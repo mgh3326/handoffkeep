@@ -61,6 +61,8 @@ func youtrackCmd(args []string, out io.Writer) error {
 		return youtrackIssuesBackfillCmd(args[1:], out)
 	case "fields-backfill":
 		return youtrackFieldsBackfillCmd(args[1:], out)
+	case "decisions-backfill":
+		return youtrackDecisionsBackfillCmd(args[1:], out)
 	case "audit":
 		return youtrackAuditCmd(args[1:], out)
 	default:
@@ -69,7 +71,7 @@ func youtrackCmd(args []string, out io.Writer) error {
 }
 
 // youtrackUsage also answers `yt`, the short name of this command.
-const youtrackUsage = "usage: youtrack sync [--dry-run] | youtrack adopt --state <yt_state.json> [--dry-run] | youtrack projects list|put | youtrack ops [--state S] [--task N] | youtrack canary add|remove|list | youtrack schema plan|apply [--project P] | youtrack comments-preflight [--project P] [--days N] [--all] | youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME] | youtrack audit [--project P] [--task N] [--enqueue] [--limit N] | youtrack issues-backfill [--project P] [--dry-run] | youtrack fields-backfill [--project P] [--task N] [--limit N] [--dry-run]"
+const youtrackUsage = "usage: youtrack sync [--dry-run] | youtrack adopt --state <yt_state.json> [--dry-run] | youtrack projects list|put | youtrack ops [--state S] [--task N] | youtrack canary add|remove|list | youtrack schema plan|apply [--project P] | youtrack comments-preflight [--project P] [--days N] [--all] | youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME] | youtrack audit [--project P] [--task N] [--enqueue] [--limit N] | youtrack issues-backfill [--project P] [--dry-run] | youtrack fields-backfill [--project P] [--task N] [--limit N] [--dry-run] | youtrack decisions-backfill [--apply] [--by NAME] [--limit N]"
 
 func youtrackSyncCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("youtrack sync", flag.ContinueOnError)
@@ -223,8 +225,8 @@ func youtrackAdoptCmd(args []string, out io.Writer) error {
 
 // youtrackProtocolOwner names the env setting that hands YouTrack writes to
 // the write protocol, or returns "" when none is set: comments mode canary or
-// on, issues mode on, fields mode on, or document-comment mode on. An
-// unparsable mode is an error, so the guard fails closed.
+// on, issues mode on, fields mode on, document-comment mode on, or decisions
+// mode on. An unparsable mode is an error, so the guard fails closed.
 func youtrackProtocolOwner() (string, error) {
 	comments, err := ytCommentsModeFromEnv()
 	if err != nil {
@@ -253,6 +255,14 @@ func youtrackProtocolOwner() (string, error) {
 	}
 	if docs == store.YTDocCommentsOn {
 		return "HANDOFFKEEP_YT_DOC_COMMENTS_MODE=on", nil
+	}
+	// The legacy sync also mirrors the DEC issues (syncDecisions).
+	decisions, err := ytDecisionsModeFromEnv()
+	if err != nil {
+		return "", err
+	}
+	if decisions == store.YTDecisionsOn {
+		return "HANDOFFKEEP_YT_DECISIONS_MODE=on", nil
 	}
 	return "", nil
 }

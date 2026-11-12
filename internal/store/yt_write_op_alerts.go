@@ -22,7 +22,7 @@ func (s *Store) EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int,
 
 	// The binding-conflict reason is a literal, not a parameter, so a cached
 	// generic plan can still use its partial index (yt_write_ops_binding_conflict).
-	rows, err := tx.Query(ctx, `SELECT id,kind,entity_id,state,created_at FROM yt_write_ops
+	rows, err := tx.Query(ctx, `SELECT id,kind,entity_kind,entity_id,state,created_at FROM yt_write_ops
 		WHERE (state IN ('prepared','dispatched','remote_unknown') AND created_at <= $1
 				AND NOT EXISTS (SELECT 1 FROM notification_outbox n WHERE n.event_id='yt-op-'||yt_write_ops.id::text||'-pending'))
 			OR ((state='rejected' OR (state='applied' AND reason='`+ytwrite.ReasonBindingConflict+`'))
@@ -32,14 +32,14 @@ func (s *Store) EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int,
 		return 0, err
 	}
 	type candidate struct {
-		id                    int64
-		kind, entityID, state string
-		createdAt             time.Time
+		id                                int64
+		kind, entityKind, entityID, state string
+		createdAt                         time.Time
 	}
 	var candidates []candidate
 	for rows.Next() {
 		var x candidate
-		if err := rows.Scan(&x.id, &x.kind, &x.entityID, &x.state, &x.createdAt); err != nil {
+		if err := rows.Scan(&x.id, &x.kind, &x.entityKind, &x.entityID, &x.state, &x.createdAt); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -65,6 +65,11 @@ func (s *Store) EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int,
 			age = 0
 		}
 		text := fmt.Sprintf("[yt-ops] %s op=%d kind=%s task=%s age=%dm | handoffkeep yt ops --task %s", condition, x.id, x.kind, x.entityID, age, x.entityID)
+		if x.entityKind != "task" {
+			// A decision op (hk 4054) is on its decision's lane: --task
+			// would name a task with that number.
+			text = fmt.Sprintf("[yt-ops] %s op=%d kind=%s %s=%s age=%dm | handoffkeep yt ops --state all", condition, x.id, x.kind, x.entityKind, x.entityID, age)
+		}
 		inserted, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindYTWriteOp, "handoffkeep-design", fmt.Sprintf("yt-op-%d-%s", x.id, condition), text, now.UTC())
 		if err != nil {
 			return 0, err

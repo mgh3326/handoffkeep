@@ -589,6 +589,10 @@ type Store struct {
 	// (SetYTDocCommentsMode), a YTDocCommentsMode; unset is off. On copies
 	// task-tied reports and briefs from the change feed (yt_doc_comments.go).
 	ytDocComments atomic.Value
+	// ytDecisions is the YouTrack decision gate, tenant and DEC project
+	// (SetYTDecisionsMode); nil is off. On prepares decision ops from the
+	// change feed.
+	ytDecisions atomic.Pointer[ytDecisionsGate]
 	// ytBindingChecked, when set (tests only), runs inside AddYTTaskBinding
 	// after every check has passed and before the binding row is inserted,
 	// with every lock of the publication held.
