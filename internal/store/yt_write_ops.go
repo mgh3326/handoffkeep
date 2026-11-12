@@ -293,15 +293,15 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	}
 	// A comment queued behind its task's issue_create gets its target here,
 	// from the binding that create published, once the lane is clear
-	// (hk 4263); with no such binding it is rejected here, never dispatched
-	// without a target. Every other op keeps its own.
-	target, sha, unbound, err := claimYTCommentTargetTx(ctx, tx, op)
+	// (hk 4263); with no such binding, or one a local source disagrees
+	// with, it is rejected here, never dispatched. Every other op keeps its
+	// own.
+	target, sha, reject, detail, err := claimYTCommentTargetTx(ctx, tx, op)
 	if err != nil {
 		return ytwrite.Op{}, "", err
 	}
-	if unbound {
-		op, err = rejectYTOpTx(ctx, tx, now, id, ytwrite.ReasonIssueNotBound,
-			"task "+op.EntityID+" has no binding from its issue_create op; the comment was queued behind it")
+	if reject != "" {
+		op, err = rejectYTOpTx(ctx, tx, now, id, reject, detail)
 		if err != nil {
 			return ytwrite.Op{}, "", err
 		}

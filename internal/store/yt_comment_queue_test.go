@@ -280,3 +280,43 @@ func TestYTWriteOpsGuardQueuedTarget(t *testing.T) {
 		t.Fatalf("retarget of a targeted op: err = %v", err)
 	}
 }
+
+// A binding the create publishes is checked against every local source at the
+// claim, as a fresh comment's is: a task moved to another project while its
+// create was pending keeps a binding in the old project, and the queued
+// comment is rejected instead of sent there.
+func TestYTCommentQueuedBindingDisagreement(t *testing.T) {
+	s, x, create := ytqSetup(t, "ytq_moved")
+	ctx := t.Context()
+	c, err := s.CreateTaskComment(ctx, x.ID, "worker", "queued, then the task moved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, ok := ytcOpFor(t, s, c.ID)
+	if !ok {
+		t.Fatal("no queued op")
+	}
+	const other = "ytq-other"
+	if _, err := s.AddTaskProject(ctx, other, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: other, ProjectID: "0-9", ShortName: "HKO"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET project=$2 WHERE id=$1`, x.ID, other); err != nil {
+		t.Fatal(err)
+	}
+	ytiDispatch(t, s, create)
+	if _, err := s.YTWriteLedger().Apply(ctx, time.Now().UTC(), create.ID, "2-900", ytiMaps(create, "2-900")); err != nil {
+		t.Fatal(err)
+	}
+	if b, found, err := s.YTTaskBinding(ctx, x.ID); err != nil || !found || b.IssueID != "2-900" {
+		t.Fatalf("binding %+v %v %v", b, found, err)
+	}
+	counting := &ytcCounting{Remote: ytwritetest.NewFake()}
+	var offset atomic.Int64
+	got := ytqDrive(t, s, ytcProtocol(t, s, counting, &offset), op.ID)
+	if got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonAmbiguousIssue || got.YTTargetID != "" || got.Attempts != 0 || counting.posts.Load() != 0 {
+		t.Fatalf("comment op %+v, posts %d", got, counting.posts.Load())
+	}
+}

@@ -1228,7 +1228,11 @@ release rollback never meets an authority value it cannot parse (consult hk
   in its own transaction, `rejected / issue_not_bound`, so it is never
   dispatched without a target (and never reaches stale recovery or
   `remote_unknown`). Nothing is sent, and the rejected-op alert reports it.
-  `Send` also refuses an empty target as a backstop. A task with no pending create, a body
+  `Send` also refuses an empty target as a backstop. The claim also checks
+  the binding against every local source, as a fresh comment's enqueue does
+  (for example a task moved to another project while its create was pending):
+  on a disagreement the op is `rejected / ambiguous_issue` and nothing is
+  sent. A task with no pending create, a body
   the protocol cannot send, and a mapping disagreement are still refused.
   The previous release's comment gate never admits a targetless op, so it
   holds such an op rather than send it. A dots reply (`ReplyDots`), which prepares no op
