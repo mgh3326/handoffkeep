@@ -580,8 +580,8 @@ type Store struct {
 	// yt_comment_canary, on those of tasks with a consistent yt_task_bindings
 	// row, in the comment's transaction.
 	ytCommentsMode atomic.Value
-	// ytIssues is the YouTrack issue gate and tenant (SetYTIssuesMode); nil
-	// is off. On prepares an issue_create op in each new task's transaction.
+	// ytIssues is the YouTrack issue gate, tenant and HK bucket project
+	// (SetYTIssuesMode/SetYTIssuesBucketProject); nil is off.
 	ytIssues atomic.Pointer[ytIssuesGate]
 	// ytFields is the YouTrack task-fields gate and tenant (SetYTFieldsMode);
 	// nil is off. On prepares issue_fields ops from the change feed.
@@ -2978,6 +2978,15 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 	}
 	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
 		return Task{}, false, err
+	}
+	var bound bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=$1)`, id).Scan(&bound); err != nil {
+		return Task{}, false, err
+	}
+	if !bound {
+		if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
+			return Task{}, false, err
+		}
 	}
 	return x, true, tx.Commit(ctx)
 }

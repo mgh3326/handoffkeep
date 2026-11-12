@@ -294,6 +294,16 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 			art.buckets[k] = store.YTArticleProject{ID: b.ID, ShortName: b.ShortName}
 		}
 	}
+	var issueBucketID string
+	if issues == store.YTIssuesOn {
+		ctx, cancel := context.WithTimeout(context.Background(), ytCommentsGetTimeout)
+		issueBucketID, err = youtrack.ResolveBucketProject(ctx, client)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("HANDOFFKEEP_YT_ISSUES_MODE=on: resolve the %s bucket project: %w", youtrack.BucketShortName, err)
+		}
+	}
+	st.SetYTIssuesBucketProject(issueBucketID)
 	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, docs, dec, art, catchUp, nil)
 	if err != nil {
 		return nil, err
@@ -1067,7 +1077,7 @@ func youtrackIssuesBackfillCmd(args []string, out io.Writer) error {
 	if dbURL == "" || baseURL == "" || token == "" {
 		return exitCodeError{code: youtrackExitConfig, err: errors.New("HANDOFFKEEP_DB_URL, YOUTRACK_URL and YOUTRACK_BOT_API_KEY are required")}
 	}
-	// The client only names the tenant here; nothing is sent.
+	// The client names the tenant and resolves the no-project import bucket.
 	client, err := youtrack.New(youtrack.Config{BaseURL: baseURL, Token: token, UserAgent: "handoffkeep-ytwrite"})
 	if err != nil {
 		return exitCodeError{code: youtrackExitConfig, err: err}
@@ -1080,6 +1090,11 @@ func youtrackIssuesBackfillCmd(args []string, out io.Writer) error {
 		return err
 	}
 	defer st.Close()
+	bucketID, err := youtrack.ResolveBucketProject(openCtx, client)
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("resolve the %s bucket project: %w", youtrack.BucketShortName, err)}
+	}
+	st.SetYTIssuesBucketProject(bucketID)
 	report, err := st.BackfillYTIssueOps(context.Background(), tenant, strings.TrimSpace(*project), *dryRun)
 	if err != nil {
 		return err

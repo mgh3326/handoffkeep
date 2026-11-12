@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -128,12 +129,12 @@ func TestYTAuthoritySwitchOverHTTP(t *testing.T) {
 	if n := items("/v1/import/tasks"); n != tasks {
 		t.Fatalf("youtrack comments: %d import tasks, want %d", n, tasks)
 	}
-	if status, body := comment(task.ID, unsendable); status != http.StatusBadRequest || body["error"] != "yt_comment_unsendable" || body["reason"] == nil {
+	if status, body := comment(task.ID, unsendable); status != http.StatusBadRequest || body["error"] != "yt_comment_unsendable" || !strings.Contains(body["reason"].(string), "the body cannot be sent:") {
 		t.Fatalf("youtrack: unsendable comment = %d %v", status, body)
 	}
 	// The task has no binding, so even a sendable comment would stay only in
 	// PG: refused too.
-	if status, body := comment(task.ID, "no copy path"); status != http.StatusBadRequest || body["error"] != "yt_comment_unsendable" {
+	if status, body := comment(task.ID, "no copy path"); status != http.StatusBadRequest || body["error"] != "yt_comment_unsendable" || body["reason"] != "this task has no YouTrack issue yet; retry in a minute" {
 		t.Fatalf("youtrack: comment without a copy path = %d %v", status, body)
 	}
 

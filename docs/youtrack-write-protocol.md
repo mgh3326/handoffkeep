@@ -745,18 +745,24 @@ so later comment and field ops have a target. `HANDOFFKEEP_YT_ISSUES_MODE` is
 `off` (the default) or `on`, read like the comments mode; either mode on
 starts the write worker and needs `YOUTRACK_URL` and `YOUTRACK_BOT_API_KEY`.
 Turning it on ends the YouTrack import (decision D3); the operator does that.
+At startup the worker resolves the unique `HK` project from YouTrack's project
+list. A task with no hk project uses that bucket, matching the import's
+`HK-<task id>` issue; hk keeps no `youtrack_projects` row for the bucket.
 
 **Op.** Principal `hk:task-issues`, key `task-issue:<task id>`, lane
 `task:<id>`, target the YouTrack project id, payload the title, the hk
 project and the YouTrack project's short name. In mode on, every task creator
 (`CreateTask`, intake, ticket sets, dots, dispositions) prepares it in the
-task's own transaction when the task's project has a
-`youtrack_projects` row with a project id; otherwise no op and one
-`ytwrite.issue_skipped` line. A task the protocol cannot render (an actor
+task's own transaction when its project has a `youtrack_projects` row with a
+project id, or when its project is empty (to the `HK` bucket); otherwise no op
+and one `ytwrite.issue_skipped` line. Setting or changing the project of an
+unbound task also prepares its issue_create when no create op already exists.
+A task the protocol cannot render (an actor
 with ` · `, a title quoting the marker) gets the op rejected `invalid_issue`.
 `handoffkeep youtrack issues-backfill [--project P] [--dry-run]` prepares the
 op for every task with no binding, bound to the host of `YOUTRACK_URL`; it
-calls no YouTrack, skips a task that already has its op, and so is idempotent.
+reads the YouTrack project list to resolve the `HK` bucket, but does not search
+for or create issues. It skips a task that already has its op, and so is idempotent.
 It also skips (counts as `owned`) a task hk already ties to an issue: a
 binding, a canary enrollment, a task map row or a YouTrack `task_origins` row
 recorded earlier (a pull or `youtrack adopt`), read again under the task's

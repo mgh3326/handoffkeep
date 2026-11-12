@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"slices"
 	"strconv"
@@ -107,6 +108,52 @@ func TestYTIssueCreateTaskPreparesOneOp(t *testing.T) {
 	}
 	if want := "ytwrite.issue_skipped task_id=" + strconv.FormatInt(unmapped.ID, 10); strings.Count(logs(), want) != 1 {
 		t.Fatalf("log %q, want one %q", logs(), want)
+	}
+}
+
+func TestYTIssueNoProjectDotsRequestUsesImportBucket(t *testing.T) {
+	s := schemaStore(t, "yti_no_project")
+	s.SetYTIssuesBucketProject("0-hk")
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	task, err := s.CreateDotsRequest(t.Context(), "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := ytiOps(t, s, task.ID)
+	if len(ops) != 1 || ops[0].YTTargetID != "0-hk" || ops[0].Tenant != ytcTenant {
+		t.Fatalf("issue_create ops = %+v", ops)
+	}
+	var payload ytwrite.IssueCreatePayload
+	if err := json.Unmarshal(ops[0].Payload, &payload); err != nil || payload.Project != "" || payload.YTProjectShort != "HK" {
+		t.Fatalf("bucket payload = %+v, err=%v", payload, err)
+	}
+}
+
+func TestYTIssueProjectSetPreparesCreateForUnboundTask(t *testing.T) {
+	s := schemaStore(t, "yti_project_set")
+	const project = "yti-project-set"
+	if _, err := s.AddTaskProject(t.Context(), project, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetYouTrackProjectID(t.Context(), project, "0-project-set"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateDotsRequest(t.Context(), "caller", DotsRequestInput{Title: "Research", Body: "Investigate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	updated, changed, err := s.SetTaskProject(t.Context(), task.ID, project, "tester", "assign project")
+	if err != nil || !changed || updated.Project == nil || *updated.Project != project {
+		t.Fatalf("SetTaskProject = %+v, changed=%t, err=%v", updated, changed, err)
+	}
+	ops := ytiOps(t, s, task.ID)
+	if len(ops) != 1 || ops[0].YTTargetID != "0-project-set" {
+		t.Fatalf("issue_create ops = %+v", ops)
+	}
+	var payload ytwrite.IssueCreatePayload
+	if err := json.Unmarshal(ops[0].Payload, &payload); err != nil || payload.Project != project {
+		t.Fatalf("project payload = %+v, err=%v", payload, err)
 	}
 }
 

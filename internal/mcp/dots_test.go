@@ -63,3 +63,32 @@ func TestDotsInboxAvailableWhenWritesOff(t *testing.T) {
 		t.Fatalf("reply failed=%v text=%s", failed, text)
 	}
 }
+
+func TestDotsReplyExplainsMissingYouTrackIssue(t *testing.T) {
+	t.Setenv("HANDOFFKEEP_DOTS_REPLY_WRITES", "on")
+	st := newOperatorStore(t)
+	task, err := st.CreateDotsRequest(context.Background(), "caller", store.DotsRequestInput{Title: "Research", Body: "Investigate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := st.ReplyDots(context.Background(), "operator:test@example.com", "chatgpt", store.DotsReplyInput{
+		TaskID: task.ID, Kind: "START", Body: "Starting", IdempotencyKey: "start", ExpectedUpdatedAt: &task.UpdatedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SetYTCommentsMode(store.YTCommentsOn)
+	if _, _, err := st.SetYTAuthority(context.Background(), []store.YTAuthorityKind{store.YTAuthorityComments}, store.YTAuthorityYouTrack, "operator", "test"); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, api.Tokens{"operator": "bearer-secret"}, nil))
+	defer srv.Close()
+	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+	text, failed := toolText(t, session, "dots_reply", map[string]any{
+		"task_id": task.ID, "kind": "PROGRESS", "body": "No issue yet", "idempotency_key": "progress",
+		"run_token": started.RunToken,
+	})
+	if !failed || !strings.Contains(text, "this task has no YouTrack issue yet; retry in a minute") {
+		t.Fatalf("dots_reply failed=%v text=%s", failed, text)
+	}
+}
