@@ -250,6 +250,19 @@ func fleetCases(t *testing.T) []fleetCase {
 			},
 		},
 		{
+			name: "ListQuotaObservations", method: "GET", uri: "/v1/quota/accounts/codex:0123456789abcdef/observations?limit=5&since=2026-11-08T08%3A00%3A00Z&until=2026-11-08T09%3A00%3A00Z", status: http.StatusOK,
+			reply: `[{"id":7,"kind":"auto","measured_at":"2026-11-08T08:30:00Z","buckets":[{"window":"5h","used_pct":42,"scope":"account"}]}]`,
+			call: func(ctx context.Context, c client.Client) error {
+				since := time.Date(2026, 11, 8, 8, 0, 0, 0, time.UTC)
+				until := since.Add(time.Hour)
+				xs, err := c.ListQuotaObservations(ctx, "codex:0123456789abcdef", since, until, 5)
+				if err == nil && (len(xs) != 1 || xs[0].ID != 7 || xs[0].Buckets[0].UsedPct != 42 || xs[0].MeasuredAt.IsZero()) {
+					t.Fatalf("quota history decoded wrong: %+v", xs)
+				}
+				return err
+			},
+		},
+		{
 			name: "ClaimTask", method: "POST", uri: "/v1/tasks/42/claim", status: http.StatusOK, reply: claimedTaskJSON("worker-1", "job-7"),
 			wantBody: map[string]any{"claimed_by": "worker-1", "job_id": "job-7"},
 			call: func(ctx context.Context, c client.Client) error {

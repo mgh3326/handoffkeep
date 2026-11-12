@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -295,6 +296,43 @@ func TestQuotaDedupePostgres(t *testing.T) {
 		t.Fatalf("dedupe concurrent history=%d %v", count, err)
 	}
 }
+
+func TestQuotaObservationHistoryPostgres(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := context.Background()
+	key := quotaTestKey
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	insert := func(at time.Time, pct float64) {
+		t.Helper()
+		value, err := json.Marshal(QuotaObservation{Kind: "auto", MeasuredAt: at, Buckets: []QuotaBucket{{Window: "5h", UsedPct: pct, Scope: "account"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO quota_observations(account_key,kind,window_key,measured_at,value) VALUES($1,'auto','',$2,$3)`, key, at, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert(base.Add(2*time.Hour), 30)
+	insert(base.Add(time.Hour), 20)
+	insert(base.Add(time.Hour), 21)
+
+	rows, found, err := s.QuotaObservationHistory(ctx, key, base, base.Add(3*time.Hour), 2)
+	if err != nil || !found || len(rows) != 2 || rows[0].MeasuredAt != base.Add(time.Hour) || rows[1].MeasuredAt != base.Add(time.Hour) || rows[0].ID >= rows[1].ID {
+		t.Fatalf("ordered/capped rows=%+v found=%v err=%v", rows, found, err)
+	}
+	if rows[0].Buckets[0].UsedPct != 20 || rows[1].Buckets[0].UsedPct != 21 {
+		t.Fatalf("same-time ID order buckets=%+v", rows)
+	}
+	rows, found, err = s.QuotaObservationHistory(ctx, key, base.Add(5*time.Hour), base.Add(6*time.Hour), 500)
+	if err != nil || !found || rows == nil || len(rows) != 0 {
+		t.Fatalf("empty range rows=%v found=%v err=%v", rows, found, err)
+	}
+	rows, found, err = s.QuotaObservationHistory(ctx, "claude:0123456789abcdef", base, base.Add(time.Hour), 500)
+	if err != nil || found || rows == nil || len(rows) != 0 {
+		t.Fatalf("unknown account rows=%v found=%v err=%v", rows, found, err)
+	}
+}
+
 func TestQuotaRetentionPostgres(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := context.Background()

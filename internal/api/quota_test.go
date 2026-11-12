@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -59,6 +60,11 @@ func TestQuotaRequestGuards(t *testing.T) {
 	}{
 		{"GET", "/v1/quota/accounts/codex:0123456789abcdef/latest", "", "", 401},
 		{"GET", "/v1/quota/accounts/invalid/latest", "", "test-token", 400},
+		{"GET", "/v1/quota/accounts/codex:0123456789abcdef/observations", "", "test-token", 400},
+		{"GET", "/v1/quota/accounts/codex:0123456789abcdef/observations?since=bad", "", "test-token", 400},
+		{"GET", "/v1/quota/accounts/codex:0123456789abcdef/observations?since=2026-10-01T00:00:00Z&until=bad", "", "test-token", 400},
+		{"GET", "/v1/quota/accounts/codex:0123456789abcdef/observations?since=2026-10-02T00:00:00Z&until=2026-10-01T00:00:00Z", "", "test-token", 400},
+		{"GET", "/v1/quota/accounts/codex:0123456789abcdef/observations?since=2026-10-01T00:00:00Z&limit=5001", "", "test-token", 400},
 		{"POST", "/v1/quota/accounts/codex:0123456789abcdef/lease", `{"holder":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ttl_s":121}`, "test-token", 400},
 		{"POST", "/v1/quota/accounts/codex:0123456789abcdef/lease", `{"holder":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} {}`, "test-token", 400},
 		{"POST", "/v1/quota/accounts/codex:0123456789abcdef/lease", strings.Repeat(" ", 33<<10), "test-token", 400},
@@ -287,5 +293,64 @@ func TestQuotaPresenceAPIPostgres(t *testing.T) {
 	code, out = call("GET", "/v1/quota/presence?account_key=claude:0123456789abcdef", "token-r", "")
 	if rows, ok := decodeRuntugPresence(out); code != 200 || !ok || len(rows) != 0 {
 		t.Fatalf("filtered-out presence %d %s", code, out)
+	}
+}
+
+func TestQuotaObservationHistoryAPIPostgres(t *testing.T) {
+	_, st := relaneAPIServer(t)
+	ctx := context.Background()
+	const key = "codex:fedcba9876543210"
+	const holder = "cccccccccccccccccccccccccccccccc"
+	if _, err := st.LeaseQuota(ctx, key, "publisher", holder, 120); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	for i, pct := range []float64{10, 20, 30} {
+		at := base.Add(time.Duration(i) * time.Hour)
+		if _, _, err := st.PutQuota(ctx, key, "publisher", holder, store.QuotaObservation{
+			Kind: "auto", MeasuredAt: at,
+			Buckets: []store.QuotaBucket{{Window: "5h", UsedPct: pct, Scope: "account"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := httptest.NewServer(Server{Service: Service{Store: st}, Tokens: Tokens{"svc-panewire": "token-r"}}.Handler())
+	t.Cleanup(srv.Close)
+	call := func(path, token string) (int, []byte) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, body
+	}
+	path := "/v1/quota/accounts/" + key + "/observations?since=" + base.Add(time.Hour).Format(time.RFC3339) + "&until=" + base.Add(2*time.Hour).Format(time.RFC3339)
+	status, body := call(path, "token-r")
+	var rows []store.QuotaObservation
+	if status != http.StatusOK || json.Unmarshal(body, &rows) != nil || len(rows) != 2 || rows[0].Buckets[0].UsedPct != 20 || rows[1].Buckets[0].UsedPct != 30 {
+		t.Fatalf("service read %d %s rows=%+v", status, body, rows)
+	}
+	status, body = call("/v1/quota/accounts/"+key+"/observations?since=2026-10-02T00:00:00Z&until=2026-10-03T00:00:00Z", "token-r")
+	if status != http.StatusOK || string(body) != "[]\n" {
+		t.Fatalf("empty range %d %s", status, body)
+	}
+	status, body = call("/v1/quota/accounts/claude:0123456789abcdef/observations?since=2026-10-01T00:00:00Z", "token-r")
+	if status != http.StatusNotFound || !strings.Contains(string(body), `"error":"not_found"`) {
+		t.Fatalf("unknown account %d %s", status, body)
+	}
+	if status, _ = call("/v1/quota/accounts/"+key+"/observations?since=2026-10-01T00:00:00Z", ""); status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated read status=%d", status)
 	}
 }
