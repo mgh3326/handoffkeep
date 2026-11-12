@@ -60,7 +60,13 @@ func postRelayEvent(t *testing.T, hURL, token string, body map[string]any) (int,
 // escalations exist; this query always reaches the target row.
 func relayEscalationOpen(t *testing.T, id int64) bool {
 	t.Helper()
-	db, err := pgx.Connect(t.Context(), testdb.URL(t))
+	return relayEscalationOpenAt(t, testdb.URL(t), id)
+}
+
+// relayEscalationOpenAt is relayEscalationOpen in the database dbURL names.
+func relayEscalationOpenAt(t *testing.T, dbURL string, id int64) bool {
+	t.Helper()
+	db, err := pgx.Connect(t.Context(), dbURL)
 	if err != nil {
 		t.Fatal(err)
 	}
