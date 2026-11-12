@@ -91,6 +91,20 @@ func ytFieldsModeFromEnv() (store.YTFieldsMode, error) {
 	}
 }
 
+// ytDocCommentsModeFromEnv reads HANDOFFKEEP_YT_DOC_COMMENTS_MODE (hk 4xxx):
+// unset or "off" (the default) or "on", exactly like the fields mode. Any
+// other value is an error.
+func ytDocCommentsModeFromEnv() (store.YTDocCommentsMode, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_DOC_COMMENTS_MODE")); raw {
+	case "", string(store.YTDocCommentsOff):
+		return store.YTDocCommentsOff, nil
+	case string(store.YTDocCommentsOn):
+		return store.YTDocCommentsOn, nil
+	default:
+		return "", fmt.Errorf("HANDOFFKEEP_YT_DOC_COMMENTS_MODE=%q: want off or on", raw)
+	}
+}
+
 // ytCommentsCatchUpFromEnv reads HANDOFFKEEP_YT_COMMENTS_CATCHUP: unset or
 // "off" (the default) runs no catch-up, "on" runs it before each Drive pass
 // in mode on. Any other value is an error, as for the mode. The catch-up
@@ -109,10 +123,10 @@ func ytCommentsCatchUpFromEnv() (bool, error) {
 }
 
 // ytCommentsWorkerFromEnv sets the store's gates and returns the write
-// dispatcher for serve's worker list, or nil when the comments, issues and
-// fields modes are all off (which needs no YouTrack configuration). Any on
-// without YOUTRACK_URL and YOUTRACK_BOT_API_KEY is a startup error, never a
-// writer that silently does nothing.
+// dispatcher for serve's worker list, or nil when the comments, issues,
+// fields and document-comment modes are all off (which needs no YouTrack
+// configuration). Any on without YOUTRACK_URL and YOUTRACK_BOT_API_KEY is a
+// startup error, never a writer that silently does nothing.
 func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	mode, err := ytCommentsModeFromEnv()
 	if err != nil {
@@ -126,15 +140,20 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	if err != nil {
 		return nil, err
 	}
+	docs, err := ytDocCommentsModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
 	catchUp, err := ytCommentsCatchUpFromEnv()
 	if err != nil {
 		return nil, err
 	}
-	if mode == store.YTCommentsOff && issues == store.YTIssuesOff && fields == store.YTFieldsOff {
+	if mode == store.YTCommentsOff && issues == store.YTIssuesOff && fields == store.YTFieldsOff && docs == store.YTDocCommentsOff {
 		if st != nil {
 			st.SetYTCommentsMode(store.YTCommentsOff)
 			st.SetYTIssuesMode(store.YTIssuesOff, "")
 			st.SetYTFieldsMode(store.YTFieldsOff, "")
+			st.SetYTDocCommentsMode(store.YTDocCommentsOff)
 		}
 		return nil, nil
 	}
@@ -143,8 +162,10 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	case mode != store.YTCommentsOff:
 	case issues != store.YTIssuesOff:
 		which = "HANDOFFKEEP_YT_ISSUES_MODE=" + string(issues)
-	default:
+	case fields != store.YTFieldsOff:
 		which = "HANDOFFKEEP_YT_FIELDS_MODE=" + string(fields)
+	default:
+		which = "HANDOFFKEEP_YT_DOC_COMMENTS_MODE=" + string(docs)
 	}
 	baseURL := strings.TrimSpace(os.Getenv("YOUTRACK_URL"))
 	token := strings.TrimSpace(os.Getenv("YOUTRACK_BOT_API_KEY"))
@@ -159,24 +180,26 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 		return nil, err
 	}
 	remote := youtrack.NewWriteRemote(client)
-	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, catchUp, nil)
+	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, docs, catchUp, nil)
 	if err != nil {
 		return nil, err
 	}
 	return w, nil
 }
 
-// newYTWriteWorker sets the three gates (the comments mode may be off when
-// the issues or the fields mode is on) and builds the dispatcher for one
-// tenant over remote. catchUp applies to the comments mode only.
-func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, comments store.YTCommentsMode, issues store.YTIssuesMode, fields store.YTFieldsMode, catchUp bool, now func() time.Time) (ytCommentsWorker, error) {
-	if comments == store.YTCommentsOff && issues != store.YTIssuesOn && fields != store.YTFieldsOn {
-		return ytCommentsWorker{}, errors.New("the write worker runs with the comments, issues or fields mode on")
+// newYTWriteWorker sets the gates (the comments mode may be off when the
+// issues, fields or document-comment mode is on) and builds the dispatcher for
+// one tenant over remote. catchUp applies to the comments mode only.
+func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, comments store.YTCommentsMode, issues store.YTIssuesMode, fields store.YTFieldsMode, docs store.YTDocCommentsMode, catchUp bool, now func() time.Time) (ytCommentsWorker, error) {
+	if comments == store.YTCommentsOff && issues != store.YTIssuesOn && fields != store.YTFieldsOn && docs != store.YTDocCommentsOn {
+		return ytCommentsWorker{}, errors.New("the write worker runs with the comments, issues, fields or document-comment mode on")
 	}
 	st.SetYTIssuesMode(issues, tenant)
 	log.Printf("ytwrite.issues_mode mode=%s tenant=%q", issues, tenant)
 	st.SetYTFieldsMode(fields, tenant)
 	log.Printf("ytwrite.fields_mode mode=%s tenant=%q", fields, tenant)
+	st.SetYTDocCommentsMode(docs)
+	log.Printf("ytwrite.doc_comments_mode mode=%s tenant=%q", docs, tenant)
 	if comments != store.YTCommentsOff {
 		return newYTCommentsWorker(st, remote, tenant, comments, catchUp, now)
 	}

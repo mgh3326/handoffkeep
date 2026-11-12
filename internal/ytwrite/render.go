@@ -72,7 +72,9 @@ func RenderedOpID(text string) (opID int64, ok bool) {
 		return 0, false
 	}
 	body, found := strings.CutSuffix(rest, "\n\n"+OpMarker(id))
-	if !found || checkBody(body) != nil {
+	// A document part (doc_comment.go) is longer than a hk comment; both
+	// forms render the same way, so either is accepted here.
+	if !found || checkBodyMax(body, MaxDocCommentBodyBytes) != nil {
 		return 0, false
 	}
 	return id, true
@@ -129,12 +131,15 @@ func checkActor(actor string) error {
 
 // checkBody refuses an empty body, an over-size body, and a body that carries
 // the reserved marker text.
-func checkBody(body string) error {
+func checkBody(body string) error { return checkBodyMax(body, MaxBodyBytes) }
+
+// checkBodyMax is checkBody with the size cap given.
+func checkBodyMax(body string, limit int) error {
 	if strings.TrimSpace(body) == "" {
 		return fmt.Errorf("%w: body is empty", ErrInvalid)
 	}
-	if len(body) > MaxBodyBytes {
-		return fmt.Errorf("%w: body is over %d bytes", ErrInvalid, MaxBodyBytes)
+	if len(body) > limit {
+		return fmt.Errorf("%w: body is over %d bytes", ErrInvalid, limit)
 	}
 	// jsonb cannot hold NUL, and a body that is not UTF-8 would not survive
 	// the JSON payload unchanged.
