@@ -32,6 +32,26 @@ const KindIssueFields = "issue_fields"
 // snapshot cannot be written as). Nothing was sent; the op is rejected.
 const ReasonFieldRefused = "field_refused"
 
+// ReasonIssueNotMoved: an issue_fields op names a YouTrack project the bound
+// issue is not in when its lane clears, because the issue_move before it was
+// refused (hk 4111). The store rejects it at claim, so a snapshot shaped for
+// one project is never written to the issue in another; the feed prepares
+// the snapshot again for the project the issue is in.
+const ReasonIssueNotMoved = "issue_not_moved"
+
+// IssueFieldsProject is the YouTrack project an issue_fields op was prepared
+// for. It is ErrInvalid for an op whose payload names none.
+func IssueFieldsProject(op Op) (string, error) {
+	var p IssueFieldsPayload
+	if err := json.Unmarshal(op.Payload, &p); err != nil {
+		return "", fmt.Errorf("%w: payload of op %d: %v", ErrInvalid, op.ID, err)
+	}
+	if !issueIDRE.MatchString(p.ProjectID) {
+		return "", fmt.Errorf("%w: op %d names no project", ErrInvalid, op.ID)
+	}
+	return p.ProjectID, nil
+}
+
 // The YouTrack field names a task issue carries: the importer's
 // (youtrack/import/client.js FIELD), which the legacy push shares.
 const (
