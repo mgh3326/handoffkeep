@@ -922,7 +922,10 @@ listing, page at a server cap. Covered: no false done, no duplicate create, same
 with another payload is a conflict, concurrent same-key callers send once, crash at
 each ledger/remote boundary (before and after the commit of prepare, claim, apply,
 mark-unknown, defer), two writes to one entity in order, evidence paging and exact
-match, ambiguous evidence, caller cancellation.
+match, ambiguous evidence, caller cancellation. `ytwritetest.RunIssueProtocol`
+runs the same fault cases for `issue_create` (lost and delayed replies, 2xx
+without an id, 429, 401, 5xx, 4xx, operator resolution, concurrent workers,
+a crash at each boundary) over both ledgers (hk 3910).
 
 ## Not yet (later slices)
 

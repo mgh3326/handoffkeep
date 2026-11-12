@@ -29,6 +29,20 @@ func TestYTWriteLedgerContract(t *testing.T) { ytwritetest.RunLedger(t, ytLedger
 
 func TestYTWriteProtocolOverPostgres(t *testing.T) { ytwritetest.RunProtocol(t, ytLedgerFactory(t)) }
 
+// TestYTIssueProtocolOverPostgres runs the issue_create fault cases (hk 3910);
+// an applied op publishes its task's binding, so each subtest also starts
+// with no bindings.
+func TestYTIssueProtocolOverPostgres(t *testing.T) {
+	s := schemaStore(t, "ytwi")
+	ytwritetest.RunIssueProtocol(t, func(t *testing.T) ytwrite.Ledger {
+		t.Helper()
+		if _, err := s.pool.Exec(t.Context(), `TRUNCATE yt_task_bindings, yt_comment_write_links, yt_entity_map, yt_write_ops RESTART IDENTITY`); err != nil {
+			t.Fatal(err)
+		}
+		return s.YTWriteLedger()
+	})
+}
+
 func TestYTWriteOpAlertsAreDeduplicated(t *testing.T) {
 	s := schemaStore(t, "ytwa")
 	ctx := t.Context()
