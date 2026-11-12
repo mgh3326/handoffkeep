@@ -123,10 +123,6 @@ const (
 	// bound elsewhere (hk 3898). The op stays applied; the operator's view
 	// lists it with the rejected ops.
 	ReasonBindingConflict = "binding_conflict"
-	// ReasonProjectChanged: an issue_create op not yet sent whose task moved
-	// to another project; the store rejects it and prepares the task's
-	// current project's op in the same transaction (hk 3909).
-	ReasonProjectChanged = "project_changed"
 	// ReasonHeld: the ledger's claim refused the dispatch (ClaimHeld:
 	// canary removed, mode off, another tenant); the op stays prepared and
 	// nothing is sent.

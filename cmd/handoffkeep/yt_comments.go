@@ -333,7 +333,7 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 		return ytCommentsWorker{}, err
 	}
 	st.SetYTCommentsMode(store.YTCommentsOff)
-	return ytCommentsWorker{protocol: p, feed: st, intents: st}, nil
+	return ytCommentsWorker{protocol: p, feed: st}, nil
 }
 
 // newYTCommentsWorker sets the gate to mode (canary or on) and builds the

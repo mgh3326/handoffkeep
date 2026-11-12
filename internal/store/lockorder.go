@@ -202,11 +202,6 @@ package store
 //     target (hk 4263, claimYTCommentTargetTx) before it updates its own op
 //     row; the enqueue that queued it (queueYTCommentTx) makes the same plain
 //     reads under the lane lock it already holds.
-//     A task project change
-//     (SetTaskProject, a triage's project; retargetYTIssueTx, hk 3909)
-//     takes the task's lane lock last, after its own locks and the task row,
-//     as CreateTask does, then reads youtrack_projects without a lock and
-//     rejects and inserts yt_write_ops rows.
 //     No cycle, lock by lock:
 //       - The ownership lock: only those two writers take it, always first
 //         and while holding nothing, so no transaction waits for it while

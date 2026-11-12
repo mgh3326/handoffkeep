@@ -590,57 +590,6 @@ func TestYTIssueIntakePreparesOneOp(t *testing.T) {
 	}
 }
 
-// A task moved to another project before its issue op was sent gets the new
-// project's op in the move's transaction; the stale op is rejected
-// project_changed and never sent (hk 3909). A sent op is left alone.
-func TestYTIssueProjectChangeRetargetsAnUnsentOp(t *testing.T) {
-	s := schemaStore(t, "yti_retarget")
-	ytbMapped(t, s)
-	const other, otherID = "yti-other", "0-9"
-	if _, err := s.AddTaskProject(t.Context(), other, "test"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.AddTaskProject(t.Context(), "yti-unmapped", "test"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: other, ProjectID: otherID, ShortName: "HO"}); err != nil {
-		t.Fatal(err)
-	}
-	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
-	x := ytiCreate(t, s, ytbProject)
-	if _, _, err := s.SetTaskProject(t.Context(), x.ID, other, "test", "moved"); err != nil {
-		t.Fatal(err)
-	}
-	ops := ytiOps(t, s, x.ID)
-	if len(ops) != 2 || ops[0].State != ytwrite.StateRejected || ops[0].Reason != ytwrite.ReasonProjectChanged ||
-		ops[1].State != ytwrite.StatePrepared || ops[1].YTTargetID != otherID || ops[1].Tenant != ytcTenant ||
-		ops[1].Key != ytwrite.IssueKey(x.ID)+":after-"+strconv.FormatInt(ops[0].ID, 10) {
-		t.Fatalf("ops after the move %+v", ops)
-	}
-	if out := ytiClaim(t, s, ops[1]); out != ytwrite.ClaimClaimed {
-		t.Fatalf("claim of the new op = %s", out)
-	}
-	if _, err := s.YTWriteLedger().Defer(t.Context(), time.Now().UTC(), ops[1].ID, time.Now().UTC(), ytwrite.ReasonRateLimited, "429"); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.SetTaskProject(t.Context(), x.ID, "yti-unmapped", "test", "moved again"); err != nil {
-		t.Fatal(err)
-	}
-	if ops := ytiOps(t, s, x.ID); len(ops) != 2 || ops[1].State != ytwrite.StateRejected || ops[1].Reason != ytwrite.ReasonProjectChanged {
-		t.Fatalf("a deferred op moved to an unmapped project: %+v", ops)
-	}
-
-	sent := ytiCreate(t, s, ytbProject)
-	op := ytiOps(t, s, sent.ID)[0]
-	ytiDispatch(t, s, op)
-	if _, _, err := s.SetTaskProject(t.Context(), sent.ID, other, "test", "moved"); err != nil {
-		t.Fatal(err)
-	}
-	if ops := ytiOps(t, s, sent.ID); len(ops) != 1 || ops[0].State != ytwrite.StateDispatched {
-		t.Fatalf("a dispatched op was retargeted: %+v", ops)
-	}
-}
-
 // A comment written while the task's issue op was pending got no op (no
 // binding yet); once the op applies, the issue-binding catch-up prepares it
 // even with the general catch-up off. A binding from the import is left to

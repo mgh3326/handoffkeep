@@ -39,8 +39,7 @@ type IssueCreatePayload struct {
 }
 
 // IssueKey is the idempotency key of a task's issue_create op: one create per
-// task. A task moved to another project before its op was sent gets a
-// replacement op keyed by the one it replaces (IssueRequest.Replaces).
+// task.
 func IssueKey(taskID int64) string { return "task-issue:" + strconv.FormatInt(taskID, 10) }
 
 // IssueRequest is one task whose issue hk creates.
@@ -56,9 +55,6 @@ type IssueRequest struct {
 	YTProjectID    string
 	YTProjectShort string
 	Tenant         string
-	// Replaces is the op this one replaces, rejected project_changed because
-	// the task moved before it was sent (hk 3909); 0 for the task's first.
-	Replaces int64
 }
 
 // CheckIssue explains why an issue request cannot be sent. A store that must
@@ -105,14 +101,10 @@ func IssueOp(req IssueRequest) (NewOp, error) {
 		return NewOp{}, err
 	}
 	entityID := strconv.FormatInt(req.TaskID, 10)
-	key := IssueKey(req.TaskID)
-	if req.Replaces > 0 {
-		key += ":after-" + strconv.FormatInt(req.Replaces, 10)
-	}
 	return NewOp{
 		Principal: req.Principal,
 		Kind:      KindIssueCreate,
-		Key:       key,
+		Key:       IssueKey(req.TaskID),
 		// The body slot carries the whole payload: the title, the hk project
 		// and the short name are what the write means.
 		PayloadSHA: payloadSHA(KindIssueCreate, "task", entityID, req.YTProjectID, req.Tenant, req.Actor, string(payload)),

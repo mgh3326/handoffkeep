@@ -2979,9 +2979,6 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
 		return Task{}, false, err
 	}
-	if err := retargetYTIssueTx(ctx, tx, x, x.UpdatedAt); err != nil {
-		return Task{}, false, err
-	}
 	return x, true, tx.Commit(ctx)
 }
 
