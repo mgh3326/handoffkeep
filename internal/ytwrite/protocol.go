@@ -104,6 +104,9 @@ func New(cfg Config) (*Protocol, error) {
 	}
 	def(&cfg.DispatchTimeout, 30*time.Second)
 	def(&cfg.StaleAfter, 2*cfg.DispatchTimeout)
+	if cfg.StaleAfter <= cfg.DispatchTimeout {
+		return nil, fmt.Errorf("ytwrite: StaleAfter %s must exceed DispatchTimeout %s", cfg.StaleAfter, cfg.DispatchTimeout)
+	}
 	def(&cfg.SettleTimeout, 10*time.Second)
 	def(&cfg.RateLimitWait, 5*time.Second)
 	def(&cfg.MaxRetryAfter, RetryAfterCap)

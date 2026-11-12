@@ -26,7 +26,7 @@ func echoActivity(id, commentID, text string) Activity {
 func TestProtocolActivityDoesNotEcho(t *testing.T) {
 	fs := newFakeStore()
 	fs.cursor.Cursor = "before"
-	fs.ytWriteOps = map[int64]string{17: "9-17", 18: "9-99"}
+	fs.ytWriteOps = map[int64]ytWriteOp{17: {tenant: "tenant", issueID: "9-17"}, 18: {tenant: "tenant", issueID: "9-99"}, 19: {tenant: "other-tenant", issueID: "9-17"}}
 	yt := newFakeYouTrack()
 	task := fs.addTask("handoffkeep", "handoffkeep", "echo target", store.StateBacklog, 0)
 	mirrorIssue(fs, yt, task.ID, "9-17", "HK-17")
