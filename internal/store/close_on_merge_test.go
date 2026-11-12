@@ -401,3 +401,32 @@ func TestDriftMechanicalHonoursTheStateGate(t *testing.T) {
 		t.Fatalf("unblocked task %+v ok=%t, want mechanical", d, ok)
 	}
 }
+
+// TestDriftFindsParentHeldAtAutoClose (PR #331 review round 3): a parent that
+// auto-close held on its own open PR is listed once its sub-tasks settle,
+// and becomes mechanical when that PR closes unmerged.
+func TestDriftFindsParentHeldAtAutoClose(t *testing.T) {
+	s, pool := searchTestStore(t)
+	parent := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	child := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setParent(t, s, child, parent)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: testPR(6901), TaskID: parent.ID})
+	send(t, s, mergeEvent(child.ID, testPR(6902)))
+	find := func() (TaskDriftTask, bool) {
+		for _, d := range driftAt(t, s, time.Now().UTC(), DriftDefaultMergedDays).MergedPRNotMerged.Tasks {
+			if d.ID == parent.ID {
+				return d, true
+			}
+		}
+		return TaskDriftTask{}, false
+	}
+	if d, ok := find(); !ok || d.Mechanical || len(d.OpenPRs) != 1 || d.OpenPRs[0] != testPR(6901) {
+		t.Fatalf("held parent %+v ok=%t", d, ok)
+	}
+	if _, err := pool.Exec(t.Context(), `UPDATE changes SET state='closed' WHERE repo='example/app' AND pr_number=6901`); err != nil {
+		t.Fatal(err)
+	}
+	if d, ok := find(); !ok || !d.Mechanical {
+		t.Fatalf("parent after its PR closed %+v ok=%t", d, ok)
+	}
+}

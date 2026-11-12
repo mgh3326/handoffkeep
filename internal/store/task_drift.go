@@ -92,13 +92,19 @@ const driftSettledOpenSQL = `SELECT ` + driftColumns + `updated_at FROM tasks
 // this task. A reverted change is not merged work, and a task with a
 // reverted, not relanded implements change (unresolvedRevertSQL) is not
 // delivered: its task went back to developing on purpose. A task with no refs.pr is found through the work
-// record instead (hk 3294): a merged, not reverted change it implements.
+// record instead (hk 3294): a merged, not reverted change it implements. A
+// parent whose sub-tasks are all settled, one at least merged or deployed, is
+// listed too: auto_close_parent would close it at merged, so a parent it left
+// open (held by its own PR that later closed, or auto-close off) is found
+// here rather than stranded.
 var driftMergedPRSQL = `SELECT ` + driftColumns + `updated_at FROM tasks t
 	WHERE t.state NOT IN (` + settledStatesSQL + `) AND ((COALESCE(t.refs->>'pr','')<>'' AND (
 		EXISTS (SELECT 1 FROM changes c WHERE c.state='merged' AND c.reverted_by_change_id IS NULL AND ('https://github.com/'||c.repo||'/pull/'||c.pr_number::text)=t.refs->>'pr')
 		OR EXISTS (SELECT 1 FROM tasks m WHERE m.id<>t.id AND m.state IN ('merged','deployed') AND m.refs->>'pr'=t.refs->>'pr')
 	)) OR EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
 		WHERE ct.task_id=t.id AND ct.relation='implements' AND c.state='merged' AND c.reverted_by_change_id IS NULL)
+	OR (EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=t.id AND k.state IN ('merged','deployed'))
+		AND NOT EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=t.id AND k.state NOT IN (` + settledStatesSQL + `)))
 	) AND NOT EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ` + unresolvedRevertSQL("t.id") + `)
 	ORDER BY t.id`
 
@@ -143,7 +149,7 @@ func (s *Store) TaskDrift(ctx context.Context, now time.Time, mergedDays int) (T
 	if out.SettledOpenDecision, err = driftList(ctx, tx, "state is settled and refs.decision_request is open", driftSettledOpenSQL, DecisionRequestOpen); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift settled_open_decision: %w", err)
 	}
-	if out.MergedPRNotMerged, err = driftList(ctx, tx, "not settled, and refs.pr is merged (a merged changes row names the PR, or a merged or deployed task does) or the task implements a merged, not reverted change, and no implements change is reverted and not relanded; open_prs and open_sub_tasks list what still holds the close, and mechanical is true only when nothing does and the state is one a merge applies from", driftMergedPRSQL); err != nil {
+	if out.MergedPRNotMerged, err = driftList(ctx, tx, "not settled, and refs.pr is merged (a merged changes row names the PR, or a merged or deployed task does) or the task implements a merged, not reverted change, or every sub-task is settled and one is merged or deployed, and no implements change is reverted and not relanded; open_prs and open_sub_tasks list what still holds the close, and mechanical is true only when nothing does and the state is one a merge applies from", driftMergedPRSQL); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_pr_not_merged: %w", err)
 	}
 	if err = driftBlockers(ctx, tx, out.MergedPRNotMerged.Tasks); err != nil {

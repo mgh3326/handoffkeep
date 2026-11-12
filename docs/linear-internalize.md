@@ -183,7 +183,8 @@ treated as overdue.
     per `Mergewake-Task` line of the PR, for example a bundle PR's sub-tasks); each
     gets the event as `task_id` does, in its own turn: propagation and the rule 9
     parent row skip a named task. A task held by a change that later closes unmerged,
-    or a parent whose sub-tasks all settle without closing it, gets no further event;
+    or a parent whose sub-tasks all settle without closing it (all dropped, or held at
+    auto-close by its own PR that later closes unmerged), gets no further event;
     `tasks drift` lists it under `merged_pr_not_merged` with `mechanical: true` (empty
     `open_prs` and `open_sub_tasks`, and a state a merge applies from, so not triage or
     icebox): the close the daily hygiene job (hk 3292) is to make.
