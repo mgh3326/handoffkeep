@@ -49,7 +49,7 @@ func TestCommentRenderGolden(t *testing.T) {
 }
 
 func TestRegisteredKinds(t *testing.T) {
-	if got := ytwrite.RegisteredKinds(); len(got) != 3 || got[0] != ytwrite.KindCommentAppend || got[1] != ytwrite.KindIssueCreate || got[2] != ytwrite.KindIssueFields {
+	if got := ytwrite.RegisteredKinds(); len(got) != 4 || got[0] != ytwrite.KindCommentAppend || got[1] != ytwrite.KindIssueCreate || got[2] != ytwrite.KindIssueFields || got[3] != ytwrite.KindIssueMove {
 		t.Fatalf("registered kinds %v", got)
 	}
 }
