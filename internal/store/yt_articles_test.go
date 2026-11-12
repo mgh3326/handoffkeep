@@ -613,18 +613,23 @@ func TestYTArticlesLegacySyncedDocument(t *testing.T) {
 	if len(ops) != 1 || json.Unmarshal(ops[0].Payload, &p) != nil || p.LegacyArticleID != legacy || p.LegacyMarker != ytwrite.LegacyDocMarker(key) {
 		t.Fatalf("ops %+v payload %+v", ops, p)
 	}
+	// One drive applies the adoption and the update it queued (the
+	// binding's needs_update is what queues it, and the update clears it).
+	ytartDrive(t, s, yt, &offset)
 	ytartDrive(t, s, yt, &offset)
 	ops = ytartOps(t, s, id)
 	if ops[0].State != ytwrite.StateApplied || ops[0].YTResultID != legacy || len(yt.Articles(ytartShared)) != 1 {
 		t.Fatalf("ops %+v articles %+v", ops, yt.Articles(ytartShared))
 	}
-	if b := ytartBinding(t, s, id); b.ArticleID != legacy || b.Origin != YTBindingImportVerified || !b.NeedsUpdate {
-		t.Fatalf("binding %+v", b)
-	}
-	if len(ops) != 2 || ops[1].Kind != ytwrite.KindArticleUpdate {
+	var up ytwrite.ArticleUpdatePayload
+	if len(ops) != 2 || ops[1].Kind != ytwrite.KindArticleUpdate || ops[1].State != ytwrite.StateApplied ||
+		json.Unmarshal(ops[1].Payload, &up) != nil || up.Provenance || up.Content != "current body" {
 		t.Fatalf("ops after the adoption %+v", ops)
 	}
-	ytartDrive(t, s, yt, &offset)
+	if b := ytartBinding(t, s, id); b.ArticleID != legacy || b.Origin != YTBindingImportVerified || b.OpID != ops[0].ID ||
+		b.NeedsUpdate || b.ContentSHA != ytwrite.ContentSHA("current body") {
+		t.Fatalf("binding %+v", b)
+	}
 	if a, _ := yt.Article(legacy); a.Content != "current body" {
 		t.Fatalf("article %+v", a)
 	}

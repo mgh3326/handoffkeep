@@ -357,8 +357,10 @@ func TestArticleCreateLegacySyncedArticle(t *testing.T) {
 	for name, setup := range map[string]func(e articleEnv) string{
 		"no_marker":     func(e articleEnv) string { return e.yt.InjectArticle(artProject, "x", "old body without the marker") },
 		"other_project": func(e articleEnv) string { return e.yt.InjectArticle("0-99", "x", legacyBody) },
-		"other_marker":  func(e articleEnv) string { return e.yt.InjectArticle(artProject, "x", ytwrite.LegacyDocMarker("other/key")+"\nbody") },
-		"gone":          func(articleEnv) string { return "3-404" },
+		"other_marker": func(e articleEnv) string {
+			return e.yt.InjectArticle(artProject, "x", ytwrite.LegacyDocMarker("other/key")+"\nbody")
+		},
+		"gone": func(articleEnv) string { return "3-404" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := newArticleEnv(t)
