@@ -421,8 +421,15 @@ func mainTierProblems(wf tierWorkflow) []string {
 	}
 	if pgStartStep == nil {
 		add("main-linux needs a step that starts postgres:17 with docker run (hk 4342)")
-	} else if pgStartStep.If != "${{ inputs.packages == '' || steps.dbplan.outputs.needed == 'yes' }}" {
-		add("the postgres step must start for the full suite or a DB-backed selection, got %q", pgStartStep.If)
+	} else {
+		if pgStartStep.If != "${{ inputs.packages == '' || steps.dbplan.outputs.needed == 'yes' }}" {
+			add("the postgres step must start for the full suite or a DB-backed selection, got %q", pgStartStep.If)
+		}
+		// A fixed host port collides with a container a dead agent leaves
+		// behind on a self-hosted runner, and with a concurrent run.
+		if !strings.Contains(pgStartStep.Run, "-p 127.0.0.1::5432") || !strings.Contains(pgStartStep.Run, "GITHUB_ENV") {
+			add("the postgres step must bind an ephemeral port and export HANDOFFKEEP_TEST_DB_URL with it (review on #358)")
+		}
 	}
 	if pgStopStep == nil || !strings.Contains(pgStopStep.If, "always()") {
 		add("main-linux needs an always() step that removes the postgres container (self-hosted runners keep it, hk 4342)")
@@ -1146,6 +1153,7 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"pr-store-db-pg-ungated", "      - name: start PostgreSQL\n        if: ${{ steps.decide.outputs.run == 'yes' }}\n        run: |\n          docker run -d --name postgres \\", "      - name: start PostgreSQL\n        run: |\n          docker run -d --name postgres \\"},
 		{"main-linux-service-back", "    timeout-minutes: 30\n    env:", "    timeout-minutes: 30\n    services:\n      postgres:\n        image: postgres:17\n    env:"},
 		{"main-linux-pg-ungated", "        if: ${{ inputs.packages == '' || steps.dbplan.outputs.needed == 'yes' }}\n        env:\n          PG_NAME:", "        env:\n          PG_NAME:"},
+		{"main-linux-fixed-port", "-p 127.0.0.1::5432", "-p 127.0.0.1:5432:5432"},
 		// hk 3629: the composite action must come from the workflow revision,
 		// never from the ref under test (a pre-#255 sha has no such file).
 		{"local-action-from-target-ref", "uses: ./workflow/.github/actions/setup-go-cached\n      - run: bash scripts/test-build-release.sh", "uses: ./.github/actions/setup-go-cached\n      - run: bash scripts/test-build-release.sh"},

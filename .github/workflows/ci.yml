@@ -359,6 +359,8 @@ jobs:
     runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
+      # Fallback only: the start step below re-exports this with the
+      # ephemeral port it actually bound (hk 4342 review).
       HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -387,20 +389,28 @@ jobs:
           PG_NAME: postgres-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           docker rm -f "$PG_NAME" >/dev/null 2>&1 || true
+          # An ephemeral host port: a container an agent that died mid-job
+          # leaves behind cannot collide with the next run on a self-hosted
+          # runner, and neither can a concurrent run (review on #358).
           docker run -d --name "$PG_NAME" \
             -e POSTGRES_USER=handoffkeep \
             -e POSTGRES_PASSWORD=handoffkeep \
             -e POSTGRES_DB=handoffkeep \
-            -p 127.0.0.1:5432:5432 \
+            -p 127.0.0.1::5432 \
             postgres:17
+          port=""
           for i in $(seq 1 60); do
-            if docker exec "$PG_NAME" pg_isready -U handoffkeep >/dev/null 2>&1; then
-              exit 0
+            port=$(docker port "$PG_NAME" 5432/tcp 2>/dev/null | sed -n 's/.*:\([0-9]*\)$/\1/p' | head -1)
+            if [ -n "$port" ] && docker exec "$PG_NAME" pg_isready -U handoffkeep >/dev/null 2>&1; then
+              break
             fi
             sleep 2
           done
-          docker logs "$PG_NAME" >&2 || true
-          exit 1
+          if [ -z "$port" ] || ! docker exec "$PG_NAME" pg_isready -U handoffkeep >/dev/null 2>&1; then
+            docker logs "$PG_NAME" >&2 || true
+            exit 1
+          fi
+          echo "HANDOFFKEEP_TEST_DB_URL=postgres://handoffkeep:handoffkeep@127.0.0.1:$port/handoffkeep?sslmode=disable" >> "$GITHUB_ENV"
       # The local action comes from the workflow revision, not the ref under
       # test: ci-any-ref and dispatches can name a commit that predates
       # .github/actions/setup-go-cached (hk 3629). Sparse keeps the side

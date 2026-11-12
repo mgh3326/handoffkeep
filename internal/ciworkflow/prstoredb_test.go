@@ -229,11 +229,13 @@ func TestCIDBNeededClassifier(t *testing.T) {
 	}{
 		{name: "store-subtree", packages: "./internal/store/...", want: "yes"},
 		{name: "store-package", packages: "./internal/store", want: "yes"},
+		{name: "store-package-trailing-slash", packages: "./internal/store/", want: "yes"},
 		{name: "testdb-package", packages: "./internal/testdb", want: "yes"},
 		{name: "internal-subtree", packages: "./internal/...", want: "yes"},
 		{name: "full-suite", packages: "./...", want: "yes"},
 		{name: "mixed-with-db", packages: "./internal/guard ./internal/store/...", want: "yes"},
 		{name: "non-db-package", packages: "./internal/guard", want: "no"},
+		{name: "non-db-package-trailing-slash", packages: "./internal/guard/", want: "no"},
 		{name: "non-db-subtree", packages: "./internal/guard/...", want: "no"},
 		{name: "package-without-db-tests", packages: "./internal/mcp", want: "no"},
 		{name: "mixed-without-db", packages: "./internal/guard ./internal/mcp/...", want: "no"},

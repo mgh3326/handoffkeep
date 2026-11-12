@@ -20,6 +20,9 @@ for pat in "$@"; do
   case "$pat" in */...) subtree=yes ;; esac
   p=${pat#./}
   p=${p%/...}
+  # validate-ci-packages.sh accepts a trailing slash; ./internal/store/ is
+  # the same package as ./internal/store.
+  p=${p%/}
   if [ "$p" = "..." ] || [ "$p" = "." ]; then
     needed=yes
     break
