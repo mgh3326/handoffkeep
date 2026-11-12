@@ -1,0 +1,188 @@
+package store
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestMergeWaitsForEveryImplementsChange (hk 3294): a task with two open
+// implements changes stays where it is when the first merges, with the
+// still-open PR named in the not-applied row, and moves to merged when the
+// last one merges. A change closed without merging does not hold the task.
+func TestMergeWaitsForEveryImplementsChange(t *testing.T) {
+	s, pool := searchTestStore(t)
+	x := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	first, second := testPR(3294), testPR(3295)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: first, TaskID: x.ID})
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: second, TaskID: x.ID})
+
+	res := send(t, s, mergeEvent(x.ID, first))
+	if res.Applied || res.State != StateReviewing || !strings.Contains(res.Reason, second) {
+		t.Fatalf("first merge: %+v, want held at reviewing naming %s", res, second)
+	}
+	if rows := sourceRows(t, s, x.ID, SourceMergewakeMerge); len(rows) != 1 || rows[0].Applied || !strings.Contains(rows[0].Note, second) {
+		t.Fatalf("held merge rows %+v", rows)
+	}
+	if got := stateOf(t, s, x.ID); got.State != StateReviewing || got.Refs.PR != "" {
+		t.Fatalf("held task state=%s refs.pr=%q", got.State, got.Refs.PR)
+	}
+	// The held merge still marks its change merged.
+	if c := mustChange(t, s, "example/app", 3294); c.State != ChangeMerged {
+		t.Fatalf("first change %+v", c)
+	}
+	if res := send(t, s, mergeEvent(x.ID, second)); !res.Applied || res.State != StateMerged || res.Task.Refs.PR != second {
+		t.Fatalf("last merge: %+v", res)
+	}
+
+	y := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	abandoned, landed := testPR(3296), testPR(3297)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: abandoned, TaskID: y.ID})
+	if _, err := pool.Exec(t.Context(), `UPDATE changes SET state='closed' WHERE repo='example/app' AND pr_number=3296`); err != nil {
+		t.Fatal(err)
+	}
+	if res := send(t, s, mergeEvent(y.ID, landed)); !res.Applied || res.State != StateMerged {
+		t.Fatalf("merge beside a closed change: %+v", res)
+	}
+}
+
+// TestMergeHoldsAParentWithOpenSubTasks (hk 3294): a PR bound to a bundle
+// parent does not close the parent while a sub-task is open; the PR's merge
+// to the sub-tasks it delivers settles them, and the parent then closes
+// through auto_close_parent when its last sub-task settles.
+func TestMergeHoldsAParentWithOpenSubTasks(t *testing.T) {
+	s, pool := searchTestStore(t)
+	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
+	delivered := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	later := flowTask(t, s, pool, "fix", StateBacklog, false)
+	setParent(t, s, delivered, parent)
+	setParent(t, s, later, parent)
+
+	pr := testPR(4059)
+	res := send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: parent.ID, Tasks: []int64{delivered.ID}})
+	if res.Applied || res.State != StateBacklog || !strings.Contains(res.Reason, "sub-tasks") {
+		t.Fatalf("parent merge: %+v, want held", res)
+	}
+	if len(res.Tasks) != 1 || !res.Tasks[0].Applied || res.Tasks[0].State != StateMerged || res.Tasks[0].Task.ID != delivered.ID {
+		t.Fatalf("named sub-task result %+v", res.Tasks)
+	}
+	if got := stateOf(t, s, parent.ID).State; got != StateBacklog {
+		t.Fatalf("parent closed with an open sub-task: %s", got)
+	}
+	if got := stateOf(t, s, later.ID).State; got != StateBacklog {
+		t.Fatalf("an unnamed sub-task moved: %s", got)
+	}
+
+	next := testPR(4060)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: next, TaskID: later.ID, Tasks: []int64{parent.ID}})
+	if got := stateOf(t, s, later.ID).State; got != StateMerged {
+		t.Fatalf("last sub-task: %s", got)
+	}
+	if got := stateOf(t, s, parent.ID).State; got != StateMerged {
+		t.Fatalf("parent after its last sub-task: %s, want merged", got)
+	}
+}
+
+// TestEventNamesSeveralTasks (hk 3294): every task an event names gets it the
+// way task_id does (own change link, own recorded row), a missing named task
+// is reported and skipped, and a redelivery changes nothing on any of them.
+func TestEventNamesSeveralTasks(t *testing.T) {
+	s, pool := searchTestStore(t)
+	a := flowTask(t, s, pool, "implement", StateReviewing, true)
+	b := flowTask(t, s, pool, "fix", StateBacklog, false)
+	c := flowTask(t, s, pool, "decide", StateResearching, false)
+	pr := testPR(3921)
+	in := TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: a.ID, Tasks: []int64{b.ID, 987654321, c.ID}}
+	res := send(t, s, in)
+	if !res.Applied || res.State != StateMerged || len(res.Tasks) != 3 {
+		t.Fatalf("result %+v", res)
+	}
+	if r := res.Tasks[0]; !r.Applied || r.State != StateMerged || r.Task.Refs.PR != pr {
+		t.Fatalf("named fix task %+v", r)
+	}
+	if r := res.Tasks[1]; r.Applied || r.State != "" || r.Reason != "task_not_found" {
+		t.Fatalf("missing named task %+v", r)
+	}
+	if r := res.Tasks[2]; !r.Applied || r.State != StateCompleted {
+		t.Fatalf("named decide task %+v", r)
+	}
+	links := changeLinks(t, s, mustChange(t, s, "example/app", 3921).ID)
+	for _, id := range []int64{a.ID, b.ID, c.ID} {
+		if links[id] != ChangeImplements {
+			t.Fatalf("links %v, want every named task implements", links)
+		}
+		if rows := sourceRows(t, s, id, SourceMergewakeMerge); len(rows) != 1 || !rows[0].Applied {
+			t.Fatalf("task %d merge rows %+v", id, rows)
+		}
+	}
+	again := send(t, s, in)
+	if !again.Redelivered || len(again.Tasks) != 3 || !again.Tasks[0].Redelivered || !again.Tasks[2].Redelivered {
+		t.Fatalf("redelivery %+v", again)
+	}
+	if rows := sourceRows(t, s, b.ID, SourceMergewakeMerge); len(rows) != 1 {
+		t.Fatalf("redelivery recorded again: %+v", rows)
+	}
+}
+
+// TestEventTasksPayload: tasks must be positive, distinct, not task_id and at
+// most MaxEventTasks.
+func TestEventTasksPayload(t *testing.T) {
+	pr := testPR(1)
+	ok := TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: 1, Tasks: []int64{2, 3}}
+	if _, err := normalizeTaskSourceEvent(ok); err != nil {
+		t.Fatalf("valid tasks refused: %v", err)
+	}
+	many := make([]int64, MaxEventTasks+1)
+	for i := range many {
+		many[i] = int64(i + 2)
+	}
+	for name, tasks := range map[string][]int64{"zero": {0}, "negative": {-2}, "task_id": {1}, "duplicate": {2, 2}, "too many": many} {
+		in := ok
+		in.Tasks = tasks
+		if _, err := normalizeTaskSourceEvent(in); err == nil {
+			t.Fatalf("%s: accepted", name)
+		}
+	}
+}
+
+// TestDriftFindsDeliveredTaskThroughTheWorkRecord (hk 3294): class (b) finds
+// an unsettled task with no refs.pr through a merged change it implements,
+// and names the open implements change that holds it. A task whose only
+// merged change was reverted is not drift.
+func TestDriftFindsDeliveredTaskThroughTheWorkRecord(t *testing.T) {
+	s, pool := searchTestStore(t)
+	held := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: testPR(5001), TaskID: held.ID})
+	send(t, s, mergeEvent(held.ID, testPR(5002)))
+
+	stuck := flowTask(t, s, pool, "implement", StateReviewing, true)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: testPR(5003), TaskID: stuck.ID})
+	send(t, s, mergeEvent(stuck.ID, testPR(5004)))
+	// The holding PR closes unmerged: no event follows, so only the report
+	// shows the task, with nothing left open.
+	if _, err := pool.Exec(t.Context(), `UPDATE changes SET state='closed' WHERE repo='example/app' AND pr_number=5003`); err != nil {
+		t.Fatal(err)
+	}
+
+	reverted := flowTask(t, s, pool, "implement", StateReviewing, true)
+	send(t, s, mergeEvent(reverted.ID, testPR(5005)))
+	send(t, s, revertEvent(reverted.ID, testPR(5005), testPR(5006)))
+	if got := stateOf(t, s, reverted.ID).State; got != StateDeveloping {
+		t.Fatalf("reverted task %s", got)
+	}
+
+	c := driftAt(t, s, time.Now().UTC(), DriftDefaultMergedDays).MergedPRNotMerged
+	byID := map[int64]TaskDriftTask{}
+	for _, x := range c.Tasks {
+		byID[x.ID] = x
+	}
+	if x, ok := byID[held.ID]; !ok || len(x.OpenPRs) != 1 || x.OpenPRs[0] != testPR(5001) {
+		t.Fatalf("held task %+v ok=%t", x, ok)
+	}
+	if x, ok := byID[stuck.ID]; !ok || len(x.OpenPRs) != 0 || x.PR != "" {
+		t.Fatalf("stuck task %+v ok=%t", x, ok)
+	}
+	if _, ok := byID[reverted.ID]; ok {
+		t.Fatalf("reverted task reported: %+v", c.Tasks)
+	}
+}

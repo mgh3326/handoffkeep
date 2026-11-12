@@ -107,7 +107,7 @@ forward or is recorded with no effect.
 | `panewire.job` | Spawn bound to the task | `researching` or `developing`, see below | `backlog`, `unstarted` |
 | `mergewake.pr` | PR opened carrying `Mergewake-Task: <id>` | `reviewing` | `backlog`, `unstarted`, `researching`, `developing` |
 | `mergewake.review` | Review started | `reviewing` | Same as above |
-| `mergewake.merge` | mergewake merged the PR after its review passed | `merged` | Any `backlog`, `unstarted` or `started` state |
+| `mergewake.merge` | mergewake merged the PR after its review passed, and it was the task's last open piece (rule 11) | `merged` | Any `backlog`, `unstarted` or `started` state |
 | `mergewake.revert` | Revert PR merged, for example after post-merge CI failed | `developing` | `merged`, `deployed` |
 | `hk.deploy` | Successful deploy record lists the PR | `deployed` | `merged` |
 | `hk.auto_close` | Last child closed | `completed`, `merged` or `deployed`, see Hierarchy | Any non-terminal state except `triage` |
@@ -169,6 +169,16 @@ treated as overdue.
     the merge is recorded with `applied=false`. This covers a revert that arrives
     before its merge and a merge event redelivered after a revert. Relanding the change
     takes a new PR.
+11. A merge closes a task only when nothing else of it is open (hk 3294). The merge
+    is recorded with `applied=false`, the reason naming what holds it, while another
+    `implements` change of the task is still `open` (the task closes on that change's
+    merge) or while a sub-task is not settled (the parent closes through
+    `auto_close_parent` when its last sub-task settles). A change closed without
+    merging does not hold the task. An event may name further tasks in `tasks` (one
+    per `Mergewake-Task` line of the PR, for example a bundle PR's sub-tasks); each
+    gets the event as `task_id` does. A task held by a change that later closes
+    unmerged gets no further event; `tasks drift` lists it under
+    `merged_pr_not_merged` with no `open_prs`: the mechanical close the daily hygiene job (hk 3292) is to make.
 
 **Changes and reviews from the same events.** Every mergewake event also writes the
 work record, in the same transaction, after the task row is locked and before the rule
@@ -185,6 +195,7 @@ and a bad value is a 400.
 |---|---|---|
 | `head_sha`, `base_sha` | every mergewake source | 40 lower-case hex digits; replaces the stored value unless the change is merged (only the merge event sets them then). On a revert they describe the revert PR. |
 | `merge_sha` | `mergewake.merge` | 40 lower-case hex digits. |
+| `tasks` | every mergewake source | Up to 32 other task ids, positive, distinct and not `task_id`. Each gets the event and its change rows; a missing one is reported as `task_not_found` and writes nothing. |
 | `reviews` | `mergewake.review` | Up to 16 review passes: `reviewed_head` (required), `reviewed_base`, `patch_id`, `round` and `pass` (at least 1), `lens` (required), `reviewer_job_id`, `family`, `profile`, `model`, `harness`, `effort`, `executor`, `fallback`, `policy_revision`, `contract_source`, `verdict`, severity counts `critical`, `high`, `medium`, `low` (counts only, never the findings), `started_at`, `finished_at`. |
 
 What each event writes:

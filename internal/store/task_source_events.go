@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -88,12 +89,19 @@ func sourceEventTarget(source, from, to string) (string, string) {
 	return rule.to, ""
 }
 
-// TaskSourceEvent is one integration event addressed to one task.
+// MaxEventTasks caps the other tasks one event names (TaskSourceEvent.Tasks).
+const MaxEventTasks = 32
+
+// TaskSourceEvent is one integration event addressed to one task, and to the
+// other tasks the PR names in Tasks (hk 3294: one Mergewake-Task line each,
+// a bundle PR's children). Each named task gets the event as task_id does:
+// its own change link, rules and recorded row.
 // source_ref is the PR URL, and for a revert the revert PR URL (rule 10).
 type TaskSourceEvent struct {
 	Source     string     `json:"source"`
 	SourceRef  string     `json:"source_ref"`
 	TaskID     int64      `json:"task_id"`
+	Tasks      []int64    `json:"tasks,omitempty"`
 	PR         string     `json:"pr,omitempty"`
 	RevertedPR string     `json:"reverted_pr,omitempty"`
 	RevertPR   string     `json:"revert_pr,omitempty"`
@@ -110,12 +118,16 @@ type TaskSourceEvent struct {
 
 // TaskEventResult says what an event did. Redelivered is set when the same
 // (task, source, source_ref) was already recorded: nothing changed this time.
+// Tasks is the result for each task in TaskSourceEvent.Tasks, in that order;
+// a named task that does not exist has an empty State and the reason
+// task_not_found, and nothing is written for it.
 type TaskEventResult struct {
-	Applied     bool   `json:"applied"`
-	Redelivered bool   `json:"redelivered"`
-	State       string `json:"state"`
-	Reason      string `json:"reason,omitempty"`
-	Task        Task   `json:"task"`
+	Applied     bool              `json:"applied"`
+	Redelivered bool              `json:"redelivered"`
+	State       string            `json:"state"`
+	Reason      string            `json:"reason,omitempty"`
+	Task        Task              `json:"task"`
+	Tasks       []TaskEventResult `json:"tasks,omitempty"`
 }
 
 // normalizeTaskSourceEvent checks an API event. pr defaults to source_ref for
@@ -149,6 +161,16 @@ func normalizeTaskSourceEvent(in TaskSourceEvent) (TaskSourceEvent, error) {
 	}
 	if err := checkEventChangeFields(in); err != nil {
 		return in, err
+	}
+	if len(in.Tasks) > MaxEventTasks {
+		return in, fmt.Errorf("invalid task event: tasks names at most %d tasks", MaxEventTasks)
+	}
+	seen := map[int64]bool{in.TaskID: true}
+	for _, id := range in.Tasks {
+		if id < 1 || seen[id] {
+			return in, errors.New("invalid task event: tasks must be positive, distinct and not task_id")
+		}
+		seen[id] = true
 	}
 	return in, nil
 }
@@ -184,29 +206,55 @@ func (s *Store) ApplyTaskSourceEvent(ctx context.Context, in TaskSourceEvent) (T
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return TaskEventResult{}, err
 	}
-	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, in.TaskID), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return TaskEventResult{}, ErrTaskNotFound
-		}
+	res, found, err := s.applyTaskSourceEventTx(ctx, tx, in.TaskID, in, at, now)
+	if err != nil {
 		return TaskEventResult{}, err
 	}
+	if !found {
+		return TaskEventResult{}, ErrTaskNotFound
+	}
+	// The named tasks follow task_id, each under its own row lock; the
+	// level-2 lock held above serializes them with every other holder.
+	for _, id := range in.Tasks {
+		r, found, err := s.applyTaskSourceEventTx(ctx, tx, id, in, at, now)
+		if err != nil {
+			return TaskEventResult{}, err
+		}
+		if !found {
+			r = TaskEventResult{Reason: "task_not_found"}
+		}
+		res.Tasks = append(res.Tasks, r)
+	}
+	return res, tx.Commit(ctx)
+}
+
+// applyTaskSourceEventTx applies one event to task id: it locks the row,
+// writes the change rows, applies the event and propagates a merge. found is
+// false, with nothing written, when the task does not exist.
+func (s *Store) applyTaskSourceEventTx(ctx context.Context, tx pgx.Tx, id int64, in TaskSourceEvent, at, now time.Time) (TaskEventResult, bool, error) {
+	var x Task
+	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return TaskEventResult{}, false, nil
+		}
+		return TaskEventResult{}, false, err
+	}
 	// The change rows describe the PR, so they are written for a redelivered
-	// or not-applied event too; a 404 above has written nothing.
-	if err = recordChangeTx(ctx, tx, x, in, at, now); err != nil {
-		return TaskEventResult{}, err
+	// or not-applied event too.
+	if err := recordChangeTx(ctx, tx, x, in, at, now); err != nil {
+		return TaskEventResult{}, false, err
 	}
 	ev := sourceEvent{Source: in.Source, SourceRef: in.SourceRef, PR: in.PR, RevertedPR: in.RevertedPR, RevertPR: in.RevertPR, At: at}
 	res, err := s.applySourceEventTx(ctx, tx, x, ev, now)
 	if err != nil {
-		return TaskEventResult{}, err
+		return TaskEventResult{}, false, err
 	}
 	if res.Applied && in.Source == SourceMergewakeMerge {
 		if err = s.propagateMergeTx(ctx, tx, res.Task.ID, ev, now); err != nil {
-			return TaskEventResult{}, err
+			return TaskEventResult{}, false, err
 		}
 	}
-	return res, tx.Commit(ctx)
+	return res, true, nil
 }
 
 // propagateMergeTx is the cross-task half of a merge (hk 3766): a PR merge
@@ -291,6 +339,11 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 			reason = "the deploy lists only the reverted PR"
 		}
 	}
+	if reason == "" && ev.Source == SourceMergewakeMerge {
+		if reason, err = mergeHoldTx(ctx, tx, x.ID, ev.PR); err != nil {
+			return TaskEventResult{}, err
+		}
+	}
 	if reason != "" {
 		note := joinNote(ev.Note, "not applied: "+reason)
 		if _, _, err := insertEvent(ctx, tx, taskEventInput{
@@ -370,6 +423,49 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 		}
 	}
 	return TaskEventResult{Applied: true, State: x.State, Task: x}, nil
+}
+
+// openImplementsSQL lists the PR URLs of a task's implements changes that are
+// still open ($1 the task), other than the PR in $2 (repo) and $3 (number).
+// A closed (unmerged) change does not hold a task; a merged one is done.
+const openImplementsSQL = `SELECT 'https://github.com/'||c.repo||'/pull/'||c.pr_number::text FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
+	WHERE ct.task_id=$1 AND ct.relation='implements' AND c.state='open' AND NOT (c.repo=$2 AND c.pr_number=$3) ORDER BY c.id`
+
+// mergeHoldTx is the close-on-merge rule (hk 3294): a merge closes a task
+// only when it delivers the task's last open piece. It returns why the merge
+// of pr is held, or "" when it may apply. A task is held while another of its
+// implements changes is open (the task closes on that change's merge) or
+// while one of its sub-tasks is not settled (a parent closes through
+// auto_close_parent when its last sub-task settles).
+func mergeHoldTx(ctx context.Context, tx pgx.Tx, taskID int64, pr string) (string, error) {
+	repo, n, _ := parsePRURL(pr)
+	rows, err := tx.Query(ctx, openImplementsSQL, taskID, repo, n)
+	if err != nil {
+		return "", err
+	}
+	open, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return "", err
+	}
+	if len(open) > 0 {
+		return "implements change " + strings.Join(open, ", ") + " is still open; the task closes when its last implements change merges", nil
+	}
+	rows, err = tx.Query(ctx, `SELECT id FROM tasks WHERE parent_id=$1 AND state NOT IN (`+settledStatesSQL+`) ORDER BY id`, taskID)
+	if err != nil {
+		return "", err
+	}
+	children, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return "", err
+	}
+	if len(children) > 0 {
+		ids := make([]string, len(children))
+		for i, id := range children {
+			ids[i] = fmt.Sprintf("#%d", id)
+		}
+		return "sub-tasks " + strings.Join(ids, ", ") + " are not settled; the parent closes when its last sub-task does (auto_close_parent)", nil
+	}
+	return "", nil
 }
 
 func joinNote(a, b string) string {

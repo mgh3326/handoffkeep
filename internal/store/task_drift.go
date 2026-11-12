@@ -62,6 +62,10 @@ type TaskDriftTask struct {
 	PR              string    `json:"pr,omitempty"`
 	DecisionRequest string    `json:"decision_request,omitempty"`
 	Since           time.Time `json:"since"`
+	// OpenPRs, on merged_pr_not_merged only, lists the task's implements
+	// changes that are still open: the close-on-merge rule (mergeHoldTx) holds
+	// the task until they merge or close, so it is not a mechanical fix.
+	OpenPRs []string `json:"open_prs,omitempty"`
 }
 
 // driftColumns is the TaskDriftTask row: id, lane, title, kind, state, pr,
@@ -76,12 +80,21 @@ const driftSettledOpenSQL = `SELECT ` + driftColumns + `updated_at FROM tasks
 // driftMergedPRSQL is class (b): a non-settled task whose PR is merged. The PR
 // is merged when the work record says so (a merged changes row for the URL) or
 // a merged or deployed task already names it: the merge did not propagate to
-// this task.
+// this task. A reverted change is not merged work: its task went back to
+// developing on purpose. A task with no refs.pr is found through the work
+// record instead (hk 3294): a merged, not reverted change it implements.
 const driftMergedPRSQL = `SELECT ` + driftColumns + `updated_at FROM tasks t
-	WHERE t.state NOT IN (` + settledStatesSQL + `) AND COALESCE(t.refs->>'pr','')<>'' AND (
-		EXISTS (SELECT 1 FROM changes c WHERE c.state='merged' AND ('https://github.com/'||c.repo||'/pull/'||c.pr_number::text)=t.refs->>'pr')
+	WHERE t.state NOT IN (` + settledStatesSQL + `) AND ((COALESCE(t.refs->>'pr','')<>'' AND (
+		EXISTS (SELECT 1 FROM changes c WHERE c.state='merged' AND c.reverted_by_change_id IS NULL AND ('https://github.com/'||c.repo||'/pull/'||c.pr_number::text)=t.refs->>'pr')
 		OR EXISTS (SELECT 1 FROM tasks m WHERE m.id<>t.id AND m.state IN ('merged','deployed') AND m.refs->>'pr'=t.refs->>'pr')
+	)) OR EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
+		WHERE ct.task_id=t.id AND ct.relation='implements' AND c.state='merged' AND c.reverted_by_change_id IS NULL)
 	) ORDER BY t.id`
+
+// driftOpenPRsSQL is the open implements changes of the tasks in $1, as
+// OpenPRs reports them.
+const driftOpenPRsSQL = `SELECT ct.task_id,'https://github.com/'||c.repo||'/pull/'||c.pr_number::text FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
+	WHERE ct.task_id=ANY($1) AND ct.relation='implements' AND c.state='open' ORDER BY ct.task_id,c.id`
 
 // driftMergedPageSQL is one page of class (c)'s candidates: merged for at least
 // the cutoff, after the (since, id) keyset cursor. Pages are read in order so
@@ -117,8 +130,11 @@ func (s *Store) TaskDrift(ctx context.Context, now time.Time, mergedDays int) (T
 	if out.SettledOpenDecision, err = driftList(ctx, tx, "state is settled and refs.decision_request is open", driftSettledOpenSQL, DecisionRequestOpen); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift settled_open_decision: %w", err)
 	}
-	if out.MergedPRNotMerged, err = driftList(ctx, tx, "not settled, and refs.pr is merged: a merged changes row names the PR, or a merged or deployed task does", driftMergedPRSQL); err != nil {
+	if out.MergedPRNotMerged, err = driftList(ctx, tx, "not settled, and refs.pr is merged (a merged changes row names the PR, or a merged or deployed task does) or the task implements a merged, not reverted change; open_prs lists implements changes still open, which hold the close", driftMergedPRSQL); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_pr_not_merged: %w", err)
+	}
+	if err = driftOpenPRs(ctx, tx, out.MergedPRNotMerged.Tasks); err != nil {
+		return TaskDrift{}, fmt.Errorf("drift merged_pr_not_merged open_prs: %w", err)
 	}
 	if out.MergedWithoutDeploy, err = driftMergedWithoutDeploy(ctx, tx, now.Add(-time.Duration(mergedDays)*24*time.Hour), mergedDays); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_without_deploy: %w", err)
@@ -179,6 +195,32 @@ scan:
 	}
 	out.Count = len(out.Tasks)
 	return out, nil
+}
+
+// driftOpenPRs fills OpenPRs on xs from one read.
+func driftOpenPRs(ctx context.Context, tx pgx.Tx, xs []TaskDriftTask) error {
+	if len(xs) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(xs))
+	at := make(map[int64]int, len(xs))
+	for i, x := range xs {
+		ids[i], at[x.ID] = x.ID, i
+	}
+	rows, err := tx.Query(ctx, driftOpenPRsSQL, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var pr string
+		if err = rows.Scan(&id, &pr); err != nil {
+			return err
+		}
+		xs[at[id]].OpenPRs = append(xs[at[id]].OpenPRs, pr)
+	}
+	return rows.Err()
 }
 
 // driftList runs one class query, which takes its args as $1.. and ends in an
