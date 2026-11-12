@@ -66,7 +66,7 @@ var ErrYTCommentUnsendable = errors.New("yt_comment_unsendable")
 var ytAuthorityPrincipals = map[YTAuthorityKind][]string{
 	YTAuthorityTasks:     {YTIssuePrincipal, YTFieldsPrincipal},
 	YTAuthorityComments:  {YTCommentPrincipal},
-	YTAuthorityDocuments: {ytDocCommentPrincipal},
+	YTAuthorityDocuments: {ytDocCommentPrincipal, YTDocsPrincipal},
 	YTAuthorityDecisions: {YTDecisionsPrincipal},
 }
 
@@ -78,7 +78,7 @@ var ytAuthorityFeeds = map[YTAuthorityKind][]struct {
 	models   []string
 }{
 	YTAuthorityTasks:     {{ytFieldsConsumer, []string{"task"}}},
-	YTAuthorityDocuments: {{ytDocCommentsConsumer, []string{"document"}}},
+	YTAuthorityDocuments: {{ytDocCommentsConsumer, []string{"document"}}, {ytDocsConsumer, []string{"document"}}},
 	YTAuthorityDecisions: {{ytDecisionsConsumer, []string{"decision"}}},
 }
 
@@ -254,6 +254,11 @@ func (s *Store) ytAuthorityWriteModeOff(kind YTAuthorityKind) string {
 	case YTAuthorityDocuments:
 		if s.ytDocCommentsNow() != YTDocCommentsOn {
 			return "HANDOFFKEEP_YT_DOC_COMMENTS_MODE is not on"
+		}
+		// The articles (hk 4206): a task's documents reach its issue as
+		// comments, every other document its article.
+		if _, on := s.ytDocsNow(); !on {
+			return "HANDOFFKEEP_YT_DOCS_MODE is not on"
 		}
 		return ""
 	case YTAuthorityDecisions:

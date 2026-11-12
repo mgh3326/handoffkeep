@@ -1227,11 +1227,11 @@ server first takes the legacy sync lock (a running `youtrack sync`, `adopt`
 or comment catch-up makes it refuse), then checks, for each kind it changes to
 youtrack, that its own write mode is on (tasks: `HANDOFFKEEP_YT_ISSUES_MODE` and `HANDOFFKEEP_YT_FIELDS_MODE`;
 comments: `HANDOFFKEEP_YT_COMMENTS_MODE=on`; documents:
-`HANDOFFKEEP_YT_DOC_COMMENTS_MODE`; decisions: `HANDOFFKEEP_YT_DECISIONS_MODE`) and that the kind has no `prepared`, `dispatched` or
+`HANDOFFKEEP_YT_DOC_COMMENTS_MODE` and `HANDOFFKEEP_YT_DOCS_MODE`; decisions: `HANDOFFKEEP_YT_DECISIONS_MODE`) and that the kind has no `prepared`, `dispatched` or
 `remote_unknown` op (by principal: `hk:task-issues` and `hk:task-fields`,
-`hk:task-comments`, `hk:doc-comments`, `hk:decisions`), and that its feed
-consumers have read every change (`task_fields` for tasks, `task_docs` for
-documents, `decision_issues` for decisions; a consumer
+`hk:task-comments`, `hk:doc-comments` and `hk:documents`, `hk:decisions`), and that its feed
+consumers have read every change (`task_fields` for tasks, `task_docs` and
+`document_articles` for documents, `decision_issues` for decisions; a consumer
 that has never run, or whose cursor is behind `sync_state.pruned_through`,
 refuses). Every op preparation holds its kind's row
 `FOR SHARE`, so the switch counts an op whose transaction was open when it

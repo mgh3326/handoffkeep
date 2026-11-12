@@ -506,3 +506,43 @@ func TestYTArticleBindingRefusedWhileCreatePending(t *testing.T) {
 		t.Fatalf("binding after the create was rejected: %v", err)
 	}
 }
+
+// r4546390459: the documents authority switch also waits for the document
+// articles: HANDOFFKEEP_YT_DOCS_MODE on, no unresolved hk:documents op, and
+// document_articles caught up with the feed.
+func TestYTAuthorityDocumentsWaitsForArticles(t *testing.T) {
+	s := ytartSetup(t, "ytart_auth", false)
+	ctx := t.Context()
+	s.SetYTDocCommentsMode(YTDocCommentsOn)
+	docComments := ytFeedConsumers[ytDocCommentsConsumer]
+	ytFeedPassOK(t, s, docComments)
+	set := func() error {
+		_, _, err := s.SetYTAuthority(ctx, []YTAuthorityKind{YTAuthorityDocuments}, YTAuthorityYouTrack, "operator", "drill")
+		return err
+	}
+	refused := func(err error, want string) {
+		t.Helper()
+		if !errors.Is(err, ErrYTAuthorityRefused) || !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want a refusal naming %q", err, want)
+		}
+	}
+	refused(set(), "HANDOFFKEEP_YT_DOCS_MODE")
+
+	s.SetYTDocsMode(YTDocsOn, ytcTenant, ytartBuckets())
+	id := ytartPut(t, s, "design/ytart/auth.md", "body", nil)
+	ytFeedPassOK(t, s, docComments)
+	refused(set(), "feed consumer document_articles has 1 changes")
+	ytartPass(t, s)
+	ops := ytartOps(t, s, id)
+	if len(ops) != 1 || ops[0].Principal != YTDocsPrincipal {
+		t.Fatalf("ops %+v", ops)
+	}
+	refused(set(), "documents: 1 ops")
+
+	if _, err := s.YTWriteLedger().Reject(ctx, time.Now().UTC(), ops[0].ID, "operator_not_applied", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := set(); err != nil {
+		t.Fatalf("switch with every precondition met: %v", err)
+	}
+}
