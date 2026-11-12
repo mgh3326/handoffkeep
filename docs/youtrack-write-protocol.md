@@ -799,12 +799,27 @@ Parent task: #<parent id>
 exactly one `POST /api/issues/<id>` with the summary, the description and
 every field in the shape the project's field takes (a text or enum `hk
 프로젝트`, a single or multi-value `멈춤`; null, or `[]` for a multi-value field,
-clears). A value missing from (or archived in) a field's bundle, a field the
-project lacks with a value to set, or a type the snapshot cannot be written as
-is `rejected / field_refused` before the POST, with `last_error` naming the
-field and the value; a 4xx from the POST is `rejected / http_4xx`. Either
-raises the rejected-op alert. Bundle values are never created here (the
-schema plan owns them); the next change prepares a new snapshot. No map rows.
+clears). A closed-set value (`hk 상태`, `종류`, `등급`, `티어`, `hk 우선순위`,
+`멈춤`) missing from (or archived in) its field's bundle, a field the project
+lacks with a value to set, or a type the snapshot cannot be written as is
+`rejected / field_refused` before the POST, with `last_error` naming the field
+and the value; a 4xx from the POST is `rejected / http_4xx`. Either raises the
+rejected-op alert, and the next change prepares a new snapshot. No map rows.
+
+`레인`, `영역` and `마일스톤` are open sets hk owns (a new lane appears in hk
+first, hk 4051). When nothing above refuses, a value of theirs missing from
+the project's bundle is added to that bundle (`POST
+/api/admin/customFieldSettings/bundles/enum/<bundle>/values` with `$type` and
+`name`), and an archived one is un-archived (`POST .../values/<value id>` with
+`archived: false`), never duplicated. The add goes to the bundle the project's
+field uses, so a bundle several projects share gains the value for all of
+them; no per-project bundle is made. Each add logs
+`ytwrite.bundle_value_added project_id= field= value= bundle_id= action=`
+(`added`, `unarchived`, or `present` when another 4xx answer turns out to be a
+concurrent add and a re-read finds the value live). A 403 on the add is
+`rejected / field_refused` ("no permission to add bundle value"); any other
+failure is `not_sent`, as a failed field read is. The update itself is still
+the one POST above.
 
 **Evidence.** A GET of the issue: the summary, the description and every
 snapshot field equal (a field the issue lacks counts as empty) applies the

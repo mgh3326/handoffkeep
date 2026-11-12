@@ -399,7 +399,10 @@ type IssueFieldsRemote interface {
 	// returns the issue's id. It may read the project's fields first: a
 	// failed read is a *NotSentError, and a value the project's field cannot
 	// take is a *RefusedError (ReasonFieldRefused) naming the field and the
-	// value; neither sends anything. Other errors follow CreateComment's.
+	// value; neither sends the update. An open-set value (레인, 영역,
+	// 마일스톤) its bundle lacks is added to the bundle first (a failed add
+	// is a *NotSentError, a 403 a *RefusedError). Other errors follow
+	// CreateComment's.
 	UpdateIssueFields(ctx context.Context, in IssueFieldsUpdate) (id string, err error)
 	// ReadIssueFields reads the issue's summary, description and fields,
 	// each field's value in the canonical text of FieldValue ("" for none).

@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,11 +21,11 @@ func projectFieldsJSON() []map[string]any {
 		f := map[string]any{"field": map[string]any{"name": name, "fieldType": map[string]any{"id": typeID}}}
 		if len(values) > 0 {
 			vs := []map[string]any{}
-			for _, v := range values {
-				vs = append(vs, map[string]any{"name": v, "archived": false})
+			for i, v := range values {
+				vs = append(vs, map[string]any{"id": name + "-v" + strconv.Itoa(i), "name": v, "archived": false})
 			}
-			vs = append(vs, map[string]any{"name": "archived-lane", "archived": true})
-			f["bundle"] = map[string]any{"values": vs}
+			vs = append(vs, map[string]any{"id": name + "-varch", "name": "archived-lane", "archived": true})
+			f["bundle"] = map[string]any{"id": "b-" + name, "values": vs}
 		}
 		return f
 	}
@@ -109,8 +112,14 @@ func TestWriteRemoteUpdateIssueFieldsRefusals(t *testing.T) {
 		edit func(*ytwrite.IssueSnapshot)
 		want string
 	}{
-		"missing_value":  {func(s *ytwrite.IssueSnapshot) { s.Fields[4].Value = "no-such-lane" }, `field "레인" value "no-such-lane"`},
-		"archived_value": {func(s *ytwrite.IssueSnapshot) { s.Fields[4].Value = "archived-lane" }, `field "레인" value "archived-lane"`},
+		"missing_closed_value":  {func(s *ytwrite.IssueSnapshot) { setField(s, ytwrite.FieldGrade, "Z") }, `field "등급" value "Z": the value is not in the field's bundle`},
+		"archived_closed_value": {func(s *ytwrite.IssueSnapshot) { setField(s, ytwrite.FieldKind, "archived-lane") }, `field "종류" value "archived-lane"`},
+		// A closed-set refusal adds nothing, not even the open-set value
+		// the same snapshot lacks.
+		"closed_with_open_missing": {func(s *ytwrite.IssueSnapshot) {
+			setField(s, ytwrite.FieldGrade, "Z")
+			setField(s, ytwrite.FieldLane, "routing-policy")
+		}, `field "등급" value "Z"`},
 		"missing_field": {func(s *ytwrite.IssueSnapshot) {
 			s.Fields = append(s.Fields, ytwrite.FieldValue{Name: "없는 필드", Type: ytwrite.FieldTypeText, Value: "x"})
 		}, `field "없는 필드" value "x": project 0-7 has no such field`},
@@ -131,6 +140,24 @@ func TestWriteRemoteUpdateIssueFieldsRefusals(t *testing.T) {
 			}
 		})
 	}
+	t.Run("open_set_on_string_field", func(t *testing.T) {
+		// 영역 is a text field in this project: no bundle, no add.
+		y := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet {
+				_ = json.NewEncoder(w).Encode(projectFieldsJSON())
+				return
+			}
+			_, _ = w.Write([]byte(`{"id":"2-9"}`))
+		}}
+		snap := fieldsSnapshot()
+		setField(&snap, ytwrite.FieldArea, "new-area")
+		if _, err := y.serve(t).UpdateIssueFields(t.Context(), ytwrite.IssueFieldsUpdate{IssueID: "2-9", ProjectID: "0-7", IssueSnapshot: snap}); err != nil {
+			t.Fatal(err)
+		}
+		if y.countOf(http.MethodPost) != 1 {
+			t.Fatalf("requests %v", y.requests)
+		}
+	})
 	t.Run("field_read_fails", func(t *testing.T) {
 		y := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) }}
 		_, err := y.serve(t).UpdateIssueFields(t.Context(), ytwrite.IssueFieldsUpdate{IssueID: "2-9", ProjectID: "0-7", IssueSnapshot: fieldsSnapshot()})
@@ -181,6 +208,125 @@ func TestWriteRemoteReadIssueFieldsRoundTrip(t *testing.T) {
 		if v := canonicalFieldValue(json.RawMessage(raw)); v != want {
 			t.Errorf("canonical(%s) = %q, want %q", raw, v, want)
 		}
+	}
+}
+
+// setField sets one snapshot field's value by name.
+func setField(s *ytwrite.IssueSnapshot, name, value string) {
+	for i := range s.Fields {
+		if s.Fields[i].Name == name {
+			s.Fields[i].Value = value
+			return
+		}
+	}
+	panic("no field " + name)
+}
+
+// An open-set value (레인) the project's bundle lacks is added to that bundle,
+// or un-archived, before the one issue update; a 403 on the add refuses, any
+// other failure sends nothing and is retried (hk 4051).
+func TestWriteRemoteUpdateIssueFieldsAddsOpenSetValue(t *testing.T) {
+	const addPath = "/api/admin/customFieldSettings/bundles/enum/b-레인/values"
+	type want struct {
+		requests []string
+		err      func(error) bool
+	}
+	refused := func(detail string) func(error) bool {
+		return func(err error) bool {
+			var re *ytwrite.RefusedError
+			return errors.As(err, &re) && re.Reason == ytwrite.ReasonFieldRefused && strings.Contains(re.Detail, detail)
+		}
+	}
+	notSent := func(err error) bool { var ns *ytwrite.NotSentError; return errors.As(err, &ns) }
+	ok := func(err error) bool { return err == nil }
+	get, post := "GET /api/admin/projects/0-7/customFields", "POST /api/issues/2-9"
+	for name, tc := range map[string]struct {
+		lane    string
+		addCode int
+		// already: the bundle holds the value once the add answers (a
+		// concurrent add won).
+		already bool
+		want    want
+	}{
+		"missing_added":     {lane: "routing-policy", addCode: http.StatusOK, want: want{[]string{get, "POST " + addPath, post}, ok}},
+		"existing_no_add":   {lane: "handoffkeep-design", want: want{[]string{get, post}, ok}},
+		"archived_restored": {lane: "archived-lane", addCode: http.StatusOK, want: want{[]string{get, "POST " + addPath + "/레인-varch", post}, ok}},
+		"add_403":           {lane: "routing-policy", addCode: http.StatusForbidden, want: want{[]string{get, "POST " + addPath}, refused(`field "레인" value "routing-policy": no permission to add bundle value`)}},
+		"add_5xx":           {lane: "routing-policy", addCode: http.StatusBadGateway, want: want{[]string{get, "POST " + addPath}, notSent}},
+		"add_already_exists": {lane: "routing-policy", addCode: http.StatusBadRequest, already: true,
+			want: want{[]string{get, "POST " + addPath, get, post}, ok}},
+		"add_400_still_missing": {lane: "routing-policy", addCode: http.StatusBadRequest,
+			want: want{[]string{get, "POST " + addPath, get}, notSent}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var mu sync.Mutex
+			added := false
+			y := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/admin/projects/0-7/customFields":
+					fields := projectFieldsJSON()
+					if added {
+						for _, f := range fields {
+							if f["field"].(map[string]any)["name"] == ytwrite.FieldLane {
+								b := f["bundle"].(map[string]any)
+								b["values"] = append(b["values"].([]map[string]any), map[string]any{"id": "new", "name": tc.lane, "archived": false})
+							}
+						}
+					}
+					_ = json.NewEncoder(w).Encode(fields)
+				case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, addPath):
+					added = tc.already || tc.addCode < 300
+					w.WriteHeader(tc.addCode)
+					_, _ = w.Write([]byte(`{"id":"new","name":"x","archived":false}`))
+				case r.Method == http.MethodPost && r.URL.Path == "/api/issues/2-9":
+					_, _ = w.Write([]byte(`{"id":"2-9"}`))
+				default:
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}}
+			snap := fieldsSnapshot()
+			setField(&snap, ytwrite.FieldLane, tc.lane)
+			_, err := y.serve(t).UpdateIssueFields(t.Context(), ytwrite.IssueFieldsUpdate{IssueID: "2-9", ProjectID: "0-7", IssueSnapshot: snap})
+			if !tc.want.err(err) {
+				t.Fatalf("err %v", err)
+			}
+			if strings.Join(y.requests, "|") != strings.Join(tc.want.requests, "|") {
+				t.Fatalf("requests %q, want %q", y.requests, tc.want.requests)
+			}
+			for i, req := range y.requests {
+				if !strings.HasPrefix(req, "POST "+addPath) {
+					continue
+				}
+				var body map[string]any
+				if err := json.Unmarshal([]byte(y.bodies[i]), &body); err != nil {
+					t.Fatal(err)
+				}
+				wantBody := map[string]any{"$type": "EnumBundleElement", "name": tc.lane}
+				if strings.HasSuffix(req, "/레인-varch") {
+					wantBody = map[string]any{"$type": "EnumBundleElement", "archived": false}
+				}
+				if !reflect.DeepEqual(body, wantBody) {
+					t.Fatalf("add body %v, want %v", body, wantBody)
+				}
+			}
+			if last := len(y.requests) - 1; last >= 0 && y.requests[last] == post {
+				var body struct {
+					CustomFields []struct {
+						Name  string          `json:"name"`
+						Value json.RawMessage `json:"value"`
+					} `json:"customFields"`
+				}
+				_ = json.Unmarshal([]byte(y.bodies[last]), &body)
+				for _, f := range body.CustomFields {
+					if f.Name == ytwrite.FieldLane && string(f.Value) != `{"$type":"EnumBundleElement","name":`+quoteJSON(tc.lane)+`}` {
+						t.Fatalf("레인 sent as %s", f.Value)
+					}
+				}
+			}
+		})
 	}
 }
 
