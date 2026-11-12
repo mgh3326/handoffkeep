@@ -1510,9 +1510,14 @@ and marker for an `op_applied` binding) applies the op, anything else keeps it
 A binding `youtrack articles-backfill` publishes in
 `HANDOFFKEEP_YT_DOCS_MODE=on` whose article is not the document's body gets
 its `article_update` in the binding's own transaction. Once documents are
-canonical in YouTrack, a backfill binding queues no update: it records the
-document's current body as reconciled (`content_sha` the document's sha,
-`needs_update` false), so only a later hk edit is written.
+canonical in YouTrack, a backfill binding queues no update: it keeps what was
+verified (the article's `content_sha` and `needs_update`) and records the
+document's current body as its post-switch baseline (`yt_snapshot_state`
+kind `article_baseline`). While documents stay canonical in YouTrack, no
+update writes a body equal to that baseline (outcome `superseded`, also on a
+restart's catch-up); an hk edit after it is written. After a rollback to hk
+the baseline is ignored, so the body is written, and the documents switch
+counts it unwritten until it is. An applied `article_update` clears it.
 
 **Binding.** Applying an `article_create` (send, evidence or `yt ops
 resolve`) takes the document's lane lock, checks the document's binding and

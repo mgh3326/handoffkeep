@@ -242,6 +242,9 @@ const (
 	ytArticleCreatePending   ytArticleOutcome = "create_exists"
 	ytArticleNoProject       ytArticleOutcome = "no_project"
 	ytArticleInvalid         ytArticleOutcome = "invalid"
+	// ytArticleSuperseded: documents are canonical in YouTrack and the
+	// document's body is the post-switch baseline its article superseded.
+	ytArticleSuperseded ytArticleOutcome = "superseded"
 	// ytArticleLegacyUnverified: the legacy sync split the document into
 	// parts, so its article cannot be adopted; the create is rejected
 	// legacy_synced_unverified at once (Send rejects the other unverified
@@ -286,6 +289,13 @@ func prepareYTArticleTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDocsG
 	if r.bound {
 		if !r.binding.NeedsUpdate && r.binding.ContentSHA == r.doc.SHA256 {
 			return ytArticleUnchanged, nil
+		}
+		superseded, err := ytArticleSupersededTx(ctx, tx, id, r.doc.SHA256)
+		if err != nil {
+			return "", err
+		}
+		if superseded {
+			return ytArticleSuperseded, nil
 		}
 		n, err := ytwrite.ArticleUpdateOp(ytwrite.ArticleUpdateRequest{Principal: YTDocsPrincipal, Actor: YTDocsPrincipal,
 			Tenant: r.binding.Tenant, ArticleID: r.binding.ArticleID, DocumentID: id, Summary: summary, Content: r.body,
@@ -403,10 +413,11 @@ func ytDocsHandler(s *Store, now time.Time) FeedHandler {
 			}
 			counts[outcome]++
 		}
-		log.Printf("ytwrite.articles_feed documents=%d create_prepared=%d create_rejected=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d deleted=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d",
+		log.Printf("ytwrite.articles_feed documents=%d create_prepared=%d create_rejected=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d deleted=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d superseded=%d",
 			len(ids), counts[ytArticleCreatePrepared], counts[ytArticleCreateRejected], counts[ytArticleCreatePending], counts[ytArticleUpdatePrepared],
 			counts[ytArticleUnchanged], counts[ytArticleNotUpdated], counts[ytArticleUnboundImported], counts[ytArticleOutOfScope],
-			counts[ytArticleDeleted], counts[ytArticleOtherTenant], counts[ytArticleNoProject], counts[ytArticleInvalid], counts[ytArticleLegacyUnverified])
+			counts[ytArticleDeleted], counts[ytArticleOtherTenant], counts[ytArticleNoProject], counts[ytArticleInvalid], counts[ytArticleLegacyUnverified],
+			counts[ytArticleSuperseded])
 		return nil
 	}
 }
@@ -505,6 +516,39 @@ func (s *Store) ytArticleSnapshotTx(ctx context.Context, tx pgx.Tx, id int64, no
 	return prepareYTArticleTx(ctx, tx, now, g, id, r)
 }
 
+// ytArticleBaselineKind is the yt_snapshot_state kind of a document's
+// post-switch baseline (r4547995557): the sha of its PG body when a binding
+// was published while documents were canonical in YouTrack, a body the
+// article superseded. last_op_id 0: no op sent it.
+const ytArticleBaselineKind = "article_baseline"
+
+// setYTArticleBaselineTx records document id's post-switch baseline.
+func setYTArticleBaselineTx(ctx context.Context, tx pgx.Tx, id int64, sha string) error {
+	_, err := tx.Exec(ctx, `INSERT INTO yt_snapshot_state(entity_kind,entity_id,kind,seq,last_sha,last_op_id) VALUES($1,$2,$3,1,$4,0)
+		ON CONFLICT (entity_kind,entity_id,kind) DO UPDATE SET last_sha=EXCLUDED.last_sha`,
+		ytwrite.ArticleEntity, strconv.FormatInt(id, 10), ytArticleBaselineKind, sha)
+	return err
+}
+
+// ytArticleSupersededTx reports whether document id's body (sha) must not be
+// written now: documents are canonical in YouTrack (read FOR SHARE, as op
+// preparation takes it) and sha is the document's post-switch baseline. Under
+// hk (a rollback) the baseline is ignored, so the body is written and the
+// switch gate counts it until then.
+func ytArticleSupersededTx(ctx context.Context, tx pgx.Tx, id int64, sha string) (bool, error) {
+	var baseline string
+	err := tx.QueryRow(ctx, `SELECT last_sha FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3`,
+		ytwrite.ArticleEntity, strconv.FormatInt(id, 10), ytArticleBaselineKind).Scan(&baseline)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && baseline != sha) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityDocuments)
+	return side == YTAuthorityYouTrack, err
+}
+
 // noYTConflict is the conflict check of an apply hook that publishes no new
 // mapping.
 func noYTConflict(context.Context, pgx.Tx, ytwrite.Op, string) (string, error) { return "", nil }
@@ -528,6 +572,11 @@ func bindYTArticleUpdateApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytw
 	}
 	if _, err := tx.Exec(ctx, `UPDATE yt_article_bindings SET content_sha=$4, needs_update=false
 		WHERE document_id::text=$1 AND tenant=$2 AND article_id=$3`, op.EntityID, op.Tenant, op.YTTargetID, ytwrite.ContentSHA(p.Content)); err != nil {
+		return err
+	}
+	// The article now holds an hk body: no post-switch baseline is left.
+	if _, err := tx.Exec(ctx, `DELETE FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3`,
+		ytwrite.ArticleEntity, op.EntityID, ytArticleBaselineKind); err != nil {
 		return err
 	}
 	id, err := strconv.ParseInt(op.EntityID, 10, 64)

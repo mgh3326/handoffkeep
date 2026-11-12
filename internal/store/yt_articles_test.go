@@ -833,41 +833,73 @@ func TestYTArticlesFeedNoProjectIsRetried(t *testing.T) {
 	}
 }
 
-// r4547807096, r4547880748: once documents are canonical in YouTrack, a
-// backfill binding is published but queues no update of the PG body over
-// the article, then or later.
-func TestYTArticleBindingAfterSwitchQueuesNothing(t *testing.T) {
-	s := ytartSetup(t, "ytart_switched", true)
-	id := ytartPut(t, s, "note/ytart/switched", "hk body", nil)
-	ytartImported(t, s, id)
+// ytartAuthority sets the documents authority row directly.
+func ytartAuthority(t *testing.T, s *Store, side YTAuthoritySide) {
+	t.Helper()
 	if _, err := s.pool.Exec(t.Context(), `INSERT INTO yt_authority(kind) VALUES ('documents') ON CONFLICT DO NOTHING`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.pool.Exec(t.Context(), `UPDATE yt_authority SET authority='youtrack' WHERE kind='documents'`); err != nil {
+	if _, err := s.pool.Exec(t.Context(), `UPDATE yt_authority SET authority=$1 WHERE kind='documents'`, string(side)); err != nil {
 		t.Fatal(err)
 	}
-	ytartBind(t, s, id, "3-960", ytwrite.ContentSHA("what the import wrote"), true)
-	if ops := ytartOps(t, s, id); len(ops) != 0 {
-		t.Fatalf("ops after the switch %+v", ops)
-	}
-	// r4547880748: the article wins, so the binding records the PG body as
-	// reconciled, and no later catch-up (a restart: a fresh Store's full
-	// scan) writes that body over the article; an edit after it is written.
-	d := ytArticleDoc(t, s, id)
-	if b := ytartBinding(t, s, id); b.NeedsUpdate || b.ContentSHA != d.SHA256 {
-		t.Fatalf("binding %+v", b)
-	}
+}
+
+// ytartRestart runs a fresh process's full catch-up on s's database.
+func ytartRestart(t *testing.T, s *Store) {
+	t.Helper()
 	restarted := &Store{pool: s.pool}
 	restarted.SetYTDocsMode(YTDocsOn, ytcTenant, ytartBuckets())
 	if err := restarted.catchUpYTArticlesOnce(t.Context(), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// r4547807096, r4547880748, r4547995557: once documents are canonical in
+// YouTrack, a backfill binding keeps what was verified (the article's sha,
+// needs_update) and queues no update of the PG body the article superseded,
+// then, on a restart's catch-up, or on a write that leaves the body as it was;
+// an hk edit after it is written. After a rollback to hk that body is
+// written, and until then the documents switch counts it unwritten.
+func TestYTArticleBindingAfterSwitchQueuesNothing(t *testing.T) {
+	s := ytartSetup(t, "ytart_switched", true)
+	id := ytartPut(t, s, "note/ytart/switched", "hk body", nil)
+	ytartImported(t, s, id)
+	rolled := ytartPut(t, s, "note/ytart/rolled", "hk body two", nil)
+	ytartImported(t, s, rolled)
+	ytartPass(t, s)
+	ytartAuthority(t, s, YTAuthorityYouTrack)
+	imported := ytwrite.ContentSHA("what the import wrote")
+	ytartBind(t, s, id, "3-960", imported, true)
+	ytartBind(t, s, rolled, "3-961", imported, true)
 	if ops := ytartOps(t, s, id); len(ops) != 0 {
-		t.Fatalf("ops after a restart's catch-up %+v", ops)
+		t.Fatalf("ops after the switch %+v", ops)
+	}
+	if b := ytartBinding(t, s, id); !b.NeedsUpdate || b.ContentSHA != imported {
+		t.Fatalf("binding %+v, want the verified article's sha and needs_update", b)
+	}
+	ytartRestart(t, s)
+	ytartTouch(t, s, id)
+	ytartPass(t, s)
+	if ops := ytartOps(t, s, id); len(ops) != 0 {
+		t.Fatalf("ops after a restart and a touch %+v", ops)
 	}
 	ytartPut(t, s, "note/ytart/switched", "edited in hk after the switch", nil)
 	ytartPass(t, s)
 	if ops := ytartOps(t, s, id); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleUpdate {
 		t.Fatalf("ops after an edit %+v", ops)
+	}
+	if ops := ytartOps(t, s, rolled); len(ops) != 0 {
+		t.Fatalf("rolled ops before the rollback %+v", ops)
+	}
+
+	// Rollback: hk is canonical again, so the PG body is written, and the
+	// switch counts the document unwritten until it is.
+	ytartAuthority(t, s, YTAuthorityHK)
+	if n := ytartUnwritten(t, s); n != 1 {
+		t.Fatalf("%d unwritten after the rollback, want the rolled document", n)
+	}
+	ytartRestart(t, s)
+	if ops := ytartOps(t, s, rolled); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleUpdate || ops[0].YTTargetID != "3-961" {
+		t.Fatalf("rolled ops after the rollback %+v", ops)
 	}
 }
