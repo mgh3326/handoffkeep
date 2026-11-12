@@ -183,6 +183,10 @@ func prepareYTOpTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrite.NewO
 	if err := lockYTEntity(ctx, tx, n.EntityKind, n.EntityID); err != nil {
 		return ytwrite.Op{}, false, err
 	}
+	// Orders this op against an authority switch (hk 4122).
+	if err := lockYTAuthorityForOpTx(ctx, tx, n.Principal); err != nil {
+		return ytwrite.Op{}, false, err
+	}
 	var parent any
 	if n.ParentID > 0 {
 		parent = n.ParentID

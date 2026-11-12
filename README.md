@@ -572,7 +572,11 @@ same for every task with a verified binding (`handoffkeep youtrack
 comments-preflight` and `comments-backfill`, same document).
 `HANDOFFKEEP_YT_ISSUES_MODE=on` has hk create each new task's YouTrack issue
 through the same protocol (`handoffkeep youtrack issues-backfill` prepares it
-for existing tasks; same document). None of these modes turns
+for existing tasks; same document). Which side is canonical per kind is a
+database row, not a mode: `handoffkeep youtrack authority show|set`
+(`GET`/`POST /v1/yt/authority`; same document, §Authority). While comments are
+canonical in YouTrack, a comment the protocol cannot send is refused with 400
+`yt_comment_unsendable`. None of these modes turns
 on serve's YouTrack read-through, which has its own
 `HANDOFFKEEP_YT_READTHROUGH_MODE` (`docs/youtrack.md`).
 

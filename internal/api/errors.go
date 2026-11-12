@@ -55,6 +55,8 @@ var errorRules = []errorRule{
 	{ytwrite.ErrState, http.StatusConflict, "ytwrite_state", false},
 	{ytwrite.ErrInvalid, http.StatusBadRequest, "ytwrite_invalid", false},
 	{ytwrite.ErrConflictingResult, http.StatusConflict, "ytwrite_conflicting_result", false},
+	{store.ErrYTAuthorityRefused, http.StatusConflict, "yt_authority_refused", true},
+	{store.ErrYTCommentUnsendable, http.StatusBadRequest, "yt_comment_unsendable", true},
 	{store.ErrStandingNotNewer, http.StatusConflict, "standing_not_newer", false},
 	{store.ErrStandingConflict, http.StatusConflict, "standing_conflict", false},
 	{store.ErrInvalidSync, http.StatusBadRequest, "invalid_context", false},

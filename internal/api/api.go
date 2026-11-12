@@ -709,6 +709,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/import/{resource}", s.importExport)
 	m.HandleFunc("GET /v1/yt/ops", s.ytOps)
 	m.HandleFunc("POST /v1/yt/ops/{id}/resolve", s.ytOpsResolve)
+	m.HandleFunc("GET /v1/yt/authority", s.ytAuthority)
+	m.HandleFunc("POST /v1/yt/authority", s.ytAuthoritySet)
 	m.HandleFunc("/v1/documents/{key...}", s.document)
 	m.HandleFunc("GET /v1/memory/{agent}", s.memoryList)
 	m.HandleFunc("/v1/memory/{agent}/{name}", s.memory)

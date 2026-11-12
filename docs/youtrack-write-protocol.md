@@ -1097,6 +1097,103 @@ SHA-256 to the import's output.
 **Audit.** A document copy is not an hk comment, so `youtrack audit` lists it
 as `yt_only_bot`, which the audit's gate does not count.
 
+## Authority (hk 4122)
+
+Which side is canonical, per content kind, is a row in `yt_authority`
+(migration `20261112-yt-authority`, expand-only: one new table seeded with one
+`hk` row per kind). The kinds are `tasks`, `comments`, `documents` and
+`decisions`; the authority is `hk` (the default) or `youtrack`. A kind with no
+row reads as `hk`. The modes stay env values; the authority is not one, so a
+release rollback never meets an authority value it cannot parse (consult hk
+3833 §3.4).
+
+**Authority hk** is today's behaviour exactly.
+
+**Authority youtrack** for a kind:
+
+- `/v1/import/*` answers every page of that kind's resources with
+  `{"items": [], "next_cursor": null}` (200), after the request's own
+  validation: `projects` and `tasks` are tasks, `comments` and
+  `comment-authors` comments, `documents`, `task-documents` and
+  `document-authors` documents, `decisions` decisions. The other kinds' pages
+  are unchanged.
+- `youtrack sync` and `youtrack adopt` refuse (exit 5, before any YouTrack
+  call) while any kind is youtrack, naming the kinds, even with every mode off.
+  They check while holding the sync lock, which a switch to youtrack needs
+  too, so no switch commits during a run. The mode guard (hk 3907) still
+  refuses first while a mode is on.
+- `youtrack audit` reports `"repair_direction": "youtrack_to_pg"` (otherwise
+  `"pg_to_youtrack"`) when comments are youtrack, and `--enqueue` prepares
+  nothing (`"enqueue_skipped"` says why). Each enqueue transaction also
+  reads the authority itself, so a run that started before a switch stops
+  enqueuing at the switch. Its classes and exit codes are unchanged.
+- A comment that would stay only in PG is refused with 400
+  `{"error": "yt_comment_unsendable", "reason": ...}` and nothing is written:
+  one the protocol can never send (`ytwrite.CheckCommentContent`: the author
+  or the body, for example a body quoting the op marker), and one that gets no
+  op or a born-rejected one (the comments mode is off, the task is not bound,
+  or not enrolled in canary, or a mapping disagrees). Under hk the same
+  comments commit as before. A dots reply (`ReplyDots`), which prepares no op
+  under hk, gets its op in the reply's transaction under youtrack, or the whole
+  reply is refused the same way. Every comment writer reads the comments row
+  `FOR SHARE` (creating it as hk first if it is missing), so a switch waits for
+  a comment in flight and a comment sees a switch that committed first.
+
+**Commands.** `handoffkeep youtrack authority show` prints every kind's row
+(`GET /v1/yt/authority`). `handoffkeep youtrack authority set <kind|all>
+<hk|youtrack> --by NAME --note TEXT` (`POST /v1/yt/authority`, operator token
+only) switches in one transaction and prints every row before and after. The
+server first takes the legacy sync lock (a running `youtrack sync`, `adopt`
+or comment catch-up makes it refuse), then checks, for each kind it changes to
+youtrack, that its own write mode is on (tasks: `HANDOFFKEEP_YT_ISSUES_MODE` and `HANDOFFKEEP_YT_FIELDS_MODE`;
+comments: `HANDOFFKEEP_YT_COMMENTS_MODE=on`; documents:
+`HANDOFFKEEP_YT_DOC_COMMENTS_MODE`; decisions: `HANDOFFKEEP_YT_DECISIONS_MODE`) and that the kind has no `prepared`, `dispatched` or
+`remote_unknown` op (by principal: `hk:task-issues` and `hk:task-fields`,
+`hk:task-comments`, `hk:doc-comments`, `hk:decisions`), and that its feed
+consumers have read every change (`task_fields` for tasks, `task_docs` for
+documents, `decision_issues` for decisions; a consumer
+that has never run, or whose cursor is behind `sync_state.pruned_through`,
+refuses). Every op preparation holds its kind's row
+`FOR SHARE`, so the switch counts an op whose transaction was open when it
+started. Any refusal is 409
+`yt_authority_refused` naming each kind and reason, and no kind changes. A kind
+already on the target is left as it was. Setting `hk` always succeeds. Each
+changed kind logs `ytwrite.authority_set kind= authority= switched_by= note=`.
+
+### Switch runbook (consult hk 3833 §3.2, operator A53)
+
+Before the day, with no freeze: each kind's mode on, `youtrack audit`
+rehearsed until it is clean, a restore drill rehearsed, and the delta audit
+timed. There is no full YouTrack export (A53).
+
+1. Freeze: no new spawns, no hk deploys, no `youtrack_projects` edits and no
+   task project moves. PG writes need not stop; their ops follow.
+2. Confirm the import grant is gone (D3): the hk auth file has no
+   `HANDOFFKEEP_TOKEN_youtrack` or `HANDOFFKEEP_IMPORT_READONLY_youtrack` line.
+3. `youtrack ops`: no pending op, no `remote_unknown`, and only explained
+   `rejected` ones.
+4. Full `youtrack audit`: `unbound` 0 (or explained per task), `missing_in_yt`
+   0, `duplicate` 0, and the `yt_only` lists reviewed.
+5. The restore check (consult §3.3): no diff outside the allowed exception
+   list. Documents
+   over 240 KiB are on a "not updated" exception list at the first switch
+   (D4).
+6. `youtrack authority set <kind> youtrack --by NAME --note TEXT` for each
+   kind, or `all`. Check that the printed
+   `after` rows are youtrack and `youtrack authority show` agrees.
+7. Lift the freeze. For the next day, run the audit periodically and keep the
+   pending-op alert on.
+
+### Rollback
+
+`youtrack authority set <kind|all> hk --by NAME --note TEXT`: the effects
+above stop at once and nothing else changes. The only reverse repair is the
+audit's `yt_only` items (what people wrote in YouTrack meanwhile). A release
+rollback leaves the rows alone, but the previous release does not read
+`yt_authority`: while it serves, every kind behaves as hk (import pages,
+legacy push, unsendable comments). Set the kinds to hk before rolling back a
+release, or switch them again once the release that reads the table is back.
+
 ## Kinds decision_create and decision_fields (hk 4054)
 
 A decision request's DEC issue carries its whole text. The import wrote a
