@@ -181,7 +181,7 @@ var TaskTransitions = map[string]map[string]bool{
 	StateResearching: {StateDeveloping: true, StateReviewing: true, StateUnstarted: true, StateIcebox: true, StateDropped: true, StateDuplicate: true, StateCompleted: true},
 	StateDeveloping:  {StateResearching: true, StateReviewing: true, StateUnstarted: true, StateIcebox: true, StateDropped: true, StateDuplicate: true, StateCompleted: true},
 	StateReviewing:   {StateDeveloping: true, StateMerged: true, StateUnstarted: true, StateIcebox: true, StateDropped: true, StateDuplicate: true, StateCompleted: true},
-	StateMerged:      {StateUnstarted: true},
+	StateMerged:      {StateUnstarted: true, StateCompleted: true},
 	StateDeployed:    {StateUnstarted: true},
 	StateCompleted:   {StateUnstarted: true},
 	StateDropped:     {StateUnstarted: true},
@@ -202,6 +202,16 @@ var taskStates = func() map[string]bool {
 
 func taskTransitionAllowed(from, to string) bool {
 	return TaskTransitions[from][to]
+}
+
+// mergedCompletes reports the one settled-to-settled edge: a merged task is
+// closed as completed on evidence (hk 4214). Its closure is written anew.
+func mergedCompletes(from, to string) bool { return from == StateMerged && to == StateCompleted }
+
+// closureWrittenBy reports whether a move from→to writes the closure of its
+// settled target: entering a settled state, or the merged→completed edge.
+func closureWrittenBy(from, to string) bool {
+	return IsSettledState(to) && (!IsSettledState(from) || mergedCompletes(from, to))
 }
 
 // substateForKind is the spawn rule: a claim sets the sub-state from the task

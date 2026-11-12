@@ -727,6 +727,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/tasks/export", s.tasksExport)
 	m.HandleFunc("GET /v1/tasks/sweep", s.tasksSweepPreview)
 	m.HandleFunc("GET /v1/tasks/drift", s.tasksDrift)
+	m.HandleFunc("POST /v1/tasks/settle-merged", s.tasksSettleMerged)
 	m.HandleFunc("POST /v1/task-events", s.taskEvents)
 	m.HandleFunc("GET /v1/standing-orders", s.standingList)
 	m.HandleFunc("POST /v1/standing-orders", s.standingPut)

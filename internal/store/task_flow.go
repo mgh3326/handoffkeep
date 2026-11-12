@@ -101,7 +101,7 @@ func insertEvent(ctx context.Context, q rowQuerier, e taskEventInput) (id int64,
 var completedEvidenceRE = regexp.MustCompile(`^(https?://\S+|hk:doc \S+)$`)
 
 func applyLifecycle(x *Task, from, to string, now time.Time, c *TaskClosure) error {
-	if IsSettledState(to) && !IsSettledState(from) {
+	if closureWrittenBy(from, to) {
 		if c == nil {
 			return fmt.Errorf("%w: evidence is required", ErrClosureInvalid)
 		}
@@ -533,7 +533,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 	if reopen && x.Kind == "" {
 		return Task{}, fmt.Errorf("%w: this task was declined in triage without a kind; file it again instead", ErrTaskConflict)
 	}
-	if IsSettledState(from) && !reopen {
+	if IsSettledState(from) && !reopen && !mergedCompletes(from, to) {
 		return Task{}, ErrTaskConflict
 	}
 	if reopen && strings.TrimSpace(note) == "" {
@@ -572,7 +572,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		if !backToBacklog && !taskTransitionAllowed(from, to) {
 			return Task{}, ErrTaskConflict
 		}
-		if to == StateCompleted && !canCompleteKind(x.Kind) {
+		if to == StateCompleted && from != StateMerged && !canCompleteKind(x.Kind) {
 			return Task{}, fmt.Errorf("%w: completed applies to decide, ops and verify tasks", ErrTaskConflict)
 		}
 		// A task waiting on a decision leaves only the way the old
@@ -709,7 +709,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		x.AwaitingDecision = false
 		x.State = to
 		var closure *TaskClosure
-		if IsSettledState(to) && !IsSettledState(from) {
+		if closureWrittenBy(from, to) {
 			rule := taskClosureRules[to]
 			typ, evidence := in.Closure, strings.TrimSpace(in.Evidence)
 			if typ == "" {
