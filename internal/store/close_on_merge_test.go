@@ -306,3 +306,21 @@ func TestAutoCloseKeepsTheReceiptFence(t *testing.T) {
 		t.Fatalf("fenced parent auto-closed to %s", got)
 	}
 }
+
+// TestHeldParentAdoptsThePRWhenItsChildClosesIt (PR #331 review round 6): a
+// parent whose turn comes first is held on its open child; the child's turn
+// then auto-closes it, and the parent still ends with the PR as refs.pr.
+func TestHeldParentAdoptsThePRWhenItsChildClosesIt(t *testing.T) {
+	s, pool := searchTestStore(t)
+	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
+	child := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setParent(t, s, child, parent)
+	pr := testPR(7201)
+	res := send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: parent.ID, Tasks: []int64{child.ID}})
+	if res.State != StateMerged || res.Task.Refs.PR != pr {
+		t.Fatalf("parent result state=%s refs.pr=%q", res.State, res.Task.Refs.PR)
+	}
+	if got := stateOf(t, s, parent.ID); got.State != StateMerged || got.Refs.PR != pr {
+		t.Fatalf("parent state=%s refs.pr=%q", got.State, got.Refs.PR)
+	}
+}
