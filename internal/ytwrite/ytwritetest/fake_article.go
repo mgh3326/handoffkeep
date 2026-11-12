@@ -25,6 +25,16 @@ func (f *FakeYouTrack) InjectArticle(projectID, summary, content string) string 
 	return f.addArticleLocked(projectID, summary, content)
 }
 
+// InjectChildArticle adds a child article (one under a parent, as the legacy
+// sync put every document under its prefix's index) and returns its id.
+func (f *FakeYouTrack) InjectChildArticle(projectID, summary, content string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := f.addArticleLocked(projectID, summary, content)
+	f.articleLocked(id).Child = true
+	return id
+}
+
 func (f *FakeYouTrack) addArticleLocked(projectID, summary, content string) string {
 	f.nextID++
 	id := fmt.Sprintf("3-%d", f.nextID)

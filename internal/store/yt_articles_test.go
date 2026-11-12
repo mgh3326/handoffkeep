@@ -473,9 +473,8 @@ func TestYTArticlesCatchUpCoversTheFirstPassGap(t *testing.T) {
 	if ops := ytartOps(t, s, same); len(ops) != 0 {
 		t.Fatalf("unchanged ops %+v", ops)
 	}
-	var marker bool
-	if err := s.pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM yt_feed_cursors WHERE consumer=$1)`, ytDocsCatchUpMarker).Scan(&marker); err != nil || !marker {
-		t.Fatalf("catch-up marker %v %v", marker, err)
+	if n := ytartUnwritten(t, s); n != 0 {
+		t.Fatalf("%d documents unwritten after the catch-up", n)
 	}
 	// Again, directly: idempotent.
 	if _, _, err := s.catchUpYTArticles(t.Context(), time.Now().UTC()); err != nil {
@@ -544,17 +543,73 @@ func TestYTAuthorityDocumentsWaitsForArticles(t *testing.T) {
 	}
 	refused(set(), "documents: 1 ops")
 
-	if _, err := s.YTWriteLedger().Reject(ctx, time.Now().UTC(), ops[0].ID, "operator_not_applied", "test"); err != nil {
+	// The create applies and binds the document: nothing is pending.
+	yt := ytwritetest.NewFake()
+	var offset atomic.Int64
+	ytartDrive(t, s, yt, &offset)
+	if b := ytartBinding(t, s, id); b.Origin != YTBindingOpApplied {
+		t.Fatalf("binding %+v", b)
+	}
+
+	// r4547701680/r4547710868: the switch reads the state, not a record of
+	// work. A document whose create was rejected has content YouTrack
+	// lacks and no op writing it: refused until it is bound.
+	other := ytartPut(t, s, "design/ytart/auth-other.md", "other", nil)
+	ytFeedPassOK(t, s, docComments)
+	ytartPass(t, s)
+	if _, err := s.YTWriteLedger().Reject(ctx, time.Now().UTC(), ytartOps(t, s, other)[0].ID, "operator_not_applied", "test"); err != nil {
 		t.Fatal(err)
 	}
-	// r4546651995/r4546652097: a caught-up cursor proves nothing until the
-	// first catch-up has covered the documents changed before it.
-	refused(set(), "first catch-up has not completed")
-	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
-		t.Fatal(err)
-	}
+	refused(set(), "1 documents have content YouTrack lacks")
+	ytartBind(t, s, other, "3-900", "", false)
 	if err := set(); err != nil {
 		t.Fatalf("switch with every precondition met: %v", err)
+	}
+}
+
+// ytartUnwritten is ytArticlesUnwrittenTx's count on the test tenant.
+func ytartUnwritten(t *testing.T, s *Store) int {
+	t.Helper()
+	tx, err := s.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(t.Context())
+	n, _, err := ytArticlesUnwrittenTx(t.Context(), tx, ytcTenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// r4547701680: a binding the backfill publishes after the catch-up ran gets
+// its article_update in the binding's own transaction (docs mode on); with
+// the mode off it is counted unwritten, so the switch cannot pass it.
+func TestYTArticleBindingAfterCatchUpQueuesUpdate(t *testing.T) {
+	s := ytartSetup(t, "ytart_late", true)
+	id := ytartPut(t, s, "note/ytart/late", "hk body", nil)
+	ytartImported(t, s, id)
+	ytartPass(t, s)
+	if _, err := s.RunYTFeedConsumers(t.Context(), 100); err != nil || !s.ytDocsCaughtUp.Load() {
+		t.Fatalf("catch-up: %v %v", s.ytDocsCaughtUp.Load(), err)
+	}
+	ytartBind(t, s, id, "3-950", ytwrite.ContentSHA("what the import wrote"), true)
+	if ops := ytartOps(t, s, id); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleUpdate || ops[0].YTTargetID != "3-950" {
+		t.Fatalf("ops %+v", ops)
+	}
+	if n := ytartUnwritten(t, s); n != 0 {
+		t.Fatalf("%d unwritten with the update pending", n)
+	}
+
+	off := ytartSetup(t, "ytart_late_off", false)
+	doc := ytartPut(t, off, "note/ytart/late-off", "hk body", nil)
+	ytartImported(t, off, doc)
+	ytartBind(t, off, doc, "3-951", ytwrite.ContentSHA("what the import wrote"), true)
+	if ops := ytartOps(t, off, doc); len(ops) != 0 {
+		t.Fatalf("mode off ops %+v", ops)
+	}
+	if n := ytartUnwritten(t, off); n != 1 {
+		t.Fatalf("mode off: %d unwritten, want the stale binding", n)
 	}
 }
 
@@ -585,32 +640,49 @@ func TestYTArticleInScope(t *testing.T) {
 }
 
 // ytartLegacy records an article of the legacy `youtrack sync` for a
-// document key, split into parts articles.
-func ytartLegacy(t *testing.T, s *Store, key, article string, parts int) {
+// document key, in hk project hkProject's YouTrack project, split into parts
+// articles.
+func ytartLegacy(t *testing.T, s *Store, key, article, hkProject string, parts int) {
 	t.Helper()
 	if _, err := s.pool.Exec(t.Context(), `INSERT INTO youtrack_doc_articles(doc_key, hk_project, article_id, synced_at, document_key, part_index, part_count)
-		VALUES ($1,'',$2,now(),$1,1,$3)`, key, article, parts); err != nil {
+		VALUES ($1,$2,$3,now(),$1,1,$4)`, key, hkProject, article, parts); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// r4546690175 (handoffkeep-design decision-3 B): a post-import document the
-// legacy sync wrote never gets a second article. Its legacy article, once
-// verified, is adopted and bound import_verified, and the body is rewritten
-// raw by an article_update; one that does not verify, or a split one, is
-// rejected legacy_synced_unverified with nothing created or bound.
+// ytartLegacyProject is the legacy sync's YouTrack project in the legacy
+// test: not the shared bucket the create targets.
+const ytartLegacyProject = "0-50"
+
+// r4546690175 (handoffkeep-design decision-3 B), r4547701678/r4547710855: a
+// post-import document the legacy sync wrote never gets a second article.
+// Its legacy article, as the legacy sync made it (a child of its prefix
+// index, in the legacy project of the ledger's hk project, carrying the
+// legacy marker), is adopted and bound import_verified in that project, and
+// the body is rewritten raw by an article_update; one that does not verify,
+// whose legacy project is unknown, or a split one, is rejected
+// legacy_synced_unverified with nothing created or bound, and counts as
+// unwritten for the documents switch.
 func TestYTArticlesLegacySyncedDocument(t *testing.T) {
 	s := ytartSetup(t, "ytart_legacy", true)
+	ctx := t.Context()
+	if _, err := s.AddTaskProject(ctx, "ytart-legacy", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "ytart-legacy", ProjectID: ytartLegacyProject, ShortName: "YTL"}); err != nil {
+		t.Fatal(err)
+	}
 	yt := ytwritetest.NewFake()
 	var offset atomic.Int64
 	const key = "design/ytart/legacy.md"
-	legacy := yt.InjectArticle(ytartShared, key, ytwrite.LegacyDocMarker(key)+"\n> hk 문서\n\nold body")
-	ytartLegacy(t, s, key, legacy, 1)
+	legacy := yt.InjectChildArticle(ytartLegacyProject, key, ytwrite.LegacyDocMarker(key)+"\n> hk 문서\n\nold body")
+	ytartLegacy(t, s, key, legacy, "ytart-legacy", 1)
 	id := ytartPut(t, s, key, "current body", nil)
 	ytartPass(t, s)
 	ops := ytartOps(t, s, id)
 	var p ytwrite.ArticleCreatePayload
-	if len(ops) != 1 || json.Unmarshal(ops[0].Payload, &p) != nil || p.LegacyArticleID != legacy || p.LegacyMarker != ytwrite.LegacyDocMarker(key) {
+	if len(ops) != 1 || json.Unmarshal(ops[0].Payload, &p) != nil || p.LegacyArticleID != legacy || p.LegacyProjectID != ytartLegacyProject ||
+		p.LegacyMarker != ytwrite.LegacyDocMarker(key) {
 		t.Fatalf("ops %+v payload %+v", ops, p)
 	}
 	// One drive applies the adoption and the update it queued (the
@@ -618,7 +690,7 @@ func TestYTArticlesLegacySyncedDocument(t *testing.T) {
 	ytartDrive(t, s, yt, &offset)
 	ytartDrive(t, s, yt, &offset)
 	ops = ytartOps(t, s, id)
-	if ops[0].State != ytwrite.StateApplied || ops[0].YTResultID != legacy || len(yt.Articles(ytartShared)) != 1 {
+	if ops[0].State != ytwrite.StateApplied || ops[0].YTResultID != legacy || len(yt.Articles(ytartShared)) != 0 {
 		t.Fatalf("ops %+v articles %+v", ops, yt.Articles(ytartShared))
 	}
 	var up ytwrite.ArticleUpdatePayload
@@ -627,24 +699,26 @@ func TestYTArticlesLegacySyncedDocument(t *testing.T) {
 		t.Fatalf("ops after the adoption %+v", ops)
 	}
 	if b := ytartBinding(t, s, id); b.ArticleID != legacy || b.Origin != YTBindingImportVerified || b.OpID != ops[0].ID ||
-		b.NeedsUpdate || b.ContentSHA != ytwrite.ContentSHA("current body") {
+		b.ProjectID != ytartLegacyProject || b.NeedsUpdate || b.ContentSHA != ytwrite.ContentSHA("current body") {
 		t.Fatalf("binding %+v", b)
 	}
 	if a, _ := yt.Article(legacy); a.Content != "current body" {
 		t.Fatalf("article %+v", a)
 	}
 
-	for name, setup := range map[string]func() string{
-		"unverified": func() string { return yt.InjectArticle("0-99", "x", "no marker") },
-		"split":      func() string { return yt.InjectArticle(ytartShared, "y", "part one") },
+	for _, tc := range []struct {
+		name, hkProject string
+		parts           int
+		article         func(key string) string
+	}{
+		{"unverified", "ytart-legacy", 1, func(string) string { return yt.InjectChildArticle(ytartLegacyProject, "x", "no marker") }},
+		{"target_project", "ytart-legacy", 1, func(k string) string { return yt.InjectArticle(ytartShared, k, ytwrite.LegacyDocMarker(k)) }},
+		{"unknown_project", "ytart-nomap", 1, func(k string) string { return yt.InjectChildArticle(ytartLegacyProject, k, ytwrite.LegacyDocMarker(k)) }},
+		{"split", "ytart-legacy", 2, func(k string) string { return yt.InjectChildArticle(ytartLegacyProject, k, ytwrite.LegacyDocMarker(k)) }},
 	} {
+		name := tc.name
 		k := "design/ytart/legacy-" + name + ".md"
-		art := setup()
-		parts := 1
-		if name == "split" {
-			parts = 2
-		}
-		ytartLegacy(t, s, k, art, parts)
+		ytartLegacy(t, s, k, tc.article(k), tc.hkProject, tc.parts)
 		doc := ytartPut(t, s, k, "body", nil)
 		ytartPass(t, s)
 		ytartDrive(t, s, yt, &offset)
@@ -656,6 +730,9 @@ func TestYTArticlesLegacySyncedDocument(t *testing.T) {
 			t.Fatalf("%s: bound", name)
 		}
 	}
+	if n := ytartUnwritten(t, s); n != 4 {
+		t.Fatalf("%d unwritten, want the 4 rejected legacy documents", n)
+	}
 	if n := len(yt.ArticleWrites()); n != 1 {
 		t.Fatalf("%d article writes, want only the one update", n)
 	}
@@ -663,7 +740,7 @@ func TestYTArticlesLegacySyncedDocument(t *testing.T) {
 
 // r4546690164: a document the catch-up skipped as no_project (its task's
 // project has no YouTrack project yet) is retried on every later pass, and
-// the catch-up is not done (no marker, the documents switch refused) until
+// the catch-up is not done (and the document counts as unwritten) until
 // its mapping exists and its create is prepared.
 func TestYTArticlesCatchUpRetriesNoProject(t *testing.T) {
 	s := schemaStore(t, "ytart_noproj")
@@ -681,20 +758,12 @@ func TestYTArticlesCatchUpRetriesNoProject(t *testing.T) {
 	if pass := ytartPass(t, s); !pass.Created {
 		t.Fatalf("first pass %+v", pass)
 	}
-	marker := func() bool {
-		t.Helper()
-		var ok bool
-		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_feed_cursors WHERE consumer=$1)`, ytDocsCatchUpMarker).Scan(&ok); err != nil {
-			t.Fatal(err)
-		}
-		return ok
-	}
 	for range 2 {
 		if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
 			t.Fatal(err)
 		}
-		if ops := ytartOps(t, s, id); len(ops) != 0 || marker() || s.ytDocsCaughtUp.Load() {
-			t.Fatalf("no_project: ops %+v marker %v", ops, marker())
+		if ops := ytartOps(t, s, id); len(ops) != 0 || ytartUnwritten(t, s) != 1 || s.ytDocsCaughtUp.Load() {
+			t.Fatalf("no_project: ops %+v unwritten %d", ops, ytartUnwritten(t, s))
 		}
 	}
 	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "ytart-np", ProjectID: "0-43", ShortName: "YTNP"}); err != nil {
@@ -706,7 +775,7 @@ func TestYTArticlesCatchUpRetriesNoProject(t *testing.T) {
 	if ops := ytartOps(t, s, id); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleCreate || ops[0].YTTargetID != "0-43" {
 		t.Fatalf("ops after the mapping %+v", ops)
 	}
-	if !marker() || !s.ytDocsCaughtUp.Load() {
+	if ytartUnwritten(t, s) != 0 || !s.ytDocsCaughtUp.Load() {
 		t.Fatal("catch-up not done once nothing waits")
 	}
 }

@@ -49,8 +49,8 @@ const ArticleSummaryLimit = 250
 
 // ReasonLegacySyncedUnverified: the document has an article the legacy
 // `youtrack sync` made (youtrack_doc_articles) that the create could not
-// verify as its own (gone, in another project, a child, without the
-// document's legacy marker, or split into parts). Nothing is created: never a
+// verify as its own (gone, not in the legacy project, without the document's
+// legacy marker, the legacy project unknown, or split into parts). Nothing is created: never a
 // second article (handoffkeep-design, hk 4206).
 const ReasonLegacySyncedUnverified = "legacy_synced_unverified"
 
@@ -113,10 +113,12 @@ type ArticleRequest struct {
 	Summary string
 	Body    string
 	// LegacyArticleID is the article the legacy `youtrack sync` recorded for
-	// the document ("" for none) and LegacyMarker its legacy marker
-	// (LegacyDocMarker of the key): Send adopts that article when it
-	// verifies and otherwise creates nothing.
+	// the document ("" for none), LegacyProjectID the YouTrack project the
+	// legacy sync put it in (its youtrack_projects mapping) and LegacyMarker
+	// its legacy marker (LegacyDocMarker of the key): Send adopts that
+	// article when it verifies and otherwise creates nothing.
 	LegacyArticleID string
+	LegacyProjectID string
 	LegacyMarker    string
 }
 
@@ -129,8 +131,10 @@ type ArticleCreatePayload struct {
 	Summary        string `json:"summary"`
 	Body           string `json:"body"`
 	YTProjectShort string `json:"yt_project_short"`
-	// LegacyArticleID and LegacyMarker are ArticleRequest's.
+	// LegacyArticleID, LegacyProjectID and LegacyMarker are
+	// ArticleRequest's.
 	LegacyArticleID string `json:"legacy_article_id,omitempty"`
+	LegacyProjectID string `json:"legacy_project_id,omitempty"`
 	LegacyMarker    string `json:"legacy_marker,omitempty"`
 }
 
@@ -170,7 +174,7 @@ func ArticleOp(req ArticleRequest) (NewOp, error) {
 		return NewOp{}, fmt.Errorf("%w: document id must be positive", ErrInvalid)
 	}
 	payload, err := json.Marshal(ArticleCreatePayload{DocumentID: req.DocumentID, Summary: req.Summary, Body: req.Body, YTProjectShort: req.YTProjectShort,
-		LegacyArticleID: req.LegacyArticleID, LegacyMarker: req.LegacyMarker})
+		LegacyArticleID: req.LegacyArticleID, LegacyProjectID: req.LegacyProjectID, LegacyMarker: req.LegacyMarker})
 	if err != nil {
 		return NewOp{}, err
 	}
@@ -351,10 +355,11 @@ func markedArticles(hits []RemoteArticle, opID int64) []RemoteArticle {
 
 // Send looks for the document's article and writes only when there is none.
 // A document the legacy sync wrote (LegacyArticleID) is never created: its
-// article is read and adopted (no POST) when it is a top-level article of
-// the op's project carrying the document's legacy marker, and otherwise the
-// op is rejected legacy_synced_unverified (a 404 included; another failed
-// read is not_sent). Else exactly one article of the project with the op's
+// article is read and adopted (no POST) when it is that article, in the
+// legacy project (LegacyProjectID), carrying the document's legacy marker; it
+// may be a child (the legacy sync put every document under its prefix's index
+// article). Otherwise the op is rejected legacy_synced_unverified (a 404
+// included; another failed read is not_sent). Else exactly one article of the project with the op's
 // summary that carries the op's marker is adopted (no POST); two or more are
 // ambiguous_issue (no POST); none is exactly one create with the summary and
 // the content.
@@ -399,9 +404,9 @@ func legacyArticle(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreate
 		return &RefusedError{Reason: ReasonLegacySyncedUnverified, Detail: "legacy article " + p.LegacyArticleID + " is gone"}
 	case err != nil:
 		return &NotSentError{Err: err}
-	case a.ID != p.LegacyArticleID || a.Child || a.ProjectID != op.YTTargetID || p.LegacyMarker == "" || !strings.Contains(a.Content, p.LegacyMarker):
-		return &RefusedError{Reason: ReasonLegacySyncedUnverified, Detail: fmt.Sprintf("legacy article %s (project %s, child %t) is not a top-level article of project %s carrying the document's legacy marker",
-			p.LegacyArticleID, a.ProjectID, a.Child, op.YTTargetID)}
+	case a.ID != p.LegacyArticleID || p.LegacyProjectID == "" || a.ProjectID != p.LegacyProjectID || p.LegacyMarker == "" || !strings.Contains(a.Content, p.LegacyMarker):
+		return &RefusedError{Reason: ReasonLegacySyncedUnverified, Detail: fmt.Sprintf("legacy article %s (project %s) is not an article of the legacy project %q carrying the document's legacy marker",
+			p.LegacyArticleID, a.ProjectID, p.LegacyProjectID)}
 	}
 	return &AdoptedError{ID: a.ID}
 }

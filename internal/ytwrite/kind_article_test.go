@@ -325,7 +325,7 @@ func TestArticleUpdateProvenanceKeepsHKFormat(t *testing.T) {
 func (e articleEnv) prepareLegacyCreate(legacyID string) ytwrite.Op {
 	e.t.Helper()
 	req := articleReq()
-	req.LegacyArticleID, req.LegacyMarker = legacyID, ytwrite.LegacyDocMarker("design/yt/articles.md")
+	req.LegacyArticleID, req.LegacyProjectID, req.LegacyMarker = legacyID, legacyProject, ytwrite.LegacyDocMarker("design/yt/articles.md")
 	n, err := ytwrite.ArticleOp(req)
 	if err != nil {
 		e.t.Fatal(err)
@@ -337,15 +337,21 @@ func (e articleEnv) prepareLegacyCreate(legacyID string) ytwrite.Op {
 	return op
 }
 
-// A document the legacy sync wrote: its verified article (top level, in the
-// op's project, carrying the document's legacy marker) is adopted with no
-// POST and no search; one that does not verify, or is gone, rejects the op
-// legacy_synced_unverified, never a second article; a failed read retries.
+// legacyProject is the legacy sync's project for the document: not the
+// create's target (artProject).
+const legacyProject = "0-77"
+
+// A document the legacy sync wrote: its verified article (the ledger's
+// article, in the legacy project, carrying the document's legacy marker; a
+// child of the legacy prefix index, as the legacy sync makes them) is adopted
+// with no POST and no search; one that does not verify, or is gone, rejects
+// the op legacy_synced_unverified, never a second article; a failed read
+// retries.
 func TestArticleCreateLegacySyncedArticle(t *testing.T) {
 	legacyBody := ytwrite.LegacyDocMarker("design/yt/articles.md") + "\n> hk 문서 `design/yt/articles.md`\n\nold body"
 	t.Run("verified", func(t *testing.T) {
 		e := newArticleEnv(t)
-		legacy := e.yt.InjectArticle(artProject, "design/yt/articles.md", legacyBody)
+		legacy := e.yt.InjectChildArticle(legacyProject, "design/yt/articles.md", legacyBody)
 		op := e.prepareLegacyCreate(legacy)
 		e.drive()
 		got := e.want(op.ID, ytwrite.StateApplied, "")
@@ -355,10 +361,12 @@ func TestArticleCreateLegacySyncedArticle(t *testing.T) {
 		e.wantMap(got, legacy, true)
 	})
 	for name, setup := range map[string]func(e articleEnv) string{
-		"no_marker":     func(e articleEnv) string { return e.yt.InjectArticle(artProject, "x", "old body without the marker") },
-		"other_project": func(e articleEnv) string { return e.yt.InjectArticle("0-99", "x", legacyBody) },
+		"no_marker": func(e articleEnv) string {
+			return e.yt.InjectChildArticle(legacyProject, "x", "old body without the marker")
+		},
+		"target_project": func(e articleEnv) string { return e.yt.InjectArticle(artProject, "x", legacyBody) },
 		"other_marker": func(e articleEnv) string {
-			return e.yt.InjectArticle(artProject, "x", ytwrite.LegacyDocMarker("other/key")+"\nbody")
+			return e.yt.InjectChildArticle(legacyProject, "x", ytwrite.LegacyDocMarker("other/key")+"\nbody")
 		},
 		"gone": func(articleEnv) string { return "3-404" },
 	} {
@@ -374,7 +382,7 @@ func TestArticleCreateLegacySyncedArticle(t *testing.T) {
 	}
 	t.Run("read_failed", func(t *testing.T) {
 		e := newArticleEnv(t)
-		legacy := e.yt.InjectArticle(artProject, "x", legacyBody)
+		legacy := e.yt.InjectChildArticle(legacyProject, "x", legacyBody)
 		e.yt.QueueRead(&ytwrite.RemoteError{Status: http.StatusBadGateway, Message: "down"})
 		op := e.prepareLegacyCreate(legacy)
 		e.drive()

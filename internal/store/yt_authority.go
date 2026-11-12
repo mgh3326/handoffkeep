@@ -344,15 +344,17 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 				refusals = append(refusals, fmt.Sprintf("%s: %d ops are prepared, dispatched or remote_unknown (youtrack ops)", k, pending))
 			}
 			if k == YTAuthorityDocuments {
-				// The document articles' first catch-up (hk 4206) covers
-				// the documents changed before their consumer's cursor;
-				// until it has completed, the cursor alone proves nothing.
-				var caughtUp bool
-				if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_feed_cursors WHERE consumer=$1)`, ytDocsCatchUpMarker).Scan(&caughtUp); err != nil {
+				// The document articles (hk 4206): no in-scope document may
+				// hold content YouTrack lacks with no op writing it, which
+				// covers what a feed cursor cannot (changes before it, a
+				// binding published since, a create that was refused).
+				g, _ := s.ytDocsNow()
+				n, ids, err := ytArticlesUnwrittenTx(ctx, tx, g.tenant)
+				if err != nil {
 					return nil, nil, err
 				}
-				if !caughtUp {
-					refusals = append(refusals, fmt.Sprintf("%s: the document articles' first catch-up has not completed (serve in HANDOFFKEEP_YT_DOCS_MODE=on runs it)", k))
+				if n > 0 {
+					refusals = append(refusals, fmt.Sprintf("%s: %d documents have content YouTrack lacks and no op writing it (%v)", k, n, ids))
 				}
 			}
 			for _, f := range ytAuthorityFeeds[k] {

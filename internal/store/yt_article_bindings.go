@@ -295,6 +295,11 @@ var ytSHA256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // published under it would hold the op, and every op behind it on the
 // document's lane, for good.
 //
+// In HANDOFFKEEP_YT_DOCS_MODE=on the new binding's article_update, when its
+// article does not hold the document's body, is prepared in the same
+// transaction (ytArticleSnapshotTx), after the insert, under the documents
+// authority row's FOR SHARE that prepareYTOpTx takes.
+//
 // Locks, in this order (lockorder.go): the document's lane lock (as the
 // feed and an article_create's Apply take it, before any row), then FOR
 // SHARE on the documents row, then
@@ -352,6 +357,13 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 		ON CONFLICT DO NOTHING RETURNING `+ytArticleBindingColumns,
 		b.DocumentID, b.Tenant, b.ArticleID, b.ArticleReadable, b.ProjectID, b.Part, contentSHA, YTBindingImportVerified, b.NeedsUpdate, b.BoundBy, time.Now().UTC()), &got)
 	if err == nil {
+		// In docs mode on (hk 4206), a binding whose article does not hold
+		// the document's body gets its article_update in the same
+		// transaction: no feed row comes for a binding, and the documents
+		// authority switch must not see it published with no op behind it.
+		if _, err := s.ytArticleSnapshotTx(ctx, tx, b.DocumentID, time.Now().UTC()); err != nil {
+			return YTArticleBinding{}, err
+		}
 		return got, tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {

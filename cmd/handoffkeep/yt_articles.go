@@ -608,6 +608,22 @@ func youtrackArticlesCmd(args []string, out io.Writer, backfill bool) error {
 		return exitCodeError{code: youtrackExitFailed, err: fmt.Errorf("list YouTrack projects: %w", err)}
 	}
 	a := &ytArticler{st: st, remote: client, tenant: youtrack.NewWriteRemote(client).Tenant(), buckets: buckets}
+	if backfill {
+		// In HANDOFFKEEP_YT_DOCS_MODE=on (hk 4206) each binding whose article
+		// does not hold the document's body gets its article_update in the
+		// binding's own transaction, as serve's catch-up would.
+		mode, err := ytDocsModeFromEnv()
+		if err != nil {
+			return exitCodeError{code: youtrackExitConfig, err: err}
+		}
+		if mode == store.YTDocsOn {
+			projects := map[string]store.YTArticleProject{}
+			for k, b := range buckets {
+				projects[k] = store.YTArticleProject{ID: b.ID, ShortName: b.ShortName}
+			}
+			st.SetYTDocsMode(store.YTDocsOn, a.tenant, projects)
+		}
+	}
 	report, err := a.run(context.Background(), strings.TrimSpace(*project), bindBy)
 	if err != nil {
 		return err

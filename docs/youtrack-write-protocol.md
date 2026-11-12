@@ -1231,11 +1231,12 @@ comments: `HANDOFFKEEP_YT_COMMENTS_MODE=on`; documents:
 `remote_unknown` op (by principal: `hk:task-issues` and `hk:task-fields`,
 `hk:task-comments`, `hk:doc-comments` and `hk:documents`, `hk:decisions`), and that its feed
 consumers have read every change (`task_fields` for tasks, `task_docs` and
-`document_articles` for documents, and for documents the document
-articles' first catch-up recorded as done (`yt_feed_cursors` row
-`document_articles_catchup`; it is not done while a document it skipped as
-`no_project` waits for its YouTrack project: those are retried on every feed
-pass and logged as `ytwrite.articles_catchup_retried`), `decision_issues` for decisions; a consumer
+`document_articles` for documents, and for documents no in-scope document
+whose content YouTrack lacks with no op writing it: a binding whose article
+is not the document's body, or a document created after the import with no
+binding (no create yet, no YouTrack project, a rejected create);
+`store.ytArticlesUnwrittenTx`, read from the state at the switch, not from a
+record of a catch-up), `decision_issues` for decisions; a consumer
 that has never run, or whose cursor is behind `sync_state.pruned_through`,
 refuses). Every op preparation holds its kind's row
 `FOR SHARE`, so the switch counts an op whose transaction was open when it
@@ -1463,15 +1464,19 @@ sha256 after the update.
 
 **Legacy-synced documents.** A document the legacy `youtrack sync` already
 wrote (a `youtrack_doc_articles` row for its key) never gets a second
-article. Its `article_create` carries that article's id and the document's
-legacy marker (`<!-- hk-marker:hkdoc<sha256(key)[:12]> -->`,
-`ytwrite.LegacyDocMarker`). Send reads the article (one GET, no search). It
-is adopted (no POST) when it is a top-level article of the op's project that
-carries the marker: the apply binds it with `origin = 'import_verified'` and
-`needs_update`, so an `article_update` rewrites it with the raw body. Anything
-else (gone, another project, a child, no marker) rejects the op
-`legacy_synced_unverified`, and so does a legacy article the sync split into
-parts, at prepare time. Any other failed read leaves the op `not_sent`.
+article. Its `article_create` carries that article's id, the legacy project
+(the `youtrack_projects` mapping of the ledger's hk project, which the legacy
+sync wrote to; not the create's target) and the document's legacy marker
+(`<!-- hk-marker:hkdoc<sha256(key)[:12]> -->`, `ytwrite.LegacyDocMarker`).
+Send reads the article (one GET, no search). It is adopted (no POST) when it
+is in the legacy project and carries the marker; it may be a child, since the
+legacy sync put every document under its prefix's index article. The apply
+binds it in the legacy project with `origin = 'import_verified'` and
+`needs_update`, so an `article_update` rewrites it with the raw body.
+Anything else (gone, another project, no marker) rejects the op
+`legacy_synced_unverified`, and so does, at prepare time, a legacy article
+the sync split into parts or whose legacy project has no YouTrack id. A
+rejected document stays unbound and holds the documents authority switch. Any other failed read leaves the op `not_sent`.
 
 **Send.** `article_create`: one search of the project for the summary
 (`GET /api/articles`, query `project: <SHORT> "<summary>"`, at most 100 hits,
@@ -1490,6 +1495,10 @@ carrying the marker with other content keeps it `remote_unknown`.
 content's sha256 equal to the rendered content's (with the provenance line
 and marker for an `op_applied` binding) applies the op, anything else keeps it
 `remote_unknown`.
+
+A binding `youtrack articles-backfill` publishes in
+`HANDOFFKEEP_YT_DOCS_MODE=on` whose article is not the document's body gets
+its `article_update` in the binding's own transaction.
 
 **Binding.** Applying an `article_create` (send, evidence or `yt ops
 resolve`) takes the document's lane lock, checks the document's binding and

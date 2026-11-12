@@ -194,9 +194,12 @@ type ytArticleRow struct {
 	bound     bool
 	created   bool
 	// legacyArticle is the article the legacy `youtrack sync` recorded for
-	// the document (youtrack_doc_articles, its first part; "" for none) and
-	// legacyParts the number of parts it split the document into.
+	// the document (youtrack_doc_articles, its first part; "" for none),
+	// legacyProject the YouTrack project it put it in (the youtrack_projects
+	// mapping of the ledger's hk project, "" when unknown) and legacyParts the
+	// number of parts it split the document into.
 	legacyArticle string
+	legacyProject string
 	legacyParts   int
 }
 
@@ -206,8 +209,9 @@ func readYTArticleRow(ctx context.Context, tx pgx.Tx, id int64) (*ytArticleRow, 
 	err := scanYTArticleCandidate(tx.QueryRow(ctx, ytArticleCandidateSQL+`, d.body, d.created_at,
 			EXISTS(SELECT 1 FROM yt_write_ops o WHERE o.principal = $2 AND o.kind = $3 AND o.idem_key = $4),
 			coalesce((SELECT l.article_id FROM youtrack_doc_articles l WHERE l.doc_key = d.key), ''),
-			coalesce((SELECT l.part_count FROM youtrack_doc_articles l WHERE l.doc_key = d.key), 0)`+ytArticleCandidateFrom+` WHERE d.id = $1`,
-		id, YTDocsPrincipal, ytwrite.KindArticleCreate, ytwrite.ArticleKey(id)), &r.doc, &r.body, &r.createdAt, &r.created, &r.legacyArticle, &r.legacyParts)
+			coalesce((SELECT l.part_count FROM youtrack_doc_articles l WHERE l.doc_key = d.key), 0),
+			coalesce((SELECT lp.yt_project_id FROM youtrack_doc_articles l JOIN youtrack_projects lp ON lp.hk_project = l.hk_project WHERE l.doc_key = d.key), '')`+ytArticleCandidateFrom+` WHERE d.id = $1`,
+		id, YTDocsPrincipal, ytwrite.KindArticleCreate, ytwrite.ArticleKey(id)), &r.doc, &r.body, &r.createdAt, &r.created, &r.legacyArticle, &r.legacyParts, &r.legacyProject)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -318,7 +322,7 @@ func prepareYTArticleTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDocsG
 	if r.legacyArticle != "" {
 		// The legacy sync wrote this document's article: the create adopts
 		// it once verified, and never makes a second one.
-		req.LegacyArticleID, req.LegacyMarker = r.legacyArticle, ytwrite.LegacyDocMarker(r.doc.Key)
+		req.LegacyArticleID, req.LegacyProjectID, req.LegacyMarker = r.legacyArticle, r.legacyProject, ytwrite.LegacyDocMarker(r.doc.Key)
 	}
 	n, err := ytwrite.ArticleOp(req)
 	if err != nil {
@@ -331,8 +335,11 @@ func prepareYTArticleTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDocsG
 	if !created {
 		return ytArticleCreatePending, nil
 	}
-	if r.legacyArticle != "" && r.legacyParts > 1 {
+	if r.legacyArticle != "" && (r.legacyParts > 1 || r.legacyProject == "") {
 		detail := fmt.Sprintf("the legacy sync split the document into %d articles (first %s)", r.legacyParts, r.legacyArticle)
+		if r.legacyParts <= 1 {
+			detail = fmt.Sprintf("the legacy article %s's project has no YouTrack id in youtrack_projects", r.legacyArticle)
+		}
 		if _, err := rejectYTOpTx(ctx, tx, now, op.ID, ytwrite.ReasonLegacySyncedUnverified, detail); err != nil {
 			return "", err
 		}
@@ -449,13 +456,14 @@ func bindYTArticleApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.O
 	if err := json.Unmarshal(op.Payload, &p); err != nil {
 		return fmt.Errorf("payload of op %d: %w", op.ID, err)
 	}
-	origin := YTBindingOpApplied
+	origin, project := YTBindingOpApplied, op.YTTargetID
 	if adopted && p.LegacyArticleID != "" && p.LegacyArticleID == ytID {
-		origin = YTBindingImportVerified
+		// The legacy sync's article, in its own project.
+		origin, project = YTBindingImportVerified, p.LegacyProjectID
 	}
 	tag, err := tx.Exec(ctx, `INSERT INTO yt_article_bindings(document_id, tenant, article_id, article_readable, project_id, part, generation, content_sha, origin, op_id, needs_update, bound_by, bound_at)
 		VALUES ($1,$2,$3,'',$4,0,0,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING`,
-		id, op.Tenant, ytID, op.YTTargetID, ytwrite.ContentSHA(p.Body), origin, op.ID, adopted, op.Principal, now.UTC())
+		id, op.Tenant, ytID, project, ytwrite.ContentSHA(p.Body), origin, op.ID, adopted, op.Principal, now.UTC())
 	if err != nil {
 		return err
 	}
@@ -622,25 +630,14 @@ func (s *Store) catchUpYTArticle(ctx context.Context, now time.Time, g ytDocsGat
 	return outcome, tx.Commit(ctx)
 }
 
-// ytDocsCatchUpMarker is the yt_feed_cursors row that records, durably, that
-// the document articles' first catch-up has completed (its last_sync_id is
-// the document_articles cursor then). It is no consumer: the feed runs only
-// registered consumers. The documents authority switch refuses until it
-// exists, because between the consumer's first pass (its cursor starts at the
-// feed's end) and that catch-up, a document changed before the cursor has no
-// op yet and the switch would see nothing pending.
-const ytDocsCatchUpMarker = "document_articles_catchup"
-
 // catchUpYTArticlesOnce runs catchUpYTArticles once per process in mode on,
 // after the document_articles cursor exists (so every later change is the
 // feed's): RunYTFeedConsumers calls it after its passes until it is done.
 // The documents it skipped as no_project (r4546690164) are kept and retried,
 // alone, on every later call: a youtrack_projects mapping added for them makes
-// no feed row. It is done only when none is left; then it writes
-// ytDocsCatchUpMarker (once) under FOR SHARE on the documents authority row,
-// so a switch (FOR UPDATE) either sees the marker with every op the catch-up
-// prepared, or commits first and is refused. Until then the documents switch
-// is refused.
+// no feed row. It is done only when none is left. The documents authority
+// switch does not rely on it: it refuses while any document is unwritten
+// (ytArticlesUnwrittenTx), whatever this process has scanned.
 func (s *Store) catchUpYTArticlesOnce(ctx context.Context, now time.Time) error {
 	if s.ytDocsCaughtUp.Load() {
 		return nil
@@ -684,34 +681,56 @@ func (s *Store) catchUpYTArticlesOnce(ctx context.Context, now time.Time) error 
 		s.ytDocsNoProject = left
 	}
 	if len(s.ytDocsNoProject) > 0 {
-		// Not done: the switch stays refused while a document waits for
-		// its project.
 		return nil
-	}
-	if err := markYTArticlesCaughtUp(ctx, s, now); err != nil {
-		log.Printf("ytwrite.articles_catchup_failed err=%q", err.Error())
-		return err
 	}
 	s.ytDocsCaughtUp.Store(true)
 	log.Printf("ytwrite.articles_caught_up")
 	return nil
 }
 
-// markYTArticlesCaughtUp writes ytDocsCatchUpMarker once, at the
-// document_articles cursor, under FOR SHARE on the documents authority row.
-func markYTArticlesCaughtUp(ctx context.Context, s *Store, now time.Time) error {
-	tx, err := s.pool.Begin(ctx)
+// ytArticlesUnwrittenMax bounds the document ids a refusal names.
+const ytArticlesUnwrittenMax = 10
+
+// ytArticlesUnwrittenTx counts, in tx, the in-scope documents whose PG content
+// YouTrack does not hold and no op is writing (r4547701680, r4547710868): no
+// unresolved hk:documents op on the document, and either a binding on tenant
+// whose body is not the document's (needs_update or another content_sha), or
+// no binding at all for a document created after the import ended (no
+// create yet, no project for it, or a create that was rejected). Documents out
+// of scope and the two exception classes do not count. The documents
+// authority switch refuses while the count is not zero, whatever any
+// process's catch-up has scanned: it is the state, not a record of work.
+// It returns the count and up to ytArticlesUnwrittenMax ids.
+func ytArticlesUnwrittenTx(ctx context.Context, tx pgx.Tx, tenant string) (int, []int64, error) {
+	rows, err := tx.Query(ctx, `SELECT d.id, d.key, coalesce(d.task_id,0), octet_length(d.body), d.created_at,
+			b.document_id IS NOT NULL, b.document_id IS NOT NULL AND b.content_sha IS NULL
+		FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id = d.id
+		WHERE NOT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.principal = $2 AND o.entity_kind = 'document' AND o.entity_id = d.id::text
+				AND o.state IN ('prepared','dispatched','remote_unknown'))
+			AND ((b.document_id IS NULL AND d.created_at >= $3)
+				OR (b.tenant = $1 AND (b.needs_update OR b.content_sha IS DISTINCT FROM d.sha256)))
+		ORDER BY d.id`, tenant, YTDocsPrincipal, YTImportEndedAt)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
-	defer tx.Rollback(ctx)
-	if _, err := ytAuthorityShareTx(ctx, tx, YTAuthorityDocuments); err != nil {
-		return err
+	defer rows.Close()
+	n, ids := 0, []int64{}
+	for rows.Next() {
+		var id, taskID int64
+		var key string
+		var bytes int
+		var at time.Time
+		var bound, splitIndex bool
+		if err := rows.Scan(&id, &key, &taskID, &bytes, &at, &bound, &splitIndex); err != nil {
+			return 0, nil, err
+		}
+		if !ytArticleInScope(key, taskID) || ytArticleException(bytes, bound, splitIndex, at.UTC()) != "" {
+			continue
+		}
+		n++
+		if len(ids) < ytArticlesUnwrittenMax {
+			ids = append(ids, id)
+		}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO yt_feed_cursors(consumer,last_sync_id,updated_at)
-		SELECT $1, last_sync_id, $3 FROM yt_feed_cursors WHERE consumer=$2 ON CONFLICT (consumer) DO NOTHING`,
-		ytDocsCatchUpMarker, ytDocsConsumer, now.UTC()); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return n, ids, rows.Err()
 }
