@@ -92,7 +92,18 @@ setup() {
 		[[ -f "$f" ]] || return 3
 		cp "$f" "$2"
 	}
-	hk_doc_put() { cp "$2" "$FIX/records/$(key "$1")"; echo "record $1" >>"$FIX/calls"; }
+	hk_doc_put() {
+		cp "$2" "$FIX/records/$(key "$1")"
+		echo "record $1" >>"$FIX/calls"
+		# HK_FOLLOW_RECORD_OUT: internal/ciworkflow parses every record with
+		# the store's own deploy-record parser (TestHKFollowRecordsParse).
+		if [[ -n "${HK_FOLLOW_RECORD_OUT:-}" ]]; then
+			local d="$HK_FOLLOW_RECORD_OUT/$(basename "$FIX")"
+			mkdir -p "$d"
+			printf '%s\n' "$1" >"$d/$(key "$1").key"
+			cp "$2" "$d/$(key "$1").json"
+		fi
+	}
 	sg_status() {
 		[[ -f "$FIX/sg_status_error" ]] && return 1
 		cat "$FIX/sg_status" 2>/dev/null || echo '[{"name":"handoffkeep","state":{}},{"name":"handoffkeep-work","state":{}}]'
@@ -384,8 +395,8 @@ t_tick_second_service_fails() {
 	tick
 	want "failed" "$(state_field verdict)"
 	want "success" "$(jq -r .result "$FIX"/records/deploy_handoffkeep_2*)"
-	want "failed shiftgate_handoffkeep-work_exit_1" \
-		"$(jq -r '.result + " " + .failed_step' "$FIX"/records/deploy_handoffkeep-work_*)"
+	want "failed 6 shiftgate_handoffkeep-work_exit_1" \
+		"$(jq -r '.result + " " + (.failed_step|tostring) + " " + .failed_step_name' "$FIX"/records/deploy_handoffkeep-work_*)"
 }
 t_tick_healthz_mismatch() {
 	# shiftgate flipped but the new colour serves another revision: roll it
@@ -397,7 +408,7 @@ t_tick_healthz_mismatch() {
 	want 1 "$(count '^rollback handoffkeep$')"
 	want "$SHA_OLD" "$(healthz_revision http://127.0.0.1:8800)"
 	want 0 "$(count 'deploy handoffkeep-work')"
-	want "rolled_back healthz_handoffkeep" "$(jq -r '.result + " " + .failed_step' "$FIX"/records/deploy_handoffkeep_2*)"
+	want "rolled_back 7 healthz_handoffkeep" "$(jq -r '.result + " " + (.failed_step|tostring) + " " + .failed_step_name' "$FIX"/records/deploy_handoffkeep_2*)"
 }
 t_tick_healthz_mismatch_rollback_fails() {
 	setup; setup_tick
@@ -496,6 +507,19 @@ t_tick_crash_not_retried() {
 	tick
 	want "failed interrupted" "$(state_field verdict) $(state_field reason)"
 	want 1 "$(count '^deploy ')"
+}
+t_tick_interrupted_then_tag_moved() {
+	# The tick died mid-rollout and a newer promote moved the tag before the
+	# next tick: the dead rollout is still reported, then the new tag runs.
+	setup; setup_tick
+	jq -n --arg d "$D3" --arg s "$SHA_OTHER" '{digest:$d, sha:$s, verdict:"started", reason:"", at:"2026-11-12T01:02:03Z"}' >"$FIX/state/state.json"
+	tick
+	want 1 "$(count "status $SHA_OTHER deployed failure rollout interrupted")"
+	[[ -f "$FIX/records/deploy_handoffkeep_20261112T010203Z" ]]
+	want 1 "$(count 'notify .*333333333333 rollout interrupted')"
+	want "failed 6 interrupted" "$(jq -r '.result + " " + (.failed_step|tostring) + " " + .failed_step_name' "$FIX"/records/deploy_handoffkeep-work_20261112T010203Z)"
+	want "deployed $SHA_NEW" "$(state_field verdict) $(state_field sha)"
+	want 1 "$(count 'deploy handoffkeep-work ')"
 }
 t_tick_tag_not_bound() {
 	# The tag says SHA_NEW but carries other images.

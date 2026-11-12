@@ -84,11 +84,13 @@ Every result appears in four places. Consumers should read them in this order.
    {"schema":"deploy-record/v0","service":"handoffkeep","target":"ncp",
     "head_sha":"<sha>","deployed_ref":"ghcr.io/mgh3326/handoffkeep@sha256:<deploy index digest>",
     "previous_ref":"<sha served before>","deployed_at":"<RFC3339 UTC>",
-    "result":"success|failed|rolled_back","failed_step":null,"job_id":null,
+    "result":"success|failed|rolled_back","failed_step":null,"failed_step_name":null,"job_id":null,
     "approval_ref":"deploy-approval/handoffkeep/<sha>|null",
     "included_prs":["https://github.com/mgh3326/handoffkeep/pull/<n>", …],
     "source":"hk-follow","release":null}
    ```
+
+   `failed_step` is an integer, as `store.DeployRecord` reads it. It keeps the R12 meaning that 6 and up ran the deploy command: 6 is a shiftgate failure or an interrupted tick, 7 is a wrong revision that was rolled back, and 8 is a wrong revision whose rollback failed. The step's name is in `failed_step_name`. An interrupted tick writes a `failed` record (step 6, `previous_ref` null) for every service, because which ones flipped is unknown.
 
    When `handoffkeep-work` fails after `handoffkeep` succeeded, the `handoffkeep` record says `success` (it serves the new sha) and the `handoffkeep-work` record says `failed`. A hold or a refusal writes no record; the status and the lane event carry it. `included_prs` is every `(#N)` in the commit subjects between the two shas.
 

@@ -469,19 +469,36 @@ included_prs() {
 		| unique_by(tonumber) | map("https://github.com/\($r)/pull/\(.)")' "$f"
 }
 
+# step_number <failed-step name>: deploy-record/v0's failed_step is an
+# integer (store.DeployRecord.FailedStep). Its R12 meaning is kept: 6 and up
+# ran the deploy command, so the serving version may have changed. The name
+# goes in failed_step_name, which readers that do not know it ignore.
+#   6  shiftgate_<svc>_exit_<rc>, interrupted   the deploy command ran
+#   7  healthz_<svc>                            flipped, wrong revision, rolled back
+#   8  healthz_<svc>_rollback_failed            flipped, rollback did not restore
+step_number() {
+	case "$1" in
+	"") echo null ;;
+	healthz_*_rollback_failed) echo 8 ;;
+	healthz_*) echo 7 ;;
+	*) echo 6 ;;
+	esac
+}
+
 # record <service> <sha> <digest> <previous> <result> <failed-step> <stamp>:
 # one deploy-record/v0 document, the shape hk-ship writes (README §Report).
 record() {
 	local f="$WORK/record-$1.json"
 	jq -n --arg svc "$1" --arg target "$HK_FOLLOW_TARGET" --arg sha "$2" \
 		--arg ref "${HK_FOLLOW_IMAGE}@$3" --arg prev "$4" --arg at "$(now_utc)" \
-		--arg result "$5" --arg step "$6" --arg appr "${GATE_APPROVAL_REF:-}" \
+		--arg result "$5" --arg step "$6" --argjson stepn "$(step_number "$6")" --arg appr "${GATE_APPROVAL_REF:-}" \
 		--argjson prs "$(included_prs "$4")" '{
 			schema: "deploy-record/v0", service: $svc, target: $target,
 			head_sha: $sha, deployed_ref: $ref,
 			previous_ref: (if $prev == "" then null else $prev end),
 			deployed_at: $at, result: $result,
-			failed_step: (if $step == "" then null else $step end),
+			failed_step: $stepn,
+			failed_step_name: (if $step == "" then null else $step end),
 			job_id: null,
 			approval_ref: (if $appr == "" then null else $appr end),
 			included_prs: $prs, source: "hk-follow", release: null
@@ -533,21 +550,33 @@ tick_locked() {
 	prev_sha=$(state_field sha)
 	prev_reason=$(state_field reason)
 
+	if [[ "$prev_verdict" == started ]]; then
+		# The previous tick died mid-rollout. Report it whether or not the
+		# tag has moved since (a newer promote must not erase the failure),
+		# and never retry it (I4). Which services flipped is unknown, so
+		# every service gets a record whose step says the deploy command
+		# may have run.
+		log "hk_follow.failed sha=$prev_sha digest=$prev_digest step=interrupted"
+		[[ $DRY_RUN -eq 1 ]] && return 0
+		# Stamped when the attempt started, so it never shares a key with
+		# the records of the rollout this tick may run next.
+		stamp=$(state_field at | tr -d ':-')
+		[[ "$stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || stamp=$(date -u +%Y%m%dT%H%M%SZ)
+		save_state "$prev_digest" "$prev_sha" failed interrupted
+		post_status "$prev_sha" deployed failure "rollout interrupted on ${HK_FOLLOW_TARGET}; not retried; check shiftgate status"
+		for line in "${svcs[@]}"; do
+			record "${line%% *}" "$prev_sha" "$prev_digest" "" failed interrupted "$stamp"
+		done
+		notify "[hk-follow] handoffkeep ${prev_sha:0:12} rollout interrupted on ${HK_FOLLOW_TARGET}; not retried; check shiftgate status"
+		[[ "$prev_digest" == "$TAG_DIGEST" ]] && return 0
+		prev_verdict=failed prev_reason=interrupted
+	fi
 	if [[ "$prev_digest" == "$TAG_DIGEST" ]]; then
 		case "$prev_verdict" in
 		deployed | failed | refuse | noop)
 			# I4: an attempted or refused digest is done; only a new
 			# digest (the next promote) runs again.
 			[[ $DRY_RUN -eq 1 ]] && log "hk_follow.dry_run digest=$TAG_DIGEST verdict=$prev_verdict handled=yes"
-			return 0
-			;;
-		started)
-			# The previous tick died mid-rollout. Never retry it (I4).
-			log "hk_follow.failed sha=$prev_sha digest=$TAG_DIGEST step=interrupted"
-			[[ $DRY_RUN -eq 1 ]] && return 0
-			save_state "$TAG_DIGEST" "$prev_sha" failed interrupted
-			post_status "$prev_sha" deployed failure "rollout interrupted on ${HK_FOLLOW_TARGET}; not retried; check shiftgate status"
-			notify "[hk-follow] handoffkeep ${prev_sha:0:12} rollout interrupted on ${HK_FOLLOW_TARGET}; not retried; check shiftgate status"
 			return 0
 			;;
 		esac
