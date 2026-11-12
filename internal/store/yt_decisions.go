@@ -240,18 +240,31 @@ func decisionTextOf(d DecisionRecord, channel string) ytwrite.DecisionText {
 	return ytwrite.CanonicalDecision(x)
 }
 
-// ytDecisionOutcome is what prepareYTDecisionTx did with one decision.
-type ytDecisionOutcome string
+// YTDecisionOutcome is what prepareYTDecisionTx did with one decision.
+type YTDecisionOutcome string
 
 const (
-	ytDecisionCreatePrepared ytDecisionOutcome = "create_prepared"
-	ytDecisionCreateRejected ytDecisionOutcome = "create_rejected"
-	ytDecisionCreatePending  ytDecisionOutcome = "create_exists"
-	ytDecisionFieldsPrepared ytDecisionOutcome = "fields_prepared"
-	ytDecisionUnchanged      ytDecisionOutcome = "unchanged"
-	ytDecisionDeleted        ytDecisionOutcome = "deleted"
-	ytDecisionOtherTenant    ytDecisionOutcome = "other_tenant"
-	ytDecisionInvalid        ytDecisionOutcome = "invalid"
+	YTDecisionCreatePrepared YTDecisionOutcome = "create_prepared"
+	YTDecisionCreateRejected YTDecisionOutcome = "create_rejected"
+	YTDecisionCreatePending  YTDecisionOutcome = "create_exists"
+	YTDecisionFieldsPrepared YTDecisionOutcome = "fields_prepared"
+	YTDecisionUnchanged      YTDecisionOutcome = "unchanged"
+	YTDecisionDeleted        YTDecisionOutcome = "deleted"
+	YTDecisionOtherTenant    YTDecisionOutcome = "other_tenant"
+	YTDecisionInvalid        YTDecisionOutcome = "invalid"
+)
+
+type ytDecisionOutcome = YTDecisionOutcome
+
+const (
+	ytDecisionCreatePrepared = YTDecisionCreatePrepared
+	ytDecisionCreateRejected = YTDecisionCreateRejected
+	ytDecisionCreatePending  = YTDecisionCreatePending
+	ytDecisionFieldsPrepared = YTDecisionFieldsPrepared
+	ytDecisionUnchanged      = YTDecisionUnchanged
+	ytDecisionDeleted        = YTDecisionDeleted
+	ytDecisionOtherTenant    = YTDecisionOtherTenant
+	ytDecisionInvalid        = YTDecisionInvalid
 )
 
 // prepareYTDecisionTx decides one decision in tx at now for gate g: a deleted
@@ -563,4 +576,51 @@ func (s *Store) UnboundYTDecisions(ctx context.Context, afterID int64, limit int
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// PrepareYTDecision prepares a decision's op in its own transaction under its
+// lane lock: a decision_create op when unbound (and missing its op); a
+// decision_fields snapshot op when bound (and its snapshot sha differs).
+// Mode off or other tenant returns ("", nil).
+func (s *Store) PrepareYTDecision(ctx context.Context, id int64, now time.Time) (YTDecisionOutcome, error) {
+	g, on := s.ytDecisionsNow()
+	if !on {
+		return "", nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockYTEntity(ctx, tx, ytwrite.DecisionEntity, strconv.FormatInt(id, 10)); err != nil {
+		return "", err
+	}
+	decisions, err := readYTDecisionRows(ctx, tx, []int64{id}, now)
+	if err != nil {
+		return "", err
+	}
+	outcome, err := prepareYTDecisionTx(ctx, tx, now, g, id, decisions[id])
+	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return outcome, nil
+}
+
+// BoundYTDecisions lists, in decision id order, the ids of decisions bound on
+// tenant with an id greater than afterID, at most limit (1..YTDecisionCandidatesMax).
+func (s *Store) BoundYTDecisions(ctx context.Context, tenant string, afterID int64, limit int) ([]int64, error) {
+	if tenant == "" || afterID < 0 || limit < 1 || limit > YTDecisionCandidatesMax {
+		return nil, errors.New("invalid bound decision page")
+	}
+	rows, err := s.pool.Query(ctx, `SELECT decision_id::bigint FROM yt_decision_bindings
+		WHERE tenant = $1 AND decision_id::bigint > $2
+		ORDER BY decision_id::bigint LIMIT $3`, tenant, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return pgx.CollectRows(rows, pgx.RowTo[int64])
 }
