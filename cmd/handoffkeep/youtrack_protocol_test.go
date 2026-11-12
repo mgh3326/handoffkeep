@@ -130,6 +130,8 @@ func TestYouTrackUnguardedSubcommandsRunWhileProtocolOwnsWrites(t *testing.T) {
 		{"schema", "plan"},
 		{"comments-preflight"},
 		{"comments-backfill"},
+		{"articles-preflight"},
+		{"articles-backfill"},
 		{"audit"},
 		{"audit", "--enqueue"},
 		{"canary", "list"},

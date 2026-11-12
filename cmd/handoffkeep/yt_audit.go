@@ -170,6 +170,61 @@ type ytAuditReport struct {
 	Total    ytAuditCounts     `json:"total"`
 	Projects []*ytAuditProject `json:"projects"`
 	Enqueue  *ytAuditEnqueue   `json:"enqueue,omitempty"`
+	// Documents counts the documents with no article binding on this
+	// tenant (hk 4053); absent with --task, or without the articles
+	// migration.
+	Documents *ytAuditDocuments `json:"documents,omitempty"`
+}
+
+// ytAuditDocuments is the documents the import made an article for
+// (store.YTArticleExcluded false) that have no yt_article_bindings row on
+// the audit's tenant, in all and per project (an hk project, /shared or
+// /unassigned). It is a count for the document cutover, not part of the
+// comment gate: it does not change the exit.
+type ytAuditDocuments struct {
+	Documents int                  `json:"documents"`
+	Unbound   ytArticlesClass      `json:"unbound"`
+	Projects  []*ytAuditDocProject `json:"projects"`
+}
+
+type ytAuditDocProject struct {
+	Project string          `json:"project"`
+	Unbound ytArticlesClass `json:"unbound"`
+}
+
+// documents counts the unbound documents of bucket ("" for all).
+func (a *ytAuditor) documents(ctx context.Context, bucket string) (*ytAuditDocuments, error) {
+	out := &ytAuditDocuments{Unbound: ytArticlesClass{DocumentIDs: []int64{}}, Projects: []*ytAuditDocProject{}}
+	byProject := map[string]*ytAuditDocProject{}
+	var after int64
+	for {
+		docs, err := a.st.YTArticleDocs(ctx, bucket, after, ytArticleDocPage)
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range docs {
+			after = d.DocumentID
+			if store.YTArticleExcluded(d.Key, d.TaskID) {
+				continue
+			}
+			out.Documents++
+			p := byProject[d.Bucket]
+			if p == nil {
+				p = &ytAuditDocProject{Project: d.Bucket, Unbound: ytArticlesClass{DocumentIDs: []int64{}}}
+				byProject[d.Bucket] = p
+				out.Projects = append(out.Projects, p)
+			}
+			if d.BoundTenant != a.tenant {
+				out.Unbound.add(d.DocumentID)
+				p.Unbound.add(d.DocumentID)
+			}
+		}
+		if len(docs) < ytArticleDocPage {
+			break
+		}
+	}
+	sort.Slice(out.Projects, func(i, j int) bool { return out.Projects[i].Project < out.Projects[j].Project })
+	return out, nil
 }
 
 // gap reports whether the run found what the cutover gate refuses.
@@ -193,6 +248,9 @@ type ytAuditor struct {
 	tenant  string
 	botID   string
 	enqueue bool
+	// articles is set when the schema has yt_article_bindings: the run
+	// then also counts the unbound documents (ytAuditDocuments).
+	articles bool
 	// sleep waits d or until ctx ends (nil: the wall clock).
 	sleep func(ctx context.Context, d time.Duration) error
 }
@@ -451,6 +509,13 @@ func (a *ytAuditor) run(ctx context.Context, project string, taskID int64, limit
 	for _, p := range append([]*ytAuditCounts{&r.Total}, projectCounts(r.Projects)...) {
 		p.fillEmpty()
 	}
+	if a.articles && taskID == 0 {
+		docs, err := a.documents(ctx, project)
+		if err != nil {
+			return r, err
+		}
+		r.Documents = docs
+	}
 	return r, nil
 }
 
@@ -531,11 +596,17 @@ func youtrackAuditCmd(args []string, out io.Writer) error {
 			return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("the database lacks migration %s: deploy the release that adds it first; the audit never migrates", store.YTTaskBindingsMigration)}
 		}
 	}
+	// The document count needs yt_article_bindings; a schema from before
+	// it (read-only, so not migrated) is audited without the count.
+	articles, err := st.MigrationApplied(openCtx, store.YTArticleBindingsMigration)
+	if err != nil {
+		return err
+	}
 	me, err := client.Me(openCtx)
 	if err != nil {
 		return fmt.Errorf("read the bot's YouTrack user: %w", err)
 	}
-	a := &ytAuditor{st: st, remote: remote, tenant: remote.Tenant(), botID: me.ID, enqueue: *enqueue}
+	a := &ytAuditor{st: st, remote: remote, tenant: remote.Tenant(), botID: me.ID, enqueue: *enqueue, articles: articles}
 	report, err := a.run(context.Background(), *project, *task, *limit)
 	if err != nil {
 		return err
