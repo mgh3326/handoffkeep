@@ -958,7 +958,7 @@ func (s *Service) protocolEcho(ctx context.Context, issue *Issue, text string) (
 	if !ok || issue == nil || issue.ID == "" {
 		return false, nil
 	}
-	return s.store.YTCommentEchoOp(ctx, opID, issue.ID)
+	return s.store.YTCommentEchoOp(ctx, opID, s.tenant, issue.ID)
 }
 
 // newIssue maps the operator's issue back to an hk project through the

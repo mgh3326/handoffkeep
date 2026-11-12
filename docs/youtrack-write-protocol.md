@@ -64,6 +64,8 @@ Submit ─► prepared ─Claim─► dispatched ─┬─ 2xx + valid id ──
   to resume and a crash in `dispatched` is uncertain. A `dispatched` op older than
   `StaleAfter` becomes `remote_unknown` (a crash between the claim and the send
   looks the same, so it stays unknown too: conservative, never a resend).
+  `StaleAfter` must exceed `DispatchTimeout`: `New` refuses a value at or below it,
+  so a send still in flight is never recovered as stale.
 - **No automatic re-create.** `remote_unknown` is left only by positive evidence or
   by an operator. Evidence: enumerate **all** comments of the target (paged, no
   assumption about order) and find exactly one whose text equals the rendered body,

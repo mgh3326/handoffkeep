@@ -445,12 +445,13 @@ func (s *Store) YTCommentConfig(tenant string, cfg ytwrite.Config) ytwrite.Confi
 }
 
 // YTCommentEchoOp reports whether op opID is a comment_append op hk wrote (or
-// is writing) to the YouTrack issue issueID: the ownership evidence the
-// activity pull needs before it drops a comment as hk's own echo.
-func (s *Store) YTCommentEchoOp(ctx context.Context, opID int64, issueID string) (bool, error) {
+// is writing) to the YouTrack issue issueID on tenant: the ownership evidence
+// the activity pull needs before it drops a comment as hk's own echo. Issue
+// ids are only unique per YouTrack instance, so the tenant is part of the match.
+func (s *Store) YTCommentEchoOp(ctx context.Context, opID int64, tenant, issueID string) (bool, error) {
 	var ok bool
 	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops o JOIN yt_comment_write_links w ON w.op_id = o.id
-		WHERE o.id=$1 AND o.kind=$2 AND o.yt_target_id=$3)`, opID, ytwrite.KindCommentAppend, issueID).Scan(&ok)
+		WHERE o.id=$1 AND o.kind=$2 AND o.yt_target_id=$3 AND o.tenant=$4)`, opID, ytwrite.KindCommentAppend, issueID, tenant).Scan(&ok)
 	return ok, err
 }
 

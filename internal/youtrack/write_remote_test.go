@@ -522,3 +522,19 @@ func TestAdapterGetIssueDecodesRecordedIssue(t *testing.T) {
 		t.Fatalf("missing issue: %v", err)
 	}
 }
+
+// A reply that does not decode must not echo its bytes into the error: the
+// op log keeps that text. encoding/json quotes the offending character.
+func TestAdapterDecodeErrorDoesNotEchoReplyBody(t *testing.T) {
+	y := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("#token-SECRET not json"))
+	}}
+	rm := y.serve(t)
+	_, err := rm.GetIssue(context.Background(), "HK-7")
+	if err == nil {
+		t.Fatal("a body that is not JSON decoded")
+	}
+	if strings.Contains(err.Error(), "token-SECRET") || strings.Contains(err.Error(), "'#'") {
+		t.Fatalf("decode error echoes the reply body: %q", err.Error())
+	}
+}

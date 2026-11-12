@@ -187,7 +187,7 @@ func (r *WriteRemote) ListComments(ctx context.Context, issueID string, pageSize
 		}
 		var page []listedComment
 		if err := json.Unmarshal(data, &page); err != nil {
-			return nil, fmt.Errorf("youtrack GET %s: decode: %w", path, err)
+			return nil, decodeReplyErr("youtrack GET "+path, err)
 		}
 		out := make([]ytwrite.RemoteComment, 0, len(page))
 		for _, c := range page {
@@ -222,9 +222,19 @@ func (r *WriteRemote) GetIssue(ctx context.Context, issueID string) (Issue, erro
 	}
 	var out Issue
 	if err := json.Unmarshal(data, &out); err != nil {
-		return Issue{}, fmt.Errorf("youtrack GET issue %s: decode: %w", issueID, err)
+		return Issue{}, decodeReplyErr("youtrack GET issue "+issueID, err)
 	}
 	return out, nil
+}
+
+// decodeReplyErr names a reply that did not decode. It never quotes the reply:
+// a json syntax error carries the offending byte, and the op log keeps this text.
+func decodeReplyErr(op string, err error) error {
+	var syn *json.SyntaxError
+	if errors.As(err, &syn) {
+		return fmt.Errorf("%s: decode: malformed JSON at byte %d", op, syn.Offset)
+	}
+	return fmt.Errorf("%s: decode: reply has an unexpected shape", op)
 }
 
 // taskIssueSearchTop is the page an issue search asks for. A task has one
@@ -245,7 +255,7 @@ func (r *WriteRemote) FindTaskIssues(ctx context.Context, projectShort, projectI
 	}
 	var page []Issue
 	if err := json.Unmarshal(data, &page); err != nil {
-		return nil, fmt.Errorf("youtrack GET /api/issues: decode: %w", err)
+		return nil, decodeReplyErr("youtrack GET /api/issues", err)
 	}
 	if len(page) >= taskIssueSearchTop {
 		return nil, fmt.Errorf("youtrack GET /api/issues: %d or more issues match hk ID %d; the search is not complete", taskIssueSearchTop, taskID)
@@ -336,7 +346,7 @@ func (r *WriteRemote) CheckIssueFields(ctx context.Context, projectID, hkProject
 		} `json:"bundle"`
 	}
 	if err := json.Unmarshal(data, &fields); err != nil {
-		return none, fmt.Errorf("youtrack GET %s: decode: %w", path, err)
+		return none, decodeReplyErr("youtrack GET "+path, err)
 	}
 	if len(fields) >= issueFieldsTop {
 		return none, fmt.Errorf("youtrack GET %s: %d or more fields; the listing is not complete", path, issueFieldsTop)
