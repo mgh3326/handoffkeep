@@ -370,10 +370,7 @@ implement tasks move to `merged`, and decide, verify and ops tasks close at
 `completed` with the PR as the result link. `handoffkeep tasks drift [--json]
 [--merged-days N]` (`GET /v1/tasks/drift?merged_days=N`, default 2) reads four
 drift classes and writes nothing: settled tasks with an open decision request,
-unsettled tasks whose PR is already merged or that implement a merged, not
-reverted change and have no reverted, not relanded one (with `open_prs` and
-`open_sub_tasks` naming what still holds the close, and `mechanical` set when
-nothing does and the state is one a merge applies from), merged tasks older than N days that
+unsettled tasks whose PR is already merged, merged tasks older than N days that
 no deploy record lists, and researching or developing tasks idle for
 `started_stalled_hours`.
 Schema version 34 adds the `source_event` kind for events

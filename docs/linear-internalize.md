@@ -176,19 +176,16 @@ treated as overdue.
     `implements` change was opened after the revert merged (relanding takes a new PR,
     so a PR opened before the revert does not count), or while a sub-task is not
     settled (the parent closes through `auto_close_parent` when its last sub-task
-    settles; that close keeps the first two holds). A change closed without merging
+    settles). A change closed without merging
     does not hold the task. A held merge still reaches the other tasks whose `refs.pr`
     is the PR, each linked to the change as `implements` and under its own rules. A
     merged task with no `refs.pr` that a merge names adopts the PR as `refs.pr`. An event may name further tasks in `tasks` (one
     per `Mergewake-Task` line of the PR, for example a bundle PR's sub-tasks); each
     gets the event as `task_id` does, in its own turn: propagation and the rule 9
-    parent row skip a named task. A task held by a change that later closes unmerged,
-    or a parent whose sub-tasks all settle without closing it (all dropped, or held at
-    auto-close by its own PR that later closes unmerged), gets no further event;
-    `tasks drift` lists it under `merged_pr_not_merged` with `mechanical: true` (empty
-    `open_prs` and `open_sub_tasks`, a state a merge applies from, so not triage or icebox, and the
-    gate auto-close applies: not awaiting a decision, no open decision request, and the
-    work-receipt fence allows it): the close the daily hygiene job (hk 3292) is to make.
+    parent row skip a named task. A task held by a change that later closes unmerged
+    gets no further event; finding and closing it is the hygiene job's (hk 3292). An
+    automatic parent close (`auto_close_parent`) waits while the parent is awaiting a
+    decision, has an open decision request, or the work-receipt fence refuses it.
 
 **Changes and reviews from the same events.** Every mergewake event also writes the
 work record, in the same transaction, after the task row is locked and before the rule

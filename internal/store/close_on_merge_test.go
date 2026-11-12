@@ -3,7 +3,6 @@ package store
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestMergeWaitsForEveryImplementsChange (hk 3294): a task with two open
@@ -145,48 +144,6 @@ func TestEventTasksPayload(t *testing.T) {
 	}
 }
 
-// TestDriftFindsDeliveredTaskThroughTheWorkRecord (hk 3294): class (b) finds
-// an unsettled task with no refs.pr through a merged change it implements,
-// and names the open implements change that holds it. A task whose only
-// merged change was reverted is not drift.
-func TestDriftFindsDeliveredTaskThroughTheWorkRecord(t *testing.T) {
-	s, pool := searchTestStore(t)
-	held := flowTask(t, s, pool, "implement", StateDeveloping, true)
-	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: testPR(5001), TaskID: held.ID})
-	send(t, s, mergeEvent(held.ID, testPR(5002)))
-
-	stuck := flowTask(t, s, pool, "implement", StateReviewing, true)
-	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: testPR(5003), TaskID: stuck.ID})
-	send(t, s, mergeEvent(stuck.ID, testPR(5004)))
-	// The holding PR closes unmerged: no event follows, so only the report
-	// shows the task, with nothing left open.
-	if _, err := pool.Exec(t.Context(), `UPDATE changes SET state='closed' WHERE repo='example/app' AND pr_number=5003`); err != nil {
-		t.Fatal(err)
-	}
-
-	reverted := flowTask(t, s, pool, "implement", StateReviewing, true)
-	send(t, s, mergeEvent(reverted.ID, testPR(5005)))
-	send(t, s, revertEvent(reverted.ID, testPR(5005), testPR(5006)))
-	if got := stateOf(t, s, reverted.ID).State; got != StateDeveloping {
-		t.Fatalf("reverted task %s", got)
-	}
-
-	c := driftAt(t, s, time.Now().UTC(), DriftDefaultMergedDays).MergedPRNotMerged
-	byID := map[int64]TaskDriftTask{}
-	for _, x := range c.Tasks {
-		byID[x.ID] = x
-	}
-	if x, ok := byID[held.ID]; !ok || len(x.OpenPRs) != 1 || x.OpenPRs[0] != testPR(5001) {
-		t.Fatalf("held task %+v ok=%t", x, ok)
-	}
-	if x, ok := byID[stuck.ID]; !ok || len(x.OpenPRs) != 0 || x.PR != "" {
-		t.Fatalf("stuck task %+v ok=%t", x, ok)
-	}
-	if _, ok := byID[reverted.ID]; ok {
-		t.Fatalf("reverted task reported: %+v", c.Tasks)
-	}
-}
-
 // TestHeldMergeStillPropagates (PR #331 review): a merge held on its own task
 // still reaches the other tasks whose refs.pr is that PR, each under its own
 // rules.
@@ -224,53 +181,6 @@ func TestRevertedPieceHoldsUntilRelanded(t *testing.T) {
 	}
 	if res := send(t, s, mergeEvent(x.ID, reland)); !res.Applied || res.State != StateMerged {
 		t.Fatalf("reland: %+v", res)
-	}
-}
-
-// TestDriftSkipsUnrelandedRevertAndNamesSubTasks (PR #331 review): a task
-// with a reverted, not relanded piece is not drift even when another piece
-// merged; a parent held by sub-tasks lists them in open_sub_tasks, and once
-// they settle without closing it (all dropped) it is listed with no
-// blockers, the hygiene job's mechanical close.
-func TestDriftSkipsUnrelandedRevertAndNamesSubTasks(t *testing.T) {
-	s, pool := searchTestStore(t)
-	x := flowTask(t, s, pool, "implement", StateDeveloping, true)
-	a, b := testPR(6201), testPR(6202)
-	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: b, TaskID: x.ID})
-	send(t, s, mergeEvent(x.ID, a))
-	send(t, s, mergeEvent(x.ID, b))
-	send(t, s, revertEvent(x.ID, b, testPR(6203)))
-	if got := stateOf(t, s, x.ID).State; got != StateDeveloping {
-		t.Fatalf("reverted task %s", got)
-	}
-
-	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
-	child := flowTask(t, s, pool, "fix", StateBacklog, false)
-	setParent(t, s, child, parent)
-	send(t, s, mergeEvent(parent.ID, testPR(6204)))
-
-	find := func() map[int64]TaskDriftTask {
-		out := map[int64]TaskDriftTask{}
-		for _, d := range driftAt(t, s, time.Now().UTC(), DriftDefaultMergedDays).MergedPRNotMerged.Tasks {
-			out[d.ID] = d
-		}
-		return out
-	}
-	got := find()
-	if _, ok := got[x.ID]; ok {
-		t.Fatalf("task with an unrelanded revert reported: %+v", got[x.ID])
-	}
-	if d, ok := got[parent.ID]; !ok || len(d.OpenSubTasks) != 1 || d.OpenSubTasks[0] != child.ID || len(d.OpenPRs) != 0 {
-		t.Fatalf("held parent %+v ok=%t", d, ok)
-	}
-	if _, err := s.TransitionTaskWith(t.Context(), child.ID, TransitionInput{To: StateDropped, By: "tester", Note: "not needed"}); err != nil {
-		t.Fatal(err)
-	}
-	if st := stateOf(t, s, parent.ID).State; st != StateBacklog {
-		t.Fatalf("parent after its only sub-task dropped: %s", st)
-	}
-	if d, ok := find()[parent.ID]; !ok || len(d.OpenSubTasks) != 0 || len(d.OpenPRs) != 0 {
-		t.Fatalf("released parent %+v ok=%t", d, ok)
 	}
 }
 
@@ -325,24 +235,6 @@ func TestRelandIsJudgedByOpenTime(t *testing.T) {
 	}
 }
 
-// TestAutoCloseKeepsTheParentHolds (PR #331 review round 2): a parent whose
-// last sub-task settles stays open while its own implements PR is open.
-func TestAutoCloseKeepsTheParentHolds(t *testing.T) {
-	s, pool := searchTestStore(t)
-	parent := flowTask(t, s, pool, "implement", StateDeveloping, true)
-	child := flowTask(t, s, pool, "implement", StateReviewing, true)
-	setParent(t, s, child, parent)
-	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: testPR(6501), TaskID: parent.ID})
-	send(t, s, mergeEvent(child.ID, testPR(6502)))
-	if got := stateOf(t, s, parent.ID).State; got != StateReviewing {
-		t.Fatalf("parent with an open implements PR: %s, want reviewing", got)
-	}
-	rows := sourceRows(t, s, parent.ID, "hk.auto_close")
-	if len(rows) == 0 || rows[len(rows)-1].Applied || !strings.Contains(rows[len(rows)-1].Note, testPR(6501)) {
-		t.Fatalf("auto_close rows %+v", rows)
-	}
-}
-
 // TestNamedParentAdoptsThePR (PR #331 review round 2): a named parent that
 // its named child's merge auto-closes before the parent's own turn still
 // gets the PR as refs.pr, which deploy records match.
@@ -377,75 +269,10 @@ func TestPropagatedSiblingLinksTheChange(t *testing.T) {
 	}
 }
 
-// TestDriftMechanicalHonoursTheStateGate (PR #331 review round 2): a triage
-// task with a merged implements change is listed but not mechanical; an
-// unblocked reviewing task is.
-func TestDriftMechanicalHonoursTheStateGate(t *testing.T) {
-	s, pool := searchTestStore(t)
-	triage := flowTask(t, s, pool, "implement", StateTriage, false)
-	send(t, s, mergeEvent(triage.ID, testPR(6801)))
-	open := flowTask(t, s, pool, "implement", StateReviewing, true)
-	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: testPR(6802), TaskID: open.ID})
-	send(t, s, mergeEvent(open.ID, testPR(6803)))
-	if _, err := pool.Exec(t.Context(), `UPDATE changes SET state='closed' WHERE repo='example/app' AND pr_number=6802`); err != nil {
-		t.Fatal(err)
-	}
-	got := map[int64]TaskDriftTask{}
-	for _, d := range driftAt(t, s, time.Now().UTC(), DriftDefaultMergedDays).MergedPRNotMerged.Tasks {
-		got[d.ID] = d
-	}
-	if d, ok := got[triage.ID]; !ok || d.Mechanical {
-		t.Fatalf("triage task %+v ok=%t, want listed and not mechanical", d, ok)
-	}
-	if d, ok := got[open.ID]; !ok || !d.Mechanical {
-		t.Fatalf("unblocked task %+v ok=%t, want mechanical", d, ok)
-	}
-}
-
-// TestDriftFindsParentHeldAtAutoClose (PR #331 review round 3): a parent that
-// auto-close held on its own open PR is listed once its sub-tasks settle,
-// and becomes mechanical when that PR closes unmerged.
-func TestDriftFindsParentHeldAtAutoClose(t *testing.T) {
-	s, pool := searchTestStore(t)
-	parent := flowTask(t, s, pool, "implement", StateDeveloping, true)
-	child := flowTask(t, s, pool, "implement", StateReviewing, true)
-	setParent(t, s, child, parent)
-	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: testPR(6901), TaskID: parent.ID})
-	send(t, s, mergeEvent(child.ID, testPR(6902)))
-	find := func() (TaskDriftTask, bool) {
-		for _, d := range driftAt(t, s, time.Now().UTC(), DriftDefaultMergedDays).MergedPRNotMerged.Tasks {
-			if d.ID == parent.ID {
-				return d, true
-			}
-		}
-		return TaskDriftTask{}, false
-	}
-	if d, ok := find(); !ok || d.Mechanical || len(d.OpenPRs) != 1 || d.OpenPRs[0] != testPR(6901) {
-		t.Fatalf("held parent %+v ok=%t", d, ok)
-	}
-	if _, err := pool.Exec(t.Context(), `UPDATE changes SET state='closed' WHERE repo='example/app' AND pr_number=6901`); err != nil {
-		t.Fatal(err)
-	}
-	if d, ok := find(); !ok || !d.Mechanical {
-		t.Fatalf("parent after its PR closed %+v ok=%t", d, ok)
-	}
-}
-
-// driftRow returns task id's merged_pr_not_merged row, if listed.
-func driftRow(t *testing.T, s *Store, id int64) (TaskDriftTask, bool) {
-	t.Helper()
-	for _, d := range driftAt(t, s, time.Now().UTC(), DriftDefaultMergedDays).MergedPRNotMerged.Tasks {
-		if d.ID == id {
-			return d, true
-		}
-	}
-	return TaskDriftTask{}, false
-}
-
-// TestDriftMechanicalKeepsTheDecisionGates (PR #331 review round 4): a parent
-// auto-close leaves open because it awaits a decision, or because its
-// decision request is open, is listed but not mechanical (closeGateTx).
-func TestDriftMechanicalKeepsTheDecisionGates(t *testing.T) {
+// TestAutoCloseKeepsTheDecisionGates (PR #331 review round 4): auto-close
+// leaves a parent open while it awaits a decision or its decision request is
+// open (closeGateTx).
+func TestAutoCloseKeepsTheDecisionGates(t *testing.T) {
 	s, pool := searchTestStore(t)
 	for i, gate := range []string{
 		`UPDATE tasks SET awaiting_decision=true WHERE id=$1`,
@@ -461,16 +288,12 @@ func TestDriftMechanicalKeepsTheDecisionGates(t *testing.T) {
 		if got := stateOf(t, s, parent.ID).State; got != StateDeveloping {
 			t.Fatalf("gate %d: parent auto-closed to %s", i, got)
 		}
-		if d, ok := driftRow(t, s, parent.ID); !ok || d.Mechanical {
-			t.Fatalf("gate %d: parent %+v ok=%t, want listed and not mechanical", i, d, ok)
-		}
 	}
 }
 
-// TestDriftMechanicalKeepsTheReceiptFence (PR #331 review round 4): a parent
-// the work-receipt fence protects is not auto-closed by its sub-task's merge,
-// and the drift report lists it as not mechanical.
-func TestDriftMechanicalKeepsTheReceiptFence(t *testing.T) {
+// TestAutoCloseKeepsTheReceiptFence (PR #331 review round 4): a parent the
+// work-receipt fence protects is not auto-closed by its sub-task's merge.
+func TestAutoCloseKeepsTheReceiptFence(t *testing.T) {
 	s := wrkCIStore(t)
 	storeActivate(t, s, "job-a", "builder-a", 9001)
 	if _, err := s.pool.Exec(t.Context(), `INSERT INTO tasks(id,lane,parent_lane,title,kind,state,claimed_by,parent_id,created_by,created_at,updated_at,last_activity_at) VALUES(9003,'builder-a','director-1','fenced child','implement','reviewing','',9001,'test',now(),now(),now())`); err != nil {
@@ -481,8 +304,5 @@ func TestDriftMechanicalKeepsTheReceiptFence(t *testing.T) {
 	}
 	if got := stateOf(t, s, 9001).State; got != StateBacklog {
 		t.Fatalf("fenced parent auto-closed to %s", got)
-	}
-	if d, ok := driftRow(t, s, 9001); !ok || d.Mechanical {
-		t.Fatalf("fenced parent %+v ok=%t, want listed and not mechanical", d, ok)
 	}
 }

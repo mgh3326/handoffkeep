@@ -409,8 +409,8 @@ func (s *Store) afterStateChangeTx(ctx context.Context, tx pgx.Tx, x Task, from,
 	return nil
 }
 
-// closeGateTx is the gate an automatic close of x to state to passes, shared
-// by autoCloseTx and the drift report's mechanical flag (hk 3294): it returns
+// closeGateTx is the gate an automatic close of x to state to passes (hk
+// 3294; the hygiene close of hk 3292 is to reuse it): it returns
 // why the close must wait for a person, or "". x waits while it is awaiting a
 // decision, while its decision request is open, or while the work-receipt
 // fence refuses the move.
@@ -419,8 +419,8 @@ func (s *Store) closeGateTx(ctx context.Context, tx pgx.Tx, x Task, to string) (
 }
 
 // closeGate is closeGateTx with the work-record snapshot read through
-// snapshot, called only when the decision gates pass; a caller checking many
-// tasks reads it once.
+// snapshot, called only when the decision gates pass, so a caller checking
+// many tasks can read it once.
 func (s *Store) closeGate(ctx context.Context, x Task, to string, snapshot func() (wrkrecords.Snapshot, error)) (string, error) {
 	if x.AwaitingDecision {
 		return "parent is awaiting a decision", nil
@@ -519,20 +519,6 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 		}
 		if deployed == completed {
 			to = StateDeployed
-		}
-		// The close-on-merge holds (hk 3294) apply to the parent too: an open
-		// implements change of its own, or a reverted one not relanded.
-		hold, err := mergeHoldTx(ctx, tx, p.ID, "")
-		if err != nil {
-			return err
-		}
-		if hold != "" {
-			_, _, err = insertEvent(ctx, tx, taskEventInput{
-				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
-				Note:   "every sub-task is settled, but " + hold,
-				Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
-			})
-			return err
 		}
 		if gate, err := s.closeGateTx(ctx, tx, p, to); err != nil || gate != "" {
 			if err != nil {
