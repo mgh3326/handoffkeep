@@ -660,6 +660,81 @@ server's `Retry-After`, 5 s without one) and the read repeated, at most 5
 times; a wait over 10 minutes stops the run (`stopped`, exit 1). Each read
 (an issue GET, or one issue's full listing) has 60 s.
 
+## Rebuild audit (hk 4121)
+
+`handoffkeep youtrack audit --rebuild [--project P] [--sample-comments N]
+[--seed S] [--json]` is the restore drill, the C3 gate of the switch (hk 3833
+§1.2, §3.3): it rebuilds what hk needs from YouTrack reads and PG's id maps
+only (the binding tables and `yt_comment_write_links`), and diffs the result
+with PG. Besides YouTrack it reads PG's side and these id maps:
+`yt_task_bindings`, `yt_article_bindings`, `yt_decision_bindings`,
+`yt_comment_write_links` with `yt_write_ops` (an op's kind, issue and time),
+and `youtrack_comment_links` (legacy and pulled comments). It is read-only: `store.OpenReadOnly`, GETs only, and it refuses
+(exit 2) a database without `20261110-yt-task-bindings`. The tenant is
+`YOUTRACK_URL`'s, as for the comment audit.
+
+| Target | Scope | Rebuilt from | Equal when |
+|---|---|---|---|
+| documents | every `yt_article_bindings` row on the tenant | the article's content | its sha256 is `documents.sha256`. A binding that names the import's split index (articles-backfill stored no content sha) is `exception_not_updated` (D4), not a failure, and its article is not read; the current body size decides nothing, so a document that grew past 240 KiB after a single-part import is compared |
+| comments | `--sample-comments` random bound tasks (default 200, by `md5("<seed>:<task id>")`) and the 20 bound tasks with the most comments | the issue's comments, listed stably | every hk comment has exactly one copy with the same (author, time, body), and every YouTrack comment copies one |
+| tasks | every `yt_task_bindings` row on the tenant | the issue | hk ID → id, the description's title line → title, the project → project |
+| decisions | every `yt_decision_bindings` row on the tenant | the DEC issue's description | question, options and answer equal (the Y6 block) |
+
+**Comments.** A comment in the rendered form of op N (`RenderedOpID`) whose op
+is one of the task's comments' (`yt_comment_write_links`) gives its author and
+time from the provenance line, to the second, and its body from between that
+line and the marker; a catch-up op (`CatchUpYTComments`) names its own later
+time, so a provenance time equal to the op's and not the comment's is the
+exception `op_time` (the comment's time is PG-only). A comment in that form
+whose op is another of hk's ops for the issue is left out
+(`other_hk_writes`); one whose op hk's ledger does not have for the issue
+differs. The import's copies of the task's reports and briefs are
+expected once each, as the import wrote them: `ytwrite.DocComments` of each
+document tied to the task (as it is now), at the document's creation time
+(to the millisecond; no later save changes it). The author is not compared:
+`PutDocument` overwrites `documents.created_by` on every changed body, so the
+import-time author is PG-only (`not_rebuildable`). A comment that fits an expected copy's (body, time) and an hk
+comment's tuple too is assigned to neither and differs as `ambiguous:
+document copy or task comment`. Otherwise a comment matching an expected
+copy's (body, time) uses it up and is left out (`document_copies`), so a task comment with the same text
+still matches its hk comment and an extra copy is not hidden; a comment that
+names a task document but matches no expected copy differs. Any other comment is an import's: its author is the
+YouTrack user's login or name (the import named each user after its hk actor)
+and its time the created time, to the millisecond; it is matched with the hk
+comment of the same (time, author, body), since imported comments have no id
+map. A legacy mirror copy (its `youtrack_comment_links` id, or the
+`<!-- hk-comment:N -->` trailer) carries only the body: an equal body is the
+exception `legacy_mirror`, not a pass. Left out on both sides and counted: the
+activity pull's comments and their YouTrack originals (`pulled_left_out`). The seed is printed; `--seed S` repeats a
+sample on the same data.
+
+**Tasks.** The id is the `hk ID` field (else the description's `hk task: #N`
+line). The title is the description's title line in whichever form wrote it:
+issue_fields' `RenderFields` (whitespace collapsed, so PG's title is compared
+collapsed), issue_create's `RenderIssue` or the import's `Original hk title:`
+(both exact). The project is the `hk 프로젝트` field (else the description's
+project; both, when present, must agree), with `Unassigned` read as none.
+
+**Decisions.** The DEC issue's description is read in the Y6 form only:
+`RenderDecision`'s block (a decision_fields snapshot), or the block between
+decision_create's provenance line and marker. An issue still in the import's
+form (`답변:` lines, no question block or options) differs, as does a binding
+whose decision is gone from hk. PG's side is the projection's own text
+(`CanonicalDecision`). DEC issues live in one project, so `--project` does not
+narrow decisions.
+
+**Output.** Per target: `checked`, `equal`, `differ`, `exceptions` and `errors`
+(up to 10 ids each, with a one-line reason), and `not_rebuildable`: what of the
+target stays PG-only (hk 3833 §1.5), listed so a clean result is not read as
+covering it. A target whose table is not in the schema yet is `skipped` with
+the count it would have checked. The report also gives the wall time. Text by
+default, JSON with `--json`. Exit 0 when nothing differs; 4 when something
+differs; 1 when a read failed or the run stopped.
+
+**Rate.** One read at a time; a 429 is waited out as in the comment audit (the
+server's `Retry-After`, 5 s without one, at most 5 tries; a wait over 10
+minutes stops the run).
+
 ## Kind issue_create (hk 3898)
 
 hk creates a task's YouTrack issue itself, at most once per task, and
@@ -1096,8 +1171,108 @@ SHA-256 to the import's output.
 **Cap.** A document part may be up to `MaxDocCommentBodyBytes` (the import's
 240 KiB, `CheckDocComment`); hk's own comments keep `MaxBodyBytes` (64 KiB).
 
-**Audit.** A document copy is not an hk comment, so `youtrack audit` lists it
-as `yt_only_bot`, which the audit's gate does not count.
+**Audit.** A document copy is not an hk comment. One the import posted
+(`documentIssueComments`' `# <key>` report parts and `Article:` brief lines)
+classifies as `doc_comment` (`ytwrite.ImportedDocCommentKey`); a protocol
+document copy lists as `yt_only_bot`. Neither class is counted by the
+audit's gate.
+
+## Authority (hk 4122)
+
+Which side is canonical, per content kind, is a row in `yt_authority`
+(migration `20261112-yt-authority`, expand-only: one new table seeded with one
+`hk` row per kind). The kinds are `tasks`, `comments`, `documents` and
+`decisions`; the authority is `hk` (the default) or `youtrack`. A kind with no
+row reads as `hk`. The modes stay env values; the authority is not one, so a
+release rollback never meets an authority value it cannot parse (consult hk
+3833 §3.4).
+
+**Authority hk** is today's behaviour exactly.
+
+**Authority youtrack** for a kind:
+
+- `/v1/import/*` answers every page of that kind's resources with
+  `{"items": [], "next_cursor": null}` (200), after the request's own
+  validation: `projects` and `tasks` are tasks, `comments` and
+  `comment-authors` comments, `documents`, `task-documents` and
+  `document-authors` documents, `decisions` decisions. The other kinds' pages
+  are unchanged.
+- `youtrack sync` and `youtrack adopt` refuse (exit 5, before any YouTrack
+  call) while any kind is youtrack, naming the kinds, even with every mode off.
+  They check while holding the sync lock, which a switch to youtrack needs
+  too, so no switch commits during a run. The mode guard (hk 3907) still
+  refuses first while a mode is on.
+- `youtrack audit` reports `"repair_direction": "youtrack_to_pg"` (otherwise
+  `"pg_to_youtrack"`) when comments are youtrack, and `--enqueue` prepares
+  nothing (`"enqueue_skipped"` says why). Each enqueue transaction also
+  reads the authority itself, so a run that started before a switch stops
+  enqueuing at the switch. Its classes and exit codes are unchanged.
+- A comment that would stay only in PG is refused with 400
+  `{"error": "yt_comment_unsendable", "reason": ...}` and nothing is written:
+  one the protocol can never send (`ytwrite.CheckCommentContent`: the author
+  or the body, for example a body quoting the op marker), and one that gets no
+  op or a born-rejected one (the comments mode is off, the task is not bound,
+  or not enrolled in canary, or a mapping disagrees). Under hk the same
+  comments commit as before. A dots reply (`ReplyDots`), which prepares no op
+  under hk, gets its op in the reply's transaction under youtrack, or the whole
+  reply is refused the same way. Every comment writer reads the comments row
+  `FOR SHARE` (creating it as hk first if it is missing), so a switch waits for
+  a comment in flight and a comment sees a switch that committed first.
+
+**Commands.** `handoffkeep youtrack authority show` prints every kind's row
+(`GET /v1/yt/authority`). `handoffkeep youtrack authority set <kind|all>
+<hk|youtrack> --by NAME --note TEXT` (`POST /v1/yt/authority`, operator token
+only) switches in one transaction and prints every row before and after. The
+server first takes the legacy sync lock (a running `youtrack sync`, `adopt`
+or comment catch-up makes it refuse), then checks, for each kind it changes to
+youtrack, that its own write mode is on (tasks: `HANDOFFKEEP_YT_ISSUES_MODE` and `HANDOFFKEEP_YT_FIELDS_MODE`;
+comments: `HANDOFFKEEP_YT_COMMENTS_MODE=on`; documents:
+`HANDOFFKEEP_YT_DOC_COMMENTS_MODE`; decisions: `HANDOFFKEEP_YT_DECISIONS_MODE`) and that the kind has no `prepared`, `dispatched` or
+`remote_unknown` op (by principal: `hk:task-issues` and `hk:task-fields`,
+`hk:task-comments`, `hk:doc-comments`, `hk:decisions`), and that its feed
+consumers have read every change (`task_fields` for tasks, `task_docs` for
+documents, `decision_issues` for decisions; a consumer
+that has never run, or whose cursor is behind `sync_state.pruned_through`,
+refuses). Every op preparation holds its kind's row
+`FOR SHARE`, so the switch counts an op whose transaction was open when it
+started. Any refusal is 409
+`yt_authority_refused` naming each kind and reason, and no kind changes. A kind
+already on the target is left as it was. Setting `hk` always succeeds. Each
+changed kind logs `ytwrite.authority_set kind= authority= switched_by= note=`.
+
+### Switch runbook (consult hk 3833 §3.2, operator A53)
+
+Before the day, with no freeze: each kind's mode on, `youtrack audit`
+rehearsed until it is clean, a restore drill rehearsed, and the delta audit
+timed. There is no full YouTrack export (A53).
+
+1. Freeze: no new spawns, no hk deploys, no `youtrack_projects` edits and no
+   task project moves. PG writes need not stop; their ops follow.
+2. Confirm the import grant is gone (D3): the hk auth file has no
+   `HANDOFFKEEP_TOKEN_youtrack` or `HANDOFFKEEP_IMPORT_READONLY_youtrack` line.
+3. `youtrack ops`: no pending op, no `remote_unknown`, and only explained
+   `rejected` ones.
+4. Full `youtrack audit`: `unbound` 0 (or explained per task), `missing_in_yt`
+   0, `duplicate` 0, and the `yt_only` lists reviewed.
+5. The restore check (consult §3.3): no diff outside the allowed exception
+   list. Documents
+   over 240 KiB are on a "not updated" exception list at the first switch
+   (D4).
+6. `youtrack authority set <kind> youtrack --by NAME --note TEXT` for each
+   kind, or `all`. Check that the printed
+   `after` rows are youtrack and `youtrack authority show` agrees.
+7. Lift the freeze. For the next day, run the audit periodically and keep the
+   pending-op alert on.
+
+### Rollback
+
+`youtrack authority set <kind|all> hk --by NAME --note TEXT`: the effects
+above stop at once and nothing else changes. The only reverse repair is the
+audit's `yt_only` items (what people wrote in YouTrack meanwhile). A release
+rollback leaves the rows alone, but the previous release does not read
+`yt_authority`: while it serves, every kind behaves as hk (import pages,
+legacy push, unsendable comments). Set the kinds to hk before rolling back a
+release, or switch them again once the release that reads the table is back.
 
 ## Kinds decision_create and decision_fields (hk 4054)
 

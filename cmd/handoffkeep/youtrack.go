@@ -69,13 +69,15 @@ func youtrackCmd(args []string, out io.Writer) error {
 		return youtrackDecisionsBackfillCmd(args[1:], out)
 	case "audit":
 		return youtrackAuditCmd(args[1:], out)
+	case "authority":
+		return youtrackAuthorityCmd(args[1:], out)
 	default:
 		return errors.New(youtrackUsage)
 	}
 }
 
 // youtrackUsage also answers `yt`, the short name of this command.
-const youtrackUsage = "usage: youtrack sync [--dry-run] | youtrack adopt --state <yt_state.json> [--dry-run] | youtrack projects list|put | youtrack ops [--state S] [--kind K] [--task N] | youtrack canary add|remove|list | youtrack schema plan|apply [--project P] | youtrack comments-preflight [--project P] [--days N] [--all] | youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME] | youtrack articles-preflight [--project P] | youtrack articles-backfill [--project P] [--by NAME] | youtrack audit [--project P] [--task N] [--enqueue] [--limit N] | youtrack issues-backfill [--project P] [--dry-run] | youtrack fields-backfill [--project P] [--task N] [--limit N] [--dry-run] | youtrack decisions-backfill [--apply] [--by NAME] [--limit N]"
+const youtrackUsage = "usage: youtrack sync [--dry-run] | youtrack adopt --state <yt_state.json> [--dry-run] | youtrack projects list|put | youtrack ops [--state S] [--kind K] [--task N] | youtrack canary add|remove|list | youtrack schema plan|apply [--project P] | youtrack comments-preflight [--project P] [--days N] [--all] | youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME] | youtrack articles-preflight [--project P] | youtrack articles-backfill [--project P] [--by NAME] | youtrack audit [--project P] [--task N] [--enqueue] [--limit N] | youtrack issues-backfill [--project P] [--dry-run] | youtrack fields-backfill [--project P] [--task N] [--limit N] [--dry-run] | youtrack decisions-backfill [--apply] [--by NAME] [--limit N] | youtrack authority show | youtrack authority set <kind|all> <hk|youtrack> --by NAME --note TEXT"
 
 func youtrackSyncCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("youtrack sync", flag.ContinueOnError)
@@ -128,6 +130,11 @@ func youtrackSyncCmd(args []string, out io.Writer) error {
 			log.Printf("youtrack.unlock_failed err=%q", err)
 		}
 	}()
+	// Checked while the run holds the sync lock, which a switch to youtrack
+	// needs too (store.SetYTAuthority): no switch commits during the run.
+	if err := youtrackRefuseAuthority(ctx, st, "sync"); err != nil {
+		return err
+	}
 	service := youtrack.NewService(st, client, youtrackServiceOptions())
 	report, err := service.Sync(ctx, youtrack.SyncOptions{
 		DryRun:        *dryRun,
@@ -213,6 +220,11 @@ func youtrackAdoptCmd(args []string, out io.Writer) error {
 			log.Printf("youtrack.unlock_failed err=%q", err)
 		}
 	}()
+	// Checked while the run holds the sync lock, which a switch to youtrack
+	// needs too (store.SetYTAuthority): no switch commits during the run.
+	if err := youtrackRefuseAuthority(ctx, st, "adopt"); err != nil {
+		return err
+	}
 	service := youtrack.NewService(st, client, youtrackServiceOptions())
 	report, err := service.Adopt(ctx, state, *dryRun)
 	if printErr := printJSON(out, report); printErr != nil {
@@ -230,42 +242,41 @@ func youtrackAdoptCmd(args []string, out io.Writer) error {
 // youtrackProtocolOwner names the env setting that hands YouTrack writes to
 // the write protocol, or returns "" when none is set: comments mode canary or
 // on, issues mode on, fields mode on, document-comment mode on, or decisions
-// mode on. An unparsable mode is an error, so the guard fails closed.
+// mode on. Every mode is parsed before the owner is chosen, so an unparsable
+// value is a config error even when an earlier mode already owns the writes;
+// the guard fails closed.
 func youtrackProtocolOwner() (string, error) {
 	comments, err := ytCommentsModeFromEnv()
 	if err != nil {
 		return "", err
 	}
-	if comments != store.YTCommentsOff {
-		return "HANDOFFKEEP_YT_COMMENTS_MODE=" + string(comments), nil
-	}
 	issues, err := ytIssuesModeFromEnv()
 	if err != nil {
 		return "", err
-	}
-	if issues == store.YTIssuesOn {
-		return "HANDOFFKEEP_YT_ISSUES_MODE=on", nil
 	}
 	fields, err := ytFieldsModeFromEnv()
 	if err != nil {
 		return "", err
 	}
-	if fields == store.YTFieldsOn {
-		return "HANDOFFKEEP_YT_FIELDS_MODE=on", nil
-	}
 	docs, err := ytDocCommentsModeFromEnv()
 	if err != nil {
 		return "", err
-	}
-	if docs == store.YTDocCommentsOn {
-		return "HANDOFFKEEP_YT_DOC_COMMENTS_MODE=on", nil
 	}
 	// The legacy sync also mirrors the DEC issues (syncDecisions).
 	decisions, err := ytDecisionsModeFromEnv()
 	if err != nil {
 		return "", err
 	}
-	if decisions == store.YTDecisionsOn {
+	switch {
+	case comments != store.YTCommentsOff:
+		return "HANDOFFKEEP_YT_COMMENTS_MODE=" + string(comments), nil
+	case issues == store.YTIssuesOn:
+		return "HANDOFFKEEP_YT_ISSUES_MODE=on", nil
+	case fields == store.YTFieldsOn:
+		return "HANDOFFKEEP_YT_FIELDS_MODE=on", nil
+	case docs == store.YTDocCommentsOn:
+		return "HANDOFFKEEP_YT_DOC_COMMENTS_MODE=on", nil
+	case decisions == store.YTDecisionsOn:
 		return "HANDOFFKEEP_YT_DECISIONS_MODE=on", nil
 	}
 	// The legacy sync also pushes documents to articles (Service.syncDocs).

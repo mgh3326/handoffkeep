@@ -35,10 +35,15 @@ import (
 // thousand rows for that long; CREATE TRIGGER takes SHARE ROW EXCLUSIVE on it
 // briefly. The migration writes no row.
 func init() {
-	registerMigration(migration{ID: "20261111-yt-task-binding-origin", After: []string{YTTaskBindingsMigration, "20261109-yt-write-ops"}, Apply: func(ctx context.Context, tx pgx.Tx) error {
+	registerMigration(migration{ID: YTTaskBindingOriginMigration, After: []string{YTTaskBindingsMigration, "20261109-yt-write-ops"}, Apply: func(ctx context.Context, tx pgx.Tx) error {
 		return execAll(ctx, tx, ytTaskBindingOriginStatements)
 	}})
 }
+
+// YTTaskBindingOriginMigration is the migration's registered ID. The
+// read-only youtrack commands refuse a schema that does not record it
+// (Store.MigrationApplied): their binding reads select origin and op_id.
+const YTTaskBindingOriginMigration = "20261111-yt-task-binding-origin"
 
 var ytTaskBindingOriginStatements = []string{
 	`ALTER TABLE yt_task_bindings ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'import_verified'

@@ -40,7 +40,8 @@ type AuditAmbiguous struct {
 }
 
 // CommentAudit is one issue's comparison. Every live YouTrack comment is a
-// copy of one hk comment, in AmbiguousCopy (assigned to neither), or in
+// copy of one hk comment, in AmbiguousCopy (assigned to neither), DocComment
+// (a document copy the import posted, ImportedDocCommentKey), or in
 // YTOnlyBot (written by the bot) or YTOnlyHuman (anyone else). Every hk
 // comment is in exactly one of Present (one copy), Duplicate (two or more)
 // and Missing (none), except that one with no copy named by an
@@ -51,8 +52,11 @@ type CommentAudit struct {
 	Missing       []AuditCopies
 	Duplicate     []AuditCopies
 	AmbiguousCopy []AuditAmbiguous
-	YTOnlyBot     []string
-	YTOnlyHuman   []string
+	// DocComment lists the YouTrack comments that are document copies the
+	// import posted (client.js documentIssueComments), in listing order.
+	DocComment  []string
+	YTOnlyBot   []string
+	YTOnlyHuman []string
 }
 
 // AuditComments matches hk comments to YouTrack comments, by the strongest
@@ -65,7 +69,9 @@ type CommentAudit struct {
 // YouTrack trims comment text. If that makes one remote body match distinct
 // hk bodies, the copy is ambiguous. Equal bodies are shared in comment id
 // order; extra copies make the last comment a duplicate. botID is the bot's
-// YouTrack user id.
+// YouTrack user id. A comment that copies nothing and whose text is a
+// document copy the import posted (ImportedDocCommentKey) is DocComment,
+// never YTOnly.
 func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy func(text string) (int64, bool)) CommentAudit {
 	hk = append([]AuditComment(nil), hk...)
 	sort.Slice(hk, func(i, j int) bool { return hk[i].ID < hk[j].ID })
@@ -167,7 +173,9 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy f
 			group = byTrimmedImportedBody[trimmed]
 		}
 		if len(group) == 0 {
-			if botID != "" && c.AuthorID == botID {
+			if _, ok := ImportedDocCommentKey(c.Text); ok {
+				out.DocComment = append(out.DocComment, c.ID)
+			} else if botID != "" && c.AuthorID == botID {
 				out.YTOnlyBot = append(out.YTOnlyBot, c.ID)
 			} else {
 				out.YTOnlyHuman = append(out.YTOnlyHuman, c.ID)
