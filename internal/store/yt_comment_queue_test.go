@@ -349,6 +349,7 @@ func ytqDue(t *testing.T, s *Store, id int64) bool {
 // to op 3's issue in the new project.
 func TestYTCommentQueuedFollowsTheReplacementAfterAMove(t *testing.T) {
 	s, x, create := ytqSetup(t, "ytq_replaced")
+	s.SetYTIssueRetarget(true)
 	ctx := t.Context()
 	ytrProject(t, s, "ytq-other", "0-9")
 	c, err := s.CreateTaskComment(ctx, x.ID, "worker", "queued behind op 1")
@@ -395,6 +396,7 @@ func TestYTCommentQueuedFollowsTheReplacementAfterAMove(t *testing.T) {
 // refused; the comments keep their order across the replacement.
 func TestYTCommentQueuedKeepsOrderAcrossAReplacement(t *testing.T) {
 	s, x, _ := ytqSetup(t, "ytq_order")
+	s.SetYTIssueRetarget(true)
 	ctx := t.Context()
 	ytrProject(t, s, "ytq-other", "0-9")
 	first, err := s.CreateTaskComment(ctx, x.ID, "worker", "first, behind op 1")
@@ -447,6 +449,7 @@ func TestYTCommentQueuedKeepsOrderAcrossAReplacement(t *testing.T) {
 // delivered once the project is mapped and the intent becomes the op.
 func TestYTCommentQueuedWaitsForTheIssueIntent(t *testing.T) {
 	s, x, _ := ytqSetup(t, "ytq_intent")
+	s.SetYTIssueRetarget(true)
 	ctx := t.Context()
 	ytrProject(t, s, "ytq-later", "")
 	c, err := s.CreateTaskComment(ctx, x.ID, "worker", "queued, then the task moved to an unmapped project")
@@ -480,5 +483,39 @@ func TestYTCommentQueuedWaitsForTheIssueIntent(t *testing.T) {
 	b, found, err := s.YTTaskBinding(ctx, x.ID)
 	if err != nil || !found || b.ProjectID != "0-11" || got.State != ytwrite.StateApplied || got.YTTargetID != b.IssueID {
 		t.Fatalf("comment op %+v, binding %+v %v %v", got, b, found, err)
+	}
+}
+
+// A binding the operator verifies while a comment is queued behind an issue
+// intent is refused (PR #357 review): the queued comment takes its target
+// only from a binding an issue_create op publishes, so it would be rejected.
+// Once the intent's op applies, the comment is delivered.
+func TestYTCommentQueuedRefusesABindingWhileItWaits(t *testing.T) {
+	s, x, _ := ytqSetup(t, "ytq_bind")
+	s.SetYTIssueRetarget(true)
+	ctx := t.Context()
+	ytrProject(t, s, "ytq-later", "")
+	c, err := s.CreateTaskComment(ctx, x.ID, "worker", "queued, then the task moved to an unmapped project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, _ := ytcOpFor(t, s, c.ID)
+	ytrMove(t, s, x.ID, "ytq-later")
+	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "ytq-later", ProjectID: "0-11", ShortName: "HL"}); err != nil {
+		t.Fatal(err)
+	}
+	b := ytbBinding(x.ID)
+	b.ProjectID = "0-11"
+	if _, err := ytbAdd(t, s, b); !errors.Is(err, ErrYTBindingConflict) || !contains(err.Error(), "unresolved") {
+		t.Fatalf("binding while a comment is queued: err = %v", err)
+	}
+	if n, err := s.PrepareMappedYTIssues(ctx, 10); err != nil || n != 1 {
+		t.Fatalf("intent pass prepared %d, %v", n, err)
+	}
+	yt := ytwritetest.NewFake()
+	var offset atomic.Int64
+	got := ytqDrive(t, s, ytcProtocol(t, s, yt, &offset), op.ID)
+	if got.State != ytwrite.StateApplied || got.YTTargetID == "" {
+		t.Fatalf("comment op %+v", got)
 	}
 }

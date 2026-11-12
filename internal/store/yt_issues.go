@@ -65,6 +65,20 @@ func (s *Store) SetYTIssuesBucketProject(projectID string) {
 	s.ytIssues.Store(&gate)
 }
 
+// SetYTIssueRetarget sets the issue-retarget gate for this process (hk 4318,
+// HANDOFFKEEP_YT_ISSUE_RETARGET; default off). On, a task moved before its
+// issue_create op was sent gets the op rejected project_changed and replaced
+// (syncYTIssueTx). Off, the op is left as it is, as before hk 4318: its issue
+// is created in the old project and moves follow the binding.
+//
+// It is a gate and not always on because of blue-green: the previous
+// release's worker orders a lane by id alone and takes a queued comment's
+// target only from the binding of the op keyed IssueKey, so it would claim a
+// comment queued behind the rejected op before the replacement and reject it
+// issue_not_bound. The operator turns it on once no release older than this
+// one serves (and off again before rolling back to one).
+func (s *Store) SetYTIssueRetarget(on bool) { s.ytIssueRetarget.Store(on) }
+
 // ytIssuesNow is the gate: on and its tenant, or off.
 func (s *Store) ytIssuesNow() (YTIssuesMode, string) {
 	g := s.ytIssues.Load()
@@ -221,6 +235,10 @@ func (s *Store) syncYTIssueTx(ctx context.Context, tx pgx.Tx, t Task, now time.T
 		if found && ytIssueOpTargets(latest, p) {
 			return 0, false, dropYTIssueIntentTx(ctx, tx, t.ID)
 		}
+		if !s.ytIssueRetarget.Load() {
+			// The gate is off: the op is left as it is (SetYTIssueRetarget).
+			return 0, false, nil
+		}
 		if !found && deref(t.Project) == "" {
 			// A task with no project goes to the HK bucket, whose id only a
 			// process in issue mode on knows: one that does not cannot tell
@@ -292,7 +310,7 @@ func dropYTIssueIntentTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
 // row is read without a lock (no lane holder locks a task row); a task that
 // no longer exists leaves op as it is.
 func (s *Store) claimSyncYTIssueTx(ctx context.Context, tx pgx.Tx, now time.Time, op ytwrite.Op) (moved bool, err error) {
-	if op.Kind != ytwrite.KindIssueCreate || op.Principal != YTIssuePrincipal || op.EntityKind != "task" {
+	if op.Kind != ytwrite.KindIssueCreate || op.Principal != YTIssuePrincipal || op.EntityKind != "task" || !s.ytIssueRetarget.Load() {
 		return false, nil
 	}
 	taskID, err := strconv.ParseInt(op.EntityID, 10, 64)
@@ -471,13 +489,19 @@ func bindYTIssueTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string, n
 }
 
 // ytIssueOpPendingTx reports whether task has an issue_create op that is not
-// yet applied or rejected: the writers that give the task an issue another
-// way (AddYTTaskBinding, AddYTCommentCanary) refuse while it does, so the op
-// never races them to a second issue. The caller holds the task's lane lock.
+// yet applied or rejected, or a comment op queued with no target
+// (queueYTCommentTx): the writers that give the task an issue another way
+// (AddYTTaskBinding, AddYTCommentCanary) refuse while it does, so the op
+// never races them to a second issue, and a queued comment, which takes its
+// target only from a binding an issue_create op published, is not left with
+// a binding it must reject (hk 4318: its create may be a replacement still
+// waiting as an issue intent). The caller holds the task's lane lock.
 func ytIssueOpPendingTx(ctx context.Context, q ytRowQuerier, taskID int64) (bool, error) {
 	var pending bool
-	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$1 AND entity_kind='task' AND entity_id=$2
-		AND state NOT IN ('applied','rejected'))`, ytwrite.KindIssueCreate, strconv.FormatInt(taskID, 10)).Scan(&pending)
+	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE entity_kind='task' AND entity_id=$2
+		AND ((kind=$1 AND state NOT IN ('applied','rejected'))
+			OR (kind=$3 AND principal=$4 AND yt_target_id='' AND state='prepared')))`,
+		ytwrite.KindIssueCreate, strconv.FormatInt(taskID, 10), ytwrite.KindCommentAppend, YTCommentPrincipal).Scan(&pending)
 	return pending, err
 }
 
@@ -492,6 +516,9 @@ type YTIssueBackfillProject struct {
 	Existing int `json:"existing"`
 	// Unmapped: the project maps to no YouTrack project.
 	Unmapped int `json:"unmapped"`
+	// OtherTenant: the task waits on an issue intent of another tenant
+	// (hk 3942); that tenant's worker prepares its op.
+	OtherTenant int `json:"other_tenant"`
 	// Owned: the task already has an issue hk knows of (a binding, a canary
 	// enrollment, a task map row or a YouTrack origin recorded earlier);
 	// creating one would make a second.
@@ -553,13 +580,16 @@ func (s *Store) BackfillYTIssueOps(ctx context.Context, tenant, project string, 
 			p.Unmapped++
 		case "owned":
 			p.Owned++
+		case "other_tenant":
+			p.OtherTenant++
 		}
 	}
 	return r, nil
 }
 
 // backfillYTIssue is one task of a backfill, in one transaction: "prepared",
-// "rejected", "existing", "owned" or "unmapped", and the task's project. It
+// "rejected", "existing", "owned", "other_tenant" or "unmapped", and the
+// task's project. A prepared op drops the task's intent. It
 // takes the task's lane lock first, the lock canary enrollment and the
 // comment path take before they give the task an issue, so an "owned" check
 // and the op it allows cannot interleave with them.
@@ -592,6 +622,15 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 	if owned {
 		return "owned", name, nil
 	}
+	// A task waiting on an issue intent belongs to the intent's tenant
+	// (hk 3942): only that tenant's op may be prepared for it here.
+	var intent string
+	if err := tx.QueryRow(ctx, `SELECT coalesce((SELECT tenant FROM yt_issue_intents WHERE task_id=$1),'')`, taskID).Scan(&intent); err != nil {
+		return "", "", err
+	}
+	if intent != "" && intent != tenant {
+		return "other_tenant", name, nil
+	}
 	p, found, err := s.ytIssueProject(ctx, tx, name)
 	if err != nil {
 		return "", "", err
@@ -604,6 +643,9 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 	}
 	op, created, err := prepareYTIssueTx(ctx, tx, time.Now().UTC(), t, p, tenant, 0)
 	if err != nil {
+		return "", "", err
+	}
+	if err := dropYTIssueIntentTx(ctx, tx, taskID); err != nil {
 		return "", "", err
 	}
 	outcome := "prepared"

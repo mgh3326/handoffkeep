@@ -106,6 +106,21 @@ func ytMovesModeFromEnv() (store.YTMovesMode, error) {
 	}
 }
 
+// ytIssueRetargetFromEnv reads HANDOFFKEEP_YT_ISSUE_RETARGET (hk 4318):
+// unset or "off" (the default) or "on". Any other value is an error. On, a
+// task moved before its issue_create op was sent gets the op replaced
+// (store.SetYTIssueRetarget); turn it on only once no older release serves.
+func ytIssueRetargetFromEnv() (bool, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_ISSUE_RETARGET")); raw {
+	case "", "off":
+		return false, nil
+	case "on":
+		return true, nil
+	default:
+		return false, fmt.Errorf("HANDOFFKEEP_YT_ISSUE_RETARGET=%q: want off or on", raw)
+	}
+}
+
 // ytDocCommentsModeFromEnv reads HANDOFFKEEP_YT_DOC_COMMENTS_MODE (hk 4xxx):
 // unset or "off" (the default) or "on", exactly like the fields mode. Any
 // other value is an error.
@@ -214,6 +229,10 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	if err != nil {
 		return nil, err
 	}
+	retarget, err := ytIssueRetargetFromEnv()
+	if err != nil {
+		return nil, err
+	}
 	articles, err := ytDocsModeFromEnv()
 	if err != nil {
 		return nil, err
@@ -224,6 +243,9 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	}
 	if st != nil {
 		st.SetYTMovesMode(moves)
+		// Every project writer of this process reads it, worker or not.
+		st.SetYTIssueRetarget(retarget)
+		log.Printf("ytwrite.issue_retarget on=%t", retarget)
 	}
 	if mode == store.YTCommentsOff && issues == store.YTIssuesOff && fields == store.YTFieldsOff && docs == store.YTDocCommentsOff && decisions == store.YTDecisionsOff && articles == store.YTDocsOff {
 		if st != nil {

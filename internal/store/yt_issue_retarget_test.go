@@ -54,6 +54,7 @@ func ytrAfter(task int64, replaced ytwrite.Op) string {
 // intent on the op's tenant. A sent op is left alone.
 func TestYTIssueProjectChangeReplacesAnUnsentOp(t *testing.T) {
 	s := schemaStore(t, "ytr_move")
+	s.SetYTIssueRetarget(true)
 	ytbMapped(t, s)
 	ytrProject(t, s, "ytr-other", "0-9")
 	ytrProject(t, s, "ytr-unmapped", "")
@@ -96,6 +97,7 @@ func TestYTIssueProjectChangeReplacesAnUnsentOp(t *testing.T) {
 // is still replaced.
 func TestYTIssueProjectChangeWithinOneYouTrackProject(t *testing.T) {
 	s := schemaStore(t, "ytr_twin")
+	s.SetYTIssueRetarget(true)
 	ytbMapped(t, s)
 	ytrProject(t, s, "ytr-twin", ytbProjectID)
 	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
@@ -117,6 +119,7 @@ func TestYTIssueProjectChangeWithinOneYouTrackProject(t *testing.T) {
 // lock, instead of the issue created in the old project.
 func TestYTIssueMovedOpIsReplacedAtItsClaim(t *testing.T) {
 	s := schemaStore(t, "ytr_claim")
+	s.SetYTIssueRetarget(true)
 	ytbMapped(t, s)
 	ytrProject(t, s, "ytr-other", "0-9")
 	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
@@ -173,6 +176,7 @@ func TestYTIssueMovedOpIsReplacedAtItsClaim(t *testing.T) {
 // rejected op. Nothing is prepared twice, nor in mode off.
 func TestYTIssueUnmappedTaskGetsItsOpOnceMapped(t *testing.T) {
 	s := schemaStore(t, "ytr_intent")
+	s.SetYTIssueRetarget(true)
 	ytbMapped(t, s)
 	ytrProject(t, s, "ytr-later", "")
 	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
@@ -220,6 +224,7 @@ func TestYTIssueUnmappedTaskGetsItsOpOnceMapped(t *testing.T) {
 // worker; the op it becomes is bound to that tenant.
 func TestYTIssueIntentIsConsumedOnlyOnItsTenant(t *testing.T) {
 	s := schemaStore(t, "ytr_tenant")
+	s.SetYTIssueRetarget(true)
 	ytrProject(t, s, "ytr-later", "")
 	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
 	x := ytiCreate(t, s, "ytr-later")
@@ -245,6 +250,7 @@ func TestYTIssueIntentIsConsumedOnlyOnItsTenant(t *testing.T) {
 // op as it is rather than treat the task as moved.
 func TestYTIssueBucketOpIsKeptWhereTheBucketIsUnknown(t *testing.T) {
 	s := schemaStore(t, "ytr_bucket")
+	s.SetYTIssueRetarget(true)
 	s.SetYTIssuesBucketProject("0-hk")
 	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
 	task, err := s.CreateDotsRequest(t.Context(), "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester"})
@@ -258,5 +264,50 @@ func TestYTIssueBucketOpIsKeptWhereTheBucketIsUnknown(t *testing.T) {
 	ytiDispatch(t, s, ytiOps(t, s, task.ID)[0])
 	if ops := ytiOps(t, s, task.ID); len(ops) != 1 || ops[0].State != ytwrite.StateDispatched {
 		t.Fatalf("ops after a claim without the bucket %+v", ops)
+	}
+}
+
+// With the retarget gate off (the default, until no older release serves), a
+// moved task's unsent op is left as it was before hk 4318: it is claimed and
+// creates the issue in the old project, and no intent is recorded.
+func TestYTIssueRetargetOffLeavesTheOp(t *testing.T) {
+	s := schemaStore(t, "ytr_off")
+	ytbMapped(t, s)
+	ytrProject(t, s, "ytr-other", "0-9")
+	ytrProject(t, s, "ytr-unmapped", "")
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	x := ytiCreate(t, s, ytbProject)
+	ytrMove(t, s, x.ID, "ytr-other")
+	ytrMove(t, s, x.ID, "ytr-unmapped")
+	ops := ytiOps(t, s, x.ID)
+	if len(ops) != 1 || ops[0].State != ytwrite.StatePrepared || ops[0].YTTargetID != ytbProjectID || ytrIntent(t, s, x.ID) != "" {
+		t.Fatalf("ops %+v, intent %q", ops, ytrIntent(t, s, x.ID))
+	}
+	if out := ytiClaim(t, s, ops[0]); out != ytwrite.ClaimClaimed {
+		t.Fatalf("claim with the gate off = %s", out)
+	}
+}
+
+// issues-backfill honours an intent's tenant (PR #357 review): a backfill on
+// another tenant leaves the task to the intent's worker; one on the intent's
+// tenant prepares the op and drops the intent.
+func TestYTIssueBackfillHonoursTheIntentTenant(t *testing.T) {
+	s := schemaStore(t, "ytr_backfill")
+	ytrProject(t, s, "ytr-later", "")
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	x := ytiCreate(t, s, "ytr-later")
+	if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: "ytr-later", ProjectID: "0-11", ShortName: "HL"}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := s.BackfillYTIssueOps(t.Context(), "other.youtrack.cloud", "ytr-later", false)
+	if err != nil || len(r.Projects) != 1 || r.Projects[0].OtherTenant != 1 || r.Projects[0].Prepared != 0 || len(ytiOps(t, s, x.ID)) != 0 {
+		t.Fatalf("other-tenant backfill %+v %v, ops %+v", r, err, ytiOps(t, s, x.ID))
+	}
+	r, err = s.BackfillYTIssueOps(t.Context(), ytcTenant, "ytr-later", false)
+	if err != nil || len(r.Projects) != 1 || r.Projects[0].Prepared != 1 {
+		t.Fatalf("own-tenant backfill %+v %v", r, err)
+	}
+	if ops := ytiOps(t, s, x.ID); len(ops) != 1 || ops[0].Tenant != ytcTenant || ytrIntent(t, s, x.ID) != "" {
+		t.Fatalf("ops %+v, intent %q", ops, ytrIntent(t, s, x.ID))
 	}
 }

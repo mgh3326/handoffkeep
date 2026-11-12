@@ -590,6 +590,10 @@ type Store struct {
 	// YTMovesMode; unset is off. On prepares and admits issue_move ops
 	// (yt_move.go).
 	ytMoves atomic.Value
+	// ytIssueRetarget is the issue-retarget gate (SetYTIssueRetarget,
+	// HANDOFFKEEP_YT_ISSUE_RETARGET); false is off. On replaces an unsent
+	// issue_create op whose task moved (syncYTIssueTx, hk 4318).
+	ytIssueRetarget atomic.Bool
 	// ytDocComments is the YouTrack document-comment gate
 	// (SetYTDocCommentsMode), a YTDocCommentsMode; unset is off. On copies
 	// task-tied reports and briefs from the change feed (yt_doc_comments.go).
