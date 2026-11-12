@@ -196,7 +196,10 @@ package store
 //     (SetTaskProject, a triage's project; retargetYTIssueTx, hk 3909)
 //     takes the task's lane lock last, after its own locks and the task row,
 //     as CreateTask does, then reads youtrack_projects without a lock and
-//     rejects and inserts yt_write_ops rows.
+//     rejects and inserts yt_write_ops rows (and a yt_issue_intents row).
+//     PrepareMappedYTIssues (hk 3942) reads the task row without a lock,
+//     then takes the lane lock as the first lock of its transaction, as
+//     backfillYTIssue does.
 //     No cycle, lock by lock:
 //       - The ownership lock: only those two writers take it, always first
 //         and while holding nothing, so no transaction waits for it while

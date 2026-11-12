@@ -649,13 +649,17 @@ Turning it on ends the YouTrack import (decision D3); the operator does that.
 project and the YouTrack project's short name. In mode on, every task creator
 (`CreateTask`, intake, ticket sets, dots, dispositions) prepares it in the
 task's own transaction when the task's project has a
-`youtrack_projects` row with a project id; otherwise no op and one
-`ytwrite.issue_skipped` line. A task the protocol cannot render (an actor
+`youtrack_projects` row with a project id; otherwise no op, one
+`ytwrite.issue_skipped` line and a `yt_issue_intents` row (migration
+`20261112-yt-issue-intents`, hk 3942). Before each Drive pass the write worker
+(mode on) prepares the op of every intent whose task's project now has its
+mapping, under the task's lane lock, and drops the intent; a task that got its
+op or an issue another way meanwhile only loses the intent. A task the protocol cannot render (an actor
 with ` · `, a title quoting the marker) gets the op rejected `invalid_issue`.
 A task moved to another project (`SetTaskProject`, a triage's project) while
 its op is still `prepared` (nothing sent) gets the op rejected
 `project_changed` and, when the new project is mapped, a replacement op for
-that project on the same tenant, keyed `task-issue:<id>:after-<old op id>`, in
+that project on the same tenant (else an intent, above), keyed `task-issue:<id>:after-<old op id>`, in
 the move's transaction (hk 3909). An op already dispatched, uncertain or
 resolved is left alone: its issue may exist in the old project.
 `handoffkeep youtrack issues-backfill [--project P] [--dry-run]` prepares the

@@ -592,3 +592,41 @@ func TestYTIssueProjectChangeRetargetsAnUnsentOp(t *testing.T) {
 		t.Fatalf("a dispatched op was retargeted: %+v", ops)
 	}
 }
+
+// A task created (or moved) while its project maps to no YouTrack project
+// keeps a durable intent; the worker prepares its op once the mapping exists
+// (hk 3942).
+func TestYTIssueUnmappedTaskGetsItsOpOnceMapped(t *testing.T) {
+	s := schemaStore(t, "yti_intent")
+	ytbMapped(t, s)
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	const later = "yti-later"
+	x := ytiCreate(t, s, later)
+	moved := ytiCreate(t, s, ytbProject)
+	if _, _, err := s.SetTaskProject(t.Context(), moved.ID, later, "test", "moved"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.PrepareMappedYTIssues(t.Context(), 10); err != nil || n != 0 || len(ytiOps(t, s, x.ID)) != 0 {
+		t.Fatalf("unmapped pass prepared %d, %v", n, err)
+	}
+	if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: later, ProjectID: "0-11", ShortName: "HL"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.PrepareMappedYTIssues(t.Context(), 10); err != nil || n != 2 {
+		t.Fatalf("mapped pass prepared %d, %v; want 2", n, err)
+	}
+	if ops := ytiOps(t, s, x.ID); len(ops) != 1 || ops[0].State != ytwrite.StatePrepared || ops[0].Key != ytwrite.IssueKey(x.ID) || ops[0].YTTargetID != "0-11" {
+		t.Fatalf("ops of the created task %+v", ops)
+	}
+	if ops := ytiOps(t, s, moved.ID); len(ops) != 2 || ops[0].Reason != ytwrite.ReasonProjectChanged || ops[1].State != ytwrite.StatePrepared ||
+		ops[1].Key != ytwrite.IssueKey(moved.ID)+":after-"+strconv.FormatInt(ops[0].ID, 10) {
+		t.Fatalf("ops of the moved task %+v", ops)
+	}
+	if n, err := s.PrepareMappedYTIssues(t.Context(), 10); err != nil || n != 0 {
+		t.Fatalf("second pass prepared %d, %v", n, err)
+	}
+	s.SetYTIssuesMode(YTIssuesOff, "")
+	if n, err := s.PrepareMappedYTIssues(t.Context(), 10); err != nil || n != 0 {
+		t.Fatalf("mode off prepared %d, %v", n, err)
+	}
+}
