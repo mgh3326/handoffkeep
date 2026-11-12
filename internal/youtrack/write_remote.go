@@ -159,7 +159,9 @@ type listedComment struct {
 	Updated *int64 `json:"updated"`
 	Deleted bool   `json:"deleted"`
 	Author  *struct {
-		ID string `json:"id"`
+		ID    string `json:"id"`
+		Login string `json:"login"`
+		Name  string `json:"name"`
 	} `json:"author"`
 }
 
@@ -175,7 +177,7 @@ func (r *WriteRemote) ListComments(ctx context.Context, issueID string, pageSize
 	path := "/api/issues/" + url.PathEscape(issueID) + "/comments"
 	return ytwrite.EnumerateStableComments(ctx, pageSize, func(ctx context.Context, skip, top int) ([]ytwrite.RemoteComment, error) {
 		q := url.Values{}
-		q.Set("fields", "id,text,created,updated,deleted,author(id)")
+		q.Set("fields", "id,text,created,updated,deleted,author(id,login,name)")
 		q.Set("$skip", strconv.Itoa(skip))
 		q.Set("$top", strconv.Itoa(top))
 		data, readErr, err := r.send(ctx, http.MethodGet, path, q, nil)
@@ -195,9 +197,9 @@ func (r *WriteRemote) ListComments(ctx context.Context, issueID string, pageSize
 			if c.Updated != nil {
 				at = *c.Updated
 			}
-			rc := ytwrite.RemoteComment{ID: c.ID, Text: c.Text, UpdatedAt: time.UnixMilli(at), Deleted: c.Deleted}
+			rc := ytwrite.RemoteComment{ID: c.ID, Text: c.Text, UpdatedAt: time.UnixMilli(at), Deleted: c.Deleted, CreatedAt: time.UnixMilli(c.Created).UTC()}
 			if c.Author != nil {
-				rc.AuthorID = c.Author.ID
+				rc.AuthorID, rc.AuthorLogin, rc.AuthorName = c.Author.ID, c.Author.Login, c.Author.Name
 			}
 			out = append(out, rc)
 		}

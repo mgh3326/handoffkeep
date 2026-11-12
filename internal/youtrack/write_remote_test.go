@@ -463,7 +463,7 @@ func TestAdapterEnumeratesActualRevisionAndDeletion(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/api/issues/2-77/comments" {
 			t.Errorf("request %s %s", r.Method, r.URL.Path)
 		}
-		for _, f := range []string{"id", "text", "updated", "deleted", "author(id)"} {
+		for _, f := range []string{"id", "text", "created", "updated", "deleted", "author(id,login,name)"} {
 			if !strings.Contains(q.Get("fields"), f) {
 				t.Errorf("fields %q lacks %s", q.Get("fields"), f)
 			}
@@ -501,6 +501,10 @@ func TestAdapterEnumeratesActualRevisionAndDeletion(t *testing.T) {
 	// The author's id, for the comment audit; "" when the listing has none.
 	if hk.AuthorID != "1-1" || byID["4-101"].AuthorID != "1-7" || byID["4-103"].AuthorID != "" {
 		t.Fatalf("author ids %q %q %q", hk.AuthorID, byID["4-101"].AuthorID, byID["4-103"].AuthorID)
+	}
+	// The created time apart from the revision, for the rebuild drill.
+	if !byID["4-103"].CreatedAt.Equal(time.UnixMilli(1731150000000)) || !byID["4-101"].CreatedAt.Equal(time.UnixMilli(1731117600000)) {
+		t.Fatalf("created times %v %v", byID["4-103"].CreatedAt, byID["4-101"].CreatedAt)
 	}
 }
 

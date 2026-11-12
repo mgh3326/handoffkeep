@@ -299,6 +299,14 @@ type RemoteComment struct {
 	// the remote did not say). The comment audit tells the bot's comments
 	// from people's by it; the protocol never reads it.
 	AuthorID string
+	// CreatedAt, AuthorLogin and AuthorName are the comment's creation time
+	// and its author's login and name, as listed ("" or zero when the
+	// remote did not say). The rebuild drill (`youtrack audit --rebuild`)
+	// reads an imported comment's author and time from them; the protocol
+	// and the stable enumeration never read them.
+	CreatedAt   time.Time
+	AuthorLogin string
+	AuthorName  string
 }
 
 // Remote is the YouTrack surface the protocol uses. CreateComment makes exactly

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -472,7 +473,17 @@ func (c *ytAuditCounts) fillEmpty() {
 	}
 }
 
-const youtrackAuditUsage = "usage: youtrack audit [--project P] [--task N] [--enqueue] [--limit N]"
+const youtrackAuditUsage = "usage: youtrack audit [--project P] [--task N] [--enqueue] [--limit N] | " + youtrackRebuildUsage
+
+// isRebuildFlag reports whether arg turns on the restore drill (--rebuild,
+// youtrackRebuildCmd), which takes its own flags.
+func isRebuildFlag(arg string) bool {
+	switch arg {
+	case "--rebuild", "-rebuild", "--rebuild=true", "-rebuild=true":
+		return true
+	}
+	return false
+}
 
 // youtrackAuditCmd is `youtrack audit`. It opens the database directly and
 // reads YouTrack with the bot key, like comments-backfill, against the tenant
@@ -482,6 +493,9 @@ const youtrackAuditUsage = "usage: youtrack audit [--project P] [--task N] [--en
 // missing_in_yt or duplicate comment or an unbound task exits
 // youtrackExitAuditGap.
 func youtrackAuditCmd(args []string, out io.Writer) error {
+	if slices.ContainsFunc(args, isRebuildFlag) {
+		return youtrackRebuildCmd(args, out)
+	}
 	fs := flag.NewFlagSet("youtrack audit", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	project := fs.String("project", "", "only tasks of this hk project")
