@@ -652,6 +652,12 @@ task's own transaction when the task's project has a
 `youtrack_projects` row with a project id; otherwise no op and one
 `ytwrite.issue_skipped` line. A task the protocol cannot render (an actor
 with ` · `, a title quoting the marker) gets the op rejected `invalid_issue`.
+A task moved to another project (`SetTaskProject`, a triage's project) while
+its op is still `prepared` (nothing sent) gets the op rejected
+`project_changed` and, when the new project is mapped, a replacement op for
+that project on the same tenant, keyed `task-issue:<id>:after-<old op id>`, in
+the move's transaction (hk 3909). An op already dispatched, uncertain or
+resolved is left alone: its issue may exist in the old project.
 `handoffkeep youtrack issues-backfill [--project P] [--dry-run]` prepares the
 op for every task with no binding, bound to the host of `YOUTRACK_URL`; it
 calls no YouTrack, skips a task that already has its op, and so is idempotent.

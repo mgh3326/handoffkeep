@@ -99,9 +99,9 @@ func readYTIssueProject(ctx context.Context, q ytRowQuerier, project string) (yt
 // now. A task the protocol cannot render gets a rejected op (invalid_issue)
 // and nothing is ever sent. created is false when the task already had its op
 // (the key replays). The caller has read p.
-func prepareYTIssueTx(ctx context.Context, tx pgx.Tx, now time.Time, t Task, p ytIssueProject, tenant string) (ytwrite.Op, bool, error) {
+func prepareYTIssueTx(ctx context.Context, tx pgx.Tx, now time.Time, t Task, p ytIssueProject, tenant string, replaces int64) (ytwrite.Op, bool, error) {
 	req := ytwrite.IssueRequest{Principal: YTIssuePrincipal, Actor: t.CreatedBy, TaskID: t.ID, Title: t.Title,
-		Project: p.project, YTProjectID: p.projectID, YTProjectShort: p.shortName, Tenant: tenant}
+		Project: p.project, YTProjectID: p.projectID, YTProjectShort: p.shortName, Tenant: tenant, Replaces: replaces}
 	n, err := ytwrite.IssueOp(req)
 	if err != nil {
 		return ytwrite.Op{}, false, err
@@ -139,11 +139,56 @@ func (s *Store) enqueueYTIssueTx(ctx context.Context, tx pgx.Tx, t Task) error {
 		log.Printf("ytwrite.issue_skipped task_id=%d project=%q reason=project_unmapped", t.ID, deref(t.Project))
 		return nil
 	}
-	op, _, err := prepareYTIssueTx(ctx, tx, t.CreatedAt.UTC(), t, p, tenant)
+	op, _, err := prepareYTIssueTx(ctx, tx, t.CreatedAt.UTC(), t, p, tenant, 0)
 	if err != nil {
 		return err
 	}
 	log.Printf("ytwrite.issue_enqueued op_id=%d task_id=%d state=%s reason=%q", op.ID, t.ID, op.State, op.Reason)
+	return nil
+}
+
+// retargetYTIssueTx keeps a task's unsent issue op on the task's current
+// project (hk 3909). Every writer of tasks.project calls it in its own
+// transaction, after the update. A prepared op (nothing was sent: a prepared
+// op is new or was deferred because the remote did not process it) whose
+// YouTrack project is not the one the task's project now maps to is rejected
+// project_changed, and the current project's op is prepared in its place on
+// the same tenant; an unmapped project gets none (one ytwrite.issue_skipped
+// line). An op already dispatched, uncertain or resolved is left as it is:
+// its issue may exist in the old project.
+//
+// Locks, after the caller's task row: the task's lane lock (as Claim takes
+// it, so a claim either precedes this and leaves nothing prepared, or reads
+// the rejection), then its yt_write_ops rows.
+func retargetYTIssueTx(ctx context.Context, tx pgx.Tx, t Task, now time.Time) error {
+	entityID := strconv.FormatInt(t.ID, 10)
+	if err := lockYTEntity(ctx, tx, "task", entityID); err != nil {
+		return err
+	}
+	op, err := scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE kind=$1 AND entity_kind='task' AND entity_id=$2
+		AND state='prepared' ORDER BY id DESC LIMIT 1`, ytwrite.KindIssueCreate, entityID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	p, found, err := readYTIssueProject(ctx, tx, deref(t.Project))
+	if err != nil || (found && p.projectID == op.YTTargetID) {
+		return err
+	}
+	if _, err := rejectYTOpTx(ctx, tx, now, op.ID, ytwrite.ReasonProjectChanged, fmt.Sprintf("task moved to project %q before the issue was created", deref(t.Project))); err != nil {
+		return err
+	}
+	if !found {
+		log.Printf("ytwrite.issue_skipped task_id=%d project=%q reason=project_unmapped", t.ID, deref(t.Project))
+		return nil
+	}
+	next, _, err := prepareYTIssueTx(ctx, tx, now, t, p, op.Tenant, op.ID)
+	if err != nil {
+		return err
+	}
+	log.Printf("ytwrite.issue_retargeted task_id=%d op_id=%d replaced_op_id=%d state=%s", t.ID, next.ID, op.ID, next.State)
 	return nil
 }
 
@@ -351,7 +396,7 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 	if dryRun {
 		return "prepared", name, nil
 	}
-	op, created, err := prepareYTIssueTx(ctx, tx, time.Now().UTC(), t, p, tenant)
+	op, created, err := prepareYTIssueTx(ctx, tx, time.Now().UTC(), t, p, tenant, 0)
 	if err != nil {
 		return "", "", err
 	}

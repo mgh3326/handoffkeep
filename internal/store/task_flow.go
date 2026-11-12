@@ -863,6 +863,11 @@ func writeTriageFieldsTx(ctx context.Context, tx pgx.Tx, before, x Task, by stri
 	if _, err := tx.Exec(ctx, `UPDATE tasks SET priority=$2,kind=$3,project=$4 WHERE id=$1`, x.ID, x.Priority, x.Kind, x.Project); err != nil {
 		return err
 	}
+	if deref(before.Project) != deref(x.Project) {
+		if err := retargetYTIssueTx(ctx, tx, x, now); err != nil {
+			return err
+		}
+	}
 	if before.Priority != x.Priority {
 		if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: "metadata", From: before.State, To: before.State, By: by, Refs: before.Refs, At: now, Field: "priority", FromValue: fmt.Sprint(before.Priority), ToValue: fmt.Sprint(x.Priority)}); err != nil {
 			return err

@@ -192,7 +192,11 @@ package store
 //     an issue writer's checks and its commit. The comment worker's Claim
 //     (YTTenantLedger) reads the task's canary row (mode canary) or binding
 //     (mode on) under the same lane lock, which is what orders an enrollment,
-//     a removal or a binding against a claim.
+//     a removal or a binding against a claim. A task project change
+//     (SetTaskProject, a triage's project; retargetYTIssueTx, hk 3909)
+//     takes the task's lane lock last, after its own locks and the task row,
+//     as CreateTask does, then reads youtrack_projects without a lock and
+//     rejects and inserts yt_write_ops rows.
 //     No cycle, lock by lock:
 //       - The ownership lock: only those two writers take it, always first
 //         and while holding nothing, so no transaction waits for it while
