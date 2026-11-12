@@ -192,10 +192,12 @@ type ytArticleRow struct {
 	createdAt time.Time
 	binding   YTArticleBinding
 	bound     bool
-	// created: the document's article_create is held; retryOf is its
-	// retryable first create (0 for none). See ytArticleCreateSQL.
-	created bool
-	retryOf int64
+	// created: the document's article_create is held; retryOf is the
+	// retryable newest op of its create chain (0 for none) and retryKey
+	// that op's key. See ytArticleCreateSQL.
+	created  bool
+	retryOf  int64
+	retryKey string
 	// legacyArticle is the article the legacy `youtrack sync` recorded for
 	// the document (youtrack_doc_articles, its first part; "" for none),
 	// legacyProject the YouTrack project it put it in (the youtrack_projects
@@ -207,37 +209,50 @@ type ytArticleRow struct {
 }
 
 // ytArticleCreateHeldSQL is true when document d's article_create is held:
-// its first create (key ytwrite.ArticleKey) exists and is not retryable, or
-// its retry (ytwrite.ArticleRetryKey of the first) exists in any state.
-// ytArticleCreateRetrySQL is the first create's id when it is retryable and
-// has no retry yet, else 0. A retryable create never made an article: it was
-// rejected invalid_issue before any claim, which is the prepare-time
-// CheckArticle refusal. Before hk 4295 that refused every body quoting the
-// op marker; the render now escapes it, so such a document gets one retry
-// once its request checks. A retry is prepared only then, so it is never
-// itself retryable: one level is enough, and every lookup is by key (the
-// unique index), not by lane. A create rejected any other way, or after a
-// claim, stays the operator's. $P, $K, $R are the principal, the kind and
-// ytwrite.ReasonInvalidIssue.
-func ytArticleCreateSQL(principal, kind, reason string) (held, retry string) {
+// the newest op of its create chain exists and is not retryable.
+// ytArticleCreateRetrySQL is that newest op's id when it is retryable, else
+// 0. The chain is the first create (key ytwrite.ArticleKey), its retry
+// (ytwrite.ArticleRetryKey of the first) and at most one retry of that retry
+// (keyed <its idem_key>:retry-<its id>); each is prepared only when the op
+// before it is retryable, and every lookup is by key (the unique index), not
+// by lane. A retryable first create never made an article: it was rejected
+// invalid_issue before any claim, which is the prepare-time CheckArticle
+// refusal. Before hk 4295 that refused every body quoting the op marker; the
+// render now escapes it, so such a document gets one retry once its request
+// checks. A retry is retryable only when it was rejected unsupported_kind
+// before any claim (hk 4357): during the blue-green deploy that prepared it,
+// the previous colour, still serving, claimed it and its older render
+// refused the quoted marker before sending anything. That gets one more
+// retry and no further level. A create rejected any other way, or after a
+// claim, stays the operator's. $P, $K, $R, $U are the principal, the kind,
+// ytwrite.ReasonInvalidIssue and ytwrite.ReasonUnsupportedKind.
+func ytArticleCreateSQL(principal, kind, reason, unsupported string) (held, retry string) {
 	first := `o.principal = ` + principal + ` AND o.kind = ` + kind + ` AND o.idem_key = 'document-article:' || d.id::text`
 	retryable := `o.state = 'rejected' AND o.reason = ` + reason + ` AND o.attempts = 0`
-	retried := `EXISTS (SELECT 1 FROM yt_write_ops r WHERE r.principal = o.principal AND r.kind = o.kind
-		AND r.idem_key = o.idem_key || ':retry-' || o.id::text)`
-	held = `EXISTS (SELECT 1 FROM yt_write_ops o WHERE ` + first + ` AND (NOT (` + retryable + `) OR ` + retried + `))`
-	retry = `coalesce((SELECT o.id FROM yt_write_ops o WHERE ` + first + ` AND ` + retryable + ` AND NOT ` + retried + `), 0)`
+	again := `r.state = 'rejected' AND r.reason = ` + unsupported + ` AND r.attempts = 0`
+	// next is true when op b is the retry of op a.
+	next := func(a, b string) string {
+		return b + `.principal = ` + a + `.principal AND ` + b + `.kind = ` + a + `.kind
+		AND ` + b + `.idem_key = ` + a + `.idem_key || ':retry-' || ` + a + `.id::text`
+	}
+	retried := func(a string) string { return `EXISTS (SELECT 1 FROM yt_write_ops n WHERE ` + next(a, "n") + `)` }
+	held = `EXISTS (SELECT 1 FROM yt_write_ops o WHERE ` + first + ` AND (NOT (` + retryable + `)
+		OR EXISTS (SELECT 1 FROM yt_write_ops r WHERE ` + next("o", "r") + ` AND (NOT (` + again + `) OR ` + retried("r") + `))))`
+	retry = `coalesce((SELECT o.id FROM yt_write_ops o WHERE ` + first + ` AND ` + retryable + ` AND NOT ` + retried("o") + `),
+		(SELECT r.id FROM yt_write_ops o JOIN yt_write_ops r ON ` + next("o", "r") + `
+			WHERE ` + first + ` AND ` + retryable + ` AND ` + again + ` AND NOT ` + retried("r") + `), 0)`
 	return held, retry
 }
 
 // readYTArticleRow reads document id; nil when it is gone.
 func readYTArticleRow(ctx context.Context, tx pgx.Tx, id int64) (*ytArticleRow, error) {
 	r := &ytArticleRow{}
-	held, retry := ytArticleCreateSQL("$2", "$3", "$4")
+	held, retry := ytArticleCreateSQL("$2", "$3", "$4", "$5")
 	err := scanYTArticleCandidate(tx.QueryRow(ctx, ytArticleCandidateSQL+`, d.body, d.created_at, `+held+`, `+retry+`,
 			coalesce((SELECT l.article_id FROM youtrack_doc_articles l WHERE l.doc_key = d.key), ''),
 			coalesce((SELECT l.part_count FROM youtrack_doc_articles l WHERE l.doc_key = d.key), 0),
 			coalesce((SELECT lp.yt_project_id FROM youtrack_doc_articles l JOIN youtrack_projects lp ON lp.hk_project = l.hk_project WHERE l.doc_key = d.key), '')`+ytArticleCandidateFrom+` WHERE d.id = $1`,
-		id, YTDocsPrincipal, ytwrite.KindArticleCreate, ytwrite.ReasonInvalidIssue), &r.doc, &r.body, &r.createdAt, &r.created, &r.retryOf, &r.legacyArticle, &r.legacyParts, &r.legacyProject)
+		id, YTDocsPrincipal, ytwrite.KindArticleCreate, ytwrite.ReasonInvalidIssue, ytwrite.ReasonUnsupportedKind), &r.doc, &r.body, &r.createdAt, &r.created, &r.retryOf, &r.legacyArticle, &r.legacyParts, &r.legacyProject)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -245,6 +260,11 @@ func readYTArticleRow(ctx context.Context, tx pgx.Tx, id int64) (*ytArticleRow, 
 		return nil, err
 	}
 	r.createdAt = r.createdAt.UTC()
+	if r.retryOf > 0 {
+		if err := tx.QueryRow(ctx, `SELECT idem_key FROM yt_write_ops WHERE id = $1`, r.retryOf).Scan(&r.retryKey); err != nil {
+			return nil, err
+		}
+	}
 	r.binding, r.bound, err = readYTArticleBinding(ctx, tx, id)
 	if err != nil {
 		return nil, err
@@ -297,7 +317,8 @@ func ytArticleTarget(g ytDocsGate, c YTArticleCandidate) (YTArticleProject, bool
 // through prepareYTSnapshotTx unless its body is the one the article holds;
 // or an unbound document's create, unless it already has one (in any state:
 // a rejected create is the operator's, except one rejected invalid_issue
-// before any claim, which a create that now checks replaces, hk 4295). A
+// before any claim, which a create that now checks replaces, hk 4295, and
+// that retry refused unsupported_kind before any claim, hk 4357). A
 // document whose snapshot the protocol cannot store is skipped and logged.
 func prepareYTArticleTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDocsGate, id int64, r *ytArticleRow) (ytArticleOutcome, error) {
 	if r == nil {
@@ -367,7 +388,7 @@ func prepareYTArticleTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDocsG
 		if err := ytwrite.CheckArticle(req); err != nil {
 			return ytArticleCreateRejected, nil
 		}
-		req.RetryOf = r.retryOf
+		req.RetryOf, req.RetryKey = r.retryOf, r.retryKey
 	}
 	n, err := ytwrite.ArticleOp(req)
 	if err != nil {
@@ -667,7 +688,7 @@ func (s *Store) catchUpYTArticles(ctx context.Context, now time.Time, bound bool
 		return counts, 0, nil
 	}
 	var after int64
-	held, _ := ytArticleCreateSQL("$3", "$4", "$9")
+	held, _ := ytArticleCreateSQL("$3", "$4", "$9", "$10")
 	for {
 		rows, err := s.pool.Query(ctx, `SELECT d.id, d.key, coalesce(d.task_id,0) FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id = d.id
 			WHERE d.id > $1 AND (
@@ -675,7 +696,7 @@ func (s *Store) catchUpYTArticles(ctx context.Context, now time.Time, bound bool
 				OR (b.tenant = $5 AND (b.needs_update OR b.content_sha IS DISTINCT FROM d.sha256)
 					AND ($7 OR EXISTS (SELECT 1 FROM yt_snapshot_state st WHERE st.entity_kind = 'document'
 						AND st.entity_id = d.id::text AND st.kind = $8 AND st.last_sha = d.sha256))))
-			ORDER BY d.id LIMIT $6`, after, YTImportEndedAt, YTDocsPrincipal, ytwrite.KindArticleCreate, g.tenant, ytArticleCatchUpPage, bound, ytArticleBaselineKind, ytwrite.ReasonInvalidIssue)
+			ORDER BY d.id LIMIT $6`, after, YTImportEndedAt, YTDocsPrincipal, ytwrite.KindArticleCreate, g.tenant, ytArticleCatchUpPage, bound, ytArticleBaselineKind, ytwrite.ReasonInvalidIssue, ytwrite.ReasonUnsupportedKind)
 		if err != nil {
 			return counts, noProject, err
 		}
