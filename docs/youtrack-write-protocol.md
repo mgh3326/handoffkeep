@@ -659,6 +659,57 @@ server's `Retry-After`, 5 s without one) and the read repeated, at most 5
 times; a wait over 10 minutes stops the run (`stopped`, exit 1). Each read
 (an issue GET, or one issue's full listing) has 60 s.
 
+## Rebuild audit (hk 4121)
+
+`handoffkeep youtrack audit --rebuild [--project P] [--sample-comments N]
+[--seed S] [--json]` is the restore drill, the C3 gate of the switch (hk 3833
+§1.2, §3.3): it rebuilds what hk needs from YouTrack reads and PG's id maps
+only (the binding tables and `yt_comment_write_links`), and diffs the result
+with PG. It is read-only: `store.OpenReadOnly`, GETs only, and it refuses
+(exit 2) a database without `20261110-yt-task-bindings`. The tenant is
+`YOUTRACK_URL`'s, as for the comment audit.
+
+| Target | Scope | Rebuilt from | Equal when |
+|---|---|---|---|
+| documents | every `yt_article_bindings` row on the tenant | the article's content | its sha256 is `documents.sha256`. A body over 240 KiB was split on import: `exception_not_updated` (D4), not a failure, and its article is not read |
+| comments | `--sample-comments` random bound tasks (default 200, by `md5("<seed>:<task id>")`) and the 20 bound tasks with the most comments | the issue's comments, listed stably | every hk comment has exactly one copy with the same (author, time, body), and every YouTrack comment copies one |
+| tasks | every `yt_task_bindings` row on the tenant | the issue | hk ID → id, the description's title line → title, the project → project |
+| decisions | every `yt_decision_bindings` row on the tenant | the DEC issue's description | question, options and answer equal (the Y6 block) |
+
+**Comments.** A comment in the rendered form of op N (`RenderedOpID`) whose op
+is one of the task's comments' (`yt_comment_write_links`) gives its author and
+time from the provenance line, to the second, and its body from between that
+line and the marker. Any other comment is an import's: its author is the
+YouTrack user's login or name (the import named each user after its hk actor)
+and its time the created time, to the millisecond; it is matched with the hk
+comment of the same (time, author, body), since imported comments have no id
+map. A legacy mirror copy (its `youtrack_comment_links` id, or the
+`<!-- hk-comment:N -->` trailer) carries only the body: an equal body is the
+exception `legacy_mirror`, not a pass. Left out on both sides and counted: the
+activity pull's comments and their YouTrack originals (`pulled_left_out`), and
+hk writes that are not one of the task's comments, such as a task-tied
+document's copy (`other_hk_writes`). The seed is printed; `--seed S` repeats a
+sample on the same data.
+
+**Tasks.** The id is the `hk ID` field (else the description's `hk task: #N`
+line). The title is the description's title line in whichever form wrote it:
+issue_fields' `RenderFields` (whitespace collapsed, so PG's title is compared
+collapsed), issue_create's `RenderIssue` or the import's `Original hk title:`
+(both exact). The project is the `hk 프로젝트` field (else the description's
+project; both, when present, must agree), with `Unassigned` read as none.
+
+**Output.** Per target: `checked`, `equal`, `differ`, `exceptions` and `errors`
+(up to 10 ids each, with a one-line reason), and `not_rebuildable`: what of the
+target stays PG-only (hk 3833 §1.5), listed so a clean result is not read as
+covering it. A target whose table is not in the schema yet is `skipped` with
+the count it would have checked. The report also gives the wall time. Text by
+default, JSON with `--json`. Exit 0 when nothing differs; 4 when something
+differs; 1 when a read failed or the run stopped.
+
+**Rate.** One read at a time; a 429 is waited out as in the comment audit (the
+server's `Retry-After`, 5 s without one, at most 5 tries; a wait over 10
+minutes stops the run).
+
 ## Kind issue_create (hk 3898)
 
 hk creates a task's YouTrack issue itself, at most once per task, and
