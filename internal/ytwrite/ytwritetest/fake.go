@@ -85,6 +85,10 @@ type FakeYouTrack struct {
 	articles      []*ytwrite.RemoteArticle
 	articleWrites []FakeArticleWrite
 
+	// delayedCreates are the creates (issues, decisions, articles) a
+	// DelayCommit fault held back; ReleaseDelayed runs each commit.
+	delayedCreates []func() string
+
 	// BeforeCreate runs at the start of every CreateComment, with the caller's
 	// context, before anything else. Tests use it to cancel a caller mid-call.
 	BeforeCreate func(ctx context.Context)
@@ -123,7 +127,8 @@ func (f *FakeYouTrack) ShiftPages() { f.mu.Lock(); defer f.mu.Unlock(); f.shiftP
 // FailLists makes the next n ListComments calls fail.
 func (f *FakeYouTrack) FailLists(n int) { f.mu.Lock(); f.listFail = n; f.mu.Unlock() }
 
-// SetLatency makes every CreateComment take d, to widen race windows.
+// SetLatency makes every CreateComment and CreateIssue take d, to widen race
+// windows.
 func (f *FakeYouTrack) SetLatency(d time.Duration) { f.mu.Lock(); f.latency = d; f.mu.Unlock() }
 
 // Calls is the number of create calls (CreateComment, CreateIssue) received,
@@ -186,7 +191,8 @@ func (f *FakeYouTrack) Delete(issue, id string) {
 	panic("ytwritetest: delete of unknown comment " + id)
 }
 
-// ReleaseDelayed commits every comment a DelayCommit fault held back.
+// ReleaseDelayed commits every comment and issue a DelayCommit fault held
+// back.
 func (f *FakeYouTrack) ReleaseDelayed() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -195,6 +201,10 @@ func (f *FakeYouTrack) ReleaseDelayed() {
 		f.commits++
 	}
 	f.delayed = nil
+	for _, commit := range f.delayedCreates {
+		commit()
+	}
+	f.delayedCreates = nil
 }
 
 func (f *FakeYouTrack) addLocked(issue, text string) string {
@@ -542,6 +552,12 @@ func (f *FakeYouTrack) FindTaskIssues(ctx context.Context, _, projectID string, 
 // CreateComment does).
 func (f *FakeYouTrack) CreateIssue(ctx context.Context, in ytwrite.IssueCreate) (string, error) {
 	f.mu.Lock()
+	latency := f.latency
+	f.mu.Unlock()
+	if latency > 0 {
+		time.Sleep(latency)
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	f.created = append(f.created, in)
@@ -583,7 +599,8 @@ func (f *FakeYouTrack) createLocked(add func() string) (string, error) {
 	case Refuse:
 		return "", &ytwrite.RemoteError{Status: fault.Status, Message: "refused"}
 	case DelayCommit:
-		panic("ytwritetest: DelayCommit is not supported for issues")
+		f.delayedCreates = append(f.delayedCreates, commit)
+		return "", context.DeadlineExceeded
 	}
 	return commit(), nil
 }
