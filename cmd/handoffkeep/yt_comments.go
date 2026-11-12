@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -315,7 +316,7 @@ func (w ytOpsAlertWorker) Run(ctx context.Context) {
 	}
 }
 
-const youtrackOpsUsage = "usage: youtrack ops [--state pending|all|prepared|dispatched|applied|rejected|remote_unknown] [--task N] [--after-id N] [--limit N] | youtrack ops resolve <op id> --applied <youtrack id> [--adopted] | --not-applied --by <actor> --note <text>"
+const youtrackOpsUsage = "usage: youtrack ops [--state pending|all|prepared|dispatched|applied|rejected|remote_unknown] [--kind K] [--task N] [--after-id N] [--limit N] | youtrack ops resolve <op id> --applied <youtrack id> [--adopted] | --not-applied --by <actor> --note <text>"
 
 // youtrackOpsCmd is `youtrack ops` (also `yt ops`): the write-protocol ops
 // through GET /v1/yt/ops. remote_unknown shows status pending, never done.
@@ -327,10 +328,11 @@ func youtrackOpsCmd(args []string, out io.Writer) error {
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
 	state := fs.String("state", "pending", "pending (default), all, or one lifecycle state")
+	kind := fs.String("kind", "", "only ops of this kind (comment_append, issue_create, issue_fields, ...)")
 	task := fs.Int64("task", 0, "only ops of this task")
 	after := fs.Int64("after-id", 0, "ops with id greater than this")
 	limit := fs.Int("limit", 100, "maximum results")
-	ordered, err := splitArgs(args, "state", "task", "after-id", "limit", "url", "token")
+	ordered, err := splitArgs(args, "state", "kind", "task", "after-id", "limit", "url", "token")
 	if err != nil {
 		return err
 	}
@@ -343,6 +345,9 @@ func youtrackOpsCmd(args []string, out io.Writer) error {
 	if s := *state; s != "pending" && s != "all" && !ytwrite.State(s).Valid() {
 		return fmt.Errorf("unknown --state %q; %s", s, youtrackOpsUsage)
 	}
+	if *kind != "" && !slices.Contains(ytwrite.RegisteredKinds(), *kind) {
+		return fmt.Errorf("unknown --kind %q; %s", *kind, youtrackOpsUsage)
+	}
 	if *task < 0 || *after < 0 || *limit < 1 || *limit > store.YTOpListMax {
 		return errors.New(youtrackOpsUsage)
 	}
@@ -351,7 +356,7 @@ func youtrackOpsCmd(args []string, out io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	ops, next, err := c.ListYTOps(ctx, *state, *task, *after, *limit)
+	ops, next, err := c.ListYTOps(ctx, *state, *kind, *task, *after, *limit)
 	if err != nil {
 		return err
 	}
@@ -421,7 +426,7 @@ func youtrackOpsResolveCmd(args []string, out io.Writer) error {
 // ytOpIsIssueCreate reads whether op id is an issue_create op. An op the
 // listing does not return is not one; the server answers the resolution.
 func ytOpIsIssueCreate(ctx context.Context, c remote.Client, id int64) (bool, error) {
-	ops, _, err := c.ListYTOps(ctx, "all", 0, id-1, 1)
+	ops, _, err := c.ListYTOps(ctx, "all", "", 0, id-1, 1)
 	if err != nil {
 		return false, err
 	}

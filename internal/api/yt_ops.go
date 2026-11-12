@@ -11,9 +11,10 @@ import (
 
 // ytOps is GET /v1/yt/ops: the YouTrack write ops (slice b1a) for the
 // operator to watch. Query: state (a lifecycle state, "pending" — the default:
-// prepared, dispatched and remote_unknown — or "all"), task, after_id, limit.
-// Each op is a ytwrite.OpView: no body, no raw error, no key; remote_unknown
-// reads as pending, never done. next_after_id is set when the page is full.
+// prepared, dispatched and remote_unknown — or "all"), kind (an op kind, empty
+// for all), task, after_id, limit. Each op is a ytwrite.OpView: no body, no
+// key; last_error carries the detail behind reason. remote_unknown reads as
+// pending, never done. next_after_id is set when the page is full.
 func (s Server) ytOps(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
@@ -37,7 +38,7 @@ func (s Server) ytOps(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	ops, err := s.Service.Store.ListYTWriteOps(r.Context(), store.YTOpFilter{State: q.Get("state"), TaskID: task, AfterID: after, Limit: limit})
+	ops, err := s.Service.Store.ListYTWriteOps(r.Context(), store.YTOpFilter{State: q.Get("state"), Kind: q.Get("kind"), TaskID: task, AfterID: after, Limit: limit})
 	if err != nil {
 		appErr(w, r, err)
 		return

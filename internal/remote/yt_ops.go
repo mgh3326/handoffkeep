@@ -10,11 +10,14 @@ import (
 )
 
 // ListYTOps reads GET /v1/yt/ops: the YouTrack write ops the operator watches.
-// next is the after_id of the next page, 0 at the end.
-func (c Client) ListYTOps(ctx context.Context, state string, taskID, afterID int64, limit int) ([]ytwrite.OpView, int64, error) {
+// kind "" is every kind. next is the after_id of the next page, 0 at the end.
+func (c Client) ListYTOps(ctx context.Context, state, kind string, taskID, afterID int64, limit int) ([]ytwrite.OpView, int64, error) {
 	q := url.Values{}
 	if state != "" {
 		q.Set("state", state)
+	}
+	if kind != "" {
+		q.Set("kind", kind)
 	}
 	if taskID > 0 {
 		q.Set("task", strconv.FormatInt(taskID, 10))

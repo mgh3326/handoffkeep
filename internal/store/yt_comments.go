@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -453,6 +454,7 @@ func (s *Store) YTCommentEchoOp(ctx context.Context, opID int64, issueID string)
 // (reason binding_conflict).
 type YTOpFilter struct {
 	State   string
+	Kind    string
 	TaskID  int64
 	AfterID int64
 	Limit   int
@@ -468,6 +470,9 @@ func (s *Store) ListYTWriteOps(ctx context.Context, f YTOpFilter) ([]ytwrite.Op,
 	}
 	if f.Limit < 1 || f.Limit > YTOpListMax || f.TaskID < 0 || f.AfterID < 0 {
 		return nil, errors.New("invalid yt op filter")
+	}
+	if f.Kind != "" && !slices.Contains(ytwrite.RegisteredKinds(), f.Kind) {
+		return nil, fmt.Errorf("%w: unknown yt op kind %q", ytwrite.ErrInvalid, f.Kind)
 	}
 	var states []string
 	switch strings.TrimSpace(f.State) {
@@ -492,5 +497,6 @@ func (s *Store) ListYTWriteOps(ctx context.Context, f YTOpFilter) ([]ytwrite.Op,
 	return s.YTWriteLedger().list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops
 		WHERE (cardinality($1::text[]) = 0 OR state = ANY($1::text[]) OR ($5 AND state = 'applied' AND reason = '`+ytwrite.ReasonBindingConflict+`'))
 		AND ($2 = '' OR (entity_kind = 'task' AND entity_id = $2))
-		AND id > $3 ORDER BY id LIMIT $4`, states, task, f.AfterID, f.Limit, conflicts)
+		AND ($6 = '' OR kind = $6)
+		AND id > $3 ORDER BY id LIMIT $4`, states, task, f.AfterID, f.Limit, conflicts, f.Kind)
 }

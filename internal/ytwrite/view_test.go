@@ -22,9 +22,10 @@ func TestViewStatus(t *testing.T) {
 	}
 	at := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
 	v := ytwrite.ViewOf(ytwrite.Op{ID: 9, Kind: ytwrite.KindCommentAppend, EntityKind: "task", EntityID: "7", YTTargetID: "HK-7", Actor: "w",
-		State: ytwrite.StateRemoteUnknown, Reason: ytwrite.ReasonNoEvidence, Attempts: 1, Reconciles: 2, CreatedAt: at, NextAttemptAt: at.Add(time.Minute),
+		State: ytwrite.StateRemoteUnknown, Reason: ytwrite.ReasonNoEvidence, LastError: "youtrack answered 500: boom", Attempts: 1, Reconciles: 2, CreatedAt: at, NextAttemptAt: at.Add(time.Minute),
 		Payload: []byte(`{"body":"secret-ish body"}`)})
 	if v.ID != 9 || v.State != ytwrite.StateRemoteUnknown || v.Status != ytwrite.StatusPending || v.Reason != ytwrite.ReasonNoEvidence ||
+		v.LastError != "youtrack answered 500: boom" ||
 		v.EntityID != "7" || v.YTTargetID != "HK-7" || v.Attempts != 1 || v.Reconciles != 2 || v.ResolvedAt != nil || !v.NextAttemptAt.Equal(at.Add(time.Minute)) {
 		t.Fatalf("view = %+v", v)
 	}

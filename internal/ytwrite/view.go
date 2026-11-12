@@ -27,6 +27,7 @@ type OpView struct {
 	State         State      `json:"state"`
 	Status        Status     `json:"status"`
 	Reason        string     `json:"reason,omitempty"`
+	LastError     string     `json:"last_error,omitempty"`
 	YTResultID    string     `json:"yt_result_id,omitempty"`
 	Attempts      int        `json:"attempts"`
 	Reconciles    int        `json:"reconciles"`
@@ -39,7 +40,7 @@ type OpView struct {
 func ViewOf(op Op) OpView {
 	v := OpView{
 		ID: op.ID, Kind: op.Kind, EntityKind: op.EntityKind, EntityID: op.EntityID, YTTargetID: op.YTTargetID, Tenant: op.Tenant,
-		Actor: op.Actor, State: op.State, Status: StatusOf(op.State), Reason: op.Reason, YTResultID: op.YTResultID,
+		Actor: op.Actor, State: op.State, Status: StatusOf(op.State), Reason: op.Reason, LastError: op.LastError, YTResultID: op.YTResultID,
 		Attempts: op.Attempts, Reconciles: op.Reconciles, CreatedAt: op.CreatedAt, NextAttemptAt: op.NextAttemptAt,
 	}
 	if !op.ResolvedAt.IsZero() {
