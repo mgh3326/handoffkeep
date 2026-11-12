@@ -355,7 +355,7 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 	}
 	st.SetYTCommentsMode(mode)
 	log.Printf("ytwrite.comments_enabled mode=%s tenant=%q catchup=%t", mode, tenant, catchUp)
-	w := ytCommentsWorker{protocol: p, feed: st, intents: st}
+	w := ytCommentsWorker{protocol: p, feed: st}
 	if catchUp {
 		w.catchUp = st
 	} else {
@@ -385,12 +385,6 @@ type ytFeedRunner interface {
 	RunYTFeedConsumers(ctx context.Context, limit int) ([]store.YTFeedPass, error)
 }
 
-// ytIssueIntents prepares the issue ops of tasks whose project has been
-// mapped since they were created (store.PrepareMappedYTIssues, hk 3942).
-type ytIssueIntents interface {
-	PrepareMappedYTIssues(ctx context.Context, limit int) (int, error)
-}
-
 // ytCommentsWorker runs one sequential Drive pass every interval. Two serve
 // processes (blue-green) may both run it: the ledger's compare-and-set claim
 // is the boundary, so an op is sent at most once. Its ledger is scoped to the
@@ -407,13 +401,11 @@ type ytIssueIntents interface {
 // After the catch-up, feed (when set) runs each registered change-feed
 // consumer once, up to ytFeedPassLimit rows each, so the ops they prepare
 // go out in the same pass's Drive. With no consumer registered it does
-// nothing. Then intents (when set) prepares the issue ops of tasks whose
-// project got its mapping (nothing outside issue mode on).
+// nothing.
 type ytCommentsWorker struct {
 	protocol *ytwrite.Protocol
 	catchUp  ytCommentCatchUpper
 	feed     ytFeedRunner
-	intents  ytIssueIntents
 	interval time.Duration
 }
 
@@ -436,11 +428,6 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 		if w.feed != nil {
 			// Each failing consumer is logged by the store (ytwrite.feed_failed).
 			_, _ = w.feed.RunYTFeedConsumers(ctx, ytFeedPassLimit)
-		}
-		if w.intents != nil {
-			if _, err := w.intents.PrepareMappedYTIssues(ctx, ytCommentsCatchUpLimit); err != nil && ctx.Err() == nil {
-				log.Printf("ytwrite.issue_intents_failed err=%q", err.Error())
-			}
 		}
 		st, err := w.protocol.Drive(ctx, ytCommentsPassLimit)
 		if err != nil && ctx.Err() == nil {
