@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TranslationIndicator, translationAction, useShowOriginal } from "../shared/translation";
 import { Icon, IconFrame } from "../shared/Icon";
 import { StateIcon } from "../shared/StateIcon";
@@ -119,7 +119,15 @@ function filterItems(items: { action: Item[]; fyi: Item[] }, filters: QueryFilte
 function Row({ item, now, selected, toggle }: { item: Item; now: string; selected: boolean; toggle: (key: string) => void }) {
   const globalOriginal = useShowOriginal();
   const [override, setOverride] = useState<boolean | null>(null);
-  useEffect(() => setOverride(null), [globalOriginal]);
+  // Drop the row's own reveal when the global preference flips. The first run
+  // is skipped: it has nothing to drop, and a mount-time write can land after
+  // a click and discard it (hk 4273).
+  const lastGlobal = useRef(globalOriginal);
+  useEffect(() => {
+    if (lastGlobal.current === globalOriginal) return;
+    lastGlobal.current = globalOriginal;
+    setOverride(null);
+  }, [globalOriginal]);
   const showOriginal = override ?? globalOriginal;
   let stale = false, hasTranslation = false;
   let href: string, id: number, title: string, original: string, summary: string;
