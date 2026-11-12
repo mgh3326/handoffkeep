@@ -297,7 +297,8 @@ func TaskIssueSnapshot(t TaskFields) IssueSnapshot {
 	}
 	due := ""
 	if t.DueAt != nil {
-		due = strconv.FormatInt(t.DueAt.UTC().UnixMilli(), 10)
+		local := t.DueAt.In(time.FixedZone("Asia/Seoul", 9*60*60))
+		due = strconv.FormatInt(time.Date(local.Year(), local.Month(), local.Day(), 12, 0, 0, 0, time.UTC).UnixMilli(), 10)
 	}
 	expected := ""
 	if m := int64(t.Expected / time.Minute); m > 0 {
@@ -486,11 +487,27 @@ func SnapshotDiff(want, got IssueSnapshot) string {
 		have[f.Name] = f.Value
 	}
 	for _, f := range want.Fields {
-		if have[f.Name] != f.Value {
+		if !snapshotFieldEqual(f.Name, f.Value, have[f.Name]) {
 			return f.Name
 		}
 	}
 	return ""
+}
+
+// YouTrack's date field stores a date as noon UTC. Compare 마감 by the UTC
+// calendar date it represents; every other snapshot field remains exact.
+func snapshotFieldEqual(name, want, got string) bool {
+	if name != FieldDue || want == "" || got == "" {
+		return want == got
+	}
+	wantMS, wantErr := strconv.ParseInt(want, 10, 64)
+	gotMS, gotErr := strconv.ParseInt(got, 10, 64)
+	if wantErr != nil || gotErr != nil {
+		return false
+	}
+	wy, wm, wd := time.UnixMilli(wantMS).UTC().Date()
+	gy, gm, gd := time.UnixMilli(gotMS).UTC().Date()
+	return wy == gy && wm == gm && wd == gd
 }
 
 // MapRows: an update creates nothing to map.
