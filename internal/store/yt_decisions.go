@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -389,6 +390,71 @@ func ytDecisionsHandler(s *Store, now time.Time) FeedHandler {
 			counts[ytDecisionUnchanged], counts[ytDecisionDeleted], counts[ytDecisionOtherTenant], counts[ytDecisionInvalid])
 		return nil
 	}
+}
+
+// ytDecisionExpirySweep is the expiry sweep's watermark: swept is the instant
+// the last completed sweep covered up to. Zero means no sweep has completed in
+// this process yet.
+type ytDecisionExpirySweep struct {
+	mu    sync.Mutex
+	swept time.Time
+}
+
+// ytDecisionExpiryEvery is how often catchUpYTDecisionExpiries sweeps.
+const ytDecisionExpiryEvery = time.Minute
+
+// catchUpYTDecisionExpiries (hk 4116) refreshes the DEC snapshot of each bound
+// decision whose expires_at passed since the last sweep. A decision's status
+// is derived at read time (deriveStatus), so the write that would refresh its
+// DEC issue never comes when expires_at passes, and the issue would keep its
+// open status. The sweep prepares the snapshot at the sweep's time, where the
+// status reads expired. prepareYTSnapshotTx keys the snapshot by its hash, so
+// each expiry prepares one op: a later sweep finds the same snapshot. The
+// first sweep of a process covers every expired decision; later ones cover
+// the window since the last completed sweep. A failed sweep keeps its window,
+// so the next one reads it again. Mode off does nothing.
+func (s *Store) catchUpYTDecisionExpiries(ctx context.Context, now time.Time) error {
+	g, on := s.ytDecisionsNow()
+	if !on {
+		return nil
+	}
+	s.ytDecExpiry.mu.Lock()
+	defer s.ytDecExpiry.mu.Unlock()
+	since := s.ytDecExpiry.swept
+	if !since.IsZero() && now.Sub(since) < ytDecisionExpiryEvery {
+		return nil
+	}
+	var from *time.Time
+	if !since.IsZero() {
+		from = &since
+	}
+	rows, err := s.pool.Query(ctx, `SELECT d.id FROM decision_requests d
+		JOIN yt_decision_bindings b ON b.decision_id = d.id::text AND b.tenant = $1
+		WHERE d.status = 'open' AND d.expires_at IS NOT NULL AND d.expires_at <= $2
+			AND ($3::timestamptz IS NULL OR d.expires_at > $3)
+		ORDER BY d.id`, g.tenant, now.UTC(), from)
+	if err != nil {
+		return err
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return err
+	}
+	prepared := 0
+	for _, id := range ids {
+		outcome, err := s.PrepareYTDecision(ctx, id, now)
+		if err != nil {
+			return err
+		}
+		if outcome == YTDecisionFieldsPrepared {
+			prepared++
+		}
+	}
+	s.ytDecExpiry.swept = now
+	if len(ids) > 0 {
+		log.Printf("ytwrite.decision_expiry_sweep decisions=%d prepared=%d", len(ids), prepared)
+	}
+	return nil
 }
 
 // ytDecisionSnapshotTx prepares decision id's snapshot in tx when the mode is

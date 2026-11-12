@@ -632,7 +632,10 @@ page at a time, at most `--limit` (default all), audited one at a time. For each
   `missing_in_yt` (none), `duplicate` (two or more), `adopted_unmatched`
   (none, but the adoption's `adopted:` link says the Python mirror posted it
   in a form hk cannot identify; never enqueued), and for a YouTrack
-  comment that copies nothing `yt_only_bot` (written by the bot key's user)
+  comment that copies nothing `yt_only_bot` (written by the bot key's user;
+  a bot comment whose rendered form names a `comment_append` op of the
+  task_docs principal `hk:doc-comments` on the same issue is `doc_comment`,
+  hk 4245, `ytwrite.ReclassifyDocOps`)
   or `yt_only_human`.
 - **Not bound here**, by reason under `unbound`: `no_project`, `no_issue`
   (unmapped project, no YouTrack project id, no such issue), `ambiguous` (the
@@ -1390,6 +1393,14 @@ text quotes the marker gets its create rejected `invalid_issue`.
 an open request past its expiry, read when the row changes), `레인`, `권장`,
 `결정 기한` (epoch ms), `연결 task ID`. Every field is in every op; empty
 clears.
+
+**Expiry sweep (hk 4116).** An open request's expiry changes no row, so the
+feed never sees it. `catchUpYTDecisionExpiries` runs after each feed pass,
+at most once a minute, and prepares the snapshot of every bound decision
+(on the gate's tenant) whose `expires_at` passed since the last completed
+sweep; the first sweep of a process covers every expired decision. The
+snapshot is keyed by its hash, so each expiry prepares one op. A failed
+sweep keeps its window and runs again.
 
 **Send.** `decision_create`: the project's fields (one admin GET; without
 `hk ID` or `결정 ID` the op is held `not_sent`), then the DEC issues with

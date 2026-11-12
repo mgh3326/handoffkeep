@@ -258,3 +258,62 @@ func TestYTArticleListUnstable(t *testing.T) {
 		})
 	}
 }
+
+// A split document's index article is read and verified before it is bound
+// (hk 4119 a): the list found it, but it moved to another project after the
+// list was read, so nothing is bound.
+func TestYTArticleClassifyIndexReadBeforeBind(t *testing.T) {
+	ctx := t.Context()
+	idx := youtrack.Article{ID: "2-7", IDReadable: "SMA-A-7", Summary: store.YTArticleIndexSummary("note/big", "note"),
+		Content: "# index", Project: &youtrack.ProjectRef{ID: "0-8"}}
+	f := &ytartRemote{reads: map[string]int{}, articles: []youtrack.Article{idx}}
+	a := &ytArticler{remote: f, tenant: "t", lookup: map[string]string{}}
+	if err := a.loadIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.articles[0].Project = &youtrack.ProjectRef{ID: "0-9"}
+	got := a.classify(ctx, ytartDoc(34, "note/big", "large", "sma", "SMA", "0-8"), "by")
+	if got.class != ytArticleAmbiguous || got.binding.ArticleID != "" || f.reads["2-7"] != 1 {
+		t.Fatalf("index article moved: %s %+v (%s), reads %v; want ambiguous, nothing bound, one read", got.class, got.binding, got.detail, f.reads)
+	}
+}
+
+// A document whose project has no YouTrack project is missing without an
+// article list read (hk 4119 b).
+func TestYTArticleClassifyUnmappedDoesNotListArticles(t *testing.T) {
+	ctx := t.Context()
+	f := &ytartRemote{reads: map[string]int{}, articles: []youtrack.Article{{ID: "1-1", IDReadable: "RDA-A-1", Summary: "x"}}}
+	a := &ytArticler{remote: f, tenant: "t", lookup: map[string]string{}}
+	d := ytartDoc(35, "note/nomap", "x", "nomap", "", "")
+	if a.needsLookup(d) {
+		t.Fatal("an unmapped document needs no lookup")
+	}
+	if got := a.classify(ctx, d, "by"); got.class != ytArticleMissing || f.lists != 0 {
+		t.Fatalf("unmapped document: %s, %d article lists; want missing and no list", got.class, f.lists)
+	}
+}
+
+// ytartBrokenList is a remote whose article list always fails.
+type ytartBrokenList struct{ ytartRemote }
+
+func (f *ytartBrokenList) ListArticles(context.Context) ([]youtrack.Article, error) {
+	f.lists++
+	return nil, errors.New("list down")
+}
+
+// A failed article list is kept for the run: each following document gets
+// the same error, and the list is read once (hk 4119 c).
+func TestYTArticleClassifyListFailureKeptForRun(t *testing.T) {
+	ctx := t.Context()
+	f := &ytartBrokenList{ytartRemote{reads: map[string]int{}}}
+	a := &ytArticler{remote: f, tenant: "t", lookup: map[string]string{}}
+	for _, id := range []int64{31, 32, 33} {
+		d := ytartDoc(id, "note/c", "body", "sma", "SMA", "0-8")
+		if got := a.classify(ctx, d, "by"); got.class != ytArticleError {
+			t.Fatalf("document %d: %s, want error", id, got.class)
+		}
+	}
+	if f.lists != 1 {
+		t.Fatalf("%d article list reads for three documents, want 1", f.lists)
+	}
+}

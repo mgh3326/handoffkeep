@@ -181,6 +181,11 @@ func (s *Store) RunYTFeedConsumers(ctx context.Context, limit int) ([]YTFeedPass
 	if err := s.catchUpYTArticlesOnce(ctx, time.Now().UTC()); err != nil && first == nil {
 		first = err
 	}
+	// The decisions' expiry sweep (hk 4116) runs after the feed, as the
+	// articles' catch-up does.
+	if err := s.catchUpYTDecisionExpiries(ctx, time.Now().UTC()); err != nil && first == nil {
+		first = err
+	}
 	return out, first
 }
 
