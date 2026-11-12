@@ -350,6 +350,21 @@ func SnapshotKey(kind, entityID string, seq int64, sha string) string {
 // yt_snapshot_state row, then what prepareYTOpTx takes. Reading the last op's
 // state by id takes no lock. No other writer locks a yt_snapshot_state row.
 func prepareYTSnapshotTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrite.NewOp, sha string) (ytwrite.Op, bool, error) {
+	return prepareYTSnapshotRuleTx(ctx, tx, now, n, sha, true)
+}
+
+// prepareYTOnceTx is prepareYTSnapshotTx without the hk 4057 retry: an op
+// whose sha equals the last one prepared is never prepared again, whatever
+// that op's state, so a request YouTrack refused is not repeated on every
+// feed or backfill pass (hk 4111). A different sha (a new target) is a new op
+// with the next seq, as for a snapshot. The issue_move ops use it.
+func prepareYTOnceTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrite.NewOp, sha string) (ytwrite.Op, bool, error) {
+	return prepareYTSnapshotRuleTx(ctx, tx, now, n, sha, false)
+}
+
+// prepareYTSnapshotRuleTx is the rule both share; retryRejected is the hk
+// 4057 retry of an unchanged sha whose op was rejected.
+func prepareYTSnapshotRuleTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrite.NewOp, sha string, retryRejected bool) (ytwrite.Op, bool, error) {
 	if sha == "" || n.Kind == "" || n.EntityKind == "" || n.EntityID == "" {
 		return ytwrite.Op{}, false, errors.New("snapshot op needs a kind, an entity and a sha")
 	}
@@ -364,6 +379,9 @@ func prepareYTSnapshotTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrit
 		return ytwrite.Op{}, false, err
 	}
 	if err == nil {
+		if !retryRejected && lastSHA == sha {
+			return ytwrite.Op{}, false, nil
+		}
 		skip, err := ytSnapshotUnchanged(ctx, tx, lastSHA, lastOpID, sha)
 		if err != nil || skip {
 			return ytwrite.Op{}, false, err

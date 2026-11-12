@@ -915,7 +915,9 @@ unchanged. A `rejected` op will never be sent, so the same snapshot is
 prepared again as a new op (the next seq, a new key) on the next call; any
 other state (`prepared`, `dispatched`, `remote_unknown`, `applied`) or a
 missing op row keeps the skip. One call prepares at most one op: a retry that
-is rejected again is retried on the following call, not in a loop.
+is rejected again is retried on the following call, not in a loop. An
+`issue_move` is not a snapshot and does not take this retry (hk 4111, Kind
+issue_move below).
 
 Mode off prepares nothing and still advances the cursor, so a change made
 while off reaches YouTrack with the task's next change. Each pass logs one
@@ -999,11 +1001,13 @@ prepares nothing unless its last op was rejected, so a second run is a no-op
 once the first run's ops are pending or sent, a run re-prepares exactly the
 rejected ones, and a run beside the feed prepares one op per snapshot. It only prepares; serve's write worker sends the
 ops and honours YouTrack's 429s. `--limit` stops after that many prepared ops,
-for pacing; the next run passes the sent ones as unchanged. `--dry-run`
+for pacing, counting `issue_move` ops with the `issue_fields` ones (a moved
+task makes two, hk 4112); the next run passes the sent ones as unchanged. `--dry-run`
 applies the same rule (an unchanged hash whose op was rejected counts as
 prepared) and writes nothing. It
-prints one JSON summary, `scanned prepared unchanged unbound moved
-move_skipped other_tenant invalid` per hk project and in `total`, and exits 6 without
+prints one JSON summary, `scanned ops prepared unchanged unbound moved
+move_skipped other_tenant invalid` per hk project (`ops` is every op made,
+moves included) and in `total`, and exits 6 without
 touching the database unless `HANDOFFKEEP_YT_FIELDS_MODE=on`.
 
 **Not here.** Tags and issue links (parent, relations) stay as the import set
@@ -1125,7 +1129,10 @@ A task's hk project can change while its issue stays in the YouTrack project
 of the old one. The issue then moves: `issue_move` (`kind_move.go`) sends one
 POST that sets the issue's project, and the task_fields consumer
 (`internal/store/yt_move.go`) prepares it. Moves have their own mode,
-`HANDOFFKEEP_YT_MOVES_MODE` (`off` or `on`, default `off`, hk 4111). Off, a
+`HANDOFFKEEP_YT_MOVES_MODE` (`off` or `on`, default `off`, hk 4111). Moves are
+prepared by the task_fields consumer, so `on` needs
+`HANDOFFKEEP_YT_FIELDS_MODE=on`: moves on with fields off is a startup error
+(hk 4117), never a gate that looks on and does nothing. Off, a
 moved task is skipped as it was before moves existed: no move, no snapshot,
 logged as `ytwrite.fields_skipped_moved` and counted as `moved`. Turning the mode
 off admits no issue_move op, so a move already prepared is held until it is
@@ -1141,12 +1148,29 @@ from the belonging project, one move op is prepared, keyed
 sha is the target's, so a repeat of a move already prepared is no new op), and
 the snapshot naming the belonging project follows it on the lane. A task moved
 away and back before the first move applied gets a move back, so the issue
-ends where the task is. A move the protocol rejected is not prepared again:
-`ytwrite.move_stuck` is logged and the operator resolves the op.
+ends where the task is. A move is prepared once per target
+(`prepareYTOnceTx`, hk 4111): the hk 4057 retry of rejected snapshots does not
+apply, so a move YouTrack refused is not prepared again on the task's next
+change or a backfill run, only when the task's project maps to another target
+(a new sha). Until then `ytwrite.move_stuck` is logged, counted as
+`move_skipped=`, and the task's snapshot is prepared for the project the
+issue is in (or on its way to), so its fields keep reaching it there.
 
-**Unmapped target.** When the belonging project maps to no YouTrack project
-(an hk project no `youtrack_projects` row names), nothing is prepared for the
-task's issue: no move and no snapshot. The feed logs
+**A snapshot behind a refused move** (hk 4111). The lane treats a rejected
+op as resolved, so an `issue_fields` op prepared behind a move that was then
+rejected would be claimed with a payload naming the target project while the
+issue is still in the old one. At claim, once its lane is clear, an
+`issue_fields` op whose payload project is not the binding's `project_id` (on
+its tenant and issue) is rejected `issue_not_moved`, in the claim's own
+transaction, and never sent; the rejected-op alert reports it and the next
+change or backfill prepares the snapshot for the project the issue is in.
+
+**Unmapped target** (hk 4118). When the task's hk project maps to no
+YouTrack project (an hk project no `youtrack_projects` row names), or is
+cleared while its issue sits in a mapped project, there is nothing to move
+to: no move is prepared, the issue stays in its binding's project (or the
+target of a move already in flight), and the task's snapshot is still
+prepared for it there, so its fields do not freeze. The feed logs
 `ytwrite.move_skipped_unmapped task_id= project= issue_id= binding_project_id=`
 and counts it as `move_skipped=` on the `ytwrite.fields_feed` line.
 

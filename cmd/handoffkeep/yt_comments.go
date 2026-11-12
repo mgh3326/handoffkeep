@@ -200,8 +200,9 @@ func ytCommentsCatchUpFromEnv() (bool, error) {
 
 // ytCommentsWorkerFromEnv sets the store's gates and returns the write
 // dispatcher for serve's worker list, or nil when the comments, issues,
-// fields, document-comment and decisions modes are all off (which needs no
-// YouTrack configuration). Any on without YOUTRACK_URL and
+// fields, document-comment, decisions and document-article modes are all off
+// (which needs no YouTrack configuration). Moves mode on with fields mode off is
+// a startup error: nothing would prepare or send a move. Any on without YOUTRACK_URL and
 // YOUTRACK_BOT_API_KEY is a startup error, never a writer that silently does
 // nothing; decisions mode on also reads the DEC project's id once.
 func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
@@ -240,6 +241,13 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	catchUp, err := ytCommentsCatchUpFromEnv()
 	if err != nil {
 		return nil, err
+	}
+	// Moves are prepared only by the task_fields consumer and their
+	// snapshots ride the fields gate, so moves on with fields off would start
+	// no worker and prepare nothing: refuse it rather than look enabled
+	// (hk 4117).
+	if moves == store.YTMovesOn && fields != store.YTFieldsOn {
+		return nil, fmt.Errorf("HANDOFFKEEP_YT_MOVES_MODE=on needs HANDOFFKEEP_YT_FIELDS_MODE=on (moves are prepared by the task fields feed); got HANDOFFKEEP_YT_FIELDS_MODE=%s", fields)
 	}
 	if st != nil {
 		st.SetYTMovesMode(moves)

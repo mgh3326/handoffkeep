@@ -107,20 +107,104 @@ func TestYTMoveProjectChangeMakesMoveThenFields(t *testing.T) {
 	}
 }
 
-// A target project no youtrack_projects row maps prepares nothing: no move,
-// no snapshot.
-func TestYTMoveUnmappedTargetPreparesNothing(t *testing.T) {
-	s, bound, _ := ytmSetup(t, "ytm_unmapped")
-	ytFeedExec(t, s, `UPDATE tasks SET project='ytm-nowhere', priority=5 WHERE id=$1`, bound)
+// A target project no youtrack_projects row maps, or a cleared hk project,
+// has nothing to move to: no move, and the issue keeps its binding project,
+// where its snapshot still goes (hk 4118). Before, neither case prepared a
+// snapshot, so the issue's fields froze.
+func TestYTMoveUnmappedTargetKeepsProjectAndSendsFields(t *testing.T) {
+	for _, tc := range []struct{ name, set string }{
+		{"unmapped", `UPDATE tasks SET project='ytm-nowhere', priority=5 WHERE id=$1`},
+		{"cleared", `UPDATE tasks SET project=NULL, priority=5 WHERE id=$1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, bound, _ := ytmSetup(t, "ytm_unmapped_"+tc.name)
+			ytFeedExec(t, s, tc.set, bound)
+			ytfPass(t, s)
+			if ops := ytmOps(t, s, bound); len(ops) != 0 {
+				t.Fatalf("move ops with nothing to move to %+v", ops)
+			}
+			fields := ytfOps(t, s, bound)
+			if len(fields) != 1 || ytfPayload(t, fields[0]).ProjectID != ytbProjectID {
+				t.Fatalf("snapshot ops %+v, want one in the binding's project %q", fields, ytbProjectID)
+			}
+			if out := ytiClaim(t, s, fields[0]); out != ytwrite.ClaimClaimed {
+				t.Fatalf("snapshot in the binding's project: %s", out)
+			}
+			if project, _ := ytmBinding(t, s, bound); project != ytbProjectID {
+				t.Fatalf("binding moved to %q", project)
+			}
+		})
+	}
+}
+
+// ytmReject claims op and rejects it, as the worker does on YouTrack's 4xx.
+func ytmReject(t *testing.T, s *Store, op ytwrite.Op) {
+	t.Helper()
+	if out := ytiClaim(t, s, op); out != ytwrite.ClaimClaimed {
+		t.Fatalf("claim of op %d (%s): %s", op.ID, op.Kind, out)
+	}
+	if _, err := s.YTWriteLedger().Reject(t.Context(), time.Now().UTC(), op.ID, "http_403", "refused"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A move YouTrack refused is not prepared again on the task's next change or
+// on a backfill run, only when its target changes (hk 4111). The snapshot
+// prepared behind it named the target project, which the issue never reached:
+// it is rejected at claim, never written to the issue in the old project, and
+// the next change prepares the snapshot for the project the issue is in.
+func TestYTMoveRejectedIsNotRetriedAndItsSnapshotIsNotSent(t *testing.T) {
+	s, bound, _ := ytmSetup(t, "ytm_rejected")
+	ytmMapped(t, s)
+	ytFeedExec(t, s, `UPDATE tasks SET project=$2 WHERE id=$1`, bound, ytmProject)
 	ytfPass(t, s)
-	if ops := ytmOps(t, s, bound); len(ops) != 0 {
-		t.Fatalf("move ops to an unmapped project %+v", ops)
+	moves, fields := ytmOps(t, s, bound), ytfOps(t, s, bound)
+	if len(moves) != 1 || len(fields) != 1 || ytfPayload(t, fields[0]).ProjectID != ytmProjectID {
+		t.Fatalf("moves %+v snapshots %+v", moves, fields)
 	}
-	if ops := ytfOps(t, s, bound); len(ops) != 0 {
-		t.Fatalf("snapshot ops for an unmapped project %+v", ops)
+	ytmReject(t, s, moves[0])
+
+	// The snapshot behind the refused move: its lane is clear, but the issue
+	// is still in the binding's project. It is rejected, never dispatched.
+	op, out, err := s.YTTenantLedger(ytcTenant).Claim(t.Context(), time.Now().UTC(), fields[0].ID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if project, _ := ytmBinding(t, s, bound); project != ytbProjectID {
-		t.Fatalf("binding moved to %q", project)
+	if out == ytwrite.ClaimClaimed || op.State != ytwrite.StateRejected || op.Reason != ytwrite.ReasonIssueNotMoved || op.Attempts != 0 {
+		t.Fatalf("snapshot behind a refused move: %s %+v", out, op)
+	}
+
+	// The next change and a backfill run prepare no second move to the same
+	// target; the snapshot goes to the project the issue is in.
+	ytFeedExec(t, s, `UPDATE tasks SET priority=6 WHERE id=$1`, bound)
+	ytfPass(t, s)
+	r := ytfBackfill(t, s, YTFieldsBackfillOptions{TaskID: bound})
+	if moves := ytmOps(t, s, bound); len(moves) != 1 {
+		t.Fatalf("the refused move was prepared again: %+v", moves)
+	}
+	if r.Total.Ops != 0 || r.Total.MoveSkipped != 1 {
+		t.Fatalf("backfill after the refused move %+v", r.Total)
+	}
+	fields = ytfOps(t, s, bound)
+	if len(fields) != 2 || ytfPayload(t, fields[1]).ProjectID != ytbProjectID {
+		t.Fatalf("snapshots after the refused move %+v", fields)
+	}
+	if out := ytiClaim(t, s, fields[1]); out != ytwrite.ClaimClaimed {
+		t.Fatalf("snapshot for the issue's own project: %s", out)
+	}
+
+	// A new target is a new move.
+	if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: "ytm-third", ProjectID: "0-4", ShortName: "TH"}); err != nil {
+		t.Fatal(err)
+	}
+	ytFeedExec(t, s, `UPDATE tasks SET project='ytm-third' WHERE id=$1`, bound)
+	ytfPass(t, s)
+	moves = ytmOps(t, s, bound)
+	if len(moves) != 2 || moves[1].State != ytwrite.StatePrepared {
+		t.Fatalf("moves after a new target %+v", moves)
+	}
+	if p, err := ytwrite.IssueMoveProject(moves[1]); err != nil || p != "0-4" {
+		t.Fatalf("new move to %q %v", p, err)
 	}
 }
 

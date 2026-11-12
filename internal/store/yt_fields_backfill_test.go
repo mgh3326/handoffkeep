@@ -42,7 +42,7 @@ func TestYTFieldsBackfillPreparesOnceThenOnChange(t *testing.T) {
 		t.Fatalf("ops before the backfill %+v", ops)
 	}
 	r := ytfBackfill(t, s, YTFieldsBackfillOptions{})
-	want := YTFieldsBackfillCounts{Scanned: 2, Prepared: 1, Unbound: 1}
+	want := YTFieldsBackfillCounts{Scanned: 2, Ops: 1, Prepared: 1, Unbound: 1}
 	if r.Total != want || r.Tenant != ytcTenant || len(r.Projects) != 1 || r.Projects[0].Project != ytbProject || r.Projects[0].YTFieldsBackfillCounts != want {
 		t.Fatalf("first run %+v %+v", r, r.Projects)
 	}
@@ -66,7 +66,7 @@ func TestYTFieldsBackfillPreparesOnceThenOnChange(t *testing.T) {
 
 	// A changed task (not yet seen by the feed) gets one more op.
 	ytFeedExec(t, s, `UPDATE tasks SET priority=4 WHERE id=$1`, bound)
-	if r := ytfBackfill(t, s, YTFieldsBackfillOptions{TaskID: bound}); r.Total != (YTFieldsBackfillCounts{Scanned: 1, Prepared: 1}) || r.TaskID != bound {
+	if r := ytfBackfill(t, s, YTFieldsBackfillOptions{TaskID: bound}); r.Total != (YTFieldsBackfillCounts{Scanned: 1, Ops: 1, Prepared: 1}) || r.TaskID != bound {
 		t.Fatalf("changed %+v", r)
 	}
 	if ops := ytfOps(t, s, bound); len(ops) != 2 || ops[1].PayloadSHA == ops[0].PayloadSHA {
@@ -112,7 +112,7 @@ func TestYTFieldsBackfillLimitAndDryRun(t *testing.T) {
 		due = append(due, task)
 	}
 	// Dry run: the counts of a real run, no op.
-	if r := ytfBackfill(t, s, YTFieldsBackfillOptions{DryRun: true}); r.Total != (YTFieldsBackfillCounts{Scanned: 6, Prepared: 5, Unbound: 1}) || !r.DryRun {
+	if r := ytfBackfill(t, s, YTFieldsBackfillOptions{DryRun: true}); r.Total != (YTFieldsBackfillCounts{Scanned: 6, Ops: 5, Prepared: 5, Unbound: 1}) || !r.DryRun {
 		t.Fatalf("dry run %+v", r)
 	}
 	if n := ytfAllOps(t, s); n != 0 {
@@ -132,7 +132,7 @@ func TestYTFieldsBackfillLimitAndDryRun(t *testing.T) {
 	}
 	// A dry run after a change counts it as due, the rest unchanged.
 	ytFeedExec(t, s, `UPDATE tasks SET priority=6 WHERE id=$1`, due[2])
-	if r := ytfBackfill(t, s, YTFieldsBackfillOptions{DryRun: true}); r.Total != (YTFieldsBackfillCounts{Scanned: 6, Prepared: 1, Unchanged: 4, Unbound: 1}) {
+	if r := ytfBackfill(t, s, YTFieldsBackfillOptions{DryRun: true}); r.Total != (YTFieldsBackfillCounts{Scanned: 6, Ops: 1, Prepared: 1, Unchanged: 4, Unbound: 1}) {
 		t.Fatalf("dry run after the change %+v", r.Total)
 	}
 	if n := ytfAllOps(t, s); n != 5 {
@@ -170,7 +170,7 @@ func TestYTFieldsBackfillRetriesRejected(t *testing.T) {
 	ytSetOpState(t, s, ytfOps(t, s, tasks[1])[0].ID, ytwrite.StateApplied)
 	ytSetOpState(t, s, ytfOps(t, s, tasks[3])[0].ID, ytwrite.StateRejected)
 
-	want := YTFieldsBackfillCounts{Scanned: 5, Prepared: 2, Unchanged: 2, Unbound: 1}
+	want := YTFieldsBackfillCounts{Scanned: 5, Ops: 2, Prepared: 2, Unchanged: 2, Unbound: 1}
 	if r := ytfBackfill(t, s, YTFieldsBackfillOptions{DryRun: true}); r.Total != want {
 		t.Fatalf("dry run %+v, want %+v", r.Total, want)
 	}
@@ -192,5 +192,34 @@ func TestYTFieldsBackfillRetriesRejected(t *testing.T) {
 	// The retries are pending: a re-run prepares nothing.
 	if r := ytfBackfill(t, s, YTFieldsBackfillOptions{}); r.Total != (YTFieldsBackfillCounts{Scanned: 5, Unchanged: 4, Unbound: 1}) {
 		t.Fatalf("re-run %+v", r.Total)
+	}
+}
+
+// A moved task makes two ops, its move and its snapshot, and --limit counts
+// both (hk 4112): a limit of 2 stops after the first moved task, not after
+// two of them (four ops).
+func TestYTFieldsBackfillLimitCountsMoves(t *testing.T) {
+	s, bound, _ := ytmSetup(t, "ytfb_limit_moves")
+	ytmMapped(t, s)
+	tasks := []int64{bound}
+	for range 2 {
+		task := ytcTask(t, s, ytbProject)
+		ytfBind(t, s, task)
+		tasks = append(tasks, task)
+	}
+	for _, task := range tasks {
+		ytFeedExec(t, s, `UPDATE tasks SET project=$2 WHERE id=$1`, task, ytmProject)
+	}
+	r := ytfBackfill(t, s, YTFieldsBackfillOptions{Limit: 2})
+	if r.Total != (YTFieldsBackfillCounts{Scanned: 1, Ops: 2, Moved: 1}) {
+		t.Fatalf("limit 2 with moves: %+v", r.Total)
+	}
+	if moves, fields := ytmOps(t, s, tasks[0]), ytfOps(t, s, tasks[0]); len(moves) != 1 || len(fields) != 1 {
+		t.Fatalf("first task: moves %+v snapshots %+v", moves, fields)
+	}
+	for _, task := range tasks[1:] {
+		if moves, fields := ytmOps(t, s, task), ytfOps(t, s, task); len(moves) != 0 || len(fields) != 0 {
+			t.Fatalf("task %d past the limit: moves %+v snapshots %+v", task, moves, fields)
+		}
 	}
 }
