@@ -72,6 +72,39 @@ func ArticleKey(documentID int64) string {
 	return "document-article:" + strconv.FormatInt(documentID, 10)
 }
 
+// ArticleRetryKey is the key of the create that replaces the document's
+// article_create op rejectedOpID, which was rejected invalid_issue before it
+// was ever claimed (hk 4295: a body quoting the op marker, which the render
+// now escapes). Such an op made no article, so the retry is still the
+// document's only create; deriving the key from the rejected op keeps the
+// retry idempotent.
+func ArticleRetryKey(documentID, rejectedOpID int64) string {
+	return ArticleKey(documentID) + ":retry-" + strconv.FormatInt(rejectedOpID, 10)
+}
+
+// escapedMarkerPrefix is markerPrefix with a zero-width space after its "<":
+// YouTrack shows it as the same text, in prose and in code alike (an HTML
+// entity would show as "&lt;" inside a code span), and no marker scan
+// matches it.
+const escapedMarkerPrefix = "<\u200b!-- hk-op:"
+
+// EscapeArticleBody is a document body as an article carries it: every
+// quoted op marker prefix escaped (hk 4295), so the op's own marker stays
+// the only real one in the content. A body without the prefix is returned
+// unchanged. The escape is one-way: a body may already hold the escaped
+// form, so a reader compares EscapeArticleBody of the document with the
+// article and never unescapes.
+func EscapeArticleBody(body string) string {
+	return strings.ReplaceAll(body, markerPrefix, escapedMarkerPrefix)
+}
+
+// OpMarkerPrefix is the reserved prefix of every hk op marker, for a reader
+// that must find a quoted one in SQL.
+const OpMarkerPrefix = markerPrefix
+
+// HasOpMarker reports whether text quotes the reserved op marker prefix.
+func HasOpMarker(text string) bool { return strings.Contains(text, markerPrefix) }
+
 // ContentSHA is the sha256 of an article's content, lower-case hex: the
 // value article_update's evidence compares and yt_article_bindings keeps.
 func ContentSHA(content string) string {
@@ -120,6 +153,9 @@ type ArticleRequest struct {
 	LegacyArticleID string
 	LegacyProjectID string
 	LegacyMarker    string
+	// RetryOf is the document's create op this one replaces (0 for the
+	// first create): see ArticleRetryKey.
+	RetryOf int64
 }
 
 // ArticleCreatePayload is the immutable payload of an article_create op: the
@@ -140,8 +176,9 @@ type ArticleCreatePayload struct {
 
 // CheckArticle explains why an article request cannot be sent. A store that
 // must record such a document builds the op with ArticleOp and rejects it in
-// the same transaction. A body that quotes the op marker is refused: the
-// marker is the create's only evidence.
+// the same transaction. A body that quotes the op marker is sent escaped
+// (EscapeArticleBody), so the op's own marker stays the create's only
+// evidence.
 func CheckArticle(req ArticleRequest) error {
 	if !principalRE.MatchString(req.Principal) {
 		return fmt.Errorf("%w: principal is empty or malformed", ErrInvalid)
@@ -158,13 +195,7 @@ func CheckArticle(req ArticleRequest) error {
 	if req.Tenant == "" {
 		return fmt.Errorf("%w: tenant is empty", ErrInvalid)
 	}
-	if err := checkArticleText(req.Summary, req.Body); err != nil {
-		return err
-	}
-	if strings.Contains(req.Body, markerPrefix) {
-		return fmt.Errorf("%w: document body contains the reserved hk op marker", ErrInvalid)
-	}
-	return nil
+	return checkArticleText(req.Summary, req.Body)
 }
 
 // ArticleOp is the op an article request stores. Like DecisionOp it does not
@@ -179,10 +210,14 @@ func ArticleOp(req ArticleRequest) (NewOp, error) {
 		return NewOp{}, err
 	}
 	entityID := strconv.FormatInt(req.DocumentID, 10)
+	key := ArticleKey(req.DocumentID)
+	if req.RetryOf > 0 {
+		key = ArticleRetryKey(req.DocumentID, req.RetryOf)
+	}
 	return NewOp{
 		Principal:  req.Principal,
 		Kind:       KindArticleCreate,
-		Key:        ArticleKey(req.DocumentID),
+		Key:        key,
 		PayloadSHA: payloadSHA(KindArticleCreate, ArticleEntity, entityID, req.YTProjectID, req.Tenant, req.Actor, string(payload)),
 		Payload:    payload,
 		EntityKind: ArticleEntity,
@@ -241,9 +276,6 @@ func ArticleUpdateOp(req ArticleUpdateRequest) (NewOp, error) {
 	}
 	if err := checkArticleText(req.Summary, req.Content); err != nil {
 		return NewOp{}, err
-	}
-	if req.Provenance && strings.Contains(req.Content, markerPrefix) {
-		return NewOp{}, fmt.Errorf("%w: document body contains the reserved hk op marker", ErrInvalid)
 	}
 	payload, err := json.Marshal(ArticleUpdatePayload{Summary: req.Summary, Content: req.Content, Provenance: req.Provenance})
 	if err != nil {
@@ -316,7 +348,8 @@ func articleCreateOf(op Op) (ArticleCreatePayload, error) {
 	return p, nil
 }
 
-// RenderArticleCreate is the content an article_create op writes:
+// RenderArticleCreate is the content an article_create op writes, the body
+// escaped (EscapeArticleBody):
 //
 //	작성: <actor> · <UTC> · hk op <op>
 //
@@ -324,7 +357,28 @@ func articleCreateOf(op Op) (ArticleCreatePayload, error) {
 //
 //	<!-- hk-op:<op> -->
 func RenderArticleCreate(actor string, at time.Time, opID int64, body string) string {
-	return ProvenanceLine(actor, at, opID) + "\n\n" + body + "\n\n" + OpMarker(opID)
+	return ProvenanceLine(actor, at, opID) + "\n\n" + EscapeArticleBody(body) + "\n\n" + OpMarker(opID)
+}
+
+// ParseArticleContent reads an article content in RenderArticleCreate's
+// form back: the op named by the provenance line, whose marker ends the
+// content, and the body between them as the article carries it (escaped).
+// ok is false for any other text, including one whose body holds a marker
+// prefix. Like RenderedOpID, the form alone is not ownership.
+func ParseArticleContent(content string) (opID int64, body string, ok bool) {
+	first, rest, found := strings.Cut(content, "\n\n")
+	if !found {
+		return 0, "", false
+	}
+	actor, _, id, ok := ParseProvenance(first)
+	if !ok || checkActor(actor) != nil {
+		return 0, "", false
+	}
+	body, found = strings.CutSuffix(rest, "\n\n"+OpMarker(id))
+	if !found || HasOpMarker(body) {
+		return 0, "", false
+	}
+	return id, body, true
 }
 
 func (articleCreate) Render(op Op) (string, error) {
@@ -334,9 +388,6 @@ func (articleCreate) Render(op Op) (string, error) {
 	}
 	if err := checkArticleText(p.Summary, p.Body); err != nil {
 		return "", err
-	}
-	if strings.Contains(p.Body, markerPrefix) {
-		return "", fmt.Errorf("%w: document body contains the reserved hk op marker", ErrInvalid)
 	}
 	return RenderArticleCreate(op.Actor, op.CreatedAt.UTC().Truncate(time.Second), op.ID, p.Body), nil
 }
@@ -476,10 +527,7 @@ func (articleUpdate) Render(op Op) (string, error) {
 		return "", err
 	}
 	if !p.Provenance {
-		return p.Content, nil
-	}
-	if strings.Contains(p.Content, markerPrefix) {
-		return "", fmt.Errorf("%w: document body contains the reserved hk op marker", ErrInvalid)
+		return EscapeArticleBody(p.Content), nil
 	}
 	return RenderArticleCreate(op.Actor, op.CreatedAt.UTC().Truncate(time.Second), op.ID, p.Content), nil
 }
