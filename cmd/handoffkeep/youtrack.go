@@ -242,42 +242,41 @@ func youtrackAdoptCmd(args []string, out io.Writer) error {
 // youtrackProtocolOwner names the env setting that hands YouTrack writes to
 // the write protocol, or returns "" when none is set: comments mode canary or
 // on, issues mode on, fields mode on, document-comment mode on, or decisions
-// mode on. An unparsable mode is an error, so the guard fails closed.
+// mode on. Every mode is parsed before the owner is chosen, so an unparsable
+// value is a config error even when an earlier mode already owns the writes;
+// the guard fails closed.
 func youtrackProtocolOwner() (string, error) {
 	comments, err := ytCommentsModeFromEnv()
 	if err != nil {
 		return "", err
 	}
-	if comments != store.YTCommentsOff {
-		return "HANDOFFKEEP_YT_COMMENTS_MODE=" + string(comments), nil
-	}
 	issues, err := ytIssuesModeFromEnv()
 	if err != nil {
 		return "", err
-	}
-	if issues == store.YTIssuesOn {
-		return "HANDOFFKEEP_YT_ISSUES_MODE=on", nil
 	}
 	fields, err := ytFieldsModeFromEnv()
 	if err != nil {
 		return "", err
 	}
-	if fields == store.YTFieldsOn {
-		return "HANDOFFKEEP_YT_FIELDS_MODE=on", nil
-	}
 	docs, err := ytDocCommentsModeFromEnv()
 	if err != nil {
 		return "", err
-	}
-	if docs == store.YTDocCommentsOn {
-		return "HANDOFFKEEP_YT_DOC_COMMENTS_MODE=on", nil
 	}
 	// The legacy sync also mirrors the DEC issues (syncDecisions).
 	decisions, err := ytDecisionsModeFromEnv()
 	if err != nil {
 		return "", err
 	}
-	if decisions == store.YTDecisionsOn {
+	switch {
+	case comments != store.YTCommentsOff:
+		return "HANDOFFKEEP_YT_COMMENTS_MODE=" + string(comments), nil
+	case issues == store.YTIssuesOn:
+		return "HANDOFFKEEP_YT_ISSUES_MODE=on", nil
+	case fields == store.YTFieldsOn:
+		return "HANDOFFKEEP_YT_FIELDS_MODE=on", nil
+	case docs == store.YTDocCommentsOn:
+		return "HANDOFFKEEP_YT_DOC_COMMENTS_MODE=on", nil
+	case decisions == store.YTDecisionsOn:
 		return "HANDOFFKEEP_YT_DECISIONS_MODE=on", nil
 	}
 	return "", nil

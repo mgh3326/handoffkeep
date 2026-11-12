@@ -2,6 +2,7 @@ package ytwrite
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -29,17 +30,31 @@ const (
 	docArticleTitleRunes   = 250
 )
 
+// docCommentKind is the import's taskReportKind over the document keys it
+// copies to an issue: "report" for reports/mwr-* and reports/<job>/report.md,
+// "brief" for brief/<date>/<job>, "" for any other key.
+func docCommentKind(key string) string {
+	path := strings.Split(key, "/")
+	switch {
+	case path[0] == "reports" && len(path) > 1 && strings.HasPrefix(path[1], "mwr-"),
+		path[0] == "reports" && len(path) == 3 && path[2] == "report.md":
+		return "report"
+	case path[0] == "brief" && len(path) == 3:
+		return "brief"
+	}
+	return ""
+}
+
 // DocComments returns the comment bodies that a document with this key, kind
 // and body gets on its task's issue, in part order. ok is false when the key
 // is not a task-tied report or brief (nothing is copied). err is set when a
 // part would exceed DocCommentPartBytes, which the import refused too.
 func DocComments(key, kind, body string) (bodies []string, ok bool, err error) {
 	path := strings.Split(key, "/")
-	switch {
-	case path[0] == "reports" && len(path) > 1 && strings.HasPrefix(path[1], "mwr-"),
-		path[0] == "reports" && len(path) == 3 && path[2] == "report.md":
+	switch docCommentKind(key) {
+	case "report":
 		return docReportBodies(key, body)
-	case path[0] == "brief" && len(path) == 3:
+	case "brief":
 		title := truncateRunes("["+path[0]+"] "+key+" ["+kind+"]", docArticleTitleRunes)
 		return []string{"Article: " + title + " (hk document key: " + key + ")"}, true, nil
 	}
@@ -127,6 +142,43 @@ func splitAfterNewline(text string) []string {
 		out = append(out, text)
 	}
 	return out
+}
+
+// docCommentPartSuffix is the " (part i/n)" a split report's heading adds.
+var docCommentPartSuffix = regexp.MustCompile(` \(part [0-9]+/[0-9]+\)$`)
+
+// ImportedDocCommentKey reads the document key out of a comment the import
+// posted for a task-tied document (youtrack/import/client.js
+// documentIssueComments): a report part's first line is "# <key>" (with
+// " (part i/n)" when the body was split), and a brief's text is the one
+// "Article: [brief] <key> [<kind>] (hk document key: <key>)" line. ok is
+// false for anything else, including a protocol document copy, whose
+// provenance line and op marker are not this shape.
+func ImportedDocCommentKey(text string) (string, bool) {
+	if rest, ok := strings.CutPrefix(text, "Article: "); ok {
+		const mark = " (hk document key: "
+		i := strings.LastIndex(rest, mark)
+		if i < 0 || !strings.HasPrefix(rest, "[brief] ") || !strings.HasSuffix(rest, ")") {
+			return "", false
+		}
+		key := rest[i+len(mark) : len(rest)-1]
+		if docCommentKind(key) != "brief" {
+			return "", false
+		}
+		return key, true
+	}
+	line, _, _ := strings.Cut(text, "\n")
+	rest, ok := strings.CutPrefix(line, "# ")
+	if !ok {
+		return "", false
+	}
+	if docCommentKind(rest) == "report" {
+		return rest, true
+	}
+	if key := docCommentPartSuffix.ReplaceAllString(rest, ""); key != rest && docCommentKind(key) == "report" {
+		return key, true
+	}
+	return "", false
 }
 
 // CheckDocComment is CheckComment with the document cap: the same request

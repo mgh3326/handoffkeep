@@ -885,6 +885,12 @@ const (
 	youtrackCommentsBackfillUsage  = "usage: youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME]"
 )
 
+// ytBindingMigrations are the registered migrations a binding read needs:
+// ytBindingColumns selects comments_from, origin and op_id. The read-only
+// commands check them all and refuse a schema without one, because they
+// never migrate.
+var ytBindingMigrations = []string{store.YTTaskBindingsMigration, store.YTBindingCommentsFromMigration, store.YTTaskBindingOriginMigration}
+
 // youtrackCommentsCmd is `youtrack comments-preflight` (backfill false):
 // read-only, it reads YouTrack issues but writes nothing, not even a
 // migration (store.OpenReadOnly); and `youtrack comments-backfill` (backfill
@@ -949,7 +955,7 @@ func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 	}
 	defer st.Close()
 	if !backfill {
-		for _, id := range []string{store.YTTaskBindingsMigration, store.YTBindingCommentsFromMigration} {
+		for _, id := range ytBindingMigrations {
 			applied, err := st.MigrationApplied(openCtx, id)
 			if err != nil {
 				return err

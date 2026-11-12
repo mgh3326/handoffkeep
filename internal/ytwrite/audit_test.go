@@ -3,6 +3,7 @@ package ytwrite_test
 import (
 	"encoding/json"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -236,6 +237,31 @@ func TestAuditCommentsAmbiguousCopy(t *testing.T) {
 	got = ytwrite.AuditComments([]ytwrite.AuditComment{{ID: 1, Body: quoted}}, auditList(t, f), auditBot, legacy)
 	if !reflect.DeepEqual(got.Present, []ytwrite.AuditCopies{copies(1, 0, both)}) || got.AmbiguousCopy != nil {
 		t.Fatalf("self-trailer: %+v", got)
+	}
+}
+
+// A document copy the import posted is doc_comment, not yt_only, whichever
+// side authored it; a comment merely near the shape stays yt_only.
+func TestAuditCommentsImportedDocComments(t *testing.T) {
+	f := ytwritetest.NewFake()
+	report := f.InjectAs(auditIssue, "# reports/job-b/report.md\n\nbody", auditHuman)
+	part := f.InjectAs(auditIssue, "# reports/job-b/report.md (part 2/2)\n\nmore", auditBot)
+	brief := f.InjectAs(auditIssue, "Article: [brief] brief/2026-11-09/job-a [brief] (hk document key: brief/2026-11-09/job-a)", auditHuman)
+	human := f.InjectAs(auditIssue, "said in YouTrack", auditHuman)
+	near := f.InjectAs(auditIssue, "# reports/job/other.md", auditHuman)
+	got := ytwrite.AuditComments(nil, auditList(t, f), auditBot, nil)
+	doc := append([]string(nil), got.DocComment...)
+	sort.Strings(doc)
+	wantDoc := []string{report, part, brief}
+	sort.Strings(wantDoc)
+	if !reflect.DeepEqual(doc, wantDoc) {
+		t.Fatalf("DocComment %v, want %v", doc, wantDoc)
+	}
+	if !reflect.DeepEqual(got.YTOnlyHuman, []string{human, near}) && !reflect.DeepEqual(got.YTOnlyHuman, []string{near, human}) {
+		t.Fatalf("YTOnlyHuman %v, want the two non-doc comments", got.YTOnlyHuman)
+	}
+	if len(got.YTOnlyBot) != 0 || len(got.Present)+len(got.Missing)+len(got.Duplicate)+len(got.AmbiguousCopy) != 0 {
+		t.Fatalf("unexpected classes: %+v", got)
 	}
 }
 
