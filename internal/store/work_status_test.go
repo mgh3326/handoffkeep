@@ -13,7 +13,7 @@ func TestWorkStatusRead(t *testing.T) {
 
 	// Configure projects in task_projects
 	for _, proj := range []string{"handoffkeep", "panewire", "ParkingArcade"} {
-		if _, err := st.pool.Exec(ctx, `INSERT INTO task_projects(name, status, created_at, updated_at) VALUES($1, 'active', $2, $2)`, proj, now); err != nil {
+		if _, err := st.pool.Exec(ctx, `INSERT INTO task_projects(name, created_by, created_at) VALUES($1, 'test', $2) ON CONFLICT (name) DO NOTHING`, proj, now); err != nil {
 			t.Fatal(err)
 		}
 	}
