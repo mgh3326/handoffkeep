@@ -324,3 +324,26 @@ func TestHeldParentAdoptsThePRWhenItsChildClosesIt(t *testing.T) {
 		t.Fatalf("parent state=%s refs.pr=%q", got.State, got.Refs.PR)
 	}
 }
+
+// TestAdoptedPRDoesNotDeployPastASubTask (PR #331 review round 7): a named
+// parent that adopts an already deployed PR stays merged while another
+// sub-task is merged but not deployed.
+func TestAdoptedPRDoesNotDeployPastASubTask(t *testing.T) {
+	s, pool := searchTestStore(t)
+	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
+	a := flowTask(t, s, pool, "implement", StateReviewing, true)
+	b := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setParent(t, s, a, parent)
+	setParent(t, s, b, parent)
+	send(t, s, mergeEvent(a.ID, testPR(7301)))
+	pr := testPR(7302)
+	putDeploy(t, s, "deploy/svc/20261112T000000Z", "svc", "success", []string{pr})
+	send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: b.ID, Tasks: []int64{parent.ID}})
+	if got := stateOf(t, s, b.ID).State; got != StateDeployed {
+		t.Fatalf("b on a deployed PR: %s", got)
+	}
+	got := stateOf(t, s, parent.ID)
+	if got.State != StateMerged || got.Refs.PR != pr {
+		t.Fatalf("parent state=%s refs.pr=%q, want merged with the PR (a is not deployed)", got.State, got.Refs.PR)
+	}
+}

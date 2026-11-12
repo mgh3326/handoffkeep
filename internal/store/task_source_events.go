@@ -282,7 +282,7 @@ func (s *Store) applyTaskSourceEventTx(ctx context.Context, tx pgx.Tx, id int64,
 
 // adoptMergedPRTx runs after every task a merge names has had its turn: a
 // named task that is now merged with no PR reference adopts the PR and gets
-// the deploy lookup (rule 8). auto_close_parent can move a named parent to
+// the deploy lookup (rule 8), unless a done sub-task is not deployed. auto_close_parent can move a named parent to
 // merged during another named task's turn, before or after its own, so this
 // runs once all turns are done. A task with a revert row for the PR does
 // not adopt it. r is the task's result, updated in place.
@@ -305,8 +305,16 @@ func (s *Store) adoptMergedPRTx(ctx context.Context, tx pgx.Tx, r *TaskEventResu
 	if t, err = writeTaskTx(ctx, tx, t); err != nil {
 		return err
 	}
-	if t, err = s.deployOnMergedTx(ctx, tx, t, now); err != nil {
+	// A parent is deployed only when every done sub-task is (autoCloseTx);
+	// the PR it adopts must not deploy it past a sub-task that is not.
+	var waiting bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_id=$1 AND state IN ('merged','completed'))`, t.ID).Scan(&waiting); err != nil {
 		return err
+	}
+	if !waiting {
+		if t, err = s.deployOnMergedTx(ctx, tx, t, now); err != nil {
+			return err
+		}
 	}
 	r.Task, r.State = t, t.State
 	return nil
