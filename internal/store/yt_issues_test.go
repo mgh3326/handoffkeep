@@ -220,8 +220,9 @@ func TestYTIssueBindingNeverOverwritten(t *testing.T) {
 	if _, err := s.EnqueueYTWriteOpAlerts(t.Context(), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if n := ytcCount(t, s, `SELECT count(*) FROM notification_outbox WHERE event_id=$1`, "yt-op-"+strconv.FormatInt(op.ID, 10)+"-rejected"); n != 1 {
-		t.Fatalf("%d rejected alerts for the conflict", n)
+	// Alerts are batched per window: the conflict is named in a rejected notice.
+	if n := ytcCount(t, s, `SELECT count(*) FROM notification_outbox WHERE event_id LIKE 'yt-ops-rejected-%' AND text LIKE '%op ids%' AND text LIKE $1`, "%"+strconv.FormatInt(op.ID, 10)+"%"); n < 1 {
+		t.Fatalf("%d rejected alert notices name the conflict", n)
 	}
 
 	// The issue bound to another task is a conflict too.
