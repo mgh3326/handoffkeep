@@ -115,7 +115,7 @@ func TestYTCommentQueuedBehindIssueCreate(t *testing.T) {
 	if len(comments) != 1 || comments[0].Text != text {
 		t.Fatalf("issue %s comments %+v, want one %q", b.IssueID, comments, text)
 	}
-	if echo, err := s.YTCommentEchoOp(ctx, got.ID, ytcTenant, b.IssueID); err != nil || !echo {
+	if echo, err := s.YTCommentEchoOp(ctx, got.ID, got.Tenant, b.IssueID); err != nil || !echo {
 		t.Fatalf("echo evidence = %v %v", echo, err)
 	}
 	// The catch-up sees the link and prepares nothing more.
