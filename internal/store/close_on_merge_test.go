@@ -303,3 +303,101 @@ func TestNamedTasksKeepTheirOwnEventKey(t *testing.T) {
 		t.Fatalf("revert naming the parent: %+v", rev)
 	}
 }
+
+// TestRelandIsJudgedByOpenTime (PR #331 review round 2): a PR opened before
+// the revert merged does not reland the reverted piece, even when its row was
+// written after the revert PR's row.
+func TestRelandIsJudgedByOpenTime(t *testing.T) {
+	s, pool := searchTestStore(t)
+	x := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	a, holder, revert, b := testPR(6401), testPR(6402), testPR(6403), testPR(6404)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: a, TaskID: x.ID})
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: holder, TaskID: x.ID})
+	send(t, s, mergeEvent(x.ID, a))
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: revert, TaskID: x.ID})
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: b, TaskID: x.ID})
+	send(t, s, revertEvent(x.ID, a, revert))
+	if _, err := pool.Exec(t.Context(), `UPDATE changes SET state='closed' WHERE repo='example/app' AND pr_number=6402`); err != nil {
+		t.Fatal(err)
+	}
+	if res := send(t, s, mergeEvent(x.ID, b)); res.Applied || !strings.Contains(res.Reason, "reverted") {
+		t.Fatalf("merge of a PR opened before the revert: %+v, want held", res)
+	}
+}
+
+// TestAutoCloseKeepsTheParentHolds (PR #331 review round 2): a parent whose
+// last sub-task settles stays open while its own implements PR is open.
+func TestAutoCloseKeepsTheParentHolds(t *testing.T) {
+	s, pool := searchTestStore(t)
+	parent := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	child := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setParent(t, s, child, parent)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: testPR(6501), TaskID: parent.ID})
+	send(t, s, mergeEvent(child.ID, testPR(6502)))
+	if got := stateOf(t, s, parent.ID).State; got != StateReviewing {
+		t.Fatalf("parent with an open implements PR: %s, want reviewing", got)
+	}
+	rows := sourceRows(t, s, parent.ID, "hk.auto_close")
+	if len(rows) == 0 || rows[len(rows)-1].Applied || !strings.Contains(rows[len(rows)-1].Note, testPR(6501)) {
+		t.Fatalf("auto_close rows %+v", rows)
+	}
+}
+
+// TestNamedParentAdoptsThePR (PR #331 review round 2): a named parent that
+// its named child's merge auto-closes before the parent's own turn still
+// gets the PR as refs.pr, which deploy records match.
+func TestNamedParentAdoptsThePR(t *testing.T) {
+	s, pool := searchTestStore(t)
+	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
+	child := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setParent(t, s, child, parent)
+	pr := testPR(6601)
+	res := send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: child.ID, Tasks: []int64{parent.ID}})
+	if len(res.Tasks) != 1 || res.Tasks[0].State != StateMerged || res.Tasks[0].Task.Refs.PR != pr {
+		t.Fatalf("named parent %+v", res.Tasks)
+	}
+	if got := stateOf(t, s, parent.ID); got.State != StateMerged || got.Refs.PR != pr {
+		t.Fatalf("parent state=%s refs.pr=%q", got.State, got.Refs.PR)
+	}
+}
+
+// TestPropagatedSiblingLinksTheChange (PR #331 review round 2): a sibling the
+// merge propagates to is linked to the change as implements, so a later
+// revert of the PR holds the sibling too.
+func TestPropagatedSiblingLinksTheChange(t *testing.T) {
+	s, pool := searchTestStore(t)
+	pr := testPR(6701)
+	a := flowTask(t, s, pool, "implement", StateReviewing, true)
+	b := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setRefsPR(t, s, a.ID, pr)
+	setRefsPR(t, s, b.ID, pr)
+	send(t, s, mergeEvent(a.ID, pr))
+	if links := changeLinks(t, s, mustChange(t, s, "example/app", 6701).ID); links[b.ID] != ChangeImplements {
+		t.Fatalf("links %v, want the sibling linked as implements", links)
+	}
+}
+
+// TestDriftMechanicalHonoursTheStateGate (PR #331 review round 2): a triage
+// task with a merged implements change is listed but not mechanical; an
+// unblocked reviewing task is.
+func TestDriftMechanicalHonoursTheStateGate(t *testing.T) {
+	s, pool := searchTestStore(t)
+	triage := flowTask(t, s, pool, "implement", StateTriage, false)
+	send(t, s, mergeEvent(triage.ID, testPR(6801)))
+	open := flowTask(t, s, pool, "implement", StateReviewing, true)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: testPR(6802), TaskID: open.ID})
+	send(t, s, mergeEvent(open.ID, testPR(6803)))
+	if _, err := pool.Exec(t.Context(), `UPDATE changes SET state='closed' WHERE repo='example/app' AND pr_number=6802`); err != nil {
+		t.Fatal(err)
+	}
+	got := map[int64]TaskDriftTask{}
+	for _, d := range driftAt(t, s, time.Now().UTC(), DriftDefaultMergedDays).MergedPRNotMerged.Tasks {
+		got[d.ID] = d
+	}
+	if d, ok := got[triage.ID]; !ok || d.Mechanical {
+		t.Fatalf("triage task %+v ok=%t, want listed and not mechanical", d, ok)
+	}
+	if d, ok := got[open.ID]; !ok || !d.Mechanical {
+		t.Fatalf("unblocked task %+v ok=%t, want mechanical", d, ok)
+	}
+}

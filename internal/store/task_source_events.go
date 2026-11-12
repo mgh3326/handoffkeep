@@ -267,6 +267,24 @@ func (s *Store) applyTaskSourceEventTx(ctx context.Context, tx pgx.Tx, id int64,
 			return TaskEventResult{}, false, err
 		}
 	}
+	// A merged task with no PR reference that a merge names adopts the PR:
+	// auto_close_parent can move a parent to merged before its own turn in the
+	// same event, and the PR is what a deploy record matches (rule 8).
+	if in.Source == SourceMergewakeMerge && !res.Applied && !res.Redelivered && res.Task.State == StateMerged && res.Task.Refs.PR == "" {
+		reverted, err := revertNamesPRTx(ctx, tx, res.Task.ID, in.PR)
+		if err != nil || reverted {
+			return res, true, err
+		}
+		t := res.Task
+		t.Refs.PR = in.PR
+		if t, err = writeTaskTx(ctx, tx, t); err != nil {
+			return TaskEventResult{}, false, err
+		}
+		if t, err = s.deployOnMergedTx(ctx, tx, t, now); err != nil {
+			return TaskEventResult{}, false, err
+		}
+		res.Task, res.State = t, t.State
+	}
 	return res, true, nil
 }
 
@@ -289,9 +307,22 @@ func (s *Store) propagateMergeTx(ctx context.Context, tx pgx.Tx, src int64, ev s
 	if err != nil {
 		return err
 	}
+	var changeID int64
+	if repo, n, ok := parsePRURL(ev.PR); ok {
+		if err = tx.QueryRow(ctx, `SELECT id FROM changes WHERE repo=$1 AND pr_number=$2`, repo, n).Scan(&changeID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+	}
 	for _, x := range siblings {
 		if ev.Named[x.ID] {
 			continue
+		}
+		// The sibling implements the PR too: link it first, so a later revert
+		// of the PR holds the sibling's own close (unresolvedRevertSQL).
+		if changeID != 0 {
+			if err = linkChangeTaskTx(ctx, tx, changeID, x.ID, ChangeImplements, false, now); err != nil {
+				return err
+			}
 		}
 		sib := ev
 		sib.Note = fmt.Sprintf("the PR is also task #%d's; applied with it", src)
@@ -455,13 +486,16 @@ const openImplementsSQL = `SELECT ` + prURLSQL + ` FROM change_tasks ct JOIN cha
 // unresolvedRevertSQL is the condition, on changes row c linked to the task
 // whose id is the SQL expression task, that c is an implements change of the
 // task that was reverted and not relanded: no merged, not reverted
-// implements change of the task was created after the revert PR's row.
-// Relanding takes a new PR (rule 10), so a change opened before the revert
-// does not reland it.
+// implements change of the task was opened after the revert merged.
+// Relanding takes a new PR (rule 10), so a PR opened before the revert
+// merged does not reland it, whatever order its rows were written in.
+// opened_at is the time of the first event that named the PR (its
+// mergewake.pr event, else its merge); the revert's merged_at is the revert
+// event's time.
 func unresolvedRevertSQL(task string) string {
 	return `ct.task_id=` + task + ` AND ct.relation='implements' AND c.reverted_by_change_id IS NOT NULL
-	AND NOT EXISTS (SELECT 1 FROM change_tasks rt JOIN changes r ON r.id=rt.change_id
-		WHERE rt.task_id=` + task + ` AND rt.relation='implements' AND r.state='merged' AND r.reverted_by_change_id IS NULL AND r.id>c.reverted_by_change_id)`
+	AND NOT EXISTS (SELECT 1 FROM change_tasks rt JOIN changes r ON r.id=rt.change_id JOIN changes rv ON rv.id=c.reverted_by_change_id
+		WHERE rt.task_id=` + task + ` AND rt.relation='implements' AND r.state='merged' AND r.reverted_by_change_id IS NULL AND r.opened_at>COALESCE(rv.merged_at,rv.created_at))`
 }
 
 // openSubTasksSQL lists the sub-tasks of task $1 that are not settled.

@@ -260,6 +260,9 @@ func writeTaskDriftText(out io.Writer, rep store.TaskDrift) error {
 				}
 				fmt.Fprintf(&b, " open_sub_tasks=%s", strings.Join(subs, ","))
 			}
+			if x.Mechanical {
+				b.WriteString(" mechanical")
+			}
 			fmt.Fprintf(&b, " %s\n", x.Title)
 		}
 	}

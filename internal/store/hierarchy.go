@@ -494,6 +494,20 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 		if deployed == completed {
 			to = StateDeployed
 		}
+		// The close-on-merge holds (hk 3294) apply to the parent too: an open
+		// implements change of its own, or a reverted one not relanded.
+		hold, err := mergeHoldTx(ctx, tx, p.ID, "")
+		if err != nil {
+			return err
+		}
+		if hold != "" {
+			_, _, err = insertEvent(ctx, tx, taskEventInput{
+				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
+				Note:   "every sub-task is settled, but " + hold,
+				Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
+			})
+			return err
+		}
 		if to == StateCompleted && !canCompleteKind(p.Kind) {
 			_, _, err = insertEvent(ctx, tx, taskEventInput{
 				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,

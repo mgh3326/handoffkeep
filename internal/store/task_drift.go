@@ -70,6 +70,11 @@ type TaskDriftTask struct {
 	// are not settled, which hold the close too. The close is mechanical only
 	// when OpenPRs and OpenSubTasks are both empty.
 	OpenSubTasks []int64 `json:"open_sub_tasks,omitempty"`
+	// Mechanical, on merged_pr_not_merged only, is true when nothing holds
+	// the close: OpenPRs and OpenSubTasks are empty and the task is in a
+	// state a merge applies from (not triage, not icebox). It is the set the
+	// hygiene job (hk 3292) may close without a person.
+	Mechanical bool `json:"mechanical,omitempty"`
 }
 
 // driftColumns is the TaskDriftTask row: id, lane, title, kind, state, pr,
@@ -138,7 +143,7 @@ func (s *Store) TaskDrift(ctx context.Context, now time.Time, mergedDays int) (T
 	if out.SettledOpenDecision, err = driftList(ctx, tx, "state is settled and refs.decision_request is open", driftSettledOpenSQL, DecisionRequestOpen); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift settled_open_decision: %w", err)
 	}
-	if out.MergedPRNotMerged, err = driftList(ctx, tx, "not settled, and refs.pr is merged (a merged changes row names the PR, or a merged or deployed task does) or the task implements a merged, not reverted change, and no implements change is reverted and not relanded; open_prs and open_sub_tasks list what still holds the close", driftMergedPRSQL); err != nil {
+	if out.MergedPRNotMerged, err = driftList(ctx, tx, "not settled, and refs.pr is merged (a merged changes row names the PR, or a merged or deployed task does) or the task implements a merged, not reverted change, and no implements change is reverted and not relanded; open_prs and open_sub_tasks list what still holds the close, and mechanical is true only when nothing does and the state is one a merge applies from", driftMergedPRSQL); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_pr_not_merged: %w", err)
 	}
 	if err = driftBlockers(ctx, tx, out.MergedPRNotMerged.Tasks); err != nil {
@@ -244,7 +249,14 @@ func driftBlockers(ctx context.Context, tx pgx.Tx, xs []TaskDriftTask) error {
 		}
 		xs[at[id]].OpenSubTasks = append(xs[at[id]].OpenSubTasks, child)
 	}
-	return rows.Err()
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	for i := range xs {
+		x := &xs[i]
+		x.Mechanical = len(x.OpenPRs) == 0 && len(x.OpenSubTasks) == 0 && sourceEventTable[SourceMergewakeMerge].from[x.State]
+	}
+	return nil
 }
 
 // driftList runs one class query, which takes its args as $1.. and ends in an
