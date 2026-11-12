@@ -108,6 +108,9 @@ func (f *fakeTenant) addProject(short, name string) *fakeProject {
 }
 
 func (f *fakeTenant) newBundle(kind FieldKind, name string, values []BundleValue) *fakeBundle {
+	if kind == KindMultiEnum {
+		kind = KindEnum // the enum bundle path serves single and multi alike
+	}
 	b := &fakeBundle{ID: f.id("67"), Name: name, Kind: kind}
 	for i, v := range values {
 		b.Values = append(b.Values, &fakeElement{ID: f.id("68"), Name: v.Name, Ordinal: i, Resolved: v.Resolved})
@@ -133,7 +136,7 @@ func (f *fakeTenant) attach(p *fakeProject, name string, kind FieldKind, values 
 }
 
 func projectFieldType(kind FieldKind) string {
-	return map[FieldKind]string{KindState: "StateProjectCustomField", KindEnum: "EnumProjectCustomField", KindDate: "SimpleProjectCustomField", KindPeriod: "PeriodProjectCustomField"}[kind]
+	return map[FieldKind]string{KindState: "StateProjectCustomField", KindEnum: "EnumProjectCustomField", KindMultiEnum: "EnumProjectCustomField", KindDate: "SimpleProjectCustomField", KindPeriod: "PeriodProjectCustomField", KindString: "SimpleProjectCustomField", KindInt: "SimpleProjectCustomField"}[kind]
 }
 
 // seedBuiltinLinks adds the three link types YouTrack ships.
@@ -318,7 +321,7 @@ func (f *fakeTenant) projectFields(w http.ResponseWriter, r *http.Request, proje
 			return
 		}
 	}
-	want := map[string]string{"state[1]": "StateProjectCustomField", "enum[1]": "EnumProjectCustomField", "date": "SimpleProjectCustomField", "period": "PeriodProjectCustomField"}[g.Type]
+	want := map[string]string{"state[1]": "StateProjectCustomField", "enum[1]": "EnumProjectCustomField", "enum[*]": "EnumProjectCustomField", "date": "SimpleProjectCustomField", "period": "PeriodProjectCustomField", "string": "SimpleProjectCustomField", "integer": "SimpleProjectCustomField"}[g.Type]
 	if typ != want {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project field type " + typ + " does not fit " + g.Type})
 		return
@@ -345,8 +348,14 @@ func kindOfType(typ string) FieldKind {
 		return KindState
 	case "enum[1]":
 		return KindEnum
+	case "enum[*]":
+		return KindMultiEnum
 	case "date":
 		return KindDate
+	case "string":
+		return KindString
+	case "integer":
+		return KindInt
 	}
 	return KindPeriod
 }

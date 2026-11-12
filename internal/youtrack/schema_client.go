@@ -143,7 +143,7 @@ func bundlePath(kind FieldKind) (string, error) {
 	switch kind {
 	case KindState:
 		return "state", nil
-	case KindEnum:
+	case KindEnum, KindMultiEnum:
 		return "enum", nil
 	}
 	return "", fmt.Errorf("field kind %d has no bundle", kind)
@@ -239,16 +239,16 @@ func (c *Client) SetStateElement(ctx context.Context, bundleID, valueID string, 
 }
 
 // AttachProjectField attaches a field definition to a project. bundleID is
-// empty for a date or period field.
+// empty for a field without a bundle.
 func (c *Client) AttachProjectField(ctx context.Context, projectID string, kind FieldKind, fieldID, bundleID string) (ProjectField, error) {
 	body := map[string]any{"field": map[string]any{"id": fieldID, "$type": "CustomField"}}
 	switch kind {
 	case KindState:
 		body["$type"] = "StateProjectCustomField"
-	case KindEnum:
+	case KindEnum, KindMultiEnum:
 		body["$type"] = "EnumProjectCustomField"
 		body["canBeEmpty"] = true
-	case KindDate:
+	case KindDate, KindString, KindInt:
 		body["$type"] = "SimpleProjectCustomField"
 		body["canBeEmpty"] = true
 	case KindPeriod:

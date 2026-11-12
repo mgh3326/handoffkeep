@@ -21,6 +21,7 @@ type Schema struct {
 	HKIDField     string
 	PriorityField string
 	PRField       string
+	JobField      string
 	ProjectField  string
 	StallField    string
 	StateBundle   string
@@ -41,6 +42,7 @@ func DefaultSchema() Schema {
 		HKIDField:     ytwrite.FieldHKID,
 		PriorityField: ytwrite.FieldPriority,
 		PRField:       ytwrite.FieldPR,
+		JobField:      ytwrite.FieldJob,
 		ProjectField:  ytwrite.FieldProject,
 		StallField:    ytwrite.FieldStalled,
 		StateBundle:   "hk 상태",
@@ -126,10 +128,13 @@ var (
 type FieldKind int
 
 const (
-	KindState  FieldKind = iota // state[1], a StateBundle with isResolved
-	KindEnum                    // enum[1], an EnumBundle
-	KindDate                    // date, no bundle
-	KindPeriod                  // period, no bundle
+	KindState     FieldKind = iota // state[1], a StateBundle with isResolved
+	KindEnum                       // enum[1], an EnumBundle
+	KindMultiEnum                  // enum[*], an EnumBundle
+	KindDate                       // date, no bundle
+	KindPeriod                     // period, no bundle
+	KindString                     // string, no bundle
+	KindInt                        // integer, no bundle
 )
 
 // FieldSpec is one field the schema wants on every hk project. Values is the
@@ -161,17 +166,26 @@ type Vocabulary struct {
 
 // Desired is the one declaration of the schema one hk project should have. Plan
 // and apply both read it, so a field or value is named in this function only.
+// It lists every field the import gives a task project
+// (youtrack/import/client.js fieldsForProject), in that order, so a project the
+// run creates takes the same writes an import-created one does (hk 3972).
 func (s Schema) Desired(v Vocabulary, hkProject string) []FieldSpec {
 	states := make([]BundleValue, 0, len(StateLabels))
 	for i, state := range store.TaskStates() {
 		states = append(states, BundleValue{Name: StateLabel(state), Resolved: StateResolved(state), Ordinal: i})
 	}
 	return []FieldSpec{
+		{Name: s.HKIDField, Kind: KindInt},
+		{Name: s.ProjectField, Kind: KindString},
 		{Name: s.StateBundle, Kind: KindState, Values: states},
+		{Name: s.PriorityField, Kind: KindInt},
+		{Name: s.LaneField, Kind: KindEnum, Values: enumValues(v.Lanes[hkProject])},
 		{Name: s.KindField, Kind: KindEnum, Values: enumValues(v.Kinds)},
 		{Name: s.GradeField, Kind: KindEnum, Values: enumValues(Grades)},
 		{Name: s.TierField, Kind: KindEnum, Values: enumValues(Tiers)},
-		{Name: s.LaneField, Kind: KindEnum, Values: enumValues(v.Lanes[hkProject])},
+		{Name: s.PRField, Kind: KindString},
+		{Name: s.JobField, Kind: KindString},
+		{Name: s.StallField, Kind: KindMultiEnum, Values: []BundleValue{{Name: StallLabel}}},
 		{Name: s.DueField, Kind: KindDate},
 		{Name: s.AreaField, Kind: KindEnum, Values: enumValues(v.Areas)},
 		{Name: s.MilestoneField, Kind: KindEnum, Values: enumValues(v.Milestones[hkProject])},

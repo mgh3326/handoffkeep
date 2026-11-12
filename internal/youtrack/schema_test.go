@@ -42,9 +42,10 @@ func seedSchemaTenant(t *testing.T) (*fakeTenant, *fakeSchemaStore, *SchemaRunne
 	f.attach(hk, schema.TierField, KindEnum, []BundleValue{{Name: "T1"}})
 	f.attach(hk, schema.LaneField, KindEnum, []BundleValue{{Name: "lane-a"}})
 
-	// A project that has every field the import made, complete, but no mapping row.
+	// A project that has every field the schema declares, complete, but no
+	// mapping row.
 	mw := f.addProject("MERGEWAKE", "mergewake")
-	for _, spec := range schema.Desired(vocab, "mergewake")[:5] {
+	for _, spec := range schema.Desired(vocab, "mergewake") {
 		f.attach(mw, spec.Name, spec.Kind, spec.Values)
 	}
 	return f, st, &SchemaRunner{Client: f.client(t, Config{}), Store: st, Schema: schema}
@@ -64,6 +65,27 @@ func TestSchemaGradesMatchStoreScale(t *testing.T) {
 	}
 }
 
+// TestDesiredListsEveryImportFieldInImportOrder pins the contract hk 3972 is
+// about: Desired names every field youtrack/import/client.js fieldsForProject
+// declares, in that order, so a project the run creates takes the same writes
+// an import-created one does.
+func TestDesiredListsEveryImportFieldInImportOrder(t *testing.T) {
+	want := []string{
+		"hk ID", "hk 프로젝트", "hk 상태", "hk 우선순위", "레인", "종류",
+		"등급", "티어", "PR", "작업 job", "멈춤", "마감", "영역", "마일스톤", "예상 소요",
+	}
+	var got []string
+	for _, spec := range DefaultSchema().Desired(Vocabulary{}, "x") {
+		got = append(got, spec.Name)
+		if spec.Name == "멈춤" && spec.Kind != KindMultiEnum {
+			t.Fatalf("멈춤 kind=%v want KindMultiEnum (the import sets multiValue)", spec.Kind)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Desired fields=%q want %q", got, want)
+	}
+}
+
 func TestSchemaPlanListsExactlyWhatIsMissing(t *testing.T) {
 	f, _, runner := seedSchemaTenant(t)
 	plan, err := runner.Plan(context.Background(), "")
@@ -75,29 +97,33 @@ func TestSchemaPlanListsExactlyWhatIsMissing(t *testing.T) {
 		"factortrail\tproject\tcreate\tFACTORTRAI",
 		"factortrail\tmapping\tput\tFACTORTRAI",
 		"mergewake\tmapping\tput\tMERGEWAKE",
-		// field definitions the tenant lacks, once each
-		"-\t마감\tcreate-field\tdate",
-		"-\t영역\tcreate-field\tenum[1]",
-		"-\t마일스톤\tcreate-field\tenum[1]",
-		"-\t예상 소요\tcreate-field\tperiod",
-		// attachments: the new project gets every field, an import project the four new ones
+		// attachments in the import's field order: a new project gets every
+		// field, the import project the ten it lacks; mergewake is complete
+		"factortrail\thk ID\tattach\tinteger",
+		"factortrail\thk 프로젝트\tattach\tstring",
 		"factortrail\thk 상태\tattach\tstate[1] with 12 values",
+		"factortrail\thk 우선순위\tattach\tinteger",
+		"factortrail\t레인\tattach\tenum[1] with 1 values",
 		"factortrail\t종류\tattach\tenum[1] with 5 values",
 		"factortrail\t등급\tattach\tenum[1] with 7 values",
 		"factortrail\t티어\tattach\tenum[1] with 4 values",
-		"factortrail\t레인\tattach\tenum[1] with 1 values",
+		"factortrail\tPR\tattach\tstring",
+		"factortrail\t작업 job\tattach\tstring",
+		"factortrail\t멈춤\tattach\tenum[*] with 1 values",
 		"factortrail\t마감\tattach\tdate",
 		"factortrail\t영역\tattach\tenum[1] with 13 values",
 		"factortrail\t마일스톤\tattach\tenum[1] with 0 values",
 		"factortrail\t예상 소요\tattach\tperiod",
+		"handoffkeep\thk ID\tattach\tinteger",
+		"handoffkeep\thk 프로젝트\tattach\tstring",
+		"handoffkeep\thk 우선순위\tattach\tinteger",
+		"handoffkeep\tPR\tattach\tstring",
+		"handoffkeep\t작업 job\tattach\tstring",
+		"handoffkeep\t멈춤\tattach\tenum[*] with 1 values",
 		"handoffkeep\t마감\tattach\tdate",
 		"handoffkeep\t영역\tattach\tenum[1] with 13 values",
 		"handoffkeep\t마일스톤\tattach\tenum[1] with 2 values",
 		"handoffkeep\t예상 소요\tattach\tperiod",
-		"mergewake\t마감\tattach\tdate",
-		"mergewake\t영역\tattach\tenum[1] with 13 values",
-		"mergewake\t마일스톤\tattach\tenum[1] with 0 values",
-		"mergewake\t예상 소요\tattach\tperiod",
 		// missing bundle values, in the declaration's order
 		"handoffkeep\thk 상태\tadd-value\t분류 대기 (resolved=false ordinal=0)",
 		"handoffkeep\thk 상태\tadd-value\t착수 전 (resolved=false ordinal=2)",
@@ -106,6 +132,7 @@ func TestSchemaPlanListsExactlyWhatIsMissing(t *testing.T) {
 		"handoffkeep\thk 상태\tadd-value\t종료됨 (resolved=true ordinal=9)",
 		"handoffkeep\thk 상태\tadd-value\t중복 (resolved=true ordinal=10)",
 		"handoffkeep\thk 상태\tadd-value\t보류(보관) (resolved=false ordinal=11)",
+		"handoffkeep\t레인\tadd-value\tlane-b",
 		"handoffkeep\t종류\tadd-value\tdecide",
 		"handoffkeep\t종류\tadd-value\tops",
 		"handoffkeep\t종류\tadd-value\tverify",
@@ -117,7 +144,6 @@ func TestSchemaPlanListsExactlyWhatIsMissing(t *testing.T) {
 		"handoffkeep\t티어\tadd-value\tT0",
 		"handoffkeep\t티어\tadd-value\tT2",
 		"handoffkeep\t티어\tadd-value\tT3",
-		"handoffkeep\t레인\tadd-value\tlane-b",
 		// flags and ordinals of the values already there
 		"handoffkeep\thk 상태\tset-ordinal\t대기=1",
 		"handoffkeep\thk 상태\tset-ordinal\t개발 중=4",
@@ -135,6 +161,44 @@ func TestSchemaPlanListsExactlyWhatIsMissing(t *testing.T) {
 	}
 	if w := f.writes(); len(w) != 0 {
 		t.Fatalf("plan wrote to YouTrack: %v", w)
+	}
+}
+
+// TestSchemaReportsSuffixedDuplicateFields is the HANDOFFKEEP incident of
+// hk 3972: the project carried 영역 and 영역_0 (and the same for 마일스톤)
+// after a double attach. The plan reports the pair and plans no change for
+// the suffixed field: deleting or renaming it is the operator's call.
+func TestSchemaReportsSuffixedDuplicateFields(t *testing.T) {
+	f, _, runner := seedSchemaTenant(t)
+	hk := f.projects[0]
+	for _, base := range []string{"영역", "마일스톤"} {
+		f.attach(hk, base, KindEnum, []BundleValue{{Name: "x"}})
+		f.attach(hk, base+"_0", KindEnum, []BundleValue{{Name: "y"}})
+	}
+	// A suffixed name whose base is not attached is not a duplicate.
+	f.attach(hk, "메모_0", KindString, nil)
+	plan, err := runner.Plan(context.Background(), "handoffkeep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	for _, r := range plan.Reports {
+		if r.Object == "field" && r.Status == "duplicate" {
+			found[r.Value] = true
+		}
+	}
+	for _, want := range []string{"handoffkeep 영역_0 duplicates 영역", "handoffkeep 마일스톤_0 duplicates 마일스톤"} {
+		if !found[want] {
+			t.Fatalf("reports=%+v lack %q", plan.Reports, want)
+		}
+	}
+	for _, c := range plan.Changes {
+		if c.Object == "영역_0" || c.Object == "마일스톤_0" || c.Object == "메모_0" {
+			t.Errorf("the run plans a change for a suffixed field: %s", c.Line())
+		}
+	}
+	if !strings.Contains(plan.Text(), "report\tfield\tduplicate\thandoffkeep 영역_0 duplicates 영역\n") {
+		t.Fatalf("text form lacks the duplicate report:\n%s", plan.Text())
 	}
 }
 
@@ -203,7 +267,7 @@ func TestSchemaApplyMakesThePlanTrueAndNeverDeletes(t *testing.T) {
 			ft = p
 		}
 	}
-	if ft == nil || ft.Short != "FACTORTRAI" || ft.Leader != f.me.ID || len(ft.Fields) != 9 {
+	if ft == nil || ft.Short != "FACTORTRAI" || ft.Leader != f.me.ID || len(ft.Fields) != len(DefaultSchema().Desired(Vocabulary{}, "factortrail")) {
 		t.Fatalf("factortrail project=%+v", ft)
 	}
 	if row := st.rows["factortrail"]; row.ProjectID != ft.ID || row.ShortName != "FACTORTRAI" {
@@ -441,8 +505,13 @@ func TestShortNameFollowsTheImportRule(t *testing.T) {
 }
 
 func TestDesiredSchemaStateBundleFollowsHKOrderAndFlags(t *testing.T) {
-	spec := DefaultSchema().Desired(Vocabulary{}, "x")[0]
-	if spec.Name != "hk 상태" || spec.Kind != KindState || len(spec.Values) != 12 {
+	var spec FieldSpec
+	for _, s := range DefaultSchema().Desired(Vocabulary{}, "x") {
+		if s.Name == "hk 상태" {
+			spec = s
+		}
+	}
+	if spec.Kind != KindState || len(spec.Values) != 12 {
 		t.Fatalf("state spec=%+v", spec)
 	}
 	var resolved []string
@@ -567,7 +636,20 @@ func TestSchemaPlansASharedBundleOnce(t *testing.T) {
 func TestSchemaReportsAFieldOfTheWrongTypeInsteadOfConverging(t *testing.T) {
 	f, _, runner := seedSchemaTenant(t)
 	ctx := context.Background()
-	// 마감 already exists as an enum, on the tenant and on handoffkeep.
+	// 마감 is defined as an enum on the tenant, and handoffkeep carries it;
+	// mergewake does not, so the run reports the definition, not just a field.
+	for _, g := range f.globals {
+		if g.Name == "마감" {
+			g.Type = "enum[1]"
+		}
+	}
+	mw := f.projects[1]
+	for i := 0; i < len(mw.Fields); i++ {
+		if f.globalByID(mw.Fields[i].GlobalID).Name == "마감" {
+			mw.Fields = append(mw.Fields[:i], mw.Fields[i+1:]...)
+			i--
+		}
+	}
 	f.attach(f.projects[0], "마감", KindEnum, []BundleValue{{Name: "x"}})
 	plan, err := runner.Plan(ctx, "handoffkeep")
 	if err != nil {
