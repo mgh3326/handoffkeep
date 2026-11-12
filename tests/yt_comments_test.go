@@ -186,7 +186,7 @@ func TestOpsViewUsesSafeDTO(t *testing.T) {
 		t.Fatalf("pending filter = %d", status)
 	}
 	client := remote.Client{URL: h.URL, Token: "node-token", HTTP: h.Client()}
-	views, next, err := client.ListYTOps(ctx, "all", task.ID, 0, 10)
+	views, next, err := client.ListYTOps(ctx, "all", "", task.ID, 0, 10)
 	if err != nil || len(views) != 2 || next != 0 || views[0].Status != ytwrite.StatusPending {
 		t.Fatalf("remote ListYTOps = %+v %d %v", views, next, err)
 	}
