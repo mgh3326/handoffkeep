@@ -200,22 +200,49 @@ type ytAuditReport struct {
 // ytAuditDocuments is the documents the import made an article for
 // (store.YTArticleExcluded false) that have no yt_article_bindings row on
 // the audit's tenant, in all and per project (an hk project, /shared or
-// /unassigned). It is a count for the document cutover, not part of the
-// comment gate: it does not change the exit.
+// /unassigned), and the two classes the document kinds write no op for
+// (hk 4206, store.YTArticleExceptionOf): exception_not_updated (a body over
+// the single-article limit, or a split document's index binding) and
+// exception_unbound_imported (unbound, created before the import ended). It
+// is a count for the document cutover, not part of the comment gate: it does
+// not change the exit.
 type ytAuditDocuments struct {
-	Documents int                  `json:"documents"`
-	Unbound   ytArticlesClass      `json:"unbound"`
-	Projects  []*ytAuditDocProject `json:"projects"`
+	Documents int             `json:"documents"`
+	Unbound   ytArticlesClass `json:"unbound"`
+	ytAuditDocExceptions
+	Projects []*ytAuditDocProject `json:"projects"`
+}
+
+// ytAuditDocExceptions are the exception counts of one scope.
+type ytAuditDocExceptions struct {
+	NotUpdated      ytArticlesClass `json:"exception_not_updated"`
+	UnboundImported ytArticlesClass `json:"exception_unbound_imported"`
+}
+
+// add counts document id under class (one of the store's exception
+// classes; "" counts nothing).
+func (e *ytAuditDocExceptions) add(class string, id int64) {
+	switch class {
+	case store.YTArticleExceptionNotUpdated:
+		e.NotUpdated.add(id)
+	case store.YTArticleExceptionUnboundImported:
+		e.UnboundImported.add(id)
+	}
+}
+
+func newYTAuditDocExceptions() ytAuditDocExceptions {
+	return ytAuditDocExceptions{NotUpdated: ytArticlesClass{DocumentIDs: []int64{}}, UnboundImported: ytArticlesClass{DocumentIDs: []int64{}}}
 }
 
 type ytAuditDocProject struct {
 	Project string          `json:"project"`
 	Unbound ytArticlesClass `json:"unbound"`
+	ytAuditDocExceptions
 }
 
 // documents counts the unbound documents of bucket ("" for all).
 func (a *ytAuditor) documents(ctx context.Context, bucket string) (*ytAuditDocuments, error) {
-	out := &ytAuditDocuments{Unbound: ytArticlesClass{DocumentIDs: []int64{}}, Projects: []*ytAuditDocProject{}}
+	out := &ytAuditDocuments{Unbound: ytArticlesClass{DocumentIDs: []int64{}}, ytAuditDocExceptions: newYTAuditDocExceptions(), Projects: []*ytAuditDocProject{}}
 	byProject := map[string]*ytAuditDocProject{}
 	var after int64
 	for {
@@ -231,7 +258,7 @@ func (a *ytAuditor) documents(ctx context.Context, bucket string) (*ytAuditDocum
 			out.Documents++
 			p := byProject[d.Bucket]
 			if p == nil {
-				p = &ytAuditDocProject{Project: d.Bucket, Unbound: ytArticlesClass{DocumentIDs: []int64{}}}
+				p = &ytAuditDocProject{Project: d.Bucket, Unbound: ytArticlesClass{DocumentIDs: []int64{}}, ytAuditDocExceptions: newYTAuditDocExceptions()}
 				byProject[d.Bucket] = p
 				out.Projects = append(out.Projects, p)
 			}
@@ -239,6 +266,9 @@ func (a *ytAuditor) documents(ctx context.Context, bucket string) (*ytAuditDocum
 				out.Unbound.add(d.DocumentID)
 				p.Unbound.add(d.DocumentID)
 			}
+			class := store.YTArticleExceptionOf(d, a.tenant)
+			out.add(class, d.DocumentID)
+			p.add(class, d.DocumentID)
 		}
 		if len(docs) < ytArticleDocPage {
 			break

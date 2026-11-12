@@ -29,7 +29,9 @@ import (
 // and, in fields mode on, the task's yt_snapshot_state row and its first
 // issue_fields op, an issue_move Apply updates the binding's project, and a
 // decision_create Apply does as issue_create for the decision with
-// yt_decision_bindings and decision_fields, all under the same lane lock). It takes no task
+// yt_decision_bindings and decision_fields, and an article_create or
+// article_update Apply writes the document's yt_article_bindings row and may
+// prepare its article_update, all under the same lane lock). It takes no task
 // row, no level-2 lock and no job lock, and no writer of another table waits on
 // one of its rows, so it cannot close a cycle with them. It reads no clock:
 // time is passed in (lockorder.go, "Time").
@@ -73,7 +75,8 @@ func registerYTKindGate(kind string, gate func(s *Store) string) {
 var ytKindNameRE = regexp.MustCompile(`^[a-z][a-z_]{0,63}$`)
 
 // ytApplyHook is what applying an op of a create kind (issue_create,
-// decision_create) also does, in Apply's transaction under the entity's lane
+// decision_create, article_create) or of article_update (which records the
+// content its binding now holds) also does, in Apply's transaction under the entity's lane
 // lock, which Apply takes first for such a kind: conflict names a mapping hk
 // already keeps that publishing ytID would contradict ("" when none; then the
 // op applies with reason binding_conflict and publishes nothing), and bind

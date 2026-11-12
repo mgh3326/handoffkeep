@@ -66,7 +66,7 @@ var ErrYTCommentUnsendable = errors.New("yt_comment_unsendable")
 var ytAuthorityPrincipals = map[YTAuthorityKind][]string{
 	YTAuthorityTasks:     {YTIssuePrincipal, YTFieldsPrincipal},
 	YTAuthorityComments:  {YTCommentPrincipal},
-	YTAuthorityDocuments: {ytDocCommentPrincipal},
+	YTAuthorityDocuments: {ytDocCommentPrincipal, YTDocsPrincipal},
 	YTAuthorityDecisions: {YTDecisionsPrincipal},
 }
 
@@ -78,7 +78,7 @@ var ytAuthorityFeeds = map[YTAuthorityKind][]struct {
 	models   []string
 }{
 	YTAuthorityTasks:     {{ytFieldsConsumer, []string{"task"}}},
-	YTAuthorityDocuments: {{ytDocCommentsConsumer, []string{"document"}}},
+	YTAuthorityDocuments: {{ytDocCommentsConsumer, []string{"document"}}, {ytDocsConsumer, []string{"document"}}},
 	YTAuthorityDecisions: {{ytDecisionsConsumer, []string{"decision"}}},
 }
 
@@ -255,6 +255,11 @@ func (s *Store) ytAuthorityWriteModeOff(kind YTAuthorityKind) string {
 		if s.ytDocCommentsNow() != YTDocCommentsOn {
 			return "HANDOFFKEEP_YT_DOC_COMMENTS_MODE is not on"
 		}
+		// The articles (hk 4206): a task's documents reach its issue as
+		// comments, every other document its article.
+		if _, on := s.ytDocsNow(); !on {
+			return "HANDOFFKEEP_YT_DOCS_MODE is not on"
+		}
 		return ""
 	case YTAuthorityDecisions:
 		if _, on := s.ytDecisionsNow(); !on {
@@ -337,6 +342,20 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 			}
 			if pending > 0 {
 				refusals = append(refusals, fmt.Sprintf("%s: %d ops are prepared, dispatched or remote_unknown (youtrack ops)", k, pending))
+			}
+			if k == YTAuthorityDocuments {
+				// The document articles (hk 4206): no in-scope document may
+				// hold content YouTrack lacks with no op writing it, which
+				// covers what a feed cursor cannot (changes before it, a
+				// binding published since, a create that was refused).
+				g, _ := s.ytDocsNow()
+				n, ids, err := ytArticlesUnwrittenTx(ctx, tx, g.tenant)
+				if err != nil {
+					return nil, nil, err
+				}
+				if n > 0 {
+					refusals = append(refusals, fmt.Sprintf("%s: %d documents have content YouTrack lacks and no op writing it (%v)", k, n, ids))
+				}
 			}
 			for _, f := range ytAuthorityFeeds[k] {
 				// One statement, so the prune boundary, the cursor and the

@@ -973,14 +973,14 @@ milestone reaches the issue with the task's next change.
 The import made a YouTrack article for most hk documents, and hk kept no
 record of which. `yt_article_bindings` records it, one row per document, so
 the document kind (Y5b) updates that article instead of creating a second.
-No mode reads the table yet; nothing changes until Y5b ships.
+The document kinds (hk 4206, below) read it in `HANDOFFKEEP_YT_DOCS_MODE=on`.
 
 **Row.** `document_id` (primary key), `tenant`, `article_id` (stable internal
 id), `article_readable`, `project_id`, `part` (0: the whole document, or the
 index article of a split one), `generation` (0; Y5c owns it), `content_sha`
 (sha256 of the content the article held when it was verified; NULL for a
 split document's index), `origin` (`import_verified` here; `op_applied` is
-for Y5b), `op_id`, `needs_update`, `bound_by`, `bound_at`, and
+for an applied `article_create`), `op_id`, `needs_update`, `bound_by`, `bound_at`, and
 `UNIQUE(tenant, article_id)`. `Store.AddYTArticleBinding` writes it: the same
 binding again is a no-op; any other binding for the document, or another
 document's binding to the article, is `yt_article_binding_conflict` and
@@ -1065,7 +1065,9 @@ binding is outside what the backfill checks.
 
 **Audit.** `youtrack audit` (without `--task`) adds `documents`: the in-scope
 documents and those with no binding on its tenant (`unbound`, count and up to
-10 ids, in all and per project). It is a count for the document cutover; it
+10 ids, in all and per project), and the two classes the document kinds write
+no op for (hk 4206), `exception_not_updated` and
+`exception_unbound_imported`, in all and per project. It is a count for the document cutover; it
 does not change the audit's exit.
 
 **Migration** `20261112-yt-article-bindings` (expand-only, no `After`): the
@@ -1225,11 +1227,16 @@ server first takes the legacy sync lock (a running `youtrack sync`, `adopt`
 or comment catch-up makes it refuse), then checks, for each kind it changes to
 youtrack, that its own write mode is on (tasks: `HANDOFFKEEP_YT_ISSUES_MODE` and `HANDOFFKEEP_YT_FIELDS_MODE`;
 comments: `HANDOFFKEEP_YT_COMMENTS_MODE=on`; documents:
-`HANDOFFKEEP_YT_DOC_COMMENTS_MODE`; decisions: `HANDOFFKEEP_YT_DECISIONS_MODE`) and that the kind has no `prepared`, `dispatched` or
+`HANDOFFKEEP_YT_DOC_COMMENTS_MODE` and `HANDOFFKEEP_YT_DOCS_MODE`; decisions: `HANDOFFKEEP_YT_DECISIONS_MODE`) and that the kind has no `prepared`, `dispatched` or
 `remote_unknown` op (by principal: `hk:task-issues` and `hk:task-fields`,
-`hk:task-comments`, `hk:doc-comments`, `hk:decisions`), and that its feed
-consumers have read every change (`task_fields` for tasks, `task_docs` for
-documents, `decision_issues` for decisions; a consumer
+`hk:task-comments`, `hk:doc-comments` and `hk:documents`, `hk:decisions`), and that its feed
+consumers have read every change (`task_fields` for tasks, `task_docs` and
+`document_articles` for documents, and for documents no in-scope document
+whose content YouTrack lacks with no op writing it: a binding whose article
+is not the document's body, or a document created after the import with no
+binding (no create yet, no YouTrack project, a rejected create);
+`store.ytArticlesUnwrittenTx`, read from the state at the switch, not from a
+record of a catch-up), `decision_issues` for decisions; a consumer
 that has never run, or whose cursor is behind `sync_state.pruned_through`,
 refuses). Every op preparation holds its kind's row
 `FOR SHARE`, so the switch counts an op whose transaction was open when it
@@ -1396,6 +1403,148 @@ the decision has no binding, or one this op published (a backfill binding
 holds it). `decision_fields`: the op's target is the decision's bound issue
 on that tenant now.
 
+## Kinds article_create and article_update (hk 4206)
+
+After the switch, documents are canonical in YouTrack, and the import no
+longer writes them. `HANDOFFKEEP_YT_DOCS_MODE` is `off` (the default) or
+`on`, read like the other modes; on alone starts the write worker, needs the
+YouTrack credentials, reads the `/shared` and `/unassigned` bucket projects
+(`Shared documents`, `Unassigned hk tasks`) once at start by name, as the
+articles backfill does (none, two or a failed read stops the start), and
+makes the legacy `youtrack sync` (which also writes articles) and `adopt`
+refuse to run.
+
+**Scope.** Every document the import made an article for
+(`store.YTArticleExcluded` false) except the mergewake reviewer briefs
+(`briefs/mwr-*`, the same class as the `review/mwr-*` prompts; 461 of 1,226
+unbound documents on production, 2026-11-12): all but `screens/*`,
+`review/mwr-*`, `briefs/mwr-*` and a task's reports, which Y5d posts as
+comments. `YTArticleExcluded` stays the import's own filter, which the
+backfill binds against. A task's brief is in scope: the
+import made its article, and Y5d's pointer comment names it
+(handoffkeep-design's answer, hk 4206). `deploy/*` is written too.
+
+**Feed consumer `document_articles`** (`internal/store/yt_articles.go`). In
+mode on, for each changed document, in order:
+
+- deleted or out of scope: nothing;
+- a binding on another tenant: skipped;
+- a body over 240 KiB (`YTArticleSafePartBytes`, the import's
+  `SAFE_PART_BYTES`: it would split), or a binding to a split document's
+  index (no `content_sha`): `exception_not_updated`, no op (D4; no Y5c now);
+- no binding and created before the import ended (`store.YTImportEndedAt`,
+  2026-11-11T12:00:00Z): `exception_unbound_imported`, no op. The import made
+  its article or the backfill could not bind it (`summary_cut`, `missing`,
+  `ambiguous`);
+- bound, and `content_sha` equals `documents.sha256` with `needs_update`
+  false: unchanged, no op. Otherwise one `article_update` through
+  `prepareYTSnapshotTx` (no op when the snapshot is the one last prepared);
+- no binding and created after the import ended: one `article_create` (key
+  `document-article:<id>`, at most one per document; a rejected one is the
+  operator's) in its task's project's `youtrack_projects` row, or in the
+  bucket's project (no project row: skipped, `no_project`).
+
+**Catch-up.** The consumer's cursor starts at the feed's end, so each
+process in mode on runs, after the cursor exists, one full catch-up: every
+document that needs an op by the same rules (unbound and created after the
+import with no create, or bound with `needs_update` or another
+`content_sha`) is decided in its own transaction. Then, at most once a
+minute, every worker rescans the unbound documents from the shared state,
+so a document skipped as `no_project` gets its create from whichever worker
+rescans after its `youtrack_projects` mapping is added (a mapping makes no
+document feed row). A bound document is the feed's after the full catch-up.
+Each logs `ytwrite.articles_catchup full=`.
+
+Mode off prepares nothing and advances the cursor. Each pass logs
+`ytwrite.articles_feed documents= create_prepared= create_rejected=
+create_exists= update_prepared= unchanged= exception_not_updated=
+exception_unbound_imported= out_of_scope= deleted= other_tenant= no_project=
+invalid=`. No parent is set: hk 3995 had no settled rule when this shipped.
+
+**Op.** Principal and actor `hk:documents`, lane `document:<id>`. An
+`article_create` targets the project id and carries the summary, the body
+and the project's short name; an `article_update` targets the bound article
+and carries the summary and the content.
+
+**Text.** The summary is the import's (`store.YTArticleSummary`:
+`[<prefix>] <key> [<kind>]` cut to 250 code points). An `article_create`'s
+content is the provenance line, a blank line, the body, a blank line and the
+op marker; a body that quotes the marker gets its create rejected
+`invalid_issue`. An `article_update`'s content depends on the binding's
+origin: an imported article (`import_verified`) gets the body alone, as the
+import wrote it; an article hk created (`op_applied`) keeps hk's format, the
+update op's own provenance line, the body and the update op's marker
+(rendered exactly as a create). Either way `content_sha` is the body's
+sha256 after the update.
+
+**Legacy-synced documents.** A document the legacy `youtrack sync` already
+wrote (a `youtrack_doc_articles` row for its key) never gets a second
+article. Its `article_create` carries that article's id, the legacy project
+(the `youtrack_projects` mapping of the ledger's hk project, which the legacy
+sync wrote to; not the create's target) and the document's legacy marker
+(`<!-- hk-marker:hkdoc<sha256(key)[:12]> -->`, `ytwrite.LegacyDocMarker`).
+Send reads the article (one GET, no search). It is adopted (no POST) when it
+is in the legacy project and carries the marker; it may be a child, since the
+legacy sync put every document under its prefix's index article. The apply
+binds it in the legacy project with `origin = 'import_verified'` and
+`needs_update`, so an `article_update` rewrites it with the raw body.
+Anything else (gone, another project, no marker) rejects the op
+`legacy_synced_unverified`, and so does, at prepare time, a legacy article
+the sync split into parts or whose legacy project has no YouTrack id. A
+rejected document stays unbound and holds the documents authority switch. Any other failed read leaves the op `not_sent`.
+
+**Send.** `article_create`: one search of the project for the summary
+(`GET /api/articles`, query `project: <SHORT> "<summary>"`, at most 100 hits,
+a full page is an error and the op is held `not_sent`), keeping the
+top-level articles of the project id whose summary is exact, and one GET of
+each kept hit's content. Exactly one carrying the op's marker is adopted, no
+POST; two are `rejected / ambiguous_issue`; none is exactly one POST with
+the project, summary and content. `article_update`: one POST to the article
+with the summary and the rendered content. Whether the live search syntax finds a
+created article is UNVERIFIED until the first live create (hk 4206 report).
+
+**Evidence.** `article_create`: the same search; one article carrying the
+marker whose content is exactly the rendered text applies the op, one
+carrying the marker with other content keeps it `remote_unknown`.
+`article_update`: one GET of the article; its summary equal and its
+content's sha256 equal to the rendered content's (with the provenance line
+and marker for an `op_applied` binding) applies the op, anything else keeps it
+`remote_unknown`.
+
+A binding `youtrack articles-backfill` publishes in
+`HANDOFFKEEP_YT_DOCS_MODE=on` whose article is not the document's body gets
+its `article_update` in the binding's own transaction. Once documents are
+canonical in YouTrack, a backfill binding queues no update: it keeps what was
+verified (the article's `content_sha` and `needs_update`) and records the
+document's current body as its post-switch baseline (`yt_snapshot_state`
+kind `article_baseline`). While documents stay canonical in YouTrack, no
+update writes a body equal to that baseline (outcome `superseded`, also on a
+restart's catch-up); an hk edit after it is written. A document written
+after the switch is not bound at all (refused `yt_article_binding_conflict`:
+its body may be an hk edit the article lacks, which a baseline would drop and
+a write could overwrite the article with; the operator reconciles it). After
+a rollback to hk, every worker's periodic rescan (which also covers bound
+documents that hold a baseline) writes the body with no restart and no
+document change, spending the baseline as it prepares the update; the
+documents switch counts it unwritten until then. An applied
+`article_update` clears it too.
+
+**Binding.** Applying an `article_create` (send, evidence or `yt ops
+resolve`) takes the document's lane lock, checks the document's binding and
+`document` map row and the article's, then writes the map row (parent: the
+project) and the binding (`origin = 'op_applied'`, `op_id`, part 0,
+`content_sha` the sha256 of the body the op wrote, `needs_update` true when
+the article was adopted rather than written), and prepares the document's
+update when its body changed since the op was prepared, all in one
+transaction; a conflict applies the op with `binding_conflict` and writes
+nothing. Applying an `article_update` sets the binding's `content_sha` to
+the content's sha256 and `needs_update` to false in the same transaction.
+
+**Admission.** Mode on and the op's tenant is the worker's.
+`article_create`: the document has no binding, or one this op published (a
+backfill binding holds it). `article_update`: the op's target is the
+document's bound article on that tenant now.
+
 ## Tests
 
 `ytwritetest.RunProtocol` (public contract) and `RunLedger` (compare-and-set rules)
@@ -1416,6 +1565,6 @@ match, ambiguous evidence, caller cancellation.
 - An automatic binder for new tasks, `comments-unbind`, and recovery of ops
   held after a stop (hk 3810 follow-up).
 - The event-feed row an applied op commits, parent/child settling (b3),
-  article generations (b2), claims with a fencing generation (v2.2).
+  article generations for split documents (Y5c), claims with a fencing generation (v2.2).
 - A direct GET of the created comment before answering `applied`; the live
   canary measures index latency, marker preservation and read-after-write.

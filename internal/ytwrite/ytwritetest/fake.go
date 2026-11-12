@@ -79,6 +79,11 @@ type FakeYouTrack struct {
 	readFaults []error
 	// moves are the MoveIssueToProject calls received, in order (fake_move.go).
 	moves []FakeMove
+	// articles are the articles of every project, in creation order, and
+	// articleWrites every create and update call received
+	// (fake_article.go).
+	articles      []*ytwrite.RemoteArticle
+	articleWrites []FakeArticleWrite
 
 	// BeforeCreate runs at the start of every CreateComment, with the caller's
 	// context, before anything else. Tests use it to cancel a caller mid-call.

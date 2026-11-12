@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 // Article bindings (hk 4053, docs/youtrack-write-protocol.md §Article
@@ -39,7 +42,10 @@ type YTArticleBinding struct {
 	BoundBy         string    `json:"bound_by"`
 	BoundAt         time.Time `json:"bound_at"`
 	// Origin is set by the store: YTBindingImportVerified for a backfill
-	// binding (YTBindingOpApplied is reserved for an applied document op).
+	// binding, YTBindingOpApplied for one an applied article_create
+	// published (hk 4206; ContentSHA is then the sha256 of the body the op
+	// wrote, without its provenance line and marker). A create that adopted
+	// the legacy sync's article publishes YTBindingImportVerified.
 	Origin string `json:"origin"`
 	OpID   int64  `json:"op_id,omitempty"`
 }
@@ -52,7 +58,7 @@ var ErrYTArticleBindingConflict = errors.New("yt_article_binding_conflict")
 // YTArticleSafePartBytes is the import's SAFE_PART_BYTES
 // (youtrack/import/client.js): a document body longer than this many UTF-8
 // bytes was imported as an index article and its parts.
-const YTArticleSafePartBytes = 240 * 1024
+const YTArticleSafePartBytes = ytwrite.MaxArticleBytes
 
 // ytArticleSummaryRunes is the import's summary cut (truncateRunes(..., 250)).
 const ytArticleSummaryRunes = 250
@@ -166,11 +172,14 @@ type YTArticleCandidate struct {
 	YTProjectID string
 }
 
-// YTArticleDoc is a listed document and the tenant of its binding ("" when it
-// has none).
+// YTArticleDoc is a listed document, when it was created, the tenant of its
+// binding ("" when it has none) and whether that binding is a split
+// document's index (no content_sha).
 type YTArticleDoc struct {
 	YTArticleCandidate
-	BoundTenant string
+	CreatedAt       time.Time
+	BoundTenant     string
+	BoundSplitIndex bool
 }
 
 // ytArticleCandidateSQL reads candidates. The bucket is the import's
@@ -198,7 +207,7 @@ func (s *Store) YTArticleDocs(ctx context.Context, bucket string, afterID int64,
 	if afterID < 0 || limit < 1 || limit > YTArticleDocPageMax {
 		return nil, errors.New("invalid article document filter")
 	}
-	rows, err := s.pool.Query(ctx, ytArticleCandidateSQL+`, coalesce(b.tenant, '')`+ytArticleCandidateFrom+`
+	rows, err := s.pool.Query(ctx, ytArticleCandidateSQL+`, d.created_at, coalesce(b.tenant, ''), b.document_id IS NOT NULL AND b.content_sha IS NULL`+ytArticleCandidateFrom+`
 			LEFT JOIN yt_article_bindings b ON b.document_id = d.id
 			WHERE d.id > $2 AND ($1 = '' OR `+ytArticleBucketSQL+` = $1) ORDER BY d.id LIMIT $3`, bucket, afterID, limit)
 	if err != nil {
@@ -208,9 +217,10 @@ func (s *Store) YTArticleDocs(ctx context.Context, bucket string, afterID int64,
 	out := []YTArticleDoc{}
 	for rows.Next() {
 		var d YTArticleDoc
-		if err := scanYTArticleCandidate(rows, &d.YTArticleCandidate, &d.BoundTenant); err != nil {
+		if err := scanYTArticleCandidate(rows, &d.YTArticleCandidate, &d.CreatedAt, &d.BoundTenant, &d.BoundSplitIndex); err != nil {
 			return nil, err
 		}
+		d.CreatedAt = d.CreatedAt.UTC()
 		out = append(out, d)
 	}
 	return out, rows.Err()
@@ -280,8 +290,23 @@ var ytSHA256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // and article) is a no-op that returns the stored row; any other binding for
 // the document, or another document's binding to the article, is
 // ErrYTArticleBindingConflict and changes nothing. No other row is written.
+// A document whose article_create op (hk 4206) is unresolved is refused with
+// ErrYTArticleBindingConflict too: the op gives it its article, and a binding
+// published under it would hold the op, and every op behind it on the
+// document's lane, for good.
 //
-// Locks, in this order (lockorder.go): FOR SHARE on the documents row, then
+// In HANDOFFKEEP_YT_DOCS_MODE=on the new binding's article_update, when its
+// article does not hold the document's body, is prepared in the same
+// transaction (ytArticleSnapshotTx), after the insert, unless documents are
+// canonical in YouTrack: then none is, the binding keeps what was verified,
+// and the document's current body becomes its post-switch baseline
+// (setYTArticleBaselineTx).
+//
+// Locks, in this order (lockorder.go): the document's lane lock (as the
+// feed and an article_create's Apply take it, before any row), FOR SHARE on
+// the documents yt_authority row (as prepareYTOpTx takes it; a switch holds
+// it FOR UPDATE and takes no lane lock or documents row), then FOR SHARE on
+// the documents row, then
 // on its task's row, then on that project's youtrack_projects row, held to
 // commit, so neither the body, the task, the task's project nor its mapping
 // can change between the comparison and the insert; then the new binding
@@ -300,8 +325,27 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 		return YTArticleBinding{}, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockYTEntity(ctx, tx, ytwrite.ArticleEntity, strconv.FormatInt(b.DocumentID, 10)); err != nil {
+		return YTArticleBinding{}, err
+	}
+	// FOR SHARE on the documents authority row before the binding exists
+	// (r4547807096): a switch (FOR UPDATE) either commits first, and this
+	// transaction then sees documents canonical in YouTrack and queues no
+	// update, or waits for the binding and its update and counts them.
+	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityDocuments)
+	if err != nil {
+		return YTArticleBinding{}, err
+	}
 	if err := lockYTArticleSourcesTx(ctx, tx, b.DocumentID); err != nil {
 		return YTArticleBinding{}, err
+	}
+	var pending bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$1 AND entity_kind=$2 AND entity_id=$3
+		AND state NOT IN ('applied','rejected'))`, ytwrite.KindArticleCreate, ytwrite.ArticleEntity, strconv.FormatInt(b.DocumentID, 10)).Scan(&pending); err != nil {
+		return YTArticleBinding{}, err
+	}
+	if pending {
+		return YTArticleBinding{}, fmt.Errorf("%w: document %d has an unresolved article_create op", ErrYTArticleBindingConflict, b.DocumentID)
 	}
 	var current YTArticleCandidate
 	err = scanYTArticleCandidate(tx.QueryRow(ctx, ytArticleCandidateSQL+ytArticleCandidateFrom+` WHERE d.id = $1`, b.DocumentID), &current)
@@ -315,6 +359,22 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 		return YTArticleBinding{}, fmt.Errorf("%w: document %d changed after verification (verified %s sha %s in %s, now %s sha %s in %s); verify again",
 			ErrYTArticleBindingConflict, b.DocumentID, verified.Key, verified.SHA256, verified.Bucket, current.Key, current.SHA256, current.Bucket)
 	}
+	if side == YTAuthorityYouTrack {
+		// r4548095643: the post-switch baseline must be a body from before
+		// the switch. A document written after documents switched may hold
+		// an hk edit YouTrack lacks; baselining it would drop that edit,
+		// and writing it could overwrite the canonical article. Neither is
+		// decided here: the binding is refused, and the document stays an
+		// unbound exception for the operator.
+		var after bool
+		if err := tx.QueryRow(ctx, `SELECT d.updated_at > a.switched_at FROM documents d, yt_authority a
+			WHERE d.id=$1 AND a.kind='documents' AND a.switched_at IS NOT NULL`, b.DocumentID).Scan(&after); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return YTArticleBinding{}, err
+		}
+		if after {
+			return YTArticleBinding{}, fmt.Errorf("%w: document %d was written after documents switched to YouTrack; reconcile it by hand", ErrYTArticleBindingConflict, b.DocumentID)
+		}
+	}
 	var contentSHA any
 	if b.ContentSHA != "" {
 		contentSHA = b.ContentSHA
@@ -325,6 +385,24 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 		ON CONFLICT DO NOTHING RETURNING `+ytArticleBindingColumns,
 		b.DocumentID, b.Tenant, b.ArticleID, b.ArticleReadable, b.ProjectID, b.Part, contentSHA, YTBindingImportVerified, b.NeedsUpdate, b.BoundBy, time.Now().UTC()), &got)
 	if err == nil {
+		// In docs mode on (hk 4206), a binding whose article does not hold
+		// the document's body gets its article_update in the same
+		// transaction: no feed row comes for a binding, and the documents
+		// authority switch must not see it published with no op behind it.
+		// Once documents are canonical in YouTrack, the PG body the article
+		// superseded is never written over it (r4547880748, r4547995557):
+		// the binding keeps the verified article's sha and needs_update, and
+		// the document's current body is recorded as its post-switch
+		// baseline, which prepareYTArticleTx skips while documents stay
+		// canonical in YouTrack; an hk edit after it, or a rollback to hk,
+		// writes it.
+		if side == YTAuthorityYouTrack {
+			if err := setYTArticleBaselineTx(ctx, tx, b.DocumentID, current.SHA256); err != nil {
+				return YTArticleBinding{}, err
+			}
+		} else if _, err := s.ytArticleSnapshotTx(ctx, tx, b.DocumentID, time.Now().UTC()); err != nil {
+			return YTArticleBinding{}, err
+		}
 		return got, tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {

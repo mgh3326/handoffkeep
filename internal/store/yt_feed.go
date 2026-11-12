@@ -176,6 +176,11 @@ func (s *Store) RunYTFeedConsumers(ctx context.Context, limit int) ([]YTFeedPass
 		}
 		out = append(out, pass)
 	}
+	// The document articles' catch-up (hk 4206) runs once, after its
+	// consumer's cursor exists.
+	if err := s.catchUpYTArticlesOnce(ctx, time.Now().UTC()); err != nil && first == nil {
+		first = err
+	}
 	return out, first
 }
 
