@@ -128,10 +128,11 @@ func TestYTArticlesRescanRetriesOnlyPrepareTimeInvalid(t *testing.T) {
 
 // hk 4357: at the deploy that prepared the retries, the previous colour,
 // still serving, claimed them and its render refused the quoted marker
-// (unsupported_kind, attempts 0). Such a retry sent nothing, so it gets one
-// more retry, keyed off it; that one is the last.
+// (unsupported_kind, attempts 1: the claim counts the attempt before the
+// render). Such a retry sent nothing, so it gets one more retry, keyed off
+// it; that one is the last.
 
-// ytartRefuse records op id rejected with reason after attempts sends, as
+// ytartRefuse records op id rejected with reason after attempts claims, as
 // a worker's refusal does.
 func ytartRefuse(t *testing.T, s *Store, id int64, reason string, attempts int) {
 	t.Helper()
@@ -165,7 +166,7 @@ func TestYTArticlesRetryRefusedByOlderColourIsRetriedOnce(t *testing.T) {
 		t.Fatalf("ops %+v", ops)
 	}
 	retry1 := ops[1]
-	ytartRefuse(t, s, retry1.ID, ytwrite.ReasonUnsupportedKind, 0)
+	ytartRefuse(t, s, retry1.ID, ytwrite.ReasonUnsupportedKind, 1)
 	if n := ytartUnwritten(t, s); n != 1 {
 		t.Fatalf("%d documents unwritten after the refusal", n)
 	}
@@ -195,8 +196,8 @@ func TestYTArticlesRetryRefusedByOlderColourIsRetriedOnce(t *testing.T) {
 	}
 }
 
-// Retry 2 refused again, or a retry refused after a send or any other way,
-// stays the operator's.
+// Retry 2 refused again, or a retry refused after an earlier attempt (which
+// may have written) or any other way, stays the operator's.
 func TestYTArticlesRetryRefusedOtherwiseStays(t *testing.T) {
 	s := ytartSetup(t, "ytart_marker_stays", true)
 	cases := []struct {
@@ -204,10 +205,10 @@ func TestYTArticlesRetryRefusedOtherwiseStays(t *testing.T) {
 		attempts     int
 		levels       int
 	}{
-		{"again", ytwrite.ReasonUnsupportedKind, 0, 2},
-		{"sent", ytwrite.ReasonUnsupportedKind, 1, 1},
-		{"other", ytwrite.ReasonInvalidIssue, 0, 1},
-		{"ambiguous", ytwrite.ReasonAmbiguousIssue, 0, 1},
+		{"again", ytwrite.ReasonUnsupportedKind, 1, 2},
+		{"sent", ytwrite.ReasonUnsupportedKind, 2, 1},
+		{"other", ytwrite.ReasonInvalidIssue, 1, 1},
+		{"ambiguous", ytwrite.ReasonAmbiguousIssue, 1, 1},
 	}
 	ids := make([]int64, len(cases))
 	for i, c := range cases {
@@ -222,7 +223,7 @@ func TestYTArticlesRetryRefusedOtherwiseStays(t *testing.T) {
 			if len(ops) != level+1 || ops[level].State != ytwrite.StatePrepared {
 				t.Fatalf("%s level %d: ops %+v", c.name, level, ops)
 			}
-			reason, attempts := ytwrite.ReasonUnsupportedKind, 0
+			reason, attempts := ytwrite.ReasonUnsupportedKind, 1
 			if level == c.levels {
 				reason, attempts = c.reason, c.attempts
 			}

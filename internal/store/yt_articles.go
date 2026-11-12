@@ -220,16 +220,18 @@ type ytArticleRow struct {
 // refusal. Before hk 4295 that refused every body quoting the op marker; the
 // render now escapes it, so such a document gets one retry once its request
 // checks. A retry is retryable only when it was rejected unsupported_kind
-// before any claim (hk 4357): during the blue-green deploy that prepared it,
-// the previous colour, still serving, claimed it and its older render
-// refused the quoted marker before sending anything. That gets one more
-// retry and no further level. A create rejected any other way, or after a
+// on its first claim (hk 4357): during the blue-green deploy that prepared
+// it, the previous colour, still serving, claimed it (attempts 1: Claim
+// counts the attempt before the render) and its older render refused the
+// quoted marker before sending anything. A retry with more attempts may
+// have written an article on an earlier one, so it is not. That gets one
+// more retry and no further level. A create rejected any other way, or after a
 // claim, stays the operator's. $P, $K, $R, $U are the principal, the kind,
 // ytwrite.ReasonInvalidIssue and ytwrite.ReasonUnsupportedKind.
 func ytArticleCreateSQL(principal, kind, reason, unsupported string) (held, retry string) {
 	first := `o.principal = ` + principal + ` AND o.kind = ` + kind + ` AND o.idem_key = 'document-article:' || d.id::text`
 	retryable := `o.state = 'rejected' AND o.reason = ` + reason + ` AND o.attempts = 0`
-	again := `r.state = 'rejected' AND r.reason = ` + unsupported + ` AND r.attempts = 0`
+	again := `r.state = 'rejected' AND r.reason = ` + unsupported + ` AND r.attempts <= 1`
 	// next is true when op b is the retry of op a.
 	next := func(a, b string) string {
 		return b + `.principal = ` + a + `.principal AND ` + b + `.kind = ` + a + `.kind
@@ -318,7 +320,7 @@ func ytArticleTarget(g ytDocsGate, c YTArticleCandidate) (YTArticleProject, bool
 // or an unbound document's create, unless it already has one (in any state:
 // a rejected create is the operator's, except one rejected invalid_issue
 // before any claim, which a create that now checks replaces, hk 4295, and
-// that retry refused unsupported_kind before any claim, hk 4357). A
+// that retry refused unsupported_kind on its first claim, hk 4357). A
 // document whose snapshot the protocol cannot store is skipped and logged.
 func prepareYTArticleTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDocsGate, id int64, r *ytArticleRow) (ytArticleOutcome, error) {
 	if r == nil {
