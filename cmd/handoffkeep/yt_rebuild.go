@@ -218,7 +218,6 @@ type ytRebuilder struct {
 // ytRebuildArticleBindingsMigration adds yt_article_bindings (hk 4053).
 const ytRebuildArticleBindingsMigration = "20261112-yt-article-bindings"
 
-
 func (b *ytRebuilder) call(ctx context.Context, read func(context.Context) error) error {
 	return b.reader.call(ctx, read)
 }
