@@ -229,8 +229,8 @@ type ytArticleResult struct {
 	detail  string
 	binding store.YTArticleBinding
 	// summaryCut marks an ambiguous result refused because the document's
-	// summary is cut at 250 code points and its article could not be proven
-	// its own (decision-3, hk 4053): counted under summary_cut as well.
+	// summary is cut at 250 code points (decision-5, hk 4053): counted under
+	// summary_cut as well.
 	summaryCut bool
 }
 
@@ -262,7 +262,7 @@ func ytArticleVerifies(x youtrack.Article, projectID, single, index string) bool
 
 // needsLookup reports whether classify reads YouTrack for d.
 func (a *ytArticler) needsLookup(d store.YTArticleDoc) bool {
-	return d.BoundTenant == "" && !store.YTArticleExcluded(d.Key, d.TaskID)
+	return d.BoundTenant == "" && !store.YTArticleExcluded(d.Key, d.TaskID) && !store.YTArticleSummaryCut(d.Key, d.Kind)
 }
 
 // loadIndex reads the article list twice, as EnumerateStableComments reads
@@ -326,8 +326,15 @@ func (a *ytArticler) classify(ctx context.Context, d store.YTArticleDoc, bindBy 
 	if missing != "" {
 		return ytArticleResult{class: ytArticleMissing, detail: missing}
 	}
+	// A summary cut at 250 code points no longer holds the whole key, so
+	// another document can render it too, and neither a unique article nor
+	// equal content proves which document an article is (two documents may
+	// share a body). Such a document is never bound (decision-5): it is
+	// ambiguous, reason summary_cut, with no YouTrack read.
+	if store.YTArticleSummaryCut(c.Key, c.Kind) {
+		return ytArticleResult{class: ytArticleAmbiguous, summaryCut: true, detail: "summary_cut: the summary is cut at 250 code points and cannot name the document"}
+	}
 	single, index := store.YTArticleSummary(c.Key, c.Kind), store.YTArticleIndexSummary(c.Key, c.Kind)
-	cut := store.YTArticleSummaryCut(c.Key, c.Kind)
 	if err := a.loadIndex(ctx); err != nil {
 		return failed(err)
 	}
@@ -340,11 +347,7 @@ func (a *ytArticler) classify(ctx context.Context, d store.YTArticleDoc, bindBy 
 		for i, x := range hits {
 			ids[i] = x.ID
 		}
-		detail := fmt.Sprintf("%d articles of project %s have the summary: %s", len(hits), short, strings.Join(ids, ","))
-		if cut {
-			detail = "summary_cut: " + detail
-		}
-		return ytArticleResult{class: ytArticleAmbiguous, summaryCut: cut, detail: detail}
+		return ytArticleResult{class: ytArticleAmbiguous, detail: fmt.Sprintf("%d articles of project %s have the summary: %s", len(hits), short, strings.Join(ids, ","))}
 	}
 	var found youtrack.Article
 	haveContent := false
@@ -384,19 +387,7 @@ func (a *ytArticler) classify(ctx context.Context, d store.YTArticleDoc, bindBy 
 	default:
 		return ambiguous(hits)
 	}
-	// A cut summary does not contain the whole key, so another document
-	// (moved since the import, created since, or numbered onto this
-	// readable id) can render it too. Such a document binds only to the one
-	// article with that summary, and only when the article holds exactly its
-	// body (decision-3): a split index, whose content is the import's, or
-	// other content is ambiguous, reason summary_cut.
-	refuseCut := func(why string) ytArticleResult {
-		return ytArticleResult{class: ytArticleAmbiguous, summaryCut: true, detail: "summary_cut: " + why}
-	}
 	b := store.YTArticleBinding{DocumentID: c.DocumentID, Tenant: a.tenant, ArticleID: found.ID, ArticleReadable: found.IDReadable, ProjectID: projectID, BoundBy: bindBy}
-	if found.Summary == index && cut {
-		return refuseCut("split document's index article " + found.ID + " cannot be checked by content")
-	}
 	if found.Summary == index {
 		b.NeedsUpdate = true
 		return ytArticleResult{class: ytArticleSHADiffers, detail: "split document: index article " + found.ID, binding: b}
@@ -415,9 +406,6 @@ func (a *ytArticler) classify(ctx context.Context, d store.YTArticleDoc, bindBy 
 	}
 	sum := sha256.Sum256([]byte(found.Content))
 	b.ContentSHA = hex.EncodeToString(sum[:])
-	if b.ContentSHA != c.SHA256 && cut {
-		return refuseCut("article " + found.ID + " content sha " + b.ContentSHA + " is not the document's")
-	}
 	if b.ContentSHA != c.SHA256 {
 		b.NeedsUpdate = true
 		return ytArticleResult{class: ytArticleSHADiffers, detail: "article " + found.ID + " content sha " + b.ContentSHA, binding: b}

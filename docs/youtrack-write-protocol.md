@@ -953,13 +953,13 @@ matched article's content is read by id. On both paths a second top-level
 article of the project with the document's summary makes it `ambiguous`. 
 
 **A cut summary** (the rendering is over 250 code points, so the summary no
-longer holds the whole key and another document can render it too, decision-3
-of hk 4053) binds only when exactly one top-level article of the project has
-it and, the document being single-part, that article's content sha equals
-`documents.sha256`. Anything else (two candidates, other content, a split
-document's index) is `ambiguous`, never bound, and also counted under
-`summary_cut`. An uncut summary contains the whole key, which is unique, and
-binds as above. Which lookup the live import allows is UNVERIFIED until
+longer holds the whole key and another document can render it too) is never
+bound (decision-5 of hk 4053). Neither a unique article nor equal content
+proves which document such an article is, because two documents can share a
+body. The document is `ambiguous`, also counted under `summary_cut`, with no
+YouTrack read. It stays unbound; Y5b puts it on its exception list rather
+than creating an article. An uncut summary contains the whole key, which is
+unique, and binds as above. Which lookup the live import allows is UNVERIFIED until
 the first preflight (hk 4053 report).
 
 **Commands.** Both open the database directly and verify against the tenant
