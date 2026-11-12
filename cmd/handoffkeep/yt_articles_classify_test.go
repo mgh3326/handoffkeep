@@ -91,17 +91,17 @@ func TestYTArticleClassify(t *testing.T) {
 	if got.binding.ContentSHA != ytartHex("old b") || !got.binding.NeedsUpdate {
 		t.Fatalf("sha_differs binding %+v", got.binding)
 	}
-	if a.lookup["0-7"] != ytArticleLookupReadable || f.lists != 1 || f.reads["RDA-A-11"] != 1 {
+	if a.lookup["0-7"] != ytArticleLookupReadable || f.lists != 2 || f.reads["RDA-A-11"] != 1 {
 		t.Fatalf("lookup %v, %d lists, reads %v", a.lookup, f.lists, f.reads)
 	}
 	// Summary lookup: the first GET (SMA-A-31) does not exist.
 	check(ytartDoc(31, "note/c", "body c", "sma", "SMA", "0-8"), ytArticleMatched, "2-1")
-	if a.lookup["0-8"] != ytArticleLookupSummary || f.lists != 1 || f.reads["SMA-A-31"] != 1 || f.reads["2-1"] != 1 {
+	if a.lookup["0-8"] != ytArticleLookupSummary || f.lists != 2 || f.reads["SMA-A-31"] != 1 || f.reads["2-1"] != 1 {
 		t.Fatalf("lookup %v, %d lists, reads %v", a.lookup, f.lists, f.reads)
 	}
 	check(ytartDoc(32, "note/d", "d", "sma", "SMA", "0-8"), ytArticleAmbiguous, "")
 	check(ytartDoc(33, "note/e", "e", "sma", "SMA", "0-8"), ytArticleMissing, "")
-	if f.reads["SMA-A-32"] != 0 || f.lists != 1 {
+	if f.reads["SMA-A-32"] != 0 || f.lists != 2 {
 		t.Fatalf("summary lookup read by readable id or listed again: %v, %d lists", f.reads, f.lists)
 	}
 	// A split document's index article: bound with needs_update, no sha.
@@ -218,5 +218,58 @@ func TestYTArticleBucketsByImportName(t *testing.T) {
 		if _, err := ytArticleBuckets(t.Context(), ps); !errors.Is(err, youtrack.ErrBucketProject) {
 			t.Errorf("%+v: err = %v, want ErrBucketProject", ps, err)
 		}
+	}
+}
+
+// ytartShifting answers a different article list on each read.
+type ytartShifting struct {
+	ytartRemote
+	reads [][]youtrack.Article
+}
+
+func (f *ytartShifting) ListArticles(context.Context) ([]youtrack.Article, error) {
+	f.lists++
+	out := f.reads[0]
+	if len(f.reads) > 1 {
+		f.reads = f.reads[1:]
+	}
+	return out, nil
+}
+
+// The article list is read twice (decision-4): a project whose articles
+// differ between the reads, or repeat within one (an offset page shifted),
+// binds nothing, its documents are class error with reason list_unstable,
+// and a stable project still binds (findings r4545095363, r4545095370).
+func TestYTArticleListUnstable(t *testing.T) {
+	art := func(id, project, key, content string) youtrack.Article {
+		return youtrack.Article{ID: id, IDReadable: "X-A-" + id, Summary: store.YTArticleSummary(key, "note"), Content: content, Project: &youtrack.ProjectRef{ID: project}}
+	}
+	stable := art("1-1", "0-7", "note/a", "a")
+	m := art("2-1", "0-8", "note/b", "b")
+	x := art("2-2", "0-8", "note/b", "b") // appears only in the second read
+	for name, reads := range map[string][][]youtrack.Article{
+		"changed":   {{stable, m}, {stable, m, x}},
+		"duplicate": {{stable, m, m}, {stable, m, m}},
+		// The second read drops X (a $skip page shifted): without the
+		// double read, M would look unique and bind.
+		"dropped": {{stable, m, x}, {stable, m}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &ytartShifting{ytartRemote: ytartRemote{reads: map[string]int{}, articles: []youtrack.Article{stable, m, x}}, reads: reads}
+			a := &ytArticler{remote: f, tenant: "t", lookup: map[string]string{}}
+			got := a.classify(t.Context(), ytartDoc(10, "note/b", "b", "sma", "SMA", "0-8"), "by")
+			if got.class != ytArticleError || !strings.HasPrefix(got.detail, ytArticleListUnstable+": ") || got.binding.ArticleID != "" {
+				t.Fatalf("unstable project: %+v", got)
+			}
+			if f.lists != 2 {
+				t.Fatalf("%d list reads, want 2", f.lists)
+			}
+			if got := a.classify(t.Context(), ytartDoc(11, "note/a", "a", "rda", "RDA", "0-7"), "by"); got.class != ytArticleMatched || got.binding.ArticleID != "1-1" {
+				t.Fatalf("stable project: %+v", got)
+			}
+			if !a.unstable["0-8"] || a.unstable["0-7"] {
+				t.Fatalf("unstable = %v", a.unstable)
+			}
+		})
 	}
 }

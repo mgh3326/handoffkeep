@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"slices"
 	"sort"
@@ -117,8 +118,11 @@ type ytArticlesProject struct {
 	// (also counted in Ambiguous).
 	SummaryCut ytArticlesClass `json:"summary_cut"`
 	Excluded   ytArticlesClass `json:"excluded"`
-	Error      ytArticlesClass `json:"error"`
-	ytProject  string
+	// ListUnstable is set when the project's article list differed between
+	// two reads (reason list_unstable): its documents are class error.
+	ListUnstable bool            `json:"list_unstable,omitempty"`
+	Error        ytArticlesClass `json:"error"`
+	ytProject    string
 }
 
 func (p *ytArticlesProject) class(name string) *ytArticlesClass {
@@ -170,6 +174,52 @@ type ytArticler struct {
 	// lookup and outside that document's budget (run), or by classify when
 	// it is called alone.
 	index map[string]map[string][]youtrack.Article
+	// unstable is the YouTrack projects whose article list differed between
+	// the two reads (decision-4): their documents are never bound.
+	unstable map[string]bool
+}
+
+// ytArticleListUnstable is the reason a project's documents are not
+// classified when its article list was not the same on two reads.
+const ytArticleListUnstable = "list_unstable"
+
+// ytArticleListEntry is what two reads of a project's article list must
+// agree on, per article id.
+type ytArticleListEntry struct {
+	summary, parent string
+}
+
+// readArticleList reads the full article list once and groups it by
+// project; an id seen twice in one read (an offset page that shifted) marks
+// its project unstable.
+func (a *ytArticler) readArticleList(ctx context.Context) ([]youtrack.Article, map[string]map[string]ytArticleListEntry, map[string]bool, error) {
+	gctx, cancel := context.WithTimeout(ctx, ytArticleListTimeout)
+	all, err := a.remote.ListArticles(gctx)
+	cancel()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("list YouTrack articles: %w", err)
+	}
+	byProject := map[string]map[string]ytArticleListEntry{}
+	dup := map[string]bool{}
+	for _, x := range all {
+		if x.Project == nil {
+			continue
+		}
+		set := byProject[x.Project.ID]
+		if set == nil {
+			set = map[string]ytArticleListEntry{}
+			byProject[x.Project.ID] = set
+		}
+		if _, seen := set[x.ID]; seen || x.ID == "" {
+			dup[x.Project.ID] = true
+		}
+		parent := ""
+		if x.HasParent() {
+			parent = x.ParentArticle.ID
+		}
+		set[x.ID] = ytArticleListEntry{summary: x.Summary, parent: parent}
+	}
+	return all, byProject, dup, nil
 }
 
 // ytArticleResult is one document's class, with the binding a backfill
@@ -215,16 +265,33 @@ func (a *ytArticler) needsLookup(d store.YTArticleDoc) bool {
 	return d.BoundTenant == "" && !store.YTArticleExcluded(d.Key, d.TaskID)
 }
 
+// loadIndex reads the article list twice, as EnumerateStableComments reads
+// comments (internal/ytwrite/enumerate.go), and keeps the second read. A
+// project whose articles (ids, summaries, parents) differ between the two
+// reads, or repeat within one, is unstable: offset pages shifted or a writer
+// ran while it was read. The backfill's precondition is that no article
+// writer runs (the import ended, D3); the double read detects a breach.
 func (a *ytArticler) loadIndex(ctx context.Context) error {
 	if a.index != nil {
 		return nil
 	}
-	gctx, cancel := context.WithTimeout(ctx, ytArticleListTimeout)
-	all, err := a.remote.ListArticles(gctx)
-	cancel()
+	_, first, dup1, err := a.readArticleList(ctx)
 	if err != nil {
-		return fmt.Errorf("list YouTrack articles: %w", err)
+		return err
 	}
+	all, second, dup2, err := a.readArticleList(ctx)
+	if err != nil {
+		return err
+	}
+	unstable := map[string]bool{}
+	for _, sets := range []map[string]map[string]ytArticleListEntry{first, second} {
+		for projectID := range sets {
+			if dup1[projectID] || dup2[projectID] || !maps.Equal(first[projectID], second[projectID]) {
+				unstable[projectID] = true
+			}
+		}
+	}
+	a.unstable = unstable
 	index := map[string]map[string][]youtrack.Article{}
 	for _, x := range all {
 		if x.ID == "" || x.HasParent() || x.Project == nil {
@@ -263,6 +330,9 @@ func (a *ytArticler) classify(ctx context.Context, d store.YTArticleDoc, bindBy 
 	cut := store.YTArticleSummaryCut(c.Key, c.Kind)
 	if err := a.loadIndex(ctx); err != nil {
 		return failed(err)
+	}
+	if a.unstable[projectID] {
+		return ytArticleResult{class: ytArticleError, detail: ytArticleListUnstable + ": the article list of project " + short + " differed between two reads; nothing is bound in it"}
 	}
 	hits := append(append([]youtrack.Article{}, a.index[projectID][single]...), a.index[projectID][index]...)
 	ambiguous := func(hits []youtrack.Article) ytArticleResult {
@@ -431,6 +501,7 @@ func (a *ytArticler) run(ctx context.Context, bucket, bindBy string) (ytArticles
 	}
 	for _, p := range r.Projects {
 		p.Lookup = a.lookup[p.ytProject]
+		p.ListUnstable = a.unstable[p.ytProject]
 	}
 	sort.Slice(r.Projects, func(i, j int) bool { return r.Projects[i].Project < r.Projects[j].Project })
 	if bindBy != "" {

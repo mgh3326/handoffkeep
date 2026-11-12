@@ -937,7 +937,12 @@ generated from `client.js` itself. Then:
 
 The whole article list is read once per run (id, idReadable, summary,
 project, parent; 100 a page), before the first document that needs a lookup
-and outside its 60 s budget. The article is then read by one GET of
+and outside its 60 s budget. It is read twice, as `EnumerateStableComments`
+reads comments (decision-4): a YouTrack project whose articles (ids,
+summaries, parents) differ between the two reads, or repeat within one (an
+offset page shifted), binds nothing. Its documents are class `error` with
+reason `list_unstable`, the report sets `list_unstable: true` on it, and the
+command exits 1; run it again. Other projects proceed. The article is then read by one GET of
 `<SHORT>-A-<document id>`, the readable id the import's article key
 (`articleKey`, the document id) would give it. A project whose first such GET
 verifies keeps that lookup (`lookup: "readable_id"`); a document whose GET
@@ -958,6 +963,12 @@ the first preflight (hk 4053 report).
 
 **Commands.** Both open the database directly and verify against the tenant
 of `YOUTRACK_URL`; `--project` is an hk project, `/shared` or `/unassigned`.
+
+**Precondition.** No YouTrack article writer runs during a backfill: the
+import has ended (D3), and the legacy docs push (`youtrack sync`) is off. hk
+cannot fence YouTrack writes. The double read detects a writer during the
+enumeration but not after it, so an article created between the list and a
+binding is outside what the backfill checks.
 
 - `handoffkeep youtrack articles-preflight [--project P]` is read-only
   (`store.OpenReadOnly`; exit 2 without migration `20261112-yt-article-bindings`).
