@@ -421,11 +421,11 @@ func TestYouTrackRebuildCommentProvenance(t *testing.T) {
 func TestYouTrackRebuildCommentTrailingWhitespace(t *testing.T) {
 	at := time.Date(2026, 11, 12, 8, 30, 0, 0, time.UTC)
 	for _, tc := range []struct {
-		name    string
-		hkBody  string
-		ytText  string
-		equal   bool
-		differ  string
+		name   string
+		hkBody string
+		ytText string
+		equal  bool
+		differ string
 	}{
 		{"trailing newline equals trimmed (hk 4248 comment 1099 case)", "ends with newline\n", "ends with newline", true, ""},
 		{"trailing spaces equal trimmed", "ends with spaces   ", "ends with spaces", true, ""},
