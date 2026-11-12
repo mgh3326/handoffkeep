@@ -21,7 +21,10 @@ The response is `application/x-ndjson`, with ascending sync IDs:
 Actions are insert (`I`), update (`U`) and delete (`D`). Timestamps are RFC3339
 (with fractional seconds when present). Document, task and comment IDs are their
 numeric database IDs encoded as strings. Decision IDs are
-`tasks.refs.decision_request.id`. A request revision or resolution emits `U`;
+`tasks.refs.decision_request.id`, except `record:<id>`, a write of the
+`decision_requests` row `<id>` (the YouTrack decision projection reads it);
+`/v1/sync/rows/decision/record:<id>` finds no request, and a reader of
+requests ignores it. A request revision or resolution emits `U`;
 replacement emits `D` for the previous ID and `I` for the replacement. Removing
 the current request emits `D`. Tasks have no production hard-delete path: their
 append-only event history prevents deletion. Closing a task with `merged` or

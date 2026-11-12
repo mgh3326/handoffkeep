@@ -164,7 +164,8 @@ otherwise `multiple_matches`, `marker_deleted`, `marker_mismatch` or
 unsupported_kind` when sent, and a failed render is `unsupported_kind` (send) or
 `reconcile_failed` (search). `comment_append` (`kind_comment.go`),
 `issue_create` (`kind_issue.go`, below), `issue_fields` (`kind_fields.go`,
-below) and `issue_move` (`kind_move.go`, below) are the registered kinds.
+below), `issue_move` (`kind_move.go`, below), and `decision_create` and
+`decision_fields` (`kind_decision.go`, below) are the registered kinds.
 
 **Precondition: the bot sees every issue.** A kind's search (the comments of
 an issue, the issues of a project with a task's `hk ID`) is complete only if
@@ -887,7 +888,7 @@ move_skipped other_tenant invalid` per hk project and in `total`, and exits 6 wi
 touching the database unless `HANDOFFKEEP_YT_FIELDS_MODE=on`.
 
 **Not here.** Tags and issue links (parent, relations) stay as the import set
-them; documents and decisions are later slices. 멈춤, the
+them; documents are a later slice (a project move and decisions: below). 멈춤, the
 Korean title and the milestone name are read when the task row changes: a
 task that becomes stalled with no change, a new translation or a renamed
 milestone reaches the issue with the task's next change.
@@ -1091,6 +1092,126 @@ SHA-256 to the import's output.
 
 **Audit.** A document copy is not an hk comment, so `youtrack audit` lists it
 as `yt_only_bot`, which the audit's gate does not count.
+
+## Kinds decision_create and decision_fields (hk 4054)
+
+A decision request's DEC issue carries its whole text. The import wrote a
+DEC issue per decision with summary `D-<id> <question>` cut to 250 runes and
+only the answer, the recommendation and the default action in the
+description; the options and the rest of a long question never reached
+YouTrack. Arbitration, receipts, option ids and question hashes stay in PG.
+`HANDOFFKEEP_YT_DECISIONS_MODE` is `off` (the default) or `on`, read like the
+other modes; on alone starts the write worker, needs the YouTrack credentials,
+reads the DEC project's id once at start (a failed read stops the start), and
+makes the legacy `youtrack sync` (which also mirrors DEC issues) and `adopt`
+refuse to run.
+
+**Change source.** The DEC issue is keyed by `decision_requests.id`. The
+`decision` rows the feed had are a task's `refs.decision_request` (keyed by
+request id); a decision from a chat question, a lane event, a job escalation
+or a task flag, and its answer, never touch that. Migration
+`20261112-decision-record-feed` adds a row trigger on `decision_requests`
+that journals every write in the writer's transaction as a `decision` row
+whose model id is `record:<decision_requests id>` (no new model value: the
+`/v1/sync` client refuses unknown models). So `ResolveDecision` and every
+other answer path emit their row in the answer's transaction.
+
+**Feed consumer `decision_issues`** (`internal/store/yt_decisions.go`). In
+mode on, for each changed decision: deleted, skipped; no binding and no
+`decision_create` op yet, one `decision_create` op (key
+`decision-issue:<id>`, at most one per decision; a rejected one is the
+operator's); no binding and an op already, skipped; a binding on another
+tenant, skipped; bound, its snapshot through `prepareYTSnapshotTx` (no op
+when unchanged, such as a snooze). Mode off prepares nothing and advances the
+cursor. Each pass logs `ytwrite.decisions_feed decisions= create_prepared=
+create_rejected= create_exists= fields_prepared= unchanged= deleted=
+other_tenant= invalid=`.
+
+**Op.** Principal and actor `hk:decisions`, lane `decision:<id>`. A
+`decision_create` targets the DEC project id and carries the decision's text
+as it was and the project's short name; a `decision_fields` targets the bound
+issue and carries the project id and the snapshot.
+
+**Text** (`ytwrite.RenderDecision`, read back by `ParseDecision`;
+`ParseDecision(RenderDecision(x)) == CanonicalDecision(x)`). Summary
+`D-<id> <question>` on one line, cut to 250 runes. The hk block:
+
+```
+hk decision: D-<id>
+연결 작업: #<task>
+질문:
+> <question, every line quoted>
+선택지:
+1. [<key>] <label>
+권장: <recommended>
+기본 동작: <default action>
+답:
+> <answer, every line quoted>
+답한 사람: <who>
+답한 경로: <channel>
+답한 시각: <UTC>
+```
+
+`질문:` is always there; every other line or section is left out when empty.
+The question and the answer keep their lines (CR LF to LF, trailing
+whitespace and edge blank lines dropped); every other value is one line. The
+channel is the latest `decision_resolutions.channel` of a structured
+request's answer. A `decision_create` description is the provenance line, the
+block, a blank line and the op marker; a `decision_fields` description is the
+block alone, so the same decision renders the same text. A decision whose
+text quotes the marker gets its create rejected `invalid_issue`.
+
+**Snapshot fields** (the import's): `hk ID` and `결정 ID` (the decision id),
+`결정 상태` (열림, 답변됨, 대체됨, 만료됨; expired is the read-time status of
+an open request past its expiry, read when the row changes), `레인`, `권장`,
+`결정 기한` (epoch ms), `연결 task ID`. Every field is in every op; empty
+clears.
+
+**Send.** `decision_create`: the project's fields (one admin GET; without
+`hk ID` or `결정 ID` the op is held `not_sent`), then the DEC issues with
+`결정 ID` = id (one GET). Exactly one whose summary names the decision
+(the import's `D-<id>` or the legacy `youtrack sync` mirror's `[결정 <id>]`,
+then a space or the end) is adopted, no POST; any other hit is
+`rejected / ambiguous_issue`; none is exactly one POST with the project,
+summary, description and only `hk ID` and `결정 ID`. `decision_fields` is the
+`issue_fields` write on a decision lane (one admin GET, one POST, the same
+`field_refused` rule).
+
+**Evidence.** `decision_create`: the same search; exactly one issue with the
+decision's `결정 ID` whose description is exactly the rendered text applies
+the op, anything else keeps it `remote_unknown`. `decision_fields`: a GET of
+the issue compared with the whole snapshot, as for `issue_fields`.
+
+**Binding** (`yt_decision_bindings`, migration
+`20261112-yt-decision-bindings`: `decision_id` text primary key, `tenant`,
+`issue_id`, `issue_readable`, `project_id`, `origin`, `op_id`, `bound_by`,
+`bound_at`, unique `(tenant, issue_id)`). Two writers. Applying a
+`decision_create` op (send, evidence or `yt ops resolve`) takes the
+decision's lane lock, checks the decision's binding and map row and the
+issue's, then writes the map row (parent: the project) and the binding with
+`origin = 'op_applied'` and `op_id`, and prepares the first snapshot, all in
+one transaction; a conflict applies the op with `binding_conflict` and
+writes nothing. A trigger refuses to apply a `decision_create` op without its
+binding. `handoffkeep youtrack decisions-backfill [--apply] [--by NAME]
+[--limit N]` checks every unbound decision: one GET of `DEC-<id>`, bound
+only when its readable id is `DEC-<id>`, it is in the DEC project, its
+summary names the decision and its `결정 ID` equals the id
+(`youtrack.VerifyDecisionIssue`), with `origin = 'import_verified'`. When
+that issue is missing or does not verify and the legacy sync recorded another
+issue for the decision (`youtrack_decision_mirrors`), that issue is read and
+bound under the same rules except the readable id, which YouTrack chose
+(`verified_legacy` in the report). When both `DEC-<id>` and a different
+mirrored issue verify, neither is bound (`ambiguous`). Without
+`--apply` it is the preflight: the database is opened read-only and nothing
+is written. A decision whose `decision_create` is unresolved is refused
+(`pending_op`). With the mode on in the command's environment, each new
+binding also prepares the decision's first snapshot; a binding made with the
+mode off gets its full text with the decision's next change.
+
+**Admission.** Mode on and the op's tenant is the worker's. `decision_create`:
+the decision has no binding, or one this op published (a backfill binding
+holds it). `decision_fields`: the op's target is the decision's bound issue
+on that tenant now.
 
 ## Tests
 
