@@ -839,7 +839,7 @@ func ytartAuthority(t *testing.T, s *Store, side YTAuthoritySide) {
 	if _, err := s.pool.Exec(t.Context(), `INSERT INTO yt_authority(kind) VALUES ('documents') ON CONFLICT DO NOTHING`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.pool.Exec(t.Context(), `UPDATE yt_authority SET authority=$1 WHERE kind='documents'`, string(side)); err != nil {
+	if _, err := s.pool.Exec(t.Context(), `UPDATE yt_authority SET authority=$1, switched_at=clock_timestamp() WHERE kind='documents'`, string(side)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -892,14 +892,54 @@ func TestYTArticleBindingAfterSwitchQueuesNothing(t *testing.T) {
 		t.Fatalf("rolled ops before the rollback %+v", ops)
 	}
 
-	// Rollback: hk is canonical again, so the PG body is written, and the
-	// switch counts the document unwritten until it is.
+	// This worker's own full scan under youtrack suppresses it too.
+	if _, err := s.RunYTFeedConsumers(t.Context(), 100); err != nil || !s.ytDocsScanned {
+		t.Fatalf("full scan: %v", err)
+	}
+	if ops := ytartOps(t, s, rolled); len(ops) != 0 {
+		t.Fatalf("rolled ops after the full scan %+v", ops)
+	}
+
+	// Rollback (r4548095657): hk is canonical again, and the running
+	// worker's periodic rescan, with no restart and no document change,
+	// writes the PG body; the switch counts it unwritten until then, and the
+	// baseline is spent.
 	ytartAuthority(t, s, YTAuthorityHK)
 	if n := ytartUnwritten(t, s); n != 1 {
 		t.Fatalf("%d unwritten after the rollback, want the rolled document", n)
 	}
-	ytartRestart(t, s)
+	ytartRescanDue(s)
+	if _, err := s.RunYTFeedConsumers(t.Context(), 100); err != nil {
+		t.Fatal(err)
+	}
 	if ops := ytartOps(t, s, rolled); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleUpdate || ops[0].YTTargetID != "3-961" {
 		t.Fatalf("rolled ops after the rollback %+v", ops)
+	}
+	var baselines int
+	if err := s.pool.QueryRow(t.Context(), `SELECT count(*) FROM yt_snapshot_state WHERE kind=$1 AND entity_id=$2`, ytArticleBaselineKind, strconv.FormatInt(rolled, 10)).Scan(&baselines); err != nil || baselines != 0 {
+		t.Fatalf("baselines %d %v", baselines, err)
+	}
+	ytartRescanDue(s)
+	if _, err := s.RunYTFeedConsumers(t.Context(), 100); err != nil || len(ytartOps(t, s, rolled)) != 1 {
+		t.Fatalf("a second rescan prepared again: %v", err)
+	}
+}
+
+// r4548095643: a document written after documents switched to YouTrack may
+// hold an hk edit the article lacks; the backfill refuses to bind it rather
+// than baseline (lose) or write (overwrite) it.
+func TestYTArticleBindingRefusedAfterPostSwitchEdit(t *testing.T) {
+	s := ytartSetup(t, "ytart_postedit", true)
+	id := ytartPut(t, s, "note/ytart/postedit", "pre-switch body", nil)
+	ytartImported(t, s, id)
+	ytartAuthority(t, s, YTAuthorityYouTrack)
+	ytartPut(t, s, "note/ytart/postedit", "edited after the switch", nil)
+	d := ytArticleDoc(t, s, id)
+	b := YTArticleBinding{DocumentID: id, Tenant: ytcTenant, ArticleID: "3-970", ProjectID: ytartShared, ContentSHA: ytwrite.ContentSHA("article"), NeedsUpdate: true, BoundBy: "test"}
+	if _, err := s.AddYTArticleBinding(t.Context(), b, d.YTArticleCandidate); !errors.Is(err, ErrYTArticleBindingConflict) || !strings.Contains(err.Error(), "written after documents switched") {
+		t.Fatalf("binding a post-switch edit: %v", err)
+	}
+	if _, found, _ := s.YTArticleBinding(t.Context(), id); found {
+		t.Fatal("bound")
 	}
 }

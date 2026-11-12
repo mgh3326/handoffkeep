@@ -533,7 +533,7 @@ func setYTArticleBaselineTx(ctx context.Context, tx pgx.Tx, id int64, sha string
 // ytArticleSupersededTx reports whether document id's body (sha) must not be
 // written now: documents are canonical in YouTrack (read FOR SHARE, as op
 // preparation takes it) and sha is the document's post-switch baseline. Under
-// hk (a rollback) the baseline is ignored, so the body is written and the
+// hk (a rollback) the baseline is deleted and the body is written; the
 // switch gate counts it until then.
 func ytArticleSupersededTx(ctx context.Context, tx pgx.Tx, id int64, sha string) (bool, error) {
 	var baseline string
@@ -546,7 +546,15 @@ func ytArticleSupersededTx(ctx context.Context, tx pgx.Tx, id int64, sha string)
 		return false, err
 	}
 	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityDocuments)
-	return side == YTAuthorityYouTrack, err
+	if err != nil || side == YTAuthorityYouTrack {
+		return side == YTAuthorityYouTrack, err
+	}
+	// hk is canonical again (a rollback): the body is written now, and the
+	// baseline is spent with this preparation (r4548095657), so the rescan
+	// does not prepare it again should the update be rejected.
+	_, err = tx.Exec(ctx, `DELETE FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3`,
+		ytwrite.ArticleEntity, strconv.FormatInt(id, 10), ytArticleBaselineKind)
+	return false, err
 }
 
 // noYTConflict is the conflict check of an apply hook that publishes no new
@@ -609,9 +617,12 @@ const ytArticleCatchUpPage = 200
 // nothing twice. Mode off does nothing. Out-of-scope documents are dropped
 // before their transaction (no body is read for them).
 //
-// bound false lists the unbound documents only (the periodic rescan): a
-// bound one is the feed's, and rescanning a stale binding whose update was
-// rejected would prepare it again on every rescan. noProject counts the
+// bound false lists the unbound documents and the stale bound ones that
+// still hold a post-switch baseline (the periodic rescan): a rollback to hk
+// makes no feed row, so the rescan writes their bodies (r4548095657), and the
+// baseline is spent when it does. Other bound documents are the feed's:
+// rescanning a stale binding whose update was rejected would prepare it again
+// on every rescan. noProject counts the
 // documents skipped for want of a YouTrack project.
 func (s *Store) catchUpYTArticles(ctx context.Context, now time.Time, bound bool) (counts map[ytArticleOutcome]int, noProject int, err error) {
 	counts = map[ytArticleOutcome]int{}
@@ -625,8 +636,10 @@ func (s *Store) catchUpYTArticles(ctx context.Context, now time.Time, bound bool
 			WHERE d.id > $1 AND (
 				(b.document_id IS NULL AND d.created_at >= $2 AND NOT EXISTS (SELECT 1 FROM yt_write_ops o
 					WHERE o.principal = $3 AND o.kind = $4 AND o.idem_key = 'document-article:' || d.id::text))
-				OR ($7 AND b.tenant = $5 AND (b.needs_update OR b.content_sha IS DISTINCT FROM d.sha256)))
-			ORDER BY d.id LIMIT $6`, after, YTImportEndedAt, YTDocsPrincipal, ytwrite.KindArticleCreate, g.tenant, ytArticleCatchUpPage, bound)
+				OR (b.tenant = $5 AND (b.needs_update OR b.content_sha IS DISTINCT FROM d.sha256)
+					AND ($7 OR EXISTS (SELECT 1 FROM yt_snapshot_state st WHERE st.entity_kind = 'document'
+						AND st.entity_id = d.id::text AND st.kind = $8))))
+			ORDER BY d.id LIMIT $6`, after, YTImportEndedAt, YTDocsPrincipal, ytwrite.KindArticleCreate, g.tenant, ytArticleCatchUpPage, bound, ytArticleBaselineKind)
 		if err != nil {
 			return counts, noProject, err
 		}

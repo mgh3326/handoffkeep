@@ -1515,9 +1515,15 @@ verified (the article's `content_sha` and `needs_update`) and records the
 document's current body as its post-switch baseline (`yt_snapshot_state`
 kind `article_baseline`). While documents stay canonical in YouTrack, no
 update writes a body equal to that baseline (outcome `superseded`, also on a
-restart's catch-up); an hk edit after it is written. After a rollback to hk
-the baseline is ignored, so the body is written, and the documents switch
-counts it unwritten until it is. An applied `article_update` clears it.
+restart's catch-up); an hk edit after it is written. A document written
+after the switch is not bound at all (refused `yt_article_binding_conflict`:
+its body may be an hk edit the article lacks, which a baseline would drop and
+a write could overwrite the article with; the operator reconciles it). After
+a rollback to hk, every worker's periodic rescan (which also covers bound
+documents that hold a baseline) writes the body with no restart and no
+document change, spending the baseline as it prepares the update; the
+documents switch counts it unwritten until then. An applied
+`article_update` clears it too.
 
 **Binding.** Applying an `article_create` (send, evidence or `yt ops
 resolve`) takes the document's lane lock, checks the document's binding and

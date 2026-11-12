@@ -359,6 +359,22 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 		return YTArticleBinding{}, fmt.Errorf("%w: document %d changed after verification (verified %s sha %s in %s, now %s sha %s in %s); verify again",
 			ErrYTArticleBindingConflict, b.DocumentID, verified.Key, verified.SHA256, verified.Bucket, current.Key, current.SHA256, current.Bucket)
 	}
+	if side == YTAuthorityYouTrack {
+		// r4548095643: the post-switch baseline must be a body from before
+		// the switch. A document written after documents switched may hold
+		// an hk edit YouTrack lacks; baselining it would drop that edit,
+		// and writing it could overwrite the canonical article. Neither is
+		// decided here: the binding is refused, and the document stays an
+		// unbound exception for the operator.
+		var after bool
+		if err := tx.QueryRow(ctx, `SELECT d.updated_at > a.switched_at FROM documents d, yt_authority a
+			WHERE d.id=$1 AND a.kind='documents' AND a.switched_at IS NOT NULL`, b.DocumentID).Scan(&after); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return YTArticleBinding{}, err
+		}
+		if after {
+			return YTArticleBinding{}, fmt.Errorf("%w: document %d was written after documents switched to YouTrack; reconcile it by hand", ErrYTArticleBindingConflict, b.DocumentID)
+		}
+	}
 	var contentSHA any
 	if b.ContentSHA != "" {
 		contentSHA = b.ContentSHA
