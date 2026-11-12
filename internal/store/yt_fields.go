@@ -173,24 +173,35 @@ const (
 	ytFieldsInvalid     ytFieldsOutcome = "invalid"
 )
 
-// prepareYTFieldsTx decides one task's snapshot in tx at now, for the worker
-// of tenant: a deleted task (found false) is skipped; a task with no binding
-// is skipped (its issue_create publishes the binding and prepares the first
-// snapshot then, ytFieldsOnBindTx); a binding on another tenant is skipped; a
-// task whose hk project no longer maps to its binding's YouTrack project gets
-// an issue_move op first (ytMoveForTx), and its snapshot names the project
-// the issue belongs in; with no mapped target nothing is prepared for it. A
-// snapshot the protocol cannot store is skipped and logged. Every other task
-// prepares its snapshot through prepareYTSnapshotTx, which makes no op when
-// the snapshot is the one last prepared.
-func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant string, id int64, t ytFieldsRow, found bool) (ytFieldsOutcome, error) {
+// ytFieldsSkipOutcome is why the snapshot rule writes nothing for a task that
+// is not one of this worker's bound tasks: a deleted task (found false) is
+// skipped; a task with no binding is skipped (its issue_create publishes the
+// binding and prepares the first snapshot then, ytFieldsOnBindTx); a binding on
+// another tenant is skipped. It is "" for every other task.
+func ytFieldsSkipOutcome(tenant string, t ytFieldsRow, found bool) ytFieldsOutcome {
 	switch {
 	case !found:
-		return ytFieldsDeleted, nil
+		return ytFieldsDeleted
 	case t.issueID == "":
-		return ytFieldsUnbound, nil
+		return ytFieldsUnbound
 	case t.tenant != tenant:
-		return ytFieldsOtherTenant, nil
+		return ytFieldsOtherTenant
+	}
+	return ""
+}
+
+// prepareYTFieldsTx decides one task's snapshot in tx at now, for the worker
+// of tenant. A task that is not bound on this tenant is skipped
+// (ytFieldsSkipOutcome). A task whose hk project no longer maps to its
+// binding's YouTrack project gets an issue_move op first (ytMoveForTx), and its
+// snapshot names the project the issue belongs in; with no mapped target
+// nothing is prepared for it. A snapshot the protocol cannot store is skipped
+// and logged. Every other task prepares its snapshot through
+// prepareYTSnapshotTx, which makes no op when the snapshot is the one last
+// prepared.
+func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant string, id int64, t ytFieldsRow, found bool) (ytFieldsOutcome, error) {
+	if skip := ytFieldsSkipOutcome(tenant, t, found); skip != "" {
+		return skip, nil
 	}
 	// The project the issue belongs in, and the move to it when the issue is
 	// not there yet (yt_move.go). The snapshot names that project: it is
@@ -206,16 +217,9 @@ func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant str
 	if project == "" {
 		return ytFieldsMoveSkipped, nil
 	}
-	n, err := ytwrite.FieldsOp(ytwrite.FieldsRequest{Principal: YTFieldsPrincipal, Actor: YTFieldsPrincipal, Tenant: t.tenant,
-		IssueID: t.issueID, ProjectID: project, Task: t.fields})
-	if errors.Is(err, ytwrite.ErrInvalid) {
-		// Bad data must not stop the feed: the cursor would never pass
-		// this row.
-		log.Printf("ytwrite.fields_skipped task_id=%d reason=invalid err=%q", id, err.Error())
-		return ytFieldsInvalid, nil
-	}
-	if err != nil {
-		return "", err
+	n, outcome, err := ytFieldsOpFor(id, t, project)
+	if outcome != "" || err != nil {
+		return outcome, err
 	}
 	op, made, err := prepareYTSnapshotTx(ctx, tx, now, n, n.PayloadSHA)
 	if err != nil {
@@ -231,6 +235,24 @@ func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant str
 		return ytFieldsUnchanged, nil
 	}
 	return ytFieldsPrepared, nil
+}
+
+// ytFieldsOpFor is task id's snapshot op for the issue in project (its project
+// after any move). A snapshot the protocol cannot store is skipped and logged
+// (ytFieldsInvalid); every other task returns its op and "".
+func ytFieldsOpFor(id int64, t ytFieldsRow, project string) (ytwrite.NewOp, ytFieldsOutcome, error) {
+	n, err := ytwrite.FieldsOp(ytwrite.FieldsRequest{Principal: YTFieldsPrincipal, Actor: YTFieldsPrincipal, Tenant: t.tenant,
+		IssueID: t.issueID, ProjectID: project, Task: t.fields})
+	if errors.Is(err, ytwrite.ErrInvalid) {
+		// Bad data must not stop the feed: the cursor would never pass
+		// this row.
+		log.Printf("ytwrite.fields_skipped task_id=%d reason=invalid err=%q", id, err.Error())
+		return ytwrite.NewOp{}, ytFieldsInvalid, nil
+	}
+	if err != nil {
+		return ytwrite.NewOp{}, "", err
+	}
+	return n, "", nil
 }
 
 // ytFieldsOnBindTx prepares the first snapshot of a task whose binding an
