@@ -754,9 +754,25 @@ list. A task with no hk project uses that bucket, matching the import's
 project and the YouTrack project's short name. In mode on, every task creator
 (`CreateTask`, intake, ticket sets, dots, dispositions) prepares it in the
 task's own transaction when its project has a `youtrack_projects` row with a
-project id, or when its project is empty (to the `HK` bucket); otherwise no op
-and one `ytwrite.issue_skipped` line. Setting or changing the project of an
-unbound task also prepares its issue_create when no create op already exists.
+project id, or when its project is empty (to the `HK` bucket); otherwise no op,
+one `ytwrite.issue_skipped` line and a `yt_issue_intents` row on the gate's
+tenant (migration `20261113-yt-issue-intents`, hk 3942). Before each Drive
+pass the write worker in mode on prepares the op of every intent of its own
+tenant whose task's project now has its mapping, under the task's lane lock,
+and drops the intent; an intent of another tenant is never consumed there. A
+task that got an issue another way meanwhile only loses its intent.
+
+**Project changes (hk 3909).** `SetTaskProject` syncs the task's latest
+issue_create op in its own transaction: an op still `prepared` (nothing sent)
+whose YouTrack project or hk project is no longer the task's is rejected
+`project_changed` and replaced, on the same tenant, by the current project's
+op keyed `task-issue:<id>:after-<old op id>` (or an intent on that tenant when
+the project is unmapped); a task with no op gets its first; an op already
+`dispatched`, `remote_unknown` or resolved is left alone (its issue may exist
+in the old project; moves follow the binding). Every claim of an issue_create
+op makes the same check under the lane lock, so a task moved by a triage, or
+moved while its op was in flight and then deferred back to `prepared`, has its
+op replaced there instead of dispatched.
 A task the protocol cannot render (an actor
 with ` · `, a title quoting the marker) gets the op rejected `invalid_issue`.
 `handoffkeep youtrack issues-backfill [--project P] [--dry-run]` prepares the
@@ -1239,8 +1255,16 @@ release rollback never meets an authority value it cannot parse (consult hk
   it fills the target, and the payload hash with it, from the binding that
   create published (`origin = 'op_applied'`, `op_id` the create); the
   `yt_write_ops` guard allows exactly that change (migration
-  `20261112-yt-comment-queued-target`). A create that ends rejected, or applied
-  with `binding_conflict`, publishes no such binding: the claim rejects the op
+  `20261112-yt-comment-queued-target`). The queued op follows the task's
+  active issue op whatever its key (hk 4318): it is accepted behind a
+  replacement as behind the first op, and it waits for every issue_create op
+  of the task that is not applied or rejected, and for the task's issue
+  intent, even one prepared after it, while an issue_create op does not wait
+  for queued comments (`ytLaneBlockedSQL`; `Due` and `Claim` share the rule).
+  Its target comes from the binding any issue_create op of the task
+  published. A create that ends rejected (other than `project_changed`, which
+  leaves its replacement or an intent), or applied with `binding_conflict`,
+  publishes no such binding: the claim rejects the op
   in its own transaction, `rejected / issue_not_bound`, so it is never
   dispatched without a target (and never reaches stale recovery or
   `remote_unknown`). Nothing is sent, and the rejected-op alert reports it.

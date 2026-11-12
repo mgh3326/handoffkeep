@@ -283,7 +283,7 @@ func TestYTWriteOpsGuardQueuedTarget(t *testing.T) {
 
 // A binding the create publishes is checked against every local source at the
 // claim, as a fresh comment's is: a task moved to another project while its
-// create was pending keeps a binding in the old project, and the queued
+// create was in flight keeps a binding in the old project, and the queued
 // comment is rejected instead of sent there.
 func TestYTCommentQueuedBindingDisagreement(t *testing.T) {
 	s, x, create := ytqSetup(t, "ytq_moved")
@@ -303,10 +303,12 @@ func TestYTCommentQueuedBindingDisagreement(t *testing.T) {
 	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: other, ProjectID: "0-9", ShortName: "HKO"}); err != nil {
 		t.Fatal(err)
 	}
+	// Moved while the create is in flight: a prepared op would be replaced
+	// at its claim (hk 4318), a dispatched one keeps its project.
+	ytiDispatch(t, s, create)
 	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET project=$2 WHERE id=$1`, x.ID, other); err != nil {
 		t.Fatal(err)
 	}
-	ytiDispatch(t, s, create)
 	if _, err := s.YTWriteLedger().Apply(ctx, time.Now().UTC(), create.ID, "2-900", ytiMaps(create, "2-900")); err != nil {
 		t.Fatal(err)
 	}
@@ -318,5 +320,165 @@ func TestYTCommentQueuedBindingDisagreement(t *testing.T) {
 	got := ytqDrive(t, s, ytcProtocol(t, s, counting, &offset), op.ID)
 	if got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonAmbiguousIssue || got.YTTargetID != "" || got.Attempts != 0 || counting.posts.Load() != 0 {
 		t.Fatalf("comment op %+v, posts %d", got, counting.posts.Load())
+	}
+}
+
+// hk 4318: a comment queued behind a task's issue op follows the task's
+// active issue op, whatever its key, when the task moves before the op is
+// sent.
+
+// ytqDue reports whether the tenant worker's Due lists op id now.
+func ytqDue(t *testing.T, s *Store, id int64) bool {
+	t.Helper()
+	due, err := s.YTTenantLedger(ytcTenant).Due(t.Context(), time.Now().UTC(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range due {
+		if op.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// The ESC's sequence (PR #335 round 3): comment op 2 is queued behind issue
+// op 1; the task moves, which rejects op 1 and prepares op 3 (id above op
+// 2's). Op 2 waits for op 3 instead of being claimed first and rejected
+// issue_not_bound, op 3 does not wait for op 2, and the comment is delivered
+// to op 3's issue in the new project.
+func TestYTCommentQueuedFollowsTheReplacementAfterAMove(t *testing.T) {
+	s, x, create := ytqSetup(t, "ytq_replaced")
+	ctx := t.Context()
+	ytrProject(t, s, "ytq-other", "0-9")
+	c, err := s.CreateTaskComment(ctx, x.ID, "worker", "queued behind op 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, ok := ytcOpFor(t, s, c.ID)
+	if !ok || op.State != ytwrite.StatePrepared || op.YTTargetID != "" || op.ID <= create.ID {
+		t.Fatalf("queued op %+v %v", op, ok)
+	}
+	ytrMove(t, s, x.ID, "ytq-other")
+	ops := ytiOps(t, s, x.ID)
+	if len(ops) != 2 || ops[0].ID != create.ID || ops[0].Reason != ytwrite.ReasonProjectChanged || ops[1].State != ytwrite.StatePrepared || ops[1].ID <= op.ID {
+		t.Fatalf("issue ops after the move %+v (comment op %d)", ops, op.ID)
+	}
+	replacement := ops[1]
+	// Claim and Due agree: the comment waits, the replacement goes first.
+	if out := ytiClaim(t, s, op); out != ytwrite.ClaimBlocked {
+		t.Fatalf("claim of the comment before the replacement = %s", out)
+	}
+	if ytqDue(t, s, op.ID) || !ytqDue(t, s, replacement.ID) {
+		t.Fatalf("due: comment %t, replacement %t", ytqDue(t, s, op.ID), ytqDue(t, s, replacement.ID))
+	}
+
+	yt := ytwritetest.NewFake()
+	var offset atomic.Int64
+	got := ytqDrive(t, s, ytcProtocol(t, s, yt, &offset), op.ID)
+	b, found, err := s.YTTaskBinding(ctx, x.ID)
+	if err != nil || !found || b.OpID != replacement.ID || b.ProjectID != "0-9" {
+		t.Fatalf("binding %+v %v %v", b, found, err)
+	}
+	if got.State != ytwrite.StateApplied || got.YTTargetID != b.IssueID || got.Tenant != ytcTenant {
+		t.Fatalf("comment op %+v, binding %+v", got, b)
+	}
+	if n := len(yt.Issues(ytbProjectID)); n != 0 {
+		t.Fatalf("%d issues created in the old project", n)
+	}
+	if comments := yt.Comments(b.IssueID); len(comments) != 1 {
+		t.Fatalf("issue %s comments %+v", b.IssueID, comments)
+	}
+}
+
+// While the replacement is pending, a new comment is queued behind it, not
+// refused; the comments keep their order across the replacement.
+func TestYTCommentQueuedKeepsOrderAcrossAReplacement(t *testing.T) {
+	s, x, _ := ytqSetup(t, "ytq_order")
+	ctx := t.Context()
+	ytrProject(t, s, "ytq-other", "0-9")
+	first, err := s.CreateTaskComment(ctx, x.ID, "worker", "first, behind op 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ytrMove(t, s, x.ID, "ytq-other")
+	replacement := ytiOps(t, s, x.ID)[1]
+	second, err := s.CreateTaskComment(ctx, x.ID, "worker", "second, behind the replacement")
+	if err != nil {
+		t.Fatalf("comment while the replacement is pending: %v", err)
+	}
+	op1, _ := ytcOpFor(t, s, first.ID)
+	op2, ok := ytcOpFor(t, s, second.ID)
+	if !ok || op2.State != ytwrite.StatePrepared || op2.YTTargetID != "" || op2.Tenant != replacement.Tenant || op2.ID <= replacement.ID {
+		t.Fatalf("second op %+v %v (replacement %+v)", op2, ok, replacement)
+	}
+	for _, op := range []ytwrite.Op{op1, op2} {
+		if out := ytiClaim(t, s, op); out != ytwrite.ClaimBlocked {
+			t.Fatalf("claim of comment op %d before the replacement = %s", op.ID, out)
+		}
+	}
+	yt := ytwritetest.NewFake()
+	var offset atomic.Int64
+	p := ytcProtocol(t, s, yt, &offset)
+	got2 := ytqDrive(t, s, p, op2.ID)
+	got1, err := s.YTWriteLedger().ByID(ctx, op1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got1.State != ytwrite.StateApplied || got2.State != ytwrite.StateApplied || got1.YTTargetID != got2.YTTargetID {
+		t.Fatalf("comment ops %+v %+v", got1, got2)
+	}
+	text1, err := ytwrite.RenderComment(got1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text2, err := ytwrite.RenderComment(got2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments := yt.Comments(got1.YTTargetID)
+	if len(comments) != 2 || comments[0].Text != text1 || comments[1].Text != text2 {
+		t.Fatalf("issue %s comments %+v", got1.YTTargetID, comments)
+	}
+}
+
+// A move to an unmapped project leaves an intent instead of a replacement:
+// the queued comment waits for it (never rejected issue_not_bound) and is
+// delivered once the project is mapped and the intent becomes the op.
+func TestYTCommentQueuedWaitsForTheIssueIntent(t *testing.T) {
+	s, x, _ := ytqSetup(t, "ytq_intent")
+	ctx := t.Context()
+	ytrProject(t, s, "ytq-later", "")
+	c, err := s.CreateTaskComment(ctx, x.ID, "worker", "queued, then the task moved to an unmapped project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, _ := ytcOpFor(t, s, c.ID)
+	ytrMove(t, s, x.ID, "ytq-later")
+	if ops := ytiOps(t, s, x.ID); len(ops) != 1 || ops[0].Reason != ytwrite.ReasonProjectChanged || ytrIntent(t, s, x.ID) != ytcTenant {
+		t.Fatalf("ops %+v, intent %q", ops, ytrIntent(t, s, x.ID))
+	}
+	yt := ytwritetest.NewFake()
+	counting := &ytcCounting{Remote: yt}
+	var offset atomic.Int64
+	p := ytcProtocol(t, s, counting, &offset)
+	for range 3 {
+		if _, err := p.Drive(ctx, 20); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := s.YTWriteLedger().ByID(ctx, op.ID); err != nil || got.State != ytwrite.StatePrepared || counting.posts.Load() != 0 {
+		t.Fatalf("comment op while the intent waits %+v %v, posts %d", got, err, counting.posts.Load())
+	}
+	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "ytq-later", ProjectID: "0-11", ShortName: "HL"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.PrepareMappedYTIssues(ctx, 10); err != nil || n != 1 {
+		t.Fatalf("intent pass prepared %d, %v", n, err)
+	}
+	got := ytqDrive(t, s, p, op.ID)
+	b, found, err := s.YTTaskBinding(ctx, x.ID)
+	if err != nil || !found || b.ProjectID != "0-11" || got.State != ytwrite.StateApplied || got.YTTargetID != b.IssueID {
+		t.Fatalf("comment op %+v, binding %+v %v %v", got, b, found, err)
 	}
 }

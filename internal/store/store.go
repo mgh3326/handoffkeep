@@ -2979,7 +2979,10 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
 		return Task{}, false, err
 	}
-	if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
+	// The task's issue op follows its new project (hk 3909, 3942): an unsent
+	// op is replaced, a task with none gets its first, an unmapped project
+	// an intent. Task row, then lane lock, as CreateTask (lockorder.go).
+	if _, _, err := s.syncYTIssueTx(ctx, tx, x, x.UpdatedAt); err != nil {
 		return Task{}, false, err
 	}
 	return x, true, tx.Commit(ctx)

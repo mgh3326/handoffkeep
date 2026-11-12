@@ -271,6 +271,21 @@ package store
 //     lock and no task row: a canary enrollment racing it is caught by the
 //     comment enqueue's ytBindingDisagreement, which skips that task's
 //     comments.
+//     The issue op follows the task's project (syncYTIssueTx, hk 3909, 3942,
+//     4318). The task creators above, and SetTaskProject after its level-1
+//     lock and FOR UPDATE on the task row (task row before lane lock, as
+//     AddYTTaskBinding), take the task's lane lock, then read
+//     youtrack_projects and the ownership rows without a lock, then reject
+//     and insert that task's yt_write_ops rows and insert or delete its
+//     yt_issue_intents row (no foreign key, nobody else locks it). Claim of
+//     an issue_create op makes the same sync under the lane lock it holds,
+//     after FOR UPDATE on its op row, reading the task row without a lock.
+//     PrepareMappedYTIssues takes the lane lock as the first lock of each
+//     task's transaction (as backfillYTIssue), then reads the task row
+//     without a lock and syncs. None of them holds a second lane lock, and a
+//     triage, which writes several task rows in one transaction, does not
+//     sync (its moved op is replaced at its claim), so these add no edge
+//     from a lane lock to a task row.
 //
 //   - The YouTrack change feed (yt_feed.go, hk 3997). A consumer's pass
 //     takes pg_try_advisory_xact_lock(8241873997) as the first lock of its

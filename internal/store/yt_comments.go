@@ -158,14 +158,19 @@ func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment
 // queueYTCommentTx is the comment copy of a task that has no binding yet
 // because its issue is still being created (hk 4263): a task created a moment
 // ago gets its binding only when its issue_create op applies. When the task
-// has no binding and its issue_create op (YTIssuePrincipal, IssueKey) is
+// has no binding and its active issue_create op (YTIssuePrincipal, any key:
+// a replacement after a move is keyed after the op it replaced) is
 // prepared, dispatched or remote_unknown, it prepares the comment's
 // comment_append op with the usual key and payload, on the create's tenant,
-// with no target, and links it to the comment. The op is on the task's lane
-// behind the create, so it is never claimed before the create resolves; its
+// with no target, and links it to the comment. The op waits on the task's
+// lane for every pending issue_create op and the task's issue intent
+// (ytLaneBlockedSQL), so it is never claimed before the create, or the
+// replacement prepared when the task moved, resolves; its
 // claim takes the target from the binding the create published
-// (claimYTCommentTargetTx). A create that ends rejected, or applied without a
-// binding (binding_conflict), publishes none, and the claim rejects the op
+// (claimYTCommentTargetTx). A create rejected project_changed leaves its
+// replacement or an intent, which the op waits for. A create that ends
+// rejected otherwise, or applied without a binding (binding_conflict),
+// publishes none, and the claim rejects the op
 // (ytwrite.ReasonIssueNotBound) instead of dispatching it; so does a binding
 // a local source disagrees with (ytwrite.ReasonAmbiguousIssue). The
 // rejected-op alert reports both. No map anchor is written: the create's apply writes the task's map
@@ -191,9 +196,13 @@ func queueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op
 	}
 	var createID int64
 	var tenant string
-	err := tx.QueryRow(ctx, `SELECT id, tenant FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3
-		AND entity_kind='task' AND entity_id=$4 AND state IN ('prepared','dispatched','remote_unknown')`,
-		YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(c.TaskID), taskKey).Scan(&createID, &tenant)
+	// The task's active issue op, whatever its key: a replacement prepared
+	// when the task moved (syncYTIssueTx, hk 4318) is keyed after the op it
+	// replaced.
+	err := tx.QueryRow(ctx, `SELECT id, tenant FROM yt_write_ops WHERE principal=$1 AND kind=$2
+		AND entity_kind='task' AND entity_id=$3 AND state IN ('prepared','dispatched','remote_unknown')
+		ORDER BY id DESC LIMIT 1`,
+		YTIssuePrincipal, ytwrite.KindIssueCreate, taskKey).Scan(&createID, &tenant)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && tenant == "") {
 		return ytwrite.Op{}, false, nil
 	}
@@ -244,15 +253,19 @@ func claimYTCommentTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (targ
 	if err != nil {
 		return "", "", "", "", err
 	}
-	var createID int64
-	if found {
-		err = tx.QueryRow(ctx, `SELECT id FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3 AND state='applied'`,
-			YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(taskID)).Scan(&createID)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	// The binding must be the one an issue_create op of this task published,
+	// whatever that op's key: the task's first op or a replacement prepared
+	// after the task moved (hk 4318).
+	var ownCreate bool
+	if found && b.OpID != 0 {
+		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE id=$1 AND principal=$2 AND kind=$3
+			AND entity_kind='task' AND entity_id=$4 AND state='applied')`,
+			b.OpID, YTIssuePrincipal, ytwrite.KindIssueCreate, op.EntityID).Scan(&ownCreate)
+		if err != nil {
 			return "", "", "", "", err
 		}
 	}
-	if !found || b.Origin != YTBindingOpApplied || b.OpID == 0 || b.OpID != createID || b.Tenant != op.Tenant {
+	if !found || b.Origin != YTBindingOpApplied || !ownCreate || b.Tenant != op.Tenant {
 		log.Printf("ytwrite.comment_queued_unbound op_id=%d task_id=%d", op.ID, taskID)
 		return "", "", ytwrite.ReasonIssueNotBound, unbound, nil
 	}
