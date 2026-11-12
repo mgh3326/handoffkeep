@@ -1233,7 +1233,9 @@ comments: `HANDOFFKEEP_YT_COMMENTS_MODE=on`; documents:
 consumers have read every change (`task_fields` for tasks, `task_docs` and
 `document_articles` for documents, and for documents the document
 articles' first catch-up recorded as done (`yt_feed_cursors` row
-`document_articles_catchup`), `decision_issues` for decisions; a consumer
+`document_articles_catchup`; it is not done while a document it skipped as
+`no_project` waits for its YouTrack project: those are retried on every feed
+pass and logged as `ytwrite.articles_catchup_retried`), `decision_issues` for decisions; a consumer
 that has never run, or whose cursor is behind `sync_state.pruned_through`,
 refuses). Every op preparation holds its kind's row
 `FOR SHARE`, so the switch counts an op whose transaction was open when it

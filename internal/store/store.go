@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -604,6 +605,12 @@ type Store struct {
 	// ytDocsCaughtUp is set once the document-article catch-up has run in
 	// this process (catchUpYTArticlesOnce).
 	ytDocsCaughtUp atomic.Bool
+	// ytDocsCatchUpMu guards ytDocsScanned (the catch-up's full scan ran in
+	// this process) and ytDocsNoProject (the documents it skipped as
+	// no_project, retried on every feed pass until none is left).
+	ytDocsCatchUpMu sync.Mutex
+	ytDocsScanned   bool
+	ytDocsNoProject []int64
 	// ytBindingChecked, when set (tests only), runs inside AddYTTaskBinding
 	// after every check has passed and before the binding row is inserted,
 	// with every lock of the publication held.

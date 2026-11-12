@@ -478,7 +478,7 @@ func TestYTArticlesCatchUpCoversTheFirstPassGap(t *testing.T) {
 		t.Fatalf("catch-up marker %v %v", marker, err)
 	}
 	// Again, directly: idempotent.
-	if _, err := s.catchUpYTArticles(t.Context(), time.Now().UTC()); err != nil {
+	if _, _, err := s.catchUpYTArticles(t.Context(), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if len(ytartOps(t, s, fresh)) != 1 || len(ytartOps(t, s, bound)) != 1 {
@@ -658,5 +658,55 @@ func TestYTArticlesLegacySyncedDocument(t *testing.T) {
 	}
 	if n := len(yt.ArticleWrites()); n != 1 {
 		t.Fatalf("%d article writes, want only the one update", n)
+	}
+}
+
+// r4546690164: a document the catch-up skipped as no_project (its task's
+// project has no YouTrack project yet) is retried on every later pass, and
+// the catch-up is not done (no marker, the documents switch refused) until
+// its mapping exists and its create is prepared.
+func TestYTArticlesCatchUpRetriesNoProject(t *testing.T) {
+	s := schemaStore(t, "ytart_noproj")
+	ctx := t.Context()
+	s.SetYTDocsMode(YTDocsOn, ytcTenant, ytartBuckets())
+	if _, err := s.AddTaskProject(ctx, "ytart-np", "test"); err != nil {
+		t.Fatal(err)
+	}
+	project := "ytart-np"
+	task, err := s.CreateTask(ctx, Task{Lane: "ytart-lane", Title: "articles", Kind: "implement", CreatedBy: "test", Project: &project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := ytartPut(t, s, "design/ytart/noproj.md", "body", &task.ID)
+	if pass := ytartPass(t, s); !pass.Created {
+		t.Fatalf("first pass %+v", pass)
+	}
+	marker := func() bool {
+		t.Helper()
+		var ok bool
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_feed_cursors WHERE consumer=$1)`, ytDocsCatchUpMarker).Scan(&ok); err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	for range 2 {
+		if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
+			t.Fatal(err)
+		}
+		if ops := ytartOps(t, s, id); len(ops) != 0 || marker() || s.ytDocsCaughtUp.Load() {
+			t.Fatalf("no_project: ops %+v marker %v", ops, marker())
+		}
+	}
+	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "ytart-np", ProjectID: "0-43", ShortName: "YTNP"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	if ops := ytartOps(t, s, id); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleCreate || ops[0].YTTargetID != "0-43" {
+		t.Fatalf("ops after the mapping %+v", ops)
+	}
+	if !marker() || !s.ytDocsCaughtUp.Load() {
+		t.Fatal("catch-up not done once nothing waits")
 	}
 }
