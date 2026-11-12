@@ -29,7 +29,7 @@ var (
 	// notices). Those are not mirrored; the mirror only carries human text.
 	noiseRE = regexp.MustCompile(`(?i)^\s*(spawned request=|spawn failed|panewire job\.(completed|escalated|lost)|blocks:|Expected:|design (check|review)|Scope (add|change|extended)|Rescoped|direct-merge|Restart decision|Second attempt|Correction|Field contract|ESC answer|\[mergewake\]|mergewake |ledger|landing|request=)`)
 	// suffixRE is the "(grade B, T2)" or "(T2)" marker at the end of a title.
-	suffixRE   = regexp.MustCompile(`\s*\((grade [SABC]\+?, ?T[0-3]|T[0-3])\)\s*$`)
+	suffixRE   = regexp.MustCompile(`\s*\((grade (` + store.TaskGradePattern() + `), ?T[0-3]|T[0-3])\)\s*$`)
 	hkPrefixRE = regexp.MustCompile(`^\[hk \d+\]\s*`)
 	workerRE   = regexp.MustCompile(`host=(\S+) profile=(\S+)`)
 )

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 	"github.com/mgh3326/handoffkeep/internal/ytwrite/ytwritetest"
 )
@@ -154,6 +155,29 @@ func TestTaskIssueSnapshotMapsLikeTheImport(t *testing.T) {
 	long := ytwrite.TaskSummary(1, strings.Repeat("가", 300))
 	if n := len([]rune(long)); n != ytwrite.IssueSummaryLimit {
 		t.Fatalf("summary of %d runes", n)
+	}
+}
+
+func TestTaskIssueSnapshotRendersSSGrade(t *testing.T) {
+	row := fieldsTaskRow()
+	row.Title = "top grade task (grade SS, T2)"
+	snapshot := ytwrite.TaskIssueSnapshot(row)
+	grade, ok := valueOf(snapshot, ytwrite.FieldGrade)
+	if !ok || grade != "SS" {
+		t.Fatalf("issue_fields grade=%q present=%v, want SS", grade, ok)
+	}
+	tier, ok := valueOf(snapshot, ytwrite.FieldTier)
+	if !ok || tier != "T2" {
+		t.Fatalf("issue_fields tier=%q present=%v, want T2", tier, ok)
+	}
+}
+
+func TestTitleGradeTierCoversStoreScale(t *testing.T) {
+	for _, grade := range store.TaskGrades() {
+		got, tier := ytwrite.TitleGradeTier("task (grade " + grade + ", T2)")
+		if got != grade || tier != "T2" {
+			t.Errorf("TitleGradeTier(%q)=(%q,%q)", grade, got, tier)
+		}
 	}
 }
 

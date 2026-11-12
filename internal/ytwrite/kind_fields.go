@@ -76,7 +76,7 @@ var TaskStateLabels = map[string]string{
 	"icebox":      "보류(보관)",
 }
 
-var titleGradeRE = regexp.MustCompile(`\(grade ([SABC]\+?), (T[0-3])\)\s*$`)
+var titleGradeRE = regexp.MustCompile(`\(grade (SS|S\+|S|A\+|A|B|C), (T[0-3])\)\s*$`)
 
 // TitleGradeTier reads the "(grade G, T)" marker at the end of a title.
 func TitleGradeTier(title string) (grade, tier string) {

@@ -117,7 +117,7 @@ func StateResolved(state string) bool { return resolvedStates[state] }
 // Grades and Tiers are the closed value sets of the 등급 and 티어 enums, the
 // ones the "(grade G, T)" title marker carries.
 var (
-	Grades = []string{"S+", "S", "A+", "A", "B", "C"}
+	Grades = store.TaskGrades()
 	Tiers  = []string{"T0", "T1", "T2", "T3"}
 )
 

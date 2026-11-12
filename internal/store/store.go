@@ -1429,7 +1429,62 @@ func CheckTaskNoJob(noJob string) (string, error) {
 
 const benchBatchMax = 1000
 
-var benchGradeValues = map[string]bool{"S+": true, "S": true, "A+": true, "A": true, "B": true, "C": true, "unrated": true}
+var taskGradeScale = [...]string{"SS", "S+", "S", "A+", "A", "B", "C"}
+
+// TaskGrades returns the canonical task and bench grade scale, strongest first.
+func TaskGrades() []string { return append([]string(nil), taskGradeScale[:]...) }
+
+// TaskGradePattern returns the regexp alternation for TaskGrades.
+func TaskGradePattern() string {
+	parts := make([]string, 0, len(taskGradeScale))
+	for _, grade := range taskGradeScale {
+		parts = append(parts, regexp.QuoteMeta(grade))
+	}
+	return strings.Join(parts, "|")
+}
+
+func validTaskGrade(grade string) bool {
+	_, ok := taskGradeRanks[grade]
+	return ok
+}
+
+var taskGradeRanks = func() map[string]int {
+	ranks := make(map[string]int, len(taskGradeScale))
+	for rank, grade := range taskGradeScale {
+		ranks[grade] = rank
+	}
+	return ranks
+}()
+
+var benchGradeValues = func() map[string]bool {
+	values := make(map[string]bool, len(taskGradeScale)+1)
+	for _, grade := range taskGradeScale {
+		values[grade] = true
+	}
+	// unrated is a bench catalog value, outside the task grade scale.
+	values["unrated"] = true
+	return values
+}()
+
+func benchGradeOrderSQL() string {
+	var b strings.Builder
+	b.WriteString("CASE grade")
+	for rank, grade := range taskGradeScale {
+		fmt.Fprintf(&b, " WHEN '%s' THEN %d", strings.ReplaceAll(grade, "'", "''"), rank)
+	}
+	fmt.Fprintf(&b, " WHEN 'unrated' THEN %d ELSE %d END", len(taskGradeScale), len(taskGradeScale)+1)
+	return b.String()
+}
+
+// lockBenchGradeTables serializes the grade mirror writers against schema
+// changes and acquires both table locks in their shared order.
+func lockBenchGradeTables(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `LOCK TABLE bench_grades IN ROW EXCLUSIVE MODE`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `LOCK TABLE bench_catalog IN ROW EXCLUSIVE MODE`)
+	return err
+}
 
 func validBenchRequiredText(x string) bool {
 	return x != "" && len(x) <= 200 && validText(x, 200)
@@ -1493,24 +1548,13 @@ var benchEffortRanks = map[string]int{"low": 0, "medium": 1, "high": 2, "xhigh":
 var benchSolProfiles = map[string]bool{"codex-sol": true, "kiro-sol": true}
 
 func benchGradeRank(grade string) int {
-	switch grade {
-	case "S+":
-		return 0
-	case "S":
-		return 1
-	case "A+":
-		return 2
-	case "A":
-		return 3
-	case "B":
-		return 4
-	case "C":
-		return 5
-	case "unrated":
-		return 6
-	default:
-		return 7
+	if rank, ok := taskGradeRanks[grade]; ok {
+		return rank
 	}
+	if grade == "unrated" {
+		return len(taskGradeScale)
+	}
+	return len(taskGradeScale) + 1
 }
 
 func validBenchCatalogEntry(x BenchCatalogEntry) bool {
@@ -1893,6 +1937,9 @@ func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, er
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockBenchGradeTables(ctx, tx); err != nil {
+		return 0, err
+	}
 	now := time.Now().UTC()
 	for _, x := range xs {
 		if strings.TrimSpace(x.DeviationRef) == "" {
@@ -1971,6 +2018,9 @@ func (s *Store) UpsertBenchCatalog(ctx context.Context, xs []BenchCatalogEntry) 
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockBenchGradeTables(ctx, tx); err != nil {
+		return 0, err
+	}
 	now := time.Now().UTC()
 	profiles := map[string]bool{}
 	for _, x := range xs {
@@ -2072,7 +2122,7 @@ func checkBenchCatalogMonotonicity(ctx context.Context, tx pgx.Tx, profiles map[
 }
 
 // ListBenchCatalog returns catalog rows in ladder order — pool, then grade
-// descending (S+ first), then profile, then effort rung. A pool filter turns
+// descending (SS first), then profile, then effort rung. A pool filter turns
 // the result into the subscription ladder for that pool and drops
 // consult_only rows (they remain visible in the unfiltered listing). Retired
 // rows are hidden unless includeRetired is set.
@@ -2080,7 +2130,7 @@ func (s *Store) ListBenchCatalog(ctx context.Context, pool string, includeRetire
 	if !validText(pool, 200) {
 		return nil, errors.New("invalid bench catalog query")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT profile,effort,model_id,pool,grade,score,gate,gate_reason,benchmark_source,benchmark_annotation,boundary_version,deviation_ref,decided_at,decided_by,retired_at FROM bench_catalog WHERE ($1='' OR pool=$1) AND ($1='' OR gate<>'consult_only') AND ($2 OR retired_at IS NULL) ORDER BY pool, CASE grade WHEN 'S+' THEN 0 WHEN 'S' THEN 1 WHEN 'A+' THEN 2 WHEN 'A' THEN 3 WHEN 'B' THEN 4 WHEN 'C' THEN 5 ELSE 6 END, profile, CASE effort WHEN '' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2 WHEN 'high' THEN 3 WHEN 'xhigh' THEN 4 WHEN 'max' THEN 5 ELSE 6 END, effort`, pool, includeRetired)
+	rows, err := s.pool.Query(ctx, `SELECT profile,effort,model_id,pool,grade,score,gate,gate_reason,benchmark_source,benchmark_annotation,boundary_version,deviation_ref,decided_at,decided_by,retired_at FROM bench_catalog WHERE ($1='' OR pool=$1) AND ($1='' OR gate<>'consult_only') AND ($2 OR retired_at IS NULL) ORDER BY pool, `+benchGradeOrderSQL()+`, profile, CASE effort WHEN '' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2 WHEN 'high' THEN 3 WHEN 'xhigh' THEN 4 WHEN 'max' THEN 5 ELSE 6 END, effort`, pool, includeRetired)
 	if err != nil {
 		return nil, err
 	}
@@ -2230,7 +2280,7 @@ func validTaskLinear(x TaskLinear) bool {
 	if x.Tier != "" && x.Tier != "T0" && x.Tier != "T1" && x.Tier != "T2" && x.Tier != "T3" {
 		return false
 	}
-	if x.Grade != "" && x.Grade != "S+" && x.Grade != "S" && x.Grade != "A+" && x.Grade != "A" && x.Grade != "B" && x.Grade != "C" {
+	if x.Grade != "" && !validTaskGrade(x.Grade) {
 		return false
 	}
 	for _, value := range []string{x.Brief, x.Report, x.Verify, x.Decision} {

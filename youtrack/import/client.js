@@ -10,6 +10,8 @@ const FIELD = {
   decisionID: '결정 ID', decisionState: '결정 상태',
   recommended: '권장', due: '결정 기한', linkedTask: '연결 task ID', docKey: 'hk 문서 키', docPrefix: '문서 prefix'
 };
+// Keep aligned with store.TaskGradePattern() and the Go title marker parser.
+const TITLE_GRADE_RE = /\(grade (SS|S\+|S|A\+|A|B|C), (T[0-3])\)\s*$/;
 const STATE = {
   triage: '분류 대기', backlog: '대기', unstarted: '착수 전', researching: '조사 중',
   developing: '개발 중', reviewing: '검토 중', merged: '머지됨', deployed: '배포됨',
@@ -354,7 +356,7 @@ class HandoffkeepImport {
     });
     const ref = task.refs || {};
     let grade = '', tier = '';
-    const marker = String(task.title || '').match(/\(grade ([SABC]\+?), (T[0-3])\)\s*$/);
+    const marker = String(task.title || '').match(TITLE_GRADE_RE);
     if (marker) { grade = marker[1]; tier = marker[2]; }
     if (!grade && ref.linear) { grade = ref.linear.grade || ''; tier = ref.linear.tier || ''; }
     const fields = {
@@ -406,7 +408,7 @@ class HandoffkeepImport {
   }
   taskTags(task) {
     const tags = [];
-    const marker = String(task.title || '').match(/\(grade ([SABC]\+?), (T[0-3])\)\s*$/);
+    const marker = String(task.title || '').match(TITLE_GRADE_RE);
     const grade = marker ? marker[1] : (task.refs && task.refs.linear && task.refs.linear.grade);
     const tier = marker ? marker[2] : (task.refs && task.refs.linear && task.refs.linear.tier);
     [['lane', task.lane], ['kind', task.kind], ['project', task.project], ['grade', grade], ['tier', tier]].forEach(([k,v]) => {

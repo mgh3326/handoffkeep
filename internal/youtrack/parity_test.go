@@ -3,6 +3,7 @@ package youtrack
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +40,24 @@ func TestGradeFromTitleNeedsTheGrade(t *testing.T) {
 	}
 	if g, tier := gradeFromTitle("x (T2)"); g != "" || tier != "" {
 		t.Fatalf("a tier alone must not set the grade: %q %q", g, tier)
+	}
+}
+
+func TestSSGradeTitleMarkerAndImportRegex(t *testing.T) {
+	title := "Top grade task (grade SS, T2)"
+	if got := cleanTitle(title); got != "Top grade task" {
+		t.Fatalf("cleanTitle(%q)=%q", title, got)
+	}
+	if g, tier := gradeFromTitle(title); g != "SS" || tier != "T2" {
+		t.Fatalf("grade=%q tier=%q, want SS T2", g, tier)
+	}
+	source, err := os.ReadFile("../../youtrack/import/client.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `const TITLE_GRADE_RE = /\(grade (` + store.TaskGradePattern() + `), (T[0-3])\)\s*$/;`
+	if !strings.Contains(string(source), want) {
+		t.Fatalf("import regex drift: missing %q", want)
 	}
 }
 
