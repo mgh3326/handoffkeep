@@ -57,6 +57,10 @@ func youtrackCmd(args []string, out io.Writer) error {
 		return youtrackCommentsCmd(args[1:], out, false)
 	case "comments-backfill":
 		return youtrackCommentsCmd(args[1:], out, true)
+	case "articles-preflight":
+		return youtrackArticlesCmd(args[1:], out, false)
+	case "articles-backfill":
+		return youtrackArticlesCmd(args[1:], out, true)
 	case "issues-backfill":
 		return youtrackIssuesBackfillCmd(args[1:], out)
 	case "fields-backfill":
@@ -73,7 +77,7 @@ func youtrackCmd(args []string, out io.Writer) error {
 }
 
 // youtrackUsage also answers `yt`, the short name of this command.
-const youtrackUsage = "usage: youtrack sync [--dry-run] | youtrack adopt --state <yt_state.json> [--dry-run] | youtrack projects list|put | youtrack ops [--state S] [--kind K] [--task N] | youtrack canary add|remove|list | youtrack schema plan|apply [--project P] | youtrack comments-preflight [--project P] [--days N] [--all] | youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME] | youtrack audit [--project P] [--task N] [--enqueue] [--limit N] | youtrack issues-backfill [--project P] [--dry-run] | youtrack fields-backfill [--project P] [--task N] [--limit N] [--dry-run] | youtrack decisions-backfill [--apply] [--by NAME] [--limit N] | youtrack authority show | youtrack authority set <kind|all> <hk|youtrack> --by NAME --note TEXT"
+const youtrackUsage = "usage: youtrack sync [--dry-run] | youtrack adopt --state <yt_state.json> [--dry-run] | youtrack projects list|put | youtrack ops [--state S] [--kind K] [--task N] | youtrack canary add|remove|list | youtrack schema plan|apply [--project P] | youtrack comments-preflight [--project P] [--days N] [--all] | youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME] | youtrack articles-preflight [--project P] | youtrack articles-backfill [--project P] [--by NAME] | youtrack audit [--project P] [--task N] [--enqueue] [--limit N] | youtrack issues-backfill [--project P] [--dry-run] | youtrack fields-backfill [--project P] [--task N] [--limit N] [--dry-run] | youtrack decisions-backfill [--apply] [--by NAME] [--limit N] | youtrack authority show | youtrack authority set <kind|all> <hk|youtrack> --by NAME --note TEXT"
 
 func youtrackSyncCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("youtrack sync", flag.ContinueOnError)
