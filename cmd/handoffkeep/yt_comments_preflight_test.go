@@ -571,8 +571,11 @@ func TestYTCommentsWorkerStartsInModeOn(t *testing.T) {
 		t.Fatal(err)
 	}
 	remote := ytwritetest.NewFake()
-	// The catch-up is off unless asked for (HANDOFFKEEP_YT_COMMENTS_CATCHUP).
-	if off, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsOn, false, nil); err != nil || off.catchUp != nil {
+	// The catch-up is off unless asked for (HANDOFFKEEP_YT_COMMENTS_CATCHUP),
+	// except for bindings issue_create ops published (hk 3914).
+	if off, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsOn, false, nil); err != nil {
+		t.Fatal(err)
+	} else if _, issueOnly := off.catchUp.(ytIssueCommentCatchUp); !issueOnly {
 		t.Fatalf("worker without the catch-up: %+v %v", off, err)
 	}
 	w, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsOn, true, nil)

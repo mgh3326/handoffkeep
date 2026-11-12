@@ -589,3 +589,40 @@ func TestYTIssueIntakePreparesOneOp(t *testing.T) {
 		t.Fatalf("a replay prepared another op: %+v", ops)
 	}
 }
+
+// A comment written while the task's issue op was pending got no op (no
+// binding yet); once the op applies, the issue-binding catch-up prepares it
+// even with the general catch-up off. A binding from the import is left to
+// the general catch-up (hk 3914).
+func TestYTIssuePendingCommentsReachTheIssue(t *testing.T) {
+	s := schemaStore(t, "yti_pending_comments")
+	ytbMapped(t, s)
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	s.SetYTCommentsMode(YTCommentsOn)
+	x := ytiCreate(t, s, ytbProject)
+	pending, err := s.CreateTaskComment(t.Context(), x.ID, "worker", "written while the issue was pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ytcuNoOp(t, s, "pending", pending)
+	imported := ytcTask(t, s, ytbProject)
+	ytbBind(t, s, ytbBinding(imported))
+	missed := ytcuRawComment(t, s, imported, "worker")
+
+	op := ytiOps(t, s, x.ID)[0]
+	ytiDispatch(t, s, op)
+	if _, err := s.YTWriteLedger().Apply(t.Context(), time.Now().UTC(), op.ID, "2-500", ytiMaps(op, "2-500")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.CatchUpYTIssueComments(t.Context(), 100, nil)
+	if err != nil || len(got.Prepared) != 1 || got.Prepared[0].YTTargetID != "2-500" {
+		t.Fatalf("issue catch-up = %+v %v", got, err)
+	}
+	if c, ok := ytcOpFor(t, s, pending.ID); !ok || c.ID != got.Prepared[0].ID {
+		t.Fatalf("pending comment's op %+v %v", c, ok)
+	}
+	ytcuNoOp(t, s, "import binding", missed)
+	if again, err := s.CatchUpYTIssueComments(t.Context(), 100, nil); err != nil || len(again.Prepared) != 0 {
+		t.Fatalf("second pass = %+v %v", again, err)
+	}
+}

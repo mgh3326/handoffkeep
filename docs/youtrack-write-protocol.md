@@ -793,7 +793,11 @@ classification is the shared one; a failed search is `not_sent` (above).
 whose description is exactly the rendered text, applies the op; a quoted or
 copied marker is not ownership. Zero, two exact hits, an edited description,
 or a hit beside another issue with that `hk ID` keep it `remote_unknown`;
-there is never an automatic re-create.
+there is never an automatic re-create. An adoption whose settlement was lost (a crash or
+a failed apply after Send adopted) is `remote_unknown / marker_mismatch` too:
+the adopted issue has no marker, and an issue's age does not prove the
+dispatch's search saw it (its `hk ID` or summary may have been set after the
+search while a POST was in flight), so the operator resolves it.
 
 **Binding.** Applying the op (send, evidence or `yt ops resolve`) takes the
 task's lane lock, first checks every mapping hk keeps (the task's binding and
@@ -805,7 +809,11 @@ an `issue_create` op without its binding, so a resolver that does not know the
 kind cannot close one). `issue_readable` is left empty: the protocol carries
 only the stable id. `comments_from` is 0 for an issue the op created (the
 catch-up copies the task's comments) and the task's highest comment id for an
-adopted one (it already holds that history). Nothing is overwritten: the same
+adopted one (it already holds that history). A comment written while the op
+was pending gets no op (the task has no binding yet), so in comments mode on
+the write worker runs the catch-up for `op_applied` bindings before every
+Drive pass even when `HANDOFFKEEP_YT_COMMENTS_CATCHUP` is off
+(`CatchUpYTIssueComments`, hk 3914). Nothing is overwritten: the same
 issue is a no-op; a task bound or mapped to another issue or whose YouTrack
 origin names another issue, or the issue bound or mapped to another task,
 keeps the op applied with reason
@@ -1602,7 +1610,10 @@ listing, page at a server cap. Covered: no false done, no duplicate create, same
 with another payload is a conflict, concurrent same-key callers send once, crash at
 each ledger/remote boundary (before and after the commit of prepare, claim, apply,
 mark-unknown, defer), two writes to one entity in order, evidence paging and exact
-match, ambiguous evidence, caller cancellation.
+match, ambiguous evidence, caller cancellation. `ytwritetest.RunIssueProtocol`
+runs the same fault cases for `issue_create` (lost and delayed replies, 2xx
+without an id, 429, 401, 5xx, 4xx, operator resolution, concurrent workers,
+a crash at each boundary) over both ledgers (hk 3910).
 
 ## Not yet (later slices)
 
