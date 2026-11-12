@@ -154,8 +154,11 @@ type ArticleRequest struct {
 	LegacyProjectID string
 	LegacyMarker    string
 	// RetryOf is the document's create op this one replaces (0 for the
-	// first create): see ArticleRetryKey.
-	RetryOf int64
+	// first create): see ArticleRetryKey. RetryKey is that op's key; empty
+	// means the first create's (ArticleKey), and a retry of a retry
+	// (hk 4357) gives its own.
+	RetryOf  int64
+	RetryKey string
 }
 
 // ArticleCreatePayload is the immutable payload of an article_create op: the
@@ -213,6 +216,9 @@ func ArticleOp(req ArticleRequest) (NewOp, error) {
 	key := ArticleKey(req.DocumentID)
 	if req.RetryOf > 0 {
 		key = ArticleRetryKey(req.DocumentID, req.RetryOf)
+		if req.RetryKey != "" {
+			key = req.RetryKey + ":retry-" + strconv.FormatInt(req.RetryOf, 10)
+		}
 	}
 	return NewOp{
 		Principal:  req.Principal,
