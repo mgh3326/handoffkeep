@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -61,5 +62,36 @@ func TestDotsInboxAvailableWhenWritesOff(t *testing.T) {
 	text, failed = toolText(t, session, "dots_reply", map[string]any{"task_id": 1, "kind": "RESULT", "body": "done", "idempotency_key": "key"})
 	if !failed || !strings.Contains(text, "dots_reply_writes_disabled") {
 		t.Fatalf("reply failed=%v text=%s", failed, text)
+	}
+}
+
+func TestDotsReplyExplainsMissingYouTrackIssue(t *testing.T) {
+	t.Setenv("HANDOFFKEEP_DOTS_REPLY_WRITES", "on")
+	st := newOperatorStore(t)
+	task, err := st.CreateDotsRequest(context.Background(), "caller", store.DotsRequestInput{Title: "Research", Body: "Investigate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := st.ReplyDots(context.Background(), "operator:test@example.com", "chatgpt", store.DotsReplyInput{
+		TaskID: task.ID, Kind: "START", Body: "Starting", IdempotencyKey: "start", ExpectedUpdatedAt: &task.UpdatedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SetYTCommentsMode(store.YTCommentsOn)
+	if _, _, err := st.SetYTAuthority(context.Background(), []store.YTAuthorityKind{store.YTAuthorityComments}, store.YTAuthorityYouTrack, "operator", "test"); err != nil {
+		t.Fatal(err)
+	}
+	access := newAccessFixture(t)
+	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, nil, access.verifier))
+	defer srv.Close()
+	assertion := access.token(t, jwt.MapClaims{"email": "operator@example.com"})
+	session := connectMCP(t, srv.URL, map[string]string{"Cf-Access-Jwt-Assertion": assertion})
+	text, failed := toolText(t, session, "dots_reply", map[string]any{
+		"task_id": task.ID, "kind": "PROGRESS", "body": "No issue yet", "idempotency_key": "progress",
+		"run_token": started.RunToken,
+	})
+	if !failed || !strings.Contains(text, "this task has no YouTrack issue yet; retry in a minute") {
+		t.Fatalf("dots_reply failed=%v text=%s", failed, text)
 	}
 }
