@@ -188,6 +188,9 @@ func TestYTIssueProjectSetSkipsTasksWithExistingIssueOwnership(t *testing.T) {
 			if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: project, ProjectID: "0-owned", ShortName: "OWN"}); err != nil {
 				t.Fatal(err)
 			}
+			if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: initialProject, ProjectID: ytbProjectID, ShortName: "HK"}); err != nil {
+				t.Fatal(err)
+			}
 			task, err := s.CreateTask(t.Context(), Task{Lane: "yti-owned", Title: "owned task", Kind: "implement", CreatedBy: "test", Project: &initialProject})
 			if err != nil {
 				t.Fatal(err)
