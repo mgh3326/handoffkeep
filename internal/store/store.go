@@ -610,6 +610,8 @@ type Store struct {
 	ytDocsCatchUpMu sync.Mutex
 	ytDocsScanned   bool
 	ytDocsLastScan  time.Time
+	// ytDecExpiry is the decisions' expiry sweep (catchUpYTDecisionExpiries).
+	ytDecExpiry ytDecisionExpirySweep
 	// ytBindingChecked, when set (tests only), runs inside AddYTTaskBinding
 	// after every check has passed and before the binding row is inserted,
 	// with every lock of the publication held.

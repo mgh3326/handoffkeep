@@ -272,3 +272,29 @@ func TestAuditCommentsUnknownBot(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+// A bot comment in the rendered form of a document copy's op moves from
+// YTOnlyBot to DocComment; a person's copy of that form, another op's copy and
+// a plain bot comment stay where they are (hk 4245).
+func TestReclassifyDocOps(t *testing.T) {
+	yt := []ytwrite.RemoteComment{
+		{ID: "4-1", Text: auditRendered(t, 6920, "report"), AuthorID: auditBot},
+		{ID: "4-2", Text: auditRendered(t, 6921, "other op"), AuthorID: auditBot},
+		{ID: "4-3", Text: auditRendered(t, 6920, "quoted by a person"), AuthorID: auditHuman},
+		{ID: "4-4", Text: "plain bot text", AuthorID: auditBot},
+	}
+	got := ytwrite.AuditComments(nil, yt, auditBot, nil)
+	if !reflect.DeepEqual(got.YTOnlyBot, []string{"4-1", "4-2", "4-4"}) || !reflect.DeepEqual(got.YTOnlyHuman, []string{"4-3"}) {
+		t.Fatalf("before: yt_only_bot %v human %v", got.YTOnlyBot, got.YTOnlyHuman)
+	}
+	ytwrite.ReclassifyDocOps(&got, yt, auditBot, func(op int64) bool { return op == 6920 })
+	if !reflect.DeepEqual(got.DocComment, []string{"4-1"}) || !reflect.DeepEqual(got.YTOnlyBot, []string{"4-2", "4-4"}) || !reflect.DeepEqual(got.YTOnlyHuman, []string{"4-3"}) {
+		t.Fatalf("after: doc %v yt_only_bot %v human %v", got.DocComment, got.YTOnlyBot, got.YTOnlyHuman)
+	}
+	// Without a predicate nothing moves.
+	none := ytwrite.AuditComments(nil, yt, auditBot, nil)
+	ytwrite.ReclassifyDocOps(&none, yt, auditBot, nil)
+	if len(none.DocComment) != 0 || len(none.YTOnlyBot) != 3 {
+		t.Fatalf("nil predicate moved comments: doc %v bot %v", none.DocComment, none.YTOnlyBot)
+	}
+}
