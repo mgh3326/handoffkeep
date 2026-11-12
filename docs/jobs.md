@@ -127,12 +127,22 @@ The fallback uses the end state, optional `end_reason` and `diff_stat`
 on the transition into a terminal state. The server computes the fallback on
 read and does not store it.
 
+`report_doc` and `report_sha256` are the one report write a terminal record
+still accepts, so a `panewire done` retry that lands after the job ended is
+not lost. While the record's report is empty both must arrive together,
+non-empty (`report_sha256` keeps its 64-hex rule); a partial write returns
+`invalid_context`. Once the pair is stored, a repeat of the same values
+succeeds without changing the record, and different values return 409
+`job_state_conflict` like any other terminal write. `report_version` stays
+immutable on a terminal record.
+
 `skills` replaces the entire array of `{name, source, version_or_hash, calls}`.
 It has at most 100 unique name/source pairs; names are 1–128 bytes, sources
 1–64 bytes, versions at most 128 bytes, and calls nonnegative. A nonempty
 array requires `skills_supported:true`; false requires an empty or absent
 array. A zero call count means the skill was available but never called.
-Terminal updates may contain only `usage`, `skills`, and `skills_supported`.
+Terminal updates may contain only `usage`, `skills`, `skills_supported`,
+and the once-only `report_doc` + `report_sha256` pair described above.
 Other terminal updates return `job_state_conflict`; invalid values and field
 combinations return `invalid_context` (secret-shaped values retain
 `secret_like_content`).

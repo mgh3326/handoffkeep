@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -122,5 +123,120 @@ func TestYTArticlesRescanRetriesOnlyPrepareTimeInvalid(t *testing.T) {
 	}
 	if n := ytartUnwritten(t, s); n != 1 {
 		t.Fatalf("%d documents unwritten, want the operator's one", n)
+	}
+}
+
+// hk 4357: at the deploy that prepared the retries, the previous colour,
+// still serving, claimed them and its render refused the quoted marker
+// (unsupported_kind, attempts 1: the claim counts the attempt before the
+// render). Such a retry sent nothing, so it gets one more retry, keyed off
+// it; that one is the last.
+
+// ytartRefuse records op id rejected with reason after attempts claims, as
+// a worker's refusal does.
+func ytartRefuse(t *testing.T, s *Store, id int64, reason string, attempts int) {
+	t.Helper()
+	if _, err := s.pool.Exec(t.Context(), `UPDATE yt_write_ops SET state='rejected', reason=$2, attempts=$3, resolved_at=now() WHERE id=$1`,
+		id, reason, attempts); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ytartRescan runs a touch, a feed pass and a rescan for document id.
+func ytartRescan(t *testing.T, s *Store, id int64) {
+	t.Helper()
+	ytartTouch(t, s, id)
+	ytartPass(t, s)
+	ytartRescanDue(s)
+	if _, err := s.RunYTFeedConsumers(t.Context(), 100); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestYTArticlesRetryRefusedByOlderColourIsRetriedOnce(t *testing.T) {
+	s := ytartSetup(t, "ytart_marker_again", true)
+	yt := ytwritetest.NewFake()
+	var offset atomic.Int64
+	const key = "briefs/ytart/again.md"
+	id := ytartPut(t, s, key, ytartQuoted, nil)
+	first := ytartRejectedCreate(t, s, id, key, ytartQuoted, ytwrite.ReasonInvalidIssue)
+	ytartPass(t, s)
+	ops := ytartOps(t, s, id)
+	if len(ops) != 2 || ops[1].Key != ytwrite.ArticleRetryKey(id, first.ID) {
+		t.Fatalf("ops %+v", ops)
+	}
+	retry1 := ops[1]
+	ytartRefuse(t, s, retry1.ID, ytwrite.ReasonUnsupportedKind, 1)
+	if n := ytartUnwritten(t, s); n != 1 {
+		t.Fatalf("%d documents unwritten after the refusal", n)
+	}
+
+	ytartRescan(t, s, id)
+	ops = ytartOps(t, s, id)
+	want := retry1.Key + ":retry-" + strconv.FormatInt(retry1.ID, 10)
+	if len(ops) != 3 || ops[2].State != ytwrite.StatePrepared || ops[2].Key != want || ops[2].PayloadSHA != first.PayloadSHA {
+		t.Fatalf("ops %+v, want a third keyed %q", ops, want)
+	}
+	if n := ytartUnwritten(t, s); n != 0 {
+		t.Fatalf("%d documents unwritten with retry 2 prepared", n)
+	}
+	// Retry 2 holds the create: another pass prepares nothing.
+	ytartRescan(t, s, id)
+	if n := len(ytartOps(t, s, id)); n != 3 {
+		t.Fatalf("%d ops after a touch and a rescan", n)
+	}
+
+	ytartDrive(t, s, yt, &offset)
+	retry2 := ytartOps(t, s, id)[2]
+	if retry2.State != ytwrite.StateApplied {
+		t.Fatalf("retry 2 %+v", retry2)
+	}
+	if b := ytartBinding(t, s, id); b.OpID != retry2.ID || b.ContentSHA != ytwrite.ContentSHA(ytartQuoted) {
+		t.Fatalf("binding %+v", b)
+	}
+}
+
+// Retry 2 refused again, or a retry refused after an earlier attempt (which
+// may have written) or any other way, stays the operator's.
+func TestYTArticlesRetryRefusedOtherwiseStays(t *testing.T) {
+	s := ytartSetup(t, "ytart_marker_stays", true)
+	cases := []struct {
+		name, reason string
+		attempts     int
+		levels       int
+	}{
+		{"again", ytwrite.ReasonUnsupportedKind, 1, 2},
+		{"sent", ytwrite.ReasonUnsupportedKind, 2, 1},
+		{"other", ytwrite.ReasonInvalidIssue, 1, 1},
+		{"ambiguous", ytwrite.ReasonAmbiguousIssue, 1, 1},
+	}
+	ids := make([]int64, len(cases))
+	for i, c := range cases {
+		key := "briefs/ytart/stays-" + c.name + ".md"
+		ids[i] = ytartPut(t, s, key, ytartQuoted, nil)
+		ytartRejectedCreate(t, s, ids[i], key, ytartQuoted, ytwrite.ReasonInvalidIssue)
+	}
+	ytartPass(t, s)
+	for i, c := range cases {
+		for level := 1; level <= c.levels; level++ {
+			ops := ytartOps(t, s, ids[i])
+			if len(ops) != level+1 || ops[level].State != ytwrite.StatePrepared {
+				t.Fatalf("%s level %d: ops %+v", c.name, level, ops)
+			}
+			reason, attempts := ytwrite.ReasonUnsupportedKind, 1
+			if level == c.levels {
+				reason, attempts = c.reason, c.attempts
+			}
+			ytartRefuse(t, s, ops[level].ID, reason, attempts)
+			ytartRescan(t, s, ids[i])
+		}
+	}
+	for i, c := range cases {
+		if ops := ytartOps(t, s, ids[i]); len(ops) != c.levels+1 || ops[c.levels].State != ytwrite.StateRejected {
+			t.Fatalf("%s: ops %+v", c.name, ops)
+		}
+	}
+	if n := ytartUnwritten(t, s); n != len(cases) {
+		t.Fatalf("%d documents unwritten, want the operator's %d", n, len(cases))
 	}
 }

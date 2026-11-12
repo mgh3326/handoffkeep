@@ -2,6 +2,8 @@ package main
 
 import (
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -18,7 +20,16 @@ func TestYTIssuesModeStartsTheWriteWorker(t *testing.T) {
 	if _, err := ytCommentsWorkerFromEnv(nil); err == nil || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_ISSUES_MODE=on") || !strings.Contains(err.Error(), "YOUTRACK_URL") {
 		t.Fatalf("on without credentials: %v", err)
 	}
-	t.Setenv("YOUTRACK_URL", readthroughTestURL)
+	bucket := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/admin/projects" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[{"id":"0-hk","shortName":"HK","name":"Unassigned hk tasks"}]`)
+	}))
+	t.Cleanup(bucket.Close)
+	t.Setenv("YOUTRACK_URL", bucket.URL)
 	t.Setenv("YOUTRACK_BOT_API_KEY", readthroughTestKey)
 	if w, err := ytCommentsWorkerFromEnv(&store.Store{}); err != nil || w == nil {
 		t.Fatalf("issues on: worker %v err %v", w, err)

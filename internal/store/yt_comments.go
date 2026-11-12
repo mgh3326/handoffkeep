@@ -128,7 +128,7 @@ func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment
 		return s.enqueueYTCommentModeTx(ctx, tx, c)
 	}
 	if cerr := ytwrite.CheckCommentContent(c.Author, c.Body); cerr != nil {
-		return ytwrite.Op{}, false, fmt.Errorf("%w: %v", ErrYTCommentUnsendable, cerr)
+		return ytwrite.Op{}, false, fmt.Errorf("%w: the body cannot be sent: %v", ErrYTCommentUnsendable, cerr)
 	}
 	op, enqueued, err := s.enqueueYTCommentModeTx(ctx, tx, c)
 	if err == nil && !enqueued && s.ytCommentsModeNow() == YTCommentsOn {
@@ -138,6 +138,15 @@ func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment
 	case err != nil:
 		return op, enqueued, err
 	case !enqueued:
+		if s.ytCommentsModeNow() == YTCommentsOn {
+			_, found, readErr := readYTBinding(ctx, tx, c.TaskID)
+			if readErr != nil {
+				return ytwrite.Op{}, false, readErr
+			}
+			if !found {
+				return ytwrite.Op{}, false, fmt.Errorf("%w: this task has no YouTrack issue yet; retry in a minute", ErrYTCommentUnsendable)
+			}
+		}
 		return ytwrite.Op{}, false, fmt.Errorf("%w: comments mode %s has no YouTrack copy for task %d (not bound or enrolled, or a mapping disagrees)",
 			ErrYTCommentUnsendable, s.ytCommentsModeNow(), c.TaskID)
 	case op.State == ytwrite.StateRejected:

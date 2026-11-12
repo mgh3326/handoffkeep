@@ -160,6 +160,88 @@ func TestJobSkills(t *testing.T) {
 		t.Fatal("false with skills")
 	}
 }
+func TestJobReportLateWrite(t *testing.T) {
+	s := schemaStore(t, "job_context_late_report")
+	hash := strings.Repeat("b", 64)
+	other := strings.Repeat("c", 64)
+
+	// A terminal record with an empty report takes the pair once, together.
+	jobContextClaim(t, s, "job-late", nil)
+	jobContextUpdate(t, s, "job-late", JobUpdate{State: strptr("spawned")})
+	jobContextUpdate(t, s, "job-late", JobUpdate{State: strptr("completed")})
+	j := jobContextUpdate(t, s, "job-late", JobUpdate{ReportDoc: strptr("reports/job-late"), ReportSHA256: &hash})
+	if j.ReportDoc != "reports/job-late" || j.ReportSHA256 == nil || *j.ReportSHA256 != hash {
+		t.Fatal(j)
+	}
+	updated := j.UpdatedAt
+	// The same values replay as a no-op: accepted, nothing changes.
+	j = jobContextUpdate(t, s, "job-late", JobUpdate{ReportDoc: strptr("reports/job-late"), ReportSHA256: &hash})
+	if !j.UpdatedAt.Equal(updated) {
+		t.Fatal("repeat rewrote the record")
+	}
+	// Different values on a record that has them are refused like any other
+	// terminal write.
+	for _, u := range []JobUpdate{
+		{ReportDoc: strptr("reports/other"), ReportSHA256: &hash},
+		{ReportDoc: strptr("reports/job-late"), ReportSHA256: &other},
+		{ReportSHA256: &other},
+	} {
+		if _, err := s.UpdateJob(t.Context(), "job-late", u); !errors.Is(err, ErrJobStateConflict) {
+			t.Fatalf("%+v: %v", u, err)
+		}
+	}
+	// Every other field stays immutable on a terminal record.
+	for _, u := range []JobUpdate{
+		{Label: strptr("x")},
+		{ReportDoc: strptr("reports/job-late"), ReportVersion: intPtr(2)},
+		{ReportDoc: strptr("reports/job-late"), State: strptr("lost")},
+	} {
+		if _, err := s.UpdateJob(t.Context(), "job-late", u); !errors.Is(err, ErrJobStateConflict) {
+			t.Fatalf("%+v: %v", u, err)
+		}
+	}
+
+	// While the report is still empty the pair must land together and
+	// non-empty; a partial write is a validation failure, not a conflict.
+	jobContextClaim(t, s, "job-partial", nil)
+	jobContextUpdate(t, s, "job-partial", JobUpdate{State: strptr("spawned")})
+	jobContextUpdate(t, s, "job-partial", JobUpdate{State: strptr("completed")})
+	for _, u := range []JobUpdate{
+		{ReportDoc: strptr("reports/partial")},
+		{ReportSHA256: &hash},
+		{ReportDoc: strptr(""), ReportSHA256: &hash},
+	} {
+		if _, err := s.UpdateJob(t.Context(), "job-partial", u); err == nil || errors.Is(err, ErrJobStateConflict) {
+			t.Fatalf("%+v: %v", u, err)
+		}
+	}
+	j = jobContextUpdate(t, s, "job-partial", JobUpdate{ReportDoc: strptr("reports/partial"), ReportSHA256: &hash})
+	if j.ReportDoc != "reports/partial" {
+		t.Fatal(j)
+	}
+
+	// A report pinned at completion is already "has them": the same pair
+	// replays, a different one conflicts.
+	jobContextClaim(t, s, "job-pinned", nil)
+	jobContextUpdate(t, s, "job-pinned", JobUpdate{State: strptr("spawned")})
+	jobContextUpdate(t, s, "job-pinned", JobUpdate{State: strptr("completed"), ReportDoc: strptr("reports/pinned"), ReportSHA256: &hash})
+	j = jobContextUpdate(t, s, "job-pinned", JobUpdate{ReportDoc: strptr("reports/pinned"), ReportSHA256: &hash})
+	if j.ReportDoc != "reports/pinned" {
+		t.Fatal(j)
+	}
+	if _, err := s.UpdateJob(t.Context(), "job-pinned", JobUpdate{ReportDoc: strptr("reports/pinned"), ReportSHA256: &other}); !errors.Is(err, ErrJobStateConflict) {
+		t.Fatal(err)
+	}
+
+	// Non-terminal records are unchanged: report_doc alone still merges.
+	jobContextClaim(t, s, "job-open", nil)
+	jobContextUpdate(t, s, "job-open", JobUpdate{State: strptr("spawned")})
+	j = jobContextUpdate(t, s, "job-open", JobUpdate{ReportDoc: strptr("reports/open")})
+	if j.ReportDoc != "reports/open" {
+		t.Fatal(j)
+	}
+}
+
 func TestJobSummaryFallback(t *testing.T) {
 	s := schemaStore(t, "job_context_summary")
 	jobContextClaim(t, s, "job-lost", nil)

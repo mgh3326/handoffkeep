@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"slices"
 	"strconv"
@@ -107,6 +108,102 @@ func TestYTIssueCreateTaskPreparesOneOp(t *testing.T) {
 	}
 	if want := "ytwrite.issue_skipped task_id=" + strconv.FormatInt(unmapped.ID, 10); strings.Count(logs(), want) != 1 {
 		t.Fatalf("log %q, want one %q", logs(), want)
+	}
+}
+
+func TestYTIssueNoProjectDotsRequestUsesImportBucket(t *testing.T) {
+	s := schemaStore(t, "yti_no_project")
+	s.SetYTIssuesBucketProject("0-hk")
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	task, err := s.CreateDotsRequest(t.Context(), "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := ytiOps(t, s, task.ID)
+	if len(ops) != 1 || ops[0].YTTargetID != "0-hk" || ops[0].Tenant != ytcTenant {
+		t.Fatalf("issue_create ops = %+v", ops)
+	}
+	var payload ytwrite.IssueCreatePayload
+	if err := json.Unmarshal(ops[0].Payload, &payload); err != nil || payload.Project != "" || payload.YTProjectShort != "HK" {
+		t.Fatalf("bucket payload = %+v, err=%v", payload, err)
+	}
+}
+
+func TestYTIssueProjectSetPreparesCreateForUnboundTask(t *testing.T) {
+	s := schemaStore(t, "yti_project_set")
+	const project = "yti-project-set"
+	if _, err := s.AddTaskProject(t.Context(), project, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: project, ProjectID: "0-project-set", ShortName: "PS"}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateDotsRequest(t.Context(), "caller", DotsRequestInput{Title: "Research", Body: "Investigate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	updated, changed, err := s.SetTaskProject(t.Context(), task.ID, project, "tester", "assign project")
+	if err != nil || !changed || updated.Project == nil || *updated.Project != project {
+		t.Fatalf("SetTaskProject = %+v, changed=%t, err=%v", updated, changed, err)
+	}
+	ops := ytiOps(t, s, task.ID)
+	if len(ops) != 1 || ops[0].YTTargetID != "0-project-set" {
+		t.Fatalf("issue_create ops = %+v", ops)
+	}
+	var payload ytwrite.IssueCreatePayload
+	if err := json.Unmarshal(ops[0].Payload, &payload); err != nil || payload.Project != project {
+		t.Fatalf("project payload = %+v, err=%v", payload, err)
+	}
+}
+
+func TestYTIssueProjectSetSkipsTasksWithExistingIssueOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		claim func(t *testing.T, s *Store, task Task)
+	}{
+		{"binding", func(t *testing.T, s *Store, task Task) { ytbBind(t, s, ytbBinding(task.ID)) }},
+		{"entity map", func(t *testing.T, s *Store, task Task) {
+			ytbAnchor(t, s, task.ID, "2-map-"+strconv.FormatInt(task.ID, 10))
+		}},
+		{"comment canary", func(t *testing.T, s *Store, task Task) {
+			ytbCanaryRow(t, s, task.ID, ytcTenant, "2-canary-"+strconv.FormatInt(task.ID, 10))
+		}},
+		{"task origin", func(t *testing.T, s *Store, task Task) {
+			if _, err := s.UpsertYouTrackMirror(t.Context(), YouTrackMirrorInput{TaskID: task.ID, IssueID: "2-origin-" + strconv.FormatInt(task.ID, 10), DisplayRef: "HK-1", Tenant: ytcTenant, Role: "mirror"}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := schemaStore(t, "yti_owned_"+strings.ReplaceAll(tc.name, " ", "_"))
+			const project = "yti-owned-project"
+			initialProject := "yti-owned-initial-project"
+			if _, err := s.AddTaskProject(t.Context(), project, "test"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddTaskProject(t.Context(), initialProject, "test"); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: project, ProjectID: "0-owned", ShortName: "OWN"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: initialProject, ProjectID: ytbProjectID, ShortName: "HK"}); err != nil {
+				t.Fatal(err)
+			}
+			task, err := s.CreateTask(t.Context(), Task{Lane: "yti-owned", Title: "owned task", Kind: "implement", CreatedBy: "test", Project: &initialProject})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+			tc.claim(t, s, task)
+			if _, changed, err := s.SetTaskProject(t.Context(), task.ID, project, "tester", "assign project"); err != nil || !changed {
+				t.Fatalf("SetTaskProject changed=%t err=%v", changed, err)
+			}
+			if ops := ytiOps(t, s, task.ID); len(ops) != 0 {
+				t.Fatalf("issue_create ops for already-owned task = %+v", ops)
+			}
+		})
 	}
 }
 
