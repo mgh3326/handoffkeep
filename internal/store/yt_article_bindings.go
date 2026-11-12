@@ -298,7 +298,9 @@ var ytSHA256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // In HANDOFFKEEP_YT_DOCS_MODE=on the new binding's article_update, when its
 // article does not hold the document's body, is prepared in the same
 // transaction (ytArticleSnapshotTx), after the insert, unless documents are
-// canonical in YouTrack (then none is).
+// canonical in YouTrack: then none is, and the binding records the
+// document's current body as reconciled (content_sha the document's sha,
+// needs_update false), since the article wins over it.
 //
 // Locks, in this order (lockorder.go): the document's lane lock (as the
 // feed and an article_create's Apply take it, before any row), FOR SHARE on
@@ -361,11 +363,20 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 	if b.ContentSHA != "" {
 		contentSHA = b.ContentSHA
 	}
+	needsUpdate := b.NeedsUpdate
+	if side == YTAuthorityYouTrack && contentSHA != nil {
+		// Documents are canonical in YouTrack (r4547880748): the article
+		// wins over the PG body it differs from, so the binding records
+		// that body as reconciled. No catch-up or rescan then treats it as
+		// a pending PG write; a later edit of the document changes its sha
+		// and is written as any hk edit is.
+		contentSHA, needsUpdate = current.SHA256, false
+	}
 	var got YTArticleBinding
 	err = scanYTArticleBinding(tx.QueryRow(ctx, `INSERT INTO yt_article_bindings(document_id, tenant, article_id, article_readable, project_id, part, generation, content_sha, origin, needs_update, bound_by, bound_at)
 		VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,$9,$10,$11)
 		ON CONFLICT DO NOTHING RETURNING `+ytArticleBindingColumns,
-		b.DocumentID, b.Tenant, b.ArticleID, b.ArticleReadable, b.ProjectID, b.Part, contentSHA, YTBindingImportVerified, b.NeedsUpdate, b.BoundBy, time.Now().UTC()), &got)
+		b.DocumentID, b.Tenant, b.ArticleID, b.ArticleReadable, b.ProjectID, b.Part, contentSHA, YTBindingImportVerified, needsUpdate, b.BoundBy, time.Now().UTC()), &got)
 	if err == nil {
 		// In docs mode on (hk 4206), a binding whose article does not hold
 		// the document's body gets its article_update in the same

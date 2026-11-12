@@ -1440,6 +1440,17 @@ mode on, for each changed document, in order:
   operator's) in its task's project's `youtrack_projects` row, or in the
   bucket's project (no project row: skipped, `no_project`).
 
+**Catch-up.** The consumer's cursor starts at the feed's end, so each
+process in mode on runs, after the cursor exists, one full catch-up: every
+document that needs an op by the same rules (unbound and created after the
+import with no create, or bound with `needs_update` or another
+`content_sha`) is decided in its own transaction. Then, at most once a
+minute, every worker rescans the unbound documents from the shared state,
+so a document skipped as `no_project` gets its create from whichever worker
+rescans after its `youtrack_projects` mapping is added (a mapping makes no
+document feed row). A bound document is the feed's after the full catch-up.
+Each logs `ytwrite.articles_catchup full=`.
+
 Mode off prepares nothing and advances the cursor. Each pass logs
 `ytwrite.articles_feed documents= create_prepared= create_rejected=
 create_exists= update_prepared= unchanged= exception_not_updated=
@@ -1498,7 +1509,10 @@ and marker for an `op_applied` binding) applies the op, anything else keeps it
 
 A binding `youtrack articles-backfill` publishes in
 `HANDOFFKEEP_YT_DOCS_MODE=on` whose article is not the document's body gets
-its `article_update` in the binding's own transaction.
+its `article_update` in the binding's own transaction. Once documents are
+canonical in YouTrack, a backfill binding queues no update: it records the
+document's current body as reconciled (`content_sha` the document's sha,
+`needs_update` false), so only a later hk edit is written.
 
 **Binding.** Applying an `article_create` (send, evidence or `yt ops
 resolve`) takes the document's lane lock, checks the document's binding and

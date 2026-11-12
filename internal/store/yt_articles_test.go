@@ -477,7 +477,7 @@ func TestYTArticlesCatchUpCoversTheFirstPassGap(t *testing.T) {
 		t.Fatalf("%d documents unwritten after the catch-up", n)
 	}
 	// Again, directly: idempotent.
-	if _, _, err := s.catchUpYTArticles(t.Context(), time.Now().UTC()); err != nil {
+	if _, _, err := s.catchUpYTArticles(t.Context(), time.Now().UTC(), true); err != nil {
 		t.Fatal(err)
 	}
 	if len(ytartOps(t, s, fresh)) != 1 || len(ytartOps(t, s, bound)) != 1 {
@@ -769,6 +769,7 @@ func TestYTArticlesCatchUpRetriesNoProject(t *testing.T) {
 	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "ytart-np", ProjectID: "0-43", ShortName: "YTNP"}); err != nil {
 		t.Fatal(err)
 	}
+	ytartRescanDue(s)
 	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
 		t.Fatal(err)
 	}
@@ -780,9 +781,18 @@ func TestYTArticlesCatchUpRetriesNoProject(t *testing.T) {
 	}
 }
 
-// r4547806956: a document the live feed skips as no_project after the
-// catch-up has finished joins the same retry set, so its create comes once
-// its mapping exists, with no further document change.
+// ytartRescanDue makes the next catch-up call rescan now.
+func ytartRescanDue(s *Store) {
+	s.ytDocsCatchUpMu.Lock()
+	s.ytDocsLastScan = time.Time{}
+	s.ytDocsCatchUpMu.Unlock()
+}
+
+// r4547806956, r4547880757: a document the live feed skips as no_project
+// after the catch-up has finished is found again from the shared state by
+// the periodic rescan of any worker, here a second Store on the same
+// database that never read the document's feed row (another blue-green
+// colour), once its mapping exists, with no further document change.
 func TestYTArticlesFeedNoProjectIsRetried(t *testing.T) {
 	s := ytartSetup(t, "ytart_feednp", true)
 	ctx := t.Context()
@@ -798,6 +808,8 @@ func TestYTArticlesFeedNoProjectIsRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := ytartPut(t, s, "design/ytart/feed-noproj.md", "body", &task.ID)
+	ytartPass(t, s)
+	ytartRescanDue(s)
 	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
 		t.Fatal(err)
 	}
@@ -807,16 +819,23 @@ func TestYTArticlesFeedNoProjectIsRetried(t *testing.T) {
 	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "ytart-fnp", ProjectID: "0-44", ShortName: "YTFNP"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
+	// Within the rescan interval the first worker waits.
+	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil || len(ytartOps(t, s, id)) != 0 {
+		t.Fatalf("rescan before its interval: %v ops %+v", err, ytartOps(t, s, id))
+	}
+	other := &Store{pool: s.pool}
+	other.SetYTDocsMode(YTDocsOn, ytcTenant, ytartBuckets())
+	if err := other.catchUpYTArticlesOnce(ctx, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if ops := ytartOps(t, s, id); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleCreate || ops[0].YTTargetID != "0-44" || !s.ytDocsCaughtUp.Load() {
-		t.Fatalf("after the mapping: ops %+v caught up %v", ops, s.ytDocsCaughtUp.Load())
+	if ops := ytartOps(t, s, id); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleCreate || ops[0].YTTargetID != "0-44" || !other.ytDocsCaughtUp.Load() {
+		t.Fatalf("after the mapping: ops %+v caught up %v", ops, other.ytDocsCaughtUp.Load())
 	}
 }
 
-// r4547807096: once documents are canonical in YouTrack, a backfill binding
-// is published but queues no update of the PG body over the article.
+// r4547807096, r4547880748: once documents are canonical in YouTrack, a
+// backfill binding is published but queues no update of the PG body over
+// the article, then or later.
 func TestYTArticleBindingAfterSwitchQueuesNothing(t *testing.T) {
 	s := ytartSetup(t, "ytart_switched", true)
 	id := ytartPut(t, s, "note/ytart/switched", "hk body", nil)
@@ -831,7 +850,24 @@ func TestYTArticleBindingAfterSwitchQueuesNothing(t *testing.T) {
 	if ops := ytartOps(t, s, id); len(ops) != 0 {
 		t.Fatalf("ops after the switch %+v", ops)
 	}
-	if b := ytartBinding(t, s, id); !b.NeedsUpdate {
+	// r4547880748: the article wins, so the binding records the PG body as
+	// reconciled, and no later catch-up (a restart: a fresh Store's full
+	// scan) writes that body over the article; an edit after it is written.
+	d := ytArticleDoc(t, s, id)
+	if b := ytartBinding(t, s, id); b.NeedsUpdate || b.ContentSHA != d.SHA256 {
 		t.Fatalf("binding %+v", b)
+	}
+	restarted := &Store{pool: s.pool}
+	restarted.SetYTDocsMode(YTDocsOn, ytcTenant, ytartBuckets())
+	if err := restarted.catchUpYTArticlesOnce(t.Context(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if ops := ytartOps(t, s, id); len(ops) != 0 {
+		t.Fatalf("ops after a restart's catch-up %+v", ops)
+	}
+	ytartPut(t, s, "note/ytart/switched", "edited in hk after the switch", nil)
+	ytartPass(t, s)
+	if ops := ytartOps(t, s, id); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleUpdate {
+		t.Fatalf("ops after an edit %+v", ops)
 	}
 }

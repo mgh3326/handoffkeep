@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -403,11 +402,6 @@ func ytDocsHandler(s *Store, now time.Time) FeedHandler {
 				return err
 			}
 			counts[outcome]++
-			if outcome == ytArticleNoProject {
-				// A mapping added later makes no document feed row: the
-				// catch-up retries it on every pass (r4547806956).
-				s.retryYTArticleNoProject(id)
-			}
 		}
 		log.Printf("ytwrite.articles_feed documents=%d create_prepared=%d create_rejected=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d deleted=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d",
 			len(ids), counts[ytArticleCreatePrepared], counts[ytArticleCreateRejected], counts[ytArticleCreatePending], counts[ytArticleUpdatePrepared],
@@ -563,34 +557,44 @@ const ytArticleCatchUpPage = 200
 // each in its own transaction under its lane lock. The decision is
 // idempotent (a create exists once per document, a snapshot already
 // prepared is skipped), so running it again, or beside the feed, prepares
-// nothing twice. Mode off does nothing.
+// nothing twice. Mode off does nothing. Out-of-scope documents are dropped
+// before their transaction (no body is read for them).
 //
-// noProject are the documents it skipped for want of a YouTrack project
-// (ytArticleNoProject), in id order: no feed row comes when a mapping is
-// added, so the caller retries them (catchUpYTArticlesOnce).
-func (s *Store) catchUpYTArticles(ctx context.Context, now time.Time) (counts map[ytArticleOutcome]int, noProject []int64, err error) {
+// bound false lists the unbound documents only (the periodic rescan): a
+// bound one is the feed's, and rescanning a stale binding whose update was
+// rejected would prepare it again on every rescan. noProject counts the
+// documents skipped for want of a YouTrack project.
+func (s *Store) catchUpYTArticles(ctx context.Context, now time.Time, bound bool) (counts map[ytArticleOutcome]int, noProject int, err error) {
 	counts = map[ytArticleOutcome]int{}
 	g, on := s.ytDocsNow()
 	if !on {
-		return counts, nil, nil
+		return counts, 0, nil
 	}
 	var after int64
 	for {
-		rows, err := s.pool.Query(ctx, `SELECT d.id FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id = d.id
+		rows, err := s.pool.Query(ctx, `SELECT d.id, d.key, coalesce(d.task_id,0) FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id = d.id
 			WHERE d.id > $1 AND (
 				(b.document_id IS NULL AND d.created_at >= $2 AND NOT EXISTS (SELECT 1 FROM yt_write_ops o
 					WHERE o.principal = $3 AND o.kind = $4 AND o.idem_key = 'document-article:' || d.id::text))
-				OR (b.tenant = $5 AND (b.needs_update OR b.content_sha IS DISTINCT FROM d.sha256)))
-			ORDER BY d.id LIMIT $6`, after, YTImportEndedAt, YTDocsPrincipal, ytwrite.KindArticleCreate, g.tenant, ytArticleCatchUpPage)
+				OR ($7 AND b.tenant = $5 AND (b.needs_update OR b.content_sha IS DISTINCT FROM d.sha256)))
+			ORDER BY d.id LIMIT $6`, after, YTImportEndedAt, YTDocsPrincipal, ytwrite.KindArticleCreate, g.tenant, ytArticleCatchUpPage, bound)
 		if err != nil {
 			return counts, noProject, err
 		}
 		var ids []int64
+		listed := 0
 		for rows.Next() {
-			var id int64
-			if err := rows.Scan(&id); err != nil {
+			var id, taskID int64
+			var key string
+			if err := rows.Scan(&id, &key, &taskID); err != nil {
 				rows.Close()
 				return counts, noProject, err
+			}
+			listed++
+			after = id
+			if !ytArticleInScope(key, taskID) {
+				counts[ytArticleOutOfScope]++
+				continue
 			}
 			ids = append(ids, id)
 		}
@@ -599,17 +603,16 @@ func (s *Store) catchUpYTArticles(ctx context.Context, now time.Time) (counts ma
 			return counts, noProject, err
 		}
 		for _, id := range ids {
-			after = id
 			outcome, err := s.catchUpYTArticle(ctx, now, g, id)
 			if err != nil {
 				return counts, noProject, err
 			}
 			counts[outcome]++
 			if outcome == ytArticleNoProject {
-				noProject = append(noProject, id)
+				noProject++
 			}
 		}
-		if len(ids) < ytArticleCatchUpPage {
+		if listed < ytArticleCatchUpPage {
 			return counts, noProject, nil
 		}
 	}
@@ -636,76 +639,50 @@ func (s *Store) catchUpYTArticle(ctx context.Context, now time.Time, g ytDocsGat
 	return outcome, tx.Commit(ctx)
 }
 
-// catchUpYTArticlesOnce runs catchUpYTArticles once per process in mode on,
-// after the document_articles cursor exists (so every later change is the
-// feed's); RunYTFeedConsumers calls it after every pass. The documents it,
-// or the live feed, skipped as no_project (r4546690164, r4547806956) are kept
-// and retried, alone, on every later call: a youtrack_projects mapping added
-// for them makes no feed row. It is done (ytDocsCaughtUp) while none is left. The documents authority
-// switch does not rely on it: it refuses while any document is unwritten
-// (ytArticlesUnwrittenTx), whatever this process has scanned.
+// ytArticleRescanEvery is how often catchUpYTArticlesOnce rescans the
+// unbound documents after its first full scan.
+const ytArticleRescanEvery = time.Minute
+
+// catchUpYTArticlesOnce runs, in mode on, after the document_articles cursor
+// exists (so every later change is the feed's), one full catch-up per
+// process, then a rescan of the unbound documents at most every
+// ytArticleRescanEvery; RunYTFeedConsumers calls it after every pass. The
+// rescan reads the shared state, so a document any worker skipped as
+// no_project (r4546690164, r4547806956, r4547880757: a youtrack_projects
+// mapping added later makes no feed row) gets its create from whichever worker
+// rescans next. ytDocsCaughtUp is set while the last scan found none waiting.
+// The documents authority switch does not rely on it: it refuses while any
+// document is unwritten (ytArticlesUnwrittenTx).
 func (s *Store) catchUpYTArticlesOnce(ctx context.Context, now time.Time) error {
-	g, on := s.ytDocsNow()
-	if !on {
+	if _, on := s.ytDocsNow(); !on {
 		return nil
 	}
 	s.ytDocsCatchUpMu.Lock()
 	defer s.ytDocsCatchUpMu.Unlock()
-	if !s.ytDocsScanned {
+	full := !s.ytDocsScanned
+	if !full && now.Sub(s.ytDocsLastScan) < ytArticleRescanEvery {
+		return nil
+	}
+	if full {
 		var cursor bool
 		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_feed_cursors WHERE consumer=$1)`, ytDocsConsumer).Scan(&cursor); err != nil || !cursor {
 			return err
 		}
-		counts, noProject, err := s.catchUpYTArticles(ctx, now)
-		if err != nil {
-			log.Printf("ytwrite.articles_catchup_failed err=%q", err.Error())
-			return err
-		}
-		s.ytDocsScanned = true
-		for _, id := range noProject {
-			s.addYTArticleNoProjectLocked(id)
-		}
-		log.Printf("ytwrite.articles_catchup create_prepared=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d",
-			counts[ytArticleCreatePrepared], counts[ytArticleCreatePending], counts[ytArticleUpdatePrepared], counts[ytArticleUnchanged],
+	}
+	counts, noProject, err := s.catchUpYTArticles(ctx, now, full)
+	if err != nil {
+		log.Printf("ytwrite.articles_catchup_failed full=%t err=%q", full, err.Error())
+		return err
+	}
+	s.ytDocsScanned, s.ytDocsLastScan = true, now
+	if full || counts[ytArticleCreatePrepared] > 0 || noProject > 0 {
+		log.Printf("ytwrite.articles_catchup full=%t create_prepared=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d",
+			full, counts[ytArticleCreatePrepared], counts[ytArticleCreatePending], counts[ytArticleUpdatePrepared], counts[ytArticleUnchanged],
 			counts[ytArticleNotUpdated], counts[ytArticleUnboundImported], counts[ytArticleOutOfScope], counts[ytArticleOtherTenant],
-			counts[ytArticleNoProject], counts[ytArticleInvalid], counts[ytArticleLegacyUnverified])
-	} else if len(s.ytDocsNoProject) > 0 {
-		var left []int64
-		for _, id := range s.ytDocsNoProject {
-			outcome, err := s.catchUpYTArticle(ctx, now, g, id)
-			if err != nil {
-				log.Printf("ytwrite.articles_catchup_failed document_id=%d err=%q", id, err.Error())
-				return err
-			}
-			if outcome == ytArticleNoProject {
-				left = append(left, id)
-			}
-		}
-		if len(left) < len(s.ytDocsNoProject) {
-			log.Printf("ytwrite.articles_catchup_retried resolved=%d no_project=%d", len(s.ytDocsNoProject)-len(left), len(left))
-		}
-		s.ytDocsNoProject = left
+			noProject, counts[ytArticleInvalid], counts[ytArticleLegacyUnverified])
 	}
-	done := len(s.ytDocsNoProject) == 0
-	if done && !s.ytDocsCaughtUp.Load() {
-		log.Printf("ytwrite.articles_caught_up")
-	}
-	s.ytDocsCaughtUp.Store(done)
+	s.ytDocsCaughtUp.Store(noProject == 0)
 	return nil
-}
-
-// retryYTArticleNoProject adds a document the live feed skipped as no_project
-// to the catch-up's retry set (r4547806956).
-func (s *Store) retryYTArticleNoProject(id int64) {
-	s.ytDocsCatchUpMu.Lock()
-	defer s.ytDocsCatchUpMu.Unlock()
-	s.addYTArticleNoProjectLocked(id)
-}
-
-func (s *Store) addYTArticleNoProjectLocked(id int64) {
-	if !slices.Contains(s.ytDocsNoProject, id) {
-		s.ytDocsNoProject = append(s.ytDocsNoProject, id)
-	}
 }
 
 // ytArticlesUnwrittenMax bounds the document ids a refusal names.
