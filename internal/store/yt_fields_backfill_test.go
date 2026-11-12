@@ -3,6 +3,8 @@ package store
 import (
 	"errors"
 	"testing"
+
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 // The issue_fields backfill (hk 4022) prepares the snapshot of every bound
@@ -146,5 +148,49 @@ func TestYTFieldsBackfillRefusedModeOff(t *testing.T) {
 	}
 	if n := ytfAllOps(t, s); n != 0 {
 		t.Fatalf("mode off made %d ops", n)
+	}
+}
+
+// The 18 issue_fields ops rejected field_refused before hk 4051 (hk 4057): a
+// backfill re-prepares exactly the tasks whose last snapshot op was rejected,
+// once, and leaves the sent ones unchanged.
+func TestYTFieldsBackfillRetriesRejected(t *testing.T) {
+	s, bound, _ := ytfSetup(t, "ytfb_rejected")
+	tasks := []int64{bound}
+	for range 3 {
+		task := ytcTask(t, s, ytbProject)
+		ytfBind(t, s, task)
+		tasks = append(tasks, task)
+	}
+	if r := ytfBackfill(t, s, YTFieldsBackfillOptions{}); r.Total.Prepared != 4 {
+		t.Fatalf("first run %+v", r.Total)
+	}
+	// Two refused, one applied, one still prepared.
+	ytSetOpState(t, s, ytfOps(t, s, tasks[0])[0].ID, ytwrite.StateRejected)
+	ytSetOpState(t, s, ytfOps(t, s, tasks[1])[0].ID, ytwrite.StateApplied)
+	ytSetOpState(t, s, ytfOps(t, s, tasks[3])[0].ID, ytwrite.StateRejected)
+
+	want := YTFieldsBackfillCounts{Scanned: 5, Prepared: 2, Unchanged: 2, Unbound: 1}
+	if r := ytfBackfill(t, s, YTFieldsBackfillOptions{DryRun: true}); r.Total != want {
+		t.Fatalf("dry run %+v, want %+v", r.Total, want)
+	}
+	if n := ytfAllOps(t, s); n != 4 {
+		t.Fatalf("dry run made ops: %d", n)
+	}
+	if r := ytfBackfill(t, s, YTFieldsBackfillOptions{}); r.Total != want {
+		t.Fatalf("retry run %+v, want %+v", r.Total, want)
+	}
+	for i, wantOps := range []int{2, 1, 1, 2} {
+		ops := ytfOps(t, s, tasks[i])
+		if len(ops) != wantOps {
+			t.Fatalf("task %d ops %+v", tasks[i], ops)
+		}
+		if wantOps == 2 && (ops[1].PayloadSHA != ops[0].PayloadSHA || ops[1].Key == ops[0].Key || ops[1].State != ytwrite.StatePrepared) {
+			t.Fatalf("task %d retry %+v", tasks[i], ops)
+		}
+	}
+	// The retries are pending: a re-run prepares nothing.
+	if r := ytfBackfill(t, s, YTFieldsBackfillOptions{}); r.Total != (YTFieldsBackfillCounts{Scanned: 5, Unchanged: 4, Unbound: 1}) {
+		t.Fatalf("re-run %+v", r.Total)
 	}
 }

@@ -429,3 +429,100 @@ func TestPutTranslationsTitleReachesFeed(t *testing.T) {
 		t.Fatalf("feed after a title translation = %+v", changes)
 	}
 }
+
+// ytSetOpState moves op id to state along the guard trigger's legal path.
+func ytSetOpState(t *testing.T, s *Store, id int64, state ytwrite.State) {
+	t.Helper()
+	ctx := t.Context()
+	exec := func(q string) {
+		t.Helper()
+		if _, err := s.pool.Exec(ctx, q, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	switch state {
+	case ytwrite.StatePrepared:
+	case ytwrite.StateRejected:
+		exec(`UPDATE yt_write_ops SET state='rejected', reason='field_refused', resolved_at=now() WHERE id=$1`)
+	case ytwrite.StateDispatched:
+		exec(`UPDATE yt_write_ops SET state='dispatched', dispatched_at=now() WHERE id=$1`)
+	case ytwrite.StateRemoteUnknown:
+		exec(`UPDATE yt_write_ops SET state='dispatched', dispatched_at=now() WHERE id=$1`)
+		exec(`UPDATE yt_write_ops SET state='remote_unknown' WHERE id=$1`)
+	case ytwrite.StateApplied:
+		exec(`UPDATE yt_write_ops SET state='dispatched', dispatched_at=now() WHERE id=$1`)
+		exec(`UPDATE yt_write_ops SET state='applied', yt_result_id='2-1', resolved_at=now() WHERE id=$1`)
+	default:
+		t.Fatalf("state %q", state)
+	}
+}
+
+// An unchanged snapshot whose last op was rejected is prepared again (hk
+// 4057); one whose last op is in any other state is not.
+func TestPrepareYTSnapshotRetriesRejectedSHA(t *testing.T) {
+	s := schemaStore(t, "yt_feed_snapshot_rejected")
+	ctx := t.Context()
+	now := time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)
+	prepare := func(entity, sha string) (ytwrite.Op, bool) {
+		t.Helper()
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		op, prepared, err := prepareYTSnapshotTx(ctx, tx, now, ytwrite.NewOp{Principal: "p", Kind: "task_fields", PayloadSHA: sha,
+			Payload: []byte(`{"sha":"` + sha + `"}`), EntityKind: "task", EntityID: entity, YTTargetID: "2-" + entity, Actor: "a"}, sha)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return op, prepared
+	}
+	for i, state := range []ytwrite.State{ytwrite.StatePrepared, ytwrite.StateDispatched, ytwrite.StateRemoteUnknown, ytwrite.StateApplied} {
+		entity := strconv.Itoa(100 + i)
+		a, ok := prepare(entity, "aaa")
+		if !ok {
+			t.Fatalf("%s: first prepare skipped", state)
+		}
+		ytSetOpState(t, s, a.ID, state)
+		if op, ok := prepare(entity, "aaa"); ok {
+			t.Fatalf("%s + same sha prepared %+v", state, op)
+		}
+	}
+
+	// Rejected + same sha: one new op per call, the next seq.
+	a, _ := prepare("42", "aaa")
+	ytSetOpState(t, s, a.ID, ytwrite.StateRejected)
+	b, ok := prepare("42", "aaa")
+	if !ok || b.ID == a.ID || b.Key != "task_fields:42:2:aaa" || b.State != ytwrite.StatePrepared {
+		t.Fatalf("retry of a rejected sha = %+v, %t", b, ok)
+	}
+	// The retry is pending: a second call makes nothing.
+	if op, ok := prepare("42", "aaa"); ok {
+		t.Fatalf("second call prepared %+v", op)
+	}
+	// Rejected again: the next call prepares once more, and only once.
+	ytSetOpState(t, s, b.ID, ytwrite.StateRejected)
+	c, ok := prepare("42", "aaa")
+	if !ok || c.Key != "task_fields:42:3:aaa" {
+		t.Fatalf("retry after a second rejection = %+v, %t", c, ok)
+	}
+	if _, ok := prepare("42", "aaa"); ok {
+		t.Fatal("a pending retry prepared again")
+	}
+	// A different sha prepares as before, whatever the last op's state.
+	d, ok := prepare("42", "bbb")
+	if !ok || d.Key != "task_fields:42:4:bbb" {
+		t.Fatalf("changed sha = %+v, %t", d, ok)
+	}
+	var seq, last int64
+	if err := s.pool.QueryRow(ctx, `SELECT seq,last_op_id FROM yt_snapshot_state WHERE entity_kind='task' AND entity_id='42' AND kind='task_fields'`).Scan(&seq, &last); err != nil || seq != 4 || last != d.ID {
+		t.Fatalf("state = %d/%d, %v; want 4/%d", seq, last, err, d.ID)
+	}
+	var ops int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM yt_write_ops WHERE entity_id='42'`).Scan(&ops); err != nil || ops != 4 {
+		t.Fatalf("ops = %d, %v", ops, err)
+	}
+}

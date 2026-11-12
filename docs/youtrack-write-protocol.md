@@ -759,8 +759,18 @@ the feed's `[a-z0-9_]` cursor key). It reads every `task` change from
 - otherwise its snapshot, from the current row, its current Korean title,
   its milestone's name, its refs and its 멈춤 as of the pass, is prepared
   through `prepareYTSnapshotTx`: no op when the snapshot hash equals the last
-  one prepared (an `updated_at`-only change), else one op keyed
-  `issue_fields:<task>:<seq>:<sha>` (A -> B -> A is three ops).
+  one prepared (an `updated_at`-only change) and that op is not `rejected`,
+  else one op keyed `issue_fields:<task>:<seq>:<sha>` (A -> B -> A is three
+  ops).
+
+**Rejected snapshots** (hk 4057, every snapshot kind). `prepareYTSnapshotTx`
+reads the state of `yt_snapshot_state.last_op_id` (in the same transaction,
+after the state row's lock, by id, with no lock of its own) when the hash is
+unchanged. A `rejected` op will never be sent, so the same snapshot is
+prepared again as a new op (the next seq, a new key) on the next call; any
+other state (`prepared`, `dispatched`, `remote_unknown`, `applied`) or a
+missing op row keeps the skip. One call prepares at most one op: a retry that
+is rejected again is retried on the following call, not in a loop.
 
 Mode off prepares nothing and still advances the cursor, so a change made
 while off reaches YouTrack with the task's next change. Each pass logs one
@@ -804,7 +814,8 @@ clears). A closed-set value (`hk 상태`, `종류`, `등급`, `티어`, `hk 우�
 lacks with a value to set, or a type the snapshot cannot be written as is
 `rejected / field_refused` before the POST, with `last_error` naming the field
 and the value; a 4xx from the POST is `rejected / http_4xx`. Either raises the
-rejected-op alert, and the next change prepares a new snapshot. No map rows.
+rejected-op alert, and the next feed change or backfill run prepares the
+snapshot again (Rejected snapshots above). No map rows.
 
 `레인`, `영역` and `마일스톤` are open sets hk owns (a new lane appears in hk
 first, hk 4051). When nothing above refuses, a value of theirs missing from
@@ -838,11 +849,13 @@ N] [--limit N] [--dry-run]` runs on the server host (it opens
 `HANDOFFKEEP_DB_URL` and names the tenant from `YOUTRACK_URL`, calling no
 YouTrack) and walks the tasks in id order, each in its own transaction under
 its lane lock, through the consumer's rule above: an unchanged snapshot
-prepares nothing, so a second run is a no-op and a run beside the feed
-prepares one op per snapshot. It only prepares; serve's write worker sends the
+prepares nothing unless its last op was rejected, so a second run is a no-op
+once the first run's ops are pending or sent, a run re-prepares exactly the
+rejected ones, and a run beside the feed prepares one op per snapshot. It only prepares; serve's write worker sends the
 ops and honours YouTrack's 429s. `--limit` stops after that many prepared ops,
 for pacing; the next run passes the sent ones as unchanged. `--dry-run`
-compares each snapshot hash with the last one prepared and writes nothing. It
+applies the same rule (an unchanged hash whose op was rejected counts as
+prepared) and writes nothing. It
 prints one JSON summary, `scanned prepared unchanged unbound moved
 other_tenant invalid` per hk project and in `total`, and exits 6 without
 touching the database unless `HANDOFFKEEP_YT_FIELDS_MODE=on`.

@@ -136,8 +136,9 @@ func (s *Store) BackfillYTFieldsOps(ctx context.Context, opt YTFieldsBackfillOpt
 // backfillYTFields is one task of a backfill, in one transaction: the task's
 // lane lock first (the lock prepareYTSnapshotTx takes, so a feed pass and the
 // backfill decide one task one after the other), then the snapshot inputs,
-// then the consumer's rule. A dry run compares the snapshot's sha with the
-// last one prepared and rolls back.
+// then the consumer's rule. A dry run applies the same rule
+// (ytSnapshotUnchanged: an unchanged sha whose op was rejected counts as prepared)
+// and rolls back.
 func (s *Store) backfillYTFields(ctx context.Context, tenant string, id int64, dryRun bool) (ytFieldsOutcome, string, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -160,14 +161,20 @@ func (s *Store) backfillYTFields(ctx context.Context, tenant string, id int64, d
 			return outcome, project, err
 		}
 		var lastSHA string
-		err = tx.QueryRow(ctx, `SELECT last_sha FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3`,
-			n.EntityKind, n.EntityID, n.Kind).Scan(&lastSHA)
+		var lastOpID int64
+		err = tx.QueryRow(ctx, `SELECT last_sha,last_op_id FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3`,
+			n.EntityKind, n.EntityID, n.Kind).Scan(&lastSHA, &lastOpID)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			return ytFieldsPrepared, project, nil
 		case err != nil:
 			return "", "", err
-		case lastSHA == n.PayloadSHA:
+		}
+		skip, err := ytSnapshotUnchanged(ctx, tx, lastSHA, lastOpID, n.PayloadSHA)
+		switch {
+		case err != nil:
+			return "", "", err
+		case skip:
 			return ytFieldsUnchanged, project, nil
 		default:
 			return ytFieldsPrepared, project, nil

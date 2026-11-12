@@ -330,17 +330,18 @@ func SnapshotKey(kind, entityID string, seq int64, sha string) string {
 	return kind + ":" + entityID + ":" + strconv.FormatInt(seq, 10) + ":" + sha
 }
 
-// prepareYTSnapshotTx prepares a snapshot op n in tx only when sha differs
-// from the last SHA prepared for (n.EntityKind, n.EntityID, n.Kind), so an
-// update that leaves the snapshot as it was (a last_activity_at repair) makes
-// no op. Otherwise it increments that entity and kind's seq, sets n.Key to
-// SnapshotKey(n.Kind, n.EntityID, seq, sha), prepares the op and records seq,
-// sha and the op's id in yt_snapshot_state, all in the same transaction.
-// prepared is false only for an unchanged SHA.
+// prepareYTSnapshotTx prepares a snapshot op n in tx unless sha equals the
+// last SHA prepared for (n.EntityKind, n.EntityID, n.Kind) and the op that
+// sent it was not rejected, so an update that leaves the snapshot as it was (a
+// last_activity_at repair) makes no op while a snapshot YouTrack refused is
+// prepared again (hk 4057). Otherwise it increments that entity and kind's
+// seq, sets n.Key to SnapshotKey(n.Kind, n.EntityID, seq, sha), prepares the
+// op and records seq, sha and the op's id in yt_snapshot_state, all in the
+// same transaction. prepared is false only for a skipped snapshot.
 //
 // Locks: the entity's lane lock (lockYTEntity) first, then its
-// yt_snapshot_state row, then what prepareYTOpTx takes. No other writer
-// locks a yt_snapshot_state row.
+// yt_snapshot_state row, then what prepareYTOpTx takes. Reading the last op's
+// state by id takes no lock. No other writer locks a yt_snapshot_state row.
 func prepareYTSnapshotTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrite.NewOp, sha string) (ytwrite.Op, bool, error) {
 	if sha == "" || n.Kind == "" || n.EntityKind == "" || n.EntityID == "" {
 		return ytwrite.Op{}, false, errors.New("snapshot op needs a kind, an entity and a sha")
@@ -349,14 +350,17 @@ func prepareYTSnapshotTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrit
 		return ytwrite.Op{}, false, err
 	}
 	var lastSHA string
-	var seq int64
-	err := tx.QueryRow(ctx, `SELECT seq,last_sha FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3 FOR UPDATE`,
-		n.EntityKind, n.EntityID, n.Kind).Scan(&seq, &lastSHA)
+	var seq, lastOpID int64
+	err := tx.QueryRow(ctx, `SELECT seq,last_sha,last_op_id FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3 FOR UPDATE`,
+		n.EntityKind, n.EntityID, n.Kind).Scan(&seq, &lastSHA, &lastOpID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return ytwrite.Op{}, false, err
 	}
-	if err == nil && lastSHA == sha {
-		return ytwrite.Op{}, false, nil
+	if err == nil {
+		skip, err := ytSnapshotUnchanged(ctx, tx, lastSHA, lastOpID, sha)
+		if err != nil || skip {
+			return ytwrite.Op{}, false, err
+		}
 	}
 	seq++
 	n.Key = SnapshotKey(n.Kind, n.EntityID, seq, sha)
@@ -370,4 +374,26 @@ func prepareYTSnapshotTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrit
 		return ytwrite.Op{}, false, err
 	}
 	return op, true, nil
+}
+
+// ytSnapshotUnchanged reports whether a snapshot with sha needs no new op, given
+// its entity's yt_snapshot_state (lastSHA, lastOpID): true when sha equals
+// lastSHA and that op is not rejected. Any other state of the op (prepared,
+// dispatched, remote_unknown, applied) or a missing op row keeps the skip,
+// since that op is sent, being sent or settled; only a rejected op, which
+// will never be sent, lets the same snapshot be prepared again. It reads the
+// op by id without a lock.
+func ytSnapshotUnchanged(ctx context.Context, tx pgx.Tx, lastSHA string, lastOpID int64, sha string) (bool, error) {
+	if lastSHA != sha {
+		return false, nil
+	}
+	var state string
+	err := tx.QueryRow(ctx, `SELECT state FROM yt_write_ops WHERE id=$1`, lastOpID).Scan(&state)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return true, nil
+	case err != nil:
+		return false, err
+	}
+	return state != string(ytwrite.StateRejected), nil
 }
