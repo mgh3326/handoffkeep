@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -166,7 +167,7 @@ func (s *Store) enqueueYTIssueTx(ctx context.Context, tx pgx.Tx, t Task) error {
 // project (hk 3909). Every writer of tasks.project calls it in its own
 // transaction, after the update. A prepared op (nothing was sent: a prepared
 // op is new or was deferred because the remote did not process it) whose
-// YouTrack project is not the one the task's project now maps to is rejected
+// YouTrack project or hk project is not the task's current one is rejected
 // project_changed, and the current project's op is prepared in its place on
 // the same tenant; an unmapped project gets none (one ytwrite.issue_skipped
 // line and a yt_issue_intents row, hk 3942). An op already dispatched, uncertain or resolved is left as it is:
@@ -189,8 +190,14 @@ func retargetYTIssueTx(ctx context.Context, tx pgx.Tx, t Task, now time.Time) er
 		return err
 	}
 	p, found, err := readYTIssueProject(ctx, tx, deref(t.Project))
-	if err != nil || (found && p.projectID == op.YTTargetID) {
+	if err != nil {
 		return err
+	}
+	// Two hk projects may map to one YouTrack project: the payload's hk
+	// project (the issue's description and hk 프로젝트 field) must match too.
+	var payload ytwrite.IssueCreatePayload
+	if found && p.projectID == op.YTTargetID && json.Unmarshal(op.Payload, &payload) == nil && payload.Project == p.project {
+		return nil
 	}
 	if _, err := rejectYTOpTx(ctx, tx, now, op.ID, ytwrite.ReasonProjectChanged, fmt.Sprintf("task moved to project %q before the issue was created", deref(t.Project))); err != nil {
 		return err
@@ -251,7 +258,8 @@ func (s *Store) PrepareMappedYTIssues(ctx context.Context, limit int) (int, erro
 }
 
 // prepareYTIssueIntent is one task of PrepareMappedYTIssues, under the
-// task's lane lock (as backfillYTIssue). The op replaces the task's latest
+// task's lane lock (as backfillYTIssue), which it takes before it reads the
+// task. The op replaces the task's latest
 // one when that was rejected project_changed (hk 3909), so its key is new.
 func (s *Store) prepareYTIssueIntent(ctx context.Context, tenant string, taskID int64) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
@@ -259,12 +267,17 @@ func (s *Store) prepareYTIssueIntent(ctx context.Context, tenant string, taskID 
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	var t Task
-	if err := tx.QueryRow(ctx, `SELECT id, title, created_by, project FROM tasks WHERE id=$1`, taskID).Scan(&t.ID, &t.Title, &t.CreatedBy, &t.Project); err != nil {
-		return false, err
-	}
 	entityID := strconv.FormatInt(taskID, 10)
 	if err := lockYTEntity(ctx, tx, "task", entityID); err != nil {
+		return false, err
+	}
+	// Read the task under the lane lock, not before it: a project change
+	// commits its tasks.project and its retarget under this lane, so this
+	// read sees the project it committed, or the change waits for the lane
+	// and retargets the op prepared here. A read before the lock could
+	// prepare the old project after a retarget that found nothing to move.
+	var t Task
+	if err := tx.QueryRow(ctx, `SELECT id, title, created_by, project FROM tasks WHERE id=$1`, taskID).Scan(&t.ID, &t.Title, &t.CreatedBy, &t.Project); err != nil {
 		return false, err
 	}
 	var latest int64

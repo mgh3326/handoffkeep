@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"slices"
 	"strconv"
@@ -638,6 +639,34 @@ func TestYTIssueProjectChangeRetargetsAnUnsentOp(t *testing.T) {
 	}
 	if ops := ytiOps(t, s, sent.ID); len(ops) != 1 || ops[0].State != ytwrite.StateDispatched {
 		t.Fatalf("a dispatched op was retargeted: %+v", ops)
+	}
+}
+
+// Two hk projects mapped to one YouTrack project: a move between them keeps
+// the YouTrack target but changes the payload's hk project, so the unsent op
+// is still replaced (PR #335 review r4545218582).
+func TestYTIssueProjectChangeWithinOneYouTrackProject(t *testing.T) {
+	s := schemaStore(t, "yti_retarget_same")
+	ytbMapped(t, s)
+	const twin = "yti-twin"
+	if _, err := s.AddTaskProject(t.Context(), twin, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: twin, ProjectID: ytbProjectID, ShortName: "HK"}); err != nil {
+		t.Fatal(err)
+	}
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	x := ytiCreate(t, s, ytbProject)
+	if _, _, err := s.SetTaskProject(t.Context(), x.ID, twin, "test", "moved"); err != nil {
+		t.Fatal(err)
+	}
+	ops := ytiOps(t, s, x.ID)
+	if len(ops) != 2 || ops[0].Reason != ytwrite.ReasonProjectChanged || ops[1].State != ytwrite.StatePrepared || ops[1].YTTargetID != ytbProjectID {
+		t.Fatalf("ops after the move %+v", ops)
+	}
+	var p ytwrite.IssueCreatePayload
+	if err := json.Unmarshal(ops[1].Payload, &p); err != nil || p.Project != twin {
+		t.Fatalf("payload of the new op %s (%v), want project %s", ops[1].Payload, err, twin)
 	}
 }
 
