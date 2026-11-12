@@ -158,11 +158,24 @@ type ytAuditEnqueue struct {
 	OpIDs    []int64 `json:"op_ids"`
 }
 
+// Repair directions of an audit (hk 4122): which side a gap is repaired
+// from, by the comments authority.
+const (
+	// ytAuditRepairToYT: hk is canonical; --enqueue copies a missing_in_yt
+	// comment to YouTrack.
+	ytAuditRepairToYT = "pg_to_youtrack"
+	// ytAuditRepairToPG: YouTrack is canonical; a gap is repaired from
+	// YouTrack into PG, and --enqueue prepares nothing.
+	ytAuditRepairToPG = "youtrack_to_pg"
+)
+
 type ytAuditReport struct {
-	Tenant  string `json:"tenant"`
-	Project string `json:"project,omitempty"`
-	Task    int64  `json:"task,omitempty"`
-	Limit   int    `json:"limit,omitempty"`
+	Tenant string `json:"tenant"`
+	// RepairDirection is ytAuditRepairToYT or ytAuditRepairToPG.
+	RepairDirection string `json:"repair_direction"`
+	Project         string `json:"project,omitempty"`
+	Task            int64  `json:"task,omitempty"`
+	Limit           int    `json:"limit,omitempty"`
 	// Tasks is how many tasks the run read; Stopped, when set, says why it
 	// ended before the last one.
 	Tasks    int               `json:"tasks"`
@@ -170,6 +183,9 @@ type ytAuditReport struct {
 	Total    ytAuditCounts     `json:"total"`
 	Projects []*ytAuditProject `json:"projects"`
 	Enqueue  *ytAuditEnqueue   `json:"enqueue,omitempty"`
+	// EnqueueSkipped says why --enqueue prepared nothing (the comments
+	// authority is youtrack).
+	EnqueueSkipped string `json:"enqueue_skipped,omitempty"`
 }
 
 // gap reports whether the run found what the cutover gate refuses.
@@ -193,6 +209,9 @@ type ytAuditor struct {
 	tenant  string
 	botID   string
 	enqueue bool
+	// toPG: comments are canonical in YouTrack (ytAuditRepairToPG); the run
+	// enqueues nothing, even with enqueue set.
+	toPG bool
 	// sleep waits d or until ctx ends (nil: the wall clock).
 	sleep func(ctx context.Context, d time.Duration) error
 }
@@ -403,7 +422,14 @@ func (a *ytAuditor) auditTask(ctx context.Context, taskID int64, counts []*ytAud
 // in task id order, listing them a page at a time. One task's failed read is class error and the run goes
 // on; a rate limit longer than the audit waits stops it.
 func (a *ytAuditor) run(ctx context.Context, project string, taskID int64, limit int) (ytAuditReport, error) {
-	r := ytAuditReport{Tenant: a.tenant, Project: project, Task: taskID, Limit: limit, Projects: []*ytAuditProject{}}
+	r := ytAuditReport{Tenant: a.tenant, RepairDirection: ytAuditRepairToYT, Project: project, Task: taskID, Limit: limit, Projects: []*ytAuditProject{}}
+	if a.toPG {
+		r.RepairDirection = ytAuditRepairToPG
+		if a.enqueue {
+			a.enqueue = false
+			r.EnqueueSkipped = "comments authority is youtrack: repair from YouTrack to PG; no op is prepared"
+		}
+	}
 	if a.enqueue {
 		r.Enqueue = &ytAuditEnqueue{OpIDs: []int64{}}
 	}
@@ -535,7 +561,11 @@ func youtrackAuditCmd(args []string, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("read the bot's YouTrack user: %w", err)
 	}
-	a := &ytAuditor{st: st, remote: remote, tenant: remote.Tenant(), botID: me.ID, enqueue: *enqueue}
+	toPG, err := ytAuditToPG(openCtx, st)
+	if err != nil {
+		return err
+	}
+	a := &ytAuditor{st: st, remote: remote, tenant: remote.Tenant(), botID: me.ID, enqueue: *enqueue, toPG: toPG}
 	report, err := a.run(context.Background(), *project, *task, *limit)
 	if err != nil {
 		return err
@@ -555,4 +585,16 @@ func youtrackAuditCmd(args []string, out io.Writer) error {
 			report.Total.MissingInYT.Count, report.Total.Duplicate.Count, report.Total.AdoptedUnmatched.Count, report.Total.AmbiguousCopy.Count, report.Total.Unbound.Count)}
 	}
 	return nil
+}
+
+// ytAuditToPG reads whether comments are canonical in YouTrack. A database
+// without the authority table (an older schema the read-only audit does not
+// migrate) is hk.
+func ytAuditToPG(ctx context.Context, st *store.Store) (bool, error) {
+	applied, err := st.MigrationApplied(ctx, store.YTAuthorityMigration)
+	if err != nil || !applied {
+		return false, err
+	}
+	side, err := st.YTAuthorityOf(ctx, store.YTAuthorityComments)
+	return side == store.YTAuthorityYouTrack, err
 }

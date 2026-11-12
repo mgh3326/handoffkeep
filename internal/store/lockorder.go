@@ -285,6 +285,15 @@ package store
 //     titles it writes after its translations rows and locks no task row; its
 //     commit takes level 6 like any feed writer.
 //
+//   - The authority rows (yt_authority.go, hk 4122). SetYTAuthority locks
+//     yt_authority rows FOR UPDATE in kind order as the first lock of its
+//     transaction, then reads yt_write_ops without a lock and updates only
+//     its locked rows; it waits for nothing else while it holds them. The
+//     comment writers read the comments row FOR SHARE after the comment
+//     insert and before the lane lock (enqueueYTCommentTx). A comment writer
+//     can wait for a switch, but a switch never waits for anything a comment
+//     writer holds, so the pair cannot cycle.
+//
 //   - The YouTrack sync's single-run guard is a session-scoped
 //     pg_try_advisory_lock(8241873404) on its own pooled connection. It is
 //     taken before the run and released after it, and no other writer takes

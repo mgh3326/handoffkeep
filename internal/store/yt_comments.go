@@ -104,6 +104,19 @@ func ytCommentModeGateSQL(s *Store) string {
 // SHARE on its task: the op's entity lane lock (lockYTEntity), then new rows
 // of yt_write_ops, yt_comment_write_links and yt_entity_map (lockorder.go).
 func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op, bool, error) {
+	// While comments are canonical in YouTrack (hk 4122), a comment the
+	// protocol can never send is refused, whatever the mode or binding:
+	// committing it would leave a comment only PG has. FOR SHARE orders the
+	// comment against a switch (SetYTAuthority).
+	side, err := ytAuthorityTx(ctx, tx, YTAuthorityComments, " FOR SHARE")
+	if err != nil {
+		return ytwrite.Op{}, false, err
+	}
+	if side == YTAuthorityYouTrack {
+		if cerr := ytwrite.CheckCommentContent(c.Author, c.Body); cerr != nil {
+			return ytwrite.Op{}, false, fmt.Errorf("%w: %v", ErrYTCommentUnsendable, cerr)
+		}
+	}
 	switch s.ytCommentsModeNow() {
 	case YTCommentsOn:
 		return enqueueYTCommentOnTx(ctx, tx, c)
@@ -112,7 +125,7 @@ func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment
 		return ytwrite.Op{}, false, nil
 	}
 	var issueID, projectID, tenant string
-	err := tx.QueryRow(ctx, `SELECT issue_id, project_id, tenant FROM yt_comment_canary WHERE task_id=$1`, c.TaskID).Scan(&issueID, &projectID, &tenant)
+	err = tx.QueryRow(ctx, `SELECT issue_id, project_id, tenant FROM yt_comment_canary WHERE task_id=$1`, c.TaskID).Scan(&issueID, &projectID, &tenant)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ytwrite.Op{}, false, nil
 	}

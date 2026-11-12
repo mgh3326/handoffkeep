@@ -63,13 +63,15 @@ func youtrackCmd(args []string, out io.Writer) error {
 		return youtrackFieldsBackfillCmd(args[1:], out)
 	case "audit":
 		return youtrackAuditCmd(args[1:], out)
+	case "authority":
+		return youtrackAuthorityCmd(args[1:], out)
 	default:
 		return errors.New(youtrackUsage)
 	}
 }
 
 // youtrackUsage also answers `yt`, the short name of this command.
-const youtrackUsage = "usage: youtrack sync [--dry-run] | youtrack adopt --state <yt_state.json> [--dry-run] | youtrack projects list|put | youtrack ops [--state S] [--kind K] [--task N] | youtrack canary add|remove|list | youtrack schema plan|apply [--project P] | youtrack comments-preflight [--project P] [--days N] [--all] | youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME] | youtrack audit [--project P] [--task N] [--enqueue] [--limit N] | youtrack issues-backfill [--project P] [--dry-run] | youtrack fields-backfill [--project P] [--task N] [--limit N] [--dry-run]"
+const youtrackUsage = "usage: youtrack sync [--dry-run] | youtrack adopt --state <yt_state.json> [--dry-run] | youtrack projects list|put | youtrack ops [--state S] [--kind K] [--task N] | youtrack canary add|remove|list | youtrack schema plan|apply [--project P] | youtrack comments-preflight [--project P] [--days N] [--all] | youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME] | youtrack audit [--project P] [--task N] [--enqueue] [--limit N] | youtrack issues-backfill [--project P] [--dry-run] | youtrack fields-backfill [--project P] [--task N] [--limit N] [--dry-run] | youtrack authority show | youtrack authority set <kind|all> <hk|youtrack> --by NAME --note TEXT"
 
 func youtrackSyncCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("youtrack sync", flag.ContinueOnError)
@@ -110,6 +112,9 @@ func youtrackSyncCmd(args []string, out io.Writer) error {
 		return err
 	}
 	defer st.Close()
+	if err := youtrackRefuseAuthority(ctx, st, "sync"); err != nil {
+		return err
+	}
 	lock, acquired, err := st.TryYouTrackSyncLock(ctx)
 	if err != nil {
 		return err
@@ -195,6 +200,9 @@ func youtrackAdoptCmd(args []string, out io.Writer) error {
 		return err
 	}
 	defer st.Close()
+	if err := youtrackRefuseAuthority(ctx, st, "adopt"); err != nil {
+		return err
+	}
 	lock, acquired, err := st.TryYouTrackSyncLock(ctx)
 	if err != nil {
 		return err

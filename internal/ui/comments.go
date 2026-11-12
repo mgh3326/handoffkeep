@@ -174,6 +174,9 @@ func (h *Handler) createTaskComment(w http.ResponseWriter, r *http.Request, emai
 	case errors.Is(err, store.ErrTaskCommentInvalid):
 		writeJSONError(w, http.StatusBadRequest, "comment_invalid")
 		return
+	case errors.Is(err, store.ErrYTCommentUnsendable):
+		writeJSONError(w, http.StatusBadRequest, "yt_comment_unsendable")
+		return
 	case isSecretReject(err):
 		outcome.result = "secret_reject"
 		writeJSONError(w, http.StatusBadRequest, "comment_secret_like")
