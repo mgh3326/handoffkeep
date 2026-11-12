@@ -106,6 +106,9 @@ const (
 	// YTAuditSkipped: the task has no binding, or a source disagrees with
 	// it; nothing was written (the enqueue's own rule).
 	YTAuditSkipped = "skipped"
+	// YTAuditAuthority: comments are canonical in YouTrack (hk 4122), so no
+	// repair goes from PG to YouTrack; nothing was written.
+	YTAuditAuthority = "authority_youtrack"
 )
 
 // EnqueueYTAuditComment prepares the op that copies comment commentID to its
@@ -116,8 +119,12 @@ const (
 // is left as it is (YTAuditLinked), so a second run writes nothing. A comment
 // the YouTrack activity pull wrote is refused: it came from YouTrack.
 //
+// While comments are canonical in YouTrack it writes nothing
+// (YTAuditAuthority).
+//
 // Locks, as the enqueue takes them after its comment insert (lockorder.go):
-// KEY SHARE on the comment's task row, the task's lane lock, then the new rows
+// KEY SHARE on the comment's task row, FOR SHARE on the comments authority
+// row, the task's lane lock, then the new rows
 // of yt_write_ops, yt_comment_write_links and yt_entity_map.
 func (s *Store) EnqueueYTAuditComment(ctx context.Context, commentID int64) (string, ytwrite.Op, error) {
 	if commentID < 1 {
@@ -141,6 +148,15 @@ func (s *Store) EnqueueYTAuditComment(ctx context.Context, commentID int64) (str
 	}
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM tasks WHERE id=$1 FOR KEY SHARE`, c.TaskID); err != nil {
 		return "", ytwrite.Op{}, err
+	}
+	// Read in this transaction and held FOR SHARE until its commit, so an
+	// audit that started before a switch prepares nothing after it.
+	side, err := ytAuthorityTx(ctx, tx, YTAuthorityComments, " FOR SHARE")
+	if err != nil {
+		return "", ytwrite.Op{}, err
+	}
+	if side == YTAuthorityYouTrack {
+		return YTAuditAuthority, ytwrite.Op{}, nil
 	}
 	// The link is written only under the lane lock, so it cannot appear
 	// between this check and the enqueue.

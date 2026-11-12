@@ -70,6 +70,73 @@ var ytAuthorityPrincipals = map[YTAuthorityKind][]string{
 	YTAuthorityDocuments: {ytDocCommentPrincipal},
 }
 
+// ytAuthorityFeeds are the change-feed consumers that prepare each kind's ops
+// from sync_log, with their models: a switch waits until they have read every
+// change (hk 4122), so no PG change older than the switch is sent after it.
+var ytAuthorityFeeds = map[YTAuthorityKind][]struct {
+	consumer string
+	models   []string
+}{
+	YTAuthorityTasks:     {{ytFieldsConsumer, []string{"task"}}},
+	YTAuthorityDocuments: {{ytDocCommentsConsumer, []string{"document"}}},
+}
+
+// ytAuthorityKindOf is the kind whose ops principal prepares ("" for a
+// principal no kind owns, such as a test's).
+func ytAuthorityKindOf(principal string) YTAuthorityKind {
+	for k, ps := range ytAuthorityPrincipals {
+		if slices.Contains(ps, principal) {
+			return k
+		}
+	}
+	return ""
+}
+
+// lockYTAuthorityForOpTx takes FOR SHARE on the authority row of the kind
+// that owns principal, in the transaction that prepares the op
+// (prepareYTOpTx). A switch (SetYTAuthority, FOR UPDATE) therefore waits for
+// every op preparation in flight and counts it once committed, and a
+// preparation that starts during a switch waits for it.
+func lockYTAuthorityForOpTx(ctx context.Context, tx pgx.Tx, principal string) error {
+	kind := ytAuthorityKindOf(principal)
+	if kind == "" {
+		return nil
+	}
+	_, err := ytAuthorityTx(ctx, tx, kind, " FOR SHARE")
+	return err
+}
+
+// ytAuthoritySyncLockAttempts and ytAuthoritySyncLockWait bound how long a
+// switch tries for the legacy sync's lock: a comment catch-up pass holds it
+// for a moment, a sync or adopt run for its whole run.
+const (
+	ytAuthoritySyncLockAttempts = 50
+	ytAuthoritySyncLockWait     = 100 * time.Millisecond
+)
+
+// tryYTSyncLockTx tries the legacy sync's single-run lock (8241873404,
+// TryYouTrackSyncLock) at transaction scope, a few times, never waiting on
+// it. Held, no sync, adopt or catch-up pass can start until the switch
+// commits; one that holds it already makes the switch refuse.
+func tryYTSyncLockTx(ctx context.Context, tx pgx.Tx) (bool, error) {
+	for attempt := 1; ; attempt++ {
+		var held bool
+		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(8241873404)`).Scan(&held); err != nil || held {
+			return held, err
+		}
+		if attempt >= ytAuthoritySyncLockAttempts {
+			return false, nil
+		}
+		t := time.NewTimer(ytAuthoritySyncLockWait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return false, ctx.Err()
+		case <-t.C:
+		}
+	}
+}
+
 func validYTAuthorityKind(k YTAuthorityKind) bool { return slices.Contains(YTAuthorityKinds, k) }
 
 func validYTAuthoritySide(a YTAuthoritySide) bool {
@@ -177,13 +244,17 @@ const YTAuthoritySetMax = 2000
 // SetYTAuthority switches kinds to side in one transaction and returns every
 // kind's row before and after. A kind already on side is left as it is
 // (its switched_at, switched_by and note are kept). A switch to youtrack is
-// ErrYTAuthorityRefused unless, for each kind it changes, this process's
-// write mode for the kind is on and the kind has no prepared, dispatched or
-// remote_unknown op; if any kind is refused, none changes. A switch to hk
-// always succeeds: it is the rollback.
+// ErrYTAuthorityRefused unless no legacy sync, adopt or comment catch-up runs
+// and, for each kind it changes, this process's write mode for the kind is
+// on, the kind has no prepared, dispatched or remote_unknown op, and its feed
+// consumers have read every change; if any kind is refused, none changes. A
+// switch to hk always succeeds: it is the rollback.
 //
-// Locks: FOR UPDATE on the yt_authority rows (in kind order), then plain reads
-// of yt_write_ops. It takes no other lock (lockorder.go).
+// Locks (lockorder.go): a switch to youtrack first tries the sync lock
+// (tryYTSyncLockTx, never waits); then FOR UPDATE on the yt_authority rows
+// in kind order, which waits for every op preparation and comment in flight
+// (they hold the row FOR SHARE); then plain reads of yt_write_ops,
+// yt_feed_cursors and sync_log.
 func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, side YTAuthoritySide, by, note string) (before, after []YTAuthority, err error) {
 	if len(kinds) == 0 || !validYTAuthoritySide(side) || strings.TrimSpace(by) == "" || !ValidActor(by) ||
 		strings.TrimSpace(note) == "" || !validText(note, YTAuthoritySetMax) {
@@ -201,6 +272,15 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 		return nil, nil, err
 	}
 	defer tx.Rollback(ctx)
+	if side == YTAuthorityYouTrack {
+		held, err := tryYTSyncLockTx(ctx, tx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !held {
+			return nil, nil, fmt.Errorf("%w: a youtrack sync, adopt or comment catch-up holds the sync lock; try again when it ends", ErrYTAuthorityRefused)
+		}
+	}
 	// A row a database lost (or never seeded) is hk; give it a row to lock.
 	if _, err := tx.Exec(ctx, `INSERT INTO yt_authority(kind) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING`, ytAuthorityKindStrings(YTAuthorityKinds)); err != nil {
 		return nil, nil, err
@@ -229,6 +309,23 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 			}
 			if pending > 0 {
 				refusals = append(refusals, fmt.Sprintf("%s: %d ops are prepared, dispatched or remote_unknown (youtrack ops)", k, pending))
+			}
+			for _, f := range ytAuthorityFeeds[k] {
+				var cursor *int64
+				if err := tx.QueryRow(ctx, `SELECT last_sync_id FROM yt_feed_cursors WHERE consumer=$1`, f.consumer).Scan(&cursor); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+					return nil, nil, err
+				}
+				if cursor == nil {
+					refusals = append(refusals, fmt.Sprintf("%s: feed consumer %s has not run yet", k, f.consumer))
+					continue
+				}
+				var behind int
+				if err := tx.QueryRow(ctx, `SELECT count(*) FROM sync_log WHERE sync_id > $1 AND model = ANY($2::text[])`, *cursor, f.models).Scan(&behind); err != nil {
+					return nil, nil, err
+				}
+				if behind > 0 {
+					refusals = append(refusals, fmt.Sprintf("%s: feed consumer %s has %d changes to read", k, f.consumer, behind))
+				}
 			}
 		}
 		if len(refusals) > 0 {

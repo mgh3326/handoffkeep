@@ -112,9 +112,6 @@ func youtrackSyncCmd(args []string, out io.Writer) error {
 		return err
 	}
 	defer st.Close()
-	if err := youtrackRefuseAuthority(ctx, st, "sync"); err != nil {
-		return err
-	}
 	lock, acquired, err := st.TryYouTrackSyncLock(ctx)
 	if err != nil {
 		return err
@@ -127,6 +124,11 @@ func youtrackSyncCmd(args []string, out io.Writer) error {
 			log.Printf("youtrack.unlock_failed err=%q", err)
 		}
 	}()
+	// Checked while the run holds the sync lock, which a switch to youtrack
+	// needs too (store.SetYTAuthority): no switch commits during the run.
+	if err := youtrackRefuseAuthority(ctx, st, "sync"); err != nil {
+		return err
+	}
 	service := youtrack.NewService(st, client, youtrackServiceOptions())
 	report, err := service.Sync(ctx, youtrack.SyncOptions{
 		DryRun:        *dryRun,
@@ -200,9 +202,6 @@ func youtrackAdoptCmd(args []string, out io.Writer) error {
 		return err
 	}
 	defer st.Close()
-	if err := youtrackRefuseAuthority(ctx, st, "adopt"); err != nil {
-		return err
-	}
 	lock, acquired, err := st.TryYouTrackSyncLock(ctx)
 	if err != nil {
 		return err
@@ -215,6 +214,11 @@ func youtrackAdoptCmd(args []string, out io.Writer) error {
 			log.Printf("youtrack.unlock_failed err=%q", err)
 		}
 	}()
+	// Checked while the run holds the sync lock, which a switch to youtrack
+	// needs too (store.SetYTAuthority): no switch commits during the run.
+	if err := youtrackRefuseAuthority(ctx, st, "adopt"); err != nil {
+		return err
+	}
 	service := youtrack.NewService(st, client, youtrackServiceOptions())
 	report, err := service.Adopt(ctx, state, *dryRun)
 	if printErr := printJSON(out, report); printErr != nil {

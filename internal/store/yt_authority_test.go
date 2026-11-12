@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
@@ -170,12 +171,38 @@ func TestYTAuthoritySetRefusals(t *testing.T) {
 	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
 	_, _, err = set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack)
 	refused(err, "HANDOFFKEEP_YT_FIELDS_MODE")
+	// With both modes on, the fields feed must have read every task change.
 	s.SetYTFieldsMode(YTFieldsOn, ytcTenant)
+	_, _, err = set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack)
+	refused(err, "feed consumer "+ytFieldsConsumer+" has not run yet")
+	if _, err := s.pool.Exec(ctx, `INSERT INTO yt_feed_cursors(consumer,last_sync_id,updated_at) VALUES ($1,0,now())`, ytFieldsConsumer); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack)
+	refused(err, "changes to read")
+	if _, err := s.pool.Exec(ctx, `UPDATE yt_feed_cursors SET last_sync_id=(SELECT coalesce(max(sync_id),0) FROM sync_log) WHERE consumer=$1`, ytFieldsConsumer); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack); err != nil {
 		t.Fatal(err)
 	}
 	_, _, err = set([]YTAuthorityKind{YTAuthorityDecisions}, YTAuthorityYouTrack)
 	refused(err, "decisions: ")
+
+	// A legacy sync, adopt or catch-up holding the sync lock refuses a switch
+	// to youtrack; a rollback to hk does not need it.
+	lock, held, err := s.TryYouTrackSyncLock(ctx)
+	if err != nil || !held {
+		t.Fatalf("sync lock %v %v", held, err)
+	}
+	if _, _, err := set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityHK); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack)
+	refused(err, "sync lock")
+	if err := lock.Release(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	// Rollback to hk needs nothing, even with every mode off again.
 	s.SetYTCommentsMode(YTCommentsOff)
@@ -185,6 +212,50 @@ func TestYTAuthoritySetRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	unchanged()
+}
+
+// An op prepared in a transaction still open when the switch starts is
+// counted: the switch waits for it (FOR SHARE in prepareYTOpTx) and refuses.
+func TestYTAuthoritySwitchWaitsForOpInFlight(t *testing.T) {
+	s := schemaStore(t, "yta_race")
+	ctx := t.Context()
+	s.SetYTCommentsMode(YTCommentsOn)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, _, err := prepareYTOpTx(ctx, tx, time.Now().UTC(), ytwrite.NewOp{Principal: YTCommentPrincipal, Kind: ytwrite.KindCommentAppend, Key: "in-flight",
+		PayloadSHA: "x", Payload: []byte(`{"body":"x"}`), EntityKind: "task", EntityID: "999998", YTTargetID: "2-1", Actor: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := s.SetYTAuthority(ctx, []YTAuthorityKind{YTAuthorityComments}, YTAuthorityYouTrack, "operator", "race")
+		done <- err
+	}()
+	// Wait until the switch waits on the authority row (or has finished).
+	deadline := time.Now().Add(10 * time.Second)
+	for waiting := false; !waiting && time.Now().Before(deadline); {
+		select {
+		case err := <-done:
+			t.Fatalf("the switch did not wait for the op in flight: %v", err)
+		default:
+		}
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+			WHERE NOT l.granted AND c.relname = 'yt_authority')`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; !errors.Is(err, ErrYTAuthorityRefused) || !strings.Contains(err.Error(), "comments: 1 ops") {
+		t.Fatalf("switch after the op committed = %v", err)
+	}
+	if side, err := s.YTAuthorityOf(ctx, YTAuthorityComments); err != nil || side != YTAuthorityHK {
+		t.Fatalf("comments = %q %v", side, err)
+	}
 }
 
 // An unsendable comment: under hk it commits with a born-rejected op, as
@@ -226,6 +297,11 @@ func TestYTAuthorityUnsendableComment(t *testing.T) {
 				t.Fatalf("mode %s task %d: err = %v", mode, id, err)
 			}
 		}
+		// A sendable comment with no YouTrack copy (the task is not bound or
+		// enrolled, or the mode is off) would stay only in PG: refused too.
+		if _, err := s.CreateTaskComment(ctx, other, "worker", "sendable"); !errors.Is(err, ErrYTCommentUnsendable) {
+			t.Fatalf("mode %s: sendable comment without a copy: err = %v", mode, err)
+		}
 		w := MCPWrite{Tool: "task_comment", Actor: "operator@example.com", Channel: "chatgpt", Author: "dots", Key: "yta-" + string(mode)}
 		if _, _, err := s.CreateMCPTaskComment(ctx, task, quoted, w); !errors.Is(err, ErrYTCommentUnsendable) {
 			t.Fatalf("mode %s mcp: err = %v", mode, err)
@@ -247,6 +323,10 @@ func TestYTAuthorityUnsendableComment(t *testing.T) {
 		t.Fatalf("sendable under youtrack: op %+v %v", op, ok)
 	}
 
+	// The audit's enqueue writes nothing while comments are youtrack.
+	if status, _, err := s.EnqueueYTAuditComment(ctx, c.ID); err != nil || status != YTAuditAuthority {
+		t.Fatalf("audit enqueue under youtrack = %q %v", status, err)
+	}
 	if _, _, err := s.SetYTAuthority(ctx, []YTAuthorityKind{YTAuthorityComments}, YTAuthorityHK, "operator", "rollback"); err != nil {
 		t.Fatal(err)
 	}

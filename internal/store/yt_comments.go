@@ -103,20 +103,39 @@ func ytCommentModeGateSQL(s *Store) string {
 // Locks, in this order after the comment insert lock and the comment's KEY
 // SHARE on its task: the op's entity lane lock (lockYTEntity), then new rows
 // of yt_write_ops, yt_comment_write_links and yt_entity_map (lockorder.go).
+//
+// While comments are canonical in YouTrack (hk 4122), a comment that would
+// end up only in PG is refused with ErrYTCommentUnsendable and the caller's
+// transaction rolls back: a comment the protocol can never send, and a
+// comment that gets no op or a born-rejected one (the mode is not on or
+// canary, the task is not bound or enrolled, a source disagrees). FOR SHARE on
+// the comments row orders the comment against a switch (SetYTAuthority).
 func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op, bool, error) {
-	// While comments are canonical in YouTrack (hk 4122), a comment the
-	// protocol can never send is refused, whatever the mode or binding:
-	// committing it would leave a comment only PG has. FOR SHARE orders the
-	// comment against a switch (SetYTAuthority).
 	side, err := ytAuthorityTx(ctx, tx, YTAuthorityComments, " FOR SHARE")
 	if err != nil {
 		return ytwrite.Op{}, false, err
 	}
-	if side == YTAuthorityYouTrack {
-		if cerr := ytwrite.CheckCommentContent(c.Author, c.Body); cerr != nil {
-			return ytwrite.Op{}, false, fmt.Errorf("%w: %v", ErrYTCommentUnsendable, cerr)
-		}
+	if side != YTAuthorityYouTrack {
+		return s.enqueueYTCommentModeTx(ctx, tx, c)
 	}
+	if cerr := ytwrite.CheckCommentContent(c.Author, c.Body); cerr != nil {
+		return ytwrite.Op{}, false, fmt.Errorf("%w: %v", ErrYTCommentUnsendable, cerr)
+	}
+	op, enqueued, err := s.enqueueYTCommentModeTx(ctx, tx, c)
+	switch {
+	case err != nil:
+		return op, enqueued, err
+	case !enqueued:
+		return ytwrite.Op{}, false, fmt.Errorf("%w: comments mode %s has no YouTrack copy for task %d (not bound or enrolled, or a mapping disagrees)",
+			ErrYTCommentUnsendable, s.ytCommentsModeNow(), c.TaskID)
+	case op.State == ytwrite.StateRejected:
+		return ytwrite.Op{}, false, fmt.Errorf("%w: its YouTrack copy would be rejected (%s)", ErrYTCommentUnsendable, op.Reason)
+	}
+	return op, enqueued, nil
+}
+
+// enqueueYTCommentModeTx is enqueueYTCommentTx by the comments mode alone.
+func (s *Store) enqueueYTCommentModeTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op, bool, error) {
 	switch s.ytCommentsModeNow() {
 	case YTCommentsOn:
 		return enqueueYTCommentOnTx(ctx, tx, c)
@@ -125,7 +144,7 @@ func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment
 		return ytwrite.Op{}, false, nil
 	}
 	var issueID, projectID, tenant string
-	err = tx.QueryRow(ctx, `SELECT issue_id, project_id, tenant FROM yt_comment_canary WHERE task_id=$1`, c.TaskID).Scan(&issueID, &projectID, &tenant)
+	err := tx.QueryRow(ctx, `SELECT issue_id, project_id, tenant FROM yt_comment_canary WHERE task_id=$1`, c.TaskID).Scan(&issueID, &projectID, &tenant)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ytwrite.Op{}, false, nil
 	}

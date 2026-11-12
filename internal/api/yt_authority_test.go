@@ -131,8 +131,10 @@ func TestYTAuthoritySwitchOverHTTP(t *testing.T) {
 	if status, body := comment(task.ID, unsendable); status != http.StatusBadRequest || body["error"] != "yt_comment_unsendable" || body["reason"] == nil {
 		t.Fatalf("youtrack: unsendable comment = %d %v", status, body)
 	}
-	if status, body := comment(task.ID, "still sendable"); status != http.StatusCreated {
-		t.Fatalf("youtrack: sendable comment = %d %v", status, body)
+	// The task has no binding, so even a sendable comment would stay only in
+	// PG: refused too.
+	if status, body := comment(task.ID, "no copy path"); status != http.StatusBadRequest || body["error"] != "yt_comment_unsendable" {
+		t.Fatalf("youtrack: comment without a copy path = %d %v", status, body)
 	}
 
 	// Rollback: set back to hk restores everything.
@@ -142,7 +144,7 @@ func TestYTAuthoritySwitchOverHTTP(t *testing.T) {
 	if status, body := comment(task.ID, unsendable); status != http.StatusCreated {
 		t.Fatalf("hk again: unsendable comment = %d %v", status, body)
 	}
-	if n := items("/v1/import/comments"); n != 4 {
-		t.Fatalf("hk again: %d import comments, want 4", n)
+	if n := items("/v1/import/comments"); n != 3 {
+		t.Fatalf("hk again: %d import comments, want 3", n)
 	}
 }

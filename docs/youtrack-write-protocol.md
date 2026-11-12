@@ -1013,30 +1013,40 @@ release rollback never meets an authority value it cannot parse (consult hk
   are unchanged.
 - `youtrack sync` and `youtrack adopt` refuse (exit 5, before any YouTrack
   call) while any kind is youtrack, naming the kinds, even with every mode off.
-  The mode guard (hk 3907) still refuses first while a mode is on.
+  They check while holding the sync lock, which a switch to youtrack needs
+  too, so no switch commits during a run. The mode guard (hk 3907) still
+  refuses first while a mode is on.
 - `youtrack audit` reports `"repair_direction": "youtrack_to_pg"` (otherwise
   `"pg_to_youtrack"`) when comments are youtrack, and `--enqueue` prepares
-  nothing (`"enqueue_skipped"` says why). Its classes and exit codes are
-  unchanged.
-- A comment the protocol can never send (`ytwrite.CheckCommentContent`: the
-  author or the body, for example a body quoting the op marker) is refused
-  with 400 `{"error": "yt_comment_unsendable", "reason": ...}` and nothing is
-  written, in every comment mode and whether or not the task is bound. Under
-  hk the same comment commits and its op is born rejected, as before. Every
-  comment writer reads the comments row `FOR SHARE`, so a switch waits for a
-  comment in flight and a comment sees a switch that committed first.
+  nothing (`"enqueue_skipped"` says why). Each enqueue transaction also
+  reads the authority itself, so a run that started before a switch stops
+  enqueuing at the switch. Its classes and exit codes are unchanged.
+- A comment that would stay only in PG is refused with 400
+  `{"error": "yt_comment_unsendable", "reason": ...}` and nothing is written:
+  one the protocol can never send (`ytwrite.CheckCommentContent`: the author
+  or the body, for example a body quoting the op marker), and one that gets no
+  op or a born-rejected one (the comments mode is off, the task is not bound,
+  or not enrolled in canary, or a mapping disagrees). Under hk the same
+  comments commit as before. Every comment writer reads the comments row
+  `FOR SHARE`, so a switch waits for a comment in flight and a comment sees a
+  switch that committed first.
 
 **Commands.** `handoffkeep youtrack authority show` prints every kind's row
 (`GET /v1/yt/authority`). `handoffkeep youtrack authority set <kind|all>
 <hk|youtrack> --by NAME --note TEXT` (`POST /v1/yt/authority`, operator token
 only) switches in one transaction and prints every row before and after. The
-server checks, for each kind it changes to youtrack, that its own write mode is
-on (tasks: `HANDOFFKEEP_YT_ISSUES_MODE` and `HANDOFFKEEP_YT_FIELDS_MODE`;
+server first takes the legacy sync lock (a running `youtrack sync`, `adopt`
+or comment catch-up makes it refuse), then checks, for each kind it changes to
+youtrack, that its own write mode is on (tasks: `HANDOFFKEEP_YT_ISSUES_MODE` and `HANDOFFKEEP_YT_FIELDS_MODE`;
 comments: `HANDOFFKEEP_YT_COMMENTS_MODE=on`; documents:
 `HANDOFFKEEP_YT_DOC_COMMENTS_MODE`; decisions: no mode in this release, so
 always refused) and that the kind has no `prepared`, `dispatched` or
 `remote_unknown` op (by principal: `hk:task-issues` and `hk:task-fields`,
-`hk:task-comments`, `hk:doc-comments`). Any refusal is 409
+`hk:task-comments`, `hk:doc-comments`), and that its feed consumers have read
+every change (`task_fields` for tasks, `task_docs` for documents; a consumer
+that has never run refuses). Every op preparation holds its kind's row
+`FOR SHARE`, so the switch counts an op whose transaction was open when it
+started. Any refusal is 409
 `yt_authority_refused` naming each kind and reason, and no kind changes. A kind
 already on the target is left as it was. Setting `hk` always succeeds. Each
 changed kind logs `ytwrite.authority_set kind= authority= switched_by= note=`.

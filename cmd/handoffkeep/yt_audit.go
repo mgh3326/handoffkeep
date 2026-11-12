@@ -411,6 +411,12 @@ func (a *ytAuditor) auditTask(ctx context.Context, taskID int64, counts []*ytAud
 			}
 		case status == store.YTAuditLinked:
 			enq.Linked++
+		case status == store.YTAuditAuthority:
+			// Comments switched to YouTrack during the run: stop
+			// enqueuing; the report's direction follows (run).
+			enq.Skipped++
+			a.toPG, a.enqueue = true, false
+			return nil
 		default:
 			enq.Skipped++
 		}
@@ -472,6 +478,10 @@ func (a *ytAuditor) run(ctx context.Context, project string, taskID int64, limit
 		if len(tasks) < page {
 			break
 		}
+	}
+	if a.toPG && r.RepairDirection != ytAuditRepairToPG {
+		r.RepairDirection = ytAuditRepairToPG
+		r.EnqueueSkipped = "comments authority switched to youtrack during the run: enqueuing stopped"
 	}
 	sort.Slice(r.Projects, func(i, j int) bool { return r.Projects[i].Project < r.Projects[j].Project })
 	for _, p := range append([]*ytAuditCounts{&r.Total}, projectCounts(r.Projects)...) {
