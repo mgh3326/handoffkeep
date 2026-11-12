@@ -943,3 +943,37 @@ func TestYTArticleBindingRefusedAfterPostSwitchEdit(t *testing.T) {
 		t.Fatal("bound")
 	}
 }
+
+// r4548218738/r4548257305: once a document's body moved past its post-switch
+// baseline it is the feed's, not the rescan's: a rejected update of the new
+// body is not prepared again on every rescan.
+func TestYTArticlesRescanSkipsMovedBaseline(t *testing.T) {
+	s := ytartSetup(t, "ytart_moved", true)
+	id := ytartPut(t, s, "note/ytart/moved", "pre-switch body", nil)
+	ytartImported(t, s, id)
+	ytartPass(t, s)
+	ytartAuthority(t, s, YTAuthorityYouTrack)
+	ytartBind(t, s, id, "3-980", ytwrite.ContentSHA("article"), true)
+	// This worker's full scan runs first (superseded: no op).
+	if _, err := s.RunYTFeedConsumers(t.Context(), 100); err != nil || !s.ytDocsScanned || len(ytartOps(t, s, id)) != 0 {
+		t.Fatalf("full scan: %v ops %+v", err, ytartOps(t, s, id))
+	}
+	ytartPut(t, s, "note/ytart/moved", "edited in hk", nil)
+	ytartPass(t, s)
+	ops := ytartOps(t, s, id)
+	if len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleUpdate {
+		t.Fatalf("ops after the edit %+v", ops)
+	}
+	if _, err := s.YTWriteLedger().Reject(t.Context(), time.Now().UTC(), ops[0].ID, "operator_not_applied", "test"); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		ytartRescanDue(s)
+		if _, err := s.RunYTFeedConsumers(t.Context(), 100); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := len(ytartOps(t, s, id)); n != 1 {
+		t.Fatalf("%d ops, want the one rejected update only", n)
+	}
+}

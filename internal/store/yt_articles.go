@@ -617,8 +617,9 @@ const ytArticleCatchUpPage = 200
 // nothing twice. Mode off does nothing. Out-of-scope documents are dropped
 // before their transaction (no body is read for them).
 //
-// bound false lists the unbound documents and the stale bound ones that
-// still hold a post-switch baseline (the periodic rescan): a rollback to hk
+// bound false lists the unbound documents and the stale bound ones whose
+// body is still their post-switch baseline (the periodic rescan; a body that
+// moved past it is the feed's, r4548218738): a rollback to hk
 // makes no feed row, so the rescan writes their bodies (r4548095657), and the
 // baseline is spent when it does. Other bound documents are the feed's:
 // rescanning a stale binding whose update was rejected would prepare it again
@@ -638,7 +639,7 @@ func (s *Store) catchUpYTArticles(ctx context.Context, now time.Time, bound bool
 					WHERE o.principal = $3 AND o.kind = $4 AND o.idem_key = 'document-article:' || d.id::text))
 				OR (b.tenant = $5 AND (b.needs_update OR b.content_sha IS DISTINCT FROM d.sha256)
 					AND ($7 OR EXISTS (SELECT 1 FROM yt_snapshot_state st WHERE st.entity_kind = 'document'
-						AND st.entity_id = d.id::text AND st.kind = $8))))
+						AND st.entity_id = d.id::text AND st.kind = $8 AND st.last_sha = d.sha256))))
 			ORDER BY d.id LIMIT $6`, after, YTImportEndedAt, YTDocsPrincipal, ytwrite.KindArticleCreate, g.tenant, ytArticleCatchUpPage, bound, ytArticleBaselineKind)
 		if err != nil {
 			return counts, noProject, err
