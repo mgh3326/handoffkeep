@@ -3,6 +3,7 @@ package ytwrite
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -17,12 +18,22 @@ type commentAppend struct{ pageSize int }
 
 func (commentAppend) Render(op Op) (string, error) { return RenderComment(op) }
 
+// Send refuses an op with no target: a comment queued behind its task's
+// issue_create (hk 4263) whose claim found no binding from that create. It
+// never calls YouTrack with an empty issue id.
 func (commentAppend) Send(ctx context.Context, remote Remote, op Op, text string) (string, error) {
+	if !issueIDRE.MatchString(op.YTTargetID) {
+		return "", &RefusedError{Reason: ReasonIssueNotBound, Detail: "task " + op.EntityID + " has no binding from its issue_create op; the comment was queued behind it"}
+	}
 	return remote.CreateComment(ctx, op.YTTargetID, text)
 }
 
 func (k commentAppend) Evidence(ctx context.Context, remote Remote, op Op, text string) (Evidence, error) {
 	var ev Evidence
+	if !issueIDRE.MatchString(op.YTTargetID) {
+		// Send refuses such an op before it writes, so it is never uncertain.
+		return ev, fmt.Errorf("%w: comment op %d has no target issue", ErrInvalid, op.ID)
+	}
 	comments, err := remote.ListComments(ctx, op.YTTargetID, k.pageSize)
 	if err != nil {
 		// A rate-limited search waits at least as long as the server asked.

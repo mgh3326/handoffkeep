@@ -197,7 +197,11 @@ package store
 //     an issue writer's checks and its commit. The comment worker's Claim
 //     (YTTenantLedger) reads the task's canary row (mode canary) or binding
 //     (mode on) under the same lane lock, which is what orders an enrollment,
-//     a removal or a binding against a claim.
+//     a removal or a binding against a claim. Claim also reads, without a
+//     lock, the binding and issue_create op of a comment op queued with no
+//     target (hk 4263, claimYTCommentTargetTx) before it updates its own op
+//     row; the enqueue that queued it (queueYTCommentTx) makes the same plain
+//     reads under the lane lock it already holds.
 //     No cycle, lock by lock:
 //       - The ownership lock: only those two writers take it, always first
 //         and while holding nothing, so no transaction waits for it while

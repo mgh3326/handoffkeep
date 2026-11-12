@@ -1213,7 +1213,23 @@ release rollback never meets an authority value it cannot parse (consult hk
   or the body, for example a body quoting the op marker), and one that gets no
   op or a born-rejected one (the comments mode is off, the task is not bound,
   or not enrolled in canary, or a mapping disagrees). Under hk the same
-  comments commit as before. A dots reply (`ReplyDots`), which prepares no op
+  comments commit as before.
+- One exception (hk 4263): in comments mode `on`, a comment on a task with no
+  binding whose `issue_create` op is `prepared`, `dispatched` or
+  `remote_unknown` (a task created a moment ago) is accepted. Its
+  `comment_append` op (same key and render) is prepared on the create's
+  tenant with no target, linked to the comment, and queued behind the create
+  on the task's lane; its projection is `pending`. The claim that dispatches
+  it fills the target, and the payload hash with it, from the binding that
+  create published (`origin = 'op_applied'`, `op_id` the create); the
+  `yt_write_ops` guard allows exactly that change (migration
+  `20261112-yt-comment-queued-target`). A create that ends rejected, or applied
+  with `binding_conflict`, publishes no such binding: the op is claimed with
+  no target and `Send` refuses it, `rejected / issue_not_bound`, nothing sent,
+  and the rejected-op alert reports it. A task with no pending create, a body
+  the protocol cannot send, and a mapping disagreement are still refused.
+  The previous release's comment gate never admits a targetless op, so it
+  holds such an op rather than send it. A dots reply (`ReplyDots`), which prepares no op
   under hk, gets its op in the reply's transaction under youtrack, or the whole
   reply is refused the same way. Every comment writer reads the comments row
   `FOR SHARE` (creating it as hk first if it is missing), so a switch waits for

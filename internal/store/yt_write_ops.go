@@ -291,8 +291,16 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	if blocked {
 		return op, ytwrite.ClaimBlocked, tx.Commit(ctx)
 	}
-	op, err = scanYTOp(tx.QueryRow(ctx, `UPDATE yt_write_ops SET state='dispatched', attempts=attempts+1, dispatched_at=$2
-		WHERE id=$1 RETURNING `+ytOpColumns, id, now.UTC()))
+	// A comment queued behind its task's issue_create gets its target here,
+	// from the binding that create published, once the lane is clear
+	// (hk 4263). Every other op keeps its own.
+	target, sha, err := claimYTCommentTargetTx(ctx, tx, op)
+	if err != nil {
+		return ytwrite.Op{}, "", err
+	}
+	op, err = scanYTOp(tx.QueryRow(ctx, `UPDATE yt_write_ops SET state='dispatched', attempts=attempts+1, dispatched_at=$2,
+		yt_target_id=$3, payload_sha=$4
+		WHERE id=$1 RETURNING `+ytOpColumns, id, now.UTC(), target, sha))
 	if err != nil {
 		return ytwrite.Op{}, "", err
 	}
