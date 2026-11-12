@@ -337,10 +337,11 @@ func TestYTDecisionsBackfillBinding(t *testing.T) {
 func TestYTDecisionsCreateConflictAndGuard(t *testing.T) {
 	s := ytdecSetup(t, "ytd_conflict", true)
 	ctx := t.Context()
-	now := time.Now().UTC()
 	id := ytdecChat(t, s, "Q-20261112-07", "c?")
 	ytdecPass(t, s)
 	op := ytdecOps(t, s, ytwrite.KindDecisionCreate, id)[0]
+	// The op is due from its prepare time: read the clock after the pass.
+	now := time.Now().UTC()
 	// The guard: a resolver that marks the op applied without the binding
 	// (the previous release's, which knows no such kind) is refused.
 	if _, out, err := s.YTWriteLedger().Claim(ctx, now, op.ID); err != nil || out != ytwrite.ClaimClaimed {
