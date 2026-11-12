@@ -341,7 +341,8 @@ PR's sub-tasks); each gets the event as `task_id` does, and the answer's
 `tasks` holds one result per named task (`reason` `task_not_found` for a
 missing one, which writes nothing). A merge closes a task only when it is the
 task's last open piece: while another `implements` change of the task is still
-open, or a sub-task is not settled, the merge is recorded with `applied=false`
+open, one was reverted and not relanded, or a sub-task is not settled, the
+merge is recorded with `applied=false`
 and the reason names what holds it (a parent then closes through
 `auto_close_parent`). `handoffkeep tasks event <id> --source S --source-ref
 URL [--reverted-pr URL] [--tasks ID,...]` posts one by hand.
@@ -370,8 +371,8 @@ implement tasks move to `merged`, and decide, verify and ops tasks close at
 [--merged-days N]` (`GET /v1/tasks/drift?merged_days=N`, default 2) reads four
 drift classes and writes nothing: settled tasks with an open decision request,
 unsettled tasks whose PR is already merged or that implement a merged, not
-reverted change (with `open_prs` naming any implements change still open,
-which holds the close), merged tasks older than N days that
+reverted change and have no reverted, not relanded one (with `open_prs` and
+`open_sub_tasks` naming what still holds the close), merged tasks older than N days that
 no deploy record lists, and researching or developing tasks idle for
 `started_stalled_hours`.
 Schema version 34 adds the `source_event` kind for events

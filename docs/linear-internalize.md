@@ -172,13 +172,18 @@ treated as overdue.
 11. A merge closes a task only when nothing else of it is open (hk 3294). The merge
     is recorded with `applied=false`, the reason naming what holds it, while another
     `implements` change of the task is still `open` (the task closes on that change's
-    merge) or while a sub-task is not settled (the parent closes through
-    `auto_close_parent` when its last sub-task settles). A change closed without
-    merging does not hold the task. An event may name further tasks in `tasks` (one
+    merge), while an `implements` change of the task was reverted and no merged
+    `implements` change was created after the revert (relanding takes a new PR, so a
+    PR opened before the revert does not count), or while a sub-task is not settled
+    (the parent closes through `auto_close_parent` when its last sub-task settles). A
+    change closed without merging does not hold the task. A held merge still reaches
+    the other tasks whose `refs.pr` is the PR, each under its own rules. An event may name further tasks in `tasks` (one
     per `Mergewake-Task` line of the PR, for example a bundle PR's sub-tasks); each
-    gets the event as `task_id` does. A task held by a change that later closes
-    unmerged gets no further event; `tasks drift` lists it under
-    `merged_pr_not_merged` with no `open_prs`: the mechanical close the daily hygiene job (hk 3292) is to make.
+    gets the event as `task_id` does, in its own turn: propagation and the rule 9
+    parent row skip a named task. A task held by a change that later closes unmerged,
+    or a parent whose sub-tasks all settle without closing it, gets no further event;
+    `tasks drift` lists it under `merged_pr_not_merged` with empty `open_prs` and
+    `open_sub_tasks`: the mechanical close the daily hygiene job (hk 3292) is to make.
 
 **Changes and reviews from the same events.** Every mergewake event also writes the
 work record, in the same transaction, after the task row is locked and before the rule

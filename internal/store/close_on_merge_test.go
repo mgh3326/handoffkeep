@@ -186,3 +186,120 @@ func TestDriftFindsDeliveredTaskThroughTheWorkRecord(t *testing.T) {
 		t.Fatalf("reverted task reported: %+v", c.Tasks)
 	}
 }
+
+// TestHeldMergeStillPropagates (PR #331 review): a merge held on its own task
+// still reaches the other tasks whose refs.pr is that PR, each under its own
+// rules.
+func TestHeldMergeStillPropagates(t *testing.T) {
+	s, pool := searchTestStore(t)
+	pr, other := testPR(6001), testPR(6002)
+	a := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	b := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setRefsPR(t, s, a.ID, pr)
+	setRefsPR(t, s, b.ID, pr)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: other, TaskID: a.ID})
+	if res := send(t, s, mergeEvent(a.ID, pr)); res.Applied {
+		t.Fatalf("a: %+v, want held on %s", res, other)
+	}
+	if got := stateOf(t, s, b.ID).State; got != StateMerged {
+		t.Fatalf("b on the held PR: %s, want merged", got)
+	}
+}
+
+// TestRevertedPieceHoldsUntilRelanded (PR #331 review): a piece reverted
+// while the task is still open holds the task, so a merge of a PR opened
+// before the revert does not close it; a reland PR opened after the revert
+// does.
+func TestRevertedPieceHoldsUntilRelanded(t *testing.T) {
+	s, pool := searchTestStore(t)
+	x := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	a, b, revert, reland := testPR(6101), testPR(6102), testPR(6103), testPR(6104)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: a, TaskID: x.ID})
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: b, TaskID: x.ID})
+	send(t, s, mergeEvent(x.ID, a))
+	send(t, s, revertEvent(x.ID, a, revert))
+	res := send(t, s, mergeEvent(x.ID, b))
+	if res.Applied || !strings.Contains(res.Reason, "reverted") || !strings.Contains(res.Reason, a) {
+		t.Fatalf("merge of b after a's revert: %+v, want held on %s", res, a)
+	}
+	if res := send(t, s, mergeEvent(x.ID, reland)); !res.Applied || res.State != StateMerged {
+		t.Fatalf("reland: %+v", res)
+	}
+}
+
+// TestDriftSkipsUnrelandedRevertAndNamesSubTasks (PR #331 review): a task
+// with a reverted, not relanded piece is not drift even when another piece
+// merged; a parent held by sub-tasks lists them in open_sub_tasks, and once
+// they settle without closing it (all dropped) it is listed with no
+// blockers, the hygiene job's mechanical close.
+func TestDriftSkipsUnrelandedRevertAndNamesSubTasks(t *testing.T) {
+	s, pool := searchTestStore(t)
+	x := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	a, b := testPR(6201), testPR(6202)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: b, TaskID: x.ID})
+	send(t, s, mergeEvent(x.ID, a))
+	send(t, s, mergeEvent(x.ID, b))
+	send(t, s, revertEvent(x.ID, b, testPR(6203)))
+	if got := stateOf(t, s, x.ID).State; got != StateDeveloping {
+		t.Fatalf("reverted task %s", got)
+	}
+
+	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
+	child := flowTask(t, s, pool, "fix", StateBacklog, false)
+	setParent(t, s, child, parent)
+	send(t, s, mergeEvent(parent.ID, testPR(6204)))
+
+	find := func() map[int64]TaskDriftTask {
+		out := map[int64]TaskDriftTask{}
+		for _, d := range driftAt(t, s, time.Now().UTC(), DriftDefaultMergedDays).MergedPRNotMerged.Tasks {
+			out[d.ID] = d
+		}
+		return out
+	}
+	got := find()
+	if _, ok := got[x.ID]; ok {
+		t.Fatalf("task with an unrelanded revert reported: %+v", got[x.ID])
+	}
+	if d, ok := got[parent.ID]; !ok || len(d.OpenSubTasks) != 1 || d.OpenSubTasks[0] != child.ID || len(d.OpenPRs) != 0 {
+		t.Fatalf("held parent %+v ok=%t", d, ok)
+	}
+	if _, err := s.TransitionTaskWith(t.Context(), child.ID, TransitionInput{To: StateDropped, By: "tester", Note: "not needed"}); err != nil {
+		t.Fatal(err)
+	}
+	if st := stateOf(t, s, parent.ID).State; st != StateBacklog {
+		t.Fatalf("parent after its only sub-task dropped: %s", st)
+	}
+	if d, ok := find()[parent.ID]; !ok || len(d.OpenSubTasks) != 0 || len(d.OpenPRs) != 0 {
+		t.Fatalf("released parent %+v ok=%t", d, ok)
+	}
+}
+
+// TestNamedTasksKeepTheirOwnEventKey (PR #331 review): a task the event names
+// gets its own turn. Propagation does not apply the merge to it first (its
+// result says applied, not redelivered), and a sub-task's revert does not
+// write the informational row on a parent the event also names, so the
+// parent reverts too.
+func TestNamedTasksKeepTheirOwnEventKey(t *testing.T) {
+	s, pool := searchTestStore(t)
+	pr := testPR(6301)
+	a := flowTask(t, s, pool, "implement", StateReviewing, true)
+	b := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setRefsPR(t, s, b.ID, pr)
+	res := send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: a.ID, Tasks: []int64{b.ID}})
+	if len(res.Tasks) != 1 || !res.Tasks[0].Applied || res.Tasks[0].Redelivered || res.Tasks[0].State != StateMerged {
+		t.Fatalf("named task on the PR: %+v", res.Tasks)
+	}
+
+	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
+	child := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setParent(t, s, child, parent)
+	merged := testPR(6302)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: merged, TaskID: child.ID, Tasks: []int64{parent.ID}})
+	if st := stateOf(t, s, parent.ID).State; st != StateMerged {
+		t.Fatalf("parent after the merge: %s", st)
+	}
+	rev := send(t, s, TaskSourceEvent{Source: SourceMergewakeRevert, SourceRef: testPR(6303), RevertedPR: merged, TaskID: child.ID, Tasks: []int64{parent.ID}})
+	if !rev.Applied || len(rev.Tasks) != 1 || !rev.Tasks[0].Applied || rev.Tasks[0].State != StateDeveloping {
+		t.Fatalf("revert naming the parent: %+v", rev)
+	}
+}

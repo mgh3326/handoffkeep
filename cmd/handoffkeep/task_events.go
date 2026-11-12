@@ -253,6 +253,13 @@ func writeTaskDriftText(out io.Writer, rep store.TaskDrift) error {
 			if len(x.OpenPRs) > 0 {
 				fmt.Fprintf(&b, " open_prs=%s", strings.Join(x.OpenPRs, ","))
 			}
+			if len(x.OpenSubTasks) > 0 {
+				subs := make([]string, len(x.OpenSubTasks))
+				for i, id := range x.OpenSubTasks {
+					subs[i] = fmt.Sprintf("#%d", id)
+				}
+				fmt.Fprintf(&b, " open_sub_tasks=%s", strings.Join(subs, ","))
+			}
 			fmt.Fprintf(&b, " %s\n", x.Title)
 		}
 	}

@@ -280,7 +280,7 @@ func TestTasksDriftCLI(t *testing.T) {
 		paths = append(paths, r.Method+" "+r.URL.Path+"?"+r.URL.RawQuery)
 		_, _ = io.WriteString(w, `{"as_of":"2026-11-10T00:00:00Z","merged_days":2,"started_stalled_hours":24,`+
 			`"settled_open_decision":{"rule":"r","count":1,"truncated":false,"tasks":[{"id":2825,"lane":"l","title":"decide it","kind":"decide","state":"merged","decision_request":"dr-2825-1","since":"2026-11-09T00:00:00Z"}]},`+
-			`"merged_pr_not_merged":{"rule":"r","count":1,"truncated":false,"tasks":[{"id":3294,"lane":"l","title":"held","kind":"implement","state":"reviewing","since":"2026-11-09T00:00:00Z","open_prs":["https://github.com/example/app/pull/2","https://github.com/example/app/pull/3"]}]},"merged_without_deploy":{"rule":"r","count":0,"truncated":false,"tasks":[]},"idle_started":{"rule":"r","count":0,"truncated":false,"tasks":[]}}`)
+			`"merged_pr_not_merged":{"rule":"r","count":1,"truncated":false,"tasks":[{"id":3294,"lane":"l","title":"held","kind":"implement","state":"reviewing","since":"2026-11-09T00:00:00Z","open_prs":["https://github.com/example/app/pull/2","https://github.com/example/app/pull/3"],"open_sub_tasks":[3921,3292]}]},"merged_without_deploy":{"rule":"r","count":0,"truncated":false,"tasks":[]},"idle_started":{"rule":"r","count":0,"truncated":false,"tasks":[]}}`)
 	}))
 	defer h.Close()
 	var out bytes.Buffer
@@ -288,7 +288,7 @@ func TestTasksDriftCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(paths) != 1 || paths[0] != "GET /v1/tasks/drift?merged_days=2" || !strings.Contains(out.String(), "settled_open_decision: 1") || !strings.Contains(out.String(), "#2825") ||
-		!strings.Contains(out.String(), "open_prs=https://github.com/example/app/pull/2,https://github.com/example/app/pull/3") {
+		!strings.Contains(out.String(), "open_prs=https://github.com/example/app/pull/2,https://github.com/example/app/pull/3 open_sub_tasks=#3921,#3292") {
 		t.Fatalf("paths=%v out=%s", paths, out.String())
 	}
 	out.Reset()
