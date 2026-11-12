@@ -321,3 +321,73 @@ func TestArticleUpdateProvenanceKeepsHKFormat(t *testing.T) {
 		t.Fatal("a provenance update quoting the marker was accepted")
 	}
 }
+
+func (e articleEnv) prepareLegacyCreate(legacyID string) ytwrite.Op {
+	e.t.Helper()
+	req := articleReq()
+	req.LegacyArticleID, req.LegacyMarker = legacyID, ytwrite.LegacyDocMarker("design/yt/articles.md")
+	n, err := ytwrite.ArticleOp(req)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	op, _, err := e.ledger.Prepare(context.Background(), e.clock.Now(), n)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return op
+}
+
+// A document the legacy sync wrote: its verified article (top level, in the
+// op's project, carrying the document's legacy marker) is adopted with no
+// POST and no search; one that does not verify, or is gone, rejects the op
+// legacy_synced_unverified, never a second article; a failed read retries.
+func TestArticleCreateLegacySyncedArticle(t *testing.T) {
+	legacyBody := ytwrite.LegacyDocMarker("design/yt/articles.md") + "\n> hk 문서 `design/yt/articles.md`\n\nold body"
+	t.Run("verified", func(t *testing.T) {
+		e := newArticleEnv(t)
+		legacy := e.yt.InjectArticle(artProject, "design/yt/articles.md", legacyBody)
+		op := e.prepareLegacyCreate(legacy)
+		e.drive()
+		got := e.want(op.ID, ytwrite.StateApplied, "")
+		if got.YTResultID != legacy || e.yt.Calls() != 0 || e.yt.Finds() != 0 {
+			t.Fatalf("op %+v writes %d finds %d", got, e.yt.Calls(), e.yt.Finds())
+		}
+		e.wantMap(got, legacy, true)
+	})
+	for name, setup := range map[string]func(e articleEnv) string{
+		"no_marker":     func(e articleEnv) string { return e.yt.InjectArticle(artProject, "x", "old body without the marker") },
+		"other_project": func(e articleEnv) string { return e.yt.InjectArticle("0-99", "x", legacyBody) },
+		"other_marker":  func(e articleEnv) string { return e.yt.InjectArticle(artProject, "x", ytwrite.LegacyDocMarker("other/key")+"\nbody") },
+		"gone":          func(articleEnv) string { return "3-404" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newArticleEnv(t)
+			op := e.prepareLegacyCreate(setup(e))
+			e.drive()
+			e.want(op.ID, ytwrite.StateRejected, ytwrite.ReasonLegacySyncedUnverified)
+			if e.yt.Calls() != 0 || len(e.yt.ArticleWrites()) != 0 {
+				t.Fatalf("%d writes", e.yt.Calls())
+			}
+		})
+	}
+	t.Run("read_failed", func(t *testing.T) {
+		e := newArticleEnv(t)
+		legacy := e.yt.InjectArticle(artProject, "x", legacyBody)
+		e.yt.QueueRead(&ytwrite.RemoteError{Status: http.StatusBadGateway, Message: "down"})
+		op := e.prepareLegacyCreate(legacy)
+		e.drive()
+		e.want(op.ID, ytwrite.StatePrepared, ytwrite.ReasonNotSent)
+		if e.yt.Calls() != 0 {
+			t.Fatalf("%d writes", e.yt.Calls())
+		}
+	})
+}
+
+// The legacy marker is the one the legacy sync writes (internal/youtrack
+// docMarker delegates to it).
+func TestLegacyDocMarker(t *testing.T) {
+	if got := ytwrite.LegacyDocMarker("design/x.md"); got != "<!-- hk-marker:"+ytwrite.LegacyDocToken("design/x.md")+" -->" ||
+		len(ytwrite.LegacyDocToken("design/x.md")) != len("hkdoc")+24 || !strings.HasPrefix(got, "<!-- hk-marker:hkdoc") {
+		t.Fatalf("marker %q", got)
+	}
+}

@@ -193,14 +193,21 @@ type ytArticleRow struct {
 	binding   YTArticleBinding
 	bound     bool
 	created   bool
+	// legacyArticle is the article the legacy `youtrack sync` recorded for
+	// the document (youtrack_doc_articles, its first part; "" for none) and
+	// legacyParts the number of parts it split the document into.
+	legacyArticle string
+	legacyParts   int
 }
 
 // readYTArticleRow reads document id; nil when it is gone.
 func readYTArticleRow(ctx context.Context, tx pgx.Tx, id int64) (*ytArticleRow, error) {
 	r := &ytArticleRow{}
 	err := scanYTArticleCandidate(tx.QueryRow(ctx, ytArticleCandidateSQL+`, d.body, d.created_at,
-			EXISTS(SELECT 1 FROM yt_write_ops o WHERE o.principal = $2 AND o.kind = $3 AND o.idem_key = $4)`+ytArticleCandidateFrom+` WHERE d.id = $1`,
-		id, YTDocsPrincipal, ytwrite.KindArticleCreate, ytwrite.ArticleKey(id)), &r.doc, &r.body, &r.createdAt, &r.created)
+			EXISTS(SELECT 1 FROM yt_write_ops o WHERE o.principal = $2 AND o.kind = $3 AND o.idem_key = $4),
+			coalesce((SELECT l.article_id FROM youtrack_doc_articles l WHERE l.doc_key = d.key), ''),
+			coalesce((SELECT l.part_count FROM youtrack_doc_articles l WHERE l.doc_key = d.key), 0)`+ytArticleCandidateFrom+` WHERE d.id = $1`,
+		id, YTDocsPrincipal, ytwrite.KindArticleCreate, ytwrite.ArticleKey(id)), &r.doc, &r.body, &r.createdAt, &r.created, &r.legacyArticle, &r.legacyParts)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -231,6 +238,11 @@ const (
 	ytArticleCreatePending   ytArticleOutcome = "create_exists"
 	ytArticleNoProject       ytArticleOutcome = "no_project"
 	ytArticleInvalid         ytArticleOutcome = "invalid"
+	// ytArticleLegacyUnverified: the legacy sync split the document into
+	// parts, so its article cannot be adopted; the create is rejected
+	// legacy_synced_unverified at once (Send rejects the other unverified
+	// legacy articles).
+	ytArticleLegacyUnverified ytArticleOutcome = ytwrite.ReasonLegacySyncedUnverified
 )
 
 // ytArticleTarget is the YouTrack project a new document's article is
@@ -303,6 +315,11 @@ func prepareYTArticleTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDocsG
 	}
 	req := ytwrite.ArticleRequest{Principal: YTDocsPrincipal, Actor: YTDocsPrincipal, YTProjectID: target.ID, YTProjectShort: target.ShortName,
 		Tenant: g.tenant, DocumentID: id, Summary: summary, Body: r.body}
+	if r.legacyArticle != "" {
+		// The legacy sync wrote this document's article: the create adopts
+		// it once verified, and never makes a second one.
+		req.LegacyArticleID, req.LegacyMarker = r.legacyArticle, ytwrite.LegacyDocMarker(r.doc.Key)
+	}
 	n, err := ytwrite.ArticleOp(req)
 	if err != nil {
 		return "", err
@@ -313,6 +330,14 @@ func prepareYTArticleTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDocsG
 	}
 	if !created {
 		return ytArticleCreatePending, nil
+	}
+	if r.legacyArticle != "" && r.legacyParts > 1 {
+		detail := fmt.Sprintf("the legacy sync split the document into %d articles (first %s)", r.legacyParts, r.legacyArticle)
+		if _, err := rejectYTOpTx(ctx, tx, now, op.ID, ytwrite.ReasonLegacySyncedUnverified, detail); err != nil {
+			return "", err
+		}
+		log.Printf("ytwrite.article_create_rejected op_id=%d document_id=%d reason=%s err=%q", op.ID, id, ytwrite.ReasonLegacySyncedUnverified, detail)
+		return ytArticleLegacyUnverified, nil
 	}
 	if cerr := ytwrite.CheckArticle(req); cerr != nil {
 		if _, err := rejectYTOpTx(ctx, tx, now, op.ID, ytwrite.ReasonInvalidIssue, cerr.Error()); err != nil {
@@ -371,10 +396,10 @@ func ytDocsHandler(s *Store, now time.Time) FeedHandler {
 			}
 			counts[outcome]++
 		}
-		log.Printf("ytwrite.articles_feed documents=%d create_prepared=%d create_rejected=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d deleted=%d other_tenant=%d no_project=%d invalid=%d",
+		log.Printf("ytwrite.articles_feed documents=%d create_prepared=%d create_rejected=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d deleted=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d",
 			len(ids), counts[ytArticleCreatePrepared], counts[ytArticleCreateRejected], counts[ytArticleCreatePending], counts[ytArticleUpdatePrepared],
 			counts[ytArticleUnchanged], counts[ytArticleNotUpdated], counts[ytArticleUnboundImported], counts[ytArticleOutOfScope],
-			counts[ytArticleDeleted], counts[ytArticleOtherTenant], counts[ytArticleNoProject], counts[ytArticleInvalid])
+			counts[ytArticleDeleted], counts[ytArticleOtherTenant], counts[ytArticleNoProject], counts[ytArticleInvalid], counts[ytArticleLegacyUnverified])
 		return nil
 	}
 }
@@ -412,7 +437,9 @@ func ytArticleConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID str
 
 // bindYTArticleApplyTx is the article_create apply hook's bind: the
 // document's binding (origin op_applied, this op, part 0) with content_sha
-// the sha256 of the body the op wrote, then, as the feed would, the
+// the sha256 of the body the op wrote (origin import_verified when the op
+// adopted the article the legacy sync made: hk did not write it, so its
+// updates keep the raw body), then, as the feed would, the
 // document's update when its body changed since the op was prepared (or the
 // article was adopted, whose content the op did not write: needs_update). A
 // binding of the document to this same article is kept as it is.
@@ -422,9 +449,13 @@ func bindYTArticleApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.O
 	if err := json.Unmarshal(op.Payload, &p); err != nil {
 		return fmt.Errorf("payload of op %d: %w", op.ID, err)
 	}
+	origin := YTBindingOpApplied
+	if adopted && p.LegacyArticleID != "" && p.LegacyArticleID == ytID {
+		origin = YTBindingImportVerified
+	}
 	tag, err := tx.Exec(ctx, `INSERT INTO yt_article_bindings(document_id, tenant, article_id, article_readable, project_id, part, generation, content_sha, origin, op_id, needs_update, bound_by, bound_at)
 		VALUES ($1,$2,$3,'',$4,0,0,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING`,
-		id, op.Tenant, ytID, op.YTTargetID, ytwrite.ContentSHA(p.Body), YTBindingOpApplied, op.ID, adopted, op.Principal, now.UTC())
+		id, op.Tenant, ytID, op.YTTargetID, ytwrite.ContentSHA(p.Body), origin, op.ID, adopted, op.Principal, now.UTC())
 	if err != nil {
 		return err
 	}

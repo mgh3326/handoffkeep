@@ -44,7 +44,8 @@ type YTArticleBinding struct {
 	// Origin is set by the store: YTBindingImportVerified for a backfill
 	// binding, YTBindingOpApplied for one an applied article_create
 	// published (hk 4206; ContentSHA is then the sha256 of the body the op
-	// wrote, without its provenance line and marker).
+	// wrote, without its provenance line and marker). A create that adopted
+	// the legacy sync's article publishes YTBindingImportVerified.
 	Origin string `json:"origin"`
 	OpID   int64  `json:"op_id,omitempty"`
 }

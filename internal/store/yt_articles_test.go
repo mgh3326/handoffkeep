@@ -583,3 +583,75 @@ func TestYTArticleInScope(t *testing.T) {
 		}
 	}
 }
+
+// ytartLegacy records an article of the legacy `youtrack sync` for a
+// document key, split into parts articles.
+func ytartLegacy(t *testing.T, s *Store, key, article string, parts int) {
+	t.Helper()
+	if _, err := s.pool.Exec(t.Context(), `INSERT INTO youtrack_doc_articles(doc_key, hk_project, article_id, synced_at, document_key, part_index, part_count)
+		VALUES ($1,'',$2,now(),$1,1,$3)`, key, article, parts); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// r4546690175 (handoffkeep-design decision-3 B): a post-import document the
+// legacy sync wrote never gets a second article. Its legacy article, once
+// verified, is adopted and bound import_verified, and the body is rewritten
+// raw by an article_update; one that does not verify, or a split one, is
+// rejected legacy_synced_unverified with nothing created or bound.
+func TestYTArticlesLegacySyncedDocument(t *testing.T) {
+	s := ytartSetup(t, "ytart_legacy", true)
+	yt := ytwritetest.NewFake()
+	var offset atomic.Int64
+	const key = "design/ytart/legacy.md"
+	legacy := yt.InjectArticle(ytartShared, key, ytwrite.LegacyDocMarker(key)+"\n> hk 문서\n\nold body")
+	ytartLegacy(t, s, key, legacy, 1)
+	id := ytartPut(t, s, key, "current body", nil)
+	ytartPass(t, s)
+	ops := ytartOps(t, s, id)
+	var p ytwrite.ArticleCreatePayload
+	if len(ops) != 1 || json.Unmarshal(ops[0].Payload, &p) != nil || p.LegacyArticleID != legacy || p.LegacyMarker != ytwrite.LegacyDocMarker(key) {
+		t.Fatalf("ops %+v payload %+v", ops, p)
+	}
+	ytartDrive(t, s, yt, &offset)
+	ops = ytartOps(t, s, id)
+	if ops[0].State != ytwrite.StateApplied || ops[0].YTResultID != legacy || len(yt.Articles(ytartShared)) != 1 {
+		t.Fatalf("ops %+v articles %+v", ops, yt.Articles(ytartShared))
+	}
+	if b := ytartBinding(t, s, id); b.ArticleID != legacy || b.Origin != YTBindingImportVerified || !b.NeedsUpdate {
+		t.Fatalf("binding %+v", b)
+	}
+	if len(ops) != 2 || ops[1].Kind != ytwrite.KindArticleUpdate {
+		t.Fatalf("ops after the adoption %+v", ops)
+	}
+	ytartDrive(t, s, yt, &offset)
+	if a, _ := yt.Article(legacy); a.Content != "current body" {
+		t.Fatalf("article %+v", a)
+	}
+
+	for name, setup := range map[string]func() string{
+		"unverified": func() string { return yt.InjectArticle("0-99", "x", "no marker") },
+		"split":      func() string { return yt.InjectArticle(ytartShared, "y", "part one") },
+	} {
+		k := "design/ytart/legacy-" + name + ".md"
+		art := setup()
+		parts := 1
+		if name == "split" {
+			parts = 2
+		}
+		ytartLegacy(t, s, k, art, parts)
+		doc := ytartPut(t, s, k, "body", nil)
+		ytartPass(t, s)
+		ytartDrive(t, s, yt, &offset)
+		ops := ytartOps(t, s, doc)
+		if len(ops) != 1 || ops[0].State != ytwrite.StateRejected || ops[0].Reason != ytwrite.ReasonLegacySyncedUnverified {
+			t.Fatalf("%s: ops %+v", name, ops)
+		}
+		if _, found, _ := s.YTArticleBinding(t.Context(), doc); found {
+			t.Fatalf("%s: bound", name)
+		}
+	}
+	if n := len(yt.ArticleWrites()); n != 1 {
+		t.Fatalf("%d article writes, want only the one update", n)
+	}
+}

@@ -1459,6 +1459,18 @@ update op's own provenance line, the body and the update op's marker
 (rendered exactly as a create). Either way `content_sha` is the body's
 sha256 after the update.
 
+**Legacy-synced documents.** A document the legacy `youtrack sync` already
+wrote (a `youtrack_doc_articles` row for its key) never gets a second
+article. Its `article_create` carries that article's id and the document's
+legacy marker (`<!-- hk-marker:hkdoc<sha256(key)[:12]> -->`,
+`ytwrite.LegacyDocMarker`). Send reads the article (one GET, no search). It
+is adopted (no POST) when it is a top-level article of the op's project that
+carries the marker: the apply binds it with `origin = 'import_verified'` and
+`needs_update`, so an `article_update` rewrites it with the raw body. Anything
+else (gone, another project, a child, no marker) rejects the op
+`legacy_synced_unverified`, and so does a legacy article the sync split into
+parts, at prepare time. Any other failed read leaves the op `not_sent`.
+
 **Send.** `article_create`: one search of the project for the summary
 (`GET /api/articles`, query `project: <SHORT> "<summary>"`, at most 100 hits,
 a full page is an error and the op is held `not_sent`), keeping the
