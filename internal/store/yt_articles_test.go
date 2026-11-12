@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -286,12 +287,20 @@ func TestYTArticlesCreateAdoptedOnLostReply(t *testing.T) {
 // No op for: an unbound document created before the import ended
 // (exception_unbound_imported), a body over the single-article limit, bound
 // or not (exception_not_updated), and the excluded prefixes. A task's brief
-// is in scope (handoffkeep-design, hk 4206) and gets its create in the
-// unassigned bucket when its task has no project.
+// is in scope (handoffkeep-design, hk 4206) and gets its create in its
+// task's project's YouTrack project.
 func TestYTArticlesExceptionsAndScope(t *testing.T) {
 	s := ytartSetup(t, "ytart_scope", true)
 	ctx := t.Context()
-	task, err := s.CreateTask(ctx, Task{Lane: "ytart-lane", Title: "articles", Kind: "implement", CreatedBy: "test"})
+	// New tasks need a project; this one maps to its own YouTrack project.
+	if _, err := s.AddTaskProject(ctx, "ytart", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "ytart", ProjectID: "0-42", ShortName: "YTART"}); err != nil {
+		t.Fatal(err)
+	}
+	project := "ytart"
+	task, err := s.CreateTask(ctx, Task{Lane: "ytart-lane", Title: "articles", Kind: "implement", CreatedBy: "test", Project: &project})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +325,7 @@ func TestYTArticlesExceptionsAndScope(t *testing.T) {
 			t.Errorf("document %d made ops %+v", id, ops)
 		}
 	}
-	if ops := ytartOps(t, s, brief); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleCreate || ops[0].YTTargetID != ytartUnassigned {
+	if ops := ytartOps(t, s, brief); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleCreate || ops[0].YTTargetID != "0-42" {
 		t.Fatalf("brief ops %+v", ops)
 	}
 	for id, want := range map[int64]string{imported: YTArticleExceptionUnboundImported, oversize: YTArticleExceptionNotUpdated,
@@ -390,5 +399,110 @@ func TestYTArticleException(t *testing.T) {
 	}
 	if YTImportEndedAt != time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC) || YTArticleSafePartBytes != 240*1024 {
 		t.Fatal("constants moved")
+	}
+}
+
+// r4545936506/r4545936516: an update queued for B applies after the document
+// went back to A, which the feed found unchanged (the binding still held A).
+// The apply re-checks the document and queues A's update behind it, so the
+// article ends at A.
+func TestYTArticlesQueuedUpdateThenRevert(t *testing.T) {
+	s := ytartSetup(t, "ytart_revert", true)
+	yt := ytwritetest.NewFake()
+	var offset atomic.Int64
+	id := ytartPut(t, s, "note/ytart/revert", "body A", nil)
+	ytartImported(t, s, id)
+	article := yt.InjectArticle(ytartShared, YTArticleSummary("note/ytart/revert", "note"), "body A")
+	ytartBind(t, s, id, article, "", false)
+	ytartPass(t, s)
+
+	ytartPut(t, s, "note/ytart/revert", "body B", nil)
+	ytartPass(t, s)
+	ytartPut(t, s, "note/ytart/revert", "body A", nil)
+	ytartPass(t, s)
+	if ops := ytartOps(t, s, id); len(ops) != 1 {
+		t.Fatalf("ops before the drive %+v", ops)
+	}
+	ytartDrive(t, s, yt, &offset)
+	ops := ytartOps(t, s, id)
+	if len(ops) != 2 || ops[0].State != ytwrite.StateApplied || ops[1].Kind != ytwrite.KindArticleUpdate {
+		t.Fatalf("ops after B applied %+v", ops)
+	}
+	ytartDrive(t, s, yt, &offset)
+	if a, _ := yt.Article(article); a.Content != "body A" {
+		t.Fatalf("article %+v", a)
+	}
+	if b := ytartBinding(t, s, id); b.ContentSHA != ytwrite.ContentSHA("body A") {
+		t.Fatalf("binding %+v", b)
+	}
+	if n := len(ytartOps(t, s, id)); n != 2 {
+		t.Fatalf("%d ops at the end", n)
+	}
+}
+
+// r4545936512: the consumer's cursor starts at the feed's end, so documents
+// written before its first pass have no row it reads. The catch-up after the
+// cursor exists prepares their ops once.
+func TestYTArticlesCatchUpCoversTheFirstPassGap(t *testing.T) {
+	s := schemaStore(t, "ytart_catch")
+	s.SetYTDocsMode(YTDocsOn, ytcTenant, ytartBuckets())
+	fresh := ytartPut(t, s, "design/ytart/fresh.md", "fresh", nil)
+	bound := ytartPut(t, s, "note/ytart/bound", "old", nil)
+	ytartImported(t, s, bound)
+	ytartBind(t, s, bound, "3-700", "", false)
+	ytartPut(t, s, "note/ytart/bound", "changed before the first pass", nil)
+	same := ytartPut(t, s, "note/ytart/same", "same", nil)
+	ytartImported(t, s, same)
+	ytartBind(t, s, same, "3-701", "", false)
+	if pass := ytartPass(t, s); !pass.Created {
+		t.Fatalf("first pass %+v", pass)
+	}
+	if len(ytartOps(t, s, fresh))+len(ytartOps(t, s, bound)) != 0 {
+		t.Fatal("the first pass read rows from before its cursor")
+	}
+	if _, err := s.RunYTFeedConsumers(t.Context(), 100); err != nil {
+		t.Fatal(err)
+	}
+	if ops := ytartOps(t, s, fresh); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleCreate {
+		t.Fatalf("fresh ops %+v", ops)
+	}
+	if ops := ytartOps(t, s, bound); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleUpdate || ops[0].YTTargetID != "3-700" {
+		t.Fatalf("bound ops %+v", ops)
+	}
+	if ops := ytartOps(t, s, same); len(ops) != 0 {
+		t.Fatalf("unchanged ops %+v", ops)
+	}
+	// Again, directly: idempotent.
+	if _, err := s.catchUpYTArticles(t.Context(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if len(ytartOps(t, s, fresh)) != 1 || len(ytartOps(t, s, bound)) != 1 {
+		t.Fatal("a second catch-up prepared ops again")
+	}
+}
+
+// r4546214644: a backfill binding is refused while the document's
+// article_create is unresolved; it would hold the create, and every update
+// behind it on the lane, for good.
+func TestYTArticleBindingRefusedWhileCreatePending(t *testing.T) {
+	s := ytartSetup(t, "ytart_pend", true)
+	id := ytartPut(t, s, "design/ytart/pending.md", "body", nil)
+	ytartPass(t, s)
+	if ops := ytartOps(t, s, id); len(ops) != 1 || ops[0].State != ytwrite.StatePrepared {
+		t.Fatalf("ops %+v", ops)
+	}
+	d := ytArticleDoc(t, s, id)
+	b := YTArticleBinding{DocumentID: id, Tenant: ytcTenant, ArticleID: "3-800", ProjectID: ytartShared, ContentSHA: d.SHA256, BoundBy: "test"}
+	if _, err := s.AddYTArticleBinding(t.Context(), b, d.YTArticleCandidate); !errors.Is(err, ErrYTArticleBindingConflict) || !strings.Contains(err.Error(), "unresolved article_create") {
+		t.Fatalf("binding under a pending create: %v", err)
+	}
+	if _, found, _ := s.YTArticleBinding(t.Context(), id); found {
+		t.Fatal("bound")
+	}
+	if _, err := s.YTWriteLedger().Reject(t.Context(), time.Now().UTC(), ytartOps(t, s, id)[0].ID, "operator_not_applied", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddYTArticleBinding(t.Context(), b, d.YTArticleCandidate); err != nil {
+		t.Fatalf("binding after the create was rejected: %v", err)
 	}
 }

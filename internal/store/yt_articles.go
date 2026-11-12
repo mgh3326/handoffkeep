@@ -464,12 +464,137 @@ func noYTConflict(context.Context, pgx.Tx, ytwrite.Op, string) (string, error) {
 // and needs_update false, so the feed prepares no update until the body
 // changes again. A binding that no longer names the op's article (none is
 // ever overwritten, so only a binding removed by hand) is left alone.
-func bindYTArticleUpdateApplyTx(_ *Store, ctx context.Context, tx pgx.Tx, op ytwrite.Op, _ string, _ time.Time, _ bool) error {
+//
+// Then the document is decided again against the new binding, as the feed
+// would: an update queued for body B applies after the document went back to
+// the body A the article held when the feed saw A (and found it unchanged),
+// so the article now holds B while the document is A, and no feed row is
+// left to notice. The re-check prepares A's update behind this op.
+func bindYTArticleUpdateApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.Op, _ string, now time.Time, _ bool) error {
 	var p ytwrite.ArticleUpdatePayload
 	if err := json.Unmarshal(op.Payload, &p); err != nil {
 		return fmt.Errorf("payload of op %d: %w", op.ID, err)
 	}
-	_, err := tx.Exec(ctx, `UPDATE yt_article_bindings SET content_sha=$4, needs_update=false
-		WHERE document_id::text=$1 AND tenant=$2 AND article_id=$3`, op.EntityID, op.Tenant, op.YTTargetID, ytwrite.ContentSHA(p.Content))
-	return err
+	if _, err := tx.Exec(ctx, `UPDATE yt_article_bindings SET content_sha=$4, needs_update=false
+		WHERE document_id::text=$1 AND tenant=$2 AND article_id=$3`, op.EntityID, op.Tenant, op.YTTargetID, ytwrite.ContentSHA(p.Content)); err != nil {
+		return err
+	}
+	id, err := strconv.ParseInt(op.EntityID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("article_update op %d is not on a document lane: %w", op.ID, err)
+	}
+	outcome, err := s.ytArticleSnapshotTx(ctx, tx, id, now)
+	if err != nil {
+		return err
+	}
+	if outcome == ytArticleUpdatePrepared {
+		log.Printf("ytwrite.article_on_update document_id=%d op_id=%d outcome=%q", id, op.ID, outcome)
+	}
+	return nil
+}
+
+// ytArticleCatchUpPage bounds the documents one catch-up query lists.
+const ytArticleCatchUpPage = 200
+
+// catchUpYTArticles decides, through prepareYTArticleTx, every document the
+// feed may not have seen: the consumer's cursor starts at the feed's end on
+// its first pass, so a document created after the import ended, or a bound
+// one changed, before that pass has no feed row the consumer reads. It lists
+// the documents that need an op by the rule (unbound, created after the
+// import ended, with no article_create op; or bound on the gate's tenant
+// with needs_update or a content_sha that is not the document's) and decides
+// each in its own transaction under its lane lock. The decision is
+// idempotent (a create exists once per document, a snapshot already
+// prepared is skipped), so running it again, or beside the feed, prepares
+// nothing twice. Mode off does nothing.
+func (s *Store) catchUpYTArticles(ctx context.Context, now time.Time) (map[ytArticleOutcome]int, error) {
+	counts := map[ytArticleOutcome]int{}
+	g, on := s.ytDocsNow()
+	if !on {
+		return counts, nil
+	}
+	var after int64
+	for {
+		rows, err := s.pool.Query(ctx, `SELECT d.id FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id = d.id
+			WHERE d.id > $1 AND (
+				(b.document_id IS NULL AND d.created_at >= $2 AND NOT EXISTS (SELECT 1 FROM yt_write_ops o
+					WHERE o.principal = $3 AND o.kind = $4 AND o.idem_key = 'document-article:' || d.id::text))
+				OR (b.tenant = $5 AND (b.needs_update OR b.content_sha IS DISTINCT FROM d.sha256)))
+			ORDER BY d.id LIMIT $6`, after, YTImportEndedAt, YTDocsPrincipal, ytwrite.KindArticleCreate, g.tenant, ytArticleCatchUpPage)
+		if err != nil {
+			return counts, err
+		}
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return counts, err
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return counts, err
+		}
+		for _, id := range ids {
+			after = id
+			outcome, err := s.catchUpYTArticle(ctx, now, g, id)
+			if err != nil {
+				return counts, err
+			}
+			counts[outcome]++
+		}
+		if len(ids) < ytArticleCatchUpPage {
+			return counts, nil
+		}
+	}
+}
+
+// catchUpYTArticle is one document's catch-up transaction.
+func (s *Store) catchUpYTArticle(ctx context.Context, now time.Time, g ytDocsGate, id int64) (ytArticleOutcome, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockYTEntity(ctx, tx, ytwrite.ArticleEntity, strconv.FormatInt(id, 10)); err != nil {
+		return "", err
+	}
+	r, err := readYTArticleRow(ctx, tx, id)
+	if err != nil {
+		return "", err
+	}
+	outcome, err := prepareYTArticleTx(ctx, tx, now, g, id, r)
+	if err != nil {
+		return "", err
+	}
+	return outcome, tx.Commit(ctx)
+}
+
+// catchUpYTArticlesOnce runs catchUpYTArticles once per process in mode on,
+// after the document_articles cursor exists (so every later change is the
+// feed's): RunYTFeedConsumers calls it after its passes until it succeeds.
+func (s *Store) catchUpYTArticlesOnce(ctx context.Context, now time.Time) error {
+	if s.ytDocsCaughtUp.Load() {
+		return nil
+	}
+	if _, on := s.ytDocsNow(); !on {
+		return nil
+	}
+	var cursor bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_feed_cursors WHERE consumer=$1)`, ytDocsConsumer).Scan(&cursor); err != nil || !cursor {
+		return err
+	}
+	counts, err := s.catchUpYTArticles(ctx, now)
+	if err != nil {
+		log.Printf("ytwrite.articles_catchup_failed err=%q", err.Error())
+		return err
+	}
+	s.ytDocsCaughtUp.Store(true)
+	log.Printf("ytwrite.articles_catchup create_prepared=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d other_tenant=%d no_project=%d invalid=%d",
+		counts[ytArticleCreatePrepared], counts[ytArticleCreatePending], counts[ytArticleUpdatePrepared], counts[ytArticleUnchanged],
+		counts[ytArticleNotUpdated], counts[ytArticleUnboundImported], counts[ytArticleOutOfScope], counts[ytArticleOtherTenant],
+		counts[ytArticleNoProject], counts[ytArticleInvalid])
+	return nil
 }

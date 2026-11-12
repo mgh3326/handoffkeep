@@ -297,14 +297,16 @@ func TestYTCommentsWorkerStopIsBoundedWhileSettling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// hk 3997: every pass also runs the change-feed consumers; the three
-	// registered (decision_issues, hk 4054; task_docs, hk 3811; task_fields,
-	// hk 4003) prepare nothing with their modes off.
+	// hk 3997: every pass also runs the change-feed consumers; the four
+	// registered (decision_issues, hk 4054; document_articles, hk 4206;
+	// task_docs, hk 3811; task_fields, hk 4003) prepare nothing with their
+	// modes off.
 	if w.feed == nil {
 		t.Fatal("the write worker runs no change-feed pass")
 	}
 	passes, err := w.feed.RunYTFeedConsumers(ctx, ytFeedPassLimit)
-	if err != nil || len(passes) != 3 || passes[0].Consumer != "decision_issues" || passes[1].Consumer != "task_docs" || passes[2].Consumer != "task_fields" {
+	if err != nil || len(passes) != 4 || passes[0].Consumer != "decision_issues" || passes[1].Consumer != "document_articles" ||
+		passes[2].Consumer != "task_docs" || passes[3].Consumer != "task_fields" {
 		t.Fatalf("feed passes = %+v, %v", passes, err)
 	}
 	done := make(chan struct{})

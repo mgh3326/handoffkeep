@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -288,8 +289,14 @@ var ytSHA256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // and article) is a no-op that returns the stored row; any other binding for
 // the document, or another document's binding to the article, is
 // ErrYTArticleBindingConflict and changes nothing. No other row is written.
+// A document whose article_create op (hk 4206) is unresolved is refused with
+// ErrYTArticleBindingConflict too: the op gives it its article, and a binding
+// published under it would hold the op, and every op behind it on the
+// document's lane, for good.
 //
-// Locks, in this order (lockorder.go): FOR SHARE on the documents row, then
+// Locks, in this order (lockorder.go): the document's lane lock (as the
+// feed and an article_create's Apply take it, before any row), then FOR
+// SHARE on the documents row, then
 // on its task's row, then on that project's youtrack_projects row, held to
 // commit, so neither the body, the task, the task's project nor its mapping
 // can change between the comparison and the insert; then the new binding
@@ -308,8 +315,19 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 		return YTArticleBinding{}, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockYTEntity(ctx, tx, ytwrite.ArticleEntity, strconv.FormatInt(b.DocumentID, 10)); err != nil {
+		return YTArticleBinding{}, err
+	}
 	if err := lockYTArticleSourcesTx(ctx, tx, b.DocumentID); err != nil {
 		return YTArticleBinding{}, err
+	}
+	var pending bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$1 AND entity_kind=$2 AND entity_id=$3
+		AND state NOT IN ('applied','rejected'))`, ytwrite.KindArticleCreate, ytwrite.ArticleEntity, strconv.FormatInt(b.DocumentID, 10)).Scan(&pending); err != nil {
+		return YTArticleBinding{}, err
+	}
+	if pending {
+		return YTArticleBinding{}, fmt.Errorf("%w: document %d has an unresolved article_create op", ErrYTArticleBindingConflict, b.DocumentID)
 	}
 	var current YTArticleCandidate
 	err = scanYTArticleCandidate(tx.QueryRow(ctx, ytArticleCandidateSQL+ytArticleCandidateFrom+` WHERE d.id = $1`, b.DocumentID), &current)

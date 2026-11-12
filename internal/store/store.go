@@ -601,6 +601,9 @@ type Store struct {
 	// projects (SetYTDocsMode); nil is off. On prepares document ops from
 	// the change feed (hk 4206).
 	ytDocs atomic.Pointer[ytDocsGate]
+	// ytDocsCaughtUp is set once the document-article catch-up has run in
+	// this process (catchUpYTArticlesOnce).
+	ytDocsCaughtUp atomic.Bool
 	// ytBindingChecked, when set (tests only), runs inside AddYTTaskBinding
 	// after every check has passed and before the binding row is inserted,
 	// with every lock of the publication held.

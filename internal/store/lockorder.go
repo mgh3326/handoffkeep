@@ -56,8 +56,10 @@ package store
 //     single-task case and needs no level-2 lock: no task writer locks a
 //     documents row while it holds a task row (IntakeTask inserts new keys;
 //     applyDeployRecordTx runs under PutDocument's own level-2 lock, after the
-//     document row). AddYTArticleBinding takes the same order with FOR
-//     SHARE: the documents row, then its task row, then that project's
+//     document row). AddYTArticleBinding takes the document's YouTrack lane
+//     lock first (an advisory lock the feed and an article op's Apply take
+//     before any row, and that no holder of a documents row waits for), then
+//     the same order with FOR SHARE: the documents row, then its task row, then that project's
 //     youtrack_projects row (which no writer holds while it locks a task or
 //     a document), then inserts its new yt_article_bindings row. The dots writer (RecordDotsResult) is the same case: it
 //     inserts or updates one documents row and one dots_results row, each
