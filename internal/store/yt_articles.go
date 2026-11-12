@@ -260,7 +260,8 @@ func prepareYTArticleTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDocsG
 			return ytArticleUnchanged, nil
 		}
 		n, err := ytwrite.ArticleUpdateOp(ytwrite.ArticleUpdateRequest{Principal: YTDocsPrincipal, Actor: YTDocsPrincipal,
-			Tenant: r.binding.Tenant, ArticleID: r.binding.ArticleID, DocumentID: id, Summary: summary, Content: r.body})
+			Tenant: r.binding.Tenant, ArticleID: r.binding.ArticleID, DocumentID: id, Summary: summary, Content: r.body,
+			Provenance: r.binding.Origin == YTBindingOpApplied})
 		if errors.Is(err, ytwrite.ErrInvalid) {
 			// Bad data must not stop the feed: the cursor would never pass
 			// this row.
@@ -458,7 +459,8 @@ func (s *Store) ytArticleSnapshotTx(ctx context.Context, tx pgx.Tx, id int64, no
 func noYTConflict(context.Context, pgx.Tx, ytwrite.Op, string) (string, error) { return "", nil }
 
 // bindYTArticleUpdateApplyTx records, with an applied article_update, that
-// the bound article holds the op's content: content_sha becomes its sha256
+// the bound article holds the op's body: content_sha becomes the body's
+// sha256 (for an op_applied binding, without the provenance line and marker)
 // and needs_update false, so the feed prepares no update until the body
 // changes again. A binding that no longer names the op's article (none is
 // ever overwritten, so only a binding removed by hand) is left alone.

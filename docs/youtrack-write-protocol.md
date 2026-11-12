@@ -1271,8 +1271,12 @@ and carries the summary and the content.
 `[<prefix>] <key> [<kind>]` cut to 250 code points). An `article_create`'s
 content is the provenance line, a blank line, the body, a blank line and the
 op marker; a body that quotes the marker gets its create rejected
-`invalid_issue`. An `article_update`'s content is the body alone, as the
-import wrote it, so after an update `content_sha` is the body's sha256.
+`invalid_issue`. An `article_update`'s content depends on the binding's
+origin: an imported article (`import_verified`) gets the body alone, as the
+import wrote it; an article hk created (`op_applied`) keeps hk's format, the
+update op's own provenance line, the body and the update op's marker
+(rendered exactly as a create). Either way `content_sha` is the body's
+sha256 after the update.
 
 **Send.** `article_create`: one search of the project for the summary
 (`GET /api/articles`, query `project: <SHORT> "<summary>"`, at most 100 hits,
@@ -1281,14 +1285,15 @@ top-level articles of the project id whose summary is exact, and one GET of
 each kept hit's content. Exactly one carrying the op's marker is adopted, no
 POST; two are `rejected / ambiguous_issue`; none is exactly one POST with
 the project, summary and content. `article_update`: one POST to the article
-with the summary and content. Whether the live search syntax finds a
+with the summary and the rendered content. Whether the live search syntax finds a
 created article is UNVERIFIED until the first live create (hk 4206 report).
 
 **Evidence.** `article_create`: the same search; one article carrying the
 marker whose content is exactly the rendered text applies the op, one
 carrying the marker with other content keeps it `remote_unknown`.
 `article_update`: one GET of the article; its summary equal and its
-content's sha256 equal applies the op, anything else keeps it
+content's sha256 equal to the rendered content's (with the provenance line
+and marker for an `op_applied` binding) applies the op, anything else keeps it
 `remote_unknown`.
 
 **Binding.** Applying an `article_create` (send, evidence or `yt ops

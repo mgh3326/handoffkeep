@@ -170,14 +170,21 @@ type ArticleUpdateRequest struct {
 	ArticleID  string
 	DocumentID int64
 	Summary    string
-	Content    string
+	// Content is the document's body.
+	Content string
+	// Provenance writes the body in hk's format (RenderArticleCreate, with
+	// the update op's own provenance line and marker): set for an article
+	// hk created (binding origin op_applied). An imported article keeps the
+	// raw body, as the import wrote it.
+	Provenance bool
 }
 
 // ArticleUpdatePayload is the immutable payload of an article_update op: the
-// whole summary and content the article gets.
+// summary, the body, and whether the body is written in hk's format.
 type ArticleUpdatePayload struct {
-	Summary string `json:"summary"`
-	Content string `json:"content"`
+	Summary    string `json:"summary"`
+	Content    string `json:"content"`
+	Provenance bool   `json:"provenance,omitempty"`
 }
 
 // ArticleUpdateOp is the op an update request stores, with no Key: the
@@ -202,7 +209,10 @@ func ArticleUpdateOp(req ArticleUpdateRequest) (NewOp, error) {
 	if err := checkArticleText(req.Summary, req.Content); err != nil {
 		return NewOp{}, err
 	}
-	payload, err := json.Marshal(ArticleUpdatePayload{Summary: req.Summary, Content: req.Content})
+	if req.Provenance && strings.Contains(req.Content, markerPrefix) {
+		return NewOp{}, fmt.Errorf("%w: document body contains the reserved hk op marker", ErrInvalid)
+	}
+	payload, err := json.Marshal(ArticleUpdatePayload{Summary: req.Summary, Content: req.Content, Provenance: req.Provenance})
 	if err != nil {
 		return NewOp{}, err
 	}
@@ -383,7 +393,9 @@ func (articleCreate) MapRows(op Op, ytID string) []MapRow {
 }
 
 // articleUpdate is the article_update kind: the whole summary and content
-// written to the bound article. Its text (Render) is the content.
+// written to the bound article. Its text (Render) is the content: the body,
+// or for a Provenance op the body in RenderArticleCreate's form with this
+// op's provenance line and marker.
 type articleUpdate struct{}
 
 func articleUpdateOf(op Op) (ArticleUpdatePayload, error) {
@@ -402,10 +414,16 @@ func (articleUpdate) Render(op Op) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return p.Content, nil
+	if !p.Provenance {
+		return p.Content, nil
+	}
+	if strings.Contains(p.Content, markerPrefix) {
+		return "", fmt.Errorf("%w: document body contains the reserved hk op marker", ErrInvalid)
+	}
+	return RenderArticleCreate(op.Actor, op.CreatedAt.UTC().Truncate(time.Second), op.ID, p.Content), nil
 }
 
-func (articleUpdate) Send(ctx context.Context, remote Remote, op Op, _ string) (string, error) {
+func (articleUpdate) Send(ctx context.Context, remote Remote, op Op, text string) (string, error) {
 	ar, ok := remote.(ArticleRemote)
 	if !ok {
 		return "", &RefusedError{Reason: ReasonUnsupportedKind, Detail: "the remote cannot update articles"}
@@ -414,13 +432,13 @@ func (articleUpdate) Send(ctx context.Context, remote Remote, op Op, _ string) (
 	if err != nil {
 		return "", &RefusedError{Reason: ReasonInvalidIssue, Detail: err.Error()}
 	}
-	return ar.UpdateArticle(ctx, op.YTTargetID, p.Summary, p.Content)
+	return ar.UpdateArticle(ctx, op.YTTargetID, p.Summary, text)
 }
 
 // Evidence reads the article: when its summary is the op's and its content's
-// sha256 is the op content's, the article is the one match; anything else is
-// one mismatch, which the shared rule keeps remote_unknown.
-func (articleUpdate) Evidence(ctx context.Context, remote Remote, op Op, _ string) (Evidence, error) {
+// sha256 is the rendered text's, the article is the one match; anything else
+// is one mismatch, which the shared rule keeps remote_unknown.
+func (articleUpdate) Evidence(ctx context.Context, remote Remote, op Op, text string) (Evidence, error) {
 	var ev Evidence
 	ar, ok := remote.(ArticleRemote)
 	if !ok {
@@ -438,7 +456,7 @@ func (articleUpdate) Evidence(ctx context.Context, remote Remote, op Op, _ strin
 		}
 		return ev, err
 	}
-	if got.Summary == p.Summary && ContentSHA(got.Content) == ContentSHA(p.Content) {
+	if got.Summary == p.Summary && ContentSHA(got.Content) == ContentSHA(text) {
 		ev.Matches = []string{op.YTTargetID}
 	} else {
 		ev.Mismatched = 1

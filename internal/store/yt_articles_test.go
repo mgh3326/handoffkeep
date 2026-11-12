@@ -149,7 +149,7 @@ func TestYTArticlesBoundChangedUpdatesOnce(t *testing.T) {
 		t.Fatalf("ops %+v", ops)
 	}
 	var p ytwrite.ArticleUpdatePayload
-	if err := json.Unmarshal(ops[0].Payload, &p); err != nil || p.Summary != summary || p.Content != "edited body" {
+	if err := json.Unmarshal(ops[0].Payload, &p); err != nil || p.Summary != summary || p.Content != "edited body" || p.Provenance {
 		t.Fatalf("payload %+v %v", p, err)
 	}
 
@@ -224,11 +224,34 @@ func TestYTArticlesPostImportCreateBinds(t *testing.T) {
 	if n := len(ytartOps(t, s, id)); n != 1 {
 		t.Fatalf("%d ops after the bind", n)
 	}
-	// Its next edit is an update of the article it made.
+	// Its next edit is an update of the article it made, which keeps hk's
+	// format: the update op's provenance line, the body and its marker. The
+	// binding records the body's sha, so an unchanged body prepares nothing.
 	ytartPut(t, s, "design/ytart/new.md", "# new\n\nedited", nil)
 	ytartPass(t, s)
-	if ops := ytartOps(t, s, id); len(ops) != 2 || ops[1].Kind != ytwrite.KindArticleUpdate || ops[1].YTTargetID != b.ArticleID {
+	ops = ytartOps(t, s, id)
+	if len(ops) != 2 || ops[1].Kind != ytwrite.KindArticleUpdate || ops[1].YTTargetID != b.ArticleID {
 		t.Fatalf("ops %+v", ops)
+	}
+	var up ytwrite.ArticleUpdatePayload
+	if err := json.Unmarshal(ops[1].Payload, &up); err != nil || !up.Provenance || up.Content != "# new\n\nedited" {
+		t.Fatalf("update payload %+v %v", up, err)
+	}
+	ytartDrive(t, s, yt, &offset)
+	upd := ytartOps(t, s, id)[1]
+	if upd.State != ytwrite.StateApplied {
+		t.Fatalf("update %+v", upd)
+	}
+	if a, _ := yt.Article(b.ArticleID); a.Content != ytwrite.RenderArticleCreate(YTDocsPrincipal, upd.CreatedAt, upd.ID, "# new\n\nedited") {
+		t.Fatalf("article after update %+v", a)
+	}
+	if b := ytartBinding(t, s, id); b.ContentSHA != ytwrite.ContentSHA("# new\n\nedited") || b.NeedsUpdate || b.Origin != YTBindingOpApplied {
+		t.Fatalf("binding after update %+v", b)
+	}
+	ytartTouch(t, s, id)
+	ytartPass(t, s)
+	if n := len(ytartOps(t, s, id)); n != 2 {
+		t.Fatalf("%d ops after a touch", n)
 	}
 }
 

@@ -264,3 +264,60 @@ func TestArticleCreateResolveNeedsProvenance(t *testing.T) {
 	}
 	e.wantMap(e.want(op.ID, ytwrite.StateApplied, ""), "3-9", true)
 }
+
+// An article hk created (binding origin op_applied) keeps hk's format on
+// update: the update op's provenance line, the body and its marker, sent and
+// compared as such; a lost reply is applied by that exact rendering. An
+// imported article gets the raw body (TestArticleUpdateWritesAndEvidence).
+func TestArticleUpdateProvenanceKeepsHKFormat(t *testing.T) {
+	e := newArticleEnv(t)
+	art := e.yt.InjectArticle(artProject, artSummary, "created by an earlier op")
+	prepare := func(key, body string) ytwrite.Op {
+		t.Helper()
+		n, err := ytwrite.ArticleUpdateOp(ytwrite.ArticleUpdateRequest{Principal: artActor, Actor: artActor, Tenant: decTenant,
+			ArticleID: art, DocumentID: artDocID, Summary: artSummary, Content: body, Provenance: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		n.Key = key
+		op, _, err := e.ledger.Prepare(context.Background(), e.clock.Now(), n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return op
+	}
+	op := prepare("article_update:4206:1:a", "edited body")
+	e.drive()
+	e.want(op.ID, ytwrite.StateApplied, "")
+	want := ytwrite.RenderArticleCreate(artActor, op.CreatedAt, op.ID, "edited body")
+	if got, _ := e.yt.Article(art); got.Content != want || got.Summary != artSummary {
+		t.Fatalf("article %+v\nwant %q", got, want)
+	}
+
+	e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.CommitDropReply})
+	lost := prepare("article_update:4206:2:b", "edited again")
+	e.drive()
+	e.want(lost.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
+	e.clock.Advance(time.Hour)
+	e.drive()
+	e.want(lost.ID, ytwrite.StateApplied, "")
+	if got, _ := e.yt.Article(art); got.Content != ytwrite.RenderArticleCreate(artActor, lost.CreatedAt, lost.ID, "edited again") {
+		t.Fatalf("article %+v", got)
+	}
+
+	// The raw body is no evidence for a provenance update.
+	e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.Refuse, Status: http.StatusBadGateway})
+	miss := prepare("article_update:4206:3:c", "third")
+	e.drive()
+	if _, err := e.yt.UpdateArticle(context.Background(), art, artSummary, "third"); err != nil {
+		t.Fatal(err)
+	}
+	e.clock.Advance(time.Hour)
+	e.drive()
+	e.want(miss.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonMarkerMismatch)
+
+	if _, err := ytwrite.ArticleUpdateOp(ytwrite.ArticleUpdateRequest{Principal: artActor, Actor: artActor, Tenant: decTenant,
+		ArticleID: art, DocumentID: artDocID, Summary: artSummary, Content: "quoting " + ytwrite.OpMarker(1), Provenance: true}); err == nil {
+		t.Fatal("a provenance update quoting the marker was accepted")
+	}
+}
