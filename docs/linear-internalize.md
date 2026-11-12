@@ -186,8 +186,9 @@ treated as overdue.
     or a parent whose sub-tasks all settle without closing it (all dropped, or held at
     auto-close by its own PR that later closes unmerged), gets no further event;
     `tasks drift` lists it under `merged_pr_not_merged` with `mechanical: true` (empty
-    `open_prs` and `open_sub_tasks`, and a state a merge applies from, so not triage or
-    icebox): the close the daily hygiene job (hk 3292) is to make.
+    `open_prs` and `open_sub_tasks`, a state a merge applies from, so not triage or icebox, and the
+    gate auto-close applies: not awaiting a decision, no open decision request, and the
+    work-receipt fence allows it): the close the daily hygiene job (hk 3292) is to make.
 
 **Changes and reviews from the same events.** Every mergewake event also writes the
 work record, in the same transaction, after the task row is locked and before the rule

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
 // The drift report (hk 3766) names tasks whose state disagrees with the
@@ -71,8 +72,10 @@ type TaskDriftTask struct {
 	// when OpenPRs and OpenSubTasks are both empty.
 	OpenSubTasks []int64 `json:"open_sub_tasks,omitempty"`
 	// Mechanical, on merged_pr_not_merged only, is true when nothing holds
-	// the close: OpenPRs and OpenSubTasks are empty and the task is in a
-	// state a merge applies from (not triage, not icebox). It is the set the
+	// the close: OpenPRs and OpenSubTasks are empty, the task is in a state a
+	// merge applies from (not triage, not icebox), and the auto-close gate
+	// passes (closeGateTx: no pending decision, the work-receipt fence
+	// allows it). It is the set the
 	// hygiene job (hk 3292) may close without a person.
 	Mechanical bool `json:"mechanical,omitempty"`
 }
@@ -152,7 +155,7 @@ func (s *Store) TaskDrift(ctx context.Context, now time.Time, mergedDays int) (T
 	if out.MergedPRNotMerged, err = driftList(ctx, tx, "not settled, and refs.pr is merged (a merged changes row names the PR, or a merged or deployed task does) or the task implements a merged, not reverted change, or every sub-task is settled and one is merged or deployed, and no implements change is reverted and not relanded; open_prs and open_sub_tasks list what still holds the close, and mechanical is true only when nothing does and the state is one a merge applies from", driftMergedPRSQL); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_pr_not_merged: %w", err)
 	}
-	if err = driftBlockers(ctx, tx, out.MergedPRNotMerged.Tasks); err != nil {
+	if err = s.driftBlockers(ctx, tx, out.MergedPRNotMerged.Tasks); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_pr_not_merged blockers: %w", err)
 	}
 	if out.MergedWithoutDeploy, err = driftMergedWithoutDeploy(ctx, tx, now.Add(-time.Duration(mergedDays)*24*time.Hour), mergedDays); err != nil {
@@ -216,8 +219,10 @@ scan:
 	return out, nil
 }
 
-// driftBlockers fills OpenPRs and OpenSubTasks on xs, one read each.
-func driftBlockers(ctx context.Context, tx pgx.Tx, xs []TaskDriftTask) error {
+// driftBlockers fills OpenPRs and OpenSubTasks on xs, one read each, and sets
+// Mechanical where nothing holds the close and closeGateTx, the gate
+// autoCloseTx applies, passes for a close at merged.
+func (s *Store) driftBlockers(ctx context.Context, tx pgx.Tx, xs []TaskDriftTask) error {
 	if len(xs) == 0 {
 		return nil
 	}
@@ -258,9 +263,31 @@ func driftBlockers(ctx context.Context, tx pgx.Tx, xs []TaskDriftTask) error {
 	if err = rows.Err(); err != nil {
 		return err
 	}
+	var snap *wrkrecords.Snapshot
+	snapshot := func() (wrkrecords.Snapshot, error) {
+		if snap == nil {
+			got, err := loadWrkSnapshot(ctx, tx)
+			if err != nil {
+				return got, err
+			}
+			snap = &got
+		}
+		return *snap, nil
+	}
 	for i := range xs {
 		x := &xs[i]
-		x.Mechanical = len(x.OpenPRs) == 0 && len(x.OpenSubTasks) == 0 && sourceEventTable[SourceMergewakeMerge].from[x.State]
+		if len(x.OpenPRs) > 0 || len(x.OpenSubTasks) > 0 || !sourceEventTable[SourceMergewakeMerge].from[x.State] {
+			continue
+		}
+		var t Task
+		if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, x.ID), &t); err != nil {
+			return err
+		}
+		gate, err := s.closeGate(ctx, t, StateMerged, snapshot)
+		if err != nil {
+			return err
+		}
+		x.Mechanical = gate == ""
 	}
 	return nil
 }

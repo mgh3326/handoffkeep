@@ -430,3 +430,59 @@ func TestDriftFindsParentHeldAtAutoClose(t *testing.T) {
 		t.Fatalf("parent after its PR closed %+v ok=%t", d, ok)
 	}
 }
+
+// driftRow returns task id's merged_pr_not_merged row, if listed.
+func driftRow(t *testing.T, s *Store, id int64) (TaskDriftTask, bool) {
+	t.Helper()
+	for _, d := range driftAt(t, s, time.Now().UTC(), DriftDefaultMergedDays).MergedPRNotMerged.Tasks {
+		if d.ID == id {
+			return d, true
+		}
+	}
+	return TaskDriftTask{}, false
+}
+
+// TestDriftMechanicalKeepsTheDecisionGates (PR #331 review round 4): a parent
+// auto-close leaves open because it awaits a decision, or because its
+// decision request is open, is listed but not mechanical (closeGateTx).
+func TestDriftMechanicalKeepsTheDecisionGates(t *testing.T) {
+	s, pool := searchTestStore(t)
+	for i, gate := range []string{
+		`UPDATE tasks SET awaiting_decision=true WHERE id=$1`,
+		`UPDATE tasks SET refs=refs||jsonb_build_object('decision_request',jsonb_build_object('id','dr-'||$1::text||'-1','status','open')) WHERE id=$1`,
+	} {
+		parent := flowTask(t, s, pool, "implement", StateDeveloping, true)
+		child := flowTask(t, s, pool, "implement", StateReviewing, true)
+		setParent(t, s, child, parent)
+		if _, err := pool.Exec(t.Context(), gate, parent.ID); err != nil {
+			t.Fatal(err)
+		}
+		send(t, s, mergeEvent(child.ID, testPR(7001+i)))
+		if got := stateOf(t, s, parent.ID).State; got != StateDeveloping {
+			t.Fatalf("gate %d: parent auto-closed to %s", i, got)
+		}
+		if d, ok := driftRow(t, s, parent.ID); !ok || d.Mechanical {
+			t.Fatalf("gate %d: parent %+v ok=%t, want listed and not mechanical", i, d, ok)
+		}
+	}
+}
+
+// TestDriftMechanicalKeepsTheReceiptFence (PR #331 review round 4): a parent
+// the work-receipt fence protects is not auto-closed by its sub-task's merge,
+// and the drift report lists it as not mechanical.
+func TestDriftMechanicalKeepsTheReceiptFence(t *testing.T) {
+	s := wrkCIStore(t)
+	storeActivate(t, s, "job-a", "builder-a", 9001)
+	if _, err := s.pool.Exec(t.Context(), `INSERT INTO tasks(id,lane,parent_lane,title,kind,state,claimed_by,parent_id,created_by,created_at,updated_at,last_activity_at) VALUES(9003,'builder-a','director-1','fenced child','implement','reviewing','',9001,'test',now(),now(),now())`); err != nil {
+		t.Fatal(err)
+	}
+	if res := send(t, s, mergeEvent(9003, testPR(7101))); !res.Applied || res.State != StateMerged {
+		t.Fatalf("child merge %+v", res)
+	}
+	if got := stateOf(t, s, 9001).State; got != StateBacklog {
+		t.Fatalf("fenced parent auto-closed to %s", got)
+	}
+	if d, ok := driftRow(t, s, 9001); !ok || d.Mechanical {
+		t.Fatalf("fenced parent %+v ok=%t, want listed and not mechanical", d, ok)
+	}
+}
