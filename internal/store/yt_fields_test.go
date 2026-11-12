@@ -262,3 +262,65 @@ func TestYTFieldsSnapshotOnIssueCreateApply(t *testing.T) {
 		t.Fatalf("mode off ops %+v", ops)
 	}
 }
+
+// A binding published by the comments backfill has no issue_create apply to
+// trigger the initial snapshot, so AddYTTaskBinding must prepare it itself.
+func TestYTFieldsSnapshotOnTaskBinding(t *testing.T) {
+	s := schemaStore(t, "ytf_binding")
+	ytbMapped(t, s)
+	task := ytcTask(t, s, ytbProject)
+	if _, err := s.pool.Exec(t.Context(), `UPDATE tasks SET state='developing' WHERE id=$1`, task); err != nil {
+		t.Fatal(err)
+	}
+	s.SetYTFieldsMode(YTFieldsOn, ytcTenant)
+	if _, err := ytbAdd(t, s, ytbBinding(task)); err != nil {
+		t.Fatal(err)
+	}
+	ops := ytfOps(t, s, task)
+	if len(ops) != 1 || ops[0].State != ytwrite.StatePrepared || ops[0].YTTargetID != ytfIssue(task) {
+		t.Fatalf("binding ops %+v", ops)
+	}
+	if got := ytfField(ytfPayload(t, ops[0]), "hk 상태"); got != "개발 중" {
+		t.Fatalf("snapshot state = %q, want current task state", got)
+	}
+
+	offTask := ytcTask(t, s, ytbProject)
+	s.SetYTFieldsMode(YTFieldsOff, "")
+	if _, err := ytbAdd(t, s, ytbBinding(offTask)); err != nil {
+		t.Fatal(err)
+	}
+	if ops := ytfOps(t, s, offTask); len(ops) != 0 {
+		t.Fatalf("mode off binding ops %+v", ops)
+	}
+}
+
+func TestYTFieldsSnapshotOnTaskBindingRollsBackWithBinding(t *testing.T) {
+	s := schemaStore(t, "ytf_binding_rollback")
+	ytbMapped(t, s)
+	s.SetYTFieldsMode(YTFieldsOn, ytcTenant)
+	task := ytcTask(t, s, ytbProject)
+	// The deferred constraint confirms the snapshot was present at commit
+	// time, then aborts the transaction so both rows must roll back.
+	_, err := s.pool.Exec(t.Context(), `
+		CREATE FUNCTION reject_test_binding_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM yt_write_ops WHERE kind='issue_fields' AND entity_kind='task' AND entity_id=NEW.task_id::text) THEN
+				RAISE EXCEPTION 'issue_fields snapshot absent at binding commit';
+			END IF;
+			RAISE EXCEPTION 'test binding rollback';
+		END $$;
+		CREATE CONSTRAINT TRIGGER reject_test_binding_commit AFTER INSERT ON yt_task_bindings
+		DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_test_binding_commit();`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ytbAdd(t, s, ytbBinding(task)); err == nil || !strings.Contains(err.Error(), "test binding rollback") {
+		t.Fatalf("AddYTTaskBinding error = %v, want deferred rollback", err)
+	}
+	if n := ytcCount(t, s, `SELECT count(*) FROM yt_task_bindings WHERE task_id=$1`, task); n != 0 {
+		t.Fatalf("binding rows after rollback = %d", n)
+	}
+	if ops := ytfOps(t, s, task); len(ops) != 0 {
+		t.Fatalf("ops after binding rollback %+v", ops)
+	}
+}

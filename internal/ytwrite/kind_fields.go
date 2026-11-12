@@ -297,7 +297,8 @@ func TaskIssueSnapshot(t TaskFields) IssueSnapshot {
 	}
 	due := ""
 	if t.DueAt != nil {
-		due = strconv.FormatInt(t.DueAt.UTC().UnixMilli(), 10)
+		local := t.DueAt.In(time.FixedZone("Asia/Seoul", 9*60*60))
+		due = strconv.FormatInt(time.Date(local.Year(), local.Month(), local.Day(), 12, 0, 0, 0, time.UTC).UnixMilli(), 10)
 	}
 	expected := ""
 	if m := int64(t.Expected / time.Minute); m > 0 {
@@ -399,7 +400,10 @@ type IssueFieldsRemote interface {
 	// returns the issue's id. It may read the project's fields first: a
 	// failed read is a *NotSentError, and a value the project's field cannot
 	// take is a *RefusedError (ReasonFieldRefused) naming the field and the
-	// value; neither sends anything. Other errors follow CreateComment's.
+	// value; neither sends the update. An open-set value (레인, 영역,
+	// 마일스톤) its bundle lacks is added to the bundle first (a failed add
+	// is a *NotSentError, a 403 a *RefusedError). Other errors follow
+	// CreateComment's.
 	UpdateIssueFields(ctx context.Context, in IssueFieldsUpdate) (id string, err error)
 	// ReadIssueFields reads the issue's summary, description and fields,
 	// each field's value in the canonical text of FieldValue ("" for none).
@@ -486,11 +490,27 @@ func SnapshotDiff(want, got IssueSnapshot) string {
 		have[f.Name] = f.Value
 	}
 	for _, f := range want.Fields {
-		if have[f.Name] != f.Value {
+		if !snapshotFieldEqual(f.Name, f.Value, have[f.Name]) {
 			return f.Name
 		}
 	}
 	return ""
+}
+
+// YouTrack's date field stores a date as noon UTC. Compare 마감 by the UTC
+// calendar date it represents; every other snapshot field remains exact.
+func snapshotFieldEqual(name, want, got string) bool {
+	if name != FieldDue || want == "" || got == "" {
+		return want == got
+	}
+	wantMS, wantErr := strconv.ParseInt(want, 10, 64)
+	gotMS, gotErr := strconv.ParseInt(got, 10, 64)
+	if wantErr != nil || gotErr != nil {
+		return false
+	}
+	wy, wm, wd := time.UnixMilli(wantMS).UTC().Date()
+	gy, gm, gd := time.UnixMilli(gotMS).UTC().Date()
+	return wy == gy && wm == gm && wd == gd
 }
 
 // MapRows: an update creates nothing to map.
