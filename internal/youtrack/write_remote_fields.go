@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -18,17 +20,38 @@ var _ ytwrite.IssueFieldsRemote = (*WriteRemote)(nil)
 
 // fieldShape is one project field as the issue_fields update needs it: its
 // global type id ("string", "integer", "enum[1]", "enum[*]", "state[1]",
-// "date", "period", "text", ...) and, for a bundle field, its live values.
+// "date", "period", "text", ...) and, for a bundle field, the bundle's id and
+// every value it holds, archived ones too.
 type fieldShape struct {
-	typeID string
-	values map[string]bool
-	bundle bool
+	typeID   string
+	bundle   bool
+	bundleID string
+	values   map[string]bundleValue
 }
+
+// bundleValue is one value of a field's bundle.
+type bundleValue struct {
+	id       string
+	archived bool
+}
+
+// live reports whether the bundle holds the value unarchived.
+func (s fieldShape) live(value string) bool {
+	v, ok := s.values[value]
+	return ok && !v.archived
+}
+
+// openSetFields are the fields whose values hk owns as an open set (a lane,
+// an area, a milestone name appears in hk first): a value missing from the
+// project's bundle is added to it before the update (hk 4051). Every other
+// bundle field (hk 상태, 종류, 등급, 티어, hk 우선순위, 멈춤) is a closed set
+// the schema plan owns, and a missing value is refused.
+var openSetFields = map[string]bool{ytwrite.FieldLane: true, ytwrite.FieldArea: true, ytwrite.FieldMilestone: true}
 
 // projectFieldShapes reads the project's fields in one request.
 func (r *WriteRemote) projectFieldShapes(ctx context.Context, projectID string) (map[string]fieldShape, error) {
 	q := url.Values{}
-	q.Set("fields", "field(name,fieldType(id)),bundle(values(name,archived))")
+	q.Set("fields", "field(name,fieldType(id)),bundle(id,values(id,name,archived))")
 	q.Set("$top", strconv.Itoa(issueFieldsTop))
 	path := "/api/admin/projects/" + url.PathEscape(projectID) + "/customFields"
 	data, readErr, err := r.send(ctx, http.MethodGet, path, q, nil)
@@ -46,7 +69,9 @@ func (r *WriteRemote) projectFieldShapes(ctx context.Context, projectID string) 
 			} `json:"fieldType"`
 		} `json:"field"`
 		Bundle *struct {
+			ID     string `json:"id"`
 			Values []struct {
+				ID       string `json:"id"`
 				Name     string `json:"name"`
 				Archived bool   `json:"archived"`
 			} `json:"values"`
@@ -60,18 +85,83 @@ func (r *WriteRemote) projectFieldShapes(ctx context.Context, projectID string) 
 	}
 	out := make(map[string]fieldShape, len(fields))
 	for _, f := range fields {
-		s := fieldShape{typeID: f.Field.FieldType.ID, values: map[string]bool{}}
+		s := fieldShape{typeID: f.Field.FieldType.ID, values: map[string]bundleValue{}}
 		if f.Bundle != nil {
-			s.bundle = true
+			s.bundle, s.bundleID = true, f.Bundle.ID
 			for _, v := range f.Bundle.Values {
-				if !v.Archived {
-					s.values[v.Name] = true
+				// A live value wins over an archived one of the same name.
+				if have, ok := s.values[v.Name]; ok && !have.archived {
+					continue
 				}
+				s.values[v.Name] = bundleValue{id: v.ID, archived: v.Archived}
 			}
 		}
 		out[f.Field.Name] = s
 	}
 	return out, nil
+}
+
+// bundleKindPath is the admin bundles path segment and element type of a
+// bundle field's type id; ok is false for a type hk does not add values to.
+func bundleKindPath(typeID string) (kindPath, elementType string, ok bool) {
+	switch typeID {
+	case "enum[1]", "enum[*]":
+		return "enum", "EnumBundleElement", true
+	case "state[1]":
+		return "state", "StateBundleElement", true
+	}
+	return "", "", false
+}
+
+// errNoBundlePermission is a 403 from a bundle value add.
+var errNoBundlePermission = errors.New("no permission to add bundle value")
+
+// ensureBundleValue makes value a live value of the field's bundle: an
+// archived value is un-archived (never duplicated), a missing one is added
+// with one POST to the bundle itself, so a bundle several projects share
+// gains it for all of them. A 403 is errNoBundlePermission; another 4xx
+// (an "already exists" from a concurrent add) re-reads the project's fields
+// and succeeds when the value is now live. Each change is logged.
+func (r *WriteRemote) ensureBundleValue(ctx context.Context, projectID, field string, s fieldShape, value string) error {
+	kindPath, elementType, ok := bundleKindPath(s.typeID)
+	if !ok || s.bundleID == "" {
+		return fmt.Errorf("field %q: a %s bundle takes no added value", field, s.typeID)
+	}
+	base := "/api/admin/customFieldSettings/bundles/" + kindPath + "/" + url.PathEscape(s.bundleID) + "/values"
+	q := url.Values{}
+	q.Set("fields", "id,name,archived")
+	path, body, action := base, any(struct {
+		Type string `json:"$type"`
+		Name string `json:"name"`
+	}{elementType, value}), "added"
+	if v, ok := s.values[value]; ok && v.archived {
+		path, action = base+"/"+url.PathEscape(v.id), "unarchived"
+		body = struct {
+			Type     string `json:"$type"`
+			Archived bool   `json:"archived"`
+		}{elementType, false}
+	}
+	_, _, err := r.send(ctx, http.MethodPost, path, q, body)
+	var re *ytwrite.RemoteError
+	switch {
+	case err == nil:
+	case errors.As(err, &re) && re.Status == http.StatusForbidden:
+		return fmt.Errorf("%w: %v", errNoBundlePermission, err)
+	case errors.As(err, &re) && re.Status >= 400 && re.Status < 500 &&
+		re.Status != http.StatusUnauthorized && re.Status != http.StatusTooManyRequests && re.Status != http.StatusRequestTimeout:
+		shapes, rerr := r.projectFieldShapes(ctx, projectID)
+		if rerr != nil {
+			return rerr
+		}
+		if !shapes[field].live(value) {
+			return err
+		}
+		action = "present"
+	default:
+		return err
+	}
+	log.Printf("ytwrite.bundle_value_added project_id=%s field=%q value=%q bundle_id=%s action=%s", projectID, field, value, s.bundleID, action)
+	return nil
 }
 
 // issueFieldValue is one field of the update in the wire shape the
@@ -160,7 +250,7 @@ func issueFieldValue(fv ytwrite.FieldValue, s fieldShape) (CustomField, error) {
 	default:
 		return refuse("the field type " + strconv.Quote(typeID) + " is not one hk writes")
 	}
-	if s.bundle && fv.Value != "" && !s.values[fv.Value] {
+	if s.bundle && fv.Value != "" && !s.live(fv.Value) && !openSetFields[fv.Name] {
 		return refuse("the value is not in the field's bundle (or it is archived)")
 	}
 	return f, nil
@@ -169,9 +259,12 @@ func issueFieldValue(fv ytwrite.FieldValue, s fieldShape) (CustomField, error) {
 // UpdateIssueFields reads the project's fields (one GET; a failure is a
 // *ytwrite.NotSentError), builds every snapshot field in the shape the
 // project's field takes, and refuses (*ytwrite.RefusedError,
-// ytwrite.ReasonFieldRefused) a value its bundle lacks, a field the project
-// lacks with a value to set, or a type the snapshot cannot be written as, so
-// last_error names the field and the value. Then it makes one POST
+// ytwrite.ReasonFieldRefused) a closed-set value its bundle lacks, a field the
+// project lacks with a value to set, or a type the snapshot cannot be written
+// as, so last_error names the field and the value. Only when nothing is
+// refused, an open-set value (openSetFields) missing from or archived in its
+// bundle is added or un-archived (ensureBundleValue): a 403 is refused, any
+// other failure is a *ytwrite.NotSentError. Then it makes one POST
 // /api/issues/{id} with the summary, the description and every field ("" is
 // sent as null, or [] for a multi-value field, which clears it). A field the
 // project lacks with no value is left out.
@@ -182,6 +275,11 @@ func (r *WriteRemote) UpdateIssueFields(ctx context.Context, in ytwrite.IssueFie
 	}
 	fields := make([]CustomField, 0, len(in.Fields))
 	var refused []string
+	type bundleAdd struct {
+		field, value string
+		shape        fieldShape
+	}
+	var adds []bundleAdd
 	for _, fv := range in.Fields {
 		s, ok := shapes[fv.Name]
 		if !ok {
@@ -195,10 +293,32 @@ func (r *WriteRemote) UpdateIssueFields(ctx context.Context, in ytwrite.IssueFie
 			refused = append(refused, ferr.Error())
 			continue
 		}
+		if s.bundle && fv.Value != "" && !s.live(fv.Value) {
+			if _, _, ok := bundleKindPath(s.typeID); !ok || s.bundleID == "" {
+				refused = append(refused, fmt.Sprintf("field %q value %q: the value is not in the field's bundle and a %s bundle takes no added value", fv.Name, fv.Value, s.typeID))
+				continue
+			}
+			adds = append(adds, bundleAdd{fv.Name, fv.Value, s})
+		}
 		fields = append(fields, f)
 	}
 	if len(refused) > 0 {
 		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonFieldRefused, Detail: strings.Join(refused, "; ")}
+	}
+	done := map[string]bool{}
+	for _, a := range adds {
+		key := a.shape.bundleID + "\x00" + a.value
+		if done[key] {
+			continue
+		}
+		if err := r.ensureBundleValue(ctx, in.ProjectID, a.field, a.shape, a.value); err != nil {
+			if errors.Is(err, errNoBundlePermission) {
+				return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonFieldRefused,
+					Detail: fmt.Sprintf("field %q value %q: %v", a.field, a.value, err)}
+			}
+			return "", &ytwrite.NotSentError{Err: err}
+		}
+		done[key] = true
 	}
 	body := struct {
 		Summary      string        `json:"summary"`

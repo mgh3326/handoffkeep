@@ -938,3 +938,65 @@ func youtrackIssuesBackfillCmd(args []string, out io.Writer) error {
 	}
 	return printJSON(out, report)
 }
+
+const youtrackFieldsBackfillUsage = "usage: youtrack fields-backfill [--project P] [--task N] [--limit N] [--dry-run]"
+
+// youtrackFieldsBackfillCmd is `youtrack fields-backfill` (hk 4022): it
+// prepares the issue_fields snapshot of every bound task whose snapshot
+// differs from the last one prepared, on the tenant of YOUTRACK_URL, by the
+// task_fields consumer's rule, and calls no YouTrack: serve's write worker
+// sends the ops. A second run prepares nothing. --limit caps the ops one run
+// prepares; --dry-run counts without writing. It refuses with
+// youtrackExitFieldsOff unless HANDOFFKEEP_YT_FIELDS_MODE is on, and opens
+// the database directly, like `youtrack issues-backfill`.
+func youtrackFieldsBackfillCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("youtrack fields-backfill", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	project := fs.String("project", "", "only tasks of this hk project")
+	task := fs.Int64("task", 0, "only this task")
+	limit := fs.Int("limit", 0, "maximum ops prepared in this run (0: no cap)")
+	dryRun := fs.Bool("dry-run", false, "count the tasks without preparing ops")
+	ordered, err := splitArgs(args, "project", "task", "limit")
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(ordered); err != nil {
+		return fmt.Errorf("%v; %s", err, youtrackFieldsBackfillUsage)
+	}
+	if fs.NArg() != 0 || *task < 0 || *limit < 0 {
+		return errors.New(youtrackFieldsBackfillUsage)
+	}
+	mode, err := ytFieldsModeFromEnv()
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	if mode != store.YTFieldsOn {
+		return exitCodeError{code: youtrackExitFieldsOff, err: errors.New("fields-backfill needs HANDOFFKEEP_YT_FIELDS_MODE=on (the write worker admits no issue_fields op while it is off)")}
+	}
+	dbURL := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DB_URL"))
+	baseURL := strings.TrimSpace(os.Getenv("YOUTRACK_URL"))
+	token := strings.TrimSpace(os.Getenv("YOUTRACK_BOT_API_KEY"))
+	if dbURL == "" || baseURL == "" || token == "" {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("HANDOFFKEEP_DB_URL, YOUTRACK_URL and YOUTRACK_BOT_API_KEY are required")}
+	}
+	// The client only names the tenant here; nothing is sent.
+	client, err := youtrack.New(youtrack.Config{BaseURL: baseURL, Token: token, UserAgent: "handoffkeep-ytwrite"})
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	tenant := youtrack.NewWriteRemote(client).Tenant()
+	openCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := store.Open(openCtx, dbURL)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	st.SetYTFieldsMode(mode, tenant)
+	report, err := st.BackfillYTFieldsOps(context.Background(), store.YTFieldsBackfillOptions{
+		Project: strings.TrimSpace(*project), TaskID: *task, Limit: *limit, DryRun: *dryRun})
+	if err != nil {
+		return err
+	}
+	return printJSON(out, report)
+}

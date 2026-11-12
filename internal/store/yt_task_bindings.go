@@ -252,8 +252,9 @@ func ytCommentOnOpTx(ctx context.Context, tx pgx.Tx, c TaskComment, now time.Tim
 // any of them changed since, then refuses if any local source disagrees with
 // the binding (ytBindingDisagreement) or another binding holds the task.
 // Adding the same binding again is a no-op that returns the stored row.
-// Nothing else is written: a binding creates no op row and no map row. The
-// new row's comments_from is the task's highest comment id read in the same
+// A new binding creates no map row; when task fields mode is on, it also
+// prepares the task's first issue_fields op in this transaction. The new
+// row's comments_from is the task's highest comment id read in the same
 // transaction, so the binding never copies a comment written before it.
 //
 // Locks, in this order (lockorder.go): the issue ownership lock, FOR UPDATE on
@@ -314,15 +315,19 @@ func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified 
 	if s.ytBindingChecked != nil {
 		s.ytBindingChecked()
 	}
+	now := time.Now().UTC()
 	var got YTTaskBinding
 	err = scanYTBinding(tx.QueryRow(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, comments_from)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$1))
 		ON CONFLICT DO NOTHING RETURNING `+ytBindingColumns,
-		b.TaskID, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, time.Now().UTC()), &got)
+		b.TaskID, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, now), &got)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return YTTaskBinding{}, fmt.Errorf("%w: issue %s on %s is bound to another task", ErrYTBindingConflict, b.IssueID, b.Tenant)
 	}
 	if err != nil {
+		return YTTaskBinding{}, err
+	}
+	if err := s.ytFieldsOnBindTx(ctx, tx, b.TaskID, now); err != nil {
 		return YTTaskBinding{}, err
 	}
 	return got, tx.Commit(ctx)
