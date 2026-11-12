@@ -221,6 +221,12 @@ func (s *Store) syncYTIssueTx(ctx context.Context, tx pgx.Tx, t Task, now time.T
 		if found && ytIssueOpTargets(latest, p) {
 			return 0, false, dropYTIssueIntentTx(ctx, tx, t.ID)
 		}
+		if !found && deref(t.Project) == "" {
+			// A task with no project goes to the HK bucket, whose id only a
+			// process in issue mode on knows: one that does not cannot tell
+			// whether the op still targets it, so it leaves the op alone.
+			return 0, false, nil
+		}
 		if _, err := rejectYTOpTx(ctx, tx, now, latest.ID, ytwrite.ReasonProjectChanged,
 			fmt.Sprintf("task moved to project %q before the issue was created", deref(t.Project))); err != nil {
 			return 0, false, err

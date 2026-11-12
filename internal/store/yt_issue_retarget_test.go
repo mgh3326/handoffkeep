@@ -239,3 +239,24 @@ func TestYTIssueIntentIsConsumedOnlyOnItsTenant(t *testing.T) {
 		t.Fatalf("ops %+v", ops)
 	}
 }
+
+// A no-project task's op targets the HK bucket, whose id only a process in
+// issue mode on knows: a claim in a process that does not know it leaves the
+// op as it is rather than treat the task as moved.
+func TestYTIssueBucketOpIsKeptWhereTheBucketIsUnknown(t *testing.T) {
+	s := schemaStore(t, "ytr_bucket")
+	s.SetYTIssuesBucketProject("0-hk")
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	task, err := s.CreateDotsRequest(t.Context(), "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ops := ytiOps(t, s, task.ID); len(ops) != 1 || ops[0].YTTargetID != "0-hk" {
+		t.Fatalf("ops %+v", ops)
+	}
+	s.SetYTIssuesBucketProject("")
+	ytiDispatch(t, s, ytiOps(t, s, task.ID)[0])
+	if ops := ytiOps(t, s, task.ID); len(ops) != 1 || ops[0].State != ytwrite.StateDispatched {
+		t.Fatalf("ops after a claim without the bucket %+v", ops)
+	}
+}
