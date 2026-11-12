@@ -16,6 +16,8 @@ func StatusOf(s State) Status {
 
 // OpView is the read-only shape of one op that the operator's view (/v1/yt/ops,
 // `handoffkeep yt ops`) shows. It carries no payload: the body stays in PG.
+// LastError is set only by OperatorViewOf: the raw remote or operator detail is
+// for the operator's client, never for other bearer tokens.
 type OpView struct {
 	ID            int64      `json:"id"`
 	Kind          string     `json:"kind"`
@@ -36,16 +38,23 @@ type OpView struct {
 	ResolvedAt    *time.Time `json:"resolved_at,omitempty"`
 }
 
-// ViewOf renders an op for the operator's view.
+// ViewOf renders an op for any holder of an API token. It omits LastError.
 func ViewOf(op Op) OpView {
 	v := OpView{
 		ID: op.ID, Kind: op.Kind, EntityKind: op.EntityKind, EntityID: op.EntityID, YTTargetID: op.YTTargetID, Tenant: op.Tenant,
-		Actor: op.Actor, State: op.State, Status: StatusOf(op.State), Reason: op.Reason, LastError: op.LastError, YTResultID: op.YTResultID,
+		Actor: op.Actor, State: op.State, Status: StatusOf(op.State), Reason: op.Reason, YTResultID: op.YTResultID,
 		Attempts: op.Attempts, Reconciles: op.Reconciles, CreatedAt: op.CreatedAt, NextAttemptAt: op.NextAttemptAt,
 	}
 	if !op.ResolvedAt.IsZero() {
 		at := op.ResolvedAt
 		v.ResolvedAt = &at
 	}
+	return v
+}
+
+// OperatorViewOf is ViewOf plus LastError, for the operator's own client only.
+func OperatorViewOf(op Op) OpView {
+	v := ViewOf(op)
+	v.LastError = op.LastError
 	return v
 }

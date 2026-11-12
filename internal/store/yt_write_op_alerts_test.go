@@ -14,7 +14,7 @@ import (
 // injected clock. One notice per class per 10-minute window covers every op of
 // the class not yet announced; an op is announced once per class; an op not
 // old enough yet waits; an op a window's notice could not take waits for the
-// next window; a remote_unknown op is not a stuck op.
+// next window; a remote_unknown op is stuck until the operator resolves it.
 func TestYTWriteOpAlertsBatchPerWindowAndClass(t *testing.T) {
 	s := schemaStore(t, "ytwb")
 	ctx := t.Context()
@@ -59,7 +59,7 @@ func TestYTWriteOpAlertsBatchPerWindowAndClass(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 12:00: one stuck notice (prepared and dispatched) and one rejected notice.
+	// 12:00: one stuck notice (prepared, dispatched and remote_unknown) and one rejected notice.
 	if n := alerts(t0); n != 2 {
 		t.Fatalf("12:00 pass = %d notices, want 2", n)
 	}
@@ -111,7 +111,7 @@ func TestYTWriteOpAlertsBatchPerWindowAndClass(t *testing.T) {
 	at := func(m int) int64 { return t0.Add(time.Duration(m) * time.Minute).Unix() }
 	want := []row{
 		{fmt.Sprintf("yt-ops-stuck-%d", at(0)), "handoffkeep-design",
-			"[ytwrite] 2 stuck (dispatched: 1, prepared: 1) op ids " + id(prepared) + ", " + id(dispatched) + " | handoffkeep yt ops"},
+			"[ytwrite] 3 stuck (dispatched: 1, prepared: 1, remote_unknown: 1) op ids " + id(prepared) + ", " + id(dispatched) + ", " + id(unknown) + " | handoffkeep yt ops"},
 		{fmt.Sprintf("yt-ops-rejected-%d", at(0)), "handoffkeep-design",
 			"[ytwrite] 1 rejected (" + ytwrite.ReasonOperatorNotDone + ": 1) op ids " + id(rejected) + " | handoffkeep yt ops --state rejected"},
 		{fmt.Sprintf("yt-ops-stuck-%d", at(10)), "handoffkeep-design",

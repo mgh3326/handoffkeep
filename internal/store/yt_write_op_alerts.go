@@ -45,6 +45,10 @@ var ytWriteOpAlertPointer = map[string]string{
 // once per class (yt_write_op_alerts). A window whose notice for a class
 // already exists leaves its ops unmarked, so they go in the next window.
 // Returns how many notices it wrote.
+//
+// Passes are serialised by a transaction-scoped advisory lock taken before the
+// candidate read. Two passes that straddle a window boundary would otherwise
+// both read an op as unmarked and announce it in two windows.
 func (s *Store) EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int, error) {
 	now = now.UTC()
 	tx, err := s.pool.Begin(ctx)
@@ -52,6 +56,9 @@ func (s *Store) EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int,
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('yt_write_op_alerts', 0))`); err != nil {
+		return 0, err
+	}
 
 	window := now.Truncate(ytWriteOpAlertWindow)
 	created := 0
@@ -96,9 +103,12 @@ type ytWriteOpAlertCandidate struct {
 
 // ytWriteOpAlertCandidates lists the ops of class not yet announced, oldest
 // first, up to the batch bound. The row lock keeps a pending alert from racing
-// a concurrent resolution. A stuck op is prepared since before cutoff or
-// dispatched since before cutoff. A rejected op is rejected, or applied with
-// an unpublished binding (the operator's rejected view lists it too).
+// a concurrent resolution. A stuck op is prepared since before cutoff, or
+// dispatched since before cutoff, or remote_unknown since before cutoff (no
+// state-entry time is kept for remote_unknown, so its creation time stands in;
+// its write may already have landed, and only the operator resolves it). A
+// rejected op is rejected, or applied with an unpublished binding (the
+// operator's rejected view lists it too).
 func ytWriteOpAlertCandidates(ctx context.Context, tx pgx.Tx, class string, cutoff time.Time) ([]ytWriteOpAlertCandidate, error) {
 	// The binding-conflict reason is a literal, not a parameter, so a cached
 	// generic plan can still use the partial index yt_write_ops_alert_scan.
@@ -106,7 +116,8 @@ func ytWriteOpAlertCandidates(ctx context.Context, tx pgx.Tx, class string, cuto
 	switch class {
 	case ytWriteOpAlertStuck:
 		q = `SELECT o.id, o.state, o.reason FROM yt_write_ops o
-			WHERE ((o.state='prepared' AND o.created_at <= $1) OR (o.state='dispatched' AND o.dispatched_at <= $1))
+			WHERE ((o.state='prepared' AND o.created_at <= $1) OR (o.state='dispatched' AND o.dispatched_at <= $1)
+				OR (o.state='remote_unknown' AND o.created_at <= $1))
 			AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='stuck')
 			ORDER BY o.id LIMIT $2 FOR SHARE OF o`
 	case ytWriteOpAlertRejected:

@@ -271,7 +271,8 @@ package store
 //     locks a cursor or snapshot-state row, and a handler takes no task row,
 //     no level 2-5 lock and no comment lock. The pruned alert inserts a new
 //     notification_outbox key (ON CONFLICT DO NOTHING).
-//     The op alert pass (EnqueueYTWriteOpAlerts, hk 4056) takes FOR SHARE on
+//     The op alert pass (EnqueueYTWriteOpAlerts, hk 4056) takes the advisory
+//     lock hashtextextended('yt_write_op_alerts', 0) first, then FOR SHARE on
 //     the yt_write_ops rows it reads, then inserts notification_outbox and
 //     yt_write_op_alerts rows (ON CONFLICT DO NOTHING); it takes no lane lock.
 //     The issue_fields backfill (BackfillYTFieldsOps, hk 4022) runs one

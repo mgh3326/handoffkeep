@@ -325,8 +325,7 @@ comment.
 prepared, dispatched, remote_unknown), `all`, or one state; `kind` is one
 registered op kind (an unknown kind is refused). Each op shows id,
 kind, lane, target, tenant, actor, state, `status` (`pending` for every unresolved
-state, `remote_unknown` included), reason code, `last_error` (the detail behind
-the reason: the YouTrack message or the operator's note), result id, attempts
+state, `remote_unknown` included), reason code, result id, attempts
 and times; never the body or the key. A full page carries `next_after_id`.
 
 **Operator resolve.** `handoffkeep youtrack ops resolve <op id> --applied <yt id>
@@ -335,15 +334,17 @@ through `POST /v1/yt/ops/{id}/resolve` (operator bearer only). It refuses an op
 that is not `remote_unknown` (409 `ytwrite_state`) and never resends.
 
 **Alerts** (`handoffkeep-design` lane, outbox kind `yt_write_op`). The alert
-worker raises two classes: `stuck` (an op prepared, or dispatched, for more
-than 10 minutes) and `rejected` (an op rejected, or applied with reason
+worker raises two classes: `stuck` (an op prepared or dispatched for more
+than 10 minutes, or `remote_unknown` for more than 10 minutes since its creation) and `rejected` (an op rejected, or applied with reason
 `binding_conflict`). Per class and 10-minute window it writes one notice that
 covers every op of the class not yet announced, for example
 `[ytwrite] 2 stuck (dispatched: 1, prepared: 1) op ids 12, 15 | handoffkeep yt ops`.
 `yt_write_op_alerts` records each op's announcement per class, so an op is
 named once; an op that a window's notice could not take (that window already
 has one for the class) is named by the next window. A `remote_unknown` op is
-not a stuck op: the operator resolves it.
+stuck until the operator resolves it. `last_error` (the detail behind the reason:
+the YouTrack message or the operator's note) is shown only to the operator's
+client; other tokens get the view without it.
 
 **Migration** `20261112-yt-write-op-alert-batch` (expand-only): the table
 `yt_write_op_alerts` (no foreign key, so `yt_write_ops` takes no lock), written
