@@ -56,7 +56,7 @@ func stateOf(t *testing.T, s *Store, id int64) Task {
 // TestEveryManualTransitionEdge runs every ordered pair of states through
 // TransitionTaskWith: an edge in TaskTransitions succeeds from a non-settled
 // state, every other pair is a conflict that leaves the task untouched, and a
-// settled task leaves only through reopen.
+// settled task leaves only through reopen, or merged to completed with evidence.
 func TestEveryManualTransitionEdge(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := t.Context()
@@ -77,7 +77,7 @@ func TestEveryManualTransitionEdge(t *testing.T) {
 					in.DuplicateOf = other.ID
 				}
 				got, err := s.TransitionTaskWith(ctx, x.ID, in)
-				allowed := TaskTransitions[from][to] && !IsSettledState(from) && (to != StateCompleted || from == StateMerged)
+				allowed := TaskTransitions[from][to] && (!IsSettledState(from) || mergedCompletes(from, to)) && (to != StateCompleted || mergedCompletes(from, to))
 				if allowed {
 					if err != nil {
 						t.Fatalf("%s -> %s refused: %v", from, to, err)
