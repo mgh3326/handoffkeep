@@ -283,7 +283,25 @@ package store
 //     lock, cursor, task row or level 2-5 lock.
 //     PutTranslations (translations.go) inserts sync_log rows for the task
 //     titles it writes after its translations rows and locks no task row; its
-//     commit takes level 6 like any feed writer.
+//     commit takes level 6 like any feed writer. Every decision_requests
+//     write inserts its sync_log row from a row trigger (hk 4054,
+//     migration_decision_record_feed.go) and so takes level 6 at commit too.
+//
+//   - Decision mode (yt_decisions.go, hk 4054). Its lanes are decisions
+//     (yt_write_entity:decision:<id>), which no task writer or comment
+//     writer takes. The feed handler (decision_issues) takes them as above,
+//     each before it reads that decision's binding and create op.
+//     Apply of a decision_create op takes the decision's lane lock first,
+//     then FOR UPDATE on the op row, then inserts the decision's
+//     yt_entity_map and yt_decision_bindings rows and may prepare its first
+//     snapshot (the same lane lock again, its yt_snapshot_state row, a new
+//     op row). BindYTDecision (`youtrack decisions-backfill`) takes the
+//     decision's lane lock first, reads its ops and binding without a lock,
+//     inserts the binding and may prepare the snapshot the same way. Both
+//     hold one lane lock; a binding insert can wait only for another
+//     decision's uncommitted binding of the same issue, whose holder waits
+//     for no second lane lock, so the wait cannot close a cycle. Neither
+//     takes a task row, a decision_requests row or a level 1-5 lock.
 //
 //   - The YouTrack sync's single-run guard is a session-scoped
 //     pg_try_advisory_lock(8241873404) on its own pooled connection. It is
