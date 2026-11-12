@@ -213,6 +213,34 @@ func retargetYTIssueTx(ctx context.Context, tx pgx.Tx, t Task, now time.Time) er
 	return nil
 }
 
+// retargetClaimedYTIssueTx runs retargetYTIssueTx for prepared issue op op
+// from Claim, which holds the task's lane lock and op's row, and reports
+// whether op was rejected (moved) so Claim must not dispatch it. The task
+// row is read without a lock, as prepareYTIssueIntent reads it; a task that
+// no longer exists leaves op as it is.
+func retargetClaimedYTIssueTx(ctx context.Context, tx pgx.Tx, now time.Time, op ytwrite.Op) (bool, error) {
+	taskID, err := strconv.ParseInt(op.EntityID, 10, 64)
+	if err != nil || op.EntityKind != "task" {
+		return false, nil
+	}
+	var t Task
+	err = tx.QueryRow(ctx, `SELECT id, title, created_by, project FROM tasks WHERE id=$1`, taskID).Scan(&t.ID, &t.Title, &t.CreatedBy, &t.Project)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := retargetYTIssueTx(ctx, tx, t, now.UTC()); err != nil {
+		return false, err
+	}
+	var state string
+	if err := tx.QueryRow(ctx, `SELECT state FROM yt_write_ops WHERE id=$1`, op.ID).Scan(&state); err != nil {
+		return false, err
+	}
+	return state != string(ytwrite.StatePrepared), nil
+}
+
 // recordYTIssueIntentTx records that task t, in issue mode on, waits for its
 // project's mapping (hk 3942).
 func recordYTIssueIntentTx(ctx context.Context, tx pgx.Tx, t Task, now time.Time) error {

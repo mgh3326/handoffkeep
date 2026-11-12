@@ -211,6 +211,10 @@ package store
 //     of its transaction, as backfillYTIssue does, then reads the task row
 //     without a lock: after the lock, so it sees the project a change
 //     committed under that lane, or the change retargets what it prepared.
+//     Claim of an issue_create op (retargetClaimedYTIssueTx) also reads the
+//     task row without a lock, under the lane lock and after its op row,
+//     and may then reject that op and insert its replacement as a project
+//     change's retarget does.
 //     No cycle, lock by lock:
 //       - The ownership lock: only those two writers take it, always first
 //         and while holding nothing, so no transaction waits for it while
