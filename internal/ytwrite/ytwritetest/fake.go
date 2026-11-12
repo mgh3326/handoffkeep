@@ -75,6 +75,8 @@ type FakeYouTrack struct {
 	updates    []ytwrite.IssueFieldsUpdate
 	reads      int
 	readFaults []error
+	// moves are the MoveIssueToProject calls received, in order (fake_move.go).
+	moves []FakeMove
 
 	// BeforeCreate runs at the start of every CreateComment, with the caller's
 	// context, before anything else. Tests use it to cancel a caller mid-call.

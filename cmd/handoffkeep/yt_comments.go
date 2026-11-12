@@ -91,6 +91,20 @@ func ytFieldsModeFromEnv() (store.YTFieldsMode, error) {
 	}
 }
 
+// ytMovesModeFromEnv reads HANDOFFKEEP_YT_MOVES_MODE (hk 4111): unset or "off"
+// (the default) or "on", exactly like the fields mode. Any other value is an
+// error.
+func ytMovesModeFromEnv() (store.YTMovesMode, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_MOVES_MODE")); raw {
+	case "", string(store.YTMovesOff):
+		return store.YTMovesOff, nil
+	case string(store.YTMovesOn):
+		return store.YTMovesOn, nil
+	default:
+		return "", fmt.Errorf("HANDOFFKEEP_YT_MOVES_MODE=%q: want off or on", raw)
+	}
+}
+
 // ytDocCommentsModeFromEnv reads HANDOFFKEEP_YT_DOC_COMMENTS_MODE (hk 4xxx):
 // unset or "off" (the default) or "on", exactly like the fields mode. Any
 // other value is an error.
@@ -144,9 +158,16 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	if err != nil {
 		return nil, err
 	}
+	moves, err := ytMovesModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
 	catchUp, err := ytCommentsCatchUpFromEnv()
 	if err != nil {
 		return nil, err
+	}
+	if st != nil {
+		st.SetYTMovesMode(moves)
 	}
 	if mode == store.YTCommentsOff && issues == store.YTIssuesOff && fields == store.YTFieldsOff && docs == store.YTDocCommentsOff {
 		if st != nil {
@@ -154,6 +175,7 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 			st.SetYTIssuesMode(store.YTIssuesOff, "")
 			st.SetYTFieldsMode(store.YTFieldsOff, "")
 			st.SetYTDocCommentsMode(store.YTDocCommentsOff)
+			st.SetYTMovesMode(store.YTMovesOff)
 		}
 		return nil, nil
 	}
@@ -1011,6 +1033,11 @@ func youtrackFieldsBackfillCmd(args []string, out io.Writer) error {
 	}
 	defer st.Close()
 	st.SetYTFieldsMode(mode, tenant)
+	moves, err := ytMovesModeFromEnv()
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	st.SetYTMovesMode(moves)
 	report, err := st.BackfillYTFieldsOps(context.Background(), store.YTFieldsBackfillOptions{
 		Project: strings.TrimSpace(*project), TaskID: *task, Limit: *limit, DryRun: *dryRun})
 	if err != nil {

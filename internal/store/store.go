@@ -585,6 +585,10 @@ type Store struct {
 	// ytFields is the YouTrack task-fields gate and tenant (SetYTFieldsMode);
 	// nil is off. On prepares issue_fields ops from the change feed.
 	ytFields atomic.Pointer[ytFieldsGate]
+	// ytMoves is the YouTrack project-move gate (SetYTMovesMode), a
+	// YTMovesMode; unset is off. On prepares and admits issue_move ops
+	// (yt_move.go).
+	ytMoves atomic.Value
 	// ytDocComments is the YouTrack document-comment gate
 	// (SetYTDocCommentsMode), a YTDocCommentsMode; unset is off. On copies
 	// task-tied reports and briefs from the change feed (yt_doc_comments.go).

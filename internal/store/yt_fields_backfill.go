@@ -42,6 +42,7 @@ type YTFieldsBackfillCounts struct {
 	Unchanged   int `json:"unchanged"`
 	Unbound     int `json:"unbound"`
 	Moved       int `json:"moved"`
+	MoveSkipped int `json:"move_skipped"`
 	OtherTenant int `json:"other_tenant"`
 	Invalid     int `json:"invalid"`
 }
@@ -57,6 +58,8 @@ func (c *YTFieldsBackfillCounts) add(o ytFieldsOutcome) {
 		c.Unbound++
 	case ytFieldsMoved:
 		c.Moved++
+	case ytFieldsMoveSkipped:
+		c.MoveSkipped++
 	case ytFieldsOtherTenant:
 		c.OtherTenant++
 	case ytFieldsInvalid:
@@ -155,34 +158,13 @@ func (s *Store) backfillYTFields(ctx context.Context, tenant string, id int64, d
 	}
 	t, found := tasks[id]
 	project := t.fields.Project
-	if dryRun {
-		n, outcome, err := ytFieldsOpFor(tenant, id, t, found)
-		if err != nil || outcome != "" {
-			return outcome, project, err
-		}
-		var lastSHA string
-		var lastOpID int64
-		err = tx.QueryRow(ctx, `SELECT last_sha,last_op_id FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3`,
-			n.EntityKind, n.EntityID, n.Kind).Scan(&lastSHA, &lastOpID)
-		switch {
-		case errors.Is(err, pgx.ErrNoRows):
-			return ytFieldsPrepared, project, nil
-		case err != nil:
-			return "", "", err
-		}
-		skip, err := ytSnapshotUnchanged(ctx, tx, lastSHA, lastOpID, n.PayloadSHA)
-		switch {
-		case err != nil:
-			return "", "", err
-		case skip:
-			return ytFieldsUnchanged, project, nil
-		default:
-			return ytFieldsPrepared, project, nil
-		}
-	}
-	outcome, err := prepareYTFieldsTx(ctx, tx, now, tenant, id, t, found)
+	// A dry run applies the consumer's rule as it would, and rolls back.
+	outcome, err := prepareYTFieldsTx(ctx, tx, now, tenant, s.ytMovesNow() == YTMovesOn, id, t, found)
 	if err != nil {
 		return "", "", err
+	}
+	if dryRun {
+		return outcome, project, nil
 	}
 	return outcome, project, tx.Commit(ctx)
 }
