@@ -214,6 +214,14 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 	s3 := put("note/sma/edited", "sma edited", smaTask)
 	x1 := put("note/shared/elsewhere", "shared", nil)
 	n1 := put("note/nomap/doc", "no mapping", nomapTask)
+	// Two keys that differ only after the 250-rune cut render one summary;
+	// the one article with it cannot be told apart (finding r4545018005).
+	long := "note/sma/" + strings.Repeat("k", 260)
+	c1 := put(long+"-a", "collides a", smaTask)
+	c2 := put(long+"-b", "collides b", smaTask)
+	if store.YTArticleSummary(long+"-a", "note") != store.YTArticleSummary(long+"-b", "note") {
+		t.Fatal("the two long keys should render one summary")
+	}
 
 	sum := func(key string) string { return store.YTArticleSummary(key, "note") }
 	fake.add("1-1", "RDA-A-"+id(r1), "0-7", sum("note/rda/one"), "rda one")
@@ -226,6 +234,7 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 	fake.add("2-3", "SMA-A-3", "0-8", sum("note/sma/twice"), "sma twice")
 	fake.add("2-4", "SMA-A-4", "0-8", sum("note/sma/edited"), "sma before the edit")
 	fake.add("3-1", "RDA-A-901", "0-7", sum("note/shared/elsewhere"), "shared") // right summary, wrong project
+	fake.add("2-5", "SMA-A-5", "0-8", sum(long+"-a"), "collides a")
 
 	t.Setenv("HANDOFFKEEP_DB_URL", dbURL)
 	t.Setenv("YOUTRACK_URL", ts.URL)
@@ -243,7 +252,7 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Tenant != tenant || r.Documents != 10 || r.BoundNow != nil || bindings() != 0 {
+	if r.Tenant != tenant || r.Documents != 12 || r.BoundNow != nil || bindings() != 0 {
 		t.Fatalf("preflight report %+v, %d bindings", r, bindings())
 	}
 	rda := r.project(t, "rda")
@@ -261,7 +270,7 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 		t.Errorf("sma lookup = %q, want %q", sma.Lookup, ytArticleLookupSummary)
 	}
 	ytartIDs(t, "sma matched", sma.Matched, s1)
-	ytartIDs(t, "sma ambiguous", sma.Ambiguous, s2)
+	ytartIDs(t, "sma ambiguous", sma.Ambiguous, s2, c1, c2)
 	ytartIDs(t, "sma sha_differs", sma.SHADiffers, s3)
 	ytartIDs(t, "shared missing", r.project(t, store.YTArticleBucketShared).Missing, x1)
 	ytartIDs(t, "nomap missing", r.project(t, "nomap").Missing, n1)
@@ -302,7 +311,7 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 			t.Errorf("document %d binding = %+v, want %+v", doc, b, w)
 		}
 	}
-	for _, doc := range []int64{r3, r4, s2, x1, n1} {
+	for _, doc := range []int64{r3, r4, s2, x1, n1, c1, c2} {
 		if _, found, err := st.YTArticleBinding(ctx, doc); err != nil || found {
 			t.Errorf("document %d was bound (%v)", doc, err)
 		}
@@ -326,14 +335,14 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if docs.Documents != 9 || docs.Unbound.Count != 4 || !slices.Equal(docs.Unbound.DocumentIDs, []int64{r3, s2, x1, n1}) {
+	if docs.Documents != 11 || docs.Unbound.Count != 6 || !slices.Equal(docs.Unbound.DocumentIDs, []int64{r3, s2, x1, n1, c1, c2}) {
 		t.Fatalf("audit documents = %+v", docs)
 	}
 	per := map[string][]int64{}
 	for _, p := range docs.Projects {
 		per[p.Project] = p.Unbound.DocumentIDs
 	}
-	for p, w := range map[string][]int64{"rda": {r3}, "sma": {s2}, store.YTArticleBucketShared: {x1}, "nomap": {n1}} {
+	for p, w := range map[string][]int64{"rda": {r3}, "sma": {s2, c1, c2}, store.YTArticleBucketShared: {x1}, "nomap": {n1}} {
 		if !slices.Equal(per[p], w) {
 			t.Errorf("audit %s unbound = %v, want %v", p, per[p], w)
 		}

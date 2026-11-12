@@ -167,6 +167,61 @@ type ytArticler struct {
 	// lookup and outside that document's budget (run), or by classify when
 	// it is called alone.
 	index map[string]map[string][]youtrack.Article
+	// owners is, by YouTrack project id and summary, the in-scope documents
+	// of every hk project whose article would have that summary (run reads
+	// it first, across all projects). A summary that two documents render
+	// cannot name either one's article (finding r4545018005); nil when
+	// classify is called alone.
+	owners map[string]map[string][]int64
+}
+
+// loadOwners reads every document once (all projects, whatever the run's
+// filter: two hk projects can share a YouTrack project) and records which
+// documents render each summary in each YouTrack project. Excluded
+// documents have no article and are left out.
+func (a *ytArticler) loadOwners(ctx context.Context) error {
+	owners := map[string]map[string][]int64{}
+	var after int64
+	for {
+		docs, err := a.st.YTArticleDocs(ctx, "", after, ytArticleDocPage)
+		if err != nil {
+			return err
+		}
+		for _, d := range docs {
+			after = d.DocumentID
+			if store.YTArticleExcluded(d.Key, d.TaskID) {
+				continue
+			}
+			_, projectID, missing := a.target(d.YTArticleCandidate)
+			if missing != "" {
+				continue
+			}
+			bySummary := owners[projectID]
+			if bySummary == nil {
+				bySummary = map[string][]int64{}
+				owners[projectID] = bySummary
+			}
+			for _, summary := range []string{store.YTArticleSummary(d.Key, d.Kind), store.YTArticleIndexSummary(d.Key, d.Kind)} {
+				bySummary[summary] = append(bySummary[summary], d.DocumentID)
+			}
+		}
+		if len(docs) < ytArticleDocPage {
+			break
+		}
+	}
+	a.owners = owners
+	return nil
+}
+
+// sharedSummary returns another document of project projectID that renders
+// summary, or 0 when none does.
+func (a *ytArticler) sharedSummary(projectID, summary string, documentID int64) int64 {
+	for _, id := range a.owners[projectID][summary] {
+		if id != documentID {
+			return id
+		}
+	}
+	return 0
 }
 
 // ytArticleResult is one document's class, with the binding a backfill
@@ -298,6 +353,11 @@ func (a *ytArticler) classify(ctx context.Context, d store.YTArticleDoc, bindBy 
 	case len(hits) == 0:
 		return ytArticleResult{class: ytArticleMissing, detail: "no article of project " + short + " has summary " + strconv.Quote(single)}
 	case len(hits) == 1:
+		// Found by summary only: the summary must name this document
+		// alone, or the article may be another document's.
+		if other := a.sharedSummary(projectID, hits[0].Summary, c.DocumentID); other != 0 {
+			return ytArticleResult{class: ytArticleAmbiguous, detail: fmt.Sprintf("summary of article %s is also document %d's", hits[0].ID, other)}
+		}
 		found = hits[0]
 	default:
 		return ambiguous(hits)
@@ -336,6 +396,9 @@ func (a *ytArticler) run(ctx context.Context, bucket, bindBy string) (ytArticles
 	r := ytArticlesReport{Tenant: a.tenant, Project: bucket, Projects: []*ytArticlesProject{}}
 	if a.lookup == nil {
 		a.lookup = map[string]string{}
+	}
+	if err := a.loadOwners(ctx); err != nil {
+		return r, err
 	}
 	byProject := map[string]*ytArticlesProject{}
 	boundNow := 0

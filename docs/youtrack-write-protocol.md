@@ -918,7 +918,10 @@ verifies keeps that lookup (`lookup: "readable_id"`); a document whose GET
 then misses falls back to the summary. A project whose first GET does not
 verify is matched by summary from here on (`lookup: "summary"`), and the
 matched article's content is read by id. On both paths a second top-level
-article of the project with the document's summary makes it `ambiguous`. Which lookup the live import allows is UNVERIFIED until
+article of the project with the document's summary makes it `ambiguous`. A
+match by summary alone is also `ambiguous` when another in-scope document of
+the same YouTrack project renders that summary (two keys that differ only
+after the 250-code-point cut): the run reads every document's summary first. Which lookup the live import allows is UNVERIFIED until
 the first preflight (hk 4053 report).
 
 **Commands.** Both open the database directly and verify against the tenant

@@ -134,6 +134,17 @@ func TestYTArticleClassify(t *testing.T) {
 	if f.reads["SHRDOC2-A-41"] != 1 || a.lookup["0-3"] != ytArticleLookupReadable {
 		t.Fatalf("shared lookup: reads %v, lookup %v", f.reads, a.lookup)
 	}
+	// Found by summary only, but another document renders the same
+	// summary: the article may be that document's (finding r4545018005).
+	f.articles = append(f.articles, art("2-9", "SMA-A-9", "0-8", "note/coll", "coll"))
+	a.index = nil
+	a.owners = map[string]map[string][]int64{"0-8": {store.YTArticleSummary("note/coll", "note"): {42, 43}}}
+	if got := check(ytartDoc(42, "note/coll", "coll", "sma", "SMA", "0-8"), ytArticleAmbiguous, ""); !strings.Contains(got.detail, "document 43") {
+		t.Fatalf("summary collision detail %q", got.detail)
+	}
+	a.owners["0-8"][store.YTArticleSummary("note/coll", "note")] = []int64{42}
+	check(ytartDoc(42, "note/coll", "coll", "sma", "SMA", "0-8"), ytArticleMatched, "2-9")
+	a.owners = nil
 	// Excluded and bound documents are classified without a read.
 	before := len(f.reads)
 	rep := ytartDoc(37, "reports/job/report.md", "r", "sma", "SMA", "0-8")
