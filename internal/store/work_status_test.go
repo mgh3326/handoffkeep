@@ -54,6 +54,13 @@ func TestWorkStatusRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	setTask := func(id int64, state string, createdAt time.Time, claimedBy string) {
+		t.Helper()
+		if _, err := st.pool.Exec(ctx, `UPDATE tasks SET state=$2, created_at=$3, updated_at=$3, claimed_by=$4 WHERE id=$1`, id, state, createdAt, claimedBy); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// 1. Seed bundle parent
 	bundleParent, err := st.CreateTask(ctx, Task{
 		Lane:      "handoffkeep-design",
@@ -68,6 +75,7 @@ func TestWorkStatusRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTask(bundleParent.ID, StateBacklog, now.Add(-5*time.Hour), "")
 
 	// 2. Seed backlog tasks (one child of bundleParent, one normal task)
 	// Higher priority task created later vs lower priority created earlier
@@ -85,6 +93,7 @@ func TestWorkStatusRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTask(backlog1.ID, StateBacklog, now.Add(-4*time.Hour), "")
 
 	backlog2, err := st.CreateTask(ctx, Task{
 		Lane:      "handoffkeep-design",
@@ -99,6 +108,7 @@ func TestWorkStatusRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTask(backlog2.ID, StateBacklog, now.Add(-2*time.Hour), "")
 
 	// 3. Seed in-work tasks (researching, developing, reviewing)
 	inWork1, err := st.CreateTask(ctx, Task{
@@ -118,6 +128,7 @@ func TestWorkStatusRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTask(inWork1.ID, StateDeveloping, now.Add(-10*time.Hour), "")
 	// Seed transition event for developing state entry
 	devSince := now.Add(-3 * time.Hour)
 	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
@@ -153,6 +164,7 @@ func TestWorkStatusRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTask(inWork2.ID, StateReviewing, now.Add(-8*time.Hour), "mac-reviewer")
 	revSince := now.Add(-1 * time.Hour)
 	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
 		TaskID: inWork2.ID,
@@ -179,6 +191,7 @@ func TestWorkStatusRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTask(mergedWaiting.ID, StateMerged, now.Add(-12*time.Hour), "")
 	mergeAfterTime := hkDeployTime.Add(1 * time.Hour)
 	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
 		TaskID: mergedWaiting.ID,
@@ -204,6 +217,7 @@ func TestWorkStatusRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTask(mergedBefore.ID, StateMerged, now.Add(-24*time.Hour), "")
 	mergeBeforeTime := hkDeployTime.Add(-2 * time.Hour)
 	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
 		TaskID: mergedBefore.ID,
@@ -229,6 +243,7 @@ func TestWorkStatusRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTask(mergedNoRecord.ID, StateMerged, now.Add(-5*time.Hour), "")
 	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
 		TaskID: mergedNoRecord.ID,
 		From:   StateReviewing,
@@ -253,6 +268,7 @@ func TestWorkStatusRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTask(closedToday.ID, StateCompleted, now.Add(-6*time.Hour), "")
 	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
 		TaskID: closedToday.ID,
 		From:   StateDeveloping,
@@ -276,6 +292,7 @@ func TestWorkStatusRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTask(closedYesterday.ID, StateDropped, now.Add(-30*time.Hour), "")
 	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
 		TaskID: closedYesterday.ID,
 		From:   StateBacklog,
