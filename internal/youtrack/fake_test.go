@@ -48,11 +48,17 @@ type fakeStore struct {
 	decisions       []store.DecisionRecord
 	decisionMirrors map[int64]store.YouTrackDecisionMirror
 	commentLinks    map[int64]string
-	// ytWriteOps is the write protocol's comment ops: op id -> the issue it
-	// wrote to (YTCommentEchoOp).
-	ytWriteOps  map[int64]string
+	// ytWriteOps is the write protocol's comment ops: op id -> the tenant and
+	// issue it wrote to (YTCommentEchoOp).
+	ytWriteOps  map[int64]ytWriteOp
 	docArticles map[string]store.YouTrackDocArticle
 	attempts    map[string]fakeAttempt
+}
+
+// ytWriteOp is a write-protocol comment op: the tenant it is bound to and the issue it wrote to.
+type ytWriteOp struct {
+	tenant  string
+	issueID string
 }
 
 // fakeAttempt mirrors one youtrack_attempts row. next is the time the key is
@@ -564,11 +570,11 @@ func (f *fakeStore) LinkYouTrackComment(_ context.Context, _ int64, hkCommentID 
 	return nil
 }
 
-func (f *fakeStore) YTCommentEchoOp(_ context.Context, opID int64, issueID string) (bool, error) {
+func (f *fakeStore) YTCommentEchoOp(_ context.Context, opID int64, tenant, issueID string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	target, ok := f.ytWriteOps[opID]
-	return ok && target == issueID, nil
+	op, ok := f.ytWriteOps[opID]
+	return ok && op.tenant == tenant && op.issueID == issueID, nil
 }
 
 func (f *fakeStore) FindYouTrackCommentLinkByYouTrackID(_ context.Context, _ string) (store.YouTrackCommentLink, bool, error) {

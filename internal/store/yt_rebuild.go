@@ -230,6 +230,13 @@ type YTRebuildDocument struct {
 	// no content sha, hk 4053). The current body size says nothing about
 	// how the document was imported.
 	SplitIndex bool
+	// Origin is the binding's origin: an op_applied article carries hk's
+	// provenance line and marker around the body (ytwrite.RenderArticleCreate).
+	Origin string
+	// EscapedSHA256 is set when the body quotes the reserved op marker: the
+	// sha256 of the body as the document kinds send it
+	// (ytwrite.EscapeArticleBody, hk 4295).
+	EscapedSHA256 string
 }
 
 // YTRebuildDocuments lists, in id order, a page of the documents with a
@@ -241,9 +248,11 @@ func (s *Store) YTRebuildDocuments(ctx context.Context, tenant, project string, 
 	if tenant == "" || afterID < 0 || limit < 1 || limit > YTRebuildTaskPageMax {
 		return nil, errors.New("invalid rebuild document filter")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT d.id, d.key, d.sha256, octet_length(d.body), b.article_id, b.content_sha IS NULL
+	// Only a body quoting the marker is read, to escape it.
+	rows, err := s.pool.Query(ctx, `SELECT d.id, d.key, d.sha256, octet_length(d.body), b.article_id, b.content_sha IS NULL, b.origin,
+			CASE WHEN strpos(d.body, $5) > 0 THEN d.body END
 		FROM yt_article_bindings b JOIN documents d ON d.id = b.document_id LEFT JOIN tasks t ON t.id = d.task_id
-		WHERE b.tenant = $1 AND ($2 = '' OR t.project = $2) AND d.id > $3 ORDER BY d.id LIMIT $4`, tenant, project, afterID, limit)
+		WHERE b.tenant = $1 AND ($2 = '' OR t.project = $2) AND d.id > $3 ORDER BY d.id LIMIT $4`, tenant, project, afterID, limit, ytwrite.OpMarkerPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -251,8 +260,12 @@ func (s *Store) YTRebuildDocuments(ctx context.Context, tenant, project string, 
 	out := []YTRebuildDocument{}
 	for rows.Next() {
 		var d YTRebuildDocument
-		if err := rows.Scan(&d.DocumentID, &d.Key, &d.SHA256, &d.BodyBytes, &d.ArticleID, &d.SplitIndex); err != nil {
+		var quoted *string
+		if err := rows.Scan(&d.DocumentID, &d.Key, &d.SHA256, &d.BodyBytes, &d.ArticleID, &d.SplitIndex, &d.Origin, &quoted); err != nil {
 			return nil, err
+		}
+		if quoted != nil {
+			d.EscapedSHA256 = ytwrite.ContentSHA(ytwrite.EscapeArticleBody(*quoted))
 		}
 		out = append(out, d)
 	}

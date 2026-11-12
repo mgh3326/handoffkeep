@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -159,13 +160,21 @@ func fieldTypeID(kind FieldKind) string {
 		return "state[1]"
 	case KindEnum:
 		return "enum[1]"
+	case KindMultiEnum:
+		return "enum[*]"
 	case KindDate:
 		return "date"
+	case KindPeriod:
+		return "period"
+	case KindString:
+		return "string"
 	}
-	return "period"
+	return "integer"
 }
 
-func hasBundle(kind FieldKind) bool { return kind == KindState || kind == KindEnum }
+func hasBundle(kind FieldKind) bool {
+	return kind == KindState || kind == KindEnum || kind == KindMultiEnum
+}
 
 // projectState is what one hk project's changes share: the YouTrack project id
 // is known at plan time for an existing project and only once the project is
@@ -435,7 +444,31 @@ func (r *SchemaRunner) planFields(ctx context.Context, ps *projectState, vocab V
 		}
 		changes = append(changes, valueChanges...)
 	}
+	reportDuplicateFields(ps.hk, attached, pl)
 	return changes, nil
+}
+
+// duplicateFieldTail is the "_<digits>" tail YouTrack gives a field whose
+// name collided with another one (영역_0 next to 영역, seen on HANDOFFKEE
+// 2026-11-11, hk 3972).
+var duplicateFieldTail = regexp.MustCompile(`^(.+)_([0-9]+)$`)
+
+// reportDuplicateFields reports a project field named "<base>_<digits>" while
+// "<base>" is attached to the same project: the writes name the base field,
+// so the suffixed one is dead weight the operator may want gone. The run
+// only reports it; deleting is an operator decision.
+func reportDuplicateFields(hk string, attached []ProjectField, pl *planState) {
+	for i, pf := range attached {
+		m := duplicateFieldTail.FindStringSubmatch(strings.TrimSpace(pf.Field.Name))
+		if m == nil {
+			continue
+		}
+		for j, other := range attached {
+			if i != j && sameFieldName(other.Field.Name, m[1]) {
+				pl.report(Report{Object: "field", Status: "duplicate", Value: fmt.Sprintf("%s %s duplicates %s", hk, pf.Field.Name, other.Field.Name)})
+			}
+		}
+	}
 }
 
 func (r *SchemaRunner) planAttach(ps *projectState, spec FieldSpec, pl *planState) []Change {

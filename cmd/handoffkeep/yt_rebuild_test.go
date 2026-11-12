@@ -557,6 +557,49 @@ func TestYouTrackRebuildDocuments(t *testing.T) {
 	}
 }
 
+// hk 4295: a document whose body quotes the reserved op marker has an
+// article holding the body escaped; the drill lists it as the exception
+// escaped_marker, not as a difference, for both binding origins. An
+// op_applied article is compared by the body inside hk's rendered form, so
+// one without a quote is equal and one that is not in that form differs.
+func TestYouTrackRebuildDocumentsEscapedMarker(t *testing.T) {
+	const quoted = "see `<!-- hk-op:12 -->` and <!-- hk-op:"
+	at := time.Date(2026, 11, 12, 13, 0, 0, 0, time.UTC)
+	escaped := ytwrite.EscapeArticleBody(quoted)
+	fake := newYTRBFake()
+	fake.articles["3-1"] = escaped
+	fake.articles["3-2"] = ytwrite.RenderArticleCreate("hk:documents", at, 501, quoted)
+	fake.articles["3-3"] = ytwrite.RenderArticleCreate("hk:documents", at, 502, "plain")
+	fake.articles["3-4"] = "plain"
+	fake.articles["3-5"] = quoted
+	doc := func(id int64, body, article, origin string) store.YTRebuildDocument {
+		d := store.YTRebuildDocument{DocumentID: id, Key: "briefs/" + article, SHA256: ytrbSHA(body), BodyBytes: len(body), ArticleID: article, Origin: origin}
+		if ytwrite.HasOpMarker(body) {
+			d.EscapedSHA256 = ytrbSHA(ytwrite.EscapeArticleBody(body))
+		}
+		return d
+	}
+	src := &ytrbSource{docs: []store.YTRebuildDocument{
+		doc(1, quoted, "3-1", store.YTBindingImportVerified),
+		doc(2, quoted, "3-2", store.YTBindingOpApplied),
+		doc(3, "plain", "3-3", store.YTBindingOpApplied),
+		doc(4, "plain", "3-4", store.YTBindingOpApplied),
+		// The import wrote the raw body, quote included: that is the body.
+		doc(5, quoted, "3-5", store.YTBindingImportVerified),
+	}}
+	r, _ := ytrbRun(t, fake, src, "")
+	got := r.Documents
+	if got.Checked != 5 || got.Equal != 2 || got.Exceptions.Count != 2 || got.Differ.Count != 1 {
+		t.Fatalf("documents = %+v", got)
+	}
+	if !slices.Equal(ytrbIDs(got.Exceptions), []string{"1", "2"}) || !strings.HasPrefix(got.Exceptions.Items[0].Reason, "escaped_marker: briefs/3-1 quotes") {
+		t.Fatalf("exceptions %+v", got.Exceptions.Items)
+	}
+	if !slices.Equal(ytrbIDs(got.Differ), []string{"4"}) || !strings.Contains(got.Differ.Items[0].Reason, "rendered form") {
+		t.Fatalf("differ %+v", got.Differ.Items)
+	}
+}
+
 // hk 4121: a bound decision's question, options and answer are rebuilt from
 // its DEC issue's Y6 block, as decision_fields writes it or between
 // decision_create's provenance line and marker; each field that differs is

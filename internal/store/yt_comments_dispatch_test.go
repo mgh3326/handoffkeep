@@ -239,13 +239,16 @@ func TestYTCommentEchoOpNeedsMatchingTarget(t *testing.T) {
 	}
 	op, _ := ytcOpFor(t, s, c.ID)
 	issue := ytcBinding(task).IssueID
-	if ok, err := s.YTCommentEchoOp(ctx, op.ID, issue); err != nil || !ok {
+	if ok, err := s.YTCommentEchoOp(ctx, op.ID, op.Tenant, issue); err != nil || !ok {
 		t.Fatalf("own op on its issue: %v %v", ok, err)
 	}
-	if ok, err := s.YTCommentEchoOp(ctx, op.ID, "2-99999999"); err != nil || ok {
+	if ok, err := s.YTCommentEchoOp(ctx, op.ID, op.Tenant, "2-99999999"); err != nil || ok {
 		t.Fatalf("own op on another issue: %v %v", ok, err)
 	}
-	if ok, err := s.YTCommentEchoOp(ctx, op.ID+1000, issue); err != nil || ok {
+	if ok, err := s.YTCommentEchoOp(ctx, op.ID, "other.example", issue); err != nil || ok {
+		t.Fatalf("own op on the same issue id of another tenant: %v %v", ok, err)
+	}
+	if ok, err := s.YTCommentEchoOp(ctx, op.ID+1000, op.Tenant, issue); err != nil || ok {
 		t.Fatalf("unknown op: %v %v", ok, err)
 	}
 }

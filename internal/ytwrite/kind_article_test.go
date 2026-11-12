@@ -148,7 +148,6 @@ func TestCheckArticle(t *testing.T) {
 		t.Fatalf("an empty document was refused: %v", err)
 	}
 	for name, edit := range map[string]func(*ytwrite.ArticleRequest){
-		"marker":         func(r *ytwrite.ArticleRequest) { r.Body = "quoting " + ytwrite.OpMarker(1) },
 		"nul":            func(r *ytwrite.ArticleRequest) { r.Body = "a\x00b" },
 		"oversize":       func(r *ytwrite.ArticleRequest) { r.Body = strings.Repeat("a", ytwrite.MaxArticleBytes+1) },
 		"empty_summary":  func(r *ytwrite.ArticleRequest) { r.Summary = "" },
@@ -315,11 +314,6 @@ func TestArticleUpdateProvenanceKeepsHKFormat(t *testing.T) {
 	e.clock.Advance(time.Hour)
 	e.drive()
 	e.want(miss.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonMarkerMismatch)
-
-	if _, err := ytwrite.ArticleUpdateOp(ytwrite.ArticleUpdateRequest{Principal: artActor, Actor: artActor, Tenant: decTenant,
-		ArticleID: art, DocumentID: artDocID, Summary: artSummary, Content: "quoting " + ytwrite.OpMarker(1), Provenance: true}); err == nil {
-		t.Fatal("a provenance update quoting the marker was accepted")
-	}
 }
 
 func (e articleEnv) prepareLegacyCreate(legacyID string) ytwrite.Op {

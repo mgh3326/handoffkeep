@@ -454,6 +454,14 @@ func (c *CrashLedger) Stale(ctx context.Context, cutoff time.Time, limit int) ([
 	return c.Ledger.Stale(ctx, cutoff, limit)
 }
 
+func (c *CrashLedger) RecoverStale(ctx context.Context, id int64, attempts int, cutoff, next time.Time, detail string) (bool, error) {
+	if err := c.enter("RecoverStale"); err != nil {
+		return false, err
+	}
+	changed, err := c.Ledger.RecoverStale(ctx, id, attempts, cutoff, next, detail)
+	return changed, c.leave("RecoverStale", err)
+}
+
 func (c *CrashLedger) ListState(ctx context.Context, state ytwrite.State, limit int) ([]ytwrite.Op, error) {
 	if err := c.enter("ListState"); err != nil {
 		return nil, err
