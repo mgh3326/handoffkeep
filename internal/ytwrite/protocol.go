@@ -145,6 +145,16 @@ type CommentRequest struct {
 // stored. An empty Key is accepted (AppendComment generates one).
 func CheckComment(req CommentRequest) error { return checkCommentRequest(req, MaxBodyBytes) }
 
+// CheckCommentContent explains why a comment's author or body can never be
+// sent, whatever issue it targets: the part of CheckComment that depends on
+// the comment alone.
+func CheckCommentContent(actor, body string) error {
+	if err := checkActor(actor); err != nil {
+		return err
+	}
+	return checkBodyMax(body, MaxBodyBytes)
+}
+
 // checkCommentRequest is CheckComment with the body cap given.
 func checkCommentRequest(req CommentRequest, maxBody int) error {
 	if !principalRE.MatchString(req.Principal) {
