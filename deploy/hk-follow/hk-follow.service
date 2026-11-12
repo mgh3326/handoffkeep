@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-# GH_TOKEN (fine-grained, this repository only: Contents read, Checks read,
+# GH_TOKEN (fine-grained, this repository only: Contents read, Actions read,
 # Commit statuses write; nothing else) and HK_FOLLOW_* overrides. The hk CLI reads
 # its own HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN from the same file.
 EnvironmentFile=/etc/hk-follow/env

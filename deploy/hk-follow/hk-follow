@@ -147,6 +147,7 @@ hk_doc_put() {
 
 sg_status() { "$SHIFTGATE" status --json; }
 sg_deploy() { "$SHIFTGATE" deploy "$1" --digest "$2"; }
+sg_rollback() { "$SHIFTGATE" rollback "$1"; }
 
 # notify <text>: one lane event to the design session. Optional: a host
 # without panewire logs the text instead.
@@ -181,20 +182,52 @@ context_state() {
 	jq -r --arg c "$2" '[.statuses[]? | select(.context == $c) | .state] | first // "missing"' "$1"
 }
 
-# ci_ok_state <checks.json> <status.json>: ci-ok as release.yml reads it. It
-# is the ci-ok job (a check run of the github-actions app) of a ci.yml run on
-# the sha, or a ci-ok commit status that ci-any-ref posts. Any success is
-# success; otherwise a failed run is a failure and anything else (cancelled,
-# still running, absent) has no verdict yet.
+# ci_ok_state <sha> <status.json>: ci-ok exactly as release.yml's ci-green
+# reads it (one pass, no waiting). The verdict is the ci-ok job of the newest
+# ci.yml main push run for the sha, latest attempt: a rerun that failed
+# overrides an older success, and a dispatch or any-ref run cannot. Only when
+# that run was cancelled or skipped and a newer main push run exists for
+# another commit (superseded) does a ci-any-ref ci-ok commit status decide.
+# Prints success, failure, pending (no verdict yet), missing, or unknown (an
+# API read failed).
 ci_ok_state() {
-	local st
+	local sha=$1 run mid ms mt mc job newest nsha nt st
+	gh_get "/repos/${HK_FOLLOW_REPO}/actions/workflows/ci.yml/runs?head_sha=${sha}&event=push&branch=main&per_page=1" "$WORK/runs.json" ||
+		{ echo unknown; return; }
+	run=$(jq -r '.workflow_runs | first // {} | "\(.id // 0) \(.status // "none") \(.created_at // "none") \(.conclusion // "-")"' "$WORK/runs.json") ||
+		{ echo unknown; return; }
+	read -r mid ms mt mc <<<"$run"
+	[[ "$mid" != 0 ]] || { echo missing; return; }
+	[[ "$ms" == completed ]] || { echo pending; return; }
+	gh_get "/repos/${HK_FOLLOW_REPO}/actions/runs/${mid}/jobs?filter=latest&per_page=100" "$WORK/jobs.json" ||
+		{ echo unknown; return; }
+	job=$(jq -r '[.jobs[]? | select(.name == "ci-ok")] | first // {} | .conclusion // "none"' "$WORK/jobs.json") ||
+		{ echo unknown; return; }
+	case "$job" in
+	success) echo success; return ;;
+	skipped | cancelled | none) ;;
+	*) echo failure; return ;;
+	esac
+	case "$mc" in
+	cancelled | skipped) ;;
+	*) echo failure; return ;;
+	esac
+	# A cancelled run is superseded only when a newer main push run exists
+	# for another commit; any other cancellation fails closed.
+	gh_get "/repos/${HK_FOLLOW_REPO}/actions/workflows/ci.yml/runs?event=push&branch=main&per_page=1" "$WORK/newest.json" ||
+		{ echo unknown; return; }
+	newest=$(jq -r '.workflow_runs | first // {} | "\(.head_sha // "none") \(.created_at // "none")"' "$WORK/newest.json") ||
+		{ echo unknown; return; }
+	read -r nsha nt <<<"$newest"
+	if [[ "$nsha" == "$sha" || "$nsha" == none || ! "$nt" > "$mt" ]]; then
+		echo failure
+		return
+	fi
 	st=$(context_state "$2" ci-ok)
-	jq -r --arg st "$st" '
-		[.check_runs[]? | select(.name == "ci-ok" and .app.slug == "github-actions") | (.conclusion // "pending")] as $c
-		| if ($c | index("success")) or $st == "success" then "success"
-		  elif ($c | map(select(. == "failure" or . == "timed_out")) | length > 0) or $st == "failure" or $st == "error" then "failure"
-		  elif ($c | length > 0) or $st == "pending" then "pending"
-		  else "missing" end' "$1"
+	case "$st" in
+	success | pending | missing) echo "$st" ;;
+	*) echo failure ;;
+	esac
 }
 
 # migrations <compare.json>: print each file in the comparison that adds a
@@ -233,17 +266,17 @@ gate() {
 	# I1: ci-ok and deploy-ok are both success on this exact sha.
 	gh_get "/repos/${HK_FOLLOW_REPO}/commits/${sha}/status?per_page=100" "$WORK/status.json" ||
 		{ verdict wait github_status; return; }
-	gh_get "/repos/${HK_FOLLOW_REPO}/commits/${sha}/check-runs?check_name=ci-ok&filter=all&per_page=100" "$WORK/checks.json" ||
-		{ verdict wait github_checks; return; }
+	jq -e '.statuses | type == "array"' "$WORK/status.json" >/dev/null 2>&1 ||
+		{ verdict wait github_status; return; }
 	for c in ci-ok deploy-ok; do
 		if [[ $c == ci-ok ]]; then
-			st=$(ci_ok_state "$WORK/checks.json" "$WORK/status.json")
+			st=$(ci_ok_state "$sha" "$WORK/status.json")
 		else
 			st=$(context_state "$WORK/status.json" "$c")
 		fi
 		case "$st" in
 		success) ;;
-		pending | missing) verdict wait "${c}_${st}"; return ;;
+		pending | missing | unknown) verdict wait "${c}_${st}"; return ;;
 		*) verdict refuse "${c}_${st}"; return ;;
 		esac
 	done
@@ -421,10 +454,11 @@ state_field() {
 
 # included_prs: PR urls named "(#N)" in the comparison's commit subjects.
 included_prs() {
-	[[ -f "$WORK/compare.json" ]] || { echo '[]'; return; }
+	local f="$WORK/compare-$1.json"
+	[[ -f "$f" ]] || { echo '[]'; return; }
 	jq -c --arg r "$HK_FOLLOW_REPO" '
 		[.commits[]?.commit.message | split("\n")[0] | scan("\\(#([0-9]+)\\)") | .[0]]
-		| unique_by(tonumber) | map("https://github.com/\($r)/pull/\(.)")' "$WORK/compare.json"
+		| unique_by(tonumber) | map("https://github.com/\($r)/pull/\(.)")' "$f"
 }
 
 # record <service> <sha> <digest> <previous> <result> <failed-step> <stamp>:
@@ -434,7 +468,7 @@ record() {
 	jq -n --arg svc "$1" --arg target "$HK_FOLLOW_TARGET" --arg sha "$2" \
 		--arg ref "${HK_FOLLOW_IMAGE}@$3" --arg prev "$4" --arg at "$(now_utc)" \
 		--arg result "$5" --arg step "$6" --arg appr "${GATE_APPROVAL_REF:-}" \
-		--argjson prs "$(included_prs)" '{
+		--argjson prs "$(included_prs "$4")" '{
 			schema: "deploy-record/v0", service: $svc, target: $target,
 			head_sha: $sha, deployed_ref: $ref,
 			previous_ref: (if $prev == "" then null else $prev end),
@@ -472,9 +506,10 @@ services() {
 }
 
 tick_locked() {
-	local verdict="" reason="" prev_digest prev_verdict prev_sha prev_reason base="" svc url line rc held
-	local result=success failed_step="" failed_svc="" stamp waited all_serving
-	local attempted=() svcs=()
+	local verdict="" reason="" prev_digest prev_verdict prev_sha prev_reason base="" svc url line rc held rev
+	local result=success failed_step="" failed_svc="" failed_result=failed stamp all_serving approval="" sgjson
+	local attempted=() svcs=() bases=()
+	local -A prev_rev=()
 	# shellcheck disable=SC2034 # set by resolve
 	local TAG_DIGEST TAG_REV TAG_CHILDREN CAND_DIGEST CAND_REV CAND_CHILDREN
 	mapfile -t svcs < <(services)
@@ -530,28 +565,55 @@ tick_locked() {
 	fi
 
 	if [[ -z "$verdict" ]]; then
-		# The deployed sha is what a service that still needs the candidate
-		# actually serves (the first such one). A service already on the
-		# candidate is no baseline: it would make the gate answer identical
-		# and leave the other service behind.
+		# Every service that still needs the candidate is a baseline, and
+		# the gate must pass against each distinct revision they serve:
+		# after a partial rollout or a per-service rollback they differ, and
+		# checking one would miss a migration since the other, or roll a
+		# newer service back.
 		all_serving=1
 		for line in "${svcs[@]}"; do
+			svc=${line%% *}
 			rev=$(healthz_revision "${line#* }")
-			if [[ "$rev" != "$sha" ]]; then
-				all_serving=0
-				base=$rev
-				break
-			fi
+			[[ "$rev" == "$sha" ]] && continue
+			all_serving=0
+			prev_rev[$svc]=$rev
+			[[ " ${bases[*]} " == *" ${rev:-<unknown>} "* ]] || bases+=("${rev:-<unknown>}")
 		done
 		if [[ $all_serving -eq 1 ]]; then
 			verdict=noop reason=serving
 		else
-			gate "$sha" "$base"
-			verdict=$GATE_VERDICT reason=$GATE_REASON
+			for base in "${bases[@]}"; do
+				[[ "$base" == "<unknown>" ]] && base=
+				gate "$sha" "$base"
+				verdict=$GATE_VERDICT reason=$GATE_REASON
+				[[ -n "$GATE_APPROVAL_REF" ]] && approval=$GATE_APPROVAL_REF
+				[[ -f "$WORK/compare.json" ]] && cp "$WORK/compare.json" "$WORK/compare-${base}.json"
+				[[ "$verdict" == promote ]] || break
+			done
 		fi
 	fi
+	GATE_APPROVAL_REF=$approval
 
-	log "hk_follow.gate sha=${sha:-none} digest=$TAG_DIGEST deployed_sha=${base:-unknown} verdict=$verdict reason=$reason approval_ref=${GATE_APPROVAL_REF:-none}"
+	log "hk_follow.gate sha=${sha:-none} digest=$TAG_DIGEST deployed_sha=$(IFS=,; echo "${bases[*]:-unknown}") verdict=$verdict reason=$reason approval_ref=${GATE_APPROVAL_REF:-none}"
+	if [[ "$verdict" == promote ]]; then
+		# shiftgate's hold is read before anything starts. A status that
+		# cannot be read or does not list a service is no answer: deploying
+		# anyway would clear a hold an operator's rollback set.
+		sgjson=$(sg_status </dev/null 2>/dev/null) || sgjson=
+		for line in "${svcs[@]}"; do
+			svc=${line%% *}
+			[[ -n "${prev_rev[$svc]+x}" ]] || continue
+			if ! held=$(jq -er --arg s "$svc" 'if type == "array" then . else error("not an array") end
+				| map(select(.name == $s)) | if length == 1 then .[0].state.hold.digest // "" else error("service missing") end' <<<"$sgjson" 2>/dev/null); then
+				verdict=wait reason=shiftgate_status
+				break
+			fi
+			if [[ "$held" == "$TAG_DIGEST" ]]; then
+				verdict=refuse reason="held_${svc}"
+				break
+			fi
+		done
+	fi
 	if [[ "$verdict" != promote ]]; then
 		if [[ "$prev_digest" != "$TAG_DIGEST" || "$prev_verdict" != "$verdict" || "$prev_reason" != "$reason" ]]; then
 			report_gate "$sha" "$TAG_DIGEST" "$verdict" "$reason"
@@ -561,6 +623,7 @@ tick_locked() {
 	fi
 	if [[ $DRY_RUN -eq 1 ]]; then
 		for line in "${svcs[@]}"; do
+			[[ -n "${prev_rev[${line%% *}]+x}" ]] || continue
 			log "hk_follow.dry_run would_run=$(printf '%q' "$SHIFTGATE deploy ${line%% *} --digest $TAG_DIGEST") then_check=${line#* }/healthz want=$sha"
 		done
 		return 0
@@ -574,15 +637,9 @@ tick_locked() {
 
 	for line in "${svcs[@]}"; do
 		svc=${line%% *} url=${line#* }
-		if [[ "$(healthz_revision "$url")" == "$sha" ]]; then
+		if [[ -z "${prev_rev[$svc]+x}" ]]; then
 			log "hk_follow.service_current service=$svc sha=$sha"
 			continue
-		fi
-		held=$(sg_status </dev/null | jq -r --arg s "$svc" '.[]? | select(.name == $s) | .state.hold.digest // empty') || held=
-		if [[ "$held" == "$TAG_DIGEST" ]]; then
-			attempted+=("$svc")
-			result=failed failed_svc=$svc failed_step="held_${svc}"
-			break
 		fi
 		rc=0
 		sg_deploy "$svc" "$TAG_DIGEST" </dev/null || rc=$?
@@ -600,25 +657,32 @@ tick_locked() {
 		fi
 		attempted+=("$svc")
 		if [[ $rc -ne 0 ]]; then
+			# shiftgate failed before the flip (or left recovery to a
+			# person, exit 3): the previous colour still serves.
 			result=failed failed_svc=$svc failed_step="shiftgate_${svc}_exit_${rc}"
 			break
 		fi
-		# I3: the serving binary is this sha, else stop.
-		waited=0
-		while [[ "$(healthz_revision "$url")" != "$sha" ]]; do
-			if [[ $waited -ge $HK_FOLLOW_HEALTH_WAIT ]]; then
-				result=failed failed_svc=$svc failed_step="healthz_${svc}"
-				break 2
+		# I3: the serving binary is this sha. shiftgate has already
+		# flipped, so a mismatch is rolled back here, not just reported.
+		if ! wait_revision "$url" "$sha"; then
+			result=failed failed_svc=$svc failed_step="healthz_${svc}"
+			rc=0
+			sg_rollback "$svc" </dev/null || rc=$?
+			if [[ $rc -eq 0 ]] && wait_revision "$url" "${prev_rev[$svc]}"; then
+				failed_result=rolled_back
+				log "hk_follow.rolled_back service=$svc sha=$sha restored_sha=${prev_rev[$svc]}"
+			else
+				failed_step="healthz_${svc}_rollback_failed"
+				log "hk_follow.rollback_failed service=$svc sha=$sha rollback_exit=$rc"
 			fi
-			sleep 2
-			waited=$((waited + 2))
-		done
+			break
+		fi
 		log "hk_follow.service_deployed service=$svc sha=$sha digest=$TAG_DIGEST"
 	done
 
 	if [[ $result == success ]]; then
 		save_state "$TAG_DIGEST" "$sha" deployed ""
-		log "hk_follow.deployed sha=$sha digest=$TAG_DIGEST previous_sha=$base"
+		log "hk_follow.deployed sha=$sha digest=$TAG_DIGEST previous_sha=$(IFS=,; echo "${bases[*]}")"
 		post_status "$sha" deployed success "deployed on ${HK_FOLLOW_TARGET}: $(printf '%s\n' "${svcs[@]%% *}" | paste -sd, -)"
 	else
 		save_state "$TAG_DIGEST" "$sha" failed "$failed_step"
@@ -629,16 +693,29 @@ tick_locked() {
 		# A service that finished before a later one failed serves the new
 		# sha; its own record says so.
 		if [[ "$svc" == "$failed_svc" ]]; then
-			record "$svc" "$sha" "$TAG_DIGEST" "$base" failed "$failed_step" "$stamp"
+			record "$svc" "$sha" "$TAG_DIGEST" "${prev_rev[$svc]}" "$failed_result" "$failed_step" "$stamp"
 		else
-			record "$svc" "$sha" "$TAG_DIGEST" "$base" success "" "$stamp"
+			record "$svc" "$sha" "$TAG_DIGEST" "${prev_rev[$svc]}" success "" "$stamp"
 		fi
 	done
 	if [[ $result == success ]]; then
-		notify "[hk-follow] handoffkeep ${sha:0:12} deployed on ${HK_FOLLOW_TARGET} (from ${base:0:12})"
+		notify "[hk-follow] handoffkeep ${sha:0:12} deployed on ${HK_FOLLOW_TARGET}"
+	elif [[ $failed_step == *_rollback_failed ]]; then
+		notify "[hk-follow] handoffkeep ${sha:0:12} FAILED at ${failed_step} on ${HK_FOLLOW_TARGET}: ${failed_svc} serves a wrong or unhealthy revision and rollback did not restore it; act now"
 	else
-		notify "[hk-follow] handoffkeep ${sha:0:12} FAILED at ${failed_step} on ${HK_FOLLOW_TARGET}; not retried; the failed service keeps its previous colour"
+		notify "[hk-follow] handoffkeep ${sha:0:12} FAILED at ${failed_step} on ${HK_FOLLOW_TARGET}; not retried; ${failed_svc} keeps or was rolled back to its previous colour"
 	fi
+}
+
+# wait_revision <base-url> <sha>: until /healthz serves <sha>, at most
+# HK_FOLLOW_HEALTH_WAIT seconds.
+wait_revision() {
+	local waited=0
+	while [[ "$(healthz_revision "$1")" != "$2" ]]; do
+		[[ $waited -ge $HK_FOLLOW_HEALTH_WAIT ]] && return 1
+		sleep 2
+		waited=$((waited + 2))
+	done
 }
 
 tick() {

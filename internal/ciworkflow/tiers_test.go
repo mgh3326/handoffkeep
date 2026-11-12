@@ -594,7 +594,7 @@ func promoteProblems(wf tierWorkflow) []string {
 			add("if must require needs.%s.result == 'success', got %q", n, cond)
 		}
 	}
-	want := map[string]string{"contents": "read", "checks": "read", "statuses": "write", "packages": "write"}
+	want := map[string]string{"contents": "read", "actions": "read", "statuses": "write", "packages": "write"}
 	for k, v := range want {
 		if fmt.Sprint(p.Permissions[k]) != v {
 			add("permissions.%s is %q, want %q", k, p.Permissions[k], v)

@@ -23,10 +23,10 @@ main push → ci.yml (ci-ok) ─┬→ deploy.yml (deploy-ok) → promote job �
 
 | | Rule | Where |
 |---|---|---|
-| I1 | Only a sha with ci-ok and deploy-ok success that is on main and newer than the deployed sha is promoted or installed. | `gate`, run by both `promote` and `tick`. `tick` also requires the `deploy` index to carry exactly the child manifests of `:<sha>`, so a tag mover cannot bind other images to a good sha. |
+| I1 | Only a sha with ci-ok and deploy-ok success that is on main and newer than the deployed sha is promoted or installed. On ncp, the deployed sha is every distinct revision still served by a service that needs the candidate, so after a partial rollout or a per-service rollback the gate passes against each one. | `gate`, run by both `promote` and `tick`. `tick` also requires the `deploy` index to carry exactly the child manifests of `:<sha>`, so a tag mover cannot bind other images to a good sha. |
 | I2 | If the release adds a migration since the deployed sha, it ships only with an approval record. | `gate` (`migrations`, approval lookup), both callers. |
-| I3 | The rollout matches hk-ship: `handoffkeep`, then `handoffkeep-work`. Each `/healthz` `vcs_revision` must equal the sha, or the rollout stops. | `tick` |
-| I4 | A failed rollout leaves the previous colour serving and is never retried by itself. Only a new digest runs. | `tick`: the attempt is written to `state.json` before the first shiftgate call. A digest held by shiftgate is not deployed. |
+| I3 | The rollout matches hk-ship: `handoffkeep`, then `handoffkeep-work`. Each `/healthz` `vcs_revision` must equal the sha, or the rollout stops. shiftgate has already flipped by then, so a mismatch runs `shiftgate rollback <svc>` and checks that the previous revision serves again. | `tick` |
+| I4 | A failed rollout leaves the previous colour serving and is never retried by itself. Only a new digest runs. | `tick`: the attempt is written to `state.json` before the first shiftgate call. shiftgate's hold state is read for every service before anything starts. A held digest is refused, and an unreadable status means wait, because an explicit deploy would clear a rollback's hold. |
 | I5 | One rollout at a time. | `tick`: `flock` on `$HK_FOLLOW_STATE_DIR/lock`; also, systemd never starts a oneshot unit twice. |
 | I6 | No new credential on ncp beyond a GitHub token and the existing hk token. | The registry is read anonymously (the package is public). |
 
@@ -39,10 +39,10 @@ main push → ci.yml (ci-ok) ─┬→ deploy.yml (deploy-ok) → promote job �
 | `promote ok` | Every check passed. | moves the tag | rolls out |
 | `noop identical` / `noop serving` | The candidate is already deployed. | nothing | records the digest as handled |
 | `hold migration` | A migration was added and no approval exists. | posts `deploy-promote` pending and leaves the tag | posts `deployed` pending, then re-checks each tick |
-| `wait <reason>` | A check has no answer yet (GitHub, hk or healthz unreachable; ci-ok still running). | fails the job (re-run it) | re-checks next tick |
-| `refuse <reason>` | The candidate must not ship (`ci-ok_failure`, `deploy-ok_failure`, `not_on_main`, `not_newer`, `tag_not_bound`, `no_revision`, `image_missing`, …). | fails the job, `deploy-promote` failure; `not_newer` and `not_on_main` (a diagnostic dispatch on an old or unmerged head) only log and pass | `deployed` failure; the digest is done |
+| `wait <reason>` | A check has no answer yet (GitHub, hk, healthz or `shiftgate status` unreadable; ci-ok still running). | fails the job (re-run it) | re-checks next tick |
+| `refuse <reason>` | The candidate must not ship (`ci-ok_failure`, `deploy-ok_failure`, `not_on_main`, `not_newer`, `tag_not_bound`, `no_revision`, `image_missing`, `held_<svc>`, …). | fails the job, `deploy-promote` failure; `not_newer` and `not_on_main` (a diagnostic dispatch on an old or unmerged head) only log and pass | `deployed` failure; the digest is done |
 
-- **ci-ok** comes from the same sources release.yml reads: the `ci-ok` job of a ci.yml run on the sha (a github-actions check run), or a `ci-ok` commit status posted by ci-any-ref.
+- **ci-ok** is selected exactly as release.yml's `ci-green` selects it. The verdict is the `ci-ok` job (latest attempt) of the newest ci.yml main push run for the sha, so a failed rerun overrides an older success and a dispatch run cannot. Only when that run was cancelled or skipped, and a newer main push run exists for another commit, does a ci-any-ref `ci-ok` commit status decide.
 - **deploy-ok** is the commit status that deploy.yml's status job posts.
 - **Migrations** are files in `internal/store/` changed between the deployed sha and the candidate (`compare/<deployed>...<sha>`). A file counts if it meets any of these:
   - It is a non-test `.go` file, added, renamed or copied, whose name contains `migration`.
@@ -74,8 +74,8 @@ Every result appears in four places. Consumers should read them in this order.
 
    A sha whose `deployed` status is success is serving on both services. The failure steps are:
    - `shiftgate_<svc>_exit_<rc>`: shiftgate exited 1 (failed), 3 (recovery required) or 78 (configuration refused).
-   - `healthz_<svc>`: after `HK_FOLLOW_HEALTH_WAIT` seconds, the service still served another revision.
-   - `held_<svc>`: shiftgate holds the digest, for example after a rollback.
+   - `healthz_<svc>`: after `HK_FOLLOW_HEALTH_WAIT` seconds, the service still served another revision. hk-follow rolled it back and the previous revision serves again (record `result: rolled_back`).
+   - `healthz_<svc>_rollback_failed`: the same, but the rollback did not restore the previous revision. A person must act; the lane event says so.
    - `interrupted`: the tick died mid-rollout.
 
 2. **hk deploy records**. For each service that hk-follow attempted, it writes the doc `deploy/<service>/<UTC yyyymmddThhmmssZ>` (kind `report`). It uses the `deploy-record/v0` shape that hk-ship writes, with `source: "hk-follow"`:
@@ -84,7 +84,7 @@ Every result appears in four places. Consumers should read them in this order.
    {"schema":"deploy-record/v0","service":"handoffkeep","target":"ncp",
     "head_sha":"<sha>","deployed_ref":"ghcr.io/mgh3326/handoffkeep@sha256:<deploy index digest>",
     "previous_ref":"<sha served before>","deployed_at":"<RFC3339 UTC>",
-    "result":"success|failed","failed_step":null,"job_id":null,
+    "result":"success|failed|rolled_back","failed_step":null,"job_id":null,
     "approval_ref":"deploy-approval/handoffkeep/<sha>|null",
     "included_prs":["https://github.com/mgh3326/handoffkeep/pull/<n>", …],
     "source":"hk-follow","release":null}
@@ -101,7 +101,7 @@ Every result appears in four places. Consumers should read them in this order.
 Nothing here is installed by the PR. These are the steps the design session runs (T-a):
 
 1. **Prerequisites.** `bash`, `curl`, `jq`, `flock` (util-linux), `sha256sum`, and shiftgate with the `handoffkeep` and `handoffkeep-work` services. Both services must answer `/healthz` on `127.0.0.1:8800` and `:8801`; set `HK_FOLLOW_SERVICES` to change that. You also need the hk CLI with its usual env, and optionally panewire.
-2. **GitHub token.** Create a fine-grained token for `mgh3326/handoffkeep` only, with Contents read, Checks read and Commit statuses write, and nothing else. Commit statuses write is the only write: hk-follow reports through it. Store it in Infisical and render it as `GH_TOKEN` in the env file. Do not print it.
+2. **GitHub token.** Create a fine-grained token for `mgh3326/handoffkeep` only, with Contents read, Actions read and Commit statuses write, and nothing else. Commit statuses write is the only write: hk-follow reports through it. Store it in Infisical and render it as `GH_TOKEN` in the env file. Do not print it.
 3. **Env file** `/etc/hk-follow/env` (mode 0600). It holds `GH_TOKEN=…` and the hk CLI's `HANDOFFKEEP_URL` and `HANDOFFKEEP_TOKEN`, plus the Access pair if the CLI goes through Cloudflare. It may also hold overrides: `HK_FOLLOW_SERVICES`, `HK_FOLLOW_TARGET`, `HK_FOLLOW_HEALTH_WAIT`, `SHIFTGATE`, `HANDOFFKEEP_CLI`, `PANEWIRE`. The defaults are at the top of `hk-follow`.
 4. **Files.** Run `install -m 0755 deploy/hk-follow/hk-follow /usr/local/bin/hk-follow`, then copy both units to `/etc/systemd/system/`.
 5. **GitHub secrets for the promote job.** The job reads hk only to look up an approval: `HK_PROMOTE_URL`, `HK_PROMOTE_TOKEN`, `HK_PROMOTE_CF_ACCESS_CLIENT_ID`, `HK_PROMOTE_CF_ACCESS_CLIENT_SECRET`. Use a token that only reads docs. Without these secrets, a release with a migration fails closed (`deploy-refused:approval_unreadable`); a release without one promotes normally.
@@ -130,4 +130,4 @@ Nothing here is installed by the PR. These are the steps the design session runs
 - **`shiftgate deploy --digest`, not `shiftgate follow --tag deploy`.** hk-follow resolves the tag once, checks that digest, and deploys exactly that digest. `follow` would resolve the tag again, so a tag moved between the check and the rollout would ship unchecked. hk-follow keeps follow's semantics itself: it skips a digest shiftgate holds, and it never retries a digest it attempted.
 - **The sha travels as an OCI index annotation, not an image label.** `promote` uses `imagetools create --annotation`, which writes a new index over the unchanged child manifests. Images built before this PR lack a label, and the annotation works on them too. `tick` checks that the child manifests are the same as `:<sha>`'s.
 - **Approval is an hk doc with a fixed key, not a decision request.** The promote job holds a read-only hk credential and cannot open a request. A doc key per sha is something both callers can check without parsing a free-form answer.
-- **ci-ok is read as release.yml reads it.** On main heads it is a check run, not a commit status.
+- **ci-ok is read as release.yml reads it.** On main heads it is the ci.yml job, not a commit status.

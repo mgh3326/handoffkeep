@@ -37,12 +37,25 @@ index_json() { # <revision or ""> <child digest>...
 		annotations: (if $rev == "" then {} else {"org.opencontainers.image.revision": $rev} end)}' "$@"
 }
 
-# green <sha>: ci-ok (check run) and deploy-ok (status) success.
+# green <sha>: ci-ok (the ci-ok job of the newest ci.yml main push run) and
+# deploy-ok (status) success, and the sha on main.
 green() {
 	fx_gh "/repos/mgh3326/handoffkeep/commits/$1/status?per_page=100" '{"statuses":[{"context":"deploy-ok","state":"success"}]}'
-	fx_gh "/repos/mgh3326/handoffkeep/commits/$1/check-runs?check_name=ci-ok&filter=all&per_page=100" \
-		'{"check_runs":[{"name":"ci-ok","conclusion":"success","app":{"slug":"github-actions"}}]}'
+	ci_run "$1" 501 completed success "2026-11-12T10:00:00Z"
+	ci_job 501 success
 	fx_gh "/repos/mgh3326/handoffkeep/compare/$1...main" '{"status":"identical"}'
+}
+ci_run() { # <sha> <run id> <status> <conclusion> <created_at>
+	fx_gh "/repos/mgh3326/handoffkeep/actions/workflows/ci.yml/runs?head_sha=$1&event=push&branch=main&per_page=1" \
+		"{\"workflow_runs\":[{\"id\":$2,\"status\":\"$3\",\"conclusion\":\"$4\",\"created_at\":\"$5\"}]}"
+}
+ci_job() { # <run id> <ci-ok conclusion> (the latest attempt)
+	fx_gh "/repos/mgh3326/handoffkeep/actions/runs/$1/jobs?filter=latest&per_page=100" \
+		"{\"jobs\":[{\"name\":\"test\",\"conclusion\":\"success\"},{\"name\":\"ci-ok\",\"conclusion\":\"$2\"}]}"
+}
+newest_main() { # <sha> <created_at>
+	fx_gh "/repos/mgh3326/handoffkeep/actions/workflows/ci.yml/runs?event=push&branch=main&per_page=1" \
+		"{\"workflow_runs\":[{\"head_sha\":\"$1\",\"created_at\":\"$2\"}]}"
 }
 
 compare() { # <base> <head> <status> [files-json] [commits-json]
@@ -80,14 +93,27 @@ setup() {
 		cp "$f" "$2"
 	}
 	hk_doc_put() { cp "$2" "$FIX/records/$(key "$1")"; echo "record $1" >>"$FIX/calls"; }
-	sg_status() { cat "$FIX/sg_status" 2>/dev/null || echo '[]'; }
+	sg_status() {
+		[[ -f "$FIX/sg_status_error" ]] && return 1
+		cat "$FIX/sg_status" 2>/dev/null || echo '[{"name":"handoffkeep","state":{}},{"name":"handoffkeep-work","state":{}}]'
+	}
+	sg_rollback() {
+		echo "rollback $1" >>"$FIX/calls"
+		[[ -f "$FIX/sg_rollback_fail" ]] && return 1
+		local url
+		url=$(services | awk -v s="$1" '$1 == s {print $2}')
+		fx_health "$url" "$(cat "$FIX/prev_$1")"
+	}
 	sg_deploy() {
 		echo "deploy $1 $2" >>"$FIX/calls"
 		local rc
 		rc=$(cat "$FIX/sg_rc_$1" 2>/dev/null || echo 0)
-		if [[ $rc -eq 0 && ! -f "$FIX/sg_nohealth_$1" ]]; then
-			local url
-			url=$(services | awk -v s="$1" '$1 == s {print $2}')
+		local url
+		url=$(services | awk -v s="$1" '$1 == s {print $2}')
+		healthz_revision "$url" >"$FIX/prev_$1"
+		if [[ $rc -eq 0 && -f "$FIX/sg_nohealth_$1" ]]; then
+			fx_health "$url" "$SHA_OTHER"
+		elif [[ $rc -eq 0 ]]; then
 			fx_health "$url" "$(jq -r '.annotations["org.opencontainers.image.revision"]' "$FIX/reg/deploy")"
 		fi
 		return "$rc"
@@ -174,25 +200,66 @@ t_gate_deploy_ok_missing() {
 }
 t_gate_ci_ok_failure() {
 	setup; setup_tick
-	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/check-runs?check_name=ci-ok&filter=all&per_page=100" \
-		'{"check_runs":[{"name":"ci-ok","conclusion":"failure","app":{"slug":"github-actions"}}]}'
+	ci_job 501 failure
 	want "refuse ci-ok_failure" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
 }
-t_gate_ci_ok_other_app() {
-	# A check run named ci-ok from another app is not ci.yml's job.
+t_gate_ci_ok_rerun_failed() {
+	# A rerun of the main run that failed overrides its earlier success: the
+	# jobs list is the latest attempt, and a ci-ok status does not rescue it.
 	setup; setup_tick
-	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/check-runs?check_name=ci-ok&filter=all&per_page=100" \
-		'{"check_runs":[{"name":"ci-ok","conclusion":"success","app":{"slug":"someone-else"}}]}'
+	ci_job 501 failure
+	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/status?per_page=100" \
+		'{"statuses":[{"context":"deploy-ok","state":"success"},{"context":"ci-ok","state":"success"}]}'
+	want "refuse ci-ok_failure" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_ci_ok_running() {
+	setup; setup_tick
+	ci_run "$SHA_NEW" 501 in_progress "" "2026-11-12T10:00:00Z"
+	want "wait ci-ok_pending" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_ci_ok_no_main_run() {
+	# Only a dispatch or any-ref run: no main verdict.
+	setup; setup_tick
+	fx_gh "/repos/mgh3326/handoffkeep/actions/workflows/ci.yml/runs?head_sha=$SHA_NEW&event=push&branch=main&per_page=1" '{"workflow_runs":[]}'
 	want "wait ci-ok_missing" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
 }
-t_gate_ci_ok_status() {
+t_gate_ci_ok_superseded() {
 	# A superseded main run: ci-any-ref's ci-ok status decides.
 	setup; setup_tick
-	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/check-runs?check_name=ci-ok&filter=all&per_page=100" \
-		'{"check_runs":[{"name":"ci-ok","conclusion":"cancelled","app":{"slug":"github-actions"}}]}'
+	ci_run "$SHA_NEW" 501 completed cancelled "2026-11-12T10:00:00Z"
+	ci_job 501 cancelled
+	newest_main "$SHA_OTHER" "2026-11-12T10:05:00Z"
 	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/status?per_page=100" \
 		'{"statuses":[{"context":"deploy-ok","state":"success"},{"context":"ci-ok","state":"success"}]}'
 	want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/status?per_page=100" '{"statuses":[{"context":"deploy-ok","state":"success"}]}'
+	want "wait ci-ok_missing" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_ci_ok_failed_job_in_superseded_run() {
+	# ci-ok itself failed; the run was cancelled later and superseded. The
+	# failed job is final: a ci-any-ref status does not override it.
+	setup; setup_tick
+	ci_run "$SHA_NEW" 501 completed cancelled "2026-11-12T10:00:00Z"
+	ci_job 501 failure
+	newest_main "$SHA_OTHER" "2026-11-12T10:05:00Z"
+	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/status?per_page=100" \
+		'{"statuses":[{"context":"deploy-ok","state":"success"},{"context":"ci-ok","state":"success"}]}'
+	want "refuse ci-ok_failure" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_ci_ok_cancelled_not_superseded() {
+	# Cancelled with no newer main push: fails closed, a status cannot help.
+	setup; setup_tick
+	ci_run "$SHA_NEW" 501 completed cancelled "2026-11-12T10:00:00Z"
+	ci_job 501 cancelled
+	newest_main "$SHA_NEW" "2026-11-12T10:00:00Z"
+	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/status?per_page=100" \
+		'{"statuses":[{"context":"deploy-ok","state":"success"},{"context":"ci-ok","state":"success"}]}'
+	want "refuse ci-ok_failure" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_ci_ok_unreadable() {
+	setup; setup_tick
+	rm "$FIX/gh/$(key "/repos/mgh3326/handoffkeep/actions/runs/501/jobs?filter=latest&per_page=100")"
+	want "wait ci-ok_unknown" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
 }
 t_gate_github_down() {
 	setup; setup_tick
@@ -321,11 +388,24 @@ t_tick_second_service_fails() {
 		"$(jq -r '.result + " " + .failed_step' "$FIX"/records/deploy_handoffkeep-work_*)"
 }
 t_tick_healthz_mismatch() {
+	# shiftgate flipped but the new colour serves another revision: roll it
+	# back, verify the old revision serves, stop before the next service.
 	setup; setup_tick
 	touch "$FIX/sg_nohealth_handoffkeep"
 	tick
 	want "failed healthz_handoffkeep" "$(state_field verdict) $(state_field reason)"
+	want 1 "$(count '^rollback handoffkeep$')"
+	want "$SHA_OLD" "$(healthz_revision http://127.0.0.1:8800)"
 	want 0 "$(count 'deploy handoffkeep-work')"
+	want "rolled_back healthz_handoffkeep" "$(jq -r '.result + " " + .failed_step' "$FIX"/records/deploy_handoffkeep_2*)"
+}
+t_tick_healthz_mismatch_rollback_fails() {
+	setup; setup_tick
+	touch "$FIX/sg_nohealth_handoffkeep" "$FIX/sg_rollback_fail"
+	tick
+	want "failed healthz_handoffkeep_rollback_failed" "$(state_field verdict) $(state_field reason)"
+	want 1 "$(count 'notify .*rollback did not restore it; act now')"
+	want "failed" "$(jq -r .result "$FIX"/records/deploy_handoffkeep_2*)"
 }
 t_tick_shiftgate_busy() {
 	setup; setup_tick
@@ -341,10 +421,60 @@ t_tick_shiftgate_hold() {
 	setup; setup_tick
 	local dig
 	dig="sha256:$(sha256sum <"$FIX/reg/deploy" | cut -d' ' -f1)"
-	jq -n --arg d "$dig" '[{name:"handoffkeep", state:{hold:{digest:$d, reason:"rolled_back"}}}]' >"$FIX/sg_status"
+	jq -n --arg d "$dig" '[{name:"handoffkeep", state:{hold:{digest:$d, reason:"rolled_back"}}}, {name:"handoffkeep-work", state:{}}]' >"$FIX/sg_status"
 	tick
-	want "failed held_handoffkeep" "$(state_field verdict) $(state_field reason)"
+	want "refuse held_handoffkeep" "$(state_field verdict) $(state_field reason)"
 	want 0 "$(count '^deploy ')"
+}
+t_tick_shiftgate_status_unreadable() {
+	# No readable hold state is no answer: never deploy (an explicit deploy
+	# would clear a rollback's hold), and re-check next tick.
+	setup; setup_tick
+	touch "$FIX/sg_status_error"
+	tick
+	want "wait shiftgate_status" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count '^deploy ')"
+	echo '{"oops":1}' >"$FIX/sg_status"; rm "$FIX/sg_status_error"
+	tick
+	want 0 "$(count '^deploy ')"
+	echo '[{"name":"handoffkeep","state":{}}]' >"$FIX/sg_status"
+	tick
+	want "wait shiftgate_status" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count '^deploy ')"
+	rm "$FIX/sg_status"
+	tick
+	want "deployed" "$(state_field verdict)"
+}
+t_tick_gates_every_baseline() {
+	# handoffkeep on OLD, handoffkeep-work on an older A: a migration in
+	# A...NEW holds the rollout even though OLD...NEW has none.
+	setup; setup_tick
+	local A=4444444444444444444444444444444444444444
+	fx_health http://127.0.0.1:8801 "$A"
+	compare "$A" "$SHA_NEW" ahead "$MIG_ADDED"
+	tick
+	want "hold migration" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count '^deploy ')"
+}
+t_tick_never_downgrades_a_service() {
+	# handoffkeep-work already serves a newer D: NEW would roll it back.
+	setup; setup_tick
+	local D=5555555555555555555555555555555555555555
+	fx_health http://127.0.0.1:8801 "$D"
+	compare "$D" "$SHA_NEW" behind
+	tick
+	want "refuse not_newer" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count '^deploy ')"
+}
+t_tick_per_service_previous() {
+	setup; setup_tick
+	local A=4444444444444444444444444444444444444444
+	fx_health http://127.0.0.1:8801 "$A"
+	compare "$A" "$SHA_NEW" ahead '[]' '[{"commit":{"message":"x (#7)"}}]'
+	tick
+	want "deployed" "$(state_field verdict)"
+	want "$SHA_OLD" "$(jq -r .previous_ref "$FIX"/records/deploy_handoffkeep_2*)"
+	want "$A [\"https://github.com/mgh3326/handoffkeep/pull/7\"]" "$(jq -r '.previous_ref + " " + (.included_prs|tojson)' "$FIX"/records/deploy_handoffkeep-work_*)"
 }
 t_tick_interrupted() {
 	setup; setup_tick
@@ -488,8 +618,7 @@ t_promote_refuse() {
 }
 t_promote_ci_ok_failure() {
 	setup; setup_promote
-	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/check-runs?check_name=ci-ok&filter=all&per_page=100" \
-		'{"check_runs":[{"name":"ci-ok","conclusion":"failure","app":{"slug":"github-actions"}}]}'
+	ci_job 501 failure
 	fails promote "$SHA_NEW"
 	want 0 "$(count '^tag ')"
 	want 1 "$(count "status $SHA_NEW deploy-promote failure deploy-refused:ci-ok_failure")"
