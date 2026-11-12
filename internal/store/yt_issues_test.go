@@ -482,6 +482,46 @@ func TestYTIssueApplyGuardRefusesABindinglessApply(t *testing.T) {
 	}
 }
 
+// A previous release's resolver can see a matching imported binding while
+// applying an issue_create op, but it does not publish the task map row. The
+// database guard must reject that partial apply and roll back its comment map.
+func TestYTIssueApplyGuardRequiresTaskMap(t *testing.T) {
+	s := schemaStore(t, "yti_guard_map")
+	ytbMapped(t, s)
+	task := ytcTask(t, s, ytbProject)
+	binding := ytbBinding(task)
+	ytbBind(t, s, binding)
+	op := ytiPrepare(t, s, task, ytcTenant)
+	ytiDispatch(t, s, op)
+	if _, err := s.YTWriteLedger().MarkUnknown(t.Context(), time.Now().UTC(), op.ID, time.Now().UTC(), "test", "uncertain"); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := s.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(t.Context())
+	if _, err := tx.Exec(t.Context(), `INSERT INTO yt_entity_map(entity_kind,hk_key,yt_id,yt_parent_id,op_id,created_at)
+		VALUES ('comment',$1,'2-comment',$2,$3,now())`, "op:"+strconv.FormatInt(op.ID, 10), binding.IssueID, op.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = tx.Exec(t.Context(), `UPDATE yt_write_ops SET state='applied', yt_result_id=$2, reason='', last_error='', resolved_at=now() WHERE id=$1`, op.ID, binding.IssueID)
+	if err == nil || !strings.Contains(err.Error(), "task map") {
+		t.Fatalf("mapless apply: %v", err)
+	}
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := s.YTWriteLedger().MapGet(t.Context(), "comment", "op:"+strconv.FormatInt(op.ID, 10)); err != nil || found {
+		t.Fatalf("comment map survived rejected apply: found=%v err=%v", found, err)
+	}
+	got, err := s.YTWriteLedger().ByID(t.Context(), op.ID)
+	if err != nil || got.State != ytwrite.StateRemoteUnknown {
+		t.Fatalf("op %+v %v; want remote_unknown", got, err)
+	}
+}
+
 // A YouTrack origin naming another issue is a conflict at apply: the op is
 // applied with binding_conflict and no binding is written.
 func TestYTIssueOriginConflict(t *testing.T) {
