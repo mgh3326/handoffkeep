@@ -64,6 +64,8 @@ Submit ─► prepared ─Claim─► dispatched ─┬─ 2xx + valid id ──
   to resume and a crash in `dispatched` is uncertain. A `dispatched` op older than
   `StaleAfter` becomes `remote_unknown` (a crash between the claim and the send
   looks the same, so it stays unknown too: conservative, never a resend).
+  `StaleAfter` must exceed `DispatchTimeout`: `New` refuses a value at or below it,
+  so a send still in flight is never recovered as stale.
 - **No automatic re-create.** `remote_unknown` is left only by positive evidence or
   by an operator. Evidence: enumerate **all** comments of the target (paged, no
   assumption about order) and find exactly one whose text equals the rendered body,
@@ -675,7 +677,7 @@ and `youtrack_comment_links` (legacy and pulled comments). It is read-only: `sto
 
 | Target | Scope | Rebuilt from | Equal when |
 |---|---|---|---|
-| documents | every `yt_article_bindings` row on the tenant | the article's content | its sha256 is `documents.sha256`. A binding that names the import's split index (articles-backfill stored no content sha) is `exception_not_updated` (D4), not a failure, and its article is not read; the current body size decides nothing, so a document that grew past 240 KiB after a single-part import is compared |
+| documents | every `yt_article_bindings` row on the tenant | the article's content; for an `op_applied` binding the body inside hk's rendered form (`ytwrite.ParseArticleContent`; another form differs) | its sha256 is `documents.sha256`. A binding that names the import's split index (articles-backfill stored no content sha) is `exception_not_updated` (D4), not a failure, and its article is not read; the current body size decides nothing, so a document that grew past 240 KiB after a single-part import is compared. A body quoting the op marker whose article holds it escaped (hk 4295) is the exception `escaped_marker` |
 | comments | `--sample-comments` random bound tasks (default 200, by `md5("<seed>:<task id>")`) and the 20 bound tasks with the most comments | the issue's comments, listed stably | every hk comment has exactly one copy with the same (author, time, body), and every YouTrack comment copies one |
 | tasks | every `yt_task_bindings` row on the tenant | the issue | hk ID → id, the description's title line → title, the project → project |
 | decisions | every `yt_decision_bindings` row on the tenant | the DEC issue's description | question, options and answer equal (the Y6 block) |
@@ -1486,7 +1488,17 @@ mode on, for each changed document, in order:
 - no binding and created after the import ended: one `article_create` (key
   `document-article:<id>`, at most one per document; a rejected one is the
   operator's) in its task's project's `youtrack_projects` row, or in the
-  bucket's project (no project row: skipped, `no_project`).
+  bucket's project (no project row: skipped, `no_project`). One exception
+  (hk 4295): a first create rejected `invalid_issue` with no attempt (the
+  prepare-time `CheckArticle` refusal, which before hk 4295 refused every
+  body quoting the op marker) made no article, so once the request checks
+  the document gets one retry, key `document-article:<id>:retry-<rejected op
+  id>` (`ytwrite.ArticleRetryKey`), with the same payload. The retry is
+  prepared only when the request checks, so it is never itself retryable;
+  any other rejection, or one after a claim, stays the operator's. The feed
+  and the rescan both find such a document: the rescan lists every unbound
+  post-import document whose create is not held, so no document change is
+  needed.
 
 **Catch-up.** The consumer's cursor starts at the feed's end, so each
 process in mode on runs, after the cursor exists, one full catch-up: every
@@ -1513,13 +1525,25 @@ and carries the summary and the content.
 **Text.** The summary is the import's (`store.YTArticleSummary`:
 `[<prefix>] <key> [<kind>]` cut to 250 code points). An `article_create`'s
 content is the provenance line, a blank line, the body, a blank line and the
-op marker; a body that quotes the marker gets its create rejected
-`invalid_issue`. An `article_update`'s content depends on the binding's
+op marker. An `article_update`'s content depends on the binding's
 origin: an imported article (`import_verified`) gets the body alone, as the
 import wrote it; an article hk created (`op_applied`) keeps hk's format, the
 update op's own provenance line, the body and the update op's marker
 (rendered exactly as a create). Either way `content_sha` is the body's
 sha256 after the update.
+
+**Quoted marker** (hk 4295). In every article content (both kinds, both
+origins) each `<!-- hk-op:` in the body is sent as `<`, U+200B (zero-width
+space), `!-- hk-op:` (`ytwrite.EscapeArticleBody`): YouTrack shows the same
+text, in prose and inside code alike (an HTML entity such as `&lt;` would
+show literally inside a code span), and no marker scan matches it, so the
+op's own marker stays the only real one. A body without the prefix is sent
+byte for byte. Evidence compares against this same rendering, and
+`content_sha` stays the sha256 of the document's body (not the escaped
+one), so the binding equals `documents.sha256`. The escape is one-way: a
+body may already hold the escaped form, so readers escape the document and
+compare; they never unescape the article. `ytwrite.ParseArticleContent`
+reads hk's rendered form back (op id and the escaped body).
 
 **Legacy-synced documents.** A document the legacy `youtrack sync` already
 wrote (a `youtrack_doc_articles` row for its key) never gets a second

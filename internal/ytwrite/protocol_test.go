@@ -17,6 +17,27 @@ func TestIssueProtocolOverMemoryLedger(t *testing.T) { ytwritetest.RunIssueProto
 
 func TestMemoryLedgerContract(t *testing.T) { ytwritetest.RunLedger(t, memory) }
 
+// StaleAfter must exceed DispatchTimeout: a dispatch still inside its call
+// would otherwise be recovered as lost while it may yet send, and sent again.
+func TestNewRefusesStaleAfterWithinDispatchTimeout(t *testing.T) {
+	l := ytwritetest.NewMemLedger()
+	remote := ytwritetest.NewFake()
+	for _, tc := range []struct {
+		name            string
+		dispatch, stale time.Duration
+	}{
+		{"equal", 3 * time.Second, 3 * time.Second},
+		{"shorter", 3 * time.Second, time.Second},
+	} {
+		if _, err := ytwrite.New(ytwrite.Config{Ledger: l, Remote: remote, DispatchTimeout: tc.dispatch, StaleAfter: tc.stale}); err == nil {
+			t.Errorf("%s: New accepted StaleAfter %s with DispatchTimeout %s", tc.name, tc.stale, tc.dispatch)
+		}
+	}
+	if _, err := ytwrite.New(ytwrite.Config{Ledger: l, Remote: remote, DispatchTimeout: 3 * time.Second, StaleAfter: 4 * time.Second}); err != nil {
+		t.Fatalf("a StaleAfter above DispatchTimeout was refused: %v", err)
+	}
+}
+
 func TestProvenanceLineFormat(t *testing.T) {
 	at := time.Date(2026, 11, 9, 3, 4, 5, 0, time.FixedZone("KST", 9*3600))
 	line := ytwrite.ProvenanceLine("worker", at, 42)

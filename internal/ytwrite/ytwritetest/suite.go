@@ -591,6 +591,38 @@ func RunProtocol(t *testing.T, nl NewLedger) {
 			})
 		}
 	})
+
+	t.Run("crash_in_stale_recovery", func(t *testing.T) {
+		// The claim committed and the process died before it sent, so the op
+		// is dispatched with no outcome. The next worker's stale recovery is
+		// the ledger call that must die with its process when it crashes.
+		e := newEnv(t, nl)
+		claim := &CrashLedger{Ledger: e.ledger, Method: "Claim", After: true}
+		e.restart(claim)
+		_, _ = e.p.AppendComment(context.Background(), e.req("k1", "stale"))
+		if !claim.Dead() {
+			t.Fatal("the crash at Claim never fired")
+		}
+		recovery := &CrashLedger{Ledger: e.ledger, Method: "RecoverStale"}
+		e.restart(recovery)
+		e.clock.Advance(10 * time.Minute)
+		_, _ = e.p.Drive(context.Background(), 100)
+		if !recovery.Dead() {
+			t.Fatal("the crash at RecoverStale never fired: stale recovery bypassed the crash ledger")
+		}
+		// A new process finds the op remote_unknown, with no evidence and no resend.
+		e.restart(e.ledger)
+		e.clock.Advance(10 * time.Minute)
+		e.drive()
+		res, err := e.p.Lookup(context.Background(), "agent-a", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.State != ytwrite.StateRemoteUnknown {
+			t.Fatalf("final state = %s (%s), want %s", res.State, res.Reason, ytwrite.StateRemoteUnknown)
+		}
+		e.wantRemote(0, 0)
+	})
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }

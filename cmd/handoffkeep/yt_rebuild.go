@@ -173,6 +173,7 @@ var (
 		"screens/* and review/mwr-* documents (hk only by operator decision)",
 		"task reports, which are comments on their task's issue",
 		"documents over 240 KiB until the document kind rewrites them (exception_not_updated, D4)",
+		"a quoted hk op marker in a document body, which its article carries escaped (escaped_marker, hk 4295)",
 		"attachment metadata",
 	}
 	ytRebuildDecisionsPGOnly = []string{
@@ -275,8 +276,16 @@ func (b *ytRebuilder) tasks(ctx context.Context, out *ytRebuildTarget) error {
 	}
 }
 
+// ytRebuildEscapedMarker is the exception of a document whose body quotes
+// the reserved op marker: its article holds the body with the quote escaped
+// (ytwrite.EscapeArticleBody), so it equals the escaped body, not the body.
+const ytRebuildEscapedMarker = "escaped_marker"
+
 // documents compares every bound document's article content with the
-// document: its content sha256 must be documents.sha256. A document whose
+// document: its content sha256 must be documents.sha256. An op_applied
+// binding's article is compared by the body inside hk's rendered form
+// (ytwrite.ParseArticleContent), and a body that quotes the op marker is
+// the exception escaped_marker when the article holds it escaped. A document whose
 // binding names the import's split index article (over 240 KiB when
 // imported) is listed as exception_not_updated (D4, operator A53): its
 // articles are the import's and are not updated at the first switch. Whether
@@ -318,12 +327,27 @@ func (b *ytRebuilder) documents(ctx context.Context, out *ytRebuildTarget) error
 				}
 				continue
 			}
-			sum := sha256.Sum256([]byte(content))
-			if got := hex.EncodeToString(sum[:]); got != d.SHA256 {
-				out.differ(id, fmt.Sprintf("article %s content sha256 %.12s, hk %.12s", d.ArticleID, got, d.SHA256))
-				continue
+			body := content
+			if d.Origin == store.YTBindingOpApplied {
+				// hk wrote this article: its body sits between hk's
+				// provenance line and the op marker.
+				_, inner, ok := ytwrite.ParseArticleContent(content)
+				if !ok {
+					out.differ(id, "article "+d.ArticleID+" is not in hk's rendered form (provenance line, body, op marker)")
+					continue
+				}
+				body = inner
 			}
-			out.equal()
+			sum := sha256.Sum256([]byte(body))
+			got := hex.EncodeToString(sum[:])
+			switch {
+			case got == d.SHA256:
+				out.equal()
+			case d.EscapedSHA256 != "" && got == d.EscapedSHA256:
+				out.exception(id, fmt.Sprintf("%s: %s quotes the reserved hk op marker, which article %s carries escaped (hk 4295)", ytRebuildEscapedMarker, d.Key, d.ArticleID))
+			default:
+				out.differ(id, fmt.Sprintf("article %s content sha256 %.12s, hk %.12s", d.ArticleID, got, d.SHA256))
+			}
 		}
 		if len(docs) < page {
 			return nil
