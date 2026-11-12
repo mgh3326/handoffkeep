@@ -753,11 +753,11 @@ func diffComments(taskID int64, hk store.YTRebuildComments, listed []ytwrite.Rem
 		}
 		r := rebuilt[copies[i][0]]
 		switch {
-		case r.how == rebuiltLegacy && r.body == c.Body:
+		case r.how == rebuiltLegacy && equalCommentBody(r.body, c.Body):
 			out.exception(id, "legacy_mirror: "+r.ytID+" is the pre-protocol mirror copy; body equal, author and time not in YouTrack")
 		case r.how == rebuiltLegacy:
 			out.differ(id, "task "+task+": legacy mirror copy "+r.ytID+" body differs")
-		case r.body != c.Body:
+		case !equalCommentBody(r.body, c.Body):
 			out.differ(id, "task "+task+": "+r.ytID+" body differs")
 		case r.how == rebuiltImported:
 			out.equal() // matched by the whole tuple
@@ -793,12 +793,18 @@ func docCopyKey(text string, docs []store.YTRebuildTaskDoc) string {
 	return ""
 }
 
+// equalCommentBody reports whether a rebuild comment body matches the hk comment
+// body: YouTrack trims trailing whitespace (hk 4248), as audit does (hk 3915).
+func equalCommentBody(a, b string) bool {
+	return strings.TrimRight(a, " \t\r\n") == strings.TrimRight(b, " \t\r\n")
+}
+
 // importedMatches reports whether an imported YouTrack comment is hk comment
-// c: the same body, the same time to the millisecond (the import sent
-// millisecond precision), and an author whose login or name is c's author
-// (the import made each hk actor a user of that name).
+// c: the same body (trailing whitespace trimmed, hk 4248), the same time to the
+// millisecond (the import sent millisecond precision), and an author whose login
+// or name is c's author (the import made each hk actor a user of that name).
 func importedMatches(r rebuiltComment, c store.YTRebuildComment) bool {
-	if r.body != c.Body || !r.at.Equal(c.CreatedAt.Truncate(time.Millisecond)) {
+	if !equalCommentBody(r.body, c.Body) || !r.at.Equal(c.CreatedAt.Truncate(time.Millisecond)) {
 		return false
 	}
 	for _, a := range r.authors {
