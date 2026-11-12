@@ -86,11 +86,11 @@ func TestYTFieldsBackfillSkipsMovedAndOtherTenant(t *testing.T) {
 	ytFeedExec(t, s, `UPDATE yt_task_bindings SET tenant='other.youtrack.cloud' WHERE task_id=$1`, other)
 	ytFeedExec(t, s, `UPDATE tasks SET project='ytfb-elsewhere' WHERE id=$1`, bound)
 	r := ytfBackfill(t, s, YTFieldsBackfillOptions{})
-	if r.Total != (YTFieldsBackfillCounts{Scanned: 3, MoveSkipped: 1, Unbound: 1, OtherTenant: 1}) || len(r.Projects) != 2 {
+	if r.Total != (YTFieldsBackfillCounts{Scanned: 3, Moved: 1, Unbound: 1, OtherTenant: 1}) || len(r.Projects) != 2 {
 		t.Fatalf("report %+v %+v", r.Total, r.Projects)
 	}
 	for _, p := range r.Projects {
-		if p.Project == "ytfb-elsewhere" && p.YTFieldsBackfillCounts != (YTFieldsBackfillCounts{Scanned: 1, MoveSkipped: 1}) {
+		if p.Project == "ytfb-elsewhere" && p.YTFieldsBackfillCounts != (YTFieldsBackfillCounts{Scanned: 1, Moved: 1}) {
 			t.Fatalf("moved project %+v", p)
 		}
 	}

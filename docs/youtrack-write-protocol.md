@@ -873,8 +873,12 @@ milestone reaches the issue with the task's next change.
 A task's hk project can change while its issue stays in the YouTrack project
 of the old one. The issue then moves: `issue_move` (`kind_move.go`) sends one
 POST that sets the issue's project, and the task_fields consumer
-(`internal/store/yt_move.go`) prepares it. The move shares the fields mode
-(`HANDOFFKEEP_YT_FIELDS_MODE`, no new variable), so it is off with that mode.
+(`internal/store/yt_move.go`) prepares it. Moves have their own mode,
+`HANDOFFKEEP_YT_MOVES_MODE` (`off` or `on`, default `off`, hk 4111). Off, a
+moved task is skipped as it was before moves existed: no move, no snapshot,
+logged as `ytwrite.fields_skipped_moved` and counted as `moved`. Turning the mode
+off admits no issue_move op, so a move already prepared is held until it is
+on again.
 
 **Prepare.** For a bound task (on the worker's tenant) the feed decides the
 project its issue belongs in: the YouTrack project its hk project maps to; a
@@ -912,11 +916,56 @@ empty for the same reason. A binding that no longer names the op's issue
 (rebound since the op was prepared) is `ErrConflictingResult`: the apply
 rolls back and the op stays unresolved.
 
-**Admission.** The fields gate: mode on, and the op's target is the issue the
-task is bound to on the op's tenant now.
+**Admission.** The moves gate: `HANDOFFKEEP_YT_MOVES_MODE` on, and the op's
+target is the issue the task is bound to on the op's tenant now.
 
 **Not here.** A move made in YouTrack itself is not seen locally (see the
 note in the comment path above). hk moves only the issues it binds.
+
+## Document comments (hk 4xxx)
+
+After the import ended, a task-tied report or brief reaches its task's issue
+only through this path. It is a `comment_append` op, so it has no kind of its
+own: its principal is `hk:doc-comments`, and the comment gate admits it only
+while `HANDOFFKEEP_YT_DOC_COMMENTS_MODE` is `on` (default `off`). The hk-comment
+modes never admit a document op, so turning this mode off stops them even when
+the comments mode is on.
+
+**Feed consumer `task_docs`** (`internal/store/yt_doc_comments.go`) reads every
+`document` change from `sync_log`. For each document with a task whose key is
+a report (`reports/mwr-*`, or `reports/<job>/report.md`) or a brief
+(`brief/<date>/<job>`), and whose task is bound (`yt_task_bindings`):
+
+- one op per comment body of `ytwrite.DocComments`, keyed
+  `doc-comment:<doc id>:<sha>` (parts after the first: `:part:<n>`), so a
+  changed document (a new sha) gets new comments and a re-save with the same
+  body prepares nothing (the key already exists);
+- no task, a key that is neither, or a missing sha: skipped;
+- unbound task, or a binding a local source disagrees with: skipped and
+  counted (`ytwrite.doc_comments_feed ... unbound= disagree=`);
+- a key already taken by an op with another payload (the author or the
+  binding's target changed): counted as a conflict and logged, never fatal.
+
+Mode off prepares nothing and still advances the cursor, so a document changed
+while off is not copied unless it changes again. The cursor starts at the
+feed's max_sync_id, so documents before it (the import's) are not re-posted.
+
+**Bodies** (`ytwrite.DocComments`) are the import's (`youtrack/import/client.js`
+`documentIssueComments`): a report is `# <key>` (with ` (part i/n)` when split),
+a blank line and the part, split at `DocCommentPartBytes-1024` bytes
+(`DocCommentPartBytes` is the import's `SAFE_PART_BYTES`, 240 KiB) on whole
+lines, cut between characters for a longer line; a brief is one
+`Article: [brief] <key> [brief] (hk document key: <key>)` line (title cut to
+250 runes). `RenderComment` then adds the provenance line and the op marker, so
+`youtrack audit` can read them as hk's (`RenderedOpID`). The golden test
+`TestDocCommentsSplitReportMatchesImport` pins the parts' byte lengths and
+SHA-256 to the import's output.
+
+**Cap.** A document part may be up to `MaxDocCommentBodyBytes` (the import's
+240 KiB, `CheckDocComment`); hk's own comments keep `MaxBodyBytes` (64 KiB).
+
+**Audit.** A document copy is not an hk comment, so `youtrack audit` lists it
+as `yt_only_bot`, which the audit's gate does not count.
 
 ## Tests
 

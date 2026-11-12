@@ -24,26 +24,46 @@ func TestYTKindGatesNameRegisteredKinds(t *testing.T) {
 	}
 }
 
-// The per-kind admission keeps the comment gate exactly as it was, and the
-// issue_create gate admits nothing while the issues mode is off.
+// The comment_append gate admits an hk comment's copy by the comments mode
+// and never a document copy (principal hk:doc-comments), which the document
+// mode admits alone. The issue_create gate admits nothing while the issues
+// mode is off.
 func TestYTAdmitSQLPerKind(t *testing.T) {
 	s := &Store{}
+	// issue_fields and issue_move are FALSE until their modes are on: moves
+	// have their own mode (hk 4111), off by default.
+	const noFields = `(o.kind = 'issue_fields' AND (FALSE))`
+	const noMove = `(o.kind = 'issue_move' AND (FALSE))`
 	for _, tc := range []struct {
 		mode YTCommentsMode
 		gate string
 	}{
 		{YTCommentsOff, `FALSE`},
-		{YTCommentsCanary, `EXISTS (SELECT 1 FROM yt_comment_canary c
+		{YTCommentsCanary, `o.principal <> 'hk:doc-comments' AND EXISTS (SELECT 1 FROM yt_comment_canary c
 		WHERE o.entity_kind = 'task' AND c.task_id::text = o.entity_id AND c.issue_id = o.yt_target_id AND c.tenant = o.tenant)`},
-		{YTCommentsOn, `o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
+		{YTCommentsOn, `o.principal <> 'hk:doc-comments' AND o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
 		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`},
 	} {
 		s.SetYTCommentsMode(tc.mode)
-		want := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND (` + tc.gate + `)) OR (o.kind = 'issue_create' AND (FALSE)) OR (o.kind = 'issue_fields' AND (FALSE)) OR (o.kind = 'issue_move' AND (FALSE))))`
+		want := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND ((` + tc.gate + `) OR (FALSE))) OR (o.kind = 'issue_create' AND (FALSE)) OR ` + noFields + ` OR ` + noMove + `))`
 		if got := s.ytAdmitSQL("$2"); got != want {
 			t.Errorf("mode %s:\n got %s\nwant %s", tc.mode, got, want)
 		}
 	}
+	// The document mode (hk 4xxx) admits only document copies bound to their
+	// task's issue; off admits nothing.
+	s.SetYTCommentsMode(YTCommentsOff)
+	s.SetYTDocCommentsMode(YTDocCommentsOff)
+	if got := ytDocCommentGateSQL(s); got != `FALSE` {
+		t.Errorf("doc comments off: %s", got)
+	}
+	s.SetYTDocCommentsMode(YTDocCommentsOn)
+	wantDoc := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND ((FALSE) OR (o.principal = 'hk:doc-comments' AND o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
+		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)))) OR (o.kind = 'issue_create' AND (FALSE)) OR ` + noFields + ` OR ` + noMove + `))`
+	if got := s.ytAdmitSQL("$2"); got != wantDoc {
+		t.Errorf("doc comments on:\n got %s\nwant %s", got, wantDoc)
+	}
+	s.SetYTDocCommentsMode(YTDocCommentsOff)
 	// The fields mode (hk 4003) admits an op whose target is the task's
 	// bound issue on the op's tenant; on without a tenant is off.
 	s.SetYTCommentsMode(YTCommentsOff)
@@ -52,12 +72,22 @@ func TestYTAdmitSQLPerKind(t *testing.T) {
 		t.Errorf("fields on without a tenant: %s", got)
 	}
 	s.SetYTFieldsMode(YTFieldsOn, ytcTenant)
-	// A move shares the fields mode (hk 4055): the same gate, for issue_move.
-	want := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND (FALSE)) OR (o.kind = 'issue_create' AND (FALSE)) OR (o.kind = 'issue_fields' AND (o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
-		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant))) OR (o.kind = 'issue_move' AND (o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
-		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)))))`
+	fieldsGate := `o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
+		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
+	want := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND ((FALSE) OR (FALSE))) OR (o.kind = 'issue_create' AND (FALSE)) OR (o.kind = 'issue_fields' AND (` + fieldsGate + `)) OR ` + noMove + `))`
 	if got := s.ytAdmitSQL("$2"); got != want {
-		t.Errorf("fields on:\n got %s\nwant %s", got, want)
+		t.Errorf("fields on, moves off:\n got %s\nwant %s", got, want)
+	}
+	// The moves mode (hk 4111) admits an issue_move op whose target is the
+	// task's bound issue on the op's tenant; off is FALSE, with fields on or not.
+	s.SetYTMovesMode(YTMovesOn)
+	wantMoves := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND ((FALSE) OR (FALSE))) OR (o.kind = 'issue_create' AND (FALSE)) OR (o.kind = 'issue_fields' AND (` + fieldsGate + `)) OR (o.kind = 'issue_move' AND (` + fieldsGate + `))))`
+	if got := s.ytAdmitSQL("$2"); got != wantMoves {
+		t.Errorf("moves on:\n got %s\nwant %s", got, wantMoves)
+	}
+	s.SetYTMovesMode(YTMovesOff)
+	if got := ytMoveGateSQL(s); got != `FALSE` {
+		t.Errorf("moves off: %s", got)
 	}
 }
 

@@ -192,30 +192,39 @@ func ytFieldsSkipOutcome(tenant string, t ytFieldsRow, found bool) ytFieldsOutco
 
 // prepareYTFieldsTx decides one task's snapshot in tx at now, for the worker
 // of tenant. A task that is not bound on this tenant is skipped
-// (ytFieldsSkipOutcome). A task whose hk project no longer maps to its
-// binding's YouTrack project gets an issue_move op first (ytMoveForTx), and its
-// snapshot names the project the issue belongs in; with no mapped target
-// nothing is prepared for it. A snapshot the protocol cannot store is skipped
-// and logged. Every other task prepares its snapshot through
-// prepareYTSnapshotTx, which makes no op when the snapshot is the one last
-// prepared.
-func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant string, id int64, t ytFieldsRow, found bool) (ytFieldsOutcome, error) {
+// (ytFieldsSkipOutcome). With moves on (movesOn), a task whose hk project no
+// longer maps to its binding's YouTrack project gets an issue_move op first
+// (ytMoveForTx), and its snapshot names the project the issue belongs in; with
+// no mapped target nothing is prepared for it. With moves off, such a task is
+// skipped and logged, as before moves existed (ytwrite.fields_skipped_moved).
+// A snapshot the protocol cannot store is skipped and logged. Every other task
+// prepares its snapshot through prepareYTSnapshotTx, which makes no op when
+// the snapshot is the one last prepared.
+func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant string, movesOn bool, id int64, t ytFieldsRow, found bool) (ytFieldsOutcome, error) {
 	if skip := ytFieldsSkipOutcome(tenant, t, found); skip != "" {
 		return skip, nil
 	}
-	// The project the issue belongs in, and the move to it when the issue is
-	// not there yet (yt_move.go). The snapshot names that project: it is
-	// written after the move, on the same lane.
-	project, moving, err := ytMoveForTx(ctx, tx, now, id, t)
-	if errors.Is(err, ytwrite.ErrInvalid) {
-		log.Printf("ytwrite.move_skipped task_id=%d reason=invalid err=%q", id, err.Error())
-		return ytFieldsInvalid, nil
-	}
-	if err != nil {
-		return "", err
-	}
-	if project == "" {
-		return ytFieldsMoveSkipped, nil
+	project, moving := t.bindingProjectID, false
+	if movesOn {
+		// The project the issue belongs in, and the move to it when the issue
+		// is not there yet (yt_move.go). The snapshot names that project: it is
+		// written after the move, on the same lane.
+		var err error
+		project, moving, err = ytMoveForTx(ctx, tx, now, id, t)
+		if errors.Is(err, ytwrite.ErrInvalid) {
+			log.Printf("ytwrite.move_skipped task_id=%d reason=invalid err=%q", id, err.Error())
+			return ytFieldsInvalid, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if project == "" {
+			return ytFieldsMoveSkipped, nil
+		}
+	} else if !t.projectAgrees {
+		log.Printf("ytwrite.fields_skipped_moved task_id=%d project=%q issue_id=%q binding_project_id=%q project_id=%q",
+			id, t.fields.Project, t.issueID, t.bindingProjectID, t.mappedProjectID)
+		return ytFieldsMoved, nil
 	}
 	n, outcome, err := ytFieldsOpFor(id, t, project)
 	if outcome != "" || err != nil {
@@ -273,7 +282,7 @@ func (s *Store) ytFieldsOnBindTx(ctx context.Context, tx pgx.Tx, taskID int64, n
 		return err
 	}
 	t, found := tasks[taskID]
-	outcome, err := prepareYTFieldsTx(ctx, tx, now, tenant, taskID, t, found)
+	outcome, err := prepareYTFieldsTx(ctx, tx, now, tenant, s.ytMovesNow() == YTMovesOn, taskID, t, found)
 	if err != nil {
 		return err
 	}
@@ -290,6 +299,7 @@ func ytFieldsHandler(s *Store, now time.Time) FeedHandler {
 		if mode != YTFieldsOn {
 			return nil
 		}
+		movesOn := s.ytMovesNow() == YTMovesOn
 		ids := make([]int64, 0, len(rows))
 		for _, r := range rows {
 			if id, err := strconv.ParseInt(r.ModelID, 10, 64); err == nil && id > 0 && r.Model == "task" {
@@ -303,7 +313,7 @@ func ytFieldsHandler(s *Store, now time.Time) FeedHandler {
 		counts := map[ytFieldsOutcome]int{}
 		for _, id := range ids {
 			t, found := tasks[id]
-			outcome, err := prepareYTFieldsTx(ctx, tx, now, tenant, id, t, found)
+			outcome, err := prepareYTFieldsTx(ctx, tx, now, tenant, movesOn, id, t, found)
 			if err != nil {
 				return err
 			}

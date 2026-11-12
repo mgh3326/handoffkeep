@@ -159,7 +159,7 @@ func (s *Store) backfillYTFields(ctx context.Context, tenant string, id int64, d
 	t, found := tasks[id]
 	project := t.fields.Project
 	// A dry run applies the consumer's rule as it would, and rolls back.
-	outcome, err := prepareYTFieldsTx(ctx, tx, now, tenant, id, t, found)
+	outcome, err := prepareYTFieldsTx(ctx, tx, now, tenant, s.ytMovesNow() == YTMovesOn, id, t, found)
 	if err != nil {
 		return "", "", err
 	}

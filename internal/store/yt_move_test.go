@@ -27,6 +27,14 @@ func ytmMapped(t *testing.T, s *Store) {
 	}
 }
 
+// ytmSetup is ytfSetup with the moves mode on (the move tests' setup).
+func ytmSetup(t *testing.T, prefix string) (s *Store, bound, unbound int64) {
+	t.Helper()
+	s, bound, unbound = ytfSetup(t, prefix)
+	s.SetYTMovesMode(YTMovesOn)
+	return s, bound, unbound
+}
+
 // ytmOps is the issue_move ops of a task, oldest first.
 func ytmOps(t *testing.T, s *Store, task int64) []ytwrite.Op {
 	t.Helper()
@@ -64,7 +72,7 @@ func ytmBinding(t *testing.T, s *Store, task int64) (project, readable string) {
 // The snapshot waits for the move on the lane; the move's apply moves the
 // binding's project in the same transaction.
 func TestYTMoveProjectChangeMakesMoveThenFields(t *testing.T) {
-	s, bound, _ := ytfSetup(t, "ytm_move")
+	s, bound, _ := ytmSetup(t, "ytm_move")
 	ytmMapped(t, s)
 	ytFeedExec(t, s, `UPDATE tasks SET project=$2, priority=5 WHERE id=$1`, bound, ytmProject)
 	ytfPass(t, s)
@@ -102,7 +110,7 @@ func TestYTMoveProjectChangeMakesMoveThenFields(t *testing.T) {
 // A target project no youtrack_projects row maps prepares nothing: no move,
 // no snapshot.
 func TestYTMoveUnmappedTargetPreparesNothing(t *testing.T) {
-	s, bound, _ := ytfSetup(t, "ytm_unmapped")
+	s, bound, _ := ytmSetup(t, "ytm_unmapped")
 	ytFeedExec(t, s, `UPDATE tasks SET project='ytm-nowhere', priority=5 WHERE id=$1`, bound)
 	ytfPass(t, s)
 	if ops := ytmOps(t, s, bound); len(ops) != 0 {
@@ -118,7 +126,7 @@ func TestYTMoveUnmappedTargetPreparesNothing(t *testing.T) {
 
 // Moved back after the first move applied, the task gets another move.
 func TestYTMoveBackAgainMakesAnotherMove(t *testing.T) {
-	s, bound, _ := ytfSetup(t, "ytm_back")
+	s, bound, _ := ytmSetup(t, "ytm_back")
 	ytmMapped(t, s)
 	ytFeedExec(t, s, `UPDATE tasks SET project=$2 WHERE id=$1`, bound, ytmProject)
 	ytfPass(t, s)
@@ -142,7 +150,7 @@ func TestYTMoveBackAgainMakesAnotherMove(t *testing.T) {
 // the task is. The second move is prepared behind the first, and the snapshots
 // follow their moves on the lane.
 func TestYTMoveBackBeforeTheMoveAppliesMovesBack(t *testing.T) {
-	s, bound, _ := ytfSetup(t, "ytm_pending")
+	s, bound, _ := ytmSetup(t, "ytm_pending")
 	ytmMapped(t, s)
 	ytFeedExec(t, s, `UPDATE tasks SET project=$2 WHERE id=$1`, bound, ytmProject)
 	ytfPass(t, s)
@@ -175,7 +183,7 @@ func TestYTMoveBackBeforeTheMoveAppliesMovesBack(t *testing.T) {
 // YouTrack: the move applies, and the binding takes the target project. The
 // move is sent once.
 func TestYTMoveLostReplyIsSettledByProject(t *testing.T) {
-	s, bound, _ := ytfSetup(t, "ytm_evidence")
+	s, bound, _ := ytmSetup(t, "ytm_evidence")
 	ytmMapped(t, s)
 	yt := ytwritetest.NewFake()
 	issue := yt.InjectIssue(ytbProjectID, bound, "#"+strconv.FormatInt(bound, 10)+" move", "d")
@@ -213,17 +221,30 @@ func TestYTMoveLostReplyIsSettledByProject(t *testing.T) {
 	}
 }
 
-// Mode off: a project change prepares no move and no snapshot.
+// Moves mode off (the default): a moved task is skipped as before moves
+// existed, with no move and no snapshot. Turning moves off holds a move that
+// was already prepared: the worker admits nothing while it is off.
 func TestYTMoveModeOffPreparesNothing(t *testing.T) {
 	s, bound, _ := ytfSetup(t, "ytm_off")
 	ytmMapped(t, s)
-	s.SetYTFieldsMode(YTFieldsOff, "")
 	ytFeedExec(t, s, `UPDATE tasks SET project=$2 WHERE id=$1`, bound, ytmProject)
 	ytfPass(t, s)
 	if ops := ytmOps(t, s, bound); len(ops) != 0 {
-		t.Fatalf("mode off prepared moves %+v", ops)
+		t.Fatalf("moves off prepared moves %+v", ops)
 	}
 	if ops := ytfOps(t, s, bound); len(ops) != 0 {
-		t.Fatalf("mode off prepared snapshots %+v", ops)
+		t.Fatalf("moves off prepared snapshots %+v", ops)
+	}
+	// On, the same change is a move; off again, the move is held.
+	s.SetYTMovesMode(YTMovesOn)
+	ytFeedExec(t, s, `UPDATE tasks SET priority=6 WHERE id=$1`, bound)
+	ytfPass(t, s)
+	moves := ytmOps(t, s, bound)
+	if len(moves) != 1 {
+		t.Fatalf("moves on prepared %+v, want one", moves)
+	}
+	s.SetYTMovesMode(YTMovesOff)
+	if out := ytiClaim(t, s, moves[0]); out != ytwrite.ClaimHeld {
+		t.Fatalf("claim of a move with moves off: %s", out)
 	}
 }

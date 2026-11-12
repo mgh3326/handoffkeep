@@ -143,7 +143,10 @@ type CommentRequest struct {
 
 // CheckComment explains why a comment request is refused before anything is
 // stored. An empty Key is accepted (AppendComment generates one).
-func CheckComment(req CommentRequest) error {
+func CheckComment(req CommentRequest) error { return checkCommentRequest(req, MaxBodyBytes) }
+
+// checkCommentRequest is CheckComment with the body cap given.
+func checkCommentRequest(req CommentRequest, maxBody int) error {
 	if !principalRE.MatchString(req.Principal) {
 		return fmt.Errorf("%w: principal is empty or malformed", ErrInvalid)
 	}
@@ -156,7 +159,7 @@ func CheckComment(req CommentRequest) error {
 	if !issueIDRE.MatchString(req.YTIssueID) {
 		return fmt.Errorf("%w: youtrack issue id is empty or malformed", ErrInvalid)
 	}
-	if err := checkBody(req.Body); err != nil {
+	if err := checkBodyMax(req.Body, maxBody); err != nil {
 		return err
 	}
 	if req.Key != "" && !keyRE.MatchString(req.Key) {

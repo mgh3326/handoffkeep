@@ -18,7 +18,7 @@ const protocolTestDB = "postgres://protocol-test.invalid:1/none?sslmode=disable"
 // modes under test and the credentials of a configured legacy push.
 func protocolEnv(t *testing.T, comments, issues string) {
 	t.Helper()
-	for _, name := range []string{"HANDOFFKEEP_YT_COMMENTS_MODE", "HANDOFFKEEP_YT_ISSUES_MODE", "HANDOFFKEEP_YT_FIELDS_MODE", "HANDOFFKEEP_YT_COMMENTS_CATCHUP", "HANDOFFKEEP_YT_READTHROUGH_MODE", "HANDOFFKEEP_DB_URL", "YOUTRACK_URL", "YOUTRACK_BOT_API_KEY"} {
+	for _, name := range []string{"HANDOFFKEEP_YT_COMMENTS_MODE", "HANDOFFKEEP_YT_ISSUES_MODE", "HANDOFFKEEP_YT_FIELDS_MODE", "HANDOFFKEEP_YT_DOC_COMMENTS_MODE", "HANDOFFKEEP_YT_COMMENTS_CATCHUP", "HANDOFFKEEP_YT_READTHROUGH_MODE", "HANDOFFKEEP_DB_URL", "YOUTRACK_URL", "YOUTRACK_BOT_API_KEY"} {
 		t.Setenv(name, "")
 	}
 	t.Setenv("HANDOFFKEEP_YT_COMMENTS_MODE", comments)

@@ -18,10 +18,47 @@ import (
 // project. The task_fields consumer (yt_fields.go) prepares one issue_move op
 // for it and then the task's snapshot, on the task's lane, so the snapshot
 // reaches the issue once the move applied. The move applies in the same
-// transaction as the binding's new project (bindYTMoveTx). The move shares the
-// fields mode: HANDOFFKEEP_YT_FIELDS_MODE gates both.
+// transaction as the binding's new project (bindYTMoveTx). Moves have their
+// own gate, HANDOFFKEEP_YT_MOVES_MODE (default off): while it is off a moved
+// task is skipped as it was before moves existed, and no move op is admitted.
 
-func init() { registerYTKindGate(ytwrite.KindIssueMove, ytFieldsGateSQL) }
+// YTMovesMode gates the project moves (HANDOFFKEEP_YT_MOVES_MODE).
+type YTMovesMode string
+
+const (
+	// YTMovesOff prepares no move, and admits no issue_move op (the default).
+	YTMovesOff YTMovesMode = "off"
+	// YTMovesOn prepares the move of a moved task and admits the issue_move
+	// ops whose target is the task's bound issue.
+	YTMovesOn YTMovesMode = "on"
+)
+
+// SetYTMovesMode sets the project-move gate for this process. serve calls it
+// once at start. Any value that is not on is off.
+func (s *Store) SetYTMovesMode(m YTMovesMode) { s.ytMoves.Store(m) }
+
+// ytMovesNow is the gate: on, or off (unset, or any other value).
+func (s *Store) ytMovesNow() YTMovesMode {
+	switch m, _ := s.ytMoves.Load().(YTMovesMode); m {
+	case YTMovesOn:
+		return YTMovesOn
+	default:
+		return YTMovesOff
+	}
+}
+
+func init() { registerYTKindGate(ytwrite.KindIssueMove, ytMoveGateSQL) }
+
+// ytMoveGateSQL is the issue_move gate (ytAdmitSQL): moves mode on, and o's
+// target is the issue o's task is bound to on o's tenant now. Moves mode off
+// admits nothing.
+func ytMoveGateSQL(s *Store) string {
+	if s.ytMovesNow() != YTMovesOn {
+		return `FALSE`
+	}
+	return `o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
+		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
+}
 
 // ytFieldsMoveSkipped is a task whose issue must move but cannot: its hk
 // project maps to no YouTrack project (nothing to move to), or the move the

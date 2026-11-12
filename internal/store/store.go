@@ -583,9 +583,16 @@ type Store struct {
 	// is off. On prepares an issue_create op in each new task's transaction.
 	ytIssues atomic.Pointer[ytIssuesGate]
 	// ytFields is the YouTrack task-fields gate and tenant (SetYTFieldsMode);
-	// nil is off. On prepares issue_fields ops (and issue_move ops for a
-	// project change) from the change feed.
+	// nil is off. On prepares issue_fields ops from the change feed.
 	ytFields atomic.Pointer[ytFieldsGate]
+	// ytMoves is the YouTrack project-move gate (SetYTMovesMode), a
+	// YTMovesMode; unset is off. On prepares and admits issue_move ops
+	// (yt_move.go).
+	ytMoves atomic.Value
+	// ytDocComments is the YouTrack document-comment gate
+	// (SetYTDocCommentsMode), a YTDocCommentsMode; unset is off. On copies
+	// task-tied reports and briefs from the change feed (yt_doc_comments.go).
+	ytDocComments atomic.Value
 	// ytBindingChecked, when set (tests only), runs inside AddYTTaskBinding
 	// after every check has passed and before the binding row is inserted,
 	// with every lock of the publication held.
