@@ -249,7 +249,8 @@ package store
 //     task it just inserted, which no other transaction can hold yet, then
 //     inserts the op row. Apply of an issue_create op takes the task's lane
 //     lock first (as Claim does), then FOR UPDATE on the op row, then inserts
-//     the task's yt_entity_map row and its yt_task_bindings row. That insert
+//     the task's yt_entity_map row and its yt_task_bindings row (an issue_move
+//     op takes the same lane lock and updates that binding's project). That insert
 //     can wait for an uncommitted binding of AddYTTaskBinding, which holds
 //     its own task's lane lock and never waits for an op row or a second
 //     lane lock, so the wait cannot close a cycle. Apply takes no ownership

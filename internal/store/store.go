@@ -583,7 +583,8 @@ type Store struct {
 	// is off. On prepares an issue_create op in each new task's transaction.
 	ytIssues atomic.Pointer[ytIssuesGate]
 	// ytFields is the YouTrack task-fields gate and tenant (SetYTFieldsMode);
-	// nil is off. On prepares issue_fields ops from the change feed.
+	// nil is off. On prepares issue_fields ops (and issue_move ops for a
+	// project change) from the change feed.
 	ytFields atomic.Pointer[ytFieldsGate]
 	// ytBindingChecked, when set (tests only), runs inside AddYTTaskBinding
 	// after every check has passed and before the binding row is inserted,

@@ -19,8 +19,10 @@ import (
 // change-feed consumer task_fields reads every task change from sync_log and,
 // for a task bound to its issue (yt_task_bindings), prepares one issue_fields
 // op with the task's full snapshot when the snapshot changed
-// (prepareYTSnapshotTx). The op rides the task's lane (task:<id>) with its
-// comments and its issue_create, so the writes to one issue stay in order.
+// (prepareYTSnapshotTx). A task whose hk project moved to another mapped
+// YouTrack project gets an issue_move op first (yt_move.go). The ops ride the
+// task's lane (task:<id>) with its comments and its issue_create, so the
+// writes to one issue stay in order.
 
 // YTFieldsMode gates the task-fields projection (HANDOFFKEEP_YT_FIELDS_MODE).
 type YTFieldsMode string
@@ -69,9 +71,10 @@ func init() {
 	registerYTFeedStoreConsumer(ytFieldsConsumer, []string{"task"}, ytFieldsHandler)
 }
 
-// ytFieldsGateSQL is the issue_fields gate (ytAdmitSQL): mode on, and o's
-// target is the issue o's task is bound to on o's tenant now. An op whose
-// task was rebound stays prepared (a project move is Y4c's). Mode off admits
+// ytFieldsGateSQL is the issue_fields gate (ytAdmitSQL), and the issue_move
+// gate too (yt_move.go): mode on, and o's target is the issue o's task is
+// bound to on o's tenant now. An op whose task was rebound stays prepared; a
+// project move keeps the issue, so its own gate is this one. Mode off admits
 // nothing.
 func ytFieldsGateSQL(s *Store) string {
 	if mode, _ := s.ytFieldsNow(); mode != YTFieldsOn {
@@ -174,8 +177,9 @@ const (
 // of tenant: a deleted task (found false) is skipped; a task with no binding
 // is skipped (its issue_create publishes the binding and prepares the first
 // snapshot then, ytFieldsOnBindTx); a binding on another tenant is skipped; a
-// task whose hk project no longer maps to its binding's YouTrack project is
-// skipped and logged (ytwrite.fields_skipped_moved; a move is Y4c's); a
+// task whose hk project no longer maps to its binding's YouTrack project gets
+// an issue_move op first (ytMoveForTx), and its snapshot names the project
+// the issue belongs in; with no mapped target nothing is prepared for it. A
 // snapshot the protocol cannot store is skipped and logged. Every other task
 // prepares its snapshot through prepareYTSnapshotTx, which makes no op when
 // the snapshot is the one last prepared.
@@ -187,13 +191,23 @@ func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant str
 		return ytFieldsUnbound, nil
 	case t.tenant != tenant:
 		return ytFieldsOtherTenant, nil
-	case !t.projectAgrees:
-		log.Printf("ytwrite.fields_skipped_moved task_id=%d project=%q issue_id=%q binding_project_id=%q project_id=%q",
-			id, t.fields.Project, t.issueID, t.bindingProjectID, t.mappedProjectID)
-		return ytFieldsMoved, nil
+	}
+	// The project the issue belongs in, and the move to it when the issue is
+	// not there yet (yt_move.go). The snapshot names that project: it is
+	// written after the move, on the same lane.
+	project, moving, err := ytMoveForTx(ctx, tx, now, id, t)
+	if errors.Is(err, ytwrite.ErrInvalid) {
+		log.Printf("ytwrite.move_skipped task_id=%d reason=invalid err=%q", id, err.Error())
+		return ytFieldsInvalid, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if project == "" {
+		return ytFieldsMoveSkipped, nil
 	}
 	n, err := ytwrite.FieldsOp(ytwrite.FieldsRequest{Principal: YTFieldsPrincipal, Actor: YTFieldsPrincipal, Tenant: t.tenant,
-		IssueID: t.issueID, ProjectID: t.bindingProjectID, Task: t.fields})
+		IssueID: t.issueID, ProjectID: project, Task: t.fields})
 	if errors.Is(err, ytwrite.ErrInvalid) {
 		// Bad data must not stop the feed: the cursor would never pass
 		// this row.
@@ -207,10 +221,15 @@ func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant str
 	if err != nil {
 		return "", err
 	}
-	if !made {
+	if made {
+		log.Printf("ytwrite.fields_enqueued op_id=%d task_id=%d issue_id=%q", op.ID, id, t.issueID)
+	}
+	switch {
+	case moving:
+		return ytFieldsMoved, nil
+	case !made:
 		return ytFieldsUnchanged, nil
 	}
-	log.Printf("ytwrite.fields_enqueued op_id=%d task_id=%d issue_id=%q", op.ID, id, t.issueID)
 	return ytFieldsPrepared, nil
 }
 
@@ -268,9 +287,9 @@ func ytFieldsHandler(s *Store, now time.Time) FeedHandler {
 			}
 			counts[outcome]++
 		}
-		log.Printf("ytwrite.fields_feed tasks=%d prepared=%d unchanged=%d deleted=%d unbound=%d other_tenant=%d moved=%d invalid=%d",
+		log.Printf("ytwrite.fields_feed tasks=%d prepared=%d unchanged=%d deleted=%d unbound=%d other_tenant=%d moved=%d move_skipped=%d invalid=%d",
 			len(ids), counts[ytFieldsPrepared], counts[ytFieldsUnchanged], counts[ytFieldsDeleted], counts[ytFieldsUnbound],
-			counts[ytFieldsOtherTenant], counts[ytFieldsMoved], counts[ytFieldsInvalid])
+			counts[ytFieldsOtherTenant], counts[ytFieldsMoved], counts[ytFieldsMoveSkipped], counts[ytFieldsInvalid])
 		return nil
 	}
 }
