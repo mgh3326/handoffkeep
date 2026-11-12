@@ -62,12 +62,12 @@ var ErrYTAuthorityRefused = errors.New("yt_authority_refused")
 var ErrYTCommentUnsendable = errors.New("yt_comment_unsendable")
 
 // ytAuthorityPrincipals are the op principals whose writes belong to each
-// kind: the ops that must be resolved before the kind switches. Decisions have
-// no op in this release.
+// kind: the ops that must be resolved before the kind switches.
 var ytAuthorityPrincipals = map[YTAuthorityKind][]string{
 	YTAuthorityTasks:     {YTIssuePrincipal, YTFieldsPrincipal},
 	YTAuthorityComments:  {YTCommentPrincipal},
 	YTAuthorityDocuments: {ytDocCommentPrincipal},
+	YTAuthorityDecisions: {YTDecisionsPrincipal},
 }
 
 // ytAuthorityFeeds are the change-feed consumers that prepare each kind's ops
@@ -79,6 +79,7 @@ var ytAuthorityFeeds = map[YTAuthorityKind][]struct {
 }{
 	YTAuthorityTasks:     {{ytFieldsConsumer, []string{"task"}}},
 	YTAuthorityDocuments: {{ytDocCommentsConsumer, []string{"document"}}},
+	YTAuthorityDecisions: {{ytDecisionsConsumer, []string{"decision"}}},
 }
 
 // ytAuthorityKindOf is the kind whose ops principal prepares ("" for a
@@ -212,7 +213,7 @@ func (s *Store) YTAuthorityOf(ctx context.Context, kind YTAuthorityKind) (YTAuth
 
 // ytAuthorityWriteModeOff explains why kind's write mode in this process is
 // not on, or returns "" when it is. Tasks need both the issue and the field
-// copies; decisions have no write mode in this release.
+// copies.
 func (s *Store) ytAuthorityWriteModeOff(kind YTAuthorityKind) string {
 	switch kind {
 	case YTAuthorityTasks:
@@ -231,6 +232,11 @@ func (s *Store) ytAuthorityWriteModeOff(kind YTAuthorityKind) string {
 	case YTAuthorityDocuments:
 		if s.ytDocCommentsNow() != YTDocCommentsOn {
 			return "HANDOFFKEEP_YT_DOC_COMMENTS_MODE is not on"
+		}
+		return ""
+	case YTAuthorityDecisions:
+		if _, on := s.ytDecisionsNow(); !on {
+			return "HANDOFFKEEP_YT_DECISIONS_MODE is not on"
 		}
 		return ""
 	default:

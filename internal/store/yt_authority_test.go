@@ -166,8 +166,7 @@ func TestYTAuthoritySetRefusals(t *testing.T) {
 		}
 	}
 
-	// Tasks need both the issue and the field modes; decisions are refused in
-	// this release whatever the modes.
+	// Tasks need both the issue and the field modes.
 	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
 	_, _, err = set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack)
 	refused(err, "HANDOFFKEEP_YT_FIELDS_MODE")
@@ -186,8 +185,19 @@ func TestYTAuthoritySetRefusals(t *testing.T) {
 	if _, _, err := set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack); err != nil {
 		t.Fatal(err)
 	}
+	// Decisions need their mode (hk 4054) and their feed caught up.
 	_, _, err = set([]YTAuthorityKind{YTAuthorityDecisions}, YTAuthorityYouTrack)
-	refused(err, "decisions: ")
+	refused(err, "HANDOFFKEEP_YT_DECISIONS_MODE")
+	s.SetYTDecisionsMode(YTDecisionsOn, ytcTenant, "0-9", "DEC")
+	_, _, err = set([]YTAuthorityKind{YTAuthorityDecisions}, YTAuthorityYouTrack)
+	refused(err, "feed consumer "+ytDecisionsConsumer+" has not run yet")
+	if _, err := s.pool.Exec(ctx, `INSERT INTO yt_feed_cursors(consumer,last_sync_id,updated_at) SELECT $1, coalesce(max(sync_id),0), now() FROM sync_log`, ytDecisionsConsumer); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := set([]YTAuthorityKind{YTAuthorityDecisions}, YTAuthorityYouTrack); err != nil {
+		t.Fatal(err)
+	}
+	s.SetYTDecisionsMode(YTDecisionsOff, "", "", "")
 
 	// A legacy sync, adopt or catch-up holding the sync lock refuses a switch
 	// to youtrack; a rollback to hk does not need it.

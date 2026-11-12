@@ -67,6 +67,8 @@ type FakeYouTrack struct {
 	fieldsMissing map[string]bool
 	projectText   map[string]bool
 	created       []ytwrite.IssueCreate
+	// decisionCreates every DecisionIssueCreate received (fake_decision.go).
+	decisionCreates []ytwrite.DecisionIssueCreate
 	// bundles are the values the named enum or state fields accept (a
 	// field not named takes any value); updates every IssueFieldsUpdate
 	// received; readFaults the errors the next ReadIssueFields calls
@@ -88,6 +90,8 @@ type delayedComment struct{ issue, text string }
 type fakeIssue struct {
 	ytwrite.RemoteIssue
 	hkID int64
+	// decisionID is the issue's 결정 ID (0: none; fake_decision.go).
+	decisionID int64
 	// fields are the issue's field values, by name (no entry: empty).
 	fields map[string]string
 }
@@ -531,13 +535,19 @@ func (f *FakeYouTrack) CreateIssue(ctx context.Context, in ytwrite.IssueCreate) 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	return f.createLocked(func() string { return f.addIssueLocked(in.ProjectID, in.TaskID, in.Summary, in.Description) })
+}
+
+// createLocked is one issue create under f.mu: it fails as the next queued
+// Fault says (as CreateComment does) and otherwise runs add, the commit.
+func (f *FakeYouTrack) createLocked(add func() string) (string, error) {
 	var fault Fault
 	if len(f.faults) > 0 {
 		fault, f.faults = f.faults[0], f.faults[1:]
 	}
 	commit := func() string {
 		f.commits++
-		return f.addIssueLocked(in.ProjectID, in.TaskID, in.Summary, in.Description)
+		return add()
 	}
 	switch fault.Kind {
 	case CommitDropReply:
