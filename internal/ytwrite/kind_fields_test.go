@@ -123,7 +123,7 @@ func TestTaskIssueSnapshotMapsLikeTheImport(t *testing.T) {
 	want := map[string]string{
 		"hk ID": "4003", "hk 프로젝트": "handoffkeep", "hk 상태": "개발 중", "hk 우선순위": "2", "레인": "handoffkeep-design",
 		"종류": "implement", "등급": "A", "티어": "T2", "PR": "https://github.com/o/r/pull/317", "작업 job": "hk4003-yt-issue-fields",
-		"멈춤": "멈춤", "마감": "1795167000000", "영역": "youtrack", "마일스톤": "YouTrack canonical", "예상 소요": "90",
+		"멈춤": "멈춤", "마감": "1795176000000", "영역": "youtrack", "마일스톤": "YouTrack canonical", "예상 소요": "90",
 	}
 	if len(s.Fields) != len(want) {
 		t.Fatalf("fields %+v", s.Fields)
@@ -155,6 +155,18 @@ func TestTaskIssueSnapshotMapsLikeTheImport(t *testing.T) {
 	long := ytwrite.TaskSummary(1, strings.Repeat("가", 300))
 	if n := len([]rune(long)); n != ytwrite.IssueSummaryLimit {
 		t.Fatalf("summary of %d runes", n)
+	}
+}
+
+func TestTaskIssueSnapshotRendersKSTDueDate(t *testing.T) {
+	for _, due := range []time.Time{
+		time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 11, 13, 20, 0, 0, 0, time.UTC),
+	} {
+		row := ytwrite.TaskFields{TaskID: 1, Title: "due", DueAt: &due}
+		if got, ok := valueOf(ytwrite.TaskIssueSnapshot(row), ytwrite.FieldDue); !ok || got != "1794657600000" {
+			t.Errorf("due %s rendered 마감=%q present=%v, want 1794657600000", due, got, ok)
+		}
 	}
 }
 
@@ -250,7 +262,10 @@ func TestIssueFieldsEvidence(t *testing.T) {
 	t.Run("equal_applied", func(t *testing.T) {
 		e := newFieldsEnv(t)
 		e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.CommitDropReply})
-		op := e.prepare(fieldsTaskRow(), "k1")
+		row := fieldsTaskRow()
+		due := time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)
+		row.DueAt = &due
+		op := e.prepare(row, "k1")
 		e.drive()
 		e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
 		e.clock.Advance(time.Hour)
@@ -271,6 +286,27 @@ func TestIssueFieldsEvidence(t *testing.T) {
 		if e.yt.Calls() != 1 {
 			t.Fatalf("resent: %d calls", e.yt.Calls())
 		}
+	})
+	t.Run("different_due_day_unknown", func(t *testing.T) {
+		e := newFieldsEnv(t)
+		e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.CommitDropReply})
+		op := e.prepare(fieldsTaskRow(), "k1")
+		e.drive()
+		e.yt.SetIssueField(e.issue, ytwrite.FieldDue, "1794744000000")
+		e.clock.Advance(time.Hour)
+		e.drive()
+		e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonMarkerMismatch)
+	})
+	t.Run("nil_due_matches_null", func(t *testing.T) {
+		e := newFieldsEnv(t)
+		row := fieldsTaskRow()
+		row.DueAt = nil
+		e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.CommitDropReply})
+		op := e.prepare(row, "k1")
+		e.drive()
+		e.clock.Advance(time.Hour)
+		e.drive()
+		e.want(op.ID, ytwrite.StateApplied, "")
 	})
 	t.Run("not_written_unknown", func(t *testing.T) {
 		e := newFieldsEnv(t)

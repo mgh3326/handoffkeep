@@ -89,7 +89,7 @@ func TestWriteRemoteUpdateIssueFields(t *testing.T) {
 		"PR":      `SimpleIssueCustomField null`,
 		"작업 job":  `SimpleIssueCustomField null`,
 		"멈춤":      `MultiEnumIssueCustomField []`,
-		"마감":      `DateIssueCustomField 1795132800000`,
+		"마감":      `DateIssueCustomField 1795176000000`,
 		"영역":      `SimpleIssueCustomField null`,
 		"마일스톤":    `SimpleIssueCustomField null`,
 		"예상 소요":   `PeriodIssueCustomField {"$type":"PeriodValue","minutes":90}`,
@@ -193,7 +193,7 @@ func TestWriteRemoteReadIssueFieldsRoundTrip(t *testing.T) {
 			{"name":"hk 상태","value":{"name":"개발 중","$type":"StateBundleElement"}},{"name":"hk 우선순위","value":2},
 			{"name":"레인","value":{"name":"handoffkeep-design"}},{"name":"종류","value":{"name":"implement"}},
 			{"name":"등급","value":{"name":"A"}},{"name":"티어","value":{"name":"T2"}},{"name":"PR","value":null},
-			{"name":"작업 job","value":null},{"name":"멈춤","value":[]},{"name":"마감","value":1795132800000},
+			{"name":"작업 job","value":null},{"name":"멈춤","value":[]},{"name":"마감","value":1795176000000},
 			{"name":"영역","value":null},{"name":"마일스톤","value":null},{"name":"예상 소요","value":{"minutes":90,"presentation":"1h 30m"}},
 			{"name":"Assignee","value":{"name":"someone"}}]}`))
 	}}
