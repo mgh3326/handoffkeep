@@ -16,7 +16,38 @@ type Article struct {
 	Summary    string      `json:"summary"`
 	Content    string      `json:"content,omitempty"`
 	Project    *ProjectRef `json:"project,omitempty"`
-	Type       string      `json:"$type"`
+	// ParentArticle is set on a child article (a split document's part);
+	// read by ListArticles and ReadArticle only.
+	ParentArticle *ArticleRef `json:"parentArticle,omitempty"`
+	Type          string      `json:"$type"`
+}
+
+// ArticleRef names another article.
+type ArticleRef struct {
+	ID string `json:"id"`
+}
+
+// HasParent reports whether the article is a child of another article.
+func (a Article) HasParent() bool { return a.ParentArticle != nil && a.ParentArticle.ID != "" }
+
+// articleBindingFields are what the article bindings (hk 4053) read: the
+// identity, summary, project and parent of an article.
+const articleBindingFields = "id,idReadable,summary,project(id,shortName,$type),parentArticle(id)"
+
+// ListArticles lists every article the bot can see, page by page, without
+// content (articleBindingFields).
+func (c *Client) ListArticles(ctx context.Context) ([]Article, error) {
+	return getAll[Article](ctx, c, "/api/articles", articleBindingFields)
+}
+
+// ReadArticle reads one article by id or readable id, with its content,
+// project and parent. A missing article is a 404 (IsNotFound).
+func (c *Client) ReadArticle(ctx context.Context, articleID string) (Article, error) {
+	q := url.Values{}
+	q.Set("fields", articleBindingFields+",content")
+	var out Article
+	err := c.get(ctx, "/api/articles/"+url.PathEscape(articleID), q, &out)
+	return out, err
 }
 
 // ArticleWrite is one create call. ParentID empty makes a top-level article.
