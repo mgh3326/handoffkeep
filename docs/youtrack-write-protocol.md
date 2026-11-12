@@ -1390,9 +1390,13 @@ bound under the same rules except the readable id, which YouTrack chose
 mirrored issue verify, neither is bound (`ambiguous`). Without
 `--apply` it is the preflight: the database is opened read-only and nothing
 is written. A decision whose `decision_create` is unresolved is refused
-(`pending_op`). With the mode on in the command's environment, each new
-binding also prepares the decision's first snapshot; a binding made with the
-mode off gets its full text with the decision's next change.
+(`pending_op`). With `--apply` and mode on in the command's environment, each
+new binding also prepares the decision's first snapshot, already-bound
+decisions prepare their `decision_fields` snapshot if their snapshot sha
+differs (`fields_prepared` in the report, unchanged under `unchanged`), and
+missing decisions get a `decision_create` op prepared (`create_prepared` in the
+report; same adopt rule as the feed); with mode off, a binding gets its full
+text with the decision's next change.
 
 **Admission.** Mode on and the op's tenant is the worker's. `decision_create`:
 the decision has no binding, or one this op published (a backfill binding

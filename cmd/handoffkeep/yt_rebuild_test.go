@@ -415,6 +415,49 @@ func TestYouTrackRebuildCommentProvenance(t *testing.T) {
 	}
 }
 
+// hk 4248: YouTrack trims trailing whitespace from comment bodies; the drill's
+// comment compare trims trailing whitespace so a comment ending in \n or spaces
+// rebuilds as equal.
+func TestYouTrackRebuildCommentTrailingWhitespace(t *testing.T) {
+	at := time.Date(2026, 11, 12, 8, 30, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		hkBody string
+		ytText string
+		equal  bool
+		differ string
+	}{
+		{"trailing newline equals trimmed (hk 4248 comment 1099 case)", "ends with newline\n", "ends with newline", true, ""},
+		{"trailing spaces equal trimmed", "ends with spaces   ", "ends with spaces", true, ""},
+		{"negative: internal whitespace difference differs", "two  spaces", "two spaces", false, "matches no hk comment"},
+		{"negative: leading whitespace difference differs", " leading", "leading", false, "matches no hk comment"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out ytRebuildComments
+			hk := store.YTRebuildComments{
+				Comments:    []store.YTRebuildComment{{ID: 1099, Author: "mac-personal", Body: tc.hkBody, CreatedAt: at}},
+				PulledYTIDs: map[string]bool{},
+			}
+			listed := []ytwrite.RemoteComment{
+				{ID: "7-9521", Text: tc.ytText, AuthorLogin: "mac-personal", CreatedAt: at},
+			}
+			diffComments(866, hk, listed, &out)
+			if tc.equal {
+				if out.Equal != 1 || out.Differ.Count != 0 || out.Checked != 1 {
+					t.Fatalf("want equal=1 differ=0, got %+v", out)
+				}
+			} else {
+				if out.Equal != 0 || out.Differ.Count == 0 {
+					t.Fatalf("want differ, got equal=%d differ=%d", out.Equal, out.Differ.Count)
+				}
+				if tc.differ != "" && len(out.Differ.Items) > 0 && !strings.Contains(out.Differ.Items[0].Reason, tc.differ) {
+					t.Fatalf("differ reason %q lacks %q", out.Differ.Items[0].Reason, tc.differ)
+				}
+			}
+		})
+	}
+}
+
 // hk 4121: a 429 is waited out (its Retry-After, else the protocol's wait)
 // and the read repeated; a wait longer than the drill takes stops the run,
 // and the stop is reported, not hidden.

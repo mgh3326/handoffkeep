@@ -52,24 +52,30 @@ type ytDecisionsMismatch struct {
 // verification (never bound); PendingOp: the decision's decision_create op is
 // unresolved (the op gives it its issue); Conflict: the binding was refused
 // (the decision or the issue is bound elsewhere); Error: the read failed, run
-// again.
+// again; CreatePrepared: --apply with mode on prepared a decision_create op
+// for a missing decision; FieldsPrepared: --apply with mode on prepared a
+// decision_fields snapshot op; Unchanged: --apply with mode on found a bound
+// decision's snapshot sha already prepared.
 type ytDecisionsReport struct {
-	Tenant     string                `json:"tenant"`
-	ProjectID  string                `json:"project_id"`
-	Apply      bool                  `json:"apply"`
-	Snapshots  string                `json:"snapshots"`
-	Checked    int                   `json:"checked"`
-	Verified   ytDecisionsClass      `json:"verified"`
-	Legacy     ytDecisionsClass      `json:"verified_legacy"`
-	Ambiguous  ytDecisionsClass      `json:"ambiguous"`
-	Bound      ytDecisionsClass      `json:"bound"`
-	Missing    ytDecisionsClass      `json:"missing"`
-	Mismatch   ytDecisionsClass      `json:"mismatch"`
-	Reasons    []ytDecisionsMismatch `json:"mismatch_reasons"`
-	PendingOp  ytDecisionsClass      `json:"pending_op"`
-	Conflict   ytDecisionsClass      `json:"conflict"`
-	Error      ytDecisionsClass      `json:"error"`
-	errorTexts []string
+	Tenant         string                `json:"tenant"`
+	ProjectID      string                `json:"project_id"`
+	Apply          bool                  `json:"apply"`
+	Snapshots      string                `json:"snapshots"`
+	Checked        int                   `json:"checked"`
+	Verified       ytDecisionsClass      `json:"verified"`
+	Legacy         ytDecisionsClass      `json:"verified_legacy"`
+	Ambiguous      ytDecisionsClass      `json:"ambiguous"`
+	Bound          ytDecisionsClass      `json:"bound"`
+	Missing        ytDecisionsClass      `json:"missing"`
+	Mismatch       ytDecisionsClass      `json:"mismatch"`
+	Reasons        []ytDecisionsMismatch `json:"mismatch_reasons"`
+	PendingOp      ytDecisionsClass      `json:"pending_op"`
+	Conflict       ytDecisionsClass      `json:"conflict"`
+	Error          ytDecisionsClass      `json:"error"`
+	CreatePrepared ytDecisionsClass      `json:"create_prepared"`
+	FieldsPrepared ytDecisionsClass      `json:"fields_prepared"`
+	Unchanged      ytDecisionsClass      `json:"unchanged"`
+	errorTexts     []string
 }
 
 // ytDecisionIssueGetter reads one issue by id (WriteRemote.GetIssue).
@@ -80,7 +86,9 @@ type ytDecisionIssueGetter interface {
 // ytDecisionsBackfillStore is the store surface of the backfill.
 type ytDecisionsBackfillStore interface {
 	UnboundYTDecisions(ctx context.Context, afterID int64, limit int) ([]store.YTDecisionCandidate, error)
+	BoundYTDecisions(ctx context.Context, tenant string, afterID int64, limit int) ([]int64, error)
 	BindYTDecision(ctx context.Context, b store.YTDecisionBinding, now time.Time) (bool, error)
+	PrepareYTDecision(ctx context.Context, id int64, now time.Time) (store.YTDecisionOutcome, error)
 	ListYouTrackDecisionMirrors(ctx context.Context, decisionIDs []int64) (map[int64]store.YouTrackDecisionMirror, error)
 }
 
@@ -109,6 +117,7 @@ func ytDecisionsBackfillRun(ctx context.Context, st ytDecisionsBackfillStore, is
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
+	boundNow := map[int64]bool{}
 	var after int64
 	for {
 		page, err := st.UnboundYTDecisions(ctx, after, 200)
@@ -161,6 +170,15 @@ func ytDecisionsBackfillRun(ctx context.Context, st ytDecisionsBackfillStore, is
 				continue
 			case "missing":
 				r.Missing.add(c.ID)
+				if o.Apply && o.Snapshots == string(store.YTDecisionsOn) {
+					outcome, err := st.PrepareYTDecision(ctx, c.ID, now())
+					if err != nil {
+						return r, fmt.Errorf("prepare missing decision %d: %w", c.ID, err)
+					}
+					if outcome == store.YTDecisionCreatePrepared {
+						r.CreatePrepared.add(c.ID)
+					}
+				}
 				continue
 			case "error":
 				r.Error.add(c.ID)
@@ -188,12 +206,49 @@ func ytDecisionsBackfillRun(ctx context.Context, st ytDecisionsBackfillStore, is
 				return r, fmt.Errorf("bind decision %d: %w", c.ID, err)
 			case created:
 				r.Bound.add(c.ID)
+				boundNow[c.ID] = true
+				if o.Snapshots == string(store.YTDecisionsOn) {
+					r.FieldsPrepared.add(c.ID)
+				}
 			}
 		}
 		if len(page) < 200 {
-			return r, nil
+			break
 		}
 	}
+	if o.Apply && o.Snapshots == string(store.YTDecisionsOn) {
+		var afterBound int64
+		for {
+			page, err := st.BoundYTDecisions(ctx, o.Tenant, afterBound, 200)
+			if err != nil {
+				return r, err
+			}
+			for _, id := range page {
+				afterBound = id
+				if boundNow[id] {
+					continue
+				}
+				if o.Limit > 0 && r.Checked >= o.Limit {
+					return r, nil
+				}
+				r.Checked++
+				outcome, err := st.PrepareYTDecision(ctx, id, now())
+				if err != nil {
+					return r, fmt.Errorf("prepare bound decision %d snapshot: %w", id, err)
+				}
+				switch outcome {
+				case store.YTDecisionFieldsPrepared:
+					r.FieldsPrepared.add(id)
+				case store.YTDecisionUnchanged:
+					r.Unchanged.add(id)
+				}
+			}
+			if len(page) < 200 {
+				break
+			}
+		}
+	}
+	return r, nil
 }
 
 // ytDecisionIssueVerify reads one issue and classifies it for decision id:

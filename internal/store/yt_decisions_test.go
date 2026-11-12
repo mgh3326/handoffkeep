@@ -376,3 +376,69 @@ func TestDecisionFeedIDs(t *testing.T) {
 		t.Fatalf("ids %v", got)
 	}
 }
+
+// BoundYTDecisions lists decisions bound on tenant, and PrepareYTDecision
+// prepares snapshots for bound decisions (idempotently) and decision_create
+// for unbound decisions.
+func TestYTDecisionsBoundAndPrepareYTDecision(t *testing.T) {
+	s := ytdecSetup(t, "ytd_bound_prep", true)
+	ctx := t.Context()
+	now := time.Now().UTC()
+
+	a := ytdecChat(t, s, "Q-20261112-21", "question 1?")
+	b := ytdecChat(t, s, "Q-20261112-22", "question 2?")
+	c := ytdecChat(t, s, "Q-20261112-23", "question 3?")
+
+	// Bind 'a' directly without snapshot (as if mode was off).
+	if _, err := s.pool.Exec(ctx, `INSERT INTO yt_decision_bindings(decision_id, tenant, issue_id, issue_readable, project_id, origin, bound_by, bound_at)
+		VALUES ($1, $2, '2-101', 'DEC-101', $3, 'import_verified', 'test', $4)`,
+		strconv.FormatInt(a, 10), ytcTenant, ytdecProjectID, now); err != nil {
+		t.Fatal(err)
+	}
+
+	// BoundYTDecisions returns bound decision on tenant.
+	bound, err := s.BoundYTDecisions(ctx, ytcTenant, 0, 100)
+	if err != nil || len(bound) != 1 || bound[0] != a {
+		t.Fatalf("bound decisions: %+v %v", bound, err)
+	}
+
+	// PrepareYTDecision on bound decision 'a' prepares decision_fields snapshot.
+	outcome, err := s.PrepareYTDecision(ctx, a, now)
+	if err != nil || outcome != YTDecisionFieldsPrepared {
+		t.Fatalf("prepare bound: %s %v", outcome, err)
+	}
+	if ops := ytdecOps(t, s, ytwrite.KindDecisionFields, a); len(ops) != 1 {
+		t.Fatalf("fields ops after prepare: %d", len(ops))
+	}
+
+	// Second PrepareYTDecision on 'a' is idempotent (unchanged).
+	outcome, err = s.PrepareYTDecision(ctx, a, now)
+	if err != nil || outcome != YTDecisionUnchanged {
+		t.Fatalf("prepare bound again: %s %v", outcome, err)
+	}
+	if ops := ytdecOps(t, s, ytwrite.KindDecisionFields, a); len(ops) != 1 {
+		t.Fatalf("fields ops after second prepare: %d", len(ops))
+	}
+
+	// PrepareYTDecision on unbound decision 'b' prepares decision_create.
+	outcome, err = s.PrepareYTDecision(ctx, b, now)
+	if err != nil || outcome != YTDecisionCreatePrepared {
+		t.Fatalf("prepare unbound: %s %v", outcome, err)
+	}
+	if ops := ytdecOps(t, s, ytwrite.KindDecisionCreate, b); len(ops) != 1 {
+		t.Fatalf("create ops after prepare: %d", len(ops))
+	}
+
+	// Second PrepareYTDecision on 'b' finds create op pending.
+	outcome, err = s.PrepareYTDecision(ctx, b, now)
+	if err != nil || outcome != YTDecisionCreatePending {
+		t.Fatalf("prepare unbound again: %s %v", outcome, err)
+	}
+
+	// Mode off: PrepareYTDecision does nothing.
+	s.SetYTDecisionsMode(YTDecisionsOff, "", "", "")
+	outcome, err = s.PrepareYTDecision(ctx, c, now)
+	if err != nil || outcome != "" {
+		t.Fatalf("prepare mode off: %s %v", outcome, err)
+	}
+}
