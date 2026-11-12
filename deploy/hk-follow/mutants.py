@@ -40,6 +40,8 @@ MUTANTS = {
         'failed_step="shiftgate_${svc}_exit_${rc}"\n\t\t\tcontinue'),
     "I4-terminal-retry": ("deployed | failed | refuse | noop)", "deployed | refuse | noop)"),
     "I4-no-started-state": ('save_state "$TAG_DIGEST" "$sha" started ""', "true"),
+    "I4-status-errors-ignored": ('| if (.errors // []) != [] then error("status errors") else . end', "| ."),
+    "I4-missing-state-as-no-hold": ('| if (.state | type) != "object" then error("no readable state") else .state end', "| (.state // {})"),
     "I4-shiftgate-hold-ignored": ('if [[ "$held" == "$TAG_DIGEST" ]]; then', "if false; then"),
     "I5-no-lock": ("if ! flock -n 9; then", "if false; then"),
     "promote-no-readback": (

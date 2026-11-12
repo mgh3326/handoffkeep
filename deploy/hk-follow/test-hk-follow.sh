@@ -452,6 +452,25 @@ t_tick_shiftgate_status_unreadable() {
 	tick
 	want "wait shiftgate_status" "$(state_field verdict) $(state_field reason)"
 	want 0 "$(count '^deploy ')"
+	# shiftgate names a service whose state.json failed to load, omits
+	# state and carries the error (review on #349, round 3).
+	echo '[{"name":"handoffkeep","backend":"hk","errors":["state: open /var/lib/shiftgate/handoffkeep/state.json: permission denied"]},{"name":"handoffkeep-work","state":{}}]' >"$FIX/sg_status"
+	tick
+	want "wait shiftgate_status" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count '^deploy ')"
+	# No state and no errors (a service shiftgate has never deployed).
+	echo '[{"name":"handoffkeep","backend":"hk"},{"name":"handoffkeep-work","state":{}}]' >"$FIX/sg_status"
+	tick
+	want "wait shiftgate_status" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count '^deploy ')"
+	# A state present but with an errors entry, or a hold without a digest.
+	echo '[{"name":"handoffkeep","state":{},"errors":["haproxy: dial unix: no such file"]},{"name":"handoffkeep-work","state":{}}]' >"$FIX/sg_status"
+	tick
+	want "wait shiftgate_status" "$(state_field verdict) $(state_field reason)"
+	echo '[{"name":"handoffkeep","state":{"hold":{"reason":"rolled_back"}}},{"name":"handoffkeep-work","state":{}}]' >"$FIX/sg_status"
+	tick
+	want "wait shiftgate_status" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count '^deploy ')"
 	rm "$FIX/sg_status"
 	tick
 	want "deployed" "$(state_field verdict)"

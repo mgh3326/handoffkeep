@@ -633,15 +633,23 @@ tick_locked() {
 
 	log "hk_follow.gate sha=${sha:-none} digest=$TAG_DIGEST deployed_sha=$(IFS=,; echo "${bases[*]:-unknown}") verdict=$verdict reason=$reason approval_ref=${GATE_APPROVAL_REF:-none}"
 	if [[ "$verdict" == promote ]]; then
-		# shiftgate's hold is read before anything starts. A status that
-		# cannot be read or does not list a service is no answer: deploying
-		# anyway would clear a hold an operator's rollback set.
+		# shiftgate's hold is read before anything starts, and only from a
+		# readable state. shiftgate still lists a service whose state.json
+		# failed to load, with state omitted and the error in errors; that,
+		# a status that cannot be read, or a service listed other than once
+		# is no answer. Deploying anyway would clear a hold an operator's
+		# rollback set.
 		sgjson=$(sg_status </dev/null 2>/dev/null) || sgjson=
 		for line in "${svcs[@]}"; do
 			svc=${line%% *}
 			[[ -n "${prev_rev[$svc]+x}" ]] || continue
 			if ! held=$(jq -er --arg s "$svc" 'if type == "array" then . else error("not an array") end
-				| map(select(.name == $s)) | if length == 1 then .[0].state.hold.digest // "" else error("service missing") end' <<<"$sgjson" 2>/dev/null); then
+				| map(select(.name == $s)) | if length == 1 then .[0] else error("service missing") end
+				| if (.errors // []) != [] then error("status errors") else . end
+				| if (.state | type) != "object" then error("no readable state") else .state end
+				| if .hold == null then ""
+				  elif (.hold | type) == "object" and (.hold.digest | type) == "string" then .hold.digest
+				  else error("hold undeterminable") end' <<<"$sgjson" 2>/dev/null); then
 				verdict=wait reason=shiftgate_status
 				break
 			fi
