@@ -171,37 +171,12 @@ const (
 )
 
 // prepareYTFieldsTx decides one task's snapshot in tx at now, for the worker
-// of tenant: a deleted task (found false) is skipped; a task with no binding
-// is skipped (its issue_create publishes the binding and prepares the first
-// snapshot then, ytFieldsOnBindTx); a binding on another tenant is skipped; a
-// task whose hk project no longer maps to its binding's YouTrack project is
-// skipped and logged (ytwrite.fields_skipped_moved; a move is Y4c's); a
-// snapshot the protocol cannot store is skipped and logged. Every other task
-// prepares its snapshot through prepareYTSnapshotTx, which makes no op when
-// the snapshot is the one last prepared.
+// of tenant (ytFieldsOpFor), and prepares it through prepareYTSnapshotTx,
+// which makes no op when the snapshot is the one last prepared.
 func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant string, id int64, t ytFieldsRow, found bool) (ytFieldsOutcome, error) {
-	switch {
-	case !found:
-		return ytFieldsDeleted, nil
-	case t.issueID == "":
-		return ytFieldsUnbound, nil
-	case t.tenant != tenant:
-		return ytFieldsOtherTenant, nil
-	case !t.projectAgrees:
-		log.Printf("ytwrite.fields_skipped_moved task_id=%d project=%q issue_id=%q binding_project_id=%q project_id=%q",
-			id, t.fields.Project, t.issueID, t.bindingProjectID, t.mappedProjectID)
-		return ytFieldsMoved, nil
-	}
-	n, err := ytwrite.FieldsOp(ytwrite.FieldsRequest{Principal: YTFieldsPrincipal, Actor: YTFieldsPrincipal, Tenant: t.tenant,
-		IssueID: t.issueID, ProjectID: t.bindingProjectID, Task: t.fields})
-	if errors.Is(err, ytwrite.ErrInvalid) {
-		// Bad data must not stop the feed: the cursor would never pass
-		// this row.
-		log.Printf("ytwrite.fields_skipped task_id=%d reason=invalid err=%q", id, err.Error())
-		return ytFieldsInvalid, nil
-	}
-	if err != nil {
-		return "", err
+	n, outcome, err := ytFieldsOpFor(tenant, id, t, found)
+	if err != nil || outcome != "" {
+		return outcome, err
 	}
 	op, made, err := prepareYTSnapshotTx(ctx, tx, now, n, n.PayloadSHA)
 	if err != nil {
@@ -212,6 +187,41 @@ func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant str
 	}
 	log.Printf("ytwrite.fields_enqueued op_id=%d task_id=%d issue_id=%q", op.ID, id, t.issueID)
 	return ytFieldsPrepared, nil
+}
+
+// ytFieldsOpFor is the rule that decides whether one task has a snapshot for
+// the worker of tenant: a deleted task (found false) is skipped; a task with
+// no binding is skipped (its issue_create publishes the binding and prepares
+// the first snapshot then, ytFieldsOnBindTx); a binding on another tenant is
+// skipped; a task whose hk project no longer maps to its binding's YouTrack
+// project is skipped and logged (ytwrite.fields_skipped_moved; a move is
+// Y4c's); a snapshot the protocol cannot store is skipped and logged. A
+// skipped task returns its outcome; every other task returns its op and "".
+func ytFieldsOpFor(tenant string, id int64, t ytFieldsRow, found bool) (ytwrite.NewOp, ytFieldsOutcome, error) {
+	switch {
+	case !found:
+		return ytwrite.NewOp{}, ytFieldsDeleted, nil
+	case t.issueID == "":
+		return ytwrite.NewOp{}, ytFieldsUnbound, nil
+	case t.tenant != tenant:
+		return ytwrite.NewOp{}, ytFieldsOtherTenant, nil
+	case !t.projectAgrees:
+		log.Printf("ytwrite.fields_skipped_moved task_id=%d project=%q issue_id=%q binding_project_id=%q project_id=%q",
+			id, t.fields.Project, t.issueID, t.bindingProjectID, t.mappedProjectID)
+		return ytwrite.NewOp{}, ytFieldsMoved, nil
+	}
+	n, err := ytwrite.FieldsOp(ytwrite.FieldsRequest{Principal: YTFieldsPrincipal, Actor: YTFieldsPrincipal, Tenant: t.tenant,
+		IssueID: t.issueID, ProjectID: t.bindingProjectID, Task: t.fields})
+	if errors.Is(err, ytwrite.ErrInvalid) {
+		// Bad data must not stop the feed: the cursor would never pass
+		// this row.
+		log.Printf("ytwrite.fields_skipped task_id=%d reason=invalid err=%q", id, err.Error())
+		return ytwrite.NewOp{}, ytFieldsInvalid, nil
+	}
+	if err != nil {
+		return ytwrite.NewOp{}, "", err
+	}
+	return n, "", nil
 }
 
 // ytFieldsOnBindTx prepares the first snapshot of a task whose binding an

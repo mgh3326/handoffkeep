@@ -831,6 +831,22 @@ resend.
 is the issue the task is bound to on that tenant now. An op of a task rebound
 since stays prepared.
 
+**Backfill** (hk 4022). The consumer sends a snapshot only on a task's next
+change after its cursor, so a bound task unchanged since the import keeps the
+import's fields. `handoffkeep youtrack fields-backfill [--project P] [--task
+N] [--limit N] [--dry-run]` runs on the server host (it opens
+`HANDOFFKEEP_DB_URL` and names the tenant from `YOUTRACK_URL`, calling no
+YouTrack) and walks the tasks in id order, each in its own transaction under
+its lane lock, through the consumer's rule above: an unchanged snapshot
+prepares nothing, so a second run is a no-op and a run beside the feed
+prepares one op per snapshot. It only prepares; serve's write worker sends the
+ops and honours YouTrack's 429s. `--limit` stops after that many prepared ops,
+for pacing; the next run passes the sent ones as unchanged. `--dry-run`
+compares each snapshot hash with the last one prepared and writes nothing. It
+prints one JSON summary, `scanned prepared unchanged unbound moved
+other_tenant invalid` per hk project and in `total`, and exits 6 without
+touching the database unless `HANDOFFKEEP_YT_FIELDS_MODE=on`.
+
 **Not here.** Tags and issue links (parent, relations) stay as the import set
 them; documents, decisions and a project move are later slices. 멈춤, the
 Korean title and the milestone name are read when the task row changes: a
