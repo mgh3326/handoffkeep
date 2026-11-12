@@ -13,7 +13,7 @@ import (
 // trigger function takes a catalog lock only; it takes no lock on application
 // tables and changes no rows.
 func init() {
-	registerMigration(migration{ID: "20261112-yt-task-map-guard", After: []string{"20261111-yt-task-binding-origin", "20261109-yt-write-ops"}, Apply: func(ctx context.Context, tx pgx.Tx) error {
+	registerMigration(migration{ID: "20261112-yt-task-map-guard", After: []string{YTTaskBindingsMigration, "20261111-yt-task-binding-origin", "20261109-yt-write-ops"}, Apply: func(ctx context.Context, tx pgx.Tx) error {
 		return execAll(ctx, tx, ytTaskMapGuardStatements)
 	}})
 }

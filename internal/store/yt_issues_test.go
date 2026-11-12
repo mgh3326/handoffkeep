@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -337,12 +338,18 @@ func TestYTTaskBindingOriginMigrationUpgrades(t *testing.T) {
 	const id = "20261111-yt-task-binding-origin"
 	_, url := testdb.Schema(t, "yti_mig")
 	var without []migration
+	found := false
 	for _, m := range migrationRegistry {
-		if m.ID != id {
-			without = append(without, m)
+		if m.ID == id {
+			found = true
+			continue
 		}
+		if slices.Contains(m.After, id) {
+			continue
+		}
+		without = append(without, m)
 	}
-	if len(without) != len(migrationRegistry)-1 {
+	if !found {
 		t.Fatalf("migration %s is not registered", id)
 	}
 	old := openRegistry(t, url, without)
