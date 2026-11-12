@@ -483,16 +483,23 @@ t_promote_hold() {
 t_promote_refuse() {
 	setup; setup_promote
 	fx_gh "/repos/mgh3326/handoffkeep/compare/$SHA_NEW...main" '{"status":"behind"}'
+	promote "$SHA_NEW"
+	want "" "$(calls)"
+}
+t_promote_ci_ok_failure() {
+	setup; setup_promote
+	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/check-runs?check_name=ci-ok&filter=all&per_page=100" \
+		'{"check_runs":[{"name":"ci-ok","conclusion":"failure","app":{"slug":"github-actions"}}]}'
 	fails promote "$SHA_NEW"
 	want 0 "$(count '^tag ')"
-	want 1 "$(count "status $SHA_NEW deploy-promote failure deploy-refused:not_on_main")"
+	want 1 "$(count "status $SHA_NEW deploy-promote failure deploy-refused:ci-ok_failure")"
 }
 t_promote_old_sha() {
-	# A dispatch of an older head never moves the tag back.
+	# A dispatch of an older head never moves the tag back, and is not red.
 	setup; setup_promote
 	compare "$SHA_OLD" "$SHA_NEW" behind
-	fails promote "$SHA_NEW"
-	want 0 "$(count '^tag ')"
+	promote "$SHA_NEW"
+	want "" "$(calls)"
 }
 t_promote_no_baseline() {
 	setup; setup_promote

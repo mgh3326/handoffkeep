@@ -40,7 +40,7 @@ main push → ci.yml (ci-ok) ─┬→ deploy.yml (deploy-ok) → promote job �
 | `noop identical` / `noop serving` | The candidate is already deployed. | nothing | records the digest as handled |
 | `hold migration` | A migration was added and no approval exists. | posts `deploy-promote` pending and leaves the tag | posts `deployed` pending, then re-checks each tick |
 | `wait <reason>` | A check has no answer yet (GitHub, hk or healthz unreachable; ci-ok still running). | fails the job (re-run it) | re-checks next tick |
-| `refuse <reason>` | The candidate must not ship (`ci-ok_failure`, `deploy-ok_failure`, `not_on_main`, `not_newer`, `tag_not_bound`, `no_revision`, `image_missing`, …). | fails the job, `deploy-promote` failure | `deployed` failure; the digest is done |
+| `refuse <reason>` | The candidate must not ship (`ci-ok_failure`, `deploy-ok_failure`, `not_on_main`, `not_newer`, `tag_not_bound`, `no_revision`, `image_missing`, …). | fails the job, `deploy-promote` failure; `not_newer` and `not_on_main` (a diagnostic dispatch on an old or unmerged head) only log and pass | `deployed` failure; the digest is done |
 
 - **ci-ok** comes from the same sources release.yml reads: the `ci-ok` job of a ci.yml run on the sha (a github-actions check run), or a `ci-ok` commit status posted by ci-any-ref.
 - **deploy-ok** is the commit status that deploy.yml's status job posts.

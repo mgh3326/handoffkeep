@@ -360,8 +360,19 @@ promote() {
 		post_status "$sha" deploy-promote pending "deploy-held:${reason} write ${HK_FOLLOW_APPROVAL_PREFIX}/${sha} then re-run deploy.yml"
 		return 0
 		;;
-	wait | refuse)
-		[[ $DRY_RUN -eq 1 ]] && return 1
+	refuse)
+		case "$reason" in
+		not_newer | not_on_main)
+			# A dispatch that re-runs the tier on an old or unmerged head is
+			# a diagnostic, not a deploy: leave the tag, post nothing.
+			log "hk_follow.promote_skipped sha=$sha reason=$reason"
+			return 0
+			;;
+		esac
+		post_status "$sha" deploy-promote failure "deploy-refused:${reason}"
+		return 1
+		;;
+	wait)
 		post_status "$sha" deploy-promote failure "deploy-refused:${reason}"
 		return 1
 		;;
