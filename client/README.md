@@ -50,9 +50,9 @@ presign answer (`AttachmentURL`) is returned, never followed.
 `GetTask`, `ListTasks`, `ClaimTask`, `RebindTaskJob`, `ReopenTask`,
 `CommentTask`, `ProjectOwner`, `GetDocument`, `ListDocuments`,
 `PutDocument`, `PutAttachment`, `GetAttachment`, `AttachmentURL`,
-`RecordDecisionRequest` and `AskDecision`. Each uses the same route and JSON
-as its `internal/remote` equivalent; `internal/clientparity` checks that the
-two list calls send the same query. `ListTasks` and `ListDocuments` take a
+`RecordDecisionRequest`, `AskDecision` and `ListQuotaObservations`. Each uses
+its documented `/v1` route and JSON shape; `internal/clientparity` checks that
+the two list calls send the same query. `ListTasks` and `ListDocuments` take a
 limit from 1 to 1000 and return at most that many rows, with no sign that
 more exist. `ListDocuments` matches its prefix with SQL `LIKE` (`_` and `%`
 are wildcards) and returns documents without their body.

@@ -816,6 +816,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/jobs/{job}", s.jobGet)
 	m.HandleFunc("PUT /v1/jobs/{job}", s.jobUpdate)
 	m.HandleFunc("GET /v1/quota/accounts/{key}/latest", s.quotaLatest)
+	m.HandleFunc("GET /v1/quota/accounts/{key}/observations", s.quotaObservationHistory)
 	m.HandleFunc("PUT /v1/quota/accounts/{key}/observation", s.quotaPut)
 	m.HandleFunc("POST /v1/quota/accounts/{key}/lease", s.quotaLease)
 	m.HandleFunc("DELETE /v1/quota/accounts/{key}/lease", s.quotaRelease)
