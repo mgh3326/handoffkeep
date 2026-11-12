@@ -113,6 +113,7 @@ func ytWriteOpAlertCandidates(ctx context.Context, tx pgx.Tx, class string, cuto
 	// The binding-conflict reason is a literal, not a parameter, so a cached
 	// generic plan can still use the partial index yt_write_ops_alert_scan.
 	var q string
+	var args []any
 	switch class {
 	case ytWriteOpAlertStuck:
 		q = `SELECT o.id, o.state, o.reason FROM yt_write_ops o
@@ -120,15 +121,19 @@ func ytWriteOpAlertCandidates(ctx context.Context, tx pgx.Tx, class string, cuto
 				OR (o.state='remote_unknown' AND o.created_at <= $1))
 			AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='stuck')
 			ORDER BY o.id LIMIT $2 FOR SHARE OF o`
+		args = []any{cutoff.UTC(), ytWriteOpAlertBatchMax}
 	case ytWriteOpAlertRejected:
 		q = `SELECT o.id, o.state, o.reason FROM yt_write_ops o
 			WHERE (o.state='rejected' OR (o.state='applied' AND o.reason='` + ytwrite.ReasonBindingConflict + `'))
 			AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='rejected')
-			ORDER BY o.id LIMIT $2 FOR SHARE OF o`
+			ORDER BY o.id LIMIT $1 FOR SHARE OF o`
+		// Only the limit: this class has no time condition, so a cutoff
+		// argument would have no placeholder to bind.
+		args = []any{ytWriteOpAlertBatchMax}
 	default:
 		return nil, fmt.Errorf("unknown yt op alert class %q", class)
 	}
-	rows, err := tx.Query(ctx, q, cutoff.UTC(), ytWriteOpAlertBatchMax)
+	rows, err := tx.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
