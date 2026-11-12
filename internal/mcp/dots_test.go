@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -81,9 +82,11 @@ func TestDotsReplyExplainsMissingYouTrackIssue(t *testing.T) {
 	if _, _, err := st.SetYTAuthority(context.Background(), []store.YTAuthorityKind{store.YTAuthorityComments}, store.YTAuthorityYouTrack, "operator", "test"); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, api.Tokens{"operator": "bearer-secret"}, nil))
+	access := newAccessFixture(t)
+	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, nil, access.verifier))
 	defer srv.Close()
-	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+	assertion := access.token(t, jwt.MapClaims{"email": "operator@example.com"})
+	session := connectMCP(t, srv.URL, map[string]string{"Cf-Access-Jwt-Assertion": assertion})
 	text, failed := toolText(t, session, "dots_reply", map[string]any{
 		"task_id": task.ID, "kind": "PROGRESS", "body": "No issue yet", "idempotency_key": "progress",
 		"run_token": started.RunToken,
