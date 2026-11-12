@@ -327,7 +327,7 @@ func TestYouTrackRebuildComments(t *testing.T) {
 				{ID: 15, Author: "operator:robin", Body: "second imported", CreatedAt: t0.Add(time.Minute)},
 				{ID: 16, Author: "worker:a", Body: report, CreatedAt: t0.Add(2 * time.Minute)},
 			}, PulledYTIDs: map[string]bool{"4-4": true}, IssueOps: map[int64]bool{501: true, 900: true},
-				Docs: []store.YTRebuildTaskDoc{{Key: "reports/j1/report.md", Kind: "report", Body: "the report", CreatedBy: "worker:a", CreatedAt: t0}, {Key: "notes/n", Kind: "note", Body: "not copied"}}},
+				Docs: []store.YTRebuildTaskDoc{{Key: "reports/j1/report.md", Kind: "report", Body: "the report", CreatedBy: "worker:edited-later", CreatedAt: t0}, {Key: "notes/n", Kind: "note", Body: "not copied"}}},
 			2: {Comments: []store.YTRebuildComment{
 				{ID: 21, Author: "worker:c", Body: "the original", CreatedAt: t0, OpID: 601},
 				{ID: 22, Author: "worker:f", Body: "who wrote it", CreatedAt: t0, OpID: 602},

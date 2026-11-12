@@ -166,6 +166,7 @@ var (
 	ytRebuildCommentsPGOnly = []string{
 		"the hk id of an imported comment (matched by task, time, author and body; no id map)",
 		"comments the activity pull copied from YouTrack (YouTrack's own, left out)",
+		"the import-time author of a document copy (documents.created_by is overwritten by PutDocument, store.go:3924)",
 		"tasks outside the sample",
 	}
 	ytRebuildDocumentsPGOnly = []string{
@@ -604,13 +605,15 @@ func diffComments(taskID int64, hk store.YTRebuildComments, listed []ytwrite.Rem
 	byID := map[int64]int{}
 	byLegacyYT := map[string]int{}
 	// The import's copies of the task's documents, each expected once, by
-	// (body, author, time) as the import wrote them: the document's creator
-	// and creation time (youtrack/import/client.js documentIssueComments).
+	// (body, time) as the import wrote them: the document's creation time
+	// (youtrack/import/client.js documentIssueComments), which no later save
+	// changes. Not the author: the import wrote the creator of the time, and
+	// PutDocument overwrites documents.created_by on every changed body.
 	var docCopies []store.YTRebuildComment
 	for _, d := range hk.Docs {
 		bodies, _, _ := ytwrite.DocComments(d.Key, d.Kind, d.Body)
 		for _, b := range bodies {
-			docCopies = append(docCopies, store.YTRebuildComment{Author: d.CreatedBy, Body: b, CreatedAt: d.CreatedAt})
+			docCopies = append(docCopies, store.YTRebuildComment{Body: b, CreatedAt: d.CreatedAt})
 		}
 	}
 	docUsed := make([]bool, len(docCopies))
@@ -695,7 +698,7 @@ func diffComments(taskID int64, hk store.YTRebuildComments, listed []ytwrite.Rem
 		// hidden.
 		doc := -1
 		for k, d := range docCopies {
-			if !docUsed[k] && importedMatches(*r, d) {
+			if !docUsed[k] && r.body == d.Body && r.at.Equal(d.CreatedAt.Truncate(time.Millisecond)) {
 				doc = k
 				break
 			}
