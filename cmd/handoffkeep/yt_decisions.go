@@ -46,7 +46,8 @@ type ytDecisionsMismatch struct {
 
 // ytDecisionsReport is what one run found. Verified: the DEC-<id> issue, or
 // the legacy mirror's issue (also counted in Legacy), verifies (in --apply,
-// it was bound now); Bound: --apply published the
+// it was bound now); Ambiguous: both DEC-<id> and the different issue the
+// legacy mirror recorded verify (never bound); Bound: --apply published the
 // binding; Missing: no DEC-<id> issue; Mismatch: an issue that fails the
 // verification (never bound); PendingOp: the decision's decision_create op is
 // unresolved (the op gives it its issue); Conflict: the binding was refused
@@ -60,6 +61,7 @@ type ytDecisionsReport struct {
 	Checked    int                   `json:"checked"`
 	Verified   ytDecisionsClass      `json:"verified"`
 	Legacy     ytDecisionsClass      `json:"verified_legacy"`
+	Ambiguous  ytDecisionsClass      `json:"ambiguous"`
 	Bound      ytDecisionsClass      `json:"bound"`
 	Missing    ytDecisionsClass      `json:"missing"`
 	Mismatch   ytDecisionsClass      `json:"mismatch"`
@@ -135,15 +137,28 @@ func ytDecisionsBackfillRun(ctx context.Context, st ytDecisionsBackfillStore, is
 			// `youtrack sync` recorded for the decision
 			// (youtrack_decision_mirrors), whose number YouTrack chose.
 			issue, class, reason, err := ytDecisionIssueVerify(ctx, issues, youtrack.DecisionReadable(c.ID), c.ID, o.ProjectID, youtrack.DecisionReadable(c.ID))
-			if m, ok := mirrors[c.ID]; ok && class != "verified" && class != "error" && m.IssueID != "" && m.IssueID != issue.ID {
-				if li, lclass, lreason, lerr := ytDecisionIssueVerify(ctx, issues, m.IssueID, c.ID, o.ProjectID, ""); lclass == "verified" || lclass == "error" {
-					issue, class, reason, err = li, lclass, lreason, lerr
-					if lclass == "verified" {
-						r.Legacy.add(c.ID)
-					}
+			if m, ok := mirrors[c.ID]; ok && class != "error" && m.IssueID != "" && m.IssueID != issue.ID {
+				li, lclass, lreason, lerr := ytDecisionIssueVerify(ctx, issues, m.IssueID, c.ID, o.ProjectID, "")
+				switch {
+				case lclass == "error":
+					class, err = lclass, lerr
+				case lclass == "verified" && class == "verified":
+					// Two issues verify for one decision: binding either
+					// would leave the other stale. Refused for the operator.
+					class = "ambiguous"
+				case lclass == "verified":
+					issue, class = li, lclass
+					r.Legacy.add(c.ID)
+				case lclass == "mismatch" && class == "missing":
+					// The only candidate is the legacy issue: report why it
+					// was refused.
+					class, reason = lclass, "legacy mirror issue "+m.IssueID+": "+lreason
 				}
 			}
 			switch class {
+			case "ambiguous":
+				r.Ambiguous.add(c.ID)
+				continue
 			case "missing":
 				r.Missing.add(c.ID)
 				continue

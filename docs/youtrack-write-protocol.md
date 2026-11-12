@@ -1019,7 +1019,8 @@ summary names the decision and its `결정 ID` equals the id
 that issue is missing or does not verify and the legacy sync recorded another
 issue for the decision (`youtrack_decision_mirrors`), that issue is read and
 bound under the same rules except the readable id, which YouTrack chose
-(`verified_legacy` in the report). Without
+(`verified_legacy` in the report). When both `DEC-<id>` and a different
+mirrored issue verify, neither is bound (`ambiguous`). Without
 `--apply` it is the preflight: the database is opened read-only and nothing
 is written. A decision whose `decision_create` is unresolved is refused
 (`pending_op`). With the mode on in the command's environment, each new

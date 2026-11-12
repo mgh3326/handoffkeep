@@ -56,7 +56,7 @@ func TestYTDecisionsBackfillBindsOnlyVerified(t *testing.T) {
 	}
 	defer st.Close()
 	ids := map[string]int64{}
-	for i, qid := range []string{"verified", "summary", "field", "project", "missing", "error", "legacy"} {
+	for i, qid := range []string{"verified", "summary", "field", "project", "missing", "error", "legacy", "both", "legacybad"} {
 		lane := "ytd-cmd-" + qid
 		if _, _, err := st.UpsertChatQuestion(ctx, store.ChatQuestion{ID: fmt.Sprintf("Q-20261112-%02d", 10+i), Lane: lane, Body: qid + "?"}); err != nil {
 			t.Fatal(err)
@@ -80,9 +80,16 @@ func TestYTDecisionsBackfillBindsOnlyVerified(t *testing.T) {
 			i.IDReadable = "DEC-9001"
 			return i
 		}(),
+		// Both the import's issue and a legacy one verify: ambiguous.
+		youtrack.DecisionReadable(ids["both"]): ytdIssue("2-10", ids["both"], sum("both"), ids["both"], ytdCmdProject),
+		"2-11":                                 ytdIssue("2-11", ids["both"], "[결정 "+strconv.FormatInt(ids["both"], 10)+"] both?", ids["both"], ytdCmdProject),
+		// No DEC-<id>, and the legacy issue's 결정 ID was changed.
+		"2-12": ytdIssue("2-12", ids["legacybad"], "[결정 "+strconv.FormatInt(ids["legacybad"], 10)+"] bad?", ids["legacybad"]+1, ytdCmdProject),
 	}, errs: map[string]error{youtrack.DecisionReadable(ids["error"]): errors.New("connection reset")}}
-	if err := st.PutYouTrackDecisionMirror(ctx, store.YouTrackDecisionMirror{DecisionID: ids["legacy"], IssueID: "2-9", DisplayRef: "DEC-9001", Stamp: "x"}); err != nil {
-		t.Fatal(err)
+	for name, issue := range map[string]string{"legacy": "2-9", "both": "2-11", "legacybad": "2-12"} {
+		if err := st.PutYouTrackDecisionMirror(ctx, store.YouTrackDecisionMirror{DecisionID: ids[name], IssueID: issue, DisplayRef: "DEC-x", Stamp: "x"}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	opts := ytDecisionsOptions{Tenant: "tenant.youtrack.cloud", ProjectID: ytdCmdProject, BindBy: "operator:test", Snapshots: "off"}
 
@@ -90,7 +97,8 @@ func TestYTDecisionsBackfillBindsOnlyVerified(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pre.Checked != 7 || pre.Verified.Count != 2 || pre.Legacy.Count != 1 || pre.Bound.Count != 0 || pre.Mismatch.Count != 3 || pre.Missing.Count != 1 || pre.Error.Count != 1 {
+	if pre.Checked != 9 || pre.Verified.Count != 2 || pre.Legacy.Count != 1 || pre.Ambiguous.Count != 1 || pre.Ambiguous.IDs[0] != ids["both"] ||
+		pre.Bound.Count != 0 || pre.Mismatch.Count != 4 || pre.Missing.Count != 1 || pre.Error.Count != 1 {
 		t.Fatalf("preflight %+v", pre)
 	}
 	if _, found, _ := st.YTDecisionBinding(ctx, ids["verified"]); found {
@@ -102,7 +110,7 @@ func TestYTDecisionsBackfillBindsOnlyVerified(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Bound.Count != 2 || got.Bound.IDs[0] != ids["verified"] || got.Bound.IDs[1] != ids["legacy"] || got.Mismatch.Count != 3 || len(got.Reasons) != 3 {
+	if got.Bound.Count != 2 || got.Bound.IDs[0] != ids["verified"] || got.Bound.IDs[1] != ids["legacy"] || got.Mismatch.Count != 4 || len(got.Reasons) != 4 {
 		t.Fatalf("apply %+v", got)
 	}
 	if b, found, err := st.YTDecisionBinding(ctx, ids["legacy"]); err != nil || !found || b.IssueID != "2-9" || b.IssueReadable != "DEC-9001" {
@@ -112,14 +120,21 @@ func TestYTDecisionsBackfillBindsOnlyVerified(t *testing.T) {
 	if err != nil || !found || b.IssueID != "2-1" || b.Origin != "import_verified" || b.IssueReadable != youtrack.DecisionReadable(ids["verified"]) || b.ProjectID != ytdCmdProject {
 		t.Fatalf("binding %+v %v %v", b, found, err)
 	}
-	for _, name := range []string{"summary", "field", "project", "missing", "error"} {
+	legacyBad := false
+	for _, m := range got.Reasons {
+		legacyBad = legacyBad || (m.ID == ids["legacybad"] && strings.Contains(m.Reason, "legacy mirror issue 2-12"))
+	}
+	if !legacyBad {
+		t.Fatalf("legacy mismatch reason lost: %+v", got.Reasons)
+	}
+	for _, name := range []string{"summary", "field", "project", "missing", "error", "both", "legacybad"} {
 		if _, found, _ := st.YTDecisionBinding(ctx, ids[name]); found {
 			t.Fatalf("%s was bound", name)
 		}
 	}
 	// A second run checks only the unbound ones again.
 	again, err := ytDecisionsBackfillRun(ctx, st, fake, opts)
-	if err != nil || again.Checked != 5 || again.Bound.Count != 0 {
+	if err != nil || again.Checked != 7 || again.Bound.Count != 0 {
 		t.Fatalf("second run %+v %v", again, err)
 	}
 }
