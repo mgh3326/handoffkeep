@@ -127,6 +127,11 @@ const (
 	// canary removed, mode off, another tenant); the op stays prepared and
 	// nothing is sent.
 	ReasonHeld = "held"
+	// ReasonIssueNotBound: a comment_append op queued behind its task's
+	// issue_create (hk 4263) reached its send and the task has no binding
+	// from that create (the create was rejected, or applied with
+	// binding_conflict). Nothing is sent.
+	ReasonIssueNotBound = "issue_not_bound"
 )
 
 var (
@@ -145,7 +150,10 @@ var (
 
 // Op is one logical write as the ledger holds it. Principal, Kind, Key,
 // PayloadSHA, Payload, EntityKind, EntityID, YTTargetID, Actor, ParentID,
-// ChildSeq and CreatedAt never change after Prepare.
+// ChildSeq and CreatedAt never change after Prepare, with one exception: a
+// comment_append op queued behind its task's issue_create has no YTTargetID
+// until the claim that dispatches it fills it, with the PayloadSHA that covers
+// it, from the binding that create published (hk 4263).
 type Op struct {
 	ID        int64
 	Principal string
