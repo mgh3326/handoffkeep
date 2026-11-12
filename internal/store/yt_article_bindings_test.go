@@ -1,9 +1,16 @@
 package store
 
 import (
+	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 // ytArticleDoc reads document id's candidate as YTArticleDocs lists it.
@@ -115,5 +122,90 @@ func TestAddYTArticleBinding(t *testing.T) {
 	od = ytArticleDoc(t, s, owned)
 	if _, err := s.AddYTArticleBinding(ctx, fresh, od.YTArticleCandidate); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// AddYTArticleBinding holds the document, its task and the project mapping
+// from its comparison to its commit (finding r4544954725): a body edit or a
+// project move in flight makes it wait, and once that commits it refuses
+// instead of publishing the old verification.
+func TestAddYTArticleBindingWaitsForSourceChanges(t *testing.T) {
+	_, dbURL := testdb.Schema(t, "ytab_lock")
+	ctx := t.Context()
+	s, err := Open(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close(context.Background()) })
+	for _, p := range []string{"ytabl", "ytabl-other"} {
+		if _, err := s.AddTaskProject(ctx, p, "test"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: p, ProjectID: "0-" + p, ShortName: "YTABL"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	project := "ytabl"
+	task, err := s.CreateTask(ctx, Task{Lane: "ytabl-lane", Title: "articles", Kind: "implement", CreatedBy: "test", Project: &project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, change := range []string{
+		`UPDATE documents SET body='edited', sha256=repeat('e', 64) WHERE id=$1`,
+		`UPDATE tasks SET project='ytabl-other' WHERE id=(SELECT task_id FROM documents WHERE id=$1)`,
+		`UPDATE youtrack_projects SET yt_project_id='0-moved' WHERE hk_project=(SELECT t.project FROM documents d JOIN tasks t ON t.id=d.task_id WHERE d.id=$1)`,
+	} {
+		d, _, err := s.PutDocument(ctx, Document{Key: "note/ytabl/" + strconv.Itoa(i), Kind: "note", Body: "body", CreatedBy: "test", TaskID: &task.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		verified := ytArticleDoc(t, s, d.ID).YTArticleCandidate
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, change, d.ID); err != nil {
+			t.Fatal(err)
+		}
+		var pid int32
+		if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := s.AddYTArticleBinding(ctx, YTArticleBinding{DocumentID: d.ID, Tenant: "yt.example", ArticleID: "a-" + strconv.Itoa(i), ProjectID: verified.YTProjectID, BoundBy: "test"}, verified)
+			done <- err
+		}()
+		// Poll until the binding waits on the change's transaction; a
+		// binding that finishes first did not lock what it compared.
+		deadline := time.Now().Add(20 * time.Second)
+		for waiting := false; !waiting; {
+			select {
+			case err := <-done:
+				t.Fatalf("change %d: the binding finished (%v) while the change was uncommitted", i, err)
+			default:
+			}
+			if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))`, pid).Scan(&waiting); err != nil {
+				t.Fatal(err)
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("change %d: the binding never waited on the change", i)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; !errors.Is(err, ErrYTArticleBindingConflict) {
+			t.Fatalf("change %d: err = %v, want ErrYTArticleBindingConflict", i, err)
+		}
+		if _, found, err := s.YTArticleBinding(ctx, d.ID); err != nil || found {
+			t.Fatalf("change %d: a binding was published (found %v, %v)", i, found, err)
+		}
 	}
 }

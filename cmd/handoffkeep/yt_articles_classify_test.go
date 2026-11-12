@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -69,7 +71,8 @@ func TestYTArticleClassify(t *testing.T) {
 	child := art("2-6", "SMA-A-6", "0-8", "note/g", "g")
 	child.ParentArticle = &youtrack.ArticleRef{ID: "2-5"}
 	f.articles = append(f.articles, child)
-	a := &ytArticler{remote: f, tenant: "t", lookup: map[string]string{}}
+	a := &ytArticler{remote: f, tenant: "t", lookup: map[string]string{}, buckets: map[string]ytArticleBucket{
+		store.YTArticleBucketShared: {ID: "0-3", ShortName: "SHRDOC2"}, store.YTArticleBucketUnassigned: {ID: "0-1", ShortName: "HK"}}}
 
 	check := func(d store.YTArticleDoc, class, article string) ytArticleResult {
 		t.Helper()
@@ -88,7 +91,7 @@ func TestYTArticleClassify(t *testing.T) {
 	if got.binding.ContentSHA != ytartHex("old b") || !got.binding.NeedsUpdate {
 		t.Fatalf("sha_differs binding %+v", got.binding)
 	}
-	if a.lookup["0-7"] != ytArticleLookupReadable || f.lists != 0 || f.reads["RDA-A-11"] != 1 {
+	if a.lookup["0-7"] != ytArticleLookupReadable || f.lists != 1 || f.reads["RDA-A-11"] != 1 {
 		t.Fatalf("lookup %v, %d lists, reads %v", a.lookup, f.lists, f.reads)
 	}
 	// Summary lookup: the first GET (SMA-A-31) does not exist.
@@ -116,6 +119,21 @@ func TestYTArticleClassify(t *testing.T) {
 	check(ytartDoc(39, "note/g", "g", "sma", "SMA", "0-8"), ytArticleMissing, "")
 	check(ytartDoc(35, "note/nomap", "x", "nomap", "", ""), ytArticleMissing, "")
 	check(ytartDoc(36, "note/hk-row", "x", "handoffkeep", "HK", "0-1"), ytArticleMissing, "")
+	// The readable id verifies, but a second top-level article of the
+	// project has the summary: ambiguous, not bound (finding r4544954720).
+	f.articles = append(f.articles, art("1-3", "RDA-A-40", "0-7", "note/dup", "dup"), art("1-4", "RDA-A-99", "0-7", "note/dup", "dup"))
+	a.index = nil
+	if got := check(ytartDoc(40, "note/dup", "dup", "rda", "RDA", "0-7"), ytArticleAmbiguous, ""); f.reads["RDA-A-40"] != 1 || !strings.Contains(got.detail, "2 articles") {
+		t.Fatalf("readable duplicate: %+v, reads %v", got, f.reads)
+	}
+	// A shared document is looked up under the bucket's own short name,
+	// tail included (finding r4544954807).
+	f.articles = append(f.articles, art("3-1", "SHRDOC2-A-41", "0-3", "note/shared", "s"))
+	a.index = nil
+	check(store.YTArticleDoc{YTArticleCandidate: store.YTArticleCandidate{DocumentID: 41, Key: "note/shared", Kind: "note", SHA256: ytartHex("s"), Bucket: store.YTArticleBucketShared}}, ytArticleMatched, "3-1")
+	if f.reads["SHRDOC2-A-41"] != 1 || a.lookup["0-3"] != ytArticleLookupReadable {
+		t.Fatalf("shared lookup: reads %v, lookup %v", f.reads, a.lookup)
+	}
 	// Excluded and bound documents are classified without a read.
 	before := len(f.reads)
 	rep := ytartDoc(37, "reports/job/report.md", "r", "sma", "SMA", "0-8")
@@ -127,5 +145,36 @@ func TestYTArticleClassify(t *testing.T) {
 	check(bound, ytArticleAmbiguous, "")
 	if len(f.reads) != before {
 		t.Fatalf("reads for excluded or bound documents: %v", f.reads)
+	}
+}
+
+type ytartProjects []youtrack.AdminProject
+
+func (p ytartProjects) ListAdminProjects(context.Context) ([]youtrack.AdminProject, error) {
+	return p, nil
+}
+
+// The synthetic buckets are resolved by the names the import gives them,
+// not by their base short names: an hk project that took SHRDOC leaves the
+// shared documents in SHRDOC2 (client.js getProjects; finding r4544954807).
+func TestYTArticleBucketsByImportName(t *testing.T) {
+	got, err := ytArticleBuckets(t.Context(), ytartProjects{
+		{ID: "0-5", ShortName: "SHRDOC", Name: "shrdoc"},
+		{ID: "0-3", ShortName: "SHRDOC2", Name: "Shared documents"},
+		{ID: "0-1", ShortName: "HK", Name: "Unassigned hk tasks"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[store.YTArticleBucketShared] != (ytArticleBucket{ID: "0-3", ShortName: "SHRDOC2"}) || got[store.YTArticleBucketUnassigned] != (ytArticleBucket{ID: "0-1", ShortName: "HK"}) {
+		t.Fatalf("buckets = %+v", got)
+	}
+	for _, ps := range []ytartProjects{
+		{{ID: "0-1", ShortName: "HK", Name: "Unassigned hk tasks"}},
+		{{ID: "0-3", ShortName: "SHRDOC", Name: "Shared documents"}, {ID: "0-4", ShortName: "SHRDOC2", Name: "Shared documents"}, {ID: "0-1", ShortName: "HK", Name: "Unassigned hk tasks"}},
+	} {
+		if _, err := ytArticleBuckets(t.Context(), ps); !errors.Is(err, youtrack.ErrBucketProject) {
+			t.Errorf("%+v: err = %v, want ErrBucketProject", ps, err)
+		}
 	}
 }

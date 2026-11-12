@@ -45,8 +45,9 @@ func (f *ytartFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method != http.MethodGet:
 		http.Error(w, `{"error":"unexpected"}`, http.StatusMethodNotAllowed)
 	case r.URL.Path == "/api/admin/projects":
-		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "0-1", "shortName": "HK"}, {"id": "0-3", "shortName": "SHRDOC"},
-			{"id": "0-7", "shortName": "RDA"}, {"id": "0-8", "shortName": "SMA"}})
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "0-1", "shortName": "HK", "name": "Unassigned hk tasks"},
+			{"id": "0-3", "shortName": "SHRDOC", "name": "Shared documents"}, {"id": "0-7", "shortName": "RDA", "name": "rda"},
+			{"id": "0-8", "shortName": "SMA", "name": "sma"}})
 	case r.URL.Path == "/api/articles":
 		skip, _ := strconv.Atoi(r.URL.Query().Get("$skip"))
 		top, _ := strconv.Atoi(r.URL.Query().Get("$top"))

@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,8 +34,10 @@ import (
 // It is found by one GET of the readable id <SHORT>-A-<document id>, the id
 // the import's article key would give it; when the first such GET of a
 // project does not verify, that project's articles are found by summary in
-// the full article list instead (lookup "summary"). Two articles with the
-// document's summary are ambiguous and never bound.
+// the full article list instead (lookup "summary"). On either path, a second
+// top-level article of the project with the document's summary makes it
+// ambiguous, never bound: the full article list is read once per run, before
+// the first document that needs it.
 
 // The classes of a document.
 const (
@@ -65,18 +68,22 @@ const (
 	ytArticleLookupSummary  = "summary"
 )
 
-// ytArticleBucketShortNames are the import's synthetic article projects
-// (youtrack/import/client.js getProjects): documents with no task go to
-// SHRDOC, documents of a task with no project to HK.
-var ytArticleBucketShortNames = map[string]string{
-	store.YTArticleBucketShared:     "SHRDOC",
-	store.YTArticleBucketUnassigned: youtrack.BucketShortName,
+// ytArticleBucketNames are the names the import gives its synthetic article
+// projects (youtrack/import/client.js getProjects): documents with no task go
+// to "Shared documents", documents of a task with no project to "Unassigned
+// hk tasks". Their short names (SHRDOC, HK) are only a base: the import adds
+// a numeric tail when an hk project already took one (SHRDOC2), so a bucket
+// is resolved by its name and its short name read from YouTrack.
+var ytArticleBucketNames = map[string]string{
+	store.YTArticleBucketShared:     "Shared documents",
+	store.YTArticleBucketUnassigned: "Unassigned hk tasks",
 }
 
-// ytArticleReservedShortNames are short names a youtrack_projects row may
-// still hold from before `schema apply` but which name the import's synthetic
-// projects, not the hk project's own (youtrack.SchemaRunner).
-var ytArticleReservedShortNames = []string{"SHRDOC", "HK", "DEC"}
+// ytArticleBucket is a synthetic bucket's YouTrack project.
+type ytArticleBucket struct {
+	ID        string
+	ShortName string
+}
 
 // ytArticleListTimeout bounds reading the whole article list (one GET per
 // 100 articles), outside any one document's budget.
@@ -152,14 +159,14 @@ type ytArticler struct {
 	st      *store.Store
 	remote  ytArticleRemote
 	tenant  string
-	buckets map[string]string // synthetic bucket -> YouTrack project id
+	buckets map[string]ytArticleBucket // synthetic bucket -> its YouTrack project
 	// lookup is each YouTrack project's lookup, decided by its first GET.
 	lookup map[string]string
 	// index is the full article list by project id and summary, top-level
-	// articles only; read once, when a lookup first needs it, under the
-	// run's context (base), not the document's.
+	// articles only; read once, before the first document that needs a
+	// lookup and outside that document's budget (run), or by classify when
+	// it is called alone.
 	index map[string]map[string][]youtrack.Article
-	base  context.Context
 }
 
 // ytArticleResult is one document's class, with the binding a backfill
@@ -173,12 +180,15 @@ type ytArticleResult struct {
 // ytArticleTarget is the YouTrack project of a document's article: its short
 // name and id, or a reason it has none.
 func (a *ytArticler) target(c store.YTArticleCandidate) (short, id, missing string) {
-	if short, ok := ytArticleBucketShortNames[c.Bucket]; ok {
-		return short, a.buckets[c.Bucket], ""
+	if _, ok := ytArticleBucketNames[c.Bucket]; ok {
+		b := a.buckets[c.Bucket]
+		return b.ShortName, b.ID, ""
 	}
-	for _, r := range ytArticleReservedShortNames {
-		if strings.EqualFold(c.ShortName, r) {
-			return "", "", fmt.Sprintf("project %q maps to the import's bucket %s, not its own YouTrack project", c.Bucket, c.ShortName)
+	// A row from before `schema apply` (the store seeds handoffkeep with HK)
+	// can still name a synthetic bucket's project, not the hk project's own.
+	for name, b := range a.buckets {
+		if c.YTProjectID != "" && c.YTProjectID == b.ID {
+			return "", "", fmt.Sprintf("project %q maps to the import's %s project %s, not its own", c.Bucket, name, b.ShortName)
 		}
 	}
 	if c.ShortName == "" || c.YTProjectID == "" {
@@ -193,15 +203,16 @@ func ytArticleVerifies(x youtrack.Article, projectID, single, index string) bool
 	return x.ID != "" && !x.HasParent() && x.Project != nil && x.Project.ID == projectID && (x.Summary == single || x.Summary == index)
 }
 
-func (a *ytArticler) loadIndex() error {
+// needsLookup reports whether classify reads YouTrack for d.
+func (a *ytArticler) needsLookup(d store.YTArticleDoc) bool {
+	return d.BoundTenant == "" && !store.YTArticleExcluded(d.Key, d.TaskID)
+}
+
+func (a *ytArticler) loadIndex(ctx context.Context) error {
 	if a.index != nil {
 		return nil
 	}
-	base := a.base
-	if base == nil {
-		base = context.Background()
-	}
-	gctx, cancel := context.WithTimeout(base, ytArticleListTimeout)
+	gctx, cancel := context.WithTimeout(ctx, ytArticleListTimeout)
 	all, err := a.remote.ListArticles(gctx)
 	cancel()
 	if err != nil {
@@ -242,6 +253,17 @@ func (a *ytArticler) classify(ctx context.Context, d store.YTArticleDoc, bindBy 
 		return ytArticleResult{class: ytArticleMissing, detail: missing}
 	}
 	single, index := store.YTArticleSummary(c.Key, c.Kind), store.YTArticleIndexSummary(c.Key, c.Kind)
+	if err := a.loadIndex(ctx); err != nil {
+		return failed(err)
+	}
+	hits := append(append([]youtrack.Article{}, a.index[projectID][single]...), a.index[projectID][index]...)
+	ambiguous := func(hits []youtrack.Article) ytArticleResult {
+		ids := make([]string, len(hits))
+		for i, x := range hits {
+			ids[i] = x.ID
+		}
+		return ytArticleResult{class: ytArticleAmbiguous, detail: fmt.Sprintf("%d articles of project %s have the summary: %s", len(hits), short, strings.Join(ids, ","))}
+	}
 	var found youtrack.Article
 	haveContent := false
 	if mode := a.lookup[projectID]; mode != ytArticleLookupSummary {
@@ -262,23 +284,23 @@ func (a *ytArticler) classify(ctx context.Context, d store.YTArticleDoc, bindBy 
 			a.lookup[projectID] = ytArticleLookupSummary
 		}
 	}
-	if found.ID == "" {
-		if err := a.loadIndex(); err != nil {
-			return failed(err)
+	switch {
+	case found.ID != "":
+		// The readable id names the article; any other top-level article
+		// of the project with the summary still makes it ambiguous.
+		all := hits
+		if !slices.ContainsFunc(hits, func(x youtrack.Article) bool { return x.ID == found.ID }) {
+			all = append([]youtrack.Article{found}, hits...)
 		}
-		hits := append(append([]youtrack.Article{}, a.index[projectID][single]...), a.index[projectID][index]...)
-		switch len(hits) {
-		case 0:
-			return ytArticleResult{class: ytArticleMissing, detail: "no article of project " + short + " has summary " + strconv.Quote(single)}
-		case 1:
-			found = hits[0]
-		default:
-			ids := make([]string, len(hits))
-			for i, x := range hits {
-				ids[i] = x.ID
-			}
-			return ytArticleResult{class: ytArticleAmbiguous, detail: fmt.Sprintf("%d articles of project %s have the summary: %s", len(hits), short, strings.Join(ids, ","))}
+		if len(all) > 1 {
+			return ambiguous(all)
 		}
+	case len(hits) == 0:
+		return ytArticleResult{class: ytArticleMissing, detail: "no article of project " + short + " has summary " + strconv.Quote(single)}
+	case len(hits) == 1:
+		found = hits[0]
+	default:
+		return ambiguous(hits)
 	}
 	b := store.YTArticleBinding{DocumentID: c.DocumentID, Tenant: a.tenant, ArticleID: found.ID, ArticleReadable: found.IDReadable, ProjectID: projectID, BoundBy: bindBy}
 	if found.Summary == index {
@@ -315,7 +337,6 @@ func (a *ytArticler) run(ctx context.Context, bucket, bindBy string) (ytArticles
 	if a.lookup == nil {
 		a.lookup = map[string]string{}
 	}
-	a.base = ctx
 	byProject := map[string]*ytArticlesProject{}
 	boundNow := 0
 	var after int64
@@ -327,8 +348,19 @@ func (a *ytArticler) run(ctx context.Context, bucket, bindBy string) (ytArticles
 		for _, d := range docs {
 			after = d.DocumentID
 			r.Documents++
+			// The article list is read under the run's context, before the
+			// document's budget starts: a long list never eats it.
+			var listErr error
+			if a.needsLookup(d) {
+				listErr = a.loadIndex(ctx)
+			}
 			tctx, cancel := context.WithTimeout(ctx, ytCommentsTaskTimeout)
-			got := a.classify(tctx, d, bindBy)
+			got := ytArticleResult{class: ytArticleError}
+			if listErr != nil {
+				got.detail = listErr.Error()
+			} else {
+				got = a.classify(tctx, d, bindBy)
+			}
 			if bindBy != "" && (got.class == ytArticleMatched || got.class == ytArticleSHADiffers) {
 				_, err := a.st.AddYTArticleBinding(tctx, got.binding, d.YTArticleCandidate)
 				switch {
@@ -376,26 +408,27 @@ func (a *ytArticler) run(ctx context.Context, bucket, bindBy string) (ytArticles
 	return r, nil
 }
 
-// ytArticleBuckets resolves the YouTrack project id of each synthetic bucket
-// by its short name: none, or more than one, refuses the run, as
-// youtrack.ResolveBucketProject does for HK.
-func ytArticleBuckets(ctx context.Context, projects youtrack.ProjectLister) (map[string]string, error) {
+// ytArticleBuckets resolves each synthetic bucket's YouTrack project by the
+// name the import gave it (ytArticleBucketNames): none, or more than one,
+// refuses the run, as youtrack.ResolveBucketProject does for HK. The short
+// name is the project's own, tail included.
+func ytArticleBuckets(ctx context.Context, projects youtrack.ProjectLister) (map[string]ytArticleBucket, error) {
 	all, err := projects.ListAdminProjects(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]string{}
-	for bucket, short := range ytArticleBucketShortNames {
-		var ids []string
+	out := map[string]ytArticleBucket{}
+	for bucket, name := range ytArticleBucketNames {
+		var hits []ytArticleBucket
 		for _, p := range all {
-			if strings.EqualFold(p.ShortName, short) {
-				ids = append(ids, p.ID)
+			if p.Name == name {
+				hits = append(hits, ytArticleBucket{ID: p.ID, ShortName: p.ShortName})
 			}
 		}
-		if len(ids) != 1 || ids[0] == "" {
-			return nil, fmt.Errorf("%w: %d YouTrack projects have short name %s %v, want exactly one", youtrack.ErrBucketProject, len(ids), short, ids)
+		if len(hits) != 1 || hits[0].ID == "" || hits[0].ShortName == "" {
+			return nil, fmt.Errorf("%w: %d YouTrack projects are named %q %v, want exactly one with an id and short name", youtrack.ErrBucketProject, len(hits), name, hits)
 		}
-		out[bucket] = ids[0]
+		out[bucket] = hits[0]
 	}
 	return out, nil
 }

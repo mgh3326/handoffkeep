@@ -886,10 +886,14 @@ changes nothing. It also refuses a document that changed (body, task or
 project) since it was verified, and an excluded one.
 
 **Scope.** The import's own filter (`youtrack/import/client.js`): a document
-with no task is in project `/shared` (YouTrack project `SHRDOC`), one of a
-task with no project in `/unassigned` (`HK`), any other in its task's hk
-project (its `youtrack_projects` row; a row still naming `HK`, `SHRDOC` or
-`DEC` counts as unmapped). `screens/*`, `review/mwr-*` and a task's reports
+with no task is in project `/shared` (the YouTrack project named `Shared
+documents`), one of a task with no project in `/unassigned` (`Unassigned hk
+tasks`), any other in its task's hk project (its `youtrack_projects` row; a
+row whose YouTrack id is one of those two projects counts as unmapped). The
+two are found by name, not short name: the import gives them `SHRDOC` and
+`HK` with a numeric tail when an hk project took the name first (`SHRDOC2`),
+and the readable-id lookup uses the short name YouTrack reports. No such
+project, or two, refuses the run (exit 2). `screens/*`, `review/mwr-*` and a task's reports
 (`reports/mwr-*/...`, `reports/<job>/report.md`) are `excluded`: they became
 issue comments (Y5d).
 
@@ -905,14 +909,16 @@ generated from `client.js` itself. Then:
   bound with `needs_update` true;
 - none: `missing`; two or more: `ambiguous`, never bound.
 
-The article is first read by one GET of `<SHORT>-A-<document id>`, the
-readable id the import's article key (`articleKey`, the document id) would
-give it. A project whose first such GET verifies keeps that lookup
-(`lookup: "readable_id"`); a document whose GET then misses falls back to the
-summary. A project whose first GET does not verify is matched by summary from
-here on (`lookup: "summary"`): the whole article list is read once (id,
-idReadable, summary, project, parent; 100 a page) and the matched article's
-content read by id. Which lookup the live import allows is UNVERIFIED until
+The whole article list is read once per run (id, idReadable, summary,
+project, parent; 100 a page), before the first document that needs a lookup
+and outside its 60 s budget. The article is then read by one GET of
+`<SHORT>-A-<document id>`, the readable id the import's article key
+(`articleKey`, the document id) would give it. A project whose first such GET
+verifies keeps that lookup (`lookup: "readable_id"`); a document whose GET
+then misses falls back to the summary. A project whose first GET does not
+verify is matched by summary from here on (`lookup: "summary"`), and the
+matched article's content is read by id. On both paths a second top-level
+article of the project with the document's summary makes it `ambiguous`. Which lookup the live import allows is UNVERIFIED until
 the first preflight (hk 4053 report).
 
 **Commands.** Both open the database directly and verify against the tenant

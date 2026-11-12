@@ -201,6 +201,34 @@ func (s *Store) YTArticleBinding(ctx context.Context, documentID int64) (YTArtic
 	return readYTArticleBinding(ctx, s.pool, documentID)
 }
 
+// lockYTArticleSourcesTx takes FOR SHARE, to commit, on what a candidate is
+// read from: the document row, its task's row and the youtrack_projects row
+// of the task's project (each when there is one). A missing document is
+// ErrYTArticleBindingConflict. The order is PutDocument's (the document row,
+// then its task through the foreign key); FOR SHARE on the task row blocks a
+// project change, and no task or mapping writer locks a documents row while
+// it holds either (lockorder.go).
+func lockYTArticleSourcesTx(ctx context.Context, tx pgx.Tx, documentID int64) error {
+	var taskID *int64
+	err := tx.QueryRow(ctx, `SELECT task_id FROM documents WHERE id=$1 FOR SHARE`, documentID).Scan(&taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: document %d no longer exists", ErrYTArticleBindingConflict, documentID)
+	}
+	if err != nil || taskID == nil {
+		return err
+	}
+	var project *string
+	err = tx.QueryRow(ctx, `SELECT project FROM tasks WHERE id=$1 FOR SHARE`, *taskID).Scan(&project)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && project == nil) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `SELECT 1 FROM youtrack_projects WHERE hk_project=$1 FOR SHARE`, *project)
+	return err
+}
+
 var ytSHA256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // AddYTArticleBinding publishes a verified binding (origin import_verified).
@@ -212,8 +240,11 @@ var ytSHA256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // the document, or another document's binding to the article, is
 // ErrYTArticleBindingConflict and changes nothing. No other row is written.
 //
-// Locks: none on existing rows (plain reads), then the new binding row; a
-// concurrent insert of the same key waits on the unique index.
+// Locks, in this order (lockorder.go): FOR SHARE on the documents row, then
+// on its task's row, then on that project's youtrack_projects row, held to
+// commit, so neither the body, the task, the task's project nor its mapping
+// can change between the comparison and the insert; then the new binding
+// row (a concurrent insert of the same key waits on the unique index).
 func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, verified YTArticleCandidate) (YTArticleBinding, error) {
 	if b.DocumentID < 1 || verified.DocumentID != b.DocumentID || b.Tenant == "" || len(b.Tenant) > 255 || b.ArticleID == "" || len(b.ArticleID) > 64 ||
 		len(b.ArticleReadable) > 64 || b.ProjectID == "" || len(b.ProjectID) > 64 || b.Part < 0 || b.Generation != 0 ||
@@ -228,6 +259,9 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 		return YTArticleBinding{}, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockYTArticleSourcesTx(ctx, tx, b.DocumentID); err != nil {
+		return YTArticleBinding{}, err
+	}
 	var current YTArticleCandidate
 	err = scanYTArticleCandidate(tx.QueryRow(ctx, ytArticleCandidateSQL+ytArticleCandidateFrom+` WHERE d.id = $1`, b.DocumentID), &current)
 	if errors.Is(err, pgx.ErrNoRows) {
