@@ -744,7 +744,11 @@ an `issue_create` op without its binding, so a resolver that does not know the
 kind cannot close one). `issue_readable` is left empty: the protocol carries
 only the stable id. `comments_from` is 0 for an issue the op created (the
 catch-up copies the task's comments) and the task's highest comment id for an
-adopted one (it already holds that history). Nothing is overwritten: the same
+adopted one (it already holds that history). A comment written while the op
+was pending gets no op (the task has no binding yet), so in comments mode on
+the write worker runs the catch-up for `op_applied` bindings before every
+Drive pass even when `HANDOFFKEEP_YT_COMMENTS_CATCHUP` is off
+(`CatchUpYTIssueComments`, hk 3914). Nothing is overwritten: the same
 issue is a no-op; a task bound or mapped to another issue or whose YouTrack
 origin names another issue, or the issue bound or mapped to another task,
 keeps the op applied with reason

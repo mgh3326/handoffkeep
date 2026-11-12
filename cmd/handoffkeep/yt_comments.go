@@ -236,7 +236,7 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 		return ytCommentsWorker{}, err
 	}
 	st.SetYTCommentsMode(store.YTCommentsOff)
-	return ytCommentsWorker{protocol: p, feed: st}, nil
+	return ytCommentsWorker{protocol: p, feed: st, intents: st}, nil
 }
 
 // newYTCommentsWorker sets the gate to mode (canary or on) and builds the
@@ -261,6 +261,8 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 	w := ytCommentsWorker{protocol: p, feed: st, intents: st}
 	if catchUp {
 		w.catchUp = st
+	} else {
+		w.catchUp = ytIssueCommentCatchUp{st}
 	}
 	return w, nil
 }
@@ -269,6 +271,15 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 // (store.CatchUpYTComments).
 type ytCommentCatchUpper interface {
 	CatchUpYTComments(ctx context.Context, limit int, skip []int64) (store.YTCatchUp, error)
+}
+
+// ytIssueCommentCatchUp is the catch-up limited to the bindings issue_create
+// ops published (store.CatchUpYTIssueComments, hk 3914): the worker's
+// catch-up when HANDOFFKEEP_YT_COMMENTS_CATCHUP is off.
+type ytIssueCommentCatchUp struct{ st *store.Store }
+
+func (c ytIssueCommentCatchUp) CatchUpYTComments(ctx context.Context, limit int, skip []int64) (store.YTCatchUp, error) {
+	return c.st.CatchUpYTIssueComments(ctx, limit, skip)
 }
 
 // ytFeedRunner runs one pass of every registered change-feed consumer
@@ -289,7 +300,8 @@ type ytIssueIntents interface {
 // tenant it was configured for (store.YTTenantLedger): it neither sends nor
 // searches for an op bound to another tenant.
 //
-// Before each Drive pass, catchUp (when set: HANDOFFKEEP_YT_COMMENTS_CATCHUP=on) prepares the ops of comments on
+// Before each Drive pass, catchUp (HANDOFFKEEP_YT_COMMENTS_CATCHUP=on, or
+// else only for bindings issue_create ops published, hk 3914) prepares the ops of comments on
 // bound tasks that the enqueue missed; it does nothing outside mode on. A
 // comment it skipped as ambiguous is left out of later passes of this
 // process, so it is logged once and never crowds out the others; a restart
