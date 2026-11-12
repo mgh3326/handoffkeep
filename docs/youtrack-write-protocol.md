@@ -908,8 +908,11 @@ SHA-256 to the import's output.
 **Cap.** A document part may be up to `MaxDocCommentBodyBytes` (the import's
 240 KiB, `CheckDocComment`); hk's own comments keep `MaxBodyBytes` (64 KiB).
 
-**Audit.** A document copy is not an hk comment, so `youtrack audit` lists it
-as `yt_only_bot`, which the audit's gate does not count.
+**Audit.** A document copy is not an hk comment. One the import posted
+(`documentIssueComments`' `# <key>` report parts and `Article:` brief lines)
+classifies as `doc_comment` (`ytwrite.ImportedDocCommentKey`); a protocol
+document copy lists as `yt_only_bot`. Neither class is counted by the
+audit's gate.
 
 ## Tests
 

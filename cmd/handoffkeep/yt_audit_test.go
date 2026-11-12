@@ -268,6 +268,10 @@ func TestYouTrackAudit(t *testing.T) {
 	if err := st.LinkYouTrackComment(ctx, bound, cAdopted, "adopted:"+strconv.FormatInt(cAdopted, 10), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
+	// Document copies the import posted on the issue: doc_comment, never
+	// yt_only and never enqueued.
+	fake.add(issue, "4-16", "# reports/mwr-audit/report.md\n\nimported report", "1-7")
+	fake.add(issue, "4-17", "Article: [brief] brief/2026-11-09/job-a [brief] (hk document key: brief/2026-11-09/job-a)", "1-8")
 
 	noProject := newTask()
 	if _, err := conn.Exec(ctx, `UPDATE tasks SET project=NULL WHERE id=$1`, noProject); err != nil {
@@ -339,6 +343,9 @@ func TestYouTrackAudit(t *testing.T) {
 		}
 		if c.YTOnlyBot.Count != 1 || c.YTOnlyBot.Items[0].YTIDs[0] != "4-6" || !slices.Equal(human, []string{"4-3", "4-9"}) {
 			t.Errorf("%s: yt_only bot %+v human %v, want 4-6 and 4-3 4-9", name, c.YTOnlyBot, human)
+		}
+		if c.DocComment.Count != 2 || !slices.Equal(c.DocComment.Items[0].YTIDs, []string{"4-16"}) || !slices.Equal(c.DocComment.Items[1].YTIDs, []string{"4-17"}) {
+			t.Errorf("%s: doc_comment %+v, want 4-16 and 4-17", name, c.DocComment)
 		}
 		if len(r.Projects) != 2 || r.Projects[0].Project != "" || r.Projects[1].Project != project || r.Projects[1].MissingInYT.Count != 3 {
 			t.Errorf("%s: projects %+v", name, r.Projects)
@@ -417,6 +424,47 @@ func TestYouTrackAudit(t *testing.T) {
 	}
 	if fake.refused != 0 {
 		t.Errorf("the audit made %d requests the fake refuses (a write?)", fake.refused)
+	}
+}
+
+// hk 3913: the read-only audit checks every migration a binding read needs
+// (ytBindingColumns selects comments_from, origin and op_id). A schema whose
+// record of the binding-origin migration is missing refuses with exit 2
+// before any YouTrack read.
+func TestYouTrackAuditRefusesSchemaWithoutBindingOrigin(t *testing.T) {
+	_, dbURL := testdb.Schema(t, "yta_origin")
+	ctx := t.Context()
+	st, err := store.Open(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close(context.Background()) })
+	if _, err := conn.Exec(ctx, `DELETE FROM schema_migrations WHERE id=$1`, store.YTTaskBindingOriginMigration); err != nil {
+		t.Fatal(err)
+	}
+	fake := &ytaFake{issues: map[string]map[string]any{}, comments: map[string][]ytaComment{}}
+	ts := httptest.NewServer(fake)
+	t.Cleanup(ts.Close)
+	t.Setenv("HANDOFFKEEP_DB_URL", dbURL)
+	t.Setenv("YOUTRACK_URL", ts.URL)
+	t.Setenv("YOUTRACK_BOT_API_KEY", "fake-test-key")
+
+	var out bytes.Buffer
+	err = run([]string{"youtrack", "audit"}, &out, io.Discard)
+	var code exitCodeError
+	if !errors.As(err, &code) || code.code != youtrackExitConfig || !strings.Contains(err.Error(), store.YTTaskBindingOriginMigration) {
+		t.Fatalf("err = %v, want exit %d naming %s", err, youtrackExitConfig, store.YTTaskBindingOriginMigration)
+	}
+	if out.Len() != 0 {
+		t.Errorf("a refused audit printed %q", out.String())
+	}
+	if fake.refused != 0 {
+		t.Errorf("the refused audit made %d requests the fake refuses", fake.refused)
 	}
 }
 

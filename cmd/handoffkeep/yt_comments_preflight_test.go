@@ -490,6 +490,50 @@ func TestCommentsPreflightRefusesSchemaWithoutBindings(t *testing.T) {
 	}
 }
 
+// hk 3913: the preflight checks every migration a binding read needs
+// (ytBindingColumns selects comments_from, origin and op_id). A schema whose
+// record of the binding-origin migration is missing refuses with exit 2
+// before any YouTrack read.
+func TestCommentsPreflightRefusesSchemaWithoutBindingOrigin(t *testing.T) {
+	_, dbURL := testdb.Schema(t, "ytp_origin")
+	ctx := t.Context()
+	st, err := store.Open(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close(context.Background()) })
+	if _, err := conn.Exec(ctx, `DELETE FROM schema_migrations WHERE id=$1`, store.YTTaskBindingOriginMigration); err != nil {
+		t.Fatal(err)
+	}
+	fake := &ytpFake{issues: map[string]map[string]any{}, fail: map[string]int{}, hits: map[string]int{}}
+	ts := httptest.NewServer(fake)
+	t.Cleanup(ts.Close)
+	t.Setenv("HANDOFFKEEP_DB_URL", dbURL)
+	t.Setenv("YOUTRACK_URL", ts.URL)
+	t.Setenv("YOUTRACK_BOT_API_KEY", "fake-test-key")
+
+	var out bytes.Buffer
+	err = run([]string{"yt", "comments-preflight"}, &out, io.Discard)
+	var code exitCodeError
+	if !errors.As(err, &code) || code.code != youtrackExitConfig || !strings.Contains(err.Error(), store.YTTaskBindingOriginMigration) {
+		t.Fatalf("err = %v, want exit %d naming %s", err, youtrackExitConfig, store.YTTaskBindingOriginMigration)
+	}
+	if out.Len() != 0 {
+		t.Errorf("a refused preflight printed %q", out.String())
+	}
+	fake.mu.Lock()
+	hits := len(fake.hits)
+	fake.mu.Unlock()
+	if hits != 0 {
+		t.Errorf("the refused preflight read YouTrack: %v", fake.hits)
+	}
+}
+
 // The worker started in mode on sets the store's gate to on: a comment on a
 // bound task gets its op, and the worker sends it.
 func TestYTCommentsWorkerStartsInModeOn(t *testing.T) {

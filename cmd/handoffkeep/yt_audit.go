@@ -119,7 +119,8 @@ func (u *ytAuditUnbound) add(reason string, it ytAuditItem) {
 
 // ytAuditCounts is one project's (or the total's) classes. Comments are
 // counted once each: present, missing_in_yt or duplicate for an hk comment,
-// yt_only_bot or yt_only_human for a YouTrack comment that copies none.
+// doc_comment for a document copy the import posted, yt_only_bot or
+// yt_only_human for a YouTrack comment that copies none.
 type ytAuditCounts struct {
 	// TasksAudited is the bound tasks whose comments were compared.
 	TasksAudited int          `json:"tasks_audited"`
@@ -133,10 +134,13 @@ type ytAuditCounts struct {
 	// body and end in another's legacy trailer: assigned to neither, and
 	// neither comment is enqueued (when it has no other copy it is listed
 	// here only, not as missing_in_yt).
-	AmbiguousCopy ytAuditClass   `json:"ambiguous_copy"`
-	YTOnlyBot     ytAuditClass   `json:"yt_only_bot"`
-	YTOnlyHuman   ytAuditClass   `json:"yt_only_human"`
-	Unbound       ytAuditUnbound `json:"unbound"`
+	AmbiguousCopy ytAuditClass `json:"ambiguous_copy"`
+	// DocComment is a document copy the import posted on the issue
+	// (ytwrite.ImportedDocCommentKey): not an hk comment, never enqueued.
+	DocComment  ytAuditClass   `json:"doc_comment"`
+	YTOnlyBot   ytAuditClass   `json:"yt_only_bot"`
+	YTOnlyHuman ytAuditClass   `json:"yt_only_human"`
+	Unbound     ytAuditUnbound `json:"unbound"`
 	// Error is the tasks whose reads failed; run again.
 	Error ytAuditClass `json:"error"`
 }
@@ -363,6 +367,9 @@ func (a *ytAuditor) auditTask(ctx context.Context, taskID int64, counts []*ytAud
 		for _, x := range got.AmbiguousCopy {
 			c.AmbiguousCopy.add(ytAuditItem{TaskID: taskID, CommentIDs: x.CommentIDs, YTIDs: []string{x.YTID}})
 		}
+		for _, id := range got.DocComment {
+			c.DocComment.add(ytAuditItem{TaskID: taskID, YTIDs: []string{id}})
+		}
 		for _, x := range got.Duplicate {
 			c.Duplicate.add(item(x))
 		}
@@ -464,7 +471,7 @@ func projectCounts(ps []*ytAuditProject) []*ytAuditCounts {
 
 // fillEmpty makes every empty item list [] rather than null.
 func (c *ytAuditCounts) fillEmpty() {
-	for _, x := range []*ytAuditClass{&c.Present, &c.MissingInYT, &c.Duplicate, &c.AdoptedUnmatched, &c.AmbiguousCopy, &c.YTOnlyBot, &c.YTOnlyHuman, &c.Error,
+	for _, x := range []*ytAuditClass{&c.Present, &c.MissingInYT, &c.Duplicate, &c.AdoptedUnmatched, &c.AmbiguousCopy, &c.DocComment, &c.YTOnlyBot, &c.YTOnlyHuman, &c.Error,
 		&c.Unbound.NoProject, &c.Unbound.NoIssue, &c.Unbound.Ambiguous, &c.Unbound.Verifies, &c.Unbound.OtherTenant} {
 		if x.Items == nil {
 			x.Items = []ytAuditItem{}
@@ -523,12 +530,14 @@ func youtrackAuditCmd(args []string, out io.Writer) error {
 	}
 	defer st.Close()
 	if !*enqueue {
-		applied, err := st.MigrationApplied(openCtx, store.YTTaskBindingsMigration)
-		if err != nil {
-			return err
-		}
-		if !applied {
-			return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("the database lacks migration %s: deploy the release that adds it first; the audit never migrates", store.YTTaskBindingsMigration)}
+		for _, id := range ytBindingMigrations {
+			applied, err := st.MigrationApplied(openCtx, id)
+			if err != nil {
+				return err
+			}
+			if !applied {
+				return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("the database lacks migration %s: deploy the release that adds it first; the audit never migrates", id)}
+			}
 		}
 	}
 	me, err := client.Me(openCtx)
