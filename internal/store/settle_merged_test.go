@@ -55,7 +55,6 @@ func settleState(t *testing.T, s *Store, id int64) string {
 // a re-run that changes nothing.
 func TestSettleMergedReasons(t *testing.T) {
 	f := newDeployFixture(t, "settle", "prod")
-	covered := f.mergedWithSHA(t, 1)
 	notYet := f.mergedWithSHA(t, 2)
 	noMergeSHA := f.mergedTask(t, 3)
 	otherRepo := changeRepo("settle_other")
@@ -64,6 +63,9 @@ func TestSettleMergedReasons(t *testing.T) {
 
 	f.start(t, "s-1", "deploy", []string{"prod"}, f.cand(1, "internal/x.go"))
 	f.finish(t, "s-1", "success")
+	// Merged after the deploy finished: FinishDeploy's task rule already ran,
+	// so this task stays merged for settle-merged to find.
+	covered := f.mergedWithSHA(t, 1)
 
 	dry, err := f.s.SettleMerged(t.Context(), "", true)
 	if err != nil {
