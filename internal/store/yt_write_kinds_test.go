@@ -30,6 +30,11 @@ func TestYTKindGatesNameRegisteredKinds(t *testing.T) {
 // mode is off.
 func TestYTAdmitSQLPerKind(t *testing.T) {
 	s := &Store{}
+	// issue_fields and issue_move are FALSE until their modes are on: moves
+	// have their own mode (hk 4111), off by default.
+	const noFields = `(o.kind = 'issue_fields' AND (FALSE))`
+	const noMove = `(o.kind = 'issue_move' AND (FALSE))`
+	const noDecisions = `(o.kind = 'decision_create' AND (FALSE)) OR (o.kind = 'decision_fields' AND (FALSE))`
 	for _, tc := range []struct {
 		mode YTCommentsMode
 		gate string
@@ -41,7 +46,7 @@ func TestYTAdmitSQLPerKind(t *testing.T) {
 		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`},
 	} {
 		s.SetYTCommentsMode(tc.mode)
-		want := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND ((` + tc.gate + `) OR (FALSE))) OR (o.kind = 'issue_create' AND (FALSE)) OR (o.kind = 'issue_fields' AND (FALSE))))`
+		want := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND ((` + tc.gate + `) OR (FALSE))) OR ` + noDecisions + ` OR (o.kind = 'issue_create' AND (FALSE)) OR ` + noFields + ` OR ` + noMove + `))`
 		if got := s.ytAdmitSQL("$2"); got != want {
 			t.Errorf("mode %s:\n got %s\nwant %s", tc.mode, got, want)
 		}
@@ -55,7 +60,7 @@ func TestYTAdmitSQLPerKind(t *testing.T) {
 	}
 	s.SetYTDocCommentsMode(YTDocCommentsOn)
 	wantDoc := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND ((FALSE) OR (o.principal = 'hk:doc-comments' AND o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
-		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)))) OR (o.kind = 'issue_create' AND (FALSE)) OR (o.kind = 'issue_fields' AND (FALSE))))`
+		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)))) OR ` + noDecisions + ` OR (o.kind = 'issue_create' AND (FALSE)) OR ` + noFields + ` OR ` + noMove + `))`
 	if got := s.ytAdmitSQL("$2"); got != wantDoc {
 		t.Errorf("doc comments on:\n got %s\nwant %s", got, wantDoc)
 	}
@@ -68,10 +73,37 @@ func TestYTAdmitSQLPerKind(t *testing.T) {
 		t.Errorf("fields on without a tenant: %s", got)
 	}
 	s.SetYTFieldsMode(YTFieldsOn, ytcTenant)
-	want := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND ((FALSE) OR (FALSE))) OR (o.kind = 'issue_create' AND (FALSE)) OR (o.kind = 'issue_fields' AND (o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
-		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)))))`
+	fieldsGate := `o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
+		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
+	want := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND ((FALSE) OR (FALSE))) OR ` + noDecisions + ` OR (o.kind = 'issue_create' AND (FALSE)) OR (o.kind = 'issue_fields' AND (` + fieldsGate + `)) OR ` + noMove + `))`
 	if got := s.ytAdmitSQL("$2"); got != want {
-		t.Errorf("fields on:\n got %s\nwant %s", got, want)
+		t.Errorf("fields on, moves off:\n got %s\nwant %s", got, want)
+	}
+	// The moves mode (hk 4111) admits an issue_move op whose target is the
+	// task's bound issue on the op's tenant; off is FALSE, with fields on or not.
+	s.SetYTMovesMode(YTMovesOn)
+	wantMoves := `(o.tenant = $2 AND ((o.kind = 'comment_append' AND ((FALSE) OR (FALSE))) OR ` + noDecisions + ` OR (o.kind = 'issue_create' AND (FALSE)) OR (o.kind = 'issue_fields' AND (` + fieldsGate + `)) OR (o.kind = 'issue_move' AND (` + fieldsGate + `))))`
+	if got := s.ytAdmitSQL("$2"); got != wantMoves {
+		t.Errorf("moves on:\n got %s\nwant %s", got, wantMoves)
+	}
+	s.SetYTMovesMode(YTMovesOff)
+	if got := ytMoveGateSQL(s); got != `FALSE` {
+		t.Errorf("moves off: %s", got)
+	}
+	// The decisions mode (hk 4054) admits a create while the decision is
+	// unbound (or bound by this op) and a snapshot whose target is the
+	// bound issue; on without a tenant or a DEC project is off.
+	s.SetYTFieldsMode(YTFieldsOff, "")
+	s.SetYTDecisionsMode(YTDecisionsOn, ytcTenant, "", "DEC")
+	if got := ytDecisionCreateGateSQL(s) + ytDecisionFieldsGateSQL(s); got != `FALSEFALSE` {
+		t.Errorf("decisions on without a project: %s", got)
+	}
+	s.SetYTDecisionsMode(YTDecisionsOn, ytcTenant, "0-12", "DEC")
+	want = `(o.tenant = $2 AND ((o.kind = 'comment_append' AND ((FALSE) OR (FALSE))) OR (o.kind = 'decision_create' AND (o.entity_kind = 'decision' AND NOT EXISTS (SELECT 1 FROM yt_decision_bindings b
+		WHERE b.decision_id = o.entity_id AND b.op_id IS DISTINCT FROM o.id))) OR (o.kind = 'decision_fields' AND (o.entity_kind = 'decision' AND EXISTS (SELECT 1 FROM yt_decision_bindings b
+		WHERE b.decision_id = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant))) OR (o.kind = 'issue_create' AND (FALSE)) OR ` + noFields + ` OR ` + noMove + `))`
+	if got := s.ytAdmitSQL("$2"); got != want {
+		t.Errorf("decisions on:\n got %s\nwant %s", got, want)
 	}
 }
 
