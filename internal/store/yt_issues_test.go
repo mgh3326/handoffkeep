@@ -178,13 +178,17 @@ func TestYTIssueProjectSetSkipsTasksWithExistingIssueOwnership(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := schemaStore(t, "yti_owned_"+strings.ReplaceAll(tc.name, " ", "_"))
 			const project = "yti-owned-project"
+			initialProject := "yti-owned-initial-project"
 			if _, err := s.AddTaskProject(t.Context(), project, "test"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddTaskProject(t.Context(), initialProject, "test"); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: project, ProjectID: "0-owned", ShortName: "OWN"}); err != nil {
 				t.Fatal(err)
 			}
-			task, err := s.CreateTask(t.Context(), Task{Lane: "yti-owned", Title: "owned task", Kind: "implement", CreatedBy: "test"})
+			task, err := s.CreateTask(t.Context(), Task{Lane: "yti-owned", Title: "owned task", Kind: "implement", CreatedBy: "test", Project: &initialProject})
 			if err != nil {
 				t.Fatal(err)
 			}
