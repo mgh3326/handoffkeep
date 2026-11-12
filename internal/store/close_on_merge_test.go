@@ -235,24 +235,6 @@ func TestRelandIsJudgedByOpenTime(t *testing.T) {
 	}
 }
 
-// TestNamedParentAdoptsThePR (PR #331 review round 2): a named parent that
-// its named child's merge auto-closes before the parent's own turn still
-// gets the PR as refs.pr, which deploy records match.
-func TestNamedParentAdoptsThePR(t *testing.T) {
-	s, pool := searchTestStore(t)
-	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
-	child := flowTask(t, s, pool, "implement", StateReviewing, true)
-	setParent(t, s, child, parent)
-	pr := testPR(6601)
-	res := send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: child.ID, Tasks: []int64{parent.ID}})
-	if len(res.Tasks) != 1 || res.Tasks[0].State != StateMerged || res.Tasks[0].Task.Refs.PR != pr {
-		t.Fatalf("named parent %+v", res.Tasks)
-	}
-	if got := stateOf(t, s, parent.ID); got.State != StateMerged || got.Refs.PR != pr {
-		t.Fatalf("parent state=%s refs.pr=%q", got.State, got.Refs.PR)
-	}
-}
-
 // TestPropagatedSiblingLinksTheChange (PR #331 review round 2): a sibling the
 // merge propagates to is linked to the change as implements, so a later
 // revert of the PR holds the sibling too.
@@ -304,46 +286,5 @@ func TestAutoCloseKeepsTheReceiptFence(t *testing.T) {
 	}
 	if got := stateOf(t, s, 9001).State; got != StateBacklog {
 		t.Fatalf("fenced parent auto-closed to %s", got)
-	}
-}
-
-// TestHeldParentAdoptsThePRWhenItsChildClosesIt (PR #331 review round 6): a
-// parent whose turn comes first is held on its open child; the child's turn
-// then auto-closes it, and the parent still ends with the PR as refs.pr.
-func TestHeldParentAdoptsThePRWhenItsChildClosesIt(t *testing.T) {
-	s, pool := searchTestStore(t)
-	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
-	child := flowTask(t, s, pool, "implement", StateReviewing, true)
-	setParent(t, s, child, parent)
-	pr := testPR(7201)
-	res := send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: parent.ID, Tasks: []int64{child.ID}})
-	if res.State != StateMerged || res.Task.Refs.PR != pr {
-		t.Fatalf("parent result state=%s refs.pr=%q", res.State, res.Task.Refs.PR)
-	}
-	if got := stateOf(t, s, parent.ID); got.State != StateMerged || got.Refs.PR != pr {
-		t.Fatalf("parent state=%s refs.pr=%q", got.State, got.Refs.PR)
-	}
-}
-
-// TestAdoptedPRDoesNotDeployPastASubTask (PR #331 review round 7): a named
-// parent that adopts an already deployed PR stays merged while another
-// sub-task is merged but not deployed.
-func TestAdoptedPRDoesNotDeployPastASubTask(t *testing.T) {
-	s, pool := searchTestStore(t)
-	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
-	a := flowTask(t, s, pool, "implement", StateReviewing, true)
-	b := flowTask(t, s, pool, "implement", StateReviewing, true)
-	setParent(t, s, a, parent)
-	setParent(t, s, b, parent)
-	send(t, s, mergeEvent(a.ID, testPR(7301)))
-	pr := testPR(7302)
-	putDeploy(t, s, "deploy/svc/20261112T000000Z", "svc", "success", []string{pr})
-	send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: b.ID, Tasks: []int64{parent.ID}})
-	if got := stateOf(t, s, b.ID).State; got != StateDeployed {
-		t.Fatalf("b on a deployed PR: %s", got)
-	}
-	got := stateOf(t, s, parent.ID)
-	if got.State != StateMerged || got.Refs.PR != pr {
-		t.Fatalf("parent state=%s refs.pr=%q, want merged with the PR (a is not deployed)", got.State, got.Refs.PR)
 	}
 }

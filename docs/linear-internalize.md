@@ -178,8 +178,7 @@ treated as overdue.
     settled (the parent closes through `auto_close_parent` when its last sub-task
     settles). A change closed without merging
     does not hold the task. A held merge still reaches the other tasks whose `refs.pr`
-    is the PR, each linked to the change as `implements` and under its own rules. A
-    merged task with no `refs.pr` that a merge names adopts the PR as `refs.pr`. An event may name further tasks in `tasks` (one
+    is the PR, each linked to the change as `implements` and under its own rules. An event may name further tasks in `tasks` (one
     per `Mergewake-Task` line of the PR, for example a bundle PR's sub-tasks); each
     gets the event as `task_id` does, in its own turn: propagation and the rule 9
     parent row skip a named task. A task held by a change that later closes unmerged
