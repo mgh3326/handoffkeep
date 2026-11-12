@@ -603,13 +603,17 @@ func diffComments(taskID int64, hk store.YTRebuildComments, listed []ytwrite.Rem
 	byOp := map[int64]int{}
 	byID := map[int64]int{}
 	byLegacyYT := map[string]int{}
-	docs := map[string]bool{}
+	// The import's copies of the task's documents, each expected once, by
+	// (body, author, time) as the import wrote them: the document's creator
+	// and creation time (youtrack/import/client.js documentIssueComments).
+	var docCopies []store.YTRebuildComment
 	for _, d := range hk.Docs {
 		bodies, _, _ := ytwrite.DocComments(d.Key, d.Kind, d.Body)
 		for _, b := range bodies {
-			docs[b] = true
+			docCopies = append(docCopies, store.YTRebuildComment{Author: d.CreatedBy, Body: b, CreatedAt: d.CreatedAt})
 		}
 	}
+	docUsed := make([]bool, len(docCopies))
 	for i, c := range hk.Comments {
 		byID[c.ID] = i
 		if c.OpID > 0 {
@@ -669,14 +673,6 @@ func diffComments(taskID int64, hk store.YTRebuildComments, listed []ytwrite.Rem
 				continue
 			}
 		}
-		if docs[c.Text] {
-			out.DocumentCopies++
-			continue
-		}
-		if key := docCopyKey(c.Text, hk.Docs); key != "" {
-			out.differ("yt "+c.ID, "task "+strconv.FormatInt(taskID, 10)+": the import's copy of document "+key+" is not the document as it is now")
-			continue
-		}
 		rebuilt = append(rebuilt, rebuiltComment{ytID: c.ID, how: rebuiltImported, hk: -1,
 			authors: []string{c.AuthorLogin, c.AuthorName}, at: c.CreatedAt, body: c.Text})
 	}
@@ -694,6 +690,21 @@ func diffComments(taskID int64, hk store.YTRebuildComments, listed []ytwrite.Rem
 		if r.how != rebuiltImported {
 			continue
 		}
+		// An expected document copy first, consumed once, so a task comment
+		// with the same text is still matched and an extra copy is not
+		// hidden.
+		doc := -1
+		for k, d := range docCopies {
+			if !docUsed[k] && importedMatches(*r, d) {
+				doc = k
+				break
+			}
+		}
+		if doc >= 0 {
+			docUsed[doc] = true
+			out.DocumentCopies++
+			continue
+		}
 		// An hk comment with no copy yet first; else one that has a copy
 		// already, which makes this one its duplicate.
 		for _, free := range []bool{true, false} {
@@ -704,7 +715,11 @@ func diffComments(taskID int64, hk store.YTRebuildComments, listed []ytwrite.Rem
 				}
 			}
 		}
-		if r.hk < 0 {
+		switch key := docCopyKey(r.body, hk.Docs); {
+		case r.hk >= 0:
+		case key != "":
+			out.differ("yt "+r.ytID, "task "+task+": names document "+key+" but is no expected copy of it (an extra copy, or the document changed; body, author, time)")
+		default:
 			out.differ("yt "+r.ytID, "task "+task+": YouTrack comment matches no hk comment (author, time, body)")
 		}
 	}

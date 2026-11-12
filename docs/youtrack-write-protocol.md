@@ -688,10 +688,13 @@ time, so a provenance time equal to the op's and not the comment's is the
 exception `op_time` (the comment's time is PG-only). A comment in that form
 whose op is another of hk's ops for the issue is left out
 (`other_hk_writes`); one whose op hk's ledger does not have for the issue
-differs. The import's copies of the task's reports and briefs
-(`ytwrite.DocComments` of each document tied to the task, as it is now) are
-left out (`document_copies`); a copy that names a task document but is not its
-current text differs. Any other comment is an import's: its author is the
+differs. The import's copies of the task's reports and briefs are
+expected once each, as the import wrote them: `ytwrite.DocComments` of each
+document tied to the task (as it is now), by the document's creator and
+creation time. A comment matching an expected copy's (body, author, time) uses
+it up and is left out (`document_copies`), so a task comment with the same text
+still matches its hk comment and an extra copy is not hidden; a comment that
+names a task document but matches no expected copy differs. Any other comment is an import's: its author is the
 YouTrack user's login or name (the import named each user after its hk actor)
 and its time the created time, to the millisecond; it is matched with the hk
 comment of the same (time, author, body), since imported comments have no id

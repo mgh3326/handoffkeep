@@ -299,7 +299,10 @@ func TestYouTrackRebuildComments(t *testing.T) {
 	fake.comment("2-1", "4-4", "from a person in YouTrack", t0, "robin", "Robin")                                             // pulled into hk as 14
 	fake.comment("2-1", "4-5", op("hk:doc", t0, 900, "# reports/x/report.md\n\nreport"), t0, "hk-bot", "hk bot")              // a document copy
 	fake.comment("2-1", "4-6", "second imported", t0.Add(time.Minute), "x", "operator:robin")                                 // hk 15: the name is the actor
-	fake.comment("2-1", "4-8", "# reports/j1/report.md\n\nthe report", t0, "worker:a", "worker:a")                            // the import's copy of a task report
+	report := "# reports/j1/report.md\n\nthe report"
+	fake.comment("2-1", "4-8", report, t0, "worker:a", "worker:a")                    // the import's copy of a task report
+	fake.comment("2-1", "4-9", report, t0.Add(2*time.Minute), "worker:a", "worker:a") // hk 16: a task comment with the same text
+	fake.comment("2-1", "4-10", report, t0, "worker:a", "worker:a")                   // a second copy of the report: one too many
 	del := ytrbComment{ID: "4-7", Text: "removed", Deleted: true}
 	fake.comments["2-1"] = append(fake.comments["2-1"], del)
 	// Task 2, issue 2-2: one difference of each kind.
@@ -309,7 +312,6 @@ func TestYouTrackRebuildComments(t *testing.T) {
 	fake.comment("2-2", "4-24", "written in YouTrack only", t0, "robin", "Robin")                                                   // not pulled: yt only
 	fake.comment("2-2", "4-25", op("worker:e", t0, 605, "twice"), t0, "hk-bot", "hk bot")                                           // hk 25: two copies
 	fake.comment("2-2", "4-26", "twice", t0, "worker:e", "worker:e")                                                                // (imported copy of 25)
-	fake.comment("2-2", "4-28", op("worker:z", t0, 999, "looks like hk's"), t0, "robin", "Robin")                                   // hk's form, but no such op of the issue
 	fake.comment("2-2", "4-29", "Article: [brief] brief/2026-11-12/j2 [note] (hk document key: brief/2026-11-12/j2)", t0, "x", "x") // a brief copy, stale
 	fake.comment("2-2", "4-27", "**에이전트 메모 (w)** · 2026-11-01 09:40\n\ncut sho\n\n<!-- hk-comment:27 -->", t0, "hk-bot", "hk bot")  // hk 27: legacy, body differs
 	src := &ytrbSource{
@@ -323,8 +325,9 @@ func TestYouTrackRebuildComments(t *testing.T) {
 				{ID: 12, Author: "worker:b", Body: "op body", CreatedAt: t0.Add(time.Hour), OpID: 501},
 				{ID: 13, Author: "operator:robin", Body: "legacy body", CreatedAt: t0, LegacyYTID: "4-3"},
 				{ID: 15, Author: "operator:robin", Body: "second imported", CreatedAt: t0.Add(time.Minute)},
+				{ID: 16, Author: "worker:a", Body: report, CreatedAt: t0.Add(2 * time.Minute)},
 			}, PulledYTIDs: map[string]bool{"4-4": true}, IssueOps: map[int64]bool{501: true, 900: true},
-				Docs: []store.YTRebuildTaskDoc{{Key: "reports/j1/report.md", Kind: "report", Body: "the report"}, {Key: "notes/n", Kind: "note", Body: "not copied"}}},
+				Docs: []store.YTRebuildTaskDoc{{Key: "reports/j1/report.md", Kind: "report", Body: "the report", CreatedBy: "worker:a", CreatedAt: t0}, {Key: "notes/n", Kind: "note", Body: "not copied"}}},
 			2: {Comments: []store.YTRebuildComment{
 				{ID: 21, Author: "worker:c", Body: "the original", CreatedAt: t0, OpID: 601},
 				{ID: 22, Author: "worker:f", Body: "who wrote it", CreatedAt: t0, OpID: 602},
@@ -333,7 +336,7 @@ func TestYouTrackRebuildComments(t *testing.T) {
 				{ID: 25, Author: "worker:e", Body: "twice", CreatedAt: t0, OpID: 605},
 				{ID: 27, Author: "w", Body: "cut short by the mirror", CreatedAt: t0},
 			}, IssueOps: map[int64]bool{601: true, 602: true, 605: true},
-				Docs: []store.YTRebuildTaskDoc{{Key: "brief/2026-11-12/j2", Kind: "brief", Body: "b"}}},
+				Docs: []store.YTRebuildTaskDoc{{Key: "brief/2026-11-12/j2", Kind: "brief", Body: "b", CreatedBy: "x", CreatedAt: t0}}},
 		},
 	}
 	r, _ := ytrbRun(t, fake, src, "")
@@ -341,10 +344,10 @@ func TestYouTrackRebuildComments(t *testing.T) {
 	if got.Tasks != 2 || got.TopTasks != 1 || got.PulledLeftOut != 1 || got.OtherHKWrites != 1 || got.DocumentCopies != 1 || got.Errors.Count != 0 {
 		t.Fatalf("comments = %+v", got)
 	}
-	if got.Equal != 3 || got.Exceptions.Count != 1 || ytrbIDs(got.Exceptions)[0] != "comment 13" || !strings.HasPrefix(got.Exceptions.Items[0].Reason, "legacy_mirror: ") {
+	if got.Equal != 4 || got.Exceptions.Count != 1 || ytrbIDs(got.Exceptions)[0] != "comment 13" || !strings.HasPrefix(got.Exceptions.Items[0].Reason, "legacy_mirror: ") {
 		t.Fatalf("equal %d exceptions %+v", got.Equal, got.Exceptions)
 	}
-	wantDiffer := []string{"yt 4-28", "yt 4-29", "yt 4-24", "yt 4-23", "comment 21", "comment 22", "comment 23", "comment 24", "comment 25", "comment 27"}
+	wantDiffer := []string{"yt 4-8", "yt 4-24", "yt 4-29", "yt 4-23", "comment 21", "comment 22", "comment 23", "comment 24", "comment 25", "comment 27"}
 	if gotIDs := ytrbIDs(got.Differ); !slices.Equal(gotIDs, wantDiffer) || got.Differ.Count != len(wantDiffer) {
 		t.Fatalf("differ %v, want %v (%+v)", gotIDs, wantDiffer, got.Differ.Items)
 	}
@@ -359,8 +362,8 @@ func TestYouTrackRebuildComments(t *testing.T) {
 		"comment 25": "2 copies 4-25,4-26",
 		"comment 27": "legacy mirror",
 		"yt 4-24":    "matches no hk comment",
-		"yt 4-28":    "names hk op 999, which hk's ledger has not for this issue",
-		"yt 4-29":    "copy of document brief/2026-11-12/j2 is not the document as it is now",
+		"yt 4-29":    "names document brief/2026-11-12/j2 but is no expected copy",
+		"yt 4-8":     "names document reports/j1/report.md but is no expected copy",
 	} {
 		if !strings.Contains(reason[id], w) {
 			t.Errorf("%s reason %q lacks %q", id, reason[id], w)

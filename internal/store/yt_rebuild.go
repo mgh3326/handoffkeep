@@ -124,11 +124,14 @@ type YTRebuildComment struct {
 
 // YTRebuildTaskDoc is one document tied to the task: the import copied a
 // task's reports and briefs onto its issue as comments
-// (ytwrite.DocComments).
+// (ytwrite.DocComments), each with the document's creator and creation time
+// as its author and time.
 type YTRebuildTaskDoc struct {
-	Key  string
-	Kind string
-	Body string
+	Key       string
+	Kind      string
+	Body      string
+	CreatedBy string
+	CreatedAt time.Time
 }
 
 // YTRebuildComments is one task's side of the comment comparison.
@@ -189,10 +192,11 @@ func (s *Store) YTRebuildTaskComments(ctx context.Context, taskID int64, issueID
 	}
 	if err := s.ytRebuildEach(ctx, func(rows pgx.Rows) error {
 		var d YTRebuildTaskDoc
-		err := rows.Scan(&d.Key, &d.Kind, &d.Body)
+		err := rows.Scan(&d.Key, &d.Kind, &d.Body, &d.CreatedBy, &d.CreatedAt)
+		d.CreatedAt = d.CreatedAt.UTC()
 		out.Docs = append(out.Docs, d)
 		return err
-	}, `SELECT key, kind, body FROM documents WHERE task_id = $1 ORDER BY id`, taskID); err != nil {
+	}, `SELECT key, kind, body, created_by, created_at FROM documents WHERE task_id = $1 ORDER BY id`, taskID); err != nil {
 		return YTRebuildComments{}, err
 	}
 	return out, nil

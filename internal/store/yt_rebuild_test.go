@@ -146,7 +146,7 @@ func TestYTRebuildReads(t *testing.T) {
 	if !got.IssueOps[op.ID] || len(got.IssueOps) != 1 {
 		t.Fatalf("issue ops %v, want op %d", got.IssueOps, op.ID)
 	}
-	if len(got.Docs) != 1 || got.Docs[0].Key != "reports/rebuild-job/report.md" || got.Docs[0].Kind != "report" || got.Docs[0].Body != "the report" {
+	if len(got.Docs) != 1 || got.Docs[0].Key != "reports/rebuild-job/report.md" || got.Docs[0].Kind != "report" || got.Docs[0].Body != "the report" || got.Docs[0].CreatedBy != "test" || got.Docs[0].CreatedAt.IsZero() || got.Docs[0].CreatedAt.Location() != time.UTC {
 		t.Fatalf("task documents %+v", got.Docs)
 	}
 	if c := byID[legacy]; c.LegacyYTID != "4-900" || c.OpID != 0 {
