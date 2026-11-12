@@ -44,8 +44,11 @@ func TestYTAdmitSQLPerKind(t *testing.T) {
 		{YTCommentsOff, `FALSE`},
 		{YTCommentsCanary, `o.principal <> 'hk:doc-comments' AND EXISTS (SELECT 1 FROM yt_comment_canary c
 		WHERE o.entity_kind = 'task' AND c.task_id::text = o.entity_id AND c.issue_id = o.yt_target_id AND c.tenant = o.tenant)`},
-		{YTCommentsOn, `o.principal <> 'hk:doc-comments' AND o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
-		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`},
+		// Mode on also admits an hk comment queued with no target behind
+		// its task's issue_create (hk 4263); its claim resolves the target.
+		{YTCommentsOn, `o.principal <> 'hk:doc-comments' AND o.entity_kind = 'task' AND (EXISTS (SELECT 1 FROM yt_task_bindings b
+		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)
+		OR (o.principal = 'hk:task-comments' AND o.yt_target_id = ''))`},
 	} {
 		s.SetYTCommentsMode(tc.mode)
 		want := `(o.tenant = $2 AND (` + noArticles + ` OR (o.kind = 'comment_append' AND ((` + tc.gate + `) OR (FALSE))) OR ` + noDecisions + ` OR (o.kind = 'issue_create' AND (FALSE)) OR ` + noFields + ` OR ` + noMove + `))`
