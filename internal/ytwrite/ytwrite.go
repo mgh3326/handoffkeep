@@ -324,6 +324,8 @@ type RemoteIssue struct {
 	ProjectID   string
 	Summary     string
 	Description string
+	// Created is when YouTrack created the issue (zero: not reported).
+	Created time.Time
 }
 
 // IssueCreate is one issue create: the project, the text, and the task whose

@@ -579,6 +579,13 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 			logTransition(s.op)
 		}
 		return s.err == nil, s.err
+	case len(ev.Matches) == 0 && ev.Deleted == 0 && ev.Mismatched == 0 && ev.Adoptable != "" && resultIDRE.MatchString(ev.Adoptable):
+		// The dispatch adopted it and its settlement was lost (hk 3911).
+		s := p.apply(ctx, kind, op, ev.Adoptable, true)
+		if s.err == nil {
+			logTransition(s.op)
+		}
+		return s.err == nil, s.err
 	case len(ev.Matches) > 1:
 		return touch(ReasonMultipleMatches, fmt.Sprintf("%d candidates carry the marker", len(ev.Matches)))
 	case ev.Deleted > 0:

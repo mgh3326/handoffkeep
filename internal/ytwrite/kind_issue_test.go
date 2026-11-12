@@ -446,3 +446,63 @@ func TestIssueCreateHeldUntilFieldsExist(t *testing.T) {
 		t.Fatalf("creates %d", e.yt.Calls())
 	}
 }
+
+// failApplyOnce loses the first Apply's settlement, as a stopping process
+// or a failed commit does.
+type failApplyOnce struct {
+	*ytwritetest.MemLedger
+	failed bool
+}
+
+func (l *failApplyOnce) Apply(ctx context.Context, now time.Time, id int64, ytID string, maps []ytwrite.MapRow) (ytwrite.Op, error) {
+	if !l.failed {
+		l.failed = true
+		return ytwrite.Op{}, errors.New("commit lost")
+	}
+	return l.MemLedger.Apply(ctx, now, id, ytID, maps)
+}
+
+// An adoption whose settlement was lost is recovered as an adoption (hk
+// 3911): the map row is marked adopted, so the binding starts after the
+// task's comments. An unmarked issue created only just before the dispatch
+// is not taken: the dispatch's search may not have seen it, so a POST may be
+// in flight.
+func TestIssueCreateLostAdoptionRecovered(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		before time.Duration
+		state  ytwrite.State
+	}{
+		{"older_issue_is_adopted", time.Hour, ytwrite.StateApplied},
+		{"issue_within_the_margin_stays_unknown", ytwrite.IssueAdoptMargin / 2, ytwrite.StateRemoteUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newIssueEnv(t)
+			existing := e.yt.InjectIssue(issueProject, issueTask, "#3898 imported earlier", "legacy body")
+			e.clock.Advance(tc.before)
+			l := &failApplyOnce{MemLedger: e.ledger}
+			p, err := ytwrite.New(ytwrite.Config{Ledger: l, Remote: e.yt, Now: e.clock.Now})
+			if err != nil {
+				t.Fatal(err)
+			}
+			op := e.prepareIssue()
+			if _, err := p.Drive(context.Background(), 10); err != nil {
+				t.Fatal(err)
+			}
+			e.want(op.ID, ytwrite.StateDispatched, "")
+			e.clock.Advance(10 * time.Minute)
+			if _, err := p.Drive(context.Background(), 10); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := e.ledger.ByID(context.Background(), op.ID)
+			if got.State != tc.state || e.yt.Calls() != 0 {
+				t.Fatalf("op %+v, creates %d, want %s and no POST", got, e.yt.Calls(), tc.state)
+			}
+			if tc.state == ytwrite.StateApplied {
+				if m, _, _ := e.ledger.MapGet(context.Background(), "task", "3898"); m.YTID != existing || !m.Adopted {
+					t.Fatalf("map row %+v, want %s adopted", m, existing)
+				}
+			}
+		})
+	}
+}

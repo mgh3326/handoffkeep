@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const issueFields = "id,idReadable,summary,description,$type,project(id,shortName,name,$type),customFields(id,name,$type,value)"
+const issueFields = "id,idReadable,summary,description,created,$type,project(id,shortName,name,$type),customFields(id,name,$type,value)"
 
 // IssueWrite is one create call.
 type IssueWrite struct {

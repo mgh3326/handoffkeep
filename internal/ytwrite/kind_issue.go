@@ -262,6 +262,13 @@ func (issueCreate) Send(ctx context.Context, remote Remote, op Op, text string) 
 // ownership. Every other issue with that hk ID counts as a mismatch, so the
 // shared rule keeps the op remote_unknown unless that one issue is all there
 // is.
+//
+// The one exception is the issue Send adopted when the adoption's settlement
+// was lost (hk 3911): the only hit, naming the task, without this op's
+// marker, created at least IssueAdoptMargin before the op's last dispatch
+// began. That dispatch's complete search saw it, so it adopted it and sent
+// no POST; it is Adoptable. A hit created later may sit beside a POST of
+// this op that has not landed yet, so it stays a mismatch.
 func (issueCreate) Evidence(ctx context.Context, remote Remote, op Op, text string) (Evidence, error) {
 	var ev Evidence
 	ir, ok := remote.(IssueRemote)
@@ -280,6 +287,10 @@ func (issueCreate) Evidence(ctx context.Context, remote Remote, op Op, text stri
 		}
 		return ev, err
 	}
+	if len(hits) == 1 && issueAdoptable(hits[0], op) {
+		ev.Adoptable = hits[0].ID
+		return ev, nil
+	}
 	for _, h := range hits {
 		if h.Description == text {
 			ev.Matches = append(ev.Matches, h.ID)
@@ -288,6 +299,18 @@ func (issueCreate) Evidence(ctx context.Context, remote Remote, op Op, text stri
 		}
 	}
 	return ev, nil
+}
+
+// IssueAdoptMargin is how long before an op's dispatch an issue must have
+// been created for the evidence search to take it as the one that dispatch
+// adopted: it covers the clock skew between hk and YouTrack and the search
+// index's latency.
+const IssueAdoptMargin = 5 * time.Minute
+
+func issueAdoptable(h RemoteIssue, op Op) bool {
+	taskID, _ := strconv.ParseInt(op.EntityID, 10, 64)
+	return SummaryNamesTask(h.Summary, taskID) && !strings.Contains(h.Description, OpMarker(op.ID)) &&
+		!h.Created.IsZero() && !op.DispatchedAt.IsZero() && h.Created.Before(op.DispatchedAt.Add(-IssueAdoptMargin))
 }
 
 func (issueCreate) needsProvenance() bool { return true }

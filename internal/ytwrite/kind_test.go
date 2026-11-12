@@ -109,6 +109,7 @@ type kindEnv struct {
 func newKindEnv(t *testing.T) *kindEnv {
 	t.Helper()
 	e := &kindEnv{t: t, yt: ytwritetest.NewFake(), clock: ytwritetest.NewClock(), ledger: ytwritetest.NewMemLedger(), note: &noteKind{}}
+	e.yt.Clock = e.clock
 	p, err := ytwrite.New(ytwrite.Config{Ledger: e.ledger, Remote: e.yt, Now: e.clock.Now})
 	if err != nil {
 		t.Fatal(err)

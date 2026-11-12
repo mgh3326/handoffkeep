@@ -691,7 +691,14 @@ classification is the shared one; a failed search is `not_sent` (above).
 whose description is exactly the rendered text, applies the op; a quoted or
 copied marker is not ownership. Zero, two exact hits, an edited description,
 or a hit beside another issue with that `hk ID` keep it `remote_unknown`;
-there is never an automatic re-create.
+there is never an automatic re-create. One exception recovers an adoption
+whose settlement was lost (a crash or a failed apply after Send adopted,
+hk 3911): the only hit, whose summary names the task, without this op's
+marker, and created (YouTrack's `created`) at least
+`ytwrite.IssueAdoptMargin` (5m) before the op's last dispatch began, is the
+issue that dispatch's complete search saw and adopted with no POST; the op
+applies with it as adopted. A later-created hit stays a mismatch, since a POST
+of this op may still land beside it.
 
 **Binding.** Applying the op (send, evidence or `yt ops resolve`) takes the
 task's lane lock, first checks every mapping hk keeps (the task's binding and

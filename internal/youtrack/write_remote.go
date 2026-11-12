@@ -256,6 +256,9 @@ func (r *WriteRemote) FindTaskIssues(ctx context.Context, projectShort, projectI
 			continue
 		}
 		hit := ytwrite.RemoteIssue{ID: issue.ID, Readable: issue.IDReadable, Summary: issue.Summary, Description: issue.Description}
+		if issue.Created > 0 {
+			hit.Created = time.UnixMilli(issue.Created).UTC()
+		}
 		if issue.Project != nil {
 			hit.ProjectID = issue.Project.ID
 		}

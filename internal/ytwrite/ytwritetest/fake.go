@@ -79,6 +79,9 @@ type FakeYouTrack struct {
 	// delayedIssues are the creates a DelayCommit fault held back.
 	delayedIssues []ytwrite.IssueCreate
 
+	// Clock, when set, stamps each issue's Created.
+	Clock *Clock
+
 	// BeforeCreate runs at the start of every CreateComment, with the caller's
 	// context, before anything else. Tests use it to cancel a caller mid-call.
 	BeforeCreate func(ctx context.Context)
@@ -499,8 +502,12 @@ func (f *FakeYouTrack) Finds() int { f.mu.Lock(); defer f.mu.Unlock(); return f.
 func (f *FakeYouTrack) addIssueLocked(projectID string, taskID int64, summary, description string) string {
 	f.nextID++
 	id := fmt.Sprintf("2-%d", f.nextID)
+	var created time.Time
+	if f.Clock != nil {
+		created = f.Clock.Now()
+	}
 	f.projects[projectID] = append(f.projects[projectID], &fakeIssue{
-		RemoteIssue: ytwrite.RemoteIssue{ID: id, Readable: fmt.Sprintf("HK-%d", f.nextID), ProjectID: projectID, Summary: summary, Description: description},
+		RemoteIssue: ytwrite.RemoteIssue{ID: id, Readable: fmt.Sprintf("HK-%d", f.nextID), ProjectID: projectID, Summary: summary, Description: description, Created: created},
 		hkID:        taskID,
 	})
 	return id

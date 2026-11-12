@@ -232,6 +232,31 @@ func RunIssueProtocol(t *testing.T, nl NewLedger) {
 		e.wantRemote(1, 1)
 	})
 
+	// Send adopted the task's existing issue and the process died before the
+	// apply committed (hk 3911): the evidence search adopts the same issue,
+	// with no POST, instead of holding the op remote_unknown for good.
+	t.Run("lost_adoption_settlement_is_recovered", func(t *testing.T) {
+		e := newEnv(t, nl)
+		existing := e.yt.InjectIssue(issueSuiteProject, testTask, "#"+itoa(testTask)+" imported", "legacy body")
+		e.clock.Advance(time.Hour)
+		cl := &CrashLedger{Ledger: e.ledger, Method: "Apply"}
+		e.restart(cl)
+		if _, _, err := e.prepareIssue(cl); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = e.p.Drive(context.Background(), 10)
+		if !cl.Dead() {
+			t.Fatal("the crash at Apply never fired")
+		}
+		e.restart(e.ledger)
+		e.clock.Advance(10 * time.Minute)
+		e.drive()
+		if got := e.wantOp(1, ytwrite.StateApplied, ""); got.YTResultID != existing {
+			t.Fatalf("op applied with %q, want the adopted %s", got.YTResultID, existing)
+		}
+		e.wantRemote(0, 0)
+	})
+
 	t.Run("crash_at_each_boundary", func(t *testing.T) {
 		for _, tc := range []struct {
 			name           string
