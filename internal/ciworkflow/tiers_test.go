@@ -66,6 +66,7 @@ type tierJob struct {
 	With        map[string]any `yaml:"with"`
 	Steps       []step         `yaml:"steps"`
 	Concurrency map[string]any `yaml:"concurrency"`
+	Permissions map[string]any `yaml:"permissions"`
 }
 
 type tierWorkflow struct {
@@ -564,7 +565,79 @@ func deployWorkflowProblems(raw []byte) []string {
 	if got := fmt.Sprint(status.Env["TARGET_SHA"]); got != "${{ needs.target.outputs.sha }}" {
 		add("TARGET_SHA is %q, want the resolved target %q", got, "${{ needs.target.outputs.sha }}")
 	}
+	return append(out, promoteProblems(wf)...)
+}
+
+// promoteProblems checks deploy.yml's promote job (hk 3509): it runs only
+// after a green tier, moves the deploy tag through deploy/hk-follow/hk-follow
+// (whose gate hk-follow on the host repeats), and holds exactly the
+// permissions a tag move needs. It never writes deploy-ok.
+func promoteProblems(wf tierWorkflow) []string {
+	var out []string
+	add := func(f string, a ...any) { out = append(out, fmt.Sprintf("deploy.yml: promote: "+f, a...)) }
+	p, ok := wf.Jobs["promote"]
+	if !ok {
+		return []string{"deploy.yml: must have a promote job (hk 3509)"}
+	}
+	needs := needsList(p.Needs)
+	for _, n := range []string{"target", "ci", "schema-compat", "status"} {
+		if !slices.Contains(needs, n) {
+			add("must need %s, got %v", n, needs)
+		}
+	}
+	cond := unwrap(p.If)
+	if strings.Contains(cond, "always()") {
+		add("must not run with always(): a failed tier never promotes")
+	}
+	for _, n := range []string{"ci", "schema-compat", "status"} {
+		if !strings.Contains(cond, "needs."+n+".result == 'success'") {
+			add("if must require needs.%s.result == 'success', got %q", n, cond)
+		}
+	}
+	want := map[string]string{"contents": "read", "checks": "read", "statuses": "write", "packages": "write"}
+	for k, v := range want {
+		if fmt.Sprint(p.Permissions[k]) != v {
+			add("permissions.%s is %q, want %q", k, p.Permissions[k], v)
+		}
+	}
+	for k, v := range p.Permissions {
+		if _, ok := want[k]; !ok {
+			add("permissions.%s=%v is wider than a tag move needs", k, v)
+		}
+	}
+	if got := fmt.Sprint(p.Env["TARGET_SHA"]); got != "${{ needs.target.outputs.sha }}" {
+		add("TARGET_SHA is %q, want the resolved target", got)
+	}
+	runs := stepRuns(p)
+	if !strings.Contains(runs, `deploy/hk-follow/hk-follow promote "$TARGET_SHA"`) {
+		add("must run deploy/hk-follow/hk-follow promote \"$TARGET_SHA\" (the shared gate)")
+	}
+	if strings.Contains(runs, "deploy-ok") || strings.Contains(runs, "imagetools") {
+		add("must move the tag only through the gate script and never post deploy-ok")
+	}
+	pinned := false
+	for _, s := range p.Steps {
+		if hasAction(s.Uses, "actions/checkout") && fmt.Sprint(s.With["ref"]) == "${{ github.workflow_sha }}" {
+			pinned = true
+		}
+	}
+	if !pinned {
+		add("checkout must pin ref: ${{ github.workflow_sha }} so an old dispatch runs this revision's gate")
+	}
 	return out
+}
+
+// The hk-follow decision tests run in the light tier, so a pull request that
+// breaks the gate is red before it merges.
+func TestHKFollowTestsRunInCI(t *testing.T) {
+	var wf tierWorkflow
+	if err := yaml.Unmarshal(readWorkflow(t, "ci.yml"), &wf); err != nil {
+		t.Fatal(err)
+	}
+	j, ok := wf.Jobs["auto-tag-test"]
+	if !ok || !strings.Contains(stepRuns(j), "bash deploy/hk-follow/test-hk-follow.sh") {
+		t.Fatal("ci.yml auto-tag-test must run bash deploy/hk-follow/test-hk-follow.sh")
+	}
 }
 
 // tierProblems checks ci.yml and ci-any-ref.yml against the tier contract,
@@ -955,7 +1028,7 @@ func TestCITierJobInventory(t *testing.T) {
 		want []string
 	}{
 		{"ci.yml", []string{"auto-tag-test", "build", "ci-ok", "deploy-linux", "deploy-macos", "deploy-release", "main-linux", "pr-store-db", "test", "vitest"}},
-		{"deploy.yml", []string{"ci", "schema-compat", "status", "target"}},
+		{"deploy.yml", []string{"ci", "promote", "schema-compat", "status", "target"}},
 	} {
 		var wf tierWorkflow
 		if err := yaml.Unmarshal(readWorkflow(t, c.file), &wf); err != nil {
@@ -1086,7 +1159,7 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 	for _, m := range []struct{ name, old, new string }{
 		{"deploy-cancels", "cancel-in-progress: false", "cancel-in-progress: true"},
 		{"deploy-one-group-per-run", "group: deploy", "group: deploy-${{ github.run_id }}"},
-		{"deploy-widens-permissions", "  statuses: write", "  statuses: write\n  contents: write"},
+		{"deploy-widens-permissions", "\n  statuses: write\njobs:", "\n  statuses: write\n  packages: write\njobs:"},
 		{"deploy-drops-contents-read", "  contents: read\n  statuses: write", "  statuses: write"},
 		{"deploy-no-workflow-run", "  workflow_run:\n    # ci.yml is by name, the only workflow it may follow. branches: [main] drops\n    # every pull request and any-ref call at the trigger, before a run exists;\n    # the target job repeats the main-push test so a manually edited trigger\n    # cannot deploy a PR head.\n    workflows: [ci]\n    types: [completed]\n    branches: [main]\n", ""},
 		{"deploy-follows-any-branch", "    branches: [main]\n", "    branches: [main, develop]\n"},
@@ -1101,6 +1174,15 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"deploy-schema-compat-unpinned", "          ref: ${{ github.workflow_sha }}\n", ""},
 		{"deploy-schema-compat-no-target-sha", "          # v* tag before the target.\n          TARGET_SHA: ${{ needs.target.outputs.sha }}\n", "          # v* tag before the target.\n"},
 		{"deploy-schema-compat-no-fetch", "          git fetch --no-tags origin \"$TARGET_SHA\"\n", ""},
+		{"promote-dropped", "  promote:\n", "  promote-gone:\n"},
+		{"promote-always", "if: ${{ needs.ci.result == 'success' &&", "if: ${{ always() && needs.ci.result == 'success' &&"},
+		{"promote-before-status", "needs: [target, ci, schema-compat, status]", "needs: [target, ci, schema-compat]"},
+		{"promote-without-schema-compat", " && needs.schema-compat.result == 'success' && needs.status", " && needs.status"},
+		{"promote-widens-permissions", "      packages: write\n", "      packages: write\n      contents: write\n"},
+		{"promote-no-packages", "      packages: write\n", ""},
+		{"promote-bypasses-gate", "          bash deploy/hk-follow/hk-follow promote \"$TARGET_SHA\"\n", "          docker buildx imagetools create --tag ghcr.io/x:deploy ghcr.io/x:$TARGET_SHA\n"},
+		{"promote-dispatch-sha", "    env:\n      TARGET_SHA: ${{ needs.target.outputs.sha }}\n    steps:", "    env:\n      TARGET_SHA: ${{ github.sha }}\n    steps:"},
+		{"promote-target-checkout", "          ref: '${{ github.workflow_sha }}'", "          ref: '${{ needs.target.outputs.sha }}'"},
 	} {
 		t.Run(m.name, func(t *testing.T) {
 			src := string(deploy)

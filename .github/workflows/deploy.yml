@@ -216,3 +216,63 @@ jobs:
             -f context=deploy-ok \
             -f target_url="$RUN_URL" \
             -f description="$desc"
+
+  promote:
+    # Push deploy (hk 3509, hk:doc decision/2026-11-08/hk-push-rollout-shiftgate
+    # r3). After a green deploy tier, move the image tag `deploy` to the
+    # target's image; hk-follow on ncp rolls out whatever that tag names after
+    # re-checking the same gate itself. This job only moves a registry tag: it
+    # holds no server credential and reaches no host.
+    #
+    # The gate is deploy/hk-follow/hk-follow's, shared with hk-follow (I1, I2):
+    # ci-ok and deploy-ok success on the sha, the sha on main and newer than
+    # the sha the tag names now, and an approval record
+    # (deploy-approval/handoffkeep/<sha> in hk) when a migration landed since
+    # then. A hold posts deploy-promote=pending and leaves the tag; re-run
+    # this workflow on the sha after writing the approval. The job runs only
+    # when both tier jobs passed and deploy-ok was posted; it re-reads every
+    # verdict from GitHub rather than from these results.
+    needs: [target, ci, schema-compat, status]
+    if: ${{ needs.ci.result == 'success' && needs.schema-compat.result == 'success' && needs.status.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      checks: read
+      statuses: write
+      packages: write
+    env:
+      TARGET_SHA: ${{ needs.target.outputs.sha }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # The workflow revision, not the target: a dispatch on an old sha
+          # must still run this revision's gate. (Quoted only so this line
+          # differs from schema-compat's identical checkout ref.)
+          ref: '${{ github.workflow_sha }}'
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go-cached
+      - name: Build the hk CLI for the approval read
+        run: go build -trimpath -o "$RUNNER_TEMP/handoffkeep" ./cmd/handoffkeep
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Log in to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote the target to the deploy tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HK_FOLLOW_REPO: ${{ github.repository }}
+          HK_FOLLOW_IMAGE: ghcr.io/${{ github.repository }}
+          # hk is read only for the approval record. Without these secrets a
+          # migration reads as unapproved-unreadable and the promote fails
+          # closed; a release with no migration never calls hk.
+          HANDOFFKEEP_URL: ${{ secrets.HK_PROMOTE_URL }}
+          HANDOFFKEEP_TOKEN: ${{ secrets.HK_PROMOTE_TOKEN }}
+          HANDOFFKEEP_CF_ACCESS_CLIENT_ID: ${{ secrets.HK_PROMOTE_CF_ACCESS_CLIENT_ID }}
+          HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET: ${{ secrets.HK_PROMOTE_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          export HANDOFFKEEP_CLI="$RUNNER_TEMP/handoffkeep"
+          bash deploy/hk-follow/hk-follow promote "$TARGET_SHA"

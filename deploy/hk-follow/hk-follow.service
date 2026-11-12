@@ -1,0 +1,18 @@
+[Unit]
+Description=hk-follow: roll handoffkeep out to the image tag deploy (hk 3509)
+Documentation=https://github.com/mgh3326/handoffkeep/blob/main/deploy/hk-follow/README.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# GH_TOKEN (fine-grained, this repository only: Contents read, Checks read,
+# Commit statuses write; nothing else) and HK_FOLLOW_* overrides. The hk CLI reads
+# its own HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN from the same file.
+EnvironmentFile=/etc/hk-follow/env
+ExecStart=/usr/local/bin/hk-follow tick
+# A rollout pulls, health-checks and drains; shiftgate bounds each step. A
+# oneshot unit is never started twice at once, and the script also holds
+# flock on its state directory (I5).
+TimeoutStartSec=30min
+StateDirectory=hk-follow

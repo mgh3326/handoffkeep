@@ -1,0 +1,534 @@
+#!/usr/bin/env bash
+# Tests for deploy/hk-follow/hk-follow against a fake GitHub, registry, hk,
+# shiftgate and healthz. Every external call in the script is one function;
+# each case sources the script (HK_FOLLOW_LIB=1) in a subshell and replaces
+# those functions with fakes reading and writing files under $FIX.
+#
+#   bash deploy/hk-follow/test-hk-follow.sh
+set -uo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+SCRIPT="$HERE/hk-follow"
+ROOT=$(mktemp -d)
+trap 'rm -rf "$ROOT"' EXIT
+FAILS=0 PASSES=0
+
+SHA_NEW=1111111111111111111111111111111111111111
+SHA_OLD=2222222222222222222222222222222222222222
+SHA_OTHER=3333333333333333333333333333333333333333
+D1=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+D2=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+D3=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+
+# --- fixture helpers (run in the case subshell) ----------------------------
+
+key() { printf '%s' "$1" | tr '/?&=' '____'; }
+
+fx_gh() { printf '%s' "$2" >"$FIX/gh/$(key "$1")"; }
+fx_manifest() { printf '%s' "$2" >"$FIX/reg/$1"; }
+fx_health() { printf '%s' "$2" >"$FIX/health/$(key "$1")"; }
+fx_doc() { printf '%s' "$2" >"$FIX/docs/$(key "$1")"; }
+
+index_json() { # <revision or ""> <child digest>...
+	local rev=$1
+	shift
+	jq -cn --arg rev "$rev" --args '{schemaVersion:2, mediaType:"application/vnd.oci.image.index.v1+json",
+		manifests: ($ARGS.positional | map({digest:.})),
+		annotations: (if $rev == "" then {} else {"org.opencontainers.image.revision": $rev} end)}' "$@"
+}
+
+# green <sha>: ci-ok (check run) and deploy-ok (status) success.
+green() {
+	fx_gh "/repos/mgh3326/handoffkeep/commits/$1/status?per_page=100" '{"statuses":[{"context":"deploy-ok","state":"success"}]}'
+	fx_gh "/repos/mgh3326/handoffkeep/commits/$1/check-runs?check_name=ci-ok&filter=all&per_page=100" \
+		'{"check_runs":[{"name":"ci-ok","conclusion":"success","app":{"slug":"github-actions"}}]}'
+	fx_gh "/repos/mgh3326/handoffkeep/compare/$1...main" '{"status":"identical"}'
+}
+
+compare() { # <base> <head> <status> [files-json] [commits-json]
+	fx_gh "/repos/mgh3326/handoffkeep/compare/$1...$2" \
+		"{\"status\":\"$3\",\"files\":${4:-[]},\"commits\":${5:-[]}}"
+}
+
+setup() {
+	FIX="$ROOT/case$((PASSES + FAILS))"
+	mkdir -p "$FIX"/{gh,reg,health,docs,records,state}
+	: >"$FIX/calls"
+	export FIX
+	export HK_FOLLOW_STATE_DIR="$FIX/state" HK_FOLLOW_LIB=1
+	# shellcheck source=hk-follow
+	source "$SCRIPT"
+	gh_get() { local f="$FIX/gh/$(key "$1")"; [[ -f "$f" ]] && cp "$f" "$2"; }
+	gh_status() { echo "status $1 $2 $3 $4" >>"$FIX/calls"; }
+	registry_manifest() {
+		local f="$FIX/reg/${1//\//_}"
+		[[ -f "$FIX/reg_error" ]] && return 1
+		[[ -f "$f" ]] || return 3
+		cp "$f" "$2"
+	}
+	registry_tag() {
+		echo "tag $1" >>"$FIX/calls"
+		local kids
+		mapfile -t kids < <(jq -r '.manifests[].digest' "$FIX/reg/$1")
+		index_json "$1" "${kids[@]}" >"$FIX/reg/deploy"
+	}
+	healthz_revision() { cat "$FIX/health/$(key "$1")" 2>/dev/null || true; }
+	hk_doc_get() {
+		[[ -f "$FIX/hk_error" ]] && return 1
+		local f="$FIX/docs/$(key "$1")"
+		[[ -f "$f" ]] || return 3
+		cp "$f" "$2"
+	}
+	hk_doc_put() { cp "$2" "$FIX/records/$(key "$1")"; echo "record $1" >>"$FIX/calls"; }
+	sg_status() { cat "$FIX/sg_status" 2>/dev/null || echo '[]'; }
+	sg_deploy() {
+		echo "deploy $1 $2" >>"$FIX/calls"
+		local rc
+		rc=$(cat "$FIX/sg_rc_$1" 2>/dev/null || echo 0)
+		if [[ $rc -eq 0 && ! -f "$FIX/sg_nohealth_$1" ]]; then
+			local url
+			url=$(services | awk -v s="$1" '$1 == s {print $2}')
+			fx_health "$url" "$(jq -r '.annotations["org.opencontainers.image.revision"]' "$FIX/reg/deploy")"
+		fi
+		return "$rc"
+	}
+	notify() { echo "notify $1" >>"$FIX/calls"; }
+	sleep() { :; }
+	HK_FOLLOW_HEALTH_WAIT=4
+}
+
+# A deploy tag on SHA_NEW, its image, and both services on SHA_OLD.
+setup_tick() {
+	fx_manifest deploy "$(index_json "$SHA_NEW" "$D1" "$D2")"
+	fx_manifest "$SHA_NEW" "$(index_json "" "$D2" "$D1")"
+	fx_health http://127.0.0.1:8800 "$SHA_OLD"
+	fx_health http://127.0.0.1:8801 "$SHA_OLD"
+	green "$SHA_NEW"
+	compare "$SHA_OLD" "$SHA_NEW" ahead '[{"filename":"internal/api/api.go","status":"modified","patch":"+x"}]' \
+		'[{"commit":{"message":"api: a fix (hk 1) (#12)\n\nbody (#99)"}},{"commit":{"message":"ui: b (#13)"}}]'
+}
+
+calls() { cat "$FIX/calls"; }
+count() { grep -c -- "$1" "$FIX/calls" || true; }
+
+# check <name> <command...>: run one case in a subshell.
+check() {
+	local name=$1
+	shift
+	local rc
+	# Neither in an if nor before || or &&: set -e is ignored there, even
+	# inside the subshell, and a failed want would not stop the case.
+	(set -e; "$@") >"$ROOT/out" 2>&1
+	rc=$?
+	if [[ $rc -eq 0 ]]; then
+		PASSES=$((PASSES + 1))
+	else
+		FAILS=$((FAILS + 1))
+		echo "FAIL: $name" >&2
+		sed 's/^/    /' "$ROOT/out" >&2
+	fi
+}
+
+want() { # <expected> <actual>
+	if [[ "$1" != "$2" ]]; then
+		echo "want: $1" >&2
+		echo " got: $2" >&2
+		return 1
+	fi
+}
+
+# fails <command...>: the command must fail ("! cmd" never trips set -e).
+fails() {
+	if "$@"; then
+		echo "expected failure: $*" >&2
+		return 1
+	fi
+}
+
+run_gate() { gate "$1" "$2"; echo "$GATE_VERDICT $GATE_REASON${GATE_APPROVAL_REF:+ $GATE_APPROVAL_REF}"; }
+
+# --- gate ------------------------------------------------------------------
+
+t_gate_promote() {
+	setup; setup_tick
+	want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_identical() {
+	setup; setup_tick
+	want "noop identical" "$(run_gate "$SHA_NEW" "$SHA_NEW")"
+}
+t_gate_bad_sha() {
+	setup
+	want "refuse bad_sha" "$(run_gate "v0.0.1" "$SHA_OLD")"
+	want "wait baseline_unknown" "$(run_gate "$SHA_NEW" "")"
+}
+t_gate_deploy_ok_failure() {
+	setup; setup_tick
+	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/status?per_page=100" '{"statuses":[{"context":"deploy-ok","state":"failure"}]}'
+	want "refuse deploy-ok_failure" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_deploy_ok_missing() {
+	setup; setup_tick
+	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/status?per_page=100" '{"statuses":[]}'
+	want "wait deploy-ok_missing" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_ci_ok_failure() {
+	setup; setup_tick
+	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/check-runs?check_name=ci-ok&filter=all&per_page=100" \
+		'{"check_runs":[{"name":"ci-ok","conclusion":"failure","app":{"slug":"github-actions"}}]}'
+	want "refuse ci-ok_failure" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_ci_ok_other_app() {
+	# A check run named ci-ok from another app is not ci.yml's job.
+	setup; setup_tick
+	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/check-runs?check_name=ci-ok&filter=all&per_page=100" \
+		'{"check_runs":[{"name":"ci-ok","conclusion":"success","app":{"slug":"someone-else"}}]}'
+	want "wait ci-ok_missing" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_ci_ok_status() {
+	# A superseded main run: ci-any-ref's ci-ok status decides.
+	setup; setup_tick
+	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/check-runs?check_name=ci-ok&filter=all&per_page=100" \
+		'{"check_runs":[{"name":"ci-ok","conclusion":"cancelled","app":{"slug":"github-actions"}}]}'
+	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/status?per_page=100" \
+		'{"statuses":[{"context":"deploy-ok","state":"success"},{"context":"ci-ok","state":"success"}]}'
+	want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_github_down() {
+	setup; setup_tick
+	rm "$FIX/gh/$(key "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/status?per_page=100")"
+	want "wait github_status" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_not_on_main() {
+	setup; setup_tick
+	fx_gh "/repos/mgh3326/handoffkeep/compare/$SHA_NEW...main" '{"status":"diverged"}'
+	want "refuse not_on_main" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_not_newer() {
+	setup; setup_tick
+	compare "$SHA_OLD" "$SHA_NEW" behind
+	want "refuse not_newer" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	compare "$SHA_OLD" "$SHA_NEW" diverged
+	want "refuse not_newer" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+
+MIG_ADDED='[{"filename":"internal/store/migration_new_thing.go","status":"added","patch":"+package store"}]'
+t_gate_migration_hold() {
+	setup; setup_tick
+	compare "$SHA_OLD" "$SHA_NEW" ahead "$MIG_ADDED"
+	want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_migration_approved() {
+	setup; setup_tick
+	compare "$SHA_OLD" "$SHA_NEW" ahead "$MIG_ADDED"
+	fx_doc "deploy-approval/handoffkeep/$SHA_NEW" "{\"body\":\"# review\\napprove $SHA_NEW\\n\"}"
+	want "promote ok deploy-approval/handoffkeep/$SHA_NEW" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_migration_wrong_approval() {
+	# The approval names another sha, or says something else: still held.
+	setup; setup_tick
+	compare "$SHA_OLD" "$SHA_NEW" ahead "$MIG_ADDED"
+	fx_doc "deploy-approval/handoffkeep/$SHA_NEW" "{\"body\":\"approve $SHA_OTHER\\nnot approve $SHA_NEW\"}"
+	want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_migration_hk_down() {
+	setup; setup_tick
+	compare "$SHA_OLD" "$SHA_NEW" ahead "$MIG_ADDED"
+	touch "$FIX/hk_error"
+	want "wait approval_unreadable" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_migration_kinds() {
+	setup; setup_tick
+	local f
+	for f in \
+		'[{"filename":"internal/store/linear_board_migration.go","status":"added","patch":"+x"}]' \
+		'[{"filename":"internal/store/migration_a.go","status":"renamed","patch":"+x"}]' \
+		'[{"filename":"internal/store/tasks.go","status":"modified","patch":"@@ -1 +1 @@\n+func init() { registerMigration(migration{ID: \"x\"}) }"}]' \
+		'[{"filename":"internal/store/big.go","status":"modified"}]'; do
+		compare "$SHA_OLD" "$SHA_NEW" ahead "$f"
+		want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	done
+	# 300 files: GitHub's cap, the list may be partial.
+	compare "$SHA_OLD" "$SHA_NEW" ahead "$(jq -cn '[range(300) | {filename:"docs/\(.).md", status:"added", patch:"+x"}]')"
+	want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_not_migrations() {
+	setup; setup_tick
+	local f
+	for f in \
+		'[{"filename":"internal/store/migration_a_test.go","status":"added","patch":"+registerMigration("}]' \
+		'[{"filename":"internal/store/migration_a.go","status":"modified","patch":"+// comment"}]' \
+		'[{"filename":"internal/store/migration_a.go","status":"removed"}]' \
+		'[{"filename":"internal/store/sub/migration_a.go","status":"added","patch":"+x"}]' \
+		'[{"filename":"internal/store/tasks.go","status":"modified","patch":"-registerMigration(old)\n+x"}]' \
+		'[{"filename":"docs/migration_notes.go","status":"added","patch":"+x"}]'; do
+		compare "$SHA_OLD" "$SHA_NEW" ahead "$f"
+		want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	done
+}
+
+# --- tick ------------------------------------------------------------------
+
+t_tick_deploys() {
+	setup; setup_tick
+	tick
+	want "deployed" "$(state_field verdict)"
+	local dig
+	dig=$(state_field digest)
+	want "deploy handoffkeep $dig" "$(grep '^deploy handoffkeep ' "$FIX/calls")"
+	want "deploy handoffkeep-work $dig" "$(grep '^deploy handoffkeep-work ' "$FIX/calls")"
+	want 1 "$(count "status $SHA_NEW deployed success")"
+	want 2 "$(count '^record deploy/handoffkeep')"
+	want 1 "$(count 'notify .* deployed on ncp')"
+	local rec
+	rec=$(cat "$FIX"/records/deploy_handoffkeep_2*)
+	want "deploy-record/v0 handoffkeep $SHA_NEW success hk-follow $SHA_OLD" \
+		"$(jq -r '[.schema, .service, .head_sha, .result, .source, .previous_ref] | join(" ")' <<<"$rec")"
+	want '["https://github.com/mgh3326/handoffkeep/pull/12","https://github.com/mgh3326/handoffkeep/pull/13"]' \
+		"$(jq -c .included_prs <<<"$rec")"
+	want "ghcr.io/mgh3326/handoffkeep@$dig" "$(jq -r .deployed_ref <<<"$rec")"
+	# I4 and idempotence: the same digest again does nothing at all.
+	: >"$FIX/calls"
+	tick
+	want "" "$(calls)"
+}
+t_tick_failed_not_retried() {
+	setup; setup_tick
+	echo 1 >"$FIX/sg_rc_handoffkeep"
+	tick
+	want "failed shiftgate_handoffkeep_exit_1" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count 'deploy handoffkeep-work')"
+	want 1 "$(count "status $SHA_NEW deployed failure")"
+	want "failed" "$(jq -r .result "$FIX"/records/deploy_handoffkeep_2*)"
+	want 1 "$(count '^record ')"
+	# I4: never again for this digest, even after shiftgate recovers.
+	rm "$FIX/sg_rc_handoffkeep"
+	: >"$FIX/calls"
+	tick
+	want "" "$(calls)"
+	# A new promote (new digest) runs.
+	fx_manifest deploy "$(index_json "$SHA_NEW" "$D1" "$D2" | jq -c '.annotations.x="y"')"
+	tick
+	want 1 "$(count 'deploy handoffkeep ')"
+}
+t_tick_second_service_fails() {
+	setup; setup_tick
+	echo 1 >"$FIX/sg_rc_handoffkeep-work"
+	tick
+	want "failed" "$(state_field verdict)"
+	want "success" "$(jq -r .result "$FIX"/records/deploy_handoffkeep_2*)"
+	want "failed shiftgate_handoffkeep-work_exit_1" \
+		"$(jq -r '.result + " " + .failed_step' "$FIX"/records/deploy_handoffkeep-work_*)"
+}
+t_tick_healthz_mismatch() {
+	setup; setup_tick
+	touch "$FIX/sg_nohealth_handoffkeep"
+	tick
+	want "failed healthz_handoffkeep" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count 'deploy handoffkeep-work')"
+}
+t_tick_shiftgate_busy() {
+	setup; setup_tick
+	echo 75 >"$FIX/sg_rc_handoffkeep"
+	tick
+	want "" "$(state_field verdict)"
+	want 0 "$(count '^record ')"
+	rm "$FIX/sg_rc_handoffkeep"
+	tick
+	want "deployed" "$(state_field verdict)"
+}
+t_tick_shiftgate_hold() {
+	setup; setup_tick
+	local dig
+	dig="sha256:$(sha256sum <"$FIX/reg/deploy" | cut -d' ' -f1)"
+	jq -n --arg d "$dig" '[{name:"handoffkeep", state:{hold:{digest:$d, reason:"rolled_back"}}}]' >"$FIX/sg_status"
+	tick
+	want "failed held_handoffkeep" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count '^deploy ')"
+}
+t_tick_interrupted() {
+	setup; setup_tick
+	local dig
+	dig="sha256:$(sha256sum <"$FIX/reg/deploy" | cut -d' ' -f1)"
+	save_state "$dig" "$SHA_NEW" started ""
+	tick
+	want "failed interrupted" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count '^deploy ')"
+	want 1 "$(count "status $SHA_NEW deployed failure")"
+}
+t_tick_crash_not_retried() {
+	# A tick killed inside shiftgate (host reboot, OOM) never re-runs that
+	# rollout: the attempt is on disk before the first shiftgate call (I4).
+	setup; setup_tick
+	(sg_deploy() { echo "deploy $1 $2" >>"$FIX/calls"; exit 137; }; tick) || true
+	want 1 "$(count '^deploy ')"
+	want "started" "$(state_field verdict)"
+	tick
+	want "failed interrupted" "$(state_field verdict) $(state_field reason)"
+	want 1 "$(count '^deploy ')"
+}
+t_tick_tag_not_bound() {
+	# The tag says SHA_NEW but carries other images.
+	setup; setup_tick
+	fx_manifest deploy "$(index_json "$SHA_NEW" "$D3")"
+	tick
+	want "refuse tag_not_bound" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count '^deploy ')"
+	want 1 "$(count "status $SHA_NEW deployed failure")"
+	: >"$FIX/calls"
+	tick
+	want "" "$(calls)"
+}
+t_tick_no_revision() {
+	setup; setup_tick
+	fx_manifest deploy "$(index_json "" "$D1" "$D2")"
+	tick
+	want "refuse no_revision" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count '^deploy ')"
+}
+t_tick_rechecks_github() {
+	# The tag mover is not trusted: deploy-ok failure on GitHub stops it.
+	setup; setup_tick
+	fx_gh "/repos/mgh3326/handoffkeep/commits/$SHA_NEW/status?per_page=100" '{"statuses":[{"context":"deploy-ok","state":"failure"}]}'
+	tick
+	want "refuse deploy-ok_failure" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count '^deploy ')"
+}
+t_tick_hold_then_approval() {
+	setup; setup_tick
+	compare "$SHA_OLD" "$SHA_NEW" ahead "$MIG_ADDED"
+	tick
+	want "hold migration" "$(state_field verdict) $(state_field reason)"
+	want 1 "$(count "status $SHA_NEW deployed pending deploy-held:migration")"
+	want 0 "$(count '^deploy ')"
+	# Re-evaluated every tick, reported once.
+	tick
+	want 1 "$(count 'deploy-held:migration')"
+	fx_doc "deploy-approval/handoffkeep/$SHA_NEW" "{\"body\":\"approve $SHA_NEW\"}"
+	tick
+	want "deployed" "$(state_field verdict)"
+	want "deploy-approval/handoffkeep/$SHA_NEW" "$(jq -r .approval_ref "$FIX"/records/deploy_handoffkeep_2*)"
+}
+t_tick_already_serving() {
+	setup; setup_tick
+	fx_health http://127.0.0.1:8800 "$SHA_NEW"
+	fx_health http://127.0.0.1:8801 "$SHA_NEW"
+	tick
+	want "noop serving" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count '^deploy ')"
+	want 0 "$(count '^status ')"
+}
+t_tick_one_service_current() {
+	setup; setup_tick
+	fx_health http://127.0.0.1:8800 "$SHA_NEW"
+	tick
+	want "deployed" "$(state_field verdict)"
+	want 0 "$(count 'deploy handoffkeep ')"
+	want 1 "$(count 'deploy handoffkeep-work ')"
+}
+t_tick_baseline_unknown() {
+	setup; setup_tick
+	rm "$FIX/health/$(key http://127.0.0.1:8800)"
+	tick
+	want "wait baseline_unknown" "$(state_field verdict) $(state_field reason)"
+	want 0 "$(count '^deploy ')"
+}
+t_tick_dry_run() {
+	setup; setup_tick
+	DRY_RUN=1
+	tick 2>"$FIX/log"
+	want "" "$(calls)"
+	[[ ! -f "$FIX/state/state.json" ]]
+	grep -q 'would_run=' "$FIX/log"
+}
+t_tick_registry_down() {
+	setup; setup_tick
+	touch "$FIX/reg_error"
+	tick
+	want "" "$(calls)"
+	[[ ! -f "$FIX/state/state.json" ]]
+}
+t_tick_lock() {
+	# I5: a second tick while one holds the lock exits without work.
+	setup; setup_tick
+	exec 8>"$HK_FOLLOW_LOCK"
+	flock -n 8
+	(tick) 2>"$FIX/log"
+	want "" "$(calls)"
+	grep -q 'hk_follow.busy reason=lock' "$FIX/log"
+}
+
+# --- promote ---------------------------------------------------------------
+
+setup_promote() {
+	fx_manifest deploy "$(index_json "$SHA_OLD" "$D3")"
+	fx_manifest "$SHA_NEW" "$(index_json "" "$D1" "$D2")"
+	green "$SHA_NEW"
+	compare "$SHA_OLD" "$SHA_NEW" ahead '[]'
+}
+t_promote_ok() {
+	setup; setup_promote
+	promote "$SHA_NEW"
+	want "tag $SHA_NEW" "$(grep '^tag ' "$FIX/calls")"
+	want 1 "$(count "status $SHA_NEW deploy-promote success")"
+	want "$SHA_NEW" "$(jq -r '.annotations["org.opencontainers.image.revision"]' "$FIX/reg/deploy")"
+}
+t_promote_hold() {
+	setup; setup_promote
+	compare "$SHA_OLD" "$SHA_NEW" ahead "$MIG_ADDED"
+	promote "$SHA_NEW"
+	want 0 "$(count '^tag ')"
+	want 1 "$(count "status $SHA_NEW deploy-promote pending deploy-held:migration")"
+}
+t_promote_refuse() {
+	setup; setup_promote
+	fx_gh "/repos/mgh3326/handoffkeep/compare/$SHA_NEW...main" '{"status":"behind"}'
+	fails promote "$SHA_NEW"
+	want 0 "$(count '^tag ')"
+	want 1 "$(count "status $SHA_NEW deploy-promote failure deploy-refused:not_on_main")"
+}
+t_promote_old_sha() {
+	# A dispatch of an older head never moves the tag back.
+	setup; setup_promote
+	compare "$SHA_OLD" "$SHA_NEW" behind
+	fails promote "$SHA_NEW"
+	want 0 "$(count '^tag ')"
+}
+t_promote_no_baseline() {
+	setup; setup_promote
+	rm "$FIX/reg/deploy"
+	fails promote "$SHA_NEW"
+	want 0 "$(count '^tag ')"
+	want 1 "$(count 'deploy-refused:no_baseline')"
+}
+t_promote_image_missing() {
+	setup; setup_promote
+	rm "$FIX/reg/$SHA_NEW"
+	HK_FOLLOW_IMAGE_WAIT=60
+	fails promote "$SHA_NEW"
+	want 1 "$(count 'deploy-refused:image_missing')"
+}
+t_promote_same() {
+	setup; setup_promote
+	fx_manifest deploy "$(index_json "$SHA_NEW" "$D1" "$D2")"
+	promote "$SHA_NEW"
+	want "" "$(calls)"
+}
+t_promote_dry_run() {
+	setup; setup_promote
+	DRY_RUN=1
+	promote "$SHA_NEW"
+	want "" "$(calls)"
+}
+t_promote_readback() {
+	setup; setup_promote
+	registry_tag() { echo "tag $1" >>"$FIX/calls"; }
+	fails promote "$SHA_NEW"
+	want 1 "$(count 'deploy-refused:tag_readback')"
+}
+
+for t in $(declare -F | awk '{print $3}' | grep '^t_'); do
+	check "$t" "$t"
+done
+echo "hk-follow: $PASSES passed, $FAILS failed"
+[[ $FAILS -eq 0 ]]

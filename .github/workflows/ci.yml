@@ -165,6 +165,8 @@ jobs:
           ref: ${{ inputs.ref }}
       - run: python3 scripts/test-auto-tag.py
       - run: python3 scripts/test-repair-release.py
+      # hk-follow's gate and rollout decisions against fake APIs (hk 3509).
+      - run: bash deploy/hk-follow/test-hk-follow.sh
 
   pr-store-db:
     # Runs on every event, so it always reports a conclusion and can be a

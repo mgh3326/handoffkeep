@@ -1,0 +1,675 @@
+#!/usr/bin/env bash
+# hk-follow — push deploy for handoffkeep (hk 3509, hk:doc
+# decision/2026-11-08/hk-push-rollout-shiftgate r3). One file, two callers:
+#
+#   hk-follow promote <sha> [--dry-run]   deploy.yml's promote job. Checks the
+#                                         gate (I1, I2) and moves the image tag
+#                                         `deploy` to <sha>'s image. It never
+#                                         reaches a server.
+#   hk-follow tick [--dry-run]            the ncp systemd timer (every 30 s).
+#                                         Reads the `deploy` tag, re-checks the
+#                                         gate against GitHub (I1, I2: it does
+#                                         not trust whoever moved the tag),
+#                                         rolls both services out through
+#                                         shiftgate (I3), never retries a
+#                                         digest it attempted (I4), one run at
+#                                         a time (I5).
+#   hk-follow gate <sha> <deployed-sha>   print the gate verdict and exit.
+#   hk-follow state                       print the tick state file.
+#   hk-follow reset                       forget the last handled digest, so
+#                                         the next tick evaluates it again.
+#
+# The gate is one function used by both callers, so CI and the host cannot
+# disagree about what may ship. A verdict is one line "<verdict> <reason>":
+#   promote ok             every check passed
+#   noop    identical      the candidate is the deployed sha
+#   hold    migration      a migration since the deployed sha, no approval
+#   wait    <reason>       a check could not be answered yet (transient)
+#   refuse  <reason>       the candidate must not ship (terminal)
+#
+# Dependencies: bash, curl, jq, sha256sum, flock (tick), shiftgate (tick),
+# handoffkeep CLI (approval read, deploy record), docker buildx (promote),
+# panewire (optional lane event). Configuration is environment only; see
+# README.md. Credentials come from the environment the caller set (GitHub
+# Actions secrets, or the systemd EnvironmentFile); this script never prints
+# them.
+set -euo pipefail
+
+: "${HK_FOLLOW_REPO:=mgh3326/handoffkeep}"
+: "${HK_FOLLOW_IMAGE:=ghcr.io/mgh3326/handoffkeep}"
+: "${HK_FOLLOW_TAG:=deploy}"
+: "${HK_FOLLOW_SERVICES:=handoffkeep=http://127.0.0.1:8800 handoffkeep-work=http://127.0.0.1:8801}"
+: "${HK_FOLLOW_STATE_DIR:=/var/lib/hk-follow}"
+: "${HK_FOLLOW_LOCK:=${HK_FOLLOW_STATE_DIR}/lock}"
+: "${HK_FOLLOW_NOTIFY_LANE:=handoffkeep-design}"
+: "${HK_FOLLOW_TARGET:=ncp}"
+: "${HK_FOLLOW_HEALTH_WAIT:=60}"
+: "${HK_FOLLOW_IMAGE_WAIT:=1200}"
+: "${HK_FOLLOW_GITHUB_API:=https://api.github.com}"
+: "${HK_FOLLOW_APPROVAL_PREFIX:=deploy-approval/handoffkeep}"
+: "${SHIFTGATE:=shiftgate}"
+: "${HANDOFFKEEP_CLI:=handoffkeep}"
+: "${PANEWIRE:=panewire}"
+
+REVISION_ANNOTATION=org.opencontainers.image.revision
+DRY_RUN=0
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+# log prints one "event key=value ..." line on stderr (the journal).
+log() { echo "$*" >&2; }
+
+valid_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
+valid_digest() { [[ "$1" =~ ^sha256:[0-9a-f]{64}$ ]]; }
+
+# ---------------------------------------------------------------------------
+# External calls. Each is one function so the tests replace it with a fake.
+# ---------------------------------------------------------------------------
+
+# gh_get <path> <out>: GET the GitHub REST path into <out>. rc 0 on 2xx.
+gh_get() {
+	local code auth=()
+	# Reads work without a token on this public repository (at a low rate
+	# limit), which is what a local `hk-follow gate` uses.
+	[[ -n "${GH_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer ${GH_TOKEN}")
+	code=$(curl -sS -o "$2" -w '%{http_code}' --max-time 20 \
+		"${auth[@]}" \
+		-H 'Accept: application/vnd.github+json' \
+		-H 'X-GitHub-Api-Version: 2022-11-28' \
+		"${HK_FOLLOW_GITHUB_API}$1") || return 1
+	[[ "$code" == 2?? ]]
+}
+
+# gh_status <sha> <context> <state> <description>: post a commit status. A
+# refused status is logged, never fatal: the status is the report, not the
+# gate.
+gh_status() {
+	local desc=${4:0:140} body code
+	body=$(jq -n --arg s "$3" --arg c "$2" --arg d "$desc" '{state:$s, context:$c, description:$d}')
+	code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X POST \
+		-H "Authorization: Bearer ${GH_TOKEN:-}" \
+		-H 'Accept: application/vnd.github+json' \
+		-H 'X-GitHub-Api-Version: 2022-11-28' \
+		--data "$body" \
+		"${HK_FOLLOW_GITHUB_API}/repos/${HK_FOLLOW_REPO}/statuses/$1") || code=000
+	if [[ "$code" != 2?? ]]; then
+		log "hk_follow.status_failed sha=$1 context=$2 http=$code"
+	fi
+}
+
+# registry_manifest <ref> <out>: fetch the manifest of image:<ref> (a tag or a
+# digest) anonymously. rc 0 found, 3 not found, 1 any other failure.
+registry_manifest() {
+	local host=${HK_FOLLOW_IMAGE%%/*} repo=${HK_FOLLOW_IMAGE#*/} token code
+	token=$(curl -fsS --max-time 20 "https://${host}/token?scope=repository:${repo}:pull" | jq -r '.token // empty') || return 1
+	[[ -n "$token" ]] || return 1
+	code=$(curl -sS -o "$2" -w '%{http_code}' --max-time 20 \
+		-H "Authorization: Bearer $token" \
+		-H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+		"https://${host}/v2/${repo}/manifests/$1") || return 1
+	case "$code" in
+	200) return 0 ;;
+	404) return 3 ;;
+	*) return 1 ;;
+	esac
+}
+
+# registry_tag <sha>: point the deploy tag at image:<sha>'s index, annotated
+# with the sha. The child manifests are copied unchanged, so every platform
+# image is byte-for-byte the one image.yml pushed; only the index is new.
+registry_tag() {
+	docker buildx imagetools create \
+		--annotation "index:${REVISION_ANNOTATION}=$1" \
+		--tag "${HK_FOLLOW_IMAGE}:${HK_FOLLOW_TAG}" \
+		"${HK_FOLLOW_IMAGE}:$1"
+}
+
+# healthz_revision <base-url>: the serving binary's vcs_revision, or empty.
+healthz_revision() {
+	curl -fsS --max-time 5 "$1/healthz" 2>/dev/null | jq -r '.vcs_revision // empty' 2>/dev/null || true
+}
+
+# hk_doc_get <key> <out>: rc 0 found, 3 not found, 1 error.
+hk_doc_get() {
+	local err
+	if "$HANDOFFKEEP_CLI" doc get "$1" >"$2" 2>"$WORK/hk.err"; then
+		return 0
+	fi
+	err=$(cat "$WORK/hk.err")
+	[[ "$err" == *not_found* ]] && return 3
+	return 1
+}
+
+# hk_doc_put <key> <file>: store a deploy record.
+hk_doc_put() {
+	"$HANDOFFKEEP_CLI" doc put --key "$1" --kind report --file "$2" >/dev/null
+}
+
+sg_status() { "$SHIFTGATE" status --json; }
+sg_deploy() { "$SHIFTGATE" deploy "$1" --digest "$2"; }
+
+# notify <text>: one lane event to the design session. Optional: a host
+# without panewire logs the text instead.
+notify() {
+	if command -v "$PANEWIRE" >/dev/null 2>&1; then
+		"$PANEWIRE" emit --kind lane.event --lane "$HK_FOLLOW_NOTIFY_LANE" --type info --text "$1" >/dev/null 2>&1 ||
+			log "hk_follow.notify_failed lane=$HK_FOLLOW_NOTIFY_LANE"
+	else
+		log "hk_follow.notify_skipped lane=$HK_FOLLOW_NOTIFY_LANE text=$(printf '%q' "$1")"
+	fi
+}
+
+# post_status: gh_status unless this is a dry run.
+post_status() {
+	if [[ $DRY_RUN -eq 1 ]]; then
+		log "hk_follow.dry_run would_post_status sha=$1 context=$2 state=$3 description=$(printf '%q' "$4")"
+		return 0
+	fi
+	gh_status "$@"
+}
+
+now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# ---------------------------------------------------------------------------
+# The gate (I1, I2).
+# ---------------------------------------------------------------------------
+
+# context_state <status.json> <context>: the latest state of one commit
+# status context, or "missing". The combined status endpoint already keeps
+# only the newest status per context.
+context_state() {
+	jq -r --arg c "$2" '[.statuses[]? | select(.context == $c) | .state] | first // "missing"' "$1"
+}
+
+# ci_ok_state <checks.json> <status.json>: ci-ok as release.yml reads it. It
+# is the ci-ok job (a check run of the github-actions app) of a ci.yml run on
+# the sha, or a ci-ok commit status that ci-any-ref posts. Any success is
+# success; otherwise a failed run is a failure and anything else (cancelled,
+# still running, absent) has no verdict yet.
+ci_ok_state() {
+	local st
+	st=$(context_state "$2" ci-ok)
+	jq -r --arg st "$st" '
+		[.check_runs[]? | select(.name == "ci-ok" and .app.slug == "github-actions") | (.conclusion // "pending")] as $c
+		| if ($c | index("success")) or $st == "success" then "success"
+		  elif ($c | map(select(. == "failure" or . == "timed_out")) | length > 0) or $st == "failure" or $st == "error" then "failure"
+		  elif ($c | length > 0) or $st == "pending" then "pending"
+		  else "missing" end' "$1"
+}
+
+# migrations <compare.json>: print each file in the comparison that adds a
+# migration. A file counts when it is an added, renamed or copied non-test Go
+# file under internal/store/ whose name says migration, or when any changed
+# store file's patch adds a registerMigration( call. A store Go file whose
+# patch GitHub left out (too large) counts too: the gate cannot read it, so it
+# must not pass it.
+migrations() {
+	jq -r '
+		.files[]?
+		| select(.filename | test("^internal/store/[^/]+\\.go$"))
+		| select(.filename | endswith("_test.go") | not)
+		| select(
+			((.status == "added" or .status == "renamed" or .status == "copied")
+				and (.filename | test("migration[^/]*\\.go$")))
+			or ((.patch // null) == null and .status != "removed")
+			or ((.patch // "") | test("(^|\\n)\\+[^\\n]*registerMigration\\("))
+		)
+		| .filename' "$1"
+}
+
+# gate <sha> <deployed-sha>: set GATE_VERDICT and GATE_REASON and, for an
+# approved migration, GATE_APPROVAL_REF. It runs in the caller's shell (no
+# command substitution) so those survive. Leaves $WORK/compare.json for the
+# deploy record.
+GATE_VERDICT= GATE_REASON= GATE_APPROVAL_REF=
+verdict() { GATE_VERDICT=$1 GATE_REASON=$2; }
+gate() {
+	local sha=$1 base=$2 st cmp n doc c rc
+	GATE_APPROVAL_REF=
+	rm -f "$WORK/compare.json"
+	valid_sha "$sha" || { verdict refuse bad_sha; return; }
+	valid_sha "$base" || { verdict wait baseline_unknown; return; }
+
+	# I1: ci-ok and deploy-ok are both success on this exact sha.
+	gh_get "/repos/${HK_FOLLOW_REPO}/commits/${sha}/status?per_page=100" "$WORK/status.json" ||
+		{ verdict wait github_status; return; }
+	gh_get "/repos/${HK_FOLLOW_REPO}/commits/${sha}/check-runs?check_name=ci-ok&filter=all&per_page=100" "$WORK/checks.json" ||
+		{ verdict wait github_checks; return; }
+	for c in ci-ok deploy-ok; do
+		if [[ $c == ci-ok ]]; then
+			st=$(ci_ok_state "$WORK/checks.json" "$WORK/status.json")
+		else
+			st=$(context_state "$WORK/status.json" "$c")
+		fi
+		case "$st" in
+		success) ;;
+		pending | missing) verdict wait "${c}_${st}"; return ;;
+		*) verdict refuse "${c}_${st}"; return ;;
+		esac
+	done
+
+	# I1: the sha is on main (main contains it).
+	gh_get "/repos/${HK_FOLLOW_REPO}/compare/${sha}...main" "$WORK/main.json" ||
+		{ verdict wait github_compare; return; }
+	cmp=$(jq -r '.status // empty' "$WORK/main.json")
+	case "$cmp" in
+	ahead | identical) ;;
+	*) verdict refuse not_on_main; return ;;
+	esac
+
+	# Only forward: the candidate descends from the deployed sha. An old
+	# dispatch never rolls the server back.
+	[[ "$sha" == "$base" ]] && { verdict noop identical; return; }
+	gh_get "/repos/${HK_FOLLOW_REPO}/compare/${base}...${sha}" "$WORK/compare.json" ||
+		{ verdict wait github_compare; return; }
+	cmp=$(jq -r '.status // empty' "$WORK/compare.json")
+	case "$cmp" in
+	ahead) ;;
+	identical) verdict noop identical; return ;;
+	*) verdict refuse not_newer; return ;;
+	esac
+
+	# I2: a migration since the deployed sha needs an approval record for
+	# this sha. GitHub lists at most 300 files; a longer list cannot be
+	# checked, so it is treated as carrying a migration.
+	n=$(jq '.files | length' "$WORK/compare.json")
+	if [[ "$n" -lt 300 ]] && [[ -z "$(migrations "$WORK/compare.json")" ]]; then
+		verdict promote ok
+		return
+	fi
+	doc="${HK_FOLLOW_APPROVAL_PREFIX}/${sha}"
+	rc=0
+	hk_doc_get "$doc" "$WORK/approval.json" || rc=$?
+	case "$rc" in
+	0) ;;
+	3) verdict hold migration; return ;;
+	*) verdict wait approval_unreadable; return ;;
+	esac
+	if jq -r '.body // ""' "$WORK/approval.json" | grep -qxF "approve ${sha}"; then
+		GATE_APPROVAL_REF=$doc
+		verdict promote ok
+		return
+	fi
+	verdict hold migration
+}
+
+# ---------------------------------------------------------------------------
+# Registry reads.
+# ---------------------------------------------------------------------------
+
+# resolve <ref> <prefix>: fetch a manifest and set <prefix>_DIGEST,
+# <prefix>_REV (the revision annotation) and <prefix>_CHILDREN (the sorted
+# child digests). rc as registry_manifest.
+resolve() {
+	local out="$WORK/manifest-$2.json" rc=0
+	registry_manifest "$1" "$out" || rc=$?
+	[[ $rc -eq 0 ]] || return $rc
+	printf -v "$2_DIGEST" 'sha256:%s' "$(sha256sum <"$out" | cut -d' ' -f1)"
+	printf -v "$2_REV" '%s' "$(jq -r --arg a "$REVISION_ANNOTATION" '.annotations[$a] // empty' "$out")"
+	printf -v "$2_CHILDREN" '%s' "$(jq -r '[.manifests[]?.digest] | sort | join(",")' "$out")"
+}
+
+# ---------------------------------------------------------------------------
+# promote (deploy.yml).
+# ---------------------------------------------------------------------------
+
+promote() {
+	local sha=$1 verdict reason waited=0 rc
+	# shellcheck disable=SC2034 # set by resolve
+	local CAND_DIGEST CAND_REV CAND_CHILDREN CUR_DIGEST CUR_REV CUR_CHILDREN NEW_DIGEST NEW_REV NEW_CHILDREN
+	valid_sha "$sha" || { log "hk_follow.promote_refused sha=$(printf '%q' "$sha") reason=bad_sha"; return 1; }
+
+	# image.yml builds in parallel with ci.yml; give it a bounded time.
+	while :; do
+		rc=0
+		resolve "$sha" CAND || rc=$?
+		[[ $rc -eq 0 ]] && break
+		if [[ $waited -ge $HK_FOLLOW_IMAGE_WAIT ]]; then
+			log "hk_follow.promote_refused sha=$sha reason=image_missing"
+			post_status "$sha" deploy-promote failure "deploy-refused:image_missing ${HK_FOLLOW_IMAGE}:${sha}"
+			return 1
+		fi
+		sleep 30
+		waited=$((waited + 30))
+	done
+	if [[ -z "$CAND_CHILDREN" ]]; then
+		log "hk_follow.promote_refused sha=$sha reason=not_an_index"
+		post_status "$sha" deploy-promote failure "deploy-refused:not_an_index"
+		return 1
+	fi
+
+	rc=0
+	resolve "$HK_FOLLOW_TAG" CUR || rc=$?
+	if [[ $rc -ne 0 ]] || ! valid_sha "${CUR_REV:-}"; then
+		# No deploy tag yet, or one without a revision: the baseline is
+		# unknown, so the migration check cannot run. README §Bootstrap.
+		log "hk_follow.promote_refused sha=$sha reason=no_baseline"
+		post_status "$sha" deploy-promote failure "deploy-refused:no_baseline (create the ${HK_FOLLOW_TAG} tag, README Bootstrap)"
+		return 1
+	fi
+
+	gate "$sha" "$CUR_REV"
+	verdict=$GATE_VERDICT reason=$GATE_REASON
+	log "hk_follow.promote_gate sha=$sha deployed_sha=$CUR_REV verdict=$verdict reason=$reason approval_ref=${GATE_APPROVAL_REF:-none}"
+	case "$verdict" in
+	noop)
+		return 0
+		;;
+	hold)
+		[[ $DRY_RUN -eq 1 ]] && return 0
+		post_status "$sha" deploy-promote pending "deploy-held:${reason} write ${HK_FOLLOW_APPROVAL_PREFIX}/${sha} then re-run deploy.yml"
+		return 0
+		;;
+	wait | refuse)
+		[[ $DRY_RUN -eq 1 ]] && return 1
+		post_status "$sha" deploy-promote failure "deploy-refused:${reason}"
+		return 1
+		;;
+	esac
+
+	if [[ $DRY_RUN -eq 1 ]]; then
+		log "hk_follow.promote_dry_run sha=$sha digest=$CAND_DIGEST"
+		return 0
+	fi
+	registry_tag "$sha"
+	# Read the tag back: it must carry this sha and this sha's images.
+	rc=0
+	resolve "$HK_FOLLOW_TAG" NEW || rc=$?
+	if [[ $rc -ne 0 || "${NEW_REV:-}" != "$sha" || "${NEW_CHILDREN:-}" != "$CAND_CHILDREN" ]]; then
+		log "hk_follow.promote_failed sha=$sha reason=readback"
+		post_status "$sha" deploy-promote failure "deploy-refused:tag_readback"
+		return 1
+	fi
+	log "hk_follow.promoted sha=$sha digest=$NEW_DIGEST from_sha=$CUR_REV"
+	post_status "$sha" deploy-promote success "promoted ${HK_FOLLOW_TAG}=${NEW_DIGEST:7:12} from ${CUR_REV:0:12}${GATE_APPROVAL_REF:+ approval}"
+}
+
+# ---------------------------------------------------------------------------
+# tick (ncp).
+# ---------------------------------------------------------------------------
+
+STATE_FILE() { echo "${HK_FOLLOW_STATE_DIR}/state.json"; }
+
+# save_state <digest> <sha> <verdict> <reason>
+save_state() {
+	[[ $DRY_RUN -eq 1 ]] && return 0
+	local f tmp
+	f=$(STATE_FILE)
+	tmp="$f.tmp"
+	jq -n --arg d "$1" --arg s "$2" --arg v "$3" --arg r "$4" --arg t "$(now_utc)" \
+		'{digest:$d, sha:$s, verdict:$v, reason:$r, at:$t}' >"$tmp"
+	mv "$tmp" "$f"
+}
+
+state_field() {
+	local f
+	f=$(STATE_FILE)
+	[[ -f "$f" ]] || return 0
+	jq -r --arg k "$1" '.[$k] // empty' "$f"
+}
+
+# included_prs: PR urls named "(#N)" in the comparison's commit subjects.
+included_prs() {
+	[[ -f "$WORK/compare.json" ]] || { echo '[]'; return; }
+	jq -c --arg r "$HK_FOLLOW_REPO" '
+		[.commits[]?.commit.message | split("\n")[0] | scan("\\(#([0-9]+)\\)") | .[0]]
+		| unique_by(tonumber) | map("https://github.com/\($r)/pull/\(.)")' "$WORK/compare.json"
+}
+
+# record <service> <sha> <digest> <previous> <result> <failed-step> <stamp>:
+# one deploy-record/v0 document, the shape hk-ship writes (README §Report).
+record() {
+	local f="$WORK/record-$1.json"
+	jq -n --arg svc "$1" --arg target "$HK_FOLLOW_TARGET" --arg sha "$2" \
+		--arg ref "${HK_FOLLOW_IMAGE}@$3" --arg prev "$4" --arg at "$(now_utc)" \
+		--arg result "$5" --arg step "$6" --arg appr "${GATE_APPROVAL_REF:-}" \
+		--argjson prs "$(included_prs)" '{
+			schema: "deploy-record/v0", service: $svc, target: $target,
+			head_sha: $sha, deployed_ref: $ref,
+			previous_ref: (if $prev == "" then null else $prev end),
+			deployed_at: $at, result: $result,
+			failed_step: (if $step == "" then null else $step end),
+			job_id: null,
+			approval_ref: (if $appr == "" then null else $appr end),
+			included_prs: $prs, source: "hk-follow", release: null
+		}' >"$f"
+	hk_doc_put "deploy/$1/$7" "$f" || log "hk_follow.record_failed service=$1 sha=$2"
+}
+
+# report_gate <sha> <digest> <verdict> <reason>: a tick that will not roll
+# out says why, once per digest and verdict.
+report_gate() {
+	[[ $DRY_RUN -eq 1 ]] && return 0
+	case "$3" in
+	hold)
+		post_status "$1" deployed pending "deploy-held:$4 (hk-follow, ${HK_FOLLOW_TARGET})"
+		notify "[hk-follow] handoffkeep ${1:0:12} held: $4; approval doc ${HK_FOLLOW_APPROVAL_PREFIX}/$1"
+		;;
+	refuse)
+		post_status "$1" deployed failure "deploy-refused:$4 (hk-follow, ${HK_FOLLOW_TARGET})"
+		notify "[hk-follow] handoffkeep ${1:0:12} refused: $4 (digest $2)"
+		;;
+	esac
+}
+
+# services: print "name url" lines.
+services() {
+	local s
+	for s in $HK_FOLLOW_SERVICES; do
+		echo "${s%%=*} ${s#*=}"
+	done
+}
+
+tick_locked() {
+	local verdict="" reason="" prev_digest prev_verdict prev_sha prev_reason base="" svc url line rc held
+	local result=success failed_step="" failed_svc="" stamp waited all_serving
+	local attempted=() svcs=()
+	# shellcheck disable=SC2034 # set by resolve
+	local TAG_DIGEST TAG_REV TAG_CHILDREN CAND_DIGEST CAND_REV CAND_CHILDREN
+	mapfile -t svcs < <(services)
+
+	rc=0
+	resolve "$HK_FOLLOW_TAG" TAG || rc=$?
+	if [[ $rc -ne 0 ]]; then
+		log "hk_follow.wait reason=registry_${rc}"
+		return 0
+	fi
+	prev_digest=$(state_field digest)
+	prev_verdict=$(state_field verdict)
+	prev_sha=$(state_field sha)
+	prev_reason=$(state_field reason)
+
+	if [[ "$prev_digest" == "$TAG_DIGEST" ]]; then
+		case "$prev_verdict" in
+		deployed | failed | refuse | noop)
+			# I4: an attempted or refused digest is done; only a new
+			# digest (the next promote) runs again.
+			[[ $DRY_RUN -eq 1 ]] && log "hk_follow.dry_run digest=$TAG_DIGEST verdict=$prev_verdict handled=yes"
+			return 0
+			;;
+		started)
+			# The previous tick died mid-rollout. Never retry it (I4).
+			log "hk_follow.failed sha=$prev_sha digest=$TAG_DIGEST step=interrupted"
+			[[ $DRY_RUN -eq 1 ]] && return 0
+			save_state "$TAG_DIGEST" "$prev_sha" failed interrupted
+			post_status "$prev_sha" deployed failure "rollout interrupted on ${HK_FOLLOW_TARGET}; not retried; check shiftgate status"
+			notify "[hk-follow] handoffkeep ${prev_sha:0:12} rollout interrupted on ${HK_FOLLOW_TARGET}; not retried; check shiftgate status"
+			return 0
+			;;
+		esac
+	fi
+
+	local sha=${TAG_REV:-}
+	if ! valid_sha "$sha"; then
+		verdict=refuse reason=no_revision
+	elif [[ -z "$TAG_CHILDREN" ]]; then
+		verdict=refuse reason=not_an_index
+	else
+		# The tag must carry the images image.yml pushed for that sha: the
+		# tag mover is not trusted to have bound the right ones.
+		rc=0
+		resolve "$sha" CAND || rc=$?
+		if [[ $rc -eq 3 ]]; then
+			verdict=refuse reason=image_missing
+		elif [[ $rc -ne 0 ]]; then
+			verdict=wait reason=registry
+		elif [[ "$CAND_CHILDREN" != "$TAG_CHILDREN" ]]; then
+			verdict=refuse reason=tag_not_bound
+		fi
+	fi
+
+	if [[ -z "$verdict" ]]; then
+		# The deployed sha is what a service that still needs the candidate
+		# actually serves (the first such one). A service already on the
+		# candidate is no baseline: it would make the gate answer identical
+		# and leave the other service behind.
+		all_serving=1
+		for line in "${svcs[@]}"; do
+			rev=$(healthz_revision "${line#* }")
+			if [[ "$rev" != "$sha" ]]; then
+				all_serving=0
+				base=$rev
+				break
+			fi
+		done
+		if [[ $all_serving -eq 1 ]]; then
+			verdict=noop reason=serving
+		else
+			gate "$sha" "$base"
+			verdict=$GATE_VERDICT reason=$GATE_REASON
+		fi
+	fi
+
+	log "hk_follow.gate sha=${sha:-none} digest=$TAG_DIGEST deployed_sha=${base:-unknown} verdict=$verdict reason=$reason approval_ref=${GATE_APPROVAL_REF:-none}"
+	if [[ "$verdict" != promote ]]; then
+		if [[ "$prev_digest" != "$TAG_DIGEST" || "$prev_verdict" != "$verdict" || "$prev_reason" != "$reason" ]]; then
+			report_gate "$sha" "$TAG_DIGEST" "$verdict" "$reason"
+		fi
+		save_state "$TAG_DIGEST" "$sha" "$verdict" "$reason"
+		return 0
+	fi
+	if [[ $DRY_RUN -eq 1 ]]; then
+		for line in "${svcs[@]}"; do
+			log "hk_follow.dry_run would_run=$(printf '%q' "$SHIFTGATE deploy ${line%% *} --digest $TAG_DIGEST") then_check=${line#* }/healthz want=$sha"
+		done
+		return 0
+	fi
+
+	# Write the attempt before the first shiftgate call: a crash from here
+	# on is a failed attempt, not a retry (I4).
+	save_state "$TAG_DIGEST" "$sha" started ""
+	post_status "$sha" deployed pending "rolling out on ${HK_FOLLOW_TARGET} (hk-follow)"
+	stamp=$(date -u +%Y%m%dT%H%M%SZ)
+
+	for line in "${svcs[@]}"; do
+		svc=${line%% *} url=${line#* }
+		if [[ "$(healthz_revision "$url")" == "$sha" ]]; then
+			log "hk_follow.service_current service=$svc sha=$sha"
+			continue
+		fi
+		held=$(sg_status </dev/null | jq -r --arg s "$svc" '.[]? | select(.name == $s) | .state.hold.digest // empty') || held=
+		if [[ "$held" == "$TAG_DIGEST" ]]; then
+			attempted+=("$svc")
+			result=failed failed_svc=$svc failed_step="held_${svc}"
+			break
+		fi
+		rc=0
+		sg_deploy "$svc" "$TAG_DIGEST" </dev/null || rc=$?
+		if [[ $rc -eq 75 && ${#attempted[@]} -eq 0 ]]; then
+			# Another shiftgate operation holds the service lock and
+			# nothing has started: not an attempt. Restore the state and
+			# try on the next tick.
+			log "hk_follow.busy service=$svc reason=shiftgate_lock"
+			if [[ -n "$prev_digest" ]]; then
+				save_state "$prev_digest" "$prev_sha" "$prev_verdict" "$prev_reason"
+			else
+				rm -f "$(STATE_FILE)"
+			fi
+			return 0
+		fi
+		attempted+=("$svc")
+		if [[ $rc -ne 0 ]]; then
+			result=failed failed_svc=$svc failed_step="shiftgate_${svc}_exit_${rc}"
+			break
+		fi
+		# I3: the serving binary is this sha, else stop.
+		waited=0
+		while [[ "$(healthz_revision "$url")" != "$sha" ]]; do
+			if [[ $waited -ge $HK_FOLLOW_HEALTH_WAIT ]]; then
+				result=failed failed_svc=$svc failed_step="healthz_${svc}"
+				break 2
+			fi
+			sleep 2
+			waited=$((waited + 2))
+		done
+		log "hk_follow.service_deployed service=$svc sha=$sha digest=$TAG_DIGEST"
+	done
+
+	if [[ $result == success ]]; then
+		save_state "$TAG_DIGEST" "$sha" deployed ""
+		log "hk_follow.deployed sha=$sha digest=$TAG_DIGEST previous_sha=$base"
+		post_status "$sha" deployed success "deployed on ${HK_FOLLOW_TARGET}: $(printf '%s\n' "${svcs[@]%% *}" | paste -sd, -)"
+	else
+		save_state "$TAG_DIGEST" "$sha" failed "$failed_step"
+		log "hk_follow.failed sha=$sha digest=$TAG_DIGEST step=$failed_step"
+		post_status "$sha" deployed failure "failed at ${failed_step} on ${HK_FOLLOW_TARGET}; not retried"
+	fi
+	for svc in "${attempted[@]}"; do
+		# A service that finished before a later one failed serves the new
+		# sha; its own record says so.
+		if [[ "$svc" == "$failed_svc" ]]; then
+			record "$svc" "$sha" "$TAG_DIGEST" "$base" failed "$failed_step" "$stamp"
+		else
+			record "$svc" "$sha" "$TAG_DIGEST" "$base" success "" "$stamp"
+		fi
+	done
+	if [[ $result == success ]]; then
+		notify "[hk-follow] handoffkeep ${sha:0:12} deployed on ${HK_FOLLOW_TARGET} (from ${base:0:12})"
+	else
+		notify "[hk-follow] handoffkeep ${sha:0:12} FAILED at ${failed_step} on ${HK_FOLLOW_TARGET}; not retried; the failed service keeps its previous colour"
+	fi
+}
+
+tick() {
+	mkdir -p "$HK_FOLLOW_STATE_DIR"
+	# I5: one rollout at a time. A tick that finds the lock taken exits.
+	exec 9>"$HK_FOLLOW_LOCK"
+	if ! flock -n 9; then
+		log "hk_follow.busy reason=lock"
+		return 0
+	fi
+	tick_locked
+}
+
+usage() {
+	echo "usage: hk-follow promote <sha> [--dry-run] | tick [--dry-run] | gate <sha> <deployed-sha> | state | reset" >&2
+	exit 2
+}
+
+main() {
+	local args=() a
+	for a in "$@"; do
+		case "$a" in
+		--dry-run) DRY_RUN=1 ;;
+		*) args+=("$a") ;;
+		esac
+	done
+	set -- "${args[@]+"${args[@]}"}"
+	case "${1:-}" in
+	promote) [[ $# -eq 2 ]] || usage; promote "$2" ;;
+	tick) [[ $# -eq 1 ]] || usage; tick ;;
+	gate)
+		[[ $# -eq 3 ]] || usage
+		gate "$2" "$3"
+		echo "$GATE_VERDICT $GATE_REASON${GATE_APPROVAL_REF:+ approval_ref=$GATE_APPROVAL_REF}"
+		;;
+	state) [[ $# -eq 1 ]] || usage; cat "$(STATE_FILE)" 2>/dev/null || echo '{}' ;;
+	reset) [[ $# -eq 1 ]] || usage; rm -f "$(STATE_FILE)" ;;
+	*) usage ;;
+	esac
+}
+
+# Sourced by the tests (HK_FOLLOW_LIB=1) to replace the external calls.
+if [[ "${HK_FOLLOW_LIB:-0}" != 1 ]]; then
+	main "$@"
+fi
