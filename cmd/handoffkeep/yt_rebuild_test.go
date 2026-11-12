@@ -28,12 +28,24 @@ import (
 
 // ytrbSource is the PG side: bound tasks and each task's comments.
 type ytrbSource struct {
-	tasks    []store.YTRebuildTask
-	top      map[int64]bool
-	comments map[int64]store.YTRebuildComments
-	docs     []store.YTRebuildDocument
-	// noArticles leaves yt_article_bindings out of the schema.
-	noArticles bool
+	tasks     []store.YTRebuildTask
+	top       map[int64]bool
+	comments  map[int64]store.YTRebuildComments
+	docs      []store.YTRebuildDocument
+	decisions []store.YTRebuildDecision
+	// noArticles and noDecisions leave yt_article_bindings and
+	// yt_decision_bindings out of the schema.
+	noArticles, noDecisions bool
+}
+
+func (s *ytrbSource) YTRebuildDecisions(_ context.Context, _ string, afterID int64, limit int) ([]store.YTRebuildDecision, error) {
+	out := []store.YTRebuildDecision{}
+	for _, d := range s.decisions {
+		if d.DecisionID > afterID && len(out) < limit {
+			out = append(out, d)
+		}
+	}
+	return out, nil
 }
 
 func (s *ytrbSource) YTRebuildDocuments(_ context.Context, _, _ string, afterID int64, limit int) ([]store.YTRebuildDocument, error) {
@@ -50,7 +62,7 @@ func (s *ytrbSource) YTRebuildCount(_ context.Context, what, _ string) (int, err
 	if what == "documents" {
 		return len(s.docs), nil
 	}
-	return 0, nil
+	return len(s.decisions), nil
 }
 
 func (s *ytrbSource) YTRebuildTasks(_ context.Context, tenant, project string, afterID int64, limit int) ([]store.YTRebuildTask, error) {
@@ -196,7 +208,7 @@ func ytrbRun(t *testing.T, fake *ytrbFake, src *ytrbSource, project string) (ytR
 		t.Fatal(err)
 	}
 	var slept []time.Duration
-	b := &ytRebuilder{src: src, remote: youtrack.NewWriteRemote(client), tenant: "yt.test", project: project, taskPage: 2, articles: !src.noArticles,
+	b := &ytRebuilder{src: src, remote: youtrack.NewWriteRemote(client), tenant: "yt.test", project: project, taskPage: 2, articles: !src.noArticles, haveDecisions: !src.noDecisions,
 		reader: &ytAuditor{sleep: func(_ context.Context, d time.Duration) error { slept = append(slept, d); return nil }}}
 	r, err := b.run(t.Context(), 1, 200)
 	if err != nil {
@@ -475,5 +487,64 @@ func TestYouTrackRebuildDocuments(t *testing.T) {
 	r, _ = ytrbRun(t, fake, src, "")
 	if r.Documents.Skipped == "" || r.Documents.SkippedCount != 5 || r.Documents.Checked != 0 || r.differs() != 0 {
 		t.Fatalf("no bindings table: %+v", r.Documents)
+	}
+}
+
+// hk 4121: a bound decision's question, options and answer are rebuilt from
+// its DEC issue's Y6 block, as decision_fields writes it or between
+// decision_create's provenance line and marker; each field that differs is
+// listed, and so is an issue still in the import's form. Without
+// yt_decision_bindings the target is skipped with a count.
+func TestYouTrackRebuildDecisions(t *testing.T) {
+	answered := time.Date(2026, 11, 12, 3, 0, 0, 0, time.UTC)
+	text := func(id int64) ytwrite.DecisionText {
+		return ytwrite.DecisionText{DecisionID: id, TaskID: 9, Question: "Ship it?\n\nTwo lines.", Recommended: "yes",
+			Options: []ytwrite.DecisionOption{{Key: "yes", Label: "Ship"}, {Key: "no", Label: "Hold"}},
+			Answer:  "yes", AnsweredBy: "operator:robin", AnsweredAt: &answered}
+	}
+	fake := newYTRBFake()
+	// D-1: decision_fields' block. D-2: decision_create's description.
+	fake.issue("5-1", 1, "-", ytwrite.RenderDecision(text(1)))
+	fake.issue("5-2", 2, "-", ytwrite.RenderDecisionCreate("hk:decisions", answered, 77, text(2)))
+	// D-3..D-5: one field each differs from hk.
+	for id, edit := range map[int64]func(*ytwrite.DecisionText){
+		3: func(x *ytwrite.DecisionText) { x.Question = "Ship it now?" },
+		4: func(x *ytwrite.DecisionText) { x.Options = x.Options[:1] },
+		5: func(x *ytwrite.DecisionText) { x.Answer = "no" },
+	} {
+		x := text(id)
+		edit(&x)
+		fake.issue("5-"+strconv.FormatInt(id, 10), id, "-", ytwrite.RenderDecision(x))
+	}
+	// D-6: still the import's description.
+	fake.issue("5-6", 6, "-", "답변: yes\n권장: yes")
+	src := &ytrbSource{}
+	for id := int64(1); id <= 7; id++ {
+		src.decisions = append(src.decisions, store.YTRebuildDecision{DecisionID: id, IssueID: "5-" + strconv.FormatInt(id, 10), Text: text(id)})
+	}
+	// D-8: bound, but gone from hk.
+	src.decisions = append(src.decisions, store.YTRebuildDecision{DecisionID: 8, IssueID: "5-8", Deleted: true})
+	r, _ := ytrbRun(t, fake, src, "")
+	got := r.Decisions
+	if got.Checked != 8 || got.Equal != 2 || got.Differ.Count != 6 || got.Skipped != "" || got.Errors.Count != 0 {
+		t.Fatalf("decisions = %+v", got)
+	}
+	reason := map[string]string{}
+	for _, it := range got.Differ.Items {
+		reason[it.ID] = it.Reason
+	}
+	for id, w := range map[string]string{
+		"D-3": "question", "D-4": "options", "D-5": "answer", "D-6": "not in the Y6 decision form",
+		"D-7": "issue 5-7 not found", "D-8": "deleted in hk",
+	} {
+		if !strings.Contains(reason[id], w) {
+			t.Errorf("%s reason %q lacks %q", id, reason[id], w)
+		}
+	}
+
+	src.noDecisions = true
+	r, _ = ytrbRun(t, fake, src, "")
+	if r.Decisions.Skipped == "" || r.Decisions.SkippedCount != 8 || r.Decisions.Checked != 0 {
+		t.Fatalf("no bindings table: %+v", r.Decisions)
 	}
 }

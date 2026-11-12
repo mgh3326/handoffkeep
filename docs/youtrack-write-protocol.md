@@ -699,6 +699,14 @@ collapsed), issue_create's `RenderIssue` or the import's `Original hk title:`
 (both exact). The project is the `hk 프로젝트` field (else the description's
 project; both, when present, must agree), with `Unassigned` read as none.
 
+**Decisions.** The DEC issue's description is read in the Y6 form only:
+`RenderDecision`'s block (a decision_fields snapshot), or the block between
+decision_create's provenance line and marker. An issue still in the import's
+form (`답변:` lines, no question block or options) differs, as does a binding
+whose decision is gone from hk. PG's side is the projection's own text
+(`CanonicalDecision`). DEC issues live in one project, so `--project` does not
+narrow decisions.
+
 **Output.** Per target: `checked`, `equal`, `differ`, `exceptions` and `errors`
 (up to 10 ids each, with a one-line reason), and `not_rebuildable`: what of the
 target stays PG-only (hk 3833 §1.5), listed so a clean result is not read as

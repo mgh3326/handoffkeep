@@ -209,3 +209,63 @@ func (s *Store) YTRebuildCount(ctx context.Context, what, project string) (int, 
 	}
 	return n, err
 }
+
+// YTRebuildDecision is one decision bound to a DEC issue on the drill's
+// tenant. Text is the decision's DEC issue text as PG has it (the same
+// decisionTextOf the projection writes); Deleted is set when the decision
+// row is gone and the binding is left.
+type YTRebuildDecision struct {
+	DecisionID int64
+	IssueID    string
+	Text       ytwrite.DecisionText
+	Deleted    bool
+}
+
+// YTRebuildDecisions lists, in decision id order, a page of the decisions
+// with a yt_decision_bindings row on tenant, with id greater than afterID, at
+// most limit. The table comes with migration YTDecisionBindingsMigration
+// (hk 4054); the caller checks it is applied first. One read transaction, so
+// a page's bindings and decisions are read at one snapshot.
+func (s *Store) YTRebuildDecisions(ctx context.Context, tenant string, afterID int64, limit int) ([]YTRebuildDecision, error) {
+	if tenant == "" || afterID < 0 || limit < 1 || limit > YTRebuildTaskPageMax {
+		return nil, errors.New("invalid rebuild decision filter")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `SELECT decision_id::bigint, issue_id FROM yt_decision_bindings
+		WHERE tenant = $1 AND decision_id::bigint > $2 ORDER BY decision_id::bigint LIMIT $3`, tenant, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := []YTRebuildDecision{}
+	ids := []int64{}
+	for rows.Next() {
+		var d YTRebuildDecision
+		if err := rows.Scan(&d.DecisionID, &d.IssueID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, d)
+		ids = append(ids, d.DecisionID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	byID, err := readYTDecisionRows(ctx, tx, ids, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		r := byID[out[i].DecisionID]
+		if r == nil {
+			out[i].Deleted = true
+			continue
+		}
+		out[i].Text = decisionTextOf(r.record, r.channel)
+	}
+	return out, tx.Commit(ctx)
+}

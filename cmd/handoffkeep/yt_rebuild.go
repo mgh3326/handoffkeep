@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -181,6 +182,7 @@ type ytRebuildSource interface {
 	YTRebuildSampleTasks(ctx context.Context, tenant, project string, seed int64, n, top int) ([]store.YTRebuildSample, error)
 	YTRebuildTaskComments(ctx context.Context, taskID int64, issueID string) (store.YTRebuildComments, error)
 	YTRebuildDocuments(ctx context.Context, tenant, project string, afterID int64, limit int) ([]store.YTRebuildDocument, error)
+	YTRebuildDecisions(ctx context.Context, tenant string, afterID int64, limit int) ([]store.YTRebuildDecision, error)
 	YTRebuildCount(ctx context.Context, what, project string) (int, error)
 }
 
@@ -204,6 +206,9 @@ type ytRebuilder struct {
 	// articles: the schema has yt_article_bindings (hk 4053); without it
 	// the documents target is skipped.
 	articles bool
+	// decisions: the schema has yt_decision_bindings (hk 4054); without it
+	// the decisions target is skipped with a count.
+	haveDecisions bool
 }
 
 // ytRebuildArticleBindingsMigration adds yt_article_bindings (hk 4053).
@@ -322,6 +327,102 @@ func (b *ytRebuilder) documents(ctx context.Context, out *ytRebuildTarget) error
 			return nil
 		}
 	}
+}
+
+// decisions rebuilds every bound decision's question, options and answer
+// from its DEC issue. A decision is not filtered by --project: DEC issues
+// live in one project of their own.
+func (b *ytRebuilder) decisions(ctx context.Context, out *ytRebuildTarget) error {
+	page := b.taskPage
+	if page < 1 {
+		page = store.YTRebuildTaskPageMax
+	}
+	var after int64
+	for {
+		decisions, err := b.src.YTRebuildDecisions(ctx, b.tenant, after, page)
+		if err != nil {
+			return err
+		}
+		for _, d := range decisions {
+			after = d.DecisionID
+			id := "D-" + strconv.FormatInt(d.DecisionID, 10)
+			if d.Deleted {
+				out.differ(id, "bound to issue "+d.IssueID+" but deleted in hk")
+				continue
+			}
+			var issue youtrack.Issue
+			err := b.call(ctx, func(ctx context.Context) error {
+				var gerr error
+				issue, gerr = b.remote.GetIssue(ctx, d.IssueID)
+				return gerr
+			})
+			switch {
+			case errors.Is(err, youtrack.ErrNotFound):
+				out.differ(id, "issue "+d.IssueID+" not found")
+				continue
+			case err != nil:
+				out.Errors.add(id, err.Error())
+				log.Printf("youtrack.rebuild_decision_failed decision_id=%d err=%q", d.DecisionID, err.Error())
+				if stopped(ctx, err) {
+					return err
+				}
+				continue
+			}
+			if reason := diffDecision(d.Text, issue.Description); reason != "" {
+				out.differ(id, reason)
+			} else {
+				out.equal()
+			}
+		}
+		if len(decisions) < page {
+			return nil
+		}
+	}
+}
+
+// rebuildDecision reads a DEC issue's description in the Y6 form: the
+// RenderDecision block alone (a decision_fields snapshot), or between
+// decision_create's provenance line and its marker (RenderDecisionCreate).
+// The import's description has no options or question block and is not
+// read.
+func rebuildDecision(description string) (ytwrite.DecisionText, bool) {
+	if x, ok := ytwrite.ParseDecision(description); ok {
+		return x, true
+	}
+	first, rest, found := strings.Cut(description, "\n")
+	if !found {
+		return ytwrite.DecisionText{}, false
+	}
+	_, _, opID, ok := ytwrite.ParseProvenance(first)
+	if !ok {
+		return ytwrite.DecisionText{}, false
+	}
+	block, ok := strings.CutSuffix(rest, "\n\n"+ytwrite.OpMarker(opID))
+	if !ok {
+		return ytwrite.DecisionText{}, false
+	}
+	return ytwrite.ParseDecision(block)
+}
+
+// diffDecision is "" when the description rebuilds want's question, options
+// and answer, else the first difference.
+func diffDecision(want ytwrite.DecisionText, description string) string {
+	x, ok := rebuildDecision(description)
+	if !ok {
+		return "description is not in the Y6 decision form"
+	}
+	want = ytwrite.CanonicalDecision(want)
+	switch {
+	case x.DecisionID != want.DecisionID:
+		return fmt.Sprintf("description names D-%d", x.DecisionID)
+	case x.Question != want.Question:
+		return fmt.Sprintf("question %q", truncateRunes(x.Question, 80))
+	case !slices.Equal(x.Options, want.Options):
+		return fmt.Sprintf("options %v, hk %v", x.Options, want.Options)
+	case x.Answer != want.Answer:
+		return fmt.Sprintf("answer %q, hk %q", truncateRunes(x.Answer, 80), truncateRunes(want.Answer, 80))
+	}
+	return ""
 }
 
 // ytRebuiltTask is what an issue says the task is.
@@ -630,7 +731,6 @@ func (b *ytRebuilder) run(ctx context.Context, seed int64, sample int) (ytRebuil
 	r.Comments.NotRebuildable = ytRebuildCommentsPGOnly
 	r.Documents.NotRebuildable = ytRebuildDocumentsPGOnly
 	r.Decisions.NotRebuildable = ytRebuildDecisionsPGOnly
-	r.Decisions.Skipped = "not implemented yet"
 	steps := []func() error{
 		func() error {
 			if b.articles {
@@ -641,6 +741,14 @@ func (b *ytRebuilder) run(ctx context.Context, seed int64, sample int) (ytRebuil
 			return err
 		},
 		func() error { return b.tasks(ctx, &r.Tasks) },
+		func() error {
+			if b.haveDecisions {
+				return b.decisions(ctx, &r.Decisions)
+			}
+			n, err := b.src.YTRebuildCount(ctx, "decisions", b.project)
+			r.Decisions.Skipped, r.Decisions.SkippedCount = "no yt_decision_bindings in this schema (migration "+store.YTDecisionBindingsMigration+")", n
+			return err
+		},
 		func() error { return b.comments(ctx, seed, sample, &r.Comments) },
 	}
 	for _, step := range steps {
@@ -750,7 +858,11 @@ func youtrackRebuildCmd(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	b := &ytRebuilder{src: st, remote: remote, reader: &ytAuditor{}, tenant: remote.Tenant(), project: *project, articles: articles}
+	decisions, err := st.MigrationApplied(openCtx, store.YTDecisionBindingsMigration)
+	if err != nil {
+		return err
+	}
+	b := &ytRebuilder{src: st, remote: remote, reader: &ytAuditor{}, tenant: remote.Tenant(), project: *project, articles: articles, haveDecisions: decisions}
 	report, err := b.run(context.Background(), *seed, *sample)
 	if err != nil {
 		return err

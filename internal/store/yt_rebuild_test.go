@@ -2,6 +2,7 @@ package store
 
 import (
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -147,5 +148,41 @@ func TestYTRebuildReads(t *testing.T) {
 	got, err = s.YTRebuildTaskComments(ctx, task, "2-other")
 	if err != nil || got.Comments[3].ID != withOp || got.Comments[3].OpID != 0 {
 		t.Fatalf("other issue: %+v %v", got.Comments, err)
+	}
+}
+
+// hk 4121: bound decisions are listed on the tenant in id order, with the
+// DEC text the projection writes; a binding whose decision is gone is
+// marked deleted.
+func TestYTRebuildDecisionReads(t *testing.T) {
+	s := ytdecSetup(t, "yt_rebuild_dec", false)
+	ctx := t.Context()
+	bind := func(id int64, tenant, issue string) {
+		ytFeedExec(t, s, `INSERT INTO yt_decision_bindings(decision_id, tenant, issue_id, origin, bound_by, bound_at)
+			VALUES ($1,$2,$3,'import_verified','test',now())`, strconv.FormatInt(id, 10), tenant, issue)
+	}
+	a := ytdecChat(t, s, "q-rebuild-a", "First question?")
+	b := ytdecChat(t, s, "q-rebuild-b", "Second question?")
+	elsewhere := ytdecChat(t, s, "q-rebuild-c", "Other tenant?")
+	bind(a, ytcTenant, "5-1")
+	bind(b, ytcTenant, "5-2")
+	bind(elsewhere, "other.youtrack.cloud", "5-3")
+	bind(987654321, ytcTenant, "5-9") // no such decision
+	got, err := s.YTRebuildDecisions(ctx, ytcTenant, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0].DecisionID != a || got[1].DecisionID != b || got[2].DecisionID != 987654321 {
+		t.Fatalf("decisions %+v", got)
+	}
+	if got[0].IssueID != "5-1" || got[0].Text.DecisionID != a || got[0].Text.Question != "First question?" || got[0].Deleted {
+		t.Fatalf("first %+v", got[0])
+	}
+	if !got[2].Deleted {
+		t.Fatalf("a binding with no decision is not marked deleted: %+v", got[2])
+	}
+	page, err := s.YTRebuildDecisions(ctx, ytcTenant, a, 1)
+	if err != nil || len(page) != 1 || page[0].DecisionID != b {
+		t.Fatalf("page after %d: %+v %v", a, page, err)
 	}
 }
