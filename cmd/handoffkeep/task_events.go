@@ -26,8 +26,7 @@ func taskEventCmd(args []string, out io.Writer) error {
 	revertedPR := fs.String("reverted-pr", "", "the PR a revert undoes (required for mergewake.revert)")
 	revertPR := fs.String("revert-pr", "", "the revert PR URL (defaults to --source-ref)")
 	at := fs.String("at", "", "when the event happened, RFC 3339 (defaults to now)")
-	tasks := fs.String("tasks", "", "other task ids the PR names, comma-separated (one per Mergewake-Task line); each gets the event too")
-	ordered, err := splitArgs(args, "source", "source-ref", "pr", "reverted-pr", "revert-pr", "at", "tasks")
+	ordered, err := splitArgs(args, "source", "source-ref", "pr", "reverted-pr", "revert-pr", "at")
 	if err != nil {
 		return err
 	}
@@ -35,7 +34,7 @@ func taskEventCmd(args []string, out io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: tasks event <task-id> --source <source> --source-ref <pr-url> [--reverted-pr <url>] [--tasks <id,...>]")
+		return errors.New("usage: tasks event <task-id> --source <source> --source-ref <pr-url> [--reverted-pr <url>]")
 	}
 	id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
 	if err != nil || id < 1 {
@@ -45,15 +44,6 @@ func taskEventCmd(args []string, out io.Writer) error {
 		return errors.New("tasks event requires --source and --source-ref")
 	}
 	in := store.TaskSourceEvent{Source: *source, SourceRef: *sourceRef, TaskID: id, PR: *pr, RevertedPR: *revertedPR, RevertPR: *revertPR}
-	if *tasks != "" {
-		for _, f := range strings.Split(*tasks, ",") {
-			n, err := strconv.ParseInt(strings.TrimSpace(f), 10, 64)
-			if err != nil || n < 1 {
-				return errors.New("--tasks must be positive task ids, comma-separated")
-			}
-			in.Tasks = append(in.Tasks, n)
-		}
-	}
 	if *at != "" {
 		t, err := time.Parse(time.RFC3339, *at)
 		if err != nil {

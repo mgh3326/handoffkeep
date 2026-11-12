@@ -409,40 +409,6 @@ func (s *Store) afterStateChangeTx(ctx context.Context, tx pgx.Tx, x Task, from,
 	return nil
 }
 
-// closeGateTx is the gate an automatic close of x to state to passes (hk
-// 3294; the hygiene close of hk 3292 is to reuse it): it returns
-// why the close must wait for a person, or "". x waits while it is awaiting a
-// decision, while its decision request is open, or while the work-receipt
-// fence refuses the move.
-func (s *Store) closeGateTx(ctx context.Context, tx pgx.Tx, x Task, to string) (string, error) {
-	return s.closeGate(ctx, x, to, func() (wrkrecords.Snapshot, error) { return loadWrkSnapshot(ctx, tx) })
-}
-
-// closeGate is closeGateTx with the work-record snapshot read through
-// snapshot, called only when the decision gates pass, so a caller checking
-// many tasks can read it once.
-func (s *Store) closeGate(ctx context.Context, x Task, to string, snapshot func() (wrkrecords.Snapshot, error)) (string, error) {
-	if x.AwaitingDecision {
-		return "parent is awaiting a decision", nil
-	}
-	if x.Refs.DecisionRequest != nil && x.Refs.DecisionRequest.Status == DecisionRequestOpen {
-		return "parent has an open decision request", nil
-	}
-	snap, err := snapshot()
-	if err != nil {
-		return "", err
-	}
-	actor, receipt := WrkPrincipal(ctx)
-	if err := snap.CheckLegacy(s.WrkEngine().Policy, actor, wrkrecords.LegacyIntent{TaskID: x.ID, CurrentJob: x.Refs.JobID, To: FenceTarget(to), Receipt: receipt}); err != nil {
-		switch wrkrecords.Code(err) {
-		case "scope_denied", "wrk_receipt_required":
-			return "parent needs a work receipt", nil
-		}
-		return "", err
-	}
-	return "", nil
-}
-
 // autoCloseTx runs auto_close_parent in the transaction of a child's
 // transition. A child is settled when it is merged, deployed, completed, dropped or
 // duplicate; a child in triage, backlog, unstarted, a started state or icebox
@@ -513,23 +479,20 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 			})
 			return err
 		}
+		if p.AwaitingDecision {
+			_, _, err = insertEvent(ctx, tx, taskEventInput{
+				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
+				Note:   "parent is awaiting a decision; the parent stays where it is",
+				Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
+			})
+			return err
+		}
 		to := StateCompleted
 		if merged > 0 || deployed > 0 {
 			to = StateMerged
 		}
 		if deployed == completed {
 			to = StateDeployed
-		}
-		if gate, err := s.closeGateTx(ctx, tx, p, to); err != nil || gate != "" {
-			if err != nil {
-				return err
-			}
-			_, _, err = insertEvent(ctx, tx, taskEventInput{
-				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
-				Note:   gate + "; the parent stays where it is",
-				Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
-			})
-			return err
 		}
 		if to == StateCompleted && !canCompleteKind(p.Kind) {
 			_, _, err = insertEvent(ctx, tx, taskEventInput{
@@ -538,6 +501,19 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 				Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
 			})
 			return err
+		}
+		if err := s.wrkTaskFenceTx(ctx, tx, p, FenceTarget(to), false); err != nil {
+			switch wrkrecords.Code(err) {
+			case "scope_denied", "wrk_receipt_required":
+				_, _, err = insertEvent(ctx, tx, taskEventInput{
+					TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
+					Note:   "parent needs a work receipt; the parent stays where it is",
+					Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
+				})
+				return err
+			default:
+				return err
+			}
 		}
 		from := p.State
 		decisionBefore := decisionBeforeOf(p)
