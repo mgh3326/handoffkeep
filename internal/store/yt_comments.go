@@ -67,16 +67,23 @@ func (s *Store) ytCommentsModeNow() YTCommentsMode {
 
 func init() { registerYTKindGate(ytwrite.KindCommentAppend, ytCommentGateSQL) }
 
-// ytCommentGateSQL is the comment_append gate (ytAdmitSQL): o's task is
-// enrolled in the canary (mode canary) or bound (mode on, yt_task_bindings)
-// with o's issue on o's tenant. Mode off admits nothing.
+// ytCommentGateSQL is the comment_append gate (ytAdmitSQL): either the copy
+// of an hk comment (ytCommentModeGateSQL, which never admits a document
+// copy) or a document copy (ytDocCommentGateSQL).
 func ytCommentGateSQL(s *Store) string {
+	return `(` + ytCommentModeGateSQL(s) + `) OR (` + ytDocCommentGateSQL(s) + `)`
+}
+
+// ytCommentModeGateSQL admits o as an hk comment's copy: o's task is enrolled
+// in the canary (mode canary) or bound (mode on, yt_task_bindings) with o's
+// issue on o's tenant. Mode off admits nothing.
+func ytCommentModeGateSQL(s *Store) string {
 	switch s.ytCommentsModeNow() {
 	case YTCommentsCanary:
-		return `EXISTS (SELECT 1 FROM yt_comment_canary c
+		return `o.principal <> '` + ytDocCommentPrincipal + `' AND EXISTS (SELECT 1 FROM yt_comment_canary c
 		WHERE o.entity_kind = 'task' AND c.task_id::text = o.entity_id AND c.issue_id = o.yt_target_id AND c.tenant = o.tenant)`
 	case YTCommentsOn:
-		return `o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
+		return `o.principal <> '` + ytDocCommentPrincipal + `' AND o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
 		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
 	default:
 		return `FALSE`

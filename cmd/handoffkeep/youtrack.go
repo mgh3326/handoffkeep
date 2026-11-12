@@ -218,8 +218,8 @@ func youtrackAdoptCmd(args []string, out io.Writer) error {
 
 // youtrackProtocolOwner names the env setting that hands YouTrack writes to
 // the write protocol, or returns "" when none is set: comments mode canary or
-// on, issues mode on, or fields mode on. An unparsable mode is an error, so the guard fails
-// closed.
+// on, issues mode on, fields mode on, or document-comment mode on. An
+// unparsable mode is an error, so the guard fails closed.
 func youtrackProtocolOwner() (string, error) {
 	comments, err := ytCommentsModeFromEnv()
 	if err != nil {
@@ -241,6 +241,13 @@ func youtrackProtocolOwner() (string, error) {
 	}
 	if fields == store.YTFieldsOn {
 		return "HANDOFFKEEP_YT_FIELDS_MODE=on", nil
+	}
+	docs, err := ytDocCommentsModeFromEnv()
+	if err != nil {
+		return "", err
+	}
+	if docs == store.YTDocCommentsOn {
+		return "HANDOFFKEEP_YT_DOC_COMMENTS_MODE=on", nil
 	}
 	return "", nil
 }

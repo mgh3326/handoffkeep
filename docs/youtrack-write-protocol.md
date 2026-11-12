@@ -822,6 +822,51 @@ Korean title and the milestone name are read when the task row changes: a
 task that becomes stalled with no change, a new translation or a renamed
 milestone reaches the issue with the task's next change.
 
+## Document comments (hk 4xxx)
+
+After the import ended, a task-tied report or brief reaches its task's issue
+only through this path. It is a `comment_append` op, so it has no kind of its
+own: its principal is `hk:doc-comments`, and the comment gate admits it only
+while `HANDOFFKEEP_YT_DOC_COMMENTS_MODE` is `on` (default `off`). The hk-comment
+modes never admit a document op, so turning this mode off stops them even when
+the comments mode is on.
+
+**Feed consumer `task_docs`** (`internal/store/yt_doc_comments.go`) reads every
+`document` change from `sync_log`. For each document with a task whose key is
+a report (`reports/mwr-*`, or `reports/<job>/report.md`) or a brief
+(`brief/<date>/<job>`), and whose task is bound (`yt_task_bindings`):
+
+- one op per comment body of `ytwrite.DocComments`, keyed
+  `doc-comment:<doc id>:<sha>` (parts after the first: `:part:<n>`), so a
+  changed document (a new sha) gets new comments and a re-save with the same
+  body prepares nothing (the key already exists);
+- no task, a key that is neither, or a missing sha: skipped;
+- unbound task, or a binding a local source disagrees with: skipped and
+  counted (`ytwrite.doc_comments_feed ... unbound= disagree=`);
+- a key already taken by an op with another payload (the author or the
+  binding's target changed): counted as a conflict and logged, never fatal.
+
+Mode off prepares nothing and still advances the cursor, so a document changed
+while off is not copied unless it changes again. The cursor starts at the
+feed's max_sync_id, so documents before it (the import's) are not re-posted.
+
+**Bodies** (`ytwrite.DocComments`) are the import's (`youtrack/import/client.js`
+`documentIssueComments`): a report is `# <key>` (with ` (part i/n)` when split),
+a blank line and the part, split at `DocCommentPartBytes-1024` bytes
+(`DocCommentPartBytes` is the import's `SAFE_PART_BYTES`, 240 KiB) on whole
+lines, cut between characters for a longer line; a brief is one
+`Article: [brief] <key> [brief] (hk document key: <key>)` line (title cut to
+250 runes). `RenderComment` then adds the provenance line and the op marker, so
+`youtrack audit` can read them as hk's (`RenderedOpID`). The golden test
+`TestDocCommentsSplitReportMatchesImport` pins the parts' byte lengths and
+SHA-256 to the import's output.
+
+**Cap.** A document part may be up to `MaxDocCommentBodyBytes` (the import's
+240 KiB, `CheckDocComment`); hk's own comments keep `MaxBodyBytes` (64 KiB).
+
+**Audit.** A document copy is not an hk comment, so `youtrack audit` lists it
+as `yt_only_bot`, which the audit's gate does not count.
+
 ## Tests
 
 `ytwritetest.RunProtocol` (public contract) and `RunLedger` (compare-and-set rules)
