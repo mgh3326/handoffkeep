@@ -966,6 +966,111 @@ Korean title and the milestone name are read when the task row changes: a
 task that becomes stalled with no change, a new translation or a renamed
 milestone reaches the issue with the task's next change.
 
+## Article bindings (hk 4053)
+
+The import made a YouTrack article for most hk documents, and hk kept no
+record of which. `yt_article_bindings` records it, one row per document, so
+the document kind (Y5b) updates that article instead of creating a second.
+No mode reads the table yet; nothing changes until Y5b ships.
+
+**Row.** `document_id` (primary key), `tenant`, `article_id` (stable internal
+id), `article_readable`, `project_id`, `part` (0: the whole document, or the
+index article of a split one), `generation` (0; Y5c owns it), `content_sha`
+(sha256 of the content the article held when it was verified; NULL for a
+split document's index), `origin` (`import_verified` here; `op_applied` is
+for Y5b), `op_id`, `needs_update`, `bound_by`, `bound_at`, and
+`UNIQUE(tenant, article_id)`. `Store.AddYTArticleBinding` writes it: the same
+binding again is a no-op; any other binding for the document, or another
+document's binding to the article, is `yt_article_binding_conflict` and
+changes nothing. It also refuses a document that changed (body, task or
+project) since it was verified, and an excluded one.
+
+**Scope.** The import's own filter (`youtrack/import/client.js`): a document
+with no task is in project `/shared` (the YouTrack project named `Shared
+documents`), one of a task with no project in `/unassigned` (`Unassigned hk
+tasks`), any other in its task's hk project (its `youtrack_projects` row; a
+row whose YouTrack id is one of those two projects counts as unmapped). The
+two are found by name, not short name: the import gives them `SHRDOC` and
+`HK` with a numeric tail when an hk project took the name first (`SHRDOC2`),
+and the readable-id lookup uses the short name YouTrack reports. No such
+project, or two, refuses the run (exit 2). `screens/*`, `review/mwr-*` and a task's reports
+(`reports/mwr-*/...`, `reports/<job>/report.md`) are `excluded`: they became
+issue comments (Y5d).
+
+**Verification.** An article verifies when it is a top-level article of the
+document's YouTrack project and its summary is the import's rendering:
+`[<prefix>] <key> [<kind>]` cut to 250 code points (`store.YTArticleSummary`),
+or that and ` (분할 문서)` for the index of a document over 240 KiB
+(`store.YTArticleIndexSummary`). `internal/store/testdata` holds the golden,
+generated from `client.js` itself. Then:
+
+- one article, and its content's sha256 equals `documents.sha256`: `matched`;
+- one article with other content, or a split document's index: `sha_differs`,
+  bound with `needs_update` true;
+- none: `missing`; two or more: `ambiguous`, never bound.
+
+The whole article list is read once per run (id, idReadable, summary,
+project, parent; 100 a page), before the first document that needs a lookup
+and outside its 60 s budget. It is read twice, as `EnumerateStableComments`
+reads comments (decision-4): a YouTrack project whose articles (ids,
+summaries, parents) differ between the two reads, or repeat within one (an
+offset page shifted), binds nothing. Its documents are class `error` with
+reason `list_unstable`, the report sets `list_unstable: true` on it, and the
+command exits 1; run it again. Other projects proceed. The article is then read by one GET of
+`<SHORT>-A-<document id>`, the readable id the import's article key
+(`articleKey`, the document id) would give it. A project whose first such GET
+verifies keeps that lookup (`lookup: "readable_id"`); a document whose GET
+then misses falls back to the summary. A project whose first GET does not
+verify is matched by summary from here on (`lookup: "summary"`), and the
+matched article's content is read by id. On both paths a second top-level
+article of the project with the document's summary makes it `ambiguous`. 
+
+**A long rendering** is never bound (decisions 5 and 6 of hk 4053). This
+applies when the full rendering `[<prefix>] <key> [<kind>]` is 242 code
+points or longer (`store.YTArticleSummaryCut`, whose comment has the full
+argument). Below 242, both strings a document can match are shorter than 250:
+the summary is at most 241 and the index at most 249. Every cut rendering of
+any key is at least 250 (a cut summary is exactly 250, a cut index at least
+258), and an uncut rendering names one key, so a match is the document's own.
+From 242 on, a summary or index can equal another, longer key's cut summary,
+and neither a unique article nor equal content proves ownership, since two
+documents can share a body. Such a document is `ambiguous`, also counted
+under `summary_cut`, with no YouTrack read. It stays unbound, and Y5b puts it
+on its exception list rather than creating an article. Which lookup the live import allows is UNVERIFIED until
+the first preflight (hk 4053 report).
+
+**Commands.** Both open the database directly and verify against the tenant
+of `YOUTRACK_URL`; `--project` is an hk project, `/shared` or `/unassigned`.
+
+**Precondition.** No YouTrack article writer runs during a backfill: the
+import has ended (D3), and the legacy docs push (`youtrack sync`) is off. hk
+cannot fence YouTrack writes. The double read detects a writer during the
+enumeration but not after it, so an article created between the list and a
+binding is outside what the backfill checks.
+
+- `handoffkeep youtrack articles-preflight [--project P]` is read-only
+  (`store.OpenReadOnly`; exit 2 without migration `20261112-yt-article-bindings`).
+  The JSON report has, per project, its `lookup` and a count and up to 10
+  document ids for `bound`, `matched`, `sha_differs`, `missing`, `ambiguous` (and its subset `summary_cut`),
+  `excluded` and `error`. A bound or excluded document is classified without
+  a YouTrack read.
+- `handoffkeep youtrack articles-backfill [--project P] [--by NAME]` binds
+  every `matched` and `sha_differs` document and adds `bound_now`; a refused
+  publication counts as `ambiguous` and the run goes on. A re-run binds
+  nothing and reads nothing for a bound document.
+- Each read has 15 s and each document 60 s; the article list, read once, has 10 minutes. A document in
+  class `error` exits 1 after the report.
+
+**Audit.** `youtrack audit` (without `--task`) adds `documents`: the in-scope
+documents and those with no binding on its tenant (`unbound`, count and up to
+10 ids, in all and per project). It is a count for the document cutover; it
+does not change the audit's exit.
+
+**Migration** `20261112-yt-article-bindings` (expand-only, no `After`): the
+new table with its primary key and unique index. Locks only on the new, empty
+table; no foreign key. It writes no row, and the previous release neither
+reads nor writes the table.
+
 ## Kind issue_move (hk 4055)
 
 A task's hk project can change while its issue stays in the YouTrack project
