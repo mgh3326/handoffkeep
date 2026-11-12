@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -91,6 +92,20 @@ func ytFieldsModeFromEnv() (store.YTFieldsMode, error) {
 	}
 }
 
+// ytMovesModeFromEnv reads HANDOFFKEEP_YT_MOVES_MODE (hk 4111): unset or "off"
+// (the default) or "on", exactly like the fields mode. Any other value is an
+// error.
+func ytMovesModeFromEnv() (store.YTMovesMode, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_MOVES_MODE")); raw {
+	case "", string(store.YTMovesOff):
+		return store.YTMovesOff, nil
+	case string(store.YTMovesOn):
+		return store.YTMovesOn, nil
+	default:
+		return "", fmt.Errorf("HANDOFFKEEP_YT_MOVES_MODE=%q: want off or on", raw)
+	}
+}
+
 // ytDocCommentsModeFromEnv reads HANDOFFKEEP_YT_DOC_COMMENTS_MODE (hk 4xxx):
 // unset or "off" (the default) or "on", exactly like the fields mode. Any
 // other value is an error.
@@ -103,6 +118,31 @@ func ytDocCommentsModeFromEnv() (store.YTDocCommentsMode, error) {
 	default:
 		return "", fmt.Errorf("HANDOFFKEEP_YT_DOC_COMMENTS_MODE=%q: want off or on", raw)
 	}
+}
+
+// ytDecisionsModeFromEnv reads HANDOFFKEEP_YT_DECISIONS_MODE (hk 4054): unset
+// or "off" (the default) or "on", exactly like the issues mode. Any other
+// value is an error.
+func ytDecisionsModeFromEnv() (store.YTDecisionsMode, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_DECISIONS_MODE")); raw {
+	case "", string(store.YTDecisionsOff):
+		return store.YTDecisionsOff, nil
+	case string(store.YTDecisionsOn):
+		return store.YTDecisionsOn, nil
+	default:
+		return "", fmt.Errorf("HANDOFFKEEP_YT_DECISIONS_MODE=%q: want off or on", raw)
+	}
+}
+
+// ytDecisionsProjectTimeout bounds the one YouTrack read serve makes at start
+// in decisions mode on: the DEC project's id, which every decision_create op
+// targets (the feed calls no YouTrack).
+const ytDecisionsProjectTimeout = 10 * time.Second
+
+// ytDecisionsSetting is the decisions mode and, when on, the DEC project's id.
+type ytDecisionsSetting struct {
+	mode      store.YTDecisionsMode
+	projectID string
 }
 
 // ytCommentsCatchUpFromEnv reads HANDOFFKEEP_YT_COMMENTS_CATCHUP: unset or
@@ -124,9 +164,10 @@ func ytCommentsCatchUpFromEnv() (bool, error) {
 
 // ytCommentsWorkerFromEnv sets the store's gates and returns the write
 // dispatcher for serve's worker list, or nil when the comments, issues,
-// fields and document-comment modes are all off (which needs no YouTrack
-// configuration). Any on without YOUTRACK_URL and YOUTRACK_BOT_API_KEY is a
-// startup error, never a writer that silently does nothing.
+// fields, document-comment and decisions modes are all off (which needs no
+// YouTrack configuration). Any on without YOUTRACK_URL and
+// YOUTRACK_BOT_API_KEY is a startup error, never a writer that silently does
+// nothing; decisions mode on also reads the DEC project's id once.
 func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	mode, err := ytCommentsModeFromEnv()
 	if err != nil {
@@ -144,16 +185,29 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	if err != nil {
 		return nil, err
 	}
+	decisions, err := ytDecisionsModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	moves, err := ytMovesModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
 	catchUp, err := ytCommentsCatchUpFromEnv()
 	if err != nil {
 		return nil, err
 	}
-	if mode == store.YTCommentsOff && issues == store.YTIssuesOff && fields == store.YTFieldsOff && docs == store.YTDocCommentsOff {
+	if st != nil {
+		st.SetYTMovesMode(moves)
+	}
+	if mode == store.YTCommentsOff && issues == store.YTIssuesOff && fields == store.YTFieldsOff && docs == store.YTDocCommentsOff && decisions == store.YTDecisionsOff {
 		if st != nil {
 			st.SetYTCommentsMode(store.YTCommentsOff)
 			st.SetYTIssuesMode(store.YTIssuesOff, "")
 			st.SetYTFieldsMode(store.YTFieldsOff, "")
 			st.SetYTDocCommentsMode(store.YTDocCommentsOff)
+			st.SetYTDecisionsMode(store.YTDecisionsOff, "", "", "")
+			st.SetYTMovesMode(store.YTMovesOff)
 		}
 		return nil, nil
 	}
@@ -164,8 +218,10 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 		which = "HANDOFFKEEP_YT_ISSUES_MODE=" + string(issues)
 	case fields != store.YTFieldsOff:
 		which = "HANDOFFKEEP_YT_FIELDS_MODE=" + string(fields)
-	default:
+	case docs != store.YTDocCommentsOff:
 		which = "HANDOFFKEEP_YT_DOC_COMMENTS_MODE=" + string(docs)
+	default:
+		which = "HANDOFFKEEP_YT_DECISIONS_MODE=" + string(decisions)
 	}
 	baseURL := strings.TrimSpace(os.Getenv("YOUTRACK_URL"))
 	token := strings.TrimSpace(os.Getenv("YOUTRACK_BOT_API_KEY"))
@@ -180,7 +236,20 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 		return nil, err
 	}
 	remote := youtrack.NewWriteRemote(client)
-	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, docs, catchUp, nil)
+	dec := ytDecisionsSetting{mode: decisions}
+	if decisions == store.YTDecisionsOn {
+		// A decision_create op targets the DEC project by id, which only
+		// YouTrack knows; the feed that prepares the op calls no YouTrack,
+		// so the id is read once here. A failure stops the start, never a
+		// mode that silently prepares nothing.
+		ctx, cancel := context.WithTimeout(context.Background(), ytDecisionsProjectTimeout)
+		dec.projectID, err = client.ProjectID(ctx, youtrack.DecisionProject)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("%s: read the %s project: %w", "HANDOFFKEEP_YT_DECISIONS_MODE=on", youtrack.DecisionProject, err)
+		}
+	}
+	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, docs, dec, catchUp, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -188,11 +257,12 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 }
 
 // newYTWriteWorker sets the gates (the comments mode may be off when the
-// issues, fields or document-comment mode is on) and builds the dispatcher for
-// one tenant over remote. catchUp applies to the comments mode only.
-func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, comments store.YTCommentsMode, issues store.YTIssuesMode, fields store.YTFieldsMode, docs store.YTDocCommentsMode, catchUp bool, now func() time.Time) (ytCommentsWorker, error) {
-	if comments == store.YTCommentsOff && issues != store.YTIssuesOn && fields != store.YTFieldsOn && docs != store.YTDocCommentsOn {
-		return ytCommentsWorker{}, errors.New("the write worker runs with the comments, issues, fields or document-comment mode on")
+// issues, fields, document-comment or decisions mode is on) and builds the
+// dispatcher for one tenant over remote. catchUp applies to the comments mode
+// only.
+func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, comments store.YTCommentsMode, issues store.YTIssuesMode, fields store.YTFieldsMode, docs store.YTDocCommentsMode, decisions ytDecisionsSetting, catchUp bool, now func() time.Time) (ytCommentsWorker, error) {
+	if comments == store.YTCommentsOff && issues != store.YTIssuesOn && fields != store.YTFieldsOn && docs != store.YTDocCommentsOn && decisions.mode != store.YTDecisionsOn {
+		return ytCommentsWorker{}, errors.New("the write worker runs with the comments, issues, fields, document-comment or decisions mode on")
 	}
 	st.SetYTIssuesMode(issues, tenant)
 	log.Printf("ytwrite.issues_mode mode=%s tenant=%q", issues, tenant)
@@ -200,6 +270,8 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 	log.Printf("ytwrite.fields_mode mode=%s tenant=%q", fields, tenant)
 	st.SetYTDocCommentsMode(docs)
 	log.Printf("ytwrite.doc_comments_mode mode=%s tenant=%q", docs, tenant)
+	st.SetYTDecisionsMode(decisions.mode, tenant, decisions.projectID, youtrack.DecisionProject)
+	log.Printf("ytwrite.decisions_mode mode=%s tenant=%q project_id=%q", decisions.mode, tenant, decisions.projectID)
 	if comments != store.YTCommentsOff {
 		return newYTCommentsWorker(st, remote, tenant, comments, catchUp, now)
 	}
@@ -338,7 +410,7 @@ func (w ytOpsAlertWorker) Run(ctx context.Context) {
 	}
 }
 
-const youtrackOpsUsage = "usage: youtrack ops [--state pending|all|prepared|dispatched|applied|rejected|remote_unknown] [--task N] [--after-id N] [--limit N] | youtrack ops resolve <op id> --applied <youtrack id> [--adopted] | --not-applied --by <actor> --note <text>"
+const youtrackOpsUsage = "usage: youtrack ops [--state pending|all|prepared|dispatched|applied|rejected|remote_unknown] [--kind K] [--task N] [--after-id N] [--limit N] | youtrack ops resolve <op id> --applied <youtrack id> [--adopted] | --not-applied --by <actor> --note <text>"
 
 // youtrackOpsCmd is `youtrack ops` (also `yt ops`): the write-protocol ops
 // through GET /v1/yt/ops. remote_unknown shows status pending, never done.
@@ -350,10 +422,11 @@ func youtrackOpsCmd(args []string, out io.Writer) error {
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
 	state := fs.String("state", "pending", "pending (default), all, or one lifecycle state")
+	kind := fs.String("kind", "", "only ops of this kind (comment_append, issue_create, issue_fields, ...)")
 	task := fs.Int64("task", 0, "only ops of this task")
 	after := fs.Int64("after-id", 0, "ops with id greater than this")
 	limit := fs.Int("limit", 100, "maximum results")
-	ordered, err := splitArgs(args, "state", "task", "after-id", "limit", "url", "token")
+	ordered, err := splitArgs(args, "state", "kind", "task", "after-id", "limit", "url", "token")
 	if err != nil {
 		return err
 	}
@@ -366,6 +439,9 @@ func youtrackOpsCmd(args []string, out io.Writer) error {
 	if s := *state; s != "pending" && s != "all" && !ytwrite.State(s).Valid() {
 		return fmt.Errorf("unknown --state %q; %s", s, youtrackOpsUsage)
 	}
+	if *kind != "" && !slices.Contains(ytwrite.RegisteredKinds(), *kind) {
+		return fmt.Errorf("unknown --kind %q; %s", *kind, youtrackOpsUsage)
+	}
 	if *task < 0 || *after < 0 || *limit < 1 || *limit > store.YTOpListMax {
 		return errors.New(youtrackOpsUsage)
 	}
@@ -374,7 +450,7 @@ func youtrackOpsCmd(args []string, out io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	ops, next, err := c.ListYTOps(ctx, *state, *task, *after, *limit)
+	ops, next, err := c.ListYTOps(ctx, *state, *kind, *task, *after, *limit)
 	if err != nil {
 		return err
 	}
@@ -444,7 +520,7 @@ func youtrackOpsResolveCmd(args []string, out io.Writer) error {
 // ytOpIsIssueCreate reads whether op id is an issue_create op. An op the
 // listing does not return is not one; the server answers the resolution.
 func ytOpIsIssueCreate(ctx context.Context, c remote.Client, id int64) (bool, error) {
-	ops, _, err := c.ListYTOps(ctx, "all", 0, id-1, 1)
+	ops, _, err := c.ListYTOps(ctx, "all", "", 0, id-1, 1)
 	if err != nil {
 		return false, err
 	}
@@ -1011,6 +1087,11 @@ func youtrackFieldsBackfillCmd(args []string, out io.Writer) error {
 	}
 	defer st.Close()
 	st.SetYTFieldsMode(mode, tenant)
+	moves, err := ytMovesModeFromEnv()
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	st.SetYTMovesMode(moves)
 	report, err := st.BackfillYTFieldsOps(context.Background(), store.YTFieldsBackfillOptions{
 		Project: strings.TrimSpace(*project), TaskID: *task, Limit: *limit, DryRun: *dryRun})
 	if err != nil {
