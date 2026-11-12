@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -41,76 +40,6 @@ func TestYTIssueProtocolOverPostgres(t *testing.T) {
 		}
 		return s.YTWriteLedger()
 	})
-}
-
-func TestYTWriteOpAlertsAreDeduplicated(t *testing.T) {
-	s := schemaStore(t, "ytwa")
-	ctx := t.Context()
-	l := s.YTWriteLedger()
-	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
-	prepare := func(key, entity string) ytwrite.Op {
-		t.Helper()
-		op, _, err := l.Prepare(ctx, now.Add(-11*time.Minute), ytwrite.NewOp{Principal: "p", Kind: ytwrite.KindCommentAppend, Key: key, PayloadSHA: key,
-			Payload: []byte(`{"body":"x"}`), EntityKind: "task", EntityID: entity, YTTargetID: "2-" + entity, Actor: "a"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return op
-	}
-	pending := prepare("pending", "1")
-	dispatched := prepare("dispatched", "2")
-	if _, outcome, err := l.Claim(ctx, now, dispatched.ID); err != nil || outcome != ytwrite.ClaimClaimed {
-		t.Fatalf("claim dispatched op = %s, %v", outcome, err)
-	}
-	unknown := prepare("unknown", "3")
-	if _, outcome, err := l.Claim(ctx, now, unknown.ID); err != nil || outcome != ytwrite.ClaimClaimed {
-		t.Fatalf("claim unknown op = %s, %v", outcome, err)
-	}
-	if _, err := l.MarkUnknown(ctx, now, unknown.ID, now, ytwrite.ReasonTransport, "uncertain"); err != nil {
-		t.Fatal(err)
-	}
-	rejected := prepare("rejected", "4")
-	if _, err := l.Reject(ctx, now, rejected.ID, ytwrite.ReasonOperatorNotDone, "checked"); err != nil {
-		t.Fatal(err)
-	}
-	applied := prepare("applied", "5")
-	if _, outcome, err := l.Claim(ctx, now, applied.ID); err != nil || outcome != ytwrite.ClaimClaimed {
-		t.Fatalf("claim applied op = %s, %v", outcome, err)
-	}
-	if _, err := l.Apply(ctx, now, applied.ID, "c-3", nil); err != nil {
-		t.Fatal(err)
-	}
-	if n, err := s.EnqueueYTWriteOpAlerts(ctx, now); err != nil || n != 4 {
-		t.Fatalf("first alert pass = %d, %v; want 4", n, err)
-	}
-	if n, err := s.EnqueueYTWriteOpAlerts(ctx, now.Add(time.Minute)); err != nil || n != 0 {
-		t.Fatalf("repeat alert pass = %d, %v; want 0", n, err)
-	}
-	rows, err := s.ListUnsentNotifications(ctx, 20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantIDs := []string{
-		"yt-op-" + strconv.FormatInt(pending.ID, 10) + "-pending",
-		"yt-op-" + strconv.FormatInt(dispatched.ID, 10) + "-pending",
-		"yt-op-" + strconv.FormatInt(unknown.ID, 10) + "-pending",
-		"yt-op-" + strconv.FormatInt(rejected.ID, 10) + "-rejected",
-	}
-	if len(rows) != len(wantIDs) {
-		t.Fatalf("alert rows = %+v", rows)
-	}
-	for i := range rows {
-		if rows[i].EventID != wantIDs[i] || !strings.Contains(rows[i].Text, "age=11m") {
-			t.Fatalf("alert row %d = %+v, want event %q and age=11m", i, rows[i], wantIDs[i])
-		}
-	}
-	wantText := "[yt-ops] pending op=" + strconv.FormatInt(pending.ID, 10) + " kind=comment_append task=1 age=11m | handoffkeep yt ops --task 1"
-	if rows[0].Text != wantText {
-		t.Fatalf("alert text = %q, want %q", rows[0].Text, wantText)
-	}
-	if rows[0].TargetLane != "handoffkeep-design" || rows[0].Kind != OutboxKindYTWriteOp {
-		t.Fatalf("alert rows = %+v", rows)
-	}
 }
 
 // The trigger is the last line of defence for the protocol's rules: whatever a

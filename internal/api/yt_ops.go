@@ -11,12 +11,20 @@ import (
 
 // ytOps is GET /v1/yt/ops: the YouTrack write ops (slice b1a) for the
 // operator to watch. Query: state (a lifecycle state, "pending" — the default:
-// prepared, dispatched and remote_unknown — or "all"), task, after_id, limit.
-// Each op is a ytwrite.OpView: no body, no raw error, no key; remote_unknown
-// reads as pending, never done. next_after_id is set when the page is full.
+// prepared, dispatched and remote_unknown — or "all"), kind (an op kind, empty
+// for all), task, after_id, limit. Each op is a ytwrite.OpView: no body, no
+// key; last_error (the detail behind reason) only for the operator's client. remote_unknown reads as
+// pending, never done. next_after_id is set when the page is full.
 func (s Server) ytOps(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth(w, r); !ok {
+	client, ok := s.auth(w, r)
+	if !ok {
 		return
+	}
+	// last_error is raw remote or operator detail: only the operator's client
+	// gets it.
+	view := ytwrite.ViewOf
+	if client == operatorClientID {
+		view = ytwrite.OperatorViewOf
 	}
 	q := r.URL.Query()
 	limit, err := queryLimit(r, 100, store.YTOpListMax)
@@ -37,14 +45,14 @@ func (s Server) ytOps(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	ops, err := s.Service.Store.ListYTWriteOps(r.Context(), store.YTOpFilter{State: q.Get("state"), TaskID: task, AfterID: after, Limit: limit})
+	ops, err := s.Service.Store.ListYTWriteOps(r.Context(), store.YTOpFilter{State: q.Get("state"), Kind: q.Get("kind"), TaskID: task, AfterID: after, Limit: limit})
 	if err != nil {
 		appErr(w, r, err)
 		return
 	}
 	views := make([]ytwrite.OpView, 0, len(ops))
 	for _, op := range ops {
-		views = append(views, ytwrite.ViewOf(op))
+		views = append(views, view(op))
 	}
 	var next any
 	if len(ops) == limit {

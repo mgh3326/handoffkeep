@@ -75,6 +75,8 @@ type FakeYouTrack struct {
 	updates    []ytwrite.IssueFieldsUpdate
 	reads      int
 	readFaults []error
+	// moves are the MoveIssueToProject calls received, in order (fake_move.go).
+	moves []FakeMove
 
 	// delayedIssues are the creates a DelayCommit fault held back.
 	delayedIssues []ytwrite.IssueCreate

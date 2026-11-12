@@ -256,7 +256,8 @@ package store
 //     task it just inserted, which no other transaction can hold yet, then
 //     inserts the op row. Apply of an issue_create op takes the task's lane
 //     lock first (as Claim does), then FOR UPDATE on the op row, then inserts
-//     the task's yt_entity_map row and its yt_task_bindings row. That insert
+//     the task's yt_entity_map row and its yt_task_bindings row (an issue_move
+//     op takes the same lane lock and updates that binding's project). That insert
 //     can wait for an uncommitted binding of AddYTTaskBinding, which holds
 //     its own task's lane lock and never waits for an op row or a second
 //     lane lock, so the wait cannot close a cycle. Apply takes no ownership
@@ -278,6 +279,10 @@ package store
 //     locks a cursor or snapshot-state row, and a handler takes no task row,
 //     no level 2-5 lock and no comment lock. The pruned alert inserts a new
 //     notification_outbox key (ON CONFLICT DO NOTHING).
+//     The op alert pass (EnqueueYTWriteOpAlerts, hk 4056) takes the advisory
+//     lock hashtextextended('yt_write_op_alerts', 0) first, then FOR SHARE on
+//     the yt_write_ops rows it reads, then inserts notification_outbox and
+//     yt_write_op_alerts rows (ON CONFLICT DO NOTHING); it takes no lane lock.
 //     The issue_fields backfill (BackfillYTFieldsOps, hk 4022) runs one
 //     task per transaction: that task's lane lock first, then what a handler
 //     does for it (its snapshot-state row, then yt_write_ops rows). It holds
