@@ -56,9 +56,9 @@ func TestYTDecisionsBackfillBindsOnlyVerified(t *testing.T) {
 	}
 	defer st.Close()
 	ids := map[string]int64{}
-	for _, qid := range []string{"verified", "summary", "field", "project", "missing", "error"} {
+	for i, qid := range []string{"verified", "summary", "field", "project", "missing", "error", "legacy"} {
 		lane := "ytd-cmd-" + qid
-		if _, _, err := st.UpsertChatQuestion(ctx, store.ChatQuestion{ID: "Q-YTD-CMD-" + qid, Lane: lane, Body: qid + "?"}); err != nil {
+		if _, _, err := st.UpsertChatQuestion(ctx, store.ChatQuestion{ID: fmt.Sprintf("Q-20261112-%02d", 10+i), Lane: lane, Body: qid + "?"}); err != nil {
 			t.Fatal(err)
 		}
 		rows, err := st.ListDecisionRecords(ctx, store.DecisionRecordFilter{Source: store.DecisionSourceChat, Lane: lane, Limit: 10}, time.Now().UTC())
@@ -73,14 +73,24 @@ func TestYTDecisionsBackfillBindsOnlyVerified(t *testing.T) {
 		youtrack.DecisionReadable(ids["summary"]):  ytdIssue("2-2", ids["summary"], "[결정] other", ids["summary"], ytdCmdProject),
 		youtrack.DecisionReadable(ids["field"]):    ytdIssue("2-3", ids["field"], sum("field"), ids["field"]+1000, ytdCmdProject),
 		youtrack.DecisionReadable(ids["project"]):  ytdIssue("2-4", ids["project"], sum("project"), ids["project"], "0-99"),
+		// The legacy sync's issue: its own number and summary form, found
+		// through youtrack_decision_mirrors.
+		"2-9": func() youtrack.Issue {
+			i := ytdIssue("2-9", ids["legacy"], "[결정 "+strconv.FormatInt(ids["legacy"], 10)+"] legacy?", ids["legacy"], ytdCmdProject)
+			i.IDReadable = "DEC-9001"
+			return i
+		}(),
 	}, errs: map[string]error{youtrack.DecisionReadable(ids["error"]): errors.New("connection reset")}}
+	if err := st.PutYouTrackDecisionMirror(ctx, store.YouTrackDecisionMirror{DecisionID: ids["legacy"], IssueID: "2-9", DisplayRef: "DEC-9001", Stamp: "x"}); err != nil {
+		t.Fatal(err)
+	}
 	opts := ytDecisionsOptions{Tenant: "tenant.youtrack.cloud", ProjectID: ytdCmdProject, BindBy: "operator:test", Snapshots: "off"}
 
 	pre, err := ytDecisionsBackfillRun(ctx, st, fake, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pre.Checked != 6 || pre.Verified.Count != 1 || pre.Bound.Count != 0 || pre.Mismatch.Count != 3 || pre.Missing.Count != 1 || pre.Error.Count != 1 {
+	if pre.Checked != 7 || pre.Verified.Count != 2 || pre.Legacy.Count != 1 || pre.Bound.Count != 0 || pre.Mismatch.Count != 3 || pre.Missing.Count != 1 || pre.Error.Count != 1 {
 		t.Fatalf("preflight %+v", pre)
 	}
 	if _, found, _ := st.YTDecisionBinding(ctx, ids["verified"]); found {
@@ -92,8 +102,11 @@ func TestYTDecisionsBackfillBindsOnlyVerified(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Bound.Count != 1 || got.Bound.IDs[0] != ids["verified"] || got.Mismatch.Count != 3 || len(got.Reasons) != 3 {
+	if got.Bound.Count != 2 || got.Bound.IDs[0] != ids["verified"] || got.Bound.IDs[1] != ids["legacy"] || got.Mismatch.Count != 3 || len(got.Reasons) != 3 {
 		t.Fatalf("apply %+v", got)
+	}
+	if b, found, err := st.YTDecisionBinding(ctx, ids["legacy"]); err != nil || !found || b.IssueID != "2-9" || b.IssueReadable != "DEC-9001" {
+		t.Fatalf("legacy binding %+v %v %v", b, found, err)
 	}
 	b, found, err := st.YTDecisionBinding(ctx, ids["verified"])
 	if err != nil || !found || b.IssueID != "2-1" || b.Origin != "import_verified" || b.IssueReadable != youtrack.DecisionReadable(ids["verified"]) || b.ProjectID != ytdCmdProject {

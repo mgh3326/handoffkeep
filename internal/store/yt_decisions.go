@@ -339,7 +339,8 @@ func decisionFeedIDs(rows []FeedRow) []int64 {
 
 // ytDecisionsHandler is the decision_issues consumer's handler for one pass at
 // now. Mode off does nothing (the cursor advances). Otherwise each changed
-// decision, in sync_id order, goes through prepareYTDecisionTx.
+// decision, in sync_id order, is read under its lane lock and goes through
+// prepareYTDecisionTx.
 func ytDecisionsHandler(s *Store, now time.Time) FeedHandler {
 	return func(ctx context.Context, tx pgx.Tx, rows []FeedRow) error {
 		g, on := s.ytDecisionsNow()
@@ -350,12 +351,20 @@ func ytDecisionsHandler(s *Store, now time.Time) FeedHandler {
 		if len(ids) == 0 {
 			return nil
 		}
-		decisions, err := readYTDecisionRows(ctx, tx, ids, now)
-		if err != nil {
-			return err
-		}
 		counts := map[ytDecisionOutcome]int{}
 		for _, id := range ids {
+			// The decision is read under its lane lock, the lock
+			// BindYTDecision and a create's Apply publish a binding under:
+			// a binding committed before this read is seen, and one after
+			// it waits for this pass, whose create op it then refuses to
+			// race (ErrYTDecisionOpPending).
+			if err := lockYTEntity(ctx, tx, ytwrite.DecisionEntity, strconv.FormatInt(id, 10)); err != nil {
+				return err
+			}
+			decisions, err := readYTDecisionRows(ctx, tx, []int64{id}, now)
+			if err != nil {
+				return err
+			}
 			outcome, err := prepareYTDecisionTx(ctx, tx, now, g, id, decisions[id])
 			if err != nil {
 				return err

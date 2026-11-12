@@ -97,15 +97,21 @@ func TestVerifyDecisionIssue(t *testing.T) {
 		return Issue{ID: "2-1", IDReadable: "DEC-40", Summary: "D-40 질문", Project: &ProjectRef{ID: "0-12"},
 			CustomFields: []IssueField{{Name: "결정 ID", Value: json.RawMessage(`40`)}}}
 	}
-	if reason := VerifyDecisionIssue(good(), 40, "0-12"); reason != "" {
+	if reason := VerifyDecisionIssue(good(), 40, "0-12", "DEC-40"); reason != "" {
 		t.Fatalf("good issue refused: %s", reason)
+	}
+	// The legacy mirror's issue: its own readable id and summary form.
+	legacy := good()
+	legacy.IDReadable, legacy.Summary = "DEC-7", "[결정 40] 질문"
+	if reason := VerifyDecisionIssue(legacy, 40, "0-12", ""); reason != "" {
+		t.Fatalf("legacy issue refused: %s", reason)
 	}
 	for name, edit := range map[string]func(*Issue){
 		"readable":    func(i *Issue) { i.IDReadable = "DEC-41" },
 		"project":     func(i *Issue) { i.Project = &ProjectRef{ID: "0-9"} },
 		"no_project":  func(i *Issue) { i.Project = nil },
 		"summary":     func(i *Issue) { i.Summary = "D-400 질문" },
-		"legacy":      func(i *Issue) { i.Summary = "[결정 40] 질문" },
+		"unnamed":     func(i *Issue) { i.Summary = "결정 40 질문" },
 		"field":       func(i *Issue) { i.CustomFields[0].Value = json.RawMessage(`41`) },
 		"field_null":  func(i *Issue) { i.CustomFields[0].Value = json.RawMessage(`null`) },
 		"field_none":  func(i *Issue) { i.CustomFields = nil },
@@ -113,7 +119,7 @@ func TestVerifyDecisionIssue(t *testing.T) {
 	} {
 		i := good()
 		edit(&i)
-		if reason := VerifyDecisionIssue(i, 40, "0-12"); reason == "" {
+		if reason := VerifyDecisionIssue(i, 40, "0-12", "DEC-40"); reason == "" {
 			t.Errorf("%s: verified", name)
 		}
 	}

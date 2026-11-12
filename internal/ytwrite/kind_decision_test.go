@@ -124,7 +124,8 @@ func TestParseDecisionRefusesOtherText(t *testing.T) {
 }
 
 func TestSummaryNamesDecision(t *testing.T) {
-	for summary, want := range map[string]bool{"D-37 q": true, "D-37": true, "D-3 q": false, "D-370 q": false, "#37 q": false, "D-37\tq": true} {
+	for summary, want := range map[string]bool{"D-37 q": true, "D-37": true, "D-3 q": false, "D-370 q": false, "#37 q": false, "D-37\tq": true,
+		"[결정 37] q": true, "[결정 37]": true, "[결정 370] q": false, "[결정 3] q": false, "[결정 37]q": false, "결정 37 q": false} {
 		if got := ytwrite.SummaryNamesDecision(summary, 37); got != want {
 			t.Fatalf("SummaryNamesDecision(%q) = %v", summary, got)
 		}
@@ -199,6 +200,20 @@ func TestDecisionCreateAdoptsTheImportedIssue(t *testing.T) {
 	e.wantMap(got, imported, true)
 }
 
+// The legacy `youtrack sync` mirror's issue ("[결정 <id>] ...", a readable
+// id of its own) is the decision's issue too: adopted, not ambiguous.
+func TestDecisionCreateAdoptsTheLegacyMirrorIssue(t *testing.T) {
+	e := newDecisionEnv(t)
+	legacy := e.yt.InjectDecisionIssue(decProject, decisionID, "[결정 4054] 질문 첫 줄", "legacy body")
+	op := e.prepareCreate()
+	e.drive()
+	got := e.want(op.ID, ytwrite.StateApplied, "")
+	if got.YTResultID != legacy || e.yt.Calls() != 0 {
+		t.Fatalf("op %+v creates %d", got, e.yt.Calls())
+	}
+	e.wantMap(got, legacy, true)
+}
+
 func TestDecisionCreateAmbiguousSendsNothing(t *testing.T) {
 	for name, inject := range map[string]func(*ytwritetest.FakeYouTrack){
 		"two": func(yt *ytwritetest.FakeYouTrack) {
@@ -206,6 +221,10 @@ func TestDecisionCreateAmbiguousSendsNothing(t *testing.T) {
 			yt.InjectDecisionIssue(decProject, decisionID, "D-4054 b", "")
 		},
 		"not_named": func(yt *ytwritetest.FakeYouTrack) {
+			yt.InjectDecisionIssue(decProject, decisionID, "결정 4054 unnamed", "")
+		},
+		"legacy_and_import": func(yt *ytwritetest.FakeYouTrack) {
+			yt.InjectDecisionIssue(decProject, decisionID, "D-4054 import", "")
 			yt.InjectDecisionIssue(decProject, decisionID, "[결정 4054] legacy", "")
 		},
 	} {

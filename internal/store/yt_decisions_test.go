@@ -99,7 +99,7 @@ func ytdecField(p ytwrite.IssueFieldsPayload, name string) string {
 func TestYTDecisionsNewThenAnswerThenUnchanged(t *testing.T) {
 	s := ytdecSetup(t, "ytd_flow", true)
 	long := strings.Repeat("질문 전문이 YouTrack 에 그대로 간다. ", 20)
-	id := ytdecChat(t, s, "Q-YTD-1", long)
+	id := ytdecChat(t, s, "Q-20261112-01", long)
 	ytdecPass(t, s)
 	creates := ytdecOps(t, s, ytwrite.KindDecisionCreate, id)
 	if len(creates) != 1 || len(ytdecOps(t, s, ytwrite.KindDecisionFields, id)) != 0 {
@@ -155,7 +155,7 @@ func TestYTDecisionsNewThenAnswerThenUnchanged(t *testing.T) {
 	}
 
 	// The answer: one fields op with the answered state and who answered.
-	if _, err := s.TransitionChatQuestion(t.Context(), "Q-YTD-1", "resolved", "desk"); err != nil {
+	if _, err := s.TransitionChatQuestion(t.Context(), "Q-20261112-01", "resolved", "desk"); err != nil {
 		t.Fatal(err)
 	}
 	ytdecPass(t, s)
@@ -175,7 +175,7 @@ func TestYTDecisionsNewThenAnswerThenUnchanged(t *testing.T) {
 
 func TestYTDecisionsModeOffPreparesNothing(t *testing.T) {
 	s := ytdecSetup(t, "ytd_off", false)
-	id := ytdecChat(t, s, "Q-YTD-OFF", "off?")
+	id := ytdecChat(t, s, "Q-20261112-02", "off?")
 	pass := ytdecPass(t, s)
 	if pass.Read == 0 || pass.Cursor != ytFeedMaxSyncID(t, s) {
 		t.Fatalf("pass %+v", pass)
@@ -185,10 +185,10 @@ func TestYTDecisionsModeOffPreparesNothing(t *testing.T) {
 	}
 	// Mode off admits nothing either: an op prepared earlier is held.
 	s.SetYTDecisionsMode(YTDecisionsOn, ytcTenant, ytdecProjectID, "DEC")
-	ytdecChat(t, s, "Q-YTD-OFF-2", "on now")
+	ytdecChat(t, s, "Q-20261112-03", "on now")
 	ytdecPass(t, s)
 	var op ytwrite.Op
-	for _, r := range decisionRowsOf(t, s, DecisionSourceChat, "Q-YTD-OFF-2") {
+	for _, r := range decisionRowsOf(t, s, DecisionSourceChat, "Q-20261112-03") {
 		op = ytdecOps(t, s, ytwrite.KindDecisionCreate, r.ID)[0]
 	}
 	s.SetYTDecisionsMode(YTDecisionsOff, "", "", "")
@@ -238,9 +238,9 @@ func TestYTDecisionsResolveEmitsFeedRow(t *testing.T) {
 	}
 
 	// A chat answer touches no task, and is journaled all the same.
-	chat := ytdecChat(t, s, "Q-YTD-CHAT", "chat?")
+	chat := ytdecChat(t, s, "Q-20261112-04", "chat?")
 	mid := ytFeedMaxSyncID(t, s)
-	if _, err := s.TransitionChatQuestion(t.Context(), "Q-YTD-CHAT", "resolved", "desk"); err != nil {
+	if _, err := s.TransitionChatQuestion(t.Context(), "Q-20261112-04", "resolved", "desk"); err != nil {
 		t.Fatal(err)
 	}
 	var models []string
@@ -269,8 +269,8 @@ func TestYTDecisionsBackfillBinding(t *testing.T) {
 	ctx := t.Context()
 	now := time.Now().UTC()
 	s.SetYTDecisionsMode(YTDecisionsOff, "", "", "")
-	a := ytdecChat(t, s, "Q-YTD-A", "a?")
-	other := ytdecChat(t, s, "Q-YTD-B", "b?")
+	a := ytdecChat(t, s, "Q-20261112-05", "a?")
+	other := ytdecChat(t, s, "Q-20261112-06", "b?")
 	ytdecPass(t, s) // mode off: no create op
 	s.SetYTDecisionsMode(YTDecisionsOn, ytcTenant, ytdecProjectID, "DEC")
 
@@ -309,7 +309,7 @@ func TestYTDecisionsBackfillBinding(t *testing.T) {
 	}
 	// A bound decision's create is held by the gate, and its changes go to
 	// the snapshot.
-	if _, err := s.TransitionChatQuestion(ctx, "Q-YTD-A", "resolved", "desk"); err != nil {
+	if _, err := s.TransitionChatQuestion(ctx, "Q-20261112-05", "resolved", "desk"); err != nil {
 		t.Fatal(err)
 	}
 	ytdecPass(t, s)
@@ -319,7 +319,7 @@ func TestYTDecisionsBackfillBinding(t *testing.T) {
 
 	// The other decision gets its create op from the feed: the backfill
 	// then refuses to race it.
-	if _, err := s.TransitionChatQuestion(ctx, "Q-YTD-B", "resolved", "desk"); err != nil {
+	if _, err := s.TransitionChatQuestion(ctx, "Q-20261112-06", "resolved", "desk"); err != nil {
 		t.Fatal(err)
 	}
 	ytdecPass(t, s)
@@ -338,7 +338,7 @@ func TestYTDecisionsCreateConflictAndGuard(t *testing.T) {
 	s := ytdecSetup(t, "ytd_conflict", true)
 	ctx := t.Context()
 	now := time.Now().UTC()
-	id := ytdecChat(t, s, "Q-YTD-C", "c?")
+	id := ytdecChat(t, s, "Q-20261112-07", "c?")
 	ytdecPass(t, s)
 	op := ytdecOps(t, s, ytwrite.KindDecisionCreate, id)[0]
 	// The guard: a resolver that marks the op applied without the binding

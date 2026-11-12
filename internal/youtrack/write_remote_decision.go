@@ -100,21 +100,23 @@ func DecisionReadable(decisionID int64) string {
 	return DecisionProject + "-" + strconv.FormatInt(decisionID, 10)
 }
 
-// VerifyDecisionIssue explains why an issue is not the imported DEC issue of
-// decision decisionID ("" when it is): its readable id is DEC-<id>, it is in
-// the DEC project (decProjectID), its summary names the decision ("D-<id>"
-// then a space or the end), and its 결정 ID field equals the id (hk 3833
-// §2.1). `youtrack decisions-backfill` binds only an issue this accepts.
-func VerifyDecisionIssue(issue Issue, decisionID int64, decProjectID string) string {
+// VerifyDecisionIssue explains why an issue is not the DEC issue of decision
+// decisionID ("" when it is): its readable id is wantReadable (the import's
+// DEC-<id>; "" for the legacy mirror's issue, whose number YouTrack chose), it
+// is in the DEC project (decProjectID), its summary names the decision
+// ("D-<id>" or the legacy "[결정 <id>]", then a space or the end), and its
+// 결정 ID field equals the id (hk 3833 §2.1). `youtrack decisions-backfill`
+// binds only an issue this accepts.
+func VerifyDecisionIssue(issue Issue, decisionID int64, decProjectID, wantReadable string) string {
 	switch {
 	case issue.ID == "":
 		return "no issue id"
-	case issue.IDReadable != DecisionReadable(decisionID):
-		return fmt.Sprintf("readable id %q is not %s", issue.IDReadable, DecisionReadable(decisionID))
+	case wantReadable != "" && issue.IDReadable != wantReadable:
+		return fmt.Sprintf("readable id %q is not %s", issue.IDReadable, wantReadable)
 	case issue.Project == nil || issue.Project.ID != decProjectID:
 		return "not in the " + DecisionProject + " project"
 	case !ytwrite.SummaryNamesDecision(issue.Summary, decisionID):
-		return fmt.Sprintf("summary %q does not start with D-%d", truncateRunes(issue.Summary, 80), decisionID)
+		return fmt.Sprintf("summary %q does not name decision %d", truncateRunes(issue.Summary, 80), decisionID)
 	}
 	f, ok := IssueFieldByName(issue.CustomFields, ytwrite.FieldDecisionID)
 	if !ok {

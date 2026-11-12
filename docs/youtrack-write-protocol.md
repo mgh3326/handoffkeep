@@ -989,7 +989,8 @@ clears.
 **Send.** `decision_create`: the project's fields (one admin GET; without
 `hk ID` or `결정 ID` the op is held `not_sent`), then the DEC issues with
 `결정 ID` = id (one GET). Exactly one whose summary names the decision
-(`D-<id>` then a space or the end) is adopted, no POST; any other hit is
+(the import's `D-<id>` or the legacy `youtrack sync` mirror's `[결정 <id>]`,
+then a space or the end) is adopted, no POST; any other hit is
 `rejected / ambiguous_issue`; none is exactly one POST with the project,
 summary, description and only `hk ID` and `결정 ID`. `decision_fields` is the
 `issue_fields` write on a decision lane (one admin GET, one POST, the same
@@ -1014,7 +1015,11 @@ binding. `handoffkeep youtrack decisions-backfill [--apply] [--by NAME]
 [--limit N]` checks every unbound decision: one GET of `DEC-<id>`, bound
 only when its readable id is `DEC-<id>`, it is in the DEC project, its
 summary names the decision and its `결정 ID` equals the id
-(`youtrack.VerifyDecisionIssue`), with `origin = 'import_verified'`. Without
+(`youtrack.VerifyDecisionIssue`), with `origin = 'import_verified'`. When
+that issue is missing or does not verify and the legacy sync recorded another
+issue for the decision (`youtrack_decision_mirrors`), that issue is read and
+bound under the same rules except the readable id, which YouTrack chose
+(`verified_legacy` in the report). Without
 `--apply` it is the preflight: the database is opened read-only and nothing
 is written. A decision whose `decision_create` is unresolved is refused
 (`pending_op`). With the mode on in the command's environment, each new

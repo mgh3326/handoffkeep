@@ -358,18 +358,23 @@ func DecisionSummary(decisionID int64, question string) string {
 	return strings.TrimRight(truncateRunes("D-"+strconv.FormatInt(decisionID, 10)+" "+oneLine(question), IssueSummaryLimit), " ")
 }
 
-// SummaryNamesDecision reports whether a summary names the decision: "D-<id>"
-// then a space or the end ("D-37" does not name decision 3).
+// SummaryNamesDecision reports whether a summary names the decision, in the
+// import's form "D-<id>" or the legacy `youtrack sync` mirror's
+// "[결정 <id>]", then a space or the end ("D-37" does not name decision 3).
 func SummaryNamesDecision(summary string, decisionID int64) bool {
-	rest, ok := strings.CutPrefix(summary, "D-"+strconv.FormatInt(decisionID, 10))
-	if !ok {
-		return false
+	id := strconv.FormatInt(decisionID, 10)
+	for _, prefix := range []string{"D-" + id, "[결정 " + id + "]"} {
+		rest, ok := strings.CutPrefix(summary, prefix)
+		if !ok {
+			continue
+		}
+		if rest == "" {
+			return true
+		}
+		r, _ := utf8.DecodeRuneInString(rest)
+		return unicode.IsSpace(r)
 	}
-	if rest == "" {
-		return true
-	}
-	r, _ := utf8.DecodeRuneInString(rest)
-	return unicode.IsSpace(r)
+	return false
 }
 
 // checkDecisionText explains why a decision's text cannot be written: no
@@ -618,7 +623,8 @@ func (decisionCreate) Render(op Op) (string, error) {
 
 // Send checks the project's fields, then looks for the decision's issue and
 // writes only when there is none: exactly one issue with the decision's 결정
-// ID whose summary names it (the import's DEC-<id>) is adopted (no POST); any
+// ID whose summary names it (the import's DEC-<id>, or the legacy mirror's
+// "[결정 <id>]" issue) is adopted (no POST); any
 // other hit is ambiguous_issue (no POST); no hit is exactly one create with
 // the summary, the description and only the hk ID and 결정 ID fields.
 func (decisionCreate) Send(ctx context.Context, remote Remote, op Op, text string) (string, error) {

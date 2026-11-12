@@ -284,7 +284,8 @@ package store
 //
 //   - Decision mode (yt_decisions.go, hk 4054). Its lanes are decisions
 //     (yt_write_entity:decision:<id>), which no task writer or comment
-//     writer takes. The feed handler (decision_issues) takes them as above.
+//     writer takes. The feed handler (decision_issues) takes them as above,
+//     each before it reads that decision's binding and create op.
 //     Apply of a decision_create op takes the decision's lane lock first,
 //     then FOR UPDATE on the op row, then inserts the decision's
 //     yt_entity_map and yt_decision_bindings rows and may prepare its first

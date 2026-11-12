@@ -15,7 +15,8 @@ import (
 )
 
 // `youtrack decisions-backfill` (hk 4054): bind each decision's imported
-// DEC-<id> issue after verifying it (hk 3833 §2.1), so its decision_fields
+// DEC-<id> issue, or the issue the legacy `youtrack sync` mirrored it to,
+// after verifying it (hk 3833 §2.1), so its decision_fields
 // snapshots have a target and its full text reaches the issue. Read-only by
 // default (the preflight); --apply binds.
 
@@ -43,8 +44,9 @@ type ytDecisionsMismatch struct {
 	Reason string `json:"reason"`
 }
 
-// ytDecisionsReport is what one run found. Verified: the DEC-<id> issue
-// verifies (in --apply, it was bound now); Bound: --apply published the
+// ytDecisionsReport is what one run found. Verified: the DEC-<id> issue, or
+// the legacy mirror's issue (also counted in Legacy), verifies (in --apply,
+// it was bound now); Bound: --apply published the
 // binding; Missing: no DEC-<id> issue; Mismatch: an issue that fails the
 // verification (never bound); PendingOp: the decision's decision_create op is
 // unresolved (the op gives it its issue); Conflict: the binding was refused
@@ -57,6 +59,7 @@ type ytDecisionsReport struct {
 	Snapshots  string                `json:"snapshots"`
 	Checked    int                   `json:"checked"`
 	Verified   ytDecisionsClass      `json:"verified"`
+	Legacy     ytDecisionsClass      `json:"verified_legacy"`
 	Bound      ytDecisionsClass      `json:"bound"`
 	Missing    ytDecisionsClass      `json:"missing"`
 	Mismatch   ytDecisionsClass      `json:"mismatch"`
@@ -76,6 +79,7 @@ type ytDecisionIssueGetter interface {
 type ytDecisionsBackfillStore interface {
 	UnboundYTDecisions(ctx context.Context, afterID int64, limit int) ([]store.YTDecisionCandidate, error)
 	BindYTDecision(ctx context.Context, b store.YTDecisionBinding, now time.Time) (bool, error)
+	ListYouTrackDecisionMirrors(ctx context.Context, decisionIDs []int64) (map[int64]store.YouTrackDecisionMirror, error)
 }
 
 type ytDecisionsOptions struct {
@@ -92,7 +96,9 @@ type ytDecisionsOptions struct {
 }
 
 // ytDecisionsBackfillRun checks every unbound decision, oldest first: one GET
-// of DEC-<id> each, then youtrack.VerifyDecisionIssue. With Apply, a
+// of DEC-<id> each, then youtrack.VerifyDecisionIssue; when that issue is
+// missing or does not verify and the legacy mirror recorded another issue for
+// the decision, one GET of that one, verified without the readable-id rule. With Apply, a
 // verified issue is bound (store.BindYTDecision). A failed read is counted
 // and the run goes on.
 func ytDecisionsBackfillRun(ctx context.Context, st ytDecisionsBackfillStore, issues ytDecisionIssueGetter, o ytDecisionsOptions) (ytDecisionsReport, error) {
@@ -107,6 +113,14 @@ func ytDecisionsBackfillRun(ctx context.Context, st ytDecisionsBackfillStore, is
 		if err != nil {
 			return r, err
 		}
+		ids := make([]int64, 0, len(page))
+		for _, c := range page {
+			ids = append(ids, c.ID)
+		}
+		mirrors, err := st.ListYouTrackDecisionMirrors(ctx, ids)
+		if err != nil {
+			return r, err
+		}
 		for _, c := range page {
 			after = c.ID
 			if o.Limit > 0 && r.Checked >= o.Limit {
@@ -117,19 +131,27 @@ func ytDecisionsBackfillRun(ctx context.Context, st ytDecisionsBackfillStore, is
 				r.PendingOp.add(c.ID)
 				continue
 			}
-			gctx, cancel := context.WithTimeout(ctx, ytCommentsGetTimeout)
-			issue, err := issues.GetIssue(gctx, youtrack.DecisionReadable(c.ID))
-			cancel()
-			switch {
-			case errors.Is(err, youtrack.ErrNotFound):
+			// The import's DEC-<id> first; then the issue the legacy
+			// `youtrack sync` recorded for the decision
+			// (youtrack_decision_mirrors), whose number YouTrack chose.
+			issue, class, reason, err := ytDecisionIssueVerify(ctx, issues, youtrack.DecisionReadable(c.ID), c.ID, o.ProjectID, youtrack.DecisionReadable(c.ID))
+			if m, ok := mirrors[c.ID]; ok && class != "verified" && class != "error" && m.IssueID != "" && m.IssueID != issue.ID {
+				if li, lclass, lreason, lerr := ytDecisionIssueVerify(ctx, issues, m.IssueID, c.ID, o.ProjectID, ""); lclass == "verified" || lclass == "error" {
+					issue, class, reason, err = li, lclass, lreason, lerr
+					if lclass == "verified" {
+						r.Legacy.add(c.ID)
+					}
+				}
+			}
+			switch class {
+			case "missing":
 				r.Missing.add(c.ID)
 				continue
-			case err != nil:
+			case "error":
 				r.Error.add(c.ID)
 				r.errorTexts = append(r.errorTexts, fmt.Sprintf("decision %d: %v", c.ID, err))
 				continue
-			}
-			if reason := youtrack.VerifyDecisionIssue(issue, c.ID, o.ProjectID); reason != "" {
+			case "mismatch":
 				r.Mismatch.add(c.ID)
 				if len(r.Reasons) < ytDecisionsListMax {
 					r.Reasons = append(r.Reasons, ytDecisionsMismatch{ID: c.ID, Reason: reason})
@@ -157,6 +179,25 @@ func ytDecisionsBackfillRun(ctx context.Context, st ytDecisionsBackfillStore, is
 			return r, nil
 		}
 	}
+}
+
+// ytDecisionIssueVerify reads one issue and classifies it for decision id:
+// "verified", "missing" (404), "mismatch" (with the reason) or "error" (the
+// read failed).
+func ytDecisionIssueVerify(ctx context.Context, issues ytDecisionIssueGetter, ref string, id int64, projectID, wantReadable string) (youtrack.Issue, string, string, error) {
+	gctx, cancel := context.WithTimeout(ctx, ytCommentsGetTimeout)
+	issue, err := issues.GetIssue(gctx, ref)
+	cancel()
+	switch {
+	case errors.Is(err, youtrack.ErrNotFound):
+		return youtrack.Issue{}, "missing", "", nil
+	case err != nil:
+		return youtrack.Issue{}, "error", "", err
+	}
+	if reason := youtrack.VerifyDecisionIssue(issue, id, projectID, wantReadable); reason != "" {
+		return issue, "mismatch", reason, nil
+	}
+	return issue, "verified", "", nil
 }
 
 // youtrackDecisionsBackfillCmd is `youtrack decisions-backfill`. Without
