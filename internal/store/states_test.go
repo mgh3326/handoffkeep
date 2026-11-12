@@ -59,7 +59,7 @@ func TestManualTransitionTableIsTheDesignTable(t *testing.T) {
 		"researching": {"developing", "reviewing", "unstarted", "icebox", "dropped", "duplicate", "completed"},
 		"developing":  {"researching", "reviewing", "unstarted", "icebox", "dropped", "duplicate", "completed"},
 		"reviewing":   {"developing", "merged", "unstarted", "icebox", "dropped", "duplicate", "completed"},
-		"merged":      {"unstarted"},
+		"merged":      {"unstarted", "completed"},
 		"deployed":    {"unstarted"},
 		"completed":   {"unstarted"},
 		"dropped":     {"unstarted"},

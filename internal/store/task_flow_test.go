@@ -56,7 +56,7 @@ func stateOf(t *testing.T, s *Store, id int64) Task {
 // TestEveryManualTransitionEdge runs every ordered pair of states through
 // TransitionTaskWith: an edge in TaskTransitions succeeds from a non-settled
 // state, every other pair is a conflict that leaves the task untouched, and a
-// settled task leaves only through reopen.
+// settled task leaves only through reopen, or merged to completed with evidence.
 func TestEveryManualTransitionEdge(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := t.Context()
@@ -70,11 +70,14 @@ func TestEveryManualTransitionEdge(t *testing.T) {
 			t.Run(from+"_to_"+to, func(t *testing.T) {
 				x := flowTask(t, s, pool, "implement", from, true)
 				in := TransitionInput{To: to, By: "tester", Note: "why"}
+				if from == StateMerged && to == StateCompleted {
+					in.Evidence = "hk:doc research/x"
+				}
 				if to == StateDuplicate {
 					in.DuplicateOf = other.ID
 				}
 				got, err := s.TransitionTaskWith(ctx, x.ID, in)
-				allowed := TaskTransitions[from][to] && !IsSettledState(from) && to != StateCompleted
+				allowed := TaskTransitions[from][to] && (!IsSettledState(from) || mergedCompletes(from, to)) && (to != StateCompleted || mergedCompletes(from, to))
 				if allowed {
 					if err != nil {
 						t.Fatalf("%s -> %s refused: %v", from, to, err)
