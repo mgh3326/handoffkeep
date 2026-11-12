@@ -10,6 +10,8 @@ SHA-256 prefix of the account identity. Send no raw identity, tokens or host dat
   observation carries `confirmed_at`: the newest `measured_at` at which the
   latest value was republished (null on rows written before the column
   existed).
+- `GET /v1/quota/accounts/{key}/observations?since=<RFC3339>&until=<RFC3339>&limit=<n>` lists the account's stored observations in ascending `measured_at`, then ID order. `since` is required; `until` defaults to the current server time; `limit` defaults to 500 and accepts up to 5000. The response is a JSON array (empty when the account exists but the range has no observations). A key with no observation history returns 404 `not_found`. Reads use the same open bearer scope as `latest`.
+  - 한국어: 지정 계정의 관측 이력을 `measured_at`, ID 오름차순으로 반환합니다. `since`는 필수이고 `until`은 서버 현재 시각, `limit`은 기본 500이며 최대 5000입니다. 계정은 있지만 범위 내 행이 없으면 빈 JSON 배열을 반환하고, 이력이 전혀 없는 키는 404 `not_found`를 반환합니다. 읽기 권한은 `latest`와 동일하게 모든 인증 bearer 클라이언트에 열려 있습니다.
 - `POST .../lease` accepts `{holder, ttl_s}`. Use a new random 32-hex holder
   per acquisition attempt. TTL defaults to 120 seconds, maximum 120. A 200
   response includes `acquired`, `holder`, `expires_at`; contention is not an
