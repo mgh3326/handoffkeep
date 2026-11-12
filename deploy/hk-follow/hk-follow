@@ -373,11 +373,19 @@ promote() {
 
 	rc=0
 	resolve "$HK_FOLLOW_TAG" CUR || rc=$?
+	if [[ $rc -eq 3 ]]; then
+		# No deploy tag yet: hk-follow is not installed (README §Install
+		# step 6). That is the state before bootstrap, not a red deploy
+		# tier, so hold without failing the workflow; nothing is promoted.
+		log "hk_follow.promote_held sha=$sha reason=no_baseline"
+		post_status "$sha" deploy-promote pending "no baseline: bootstrap the ${HK_FOLLOW_TAG} tag (README step 6)"
+		return 0
+	fi
 	if [[ $rc -ne 0 ]] || ! valid_sha "${CUR_REV:-}"; then
-		# No deploy tag yet, or one without a revision: the baseline is
-		# unknown, so the migration check cannot run. README §Bootstrap.
-		log "hk_follow.promote_refused sha=$sha reason=no_baseline"
-		post_status "$sha" deploy-promote failure "deploy-refused:no_baseline (create the ${HK_FOLLOW_TAG} tag, README Bootstrap)"
+		# The registry could not answer, or the tag carries no revision:
+		# the baseline is unknown, so the migration check cannot run.
+		log "hk_follow.promote_refused sha=$sha reason=baseline_unreadable"
+		post_status "$sha" deploy-promote failure "deploy-refused:baseline_unreadable (${HK_FOLLOW_TAG} tag)"
 		return 1
 	fi
 

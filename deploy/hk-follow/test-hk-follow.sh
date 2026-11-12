@@ -631,11 +631,23 @@ t_promote_old_sha() {
 	want "" "$(calls)"
 }
 t_promote_no_baseline() {
+	# No deploy tag (before bootstrap): pending, exit 0, nothing promoted.
 	setup; setup_promote
 	rm "$FIX/reg/deploy"
+	promote "$SHA_NEW"
+	want 0 "$(count '^tag ')"
+	want "status $SHA_NEW deploy-promote pending no baseline: bootstrap the deploy tag (README step 6)" "$(calls)"
+}
+t_promote_baseline_unreadable() {
+	# A tag without a revision, or a registry error, still fails.
+	setup; setup_promote
+	fx_manifest deploy "$(index_json "" "$D3")"
 	fails promote "$SHA_NEW"
 	want 0 "$(count '^tag ')"
-	want 1 "$(count 'deploy-refused:no_baseline')"
+	want 1 "$(count 'deploy-promote failure deploy-refused:baseline_unreadable')"
+	touch "$FIX/reg_error"
+	fails promote "$SHA_NEW"
+	want 2 "$(count 'deploy-refused:baseline_unreadable\|deploy-refused:image_missing')"
 }
 t_promote_image_missing() {
 	setup; setup_promote
