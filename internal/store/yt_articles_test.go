@@ -318,6 +318,7 @@ func TestYTArticlesExceptionsAndScope(t *testing.T) {
 		ytartPut(t, s, "reports/ytart-job/report.md", "report", &task.ID),
 		ytartPut(t, s, "reports/mwr-ytart/r1.md", "review report", &task.ID),
 	}
+	excluded = append(excluded, ytartPut(t, s, "briefs/mwr-ytart-r1.md", "reviewer brief", nil))
 	brief := ytartPut(t, s, "brief/ytart-job/brief.md", "the brief", &task.ID)
 	ytartPass(t, s)
 	for _, id := range append([]int64{imported, oversize, oversizeBound}, excluded...) {
@@ -329,7 +330,7 @@ func TestYTArticlesExceptionsAndScope(t *testing.T) {
 		t.Fatalf("brief ops %+v", ops)
 	}
 	for id, want := range map[int64]string{imported: YTArticleExceptionUnboundImported, oversize: YTArticleExceptionNotUpdated,
-		oversizeBound: YTArticleExceptionNotUpdated, brief: "", excluded[0]: "", excluded[2]: ""} {
+		oversizeBound: YTArticleExceptionNotUpdated, brief: "", excluded[0]: "", excluded[2]: "", excluded[4]: ""} {
 		if got := YTArticleExceptionOf(ytArticleDoc(t, s, id), ytcTenant); got != want {
 			t.Errorf("document %d exception %q, want %q", id, got, want)
 		}
@@ -544,5 +545,31 @@ func TestYTAuthorityDocumentsWaitsForArticles(t *testing.T) {
 	}
 	if err := set(); err != nil {
 		t.Fatalf("switch with every precondition met: %v", err)
+	}
+}
+
+// The document kinds' scope: the import's filter, less the mergewake
+// reviewer briefs (handoffkeep-design 2026-11-12).
+func TestYTArticleInScope(t *testing.T) {
+	for _, tc := range []struct {
+		key  string
+		task int64
+		want bool
+	}{
+		{"design/x.md", 0, true},
+		{"deploy/2026-11-12.md", 0, true},
+		{"brief/job/brief.md", 7, true},
+		{"briefs/job.md", 0, true},
+		{"briefs/mwr-338-r1.md", 0, false},
+		{"briefs/mwr-338/round1.md", 7, false},
+		{"briefs/mwr", 0, true},
+		{"review/mwr-338/prompt.md", 0, false},
+		{"screens/pane.txt", 0, false},
+		{"reports/job/report.md", 7, false},
+		{"reports/job/report.md", 0, true},
+	} {
+		if got := ytArticleInScope(tc.key, tc.task); got != tc.want {
+			t.Errorf("ytArticleInScope(%q, %d) = %v, want %v", tc.key, tc.task, got, tc.want)
+		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -139,11 +140,22 @@ func ytArticleUpdateGateSQL(s *Store) string {
 }
 
 // ytArticleInScope reports whether the document kinds write the document:
-// every document the import made an article for (YTArticleExcluded false).
-// That leaves out screens/*, review/mwr-* and a task's reports, which Y5d
-// posts as comments; a task's brief gets its article here and Y5d's pointer
-// comment names it (handoffkeep-design, hk 4206). taskID 0 is no task.
-func ytArticleInScope(key string, taskID int64) bool { return !YTArticleExcluded(key, taskID) }
+// every document the import made an article for (YTArticleExcluded false)
+// except a mergewake reviewer brief (briefs/mwr-*, the same class as the
+// review/mwr-* prompts the import left out; 461 of 1,226 unbound documents
+// on production, handoffkeep-design 2026-11-12). That leaves out screens/*,
+// review/mwr-*, briefs/mwr-* and a task's reports, which Y5d posts as
+// comments; a task's brief gets its article here and Y5d's pointer comment
+// names it (handoffkeep-design, hk 4206). taskID 0 is no task.
+// YTArticleExcluded stays the import's own filter (its golden test), which
+// the backfill binds against.
+func ytArticleInScope(key string, taskID int64) bool {
+	if YTArticleExcluded(key, taskID) {
+		return false
+	}
+	path := strings.Split(key, "/")
+	return !(path[0] == "briefs" && len(path) > 1 && strings.HasPrefix(path[1], "mwr-"))
+}
 
 // YTArticleInScope is ytArticleInScope for the audit.
 func YTArticleInScope(key string, taskID int64) bool { return ytArticleInScope(key, taskID) }

@@ -1406,8 +1406,12 @@ makes the legacy `youtrack sync` (which also writes articles) and `adopt`
 refuse to run.
 
 **Scope.** Every document the import made an article for
-(`store.YTArticleExcluded` false): all but `screens/*`, `review/mwr-*` and a
-task's reports, which Y5d posts as comments. A task's brief is in scope: the
+(`store.YTArticleExcluded` false) except the mergewake reviewer briefs
+(`briefs/mwr-*`, the same class as the `review/mwr-*` prompts; 461 of 1,226
+unbound documents on production, 2026-11-12): all but `screens/*`,
+`review/mwr-*`, `briefs/mwr-*` and a task's reports, which Y5d posts as
+comments. `YTArticleExcluded` stays the import's own filter, which the
+backfill binds against. A task's brief is in scope: the
 import made its article, and Y5d's pointer comment names it
 (handoffkeep-design's answer, hk 4206). `deploy/*` is written too.
 
