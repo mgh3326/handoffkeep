@@ -26,7 +26,8 @@ func taskEventCmd(args []string, out io.Writer) error {
 	revertedPR := fs.String("reverted-pr", "", "the PR a revert undoes (required for mergewake.revert)")
 	revertPR := fs.String("revert-pr", "", "the revert PR URL (defaults to --source-ref)")
 	at := fs.String("at", "", "when the event happened, RFC 3339 (defaults to now)")
-	ordered, err := splitArgs(args, "source", "source-ref", "pr", "reverted-pr", "revert-pr", "at")
+	tasks := fs.String("tasks", "", "other task ids the PR names, comma-separated (one per Mergewake-Task line); each gets the event too")
+	ordered, err := splitArgs(args, "source", "source-ref", "pr", "reverted-pr", "revert-pr", "at", "tasks")
 	if err != nil {
 		return err
 	}
@@ -34,7 +35,7 @@ func taskEventCmd(args []string, out io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: tasks event <task-id> --source <source> --source-ref <pr-url> [--reverted-pr <url>]")
+		return errors.New("usage: tasks event <task-id> --source <source> --source-ref <pr-url> [--reverted-pr <url>] [--tasks <id,...>]")
 	}
 	id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
 	if err != nil || id < 1 {
@@ -44,6 +45,15 @@ func taskEventCmd(args []string, out io.Writer) error {
 		return errors.New("tasks event requires --source and --source-ref")
 	}
 	in := store.TaskSourceEvent{Source: *source, SourceRef: *sourceRef, TaskID: id, PR: *pr, RevertedPR: *revertedPR, RevertPR: *revertPR}
+	if *tasks != "" {
+		for _, f := range strings.Split(*tasks, ",") {
+			n, err := strconv.ParseInt(strings.TrimSpace(f), 10, 64)
+			if err != nil || n < 1 {
+				return errors.New("--tasks must be positive task ids, comma-separated")
+			}
+			in.Tasks = append(in.Tasks, n)
+		}
+	}
 	if *at != "" {
 		t, err := time.Parse(time.RFC3339, *at)
 		if err != nil {
@@ -210,6 +220,33 @@ func taskDriftCmd(args []string, out io.Writer) error {
 		return printJSON(out, rep)
 	}
 	return writeTaskDriftText(out, rep)
+}
+
+// taskSettleMergedCmd runs the merged-task sweep (tasks settle-merged). It
+// defaults to --dry-run: the report lists what would move and writes nothing.
+// --dry-run=false applies the moves. Output is JSON.
+func taskSettleMergedCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("tasks settle-merged", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	c := remoteClient(fs)
+	project := fs.String("project", "", "settle only this project's merged tasks (default every project)")
+	dryRun := fs.Bool("dry-run", true, "print what would move and write nothing; --dry-run=false applies")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("tasks settle-merged takes flags only")
+	}
+	if err := mustClient(c); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	rep, err := c.SettleMerged(ctx, *project, *dryRun)
+	if err != nil {
+		return err
+	}
+	return printJSON(out, rep)
 }
 
 // writeTaskDriftText prints one heading per drift class, then one line per

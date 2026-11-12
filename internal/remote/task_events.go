@@ -88,3 +88,14 @@ func (c Client) TasksDrift(ctx context.Context, mergedDays int) (store.TaskDrift
 	}
 	return out, nil
 }
+
+// SettleMerged runs the merged-task sweep (POST /v1/tasks/settle-merged).
+// dryRun true writes nothing and reports what would move.
+func (c Client) SettleMerged(ctx context.Context, project string, dryRun bool) (store.SettleMergedReport, error) {
+	var out store.SettleMergedReport
+	body := map[string]any{"project": project, "dry_run": dryRun}
+	if err := c.call(ctx, "POST", "/v1/tasks/settle-merged", body, &out); err != nil {
+		return store.SettleMergedReport{}, unsupportedRoute(err, "task_settle_merged_unsupported", "the settle-merged sweep")
+	}
+	return out, nil
+}
