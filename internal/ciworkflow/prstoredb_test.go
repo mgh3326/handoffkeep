@@ -19,7 +19,9 @@ import (
 // internal/store or internal/testdb still tests ./internal/store/... (hk 3193).
 // When the diff cannot be listed the step tests every DB-backed package, and
 // when the DB-backed set cannot be computed it tests ./... . Events other than
-// pull_request never test here.
+// pull_request never test here. The DB-backed set itself comes from
+// scripts/ci-db-dirs.sh (hk 4342), so the scratch repository gets the real
+// script.
 func TestPRStoreDBDecision(t *testing.T) {
 	var wf tierWorkflow
 	if err := yaml.Unmarshal(readWorkflow(t, "ci.yml"), &wf); err != nil {
@@ -34,47 +36,25 @@ func TestPRStoreDBDecision(t *testing.T) {
 	if script == "" {
 		t.Fatal("pr-store-db has no decision step")
 	}
+	dbDirsScript, err := os.ReadFile(filepath.Join("..", "..", "scripts", "ci-db-dirs.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	git := func(t *testing.T, dir string, args ...string) string {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"}, args...)...)
-		cmd.Dir = dir
-		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "GIT_CONFIG_NOSYSTEM=1"}
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-		return strings.TrimSpace(string(out))
-	}
-	write := func(t *testing.T, dir, name, content string) {
-		t.Helper()
-		p := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// A DB-backed test file imports internal/testdb. The import is an escaped
-	// literal here so that this file does not itself carry the marker.
-	dbTest := func(name string) string {
-		return "package " + filepath.Base(filepath.Dir(name)) + "\n\nimport (\n\t\"testing\"\n\n\t\"github.com/mgh3326/handoffkeep/internal/testdb\"\n)\n"
-	}
 	// The base: store, mcp, api and ui have DB-backed tests; guard has tests
 	// that only mention testdb; testdb is the package tests reach PostgreSQL
 	// through.
 	base := map[string]string{
 		"README.md":                        "readme\n",
 		"internal/store/old.go":            "package store\n",
-		"internal/store/store_test.go":     dbTest("internal/store/store_test.go"),
+		"internal/store/store_test.go":     dbTestGoFile("internal/store/store_test.go"),
 		"internal/testdb/testdb.go":        "package testdb\n",
 		"internal/mcp/old.go":              "package mcp\n",
-		"internal/mcp/mcp_test.go":         dbTest("internal/mcp/mcp_test.go"),
+		"internal/mcp/mcp_test.go":         dbTestGoFile("internal/mcp/mcp_test.go"),
 		"internal/api/api.go":              "package api\n",
-		"internal/api/api_test.go":         dbTest("internal/api/api_test.go"),
+		"internal/api/api_test.go":         dbTestGoFile("internal/api/api_test.go"),
 		"internal/ui/ui.go":                "package ui\n",
-		"internal/ui/ui_test.go":           dbTest("internal/ui/ui_test.go"),
+		"internal/ui/ui_test.go":           dbTestGoFile("internal/ui/ui_test.go"),
 		"internal/ui/templates/board.html": "<p>board</p>\n",
 		"internal/guard/guard.go":          "package guard\n",
 		"internal/guard/guard_test.go":     "package guard\n\n// Not DB-backed: it only names testdb.URL and \"internal/testdb/testdb.go\".\n",
@@ -115,26 +95,27 @@ func TestPRStoreDBDecision(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
-			git(t, dir, "init", "-q", "-b", "main")
+			scratchGit(t, dir, "init", "-q", "-b", "main")
 			for name, content := range base {
-				write(t, dir, name, content)
+				scratchWrite(t, dir, name, content)
 			}
-			git(t, dir, "add", "-A")
-			git(t, dir, "commit", "-q", "-m", "base")
-			baseSHA := git(t, dir, "rev-parse", "HEAD")
+			scratchWrite(t, dir, "scripts/ci-db-dirs.sh", string(dbDirsScript))
+			scratchGit(t, dir, "add", "-A")
+			scratchGit(t, dir, "commit", "-q", "-m", "base")
+			baseSHA := scratchGit(t, dir, "rev-parse", "HEAD")
 			for _, f := range c.removed {
 				if err := os.Remove(filepath.Join(dir, f)); err != nil {
 					t.Fatal(err)
 				}
 			}
 			for _, f := range c.changed {
-				write(t, dir, f, f+" changed\n")
+				scratchWrite(t, dir, f, f+" changed\n")
 			}
 			for _, f := range c.dbTests {
-				write(t, dir, f, dbTest(f))
+				scratchWrite(t, dir, f, dbTestGoFile(f))
 			}
-			git(t, dir, "add", "-A")
-			git(t, dir, "commit", "-q", "-m", "change")
+			scratchGit(t, dir, "add", "-A")
+			scratchGit(t, dir, "commit", "-q", "-m", "change")
 			switch c.base {
 			case "":
 			case "empty":
@@ -175,6 +156,103 @@ func TestPRStoreDBDecision(t *testing.T) {
 			got := strings.Fields(outputs["packages"])
 			if outputs["run"] != wantRun || !slices.Equal(got, c.want) {
 				t.Fatalf("run=%q packages=%q, want run=%s packages=%q\nGITHUB_OUTPUT:\n%s\nlog:\n%s", outputs["run"], got, wantRun, c.want, raw, log)
+			}
+		})
+	}
+}
+
+// scratchGit runs git in dir with a fixed identity and no user config, the
+// way the workflow steps run it on a clean runner.
+func scratchGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "GIT_CONFIG_NOSYSTEM=1"}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func scratchWrite(t *testing.T, dir, name, content string) {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// dbTestGoFile is a DB-backed test file: it imports internal/testdb. The
+// import is an escaped literal here so that this file does not itself carry
+// the marker.
+func dbTestGoFile(name string) string {
+	return "package " + filepath.Base(filepath.Dir(name)) + "\n\nimport (\n\t\"testing\"\n\n\t\"github.com/mgh3326/handoffkeep/internal/testdb\"\n)\n"
+}
+
+// TestCIDBNeededClassifier runs scripts/ci-db-needed.sh, the classifier
+// main-linux uses to decide whether a packages selection needs PostgreSQL
+// (hk 4342). It answers yes for the full suite, for a subtree that contains
+// a DB-backed package and for ./internal/testdb itself, and no for packages
+// whose tests never reach the database. When the DB-backed set cannot be
+// computed it answers yes, the same fail-safe pr-store-db takes.
+func TestCIDBNeededClassifier(t *testing.T) {
+	dir := t.TempDir()
+	scratchGit(t, dir, "init", "-q", "-b", "main")
+	files := map[string]string{
+		"internal/store/store.go":      "package store\n",
+		"internal/store/store_test.go": dbTestGoFile("internal/store/store_test.go"),
+		"internal/testdb/testdb.go":    "package testdb\n",
+		"internal/mcp/mcp.go":          "package mcp\n",
+		"internal/mcp/mcp_test.go":     "package mcp\n",
+		"internal/guard/guard.go":      "package guard\n",
+		"internal/guard/guard_test.go": "package guard\n",
+	}
+	for name, content := range files {
+		scratchWrite(t, dir, name, content)
+	}
+	scratchGit(t, dir, "add", "-A")
+	scratchGit(t, dir, "commit", "-q", "-m", "base")
+
+	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "ci-db-needed.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name     string
+		packages string
+		dir      string // "" = the scratch repo, "empty" = a directory that is no repo
+		want     string
+	}{
+		{name: "store-subtree", packages: "./internal/store/...", want: "yes"},
+		{name: "store-package", packages: "./internal/store", want: "yes"},
+		{name: "testdb-package", packages: "./internal/testdb", want: "yes"},
+		{name: "internal-subtree", packages: "./internal/...", want: "yes"},
+		{name: "full-suite", packages: "./...", want: "yes"},
+		{name: "mixed-with-db", packages: "./internal/guard ./internal/store/...", want: "yes"},
+		{name: "non-db-package", packages: "./internal/guard", want: "no"},
+		{name: "non-db-subtree", packages: "./internal/guard/...", want: "no"},
+		{name: "package-without-db-tests", packages: "./internal/mcp", want: "no"},
+		{name: "mixed-without-db", packages: "./internal/guard ./internal/mcp/...", want: "no"},
+		{name: "empty-classifier-fails-safe", packages: "./internal/guard", dir: "empty", want: "yes"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			work := dir
+			if c.dir == "empty" {
+				work = t.TempDir()
+			}
+			cmd := exec.Command("bash", append([]string{script}, strings.Fields(c.packages)...)...)
+			cmd.Dir = work
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + work, "GIT_CONFIG_NOSYSTEM=1"}
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("ci-db-needed.sh %q: %v", c.packages, err)
+			}
+			if got := strings.TrimSpace(string(out)); got != c.want {
+				t.Fatalf("ci-db-needed.sh %q = %q, want %q", c.packages, got, c.want)
 			}
 		})
 	}

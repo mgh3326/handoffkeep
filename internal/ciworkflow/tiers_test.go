@@ -231,14 +231,16 @@ func prStoreDBProblems(wf tierWorkflow, policy []byte) []string {
 	if ro := runsOnText(j.RunsOn); ro != "ubuntu-latest" {
 		add("runs-on is %q, want ubuntu-latest", ro)
 	}
-	// (b) PostgreSQL service, with the DB URL and without the no-DB switch.
-	if _, ok := j.Services["postgres"]; !ok {
-		add("needs a postgres service")
+	// (b) No job-level postgres service: it would boot for every run,
+	// including the ones the decision selects nothing for (hk 4342).
+	// PostgreSQL is a docker container a step starts only on run=yes.
+	if len(j.Services) > 0 {
+		add("must not declare services; postgres starts in a step gated on the decision (hk 4342)")
 	}
 	if _, ok := j.Env["HANDOFFKEEP_TEST_NO_DB"]; ok {
 		add("job sets HANDOFFKEEP_TEST_NO_DB")
 	}
-	var testStep, decideStep *step
+	var testStep, decideStep, gateStep, pgStep *step
 	for i, s := range j.Steps {
 		if _, ok := s.Env["HANDOFFKEEP_TEST_NO_DB"]; ok {
 			add("step %d sets HANDOFFKEEP_TEST_NO_DB", i)
@@ -249,10 +251,43 @@ func prStoreDBProblems(wf tierWorkflow, policy []byte) []string {
 		if strings.Contains(s.Run, "GITHUB_OUTPUT") {
 			decideStep = &j.Steps[i]
 		}
+		if strings.Contains(s.Run, "main-linux covers it") {
+			gateStep = &j.Steps[i]
+		}
+		if strings.Contains(s.Run, "docker run") && strings.Contains(s.Run, "postgres:17") {
+			pgStep = &j.Steps[i]
+		}
 		// (e) Event data reaches the shell only through env:.
 		if strings.Contains(s.Run, "${{") {
 			add("step %d: run contains an expression; pass it through env:", i)
 		}
+	}
+	// (b2) The event gate answers non-pull_request events before the
+	// checkout, and the checkout and decision run only when it does not
+	// say run=no (hk 4342).
+	if gateStep == nil {
+		add("needs an event gate step that writes run=no off pull_request (hk 4342)")
+	} else {
+		if fmt.Sprint(gateStep.Env["EVENT"]) != "${{ github.event_name }}" {
+			add("the event gate must read EVENT from ${{ github.event_name }}")
+		}
+	}
+	for i, s := range j.Steps {
+		if !hasAction(s.Uses, "actions/checkout") || fmt.Sprint(s.With["ref"]) != "${{ inputs.ref }}" {
+			continue
+		}
+		if s.If != "${{ steps.gate.outputs.run != 'no' }}" {
+			add("step %d: the inputs.ref checkout must be gated on the event gate (hk 4342)", i)
+		}
+	}
+	if decideStep != nil && decideStep.If != "${{ steps.gate.outputs.run != 'no' }}" {
+		add("the decision step must be gated on the event gate (hk 4342)")
+	}
+	// (b3) PostgreSQL starts only when the decision selects packages.
+	if pgStep == nil {
+		add("needs a step that starts postgres:17 with docker run (hk 4342)")
+	} else if pgStep.If != "${{ steps.decide.outputs.run == 'yes' }}" {
+		add("the postgres step must run only when the decision says run=yes, got %q", pgStep.If)
 	}
 	if testStep == nil {
 		add("needs a step that runs go test")
@@ -276,7 +311,7 @@ func prStoreDBProblems(wf tierWorkflow, policy []byte) []string {
 	if decideStep == nil {
 		add("needs a decision step that writes to GITHUB_OUTPUT")
 	} else {
-		for _, pat := range []string{"internal/store/*", "internal/testdb/*", "./internal/store/...", `/internal/testdb"'`, "packages="} {
+		for _, pat := range []string{"internal/store/*", "internal/testdb/*", "./internal/store/...", "ci-db-dirs.sh", "packages="} {
 			if !strings.Contains(decideStep.Run, pat) {
 				add("decision step must match %s", pat)
 			}
@@ -290,6 +325,36 @@ func prStoreDBProblems(wf tierWorkflow, policy []byte) []string {
 		add("policy.yaml: %v", err)
 	} else if !slices.Contains(pol.RequiredChecks, prStoreDBName) {
 		add("policy.yaml required_checks must include %q", prStoreDBName)
+	}
+	return out
+}
+
+// localActionProblems keeps hk 3629: ci.yml tests arbitrary refs (a
+// ci-any-ref dispatch can name a commit that predates
+// .github/actions/setup-go-cached, hk 255), so the composite Go action must
+// come from the workflow revision — a sparse checkout of
+// github.workflow_sha into ./workflow — never from the ref under test.
+func localActionProblems(wf tierWorkflow) []string {
+	var out []string
+	add := func(f string, a ...any) { out = append(out, fmt.Sprintf("ci.yml local action: "+f, a...)) }
+	for name, j := range wf.Jobs {
+		pinned := false
+		for i, s := range j.Steps {
+			if hasAction(s.Uses, "actions/checkout") &&
+				fmt.Sprint(s.With["ref"]) == "${{ github.workflow_sha }}" &&
+				fmt.Sprint(s.With["path"]) == "workflow" &&
+				fmt.Sprint(s.With["sparse-checkout"]) == ".github/actions/setup-go-cached" {
+				pinned = true
+			}
+			switch s.Uses {
+			case "./.github/actions/setup-go-cached":
+				add("job %s step %d uses the action from the ref under test; check out github.workflow_sha into workflow/ and use ./workflow/... (hk 3629)", name, i+1)
+			case "./workflow/.github/actions/setup-go-cached":
+				if !pinned {
+					add("job %s step %d uses ./workflow/... with no earlier github.workflow_sha checkout of .github/actions/setup-go-cached (hk 3629)", name, i+1)
+				}
+			}
+		}
 	}
 	return out
 }
@@ -319,11 +384,48 @@ func mainTierProblems(wf tierWorkflow) []string {
 	if unwrap(j.If) != mainGuard {
 		add("main-linux if is %q, want %q", j.If, mainGuard)
 	}
-	if _, ok := j.Services["postgres"]; !ok {
-		add("main-linux needs a postgres service")
+	// (hk 4342) No job-level postgres service: a packages selection with no
+	// DB-backed package would still boot one. The full suite always needs
+	// it; a packages selection is classified by ci-db-needed.sh, and the
+	// container is a docker run a step starts only when needed.
+	if len(j.Services) > 0 {
+		add("main-linux must not declare services; postgres starts in a step gated on the package selection (hk 4342)")
 	}
 	if fmt.Sprint(j.Env["HANDOFFKEEP_TEST_DB_URL"]) == "" {
 		add("main-linux must set HANDOFFKEEP_TEST_DB_URL")
+	}
+	var dbplanStep, pgStartStep, pgStopStep *step
+	for i, s := range j.Steps {
+		if strings.Contains(s.Run, "ci-db-needed.sh") {
+			dbplanStep = &j.Steps[i]
+		}
+		if strings.Contains(s.Run, "docker run") && strings.Contains(s.Run, "postgres:17") {
+			pgStartStep = &j.Steps[i]
+		}
+		if strings.Contains(s.Run, "docker rm -f") && !strings.Contains(s.Run, "docker run") {
+			pgStopStep = &j.Steps[i]
+		}
+	}
+	if dbplanStep == nil {
+		add("main-linux needs a step that classifies packages with scripts/ci-db-needed.sh (hk 4342)")
+	} else {
+		if dbplanStep.If != "${{ inputs.packages != '' }}" {
+			add("the package classifier must run only when packages is set, got %q", dbplanStep.If)
+		}
+		if fmt.Sprint(dbplanStep.Env["PACKAGES"]) != "${{ inputs.packages }}" {
+			add("the package classifier must read PACKAGES from ${{ inputs.packages }}")
+		}
+		if !strings.Contains(dbplanStep.Run, "GITHUB_OUTPUT") {
+			add("the package classifier must write its answer to GITHUB_OUTPUT")
+		}
+	}
+	if pgStartStep == nil {
+		add("main-linux needs a step that starts postgres:17 with docker run (hk 4342)")
+	} else if pgStartStep.If != "${{ inputs.packages == '' || steps.dbplan.outputs.needed == 'yes' }}" {
+		add("the postgres step must start for the full suite or a DB-backed selection, got %q", pgStartStep.If)
+	}
+	if pgStopStep == nil || !strings.Contains(pgStopStep.If, "always()") {
+		add("main-linux needs an always() step that removes the postgres container (self-hosted runners keep it, hk 4342)")
 	}
 	if hasRace(j) {
 		add("main-linux must not run -race (deploy tier owns it)")
@@ -591,6 +693,7 @@ func tierProblems(ci, anyRef, deploy, policy []byte) []string {
 
 	out = append(out, gitleaksScopeProblems(wf)...)
 	out = append(out, prStoreDBProblems(wf, policy)...)
+	out = append(out, localActionProblems(wf)...)
 	out = append(out, mainTierProblems(wf)...)
 	out = append(out, deployTierProblems(wf)...)
 	out = append(out, deployWorkflowProblems(deploy)...)
@@ -1017,7 +1120,7 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"deploy-linux-unguarded", "    if: ${{ " + deployGuard + " }}\n    name: 'deploy: race + postgres'", "    if: ${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'deploy: race + postgres'"},
 		{"deploy-linux-race-removed", "go test -v -race -timeout 30m ./...", "go test -v -timeout 30m ./..."},
 		{"deploy-macos-on-linux", "'deploy: macos'\n    runs-on: macos-latest", "'deploy: macos'\n    runs-on: ubuntu-latest"},
-		{"deploy-macos-no-db-switch", "      HANDOFFKEEP_TEST_NO_DB: \"1\"\n    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          ref: ${{ inputs.ref }}\n      - uses: ./.github/actions/setup-go-cached", "    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          ref: ${{ inputs.ref }}\n      - uses: ./.github/actions/setup-go-cached"},
+		{"deploy-macos-no-db-switch", "      HANDOFFKEEP_TEST_NO_DB: \"1\"\n    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          ref: ${{ inputs.ref }}\n      # The local action comes from the workflow revision", "    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          ref: ${{ inputs.ref }}\n      # The local action comes from the workflow revision"},
 		{"deploy-release-dropped", "      - run: bash scripts/test-build-release.sh", "      - run: true"},
 		// The main tier keeps the release build during the transition. Two
 		// distinct anchors: ci.yml has it in both main-linux and deploy-release.
@@ -1037,6 +1140,16 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"pr-store-db-ignores-selection", `go test -timeout 20m -count=1 -v "${pkgs[@]}"`, `go test -timeout 20m -count=1 -v ./internal/store/...`},
 		{"pr-store-db-packages-not-from-decision", "          PACKAGES: ${{ steps.decide.outputs.packages }}\n", "          PACKAGES: ./internal/store/...\n"},
 		{"pr-store-db-not-in-ci-ok", "needs: [test, pr-store-db, vitest,", "needs: [test, vitest,"},
+		// hk 4342: a job-level service or an ungated docker step boots
+		// PostgreSQL even when the decision selects nothing.
+		{"pr-store-db-service-back", "    timeout-minutes: 25\n    steps:", "    timeout-minutes: 25\n    services:\n      postgres:\n        image: postgres:17\n    steps:"},
+		{"pr-store-db-pg-ungated", "      - name: start PostgreSQL\n        if: ${{ steps.decide.outputs.run == 'yes' }}\n        run: |\n          docker run -d --name postgres \\", "      - name: start PostgreSQL\n        run: |\n          docker run -d --name postgres \\"},
+		{"main-linux-service-back", "    timeout-minutes: 30\n    env:", "    timeout-minutes: 30\n    services:\n      postgres:\n        image: postgres:17\n    env:"},
+		{"main-linux-pg-ungated", "        if: ${{ inputs.packages == '' || steps.dbplan.outputs.needed == 'yes' }}\n        env:\n          PG_NAME:", "        env:\n          PG_NAME:"},
+		// hk 3629: the composite action must come from the workflow revision,
+		// never from the ref under test (a pre-#255 sha has no such file).
+		{"local-action-from-target-ref", "uses: ./workflow/.github/actions/setup-go-cached\n      - run: bash scripts/test-build-release.sh", "uses: ./.github/actions/setup-go-cached\n      - run: bash scripts/test-build-release.sh"},
+		{"local-action-checkout-not-workflow-sha", "          ref: ${{ github.workflow_sha }}\n          path: workflow\n          sparse-checkout: .github/actions/setup-go-cached\n      - uses: ./workflow/.github/actions/setup-go-cached\n      - run: bash scripts/test-build-release.sh", "          ref: ${{ inputs.ref }}\n          path: workflow\n          sparse-checkout: .github/actions/setup-go-cached\n      - uses: ./workflow/.github/actions/setup-go-cached\n      - run: bash scripts/test-build-release.sh"},
 	} {
 		t.Run(m.name, func(t *testing.T) {
 			if strings.Count(ci, m.old) != 1 {

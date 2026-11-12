@@ -79,7 +79,16 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
-      - uses: ./.github/actions/setup-go-cached
+      # The local action comes from the workflow revision, not the ref under
+      # test: ci-any-ref and dispatches can name a commit that predates
+      # .github/actions/setup-go-cached (hk 3629). Sparse keeps the side
+      # tree to the action alone, so repo-wide checks never see it.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          sparse-checkout: .github/actions/setup-go-cached
+      - uses: ./workflow/.github/actions/setup-go-cached
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
       - run: npm ci
@@ -146,7 +155,16 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.ref }}
-      - uses: ./.github/actions/setup-go-cached
+      # The local action comes from the workflow revision, not the ref under
+      # test: ci-any-ref and dispatches can name a commit that predates
+      # .github/actions/setup-go-cached (hk 3629). Sparse keeps the side
+      # tree to the action alone, so repo-wide checks never see it.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          sparse-checkout: .github/actions/setup-go-cached
+      - uses: ./workflow/.github/actions/setup-go-cached
       - name: go build
         run: CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -o handoffkeep-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/handoffkeep
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -177,30 +195,35 @@ jobs:
     # ./internal/store/... (hk 3193). If the changed files cannot be listed it
     # tests every DB-backed package; if that set cannot be computed (or comes
     # out empty) it tests ./... . Anywhere else it succeeds without testing,
-    # because main-linux covers main pushes and dispatches.
+    # because main-linux covers main pushes and dispatches. PostgreSQL is a
+    # docker container started only when the decision selects packages
+    # (hk 4342): a job-level service would boot for every run, including the
+    # ones with nothing to test.
     if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     name: 'pr: store + postgres'
     runs-on: ubuntu-latest
     # ./tests alone takes ~10.5 min on main (run 42617745476); 10m panicked on handoffkeep#286 (hk 3746).
     timeout-minutes: 25
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: handoffkeep
-          POSTGRES_PASSWORD: handoffkeep
-          POSTGRES_DB: handoffkeep
-        # Loopback only, as in main-linux.
-        ports: ["127.0.0.1:5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
+      # The event gate runs before the checkout: off a pull request there is
+      # nothing to classify, so the job answers in seconds (hk 4342).
+      - name: decide scope before checkout
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "event $EVENT: main-linux covers it; not testing"
+            echo "run=no" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        if: ${{ steps.gate.outputs.run != 'no' }}
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
       - name: decide which DB-backed packages to test
         id: decide
+        if: ${{ steps.gate.outputs.run != 'no' }}
         env:
           EVENT: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -221,17 +244,14 @@ jobs:
           }
           # Directory of each path; a top-level file is in ".".
           dirs() { sed -e '/^$/d' -e 's|^[^/]*$|./&|' -e 's|/[^/]*$||' | sort -u; }
-          # The DB-backed marker: a _test.go file importing internal/testdb.
-          marker='^[[:space:]]*(import[[:space:]]+)?([[:alnum:]_.]+[[:space:]]+)?"[^"]*/internal/testdb"'
-          dbdirs=""
-          if gofiles=$(git ls-files -- '*.go') && dbfiles=$(git grep -l -E "$marker" -- '*_test.go' || [ $? -eq 1 ]); then
+          # The DB-backed set comes from the shared script (hk 4342); an
+          # empty answer means it could not be computed, so fail safe below.
+          dbdirs=$(bash scripts/ci-db-dirs.sh || true)
+          pkgdirs=""
+          if gofiles=$(git ls-files -- '*.go'); then
             pkgdirs=$(dirs <<< "$gofiles")
-            dbdirs=$(dirs <<< "$dbfiles")
-            if grep -Fxq internal/testdb <<< "$pkgdirs"; then
-              dbdirs=$(printf '%s\ninternal/testdb\n' "$dbdirs" | sed '/^$/d' | sort -u)
-            fi
           fi
-          if [ -z "$dbdirs" ]; then
+          if [ -z "$dbdirs" ] || [ -z "$pkgdirs" ]; then
             echo "cannot compute the DB-backed packages; testing ./... (fail safe)"
             echo "run=yes" >> "$GITHUB_OUTPUT"
             echo "packages=./..." >> "$GITHUB_OUTPUT"
@@ -272,6 +292,33 @@ jobs:
             echo "pull request changes no package with DB-backed tests; not testing"
             echo "run=no" >> "$GITHUB_OUTPUT"
           fi
+      - name: start PostgreSQL
+        if: ${{ steps.decide.outputs.run == 'yes' }}
+        run: |
+          docker run -d --name postgres \
+            -e POSTGRES_USER=handoffkeep \
+            -e POSTGRES_PASSWORD=handoffkeep \
+            -e POSTGRES_DB=handoffkeep \
+            -p 127.0.0.1:5432:5432 \
+            postgres:17
+          for i in $(seq 1 60); do
+            if docker exec postgres pg_isready -U handoffkeep >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs postgres >&2 || true
+          exit 1
+      # The local action comes from the workflow revision, not the ref under
+      # test: ci-any-ref and dispatches can name a commit that predates
+      # .github/actions/setup-go-cached (hk 3629). Sparse keeps the side
+      # tree to the action alone, so repo-wide checks never see it.
+      - if: ${{ steps.decide.outputs.run == 'yes' }}
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          sparse-checkout: .github/actions/setup-go-cached
       # CI: PR-tier DB job installs Node for tests/ (unblocks this PR; gap from hk 3528).
       # tests/ holds the vite-built console tests, which need web/console's node_modules.
       - if: ${{ steps.decide.outputs.run == 'yes' }}
@@ -281,7 +328,7 @@ jobs:
         run: npm ci
         working-directory: web/console
       - if: ${{ steps.decide.outputs.run == 'yes' }}
-        uses: ./.github/actions/setup-go-cached
+        uses: ./workflow/.github/actions/setup-go-cached
       - name: go test the selected DB-backed packages (PostgreSQL, no race)
         if: ${{ steps.decide.outputs.run == 'yes' }}
         env:
@@ -300,33 +347,70 @@ jobs:
     # migration and startup smoke, the mutant suites and bundle freshness: the
     # list every merged head runs, kept under 10 minutes (hk 3440). -race,
     # macOS and the release dry run live in the deploy tier, which deploy.yml
-    # starts after this whole tier is green. Service containers need Docker on
-    # Linux: a self-hosted runner named by HANDOFFKEEP_POST_LINUX_RUNNER must
-    # provide it.
+    # starts after this whole tier is green. PostgreSQL is a docker container
+    # started only when the selected packages can have DB-backed tests
+    # (hk 4342); the full suite always can, a packages selection is
+    # classified by scripts/ci-db-needed.sh. Docker on Linux: a self-hosted
+    # runner named by HANDOFFKEEP_POST_LINUX_RUNNER must provide it, and the
+    # stop step removes the container because service containers would have
+    # been cleaned up automatically.
     if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     name: 'main: postgres'
     runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
       HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: handoffkeep
-          POSTGRES_PASSWORD: handoffkeep
-          POSTGRES_DB: handoffkeep
-        # Loopback only: on a self-hosted runner the fixed test password
-        # must not be reachable from the network.
-        ports: ["127.0.0.1:5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
-      - uses: ./.github/actions/setup-go-cached
+      - name: decide whether the selected packages need PostgreSQL
+        id: dbplan
+        if: ${{ inputs.packages != '' }}
+        env:
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          # The classifier ships with this change, so a ci-any-ref run on an
+          # older sha has no script: fail safe to starting PostgreSQL, the
+          # behaviour before hk 4342.
+          if [ -f scripts/ci-db-needed.sh ]; then
+            needed=$(bash scripts/ci-db-needed.sh $PACKAGES) || needed=yes
+          else
+            needed=yes
+          fi
+          echo "packages need PostgreSQL: $needed"
+          echo "needed=$needed" >> "$GITHUB_OUTPUT"
+      - name: start PostgreSQL
+        if: ${{ inputs.packages == '' || steps.dbplan.outputs.needed == 'yes' }}
+        env:
+          PG_NAME: postgres-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          docker rm -f "$PG_NAME" >/dev/null 2>&1 || true
+          docker run -d --name "$PG_NAME" \
+            -e POSTGRES_USER=handoffkeep \
+            -e POSTGRES_PASSWORD=handoffkeep \
+            -e POSTGRES_DB=handoffkeep \
+            -p 127.0.0.1:5432:5432 \
+            postgres:17
+          for i in $(seq 1 60); do
+            if docker exec "$PG_NAME" pg_isready -U handoffkeep >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs "$PG_NAME" >&2 || true
+          exit 1
+      # The local action comes from the workflow revision, not the ref under
+      # test: ci-any-ref and dispatches can name a commit that predates
+      # .github/actions/setup-go-cached (hk 3629). Sparse keeps the side
+      # tree to the action alone, so repo-wide checks never see it.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          sparse-checkout: .github/actions/setup-go-cached
+      - uses: ./workflow/.github/actions/setup-go-cached
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
       - run: npm ci
@@ -369,6 +453,13 @@ jobs:
         # (decision §4-3), when this step and deploy-release's collapse to one.
         if: ${{ inputs.packages == '' }}
         run: bash scripts/test-build-release.sh
+      # Service containers would be removed with the runner; a docker run
+      # container on a self-hosted runner is not (hk 4342).
+      - name: stop PostgreSQL
+        if: ${{ always() }}
+        env:
+          PG_NAME: postgres-${{ github.run_id }}-${{ github.run_attempt }}
+        run: docker rm -f "$PG_NAME" >/dev/null 2>&1 || true
 
   deploy-linux:
     # T-DEPLOY (hk 3440): the -race suite against PostgreSQL. It runs on a
@@ -398,7 +489,16 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
-      - uses: ./.github/actions/setup-go-cached
+      # The local action comes from the workflow revision, not the ref under
+      # test: ci-any-ref and dispatches can name a commit that predates
+      # .github/actions/setup-go-cached (hk 3629). Sparse keeps the side
+      # tree to the action alone, so repo-wide checks never see it.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          sparse-checkout: .github/actions/setup-go-cached
+      - uses: ./workflow/.github/actions/setup-go-cached
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
       - run: npm ci
@@ -424,7 +524,16 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.ref }}
-      - uses: ./.github/actions/setup-go-cached
+      # The local action comes from the workflow revision, not the ref under
+      # test: ci-any-ref and dispatches can name a commit that predates
+      # .github/actions/setup-go-cached (hk 3629). Sparse keeps the side
+      # tree to the action alone, so repo-wide checks never see it.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          sparse-checkout: .github/actions/setup-go-cached
+      - uses: ./workflow/.github/actions/setup-go-cached
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
       - run: npm ci
@@ -448,7 +557,16 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.ref }}
-      - uses: ./.github/actions/setup-go-cached
+      # The local action comes from the workflow revision, not the ref under
+      # test: ci-any-ref and dispatches can name a commit that predates
+      # .github/actions/setup-go-cached (hk 3629). Sparse keeps the side
+      # tree to the action alone, so repo-wide checks never see it.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          sparse-checkout: .github/actions/setup-go-cached
+      - uses: ./workflow/.github/actions/setup-go-cached
       - run: bash scripts/test-build-release.sh
 
   ci-ok:
