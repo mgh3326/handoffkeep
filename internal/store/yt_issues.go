@@ -193,12 +193,33 @@ func (s *Store) enqueueYTIssueTx(ctx context.Context, tx pgx.Tx, t Task) error {
 	if exists {
 		return nil
 	}
+	owned, err := ytTaskHasIssueOwnershipTx(ctx, tx, t.ID)
+	if err != nil {
+		return err
+	}
+	if owned {
+		log.Printf("ytwrite.issue_skipped task_id=%d project=%q reason=issue_owned", t.ID, deref(t.Project))
+		return nil
+	}
 	op, _, err := prepareYTIssueTx(ctx, tx, t.CreatedAt.UTC(), t, p, tenant)
 	if err != nil {
 		return err
 	}
 	log.Printf("ytwrite.issue_enqueued op_id=%d task_id=%d state=%s reason=%q", op.ID, t.ID, op.State, op.Reason)
 	return nil
+}
+
+// ytTaskHasIssueOwnershipTx mirrors the task ownership evidence used by
+// issue backfill. Any of these records means an issue already belongs to the
+// task, even when the canonical binding has not been published yet.
+func ytTaskHasIssueOwnershipTx(ctx context.Context, q ytRowQuerier, taskID int64) (bool, error) {
+	var owned bool
+	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1)
+		OR EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$2)
+		OR EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=$1)
+		OR EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack')`,
+		taskID, strconv.FormatInt(taskID, 10)).Scan(&owned)
+	return owned, err
 }
 
 // ytIssueConflictTx reads, in Apply's transaction (which holds the task's
@@ -385,11 +406,8 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 	if exists {
 		return "existing", name, nil
 	}
-	var owned bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1)
-		OR EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$2)
-		OR EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=$1)
-		OR EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack')`, taskID, strconv.FormatInt(taskID, 10)).Scan(&owned); err != nil {
+	owned, err := ytTaskHasIssueOwnershipTx(ctx, tx, taskID)
+	if err != nil {
 		return "", "", err
 	}
 	if owned {

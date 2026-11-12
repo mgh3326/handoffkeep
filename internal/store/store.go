@@ -2979,14 +2979,8 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
 		return Task{}, false, err
 	}
-	var bound bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=$1)`, id).Scan(&bound); err != nil {
+	if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
 		return Task{}, false, err
-	}
-	if !bound {
-		if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
-			return Task{}, false, err
-		}
 	}
 	return x, true, tx.Commit(ctx)
 }
