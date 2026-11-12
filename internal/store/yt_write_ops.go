@@ -291,24 +291,6 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	if blocked {
 		return op, ytwrite.ClaimBlocked, tx.Commit(ctx)
 	}
-	// An issue_create op is checked against its task's project here, under
-	// the lane lock a project change also takes: a dispatched op that was
-	// deferred back to prepared after the task moved (no retarget saw it
-	// prepared) is replaced now instead of creating the issue in the old
-	// project (PR #335 review).
-	if op.Kind == ytwrite.KindIssueCreate {
-		moved, err := retargetClaimedYTIssueTx(ctx, tx, now, op)
-		if err != nil {
-			return ytwrite.Op{}, "", err
-		}
-		if moved {
-			op, err = scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1`, id))
-			if err != nil {
-				return ytwrite.Op{}, "", err
-			}
-			return op, ytwrite.ClaimNotPrepared, tx.Commit(ctx)
-		}
-	}
 	// A comment queued behind its task's issue_create gets its target here,
 	// from the binding that create published, once the lane is clear
 	// (hk 4263); with no such binding, or one a local source disagrees

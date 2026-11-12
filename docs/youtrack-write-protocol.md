@@ -763,11 +763,7 @@ its op is still `prepared` (nothing sent) gets the op rejected
 `project_changed` and, when the new project is mapped, a replacement op for
 that project on the same tenant (else an intent, above), keyed `task-issue:<id>:after-<old op id>`, in
 the move's transaction (hk 3909). An op already dispatched, uncertain or
-resolved is left alone: its issue may exist in the old project. A dispatched
-op the remote defers (a 429, a failed preflight) is `prepared` again, so
-every claim of an issue op makes the same check under the lane lock: an op
-whose YouTrack or hk project is no longer the task's is replaced there and
-not dispatched.
+resolved is left alone: its issue may exist in the old project.
 `handoffkeep youtrack issues-backfill [--project P] [--dry-run]` prepares the
 op for every task with no binding, bound to the host of `YOUTRACK_URL`; it
 calls no YouTrack, skips a task that already has its op, and so is idempotent.

@@ -642,49 +642,6 @@ func TestYTIssueProjectChangeRetargetsAnUnsentOp(t *testing.T) {
 	}
 }
 
-// A dispatched op is out of the retarget's reach; when the remote defers it
-// (a 429 or a failed preflight) it is prepared again, and its next claim
-// checks the task's project under the lane lock: the op is replaced instead
-// of creating the issue in the old project (PR #335 review r4551546050).
-func TestYTIssueDeferredAfterMoveIsRetargetedAtClaim(t *testing.T) {
-	s := schemaStore(t, "yti_retarget_claim")
-	ytbMapped(t, s)
-	const other, otherID = "yti-other", "0-9"
-	if _, err := s.AddTaskProject(t.Context(), other, "test"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: other, ProjectID: otherID, ShortName: "HO"}); err != nil {
-		t.Fatal(err)
-	}
-	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
-	x := ytiCreate(t, s, ytbProject)
-	op := ytiOps(t, s, x.ID)[0]
-	if out := ytiClaim(t, s, op); out != ytwrite.ClaimClaimed {
-		t.Fatalf("first claim = %s", out)
-	}
-	if _, _, err := s.SetTaskProject(t.Context(), x.ID, other, "test", "moved in flight"); err != nil {
-		t.Fatal(err)
-	}
-	if ops := ytiOps(t, s, x.ID); len(ops) != 1 || ops[0].State != ytwrite.StateDispatched {
-		t.Fatalf("a dispatched op was retargeted: %+v", ops)
-	}
-	now := time.Now().UTC()
-	if _, err := s.YTTenantLedger(ytcTenant).Defer(t.Context(), now, op.ID, now, ytwrite.ReasonRateLimited, "429"); err != nil {
-		t.Fatal(err)
-	}
-	if out := ytiClaim(t, s, op); out != ytwrite.ClaimNotPrepared {
-		t.Fatalf("claim after the move = %s, want not_prepared", out)
-	}
-	ops := ytiOps(t, s, x.ID)
-	if len(ops) != 2 || ops[0].State != ytwrite.StateRejected || ops[0].Reason != ytwrite.ReasonProjectChanged ||
-		ops[1].State != ytwrite.StatePrepared || ops[1].YTTargetID != otherID {
-		t.Fatalf("ops after the claim %+v", ops)
-	}
-	if out := ytiClaim(t, s, ops[1]); out != ytwrite.ClaimClaimed {
-		t.Fatalf("claim of the replacement = %s", out)
-	}
-}
-
 // Two hk projects mapped to one YouTrack project: a move between them keeps
 // the YouTrack target but changes the payload's hk project, so the unsent op
 // is still replaced (PR #335 review r4545218582).
