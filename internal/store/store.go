@@ -597,6 +597,10 @@ type Store struct {
 	// (SetYTDecisionsMode); nil is off. On prepares decision ops from the
 	// change feed.
 	ytDecisions atomic.Pointer[ytDecisionsGate]
+	// ytDocs is the YouTrack document-article gate, tenant and bucket
+	// projects (SetYTDocsMode); nil is off. On prepares document ops from
+	// the change feed (hk 4206).
+	ytDocs atomic.Pointer[ytDocsGate]
 	// ytBindingChecked, when set (tests only), runs inside AddYTTaskBinding
 	// after every check has passed and before the binding row is inserted,
 	// with every lock of the publication held.

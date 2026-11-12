@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -348,6 +349,29 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 	for p, w := range map[string][]int64{"rda": {r3}, "sma": {s2, c1, c2}, store.YTArticleBucketShared: {x1}, "nomap": {n1}} {
 		if !slices.Equal(per[p], w) {
 			t.Errorf("audit %s unbound = %v, want %v", p, per[p], w)
+		}
+	}
+	// The two exception classes the document kinds write no op for (hk
+	// 4206): the split r5 (exception_not_updated), and r3 and s2 once they
+	// date from before the import's end (exception_unbound_imported); the
+	// other unbound documents are newer and get an article_create instead.
+	if docs.NotUpdated.Count != 1 || docs.UnboundImported.Count != 0 {
+		t.Fatalf("audit exceptions before backdating = %+v", docs.ytAuditDocExceptions)
+	}
+	if _, err := conn.Exec(ctx, `UPDATE documents SET created_at=$1 WHERE id = ANY($2::bigint[])`, store.YTImportEndedAt.Add(-time.Hour), []int64{r3, s2, r1}); err != nil {
+		t.Fatal(err)
+	}
+	docs, err = a.documents(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(docs.NotUpdated.DocumentIDs, []int64{r5}) || !slices.Equal(docs.UnboundImported.DocumentIDs, []int64{r3, s2}) {
+		t.Fatalf("audit exceptions = %+v", docs.ytAuditDocExceptions)
+	}
+	for _, p := range docs.Projects {
+		want := map[string][2]int{"rda": {1, 1}, "sma": {0, 1}}[p.Project]
+		if p.NotUpdated.Count != want[0] || p.UnboundImported.Count != want[1] {
+			t.Errorf("audit %s exceptions = %+v, want %v", p.Project, p.ytAuditDocExceptions, want)
 		}
 	}
 	other := &ytAuditor{st: st, tenant: "other.example", articles: true}

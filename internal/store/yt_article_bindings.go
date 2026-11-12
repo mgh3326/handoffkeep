@@ -10,6 +10,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 // Article bindings (hk 4053, docs/youtrack-write-protocol.md §Article
@@ -39,7 +41,9 @@ type YTArticleBinding struct {
 	BoundBy         string    `json:"bound_by"`
 	BoundAt         time.Time `json:"bound_at"`
 	// Origin is set by the store: YTBindingImportVerified for a backfill
-	// binding (YTBindingOpApplied is reserved for an applied document op).
+	// binding, YTBindingOpApplied for one an applied article_create
+	// published (hk 4206; ContentSHA is then the sha256 of the body the op
+	// wrote, without its provenance line and marker).
 	Origin string `json:"origin"`
 	OpID   int64  `json:"op_id,omitempty"`
 }
@@ -52,7 +56,7 @@ var ErrYTArticleBindingConflict = errors.New("yt_article_binding_conflict")
 // YTArticleSafePartBytes is the import's SAFE_PART_BYTES
 // (youtrack/import/client.js): a document body longer than this many UTF-8
 // bytes was imported as an index article and its parts.
-const YTArticleSafePartBytes = 240 * 1024
+const YTArticleSafePartBytes = ytwrite.MaxArticleBytes
 
 // ytArticleSummaryRunes is the import's summary cut (truncateRunes(..., 250)).
 const ytArticleSummaryRunes = 250
@@ -166,11 +170,14 @@ type YTArticleCandidate struct {
 	YTProjectID string
 }
 
-// YTArticleDoc is a listed document and the tenant of its binding ("" when it
-// has none).
+// YTArticleDoc is a listed document, when it was created, the tenant of its
+// binding ("" when it has none) and whether that binding is a split
+// document's index (no content_sha).
 type YTArticleDoc struct {
 	YTArticleCandidate
-	BoundTenant string
+	CreatedAt       time.Time
+	BoundTenant     string
+	BoundSplitIndex bool
 }
 
 // ytArticleCandidateSQL reads candidates. The bucket is the import's
@@ -198,7 +205,7 @@ func (s *Store) YTArticleDocs(ctx context.Context, bucket string, afterID int64,
 	if afterID < 0 || limit < 1 || limit > YTArticleDocPageMax {
 		return nil, errors.New("invalid article document filter")
 	}
-	rows, err := s.pool.Query(ctx, ytArticleCandidateSQL+`, coalesce(b.tenant, '')`+ytArticleCandidateFrom+`
+	rows, err := s.pool.Query(ctx, ytArticleCandidateSQL+`, d.created_at, coalesce(b.tenant, ''), b.document_id IS NOT NULL AND b.content_sha IS NULL`+ytArticleCandidateFrom+`
 			LEFT JOIN yt_article_bindings b ON b.document_id = d.id
 			WHERE d.id > $2 AND ($1 = '' OR `+ytArticleBucketSQL+` = $1) ORDER BY d.id LIMIT $3`, bucket, afterID, limit)
 	if err != nil {
@@ -208,9 +215,10 @@ func (s *Store) YTArticleDocs(ctx context.Context, bucket string, afterID int64,
 	out := []YTArticleDoc{}
 	for rows.Next() {
 		var d YTArticleDoc
-		if err := scanYTArticleCandidate(rows, &d.YTArticleCandidate, &d.BoundTenant); err != nil {
+		if err := scanYTArticleCandidate(rows, &d.YTArticleCandidate, &d.CreatedAt, &d.BoundTenant, &d.BoundSplitIndex); err != nil {
 			return nil, err
 		}
+		d.CreatedAt = d.CreatedAt.UTC()
 		out = append(out, d)
 	}
 	return out, rows.Err()

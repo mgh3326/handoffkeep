@@ -268,6 +268,14 @@ func youtrackProtocolOwner() (string, error) {
 	if decisions == store.YTDecisionsOn {
 		return "HANDOFFKEEP_YT_DECISIONS_MODE=on", nil
 	}
+	// The legacy sync also pushes documents to articles (Service.syncDocs).
+	articles, err := ytDocsModeFromEnv()
+	if err != nil {
+		return "", err
+	}
+	if articles == store.YTDocsOn {
+		return "HANDOFFKEEP_YT_DOCS_MODE=on", nil
+	}
 	return "", nil
 }
 
