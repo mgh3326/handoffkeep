@@ -21,7 +21,7 @@ import (
 // target (YTTargetID) is the bound issue's id.
 
 func init() {
-	registerKind(KindIssueFields, func(Config) Kind { return issueFields{} })
+	registerKind(KindIssueFields, func(Config) Kind { return issueFields{entityKind: "task"} })
 }
 
 // KindIssueFields writes a task's issue snapshot (kind_fields.go, hk 4003).
@@ -411,35 +411,38 @@ type IssueFieldsRemote interface {
 	ReadIssueFields(ctx context.Context, issueID string) (IssueSnapshot, error)
 }
 
-// issueFields is the issue_fields kind. Its text (Render) is the
-// description; Send and Evidence take the whole snapshot from the payload.
-type issueFields struct{}
+// issueFields is the issue_fields kind, and the decision_fields kind
+// (kind_decision.go) on a decision lane: the same snapshot write to a bound
+// issue. Its text (Render) is the description; Send and Evidence take the
+// whole snapshot from the payload. entityKind is the lane's entity kind the
+// op must be on.
+type issueFields struct{ entityKind string }
 
-func fieldsPayloadOf(op Op) (IssueFieldsPayload, error) {
+func (k issueFields) payloadOf(op Op) (IssueFieldsPayload, error) {
 	var p IssueFieldsPayload
 	if err := json.Unmarshal(op.Payload, &p); err != nil {
 		return p, fmt.Errorf("%w: payload of op %d: %v", ErrInvalid, op.ID, err)
 	}
-	if op.EntityKind != "task" || !issueIDRE.MatchString(op.YTTargetID) || p.Summary == "" {
-		return p, fmt.Errorf("%w: op %d is not a task issue snapshot", ErrInvalid, op.ID)
+	if op.EntityKind != k.entityKind || !issueIDRE.MatchString(op.YTTargetID) || p.Summary == "" {
+		return p, fmt.Errorf("%w: op %d is not a %s issue snapshot", ErrInvalid, op.ID, k.entityKind)
 	}
 	return p, nil
 }
 
-func (issueFields) Render(op Op) (string, error) {
-	p, err := fieldsPayloadOf(op)
+func (k issueFields) Render(op Op) (string, error) {
+	p, err := k.payloadOf(op)
 	if err != nil {
 		return "", err
 	}
 	return p.Description, nil
 }
 
-func (issueFields) Send(ctx context.Context, remote Remote, op Op, _ string) (string, error) {
+func (k issueFields) Send(ctx context.Context, remote Remote, op Op, _ string) (string, error) {
 	fr, ok := remote.(IssueFieldsRemote)
 	if !ok {
 		return "", &RefusedError{Reason: ReasonUnsupportedKind, Detail: "the remote cannot update issue fields"}
 	}
-	p, err := fieldsPayloadOf(op)
+	p, err := k.payloadOf(op)
 	if err != nil {
 		return "", &RefusedError{Reason: ReasonInvalidIssue, Detail: err.Error()}
 	}
@@ -450,13 +453,13 @@ func (issueFields) Send(ctx context.Context, remote Remote, op Op, _ string) (st
 // snapshot field equal the op's, the issue is the one match; anything else
 // is one mismatch, which the shared rule keeps remote_unknown (an identical
 // resend would be harmless, but the protocol never resends on its own).
-func (issueFields) Evidence(ctx context.Context, remote Remote, op Op, _ string) (Evidence, error) {
+func (k issueFields) Evidence(ctx context.Context, remote Remote, op Op, _ string) (Evidence, error) {
 	var ev Evidence
 	fr, ok := remote.(IssueFieldsRemote)
 	if !ok {
 		return ev, errors.New("the remote cannot read issue fields")
 	}
-	p, err := fieldsPayloadOf(op)
+	p, err := k.payloadOf(op)
 	if err != nil {
 		return ev, err
 	}

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,12 +22,14 @@ import (
 // a step.
 //
 // Lock order: it holds at most one advisory lock per transaction, the entity
-// lane lock (Prepare, Claim, and Apply of an issue_create or issue_move op),
-// and then rows of yt_write_ops and yt_entity_map (a scoped Claim also reads
-// yt_comment_canary or yt_task_bindings; an issue_create Apply inserts a
-// yt_task_bindings row and, in fields mode on, the task's yt_snapshot_state
-// row and its first issue_fields op, and an issue_move Apply updates the
-// binding's project, all under the same lane lock). It takes no task
+// lane lock (Prepare, Claim, and Apply of an issue_create, issue_move or
+// decision_create op), and then rows of yt_write_ops and yt_entity_map (a
+// scoped Claim also reads yt_comment_canary, yt_task_bindings or
+// yt_decision_bindings; an issue_create Apply inserts a yt_task_bindings row
+// and, in fields mode on, the task's yt_snapshot_state row and its first
+// issue_fields op, an issue_move Apply updates the binding's project, and a
+// decision_create Apply does as issue_create for the decision with
+// yt_decision_bindings and decision_fields, all under the same lane lock). It takes no task
 // row, no level-2 lock and no job lock, and no writer of another table waits on
 // one of its rows, so it cannot close a cycle with them. It reads no clock:
 // time is passed in (lockorder.go, "Time").
@@ -70,6 +71,29 @@ func registerYTKindGate(kind string, gate func(s *Store) string) {
 }
 
 var ytKindNameRE = regexp.MustCompile(`^[a-z][a-z_]{0,63}$`)
+
+// ytApplyHook is what applying an op of a create kind (issue_create,
+// decision_create) also does, in Apply's transaction under the entity's lane
+// lock, which Apply takes first for such a kind: conflict names a mapping hk
+// already keeps that publishing ytID would contradict ("" when none; then the
+// op applies with reason binding_conflict and publishes nothing), and bind
+// publishes the entity's binding after the map rows (and may prepare the
+// entity's first snapshot behind the op).
+type ytApplyHook struct {
+	conflict func(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string) (string, error)
+	bind     func(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string, now time.Time, adopted bool) error
+}
+
+// ytApplyHooks are the create kinds' apply hooks, by kind. Each kind adds its
+// own from its own file's init (registerYTApplyHook).
+var ytApplyHooks = map[string]ytApplyHook{}
+
+func registerYTApplyHook(kind string, h ytApplyHook) {
+	if _, dup := ytApplyHooks[kind]; dup || h.conflict == nil || h.bind == nil {
+		panic(fmt.Sprintf("store: yt apply hook %q registered twice or incomplete", kind))
+	}
+	ytApplyHooks[kind] = h
+}
 
 // ytAdmitSQL is the admission of a prepared op o by the worker of the tenant
 // named by the placeholder: o is bound to that tenant and the gate of o's kind
@@ -296,11 +320,11 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 		return ytwrite.Op{}, err
 	}
 	defer tx.Rollback(ctx)
-	// An issue_create op publishes its task's map row and binding, and an
-	// issue_move op its binding's project, which the comment path and the
-	// feed read under the task's lane lock: take that lock first, as Claim
-	// does, before the op row. Kind and lane are immutable, so they are read
-	// before the lock.
+	// A create kind's op (issue_create, decision_create) publishes its
+	// entity's map row and binding, and an issue_move op its binding's
+	// project, which the other paths and the feed read under the entity's
+	// lane lock: take that lock first, as Claim does, before the op row. Kind
+	// and lane are immutable, so they are read before the lock.
 	var kind, entityKind, entityID string
 	err = tx.QueryRow(ctx, `SELECT kind, entity_kind, entity_id FROM yt_write_ops WHERE id=$1`, id).Scan(&kind, &entityKind, &entityID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -309,7 +333,8 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 	if err != nil {
 		return ytwrite.Op{}, err
 	}
-	if kind == ytwrite.KindIssueCreate || kind == ytwrite.KindIssueMove {
+	hook, hooked := ytApplyHooks[kind]
+	if hooked || kind == ytwrite.KindIssueMove {
 		if err := lockYTEntity(ctx, tx, entityKind, entityID); err != nil {
 			return ytwrite.Op{}, err
 		}
@@ -328,16 +353,17 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 	default:
 		return ytwrite.Op{}, fmt.Errorf("%w: apply from %s", ytwrite.ErrState, op.State)
 	}
-	// An issue_create op checks every mapping hk keeps for the task and the
-	// issue before it writes any: on a conflict it publishes neither the map
-	// row nor the binding, keeps what is there, and records the conflict.
+	// A create kind (issue_create, decision_create) checks every mapping hk
+	// keeps for the entity and the issue before it writes any: on a conflict
+	// it publishes neither the map row nor the binding, keeps what is there,
+	// and records the conflict.
 	reason, detail := "", ""
 	adopted := false
 	for _, m := range maps {
 		adopted = adopted || m.Adopted
 	}
-	if op.Kind == ytwrite.KindIssueCreate {
-		if detail, err = ytIssueConflictTx(ctx, tx, op, ytID); err != nil {
+	if hooked {
+		if detail, err = hook.conflict(ctx, tx, op, ytID); err != nil {
 			return ytwrite.Op{}, err
 		}
 		if detail != "" {
@@ -365,14 +391,8 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 			}
 		}
 	}
-	if op.Kind == ytwrite.KindIssueCreate && detail == "" {
-		if err := bindYTIssueTx(ctx, tx, op, ytID, now, adopted); err != nil {
-			return ytwrite.Op{}, err
-		}
-		// The new binding is no task change: the first field snapshot is
-		// prepared here, behind this op on the task's lane (hk 4003).
-		taskID, _ := strconv.ParseInt(op.EntityID, 10, 64)
-		if err := l.s.ytFieldsOnBindTx(ctx, tx, taskID, now); err != nil {
+	if hooked && detail == "" {
+		if err := hook.bind(l.s, ctx, tx, op, ytID, now, adopted); err != nil {
 			return ytwrite.Op{}, err
 		}
 	}

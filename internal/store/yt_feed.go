@@ -42,7 +42,9 @@ const ytFeedLockID = 8241873997
 
 // FeedRow is one sync_log row as a consumer sees it: the change of one model
 // row (task, document, task_comment or decision) and its action, I, U or D.
-// ModelID is the row's id as text (a decision's is its request id).
+// ModelID is the row's id as text (a decision's is its request id, or
+// "record:<decision_requests id>" for a decision_requests write,
+// migration_decision_record_feed.go).
 type FeedRow struct {
 	SyncID  int64
 	Model   string
