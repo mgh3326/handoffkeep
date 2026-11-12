@@ -693,8 +693,10 @@ expected once each, as the import wrote them: `ytwrite.DocComments` of each
 document tied to the task (as it is now), at the document's creation time
 (to the millisecond; no later save changes it). The author is not compared:
 `PutDocument` overwrites `documents.created_by` on every changed body, so the
-import-time author is PG-only (`not_rebuildable`). A comment matching an
-expected copy's (body, time) uses it up and is left out (`document_copies`), so a task comment with the same text
+import-time author is PG-only (`not_rebuildable`). A comment that fits an expected copy's (body, time) and an hk
+comment's tuple too is assigned to neither and differs as `ambiguous:
+document copy or task comment`. Otherwise a comment matching an expected
+copy's (body, time) uses it up and is left out (`document_copies`), so a task comment with the same text
 still matches its hk comment and an extra copy is not hidden; a comment that
 names a task document but matches no expected copy differs. Any other comment is an import's: its author is the
 YouTrack user's login or name (the import named each user after its hk actor)

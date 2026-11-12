@@ -572,3 +572,47 @@ func TestYouTrackRebuildDecisions(t *testing.T) {
 		t.Fatalf("no bindings table: %+v", r.Decisions)
 	}
 }
+
+// hk 4121 (r4545895459): a YouTrack comment that fits both an expected
+// document copy (body, time) and an hk comment's tuple is assigned to
+// neither and differs as ambiguous, whatever the listing order: the drill
+// never reports such an overlap as equal.
+func TestYouTrackRebuildCommentDocOverlap(t *testing.T) {
+	at := time.Date(2026, 11, 3, 4, 5, 6, 789000000, time.UTC)
+	body := "# reports/j9/report.md\n\nsame"
+	hk := store.YTRebuildComments{
+		// The document was created by A at the same millisecond as B's
+		// task comment with its exact text.
+		Comments: []store.YTRebuildComment{{ID: 1, Author: "worker:b", Body: body, CreatedAt: at}},
+		Docs:     []store.YTRebuildTaskDoc{{Key: "reports/j9/report.md", Kind: "report", Body: "same", CreatedBy: "worker:a", CreatedAt: at}},
+	}
+	copyOf := func(id, author string) ytwrite.RemoteComment {
+		return ytwrite.RemoteComment{ID: id, Text: body, CreatedAt: at, AuthorLogin: author}
+	}
+	for _, tc := range []struct {
+		name   string
+		listed []ytwrite.RemoteComment
+		differ []string
+		docs   int
+	}{
+		// A's document copy is lost and B's comment is there twice: both
+		// copies are ambiguous, the hk comment is not matched, nothing is
+		// equal.
+		{"lost copy, duplicate comment", []ytwrite.RemoteComment{copyOf("4-1", "worker:b"), copyOf("4-2", "worker:b")}, []string{"yt 4-1", "yt 4-2", "comment 1"}, 0},
+		// Both correct copies exist, B's id first: A's copy (author A fits
+		// no hk comment) is the document's; B's copy is ambiguous.
+		{"both copies, B first", []ytwrite.RemoteComment{copyOf("4-1", "worker:b"), copyOf("4-2", "worker:a")}, []string{"yt 4-1", "comment 1"}, 1},
+		{"both copies, A first", []ytwrite.RemoteComment{copyOf("4-1", "worker:a"), copyOf("4-2", "worker:b")}, []string{"yt 4-2", "comment 1"}, 1},
+	} {
+		var out ytRebuildComments
+		diffComments(9, hk, tc.listed, &out)
+		if out.Equal != 0 || out.DocumentCopies != tc.docs || !slices.Equal(ytrbIDs(out.Differ), tc.differ) {
+			t.Fatalf("%s: equal %d copies %d differ %+v", tc.name, out.Equal, out.DocumentCopies, out.Differ.Items)
+		}
+		for _, it := range out.Differ.Items {
+			if strings.HasPrefix(it.ID, "yt ") && !strings.Contains(it.Reason, "ambiguous: document copy or task comment") {
+				t.Fatalf("%s: %s reason %q", tc.name, it.ID, it.Reason)
+			}
+		}
+	}
+}

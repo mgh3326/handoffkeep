@@ -693,12 +693,23 @@ func diffComments(taskID int64, hk store.YTRebuildComments, listed []ytwrite.Rem
 		if r.how != rebuiltImported {
 			continue
 		}
-		// An expected document copy first, consumed once, so a task comment
-		// with the same text is still matched and an extra copy is not
-		// hidden.
+		// A comment that fits an expected document copy (body and time) and
+		// an hk comment's tuple too is assigned to neither: without the
+		// copy's import-time author nothing tells them apart, and either
+		// guess can hide a duplicate or a lost copy. Fitting any copy counts,
+		// used or not, so the result does not depend on the listing order.
+		fitsDoc := func(d store.YTRebuildComment) bool {
+			return r.body == d.Body && r.at.Equal(d.CreatedAt.Truncate(time.Millisecond))
+		}
+		if slices.ContainsFunc(docCopies, fitsDoc) && slices.ContainsFunc(hk.Comments, func(c store.YTRebuildComment) bool { return importedMatches(*r, c) }) {
+			out.differ("yt "+r.ytID, "task "+task+": ambiguous: document copy or task comment (same body and time)")
+			continue
+		}
+		// Otherwise an expected document copy, used up once, so an extra
+		// copy is not hidden.
 		doc := -1
 		for k, d := range docCopies {
-			if !docUsed[k] && r.body == d.Body && r.at.Equal(d.CreatedAt.Truncate(time.Millisecond)) {
+			if !docUsed[k] && fitsDoc(d) {
 				doc = k
 				break
 			}
