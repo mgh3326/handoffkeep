@@ -458,17 +458,17 @@ func TestYTCommentQueuedWaitsForTheIssueIntent(t *testing.T) {
 	if ops := ytiOps(t, s, x.ID); len(ops) != 1 || ops[0].Reason != ytwrite.ReasonProjectChanged || ytrIntent(t, s, x.ID) != ytcTenant {
 		t.Fatalf("ops %+v, intent %q", ops, ytrIntent(t, s, x.ID))
 	}
+	// The fake itself, not ytcCounting: the protocol needs its issue calls.
 	yt := ytwritetest.NewFake()
-	counting := &ytcCounting{Remote: yt}
 	var offset atomic.Int64
-	p := ytcProtocol(t, s, counting, &offset)
+	p := ytcProtocol(t, s, yt, &offset)
 	for range 3 {
 		if _, err := p.Drive(ctx, 20); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if got, err := s.YTWriteLedger().ByID(ctx, op.ID); err != nil || got.State != ytwrite.StatePrepared || counting.posts.Load() != 0 {
-		t.Fatalf("comment op while the intent waits %+v %v, posts %d", got, err, counting.posts.Load())
+	if got, err := s.YTWriteLedger().ByID(ctx, op.ID); err != nil || got.State != ytwrite.StatePrepared || yt.Calls() != 0 {
+		t.Fatalf("comment op while the intent waits %+v %v, remote calls %d", got, err, yt.Calls())
 	}
 	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "ytq-later", ProjectID: "0-11", ShortName: "HL"}); err != nil {
 		t.Fatal(err)
