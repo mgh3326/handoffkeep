@@ -134,17 +134,48 @@ func TestYTArticleClassify(t *testing.T) {
 	if f.reads["SHRDOC2-A-41"] != 1 || a.lookup["0-3"] != ytArticleLookupReadable {
 		t.Fatalf("shared lookup: reads %v, lookup %v", f.reads, a.lookup)
 	}
-	// Found by summary only, but another document renders the same
-	// summary: the article may be that document's (finding r4545018005).
-	f.articles = append(f.articles, art("2-9", "SMA-A-9", "0-8", "note/coll", "coll"))
-	a.index = nil
-	a.owners = map[string]map[string][]int64{"0-8": {store.YTArticleSummary("note/coll", "note"): {42, 43}}}
-	if got := check(ytartDoc(42, "note/coll", "coll", "sma", "SMA", "0-8"), ytArticleAmbiguous, ""); !strings.Contains(got.detail, "document 43") {
-		t.Fatalf("summary collision detail %q", got.detail)
+	// A summary cut at 250 code points (decision-3): it binds only to the
+	// one article with it, and only when that article holds exactly the
+	// document's body; anything else is ambiguous, reason summary_cut.
+	long := "note/" + strings.Repeat("c", 260)
+	cutDoc := func(id int64, suffix, body string) store.YTArticleDoc {
+		return ytartDoc(id, long+suffix, body, "sma", "SMA", "0-8")
 	}
-	a.owners["0-8"][store.YTArticleSummary("note/coll", "note")] = []int64{42}
-	check(ytartDoc(42, "note/coll", "coll", "sma", "SMA", "0-8"), ytArticleMatched, "2-9")
-	a.owners = nil
+	if !store.YTArticleSummaryCut(long+"-a", "note") || store.YTArticleSummaryCut("note/c", "note") {
+		t.Fatal("YTArticleSummaryCut")
+	}
+	f.articles = append(f.articles, art("2-9", "SMA-A-9", "0-8", long+"-a", "body a"))
+	a.index = nil
+	if got := check(cutDoc(42, "-a", "body a"), ytArticleMatched, "2-9"); got.summaryCut {
+		t.Fatal("a proven cut-summary match was flagged summary_cut")
+	}
+	// The same one article, but another document's body (it was moved,
+	// created since, or numbered onto this readable id).
+	if got := check(cutDoc(43, "-b", "body b"), ytArticleAmbiguous, ""); !got.summaryCut || !strings.HasPrefix(got.detail, "summary_cut: ") {
+		t.Fatalf("cut summary, other content: %+v", got)
+	}
+	// Also on the readable-id path: the GET of SMA-A-44 answers an article
+	// with the cut summary but another document's body.
+	f.articles = append(f.articles, art("2-10", "RDA-A-44", "0-7", long+"-x", "someone else"))
+	a.index = nil
+	if got := check(ytartDoc(44, long+"-x", "mine", "rda", "RDA", "0-7"), ytArticleAmbiguous, ""); !got.summaryCut || f.reads["RDA-A-44"] != 1 {
+		t.Fatalf("cut summary on the readable path: %+v, reads %v", got, f.reads)
+	}
+	// A split document with a cut summary cannot be checked by content.
+	big := "note/" + strings.Repeat("g", 260)
+	idxCut := art("2-11", "SMA-A-11", "0-8", big, "# index")
+	idxCut.Summary = store.YTArticleIndexSummary(big, "note")
+	f.articles = append(f.articles, idxCut)
+	a.index = nil
+	if got := check(ytartDoc(45, big, "large", "sma", "SMA", "0-8"), ytArticleAmbiguous, ""); !got.summaryCut || !strings.Contains(got.detail, "split") {
+		t.Fatalf("cut split document: %+v", got)
+	}
+	// Two candidate articles for a cut summary: ambiguous, summary_cut.
+	f.articles = append(f.articles, art("2-12", "SMA-A-12", "0-8", long+"-a", "body a"))
+	a.index = nil
+	if got := check(cutDoc(46, "-a", "body a"), ytArticleAmbiguous, ""); !got.summaryCut {
+		t.Fatalf("cut summary, two articles: %+v", got)
+	}
 	// Excluded and bound documents are classified without a read.
 	before := len(f.reads)
 	rep := ytartDoc(37, "reports/job/report.md", "r", "sma", "SMA", "0-8")

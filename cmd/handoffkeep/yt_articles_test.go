@@ -95,6 +95,7 @@ type ytartProject struct {
 	SHADiffers ytartClass `json:"sha_differs"`
 	Missing    ytartClass `json:"missing"`
 	Ambiguous  ytartClass `json:"ambiguous"`
+	SummaryCut ytartClass `json:"summary_cut"`
 	Excluded   ytartClass `json:"excluded"`
 	Error      ytartClass `json:"error"`
 }
@@ -214,8 +215,9 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 	s3 := put("note/sma/edited", "sma edited", smaTask)
 	x1 := put("note/shared/elsewhere", "shared", nil)
 	n1 := put("note/nomap/doc", "no mapping", nomapTask)
-	// Two keys that differ only after the 250-rune cut render one summary;
-	// the one article with it cannot be told apart (finding r4545018005).
+	// Two keys that differ only after the 250-rune cut render one summary,
+	// and one article has it, holding c1's body: c1 binds, c2 is ambiguous
+	// with reason summary_cut (decision-3).
 	long := "note/sma/" + strings.Repeat("k", 260)
 	c1 := put(long+"-a", "collides a", smaTask)
 	c2 := put(long+"-b", "collides b", smaTask)
@@ -269,8 +271,9 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 	if sma.Lookup != ytArticleLookupSummary {
 		t.Errorf("sma lookup = %q, want %q", sma.Lookup, ytArticleLookupSummary)
 	}
-	ytartIDs(t, "sma matched", sma.Matched, s1)
-	ytartIDs(t, "sma ambiguous", sma.Ambiguous, s2, c1, c2)
+	ytartIDs(t, "sma matched", sma.Matched, s1, c1)
+	ytartIDs(t, "sma ambiguous", sma.Ambiguous, s2, c2)
+	ytartIDs(t, "sma summary_cut", sma.SummaryCut, c2)
 	ytartIDs(t, "sma sha_differs", sma.SHADiffers, s3)
 	ytartIDs(t, "shared missing", r.project(t, store.YTArticleBucketShared).Missing, x1)
 	ytartIDs(t, "nomap missing", r.project(t, "nomap").Missing, n1)
@@ -289,8 +292,8 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.BoundNow == nil || *r.BoundNow != 5 || bindings() != 5 {
-		t.Fatalf("backfill bound %v, %d rows; want 5", r.BoundNow, bindings())
+	if r.BoundNow == nil || *r.BoundNow != 6 || bindings() != 6 {
+		t.Fatalf("backfill bound %v, %d rows; want 6", r.BoundNow, bindings())
 	}
 	want := map[int64]struct {
 		article, sha string
@@ -301,6 +304,7 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 		r5: {"1-5", "", true},
 		s1: {"2-1", ytartSHA("sma one"), false},
 		s3: {"2-4", ytartSHA("sma before the edit"), true},
+		c1: {"2-5", ytartSHA("collides a"), false},
 	}
 	for doc, w := range want {
 		b, found, err := st.YTArticleBinding(ctx, doc)
@@ -311,7 +315,7 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 			t.Errorf("document %d binding = %+v, want %+v", doc, b, w)
 		}
 	}
-	for _, doc := range []int64{r3, r4, s2, x1, n1, c1, c2} {
+	for _, doc := range []int64{r3, r4, s2, x1, n1, c2} {
 		if _, found, err := st.YTArticleBinding(ctx, doc); err != nil || found {
 			t.Errorf("document %d was bound (%v)", doc, err)
 		}
@@ -323,11 +327,11 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *r.BoundNow != 0 || bindings() != 5 || fake.hitsOf("/api/articles/RDA-A-"+id(r1)) != before {
+	if *r.BoundNow != 0 || bindings() != 6 || fake.hitsOf("/api/articles/RDA-A-"+id(r1)) != before {
 		t.Fatalf("second backfill bound %d, %d rows, %d reads of a bound article", *r.BoundNow, bindings(), fake.hitsOf("/api/articles/RDA-A-"+id(r1))-before)
 	}
 	ytartIDs(t, "rda bound", r.project(t, "rda").Bound, r1, r2, r5)
-	ytartIDs(t, "sma bound", r.project(t, "sma").Bound, s1, s3)
+	ytartIDs(t, "sma bound", r.project(t, "sma").Bound, s1, s3, c1)
 
 	// The audit counts the in-scope documents with no binding.
 	a := &ytAuditor{st: st, tenant: tenant, articles: true}
@@ -335,14 +339,14 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if docs.Documents != 11 || docs.Unbound.Count != 6 || !slices.Equal(docs.Unbound.DocumentIDs, []int64{r3, s2, x1, n1, c1, c2}) {
+	if docs.Documents != 11 || docs.Unbound.Count != 5 || !slices.Equal(docs.Unbound.DocumentIDs, []int64{r3, s2, x1, n1, c2}) {
 		t.Fatalf("audit documents = %+v", docs)
 	}
 	per := map[string][]int64{}
 	for _, p := range docs.Projects {
 		per[p.Project] = p.Unbound.DocumentIDs
 	}
-	for p, w := range map[string][]int64{"rda": {r3}, "sma": {s2, c1, c2}, store.YTArticleBucketShared: {x1}, "nomap": {n1}} {
+	for p, w := range map[string][]int64{"rda": {r3}, "sma": {s2, c2}, store.YTArticleBucketShared: {x1}, "nomap": {n1}} {
 		if !slices.Equal(per[p], w) {
 			t.Errorf("audit %s unbound = %v, want %v", p, per[p], w)
 		}

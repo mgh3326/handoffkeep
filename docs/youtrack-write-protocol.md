@@ -944,10 +944,16 @@ verifies keeps that lookup (`lookup: "readable_id"`); a document whose GET
 then misses falls back to the summary. A project whose first GET does not
 verify is matched by summary from here on (`lookup: "summary"`), and the
 matched article's content is read by id. On both paths a second top-level
-article of the project with the document's summary makes it `ambiguous`. A
-match by summary alone is also `ambiguous` when another in-scope document of
-the same YouTrack project renders that summary (two keys that differ only
-after the 250-code-point cut): the run reads every document's summary first. Which lookup the live import allows is UNVERIFIED until
+article of the project with the document's summary makes it `ambiguous`. 
+
+**A cut summary** (the rendering is over 250 code points, so the summary no
+longer holds the whole key and another document can render it too, decision-3
+of hk 4053) binds only when exactly one top-level article of the project has
+it and, the document being single-part, that article's content sha equals
+`documents.sha256`. Anything else (two candidates, other content, a split
+document's index) is `ambiguous`, never bound, and also counted under
+`summary_cut`. An uncut summary contains the whole key, which is unique, and
+binds as above. Which lookup the live import allows is UNVERIFIED until
 the first preflight (hk 4053 report).
 
 **Commands.** Both open the database directly and verify against the tenant
@@ -956,7 +962,7 @@ of `YOUTRACK_URL`; `--project` is an hk project, `/shared` or `/unassigned`.
 - `handoffkeep youtrack articles-preflight [--project P]` is read-only
   (`store.OpenReadOnly`; exit 2 without migration `20261112-yt-article-bindings`).
   The JSON report has, per project, its `lookup` and a count and up to 10
-  document ids for `bound`, `matched`, `sha_differs`, `missing`, `ambiguous`,
+  document ids for `bound`, `matched`, `sha_differs`, `missing`, `ambiguous` (and its subset `summary_cut`),
   `excluded` and `error`. A bound or excluded document is classified without
   a YouTrack read.
 - `handoffkeep youtrack articles-backfill [--project P] [--by NAME]` binds

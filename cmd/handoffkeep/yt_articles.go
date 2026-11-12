@@ -113,6 +113,9 @@ type ytArticlesProject struct {
 	SHADiffers ytArticlesClass `json:"sha_differs"`
 	Missing    ytArticlesClass `json:"missing"`
 	Ambiguous  ytArticlesClass `json:"ambiguous"`
+	// SummaryCut is the ambiguous documents refused for reason summary_cut
+	// (also counted in Ambiguous).
+	SummaryCut ytArticlesClass `json:"summary_cut"`
 	Excluded   ytArticlesClass `json:"excluded"`
 	Error      ytArticlesClass `json:"error"`
 	ytProject  string
@@ -167,61 +170,6 @@ type ytArticler struct {
 	// lookup and outside that document's budget (run), or by classify when
 	// it is called alone.
 	index map[string]map[string][]youtrack.Article
-	// owners is, by YouTrack project id and summary, the in-scope documents
-	// of every hk project whose article would have that summary (run reads
-	// it first, across all projects). A summary that two documents render
-	// cannot name either one's article (finding r4545018005); nil when
-	// classify is called alone.
-	owners map[string]map[string][]int64
-}
-
-// loadOwners reads every document once (all projects, whatever the run's
-// filter: two hk projects can share a YouTrack project) and records which
-// documents render each summary in each YouTrack project. Excluded
-// documents have no article and are left out.
-func (a *ytArticler) loadOwners(ctx context.Context) error {
-	owners := map[string]map[string][]int64{}
-	var after int64
-	for {
-		docs, err := a.st.YTArticleDocs(ctx, "", after, ytArticleDocPage)
-		if err != nil {
-			return err
-		}
-		for _, d := range docs {
-			after = d.DocumentID
-			if store.YTArticleExcluded(d.Key, d.TaskID) {
-				continue
-			}
-			_, projectID, missing := a.target(d.YTArticleCandidate)
-			if missing != "" {
-				continue
-			}
-			bySummary := owners[projectID]
-			if bySummary == nil {
-				bySummary = map[string][]int64{}
-				owners[projectID] = bySummary
-			}
-			for _, summary := range []string{store.YTArticleSummary(d.Key, d.Kind), store.YTArticleIndexSummary(d.Key, d.Kind)} {
-				bySummary[summary] = append(bySummary[summary], d.DocumentID)
-			}
-		}
-		if len(docs) < ytArticleDocPage {
-			break
-		}
-	}
-	a.owners = owners
-	return nil
-}
-
-// sharedSummary returns another document of project projectID that renders
-// summary, or 0 when none does.
-func (a *ytArticler) sharedSummary(projectID, summary string, documentID int64) int64 {
-	for _, id := range a.owners[projectID][summary] {
-		if id != documentID {
-			return id
-		}
-	}
-	return 0
 }
 
 // ytArticleResult is one document's class, with the binding a backfill
@@ -230,6 +178,10 @@ type ytArticleResult struct {
 	class   string
 	detail  string
 	binding store.YTArticleBinding
+	// summaryCut marks an ambiguous result refused because the document's
+	// summary is cut at 250 code points and its article could not be proven
+	// its own (decision-3, hk 4053): counted under summary_cut as well.
+	summaryCut bool
 }
 
 // ytArticleTarget is the YouTrack project of a document's article: its short
@@ -308,6 +260,7 @@ func (a *ytArticler) classify(ctx context.Context, d store.YTArticleDoc, bindBy 
 		return ytArticleResult{class: ytArticleMissing, detail: missing}
 	}
 	single, index := store.YTArticleSummary(c.Key, c.Kind), store.YTArticleIndexSummary(c.Key, c.Kind)
+	cut := store.YTArticleSummaryCut(c.Key, c.Kind)
 	if err := a.loadIndex(ctx); err != nil {
 		return failed(err)
 	}
@@ -317,7 +270,11 @@ func (a *ytArticler) classify(ctx context.Context, d store.YTArticleDoc, bindBy 
 		for i, x := range hits {
 			ids[i] = x.ID
 		}
-		return ytArticleResult{class: ytArticleAmbiguous, detail: fmt.Sprintf("%d articles of project %s have the summary: %s", len(hits), short, strings.Join(ids, ","))}
+		detail := fmt.Sprintf("%d articles of project %s have the summary: %s", len(hits), short, strings.Join(ids, ","))
+		if cut {
+			detail = "summary_cut: " + detail
+		}
+		return ytArticleResult{class: ytArticleAmbiguous, summaryCut: cut, detail: detail}
 	}
 	var found youtrack.Article
 	haveContent := false
@@ -353,16 +310,23 @@ func (a *ytArticler) classify(ctx context.Context, d store.YTArticleDoc, bindBy 
 	case len(hits) == 0:
 		return ytArticleResult{class: ytArticleMissing, detail: "no article of project " + short + " has summary " + strconv.Quote(single)}
 	case len(hits) == 1:
-		// Found by summary only: the summary must name this document
-		// alone, or the article may be another document's.
-		if other := a.sharedSummary(projectID, hits[0].Summary, c.DocumentID); other != 0 {
-			return ytArticleResult{class: ytArticleAmbiguous, detail: fmt.Sprintf("summary of article %s is also document %d's", hits[0].ID, other)}
-		}
 		found = hits[0]
 	default:
 		return ambiguous(hits)
 	}
+	// A cut summary does not contain the whole key, so another document
+	// (moved since the import, created since, or numbered onto this
+	// readable id) can render it too. Such a document binds only to the one
+	// article with that summary, and only when the article holds exactly its
+	// body (decision-3): a split index, whose content is the import's, or
+	// other content is ambiguous, reason summary_cut.
+	refuseCut := func(why string) ytArticleResult {
+		return ytArticleResult{class: ytArticleAmbiguous, summaryCut: true, detail: "summary_cut: " + why}
+	}
 	b := store.YTArticleBinding{DocumentID: c.DocumentID, Tenant: a.tenant, ArticleID: found.ID, ArticleReadable: found.IDReadable, ProjectID: projectID, BoundBy: bindBy}
+	if found.Summary == index && cut {
+		return refuseCut("split document's index article " + found.ID + " cannot be checked by content")
+	}
 	if found.Summary == index {
 		b.NeedsUpdate = true
 		return ytArticleResult{class: ytArticleSHADiffers, detail: "split document: index article " + found.ID, binding: b}
@@ -381,6 +345,9 @@ func (a *ytArticler) classify(ctx context.Context, d store.YTArticleDoc, bindBy 
 	}
 	sum := sha256.Sum256([]byte(found.Content))
 	b.ContentSHA = hex.EncodeToString(sum[:])
+	if b.ContentSHA != c.SHA256 && cut {
+		return refuseCut("article " + found.ID + " content sha " + b.ContentSHA + " is not the document's")
+	}
 	if b.ContentSHA != c.SHA256 {
 		b.NeedsUpdate = true
 		return ytArticleResult{class: ytArticleSHADiffers, detail: "article " + found.ID + " content sha " + b.ContentSHA, binding: b}
@@ -396,9 +363,6 @@ func (a *ytArticler) run(ctx context.Context, bucket, bindBy string) (ytArticles
 	r := ytArticlesReport{Tenant: a.tenant, Project: bucket, Projects: []*ytArticlesProject{}}
 	if a.lookup == nil {
 		a.lookup = map[string]string{}
-	}
-	if err := a.loadOwners(ctx); err != nil {
-		return r, err
 	}
 	byProject := map[string]*ytArticlesProject{}
 	boundNow := 0
@@ -449,6 +413,7 @@ func (a *ytArticler) run(ctx context.Context, bucket, bindBy string) (ytArticles
 				for _, name := range []string{ytArticleBound, ytArticleMatched, ytArticleSHADiffers, ytArticleMissing, ytArticleAmbiguous, ytArticleExcluded, ytArticleError} {
 					p.class(name).DocumentIDs = []int64{}
 				}
+				p.SummaryCut.DocumentIDs = []int64{}
 				byProject[d.Bucket] = p
 				r.Projects = append(r.Projects, p)
 			}
@@ -456,6 +421,9 @@ func (a *ytArticler) run(ctx context.Context, bucket, bindBy string) (ytArticles
 				_, p.ytProject, _ = a.target(d.YTArticleCandidate)
 			}
 			p.class(got.class).add(d.DocumentID)
+			if got.summaryCut {
+				p.SummaryCut.add(d.DocumentID)
+			}
 		}
 		if len(docs) < ytArticleDocPage {
 			break

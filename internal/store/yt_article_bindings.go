@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -69,6 +70,14 @@ func YTArticleSummary(key, kind string) string {
 		r = r[:ytArticleSummaryRunes]
 	}
 	return string(r)
+}
+
+// YTArticleSummaryCut reports whether YTArticleSummary cuts the rendering
+// at 250 code points: only then can two documents (whose keys are unique)
+// render the same summary.
+func YTArticleSummaryCut(key, kind string) bool {
+	prefix, _, _ := strings.Cut(key, "/")
+	return utf8.RuneCountInString("["+prefix+"] "+key+" ["+kind+"]") > ytArticleSummaryRunes
 }
 
 // YTArticleIndexSummary is the summary of a split document's index article:
