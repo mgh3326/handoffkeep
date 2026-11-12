@@ -338,13 +338,18 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 			if pending > 0 {
 				refusals = append(refusals, fmt.Sprintf("%s: %d ops are prepared, dispatched or remote_unknown (youtrack ops)", k, pending))
 			}
-			var prunedThrough int64
-			if err := tx.QueryRow(ctx, `SELECT pruned_through FROM sync_state WHERE singleton`).Scan(&prunedThrough); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				return nil, nil, err
-			}
 			for _, f := range ytAuthorityFeeds[k] {
+				// One statement, so the prune boundary, the cursor and the
+				// backlog come from one snapshot, as runYTFeedConsumer reads
+				// them: a prune that commits in between cannot hide unread
+				// rows.
+				var prunedThrough int64
 				var cursor *int64
-				if err := tx.QueryRow(ctx, `SELECT last_sync_id FROM yt_feed_cursors WHERE consumer=$1`, f.consumer).Scan(&cursor); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				var behind int
+				if err := tx.QueryRow(ctx, `SELECT st.pruned_through, c.last_sync_id,
+					(SELECT count(*) FROM sync_log l WHERE l.sync_id > coalesce(c.last_sync_id, 0) AND l.model = ANY($2::text[]))
+					FROM sync_state st LEFT JOIN yt_feed_cursors c ON c.consumer = $1
+					WHERE st.singleton`, f.consumer, f.models).Scan(&prunedThrough, &cursor, &behind); err != nil {
 					return nil, nil, err
 				}
 				if cursor == nil {
@@ -352,14 +357,10 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 					continue
 				}
 				// Rows the prune removed before the consumer read them cannot
-				// be counted below; the feed itself stops on them.
+				// be counted; the feed itself stops on them.
 				if prunedThrough > *cursor {
 					refusals = append(refusals, fmt.Sprintf("%s: feed consumer %s is behind the sync_log prune (cursor %d, pruned through %d)", k, f.consumer, *cursor, prunedThrough))
 					continue
-				}
-				var behind int
-				if err := tx.QueryRow(ctx, `SELECT count(*) FROM sync_log WHERE sync_id > $1 AND model = ANY($2::text[])`, *cursor, f.models).Scan(&behind); err != nil {
-					return nil, nil, err
 				}
 				if behind > 0 {
 					refusals = append(refusals, fmt.Sprintf("%s: feed consumer %s has %d changes to read", k, f.consumer, behind))

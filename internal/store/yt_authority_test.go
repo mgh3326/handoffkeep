@@ -416,3 +416,34 @@ func TestYTAuthorityDotsReply(t *testing.T) {
 		t.Fatalf("youtrack, enrolled: op %+v %v", op, ok)
 	}
 }
+
+// A prune that removed every change the feed had not read leaves no backlog
+// to count; the gate reads the prune boundary, the cursor and the backlog in
+// one statement and refuses on the boundary (hk 4122 review r4545561733).
+func TestYTAuthorityRefusesBacklogLostToPrune(t *testing.T) {
+	s := schemaStore(t, "yta_prune")
+	ctx := t.Context()
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	s.SetYTFieldsMode(YTFieldsOn, ytcTenant)
+	ytcTask(t, s, "handoffkeep")
+	if _, err := s.pool.Exec(ctx, `INSERT INTO yt_feed_cursors(consumer,last_sync_id,updated_at) VALUES ($1,0,now())`, ytFieldsConsumer); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := s.PruneSync(ctx, time.Nanosecond); err != nil || removed == 0 {
+		t.Fatalf("prune removed %d rows: %v", removed, err)
+	}
+	if n := ytcCount(t, s, `SELECT count(*) FROM sync_log WHERE model='task'`); n != 0 {
+		t.Fatalf("%d task changes survived the prune", n)
+	}
+	_, _, err := s.SetYTAuthority(ctx, []YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack, "operator", "drill")
+	if !errors.Is(err, ErrYTAuthorityRefused) || !strings.Contains(err.Error(), "behind the sync_log prune") {
+		t.Fatalf("switch with a pruned, unread backlog = %v", err)
+	}
+	// Once the consumer is past the boundary the gate passes.
+	if _, err := s.pool.Exec(ctx, `UPDATE yt_feed_cursors SET last_sync_id=(SELECT pruned_through FROM sync_state WHERE singleton) WHERE consumer=$1`, ytFieldsConsumer); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.SetYTAuthority(ctx, []YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack, "operator", "drill"); err != nil {
+		t.Fatal(err)
+	}
+}
