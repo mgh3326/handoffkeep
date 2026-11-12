@@ -161,9 +161,9 @@ func TestYTRebuildDecisionReads(t *testing.T) {
 		ytFeedExec(t, s, `INSERT INTO yt_decision_bindings(decision_id, tenant, issue_id, origin, bound_by, bound_at)
 			VALUES ($1,$2,$3,'import_verified','test',now())`, strconv.FormatInt(id, 10), tenant, issue)
 	}
-	a := ytdecChat(t, s, "q-rebuild-a", "First question?")
-	b := ytdecChat(t, s, "q-rebuild-b", "Second question?")
-	elsewhere := ytdecChat(t, s, "q-rebuild-c", "Other tenant?")
+	a := ytdecChat(t, s, "Q-20261112-41", "First question?")
+	b := ytdecChat(t, s, "Q-20261112-42", "Second question?")
+	elsewhere := ytdecChat(t, s, "Q-20261112-43", "Other tenant?")
 	bind(a, ytcTenant, "5-1")
 	bind(b, ytcTenant, "5-2")
 	bind(elsewhere, "other.youtrack.cloud", "5-3")
