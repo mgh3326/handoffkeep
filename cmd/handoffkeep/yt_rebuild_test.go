@@ -339,7 +339,7 @@ func TestYouTrackRebuildComments(t *testing.T) {
 	if got.Equal != 3 || got.Exceptions.Count != 1 || ytrbIDs(got.Exceptions)[0] != "comment 13" || !strings.HasPrefix(got.Exceptions.Items[0].Reason, "legacy_mirror: ") {
 		t.Fatalf("equal %d exceptions %+v", got.Equal, got.Exceptions)
 	}
-	wantDiffer := []string{"yt 4-23", "yt 4-24", "comment 21", "comment 22", "comment 23", "comment 24", "comment 25", "comment 27"}
+	wantDiffer := []string{"yt 4-24", "yt 4-23", "comment 21", "comment 22", "comment 23", "comment 24", "comment 25", "comment 27"}
 	if gotIDs := ytrbIDs(got.Differ); !slices.Equal(gotIDs, wantDiffer) || got.Differ.Count != len(wantDiffer) {
 		t.Fatalf("differ %v, want %v (%+v)", gotIDs, wantDiffer, got.Differ.Items)
 	}

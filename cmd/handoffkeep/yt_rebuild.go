@@ -611,6 +611,16 @@ func diffComments(taskID int64, hk store.YTRebuildComments, listed []ytwrite.Rem
 			byLegacyYT[c.LegacyYTID] = i
 		}
 	}
+	// The listing comes in no fixed order (EnumerateStableComments returns
+	// a set); created time, then id, makes the matching and the report the
+	// same on every run.
+	listed = slices.Clone(listed)
+	slices.SortFunc(listed, func(a, b ytwrite.RemoteComment) int {
+		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
 	var rebuilt []rebuiltComment
 	for _, c := range listed {
 		if c.Deleted {
