@@ -104,6 +104,10 @@ type ytRebuildComments struct {
 	// document's copy, for one), left out too.
 	PulledLeftOut int `json:"pulled_left_out"`
 	OtherHKWrites int `json:"other_hk_writes"`
+	// DocumentCopies is the import's copies of the task's reports and
+	// briefs (ytwrite.DocComments of the document as it is now), left out:
+	// they are documents, not task comments.
+	DocumentCopies int `json:"document_copies"`
 }
 
 type ytRebuildReport struct {
@@ -214,10 +218,6 @@ type ytRebuilder struct {
 // ytRebuildArticleBindingsMigration adds yt_article_bindings (hk 4053).
 const ytRebuildArticleBindingsMigration = "20261112-yt-article-bindings"
 
-// ytRebuildSplitBytes is the import's SAFE_PART_BYTES
-// (youtrack/import/client.js): a longer document was imported as an index
-// article and parts, which the document kind has not rewritten yet.
-const ytRebuildSplitBytes = 240 << 10
 
 func (b *ytRebuilder) call(ctx context.Context, read func(context.Context) error) error {
 	return b.reader.call(ctx, read)
@@ -276,10 +276,12 @@ func (b *ytRebuilder) tasks(ctx context.Context, out *ytRebuildTarget) error {
 }
 
 // documents compares every bound document's article content with the
-// document: a single-part one's content sha256 must be documents.sha256; a
-// split one (over 240 KiB) is listed as exception_not_updated (D4, operator
-// A53): its articles are the import's and are not updated at the first
-// switch.
+// document: its content sha256 must be documents.sha256. A document whose
+// binding names the import's split index article (over 240 KiB when
+// imported) is listed as exception_not_updated (D4, operator A53): its
+// articles are the import's and are not updated at the first switch. Whether
+// it was split is the binding's record, not the current body size: a
+// document that grew past 240 KiB after a single-part import is compared.
 func (b *ytRebuilder) documents(ctx context.Context, out *ytRebuildTarget) error {
 	page := b.taskPage
 	if page < 1 {
@@ -294,8 +296,8 @@ func (b *ytRebuilder) documents(ctx context.Context, out *ytRebuildTarget) error
 		for _, d := range docs {
 			after = d.DocumentID
 			id := strconv.FormatInt(d.DocumentID, 10)
-			if d.BodyBytes > ytRebuildSplitBytes {
-				out.exception(id, fmt.Sprintf("exception_not_updated: %s is %d bytes, split on import (over 240 KiB, D4)", d.Key, d.BodyBytes))
+			if d.SplitIndex {
+				out.exception(id, fmt.Sprintf("exception_not_updated: %s (%d bytes) is bound to the import's split index article %s (D4)", d.Key, d.BodyBytes, d.ArticleID))
 				continue
 			}
 			var content string
@@ -602,6 +604,13 @@ func diffComments(taskID int64, hk store.YTRebuildComments, listed []ytwrite.Rem
 	byOp := map[int64]int{}
 	byID := map[int64]int{}
 	byLegacyYT := map[string]int{}
+	docs := map[string]bool{}
+	for _, d := range hk.Docs {
+		bodies, _, _ := ytwrite.DocComments(d.Key, d.Kind, d.Body)
+		for _, b := range bodies {
+			docs[b] = true
+		}
+	}
 	for i, c := range hk.Comments {
 		byID[c.ID] = i
 		if c.OpID > 0 {
@@ -636,8 +645,17 @@ func diffComments(taskID int64, hk store.YTRebuildComments, listed []ytwrite.Rem
 		}
 		if opID, ok := ytwrite.RenderedOpID(c.Text); ok {
 			i, mine := byOp[opID]
-			if !mine {
+			switch {
+			case mine:
+			case hk.IssueOps[opID]:
+				// hk's own write to this issue, of another entity (a
+				// task-tied document's copy, for one).
 				out.OtherHKWrites++
+				continue
+			default:
+				// The form alone is not hk's: no op of hk's ledger for this
+				// issue has the id.
+				out.differ("yt "+c.ID, "task "+strconv.FormatInt(taskID, 10)+": names hk op "+strconv.FormatInt(opID, 10)+", which hk's ledger has not for this issue")
 				continue
 			}
 			first, rest, _ := strings.Cut(c.Text, "\n\n")
@@ -651,6 +669,14 @@ func diffComments(taskID int64, hk store.YTRebuildComments, listed []ytwrite.Rem
 				rebuilt = append(rebuilt, rebuiltComment{ytID: c.ID, how: rebuiltLegacy, hk: i, body: legacyBody(c.Text)})
 				continue
 			}
+		}
+		if docs[c.Text] {
+			out.DocumentCopies++
+			continue
+		}
+		if key := docCopyKey(c.Text, hk.Docs); key != "" {
+			out.differ("yt "+c.ID, "task "+strconv.FormatInt(taskID, 10)+": the import's copy of document "+key+" is not the document as it is now")
+			continue
 		}
 		rebuilt = append(rebuilt, rebuiltComment{ytID: c.ID, how: rebuiltImported, hk: -1,
 			authors: []string{c.AuthorLogin, c.AuthorName}, at: c.CreatedAt, body: c.Text})
@@ -707,13 +733,36 @@ func diffComments(taskID int64, hk store.YTRebuildComments, listed []ytwrite.Rem
 			out.differ(id, "task "+task+": "+r.ytID+" body differs")
 		case r.how == rebuiltImported:
 			out.equal() // matched by the whole tuple
-		case r.authors[0] != c.Author || !r.at.Equal(c.CreatedAt.Truncate(time.Second)):
+		case r.authors[0] == c.Author && r.at.Equal(c.CreatedAt.Truncate(time.Second)):
+			out.equal()
+		case r.authors[0] == c.Author && r.at.Equal(c.OpCreatedAt.Truncate(time.Second)):
+			// A catch-up op (CatchUpYTComments) is made after the comment and
+			// its provenance names its own time: the comment's time is not in
+			// YouTrack.
+			out.exception(id, fmt.Sprintf("op_time: %s names the time of op %d (%s), not the comment's (%s); the comment's time is PG-only",
+				r.ytID, c.OpID, r.at.Format(time.RFC3339), c.CreatedAt.Format(time.RFC3339Nano)))
+		default:
 			out.differ(id, fmt.Sprintf("task %s: %s provenance %q at %s, hk %q at %s", task, r.ytID,
 				r.authors[0], r.at.Format(time.RFC3339), c.Author, c.CreatedAt.Format(time.RFC3339Nano)))
-		default:
-			out.equal()
 		}
 	}
+}
+
+// docCopyKey is the key of the task document an import copy names (a report's
+// "# <key>" heading, or a brief's "(hk document key: <key>)" line), "" when
+// the text names none of the task's documents.
+func docCopyKey(text string, docs []store.YTRebuildTaskDoc) string {
+	for _, d := range docs {
+		if _, ok, _ := ytwrite.DocComments(d.Key, d.Kind, ""); !ok {
+			continue
+		}
+		heading := "# " + d.Key
+		if text == heading || strings.HasPrefix(text, heading+"\n") || strings.HasPrefix(text, heading+" (part ") ||
+			(strings.HasPrefix(text, "Article: ") && strings.HasSuffix(text, "(hk document key: "+d.Key+")")) {
+			return d.Key
+		}
+	}
+	return ""
 }
 
 // importedMatches reports whether an imported YouTrack comment is hk comment

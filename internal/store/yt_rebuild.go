@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -108,12 +110,25 @@ func (s *Store) YTRebuildSampleTasks(ctx context.Context, tenant, project string
 // the legacy mirror push recorded for it (youtrack_comment_links, as
 // stored; youtrack.CommentLinkIsID tells an id from a marker).
 type YTRebuildComment struct {
-	ID         int64
-	Author     string
-	Body       string
-	CreatedAt  time.Time
-	OpID       int64
-	LegacyYTID string
+	ID        int64
+	Author    string
+	Body      string
+	CreatedAt time.Time
+	OpID      int64
+	// OpCreatedAt is that op's created_at, the time its provenance line
+	// names: the comment's own time when the comment's enqueue made it, the
+	// time of the catch-up when CatchUpYTComments did.
+	OpCreatedAt time.Time
+	LegacyYTID  string
+}
+
+// YTRebuildTaskDoc is one document tied to the task: the import copied a
+// task's reports and briefs onto its issue as comments
+// (ytwrite.DocComments).
+type YTRebuildTaskDoc struct {
+	Key  string
+	Kind string
+	Body string
 }
 
 // YTRebuildComments is one task's side of the comment comparison.
@@ -124,27 +139,34 @@ type YTRebuildComments struct {
 	// PulledYTIDs are the YouTrack comments the pull copied into the task:
 	// they came from YouTrack and are left out on both sides.
 	PulledYTIDs map[string]bool
+	// IssueOps are the comment_append ops hk's ledger has for the issue,
+	// whatever entity they copy: an hk-rendered YouTrack comment is hk's
+	// only when its op is one of them.
+	IssueOps map[int64]bool
+	// Docs are the documents tied to the task, in id order.
+	Docs []YTRebuildTaskDoc
 }
 
 // YTRebuildTaskComments reads task taskID's comments for the drill against
 // issue issueID.
 func (s *Store) YTRebuildTaskComments(ctx context.Context, taskID int64, issueID string) (YTRebuildComments, error) {
-	out := YTRebuildComments{Comments: []YTRebuildComment{}, PulledYTIDs: map[string]bool{}}
-	rows, err := s.pool.Query(ctx, `SELECT c.id, c.author, c.body, c.created_at,
-			coalesce((SELECT o.id FROM yt_comment_write_links w JOIN yt_write_ops o ON o.id = w.op_id
-				WHERE w.comment_id = c.id AND o.kind = $2 AND o.yt_target_id = $3), 0),
+	out := YTRebuildComments{Comments: []YTRebuildComment{}, PulledYTIDs: map[string]bool{}, IssueOps: map[int64]bool{}, Docs: []YTRebuildTaskDoc{}}
+	rows, err := s.pool.Query(ctx, `SELECT c.id, c.author, c.body, c.created_at, coalesce(o.id, 0), coalesce(o.created_at, c.created_at),
 			coalesce((SELECT l.youtrack_comment_id FROM youtrack_comment_links l WHERE l.hk_comment_id = c.id), '')
-		FROM task_comments c WHERE c.task_id = $1 ORDER BY c.id`, taskID, ytwrite.KindCommentAppend, issueID)
+		FROM task_comments c
+		LEFT JOIN LATERAL (SELECT o.id, o.created_at FROM yt_comment_write_links w JOIN yt_write_ops o ON o.id = w.op_id
+			WHERE w.comment_id = c.id AND o.kind = $2 AND o.yt_target_id = $3 ORDER BY o.id LIMIT 1) o ON true
+		WHERE c.task_id = $1 ORDER BY c.id`, taskID, ytwrite.KindCommentAppend, issueID)
 	if err != nil {
 		return YTRebuildComments{}, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var c YTRebuildComment
-		if err := rows.Scan(&c.ID, &c.Author, &c.Body, &c.CreatedAt, &c.OpID, &c.LegacyYTID); err != nil {
+		if err := rows.Scan(&c.ID, &c.Author, &c.Body, &c.CreatedAt, &c.OpID, &c.OpCreatedAt, &c.LegacyYTID); err != nil {
 			return YTRebuildComments{}, err
 		}
-		c.CreatedAt = c.CreatedAt.UTC()
+		c.CreatedAt, c.OpCreatedAt = c.CreatedAt.UTC(), c.OpCreatedAt.UTC()
 		if c.Author == YouTrackOwnedActor {
 			if c.LegacyYTID != "" {
 				out.PulledYTIDs[c.LegacyYTID] = true
@@ -153,7 +175,42 @@ func (s *Store) YTRebuildTaskComments(ctx context.Context, taskID int64, issueID
 		}
 		out.Comments = append(out.Comments, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return YTRebuildComments{}, err
+	}
+	rows.Close()
+	if err := s.ytRebuildEach(ctx, func(rows pgx.Rows) error {
+		var id int64
+		err := rows.Scan(&id)
+		out.IssueOps[id] = true
+		return err
+	}, `SELECT id FROM yt_write_ops WHERE kind = $1 AND yt_target_id = $2`, ytwrite.KindCommentAppend, issueID); err != nil {
+		return YTRebuildComments{}, err
+	}
+	if err := s.ytRebuildEach(ctx, func(rows pgx.Rows) error {
+		var d YTRebuildTaskDoc
+		err := rows.Scan(&d.Key, &d.Kind, &d.Body)
+		out.Docs = append(out.Docs, d)
+		return err
+	}, `SELECT key, kind, body FROM documents WHERE task_id = $1 ORDER BY id`, taskID); err != nil {
+		return YTRebuildComments{}, err
+	}
+	return out, nil
+}
+
+// ytRebuildEach runs q and calls scan for each row.
+func (s *Store) ytRebuildEach(ctx context.Context, scan func(pgx.Rows) error, q string, args ...any) error {
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if err := scan(rows); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 // YTRebuildDocument is one document bound to an article on the drill's
@@ -164,6 +221,11 @@ type YTRebuildDocument struct {
 	SHA256     string
 	BodyBytes  int
 	ArticleID  string
+	// SplitIndex: the binding names the index article of a document the
+	// import split (articles-backfill verified the index summary and stored
+	// no content sha, hk 4053). The current body size says nothing about
+	// how the document was imported.
+	SplitIndex bool
 }
 
 // YTRebuildDocuments lists, in id order, a page of the documents with a
@@ -175,7 +237,7 @@ func (s *Store) YTRebuildDocuments(ctx context.Context, tenant, project string, 
 	if tenant == "" || afterID < 0 || limit < 1 || limit > YTRebuildTaskPageMax {
 		return nil, errors.New("invalid rebuild document filter")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT d.id, d.key, d.sha256, octet_length(d.body), b.article_id
+	rows, err := s.pool.Query(ctx, `SELECT d.id, d.key, d.sha256, octet_length(d.body), b.article_id, b.content_sha IS NULL
 		FROM yt_article_bindings b JOIN documents d ON d.id = b.document_id LEFT JOIN tasks t ON t.id = d.task_id
 		WHERE b.tenant = $1 AND ($2 = '' OR t.project = $2) AND d.id > $3 ORDER BY d.id LIMIT $4`, tenant, project, afterID, limit)
 	if err != nil {
@@ -185,7 +247,7 @@ func (s *Store) YTRebuildDocuments(ctx context.Context, tenant, project string, 
 	out := []YTRebuildDocument{}
 	for rows.Next() {
 		var d YTRebuildDocument
-		if err := rows.Scan(&d.DocumentID, &d.Key, &d.SHA256, &d.BodyBytes, &d.ArticleID); err != nil {
+		if err := rows.Scan(&d.DocumentID, &d.Key, &d.SHA256, &d.BodyBytes, &d.ArticleID, &d.SplitIndex); err != nil {
 			return nil, err
 		}
 		out = append(out, d)

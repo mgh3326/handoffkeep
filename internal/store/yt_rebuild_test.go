@@ -119,6 +119,8 @@ func TestYTRebuildReads(t *testing.T) {
 	if err != nil || status != YTAuditPrepared {
 		t.Fatalf("enqueue: %q %v", status, err)
 	}
+	ytFeedExec(t, s, `INSERT INTO documents(key, kind, body, sha256, created_by, created_at, updated_at, task_id)
+		VALUES ('reports/rebuild-job/report.md', 'report', 'the report', repeat('0', 64), 'test', now(), now(), $1)`, task)
 	legacy := comment(task, "worker:old", "mirrored")
 	pulled := comment(task, YouTrackOwnedActor, "from YouTrack")
 	for _, l := range []struct {
@@ -138,8 +140,14 @@ func TestYTRebuildReads(t *testing.T) {
 	for _, c := range got.Comments {
 		byID[c.ID] = c
 	}
-	if c := byID[withOp]; c.OpID != op.ID || c.Author != "worker:op" || !c.CreatedAt.Equal(at) || c.CreatedAt.Location() != time.UTC {
-		t.Fatalf("op comment %+v, op %d", c, op.ID)
+	if c := byID[withOp]; c.OpID != op.ID || c.Author != "worker:op" || !c.CreatedAt.Equal(at) || c.CreatedAt.Location() != time.UTC || !c.OpCreatedAt.Equal(op.CreatedAt) {
+		t.Fatalf("op comment %+v, op %d at %v", c, op.ID, op.CreatedAt)
+	}
+	if !got.IssueOps[op.ID] || len(got.IssueOps) != 1 {
+		t.Fatalf("issue ops %v, want op %d", got.IssueOps, op.ID)
+	}
+	if len(got.Docs) != 1 || got.Docs[0].Key != "reports/rebuild-job/report.md" || got.Docs[0].Kind != "report" || got.Docs[0].Body != "the report" {
+		t.Fatalf("task documents %+v", got.Docs)
 	}
 	if c := byID[legacy]; c.LegacyYTID != "4-900" || c.OpID != 0 {
 		t.Fatalf("legacy comment %+v", c)

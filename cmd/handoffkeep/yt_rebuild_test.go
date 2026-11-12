@@ -299,16 +299,19 @@ func TestYouTrackRebuildComments(t *testing.T) {
 	fake.comment("2-1", "4-4", "from a person in YouTrack", t0, "robin", "Robin")                                             // pulled into hk as 14
 	fake.comment("2-1", "4-5", op("hk:doc", t0, 900, "# reports/x/report.md\n\nreport"), t0, "hk-bot", "hk bot")              // a document copy
 	fake.comment("2-1", "4-6", "second imported", t0.Add(time.Minute), "x", "operator:robin")                                 // hk 15: the name is the actor
+	fake.comment("2-1", "4-8", "# reports/j1/report.md\n\nthe report", t0, "worker:a", "worker:a")                            // the import's copy of a task report
 	del := ytrbComment{ID: "4-7", Text: "removed", Deleted: true}
 	fake.comments["2-1"] = append(fake.comments["2-1"], del)
 	// Task 2, issue 2-2: one difference of each kind.
-	fake.comment("2-2", "4-21", op("worker:c", t0, 601, "edited in YouTrack"), t0, "hk-bot", "hk bot")                             // hk 21: body differs
-	fake.comment("2-2", "4-22", op("worker:other", t0, 602, "who wrote it"), t0, "hk-bot", "hk bot")                               // hk 22: provenance actor differs
-	fake.comment("2-2", "4-23", "imported late", t0.Add(time.Second), "worker:d", "worker:d")                                      // hk 23: the time differs
-	fake.comment("2-2", "4-24", "written in YouTrack only", t0, "robin", "Robin")                                                  // not pulled: yt only
-	fake.comment("2-2", "4-25", op("worker:e", t0, 605, "twice"), t0, "hk-bot", "hk bot")                                          // hk 25: two copies
-	fake.comment("2-2", "4-26", "twice", t0, "worker:e", "worker:e")                                                               // (imported copy of 25)
-	fake.comment("2-2", "4-27", "**에이전트 메모 (w)** · 2026-11-01 09:40\n\ncut sho\n\n<!-- hk-comment:27 -->", t0, "hk-bot", "hk bot") // hk 27: legacy, body differs
+	fake.comment("2-2", "4-21", op("worker:c", t0, 601, "edited in YouTrack"), t0, "hk-bot", "hk bot")                              // hk 21: body differs
+	fake.comment("2-2", "4-22", op("worker:other", t0, 602, "who wrote it"), t0, "hk-bot", "hk bot")                                // hk 22: provenance actor differs
+	fake.comment("2-2", "4-23", "imported late", t0.Add(time.Second), "worker:d", "worker:d")                                       // hk 23: the time differs
+	fake.comment("2-2", "4-24", "written in YouTrack only", t0, "robin", "Robin")                                                   // not pulled: yt only
+	fake.comment("2-2", "4-25", op("worker:e", t0, 605, "twice"), t0, "hk-bot", "hk bot")                                           // hk 25: two copies
+	fake.comment("2-2", "4-26", "twice", t0, "worker:e", "worker:e")                                                                // (imported copy of 25)
+	fake.comment("2-2", "4-28", op("worker:z", t0, 999, "looks like hk's"), t0, "robin", "Robin")                                   // hk's form, but no such op of the issue
+	fake.comment("2-2", "4-29", "Article: [brief] brief/2026-11-12/j2 [note] (hk document key: brief/2026-11-12/j2)", t0, "x", "x") // a brief copy, stale
+	fake.comment("2-2", "4-27", "**에이전트 메모 (w)** · 2026-11-01 09:40\n\ncut sho\n\n<!-- hk-comment:27 -->", t0, "hk-bot", "hk bot")  // hk 27: legacy, body differs
 	src := &ytrbSource{
 		tasks: []store.YTRebuildTask{{TaskID: 1, IssueID: "2-1"}, {TaskID: 2, IssueID: "2-2"}},
 		top:   map[int64]bool{2: true},
@@ -320,7 +323,8 @@ func TestYouTrackRebuildComments(t *testing.T) {
 				{ID: 12, Author: "worker:b", Body: "op body", CreatedAt: t0.Add(time.Hour), OpID: 501},
 				{ID: 13, Author: "operator:robin", Body: "legacy body", CreatedAt: t0, LegacyYTID: "4-3"},
 				{ID: 15, Author: "operator:robin", Body: "second imported", CreatedAt: t0.Add(time.Minute)},
-			}, PulledYTIDs: map[string]bool{"4-4": true}},
+			}, PulledYTIDs: map[string]bool{"4-4": true}, IssueOps: map[int64]bool{501: true, 900: true},
+				Docs: []store.YTRebuildTaskDoc{{Key: "reports/j1/report.md", Kind: "report", Body: "the report"}, {Key: "notes/n", Kind: "note", Body: "not copied"}}},
 			2: {Comments: []store.YTRebuildComment{
 				{ID: 21, Author: "worker:c", Body: "the original", CreatedAt: t0, OpID: 601},
 				{ID: 22, Author: "worker:f", Body: "who wrote it", CreatedAt: t0, OpID: 602},
@@ -328,18 +332,19 @@ func TestYouTrackRebuildComments(t *testing.T) {
 				{ID: 24, Author: "worker:d", Body: "never copied", CreatedAt: t0},
 				{ID: 25, Author: "worker:e", Body: "twice", CreatedAt: t0, OpID: 605},
 				{ID: 27, Author: "w", Body: "cut short by the mirror", CreatedAt: t0},
-			}},
+			}, IssueOps: map[int64]bool{601: true, 602: true, 605: true},
+				Docs: []store.YTRebuildTaskDoc{{Key: "brief/2026-11-12/j2", Kind: "brief", Body: "b"}}},
 		},
 	}
 	r, _ := ytrbRun(t, fake, src, "")
 	got := r.Comments
-	if got.Tasks != 2 || got.TopTasks != 1 || got.PulledLeftOut != 1 || got.OtherHKWrites != 1 || got.Errors.Count != 0 {
+	if got.Tasks != 2 || got.TopTasks != 1 || got.PulledLeftOut != 1 || got.OtherHKWrites != 1 || got.DocumentCopies != 1 || got.Errors.Count != 0 {
 		t.Fatalf("comments = %+v", got)
 	}
 	if got.Equal != 3 || got.Exceptions.Count != 1 || ytrbIDs(got.Exceptions)[0] != "comment 13" || !strings.HasPrefix(got.Exceptions.Items[0].Reason, "legacy_mirror: ") {
 		t.Fatalf("equal %d exceptions %+v", got.Equal, got.Exceptions)
 	}
-	wantDiffer := []string{"yt 4-24", "yt 4-23", "comment 21", "comment 22", "comment 23", "comment 24", "comment 25", "comment 27"}
+	wantDiffer := []string{"yt 4-28", "yt 4-29", "yt 4-24", "yt 4-23", "comment 21", "comment 22", "comment 23", "comment 24", "comment 25", "comment 27"}
 	if gotIDs := ytrbIDs(got.Differ); !slices.Equal(gotIDs, wantDiffer) || got.Differ.Count != len(wantDiffer) {
 		t.Fatalf("differ %v, want %v (%+v)", gotIDs, wantDiffer, got.Differ.Items)
 	}
@@ -354,6 +359,8 @@ func TestYouTrackRebuildComments(t *testing.T) {
 		"comment 25": "2 copies 4-25,4-26",
 		"comment 27": "legacy mirror",
 		"yt 4-24":    "matches no hk comment",
+		"yt 4-28":    "names hk op 999, which hk's ledger has not for this issue",
+		"yt 4-29":    "copy of document brief/2026-11-12/j2 is not the document as it is now",
 	} {
 		if !strings.Contains(reason[id], w) {
 			t.Errorf("%s reason %q lacks %q", id, reason[id], w)
@@ -382,12 +389,26 @@ func TestYouTrackRebuildCommentProvenance(t *testing.T) {
 			t.Fatalf("hk time %v: %+v, want equal %v", tc.hkAt, out, tc.equal)
 		}
 	}
-	// A provenance line naming an op that is not this task's comment's is
-	// another hk write, never a match.
+	// A catch-up op names its own later time: the comment's time is not in
+	// YouTrack, an exception, not a pass and not a difference.
 	var out ytRebuildComments
-	diffComments(9, store.YTRebuildComments{Comments: []store.YTRebuildComment{{ID: 1, Author: "operator:robin", Body: "line one\n\nline two", CreatedAt: at, OpID: 78}}, PulledYTIDs: map[string]bool{}}, listed, &out)
-	if out.OtherHKWrites != 1 || out.Differ.Count != 1 || out.Differ.Items[0].ID != "comment 1" {
-		t.Fatalf("foreign op: %+v", out)
+	early := at.Add(-time.Hour)
+	diffComments(9, store.YTRebuildComments{Comments: []store.YTRebuildComment{{ID: 1, Author: "operator:robin", Body: "line one\n\nline two", CreatedAt: early, OpID: 77, OpCreatedAt: at}}}, listed, &out)
+	if out.Exceptions.Count != 1 || !strings.HasPrefix(out.Exceptions.Items[0].Reason, "op_time: ") || out.Equal != 0 || out.Differ.Count != 0 {
+		t.Fatalf("catch-up op: %+v", out)
+	}
+	// A provenance line naming another hk op of the issue is another hk
+	// write; one hk's ledger does not have for the issue differs.
+	for _, tc := range []struct {
+		issueOps map[int64]bool
+		other    int
+		differ   []string
+	}{{map[int64]bool{77: true}, 1, []string{"comment 1"}}, {nil, 0, []string{"yt 4-1", "comment 1"}}} {
+		out = ytRebuildComments{}
+		diffComments(9, store.YTRebuildComments{Comments: []store.YTRebuildComment{{ID: 1, Author: "operator:robin", Body: "line one\n\nline two", CreatedAt: at, OpID: 78}}, IssueOps: tc.issueOps}, listed, &out)
+		if out.OtherHKWrites != tc.other || !slices.Equal(ytrbIDs(out.Differ), tc.differ) {
+			t.Fatalf("op 77 in the issue's ledger %v: %+v", tc.issueOps, out)
+		}
 	}
 }
 
@@ -449,38 +470,38 @@ func ytrbSHA(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// hk 4121: a bound single-part document's article content hashes to
-// documents.sha256; a split one is exception_not_updated, not a failure; a
-// changed or missing article differs. Without yt_article_bindings the target
-// is skipped with a count.
+// hk 4121: a bound document's article content hashes to documents.sha256;
+// one whose binding names the import's split index is exception_not_updated,
+// not a failure, and its article is not read; a changed or missing article
+// differs, and so does a document that grew past 240 KiB after a single-part
+// import (its size alone is no exception). Without yt_article_bindings the
+// target is skipped with a count.
 func TestYouTrackRebuildDocuments(t *testing.T) {
 	fake := newYTRBFake()
 	fake.articles["3-1"] = "# same\n\nbody"
 	fake.articles["3-2"] = "old text"
-	big := strings.Repeat("x", ytRebuildSplitBytes+1)
+	fake.articles["3-5"] = "small when imported"
+	big := strings.Repeat("x", 240<<10+1)
 	src := &ytrbSource{docs: []store.YTRebuildDocument{
 		{DocumentID: 1, Key: "notes/a", SHA256: ytrbSHA("# same\n\nbody"), BodyBytes: 13, ArticleID: "3-1"},
 		{DocumentID: 2, Key: "notes/b", SHA256: ytrbSHA("new text"), BodyBytes: 8, ArticleID: "3-2"},
 		{DocumentID: 3, Key: "notes/c", SHA256: ytrbSHA("gone"), BodyBytes: 4, ArticleID: "3-3"},
-		// Split: the article is never read.
-		{DocumentID: 4, Key: "notes/big", SHA256: ytrbSHA(big), BodyBytes: len(big), ArticleID: "3-4"},
-		// Exactly 240 KiB is one part.
-		{DocumentID: 5, Key: "notes/edge", SHA256: ytrbSHA(big[:ytRebuildSplitBytes]), BodyBytes: ytRebuildSplitBytes, ArticleID: "3-5"},
+		{DocumentID: 4, Key: "notes/big", SHA256: ytrbSHA(big), BodyBytes: len(big), ArticleID: "3-4", SplitIndex: true},
+		{DocumentID: 5, Key: "notes/grew", SHA256: ytrbSHA(big), BodyBytes: len(big), ArticleID: "3-5"},
 	}}
-	fake.articles["3-5"] = big[:ytRebuildSplitBytes]
 	r, _ := ytrbRun(t, fake, src, "")
 	got := r.Documents
-	if got.Checked != 5 || got.Equal != 2 || got.Differ.Count != 2 || got.Exceptions.Count != 1 || got.Skipped != "" {
+	if got.Checked != 5 || got.Equal != 1 || got.Differ.Count != 3 || got.Exceptions.Count != 1 || got.Skipped != "" {
 		t.Fatalf("documents = %+v", got)
 	}
-	if !slices.Equal(ytrbIDs(got.Differ), []string{"2", "3"}) || !strings.Contains(got.Differ.Items[0].Reason, "content sha256") || got.Differ.Items[1].Reason != "article 3-3 not found" {
+	if !slices.Equal(ytrbIDs(got.Differ), []string{"2", "3", "5"}) || !strings.Contains(got.Differ.Items[0].Reason, "content sha256") || got.Differ.Items[1].Reason != "article 3-3 not found" {
 		t.Fatalf("differ %+v", got.Differ.Items)
 	}
 	if it := got.Exceptions.Items[0]; it.ID != "4" || !strings.HasPrefix(it.Reason, "exception_not_updated: notes/big") {
 		t.Fatalf("exception %+v", it)
 	}
-	if fake.gets["/api/articles/3-4"] != 0 {
-		t.Fatal("the split document's article was read")
+	if fake.gets["/api/articles/3-4"] != 0 || fake.gets["/api/articles/3-5"] != 1 {
+		t.Fatalf("article reads %v", fake.gets)
 	}
 
 	src.noArticles = true
