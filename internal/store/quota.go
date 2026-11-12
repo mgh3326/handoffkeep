@@ -210,6 +210,40 @@ func (s *Store) LatestQuota(ctx context.Context, key string) (QuotaLatest, error
 	return out, rows.Err()
 }
 
+// QuotaObservationHistory returns an account's observations in the inclusive
+// measured_at range, oldest first. found distinguishes an account with no
+// matching rows from a key that has never had an observation.
+func (s *Store) QuotaObservationHistory(ctx context.Context, key string, since, until time.Time, limit int) ([]QuotaObservation, bool, error) {
+	var found bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quota_observations WHERE account_key=$1)`, key).Scan(&found); err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return []QuotaObservation{}, false, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id,value FROM quota_observations WHERE account_key=$1 AND measured_at >= $2 AND measured_at <= $3 ORDER BY measured_at,id LIMIT $4`, key, since, until, limit)
+	if err != nil {
+		return nil, true, err
+	}
+	defer rows.Close()
+	out := []QuotaObservation{}
+	for rows.Next() {
+		var x QuotaObservation
+		var data []byte
+		var id int64
+		if err := rows.Scan(&id, &data); err != nil {
+			return nil, true, err
+		}
+		if err := json.Unmarshal(data, &x); err != nil {
+			return nil, true, err
+		}
+		// ID is held in its own column and is authoritative over JSON.
+		x.ID = id
+		out = append(out, x)
+	}
+	return out, true, rows.Err()
+}
+
 // QuotaAccountKeys returns the opaque account keys that currently have a
 // latest observation. Account keys are hashes/aliases and never credentials.
 func (s *Store) QuotaAccountKeys(ctx context.Context) ([]string, error) {
