@@ -40,7 +40,6 @@ type Issue struct {
 	IDReadable   string       `json:"idReadable"`
 	Summary      string       `json:"summary"`
 	Description  string       `json:"description"`
-	Created      int64        `json:"created"`
 	Project      *ProjectRef  `json:"project"`
 	CustomFields []IssueField `json:"customFields"`
 	Type         string       `json:"$type"`

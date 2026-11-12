@@ -33,7 +33,6 @@ type env struct {
 func newEnv(t *testing.T, nl NewLedger) *env {
 	t.Helper()
 	e := &env{t: t, clock: NewClock(), yt: NewFake(), ledger: nl(t)}
-	e.yt.Clock = e.clock
 	e.restart(e.ledger)
 	return e
 }

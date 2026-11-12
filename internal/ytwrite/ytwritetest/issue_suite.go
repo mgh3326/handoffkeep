@@ -233,11 +233,14 @@ func RunIssueProtocol(t *testing.T, nl NewLedger) {
 	})
 
 	// Send adopted the task's existing issue and the process died before the
-	// apply committed (hk 3911): the evidence search adopts the same issue,
-	// with no POST, instead of holding the op remote_unknown for good.
-	t.Run("lost_adoption_settlement_is_recovered", func(t *testing.T) {
+	// apply committed. The adopted issue carries no marker, and nothing durable
+	// says this dispatch adopted rather than POSTed (its hk ID may have been
+	// set after the search, with a POST still in flight), so the op stays
+	// remote_unknown for the operator and nothing is re-created (PR #335
+	// review; hk 3911 needs durable adoption evidence first).
+	t.Run("lost_adoption_settlement_stays_unknown", func(t *testing.T) {
 		e := newEnv(t, nl)
-		existing := e.yt.InjectIssue(issueSuiteProject, testTask, "#"+itoa(testTask)+" imported", "legacy body")
+		e.yt.InjectIssue(issueSuiteProject, testTask, "#"+itoa(testTask)+" imported", "legacy body")
 		e.clock.Advance(time.Hour)
 		cl := &CrashLedger{Ledger: e.ledger, Method: "Apply"}
 		e.restart(cl)
@@ -251,9 +254,7 @@ func RunIssueProtocol(t *testing.T, nl NewLedger) {
 		e.restart(e.ledger)
 		e.clock.Advance(10 * time.Minute)
 		e.drive()
-		if got := e.wantOp(1, ytwrite.StateApplied, ""); got.YTResultID != existing {
-			t.Fatalf("op applied with %q, want the adopted %s", got.YTResultID, existing)
-		}
+		e.wantOp(1, ytwrite.StateRemoteUnknown, ytwrite.ReasonMarkerMismatch)
 		e.wantRemote(0, 0)
 	})
 

@@ -77,12 +77,6 @@ type Evidence struct {
 	// RetryAfter is the wait a rate-limited (429) search asked for; the next
 	// search waits at least this long.
 	RetryAfter time.Duration
-	// Adoptable is the id of an effect that existed before the op's last
-	// dispatch began and that its Send adopts without writing (issue_create,
-	// hk 3911): that dispatch adopted it and wrote nothing, so the op is
-	// applied with it as adopted. Set only when no candidate carries the
-	// op's marker.
-	Adoptable string
 }
 
 // kindBuilders are the registered kinds, by op kind. Each kind registers
