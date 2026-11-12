@@ -248,8 +248,15 @@ or a no-job reason. Waiting on the operator is the `awaiting_decision` flag,
 not a state: the task keeps its work state, cannot be claimed while flagged,
 and the answer paths clear the flag. A task leaves `triage` for `backlog` or
 `unstarted` only with a priority above 0, a project and a kind. No manual edge
-enters `deployed`, and a task cannot enter `merged` from `researching` or
-`developing` by hand. A `merged` task closes as `completed` only with a result
+enters `deployed`, and the manual edge into `merged` is from `reviewing`.
+A task that a merged PR delivered closes in one step from any open state
+(`triage`, `backlog`, `unstarted`, `researching`, `developing`) with
+`tasks transition <id> --to merged --pr <url>` (hk 4322). hk accepts it only
+when the PR's change record shows it merged: hk holds no GitHub credential,
+so the change record written from mergewake's PR and merge events is the
+evidence it checks. The PR becomes the closure evidence, and the task is
+linked to the change as `implements`. A refused move answers `task_conflict`
+with a `reason` that names the states allowed from the current one. A `merged` task closes as `completed` only with a result
 link (an https URL or `hk:doc <key>`), the same evidence `completed` takes; the
 kind rule for `completed` does not apply to this edge.
 

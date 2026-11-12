@@ -334,7 +334,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	question := fs.String("question", "", "question required for needs_decision")
 	limit := fs.Int("limit", 20, "maximum results")
 	stalled := fs.Bool("stalled", false, "list only stalled tasks: started, not awaiting a decision, no activity within the server's started_stalled_hours (tasks list only)")
-	pr := fs.String("pr", "", "pull request reference")
+	pr := fs.String("pr", "", "pull request reference; with --to merged from an open state before reviewing, the merged PR that delivered the task (hk checks its change record)")
 	headSHA := fs.String("head-sha", "", "head revision reference")
 	reportPath := fs.String("report-path", "", "report path reference")
 	jobID := fs.String("job-id", "", "job reference")
