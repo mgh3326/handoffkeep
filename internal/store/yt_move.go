@@ -88,10 +88,11 @@ type ytMoveDecision struct {
 //
 // It returns the project the task's snapshot names, moving (a move is pending
 // for the task or was prepared here), skipped (the issue should move but
-// cannot) and prepared (a move op was prepared here). When the task's project is cleared or maps to no YouTrack project,
-// or the move to its project was prepared before and refused, no move is
-// prepared and the project is the one the issue is in or on its way to, so
-// its fields still reach it there (hk 4118, hk 4111). A move is prepared
+// cannot) and prepared (a move op was prepared here). When the task's
+// project is cleared or maps to no YouTrack project, or the move to its
+// project was prepared before and refused, no move is prepared and the
+// project is the one the issue is in or on its way to, so its fields still
+// reach it there (hk 4118, hk 4111). A move is prepared
 // once per target (prepareYTOnceTx): a refused move is prepared again only
 // when the target changes, never on every pass.
 //
