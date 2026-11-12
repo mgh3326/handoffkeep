@@ -185,7 +185,7 @@ it("Cmd-K lists the selection's actions and the four destinations", () => {
   expect(within(dialog).getAllByText("우선순위").length).toBeGreaterThan(0);
   expect(within(dialog).getByText("보류")).toBeTruthy();
   expect(within(dialog).getByText("명령 실행 (한 줄)")).toBeTruthy();
-  for (const label of ["홈 화면으로 이동", "결정 화면으로 이동", "작업 화면으로 이동", "배포 화면으로 이동"]) {
+  for (const label of ["홈 화면으로 이동", "결정 화면으로 이동", "작업 화면으로 이동", "작업 현황 화면으로 이동", "배포 화면으로 이동"]) {
     expect(within(dialog).getByText(label)).toBeTruthy();
   }
 });

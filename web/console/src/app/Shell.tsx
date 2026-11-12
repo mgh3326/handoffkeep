@@ -14,13 +14,14 @@ import { applyTheme, loadTheme } from "../shared/theme";
 import { Chip } from "../shared/ui/Chip";
 import { OriginalPreference } from "../shared/translation";
 
-export type NavKey = "home" | "work" | "decisions" | "deploys";
+export type NavKey = "home" | "work" | "decisions" | "deploys" | "work-status";
 
 /** Navigation entries are data: a new page is one row here. */
 export const destinations: { key: NavKey; label: string; href: string }[] = [
   { key: "home", label: "홈", href: "/ui" },
   { key: "decisions", label: "결정", href: "/ui/decisions" },
   { key: "work", label: "작업", href: "/ui/work" },
+  { key: "work-status", label: "작업 현황", href: "/ui/work-status" },
   { key: "deploys", label: "배포", href: "/ui/deploys" },
 ];
 

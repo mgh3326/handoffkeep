@@ -1,6 +1,8 @@
 .ha-root { max-width: 912px; padding: var(--hk-space-4); color: var(--hk-text-primary); font-family: var(--hk-font-ui); }
 .ha-title { margin: 0; font-size: var(--hk-type-page); line-height: var(--hk-line-page); }
 .ha-summary-count, .ha-note { color: var(--hk-text-secondary); font-size: var(--hk-type-meta); }
+.ha-work-status-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.ha-work-status-link:hover { color: var(--hk-text-primary); }
 .ha-section { margin-top: var(--hk-space-6); min-width: 0; }
 .ha-section h2 { font-size: var(--hk-type-section); margin: 0; }
 .ha-section h2 span, .ha-section h3 { color: var(--hk-text-secondary); font-weight: var(--hk-weight-normal); }
