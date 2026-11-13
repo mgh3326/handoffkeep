@@ -43,8 +43,9 @@ type WriteRemote struct {
 }
 
 var (
-	_ ytwrite.Remote      = (*WriteRemote)(nil)
-	_ ytwrite.IssueRemote = (*WriteRemote)(nil)
+	_ ytwrite.Remote           = (*WriteRemote)(nil)
+	_ ytwrite.IssueRemote      = (*WriteRemote)(nil)
+	_ ytwrite.IssueLinksRemote = (*WriteRemote)(nil)
 )
 
 // NewWriteRemote wraps a configured client.

@@ -14,7 +14,7 @@ import (
 // start by name (none, two, or a failed read stops the start), and blocks
 // the legacy push, which also writes articles.
 func TestYTDocsModeStartsTheWriteWorker(t *testing.T) {
-	for _, env := range []string{"HANDOFFKEEP_YT_COMMENTS_MODE", "HANDOFFKEEP_YT_ISSUES_MODE", "HANDOFFKEEP_YT_FIELDS_MODE",
+	for _, env := range []string{"HANDOFFKEEP_YT_COMMENTS_MODE", "HANDOFFKEEP_YT_ISSUES_MODE", "HANDOFFKEEP_YT_FIELDS_MODE", "HANDOFFKEEP_YT_LINKS_MODE",
 		"HANDOFFKEEP_YT_DOC_COMMENTS_MODE", "HANDOFFKEEP_YT_DECISIONS_MODE"} {
 		t.Setenv(env, "off")
 	}

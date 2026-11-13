@@ -92,6 +92,19 @@ func ytFieldsModeFromEnv() (store.YTFieldsMode, error) {
 	}
 }
 
+// ytLinksModeFromEnv reads the task-link projection mode. It is off until the
+// YouTrack import has ended.
+func ytLinksModeFromEnv() (store.YTLinksMode, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_LINKS_MODE")); raw {
+	case "", string(store.YTLinksOff):
+		return store.YTLinksOff, nil
+	case string(store.YTLinksOn):
+		return store.YTLinksOn, nil
+	default:
+		return "", fmt.Errorf("HANDOFFKEEP_YT_LINKS_MODE=%q: want off or on", raw)
+	}
+}
+
 // ytMovesModeFromEnv reads HANDOFFKEEP_YT_MOVES_MODE (hk 4111): unset or "off"
 // (the default) or "on", exactly like the fields mode. Any other value is an
 // error.
@@ -203,6 +216,10 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	if err != nil {
 		return nil, err
 	}
+	links, err := ytLinksModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
 	docs, err := ytDocCommentsModeFromEnv()
 	if err != nil {
 		return nil, err
@@ -233,11 +250,15 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	if st != nil {
 		st.SetYTMovesMode(moves)
 	}
-	if mode == store.YTCommentsOff && issues == store.YTIssuesOff && fields == store.YTFieldsOff && docs == store.YTDocCommentsOff && decisions == store.YTDecisionsOff && articles == store.YTDocsOff {
+	if st != nil {
+		st.SetYTLinksMode(links, "")
+	}
+	if mode == store.YTCommentsOff && issues == store.YTIssuesOff && fields == store.YTFieldsOff && links == store.YTLinksOff && docs == store.YTDocCommentsOff && decisions == store.YTDecisionsOff && articles == store.YTDocsOff {
 		if st != nil {
 			st.SetYTCommentsMode(store.YTCommentsOff)
 			st.SetYTIssuesMode(store.YTIssuesOff, "")
 			st.SetYTFieldsMode(store.YTFieldsOff, "")
+			st.SetYTLinksMode(store.YTLinksOff, "")
 			st.SetYTDocCommentsMode(store.YTDocCommentsOff)
 			st.SetYTDecisionsMode(store.YTDecisionsOff, "", "", "")
 			st.SetYTDocsMode(store.YTDocsOff, "", nil)
@@ -252,6 +273,8 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 		which = "HANDOFFKEEP_YT_ISSUES_MODE=" + string(issues)
 	case fields != store.YTFieldsOff:
 		which = "HANDOFFKEEP_YT_FIELDS_MODE=" + string(fields)
+	case links != store.YTLinksOff:
+		which = "HANDOFFKEEP_YT_LINKS_MODE=" + string(links)
 	case docs != store.YTDocCommentsOff:
 		which = "HANDOFFKEEP_YT_DOC_COMMENTS_MODE=" + string(docs)
 	case decisions != store.YTDecisionsOff:
@@ -312,7 +335,7 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 		}
 	}
 	st.SetYTIssuesBucketProject(issueBucketID)
-	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, docs, dec, art, catchUp, nil)
+	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, links, docs, dec, art, catchUp, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -323,14 +346,16 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 // issues, fields, document-comment or decisions mode is on) and builds the
 // dispatcher for one tenant over remote. catchUp applies to the comments mode
 // only.
-func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, comments store.YTCommentsMode, issues store.YTIssuesMode, fields store.YTFieldsMode, docs store.YTDocCommentsMode, decisions ytDecisionsSetting, articles ytDocsSetting, catchUp bool, now func() time.Time) (ytCommentsWorker, error) {
-	if comments == store.YTCommentsOff && issues != store.YTIssuesOn && fields != store.YTFieldsOn && docs != store.YTDocCommentsOn && decisions.mode != store.YTDecisionsOn && articles.mode != store.YTDocsOn {
-		return ytCommentsWorker{}, errors.New("the write worker runs with the comments, issues, fields, document-comment, decisions or docs mode on")
+func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, comments store.YTCommentsMode, issues store.YTIssuesMode, fields store.YTFieldsMode, links store.YTLinksMode, docs store.YTDocCommentsMode, decisions ytDecisionsSetting, articles ytDocsSetting, catchUp bool, now func() time.Time) (ytCommentsWorker, error) {
+	if comments == store.YTCommentsOff && issues != store.YTIssuesOn && fields != store.YTFieldsOn && links != store.YTLinksOn && docs != store.YTDocCommentsOn && decisions.mode != store.YTDecisionsOn && articles.mode != store.YTDocsOn {
+		return ytCommentsWorker{}, errors.New("the write worker runs with the comments, issues, fields, links, document-comment, decisions or docs mode on")
 	}
 	st.SetYTIssuesMode(issues, tenant)
 	log.Printf("ytwrite.issues_mode mode=%s tenant=%q", issues, tenant)
 	st.SetYTFieldsMode(fields, tenant)
 	log.Printf("ytwrite.fields_mode mode=%s tenant=%q", fields, tenant)
+	st.SetYTLinksMode(links, tenant)
+	log.Printf("ytwrite.links_mode mode=%s tenant=%q", links, tenant)
 	st.SetYTDocCommentsMode(docs)
 	log.Printf("ytwrite.doc_comments_mode mode=%s tenant=%q", docs, tenant)
 	st.SetYTDecisionsMode(decisions.mode, tenant, decisions.projectID, youtrack.DecisionProject)

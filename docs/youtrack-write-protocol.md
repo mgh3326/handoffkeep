@@ -1013,11 +1013,32 @@ move_skipped other_tenant invalid` per hk project (`ops` is every op made,
 moves included) and in `total`, and exits 6 without
 touching the database unless `HANDOFFKEEP_YT_FIELDS_MODE=on`.
 
-**Not here.** Tags and issue links (parent, relations) stay as the import set
-them; documents are a later slice (a project move and decisions: below). 멈춤, the
+**Not here.** Tags stay as the import set them; issue links follow `issue_links`
+below. Documents are a later slice (a project move and decisions: below). 멈춤, the
 Korean title and the milestone name are read when the task row changes: a
 task that becomes stalled with no change, a new translation or a renamed
 milestone reaches the issue with the task's next change.
+
+## Kind issue_links (hk 4472)
+
+After the custom import ends (D3), `HANDOFFKEEP_YT_LINKS_MODE=on` sends each
+bound task's current parent, `related`, and `duplicate_of` links through the
+write protocol. The `task_links` consumer reads the task change feed and writes
+one complete snapshot on the task's lane. Clearing `parent_id` or archiving a
+relation changes the task's `updated_at` in the same transaction, so the feed
+prepares a snapshot with that link removed. A live link target must have a
+binding in the same tenant; otherwise the snapshot is held out until that
+target is bound, so an incomplete mapping cannot erase a link.
+
+The `issue_links` kind updates only the YouTrack link directions hk owns:
+Subtask-of (`targetToSource`), Relates, and Duplicate (`sourceToTarget`). Each
+type direction is replaced as a set, including an empty set to remove old
+links. Its evidence read compares those same link sets, so a lost update reply
+can be resolved by reading the issue. Other YouTrack link types remain intact.
+
+Mode off is the default and admits none of these ops. Turn it on only after the
+last YouTrack import run and removal of its grant; the import client cannot
+delete a link when the corresponding hk edge is absent.
 
 ## Article bindings (hk 4053)
 

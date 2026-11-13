@@ -63,7 +63,7 @@ var ErrYTCommentUnsendable = errors.New("yt_comment_unsendable")
 // ytAuthorityPrincipals are the op principals whose writes belong to each
 // kind: the ops that must be resolved before the kind switches.
 var ytAuthorityPrincipals = map[YTAuthorityKind][]string{
-	YTAuthorityTasks:     {YTIssuePrincipal, YTFieldsPrincipal},
+	YTAuthorityTasks:     {YTIssuePrincipal, YTFieldsPrincipal, YTLinksPrincipal},
 	YTAuthorityComments:  {YTCommentPrincipal},
 	YTAuthorityDocuments: {ytDocCommentPrincipal, YTDocsPrincipal},
 	YTAuthorityDecisions: {YTDecisionsPrincipal},
@@ -76,7 +76,7 @@ var ytAuthorityFeeds = map[YTAuthorityKind][]struct {
 	consumer string
 	models   []string
 }{
-	YTAuthorityTasks:     {{ytFieldsConsumer, []string{"task"}}},
+	YTAuthorityTasks:     {{ytFieldsConsumer, []string{"task"}}, {ytLinksConsumer, []string{"task"}}},
 	YTAuthorityDocuments: {{ytDocCommentsConsumer, []string{"document"}}, {ytDocsConsumer, []string{"document"}}},
 	YTAuthorityDecisions: {{ytDecisionsConsumer, []string{"decision"}}},
 }
@@ -243,6 +243,9 @@ func (s *Store) ytAuthorityWriteModeOff(kind YTAuthorityKind) string {
 		}
 		if m, _ := s.ytFieldsNow(); m != YTFieldsOn {
 			return "HANDOFFKEEP_YT_FIELDS_MODE is not on"
+		}
+		if m, _ := s.ytLinksNow(); m != YTLinksOn {
+			return "HANDOFFKEEP_YT_LINKS_MODE is not on"
 		}
 		return ""
 	case YTAuthorityComments:

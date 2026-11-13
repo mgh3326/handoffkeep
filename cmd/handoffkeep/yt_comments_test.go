@@ -89,7 +89,7 @@ func TestYTCommentsWorkerNeedsCredentialsOnlyInCanaryAndOn(t *testing.T) {
 // move (moves are prepared by the fields feed): it is a startup error naming
 // both modes, before any YouTrack configuration is read (hk 4117).
 func TestYTMovesOnNeedsFieldsOn(t *testing.T) {
-	for _, env := range []string{"HANDOFFKEEP_YT_COMMENTS_MODE", "HANDOFFKEEP_YT_ISSUES_MODE", "HANDOFFKEEP_YT_FIELDS_MODE",
+	for _, env := range []string{"HANDOFFKEEP_YT_COMMENTS_MODE", "HANDOFFKEEP_YT_ISSUES_MODE", "HANDOFFKEEP_YT_FIELDS_MODE", "HANDOFFKEEP_YT_LINKS_MODE",
 		"HANDOFFKEEP_YT_DOC_COMMENTS_MODE", "HANDOFFKEEP_YT_DECISIONS_MODE", "HANDOFFKEEP_YT_DOCS_MODE", "HANDOFFKEEP_YT_COMMENTS_CATCHUP"} {
 		t.Setenv(env, "")
 	}

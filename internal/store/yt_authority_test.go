@@ -180,6 +180,7 @@ func TestYTAuthoritySetRefusals(t *testing.T) {
 	refused(err, "HANDOFFKEEP_YT_FIELDS_MODE")
 	// With both modes on, the fields feed must have read every task change.
 	s.SetYTFieldsMode(YTFieldsOn, ytcTenant)
+	s.SetYTLinksMode(YTLinksOn, ytcTenant)
 	_, _, err = set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack)
 	refused(err, "feed consumer "+ytFieldsConsumer+" has not run yet")
 	if _, err := s.pool.Exec(ctx, `INSERT INTO yt_feed_cursors(consumer,last_sync_id,updated_at) VALUES ($1,0,now())`, ytFieldsConsumer); err != nil {
@@ -188,6 +189,11 @@ func TestYTAuthoritySetRefusals(t *testing.T) {
 	_, _, err = set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack)
 	refused(err, "changes to read")
 	if _, err := s.pool.Exec(ctx, `UPDATE yt_feed_cursors SET last_sync_id=(SELECT coalesce(max(sync_id),0) FROM sync_log) WHERE consumer=$1`, ytFieldsConsumer); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack)
+	refused(err, "feed consumer "+ytLinksConsumer+" has not run yet")
+	if _, err := s.pool.Exec(ctx, `INSERT INTO yt_feed_cursors(consumer,last_sync_id,updated_at) SELECT $1, coalesce(max(sync_id),0), now() FROM sync_log`, ytLinksConsumer); err != nil {
 		t.Fatal(err)
 	}
 	// A prune past the cursor removed rows the feed never read: refused.
@@ -201,6 +207,9 @@ func TestYTAuthoritySetRefusals(t *testing.T) {
 	_, _, err = set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack)
 	refused(err, "behind the sync_log prune")
 	if _, err := s.pool.Exec(ctx, `UPDATE sync_state SET pruned_through=$1 WHERE singleton`, pruned); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE yt_feed_cursors SET last_sync_id=(SELECT coalesce(max(sync_id),0) FROM sync_log) WHERE consumer=$1`, ytLinksConsumer); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := set([]YTAuthorityKind{YTAuthorityTasks}, YTAuthorityYouTrack); err != nil {
@@ -425,8 +434,12 @@ func TestYTAuthorityRefusesBacklogLostToPrune(t *testing.T) {
 	ctx := t.Context()
 	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
 	s.SetYTFieldsMode(YTFieldsOn, ytcTenant)
+	s.SetYTLinksMode(YTLinksOn, ytcTenant)
 	ytcTask(t, s, "handoffkeep")
 	if _, err := s.pool.Exec(ctx, `INSERT INTO yt_feed_cursors(consumer,last_sync_id,updated_at) VALUES ($1,0,now())`, ytFieldsConsumer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `INSERT INTO yt_feed_cursors(consumer,last_sync_id,updated_at) SELECT $1, coalesce(max(sync_id),0), now() FROM sync_log`, ytLinksConsumer); err != nil {
 		t.Fatal(err)
 	}
 	if removed, err := s.PruneSync(ctx, time.Nanosecond); err != nil || removed == 0 {

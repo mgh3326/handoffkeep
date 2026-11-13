@@ -632,6 +632,8 @@ type Store struct {
 	// YTMovesMode; unset is off. On prepares and admits issue_move ops
 	// (yt_move.go).
 	ytMoves atomic.Value
+	// ytLinks is the YouTrack task-link gate (SetYTLinksMode); nil is off.
+	ytLinks atomic.Pointer[ytLinksGate]
 	// ytDocComments is the YouTrack document-comment gate
 	// (SetYTDocCommentsMode), a YTDocCommentsMode; unset is off. On copies
 	// task-tied reports and briefs from the change feed (yt_doc_comments.go).

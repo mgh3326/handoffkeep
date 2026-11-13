@@ -134,6 +134,12 @@ func addRelationTx(ctx context.Context, tx pgx.Tx, src int64, kind string, dst i
 		return false, err
 	}
 	_, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: src, Kind: TaskEventRelation, From: "", To: "", By: by, At: now, Field: "relation", ToValue: fmt.Sprintf("%s:%d", kind, dst), Refs: TaskRefs{}})
+	if err != nil {
+		return false, err
+	}
+	// Relation-only edits must reach the task change feed, which prepares the
+	// YouTrack link snapshot after the import has ended.
+	_, err = tx.Exec(ctx, `UPDATE tasks SET updated_at=$2 WHERE id=$1`, src, now)
 	return true, err
 }
 
@@ -246,6 +252,10 @@ func (s *Store) RemoveTaskRelation(ctx context.Context, src int64, kind string, 
 		return false, tx.Commit(ctx)
 	}
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: src, Kind: TaskEventRelation, By: by, At: now, Field: "relation", FromValue: fmt.Sprintf("%s:%d", kind, dst), Refs: TaskRefs{}}); err != nil {
+		return false, err
+	}
+	// Keep relation-only changes visible to task-feed consumers.
+	if _, err = tx.Exec(ctx, `UPDATE tasks SET updated_at=$2 WHERE id=$1`, src, now); err != nil {
 		return false, err
 	}
 	return true, tx.Commit(ctx)

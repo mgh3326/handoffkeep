@@ -330,6 +330,9 @@ func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified 
 	if err := s.ytFieldsOnBindTx(ctx, tx, b.TaskID, now); err != nil {
 		return YTTaskBinding{}, err
 	}
+	if err := s.ytLinksOnBindTx(ctx, tx, b.TaskID, now); err != nil {
+		return YTTaskBinding{}, err
+	}
 	return got, tx.Commit(ctx)
 }
 

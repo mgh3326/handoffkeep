@@ -79,6 +79,9 @@ type FakeYouTrack struct {
 	readFaults []error
 	// moves are the MoveIssueToProject calls received, in order (fake_move.go).
 	moves []FakeMove
+	// issueLinks are the current hk-owned issue links and their write calls.
+	issueLinks map[string]ytwrite.IssueLinks
+	linkWrites []FakeIssueLinksWrite
 	// articles are the articles of every project, in creation order, and
 	// articleWrites every create and update call received
 	// (fake_article.go).
@@ -105,9 +108,15 @@ type fakeIssue struct {
 	fields map[string]string
 }
 
+// FakeIssueLinksWrite is one complete hk-owned link snapshot sent to an issue.
+type FakeIssueLinksWrite struct {
+	IssueID string
+	Links   ytwrite.IssueLinks
+}
+
 // NewFake returns an empty fake with no faults queued.
 func NewFake() *FakeYouTrack {
-	return &FakeYouTrack{issues: map[string][]*ytwrite.RemoteComment{}, projects: map[string][]*fakeIssue{}, fieldsMissing: map[string]bool{}, projectText: map[string]bool{}, bundles: map[string]map[string]bool{}}
+	return &FakeYouTrack{issues: map[string][]*ytwrite.RemoteComment{}, projects: map[string][]*fakeIssue{}, fieldsMissing: map[string]bool{}, projectText: map[string]bool{}, bundles: map[string]map[string]bool{}, issueLinks: map[string]ytwrite.IssueLinks{}}
 }
 
 // Queue adds faults for the next CreateComment calls.
