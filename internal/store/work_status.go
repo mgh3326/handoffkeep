@@ -541,6 +541,10 @@ func (s *Store) ReadWorkStatusOverlay(ctx context.Context, ids []int64) (WorkSta
 // readProjectLastSuccessfulDeploysTx scans active deploy services and records
 // to find the most recent successful deploy timestamp per project.
 func readProjectLastSuccessfulDeploysTx(ctx context.Context, tx pgx.Tx) (map[string]time.Time, error) {
+	return readProjectLastSuccessfulDeploys(ctx, tx)
+}
+
+func readProjectLastSuccessfulDeploys(ctx context.Context, tx pgx.Tx) (map[string]time.Time, error) {
 	result := make(map[string]time.Time)
 
 	// Fetch active deploy services
@@ -570,7 +574,17 @@ func readProjectLastSuccessfulDeploysTx(ctx context.Context, tx pgx.Tx) (map[str
 	for _, svc := range services {
 		var newestSuccess *time.Time
 		for _, prefix := range svc.prefixes {
-			t, err := scanPrefixLastSuccessDeployTx(ctx, tx, prefix, svc.name)
+			// A prefix may be legacy-named while the document uses the canonical
+			// configured service name (for example deploy/panewire/ for panewire-hub).
+			alias := strings.TrimSuffix(prefix, "/")
+			if i := strings.LastIndex(alias, "/"); i >= 0 {
+				alias = alias[i+1:]
+			}
+			services := []string{svc.name}
+			if alias != svc.name {
+				services = append(services, alias)
+			}
+			t, err := scanPrefixLastSuccessDeployTx(ctx, tx, prefix, services)
 			if err != nil {
 				return nil, err
 			}
@@ -591,7 +605,7 @@ func readProjectLastSuccessfulDeploysTx(ctx context.Context, tx pgx.Tx) (map[str
 	return result, nil
 }
 
-func scanPrefixLastSuccessDeployTx(ctx context.Context, tx pgx.Tx, prefix, service string) (*time.Time, error) {
+func scanPrefixLastSuccessDeployTx(ctx context.Context, tx pgx.Tx, prefix string, services []string) (*time.Time, error) {
 	rows, err := tx.Query(ctx, `SELECT d.key, d.sha256, d.created_at, p.record, p.decoded,
 		CASE WHEN p.key IS NULL THEN d.body ELSE NULL END
 		FROM documents d
@@ -621,11 +635,21 @@ func scanPrefixLastSuccessDeployTx(ctx context.Context, tx pgx.Tx, prefix, servi
 		var reasons []string
 
 		if body != nil {
-			rec, deployedAt, reasons = ClassifyDeployRecord(key, service, *body)
+			for _, service := range services {
+				rec, deployedAt, reasons = ClassifyDeployRecord(key, service, *body)
+				if rec != nil && len(reasons) == 0 {
+					break
+				}
+			}
 		} else if raw != nil && decoded != nil && *decoded {
 			var parsed DeployRecord
 			if err := json.Unmarshal(raw, &parsed); err == nil {
-				rec, deployedAt, reasons = classifyParsedDeployRecord(key, service, &parsed, true)
+				for _, service := range services {
+					rec, deployedAt, reasons = classifyParsedDeployRecord(key, service, &parsed, true)
+					if rec != nil && len(reasons) == 0 {
+						break
+					}
+				}
 			}
 		}
 
