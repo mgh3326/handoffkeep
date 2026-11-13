@@ -732,7 +732,7 @@ func (b ytBindingBinder) bindTask(ctx context.Context, now time.Time, in store.Y
 			b.exclude(ctx, now, in.TaskID, ytBindOtherTenant, "bound on tenant "+bound.Tenant, rep)
 			return
 		}
-		b.finish(ctx, now, in.TaskID, bound.IssueID, rep)
+		b.finish(ctx, now, bound, rep)
 		return
 	}
 	// 3. Verify the issue with the enrollment rules (design §6.8).
@@ -774,6 +774,14 @@ func (b ytBindingBinder) bindTask(ctx context.Context, now time.Time, in store.Y
 		case errors.Is(err, store.ErrYTBindingExcluded):
 			b.exclude(ctx, now, in.TaskID, "excluded", err.Error(), rep)
 		case errors.Is(err, store.ErrYTBindingConflict):
+			// A competing publication won, most often the operator's backfill
+			// or an issue_create that adopted the issue. Its watermark is not
+			// this binder's to complete: settle the intent as that binding's
+			// instead of retrying the bind.
+			if bound, found, rerr := b.st.YTTaskBinding(ctx, in.TaskID); rerr == nil && found && bound.Tenant == b.tenant {
+				b.finish(ctx, now, bound, rep)
+				return
+			}
 			b.refuse(ctx, now, in.TaskID, ytBindAmbiguous, err.Error(), rep)
 		default:
 			b.fail(ctx, now, in.TaskID, err, rep)
@@ -801,38 +809,46 @@ func (b ytBindingBinder) bindTask(ctx context.Context, now time.Time, in store.Y
 	log.Printf("ytwrite.bind_task task_id=%d class=bound issue_id=%q comments_from=%d enqueued=%d", in.TaskID, binding.IssueID, watermark, enqueued)
 }
 
-// finish completes an intent whose task is bound already: it copies the
-// comments the issue provably lacks and drops the intent.
-func (b ytBindingBinder) finish(ctx context.Context, now time.Time, taskID int64, issueID string, rep *ytBindReport) {
-	_, missing, class, err := b.watermark(ctx, taskID, issueID)
-	if err != nil {
-		b.fail(ctx, now, taskID, err, rep)
-		return
-	}
-	if class != "" {
-		// The task is bound and this pass cannot prove what the issue lacks;
-		// the audit is the operator's tool from here. Drop the intent rather
-		// than retry it forever.
-		log.Printf("ytwrite.bind_task task_id=%d class=%s detail=%q", taskID, class, "the task is bound; run the audit")
-		if err := b.st.DropYTBindingIntent(ctx, taskID); err != nil {
-			log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", taskID, err.Error())
+// finish settles an intent whose task is bound already. Only a binding this
+// binder published is completed: a backfill (import_verified) or an adopted
+// issue (op_applied) sets comments_from to the latest comment on purpose, so
+// copying below that watermark could post a second copy of an old comment the
+// audit cannot recognise. Any other origin drops the intent and leaves the
+// copies to that binding's own catch-up. An auto_verified binding whose
+// history is not provably complete keeps its intent as a durable refusal: the
+// intent is the only record of the copies still owed, and the operator's
+// repair (the audit, deleting a duplicate) resumes them.
+func (b ytBindingBinder) finish(ctx context.Context, now time.Time, bound store.YTTaskBinding, rep *ytBindReport) {
+	if bound.Origin != store.YTBindingAutoVerified {
+		log.Printf("ytwrite.bind_task task_id=%d class=bound origin=%s detail=%q", bound.TaskID, bound.Origin, "not the binder's binding; its catch-up owns the copies")
+		if err := b.st.DropYTBindingIntent(ctx, bound.TaskID); err != nil {
+			log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", bound.TaskID, err.Error())
 		}
 		return
 	}
-	enqueued, pending, err := b.enqueue(ctx, taskID, missing)
+	_, missing, class, err := b.watermark(ctx, bound.TaskID, bound.IssueID)
+	if err != nil {
+		b.fail(ctx, now, bound.TaskID, err, rep)
+		return
+	}
+	if class != "" {
+		b.refuse(ctx, now, bound.TaskID, class, "the binding's comment history is not provably complete", rep)
+		return
+	}
+	enqueued, pending, err := b.enqueue(ctx, bound.TaskID, missing)
 	rep.Enqueued += enqueued
 	if err != nil {
-		b.fail(ctx, now, taskID, err, rep)
+		b.fail(ctx, now, bound.TaskID, err, rep)
 		return
 	}
 	if pending {
-		log.Printf("ytwrite.bind_task task_id=%d class=bound issue_id=%q enqueued=%d pending=true", taskID, issueID, enqueued)
+		log.Printf("ytwrite.bind_task task_id=%d class=bound issue_id=%q enqueued=%d pending=true", bound.TaskID, bound.IssueID, enqueued)
 		return
 	}
-	if err := b.st.DropYTBindingIntent(ctx, taskID); err != nil {
-		log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", taskID, err.Error())
+	if err := b.st.DropYTBindingIntent(ctx, bound.TaskID); err != nil {
+		log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", bound.TaskID, err.Error())
 	}
-	log.Printf("ytwrite.bind_task task_id=%d class=bound issue_id=%q enqueued=%d", taskID, issueID, enqueued)
+	log.Printf("ytwrite.bind_task task_id=%d class=bound issue_id=%q enqueued=%d", bound.TaskID, bound.IssueID, enqueued)
 }
 
 // watermark lists the issue's comments once and classifies the task's

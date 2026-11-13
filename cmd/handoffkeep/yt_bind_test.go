@@ -310,6 +310,91 @@ func TestYTBindingBinderCopiesAllMissing(t *testing.T) {
 	}
 }
 
+// A deferred intent that outlives an operator backfill does not copy the
+// history that binding deliberately excludes: only the binder's own
+// auto_verified binding is finished.
+func TestYTBindingBinderLeavesOtherOriginsAlone(t *testing.T) {
+	e := newYTBEnv(t, "ytb_origin")
+	ctx := t.Context()
+	now := time.Now().UTC().Truncate(time.Second)
+	task := e.task(t, true)
+	c := e.comment(t, task, "history the backfill excludes")
+	if _, err := e.st.ScanYTBindingCandidates(ctx, e.tenant, ytBindScanLimit, now); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := e.st.YTCanaryCandidate(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := store.YTTaskBinding{TaskID: task, Tenant: e.tenant, IssueID: "2-" + strconv.FormatInt(task, 10),
+		IssueReadable: "HK-" + strconv.FormatInt(task, 10), ProjectID: "0-2", BoundBy: "operator"}
+	if _, err := e.st.AddYTTaskBinding(ctx, b, verified); err != nil {
+		t.Fatal(err)
+	}
+	rep := ytbPass(t, e.worker, now.Add(time.Minute))
+	if rep.Enqueued != 0 {
+		t.Fatalf("the binder copied across a backfill's watermark: %+v", rep)
+	}
+	if _, ok := ytbOpFor(t, e.conn, c); ok {
+		t.Fatal("a comment below the backfill's watermark got an op")
+	}
+	if state, _, _, ok := e.intent(t, task); ok {
+		t.Fatalf("the intent survived: %q", state)
+	}
+}
+
+// An auto_verified binding whose retry finds an ambiguous history keeps its
+// intent, so the copies still owed below the watermark resume once the
+// ambiguity is gone instead of being lost.
+func TestYTBindingBinderKeepsIntentWhileAmbiguous(t *testing.T) {
+	e := newYTBEnv(t, "ytb_ambiguous")
+	ctx := t.Context()
+	now := time.Now().UTC().Truncate(time.Second)
+	task := e.task(t, true)
+	older := e.comment(t, task, "c0")
+	newer := e.comment(t, task, "c1")
+	issue := "2-" + strconv.FormatInt(task, 10)
+	if _, err := e.st.ScanYTBindingCandidates(ctx, e.tenant, ytBindScanLimit, now); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := e.st.YTCanaryCandidate(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := youtrack.VerifyBinding(ctx, e.remote, e.tenant, ytpBucketID, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding.BoundBy = ytBindActor
+	// The binder listed the issue with c1 present and c0 missing, published,
+	// and then crashed before copying c0.
+	e.fake.Inject(issue, "c1")
+	if _, err := e.st.AddYTTaskBindingFrom(ctx, binding, candidate, newer, store.YTBindingAutoVerified, ytBindActor); err != nil {
+		t.Fatal(err)
+	}
+	// A second copy of c1 makes the history ambiguous before the retry.
+	duplicate := e.fake.Inject(issue, "c1")
+	rep := ytbPass(t, e.worker, now.Add(time.Minute))
+	if rep.Enqueued != 0 {
+		t.Fatalf("the ambiguous pass copied something: %+v", rep)
+	}
+	if state, reason, attempts, ok := e.intent(t, task); !ok || state != "refused" || reason != "history_ambiguous" || attempts != 1 {
+		t.Fatalf("the intent was not kept as a durable refusal: %q %q %d %v", state, reason, attempts, ok)
+	}
+	// The operator removes the duplicate; the next attempt copies the rest.
+	e.fake.Delete(issue, duplicate)
+	rep = ytbPass(t, e.worker, now.Add(time.Hour+2*time.Minute))
+	if rep.Enqueued != 1 {
+		t.Fatalf("the resumed pass %+v, want c0 copied", rep)
+	}
+	if op, ok := ytbOpFor(t, e.conn, older); !ok || op.State != ytwrite.StatePrepared {
+		t.Fatalf("c0 op %+v %v", op, ok)
+	}
+	if state, _, _, ok := e.intent(t, task); ok {
+		t.Fatalf("the intent survived: %q", state)
+	}
+}
+
 // A pass that crashes after the publication leaves the intent: the next pass
 // finds the binding and copies what the issue lacks instead of binding again.
 func TestYTBindingBinderFinishesAfterBind(t *testing.T) {
