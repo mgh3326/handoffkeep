@@ -559,7 +559,10 @@ func ytDocsHandler(s *Store, now time.Time) FeedHandler {
 // would contradict a mapping hk already keeps: the document bound or mapped
 // to another article, or the article bound or mapped to another document.
 // It returns the conflict ("" when none) and logs it as
-// ytwrite.binding_conflict.
+// ytwrite.binding_conflict. Each lookup returns at most one row: a map row
+// the previous release wrote with no tenant can sit beside this tenant's row
+// for the same article (the unique index is per tenant), and either one is a
+// conflict, never a "more than one row" error that fails the apply.
 func ytArticleConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string) (string, error) {
 	id, err := strconv.ParseInt(op.EntityID, 10, 64)
 	if err != nil || id < 1 || op.EntityKind != ytwrite.ArticleEntity {
@@ -574,7 +577,8 @@ func ytArticleConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID str
 		(SELECT 'document is mapped to article '||yt_id FROM yt_entity_map
 			WHERE entity_kind='document' AND hk_key=$4 AND yt_id<>$3),
 		(SELECT 'article is mapped to document '||hk_key FROM yt_entity_map
-			WHERE entity_kind='document' AND (tenant=$2 OR tenant='') AND yt_id=$3 AND hk_key<>$4),
+			WHERE entity_kind='document' AND (tenant=$2 OR tenant='') AND yt_id=$3 AND hk_key<>$4
+			ORDER BY hk_key LIMIT 1),
 		'')`, id, op.Tenant, ytID, op.EntityID).Scan(&detail)
 	if err != nil {
 		return "", err
