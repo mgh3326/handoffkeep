@@ -265,6 +265,9 @@ func TestYTIssueUnmappedTaskGetsItsOpOnceMapped(t *testing.T) {
 func TestYTIssueIntentTaskMovedToAMappedProject(t *testing.T) {
 	s := schemaStore(t, "ytr_intent_move")
 	ytbMapped(t, s)
+	if _, err := s.AddTaskProject(t.Context(), ytbProject, "test"); err != nil {
+		t.Fatal(err)
+	}
 	ytrProject(t, s, "ytr-later", "")
 	ytrProject(t, s, "ytr-never", "")
 	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
