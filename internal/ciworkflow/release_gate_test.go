@@ -41,6 +41,15 @@ func TestReleaseCIGreenVerdicts(t *testing.T) {
 		t.Fatalf("ci-green GATE = %q, want ci-ok (the switch to deploy-ok waits for mergewake)", got)
 	}
 	script := strings.ReplaceAll(job.Steps[0].Run, "sleep 30", "exit 7 # pending: the test stops instead of waiting")
+	// compareByRow sets what the fake gh reports for compare/def...abc, the
+	// newest main head against the release target. Unlisted rows are "ahead":
+	// the newest head is an ancestor of the target.
+	compareByRow := map[string]string{
+		"newer main head supersedes target, exact-sha success publishes": "behind",
+		"newer main head supersedes target, any-ref failure blocks":      "behind",
+		"newer main head supersedes target, no status skips":             "behind",
+		"diverged newest main head does not publish":                     "diverged",
+	}
 	// deploy is the deploy-ok status beside the ci-ok one: the shipped gate
 	// requires both (review on #228, high), so a ci-ok success alone no longer
 	// publishes.
@@ -71,7 +80,10 @@ func TestReleaseCIGreenVerdicts(t *testing.T) {
 		{"jobs API failure waits", "ci-ok", "9 completed success", "success", "none", "success", "def", "/jobs", 7, ""},
 		{"manual cancel, same main head blocks despite success status", "ci-ok", "9 completed cancelled", "none", "success", "success", "abc", "", 1, ""},
 		{"out-of-order older run cancelled newest head, exact-sha success publishes", "ci-ok", "9 completed cancelled", "skipped", "success", "success", "def", "", 0, "true"},
-		{"newer main head supersedes target", "ci-ok", "9 completed cancelled", "skipped", "success", "success", "def", "", 0, "false"},
+		{"newer main head supersedes target, exact-sha success publishes", "ci-ok", "9 completed cancelled", "skipped", "success", "success", "def", "", 0, "true"},
+		{"newer main head supersedes target, any-ref failure blocks", "ci-ok", "9 completed cancelled", "skipped", "error", "success", "def", "", 1, ""},
+		{"newer main head supersedes target, no status skips", "ci-ok", "9 completed cancelled", "skipped", "none", "success", "def", "", 0, "false"},
+		{"diverged newest main head does not publish", "ci-ok", "9 completed cancelled", "skipped", "success", "success", "def", "", 0, "false"},
 		{"ancestry API failure waits", "ci-ok", "9 completed cancelled", "skipped", "success", "success", "def", "compare/def", 7, ""},
 		{"newest-run API failure waits", "ci-ok", "9 completed cancelled", "skipped", "success", "success", "def", "runs?event=push", 7, ""},
 		{"statuses API failure waits", "ci-ok", "9 completed cancelled", "skipped", "success", "success", "def", "statuses", 7, ""},
@@ -111,7 +123,11 @@ esac
 			}
 			out := filepath.Join(dir, "out")
 			cmd := exec.Command("bash", "-c", script)
-			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "GITHUB_OUTPUT="+out, "GITHUB_SHA=abc", "GITHUB_REPOSITORY=o/r", "GATE="+tc.gate, "FAKE_DEPLOY="+tc.deploy, "FAKE_MAIN="+tc.main, "FAKE_JOB="+tc.job, "FAKE_STATUS="+tc.status, "FAKE_NEWEST="+tc.newest, "FAKE_COMPARE="+map[bool]string{true: "behind", false: "ahead"}[tc.name == "newer main head supersedes target"], "FAKE_FAIL="+tc.fail)
+			compare := "ahead"
+			if v, ok := compareByRow[tc.name]; ok {
+				compare = v
+			}
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "GITHUB_OUTPUT="+out, "GITHUB_SHA=abc", "GITHUB_REPOSITORY=o/r", "GATE="+tc.gate, "FAKE_DEPLOY="+tc.deploy, "FAKE_MAIN="+tc.main, "FAKE_JOB="+tc.job, "FAKE_STATUS="+tc.status, "FAKE_NEWEST="+tc.newest, "FAKE_COMPARE="+compare, "FAKE_FAIL="+tc.fail)
 			logs, err := cmd.CombinedOutput()
 			code := 0
 			if ee, ok := err.(*exec.ExitError); ok {

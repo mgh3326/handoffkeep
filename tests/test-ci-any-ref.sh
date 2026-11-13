@@ -118,6 +118,10 @@ def validate(wf_text: str, ci_text: str) -> None:
         "schema compatibility must use the workflow script and fetch arbitrary target commits"
     assert "bash scripts/test-previous-release-schema.sh" in schema, \
         "deploy diagnostics must exercise the previous release on the target schema"
+    assert "    permissions:\n      contents: read\n" in schema and "statuses" not in schema, \
+        "schema compatibility runs TARGET_SHA code and must hold contents: read only, no status write"
+    assert re.search(r"(?m)^          persist-credentials: false$", schema), \
+        "schema compatibility runs TARGET_SHA code, so its checkout must not persist the job token"
 
     # Concurrency (hk 2199): the group is keyed on the RESOLVED sha plus the
     # suite on the ci and status jobs, never on inputs.ref alone. The resolve
@@ -356,7 +360,23 @@ mutant_noref = ci.replace(
 )
 expect_red(wf, mutant_noref, "checkout-without-ref")
 
-print("structural checks ok (incl. 13 mutants)")
+# Mutant 14: schema-compat persists the job token beside TARGET_SHA code -> RED.
+mutant_persist = wf.replace(
+    "          fetch-depth: 0\n          persist-credentials: false\n      - name: Fetch the target commit",
+    "          fetch-depth: 0\n      - name: Fetch the target commit",
+    1,
+)
+expect_red(mutant_persist, ci, "schema-compat-persists-credentials")
+
+# Mutant 15: schema-compat inherits the workflow's statuses: write -> RED.
+mutant_schema_perm = wf.replace(
+    "    if: ${{ inputs.suite == 'deploy' }}\n    permissions:\n      contents: read\n",
+    "    if: ${{ inputs.suite == 'deploy' }}\n",
+    1,
+)
+expect_red(mutant_schema_perm, ci, "schema-compat-inherits-write-scope")
+
+print("structural checks ok (incl. 15 mutants)")
 PY
 
 # --- live-ish harness: resolver + checkout simulation against a fixture repo ---

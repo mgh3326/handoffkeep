@@ -76,6 +76,8 @@ jobs:
     name: previous release on target schema
     needs: resolve
     if: ${{ inputs.suite == 'deploy' }}
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -92,10 +94,14 @@ jobs:
       HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
       TARGET_SHA: ${{ needs.resolve.outputs.sha }}
     steps:
+      # This job runs code from TARGET_SHA. persist-credentials: false keeps the
+      # job token out of .git/config so that code cannot read it. The fetch below
+      # and the script need no token: the repo is public.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ github.workflow_sha }}
           fetch-depth: 0
+          persist-credentials: false
       - name: Fetch the target commit
         run: git fetch --no-tags origin "$TARGET_SHA"
       - uses: ./.github/actions/setup-go-cached

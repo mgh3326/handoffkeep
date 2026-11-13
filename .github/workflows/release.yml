@@ -208,21 +208,25 @@ jobs:
                   esac
                   # Run creation order can differ from commit order when GitHub
                   # delivers push events out of order. Treat this run as
-                  # superseded only when the newest main run's head is an
-                  # ancestor of this release target: an older run may have
-                  # cancelled the actual newest head, whose exact-sha ci-any-ref
-                  # verdict is the only substitute for its skipped main verdict.
+                  # superseded when the newest main run's head and this release
+                  # target are on one line of history: "ahead" (the newest head
+                  # is an ancestor of the target: an older run cancelled the
+                  # actual newest head, out of order) or "behind" (the target is
+                  # an ancestor of a newer head: a newer push superseded it). In
+                  # both cases the exact-sha ci-any-ref verdict is the only
+                  # substitute for the skipped main verdict. A diverged head is
+                  # no ordering we can judge, so it does not publish.
                   if newest=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=main&per_page=1" -q '.workflow_runs | first // {} | .head_sha // "none"'); then
                     nsha=$newest
                     echo "newest ci.yml main push run: $nsha"
                     if [ "$nsha" != "$GITHUB_SHA" ] && [ "$nsha" != none ]; then
                       if relation=$(gh api "repos/$GITHUB_REPOSITORY/compare/$nsha...$GITHUB_SHA" -q '.status'); then
                         echo "newest main head to release target ancestry: $relation"
-                        if [ "$relation" = ahead ]; then
-                          superseded=yes
-                        else
-                          green false
-                        fi
+                        case "$relation" in
+                          ahead|behind) superseded=yes ;;
+                          *) echo "::notice::newest main head $nsha is $relation to $GITHUB_SHA; not publishing this target"
+                             green false ;;
+                        esac
                       else
                         echo "::warning::checking newest main head ancestry failed; retrying"
                       fi
