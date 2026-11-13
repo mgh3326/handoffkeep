@@ -276,8 +276,9 @@ package store
 //     3942, 4318): the task creators above, and SetTaskProject after its
 //     level-1 lock and FOR UPDATE on the task row (task row before lane
 //     lock, as AddYTTaskBinding), take the task's lane lock, then read
-//     yt_issue_intents, the ownership rows and youtrack_projects without a
-//     lock, then insert its yt_write_ops row and insert or delete its
+//     yt_issue_intents, the ownership rows (the task's latest
+//     yt_binding_history row among them, hk 4490) and youtrack_projects
+//     without a lock, then insert its yt_write_ops row and insert or delete its
 //     yt_issue_intents row (no foreign key, nobody else locks it).
 //     PrepareMappedYTIssues takes the lane lock as the first lock of each
 //     task's transaction (as backfillYTIssue), then reads the task row

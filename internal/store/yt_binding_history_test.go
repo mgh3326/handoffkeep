@@ -495,3 +495,35 @@ func TestUnbindDropsPendingIssueIntent(t *testing.T) {
 		t.Fatalf("another task's intent: %d rows, want 1", n)
 	}
 }
+
+// An unbound task is the operator's until they bind it again: a later project
+// change prepares no issue_create op for it, as it would for a task that was
+// never bound (the same move, as a control).
+func TestUnboundTaskGetsNoAutomaticIssueOnProjectChange(t *testing.T) {
+	s := schemaStore(t, "ybh_issue")
+	ctx := t.Context()
+	ytbMapped(t, s)
+	ytrProject(t, s, "ybh-other", "0-9")
+	unbound, never := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
+	ytbBind(t, s, ytbBinding(unbound))
+	if got, err := s.UnbindYTTaskBinding(ctx, unbound, YTUnbindOptions{By: "op"}); err != nil || !got.Removed {
+		t.Fatalf("unbind: %+v %v", got, err)
+	}
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	ytrMove(t, s, unbound, "ybh-other")
+	ytrMove(t, s, never, "ybh-other")
+	creates := func(task int64) int {
+		return ytcCount(t, s, `SELECT count(*) FROM yt_write_ops WHERE kind=$1 AND entity_kind='task' AND entity_id=$2`, ytwrite.KindIssueCreate, strconv.FormatInt(task, 10))
+	}
+	if n := creates(never); n != 1 {
+		t.Fatalf("control: a never-bound task got %d issue_create ops after the move, want 1", n)
+	}
+	if n := creates(unbound); n != 0 {
+		t.Fatalf("the unbound task got %d issue_create ops after the move, want 0", n)
+	}
+	// Bound again by the operator, the history's latest row is 'bound'.
+	ytbBind(t, s, ytbBinding(unbound))
+	if hist := ybhHistory(t, s, unbound); hist[len(hist)-1].Action != "bound" {
+		t.Fatalf("history after the rebind = %+v", hist)
+	}
+}
