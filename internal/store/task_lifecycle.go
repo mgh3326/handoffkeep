@@ -142,7 +142,7 @@ func recordedLifecyclePath(ctx context.Context, tx pgx.Tx, id int64, source, key
 	return path, len(path) > 0, nil
 }
 
-// CloseTaskCompleted closes a decide, ops or verify task with a result link,
+// CloseTaskCompleted closes a decide, ops, verify or research task with a result link,
 // document key, task reference, or written reason as evidence.
 func (s *Store) CloseTaskCompleted(ctx context.Context, id int64, evidence, by, note, key string) (Task, error) {
 	return s.operatorTransition(ctx, id, lifecycleSourceCloseCompleted, key, TransitionInput{

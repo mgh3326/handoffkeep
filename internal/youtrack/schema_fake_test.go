@@ -461,12 +461,11 @@ func (f *fakeTenant) bundleRoute(w http.ResponseWriter, r *http.Request, rest []
 
 // fakeSchemaStore is the hk side: a vocabulary and the mapping table.
 type fakeSchemaStore struct {
-	mu         sync.Mutex
-	projects   []string
-	lanes      map[string][]string
-	milestones map[string][]string
-	rows       map[string]store.YouTrackProject
-	puts       []store.YouTrackProject
+	mu       sync.Mutex
+	projects []string
+	lanes    map[string][]string
+	rows     map[string]store.YouTrackProject
+	puts     []store.YouTrackProject
 }
 
 func (s *fakeSchemaStore) ListTaskProjects(context.Context) ([]string, error) {
@@ -474,9 +473,6 @@ func (s *fakeSchemaStore) ListTaskProjects(context.Context) ([]string, error) {
 }
 func (s *fakeSchemaStore) ListTaskLanes(context.Context) (map[string][]string, error) {
 	return s.lanes, nil
-}
-func (s *fakeSchemaStore) ListMilestoneNames(context.Context) (map[string][]string, error) {
-	return s.milestones, nil
 }
 func (s *fakeSchemaStore) ListYouTrackProjects(context.Context) ([]store.YouTrackProject, error) {
 	s.mu.Lock()
