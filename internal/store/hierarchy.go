@@ -412,14 +412,9 @@ func (s *Store) afterStateChangeTx(ctx context.Context, tx pgx.Tx, x Task, from,
 // closeGateTx is the gate an automatic close of x to state to passes (hk
 // 3294; the hygiene close of hk 3292 is to reuse it): it returns
 // why the close must wait for a person, or "". x waits while it is awaiting a
-// decision, while its decision request is open, while one of its own
-// implements changes is open or reverted and not relanded (pieceHoldTx, the
-// last-piece rule of a merge), or while the work-receipt fence refuses the
-// move.
+// decision, while its decision request is open, or while the work-receipt
+// fence refuses the move.
 func (s *Store) closeGateTx(ctx context.Context, tx pgx.Tx, x Task, to string) (string, error) {
-	if reason, err := pieceHoldTx(ctx, tx, x.ID, ""); err != nil || reason != "" {
-		return reason, err
-	}
 	return s.closeGate(ctx, x, to, func() (wrkrecords.Snapshot, error) { return loadWrkSnapshot(ctx, tx) })
 }
 
