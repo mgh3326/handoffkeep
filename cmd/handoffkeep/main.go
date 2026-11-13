@@ -797,7 +797,7 @@ func searchArgs(args []string) ([]string, []string, error) {
 
 func docCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: doc put|get|list|import|prune")
+		return errors.New("usage: doc put|get|list|import|prune|policy-index")
 	}
 	fs := flag.NewFlagSet("doc "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -894,6 +894,8 @@ func docCmd(args []string, out io.Writer) error {
 			return e
 		}
 		return printJSON(out, v)
+	case "policy-index":
+		return docPolicyIndex(ctx, c, *apply, out)
 	case "prune":
 		days, e := parseDocOlderThan(*olderThan)
 		if e != nil {
