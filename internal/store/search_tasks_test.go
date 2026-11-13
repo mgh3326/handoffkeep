@@ -294,9 +294,6 @@ func TestSearchTasksLaneFilterAndOtherScopes(t *testing.T) {
 		t.Fatalf("lane filter keys=%v", resultKeys(xs))
 	}
 	// scope "all" must not grow task rows; existing scopes keep working.
-	if _, err = s.CreateCheckpoint(ctx, Checkpoint{Session: "ss", Kind: "checkpoint", Title: "laneprobe checkpoint", Body: "x", CreatedBy: "t"}); err != nil {
-		t.Fatal(err)
-	}
 	if _, _, err = s.PutDocument(ctx, Document{Key: "k/laneprobe", Kind: "note", Body: "laneprobe body", CreatedBy: "t"}); err != nil {
 		t.Fatal(err)
 	}
@@ -309,8 +306,8 @@ func TestSearchTasksLaneFilterAndOtherScopes(t *testing.T) {
 			t.Fatalf("scope=all leaked tasks row %+v", x)
 		}
 	}
-	if len(xs) != 2 {
-		t.Fatalf("scope=all want ctx+docs got %v", xs)
+	if len(xs) != 1 {
+		t.Fatalf("scope=all want docs got %v", xs)
 	}
 	xs, err = s.Search(ctx, "laneprobe", "docs", "", 10)
 	if err != nil || len(xs) != 1 || xs[0].Scope != "docs" {

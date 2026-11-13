@@ -23,41 +23,6 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
-const benchScoresFixture = `{
-  "scores": [
-    {
-      "model_id": "claude-opus-5",
-      "effort": "high",
-      "harness": "claude-code",
-      "source": "AA-agent",
-      "metric": "agentic",
-      "score": 13.4,
-      "rank": 18,
-      "captured_at": "2026-07-31T00:00:00Z",
-      "time_per_task_min": 13.4,
-      "cost_per_task_usd": 3.8,
-      "provenance": "operator-approved manual import 2026-09-07",
-      "updated_by": "bench-client",
-      "updated_at": "2026-09-07T04:30:00Z"
-    },
-    {
-      "model_id": "kimi-k3",
-      "effort": "",
-      "harness": "",
-      "source": "AA-model",
-      "metric": "coding_index",
-      "score": 72.0,
-      "rank": null,
-      "captured_at": "2026-09-07T00:00:00Z",
-      "time_per_task_min": null,
-      "cost_per_task_usd": null,
-      "provenance": "",
-      "updated_by": "bench-client",
-      "updated_at": "2026-09-07T04:30:00Z"
-    }
-  ]
-}`
-
 const benchRepFixture = `{
   "reps": [
     {
@@ -292,139 +257,9 @@ func TestBenchCanonicalAPI(t *testing.T) {
 	h := benchServer(s)
 	defer h.Close()
 
-	// Scores: idempotency, five-column identity, null normalization, filters,
-	// ordering, structural validation, server identity, guard, and limits.
-	resp := benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/scores", "test-token", []byte(benchScoresFixture))
-	if resp.StatusCode != http.StatusOK || benchJSON(t, resp)["upserted"] != float64(2) {
-		t.Fatalf("first score put status=%d", resp.StatusCode)
-	}
-	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/scores", "test-token", []byte(benchScoresFixture))
-	if resp.StatusCode != http.StatusOK || benchJSON(t, resp)["upserted"] != float64(2) || benchCount(t, p, `SELECT count(*) FROM bench_scores WHERE model_id IN ('claude-opus-5','kimi-k3')`) != 2 {
-		t.Fatalf("idempotent score put status=%d", resp.StatusCode)
-	}
-	third := benchItem(t, benchScoresFixture, "scores")
-	third["effort"] = "low"
-	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/scores", "test-token", benchBody(t, "scores", third))
-	if resp.StatusCode != http.StatusOK || benchCount(t, p, `SELECT count(*) FROM bench_scores WHERE model_id='claude-opus-5' AND source='AA-agent' AND metric='agentic'`) != 2 {
-		t.Fatalf("effort did not remain in score identity status=%d", resp.StatusCode)
-	}
-	resp = benchRequest(t, h.Client(), http.MethodGet, h.URL+"/v1/bench/scores", "test-token", nil)
-	var scoreList struct {
-		Scores []map[string]any `json:"scores"`
-	}
-	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&scoreList) != nil || len(scoreList.Scores) != 3 || scoreList.Scores[0]["source"] != "AA-agent" || scoreList.Scores[0]["effort"] != "high" {
-		resp.Body.Close()
-		t.Fatalf("score ordering/list status=%d rows=%v", resp.StatusCode, scoreList.Scores)
-	}
-	resp.Body.Close()
-	wantScore := map[string]any{
-		"score":             13.4,
-		"rank":              float64(18),
-		"captured_at":       "2026-07-31T00:00:00Z",
-		"time_per_task_min": 13.4,
-		"cost_per_task_usd": 3.8,
-		"provenance":        "operator-approved manual import 2026-09-07",
-	}
-	for key, want := range wantScore {
-		if got := scoreList.Scores[0][key]; got != want {
-			t.Fatalf("score %s=%v want=%v", key, got, want)
-		}
-	}
-	for _, query := range []string{"?model_id=kimi-k3", "?source=AA-model", "?limit=1"} {
-		resp = benchRequest(t, h.Client(), http.MethodGet, h.URL+"/v1/bench/scores"+query, "test-token", nil)
-		var got struct {
-			Scores []map[string]any `json:"scores"`
-		}
-		if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&got) != nil || len(got.Scores) != 1 {
-			resp.Body.Close()
-			t.Fatalf("score query %s status=%d rows=%v", query, resp.StatusCode, got.Scores)
-		}
-		resp.Body.Close()
-	}
-	resp = benchRequest(t, h.Client(), http.MethodGet, h.URL+"/v1/bench/scores?model_id=kimi-k3", "test-token", nil)
-	var sparse struct {
-		Scores []map[string]any `json:"scores"`
-	}
-	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&sparse) != nil || sparse.Scores[0]["effort"] != "" || sparse.Scores[0]["harness"] != "" || sparse.Scores[0]["provenance"] != "" || sparse.Scores[0]["rank"] != nil {
-		resp.Body.Close()
-		t.Fatalf("score empty-string/null contract status=%d rows=%v", resp.StatusCode, sparse.Scores)
-	}
-	resp.Body.Close()
-	unknownSource := benchItem(t, benchScoresFixture, "scores")
-	unknownSource["model_id"] = "benchlm-model"
-	unknownSource["source"] = "benchlm"
-	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/scores", "test-token", benchBody(t, "scores", unknownSource))
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		t.Fatalf("unknown source status=%d", resp.StatusCode)
-	}
-	resp.Body.Close()
-	badScore := benchItem(t, benchScoresFixture, "scores")
-	badScore["model_id"] = "bench-invalid-score"
-	badScore["score"] = 101
-	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/scores", "test-token", benchBody(t, "scores", badScore))
-	if resp.StatusCode != http.StatusBadRequest || benchJSON(t, resp)["error"] != "invalid_context" {
-		t.Fatalf("bad score status=%d", resp.StatusCode)
-	}
-	identityScore := benchItem(t, benchScoresFixture, "scores")
-	identityScore["model_id"] = "identity-score"
-	identityScore["updated_by"] = "someone-else"
-	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/scores", "test-token", benchBody(t, "scores", identityScore))
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		t.Fatalf("score identity put status=%d", resp.StatusCode)
-	}
-	resp.Body.Close()
-	resp = benchRequest(t, h.Client(), http.MethodGet, h.URL+"/v1/bench/scores?model_id=identity-score", "test-token", nil)
-	var identityResult struct {
-		Scores []map[string]any `json:"scores"`
-	}
-	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&identityResult) != nil || len(identityResult.Scores) != 1 || identityResult.Scores[0]["updated_by"] != "bench-client" {
-		resp.Body.Close()
-		t.Fatalf("score server identity status=%d rows=%v", resp.StatusCode, identityResult.Scores)
-	}
-	resp.Body.Close()
-	guarded := benchItem(t, benchScoresFixture, "scores")
-	guarded["model_id"] = "guard-model"
-	guarded["provenance"] = "sk-abcdefghijklmnopqrstuvwxyz"
-	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/scores", "test-token", benchBody(t, "scores", guarded))
-	if resp.StatusCode != http.StatusBadRequest || benchJSON(t, resp)["error"] != "secret_like_content" || benchCount(t, p, `SELECT count(*) FROM bench_scores WHERE model_id='guard-model'`) != 0 {
-		t.Fatalf("score guard status=%d", resp.StatusCode)
-	}
-	for _, n := range []int{0, 1001, 1000} {
-		items := make([]map[string]any, n)
-		for i := range items {
-			items[i] = map[string]any{"model_id": fmt.Sprintf("bench-limit-%d", i), "effort": "", "harness": "", "source": "limit", "metric": "agentic", "score": 1, "rank": 1, "captured_at": "2026-09-07T00:00:00Z", "time_per_task_min": nil, "cost_per_task_usd": nil, "provenance": "", "updated_by": "someone-else", "updated_at": "2026-09-07T04:30:00Z"}
-		}
-		body, err := json.Marshal(map[string]any{"scores": items})
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/scores", "test-token", body)
-		want := http.StatusOK
-		if n != 1000 {
-			want = http.StatusBadRequest
-		}
-		if resp.StatusCode != want {
-			resp.Body.Close()
-			t.Fatalf("score batch size=%d status=%d want=%d", n, resp.StatusCode, want)
-		}
-		if n == 1000 {
-			respBody := benchJSON(t, resp)
-			if respBody["upserted"] != float64(1000) {
-				t.Fatalf("score batch upserted=%v want=1000", respBody["upserted"])
-			}
-			if got := benchCount(t, p, `SELECT count(*) FROM bench_scores WHERE model_id LIKE 'bench-limit-%'`); got != 1000 {
-				t.Fatalf("score batch db count=%d want=1000", got)
-			}
-			continue
-		}
-		resp.Body.Close()
-	}
-
 	// Repetitions: all carried columns, nullable values, origin identity, and
 	// the server-owned creator field.
-	resp = benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/reps", "test-token", []byte(benchRepFixture))
+	resp := benchRequest(t, h.Client(), http.MethodPut, h.URL+"/v1/bench/reps", "test-token", []byte(benchRepFixture))
 	if resp.StatusCode != http.StatusOK || benchJSON(t, resp)["upserted"] != float64(1) {
 		t.Fatalf("rep fixture put status=%d", resp.StatusCode)
 	}
@@ -582,8 +417,6 @@ func TestBenchCanonicalAPI(t *testing.T) {
 		path   string
 		body   []byte
 	}{
-		{http.MethodGet, "/v1/bench/scores", nil},
-		{http.MethodPut, "/v1/bench/scores", []byte(benchScoresFixture)},
 		{http.MethodGet, "/v1/bench/reps", nil},
 		{http.MethodPut, "/v1/bench/reps", []byte(benchRepFixture)},
 		{http.MethodGet, "/v1/bench/grades", nil},
@@ -609,13 +442,13 @@ func TestBenchRouteMethodAndUnknownPath(t *testing.T) {
 	h := benchServer(s)
 	defer h.Close()
 
-	resp := benchRequest(t, h.Client(), http.MethodPost, h.URL+"/v1/bench/scores", "test-token", []byte(benchScoresFixture))
+	resp := benchRequest(t, h.Client(), http.MethodPost, h.URL+"/v1/bench/catalog", "test-token", nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Fatalf("POST /v1/bench/scores status=%d want=%d", resp.StatusCode, http.StatusMethodNotAllowed)
+		t.Fatalf("POST /v1/bench/catalog status=%d want=%d", resp.StatusCode, http.StatusMethodNotAllowed)
 	}
 	if allow := resp.Header.Get("Allow"); !strings.Contains(allow, "PUT") {
-		t.Fatalf("POST /v1/bench/scores Allow=%q want to contain PUT", allow)
+		t.Fatalf("Allow=%q, want PUT", allow)
 	}
 
 	resp2 := benchRequest(t, h.Client(), http.MethodGet, h.URL+"/v1/definitely-unknown", "test-token", nil)

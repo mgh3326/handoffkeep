@@ -161,7 +161,7 @@ func (s *Service) Search(ctx context.Context, fallback SearchFallback, q, scope,
 	}
 	if scope == "all" {
 		var pg []store.SearchResult
-		for _, sc := range []string{"ctx", "memory"} {
+		for _, sc := range []string{"memory"} {
 			rows, err := fallback(ctx, q, sc, session, limit)
 			if err != nil {
 				return nil, err

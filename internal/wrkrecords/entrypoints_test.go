@@ -337,7 +337,6 @@ func TestWrkShadowLegacyCompatibilityUntilActivate(t *testing.T) {
 	appendDB(t, db, "director-1", "job-a", "activate", Object{"seal_seq": nil, "reason_code": "enforce"})
 	for name, call := range map[string]func() error{
 		"claim": func() error { _, e := svc.ClaimTask(ctx, 2400, "b2400-a", "job-a", ""); return e },
-		"next":  func() error { _, e := svc.NextTask(ctx, "b2400-a", "b2400-a", "job-a", ""); return e },
 		"transition": func() error {
 			_, e := svc.TransitionTask(ctx, 2400, "verifying", "b2400-a", "P2 bypass", nil, "")
 			return e
@@ -359,14 +358,14 @@ func TestWrkShadowNextAndReviewRoleAssociation(t *testing.T) {
 	appendDB(t, db, "director-1", "p1-reviewer", "claim", Object{"job_id": "p1-reviewer", "owner_lane": "b2400-a", "parent_lane": "b2400-a", "task_id": 2400, "host_client_id": "desktop", "role": "tester", "tier": "T2", "review_of": Object{"job_id": "job-a", "round_no": 1}, "predecessor_job_id": nil, "supersedes": nil})
 	ctx := store.WithWrkPrincipal(t.Context(), "desktop", nil)
 	svc := api.Service{Store: db.runtime}
-	if _, e := svc.NextTask(ctx, "b2400-a", "b2400-a", "p1-reviewer", ""); Code(e) != "wrk_receipt_required" {
+	if _, e := svc.ClaimTask(ctx, 2400, "b2400-a", "p1-reviewer", ""); Code(e) != "wrk_receipt_required" {
 		t.Fatalf("claim-only reviewer association: %v", e)
 	}
-	if task, e := svc.NextTask(ctx, "b2400-a", "b2400-a", "job-a", ""); e != nil || task.ID != 2400 {
+	if task, e := svc.ClaimTask(ctx, 2400, "b2400-a", "job-a", ""); e != nil || task.ID != 2400 {
 		t.Fatalf("shadow next: id=%d err=%v", task.ID, e)
 	}
 	appendDB(t, db, "director-1", "job-a", "activate", Object{"seal_seq": nil, "reason_code": "enforce"})
-	if _, e := svc.NextTask(ctx, "b2400-a", "b2400-a", "job-a", ""); Code(e) != "wrk_receipt_required" {
+	if _, e := svc.ClaimTask(ctx, 2400, "b2400-a", "job-a", ""); Code(e) != "wrk_receipt_required" {
 		t.Fatalf("activated explicit next: %v", e)
 	}
 }
@@ -391,7 +390,7 @@ func TestWrkProtectedTaskCommentsRemainLegacyCompatible(t *testing.T) {
 }
 
 func TestWrkCorrectedClaimOnlyEnrollsCurrentTask(t *testing.T) {
-	for _, method := range []string{"claim", "next"} {
+	for _, method := range []string{"claim"} {
 		t.Run(method, func(t *testing.T) {
 			db := shadowDB(t)
 			claim := Object{"job_id": "job-a", "owner_lane": "b2400-a", "parent_lane": "director-1", "task_id": 2401, "host_client_id": "desktop", "role": "builder", "tier": "T3", "review_of": nil, "predecessor_job_id": nil, "supersedes": 1}
@@ -401,13 +400,7 @@ func TestWrkCorrectedClaimOnlyEnrollsCurrentTask(t *testing.T) {
 			if _, e := db.runtime.ClaimTask(ctx, 2401, "legacy", "forged", ""); Code(e) != "wrk_receipt_required" {
 				t.Fatalf("corrected current task unprotected: %v", e)
 			}
-			var old store.Task
-			var e error
-			if method == "claim" {
-				old, e = db.runtime.ClaimTask(ctx, 2400, "legacy", "legacy-old", "")
-			} else {
-				old, e = db.runtime.NextTask(ctx, "b2400-a", "legacy", "legacy-old", "")
-			}
+			old, e := db.runtime.ClaimTask(ctx, 2400, "legacy", "legacy-old", "")
 			if e != nil || old.ID != 2400 {
 				t.Fatalf("superseded task lost legacy %s: %v id=%d", method, e, old.ID)
 			}

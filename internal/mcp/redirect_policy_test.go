@@ -50,7 +50,6 @@ func TestRefusedRedirectPolicyToolTextHasNoLocation(t *testing.T) {
 		{"list_documents", map[string]any{}},
 		{"put_document", map[string]any{"key": "fixture", "kind": "note", "body": "b"}},
 		{"memory_get", map[string]any{"agent": "a", "name": "n"}},
-		{"recent_checkpoints", map[string]any{"session": "s"}},
 		{"attachment_list", map[string]any{}},
 	} {
 		res, e := cs.CallTool(context.Background(), &gmcp.CallToolParams{Name: call.name, Arguments: call.args})

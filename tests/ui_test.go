@@ -357,13 +357,6 @@ func TestUITimelineQueueAndEscaping(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	laneA, laneB := uiLane(t, "lane-a"), uiLane(t, "lane-b")
-	checkpointSession := uiLane(t, "session")
-	if _, err := s.CreateCheckpoint(t.Context(), store.Checkpoint{Session: checkpointSession, Kind: "checkpoint", Title: "older checkpoint", Body: "first", CreatedBy: "test-node"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.CreateCheckpoint(t.Context(), store.Checkpoint{Session: checkpointSession, Kind: "checkpoint", Title: "latest checkpoint", Body: "second", CreatedBy: "test-node"}); err != nil {
-		t.Fatal(err)
-	}
 	textEvent := seedRelay(t, s, laneA, "lane.event", "", "text wins", "", "")
 	questionEvent := seedRelay(t, s, laneA, "job.escalate", "", "", "question wins", "line loses")
 	lineEvent := seedRelay(t, s, laneB, "job.joined", "", "", "", "line wins")
@@ -381,9 +374,6 @@ func TestUITimelineQueueAndEscaping(t *testing.T) {
 	}
 	if !strings.Contains(body, "&lt;script&gt;alert(1)&lt;/script&gt;") || strings.Contains(body, "<script>alert(1)</script>") {
 		t.Fatal("stored XSS text was not escaped")
-	}
-	if !strings.Contains(body, "latest checkpoint") || strings.Contains(body, "older checkpoint") {
-		t.Fatal("session checkpoint panel did not select the latest entry")
 	}
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/timeline?kind=job.escalate", assertion, "")
 	body = responseText(t, response)

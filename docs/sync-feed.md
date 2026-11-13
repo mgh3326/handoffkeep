@@ -23,12 +23,11 @@ Actions are insert (`I`), update (`U`) and delete (`D`). Timestamps are RFC3339
 numeric database IDs encoded as strings. Decision IDs are
 `tasks.refs.decision_request.id`, except `record:<id>`, a write of the
 `decision_requests` row `<id>` (the YouTrack decision projection reads it);
-`/v1/sync/rows/decision/record:<id>` finds no request, and a reader of
-requests ignores it. A request revision or resolution emits `U`;
+a reader of requests ignores it. A request revision or resolution emits `U`;
 replacement emits `D` for the previous ID and `I` for the replacement. Removing
 the current request emits `D`. Tasks have no production hard-delete path: their
 append-only event history prevents deletion. Closing a task with `merged` or
-`dropped` retains the task and emits `task:U`. The decision bootstrap describes
+`dropped` retains the task and emits `task:U`. The decision projection describes
 current structured requests, including resolved requests; historical task event
 snapshots, chat questions and the composite decision inbox are separate data.
 Comments retain their existing append-only rule, so their current supported
@@ -39,9 +38,8 @@ last returned ID, or the supplied `after` on an empty page. `max_sync_id` is the
 committed feed watermark in the page's read snapshot. Continue from
 `last_sync_id` until it equals `max_sync_id`. IDs may have gaps after rollback.
 Never advance a cursor after receiving a partial response without its trailer.
-Fetch current model content through `/v1/sync/rows/{model}/{model_id}`.
-A missing row means it was deleted after the change. Applying changes must be
-idempotent.
+Delta carries IDs, not bodies: fetch current content from the owning API.
+Applying changes must be idempotent.
 
 An expired cursor returns HTTP 410 and JSON:
 
@@ -49,64 +47,18 @@ An expired cursor returns HTTP 410 and JSON:
 {"reset":true,"min_sync_id":123}
 ```
 
-Discard the index and bootstrap again. The reset boundary records the highest
+Discard the index and start again from the reset boundary. The reset boundary records the highest
 pruned ID, surviving an entirely empty log. A cursor exactly at that boundary
 can continue safely. Sequence gaps alone do not cause a reset. `min_sync_id` is
 the oldest retained ID, or the committed watermark plus one when none remain.
 Cursors ahead of the server watermark return 400.
 
-## Bootstrap
+## Starting from nothing
 
-`GET /v1/sync/bootstrap?model=document&limit=100&cursor=<opaque>`
-
-Models: `document`, `task`, `task_comment`, `decision`. Limits match delta.
-The response is JSON:
-
-```json
-{"rows":[{"id":"42","updated_at":"2026-11-02T00:00:00Z","key":"notes/example"}],"cursor":"opaque-next-page","max_sync_id":100,"schema_version":30}
-```
-
-Only documents have `key`. Comments expose their creation time as `updated_at`.
-Omission of `cursor` signals the last page; empty results are `rows: []`.
-Pass the returned cursor unchanged to the same model's next page. It binds the
-model, initial watermark, schema version and last ID; it is not an authorization
-token. Pages use deterministic ID ordering and preserve the first page's
-watermark. Malformed and cross-model cursors return 400. Expired bootstrap
-watermarks return 410.
-
-Pages read current rows, rather than holding a database snapshot across HTTP
-requests. Concurrent inserts, updates and deletes are reconciled by delta:
-
-1. Start each model's bootstrap, saving its first `max_sync_id`.
-2. Page that model into a new index generation.
-3. Replay delta from the saved watermark, applying changes for that model.
-4. Once caught up, publish the generation and continue polling delta.
-
-For one global cursor across all models, use the minimum initial watermark of
-all four models, replaying all models from there. Rows already seen during
-bootstrap may appear again in delta. Re-fetch and upsert them. A delete removes
-the ID whether or not it appeared in bootstrap. Restart on 410.
-
-## Current raw rows
-
-`GET /v1/sync/rows/{model}/{model_id...}`
-
-The endpoint uses the same bearer read authentication as delta and bootstrap.
-The model ID consumes the rest of the path, including slashes in decision IDs.
-All delta `model_id` values resolve through it while the model exists. Responses
-are JSON objects, with no envelope:
-
-- `document`: complete document database row, including `key` and `body`.
-- `task`: complete task database row, including `title` and raw `refs`.
-- `task_comment`: complete comment database row, including `body` and `author`.
-- `decision`: complete current structured request, including `question` and
-  `resolution` content when resolved, plus `task_id`, `updated_at`, and `options`.
-
-A deleted, superseded, or unknown ID returns HTTP 404 with `{"deleted":true}`.
-Unknown models and malformed numeric IDs return 400 `invalid_context`. Responses
-use `Cache-Control: no-store`. A returned row reflects current state, so several
-feed events for one ID may resolve to the same latest content. Decision document
-references remain references; the inline question and resolution are included.
+There is no bootstrap or row endpoint. A new reader starts at `after=0` and
+follows delta to `max_sync_id`; a 410 reset restarts it from the reset
+boundary. Delta rows carry the model and ID, and a reader that needs a current
+body fetches it from the API that owns the model.
 
 ## Durability and retention
 
@@ -120,13 +72,12 @@ all pending rows of that transaction in `entry_id` order using a PL/pgSQL loop,
 and updates the watermark. Remaining trigger firings find no pending rows and return immediately.
 The lock is released at commit. Ordinary source writes never acquire this lock;
 a long transaction with pending rows allows unrelated writers to commit.
-Readers return only assigned IDs. Bootstrap captures the committed watermark
-from the same snapshot as its first page; pruning ignores unassigned rows.
+Readers return only assigned IDs; pruning ignores unassigned rows.
 
 Keep the `sync_allocate` constraint deferred; forcing it immediate with
 `SET CONSTRAINTS` would acquire the allocation lock before the commit boundary.
 The store does not change constraint timing. Existing rows are discovered by
-bootstrap when the migration first installs the feed. If legacy tasks share a
+the migration when it first installs the feed. If legacy tasks share a
 decision request ID, backfill selects the newest `updated_at`, breaking ties by
 the highest task ID.
 
@@ -144,7 +95,7 @@ history. The worker participates in normal server shutdown.
 Uses the usual URL/token configuration and optional `--url` and `--token` flags.
 It validates the NDJSON page and prints one JSON object containing `changes`
 and `_metadata_`. It fetches one page; it does not persist a cursor. HTTP 410
-returns an error requiring bootstrap.
+returns an error; restart from the reset boundary.
 
 ## Desk ledger
 

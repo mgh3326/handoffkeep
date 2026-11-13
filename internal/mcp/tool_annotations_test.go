@@ -43,7 +43,7 @@ func TestEveryRegisteredToolHasAnnotations(t *testing.T) {
 	}
 
 	readOnly := []string{
-		"search_context", "recent_checkpoints", "get_document", "list_documents",
+		"search_context", "get_document", "list_documents",
 		"memory_get", "memory_list", "attachment_list", "attachment_get_url",
 	}
 	for _, name := range readOnly {
@@ -58,7 +58,7 @@ func TestEveryRegisteredToolHasAnnotations(t *testing.T) {
 	}
 
 	writes := []string{
-		"put_checkpoint", "put_document", "memory_put", "attachment_put",
+		"put_document", "memory_put", "attachment_put",
 		"attachment_upload_begin", "attachment_upload_complete", "attachment_put_from_path",
 	}
 	for _, name := range writes {

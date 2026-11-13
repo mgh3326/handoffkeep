@@ -56,7 +56,6 @@ func (o operatorTools) taskStates(_ context.Context, _ *gmcp.CallToolRequest, _ 
 		"states":                 store.TaskStateMachine(),
 		"categories":             store.TaskCategories(),
 		"accepted_state_names":   store.AcceptedStateNames(),
-		"legacy_state_names":     store.LegacyTaskStates(),
 		"awaiting_decision_flag": store.AwaitingDecisionKey,
 	})
 }

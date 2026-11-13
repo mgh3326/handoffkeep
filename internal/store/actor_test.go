@@ -29,9 +29,6 @@ func TestActorWriteRefusalsNameField(t *testing.T) {
 	tooLong := strings.Repeat("a", 129)
 	for _, actor := range []string{"bad\x00actor", tooLong} {
 		t.Run(actor, func(t *testing.T) {
-			if _, err := (*Store)(nil).CreateCheckpoint(ctx, Checkpoint{Session: "session", Kind: "checkpoint", Title: "title", CreatedBy: actor}); err == nil || !strings.Contains(err.Error(), "created_by") {
-				t.Fatalf("CreateCheckpoint error=%v, want created_by refusal", err)
-			}
 			if _, err := (*Store)(nil).PutMemory(ctx, Memory{Agent: "agent", Name: "memory", Type: "user", UpdatedBy: actor}); err == nil || !strings.Contains(err.Error(), "updated_by") {
 				t.Fatalf("PutMemory error=%v, want updated_by refusal", err)
 			}

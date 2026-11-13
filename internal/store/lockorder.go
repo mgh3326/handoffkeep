@@ -40,12 +40,12 @@ package store
 //
 //  4. Task rows: SELECT ... FOR UPDATE, or an UPDATE of tasks. Without the
 //     level-2 lock a transaction locks at most one task row and no job lock
-//     (the single-task edits: area, milestone, labels, subscribers,
-//     deadlines, placement, work-board reconcile).
+//     (the single-task edits: area, milestone, placement, work-board
+//     reconcile).
 //
 //  5. Rows that belong to a locked task: task_events (its foreign key takes
-//     KEY SHARE on the task row), task_labels, task_relations,
-//     task_subscribers, task_origins, linear_board_tasks, linear_outbox,
+//     KEY SHARE on the task row), task_relations, task_origins,
+//     linear_board_tasks, linear_outbox,
 //     sync_decisions, ticket_sets, decision_answer_attempts and
 //     decision_resolutions (inserted by ResolveDecision after its task row,
 //     under the level-2 lock; append-only and never locked by a reader), and
@@ -86,8 +86,6 @@ package store
 //     after all other work of its transaction.
 //
 // Exceptions, none of which can close a cycle:
-//   - Standing order writes lock one active standing_orders row and no other existing row.
-//
 //   - Inbox triage (operator_inbox.go) locks one operator_inbox_state row and
 //     then, when the item is a decision request and the action is snooze,
 //     that decision_requests row. Only this writer takes inbox state rows, so
@@ -120,11 +118,6 @@ package store
 //     nothing else writes either table.
 //   - AckLedger locks one ledger_cursors row and reads sync_state without a
 //     lock; nothing else writes ledger_cursors (ledger.go).
-//   - CreateStatusUpdate locks its task_projects row FOR NO KEY UPDATE
-//     first, then only reads tasks and status_updates and inserts a new
-//     status_updates row. The project metadata writers lock that row and
-//     nothing else, and the KEY SHARE a task or milestone write takes on it
-//     does not conflict with FOR NO KEY UPDATE (status_updates.go).
 //   - SetProjectDesignLane locks its one task_projects row FOR NO KEY UPDATE
 //     and then inserts a project_owner_events row; no writer locks an owner
 //     event row and no transaction that holds a task_projects lock waits on

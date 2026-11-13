@@ -53,7 +53,7 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.taskShow)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "task_get",
-		Description: "Read one hk task in full: body text (from its hk document), state, priority, kind, lane, project, area, labels, claimed_by, refs, parent, children, relations and blockers, the project's design owner, translations, the task's jobs (up to 20, oldest claim first; each with a readable Korean run summary: what ran, why that model and host were chosen, the other candidates, and the result), YouTrack link, created_at/updated_at/closed_at and console_url. field_sources names the canonical system for every returned task data field: hk owns the work record (including state, priority, lane, refs and comments by agents); YouTrack owns operator comments, translations/Korean display text and the mirror. Comments and events are a short preview only; page them with task_comments and task_events.",
+		Description: "Read one hk task in full: body text (from its hk document), state, priority, kind, lane, project, area, claimed_by, refs, parent, children, relations and blockers, the project's design owner, translations, the task's jobs (up to 20, oldest claim first; each with a readable Korean run summary: what ran, why that model and host were chosen, the other candidates, and the result), YouTrack link, created_at/updated_at/closed_at and console_url. field_sources names the canonical system for every returned task data field: hk owns the work record (including state, priority, lane, refs and comments by agents); YouTrack owns operator comments, translations/Korean display text and the mirror. Comments and events are a short preview only; page them with task_comments and task_events.",
 		Annotations: readOnlyAnnotations(),
 	}, o.taskGet)
 	gmcp.AddTool(s, &gmcp.Tool{
@@ -103,7 +103,7 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.taskIntake)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "task_update",
-		Description: "Change one hk task's state, lane, priority or labels in one call (any of them; labels by name in add_labels and remove_labels). expected_updated_at is the updated_at you read from task_show or task_get; a task that changed since answers revision_conflict and nothing is written. idempotency_key is required; a repeat returns the first call's result. Returns the changed fields, the new revision, console_url and youtrack_sync (sync_pending for a mirrored task).",
+		Description: "Change one hk task's state, lane or priority in one call (any of them). expected_updated_at is the updated_at you read from task_show or task_get; a task that changed since answers revision_conflict and nothing is written. idempotency_key is required; a repeat returns the first call's result. Returns the changed fields, the new revision, console_url and youtrack_sync (sync_pending for a mirrored task).",
 		Annotations: writeAnnotations(),
 	}, o.taskUpdate)
 	gmcp.AddTool(s, &gmcp.Tool{

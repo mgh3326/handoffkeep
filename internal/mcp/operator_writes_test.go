@@ -53,12 +53,6 @@ func TestAccessAndBearerActorMCPWrites(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			suffix := tc.name
-			callTool[store.Checkpoint](t, tc.session, "put_checkpoint", map[string]any{"session": "actor-" + suffix, "kind": "checkpoint", "title": "actor test", "body": "checkpoint"})
-			checkpoints, err := st.RecentCheckpoints(t.Context(), "actor-"+suffix, "", 10)
-			if err != nil || len(checkpoints) != 1 || checkpoints[0].CreatedBy != tc.actor {
-				t.Fatalf("checkpoint actor: rows=%+v err=%v", checkpoints, err)
-			}
-
 			document := callTool[struct {
 				Document store.Document `json:"document"`
 			}](t, tc.session, "put_document", map[string]any{"key": "actor-test/" + suffix, "kind": "note", "body": "document"})
@@ -318,58 +312,6 @@ func TestDecisionAskReplayAndOperatorOnlyRefusal(t *testing.T) {
 	}
 }
 
-func TestTaskUpdateLabelsByName(t *testing.T) {
-	st := newOperatorStore(t)
-	ctx := context.Background()
-	task := newOperatorTask(t, st, "task update labels fixture")
-	label, err := st.SaveLabel(ctx, store.Label{Name: "dots-review", EditLevel: "anyone"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	session := writesSession(t, st)
-	read := func() store.Task {
-		t.Helper()
-		x, found, err := st.GetTask(ctx, task.ID)
-		if err != nil || !found {
-			t.Fatalf("read task: found=%v err=%v", found, err)
-		}
-		return x
-	}
-
-	// An unknown label name refuses the whole call and writes nothing.
-	before := read()
-	text, isError := toolText(t, session, "task_update", map[string]any{
-		"id": task.ID, "expected_updated_at": before.UpdatedAt.UTC().Format(time.RFC3339Nano),
-		"idempotency_key": "lbl-unknown", "add_labels": []string{"no-such-label"},
-	})
-	if !isError || !strings.Contains(text, store.ErrLabelNotFound.Error()) {
-		t.Fatalf("unknown label: isError=%v text=%q", isError, text)
-	}
-	if !read().UpdatedAt.Equal(before.UpdatedAt) {
-		t.Fatal("a refused label update changed the task")
-	}
-
-	added := callTool[mcpTaskUpdateOut](t, session, "task_update", map[string]any{
-		"id": task.ID, "expected_updated_at": before.UpdatedAt.UTC().Format(time.RFC3339Nano),
-		"idempotency_key": "lbl-1", "add_labels": []string{" dots-review "},
-	})
-	if len(added.Changed) != 1 || added.Changed[0] != "labels" {
-		t.Fatalf("add label=%+v", added)
-	}
-	if !containsLabel(read().Labels, label.ID) {
-		t.Fatalf("label %d not on the task: %+v", label.ID, read().Labels)
-	}
-}
-
-func containsLabel(ids []int64, id int64) bool {
-	for _, got := range ids {
-		if got == id {
-			return true
-		}
-	}
-	return false
-}
-
 // A lane change with no note is valid: the store supplies the event note.
 func TestTaskUpdateLaneWithoutNote(t *testing.T) {
 	st := newOperatorStore(t)
@@ -408,10 +350,6 @@ func TestTaskUpdateRecordsEveryFieldEvent(t *testing.T) {
 	st := newOperatorStore(t)
 	ctx := context.Background()
 	task := newOperatorTask(t, st, "task update events fixture")
-	label, err := st.SaveLabel(ctx, store.Label{Name: "dots-events", EditLevel: "anyone"})
-	if err != nil {
-		t.Fatal(err)
-	}
 	session := writesSession(t, st)
 	before, _, err := st.GetTask(ctx, task.ID)
 	if err != nil {
@@ -419,26 +357,23 @@ func TestTaskUpdateRecordsEveryFieldEvent(t *testing.T) {
 	}
 	out := callTool[mcpTaskUpdateOut](t, session, "task_update", map[string]any{
 		"id": task.ID, "expected_updated_at": before.UpdatedAt.UTC().Format(time.RFC3339Nano),
-		"idempotency_key": "events-1", "priority": 2, "add_labels": []string{"dots-events"},
+		"idempotency_key": "events-1", "priority": 2,
 	})
-	if len(out.Changed) != 2 {
+	if len(out.Changed) != 1 {
 		t.Fatalf("changed=%v", out.Changed)
 	}
 	after, _, err := st.GetTask(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sawPriority, sawLabel bool
+	var sawPriority bool
 	for _, event := range after.Events {
 		if event.Field == "priority" && event.By == "dots" {
 			sawPriority = true
 		}
-		if event.Field == "labels" {
-			sawLabel = true
-		}
 	}
-	if !sawPriority || !sawLabel || !containsLabel(after.Labels, label.ID) {
-		t.Fatalf("events missing: priority=%v labels=%v events=%+v", sawPriority, sawLabel, after.Events)
+	if !sawPriority {
+		t.Fatalf("priority event missing: events=%+v", after.Events)
 	}
 }
 

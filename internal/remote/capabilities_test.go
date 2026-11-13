@@ -158,14 +158,6 @@ func TestGatedCallsRefuseUnlistedShapesWithoutSending(t *testing.T) {
 		feature string
 		call    func(c Client) error
 	}{
-		{"next job_id", capabilities.FeatureNextJobID, func(c Client) error {
-			_, err := c.NextTask(context.Background(), "lane", "worker", "job-1", "")
-			return err
-		}},
-		{"next no_job", capabilities.FeatureNextNoJob, func(c Client) error {
-			_, err := c.NextTask(context.Background(), "lane", "worker", "", "no job")
-			return err
-		}},
 		{"transition no_job", capabilities.FeatureTransitionNoJob, func(c Client) error {
 			_, err := c.TransitionTask(context.Background(), 7, "developing", "", nil, "no job")
 			return err

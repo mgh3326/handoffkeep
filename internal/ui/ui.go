@@ -383,13 +383,12 @@ func (h *Handler) timeline(w http.ResponseWriter, r *http.Request, fragment bool
 }
 
 type timelineData struct {
-	Events      []store.RelayEvent
-	Checkpoints []store.Checkpoint
-	Lane        string
-	Kind        string
-	Since       string
-	Until       string
-	MoreURL     string
+	Events  []store.RelayEvent
+	Lane    string
+	Kind    string
+	Since   string
+	Until   string
+	MoreURL string
 }
 
 func (h *Handler) timelineData(r *http.Request) (timelineData, error) {
@@ -441,7 +440,6 @@ func (h *Handler) timelineData(r *http.Request) (timelineData, error) {
 		next.Set("before_id", strconv.FormatInt(events[len(events)-1].ID, 10))
 		data.MoreURL = "/ui/timeline?" + next.Encode()
 	}
-	data.Checkpoints, err = h.store.LatestCheckpointsBySession(r.Context(), 1000)
 	return data, err
 }
 

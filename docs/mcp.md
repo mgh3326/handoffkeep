@@ -158,7 +158,7 @@ priority or lane.
 | --- | --- | --- | --- |
 | `task_search` | read | `query`, optional `state`/`lane`/`project`, `limit` ≤ 50 | Task summaries from the console search path, including Korean translations |
 | `task_show` | read | `id` | Title (with `title_ko` when present), state, priority, lane, project, `refs.pr`, last 20 comments, last 10 events |
-| `task_get` | read | `id` | One task in full: body, state, priority, kind, lane, project, area, labels, `claimed_by`, `refs`, parent, children, relations and blockers, `project_owner`, translations, YouTrack link, timestamps, `console_url`, `attachments`, `external_links`, `field_sync`, `field_sources`; comments and events are a five-item preview |
+| `task_get` | read | `id` | One task in full: body, state, priority, kind, lane, project, area, `claimed_by`, `refs`, parent, children, relations and blockers, `project_owner`, translations, YouTrack link, timestamps, `console_url`, `attachments`, `external_links`, `field_sync`, `field_sources`; comments and events are a five-item preview |
 | `task_list` | read | optional `state`/`lane`/`project`, `limit` ≤ 100, `cursor`, `updated_since` | Task summaries; paged calls also carry `next_cursor` |
 | `task_comments` | read | `id`, optional `cursor`, `limit` ≤ 100 | One page of comments, oldest first, with `next_cursor` and `has_more` |
 | `task_events` | read | `id`, optional `cursor`, `limit` ≤ 100 | One page of events, oldest first, with `next_cursor` and `has_more` |
@@ -167,7 +167,7 @@ priority or lane.
 | `decision_answer` | write | `request_id`, `option` or `text`, optional `note` | Store result; an already answered or stale request returns its error code |
 | `task_comment` | write | `id`, `body`, optional `idempotency_key` | The appended comment, its author, and `replayed` (a repeated key returns the comment it first made) |
 | `task_intake` | write | `title`, `body`, `project`, optional `lane`, optional `idempotency_key` | The triage task, `created`, and duplicate candidates found before filing; a repeated key returns the task that key first filed |
-| `task_update` | write | `id`, `expected_updated_at`, `idempotency_key`, one or more of `state`, `lane`, `priority`, `add_labels`, `remove_labels` (label names), optional `note` | `changed`, the new `revision`, `replayed`, `console_url` and `youtrack_sync`; a stale revision returns `revision_conflict` and writes nothing |
+| `task_update` | write | `id`, `expected_updated_at`, `idempotency_key`, one or more of `state`, `lane`, `priority`, optional `note` | `changed`, the new `revision`, `replayed`, `console_url` and `youtrack_sync`; a stale revision returns `revision_conflict` and writes nothing |
 | `decision_ask` | write | `task_id`, `idempotency_key`, `question`, `options`, `default_action`, optional `answer_policy`, `human_only`, `block` and the other `tasks decision-request` fields | The recorded request id and whether it was a duplicate |
 | `projects_list` | read | none | Every project with `design_lane`/`effective_owner`, status and dates, open task counts by state, and `health` (in_progress, waiting, blocked, done, overdue counts; assignees; top blocked and overdue tasks) with `as_of` |
 | `task_states` | read | none | The twelve states with category, terminal and claimable flags, allowed manual transitions and closure requirements |
@@ -195,7 +195,7 @@ data field in that response (hk:doc
 
 | Field(s) | Source |
 | --- | --- |
-| `id`, `title`, `body`, `body_doc`, `state`, `priority`, `kind`, `lane`, `project`, `area`, `labels`, `claimed_by`, `created_by`, `refs`, `created_at`, `updated_at`, `started_at`, `completed_at`, `canceled_at`, `closed_at`, `parent`, `children`, `relations`, `blockers`, `project_owner`, `comments_preview`, `events_preview`, `console_url`, `attachments`, `external_links` | `hk` (the hk Postgres work record) |
+| `id`, `title`, `body`, `body_doc`, `state`, `priority`, `kind`, `lane`, `project`, `area`, `claimed_by`, `created_by`, `refs`, `created_at`, `updated_at`, `started_at`, `completed_at`, `canceled_at`, `closed_at`, `parent`, `children`, `relations`, `blockers`, `project_owner`, `comments_preview`, `events_preview`, `console_url`, `attachments`, `external_links` | `hk` (the hk Postgres work record) |
 | `comments_by_agents` (agent comments) | `hk` |
 | `operator_comments` | `youtrack` |
 | `translations`, `korean_display_text`, `youtrack` (the mirror) | `youtrack` |

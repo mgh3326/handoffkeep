@@ -31,10 +31,6 @@
   </article>
   {{else}}<p class="muted">No relay events.</p>{{end}}
   {{if .MoreURL}}<p><a href="{{.MoreURL}}">더보기</a></p>{{end}}
-  <section>
-    <h2>Latest session checkpoints</h2>
-    {{range .Checkpoints}}<article class="session"><strong>{{.Session}}</strong> · {{.Title}} · <time>{{formatTime .CreatedAt}}</time></article>{{else}}<p class="muted">No checkpoints.</p>{{end}}
-  </section>
 </section>
 {{end}}
 
