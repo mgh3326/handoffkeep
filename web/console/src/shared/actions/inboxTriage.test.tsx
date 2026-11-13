@@ -132,6 +132,18 @@ it("x selects a row, Shift+x selects the range, and the bar lists the actions", 
   expect(within(bar).getByText("3개 선택")).toBeTruthy();
 });
 
+it("the bulk priority dialog takes a typed value", async () => {
+  render(<Fixture rows={[taskRow("task:1")]} />);
+  fireEvent.keyDown(focusRow("task:1"), { key: "x" });
+  fireEvent.click(within(screen.getByRole("region", { name: "선택 항목 작업" })).getByRole("button", { name: "우선순위" }));
+  const dialog = screen.getByRole("dialog", { name: "우선순위 선택" });
+  fireEvent.change(within(dialog).getByRole("spinbutton", { name: "직접 입력" }), { target: { value: "50" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "적용" }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+  expect(String(fetcher.mock.calls[0][0])).toBe("/ui/api/tasks/1/priority");
+  expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body)).priority).toBe(50);
+});
+
 it("caps a bulk write at 50 and says how many were left", async () => {
   const rows = Array.from({ length: 51 }, (_, index) => row(`task:${index + 1}`));
   render(<Fixture rows={rows} />);
