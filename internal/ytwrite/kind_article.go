@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -153,6 +154,12 @@ type ArticleRequest struct {
 	LegacyArticleID string
 	LegacyProjectID string
 	LegacyMarker    string
+	// ParentFamily is the document key's first segment: the article goes
+	// under its family's root article, which is created when missing.
+	// ParentArticleID is the article of the policy document an amending
+	// decision names: the article goes under it instead. Set at most one.
+	ParentFamily    string
+	ParentArticleID string
 	// RetryOf is the document's create op this one replaces (0 for the
 	// first create): see ArticleRetryKey. RetryKey is that op's key; empty
 	// means the first create's (ArticleKey), and a retry of a retry
@@ -175,6 +182,9 @@ type ArticleCreatePayload struct {
 	LegacyArticleID string `json:"legacy_article_id,omitempty"`
 	LegacyProjectID string `json:"legacy_project_id,omitempty"`
 	LegacyMarker    string `json:"legacy_marker,omitempty"`
+	// ParentFamily and ParentArticleID are ArticleRequest's.
+	ParentFamily    string `json:"parent_family,omitempty"`
+	ParentArticleID string `json:"parent_article_id,omitempty"`
 }
 
 // CheckArticle explains why an article request cannot be sent. A store that
@@ -198,6 +208,15 @@ func CheckArticle(req ArticleRequest) error {
 	if req.Tenant == "" {
 		return fmt.Errorf("%w: tenant is empty", ErrInvalid)
 	}
+	if req.ParentFamily != "" && !familyRE.MatchString(req.ParentFamily) {
+		return fmt.Errorf("%w: parent family %q is malformed", ErrInvalid, req.ParentFamily)
+	}
+	if req.ParentArticleID != "" && !issueIDRE.MatchString(req.ParentArticleID) {
+		return fmt.Errorf("%w: parent article id is malformed", ErrInvalid)
+	}
+	if req.ParentFamily != "" && req.ParentArticleID != "" {
+		return fmt.Errorf("%w: an article has one parent: a family or an article, not both", ErrInvalid)
+	}
 	return checkArticleText(req.Summary, req.Body)
 }
 
@@ -208,7 +227,8 @@ func ArticleOp(req ArticleRequest) (NewOp, error) {
 		return NewOp{}, fmt.Errorf("%w: document id must be positive", ErrInvalid)
 	}
 	payload, err := json.Marshal(ArticleCreatePayload{DocumentID: req.DocumentID, Summary: req.Summary, Body: req.Body, YTProjectShort: req.YTProjectShort,
-		LegacyArticleID: req.LegacyArticleID, LegacyProjectID: req.LegacyProjectID, LegacyMarker: req.LegacyMarker})
+		LegacyArticleID: req.LegacyArticleID, LegacyProjectID: req.LegacyProjectID, LegacyMarker: req.LegacyMarker,
+		ParentFamily: req.ParentFamily, ParentArticleID: req.ParentArticleID})
 	if err != nil {
 		return NewOp{}, err
 	}
@@ -307,25 +327,29 @@ type RemoteArticle struct {
 	ProjectID string
 	Summary   string
 	Content   string
-	// Child is set on an article with a parent (a split document's part).
-	Child bool
+	// ParentID is the article's parent, "" for a top-level article (a
+	// split document's part is a child of its index article).
+	ParentID string
 }
 
 // ArticleCreate is one article create: the project and the text.
 type ArticleCreate struct {
 	ProjectID string
-	Summary   string
-	Content   string
+	// ParentID, when set, makes the article a child of that article.
+	ParentID string
+	Summary  string
+	Content  string
 }
 
 // ArticleRemote is the YouTrack surface of the document kinds. A Remote that
 // does not implement it cannot send them.
 type ArticleRemote interface {
-	// FindArticles returns every top-level article of the project (short
-	// name and id) whose summary is exactly summary, with its content, or
-	// an error. A result it cannot prove complete is an error; a 429 is a
+	// FindArticles returns the articles of the project (short name and id)
+	// whose summary is exactly summary, with their content, or an error.
+	// parentID "" keeps the top-level articles; otherwise only the children
+	// of parentID. A result it cannot prove complete is an error; a 429 is a
 	// *RemoteError with the server's RetryAfter.
-	FindArticles(ctx context.Context, projectShort, projectID, summary string) ([]RemoteArticle, error)
+	FindArticles(ctx context.Context, projectShort, projectID, summary, parentID string) ([]RemoteArticle, error)
 	// CreateArticle makes exactly one POST and returns the new article's
 	// id. Its errors follow CreateComment's.
 	CreateArticle(ctx context.Context, in ArticleCreate) (id string, err error)
@@ -410,16 +434,85 @@ func markedArticles(hits []RemoteArticle, opID int64) []RemoteArticle {
 	return out
 }
 
-// Send looks for the document's article and writes only when there is none.
-// A document the legacy sync wrote (LegacyArticleID) is never created: its
-// article is read and adopted (no POST) when it is that article, in the
-// legacy project (LegacyProjectID), carrying the document's legacy marker; it
-// may be a child (the legacy sync put every document under its prefix's index
-// article). Otherwise the op is rejected legacy_synced_unverified (a 404
-// included; another failed read is not_sent). Else exactly one article of the project with the op's
-// summary that carries the op's marker is adopted (no POST); two or more are
-// ambiguous_issue (no POST); none is exactly one create with the summary and
-// the content.
+// familyRE is a family name, the first segment of a document key. It becomes
+// the family root's summary and sits in the root's marker, so it stays plain.
+var familyRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+
+// ValidFamily reports whether family can name a family root (a document
+// key's first segment, see FamilyRootMarker).
+func ValidFamily(family string) bool { return familyRE.MatchString(family) }
+
+// FamilyRootMarker is the marker a family root article carries. The root is
+// the parent of every document of its family.
+func FamilyRootMarker(family string) string {
+	return "<!-- hk-family:" + family + " -->"
+}
+
+// articleParent is the article a document's article goes under: the amended
+// policy article when the payload names one, else the family root, else ""
+// for a payload that names neither. create makes a missing family root; with
+// create false a missing root is found false, so Evidence never writes.
+func articleParent(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreatePayload, create bool) (parent string, found bool, err error) {
+	if p.ParentArticleID != "" {
+		return p.ParentArticleID, true, nil
+	}
+	if p.ParentFamily == "" {
+		return "", true, nil
+	}
+	marker := FamilyRootMarker(p.ParentFamily)
+	hits, err := ar.FindArticles(ctx, p.YTProjectShort, op.YTTargetID, p.ParentFamily, "")
+	if err != nil {
+		return "", false, err
+	}
+	var roots []RemoteArticle
+	for _, h := range hits {
+		if strings.Contains(h.Content, marker) {
+			roots = append(roots, h)
+		}
+	}
+	switch {
+	case len(roots) == 1:
+		return roots[0].ID, true, nil
+	case len(roots) > 1:
+		ids := make([]string, 0, len(roots))
+		for _, h := range roots {
+			ids = append(ids, h.ID)
+		}
+		return "", false, &RefusedError{Reason: ReasonAmbiguousIssue, Detail: fmt.Sprintf("project %s has %d %q family roots carrying %s: %s", op.YTTargetID, len(roots), p.ParentFamily, marker, strings.Join(ids, ","))}
+	case !create:
+		return "", false, nil
+	}
+	id, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, Summary: p.ParentFamily, Content: "Family root for " + p.ParentFamily + " documents.\n\n" + marker})
+	if err != nil {
+		return "", false, err
+	}
+	if id == "" {
+		return "", false, errors.New("family root create returned no id")
+	}
+	return id, true, nil
+}
+
+// readFailure is Evidence's error: a 429 keeps its RetryAfter for the shared rule.
+func readFailure(ev Evidence, err error) (Evidence, error) {
+	var re *RemoteError
+	if errors.As(err, &re) && re.Status == http.StatusTooManyRequests {
+		ev.RetryAfter = re.RetryAfter
+	}
+	return ev, err
+}
+
+// Send looks for the document's article under its parent and writes only
+// when there is none. A document the legacy sync wrote (LegacyArticleID) is
+// never created: its article is read and adopted (no POST) when it is that
+// article, in the legacy project (LegacyProjectID), carrying the document's
+// legacy marker; it may be a child (the legacy sync put every document under
+// its prefix's index article). Otherwise the op is rejected
+// legacy_synced_unverified (a 404 included; another failed read is
+// not_sent). Else the parent is the amended policy article or the family
+// root (articleParent; a missing root is created), and exactly one article
+// under it with the op's summary that carries the op's marker is adopted (no
+// POST); two or more are ambiguous_issue (no POST); none is exactly one
+// create under the parent with the summary and the content.
 func (articleCreate) Send(ctx context.Context, remote Remote, op Op, text string) (string, error) {
 	ar, ok := remote.(ArticleRemote)
 	if !ok {
@@ -432,7 +525,15 @@ func (articleCreate) Send(ctx context.Context, remote Remote, op Op, text string
 	if p.LegacyArticleID != "" {
 		return "", legacyArticle(ctx, ar, op, p)
 	}
-	hits, err := ar.FindArticles(ctx, p.YTProjectShort, op.YTTargetID, p.Summary)
+	parent, _, err := articleParent(ctx, ar, op, p, true)
+	if err != nil {
+		var re *RefusedError
+		if errors.As(err, &re) {
+			return "", re
+		}
+		return "", &NotSentError{Err: err}
+	}
+	hits, err := ar.FindArticles(ctx, p.YTProjectShort, op.YTTargetID, p.Summary, parent)
 	if err != nil {
 		return "", &NotSentError{Err: err}
 	}
@@ -446,7 +547,7 @@ func (articleCreate) Send(ctx context.Context, remote Remote, op Op, text string
 		}
 		return "", &RefusedError{Reason: ReasonAmbiguousIssue, Detail: fmt.Sprintf("project %s has %d articles carrying op %d's marker: %s", op.YTTargetID, len(marked), op.ID, strings.Join(ids, ","))}
 	}
-	return ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, Summary: p.Summary, Content: text})
+	return ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, ParentID: parent, Summary: p.Summary, Content: text})
 }
 
 // legacyArticle is Send for a document the legacy sync wrote: an
@@ -482,13 +583,16 @@ func (articleCreate) Evidence(ctx context.Context, remote Remote, op Op, text st
 	if err != nil {
 		return ev, err
 	}
-	hits, err := ar.FindArticles(ctx, p.YTProjectShort, op.YTTargetID, p.Summary)
+	parent, found, err := articleParent(ctx, ar, op, p, false)
 	if err != nil {
-		var re *RemoteError
-		if errors.As(err, &re) && re.Status == http.StatusTooManyRequests {
-			ev.RetryAfter = re.RetryAfter
-		}
-		return ev, err
+		return readFailure(ev, err)
+	}
+	if !found {
+		return ev, nil
+	}
+	hits, err := ar.FindArticles(ctx, p.YTProjectShort, op.YTTargetID, p.Summary, parent)
+	if err != nil {
+		return readFailure(ev, err)
 	}
 	for _, h := range markedArticles(hits, op.ID) {
 		if h.Content == text {

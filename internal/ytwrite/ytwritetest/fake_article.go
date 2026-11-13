@@ -25,13 +25,17 @@ func (f *FakeYouTrack) InjectArticle(projectID, summary, content string) string 
 	return f.addArticleLocked(projectID, summary, content)
 }
 
+// legacyIndexID is the parent of the children InjectChildArticle adds: the
+// legacy sync's per-prefix index article. The fake never issues "3-0".
+const legacyIndexID = "3-0"
+
 // InjectChildArticle adds a child article (one under a parent, as the legacy
 // sync put every document under its prefix's index) and returns its id.
 func (f *FakeYouTrack) InjectChildArticle(projectID, summary, content string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	id := f.addArticleLocked(projectID, summary, content)
-	f.articleLocked(id).Child = true
+	f.articleLocked(id).ParentID = legacyIndexID
 	return id
 }
 
@@ -82,9 +86,10 @@ func (f *FakeYouTrack) ArticleWrites() []FakeArticleWrite {
 	return append([]FakeArticleWrite(nil), f.articleWrites...)
 }
 
-// FindArticles returns every top-level article of the project with exactly
-// summary, failing as QueueFind says. The short name is not checked.
-func (f *FakeYouTrack) FindArticles(ctx context.Context, _, projectID, summary string) ([]ytwrite.RemoteArticle, error) {
+// FindArticles returns every article of the project with exactly summary
+// whose parent is parentID ("" for top-level), failing as QueueFind says.
+// The short name is not checked.
+func (f *FakeYouTrack) FindArticles(ctx context.Context, _, projectID, summary, parentID string) ([]ytwrite.RemoteArticle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.finds++
@@ -98,7 +103,7 @@ func (f *FakeYouTrack) FindArticles(ctx context.Context, _, projectID, summary s
 	}
 	out := []ytwrite.RemoteArticle{}
 	for _, a := range f.articles {
-		if a.ProjectID == projectID && !a.Child && a.Summary == summary {
+		if a.ProjectID == projectID && a.ParentID == parentID && a.Summary == summary {
 			out = append(out, *a)
 		}
 	}
@@ -114,7 +119,11 @@ func (f *FakeYouTrack) CreateArticle(ctx context.Context, in ytwrite.ArticleCrea
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	return f.createLocked(func() string { return f.addArticleLocked(in.ProjectID, in.Summary, in.Content) })
+	return f.createLocked(func() string {
+		id := f.addArticleLocked(in.ProjectID, in.Summary, in.Content)
+		f.articleLocked(id).ParentID = in.ParentID
+		return id
+	})
 }
 
 // UpdateArticle rewrites the article's summary and content, failing as the

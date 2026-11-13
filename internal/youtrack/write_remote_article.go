@@ -32,9 +32,10 @@ func articleSummaryQuery(short, summary string) string {
 }
 
 // FindArticles searches the project's articles for summary in one request
-// (article_create, hk 4206), keeps the top-level articles of projectID whose
-// summary is exactly summary, and reads each one's content with one GET.
-func (r *WriteRemote) FindArticles(ctx context.Context, projectShort, projectID, summary string) ([]ytwrite.RemoteArticle, error) {
+// (article_create, hk 4206), keeps the articles of projectID whose summary is
+// exactly summary and whose parent is parentID ("" for a top-level article),
+// and reads each one's content with one GET.
+func (r *WriteRemote) FindArticles(ctx context.Context, projectShort, projectID, summary, parentID string) ([]ytwrite.RemoteArticle, error) {
 	q := url.Values{}
 	q.Set("query", articleSummaryQuery(projectShort, summary))
 	q.Set("fields", articleSearchFields)
@@ -55,7 +56,7 @@ func (r *WriteRemote) FindArticles(ctx context.Context, projectShort, projectID,
 	}
 	out := []ytwrite.RemoteArticle{}
 	for _, a := range page {
-		if a.ID == "" || a.HasParent() || a.Project == nil || a.Project.ID != projectID || a.Summary != summary {
+		if a.ID == "" || parentOf(a) != parentID || a.Project == nil || a.Project.ID != projectID || a.Summary != summary {
 			continue
 		}
 		full, err := r.ReadArticle(ctx, a.ID)
@@ -67,14 +68,18 @@ func (r *WriteRemote) FindArticles(ctx context.Context, projectShort, projectID,
 	return out, nil
 }
 
-// CreateArticle makes one POST /api/articles with the project, the summary
-// and the content.
+// CreateArticle makes one POST /api/articles with the project, the summary,
+// the content and, when set, the parent article.
 func (r *WriteRemote) CreateArticle(ctx context.Context, in ytwrite.ArticleCreate) (string, error) {
 	body := struct {
-		Summary string `json:"summary"`
-		Content string `json:"content"`
-		Project idRef  `json:"project"`
+		Summary       string `json:"summary"`
+		Content       string `json:"content"`
+		Project       idRef  `json:"project"`
+		ParentArticle *idRef `json:"parentArticle,omitempty"`
 	}{Summary: in.Summary, Content: in.Content, Project: idRef{ID: in.ProjectID}}
+	if in.ParentID != "" {
+		body.ParentArticle = &idRef{ID: in.ParentID}
+	}
 	return r.articleWrite(ctx, "/api/articles", body)
 }
 
@@ -124,9 +129,17 @@ func (r *WriteRemote) ReadArticle(ctx context.Context, articleID string) (ytwrit
 	if err := json.Unmarshal(data, &a); err != nil {
 		return ytwrite.RemoteArticle{}, fmt.Errorf("youtrack GET article %s: decode: %w", articleID, err)
 	}
-	out := ytwrite.RemoteArticle{ID: a.ID, Summary: a.Summary, Content: a.Content, Child: a.HasParent()}
+	out := ytwrite.RemoteArticle{ID: a.ID, Summary: a.Summary, Content: a.Content, ParentID: parentOf(a)}
 	if a.Project != nil {
 		out.ProjectID = a.Project.ID
 	}
 	return out, nil
+}
+
+// parentOf is the article's parent id, "" for a top-level article.
+func parentOf(a Article) string {
+	if a.HasParent() {
+		return a.ParentArticle.ID
+	}
+	return ""
 }
