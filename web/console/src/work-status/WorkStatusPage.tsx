@@ -8,6 +8,23 @@ import { formatMinuteUTC } from "../shared/time";
 import { stateLabel } from "../shared/states";
 import "./workStatus.css";
 
+// A job is running only while its state is claimed or spawned; the others are finished.
+function jobStateChip(state: string | null | undefined): { label: string; live: boolean } | null {
+  switch (state) {
+    case "claimed":
+    case "spawned":
+      return { label: "실행 중", live: true };
+    case "completed":
+      return { label: "완료", live: false };
+    case "escalated":
+      return { label: "에스컬레이션", live: false };
+    case "lost":
+      return { label: "유실", live: false };
+    default:
+      return null;
+  }
+}
+
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${Math.max(0, Math.floor(seconds))}초`;
   const minutes = Math.floor(seconds / 60);
@@ -96,8 +113,12 @@ export function WorkStatusPage() {
           <span className="ws-card-value">{data.summary.waiting_deploy}</span>
         </div>
         <div className="ws-card">
-          <span className="ws-card-label">머지됨 (배포 기록 없음)</span>
-          <span className="ws-card-value">{data.summary.merged_no_deploy_record}</span>
+          <span className="ws-card-label">머지됨 (프로젝트 배포 기록 없음)</span>
+          <span className="ws-card-value">{data.summary.merged_no_deploy_project}</span>
+        </div>
+        <div className="ws-card">
+          <span className="ws-card-label">머지됨 (마지막 배포 이전)</span>
+          <span className="ws-card-value">{data.summary.merged_before_deploy}</span>
         </div>
         <div className="ws-card">
           <span className="ws-card-label">번들 (작업 제외)</span>
@@ -153,7 +174,8 @@ export function WorkStatusPage() {
                 <th className="ws-num">진행 중</th>
                 <th className="ws-num">검토 중</th>
                 <th className="ws-num">배포 대기</th>
-                <th className="ws-num">머지됨 (기록 없음)</th>
+                <th className="ws-num">기록 없음</th>
+                <th className="ws-num">배포 이전</th>
                 <th className="ws-num ws-total-col">전체 열린 작업</th>
                 <th className="ws-num">번들</th>
               </tr>
@@ -172,7 +194,8 @@ export function WorkStatusPage() {
                   <td className="ws-num">{p.counts.in_work}</td>
                   <td className="ws-num">{p.counts.in_review}</td>
                   <td className="ws-num">{p.counts.waiting_deploy}</td>
-                  <td className="ws-num">{p.counts.merged_no_deploy_record}</td>
+                  <td className="ws-num">{p.counts.merged_no_deploy_project}</td>
+                  <td className="ws-num">{p.counts.merged_before_deploy}</td>
                   <td className="ws-num ws-total-col">{p.counts.total_open}</td>
                   <td className="ws-num">{p.counts.bundle_parents}</td>
                 </tr>
@@ -185,7 +208,8 @@ export function WorkStatusPage() {
                 <td className="ws-num">{data.summary.in_work}</td>
                 <td className="ws-num">{data.summary.in_review}</td>
                 <td className="ws-num">{data.summary.waiting_deploy}</td>
-                <td className="ws-num">{data.summary.merged_no_deploy_record}</td>
+                <td className="ws-num">{data.summary.merged_no_deploy_project}</td>
+                <td className="ws-num">{data.summary.merged_before_deploy}</td>
                 <td className="ws-num ws-total-col">{data.summary.total_open}</td>
                 <td className="ws-num">{data.summary.bundle_parents}</td>
               </tr>
@@ -217,8 +241,13 @@ export function WorkStatusPage() {
                   <Chip kind="status" state={task.state} label={stateLabel(task.state)} />
                   {task.project ? <Chip kind="lane" lane={task.project} /> : null}
                   {task.host || task.job_id ? (
-                    <span className="hk-chip" title={task.job_id || task.host || undefined}>
-                      {[task.host, task.job_id].filter(Boolean).join(" · ")}
+                    <span
+                      className={jobStateChip(task.job_state)?.live ? "hk-chip ws-job ws-job--live" : "hk-chip ws-job"}
+                      title={task.job_id || task.host || undefined}
+                    >
+                      {[task.host, task.job_id, jobStateChip(task.job_state)?.label]
+                        .filter(Boolean)
+                        .join(" · ")}
                     </span>
                   ) : null}
                   {task.pr ? (
