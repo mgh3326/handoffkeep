@@ -63,8 +63,9 @@ type Config struct {
 	MaxRetryAfter time.Duration
 	// AuthWait is the wait after a 401, which needs a repaired token (5m).
 	AuthWait time.Duration
-	// ReconcileBase and ReconcileMax bound the doubling wait between evidence
-	// searches for one remote_unknown op (5s, 5m).
+	// ReconcileBase and ReconcileMax bound the initial doubling wait between
+	// evidence searches for one remote_unknown op (5s, 5m). After 50 searches,
+	// the protocol retries hourly, then daily after 24 hourly searches.
 	ReconcileBase time.Duration
 	ReconcileMax  time.Duration
 	// BlockedWait is the retry hint for an op queued behind an earlier one (5s).
@@ -465,8 +466,14 @@ func (p *Protocol) markUnknown(ctx context.Context, op Op, reason, detail string
 	return settled{got, err}
 }
 
-// reconcileDelay is the wait before the n-th evidence search of an op.
+// reconcileDelay is the wait after the n-th evidence search of an op.
 func (p *Protocol) reconcileDelay(n int) time.Duration {
+	if n >= 74 {
+		return 24 * time.Hour
+	}
+	if n >= 50 {
+		return time.Hour
+	}
 	d := p.ReconcileBase
 	for i := 0; i < n && d < p.ReconcileMax; i++ {
 		d *= 2
@@ -564,6 +571,9 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	touch := func(reason, detail string) (bool, error) {
 		now := p.now()
 		delay := max(p.reconcileDelay(op.Reconciles+1), min(wait, p.MaxRetryAfter))
+		if op.Reconciles >= 49 {
+			log.Printf("ytwrite.reconcile_warning op_id=%d reconciles=%d next_after=%q reason=%q", op.ID, op.Reconciles+1, delay, reason)
+		}
 		got, terr := p.Ledger.TouchUnknown(ctx, now, op.ID, now.Add(delay), reason, detail)
 		if terr == nil {
 			logTransition(got)

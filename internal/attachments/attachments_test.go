@@ -26,6 +26,12 @@ type fakeObjects struct {
 	beforePut func(key string)
 }
 
+func TestDefaultMaxBytesMatchesOCIPutObjectSingleObjectLimit(t *testing.T) {
+	if DefaultMaxBytes != 50<<30 {
+		t.Fatalf("DefaultMaxBytes=%d, want 50 GiB", DefaultMaxBytes)
+	}
+}
+
 func (f *fakeObjects) Stat(_ context.Context, k string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -25,11 +25,9 @@ import (
 
 const csrfCookie = "hk_ui_csrf"
 
-// decisionBatchParseLimit bounds how many submitted items one request parses.
-// decisionBatchProcessLimit bounds how many of them one request acts on.
-// Both truncate rather than reject so every submission makes progress.
-const decisionBatchParseLimit = 1000
-const decisionBatchProcessLimit = 50
+// FormRequestMaxBytes is net/http's urlencoded-form memory budget, applied
+// explicitly before ParseForm so each route has one visible body bound.
+const formRequestMaxBytes = 10 << 20
 
 var docKeyRE = regexp.MustCompile(`^[A-Za-z0-9._\-/]{1,512}$`)
 
@@ -284,10 +282,6 @@ func (h *Handler) answerDecision(w http.ResponseWriter, r *http.Request, email s
 	if note != "" {
 		text += " — " + note
 	}
-	if len([]byte(text)) > store.RelayLaneEventMaxBytes {
-		h.decisionResult(w, r, email, "Decision response is too long.", http.StatusBadRequest)
-		return
-	}
 	duplicate, emitErr := h.hub.emitLaneEvent(r.Context(), lane, eventID, text)
 	if emitErr != nil {
 		outcome.result = "hub_error"
@@ -356,9 +350,7 @@ type batchSendOutcome struct {
 	Result  string
 }
 
-// parseDecisionBatchItems returns the parsed items and the number of items the
-// submission actually carried.  The two differ when a submission exceeds
-// decisionBatchParseLimit and the tail is truncated.
+// parseDecisionBatchItems returns every parsed item and the count carried.
 func parseDecisionBatchItems(values url.Values) ([]decisionBatchItem, int, error) {
 	byIndex := map[int]*decisionBatchItem{}
 	for key, fieldValues := range values {
@@ -401,15 +393,7 @@ func parseDecisionBatchItems(values url.Values) ([]decisionBatchItem, int, error
 		indexes = append(indexes, index)
 	}
 	sort.Ints(indexes)
-	// The console renders every open decision inside one form, so a submission
-	// can carry more items than a single request should parse.  Truncating in
-	// ascending index order keeps the page usable: the operator answers the
-	// cards at the front and resubmits for the rest.  Rejecting instead locks
-	// the console shut exactly when the decision backlog is largest.
 	submitted := len(indexes)
-	if len(indexes) > decisionBatchParseLimit {
-		indexes = indexes[:decisionBatchParseLimit]
-	}
 	items := make([]decisionBatchItem, 0, len(indexes))
 	for _, index := range indexes {
 		item := *byIndex[index]
@@ -422,6 +406,7 @@ func parseDecisionBatchItems(values url.Values) ([]decisionBatchItem, int, error
 }
 
 func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, email string) {
+	r.Body = http.MaxBytesReader(w, r.Body, formRequestMaxBytes)
 	if !sameOrigin(r) {
 		h.audit(email, "decision-batch", "-", "-", "origin_reject")
 		http.Error(w, "origin rejected", http.StatusForbidden)
@@ -442,7 +427,7 @@ func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, em
 		http.Error(w, "Hub is not configured.", http.StatusBadRequest)
 		return
 	}
-	items, submitted, err := parseDecisionBatchItems(r.Form)
+	items, _, err := parseDecisionBatchItems(r.Form)
 	if err != nil {
 		h.audit(email, "decision-batch", "-", "-", "invalid")
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -456,13 +441,7 @@ func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, em
 		http.Error(w, "invalid decision selection", http.StatusBadRequest)
 		return
 	}
-	// A truncated submission is reported, never rejected: the operator must be
-	// able to see what this request covered and resubmit for the remainder.
 	notices := []string{}
-	truncated := submitted - len(items)
-	if truncated > 0 {
-		notices = append(notices, fmt.Sprintf("절단됨 %d/%d — 이번 제출은 앞 %d건만 대상입니다. 다시 제출하면 이어서 처리됩니다.", len(items), submitted, len(items)))
-	}
 	chosen := []decisionBatchItem{}
 	if len(only) == 1 {
 		index, parseErr := strconv.Atoi(only[0])
@@ -478,13 +457,6 @@ func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, em
 			}
 		}
 		if len(chosen) == 0 {
-			// Outside a truncated request's range is not an invalid selection:
-			// the card exists, this submission simply did not reach it.
-			if truncated > 0 {
-				h.audit(email, "decision-batch", "-", "-", "truncated")
-				h.renderDecisionBatch(w, r, email, strings.Join(append(notices, "선택한 항목은 이번 제출의 처리 범위 밖이라 처리되지 않았습니다."), " "), nil)
-				return
-			}
 			h.audit(email, "decision-batch", "-", "-", "invalid")
 			http.Error(w, "invalid decision selection", http.StatusBadRequest)
 			return
@@ -498,12 +470,6 @@ func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, em
 			}
 		}
 	}
-	remaining := 0
-	if len(chosen) > decisionBatchProcessLimit {
-		remaining = len(chosen) - decisionBatchProcessLimit
-		chosen = chosen[:decisionBatchProcessLimit]
-	}
-
 	results := []decisionBatchResult{}
 	for _, item := range chosen {
 		outcome, processed := h.sendBatchDecision(r, email, item, mode == "recommended")
@@ -512,9 +478,6 @@ func (h *Handler) answerDecisionBatch(w http.ResponseWriter, r *http.Request, em
 		}
 		results = append(results, outcome.decisionBatchResult)
 		h.audit(email, "decision-batch", outcome.Target, outcome.EventID, outcome.Result)
-	}
-	if remaining > 0 {
-		notices = append(notices, fmt.Sprintf("%d건이 남았습니다. 다시 제출하면 이어서 처리됩니다.", remaining))
 	}
 	if len(results) == 0 {
 		// Dropping the remainder here would repeat "nothing selected" forever
@@ -678,10 +641,6 @@ func (h *Handler) emitBatchDecision(r *http.Request, email string, item decision
 	if item.Note != "" {
 		text += " — " + item.Note
 	}
-	if len([]byte(text)) > store.RelayLaneEventMaxBytes {
-		outcome.Status, outcome.Message, outcome.Result = http.StatusBadRequest, "Decision response is too long.", "invalid"
-		return outcome, true
-	}
 	duplicate, err := h.hub.emitLaneEvent(r.Context(), target.Lane, eventID, text)
 	if err != nil {
 		outcome.Status, outcome.Message, outcome.Result = http.StatusBadGateway, "레인 전송 실패: "+hubReason(err), "hub_error"
@@ -751,6 +710,7 @@ func (h *Handler) compose(w http.ResponseWriter, r *http.Request, fragment bool,
 }
 
 func (h *Handler) composePost(w http.ResponseWriter, r *http.Request, email string) {
+	r.Body = http.MaxBytesReader(w, r.Body, formRequestMaxBytes)
 	outcome := writeOutcome{action: "compose", target: "-", eventID: "-", result: "invalid"}
 	defer func() { h.audit(email, outcome.action, outcome.target, outcome.eventID, outcome.result) }()
 	if !sameOrigin(r) {
@@ -779,10 +739,6 @@ func (h *Handler) composePost(w http.ResponseWriter, r *http.Request, email stri
 	}
 	outcome.target = lane + "#-"
 	text := "[event] " + textInput + " (from operator(web) " + email + ")"
-	if len([]byte(text)) > store.RelayLaneEventMaxBytes {
-		h.composeResult(w, r, email, "Message is too long (maximum final size is 2048 bytes).", http.StatusBadRequest)
-		return
-	}
 	eventID, err := randomEventID("web-msg-")
 	if err != nil {
 		h.composeResult(w, r, email, "Unable to create event ID.", http.StatusInternalServerError)

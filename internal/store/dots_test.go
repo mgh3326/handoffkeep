@@ -71,12 +71,10 @@ func TestDotsFormatsMatchPoller(t *testing.T) {
 	}
 }
 
-// The poller would fail on these; the outbox row must stay drainable instead.
-func TestDotsLaneTextIsDrainable(t *testing.T) {
-	text := dotsLaneText("a\tb\x7fc\u0085d" + strings.Repeat("가", RelayLaneEventMaxBytes))
-	if len(text) > RelayLaneEventMaxBytes {
-		t.Fatalf("len=%d", len(text))
-	}
+// Controls are sanitized, but the full lane-event text remains in the outbox.
+func TestDotsLaneTextKeepsLongTextAndRemovesControls(t *testing.T) {
+	long := strings.Repeat("가", 4096)
+	text := dotsLaneText("a\tb\x7fc\u0085d" + long)
 	for _, r := range text {
 		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
 			t.Fatalf("control character %q in %q", r, text[:16])
@@ -84,6 +82,9 @@ func TestDotsLaneTextIsDrainable(t *testing.T) {
 	}
 	if !strings.HasPrefix(text, "a b c d") {
 		t.Fatalf("prefix %q", text[:16])
+	}
+	if !strings.HasSuffix(text, long) {
+		t.Fatal("long event text was truncated")
 	}
 }
 

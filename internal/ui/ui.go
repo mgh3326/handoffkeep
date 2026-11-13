@@ -547,21 +547,19 @@ func eventFormData(kind string, event store.RelayEvent, csrf string, canWrite bo
 
 // decisionData caps how many answerable cards the page renders. Every card
 // contributes several successful controls to one page-wide form, and the form
-// parser rejects a request outright past its parameter limit -- which locked
-// the console at 2500 cards, before any of our own limits were consulted.
-// Rendering no more cards than one request can parse keeps that unreachable.
-// Signals are not answerable and carry no form fields, so they are neither
-// capped nor counted in the notice.
+// The decision inbox renders every open item, and the form parser accepts the
+// complete submission within formRequestMaxBytes.
 func (h *Handler) decisionData(r *http.Request, csrf, email, notice string) (decisionData, error) {
-	tasks, err := h.store.ListOpenTaskDecisions(r.Context(), 1000)
+	all := int(^uint(0) >> 1)
+	tasks, err := h.store.ListOpenTaskDecisions(r.Context(), all)
 	if err != nil {
 		return decisionData{}, err
 	}
-	escalations, err := h.store.ListOpenEscalations(r.Context(), 1000)
+	escalations, err := h.store.ListOpenEscalations(r.Context(), all)
 	if err != nil {
 		return decisionData{}, err
 	}
-	laneEvents, err := h.store.ListOpenLaneDecisions(r.Context(), 1000)
+	laneEvents, err := h.store.ListOpenLaneDecisions(r.Context(), all)
 	if err != nil {
 		return decisionData{}, err
 	}
@@ -577,23 +575,14 @@ func (h *Handler) decisionData(r *http.Request, csrf, email, notice string) (dec
 	if data.Requests, err = h.decisionRequestData(r); err != nil {
 		return decisionData{}, err
 	}
-	// Each list is already capped at 1000 by its query, so this sum is what the
-	// console retrieved, not a claim about how many decisions exist.
 	retrieved := len(tasks) + len(laneEvents)
 	for _, escalation := range escalations {
 		if isDecisionEscalation(escalation) {
 			retrieved++
 		}
 	}
-	// A full source slice may have more rows behind its SQL limit even when the
-	// combined render budget did not discard a retrieved card. Tell the operator
-	// about that boundary without pretending we know the true backlog total.
-	retrievalMayBeTruncated := len(tasks) == decisionBatchParseLimit || len(escalations) == decisionBatchParseLimit || len(laneEvents) == decisionBatchParseLimit
 	index := 0
 	for _, decision := range tasks {
-		if index >= decisionBatchParseLimit {
-			break
-		}
 		view := taskDecisionView{Type: "task", ID: decision.Task.ID, Task: decision.Task, Question: decision.Question, Options: decisionOptions(decision.Question), Structured: decision.Task.Refs.DecisionOptions, Index: index, CanWrite: data.CanWrite}
 		index++
 		if h.directorLanes[decision.Task.Lane] {
@@ -607,29 +596,18 @@ func (h *Handler) decisionData(r *http.Request, csrf, email, notice string) (dec
 			data.Signals = append(data.Signals, escalation)
 			continue
 		}
-		if index >= decisionBatchParseLimit {
-			continue
-		}
 		view := eventDecisionViewFor("escalation", escalation, index)
 		view.CanWrite = data.CanWrite
 		data.Escalations = append(data.Escalations, view)
 		index++
 	}
 	for _, event := range laneEvents {
-		if index >= decisionBatchParseLimit {
-			break
-		}
 		view := eventDecisionViewFor("lane", event, index)
 		view.CanWrite = data.CanWrite
 		data.LaneEvents = append(data.LaneEvents, view)
 		index++
 	}
 	data.Rendered, data.Retrieved = index, retrieved
-	if retrieved > index {
-		data.RenderNotice = fmt.Sprintf("현재 조회된 %d건 중 %d건 표시 — 표시된 항목을 처리하면 나머지가 이어서 표시됩니다.", retrieved, index)
-	} else if retrievalMayBeTruncated {
-		data.RenderNotice = fmt.Sprintf("현재 조회된 %d건 중 %d건 표시 — 각 목록은 최대 %d건까지만 조회되므로 추가 항목이 있을 수 있습니다.", retrieved, index, decisionBatchParseLimit)
-	}
 	return data, nil
 }
 

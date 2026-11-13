@@ -680,9 +680,6 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 			if err != nil {
 				return err
 			}
-			if len([]byte(*note+"\n"+store.FormatDecisionOptions(options))) > store.RelayLaneEventMaxBytes {
-				return errors.New("decision question and options exceed 2048 bytes")
-			}
 			refs.DecisionOptions = &options
 			hasRefs = true
 		}

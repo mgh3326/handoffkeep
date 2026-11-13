@@ -41,6 +41,14 @@ func TestDocumentTitleTruncatesLongHeadings(t *testing.T) {
 	}
 }
 
+func TestBoardDocumentFormatRendersWholeStoredDocument(t *testing.T) {
+	body := "# full document\n" + strings.Repeat("body\n", 60_000)
+	format, reason := boardDocFormat(body)
+	if format != "markdown" || reason != "" {
+		t.Fatalf("format=%q reason=%q for %d-byte markdown document", format, reason, len(body))
+	}
+}
+
 func TestDocsListRejectsInvalidQuery(t *testing.T) {
 	h := &Handler{}
 	for _, target := range []string{

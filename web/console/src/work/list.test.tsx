@@ -77,17 +77,22 @@ it("W5 renders a future state in All", async () => {
   // The row chip and the state select both name the unknown state.
   expect((await screen.findAllByText(/알 수 없는 상태 \(future_state\)/)).length).toBeGreaterThan(0);
 });
-it("W4 reports a still-truncated 5000 row cursor walk", async () => {
-  let page = 0;
+it("W4 walks a task list beyond 5000 rows to the end", async () => {
+  const cursors: number[] = [];
+  const count = 5050;
   vi.stubGlobal("fetch", vi.fn(async (path: string) => {
     if (path.includes("projects")) return response({ projects: ["a"] });
-    const tasks = Array.from({ length: 500 }, (_, i) => ({ ...task, id: page * 500 + i + 1 }));
-    page++;
-    return response({ tasks, states: [], generated_at: "now", truncated: true, next_after_id: page * 500 });
+    const afterID = Number(new URL(path, location.origin).searchParams.get("after_id") ?? 0);
+    cursors.push(afterID);
+    const endID = Math.min(count, afterID + 500);
+    const tasks = Array.from({ length: endID - afterID }, (_, i) => ({ ...task, id: afterID + i + 1 }));
+    return response({ tasks, states: [], generated_at: "now", truncated: endID < count, next_after_id: endID });
   }));
-  history.replaceState(null, "", "/ui/work?project=a&view=needs-me");
+  history.replaceState(null, "", "/ui/work?project=a&view=all");
   render(<WorkPage />);
-  expect(await screen.findByText("5000+ (truncated)")).toBeTruthy();
+  expect(await screen.findByText(`진행 중 · ${count}`)).toBeTruthy();
+  expect(cursors).toContain(5000);
+  expect(Math.max(...cursors)).toBe(5000);
 });
 it("W14 uses the shared poller without overlapping requests", async () => {
   vi.useFakeTimers();

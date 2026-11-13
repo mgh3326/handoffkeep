@@ -143,13 +143,10 @@
 <section id="ui-content" data-ui-fragment="compose">
   <h2>Compose lane event</h2>{{if .Notice}}<p class="badge">{{.Notice}}</p>{{end}}{{if .WriteReason}}<p class="muted">{{.WriteReason}}</p>{{end}}
   <form method="post" action="/ui/compose" hx-post="/ui/compose" hx-target="#ui-content" hx-swap="outerHTML" data-compose data-operator-email="{{.Email}}">
-    <input type="hidden" name="csrf" value="{{.CSRF}}"><fieldset {{if not .CanCompose}}disabled{{end}}><label>Destination <select name="lane">{{range .Lanes}}<option value="{{.}}">{{.}}</option>{{end}}</select></label><label>Message <input name="text" required data-compose-text></label><output data-compose-count></output><button type="submit">Send</button></fieldset>
+    <input type="hidden" name="csrf" value="{{.CSRF}}"><fieldset {{if not .CanCompose}}disabled{{end}}><label>Destination <select name="lane">{{range .Lanes}}<option value="{{.}}">{{.}}</option>{{end}}</select></label><label>Message <input name="text" required></label><button type="submit">Send</button></fieldset>
   </form>
   <p class="muted">Delivered status is shown by Timeline's ✓ marker.</p>
 </section>
-<script>
-  (function () { const form = document.querySelector('[data-compose]'); if (!form || !window.TextEncoder) return; const input = form.querySelector('[data-compose-text]'); const count = form.querySelector('[data-compose-count]'); const update = function () { const bytes = new TextEncoder().encode('[event] ' + input.value + ' (from operator(web) ' + form.dataset.operatorEmail + ')').length; count.textContent = bytes + '/2048 bytes'; input.setCustomValidity(bytes > 2048 ? 'Message is too long.' : ''); }; input.addEventListener('input', update); update(); }());
-</script>
 {{end}}
 
 {{define "fleet_content"}}

@@ -17,6 +17,24 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
+func TestDirectUploadCanDeclareOCIObjectMaximum(t *testing.T) {
+	db := &fakeDB{rows: map[string]store.Attachment{}}
+	m := &Manager{
+		Store:   db,
+		Objects: &fakeObjects{objects: map[string][]byte{}},
+		Enabled: true,
+		Config: Config{
+			MaxBytes: DefaultMaxBytes, StorageCap: 100 << 30, PutCap: 10, GetCap: 10,
+			Allow: map[string]bool{"text/plain": true}, DirectUpload: true,
+			StagingCap: DefaultStagingCap, StagingClientCap: DefaultStagingClientCap,
+		},
+	}
+	ticket, err := m.BeginUpload(t.Context(), "node", "large.txt", "text/plain", DefaultMaxBytes, strings.Repeat("a", 64), "")
+	if err != nil || ticket.UploadID == "" || ticket.Method != "PUT" {
+		t.Fatalf("ticket=%+v err=%v", ticket, err)
+	}
+}
+
 func newUploadManager(t *testing.T) (*Manager, *fakeDB, *fakeObjects) {
 	t.Helper()
 	db := &fakeDB{rows: map[string]store.Attachment{}}

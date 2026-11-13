@@ -24,12 +24,18 @@ import (
 )
 
 const (
-	DefaultMaxBytes         int64 = 50 << 20
-	DefaultStorageCap       int64 = 20_000_000_000
-	DefaultPutCap           int64 = 800000
-	DefaultGetCap           int64 = 8000000
-	DefaultStagingCap       int64 = 1 << 30
-	DefaultStagingClientCap int64 = 256 << 20
+	// OCI Object Storage accepts a single PutObject up to 50 GiB. Direct
+	// uploads use that path; multipart is unnecessary at the service ceiling.
+	DefaultMaxBytes int64 = 50 << 30
+	// DefaultStorageCap is the account storage fuse; its OCI allowance basis
+	// is still to confirm.
+	DefaultStorageCap int64 = 20_000_000_000 // OCI allowance — to confirm
+	DefaultPutCap     int64 = 800000
+	DefaultGetCap     int64 = 8000000
+	// Each staging fuse permits one OCI-maximum object to be in flight; the
+	// account storage fuse remains the independent stored-bytes limit.
+	DefaultStagingCap       int64 = DefaultMaxBytes
+	DefaultStagingClientCap int64 = DefaultMaxBytes
 )
 
 // DefaultMIMEAllow is the MIME allowlist used when HK_ATTACH_MIME_ALLOW is
@@ -127,6 +133,9 @@ func ConfigFromPrefix(prefix string) (Config, bool, error) {
 	var e error
 	if c.MaxBytes, e = envInt("HK_ATTACH_MAX_BYTES", DefaultMaxBytes); e != nil {
 		return c, false, e
+	}
+	if c.MaxBytes > DefaultMaxBytes {
+		return c, false, fmt.Errorf("HK_ATTACH_MAX_BYTES cannot exceed OCI PutObject's 50 GiB limit")
 	}
 	if c.StorageCap, e = envInt("HK_ATTACH_STORAGE_CAP_BYTES", DefaultStorageCap); e != nil {
 		return c, false, e

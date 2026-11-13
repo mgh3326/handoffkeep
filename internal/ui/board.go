@@ -31,14 +31,11 @@ var boardStates = func() map[string]bool {
 // BFF routes: the browser never sees hub, bearer, or database credentials.
 const (
 	boardTasksDefaultLimit = 200
-	boardTasksMaxLimit     = 500
+	boardTasksPageLimit    = 500
 	boardDetailRepsLimit   = 500
 	policyItemsMax         = 200
 	policyPointerKey       = "policy/active"
 	policyTitleMax         = 200
-	// boardDocRenderMaxBytes is the inline-render budget: a larger document
-	// is served as unsupported and the console offers only the raw view.
-	boardDocRenderMaxBytes = 256 << 10
 )
 
 type boardAttachment struct {
@@ -222,8 +219,8 @@ func (h *Handler) overlayYouTrack(ctx context.Context, tasks []store.Task) {
 }
 
 // boardTasks pages the complete task set in stable id order. The client owns
-// state grouping and priority ordering; the server guarantees a bounded,
-// complete traversal via the after_id cursor and reports truncation honestly.
+// state grouping and priority ordering; the page size is bounded while the
+// after_id cursor lets the client traverse the complete set.
 func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	lane := strings.TrimSpace(q.Get("lane"))
@@ -242,7 +239,7 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 	limit := boardTasksDefaultLimit
 	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 1 || parsed > boardTasksMaxLimit {
+		if err != nil || parsed < 1 || parsed > boardTasksPageLimit {
 			http.Error(w, "invalid board query", http.StatusBadRequest)
 			return
 		}
@@ -735,13 +732,11 @@ type boardDocResponse struct {
 }
 
 // boardDocFormat classifies a document body for inline rendering. Only
-// UTF-8 text within the render budget that is not a JSON value is markdown.
+// UTF-8 text that is not a JSON value is markdown.
 func boardDocFormat(body string) (string, string) {
 	switch {
 	case !utf8.ValidString(body):
 		return "unsupported", "not_text"
-	case len(body) > boardDocRenderMaxBytes:
-		return "unsupported", "too_large"
 	}
 	trimmed := strings.TrimSpace(body)
 	if (strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")) && json.Valid([]byte(trimmed)) {

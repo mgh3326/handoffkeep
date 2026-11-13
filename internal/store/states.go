@@ -98,7 +98,7 @@ type TaskClosureRule struct {
 	DefaultType       string   `json:"default_type"`
 	EvidenceMaxBytes  int      `json:"evidence_max_bytes"`
 	RejectsSecretLike bool     `json:"rejects_secret_like"`
-	// ResultLink requires the completed state's https URL or hk:doc evidence.
+	// ResultLink requires a machine-addressable result reference.
 	ResultLink bool `json:"result_link"`
 	// DuplicateOf requires a live duplicate_of relation to the task it copies.
 	DuplicateOf bool `json:"duplicate_of"`
@@ -109,7 +109,7 @@ type TaskClosureRule struct {
 var taskClosureRules = map[string]TaskClosureRule{
 	StateMerged:    {Types: []string{"resolved"}, DefaultType: "resolved", EvidenceMaxBytes: closureEvidenceMaxBytes, RejectsSecretLike: true},
 	StateDeployed:  {Types: []string{"resolved"}, DefaultType: "resolved", EvidenceMaxBytes: closureEvidenceMaxBytes, RejectsSecretLike: true},
-	StateCompleted: {Types: []string{"resolved"}, DefaultType: "resolved", EvidenceMaxBytes: closureEvidenceMaxBytes, RejectsSecretLike: true, ResultLink: true},
+	StateCompleted: {Types: []string{"resolved"}, DefaultType: "resolved", EvidenceMaxBytes: closureEvidenceMaxBytes, RejectsSecretLike: true},
 	StateDropped:   {Types: []string{"cancelled", "obsolete", "superseded"}, DefaultType: "cancelled", EvidenceMaxBytes: closureEvidenceMaxBytes, RejectsSecretLike: true},
 	StateDuplicate: {Types: []string{"superseded"}, DefaultType: "superseded", EvidenceMaxBytes: closureEvidenceMaxBytes, RejectsSecretLike: true, DuplicateOf: true},
 }

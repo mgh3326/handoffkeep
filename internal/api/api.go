@@ -91,9 +91,6 @@ func validDecisionResolveText(value string, required bool) bool {
 	if value == "" {
 		return true
 	}
-	if len(value) > store.RelayLaneEventMaxBytes {
-		return false
-	}
 	for _, r := range value {
 		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
 			return false
@@ -181,8 +178,8 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 	if input.Note != "" {
 		text += " — " + input.Note
 	}
-	if len([]byte(text)) > store.RelayLaneEventMaxBytes || !validDecisionResolveText(text, true) {
-		return store.RelayEvent{}, errors.New("decision response is too long")
+	if !validDecisionResolveText(text, true) {
+		return store.RelayEvent{}, errors.New("invalid decision response")
 	}
 	eventID, err := decisionEventID(fmt.Sprintf("cli-decision-%s-%d-", input.Type, input.ID))
 	if err != nil {
@@ -2311,17 +2308,19 @@ func benchRowErrorField(row []byte, fieldTypes map[string]reflect.Type) string {
 // Payload caps for decode, by what the body carries. A route picks one of
 // these or a store-owned limit (store.MaxBytes, benchRequestMaxBytes, ...).
 const (
-	bodyTiny     = 1 << 10  // an id or two and a short reason
-	bodyStanding = 8 << 10  // standing order
-	bodySmall    = 4 << 10  // one entity's short fields
-	bodyEvent    = 16 << 10 // one external event with its references (16 review items fill ~11 KiB)
-	bodyLarge    = 64 << 10 // free text or a list: descriptions, candidates
-	bodyPRState  = 2 << 20  // one PR-state write: ~200 checks, 100 threads and a pass of findings (hk 3198)
+	bodyTiny     = 1 << 10  // ~5 KiB decoded request budget including JSON envelope; small fixed fields
+	bodyStanding = 8 << 10  // ~12 KiB request budget for a standing-order document
+	bodySmall    = 4 << 10  // ~8 KiB request budget for one entity's short fields
+	bodyEvent    = 16 << 10 // ~20 KiB request budget for one event and its references
+	bodyLarge    = 64 << 10 // ~68 KiB request budget for free text or candidates
+	bodyPRState  = 2 << 20  // ~2 MiB request budget for one PR-state write (hk 3198)
 )
 
 // decode reads one JSON request body into v. max is the payload's own byte
 // cap; 4 KiB of slack covers the envelope keys around it.
 func decode(r *http.Request, v any, max int) error {
+	// Every route chooses one bound for this buffered decode; the extra space
+	// is a fixed JSON-envelope allowance within the route's request budget.
 	return decodeLimited(r.Body, v, int64(max+4096))
 }
 
@@ -2547,7 +2546,9 @@ func (s Server) attachmentPut(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, attachments.ErrDisabled)
 		return
 	}
-	max := s.Service.Attachments.Config.MaxBytes
+	// This buffered route has a 64 MiB server-memory budget; larger OCI-sized
+	// files use the direct begin/complete upload endpoints.
+	max := min(s.Service.Attachments.Config.MaxBytes, int64(64<<20))
 	b, e := io.ReadAll(http.MaxBytesReader(w, r.Body, max))
 	if e != nil {
 		appErr(w, r, attachments.ErrTooLarge)

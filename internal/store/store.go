@@ -64,8 +64,6 @@ var relayEventKinds = map[string]bool{"job.completed": true, "job.escalate": tru
 const relayJobIndexPredicate = "kind IN ('job.completed','job.escalate','job.joined','job.lost','job.revoked')"
 const relayJobConflictPredicate = "kind IN ('job.completed','job.escalate','job.joined','job.lost','job.revoked')"
 
-const RelayLaneEventMaxBytes = 2048
-
 var (
 	ErrTaskConflict         = errors.New("task_conflict")
 	ErrTaskNotFound         = errors.New("task_not_found")
@@ -177,8 +175,8 @@ type TaskLinear struct {
 }
 
 // DecisionOption is one bounded, operator-visible answer for a decision.
-// Keys are deliberately compact so the same representation can be carried in
-// a lane event without consuming much of its 2048-byte limit.
+// Keys are deliberately compact so the same representation stays readable in
+// a lane event.
 type DecisionOption struct {
 	Key         string `json:"key"`
 	Label       string `json:"label"`
@@ -3328,7 +3326,7 @@ func validRelayEvent(x RelayEvent) bool {
 }
 
 func validLaneEventText(value string) bool {
-	if len(value) == 0 || len(value) > RelayLaneEventMaxBytes {
+	if len(value) == 0 {
 		return false
 	}
 	for _, r := range value {
@@ -3647,9 +3645,6 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 	if limit < 1 {
 		limit = 1000
 	}
-	if limit > 1000 {
-		limit = 1000
-	}
 	rows, err := s.pool.Query(ctx, `SELECT `+prefixedTaskColumns("t")+`,
 		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND `+awaitingEventSQL+` ORDER BY at DESC,id DESC LIMIT 1),'')
 		FROM tasks t WHERE `+awaitingTaskDecisionSQL+` ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, limit)
@@ -3671,9 +3666,6 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 // ListOpenEscalations implements the decision inbox job escalation definition.
 func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEvent, error) {
 	if limit < 1 {
-		limit = 1000
-	}
-	if limit > 1000 {
 		limit = 1000
 	}
 	rows, err := s.pool.Query(ctx, `SELECT `+relayEventColumns+` FROM relay_events e
@@ -3709,9 +3701,6 @@ func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEven
 // ListOpenLaneDecisions implements the decision inbox lane.event definition.
 func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEvent, error) {
 	if limit < 1 {
-		limit = 1000
-	}
-	if limit > 1000 {
 		limit = 1000
 	}
 	rows, err := s.pool.Query(ctx, `SELECT `+relayEventColumns+` FROM relay_events e

@@ -402,15 +402,15 @@ func TestUIWriteSecurityAndCompose(t *testing.T) {
 		t.Fatalf("rejected requests had side effects: hub=%+v before=%+v after=%+v", got, before, after)
 	}
 
-	// Exactly 2048 bytes succeeds; htmx gets a replacement fragment.
-	exact := strings.Repeat("x", 2048-len("[event]  (from operator(web) admin@example.com)"))
-	response = uiPostForm(t, h.Client(), h.URL+"/ui/compose", assertion, cookie, url.Values{"lane": {"lane-a"}, "text": {exact}, "csrf": {csrf}}, h.URL, true)
+	// Long messages are retained in full; htmx gets a replacement fragment.
+	long := strings.Repeat("x", 4096)
+	response = uiPostForm(t, h.Client(), h.URL+"/ui/compose", assertion, cookie, url.Values{"lane": {"lane-a"}, "text": {long}, "csrf": {csrf}}, h.URL, true)
 	body := responseText(t, response)
 	if response.StatusCode != http.StatusOK || !strings.Contains(body, `id="ui-content"`) || !strings.Contains(body, "Timeline's ✓") {
 		t.Fatalf("exact compose status=%d body=%q", response.StatusCode, body)
 	}
-	if got := hub.requests(); len(got) != 1 || len([]byte(got[0].Text)) != 2048 || !strings.HasPrefix(got[0].EventID, "web-msg-") {
-		t.Fatalf("exact compose hub=%+v", got)
+	if got := hub.requests(); len(got) != 1 || !strings.Contains(got[0].Text, long) || !strings.HasPrefix(got[0].EventID, "web-msg-") {
+		t.Fatalf("long compose hub=%+v", got)
 	}
 	beforeGET, hubGET := uiRowCountsAt(t, dbURL), len(hub.requests())
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/compose?lane=lane-a&text=must-not-send", assertion, "")

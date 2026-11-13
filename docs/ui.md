@@ -189,9 +189,8 @@ answer writes against them are rejected like unknown or closed decisions.
 `HANDOFFKEEP_UI_LANES`. If that setting is empty, or if either hub setting is
 missing, write forms are disabled and direct POSTs are rejected. Compose wraps
 the submitted text as `[event] <text> (from operator(web) <email>)`; the final
-wrapped text, not merely the input, must be at most 2048 bytes and contain no
-NUL, C0, or C1 controls. The page's byte counter and the server both enforce
-the limit. Timeline's `✓ delivered` marker is the delivery-status view.
+wrapped text must contain no NUL, C0, or C1 controls. The full event text is
+retained. Timeline's `✓ delivered` marker is the delivery-status view.
 
 Both write routes invoke the server-side hub ingress before any task state
 change:
@@ -303,7 +302,7 @@ before optional final `free=0`. Omitting `free=0` permits direct answers. The
 parser recognizes options only when the final line fully matches; malformed
 tokens, duplicate keys, unknown recommendations, too many options, or an
 options line elsewhere stay ordinary body text. The question and serialized
-options together must fit the 2048-byte event limit.
+options together are stored in the full lane event.
 
 The Decisions page renders structured choices as radios. A recommendation is
 default-selected and marked `권고`; when permitted, a direct-answer radio and
