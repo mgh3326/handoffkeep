@@ -377,8 +377,10 @@ row the hygiene job may apply. `handoffkeep tasks settle-merged [--project P]
 [--dry-run]` (`POST /v1/tasks/settle-merged`, body `{project, dry_run}`) moves
 each merged task whose implementing changes are all deployed to `deployed`
 (source `deploy`, ref `deploy:<attempt_id>`), and reports every other merged
-task with the reason it stayed merged: `no_merge_commit`, `no_deploy_stage`
-or `not_yet_deployed`. `--dry-run` defaults to true: nothing is written unless
+task with the reason it stayed merged: `no_merge_commit`, `no_deploy_stage`,
+`not_yet_deployed`, or `redelivered` (its covering deploy event was already
+recorded, so a reopened task re-merged under the same attempt stays merged and
+needs an operator decision). `--dry-run` defaults to true: nothing is written unless
 `--dry-run=false` is given.
 Schema version 34 adds the `source_event` kind for events
 recorded with `applied=false`, so they never read as transitions.

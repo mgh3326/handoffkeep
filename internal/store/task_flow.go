@@ -123,7 +123,7 @@ func applyLifecycle(x *Task, from, to string, now time.Time, c *TaskClosure) err
 			return fmt.Errorf("%w: type is not allowed for target state", ErrClosureInvalid)
 		}
 		if rule.ResultLink && !completedEvidenceRE.MatchString(evidence) {
-			return fmt.Errorf("%w: completed requires a result link", ErrClosureInvalid)
+			return fmt.Errorf("%w: completed requires a result link: an https URL, or hk:doc <key> with nothing after the key", ErrClosureInvalid)
 		}
 		x.Refs.Closure = &TaskClosure{Type: c.Type, Evidence: evidence}
 	} else if !IsSettledState(to) {
@@ -496,7 +496,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 	}
 	if in.ClearOnly {
 		if !x.AwaitingDecision {
-			return Task{}, ErrTaskConflict
+			return Task{}, fmt.Errorf("%w: only a task awaiting a decision can clear its flag", ErrTaskConflict)
 		}
 		action, to = actClearFlag, x.State
 	}
@@ -511,7 +511,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		return x, nil
 	}
 	if reopen && !(IsSettledState(from) || from == StateIcebox) {
-		return Task{}, ErrTaskConflict
+		return Task{}, fmt.Errorf("%w: only a settled or icebox task reopens; from %s a task can move to %s", ErrTaskConflict, from, allowedNextStates(from))
 	}
 	// The unset kind survives only a decline from triage; a reopen would put
 	// it in unstarted, which the kind constraint refuses.
@@ -540,14 +540,17 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		// origin_pr/origin_task would detach the recorded facts from their
 		// source and let one origin own two items over time.
 		if (action == actMove && to == StateBacklog) || (refs != nil && (refs.DecisionOptions != nil || refs.OriginPR != "" || refs.OriginTask != 0)) {
-			return Task{}, ErrTaskConflict
+			return Task{}, fmt.Errorf("%w: a disposition item cannot move back to backlog or change its origin", ErrTaskConflict)
 		}
 	}
 
 	switch action {
 	case actSetFlag:
-		if x.AwaitingDecision || IsSettledState(from) {
-			return Task{}, ErrTaskConflict
+		if x.AwaitingDecision {
+			return Task{}, fmt.Errorf("%w: %s is already awaiting a decision", ErrTaskConflict, from)
+		}
+		if IsSettledState(from) {
+			return Task{}, fmt.Errorf("%w: a settled task cannot be flagged as awaiting a decision; from %s a task can move to %s", ErrTaskConflict, from, allowedNextStates(from))
 		}
 	case actClearFlag, actNoop:
 	default:
@@ -831,16 +834,22 @@ func mergedChangeTx(ctx context.Context, tx pgx.Tx, pr string) (int64, error) {
 	return id, nil
 }
 
-// transitionConflict is the task_conflict of a refused manual move: it names
-// the states the task can move to from where it is (hk 4322).
-func transitionConflict(from, to string) error {
+// allowedNextStates lists, in state order, the states a task in from can move
+// to. Refusals name them so the caller can pick a legal move (hk 2863).
+func allowedNextStates(from string) string {
 	var allowed []string
 	for _, state := range TaskStates() {
 		if taskTransitionAllowed(from, state) {
 			allowed = append(allowed, state)
 		}
 	}
-	msg := fmt.Sprintf("%s -> %s is not a transition; from %s a task can move to %s", from, to, from, strings.Join(allowed, ", "))
+	return strings.Join(allowed, ", ")
+}
+
+// transitionConflict is the task_conflict of a refused manual move: it names
+// the states the task can move to from where it is (hk 4322).
+func transitionConflict(from, to string) error {
+	msg := fmt.Sprintf("%s -> %s is not a transition; from %s a task can move to %s", from, to, from, allowedNextStates(from))
 	if to == StateMerged && deliveredOpenStates[from] {
 		msg += ", or to merged with --pr (refs.pr) naming the merged PR that delivered it"
 	}

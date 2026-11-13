@@ -115,6 +115,13 @@ func TestTaskClosure(t *testing.T) {
 			t.Fatalf("%q: %v", tc.evidence, err)
 		}
 	}
+	// Trailing text after an hk:doc key is refused, and the refusal names the
+	// accepted form (hk 4050).
+	trailing := Task{}
+	err := applyLifecycle(&trailing, StateBacklog, StateCompleted, time.Now().UTC(), &TaskClosure{Type: "resolved", Evidence: "hk:doc research/x and more"})
+	if !errors.Is(err, ErrClosureInvalid) || !strings.Contains(err.Error(), "hk:doc <key> with nothing after the key") {
+		t.Fatalf("trailing evidence: %v", err)
+	}
 	t.Run("settled transitions retain and reopen clears closure", func(t *testing.T) {
 		now := time.Now().UTC()
 		x := Task{}
