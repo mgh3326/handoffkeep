@@ -348,6 +348,21 @@ package store
 //     adopt and the comment catch-up only try it, before any row lock), so
 //     no cycle closes.
 //
+//   - Held-op recovery (RecoverHeldYTOps, yt_binding_recovery.go, hk 4491).
+//     Its candidate scan is one statement and locks nothing. It then decides
+//     each candidate in its own transaction: the task's lane lock first, then
+//     the op row FOR UPDATE, then the kind's authority row FOR SHARE
+//     (ytAuthorityShareTx, as op preparation does after its lane lock), then
+//     plain reads of yt_task_bindings and the kind gates, then one UPDATE of
+//     its op row. It holds one lane lock and takes no task row, level 1-5
+//     lock or ownership lock. A switch holds only authority rows and waits
+//     for nothing a recovery transaction holds (it reads yt_write_ops
+//     without a lock), and the alert pass holds op rows FOR SHARE and waits
+//     for no lane or authority row, so neither can close a cycle with it. A
+//     switch that waits for the authority row counts the op as resolved once
+//     the recovery commits, and a recovery that starts after a switch sees
+//     youtrack and keeps the op.
+//
 //   - The YouTrack sync's single-run guard is a session-scoped
 //     pg_try_advisory_lock(8241873404) on its own pooled connection. It is
 //     taken before the run and released after it, and no other writer takes
