@@ -121,9 +121,16 @@ func (s *Store) BackfillYTFieldsOps(ctx context.Context, opt YTFieldsBackfillOpt
 		if opt.Limit > 0 && r.Total.Ops >= opt.Limit {
 			break
 		}
-		outcome, ops, project, err := s.backfillYTFields(ctx, tenant, id, opt.DryRun)
+		remaining := 0
+		if opt.Limit > 0 {
+			remaining = opt.Limit - r.Total.Ops
+		}
+		outcome, ops, project, overLimit, err := s.backfillYTFields(ctx, tenant, id, opt.DryRun, remaining)
 		if err != nil {
 			return r, fmt.Errorf("task %d: %w", id, err)
+		}
+		if overLimit {
+			break
 		}
 		if outcome == ytFieldsDeleted {
 			continue
@@ -146,29 +153,34 @@ func (s *Store) BackfillYTFieldsOps(ctx context.Context, opt YTFieldsBackfillOpt
 // then the consumer's rule. A dry run applies the same rule
 // (ytSnapshotUnchanged: an unchanged sha whose op was rejected counts as prepared)
 // and rolls back.
-func (s *Store) backfillYTFields(ctx context.Context, tenant string, id int64, dryRun bool) (ytFieldsOutcome, int, string, error) {
+func (s *Store) backfillYTFields(ctx context.Context, tenant string, id int64, dryRun bool, remaining int) (ytFieldsOutcome, int, string, bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return "", 0, "", err
+		return "", 0, "", false, err
 	}
 	defer tx.Rollback(ctx)
 	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(id, 10)); err != nil {
-		return "", 0, "", err
+		return "", 0, "", false, err
 	}
 	now := time.Now().UTC()
 	tasks, err := readYTFieldsRows(ctx, tx, []int64{id}, now, s.StartedStalledHours())
 	if err != nil {
-		return "", 0, "", err
+		return "", 0, "", false, err
 	}
 	t, found := tasks[id]
 	project := t.fields.Project
 	// A dry run applies the consumer's rule as it would, and rolls back.
 	outcome, ops, err := prepareYTFieldsTx(ctx, tx, now, tenant, s.ytMovesNow() == YTMovesOn, id, t, found)
 	if err != nil {
-		return "", 0, "", err
+		return "", 0, "", false, err
+	}
+	if remaining > 0 && ops > remaining {
+		// Roll back this task: its ops cannot fit within the run's remaining
+		// budget. The next run starts from this task again.
+		return "", 0, "", true, nil
 	}
 	if dryRun {
-		return outcome, ops, project, nil
+		return outcome, ops, project, false, nil
 	}
-	return outcome, ops, project, tx.Commit(ctx)
+	return outcome, ops, project, false, tx.Commit(ctx)
 }

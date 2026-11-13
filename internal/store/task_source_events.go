@@ -248,7 +248,8 @@ func (s *Store) ApplyTaskSourceEvent(ctx context.Context, in TaskSourceEvent) (T
 // propagateRevertTx carries a revert to every other task that implements the
 // reverted PR and is closed on it: a task closed by naming the PR (hk 4322)
 // or a sibling the merge propagated to. The event names one task, so without
-// this those stay closed on undone work. Each goes through recordChangeTx and
+// this those stay closed on undone work. A task whose refs.pr is the PR is
+// reached too, linked or not. Each goes through recordChangeTx and
 // applySourceEventTx as a named task does, in ascending id, under the
 // task-mutation lock the caller holds.
 func (s *Store) propagateRevertTx(ctx context.Context, tx pgx.Tx, in TaskSourceEvent, at, now time.Time) error {
@@ -260,8 +261,12 @@ func (s *Store) propagateRevertTx(ctx context.Context, tx pgx.Tx, in TaskSourceE
 	for _, id := range in.Tasks {
 		named[id] = true
 	}
-	rows, err := tx.Query(ctx, `SELECT `+prefixedTaskColumns("t")+` FROM change_tasks ct JOIN changes c ON c.id=ct.change_id JOIN tasks t ON t.id=ct.task_id
-		WHERE c.repo=$1 AND c.pr_number=$2 AND ct.relation='implements' AND t.state IN ($3,$4) ORDER BY t.id FOR UPDATE OF t`, repo, n, StateMerged, StateDeployed)
+	// A task closed on the PR without a link (refs.pr set by a manual
+	// reviewing -> merged, or by a propagated merge before siblings were
+	// linked) is reached by its refs.pr, as a deploy reaches it.
+	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks t WHERE t.state IN ($3,$4) AND (t.refs->>'pr'=$5
+		OR EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=t.id AND c.repo=$1 AND c.pr_number=$2 AND ct.relation='implements'))
+		ORDER BY t.id FOR UPDATE`, repo, n, StateMerged, StateDeployed, in.PR)
 	if err != nil {
 		return err
 	}
@@ -363,7 +368,7 @@ func (s *Store) propagateMergeTx(ctx context.Context, tx pgx.Tx, src int64, ev s
 		// The sibling implements the PR too: link it first, so a later revert
 		// of the PR holds the sibling's own close (unresolvedRevertSQL).
 		if changeID != 0 {
-			if err = linkChangeTaskTx(ctx, tx, changeID, x.ID, ChangeImplements, false, now); err != nil {
+			if err = linkChangeTaskTx(ctx, tx, changeID, x.ID, ChangeImplements, true, now); err != nil {
 				return err
 			}
 		}
@@ -503,7 +508,8 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, ev.Source, ev.Note, 0, now); err != nil {
 		return TaskEventResult{}, err
 	}
-	if err = s.afterSourceMoveTx(ctx, tx, x, from, ev.Source, now); err != nil {
+	deferNamedParentClose := ev.Source == SourceMergewakeMerge && x.ParentID != nil && ev.Named[*x.ParentID]
+	if err = s.afterSourceMoveTx(ctx, tx, x, from, ev.Source, now, deferNamedParentClose); err != nil {
 		return TaskEventResult{}, err
 	}
 	if ev.Source == SourceMergewakeRevert && x.ParentID != nil && !ev.Named[*x.ParentID] {
@@ -735,8 +741,12 @@ func joinNote(a, b string) string {
 }
 
 // afterSourceMoveTx runs what every state change runs after an automatic
-// move: the hierarchy rules.
-func (s *Store) afterSourceMoveTx(ctx context.Context, tx pgx.Tx, x Task, from, by string, now time.Time) error {
+// move: the hierarchy rules. A merge defers auto-closing a parent named by
+// that same event until the parent's own event turn.
+func (s *Store) afterSourceMoveTx(ctx context.Context, tx pgx.Tx, x Task, from, by string, now time.Time, deferNamedParentClose bool) error {
+	if deferNamedParentClose {
+		return nil
+	}
 	return s.afterStateChangeTx(ctx, tx, x, from, by, now)
 }
 

@@ -21,25 +21,50 @@ type serverCaps struct {
 var capsCache = struct {
 	sync.Mutex
 	byOrigin map[string]serverCaps
+	flight   map[string]*capabilitiesFlight
 }{byOrigin: map[string]serverCaps{}}
+
+type capabilitiesFlight struct {
+	done chan struct{}
+	caps serverCaps
+	err  error
+}
 
 // capabilitiesOf returns the origin's capabilities, read from the server once
 // per process.
 func (c Client) capabilitiesOf(ctx context.Context) (serverCaps, error) {
 	capsCache.Lock()
 	got, ok := capsCache.byOrigin[c.URL]
-	capsCache.Unlock()
 	if ok {
+		capsCache.Unlock()
 		return got, nil
 	}
-	got, err := c.fetchCapabilities(ctx)
-	if err != nil {
-		return serverCaps{}, err
+	if flight := capsCache.flight[c.URL]; flight != nil {
+		capsCache.Unlock()
+		select {
+		case <-flight.done:
+			return flight.caps, flight.err
+		case <-ctx.Done():
+			return serverCaps{}, ctx.Err()
+		}
 	}
-	capsCache.Lock()
-	capsCache.byOrigin[c.URL] = got
+	flight := &capabilitiesFlight{done: make(chan struct{})}
+	if capsCache.flight == nil {
+		capsCache.flight = map[string]*capabilitiesFlight{}
+	}
+	capsCache.flight[c.URL] = flight
 	capsCache.Unlock()
-	return got, nil
+
+	got, err := c.fetchCapabilities(ctx)
+	capsCache.Lock()
+	flight.caps, flight.err = got, err
+	if err == nil {
+		capsCache.byOrigin[c.URL] = got
+	}
+	delete(capsCache.flight, c.URL)
+	close(flight.done)
+	capsCache.Unlock()
+	return got, err
 }
 
 // fetchCapabilities reads GET /v1/capabilities. Only a 404 establishes that
