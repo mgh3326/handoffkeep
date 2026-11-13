@@ -261,6 +261,7 @@ func TestYouTrackStateSinceFollowsTheCurrentVisit(t *testing.T) {
 	now := time.Date(2026, 11, 13, 3, 0, 0, 0, time.UTC)
 	old := ytIssue("2-2", 2, "created before the lookback", "developing", "a", 0)
 	old.Created = now.Add(-60 * 24 * time.Hour).UnixMilli()
+	old.Updated = now.Add(-time.Hour).UnixMilli()
 	snap := buildYTSnapshot(youtrack.DefaultSchema(), []youtrack.Issue{
 		ytIssue("2-1", 1, "back in development", "developing", "a", 0),
 		old,
@@ -277,7 +278,7 @@ func TestYouTrackStateSinceFollowsTheCurrentVisit(t *testing.T) {
 	}
 	want := map[int64]int64{
 		1: 2 * 3600,
-		2: int64(now.Sub(time.Date(2026, 11, 12, 2, 0, 0, 0, time.UTC)).Seconds()), // updated
+		2: int64(stateHistoryLookback.Seconds()),                                   // the history window is the earliest known bound
 		3: int64(now.Sub(time.Date(2026, 11, 12, 1, 0, 0, 0, time.UTC)).Seconds()), // created
 	}
 	for id, w := range want {

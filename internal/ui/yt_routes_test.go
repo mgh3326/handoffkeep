@@ -80,6 +80,12 @@ func (f *ytServer) setChanges(changes ...youtrack.StateChange) {
 	}
 }
 
+func (f *ytServer) addChange(change map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.changes = append(f.changes, change)
+}
+
 func (f *ytServer) setFail(fail bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -200,9 +206,21 @@ func TestYouTrackBoardReadsIssuesAndJoinsHK(t *testing.T) {
 func TestYouTrackWorkStatusReadsIssues(t *testing.T) {
 	f := newYTRouteFixture(t)
 	task := f.task(t, "hk title")
-	f.fake.set(ytIssue("2-1", task.ID, "yt title", "developing", "handoffkeep", 0))
+	oldTask := f.task(t, "old hk title")
+	oldIssue := ytIssue("2-2", oldTask.ID, "old yt title", "developing", "handoffkeep", 0)
+	oldIssue.Created = time.Now().UTC().Add(-60 * 24 * time.Hour).UnixMilli()
+	oldIssue.Updated = time.Now().UTC().Add(-time.Hour).UnixMilli()
+	f.fake.set(ytIssue("2-1", task.ID, "yt title", "developing", "handoffkeep", 0), oldIssue)
 	enteredAt := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Second)
 	f.fake.setChanges(youtrack.StateChange{IssueID: "2-1", At: enteredAt, State: "developing"})
+	// Scalar values on unrelated fields are valid activity data. They must not
+	// prevent the work status page from using the state activity above.
+	f.fake.addChange(map[string]any{
+		"timestamp": enteredAt.Add(time.Minute).UnixMilli(),
+		"field":     map[string]any{"name": "hk PR"},
+		"added":     []any{"pull/42"},
+		"target":    map[string]any{"id": "2-1"},
+	})
 	rec := httptest.NewRecorder()
 	f.h.workStatus(rec, httptest.NewRequest(http.MethodGet, "/ui/api/work-status", nil), operator)
 	if rec.Code != http.StatusOK {
@@ -213,12 +231,25 @@ func TestYouTrackWorkStatusReadsIssues(t *testing.T) {
 		t.Fatal(err)
 	}
 	// hk still holds the task in backlog; YouTrack's state is the one shown.
-	if status.Summary.InWork != 1 || status.Summary.Backlog != 0 || len(status.InWork) != 1 || status.InWork[0].Title != "yt title" {
+	if status.Summary.InWork != 2 || status.Summary.Backlog != 0 || len(status.InWork) != 2 {
 		t.Fatalf("work status=%+v", status)
 	}
 	// The age is YouTrack's activity time, not hk's: hk has no event for it.
-	if since := status.InWork[0].Since; since == nil || !since.Equal(enteredAt) {
-		t.Fatalf("in work since=%v want %v", since, enteredAt)
+	var entered, old *store.WorkStatusInWorkTask
+	for i := range status.InWork {
+		switch status.InWork[i].ID {
+		case task.ID:
+			entered = &status.InWork[i]
+		case oldTask.ID:
+			old = &status.InWork[i]
+		}
+	}
+	if entered == nil || entered.Title != "yt title" || entered.Since == nil || !entered.Since.Equal(enteredAt) {
+		t.Fatalf("entered task=%+v want since %v", entered, enteredAt)
+	}
+	wantWindowStart := status.GeneratedAt.Add(-stateHistoryLookback)
+	if old == nil || old.Since == nil || !old.Since.Equal(wantWindowStart) || old.AgeSeconds != int64(stateHistoryLookback.Seconds()) {
+		t.Fatalf("old task=%+v want since %v and age %d", old, wantWindowStart, int64(stateHistoryLookback.Seconds()))
 	}
 	f.fake.setFail(true)
 	rec = httptest.NewRecorder()

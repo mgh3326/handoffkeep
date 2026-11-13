@@ -311,8 +311,9 @@ func newYTHistory(changes []youtrack.StateChange, since, now time.Time) *ytHisto
 // the last state change when that change moved it into this state. Without
 // one the answer is the nearest honest bound: the creation time of an issue
 // created within the history and never changed, a merged issue's resolved time
-// (YouTrack resolves on merge), and otherwise the issue's update time, which
-// is never earlier than the real entry.
+// (YouTrack resolves on merge), and otherwise the history window start. The
+// activity log covers the window completely, while unrelated updates do not
+// indicate a state change.
 func (h *ytHistory) stateSince(t youtrack.TaskIssue) time.Time {
 	if xs := h.byIssue[t.IssueID]; len(xs) > 0 {
 		if last := xs[len(xs)-1]; last.StateKnown && last.State == t.State {
@@ -324,7 +325,7 @@ func (h *ytHistory) stateSince(t youtrack.TaskIssue) time.Time {
 	if t.State == store.StateMerged && t.Resolved != nil {
 		return *t.Resolved
 	}
-	return t.Updated
+	return h.Since
 }
 
 // closeDays are the KST days the issue moved into a closed state on, within
