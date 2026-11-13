@@ -136,6 +136,42 @@ func TestYTCommentCatchUpPreparesMissedComments(t *testing.T) {
 	}
 }
 
+// While comments are canonical in YouTrack the catch-up prepares nothing
+// (hk 4122, hk 4489): the same missed comment gets no op and no link, and a
+// pass writes nothing at all; back on hk the next pass copies it.
+func TestYTCommentCatchUpAuthorityYouTrack(t *testing.T) {
+	s := schemaStore(t, "ytcu_auth")
+	ctx := t.Context()
+	ytbMapped(t, s)
+	task := ytcTask(t, s, ytbProject)
+	ytbBind(t, s, ytbBinding(task))
+	c := ytcuRawComment(t, s, task, "dots")
+	s.SetYTCommentsMode(YTCommentsOn)
+	if _, _, err := s.SetYTAuthority(ctx, []YTAuthorityKind{YTAuthorityComments}, YTAuthorityYouTrack, "operator", "drill"); err != nil {
+		t.Fatal(err)
+	}
+	if got := ytcuPass(t, s, 200, nil); len(got.Prepared) != 0 || len(got.Skipped) != 0 || got.Deferred {
+		t.Fatalf("pass under youtrack authority %+v", got)
+	}
+	ytcuNoOp(t, s, "youtrack authority", c)
+	if n := ytcCount(t, s, `SELECT count(*) FROM yt_write_ops`); n != 0 {
+		t.Fatalf("%d ops under youtrack authority", n)
+	}
+	if n := ytcCount(t, s, `SELECT count(*) FROM yt_comment_write_links`); n != 0 {
+		t.Fatalf("%d comment links under youtrack authority", n)
+	}
+	if _, _, err := s.SetYTAuthority(ctx, []YTAuthorityKind{YTAuthorityComments}, YTAuthorityHK, "operator", "rollback"); err != nil {
+		t.Fatal(err)
+	}
+	got := ytcuPass(t, s, 200, nil)
+	if len(got.Prepared) != 1 {
+		t.Fatalf("pass back on hk %+v", got)
+	}
+	if op, ok := ytcOpFor(t, s, c.ID); !ok || op.ID != got.Prepared[0].ID {
+		t.Fatalf("comment %d op %+v %v", c.ID, op, ok)
+	}
+}
+
 // A comment whose binding a local source disagrees with gets no op and one
 // log line naming the source; passed back as skip, it is neither logged
 // again nor crowds out a later comment of another task.
