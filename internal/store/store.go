@@ -3468,6 +3468,13 @@ func validAttachmentRef(kind, id string) bool {
 	if kind == "document" {
 		return validDocKey(id)
 	}
+	// memory refs stay valid: the previous release still writes ref_kind
+	// 'memory' during the blue-green overlap, and the List filter must keep
+	// reading those rows. The memory API itself is gone.
+	if kind == "memory" {
+		a, n, ok := strings.Cut(id, "/")
+		return ok && validName(a) && validName(n)
+	}
 	if kind == "task" {
 		return ValidTaskRefID(id)
 	}
