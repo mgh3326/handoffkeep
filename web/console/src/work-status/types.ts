@@ -5,7 +5,8 @@ export interface WorkStatusCounts {
   in_work: number;
   in_review: number;
   waiting_deploy: number;
-  merged_no_deploy_record: number;
+  merged_no_deploy_project: number;
+  merged_before_deploy: number;
   total_open: number;
   bundle_parents: number;
 }
@@ -21,7 +22,8 @@ export interface WorkStatusSummary {
   in_work: number;
   in_review: number;
   waiting_deploy: number;
-  merged_no_deploy_record: number;
+  merged_no_deploy_project: number;
+  merged_before_deploy: number;
   bundle_parents: number;
 }
 
@@ -31,6 +33,7 @@ export interface WorkStatusInWorkTask {
   project?: string | null;
   state: string;
   job_id?: string | null;
+  job_state?: string | null;
   host?: string | null;
   pr?: string | null;
   since?: string | null;

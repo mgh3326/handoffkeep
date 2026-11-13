@@ -52,7 +52,8 @@ function parseCounts(raw: unknown, path: string): WorkStatusCounts {
     in_work: num(o, "in_work", path),
     in_review: num(o, "in_review", path),
     waiting_deploy: num(o, "waiting_deploy", path),
-    merged_no_deploy_record: num(o, "merged_no_deploy_record", path),
+    merged_no_deploy_project: num(o, "merged_no_deploy_project", path),
+    merged_before_deploy: num(o, "merged_before_deploy", path),
     total_open: num(o, "total_open", path),
     bundle_parents: num(o, "bundle_parents", path),
   };
@@ -66,7 +67,8 @@ function parseSummary(raw: unknown, path: string): WorkStatusSummary {
     in_work: num(o, "in_work", path),
     in_review: num(o, "in_review", path),
     waiting_deploy: num(o, "waiting_deploy", path),
-    merged_no_deploy_record: num(o, "merged_no_deploy_record", path),
+    merged_no_deploy_project: num(o, "merged_no_deploy_project", path),
+    merged_before_deploy: num(o, "merged_before_deploy", path),
     bundle_parents: num(o, "bundle_parents", path),
   };
 }
@@ -87,6 +89,7 @@ function parseInWork(raw: unknown, path: string): WorkStatusInWorkTask {
     project: nullableText(o, "project"),
     state: text(o, "state", path),
     job_id: optionalText(o, "job_id"),
+    job_state: optionalText(o, "job_state"),
     host: optionalText(o, "host"),
     pr: optionalText(o, "pr"),
     since: nullableText(o, "since"),

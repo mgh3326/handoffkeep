@@ -62,7 +62,7 @@ function payload(overrides: Record<string, unknown> = {}) {
 
 const defaultWorkStatus = {
   generated_at: "2026-11-05T05:00:00Z",
-  summary: { total_open: 5, backlog: 2, in_work: 1, in_review: 1, waiting_deploy: 1, merged_no_deploy_record: 0, bundle_parents: 0 },
+  summary: { total_open: 5, backlog: 2, in_work: 1, in_review: 1, waiting_deploy: 1, merged_no_deploy_project: 0, merged_before_deploy: 0, bundle_parents: 0 },
   projects: [],
   in_work: [],
   backlog: [],
