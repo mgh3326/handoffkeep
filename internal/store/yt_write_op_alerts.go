@@ -63,7 +63,7 @@ func (s *Store) EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int,
 	window := now.Truncate(ytWriteOpAlertWindow)
 	created := 0
 	for _, class := range []string{ytWriteOpAlertStuck, ytWriteOpAlertRejected} {
-		cands, err := ytWriteOpAlertCandidates(ctx, tx, class, now.Add(-ytWriteOpAlertDelay))
+		cands, err := s.ytWriteOpAlertCandidates(ctx, tx, class, now.Add(-ytWriteOpAlertDelay))
 		if err != nil {
 			return 0, err
 		}
@@ -109,21 +109,26 @@ type ytWriteOpAlertCandidate struct {
 // its write may already have landed, and only the operator resolves it). A
 // rejected op is rejected, or applied with an unpublished binding (the
 // operator's rejected view lists it too).
-func ytWriteOpAlertCandidates(ctx context.Context, tx pgx.Tx, class string, cutoff time.Time) ([]ytWriteOpAlertCandidate, error) {
+//
+// A stuck prepared op of a binding-gated kind is counted under why it is held
+// (ytHeldClass: held_binding, held_authority_youtrack, held_mode, ...), not
+// under "prepared", so one notice tells the operator which command applies;
+// an op its gate admits, and any other kind, stays "prepared".
+func (s *Store) ytWriteOpAlertCandidates(ctx context.Context, tx pgx.Tx, class string, cutoff time.Time) ([]ytWriteOpAlertCandidate, error) {
 	// The binding-conflict reason is a literal, not a parameter, so a cached
 	// generic plan can still use the partial index yt_write_ops_alert_scan.
 	var q string
 	var args []any
 	switch class {
 	case ytWriteOpAlertStuck:
-		q = `SELECT o.id, o.state, o.reason FROM yt_write_ops o
+		q = `SELECT o.state, o.reason, ` + ytHeldOpColumns + ` FROM yt_write_ops o
 			WHERE ((o.state='prepared' AND o.created_at <= $1) OR (o.state='dispatched' AND o.dispatched_at <= $1)
 				OR (o.state='remote_unknown' AND o.created_at <= $1))
 			AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='stuck')
 			ORDER BY o.id LIMIT $2 FOR SHARE OF o`
 		args = []any{cutoff.UTC(), ytWriteOpAlertBatchMax}
 	case ytWriteOpAlertRejected:
-		q = `SELECT o.id, o.state, o.reason FROM yt_write_ops o
+		q = `SELECT o.state, o.reason, ` + ytHeldOpColumns + ` FROM yt_write_ops o
 			WHERE (o.state='rejected' OR (o.state='applied' AND o.reason='` + ytwrite.ReasonBindingConflict + `'))
 			AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='rejected')
 			ORDER BY o.id LIMIT $1 FOR SHARE OF o`
@@ -138,23 +143,52 @@ func ytWriteOpAlertCandidates(ctx context.Context, tx pgx.Tx, class string, cuto
 		return nil, err
 	}
 	defer rows.Close()
-	var out []ytWriteOpAlertCandidate
+	type row struct {
+		op            ytHeldOp
+		state, reason string
+	}
+	var found []row
 	for rows.Next() {
-		var id int64
-		var state, reason string
-		if err := rows.Scan(&id, &state, &reason); err != nil {
+		var r row
+		if err := rows.Scan(&r.state, &r.reason, &r.op.id, &r.op.principal, &r.op.kind, &r.op.tenant, &r.op.entityKind, &r.op.entityID, &r.op.target, &r.op.createdAt); err != nil {
 			return nil, err
 		}
-		label := state
-		if class == ytWriteOpAlertRejected {
-			label = reason
+		found = append(found, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	sides := map[YTAuthorityKind]YTAuthoritySide{}
+	var out []ytWriteOpAlertCandidate
+	for _, r := range found {
+		label := r.state
+		switch {
+		case class == ytWriteOpAlertRejected:
+			label = r.reason
 			if label == "" {
 				label = "unspecified"
 			}
+		case r.state == string(ytwrite.StatePrepared) && ytHeldInScope(r.op):
+			kind := ytAuthorityKindOf(r.op.principal)
+			side, ok := sides[kind]
+			if !ok {
+				if side, err = ytAuthorityTx(ctx, tx, kind); err != nil {
+					return nil, err
+				}
+				sides[kind] = side
+			}
+			held, err := s.classifyHeldYTOpTx(ctx, tx, r.op, side)
+			if err != nil {
+				return nil, err
+			}
+			if held != ytHeldReady {
+				label = string(held)
+			}
 		}
-		out = append(out, ytWriteOpAlertCandidate{id: id, label: label})
+		out = append(out, ytWriteOpAlertCandidate{id: r.op.id, label: label})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // ytWriteOpAlertText is one batched notice:

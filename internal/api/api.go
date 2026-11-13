@@ -678,11 +678,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/chat/messages", s.chatMessagesList)
 	m.HandleFunc("POST /v1/chat/messages/{id}/delivered", s.chatMessageDelivered)
 	m.HandleFunc("POST /v1/chat/messages/{id}/failed", s.chatMessageFailed)
-	m.HandleFunc("GET /v1/assistant/pending", s.assistantPending)
-	m.HandleFunc("GET /v1/assistant/outbox", s.assistantOutboxList)
-	m.HandleFunc("POST /v1/assistant/outbox/sent", s.assistantOutboxSent)
 	m.HandleFunc("POST /v1/assistant/outbox/applied", s.assistantOutboxApplied)
-	m.HandleFunc("POST /v1/assistant/decisions/resolve", s.assistantDecisionResolve)
 	if s.UI != nil {
 		m.Handle("/ui", s.UI)
 		m.Handle("/ui/", s.UI)
