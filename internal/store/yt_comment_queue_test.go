@@ -334,8 +334,16 @@ func ytqMove(t *testing.T, s *Store, task int64, issue, projectID string) ytwrit
 	if err != nil {
 		t.Fatal(err)
 	}
-	mv, _, err := s.YTWriteLedger().Prepare(t.Context(), time.Now().UTC(), n)
+	tx, err := s.pool.Begin(t.Context())
 	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(t.Context())
+	mv, made, err := prepareYTOnceTx(t.Context(), tx, time.Now().UTC(), n, n.PayloadSHA)
+	if err != nil || !made {
+		t.Fatalf("prepare move: %v made=%v", err, made)
+	}
+	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	return mv
