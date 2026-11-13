@@ -521,8 +521,11 @@ func TestUnboundTaskGetsNoAutomaticIssueOnProjectChange(t *testing.T) {
 	if n := creates(unbound); n != 0 {
 		t.Fatalf("the unbound task got %d issue_create ops after the move, want 0", n)
 	}
-	// Bound again by the operator, the history's latest row is 'bound'.
-	ytbBind(t, s, ytbBinding(unbound))
+	// Bound again by the operator (to the YouTrack project the task is in now),
+	// the history's latest row is 'bound'.
+	again := ytbBinding(unbound)
+	again.ProjectID = "0-9"
+	ytbBind(t, s, again)
 	if hist := ybhHistory(t, s, unbound); hist[len(hist)-1].Action != "bound" {
 		t.Fatalf("history after the rebind = %+v", hist)
 	}
