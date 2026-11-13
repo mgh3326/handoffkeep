@@ -21,13 +21,17 @@ func decisionAPIServer(t *testing.T) (*httptest.Server, *store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := httptest.NewServer(Server{Service: Service{Store: st}, Tokens: Tokens{"tester": "tok"}}.Handler())
+	h := httptest.NewServer(Server{Service: Service{Store: st}, Tokens: Tokens{"tester": "tok", "operator": "operator-tok"}}.Handler())
 	t.Cleanup(h.Close)
 	t.Cleanup(st.Close)
 	return h, st
 }
 
 func decisionAPICall(t *testing.T, h *httptest.Server, method, path string, body any, out any) int {
+	return decisionAPICallAs(t, h, "tok", method, path, body, out)
+}
+
+func decisionAPICallAs(t *testing.T, h *httptest.Server, token, method, path string, body any, out any) int {
 	t.Helper()
 	var reader *bytes.Reader
 	if body != nil {
@@ -40,7 +44,7 @@ func decisionAPICall(t *testing.T, h *httptest.Server, method, path string, body
 		reader = bytes.NewReader(nil)
 	}
 	req, _ := http.NewRequest(method, h.URL+path, reader)
-	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -155,19 +159,27 @@ func TestRecordSessionDecisionAPIIsIdempotentAndListed(t *testing.T) {
 		Quote: "Let's answer from hk web or MCP.", DecidedAt: time.Date(2026, 11, 11, 5, 0, 0, 0, time.UTC),
 		Grounds: []string{"hk:doc decision/2026-11-11/model-routing-escalation"},
 	}
+	var refusal map[string]string
+	if status := decisionAPICall(t, h, http.MethodPost, "/v1/decisions/record", in, &refusal); status != http.StatusForbidden || refusal["error"] != "operator_required" {
+		t.Fatalf("unverified bearer write: %d %+v", status, refusal)
+	}
+	var listed decisionListBody
+	if status := decisionAPICallAs(t, h, "operator-tok", http.MethodGet, "/v1/decision-requests?status=answered&source=session_chat", nil, &listed); status != http.StatusOK || len(listed.DecisionRequests) != 0 {
+		t.Fatalf("unverified bearer left a record: %d %+v", status, listed)
+	}
 	var first store.SessionDecisionResult
-	if status := decisionAPICall(t, h, http.MethodPost, "/v1/decisions/record", in, &first); status != http.StatusCreated || first.Duplicate || first.Record.Answer != in.Quote || first.Record.AnsweredBy != "tester" {
+	if status := decisionAPICallAs(t, h, "operator-tok", http.MethodPost, "/v1/decisions/record", in, &first); status != http.StatusCreated || first.Duplicate || first.Record.Answer != in.Quote || first.Record.AnsweredBy != "operator" {
 		t.Fatalf("first record: %d %+v", status, first)
 	}
 	var replay store.SessionDecisionResult
-	if status := decisionAPICall(t, h, http.MethodPost, "/v1/decisions/record", in, &replay); status != http.StatusOK || !replay.Duplicate || replay.Record.ID != first.Record.ID {
+	if status := decisionAPICallAs(t, h, "operator-tok", http.MethodPost, "/v1/decisions/record", in, &replay); status != http.StatusOK || !replay.Duplicate || replay.Record.ID != first.Record.ID {
 		t.Fatalf("replay: %d %+v", status, replay)
 	}
 	in.Quote = "changed"
-	if status := decisionAPICall(t, h, http.MethodPost, "/v1/decisions/record", in, nil); status != http.StatusConflict {
+	if status := decisionAPICallAs(t, h, "operator-tok", http.MethodPost, "/v1/decisions/record", in, nil); status != http.StatusConflict {
 		t.Fatalf("key reuse status=%d, want conflict", status)
 	}
-	var listed decisionListBody
+	listed = decisionListBody{}
 	if status := decisionAPICall(t, h, http.MethodGet, "/v1/decision-requests?status=answered&source=session_chat", nil, &listed); status != http.StatusOK || len(listed.DecisionRequests) != 1 || listed.DecisionRequests[0].Reading != "Use the hk web and MCP paths." || len(listed.DecisionRequests[0].Grounds) != 1 {
 		t.Fatalf("listed record: %d %+v", status, listed)
 	}

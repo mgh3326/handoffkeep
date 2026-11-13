@@ -168,7 +168,7 @@ file tasks, or attach files.
 | `task_intake` | write | `title`, `body`, `project`, optional `lane`, optional `idempotency_key` | The triage task, `created`, and duplicate candidates found before filing; a repeated key returns the task that key first filed |
 | `task_update` | write | `id`, `expected_updated_at`, `idempotency_key`, one or more of `state`, `lane`, `priority`, optional `note` | `changed`, the new `revision`, `replayed`, `console_url` and `youtrack_sync`; a stale revision returns `revision_conflict` and writes nothing |
 | `decision_ask` | write | `task_id`, `idempotency_key`, `question`, `options`, `default_action`, optional `answer_policy`, `human_only`, `block` and the other `tasks decision-request` fields | The recorded request id and whether it was a duplicate |
-| `decision_record` | write | `key`, `lane`, `reading`, `quote`, `decided_at`, `grounds` | Record a new chat-settled decision as closed; same-key retries replay, changed content is refused |
+| `decision_record` | write | `key`, `lane`, `reading`, `quote`, `decided_at`, `grounds` | Verified Cloudflare Access operators only; bearer callers receive `operator_required`. The CLI uses the reserved `operator` credential. Same-key retries replay, changed content is refused |
 | `attachment_list` | read | optional `ref`, `limit` | Immutable attachment metadata |
 | `attachment_get_url` | read | `sha256` | Private presigned URL valid for ten minutes |
 | `attachment_put` | write | `content_base64`, `name`, optional `mime`, `ref` | Upload one private attachment without a server path |

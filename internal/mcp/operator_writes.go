@@ -152,6 +152,9 @@ type decisionRecordInput struct {
 }
 
 func (o operatorTools) decisionRecord(ctx context.Context, _ *gmcp.CallToolRequest, in decisionRecordInput) (*gmcp.CallToolResult, any, error) {
+	if !o.principal.Access {
+		return nil, nil, errors.New("operator_required")
+	}
 	write, err := o.write(toolDecisionRecord, in.Key)
 	if err != nil {
 		return nil, nil, err

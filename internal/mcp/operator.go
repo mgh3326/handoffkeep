@@ -118,7 +118,7 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.decisionAsk)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "decision_record",
-		Description: "Record a new decision settled in a session chat as a closed decision request. Supply a stable key, settling lane, reading, the operator's exact quote, decision time and ground links. Reusing the key with the same values returns the original record; changed values are refused. Existing decision documents are not imported.",
+		Description: "Record a new decision settled in a session chat as a closed decision request. Only a verified Cloudflare Access operator may record it; bearer callers receive operator_required. Supply a stable key, settling lane, reading, the operator's exact quote, decision time and ground links. Reusing the key with the same values returns the original record; changed values are refused. Existing decision documents are not imported.",
 		Annotations: writeAnnotations(),
 	}, o.decisionRecord)
 	registerMetaTools(s, o)

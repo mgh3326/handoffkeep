@@ -19,7 +19,7 @@ func TestDecisionsRecordCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	srv := httptest.NewServer(api.Server{Service: api.Service{Store: st}, Tokens: api.Tokens{"tester": "cli-secret"}}.Handler())
+	srv := httptest.NewServer(api.Server{Service: api.Service{Store: st}, Tokens: api.Tokens{"operator": "cli-secret"}}.Handler())
 	defer srv.Close()
 	t.Setenv("HANDOFFKEEP_URL", srv.URL)
 	t.Setenv("HANDOFFKEEP_TOKEN", "cli-secret")
@@ -32,7 +32,7 @@ func TestDecisionsRecordCLI(t *testing.T) {
 	if err := json.Unmarshal([]byte(first.String()), &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.Duplicate || out.Record.Answer != "exact operator words" || out.Record.Reading != "Keep the existing design." || out.Record.AnsweredBy != "tester" {
+	if out.Duplicate || out.Record.Answer != "exact operator words" || out.Record.Reading != "Keep the existing design." || out.Record.AnsweredBy != "operator" {
 		t.Fatalf("CLI output=%+v", out)
 	}
 	var replay strings.Builder
