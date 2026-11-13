@@ -5,7 +5,7 @@
 // to — never instead of — the last success.
 
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { DeploysPage } from "./DeploysPage";
 import { deployElapsed, deployPRLabel, deployStamp, shortDeployedRef, type DeployPendingResponse } from "./deploy";
 
@@ -23,14 +23,22 @@ function fixture(over: Partial<DeployPendingResponse> = {}): DeployPendingRespon
         target: "ncp",
         doc_url: "/ui/doc/deploy/handoffkeep/",
         record_count: 1,
+        state: "pending",
         current: {
           record_key: "deploy/handoffkeep/20260923T033049Z",
           result: "success",
+          target: "ncp",
+          head_sha: SHA,
           deployed_ref: SHA,
           deployed_at: "2026-09-22T13:40:36Z",
           failed_step: null,
+          failed_step_name: null,
           recorded_at: "2026-09-23T03:30:49Z",
           source: "backfill",
+          included_prs: [
+            "https://github.com/mgh3326/handoffkeep/pull/20",
+            "https://github.com/mgh3326/handoffkeep/pull/21",
+          ],
         },
         merged_boundary: "deployed_at",
         recent: [],
@@ -49,14 +57,19 @@ function fixture(over: Partial<DeployPendingResponse> = {}): DeployPendingRespon
         target: "ncp",
         doc_url: "/ui/doc/deploy/auto_trader/",
         record_count: 1,
+        state: "deployed",
         current: {
           record_key: "deploy/auto_trader/20260923T033052Z",
           result: "success",
+          target: "ncp",
+          head_sha: null,
           deployed_ref: DIGEST,
           deployed_at: null,
           failed_step: null,
+          failed_step_name: null,
           recorded_at: "2026-09-23T03:30:52Z",
           source: "backfill",
+          included_prs: [],
         },
         merged_boundary: "unrecorded",
         recent: [],
@@ -67,6 +80,7 @@ function fixture(over: Partial<DeployPendingResponse> = {}): DeployPendingRespon
         repo: "mgh3326/panewire",
         doc_url: "/ui/doc/deploy/panewire-hub/",
         record_count: 0,
+        state: "no_record",
         current: null,
         merged_boundary: "no_current",
         recent: [],
@@ -113,6 +127,46 @@ describe("DeployPanel", () => {
     expect(pr.href).toBe("https://github.com/mgh3326/handoffkeep/pull/24");
   });
 
+  it("shows the running SHA, environment and included PRs from the record", async () => {
+    render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
+    const card = await screen.findByLabelText("handoffkeep 배포");
+    // The running commit — the record's head_sha, not just the image ref.
+    expect(within(card).getAllByText("92ee9e2d0ddc").length).toBeGreaterThan(0);
+    expect(within(card).getByText("ncp")).toBeTruthy();
+    expect(within(card).getByText("포함 PR")).toBeTruthy();
+    const pr = within(card).getByText("#20") as HTMLAnchorElement;
+    expect(pr.href).toBe("https://github.com/mgh3326/handoffkeep/pull/20");
+  });
+
+  it("names the state the records prove and never invents an unrecorded one", async () => {
+    render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
+    // success + a merge waiting → pending; success alone → deployed.
+    await waitFor(() => expect(screen.getByText("배포 대기")).toBeTruthy());
+    expect(screen.getByText("배포됨")).toBeTruthy();
+    // A record-less service already says "기록 없음"; it gets no second state chip.
+    const pw = screen.getByLabelText("panewire-hub 배포");
+    expect(pw.getAttribute("data-state")).toBe("no_record");
+    expect(pw.querySelector('[data-chip="status"]')).toBeNull();
+  });
+
+  it("names an interrupted tick as serving-unknown, not as the old version serving", async () => {
+    // An interrupted tick writes a failed step-6 record without knowing
+    // which services flipped; the card must not claim a serving version.
+    const data = fixture();
+    data.services[1].state = "serving_unknown";
+    render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
+    const at = await screen.findByLabelText("auto_trader 배포");
+    expect(at.getAttribute("data-state")).toBe("serving_unknown");
+    expect(within(at).getByText("서빙 판 미확인")).toBeTruthy();
+    expect(at.querySelector('[data-chip="status"]')?.getAttribute("data-group")).toBe("failed");
+  });
+
+  it("shows SHA 미기록 when a record carries no head_sha, never a guess", async () => {
+    render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
+    const at = await screen.findByLabelText("auto_trader 배포");
+    expect(within(at).getAllByText("SHA 미기록").length).toBeGreaterThan(0);
+  });
+
   it("a null deployed_at shows the boundary note and no list (mutant: no fabricated boundary)", async () => {
     render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
     await waitFor(() => expect(screen.getByText(/배포 시각이 기록되지 않아 마지막 배포 이후 머지 목록을 계산할 수 없습니다/)).toBeTruthy());
@@ -121,21 +175,27 @@ describe("DeployPanel", () => {
   it("shows a failed latest attempt next to the last success, with the serving caveat", async () => {
     const data = fixture();
     const hk = data.services[0];
-    hk.latest = {
+    const latest = {
       record_key: "deploy/handoffkeep/20260923T050000Z",
       result: "failed",
+      target: "ncp",
+      head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       deployed_ref: null,
       deployed_at: "2026-09-23T03:50:00Z",
       failed_step: 7,
+      failed_step_name: "healthz_handoffkeep",
       recorded_at: "2026-09-23T03:50:00Z",
       source: "installer",
+      included_prs: [],
       serving_maybe_changed: true,
     };
-    hk.recent = [hk.latest];
+    hk.latest = latest;
+    hk.recent = [latest];
     render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
     await waitFor(() => expect(screen.getAllByText("최근 시도").length).toBeGreaterThan(0));
     expect(screen.getAllByText("실패").length).toBeGreaterThan(0);
     expect(screen.getByText("7단계")).toBeTruthy();
+    expect(screen.getByText("healthz_handoffkeep")).toBeTruthy();
     expect(screen.getByText(/서빙 판이 바뀌었을 수 있음/)).toBeTruthy();
     // the success line is still there — the failed attempt never replaces it
     expect(screen.getByText("92ee9e2d0ddc")).toBeTruthy();
@@ -143,16 +203,21 @@ describe("DeployPanel", () => {
 
   it("renders rolled_back as 롤백", async () => {
     const data = fixture();
-    data.services[0].latest = {
+    const latest = {
       record_key: "deploy/handoffkeep/20260923T050000Z",
       result: "rolled_back",
+      target: "ncp",
+      head_sha: "cccccccccccccccccccccccccccccccccccccccc",
       deployed_ref: null,
       deployed_at: "2026-09-23T03:50:00Z",
-      failed_step: 5,
+      failed_step: 7,
+      failed_step_name: "healthz_handoffkeep",
       recorded_at: "2026-09-23T03:50:00Z",
       source: "installer",
+      included_prs: [],
     };
-    data.services[0].recent = [data.services[0].latest];
+    data.services[0].latest = latest;
+    data.services[0].recent = [latest];
     render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
     await waitFor(() => expect(screen.getAllByText("롤백").length).toBeGreaterThan(0));
   });
@@ -164,11 +229,15 @@ describe("DeployPanel", () => {
     pw.latest = {
       record_key: "deploy/panewire-hub/20260923T050000Z",
       result: "failed",
+      target: "ncp",
+      head_sha: null,
       deployed_ref: null,
       deployed_at: null,
       failed_step: 0,
+      failed_step_name: null,
       recorded_at: "2026-09-23T03:50:00Z",
       source: "installer",
+      included_prs: [],
     };
     render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
     await waitFor(() => expect(screen.getByText("성공 배포 기록 없음")).toBeTruthy());
@@ -269,6 +338,21 @@ describe("DeployPanel", () => {
     expect(document.querySelector("[data-deploy-state]")?.getAttribute("data-deploy-state")).toBe("error");
   });
 
+  it("a state outside the contract enum is rejected, not rendered", async () => {
+    // check_failed is not a deploy-record state (holds write no record), so a
+    // payload claiming it is malformed rather than silently accepted.
+    const data = fixture();
+    (data.services[0] as unknown as Record<string, unknown>).state = "check_failed";
+    render(
+      <DeploysPage
+        fetchStatus={vi.fn(() => Promise.resolve(data as unknown as DeployPendingResponse))}
+        pollMs={600_000}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(/불러오지 못했습니다/)).toBeTruthy());
+    expect(document.querySelector("[data-deploy-state]")?.getAttribute("data-deploy-state")).toBe("error");
+  });
+
   it("a merged_boundary outside the contract enum is rejected", async () => {
     const data = fixture();
     (data.services[0] as unknown as Record<string, unknown>).merged_boundary = "guessed";
@@ -292,11 +376,15 @@ describe("DeployPanel", () => {
     hk.latest = {
       record_key: "deploy/handoffkeep/20260923T050000Z",
       result: "failed",
+      target: "ncp",
+      head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       deployed_ref: null,
       deployed_at: "2026-09-23T03:50:00Z",
       failed_step: 7,
+      failed_step_name: "healthz_handoffkeep",
       recorded_at: "2026-09-23T03:50:00Z",
       source: "installer",
+      included_prs: [],
     };
     render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
     await waitFor(() => expect(screen.getByText("현재 판(조회 범위 내)")).toBeTruthy());
