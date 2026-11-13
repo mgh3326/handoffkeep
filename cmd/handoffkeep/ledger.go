@@ -14,11 +14,10 @@ import (
 )
 
 const (
-	ledgerUsage        = "usage: handoffkeep ledger [--consumer desk] [--json] | handoffkeep ledger ack [--consumer desk] <sync_id>"
-	ledgerAckUsage     = "usage: handoffkeep ledger ack [--consumer desk] <sync_id>"
-	sinceUsage         = "usage: handoffkeep since [--consumer desk] [--json]"
-	projectStatusUsage = "usage: handoffkeep tasks project-status <project> --health on_track|at_risk|off_track --body <text> | handoffkeep tasks project-status <project> [--limit N]"
-	defaultConsumer    = "desk"
+	ledgerUsage     = "usage: handoffkeep ledger [--consumer desk] [--json] | handoffkeep ledger ack [--consumer desk] <sync_id>"
+	ledgerAckUsage  = "usage: handoffkeep ledger ack [--consumer desk] <sync_id>"
+	sinceUsage      = "usage: handoffkeep since [--consumer desk] [--json]"
+	defaultConsumer = "desk"
 )
 
 // ledgerCmd prints the desk ledger: text by default, sections in order, or
@@ -110,50 +109,6 @@ func ledgerAckCmd(args []string, out io.Writer) error {
 	return printJSON(out, cur)
 }
 
-// projectStatusCmd posts a project status update with --health and --body,
-// or lists the project's updates without them.
-func projectStatusCmd(args []string, out io.Writer) error {
-	fs := flag.NewFlagSet("tasks project-status", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	c := remoteClient(fs)
-	health := fs.String("health", "", "on_track, at_risk or off_track")
-	body := fs.String("body", "", "the update text")
-	limit := fs.Int("limit", 0, "maximum updates listed (server default 100)")
-	parsed, err := splitArgs(args, "health", "body", "limit")
-	if err != nil {
-		return err
-	}
-	if err := fs.Parse(parsed); err != nil || fs.NArg() != 1 || *limit < 0 {
-		return errors.New(projectStatusUsage)
-	}
-	set := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
-	create := set["health"] || set["body"]
-	if create && (!set["health"] || !set["body"] || set["limit"]) {
-		return errors.New(projectStatusUsage)
-	}
-	if create && !store.ValidHealth(*health) {
-		return errors.New("--health must be on_track, at_risk or off_track")
-	}
-	if err := mustClient(c); err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	if create {
-		x, err := c.CreateStatusUpdate(ctx, fs.Arg(0), *health, *body)
-		if err != nil {
-			return err
-		}
-		return printJSON(out, x)
-	}
-	list, err := c.ListStatusUpdates(ctx, fs.Arg(0), *limit)
-	if err != nil {
-		return err
-	}
-	return printJSON(out, list)
-}
-
 // ledgerAge renders a duration as its two largest units: 3d4h, 5h12m, 45m, 30s.
 func ledgerAge(d time.Duration) string {
 	if d < 0 {
@@ -217,16 +172,7 @@ func writeLedger(out io.Writer, l store.Ledger) error {
 
 	fmt.Fprintf(&b, "1. In flight (%d)\n", len(l.InFlight.Tasks))
 	for _, p := range l.InFlight.Projects {
-		fmt.Fprintf(&b, "   project %s: %d started, ", p.Project, p.Started)
-		if p.LastUpdateAt == nil {
-			b.WriteString("no status update")
-		} else {
-			fmt.Fprintf(&b, "%s %s ago", p.Health, ledgerAge(now.Sub(*p.LastUpdateAt)))
-		}
-		if p.Stale {
-			b.WriteString(" (stale)")
-		}
-		b.WriteString("\n")
+		fmt.Fprintf(&b, "   project %s: %d started\n", p.Project, p.Started)
 	}
 	for _, x := range l.InFlight.Tasks {
 		writeLedgerTask(&b, x, now, false)

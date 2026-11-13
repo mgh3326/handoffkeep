@@ -160,7 +160,7 @@ var (
 		"state, claim and lease (claimed_by, refs.job_id, job lock) and fencing",
 		"task_events and the sync_log change feed",
 		"labels, relations and parent (the parent is a description line only)",
-		"translations, standing orders, status updates",
+		"translations",
 		"the task id sequence and yt_task_bindings themselves",
 	}
 	ytRebuildCommentsPGOnly = []string{

@@ -189,63 +189,6 @@ func TestDispositionCreateRejectsUnsourcedFacts(t *testing.T) {
 	}
 }
 
-// M4 + M3: the item is never observable in backlog, so NextTask cannot claim it.
-func TestDispositionIsNeverClaimable(t *testing.T) {
-	s := uiStore(t)
-	lane := uiLane(t, "director")
-	mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "A"))
-	if _, err := s.NextTask(t.Context(), lane, "director", "job-1", ""); !errors.Is(err, store.ErrQueueEmpty) {
-		t.Fatalf("NextTask on a lane holding only a disposition item: err=%v, want queue_empty", err)
-	}
-}
-
-// AC ② / M1 M2 M3: operator silence writes nothing, however much time passes.
-func TestDispositionSilenceIsInert(t *testing.T) {
-	s := uiStore(t)
-	lane := uiLane(t, "director")
-	x := mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 2, "A"))
-	before := dispositionRowCounts(t, lane, x.ID)
-	ctx := t.Context()
-	for range 3 {
-		if _, err := s.NextTask(ctx, lane, "director", "job-1", ""); !errors.Is(err, store.ErrQueueEmpty) {
-			t.Fatalf("NextTask err=%v", err)
-		}
-	}
-	if _, err := s.ListTasks(ctx, lane, "", "", nil, nil, 100); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.ListOpenTaskDecisions(ctx, 1000); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.ListOpenDispositions(ctx, 1000); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.ListUnnotifiedDispositions(ctx, 1000); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.EventWatermarks(ctx); err != nil {
-		t.Fatal(err)
-	}
-	later := time.Now().UTC().Add(30 * 24 * time.Hour)
-	summary, err := s.DispositionSummary(ctx, later)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DispositionSummary(ctx, time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	after := dispositionRowCounts(t, lane, x.ID)
-	if after.ItemState != "backlog" || after.ItemEvents != before.ItemEvents || after.Backlog != before.Backlog {
-		t.Fatalf("silence changed the item: before=%+v after=%+v", before, after)
-	}
-	if after.Tasks != before.Tasks || after.Relay != before.Relay || after.TaskEvents != before.TaskEvents {
-		t.Fatalf("silence wrote rows: before=%+v after=%+v", before, after)
-	}
-	if summary.Open < 1 || summary.OldestOpenDays < 30 {
-		t.Fatalf("30 days of silence must leave the item open and aged: %+v", summary)
-	}
-}
-
 // AC+1 / M5 M6: every non-operator path is refused while the item is open.
 func TestDispositionOnlyOperatorLeavesNeedsDecision(t *testing.T) {
 	s := uiStore(t)

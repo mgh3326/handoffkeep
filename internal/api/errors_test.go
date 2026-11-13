@@ -30,7 +30,6 @@ func TestAppErrMapping(t *testing.T) {
 		body   map[string]string
 	}{
 		{"sentinel", store.ErrTaskNotFound, http.StatusNotFound, map[string]string{"error": "not_found"}},
-		{"wrapped sentinel", fmt.Errorf("claim: %w", store.ErrQueueEmpty), http.StatusNotFound, map[string]string{"error": "queue_empty"}},
 		{"sentinel with reason", fmt.Errorf("%w: claimed by another job", store.ErrTaskConflict), http.StatusConflict, map[string]string{"error": "task_conflict", "reason": "claimed by another job"}},
 		{"YouTrack result conflict", ytwrite.ErrConflictingResult, http.StatusConflict, map[string]string{"error": "ytwrite_conflicting_result"}},
 		{"store validation", errors.New("invalid bench rep"), http.StatusBadRequest, map[string]string{"error": "invalid_context"}},

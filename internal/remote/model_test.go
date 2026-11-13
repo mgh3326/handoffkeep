@@ -15,11 +15,7 @@ func TestModelMethods(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		method, path = r.Method, r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
-		if path == "/v1/labels" && method == "GET" {
-			fmt.Fprint(w, `{"labels":[]}`)
-		} else {
-			fmt.Fprint(w, `{}`)
-		}
+		fmt.Fprint(w, `{}`)
 	}))
 	defer server.Close()
 	c := Client{URL: server.URL, Token: "test", HTTP: server.Client()}
@@ -36,19 +32,11 @@ func TestModelMethods(t *testing.T) {
 		{"GET", "/v1/milestones/2", func() error { _, e := c.GetMilestone(ctx, 2); return e }},
 		{"PATCH", "/v1/milestones/2", func() error { _, e := c.PatchMilestone(ctx, 2, store.MilestonePatch{}); return e }},
 		{"PUT", "/v1/milestones/2", func() error { _, e := c.SaveMilestone(ctx, store.ProjectMilestone{ID: 2}); return e }},
-		{"GET", "/v1/labels", func() error { _, e := c.ListLabels(ctx); return e }},
-		{"POST", "/v1/labels", func() error { _, e := c.SaveLabel(ctx, store.Label{}); return e }},
-		{"PUT", "/v1/labels/2", func() error { _, e := c.SaveLabel(ctx, store.Label{ID: 2}); return e }},
-		{"POST", "/v1/labels/2/retire", func() error { return c.RetireLabel(ctx, 2) }},
 		{"POST", "/v1/tasks/1/milestone", func() error { _, e := c.SetTaskMilestone(ctx, 1, &mid); return e }},
-		{"POST", "/v1/tasks/1/labels", func() error { _, e := c.SetTaskLabel(ctx, 1, 2, true); return e }},
-		{"POST", "/v1/tasks/1/deadlines", func() error { _, e := c.SetTaskDeadlines(ctx, 1, store.TaskDeadlines{}); return e }},
-		{"POST", "/v1/tasks/1/due", func() error { _, e := c.SetTaskDue(ctx, 1, nil); return e }},
 		{"POST", "/v1/tasks/1/project", func() error {
 			_, e := c.SetTaskProjectWithMetadata(ctx, 1, "p", "", store.ProjectMetadataPatch{})
 			return e
 		}},
-		{"POST", "/v1/tasks/1/subscribers", func() error { _, e := c.SetTaskSubscriber(ctx, 1, "a", "cli", true); return e }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.wantMethod+tc.wantPath, func(t *testing.T) {

@@ -76,24 +76,3 @@ func TestAckLedgerBodyAndBackward(t *testing.T) {
 		t.Fatalf("backward err=%v", err)
 	}
 }
-
-func TestStatusUpdatesClient(t *testing.T) {
-	h, calls := ledgerFake(t, http.StatusCreated, `{"id":3,"project":"exp","health":"at_risk","body":"slipping","snapshot":{"started":2},"diff":{"previous_id":null}}`)
-	c := Client{URL: h.URL, Token: "tok"}
-	x, err := c.CreateStatusUpdate(context.Background(), "exp", "at_risk", "slipping")
-	if err != nil || x.ID != 3 || x.Snapshot.Started != 2 || x.Diff.PreviousID != nil {
-		t.Fatalf("update=%+v err=%v", x, err)
-	}
-	if g := (*calls)[0]; g.method != "POST" || g.path != "/v1/projects/exp/status-updates" || g.body["raw"] != `{"body":"slipping","health":"at_risk"}` {
-		t.Fatalf("call=%+v", g)
-	}
-	h, calls = ledgerFake(t, http.StatusOK, `{"project":"exp","stale":true,"last_update_at":null,"updates":[]}`)
-	c = Client{URL: h.URL, Token: "tok"}
-	list, err := c.ListStatusUpdates(context.Background(), "exp", 5)
-	if err != nil || !list.Stale || list.Project != "exp" {
-		t.Fatalf("list=%+v err=%v", list, err)
-	}
-	if g := (*calls)[0]; g.method != "GET" || g.path != "/v1/projects/exp/status-updates" || g.query != "limit=5" {
-		t.Fatalf("call=%+v", g)
-	}
-}

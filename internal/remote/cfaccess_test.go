@@ -78,8 +78,8 @@ func serveHK(t *testing.T, storage *httptest.Server) func(http.ResponseWriter, *
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/projects":
 			_ = json.NewEncoder(w).Encode(map[string]any{"projects": []string{"p"}})
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/checkpoints":
-			_ = json.NewEncoder(w).Encode(store.Checkpoint{Session: "s"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/tasks/1/comments":
+			_ = json.NewEncoder(w).Encode(store.CreatedTaskComment{})
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/attachments":
 			_ = json.NewEncoder(w).Encode(map[string]any{"attachment": store.Attachment{SHA256: "ab"}, "created": true})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/attachments/ab" && r.URL.Query().Get("presign") == "1":
@@ -88,8 +88,6 @@ func serveHK(t *testing.T, storage *httptest.Server) func(http.ResponseWriter, *
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/attachments/ab":
 			w.Header().Set("Content-Type", "application/octet-stream")
 			_, _ = io.WriteString(w, "bytes")
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/export":
-			_, _ = io.WriteString(w, `{"tasks":[]}`)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusTeapot)
@@ -104,7 +102,7 @@ func exerciseAll(t *testing.T, c Client, storage *httptest.Server) {
 	if _, e := c.ListTaskProjects(ctx); e != nil {
 		t.Fatalf("call GET: %v", e)
 	}
-	if _, e := c.Checkpoint(ctx, "", store.Checkpoint{Session: "s"}); e != nil {
+	if _, e := c.CreateTaskComment(ctx, 1, "body"); e != nil {
 		t.Fatalf("call POST: %v", e)
 	}
 	if _, _, e := c.PutAttachment(ctx, "", "n.bin", "application/octet-stream", "ref:x", []byte("b")); e != nil {
@@ -125,9 +123,6 @@ func exerciseAll(t *testing.T, c Client, storage *httptest.Server) {
 	if att.MIME != "application/octet-stream" {
 		t.Fatalf("attachment mime=%q", att.MIME)
 	}
-	if _, e := c.ExportTasks(ctx, "", "", "", nil, 0); e != nil {
-		t.Fatalf("ExportTasks: %v", e)
-	}
 }
 
 // Every request kind carries the CF Access pair by equality plus the explicit
@@ -145,8 +140,8 @@ func TestCFAccessHeadersOnEveryRequestKind(t *testing.T) {
 	exerciseAll(t, c, storage)
 
 	got := hk.requests()
-	if len(got) != 6 {
-		t.Fatalf("requests=%d want 6", len(got))
+	if len(got) != 5 {
+		t.Fatalf("requests=%d want 5", len(got))
 	}
 	for i, h := range got {
 		if h.id != cfFixtureID {
@@ -251,8 +246,6 @@ func TestCFAccessLoginRedirectFailsLoud(t *testing.T) {
 	if rc != nil {
 		_ = rc.Close()
 	}
-	_, e = c.ExportTasks(ctx, "", "", "", nil, 0)
-	check("ExportTasks", e)
 }
 
 // A redirect off the configured host is never followed — the foreign host
@@ -383,12 +376,12 @@ func (t *routeTransport) snapshot() []recordedRequest {
 }
 
 // allRequestForms returns one closure per request kind the client can send:
-// call() GET, call() POST, attachment PUT, presign, download, and export.
+// call() GET, call() POST, attachment PUT, presign and download.
 func allRequestForms(c Client) map[string]func(context.Context) error {
 	return map[string]func(context.Context) error{
 		"call-get": func(ctx context.Context) error { _, e := c.ListTaskProjects(ctx); return e },
 		"call-post": func(ctx context.Context) error {
-			_, e := c.Checkpoint(ctx, "", store.Checkpoint{Session: "s"})
+			_, e := c.CreateTaskComment(ctx, 1, "body")
 			return e
 		},
 		"put": func(ctx context.Context) error {
@@ -403,7 +396,6 @@ func allRequestForms(c Client) map[string]func(context.Context) error {
 			}
 			return e
 		},
-		"export": func(ctx context.Context) error { _, e := c.ExportTasks(ctx, "", "", "", nil, 0); return e },
 	}
 }
 
@@ -497,8 +489,6 @@ func TestHTML200IsErrorOnJSONCalls(t *testing.T) {
 	check("call", e)
 	_, _, e = c.PutAttachment(ctx, "", "n", "text/plain", "", nil)
 	check("PutAttachment", e)
-	_, e = c.ExportTasks(ctx, "", "", "", nil, 0)
-	check("ExportTasks", e)
 }
 
 // An Access login host is DNS-case-insensitive: an uppercase Location host is
@@ -524,8 +514,8 @@ func TestUppercaseAccessLoginHostFailsLoud(t *testing.T) {
 						}
 					}
 				}
-				if got := hk.requests(); len(got) != 6 {
-					t.Fatalf("requests=%d want exactly the six refused sends", len(got))
+				if got := hk.requests(); len(got) != 5 {
+					t.Fatalf("requests=%d want exactly the five refused sends", len(got))
 				}
 			})
 		}

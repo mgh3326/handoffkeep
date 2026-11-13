@@ -114,29 +114,4 @@ func TestLedgerAPI(t *testing.T) {
 	}
 }
 
-func TestStatusUpdatesAPI(t *testing.T) {
-	h, _, _ := ledgerAPIServer(t)
-	var e map[string]any
-	if status := decisionAPICall(t, h, http.MethodPost, "/v1/projects/experiment/status-updates", map[string]string{"health": "green", "body": "x"}, &e); status != http.StatusBadRequest || e["error"] != "invalid_status_update" || e["reason"] == nil {
-		t.Fatalf("invalid health: %d %v", status, e)
-	}
-	if status := decisionAPICall(t, h, http.MethodPost, "/v1/projects/no-such-project/status-updates", map[string]string{"health": "on_track", "body": "x"}, &e); status != http.StatusNotFound || e["error"] != "project_not_found" {
-		t.Fatalf("unknown project: %d %v", status, e)
-	}
-	if status := decisionAPICall(t, h, http.MethodPost, "/v1/projects/experiment/status-updates", map[string]any{"health": "on_track", "body": "x", "extra": 1}, &e); status != http.StatusBadRequest {
-		t.Fatalf("unknown field: %d %v", status, e)
-	}
-	var x store.StatusUpdate
-	if status := decisionAPICall(t, h, http.MethodPost, "/v1/projects/experiment/status-updates", map[string]string{"health": "at_risk", "body": "slipping"}, &x); status != http.StatusCreated || x.ID < 1 || x.Health != "at_risk" || x.CreatedBy != "tester" || x.Diff.PreviousID != nil {
-		t.Fatalf("create: %d %+v", status, x)
-	}
-	var list store.StatusUpdateList
-	if status := decisionAPICall(t, h, http.MethodGet, "/v1/projects/experiment/status-updates?limit=10", nil, &list); status != http.StatusOK || len(list.Updates) != 1 || list.Updates[0].ID != x.ID || list.Stale {
-		t.Fatalf("list: %d %+v", status, list)
-	}
-	if status := decisionAPICall(t, h, http.MethodGet, "/v1/projects/experiment/status-updates?limit=0", nil, &e); status != http.StatusBadRequest {
-		t.Fatalf("bad limit: %d %v", status, e)
-	}
-}
-
 func itoa64(n int64) string { return strconv.FormatInt(n, 10) }

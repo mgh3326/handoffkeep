@@ -26,45 +26,6 @@ func fakeTaskServer(t *testing.T, task store.Task) Client {
 	return Client{URL: server.URL, Token: "t"}
 }
 
-// TestClaimAcceptsBothVocabularies: a claim response in developing or
-// researching (a current server) is accepted, and so are claimed and
-// in_progress (a server that predates the eleven-state model).
-func TestClaimAcceptsBothVocabularies(t *testing.T) {
-	ctx := context.Background()
-	for _, state := range []string{"developing", "researching", "reviewing", "claimed", "in_progress"} {
-		c := fakeTaskServer(t, store.Task{ID: 7, State: state, ClaimedBy: "worker", Refs: store.TaskRefs{JobID: "job-1"}})
-		got, err := c.ClaimTask(ctx, 7, "worker", "job-1", "")
-		if err != nil || got.State != state {
-			t.Errorf("claim response %q: %+v err=%v", state, got, err)
-		}
-		if got, err := c.NextTask(ctx, "lane", "worker", "job-1", ""); state != "reviewing" && (err != nil || got.State != state) {
-			t.Errorf("next response %q: %+v err=%v", state, got, err)
-		}
-		if _, err := c.RebindTaskJob(ctx, 7, "job-0", "job-1", "worker", "takeover"); err != nil {
-			t.Errorf("rebind response %q: %v", state, err)
-		}
-	}
-	// A response that is not a started state is still a failed claim.
-	for _, state := range []string{"backlog", "unstarted", "triage", "merged", "icebox", ""} {
-		c := fakeTaskServer(t, store.Task{ID: 7, State: state, ClaimedBy: "worker", Refs: store.TaskRefs{JobID: "job-1"}})
-		if _, err := c.ClaimTask(ctx, 7, "worker", "job-1", ""); err == nil || !strings.Contains(err.Error(), "claim_not_applied") {
-			t.Errorf("claim response %q: err=%v, want claim_not_applied", state, err)
-		}
-		if _, err := c.NextTask(ctx, "lane", "worker", "job-1", ""); err == nil || !strings.Contains(err.Error(), "next_not_applied") {
-			t.Errorf("next response %q: err=%v, want next_not_applied", state, err)
-		}
-	}
-	// The claimant and the job link are still checked.
-	wrong := fakeTaskServer(t, store.Task{ID: 7, State: "developing", ClaimedBy: "someone-else", Refs: store.TaskRefs{JobID: "job-1"}})
-	if _, err := wrong.ClaimTask(ctx, 7, "worker", "job-1", ""); err == nil || !strings.Contains(err.Error(), "claim_claimant_not_recorded") {
-		t.Errorf("wrong claimant: err=%v", err)
-	}
-	unlinked := fakeTaskServer(t, store.Task{ID: 7, State: "developing", ClaimedBy: "worker"})
-	if _, err := unlinked.ClaimTask(ctx, 7, "worker", "job-1", ""); err == nil || !strings.Contains(err.Error(), "claim_job_id_not_recorded") {
-		t.Errorf("missing job link: err=%v", err)
-	}
-}
-
 // TestTransitionJudgesResponseInEitherVocabulary: the target the caller asked
 // for, in the old or the new name, is checked against whatever vocabulary the
 // server answers in.

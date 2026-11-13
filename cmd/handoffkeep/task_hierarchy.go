@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -103,60 +102,4 @@ func taskRelationCmd(args []string, out io.Writer) error {
 		return err
 	}
 	return printJSON(out, res)
-}
-
-// taskMigrateStatesCmd is the pre-deploy dry-run of the state migration. It
-// reads the database directly (HANDOFFKEEP_DB_URL, the variable serve uses):
-// the server it would ask is the one that has not been upgraded yet. It opens
-// the pool without migrating, runs one read-only transaction and writes
-// nothing. Only --dry-run exists: the migration itself runs at server start.
-func taskMigrateStatesCmd(args []string, out io.Writer) error {
-	fs := flag.NewFlagSet("tasks migrate-states", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	dryRun := fs.Bool("dry-run", false, "print the counts the migration would produce and write nothing")
-	asJSON := fs.Bool("json", false, "print the plan as JSON")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return errors.New("tasks migrate-states takes flags only")
-	}
-	if !*dryRun {
-		return errors.New("tasks migrate-states supports only --dry-run: the migration runs when the upgraded server starts")
-	}
-	dbURL := os.Getenv("HANDOFFKEEP_DB_URL")
-	if dbURL == "" {
-		return errors.New("HANDOFFKEEP_DB_URL is required: the dry-run reads the database the server will migrate")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	st, err := store.OpenForPlan(ctx, dbURL)
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-	plan, err := st.PlanStateMigration(ctx)
-	if err != nil {
-		return err
-	}
-	return writeStateMigrationPlan(out, plan, *asJSON)
-}
-
-func writeStateMigrationPlan(out io.Writer, plan store.StateMigrationPlan, asJSON bool) error {
-	if asJSON {
-		return printJSON(out, plan)
-	}
-	if plan.Migrated {
-		fmt.Fprintln(out, "already migrated: no legacy state is left to plan")
-		return nil
-	}
-	fmt.Fprintf(out, "%-16s %-22s %-12s %s\n", "legacy_state", "rule", "new_state", "count")
-	total := 0
-	for _, c := range plan.Counts {
-		fmt.Fprintf(out, "%-16s %-22s %-12s %d\n", c.LegacyState, c.Rule, c.NewState, c.Count)
-		total += c.Count
-	}
-	fmt.Fprintf(out, "changed tasks: %d (one sync_log row and one state_migration event each)\n", total)
-	fmt.Fprintf(out, "hold tasks mirrored to Linear that would show as Canceled: %d\n", plan.HoldMirroredToCanceled)
-	return nil
 }

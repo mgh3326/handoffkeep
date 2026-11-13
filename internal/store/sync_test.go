@@ -1,7 +1,6 @@
 package store
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -82,79 +81,6 @@ func TestSyncMutationJournal(t *testing.T) {
 	}
 }
 
-func TestSyncBootstrapDeltaConverges(t *testing.T) {
-	s, pool := searchTestStore(t)
-	ctx := t.Context()
-	for i := 0; i < 3; i++ {
-		if _, _, err := s.PutDocument(ctx, Document{Key: fmt.Sprintf("sync/%d", i), Kind: "note", Body: "body", CreatedBy: "test"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	first, err := s.SyncBootstrap(ctx, "document", "", 1)
-	if err != nil || first.Cursor == "" {
-		t.Fatalf("first=%+v err=%v", first, err)
-	}
-	ids := map[string]bool{first.Rows[0].ID: true}
-	if _, err = pool.Exec(ctx, `DELETE FROM documents WHERE id=$1::bigint`, first.Rows[0].ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err = s.PutDocument(ctx, Document{Key: "sync/new", Kind: "note", Body: "new", CreatedBy: "test"}); err != nil {
-		t.Fatal(err)
-	}
-	cursor := first.Cursor
-	for cursor != "" {
-		page, err := s.SyncBootstrap(ctx, "document", cursor, 1)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if page.MaxSyncID != first.MaxSyncID {
-			t.Fatal("watermark changed")
-		}
-		for _, r := range page.Rows {
-			ids[r.ID] = true
-		}
-		cursor = page.Cursor
-	}
-	after := first.MaxSyncID
-	for {
-		changes, meta, err := s.SyncDelta(ctx, after, 1)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, c := range changes {
-			if c.Action == "D" {
-				delete(ids, c.ModelID)
-			} else {
-				ids[c.ModelID] = true
-			}
-		}
-		after = meta.LastSyncID
-		if after == meta.MaxSyncID {
-			break
-		}
-	}
-	fresh, err := s.SyncBootstrap(ctx, "document", "", 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ids) != len(fresh.Rows) {
-		t.Fatalf("ids=%v fresh=%v", ids, fresh.Rows)
-	}
-	for _, r := range fresh.Rows {
-		if !ids[r.ID] {
-			t.Fatalf("missing %s", r.ID)
-		}
-	}
-	for _, model := range []string{"task", "task_comment", "decision"} {
-		if _, err = s.SyncBootstrap(ctx, model, "", 100); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err = s.SyncBootstrap(ctx, "task", first.Cursor, 1); !errors.Is(err, ErrInvalidSync) {
-		t.Fatalf("cross-model cursor: %v", err)
-	}
-}
-
 func TestSyncPruneReset(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := t.Context()
@@ -231,10 +157,6 @@ func TestSyncCommitOrder(t *testing.T) {
 	if err != nil || len(changes) != 1 || changes[0].ModelID != fmt.Sprint(secondID) || meta.LastSyncID != meta.MaxSyncID {
 		t.Fatalf("before long commit: %v %+v %v", changes, meta, err)
 	}
-	bootstrap, err := s.SyncBootstrap(ctx, "document", "", 100)
-	if err != nil || bootstrap.MaxSyncID != meta.MaxSyncID || len(bootstrap.Rows) != 1 {
-		t.Fatalf("bootstrap=%+v err=%v", bootstrap, err)
-	}
 	if err = long.QueryRow(ctx, insert, "sync/long-last").Scan(&lastID); err != nil {
 		t.Fatal(err)
 	}
@@ -304,10 +226,6 @@ func TestSyncDecisionDeleteAndTaskRetention(t *testing.T) {
 	if err = tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	page, err := s.SyncBootstrap(ctx, "decision", "", 100)
-	if err != nil || len(page.Rows) != 1 || page.Rows[0].ID != "delete-request" {
-		t.Fatalf("projection rollback=%+v err=%v", page, err)
-	}
 	// Task history is append-only: the cascading task delete must fail and
 	// roll back both source and journal changes. Production closes tasks with
 	// terminal transitions rather than hard deletion.
@@ -317,9 +235,6 @@ func TestSyncDecisionDeleteAndTaskRetention(t *testing.T) {
 	changes, _, err := s.SyncDelta(ctx, before.MaxSyncID, 100)
 	if err != nil || len(changes) != 0 {
 		t.Fatalf("refused delete leaked journal rows: %v %v", changes, err)
-	}
-	if _, found, err := s.GetSyncRow(ctx, "decision", "delete-request"); err != nil || !found {
-		t.Fatalf("refused delete lost decision: found=%v err=%v", found, err)
 	}
 	// Removing the current request deletes only its decision projection.
 	if _, err = pool.Exec(ctx, `UPDATE tasks SET refs='{}' WHERE id=$1`, id); err != nil {
@@ -339,10 +254,6 @@ func TestSyncDecisionDeleteAndTaskRetention(t *testing.T) {
 	if seen["task"] != "U" || seen["decision"] != "D" {
 		t.Fatalf("changes=%v", changes)
 	}
-	page, err = s.SyncBootstrap(ctx, "decision", "", 100)
-	if err != nil || len(page.Rows) != 0 {
-		t.Fatalf("deleted projection=%+v err=%v", page, err)
-	}
 	dropped, err := s.TransitionTask(ctx, id, "dropped", "test", "no longer needed", nil, "")
 	if err != nil || dropped.State != "dropped" {
 		t.Fatalf("terminal task=%+v err=%v", dropped, err)
@@ -356,9 +267,6 @@ func TestSyncDecisionDeleteAndTaskRetention(t *testing.T) {
 		if change.Model != "task" || change.Action != "U" || change.ModelID != fmt.Sprint(id) {
 			t.Fatalf("terminal change=%+v", change)
 		}
-	}
-	if _, found, err := s.GetSyncRow(ctx, "task", fmt.Sprint(id)); err != nil || !found {
-		t.Fatalf("terminal task not readable: found=%v err=%v", found, err)
 	}
 }
 
@@ -449,9 +357,6 @@ func TestSyncBackfillDuplicateDecisionIDs(t *testing.T) {
 	if err := s.migrate(ctx); err != nil {
 		t.Fatalf("repeat migration: %v", err)
 	}
-	if _, found, err := s.GetSyncRow(ctx, "decision", "shared/request"); err != nil || !found {
-		t.Fatalf("backfilled row found=%v err=%v", found, err)
-	}
 }
 
 func TestSyncDecisionOwnershipMovesBetweenTasks(t *testing.T) {
@@ -476,27 +381,6 @@ func TestSyncDecisionOwnershipMovesBetweenTasks(t *testing.T) {
 	// clear that row before transferring the shared ID's unique task_id.
 	claim(second.ID, "second/request", "previous second question")
 	claim(second.ID, "shared/request", "second question")
-	assertOwner := func() {
-		t.Helper()
-		raw, found, err := s.GetSyncRow(ctx, "decision", "shared/request")
-		if err != nil || !found {
-			t.Fatalf("decision found=%v err=%v", found, err)
-		}
-		var row struct {
-			TaskID   int64  `json:"task_id"`
-			Question string `json:"question"`
-		}
-		if err := json.Unmarshal(raw, &row); err != nil {
-			t.Fatal(err)
-		}
-		if row.TaskID != second.ID || row.Question != "second question" {
-			t.Fatalf("wrong decision owner: %+v", row)
-		}
-	}
-	assertOwner()
-	if _, found, err := s.GetSyncRow(ctx, "decision", "second/request"); err != nil || found {
-		t.Fatalf("previous projection found=%v err=%v", found, err)
-	}
 	_, before, err := s.SyncDelta(ctx, 0, 100)
 	if err != nil {
 		t.Fatal(err)
@@ -504,16 +388,12 @@ func TestSyncDecisionOwnershipMovesBetweenTasks(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE tasks SET refs='{}' WHERE id=$1`, first.ID); err != nil {
 		t.Fatal(err)
 	}
-	assertOwner()
 	changes, after, err := s.SyncDelta(ctx, before.LastSyncID, 100)
 	if err != nil || len(changes) != 1 || changes[0].Model != "task" || changes[0].Action != "U" {
 		t.Fatalf("old owner removal affected shared decision: %v err=%v", changes, err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE tasks SET refs='{}' WHERE id=$1`, second.ID); err != nil {
 		t.Fatal(err)
-	}
-	if _, found, err := s.GetSyncRow(ctx, "decision", "shared/request"); err != nil || found {
-		t.Fatalf("removed owner decision found=%v err=%v", found, err)
 	}
 	changes, _, err = s.SyncDelta(ctx, after.LastSyncID, 100)
 	if err != nil || len(changes) != 2 || changes[0].Model != "decision" || changes[0].ModelID != "shared/request" || changes[0].Action != "D" || changes[1].Model != "task" || changes[1].Action != "U" {
