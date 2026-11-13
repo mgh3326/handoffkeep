@@ -71,6 +71,8 @@ var (
 	ErrDecisionRequestStale = errors.New("decision_request_stale")
 	// ErrDecisionRequestResolved refuses a second, different resolution.
 	ErrDecisionRequestResolved = errors.New("decision_request_resolved")
+	// ErrNoOpenDecisionRequest refuses an answer when the task has no open decision request.
+	ErrNoOpenDecisionRequest = errors.New("no_open_decision_request")
 	// ErrDecisionAssistantKind refuses any resolution kind but answered on
 	// the assistant path: default_applied needs a real application receipt
 	// and withdrawn is the requester's own close, so neither may come back

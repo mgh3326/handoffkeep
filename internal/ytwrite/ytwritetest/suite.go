@@ -482,7 +482,7 @@ func RunProtocol(t *testing.T, nl NewLedger) {
 			"nul in body":     func(r *ytwrite.CommentRequest) { r.Body = "a\x00b" },
 			"bad utf8 body":   func(r *ytwrite.CommentRequest) { r.Body = "a\xffb" },
 			"empty body":      func(r *ytwrite.CommentRequest) { r.Body = "  \n" },
-			"huge body":       func(r *ytwrite.CommentRequest) { r.Body = strings.Repeat("x", ytwrite.MaxBodyBytes+1) },
+			"huge body":       func(r *ytwrite.CommentRequest) { r.Body = strings.Repeat("x", ytwrite.TextMaxChars+1) },
 			"separator actor": func(r *ytwrite.CommentRequest) { r.Actor = "a · b" },
 			"newline actor":   func(r *ytwrite.CommentRequest) { r.Actor = "a\nb" },
 			"no principal":    func(r *ytwrite.CommentRequest) { r.Principal = "" },

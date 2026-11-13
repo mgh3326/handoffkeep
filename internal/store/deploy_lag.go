@@ -52,6 +52,45 @@ func (s *Store) CountMergedChangesSince(ctx context.Context, repo string, since 
 	return count, err
 }
 
+// deployLagStatusTx is the one lag measure the console and the notifier share.
+// The boundary is the service's last successful deploy (the same value
+// readProjectLastSuccessfulDeploysTx returns). A service with no successful
+// deploy has no boundary: its lag is unknown, so it reports HasDeployed=false,
+// LagCount=0 and Lagging=false. Counting from time zero would report the whole
+// merge history as lag.
+func deployLagStatusTx(ctx context.Context, q rowQuerier, svc DeployService, since time.Time, hasSince bool) (DeployLagServiceStatus, error) {
+	st := DeployLagServiceStatus{Service: svc.Name, Repo: svc.Repo, HasDeployed: hasSince}
+	if !hasSince {
+		return st, nil
+	}
+	at := since
+	st.DeployedAt = &at
+	var count int
+	if err := q.QueryRow(ctx, `SELECT count(*) FROM changes WHERE repo = $1 AND state = 'merged' AND merged_at > $2`, svc.Repo, since).Scan(&count); err != nil {
+		return st, err
+	}
+	st.LagCount = count
+	st.Lagging = IsDeployLagging(count)
+	return st, nil
+}
+
+// DeployLagStatus returns the lag of one active deploy service, measured the
+// same way EnqueueDeployLagNotices measures it. The console calls this so the
+// banner and the operator-desk notice cannot disagree.
+func (s *Store) DeployLagStatus(ctx context.Context, svc DeployService) (DeployLagServiceStatus, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return DeployLagServiceStatus{}, err
+	}
+	defer tx.Rollback(ctx)
+	lastDeploys, err := readProjectLastSuccessfulDeploysTx(ctx, tx)
+	if err != nil {
+		return DeployLagServiceStatus{}, err
+	}
+	since, ok := lastDeploys[svc.Name]
+	return deployLagStatusTx(ctx, tx, svc, since, ok)
+}
+
 // EnqueueDeployLagNotices checks each active deploy service for deploy lag against main.
 // For any service whose lag count > 2 (lagging), it inserts one notification_outbox row
 // to operator-desk with event_id "deploy-lag-<service>-<YYYY-MM-DD>" (idempotent ON CONFLICT).
@@ -84,31 +123,22 @@ func (s *Store) EnqueueDeployLagNotices(ctx context.Context, now time.Time) (int
 		if !svc.Active {
 			continue
 		}
-		var since time.Time
-		if t, ok := lastDeploys[svc.Name]; ok {
-			since = t
+		since, ok := lastDeploys[svc.Name]
+		st, err := deployLagStatusTx(ctx, tx, svc, since, ok)
+		if err != nil {
+			return 0, err
 		}
-		var lagCount int
-		if since.IsZero() {
-			if err := tx.QueryRow(ctx, `SELECT count(*) FROM changes WHERE repo = $1 AND state = 'merged'`, svc.Repo).Scan(&lagCount); err != nil {
-				return 0, err
-			}
-		} else {
-			if err := tx.QueryRow(ctx, `SELECT count(*) FROM changes WHERE repo = $1 AND state = 'merged' AND merged_at > $2`, svc.Repo, since).Scan(&lagCount); err != nil {
-				return 0, err
-			}
+		if !st.Lagging {
+			continue
 		}
-
-		if IsDeployLagging(lagCount) {
-			eventID := DeployLagNoticeEventID(svc.Name, now)
-			text := DeployLagNoticeText(svc.Name, lagCount)
-			inserted, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindDeployLag, "operator-desk", eventID, text, now)
-			if err != nil {
-				return 0, err
-			}
-			if inserted {
-				enqueued++
-			}
+		eventID := DeployLagNoticeEventID(svc.Name, now)
+		text := DeployLagNoticeText(svc.Name, st.LagCount)
+		inserted, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindDeployLag, "operator-desk", eventID, text, now)
+		if err != nil {
+			return 0, err
+		}
+		if inserted {
+			enqueued++
 		}
 	}
 

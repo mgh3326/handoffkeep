@@ -12,12 +12,14 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
-// docArticleMaxBytes is the per-part cap. JetBrains does not publish an article
-// content limit; keep the established 256 KiB cap for compatibility.
-const docArticleMaxBytes = 256 << 10
+// docArticleMaxBytes is the per-part cap: the measured YouTrack article part
+// bound (ytwrite.ArticlePartMaxBytes, 240 KiB). A longer document is split
+// over more parts; a part over the bound is refused by YouTrack.
+const docArticleMaxBytes = ytwrite.ArticlePartMaxBytes
 
-// docTitleMaxRunes keeps an article title inside YouTrack's summary limit.
-const docTitleMaxRunes = 200
+// docTitleMaxRunes keeps an article title inside YouTrack's summary limit, the
+// measured bound (ytwrite.SummaryMaxChars).
+const docTitleMaxRunes = ytwrite.SummaryMaxChars
 
 // DocAction is one document the run considered. Action is create, update,
 // adopt (an article a lost create response left behind, found by its marker

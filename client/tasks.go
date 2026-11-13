@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -31,6 +32,67 @@ type Task struct {
 	Category string `json:"category"`
 	// AwaitingDecision is set while the task waits on the operator.
 	AwaitingDecision bool `json:"awaiting_decision"`
+	// Spawn is where the task's panewire spawn request stands; nil when none
+	// was recorded.
+	Spawn *TaskSpawn `json:"spawn,omitempty"`
+}
+
+// TaskSpawn is a task's spawn request record: where panewire's request for it
+// stands (state), why (reason), when to look again and, while it waits, the
+// start condition it waits for.
+type TaskSpawn struct {
+	RequestID      string          `json:"request_id"`
+	Job            string          `json:"job"`
+	Role           string          `json:"role"`
+	State          string          `json:"state"`
+	Reason         string          `json:"reason"`
+	Attempt        int             `json:"attempt"`
+	Host           string          `json:"host"`
+	NextCheckAt    *time.Time      `json:"next_check_at"`
+	ExpiresAt      *time.Time      `json:"expires_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+	StartCondition *TaskSpawnStart `json:"start_condition"`
+}
+
+// TaskSpawnStart is the condition a queued request waits for: the blocking
+// task (TaskID) reaching Until. TaskState is that task's state and Met says
+// whether the condition holds now.
+type TaskSpawnStart struct {
+	TaskID    int64  `json:"task_id"`
+	Until     string `json:"until"`
+	TaskState string `json:"task_state"`
+	Met       bool   `json:"met"`
+}
+
+// TaskSpawnInput is the body PutTaskSpawn sends.
+type TaskSpawnInput struct {
+	RequestID      string               `json:"request_id"`
+	Job            string               `json:"job"`
+	Role           string               `json:"role"`
+	State          string               `json:"state"`
+	Reason         string               `json:"reason"`
+	Attempt        int                  `json:"attempt"`
+	Host           string               `json:"host"`
+	NextCheckAt    *time.Time           `json:"next_check_at"`
+	ExpiresAt      *time.Time           `json:"expires_at"`
+	UpdatedAt      time.Time            `json:"updated_at"`
+	StartCondition *TaskSpawnStartInput `json:"start_condition,omitempty"`
+}
+
+// TaskSpawnStartInput names the start condition a request waits for.
+type TaskSpawnStartInput struct {
+	TaskID int64  `json:"task_id"`
+	Until  string `json:"until"`
+}
+
+// TaskStateEntry is one row of TaskStates: a task's state and category, the
+// open tasks that block it and, when a condition applies, whether it holds.
+type TaskStateEntry struct {
+	ID           int64   `json:"id"`
+	State        string  `json:"state"`
+	Category     string  `json:"category"`
+	Blockers     []int64 `json:"blockers"`
+	ConditionMet *bool   `json:"condition_met,omitempty"`
 }
 
 // TaskRefs are a task's typed references.
@@ -114,6 +176,36 @@ func (c Client) ListTasks(ctx context.Context, in ListTasksInput) ([]Task, error
 		return nil, err
 	}
 	return out.Tasks, nil
+}
+
+// PutTaskSpawn records task id's spawn request state through PUT
+// /v1/tasks/{id}/spawn. The server keeps the latest record by in.UpdatedAt and
+// answers the stored record: a write not newer than it is ignored, so a
+// retried write is safe. Only a fleet service (panewire) writes it.
+func (c Client) PutTaskSpawn(ctx context.Context, id int64, in TaskSpawnInput) (TaskSpawn, error) {
+	var out TaskSpawn
+	err := c.transport().Call(ctx, "PUT", fmt.Sprintf("/v1/tasks/%d/spawn", id), in, &out)
+	return out, err
+}
+
+// TaskStates reads the state, category, open blockers and condition of up to
+// 200 tasks through GET /v1/tasks/states. until, when set, is merged or
+// deployed and the level condition_met is judged against; empty uses each
+// task's own start condition. Ids that name no task are left out of the answer.
+func (c Client) TaskStates(ctx context.Context, ids []int64, until string) ([]TaskStateEntry, error) {
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		parts = append(parts, fmt.Sprint(id))
+	}
+	q := url.Values{"ids": {strings.Join(parts, ",")}}
+	if until != "" {
+		q.Set("until", until)
+	}
+	var out []TaskStateEntry
+	if err := c.transport().Call(ctx, "GET", "/v1/tasks/states?"+q.Encode(), nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ClaimTask claims a task for claimedBy, linking jobID, or recording noJob as

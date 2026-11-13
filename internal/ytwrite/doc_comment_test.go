@@ -115,10 +115,16 @@ func TestDocCommentPartCapAndHKCommentCap(t *testing.T) {
 			t.Fatalf("document part refused: %v", err)
 		}
 	}
-	// hk's own comments keep the smaller cap.
-	big := CommentRequest{Principal: "p", Actor: "w", TaskID: 1, YTIssueID: "2-1", Tenant: "t", Body: bodies[1], Key: "k"}
-	if err := CheckComment(big); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("hk comment over %d bytes accepted: %v", MaxBodyBytes, err)
+	// A document part is well under YouTrack's text bound, so an hk comment
+	// carries one too; a body over the bound is refused.
+	part := CommentRequest{Principal: "p", Actor: "w", TaskID: 1, YTIssueID: "2-1", Tenant: "t", Body: bodies[1], Key: "k"}
+	if err := CheckComment(part); err != nil {
+		t.Fatalf("document part refused as an hk comment: %v", err)
+	}
+	over := part
+	over.Body = strings.Repeat("x", TextMaxChars+1)
+	if err := CheckComment(over); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("hk comment over %d characters accepted: %v", TextMaxChars, err)
 	}
 	// The splitter keeps every part under the cap, so only a heading longer
 	// than the reserved room can push a part over it: the import refused

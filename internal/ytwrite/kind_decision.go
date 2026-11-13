@@ -377,9 +377,14 @@ func SummaryNamesDecision(summary string, decisionID int64) bool {
 	return false
 }
 
+// decisionBlockMaxBytes caps one rendered decision block. It is the cap the
+// decision kind has always had, not a YouTrack text bound (bounds.go), so it
+// keeps its value when the comment and issue bounds move.
+const decisionBlockMaxBytes = 64 << 10
+
 // checkDecisionText explains why a decision's text cannot be written: no
 // marker anywhere (marker-shaped text is data, never evidence), valid UTF-8
-// without NUL, and a block within MaxBodyBytes.
+// without NUL, and a block within decisionBlockMaxBytes.
 func checkDecisionText(x DecisionText) error {
 	if x.DecisionID <= 0 {
 		return fmt.Errorf("%w: decision id must be positive", ErrInvalid)
@@ -391,8 +396,8 @@ func checkDecisionText(x DecisionText) error {
 	if strings.Contains(block, markerPrefix) {
 		return fmt.Errorf("%w: decision text contains the reserved hk op marker", ErrInvalid)
 	}
-	if len(block) > MaxBodyBytes {
-		return fmt.Errorf("%w: decision text is over %d bytes", ErrInvalid, MaxBodyBytes)
+	if len(block) > decisionBlockMaxBytes {
+		return fmt.Errorf("%w: decision text is over %d bytes", ErrInvalid, decisionBlockMaxBytes)
 	}
 	return nil
 }

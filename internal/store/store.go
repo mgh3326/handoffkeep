@@ -27,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 const MaxBytes = 64 << 10
@@ -531,6 +532,9 @@ type Task struct {
 	Children        []TaskChild    `json:"children,omitempty"`
 	Relations       []TaskRelation `json:"relations,omitempty"`
 	Events          []TaskEvent    `json:"events,omitempty"`
+	// Spawn is where the task's panewire spawn request stands (hk 4377); absent
+	// when no request was recorded. Read with the task, never stored on it.
+	Spawn *TaskSpawn `json:"spawn,omitempty"`
 }
 
 // RelayEvent is a durable report from a worker to its owning lane.  Delivery
@@ -1403,6 +1407,17 @@ func validName(x string) bool { return nameRE.MatchString(x) }
 // ValidProjectName reports whether x has the shape of a task project name.
 func ValidProjectName(x string) bool { return validName(x) }
 func validText(x string, n int) bool { return len(x) <= n && !strings.ContainsRune(x, 0) }
+
+// validTextBound is validText for a task title or task text: the size is
+// YouTrack's text bound (ytwrite.TextMaxChars, in characters), so text it
+// would accept is accepted here.
+func validTextBound(x string) bool { return ytwrite.WithinTextMax(x) && !strings.ContainsRune(x, 0) }
+
+// validDocumentText refuses NUL only. A document has no size refusal: a
+// document longer than one article part is split over more parts when it is
+// mirrored (ytwrite.ArticlePartMaxBytes), so YouTrack never sees a whole
+// document at once.
+func validDocumentText(x string) bool { return !strings.ContainsRune(x, 0) }
 
 // ValidActor accepts ordinary store names and the operator:<email> identity
 // used by authenticated console and MCP requests. Actor text remains bounded
@@ -2416,7 +2431,7 @@ func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
 }
 
 func validTask(x Task) bool {
-	return validName(x.Lane) && (x.ParentLane == "" || validName(x.ParentLane)) && x.Title != "" && validText(x.Title, MaxBytes) && taskKinds[x.Kind] && x.CreatedBy != "" && validText(x.CreatedBy, 128) && validTaskRefs(x.Refs) && (x.BodyDoc == "" || ValidBodyDoc(x.BodyDoc))
+	return validName(x.Lane) && (x.ParentLane == "" || validName(x.ParentLane)) && x.Title != "" && validTextBound(x.Title) && taskKinds[x.Kind] && x.CreatedBy != "" && validText(x.CreatedBy, 128) && validTaskRefs(x.Refs) && (x.BodyDoc == "" || ValidBodyDoc(x.BodyDoc))
 }
 
 // bodyDocKeyRE is the document key alphabet the console can fetch and link
@@ -3193,7 +3208,10 @@ func (s *Store) ListTasksFiltered(ctx context.Context, tq TaskQuery) ([]Task, er
 		return nil, err
 	}
 	rows.Close()
-	return out, s.markStalled(ctx, s.pool, out, now)
+	if err := s.markStalled(ctx, s.pool, out, now); err != nil {
+		return out, err
+	}
+	return out, attachTaskSpawns(ctx, s.pool, out)
 }
 
 // GlanceTasks returns the counts and active task slice needed by the compact UI
@@ -3256,6 +3274,9 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 	}
 	one := []Task{x}
 	if err := s.markStalled(ctx, s.pool, one, time.Now().UTC()); err != nil {
+		return Task{}, false, err
+	}
+	if err := attachTaskSpawns(ctx, s.pool, one); err != nil {
 		return Task{}, false, err
 	}
 	x = one[0]
@@ -3879,7 +3900,7 @@ func validDocKey(k string) bool {
 	return len(k) > 0 && len(k) <= 512 && !strings.HasPrefix(k, "/") && !strings.Contains(k, "..") && !strings.ContainsRune(k, 0)
 }
 func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, error) {
-	if !validDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validText(x.Body, DocumentMaxBytes) {
+	if !validDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validDocumentText(x.Body) {
 		return x, false, errors.New("invalid document")
 	}
 	if !ValidActor(x.CreatedBy) {
@@ -3951,6 +3972,9 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 		if e = s.applyDeployRecordTx(ctx, tx, projection, now); e != nil {
 			return x, true, e
 		}
+		if e = queueDeployRecordNoticeTx(ctx, tx, projection, now); e != nil {
+			return x, true, e
+		}
 	}
 	return x, true, tx.Commit(ctx)
 }
@@ -3995,7 +4019,8 @@ func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string,
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, e := s.pool.Query(ctx, `SELECT id,key,kind,session,job,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE ($1='' OR key LIKE $1 || '%') AND ($2='' OR kind=$2) AND ($3='' OR session=$3) AND ($4::bigint=0 OR task_id=$4::bigint) ORDER BY key LIMIT $5`, prefix, kind, session, task, limit)
+	likePrefix := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
+	rows, e := s.pool.Query(ctx, `SELECT id,key,kind,session,job,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE ($1='' OR key LIKE $2 || '%' ESCAPE '\') AND ($3='' OR kind=$3) AND ($4='' OR session=$4) AND ($5::bigint=0 OR task_id=$5::bigint) ORDER BY key LIMIT $6`, prefix, likePrefix, kind, session, task, limit)
 	if e != nil {
 		return nil, e
 	}

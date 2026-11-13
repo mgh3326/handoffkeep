@@ -299,7 +299,7 @@ func TestTaskCommentResponsesAreDistinct(t *testing.T) {
 		{"wrong token", "nope", task.ID, map[string]string{"body": "x"}, http.StatusUnauthorized, "unauthorized"},
 		{"empty", "node-token", task.ID, map[string]string{"body": ""}, http.StatusBadRequest, "comment_empty"},
 		{"blank", "node-token", task.ID, map[string]string{"body": " \n\t "}, http.StatusBadRequest, "comment_empty"},
-		{"too long", "node-token", task.ID, map[string]string{"body": strings.Repeat("a", store.TaskCommentMaxBytes+1)}, http.StatusRequestEntityTooLarge, "comment_too_long"},
+		{"over the request fuse", "node-token", task.ID, map[string]string{"body": strings.Repeat("a", 400<<10)}, http.StatusRequestEntityTooLarge, "comment_too_long"},
 		{"request too large", "node-token", task.ID, map[string]string{"body": strings.Repeat("\x01", 70000)}, http.StatusRequestEntityTooLarge, "comment_too_long"},
 		{"missing task", "node-token", missing, map[string]string{"body": "x"}, http.StatusNotFound, "not_found"},
 		{"author field", "node-token", task.ID, map[string]string{"body": "x", "author": "y"}, http.StatusBadRequest, "author_not_accepted"},
@@ -330,9 +330,12 @@ func TestTaskCommentResponsesAreDistinct(t *testing.T) {
 	if got := listComments(t, s, task.ID); len(got) != 0 {
 		t.Fatalf("rejected comments stored: %+v", got)
 	}
-	x, err := s.CreateTaskComment(t.Context(), task.ID, "node", strings.Repeat("b", store.TaskCommentMaxBytes))
-	if err != nil || len(x.Body) != store.TaskCommentMaxBytes {
-		t.Fatalf("limit-sized comment err=%v", err)
+	// A 1 MB comment is stored whole: the text bound is YouTrack's 20,000,000
+	// characters, not a handoffkeep number.
+	const oneMB = 1 << 20
+	x, err := s.CreateTaskComment(t.Context(), task.ID, "node", strings.Repeat("b", oneMB))
+	if err != nil || len(x.Body) != oneMB {
+		t.Fatalf("1 MB comment err=%v", err)
 	}
 }
 

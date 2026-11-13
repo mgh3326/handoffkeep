@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,38 @@ import (
 // its public behavior boundary here: UI rendering must cap at the same 1000
 // cards accepted by one default-toolchain form request.
 const p4DecisionBatchRenderLimit = 1000
+
+// p4URLs maps each p4Store to its schema's database URL, for the fixtures
+// that write rows directly.
+var p4URLs sync.Map
+
+// p4Store opens a store on a throwaway schema (hk 3294). These tests read
+// and submit the whole decision page, which lists every open decision in the
+// schema: on the shared one, rows other tests left open (tasks, escalations,
+// decision requests) render among the cards and take answer slots, and which
+// test fails then depends on test order and timing.
+func p4Store(t *testing.T) *store.Store {
+	t.Helper()
+	_, url := testdb.Schema(t, "ui_p4")
+	s, err := store.Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	p4URLs.Store(s, url)
+	t.Cleanup(func() { p4URLs.Delete(s) })
+	return s
+}
+
+// p4URL is the database URL of a store p4Store opened.
+func p4URL(t *testing.T, s *store.Store) string {
+	t.Helper()
+	url, ok := p4URLs.Load(s)
+	if !ok {
+		t.Fatal("p4URL: store was not opened by p4Store")
+	}
+	return url.(string)
+}
 
 func p4Options(recommended, allowFree bool) map[string]any {
 	return map[string]any{"options": []map[string]any{{"key": "A", "label": "노드 로컬 저장", "recommended": recommended}, {"key": "B", "label": "중앙 저장 선행"}}, "allow_free": allowFree}
@@ -322,7 +355,7 @@ func p4StructuredDecisionQuestion() string {
 // answered work. It also moves just these test rows behind ordinary work:
 // ListTasks applies its 1000-row limit before a caller can ignore terminal
 // states, so otherwise a heavy test would hide later tests' own task rows.
-func p4StructuredDecisionTasks(t *testing.T, _ *store.Store, lane, prefix string, count int) []int64 {
+func p4StructuredDecisionTasks(t *testing.T, s *store.Store, lane, prefix string, count int) []int64 {
 	t.Helper()
 	options := p4StructuredDecisionOptions()
 	refs, err := json.Marshal(store.TaskRefs{JobID: "job-p4", DecisionOptions: &options})
@@ -333,7 +366,7 @@ func p4StructuredDecisionTasks(t *testing.T, _ *store.Store, lane, prefix string
 	for index := 0; index < count; index++ {
 		titles = append(titles, prefix+" "+strconv.Itoa(index))
 	}
-	db, err := pgx.Connect(t.Context(), testdb.URL(t))
+	db, err := pgx.Connect(t.Context(), p4URL(t, s))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +405,7 @@ func p4StructuredDecisionTasks(t *testing.T, _ *store.Store, lane, prefix string
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		db, err := pgx.Connect(context.Background(), testdb.URL(t))
+		db, err := pgx.Connect(context.Background(), p4URL(t, s))
 		if err != nil {
 			t.Logf("decision task cleanup connection: %v", err)
 			return
@@ -402,9 +435,9 @@ type p4OwnedDecisionCounter struct {
 	laneIDs       []int64
 }
 
-func newP4OwnedDecisionCounter(t *testing.T, taskIDs, escalationIDs, laneIDs []int64) p4OwnedDecisionCounter {
+func newP4OwnedDecisionCounter(t *testing.T, s *store.Store, taskIDs, escalationIDs, laneIDs []int64) p4OwnedDecisionCounter {
 	t.Helper()
-	db, err := pgx.Connect(t.Context(), testdb.URL(t))
+	db, err := pgx.Connect(t.Context(), p4URL(t, s))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +511,7 @@ func p4DecideTask(t *testing.T, s *store.Store, lane, title, state string) store
 }
 
 func TestUIP4StructuredDecisionRendering(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	h := newUITestServer(t, s, fixture, "http://127.0.0.1:1", "fixture-token", 0)
 	defer h.Close()
@@ -520,7 +553,7 @@ func TestUIP4StructuredDecisionRendering(t *testing.T) {
 }
 
 func TestUIP4BatchAnswersAndAudit(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -577,7 +610,7 @@ func TestUIP4BatchAnswersAndAudit(t *testing.T) {
 }
 
 func TestUIP4BatchConflictAndRecommended(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -641,7 +674,7 @@ func p4Resolve(t *testing.T, h *httptest.Server, input map[string]any) (*http.Re
 }
 
 func TestUIP4ResolveClosesOnlyItsDecision(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	h := newUITestServer(t, s, fixture, "", "", 0)
 	defer h.Close()
@@ -671,7 +704,7 @@ func TestUIP4ResolveClosesOnlyItsDecision(t *testing.T) {
 	}
 	// The list above is a global 1000-row window, so absence in it can be
 	// vacuous; target this escalation's id directly.
-	if relayEscalationOpen(t, escalation.ID) {
+	if relayEscalationOpenAt(t, p4URL(t, s), escalation.ID) {
 		t.Fatal("resolved escalation remained open")
 	}
 
@@ -706,9 +739,9 @@ func TestUIP4ResolveClosesOnlyItsDecision(t *testing.T) {
 	if updated.State != "developing" {
 		t.Fatalf("resolved task state=%s", updated.State)
 	}
-	before := uiLaneRowCounts(t, lane).Relay
+	before := uiLaneRowCountsAt(t, p4URL(t, s), lane).Relay
 	response, _ = p4Resolve(t, h, map[string]any{"type": "task", "id": task, "by": "lane-ops", "answer": "again"})
-	if after := uiLaneRowCounts(t, lane).Relay; response.StatusCode != http.StatusConflict || after != before {
+	if after := uiLaneRowCountsAt(t, p4URL(t, s), lane).Relay; response.StatusCode != http.StatusConflict || after != before {
 		t.Fatalf("already resolved status=%d relay before=%d after=%d", response.StatusCode, before, after)
 	}
 	response, _ = p4Resolve(t, h, map[string]any{"type": "task", "id": task + 1000000, "by": "bad lane", "answer": "x"})
@@ -716,9 +749,9 @@ func TestUIP4ResolveClosesOnlyItsDecision(t *testing.T) {
 		t.Fatalf("invalid by status=%d", response.StatusCode)
 	}
 	tooLong := p4DecisionTask(t, h, lane, "too long resolve", p4Options(true, true))
-	before = uiLaneRowCounts(t, lane).Relay
+	before = uiLaneRowCountsAt(t, p4URL(t, s), lane).Relay
 	response, _ = p4Resolve(t, h, map[string]any{"type": "task", "id": tooLong, "by": "lane-ops", "answer": strings.Repeat("x", 2049)})
-	if after := uiLaneRowCounts(t, lane).Relay; response.StatusCode != http.StatusBadRequest || after != before {
+	if after := uiLaneRowCountsAt(t, p4URL(t, s), lane).Relay; response.StatusCode != http.StatusBadRequest || after != before {
 		t.Fatalf("oversized resolve status=%d relay before=%d after=%d", response.StatusCode, before, after)
 	}
 }
@@ -738,7 +771,7 @@ func p4HasRelay(events any, id int64) bool {
 // set — the operator-only narrowing is a client filter covered by the bundle
 // tests, never a server projection that could lose data.
 func TestUIP4QueueOperatorView(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	h := newUITestServer(t, s, fixture, "", "", 0)
 	defer h.Close()
@@ -759,7 +792,7 @@ func TestUIP4QueueOperatorView(t *testing.T) {
 	if !strings.Contains(body, `id="shell-root"`) {
 		t.Fatalf("queue page did not mount the board: %q", body)
 	}
-	before := uiLaneRowCounts(t, lane)
+	before := uiLaneRowCountsAt(t, p4URL(t, s), lane)
 	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/board/tasks?lane="+lane, assertion, "")
 	if body = responseText(t, response); response.StatusCode != http.StatusOK {
 		t.Fatalf("board tasks status=%d body=%q", response.StatusCode, body)
@@ -769,13 +802,13 @@ func TestUIP4QueueOperatorView(t *testing.T) {
 			t.Fatalf("board API lost task %q: %q", title, body)
 		}
 	}
-	if after := uiLaneRowCounts(t, lane); after != before {
+	if after := uiLaneRowCountsAt(t, p4URL(t, s), lane); after != before {
 		t.Fatalf("read-only board API changed rows: before=%+v after=%+v", before, after)
 	}
 }
 
 func TestUIP4BatchRejectsNoFreeCustom(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -795,7 +828,7 @@ func TestUIP4BatchRejectsNoFreeCustom(t *testing.T) {
 }
 
 func TestUIP4BatchSelectionBoundsAndHubFailure(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -838,7 +871,7 @@ func TestUIP4BatchSelectionBoundsAndHubFailure(t *testing.T) {
 }
 
 func TestUIP4BatchSecurityAndConsoleEscalationClosure(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -850,7 +883,7 @@ func TestUIP4BatchSecurityAndConsoleEscalationClosure(t *testing.T) {
 	values := url.Values{"csrf": {csrf}, "mode": {"selected"}}
 	p4Item(values, 0, "task", task, "A: 노드 로컬 저장")
 	values.Set("items.0.select", "1")
-	before := uiLaneRowCounts(t, lane)
+	before := uiLaneRowCountsAt(t, p4URL(t, s), lane)
 	wrongCSRF := url.Values{}
 	for key, value := range values {
 		wrongCSRF[key] = append([]string(nil), value...)
@@ -872,7 +905,7 @@ func TestUIP4BatchSecurityAndConsoleEscalationClosure(t *testing.T) {
 			response.Body.Close()
 		})
 	}
-	if after := uiLaneRowCounts(t, lane); len(hub.requests()) != 0 || after != before {
+	if after := uiLaneRowCountsAt(t, p4URL(t, s), lane); len(hub.requests()) != 0 || after != before {
 		t.Fatalf("rejected batch changed state hub=%d before=%+v after=%+v", len(hub.requests()), before, after)
 	}
 
@@ -921,7 +954,7 @@ func TestUIP4BatchSecurityAndConsoleEscalationClosure(t *testing.T) {
 }
 
 func TestUIP4LegacyDecisionControlsAndAnswer(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -970,7 +1003,7 @@ func TestUIP4LegacyDecisionControlsAndAnswer(t *testing.T) {
 
 func TestUIP4LegacyDecisionOnlyAndWhitelist(t *testing.T) {
 	t.Run("only", func(t *testing.T) {
-		s := uiStore(t)
+		s := p4Store(t)
 		fixture := newUIJWTFixture(t)
 		hub := newFakeIngressHub(t)
 		h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -1002,7 +1035,7 @@ func TestUIP4LegacyDecisionOnlyAndWhitelist(t *testing.T) {
 	})
 
 	t.Run("whitelist", func(t *testing.T) {
-		s := uiStore(t)
+		s := p4Store(t)
 		fixture := newUIJWTFixture(t)
 		hub := newFakeIngressHub(t)
 		h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -1027,7 +1060,7 @@ func TestUIP4LegacyDecisionOnlyAndWhitelist(t *testing.T) {
 }
 
 func TestUIP4DecisionInboxDoesNotHideEventKindsAfterFiftyTasks(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	h := newUITestServer(t, s, fixture, "", "", 0)
 	defer h.Close()
@@ -1050,7 +1083,7 @@ func TestUIP4DecisionInboxDoesNotHideEventKindsAfterFiftyTasks(t *testing.T) {
 }
 
 func TestUIP4QueueOperatorViewExcludesInProgressImplement(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	h := newUITestServer(t, s, fixture, "", "", 0)
 	defer h.Close()
@@ -1072,7 +1105,7 @@ func TestUIP4QueueOperatorViewExcludesInProgressImplement(t *testing.T) {
 }
 
 func TestUIP4RenderedDecisionFormOnlyOverFifty(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -1102,7 +1135,7 @@ func TestUIP4RenderedDecisionFormOnlyOverFifty(t *testing.T) {
 func TestUIP4RenderedDecisionFormOnlyThreshold(t *testing.T) {
 	for _, count := range []int{50, 51} {
 		t.Run(strconv.Itoa(count), func(t *testing.T) {
-			s := uiStore(t)
+			s := p4Store(t)
 			fixture := newUIJWTFixture(t)
 			hub := newFakeIngressHub(t)
 			h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -1126,7 +1159,7 @@ func TestUIP4RenderedDecisionFormOnlyThreshold(t *testing.T) {
 }
 
 func TestUIP4SelectedDecisionBatchAdvancesOverFifty(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -1169,7 +1202,7 @@ func TestUIP4SelectedDecisionBatchAdvancesOverFifty(t *testing.T) {
 }
 
 func TestUIP4RecommendedDecisionBatchAdvancesOverFifty(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -1213,7 +1246,7 @@ func TestUIP4RecommendedDecisionBatchAdvancesOverFifty(t *testing.T) {
 }
 
 func TestUIP4QueueOperatorViewIncludesNonterminalDecide(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	h := newUITestServer(t, s, fixture, "", "", 0)
 	defer h.Close()
@@ -1296,7 +1329,7 @@ func p4Escalations(t *testing.T, s *store.Store, lane string, count int, questio
 // UI-generated forms from exceeding 1000 cards, but a direct oversized POST
 // must still truncate rather than lock the operator out.
 func TestUIP4OversizedFormTruncatesInsteadOfLocking(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -1359,7 +1392,7 @@ func p4VisibleOwnedIndexes(t *testing.T, body, kind string, ids []int64) []int {
 // AC3: inspect the actual rendered DOM, including empty text controls and the
 // clicked submitter. This fails if the helper regresses to hidden fields only.
 func TestUIP4RenderedDecisionFormSuccessfulControls(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -1393,7 +1426,7 @@ func TestUIP4RenderedDecisionFormSuccessfulControls(t *testing.T) {
 // not a hand-counted per-card estimate. Each normal submit mode stays beneath
 // Go's default URL parameter cap and reaches the real handler.
 func TestUIP4RenderedDecisionFormParameterBudget(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -1457,7 +1490,7 @@ func TestUIP4DecisionRenderLimitAndNotice(t *testing.T) {
 		{"1001", 1001, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			s := uiStore(t)
+			s := p4Store(t)
 			fixture := newUIJWTFixture(t)
 			hub := newFakeIngressHub(t)
 			h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -1508,7 +1541,7 @@ func TestUIP4DecisionRenderLimitAndNotice(t *testing.T) {
 // request can name an item past the parser window and must receive the
 // truncation/range notice instead of a new 400 lock.
 func TestUIP4OnlyBeyondDirectTruncationWindowIsReported(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -1529,7 +1562,7 @@ func TestUIP4OnlyBeyondDirectTruncationWindowIsReported(t *testing.T) {
 // HT5: recommended mode used to drop the remainder notice whenever the first
 // batch produced no result rows, repeating "nothing selected" forever.
 func TestUIP4RecommendedKeepsRemainderNoticeWithoutResults(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -1556,7 +1589,7 @@ func TestUIP4RecommendedKeepsRemainderNoticeWithoutResults(t *testing.T) {
 // submissions assert against the owned records still open in storage, not the
 // re-rendered-card count (which legitimately remains 1000 for many rounds).
 func TestUIP4MixedThreeThousandBacklogConverges(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
@@ -1576,7 +1609,7 @@ func TestUIP4MixedThreeThousandBacklogConverges(t *testing.T) {
 	}
 	hub.mu.Unlock()
 	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
-	counter := newP4OwnedDecisionCounter(t, tasks, escalations, lanes)
+	counter := newP4OwnedDecisionCounter(t, s, tasks, escalations, lanes)
 	counts := counter.counts(t)
 	if counts != (p4OpenDecisionCounts{Tasks: 1000, Escalations: 1000, Lanes: 1000}) {
 		t.Fatalf("AC5 initial open decisions=%+v", counts)
@@ -1643,7 +1676,7 @@ func TestUIP4MixedThreeThousandBacklogConverges(t *testing.T) {
 // and stay under the folded signals section, while one marked escalation and
 // one open lane decision keep their answer forms.
 func TestUIP4StaleEscalationsFoldIntoSignals(t *testing.T) {
-	s := uiStore(t)
+	s := p4Store(t)
 	fixture := newUIJWTFixture(t)
 	h := newUITestServer(t, s, fixture, "", "", 0)
 	defer h.Close()

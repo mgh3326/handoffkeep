@@ -69,7 +69,7 @@ func TestDeployLagEnqueueAndNoticeDB(t *testing.T) {
 	}
 
 	// Insert changes before deploy (already deployed, should not count)
-	if _, err := s.pool.Exec(ctx, `INSERT INTO changes(repo, pr_number, state, merged_at, created_at, updated_at) VALUES($1, 1, 'merged', $2, $2, $2)`, "mgh3326/hk-test", depTime.Add(-10*time.Minute)); err != nil {
+	if _, err := s.pool.Exec(ctx, `INSERT INTO changes(repo, pr_number, state, merged_at, opened_at, created_at, updated_at) VALUES($1, 1, 'merged', $2, $2, $2, $2)`, "mgh3326/hk-test", depTime.Add(-10*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -93,7 +93,7 @@ func TestDeployLagEnqueueAndNoticeDB(t *testing.T) {
 
 	// Add 2 merged changes after deploy -> lag = 2 (not lagging)
 	for i := 2; i <= 3; i++ {
-		if _, err := s.pool.Exec(ctx, `INSERT INTO changes(repo, pr_number, state, merged_at, created_at, updated_at) VALUES($1, $2, 'merged', $3, $3, $3)`, "mgh3326/hk-test", i, depTime.Add(time.Duration(i)*time.Minute)); err != nil {
+		if _, err := s.pool.Exec(ctx, `INSERT INTO changes(repo, pr_number, state, merged_at, opened_at, created_at, updated_at) VALUES($1, $2, 'merged', $3, $3, $3, $3)`, "mgh3326/hk-test", i, depTime.Add(time.Duration(i)*time.Minute)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -114,7 +114,7 @@ func TestDeployLagEnqueueAndNoticeDB(t *testing.T) {
 	}
 
 	// Add 1 more merged change -> lag = 3 (lagging!)
-	if _, err := s.pool.Exec(ctx, `INSERT INTO changes(repo, pr_number, state, merged_at, created_at, updated_at) VALUES($1, 4, 'merged', $2, $2, $2)`, "mgh3326/hk-test", depTime.Add(15*time.Minute)); err != nil {
+	if _, err := s.pool.Exec(ctx, `INSERT INTO changes(repo, pr_number, state, merged_at, opened_at, created_at, updated_at) VALUES($1, 4, 'merged', $2, $2, $2, $2)`, "mgh3326/hk-test", depTime.Add(15*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	count, err = s.CountMergedChangesSince(ctx, "mgh3326/hk-test", depTime)

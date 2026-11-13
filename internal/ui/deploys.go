@@ -280,27 +280,26 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 			lv := toView(latest)
 			view.Latest = &lv
 		}
-		if current.deployedAt != nil {
-			view.MergedBoundary = "deployed_at"
-			view.MergedSince = mergedTasksSince(events, repo, *current.deployedAt)
-			lag, err := h.store.CountMergedChangesSince(r.Context(), repo, *current.deployedAt)
-			if err == nil {
-				view.LagCount = lag
-				view.Lagging = store.IsDeployLagging(lag)
-			}
-		} else {
-			// The current version is known but its deploy time is not —
-			// "merged since" has no honest boundary to measure from.
-			view.MergedBoundary = "unrecorded"
-		}
 	} else {
 		lv := toView(latest)
 		view.Latest = &lv
-		lag, err := h.store.CountMergedChangesSince(r.Context(), repo, time.Time{})
-		if err == nil {
-			view.LagCount = lag
-			view.Lagging = store.IsDeployLagging(lag)
-		}
+	}
+	// Lag and the merged-since list share one boundary (the last successful
+	// deploy), the same one the operator-desk notice uses. A service without
+	// one has unknown lag, not all-time lag.
+	st, err := h.store.DeployLagStatus(r.Context(), svc)
+	if err != nil {
+		return deployServiceView{}, err
+	}
+	view.LagCount = st.LagCount
+	view.Lagging = st.Lagging
+	if st.HasDeployed {
+		view.MergedBoundary = "deployed_at"
+		view.MergedSince = mergedTasksSince(events, repo, *st.DeployedAt)
+	} else if current != nil {
+		// The current version is known but its deploy time is not —
+		// "merged since" has no honest boundary to measure from.
+		view.MergedBoundary = "unrecorded"
 	}
 	sort.Slice(parsed, func(i, j int) bool { return deployRecordLess(parsed[j], parsed[i]) })
 	for _, p := range parsed {

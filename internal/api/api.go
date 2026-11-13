@@ -409,6 +409,9 @@ func (s Service) SetTaskProject(ctx context.Context, id int64, project, client, 
 func (s Service) SetTaskArea(ctx context.Context, id int64, area *string, client, note string) (store.Task, bool, error) {
 	return s.Store.SetTaskArea(ctx, id, area, client, note)
 }
+func (s Service) SetTaskPriority(ctx context.Context, id int64, priority int, client, note string) (store.Task, bool, error) {
+	return s.Store.SetTaskPriorityDirect(ctx, id, priority, client, note)
+}
 func (s Service) ListTaskProjects(ctx context.Context) ([]string, error) {
 	return s.Store.ListTaskProjects(ctx)
 }
@@ -720,6 +723,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/attachments/uploads", s.attachmentUploadBegin)
 	m.HandleFunc("POST /v1/attachments/uploads/{id}/complete", s.attachmentUploadComplete)
 	m.HandleFunc("GET /v1/usage", s.usage)
+	m.HandleFunc("GET /v1/capabilities", s.capabilityList)
 	m.HandleFunc("GET /metrics", s.metrics)
 	m.HandleFunc("POST /v1/tasks", s.tasksCreate)
 	m.HandleFunc("POST /v1/intake", s.intake)
@@ -769,6 +773,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/labels", s.labelSave)
 	m.HandleFunc("PUT /v1/labels/{label}", s.labelSave)
 	m.HandleFunc("POST /v1/labels/{label}/retire", s.labelRetire)
+	m.HandleFunc("GET /v1/tasks/states", s.taskStates)
+	m.HandleFunc("PUT /v1/tasks/{id}/spawn", s.taskSpawnPut)
 	m.HandleFunc("GET /v1/tasks/{id}", s.task)
 	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)
 	m.HandleFunc("POST /v1/tasks/{id}/rebind", s.taskRebind)
@@ -782,9 +788,11 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/dots/results", s.dotsResultsList)
 	m.HandleFunc("POST /v1/dots/requests", s.dotsRequestCreate)
 	m.HandleFunc("POST /v1/dots/results/{id}/adoption", s.dotsAdoption)
+	m.HandleFunc("POST /v1/dots/answer", s.dotsAnswer)
 	m.HandleFunc("POST /v1/tasks/{id}/reopen", s.taskReopen)
 	m.HandleFunc("POST /v1/tasks/{id}/project", s.taskProject)
 	m.HandleFunc("POST /v1/tasks/{id}/area", s.taskArea)
+	m.HandleFunc("POST /v1/tasks/{id}/priority", s.taskPriority)
 	m.HandleFunc("POST /v1/tasks/{id}/milestone", s.taskMilestone)
 	m.HandleFunc("POST /v1/tasks/{id}/labels", s.taskLabel)
 	m.HandleFunc("POST /v1/tasks/{id}/deadlines", s.taskDeadlines)
@@ -845,6 +853,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/assistant/pending", s.assistantPending)
 	m.HandleFunc("GET /v1/assistant/outbox", s.assistantOutboxList)
 	m.HandleFunc("POST /v1/assistant/outbox/sent", s.assistantOutboxSent)
+	m.HandleFunc("POST /v1/assistant/outbox/applied", s.assistantOutboxApplied)
 	m.HandleFunc("POST /v1/assistant/decisions/resolve", s.assistantDecisionResolve)
 	if s.UI != nil {
 		m.Handle("/ui", s.UI)
@@ -1290,6 +1299,43 @@ func (s Server) taskArea(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	x, _, err := s.Service.SetTaskArea(r.Context(), id, area, client, input.Note)
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
+}
+
+// taskPriority sets a task's priority and records the change as a metadata event (hk 3219).
+func (s Server) taskPriority(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	id, err := pathID(r, "id")
+	if err != nil || id < 1 {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	defer r.Body.Close()
+	var input struct {
+		Priority *int   `json:"priority"`
+		Note     string `json:"note"`
+		Reason   string `json:"reason"`
+	}
+	if err := decode(r, &input, bodySmall); err != nil {
+		appErr(w, r, err)
+		return
+	}
+	if input.Priority == nil {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	note := input.Note
+	if note == "" {
+		note = input.Reason
+	}
+	x, _, err := s.Service.SetTaskPriority(r.Context(), id, *input.Priority, client, note)
 	if err != nil {
 		appErr(w, r, err)
 		return
