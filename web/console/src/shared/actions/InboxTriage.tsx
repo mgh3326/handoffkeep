@@ -10,6 +10,7 @@ import { inboxWriteMessage, undoInbox, writeInbox } from "../inboxApi";
 import { isTypingTarget } from "../search";
 import { formatMinuteKST } from "../time";
 import { actions as taskActions, type ActionTarget } from "./index";
+import { PriorityEntry } from "./TaskActions";
 import { inboxActions, inboxActionLabel, snoozePresets, type InboxAction, type InboxActionId, type InboxTarget } from "./inbox";
 import { CommandBar } from "../command/CommandBar";
 import "./inbox.css";
@@ -538,6 +539,7 @@ function PriorityPicker({ onPick, close }: { onPick: (value: number) => void; cl
             {value === 0 ? "없음" : `P${value}`}
           </button>
         ))}
+        <PriorityEntry apply={onPick} />
         <button type="button" className="inbox-bar-clear" onClick={close}>취소</button>
       </div>
     </div>
