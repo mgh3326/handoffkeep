@@ -1364,22 +1364,13 @@ release rollback never meets an authority value it cannot parse (consult hk
   `remote_unknown`). Nothing is sent, and the rejected-op alert reports it.
   `Send` also refuses an empty target as a backstop. The claim also checks
   the binding against every local source, as a fresh comment's enqueue does
-  (for example a task moved to another project while its create was pending).
-  When only the project disagrees and an `issue_move` of the issue is pending,
-  or the op is under an hour old (the fields feed has not prepared the move
-  yet), the op is held (`held`, still `prepared` and due again a minute later,
-  nothing sent), so a comment queued behind a create that landed in a project
-  the task has left goes out once the move places the issue in the task's
-  project instead of being rejected for good. The held op blocks only later
-  comment ops on the task's lane (`Claim` and `Due` let an `issue_move` or an
-  `issue_fields` op go ahead of a `prepared` comment op with no target), so
-  the move and any snapshot or earlier move before it can run while the
-  comment waits for them; later comments still wait for it, in order.
-  Any other disagreement, or a project one an hour old with no move pending
-  (moves mode off, the move refused), is `rejected / ambiguous_issue`, so the
-  lane is never wedged. The guard lets such an op stay `prepared` in place
-  (migration `20261113-yt-comment-hold`). A task with
-  no pending create, a body
+  (for example a task moved to another project while its create was pending):
+  on a disagreement the op is `rejected / ambiguous_issue` and nothing is
+  sent; it never waits in the lane for a later move (hk 4457's hold was
+  taken out of PR #383 because a hold that waits for a later op on a
+  strictly ordered lane can wedge it; redesign hk 4569). Migration
+  `20261113-yt-comment-hold` stays registered and unused. A task with no
+  pending create, a body
   the protocol cannot send, and a mapping disagreement are still refused.
   The previous release's comment gate never admits a targetless op, so it
   holds such an op rather than send it. A dots reply (`ReplyDots`), which prepares no op

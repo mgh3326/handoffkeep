@@ -47,19 +47,6 @@ const YTCommentPrincipal = "hk:task-comments"
 // ytCommentKeyPrefix is YTCommentKey without the comment id.
 const ytCommentKeyPrefix = "task-comment:"
 
-// ytCommentHoldWait is how long a queued comment whose task's issue is in a
-// project the task has left waits before its next claim (hk 4457): long enough
-// that a held op does not fill every pass's due list, short enough that the
-// comment follows the issue_move that fixes it.
-const ytCommentHoldWait = time.Minute
-
-// ytCommentHoldGrace bounds a hold that no issue_move explains: the fields
-// feed prepares the move when it sees the task's project change, so a comment
-// whose op is younger than this is held for it; an older one with no move
-// pending (moves mode off, the move refused, nothing to move to) is rejected
-// ambiguous_issue as before hk 4457, so the task's lane is never wedged.
-const ytCommentHoldGrace = time.Hour
-
 // YTCommentKey is the idempotency key of the op that copies one comment.
 func YTCommentKey(commentID int64) string {
 	return ytCommentKeyPrefix + strconv.FormatInt(commentID, 10)
@@ -101,8 +88,7 @@ func ytCommentModeGateSQL(s *Store) string {
 		// An op with no target is a comment queued behind its task's
 		// issue_create (hk 4263): lane order holds it until the create
 		// resolves, and its claim fills the target from the create's binding
-		// (claimYTCommentTargetTx), rejects it, or holds it while the issue
-		// is in a project the task has left (hk 4457).
+		// (claimYTCommentTargetTx) or rejects it.
 		return `o.principal <> '` + ytDocCommentPrincipal + `' AND o.entity_kind = 'task' AND (EXISTS (SELECT 1 FROM yt_task_bindings b
 		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)
 		OR (o.principal = '` + YTCommentPrincipal + `' AND o.yt_target_id = ''))`
@@ -180,13 +166,11 @@ func (s *Store) enqueueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment
 // claim takes the target from the binding the create published
 // (claimYTCommentTargetTx). A create that ends rejected, or applied without a
 // binding (binding_conflict), publishes none, and the claim rejects the op
-// (ytwrite.ReasonIssueNotBound) instead of dispatching it; a binding a local
-// source disagrees with (a create that landed in a project the task has left)
-// holds the op until an issue_move places the issue in the task's project
-// (hk 4457). The rejected-op alert reports a rejection. No map anchor is
-// written: the create's apply writes the task's map row. A task with a binding
-// (a source disagreed) or with no pending create gets nothing (enqueued
-// false).
+// (ytwrite.ReasonIssueNotBound) instead of dispatching it; so does a binding
+// a local source disagrees with (ytwrite.ReasonAmbiguousIssue). The
+// rejected-op alert reports both. No map anchor is written: the create's apply writes the task's map
+// row. A task with a binding (a source disagreed) or with no pending create
+// gets nothing (enqueued false).
 //
 // Only enqueueYTCommentTx calls it, under comments authority youtrack in mode
 // on; under hk such a comment commits with no op and the catch-up copies it
@@ -244,69 +228,52 @@ func queueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op
 // reject is the reason Claim rejects the op with, in the same transaction,
 // instead of dispatching it: ytwrite.ReasonIssueNotBound when the task has no
 // such binding (the create was rejected, or applied with binding_conflict),
-// ytwrite.ReasonAmbiguousIssue when a source disagrees with it, except for
-// hold: when the only disagreement is the project (ytBindingDisagreement
-// names it last, so no other source disagrees; a create that landed in a
-// project the task has left) and an issue_move of that issue is pending, or
-// the op is younger than ytCommentHoldGrace, the op is kept prepared and
-// retried, and goes out once the move places the issue in the task's project
-// (hk 4457). The held op blocks only later comment ops on the lane
-// (ytLaneBlocksSQL), so that move and any op before it can run.
-// A targetless op is never dispatched, so it never reaches stale recovery or
+// ytwrite.ReasonAmbiguousIssue when a source disagrees with it. A targetless
+// op is never dispatched, so it never reaches stale recovery or
 // remote_unknown. Any other op is returned unchanged.
-func claimYTCommentTargetTx(ctx context.Context, tx pgx.Tx, now time.Time, op ytwrite.Op) (target, sha, reject, detail string, hold bool, err error) {
+func claimYTCommentTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (target, sha, reject, detail string, err error) {
 	if op.Kind != ytwrite.KindCommentAppend || op.Principal != YTCommentPrincipal || op.EntityKind != "task" || op.YTTargetID != "" {
-		return op.YTTargetID, op.PayloadSHA, "", "", false, nil
+		return op.YTTargetID, op.PayloadSHA, "", "", nil
 	}
 	const unbound = "the comment was queued behind the task's issue_create op, which published no binding"
 	taskID, err := strconv.ParseInt(op.EntityID, 10, 64)
 	if err != nil || taskID < 1 {
-		return "", "", ytwrite.ReasonIssueNotBound, unbound, false, nil
+		return "", "", ytwrite.ReasonIssueNotBound, unbound, nil
 	}
 	b, found, err := readYTBinding(ctx, tx, taskID)
 	if err != nil {
-		return "", "", "", "", false, err
+		return "", "", "", "", err
 	}
 	var createID int64
 	if found {
 		err = tx.QueryRow(ctx, `SELECT id FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3 AND state='applied'`,
 			YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(taskID)).Scan(&createID)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return "", "", "", "", false, err
+			return "", "", "", "", err
 		}
 	}
 	if !found || b.Origin != YTBindingOpApplied || b.OpID == 0 || b.OpID != createID || b.Tenant != op.Tenant {
 		log.Printf("ytwrite.comment_queued_unbound op_id=%d task_id=%d", op.ID, taskID)
-		return "", "", ytwrite.ReasonIssueNotBound, unbound, false, nil
+		return "", "", ytwrite.ReasonIssueNotBound, unbound, nil
 	}
 	source, err := ytBindingDisagreement(ctx, tx, b)
 	if err != nil {
-		return "", "", "", "", false, err
+		return "", "", "", "", err
 	}
 	if source != "" {
-		pending := ""
-		if source == ytSourceProject {
-			if pending, err = ytPendingMoveTx(ctx, tx, taskID, b.IssueID); err != nil {
-				return "", "", "", "", false, err
-			}
-		}
-		if source == ytSourceProject && (pending != "" || now.Sub(op.CreatedAt) < ytCommentHoldGrace) {
-			log.Printf("ytwrite.comment_queued_held op_id=%d task_id=%d issue_id=%q source=%s", op.ID, taskID, b.IssueID, source)
-			return "", "", "", "", true, nil
-		}
 		log.Printf("ytwrite.comment_queued_ambiguous op_id=%d task_id=%d issue_id=%q source=%s", op.ID, taskID, b.IssueID, source)
-		return "", "", ytwrite.ReasonAmbiguousIssue, "binding to " + b.IssueID + " disagrees with " + source, false, nil
+		return "", "", ytwrite.ReasonAmbiguousIssue, "binding to " + b.IssueID + " disagrees with " + source, nil
 	}
 	var p ytwrite.CommentPayload
 	if err := json.Unmarshal(op.Payload, &p); err != nil {
-		return "", "", "", "", false, fmt.Errorf("payload of op %d: %w", op.ID, err)
+		return "", "", "", "", fmt.Errorf("payload of op %d: %w", op.ID, err)
 	}
 	n, err := ytwrite.CommentOp(ytwrite.CommentRequest{Principal: op.Principal, Key: op.Key, Actor: op.Actor, TaskID: taskID, YTIssueID: b.IssueID, Tenant: op.Tenant, Body: p.Body})
 	if err != nil {
-		return "", "", "", "", false, err
+		return "", "", "", "", err
 	}
 	log.Printf("ytwrite.comment_queued_targeted op_id=%d task_id=%d issue_id=%q", op.ID, taskID, b.IssueID)
-	return n.YTTargetID, n.PayloadSHA, "", "", false, nil
+	return n.YTTargetID, n.PayloadSHA, "", "", nil
 }
 
 // enqueueYTCommentIfCanonicalTx is the YouTrack copy of a comment whose writer

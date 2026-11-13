@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -283,13 +282,12 @@ func TestYTWriteOpsGuardQueuedTarget(t *testing.T) {
 	}
 }
 
-// ytqHeld is the hk 4457 sequence up to the hold: a comment queued behind
-// the task's issue_create, the task moved while the create was in flight, the
-// create applied as issue 2-900 in the old project. The comment's first claim
-// holds it. It returns the held comment op.
-func ytqHeld(t *testing.T, prefix string) (*Store, Task, ytwrite.Op) {
-	t.Helper()
-	s, x, create := ytqSetup(t, prefix)
+// A binding the create publishes is checked against every local source at the
+// claim, as a fresh comment's is: a task moved to another project while its
+// create was pending keeps a binding in the old project, and the queued
+// comment is rejected instead of sent there.
+func TestYTCommentQueuedBindingDisagreement(t *testing.T) {
+	s, x, create := ytqSetup(t, "ytq_moved")
 	ctx := t.Context()
 	c, err := s.CreateTaskComment(ctx, x.ID, "worker", "queued, then the task moved")
 	if err != nil {
@@ -315,181 +313,102 @@ func ytqHeld(t *testing.T, prefix string) (*Store, Task, ytwrite.Op) {
 	if _, err := s.YTWriteLedger().Apply(ctx, time.Now().UTC(), create.ID, "2-900", ytiMaps(create, "2-900")); err != nil {
 		t.Fatal(err)
 	}
-	if b, found, err := s.YTTaskBinding(ctx, x.ID); err != nil || !found || b.IssueID != "2-900" || b.ProjectID != ytbProjectID {
+	if b, found, err := s.YTTaskBinding(ctx, x.ID); err != nil || !found || b.IssueID != "2-900" {
 		t.Fatalf("binding %+v %v %v", b, found, err)
 	}
-	if out := ytiClaim(t, s, op); out != ytwrite.ClaimHeld {
-		t.Fatalf("claim with the issue in the old project = %s", out)
+	counting := &ytcCounting{Remote: ytwritetest.NewFake()}
+	var offset atomic.Int64
+	got := ytqDrive(t, s, ytcProtocol(t, s, counting, &offset), op.ID)
+	if got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonAmbiguousIssue || got.YTTargetID != "" || got.Attempts != 0 || counting.posts.Load() != 0 {
+		t.Fatalf("comment op %+v, posts %d", got, counting.posts.Load())
 	}
-	return s, x, op
 }
 
-// ytqMove prepares the issue_move the fields feed prepares for a task whose
-// issue must move (ytMoveForTx), with moves mode on.
-func ytqMove(t *testing.T, s *Store, task int64, issue, projectID string) ytwrite.Op {
-	t.Helper()
+// The review's sequence (PR #383, r4564745703; hk 4457's hold was taken out
+// for it, redesign hk 4569): a comment C1 queued behind the create, a comment
+// C2 written once the binding exists (so it has a target), then the task
+// moves and an issue_move M is prepared behind both. C1 is rejected at once
+// (ambiguous_issue) even with M pending, so the lane drains in id order: C2
+// goes out, then M is claimable. Nothing waits for a later op on its lane.
+func TestYTCommentQueuedRejectsWithAMovePending(t *testing.T) {
+	s, x, create := ytqSetup(t, "ytq_move_pending")
+	ctx := t.Context()
+	c1, err := s.CreateTaskComment(ctx, x.ID, "worker", "queued behind the create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	op1, ok := ytcOpFor(t, s, c1.ID)
+	if !ok || op1.YTTargetID != "" {
+		t.Fatalf("queued op %+v %v", op1, ok)
+	}
+	const other = "ytq-other"
+	if _, err := s.AddTaskProject(ctx, other, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: other, ProjectID: "0-9", ShortName: "HKO"}); err != nil {
+		t.Fatal(err)
+	}
+	ytiDispatch(t, s, create)
+	if _, err := s.YTWriteLedger().Apply(ctx, time.Now().UTC(), create.ID, "2-900", ytiMaps(create, "2-900")); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := s.CreateTaskComment(ctx, x.ID, "worker", "written once the issue was bound")
+	if err != nil {
+		t.Fatal(err)
+	}
+	op2, ok := ytcOpFor(t, s, c2.ID)
+	if !ok || op2.YTTargetID != "2-900" || op2.ID <= op1.ID {
+		t.Fatalf("targeted op %+v %v", op2, ok)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET project=$2 WHERE id=$1`, x.ID, other); err != nil {
+		t.Fatal(err)
+	}
 	s.SetYTMovesMode(YTMovesOn)
 	n, err := ytwrite.MoveOp(ytwrite.MoveRequest{Principal: YTFieldsPrincipal, Actor: YTFieldsPrincipal, Tenant: ytcTenant,
-		IssueID: issue, ProjectID: projectID, TaskID: task})
+		IssueID: "2-900", ProjectID: "0-9", TaskID: x.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tx, err := s.pool.Begin(t.Context())
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback(t.Context())
-	mv, made, err := prepareYTOnceTx(t.Context(), tx, time.Now().UTC(), n, n.PayloadSHA)
+	defer tx.Rollback(ctx)
+	mv, made, err := prepareYTOnceTx(ctx, tx, time.Now().UTC(), n, n.PayloadSHA)
 	if err != nil || !made {
 		t.Fatalf("prepare move: %v made=%v", err, made)
 	}
-	if err := tx.Commit(t.Context()); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	return mv
-}
-
-// A binding the create publishes is checked against every local source at the
-// claim, as a fresh comment's is: a task moved to another project while its
-// create was pending keeps a binding in the old project. The queued comment is
-// held, not rejected; the issue_move the feed prepares behind it passes it on
-// the lane, and once the move places the issue in the task's project the same
-// op is claimed and delivered there (hk 4457).
-func TestYTCommentQueuedBindingDisagreement(t *testing.T) {
-	logs := ytbLog(t)
-	s, x, op := ytqHeld(t, "ytq_moved")
-	ctx := t.Context()
-	// The claim held the op: still prepared, no target, nothing sent.
-	held, err := s.YTWriteLedger().ByID(ctx, op.ID)
-	if err != nil {
-		t.Fatal(err)
+	if mv.ID <= op2.ID {
+		t.Fatalf("move %d before comment %d", mv.ID, op2.ID)
 	}
-	if held.State != ytwrite.StatePrepared || held.YTTargetID != "" || held.Attempts != 0 ||
-		!held.NextAttemptAt.After(time.Now().UTC().Add(30*time.Second)) {
-		t.Fatalf("held op %+v", held)
-	}
-	if want := "ytwrite.comment_queued_held op_id=" + strconv.FormatInt(op.ID, 10); !contains(logs(), want) {
-		t.Fatalf("log %q, want %q", logs(), want)
-	}
-	if _, err := s.EnqueueYTWriteOpAlerts(ctx, time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	if n := ytcCount(t, s, `SELECT count(*) FROM yt_write_op_alerts WHERE op_id=$1 AND alert_class='rejected'`, op.ID); n != 0 {
-		t.Fatalf("a held op was alerted as rejected: %d rows", n)
+	if out := ytiClaim(t, s, mv); out != ytwrite.ClaimBlocked {
+		t.Fatalf("claim of the move behind the comments = %s", out)
 	}
 
-	// The move comes after the held comment on the task's lane, and is due
-	// and claimed anyway; its apply writes the binding's project.
-	mv := ytqMove(t, s, x.ID, "2-900", "0-9")
-	if mv.ID <= op.ID {
-		t.Fatalf("move %d before the held comment %d", mv.ID, op.ID)
-	}
-	due, err := s.YTTenantLedger(ytcTenant).Due(ctx, time.Now().UTC(), 20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.ContainsFunc(due, func(o ytwrite.Op) bool { return o.ID == mv.ID }) {
-		t.Fatalf("move %d not due behind the held comment: %+v", mv.ID, due)
-	}
-	// While the move is pending the comment stays held, past the grace too.
-	if _, out, err := s.YTTenantLedger(ytcTenant).Claim(ctx, time.Now().UTC().Add(2*ytCommentHoldGrace), op.ID); err != nil || out != ytwrite.ClaimHeld {
-		t.Fatalf("claim of the comment with the move pending = %s %v", out, err)
-	}
-	ytmSettle(t, s, mv, "2-900")
-	if project, _ := ytmBinding(t, s, x.ID); project != "0-9" {
-		t.Fatalf("binding project after the move %q", project)
-	}
-
-	// The held op is due again and delivered there.
-	yt := ytwritetest.NewFake()
+	counting := &ytcCounting{Remote: ytwritetest.NewFake()}
 	var offset atomic.Int64
-	offset.Store(int64(3 * ytCommentHoldGrace))
-	got := ytqDrive(t, s, ytcProtocol(t, s, yt, &offset), op.ID)
-	if got.State != ytwrite.StateApplied || got.YTTargetID != "2-900" || got.Attempts != 1 {
-		t.Fatalf("comment op after the move %+v", got)
+	p := ytcProtocol(t, s, counting, &offset)
+	if got := ytqDrive(t, s, p, op1.ID); got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonAmbiguousIssue || got.Attempts != 0 {
+		t.Fatalf("queued comment with the move pending %+v", got)
 	}
-	if comments := yt.Comments("2-900"); len(comments) != 1 || !strings.Contains(comments[0].Text, "queued, then the task moved") {
-		t.Fatalf("issue 2-900 comments %+v", comments)
+	if got := ytqDrive(t, s, p, op2.ID); got.State != ytwrite.StateApplied || got.YTTargetID != "2-900" {
+		t.Fatalf("targeted comment %+v", got)
 	}
-}
-
-// The review's cycle (PR #383): an issue_fields snapshot the feed prepared
-// for the issue's old project sits between the held comment and the move
-// that releases it. The snapshot passes the held comment, the move then
-// passes it too, and once both are applied the comment is delivered; neither
-// waits for the comment while the comment waits for the move.
-func TestYTCommentQueuedHoldLetsTheLaneDrain(t *testing.T) {
-	s, x, op := ytqHeld(t, "ytq_hold_drain")
-	ctx := t.Context()
-	s.SetYTFieldsMode(YTFieldsOn, ytcTenant)
-	n, err := ytwrite.FieldsOp(ytwrite.FieldsRequest{Principal: YTFieldsPrincipal, Actor: YTFieldsPrincipal, Tenant: ytcTenant,
-		IssueID: "2-900", ProjectID: ytbProjectID, Task: ytwrite.TaskFields{TaskID: x.ID, Title: x.Title, State: "todo"}})
+	// The move is no longer behind anything: claimable now, or already
+	// taken by the drive's passes.
+	cur, err := s.YTWriteLedger().ByID(ctx, mv.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	n.Key = SnapshotKey(ytFieldsConsumer, strconv.FormatInt(x.ID, 10), 1, n.PayloadSHA)
-	fields, _, err := s.YTWriteLedger().Prepare(ctx, time.Now().UTC(), n)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mv := ytqMove(t, s, x.ID, "2-900", "0-9")
-	if !(op.ID < fields.ID && fields.ID < mv.ID) {
-		t.Fatalf("lane order comment %d, fields %d, move %d", op.ID, fields.ID, mv.ID)
-	}
-	l := s.YTTenantLedger(ytcTenant)
-	ids := func() []int64 {
-		due, err := l.Due(ctx, time.Now().UTC().Add(2*ytCommentHoldWait), 20)
-		if err != nil {
-			t.Fatal(err)
+	if cur.State == ytwrite.StatePrepared {
+		if out := ytiClaim(t, s, mv); out != ytwrite.ClaimClaimed {
+			t.Fatalf("claim of the move once the comments resolved = %s", out)
 		}
-		var out []int64
-		for _, o := range due {
-			if o.EntityID == strconv.FormatInt(x.ID, 10) {
-				out = append(out, o.ID)
-			}
-		}
-		return out
-	}
-	// The snapshot is due behind the held comment; the move still waits for
-	// the snapshot, as lane order says.
-	if got := ids(); !slices.Contains(got, fields.ID) || slices.Contains(got, mv.ID) {
-		t.Fatalf("due %v, want the snapshot %d and not the move %d", got, fields.ID, mv.ID)
-	}
-	ytmSettle(t, s, fields, "2-900")
-	if got := ids(); !slices.Contains(got, mv.ID) {
-		t.Fatalf("due %v, want the move %d once the snapshot applied", got, mv.ID)
-	}
-	if _, out, err := l.Claim(ctx, time.Now().UTC().Add(2*ytCommentHoldGrace), op.ID); err != nil || out != ytwrite.ClaimHeld {
-		t.Fatalf("claim of the comment with the move pending = %s %v", out, err)
-	}
-	ytmSettle(t, s, mv, "2-900")
-	yt := ytwritetest.NewFake()
-	var offset atomic.Int64
-	offset.Store(int64(3 * ytCommentHoldGrace))
-	if got := ytqDrive(t, s, ytcProtocol(t, s, yt, &offset), op.ID); got.State != ytwrite.StateApplied || got.YTTargetID != "2-900" {
-		t.Fatalf("comment op after the snapshot and the move %+v", got)
-	}
-}
-
-// A hold no move explains is bounded: past ytCommentHoldGrace with no
-// issue_move pending (moves mode off, the move refused), the comment is
-// rejected ambiguous_issue as before hk 4457, and the lane clears.
-func TestYTCommentQueuedHoldIsBounded(t *testing.T) {
-	s, _, op := ytqHeld(t, "ytq_hold_bounded")
-	ctx := t.Context()
-	l := s.YTTenantLedger(ytcTenant)
-	if _, out, err := l.Claim(ctx, time.Now().UTC().Add(2*time.Minute), op.ID); err != nil || out != ytwrite.ClaimHeld {
-		t.Fatalf("claim within the grace = %s %v", out, err)
-	}
-	if _, _, err := l.Claim(ctx, time.Now().UTC().Add(ytCommentHoldGrace+2*time.Minute), op.ID); err != nil {
-		t.Fatal(err)
-	}
-	got, err := l.ByID(ctx, op.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonAmbiguousIssue || got.Attempts != 0 {
-		t.Fatalf("held op past the grace %+v", got)
+	} else if cur.Attempts == 0 {
+		t.Fatalf("move %+v resolved without an attempt", cur)
 	}
 }
 

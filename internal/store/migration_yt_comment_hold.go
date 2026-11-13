@@ -9,9 +9,15 @@ import (
 // YTCommentHoldMigration (hk 4457) lets the claim hold a queued comment op.
 // A comment queued behind its task's issue_create, whose issue landed in a
 // project the task has since left, is kept prepared and made due again after
-// ytCommentHoldWait (Claim, the hold branch): that is an UPDATE from prepared
+// a minute (the claim's hold branch): that is an UPDATE from prepared
 // to prepared, which every earlier guard refused ("cannot move from prepared
 // to prepared"), so the claim failed and the op was retried at once.
+//
+// The hold itself was taken out before release (PR #383 review: a hold that
+// waits for a later op on the strictly ordered lane can wedge it; redesign
+// hk 4569), so no code makes that transition now. The migration stays
+// registered: an ID once shipped on a branch database is never removed, and
+// the wider rule is harmless with nothing using it.
 //
 // It replaces the yt_write_ops guard function with the rules of
 // 20261113-yt-issue-claim-target plus one transition: a prepared

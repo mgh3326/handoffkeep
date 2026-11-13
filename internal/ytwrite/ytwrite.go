@@ -251,9 +251,7 @@ const (
 	ClaimBlocked     ClaimOutcome = "blocked"
 	// ClaimHeld: the ledger does not admit the dispatch now (for the comment
 	// canary: the task left the canary, the mode is off, or the op is bound
-	// to another tenant; for a comment queued behind its task's issue_create:
-	// the issue is in a project the task has left). Nothing is sent and the
-	// op stays prepared.
+	// to another tenant). Nothing is sent and the op stays prepared.
 	ClaimHeld ClaimOutcome = "held"
 )
 
