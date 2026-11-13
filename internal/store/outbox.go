@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -81,26 +80,9 @@ func chatAnsweredEventID(questionID string, revision int) string {
 	return fmt.Sprintf("%s-rev%d-answered", questionID, revision)
 }
 
-// assistantLaneText bounds one notification to the lane-event byte cap the
-// hub enforces, so a written row can never be undrainable. The full answer
-// lives in the message body or the decision record; the lane event is a
-// pointer with a quote.
+// assistantLaneText keeps the full notification text for the lane inbox.
 func assistantLaneText(prefix, body string) string {
-	text := prefix + body
-	if len(text) <= RelayLaneEventMaxBytes {
-		return text
-	}
-	keep := RelayLaneEventMaxBytes - len(prefix) - len("…")
-	if keep < 0 {
-		keep = 0
-	}
-	if len(body) > keep {
-		body = body[:keep]
-	}
-	for len(body) > 0 && !utf8.ValidString(body) {
-		body = body[:len(body)-1]
-	}
-	return prefix + body + "…"
+	return prefix + body
 }
 
 // insertNotificationOutbox records one owed lane notification inside the
