@@ -2271,9 +2271,21 @@ func (s Server) metrics(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
+	// The outbox gauges come from the database. A Server with no Store (tests
+	// that exercise only the client-revision series) reports none.
+	var outbox bytes.Buffer
+	if st := s.Service.Store; st != nil {
+		o, e := st.YTWriteOutboxStatus(r.Context(), time.Now())
+		if e != nil {
+			appErr(w, r, e)
+			return
+		}
+		writeYTWriteOutboxMetrics(&outbox, o)
+	}
 	if s.Service.Attachments == nil || !s.Service.Attachments.Enabled {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		_, _ = w.Write([]byte("handoffkeep_attach_enabled 0\n"))
+		_, _ = w.Write(outbox.Bytes())
 		s.ClientRevisions.writeMetrics(w)
 		return
 	}
@@ -2290,6 +2302,7 @@ func (s Server) metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprintf(w, "handoffkeep_attach_bytes_total %d\nhandoffkeep_attach_objects %d\nhandoffkeep_attach_puts_month %d\nhandoffkeep_attach_gets_month %d\nhandoffkeep_attach_cap_bytes %d\nhandoffkeep_attach_cap_ratio %.8f\n", u.TotalBytes, objects, u.Puts, u.Gets, c.StorageCap, float64(u.TotalBytes)/float64(c.StorageCap))
+	_, _ = w.Write(outbox.Bytes())
 	s.ClientRevisions.writeMetrics(w)
 }
 
