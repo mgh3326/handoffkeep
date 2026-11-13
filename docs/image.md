@@ -56,8 +56,7 @@ Optional server configuration:
   `HK_ATTACH_MAX_BYTES`, `HK_ATTACH_STORAGE_CAP_BYTES`,
   `HK_ATTACH_MONTHLY_PUT_CAP`, `HK_ATTACH_MONTHLY_GET_CAP`,
   `HK_ATTACH_MIME_ALLOW`
-- `r2usage`: `CF_API_TOKEN`, `CF_ACCOUNT_ID`; alert webhook:
-  `HK_ALERT_DISCORD_WEBHOOK`
+- alert webhook (removed with `r2usage`): `HK_ALERT_DISCORD_WEBHOOK`
 
 Client subcommands (`mcp`, `ctx`, `doc`, `tasks`, …) use `HANDOFFKEEP_URL` and
 `HANDOFFKEEP_TOKEN`. A Cloudflare Access service token for an hk URL behind

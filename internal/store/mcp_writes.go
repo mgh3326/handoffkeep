@@ -201,20 +201,14 @@ func (s *Store) RecordMCPWrite(ctx context.Context, w MCPWrite, taskID int64, re
 
 // TaskUpdateInput is one task_update call. ExpectedUpdatedAt is the revision
 // the caller read; a task that moved since is a conflict. At least one change
-// is set: State, Lane, Priority, or a label name in AddLabels or RemoveLabels.
-// Note becomes the event note of each change.
+// is set: State, Lane or Priority. Note becomes the event note of each change.
 type TaskUpdateInput struct {
 	ExpectedUpdatedAt time.Time
 	State             string
 	Lane              string
 	Priority          *int
-	AddLabels         []string
-	RemoveLabels      []string
 	Note              string
 }
-
-// maxTaskUpdateLabels bounds the label names one call may add or remove.
-const maxTaskUpdateLabels = 20
 
 // TaskUpdateResult is what a task_update applied. Changed names the fields this
 // call moved, and Revision is the task's updated_at after the write. A replay
@@ -235,11 +229,9 @@ type TaskUpdateResult struct {
 func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w MCPWrite) (TaskUpdateResult, error) {
 	var out TaskUpdateResult
 	if w.Tool != mcpTaskUpdateTool || id < 1 || in.ExpectedUpdatedAt.IsZero() || w.Key == "" || !validLifecycleKey(w.Key) ||
-		(in.State == "" && in.Lane == "" && in.Priority == nil && len(in.AddLabels) == 0 && len(in.RemoveLabels) == 0) ||
+		(in.State == "" && in.Lane == "" && in.Priority == nil) ||
 		(in.Priority != nil && (*in.Priority < 0 || *in.Priority > math.MaxInt32)) ||
-		len(in.AddLabels) > maxTaskUpdateLabels || len(in.RemoveLabels) > maxTaskUpdateLabels ||
-		!validText(in.Note, MaxBytes) || !validText(in.State, 64) || !validText(in.Lane, 128) ||
-		!validLabelNames(in.AddLabels) || !validLabelNames(in.RemoveLabels) {
+		!validText(in.Note, MaxBytes) || !validText(in.State, 64) || !validText(in.Lane, 128) {
 		return out, ErrInvalidTaskUpdate
 	}
 	if err := w.validate(); err != nil {
@@ -310,20 +302,6 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w 
 			changed = append(changed, "lane")
 		}
 	}
-	if len(in.AddLabels)+len(in.RemoveLabels) > 0 {
-		// The state and lane writes above update their own copy of the row;
-		// reload it so the label events record the state the task now has.
-		if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, id), &x); err != nil {
-			return out, err
-		}
-	}
-	labelsChanged, err := s.applyTaskUpdateLabels(ctx, tx, &x, in, w.Author)
-	if err != nil {
-		return out, err
-	}
-	if labelsChanged {
-		changed = append(changed, "labels")
-	}
 	var final Task
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, id), &final); err != nil {
 		return out, err
@@ -333,43 +311,4 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w 
 		return TaskUpdateResult{}, err
 	}
 	return out, tx.Commit(ctx)
-}
-
-// validLabelNames reports whether every name is a non-empty label name of the
-// store's size.
-func validLabelNames(names []string) bool {
-	for _, name := range names {
-		if strings.TrimSpace(name) == "" || !validText(name, 256) {
-			return false
-		}
-	}
-	return true
-}
-
-// applyTaskUpdateLabels attaches the AddLabels names and detaches RemoveLabels,
-// by label name, in the caller's transaction. A name the store does not know is
-// ErrLabelNotFound and the whole call is refused.
-func (s *Store) applyTaskUpdateLabels(ctx context.Context, tx pgx.Tx, x *Task, in TaskUpdateInput, by string) (bool, error) {
-	changed := false
-	for _, step := range []struct {
-		names  []string
-		attach bool
-	}{{in.AddLabels, true}, {in.RemoveLabels, false}} {
-		for _, name := range step.names {
-			var labelID int64
-			err := tx.QueryRow(ctx, `SELECT id FROM labels WHERE name=$1`, strings.TrimSpace(name)).Scan(&labelID)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return false, ErrLabelNotFound
-			}
-			if err != nil {
-				return false, err
-			}
-			moved, err := s.setTaskLabelTx(ctx, tx, x, labelID, by, step.attach)
-			if err != nil {
-				return false, err
-			}
-			changed = changed || moved
-		}
-	}
-	return changed, nil
 }

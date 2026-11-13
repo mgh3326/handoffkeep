@@ -44,7 +44,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|doc|attach|r2usage|tasks|tickets|decisions|placements|standing|dots|services|deploys|bench|changes|youtrack|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|doc|attach|tasks|tickets|decisions|placements|dots|services|deploys|changes|youtrack|version")
 	}
 	switch args[0] {
 	case "sync":
@@ -59,30 +59,22 @@ func run(args []string, out, errout io.Writer) error {
 		return serve(args[1:], errout)
 	case "mcp":
 		return runMCP()
-	case "ctx":
-		return ctxCmd(args[1:], out)
 	case "doc":
 		return docCmd(args[1:], out)
 	case "attach":
 		return attachCmd(args[1:], out)
-	case "r2usage":
-		return r2UsageCmd(args[1:], out)
 	case "translations":
 		return translationsCmd(args[1:], out)
 	case "tasks":
 		return tasksCmdE(args[1:], out, errout)
 	case "tickets":
 		return ticketsCmd(args[1:], out)
-	case "standing":
-		return standingCmd(args[1:], out)
 	case "decisions":
 		return decisionsCmd(args[1:], out)
 	case "placements":
 		return placementsCmd(args[1:], out)
 	case "dots":
 		return dotsCmd(args[1:], out)
-	case "bench":
-		return benchCmd(args[1:], out)
 	case "jobs":
 		return jobsCmd(args[1:], out)
 	case "services":
@@ -96,7 +88,7 @@ func run(args []string, out, errout io.Writer) error {
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|doc|attach|r2usage|tasks|tickets|decisions|placements|standing|dots|services|deploys|bench|changes|youtrack|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|doc|attach|tasks|tickets|decisions|placements|dots|services|deploys|changes|youtrack|version")
 	}
 }
 
@@ -155,7 +147,7 @@ func remoteClient(fs *flag.FlagSet) *remote.Client {
 }
 
 // configuredClient builds the client for the paths that take no --url/--token
-// flags — the mcp stdio server and the r2usage local comparison — so the
+// flags — the mcp stdio server and the local comparison — so the
 // optional CF Access service-token pair reaches those requests too.
 func configuredClient() remote.Client {
 	k := config()
@@ -173,18 +165,6 @@ type refFlags []string
 
 func (r *refFlags) String() string         { return strings.Join(*r, ",") }
 func (r *refFlags) Set(value string) error { *r = append(*r, value); return nil }
-
-func checkpointRefs(values []string) (store.Refs, error) {
-	refs := store.Refs{}
-	for _, value := range values {
-		key, ref, ok := strings.Cut(value, "=")
-		if !ok || key == "" || ref == "" {
-			return nil, errors.New("--ref must be k=v")
-		}
-		refs[key] = append(refs[key], ref)
-	}
-	return refs, nil
-}
 
 // taskRefs builds a refs patch. Grade and tier go on the wire as
 // refs.linear.{grade,tier} for one release (hk 4425): the CLI deploys before
@@ -233,7 +213,7 @@ func tasksCmd(args []string, out io.Writer) error {
 
 func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|set-priority|parent|relate|unrelate|origin|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|drift|settle-merged|project-status|intake|triage")
+		return errors.New("usage: tasks add|list|export|claim|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|set-area|areas|set-priority|parent|relate|unrelate|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|drift|settle-merged|intake|triage")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -256,22 +236,13 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	if args[0] == "relate" || args[0] == "unrelate" {
 		return taskRelationCmd(args, out)
 	}
-	if args[0] == "origin" {
-		return taskOriginCmd(args[1:], out)
-	}
-	if args[0] == "migrate-states" {
-		return taskMigrateStatesCmd(args[1:], out)
-	}
-	if args[0] == "project-status" {
-		return projectStatusCmd(args[1:], out)
-	}
 	if args[0] == "project" || args[0] == "projects" {
 		return taskProjectCmd(args, out)
 	}
 	if args[0] == "owner" || args[0] == "owners" {
 		return taskOwnerCmd(args, out)
 	}
-	if args[0] == "milestone" || args[0] == "label" || args[0] == "labels" || args[0] == "due" || args[0] == "subscribe" || args[0] == "unsubscribe" {
+	if args[0] == "milestone" {
 		return taskModelCmd(args, out)
 	}
 	if args[0] == "set-area" || args[0] == "areas" {
@@ -399,7 +370,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 			return errors.New("--no-job requires a non-empty reason")
 		}
 		switch args[0] {
-		case "claim", "next", "transition":
+		case "claim", "transition":
 		default:
 			return fmt.Errorf("--no-job is not accepted by tasks %s", args[0])
 		}
@@ -595,21 +566,6 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 			return err
 		}
 		return printJSON(out, x)
-	case "next":
-		if fs.NArg() != 0 {
-			return errors.New("tasks next takes flags only")
-		}
-		if noJobSet && *jobID != "" {
-			return errors.New("--job-id and --no-job are exclusive")
-		}
-		x, err := c.NextTask(ctx, *lane, *by, *jobID, noJobReason)
-		if err != nil {
-			if remote.ErrorCode(err) == "queue_empty" {
-				return exitCodeError{code: 3, err: errors.New("no backlog task")}
-			}
-			return err
-		}
-		return printJSON(out, x)
 	case "reopen":
 		id, err := parseID()
 		if err != nil {
@@ -689,7 +645,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		}
 		return printJSON(out, x)
 	default:
-		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|owner|owners|set-area|areas|set-priority|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|intake|triage")
+		return errors.New("usage: tasks add|list|export|claim|transition|reopen|rebind|relane|project|projects|owner|owners|set-area|areas|set-priority|parent|relate|unrelate|decision-request|decision-resolve|show|comment|comments|disposition|intake|triage")
 	}
 }
 
@@ -839,92 +795,6 @@ func searchArgs(args []string) ([]string, []string, error) {
 		}
 	}
 	return flags, positional, nil
-}
-
-func ctxCmd(args []string, out io.Writer) error {
-	if len(args) == 0 {
-		return errors.New("usage: ctx checkpoint|recent|search")
-	}
-	fs := flag.NewFlagSet("ctx "+args[0], flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	c := remoteClient(fs)
-	session := fs.String("session", "", "session")
-	limit := fs.Int("limit", 3, "limit")
-	kind := fs.String("kind", "", "checkpoint kind")
-	title := fs.String("title", "", "title")
-	body := fs.String("body", "", "body")
-	file := fs.String("file", "", "body file")
-	scope := fs.String("scope", "all", "scope")
-	var refs refFlags
-	fs.Var(&refs, "ref", "checkpoint reference k=v (repeatable)")
-	parseArgs := args[1:]
-	var searchQuery []string
-	if args[0] == "search" {
-		var e error
-		parseArgs, searchQuery, e = searchArgs(parseArgs)
-		if e != nil {
-			return e
-		}
-	}
-	if e := fs.Parse(parseArgs); e != nil {
-		return e
-	}
-	if e := mustClient(c); e != nil {
-		return e
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	switch args[0] {
-	case "checkpoint":
-		if *kind == "" {
-			*kind = "checkpoint"
-		}
-		if *file != "" {
-			b, e := os.ReadFile(*file)
-			if e != nil {
-				return e
-			}
-			*body = string(b)
-		}
-		checkpointRefs, e := checkpointRefs(refs)
-		if e != nil {
-			return e
-		}
-		v, e := c.Checkpoint(ctx, "", store.Checkpoint{Session: *session, Kind: *kind, Title: *title, Body: *body, Refs: checkpointRefs})
-		if e != nil {
-			return e
-		}
-		return printJSON(out, v)
-	case "recent":
-		v, e := c.Recent(ctx, *session, *kind, *limit)
-		if e != nil {
-			return e
-		}
-		return printJSON(out, v)
-	case "search":
-		if len(searchQuery) != 1 {
-			return errors.New("ctx search requires query")
-		}
-		// The 3-per-query default made discovery unusable (#551); search now
-		// defaults to 20 rows for every scope and the store marks a page cut
-		// at its cap with truncated=true on every row.
-		limitSet := false
-		fs.Visit(func(f *flag.Flag) {
-			if f.Name == "limit" {
-				limitSet = true
-			}
-		})
-		if !limitSet {
-			*limit = 20
-		}
-		v, e := c.Search(ctx, searchQuery[0], *scope, *session, *limit)
-		if e != nil {
-			return e
-		}
-		return printJSON(out, v)
-	default:
-		return errors.New("usage: ctx checkpoint|recent|search")
-	}
 }
 
 func docCmd(args []string, out io.Writer) error {
@@ -1133,14 +1003,13 @@ func attachCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("attach "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
-	checkpoint := fs.String("checkpoint", "", "checkpoint id")
 	doc := fs.String("doc", "", "document key")
 	memory := fs.String("memory", "", "memory agent/name")
 	task := fs.String("task", "", "hk task id")
 	name := fs.String("name", "", "original filename")
 	output := fs.String("o", "", "output path")
 	// Permit the documented `attach get SHA -o file` form as well as flags first.
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--checkpoint": true, "--doc": true, "--memory": true, "--task": true, "--name": true, "-o": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--doc": true, "--memory": true, "--task": true, "--name": true, "-o": true}
 	flags, positional := []string{}, []string{}
 	for i := 1; i < len(args); i++ {
 		a := args[i]
@@ -1166,10 +1035,6 @@ func attachCmd(args []string, out io.Writer) error {
 	ctx := context.Background()
 	ref := ""
 	n := 0
-	if *checkpoint != "" {
-		ref = "checkpoint:" + *checkpoint
-		n++
-	}
 	if *doc != "" {
 		ref = "document:" + *doc
 		n++
@@ -1300,132 +1165,6 @@ func attachMigrateCmd(args []string, out io.Writer) error {
 
 func attachmentMIME(name string) string {
 	return map[string]string{".json": "application/json", ".md": "text/markdown", ".csv": "text/csv", ".ndjson": "application/x-ndjson", ".log": "text/x-log", ".txt": "text/plain", ".html": "text/html", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".pdf": "application/pdf", ".mp4": "video/mp4", ".webm": "video/webm"}[strings.ToLower(filepath.Ext(name))]
-}
-
-// r2usage intentionally does no object-store access. It is safe to run where
-// credentials are absent and reports a skipped result in that case.
-func r2UsageCmd(args []string, out io.Writer) error {
-	fs := flag.NewFlagSet("r2usage", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	alert := fs.Bool("alert", false, "send threshold alert")
-	if e := fs.Parse(args); e != nil {
-		return e
-	}
-	token, account := os.Getenv("CF_API_TOKEN"), os.Getenv("CF_ACCOUNT_ID")
-	if token == "" || account == "" {
-		return printJSON(out, map[string]any{"skipped": true, "reason": "CF_API_TOKEN and CF_ACCOUNT_ID are required"})
-	}
-	query := `query($account:String!,$month:Time!){viewer{accounts(filter:{accountTag:$account}){r2StorageAdaptiveGroups(limit:1,orderBy:[datetime_DESC]){sum{payloadSize objectCount}} r2OperationsAdaptiveGroups(limit:100,filter:{datetime_geq:$month}){dimensions{actionType} sum{requests}}}}}`
-	month := time.Now().UTC().Format("2006-01") + "-01"
-	payload, _ := json.Marshal(map[string]any{"query": query, "variables": map[string]any{"account": account, "month": month}})
-	req, e := http.NewRequest(http.MethodPost, "https://api.cloudflare.com/client/v4/graphql", strings.NewReader(string(payload)))
-	if e != nil {
-		return e
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, e := http.DefaultClient.Do(req)
-	if e != nil {
-		return e
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("Cloudflare GraphQL returned %s", resp.Status)
-	}
-	var result struct {
-		Data struct {
-			Viewer struct {
-				Accounts []struct {
-					Storage []struct {
-						Sum struct{ PayloadSize, ObjectCount int64 } `json:"sum"`
-					} `json:"r2StorageAdaptiveGroups"`
-					Operations []struct {
-						Dimensions struct {
-							ActionType string `json:"actionType"`
-						} `json:"dimensions"`
-						Sum struct {
-							Requests int64 `json:"requests"`
-						} `json:"sum"`
-					} `json:"r2OperationsAdaptiveGroups"`
-				} `json:"accounts"`
-			} `json:"viewer"`
-		} `json:"data"`
-		Errors []any `json:"errors"`
-	}
-	if e = json.NewDecoder(resp.Body).Decode(&result); e != nil {
-		return e
-	}
-	if len(result.Errors) > 0 {
-		return fmt.Errorf("Cloudflare GraphQL returned errors")
-	}
-	var bytesTotal, objects, classA, classB int64
-	if len(result.Data.Viewer.Accounts) > 0 {
-		a := result.Data.Viewer.Accounts[0]
-		if len(a.Storage) > 0 {
-			bytesTotal = a.Storage[0].Sum.PayloadSize
-			objects = a.Storage[0].Sum.ObjectCount
-		}
-		for _, op := range a.Operations {
-			if strings.Contains(strings.ToLower(op.Dimensions.ActionType), "class a") {
-				classA += op.Sum.Requests
-			} else if strings.Contains(strings.ToLower(op.Dimensions.ActionType), "class b") {
-				classB += op.Sum.Requests
-			}
-		}
-	}
-	alertReason := r2AlertReason(bytesTotal, classA, classB)
-	output := map[string]any{"storage_bytes": bytesTotal, "object_count": objects, "class_a_month": classA, "class_b_month": classB, "storage_ratio": float64(bytesTotal) / float64(10<<30), "alert": alertReason != "", "alert_reason": alertReason}
-	// Compare the independent Cloudflare total with the local immutable-object
-	// ledger when this CLI has normal handoffkeep HTTP credentials configured.
-	if local := configuredClient(); local.URL != "" && local.Token != "" {
-		if err := remote.CFAccessPairError(local.CFAccessClientID, local.CFAccessClientSecret); err != nil {
-			return err
-		}
-		if local, err := local.AttachmentUsage(context.Background()); err == nil {
-			output["local_bytes_total"] = local.TotalBytes
-			base := bytesTotal
-			if base == 0 {
-				base = local.TotalBytes
-			}
-			diff := bytesTotal - local.TotalBytes
-			if diff < 0 {
-				diff = -diff
-			}
-			if base > 0 && diff*10 > base {
-				alertReason = "R2 storage differs from local attachment ledger by more than 10%"
-				output["alert"] = true
-				output["alert_reason"] = alertReason
-			}
-		}
-	}
-	if *alert && alertReason != "" {
-		line := "handoffkeep r2usage alert: " + alertReason
-		if hook := os.Getenv("HK_ALERT_DISCORD_WEBHOOK"); hook != "" {
-			b, _ := json.Marshal(map[string]string{"content": line})
-			_, _ = http.Post(hook, "application/json", strings.NewReader(string(b)))
-		} else {
-			fmt.Fprintln(out, line)
-		}
-	}
-	return printJSON(out, output)
-}
-
-func r2AlertReason(bytesTotal, classA, classB int64) string {
-	const storageFree = int64(10 << 30)
-	for _, x := range []struct {
-		value, cap int64
-		label      string
-	}{
-		{bytesTotal, storageFree, "R2 storage"}, {classA, 1000000, "R2 Class A operations"}, {classB, 10000000, "R2 Class B operations"},
-	} {
-		if x.value*100 >= 90*x.cap {
-			return x.label + " are at least 90% of free tier"
-		}
-		if x.value*100 >= 70*x.cap {
-			return x.label + " are at least 70% of free tier"
-		}
-	}
-	return ""
 }
 
 func validListen(addr string, tailnet bool) error {

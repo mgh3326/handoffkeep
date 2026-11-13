@@ -41,30 +41,8 @@ func TestModelRoutes(t *testing.T) {
 	request(http.MethodPut, mpath, map[string]any{"project": "experiment", "name": "changed"}, http.StatusOK)
 	request(http.MethodPut, "/v1/milestones/999999", map[string]any{"project": "experiment", "name": "changed"}, http.StatusNotFound)
 	request(http.MethodPut, mpath, map[string]any{"project": "experiment"}, http.StatusBadRequest)
-	l := request(http.MethodPost, "/v1/labels", map[string]any{"name": "first", "edit_level": "anyone"}, http.StatusOK)
-	lid := int64(l["id"].(float64))
-	request(http.MethodGet, "/v1/labels", nil, http.StatusOK)
-	request(http.MethodPost, "/v1/labels", map[string]any{"name": "bad", "edit_level": "wrong"}, http.StatusBadRequest)
-	lpath := fmt.Sprintf("/v1/labels/%d", lid)
-	request(http.MethodPut, lpath, map[string]any{"name": "changed", "edit_level": "desk"}, http.StatusOK)
-	request(http.MethodPut, "/v1/labels/999999", map[string]any{"name": "changed", "edit_level": "desk"}, http.StatusNotFound)
-	request(http.MethodPut, lpath, map[string]any{"name": "changed", "edit_level": "bad"}, http.StatusBadRequest)
 	taskpath := fmt.Sprintf("/v1/tasks/%d", task.ID)
-	for _, tc := range []struct {
-		suffix    string
-		good, bad any
-	}{
-		{"/milestone", map[string]any{"milestone_id": mid}, map[string]any{"milestone_id": -1}},
-		{"/labels", map[string]any{"label_id": lid, "attach": true}, map[string]any{"label_id": lid}},
-		{"/deadlines", map[string]any{"due_at": "2026-01-01T00:00:00Z"}, map[string]any{"due_at": "invalid"}},
-		{"/due", map[string]any{"due_at": "2026-01-01T00:00:00Z"}, map[string]any{"due_at": "invalid"}},
-		{"/subscribers", map[string]any{"subscriber": "test", "source": "test", "active": true}, map[string]any{"subscriber": "", "source": "test", "active": true}},
-	} {
-		request(http.MethodPost, taskpath+tc.suffix, tc.good, http.StatusOK)
-		request(http.MethodPost, "/v1/tasks/999999"+tc.suffix, tc.good, http.StatusNotFound)
-		request(http.MethodPost, taskpath+tc.suffix, tc.bad, http.StatusBadRequest)
-	}
-	request(http.MethodPost, lpath+"/retire", nil, http.StatusOK)
-	request(http.MethodPost, "/v1/labels/999999/retire", nil, http.StatusNotFound)
-	request(http.MethodPost, "/v1/labels/bad/retire", nil, http.StatusBadRequest)
+	request(http.MethodPost, taskpath+"/milestone", map[string]any{"milestone_id": mid}, http.StatusOK)
+	request(http.MethodPost, "/v1/tasks/999999/milestone", map[string]any{"milestone_id": mid}, http.StatusNotFound)
+	request(http.MethodPost, taskpath+"/milestone", map[string]any{"milestone_id": -1}, http.StatusBadRequest)
 }

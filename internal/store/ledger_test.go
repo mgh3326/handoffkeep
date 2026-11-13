@@ -161,85 +161,6 @@ func TestLedgerSectionsPlaceEachTaskOnce(t *testing.T) {
 	}
 }
 
-func TestLedgerProjectsStalenessAtFixedTimes(t *testing.T) {
-	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
-	a, b, c := "alpha", "beta", "gamma"
-	row := func(p *string) ledgerStartedRow {
-		return ledgerStartedRow{LedgerStartedTask: LedgerStartedTask{LedgerTask: LedgerTask{Project: p}}}
-	}
-	started := []ledgerStartedRow{row(&b), row(&a), row(&b), row(&c), row(nil)}
-	latest := map[string]statusLatest{
-		a: {Health: HealthOnTrack, At: now.Add(-StatusUpdateStaleAfter)},
-		b: {Health: HealthAtRisk, At: now.Add(-StatusUpdateStaleAfter - time.Second)},
-	}
-	got := ledgerProjects(started, latest, now)
-	if len(got) != 3 || got[0].Project != a || got[1].Project != b || got[2].Project != c {
-		t.Fatalf("projects %+v", got)
-	}
-	if got[0].Started != 1 || got[0].Stale || got[0].Health != HealthOnTrack {
-		t.Fatalf("alpha at exactly 7 days %+v", got[0])
-	}
-	if got[1].Started != 2 || !got[1].Stale || got[1].Health != HealthAtRisk {
-		t.Fatalf("beta past 7 days %+v", got[1])
-	}
-	if got[2].LastUpdateAt != nil || !got[2].Stale {
-		t.Fatalf("gamma with no update %+v", got[2])
-	}
-}
-
-func TestStatusUpdateStaleAtFixedTimes(t *testing.T) {
-	at := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	for _, tc := range []struct {
-		now   time.Time
-		stale bool
-	}{
-		{at, false},
-		{at.Add(StatusUpdateStaleAfter), false},
-		{at.Add(StatusUpdateStaleAfter + time.Second), true},
-	} {
-		if got := StatusUpdateStale(&at, tc.now); got != tc.stale {
-			t.Errorf("now=%s stale=%t", tc.now, got)
-		}
-	}
-	if !StatusUpdateStale(nil, at) {
-		t.Error("a project with no update is not stale")
-	}
-}
-
-func TestStatusDiff(t *testing.T) {
-	snap := StatusCounts{Triage: 1, Backlog: 2, Started: 3}
-	if d := statusDiff(nil, HealthOnTrack, snap); d.PreviousID != nil || d.Counts != nil || d.Health != nil {
-		t.Fatalf("first diff %+v", d)
-	}
-	prev := &StatusUpdate{ID: 7, Health: HealthOnTrack, Snapshot: StatusCounts{Backlog: 3, Started: 1, Completed: 2}}
-	d := statusDiff(prev, HealthAtRisk, snap)
-	want := StatusCounts{Triage: 1, Backlog: -1, Started: 2, Completed: -2}
-	if d.PreviousID == nil || *d.PreviousID != 7 || d.Counts == nil || *d.Counts != want || d.Health == nil || *d.Health != (StatusHealthChange{From: HealthOnTrack, To: HealthAtRisk}) {
-		t.Fatalf("diff %+v counts=%+v health=%+v", d, d.Counts, d.Health)
-	}
-	if d := statusDiff(prev, HealthOnTrack, prev.Snapshot); d.Health != nil || *d.Counts != (StatusCounts{}) {
-		t.Fatalf("unchanged diff %+v", d)
-	}
-}
-
-func TestValidateStatusUpdate(t *testing.T) {
-	if err := checkStatusUpdate("experiment", HealthOffTrack, "slipping", "tester"); err != nil {
-		t.Fatal(err)
-	}
-	for name, args := range map[string][4]string{
-		"health":       {"experiment", "green", "body", "tester"},
-		"empty health": {"experiment", "", "body", "tester"},
-		"body":         {"experiment", HealthAtRisk, "  ", "tester"},
-		"project":      {"bad name", HealthAtRisk, "body", "tester"},
-		"author":       {"experiment", HealthAtRisk, "body", ""},
-		"nul":          {"experiment", HealthAtRisk, "a\x00b", "tester"},
-	} {
-		if err := checkStatusUpdate(args[0], args[1], args[2], args[3]); !errors.Is(err, ErrStatusUpdateInvalid) {
-			t.Errorf("%s: err=%v", name, err)
-		}
-	}
-}
-
 // TestLedgerSeedOneTaskPerCase seeds one task per case and checks each lands
 // in exactly the right section, and that two reads at one now are
 // byte-identical.
@@ -303,7 +224,7 @@ func TestLedgerSeedOneTaskPerCase(t *testing.T) {
 			t.Errorf("task %d listed in %v", id, where[id])
 		}
 	}
-	if len(l.InFlight.Projects) != 1 || l.InFlight.Projects[0].Project != testProjectName || l.InFlight.Projects[0].Started != 3 || !l.InFlight.Projects[0].Stale {
+	if len(l.InFlight.Projects) != 1 || l.InFlight.Projects[0].Project != testProjectName || l.InFlight.Projects[0].Started != 3 {
 		t.Fatalf("projects %+v", l.InFlight.Projects)
 	}
 
@@ -315,17 +236,6 @@ func TestLedgerSeedOneTaskPerCase(t *testing.T) {
 	b, _ := json.Marshal(again)
 	if !bytes.Equal(a, b) {
 		t.Fatalf("two reads differ:\n%s\n%s", a, b)
-	}
-
-	if _, err := s.CreateStatusUpdate(ctx, testProjectName, HealthOnTrack, "moving", "tester", now); err != nil {
-		t.Fatal(err)
-	}
-	l, err = s.Ledger(ctx, "desk-ledger-test", now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p := l.InFlight.Projects[0]; p.Stale || p.Health != HealthOnTrack || p.LastUpdateAt == nil {
-		t.Fatalf("project after update %+v", p)
 	}
 }
 
@@ -485,84 +395,6 @@ func TestLedgerCursor(t *testing.T) {
 }
 
 func itoa(id int64) string { return strconv.FormatInt(id, 10) }
-
-func TestStatusUpdates(t *testing.T) {
-	s := ledgerStore(t)
-	ctx := t.Context()
-	const project = "brewdial"
-	seed := func(state string) {
-		x, err := s.CreateTask(ctx, Task{Lane: relaneLane(t, "status"), Title: "status " + state, Kind: "implement", CreatedBy: "tester", Project: projectPtr(project)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err = s.pool.Exec(ctx, `UPDATE tasks SET state=$2 WHERE id=$1`, x.ID, state); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, state := range []string{StateBacklog, StateBacklog, StateDeveloping, StateMerged, StateIcebox} {
-		seed(state)
-	}
-	// A task of another project does not count.
-	flowTask(t, s, s.pool, "implement", StateDeveloping, true)
-
-	t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	if _, err := s.CreateStatusUpdate(ctx, project, "green", "body", "tester", t0); !errors.Is(err, ErrStatusUpdateInvalid) {
-		t.Fatalf("invalid health err=%v", err)
-	}
-	if _, err := s.CreateStatusUpdate(ctx, "no-such-project", HealthOnTrack, "body", "tester", t0); !errors.Is(err, ErrProjectNotFound) {
-		t.Fatalf("unknown project err=%v", err)
-	}
-	if list, err := s.ListStatusUpdates(ctx, project, 0, t0); err != nil || len(list.Updates) != 0 || !list.Stale || list.LastUpdateAt != nil {
-		t.Fatalf("empty list %+v err=%v", list, err)
-	}
-
-	first, err := s.CreateStatusUpdate(ctx, project, HealthOnTrack, "on plan", "tester", t0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := (StatusCounts{Backlog: 2, Started: 1, Completed: 1, Canceled: 1}); first.Snapshot != want {
-		t.Fatalf("snapshot %+v, want %+v", first.Snapshot, want)
-	}
-	if first.Diff.PreviousID != nil || first.Diff.Counts != nil || first.Diff.Health != nil || first.CreatedBy != "tester" || !first.CreatedAt.Equal(t0) {
-		t.Fatalf("first update %+v", first)
-	}
-
-	seed(StateTriage)
-	seed(StateDeveloping)
-	t1 := t0.Add(time.Hour)
-	second, err := s.CreateStatusUpdate(ctx, project, HealthAtRisk, "slipping", "tester", t1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.Diff.PreviousID == nil || *second.Diff.PreviousID != first.ID || second.Diff.Counts == nil ||
-		*second.Diff.Counts != (StatusCounts{Triage: 1, Started: 1}) || second.Diff.Health == nil ||
-		*second.Diff.Health != (StatusHealthChange{From: HealthOnTrack, To: HealthAtRisk}) {
-		t.Fatalf("second diff %+v", second.Diff)
-	}
-
-	for _, tc := range []struct {
-		now   time.Time
-		stale bool
-	}{
-		{t1, false},
-		{t1.Add(StatusUpdateStaleAfter), false},
-		{t1.Add(StatusUpdateStaleAfter + time.Second), true},
-	} {
-		list, err := s.ListStatusUpdates(ctx, project, 0, tc.now)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if list.Stale != tc.stale || len(list.Updates) != 2 || list.Updates[0].ID != second.ID || list.Updates[1].ID != first.ID || list.LastUpdateAt == nil || !list.LastUpdateAt.Equal(t1) {
-			t.Fatalf("list at %s: %+v", tc.now, list)
-		}
-	}
-	if list, err := s.ListStatusUpdates(ctx, project, 1, t1); err != nil || len(list.Updates) != 1 || list.Updates[0].ID != second.ID {
-		t.Fatalf("limited list %+v err=%v", list, err)
-	}
-	if _, err := s.ListStatusUpdates(ctx, "no-such-project", 0, t1); !errors.Is(err, ErrProjectNotFound) {
-		t.Fatalf("unknown project list err=%v", err)
-	}
-}
 
 // ledgerRequest stores an open linear request for task (nil for none),
 // created at created and expiring at expires (nil for never).

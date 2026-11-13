@@ -275,7 +275,7 @@ func TestTextDeclarationsRejectBinarySniffsAndNUL(t *testing.T) {
 }
 
 func TestParseRef(t *testing.T) {
-	for _, ref := range []string{"checkpoint:12", "document:jobs/a.md", "memory:agent/name", "task:12", ""} {
+	for _, ref := range []string{"document:jobs/a.md", "memory:agent/name", "task:12", ""} {
 		if _, _, err := ParseRef(ref); err != nil {
 			t.Fatalf("%s: %v", ref, err)
 		}

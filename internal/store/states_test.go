@@ -168,22 +168,6 @@ func TestTaskStateMachineReturnsDetachedClosureTypes(t *testing.T) {
 	}
 }
 
-func TestRollbackScriptVersion(t *testing.T) {
-	b, err := readRepoFile("scripts/rollback-state-migration.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := "schema_version: " + itoaForTest(stateMigrationVersion); !contains(string(b), want) {
-		t.Errorf("rollback script does not carry %q", want)
-	}
-	if want := "DELETE FROM schema_version WHERE version = " + itoaForTest(stateMigrationVersion) + ";"; !contains(string(b), want) {
-		t.Errorf("rollback script does not delete schema version %d", stateMigrationVersion)
-	}
-	if SchemaVersion < stateMigrationVersion {
-		t.Errorf("SchemaVersion=%d is below the state migration %d", SchemaVersion, stateMigrationVersion)
-	}
-}
-
 func TestSettledStatesSQLMatchesIsSettledState(t *testing.T) {
 	got := map[string]bool{}
 	for _, state := range strings.Split(settledStatesSQL, ",") {

@@ -11,54 +11,6 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-func TestMigrateStatesRequiresDryRunAndDatabase(t *testing.T) {
-	t.Setenv("HANDOFFKEEP_DB_URL", "")
-	var out, errout bytes.Buffer
-	if err := run([]string{"tasks", "migrate-states"}, &out, &errout); err == nil || !strings.Contains(err.Error(), "--dry-run") {
-		t.Fatalf("without --dry-run: %v", err)
-	}
-	if err := run([]string{"tasks", "migrate-states", "--dry-run"}, &out, &errout); err == nil || !strings.Contains(err.Error(), "HANDOFFKEEP_DB_URL") {
-		t.Fatalf("without a database: %v", err)
-	}
-	if err := run([]string{"tasks", "migrate-states", "--dry-run", "extra"}, &out, &errout); err == nil {
-		t.Fatal("positional arguments are refused")
-	}
-	if out.Len() != 0 {
-		t.Fatalf("a refused dry-run printed %q", out.String())
-	}
-}
-
-func TestMigrationPlanOutput(t *testing.T) {
-	plan := store.StateMigrationPlan{
-		Counts: []store.StateMigrationCount{
-			{LegacyState: "claimed", Rule: "claimed_ended", NewState: "unstarted", Count: 2},
-			{LegacyState: "hold", Rule: "hold_icebox", NewState: "icebox", Count: 5},
-		},
-		HoldMirroredToCanceled: 3,
-	}
-	var text bytes.Buffer
-	if err := writeStateMigrationPlan(&text, plan, false); err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"legacy_state", "claimed_ended", "unstarted", "hold_icebox", "icebox", "changed tasks: 7", "mirrored to Linear that would show as Canceled: 3"} {
-		if !strings.Contains(text.String(), want) {
-			t.Errorf("dry-run table lacks %q:\n%s", want, text.String())
-		}
-	}
-	var asJSON bytes.Buffer
-	if err := writeStateMigrationPlan(&asJSON, plan, true); err != nil {
-		t.Fatal(err)
-	}
-	var back store.StateMigrationPlan
-	if err := json.Unmarshal(asJSON.Bytes(), &back); err != nil || len(back.Counts) != 2 || back.HoldMirroredToCanceled != 3 {
-		t.Fatalf("json plan: %s err=%v", asJSON.String(), err)
-	}
-	var done bytes.Buffer
-	if err := writeStateMigrationPlan(&done, store.StateMigrationPlan{Migrated: true}, false); err != nil || !strings.Contains(done.String(), "already migrated") {
-		t.Fatalf("migrated: %q err=%v", done.String(), err)
-	}
-}
-
 // fakeHK answers every request, recording the last one.
 func fakeHK(t *testing.T, response any) (*httptest.Server, *struct{ Method, Path, Body string }) {
 	t.Helper()
