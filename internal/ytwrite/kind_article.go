@@ -307,25 +307,29 @@ type RemoteArticle struct {
 	ProjectID string
 	Summary   string
 	Content   string
-	// Child is set on an article with a parent (a split document's part).
-	Child bool
+	// ParentID is the article's parent, "" for a top-level article (a
+	// split document's part is a child of its index article).
+	ParentID string
 }
 
 // ArticleCreate is one article create: the project and the text.
 type ArticleCreate struct {
 	ProjectID string
-	Summary   string
-	Content   string
+	// ParentID, when set, makes the article a child of that article.
+	ParentID string
+	Summary  string
+	Content  string
 }
 
 // ArticleRemote is the YouTrack surface of the document kinds. A Remote that
 // does not implement it cannot send them.
 type ArticleRemote interface {
-	// FindArticles returns every top-level article of the project (short
-	// name and id) whose summary is exactly summary, with its content, or
-	// an error. A result it cannot prove complete is an error; a 429 is a
+	// FindArticles returns the articles of the project (short name and id)
+	// whose summary is exactly summary, with their content, or an error.
+	// parentID "" keeps the top-level articles; otherwise only the children
+	// of parentID. A result it cannot prove complete is an error; a 429 is a
 	// *RemoteError with the server's RetryAfter.
-	FindArticles(ctx context.Context, projectShort, projectID, summary string) ([]RemoteArticle, error)
+	FindArticles(ctx context.Context, projectShort, projectID, summary, parentID string) ([]RemoteArticle, error)
 	// CreateArticle makes exactly one POST and returns the new article's
 	// id. Its errors follow CreateComment's.
 	CreateArticle(ctx context.Context, in ArticleCreate) (id string, err error)
@@ -432,7 +436,7 @@ func (articleCreate) Send(ctx context.Context, remote Remote, op Op, text string
 	if p.LegacyArticleID != "" {
 		return "", legacyArticle(ctx, ar, op, p)
 	}
-	hits, err := ar.FindArticles(ctx, p.YTProjectShort, op.YTTargetID, p.Summary)
+	hits, err := ar.FindArticles(ctx, p.YTProjectShort, op.YTTargetID, p.Summary, "")
 	if err != nil {
 		return "", &NotSentError{Err: err}
 	}
@@ -482,7 +486,7 @@ func (articleCreate) Evidence(ctx context.Context, remote Remote, op Op, text st
 	if err != nil {
 		return ev, err
 	}
-	hits, err := ar.FindArticles(ctx, p.YTProjectShort, op.YTTargetID, p.Summary)
+	hits, err := ar.FindArticles(ctx, p.YTProjectShort, op.YTTargetID, p.Summary, "")
 	if err != nil {
 		var re *RemoteError
 		if errors.As(err, &re) && re.Status == http.StatusTooManyRequests {
