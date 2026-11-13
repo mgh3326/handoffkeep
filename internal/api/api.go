@@ -604,6 +604,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/yt/ops/{id}/resolve", s.ytOpsResolve)
 	m.HandleFunc("GET /v1/yt/authority", s.ytAuthority)
 	m.HandleFunc("POST /v1/yt/authority", s.ytAuthoritySet)
+	m.HandleFunc("POST /v1/documents/prune", s.docPrune)
 	m.HandleFunc("/v1/documents/{key...}", s.document)
 	m.HandleFunc("PUT /v1/attachments", s.attachmentPut)
 	m.HandleFunc("GET /v1/attachments", s.attachments)
