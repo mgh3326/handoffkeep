@@ -431,8 +431,7 @@ The HTTP API uses the usual bearer token: `POST /v1/tasks`, `GET /v1/tasks`,
 `POST /v1/tasks/{id}/transition`. Invalid state changes and competing claims return 409.
 `GET /v1/capabilities` (bearer, any client) returns `{"protocol_version": N,
 "features": [...]}`: the request shapes this build accepts, such as
-`claim_job_id`, `claim_no_job`, `next_job_id`, `next_no_job`,
-`transition_no_job`, `resolve_no_job` and `disposition_project`. The CLI reads
+`claim_job_id`, `claim_no_job`, `transition_no_job`, `resolve_no_job` and `disposition_project`. The CLI reads
 it once per process and refuses a shape the server does not list, with
 `server_lacks_feature:<name>`, before it sends anything. A server that answers
 404 predates the route, and its requests go out as before. The list is
