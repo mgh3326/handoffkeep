@@ -392,7 +392,9 @@ func ytTaskHasIssueOwnershipTx(ctx context.Context, q ytRowQuerier, taskID int64
 // another issue. It returns the conflict ("" when none)
 // and logs it as ytwrite.binding_conflict. A binding or map row naming this
 // same issue is no conflict, and neither is a map row on another tenant: a
-// YouTrack id is the tenant's (hk 3912). Nothing is written.
+// YouTrack id is the tenant's (hk 3912), and a row with no tenant (one a
+// release that predates the column wrote) counts as this one's. Nothing is
+// written.
 func ytIssueConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string) (string, error) {
 	taskID, err := strconv.ParseInt(op.EntityID, 10, 64)
 	if err != nil || taskID < 1 || op.EntityKind != "task" {
@@ -407,7 +409,7 @@ func ytIssueConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID strin
 		(SELECT 'task is mapped to issue '||yt_id FROM yt_entity_map
 			WHERE entity_kind='task' AND hk_key=$4 AND yt_id<>$3),
 		(SELECT 'issue is mapped to task '||hk_key FROM yt_entity_map
-			WHERE entity_kind='task' AND tenant=$2 AND yt_id=$3 AND hk_key<>$4),
+			WHERE entity_kind='task' AND (tenant=$2 OR tenant='') AND yt_id=$3 AND hk_key<>$4),
 		(SELECT 'task''s YouTrack origin names issue '||coalesce(external_id,'')||' on '||coalesce(tenant,'') FROM task_origins
 			WHERE task_id=$1 AND provider='youtrack' AND (coalesce(external_id,'')<>$3 OR (coalesce(tenant,'')<>'' AND tenant<>$2))),
 		'')`, taskID, op.Tenant, ytID, op.EntityID).Scan(&detail)

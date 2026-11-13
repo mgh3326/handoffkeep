@@ -92,12 +92,14 @@ const (
 // the binding ($1 task id, $2 tenant, $3 issue id, $4 task id as text, $5
 // YouTrack project id). Plain reads: the caller decides the locks. The map
 // rows that name an issue are read on the binding's tenant: the same YouTrack
-// id on another tenant is another issue (hk 3912).
+// id on another tenant is another issue (hk 3912). A row a release that
+// predates the tenant column wrote (tenant ”) is read as this tenant's, the
+// safe direction for a check that refuses.
 const ytBindingSourcesSQL = `SELECT
 	EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack'
 		AND (coalesce(external_id,'') <> $3 OR (coalesce(tenant,'') <> '' AND tenant <> $2))),
 	EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$4 AND yt_id <> $3),
-	EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND tenant=$2 AND yt_id=$3 AND hk_key <> $4),
+	EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND (tenant=$2 OR tenant='') AND yt_id=$3 AND hk_key <> $4),
 	EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1 AND (tenant <> $2 OR issue_id <> $3)),
 	EXISTS(SELECT 1 FROM yt_comment_canary WHERE tenant=$2 AND issue_id=$3 AND task_id <> $1),
 	EXISTS(SELECT 1 FROM yt_task_bindings WHERE tenant=$2 AND issue_id=$3 AND task_id <> $1),

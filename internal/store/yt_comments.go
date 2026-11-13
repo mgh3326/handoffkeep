@@ -556,7 +556,7 @@ func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verif
 	}
 	var mapped bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task'
-		AND ((hk_key=$1 AND yt_id<>$2) OR (hk_key<>$1 AND tenant=$3 AND yt_id=$2)))`, taskKey, c.IssueID, c.Tenant).Scan(&mapped); err != nil {
+		AND ((hk_key=$1 AND yt_id<>$2) OR (hk_key<>$1 AND (tenant=$3 OR tenant='') AND yt_id=$2)))`, taskKey, c.IssueID, c.Tenant).Scan(&mapped); err != nil {
 		return YTCommentCanary{}, err
 	}
 	if mapped {
