@@ -281,3 +281,21 @@ it("links to work status page from open task summary count", async () => {
   const link = await screen.findByRole("link", { name: "열린 작업 42" });
   expect(link.getAttribute("href")).toBe("/ui/work-status");
 });
+
+it("shows a deploy lag banner when a service is lagging", async () => {
+  serve(
+    payload({
+      deploys: {
+        count: 1,
+        events_capped: false,
+        items: [deploy],
+        lagging: [{ service: "auto_trader", repo: "mgh3326/auto_trader", lag_count: 5 }],
+      },
+    }),
+  );
+  render(<HomeAttention />);
+  const banner = await screen.findByTestId("home-lag-banner");
+  expect(banner).toBeTruthy();
+  expect(banner.textContent).toContain("배포 지연: auto_trader(main보다 5개 뒤처짐)");
+  expect(banner.textContent).toContain("배포 관리");
+});

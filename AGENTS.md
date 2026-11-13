@@ -26,7 +26,7 @@ and leave the old code as is unless the change already touches it.
 **Fleet sessions** (workers, lead and design sessions launched through
 panewire) test by the host-safety preamble at the top of their brief: test
 only the packages you changed, start no local database (DB-backed tests run
-in CI), and never run `go test` on mbp-server. Where that preamble and this
+in CI). This holds on every host, mbp-server included. Where that preamble and this
 section differ, the preamble wins. The rest of this section is for people
 and CI.
 

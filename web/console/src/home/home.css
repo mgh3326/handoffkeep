@@ -34,6 +34,8 @@
 .ha-empty .hk-icon { width: 80px; height: 80px; }
 .ha-empty p { margin: 0; }
 .ha-error { color: var(--hk-chip-failed-fg); }
+.ha-lag-banner { display: flex; align-items: center; gap: var(--hk-space-2); margin-top: var(--hk-space-3); padding: var(--hk-space-2) var(--hk-space-3); border: var(--hk-border-width) solid var(--hk-warning); border-radius: var(--hk-radius-card); background: rgb(229 187 112 / 8%); color: var(--hk-warning); font: var(--hk-weight-medium) var(--hk-type-row)/var(--hk-line-row) var(--hk-font-ui); }
+.ha-lag-banner a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 
 .ha-item { display: flex; align-items: center; flex-wrap: wrap; }
 .ha-item .ha-row { flex: 1; min-width: 0; }

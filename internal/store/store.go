@@ -3551,6 +3551,23 @@ func validAttachmentRef(kind, id string) bool {
 	return false
 }
 
+// validAttachmentListRef reports whether kind/id may filter ListAttachments.
+// It accepts every ref a new attachment can be written with plus the checkpoint
+// refs the previous release still writes during the blue-green overlap: the
+// checkpoint API is gone, so nothing writes them here, but the rows stay
+// readable. The id check is the previous release's, so every row it could
+// write is still listed.
+func validAttachmentListRef(kind, id string) bool {
+	if validAttachmentRef(kind, id) {
+		return true
+	}
+	if kind == "checkpoint" {
+		_, e := strconv.ParseInt(id, 10, 64)
+		return e == nil
+	}
+	return false
+}
+
 // ValidTaskRefID reports whether id is a task id written the way ParseRef and
 // the attachment_refs row store it: a positive decimal with no sign or leading
 // zero, so "task:12" and "task:012" cannot name two different refs.
@@ -3723,7 +3740,7 @@ func (s *Store) RecordAttachmentGet(ctx context.Context, sha string, getCap int6
 	return tx.Commit(ctx)
 }
 func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limit int) ([]Attachment, error) {
-	if refKind != "" && !validAttachmentRef(refKind, refID) {
+	if refKind != "" && !validAttachmentListRef(refKind, refID) {
 		return nil, errors.New("invalid attachment ref")
 	}
 	if limit < 1 {
