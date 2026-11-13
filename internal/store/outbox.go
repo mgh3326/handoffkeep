@@ -25,6 +25,11 @@ const (
 	OutboxKindDotsDecision = "dots_decision"
 	OutboxKindDotsFollowup = "dots_followup"
 	OutboxKindYTWriteOp    = "yt_write_op"
+	// The resolution kinds of hk 3295: an operator deny of a pending decision
+	// attempt, a disposition (ESC) answer, and a deploy result.
+	OutboxKindDecisionDenied      = "decision_denied"
+	OutboxKindDispositionAnswered = "disposition_answered"
+	OutboxKindDeployResult        = "deploy_result"
 )
 
 var (
@@ -33,11 +38,16 @@ var (
 	// ErrOutboxConflict is a mark-sent naming a hub row id different from the
 	// one already recorded — the receipt chain disagrees, so nothing changes.
 	ErrOutboxConflict = errors.New("notification_outbox_conflict")
+	// ErrOutboxNotReceived is an applied ack for a row the hub never
+	// accepted: applied follows received.
+	ErrOutboxNotReceived = errors.New("notification_outbox_not_received")
 )
 
 // NotificationOutbox is one lane notification owed by a server-side write.
 // SentAt and HubRowID stay NULL until the drainer records the hub's
-// receipt (201 or 409 with the existing row id) here.
+// receipt (201 or 409 with the existing row id) here: that is the received
+// receipt. AppliedAt and AppliedBy stay NULL until the receiving lane acks
+// the event: the applied receipt, which only follows a received one.
 type NotificationOutbox struct {
 	ID         int64      `json:"id"`
 	Kind       string     `json:"kind"`
@@ -47,12 +57,14 @@ type NotificationOutbox struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	SentAt     *time.Time `json:"sent_at"`
 	HubRowID   *int64     `json:"hub_row_id"`
+	AppliedAt  *time.Time `json:"applied_at"`
+	AppliedBy  *string    `json:"applied_by"`
 }
 
-const notificationOutboxColumns = `id,kind,target_lane,event_id,text,created_at,sent_at,hub_row_id`
+const notificationOutboxColumns = `id,kind,target_lane,event_id,text,created_at,sent_at,hub_row_id,applied_at,applied_by`
 
 func scanNotificationOutbox(row interface{ Scan(...any) error }, x *NotificationOutbox) error {
-	return row.Scan(&x.ID, &x.Kind, &x.TargetLane, &x.EventID, &x.Text, &x.CreatedAt, &x.SentAt, &x.HubRowID)
+	return row.Scan(&x.ID, &x.Kind, &x.TargetLane, &x.EventID, &x.Text, &x.CreatedAt, &x.SentAt, &x.HubRowID, &x.AppliedAt, &x.AppliedBy)
 }
 
 // decisionAnsweredEventID is the deterministic outbox id for a resolution:
@@ -210,6 +222,38 @@ func (s *Store) MarkNotificationSent(ctx context.Context, eventID string, hubRow
 		return NotificationOutbox{}, err
 	}
 	if x.HubRowID == nil || *x.HubRowID != hubRowID {
+		return NotificationOutbox{}, ErrOutboxConflict
+	}
+	return x, nil
+}
+
+// MarkNotificationApplied records the receiving lane's ack for one outbox
+// row, the second receipt after the hub's. It is idempotent per (event_id,
+// by): a repeat returns the stored row, and an ack by another identity on an
+// applied row is a conflict. An ack for a row the hub has not accepted yet is
+// ErrOutboxNotReceived: applied never precedes received.
+func (s *Store) MarkNotificationApplied(ctx context.Context, eventID, by string) (NotificationOutbox, error) {
+	if eventID == "" || !validText(eventID, 256) || by == "" || !validText(by, 128) {
+		return NotificationOutbox{}, errors.New("invalid notification ack")
+	}
+	var x NotificationOutbox
+	err := scanNotificationOutbox(s.pool.QueryRow(ctx, `UPDATE notification_outbox SET applied_at=now(),applied_by=$2 WHERE event_id=$1 AND sent_at IS NOT NULL AND applied_at IS NULL RETURNING `+notificationOutboxColumns, eventID, by), &x)
+	if err == nil {
+		return x, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return NotificationOutbox{}, err
+	}
+	if err = scanNotificationOutbox(s.pool.QueryRow(ctx, `SELECT `+notificationOutboxColumns+` FROM notification_outbox WHERE event_id=$1`, eventID), &x); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return NotificationOutbox{}, ErrOutboxEventNotFound
+		}
+		return NotificationOutbox{}, err
+	}
+	switch {
+	case x.SentAt == nil:
+		return NotificationOutbox{}, ErrOutboxNotReceived
+	case x.AppliedBy == nil || *x.AppliedBy != by:
 		return NotificationOutbox{}, ErrOutboxConflict
 	}
 	return x, nil

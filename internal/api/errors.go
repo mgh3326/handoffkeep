@@ -133,6 +133,7 @@ var errorRules = []errorRule{
 	{store.ErrJobStateConflict, http.StatusConflict, "job_state_conflict", true},
 	{store.ErrOutboxEventNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrOutboxConflict, http.StatusConflict, "notification_outbox_conflict", false},
+	{store.ErrOutboxNotReceived, http.StatusConflict, "notification_outbox_not_received", false},
 	{store.ErrChatConversation, http.StatusConflict, "chat_conversation_conflict", false},
 	{store.ErrChatMessageConflict, http.StatusConflict, "chat_message_conflict", false},
 	{store.ErrDecisionRecordNotFound, http.StatusNotFound, "not_found", false},

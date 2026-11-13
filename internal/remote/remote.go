@@ -630,6 +630,18 @@ func (c Client) MarkNotificationSent(ctx context.Context, eventID string, hubRow
 	return out, err
 }
 
+// MarkNotificationApplied reports that the receiving lane applied an outbox
+// event the hub had already accepted. The server attributes the receipt to
+// the client's token, so the call names no identity. It is idempotent per
+// event id and client.
+func (c Client) MarkNotificationApplied(ctx context.Context, eventID string) (store.NotificationOutbox, error) {
+	var out store.NotificationOutbox
+	err := c.call(ctx, "POST", "/v1/assistant/outbox/applied", struct {
+		EventID string `json:"event_id"`
+	}{eventID}, &out)
+	return out, err
+}
+
 // RelaneResult is one item's outcome in a RelaneTasks response. The batch
 // continues past item failures, so callers must inspect every entry.
 type RelaneResult struct {
