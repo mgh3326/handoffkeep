@@ -108,3 +108,31 @@ func TestDotsResultNotifiesNamedLanesWithBodySection(t *testing.T) {
 		t.Fatalf("lane-a got %d ready events, want 1", n)
 	}
 }
+
+// Invariant: a request body edited after creation to name an invalid lane does
+// not refuse the RESULT. The reply is recorded, the requester and the valid
+// lanes are notified, and the invalid name is reported in the result.
+func TestDotsResultSurvivesInvalidLaneEditedAfterCreation(t *testing.T) {
+	s := schemaStore(t, "dots_notify_edited")
+	task, err := s.CreateDotsRequest(t.Context(), "caller", DotsRequestInput{Title: "Research", Body: "Investigate\n[알릴 레인] lane-a", RequesterLane: "requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(t.Context(), `UPDATE documents SET body=$2 WHERE key=$1`, task.BodyDoc, "Investigate\n[알릴 레인] lane-a, Bad Lane"); err != nil {
+		t.Fatal(err)
+	}
+	started, _ := startDotsRun(t, s, task.ID, "start")
+	got, err := s.ReplyDots(t.Context(), "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "RESULT", Body: "Done", IdempotencyKey: "key", RunToken: started.RunToken})
+	if err != nil {
+		t.Fatalf("RESULT refused: %v", err)
+	}
+	if len(got.InvalidNotifyLanes) != 1 || got.InvalidNotifyLanes[0] != "Bad Lane" {
+		t.Fatalf("invalid lanes=%v", got.InvalidNotifyLanes)
+	}
+	if n := notifyRows(t, s, "requester", OutboxKindDotsReport); n != 1 {
+		t.Fatalf("requester got %d ready events, want 1", n)
+	}
+	if n := notifyRows(t, s, "lane-a", OutboxKindDotsReport); n != 1 {
+		t.Fatalf("lane-a got %d ready events, want 1", n)
+	}
+}
