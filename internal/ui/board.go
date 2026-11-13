@@ -117,11 +117,11 @@ type boardWorkBoard struct {
 	Sessions     []boardWorkSession `json:"sessions"`
 }
 
-func projectWorkBoard(board store.LinearBoard) *boardWorkBoard {
-	if len(board.Sessions) == 0 && board.Task.Refs.PR == "" && board.Task.Refs.HeadSHA == "" {
+func projectWorkBoard(board store.TaskWorkBoard) *boardWorkBoard {
+	if len(board.Sessions) == 0 && board.PR == "" && board.HeadSHA == "" {
 		return nil
 	}
-	view := &boardWorkBoard{PrimaryJobID: board.PrimaryJob(), PR: board.Task.Refs.PR, HeadSHA: board.Task.Refs.HeadSHA, Sessions: make([]boardWorkSession, 0, len(board.Sessions))}
+	view := &boardWorkBoard{PrimaryJobID: board.PrimaryJob(), PR: board.PR, HeadSHA: board.HeadSHA, Sessions: make([]boardWorkSession, 0, len(board.Sessions))}
 	for _, session := range board.Sessions {
 		if !session.Active && session.JobID != view.PrimaryJobID {
 			continue
