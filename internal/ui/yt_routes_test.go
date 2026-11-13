@@ -109,6 +109,18 @@ func (f ytRouteFixture) exec(t *testing.T, sql string, args ...any) {
 	}
 }
 
+func (f ytRouteFixture) queryRow(t *testing.T, sql string, dest ...any) {
+	t.Helper()
+	conn, err := pgx.Connect(context.Background(), f.dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(context.Background())
+	if err := conn.QueryRow(context.Background(), sql).Scan(dest...); err != nil {
+		t.Fatal(err)
+	}
+}
+
 var operator = cfaccess.Identity{Email: "operator@example.com"}
 
 func TestYouTrackBoardReadsIssuesAndJoinsHK(t *testing.T) {
@@ -189,10 +201,12 @@ func TestYouTrackHomeTaskCounts(t *testing.T) {
 	closed := f.task(t, "hk closed")
 	// hk still says backlog for this one; YouTrack says developing, and it
 	// has had no activity for a month: a stall by YouTrack's state.
-	stalled := f.task(t, "hk stalled")
+	// task_events is append-only, so the task is inserted a month old with
+	// no events: its activity is its creation time.
+	var stalled store.Task
+	f.queryRow(t, `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at)
+		VALUES('handoffkeep','hk stalled','implement','backlog','test',now()-interval '30 days',now()-interval '30 days',now()-interval '30 days') RETURNING id`, &stalled.ID)
 	f.exec(t, `UPDATE tasks SET awaiting_decision=true WHERE id = ANY($1)`, []int64{open.ID, closed.ID})
-	f.exec(t, `UPDATE tasks SET created_at=now()-interval '30 days' WHERE id=$1`, stalled.ID)
-	f.exec(t, `UPDATE task_events SET at=now()-interval '30 days' WHERE task_id=$1`, stalled.ID)
 	f.fake.set(
 		ytIssue("2-1", open.ID, "yt open", "backlog", "rstack", 4),
 		ytIssue("2-2", closed.ID, "yt closed", "completed", "handoffkeep", 0),
