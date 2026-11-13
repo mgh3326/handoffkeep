@@ -108,12 +108,15 @@ func TestTaskClosure(t *testing.T) {
 	for _, tc := range []struct {
 		evidence string
 		ok       bool
-	}{{"notes", false}, {"hk:doc research/x", true}} {
+	}{{"notes", true}, {"hk:task/4404", true}, {"decision/2026-11-13/caps", true}, {"hk:doc research/x", true}, {"", false}} {
 		x := Task{}
 		err := applyLifecycle(&x, StateBacklog, StateCompleted, time.Now().UTC(), &TaskClosure{Type: "resolved", Evidence: tc.evidence})
 		if (err == nil) != tc.ok {
 			t.Fatalf("%q: %v", tc.evidence, err)
 		}
+	}
+	if rule := taskClosureRules[StateCompleted]; rule.ResultLink {
+		t.Fatal("completed still requires a result-link form")
 	}
 	t.Run("settled transitions retain and reopen clears closure", func(t *testing.T) {
 		now := time.Now().UTC()

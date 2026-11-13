@@ -94,9 +94,9 @@ func bindYTIssueApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.Op,
 // ytIssueGateSQL is the issue_create gate (ytAdmitSQL): mode on, and o's task
 // has no binding or a binding this op published. A binding from the import
 // (or another op) holds the op: the task already has its issue. Mode off
-// admits nothing. Issue mode assumes the legacy `youtrack sync` refuses to
-// write while it is on (hk 3907) and the import has ended (D3); nothing here
-// coordinates with them (docs/youtrack-write-protocol.md).
+// admits nothing. The legacy `youtrack sync` and the import are gone (hk
+// 4426), so the binding row is the whole coordination
+// (docs/youtrack-write-protocol.md).
 func ytIssueGateSQL(s *Store) string {
 	if mode, _ := s.ytIssuesNow(); mode != YTIssuesOn {
 		return `FALSE`

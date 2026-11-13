@@ -132,6 +132,13 @@ const (
 	// from that create (the create was rejected, or applied with
 	// binding_conflict). Nothing is sent.
 	ReasonIssueNotBound = "issue_not_bound"
+	// ReasonBindingRemoved: the held-op recovery pass closed a prepared op
+	// whose task has no binding (hk 4491); nothing was sent.
+	ReasonBindingRemoved = "binding_removed"
+	// ReasonBindingChanged: the recovery pass closed a prepared op whose
+	// task is bound to another issue on the op's tenant; nothing was sent
+	// and the op was never retargeted.
+	ReasonBindingChanged = "binding_changed"
 )
 
 var (
