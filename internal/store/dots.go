@@ -76,6 +76,9 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 	if !validName(lane) || by == "" || !validText(by, 128) || strings.TrimSpace(in.Body) == "" {
 		return Task{}, errors.New("invalid dots request")
 	}
+	if _, err := dotsNotifyLanes(in.Body, lane); err != nil {
+		return Task{}, err
+	}
 	var project *string
 	if in.Project != "" {
 		project = &in.Project
@@ -708,22 +711,14 @@ func checkDotsResult(kind string, issue DotsIssue, c DotsComment, allowProgress 
 	return guard.Reject(key + "\n" + body)
 }
 
-// dotsNotifyLanesTx returns the lanes the request body names with a
-// "[알릴 레인]" line, other than the requester lane. A name that is not a valid
-// lane refuses the reply: a silently dropped lane would lose its notice.
-func dotsNotifyLanesTx(ctx context.Context, tx pgx.Tx, task Task) ([]string, error) {
-	if task.BodyDoc == "" {
-		return nil, nil
-	}
-	var body string
-	if err := tx.QueryRow(ctx, `SELECT body FROM documents WHERE key=$1`, task.BodyDoc).Scan(&body); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, err
-	}
+// dotsNotifyLanes returns the lanes a request body names with a "[알릴 레인]"
+// line, other than the requester lane. A name that is not a valid lane is an
+// error. CreateDotsRequest runs it on the body it stores, so a body with a bad
+// line is refused at creation, and no RESULT is ever refused for a line that
+// cannot be edited.
+func dotsNotifyLanes(body, requester string) ([]string, error) {
 	var lanes []string
-	seen := map[string]bool{task.ParentLane: true}
+	seen := map[string]bool{requester: true}
 	for _, m := range dotsNotifyLaneLineRE.FindAllStringSubmatch(body, -1) {
 		for _, name := range strings.Split(m[1], ",") {
 			name = strings.TrimSpace(name)
@@ -740,6 +735,24 @@ func dotsNotifyLanesTx(ctx context.Context, tx pgx.Tx, task Task) ([]string, err
 		}
 	}
 	return lanes, nil
+}
+
+// dotsNotifyLanesTx reads the body of a dots request and returns its notify
+// lanes. A body_doc may carry a "#section" suffix (ValidBodyDoc admits it), so
+// the document key is the part before the "#".
+func dotsNotifyLanesTx(ctx context.Context, tx pgx.Tx, task Task) ([]string, error) {
+	if task.BodyDoc == "" {
+		return nil, nil
+	}
+	key, _, _ := strings.Cut(task.BodyDoc, "#")
+	var body string
+	if err := tx.QueryRow(ctx, `SELECT body FROM documents WHERE key=$1`, key).Scan(&body); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return dotsNotifyLanes(body, task.ParentLane)
 }
 
 // recordDotsResultTx records a dots comment and its document. Only a RESULT

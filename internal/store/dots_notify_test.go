@@ -75,19 +75,36 @@ func TestDotsResultNotifiesNamedLanes(t *testing.T) {
 	}
 }
 
-// Invariant: a "[알릴 레인]" line that names an invalid lane refuses the RESULT
-// and writes nothing, so no notice is lost to a typo.
-func TestDotsResultRefusesInvalidNotifyLane(t *testing.T) {
+// Invariant: a request whose "[알릴 레인]" line names an invalid lane is refused
+// at creation, so no RESULT can later be refused for a line nobody can edit.
+func TestDotsRequestRefusesInvalidNotifyLane(t *testing.T) {
 	s := schemaStore(t, "dots_notify_invalid")
-	task, err := s.CreateDotsRequest(t.Context(), "caller", DotsRequestInput{Title: "Research", Body: "Investigate\n[알릴 레인] Not A Lane", RequesterLane: "requester"})
+	for _, body := range []string{"Investigate\n[알릴 레인] Not A Lane", "Investigate\n[알릴 레인] 없음"} {
+		if _, err := s.CreateDotsRequest(t.Context(), "caller", DotsRequestInput{Title: "Research", Body: body, RequesterLane: "requester"}); err == nil {
+			t.Fatalf("request with notify line %q was accepted", body)
+		}
+	}
+	if n := notifyRows(t, s, "", ""); n != 0 {
+		t.Fatalf("lane events=%d for refused requests", n)
+	}
+}
+
+// Invariant: a request body_doc with a "#section" suffix still reads its
+// "[알릴 레인]" lines, so the named lanes are notified.
+func TestDotsResultNotifiesNamedLanesWithBodySection(t *testing.T) {
+	s := schemaStore(t, "dots_notify_section")
+	task, err := s.CreateDotsRequest(t.Context(), "caller", DotsRequestInput{Title: "Research", Body: "Investigate\n[알릴 레인] lane-a", RequesterLane: "requester"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	started, _ := startDotsRun(t, s, task.ID, "start")
-	if _, err := s.ReplyDots(t.Context(), "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "RESULT", Body: "Done", IdempotencyKey: "key", RunToken: started.RunToken}); err == nil {
-		t.Fatal("RESULT with an invalid notify lane was accepted")
+	if _, err := s.pool.Exec(t.Context(), `UPDATE tasks SET body_doc=body_doc||'#notes' WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
 	}
-	if n := notifyRows(t, s, "", ""); n != 0 {
-		t.Fatalf("lane events=%d after a refused reply", n)
+	started, _ := startDotsRun(t, s, task.ID, "start")
+	if _, err := s.ReplyDots(t.Context(), "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "RESULT", Body: "Done", IdempotencyKey: "key", RunToken: started.RunToken}); err != nil {
+		t.Fatal(err)
+	}
+	if n := notifyRows(t, s, "lane-a", OutboxKindDotsReport); n != 1 {
+		t.Fatalf("lane-a got %d ready events, want 1", n)
 	}
 }
