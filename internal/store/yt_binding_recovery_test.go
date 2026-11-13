@@ -70,7 +70,12 @@ func ytrState(t *testing.T, s *Store, op ytwrite.Op) ytwrite.Op {
 
 func ytrRecover(t *testing.T, s *Store, at time.Time) YTRecovery {
 	t.Helper()
-	got, err := s.RecoverHeldYTOps(t.Context(), at, YTHeldRecoveryGrace)
+	return ytrRecoverFor(t, s, ytcTenant, at)
+}
+
+func ytrRecoverFor(t *testing.T, s *Store, tenant string, at time.Time) YTRecovery {
+	t.Helper()
+	got, err := s.RecoverHeldYTOps(t.Context(), tenant, at, YTHeldRecoveryGrace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,8 +252,8 @@ func TestRecoverHeldYTOpsKeepsAnotherTenantsBinding(t *testing.T) {
 	ytbBind(t, s, elsewhere)
 
 	got := ytrRecover(t, s, t0.Add(YTHeldRecoveryGrace))
-	if got.Rejected != 0 || got.Kept != 1 {
-		t.Fatalf("pass = %+v, want the op kept", got)
+	if got.Rejected != 0 || got.Kept != 0 {
+		t.Fatalf("pass = %+v, want the op left out of the scan", got)
 	}
 	if op := ytrState(t, s, op); op.State != ytwrite.StatePrepared {
 		t.Fatalf("op = %+v, want prepared", op)
@@ -279,8 +284,8 @@ func TestRecoverHeldYTOpsKeepsWhatYouTrackOwns(t *testing.T) {
 	ytrDeleteBinding(t, s, task)
 
 	got := ytrRecover(t, s, t0.Add(YTHeldRecoveryGrace))
-	if got.Rejected != 0 || got.Kept != 1 {
-		t.Fatalf("pass under youtrack authority = %+v, want the op kept", got)
+	if got.Rejected != 0 || got.Kept != 0 {
+		t.Fatalf("pass under youtrack authority = %+v, want the op left out of the scan", got)
 	}
 	if op := ytrState(t, s, op); op.State != ytwrite.StatePrepared {
 		t.Fatalf("op = %+v, want prepared", op)
@@ -314,7 +319,7 @@ func TestRecoverHeldYTOpsDecidesFromTheRowsAsTheyAreNow(t *testing.T) {
 	at := t0.Add(YTHeldRecoveryGrace)
 	scan := func(op ytwrite.Op) ytHeldOp {
 		t.Helper()
-		cands, err := s.heldYTCandidates(ctx, s.ytHeldKindsOn(), at.Add(-YTHeldRecoveryGrace), time.Unix(0, 0), 0, 50)
+		cands, err := s.heldYTCandidates(ctx, ytcTenant, s.ytHeldKindsOn(), at.Add(-YTHeldRecoveryGrace), time.Unix(0, 0), 0, 50)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -412,5 +417,71 @@ func TestYTWriteOpAlertLabelsHeldOps(t *testing.T) {
 		strings.Join([]string{id(heldOp), id(ready), id(create), id(fields)}, ", ") + " | handoffkeep yt ops"
 	if texts := ytrAlertTexts(t, s); len(texts) != 1 || texts[0] != want {
 		t.Fatalf("alerts = %q, want %q", texts, want)
+	}
+}
+
+// A worker acts for its own tenant: another tenant's op, with no binding and
+// held for longer than the grace, is not closed by it, whatever this process's
+// modes are. That tenant's own worker closes it.
+func TestRecoverHeldYTOpsActsForTheWorkersTenantOnly(t *testing.T) {
+	s := schemaStore(t, "ytrec_own")
+	s.SetYTCommentsMode(YTCommentsOn)
+	task := ytcTask(t, s, ytbProject)
+	t0 := time.Now().UTC().Add(-3 * time.Hour)
+	at := t0.Add(YTHeldRecoveryGrace)
+	op := ytrPrepare(t, s, task, ytwrite.KindCommentAppend, YTCommentPrincipal, ytrOtherTenant, "2-1", "own-other", t0)
+
+	if got := ytrRecoverFor(t, s, ytcTenant, at); got.Rejected != 0 || got.Kept != 0 {
+		t.Fatalf("pass of another tenant's worker = %+v, want it to read nothing", got)
+	}
+	if got := ytrState(t, s, op); got.State != ytwrite.StatePrepared {
+		t.Fatalf("op = %+v, want prepared", got)
+	}
+	if got := ytrRecoverFor(t, s, ytrOtherTenant, at); got.Rejected != 1 || !slices.Equal(got.OpIDs, []int64{op.ID}) {
+		t.Fatalf("pass of the op's own worker = %+v, want op %d rejected", got, op.ID)
+	}
+}
+
+// An op the pass keeps for a standing reason (a binding on another tenant,
+// content canonical in YouTrack) is not a candidate, so any number of them
+// cannot hide a later op the pass would reject.
+func TestRecoverHeldYTOpsKeptOpsDoNotHideLaterOnes(t *testing.T) {
+	s := schemaStore(t, "ytrec_starve")
+	ctx := t.Context()
+	ytbMapped(t, s)
+	s.SetYTCommentsMode(YTCommentsOn)
+	t0 := time.Now().UTC().Add(-3 * time.Hour)
+	at := t0.Add(YTHeldRecoveryGrace)
+
+	// Oldest: a binding on another tenant.
+	elsewhere := ytcTask(t, s, ytbProject)
+	ytbBind(t, s, ytbBinding(elsewhere))
+	kept := ytrComment(t, s, elsewhere, "2-"+strconv.FormatInt(elsewhere, 10), "starve-tenant", t0)
+	ytrDeleteBinding(t, s, elsewhere)
+	moved := ytbBinding(elsewhere)
+	moved.Tenant = ytrOtherTenant
+	ytbBind(t, s, moved)
+
+	// Later: no binding.
+	gone := ytcTask(t, s, ytbProject)
+	ytbBind(t, s, ytbBinding(gone))
+	actionable := ytrComment(t, s, gone, "2-"+strconv.FormatInt(gone, 10), "starve-gone", t0.Add(time.Minute))
+	ytrDeleteBinding(t, s, gone)
+
+	cands, err := s.heldYTCandidates(ctx, ytcTenant, s.ytHeldKindsOn(), at, time.Unix(0, 0), 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 1 || cands[0].id != actionable.ID {
+		t.Fatalf("candidates = %+v, want only op %d (op %d is kept for good)", cands, actionable.ID, kept.ID)
+	}
+
+	// Comments become canonical in YouTrack: the unbound task's op is kept too.
+	if _, err := s.pool.Exec(ctx, `INSERT INTO yt_authority(kind, authority) VALUES ('comments','youtrack')
+		ON CONFLICT (kind) DO UPDATE SET authority='youtrack'`); err != nil {
+		t.Fatal(err)
+	}
+	if cands, err := s.heldYTCandidates(ctx, ytcTenant, s.ytHeldKindsOn(), at, time.Unix(0, 0), 0, 50); err != nil || len(cands) != 0 {
+		t.Fatalf("candidates under youtrack authority = %+v, %v, want none", cands, err)
 	}
 }

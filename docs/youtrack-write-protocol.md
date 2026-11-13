@@ -344,7 +344,7 @@ blocked behind them; `yt ops resolve` accepts only `remote_unknown`. The comment
 worker therefore runs a pass every 5 minutes, before the catch-up. A candidate
 is a `prepared` op of one of those kinds that has been prepared for more than
 1 hour (`store.YTHeldRecoveryGrace`), whose kind's write mode is on in this
-process and whose gate does not admit it. Each candidate is decided in its own
+process, whose tenant is the worker's own, and whose gate does not admit it. Each candidate is decided in its own
 transaction under the task's lane lock, from the rows as they are then:
 
 | Class | Test | Action |
@@ -358,9 +358,11 @@ transaction under the task's lane lock, from the rows as they are then:
 The authority row is read `FOR SHARE` under the lane lock, so a switch to
 youtrack either waits for the pass and then counts the op as resolved, or has
 committed and the pass keeps the op. The pass never retargets an op and never
-touches a `dispatched` or `remote_unknown` op. It examines at most 1000 ops
-oldest first, so a kept op does not stop the others unless more than a pass's
-worth are kept. Each rejection logs `ytwrite.held_op_rejected op_id= task_id=
+touches a `dispatched` or `remote_unknown` op, and it never acts on another
+tenant's op. The scan leaves out the ops it would keep for a standing reason
+(`held_other_tenant`, `held_authority_youtrack`), so they cannot hide a later
+op; a pass examines at most 1000 ops oldest first, and the next pass reaches
+the rest. Each rejection logs `ytwrite.held_op_rejected op_id= task_id=
 kind= reason=`; the rejected-class alert then names the op with its reason.
 
 **Alerts** (`handoffkeep-design` lane, outbox kind `yt_write_op`). The alert

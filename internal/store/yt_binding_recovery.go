@@ -28,10 +28,10 @@ const (
 	// an hour to come back.
 	YTHeldRecoveryGrace = time.Hour
 	// ytHeldRecoveryPage and ytHeldRecoveryPages bound one pass to
-	// pages*page candidates, oldest first. Ops a pass keeps (another tenant's,
-	// or under youtrack authority) stay candidates, so more than a pass's
-	// worth of them would hide the ops behind them until they are resolved;
-	// the alert names every one of them either way.
+	// pages*page candidates, oldest first. The candidate scan already leaves
+	// out the ops a pass would keep (another tenant's binding, content
+	// canonical in YouTrack), so a kept op never hides a later one; a full
+	// pass rejects what it examined, and the next pass reaches the rest.
 	ytHeldRecoveryPage  = 200
 	ytHeldRecoveryPages = 5
 )
@@ -187,17 +187,23 @@ func (s *Store) classifyHeldYTOpTx(ctx context.Context, q ytRowQuerier, op ytHel
 }
 
 // YTRecovery is what one RecoverHeldYTOps pass did: Rejected ops closed (OpIDs
-// names them) and Kept ops it looked at and left, which the alert labels.
+// names them) and Kept ops it decided to leave after reading them under the
+// lock (a change since the scan); the ops it never reads, a standing hold, are
+// named by the alert.
 type YTRecovery struct {
 	Rejected, Kept int
 	OpIDs          []int64
 }
 
 // RecoverHeldYTOps closes the prepared ops of binding-gated kinds whose task
-// no longer has the binding that admitted them. An op is a candidate when it
-// has been prepared for longer than grace, its kind's mode is on in this
-// process and its kind's gate does not admit it (read through
-// yt_write_ops_alert_scan). Each candidate is decided in its own transaction,
+// no longer has the binding that admitted them. It acts for one tenant, the
+// invoking worker's: an op on another tenant is that tenant's worker's to
+// hold or close, whatever this process's modes are. An op is a candidate when
+// it is the tenant's, has been prepared for longer than grace, its kind's mode
+// is on in this process and its kind's gate does not admit it (read through
+// yt_write_ops_alert_scan). The scan leaves out the ops the decision below
+// would keep for a standing reason (a binding on another tenant, content
+// canonical in YouTrack), so they cannot starve the ops behind them. Each candidate is decided in its own transaction,
 // under its task's lane lock, from the rows as they are then:
 //
 //   - no binding: rejected, binding_removed;
@@ -214,7 +220,7 @@ type YTRecovery struct {
 // Locks: one lane lock per transaction (lockYTEntity), then the op row FOR
 // UPDATE, then the authority row FOR SHARE, as op preparation does
 // (lockorder.go). It reads no clock: time is passed in.
-func (s *Store) RecoverHeldYTOps(ctx context.Context, now time.Time, grace time.Duration) (YTRecovery, error) {
+func (s *Store) RecoverHeldYTOps(ctx context.Context, tenant string, now time.Time, grace time.Duration) (YTRecovery, error) {
 	var out YTRecovery
 	kinds := s.ytHeldKindsOn()
 	if len(kinds) == 0 {
@@ -223,7 +229,7 @@ func (s *Store) RecoverHeldYTOps(ctx context.Context, now time.Time, grace time.
 	cutoff := now.UTC().Add(-grace)
 	afterAt, afterID := time.Unix(0, 0).UTC(), int64(0)
 	for range ytHeldRecoveryPages {
-		cands, err := s.heldYTCandidates(ctx, kinds, cutoff, afterAt, afterID, ytHeldRecoveryPage)
+		cands, err := s.heldYTCandidates(ctx, tenant, kinds, cutoff, afterAt, afterID, ytHeldRecoveryPage)
 		if err != nil {
 			return out, err
 		}
@@ -248,14 +254,23 @@ func (s *Store) RecoverHeldYTOps(ctx context.Context, now time.Time, grace time.
 	return out, nil
 }
 
-// heldYTCandidates lists up to limit prepared ops of kinds created at or
-// before cutoff, after the (created_at, id) position, that the gate of their
-// kind does not admit.
-func (s *Store) heldYTCandidates(ctx context.Context, kinds []string, cutoff, afterAt time.Time, afterID int64, limit int) ([]ytHeldOp, error) {
+// ytHeldKeptSQL is the part of the candidate scan that leaves out the ops the
+// decision keeps for a standing reason: the task is bound on another tenant,
+// or the op's content kind is canonical in YouTrack. It is a prefilter only;
+// recoverHeldYTOp decides from the rows under the lane lock.
+var ytHeldKeptSQL = `NOT EXISTS (SELECT 1 FROM yt_task_bindings b WHERE b.task_id::text = o.entity_id AND b.tenant <> o.tenant)
+	AND NOT EXISTS (SELECT 1 FROM yt_authority a WHERE a.authority = '` + string(YTAuthorityYouTrack) + `' AND (
+		(o.principal = '` + YTCommentPrincipal + `' AND a.kind = '` + string(ytAuthorityKindOf(YTCommentPrincipal)) + `')
+		OR (o.principal = '` + YTFieldsPrincipal + `' AND a.kind = '` + string(ytAuthorityKindOf(YTFieldsPrincipal)) + `')))`
+
+// heldYTCandidates lists up to limit prepared ops of tenant and kinds created
+// at or before cutoff, after the (created_at, id) position, that the gate of
+// their kind does not admit and that the decision may reject.
+func (s *Store) heldYTCandidates(ctx context.Context, tenant string, kinds []string, cutoff, afterAt time.Time, afterID int64, limit int) ([]ytHeldOp, error) {
 	rows, err := s.pool.Query(ctx, `SELECT `+ytHeldOpColumns+` FROM yt_write_ops o
-		WHERE o.state='prepared' AND o.created_at <= $1 AND (o.created_at, o.id) > ($2, $3)
-		AND o.kind = ANY($4) AND `+ytHeldScopeSQL+` AND NOT `+s.ytAdmitSQL("o.tenant")+`
-		ORDER BY o.created_at, o.id LIMIT $5`, cutoff.UTC(), afterAt.UTC(), afterID, kinds, limit)
+		WHERE o.state='prepared' AND o.tenant=$6 AND o.created_at <= $1 AND (o.created_at, o.id) > ($2, $3)
+		AND o.kind = ANY($4) AND `+ytHeldScopeSQL+` AND NOT `+s.ytAdmitSQL("$6")+` AND `+ytHeldKeptSQL+`
+		ORDER BY o.created_at, o.id LIMIT $5`, cutoff.UTC(), afterAt.UTC(), afterID, kinds, limit, tenant)
 	if err != nil {
 		return nil, err
 	}

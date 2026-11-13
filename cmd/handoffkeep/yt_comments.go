@@ -356,7 +356,7 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 		return ytCommentsWorker{}, err
 	}
 	st.SetYTCommentsMode(store.YTCommentsOff)
-	return ytCommentsWorker{protocol: p, feed: st, intents: st, recovery: st}, nil
+	return ytCommentsWorker{protocol: p, feed: st, intents: st, recovery: st, tenant: tenant}, nil
 }
 
 // newYTCommentsWorker sets the gate to mode (canary or on) and builds the
@@ -378,7 +378,7 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 	}
 	st.SetYTCommentsMode(mode)
 	log.Printf("ytwrite.comments_enabled mode=%s tenant=%q catchup=%t", mode, tenant, catchUp)
-	w := ytCommentsWorker{protocol: p, feed: st, intents: st, recovery: st}
+	w := ytCommentsWorker{protocol: p, feed: st, intents: st, recovery: st, tenant: tenant}
 	if catchUp {
 		w.catchUp = st
 	} else {
@@ -405,7 +405,7 @@ func (c ytIssueCommentCatchUp) CatchUpYTComments(ctx context.Context, limit int,
 // ytHeldRecoverer closes the prepared ops whose task lost the binding that
 // admitted them (store.RecoverHeldYTOps, hk 4491).
 type ytHeldRecoverer interface {
-	RecoverHeldYTOps(ctx context.Context, now time.Time, grace time.Duration) (store.YTRecovery, error)
+	RecoverHeldYTOps(ctx context.Context, tenant string, now time.Time, grace time.Duration) (store.YTRecovery, error)
 }
 
 // ytFeedRunner runs one pass of every registered change-feed consumer
@@ -454,6 +454,8 @@ type ytCommentsWorker struct {
 	feed     ytFeedRunner
 	intents  ytIssueIntents
 	recovery ytHeldRecoverer
+	// tenant is the tenant the worker acts for; recovery closes only its ops.
+	tenant   string
 	interval time.Duration
 	// now is the clock of the recovery pass (nil: the wall clock).
 	now func() time.Time
@@ -473,7 +475,7 @@ func (w ytCommentsWorker) recoverHeld(ctx context.Context, last *time.Time) {
 		return
 	}
 	*last = now
-	got, err := w.recovery.RecoverHeldYTOps(ctx, now, store.YTHeldRecoveryGrace)
+	got, err := w.recovery.RecoverHeldYTOps(ctx, w.tenant, now, store.YTHeldRecoveryGrace)
 	if err != nil && ctx.Err() == nil {
 		log.Printf("ytwrite.held_recovery_failed err=%q", err.Error())
 	}

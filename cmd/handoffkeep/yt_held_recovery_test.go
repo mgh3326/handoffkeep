@@ -10,13 +10,15 @@ import (
 )
 
 type fakeHeldRecoverer struct {
-	at     []time.Time
-	grace  []time.Duration
-	failed bool
+	at      []time.Time
+	tenants []string
+	grace   []time.Duration
+	failed  bool
 }
 
-func (f *fakeHeldRecoverer) RecoverHeldYTOps(_ context.Context, now time.Time, grace time.Duration) (store.YTRecovery, error) {
+func (f *fakeHeldRecoverer) RecoverHeldYTOps(_ context.Context, tenant string, now time.Time, grace time.Duration) (store.YTRecovery, error) {
 	f.at = append(f.at, now)
+	f.tenants = append(f.tenants, tenant)
 	f.grace = append(f.grace, grace)
 	if f.failed {
 		return store.YTRecovery{}, errors.New("boom")
@@ -30,7 +32,7 @@ func (f *fakeHeldRecoverer) RecoverHeldYTOps(_ context.Context, now time.Time, g
 func TestYTWorkerRunsHeldRecoveryOncePerInterval(t *testing.T) {
 	clock := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
 	f := &fakeHeldRecoverer{}
-	w := ytCommentsWorker{recovery: f, now: func() time.Time { return clock }}
+	w := ytCommentsWorker{recovery: f, tenant: "tenant.example", now: func() time.Time { return clock }}
 	var last time.Time
 	w.recoverHeld(t.Context(), &last)
 	clock = clock.Add(ytHeldRecoveryInterval - time.Second)
@@ -44,6 +46,11 @@ func TestYTWorkerRunsHeldRecoveryOncePerInterval(t *testing.T) {
 	w.recoverHeld(t.Context(), &last)
 	if len(f.at) != 2 || !f.at[1].Equal(clock) {
 		t.Fatalf("passes = %v, want one more at %v after the interval (a failure waits for the next one)", f.at, clock)
+	}
+	for _, tn := range f.tenants {
+		if tn != "tenant.example" {
+			t.Fatalf("recovery ran for tenant %q, want the worker's", tn)
+		}
 	}
 	for _, g := range f.grace {
 		if g != store.YTHeldRecoveryGrace {
