@@ -477,11 +477,28 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 	}
 }
 
-// ytOpsAlertWorker scans the durable ledger independently of dispatch mode,
-// so pending ops still alert if comment sending is turned off.
+// ytOpsAlertWorker scans the durable ledgers independently of dispatch mode,
+// so pending ops and deploy lag still alert if comment sending is turned off.
 type ytOpsAlertWorker struct {
 	store    *store.Store
 	interval time.Duration
+}
+
+// opsAlertPasses is the set of outbox passes the alert worker runs each tick.
+type opsAlertPasses interface {
+	EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int, error)
+	EnqueueDeployLagNotices(ctx context.Context, now time.Time) (int, error)
+}
+
+// runOpsAlertPasses runs every operator-desk notice pass once: pending
+// YouTrack write ops and deploy lag (hk 3291).
+func runOpsAlertPasses(ctx context.Context, p opsAlertPasses, now time.Time) {
+	if _, err := p.EnqueueYTWriteOpAlerts(ctx, now); err != nil && ctx.Err() == nil {
+		log.Printf("ytwrite.alerts_failed err=%q", err.Error())
+	}
+	if _, err := p.EnqueueDeployLagNotices(ctx, now); err != nil && ctx.Err() == nil {
+		log.Printf("deploy_lag.enqueue_failed err=%q", err.Error())
+	}
 }
 
 func (w ytOpsAlertWorker) Run(ctx context.Context) {
@@ -492,9 +509,7 @@ func (w ytOpsAlertWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		if _, err := w.store.EnqueueYTWriteOpAlerts(ctx, time.Now().UTC()); err != nil && ctx.Err() == nil {
-			log.Printf("ytwrite.alerts_failed err=%q", err.Error())
-		}
+		runOpsAlertPasses(ctx, w.store, time.Now().UTC())
 		select {
 		case <-ctx.Done():
 			return
