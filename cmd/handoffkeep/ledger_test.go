@@ -73,7 +73,7 @@ func TestLedgerCLITextSectionsInOrder(t *testing.T) {
 	for _, want := range []string{
 		"Ledger for desk at 2026-11-05T12:00:00Z (stalled after 24h)",
 		"1. In flight (1)",
-		"project experiment: 2 started, at_risk 11d0h ago (stale)",
+		"project experiment: 2 started",
 		"#11 developing [experiment] fresh work — last transition 2h0m ago; next: review (mergewake.pr)",
 		"2. Waiting on operator (2)",
 		"#12 reviewing flagged work",
@@ -209,46 +209,6 @@ func TestLedgerAckCLI(t *testing.T) {
 	}
 }
 
-func TestProjectStatusCLI(t *testing.T) {
-	h, calls := ledgerCLIServer(t, http.StatusCreated, `{"id":3,"project":"experiment","health":"at_risk","body":"slipping","snapshot":{"started":2},"diff":{"previous_id":2}}`)
-	var out bytes.Buffer
-	if err := run([]string{"tasks", "project-status", "experiment", "--health", "at_risk", "--body", "slipping", "--url", h.URL, "--token", "tok"}, &out, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	if c := (*calls)[0]; c.Method != "POST" || c.Path != "/v1/projects/experiment/status-updates" || c.Body != `{"body":"slipping","health":"at_risk"}` {
-		t.Fatalf("call=%+v", c)
-	}
-	var x struct {
-		ID     int64  `json:"id"`
-		Health string `json:"health"`
-	}
-	if err := json.Unmarshal(out.Bytes(), &x); err != nil || x.ID != 3 || x.Health != "at_risk" {
-		t.Fatalf("out=%s err=%v", out.String(), err)
-	}
-	out.Reset()
-	if err := run([]string{"tasks", "project-status", "experiment", "--limit", "5", "--url", h.URL, "--token", "tok"}, &out, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	if c := (*calls)[1]; c.Method != "GET" || c.Path != "/v1/projects/experiment/status-updates" || c.Query != "limit=5" {
-		t.Fatalf("list call=%+v", c)
-	}
-	for _, args := range [][]string{
-		{"tasks", "project-status"},
-		{"tasks", "project-status", "experiment", "--health", "green", "--body", "x"},
-		{"tasks", "project-status", "experiment", "--health", "at_risk"},
-		{"tasks", "project-status", "experiment", "--body", "x"},
-		{"tasks", "project-status", "experiment", "--health", "at_risk", "--body", "x", "--limit", "2"},
-		{"tasks", "project-status", "a", "b"},
-	} {
-		if err := run(append(args, "--url", h.URL, "--token", "tok"), io.Discard, io.Discard); err == nil {
-			t.Errorf("%v: accepted", args)
-		}
-	}
-	if len(*calls) != 2 {
-		t.Fatalf("refused arguments reached the server: %+v", *calls)
-	}
-}
-
 func TestLedgerAge(t *testing.T) {
 	for d, want := range map[time.Duration]string{
 		-time.Second:                     "0s",
@@ -265,7 +225,7 @@ func TestLedgerAge(t *testing.T) {
 	}
 }
 
-// TestLedgerCLIAgainstServer runs ledger, since, ack and project-status
+// TestLedgerCLIAgainstServer runs ledger, since and ack
 // through the real API and store.
 func TestLedgerCLIAgainstServer(t *testing.T) {
 	_, dbURL := testdb.Schema(t, "ledger_cli")
@@ -320,12 +280,4 @@ func TestLedgerCLIAgainstServer(t *testing.T) {
 		t.Fatalf("backward ack err=%v", err)
 	}
 
-	var up store.StatusUpdate
-	if err := json.Unmarshal([]byte(cli("tasks", "project-status", "experiment", "--health", "off_track", "--body", "blocked")), &up); err != nil || up.Snapshot.Backlog != 1 || up.Health != "off_track" {
-		t.Fatalf("project-status %+v err=%v", up, err)
-	}
-	var list store.StatusUpdateList
-	if err := json.Unmarshal([]byte(cli("tasks", "project-status", "experiment")), &list); err != nil || len(list.Updates) != 1 || list.Stale {
-		t.Fatalf("project-status list %+v err=%v", list, err)
-	}
 }

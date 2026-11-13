@@ -210,9 +210,9 @@ func TestReopenTerminalAuditAndRemerge(t *testing.T) {
 				t.Fatal("reopened task still shown as merged")
 			}
 		}
-		next, err := s.NextTask(ctx, x.Lane, "new-builder", "new-job", "")
+		next, err := s.ClaimTask(ctx, x.ID, "new-builder", "new-job", "")
 		if err != nil || next.ID != x.ID {
-			t.Fatalf("next=%+v err=%v", next, err)
+			t.Fatalf("claim=%+v err=%v", next, err)
 		}
 		got, _, _ = s.GetTask(ctx, x.ID)
 		if got.Events[len(got.Events)-1].From != "unstarted" {

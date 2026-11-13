@@ -52,12 +52,11 @@ type ImportUpdatedTask struct {
 // without changing the ordinary task API shape.
 type ImportTask struct {
 	Task
-	TitleKO       string   `json:"title_ko,omitempty"`
-	LabelNames    []string `json:"label_names,omitempty"`
-	MilestoneName string   `json:"milestone_name,omitempty"`
+	TitleKO       string `json:"title_ko,omitempty"`
+	MilestoneName string `json:"milestone_name,omitempty"`
 }
 
-// EnrichImportTasks adds current Korean titles, label names, milestone names,
+// EnrichImportTasks adds current Korean titles, milestone names,
 // and live relations to the export rows in one query per related table.
 func (s *Store) EnrichImportTasks(ctx context.Context, tasks []Task) ([]ImportTask, error) {
 	out := make([]ImportTask, len(tasks))
@@ -84,24 +83,6 @@ func (s *Store) EnrichImportTasks(ctx context.Context, tasks []Task) ([]ImportTa
 			return nil, err
 		}
 		out[byID[id]].TitleKO = title
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, err
-	}
-	rows.Close()
-	rows, err = s.pool.Query(ctx, `SELECT tl.task_id,l.name FROM task_labels tl JOIN labels l ON l.id=tl.label_id WHERE tl.task_id=ANY($1::bigint[]) ORDER BY tl.task_id,l.name`, ids)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var id int64
-		var name string
-		if err := rows.Scan(&id, &name); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		out[byID[id]].LabelNames = append(out[byID[id]].LabelNames, name)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()

@@ -77,18 +77,6 @@ func (c Client) call(ctx context.Context, method, path string, input, output any
 }
 
 func esc(x string) string { return url.PathEscape(x) }
-func (c Client) Checkpoint(ctx context.Context, _ string, x store.Checkpoint) (store.Checkpoint, error) {
-	var out store.Checkpoint
-	e := c.call(ctx, "POST", "/v1/checkpoints", x, &out)
-	return out, e
-}
-func (c Client) Recent(ctx context.Context, session, kind string, limit int) ([]store.Checkpoint, error) {
-	var out struct {
-		Checkpoints []store.Checkpoint `json:"checkpoints"`
-	}
-	e := c.call(ctx, "GET", "/v1/checkpoints?session="+url.QueryEscape(session)+"&kind="+url.QueryEscape(kind)+fmt.Sprintf("&limit=%d", limit), nil, &out)
-	return out.Checkpoints, e
-}
 func (c Client) PutDocument(ctx context.Context, _ string, x store.Document) (store.Document, bool, error) {
 	var out struct {
 		Document store.Document `json:"document"`
@@ -320,40 +308,6 @@ func (c Client) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 	return out, nil
 }
 
-func (c Client) NextTask(ctx context.Context, lane, claimedBy, jobID, noJob string) (store.Task, error) {
-	var out store.Task
-	if err := c.requireFeatureWhen(ctx, jobID != "", capabilities.FeatureNextJobID); err != nil {
-		return out, err
-	}
-	if err := c.requireFeatureWhen(ctx, noJob != "", capabilities.FeatureNextNoJob); err != nil {
-		return out, err
-	}
-	body := map[string]string{"lane": lane, "claimed_by": claimedBy}
-	if jobID != "" {
-		body["job_id"] = jobID
-	}
-	if noJob != "" {
-		body["no_job"] = noJob
-	}
-	err := c.call(ctx, "POST", "/v1/tasks/next", body, &out)
-	if err != nil {
-		var he *HTTPError
-		if errors.As(err, &he) && he.Code == "invalid_context" && noJob != "" {
-			return out, fmt.Errorf("next_no_job_rejected: server refused the claim with invalid_context — it likely predates no_job support")
-		}
-		return out, err
-	}
-	if !activeTaskState(out.State) {
-		return out, fmt.Errorf("next_not_applied: server response has state=%q, want a started state (developing or researching; old servers: claimed)", out.State)
-	}
-	if out.ClaimedBy != claimedBy {
-		return out, fmt.Errorf("next_claimant_not_recorded: server response has claimed_by=%q, want %q", out.ClaimedBy, claimedBy)
-	}
-	if jobID != "" && out.Refs.JobID != jobID {
-		return out, fmt.Errorf("next_job_id_not_recorded: server response has refs.job_id=%q, want %q (server predates job_id claims)", out.Refs.JobID, jobID)
-	}
-	return out, nil
-}
 func (c Client) TransitionTask(ctx context.Context, id int64, to, note string, refs *store.TaskRefs, noJob string) (store.Task, error) {
 	return c.TransitionTaskWith(ctx, id, store.TransitionInput{To: to, Note: note, Refs: refs, NoJob: noJob})
 }
@@ -899,56 +853,6 @@ func (c Client) ListTaskAreas(ctx context.Context) ([]string, error) {
 	return out.Areas, nil
 }
 
-// ListBenchAreaExceptions answers the routing exception list. The area
-// filter narrows to one vocabulary area; includeRetired asks for retired
-// rows too. A server that predates the route 404/405s it, surfaced as
-// bench_area_exceptions_unsupported.
-func (c Client) ListBenchAreaExceptions(ctx context.Context, area string, includeRetired bool) ([]store.BenchAreaException, error) {
-	q := url.Values{}
-	if area != "" {
-		q.Set("area", area)
-	}
-	if includeRetired {
-		q.Set("include_retired", "1")
-	}
-	path := "/v1/bench/area-exceptions"
-	if len(q) > 0 {
-		path += "?" + q.Encode()
-	}
-	var out struct {
-		Exceptions []store.BenchAreaException `json:"exceptions"`
-	}
-	err := c.call(ctx, "GET", path, nil, &out)
-	if err != nil {
-		var he *HTTPError
-		if errors.As(err, &he) && (he.Status == 404 || he.Status == 405) {
-			return nil, fmt.Errorf("bench_area_exceptions_unsupported: server predates the area exceptions endpoint")
-		}
-		return nil, err
-	}
-	return out.Exceptions, nil
-}
-
-// PutBenchAreaExceptions upserts exception rows under the operator
-// credential and returns the count written. A non-operator client fails
-// closed with the server's own operator_required 403. A server that
-// predates the route 404/405s it, surfaced as
-// bench_area_exceptions_unsupported.
-func (c Client) PutBenchAreaExceptions(ctx context.Context, xs []store.BenchAreaException) (int, error) {
-	var out struct {
-		Upserted int `json:"upserted"`
-	}
-	err := c.call(ctx, "PUT", "/v1/bench/area-exceptions", map[string]any{"exceptions": xs}, &out)
-	if err != nil {
-		var he *HTTPError
-		if errors.As(err, &he) && (he.Status == 404 || he.Status == 405) {
-			return 0, fmt.Errorf("bench_area_exceptions_unsupported: server predates the area exceptions endpoint")
-		}
-		return 0, err
-	}
-	return out.Upserted, nil
-}
-
 // ExportTasks fetches one consistent task snapshot and returns the exact
 // response body so callers print the evidence document byte-for-byte. A
 // limit below 1 omits the parameter so the server default applies.
@@ -1046,49 +950,4 @@ func (c Client) ReopenTask(ctx context.Context, id int64, reason string) (store.
 		Reason string `json:"reason"`
 	}{reason}, &out)
 	return out, err
-}
-
-// TaskOriginResult is the answer to AddTaskOrigin: the stored origin and
-// whether this call created it (false: the task already had it).
-type TaskOriginResult struct {
-	Origin  store.TaskOrigin `json:"origin"`
-	Created bool             `json:"created"`
-}
-
-// AddTaskOrigin records where a task came from, keyed by the provider's
-// durable id. Repeating it refreshes the display number and title and makes
-// no second row.
-func (c Client) AddTaskOrigin(ctx context.Context, id int64, in store.TaskOriginInput) (TaskOriginResult, error) {
-	var out TaskOriginResult
-	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/origins", id), in, &out)
-	if err != nil {
-		return out, unsupportedRoute(err, "task_origin_unsupported", "the task origins route")
-	}
-	return out, nil
-}
-
-// ListTaskOrigins lists a task's origins.
-func (c Client) ListTaskOrigins(ctx context.Context, id int64) ([]store.TaskOrigin, error) {
-	var out struct {
-		Origins []store.TaskOrigin `json:"origins"`
-	}
-	err := c.call(ctx, "GET", fmt.Sprintf("/v1/tasks/%d/origins", id), nil, &out)
-	if err != nil {
-		return nil, unsupportedRoute(err, "task_origin_unsupported", "the task origins route")
-	}
-	return out.Origins, nil
-}
-
-// FindTaskOrigins looks origins up by provider and durable external id; each
-// item names its task.
-func (c Client) FindTaskOrigins(ctx context.Context, provider, externalID string) ([]store.TaskOrigin, error) {
-	var out struct {
-		Origins []store.TaskOrigin `json:"origins"`
-	}
-	p := url.Values{"provider": {provider}, "external_id": {externalID}}
-	err := c.call(ctx, "GET", "/v1/task-origins?"+p.Encode(), nil, &out)
-	if err != nil {
-		return nil, unsupportedRoute(err, "task_origin_unsupported", "the task origins route")
-	}
-	return out.Origins, nil
 }
