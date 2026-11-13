@@ -533,8 +533,8 @@ this; the enqueue cross-checks catch what it could write (Rollout).
 **Commands.** Both open the database directly, like `youtrack canary`, and
 verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
 
-- `handoffkeep youtrack comments-preflight [--project P] [--days N] [--all]` is
-  read-only: it reads issues from YouTrack and writes nothing. It opens the
+- `handoffkeep youtrack comments-preflight [--project P] [--days N] [--all]
+  [--task N]` is read-only: it reads issues from YouTrack and writes nothing. It opens the
   database without migrating, on connections whose every transaction is READ
   ONLY, and refuses (exit 2) a database that does not record migrations
   `20261110-yt-task-bindings` and `20261111-yt-binding-comments-from`: deploy
@@ -559,9 +559,44 @@ verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
   task_id=<id> class=<class> detail="..."` to stderr, and each `error` task
   `youtrack.comments_classify_failed task_id=<id> err="..."`.
 - `handoffkeep youtrack comments-backfill [--project P] [--days N] [--all]
-  [--by NAME]` classifies the same way and publishes each `verifies` binding. A
-  refused publication counts as `ambiguous` and the run goes on; the report
-  adds `bound_now`. A re-run reads nothing from YouTrack for a bound task.
+  [--task N] [--by NAME]` classifies the same way and publishes each `verifies`
+  binding. A refused publication counts as `ambiguous` and the run goes on; the
+  report adds `bound_now`. A re-run reads nothing from YouTrack for a bound
+  task. `--task N` (both commands; not with `--project` or `--all`) makes that
+  one task the only candidate, so the operator binds exactly the task they
+  unbound; the report says `"task": N`.
+- `handoffkeep youtrack comments-unbind <task> [--by NAME] [--reason TEXT]
+  [--force]` removes the task's binding (hk 4490). It opens the database
+  directly and calls no YouTrack. A task with no binding answers `"removed":
+  false` and writes nothing. It refuses, writing nothing, while an op of the
+  task's lane is `dispatched` or `remote_unknown` (an uncertain write may have
+  landed on the old issue: `yt ops resolve` it first), while the task has an
+  unresolved `issue_create` op, while the task is enrolled in the comment canary
+  (which routes comments without the binding: `canary remove` it first), and,
+  with comments canonical in YouTrack,
+  while a hk comment op is `prepared` unless `--force`. Otherwise, in one
+  transaction, it rejects every `prepared` op of the lane that the binding
+  admits (the hk `comment_append`, `issue_fields` and `issue_move` ops on the
+  binding's tenant and issue, and a comment queued with no target; not an op of
+  another tenant or issue, which stays for the recovery pass, and not a
+  document comment's copy, which reads its article binding) with reason
+  `binding_removed` (`unbind_forced` under `--force`), deletes the binding, drops the
+  task's pending issue intent (so the issue worker cannot bind it again) and
+  appends an `unbound` row to `yt_binding_history`. It retargets nothing and
+  leaves `task_origins`, `yt_entity_map` and the canary alone. The result lists
+  `rejected` ops and the `released` comment ids (hk keeps them; the comment
+  gets no op) or, under comments authority `youtrack` with `--force`, the
+  `stranded` ones (nothing will carry them). `comments-backfill --task N`
+  binds the task again once its other records agree with the issue it
+  verifies. Unbind leaves the task's `yt_entity_map` row (anchored by its
+  first comment op), mirror link and canary row alone, so a replacement that
+  is a different issue is refused naming the source that disagrees
+  (`yt_entity_map_task`, `task_origins`) until its owner reconciles it. A
+  later comment on an unbound task gets no op. Run it only while every release
+  that can serve (a blue-green overlap, a rollback target) is this one or
+  later: an earlier release's issue ownership check does not read
+  `yt_binding_history`, so its project change would prepare an `issue_create`
+  for an unbound task that has no map row, mirror link or canary row.
 - Each YouTrack read has its own 15 s timeout and each task 60 s; there is no
   budget for the whole run. A task in class `error` makes either command exit
   1 after the report.
@@ -599,6 +634,17 @@ a backfill of every existing row to its task's highest comment id. The
 previous release never names the column; a binding it inserts gets 0, and the
 catch-up would then copy all of that task's comments, so `comments-backfill`
 runs from this release only.
+
+**Migration** `20261113-yt-binding-history` (expand-only, `After`
+`20261110-yt-task-bindings` and `20261111-yt-task-binding-origin`, whose table
+and column it uses): the new append-only table `yt_binding_history` (one row
+per binding published by `AddYTTaskBinding` and per `comments-unbind`; no
+foreign key) and a wider CHECK on `yt_task_bindings.origin` that also admits
+`auto_verified` (ACCESS EXCLUSIVE on `yt_task_bindings` for one statement; the
+new CHECK admits every value the old one did). The previous release keeps
+serving on the migrated schema: its binding insert gets the default origin,
+its reads scan `origin` as a string, and it never names the new table
+(`scripts/test-previous-release-schema.sh`).
 
 **Rollout.**
 

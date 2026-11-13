@@ -173,10 +173,12 @@ package store
 //     yt_comment_canary and youtrack_projects rows) and insert new rows of
 //     yt_write_ops, yt_comment_write_links and yt_entity_map. The comment
 //     worker's catch-up (CatchUpYTComments, hk 3897) makes the same reads and
-//     inserts for a committed comment, with the lane lock as the first lock
-//     of its transaction and no comment lock. A pass first tries (never
-//     waits for) the session-scoped `youtrack sync` lock, so it cannot wait
-//     in a cycle with a sync run. RemoveYTCommentCanary
+//     inserts for a committed comment, in its own transaction and with no
+//     comment lock: the comments authority row FOR SHARE first (hk 4489), then
+//     the lane lock. A pass first tries (never waits for) the legacy sync lock
+//     8241873404, which since the sync's removal (hk 4426) only an authority
+//     switch also takes, so it cannot wait in a cycle with a switch.
+//     RemoveYTCommentCanary
 //     takes the task's lane lock first and then deletes its yt_comment_canary
 //     row. The two writers that give an issue to a task, AddYTCommentCanary
 //     and AddYTTaskBinding (yt_task_bindings.go, hk 3810), take the issue
@@ -196,8 +198,16 @@ package store
 //     target (hk 4263, claimYTCommentTargetTx) before it updates its own op
 //     row; the enqueue that queued it (queueYTCommentTx) makes the same plain
 //     reads under the lane lock it already holds.
+//     The writer that takes an issue away, UnbindYTTaskBinding
+//     (yt_binding_history.go, hk 4490), takes the same three locks in the same
+//     order, then reads the comments authority row FOR SHARE (as prepareYTOpTx
+//     does after its lane lock), rejects the task's prepared yt_write_ops rows
+//     (ops of the task's lane, which no other holder of that lane lock can
+//     change meanwhile), deletes the task's yt_task_bindings row and yt_issue_intents row and
+//     inserts a yt_binding_history row. AddYTTaskBinding inserts its history row the same
+//     way; nothing else locks a history row.
 //     No cycle, lock by lock:
-//       - The ownership lock: only those two writers take it, always first
+//       - The ownership lock: only those three writers take it, always first
 //         and while holding nothing, so no transaction waits for it while
 //         holding another lock.
 //       - The task row: an issue writer waits for it holding only the
@@ -266,8 +276,9 @@ package store
 //     3942, 4318): the task creators above, and SetTaskProject after its
 //     level-1 lock and FOR UPDATE on the task row (task row before lane
 //     lock, as AddYTTaskBinding), take the task's lane lock, then read
-//     yt_issue_intents, the ownership rows and youtrack_projects without a
-//     lock, then insert its yt_write_ops row and insert or delete its
+//     yt_issue_intents, the ownership rows (the task's latest
+//     yt_binding_history row among them, hk 4490) and youtrack_projects
+//     without a lock, then insert its yt_write_ops row and insert or delete its
 //     yt_issue_intents row (no foreign key, nobody else locks it).
 //     PrepareMappedYTIssues takes the lane lock as the first lock of each
 //     task's transaction (as backfillYTIssue), then reads the task row
@@ -327,7 +338,8 @@ package store
 //     rollback to hk skips it. Then it locks yt_authority rows FOR UPDATE in
 //     kind order, reads yt_write_ops, yt_feed_cursors and sync_log without a
 //     lock and updates only its locked rows. Every op preparation
-//     (prepareYTOpTx, after its lane lock) and the comment writers and the
+//     (prepareYTOpTx, after its lane lock), UnbindYTTaskBinding (the comments
+//     row, after its lane lock) and the comment writers and the
 //     audit enqueue (after the comment's task KEY SHARE, before the lane
 //     lock; ReplyDots after its task row) read their kind's row FOR SHARE,
 //     first inserting it ON CONFLICT DO NOTHING if it is missing

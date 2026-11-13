@@ -41,6 +41,8 @@ func youtrackCmd(args []string, out io.Writer) error {
 		return youtrackCommentsCmd(args[1:], out, false)
 	case "comments-backfill":
 		return youtrackCommentsCmd(args[1:], out, true)
+	case "comments-unbind":
+		return youtrackCommentsUnbindCmd(args[1:], out)
 	case "articles-preflight":
 		return youtrackArticlesCmd(args[1:], out, false)
 	case "articles-backfill":
@@ -61,7 +63,7 @@ func youtrackCmd(args []string, out io.Writer) error {
 }
 
 // youtrackUsage also answers `yt`, the short name of this command.
-const youtrackUsage = "usage: youtrack projects list|put | youtrack ops [--state S] [--kind K] [--task N] | youtrack canary add|remove|list | youtrack schema plan|apply [--project P] | youtrack comments-preflight [--project P] [--days N] [--all] | youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME] | youtrack articles-preflight [--project P] | youtrack articles-backfill [--project P] [--by NAME] | youtrack audit [--project P] [--task N] [--enqueue] [--limit N] | youtrack issues-backfill [--project P] [--dry-run] | youtrack fields-backfill [--project P] [--task N] [--limit N] [--dry-run] | youtrack decisions-backfill [--apply] [--by NAME] [--limit N] | youtrack authority show | youtrack authority set <kind|all> <hk|youtrack> --by NAME --note TEXT"
+const youtrackUsage = "usage: youtrack projects list|put | youtrack ops [--state S] [--kind K] [--task N] | youtrack canary add|remove|list | youtrack schema plan|apply [--project P] | youtrack comments-preflight [--project P] [--days N] [--all] [--task N] | youtrack comments-backfill [--project P] [--days N] [--all] [--task N] [--by NAME] | youtrack comments-unbind <task> [--by NAME] [--reason TEXT] [--force] | youtrack articles-preflight [--project P] | youtrack articles-backfill [--project P] [--by NAME] | youtrack audit [--project P] [--task N] [--enqueue] [--limit N] | youtrack issues-backfill [--project P] [--dry-run] | youtrack fields-backfill [--project P] [--task N] [--limit N] [--dry-run] | youtrack decisions-backfill [--apply] [--by NAME] [--limit N] | youtrack authority show | youtrack authority set <kind|all> <hk|youtrack> --by NAME --note TEXT"
 
 // uiTaskIssuesFromEnv reads HANDOFFKEEP_UI_TASKS_SOURCE: unset or "hk" (the
 // default) keeps the console's task pages on hk's task tables; "youtrack"

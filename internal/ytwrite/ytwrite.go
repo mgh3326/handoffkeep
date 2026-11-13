@@ -137,9 +137,12 @@ const (
 	// from that create (the create was rejected, or applied with
 	// binding_conflict). Nothing is sent.
 	ReasonIssueNotBound = "issue_not_bound"
-	// ReasonBindingRemoved: the held-op recovery pass closed a prepared op
-	// whose task has no binding (hk 4491); nothing was sent.
+	// ReasonBindingRemoved: a prepared op whose task has no binding was
+	// closed without being sent, by the held-op recovery pass (hk 4491) or
+	// because the operator unbound the task (comments-unbind, hk 4490).
+	// ReasonUnbindForced is the unbind under --force.
 	ReasonBindingRemoved = "binding_removed"
+	ReasonUnbindForced   = "unbind_forced"
 	// ReasonBindingChanged: the recovery pass closed a prepared op whose
 	// task is bound to another issue on the op's tenant; nothing was sent
 	// and the op was never retargeted.

@@ -840,6 +840,7 @@ type ytCommentsReport struct {
 	Days               int                  `json:"days"`
 	All                bool                 `json:"all,omitempty"`
 	Project            string               `json:"project,omitempty"`
+	Task               int64                `json:"task,omitempty"`
 	CommentsTotal      int                  `json:"comments_total"`
 	MaxCommentsPerHour int                  `json:"max_comments_per_hour"`
 	Projects           []*ytCommentsProject `json:"projects"`
@@ -916,6 +917,9 @@ type ytCommentsOptions struct {
 	Days int
 	// All makes every task a candidate (bind-all, hk 3897).
 	All bool
+	// Task, when not 0, makes that one task the only candidate (a rebind
+	// after `youtrack comments-unbind`); Project and All are then unused.
+	Task int64
 	// BucketID is the YouTrack project a task with no hk project verifies
 	// against (youtrack.ResolveBucketProject).
 	BucketID string
@@ -928,15 +932,24 @@ type ytCommentsOptions struct {
 // as ambiguous and the run goes on. It never stops on one task.
 func ytCommentsRun(ctx context.Context, st *store.Store, issues youtrack.IssueReader, tenant string, o ytCommentsOptions) (ytCommentsReport, error) {
 	project, days, bindBy := o.Project, o.Days, o.BindBy
-	r := ytCommentsReport{Tenant: tenant, Days: days, All: o.All, Project: project, Projects: []*ytCommentsProject{}}
+	r := ytCommentsReport{Tenant: tenant, Days: days, All: o.All, Project: project, Task: o.Task, Projects: []*ytCommentsProject{}}
 	r.Uncovered.OpIDs = []int64{}
 	since := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
 	var err error
 	if r.CommentsTotal, r.MaxCommentsPerHour, err = st.YTCommentVolume(ctx, since, project); err != nil {
 		return r, err
 	}
-	candidates, err := st.YTCommentCandidates(ctx, since, project, o.All)
-	if err != nil {
+	var candidates []store.YTCommentCandidate
+	if o.Task > 0 {
+		c, found, err := st.YTCommentCandidateOf(ctx, o.Task)
+		if err != nil {
+			return r, err
+		}
+		if !found {
+			return r, fmt.Errorf("task %d does not exist", o.Task)
+		}
+		candidates = []store.YTCommentCandidate{c}
+	} else if candidates, err = st.YTCommentCandidates(ctx, since, project, o.All); err != nil {
 		return r, err
 	}
 	byProject := map[string]*ytCommentsProject{}
@@ -1023,8 +1036,8 @@ func ytCommentsRun(ctx context.Context, st *store.Store, issues youtrack.IssueRe
 }
 
 const (
-	youtrackCommentsPreflightUsage = "usage: youtrack comments-preflight [--project P] [--days N] [--all]"
-	youtrackCommentsBackfillUsage  = "usage: youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME]"
+	youtrackCommentsPreflightUsage = "usage: youtrack comments-preflight [--project P] [--days N] [--all] [--task N]"
+	youtrackCommentsBackfillUsage  = "usage: youtrack comments-backfill [--project P] [--days N] [--all] [--task N] [--by NAME]"
 )
 
 // ytBindingMigrations are the registered migrations a binding read needs:
@@ -1048,7 +1061,8 @@ func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 	project := fs.String("project", "", "only tasks of this hk project")
 	days := fs.Int("days", ytCommentsDefaultDays, "tasks with a comment in the last N days")
 	all := fs.Bool("all", false, "every task, not only those with a recent comment")
-	valueFlags := []string{"project", "days"}
+	task := fs.Int64("task", 0, "only this task (not with --project or --all)")
+	valueFlags := []string{"project", "days", "task"}
 	var by *string
 	if backfill {
 		by = fs.String("by", "operator:cli", "who bound the tasks")
@@ -1061,7 +1075,11 @@ func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 	if err := fs.Parse(ordered); err != nil {
 		return fmt.Errorf("%v; %s", err, usage)
 	}
-	if fs.NArg() != 0 || *days < 1 {
+	// --task 0 is a supplied flag, not an absent one: it must not fall back
+	// to the multi-task run.
+	taskSet := false
+	fs.Visit(func(f *flag.Flag) { taskSet = taskSet || f.Name == "task" })
+	if fs.NArg() != 0 || *days < 1 || (taskSet && (*task < 1 || *project != "" || *all)) {
 		return errors.New(usage)
 	}
 	bindBy := ""
@@ -1118,7 +1136,7 @@ func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 	if err != nil {
 		return exitCodeError{code: youtrackExitFailed, err: fmt.Errorf("list YouTrack projects: %w", err)}
 	}
-	report, err := ytCommentsRun(context.Background(), st, remote, remote.Tenant(), ytCommentsOptions{Project: *project, Days: *days, All: *all, BucketID: bucketID, BindBy: bindBy})
+	report, err := ytCommentsRun(context.Background(), st, remote, remote.Tenant(), ytCommentsOptions{Project: *project, Days: *days, All: *all, Task: *task, BucketID: bucketID, BindBy: bindBy})
 	if err != nil {
 		return err
 	}
@@ -1129,6 +1147,56 @@ func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 		return exitCodeError{code: youtrackExitFailed, err: fmt.Errorf("%d tasks could not be classified (class error); run again", report.errors)}
 	}
 	return nil
+}
+
+const youtrackCommentsUnbindUsage = "usage: youtrack comments-unbind <task> [--by NAME] [--reason TEXT] [--force]"
+
+// youtrackCommentsUnbindCmd is `youtrack comments-unbind` (hk 4490): it removes
+// a task's binding, rejects the prepared ops the binding admitted and records
+// the unbind (store.UnbindYTTaskBinding). It refuses while an op of the task
+// may have reached the issue, and, with comments canonical in YouTrack, while a
+// comment op is prepared unless --force. A task with no binding answers
+// removed false and writes nothing. It opens the database directly, like
+// `youtrack canary`, and calls no YouTrack. `youtrack comments-backfill --task
+// N` binds the task again once every other record hk keeps for it (map row,
+// mirror link) agrees with the issue it verifies; one that does not is named
+// in the refusal, and unbind does not touch it.
+func youtrackCommentsUnbindCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("youtrack comments-unbind", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	by := fs.String("by", "operator:cli", "who unbinds the task")
+	reason := fs.String("reason", "", "why the task is unbound")
+	force := fs.Bool("force", false, "reject prepared comment ops even when comments are canonical in YouTrack")
+	ordered, err := splitArgs(args, "by", "reason")
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(ordered); err != nil {
+		return fmt.Errorf("%v; %s", err, youtrackCommentsUnbindUsage)
+	}
+	if fs.NArg() != 1 || strings.TrimSpace(*by) == "" {
+		return errors.New(youtrackCommentsUnbindUsage)
+	}
+	taskID, err := strconv.ParseInt(fs.Arg(0), 10, 64)
+	if err != nil || taskID < 1 {
+		return errors.New("task id must be positive")
+	}
+	dbURL := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DB_URL"))
+	if dbURL == "" {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("HANDOFFKEEP_DB_URL is required")}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := store.Open(ctx, dbURL)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	res, err := st.UnbindYTTaskBinding(ctx, taskID, store.YTUnbindOptions{By: strings.TrimSpace(*by), Reason: strings.TrimSpace(*reason), Force: *force})
+	if err != nil {
+		return err
+	}
+	return printJSON(out, res)
 }
 
 const youtrackIssuesBackfillUsage = "usage: youtrack issues-backfill [--project P] [--dry-run]"

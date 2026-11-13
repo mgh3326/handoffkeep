@@ -373,13 +373,19 @@ func (s *Store) prepareYTIssueIntent(ctx context.Context, tenant string, taskID 
 
 // ytTaskHasIssueOwnershipTx mirrors the task ownership evidence used by
 // issue backfill. Any of these records means an issue already belongs to the
-// task, even when the canonical binding has not been published yet.
+// task, even when the canonical binding has not been published yet. So does an
+// operator unbind (hk 4490): a task whose latest yt_binding_history row is
+// 'unbound' is the operator's until they bind it again, and no automatic
+// issue_create op is prepared for it, on create, on a project change or by the
+// backfill. The callers hold the task's lane lock, which the unbind holds when
+// it appends that row.
 func ytTaskHasIssueOwnershipTx(ctx context.Context, q ytRowQuerier, taskID int64) (bool, error) {
 	var owned bool
 	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1)
 		OR EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$2)
 		OR EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=$1)
-		OR EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack')`,
+		OR EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack')
+		OR coalesce((SELECT action FROM yt_binding_history WHERE task_id=$1 ORDER BY id DESC LIMIT 1), '') = '`+ytBindingActionUnbound+`'`,
 		taskID, strconv.FormatInt(taskID, 10)).Scan(&owned)
 	return owned, err
 }
