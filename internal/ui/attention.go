@@ -73,10 +73,17 @@ type attentionResponse struct {
 		Items            []attentionTaskView `json:"items"`
 	} `json:"tasks"`
 	Deploys struct {
-		Count        int                   `json:"count"`
-		EventsCapped bool                  `json:"events_capped"`
-		Items        []attentionDeployView `json:"items"`
+		Count        int                      `json:"count"`
+		EventsCapped bool                     `json:"events_capped"`
+		Items        []attentionDeployView    `json:"items"`
+		Lagging      []attentionLaggingDeploy `json:"lagging,omitempty"`
 	} `json:"deploys"`
+}
+
+type attentionLaggingDeploy struct {
+	Service  string `json:"service"`
+	Repo     string `json:"repo"`
+	LagCount int    `json:"lag_count"`
 }
 
 // deployInboxKey is the attention item key of one deploy row. It carries the
@@ -162,6 +169,15 @@ func (h *Handler) attention(w http.ResponseWriter, r *http.Request, identity cfa
 	}
 	response.Deploys.EventsCapped = deploys.EventsCapped
 	response.Deploys.Count, response.Deploys.Items = attentionDeploys(deploys, states, now)
+	for _, svc := range deploys.Services {
+		if svc.Lagging {
+			response.Deploys.Lagging = append(response.Deploys.Lagging, attentionLaggingDeploy{
+				Service:  svc.Service,
+				Repo:     svc.Repo,
+				LagCount: svc.LagCount,
+			})
+		}
+	}
 	taskSources := make([]store.TranslationSource, 0, len(response.Tasks.Items)+len(response.Deploys.Items))
 	for _, x := range response.Tasks.Items {
 		taskSources = append(taskSources, store.TranslationSource{EntityID: strconv.FormatInt(x.ID, 10), Field: "title", Original: x.Title})
