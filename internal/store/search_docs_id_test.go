@@ -99,7 +99,7 @@ func TestSearchScopesCapAndTruncated(t *testing.T) {
 			t.Fatal("truncated page must mark every row")
 		}
 	}
-	xs, err = s.Search(ctx, "capprobe", "ctx", "", 10)
+	xs, err = s.Search(ctx, "capprobe", "docs", "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}

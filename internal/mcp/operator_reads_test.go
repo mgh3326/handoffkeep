@@ -171,6 +171,13 @@ func TestTaskGetCompleteFields(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Six priority changes stand in for the label events the preview used to
+	// count: each one appends a task event.
+	for i := 0; i < 6; i++ {
+		if _, _, err := st.SetTaskPriorityDirect(ctx, subject.ID, 10+i, "tester", "fixture event"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for i := 0; i < 6; i++ {
 		if _, err := st.CreateTaskComment(ctx, subject.ID, "tester", fmt.Sprintf("fixture comment %d", i)); err != nil {
 			t.Fatal(err)
