@@ -336,12 +336,47 @@ and times; never the body or the key. A full page carries `next_after_id`.
 through `POST /v1/yt/ops/{id}/resolve` (operator bearer only). It refuses an op
 that is not `remote_unknown` (409 `ytwrite_state`) and never resends.
 
+**Held-op recovery** (`store.RecoverHeldYTOps`, hk 4491). A task's
+`yt_task_bindings` row admits its hk comment, `issue_fields` and `issue_move`
+ops. When the row is deleted or names another issue, the ops it admitted stay
+`prepared`, the claim answers `held`, and every later op on the task's lane is
+blocked behind them; `yt ops resolve` accepts only `remote_unknown`. The comment
+worker therefore runs a pass every 5 minutes, before the catch-up. A candidate
+is a `prepared` op of one of those kinds that has been prepared for more than
+1 hour (`store.YTHeldRecoveryGrace`), whose kind's write mode is on in this
+process and whose gate does not admit it. Each candidate is decided in its own
+transaction under the task's lane lock, from the rows as they are then:
+
+| Class | Test | Action |
+|---|---|---|
+| `held_binding` | the task has no binding | rejected, `binding_removed` |
+| `held_binding_changed` | the task is bound to another issue on the op's tenant | rejected, `binding_changed` |
+| `held_other_tenant` | the task's binding is on another tenant | kept: that tenant's worker may own the op |
+| `held_authority_youtrack` | one of the first two, and the op's kind is canonical in YouTrack (`comments` for a comment, `tasks` for fields and moves) | kept: the op may be the only delivery of the content; the operator restores the binding or resolves the op |
+| `held_mode` | the kind's write mode is not on | never read: turning the mode on releases the op |
+
+The authority row is read `FOR SHARE` under the lane lock, so a switch to
+youtrack either waits for the pass and then counts the op as resolved, or has
+committed and the pass keeps the op. The pass never retargets an op and never
+touches a `dispatched` or `remote_unknown` op. It examines at most 1000 ops
+oldest first, so a kept op does not stop the others unless more than a pass's
+worth are kept. Each rejection logs `ytwrite.held_op_rejected op_id= task_id=
+kind= reason=`; the rejected-class alert then names the op with its reason.
+
 **Alerts** (`handoffkeep-design` lane, outbox kind `yt_write_op`). The alert
 worker raises two classes: `stuck` (an op prepared or dispatched for more
 than 10 minutes, or `remote_unknown` for more than 10 minutes since its creation) and `rejected` (an op rejected, or applied with reason
 `binding_conflict`). Per class and 10-minute window it writes one notice that
 covers every op of the class not yet announced, for example
 `[ytwrite] 2 stuck (dispatched: 1, prepared: 1) op ids 12, 15 | handoffkeep yt ops`.
+A prepared op of a binding-gated kind (an hk comment, `issue_fields`,
+`issue_move`) is counted under why it is held, not under `prepared`:
+`held_binding` (its task has no binding), `held_binding_changed` (the task is
+bound to another issue on the op's tenant), `held_other_tenant` (bound on
+another tenant), `held_authority_youtrack` (the content is canonical in
+YouTrack, so the pass below keeps the op) and `held_mode` (the kind's write
+mode is not on in this process); an op its gate admits stays `prepared`. For
+example `[ytwrite] 4 stuck (held_binding: 3, prepared: 1) op ids …`.
 `yt_write_op_alerts` records each op's announcement per class, so an op is
 named once; an op that a window's notice could not take (that window already
 has one for the class) is named by the next window. A `remote_unknown` op is
