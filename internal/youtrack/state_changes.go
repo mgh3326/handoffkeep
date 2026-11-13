@@ -2,6 +2,7 @@ package youtrack
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -35,12 +36,10 @@ const (
 const stateChangeFields = "id,timestamp,field(id,name),added(name,$type),removed(name,$type),target(id,$type)"
 
 type stateActivity struct {
-	Timestamp int64          `json:"timestamp"`
-	Field     *ActivityField `json:"field"`
-	Added     []struct {
-		Name string `json:"name"`
-	} `json:"added"`
-	Target *Issue `json:"target"`
+	Timestamp int64             `json:"timestamp"`
+	Field     *ActivityField    `json:"field"`
+	Added     []json.RawMessage `json:"added"`
+	Target    *Issue            `json:"target"`
 }
 
 // StateChanges returns every change of the state field (schema.StateField)
@@ -64,9 +63,10 @@ func (c *Client) StateChanges(ctx context.Context, schema Schema, since time.Tim
 			if a.Field == nil || a.Field.Name != schema.StateField || a.Target == nil || len(a.Added) == 0 {
 				continue
 			}
-			state, known := StateFromValue(a.Added[0].Name)
+			value := ActivityValueName(a.Added[0])
+			state, known := StateFromValue(value)
 			if !known {
-				state = a.Added[0].Name
+				state = value
 			}
 			out = append(out, StateChange{IssueID: a.Target.ID, At: msTime(a.Timestamp), State: state, StateKnown: known})
 		}

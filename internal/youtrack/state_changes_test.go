@@ -28,6 +28,8 @@ func TestStateChangesReadsOnlyStateFieldChanges(t *testing.T) {
 				rows = append(rows, `{"timestamp":1,"field":{"name":"hk PR"},"added":[{"name":"x"}],"target":{"id":"2-9"}}`)
 			}
 			rows = append(rows,
+				`{"timestamp":2,"field":{"name":"hk PR"},"added":["pull/42"],"target":{"id":"2-8"}}`,
+				`{"timestamp":3,"field":{"name":"hk 우선순위"},"added":[3],"target":{"id":"2-7"}}`,
 				fmt.Sprintf(`{"timestamp":%d,"field":{"name":"hk 상태"},"added":[{"name":"개발 중"}],"removed":[{"name":"리뷰 중"}],"target":{"id":"2-1"}}`, at.UnixMilli()),
 				`{"timestamp":5,"field":{"name":"hk 상태"},"added":[],"target":{"id":"2-2"}}`,
 				`{"timestamp":6,"field":{"name":"hk 상태"},"added":[{"name":"개발 중"}]}`)

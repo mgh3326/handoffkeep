@@ -311,20 +311,29 @@ func newYTHistory(changes []youtrack.StateChange, since, now time.Time) *ytHisto
 // the last state change when that change moved it into this state. Without
 // one the answer is the nearest honest bound: the creation time of an issue
 // created within the history and never changed, a merged issue's resolved time
-// (YouTrack resolves on merge), and otherwise the issue's update time, which
-// is never earlier than the real entry.
+// (YouTrack resolves on merge), and otherwise the history window start. The
+// activity log covers the window completely, while unrelated updates do not
+// indicate a state change.
 func (h *ytHistory) stateSince(t youtrack.TaskIssue) time.Time {
-	if xs := h.byIssue[t.IssueID]; len(xs) > 0 {
-		if last := xs[len(xs)-1]; last.StateKnown && last.State == t.State {
-			return last.At
-		}
-	} else if !t.Created.IsZero() && !t.Created.Before(h.Since) {
+	if at, ok := h.currentStateChange(t); ok {
+		return at
+	}
+	if len(h.byIssue[t.IssueID]) == 0 && !t.Created.IsZero() && !t.Created.Before(h.Since) {
 		return t.Created
 	}
 	if t.State == store.StateMerged && t.Resolved != nil {
 		return *t.Resolved
 	}
-	return t.Updated
+	return h.Since
+}
+
+func (h *ytHistory) currentStateChange(t youtrack.TaskIssue) (time.Time, bool) {
+	if xs := h.byIssue[t.IssueID]; len(xs) > 0 {
+		if last := xs[len(xs)-1]; last.StateKnown && last.State == t.State {
+			return last.At, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // closeDays are the KST days the issue moved into a closed state on, within
@@ -379,7 +388,11 @@ func youTrackWorkStatus(now time.Time, snap *ytSnapshot, hist *ytHistory, overla
 		row := store.WorkStatusRow{ID: t.TaskID, Title: t.Title, Project: optionalText(t.Project), State: t.State,
 			Priority: t.Priority, CreatedAt: t.Created, UpdatedAt: t.Updated, JobID: t.Job, PR: t.PR, InStateSince: &since}
 		if t.State == store.StateMerged {
-			row.MergedAt = &since
+			if at, ok := hist.currentStateChange(t); ok {
+				row.MergedAt = &at
+			} else if t.Resolved != nil {
+				row.MergedAt = t.Resolved
+			}
 		}
 		if x, ok := overlay.Tasks[t.TaskID]; ok {
 			if x.JobID != "" {
