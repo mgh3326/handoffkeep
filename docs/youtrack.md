@@ -157,6 +157,7 @@ handoffkeep youtrack schema apply [--project P] [--json]
 | `YOUTRACK_CONSOLE_URL` | 아니오 | 이슈 본문 첫 줄 링크(기본 `https://console.robinco.dev`) |
 | `HANDOFFKEEP_YT_COMMENTS_MODE` | 아니오 | `off`(기본), `canary` 또는 `on`. 쓰기 프로토콜 코멘트 카나리(hk 3739)와 바인딩된 작업 전체(hk 3810, `docs/youtrack-write-protocol.md`). 다른 값이나 YouTrack 자격 없는 `canary`·`on`은 서버 시작 실패 |
 | `HANDOFFKEEP_YT_READTHROUGH_MODE` | 아니오 | `off`(기본) 또는 `on`. 서버의 YouTrack 읽기 캐시(아래, hk 3762). 앞뒤 공백은 무시하고 대소문자는 구분한다. 다른 값이나 YouTrack 자격 없는 `on`은 서버 시작 실패 |
+| `HANDOFFKEEP_UI_TASKS_SOURCE` | 아니오 | `hk`(기본) 또는 `youtrack`. 콘솔 작업 화면의 원천(아래, hk 4430). 다른 값이나 YouTrack 자격 없는 `youtrack`은 서버 시작 실패 |
 
 서버(`handoffkeep serve`)는 `HANDOFFKEEP_YT_READTHROUGH_MODE=on`일 때만 읽기
 캐시를 켠다. 켜지면 API와 콘솔이 미러된 작업에 `youtrack_field_cache`의
@@ -186,6 +187,24 @@ sync`(`--pull` 포함), `youtrack canary add`, `yt ops`, 미러 링크·동기�
 **남은 outbox.** `off`로 바꾸기 전에 `youtrack_outbox`에 들어간 행은 지우거나
 폐기하지 않는다. 지금처럼 `youtrack sync`가 내보낸다. `off`인 동안 서버는 새 행을
 넣지 않는다.
+
+### 콘솔 작업 화면 (`HANDOFFKEEP_UI_TASKS_SOURCE`, hk 4430)
+
+`youtrack`이면 콘솔의 작업 보드(`/ui/api/board/tasks`), 작업 현황
+(`/ui/api/work-status`), 홈의 작업 수(`/ui/api/attention`의 tasks)가 hk 작업 표 대신
+YouTrack 이슈를 읽는다. 서버가 봇 토큰으로 읽고 브라우저는 YouTrack에 닿지 않는다.
+
+- 읽는 이슈: `youtrack_projects`의 프로젝트와 `HK` 버킷의 모든 이슈를 생성 순으로
+  500개씩. 제목·상태·레인·종류·등급·티어·우선순위·hk 프로젝트·영역·PR·작업 job·
+  멈춤과 생성·수정·해결 시각만 읽는다(본문·코멘트는 읽지 않는다).
+- 캐시: 한 번 읽은 결과를 15초 쓴다. YouTrack 이슈 목록은 ETag를 주지 않으므로 시간으로만
+  만료한다. 읽는 중에 온 요청은 그 결과를 기다린다.
+- 이슈와 작업: `yt_task_bindings`, 미러 링크(`task_origins`), `yt_entity_map` 순으로
+  찾고, 없으면 이슈의 `hk ID` 필드를 쓴다.
+- hk에 남는 것: 작업 job·호스트·PR·묶음 부모·상태 진입 시각·배포 기록·대기 중
+  스폰(hk 4377)·결정 요청·받은편지함 상태. 작업 id로 붙인다.
+- YouTrack을 읽지 못하면 그 화면은 `502 {"error":"youtrack_unavailable"}`로 답한다.
+  hk 작업 표로 조용히 대신하지 않는다.
 
 ## 종료 코드
 

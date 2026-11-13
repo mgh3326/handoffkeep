@@ -268,20 +268,36 @@ func attentionTasksTx(ctx context.Context, tx pgx.Tx, stalledBefore, now time.Ti
 	}
 	out.Count = out.AwaitingDecision + out.Stalled
 
-	rows, err := tx.Query(ctx, `SELECT tasks.id,title,lane,state,priority,(`+awaitingTaskDecisionSQL+`) AS awaiting,`+taskActivitySQL+` AS since,s.read_at,s.done_at,s.snoozed_until
-		FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key='task:'||tasks.id
-		WHERE ((`+awaitingTaskDecisionSQL+`) OR (`+attentionStalledSQL+`)) AND `+attentionTaskVisible("$2")+`
-		ORDER BY since DESC, tasks.id DESC LIMIT $3`, stalledBefore, now, AttentionItems)
+	items, err := attentionTaskItemsTx(ctx, tx, stalledBefore, now, AttentionItems)
 	if err != nil {
 		return out, err
 	}
+	out.Items = items
+	return out, nil
+}
+
+// attentionTaskItemsTx reads the waiting tasks, newest activity first. A limit
+// below 1 reads them all.
+func attentionTaskItemsTx(ctx context.Context, tx pgx.Tx, stalledBefore, now time.Time, limit int) ([]AttentionTask, error) {
+	var bound any
+	if limit > 0 {
+		bound = limit
+	}
+	rows, err := tx.Query(ctx, `SELECT tasks.id,title,lane,state,priority,(`+awaitingTaskDecisionSQL+`) AS awaiting,`+taskActivitySQL+` AS since,s.read_at,s.done_at,s.snoozed_until
+		FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key='task:'||tasks.id
+		WHERE ((`+awaitingTaskDecisionSQL+`) OR (`+attentionStalledSQL+`)) AND `+attentionTaskVisible("$2")+`
+		ORDER BY since DESC, tasks.id DESC LIMIT $3`, stalledBefore, now, bound)
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
+	out := []AttentionTask{}
 	for rows.Next() {
 		var x AttentionTask
 		var awaiting bool
 		var readAt, doneAt, snoozedUntil *time.Time
 		if err := rows.Scan(&x.ID, &x.Title, &x.Lane, &x.State, &x.Priority, &awaiting, &x.Since, &readAt, &doneAt, &snoozedUntil); err != nil {
-			return out, err
+			return nil, err
 		}
 		x.Key = "task:" + strconv.FormatInt(x.ID, 10)
 		x.Since = x.Since.UTC()
@@ -291,7 +307,25 @@ func attentionTasksTx(ctx context.Context, tx pgx.Tx, stalledBefore, now time.Ti
 		if awaiting {
 			x.Reason = AttentionReasonAwaitingDecision
 		}
-		out.Items = append(out.Items, x)
+		out = append(out, x)
 	}
 	return out, rows.Err()
+}
+
+// AttentionTaskCandidates is every waiting task Attention counts, unbounded,
+// newest activity first. Why a task waits (an open decision, no activity for
+// the stall window) is hk's protocol record; the console reads each task's
+// fields from YouTrack and joins them here by id (hk 4430).
+func (s *Store) AttentionTaskCandidates(ctx context.Context, now time.Time) ([]AttentionTask, error) {
+	now = now.UTC()
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	items, err := attentionTaskItemsTx(ctx, tx, now.Add(-s.StartedStalledHours()), now, 0)
+	if err != nil {
+		return nil, err
+	}
+	return items, tx.Commit(ctx)
 }

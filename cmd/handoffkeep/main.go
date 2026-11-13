@@ -2182,14 +2182,23 @@ func uiFromEnv(st *store.Store, youTrack *youtrack.Service, am *attachments.Mana
 	if err != nil {
 		return nil, err
 	}
-	return ui.New(ui.Config{
+	taskIssues, err := uiTaskIssuesFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	config := ui.Config{
 		Store:       st,
 		Attachments: am,
 		Access:      access,
 		HubURL:      strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_URL")),
 		HubToken:    strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_TOKEN")),
 		YouTrack:    youTrack,
-	})
+	}
+	if taskIssues != nil {
+		config.TaskIssues = taskIssues
+		config.TaskIssuesTenant = taskIssues.Tenant()
+	}
+	return ui.New(config)
 }
 
 // linearServer is what the Linear configuration turns on. Any field may be nil.

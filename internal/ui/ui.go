@@ -56,6 +56,13 @@ type Config struct {
 	// sets it only with HANDOFFKEEP_YT_READTHROUGH_MODE=on. Nil keeps the
 	// console exactly as it was.
 	YouTrack *youtrack.Service
+	// TaskIssues turns on the YouTrack-backed task pages (hk 4430): the
+	// board, the work status page and the Home task counts read task issues
+	// through it, in TaskIssuesTenant, cached for TaskIssuesTTL (zero is 15
+	// seconds). Nil keeps those pages on hk's task tables.
+	TaskIssues       TaskIssueLister
+	TaskIssuesTenant string
+	TaskIssuesTTL    time.Duration
 }
 
 // Handler is a Cloudflare Access-authenticated UI handler.
@@ -66,6 +73,7 @@ type Handler struct {
 	templates     *template.Template
 	hub           *hubProxy
 	youTrack      *youtrack.Service
+	ytTasks       *ytTaskSource
 	pollInterval  time.Duration
 	sseHeartbeat  time.Duration
 	static        fs.FS
@@ -150,6 +158,9 @@ func New(config Config) (*Handler, error) {
 		laneSet:       laneSet,
 		directorLanes: directorLanes,
 		assetVersion:  vcsRevision(),
+	}
+	if config.TaskIssues != nil {
+		h.ytTasks = newYTTaskSource(config.TaskIssues, config.Store, config.TaskIssuesTenant, config.TaskIssuesTTL)
 	}
 	tmpl, err := template.New("ui").Funcs(template.FuncMap{
 		"formatTime":       formatTime,

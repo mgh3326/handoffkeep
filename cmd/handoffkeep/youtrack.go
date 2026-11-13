@@ -351,6 +351,28 @@ func youTrackFromEnv(st *store.Store) (*youtrack.Service, error) {
 	return youtrack.NewService(st, client, youtrackServiceOptions()), nil
 }
 
+// uiTaskIssuesFromEnv reads HANDOFFKEEP_UI_TASKS_SOURCE: unset or "hk" (the
+// default) keeps the console's task pages on hk's task tables; "youtrack"
+// makes the board, the work status page and the Home task counts read task
+// issues from YouTrack with the bot token (hk 4430), and then needs
+// YOUTRACK_URL and YOUTRACK_BOT_API_KEY. Any other value is an error, so a
+// typo fails closed.
+func uiTaskIssuesFromEnv() (*youtrack.Client, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_TASKS_SOURCE")); raw {
+	case "", "hk":
+		return nil, nil
+	case "youtrack":
+	default:
+		return nil, fmt.Errorf("HANDOFFKEEP_UI_TASKS_SOURCE=%q: want hk or youtrack", raw)
+	}
+	baseURL := strings.TrimSpace(os.Getenv("YOUTRACK_URL"))
+	token := strings.TrimSpace(os.Getenv("YOUTRACK_BOT_API_KEY"))
+	if baseURL == "" || token == "" {
+		return nil, errors.New("HANDOFFKEEP_UI_TASKS_SOURCE=youtrack needs YOUTRACK_URL and YOUTRACK_BOT_API_KEY")
+	}
+	return youtrack.New(youtrack.Config{BaseURL: baseURL, Token: token, UserAgent: "handoffkeep-console"})
+}
+
 // serveYouTrack is what serve wires from the YouTrack configuration.
 type serveYouTrack struct {
 	// readThrough backs api.Service.YouTrack and the console; nil disables it.
