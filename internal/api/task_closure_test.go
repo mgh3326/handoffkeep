@@ -19,7 +19,7 @@ func TestTaskTransitionClosureAPI(t *testing.T) {
 	}{
 		{"decide", `{"to":"completed","evidence":"https://example.com/r"}`, http.StatusOK, ""},
 		{"decide", `{"to":"completed"}`, http.StatusBadRequest, "closure_invalid"},
-		{"implement", `{"to":"completed","evidence":"https://example.com/r"}`, http.StatusConflict, "task_conflict"},
+		{"fix", `{"to":"completed","evidence":"https://example.com/r"}`, http.StatusConflict, "task_conflict"},
 		{"decide", `{"to":"completed","closure":"unknown","evidence":"https://example.com/r"}`, http.StatusBadRequest, "closure_invalid"},
 	} {
 		x, err := st.CreateTask(t.Context(), store.Task{Lane: relaneLane(t, "closure"), Title: "closure", Kind: tc.kind, CreatedBy: "tester", Project: &apiTestProject})
