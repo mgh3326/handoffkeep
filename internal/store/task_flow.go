@@ -518,7 +518,9 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		// names, so the PR's deploy and revert reach it (deployedTasksTx,
 		// propagateRevertTx). It is linked before the hold below so a reland
 		// PR counts as one; a refusal rolls the link back.
-		if err = linkChangeTaskTx(ctx, tx, deliveredBy, id, ChangeImplements, false, now); err != nil {
+		// reclassify: a task the PR delivered implements it, even when an
+		// earlier revert event linked it as references.
+		if err = linkChangeTaskTx(ctx, tx, deliveredBy, id, ChangeImplements, true, now); err != nil {
 			return Task{}, err
 		}
 		// The close-on-merge rule a merge event applies (hk 3294) holds here

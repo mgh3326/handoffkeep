@@ -348,11 +348,23 @@ func TestRevertReachesEveryTaskClosedOnThePR(t *testing.T) {
 	if got, err := s.TransitionTask(t.Context(), delivered.ID, StateMerged, "tester", "", &TaskRefs{PR: pr}, ""); err != nil || got.State != StateMerged {
 		t.Fatalf("delivered close: %+v err=%v", got, err)
 	}
+	// Closed on the PR without a link: by hand from reviewing with --pr, and a
+	// sibling a merge closed before siblings were linked.
+	byHand := flowTask(t, s, pool, "implement", StateReviewing, true)
+	if got, err := s.TransitionTask(t.Context(), byHand.ID, StateMerged, "tester", "", &TaskRefs{PR: pr}, ""); err != nil || got.State != StateMerged {
+		t.Fatalf("reviewing -> merged --pr: %+v err=%v", got, err)
+	}
+	legacy := flowTask(t, s, pool, "implement", StateMerged, false)
+	setRefsPR(t, s, legacy.ID, pr)
+	links := changeLinks(t, s, mustChange(t, s, "example/app", 7301).ID)
+	if links[byHand.ID] != "" || links[legacy.ID] != "" {
+		t.Fatalf("links %v, want the by-hand and legacy tasks unlinked", links)
+	}
 	revert := testPR(7302)
 	if res := send(t, s, revertEvent(carrier.ID, pr, revert)); !res.Applied || res.State != StateDeveloping {
 		t.Fatalf("revert %+v", res)
 	}
-	for _, id := range []int64{sibling.ID, delivered.ID} {
+	for _, id := range []int64{sibling.ID, delivered.ID, byHand.ID, legacy.ID} {
 		got := stateOf(t, s, id)
 		if got.State != StateDeveloping || got.Refs.RevertPR != revert {
 			t.Fatalf("task %d after the revert: state=%s revert_pr=%q, want developing", id, got.State, got.Refs.RevertPR)
