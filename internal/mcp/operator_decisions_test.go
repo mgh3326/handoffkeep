@@ -172,9 +172,10 @@ func TestDecisionsHistoryPagesClosedRequests(t *testing.T) {
 func TestDecisionRecordAndOperatorAttentionTools(t *testing.T) {
 	st, pool := newOperatorStoreWithPool(t)
 	ctx := context.Background()
-	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, api.Tokens{"tester": "bearer-secret"}, nil))
+	token := "test-" + t.Name()
+	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, api.Tokens{"tester": token}, nil))
 	defer srv.Close()
-	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer " + token})
 
 	type sessionDecision struct {
 		Reading  string    `json:"reading"`
