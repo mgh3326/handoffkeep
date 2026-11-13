@@ -910,7 +910,7 @@ snapshot. `PayloadSHA` covers the snapshot, the issue and the tenant.
 collapsed, cut to 250 runes. Fields, every one in every op (no value clears
 it): `hk ID`, `hk 프로젝트` (the project, `Unassigned` for none), `hk 상태` (the
 Korean label), `hk 우선순위`, `레인`, `종류`, `등급` and `티어` (the title's `(grade
-G, T)` marker, else `refs.linear`), `PR`, `작업 job`, `멈춤` (`멈춤` when stalled),
+G, T)` marker, else `refs.grade`/`refs.tier`), `PR`, `작업 job`, `멈춤` (`멈춤` when stalled),
 `마감` (epoch ms), `영역`, `마일스톤` (the milestone's name), `예상 소요` (whole
 minutes). The description is a stable hk block with no op marker and no
 provenance line, so the same task renders the same text; empty lines after

@@ -77,12 +77,11 @@ func TestTaskCommentsAppendAndListInIDOrder(t *testing.T) {
 
 // taskSnapshot is everything a comment must not change about its task.
 type taskSnapshot struct {
-	Task        store.Task
-	Events      int
-	LaneEvents  int
-	OpenLane    bool
-	OpenTask    bool
-	LinearQueue int
+	Task       store.Task
+	Events     int
+	LaneEvents int
+	OpenLane   bool
+	OpenTask   bool
 }
 
 func snapshotTask(t *testing.T, s *store.Store, db *pgx.Conn, id int64, lane string, laneQuestion int64) taskSnapshot {
@@ -95,9 +94,6 @@ func snapshotTask(t *testing.T, s *store.Store, db *pgx.Conn, id int64, lane str
 	x.Events = nil
 	snap.Task = x
 	if err := db.QueryRow(t.Context(), `SELECT count(*) FROM relay_events WHERE owner_lane=$1`, lane).Scan(&snap.LaneEvents); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.QueryRow(t.Context(), `SELECT count(*) FROM linear_outbox WHERE task_id=$1`, id).Scan(&snap.LinearQueue); err != nil {
 		t.Fatal(err)
 	}
 	openLane, err := s.ListOpenLaneDecisions(t.Context(), 1000)

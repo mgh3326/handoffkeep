@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/hubforward"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/testdb"
@@ -50,7 +51,6 @@ func TestSingletonServeWorkers(t *testing.T) {
 		id   store.WorkerLock
 	}{
 		{"hub forwarder", store.HubForwardWorkerLock},
-		{"linear board", store.LinearBoardWorkerLock},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, url := testdb.Schema(t, "singleton_worker")
@@ -63,7 +63,12 @@ func TestSingletonServeWorkers(t *testing.T) {
 			var effect func(context.Context) error
 			var check func()
 			if tc.id == store.HubForwardWorkerLock {
-				_, err := st.RecordDotsFollowup(t.Context(), store.DotsIssue{Identifier: "ZZZ-1", Title: "t", URL: "u", IssueUUID: "0a1b2c3d-0000-4000-8000-0000000000f1"}, "0a1b2c3d-0000")
+				conn, err := pgx.Connect(t.Context(), url)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = conn.Exec(t.Context(), `INSERT INTO notification_outbox(kind,target_lane,event_id,text,created_at) VALUES('dots_followup','operator-desk','singleton-test-1','[dots-watch] test',now())`)
+				conn.Close(t.Context())
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -87,27 +92,6 @@ func TestSingletonServeWorkers(t *testing.T) {
 				check = func() {
 					if got := posts.Load(); got != 1 {
 						t.Fatalf("posts=%d", got)
-					}
-				}
-			} else {
-				st.EnableLinearBoard()
-				project := "experiment"
-				task, err := st.CreateTask(t.Context(), store.Task{Lane: "singleton", Title: "board task", Kind: "implement", Priority: 2, CreatedBy: "test", Project: &project})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err = st.ClaimTask(t.Context(), task.ID, "lead", "singleton-job", ""); err != nil {
-					t.Fatal(err)
-				}
-				before, err := st.ListLinearOutbox(t.Context(), task.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				effect = st.ReconcileLinearBoard
-				check = func() {
-					rows, err := st.ListLinearOutbox(t.Context(), task.ID)
-					if err != nil || len(rows) != len(before)+1 {
-						t.Fatalf("outbox=%d before=%d err=%v", len(rows), len(before), err)
 					}
 				}
 			}
@@ -195,7 +179,7 @@ func TestSingletonWorkerStopsOnLockSessionLoss(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	started, stopped, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	w := singletonWorker{store: st, id: store.LinearBoardWorkerLock, worker: cancellationWorker{started: started, stopped: stopped}}
+	w := singletonWorker{store: st, id: store.TaskThreadWorkerLock, worker: cancellationWorker{started: started, stopped: stopped}}
 	go func() { w.Run(ctx); close(done) }()
 	select {
 	case <-started:
@@ -204,7 +188,7 @@ func TestSingletonWorkerStopsOnLockSessionLoss(t *testing.T) {
 	}
 	conn := testdb.Conn(t)
 	var pid int
-	err = conn.QueryRow(t.Context(), `SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND classid=($1::bigint >> 32)::oid AND objid=($1::bigint & 4294967295)::oid`, int64(store.LinearBoardWorkerLock)).Scan(&pid)
+	err = conn.QueryRow(t.Context(), `SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND classid=($1::bigint >> 32)::oid AND objid=($1::bigint & 4294967295)::oid`, int64(store.TaskThreadWorkerLock)).Scan(&pid)
 	if err != nil {
 		t.Fatal(err)
 	}

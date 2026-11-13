@@ -2,7 +2,7 @@
 -- back to the legacy state vocabulary so the previous binary can run again.
 --
 -- Run it once, in one transaction, against the database the server uses, then
--- restore the previous binary (docs/linear-internalize.md, "Rollout and
+-- restore the previous binary (git show 1e3d2fa8:docs/linear-internalize.md, "Rollout and
 -- rollback"):
 --
 --   psql "$DB_URL" -v ON_ERROR_STOP=1 --single-transaction -f scripts/rollback-state-migration.sql

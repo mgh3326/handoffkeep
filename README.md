@@ -301,7 +301,7 @@ the document `task-body/<id>` and linked by `body_doc`.
 
 A repo session emits a whole ticket set with `POST /v1/ticket-sets` (`tickets
 emit --file set.json`; the document is described in
-`docs/linear-internalize.md`, "Ticket sets"). Every body needs the headings
+`git show 1e3d2fa8:git show 1e3d2fa8:docs/linear-internalize.md`, "Ticket sets"). Every body needs the headings
 Current, Desired, Key interfaces, Out of scope and Acceptance. One transaction
 creates the parent, the children (`parent_id`), their bodies and the `blocks`
 edges (`blocked_by` names a `ref` in the set or an existing task id); an
@@ -330,7 +330,7 @@ Ticket sets never stop for this check.
 ### Event-driven transitions, stalled and the backlog sweep
 
 Integration events move tasks forward under the rules in
-`docs/linear-internalize.md` ("Event-driven transitions").
+`git show 1e3d2fa8:git show 1e3d2fa8:docs/linear-internalize.md` ("Event-driven transitions").
 `POST /v1/task-events` takes `{source, source_ref, task_id, tasks, pr,
 reverted_pr, revert_pr, at}` for `mergewake.pr`, `mergewake.review`, `mergewake.merge` and
 `mergewake.revert`; `source_ref` is the PR URL, and for a revert the revert PR
@@ -426,7 +426,7 @@ N]`) lists updates newest first with the project's `stale` flag. Schema
 version 36 adds `ledger_cursors` and `status_updates`.
 
 The schema migration to this model (version 32) moves existing rows by the
-map in `docs/linear-internalize.md` and is reversible with
+map in `git show 1e3d2fa8:git show 1e3d2fa8:docs/linear-internalize.md` and is reversible with
 `scripts/rollback-state-migration.sql`; `handoffkeep tasks migrate-states
 --dry-run` (reads `HANDOFFKEEP_DB_URL`, writes nothing) prints the counts per
 `(legacy_state, rule, new_state)` before the server is upgraded.

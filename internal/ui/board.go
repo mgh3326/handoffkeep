@@ -110,11 +110,11 @@ type boardWorkBoard struct {
 	Sessions     []boardWorkSession `json:"sessions"`
 }
 
-func projectWorkBoard(board store.LinearBoard) *boardWorkBoard {
-	if len(board.Sessions) == 0 && board.Task.Refs.PR == "" && board.Task.Refs.HeadSHA == "" {
+func projectWorkBoard(board store.TaskWorkBoard) *boardWorkBoard {
+	if len(board.Sessions) == 0 && board.PR == "" && board.HeadSHA == "" {
 		return nil
 	}
-	view := &boardWorkBoard{PrimaryJobID: board.PrimaryJob(), PR: board.Task.Refs.PR, HeadSHA: board.Task.Refs.HeadSHA, Sessions: make([]boardWorkSession, 0, len(board.Sessions))}
+	view := &boardWorkBoard{PrimaryJobID: board.PrimaryJob(), PR: board.PR, HeadSHA: board.HeadSHA, Sessions: make([]boardWorkSession, 0, len(board.Sessions))}
 	for _, session := range board.Sessions {
 		if !session.Active && session.JobID != view.PrimaryJobID {
 			continue
@@ -455,11 +455,6 @@ type dwellSegment struct {
 	Open    bool   `json:"open"`
 }
 
-type boardLinear struct {
-	IssueID    string `json:"issue_id"`
-	Identifier string `json:"identifier"`
-}
-
 type participantSegment struct {
 	Role          *string `json:"role"`
 	ModelID       *string `json:"model_id"`
@@ -505,7 +500,6 @@ type boardDetailResponse struct {
 	BodyKOStale        bool               `json:"body_ko_stale,omitempty"`
 	Events             []boardEvent       `json:"events"`
 	Dwell              []dwellSegment     `json:"dwell"`
-	Linear             *boardLinear       `json:"linear"`
 	Participants       boardParticipants  `json:"participants"`
 	// DecisionRequests is every structured request of the task, newest
 	// first, with its derived display state (#618). Always present (possibly
@@ -703,7 +697,6 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 		Task:      projectBoardTask(task),
 		Events:    make([]boardEvent, 0, len(task.Events)),
 		Dwell:     taskDwell(task, now),
-		Linear:    nil,
 		Children:  task.Children,
 		Relations: task.Relations,
 	}
@@ -751,14 +744,6 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 			ID: event.ID, Kind: event.Kind, From: event.From, To: event.To, By: event.By,
 			Note: event.Note, NoJob: event.NoJob, Field: event.Field, FromValue: event.FromValue, ToValue: event.ToValue, Refs: event.Refs, At: event.At.UTC(),
 		})
-	}
-	issue, found, err := h.store.GetLinearIssue(r.Context(), id)
-	if err != nil {
-		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
-		return
-	}
-	if found {
-		response.Linear = &boardLinear{IssueID: issue.IssueID, Identifier: issue.Identifier}
 	}
 	// One extra row distinguishes "reps are complete" from "the bound was
 	// hit". Beyond the bound the totals are partial and must say so.

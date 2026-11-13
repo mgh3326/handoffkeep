@@ -13,7 +13,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
-// Status updates with health (docs/linear-internalize.md, "Model additions").
+// Status updates with health (git show 1e3d2fa8:docs/linear-internalize.md, "Model additions").
 // A person posts a project's health with a short body. The store records the
 // project's task counts by category at write time (snapshot) and the change
 // from the project's previous update (diff). Staleness is computed at read

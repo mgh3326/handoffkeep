@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Declarative automation (docs/linear-internalize.md): started_stalled_hours
+// Declarative automation (git show 1e3d2fa8:docs/linear-internalize.md): started_stalled_hours
 // flags started work at read time and moves nothing; backlog_icebox_days
 // parks idle backlog and is off until the desk enables it (Q7).
 const DefaultStartedStalledHours = 24

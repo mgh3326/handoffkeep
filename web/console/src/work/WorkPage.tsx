@@ -17,7 +17,7 @@ import { TranslationIndicator, translationAction, useShowOriginal } from "../sha
 import { TriageUi, useInboxTriage, type TriageRow } from "../shared/actions/InboxTriage";
 import { fetchInboxStates, type InboxStateView } from "../shared/inboxApi";
 import { QueryBar } from "../shared/query/QueryBar";
-import { formatQuery, parseQuery, sortTasks, taskMatchesQuery, type QueryContext, type QueryFilters, type QuerySort } from "../shared/query/query";
+import { formatQuery, parseQuery, sortTasks, taskGrade, taskMatchesQuery, taskTier, type QueryContext, type QueryFilters, type QuerySort } from "../shared/query/query";
 import { SavedSearchChips, SaveSearch } from "../shared/SavedSearchList";
 import { readSavedSearches, writeSavedSearches, type SavedSearch } from "../shared/savedSearches";
 import "./work.css";
@@ -121,8 +121,8 @@ export function WorkPage() {
   const tasks = (board?.tasks || []).map(t => ({ ...t, priority: overrides[t.id] ?? t.priority }));
   const filtered = tasks.filter(t => taskMatchesQuery(t, queryFilters));
   const choices = (key: "lane" | "kind" | "state") => [...new Set([...tasks.map(t => t[key]), params.get(key) || ""].filter(Boolean))].sort();
-  const gradeChoices = [...new Set([...tasks.map(t => t.refs.linear?.grade || ""), grade].filter(Boolean))].sort();
-  const tierChoices = [...new Set([...tasks.map(t => t.refs.linear?.tier || ""), tier].filter(Boolean))].sort();
+  const gradeChoices = [...new Set([...tasks.map(taskGrade), grade].filter(Boolean))].sort();
+  const tierChoices = [...new Set([...tasks.map(taskTier), tier].filter(Boolean))].sort();
   const queryContext: QueryContext = {
     lanes: [...new Set(tasks.map(t => t.lane))].sort(),
     projects,
