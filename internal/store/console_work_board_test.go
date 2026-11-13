@@ -71,6 +71,101 @@ func TestReadTaskWorkBoards(t *testing.T) {
 	}
 }
 
+func TestReadTaskWorkBoardsEndsReplacedJobsFromTaskEvents(t *testing.T) {
+	st := schemaStore(t, "console_work_board_rebind")
+	rebound := workBoardTask(t, st, TaskRefs{})
+	if _, err := st.ClaimTask(t.Context(), rebound.ID, "old-worker", "old-job", ""); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	place := func(job string, at time.Time) {
+		t.Helper()
+		host := "example-host"
+		if _, _, err := st.RecordPlacement(t.Context(), PlacementDecision{JobID: job, Attempt: 1, TaskID: &rebound.ID, DecidedAt: at, DecidedOn: "example-reporter", Source: "forced", Ranking: "forced", StateSource: "hub", ChosenHost: &host, Outcome: "placed", Family: "openai", Model: "example-worker", Role: "worker", Candidates: []PlacementCandidate{}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	place("old-job", now)
+	// Client placement times may run backward relative to an earlier session.
+	place("new-job", now.Add(-time.Second))
+	if _, err := st.RebindTaskJob(t.Context(), rebound.ID, "old-job", "new-job", "new-worker", "take over"); err != nil {
+		t.Fatal(err)
+	}
+
+	unplaced := workBoardTask(t, st, TaskRefs{})
+	if _, err := st.ClaimTask(t.Context(), unplaced.ID, "old-worker", "unplaced-old", ""); err != nil {
+		t.Fatal(err)
+	}
+	placeForTask := func(task Task, job string) {
+		t.Helper()
+		host := "example-host"
+		if _, _, err := st.RecordPlacement(t.Context(), PlacementDecision{JobID: job, Attempt: 1, TaskID: &task.ID, DecidedAt: now, DecidedOn: "example-reporter", Source: "forced", Ranking: "forced", StateSource: "hub", ChosenHost: &host, Outcome: "placed", Family: "openai", Model: "example-worker", Role: "worker", Candidates: []PlacementCandidate{}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	placeForTask(unplaced, "unplaced-old")
+	if _, err := st.RebindTaskJob(t.Context(), unplaced.ID, "unplaced-old", "unplaced-new", "new-worker", "take over without placement"); err != nil {
+		t.Fatal(err)
+	}
+
+	boards, err := st.ReadTaskWorkBoards(t.Context(), []Task{rebound, unplaced})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byJob := func(board TaskWorkBoard, job string) (TaskWorkSession, bool) {
+		for _, session := range board.Sessions {
+			if session.JobID == job {
+				return session, true
+			}
+		}
+		return TaskWorkSession{}, false
+	}
+	old, ok := byJob(boards[rebound.ID], "old-job")
+	if !ok || old.Active || old.EndedAt.IsZero() {
+		t.Fatalf("rebound old session = %+v, found %t", old, ok)
+	}
+	newSession, ok := byJob(boards[rebound.ID], "new-job")
+	if !ok || !newSession.Active {
+		t.Fatalf("pending replacement session = %+v, found %t", newSession, ok)
+	}
+	unplacedOld, ok := byJob(boards[unplaced.ID], "unplaced-old")
+	if !ok || unplacedOld.Active || unplacedOld.EndedAt.IsZero() {
+		t.Fatalf("session replaced without a placement = %+v, found %t", unplacedOld, ok)
+	}
+
+	reclaimed := workBoardTask(t, st, TaskRefs{})
+	if _, err := st.ClaimTask(t.Context(), reclaimed.ID, "first-worker", "first-claim", ""); err != nil {
+		t.Fatal(err)
+	}
+	placeForTask(reclaimed, "first-claim")
+	if _, err := st.TransitionTask(t.Context(), reclaimed.ID, StateUnstarted, "operator", "release for a fresh claim", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ClaimTask(t.Context(), reclaimed.ID, "second-worker", "second-claim", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	pending := workBoardTask(t, st, TaskRefs{JobID: "unclaimed-job"})
+	placeForTask(pending, "unclaimed-job")
+	pendingBoards, err := st.ReadTaskWorkBoards(t.Context(), []Task{pending})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingSession, ok := byJob(pendingBoards[pending.ID], "unclaimed-job")
+	if !ok || !pendingSession.Active {
+		t.Fatalf("unreplaced placement = %+v, found %t", pendingSession, ok)
+	}
+
+	claimBoards, err := st.ReadTaskWorkBoards(t.Context(), []Task{reclaimed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstClaim, ok := byJob(claimBoards[reclaimed.ID], "first-claim")
+	if !ok || firstClaim.Active || firstClaim.EndedAt.IsZero() {
+		t.Fatalf("session replaced by a later claim = %+v, found %t", firstClaim, ok)
+	}
+}
+
 func TestTaskWorkBoardPlacementOrder(t *testing.T) {
 	host := "h"
 	at := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
