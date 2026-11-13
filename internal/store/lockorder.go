@@ -8,7 +8,7 @@ package store
 // listed at the end, each with the reason it cannot close a cycle. The
 // lock_order_test.go tests drive the cycles this order removed.
 //
-//  1. Schema locks. DDL runs only in Store.migrate, MigrateWrk and their
+//  1. Schema locks. DDL runs only in Store.migrate and its
 //     version-gated steps, under pg_advisory_xact_lock(migrationLockID).
 //     Open runs Store.migrate only when the schema is missing a version it
 //     writes (migrateIfBehind, migrateCurrent), so opening a store beside
@@ -22,7 +22,7 @@ package store
 //
 //  2. The task-mutation lock, pg_advisory_xact_lock(8241873001). A
 //     transaction takes it first when it locks more than one task row, or
-//     when it locks a task row and also a job lock from level 3. Holders run
+//     when it locks a task row and also the jobs row from level 3. Holders run
 //     one at a time, so the order in which a holder locks task rows (a child
 //     before its parent in autoCloseTx and applySourceEventTx, ascending id
 //     in applyDeployRecordTx, propagateMergeTx and recordLinearBoardRelayTx,
@@ -30,13 +30,11 @@ package store
 //     then ascending id in propagateRevertTx) cannot form a
 //     cycle with another holder. UpdateJob, AppendRelayEvent (work board on,
 //     or an event that answers or ends a decision: relayTouchesDecisions),
-//     WrkAppend (completed or joined records) and PutDocument (deploy
-//     records) take it first for that reason. Taking it again in the
+//     and PutDocument (deploy records) take it first for that reason. Taking it again in the
 //     same transaction (applyJobRoleTx, applyDeployRecordTx) is a no-op:
 //     advisory locks are re-entrant.
 //
-//  3. Job locks: wrk_job_locks rows in job_id order (WrkAppend sorts them),
-//     then the jobs row (UpdateJob).
+//  3. Job locks: the jobs row (UpdateJob).
 //
 //  4. Task rows: SELECT ... FOR UPDATE, or an UPDATE of tasks. Without the
 //     level-2 lock a transaction locks at most one task row and no job lock

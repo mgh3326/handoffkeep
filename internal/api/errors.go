@@ -15,7 +15,6 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/telemetry"
-	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -149,11 +148,6 @@ var errorRules = []errorRule{
 // database or network, not the request) is logged and answered 500
 // internal_error. Anything else is a rejected request: 400 invalid_context.
 func appErr(w http.ResponseWriter, r *http.Request, e error) {
-	var wrkErr wrkrecords.Error
-	if errors.As(e, &wrkErr) {
-		writeError(w, wrkrecords.Status(wrkErr), wrkrecords.Code(wrkErr))
-		return
-	}
 	// These codes are the error's own text: fixed strings or store-built
 	// validator messages, never echoed input.
 	if errors.Is(e, attachments.ErrMIME) || errors.Is(e, attachments.ErrExtension) || errors.Is(e, store.ErrInvalidDecisionRequest) {
@@ -206,7 +200,7 @@ func appErr(w http.ResponseWriter, r *http.Request, e error) {
 func writeInternal(w http.ResponseWriter, r *http.Request, code string, e error) {
 	requestID := telemetry.RequestID(r.Context())
 	traceID := telemetry.TraceID(r.Context())
-	client, _ := store.WrkPrincipal(r.Context())
+	client := clientOf(r.Context())
 	log.Printf("api.internal_error request_id=%s trace_id=%s route=%q client=%q code=%s err=%q", requestID, traceID, r.Pattern, client, code, e.Error())
 	body := map[string]string{"error": code}
 	if requestID != "" {

@@ -247,8 +247,7 @@ func decidedBy(in ResolveDecisionInput, prov *assistantProvenance) string {
 }
 
 // ResolveDecision classifies one answer to a dr- request and records it; see
-// the file comment. Validation failures, and a wrk fence refusal, return an
-// error and write nothing. An assistant judgement on a request whose
+// the file comment. Validation failures return an error and write nothing. An assistant judgement on a request whose
 // effective policy is operator_direct is refused: the attempt is recorded and
 // the error returned.
 func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (ResolveDecisionOutcome, error) {
@@ -333,9 +332,6 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ResolveDecisionOutcome{}, ErrTaskNotFound
 		}
-		return ResolveDecisionOutcome{}, err
-	}
-	if err = s.wrkTaskFenceTx(ctx, tx, x, "claimed", false); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
 

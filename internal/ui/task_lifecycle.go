@@ -267,8 +267,6 @@ func (h *Handler) emitRelaneNotices(ctx context.Context, task store.Task, from, 
 // validation refusal is invalid_request; anything else is logged and 500.
 func lifecycleError(w http.ResponseWriter, err error) string {
 	switch {
-	case uiWrkError(w, err):
-		return "wrk_reject"
 	case errors.Is(err, store.ErrTaskNotFound):
 		writeJSONError(w, http.StatusNotFound, "not_found")
 	case errors.Is(err, store.ErrTaskMergePath):

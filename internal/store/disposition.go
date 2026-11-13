@@ -413,9 +413,6 @@ func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in Dispositi
 		}
 		return Task{}, "", err
 	}
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "claimed", false); err != nil {
-		return Task{}, "", err
-	}
 	if x.Refs.Disposition == nil {
 		return x, "not_disposition", nil
 	}
@@ -598,9 +595,6 @@ func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string)
 		return Task{}, err
 	}
 
-	if err := s.wrkTaskFenceTx(ctx, tx, x, DispositionTarget(x), false); err != nil {
-		return Task{}, err
-	}
 	if x.Refs.Disposition == nil || x.Refs.Disposition.Answer == nil || x.State != StateResearching || x.AwaitingDecision {
 		return Task{}, ErrTaskConflict
 	}

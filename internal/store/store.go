@@ -26,7 +26,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/guard"
-	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -516,28 +515,27 @@ type Task struct {
 // RelayEvent is a durable report from a worker to its owning lane.  Delivery
 // state belongs here rather than in the relay hub so it survives restarts.
 type RelayEvent struct {
-	WrkReceipt     *wrkrecords.Receipt `json:"wrk_receipt,omitempty"`
-	ReportSHA      string              `json:"report_sha256,omitempty"`
-	ID             int64               `json:"id"`
-	Kind           string              `json:"kind"`
-	JobID          string              `json:"job_id"`
-	Epoch          int                 `json:"epoch"`
-	OwnerLane      string              `json:"owner_lane"`
-	Machine        string              `json:"machine"`
-	PaneID         string              `json:"pane_id"`
-	ReportPath     string              `json:"report_path"`
-	ReportLastLine string              `json:"report_last_line"`
-	Question       string              `json:"question"`
-	PR             string              `json:"pr"`
-	Head           string              `json:"head"`
-	Reason         string              `json:"reason"`
-	EventID        string              `json:"event_id"`
-	Text           string              `json:"text"`
-	EventTime      *time.Time          `json:"event_time"`
-	ReceivedAt     time.Time           `json:"received_at"`
-	DeliveredAt    *time.Time          `json:"delivered_at"`
-	DeliveredTo    string              `json:"delivered_to"`
-	Attempts       int                 `json:"attempts"`
+	ReportSHA      string     `json:"report_sha256,omitempty"`
+	ID             int64      `json:"id"`
+	Kind           string     `json:"kind"`
+	JobID          string     `json:"job_id"`
+	Epoch          int        `json:"epoch"`
+	OwnerLane      string     `json:"owner_lane"`
+	Machine        string     `json:"machine"`
+	PaneID         string     `json:"pane_id"`
+	ReportPath     string     `json:"report_path"`
+	ReportLastLine string     `json:"report_last_line"`
+	Question       string     `json:"question"`
+	PR             string     `json:"pr"`
+	Head           string     `json:"head"`
+	Reason         string     `json:"reason"`
+	EventID        string     `json:"event_id"`
+	Text           string     `json:"text"`
+	EventTime      *time.Time `json:"event_time"`
+	ReceivedAt     time.Time  `json:"received_at"`
+	DeliveredAt    *time.Time `json:"delivered_at"`
+	DeliveredTo    string     `json:"delivered_to"`
+	Attempts       int        `json:"attempts"`
 }
 
 type Store struct {
@@ -546,7 +544,6 @@ type Store struct {
 	registry    []migration
 	linearSync  atomic.Bool
 	linearBoard atomic.Bool
-	wrk         atomic.Pointer[wrkrecords.Engine]
 	// autoCloseOff inverts the auto_close_parent setting so the zero Store has
 	// it on, the default.
 	autoCloseOff atomic.Bool
@@ -734,6 +731,24 @@ type SearchResult struct {
 }
 
 func Open(ctx context.Context, url string) (*Store, error) { return open(ctx, url, nil) }
+
+// OpenWithoutMigration connects without inspecting or changing the schema, so
+// a dry run never executes DDL. Callers learn whether their tables exist from
+// their own query.
+func OpenWithoutMigration(ctx context.Context, url string) (*Store, error) {
+	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
+		return nil, errors.New("database URL must use postgres:// or postgresql://")
+	}
+	p, err := newPool(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("open database pool: %w", err)
+	}
+	if err = p.Ping(ctx); err != nil {
+		p.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+	return &Store{pool: p}, nil
+}
 
 // open is Open with an explicit migration registry; nil means the real one.
 func open(ctx context.Context, url string, registry []migration) (*Store, error) {
@@ -2317,18 +2332,6 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 		return x, err
 	}
 
-	if x.Refs.JobID != "" && wrkTablesExist(ctx, tx) {
-		if _, err = tx.Exec(ctx, `INSERT INTO wrk_job_locks(job_id) VALUES($1) ON CONFLICT DO NOTHING`, x.Refs.JobID); err != nil {
-			return x, err
-		}
-		var locked string
-		if err = tx.QueryRow(ctx, `SELECT job_id FROM wrk_job_locks WHERE job_id=$1 FOR UPDATE`, x.Refs.JobID).Scan(&locked); err != nil {
-			return x, err
-		}
-		if err = s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: x.Refs.JobID, Binding: true}); err != nil {
-			return x, err
-		}
-	}
 	if err = requireTaskProject(ctx, tx, x.Project); err != nil {
 		return x, err
 	}
@@ -2426,13 +2429,6 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrTaskNotFound
 		}
-		return Task{}, err
-	}
-
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
-		return Task{}, err
-	}
-	if err := s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: toJob, Binding: true}); err != nil {
 		return Task{}, err
 	}
 
@@ -2542,9 +2538,6 @@ func (s *Store) relaneTaskTx(ctx context.Context, tx pgx.Tx, id int64, to, by, n
 		return Task{}, false, err
 	}
 
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
-		return Task{}, false, err
-	}
 	if IsSettledState(x.State) {
 		return Task{}, false, ErrTaskTerminal
 	}
@@ -2607,9 +2600,6 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 		return Task{}, false, err
 	}
 
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
-		return Task{}, false, err
-	}
 	var known bool
 	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, project).Scan(&known); err != nil {
 		return Task{}, false, err
@@ -3024,40 +3014,6 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 			return x, false, err
 		}
 	}
-	if x.JobID != "" && wrkTablesExist(ctx, tx) {
-		if _, err = tx.Exec(ctx, `INSERT INTO wrk_job_locks(job_id) VALUES($1) ON CONFLICT DO NOTHING`, x.JobID); err != nil {
-			return x, false, err
-		}
-		var locked string
-		if err = tx.QueryRow(ctx, `SELECT job_id FROM wrk_job_locks WHERE job_id=$1 FOR UPDATE`, x.JobID).Scan(&locked); err != nil {
-			return x, false, err
-		}
-	}
-	if err = s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: x.JobID, Kind: x.Kind, Head: x.Head, Digest: x.ReportSHA, Receipt: x.WrkReceipt}); err != nil {
-		return x, false, err
-	}
-	if x.Kind == "job.completed" || x.Kind == "job.joined" {
-		snapshot, e := loadWrkSnapshot(ctx, tx)
-		if e != nil {
-			return x, false, e
-		}
-		if snapshot.ReceiptRequired(x.JobID) {
-			receipt := x.WrkReceipt
-			if receipt == nil {
-				_, receipt = WrkPrincipal(ctx)
-			}
-			if receipt == nil {
-				return x, false, wrkrecords.Error("wrk_receipt_required")
-			}
-			err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE kind=$1 AND job_id=$2 AND report_path=$3 AND epoch=0 AND reason=''`, x.Kind, x.JobID, "wrk:"+x.JobID+":"+intString(receipt.Seq)), &x)
-			if err != nil {
-				return x, false, wrkrecords.Error("wrk_unavailable")
-			}
-			hydrateWrkRelay(ctx, tx, &x)
-			return x, false, tx.Commit(ctx)
-		}
-	}
-
 	if !validRelayEvent(x) {
 		return x, false, errors.New("invalid relay event")
 	}
@@ -3089,7 +3045,6 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 			return x, false, err
 		}
 	}
-	hydrateWrkRelay(ctx, tx, &x)
 	return x, created, tx.Commit(ctx)
 }
 
@@ -3102,7 +3057,6 @@ func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, 
 	var x RelayEvent
 	err := scanRelayEvent(s.pool.QueryRow(ctx, `UPDATE relay_events SET delivered_at=now(),delivered_to=$2 WHERE id=$1 AND delivered_at IS NULL RETURNING `+relayEventColumns, id, machine+"/"+pane), &x)
 	if err == nil {
-		hydrateWrkRelay(ctx, s.pool, &x)
 		return x, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -3114,7 +3068,6 @@ func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, 
 		}
 		return RelayEvent{}, err
 	}
-	hydrateWrkRelay(ctx, s.pool, &x)
 	return x, nil
 }
 
@@ -3171,7 +3124,6 @@ func (s *Store) ListRelayEventsPage(ctx context.Context, lane, kind string, unde
 	if err != nil {
 		return nil, err
 	}
-	s.hydrateWrkRelays(ctx, out)
 	return out, nil
 }
 
@@ -3228,7 +3180,6 @@ func (s *Store) ListRelayEventsTimeline(ctx context.Context, lane, kind string, 
 	if err != nil {
 		return nil, err
 	}
-	s.hydrateWrkRelays(ctx, out)
 	return out, nil
 }
 
@@ -3338,7 +3289,6 @@ func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEven
 	if err != nil {
 		return nil, err
 	}
-	s.hydrateWrkRelays(ctx, out)
 	return out, nil
 }
 
@@ -3369,7 +3319,6 @@ func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEv
 	if err != nil {
 		return nil, err
 	}
-	s.hydrateWrkRelays(ctx, out)
 	return out, nil
 }
 func validDocKey(k string) bool {
