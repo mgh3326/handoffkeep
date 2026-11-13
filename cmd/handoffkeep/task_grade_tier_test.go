@@ -10,8 +10,9 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-// tasks add --grade/--tier writes refs.grade and refs.tier, never the
-// retired refs.linear (hk 4425).
+// tasks add --grade/--tier sends grade and tier as refs.linear.{grade,tier}
+// for one release (hk 4425): the previous server refuses refs.grade, and this
+// server stores both keys. No other refs.linear field is sent.
 func TestTaskGradeTierCLIFlagsWriteRefs(t *testing.T) {
 	var received map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -31,11 +32,21 @@ func TestTaskGradeTierCLIFlagsWriteRefs(t *testing.T) {
 		t.Fatal(err)
 	}
 	refs, _ := received["refs"].(map[string]any)
-	if refs["grade"] != "SS" || refs["tier"] != "T3" {
+	linear, _ := refs["linear"].(map[string]any)
+	if linear["grade"] != "SS" || linear["tier"] != "T3" || linear["sync"] != false || len(linear) != 3 {
 		t.Fatalf("refs=%v", refs)
 	}
-	if _, ok := refs["linear"]; ok {
-		t.Fatalf("refs.linear written: %v", refs)
+	if _, ok := refs["grade"]; ok {
+		t.Fatalf("refs.grade sent to a server that may refuse it: %v", refs)
+	}
+	// The server turns that patch into refs.grade/refs.tier.
+	var patch store.TaskRefs
+	raw, _ := json.Marshal(refs)
+	if err := json.Unmarshal(raw, &patch); err != nil {
+		t.Fatal(err)
+	}
+	if g, tr := patch.GradeTier(); g != "SS" || tr != "T3" {
+		t.Fatalf("GradeTier %q %q", g, tr)
 	}
 }
 

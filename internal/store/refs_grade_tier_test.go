@@ -37,6 +37,28 @@ func TestTaskRefsGradeTierFallback(t *testing.T) {
 		t.Fatalf("legacy patch: %q %q %+v", g, tr, merged)
 	}
 
+	// A new key is mirrored into refs.linear for the previous release, which
+	// reads and keeps only that copy during the blue-green overlap.
+	merged = mergeTaskRefs(old, TaskRefs{Grade: "B"})
+	if merged.Grade != "B" || merged.Linear.Grade != "B" || merged.Linear.Tier != "T2" || merged.Linear.IssueID != "lin-1" || old.Linear.Grade != "A" {
+		t.Fatalf("new-key patch: %+v linear=%+v old=%+v", merged, merged.Linear, old.Linear)
+	}
+	created := TaskRefs{Grade: "A", Tier: "T1"}
+	syncLegacyGradeTier(&created)
+	if created.Linear == nil || created.Linear.Grade != "A" || created.Linear.Tier != "T1" {
+		t.Fatalf("create sync: %+v", created)
+	}
+	legacyOnly := TaskRefs{Linear: &TaskLinear{Grade: "S", Tier: "T3"}}
+	syncLegacyGradeTier(&legacyOnly)
+	if legacyOnly.Grade != "S" || legacyOnly.Tier != "T3" {
+		t.Fatalf("legacy create sync: %+v", legacyOnly)
+	}
+	none := TaskRefs{PR: "o/r#1"}
+	syncLegacyGradeTier(&none)
+	if none.Linear != nil {
+		t.Fatalf("ungraded refs gained refs.linear: %+v", none.Linear)
+	}
+
 	if !validTaskRefs(TaskRefs{Grade: "SS", Tier: "T0"}) || validTaskRefs(TaskRefs{Grade: "Z"}) || validTaskRefs(TaskRefs{Tier: "T9"}) {
 		t.Fatal("grade/tier validation")
 	}
@@ -46,8 +68,10 @@ func TestTaskRefsGradeTierFallback(t *testing.T) {
 	}
 }
 
-// A new task writes refs.grade/refs.tier, and a transition keeps them (the
-// store drops unknown refs keys, so the keys must be part of TaskRefs).
+// A new task writes refs.grade/refs.tier (and the refs.linear copy the
+// previous release reads), and a transition keeps them (the store drops
+// unknown refs keys, so the keys must be part of TaskRefs). A task created by
+// a previous-release client, with only refs.linear, gets the new keys too.
 func TestTaskRefsGradeTierStored(t *testing.T) {
 	s := schemaStore(t, "refs_grade_tier")
 	ctx := t.Context()
@@ -63,8 +87,16 @@ func TestTaskRefsGradeTierStored(t *testing.T) {
 	if err := json.Unmarshal(raw, &stored); err != nil {
 		t.Fatal(err)
 	}
-	if stored["grade"] != "A" || stored["tier"] != "T2" || stored["linear"] != nil {
+	legacy, _ := stored["linear"].(map[string]any)
+	if stored["grade"] != "A" || stored["tier"] != "T2" || legacy["grade"] != "A" || legacy["tier"] != "T2" {
 		t.Fatalf("stored refs %s", raw)
+	}
+	old, err := s.CreateTask(ctx, Task{Lane: "grade-lane", Title: "old client", Kind: "implement", CreatedBy: "test", Project: projectPtr(testProjectName), Refs: TaskRefs{Linear: &TaskLinear{Grade: "S", Tier: "T1"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.Refs.Grade != "S" || old.Refs.Tier != "T1" {
+		t.Fatalf("old-client create %+v", old.Refs)
 	}
 	if _, err := s.TransitionTask(ctx, x.ID, "unstarted", "test", "ready", &TaskRefs{PR: "o/r#1"}, ""); err != nil {
 		t.Fatal(err)

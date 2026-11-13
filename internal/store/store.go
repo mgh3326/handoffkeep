@@ -187,6 +187,32 @@ func (r TaskRefs) GradeTier() (grade, tier string) {
 	return grade, tier
 }
 
+// syncLegacyGradeTier keeps refs.grade/refs.tier and the legacy
+// refs.linear copy equal for the blue-green overlap (hk 4425): the previous
+// release reads and keeps only refs.linear, and drops refs.grade on its next
+// rewrite of the column. A new key wins; an empty new key is filled from the
+// legacy copy. The release that drops the refs.linear fallback removes this.
+func syncLegacyGradeTier(r *TaskRefs) {
+	if r.Linear != nil {
+		if r.Grade == "" {
+			r.Grade = r.Linear.Grade
+		}
+		if r.Tier == "" {
+			r.Tier = r.Linear.Tier
+		}
+	}
+	if r.Grade == "" && r.Tier == "" {
+		return
+	}
+	if r.Linear == nil {
+		r.Linear = &TaskLinear{}
+	} else {
+		legacy := *r.Linear
+		r.Linear = &legacy
+	}
+	r.Linear.Grade, r.Linear.Tier = r.Grade, r.Tier
+}
+
 // TaskLinear is the legacy refs.linear shape, kept as stored (see
 // TaskRefs.Linear).
 type TaskLinear struct {
@@ -2485,6 +2511,7 @@ func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
 		}
 		old.Linear = &merged
 	}
+	syncLegacyGradeTier(&old)
 	return old
 }
 
@@ -2644,6 +2671,7 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 	if x.BodyDoc != "" && !ValidBodyDoc(x.BodyDoc) {
 		return x, errors.New("invalid task: body_doc must be a document key or key#section")
 	}
+	syncLegacyGradeTier(&x.Refs)
 	if !validTask(x) {
 		return x, errors.New("invalid task")
 	}

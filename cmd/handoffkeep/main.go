@@ -200,9 +200,17 @@ func checkpointRefs(values []string) (store.Refs, error) {
 	return refs, nil
 }
 
+// taskRefs builds a refs patch. Grade and tier go on the wire as
+// refs.linear.{grade,tier} for one release (hk 4425): the CLI deploys before
+// the server, and the previous server refuses an unknown refs.grade key. This
+// server stores them as refs.grade/refs.tier too (store.syncLegacyGradeTier).
+// The next release sends refs.grade/refs.tier.
 func taskRefs(pr, headSHA, reportPath, jobID, grade, tier string) (*store.TaskRefs, bool) {
-	x := &store.TaskRefs{PR: pr, HeadSHA: headSHA, ReportPath: reportPath, JobID: jobID, Grade: grade, Tier: tier}
-	return x, pr != "" || headSHA != "" || reportPath != "" || jobID != "" || grade != "" || tier != ""
+	x := &store.TaskRefs{PR: pr, HeadSHA: headSHA, ReportPath: reportPath, JobID: jobID}
+	if grade != "" || tier != "" {
+		x.Linear = &store.TaskLinear{Grade: grade, Tier: tier}
+	}
+	return x, pr != "" || headSHA != "" || reportPath != "" || jobID != "" || x.Linear != nil
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {

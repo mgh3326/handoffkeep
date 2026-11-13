@@ -265,3 +265,45 @@ func TestRetryDeadlockIsBounded(t *testing.T) {
 		t.Fatalf("other error retried: calls=%d err=%v", calls, err)
 	}
 }
+
+// TestLockOrderJobUpdateVersusTaskWrite: UpdateJob for a new role locks the
+// job's task row (applyJobRoleTx). Every task writer takes the task-mutation
+// lock before the row, so the job update must take it first too.
+func TestLockOrderJobUpdateVersusTaskWrite(t *testing.T) {
+	dbURL, app := lockOrderSchema(t, "lockjob")
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	jobs := openLockActorStore(t, dbURL, app("job"))
+	writer := openLockActorStore(t, dbURL, app("relane"))
+
+	task := lockOrderTask(t, jobs, TaskRefs{})
+	const jobID = "lock-order-job"
+	if _, _, err := jobs.ClaimJob(ctx, Job{JobID: jobID, TaskID: &task.ID, Host: "lock-host", CreatedBy: "lock-order-test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jobs.ClaimTask(ctx, task.ID, "lead", jobID, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	blocker := lockBlocker(t, ctx, dbURL, app("blocker"))
+	if _, err := blocker.Exec(ctx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	role := "worker"
+	update := startLockActor(app("job"), func() error {
+		_, err := jobs.UpdateJob(ctx, jobID, JobUpdate{Role: &role})
+		return err
+	})
+	if !waitBlockedBy(t, ctx, jobs.pool, update, app("blocker")) {
+		t.Fatalf("UpdateJob finished before the blocker released: %v", update.err)
+	}
+	relane := startLockActor(app("relane"), func() error {
+		_, _, err := writer.RelaneTask(ctx, task.ID, "lock-order-2", "lock-order-test", "lock order", true)
+		return err
+	})
+	waitBlockedBy(t, ctx, jobs.pool, relane, app("job"), app("blocker"))
+	if err := blocker.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	finishLockActors(t, ctx, update, relane)
+}
