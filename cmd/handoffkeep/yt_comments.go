@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"slices"
 	"sort"
@@ -1574,6 +1575,232 @@ func youtrackCommentsUnbindCmd(args []string, out io.Writer) error {
 		return err
 	}
 	return printJSON(out, res)
+}
+
+const youtrackCommentsDrainUsage = "usage: youtrack comments-drain [--tenant T] [--wait 10m] [--reject-held] [--task N]"
+
+type ytCommentDrainReport struct {
+	Tenant   string            `json:"tenant"`
+	Task     int64             `json:"task,omitempty"`
+	Modes    map[string]string `json:"modes"`
+	Counts   map[string]int    `json:"counts"`
+	Rejected []int64           `json:"rejected,omitempty"`
+}
+
+// youtrackCommentsDrainCmd monitors the comment ops the serve worker can
+// send. It never dispatches. --reject-held reuses the recovery path so every
+// rejection is serialized with the lane and authority switches.
+func youtrackCommentsDrainCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("youtrack comments-drain", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	tenantFlag := fs.String("tenant", "", "YouTrack tenant host")
+	wait := fs.Duration("wait", 0, "wait for ready ops to drain")
+	rejectHeld := fs.Bool("reject-held", false, "close held ops that are safe to reject")
+	taskID := fs.Int64("task", 0, "only classify one task")
+	ordered, err := splitArgs(args, "tenant", "wait", "task")
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(ordered); err != nil || fs.NArg() != 0 || *wait < 0 || *taskID < 0 {
+		return errors.New(youtrackCommentsDrainUsage)
+	}
+	taskSpecified := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "task" {
+			taskSpecified = true
+		}
+	})
+	if taskSpecified && *taskID < 1 {
+		return errors.New(youtrackCommentsDrainUsage)
+	}
+	mode, err := ytCommentsModeFromEnv()
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	if *rejectHeld && mode != store.YTCommentsOn {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("--reject-held requires HANDOFFKEEP_YT_COMMENTS_MODE=on")}
+	}
+	fields, err := ytFieldsModeFromEnv()
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	moves, err := ytMovesModeFromEnv()
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	if moves == store.YTMovesOn && fields != store.YTFieldsOn {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("HANDOFFKEEP_YT_MOVES_MODE=on requires HANDOFFKEEP_YT_FIELDS_MODE=on")}
+	}
+	tenant := strings.TrimSpace(*tenantFlag)
+	if tenant == "" {
+		u, parseErr := url.Parse(strings.TrimSpace(os.Getenv("YOUTRACK_URL")))
+		if parseErr == nil && u != nil && u.Host != "" {
+			tenant = u.Host
+		}
+	}
+	if tenant == "" {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("--tenant or YOUTRACK_URL is required")}
+	}
+	dbURL := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DB_URL"))
+	if dbURL == "" {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("HANDOFFKEEP_DB_URL is required")}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second+*wait)
+	defer cancel()
+	var st *store.Store
+	if *rejectHeld {
+		st, err = store.Open(ctx, dbURL)
+	} else {
+		st, err = store.OpenReadOnly(ctx, dbURL)
+	}
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	st.SetYTCommentsMode(mode)
+	st.SetYTFieldsMode(fields, tenant)
+	st.SetYTMovesMode(moves)
+
+	deadline := time.Now().Add(*wait)
+	var report ytCommentDrainReport
+	for {
+		report, err = ytCommentDrainSnapshot(ctx, st, tenant, *taskID, mode, fields, moves)
+		if err != nil {
+			return err
+		}
+		if report.Counts["remote_unknown"] > 0 {
+			if err := printJSON(out, report); err != nil {
+				return err
+			}
+			return exitCodeError{code: youtrackExitRemoteUnknown, err: errors.New("remote_unknown comment ops require `youtrack ops resolve`")}
+		}
+		if report.Counts["ready"] == 0 || time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return exitCodeError{code: youtrackExitPending, err: ctx.Err()}
+		case <-time.After(time.Second):
+		}
+	}
+	if *rejectHeld {
+		var got store.YTRecovery
+		if *taskID > 0 {
+			got, err = st.RecoverHeldYTOpsForTask(ctx, tenant, *taskID, time.Now().UTC(), 0)
+		} else {
+			got, err = st.RecoverHeldYTOps(ctx, tenant, time.Now().UTC(), 0)
+		}
+		if err != nil {
+			return err
+		}
+		report.Rejected = got.OpIDs
+		report, err = ytCommentDrainSnapshot(ctx, st, tenant, *taskID, mode, fields, moves)
+		if err != nil {
+			return err
+		}
+		report.Rejected = got.OpIDs
+		if report.Counts["remote_unknown"] > 0 {
+			if err := printJSON(out, report); err != nil {
+				return err
+			}
+			return exitCodeError{code: youtrackExitRemoteUnknown, err: errors.New("remote_unknown comment ops require `youtrack ops resolve`")}
+		}
+	}
+	if err := printJSON(out, report); err != nil {
+		return err
+	}
+	if report.Counts["ready"] > 0 {
+		return exitCodeError{code: youtrackExitPending, err: errors.New("comment ops are still ready; serve has not drained them")}
+	}
+	return nil
+}
+
+const (
+	youtrackExitPending       = 3
+	youtrackExitRemoteUnknown = 4
+)
+
+func ytCommentDrainSnapshot(ctx context.Context, st *store.Store, tenant string, taskID int64, comments store.YTCommentsMode, fields store.YTFieldsMode, moves store.YTMovesMode) (ytCommentDrainReport, error) {
+	report := ytCommentDrainReport{Tenant: tenant, Task: taskID, Modes: map[string]string{"comments": string(comments), "fields": string(fields), "moves": string(moves)}, Counts: map[string]int{
+		"ready": 0, "held_binding": 0, "held_binding_changed": 0, "held_other_tenant": 0,
+		"held_authority_youtrack": 0, "held_ambiguous": 0, "held_mode": 0, "remote_unknown": 0,
+	}}
+	commentAuthority, err := st.YTAuthorityOf(ctx, store.YTAuthorityComments)
+	if err != nil {
+		return report, err
+	}
+	taskAuthority, err := st.YTAuthorityOf(ctx, store.YTAuthorityTasks)
+	if err != nil {
+		return report, err
+	}
+	for afterID := int64(0); ; {
+		ops, err := st.ListYTWriteOps(ctx, store.YTOpFilter{State: "pending", TaskID: taskID, AfterID: afterID, Limit: store.YTOpListMax})
+		if err != nil {
+			return report, err
+		}
+		for _, op := range ops {
+			afterID = op.ID
+			if op.Tenant != tenant || !ytBindingDrainOp(op) {
+				continue
+			}
+			binding, found, err := st.YTTaskBinding(ctx, parseTaskID(op.EntityID))
+			if err != nil {
+				return report, err
+			}
+			modeOn, side := ytBindingDrainModeAndAuthority(op, comments, fields, moves, commentAuthority, taskAuthority)
+			class := ytBindingDrainClass(op, binding, found, tenant, modeOn, side)
+			report.Counts[class]++
+		}
+		if len(ops) < store.YTOpListMax {
+			break
+		}
+	}
+	return report, nil
+}
+
+func parseTaskID(raw string) int64 {
+	id, _ := strconv.ParseInt(raw, 10, 64)
+	return id
+}
+
+func ytBindingDrainOp(op ytwrite.Op) bool {
+	return (op.Kind == ytwrite.KindCommentAppend && op.Principal == store.YTCommentPrincipal) ||
+		((op.Kind == ytwrite.KindIssueFields || op.Kind == ytwrite.KindIssueMove) && op.Principal == store.YTFieldsPrincipal)
+}
+
+func ytBindingDrainModeAndAuthority(op ytwrite.Op, comments store.YTCommentsMode, fields store.YTFieldsMode, moves store.YTMovesMode, commentAuthority, taskAuthority store.YTAuthoritySide) (bool, store.YTAuthoritySide) {
+	if op.Kind == ytwrite.KindCommentAppend {
+		return comments == store.YTCommentsOn, commentAuthority
+	}
+	return fields == store.YTFieldsOn && (op.Kind != ytwrite.KindIssueMove || moves == store.YTMovesOn), taskAuthority
+}
+
+func ytBindingDrainClass(op ytwrite.Op, binding store.YTTaskBinding, found bool, tenant string, modeOn bool, authority store.YTAuthoritySide) string {
+	switch op.State {
+	case ytwrite.StateRemoteUnknown:
+		return "remote_unknown"
+	case ytwrite.StateDispatched:
+		return "ready"
+	}
+	if !modeOn {
+		return "held_mode"
+	}
+	if op.YTTargetID == "" {
+		return "ready"
+	}
+	if found && binding.Tenant != tenant {
+		return "held_other_tenant"
+	}
+	if (!found || (op.YTTargetID != "" && binding.IssueID != op.YTTargetID)) && authority == store.YTAuthorityYouTrack {
+		return "held_authority_youtrack"
+	}
+	if !found {
+		return "held_binding"
+	}
+	if op.YTTargetID != "" && binding.IssueID != op.YTTargetID {
+		return "held_binding_changed"
+	}
+	return "ready"
 }
 
 const youtrackIssuesBackfillUsage = "usage: youtrack issues-backfill [--project P] [--dry-run]"

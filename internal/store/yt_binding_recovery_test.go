@@ -442,6 +442,26 @@ func TestRecoverHeldYTOpsActsForTheWorkersTenantOnly(t *testing.T) {
 	}
 }
 
+func TestRecoverHeldYTOpsForTaskIsScoped(t *testing.T) {
+	s := schemaStore(t, "ytrec_task_scope")
+	s.SetYTCommentsMode(YTCommentsOn)
+	first := ytcTask(t, s, ytbProject)
+	second := ytcTask(t, s, ytbProject)
+	t0 := time.Now().UTC().Add(-time.Hour)
+	firstOp := ytrComment(t, s, first, "2-"+strconv.FormatInt(first, 10), "scope-first", t0)
+	secondOp := ytrComment(t, s, second, "2-"+strconv.FormatInt(second, 10), "scope-second", t0)
+	ytrDeleteBinding(t, s, first)
+	ytrDeleteBinding(t, s, second)
+
+	got, err := s.RecoverHeldYTOpsForTask(t.Context(), ytcTenant, first, time.Now().UTC(), 0)
+	if err != nil || got.Rejected != 1 || !slices.Equal(got.OpIDs, []int64{firstOp.ID}) {
+		t.Fatalf("task recovery = %+v, %v, want only op %d", got, err, firstOp.ID)
+	}
+	if op := ytrState(t, s, secondOp); op.State != ytwrite.StatePrepared {
+		t.Fatalf("other task op = %+v, want prepared", op)
+	}
+}
+
 // An op the pass keeps for a standing reason (a binding on another tenant,
 // content canonical in YouTrack) is not a candidate, so any number of them
 // cannot hide a later op the pass would reject.
