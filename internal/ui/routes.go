@@ -10,7 +10,8 @@ func routePattern(path string) string {
 		"/ui/work-status",
 		"/ui/api/fleet", "/ui/api/glance", "/ui/api/board/tasks",
 		"/ui/api/attention", "/ui/api/decisions", "/ui/api/board/projects", "/ui/api/board/lanes",
-		"/ui/api/board/doc", "/ui/api/deploy-pending",
+		"/ui/api/board/doc", "/ui/api/deploy-pending", "/ui/api/dispositions",
+		"/ui/dispositions/answer", "/ui/dispositions/accept-batch", "/ui/dispositions/renotify",
 		"/ui/api/decision-requests/resolve", "/ui/api/decision-requests/deny",
 		"/ui/api/inbox/state", "/ui/api/inbox/undo", "/ui/api/work-status":
 		return path // only literal, exact matches can reach here

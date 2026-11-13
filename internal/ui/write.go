@@ -1,11 +1,13 @@
 package ui
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"log"
 	"net/http"
 	"net/url"
@@ -110,6 +112,12 @@ func sameOrigin(r *http.Request) bool {
 
 func writeAction(path string) string {
 	switch path {
+	case "/ui/dispositions/answer":
+		return "disposition"
+	case "/ui/dispositions/accept-batch":
+		return "disposition-batch"
+	case "/ui/dispositions/renotify":
+		return "disposition-renotify"
 	case "/ui/api/decision-requests/resolve":
 		return "decision-resolve"
 	case "/ui/api/decision-requests/deny":
@@ -171,4 +179,17 @@ func (h *Handler) document(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 	h.shell(w, r)
+}
+
+// hubReason names a hub failure for an operator notice without leaking the
+// hub's body or credentials.
+func hubReason(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "hub request timed out"
+	}
+	var status hubStatusError
+	if errors.As(err, &status) {
+		return status.Error()
+	}
+	return "hub request failed"
 }

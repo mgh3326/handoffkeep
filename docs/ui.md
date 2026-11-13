@@ -62,11 +62,12 @@ remain in the server process; browser responses, the shell page, and static
 assets contain only fetched operational fields, never the hub token.
 
 Email identities may use every console route. An allowlisted service identity
-may use only `/ui/api/*`; every page, document, file, static, and
-operator-write route returns `403`. An empty
+may use only `/ui/api/*`; every page, document, file, static, and operator-write
+route returns `403`. The one exception is `POST /ui/api/nodes/{machine}/accepting`,
+which a service identity may call with `Content-Type: application/json` and
+without a CSRF token or origin check (see below). An empty
 `HANDOFFKEEP_UI_ALLOWED_SERVICE_NAMES` allowlist creates no service identity
-path. Service POSTs have no browser cookie or CSRF requirement, but must use
-`Content-Type: application/json`.
+path.
 
 Every UI POST first verifies the same Cloudflare Access assertion as GET, then
 requires a same-host `Origin` (or, only when Origin is absent, `Referer`) and a
@@ -93,6 +94,7 @@ stored value starts with `https://github.com/`.
 | `POST /ui/api/inbox/state`, `POST /ui/api/inbox/undo` | Attention inbox state |
 | `POST /ui/tasks/{id}/comments` | Task comment |
 | `POST /ui/api/nodes/{machine}/accepting` | Fleet host accepting flag (relayed to the hub) |
+| `POST /ui/dispositions/answer`, `POST /ui/dispositions/accept-batch`, `POST /ui/dispositions/renotify` | Disposition answers (email identity only; form-encoded) |
 
 Each write verifies the signed-in email, origin, and CSRF token before any hub
 or store call. Decision answers return a structured result (`answered`,
@@ -158,6 +160,9 @@ email-or-service route as noted.
   polling means at most one upstream `/v1/nodes` read per ten seconds
   (single-flight + cache); the three-second hub timeout and last-success
   snapshot are retained. This route does not call jobs, relay, or lane.event.
+- `GET /ui/api/dispositions` (email identity only) returns the open disposition
+  items, the signed batch snapshot that `accept-batch` requires, and the form CSRF
+  token; see [Disposition items](#disposition-items).
 - `GET /ui/api/glance` is a `no-store` JSON snapshot for service clients. It
   contains the UTC generation time, sanitized hub health, raw hub `nodes`,
   `lanes`, and `jobs` data (with only per-node `active_jobs` added), task state
@@ -176,6 +181,15 @@ then relays it to the hub with the server-side credential. Hub status and up to
 64 KiB of its body are forwarded without exposing hub configuration; an
 unconfigured or unreachable hub returns `502 {"error":"hub_unavailable"}`.
 
+Who may call it, and which checks apply:
+
+- A signed-in email identity must send a same-host `Origin` (or `Referer` when
+  Origin is absent) and the `X-CSRF-Token` header that matches its
+  `hk_ui_csrf` cookie. A missing or wrong header is `403`.
+- A service identity (allowlisted Access service token) must send
+  `Content-Type: application/json`. It has no cookie, origin, or CSRF check. A
+  different content type is `415`.
+
 ## Frontend rules
 
 React views poll through `usePoll`, which skips ticks while the tab is hidden
@@ -191,6 +205,34 @@ together with the source change; CI fails on a stale bundle.
 ## Disposition items
 
 Disposition items (`tasks disposition`, `/v1/tasks/dispositions*`) are stored
-and served by the bearer API and the CLI. The console no longer has a
-disposition page or answer forms; the generic decision routes refuse these
-items.
+and served by the bearer API and the CLI. The operator answers an item through
+the console routes below. They take form-encoded bodies and an email identity;
+the console has no page for them, so a caller reads the notice from a
+plain-text response (`200` on success, `4xx`/`5xx` with the message as body).
+
+- `GET /ui/api/dispositions` returns the open items (oldest 50), `counts`,
+  `next_batch`, unnotified answers, a fresh `csrf` token, and, when items are
+  open, a batch snapshot: `batch_id`, `issued_at`, `snapshot` (`id:gen` list),
+  and `token`, an HMAC bound to the operator email, batch ID and issue time.
+- `POST /ui/dispositions/answer` (`id`, `gen`, `key`, `csrf`) records the answer
+  first (flag cleared and state `researching`, `by=operator:<email>`,
+  `refs.disposition.answer`) and then emits `[decision] #<id>: <key>: <label>
+  (from operator(web) <email>)` with event ID `web-disposition-<id>-g<gen>`. A
+  changed question generation is `409`; a second answer is `409` and emits
+  nothing.
+- `POST /ui/dispositions/accept-batch` (`batch_id`, `issued_at`, `snapshot`,
+  `token`, `csrf`) answers, in one transaction, exactly the snapshot items whose
+  generation is unchanged. The snapshot is rejected (`403`) when the token does
+  not match the email, batch ID and issue time, and expires after 12 hours.
+  Items created after the snapshot are not in it. One lane event per lane:
+  `[decision] disposition-batch <batch>: #a=A #b=C … (from operator(web) <email>)`
+  with ID `web-disposition-batch-<batch>-<lane>`.
+- If the emit fails the answer stays recorded and the item appears under
+  `unnotified`; `POST /ui/dispositions/renotify` (`event_id`, `csrf`) re-sends
+  the same text under the same event ID until that event reaches
+  `relay_events`.
+
+These routes are outside `/ui/api/` for the POSTs, so `ServeHTTP` refuses
+service identities, and each handler independently requires an Access **email**
+identity before origin, CSRF, hub, or store checks. Requests without an Access
+assertion are `401` before any handler runs.

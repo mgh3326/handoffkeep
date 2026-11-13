@@ -101,11 +101,17 @@ func uiCSRF(t *testing.T, client *http.Client, endpoint, assertion string) (*htt
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("form GET %s status=%d body=%q", endpoint, response.StatusCode, body)
 	}
-	start := strings.Index(body, `name="csrf" value="`)
-	if start < 0 {
+	// Server-rendered forms carry the token in name="csrf"; the React shell
+	// carries it in <meta name="hk-csrf">. Accept either.
+	field, metaField := `name="csrf" value="`, `<meta name="hk-csrf" content="`
+	start := strings.Index(body, field)
+	if start >= 0 {
+		start += len(field)
+	} else if start = strings.Index(body, metaField); start >= 0 {
+		start += len(metaField)
+	} else {
 		t.Fatalf("form GET %s did not render CSRF field: %q", endpoint, body)
 	}
-	start += len(`name="csrf" value="`)
 	end := strings.Index(body[start:], `"`)
 	if end < 0 {
 		t.Fatal("unterminated CSRF field")

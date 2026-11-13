@@ -92,6 +92,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 			return
 		}
 		h.boardDocumentAttachments(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/dispositions":
+		h.dispositionsAPI(w, r, identity)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/deploy-pending":
 		// Deploy status is assembled from deploy-record documents and task
 		// events — the same operator-only reading material as /ui/api/board/doc.

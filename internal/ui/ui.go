@@ -187,6 +187,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(context.WithValue(r.Context(), shellEmailKey{}, email))
 	if r.Method == http.MethodPost {
 		switch r.URL.Path {
+		case "/ui/dispositions/answer":
+			h.answerDisposition(w, r, identity)
+		case "/ui/dispositions/accept-batch":
+			h.acceptDispositionBatch(w, r, identity)
+		case "/ui/dispositions/renotify":
+			h.renotifyDisposition(w, r, identity)
 		default:
 			if id, ok := pathTaskID(taskCommentsPathRE, r.URL.Path); ok {
 				h.createTaskComment(w, r, email, id)

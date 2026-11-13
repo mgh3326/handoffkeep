@@ -61,6 +61,21 @@ var ConsoleWrites = []ConsoleWrite{
 		Except: "operator-only: setting a fleet host's accepting flag controls dispatch, not task data, and stays on the console fleet page.",
 	},
 	{
+		Route:  "/ui/dispositions/answer",
+		Source: "/ui/dispositions/answer",
+		Except: "follow-up: hk 3474 — disposition answers belong to the attention inbox work.",
+	},
+	{
+		Route:  "/ui/dispositions/accept-batch",
+		Source: "/ui/dispositions/accept-batch",
+		Except: "follow-up: hk 3474 — bulk accept with per-item results is the MCP bulk-change design.",
+	},
+	{
+		Route:  "/ui/dispositions/renotify",
+		Source: "/ui/dispositions/renotify",
+		Except: "follow-up: hk 3474 — re-notifying a recorded disposition belongs to the attention inbox.",
+	},
+	{
 		Route:  "/ui/tasks/{id}/comments",
 		Source: "taskCommentsPathRE",
 		MCP:    []string{"task_comment"},

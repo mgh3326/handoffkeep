@@ -159,9 +159,11 @@ handoffkeep tasks disposition summary [--as-of RFC3339] [--json]
 handoffkeep tasks disposition apply <id> [--note text]
 ```
 
-Only the operator answers an item (the console's disposition answer routes were
-removed in hk 4429); generic transitions and `decisions resolve` are refused
-with `disposition_operator_only`. Silence changes nothing: no code path answers,
+Only the operator answers an item, through the console's email-identity routes
+`POST /ui/dispositions/answer` (one item) and `POST /ui/dispositions/accept-batch`
+(the recommended answer for a signed snapshot), with CSRF; see
+[docs/ui.md](docs/ui.md#disposition-items). Generic transitions and
+`decisions resolve` are refused with `disposition_operator_only`. Silence changes nothing: no code path answers,
 demotes, or claims an open item. `apply` records the director's application of
 the operator's answer with legal edges only (A/B/C → `merged`, D → `icebox`,
 E → `dropped`); an item never returns to `backlog`. An "A 배포" answer is
