@@ -303,6 +303,7 @@ func TestYouTrackWorkStatusUsesYouTrackTimes(t *testing.T) {
 		ytIssue("2-2", 2, "completed Monday, again Tuesday", "completed", "a", 0),
 		ytIssue("2-3", 3, "completed Monday, reopened", "developing", "a", 0),
 		ytIssue("2-4", 4, "merged Monday, deployed Tuesday", "deployed", "a", 0),
+		oldMergedIssue(now),
 	}, nil, now)
 	hist := newYTHistory([]youtrack.StateChange{
 		ytChange("2-1", "merged", firstMerge),
@@ -316,9 +317,13 @@ func TestYouTrackWorkStatusUsesYouTrackTimes(t *testing.T) {
 		ytChange("2-4", "merged", monday),
 		ytChange("2-4", "deployed", tuesday),
 	}, now.Add(-stateHistoryLookback), now)
-	overlay := store.WorkStatusOverlay{Inputs: store.WorkStatusInputs{LastDeploy: map[string]time.Time{"handoffkeep": deploy}}}
+	oldDeploy := now.Add(-45 * 24 * time.Hour)
+	overlay := store.WorkStatusOverlay{Inputs: store.WorkStatusInputs{LastDeploy: map[string]time.Time{
+		"handoffkeep":  deploy,
+		"stale-deploy": oldDeploy,
+	}}}
 	got := youTrackWorkStatus(now, snap, hist, overlay)
-	if got.Summary.WaitingDeploy != 1 || got.Summary.MergedBeforeDeploy != 0 {
+	if got.Summary.WaitingDeploy != 1 || got.Summary.MergedBeforeDeploy != 1 {
 		t.Fatalf("a merge after the deploy must wait for deploy: summary=%+v", got.Summary)
 	}
 	closedOn := map[string]int{}
@@ -330,6 +335,18 @@ func TestYouTrackWorkStatusUsesYouTrackTimes(t *testing.T) {
 	if closedOn["2026-11-09"] != 2 || closedOn["2026-11-10"] != 2 || closedOn["2026-11-12"] != 0 {
 		t.Fatalf("movement=%+v", got.Movement)
 	}
+}
+
+func oldMergedIssue(now time.Time) youtrack.Issue {
+	issue := ytIssue("2-5", 5, "old merge with unknown time", "merged", "a", 0)
+	issue.Created = now.Add(-90 * 24 * time.Hour).UnixMilli()
+	issue.Updated = now.Add(-60 * 24 * time.Hour).UnixMilli()
+	for i := range issue.CustomFields {
+		if issue.CustomFields[i].Name == "hk 프로젝트" {
+			issue.CustomFields[i].Value = json.RawMessage(`{"text":"stale-deploy"}`)
+		}
+	}
+	return issue
 }
 
 // The work status reads the history once per TTL and fails with the page when

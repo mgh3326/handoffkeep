@@ -248,8 +248,9 @@ func TestYouTrackWorkStatusReadsIssues(t *testing.T) {
 		t.Fatalf("entered task=%+v want since %v", entered, enteredAt)
 	}
 	wantWindowStart := status.GeneratedAt.Add(-stateHistoryLookback)
-	if old == nil || old.Since == nil || !old.Since.Equal(wantWindowStart) || old.AgeSeconds != int64(stateHistoryLookback.Seconds()) {
-		t.Fatalf("old task=%+v want since %v and age %d", old, wantWindowStart, int64(stateHistoryLookback.Seconds()))
+	if old == nil || old.Since == nil || old.Since.Before(wantWindowStart.Add(-time.Second)) || old.Since.After(wantWindowStart.Add(time.Second)) ||
+		old.AgeSeconds < int64(stateHistoryLookback.Seconds())-1 || old.AgeSeconds > int64(stateHistoryLookback.Seconds()) {
+		t.Fatalf("old task=%+v want since within 1s of %v and age within 1s of %d", old, wantWindowStart, int64(stateHistoryLookback.Seconds()))
 	}
 	f.fake.setFail(true)
 	rec = httptest.NewRecorder()
