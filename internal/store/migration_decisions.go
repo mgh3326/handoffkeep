@@ -1,7 +1,7 @@
 package store
 
 // Version 35 adds decision_requests: one row per question put to the
-// operator, whatever source holds it (docs/linear-internalize.md, "Decision
+// operator, whatever source holds it (git show 1e3d2fa8:docs/linear-internalize.md, "Decision
 // requests"). The source's own record stays the authority; the row mirrors
 // it and is written in the source writer's transaction (decision_records.go).
 // It is a new table with its own indexes, so it locks no existing table, and

@@ -1,7 +1,7 @@
 package store
 
 // Version 36 adds the desk ledger's read cursors and project status updates
-// (docs/linear-internalize.md, "Desk ledger" and "Status updates with
+// (git show 1e3d2fa8:docs/linear-internalize.md, "Desk ledger" and "Status updates with
 // health"). A ledger_cursors row is one consumer's position in the existing
 // change feed: only an explicit ack moves it (ledger.go). status_updates
 // holds the health a person sets on a project, with the task counts at write

@@ -46,7 +46,7 @@ func TestTaskGradeScaleIncludesSSAboveSPlus(t *testing.T) {
 	if benchGradeRank("unrated") <= benchGradeRank("C") || validTaskGrade("unrated") {
 		t.Fatalf("unrated must stay bench-only: rank=%d task-valid=%v", benchGradeRank("unrated"), validTaskGrade("unrated"))
 	}
-	if !validTaskLinear(TaskLinear{Grade: "SS"}) {
+	if !validTaskRefs(TaskRefs{Grade: "SS"}) || !validTaskLinear(TaskLinear{Grade: "SS"}) {
 		t.Fatal("task grade validation rejected SS")
 	}
 }
@@ -78,12 +78,12 @@ func TestBenchCatalogStoresAndOrdersSS(t *testing.T) {
 		t.Fatalf("catalog grades in order=%v want [SS S+]", got)
 	}
 	title := "SS grade task (grade SS, T2)"
-	task, err := s.CreateTask(ctx, Task{Lane: "test-grade-ss", Title: title, Kind: "implement", CreatedBy: "test-grade-ss", Project: projectPtr(testProjectName), Refs: TaskRefs{Linear: &TaskLinear{Grade: "SS", Tier: "T2"}}})
+	task, err := s.CreateTask(ctx, Task{Lane: "test-grade-ss", Title: title, Kind: "implement", CreatedBy: "test-grade-ss", Project: projectPtr(testProjectName), Refs: TaskRefs{Grade: "SS", Tier: "T2"}})
 	if err != nil {
 		t.Fatalf("create SS task: %v", err)
 	}
 	stored, found, err := s.GetTask(ctx, task.ID)
-	if err != nil || !found || stored.Title != title || stored.Refs.Linear == nil || stored.Refs.Linear.Grade != "SS" {
+	if err != nil || !found || stored.Title != title || stored.Refs.Grade != "SS" {
 		t.Fatalf("stored task=%+v found=%v err=%v", stored, found, err)
 	}
 }

@@ -9,7 +9,7 @@ import (
 )
 
 // TestStateCategoriesAreTheDesignTable pins the derived category of each of
-// the eleven states to docs/linear-internalize.md "State model".
+// the eleven states to git show 1e3d2fa8:docs/linear-internalize.md "State model".
 func TestStateCategoriesAreTheDesignTable(t *testing.T) {
 	want := map[string]string{
 		"triage": "triage", "backlog": "backlog", "unstarted": "unstarted",
@@ -142,26 +142,6 @@ func TestOldNamesParseAsFilters(t *testing.T) {
 	}
 	if !validTaskQuery("", "in_progress", "", nil) || validTaskQuery("", "nonsense", "", nil) {
 		t.Error("validTaskQuery must accept old filter names and refuse unknown ones")
-	}
-}
-
-// TestLinearMappingCoversEveryState keeps the Linear table total over the
-// eleven states, with the design's terminal set.
-func TestLinearMappingCoversEveryState(t *testing.T) {
-	terminal := map[string]bool{"merged": true, "deployed": true, "completed": true, "dropped": true, "duplicate": true, "icebox": true}
-	names := map[string]string{
-		"triage": "Backlog", "backlog": "Backlog", "unstarted": "Backlog",
-		"researching": "In Progress", "developing": "In Progress", "reviewing": "In Review",
-		"merged": "Done", "deployed": "Done", "completed": "Done", "dropped": "Canceled", "duplicate": "Canceled", "icebox": "Canceled",
-	}
-	for _, state := range TaskStates() {
-		m, ok := LinearTaskStateMapping[state]
-		if !ok || !m.Mutate || m.Name != names[state] || m.Terminal != terminal[state] {
-			t.Errorf("LinearTaskStateMapping[%q]=%+v ok=%t", state, m, ok)
-		}
-	}
-	if len(LinearTaskStateMapping) != len(TaskStates()) {
-		t.Errorf("mapping has %d entries for %d states", len(LinearTaskStateMapping), len(TaskStates()))
 	}
 }
 

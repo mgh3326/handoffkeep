@@ -16,8 +16,12 @@ import (
 // is checked on new rows only and the old rows are not rescanned. Lock:
 // ACCESS EXCLUSIVE on notification_outbox for the drop and the add, both
 // catalog-only once NOT VALID.
+//
+// After 20261113-outbox-receipts: that migration replaces the same CHECK with
+// its own kind list, which has no dots_blocked. Ordering by ID alone would run
+// this one first and let it be overwritten, so the dependency is declared.
 func init() {
-	registerMigration(migration{ID: "20261113-dots-blocked-kind", Apply: applyDotsBlockedKindMigration})
+	registerMigration(migration{ID: "20261113-dots-blocked-kind", After: []string{"20261113-outbox-receipts"}, Apply: applyDotsBlockedKindMigration})
 }
 
 func applyDotsBlockedKindMigration(ctx context.Context, tx pgx.Tx) error {

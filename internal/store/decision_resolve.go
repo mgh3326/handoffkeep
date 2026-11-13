@@ -611,12 +611,6 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, in.Actor, note, 0, now); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
-	if err = queueDecisionClosedPost(ctx, tx, resolved, x.Refs.DecisionOptions, now); err != nil {
-		return ResolveDecisionOutcome{}, err
-	}
-	if err = s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
-		return ResolveDecisionOutcome{}, err
-	}
 	if err = tx.Commit(ctx); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
