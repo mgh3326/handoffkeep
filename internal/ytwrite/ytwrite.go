@@ -132,6 +132,11 @@ const (
 	// from that create (the create was rejected, or applied with
 	// binding_conflict). Nothing is sent.
 	ReasonIssueNotBound = "issue_not_bound"
+	// ReasonBindingRemoved: a prepared op whose gate is the task's binding,
+	// rejected because the operator unbound the task (comments-unbind).
+	// ReasonUnbindForced is the same under --force. Nothing was sent.
+	ReasonBindingRemoved = "binding_removed"
+	ReasonUnbindForced   = "unbind_forced"
 )
 
 var (
