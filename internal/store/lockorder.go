@@ -50,7 +50,7 @@ package store
 //     under its key share lock; a terminal write takes the comment insert
 //     lock before that row, as ReplyDots does, and its
 //     comment is a savepoint so a YouTrack refusal skips only the comment),
-//     the work record: changes, change_tasks and reviews. ApplyTaskSourceEvent
+//     the work record: changes, change_tasks, change_gate_events and reviews. ApplyTaskSourceEvent
 //     writes the work record under the level-2 lock after its task row
 //     (recordChangeTx); a revert locks two changes rows, the reverted PR's
 //     first. Shared rows read FOR SHARE (labels).
