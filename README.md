@@ -172,19 +172,19 @@ stateDiagram-v2
     triage --> dropped
     triage --> duplicate: requires a duplicate_of relation
     backlog --> unstarted
-    backlog --> researching: claim / next (verify, decide)
+    backlog --> researching: claim / next (verify, research, decide)
     backlog --> developing: claim / next (implement, fix, ops)
     backlog --> icebox
     backlog --> dropped
     backlog --> duplicate: requires a duplicate_of relation
-    backlog --> completed: decide, ops, verify; result link required
+    backlog --> completed: decide, ops, verify, research; result link required
     unstarted --> backlog
-    unstarted --> researching: claim / next (verify, decide)
+    unstarted --> researching: claim / next (verify, research, decide)
     unstarted --> developing: claim / next (implement, fix, ops)
     unstarted --> icebox
     unstarted --> dropped
     unstarted --> duplicate
-    unstarted --> completed: decide, ops, verify; result link required
+    unstarted --> completed: decide, ops, verify, research; result link required
     researching --> developing
     researching --> reviewing
     researching --> unstarted
@@ -232,7 +232,7 @@ is never stored (API rows carry it read-only as `category`):
 
 Open means `started` and nothing else. A claim (`tasks claim`)
 serves `backlog` and `unstarted` and sets the sub-state from the task kind:
-`implement`, `fix` and `ops` give `developing`; `verify` and `decide` give
+`implement`, `fix` and `ops` give `developing`; `verify`, `research` and `decide` give
 `researching`. Entering a started state needs `claimed_by` plus `refs.job_id`
 or a no-job reason. Waiting on the operator is the `awaiting_decision` flag,
 not a state: the task keeps its work state, cannot be claimed while flagged,
@@ -275,7 +275,7 @@ thing). `blocks` is informational. With `auto_close_parent` on (the default),
 a parent closes when its last sub-task settles: `deployed` if every done
 sub-task is `deployed`, otherwise `merged` if any is `merged` or `deployed`, or
 `completed` if all done sub-tasks are `completed` and the parent is `decide`,
-`ops` or `verify`. An `implement` or `fix` parent stays open in the last case,
+`ops`, `verify` or `research`. An `implement` or `fix` parent stays open in the last case,
 with an `auto_close` event. A sub-task in `icebox` or any open state blocks the
 close, and a parent whose sub-tasks are all `dropped` or `duplicate` stays where
 it is, with the skip recorded as an `auto_close` event. Reopening a sub-task
@@ -362,7 +362,7 @@ and writes nothing. `--started-stalled-hours` takes 1..8760 and
 startup, and the preview answers `400 invalid_context` outside 1..3650.
 A `mergewake.merge` event that applies to a task also applies, in the same
 transaction, to every other non-settled task whose `refs.pr` is that PR:
-implement tasks move to `merged`, and decide, verify and ops tasks close at
+implement tasks move to `merged`, and decide, verify, research and ops tasks close at
 `completed` with the PR as the result link. `handoffkeep tasks drift [--json]
 [--merged-days N]` (`GET /v1/tasks/drift?merged_days=N`, default 2) reads five
 drift classes and writes nothing: settled tasks with an open decision request,

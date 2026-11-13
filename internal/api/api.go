@@ -1842,9 +1842,13 @@ const operatorDeskClientID = "operator-desk"
 // right: quota grants, host grants and task writes are unchanged.
 const panewireDesignClientID = "panewire-design"
 
+// fleetPolicyClientID is the fleet-policy design session's catalog writer,
+// admitted by routing-policy decision 21. Its token is provisioned separately.
+const fleetPolicyClientID = "fleet-policy"
+
 // benchCatalogWriter reports whether client may write the bench catalog.
 func benchCatalogWriter(client string) bool {
-	return client == operatorClientID || client == operatorDeskClientID || client == panewireDesignClientID
+	return client == operatorClientID || client == operatorDeskClientID || client == panewireDesignClientID || client == fleetPolicyClientID
 }
 
 type benchCatalogInput struct {
