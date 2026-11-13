@@ -35,6 +35,31 @@ func TestDirectUploadCanDeclareOCIObjectMaximum(t *testing.T) {
 	}
 }
 
+func TestCompleteRefusesObjectsAboveBufferedCompletionFuse(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	if BufferedCompletionMaxBytes != 256<<20 {
+		t.Fatalf("completion fuse=%d, want 256 MiB", BufferedCompletionMaxBytes)
+	}
+	m.Config.MaxBytes = DefaultMaxBytes
+	m.Config.StorageCap = 1 << 30
+	size := BufferedCompletionMaxBytes + 1
+	ticket, err := m.BeginUpload(t.Context(), "node", "large.txt", "text/plain", size, strings.Repeat("a", 64), "")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	stagingKey := stagingPrefix + ticket.UploadID
+	objs.objects[stagingKey] = []byte("fake staged object")
+	objs.headSizes = map[string]int64{stagingKey: size}
+
+	_, _, err = m.CompleteUpload(t.Context(), "node", ticket.UploadID)
+	if !errors.Is(err, ErrUploadRefused) || !strings.Contains(err.Error(), "upload_completion_buffer_limit_exceeded") {
+		t.Fatalf("complete err=%v, want buffered completion fuse refusal", err)
+	}
+	if got := db.uploads[ticket.UploadID].Reason; got != "upload_completion_buffer_limit_exceeded" {
+		t.Fatalf("refusal reason=%q", got)
+	}
+}
+
 func newUploadManager(t *testing.T) (*Manager, *fakeDB, *fakeObjects) {
 	t.Helper()
 	db := &fakeDB{rows: map[string]store.Attachment{}}

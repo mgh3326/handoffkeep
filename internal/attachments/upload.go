@@ -205,6 +205,9 @@ func (m *Manager) completeClaimed(ctx context.Context, row store.AttachmentUploa
 		}
 		return store.Attachment{}, false, fmt.Errorf("%w: %s", ErrUploadRefused, reason)
 	}
+	if row.SizeBytes > BufferedCompletionMaxBytes {
+		return refuse("upload_completion_buffer_limit_exceeded")
+	}
 	head, err := m.Objects.Head(ctx, row.StagingKey)
 	if err != nil {
 		return release(err)
@@ -213,6 +216,9 @@ func (m *Manager) completeClaimed(ctx context.Context, row store.AttachmentUploa
 	// changed since, and the staged object is whatever the client PUT.
 	if head.Size > m.Config.MaxBytes {
 		return refuse("upload_too_large")
+	}
+	if head.Size > BufferedCompletionMaxBytes {
+		return refuse("upload_completion_buffer_limit_exceeded")
 	}
 	if head.Size != row.SizeBytes {
 		return refuse("upload_size_mismatch")

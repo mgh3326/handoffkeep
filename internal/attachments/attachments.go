@@ -27,6 +27,11 @@ const (
 	// OCI Object Storage accepts a single PutObject up to 50 GiB. Direct
 	// uploads use that path; multipart is unnecessary at the service ceiling.
 	DefaultMaxBytes int64 = 50 << 30
+	// BufferedCompletionMaxBytes is one quarter of Handoffkeep's 1 GiB
+	// container memory limit (docker HostConfig.Memory on ncp). Completion
+	// currently buffers the verified object before promotion, so this fuse
+	// bounds that request path until streaming completion lands (hk 4466).
+	BufferedCompletionMaxBytes int64 = 256 << 20
 	// DefaultStorageCap is the account storage fuse; its OCI allowance basis
 	// is still to confirm.
 	DefaultStorageCap int64 = 20_000_000_000 // OCI allowance — to confirm
