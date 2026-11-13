@@ -144,9 +144,7 @@ func readYTFieldsRows(ctx context.Context, q poolQuerier, ids []int64, now time.
 			}
 		}
 		f.PR, f.JobID = refs.PR, refs.JobID
-		if refs.Linear != nil {
-			f.LinearGrade, f.LinearTier = refs.Linear.Grade, refs.Linear.Tier
-		}
+		f.RefsGrade, f.RefsTier = refs.GradeTier()
 		if due != nil {
 			d := due.UTC()
 			f.DueAt = &d

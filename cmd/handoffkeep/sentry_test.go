@@ -41,8 +41,7 @@ func TestServerSentryRoutes(t *testing.T) {
 	}
 	defer monitor.Close()
 	handler := serverHandler(api.Server{
-		UI:            &ui.Handler{}, // no Access header: reject before any store call
-		LinearWebhook: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }),
+		UI: &ui.Handler{}, // no Access header: reject before any store call
 	}, monitor, nil)
 	want := map[string]int{}
 	for _, request := range []struct{ method, path, name string }{
@@ -50,7 +49,6 @@ func TestServerSentryRoutes(t *testing.T) {
 		// nondeterministically; its rate is covered in internal/telemetry.
 		{http.MethodGet, "/v1/search", "GET /v1/search"},
 		{http.MethodPost, "/v1/documents/private-doc", "POST /v1/documents/{key...}"},
-		{http.MethodPost, "/hooks/linear", "POST /hooks/linear"},
 		{http.MethodGet, "/ui/tasks/123", "GET /ui/tasks/{id}"},
 		{http.MethodGet, "/mcp", "GET /mcp"},
 		{http.MethodGet, "/private-unknown", "GET <unmatched>"},

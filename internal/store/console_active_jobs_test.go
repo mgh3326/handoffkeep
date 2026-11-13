@@ -7,10 +7,10 @@ import (
 
 func TestReadActiveJobs(t *testing.T) {
 	st := schemaStore(t, "active_jobs")
-	first := linearTask(t, st, TaskRefs{})
-	second := linearTask(t, st, TaskRefs{})
-	third := linearTask(t, st, TaskRefs{})
-	fourth := linearTask(t, st, TaskRefs{})
+	first := workBoardTask(t, st, TaskRefs{})
+	second := workBoardTask(t, st, TaskRefs{})
+	third := workBoardTask(t, st, TaskRefs{})
+	fourth := workBoardTask(t, st, TaskRefs{})
 	ctx := t.Context()
 	for _, job := range []struct {
 		id   string
