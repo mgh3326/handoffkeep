@@ -740,6 +740,16 @@ restart forgets it until each client calls again. The server logs
 `api.client_revision client=... rev=... prev=...` when a client's revision
 changes (including its first request after a restart).
 
+`/metrics` also reports the YouTrack write outbox from the database: open ops
+per state (`handoffkeep_yt_write_ops_open{state}` for `prepared`, `dispatched`
+and `remote_unknown`), the age of the oldest open op of each state
+(`handoffkeep_yt_write_oldest_open_age_seconds{state}`, from `created_at`, or
+from `dispatched_at` for a dispatched op), open ops sent more than once
+(`handoffkeep_yt_write_ops_retrying`) and open ops checked again
+(`handoffkeep_yt_write_ops_reconciling`). The alert rules that read them are in
+`deploy/observability/yt-write-outbox.rules.yml`; applying them is the
+operator's (hk:doc `policy/observability`).
+
 ## Container image
 
 
