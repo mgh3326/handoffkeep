@@ -501,6 +501,40 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 	if reopen {
 		action, to = actMove, StateUnstarted
 	}
+	// hk 4322: a task a merged PR delivered closes as merged in one step from
+	// any open state before reviewing when the transition names that PR
+	// (refs.pr) and its change record shows it merged. The PR becomes the
+	// closure evidence.
+	now := time.Now().UTC()
+	var deliveredBy int64
+	if action == actMove && to == StateMerged && !reopen && refs != nil && refs.PR != "" && deliveredOpenStates[x.State] {
+		if deliveredBy, err = mergedChangeTx(ctx, tx, refs.PR); err != nil {
+			return Task{}, err
+		}
+		if x.Kind == "" {
+			return Task{}, fmt.Errorf("%w: a triage task without a kind cannot close as merged; set its kind first", ErrTaskConflict)
+		}
+		// The delivered task implements the PR, like a task its merge event
+		// names, so the PR's deploy and revert reach it (deployedTasksTx,
+		// propagateRevertTx). It is linked before the hold below so a reland
+		// PR counts as one; a refusal rolls the link back.
+		if err = linkChangeTaskTx(ctx, tx, deliveredBy, id, ChangeImplements, false, now); err != nil {
+			return Task{}, err
+		}
+		// The close-on-merge rule a merge event applies (hk 3294) holds here
+		// too: another implements change still open, a reverted piece not
+		// relanded or an open sub-task keeps the task open.
+		hold, err := mergeHoldTx(ctx, tx, id, refs.PR)
+		if err != nil {
+			return Task{}, err
+		}
+		if hold != "" {
+			return Task{}, fmt.Errorf("%w: %s", ErrTaskConflict, hold)
+		}
+		if strings.TrimSpace(note) == "" {
+			note = "delivered by merged PR " + refs.PR
+		}
+	}
 	if in.ClearOnly {
 		if !x.AwaitingDecision {
 			return Task{}, ErrTaskConflict
@@ -534,7 +568,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		return Task{}, fmt.Errorf("%w: this task was declined in triage without a kind; file it again instead", ErrTaskConflict)
 	}
 	if IsSettledState(from) && !reopen && !mergedCompletes(from, to) {
-		return Task{}, ErrTaskConflict
+		return Task{}, transitionConflict(from, to)
 	}
 	if reopen && strings.TrimSpace(note) == "" {
 		return Task{}, errors.New("reopen requires a non-empty reason")
@@ -569,8 +603,8 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		// A flagged task may also go back to backlog, the way the old
 		// needs_decision state did; the flag is cleared by the move.
 		backToBacklog := x.AwaitingDecision && to == StateBacklog && !IsSettledState(from)
-		if !backToBacklog && !taskTransitionAllowed(from, to) {
-			return Task{}, ErrTaskConflict
+		if !backToBacklog && deliveredBy == 0 && !taskTransitionAllowed(from, to) {
+			return Task{}, transitionConflict(from, to)
 		}
 		if to == StateCompleted && from != StateMerged && !canCompleteKind(x.Kind) {
 			return Task{}, fmt.Errorf("%w: completed applies to decide, ops and verify tasks", ErrTaskConflict)
@@ -581,7 +615,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 			switch to {
 			case StateBacklog, StateIcebox, StateDropped, StateDuplicate:
 			default:
-				return Task{}, ErrTaskConflict
+				return Task{}, fmt.Errorf("%w: %s is awaiting a decision; it can move only to backlog, icebox, dropped or duplicate until the decision is answered", ErrTaskConflict, from)
 			}
 		}
 	}
@@ -662,7 +696,6 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 			recordedNoJob = noJob
 		}
 	}
-	now := time.Now().UTC()
 	var duplicateEdge bool
 	if action == actMove && taskClosureRules[to].DuplicateOf {
 		if in.DuplicateOf != 0 {
@@ -794,8 +827,10 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		return Task{}, err
 	}
 	if leavingTriage {
-		cascade := in.Set
-		if !accepting && !cascade {
+		// A delivered close is not a decline: the set's children keep their
+		// own state, with --set too.
+		cascade := in.Set && deliveredBy == 0
+		if !accepting && !cascade && deliveredBy == 0 {
 			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM ticket_sets WHERE parent_task_id=$1)`, id).Scan(&cascade); err != nil {
 				return Task{}, err
 			}
@@ -814,6 +849,62 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		}
 	}
 	return x, nil
+}
+
+// deliveredOpenStates are the open states a task closes from as merged by
+// naming the merged PR that delivered it (hk 4322). reviewing is not listed:
+// reviewing -> merged is an edge of TaskTransitions, where --pr stays a
+// reference and is not verified.
+var deliveredOpenStates = map[string]bool{
+	StateTriage: true, StateBacklog: true, StateUnstarted: true,
+	StateResearching: true, StateDeveloping: true,
+}
+
+// mergedChangeTx returns the id of the change record of pr when it shows the
+// PR merged. hk holds no GitHub credential, so the change record (written by
+// mergewake's PR and merge events) is the evidence it can check; a PR without
+// one, or not merged, is refused.
+func mergedChangeTx(ctx context.Context, tx pgx.Tx, pr string) (int64, error) {
+	repo, n, ok := parsePRURL(pr)
+	if !ok {
+		return 0, errors.New("invalid task transition: --pr must be a GitHub pull request URL to close a task as merged")
+	}
+	var id int64
+	var state string
+	var reverted bool
+	err := tx.QueryRow(ctx, `SELECT id,state,reverted_by_change_id IS NOT NULL FROM changes WHERE repo=$1 AND pr_number=$2`, repo, n).Scan(&id, &state, &reverted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("%w: hk has no change record of %s, so it cannot verify the merge; the merge event records it", ErrTaskConflict, pr)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if state != ChangeMerged {
+		return 0, fmt.Errorf("%w: %s is %s, not merged", ErrTaskConflict, pr, state)
+	}
+	if reverted {
+		return 0, fmt.Errorf("%w: %s was reverted; relanding takes a new PR", ErrTaskConflict, pr)
+	}
+	return id, nil
+}
+
+// transitionConflict is the task_conflict of a refused manual move: it names
+// the states the task can move to from where it is (hk 4322).
+func transitionConflict(from, to string) error {
+	var allowed []string
+	for _, state := range TaskStates() {
+		if taskTransitionAllowed(from, state) {
+			allowed = append(allowed, state)
+		}
+	}
+	msg := fmt.Sprintf("%s -> %s is not a transition; from %s a task can move to %s", from, to, from, strings.Join(allowed, ", "))
+	if to == StateMerged && deliveredOpenStates[from] {
+		msg += ", or to merged with --pr (refs.pr) naming the merged PR that delivered it"
+	}
+	if IsSettledState(from) {
+		msg += " (unstarted through tasks reopen)"
+	}
+	return fmt.Errorf("%w: %s", ErrTaskConflict, msg)
 }
 
 // triageGate is the one check on a move out of triage: to backlog or

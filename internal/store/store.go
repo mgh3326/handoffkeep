@@ -531,6 +531,9 @@ type Task struct {
 	Children        []TaskChild    `json:"children,omitempty"`
 	Relations       []TaskRelation `json:"relations,omitempty"`
 	Events          []TaskEvent    `json:"events,omitempty"`
+	// Spawn is where the task's panewire spawn request stands (hk 4377); absent
+	// when no request was recorded. Read with the task, never stored on it.
+	Spawn *TaskSpawn `json:"spawn,omitempty"`
 }
 
 // RelayEvent is a durable report from a worker to its owning lane.  Delivery
@@ -3193,7 +3196,10 @@ func (s *Store) ListTasksFiltered(ctx context.Context, tq TaskQuery) ([]Task, er
 		return nil, err
 	}
 	rows.Close()
-	return out, s.markStalled(ctx, s.pool, out, now)
+	if err := s.markStalled(ctx, s.pool, out, now); err != nil {
+		return out, err
+	}
+	return out, attachTaskSpawns(ctx, s.pool, out)
 }
 
 // GlanceTasks returns the counts and active task slice needed by the compact UI
@@ -3256,6 +3262,9 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 	}
 	one := []Task{x}
 	if err := s.markStalled(ctx, s.pool, one, time.Now().UTC()); err != nil {
+		return Task{}, false, err
+	}
+	if err := attachTaskSpawns(ctx, s.pool, one); err != nil {
 		return Task{}, false, err
 	}
 	x = one[0]
@@ -3998,7 +4007,8 @@ func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string,
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, e := s.pool.Query(ctx, `SELECT id,key,kind,session,job,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE ($1='' OR key LIKE $1 || '%') AND ($2='' OR kind=$2) AND ($3='' OR session=$3) AND ($4::bigint=0 OR task_id=$4::bigint) ORDER BY key LIMIT $5`, prefix, kind, session, task, limit)
+	likePrefix := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
+	rows, e := s.pool.Query(ctx, `SELECT id,key,kind,session,job,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE ($1='' OR key LIKE $2 || '%' ESCAPE '\') AND ($3='' OR kind=$3) AND ($4='' OR session=$4) AND ($5::bigint=0 OR task_id=$5::bigint) ORDER BY key LIMIT $6`, prefix, likePrefix, kind, session, task, limit)
 	if e != nil {
 		return nil, e
 	}

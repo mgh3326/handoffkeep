@@ -100,21 +100,21 @@ func (h ReviewHistory) check() error {
 func checkEventChangeFields(in TaskSourceEvent) error {
 	for name, v := range map[string]string{"head_sha": in.HeadSHA, "base_sha": in.BaseSHA, "merge_sha": in.MergeSHA} {
 		if v != "" && !gitSHARE.MatchString(v) {
-			return fmt.Errorf("invalid task event: %s must be 40 lower-case hex digits", name)
+			return invalidChangeWrite("%s must be 40 lower-case hex digits", name)
 		}
 	}
 	if in.MergeSHA != "" && in.Source != SourceMergewakeMerge {
-		return errors.New("invalid task event: merge_sha belongs to mergewake.merge")
+		return invalidChangeWrite("merge_sha belongs to mergewake.merge")
 	}
 	if len(in.Reviews) > 0 && in.Source != SourceMergewakeReview {
-		return errors.New("invalid task event: reviews belong to mergewake.review")
+		return invalidChangeWrite("reviews belong to mergewake.review")
 	}
 	if len(in.Reviews) > maxEventReviews {
-		return fmt.Errorf("invalid task event: reviews has more than %d items", maxEventReviews)
+		return invalidChangeWrite("reviews has more than %d items", maxEventReviews)
 	}
 	for i, rv := range in.Reviews {
 		if err := checkEventReview(rv); err != nil {
-			return fmt.Errorf("invalid task event: reviews[%d]: %w", i, err)
+			return invalidChangeWrite("reviews[%d]: %s", i, err.Error())
 		}
 	}
 	return nil

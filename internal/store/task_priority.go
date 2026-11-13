@@ -59,6 +59,47 @@ func (s *Store) SetTaskPriority(ctx context.Context, id int64, priority int, by,
 	return out, tx.Commit(ctx)
 }
 
+// SetTaskPriorityDirect changes a task's priority without an idempotency key and returns
+// the updated task and whether it changed (hk 3219). Terminal tasks are refused with
+// ErrTaskTerminal, whatever priority is sent. A task with an active worker claim is refused by
+// the wrk fence (Binding), so priority cannot change through this path while a claim is held.
+func (s *Store) SetTaskPriorityDirect(ctx context.Context, id int64, priority int, by, reason string) (Task, bool, error) {
+	if id < 1 || priority < 0 || priority > math.MaxInt32 || by == "" || !validText(by, 128) || !validText(reason, MaxBytes) {
+		return Task{}, false, ErrInvalidTaskPriority
+	}
+	if err := guard.Reject(reason); err != nil {
+		return Task{}, false, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Task{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return Task{}, false, err
+	}
+	var x Task
+	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Task{}, false, ErrTaskNotFound
+		}
+		return Task{}, false, err
+	}
+	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
+		return Task{}, false, err
+	}
+	if IsSettledState(x.State) {
+		return Task{}, false, ErrTaskTerminal
+	}
+	if x.Priority == priority {
+		return x, false, tx.Commit(ctx)
+	}
+	if err = setTaskPriorityTx(ctx, tx, &x, priority, by, reason, "", ""); err != nil {
+		return Task{}, false, err
+	}
+	return x, true, tx.Commit(ctx)
+}
+
 // setTaskPriorityTx writes a priority change and its event inside the caller's
 // transaction. The caller has locked the task row and loaded it into x; on
 // return x carries the new priority and updated_at.

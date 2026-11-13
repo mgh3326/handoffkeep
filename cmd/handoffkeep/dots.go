@@ -12,7 +12,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const dotsUsage = "usage: dots request --title TITLE --body BODY [--requester-lane L] [--project P] [--idempotency-key KEY]\n       dots results [--task N] [--issue ID]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID]"
+const dotsUsage = "usage: dots request --title TITLE --body BODY [--requester-lane L] [--project P] [--idempotency-key KEY]\n       dots results [--task N] [--issue ID]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID]\n       dots answer <task> --text <answer>\n\nNote: A requester-lane comment alone does NOT resolve an open dots question (explicit beats implicit); use dots answer."
 
 func dotsRequestCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("dots request", flag.ContinueOnError)
@@ -69,8 +69,9 @@ func dotsRequestCmd(args []string, out io.Writer) error {
 //
 //	dots results --task N | --issue ROB-1
 //	dots adopt ID --state S [--ref R] [--superseded-by ID]
+//	dots answer TASK --text ANSWER
 func dotsCmd(args []string, out io.Writer) error {
-	if len(args) == 0 || (args[0] != "request" && args[0] != "results" && args[0] != "adopt") {
+	if len(args) == 0 || (args[0] != "request" && args[0] != "results" && args[0] != "adopt" && args[0] != "answer") {
 		return errors.New(dotsUsage)
 	}
 	if args[0] == "request" {
@@ -84,17 +85,22 @@ func dotsCmd(args []string, out io.Writer) error {
 		taskID int64
 		issue  string
 		in     store.DotsAdoptionInput
+		text   string
 	)
 	var valueFlags []string
-	if sub == "results" {
+	switch sub {
+	case "results":
 		fs.Int64Var(&taskID, "task", 0, "hk task id")
 		fs.StringVar(&issue, "issue", "", "Linear issue identifier, such as ROB-1")
 		valueFlags = []string{"task", "issue"}
-	} else {
+	case "adopt":
 		fs.StringVar(&in.State, "state", "", "accepted, partially_used, rejected or superseded")
 		fs.StringVar(&in.Ref, "ref", "", "what adopted it: a GitHub PR URL, hk:task/<id> or hk:doc <key>")
 		fs.Int64Var(&in.SupersededBy, "superseded-by", 0, "id of the result that replaced it")
 		valueFlags = []string{"state", "ref", "superseded-by"}
+	case "answer":
+		fs.StringVar(&text, "text", "", "answer text")
+		valueFlags = []string{"text"}
 	}
 	ordered, err := splitArgs(args[1:], valueFlags...)
 	if err != nil {
@@ -104,11 +110,12 @@ func dotsCmd(args []string, out io.Writer) error {
 		return err
 	}
 	var id int64
-	if sub == "results" {
+	switch sub {
+	case "results":
 		if fs.NArg() != 0 || (taskID > 0) == (issue != "") || taskID < 0 {
 			return errors.New("dots results takes exactly one of --task N or --issue ID")
 		}
-	} else {
+	case "adopt":
 		if fs.NArg() != 1 {
 			return errors.New("dots adopt requires a result id")
 		}
@@ -118,22 +125,42 @@ func dotsCmd(args []string, out io.Writer) error {
 		if in.State == "" {
 			return errors.New("dots adopt requires --state")
 		}
+	case "answer":
+		if fs.NArg() != 1 {
+			return errors.New("dots answer requires a task id")
+		}
+		if id, err = strconv.ParseInt(fs.Arg(0), 10, 64); err != nil || id < 1 {
+			return errors.New("task id must be positive")
+		}
+		if text == "" {
+			return errors.New("dots answer requires --text")
+		}
 	}
 	if err := mustClient(c); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if sub == "results" {
+	switch sub {
+	case "results":
 		xs, err := c.ListDotsResults(ctx, taskID, issue)
 		if err != nil {
 			return err
 		}
 		return printJSON(out, map[string]any{"results": xs})
+	case "adopt":
+		res, err := c.SetDotsAdoption(ctx, id, in)
+		if err != nil {
+			return err
+		}
+		return printJSON(out, res)
+	case "answer":
+		res, err := c.AnswerDots(ctx, id, text)
+		if err != nil {
+			return err
+		}
+		return printJSON(out, res)
+	default:
+		return errors.New(dotsUsage)
 	}
-	res, err := c.SetDotsAdoption(ctx, id, in)
-	if err != nil {
-		return err
-	}
-	return printJSON(out, res)
 }

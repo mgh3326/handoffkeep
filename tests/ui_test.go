@@ -315,7 +315,13 @@ type rowCounts struct{ Relay, Tasks, TaskEvents int64 }
 // compare global counts (AGENTS.md): other packages write there concurrently.
 func uiLaneRowCounts(t *testing.T, lane string) rowCounts {
 	t.Helper()
-	db, err := pgx.Connect(t.Context(), testdb.URL(t))
+	return uiLaneRowCountsAt(t, testdb.URL(t), lane)
+}
+
+// uiLaneRowCountsAt is uiLaneRowCounts in the database dbURL names.
+func uiLaneRowCountsAt(t *testing.T, dbURL, lane string) rowCounts {
+	t.Helper()
+	db, err := pgx.Connect(t.Context(), dbURL)
 	if err != nil {
 		t.Fatal(err)
 	}
