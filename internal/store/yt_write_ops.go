@@ -300,6 +300,11 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	if err != nil {
 		return ytwrite.Op{}, "", err
 	}
+	if reject == "" {
+		if reject, detail, err = claimYTArticleCreateTx(ctx, tx, op); err != nil {
+			return ytwrite.Op{}, "", err
+		}
+	}
 	// An issue_create op is dispatched to the YouTrack project its task's
 	// project maps to now, not the one it was prepared for (hk 3909, 4318);
 	// payload is nil when that is unchanged.

@@ -127,6 +127,9 @@ const (
 	// canary removed, mode off, another tenant); the op stays prepared and
 	// nothing is sent.
 	ReasonHeld = "held"
+	// ReasonOutOfScope: an article_create's document was deleted or became
+	// excluded after preparation, so the claim rejects it before dispatch.
+	ReasonOutOfScope = "out_of_scope"
 	// ReasonIssueNotBound: a comment_append op queued behind its task's
 	// issue_create (hk 4263) reached its send and the task has no binding
 	// from that create (the create was rejected, or applied with
