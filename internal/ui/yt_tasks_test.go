@@ -265,9 +265,10 @@ func TestYouTrackWorkStatusUsesTheCurrentMergeAndCloseTimes(t *testing.T) {
 	deployedNoEvent.Resolved = &remergedMS
 	snap := buildYTSnapshot(youtrack.DefaultSchema(), []youtrack.Issue{waiting, deployedWithEvent, deployedNoEvent}, nil, now)
 	overlay := store.WorkStatusOverlay{
-		Inputs:   store.WorkStatusInputs{LastDeploy: map[string]time.Time{"handoffkeep": deploy}},
-		Tasks:    map[int64]store.WorkStatusTaskOverlay{1: {EnteredAt: map[string]time.Time{"merged": oldMerge}}},
-		ClosedAt: map[int64]map[string]time.Time{2: {"deployed": deployedAt}},
+		Inputs:       store.WorkStatusInputs{LastDeploy: map[string]time.Time{"handoffkeep": deploy}},
+		Tasks:        map[int64]store.WorkStatusTaskOverlay{1: {EnteredAt: map[string]time.Time{"merged": oldMerge}}},
+		ClosedEvents: map[int64][]time.Time{2: {deployedAt}},
+		LastClosed:   map[int64]time.Time{2: deployedAt},
 	}
 	got := youTrackWorkStatus(now, snap, overlay)
 	if got.Summary.WaitingDeploy != 1 || got.Summary.MergedBeforeDeploy != 0 {
@@ -281,5 +282,36 @@ func TestYouTrackWorkStatusUsesTheCurrentMergeAndCloseTimes(t *testing.T) {
 	// event is not counted on its merge-time resolved day.
 	if closedOn["2026-11-11"] != 1 || closedOn["2026-11-12"] != 0 {
 		t.Fatalf("movement=%+v", got.Movement)
+	}
+}
+
+func TestYouTrackMovementCountsCloseHistory(t *testing.T) {
+	now := time.Date(2026, 11, 13, 3, 0, 0, 0, time.UTC)
+	monday := time.Date(2026, 11, 9, 1, 0, 0, 0, time.UTC)    // 2026-11-09 KST
+	tuesday := time.Date(2026, 11, 10, 1, 0, 0, 0, time.UTC)  // 2026-11-10 KST
+	thursday := time.Date(2026, 11, 12, 1, 0, 0, 0, time.UTC) // 2026-11-12 KST
+	thursdayMS, mondayMS := thursday.UnixMilli(), monday.UnixMilli()
+	reopened := ytIssue("2-1", 1, "closed then reopened", "developing", "a", 0)
+	twice := ytIssue("2-2", 2, "closed twice", "completed", "a", 0)
+	tuesdayMS := tuesday.UnixMilli()
+	twice.Resolved = &tuesdayMS
+	againInYT := ytIssue("2-3", 3, "completed again in YouTrack", "completed", "a", 0)
+	againInYT.Resolved = &thursdayMS
+	afterMerge := ytIssue("2-4", 4, "completed after merge", "completed", "a", 0)
+	afterMerge.Resolved = &mondayMS // resolved at merge, before hk's completed event
+	snap := buildYTSnapshot(youtrack.DefaultSchema(), []youtrack.Issue{reopened, twice, againInYT, afterMerge}, nil, now)
+	overlay := store.WorkStatusOverlay{
+		ClosedEvents: map[int64][]time.Time{1: {monday}, 2: {monday, tuesday}, 3: {monday}, 4: {tuesday}},
+		LastClosed:   map[int64]time.Time{1: monday, 2: tuesday, 3: monday, 4: tuesday},
+	}
+	closedOn := map[string]int{}
+	for _, day := range youTrackWorkStatus(now, snap, overlay).Movement {
+		closedOn[day.Date] = day.Closed
+	}
+	want := map[string]int{"2026-11-09": 3, "2026-11-10": 2, "2026-11-12": 1}
+	for day, n := range want {
+		if closedOn[day] != n {
+			t.Fatalf("closed on %s = %d, want %d; all=%v", day, closedOn[day], n, closedOn)
+		}
 	}
 }

@@ -258,31 +258,32 @@ func youTrackAttentionTasks(candidates []store.AttentionTask, snap *ytSnapshot) 
 	return out
 }
 
-// closedAt is when a task in a closed state closed: hk's latest transition
-// into that state, else YouTrack's resolved time. The resolved time is used
-// for completed, dropped and duplicate only: a deployed issue was resolved
-// when it merged, so its resolved time is not the deploy.
-func closedAt(t youtrack.TaskIssue, transitions map[string]time.Time) (time.Time, bool) {
-	if at, ok := transitions[t.State]; ok {
-		return at, true
+// closeDays are the KST days a task closed on within the window: every hk
+// transition into a closed state, whatever the task's state now, plus
+// YouTrack's resolved time when the task is completed, dropped or duplicate
+// in YouTrack and resolved after hk's last close (closed again in YouTrack
+// with no hk event). A deployed issue's resolved time is its merge, and a
+// resolved time before hk's last close belongs to an earlier lifecycle or to
+// a resolved state before this one, so neither adds a day.
+func closeDays(t youtrack.TaskIssue, events []time.Time, lastClosed time.Time, hasLast bool, start time.Time, kst *time.Location) map[string]bool {
+	days := map[string]bool{}
+	for _, at := range events {
+		days[at.In(kst).Format("2006-01-02")] = true
 	}
-	if t.Resolved != nil && t.State != store.StateDeployed {
-		return *t.Resolved, true
+	ytClosed := t.StateKnown && (t.State == store.StateCompleted || t.State == store.StateDropped || t.State == store.StateDuplicate)
+	if ytClosed && t.Resolved != nil && !t.Resolved.Before(start) && (!hasLast || t.Resolved.After(lastClosed)) {
+		days[t.Resolved.In(kst).Format("2006-01-02")] = true
 	}
-	return time.Time{}, false
+	return days
 }
 
 // youTrackWorkStatus builds the work status document from YouTrack's tasks
-// and hk's overlay. Movement counts issues created, and tasks that entered
-// their current closed state, per KST day.
+// and hk's overlay. Movement counts, per KST day, issues created and the
+// distinct YouTrack tasks that closed that day (closeDays).
 func youTrackWorkStatus(now time.Time, snap *ytSnapshot, overlay store.WorkStatusOverlay) *store.WorkStatus {
 	inSet := map[string]bool{}
 	for _, s := range store.WorkStatusStates {
 		inSet[s] = true
-	}
-	closed := map[string]bool{}
-	for _, s := range store.WorkStatusClosedStates {
-		closed[s] = true
 	}
 	kst := time.FixedZone("KST", 9*3600)
 	_, start := store.WorkStatusMovementStart(now)
@@ -293,9 +294,10 @@ func youTrackWorkStatus(now time.Time, snap *ytSnapshot, overlay store.WorkStatu
 		if !bundle && !t.Created.IsZero() && !t.Created.Before(start) {
 			createdDays[t.Created.In(kst).Format("2006-01-02")]++
 		}
-		if !bundle && t.StateKnown && closed[t.State] {
-			if at, ok := closedAt(t, overlay.ClosedAt[t.TaskID]); ok && !at.Before(start) {
-				closedDays[at.In(kst).Format("2006-01-02")]++
+		if !bundle {
+			last, hasLast := overlay.LastClosed[t.TaskID]
+			for day := range closeDays(t, overlay.ClosedEvents[t.TaskID], last, hasLast, start, kst) {
+				closedDays[day]++
 			}
 		}
 		if !t.StateKnown || !inSet[t.State] {

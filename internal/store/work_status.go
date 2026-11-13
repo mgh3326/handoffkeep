@@ -470,16 +470,20 @@ type WorkStatusTaskOverlay struct {
 type WorkStatusOverlay struct {
 	Inputs WorkStatusInputs
 	Tasks  map[int64]WorkStatusTaskOverlay
-	// ClosedAt is, per task, the latest transition into each closed state
-	// (WorkStatusClosedStates) at or after the movement window's start.
-	ClosedAt map[int64]map[string]time.Time
+	// ClosedEvents is, per task, every transition into a closed state
+	// (WorkStatusClosedStates) at or after the movement window's start: the
+	// close history the movement counts, whatever the task's state now.
+	ClosedEvents map[int64][]time.Time
+	// LastClosed is, per task, its latest transition into a closed state at
+	// any time.
+	LastClosed map[int64]time.Time
 }
 
 // ReadWorkStatusOverlay reads the hk side of the work status for ids, and
-// the closed transitions since closedSince, in one consistent read. A task id
-// hk does not know has no overlay row.
+// the close history (ClosedEvents since closedSince, LastClosed) in one
+// consistent read. A task id hk does not know has no overlay row.
 func (s *Store) ReadWorkStatusOverlay(ctx context.Context, ids []int64, closedSince time.Time) (WorkStatusOverlay, error) {
-	out := WorkStatusOverlay{Tasks: map[int64]WorkStatusTaskOverlay{}, ClosedAt: map[int64]map[string]time.Time{}}
+	out := WorkStatusOverlay{Tasks: map[int64]WorkStatusTaskOverlay{}, ClosedEvents: map[int64][]time.Time{}, LastClosed: map[int64]time.Time{}}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return out, err
@@ -494,23 +498,24 @@ func (s *Store) ReadWorkStatusOverlay(ctx context.Context, ids []int64, closedSi
 	if out.Inputs.Queued, err = readQueuedSpawnsTx(ctx, tx); err != nil {
 		return out, err
 	}
-	closedRows, err := tx.Query(ctx, `SELECT task_id, "to", max(at) FROM task_events
-		WHERE kind = 'transition' AND "to" = ANY($1) AND at >= $2 GROUP BY task_id, "to"`, WorkStatusClosedStates, closedSince)
+	closedRows, err := tx.Query(ctx, `SELECT task_id, at, at >= $2 FROM task_events
+		WHERE kind = 'transition' AND "to" = ANY($1) ORDER BY task_id, at`, WorkStatusClosedStates, closedSince)
 	if err != nil {
 		return out, err
 	}
 	for closedRows.Next() {
 		var id int64
-		var to string
 		var at time.Time
-		if err := closedRows.Scan(&id, &to, &at); err != nil {
+		var inWindow bool
+		if err := closedRows.Scan(&id, &at, &inWindow); err != nil {
 			closedRows.Close()
 			return out, err
 		}
-		if out.ClosedAt[id] == nil {
-			out.ClosedAt[id] = map[string]time.Time{}
+		at = at.UTC()
+		if inWindow {
+			out.ClosedEvents[id] = append(out.ClosedEvents[id], at)
 		}
-		out.ClosedAt[id][to] = at.UTC()
+		out.LastClosed[id] = at // rows are in time order per task
 	}
 	closedRows.Close()
 	if err := closedRows.Err(); err != nil {
