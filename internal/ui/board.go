@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/youtrack"
 )
 
 var boardNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
@@ -164,6 +165,11 @@ type boardTask struct {
 	// Area is the task's routing tag from the closed area vocabulary, null
 	// when unset. The console shows it as a read-only label.
 	Area *string `json:"area"`
+	// Issue, Grade and Tier are the YouTrack issue and its 등급/티어 values,
+	// set on the YouTrack-backed board only (hk 4430).
+	Issue string `json:"youtrack_issue,omitempty"`
+	Grade string `json:"grade,omitempty"`
+	Tier  string `json:"tier,omitempty"`
 }
 
 type boardTasksResponse struct {
@@ -172,6 +178,8 @@ type boardTasksResponse struct {
 	Tasks       []boardTask `json:"tasks"`
 	NextAfterID int64       `json:"next_after_id,omitempty"`
 	Truncated   bool        `json:"truncated"`
+	// Source is "youtrack" when the tasks were read from YouTrack (hk 4430).
+	Source string `json:"source,omitempty"`
 }
 
 func projectBoardTask(task store.Task) boardTask {
@@ -236,6 +244,10 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid board query", http.StatusBadRequest)
 		return
 	}
+	if h.ytTasks != nil {
+		h.boardTasksYouTrack(w, r, lane, state, parentLane, project, afterID, limit)
+		return
+	}
 	var projectFilter *string
 	if project != "" {
 		projectFilter = &project
@@ -250,11 +262,78 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 	if truncated {
 		tasks = tasks[:limit]
 	}
+	h.writeBoardTasks(w, r, tasks, truncated, nil)
+}
+
+// boardTaskChunk is how many YouTrack tasks one hk read joins; TasksByIDs
+// takes at most 1000 ids.
+const boardTaskChunk = 500
+
+// boardTasksYouTrack pages the YouTrack task issues in task id order with the
+// same filters and cursor as the hk read. Lane, state and project filter on
+// YouTrack's values; parent_lane is hk's. An issue whose task hk does not know
+// is left out: its hk-only fields cannot be joined.
+func (h *Handler) boardTasksYouTrack(w http.ResponseWriter, r *http.Request, lane, state, parentLane, project string, afterID int64, limit int) {
+	snap, err := h.ytTasks.snapshot(r.Context())
+	if err != nil {
+		youTrackReadFailed(w, r, err)
+		return
+	}
+	var candidates []youtrack.TaskIssue
+	for _, t := range snap.Tasks {
+		if t.TaskID <= afterID || (lane != "" && t.Lane != lane) || (state != "" && t.State != state) || (project != "" && t.Project != project) {
+			continue
+		}
+		candidates = append(candidates, t)
+	}
+	tasks := make([]store.Task, 0, limit+1)
+	issues := map[int64]youtrack.TaskIssue{}
+	for start := 0; start < len(candidates) && len(tasks) <= limit; start += boardTaskChunk {
+		chunk := candidates[start:min(start+boardTaskChunk, len(candidates))]
+		ids := make([]int64, 0, len(chunk))
+		for _, t := range chunk {
+			ids = append(ids, t.TaskID)
+		}
+		rows, err := h.store.TasksByIDs(r.Context(), ids)
+		if err != nil {
+			youTrackReadFailed(w, r, err)
+			return
+		}
+		byID := make(map[int64]store.Task, len(rows))
+		for _, row := range rows {
+			byID[row.ID] = row
+		}
+		for _, t := range chunk {
+			row, ok := byID[t.TaskID]
+			if !ok || (parentLane != "" && row.ParentLane != parentLane) {
+				continue
+			}
+			tasks = append(tasks, withYouTrackFields(row, t))
+			issues[t.TaskID] = t
+			if len(tasks) > limit {
+				break
+			}
+		}
+	}
+	truncated := len(tasks) > limit
+	if truncated {
+		tasks = tasks[:limit]
+	}
+	h.writeBoardTasks(w, r, tasks, truncated, issues)
+}
+
+// writeBoardTasks joins hk's work board, active job and title translation to
+// each task and writes the page. issues is the YouTrack issue of each task on
+// the YouTrack-backed board, nil on the hk one.
+func (h *Handler) writeBoardTasks(w http.ResponseWriter, r *http.Request, tasks []store.Task, truncated bool, issues map[int64]youtrack.TaskIssue) {
 	response := boardTasksResponse{
 		GeneratedAt: time.Now().UTC(),
 		States:      taskStates,
 		Tasks:       make([]boardTask, 0, len(tasks)),
 		Truncated:   truncated,
+	}
+	if issues != nil {
+		response.Source = taskSourceYouTrack
 	}
 	workBoards, err := h.store.ReadTaskWorkBoards(r.Context(), tasks)
 	if err != nil {
@@ -293,6 +372,9 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 		row.WorkBoard = projectWorkBoard(workBoards[task.ID])
 		if job, ok := activeJobs[task.ID]; ok {
 			row.ActiveJob = &job
+		}
+		if issue, ok := issues[task.ID]; ok {
+			row.Issue, row.Grade, row.Tier = issue.IssueReadable, issue.Grade, issue.Tier
 		}
 		response.Tasks = append(response.Tasks, row)
 		response.NextAfterID = task.ID
