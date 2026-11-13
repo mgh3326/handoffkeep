@@ -254,8 +254,8 @@ kind rule for `completed` does not apply to this edge.
 
 An `implement` task closes as `completed` only when no change it implements is
 unmerged and no sub-task is open (a sub-task whose state is not in the completed or canceled category; merged and deployed count as completed).
-A refusal answers `task_conflict` and names the open PR (`repo#number`) or the
-open sub-task. Closed-without-merge PRs also count as unmerged.
+A refusal answers `task_conflict` and names the unmerged PR (`repo#number`, with its state) or the
+open sub-task. A closed-without-merge PR counts as unmerged.
 
 Old state names still work as input and in `--state` filters (`in_progress` →
 the claim's sub-state, `verifying` and `join` → `reviewing`, `hold` →

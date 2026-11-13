@@ -853,18 +853,18 @@ func allowedNextStates(from string) string {
 // not yet completed or canceled. It returns "" when nothing blocks it.
 func implementCompletionBlockers(ctx context.Context, tx pgx.Tx, taskID int64) (string, error) {
 	var parts []string
-	rows, err := tx.Query(ctx, `SELECT c.repo,c.pr_number FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND ct.relation=$2 AND c.state<>$3 ORDER BY c.repo,c.pr_number`, taskID, ChangeImplements, ChangeMerged)
+	rows, err := tx.Query(ctx, `SELECT c.repo,c.pr_number,c.state FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND ct.relation=$2 AND c.state<>$3 ORDER BY c.repo,c.pr_number`, taskID, ChangeImplements, ChangeMerged)
 	if err != nil {
 		return "", err
 	}
 	for rows.Next() {
-		var repo string
+		var repo, state string
 		var n int
-		if err := rows.Scan(&repo, &n); err != nil {
+		if err := rows.Scan(&repo, &n, &state); err != nil {
 			rows.Close()
 			return "", err
 		}
-		parts = append(parts, fmt.Sprintf("open PR %s#%d", repo, n))
+		parts = append(parts, fmt.Sprintf("unmerged PR %s#%d (%s)", repo, n, state))
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
