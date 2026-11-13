@@ -81,7 +81,6 @@ inbox and disposition writes refuse them.
 | Deploys | Configure deploy services | — | — | PUT /v1/deploy-services/{name}, POST /v1/deploy-services/{name}/deactivate, PUT /v1/services/{name} | services records-put, services records-deactivate, services put | — | bearer | service row | Configure again; deactivate is not a delete | internal/api/deploy_services_test.go, cmd/handoffkeep/deploys_test.go |
 | Translations | Read Korean translations | YouTrack owns the Korean summary and displays it | Rendered title/body/question/options everywhere | GET /v1/translations/missing | translations list | task_show (title_ko), decisions_pending (question_ko, options_ko) | Operator, bearer, MCP bearer/Access | Translation row (source hash, translator, stale flag) | n/a | internal/api/translations_test.go, internal/mcp/operator_test.go |
 | Translations | Write Korean translations | The YouTrack summary is the operator's edit path for the displayed title | — | PUT /v1/translations | translations put, translations import | — | bearer | Translation row (translator, source hash) | Overwrite; a changed original marks the row stale | internal/api/translations_test.go, cmd/handoffkeep/translations_test.go |
-| YouTrack | Run sync and read its health | The sync itself; cursor, outbox and processed activities are hk bookkeeping | Board detail shows the cached priority/lane with a stale flag | — | youtrack sync | sync_status | bearer (CLI); MCP bearer/Access | cursor, outbox, processed activities, field cache | Rerun; pending outbox is retried with backoff | internal/youtrack/sync_test.go, internal/mcp/meta_test.go |
 | YouTrack | Map hk projects to YouTrack projects | `youtrack_projects` is the mapping | — | — | youtrack projects list, youtrack projects put | — | bearer (CLI) | youtrack_projects row | put again | internal/youtrack/client_test.go, cmd/handoffkeep/youtrack_test.go |
 | Fleet | Set a host's accepting flag | — | POST /ui/api/nodes/{machine}/accepting | — (the hub route is /v1/nodes/{machine}/accepting on the hub, not hk) | — | — | Operator, or a service identity with JSON content type | ui.write | Set again | internal/ui/routes_test.go |
 | Fleet | Inspect quota, host/account presence and recent placement attempts | — | — | GET /v1/quota/accounts/{key}/latest, GET /v1/quota/presence, GET /v1/placements | — | fleet_capacity | Operator, bearer, MCP bearer/Access | None (read) | n/a | internal/mcp/fleet_capacity_test.go |
@@ -160,7 +159,6 @@ because that path has an authenticated principal.
 | task_intake | write | HTTP | Task create |
 | projects_list | read | HTTP | Projects read |
 | task_states | read | HTTP | State machine |
-| sync_status | read | HTTP | YouTrack sync health |
 | fleet_capacity | read | HTTP | Fleet quota and placement capacity evidence |
 
 Read tools set `readOnlyHint: true`. The write tools (`put_checkpoint`,
