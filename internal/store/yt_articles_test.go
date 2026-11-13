@@ -264,6 +264,9 @@ func TestYTArticlesCreateAdoptedOnLostReply(t *testing.T) {
 	var offset atomic.Int64
 	id := ytartPut(t, s, "design/ytart/lost.md", "lost body", nil)
 	ytartPass(t, s)
+	// The family root exists before the create, so the document's create is
+	// the first one sent and takes the dropped reply.
+	root := yt.InjectArticle(ytartShared, "design", "design documents\n\n"+ytwrite.FamilyRootMarker("design"))
 	yt.Queue(ytwritetest.Fault{Kind: ytwritetest.CommitDropReply})
 	ytartDrive(t, s, yt, &offset)
 	if op := ytartOps(t, s, id)[0]; op.State != ytwrite.StateRemoteUnknown {
@@ -276,10 +279,10 @@ func TestYTArticlesCreateAdoptedOnLostReply(t *testing.T) {
 	ytartDrive(t, s, yt, &offset)
 	op := ytartOps(t, s, id)[0]
 	arts := yt.Articles(ytartShared)
-	if op.State != ytwrite.StateApplied || len(arts) != 1 || op.YTResultID != arts[0].ID || yt.Calls() != 1 {
+	if op.State != ytwrite.StateApplied || len(arts) != 2 || arts[0].ID != root || op.YTResultID != arts[1].ID || arts[1].ParentID != root || yt.Calls() != 1 {
 		t.Fatalf("op %+v articles %+v calls %d", op, arts, yt.Calls())
 	}
-	if b := ytartBinding(t, s, id); b.ArticleID != arts[0].ID || b.Origin != YTBindingOpApplied || b.OpID != op.ID {
+	if b := ytartBinding(t, s, id); b.ArticleID != arts[1].ID || b.Origin != YTBindingOpApplied || b.OpID != op.ID {
 		t.Fatalf("binding %+v", b)
 	}
 }

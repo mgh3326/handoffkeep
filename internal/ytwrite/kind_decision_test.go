@@ -35,7 +35,7 @@ func decisionTexts() map[string]ytwrite.DecisionText {
 		{Key: "D", Label: ""}, {Key: "", Label: "키 없음"}}
 	return map[string]ytwrite.DecisionText{
 		"korean_unanswered_no_options": {DecisionID: decisionID, TaskID: 3833, Question: "YouTrack을 정본으로 할까요?\n\n> 인용처럼 보이는 줄\n- 목록"},
-		"long_five_options_answered": {DecisionID: decisionID, TaskID: 3833, Question: long + "\n둘째 줄", Options: five,
+		"long_five_options_answered": {DecisionID: decisionID, TaskID: 3833, Question: long + "\n둘째 줄", Reading: "정본은 YouTrack이다.\n옛 문서는 가져오지 않는다.", Grounds: []string{"hk:doc decision/example", "https://example.test/ground"}, Options: five,
 			Recommended: "A", DefaultAction: "권장안으로 진행", Answer: "A로 진행\n\n이유: 빠르다", AnsweredBy: "operator",
 			Channel: "console", AnsweredAt: answeredAt()},
 		"no_task_answered_no_channel": {DecisionID: 7, Question: "q", Answer: "yes", AnsweredBy: "robin", AnsweredAt: answeredAt()},

@@ -43,7 +43,7 @@ func TestWriteRemoteFindArticles(t *testing.T) {
 			t.Errorf("unexpected %s", r.URL.Path)
 		}
 	}}
-	got, err := y.serve(t).FindArticles(t.Context(), "SHRDOC", "0-30", summary)
+	got, err := y.serve(t).FindArticles(t.Context(), "SHRDOC", "0-30", summary, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,8 +64,62 @@ func TestWriteRemoteFindArticlesFullPageIsAnError(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(page)
 	}}
-	if _, err := y.serve(t).FindArticles(t.Context(), "SHRDOC", "0-30", "s"); err == nil || !strings.Contains(err.Error(), "not complete") {
+	if _, err := y.serve(t).FindArticles(t.Context(), "SHRDOC", "0-30", "s", ""); err == nil || !strings.Contains(err.Error(), "not complete") {
 		t.Fatalf("err %v", err)
+	}
+}
+
+// With a parent, FindArticles keeps only the children of that parent: the
+// same summary under another parent and a top-level article are not hits.
+func TestWriteRemoteFindArticlesScopedToParent(t *testing.T) {
+	const summary = "design/x.md"
+	y := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/articles":
+			_ = json.NewEncoder(w).Encode([]any{
+				articleHit("3-1", "0-30", summary, "", ""),
+				articleHit("3-4", "0-30", summary, "3-1", ""),
+				articleHit("3-5", "0-30", summary, "3-9", ""),
+			})
+		case "/api/articles/3-4":
+			_ = json.NewEncoder(w).Encode(articleHit("3-4", "0-30", summary, "3-1", "body"))
+		default:
+			t.Errorf("unexpected %s", r.URL.Path)
+		}
+	}}
+	got, err := y.serve(t).FindArticles(t.Context(), "SHRDOC", "0-30", summary, "3-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ytwrite.RemoteArticle{ID: "3-4", ProjectID: "0-30", Summary: summary, Content: "body", ParentID: "3-1"}
+	if len(got) != 1 || got[0] != want || y.count() != 2 {
+		t.Fatalf("hits %+v requests %v", got, y.requests)
+	}
+}
+
+// CreateArticle sends parentArticle when the create names a parent; a
+// top-level create carries no parentArticle key.
+func TestWriteRemoteArticleCreateParent(t *testing.T) {
+	y := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"3-78","$type":"Article"}`))
+	}}
+	wr := y.serve(t)
+	if _, err := wr.CreateArticle(t.Context(), ytwrite.ArticleCreate{ProjectID: "0-30", ParentID: "3-1", Summary: "s", Content: "c"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wr.CreateArticle(t.Context(), ytwrite.ArticleCreate{ProjectID: "0-30", Summary: "s", Content: "c"}); err != nil {
+		t.Fatal(err)
+	}
+	var child struct {
+		ParentArticle *struct {
+			ID string `json:"id"`
+		} `json:"parentArticle"`
+	}
+	if err := json.Unmarshal([]byte(y.bodies[0]), &child); err != nil || child.ParentArticle == nil || child.ParentArticle.ID != "3-1" {
+		t.Fatalf("child body %s %v", y.bodies[0], err)
+	}
+	if strings.Contains(y.bodies[1], "parentArticle") {
+		t.Fatalf("top-level body %s", y.bodies[1])
 	}
 }
 

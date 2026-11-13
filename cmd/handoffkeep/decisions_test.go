@@ -140,7 +140,7 @@ func TestDecisionsBackfillTextReport(t *testing.T) {
 	}
 	for _, want := range []string{
 		"by class: live=1 superseded_candidate=0 stale_candidate=0 orphan=1",
-		"by source: task_flag=1 task_request=0 job_escalate=0 lane_event=1 chat=0 linear=0",
+		"by source: task_flag=1 task_request=0 job_escalate=0 lane_event=1 chat=0 session_chat=0 linear=0",
 		"total: 2 (dry run",
 		"truncated: chat",
 	} {

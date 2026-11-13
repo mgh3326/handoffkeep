@@ -74,12 +74,14 @@ type DecisionOption struct {
 // DecisionText is the hk block of a DEC issue's description. RenderDecision
 // writes it and ParseDecision reads it back; CanonicalDecision is the form
 // both agree on (ParseDecision(RenderDecision(x)) == CanonicalDecision(x)).
-// Question and Answer keep their lines; every other value is one line.
+// Question, Reading and Answer keep their lines; grounds and labels are one line.
 type DecisionText struct {
 	DecisionID int64 `json:"decision_id"`
 	// TaskID is the task that asked (0: none).
 	TaskID        int64            `json:"task_id,omitempty"`
 	Question      string           `json:"question"`
+	Reading       string           `json:"reading,omitempty"`
+	Grounds       []string         `json:"grounds,omitempty"`
 	Options       []DecisionOption `json:"options,omitempty"`
 	Recommended   string           `json:"recommended,omitempty"`
 	DefaultAction string           `json:"default_action,omitempty"`
@@ -96,6 +98,8 @@ const (
 	decisionHeadPrefix     = "hk decision: D-"
 	decisionTaskPrefix     = "연결 작업: #"
 	decisionQuestionLine   = "질문:"
+	decisionReadingLine    = "해석:"
+	decisionGroundPrefix   = "근거: "
 	decisionOptionsLine    = "선택지:"
 	decisionRecommendedPfx = "권장: "
 	decisionDefaultPfx     = "기본 동작: "
@@ -133,6 +137,7 @@ func CanonicalDecision(x DecisionText) DecisionText {
 		DecisionID:    x.DecisionID,
 		TaskID:        x.TaskID,
 		Question:      multiLine(x.Question),
+		Reading:       multiLine(x.Reading),
 		Recommended:   oneLine(x.Recommended),
 		DefaultAction: oneLine(x.DefaultAction),
 		Answer:        multiLine(x.Answer),
@@ -141,6 +146,11 @@ func CanonicalDecision(x DecisionText) DecisionText {
 	}
 	if out.TaskID < 0 {
 		out.TaskID = 0
+	}
+	for _, ground := range x.Grounds {
+		if ground = oneLine(ground); ground != "" {
+			out.Grounds = append(out.Grounds, ground)
+		}
 	}
 	for _, o := range x.Options {
 		out.Options = append(out.Options, DecisionOption{Key: oneLine(strings.ReplaceAll(o.Key, "]", "")), Label: oneLine(o.Label)})
@@ -176,6 +186,9 @@ func quoteLines(s string) []string {
 //	연결 작업: #<task>
 //	질문:
 //	> <question, line by line>
+//	해석:
+//	> <reading, line by line>
+//	근거: <link>
 //	선택지:
 //	1. [<key>] <label>
 //	권장: <recommended>
@@ -196,6 +209,13 @@ func RenderDecision(x DecisionText) string {
 	}
 	lines = append(lines, decisionQuestionLine)
 	lines = append(lines, quoteLines(x.Question)...)
+	if x.Reading != "" {
+		lines = append(lines, decisionReadingLine)
+		lines = append(lines, quoteLines(x.Reading)...)
+	}
+	for _, ground := range x.Grounds {
+		lines = append(lines, decisionGroundPrefix+ground)
+	}
 	if len(x.Options) > 0 {
 		lines = append(lines, decisionOptionsLine)
 		for i, o := range x.Options {
@@ -273,6 +293,21 @@ func ParseDecision(block string) (x DecisionText, ok bool) {
 		return DecisionText{}, false
 	}
 	x.Question = quoted()
+	if peek() == decisionReadingLine {
+		i++
+		x.Reading = quoted()
+		if x.Reading == "" {
+			return DecisionText{}, false
+		}
+	}
+	for strings.HasPrefix(peek(), decisionGroundPrefix) {
+		ground := strings.TrimPrefix(peek(), decisionGroundPrefix)
+		if ground == "" {
+			return DecisionText{}, false
+		}
+		x.Grounds = append(x.Grounds, ground)
+		i++
+	}
 	if peek() == decisionOptionsLine {
 		i++
 		for n := 1; ; n++ {
@@ -336,9 +371,9 @@ func ParseDecision(block string) (x DecisionText, ok bool) {
 
 // decisionTextEqual compares two decision texts field by field.
 func decisionTextEqual(a, b DecisionText) bool {
-	if a.DecisionID != b.DecisionID || a.TaskID != b.TaskID || a.Question != b.Question || a.Recommended != b.Recommended ||
+	if a.DecisionID != b.DecisionID || a.TaskID != b.TaskID || a.Question != b.Question || a.Reading != b.Reading || a.Recommended != b.Recommended ||
 		a.DefaultAction != b.DefaultAction || a.Answer != b.Answer || a.AnsweredBy != b.AnsweredBy || a.Channel != b.Channel ||
-		len(a.Options) != len(b.Options) || (a.AnsweredAt == nil) != (b.AnsweredAt == nil) {
+		len(a.Options) != len(b.Options) || len(a.Grounds) != len(b.Grounds) || (a.AnsweredAt == nil) != (b.AnsweredAt == nil) {
 		return false
 	}
 	if a.AnsweredAt != nil && !a.AnsweredAt.Equal(*b.AnsweredAt) {
@@ -346,6 +381,11 @@ func decisionTextEqual(a, b DecisionText) bool {
 	}
 	for i := range a.Options {
 		if a.Options[i] != b.Options[i] {
+			return false
+		}
+	}
+	for i := range a.Grounds {
+		if a.Grounds[i] != b.Grounds[i] {
 			return false
 		}
 	}

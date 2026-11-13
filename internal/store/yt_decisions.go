@@ -225,11 +225,11 @@ func readYTDecisionRows(ctx context.Context, q pgx.Tx, ids []int64, now time.Tim
 	return out, rows.Err()
 }
 
-// decisionTextOf is the DEC issue text of a record (the stored question and
-// options; the 3514 display rendering is the console's).
+// decisionTextOf is the DEC issue text of a record, including the session
+// reading and grounds when present (the 3514 display rendering is the console's).
 func decisionTextOf(d DecisionRecord, channel string) ytwrite.DecisionText {
 	x := ytwrite.DecisionText{DecisionID: d.ID, Question: d.Question, Recommended: d.Recommended, DefaultAction: d.DefaultAction,
-		Answer: d.Answer, AnsweredBy: d.AnsweredBy, Channel: channel, AnsweredAt: d.AnsweredAt}
+		Reading: d.Reading, Grounds: d.Grounds, Answer: d.Answer, AnsweredBy: d.AnsweredBy, Channel: channel, AnsweredAt: d.AnsweredAt}
 	if d.TaskID != nil {
 		x.TaskID = *d.TaskID
 	}

@@ -424,7 +424,7 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 	}
 	to, reason := sourceEventTarget(ev.Source, x.State, ev.To)
 	if reason == "" && ev.Source == SourceMergewakeMerge && canCompleteKind(x.Kind) {
-		// A decide, verify or ops task has no change to land. The merge of the
+		// A decide, verify, research or ops task has no change to land. The merge of the
 		// PR it names closes it at completed, with the PR as the result link
 		// (the closure below takes ev.SourceRef as the evidence).
 		to = StateCompleted

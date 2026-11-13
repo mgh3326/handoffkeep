@@ -93,7 +93,6 @@ func (p Plan) JSON() ([]byte, error) {
 type SchemaStore interface {
 	ListTaskProjects(ctx context.Context) ([]string, error)
 	ListTaskLanes(ctx context.Context) (map[string][]string, error)
-	ListMilestoneNames(ctx context.Context) (map[string][]string, error)
 	ListYouTrackProjects(ctx context.Context) ([]store.YouTrackProject, error)
 	PutYouTrackProject(ctx context.Context, p store.YouTrackProject) error
 }
@@ -275,11 +274,7 @@ func (r *SchemaRunner) loadVocabulary(ctx context.Context, project string) (Voca
 	if err != nil {
 		return Vocabulary{}, nil, err
 	}
-	milestones, err := r.Store.ListMilestoneNames(ctx)
-	if err != nil {
-		return Vocabulary{}, nil, err
-	}
-	return Vocabulary{Kinds: store.TaskKinds(), Lanes: projectLanes(lanes), Areas: store.TaskAreas(), Milestones: milestones}, hkProjects, nil
+	return Vocabulary{Kinds: store.TaskKinds(), Lanes: projectLanes(lanes)}, hkProjects, nil
 }
 
 // projectLanes files the lanes of tasks with no project under the project

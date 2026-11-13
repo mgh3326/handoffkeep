@@ -40,7 +40,7 @@ var ErrSearchTimeout = errors.New("search_timeout")
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 var documentKinds = map[string]bool{"brief": true, "report": true, "answer": true, "handoff": true, "note": true, "other": true, "decision": true, "research": true, "design": true, "policy": true, "evidence": true}
 var documentOriginClasses = map[string]bool{"authored": true, "job": true, "import": true}
-var taskKinds = map[string]bool{"implement": true, "verify": true, "fix": true, "decide": true, "ops": true}
+var taskKinds = map[string]bool{"implement": true, "verify": true, "research": true, "fix": true, "decide": true, "ops": true}
 
 // TaskKinds is the server's task kind vocabulary — the single source of truth
 // client hints render so the two cannot drift.
