@@ -721,10 +721,15 @@ and `youtrack_comment_links` (legacy and pulled comments). It is read-only: `sto
 
 | Target | Scope | Rebuilt from | Equal when |
 |---|---|---|---|
-| documents | every `yt_article_bindings` row on the tenant | the article's content; for an `op_applied` binding the body inside hk's rendered form (`ytwrite.ParseArticleContent`; another form differs) | its sha256 is `documents.sha256`. A binding that names the import's split index (articles-backfill stored no content sha) is `exception_not_updated` (D4), not a failure, and its article is not read; the current body size decides nothing, so a document that grew past 240 KiB after a single-part import is compared. A body quoting the op marker whose article holds it escaped (hk 4295) is the exception `escaped_marker` |
-| comments | `--sample-comments` random bound tasks (default 200, by `md5("<seed>:<task id>")`) and the 20 bound tasks with the most comments | the issue's comments, listed stably | every hk comment has exactly one copy with the same (author, time, body), and every YouTrack comment copies one |
-| tasks | every `yt_task_bindings` row on the tenant | the issue | hk ID → id, the description's title line → title, the project → project |
+| documents | every `yt_article_bindings` row on the tenant; under `--project P`, only those of P's tasks — a document with no task is excluded | the article's content; for an `op_applied` binding the body inside hk's rendered form (`ytwrite.ParseArticleContent`; another form differs) | its sha256 is `documents.sha256`. A binding that names the import's split index (articles-backfill stored no content sha) is `exception_not_updated` (D4), not a failure, and its article is not read; the current body size decides nothing, so a document that grew past 240 KiB after a single-part import is compared. A body quoting the op marker whose article holds it escaped (hk 4295) is the exception `escaped_marker` |
+| comments | `--sample-comments` random bound tasks (default 200, by `md5("<seed>:<task id>")`) and the 20 bound tasks with the most comments; under `--project P`, only P's tasks are sampled | the issue's comments, listed stably | every hk comment has exactly one copy with the same (author, time, body), and every YouTrack comment copies one |
+| tasks | every `yt_task_bindings` row on the tenant; under `--project P`, only bindings whose task is in P | the issue | hk ID → id, the description's title line → title, the project → project |
 | decisions | every `yt_decision_bindings` row on the tenant | the DEC issue's description | question, options and answer equal (the Y6 block) |
+
+`--project P` narrows tasks, the comment sample and documents to P; it never
+narrows decisions (below). A clean result under `--project P` certifies only
+what was checked: bindings outside P, and documents with no task, were not
+read, so their differences would not have shown.
 
 **Comments.** A comment in the rendered form of op N (`RenderedOpID`) whose op
 is one of the task's comments' (`yt_comment_write_links`) gives its author and
@@ -757,9 +762,12 @@ sample on the same data.
 **Tasks.** The id is the `hk ID` field (else the description's `hk task: #N`
 line). The title is the description's title line in whichever form wrote it:
 issue_fields' `RenderFields` (whitespace collapsed, so PG's title is compared
-collapsed), issue_create's `RenderIssue` or the import's `Original hk title:`
-(both exact). The project is the `hk 프로젝트` field (else the description's
-project; both, when present, must agree), with `Unassigned` read as none.
+collapsed), issue_create's `RenderIssue`, or the import's `Original hk title:`
+(the last two exact; the import's title may span lines and ends where its
+metadata block — `제목(한국어):`, `Body document:`, `PR:`, `Job:`, `Parent
+task:` — begins). The project is the `hk 프로젝트` field (else the
+description's project; both, when present, must agree), with `Unassigned`
+read as none.
 
 **Decisions.** The DEC issue's description is read in the Y6 form only:
 `RenderDecision`'s block (a decision_fields snapshot), or the block between
@@ -1024,12 +1032,14 @@ and the value; a 4xx from the POST is `rejected / http_4xx`. Either raises the
 rejected-op alert, and the next feed change or backfill run prepares the
 snapshot again (Rejected snapshots above). No map rows.
 
-`레인`, `영역` and `마일스톤` are open sets hk owns (a new lane appears in hk
-first, hk 4051). YouTrack enum names are case-insensitively unique, so a
-value differing from a bundle value only in case is not added: the update
-sends the bundle's spelling, and an archived one is un-archived (hk 4234).
-Otherwise, when nothing above refuses, a value of theirs missing from
-the project's bundle is added to that bundle (`POST
+`레인`, `영역` and `마일스톤` are open sets hk owns (a new value appears in hk
+first, hk 4051). `영역` and `마일스톤` are the import's string fields (hk
+4305), so bundle handling applies only to projects that carry them as enums.
+YouTrack enum names are case-insensitively unique, so a value differing from
+a bundle value only in case is not added: the update sends the bundle's
+spelling, and an archived one is un-archived (hk 4234). Otherwise, when
+nothing above refuses, a value of an enum-shaped field missing from the
+project's bundle is added to that bundle (`POST
 /api/admin/customFieldSettings/bundles/enum/<bundle>/values` with `$type` and
 `name`), and an archived one is un-archived (`POST .../values/<value id>` with
 `archived: false`), never duplicated. The add goes to the bundle the project's
@@ -1621,6 +1631,10 @@ mode on, for each changed document, in order:
   and the rescan both find such a document: the rescan lists every unbound
   post-import document whose create is not held, so no document change is
   needed.
+- no binding, created after the import ended, and a decision whose body
+  amends a policy document with no bound article on the tenant:
+  `parent_pending`, no op. The catch-up and the rescan retry it once that
+  policy is bound.
 
 **Catch-up.** The consumer's cursor starts at the feed's end, so each
 process in mode on runs, after the cursor exists, one full catch-up: every
@@ -1637,7 +1651,8 @@ Mode off prepares nothing and advances the cursor. Each pass logs
 `ytwrite.articles_feed documents= create_prepared= create_rejected=
 create_exists= update_prepared= unchanged= exception_not_updated=
 exception_unbound_imported= out_of_scope= deleted= other_tenant= no_project=
-invalid=`. No parent is set: hk 3995 had no settled rule when this shipped.
+invalid=`. A document waiting on its policy's article logs
+`ytwrite.article_parent_pending`; see Parent.
 
 **Op.** Principal and actor `hk:documents`, lane `document:<id>`. An
 `article_create` targets the project id and carries the summary, the body
@@ -1682,6 +1697,33 @@ Anything else (gone, another project, no marker) rejects the op
 `legacy_synced_unverified`, and so does, at prepare time, a legacy article
 the sync split into parts or whose legacy project has no YouTrack id. A
 rejected document stays unbound and holds the documents authority switch. Any other failed read leaves the op `not_sent`.
+
+**Parent** (hk 3995). A payload may name a parent: `parent_article_id` (the
+article it goes under) or `parent_family` (the family whose root it goes
+under); setting both is refused by `CheckArticle`. A payload with neither,
+as every create made before this shipped, stays top-level, and so does a
+legacy-synced document (it is adopted where it is). The parent is decided at
+prepare time and kept in the payload, so an op prepared earlier stays
+top-level.
+- A decision whose body has an `amends: policy/<key>` line (the first such
+  line; the value must be a `policy/` key) goes under the article of that
+  policy document, bound on the tenant. Until that policy has one, the prepare
+  writes no op: outcome `parent_pending`, logged per document as
+  `ytwrite.article_parent_pending`; the catch-up and the rescan retry it.
+- Any other document whose key has a `/` goes under its family root: the
+  key's first segment. A segment that is not `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`
+  gets no parent, logged `ytwrite.article_family_skipped`, so no create is
+  refused for its key.
+- A family root is a top-level article: summary the family, content
+  `Family root for <family> documents.` and the marker
+  `<!-- hk-family:<family> -->` (`ytwrite.FamilyRootMarker`). Send finds it
+  by summary and marker: none, and it creates one before the document; one,
+  it is the parent; two or more, the op is `rejected / ambiguous_issue` (no
+  POST). Root creation is not an op, so no op records it. Residual risk: two
+  first creates of one family in one project, running at once, can make two
+  roots; the next create of that family then refuses `ambiguous_issue` until
+  an operator merges them.
+- Evidence looks for the root without creating it: no root, no match.
 
 **Send.** `article_create`: one search of the project for the summary
 (`GET /api/articles`, query `project: <SHORT> "<summary>"`, at most 100 hits,

@@ -301,22 +301,3 @@ func (s *Store) ListTaskLanes(ctx context.Context) (map[string][]string, error) 
 	}
 	return lanes, rows.Err()
 }
-
-// ListMilestoneNames lists the milestone names of each project, in the
-// milestone order (sort_order, then id).
-func (s *Store) ListMilestoneNames(ctx context.Context) (map[string][]string, error) {
-	rows, err := s.pool.Query(ctx, `SELECT project,name FROM project_milestones ORDER BY project, sort_order, id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string][]string{}
-	for rows.Next() {
-		var project, name string
-		if err := rows.Scan(&project, &name); err != nil {
-			return nil, err
-		}
-		out[project] = append(out[project], name)
-	}
-	return out, rows.Err()
-}

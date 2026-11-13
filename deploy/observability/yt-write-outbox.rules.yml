@@ -1,0 +1,32 @@
+# Alert rules for the YouTrack write outbox gauges on handoffkeep GET /metrics
+# (hk 4292; writer state in docs/youtrack-write-protocol.md).
+#
+# Applied by operator-desk, not by this repo (hk:doc policy/observability,
+# decision 168). Until it is applied and one alert has been seen to reach its
+# route, these rules are unverified.
+groups:
+  - name: handoffkeep-yt-write-outbox
+    rules:
+      # remote_unknown: the write may already have landed. Only the operator
+      # resolves it (handoffkeep yt ops resolve), so any op left unknown for 10
+      # minutes is a page-worthy state, not a retry.
+      - alert: HandoffkeepYTWriteOpUnknown
+        expr: handoffkeep_yt_write_ops_open{state="remote_unknown"} > 0
+        for: 10m
+        labels:
+          service: handoffkeep
+          severity: warning
+        annotations:
+          summary: "YouTrack write op unknown for 10m; resolve with handoffkeep yt ops"
+
+      # prepared or dispatched: the oldest open op has waited past 15 minutes.
+      # The lane alert (EnqueueYTWriteOpAlerts) fires at 10 minutes; this one is
+      # the operator-visible backstop for a worker that has stopped.
+      - alert: HandoffkeepYTWriteOpPendingOld
+        expr: max by (state) (handoffkeep_yt_write_oldest_open_age_seconds{state=~"prepared|dispatched"}) > 900
+        for: 5m
+        labels:
+          service: handoffkeep
+          severity: warning
+        annotations:
+          summary: "YouTrack write op pending past 15m (state {{ $labels.state }})"

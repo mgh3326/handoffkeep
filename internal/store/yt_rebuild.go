@@ -300,16 +300,22 @@ type YTRebuildDecision struct {
 	Deleted    bool
 }
 
+// ytRebuildDecisionsSeam is a test-only barrier invoked inside the rebuild
+// decisions transaction after the bindings page (the statement that fixes
+// the repeatable-read snapshot) and before the decision rows are read.
+var ytRebuildDecisionsSeam func(ctx context.Context)
+
 // YTRebuildDecisions lists, in decision id order, a page of the decisions
 // with a yt_decision_bindings row on tenant, with id greater than afterID, at
 // most limit. The table comes with migration YTDecisionBindingsMigration
-// (hk 4054); the caller checks it is applied first. One read transaction, so
-// a page's bindings and decisions are read at one snapshot.
+// (hk 4054); the caller checks it is applied first. One read-only
+// repeatable-read transaction, so a page's bindings and decisions are read
+// at one snapshot (the same options ListDecisionTab uses).
 func (s *Store) YTRebuildDecisions(ctx context.Context, tenant string, afterID int64, limit int) ([]YTRebuildDecision, error) {
 	if tenant == "" || afterID < 0 || limit < 1 || limit > YTRebuildTaskPageMax {
 		return nil, errors.New("invalid rebuild decision filter")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return nil, err
 	}
@@ -333,6 +339,9 @@ func (s *Store) YTRebuildDecisions(ctx context.Context, tenant string, afterID i
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if ytRebuildDecisionsSeam != nil {
+		ytRebuildDecisionsSeam(ctx)
 	}
 	byID, err := readYTDecisionRows(ctx, tx, ids, time.Now().UTC())
 	if err != nil {
