@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -286,10 +287,13 @@ func TestDispositionAnswerNotice(t *testing.T) {
 // Invariant: a deploy result notifies the lane that spawned the deploy's job,
 // once per result: the structured finish writes it in the finish transaction
 // (a commit failure leaves the attempt running and no row), a replayed finish
-// writes nothing new, the deploy record document for the same job and ref
-// owns the same row, a record without a ref or a retried attempt is a result
-// of its own, ambiguous job/ref pairs never share an id, and a deploy with no
-// job or no recorded lane writes none.
+// writes nothing new, a deploy record document is a report of its own (never
+// matched to an attempt by service/job/ref, so another target's result is not
+// silenced): replayed it writes nothing new, corrected at the same key it
+// notifies again, and control characters or NUL in its fields neither fail the
+// document write nor make the notice undeliverable. A record without a ref or
+// a retried attempt is a result of its own, ambiguous job/ref pairs never
+// share an id, and a deploy with no job or no recorded lane writes none.
 func TestDeployResultNotice(t *testing.T) {
 	f := newDeployFixture(t, "outbox_deploy", "prod")
 	pool := f.s.pool
@@ -340,13 +344,47 @@ func TestDeployResultNotice(t *testing.T) {
 		t.Fatalf("replayed finish left %d notices", len(rows))
 	}
 
-	// The record document for the same job and ref is the same result.
-	doc := Document{Key: "deploy/" + f.svc + "/20261113T010203Z", Kind: "report", Session: "test", CreatedBy: "tester", Body: `{"schema":"` + DeployRecordSchema + `","service":"` + f.svc + `","target":"prod","deployed_ref":"ref-att-1","result":"success","job_id":"job-deploy-1","included_prs":[]}`}
+	// A record document is its own report: the same job, ref and result at
+	// another target still notifies, and replaying it writes nothing new.
+	body := func(target, ref, result, job string) string {
+		return `{"schema":"` + DeployRecordSchema + `","service":"` + f.svc + `","target":"` + target + `","deployed_ref":` + ref + `,"result":"` + result + `","job_id":"` + job + `","included_prs":[]}`
+	}
+	doc := Document{Key: "deploy/" + f.svc + "/20261113T010203Z", Kind: "report", Session: "test", CreatedBy: "tester", Body: body("staging", `"ref-att-1"`, "success", "job-deploy-1")}
+	for i := 0; i < 2; i++ {
+		if _, _, err := f.s.PutDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recID := deployResultRecordEventID(doc.Key, "staging", "job-deploy-1", "ref-att-1", "success")
+	if rows := outboxByPrefix(t, pool, recID); len(rows) != 1 || rows[0].TargetLane != "asker-lane" {
+		t.Fatalf("record rows=%+v", rows)
+	}
+	if rows := outboxByPrefix(t, pool, id); len(rows) != 1 {
+		t.Fatalf("record disturbed the attempt's notice: %d rows", len(rows))
+	}
+	// A correction at the same key (result changed) is reported again.
+	doc.Body = body("staging", `"ref-att-1"`, "failed", "job-deploy-1")
 	if _, _, err := f.s.PutDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	if rows := outboxByPrefix(t, pool, id); len(rows) != 1 {
-		t.Fatalf("record for the same result wrote %d notices", len(rows))
+	if rows := outboxByPrefix(t, pool, deployResultRecordEventID(doc.Key, "staging", "job-deploy-1", "ref-att-1", "failed")); len(rows) != 1 || !strings.HasSuffix(rows[0].Text, ": failed") {
+		t.Fatalf("corrected record rows=%+v", rows)
+	}
+	// Control characters in a field are mapped, NUL in the job id names no
+	// job; the document write commits either way.
+	doc.Key = "deploy/" + f.svc + "/20261113T010303Z"
+	doc.Body = body("prod", `"ref\nwith\u0000nul"`, "success", "job-deploy-1")
+	if _, _, err := f.s.PutDocument(ctx, doc); err != nil {
+		t.Fatalf("record with control characters: %v", err)
+	}
+	rows = outboxByPrefix(t, pool, deployResultRecordEventID(doc.Key, "prod", "job-deploy-1", "ref\nwith\x00nul", "success"))
+	if len(rows) != 1 || !validLaneEventText(rows[0].Text) {
+		t.Fatalf("control character record rows=%+v", rows)
+	}
+	doc.Key = "deploy/" + f.svc + "/20261113T010403Z"
+	doc.Body = body("prod", `"ref-x"`, "success", "job-deploy-1\u0000x")
+	if _, _, err := f.s.PutDocument(ctx, doc); err != nil {
+		t.Fatalf("record with NUL job id: %v", err)
 	}
 	// A record of another ref is another result, and a failed one says so.
 	doc.Key = "deploy/" + f.svc + "/20261113T020203Z"
@@ -354,7 +392,7 @@ func TestDeployResultNotice(t *testing.T) {
 	if _, _, err := f.s.PutDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	rows = outboxByPrefix(t, pool, deployResultRecordEventID(doc.Key))
+	rows = outboxByPrefix(t, pool, deployResultRecordEventID(doc.Key, "prod", "job-deploy-2", "ref-doc", "failed"))
 	if len(rows) != 1 || rows[0].TargetLane != "owner-only-lane" || rows[0].Text != "[hk] deploy "+f.svc+" ref-doc job job-deploy-2: failed at step 3" {
 		t.Fatalf("record rows=%+v", rows)
 	}
@@ -365,7 +403,7 @@ func TestDeployResultNotice(t *testing.T) {
 	if _, _, err := f.s.PutDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	if rows = outboxByPrefix(t, pool, deployResultRecordEventID(doc.Key)); len(rows) != 1 || rows[0].TargetLane != "owner-only-lane" || rows[0].Text != "[hk] deploy "+f.svc+" (no ref) job job-deploy-2: failed" {
+	if rows = outboxByPrefix(t, pool, deployResultRecordEventID(doc.Key, "prod", "job-deploy-2", "ref-doc", "failed")); len(rows) != 1 || rows[0].TargetLane != "owner-only-lane" || rows[0].Text != "[hk] deploy "+f.svc+" (no ref) job job-deploy-2: failed" {
 		t.Fatalf("record without ref rows=%+v", rows)
 	}
 
@@ -462,5 +500,32 @@ func TestOutboxReceiptsReceivedThenApplied(t *testing.T) {
 				t.Fatal("a received row is still listed as unsent")
 			}
 		}
+	}
+}
+
+// laneSafeText leaves a deploy field deliverable: control characters and
+// invalid UTF-8 never reach the lane-event contract or a PostgreSQL text
+// parameter, and distinct record fields name distinct event ids.
+func TestLaneSafeTextAndRecordEventID(t *testing.T) {
+	got := laneSafeText("a\nb\x00c\x7f\xffd")
+	if !validLaneEventText("[hk] "+got) || strings.ContainsAny(got, "\n\x00\x7f") || !utf8.ValidString(got) {
+		t.Fatalf("laneSafeText=%q", got)
+	}
+	if laneSafeText("plain ref-1 한글") != "plain ref-1 한글" {
+		t.Fatal("laneSafeText changed a clean string")
+	}
+	base := deployResultRecordEventID("k", "prod", "j", "r", "failed")
+	for _, other := range []string{
+		deployResultRecordEventID("k", "staging", "j", "r", "failed"),
+		deployResultRecordEventID("k", "prod", "j", "r", "success"),
+		deployResultRecordEventID("k", "prod", "j-", "r", "failed"),
+		deployResultRecordEventID("k", "prod", "j", "-r", "failed"),
+	} {
+		if other == base {
+			t.Fatal("distinct records share an event id")
+		}
+	}
+	if base != deployResultRecordEventID("k", "prod", "j", "r", "failed") {
+		t.Fatal("event id is not stable")
 	}
 }

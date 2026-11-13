@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -26,16 +28,39 @@ func deployResultAttemptEventID(attemptID string) string {
 	return "deploy-result-attempt-" + hex.EncodeToString(sum[:16])
 }
 
-// deployResultRecordEventID names the result a deploy record document reports
-// when no attempt of the hub matches it: the record key is its identity.
-func deployResultRecordEventID(key string) string {
-	sum := sha256.Sum256([]byte("record\x00" + key))
-	return "deploy-result-record-" + hex.EncodeToString(sum[:16])
+// deployResultRecordEventID names the result one deploy record document
+// reports. A record is its own report, never matched to a hub attempt: the
+// document carries no attempt identity, and service, job, ref and result do
+// not establish one (a job can deploy a ref to several targets or retry a
+// failure), so sharing an attempt's id could silence a different deploy's
+// result. The id covers the key and the fields the notice states, so the same
+// document replayed owns one row and a corrected result or job at the same
+// key notifies again.
+func deployResultRecordEventID(key, target, job, ref, result string) string {
+	h := sha256.New()
+	for _, f := range []string{"record", key, target, job, ref, result} {
+		h.Write([]byte(f))
+		h.Write([]byte{0})
+	}
+	return "deploy-result-record-" + hex.EncodeToString(h.Sum(nil)[:16])
+}
+
+// laneSafeText maps what the lane-event contract refuses (control characters,
+// invalid UTF-8; deploy fields may carry both) to a space, so a notice always
+// stays deliverable and never fails the writer's transaction on a NUL.
+func laneSafeText(s string) string {
+	s = strings.ToValidUTF8(s, "?")
+	return strings.Map(func(r rune) rune {
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // deployAskerLane is the lane that asked for the job's work, "" when none.
 func deployAskerLane(ctx context.Context, tx pgx.Tx, jobID string) (string, error) {
-	if jobID == "" {
+	if jobID == "" || !validText(jobID, 256) || !utf8.ValidString(jobID) {
 		return "", nil
 	}
 	var parent, owner string
@@ -60,11 +85,11 @@ func queueDeployResultNoticeTx(ctx context.Context, tx pgx.Tx, eventID, service,
 	if err != nil || lane == "" {
 		return err
 	}
-	body := service + " " + ref + " job " + jobID + ": " + result
+	body := laneSafeText(service + " " + ref + " job " + jobID + ": " + result)
 	if failedStep != nil {
 		body += " at step " + strconv.Itoa(*failedStep)
 	} else if failedStepText != "" {
-		body += " at " + failedStepText
+		body += " at " + laneSafeText(failedStepText)
 	}
 	_, err = insertNotificationOutboxOnce(ctx, tx, OutboxKindDeployResult, lane, eventID, assistantLaneText("[hk] deploy ", body), at)
 	return err
@@ -72,10 +97,10 @@ func queueDeployResultNoticeTx(ctx context.Context, tx pgx.Tx, eventID, service,
 
 // queueDeployRecordNoticeTx is queueDeployResultNoticeTx for a stored deploy
 // record document. A document that is not a valid record for its key's
-// service, or that names no job, writes nothing. A record that matches a hub
-// attempt (same service, job, ref and result) shares that attempt's event id,
-// so a deploy reported through both paths owns one row; any other record is
-// identified by its key, which also covers a record without a ref.
+// service, or that names no job, writes nothing. The record owns its own event
+// id (see deployResultRecordEventID); a deploy reported both as a hub attempt
+// and as a record document therefore notifies once per report, and the notice
+// names service, ref and job so the lane can tell them apart.
 func queueDeployRecordNoticeTx(ctx context.Context, tx pgx.Tx, x StoredDeployRecord, at time.Time) error {
 	m := deployRecordKeyRE.FindStringSubmatch(x.Key)
 	if m == nil {
@@ -85,17 +110,10 @@ func queueDeployRecordNoticeTx(ctx context.Context, tx pgx.Tx, x StoredDeployRec
 	if len(reasons) > 0 || rec.JobID == nil {
 		return nil
 	}
-	eventID, ref := deployResultRecordEventID(x.Key), "(no ref)"
+	ref := "(no ref)"
 	if rec.DeployedRef != nil {
 		ref = *rec.DeployedRef
-		var attemptID string
-		err := tx.QueryRow(ctx, `SELECT attempt_id FROM deploys WHERE service=$1 AND job_id=$2 AND deployed_ref=$3 AND state=$4 ORDER BY id DESC LIMIT 1`, rec.Service, *rec.JobID, ref, rec.Result).Scan(&attemptID)
-		switch {
-		case err == nil:
-			eventID = deployResultAttemptEventID(attemptID)
-		case !errors.Is(err, pgx.ErrNoRows):
-			return err
-		}
 	}
+	eventID := deployResultRecordEventID(x.Key, rec.Target, *rec.JobID, ref, rec.Result)
 	return queueDeployResultNoticeTx(ctx, tx, eventID, rec.Service, *rec.JobID, ref, rec.Result, rec.FailedStep, "", at)
 }
