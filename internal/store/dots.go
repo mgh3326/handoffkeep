@@ -591,7 +591,7 @@ func checkDotsResult(kind string, issue DotsIssue, c DotsComment, allowProgress 
 	}
 	key := dotsResultKey(issue, c)
 	body := dotsResultBody(kind, issue, c)
-	if !validDocKey(key) || !validText(body, DocumentMaxBytes) {
+	if !validDocKey(key) || !validDocumentText(body) {
 		return errors.New("invalid dots result")
 	}
 	return guard.Reject(key + "\n" + body)

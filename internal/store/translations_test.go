@@ -4,6 +4,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 func TestTranslationValidation(t *testing.T) {
@@ -103,7 +105,7 @@ func TestTranslationTaskBodyLimit(t *testing.T) {
 	if err := checkTranslation(x); err != nil {
 		t.Fatalf("expanded Korean body refused: %v", err)
 	}
-	x.Text = strings.Repeat("x", 3*DocumentMaxBytes+1)
+	x.Text = strings.Repeat("x", ytwrite.TextMaxChars+1)
 	if err := checkTranslation(x); err == nil {
 		t.Fatal("translation larger than expansion limit accepted")
 	}
@@ -151,7 +153,7 @@ func TestCommentTranslationMayExpandBeyondSourceLimit(t *testing.T) {
 	if err := checkTranslation(row); err != nil {
 		t.Fatal(err)
 	}
-	row.Text = strings.Repeat("x", DocumentMaxBytes+1)
+	row.Text = strings.Repeat("x", ytwrite.TextMaxChars+1)
 	if err := checkTranslation(row); err == nil {
 		t.Fatal("oversized translation accepted")
 	}

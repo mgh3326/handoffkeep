@@ -2,6 +2,7 @@ package youtrack
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 // Point 1: a response over maxBodyBytes is an error. The first maxBodyBytes
@@ -213,13 +215,14 @@ func TestArticleWithLostResponseIsAdoptedNotCreatedAgain(t *testing.T) {
 	}
 }
 
-// Point 1, request bodies: a human comment is sent within the comment cap,
-// marker included.
-func TestCommentRequestBodyStaysUnderTheCap(t *testing.T) {
+// A human comment well over the old 60000-rune mirror cut is mirrored whole
+// (about 1.5 MB of UTF-8): the mirror cuts nothing that YouTrack would accept.
+func TestCommentMirrorIsNotCutBelowYouTrackBound(t *testing.T) {
 	fs := newFakeStore()
 	yt := newFakeYouTrack()
 	task := fs.addTask("handoffkeep", "handoffkeep", "English title", store.StateBacklog, 3)
-	fs.comments[task.ID] = []store.TaskComment{{ID: 1, TaskID: task.ID, Body: strings.Repeat("가", commentTextLimit*2), Author: "worker", CreatedAt: time.Now().UTC()}}
+	body := strings.Repeat("가", 500_000)
+	fs.comments[task.ID] = []store.TaskComment{{ID: 1, TaskID: task.ID, Body: body, Author: "worker", CreatedAt: time.Now().UTC()}}
 	svc := newTestService(t, yt, fs)
 	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
 		t.Fatal(err)
@@ -227,8 +230,23 @@ func TestCommentRequestBodyStaysUnderTheCap(t *testing.T) {
 	if len(yt.comments) != 1 {
 		t.Fatalf("comments=%d, want 1", len(yt.comments))
 	}
-	if n := len([]rune(yt.comments[0])); n > commentTextLimit {
-		t.Fatalf("comment body is %d runes, over the %d cap", n, commentTextLimit)
+	if !strings.Contains(yt.comments[0], body) {
+		t.Fatalf("mirrored comment was cut: %d characters, body %d", len([]rune(yt.comments[0])), len([]rune(body)))
+	}
+}
+
+// A comment whose mirrored text is over YouTrack's bound is refused by name
+// (errCommentTooLong), never cut; one at the bound less its header and marker
+// is sent.
+func TestCommentTextRefusesOverYouTrackBound(t *testing.T) {
+	c := store.TaskComment{ID: 7, Author: "worker", CreatedAt: time.Now().UTC()}
+	c.Body = strings.Repeat("x", ytwrite.TextMaxChars-200)
+	if _, err := commentText(c); err != nil {
+		t.Fatalf("comment within the bound refused: %v", err)
+	}
+	c.Body = strings.Repeat("x", ytwrite.TextMaxChars)
+	if _, err := commentText(c); !errors.Is(err, errCommentTooLong) {
+		t.Fatalf("comment over the bound: err=%v, want errCommentTooLong", err)
 	}
 }
 

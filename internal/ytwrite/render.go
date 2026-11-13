@@ -74,7 +74,7 @@ func RenderedOpID(text string) (opID int64, ok bool) {
 	body, found := strings.CutSuffix(rest, "\n\n"+OpMarker(id))
 	// A document part (doc_comment.go) is longer than a hk comment; both
 	// forms render the same way, so either is accepted here.
-	if !found || checkBodyMax(body, MaxDocCommentBodyBytes) != nil {
+	if !found || checkBodyMax(body, textBodyLimit) != nil {
 		return 0, false
 	}
 	return id, true
@@ -92,16 +92,17 @@ func RenderComment(op Op) (string, error) {
 	if err := json.Unmarshal(op.Payload, &p); err != nil {
 		return "", fmt.Errorf("%w: payload of op %d: %v", ErrInvalid, op.ID, err)
 	}
-	return ProvenanceLine(op.Actor, op.CreatedAt, op.ID) + "\n\n" + p.Body + "\n\n" + OpMarker(op.ID), nil
+	text := ProvenanceLine(op.Actor, op.CreatedAt, op.ID) + "\n\n" + p.Body + "\n\n" + OpMarker(op.ID)
+	// The provenance line and the marker add to the body, so the sent text can
+	// exceed the bound the body alone met. YouTrack would refuse it: refuse it
+	// here, by name, instead of sending a truncated or failed write.
+	if !WithinTextMax(text) {
+		return "", fmt.Errorf("%w: rendered comment is over %d characters (YouTrack's text bound)", ErrInvalid, TextMaxChars)
+	}
+	return text, nil
 }
 
-const (
-	// MaxBodyBytes is hk's own cap on one comment body; YouTrack's limit is
-	// not documented for the tenant, so hk refuses early rather than learn it
-	// from a failed write.
-	MaxBodyBytes = 64 << 10
-	maxIdentLen  = 200
-)
+const maxIdentLen = 200
 
 var (
 	principalRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$`)
@@ -131,15 +132,43 @@ func checkActor(actor string) error {
 
 // checkBody refuses an empty body, an over-size body, and a body that carries
 // the reserved marker text.
-func checkBody(body string) error { return checkBodyMax(body, MaxBodyBytes) }
+func checkBody(body string) error { return checkBodyMax(body, textBodyLimit) }
 
-// checkBodyMax is checkBody with the size cap given.
-func checkBodyMax(body string, limit int) error {
+// bodyLimit is the size rule of one body: a count of characters (a YouTrack
+// text field, see bounds.go) or of UTF-8 bytes (a document part).
+type bodyLimit struct {
+	max   int
+	chars bool
+}
+
+// textBodyLimit is YouTrack's text bound for a comment body or an issue text.
+var textBodyLimit = bodyLimit{max: TextMaxChars, chars: true}
+
+// docPartBodyLimit is one document-comment part, which the import split at
+// DocCommentPartBytes.
+var docPartBodyLimit = bodyLimit{max: MaxDocCommentBodyBytes}
+
+func (l bodyLimit) over(s string) bool {
+	if l.chars {
+		return utf8.RuneCountInString(s) > l.max
+	}
+	return len(s) > l.max
+}
+
+func (l bodyLimit) describe() string {
+	if l.chars {
+		return fmt.Sprintf("%d characters (YouTrack's text bound)", l.max)
+	}
+	return fmt.Sprintf("%d bytes", l.max)
+}
+
+// checkBodyMax is checkBody with the size rule given.
+func checkBodyMax(body string, lim bodyLimit) error {
 	if strings.TrimSpace(body) == "" {
 		return fmt.Errorf("%w: body is empty", ErrInvalid)
 	}
-	if len(body) > limit {
-		return fmt.Errorf("%w: body is over %d bytes", ErrInvalid, limit)
+	if lim.over(body) {
+		return fmt.Errorf("%w: body is over %s", ErrInvalid, lim.describe())
 	}
 	// jsonb cannot hold NUL, and a body that is not UTF-8 would not survive
 	// the JSON payload unchanged.

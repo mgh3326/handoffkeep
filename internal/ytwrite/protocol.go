@@ -146,7 +146,7 @@ type CommentRequest struct {
 
 // CheckComment explains why a comment request is refused before anything is
 // stored. An empty Key is accepted (AppendComment generates one).
-func CheckComment(req CommentRequest) error { return checkCommentRequest(req, MaxBodyBytes) }
+func CheckComment(req CommentRequest) error { return checkCommentRequest(req, textBodyLimit) }
 
 // CheckCommentContent explains why a comment's author or body can never be
 // sent, whatever issue it targets: the part of CheckComment that depends on
@@ -155,11 +155,11 @@ func CheckCommentContent(actor, body string) error {
 	if err := checkActor(actor); err != nil {
 		return err
 	}
-	return checkBodyMax(body, MaxBodyBytes)
+	return checkBodyMax(body, textBodyLimit)
 }
 
-// checkCommentRequest is CheckComment with the body cap given.
-func checkCommentRequest(req CommentRequest, maxBody int) error {
+// checkCommentRequest is CheckComment with the body size rule given.
+func checkCommentRequest(req CommentRequest, lim bodyLimit) error {
 	if !principalRE.MatchString(req.Principal) {
 		return fmt.Errorf("%w: principal is empty or malformed", ErrInvalid)
 	}
@@ -172,7 +172,7 @@ func checkCommentRequest(req CommentRequest, maxBody int) error {
 	if !issueIDRE.MatchString(req.YTIssueID) {
 		return fmt.Errorf("%w: youtrack issue id is empty or malformed", ErrInvalid)
 	}
-	if err := checkBodyMax(req.Body, maxBody); err != nil {
+	if err := checkBodyMax(req.Body, lim); err != nil {
 		return err
 	}
 	if req.Key != "" && !keyRE.MatchString(req.Key) {
