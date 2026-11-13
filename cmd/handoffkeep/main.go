@@ -948,7 +948,7 @@ func ctxCmd(args []string, out io.Writer) error {
 
 func docCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: doc put|get|list|import")
+		return errors.New("usage: doc put|get|list|import|prune")
 	}
 	fs := flag.NewFlagSet("doc "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -976,6 +976,8 @@ func docCmd(args []string, out io.Writer) error {
 	manifest := fs.String("manifest", "", "JSON import manifest")
 	manifestOut := fs.String("manifest-out", "", "write a candidate JSON manifest without importing")
 	apply := fs.Bool("apply", false, "apply changes")
+	olderThan := fs.String("older-than", "", "prune: delete documents not updated for this many days, like 30d")
+	limit := fs.Int("limit", 1000, "prune: most documents one run deletes")
 	if e := fs.Parse(args[1:]); e != nil {
 		return e
 	}
@@ -1060,6 +1062,16 @@ func docCmd(args []string, out io.Writer) error {
 			return e
 		}
 		return printJSON(out, v)
+	case "prune":
+		days, e := parseDocOlderThan(*olderThan)
+		if e != nil {
+			return e
+		}
+		v, e := c.PruneDocuments(ctx, *prefix, days, *limit, *apply)
+		if e != nil {
+			return e
+		}
+		return printJSON(out, v)
 	case "import":
 		if *manifest != "" {
 			if *dir != "" {
@@ -1069,7 +1081,7 @@ func docCmd(args []string, out io.Writer) error {
 		}
 		return importDocs(ctx, c, *dir, *glob, *apply, out)
 	default:
-		return errors.New("usage: doc put|get|list|import")
+		return errors.New("usage: doc put|get|list|import|prune")
 	}
 }
 
