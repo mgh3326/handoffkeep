@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/mgh3326/handoffkeep/internal/capabilities"
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -268,10 +269,26 @@ func TestTaskClaimHTTPConflictBodyCarriesReason(t *testing.T) {
 	}
 }
 
+// answerCurrentCapabilities answers GET /v1/capabilities the way a current
+// server does, and reports whether it did. Stubs of a current server call it
+// first, because the client reads the list before it sends a gated shape.
+func answerCurrentCapabilities(w http.ResponseWriter, r *http.Request) bool {
+	if r.URL.Path != "/v1/capabilities" {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"protocol_version": capabilities.ProtocolVersion, "features": capabilities.Features})
+	return true
+}
+
 func TestTaskClaimClientDetectsServerDroppingJobID(t *testing.T) {
-	// A pre-#782 server answers 200 with the task but without refs.job_id.
+	// A pre-#782 server answers 200 with the task but without refs.job_id. It
+	// lists the feature, so the client sends the claim and then catches the drop.
 	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if answerCurrentCapabilities(w, r) {
+			return
+		}
 		fmt.Fprint(w, `{"id":7,"lane":"l","title":"t","kind":"implement","state":"claimed","priority":0,"refs":{},"claimed_by":"captain-a","created_by":"x","created_at":"2026-09-27T00:00:00Z","updated_at":"2026-09-27T00:00:00Z"}`)
 	}))
 	defer h.Close()
@@ -288,8 +305,13 @@ func TestTaskClaimClientDetectsServerDroppingJobID(t *testing.T) {
 func TestTaskClaimClientTranslatesUnknownFieldRejection(t *testing.T) {
 	// The deployed pre-#782 server decodes with DisallowUnknownFields, so a
 	// claim carrying job_id fails with the generic invalid_context instead
-	// of claiming the task. The client must still fail clearly.
+	// of claiming the task. The client must still fail clearly. That server
+	// also predates /v1/capabilities, so the route answers 404.
 	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/capabilities" {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprint(w, `{"error":"invalid_context"}`)

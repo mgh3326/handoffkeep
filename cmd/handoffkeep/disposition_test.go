@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mgh3326/handoffkeep/internal/capabilities"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
@@ -32,6 +33,8 @@ func TestDispositionAddCopiesToolFacts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/capabilities":
+			_ = json.NewEncoder(w).Encode(map[string]any{"protocol_version": capabilities.ProtocolVersion, "features": capabilities.Features})
 		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/documents/"):
 			var doc store.Document
 			_ = json.NewDecoder(r.Body).Decode(&doc)

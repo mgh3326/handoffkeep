@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/mgh3326/handoffkeep/client"
+	"github.com/mgh3326/handoffkeep/internal/capabilities"
 	"github.com/mgh3326/handoffkeep/internal/hktransport"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -283,6 +284,12 @@ func (c Client) CreateTaskChecked(ctx context.Context, x store.Task, check store
 }
 func (c Client) ClaimTask(ctx context.Context, id int64, claimedBy, jobID, noJob string) (store.Task, error) {
 	var out store.Task
+	if err := c.requireFeatureWhen(ctx, jobID != "", capabilities.FeatureClaimJobID); err != nil {
+		return out, err
+	}
+	if err := c.requireFeatureWhen(ctx, noJob != "", capabilities.FeatureClaimNoJob); err != nil {
+		return out, err
+	}
 	body := map[string]string{"claimed_by": claimedBy}
 	if jobID != "" {
 		body["job_id"] = jobID
@@ -348,6 +355,12 @@ func (c Client) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 
 func (c Client) NextTask(ctx context.Context, lane, claimedBy, jobID, noJob string) (store.Task, error) {
 	var out store.Task
+	if err := c.requireFeatureWhen(ctx, jobID != "", capabilities.FeatureNextJobID); err != nil {
+		return out, err
+	}
+	if err := c.requireFeatureWhen(ctx, noJob != "", capabilities.FeatureNextNoJob); err != nil {
+		return out, err
+	}
 	body := map[string]string{"lane": lane, "claimed_by": claimedBy}
 	if jobID != "" {
 		body["job_id"] = jobID
@@ -383,6 +396,9 @@ func (c Client) TransitionTask(ctx context.Context, id int64, to, note string, r
 func (c Client) TransitionTaskWith(ctx context.Context, id int64, in store.TransitionInput) (store.Task, error) {
 	to, note, refs, noJob := in.To, in.Note, in.Refs, in.NoJob
 	var out store.Task
+	if err := c.requireFeatureWhen(ctx, noJob != "", capabilities.FeatureTransitionNoJob); err != nil {
+		return out, err
+	}
 	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/transition", id), struct {
 		To          string          `json:"to"`
 		Closure     string          `json:"closure,omitempty"`
@@ -651,6 +667,9 @@ func (c Client) CreateDisposition(ctx context.Context, x store.DispositionInput)
 		Task    store.Task `json:"task"`
 		Created bool       `json:"created"`
 	}
+	if err := c.requireFeatureWhen(ctx, x.Project != "", capabilities.FeatureDispositionProject); err != nil {
+		return out.Task, false, err
+	}
 	err := c.call(ctx, "POST", "/v1/tasks/dispositions", x, &out)
 	if err != nil && x.Project != "" {
 		var he *HTTPError
@@ -874,6 +893,19 @@ func (c Client) SetTaskArea(ctx context.Context, id int64, area *string, note st
 	return out, nil
 }
 
+// SetTaskPriority changes a task's priority and returns the updated row (hk 3219).
+func (c Client) SetTaskPriority(ctx context.Context, id int64, priority int, note string) (store.Task, error) {
+	var out store.Task
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/priority", id), map[string]any{"priority": priority, "note": note}, &out)
+	if err != nil {
+		return out, unsupportedRoute(err, "task_priority_unsupported", "the task priority route")
+	}
+	if out.Priority != priority {
+		return out, fmt.Errorf("priority_not_applied: server response has priority %d, want %d", out.Priority, priority)
+	}
+	return out, nil
+}
+
 // ListTaskAreas answers the server's closed area vocabulary in order. A
 // server that predates the endpoint 404s it.
 func (c Client) ListTaskAreas(ctx context.Context) ([]string, error) {
@@ -1010,6 +1042,9 @@ func (c Client) GetTask(ctx context.Context, id int64) (store.Task, bool, error)
 func (c Client) ResolveDecision(ctx context.Context, kind string, id int64, by, answer, note string, noInject bool, noJob string) (store.RelayEvent, error) {
 	var out struct {
 		Event store.RelayEvent `json:"event"`
+	}
+	if err := c.requireFeatureWhen(ctx, noJob != "", capabilities.FeatureResolveNoJob); err != nil {
+		return out.Event, err
 	}
 	err := c.call(ctx, "POST", "/v1/decisions/resolve", struct {
 		Type     string `json:"type"`

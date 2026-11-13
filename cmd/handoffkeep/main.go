@@ -241,7 +241,7 @@ func tasksCmd(args []string, out io.Writer) error {
 
 func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|parent|relate|unrelate|origin|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|drift|settle-merged|project-status|intake|triage")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|set-priority|parent|relate|unrelate|origin|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|drift|settle-merged|project-status|intake|triage")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -254,6 +254,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if args[0] == "rebind" {
 		return taskRebindCmd(args[1:], out)
+	}
+	if args[0] == "set-priority" {
+		return taskPriorityCmd(args, out)
 	}
 	if args[0] == "parent" {
 		return taskParentCmd(args[1:], out)
@@ -720,7 +723,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		}
 		return printJSON(out, x)
 	default:
-		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|owner|owners|set-area|areas|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|intake|triage")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|owner|owners|set-area|areas|set-priority|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|intake|triage")
 	}
 }
 

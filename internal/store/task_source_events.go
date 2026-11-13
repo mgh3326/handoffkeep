@@ -123,10 +123,10 @@ type TaskEventResult struct {
 // must name the reverted PR.
 func normalizeTaskSourceEvent(in TaskSourceEvent) (TaskSourceEvent, error) {
 	if in.TaskID < 1 {
-		return in, errors.New("invalid task event: task_id must be positive")
+		return in, invalidChangeWrite("task_id must be positive")
 	}
 	if !taskEventPRRE.MatchString(in.SourceRef) {
-		return in, errors.New("invalid task event: source_ref must be a PR URL")
+		return in, invalidChangeWrite("source_ref must be a PR URL")
 	}
 	switch in.Source {
 	case SourceMergewakePR, SourceMergewakeReview, SourceMergewakeMerge:
@@ -134,18 +134,18 @@ func normalizeTaskSourceEvent(in TaskSourceEvent) (TaskSourceEvent, error) {
 			in.PR = in.SourceRef
 		}
 		if in.PR != in.SourceRef || in.RevertedPR != "" || in.RevertPR != "" {
-			return in, errors.New("invalid task event: pr must equal source_ref, and reverted_pr and revert_pr belong to a revert")
+			return in, invalidChangeWrite("pr must equal source_ref, and reverted_pr and revert_pr belong to a revert")
 		}
 	case SourceMergewakeRevert:
 		if in.RevertPR == "" {
 			in.RevertPR = in.SourceRef
 		}
 		if in.RevertPR != in.SourceRef || !taskEventPRRE.MatchString(in.RevertedPR) || (in.PR != "" && in.PR != in.RevertedPR) {
-			return in, errors.New("invalid task event: a revert needs reverted_pr, and source_ref is the revert PR URL")
+			return in, invalidChangeWrite("a revert needs reverted_pr, and source_ref is the revert PR URL")
 		}
 		in.PR = in.RevertedPR
 	default:
-		return in, errors.New("invalid task event: unknown source")
+		return in, invalidChangeWrite("unknown source")
 	}
 	if err := checkEventChangeFields(in); err != nil {
 		return in, err
