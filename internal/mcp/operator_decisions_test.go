@@ -235,7 +235,7 @@ func TestDecisionRecordAndOperatorAttentionTools(t *testing.T) {
 		AsOf      time.Time     `json:"as_of"`
 	}
 	attention := callTool[attentionOut](t, session, "operator_attention", map[string]any{})
-	if attention.Decisions.Count != 1 || len(attention.Decisions.Items) != 1 || attention.Tasks.Count < 1 || attention.AsOf.IsZero() {
+	if attention.Decisions.Count != 1 || len(attention.Decisions.Items) != 1 || attention.Tasks.Count != 0 || attention.AsOf.IsZero() {
 		t.Fatalf("attention=%+v", attention)
 	}
 }

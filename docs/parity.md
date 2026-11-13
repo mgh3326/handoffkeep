@@ -18,7 +18,7 @@ Baseline: `handoffkeep@64942ff`, the commit this matrix was taken from.
 | Thing counted | Count at 64942ff | Now |
 | --- | --- | --- |
 | Console write routes | 14: 7 JSON routes in `internal/ui/api.go`, 7 HTML form routes in `internal/ui/ui.go` | 14 (unchanged) |
-| MCP tool definitions | 22: 21 exposed on HTTP `/mcp`, 12 on stdio (the operator/meta tools are HTTP-only; `attachment_put_from_path` is stdio-only) | 31 exposed on HTTP `/mcp` and 12 on stdio (after hk 4437 removed `memory_get`, `memory_put` and `memory_list`), counted by listing the registered tools at hk 3683 and adding `fleet_capacity` (the earlier "25" was stale; `attachment_put` and the two direct-upload tools are in both counts) |
+| MCP tool definitions | 22: 21 exposed on HTTP `/mcp`, 12 on stdio (the operator/meta tools are HTTP-only; `attachment_put_from_path` is stdio-only) | 33 exposed on HTTP `/mcp` and 12 on stdio (after hk 4437 removed `memory_get`, `memory_put` and `memory_list`), counted by listing the registered tools at hk 3683, adding `fleet_capacity`, `decision_record` and `operator_attention` (the earlier "25" was stale; `attachment_put` and the two direct-upload tools are in both counts) |
 | `/v1` write registrations | 81 method-scoped write registrations, plus two method-agnostic handlers that also accept writes: `/v1/checkpoints`, `/v1/documents/{key}` (the rows below cover the user-facing capabilities) | 81 (unchanged) |
 
 Legend: **—** means the surface has no path for that capability. **ui.write** is
@@ -52,6 +52,8 @@ inbox and disposition writes refuse them.
 | Comments | Write a comment | hk comments are pushed as issues comments; mirrored comments are linked so they do not echo | POST /ui/tasks/{id}/comments | POST /v1/tasks/{id}/comments | tasks comment | task_comment | Operator, bearer, MCP bearer/Access | comment.author; ui.write; YouTrack comment link | Append-only; no edit or delete | internal/ui/routes_test.go, internal/mcp/operator_test.go, internal/store/youtrack_test.go |
 | Decisions | List open decisions | — | GET /ui/api/decisions, GET /ui/api/decisions/{id}, GET /ui/api/attention | GET /v1/decision-requests, GET /v1/decision-requests/sources, GET /v1/tasks/dispositions/summary | decisions list, decisions hygiene, decisions backfill | decisions_pending | Operator, bearer, MCP bearer/Access | None (read) | n/a | internal/ui/decision_requests_test.go, internal/mcp/operator_test.go |
 | Decisions | History of closed decisions (answered, default_applied, withdrawn) | — | — (per task on the task page) | — | — | decisions_history | Operator, bearer, MCP bearer/Access | None (read) | n/a | internal/mcp/operator_decisions_test.go |
+| Decisions | Record a decision settled in a session chat | — | — | POST /v1/decisions/record | decisions record | decision_record | bearer; MCP Access | decision record; MCP write audit | Stable key replays identical input; changed content conflicts | internal/store/decision_records_test.go, internal/api/decision_records_test.go, internal/mcp/operator_decisions_test.go |
+| Decisions | Read operator attention | — | GET /ui/api/attention | — | — | operator_attention | Operator, MCP bearer/Access | None (read) | n/a | internal/store/attention_test.go, internal/mcp/operator_decisions_test.go |
 | Decisions | Ask (create a structured request) | — | — | POST /v1/tasks/{id}/decision-request | tasks decision-request, decisions ask | — | bearer (agents and CLI) | decision record; task_events | No retraction; a superseded request can be replaced | cmd/handoffkeep/decision_request_test.go, internal/api/decision_records_test.go |
 | Decisions | Answer a request | — | POST /ui/api/decision-requests/resolve | POST /v1/decisions/resolve, POST /v1/tasks/{id}/decision-request/resolve | decisions resolve, tasks decision-resolve | decision_answer | Console: operator only (operator_direct); bearer writes may be recorded as pending confirmation; MCP Access is operator_direct; MCP bearer on an operator_only request is refused with `decision_operator_only` and its attempt waits as pending confirmation, otherwise it follows the bearer rule | decision record (actor, channel, provenance); task_events; ui.write | Final; the request cannot be unanswered | internal/ui/decision_resolve_test.go, internal/api/decision_resolve_test.go, internal/mcp/operator_test.go |
 | Decisions | Deny a pending confirmation | — | POST /ui/api/decision-requests/deny | — | — | — | Operator only | decision record; ui.write | The denied attempt is final; the request stays open | internal/ui/decision_deny_test.go |
@@ -154,6 +156,8 @@ because that path has an authenticated principal.
 | changes_since | read | HTTP | Change feed |
 | decisions_pending | read | HTTP | Decisions list |
 | decisions_history | read | HTTP | Decisions history (closed requests) |
+| operator_attention | read | HTTP | Existing bounded operator attention model |
+| decision_record | write | HTTP | Record a session-settled decision; keyed and audited |
 | decision_answer | write | HTTP | Decisions answer |
 | task_comment | write | HTTP | Comment write |
 | task_intake | write | HTTP | Task create |
