@@ -38,8 +38,11 @@ last returned ID, or the supplied `after` on an empty page. `max_sync_id` is the
 committed feed watermark in the page's read snapshot. Continue from
 `last_sync_id` until it equals `max_sync_id`. IDs may have gaps after rollback.
 Never advance a cursor after receiving a partial response without its trailer.
-Delta carries IDs, not bodies: fetch current content from the owning API.
-Applying changes must be idempotent.
+Delta carries IDs, not bodies. Decision, document and task rows have owning
+reads by ID. A `task_comment` delta carries only the comment ID, and this build
+has no by-ID comment read, so a reader that needs comment bodies must page each
+task's comments through `GET /v1/tasks/{id}/comments` and match the ID. Applying
+changes must be idempotent.
 
 An expired cursor returns HTTP 410 and JSON:
 
@@ -47,7 +50,9 @@ An expired cursor returns HTTP 410 and JSON:
 {"reset":true,"min_sync_id":123}
 ```
 
-Discard the index and start again from the reset boundary. The reset boundary records the highest
+Discard the index and restart the retained feed at `after=min_sync_id-1`. The
+410 names `min_sync_id`, not `pruned_through`: `after=min_sync_id` skips that
+change, because the query is `sync_id > after`. The reset boundary records the highest
 pruned ID, surviving an entirely empty log. A cursor exactly at that boundary
 can continue safely. Sequence gaps alone do not cause a reset. `min_sync_id` is
 the oldest retained ID, or the committed watermark plus one when none remain.
@@ -55,10 +60,13 @@ Cursors ahead of the server watermark return 400.
 
 ## Starting from nothing
 
-There is no bootstrap or row endpoint. A new reader starts at `after=0` and
-follows delta to `max_sync_id`; a 410 reset restarts it from the reset
-boundary. Delta rows carry the model and ID, and a reader that needs a current
-body fetches it from the API that owns the model.
+This build has no bootstrap, enumeration or row endpoint. A reader that starts
+at `after=0`, or restarts after a 410, sees only changes still in `sync_log`.
+A record whose last change was pruned never reappears in delta, so a reader
+that needs a complete index of older records has no discovery path here. The
+removed bootstrap was the only one. Restoring it needs a complete enumeration
+or snapshot route, and replay must follow that route, not start at the reset
+boundary.
 
 ## Durability and retention
 
