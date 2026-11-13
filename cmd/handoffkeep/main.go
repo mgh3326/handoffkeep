@@ -202,13 +202,13 @@ func checkpointRefs(values []string) (store.Refs, error) {
 	return refs, nil
 }
 
-func taskRefs(pr, headSHA, reportPath, jobID string, linear *store.TaskLinear) (*store.TaskRefs, bool) {
-	x := &store.TaskRefs{PR: pr, HeadSHA: headSHA, ReportPath: reportPath, JobID: jobID, Linear: linear}
-	return x, pr != "" || headSHA != "" || reportPath != "" || jobID != "" || linear != nil
+func taskRefs(pr, headSHA, reportPath, jobID, grade, tier string) (*store.TaskRefs, bool) {
+	x := &store.TaskRefs{PR: pr, HeadSHA: headSHA, ReportPath: reportPath, JobID: jobID, Grade: grade, Tier: tier}
+	return x, pr != "" || headSHA != "" || reportPath != "" || jobID != "" || grade != "" || tier != ""
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--title-ko": true, "--body-ko": true, "--kind": true, "--priority": true, "--expected": true, "--by": true, "--to": true, "--closure": true, "--evidence": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true, "--parent": true, "--duplicate-of": true, "--link": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--title-ko": true, "--body-ko": true, "--kind": true, "--priority": true, "--expected": true, "--by": true, "--to": true, "--closure": true, "--evidence": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true, "--parent": true, "--duplicate-of": true, "--link": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -345,16 +345,8 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	originPR := fs.String("origin-pr", "", "merged pull request this task came from")
 	originTask := fs.Int64("origin-task", 0, "task this task came from (a disposition item for an ordered follow-up)")
 	bodyDoc := fs.String("doc", "", "hk document key holding the task body: key or key#section (tasks add only)")
-	tier := fs.String("tier", "", "Linear task tier metadata (T0..T3)")
-	grade := fs.String("grade", "", "Linear task grade metadata (SS..C)")
-	briefKey := fs.String("brief-key", "", "handoffkeep brief document key for the Linear issue")
-	linearSync := fs.Bool("linear-sync", false, "retain legacy Linear task metadata (sync connector retired)")
-	linearReportKey := fs.String("linear-report-key", "", "handoffkeep report document key for a terminal Linear comment")
-	linearVerifyKey := fs.String("linear-verify-key", "", "independent verification report key for a terminal Linear comment")
-	linearDecisionKey := fs.String("linear-decision-key", "", "decision document key for a terminal Linear comment")
-	deploySHA := fs.String("deploy-sha", "", "deployed revision for a terminal Linear comment")
-	var linearLabels refFlags
-	fs.Var(&linearLabels, "label", "existing Linear label name (repeatable; labels are never created)")
+	tier := fs.String("tier", "", "task tier, refs.tier (T0..T3)")
+	grade := fs.String("grade", "", "task grade, refs.grade (SS..C)")
 	var optionValues refFlags
 	fs.Var(&optionValues, "option", "decision option A|label (repeatable)")
 	recommended := fs.String("recommended", "", "recommended decision option key")
@@ -366,7 +358,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	if err := fs.Parse(parseArgs); err != nil {
 		return err
 	}
-	linearFlagsUsed, docFlagUsed, noJobSet, projectSet, areaSet, expectedSet := false, false, false, false, false, false
+	docFlagUsed, noJobSet, projectSet, areaSet, expectedSet := false, false, false, false, false
 	parentSet, duplicateOfSet, stalledSet := false, false, false
 	linkSet, kindSet, prioritySet := false, false, false
 	closureSet := false
@@ -405,10 +397,6 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if item.Name == "area" {
 			areaSet = true
 		}
-		switch item.Name {
-		case "linear-sync", "tier", "grade", "brief-key", "label", "linear-report-key", "linear-verify-key", "linear-decision-key", "deploy-sha":
-			linearFlagsUsed = true
-		}
 	})
 	noJobReason := ""
 	if noJobSet {
@@ -422,20 +410,6 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		case "claim", "next", "transition":
 		default:
 			return fmt.Errorf("--no-job is not accepted by tasks %s", args[0])
-		}
-	}
-	var linearRefs *store.TaskLinear
-	if linearFlagsUsed {
-		linearRefs = &store.TaskLinear{
-			Sync:      *linearSync,
-			Tier:      *tier,
-			Grade:     *grade,
-			Brief:     *briefKey,
-			Labels:    append([]string{}, linearLabels...),
-			Report:    *linearReportKey,
-			Verify:    *linearVerifyKey,
-			Decision:  *linearDecisionKey,
-			DeploySHA: *deploySHA,
 		}
 	}
 	// A task body is attached only when the task is filed; no other
@@ -507,7 +481,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if *bodyDoc != "" && !store.ValidBodyDoc(*bodyDoc) {
 			return errors.New("--doc must be a document key or key#section")
 		}
-		refs, _ := taskRefs(*pr, *headSHA, *reportPath, *jobID, linearRefs)
+		refs, _ := taskRefs(*pr, *headSHA, *reportPath, *jobID, *grade, *tier)
 		refs.OriginPR, refs.OriginTask = *originPR, *originTask
 		var areaTag *string
 		if areaSet {
@@ -677,7 +651,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 				*note = *question
 			}
 		}
-		refs, hasRefs := taskRefs(*pr, *headSHA, *reportPath, *jobID, linearRefs)
+		refs, hasRefs := taskRefs(*pr, *headSHA, *reportPath, *jobID, *grade, *tier)
 		if usingOptions {
 			options, err := parseTaskDecisionOptions(optionValues, *recommended, *noFreeAnswer)
 			if err != nil {

@@ -149,7 +149,16 @@ type TaskRefs struct {
 	// ResolveDecisionRequest; while it exists, decision_options are its
 	// choices and are not patchable by a generic transition.
 	DecisionRequest *DecisionRequest `json:"decision_request,omitempty"`
-	Linear          *TaskLinear      `json:"linear,omitempty"`
+	// Grade and Tier are the task's (grade X, Tn) marker values (hk 4425).
+	// Read them through TaskRefs.GradeTier, which falls back to the legacy
+	// refs.linear copy this release still keeps.
+	Grade string `json:"grade,omitempty"`
+	Tier  string `json:"tier,omitempty"`
+	// Linear is the retired Linear connector's metadata. Nothing writes it
+	// now except a previous-release client during a blue-green overlap; it is
+	// kept so stored values survive a transition and so GradeTier can fall
+	// back to its grade and tier. A later contract release drops it.
+	Linear *TaskLinear `json:"linear,omitempty"`
 	// OriginPR and OriginTask are the typed "this row came from" relations
 	// shared with #494 (hk:doc design/2026-09-21/task493-disposition-contract
 	// §3). Unknown refs keys are dropped by the next transition, so these names
@@ -162,6 +171,24 @@ type TaskRefs struct {
 	RevertPR string `json:"revert_pr,omitempty"`
 }
 
+// GradeTier returns the task's grade and tier: refs.grade and refs.tier,
+// else the legacy refs.linear values a task filed before hk 4425 (or by a
+// previous-release client) carries.
+func (r TaskRefs) GradeTier() (grade, tier string) {
+	grade, tier = r.Grade, r.Tier
+	if r.Linear != nil {
+		if grade == "" {
+			grade = r.Linear.Grade
+		}
+		if tier == "" {
+			tier = r.Linear.Tier
+		}
+	}
+	return grade, tier
+}
+
+// TaskLinear is the legacy refs.linear shape, kept as stored (see
+// TaskRefs.Linear).
 type TaskLinear struct {
 	MirrorReason string   `json:"mirror_reason,omitempty"`
 	IssueID      string   `json:"issue_id,omitempty"`
@@ -2294,6 +2321,12 @@ func validTaskRefs(x TaskRefs) bool {
 	if x.DecisionOptions != nil && !validDecisionOptions(*x.DecisionOptions) {
 		return false
 	}
+	if x.Grade != "" && !validTaskGrade(x.Grade) {
+		return false
+	}
+	if x.Tier != "" && !validTaskTier(x.Tier) {
+		return false
+	}
 	if x.Linear != nil && !validTaskLinear(*x.Linear) {
 		return false
 	}
@@ -2312,14 +2345,26 @@ func validTaskRefs(x TaskRefs) bool {
 	return true
 }
 
+func validTaskTier(tier string) bool {
+	switch tier {
+	case "T0", "T1", "T2", "T3":
+		return true
+	}
+	return false
+}
+
+// validTaskLinear accepts every refs.linear value the retired connector
+// stored, so a task carrying one can still transition.
 func validTaskLinear(x TaskLinear) bool {
-	if !validLinearMirrorReason(x.MirrorReason) {
+	switch x.MirrorReason {
+	case "", "dots", "operator_visible", "linear_opened":
+	default:
 		return false
 	}
 	if !validText(x.IssueID, 256) || !validText(x.Identifier, 256) {
 		return false
 	}
-	if x.Tier != "" && x.Tier != "T0" && x.Tier != "T1" && x.Tier != "T2" && x.Tier != "T3" {
+	if x.Tier != "" && !validTaskTier(x.Tier) {
 		return false
 	}
 	if x.Grade != "" && !validTaskGrade(x.Grade) {
@@ -2345,7 +2390,7 @@ func validTaskLinear(x TaskLinear) bool {
 }
 
 func rejectTaskRefs(x TaskRefs) error {
-	values := []string{x.PR, x.HeadSHA, x.ReportPath, x.JobID}
+	values := []string{x.PR, x.HeadSHA, x.ReportPath, x.JobID, x.Grade, x.Tier}
 	if x.DecisionOptions != nil {
 		for _, option := range x.DecisionOptions.Options {
 			values = append(values, option.Label)
@@ -2386,7 +2431,22 @@ func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
 	if patch.OriginTask != 0 {
 		old.OriginTask = patch.OriginTask
 	}
+	if patch.Grade != "" {
+		old.Grade = patch.Grade
+	}
+	if patch.Tier != "" {
+		old.Tier = patch.Tier
+	}
 	if patch.Linear != nil {
+		// A previous-release client still sends grade and tier under
+		// refs.linear during a blue-green overlap; they land in the new keys
+		// too, so GradeTier never reads a stale refs.grade over them.
+		if patch.Grade == "" && patch.Linear.Grade != "" {
+			old.Grade = patch.Linear.Grade
+		}
+		if patch.Tier == "" && patch.Linear.Tier != "" {
+			old.Tier = patch.Linear.Tier
+		}
 		merged := TaskLinear{}
 		if old.Linear != nil {
 			merged = *old.Linear

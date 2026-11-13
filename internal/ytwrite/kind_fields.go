@@ -164,14 +164,15 @@ type TaskFields struct {
 	Priority int
 	Lane     string
 	Kind     string
-	// LinearGrade and LinearTier are the refs.linear fallback when the
-	// title carries no grade marker.
-	LinearGrade string
-	LinearTier  string
-	Stalled     bool
-	DueAt       *time.Time
-	Area        string
-	Milestone   string
+	// RefsGrade and RefsTier are the task's refs grade and tier
+	// (store.TaskRefs.GradeTier), the fallback when the title carries no
+	// grade marker.
+	RefsGrade string
+	RefsTier  string
+	Stalled   bool
+	DueAt     *time.Time
+	Area      string
+	Milestone string
 	// Expected is the task's expected duration (0: none).
 	Expected time.Duration
 }
@@ -309,7 +310,7 @@ func TaskIssueSnapshot(t TaskFields) IssueSnapshot {
 	}
 	grade, tier := TitleGradeTier(t.Title)
 	if grade == "" {
-		grade, tier = t.LinearGrade, t.LinearTier
+		grade, tier = t.RefsGrade, t.RefsTier
 	}
 	stalled := ""
 	if t.Stalled {

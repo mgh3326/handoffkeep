@@ -4,7 +4,7 @@ import { WorkPage } from "./WorkPage";
 
 const base = { lane: "console-demo", kind: "build", priority: 2, created_by: "test", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", project: "a" };
 const tasks = [
-  { ...base, id: 101, title: "Compact list", state: "developing", refs: { linear: { grade: "B", tier: "T2" } } },
+  { ...base, id: 101, title: "Compact list", state: "developing", refs: { grade: "B", tier: "T2" } },
   { ...base, id: 102, title: "Other work", state: "reviewing", lane: "fleet-status", kind: "feature", priority: 1, refs: { linear: { grade: "A", tier: "T1" } } },
   { ...base, id: 103, title: "Done thing", state: "merged", priority: 0, refs: {} },
 ];

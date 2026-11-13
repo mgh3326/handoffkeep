@@ -341,7 +341,7 @@ func (s *Store) ClaimTaskThread(ctx context.Context, now time.Time) (TaskThreadI
 	}
 	defer tx.Rollback(ctx)
 	x := TaskThreadItem{Destination: dest, Type: TaskThreadCreate, Key: TaskThreadCreate}
-	err = tx.QueryRow(ctx, `SELECT n.task_id,n.thread_name,n.attempts,n.state='`+TaskThreadCreating+`',coalesce(t.project,''),t.kind,coalesce(t.refs->'linear'->>'grade',''),coalesce(t.refs->'linear'->>'tier','')
+	err = tx.QueryRow(ctx, `SELECT n.task_id,n.thread_name,n.attempts,n.state='`+TaskThreadCreating+`',coalesce(t.project,''),t.kind,coalesce(nullif(t.refs->>'grade',''),t.refs->'linear'->>'grade',''),coalesce(nullif(t.refs->>'tier',''),t.refs->'linear'->>'tier','')
 		FROM task_thread_deliveries n JOIN tasks t ON t.id=n.task_id
 		WHERE n.destination=$1 AND n.state IN ('`+TaskThreadPending+`','`+TaskThreadCreating+`') AND n.claim_key='' AND n.next_attempt_at<=$2::timestamptz
 		ORDER BY n.next_attempt_at,n.start_event_id LIMIT 1 FOR UPDATE OF n SKIP LOCKED`, dest, now).

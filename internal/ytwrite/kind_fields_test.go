@@ -139,8 +139,8 @@ func TestTaskIssueSnapshotMapsLikeTheImport(t *testing.T) {
 	}
 
 	// Empty values stay in the list as "" so the update clears them; no
-	// project is Unassigned; refs.linear is the grade fallback.
-	bare := ytwrite.TaskIssueSnapshot(ytwrite.TaskFields{TaskID: 5, Title: "plain", State: "odd", LinearGrade: "S", LinearTier: "T1"})
+	// project is Unassigned; the refs grade is the fallback.
+	bare := ytwrite.TaskIssueSnapshot(ytwrite.TaskFields{TaskID: 5, Title: "plain", State: "odd", RefsGrade: "S", RefsTier: "T1"})
 	for name, v := range map[string]string{"hk 프로젝트": "Unassigned", "hk 상태": "odd", "등급": "S", "티어": "T1", "멈춤": "", "마감": "", "예상 소요": "", "레인": "", "PR": ""} {
 		if got, ok := valueOf(bare, name); !ok || got != v {
 			t.Errorf("bare %s = %q %v, want %q", name, got, ok, v)

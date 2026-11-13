@@ -666,8 +666,8 @@ func (s *Service) issueFields(ctx context.Context, task store.Task, priority int
 		{s.schema.KindField, task.Kind},
 	}
 	grade, tier := gradeFromTitle(task.Title)
-	if grade == "" && task.Refs.Linear != nil {
-		grade, tier = task.Refs.Linear.Grade, task.Refs.Linear.Tier
+	if grade == "" {
+		grade, tier = task.Refs.GradeTier()
 	}
 	enums = append(enums, struct{ field, value string }{s.schema.GradeField, grade}, struct{ field, value string }{s.schema.TierField, tier})
 	for _, e := range enums {

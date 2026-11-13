@@ -196,9 +196,7 @@ func buildDashboard(now time.Time, quota []store.QuotaAccountLatest, tasks []sto
 				ID: task.ID, Title: task.Title, Lane: task.Lane, State: task.State,
 				ClaimedBy: task.ClaimedBy, JobID: task.Refs.JobID, PR: task.Refs.PR, UpdatedAt: task.UpdatedAt,
 			}
-			if task.Refs.Linear != nil {
-				item.Tier = task.Refs.Linear.Tier
-			}
+			_, item.Tier = task.Refs.GradeTier()
 			out.Work = append(out.Work, item)
 		}
 		if task.Refs.PR == "" || store.IsSettledState(task.State) {
