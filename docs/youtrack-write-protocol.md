@@ -969,7 +969,10 @@ rejected-op alert, and the next feed change or backfill run prepares the
 snapshot again (Rejected snapshots above). No map rows.
 
 `레인`, `영역` and `마일스톤` are open sets hk owns (a new lane appears in hk
-first, hk 4051). When nothing above refuses, a value of theirs missing from
+first, hk 4051). YouTrack enum names are case-insensitively unique, so a
+value differing from a bundle value only in case is not added: the update
+sends the bundle's spelling, and an archived one is un-archived (hk 4234).
+Otherwise, when nothing above refuses, a value of theirs missing from
 the project's bundle is added to that bundle (`POST
 /api/admin/customFieldSettings/bundles/enum/<bundle>/values` with `$type` and
 `name`), and an archived one is un-archived (`POST .../values/<value id>` with
@@ -984,8 +987,10 @@ failure is `not_sent`, as a failed field read is. The update itself is still
 the one POST above.
 
 **Evidence.** A GET of the issue: the summary, the description and every
-snapshot field equal (a field the issue lacks counts as empty) applies the
-op; anything else is one mismatch and keeps it `remote_unknown`. Resending an
+snapshot field equal (a field the issue lacks counts as empty; an open-set
+value compares case-insensitively, since the issue carries the bundle's
+spelling) applies the op; anything else is one mismatch and keeps it
+`remote_unknown`. Resending an
 identical snapshot would be harmless, but the shared rule holds: no automatic
 resend.
 
