@@ -300,6 +300,15 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	if err != nil {
 		return ytwrite.Op{}, "", err
 	}
+	// An issue_create op is dispatched to the YouTrack project its task's
+	// project maps to now, not the one it was prepared for (hk 3909, 4318);
+	// payload is nil when that is unchanged.
+	var payload []byte
+	if reject == "" && op.Kind == ytwrite.KindIssueCreate {
+		if target, sha, payload, err = l.s.claimYTIssueTargetTx(ctx, tx, op); err != nil {
+			return ytwrite.Op{}, "", err
+		}
+	}
 	if reject == "" {
 		// A snapshot prepared behind a move that was refused names a project
 		// its issue is not in; it is rejected, never written there (hk 4111).
@@ -314,9 +323,14 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 		}
 		return op, ytwrite.ClaimNotPrepared, tx.Commit(ctx)
 	}
+	var newPayload *string
+	if payload != nil {
+		p := string(payload)
+		newPayload = &p
+	}
 	op, err = scanYTOp(tx.QueryRow(ctx, `UPDATE yt_write_ops SET state='dispatched', attempts=attempts+1, dispatched_at=$2,
-		yt_target_id=$3, payload_sha=$4
-		WHERE id=$1 RETURNING `+ytOpColumns, id, now.UTC(), target, sha))
+		yt_target_id=$3, payload_sha=$4, payload=coalesce($5::jsonb, payload)
+		WHERE id=$1 RETURNING `+ytOpColumns, id, now.UTC(), target, sha, newPayload))
 	if err != nil {
 		return ytwrite.Op{}, "", err
 	}
