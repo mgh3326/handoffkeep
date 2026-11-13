@@ -364,6 +364,17 @@ package store
 //     the recovery commits, and a recovery that starts after a switch sees
 //     youtrack and keeps the op.
 //
+//   - The automatic binder (yt_binding_binder.go, hk 4492). Its candidate
+//     scan takes the yt_binding_cursor row FOR UPDATE, reads task_comments,
+//     yt_task_bindings and yt_issue_intents without a lock, and inserts new
+//     yt_binding_intents rows. Its publication (AddYTTaskBindingFrom) takes
+//     AddYTTaskBinding's locks in the same order and touches no other table.
+//     Settling an intent is one UPDATE or DELETE of its own row, and
+//     YTBindingExcluded one plain read of yt_binding_history. No holder takes
+//     a task row, a lane lock, the ownership lock or a level 1-5 lock, and no
+//     other transaction locks a cursor or intent row, so the binder adds no
+//     wait cycle.
+//
 //   - The YouTrack sync's single-run guard is a session-scoped
 //     pg_try_advisory_lock(8241873404) on its own pooled connection. It is
 //     taken before the run and released after it, and no other writer takes

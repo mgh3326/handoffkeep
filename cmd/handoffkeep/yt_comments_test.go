@@ -320,7 +320,7 @@ func TestYTCommentsWorkerStopIsBoundedWhileSettling(t *testing.T) {
 		stoppedAt = time.Now()
 		stop()
 	}
-	w, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsCanary, false, nil)
+	w, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsCanary, false, false, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +365,7 @@ func TestYTCommentsWorkerStopIsBoundedWhileSettling(t *testing.T) {
 		t.Fatalf("op after a stop during settlement: %+v %v; want dispatched (durable, unrecorded)", op, err)
 	}
 
-	restarted, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsCanary, false, func() time.Time { return time.Now().UTC().Add(time.Minute) })
+	restarted, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsCanary, false, false, "", func() time.Time { return time.Now().UTC().Add(time.Minute) })
 	if err != nil {
 		t.Fatal(err)
 	}
