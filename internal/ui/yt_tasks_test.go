@@ -96,7 +96,8 @@ func ytIssue(id string, hkID int64, title, state, lane string, priority int, ext
 
 func TestYTSnapshotPagesEveryIssueAndCachesForTheTTL(t *testing.T) {
 	fake := &fakeTaskIssues{}
-	for i := 0; i < youtrack.TaskIssuePageSize+3; i++ {
+	const count = 20_001
+	for i := 0; i < count; i++ {
 		fake.issues = append(fake.issues, ytIssue(fmt.Sprintf("2-%d", i), int64(i+1), "t", "backlog", "handoffkeep", 0))
 	}
 	src := newYTTaskSource(fake, fakeYTStore{projects: []store.YouTrackProject{{HKProject: "handoffkeep", ShortName: "HKW"}}}, "tenant", time.Minute)
@@ -106,18 +107,19 @@ func TestYTSnapshotPagesEveryIssueAndCachesForTheTTL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snap.Tasks) != youtrack.TaskIssuePageSize+3 || fake.reads != 2 {
-		t.Fatalf("tasks=%d reads=%d", len(snap.Tasks), fake.reads)
+	wantReads := (count + youtrack.TaskIssuePageSize - 1) / youtrack.TaskIssuePageSize
+	if len(snap.Tasks) != count || fake.reads != wantReads {
+		t.Fatalf("tasks=%d reads=%d, want %d tasks across %d pages", len(snap.Tasks), fake.reads, count, wantReads)
 	}
 	if fake.queries[0] != "(project: {HK} or project: {HKW}) sort by: created asc" {
 		t.Fatalf("query=%q", fake.queries[0])
 	}
 	clock = clock.Add(59 * time.Second)
-	if _, err := src.snapshot(context.Background()); err != nil || fake.reads != 2 {
+	if _, err := src.snapshot(context.Background()); err != nil || fake.reads != wantReads {
 		t.Fatalf("within TTL: err=%v reads=%d", err, fake.reads)
 	}
 	clock = clock.Add(2 * time.Second)
-	if _, err := src.snapshot(context.Background()); err != nil || fake.reads != 4 {
+	if _, err := src.snapshot(context.Background()); err != nil || fake.reads != 2*wantReads {
 		t.Fatalf("after TTL: err=%v reads=%d", err, fake.reads)
 	}
 }

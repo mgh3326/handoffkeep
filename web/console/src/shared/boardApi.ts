@@ -13,8 +13,6 @@ import { getJSON } from "./http";
 export { HttpError } from "./http";
 
 const PAGE_LIMIT = 500;
-const MAX_TASKS = 5000;
-const MAX_COMMENTS = 2000;
 
 export type BoardData = {
   tasks: BoardTask[];
@@ -24,8 +22,7 @@ export type BoardData = {
   generatedAt: string;
 };
 
-// Walks the after_id cursor until the server reports the set complete. If the
-// client-side cap is hit first the board still renders, marked truncated.
+// Walks the after_id cursor until the server reports the set complete.
 export async function fetchBoardTasks(project?: string): Promise<BoardData> {
   const tasks: BoardTask[] = [];
   let states: string[] = [];
@@ -59,12 +56,11 @@ export async function fetchBoardTasks(project?: string): Promise<BoardData> {
     const next = page.next_after_id ?? 0;
     if (!Number.isSafeInteger(next) || next <= afterID || page.tasks.length === 0) {
       // A cursor that does not advance would re-request the same page until
-      // the cap — reject loudly instead of looping on a server violation.
+      // completion — reject loudly instead of looping on a server violation.
       throw new Error(
         `non-advancing board cursor: after_id=${afterID} next_after_id=${next}`,
       );
     }
-    if (tasks.length >= MAX_TASKS) return { tasks: tasks.slice(0, MAX_TASKS), states, truncated: true, generatedAt };
     afterID = next;
   }
 }
@@ -109,8 +105,7 @@ async function readAttachments(path: string): Promise<BoardAttachments> {
 }
 
 /** Reads a task's comments in creation order, walking the after_id cursor.
- * Past the client cap the list is returned marked truncated — never as if it
- * were complete. A missing task rejects with HttpError(404). */
+ * A missing task rejects with HttpError(404). */
 export async function fetchTaskComments(id: number): Promise<TaskComments> {
   const comments: BoardComment[] = [];
   let afterID = 0;
@@ -125,8 +120,8 @@ export async function fetchTaskComments(id: number): Promise<TaskComments> {
       return { comments, truncated: false };
     }
     const next = page.next_after_id ?? 0;
-    if (next <= afterID || comments.length >= MAX_COMMENTS) {
-      return { comments, truncated: true };
+    if (!Number.isSafeInteger(next) || next <= afterID || page.comments.length === 0) {
+      throw new Error(`non-advancing comments cursor: after_id=${afterID} next_after_id=${next}`);
     }
     afterID = next;
   }

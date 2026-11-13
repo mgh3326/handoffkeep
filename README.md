@@ -172,19 +172,19 @@ stateDiagram-v2
     triage --> dropped
     triage --> duplicate: requires a duplicate_of relation
     backlog --> unstarted
-    backlog --> researching: claim / next (verify, decide)
+    backlog --> researching: claim / next (verify, research, decide)
     backlog --> developing: claim / next (implement, fix, ops)
     backlog --> icebox
     backlog --> dropped
     backlog --> duplicate: requires a duplicate_of relation
-    backlog --> completed: decide, ops, verify; result link required
+    backlog --> completed: decide, ops, verify, research; result link required
     unstarted --> backlog
-    unstarted --> researching: claim / next (verify, decide)
+    unstarted --> researching: claim / next (verify, research, decide)
     unstarted --> developing: claim / next (implement, fix, ops)
     unstarted --> icebox
     unstarted --> dropped
     unstarted --> duplicate
-    unstarted --> completed: decide, ops, verify; result link required
+    unstarted --> completed: decide, ops, verify, research; result link required
     researching --> developing
     researching --> reviewing
     researching --> unstarted
@@ -232,7 +232,7 @@ is never stored (API rows carry it read-only as `category`):
 
 Open means `started` and nothing else. A claim (`tasks claim`)
 serves `backlog` and `unstarted` and sets the sub-state from the task kind:
-`implement`, `fix` and `ops` give `developing`; `verify` and `decide` give
+`implement`, `fix` and `ops` give `developing`; `verify`, `research` and `decide` give
 `researching`. Entering a started state needs `claimed_by` plus `refs.job_id`
 or a no-job reason. Waiting on the operator is the `awaiting_decision` flag,
 not a state: the task keeps its work state, cannot be claimed while flagged,
@@ -275,7 +275,7 @@ thing). `blocks` is informational. With `auto_close_parent` on (the default),
 a parent closes when its last sub-task settles: `deployed` if every done
 sub-task is `deployed`, otherwise `merged` if any is `merged` or `deployed`, or
 `completed` if all done sub-tasks are `completed` and the parent is `decide`,
-`ops` or `verify`. An `implement` or `fix` parent stays open in the last case,
+`ops`, `verify` or `research`. An `implement` or `fix` parent stays open in the last case,
 with an `auto_close` event. A sub-task in `icebox` or any open state blocks the
 close, and a parent whose sub-tasks are all `dropped` or `duplicate` stays where
 it is, with the skip recorded as an `auto_close` event. Reopening a sub-task
@@ -362,7 +362,7 @@ and writes nothing. `--started-stalled-hours` takes 1..8760 and
 startup, and the preview answers `400 invalid_context` outside 1..3650.
 A `mergewake.merge` event that applies to a task also applies, in the same
 transaction, to every other non-settled task whose `refs.pr` is that PR:
-implement tasks move to `merged`, and decide, verify and ops tasks close at
+implement tasks move to `merged`, and decide, verify, research and ops tasks close at
 `completed` with the PR as the result link. `handoffkeep tasks drift [--json]
 [--merged-days N]` (`GET /v1/tasks/drift?merged_days=N`, default 2) reads five
 drift classes and writes nothing: settled tasks with an open decision request,
@@ -625,8 +625,9 @@ uses the five-field key, never that producer filename.
 `lane.event` is a directly addressed, durable lane notification. Its required
 fields are `kind: "lane.event"`, `owner_lane`, `event_id`, and `text`; its
 idempotency key is `(owner_lane, event_id)`. `owner_lane` is the destination
-lane, not a parent-routing hint. `text` must be nonempty, at most 2048 bytes,
-and contain no NUL or C0/C1 control characters (including tab, CR, and LF).
+lane, not a parent-routing hint. `text` must be nonempty and contain no NUL
+or C0/C1 control characters (including tab, CR, and LF). The relay stores the
+full text; presentation layers may show its head on a typed line.
 Job event kinds reject a nonempty `text`; their `event_id` is a stored
 producer label rather than a deduplication input, so the two idempotency
 families stay unambiguous. As with job events, duplicate lane-event
@@ -698,7 +699,7 @@ also be `virtual`. OCI Object Storage uses
 required setting is absent, only attachments are disabled; documents
 continue to work.
 
-The default safety limits are a 50 MiB object maximum, 20 GB total storage,
+The OCI per-object ceiling is 50 GiB (single PutObject). The default safety limits are a 50 GiB configured object maximum, a 256 MiB buffered-completion fuse (one quarter of the 1 GiB Handoffkeep container memory limit), 20 GB total storage,
 800,000 monthly writes, and 8,000,000 monthly reads. Set the corresponding
 `HK_ATTACH_*` variables to positive values to adjust them. Text attachments
 are secret-scanned, MIME is sniffed and allowlisted, and dump/archive filename
@@ -727,9 +728,14 @@ HTTP clients use raw `PUT /v1/attachments` with `X-HK-Name`, `Content-Type`,
 and optional `X-HK-Ref` (`document:<key>`,
 `memory:<agent>/<name>`, or `task:<id>`). Remote MCP clients use the
 `attachment_put` tool instead: base64 `content_base64`, `name`, optional `mime`
-and `ref`, at most 10 MiB raw. It returns the `sha256`, `size_bytes`, `mime`,
+and `ref`, at most 10 MiB raw. Larger files use the MCP direct-upload tools,
+which currently accept up to 256 MiB because completion buffers the verified
+object; larger begin requests are refused with
+`upload_completion_buffer_limit_exceeded`. This is a separate server-path fuse
+from OCI's 50 GiB per-object ceiling. Streaming completion is tracked in hk
+4466. It returns the `sha256`, `size_bytes`, `mime`,
 `ref`, a stable `reference` (`hk:attachment/<sha256>`) for records to store, and
-a `lookup_path`, never a signed URL. Direct upload is **off** unless `HK_ATTACH_DIRECT_UPLOAD=1` is set. Enable it only after the real-bucket negative test passes on the target store: an oversized PUT to a presigned URL must be refused. `HK_ATTACH_STAGING_CAP_BYTES` (default 1 GiB) bounds the declared bytes of direct uploads whose staging object may still exist, and `HK_ATTACH_STAGING_CLIENT_CAP_BYTES` (default 256 MiB) bounds one creator's share. An upload stays charged until its staging object is confirmed absent and its presigned URL has expired; completing or refusing it does not release the charge. A begin over either budget is refused with `attachment_staging_cap`. Large files can skip hk entirely with a direct upload: `POST /v1/attachments/uploads` (MCP `attachment_upload_begin`) checks the declared name, type, size, sha256 and ref and returns a presigned PUT for a staging object; the client PUTs the bytes there, then `POST /v1/attachments/uploads/{id}/complete` (MCP `attachment_upload_complete`) checks size, sha256, type and secrets, then stores them under the same content key as `PUT /v1/attachments`. The server checks size, sha256, type and secrets whatever the declaration said. The presigned PUT signs its Content-Length where the store honours signed headers. The stored object is written from the bytes hk verified, so a later overwrite of the staging object cannot change it. A completed upload is idempotent, and concurrent completions register one attachment. The signed URL is a secret for one object: it appears only in the begin answer, so do not log it. A refusal is final and deletes the staging object. Staging objects that are never completed are swept hourly. `GET /v1/attachments/{sha}` streams through the
+a `lookup_path`, never a signed URL. Direct upload is **off** unless `HK_ATTACH_DIRECT_UPLOAD=1` is set. Enable it only after the real-bucket negative test passes on the target store: an oversized PUT to a presigned URL must be refused. `HK_ATTACH_STAGING_CAP_BYTES` and `HK_ATTACH_STAGING_CLIENT_CAP_BYTES` (both default 50 GiB) each permit one OCI-maximum object in staging. An upload stays charged until its staging object is confirmed absent and its presigned URL has expired; completing or refusing it does not release the charge. A begin over either budget is refused with `attachment_staging_cap`. Large files can skip hk entirely with a direct upload: `POST /v1/attachments/uploads` (MCP `attachment_upload_begin`) checks the declared name, type, size, sha256 and ref and returns a presigned PUT for a staging object; the client PUTs the bytes there, then `POST /v1/attachments/uploads/{id}/complete` (MCP `attachment_upload_complete`) checks size, sha256, type and secrets, then stores them under the same content key as `PUT /v1/attachments`. The server checks size, sha256, type and secrets whatever the declaration said. The presigned PUT signs its Content-Length where the store honours signed headers. The stored object is written from the bytes hk verified, so a later overwrite of the staging object cannot change it. A completed upload is idempotent, and concurrent completions register one attachment. The signed URL is a secret for one object: it appears only in the begin answer, so do not log it. A refusal is final and deletes the staging object. Staging objects that are never completed are swept hourly. `GET /v1/attachments/{sha}` streams through the
 service; add `?presign=1` for a ten-minute private URL. `/v1/usage` and
 authenticated `/metrics` expose the local fuse counters. `/metrics` also
 reports, per authenticated client, the CLI revision from its last
@@ -739,6 +745,16 @@ reports, per authenticated client, the CLI revision from its last
 restart forgets it until each client calls again. The server logs
 `api.client_revision client=... rev=... prev=...` when a client's revision
 changes (including its first request after a restart).
+
+`/metrics` also reports the YouTrack write outbox from the database: open ops
+per state (`handoffkeep_yt_write_ops_open{state}` for `prepared`, `dispatched`
+and `remote_unknown`), the age of the oldest open op of each state
+(`handoffkeep_yt_write_oldest_open_age_seconds{state}`, from `created_at`, or
+from `dispatched_at` for a dispatched op), open ops sent more than once
+(`handoffkeep_yt_write_ops_retrying`) and open ops checked again
+(`handoffkeep_yt_write_ops_reconciling`). The alert rules that read them are in
+`deploy/observability/yt-write-outbox.rules.yml`; applying them is the
+operator's (hk:doc `policy/observability`).
 
 ## Container image
 

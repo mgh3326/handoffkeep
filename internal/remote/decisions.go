@@ -16,6 +16,14 @@ type DecisionRecordList struct {
 	DecisionRequests []store.DecisionRecord `json:"decision_requests"`
 }
 
+// RecordSessionDecision creates a closed record for a decision settled in a
+// session chat. The server uses the authenticated client as recorder.
+func (c Client) RecordSessionDecision(ctx context.Context, in store.SessionDecisionInput) (store.SessionDecisionResult, error) {
+	var out store.SessionDecisionResult
+	err := c.call(ctx, "POST", "/v1/decisions/record", in, &out)
+	return out, err
+}
+
 // ListDecisionRecords lists decision records. Empty filter fields are left
 // to the server's defaults (open, not snoozed).
 func (c Client) ListDecisionRecords(ctx context.Context, f store.DecisionRecordFilter) (DecisionRecordList, error) {

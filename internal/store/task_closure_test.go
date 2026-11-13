@@ -63,13 +63,13 @@ func TestTaskClosureMigration(t *testing.T) {
 
 func TestCompletedKindGate(t *testing.T) {
 	s := schemaStore(t, "completed_kind")
-	for _, kind := range []string{"decide", "ops", "verify", "implement", "fix"} {
+	for _, kind := range []string{"decide", "ops", "verify", "research", "implement", "fix"} {
 		for _, from := range []string{StateBacklog, StateUnstarted, StateResearching, StateDeveloping, StateReviewing} {
 			t.Run(kind+"/"+from, func(t *testing.T) {
 				x := flowTask(t, s, s.pool, kind, from, true)
 				got, err := s.TransitionTaskWith(t.Context(), x.ID, TransitionInput{To: StateCompleted, By: "tester", Evidence: "https://example.com/result"})
 				if kind == "implement" || kind == "fix" {
-					if !errors.Is(err, ErrTaskConflict) || err.Error() != "task_conflict: completed applies to decide, ops and verify tasks" {
+					if !errors.Is(err, ErrTaskConflict) || err.Error() != "task_conflict: completed applies to decide, ops, verify and research tasks" {
 						t.Fatalf("err=%v", err)
 					}
 					return
@@ -108,12 +108,15 @@ func TestTaskClosure(t *testing.T) {
 	for _, tc := range []struct {
 		evidence string
 		ok       bool
-	}{{"notes", false}, {"hk:doc research/x", true}} {
+	}{{"notes", true}, {"hk:task/4404", true}, {"decision/2026-11-13/caps", true}, {"hk:doc research/x", true}, {"", false}} {
 		x := Task{}
 		err := applyLifecycle(&x, StateBacklog, StateCompleted, time.Now().UTC(), &TaskClosure{Type: "resolved", Evidence: tc.evidence})
 		if (err == nil) != tc.ok {
 			t.Fatalf("%q: %v", tc.evidence, err)
 		}
+	}
+	if rule := taskClosureRules[StateCompleted]; rule.ResultLink {
+		t.Fatal("completed still requires a result-link form")
 	}
 	t.Run("settled transitions retain and reopen clears closure", func(t *testing.T) {
 		now := time.Now().UTC()
@@ -278,7 +281,7 @@ func TestEveryCloseRecordsClosure(t *testing.T) {
 
 func TestAutoCloseCompletedParentKinds(t *testing.T) {
 	s := schemaStore(t, "auto_close_completed_kind")
-	for _, kind := range []string{"decide", "ops", "verify", "implement", "fix"} {
+	for _, kind := range []string{"decide", "ops", "verify", "research", "implement", "fix"} {
 		t.Run(kind, func(t *testing.T) {
 			parent := flowTask(t, s, s.pool, kind, StateBacklog, false)
 			child := flowTask(t, s, s.pool, "decide", StateBacklog, false)

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
@@ -97,8 +96,6 @@ func insertEvent(ctx context.Context, q rowQuerier, e taskEventInput) (id int64,
 // applyLifecycle sets the lifecycle timestamps for a move from one state to
 // another. started_at keeps its first value; completed_at and canceled_at
 // describe the current state, so leaving the category clears them.
-var completedEvidenceRE = regexp.MustCompile(`^(https?://\S+|hk:doc \S+)$`)
-
 func applyLifecycle(x *Task, from, to string, now time.Time, c *TaskClosure) error {
 	if closureWrittenBy(from, to) {
 		if c == nil {
@@ -121,9 +118,6 @@ func applyLifecycle(x *Task, from, to string, now time.Time, c *TaskClosure) err
 		}
 		if !valid {
 			return fmt.Errorf("%w: type is not allowed for target state", ErrClosureInvalid)
-		}
-		if rule.ResultLink && !completedEvidenceRE.MatchString(evidence) {
-			return fmt.Errorf("%w: completed requires a result link", ErrClosureInvalid)
 		}
 		x.Refs.Closure = &TaskClosure{Type: c.Type, Evidence: evidence}
 	} else if !IsSettledState(to) {
@@ -558,7 +552,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 			return Task{}, transitionConflict(from, to)
 		}
 		if to == StateCompleted && from != StateMerged && !canCompleteKind(x.Kind) {
-			return Task{}, fmt.Errorf("%w: completed applies to decide, ops and verify tasks", ErrTaskConflict)
+			return Task{}, fmt.Errorf("%w: completed applies to decide, ops, verify and research tasks", ErrTaskConflict)
 		}
 		// A task waiting on a decision leaves only the way the old
 		// needs_decision state did: back to backlog, parked, or dropped.
@@ -625,12 +619,6 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 	// pending notice. The old answer stays in the task_events refs snapshots.
 	if x.Refs.Disposition != nil && action == actSetFlag {
 		x.Refs.Disposition.Answer = nil
-	}
-	if action == actSetFlag && x.Refs.DecisionOptions != nil {
-		finalText := note + "\n" + FormatDecisionOptions(*x.Refs.DecisionOptions)
-		if len([]byte(finalText)) > RelayLaneEventMaxBytes {
-			return Task{}, errors.New("decision question and options exceed 2048 bytes")
-		}
 	}
 	// The task/job-linkage guard (decision/2026-09-27/task-job-linkage item
 	// 2): entering a started state without both claimed_by and refs.job_id is

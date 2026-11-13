@@ -336,12 +336,49 @@ and times; never the body or the key. A full page carries `next_after_id`.
 through `POST /v1/yt/ops/{id}/resolve` (operator bearer only). It refuses an op
 that is not `remote_unknown` (409 `ytwrite_state`) and never resends.
 
+**Held-op recovery** (`store.RecoverHeldYTOps`, hk 4491). A task's
+`yt_task_bindings` row admits its hk comment, `issue_fields` and `issue_move`
+ops. When the row is deleted or names another issue, the ops it admitted stay
+`prepared`, the claim answers `held`, and every later op on the task's lane is
+blocked behind them; `yt ops resolve` accepts only `remote_unknown`. The comment
+worker therefore runs a pass every 5 minutes, before the catch-up. A candidate
+is a `prepared` op of one of those kinds that has been prepared for more than
+1 hour (`store.YTHeldRecoveryGrace`), whose kind's write mode is on in this
+process, whose tenant is the worker's own, and whose gate does not admit it. Each candidate is decided in its own
+transaction under the task's lane lock, from the rows as they are then:
+
+| Class | Test | Action |
+|---|---|---|
+| `held_binding` | the task has no binding | rejected, `binding_removed` |
+| `held_binding_changed` | the task is bound to another issue on the op's tenant | rejected, `binding_changed` |
+| `held_other_tenant` | the task's binding is on another tenant | kept: that tenant's worker may own the op |
+| `held_authority_youtrack` | one of the first two, and the op's kind is canonical in YouTrack (`comments` for a comment, `tasks` for fields and moves) | kept: the op may be the only delivery of the content; the operator restores the binding or resolves the op |
+| `held_mode` | the kind's write mode is not on | never read: turning the mode on releases the op |
+
+The authority row is read `FOR SHARE` under the lane lock, so a switch to
+youtrack either waits for the pass and then counts the op as resolved, or has
+committed and the pass keeps the op. The pass never retargets an op and never
+touches a `dispatched` or `remote_unknown` op, and it never acts on another
+tenant's op. The scan leaves out the ops it would keep for a standing reason
+(`held_other_tenant`, `held_authority_youtrack`), so they cannot hide a later
+op; a pass examines at most 1000 ops oldest first, and the next pass reaches
+the rest. Each rejection logs `ytwrite.held_op_rejected op_id= task_id=
+kind= reason=`; the rejected-class alert then names the op with its reason.
+
 **Alerts** (`handoffkeep-design` lane, outbox kind `yt_write_op`). The alert
 worker raises two classes: `stuck` (an op prepared or dispatched for more
 than 10 minutes, or `remote_unknown` for more than 10 minutes since its creation) and `rejected` (an op rejected, or applied with reason
 `binding_conflict`). Per class and 10-minute window it writes one notice that
 covers every op of the class not yet announced, for example
 `[ytwrite] 2 stuck (dispatched: 1, prepared: 1) op ids 12, 15 | handoffkeep yt ops`.
+A prepared op of a binding-gated kind (an hk comment, `issue_fields`,
+`issue_move`) is counted under why it is held, not under `prepared`:
+`held_binding` (its task has no binding), `held_binding_changed` (the task is
+bound to another issue on the op's tenant), `held_other_tenant` (bound on
+another tenant), `held_authority_youtrack` (the content is canonical in
+YouTrack, so the pass below keeps the op) and `held_mode` (the kind's write
+mode is not on in this process); an op its gate admits stays `prepared`. For
+example `[ytwrite] 4 stuck (held_binding: 3, prepared: 1) op ids …`.
 `yt_write_op_alerts` records each op's announcement per class, so an op is
 named once; an op that a window's notice could not take (that window already
 has one for the class) is named by the next window. A `remote_unknown` op is
@@ -422,23 +459,27 @@ which would leave the comment on no path; an anchor that still conflicts after
 the checks fails the comment. A body or actor the protocol cannot send keeps
 b1a's locally rejected op and link.
 
-**Catch-up** (hk 3897). **Off by default**: it runs only with
-`HANDOFFKEEP_YT_COMMENTS_CATCHUP=on` (unset or `off` runs none; any other
-value fails startup), and stays off until the legacy comment push refuses to
-post while the mode is `canary` or `on` (hk 3907). A legacy push that posts a
-comment and ends without linking it (a lost response, a failed link insert, a
-dead process) leaves no local trace, so the catch-up would copy that comment
-again. When enabled, before each `Drive` pass the worker in mode on runs
-`Store.CatchUpYTComments`: up to 200 comments (`ytCommentsCatchUpLimit`),
+**Catch-up** (hk 3897). **On by default in mode `on`**: it runs before each
+`Drive` pass unless `HANDOFFKEEP_YT_COMMENTS_CATCHUP=off` (unset or `on` runs
+it; any other value fails startup). `off` still runs the issue-create
+catch-up for `op_applied` bindings (`CatchUpYTIssueComments`, hk 3914). The
+default flipped with the removals (hk 4426): the legacy comment push that
+could post a comment and end without linking it no longer exists, and nothing
+else delivers a comment now, so a comment with no op would stay in PG only.
+While comments are canonical in YouTrack the pass prepares nothing (hk 4122).
+When it runs, the worker in mode on runs `Store.CatchUpYTComments`: up to 200
+comments (`ytCommentsCatchUpLimit`),
 oldest first, on a bound task, above the binding's `comments_from`, not
-written by the YouTrack pull, not already mirrored by the legacy push
-(`youtrack_comment_links`), with no ownership link and no op under
+written by the YouTrack pull, not already mirrored (`youtrack_comment_links`
+is frozen since the push's removal, but its rows still count), with no
+ownership link and no op under
 `task-comment:<id>`. These are comments written after the binding that the
 enqueue did not copy: a writer that does not enqueue (a dots reply) or a
 comment written while the mode was not `on`. Each gets, in its own
 transaction, exactly what the enqueue would have written (`ytCommentOnOpTx`),
-with the op's `created_at` the pass's time; the transaction takes the task's
-lane lock first and reads the link and the op again, and the op's unique
+with the op's `created_at` the pass's time; the transaction reads the comments
+authority row `FOR SHARE` first, then takes the task's
+lane lock and reads the link and the op again, and the op's unique
 `(principal, kind, idem_key)` keeps two workers to one op. It logs
 `ytwrite.comment_catchup task_id=<id> comment_id=<id> op_id=<id>`; a
 disagreeing source gets no op and `ytwrite.comment_catchup_skipped_ambiguous
@@ -446,22 +487,18 @@ task_id=<id> comment_id=<id> source=<source>`, once per worker process (the
 worker leaves the comment out of its later passes; a restart looks again). A
 failed pass logs `ytwrite.comment_catchup_failed`. No YouTrack call.
 
-**The catch-up and the legacy push.** The legacy push (`youtrack sync`,
-`UnpushedYouTrackComments`) keeps selecting every comment with no link, in
-every mode, and posts each before it links it. The catch-up never runs
-beside it: when a pass finds comments it tries the sync lock
-(`pg_try_advisory_lock(8241873404)`, `TryYouTrackSyncLock`), which every sync
-run of this release and of the releases before it holds for its whole run,
-across its selection, its POSTs and its `youtrack_comment_links` inserts. A
-held lock defers the pass (`ytwrite.comment_catchup_deferred comments=<n>
-reason=sync_running`, nothing written); otherwise the pass holds the lock
-until it ends and runs each comment's transaction on the lock's own
-connection (no second pool connection, so a pool of one cannot hang), and
-each transaction re-reads the push's link under the lane lock, so a comment a
-finished sync posted and linked is left. A sync that
-starts during a pass exits 3 ("another youtrack sync is running") and its
-next run goes on. Neither waits for the lock, so the lock order is
-unchanged.
+**The catch-up's sync lock.** No legacy push runs any more, but a pass that
+finds comments still tries the sync lock (`pg_try_advisory_lock(8241873404)`,
+`TryYouTrackSyncLock`) and works only while it holds it: the lock is what an
+authority switch to youtrack tries first (`SetYTAuthority`), so no switch
+commits in the middle of a pass, and each comment's transaction reads the
+authority row `FOR SHARE` besides. A held lock defers the pass
+(`ytwrite.comment_catchup_deferred comments=<n> reason=sync_running`, nothing
+written) — another catch-up pass or a previous release's sync can hold it —
+and the pass holds the lock until it ends, running each comment's
+transaction on the lock's own connection (no second pool connection, so a
+pool of one cannot hang). Both sides only try the lock, never wait for it,
+so the lock order is unchanged.
 
 **Legacy sync is refused while the protocol owns writes (hk 3907).** The
 legacy push and the adoption are a second writer to the same YouTrack objects,
@@ -680,10 +717,15 @@ and `youtrack_comment_links` (legacy and pulled comments). It is read-only: `sto
 
 | Target | Scope | Rebuilt from | Equal when |
 |---|---|---|---|
-| documents | every `yt_article_bindings` row on the tenant | the article's content; for an `op_applied` binding the body inside hk's rendered form (`ytwrite.ParseArticleContent`; another form differs) | its sha256 is `documents.sha256`. A binding that names the import's split index (articles-backfill stored no content sha) is `exception_not_updated` (D4), not a failure, and its article is not read; the current body size decides nothing, so a document that grew past 240 KiB after a single-part import is compared. A body quoting the op marker whose article holds it escaped (hk 4295) is the exception `escaped_marker` |
-| comments | `--sample-comments` random bound tasks (default 200, by `md5("<seed>:<task id>")`) and the 20 bound tasks with the most comments | the issue's comments, listed stably | every hk comment has exactly one copy with the same (author, time, body), and every YouTrack comment copies one |
-| tasks | every `yt_task_bindings` row on the tenant | the issue | hk ID → id, the description's title line → title, the project → project |
+| documents | every `yt_article_bindings` row on the tenant; under `--project P`, only those of P's tasks — a document with no task is excluded | the article's content; for an `op_applied` binding the body inside hk's rendered form (`ytwrite.ParseArticleContent`; another form differs) | its sha256 is `documents.sha256`. A binding that names the import's split index (articles-backfill stored no content sha) is `exception_not_updated` (D4), not a failure, and its article is not read; the current body size decides nothing, so a document that grew past 240 KiB after a single-part import is compared. A body quoting the op marker whose article holds it escaped (hk 4295) is the exception `escaped_marker` |
+| comments | `--sample-comments` random bound tasks (default 200, by `md5("<seed>:<task id>")`) and the 20 bound tasks with the most comments; under `--project P`, only P's tasks are sampled | the issue's comments, listed stably | every hk comment has exactly one copy with the same (author, time, body), and every YouTrack comment copies one |
+| tasks | every `yt_task_bindings` row on the tenant; under `--project P`, only bindings whose task is in P | the issue | hk ID → id, the description's title line → title, the project → project |
 | decisions | every `yt_decision_bindings` row on the tenant | the DEC issue's description | question, options and answer equal (the Y6 block) |
+
+`--project P` narrows tasks, the comment sample and documents to P; it never
+narrows decisions (below). A clean result under `--project P` certifies only
+what was checked: bindings outside P, and documents with no task, were not
+read, so their differences would not have shown.
 
 **Comments.** A comment in the rendered form of op N (`RenderedOpID`) whose op
 is one of the task's comments' (`yt_comment_write_links`) gives its author and
@@ -716,9 +758,12 @@ sample on the same data.
 **Tasks.** The id is the `hk ID` field (else the description's `hk task: #N`
 line). The title is the description's title line in whichever form wrote it:
 issue_fields' `RenderFields` (whitespace collapsed, so PG's title is compared
-collapsed), issue_create's `RenderIssue` or the import's `Original hk title:`
-(both exact). The project is the `hk 프로젝트` field (else the description's
-project; both, when present, must agree), with `Unassigned` read as none.
+collapsed), issue_create's `RenderIssue`, or the import's `Original hk title:`
+(the last two exact; the import's title may span lines and ends where its
+metadata block — `제목(한국어):`, `Body document:`, `PR:`, `Job:`, `Parent
+task:` — begins). The project is the `hk 프로젝트` field (else the
+description's project; both, when present, must agree), with `Unassigned`
+read as none.
 
 **Decisions.** The DEC issue's description is read in the Y6 form only:
 `RenderDecision`'s block (a decision_fields snapshot), or the block between
@@ -968,9 +1013,14 @@ and the value; a 4xx from the POST is `rejected / http_4xx`. Either raises the
 rejected-op alert, and the next feed change or backfill run prepares the
 snapshot again (Rejected snapshots above). No map rows.
 
-`레인`, `영역` and `마일스톤` are open sets hk owns (a new lane appears in hk
-first, hk 4051). When nothing above refuses, a value of theirs missing from
-the project's bundle is added to that bundle (`POST
+`레인`, `영역` and `마일스톤` are open sets hk owns (a new value appears in hk
+first, hk 4051). `영역` and `마일스톤` are the import's string fields (hk
+4305), so bundle handling applies only to projects that carry them as enums.
+YouTrack enum names are case-insensitively unique, so a value differing from
+a bundle value only in case is not added: the update sends the bundle's
+spelling, and an archived one is un-archived (hk 4234). Otherwise, when
+nothing above refuses, a value of an enum-shaped field missing from the
+project's bundle is added to that bundle (`POST
 /api/admin/customFieldSettings/bundles/enum/<bundle>/values` with `$type` and
 `name`), and an archived one is un-archived (`POST .../values/<value id>` with
 `archived: false`), never duplicated. The add goes to the bundle the project's
@@ -984,8 +1034,10 @@ failure is `not_sent`, as a failed field read is. The update itself is still
 the one POST above.
 
 **Evidence.** A GET of the issue: the summary, the description and every
-snapshot field equal (a field the issue lacks counts as empty) applies the
-op; anything else is one mismatch and keeps it `remote_unknown`. Resending an
+snapshot field equal (a field the issue lacks counts as empty; an open-set
+value compares case-insensitively, since the issue carries the bundle's
+spelling) applies the op; anything else is one mismatch and keeps it
+`remote_unknown`. Resending an
 identical snapshot would be harmless, but the shared rule holds: no automatic
 resend.
 
@@ -1556,6 +1608,10 @@ mode on, for each changed document, in order:
   and the rescan both find such a document: the rescan lists every unbound
   post-import document whose create is not held, so no document change is
   needed.
+- no binding, created after the import ended, and a decision whose body
+  amends a policy document with no bound article on the tenant:
+  `parent_pending`, no op. The catch-up and the rescan retry it once that
+  policy is bound.
 
 **Catch-up.** The consumer's cursor starts at the feed's end, so each
 process in mode on runs, after the cursor exists, one full catch-up: every
@@ -1572,7 +1628,8 @@ Mode off prepares nothing and advances the cursor. Each pass logs
 `ytwrite.articles_feed documents= create_prepared= create_rejected=
 create_exists= update_prepared= unchanged= exception_not_updated=
 exception_unbound_imported= out_of_scope= deleted= other_tenant= no_project=
-invalid=`. No parent is set: hk 3995 had no settled rule when this shipped.
+invalid=`. A document waiting on its policy's article logs
+`ytwrite.article_parent_pending`; see Parent.
 
 **Op.** Principal and actor `hk:documents`, lane `document:<id>`. An
 `article_create` targets the project id and carries the summary, the body
@@ -1617,6 +1674,33 @@ Anything else (gone, another project, no marker) rejects the op
 `legacy_synced_unverified`, and so does, at prepare time, a legacy article
 the sync split into parts or whose legacy project has no YouTrack id. A
 rejected document stays unbound and holds the documents authority switch. Any other failed read leaves the op `not_sent`.
+
+**Parent** (hk 3995). A payload may name a parent: `parent_article_id` (the
+article it goes under) or `parent_family` (the family whose root it goes
+under); setting both is refused by `CheckArticle`. A payload with neither,
+as every create made before this shipped, stays top-level, and so does a
+legacy-synced document (it is adopted where it is). The parent is decided at
+prepare time and kept in the payload, so an op prepared earlier stays
+top-level.
+- A decision whose body has an `amends: policy/<key>` line (the first such
+  line; the value must be a `policy/` key) goes under the article of that
+  policy document, bound on the tenant. Until that policy has one, the prepare
+  writes no op: outcome `parent_pending`, logged per document as
+  `ytwrite.article_parent_pending`; the catch-up and the rescan retry it.
+- Any other document whose key has a `/` goes under its family root: the
+  key's first segment. A segment that is not `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`
+  gets no parent, logged `ytwrite.article_family_skipped`, so no create is
+  refused for its key.
+- A family root is a top-level article: summary the family, content
+  `Family root for <family> documents.` and the marker
+  `<!-- hk-family:<family> -->` (`ytwrite.FamilyRootMarker`). Send finds it
+  by summary and marker: none, and it creates one before the document; one,
+  it is the parent; two or more, the op is `rejected / ambiguous_issue` (no
+  POST). Root creation is not an op, so no op records it. Residual risk: two
+  first creates of one family in one project, running at once, can make two
+  roots; the next create of that family then refuses `ambiguous_issue` until
+  an operator merges them.
+- Evidence looks for the root without creating it: no root, no match.
 
 **Send.** `article_create`: one search of the project for the summary
 (`GET /api/articles`, query `project: <SHORT> "<summary>"`, at most 100 hits,
