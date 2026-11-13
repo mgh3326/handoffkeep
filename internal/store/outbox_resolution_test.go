@@ -387,7 +387,7 @@ func TestDeployResultNotice(t *testing.T) {
 	claim("job-amb-b", "lane-amb-b", "")
 	ambKey := "deploy/" + f.svc + "/20261113T010253Z"
 	ambA := put(ambKey, body("prod", `"b\u0000c"`, "failed", "", "job-amb-a"))
-	ambB := put(ambKey, body("prod\u0000job-amb-a", `"c"`, "failed", "", "job-amb-b"))
+	ambB := put(ambKey, body(`prod\u0000job-amb-a`, `"c"`, "failed", "", "job-amb-b"))
 	if ambA == ambB {
 		t.Fatal("distinct bodies share an id")
 	}
@@ -402,7 +402,7 @@ func TestDeployResultNotice(t *testing.T) {
 	if rows := outboxByPrefix(t, pool, ctlID); len(rows) != 1 || !validLaneEventText(rows[0].Text) {
 		t.Fatalf("control character record rows=%+v", rows)
 	}
-	nulID := put("deploy/"+f.svc+"/20261113T010403Z", body("prod", `"ref-x"`, "success", "", "job-deploy-1\u0000x"))
+	nulID := put("deploy/"+f.svc+"/20261113T010403Z", body("prod", `"ref-x"`, "success", "", `job-deploy-1\u0000x`))
 	if rows := outboxByPrefix(t, pool, nulID); len(rows) != 0 {
 		t.Fatalf("NUL job id queued %d notices", len(rows))
 	}
