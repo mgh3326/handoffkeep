@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -161,52 +162,213 @@ func prepareYTIssueTx(ctx context.Context, tx pgx.Tx, now time.Time, t Task, p y
 
 // enqueueYTIssueTx is every task creator's step in mode on (CreateTask,
 // intake, ticket sets, dots, dispositions), after the task insert and before
-// its commit: the task's issue_create op, or nothing (one log line)
-// when its project maps to no YouTrack project. Any database error fails the
-// whole create.
-//
-// Locks, after CreateTask's own (lockorder.go): a plain read of the task's
-// youtrack_projects row, then the new task's lane lock and its new
-// yt_write_ops row (prepareYTOpTx). Nothing else can hold a brand-new task's
-// lane.
+// its commit: the task's issue_create op, or, when its project maps to no
+// YouTrack project, an issue intent on the gate's tenant (hk 3942). Any
+// database error fails the whole create.
 func (s *Store) enqueueYTIssueTx(ctx context.Context, tx pgx.Tx, t Task) error {
+	_, err := s.ensureYTIssueTx(ctx, tx, t, t.CreatedAt.UTC(), true)
+	return err
+}
+
+// ensureYTIssueTx gives task t its issue_create op in mode on, under the
+// task's lane lock, which it takes first: on the tenant of the task's
+// yt_issue_intents row when it has one, else on the gate's tenant. A task
+// that already has its op, or an issue some other way
+// (ytTaskHasIssueOwnershipTx), gets nothing and loses its intent. A task
+// whose project maps to no YouTrack project gets no op (one
+// ytwrite.issue_skipped line); atCreate records the intent then, so the
+// intent pass (PrepareMappedYTIssues) prepares the op once the project is
+// mapped. An intent is made only at create time: a task moved to an unmapped
+// project keeps the op or the intent it has (hk 4318). created reports a new
+// op. A prepared op is never changed here: its claim targets the task's
+// project then (claimYTIssueTargetTx).
+//
+// Locks, after the caller's (lockorder.go): the task's lane lock, then plain
+// reads of its yt_issue_intents row, the ownership rows and
+// youtrack_projects, then its new yt_write_ops row (prepareYTOpTx) and its
+// yt_issue_intents row.
+func (s *Store) ensureYTIssueTx(ctx context.Context, tx pgx.Tx, t Task, now time.Time, atCreate bool) (created bool, err error) {
 	mode, tenant := s.ytIssuesNow()
 	if mode != YTIssuesOn {
-		return nil
-	}
-	p, found, err := s.ytIssueProject(ctx, tx, deref(t.Project))
-	if err != nil {
-		return err
-	}
-	if !found {
-		log.Printf("ytwrite.issue_skipped task_id=%d project=%q reason=project_unmapped", t.ID, deref(t.Project))
-		return nil
+		return false, nil
 	}
 	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(t.ID, 10)); err != nil {
-		return err
+		return false, err
 	}
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3)`,
 		YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(t.ID)).Scan(&exists); err != nil {
-		return err
+		return false, err
 	}
 	if exists {
-		return nil
+		return false, dropYTIssueIntentTx(ctx, tx, t.ID)
+	}
+	var intent string
+	if err := tx.QueryRow(ctx, `SELECT coalesce((SELECT tenant FROM yt_issue_intents WHERE task_id=$1),'')`, t.ID).Scan(&intent); err != nil {
+		return false, err
+	}
+	if intent != "" {
+		tenant = intent
 	}
 	owned, err := ytTaskHasIssueOwnershipTx(ctx, tx, t.ID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if owned {
 		log.Printf("ytwrite.issue_skipped task_id=%d project=%q reason=issue_owned", t.ID, deref(t.Project))
-		return nil
+		return false, dropYTIssueIntentTx(ctx, tx, t.ID)
 	}
-	op, _, err := prepareYTIssueTx(ctx, tx, t.CreatedAt.UTC(), t, p, tenant)
+	p, found, err := s.ytIssueProject(ctx, tx, deref(t.Project))
 	if err != nil {
-		return err
+		return false, err
+	}
+	if !found {
+		log.Printf("ytwrite.issue_skipped task_id=%d project=%q reason=project_unmapped", t.ID, deref(t.Project))
+		if !atCreate {
+			return false, nil
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO yt_issue_intents(task_id, tenant, recorded_at) VALUES ($1,$2,$3)
+			ON CONFLICT (task_id) DO NOTHING`, t.ID, tenant, now.UTC())
+		return false, err
+	}
+	op, created, err := prepareYTIssueTx(ctx, tx, now, t, p, tenant)
+	if err != nil {
+		return false, err
 	}
 	log.Printf("ytwrite.issue_enqueued op_id=%d task_id=%d state=%s reason=%q", op.ID, t.ID, op.State, op.Reason)
-	return nil
+	return created, dropYTIssueIntentTx(ctx, tx, t.ID)
+}
+
+func dropYTIssueIntentTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
+	_, err := tx.Exec(ctx, `DELETE FROM yt_issue_intents WHERE task_id=$1`, taskID)
+	return err
+}
+
+// claimYTIssueTargetTx is the target and payload issue_create op op is
+// dispatched with, in Claim's transaction under the task's lane lock
+// (hk 3909, 4318): the YouTrack project the task's project maps to now, so a
+// task moved before its issue was created gets it in its current project. The
+// op keeps its id, its key (ytwrite.IssueKey) and its place on the lane, and
+// only its yt_target_id, payload and payload_sha change, in the update that
+// dispatches it (migration 20261113-yt-issue-claim-target); a release that
+// does not retarget reads the same op and creates the issue where it was
+// prepared. The op is dispatched as it is (payload nil) when its project is
+// still the task's, when the task's project maps to no YouTrack project (or
+// it has none and this process does not know the HK bucket), or when the task
+// is gone. The task row is read without a lock (no lane holder locks a task
+// row): a move that commits after this read finds the op dispatched, and the
+// issue follows the task as any bound task's does (issue_move, yt_move.go).
+func (s *Store) claimYTIssueTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (target, sha string, payload []byte, err error) {
+	target, sha = op.YTTargetID, op.PayloadSHA
+	if op.Kind != ytwrite.KindIssueCreate || op.Principal != YTIssuePrincipal || op.EntityKind != "task" {
+		return target, sha, nil, nil
+	}
+	taskID, err := strconv.ParseInt(op.EntityID, 10, 64)
+	if err != nil {
+		return target, sha, nil, nil
+	}
+	var project *string
+	err = tx.QueryRow(ctx, `SELECT project FROM tasks WHERE id=$1`, taskID).Scan(&project)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return target, sha, nil, nil
+	}
+	if err != nil {
+		return "", "", nil, err
+	}
+	p, found, err := s.ytIssueProject(ctx, tx, deref(project))
+	if err != nil || !found {
+		return target, sha, nil, err
+	}
+	var was ytwrite.IssueCreatePayload
+	if err := json.Unmarshal(op.Payload, &was); err != nil {
+		return target, sha, nil, nil
+	}
+	if op.YTTargetID == p.projectID && was.Project == p.project {
+		return target, sha, nil, nil
+	}
+	n, err := ytwrite.IssueOp(ytwrite.IssueRequest{Principal: op.Principal, Actor: op.Actor, TaskID: taskID, Title: was.Title,
+		Project: p.project, YTProjectID: p.projectID, YTProjectShort: p.shortName, Tenant: op.Tenant})
+	if err != nil {
+		return "", "", nil, err
+	}
+	log.Printf("ytwrite.issue_retargeted op_id=%d task_id=%d from_project=%q to_project=%q yt_project_id=%q", op.ID, taskID, was.Project, p.project, p.projectID)
+	return n.YTTargetID, n.PayloadSHA, n.Payload, nil
+}
+
+// PrepareMappedYTIssues prepares, for up to limit yt_issue_intents rows of
+// the gate's tenant whose task's project now maps to a YouTrack project (or
+// has no project while the HK bucket is known), the task's issue_create op
+// through ensureYTIssueTx, each task in its own transaction, and returns how
+// many ops it prepared (hk 3942). The write worker of that tenant runs it
+// before each Drive pass in issue mode on, so the op goes out in that pass;
+// an intent of another tenant is never consumed here.
+func (s *Store) PrepareMappedYTIssues(ctx context.Context, limit int) (int, error) {
+	mode, tenant := s.ytIssuesNow()
+	if mode != YTIssuesOn {
+		return 0, nil
+	}
+	bucket := ""
+	if g := s.ytIssues.Load(); g != nil {
+		bucket = g.bucketID
+	}
+	rows, err := s.pool.Query(ctx, `SELECT i.task_id FROM yt_issue_intents i JOIN tasks t ON t.id = i.task_id
+		WHERE i.tenant = $1 AND (
+			(coalesce(t.project,'') = '' AND $2 <> '')
+			OR EXISTS (SELECT 1 FROM youtrack_projects yp WHERE yp.hk_project = t.project
+				AND coalesce(yp.yt_project_id,'') <> '' AND coalesce(yp.short_name,'') <> ''))
+		ORDER BY i.task_id LIMIT $3`, tenant, bucket, ytLimit(limit))
+	if err != nil {
+		return 0, err
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, id := range ids {
+		prepared, err := s.prepareYTIssueIntent(ctx, tenant, id)
+		if err != nil {
+			return n, fmt.Errorf("task %d: %w", id, err)
+		}
+		if prepared {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// prepareYTIssueIntent is one task of PrepareMappedYTIssues: the task's lane
+// lock first, as backfillYTIssue takes it, then the task row read without a
+// lock (after the lane lock, so it sees the project a SetTaskProject
+// committed under that lane, or that change waits and finds the op), then
+// ensureYTIssueTx. An intent that moved to another tenant meanwhile is left
+// alone. prepared reports a new op.
+func (s *Store) prepareYTIssueIntent(ctx context.Context, tenant string, taskID int64) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(taskID, 10)); err != nil {
+		return false, err
+	}
+	var have string
+	if err := tx.QueryRow(ctx, `SELECT tenant FROM yt_issue_intents WHERE task_id=$1`, taskID).Scan(&have); errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	} else if have != tenant {
+		return false, nil
+	}
+	var t Task
+	if err := tx.QueryRow(ctx, `SELECT id, title, created_by, project FROM tasks WHERE id=$1`, taskID).Scan(&t.ID, &t.Title, &t.CreatedBy, &t.Project); err != nil {
+		return false, err
+	}
+	created, err := s.ensureYTIssueTx(ctx, tx, t, time.Now().UTC(), false)
+	if err != nil {
+		return false, err
+	}
+	return created, tx.Commit(ctx)
 }
 
 // ytTaskHasIssueOwnershipTx mirrors the task ownership evidence used by
@@ -313,6 +475,9 @@ type YTIssueBackfillProject struct {
 	Existing int `json:"existing"`
 	// Unmapped: the project maps to no YouTrack project.
 	Unmapped int `json:"unmapped"`
+	// OtherTenant: the task waits on an issue intent of another tenant
+	// (hk 3942); that tenant's worker prepares its op.
+	OtherTenant int `json:"other_tenant"`
 	// Owned: the task already has an issue hk knows of (a binding, a canary
 	// enrollment, a task map row or a YouTrack origin recorded earlier);
 	// creating one would make a second.
@@ -374,13 +539,16 @@ func (s *Store) BackfillYTIssueOps(ctx context.Context, tenant, project string, 
 			p.Unmapped++
 		case "owned":
 			p.Owned++
+		case "other_tenant":
+			p.OtherTenant++
 		}
 	}
 	return r, nil
 }
 
 // backfillYTIssue is one task of a backfill, in one transaction: "prepared",
-// "rejected", "existing", "owned" or "unmapped", and the task's project. It
+// "rejected", "existing", "owned", "other_tenant" or "unmapped", and the
+// task's project. A prepared op drops the task's intent. It
 // takes the task's lane lock first, the lock canary enrollment and the
 // comment path take before they give the task an issue, so an "owned" check
 // and the op it allows cannot interleave with them.
@@ -390,14 +558,17 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 		return "", "", err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(taskID, 10)); err != nil {
+		return "", "", err
+	}
+	// The task is read under the lane lock, after any SetTaskProject that
+	// held it has committed, so the op and the intent it drops follow the
+	// task's current project (PR #357 review).
 	var t Task
 	if err := tx.QueryRow(ctx, `SELECT id, title, created_by, project FROM tasks WHERE id=$1`, taskID).Scan(&t.ID, &t.Title, &t.CreatedBy, &t.Project); err != nil {
 		return "", "", err
 	}
 	name := deref(t.Project)
-	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(taskID, 10)); err != nil {
-		return "", "", err
-	}
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3)`,
 		YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(taskID)).Scan(&exists); err != nil {
@@ -413,6 +584,15 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 	if owned {
 		return "owned", name, nil
 	}
+	// A task waiting on an issue intent belongs to the intent's tenant
+	// (hk 3942): only that tenant's op may be prepared for it here.
+	var intent string
+	if err := tx.QueryRow(ctx, `SELECT coalesce((SELECT tenant FROM yt_issue_intents WHERE task_id=$1),'')`, taskID).Scan(&intent); err != nil {
+		return "", "", err
+	}
+	if intent != "" && intent != tenant {
+		return "other_tenant", name, nil
+	}
 	p, found, err := s.ytIssueProject(ctx, tx, name)
 	if err != nil {
 		return "", "", err
@@ -425,6 +605,9 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 	}
 	op, created, err := prepareYTIssueTx(ctx, tx, time.Now().UTC(), t, p, tenant)
 	if err != nil {
+		return "", "", err
+	}
+	if err := dropYTIssueIntentTx(ctx, tx, taskID); err != nil {
 		return "", "", err
 	}
 	outcome := "prepared"

@@ -38,13 +38,17 @@ type Store interface {
 	MarkNotificationSent(ctx context.Context, eventID string, hubRowID int64) (store.NotificationOutbox, error)
 }
 
-// notifyType is the lane-event type a row goes out with.
+// notifyType is the lane-event type a row goes out with. A dots RESULT is
+// ready (it does not interrupt), a QUESTION is decision and a BLOCKED is
+// blocked (both interrupt; operator decision 166).
 func notifyType(kind string) string {
 	switch kind {
 	case store.OutboxKindDotsDecision, store.OutboxKindDecisionAnswered:
 		return "decision"
+	case store.OutboxKindDotsBlocked:
+		return "blocked"
 	case store.OutboxKindDotsReport:
-		return "report"
+		return "ready"
 	default:
 		return "info"
 	}

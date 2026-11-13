@@ -19,9 +19,11 @@ const (
 	OutboxKindDecisionAnswered = "decision_answered"
 	OutboxKindChatAnswer       = "chat_answer"
 	// The dots kinds name the lane-event type a drainer sends them with:
-	// report, decision and info.
+	// dots_report is ready (RESULT), dots_decision is decision (QUESTION),
+	// dots_blocked is blocked (BLOCKED), dots_followup is info.
 	OutboxKindDotsReport   = "dots_report"
 	OutboxKindDotsDecision = "dots_decision"
+	OutboxKindDotsBlocked  = "dots_blocked"
 	OutboxKindDotsFollowup = "dots_followup"
 	OutboxKindYTWriteOp    = "yt_write_op"
 	// The resolution kinds of hk 3295: an operator deny of a pending decision

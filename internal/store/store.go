@@ -3024,7 +3024,11 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "project", From: from, To: project, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "project", FromValue: from, ToValue: project}); err != nil {
 		return Task{}, false, err
 	}
-	if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
+	// A task with no op gets its first, on its intent's tenant when it has
+	// one (hk 3942); an existing op is left as it is: its claim targets the
+	// task's project then (claimYTIssueTargetTx, hk 3909). Task row, then
+	// lane lock, as CreateTask (lockorder.go).
+	if _, err := s.ensureYTIssueTx(ctx, tx, x, x.UpdatedAt, false); err != nil {
 		return Task{}, false, err
 	}
 	return x, true, tx.Commit(ctx)

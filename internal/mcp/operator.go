@@ -88,7 +88,7 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.decisionsHistory)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "decision_answer",
-		Description: "Answer one open hk decision request by request id, with an option key or free text and an optional note. Uses the same store path and validation as the console answer. A request that is operator_only is refused with decision_operator_only unless the call comes through a verified operator path; the attempt is kept and waits for that operator. An already answered or stale request returns the store's error code.",
+		Description: "Answer one open hk decision request by request id, with an option key or free text and an optional note. Uses the same store path and validation as the console answer. The answer is recorded with the channel it came through (mcp, or dots for the chatgpt channel). Pass idempotency_key to make a retry safe: the same key with the same answer returns the first result. A request that is operator_only is refused with decision_operator_only unless the call comes through a verified operator path; the attempt is kept and waits for that operator. An already answered or stale request returns the store's error code.",
 		Annotations: writeAnnotations(),
 	}, o.decisionAnswer)
 	gmcp.AddTool(s, &gmcp.Tool{
@@ -672,10 +672,11 @@ func sameOptionKeys(a []decisionOptionView, b []store.DecisionOption) bool {
 }
 
 type decisionAnswerInput struct {
-	RequestID string `json:"request_id"`
-	Option    string `json:"option,omitempty"`
-	Text      string `json:"text,omitempty"`
-	Note      string `json:"note,omitempty"`
+	RequestID      string `json:"request_id"`
+	Option         string `json:"option,omitempty"`
+	Text           string `json:"text,omitempty"`
+	Note           string `json:"note,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 func (o operatorTools) decisionAnswer(ctx context.Context, _ *gmcp.CallToolRequest, in decisionAnswerInput) (*gmcp.CallToolResult, any, error) {
@@ -695,12 +696,24 @@ func (o operatorTools) decisionAnswer(ctx context.Context, _ *gmcp.CallToolReque
 	if option == "" && text == "" {
 		return nil, nil, errors.New("an option or text is required")
 	}
+	// The write is keyed by the caller's idempotency key (optional): a repeat
+	// with the same key and answer replays the first result, and every answer
+	// writes its mcp_write_audit row in the same transaction.
+	write, err := o.write(toolDecisionAnswer, strings.TrimSpace(in.IdempotencyKey))
+	if err != nil {
+		return nil, nil, err
+	}
+	eventKey := ""
+	if write.Key != "" {
+		eventKey = store.MCPDecisionEventKey(o.principal.Actor, write.Key)
+	}
 	// dots (the ChatGPT channel) never answers an operator-only request: the
 	// store refuses it under the task lock, with no attempt written.
 	out, err := o.service.Store.ResolveDecision(ctx, store.ResolveDecisionInput{
 		RequestID: requestID, Kind: store.DecisionRequestAnswered, Option: option, Text: text,
 		Channel: o.principal.decisionChannel(), Actor: o.principal.Actor, Verified: o.principal.Access,
 		RefuseOperatorOnly: o.principal.Channel == ChannelChatGPT,
+		EventKey:           eventKey, Audit: &write,
 	})
 	if err != nil {
 		return nil, nil, err

@@ -38,6 +38,7 @@ type TaskDrift struct {
 	StartedStalledHours int            `json:"started_stalled_hours"`
 	SettledOpenDecision TaskDriftClass `json:"settled_open_decision"`
 	MergedPRNotMerged   TaskDriftClass `json:"merged_pr_not_merged"`
+	AutoCloseHeld       TaskDriftClass `json:"auto_close_held"`
 	MergedWithoutDeploy TaskDriftClass `json:"merged_without_deploy"`
 	IdleStarted         TaskDriftClass `json:"idle_started"`
 }
@@ -62,6 +63,14 @@ type TaskDriftTask struct {
 	PR              string    `json:"pr,omitempty"`
 	DecisionRequest string    `json:"decision_request,omitempty"`
 	Since           time.Time `json:"since"`
+
+	// What holds the task's close (taskHoldsTx and closeGateTx), and whether
+	// the hygiene job may apply it now (driftMechanical).
+	OpenPRs      []string `json:"open_prs,omitempty"`
+	RevertedPRs  []string `json:"reverted_prs,omitempty"`
+	OpenSubTasks []int64  `json:"open_sub_tasks,omitempty"`
+	Hold         string   `json:"hold,omitempty"`
+	Mechanical   bool     `json:"mechanical"`
 }
 
 // driftColumns is the TaskDriftTask row: id, lane, title, kind, state, pr,
@@ -73,15 +82,33 @@ const driftColumns = `id,lane,title,kind,state,COALESCE(refs->>'pr',''),COALESCE
 const driftSettledOpenSQL = `SELECT ` + driftColumns + `updated_at FROM tasks
 	WHERE state IN (` + settledStatesSQL + `) AND refs->'decision_request'->>'status'=$1 ORDER BY id`
 
-// driftMergedPRSQL is class (b): a non-settled task whose PR is merged. The PR
-// is merged when the work record says so (a merged changes row for the URL) or
-// a merged or deployed task already names it: the merge did not propagate to
-// this task.
-const driftMergedPRSQL = `SELECT ` + driftColumns + `updated_at FROM tasks t
-	WHERE t.state NOT IN (` + settledStatesSQL + `) AND COALESCE(t.refs->>'pr','')<>'' AND (
-		EXISTS (SELECT 1 FROM changes c WHERE c.state='merged' AND ('https://github.com/'||c.repo||'/pull/'||c.pr_number::text)=t.refs->>'pr')
-		OR EXISTS (SELECT 1 FROM tasks m WHERE m.id<>t.id AND m.state IN ('merged','deployed') AND m.refs->>'pr'=t.refs->>'pr')
-	) ORDER BY t.id`
+// driftMergedPRSQL is class (b): a non-settled task whose PR is merged, and no
+// unrelanded revert holds it (unresolvedRevertSQL). The PR is merged when one
+// of the task's implements changes is merged and not reverted (change_tasks;
+// the task names no PR, as a held merge leaves it), or when the work record
+// says so for the PR the task names (a merged changes row, or a merged or
+// deployed task that names it): the merge did not propagate to this task.
+var driftMergedPRSQL = `SELECT ` + driftColumns + `updated_at FROM tasks t
+	WHERE t.state NOT IN (` + settledStatesSQL + `) AND (
+		EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
+			WHERE ct.task_id=t.id AND ct.relation='implements' AND c.state='merged' AND c.reverted_by_change_id IS NULL)
+		OR (COALESCE(t.refs->>'pr','')<>'' AND (
+			EXISTS (SELECT 1 FROM changes c WHERE c.state='merged' AND (` + prURLSQL + `)=t.refs->>'pr')
+			OR EXISTS (SELECT 1 FROM tasks m WHERE m.id<>t.id AND m.state IN ('merged','deployed') AND m.refs->>'pr'=t.refs->>'pr')))
+	) AND NOT EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ` + unresolvedRevertSQL("t.id") + `)
+	ORDER BY t.id`
+
+// driftAutoCloseHeldSQL is class (e): an unsettled parent in an auto-close
+// state whose sub-tasks are all settled, one of which did work, and whose
+// automatic close would move it to merged or deployed (or to completed, for a
+// decide, ops or verify parent, the kinds canCompleteKind names). The close is
+// due and was not made: it is held, or was held and nothing re-ran it.
+var driftAutoCloseHeldSQL = `SELECT ` + driftColumns + `updated_at FROM tasks p
+	WHERE p.state IN (` + autoCloseStatesSQL + `)
+	AND EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=p.id AND k.state IN ('completed','merged','deployed'))
+	AND NOT EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=p.id AND k.state NOT IN (` + settledStatesSQL + `))
+	AND (p.kind IN ('decide','ops','verify') OR EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=p.id AND k.state IN ('merged','deployed')))
+	ORDER BY p.id`
 
 // driftMergedPageSQL is one page of class (c)'s candidates: merged for at least
 // the cutoff, after the (since, id) keyset cursor. Pages are read in order so
@@ -117,8 +144,17 @@ func (s *Store) TaskDrift(ctx context.Context, now time.Time, mergedDays int) (T
 	if out.SettledOpenDecision, err = driftList(ctx, tx, "state is settled and refs.decision_request is open", driftSettledOpenSQL, DecisionRequestOpen); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift settled_open_decision: %w", err)
 	}
-	if out.MergedPRNotMerged, err = driftList(ctx, tx, "not settled, and refs.pr is merged: a merged changes row names the PR, or a merged or deployed task does", driftMergedPRSQL); err != nil {
+	if out.MergedPRNotMerged, err = driftList(ctx, tx, "not settled, with a merged PR: an implements change is merged and not reverted, or refs.pr is merged (a merged changes row names it, or a merged or deployed task does); no unrelanded revert", driftMergedPRSQL); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_pr_not_merged: %w", err)
+	}
+	if err = s.annotateDriftHolds(ctx, tx, &out.MergedPRNotMerged, mergeAppliesFrom); err != nil {
+		return TaskDrift{}, fmt.Errorf("drift merged_pr_not_merged: %w", err)
+	}
+	if out.AutoCloseHeld, err = driftList(ctx, tx, "auto-close due and not made: an unsettled parent in an auto-close state, every sub-task settled and one did work, moving it to merged, deployed, or completed for decide, ops and verify", driftAutoCloseHeldSQL); err != nil {
+		return TaskDrift{}, fmt.Errorf("drift auto_close_held: %w", err)
+	}
+	if err = s.annotateDriftHolds(ctx, tx, &out.AutoCloseHeld, autoCloseAppliesFrom); err != nil {
+		return TaskDrift{}, fmt.Errorf("drift auto_close_held: %w", err)
 	}
 	if out.MergedWithoutDeploy, err = driftMergedWithoutDeploy(ctx, tx, now.Add(-time.Duration(mergedDays)*24*time.Hour), mergedDays); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_without_deploy: %w", err)
@@ -179,6 +215,47 @@ scan:
 	}
 	out.Count = len(out.Tasks)
 	return out, nil
+}
+
+// mergeAppliesFrom reports whether a merge event moves a task in state (the
+// merge row of sourceEventTable).
+func mergeAppliesFrom(state string) bool {
+	return sourceEventTable[SourceMergewakeMerge].from[state]
+}
+
+// driftMechanical reports whether the hygiene job (hk 3292) may apply a task's
+// close now: nothing holds it, its state is one applies accepts, and
+// closeGateTx passes (gate is its reason, "" when it passes).
+func driftMechanical(h taskHolds, gate, state string, applies func(state string) bool) bool {
+	return h.none() && gate == "" && applies(state)
+}
+
+// annotateDriftHolds fills, for each task a class names, what holds its close:
+// open_prs, reverted_prs, open_sub_tasks, and hold (the first reason). It sets
+// mechanical through driftMechanical. It only reads.
+func (s *Store) annotateDriftHolds(ctx context.Context, tx pgx.Tx, c *TaskDriftClass, applies func(state string) bool) error {
+	for i := range c.Tasks {
+		x := &c.Tasks[i]
+		var t Task
+		if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, x.ID), &t); err != nil {
+			return err
+		}
+		h, err := taskHoldsTx(ctx, tx, x.ID, "")
+		if err != nil {
+			return err
+		}
+		gate, err := s.closeGateTx(ctx, tx, t)
+		if err != nil {
+			return err
+		}
+		x.OpenPRs, x.RevertedPRs, x.OpenSubTasks = h.OpenPRs, h.RevertedPRs, h.OpenSubTasks
+		x.Hold = h.mergeReason()
+		if x.Hold == "" {
+			x.Hold = gate
+		}
+		x.Mechanical = driftMechanical(h, gate, t.State, applies)
+	}
+	return nil
 }
 
 // driftList runs one class query, which takes its args as $1.. and ends in an

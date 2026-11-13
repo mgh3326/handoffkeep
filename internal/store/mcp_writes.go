@@ -93,6 +93,13 @@ func mcpWriteRef(actor, key string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// MCPDecisionEventKey is the attempt event key of an MCP decision_answer that
+// carries the caller's idempotency key. It is scoped to the actor, so one
+// caller's key cannot replay another caller's answer.
+func MCPDecisionEventKey(actor, key string) string {
+	return "mcp-" + mcpWriteRef(actor, key)
+}
+
 // replayMCPWriteTx loads the first result a keyed write recorded. It reports
 // false when the key was never used.
 func replayMCPWriteTx(ctx context.Context, tx pgx.Tx, w MCPWrite, out any) (bool, error) {
