@@ -1,3 +1,4 @@
+import type { TaskSpawn } from "./spawn";
 export type TaskRefs = {
   closure?: { type: string; evidence: string };
   pr?: string;
@@ -251,6 +252,8 @@ export type BoardDetail = {
   decision_legacy?: LegacyDecisionView | null;
   /** Child tasks; absent when none or on pre-hierarchy servers. */
   children?: TaskChildRef[];
+  /** The task's panewire spawn request (hk 4377); absent or null when none. */
+  spawn?: TaskSpawn | null;
   /** Inter-task relations; absent when none or on pre-hierarchy servers. */
   relations?: TaskRelation[];
 };

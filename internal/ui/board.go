@@ -461,6 +461,8 @@ type boardDetailResponse struct {
 	// Children and Relations come from GetTask; absent when none.
 	Children  []store.TaskChild    `json:"children,omitempty"`
 	Relations []store.TaskRelation `json:"relations,omitempty"`
+	// Spawn is the task's panewire spawn request record (hk 4377); absent when none.
+	Spawn *store.TaskSpawn `json:"spawn,omitempty"`
 }
 
 func taskRef(id int64) string {
@@ -642,6 +644,7 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	response := boardDetailResponse{
+		Spawn:     task.Spawn,
 		Documents: projectedDocuments, DocumentsTruncated: documentsTruncated,
 		Origins: origins, Changes: changes, Jobs: projectedJobs, OriginsTruncated: originsTruncated, ChangesTruncated: changesTruncated, JobsTruncated: jobsTruncated,
 		Task:      projectBoardTask(task),

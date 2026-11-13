@@ -66,6 +66,7 @@ const defaultWorkStatus = {
   projects: [],
   in_work: [],
   backlog: [],
+  queued: [],
   movement: [],
 };
 

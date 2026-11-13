@@ -1,10 +1,12 @@
 import { getJSON } from "../shared/http";
+import type { TaskSpawn, TaskSpawnStart } from "../shared/spawn";
 import type {
   WorkStatusBacklogTask,
   WorkStatusCounts,
   WorkStatusInWorkTask,
   WorkStatusMovementDay,
   WorkStatusProject,
+  WorkStatusQueuedTask,
   WorkStatusResponse,
   WorkStatusSummary,
 } from "./types";
@@ -107,6 +109,45 @@ function parseBacklog(raw: unknown, path: string): WorkStatusBacklogTask {
   };
 }
 
+function parseSpawnStart(raw: unknown, path: string): TaskSpawnStart | null {
+  if (raw === null || raw === undefined) return null;
+  const o = object(raw, path);
+  return {
+    task_id: num(o, "task_id", path),
+    until: text(o, "until", path),
+    task_state: text(o, "task_state", path),
+    met: typeof o.met === "boolean" ? o.met : fail(`${path}.met`, "is not a boolean"),
+  };
+}
+
+function parseSpawn(raw: unknown, path: string): TaskSpawn {
+  const o = object(raw, path);
+  return {
+    request_id: text(o, "request_id", path),
+    job: text(o, "job", path),
+    role: text(o, "role", path),
+    state: text(o, "state", path),
+    reason: text(o, "reason", path),
+    attempt: num(o, "attempt", path),
+    host: text(o, "host", path),
+    next_check_at: nullableText(o, "next_check_at"),
+    expires_at: nullableText(o, "expires_at"),
+    updated_at: text(o, "updated_at", path),
+    start_condition: parseSpawnStart(o.start_condition, `${path}.start_condition`),
+  };
+}
+
+function parseQueued(raw: unknown, path: string): WorkStatusQueuedTask {
+  const o = object(raw, path);
+  return {
+    id: num(o, "id", path),
+    title: text(o, "title", path),
+    project: nullableText(o, "project"),
+    state: text(o, "state", path),
+    spawn: parseSpawn(o.spawn, `${path}.spawn`),
+  };
+}
+
 function parseMovementDay(raw: unknown, path: string): WorkStatusMovementDay {
   const o = object(raw, path);
   return {
@@ -130,6 +171,9 @@ export function parseWorkStatus(raw: unknown): WorkStatusResponse {
   if (!Array.isArray(root.backlog)) fail("root.backlog", "is not an array");
   const backlog = root.backlog.map((t, i) => parseBacklog(t, `root.backlog[${i}]`));
 
+  if (!Array.isArray(root.queued)) fail("root.queued", "is not an array");
+  const queued = root.queued.map((t, i) => parseQueued(t, `root.queued[${i}]`));
+
   if (!Array.isArray(root.movement)) fail("root.movement", "is not an array");
   const movement = root.movement.map((m, i) => parseMovementDay(m, `root.movement[${i}]`));
 
@@ -139,6 +183,7 @@ export function parseWorkStatus(raw: unknown): WorkStatusResponse {
     projects,
     in_work: inWork,
     backlog,
+    queued,
     movement,
   };
 }

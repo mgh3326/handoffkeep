@@ -531,6 +531,9 @@ type Task struct {
 	Children        []TaskChild    `json:"children,omitempty"`
 	Relations       []TaskRelation `json:"relations,omitempty"`
 	Events          []TaskEvent    `json:"events,omitempty"`
+	// Spawn is where the task's panewire spawn request stands (hk 4377); absent
+	// when no request was recorded. Read with the task, never stored on it.
+	Spawn *TaskSpawn `json:"spawn,omitempty"`
 }
 
 // RelayEvent is a durable report from a worker to its owning lane.  Delivery
@@ -3193,7 +3196,10 @@ func (s *Store) ListTasksFiltered(ctx context.Context, tq TaskQuery) ([]Task, er
 		return nil, err
 	}
 	rows.Close()
-	return out, s.markStalled(ctx, s.pool, out, now)
+	if err := s.markStalled(ctx, s.pool, out, now); err != nil {
+		return out, err
+	}
+	return out, attachTaskSpawns(ctx, s.pool, out)
 }
 
 // GlanceTasks returns the counts and active task slice needed by the compact UI
@@ -3256,6 +3262,9 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 	}
 	one := []Task{x}
 	if err := s.markStalled(ctx, s.pool, one, time.Now().UTC()); err != nil {
+		return Task{}, false, err
+	}
+	if err := attachTaskSpawns(ctx, s.pool, one); err != nil {
 		return Task{}, false, err
 	}
 	x = one[0]

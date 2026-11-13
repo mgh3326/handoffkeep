@@ -769,6 +769,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/labels", s.labelSave)
 	m.HandleFunc("PUT /v1/labels/{label}", s.labelSave)
 	m.HandleFunc("POST /v1/labels/{label}/retire", s.labelRetire)
+	m.HandleFunc("GET /v1/tasks/states", s.taskStates)
+	m.HandleFunc("PUT /v1/tasks/{id}/spawn", s.taskSpawnPut)
 	m.HandleFunc("GET /v1/tasks/{id}", s.task)
 	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)
 	m.HandleFunc("POST /v1/tasks/{id}/rebind", s.taskRebind)

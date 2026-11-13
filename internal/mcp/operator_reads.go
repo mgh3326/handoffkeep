@@ -473,6 +473,7 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 		"parent":           parent,
 		"children":         task.Children,
 		"relations":        task.Relations,
+		"spawn":            task.Spawn,
 		"blockers":         blockers,
 		"project_owner":    owner,
 		"translations":     translations,

@@ -6,6 +6,7 @@ import { Chip } from "../shared/ui/Chip";
 import { Mono } from "../shared/ui/Mono";
 import { formatMinuteUTC } from "../shared/time";
 import { stateLabel } from "../shared/states";
+import { SpawnBlock } from "../shared/SpawnBlock";
 import "./workStatus.css";
 
 function formatDuration(seconds: number): string {
@@ -236,6 +237,36 @@ export function WorkStatusPage() {
                     {formatDuration(task.age_seconds)}
                   </time>
                 </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      {/* Queued spawn requests: open tasks whose panewire request has not ended */}
+      <section className="ws-section" aria-label="실행 요청 대기열">
+        <div className="ws-section-header">
+          <h2 className="ws-section-title">실행 요청 대기열 ({data.queued.length})</h2>
+          <span className="ws-section-note">panewire 큐에서 기동을 기다리는 요청과 그 이유</span>
+        </div>
+        {data.queued.length === 0 ? (
+          <p className="ws-empty">대기 중인 실행 요청이 없습니다.</p>
+        ) : (
+          <ul className="ws-list">
+            {data.queued.map((task) => (
+              <li key={task.id} className="ws-item">
+                <a className="ws-item-link" href={`/ui/tasks/${task.id}`}>
+                  <StateIcon state={task.state} />
+                  <span className="ws-item-id">
+                    <Mono>#{task.id}</Mono>
+                  </span>
+                  <span className="ws-item-title">{task.title}</span>
+                </a>
+                <div className="ws-item-meta">
+                  <Chip kind="status" state={task.state} label={stateLabel(task.state)} />
+                  {task.project ? <Chip kind="lane" lane={task.project} /> : null}
+                </div>
+                <SpawnBlock spawn={task.spawn} />
               </li>
             ))}
           </ul>

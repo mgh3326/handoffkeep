@@ -95,6 +95,20 @@ describe("Work", () => {
     expect(await screen.findByText(/alpha \(2\), beta \(3\)/)).toBeTruthy();
     expect(screen.getByText(/skills not supported/)).toBeTruthy();
   });
+  it("shows the task's spawn request, its state and start condition", async () => {
+    const spawn = { request_id: "req-7", job: "hk4377-spawn", role: "worker", state: "waiting", reason: "", attempt: 1, host: "m1b", next_check_at: null, expires_at: null, updated_at: "2026-11-13T00:00:00Z", start_condition: { task_id: 4376, until: "merged", task_state: "reviewing", met: false } };
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...detail, spawn })));
+    render(<TaskRecord id={101} />);
+    expect(await screen.findByRole("heading", { name: "실행 요청" })).toBeTruthy();
+    expect(screen.getByText("조건 대기")).toBeTruthy();
+    expect(screen.getByText("#4376 (검토 중) 머지 후 시작 · 미충족")).toBeTruthy();
+  });
+  it("shows no spawn section when the task has no spawn request", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json(detail)));
+    render(<TaskRecord id={101} />);
+    expect(await screen.findByRole("heading", { name: "작업 실행" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "실행 요청" })).toBeNull();
+  });
   it("W6 reports a terminal task without closure", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({ ...detail, task: { ...task, state: "dropped" } })));
     render(<TaskRecord id={101} />);

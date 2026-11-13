@@ -60,6 +60,7 @@ var errorRules = []errorRule{
 	{store.ErrStandingNotNewer, http.StatusConflict, "standing_not_newer", false},
 	{store.ErrStandingConflict, http.StatusConflict, "standing_conflict", false},
 	{store.ErrInvalidSync, http.StatusBadRequest, "invalid_context", false},
+	{store.ErrSpawnInvalid, http.StatusBadRequest, "invalid_context", true},
 	{attachments.ErrDisabled, http.StatusServiceUnavailable, "attachments_disabled", false},
 	{attachments.ErrTooLarge, http.StatusRequestEntityTooLarge, "attachment_too_large", false},
 	{store.ErrAttachmentStorageCap, http.StatusInsufficientStorage, "attachment_storage_cap", false},

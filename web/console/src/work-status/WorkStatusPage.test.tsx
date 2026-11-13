@@ -96,6 +96,27 @@ const mockWorkStatus: WorkStatusResponse = {
       bundle_title: null,
     },
   ],
+  queued: [
+    {
+      id: 4300,
+      title: "Queued spawn for handoffkeep",
+      project: "handoffkeep",
+      state: "developing",
+      spawn: {
+        request_id: "req-4300",
+        job: "hk4300-queued",
+        role: "worker",
+        state: "waiting",
+        reason: "waits for the blocking task",
+        attempt: 1,
+        host: "m1b",
+        next_check_at: null,
+        expires_at: null,
+        updated_at: "2026-11-12T08:00:00Z",
+        start_condition: { task_id: 4265, until: "merged", task_state: "developing", met: false },
+      },
+    },
+  ],
   movement: [
     { date: "2026-11-11", created: 5, closed: 3 },
     { date: "2026-11-12", created: 2, closed: 4 },
@@ -165,6 +186,23 @@ describe("WorkStatusPage", () => {
     const prLink = within(region).getByRole("link", { name: "PR ↗" });
     expect(prLink.getAttribute("href")).toBe("https://github.com/example/repo/pull/4265");
     expect(within(region).getByText("1시간")).toBeTruthy();
+  });
+
+  it("renders the queued spawn requests with state, reason and start condition", async () => {
+    render(<WorkStatusPage />);
+    const region = await screen.findByRole("region", { name: "실행 요청 대기열" });
+    expect(within(region).getByText("Queued spawn for handoffkeep")).toBeTruthy();
+    expect(within(region).getByText("조건 대기")).toBeTruthy();
+    expect(within(region).getByText("waits for the blocking task")).toBeTruthy();
+    expect(within(region).getByText("#4265 (개발 중) 머지 후 시작 · 미충족")).toBeTruthy();
+    expect(within(region).getByText("m1b · hk4300-queued")).toBeTruthy();
+  });
+
+  it("shows an empty queue as empty, not as missing", async () => {
+    serve({ ...mockWorkStatus, queued: [] });
+    render(<WorkStatusPage />);
+    const region = await screen.findByRole("region", { name: "실행 요청 대기열" });
+    expect(within(region).getByText("대기 중인 실행 요청이 없습니다.")).toBeTruthy();
   });
 
   it("renders backlog list and filters by project", async () => {
