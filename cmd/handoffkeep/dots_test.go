@@ -109,4 +109,3 @@ func TestDotsAnswerCommand(t *testing.T) {
 		t.Fatalf("expected missing text error, got %v", err)
 	}
 }
-

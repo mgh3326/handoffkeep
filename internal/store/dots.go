@@ -420,11 +420,11 @@ type DotsAnswerInput struct {
 
 // DotsAnswerResult is the outcome of answering a task's open dots question.
 type DotsAnswerResult struct {
-	TaskID    int64             `json:"task_id"`
-	RequestID string            `json:"request_id"`
-	CommentID int64             `json:"comment_id"`
-	Task      Task              `json:"task"`
-	Request   DecisionRequest   `json:"request"`
+	TaskID    int64              `json:"task_id"`
+	RequestID string             `json:"request_id"`
+	CommentID int64              `json:"comment_id"`
+	Task      Task               `json:"task"`
+	Request   DecisionRequest    `json:"request"`
 	Comment   CreatedTaskComment `json:"comment"`
 }
 
@@ -451,12 +451,12 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 	}
 	defer tx.Rollback(ctx)
 
-	// Lock order: taskCommentInsertLock, then task-mutation advisory lock (level 2),
-	// then the task row FOR UPDATE.
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+	// Lock order matches ApplyYouTrackActivity and ReplyDots: task-mutation
+	// advisory lock (level 2), then taskCommentInsertLock, then task row FOR UPDATE.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return DotsAnswerResult{}, err
 	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
 		return DotsAnswerResult{}, err
 	}
 
@@ -468,12 +468,25 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 		return DotsAnswerResult{}, err
 	}
 
+	if x.Lane != "dots" || !IsHKDotsRequest(x) {
+		return DotsAnswerResult{}, errors.New("invalid dots request task")
+	}
+	if x.Refs.Disposition != nil {
+		return DotsAnswerResult{}, ErrDispositionOperatorOnly
+	}
+	if isTerminalTaskState(x.State) {
+		return DotsAnswerResult{}, ErrTaskTerminal
+	}
+
 	current := x.Refs.DecisionRequest
 	if current == nil {
 		return DotsAnswerResult{}, ErrNoOpenDecisionRequest
 	}
 	if current.Status != DecisionRequestOpen {
 		return DotsAnswerResult{}, ErrDecisionRequestResolved
+	}
+	if current.EffectivePolicy(false) == DecisionPolicyOperatorDirect {
+		return DotsAnswerResult{}, ErrDecisionRequestHumanOnly
 	}
 
 	now := time.Now().UTC()
@@ -501,7 +514,7 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 		revisionRequestID: current.ID,
 		revision:          current.Revision,
 		root:              root,
-		provenance:        DecisionProvenanceOperatorDirect,
+		provenance:        DecisionProvenanceOperatorRelay,
 		actor:             caller,
 		at:                now,
 		text:              in.Text,
@@ -543,7 +556,7 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 	var resolutionID int64
 	err = tx.QueryRow(ctx, `INSERT INTO decision_resolutions(request_id,question_revision,revision_request_id,task_id,kind,option_id,text,receipt,provenance,channel,decided_by,recorded_by,attempt_id,committed_at)
 		VALUES($1,$2,$3,$4,$5,NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),$9,$10,$11,$12,$13,$14) RETURNING resolution_id`,
-		root, current.Revision, resolved.ID, x.ID, DecisionRequestAnswered, "", in.Text, "", DecisionProvenanceOperatorDirect, DecisionChannelCLI,
+		root, current.Revision, resolved.ID, x.ID, DecisionRequestAnswered, "", in.Text, "", DecisionProvenanceOperatorRelay, DecisionChannelCLI,
 		caller, caller, attemptID, now).Scan(&resolutionID)
 	if err != nil {
 		return DotsAnswerResult{}, err

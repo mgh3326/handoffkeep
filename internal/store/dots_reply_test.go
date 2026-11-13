@@ -478,5 +478,37 @@ func TestAnswerDotsQuestion(t *testing.T) {
 	if _, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "another answer"}); !errors.Is(err, ErrDecisionRequestResolved) {
 		t.Fatalf("second answer expected ErrDecisionRequestResolved, got %v", err)
 	}
-}
 
+	// 6. Policy checks: human_only / operator_direct request is refused
+	opTask, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Op", Body: "Op Question", RequesterLane: "requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opStarted, _ := startDotsRun(t, s, opTask.ID, "start-op")
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{
+		TaskID:         opTask.ID,
+		Kind:           "QUESTION",
+		Body:           "Needs operator?",
+		AskOperator:    true,
+		IdempotencyKey: "question-op",
+		RunToken:       opStarted.RunToken,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Make decision request human-only / operator_direct
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET refs=jsonb_set(refs, '{decision_request,human_only}', 'true') WHERE id=$1`, opTask.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AnswerDotsQuestion(ctx, opTask.ID, "caller", DotsAnswerInput{Text: "unauthorized"}); !errors.Is(err, ErrDecisionRequestHumanOnly) {
+		t.Fatalf("expected ErrDecisionRequestHumanOnly, got %v", err)
+	}
+
+	// 7. Non-dots request task is refused
+	plainTask, err := s.CreateTask(ctx, Task{Lane: "dev", Title: "Plain task", Kind: "implement", CreatedBy: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AnswerDotsQuestion(ctx, plainTask.ID, "caller", DotsAnswerInput{Text: "answer"}); err == nil || !strings.Contains(err.Error(), "invalid dots request task") {
+		t.Fatalf("expected invalid dots request task error, got %v", err)
+	}
+}
