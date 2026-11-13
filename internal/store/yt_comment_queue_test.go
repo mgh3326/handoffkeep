@@ -413,6 +413,63 @@ func TestYTCommentQueuedBindingDisagreement(t *testing.T) {
 	}
 }
 
+// The review's cycle (PR #383): an issue_fields snapshot the feed prepared
+// for the issue's old project sits between the held comment and the move
+// that releases it. The snapshot passes the held comment, the move then
+// passes it too, and once both are applied the comment is delivered; neither
+// waits for the comment while the comment waits for the move.
+func TestYTCommentQueuedHoldLetsTheLaneDrain(t *testing.T) {
+	s, x, op := ytqHeld(t, "ytq_hold_drain")
+	ctx := t.Context()
+	n, err := ytwrite.FieldsOp(ytwrite.FieldsRequest{Principal: YTFieldsPrincipal, Actor: YTFieldsPrincipal, Tenant: ytcTenant,
+		IssueID: "2-900", ProjectID: ytbProjectID, Task: ytwrite.TaskFields{TaskID: x.ID, Title: x.Title, State: "todo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.Key = SnapshotKey(ytFieldsConsumer, strconv.FormatInt(x.ID, 10), 1, n.PayloadSHA)
+	fields, _, err := s.YTWriteLedger().Prepare(ctx, time.Now().UTC(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mv := ytqMove(t, s, x.ID, "2-900", "0-9")
+	if !(op.ID < fields.ID && fields.ID < mv.ID) {
+		t.Fatalf("lane order comment %d, fields %d, move %d", op.ID, fields.ID, mv.ID)
+	}
+	l := s.YTTenantLedger(ytcTenant)
+	ids := func() []int64 {
+		due, err := l.Due(ctx, time.Now().UTC().Add(2*ytCommentHoldWait), 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []int64
+		for _, o := range due {
+			if o.EntityID == strconv.FormatInt(x.ID, 10) {
+				out = append(out, o.ID)
+			}
+		}
+		return out
+	}
+	// The snapshot is due behind the held comment; the move still waits for
+	// the snapshot, as lane order says.
+	if got := ids(); !slices.Contains(got, fields.ID) || slices.Contains(got, mv.ID) {
+		t.Fatalf("due %v, want the snapshot %d and not the move %d", got, fields.ID, mv.ID)
+	}
+	ytmSettle(t, s, fields, "2-900")
+	if got := ids(); !slices.Contains(got, mv.ID) {
+		t.Fatalf("due %v, want the move %d once the snapshot applied", got, mv.ID)
+	}
+	if _, out, err := l.Claim(ctx, time.Now().UTC().Add(2*ytCommentHoldGrace), op.ID); err != nil || out != ytwrite.ClaimHeld {
+		t.Fatalf("claim of the comment with the move pending = %s %v", out, err)
+	}
+	ytmSettle(t, s, mv, "2-900")
+	yt := ytwritetest.NewFake()
+	var offset atomic.Int64
+	offset.Store(int64(3 * ytCommentHoldGrace))
+	if got := ytqDrive(t, s, ytcProtocol(t, s, yt, &offset), op.ID); got.State != ytwrite.StateApplied || got.YTTargetID != "2-900" {
+		t.Fatalf("comment op after the snapshot and the move %+v", got)
+	}
+}
+
 // A hold no move explains is bounded: past ytCommentHoldGrace with no
 // issue_move pending (moves mode off, the move refused), the comment is
 // rejected ambiguous_issue as before hk 4457, and the lane clears.

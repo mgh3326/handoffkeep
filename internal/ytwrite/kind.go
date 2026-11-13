@@ -79,8 +79,8 @@ type Evidence struct {
 	RetryAfter time.Duration
 	// Adopted: the one match existed before the op and is the thing Send
 	// would have adopted (a create kind's adoption rule, not this op's
-	// marker). Reconcile applies it as an adoption, so the store publishes it
-	// as one (hk 3911).
+	// marker). Reconcile does not apply it: the op stays remote_unknown /
+	// adoption_unconfirmed for an operator's resolve --adopted (hk 3911).
 	Adopted bool
 }
 

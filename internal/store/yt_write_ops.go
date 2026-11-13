@@ -305,8 +305,8 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	if hold {
 		// A create that landed in a project the task has left is not worth
 		// rejecting the comment for: an issue_move can still place the issue
-		// in the task's project (it passes this op on the lane,
-		// ytLaneBlocksSQL), so the op stays prepared and due again after
+		// in the task's project (it and any snapshot before it pass this op
+		// on the lane, ytLaneBlocksSQL), so the op stays prepared and due again after
 		// ytCommentHoldWait, out of the way of this pass's due list.
 		if _, err := tx.Exec(ctx, `UPDATE yt_write_ops SET next_attempt_at=$2 WHERE id=$1`, id, now.Add(ytCommentHoldWait).UTC()); err != nil {
 			return ytwrite.Op{}, "", err
@@ -526,16 +526,20 @@ func ytLimit(n int) int {
 }
 
 // ytLaneBlocksSQL says that op e, earlier on op o's lane, holds o back: e is
-// not resolved. One exception (hk 4457): an issue_move passes a queued comment
-// op still prepared with no target. The claim holds such a comment while its
-// issue is in a project the task has left (claimYTCommentTargetTx), and the
-// move is what places the issue in the task's project; behind the comment it
-// would never be claimed, and the comment would be held until it is rejected.
-// The comment takes its target at a later claim, from the binding the move
-// keeps (a move changes only the project), so passing it reorders nothing
-// YouTrack shows. Every other op still waits for the comment.
+// not resolved. One exception (hk 4457): a queued comment op still prepared
+// with no target holds back only later comment ops. The claim holds such a
+// comment while its issue is in a project the task has left
+// (claimYTCommentTargetTx) and an issue_move of that issue is pending, and the
+// move is what places the issue in the task's project. Any op between them
+// (an issue_fields snapshot the feed prepared before the move, an earlier move
+// of a task that changed project twice) would otherwise wait for the comment
+// while the comment waits for the move behind it, and the lane would never
+// clear (review of PR #383). The comment takes its target at a later claim,
+// from the binding, which only a create or a move writes, so a snapshot or a
+// move passing it changes neither its text nor its issue; later comments still
+// wait for it, so comments reach YouTrack in their order.
 const ytLaneBlocksSQL = `e.state NOT IN ('applied','rejected')
-	AND NOT (o.kind = '` + ytwrite.KindIssueMove + `' AND e.kind = '` + ytwrite.KindCommentAppend + `'
+	AND NOT (o.kind <> '` + ytwrite.KindCommentAppend + `' AND e.kind = '` + ytwrite.KindCommentAppend + `'
 		AND e.principal = '` + YTCommentPrincipal + `' AND e.state = 'prepared' AND e.yt_target_id = '')`
 
 func (l *YTWriteLedger) Due(ctx context.Context, now time.Time, limit int) ([]ytwrite.Op, error) {

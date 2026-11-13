@@ -107,7 +107,12 @@ const (
 	ReasonMarkerDeleted     = "marker_deleted"
 	ReasonReconcileFailed   = "reconcile_failed"
 	ReasonOperatorNotDone   = "operator_not_applied"
-	ReasonUnsupportedKind   = "unsupported_kind"
+	// ReasonAdoptionUnconfirmed: the only candidate is the issue Send would
+	// have adopted (Evidence.Adopted), named in the detail. It is never
+	// applied by evidence: a create the op sent may still land (hk 3911,
+	// review of PR #383); an operator resolves it.
+	ReasonAdoptionUnconfirmed = "adoption_unconfirmed"
+	ReasonUnsupportedKind     = "unsupported_kind"
 	// ReasonNotSent: a read a kind makes before its write failed, so nothing
 	// was sent; the op is prepared again (NotSentError).
 	ReasonNotSent = "not_sent"

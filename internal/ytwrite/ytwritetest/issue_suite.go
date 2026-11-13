@@ -3,6 +3,7 @@ package ytwritetest
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -234,10 +235,13 @@ func RunIssueProtocol(t *testing.T, nl NewLedger) {
 
 	// Send adopted the task's existing issue and the process died before the
 	// apply committed. This kind's create always writes the marker, so the
-	// unmarked issue is the one Send adopts: the evidence search recovers the
-	// adoption (the map row marked adopted, no second create) instead of
-	// leaving the op for an operator (PR #335 review; hk 3911).
-	t.Run("lost_adoption_settlement_recovers_the_adoption", func(t *testing.T) {
+	// unmarked issue is the one Send adopts: the evidence search names it
+	// (remote_unknown / adoption_unconfirmed, the issue in the detail, no
+	// second create) but does not apply it, because the ledger cannot tell
+	// this crash from a POST whose reply was lost and may still land (review
+	// of PR #383). The operator's resolve --adopted applies it with the map
+	// row marked adopted (hk 3911).
+	t.Run("lost_adoption_settlement_names_the_adoption", func(t *testing.T) {
 		e := newEnv(t, nl)
 		existing := e.yt.InjectIssue(issueSuiteProject, testTask, "#"+itoa(testTask)+" imported", "legacy body")
 		e.clock.Advance(time.Hour)
@@ -251,10 +255,17 @@ func RunIssueProtocol(t *testing.T, nl NewLedger) {
 			t.Fatal("the crash at Apply never fired")
 		}
 		e.restart(e.ledger)
-		e.clock.Advance(10 * time.Minute)
+		e.clock.Advance(24 * time.Hour)
 		e.drive()
+		if got := e.wantOp(1, ytwrite.StateRemoteUnknown, ytwrite.ReasonAdoptionUnconfirmed); !strings.Contains(got.LastError, existing) {
+			t.Fatalf("op %+v, want the candidate %s in its detail", got, existing)
+		}
+		adopted := true
+		if _, err := e.p.Resolve(context.Background(), 1, ytwrite.Resolution{Applied: true, YTID: existing, Adopted: &adopted, By: "operator"}); err != nil {
+			t.Fatal(err)
+		}
 		op := e.wantOp(1, ytwrite.StateApplied, "")
-		if op.YTResultID != existing || op.Attempts != 1 || op.Reconciles != 0 {
+		if op.YTResultID != existing || op.Attempts != 1 {
 			t.Fatalf("op %+v, want the adopted issue %s after one attempt", op, existing)
 		}
 		m, ok, err := e.ledger.MapGet(context.Background(), "task", itoa(testTask))

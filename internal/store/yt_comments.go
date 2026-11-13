@@ -250,7 +250,8 @@ func queueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op
 // project the task has left) and an issue_move of that issue is pending, or
 // the op is younger than ytCommentHoldGrace, the op is kept prepared and
 // retried, and goes out once the move places the issue in the task's project
-// (hk 4457). The held op does not block that move on the lane (ytLaneBlocksSQL).
+// (hk 4457). The held op blocks only later comment ops on the lane
+// (ytLaneBlocksSQL), so that move and any op before it can run.
 // A targetless op is never dispatched, so it never reaches stale recovery or
 // remote_unknown. Any other op is returned unchanged.
 func claimYTCommentTargetTx(ctx context.Context, tx pgx.Tx, now time.Time, op ytwrite.Op) (target, sha, reject, detail string, hold bool, err error) {

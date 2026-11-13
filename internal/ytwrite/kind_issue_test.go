@@ -248,11 +248,14 @@ func TestIssueCreateEvidenceOtherwiseUnknown(t *testing.T) {
 }
 
 // The one issue whose summary names the task, carrying no marker of this
-// op's, is the issue Send adopts: a create whose reply was lost recovers as
-// that adoption, with no second create and the map row marked adopted
-// (hk 3911). Send's rule reads the summary, not the description, so another
-// op's marker does not change the decision.
-func TestIssueCreateEvidenceRecoversTheAdoption(t *testing.T) {
+// op's, is the issue Send adopts. Evidence reports it as that adoption, but
+// reconcile never applies it on its own: a create the op sent may still land,
+// and nothing bounds when (review of PR #383). The op stays remote_unknown /
+// adoption_unconfirmed with the candidate in its detail, nothing is created,
+// and an operator's resolve --adopted applies it (hk 3911). Send's rule reads
+// the summary, not the description, so another op's marker does not change
+// the decision.
+func TestIssueCreateEvidenceNamesTheAdoption(t *testing.T) {
 	for name, seed := range map[string]func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op) string{
 		"unmarked_issue": func(yt *ytwritetest.FakeYouTrack, _ ytwrite.Op) string {
 			return yt.InjectIssue(issueProject, issueTask, "#3898 imported earlier", "legacy body")
@@ -268,13 +271,17 @@ func TestIssueCreateEvidenceRecoversTheAdoption(t *testing.T) {
 			e.drive()
 			e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
 			id := seed(e.yt, op)
-			e.clock.Advance(time.Hour)
+			e.clock.Advance(24 * time.Hour)
 			e.drive()
-			got := e.want(op.ID, ytwrite.StateApplied, "")
-			if got.YTResultID != id || e.yt.Calls() != 1 || len(e.yt.Issues(issueProject)) != 1 {
+			got := e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonAdoptionUnconfirmed)
+			if got.Reconciles == 0 || !strings.Contains(got.LastError, id) || e.yt.Calls() != 1 || len(e.yt.Issues(issueProject)) != 1 {
 				t.Fatalf("op %+v, creates %d, issues %+v", got, e.yt.Calls(), e.yt.Issues(issueProject))
 			}
-			e.wantMap(got, id)
+			adopted := true
+			if _, err := e.p.Resolve(context.Background(), op.ID, ytwrite.Resolution{Applied: true, YTID: id, Adopted: &adopted, By: "operator"}); err != nil {
+				t.Fatal(err)
+			}
+			e.wantMap(e.want(op.ID, ytwrite.StateApplied, ""), id)
 			if m, _, _ := e.ledger.MapGet(context.Background(), "task", "3898"); !m.Adopted {
 				t.Fatalf("map row %+v not marked adopted", m)
 			}
@@ -282,44 +289,24 @@ func TestIssueCreateEvidenceRecoversTheAdoption(t *testing.T) {
 	}
 }
 
-// A POST whose reply was lost may still be landing: while the op's dispatch
-// is younger than AdoptionSettle an unmarked issue alone is not taken as the
-// adoption (review of PR #383), and a create that lands in that window is a
-// second hit that keeps the op remote_unknown instead of a duplicate issue.
+// A POST whose reply was lost may land at any time: a create that lands after
+// an unmarked issue appeared is a second hit that keeps the op remote_unknown,
+// never a duplicate the ledger stopped looking for.
 func TestIssueCreateAdoptionWaitsForAPostInFlight(t *testing.T) {
-	t.Run("late_create_lands", func(t *testing.T) {
-		e := newIssueEnv(t)
-		e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.Refuse, Status: http.StatusBadGateway})
-		op := e.prepareIssue()
-		e.drive()
-		e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
-		e.yt.InjectIssue(issueProject, issueTask, "#3898 imported earlier", "legacy body")
-		e.clock.Advance(ytwrite.AdoptionSettle / 2)
-		e.drive()
-		if got := e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonNoEvidence); got.Reconciles == 0 {
-			t.Fatalf("op %+v: no evidence search ran inside the window", got)
-		}
-		_, description := e.rendered(op)
-		e.yt.InjectIssue(issueProject, issueTask, "#3898 late", description)
-		e.clock.Advance(time.Hour)
-		e.drive()
-		e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonMarkerMismatch)
-	})
-	t.Run("nothing_lands", func(t *testing.T) {
-		e := newIssueEnv(t)
-		e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.Refuse, Status: http.StatusBadGateway})
-		op := e.prepareIssue()
-		e.drive()
-		id := e.yt.InjectIssue(issueProject, issueTask, "#3898 imported earlier", "legacy body")
-		e.clock.Advance(ytwrite.AdoptionSettle / 2)
-		e.drive()
-		e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonNoEvidence)
-		e.clock.Advance(time.Hour)
-		e.drive()
-		if got := e.want(op.ID, ytwrite.StateApplied, ""); got.YTResultID != id {
-			t.Fatalf("op %+v, want the adopted %s", got, id)
-		}
-	})
+	e := newIssueEnv(t)
+	e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.Refuse, Status: http.StatusBadGateway})
+	op := e.prepareIssue()
+	e.drive()
+	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+	e.yt.InjectIssue(issueProject, issueTask, "#3898 imported earlier", "legacy body")
+	e.clock.Advance(time.Hour)
+	e.drive()
+	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonAdoptionUnconfirmed)
+	_, description := e.rendered(op)
+	e.yt.InjectIssue(issueProject, issueTask, "#3898 late", description)
+	e.clock.Advance(24 * time.Hour)
+	e.drive()
+	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonMarkerMismatch)
 }
 
 func TestIssueCreate4xxRejected(t *testing.T) {

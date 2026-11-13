@@ -278,9 +278,10 @@ func (issueCreate) Send(ctx context.Context, remote Remote, op Op, text string) 
 // whose description is exactly the rendered text (provenance, task, title and
 // marker), is the match; a quoted or copied marker in other text is not
 // ownership. The one issue the task already had (no marker of this op's, its
-// summary naming the task) is the issue Send would adopt, so a settlement lost
-// after that decision is recovered as the same adoption instead of staying
-// remote_unknown until an operator resolves it (hk 3911). Every other issue
+// summary naming the task) is the issue Send would adopt, reported as
+// Evidence.Adopted so a settlement lost after that decision names the issue
+// an operator resolves it to (hk 3911); reconcile never applies it on its
+// own. Every other issue
 // with that hk ID counts as a mismatch, so the shared rule keeps the op
 // remote_unknown unless one of those two is all there is.
 func (issueCreate) Evidence(ctx context.Context, remote Remote, op Op, text string) (Evidence, error) {

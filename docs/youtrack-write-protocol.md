@@ -165,8 +165,8 @@ Neither is ever `remote_unknown`: nothing was sent.
 Everything else is the protocol's and the same for every kind: claim and
 ordering, the reply classification above, and the evidence rule (exactly one
 exact live match with a valid id, nothing deleted or mismatched, is `applied`;
-otherwise `multiple_matches`, `marker_deleted`, `marker_mismatch` or
-`no_evidence`). An op whose kind is not registered is `rejected /
+otherwise `multiple_matches`, `marker_deleted`, `marker_mismatch`,
+`adoption_unconfirmed` (below) or `no_evidence`). An op whose kind is not registered is `rejected /
 unsupported_kind` when sent, and a failed render is `unsupported_kind` (send) or
 `reconcile_failed` (search). `comment_append` (`kind_comment.go`),
 `issue_create` (`kind_issue.go`, below), `issue_fields` (`kind_fields.go`,
@@ -880,12 +880,14 @@ whose description is exactly the rendered text, applies the op; a quoted or
 copied marker is not ownership. The one issue whose summary names the task and
 whose description carries no marker of this op's is the issue Send adopts
 (this kind's create always writes the marker), so an adoption whose settlement
-was lost (a crash or a failed apply after Send adopted) is recovered as that
-adoption: the op applies with that id and its map rows are marked `Adopted`.
-That adoption is accepted only once `AdoptionSettle` (5 minutes) has passed
-since the op's dispatch: until then a POST whose reply was lost may still
-land, and is then a second hit that keeps the op `remote_unknown` instead of
-a second issue for the task.
+was lost (a crash or a failed apply after Send adopted) is reported as that
+adoption, but never applied by the search: the ledger cannot tell that crash
+from a POST whose reply was lost, nothing bounds when such a POST lands, and an
+applied op is never searched again, so a late create would be a second issue
+no one sees. The op stays `remote_unknown / adoption_unconfirmed` with the
+issue id in its detail, and `yt ops resolve <op> --applied <issue id>
+--adopted` applies it with its map rows marked `Adopted` (hk 3911; a POST that
+lands first is a second hit, `marker_mismatch`).
 Zero, two exact hits, an edited description, or a hit beside another issue
 with that `hk ID` keep it `remote_unknown`; there is never an automatic
 re-create.
@@ -1368,9 +1370,11 @@ release rollback never meets an authority value it cannot parse (consult hk
   yet), the op is held (`held`, still `prepared` and due again a minute later,
   nothing sent), so a comment queued behind a create that landed in a project
   the task has left goes out once the move places the issue in the task's
-  project instead of being rejected for good. The move passes the held op on
-  the task's lane (`Claim` and `Due` let an `issue_move` go ahead of a
-  `prepared` comment op with no target); every other op still waits for it.
+  project instead of being rejected for good. The held op blocks only later
+  comment ops on the task's lane (`Claim` and `Due` let an `issue_move` or an
+  `issue_fields` op go ahead of a `prepared` comment op with no target), so
+  the move and any snapshot or earlier move before it can run while the
+  comment waits for them; later comments still wait for it, in order.
   Any other disagreement, or a project one an hour old with no move pending
   (moves mode off, the move refused), is `rejected / ambiguous_issue`, so the
   lane is never wedged. The guard lets such an op stay `prepared` in place
