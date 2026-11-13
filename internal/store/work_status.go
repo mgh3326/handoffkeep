@@ -12,13 +12,14 @@ import (
 
 // WorkStatusCounts holds the count of tasks for one project across the state groups.
 type WorkStatusCounts struct {
-	Backlog              int `json:"backlog"`
-	InWork               int `json:"in_work"`
-	InReview             int `json:"in_review"`
-	WaitingDeploy        int `json:"waiting_deploy"`
-	MergedNoDeployRecord int `json:"merged_no_deploy_record"`
-	TotalOpen            int `json:"total_open"`
-	BundleParents        int `json:"bundle_parents"`
+	Backlog               int `json:"backlog"`
+	InWork                int `json:"in_work"`
+	InReview              int `json:"in_review"`
+	WaitingDeploy         int `json:"waiting_deploy"`
+	MergedNoDeployProject int `json:"merged_no_deploy_project"`
+	MergedBeforeDeploy    int `json:"merged_before_deploy"`
+	TotalOpen             int `json:"total_open"`
+	BundleParents         int `json:"bundle_parents"`
 }
 
 // WorkStatusProject is one project's name and its open task counts.
@@ -29,13 +30,14 @@ type WorkStatusProject struct {
 
 // WorkStatusSummary is the console-wide aggregate across all projects.
 type WorkStatusSummary struct {
-	TotalOpen            int `json:"total_open"`
-	Backlog              int `json:"backlog"`
-	InWork               int `json:"in_work"`
-	InReview             int `json:"in_review"`
-	WaitingDeploy        int `json:"waiting_deploy"`
-	MergedNoDeployRecord int `json:"merged_no_deploy_record"`
-	BundleParents        int `json:"bundle_parents"`
+	TotalOpen             int `json:"total_open"`
+	Backlog               int `json:"backlog"`
+	InWork                int `json:"in_work"`
+	InReview              int `json:"in_review"`
+	WaitingDeploy         int `json:"waiting_deploy"`
+	MergedNoDeployProject int `json:"merged_no_deploy_project"`
+	MergedBeforeDeploy    int `json:"merged_before_deploy"`
+	BundleParents         int `json:"bundle_parents"`
 }
 
 // WorkStatusInWorkTask is one task currently being worked on (researching, developing, reviewing).
@@ -45,6 +47,7 @@ type WorkStatusInWorkTask struct {
 	Project    *string    `json:"project"`
 	State      string     `json:"state"`
 	JobID      string     `json:"job_id,omitempty"`
+	JobState   string     `json:"job_state,omitempty"`
 	Host       string     `json:"host,omitempty"`
 	PR         string     `json:"pr,omitempty"`
 	Since      *time.Time `json:"since,omitempty"`
@@ -127,13 +130,14 @@ func (s *Store) ReadWorkStatus(ctx context.Context, now time.Time) (*WorkStatus,
 	rows, err := tx.Query(ctx, `SELECT t.id, t.title, t.project, t.state, t.priority, t.refs, t.claimed_by,
 		t.created_at, t.updated_at, t.parent_id,
 		p.id AS bundle_id, COALESCE(p.title, '') AS bundle_title,
-		COALESCE(j.job_id, '') AS job_id, COALESCE(j.host, '') AS host,
+		COALESCE(j.job_id, '') AS job_id, COALESCE(j.host, '') AS host, COALESCE(j.state, '') AS job_state,
 		se.at AS in_state_since,
-		me.at AS merged_at
+		me.at AS merged_at,
+		COALESCE(cp.repo, '') AS change_repo, COALESCE(cp.pr_number, 0) AS change_pr
 		FROM tasks t
 		LEFT JOIN tasks p ON p.id = t.parent_id
 		LEFT JOIN LATERAL (
-			SELECT job_id, host FROM jobs
+			SELECT job_id, host, state FROM jobs
 			WHERE task_id = t.id
 			ORDER BY (state IN ('claimed', 'spawned')) DESC, created_at DESC, job_id DESC
 			LIMIT 1
@@ -150,6 +154,13 @@ func (s *Store) ReadWorkStatus(ctx context.Context, now time.Time) (*WorkStatus,
 			ORDER BY at DESC, id DESC
 			LIMIT 1
 		) me ON true
+		LEFT JOIN LATERAL (
+			SELECT c.repo, c.pr_number FROM change_tasks ct
+			JOIN changes c ON c.id = ct.change_id
+			WHERE ct.task_id = t.id
+			ORDER BY (ct.relation = 'implements') DESC, (c.state = 'open') DESC, c.id DESC
+			LIMIT 1
+		) cp ON true
 		WHERE t.state IN ('triage','backlog','unstarted','researching','developing','reviewing','merged')
 		ORDER BY t.priority DESC, t.created_at ASC, t.id ASC`)
 	if err != nil {
@@ -175,12 +186,13 @@ func (s *Store) ReadWorkStatus(ctx context.Context, now time.Time) (*WorkStatus,
 		var claimedBy string
 		var createdAt, updatedAt time.Time
 		var parentID, bundleID *int64
-		var bundleTitle, jobID, host string
+		var bundleTitle, jobID, host, jobState, changeRepo string
+		var changePR int
 		var inStateSince, mergedAt *time.Time
 
 		if err := rows.Scan(&id, &title, &project, &state, &priority, &refsRaw, &claimedBy,
-			&createdAt, &updatedAt, &parentID, &bundleID, &bundleTitle, &jobID, &host,
-			&inStateSince, &mergedAt); err != nil {
+			&createdAt, &updatedAt, &parentID, &bundleID, &bundleTitle, &jobID, &host, &jobState,
+			&inStateSince, &mergedAt, &changeRepo, &changePR); err != nil {
 			return nil, err
 		}
 
@@ -254,6 +266,11 @@ func (s *Store) ReadWorkStatus(ctx context.Context, now time.Time) (*WorkStatus,
 			if effHost == "" && claimedBy != "" {
 				effHost = claimedBy
 			}
+			// PR: the task's own refs first, then the newest change linked to it.
+			effPR := refs.PR
+			if effPR == "" && changePR > 0 {
+				effPR = changeURL(changeRepo, changePR)
+			}
 
 			inWork = append(inWork, WorkStatusInWorkTask{
 				ID:         id,
@@ -261,8 +278,9 @@ func (s *Store) ReadWorkStatus(ctx context.Context, now time.Time) (*WorkStatus,
 				Project:    project,
 				State:      state,
 				JobID:      effJobID,
+				JobState:   jobState,
 				Host:       effHost,
-				PR:         refs.PR,
+				PR:         effPR,
 				Since:      since,
 				AgeSeconds: ageSec,
 			})
@@ -290,6 +308,11 @@ func (s *Store) ReadWorkStatus(ctx context.Context, now time.Time) (*WorkStatus,
 			if effHost == "" && claimedBy != "" {
 				effHost = claimedBy
 			}
+			// PR: the task's own refs first, then the newest change linked to it.
+			effPR := refs.PR
+			if effPR == "" && changePR > 0 {
+				effPR = changeURL(changeRepo, changePR)
+			}
 
 			inWork = append(inWork, WorkStatusInWorkTask{
 				ID:         id,
@@ -297,38 +320,41 @@ func (s *Store) ReadWorkStatus(ctx context.Context, now time.Time) (*WorkStatus,
 				Project:    project,
 				State:      state,
 				JobID:      effJobID,
+				JobState:   jobState,
 				Host:       effHost,
-				PR:         refs.PR,
+				PR:         effPR,
 				Since:      since,
 				AgeSeconds: ageSec,
 			})
 
 		case StateMerged:
-			// Item 5: count merged tasks only when their project has a deploy record and
-			// their change merged after that project's last successful deploy;
-			// show the others as "머지됨 (배포 기록 없음)" with their count, not as waiting.
+			// Count a merged task as waiting for deploy only when its project has a deploy
+			// record and it merged after that project's last successful deploy. The rest are
+			// counted apart: no deploy record for the project, or merged before the last deploy.
 			effMergedAt := mergedAt
 			if effMergedAt == nil {
 				effMergedAt = &updatedAt
 			}
 
-			var isWaitingDeploy bool
+			lastDep, hasDeploy := time.Time{}, false
 			if project != nil {
-				if lastDep, ok := lastDeploy[*project]; ok {
-					if effMergedAt.After(lastDep) {
-						isWaitingDeploy = true
-					}
-				}
+				lastDep, hasDeploy = lastDeploy[*project]
 			}
 
-			if isWaitingDeploy {
+			switch {
+			case !hasDeploy:
+				// The project has no deploy record to compare against.
+				pCounts.MergedNoDeployProject++
+				summary.MergedNoDeployProject++
+			case effMergedAt.After(lastDep):
 				pCounts.WaitingDeploy++
 				pCounts.TotalOpen++
 				summary.WaitingDeploy++
 				summary.TotalOpen++
-			} else {
-				pCounts.MergedNoDeployRecord++
-				summary.MergedNoDeployRecord++
+			default:
+				// Merged before the project's last successful deploy: already live.
+				pCounts.MergedBeforeDeploy++
+				summary.MergedBeforeDeploy++
 			}
 		}
 	}
