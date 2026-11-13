@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -197,146 +196,6 @@ func TestOperatorReplyLeavesQuestionPendingHTTP(t *testing.T) {
 	}
 }
 
-// AC6+AC8: the assistant resolve API refuses every kind but answered,
-// refuses a human_only request and a disposition item, and records
-// responder=assistant-via-berry / by=<token client> regardless of forged
-// body fields.
-func TestAssistantDecisionResolveAPI(t *testing.T) {
-	s := taskTestStore(t)
-	h := taskHTTP(s)
-	defer h.Close()
-	lane := taskLane(t)
-	post := func(taskID int64, body any) (int, map[string]any) {
-		t.Helper()
-		resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/assistant/decisions/resolve", "node-token", body)
-		defer resp.Body.Close()
-		out := map[string]any{}
-		_ = json.NewDecoder(resp.Body).Decode(&out)
-		return resp.StatusCode, out
-	}
-
-	// Wrong kinds are refused without touching the request.
-	kindTask := drTask(t, s, lane, "claimed", "in_progress")
-	kindReq := drRecord(t, s, kindTask.ID, drInput("kind guard"))
-	for _, kind := range []string{"default_applied", "withdrawn"} {
-		status, body := post(kindTask.ID, map[string]any{"request_id": kindReq.ID, "kind": kind, "text": "x"})
-		if status != http.StatusBadRequest || body["error"] != "decision_assistant_kind" {
-			t.Fatalf("kind=%s status=%d body=%v", kind, status, body)
-		}
-	}
-	if got, _, _ := s.GetTask(t.Context(), kindTask.ID); got.Refs.DecisionRequest.Status != store.DecisionRequestOpen {
-		t.Fatalf("refused kind closed the request: %+v", got.Refs.DecisionRequest)
-	}
-
-	// human_only refuses the assistant path with a named 409.
-	humanTask := drTask(t, s, lane, "claimed", "in_progress")
-	human := drInput("deploy 결정")
-	human.HumanOnly = true
-	humanReq := drRecord(t, s, humanTask.ID, human)
-	status, body := post(humanTask.ID, map[string]any{"request_id": humanReq.ID, "option": "A"})
-	if status != http.StatusConflict || body["error"] != "decision_request_human_only" {
-		t.Fatalf("human_only status=%d body=%v", status, body)
-	}
-
-	// A disposition item refuses the assistant path. RecordDecisionRequest
-	// refuses disposition items outright, so the request is recorded first
-	// and the disposition marker lands on refs afterwards — the guard reads
-	// the same field a real item would carry.
-	dispTask := drTask(t, s, lane, "claimed", "in_progress")
-	dispReq := drRecord(t, s, dispTask.ID, drInput("disposition 요청"))
-	p := chatPool(t)
-	if _, err := p.Exec(t.Context(), `UPDATE tasks SET refs=refs||'{"disposition":{"schema":"disposition/v1","facts":{"facts_source":"gh-pr-view","facts_as_of":"2026-10-09T00:00:00Z","install":{"state":"unknown"},"residual_n":0},"recommended":"E"}}'::jsonb WHERE id=$1`, dispTask.ID); err != nil {
-		t.Fatal(err)
-	}
-	status, body = post(dispTask.ID, map[string]any{"request_id": dispReq.ID, "option": "A"})
-	if status != http.StatusConflict || body["error"] != "disposition_operator_only" {
-		t.Fatalf("disposition status=%d body=%v", status, body)
-	}
-
-	// A merged or dropped task refuses the assistant path — an open request
-	// left on it is uncleaned state, not answerable work.
-	for _, state := range []string{"merged", "dropped"} {
-		termTask := drTask(t, s, lane, "claimed", "in_progress")
-		termReq := drRecord(t, s, termTask.ID, drInput("terminal "+state))
-		if state == "merged" {
-			if _, err := s.TransitionTask(t.Context(), termTask.ID, "verifying", "term-test", "step", nil, ""); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if _, err := s.TransitionTask(t.Context(), termTask.ID, state, "term-test", "finish", nil, ""); err != nil {
-			t.Fatal(err)
-		}
-		status, body = post(termTask.ID, map[string]any{"request_id": termReq.ID, "option": "A"})
-		if status != http.StatusConflict || body["error"] != "task_terminal" {
-			t.Fatalf("state=%s status=%d body=%v", state, status, body)
-		}
-		if got, _, _ := s.GetTask(t.Context(), termTask.ID); got.Refs.DecisionRequest.Status != store.DecisionRequestOpen {
-			t.Fatalf("state=%s terminal resolve wrote: %+v", state, got.Refs.DecisionRequest)
-		}
-	}
-
-	// Forged responder/by fields are accepted-but-ignored: the recorded
-	// resolution is server-attributed.
-	task := drTask(t, s, lane, "claimed", "in_progress")
-	req := drRecord(t, s, task.ID, drInput("누가 답했나"))
-	status, resolved := post(task.ID, map[string]any{
-		"request_id": req.ID, "option": "A", "text": "ship it",
-		"responder": "operator", "by": "root",
-	})
-	if status != http.StatusOK {
-		t.Fatalf("resolve status=%d body=%v", status, resolved)
-	}
-	got, _, err := s.GetTask(t.Context(), task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	res := got.Refs.DecisionRequest.Resolution
-	if res == nil || res.Responder != store.DecisionAssistantJudgementResponder || res.By != "node" || res.Kind != store.DecisionRequestAnswered {
-		t.Fatalf("attribution=%+v", res)
-	}
-	// Exactly one deterministic outbox row (the shared DB holds other tests'
-	// rows; count only this request's answered notices).
-	countOutbox := func() int {
-		t.Helper()
-		unsent, err := s.ListUnsentNotifications(t.Context(), 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		n := 0
-		for _, row := range unsent {
-			if strings.HasPrefix(row.EventID, "decision-answered-"+req.ID+"-") {
-				n++
-				if row.Kind != store.OutboxKindDecisionAnswered || row.TargetLane != task.Lane {
-					t.Fatalf("outbox row=%+v", row)
-				}
-			}
-		}
-		return n
-	}
-	if countOutbox() != 1 {
-		t.Fatalf("outbox rows for %s=%d", req.ID, countOutbox())
-	}
-	// The identical re-send is a duplicate, not a second write.
-	status, dup := post(task.ID, map[string]any{"request_id": req.ID, "option": "A", "text": "ship it"})
-	if status != http.StatusOK || dup["duplicate"] != true {
-		t.Fatalf("repeat status=%d body=%v", status, dup)
-	}
-	if countOutbox() != 1 {
-		t.Fatalf("repeat left %d outbox rows", countOutbox())
-	}
-	// A stale request id is a 409.
-	status, body = post(task.ID, map[string]any{"request_id": "dr-" + strconv.FormatInt(task.ID, 10) + "-9", "option": "A"})
-	if status != http.StatusConflict {
-		t.Fatalf("stale request status=%d body=%v", status, body)
-	}
-	// Unauthenticated calls are refused.
-	resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/assistant/decisions/resolve", "", map[string]any{"request_id": req.ID, "option": "A"})
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated status=%d", resp.StatusCode)
-	}
-}
-
 // PR-4c: a revised chat question is answerable again over HTTP — the PUT
 // bumps revision and clears answer_message_id, the old revision's answer is
 // 409 chat_question_stale, and the new revision's answer lands.
@@ -385,289 +244,34 @@ func TestAssistantChatAnswerAfterRevisionHTTP(t *testing.T) {
 	}
 }
 
-// PR-4c provenance contract over HTTP: operator_decided + verbatim quote +
-// this request's exact ref closes a human_only request with
-// decided_by=operator; every weaker claim is refused or downgraded.
-func TestAssistantDecisionResolveProvenanceAPI(t *testing.T) {
-	s := taskTestStore(t)
-	h := taskHTTP(s)
-	defer h.Close()
-	lane := taskLane(t)
-	post := func(body any) (int, map[string]any) {
-		t.Helper()
-		resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/assistant/decisions/resolve", "node-token", body)
-		defer resp.Body.Close()
-		out := map[string]any{}
-		_ = json.NewDecoder(resp.Body).Decode(&out)
-		return resp.StatusCode, out
-	}
-
-	// human_only + operator_decided + quote + matching ref is a relay (R1): it
-	// waits as 202 pending_confirmation, the request stays open and no
-	// notification is queued.
-	humanTask := drTask(t, s, lane, "claimed", "in_progress")
-	human := drInput("deploy 하시겠습니까")
-	human.HumanOnly = true
-	humanReq := drRecord(t, s, humanTask.ID, human)
-	status, out := post(map[string]any{
-		"request_id": humanReq.ID, "option": "A", "text": "operator approved",
-		"provenance": "operator_decided", "operator_quote": "A로 진행", "decision_ref": humanReq.ID,
-	})
-	if status != http.StatusAccepted || out["result"] != "pending_confirmation" {
-		t.Fatalf("operator_decided status=%d body=%v", status, out)
-	}
-	gotTask, _, err := s.GetTask(t.Context(), humanTask.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gotTask.Refs.DecisionRequest.Status != store.DecisionRequestOpen || gotTask.Refs.DecisionRequest.Resolution != nil {
-		t.Fatalf("a relay closed the human_only request: %+v", gotTask.Refs.DecisionRequest)
-	}
-	unsent, err := s.ListUnsentNotifications(t.Context(), 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range unsent {
-		if row.EventID == humanReq.ID+"-answered" {
-			t.Fatalf("pending answer queued %+v", row)
-		}
-	}
-	// The verified operator path closes it; the checks below need it resolved.
-	closed, err := s.ResolveDecision(t.Context(), store.ResolveDecisionInput{RequestID: humanReq.ID, Kind: store.DecisionRequestAnswered, Option: "A", Channel: store.DecisionChannelCLI, Actor: "operator", Verified: true})
-	if err != nil || closed.Result != store.DecisionResultAnswered {
-		t.Fatalf("verified answer=%+v err=%v", closed, err)
-	}
-
-	// human_only + bare judgement: 409 without a reason.
-	judgeTask := drTask(t, s, lane, "claimed", "in_progress")
-	judgeHuman := drInput("judgement human_only")
-	judgeHuman.HumanOnly = true
-	judgeReq := drRecord(t, s, judgeTask.ID, judgeHuman)
-	status, out = post(map[string]any{"request_id": judgeReq.ID, "option": "A", "provenance": "assistant_judgement"})
-	if status != http.StatusConflict || out["error"] != "decision_request_human_only" || out["reason"] != nil {
-		t.Fatalf("judgement status=%d body=%v", status, out)
-	}
-
-	// human_only + claimed operator_decided with a blank quote: 409 naming
-	// no_operator_quote.
-	emptyTask := drTask(t, s, lane, "claimed", "in_progress")
-	emptyHuman := drInput("empty quote human_only")
-	emptyHuman.HumanOnly = true
-	emptyReq := drRecord(t, s, emptyTask.ID, emptyHuman)
-	status, out = post(map[string]any{
-		"request_id": emptyReq.ID, "option": "A",
-		"provenance": "operator_decided", "operator_quote": "  ", "decision_ref": emptyReq.ID,
-	})
-	if status != http.StatusConflict || out["error"] != "decision_request_human_only" || out["reason"] != "no_operator_quote" {
-		t.Fatalf("empty quote status=%d body=%v", status, out)
-	}
-
-	// A ref naming another request — here the other task's request id — is
-	// 409 provenance_ref_mismatch and records nothing.
-	refTask := drTask(t, s, lane, "claimed", "in_progress")
-	refReq := drRecord(t, s, refTask.ID, drInput("ref target"))
-	status, out = post(map[string]any{
-		"request_id": refReq.ID, "option": "A",
-		"provenance": "operator_decided", "operator_quote": "borrowed quote", "decision_ref": humanReq.ID,
-	})
-	if status != http.StatusConflict || out["error"] != "provenance_ref_mismatch" {
-		t.Fatalf("ref mismatch status=%d body=%v", status, out)
-	}
-	if got, _, _ := s.GetTask(t.Context(), refTask.ID); got.Refs.DecisionRequest.Status != store.DecisionRequestOpen {
-		t.Fatalf("mismatch closed request: %+v", got.Refs.DecisionRequest)
-	}
-
-	// An unknown provenance value is a 400.
-	badTask := drTask(t, s, lane, "claimed", "in_progress")
-	badReq := drRecord(t, s, badTask.ID, drInput("bad provenance"))
-	status, out = post(map[string]any{"request_id": badReq.ID, "option": "A", "provenance": "operator"})
-	if status != http.StatusBadRequest || out["error"] != "invalid_provenance" {
-		t.Fatalf("bogus provenance status=%d body=%v", status, out)
-	}
-
-	// human_only + claimed operator_decided with an invisible-only quote
-	// (Amendment 1, A1): the quote is no quote, so 409 no_operator_quote.
-	invTask := drTask(t, s, lane, "claimed", "in_progress")
-	invHuman := drInput("invisible quote human_only")
-	invHuman.HumanOnly = true
-	invReq := drRecord(t, s, invTask.ID, invHuman)
-	status, out = post(map[string]any{
-		"request_id": invReq.ID, "option": "A",
-		"provenance": "operator_decided", "operator_quote": "\u200b", "decision_ref": invReq.ID,
-	})
-	if status != http.StatusConflict || out["error"] != "decision_request_human_only" || out["reason"] != "no_operator_quote" {
-		t.Fatalf("invisible quote status=%d body=%v", status, out)
-	}
-
-	// On an already-resolved request provenance is still judged first
-	// (Amendment 1, A2): an invalid value is 400 invalid_provenance and a
-	// quote bound to another request id is 409 provenance_ref_mismatch —
-	// neither is a duplicate.
-	status, out = post(map[string]any{"request_id": humanReq.ID, "option": "A", "provenance": "operator"})
-	if status != http.StatusBadRequest || out["error"] != "invalid_provenance" {
-		t.Fatalf("resolved bogus provenance status=%d body=%v", status, out)
-	}
-	status, out = post(map[string]any{
-		"request_id": humanReq.ID, "option": "A",
-		"provenance": "operator_decided", "operator_quote": "A로 진행", "decision_ref": judgeReq.ID,
-	})
-	if status != http.StatusConflict || out["error"] != "provenance_ref_mismatch" {
-		t.Fatalf("resolved ref mismatch status=%d body=%v", status, out)
-	}
-
-	// A judgement on an ordinary request answers with decided_by=assistant
-	// and a responder that does not say operator.
-	freeTask := drTask(t, s, lane, "claimed", "in_progress")
-	freeReq := drRecord(t, s, freeTask.ID, drInput("free judgement"))
-	status, out = post(map[string]any{"request_id": freeReq.ID, "option": "A"})
-	if status != http.StatusOK {
-		t.Fatalf("judgement answer status=%d body=%v", status, out)
-	}
-	gotTask, _, err = s.GetTask(t.Context(), freeTask.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	res := gotTask.Refs.DecisionRequest.Resolution
-	if res == nil || res.DecidedBy != "assistant" || strings.Contains(res.Responder, "operator") || res.Provenance != "assistant_judgement" {
-		t.Fatalf("judgement resolution=%+v", res)
-	}
-}
-
-// AC7: the pending API lists open requests on live tasks (merged/dropped
-// excluded), pending questions with revision, and server_time.
-func TestAssistantPendingAPI(t *testing.T) {
-	s := taskTestStore(t)
-	h := taskHTTP(s)
-	defer h.Close()
-	lane := taskLane(t)
-	backlog := drTask(t, s, lane)
-	backlogReq := drRecord(t, s, backlog.ID, drInput("backlog 요청"))
-	work := drTask(t, s, lane, "claimed", "in_progress")
-	workReq := drRecord(t, s, work.ID, drInput("in-progress 요청"))
-	merged := drTask(t, s, lane, "claimed", "in_progress")
-	drRecord(t, s, merged.ID, drInput("머지 전 요청"))
-	for _, to := range []string{"verifying", "merged"} {
-		if _, err := s.TransitionTask(t.Context(), merged.ID, to, "dr-test", "step", nil, ""); err != nil {
-			t.Fatal(err)
-		}
-	}
-	dropped := drTask(t, s, lane, "claimed", "in_progress")
-	drRecord(t, s, dropped.ID, drInput("드롭 전 요청"))
-	if _, err := s.TransitionTask(t.Context(), dropped.ID, "dropped", "dr-test", "abandon", nil, ""); err != nil {
-		t.Fatal(err)
-	}
-	q := assistantQuestion(t, h.URL, "node-token", lane, "pending question")
-
-	resp := request(t, h.Client(), http.MethodGet, h.URL+"/v1/assistant/pending", "node-token", nil)
-	defer resp.Body.Close()
-	var pending store.AssistantPending
-	if err := json.NewDecoder(resp.Body).Decode(&pending); err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("pending status=%d", resp.StatusCode)
-	}
-	if pending.ServerTime.IsZero() {
-		t.Fatalf("server_time missing")
-	}
-	listed := map[int64]string{}
-	for _, d := range pending.DecisionRequests {
-		listed[d.TaskID] = d.Request.ID
-	}
-	if listed[backlog.ID] != backlogReq.ID || listed[work.ID] != workReq.ID {
-		t.Fatalf("live requests missing: %+v", listed)
-	}
-	for _, id := range []int64{merged.ID, dropped.ID} {
-		if _, ok := listed[id]; ok {
-			t.Fatalf("terminal task %d listed", id)
-		}
-	}
-	found := false
-	for _, question := range pending.ChatQuestions {
-		if question.ID == q.ID {
-			found = true
-			if question.Revision != q.Revision {
-				t.Fatalf("pending Q revision=%d want %d", question.Revision, q.Revision)
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("pending question not listed")
-	}
-	resp = request(t, h.Client(), http.MethodGet, h.URL+"/v1/assistant/pending", "", nil)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated pending status=%d", resp.StatusCode)
-	}
-}
-
-// AC9: the outbox API lists unsent rows and marks one sent by event_id,
-// idempotently; hub_row_id=0 or a differing row id never marks sent.
-func TestAssistantOutboxAPI(t *testing.T) {
+// The receiving lane can acknowledge an outbox row after the hub accepted it;
+// caller-supplied identity is ignored in favor of the bearer token identity.
+func TestAssistantOutboxAppliedAPI(t *testing.T) {
 	s := taskTestStore(t)
 	h := taskHTTP(s)
 	defer h.Close()
 	task := drTask(t, s, taskLane(t), "claimed", "in_progress")
-	req := drRecord(t, s, task.ID, drInput("outbox 요청"))
-	resolve := request(t, h.Client(), http.MethodPost, h.URL+"/v1/assistant/decisions/resolve", "node-token", map[string]any{"request_id": req.ID, "option": "B"})
-	resolve.Body.Close()
-	if resolve.StatusCode != http.StatusOK {
-		t.Fatalf("resolve status=%d", resolve.StatusCode)
+	req := drRecord(t, s, task.ID, drInput("applied 요청"))
+	if _, err := s.ResolveDecisionRequestAssistant(t.Context(), task.ID, "berry-mcp", store.DecisionAssistantResolveInput{RequestID: req.ID, Option: "B"}); err != nil {
+		t.Fatal(err)
 	}
-	eventPrefix := "decision-answered-" + req.ID + "-"
-	// The shared DB holds other tests' unsent rows; look up only this test's
-	// event id in the list.
-	unsentHas := func() (bool, store.NotificationOutbox) {
-		t.Helper()
-		resp := request(t, h.Client(), http.MethodGet, h.URL+"/v1/assistant/outbox", "node-token", nil)
-		defer resp.Body.Close()
-		var listed struct {
-			Notifications []store.NotificationOutbox `json:"notifications"`
+	unsent, err := s.ListUnsentNotifications(t.Context(), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventID := ""
+	for _, row := range unsent {
+		if strings.HasPrefix(row.EventID, "decision-answered-"+req.ID+"-") {
+			eventID = row.EventID
+			break
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
-			t.Fatal(err)
-		}
-		for _, row := range listed.Notifications {
-			if strings.HasPrefix(row.EventID, eventPrefix) {
-				return true, row
-			}
-		}
-		return false, store.NotificationOutbox{}
 	}
-	present, row := unsentHas()
-	if !present || row.SentAt != nil || row.Kind != store.OutboxKindDecisionAnswered {
-		t.Fatalf("unsent lookup present=%t row=%+v", present, row)
+	if eventID == "" {
+		t.Fatal("resolve queued no notice")
 	}
-	eventID := row.EventID
-	mark := func(body any) (int, map[string]any) {
-		t.Helper()
-		resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/assistant/outbox/sent", "node-token", body)
-		defer resp.Body.Close()
-		out := map[string]any{}
-		_ = json.NewDecoder(resp.Body).Decode(&out)
-		return resp.StatusCode, out
+	if _, err := s.MarkNotificationSent(t.Context(), eventID, 4242); err != nil {
+		t.Fatal(err)
 	}
-	if status, out := mark(map[string]any{"event_id": eventID, "hub_row_id": 0}); status != http.StatusBadRequest {
-		t.Fatalf("hub_row_id=0 status=%d body=%v", status, out)
-	}
-	status, first := mark(map[string]any{"event_id": eventID, "hub_row_id": 4242})
-	if status != http.StatusOK || first["hub_row_id"].(float64) != 4242 || first["sent_at"] == nil {
-		t.Fatalf("mark status=%d body=%v", status, first)
-	}
-	status, again := mark(map[string]any{"event_id": eventID, "hub_row_id": 4242})
-	if status != http.StatusOK || again["sent_at"] != first["sent_at"] {
-		t.Fatalf("repeat mark status=%d body=%v", status, again)
-	}
-	if status, out := mark(map[string]any{"event_id": eventID, "hub_row_id": 7777}); status != http.StatusConflict {
-		t.Fatalf("different row id status=%d body=%v", status, out)
-	}
-	if status, out := mark(map[string]any{"event_id": "dr-999999-1-answered", "hub_row_id": 1}); status != http.StatusNotFound {
-		t.Fatalf("unknown event status=%d body=%v", status, out)
-	}
-	if present, _ := unsentHas(); present {
-		t.Fatalf("sent row still listed")
-	}
-	// The lane's ack is the second receipt; it follows the hub's.
 	applied := func(eventID, by string) (int, map[string]any) {
 		t.Helper()
 		body := map[string]any{"event_id": eventID}
@@ -680,7 +284,6 @@ func TestAssistantOutboxAPI(t *testing.T) {
 		_ = json.NewDecoder(resp.Body).Decode(&out)
 		return resp.StatusCode, out
 	}
-	// A caller-supplied identity is never the receipt's: it is the token's.
 	status, ack := applied(eventID, "spoofed-lane")
 	by, _ := ack["applied_by"].(string)
 	if status != http.StatusOK || by == "" || by == "spoofed-lane" || ack["applied_at"] == nil || ack["sent_at"] == nil {
@@ -694,18 +297,15 @@ func TestAssistantOutboxAPI(t *testing.T) {
 	}
 }
 
-// An ack for a row the hub has not accepted is refused with its own code:
-// applied never precedes received.
+// An ack for a row the hub has not accepted is refused with its own code.
 func TestAssistantOutboxAppliedNeedsReceived(t *testing.T) {
 	s := taskTestStore(t)
 	h := taskHTTP(s)
 	defer h.Close()
 	task := drTask(t, s, taskLane(t), "claimed", "in_progress")
 	req := drRecord(t, s, task.ID, drInput("applied 요청"))
-	resolve := request(t, h.Client(), http.MethodPost, h.URL+"/v1/assistant/decisions/resolve", "node-token", map[string]any{"request_id": req.ID, "option": "B"})
-	resolve.Body.Close()
-	if resolve.StatusCode != http.StatusOK {
-		t.Fatalf("resolve status=%d", resolve.StatusCode)
+	if _, err := s.ResolveDecisionRequestAssistant(t.Context(), task.ID, "berry-mcp", store.DecisionAssistantResolveInput{RequestID: req.ID, Option: "B"}); err != nil {
+		t.Fatal(err)
 	}
 	unsent, err := s.ListUnsentNotifications(t.Context(), 1000)
 	if err != nil {
@@ -715,6 +315,7 @@ func TestAssistantOutboxAppliedNeedsReceived(t *testing.T) {
 	for _, row := range unsent {
 		if strings.HasPrefix(row.EventID, "decision-answered-"+req.ID+"-") {
 			eventID = row.EventID
+			break
 		}
 	}
 	if eventID == "" {

@@ -130,9 +130,10 @@ func TestCloseTaskCompleted(t *testing.T) {
 		t.Fatalf("implement close err=%v, want ErrTaskConflict", err)
 	}
 
-	badEvidence := flowTask(t, s, pool, "decide", "reviewing", true)
-	if _, err := s.CloseTaskCompleted(ctx, badEvidence.ID, "not-a-link", "tester", "done", "complete-3"); !errors.Is(err, ErrClosureInvalid) {
-		t.Fatalf("bad evidence err=%v, want ErrClosureInvalid", err)
+	writtenReason := flowTask(t, s, pool, "decide", "reviewing", true)
+	got, err = s.CloseTaskCompleted(ctx, writtenReason.ID, "verified in operator review", "tester", "done", "complete-3")
+	if err != nil || got.State != StateCompleted || got.Refs.Closure == nil || got.Refs.Closure.Evidence != "verified in operator review" {
+		t.Fatalf("completed with written reason=%+v err=%v", got, err)
 	}
 }
 

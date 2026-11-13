@@ -17,6 +17,60 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
+func TestBeginRefusesAboveBufferedCompletionFuse(t *testing.T) {
+	db := &fakeDB{rows: map[string]store.Attachment{}}
+	objects := &fakeObjects{objects: map[string][]byte{}}
+	m := &Manager{
+		Store:   db,
+		Objects: objects,
+		Enabled: true,
+		Config: Config{
+			MaxBytes: DefaultMaxBytes, StorageCap: 100 << 30, PutCap: 10, GetCap: 10,
+			Allow: map[string]bool{"text/plain": true}, DirectUpload: true,
+			StagingCap: DefaultStagingCap, StagingClientCap: DefaultStagingClientCap,
+		},
+	}
+	if DefaultMaxBytes != 50<<30 {
+		t.Fatalf("OCI per-object ceiling=%d, want 50 GiB", DefaultMaxBytes)
+	}
+	ticket, err := m.BeginUpload(t.Context(), "node", "large.txt", "text/plain", BufferedCompletionMaxBytes+1, strings.Repeat("a", 64), "")
+	if !errors.Is(err, ErrUploadRefused) || !strings.Contains(err.Error(), "upload_completion_buffer_limit_exceeded") {
+		t.Fatalf("ticket=%+v err=%v, want buffered completion fuse refusal", ticket, err)
+	}
+	if ticket.UploadID != "" || len(db.uploads) != 0 || len(objects.objects) != 0 {
+		t.Fatalf("oversized begin created ticket, row, or staging object: ticket=%+v rows=%d objects=%d", ticket, len(db.uploads), len(objects.objects))
+	}
+}
+
+func TestCompleteRefusesObjectsAboveBufferedCompletionFuse(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	if BufferedCompletionMaxBytes != 256<<20 {
+		t.Fatalf("completion fuse=%d, want 256 MiB", BufferedCompletionMaxBytes)
+	}
+	m.Config.MaxBytes = DefaultMaxBytes
+	m.Config.StorageCap = 1 << 30
+	size := BufferedCompletionMaxBytes + 1
+	// Rows created before the begin-time fuse (or racing a rollout) remain
+	// protected by the completion-time check.
+	const uploadID = "0123456789abcdef0123456789abcdef"
+	stagingKey := stagingPrefix + uploadID
+	db.uploads = map[string]store.AttachmentUpload{uploadID: {
+		ID: uploadID, StagingKey: stagingKey, Name: "large.txt", MIME: "text/plain", SizeBytes: size,
+		SHA256: strings.Repeat("a", 64), CreatedBy: "node", Status: store.AttachmentUploadPending,
+		CreatedAt: m.now(), ExpiresAt: m.now().Add(time.Hour), UpdatedAt: m.now(),
+	}}
+	objs.objects[stagingKey] = []byte("fake staged object")
+	objs.headSizes = map[string]int64{stagingKey: size}
+
+	_, _, err := m.CompleteUpload(t.Context(), "node", uploadID)
+	if !errors.Is(err, ErrUploadRefused) || !strings.Contains(err.Error(), "upload_completion_buffer_limit_exceeded") {
+		t.Fatalf("complete err=%v, want buffered completion fuse refusal", err)
+	}
+	if got := db.uploads[uploadID].Reason; got != "upload_completion_buffer_limit_exceeded" {
+		t.Fatalf("refusal reason=%q", got)
+	}
+}
+
 func newUploadManager(t *testing.T) (*Manager, *fakeDB, *fakeObjects) {
 	t.Helper()
 	db := &fakeDB{rows: map[string]store.Attachment{}}

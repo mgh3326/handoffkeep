@@ -483,11 +483,6 @@ func CheckDecisionRequestInput(in DecisionRequestInput) error {
 	if err := CheckDecisionOptionsDetailed(in.Options); err != nil {
 		return err
 	}
-	// The same bound as a needs_decision transition: the question and its
-	// option line must fit one relay lane event.
-	if len(in.Question+"\n"+FormatDecisionOptions(in.Options)) > RelayLaneEventMaxBytes {
-		return invalidDecisionRequest("question and options exceed 2048 bytes — put detail in the request document")
-	}
 	if !validDecisionLine(in.DefaultAction, DecisionRequestActionMaxBytes) {
 		return invalidDecisionRequest(fmt.Sprintf("default action is required: one line of at most %d bytes (write \"자동 적용 없음\" when nothing is applied on silence)", DecisionRequestActionMaxBytes))
 	}
