@@ -205,12 +205,9 @@ func (s Server) quotaPresencePut(w http.ResponseWriter, r *http.Request) {
 	if !s.quotaScope(w, client, input.AccountKey) {
 		return
 	}
-	// A client with a HANDOFFKEEP_HOSTS_ line may only publish for the hosts
-	// it lists. Without a line the write is accepted and logged, until every
-	// client has one.
-	if allowed, listed := s.HostGrants.Allows(client, input.HostID); !listed {
-		warnNoHostLine(client, "quota_presence", input.HostID)
-	} else if !allowed {
+	// A client may only publish for the hosts its HANDOFFKEEP_HOSTS_ line
+	// lists; a client with no line publishes for no host.
+	if !s.HostGrants.Allows(client, input.HostID) {
 		writeError(w, http.StatusForbidden, "quota_host_forbidden")
 		return
 	}

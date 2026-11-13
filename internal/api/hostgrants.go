@@ -4,7 +4,6 @@ import (
 	"log"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -20,15 +19,10 @@ const hostGrantPrefix = "HANDOFFKEEP_HOSTS_"
 // writes share one parser and one rule.
 type HostGrants map[string]map[string]bool
 
-// Allows reports whether client may act for host. listed is false when the
-// client has no host line at all; allowed is then true and the caller keeps
-// its pre-grant behavior (see warnNoHostLine).
-func (g HostGrants) Allows(client, host string) (allowed, listed bool) {
-	hosts, listed := g[client]
-	if !listed {
-		return true, false
-	}
-	return hosts[host], true
+// Allows reports whether client may act for host. A client with no host line
+// at all, or a host not on its line, is refused.
+func (g HostGrants) Allows(client, host string) bool {
+	return g[client][host]
 }
 
 // LoadHostGrants reads the HANDOFFKEEP_HOSTS_<CLIENT> lines of the auth file.
@@ -98,18 +92,4 @@ func parseHostList(v string) ([]string, bool) {
 		hosts = append(hosts, host)
 	}
 	return hosts, true
-}
-
-// noHostLineWarned holds the clients already warned about, per route, so a
-// client that publishes every minute logs once per process.
-var noHostLineWarned sync.Map
-
-// warnNoHostLine logs that client wrote for host on route without a
-// HANDOFFKEEP_HOSTS_ line. The write is accepted; enforcing it for clients
-// without a line is a separate step once every client has one.
-func warnNoHostLine(client, route, host string) {
-	if _, seen := noHostLineWarned.LoadOrStore(client+"\x00"+route, true); seen {
-		return
-	}
-	log.Printf("api.host_grants_missing client=%s route=%s host=%s", client, route, host)
 }

@@ -487,10 +487,12 @@ type WorkStatusQueuedTask struct {
 	Spawn   TaskSpawn `json:"spawn"`
 }
 
-// readQueuedSpawnsTx lists the open tasks with a spawn request still in
-// flight, oldest request first.
-func readQueuedSpawnsTx(ctx context.Context, q poolQuerier) ([]WorkStatusQueuedTask, error) {
-	rows, err := q.Query(ctx, `SELECT t.id,t.title,t.project,t.state FROM task_spawn_records r JOIN tasks t ON t.id=r.task_id WHERE r.state NOT IN ('landed','refused','given_up','cancelled') AND t.state NOT IN ('merged','deployed','completed','dropped','duplicate') ORDER BY r.updated_at,t.id`)
+// readQueuedSpawnsTx lists the tasks with a spawn request still in flight,
+// oldest request first. hkOpenOnly keeps the tasks hk's own copy holds open:
+// the hk-only page's test. The YouTrack-backed page passes false, because
+// YouTrack, not hk's copy, says whether the task is open.
+func readQueuedSpawnsTx(ctx context.Context, q poolQuerier, hkOpenOnly bool) ([]WorkStatusQueuedTask, error) {
+	rows, err := q.Query(ctx, `SELECT t.id,t.title,t.project,t.state FROM task_spawn_records r JOIN tasks t ON t.id=r.task_id WHERE r.state NOT IN ('landed','refused','given_up','cancelled') AND (NOT $1 OR t.state NOT IN ('merged','deployed','completed','dropped','duplicate')) ORDER BY r.updated_at,t.id`, hkOpenOnly)
 	if err != nil {
 		return nil, err
 	}
