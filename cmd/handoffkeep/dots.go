@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"os"
 	"strconv"
 	"time"
 
@@ -29,11 +30,34 @@ func dotsRequestCmd(args []string, out io.Writer) error {
 	if fs.NArg() != 0 || in.Title == "" || in.Body == "" {
 		return errors.New("dots request requires --title and --body")
 	}
+	if in.RequesterLane == "" {
+		in.RequesterLane = os.Getenv("PANEWIRE_LANE")
+	}
+	if in.RequesterLane == "" {
+		return errors.New("dots request requires --requester-lane or PANEWIRE_LANE")
+	}
 	if err := mustClient(c); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	if in.Project == "" {
+		owners, err := c.ListProjectOwners(ctx)
+		if err != nil {
+			return err
+		}
+		var project string
+		matches := 0
+		for _, owner := range owners {
+			if owner.DesignLane == in.RequesterLane {
+				project = owner.Name
+				matches++
+			}
+		}
+		if matches == 1 {
+			in.Project = project
+		}
+	}
 	task, err := c.CreateDotsRequest(ctx, in)
 	if err != nil {
 		return err

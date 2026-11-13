@@ -632,7 +632,10 @@ page at a time, at most `--limit` (default all), audited one at a time. For each
   `missing_in_yt` (none), `duplicate` (two or more), `adopted_unmatched`
   (none, but the adoption's `adopted:` link says the Python mirror posted it
   in a form hk cannot identify; never enqueued), and for a YouTrack
-  comment that copies nothing `yt_only_bot` (written by the bot key's user)
+  comment that copies nothing `yt_only_bot` (written by the bot key's user;
+  a bot comment whose rendered form names a `comment_append` op of the
+  task_docs principal `hk:doc-comments` on the same issue is `doc_comment`,
+  hk 4245, `ytwrite.ReclassifyDocOps`)
   or `yt_only_human`.
 - **Not bound here**, by reason under `unbound`: `no_project`, `no_issue`
   (unmapped project, no YouTrack project id, no such issue), `ambiguous` (the
@@ -745,18 +748,24 @@ so later comment and field ops have a target. `HANDOFFKEEP_YT_ISSUES_MODE` is
 `off` (the default) or `on`, read like the comments mode; either mode on
 starts the write worker and needs `YOUTRACK_URL` and `YOUTRACK_BOT_API_KEY`.
 Turning it on ends the YouTrack import (decision D3); the operator does that.
+At startup the worker resolves the unique `HK` project from YouTrack's project
+list. A task with no hk project uses that bucket, matching the import's
+`HK-<task id>` issue; hk keeps no `youtrack_projects` row for the bucket.
 
 **Op.** Principal `hk:task-issues`, key `task-issue:<task id>`, lane
 `task:<id>`, target the YouTrack project id, payload the title, the hk
 project and the YouTrack project's short name. In mode on, every task creator
 (`CreateTask`, intake, ticket sets, dots, dispositions) prepares it in the
-task's own transaction when the task's project has a
-`youtrack_projects` row with a project id; otherwise no op and one
-`ytwrite.issue_skipped` line. A task the protocol cannot render (an actor
+task's own transaction when its project has a `youtrack_projects` row with a
+project id, or when its project is empty (to the `HK` bucket); otherwise no op
+and one `ytwrite.issue_skipped` line. Setting or changing the project of an
+unbound task also prepares its issue_create when no create op already exists.
+A task the protocol cannot render (an actor
 with ` · `, a title quoting the marker) gets the op rejected `invalid_issue`.
 `handoffkeep youtrack issues-backfill [--project P] [--dry-run]` prepares the
 op for every task with no binding, bound to the host of `YOUTRACK_URL`; it
-calls no YouTrack, skips a task that already has its op, and so is idempotent.
+reads the YouTrack project list to resolve the `HK` bucket, but does not search
+for or create issues. It skips a task that already has its op, and so is idempotent.
 It also skips (counts as `owned`) a task hk already ties to an issue: a
 binding, a canary enrollment, a task map row or a YouTrack `task_origins` row
 recorded earlier (a pull or `youtrack adopt`), read again under the task's
@@ -793,7 +802,11 @@ classification is the shared one; a failed search is `not_sent` (above).
 whose description is exactly the rendered text, applies the op; a quoted or
 copied marker is not ownership. Zero, two exact hits, an edited description,
 or a hit beside another issue with that `hk ID` keep it `remote_unknown`;
-there is never an automatic re-create.
+there is never an automatic re-create. An adoption whose settlement was lost (a crash or
+a failed apply after Send adopted) is `remote_unknown / marker_mismatch` too:
+the adopted issue has no marker, and an issue's age does not prove the
+dispatch's search saw it (its `hk ID` or summary may have been set after the
+search while a POST was in flight), so the operator resolves it.
 
 **Binding.** Applying the op (send, evidence or `yt ops resolve`) takes the
 task's lane lock, first checks every mapping hk keeps (the task's binding and
@@ -805,7 +818,11 @@ an `issue_create` op without its binding, so a resolver that does not know the
 kind cannot close one). `issue_readable` is left empty: the protocol carries
 only the stable id. `comments_from` is 0 for an issue the op created (the
 catch-up copies the task's comments) and the task's highest comment id for an
-adopted one (it already holds that history). Nothing is overwritten: the same
+adopted one (it already holds that history). A comment written while the op
+was pending gets no op (the task has no binding yet), so in comments mode on
+the write worker runs the catch-up for `op_applied` bindings before every
+Drive pass even when `HANDOFFKEEP_YT_COMMENTS_CATCHUP` is off
+(`CatchUpYTIssueComments`, hk 3914). Nothing is overwritten: the same
 issue is a no-op; a task bound or mapped to another issue or whose YouTrack
 origin names another issue, or the issue bound or mapped to another task,
 keeps the op applied with reason
@@ -873,7 +890,9 @@ unchanged. A `rejected` op will never be sent, so the same snapshot is
 prepared again as a new op (the next seq, a new key) on the next call; any
 other state (`prepared`, `dispatched`, `remote_unknown`, `applied`) or a
 missing op row keeps the skip. One call prepares at most one op: a retry that
-is rejected again is retried on the following call, not in a loop.
+is rejected again is retried on the following call, not in a loop. An
+`issue_move` is not a snapshot and does not take this retry (hk 4111, Kind
+issue_move below).
 
 Mode off prepares nothing and still advances the cursor, so a change made
 while off reaches YouTrack with the task's next change. Each pass logs one
@@ -957,11 +976,13 @@ prepares nothing unless its last op was rejected, so a second run is a no-op
 once the first run's ops are pending or sent, a run re-prepares exactly the
 rejected ones, and a run beside the feed prepares one op per snapshot. It only prepares; serve's write worker sends the
 ops and honours YouTrack's 429s. `--limit` stops after that many prepared ops,
-for pacing; the next run passes the sent ones as unchanged. `--dry-run`
+for pacing, counting `issue_move` ops with the `issue_fields` ones (a moved
+task makes two, hk 4112); the next run passes the sent ones as unchanged. `--dry-run`
 applies the same rule (an unchanged hash whose op was rejected counts as
 prepared) and writes nothing. It
-prints one JSON summary, `scanned prepared unchanged unbound moved
-move_skipped other_tenant invalid` per hk project and in `total`, and exits 6 without
+prints one JSON summary, `scanned ops prepared unchanged unbound moved
+move_skipped other_tenant invalid` per hk project (`ops` is every op made,
+moves included) and in `total`, and exits 6 without
 touching the database unless `HANDOFFKEEP_YT_FIELDS_MODE=on`.
 
 **Not here.** Tags and issue links (parent, relations) stay as the import set
@@ -1083,7 +1104,10 @@ A task's hk project can change while its issue stays in the YouTrack project
 of the old one. The issue then moves: `issue_move` (`kind_move.go`) sends one
 POST that sets the issue's project, and the task_fields consumer
 (`internal/store/yt_move.go`) prepares it. Moves have their own mode,
-`HANDOFFKEEP_YT_MOVES_MODE` (`off` or `on`, default `off`, hk 4111). Off, a
+`HANDOFFKEEP_YT_MOVES_MODE` (`off` or `on`, default `off`, hk 4111). Moves are
+prepared by the task_fields consumer, so `on` needs
+`HANDOFFKEEP_YT_FIELDS_MODE=on`: moves on with fields off is a startup error
+(hk 4117), never a gate that looks on and does nothing. Off, a
 moved task is skipped as it was before moves existed: no move, no snapshot,
 logged as `ytwrite.fields_skipped_moved` and counted as `moved`. Turning the mode
 off admits no issue_move op, so a move already prepared is held until it is
@@ -1099,12 +1123,29 @@ from the belonging project, one move op is prepared, keyed
 sha is the target's, so a repeat of a move already prepared is no new op), and
 the snapshot naming the belonging project follows it on the lane. A task moved
 away and back before the first move applied gets a move back, so the issue
-ends where the task is. A move the protocol rejected is not prepared again:
-`ytwrite.move_stuck` is logged and the operator resolves the op.
+ends where the task is. A move is prepared once per target
+(`prepareYTOnceTx`, hk 4111): the hk 4057 retry of rejected snapshots does not
+apply, so a move YouTrack refused is not prepared again on the task's next
+change or a backfill run, only when the task's project maps to another target
+(a new sha). Until then `ytwrite.move_stuck` is logged, counted as
+`move_skipped=`, and the task's snapshot is prepared for the project the
+issue is in (or on its way to), so its fields keep reaching it there.
 
-**Unmapped target.** When the belonging project maps to no YouTrack project
-(an hk project no `youtrack_projects` row names), nothing is prepared for the
-task's issue: no move and no snapshot. The feed logs
+**A snapshot behind a refused move** (hk 4111). The lane treats a rejected
+op as resolved, so an `issue_fields` op prepared behind a move that was then
+rejected would be claimed with a payload naming the target project while the
+issue is still in the old one. At claim, once its lane is clear, an
+`issue_fields` op whose payload project is not the binding's `project_id` (on
+its tenant and issue) is rejected `issue_not_moved`, in the claim's own
+transaction, and never sent; the rejected-op alert reports it and the next
+change or backfill prepares the snapshot for the project the issue is in.
+
+**Unmapped target** (hk 4118). When the task's hk project maps to no
+YouTrack project (an hk project no `youtrack_projects` row names), or is
+cleared while its issue sits in a mapped project, there is nothing to move
+to: no move is prepared, the issue stays in its binding's project (or the
+target of a move already in flight), and the task's snapshot is still
+prepared for it there, so its fields do not freeze. The feed logs
 `ytwrite.move_skipped_unmapped task_id= project= issue_id= binding_project_id=`
 and counts it as `move_skipped=` on the `ytwrite.fields_feed` line.
 
@@ -1377,6 +1418,14 @@ an open request past its expiry, read when the row changes), `레인`, `권장`,
 `결정 기한` (epoch ms), `연결 task ID`. Every field is in every op; empty
 clears.
 
+**Expiry sweep (hk 4116).** An open request's expiry changes no row, so the
+feed never sees it. `catchUpYTDecisionExpiries` runs after each feed pass,
+at most once a minute, and prepares the snapshot of every bound decision
+(on the gate's tenant) whose `expires_at` passed since the last completed
+sweep; the first sweep of a process covers every expired decision. The
+snapshot is keyed by its hash, so each expiry prepares one op. A failed
+sweep keeps its window and runs again.
+
 **Send.** `decision_create`: the project's fields (one admin GET; without
 `hk ID` or `결정 ID` the op is held `not_sent`), then the DEC issues with
 `결정 ID` = id (one GET). Exactly one whose summary names the decision
@@ -1602,7 +1651,10 @@ listing, page at a server cap. Covered: no false done, no duplicate create, same
 with another payload is a conflict, concurrent same-key callers send once, crash at
 each ledger/remote boundary (before and after the commit of prepare, claim, apply,
 mark-unknown, defer), two writes to one entity in order, evidence paging and exact
-match, ambiguous evidence, caller cancellation.
+match, ambiguous evidence, caller cancellation. `ytwritetest.RunIssueProtocol`
+runs the same fault cases for `issue_create` (lost and delayed replies, 2xx
+without an id, 429, 401, 5xx, 4xx, operator resolution, concurrent workers,
+a crash at each boundary) over both ledgers (hk 3910).
 
 ## Not yet (later slices)
 

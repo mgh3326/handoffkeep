@@ -36,15 +36,32 @@ const (
 const YTIssuePrincipal = "hk:task-issues"
 
 type ytIssuesGate struct {
-	mode   YTIssuesMode
-	tenant string
+	mode     YTIssuesMode
+	tenant   string
+	bucketID string
 }
 
 // SetYTIssuesMode sets the gate for this process and the YouTrack tenant a new
 // task's op is bound to. serve calls it once at start, before any request. On
 // with an empty tenant is off.
 func (s *Store) SetYTIssuesMode(m YTIssuesMode, tenant string) {
-	s.ytIssues.Store(&ytIssuesGate{mode: m, tenant: tenant})
+	previous := s.ytIssues.Load()
+	var bucketID string
+	if previous != nil {
+		bucketID = previous.bucketID
+	}
+	s.ytIssues.Store(&ytIssuesGate{mode: m, tenant: tenant, bucketID: bucketID})
+}
+
+// SetYTIssuesBucketProject sets the import's HK bucket project id. YouTrack
+// owns this id; serve resolves it once before enabling issue writes.
+func (s *Store) SetYTIssuesBucketProject(projectID string) {
+	previous := s.ytIssues.Load()
+	gate := ytIssuesGate{bucketID: projectID}
+	if previous != nil {
+		gate.mode, gate.tenant = previous.mode, previous.tenant
+	}
+	s.ytIssues.Store(&gate)
 }
 
 // ytIssuesNow is the gate: on and its tenant, or off.
@@ -110,6 +127,17 @@ func readYTIssueProject(ctx context.Context, q ytRowQuerier, project string) (yt
 	return p, p.projectID != "" && p.shortName != "", nil
 }
 
+func (s *Store) ytIssueProject(ctx context.Context, q ytRowQuerier, project string) (ytIssueProject, bool, error) {
+	if project != "" {
+		return readYTIssueProject(ctx, q, project)
+	}
+	g := s.ytIssues.Load()
+	if g == nil || g.bucketID == "" {
+		return ytIssueProject{}, false, nil
+	}
+	return ytIssueProject{project: "", shortName: "HK", projectID: g.bucketID}, true, nil
+}
+
 // prepareYTIssueTx stores task's issue_create op in tx, bound to tenant, at
 // now. A task the protocol cannot render gets a rejected op (invalid_issue)
 // and nothing is ever sent. created is false when the task already had its op
@@ -146,12 +174,31 @@ func (s *Store) enqueueYTIssueTx(ctx context.Context, tx pgx.Tx, t Task) error {
 	if mode != YTIssuesOn {
 		return nil
 	}
-	p, found, err := readYTIssueProject(ctx, tx, deref(t.Project))
+	p, found, err := s.ytIssueProject(ctx, tx, deref(t.Project))
 	if err != nil {
 		return err
 	}
 	if !found {
 		log.Printf("ytwrite.issue_skipped task_id=%d project=%q reason=project_unmapped", t.ID, deref(t.Project))
+		return nil
+	}
+	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(t.ID, 10)); err != nil {
+		return err
+	}
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3)`,
+		YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(t.ID)).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	owned, err := ytTaskHasIssueOwnershipTx(ctx, tx, t.ID)
+	if err != nil {
+		return err
+	}
+	if owned {
+		log.Printf("ytwrite.issue_skipped task_id=%d project=%q reason=issue_owned", t.ID, deref(t.Project))
 		return nil
 	}
 	op, _, err := prepareYTIssueTx(ctx, tx, t.CreatedAt.UTC(), t, p, tenant)
@@ -160,6 +207,19 @@ func (s *Store) enqueueYTIssueTx(ctx context.Context, tx pgx.Tx, t Task) error {
 	}
 	log.Printf("ytwrite.issue_enqueued op_id=%d task_id=%d state=%s reason=%q", op.ID, t.ID, op.State, op.Reason)
 	return nil
+}
+
+// ytTaskHasIssueOwnershipTx mirrors the task ownership evidence used by
+// issue backfill. Any of these records means an issue already belongs to the
+// task, even when the canonical binding has not been published yet.
+func ytTaskHasIssueOwnershipTx(ctx context.Context, q ytRowQuerier, taskID int64) (bool, error) {
+	var owned bool
+	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1)
+		OR EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$2)
+		OR EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=$1)
+		OR EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack')`,
+		taskID, strconv.FormatInt(taskID, 10)).Scan(&owned)
+	return owned, err
 }
 
 // ytIssueConflictTx reads, in Apply's transaction (which holds the task's
@@ -346,17 +406,14 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 	if exists {
 		return "existing", name, nil
 	}
-	var owned bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1)
-		OR EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$2)
-		OR EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=$1)
-		OR EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack')`, taskID, strconv.FormatInt(taskID, 10)).Scan(&owned); err != nil {
+	owned, err := ytTaskHasIssueOwnershipTx(ctx, tx, taskID)
+	if err != nil {
 		return "", "", err
 	}
 	if owned {
 		return "owned", name, nil
 	}
-	p, found, err := readYTIssueProject(ctx, tx, name)
+	p, found, err := s.ytIssueProject(ctx, tx, name)
 	if err != nil {
 		return "", "", err
 	}

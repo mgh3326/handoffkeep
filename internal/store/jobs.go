@@ -193,9 +193,10 @@ type JobUpdate struct {
 	DiffStat        *JobDiffStat `json:"diff_stat"`
 }
 
-// usageOnly reports an update containing only the terminal late-write set.
-func (u JobUpdate) usageOnly() bool {
-	return (u.Usage != nil || u.Skills != nil || u.SkillsSupported != nil) && u.State == nil && u.Role == nil && u.Label == nil && u.Family == nil && u.Profile == nil && u.Model == nil && u.Harness == nil && u.Effort == nil && u.Pool == nil && u.OwnerLane == nil && u.ParentLane == nil && u.ParentJob == nil && u.PaneID == nil && u.Worktree == nil && u.ReportDoc == nil && u.Result == nil && u.Selection == nil && u.At == nil && u.ReadyAt == nil && u.ReportSHA256 == nil && u.ReportVersion == nil && u.EndReason == nil && u.DiffStat == nil
+// terminalOnly reports an update containing only the terminal late-write
+// set: usage, skills and the once-only report pair.
+func (u JobUpdate) terminalOnly() bool {
+	return (u.Usage != nil || u.Skills != nil || u.SkillsSupported != nil || u.ReportDoc != nil || u.ReportSHA256 != nil) && u.State == nil && u.Role == nil && u.Label == nil && u.Family == nil && u.Profile == nil && u.Model == nil && u.Harness == nil && u.Effort == nil && u.Pool == nil && u.OwnerLane == nil && u.ParentLane == nil && u.ParentJob == nil && u.PaneID == nil && u.Worktree == nil && u.Result == nil && u.Selection == nil && u.At == nil && u.ReadyAt == nil && u.ReportVersion == nil && u.EndReason == nil && u.DiffStat == nil
 }
 
 func validJobField(s string) bool { return len(s) <= jobFieldMax && !stringContainsNUL(s) }
@@ -583,9 +584,9 @@ func (s *Store) ListJobsByTask(ctx context.Context, taskID int64, limit int) ([]
 }
 
 // UpdateJob merges the allowlisted fields of u over the record. States only
-// move forward, a terminal record is never rewritten, and result is
-// write-once together with state=completed — violations are
-// ErrJobStateConflict.
+// move forward, a terminal record accepts only the late-write set (usage,
+// skills and the once-only report pair), and result is write-once together
+// with state=completed — violations are ErrJobStateConflict.
 func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, error) {
 	var j Job
 	if !ValidJobID(id) {
@@ -612,8 +613,26 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 	if err != nil {
 		return j, err
 	}
-	if jobTerminal[j.State] && !u.usageOnly() {
+	if jobTerminal[j.State] && !u.terminalOnly() {
 		return j, fmt.Errorf("%w: state %s is terminal", ErrJobStateConflict, j.State)
+	}
+	if jobTerminal[j.State] && (u.ReportDoc != nil || u.ReportSHA256 != nil) {
+		// The report pair lands once, together, while the record's report is
+		// still empty; afterwards only the stored values replay as a no-op.
+		if j.ReportDoc == "" && j.ReportSHA256 == nil {
+			if u.ReportDoc == nil || *u.ReportDoc == "" || u.ReportSHA256 == nil {
+				return j, errors.New("terminal report write requires report_doc and report_sha256")
+			}
+		} else {
+			same := (u.ReportDoc == nil || *u.ReportDoc == j.ReportDoc) &&
+				(u.ReportSHA256 == nil || j.ReportSHA256 != nil && *u.ReportSHA256 == *j.ReportSHA256)
+			if !same {
+				return j, fmt.Errorf("%w: state %s is terminal", ErrJobStateConflict, j.State)
+			}
+			if u.Usage == nil && u.Skills == nil && u.SkillsSupported == nil {
+				return j, nil
+			}
+		}
 	}
 	if u.State != nil && jobRank[*u.State] < jobRank[j.State] {
 		return j, fmt.Errorf("%w: %s cannot move to %s", ErrJobStateConflict, j.State, *u.State)

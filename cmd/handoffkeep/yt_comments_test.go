@@ -85,6 +85,32 @@ func TestYTCommentsWorkerNeedsCredentialsOnlyInCanaryAndOn(t *testing.T) {
 	}
 }
 
+// Moves on with every other mode off would start no worker and prepare no
+// move (moves are prepared by the fields feed): it is a startup error naming
+// both modes, before any YouTrack configuration is read (hk 4117).
+func TestYTMovesOnNeedsFieldsOn(t *testing.T) {
+	for _, env := range []string{"HANDOFFKEEP_YT_COMMENTS_MODE", "HANDOFFKEEP_YT_ISSUES_MODE", "HANDOFFKEEP_YT_FIELDS_MODE",
+		"HANDOFFKEEP_YT_DOC_COMMENTS_MODE", "HANDOFFKEEP_YT_DECISIONS_MODE", "HANDOFFKEEP_YT_DOCS_MODE", "HANDOFFKEEP_YT_COMMENTS_CATCHUP"} {
+		t.Setenv(env, "")
+	}
+	t.Setenv("YOUTRACK_URL", "")
+	t.Setenv("YOUTRACK_BOT_API_KEY", "")
+	t.Setenv("HANDOFFKEEP_YT_MOVES_MODE", "on")
+	w, err := ytCommentsWorkerFromEnv(nil)
+	if err == nil || w != nil || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_MOVES_MODE=on") || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_FIELDS_MODE") {
+		t.Fatalf("moves on, fields off: worker %v err %v", w, err)
+	}
+	t.Setenv("HANDOFFKEEP_YT_COMMENTS_MODE", "on")
+	if _, err := ytCommentsWorkerFromEnv(nil); err == nil || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_FIELDS_MODE") {
+		t.Fatalf("moves on with comments on, fields off: %v", err)
+	}
+	t.Setenv("HANDOFFKEEP_YT_COMMENTS_MODE", "")
+	t.Setenv("HANDOFFKEEP_YT_FIELDS_MODE", "on")
+	if _, err := ytCommentsWorkerFromEnv(nil); err == nil || !strings.Contains(err.Error(), "YOUTRACK_URL") {
+		t.Fatalf("moves and fields on without credentials: %v", err)
+	}
+}
+
 // `handoffkeep yt …` is the youtrack command under the name the brief uses.
 func TestYTIsTheYouTrackCommand(t *testing.T) {
 	err := run([]string{"yt", "nonsense"}, io.Discard, io.Discard)

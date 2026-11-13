@@ -68,6 +68,46 @@ func (s Server) quotaLatest(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, http.StatusOK, x)
 }
+
+func (s Server) quotaObservationHistory(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.quotaAuth(w, r); !ok {
+		return
+	}
+	q := r.URL.Query()
+	since, err := time.Parse(time.RFC3339, q.Get("since"))
+	if err != nil || q.Get("since") == "" {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	until := time.Now().UTC()
+	if raw := q.Get("until"); raw != "" {
+		until, err = time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_context")
+			return
+		}
+	}
+	if since.After(until) {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	limit, err := queryLimit(r, 500, 5000)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	rows, found, err := s.Service.Store.QuotaObservationHistory(r.Context(), r.PathValue("key"), since, until, limit)
+	if err != nil {
+		quotaError(w, r, err)
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	jsonOut(w, http.StatusOK, rows)
+}
+
 func (s Server) quotaPut(w http.ResponseWriter, r *http.Request) {
 	client, ok := s.quotaAuth(w, r)
 	if !ok || !s.quotaScope(w, client, r.PathValue("key")) {

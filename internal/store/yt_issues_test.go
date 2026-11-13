@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"slices"
 	"strconv"
@@ -107,6 +108,102 @@ func TestYTIssueCreateTaskPreparesOneOp(t *testing.T) {
 	}
 	if want := "ytwrite.issue_skipped task_id=" + strconv.FormatInt(unmapped.ID, 10); strings.Count(logs(), want) != 1 {
 		t.Fatalf("log %q, want one %q", logs(), want)
+	}
+}
+
+func TestYTIssueNoProjectDotsRequestUsesImportBucket(t *testing.T) {
+	s := schemaStore(t, "yti_no_project")
+	s.SetYTIssuesBucketProject("0-hk")
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	task, err := s.CreateDotsRequest(t.Context(), "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := ytiOps(t, s, task.ID)
+	if len(ops) != 1 || ops[0].YTTargetID != "0-hk" || ops[0].Tenant != ytcTenant {
+		t.Fatalf("issue_create ops = %+v", ops)
+	}
+	var payload ytwrite.IssueCreatePayload
+	if err := json.Unmarshal(ops[0].Payload, &payload); err != nil || payload.Project != "" || payload.YTProjectShort != "HK" {
+		t.Fatalf("bucket payload = %+v, err=%v", payload, err)
+	}
+}
+
+func TestYTIssueProjectSetPreparesCreateForUnboundTask(t *testing.T) {
+	s := schemaStore(t, "yti_project_set")
+	const project = "yti-project-set"
+	if _, err := s.AddTaskProject(t.Context(), project, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: project, ProjectID: "0-project-set", ShortName: "PS"}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateDotsRequest(t.Context(), "caller", DotsRequestInput{Title: "Research", Body: "Investigate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	updated, changed, err := s.SetTaskProject(t.Context(), task.ID, project, "tester", "assign project")
+	if err != nil || !changed || updated.Project == nil || *updated.Project != project {
+		t.Fatalf("SetTaskProject = %+v, changed=%t, err=%v", updated, changed, err)
+	}
+	ops := ytiOps(t, s, task.ID)
+	if len(ops) != 1 || ops[0].YTTargetID != "0-project-set" {
+		t.Fatalf("issue_create ops = %+v", ops)
+	}
+	var payload ytwrite.IssueCreatePayload
+	if err := json.Unmarshal(ops[0].Payload, &payload); err != nil || payload.Project != project {
+		t.Fatalf("project payload = %+v, err=%v", payload, err)
+	}
+}
+
+func TestYTIssueProjectSetSkipsTasksWithExistingIssueOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		claim func(t *testing.T, s *Store, task Task)
+	}{
+		{"binding", func(t *testing.T, s *Store, task Task) { ytbBind(t, s, ytbBinding(task.ID)) }},
+		{"entity map", func(t *testing.T, s *Store, task Task) {
+			ytbAnchor(t, s, task.ID, "2-map-"+strconv.FormatInt(task.ID, 10))
+		}},
+		{"comment canary", func(t *testing.T, s *Store, task Task) {
+			ytbCanaryRow(t, s, task.ID, ytcTenant, "2-canary-"+strconv.FormatInt(task.ID, 10))
+		}},
+		{"task origin", func(t *testing.T, s *Store, task Task) {
+			if _, err := s.UpsertYouTrackMirror(t.Context(), YouTrackMirrorInput{TaskID: task.ID, IssueID: "2-origin-" + strconv.FormatInt(task.ID, 10), DisplayRef: "HK-1", Tenant: ytcTenant, Role: "mirror"}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := schemaStore(t, "yti_owned_"+strings.ReplaceAll(tc.name, " ", "_"))
+			const project = "yti-owned-project"
+			initialProject := "yti-owned-initial-project"
+			if _, err := s.AddTaskProject(t.Context(), project, "test"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddTaskProject(t.Context(), initialProject, "test"); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: project, ProjectID: "0-owned", ShortName: "OWN"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: initialProject, ProjectID: ytbProjectID, ShortName: "HK"}); err != nil {
+				t.Fatal(err)
+			}
+			task, err := s.CreateTask(t.Context(), Task{Lane: "yti-owned", Title: "owned task", Kind: "implement", CreatedBy: "test", Project: &initialProject})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+			tc.claim(t, s, task)
+			if _, changed, err := s.SetTaskProject(t.Context(), task.ID, project, "tester", "assign project"); err != nil || !changed {
+				t.Fatalf("SetTaskProject changed=%t err=%v", changed, err)
+			}
+			if ops := ytiOps(t, s, task.ID); len(ops) != 0 {
+				t.Fatalf("issue_create ops for already-owned task = %+v", ops)
+			}
+		})
 	}
 }
 
@@ -587,5 +684,42 @@ func TestYTIssueIntakePreparesOneOp(t *testing.T) {
 	}
 	if ops := ytiOps(t, s, x.ID); len(ops) != 1 {
 		t.Fatalf("a replay prepared another op: %+v", ops)
+	}
+}
+
+// A comment written while the task's issue op was pending got no op (no
+// binding yet); once the op applies, the issue-binding catch-up prepares it
+// even with the general catch-up off. A binding from the import is left to
+// the general catch-up (hk 3914).
+func TestYTIssuePendingCommentsReachTheIssue(t *testing.T) {
+	s := schemaStore(t, "yti_pending_comments")
+	ytbMapped(t, s)
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	s.SetYTCommentsMode(YTCommentsOn)
+	x := ytiCreate(t, s, ytbProject)
+	pending, err := s.CreateTaskComment(t.Context(), x.ID, "worker", "written while the issue was pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ytcuNoOp(t, s, "pending", pending)
+	imported := ytcTask(t, s, ytbProject)
+	ytbBind(t, s, ytbBinding(imported))
+	missed := ytcuRawComment(t, s, imported, "worker")
+
+	op := ytiOps(t, s, x.ID)[0]
+	ytiDispatch(t, s, op)
+	if _, err := s.YTWriteLedger().Apply(t.Context(), time.Now().UTC(), op.ID, "2-500", ytiMaps(op, "2-500")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.CatchUpYTIssueComments(t.Context(), 100, nil)
+	if err != nil || len(got.Prepared) != 1 || got.Prepared[0].YTTargetID != "2-500" {
+		t.Fatalf("issue catch-up = %+v %v", got, err)
+	}
+	if c, ok := ytcOpFor(t, s, pending.ID); !ok || c.ID != got.Prepared[0].ID {
+		t.Fatalf("pending comment's op %+v %v", c, ok)
+	}
+	ytcuNoOp(t, s, "import binding", missed)
+	if again, err := s.CatchUpYTIssueComments(t.Context(), 100, nil); err != nil || len(again.Prepared) != 0 {
+		t.Fatalf("second pass = %+v %v", again, err)
 	}
 }

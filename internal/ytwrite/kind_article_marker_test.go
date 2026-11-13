@@ -168,3 +168,16 @@ func TestArticleRetryKey(t *testing.T) {
 		t.Fatalf("first %q retry %q", first.Key, retry.Key)
 	}
 }
+
+// hk 4357: a retry of a retry is keyed off the retry it replaces.
+func TestArticleRetryOfRetryKey(t *testing.T) {
+	req := articleReq()
+	req.RetryOf, req.RetryKey = 67300, ytwrite.ArticleRetryKey(artDocID, 67208)
+	op, err := ytwrite.ArticleOp(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.Key != "document-article:4206:retry-67208:retry-67300" {
+		t.Fatalf("key %q", op.Key)
+	}
+}

@@ -300,6 +300,13 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	if err != nil {
 		return ytwrite.Op{}, "", err
 	}
+	if reject == "" {
+		// A snapshot prepared behind a move that was refused names a project
+		// its issue is not in; it is rejected, never written there (hk 4111).
+		if reject, detail, err = claimYTFieldsProjectTx(ctx, tx, op); err != nil {
+			return ytwrite.Op{}, "", err
+		}
+	}
 	if reject != "" {
 		op, err = rejectYTOpTx(ctx, tx, now, id, reject, detail)
 		if err != nil {

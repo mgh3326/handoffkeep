@@ -442,6 +442,21 @@ func (a *ytAuditor) auditTask(ctx context.Context, taskID int64, counts []*ytAud
 		}
 	}
 	got := ytwrite.AuditComments(hk.Comments, yt, a.botID, youtrack.LegacyCommentID)
+	// A document copy (the task_docs consumer's comment op) has no hk comment,
+	// so AuditComments leaves it as yt_only_bot. Its rendered form names the op:
+	// the bot's comments that name a document op on this issue are doc_comment
+	// (hk 4245).
+	var botOps []int64
+	for _, c := range yt {
+		if op, ok := ytwrite.RenderedOpID(c.Text); ok && c.AuthorID == a.botID {
+			botOps = append(botOps, op)
+		}
+	}
+	docOps, err := a.st.YTDocCommentOpIDs(ctx, a.tenant, b.IssueID, botOps)
+	if err != nil {
+		return err
+	}
+	ytwrite.ReclassifyDocOps(&got, yt, a.botID, func(op int64) bool { return docOps[op] })
 	// A comment the adoption linked was posted by the Python mirror in a form
 	// hk cannot recognise; with no copy found it is adopted_unmatched, for
 	// the operator, and never enqueued: a second copy may be the result.

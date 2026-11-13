@@ -34,10 +34,12 @@ type YTFieldsBackfillOptions struct {
 }
 
 // YTFieldsBackfillCounts is one class count per outcome of the consumer's
-// rule. Scanned counts the tasks read; Prepared the ops made (or, in a dry
-// run, that would be).
+// rule. Scanned counts the tasks read; Prepared the tasks whose snapshot op was
+// made in place (or, in a dry run, would be); Ops every op made, issue_move
+// and issue_fields alike (a moved task makes two), which --limit caps.
 type YTFieldsBackfillCounts struct {
 	Scanned     int `json:"scanned"`
+	Ops         int `json:"ops"`
 	Prepared    int `json:"prepared"`
 	Unchanged   int `json:"unchanged"`
 	Unbound     int `json:"unbound"`
@@ -47,8 +49,9 @@ type YTFieldsBackfillCounts struct {
 	Invalid     int `json:"invalid"`
 }
 
-func (c *YTFieldsBackfillCounts) add(o ytFieldsOutcome) {
+func (c *YTFieldsBackfillCounts) add(o ytFieldsOutcome, ops int) {
 	c.Scanned++
+	c.Ops += ops
 	switch o {
 	case ytFieldsPrepared:
 		c.Prepared++
@@ -89,7 +92,8 @@ type YTFieldsBackfillReport struct {
 // BackfillYTFieldsOps prepares the issue_fields snapshot of every task opt
 // selects, in id order, each in its own transaction under the task's lane
 // lock, by the consumer's rule and the consumer's gate (mode on and its
-// tenant; off is ErrYTFieldsOff). It stops once opt.Limit ops are prepared;
+// tenant; off is ErrYTFieldsOff). It stops once opt.Limit ops are prepared,
+// counting the issue_move ops with the issue_fields ones (hk 4112);
 // the next run starts again from the first task and passes the ones already
 // sent as unchanged. A dry run reads the same rows and writes nothing.
 func (s *Store) BackfillYTFieldsOps(ctx context.Context, opt YTFieldsBackfillOptions) (YTFieldsBackfillReport, error) {
@@ -114,10 +118,10 @@ func (s *Store) BackfillYTFieldsOps(ctx context.Context, opt YTFieldsBackfillOpt
 	}
 	byProject := map[string]*YTFieldsBackfillProject{}
 	for _, id := range ids {
-		if opt.Limit > 0 && r.Total.Prepared >= opt.Limit {
+		if opt.Limit > 0 && r.Total.Ops >= opt.Limit {
 			break
 		}
-		outcome, project, err := s.backfillYTFields(ctx, tenant, id, opt.DryRun)
+		outcome, ops, project, err := s.backfillYTFields(ctx, tenant, id, opt.DryRun)
 		if err != nil {
 			return r, fmt.Errorf("task %d: %w", id, err)
 		}
@@ -130,8 +134,8 @@ func (s *Store) BackfillYTFieldsOps(ctx context.Context, opt YTFieldsBackfillOpt
 			byProject[project] = p
 			r.Projects = append(r.Projects, p)
 		}
-		p.add(outcome)
-		r.Total.add(outcome)
+		p.add(outcome, ops)
+		r.Total.add(outcome, ops)
 	}
 	return r, nil
 }
@@ -142,29 +146,29 @@ func (s *Store) BackfillYTFieldsOps(ctx context.Context, opt YTFieldsBackfillOpt
 // then the consumer's rule. A dry run applies the same rule
 // (ytSnapshotUnchanged: an unchanged sha whose op was rejected counts as prepared)
 // and rolls back.
-func (s *Store) backfillYTFields(ctx context.Context, tenant string, id int64, dryRun bool) (ytFieldsOutcome, string, error) {
+func (s *Store) backfillYTFields(ctx context.Context, tenant string, id int64, dryRun bool) (ytFieldsOutcome, int, string, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return "", "", err
+		return "", 0, "", err
 	}
 	defer tx.Rollback(ctx)
 	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(id, 10)); err != nil {
-		return "", "", err
+		return "", 0, "", err
 	}
 	now := time.Now().UTC()
 	tasks, err := readYTFieldsRows(ctx, tx, []int64{id}, now, s.StartedStalledHours())
 	if err != nil {
-		return "", "", err
+		return "", 0, "", err
 	}
 	t, found := tasks[id]
 	project := t.fields.Project
 	// A dry run applies the consumer's rule as it would, and rolls back.
-	outcome, err := prepareYTFieldsTx(ctx, tx, now, tenant, s.ytMovesNow() == YTMovesOn, id, t, found)
+	outcome, ops, err := prepareYTFieldsTx(ctx, tx, now, tenant, s.ytMovesNow() == YTMovesOn, id, t, found)
 	if err != nil {
-		return "", "", err
+		return "", 0, "", err
 	}
 	if dryRun {
-		return outcome, project, nil
+		return outcome, ops, project, nil
 	}
-	return outcome, project, tx.Commit(ctx)
+	return outcome, ops, project, tx.Commit(ctx)
 }

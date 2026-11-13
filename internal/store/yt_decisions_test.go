@@ -442,3 +442,87 @@ func TestYTDecisionsBoundAndPrepareYTDecision(t *testing.T) {
 		t.Fatalf("prepare mode off: %s %v", outcome, err)
 	}
 }
+
+// A bound decision whose expires_at passes with no write gets one snapshot op
+// whose state reads expired; a later sweep of the same expiry prepares nothing
+// (hk 4116). The sweep is throttled to one per minute.
+func TestYTDecisionsExpirySweepOncePerExpiry(t *testing.T) {
+	s := ytdecSetup(t, "ytd_expiry", true)
+	ctx := t.Context()
+	now := time.Now().UTC()
+
+	a := ytdecChat(t, s, "Q-20261112-41", "expires without an answer?")
+	if _, err := s.pool.Exec(ctx, `INSERT INTO yt_decision_bindings(decision_id, tenant, issue_id, issue_readable, project_id, origin, bound_by, bound_at)
+		VALUES ($1, $2, '2-141', 'DEC-141', $3, 'import_verified', 'test', $4)`,
+		strconv.FormatInt(a, 10), ytcTenant, ytdecProjectID, now); err != nil {
+		t.Fatal(err)
+	}
+	if outcome, err := s.PrepareYTDecision(ctx, a, now); err != nil || outcome != YTDecisionFieldsPrepared {
+		t.Fatalf("open snapshot: %s %v", outcome, err)
+	}
+
+	// expires_at passes; nothing writes the decision, so the feed sees nothing.
+	if _, err := s.pool.Exec(ctx, `UPDATE decision_requests SET expires_at=$1 WHERE id=$2`, now.Add(30*time.Second), a); err != nil {
+		t.Fatal(err)
+	}
+	later := now.Add(2 * time.Minute)
+	if err := s.catchUpYTDecisionExpiries(ctx, later); err != nil {
+		t.Fatal(err)
+	}
+	ops := ytdecOps(t, s, ytwrite.KindDecisionFields, a)
+	if len(ops) != 2 {
+		t.Fatalf("fields ops after expiry: %d, want 2 (open, then expired)", len(ops))
+	}
+	if got, want := ytdecField(ytdecSnapshot(t, ops[1]), ytwrite.FieldDecisionState), ytwrite.DecisionStateLabels["expired"]; got != want {
+		t.Fatalf("expired snapshot state %q, want %q", got, want)
+	}
+
+	// Throttled: a sweep within the minute does nothing; a later sweep of the
+	// same expiry finds the snapshot it already prepared.
+	if err := s.catchUpYTDecisionExpiries(ctx, later.Add(10*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.catchUpYTDecisionExpiries(ctx, later.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(ytdecOps(t, s, ytwrite.KindDecisionFields, a)); n != 2 {
+		t.Fatalf("fields ops after repeated sweeps: %d, want 2", n)
+	}
+}
+
+// A decision bound after an earlier sweep, with its expiry already past (a
+// backfill with the mode off writes no snapshot), gets its expired snapshot at
+// the next sweep (hk 4116 review).
+func TestYTDecisionsExpiryBoundAfterSweep(t *testing.T) {
+	s := ytdecSetup(t, "ytd_expiry_late", true)
+	ctx := t.Context()
+	now := time.Now().UTC()
+
+	a := ytdecChat(t, s, "Q-20261112-42", "bound after its expiry")
+	if _, err := s.pool.Exec(ctx, `UPDATE decision_requests SET expires_at=$1 WHERE id=$2`, now.Add(30*time.Second), a); err != nil {
+		t.Fatal(err)
+	}
+	first := now.Add(time.Minute)
+	if err := s.catchUpYTDecisionExpiries(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(ytdecOps(t, s, ytwrite.KindDecisionFields, a)); n != 0 {
+		t.Fatalf("fields ops for an unbound decision: %d", n)
+	}
+
+	if _, err := s.pool.Exec(ctx, `INSERT INTO yt_decision_bindings(decision_id, tenant, issue_id, issue_readable, project_id, origin, bound_by, bound_at)
+		VALUES ($1, $2, '2-142', 'DEC-142', $3, 'import_verified', 'test', $4)`,
+		strconv.FormatInt(a, 10), ytcTenant, ytdecProjectID, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.catchUpYTDecisionExpiries(ctx, first.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	ops := ytdecOps(t, s, ytwrite.KindDecisionFields, a)
+	if len(ops) != 1 {
+		t.Fatalf("fields ops after late binding: %d, want 1", len(ops))
+	}
+	if got, want := ytdecField(ytdecSnapshot(t, ops[0]), ytwrite.FieldDecisionState), ytwrite.DecisionStateLabels["expired"]; got != want {
+		t.Fatalf("late-bound snapshot state %q, want %q", got, want)
+	}
+}

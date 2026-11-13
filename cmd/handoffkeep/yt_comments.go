@@ -185,8 +185,9 @@ func ytCommentsCatchUpFromEnv() (bool, error) {
 
 // ytCommentsWorkerFromEnv sets the store's gates and returns the write
 // dispatcher for serve's worker list, or nil when the comments, issues,
-// fields, document-comment and decisions modes are all off (which needs no
-// YouTrack configuration). Any on without YOUTRACK_URL and
+// fields, document-comment, decisions and document-article modes are all off
+// (which needs no YouTrack configuration). Moves mode on with fields mode off is
+// a startup error: nothing would prepare or send a move. Any on without YOUTRACK_URL and
 // YOUTRACK_BOT_API_KEY is a startup error, never a writer that silently does
 // nothing; decisions mode on also reads the DEC project's id once.
 func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
@@ -221,6 +222,13 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	catchUp, err := ytCommentsCatchUpFromEnv()
 	if err != nil {
 		return nil, err
+	}
+	// Moves are prepared only by the task_fields consumer and their
+	// snapshots ride the fields gate, so moves on with fields off would start
+	// no worker and prepare nothing: refuse it rather than look enabled
+	// (hk 4117).
+	if moves == store.YTMovesOn && fields != store.YTFieldsOn {
+		return nil, fmt.Errorf("HANDOFFKEEP_YT_MOVES_MODE=on needs HANDOFFKEEP_YT_FIELDS_MODE=on (moves are prepared by the task fields feed); got HANDOFFKEEP_YT_FIELDS_MODE=%s", fields)
 	}
 	if st != nil {
 		st.SetYTMovesMode(moves)
@@ -294,6 +302,16 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 			art.buckets[k] = store.YTArticleProject{ID: b.ID, ShortName: b.ShortName}
 		}
 	}
+	var issueBucketID string
+	if issues == store.YTIssuesOn {
+		ctx, cancel := context.WithTimeout(context.Background(), ytCommentsGetTimeout)
+		issueBucketID, err = youtrack.ResolveBucketProject(ctx, client)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("HANDOFFKEEP_YT_ISSUES_MODE=on: resolve the %s bucket project: %w", youtrack.BucketShortName, err)
+		}
+	}
+	st.SetYTIssuesBucketProject(issueBucketID)
 	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, docs, dec, art, catchUp, nil)
 	if err != nil {
 		return nil, err
@@ -358,6 +376,8 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 	w := ytCommentsWorker{protocol: p, feed: st}
 	if catchUp {
 		w.catchUp = st
+	} else {
+		w.catchUp = ytIssueCommentCatchUp{st}
 	}
 	return w, nil
 }
@@ -366,6 +386,15 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 // (store.CatchUpYTComments).
 type ytCommentCatchUpper interface {
 	CatchUpYTComments(ctx context.Context, limit int, skip []int64) (store.YTCatchUp, error)
+}
+
+// ytIssueCommentCatchUp is the catch-up limited to the bindings issue_create
+// ops published (store.CatchUpYTIssueComments, hk 3914): the worker's
+// catch-up when HANDOFFKEEP_YT_COMMENTS_CATCHUP is off.
+type ytIssueCommentCatchUp struct{ st *store.Store }
+
+func (c ytIssueCommentCatchUp) CatchUpYTComments(ctx context.Context, limit int, skip []int64) (store.YTCatchUp, error) {
+	return c.st.CatchUpYTIssueComments(ctx, limit, skip)
 }
 
 // ytFeedRunner runs one pass of every registered change-feed consumer
@@ -380,7 +409,8 @@ type ytFeedRunner interface {
 // tenant it was configured for (store.YTTenantLedger): it neither sends nor
 // searches for an op bound to another tenant.
 //
-// Before each Drive pass, catchUp (when set: HANDOFFKEEP_YT_COMMENTS_CATCHUP=on) prepares the ops of comments on
+// Before each Drive pass, catchUp (HANDOFFKEEP_YT_COMMENTS_CATCHUP=on, or
+// else only for bindings issue_create ops published, hk 3914) prepares the ops of comments on
 // bound tasks that the enqueue missed; it does nothing outside mode on. A
 // comment it skipped as ambiguous is left out of later passes of this
 // process, so it is logged once and never crowds out the others; a restart
@@ -1067,7 +1097,7 @@ func youtrackIssuesBackfillCmd(args []string, out io.Writer) error {
 	if dbURL == "" || baseURL == "" || token == "" {
 		return exitCodeError{code: youtrackExitConfig, err: errors.New("HANDOFFKEEP_DB_URL, YOUTRACK_URL and YOUTRACK_BOT_API_KEY are required")}
 	}
-	// The client only names the tenant here; nothing is sent.
+	// The client names the tenant and resolves the no-project import bucket.
 	client, err := youtrack.New(youtrack.Config{BaseURL: baseURL, Token: token, UserAgent: "handoffkeep-ytwrite"})
 	if err != nil {
 		return exitCodeError{code: youtrackExitConfig, err: err}
@@ -1080,6 +1110,11 @@ func youtrackIssuesBackfillCmd(args []string, out io.Writer) error {
 		return err
 	}
 	defer st.Close()
+	bucketID, err := youtrack.ResolveBucketProject(openCtx, client)
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("resolve the %s bucket project: %w", youtrack.BucketShortName, err)}
+	}
+	st.SetYTIssuesBucketProject(bucketID)
 	report, err := st.BackfillYTIssueOps(context.Background(), tenant, strings.TrimSpace(*project), *dryRun)
 	if err != nil {
 		return err

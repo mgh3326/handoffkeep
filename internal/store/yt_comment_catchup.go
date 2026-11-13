@@ -39,10 +39,11 @@ type YTCatchUp struct {
 // are never copied, and not one the legacy push already mirrored), with no
 // ownership link and no op under its key. $1 the pull's author, $2 the
 // principal, $3 the kind, $4 the key prefix (YTCommentKey), $5 comment ids to
-// leave out, $6 the limit.
+// leave out, $6 the limit, $7 true for only the bindings an issue_create op
+// published (origin op_applied).
 const ytCatchUpSelectSQL = `SELECT c.id, c.task_id, c.body, c.author, c.created_at
 	FROM yt_task_bindings b JOIN task_comments c ON c.task_id = b.task_id AND c.id > b.comments_from
-	WHERE c.author <> $1
+	WHERE c.author <> $1 AND (NOT $7 OR b.origin = 'op_applied')
 	  AND NOT EXISTS (SELECT 1 FROM youtrack_comment_links l WHERE l.hk_comment_id = c.id)
 	  AND NOT EXISTS (SELECT 1 FROM yt_comment_write_links w WHERE w.comment_id = c.id)
 	  AND NOT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.principal = $2 AND o.kind = $3 AND o.idem_key = $4 || c.id::text)
@@ -74,6 +75,21 @@ const ytCatchUpSelectSQL = `SELECT c.id, c.task_id, c.body, c.author, c.created_
 // transaction, then what ytCommentOnOpTx reads and writes. It never takes
 // taskCommentInsertLock or a task row.
 func (s *Store) CatchUpYTComments(ctx context.Context, limit int, skip []int64) (YTCatchUp, error) {
+	return s.catchUpYTComments(ctx, limit, skip, false)
+}
+
+// CatchUpYTIssueComments is CatchUpYTComments for the tasks whose binding an
+// issue_create op published (hk 3914). Such a task's comments written while
+// its op was pending got no op (the task had no binding yet), and the
+// binding's comments_from (0 for a created issue, the latest comment for an
+// adopted one) says which of them the issue still lacks. The write worker
+// runs it in mode on even when the general catch-up
+// (HANDOFFKEEP_YT_COMMENTS_CATCHUP) is off.
+func (s *Store) CatchUpYTIssueComments(ctx context.Context, limit int, skip []int64) (YTCatchUp, error) {
+	return s.catchUpYTComments(ctx, limit, skip, true)
+}
+
+func (s *Store) catchUpYTComments(ctx context.Context, limit int, skip []int64, issueOnly bool) (YTCatchUp, error) {
 	out := YTCatchUp{Prepared: []ytwrite.Op{}, Skipped: []int64{}}
 	if s.ytCommentsModeNow() != YTCommentsOn || limit < 1 {
 		return out, nil
@@ -84,7 +100,7 @@ func (s *Store) CatchUpYTComments(ctx context.Context, limit int, skip []int64) 
 	if skip == nil {
 		skip = []int64{}
 	}
-	rows, err := s.pool.Query(ctx, ytCatchUpSelectSQL, YouTrackOwnedActor, YTCommentPrincipal, ytwrite.KindCommentAppend, ytCommentKeyPrefix, skip, limit)
+	rows, err := s.pool.Query(ctx, ytCatchUpSelectSQL, YouTrackOwnedActor, YTCommentPrincipal, ytwrite.KindCommentAppend, ytCommentKeyPrefix, skip, limit, issueOnly)
 	if err != nil {
 		return out, err
 	}

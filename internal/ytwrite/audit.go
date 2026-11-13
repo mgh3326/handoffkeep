@@ -82,15 +82,8 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy f
 		}
 	}
 	// A listing has no order (EnumerateStableComments reads a set); sort by
-	// id, shorter first, so "4-9" comes before "4-10" and a run is
-	// repeatable.
-	sort.Slice(live, func(i, j int) bool {
-		a, b := live[i].ID, live[j].ID
-		if len(a) != len(b) {
-			return len(a) < len(b)
-		}
-		return a < b
-	})
+	// id, so "4-9" comes before "4-10" and a run is repeatable.
+	sort.Slice(live, func(i, j int) bool { return commentIDLess(live[i].ID, live[j].ID) })
 	copies := make([][]string, len(hk))
 	byOp := map[int64]int{}
 	byLink := map[string]int{}
@@ -205,6 +198,42 @@ func AuditComments(hk []AuditComment, yt []RemoteComment, botID string, legacy f
 		}
 	}
 	return out
+}
+
+// commentIDLess orders YouTrack comment ids: shorter first, then by text, so
+// "4-9" comes before "4-10".
+func commentIDLess(a, b string) bool {
+	if len(a) != len(b) {
+		return len(a) < len(b)
+	}
+	return a < b
+}
+
+// ReclassifyDocOps moves a bot-written comment from YTOnlyBot to DocComment
+// when its rendered form (RenderedOpID) names an op isDocOp accepts (hk 4245).
+// A document copy is a comment_append op of the task_docs consumer
+// (principal hk:doc-comments): the copy has no hk comment, so AuditComments
+// leaves it in YTOnlyBot. yt is the listing AuditComments read. A comment by
+// anyone else is never moved, and a nil isDocOp moves nothing.
+func ReclassifyDocOps(got *CommentAudit, yt []RemoteComment, botID string, isDocOp func(opID int64) bool) {
+	if botID == "" || isDocOp == nil || len(got.YTOnlyBot) == 0 {
+		return
+	}
+	text := make(map[string]RemoteComment, len(yt))
+	for _, c := range yt {
+		text[c.ID] = c
+	}
+	var kept []string
+	for _, id := range got.YTOnlyBot {
+		c := text[id]
+		if op, ok := RenderedOpID(c.Text); ok && c.AuthorID == botID && isDocOp(op) {
+			got.DocComment = append(got.DocComment, id)
+			continue
+		}
+		kept = append(kept, id)
+	}
+	got.YTOnlyBot = kept
+	sort.Slice(got.DocComment, func(i, j int) bool { return commentIDLess(got.DocComment[i], got.DocComment[j]) })
 }
 
 func hasDistinctBodies(hk []AuditComment, group []int) bool {

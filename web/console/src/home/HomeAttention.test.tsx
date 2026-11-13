@@ -62,7 +62,7 @@ function payload(overrides: Record<string, unknown> = {}) {
 
 const defaultWorkStatus = {
   generated_at: "2026-11-05T05:00:00Z",
-  summary: { total_open: 5, backlog: 2, in_work: 1, in_review: 1, waiting_deploy: 1, merged_no_deploy_record: 0, bundle_parents: 0 },
+  summary: { total_open: 5, backlog: 2, in_work: 1, in_review: 1, waiting_deploy: 1, merged_no_deploy_project: 0, merged_before_deploy: 0, bundle_parents: 0 },
   projects: [],
   in_work: [],
   backlog: [],
@@ -259,7 +259,7 @@ it("shows a fresh Korean title for a deploy and can reveal the original", async 
   render(<HomeAttention />);
   expect(await screen.findByText("배포 대기 작업")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "원문 보기" }));
-  expect(screen.getByText(deploy.title)).toBeTruthy();
+  expect(await screen.findByText(deploy.title)).toBeTruthy();
 });
 it("preserves inbox selection and read state for a translated decision", async () => {
   serve(payload({ decisions: { count: 1, overdue: 0, items: [{ ...request, read: true, overdue: false, question_ko: "배포할까요?" }] }, tasks: { count: 0, awaiting_decision: 0, stalled: 0, items: [] }, deploys: { count: 0, events_capped: false, items: [] } }));
