@@ -10,15 +10,14 @@ import (
 
 // serverCaps is one origin's answer to GET /v1/capabilities.
 type serverCaps struct {
-	// legacy means the server gave no list: it predates the endpoint, or the
-	// read was refused. Its requests go out as they always did.
+	// legacy means the server answered 404: it predates the endpoint, so it
+	// lists nothing and its requests go out as they always did.
 	legacy   bool
 	features map[string]bool
 }
 
-// capsCache holds the answers read in this process, keyed by origin. A 404
-// (legacy) and a listed answer are kept; other failures are read again next
-// time.
+// capsCache holds the answers read in this process, keyed by origin. Only a
+// listed answer and a 404 are kept; any other failure is read again next time.
 var capsCache = struct {
 	sync.Mutex
 	byOrigin map[string]serverCaps
@@ -33,6 +32,21 @@ func (c Client) capabilitiesOf(ctx context.Context) (serverCaps, error) {
 	if ok {
 		return got, nil
 	}
+	got, err := c.fetchCapabilities(ctx)
+	if err != nil {
+		return serverCaps{}, err
+	}
+	capsCache.Lock()
+	capsCache.byOrigin[c.URL] = got
+	capsCache.Unlock()
+	return got, nil
+}
+
+// fetchCapabilities reads GET /v1/capabilities. Only a 404 establishes that
+// the endpoint is absent. Any other failure, including a refusal or a
+// transient 5xx, means the server's shapes are unknown, so the caller must not
+// send a gated shape.
+func (c Client) fetchCapabilities(ctx context.Context) (serverCaps, error) {
 	var out struct {
 		ProtocolVersion int      `json:"protocol_version"`
 		Features        []string `json:"features"`
@@ -41,29 +55,22 @@ func (c Client) capabilitiesOf(ctx context.Context) (serverCaps, error) {
 	var he *HTTPError
 	switch {
 	case err == nil:
-		got = serverCaps{features: make(map[string]bool, len(out.Features))}
+		got := serverCaps{features: make(map[string]bool, len(out.Features))}
 		for _, f := range out.Features {
 			got.features[f] = true
 		}
+		return got, nil
 	case errors.As(err, &he) && he.Status == http.StatusNotFound:
-		got = serverCaps{legacy: true}
-	case errors.As(err, &he):
-		// The server answered but did not give a list: send as before, and
-		// ask again on the next call.
 		return serverCaps{legacy: true}, nil
 	default:
 		return serverCaps{}, fmt.Errorf("capabilities_unavailable: %w", err)
 	}
-	capsCache.Lock()
-	capsCache.byOrigin[c.URL] = got
-	capsCache.Unlock()
-	return got, nil
 }
 
 // requireFeature stops a request before anything is sent when the server's
-// list omits feature. A legacy server has no list to check, so its requests go
-// out as they always did, and its invalid_context answers keep the existing
-// translation into a *_rejected error.
+// list omits feature. A legacy (404) server has no list to check, so its
+// requests go out as they always did, and its invalid_context answers keep the
+// existing translation into a *_rejected error.
 func (c Client) requireFeature(ctx context.Context, feature string) error {
 	caps, err := c.capabilitiesOf(ctx)
 	if err != nil {

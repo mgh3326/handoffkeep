@@ -211,3 +211,39 @@ func TestGatedCallsRefuseUnlistedShapesWithoutSending(t *testing.T) {
 		})
 	}
 }
+
+// A transient 5xx on the capabilities read is not "legacy": the gated call is
+// refused before any shape is sent, the failure is not cached, and the next
+// call asks again.
+func TestCapabilitiesServerErrorRefusesAndRetries(t *testing.T) {
+	resetCapabilitiesCache()
+	var reads, claims atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/capabilities" {
+			if reads.Add(1) == 1 {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			answerCurrentCapabilities(w, r)
+			return
+		}
+		claims.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(store.Task{ID: 7, State: "developing", ClaimedBy: "worker", Refs: store.TaskRefs{JobID: "job-1"}})
+	}))
+	defer server.Close()
+	c := Client{URL: server.URL, Token: "t"}
+	_, err := c.ClaimTask(context.Background(), 7, "worker", "job-1", "")
+	if err == nil || !strings.HasPrefix(err.Error(), "capabilities_unavailable:") {
+		t.Fatalf("err=%v, want capabilities_unavailable", err)
+	}
+	if n := claims.Load(); n != 0 {
+		t.Fatalf("claim posts=%d after a 5xx read, want 0", n)
+	}
+	if _, err := c.ClaimTask(context.Background(), 7, "worker", "job-1", ""); err != nil {
+		t.Fatalf("retry after 5xx: %v", err)
+	}
+	if n := reads.Load(); n != 2 {
+		t.Fatalf("capabilities reads=%d, want 2 (the 5xx was not cached)", n)
+	}
+}
