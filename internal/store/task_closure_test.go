@@ -63,7 +63,7 @@ func TestTaskClosureMigration(t *testing.T) {
 
 func TestCompletedKindGate(t *testing.T) {
 	s := schemaStore(t, "completed_kind")
-	for _, kind := range []string{"decide", "ops", "verify", "implement", "fix"} {
+	for _, kind := range []string{"decide", "ops", "verify", "research", "implement", "fix"} {
 		for _, from := range []string{StateBacklog, StateUnstarted, StateResearching, StateDeveloping, StateReviewing} {
 			t.Run(kind+"/"+from, func(t *testing.T) {
 				x := flowTask(t, s, s.pool, kind, from, true)
@@ -290,7 +290,7 @@ func TestEveryCloseRecordsClosure(t *testing.T) {
 
 func TestAutoCloseCompletedParentKinds(t *testing.T) {
 	s := schemaStore(t, "auto_close_completed_kind")
-	for _, kind := range []string{"decide", "ops", "verify", "implement", "fix"} {
+	for _, kind := range []string{"decide", "ops", "verify", "research", "implement", "fix"} {
 		t.Run(kind, func(t *testing.T) {
 			parent := flowTask(t, s, s.pool, kind, StateBacklog, false)
 			child := flowTask(t, s, s.pool, "decide", StateBacklog, false)

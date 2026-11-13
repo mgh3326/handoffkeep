@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"slices"
 	"strconv"
@@ -465,14 +466,59 @@ type ytRebuiltTask struct {
 // (youtrack/import/client.js issue()).
 const importTitlePrefix = "Original hk title: "
 
+// importMetaPrefixes are the description lines the import writes after the
+// title, in order, each at most once (youtrack/import/client.js issue()):
+// 제목(한국어), Body document, PR, Job, Parent task.
+var importMetaPrefixes = []string{"제목(한국어): ", "Body document: ", "PR: ", "Job: ", "Parent task: #"}
+
+// validImportMeta reports whether lines are exactly the metadata block the
+// import may write after the title: each prefix at most once, in order, with
+// a non-empty value (the rule ParseFields applies to its optional lines).
+func validImportMeta(lines []string) bool {
+	next := 0
+	for _, line := range lines {
+		for next < len(importMetaPrefixes) && !strings.HasPrefix(line, importMetaPrefixes[next]) {
+			next++
+		}
+		if next == len(importMetaPrefixes) || line == importMetaPrefixes[next] {
+			return false
+		}
+		next++
+	}
+	return true
+}
+
+// importTitle is the title in the body of the import's description (the text
+// after importTitlePrefix). The title may span lines; it ends where the
+// metadata block begins. wantTitle is the title PG holds: when the body is
+// exactly it, or it followed by a valid metadata block, it is the title even
+// when one of its lines looks like metadata. Otherwise the title is read up
+// to the first suffix that is a valid metadata block, for the differ reason.
+func importTitle(body, wantTitle string) string {
+	if body == wantTitle {
+		return wantTitle
+	}
+	if strings.HasPrefix(body, wantTitle+"\n") && validImportMeta(strings.Split(body[len(wantTitle)+1:], "\n")) {
+		return wantTitle
+	}
+	lines := strings.Split(body, "\n")
+	for i := 1; i < len(lines); i++ {
+		if validImportMeta(lines[i:]) {
+			return strings.Join(lines[:i], "\n")
+		}
+	}
+	return body
+}
+
 // rebuildTask reads an issue as hk would rebuild its task. The hk ID field
 // gives the id (else the description's task line); the description's title
 // line the title, in whichever of the three forms wrote it (issue_fields'
 // RenderFields, issue_create's RenderIssue, the import's "Original hk
-// title:"); the hk 프로젝트 field the project (else the description's
-// project), with Unassigned read as no project. reason says what could not be
-// read.
-func rebuildTask(issue youtrack.Issue) (x ytRebuiltTask, reason string) {
+// title:", whose title may span lines — wantTitle, the title PG holds,
+// disambiguates a title line that looks like the import's metadata); the hk
+// 프로젝트 field the project (else the description's project), with
+// Unassigned read as no project. reason says what could not be read.
+func rebuildTask(issue youtrack.Issue, wantTitle string) (x ytRebuiltTask, reason string) {
 	descProject, haveDescProject := "", false
 	var descID int64
 	if f, ok := ytwrite.ParseFields(issue.Description); ok {
@@ -482,7 +528,7 @@ func rebuildTask(issue youtrack.Issue) (x ytRebuiltTask, reason string) {
 		x.Title = f.Title
 		descID, descProject, haveDescProject = f.TaskID, f.Project, true
 	} else if rest, ok := strings.CutPrefix(issue.Description, importTitlePrefix); ok {
-		x.Title, _, _ = strings.Cut(rest, "\n")
+		x.Title = importTitle(rest, wantTitle)
 	} else {
 		return x, "description has no hk title line"
 	}
@@ -516,7 +562,7 @@ func rebuildTask(issue youtrack.Issue) (x ytRebuiltTask, reason string) {
 
 // diffTask is "" when the issue rebuilds t, else the first difference.
 func diffTask(t store.YTRebuildTask, issue youtrack.Issue) string {
-	x, reason := rebuildTask(issue)
+	x, reason := rebuildTask(issue, t.Title)
 	if reason != "" {
 		return reason
 	}
@@ -566,6 +612,13 @@ func (b *ytRebuilder) comments(ctx context.Context, seed int64, n int, out *ytRe
 			return lerr
 		})
 		if err != nil {
+			var re *ytwrite.RemoteError
+			if errors.As(err, &re) && re.Status == http.StatusNotFound {
+				// The issue the binding names is gone: the same difference
+				// the tasks target reports, not a failed read.
+				out.differ("task "+id, "issue "+t.IssueID+" not found")
+				continue
+			}
 			out.Errors.add("task "+id, err.Error())
 			log.Printf("youtrack.rebuild_comments_failed task_id=%d err=%q", t.TaskID, err.Error())
 			if stopped(ctx, err) {

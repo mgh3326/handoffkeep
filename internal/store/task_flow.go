@@ -558,7 +558,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		// An implement task completes on closure evidence like the other kinds;
 		// the evidence rules in applyLifecycle still apply (hk 4050).
 		if to == StateCompleted && from != StateMerged && !canCompleteKind(x.Kind) && x.Kind != "implement" {
-			return Task{}, fmt.Errorf("%w: completed applies to implement, decide, ops and verify tasks", ErrTaskConflict)
+			return Task{}, fmt.Errorf("%w: completed applies to implement, decide, ops, verify and research tasks", ErrTaskConflict)
 		}
 		// A task waiting on a decision leaves only the way the old
 		// needs_decision state did: back to backlog, parked, or dropped.
