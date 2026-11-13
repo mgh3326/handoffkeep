@@ -41,12 +41,28 @@ func (s fieldShape) live(value string) bool {
 	return ok && !v.archived
 }
 
-// openSetFields are the fields whose values hk owns as an open set (a lane,
-// an area, a milestone name appears in hk first): a value missing from the
-// project's bundle is added to it before the update (hk 4051). Every other
-// bundle field (hk 상태, 종류, 등급, 티어, hk 우선순위, 멈춤) is a closed set
-// the schema plan owns, and a missing value is refused.
-var openSetFields = map[string]bool{ytwrite.FieldLane: true, ytwrite.FieldArea: true, ytwrite.FieldMilestone: true}
+// findValue resolves value to the bundle's own spelling and entry: the exact
+// name when the bundle holds it, else the value that differs only in case —
+// YouTrack enum names are case-insensitively unique, so a case variant is the
+// same value (hk 4234). A live value wins over an archived one; the
+// lexicographically smallest name keeps the answer deterministic. ok is
+// false when the bundle holds no such value.
+func (s fieldShape) findValue(value string) (name string, v bundleValue, ok bool) {
+	if v, ok := s.values[value]; ok {
+		return value, v, true
+	}
+	found := false
+	for n, cand := range s.values {
+		if !strings.EqualFold(n, value) {
+			continue
+		}
+		if !found || (s.values[name].archived && !cand.archived) ||
+			(s.values[name].archived == cand.archived && n < name) {
+			name, v, found = n, cand, true
+		}
+	}
+	return name, v, found
+}
 
 // projectFieldShapes reads the project's fields in one request.
 func (r *WriteRemote) projectFieldShapes(ctx context.Context, projectID string) (map[string]fieldShape, error) {
@@ -134,7 +150,7 @@ func (r *WriteRemote) ensureBundleValue(ctx context.Context, projectID, field st
 		Type string `json:"$type"`
 		Name string `json:"name"`
 	}{elementType, value}), "added"
-	if v, ok := s.values[value]; ok && v.archived {
+	if _, v, ok := s.findValue(value); ok && v.archived {
 		path, action = base+"/"+url.PathEscape(v.id), "unarchived"
 		body = struct {
 			Type     string `json:"$type"`
@@ -153,7 +169,7 @@ func (r *WriteRemote) ensureBundleValue(ctx context.Context, projectID, field st
 		if rerr != nil {
 			return rerr
 		}
-		if !shapes[field].live(value) {
+		if _, v, found := shapes[field].findValue(value); !found || v.archived {
 			return err
 		}
 		action = "present"
@@ -250,7 +266,7 @@ func issueFieldValue(fv ytwrite.FieldValue, s fieldShape) (CustomField, error) {
 	default:
 		return refuse("the field type " + strconv.Quote(typeID) + " is not one hk writes")
 	}
-	if s.bundle && fv.Value != "" && !s.live(fv.Value) && !openSetFields[fv.Name] {
+	if s.bundle && fv.Value != "" && !s.live(fv.Value) && !ytwrite.OpenSetField(fv.Name) {
 		return refuse("the value is not in the field's bundle (or it is archived)")
 	}
 	return f, nil
@@ -262,9 +278,12 @@ func issueFieldValue(fv ytwrite.FieldValue, s fieldShape) (CustomField, error) {
 // ytwrite.ReasonFieldRefused) a closed-set value its bundle lacks, a field the
 // project lacks with a value to set, or a type the snapshot cannot be written
 // as, so last_error names the field and the value. Only when nothing is
-// refused, an open-set value (openSetFields) missing from or archived in its
-// bundle is added or un-archived (ensureBundleValue): a 403 is refused, any
-// other failure is a *ytwrite.NotSentError. Then it makes one POST
+// refused, an open-set value (ytwrite.OpenSetField) missing from or
+// archived in its bundle is added or un-archived (ensureBundleValue): a 403
+// is refused, any other failure is a *ytwrite.NotSentError. An open-set
+// value that differs from a bundle value only in case is sent with the
+// bundle's spelling, and an archived one is un-archived, never duplicated
+// (hk 4234). Then it makes one POST
 // /api/issues/{id} with the summary, the description and every field ("" is
 // sent as null, or [] for a multi-value field, which clears it). A field the
 // project lacks with no value is left out.
@@ -287,6 +306,14 @@ func (r *WriteRemote) UpdateIssueFields(ctx context.Context, in ytwrite.IssueFie
 				refused = append(refused, fmt.Sprintf("field %q value %q: project %s has no such field", fv.Name, fv.Value, in.ProjectID))
 			}
 			continue
+		}
+		if s.bundle && fv.Value != "" && ytwrite.OpenSetField(fv.Name) {
+			if name, _, found := s.findValue(fv.Value); found {
+				// The bundle's spelling goes on the wire: YouTrack resolves
+				// enum names case-insensitively but refuses a case variant
+				// as a new bundle value (hk 4234).
+				fv.Value = name
+			}
 		}
 		f, ferr := issueFieldValue(fv, s)
 		if ferr != nil {
