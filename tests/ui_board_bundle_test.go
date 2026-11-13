@@ -83,10 +83,10 @@ func consoleTreeError(committed, emitted map[string][]byte) error {
 }
 
 // consoleContractsError checks the entry outputs a correct multi-entry build
-// must produce: the shell and server entries, their styles, and the
+// must produce: the shell entry and its styles, the tokens sheet, and the
 // shared chunk, plus the API/security contracts each bundle carries.
 func consoleContractsError(tree map[string][]byte) error {
-	for _, name := range []string{"shell.js", "shell.css", "server.js", "server.css", "tokens.css", "shared-client.js", "shared-DocView.js", "shared-DocMarkdown.js"} {
+	for _, name := range []string{"shell.js", "shell.css", "tokens.css", "shared-client.js", "shared-DocView.js", "shared-DocMarkdown.js"} {
 		body, ok := tree[name]
 		if !ok {
 			return fmt.Errorf("console artifact %s missing", name)
@@ -125,7 +125,7 @@ func consoleContractsError(tree map[string][]byte) error {
 // console entry output. Adding or repointing an entry must never delete a
 // sibling's emitted file.
 func consoleSiblingEntriesError(tree map[string][]byte) error {
-	for _, name := range []string{"shell.js", "shell.css", "server.js"} {
+	for _, name := range []string{"shell.js", "shell.css", "tokens.css"} {
 		if len(tree[name]) == 0 {
 			return fmt.Errorf("sibling entry output %s missing", name)
 		}
@@ -299,11 +299,11 @@ func TestConsoleBuildDriftMutantsTurnRed(t *testing.T) {
 		}
 	})
 
-	// A build without the server entry emits no server output; the emitted
+	// A build without the tokens entry emits no tokens.css; the emitted
 	// set must not silently shrink.
 	t.Run("config-single-entry", func(t *testing.T) {
 		config := writeMutantConfig(t, projectDir, "single-entry", func(source string) string {
-			return strings.Replace(source, "\n        server: resolve(root, \"src/server.tsx\"),", "", 1)
+			return strings.Replace(source, "\n        tokens: resolve(root, \"src/design/tokens.css\"),", "", 1)
 		})
 		outDir := filepath.Join(t.TempDir(), "out")
 		viteBuild(t, npm, projectDir, config, outDir)

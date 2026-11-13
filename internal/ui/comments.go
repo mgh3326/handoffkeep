@@ -108,7 +108,7 @@ func (h *Handler) boardTaskComments(w http.ResponseWriter, r *http.Request, task
 }
 
 // createTaskComment is the console's comment write. It takes the same
-// authentication, origin, and CSRF path as /ui/decisions/answer: ServeHTTP
+// authentication, origin, and CSRF path as the other console writes: ServeHTTP
 // has already required a verified operator email (service principals are
 // refused on non-/ui/api routes), then sameOrigin, ParseForm, validCSRF, and
 // one audit line. The author is the verified email; the form carries only
