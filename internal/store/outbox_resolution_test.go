@@ -287,7 +287,9 @@ func TestDispositionAnswerNotice(t *testing.T) {
 // once per result: the structured finish writes it in the finish transaction
 // (a commit failure leaves the attempt running and no row), a replayed finish
 // writes nothing new, the deploy record document for the same job and ref
-// owns the same row, and a deploy with no job or no recorded lane writes none.
+// owns the same row, a record without a ref or a retried attempt is a result
+// of its own, ambiguous job/ref pairs never share an id, and a deploy with no
+// job or no recorded lane writes none.
 func TestDeployResultNotice(t *testing.T) {
 	f := newDeployFixture(t, "outbox_deploy", "prod")
 	pool := f.s.pool
@@ -301,18 +303,19 @@ func TestDeployResultNotice(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	start := func(attempt, job string) Deploy {
+	startRef := func(attempt, job, ref string) Deploy {
 		t.Helper()
-		d, _, err := f.s.StartDeploy(ctx, DeployStart{AttemptID: attempt, Service: f.svc, Targets: []string{"prod"}, Action: DeployActionDeploy, DeployedRef: "ref-" + attempt, JobID: job, Source: "mergewake"})
+		d, _, err := f.s.StartDeploy(ctx, DeployStart{AttemptID: attempt, Service: f.svc, Targets: []string{"prod"}, Action: DeployActionDeploy, DeployedRef: ref, JobID: job, Source: "mergewake"})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return d
 	}
+	start := func(attempt, job string) Deploy { return startRef(attempt, job, "ref-"+attempt) }
 	claim("job-deploy-1", "asker-lane", "worker-lane")
 	claim("job-deploy-2", "", "owner-only-lane")
 	d := start("att-1", "job-deploy-1")
-	id := deployResultEventID(f.svc, "job-deploy-1", "ref-att-1", DeploySuccess)
+	id := deployResultAttemptEventID("att-1")
 
 	undo := failOutboxCommit(t, pool)
 	if _, err := f.s.FinishDeploy(ctx, "att-1", DeployFinish{State: DeploySuccess}); err == nil {
@@ -351,9 +354,38 @@ func TestDeployResultNotice(t *testing.T) {
 	if _, _, err := f.s.PutDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	rows = outboxByPrefix(t, pool, deployResultEventID(f.svc, "job-deploy-2", "ref-doc", "failed"))
+	rows = outboxByPrefix(t, pool, deployResultRecordEventID(doc.Key))
 	if len(rows) != 1 || rows[0].TargetLane != "owner-only-lane" || rows[0].Text != "[hk] deploy "+f.svc+" ref-doc job job-deploy-2: failed at step 3" {
 		t.Fatalf("record rows=%+v", rows)
+	}
+
+	// A record without a ref is still a result, identified by its key.
+	doc.Key = "deploy/" + f.svc + "/20261113T030203Z"
+	doc.Body = `{"schema":"` + DeployRecordSchema + `","service":"` + f.svc + `","target":"prod","deployed_ref":null,"result":"failed","job_id":"job-deploy-2","included_prs":null}`
+	if _, _, err := f.s.PutDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	if rows = outboxByPrefix(t, pool, deployResultRecordEventID(doc.Key)); len(rows) != 1 || rows[0].TargetLane != "owner-only-lane" || rows[0].Text != "[hk] deploy "+f.svc+" (no ref) job job-deploy-2: failed" {
+		t.Fatalf("record without ref rows=%+v", rows)
+	}
+
+	// Distinct deploys never share an id: hyphen-ambiguous (job, ref) pairs
+	// land on their own lanes, and a retried attempt of the same job and ref
+	// is a result of its own.
+	claim("a-b", "lane-ab", "")
+	claim("a", "lane-a", "")
+	startRef("att-amb-1", "a-b", "c")
+	startRef("att-amb-2", "a", "b-c")
+	f.finish(t, "att-amb-1", DeployFailed)
+	f.finish(t, "att-amb-2", DeployFailed)
+	startRef("att-retry-1", "a", "r")
+	startRef("att-retry-2", "a", "r")
+	f.finish(t, "att-retry-1", DeployFailed)
+	f.finish(t, "att-retry-2", DeployFailed)
+	for attempt, lane := range map[string]string{"att-amb-1": "lane-ab", "att-amb-2": "lane-a", "att-retry-1": "lane-a", "att-retry-2": "lane-a"} {
+		if rows := outboxByPrefix(t, pool, deployResultAttemptEventID(attempt)); len(rows) != 1 || rows[0].TargetLane != lane {
+			t.Fatalf("attempt %s rows=%+v want lane %s", attempt, rows, lane)
+		}
 	}
 
 	// No job, or a job no lane is recorded for: nobody asked, nothing queued.
@@ -364,8 +396,10 @@ func TestDeployResultNotice(t *testing.T) {
 	f.finish(t, "att-nolane", DeployRolledBack)
 	start("att-unknown-job", "job-never-claimed")
 	f.finish(t, "att-unknown-job", DeployFailed)
-	if rows := outboxByPrefix(t, pool, "deploy-result-"); len(rows) != 2 {
-		t.Fatalf("deploy notices=%d, want the two with an asking lane", len(rows))
+	for _, attempt := range []string{"att-nojob", "att-nolane", "att-unknown-job"} {
+		if rows := outboxByPrefix(t, pool, deployResultAttemptEventID(attempt)); len(rows) != 0 {
+			t.Fatalf("attempt %s with no asking lane wrote %+v", attempt, rows)
+		}
 	}
 }
 

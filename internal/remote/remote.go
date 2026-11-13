@@ -615,14 +615,14 @@ func (c Client) MarkNotificationSent(ctx context.Context, eventID string, hubRow
 }
 
 // MarkNotificationApplied reports that the receiving lane applied an outbox
-// event the hub had already accepted. The ack is idempotent per event id and
-// identity.
-func (c Client) MarkNotificationApplied(ctx context.Context, eventID, by string) (store.NotificationOutbox, error) {
+// event the hub had already accepted. The server attributes the receipt to
+// the client's token, so the call names no identity. It is idempotent per
+// event id and client.
+func (c Client) MarkNotificationApplied(ctx context.Context, eventID string) (store.NotificationOutbox, error) {
 	var out store.NotificationOutbox
 	err := c.call(ctx, "POST", "/v1/assistant/outbox/applied", struct {
 		EventID string `json:"event_id"`
-		By      string `json:"by"`
-	}{eventID, by}, &out)
+	}{eventID}, &out)
 	return out, err
 }
 

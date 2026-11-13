@@ -506,7 +506,7 @@ func (s *Store) FinishDeploy(ctx context.Context, attemptID string, in DeployFin
 		if d.FailedStep != nil {
 			failed = *d.FailedStep
 		}
-		if err = queueDeployResultNoticeTx(ctx, tx, d.Service, *d.JobID, d.DeployedRef, d.State, nil, failed, now); err != nil {
+		if err = queueDeployResultNoticeTx(ctx, tx, deployResultAttemptEventID(attemptID), d.Service, *d.JobID, d.DeployedRef, d.State, nil, failed, now); err != nil {
 			return Deploy{}, err
 		}
 	}

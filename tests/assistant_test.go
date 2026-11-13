@@ -670,23 +670,26 @@ func TestAssistantOutboxAPI(t *testing.T) {
 	// The lane's ack is the second receipt; it follows the hub's.
 	applied := func(eventID, by string) (int, map[string]any) {
 		t.Helper()
-		resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/assistant/outbox/applied", "node-token", map[string]any{"event_id": eventID, "by": by})
+		body := map[string]any{"event_id": eventID}
+		if by != "" {
+			body["by"] = by
+		}
+		resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/assistant/outbox/applied", "node-token", body)
 		defer resp.Body.Close()
 		out := map[string]any{}
 		_ = json.NewDecoder(resp.Body).Decode(&out)
 		return resp.StatusCode, out
 	}
-	status, ack := applied(eventID, "lane-a")
-	if status != http.StatusOK || ack["applied_by"] != "lane-a" || ack["applied_at"] == nil || ack["sent_at"] == nil {
+	// A caller-supplied identity is never the receipt's: it is the token's.
+	status, ack := applied(eventID, "spoofed-lane")
+	by, _ := ack["applied_by"].(string)
+	if status != http.StatusOK || by == "" || by == "spoofed-lane" || ack["applied_at"] == nil || ack["sent_at"] == nil {
 		t.Fatalf("applied status=%d body=%v", status, ack)
 	}
-	if status, again := applied(eventID, "lane-a"); status != http.StatusOK || again["applied_at"] != ack["applied_at"] {
+	if status, again := applied(eventID, ""); status != http.StatusOK || again["applied_at"] != ack["applied_at"] || again["applied_by"] != by {
 		t.Fatalf("repeat applied status=%d body=%v", status, again)
 	}
-	if status, out := applied(eventID, "lane-b"); status != http.StatusConflict {
-		t.Fatalf("applied by another identity status=%d body=%v", status, out)
-	}
-	if status, out := applied("dr-999999-1-answered", "lane-a"); status != http.StatusNotFound {
+	if status, out := applied("dr-999999-1-answered", ""); status != http.StatusNotFound {
 		t.Fatalf("applied unknown event status=%d body=%v", status, out)
 	}
 }
@@ -717,7 +720,7 @@ func TestAssistantOutboxAppliedNeedsReceived(t *testing.T) {
 	if eventID == "" {
 		t.Fatal("resolve queued no notice")
 	}
-	resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/assistant/outbox/applied", "node-token", map[string]any{"event_id": eventID, "by": "lane-a"})
+	resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/assistant/outbox/applied", "node-token", map[string]any{"event_id": eventID})
 	defer resp.Body.Close()
 	out := map[string]any{}
 	_ = json.NewDecoder(resp.Body).Decode(&out)

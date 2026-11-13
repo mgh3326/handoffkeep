@@ -52,7 +52,7 @@ func exerciseAssistant(t *testing.T, c Client) {
 	if _, e := c.MarkNotificationSent(ctx, "dr-1-1-answered", 7); e != nil {
 		t.Fatalf("MarkNotificationSent: %v", e)
 	}
-	if _, e := c.MarkNotificationApplied(ctx, "dr-1-1-answered", "lane-a"); e != nil {
+	if _, e := c.MarkNotificationApplied(ctx, "dr-1-1-answered"); e != nil {
 		t.Fatalf("MarkNotificationApplied: %v", e)
 	}
 	if _, e := c.AssistantResolve(ctx, store.DecisionAssistantResolveInput{RequestID: "dr-1-1", Option: "A"}); e != nil {
