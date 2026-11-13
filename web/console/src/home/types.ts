@@ -50,12 +50,6 @@ export type AttentionDeploy = {
   woken: boolean;
 };
 
-export type AttentionLaggingDeploy = {
-  service: string;
-  repo: string;
-  lag_count: number;
-};
-
 export type Attention = {
   generated_at: string;
   decisions: { count: number; overdue: number; items: AttentionDecision[] };
@@ -65,10 +59,5 @@ export type Attention = {
     stalled: number;
     items: AttentionTask[];
   };
-  deploys: {
-    count: number;
-    events_capped: boolean;
-    items: AttentionDeploy[];
-    lagging?: AttentionLaggingDeploy[];
-  };
+  deploys: { count: number; events_capped: boolean; items: AttentionDeploy[] };
 };

@@ -3,7 +3,6 @@ import type {
   Attention,
   AttentionDecision,
   AttentionDeploy,
-  AttentionLaggingDeploy,
   AttentionTask,
 } from "./types";
 
@@ -118,14 +117,6 @@ function deploy(o: Record<string, unknown>, at: string): AttentionDeploy {
   };
 }
 
-function laggingDeploy(o: Record<string, unknown>, at: string): AttentionLaggingDeploy {
-  return {
-    service: text(o, "service", at),
-    repo: text(o, "repo", at),
-    lag_count: count(o, "lag_count", at),
-  };
-}
-
 /** Checks every field the screen reads and throws on a missing or mistyped
  * one, so a malformed answer is an error, never an empty list. */
 export function parseAttention(raw: unknown): Attention {
@@ -150,15 +141,6 @@ export function parseAttention(raw: unknown): Attention {
       count: count(deploys, "count", "deploys"),
       events_capped: flag(deploys, "events_capped", "deploys"),
       items: items(deploys, "deploys", deploy),
-      lagging:
-        deploys.lagging === undefined
-          ? undefined
-          : !Array.isArray(deploys.lagging)
-            ? fail("deploys.lagging", "is not an array")
-            : deploys.lagging.map((item, index) => {
-                const at = `deploys.lagging[${index}]`;
-                return laggingDeploy(object(item, at), at);
-              }),
     },
   };
 }
