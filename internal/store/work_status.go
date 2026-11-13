@@ -392,7 +392,7 @@ func (s *Store) ReadWorkStatus(ctx context.Context, now time.Time) (*WorkStatus,
 		return nil, err
 	}
 	in.Movement = WorkStatusMovementDays(now, createdCounts, closedCounts)
-	if in.Queued, err = readQueuedSpawnsTx(ctx, tx); err != nil {
+	if in.Queued, err = readQueuedSpawnsTx(ctx, tx, true); err != nil {
 		return nil, err
 	}
 	return BuildWorkStatus(now, list, in), nil
@@ -451,8 +451,8 @@ func countByKSTDayTx(ctx context.Context, tx pgx.Tx, sql string, args ...any) (m
 }
 
 // WorkStatusTaskOverlay is the hk-only part of one task on the work status
-// page: who works on it (job, host), its PR, its bundle parent, and when it
-// last entered each state.
+// page: who works on it (job, host), its PR and its bundle parent. When it
+// entered a state is YouTrack's (its activities), not hk's.
 type WorkStatusTaskOverlay struct {
 	ParentID    *int64
 	ParentTitle string
@@ -460,30 +460,22 @@ type WorkStatusTaskOverlay struct {
 	JobState    string
 	Host        string
 	PR          string
-	// EnteredAt is the latest transition into each state.
-	EnteredAt map[string]time.Time
 }
 
 // WorkStatusOverlay is what the YouTrack-backed work status reads from hk
 // (hk 4430): the deploy records, the configured projects, the queued spawns
-// (hk 4377) and the per-task overlay. Movement is the caller's.
+// (hk 4377, every task whose request is in flight, whatever hk's copy of its
+// state: YouTrack says whether it is open) and the per-task overlay. Movement
+// and state times are the caller's, from YouTrack.
 type WorkStatusOverlay struct {
 	Inputs WorkStatusInputs
 	Tasks  map[int64]WorkStatusTaskOverlay
-	// ClosedEvents is, per task, every transition into a closed state
-	// (WorkStatusClosedStates) at or after the movement window's start: the
-	// close history the movement counts, whatever the task's state now.
-	ClosedEvents map[int64][]time.Time
-	// LastClosed is, per task, its latest transition into a closed state at
-	// any time.
-	LastClosed map[int64]time.Time
 }
 
-// ReadWorkStatusOverlay reads the hk side of the work status for ids, and
-// the close history (ClosedEvents since closedSince, LastClosed) in one
+// ReadWorkStatusOverlay reads the hk side of the work status for ids in one
 // consistent read. A task id hk does not know has no overlay row.
-func (s *Store) ReadWorkStatusOverlay(ctx context.Context, ids []int64, closedSince time.Time) (WorkStatusOverlay, error) {
-	out := WorkStatusOverlay{Tasks: map[int64]WorkStatusTaskOverlay{}, ClosedEvents: map[int64][]time.Time{}, LastClosed: map[int64]time.Time{}}
+func (s *Store) ReadWorkStatusOverlay(ctx context.Context, ids []int64) (WorkStatusOverlay, error) {
+	out := WorkStatusOverlay{Tasks: map[int64]WorkStatusTaskOverlay{}}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return out, err
@@ -495,30 +487,7 @@ func (s *Store) ReadWorkStatusOverlay(ctx context.Context, ids []int64, closedSi
 	if out.Inputs.Projects, err = readTaskProjectNamesTx(ctx, tx); err != nil {
 		return out, err
 	}
-	if out.Inputs.Queued, err = readQueuedSpawnsTx(ctx, tx); err != nil {
-		return out, err
-	}
-	closedRows, err := tx.Query(ctx, `SELECT task_id, at, at >= $2 FROM task_events
-		WHERE kind = 'transition' AND "to" = ANY($1) ORDER BY task_id, at`, WorkStatusClosedStates, closedSince)
-	if err != nil {
-		return out, err
-	}
-	for closedRows.Next() {
-		var id int64
-		var at time.Time
-		var inWindow bool
-		if err := closedRows.Scan(&id, &at, &inWindow); err != nil {
-			closedRows.Close()
-			return out, err
-		}
-		at = at.UTC()
-		if inWindow {
-			out.ClosedEvents[id] = append(out.ClosedEvents[id], at)
-		}
-		out.LastClosed[id] = at // rows are in time order per task
-	}
-	closedRows.Close()
-	if err := closedRows.Err(); err != nil {
+	if out.Inputs.Queued, err = readQueuedSpawnsTx(ctx, tx, false); err != nil {
 		return out, err
 	}
 	if len(ids) > 0 {
@@ -559,32 +528,10 @@ func (s *Store) ReadWorkStatusOverlay(ctx context.Context, ids []int64, closedSi
 				_ = json.Unmarshal(refsRaw, &refs)
 			}
 			x.JobID, x.Host, x.PR = effectiveWorkRefs(x.JobID, x.Host, refs, claimedBy, changeRepo, changePR)
-			x.EnteredAt = map[string]time.Time{}
 			out.Tasks[id] = x
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			return out, err
-		}
-		events, err := tx.Query(ctx, `SELECT task_id, "to", max(at) FROM task_events
-			WHERE task_id = ANY($1) AND kind = 'transition' GROUP BY task_id, "to"`, ids)
-		if err != nil {
-			return out, err
-		}
-		for events.Next() {
-			var id int64
-			var to string
-			var at time.Time
-			if err := events.Scan(&id, &to, &at); err != nil {
-				events.Close()
-				return out, err
-			}
-			if x, ok := out.Tasks[id]; ok {
-				x.EnteredAt[to] = at.UTC()
-			}
-		}
-		events.Close()
-		if err := events.Err(); err != nil {
 			return out, err
 		}
 	}
