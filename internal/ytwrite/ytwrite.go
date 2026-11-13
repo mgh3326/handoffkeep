@@ -107,7 +107,12 @@ const (
 	ReasonMarkerDeleted     = "marker_deleted"
 	ReasonReconcileFailed   = "reconcile_failed"
 	ReasonOperatorNotDone   = "operator_not_applied"
-	ReasonUnsupportedKind   = "unsupported_kind"
+	// ReasonAdoptionUnconfirmed: the only candidate is the issue Send would
+	// have adopted (Evidence.Adopted), named in the detail. It is never
+	// applied by evidence: a create the op sent may still land (hk 3911,
+	// review of PR #383); an operator resolves it.
+	ReasonAdoptionUnconfirmed = "adoption_unconfirmed"
+	ReasonUnsupportedKind     = "unsupported_kind"
 	// ReasonNotSent: a read a kind makes before its write failed, so nothing
 	// was sent; the op is prepared again (NotSentError).
 	ReasonNotSent = "not_sent"
@@ -132,9 +137,12 @@ const (
 	// from that create (the create was rejected, or applied with
 	// binding_conflict). Nothing is sent.
 	ReasonIssueNotBound = "issue_not_bound"
-	// ReasonBindingRemoved: the held-op recovery pass closed a prepared op
-	// whose task has no binding (hk 4491); nothing was sent.
+	// ReasonBindingRemoved: a prepared op whose task has no binding was
+	// closed without being sent, by the held-op recovery pass (hk 4491) or
+	// because the operator unbound the task (comments-unbind, hk 4490).
+	// ReasonUnbindForced is the unbind under --force.
 	ReasonBindingRemoved = "binding_removed"
+	ReasonUnbindForced   = "unbind_forced"
 	// ReasonBindingChanged: the recovery pass closed a prepared op whose
 	// task is bound to another issue on the op's tenant; nothing was sent
 	// and the op was never retargeted.
@@ -357,15 +365,34 @@ type IssueCreate struct {
 	Description string
 	TaskID      int64
 	HKProject   string
-	// HKProjectText sends the hk project as text instead of an enum value.
-	HKProjectText bool
+	// ProjectField is the project's hk 프로젝트 field type, which decides the
+	// issue-field shape the value is sent as (IssueFields.Project).
+	ProjectField IssueProjectField
 }
+
+// IssueProjectField is the type of a project's hk 프로젝트 field: the
+// issue_create write must send the issue-field shape that matches it, or
+// YouTrack refuses the POST.
+type IssueProjectField string
+
+const (
+	// IssueProjectEnum is EnumProjectCustomField (the legacy push's shape):
+	// an enum value.
+	IssueProjectEnum IssueProjectField = "enum"
+	// IssueProjectString is SimpleProjectCustomField (the importer's shape):
+	// a primitive string, sent as SimpleIssueCustomField.
+	IssueProjectString IssueProjectField = "string"
+	// IssueProjectText is TextProjectCustomField: formatted text, which
+	// YouTrack takes only as TextIssueCustomField with a {"text": ...}
+	// value. A primitive string there is a 4xx (hk 3940).
+	IssueProjectText IssueProjectField = "text"
+)
 
 // IssueFields is how the project's fields take an issue_create write.
 type IssueFields struct {
-	// ProjectText: the hk project field is a text field (the importer's
-	// shape), not an enum (the legacy push's).
-	ProjectText bool
+	// Project is the hk 프로젝트 field's type (IssueProjectEnum when the
+	// project has an enum field, the legacy push's shape).
+	Project IssueProjectField
 }
 
 // IssueRemote is the YouTrack surface of the issue_create kind. A Remote
@@ -374,9 +401,10 @@ type IssueFields struct {
 type IssueRemote interface {
 	// CheckIssueFields reports whether the project can take an issue_create
 	// write: it has the hk ID field and the hk project field with hkProject
-	// among its values (when hkProject is not ""). A missing field or value
-	// is a plain error (the op is held, not rejected, until the schema is
-	// repaired); a failed read follows CreateComment's errors.
+	// among its values (when hkProject is not ""), and it says which issue
+	// shape that field takes. A missing field or value is a plain error (the
+	// op is held, not rejected, until the schema is repaired); a failed read
+	// follows CreateComment's errors.
 	CheckIssueFields(ctx context.Context, projectID, hkProject string) (IssueFields, error)
 	// FindTaskIssues returns every issue of the project (short name and id)
 	// whose hk ID is taskID, checked against both, or an error. A result it

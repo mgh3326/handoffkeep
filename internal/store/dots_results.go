@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -56,6 +57,9 @@ type DotsResult struct {
 	AdoptionState   string     `json:"adoption_state"`
 	AdoptedRef      string     `json:"adopted_ref,omitempty"`
 	AdoptedBy       string     `json:"adopted_by,omitempty"`
+	CanvaURL        string     `json:"canva_url,omitempty"`
+	CanvaPage       string     `json:"canva_page,omitempty"`
+	CanvaVersion    string     `json:"canva_version,omitempty"`
 	AdoptedAt       *time.Time `json:"adopted_at,omitempty"`
 	SupersededBy    *int64     `json:"superseded_by,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
@@ -67,12 +71,15 @@ type DotsAdoptionInput struct {
 	State        string `json:"state"`
 	Ref          string `json:"ref,omitempty"`
 	SupersededBy int64  `json:"superseded_by,omitempty"`
+	CanvaURL     string `json:"canva_url,omitempty"`
+	CanvaPage    string `json:"canva_page,omitempty"`
+	CanvaVersion string `json:"canva_version,omitempty"`
 }
 
-const dotsResultColumns = `id,document_key,comment_id,issue_uuid,issue_identifier,kind,COALESCE(verdict,''),artefact_sha256,task_id,routed_lane,adoption_state,COALESCE(adopted_ref,''),COALESCE(adopted_by,''),adopted_at,superseded_by,created_at,updated_at`
+const dotsResultColumns = `id,document_key,comment_id,issue_uuid,issue_identifier,kind,COALESCE(verdict,''),artefact_sha256,task_id,routed_lane,adoption_state,COALESCE(adopted_ref,''),COALESCE(adopted_by,''),COALESCE(canva_url,''),COALESCE(canva_page,''),COALESCE(canva_version,''),adopted_at,superseded_by,created_at,updated_at`
 
 func scanDotsResult(row pgx.Row, x *DotsResult) error {
-	if err := row.Scan(&x.ID, &x.DocumentKey, &x.CommentID, &x.IssueUUID, &x.IssueIdentifier, &x.Kind, &x.Verdict, &x.ArtefactSHA256, &x.TaskID, &x.RoutedLane, &x.AdoptionState, &x.AdoptedRef, &x.AdoptedBy, &x.AdoptedAt, &x.SupersededBy, &x.CreatedAt, &x.UpdatedAt); err != nil {
+	if err := row.Scan(&x.ID, &x.DocumentKey, &x.CommentID, &x.IssueUUID, &x.IssueIdentifier, &x.Kind, &x.Verdict, &x.ArtefactSHA256, &x.TaskID, &x.RoutedLane, &x.AdoptionState, &x.AdoptedRef, &x.AdoptedBy, &x.CanvaURL, &x.CanvaPage, &x.CanvaVersion, &x.AdoptedAt, &x.SupersededBy, &x.CreatedAt, &x.UpdatedAt); err != nil {
 		return err
 	}
 	x.Source = "linear"
@@ -127,6 +134,14 @@ func checkDotsAdoption(id int64, in DotsAdoptionInput) error {
 	if in.Ref != "" && !validDotsAdoptedRef(in.Ref) {
 		return errors.New("invalid dots adoption: ref is a GitHub PR URL, hk:task/<id> or hk:doc <key>")
 	}
+	if in.CanvaURL != "" || in.CanvaPage != "" || in.CanvaVersion != "" {
+		if in.State != DotsAdoptionAccepted && in.State != DotsAdoptionPartial {
+			return errors.New("invalid dots adoption: canva_url, canva_page and canva_version name the adopted design; only accepted and partially_used take them")
+		}
+		if !validDotsCanvaURL(in.CanvaURL) || in.CanvaPage == "" || !validText(in.CanvaPage, 128) || in.CanvaVersion == "" || !validText(in.CanvaVersion, 128) {
+			return errors.New("invalid dots adoption: canva needs canva_url (an https link to a canva.com design, at most 512 bytes), canva_page and canva_version (1 to 128 bytes each)")
+		}
+	}
 	if (in.State == DotsAdoptionSuperseded) != (in.SupersededBy != 0) {
 		return errors.New("invalid dots adoption: superseded_by is required with superseded and only with it")
 	}
@@ -144,10 +159,37 @@ func validDotsAdoptedRef(ref string) bool {
 	return m != nil && validDocKey(m[1])
 }
 
+// validDotsCanvaURL accepts an https link to a Canva design: a canva.com host
+// or one of its subdomains, with a /design/ path and no user info.
+func validDotsCanvaURL(s string) bool {
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme != "https" || u.User != nil || !validText(s, 512) {
+		return false
+	}
+	host := u.Hostname()
+	design, ok := strings.CutPrefix(u.Path, "/design/")
+	id, _, _ := strings.Cut(design, "/")
+	return ok && id != "" && (host == "canva.com" || strings.HasSuffix(host, ".canva.com"))
+}
+
+// keepDotsAdoptionCanva keeps the Canva design already recorded on an accepted
+// or partially_used result when the change names none, so a repeat from a
+// client that predates the Canva fields neither erases it nor counts as a
+// change. Other states take the input as given: rejected and superseded clear
+// the design, as they always did.
+func keepDotsAdoptionCanva(cur DotsResult, in DotsAdoptionInput) DotsAdoptionInput {
+	if (in.State == DotsAdoptionAccepted || in.State == DotsAdoptionPartial) && in.CanvaURL == "" && in.CanvaPage == "" && in.CanvaVersion == "" {
+		in.CanvaURL, in.CanvaPage, in.CanvaVersion = cur.CanvaURL, cur.CanvaPage, cur.CanvaVersion
+	}
+	return in
+}
+
 // SetDotsAdoption moves a result to an adoption state. Repeating the stored
 // change changes nothing and answers changed=false; superseded is final, so
 // any other change to a superseded result is ErrDotsAdoptionFinal. It locks
 // one dots_results row and reads the superseding one.
+// An accepted or partially_used change that names no Canva design keeps the
+// one already recorded.
 func (s *Store) SetDotsAdoption(ctx context.Context, id int64, by string, in DotsAdoptionInput) (DotsResult, bool, error) {
 	if id < 1 || by == "" || !validText(by, 128) {
 		return DotsResult{}, false, errors.New("invalid dots adoption")
@@ -167,11 +209,13 @@ func (s *Store) SetDotsAdoption(ctx context.Context, id int64, by string, in Dot
 		}
 		return DotsResult{}, false, err
 	}
+	in = keepDotsAdoptionCanva(cur, in)
+
 	var curSupersededBy int64
 	if cur.SupersededBy != nil {
 		curSupersededBy = *cur.SupersededBy
 	}
-	if cur.AdoptionState == in.State && cur.AdoptedRef == in.Ref && curSupersededBy == in.SupersededBy {
+	if cur.AdoptionState == in.State && cur.AdoptedRef == in.Ref && curSupersededBy == in.SupersededBy && cur.CanvaURL == in.CanvaURL && cur.CanvaPage == in.CanvaPage && cur.CanvaVersion == in.CanvaVersion {
 		return cur, false, nil
 	}
 	if cur.AdoptionState == DotsAdoptionSuperseded {
@@ -189,8 +233,8 @@ func (s *Store) SetDotsAdoption(ctx context.Context, id int64, by string, in Dot
 		supersededBy = &in.SupersededBy
 	}
 	var out DotsResult
-	err = scanDotsResult(tx.QueryRow(ctx, `UPDATE dots_results SET adoption_state=$2, adopted_ref=$3, adopted_by=$4, adopted_at=$5, superseded_by=$6, updated_at=$5 WHERE id=$1 RETURNING `+dotsResultColumns,
-		id, in.State, nullIfEmpty(in.Ref), by, time.Now().UTC(), supersededBy), &out)
+	err = scanDotsResult(tx.QueryRow(ctx, `UPDATE dots_results SET adoption_state=$2, adopted_ref=$3, adopted_by=$4, adopted_at=$5, superseded_by=$6, updated_at=$5, canva_url=$7, canva_page=$8, canva_version=$9 WHERE id=$1 RETURNING `+dotsResultColumns,
+		id, in.State, nullIfEmpty(in.Ref), by, time.Now().UTC(), supersededBy, nullIfEmpty(in.CanvaURL), nullIfEmpty(in.CanvaPage), nullIfEmpty(in.CanvaVersion)), &out)
 	if err != nil {
 		return DotsResult{}, false, err
 	}
