@@ -14,7 +14,11 @@ import (
 // fakeTaskServer answers every task route with the given task JSON.
 func fakeTaskServer(t *testing.T, task store.Task) Client {
 	t.Helper()
+	resetCapabilitiesCache()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerCurrentCapabilities(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(task)
 	}))
