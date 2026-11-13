@@ -89,35 +89,6 @@ func TestTaskWorkBoardPlacementOrder(t *testing.T) {
 		t.Fatalf("%+v", b)
 	}
 
-	// The task rebound to job m: k's lead session ends even though k's row
-	// is still running; a reviewer beside the task's job stays live.
-	b.applyPlacement(PlacementDecision{JobID: "m", ChosenHost: &host, Role: "worker", DecidedAt: at.Add(4 * time.Minute)})
-	b.applyPlacement(PlacementDecision{JobID: "r", ChosenHost: &host, Role: "review", DecidedAt: at.Add(5 * time.Minute)})
-	b.JobID = "m"
-	b.endReplacedSessions()
-	active := map[string]bool{}
-	for _, s := range b.Sessions {
-		active[s.JobID] = s.Active
-	}
-	if active["k"] || !active["m"] || !active["r"] || b.PrimaryJob() != "m" {
-		t.Fatalf("after rebind %+v", b.Sessions)
-	}
-
-	// A replacement placed after the current job, still starting before its
-	// claim or rebind, stays live; so does everything when the current job
-	// has no placement to date the binding.
-	b.applyPlacement(PlacementDecision{JobID: "n", ChosenHost: &host, Role: "worker", DecidedAt: at.Add(6 * time.Minute)})
-	b.endReplacedSessions()
-	for _, s := range b.Sessions {
-		if s.JobID == "n" && !s.Active {
-			t.Fatalf("pending replacement hidden: %+v", b.Sessions)
-		}
-	}
-	unplaced := TaskWorkBoard{JobID: "x", Sessions: []TaskWorkSession{{JobID: "y", Role: "lead", Active: true, At: at}}}
-	unplaced.endReplacedSessions()
-	if !unplaced.Sessions[0].Active {
-		t.Fatalf("ended without a binding time: %+v", unplaced.Sessions)
-	}
 	if view := (TaskWorkBoard{}); view.PrimaryJob() != "" {
 		t.Fatal(view)
 	}

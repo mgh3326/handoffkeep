@@ -65,35 +65,6 @@ func (b *TaskWorkBoard) applyJob(job Job) {
 	}
 }
 
-// endReplacedSessions ends the lead and worker sessions the task's current
-// job replaced: a rebind or a new claim moves refs.job_id and leaves the old
-// job's row as it was, so its session would otherwise show as live. Only a
-// session placed before the current job's own placement counts as replaced;
-// one placed after it may be the next job, still starting before its claim
-// or rebind, and stays live. Without a placement for the current job there is
-// no binding time to compare, so nothing is ended. Other roles (review,
-// consult) work beside the task's job and are left alone.
-func (b *TaskWorkBoard) endReplacedSessions() {
-	if b.JobID == "" {
-		return
-	}
-	var bound time.Time
-	for _, s := range b.Sessions {
-		if s.JobID == b.JobID && s.At.After(bound) {
-			bound = s.At
-		}
-	}
-	if bound.IsZero() {
-		return
-	}
-	for i := range b.Sessions {
-		s := &b.Sessions[i]
-		if s.Active && s.JobID != b.JobID && (s.Role == "lead" || s.Role == "worker") && s.At.Before(bound) {
-			s.Active = false
-		}
-	}
-}
-
 // PrimaryJob is the task's job, else the latest lead or worker placed for
 // it (a placement can arrive before the claim sets refs.job_id).
 func (b TaskWorkBoard) PrimaryJob() string {
@@ -114,6 +85,9 @@ func (b TaskWorkBoard) PrimaryJob() string {
 // It writes nothing. Queries are batched for the whole UI page. A session
 // lives as long as its placement row: once PlacementRetention prunes the
 // row (180 days), the overlay no longer shows that session, by design.
+// A session ends only when its job row is terminal; a job the task was
+// rebound away from shows until its row ends (hk 4441 tracks ending it from
+// the claim/rebind history).
 func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64]TaskWorkBoard, error) {
 	boards := make(map[int64]TaskWorkBoard, len(tasks))
 	if len(tasks) == 0 {
@@ -185,10 +159,6 @@ func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64
 		if err != nil {
 			return nil, err
 		}
-	}
-	for id, board := range boards {
-		board.endReplacedSessions()
-		boards[id] = board
 	}
 	return boards, tx.Commit(ctx)
 }
