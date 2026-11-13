@@ -51,15 +51,3 @@ func (s Server) ytAuthoritySet(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"before": before, "after": after})
 }
-
-// importResourceKind is the authority kind a /v1/import resource carries.
-var importResourceKind = map[string]store.YTAuthorityKind{
-	"projects":         store.YTAuthorityTasks,
-	"tasks":            store.YTAuthorityTasks,
-	"comments":         store.YTAuthorityComments,
-	"comment-authors":  store.YTAuthorityComments,
-	"documents":        store.YTAuthorityDocuments,
-	"task-documents":   store.YTAuthorityDocuments,
-	"document-authors": store.YTAuthorityDocuments,
-	"decisions":        store.YTAuthorityDecisions,
-}

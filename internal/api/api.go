@@ -34,11 +34,8 @@ type Service struct {
 	Attachments *attachments.Manager
 	// Dots backs the /v1/dots/results routes; nil uses Store.
 	Dots DotsResultStore
-	// YouTrack is the legacy read-through service: it overlays the cached
-	// YouTrack priority and lane on linked tasks, answers YouTrack search, and
-	// queues lane changes for export to YouTrack (PG is written first). serve
-	// sets it only with HANDOFFKEEP_YT_READTHROUGH_MODE=on (docs/youtrack.md).
-	// Nil disables the feature; every other route behaves exactly as before.
+	// YouTrack answers /v1/search from YouTrack when SearchBackend is
+	// "youtrack". Nil disables it; every other route is unaffected.
 	YouTrack *youtrack.Service
 	// SearchBackend is "youtrack" to answer /v1/search from YouTrack, with
 	// PostgreSQL as the fallback; it takes effect only with YouTrack set.
@@ -50,14 +47,6 @@ type Service struct {
 type DotsResultStore interface {
 	ListDotsResults(ctx context.Context, taskID int64, issue string, limit int) ([]store.DotsResult, error)
 	SetDotsAdoption(ctx context.Context, id int64, by string, in store.DotsAdoptionInput) (store.DotsResult, bool, error)
-}
-
-// overlayTasks replaces priority and lane on linked tasks with the cached
-// YouTrack values. Unlinked tasks keep their hk columns unchanged.
-func (s Service) overlayTasks(ctx context.Context, tasks []store.Task) {
-	if s.YouTrack != nil {
-		s.YouTrack.Overlay(ctx, tasks)
-	}
 }
 
 func (s Service) dotsResults() DotsResultStore {
@@ -389,16 +378,7 @@ func (s Service) RelaneTask(ctx context.Context, id int64, to, client, note stri
 	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
 		return store.Task{}, false, err
 	}
-	// PG is the execution value. The YouTrack export is queued after the
-	// write, so a YouTrack outage never blocks the move.
-	task, changed, err := s.Store.RelaneTask(ctx, id, to, client, note, allowNewLane)
-	if err != nil {
-		return store.Task{}, false, err
-	}
-	if s.YouTrack != nil && changed {
-		s.YouTrack.RecordLane(ctx, id, to)
-	}
-	return task, changed, nil
+	return s.Store.RelaneTask(ctx, id, to, client, note, allowNewLane)
 }
 func (s Service) SetTaskProject(ctx context.Context, id int64, project, client, note string) (store.Task, bool, error) {
 	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
@@ -534,6 +514,7 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 	}
 	out := Tokens{}
 	grants := QuotaAccounts{}
+	var retiredImportGrants []string
 	for _, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -577,9 +558,12 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 		if strings.HasPrefix(k, hostGrantPrefix) {
 			continue
 		}
-		// Import grants are read by LoadImportReadGrants from the same
-		// auth file; they are not bearer-token lines.
-		if strings.HasPrefix(k, "HANDOFFKEEP_IMPORT_READONLY_") {
+		// Import read grants (HANDOFFKEEP_IMPORT_READONLY_*) were removed with
+		// the /v1/import feed. A grant still naming a live token would widen
+		// that token to every route, so it is checked once the tokens are
+		// known below; a grant for no live token is ignored.
+		if id, isGrant := strings.CutPrefix(k, "HANDOFFKEEP_IMPORT_READONLY_"); isGrant {
+			retiredImportGrants = append(retiredImportGrants, id)
 			continue
 		}
 		if !ok || v == "" {
@@ -607,6 +591,13 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 	if len(out) == 0 {
 		return nil, nil, errors.New("HANDOFFKEEP_AUTH_FILE contains no tokens")
 	}
+	// Refuse to start rather than silently turn an import-only client into a
+	// full bearer credential. The operator deletes the grant and the token.
+	for _, id := range retiredImportGrants {
+		if _, live := out[id]; live {
+			return nil, nil, fmt.Errorf("HANDOFFKEEP_IMPORT_READONLY_%s is retired (the /v1/import feed was removed): delete that line and revoke HANDOFFKEEP_TOKEN_%s; it would otherwise grant full access", id, id)
+		}
+	}
 	for id := range grants {
 		if _, ok := out[id]; !ok {
 			fmt.Fprintf(os.Stderr, "handoffkeep: ignoring HANDOFFKEEP_QUOTA_ grants for unknown client %q\n", id)
@@ -616,37 +607,6 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 	return out, grants, nil
 }
 
-// LoadImportReadGrants reads exact opt-in read-only YouTrack import grants.
-// A grant is HANDOFFKEEP_IMPORT_READONLY_<CLIENT>=true next to that client's
-// bearer token; it grants access only to /v1/import/*.
-func LoadImportReadGrants(path string, tokens Tokens) (map[string]bool, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	grants := map[string]bool{}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		id, found := strings.CutPrefix(k, "HANDOFFKEEP_IMPORT_READONLY_")
-		if !found {
-			continue
-		}
-		if !ok || v != "true" || id == "" {
-			fmt.Fprintf(os.Stderr, "handoffkeep: ignoring invalid import read grant for %q\n", id)
-			continue
-		}
-		if _, known := tokens[id]; !known {
-			fmt.Fprintf(os.Stderr, "handoffkeep: ignoring import read grant for unknown client %q\n", id)
-			continue
-		}
-		grants[id] = true
-	}
-	return grants, nil
-}
 func (t Tokens) Client(r *http.Request) (string, bool) {
 	header := r.Header.Get("Authorization")
 	if !strings.HasPrefix(header, "Bearer ") || len(header) == len("Bearer ") {
@@ -668,9 +628,6 @@ type Server struct {
 	Tokens  Tokens
 	// QuotaAccounts scopes quota writes; a nil map refuses every account.
 	QuotaAccounts QuotaAccounts
-	// ImportReadGrants restricts a client to GET /v1/import/* and denies every
-	// other route, including all writes.
-	ImportReadGrants map[string]bool
 	// HostGrants binds a client to the host ids it may act for. A client with
 	// no entry keeps today's behavior and is logged (see HostGrants.Allows).
 	HostGrants HostGrants
@@ -709,7 +666,6 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/projects/{name}/status-updates", s.statusUpdates)
 	m.HandleFunc("POST /v1/projects/{name}/status-updates", s.statusUpdates)
 	m.HandleFunc("GET /v1/documents", s.documents)
-	m.HandleFunc("GET /v1/import/{resource}", s.importExport)
 	m.HandleFunc("GET /v1/yt/ops", s.ytOps)
 	m.HandleFunc("POST /v1/yt/ops/{id}/resolve", s.ytOpsResolve)
 	m.HandleFunc("GET /v1/yt/authority", s.ytAuthority)
@@ -866,30 +822,7 @@ func (s Server) Handler() http.Handler {
 	if wrkRegistered {
 		v1.wrk = http.HandlerFunc(s.wrk)
 	}
-	return importGrantHandler{v1: v1, tokens: s.Tokens, grants: s.ImportReadGrants}
-}
-
-// importGrantHandler preserves v1 route resolution for telemetry while
-// restricting import-only clients to the GET import surface.
-type importGrantHandler struct {
-	v1     v1Handler
-	tokens Tokens
-	grants map[string]bool
-}
-
-func (h importGrantHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if client, ok := h.tokens.Client(r); ok && h.grants[client] {
-		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/v1/import/") {
-			writeError(w, http.StatusForbidden, "import_read_only")
-			return
-		}
-	}
-	h.v1.ServeHTTP(w, r)
-}
-
-// Handler reports the route the wrapped v1 handler will dispatch to.
-func (h importGrantHandler) Handler(r *http.Request) (http.Handler, string) {
-	return h.v1.Handler(r)
+	return v1
 }
 
 // wrkPattern is the route pattern reported for the /v1/wrk surface.
@@ -1033,7 +966,6 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		}
 		// Echoed like project: an old server that drops the parameter would
 		// answer with every task.
-		s.Service.overlayTasks(r.Context(), xs)
 		jsonOut(w, http.StatusOK, map[string]any{"tasks": xs, "change": changeID})
 		return
 	}
@@ -1090,7 +1022,6 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
-	s.Service.overlayTasks(r.Context(), xs)
 	body := map[string]any{"tasks": xs}
 	if project != nil {
 		// Echo the requested filter so new clients can tell a filtered
@@ -1159,9 +1090,7 @@ func (s Server) task(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 		return
 	}
-	tasks := []store.Task{x}
-	s.Service.overlayTasks(r.Context(), tasks)
-	jsonOut(w, http.StatusOK, tasks[0])
+	jsonOut(w, http.StatusOK, x)
 }
 
 type taskClaimInput struct {

@@ -51,7 +51,7 @@ package store
 //     under the level-2 lock; append-only and never locked by a reader), and
 //     task_spawn_records and task_spawn_notices (PutTaskSpawn: one task row
 //     under its key share lock; a terminal write takes the comment insert
-//     lock before that row, as ApplyYouTrackActivity and ReplyDots do, and its
+//     lock before that row, as ReplyDots does, and its
 //     comment is a savepoint so a YouTrack refusal skips only the comment),
 //     the work record: changes, change_tasks and reviews. ApplyTaskSourceEvent
 //     writes the work record under the level-2 lock after its task row
@@ -166,8 +166,8 @@ package store
 //   - Other advisory locks (disposition origin, task comment insert, labels,
 //     Linear board ownership, quota presence) are each the first lock of
 //     their transaction, and no transaction requests one while it holds a
-//     lock from levels 2-5, with two exceptions: ApplyYouTrackActivity and
-//     ReplyDots take level 2, then taskCommentInsertLock, then the task row.
+//     lock from levels 2-5, with one exception: ReplyDots takes level 2, then
+//     taskCommentInsertLock, then the task row.
 //     CreateTaskComment takes the comment lock first and reaches the task row
 //     only through the foreign key's KEY SHARE, so it cannot wait on level 2
 //     and the pair cannot cycle.
@@ -244,18 +244,15 @@ package store
 //         are one statement: a first insert takes KEY SHARE after its new
 //         row, which the issue writer's FOR SHARE read cannot see and so never
 //         waits for, and the conflict update keeps task_id and takes no task
-//         lock. MarkYouTrackTaskSynced, UpdateYouTrackMirrorDisplay and
-//         SetYouTrackProjectID are one UPDATE that keeps the key;
-//         PutYouTrackProject then deletes only youtrack_attempts rows.
-//         ApplyYouTrackActivity reaches task_origins only after FOR UPDATE on
-//         its task row, or for a task it created in the same transaction.
+//         lock. SetYouTrackProjectID is one UPDATE that keeps the key, and
+//         PutYouTrackProject is one upsert that keeps it too.
 //       - The level-4 task writers hold level-2 and level-3 locks, other task
 //         rows and the level-5 rows of tasks they already hold; an issue
 //         writer requests none of those. No task writer locks a
 //         youtrack_projects row.
 //     So the comment lock -> task row -> lane lock, ownership lock -> task
 //     row -> lane lock and lane lock -> mapping row edges cannot close a
-//     cycle. ApplyYouTrackActivity takes level 2 and never enqueues an op.
+//     cycle.
 //     ReplyDots takes level 2 and its task row FOR UPDATE, and enqueues only
 //     while comments are canonical in YouTrack (hk 4122): then the authority
 //     row FOR SHARE and the task's lane lock follow. No lane holder requests
