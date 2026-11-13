@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,21 +33,21 @@ type Backend interface {
 	CompleteAttachmentUpload(context.Context, string, string) (store.Attachment, bool, error)
 }
 
-// attachmentPutMaxRawBytes is the largest file attachment_put accepts before
-// base64 decoding: 10 MiB, the size dots asked to round-trip. Its base64 form
-// is attachmentPutMaxBase64 characters; a larger payload is refused by length.
+// attachmentPutMaxRawBytes is the body-carried MCP upload budget. Larger files
+// use attachment_upload_begin and attachment_upload_complete, which transfer
+// bytes directly to object storage, up to the buffered-completion fuse.
 const attachmentPutMaxRawBytes = 10 << 20
 
 var attachmentPutMaxBase64 = base64.StdEncoding.EncodedLen(attachmentPutMaxRawBytes)
 
-// mcpRequestBodyLimit caps one HTTP MCP request body: the largest attachment_put
-// payload plus 1 MiB for the JSON-RPC envelope.
-var mcpRequestBodyLimit = int64(attachmentPutMaxBase64) + 1<<20
+// mcpRequestBodyLimit is the HTTP MCP route's per-request memory budget. It
+// allows one 10 MiB body-carried upload plus protocol overhead.
+const mcpRequestBodyLimit = 16 << 20
 
 // attachmentPutDescription states the allowed types from the same constant the
 // attachment manager reads, so the list cannot drift from the enforced one.
 var attachmentPutDescription = "Upload one attachment from base64 content; the remote-safe path, with no server file path. " +
-	"content_base64 is standard padded base64 of at most 10 MiB raw (" + strconv.Itoa(attachmentPutMaxBase64) + " base64 characters). " +
+	"content_base64 is standard padded base64 of at most 10 MiB raw (" + strconv.Itoa(attachmentPutMaxBase64) + " base64 characters); for larger files use attachment_upload_begin, PUT the returned URL, then attachment_upload_complete (up to 256 MiB buffered completion). The OCI per-object ceiling is 50 GiB, but this server path currently has a separate 256 MiB fuse; streaming completion is tracked in hk 4466. " +
 	"name is the original file name; mime is optional and defaults to the sniffed type. " +
 	"Allowed types by default: " + strings.ReplaceAll(attachments.DefaultMIMEAllow, ",", ", ") + ". " +
 	"Text is refused when the secret guard matches it. " +
@@ -59,7 +60,7 @@ var attachmentPutDescription = "Upload one attachment from base64 content; the r
 // allowed-type list comes from the same constant the manager enforces.
 var attachmentUploadBeginDescription = "Start a direct upload: hk checks the declaration and returns upload_id and a presigned PUT url for a staging object, so the file bytes do not pass through hk. " +
 	"PUT exactly size bytes to url with no authorization header; the url is the credential, valid for ten minutes. Then call attachment_upload_complete with upload_id. " +
-	"Declared: name; mime (allowed by default: " + strings.ReplaceAll(attachments.DefaultMIMEAllow, ",", ", ") + "); size in bytes, at most the server cap; sha256 of the bytes as lowercase hex; optional ref (document:<key>, memory:<agent>/<name>, task:<id>, or none). " +
+	"Declared: name; mime (allowed by default: " + strings.ReplaceAll(attachments.DefaultMIMEAllow, ",", ", ") + "); size in bytes, at most 256 MiB for buffered completion (the OCI per-object ceiling is 50 GiB, but this server path currently has a separate fuse; streaming completion is tracked in hk 4466); sha256 of the bytes as lowercase hex; optional ref (document:<key>, memory:<agent>/<name>, task:<id>, or none). " +
 	"Refused now: a disallowed name, mime or size, a bad sha256 or ref, or no capacity. " +
 	"Completion checks the bytes against size and sha256, sniffs the type and secret-scans text; a mismatch or refusal deletes the staged object and is final. " +
 	"Never log the url."
@@ -196,7 +197,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		// The base64 length is checked before decoding so an oversized payload
 		// is refused without allocating its decoded form.
 		if len(x.ContentBase64) > attachmentPutMaxBase64 {
-			return nil, nil, attachments.ErrTooLarge
+			return nil, nil, fmt.Errorf("%w: use attachment_upload_begin, PUT the returned URL, then attachment_upload_complete", attachments.ErrTooLarge)
 		}
 		body, e := base64.StdEncoding.DecodeString(x.ContentBase64)
 		if e != nil {
@@ -206,7 +207,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		// the raw ceiling can share the encoded length of one at it; the raw
 		// size is checked here so the ceiling is exact.
 		if len(body) > attachmentPutMaxRawBytes {
-			return nil, nil, attachments.ErrTooLarge
+			return nil, nil, fmt.Errorf("%w: use attachment_upload_begin, PUT the returned URL, then attachment_upload_complete", attachments.ErrTooLarge)
 		}
 		v, created, e := service.PutAttachment(ctx, client, x.Name, x.MIME, x.Ref, body)
 		if e != nil {
@@ -273,9 +274,8 @@ func HTTPHandler(service api.Service, tokens api.Tokens, access *cfaccess.Verifi
 		return s
 	}, &gmcp.StreamableHTTPOptions{
 		Stateless: true,
-		// The SDK default (4 MiB) would refuse a 10 MiB attachment_put before the
-		// tool runs: its base64 form is attachmentPutMaxBase64 bytes. The limit
-		// is that plus headroom for the JSON-RPC envelope.
+		// The request memory budget allows one body-carried 10 MiB attachment
+		// plus the JSON-RPC envelope. Larger files use the direct upload tools.
 		MaxRequestBodyBytes: mcpRequestBodyLimit,
 		// The SDK's localhost guard rejects a loopback request whose Host is
 		// not loopback. It defends unauthenticated localhost servers against
