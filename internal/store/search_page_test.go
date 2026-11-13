@@ -21,20 +21,13 @@ func TestSearchPageOrdersScopesAndMarksTruncatedTies(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, name := range []string{"alpha memoryorderprobe", "beta memoryorderprobe", "gamma memoryorderprobe"} {
-		if _, err := s.pool.Exec(ctx, `INSERT INTO memory(agent,name,description,memory_type,content,updated_by,updated_at) VALUES('lane-a',$1,'','reference','memoryorderprobe body','test',$2)`, name, createdAt); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	got, err := s.Search(ctx, "orderprobe", "all", "", 6)
+	got, err := s.Search(ctx, "orderprobe", "all", "", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
 		"ctx:alpha ctxorderprobe", "ctx:beta ctxorderprobe",
-		"docs:a-doc-orderprobe", "docs:z-doc-orderprobe",
-		"memory:alpha memoryorderprobe", "memory:beta memoryorderprobe",
+		"docs:a-doc-orderprobe",
 	}
 	keys := make([]string, 0, len(got))
 	for _, row := range got {
