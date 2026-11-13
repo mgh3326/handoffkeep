@@ -156,7 +156,7 @@ func TestRecordSessionDecisionRejectsSecretsBeforeInsert(t *testing.T) {
 	s := decisionStore(t)
 	in := SessionDecisionInput{
 		Key: "secret-quote", Lane: "design-lane", By: "settling-session", Reading: "Keep the boundary.",
-		Quote: "The credential is AKIA1234567890ABCDEF", DecidedAt: time.Date(2026, 11, 13, 7, 0, 0, 0, time.UTC),
+		Quote: "The credential is " + "AKIA" + strings.Repeat("X", 16), DecidedAt: time.Date(2026, 11, 13, 7, 0, 0, 0, time.UTC),
 		Grounds: []string{"hk:doc decision/2026-11-13/session-a"},
 	}
 	_, err := s.RecordSessionDecision(t.Context(), in, time.Date(2026, 11, 13, 8, 0, 0, 0, time.UTC), nil)
