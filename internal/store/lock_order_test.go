@@ -200,92 +200,6 @@ func TestLockOrderStartupMigrationVersusTaskWrite(t *testing.T) {
 	finishLockActors(t, ctx, apply, open)
 }
 
-// TestLockOrderJobUpdateVersusTaskWrite: UpdateJob with the work board on
-// locks the job's task row (recordLinearBoardJobTx) and, for a new role,
-// then takes the task-mutation lock (applyJobRoleTx). Every task writer takes
-// that lock before the row, so the job update must take it first too.
-func TestLockOrderJobUpdateVersusTaskWrite(t *testing.T) {
-	dbURL, app := lockOrderSchema(t, "lockjob")
-	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-	defer cancel()
-	jobs := openLockActorStore(t, dbURL, app("job"))
-	jobs.EnableLinearBoard()
-	writer := openLockActorStore(t, dbURL, app("relane"))
-
-	task := lockOrderTask(t, jobs, TaskRefs{})
-	const jobID = "lock-order-job"
-	if _, _, err := jobs.ClaimJob(ctx, Job{JobID: jobID, TaskID: &task.ID, Host: "lock-host", CreatedBy: "lock-order-test"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := jobs.ClaimTask(ctx, task.ID, "lead", jobID, ""); err != nil {
-		t.Fatal(err)
-	}
-
-	blocker := lockBlocker(t, ctx, dbURL, app("blocker"))
-	if _, err := blocker.Exec(ctx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, task.ID); err != nil {
-		t.Fatal(err)
-	}
-	role := "worker"
-	update := startLockActor(app("job"), func() error {
-		_, err := jobs.UpdateJob(ctx, jobID, JobUpdate{Role: &role})
-		return err
-	})
-	if !waitBlockedBy(t, ctx, jobs.pool, update, app("blocker")) {
-		t.Fatalf("UpdateJob finished before the blocker released: %v", update.err)
-	}
-	relane := startLockActor(app("relane"), func() error {
-		_, _, err := writer.RelaneTask(ctx, task.ID, "lock-order-2", "lock-order-test", "lock order", true)
-		return err
-	})
-	waitBlockedBy(t, ctx, jobs.pool, relane, app("job"), app("blocker"))
-	if err := blocker.Rollback(ctx); err != nil {
-		t.Fatal(err)
-	}
-	finishLockActors(t, ctx, update, relane)
-}
-
-// TestLockOrderRelayBoardVersusAutoClose: a relay event with the work board
-// on locks every task it matches in id order (a parent before its child),
-// while dropping a child under the task-mutation lock locks the child and
-// then auto-close locks its parent. The relay must take the task-mutation
-// lock before any task row.
-func TestLockOrderRelayBoardVersusAutoClose(t *testing.T) {
-	dbURL, app := lockOrderSchema(t, "lockrelay")
-	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-	defer cancel()
-	relay := openLockActorStore(t, dbURL, app("relay"))
-	relay.EnableLinearBoard()
-	closer := openLockActorStore(t, dbURL, app("close"))
-
-	const pr = "https://github.com/example/lock-order/pull/7"
-	parent := lockOrderTask(t, relay, TaskRefs{PR: pr})
-	child := lockOrderTask(t, relay, TaskRefs{PR: pr})
-	if _, _, err := relay.SetTaskParent(ctx, child.ID, &parent.ID, "lock-order-test"); err != nil {
-		t.Fatal(err)
-	}
-
-	blocker := lockBlocker(t, ctx, dbURL, app("blocker"))
-	if _, err := blocker.Exec(ctx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, parent.ID); err != nil {
-		t.Fatal(err)
-	}
-	appendRelay := startLockActor(app("relay"), func() error {
-		_, _, err := relay.AppendRelayEvent(ctx, RelayEvent{Kind: "lane.event", OwnerLane: "lock-order", EventID: "lock-order-ready", Text: "[lock-order] READY | " + pr, PR: pr})
-		return err
-	})
-	if !waitBlockedBy(t, ctx, relay.pool, appendRelay, app("blocker")) {
-		t.Fatalf("AppendRelayEvent finished before the blocker released: %v", appendRelay.err)
-	}
-	drop := startLockActor(app("close"), func() error {
-		_, err := closer.TransitionTask(ctx, child.ID, StateDropped, "lock-order-test", "lock order", nil, "")
-		return err
-	})
-	waitBlockedBy(t, ctx, relay.pool, drop, app("relay"), app("blocker"))
-	if err := blocker.Rollback(ctx); err != nil {
-		t.Fatal(err)
-	}
-	finishLockActors(t, ctx, appendRelay, drop)
-}
-
 // TestMigrateVersionsMatchFreshSchema keeps migrateCurrent honest: a fresh
 // schema records exactly the versions it waits for, so a version added to
 // Store.migrate without updating migrateVersions fails here instead of
@@ -350,4 +264,46 @@ func TestRetryDeadlockIsBounded(t *testing.T) {
 	if !errors.Is(err, other) || calls != 1 {
 		t.Fatalf("other error retried: calls=%d err=%v", calls, err)
 	}
+}
+
+// TestLockOrderJobUpdateVersusTaskWrite: UpdateJob for a new role locks the
+// job's task row (applyJobRoleTx). Every task writer takes the task-mutation
+// lock before the row, so the job update must take it first too.
+func TestLockOrderJobUpdateVersusTaskWrite(t *testing.T) {
+	dbURL, app := lockOrderSchema(t, "lockjob")
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	jobs := openLockActorStore(t, dbURL, app("job"))
+	writer := openLockActorStore(t, dbURL, app("relane"))
+
+	task := lockOrderTask(t, jobs, TaskRefs{})
+	const jobID = "lock-order-job"
+	if _, _, err := jobs.ClaimJob(ctx, Job{JobID: jobID, TaskID: &task.ID, Host: "lock-host", CreatedBy: "lock-order-test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jobs.ClaimTask(ctx, task.ID, "lead", jobID, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	blocker := lockBlocker(t, ctx, dbURL, app("blocker"))
+	if _, err := blocker.Exec(ctx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	role := "worker"
+	update := startLockActor(app("job"), func() error {
+		_, err := jobs.UpdateJob(ctx, jobID, JobUpdate{Role: &role})
+		return err
+	})
+	if !waitBlockedBy(t, ctx, jobs.pool, update, app("blocker")) {
+		t.Fatalf("UpdateJob finished before the blocker released: %v", update.err)
+	}
+	relane := startLockActor(app("relane"), func() error {
+		_, _, err := writer.RelaneTask(ctx, task.ID, "lock-order-2", "lock-order-test", "lock order", true)
+		return err
+	})
+	waitBlockedBy(t, ctx, jobs.pool, relane, app("job"), app("blocker"))
+	if err := blocker.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	finishLockActors(t, ctx, update, relane)
 }

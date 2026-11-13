@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// The desk ledger (docs/linear-internalize.md, "Desk ledger") is one
+// The desk ledger (git show 1e3d2fa8:docs/linear-internalize.md, "Desk ledger") is one
 // server-computed view of what the desk must know after a restart. Its five
 // sections are fixed and ordered:
 //

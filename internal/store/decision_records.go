@@ -13,7 +13,7 @@ import (
 )
 
 // A decision record is the one row decision_requests keeps per question put to
-// the operator (docs/linear-internalize.md, "Decision requests"). Six sources
+// the operator (git show 1e3d2fa8:docs/linear-internalize.md, "Decision requests"). Six sources
 // hold such questions, each with its own open and answered rule; the source's
 // record stays the authority and the row mirrors it:
 //
@@ -627,34 +627,4 @@ func validDecisionSource(source string) bool {
 		}
 	}
 	return false
-}
-
-// mirrorLinearDecisionTx runs when a request gets its Linear issue. While the
-// request is still the task's open one, the issue becomes where it is
-// answered: a linear row opens and the task_request row of the same request
-// is superseded by it. The answer itself still lands on the task's request
-// (AnswerLinearDecision, or any request resolve), which mirrorTaskDecisionsTx
-// writes to both rows.
-func mirrorLinearDecisionTx(ctx context.Context, tx pgx.Tx, link LinearDecisionLink, at time.Time) error {
-	var x Task
-	err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, link.TaskID), &x)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	r := x.Refs.DecisionRequest
-	if r == nil || r.ID != link.RequestID || r.Status != DecisionRequestOpen || DecisionEndsTask(x.State) {
-		return nil
-	}
-	d := decisionOpen{Source: DecisionSourceLinear, SourceRef: r.ID, TaskID: x.ID, Lane: x.Lane, Question: r.Question,
-		Options: x.Refs.DecisionOptions, DefaultAction: r.DefaultAction, DueAt: r.DueAt, At: at}
-	if x.Refs.DecisionOptions != nil {
-		d.Recommended = recommendedOption(*x.Refs.DecisionOptions)
-	}
-	if err := openDecisionTx(ctx, tx, d); err != nil {
-		return err
-	}
-	return supersedeDecisionTx(ctx, tx, []string{DecisionSourceTaskRequest}, r.ID, DecisionSourceLinear+":"+r.ID, at)
 }

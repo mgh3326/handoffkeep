@@ -381,44 +381,7 @@ func fleetCases(t *testing.T) []fleetCase {
 			},
 		},
 		{
-			name: "AskDecision", method: "POST", uri: "/v1/tasks/42/decision-request/ask", status: http.StatusOK,
-			reply: `{"task": ` + taskJSON + `, "request": {"id": "dr-42-4", "revision": 4, "supersedes": "dr-42-3", "root": "dr-42-1", "status": "open", "question": "deploy v2?", "default_action": "hold", "requested_by": "svc-mergewake", "requested_at": "2026-11-08T11:00:00Z", "human_only": true}, "decision_ref": "hk-decision:dr-42-4", "ver": "v1-abc", "duplicate": false, "issue_created": true}`,
-			wantBody: map[string]any{
-				"question": "deploy v2?",
-				"options": map[string]any{"options": []any{
-					map[string]any{"key": "A", "label": "Approve this deployment", "recommended": true},
-					map[string]any{"key": "B", "label": "Keep the current version"},
-				}, "allow_free": false},
-				"default_action": "Hold; keep the current version",
-				"due_at":         "2026-11-09T00:00:00Z",
-				"supersedes":     "dr-42-3",
-				"human_only":     true,
-			},
-			call: func(ctx context.Context, c client.Client) error {
-				x, err := c.AskDecision(ctx, 42, client.DecisionAskInput{
-					Question: "deploy v2?",
-					Options: client.DecisionOptions{Options: []client.DecisionOption{
-						{Key: "A", Label: "Approve this deployment", Recommended: true},
-						{Key: "B", Label: "Keep the current version"},
-					}},
-					DefaultAction: "Hold; keep the current version",
-					DueAt:         &due,
-					Supersedes:    "dr-42-3",
-					HumanOnly:     true,
-				})
-				if err != nil {
-					return err
-				}
-				if x.Request.ID != "dr-42-4" || x.Request.Supersedes != "dr-42-3" || x.Request.Status != "open" || !x.Request.HumanOnly ||
-					x.DecisionRef != "hk-decision:dr-42-4" || x.Ver != "v1-abc" || x.Duplicate || !x.IssueCreated || x.Task.ID != 42 {
-					t.Fatalf("ask decoded wrong: %+v", x)
-				}
-				return nil
-			},
-		},
-		{
-			// The record-only route opens no Linear issue: the answer has no
-			// decision_ref, ver or issue_created. 201 means a new request.
+			// The answer has no decision_ref or ver. 201 means a new request.
 			name: "RecordDecisionRequest", method: "POST", uri: "/v1/tasks/42/decision-request", status: http.StatusCreated,
 			reply: `{"task": ` + taskJSON + `, "request": {"id": "dr-42-4", "revision": 4, "supersedes": "dr-42-3", "root": "dr-42-1", "status": "open", "question": "deploy v2?", "default_action": "hold", "requested_by": "svc-mergewake", "requested_at": "2026-11-08T11:00:00Z", "human_only": true}, "duplicate": false}`,
 			wantBody: map[string]any{

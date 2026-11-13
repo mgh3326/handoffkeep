@@ -261,14 +261,6 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 	} else if moved {
 		x.LastActivityAt = now.Truncate(time.Microsecond)
 	}
-	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
-		if err := enqueueLinearTaskTransition(ctx, tx, x, ""); err != nil {
-			return Task{}, err
-		}
-	}
-	if err := s.recordLinearBoardTaskTx(ctx, tx, x, ""); err != nil {
-		return Task{}, err
-	}
 	return x, nil
 }
 
@@ -777,14 +769,6 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 			return Task{}, err
 		}
 	}
-	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
-		if err = enqueueLinearTaskTransition(ctx, tx, x, note); err != nil {
-			return Task{}, err
-		}
-	}
-	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
-		return Task{}, err
-	}
 	if leavingTriage {
 		// A delivered close is not a decline: the set's children keep their
 		// own state, with --set too.
@@ -1002,14 +986,6 @@ func (s *Store) cascadeTriageTx(ctx context.Context, tx pgx.Tx, parent Task, acc
 			return err
 		}
 		if err = s.afterStateChangeTx(ctx, tx, c, StateTriage, by, now); err != nil {
-			return err
-		}
-		if s.LinearSyncEnabled() && c.Refs.Linear != nil && c.Refs.Linear.Sync {
-			if err = enqueueLinearTaskTransition(ctx, tx, c, childNote); err != nil {
-				return err
-			}
-		}
-		if err = s.recordLinearBoardTaskTx(ctx, tx, c, childNote); err != nil {
 			return err
 		}
 	}

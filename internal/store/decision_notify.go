@@ -27,16 +27,12 @@ import (
 // unsent and failed are final: unsent means the webhook was not configured
 // when the message was due, failed that sending gave up.
 //
-// Requests from source linear are not queued: the Linear flow posts them
-// (RecordLinearDecisionIssue). A request asked through Linear first opens a
-// task_request row, which RecordLinearDecisionIssue supersedes moments later;
-// the first post waits DecisionNoticePostDelay, and a request that closed
-// before its first post is never posted, so such a request gets the Linear
-// flow's message only.
+// The first post waits DecisionNoticePostDelay, and a request that closed
+// before its first post is never posted.
 //
 // Lock order (lockorder.go): a writer only inserts a new decision_deliveries
 // key. The worker locks one decision_deliveries row FOR UPDATE SKIP LOCKED and
-// holds it while it sends, as ProcessNextLinearDecisionOp does; it reads the
+// holds it while it sends; it reads the
 // request and its task without locking them, and nothing else locks an
 // existing decision_deliveries row. decision_notify_digest is written by the
 // worker only. The v38 decision_notify table is no longer written.
@@ -51,7 +47,7 @@ const (
 	DecisionDestinationDiscord = "discord"
 
 	// DecisionNoticePostDelay is how long a new request waits before its first
-	// post. It lets the Linear ask path supersede its task_request row first.
+	// post, so a request superseded or answered at once is never posted.
 	DecisionNoticePostDelay = time.Minute
 
 	// DecisionNoticeNearDue is how close to its due time a request's first
@@ -121,9 +117,6 @@ type DecisionDigest struct {
 
 // queueDecisionNoticeTx owes the channel a post for a request just opened.
 func queueDecisionNoticeTx(ctx context.Context, tx pgx.Tx, requestID int64, source string, at time.Time) error {
-	if source == DecisionSourceLinear {
-		return nil
-	}
 	at = at.UTC()
 	_, err := tx.Exec(ctx, `INSERT INTO decision_deliveries(request_id,destination,state,next_attempt_at,created_at) VALUES($1,$2,'pending',$3,$4) ON CONFLICT(request_id,destination) DO NOTHING`,
 		requestID, DecisionDestinationDiscord, at.Add(DecisionNoticePostDelay), at)
@@ -241,7 +234,7 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 			_, err = tx.Exec(settle, `UPDATE decision_deliveries SET state='failed',attempts=$2,last_error_code=$3 `+key, x.Record.ID, attempts, code)
 		} else {
 			_, err = tx.Exec(settle, `UPDATE decision_deliveries SET attempts=$2,last_error_code=$3,next_attempt_at=$4 `+key,
-				x.Record.ID, attempts, code, now.Add(linearDecisionOpBackoff(x.Attempts)))
+				x.Record.ID, attempts, code, now.Add(deliveryBackoff(x.Attempts)))
 		}
 	}
 	if err != nil {
@@ -391,13 +384,13 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 		_, err = tx.Exec(settle, `UPDATE decision_notify_digest SET state='sent',listed=$2,message_id=$3,sent_at=$4,attempts=$5,last_error='' WHERE day=$1::date`,
 			day, digest.Total, messageID, now, attempts+1)
 	default:
-		lastError := firstBytes(sendErr.Error(), linearDecisionErrorMaxBytes)
+		lastError := firstBytes(sendErr.Error(), deliveryErrorMaxBytes)
 		if attempts+1 >= decisionNoticeMaxAttempts || errors.Is(sendErr, ErrDecisionNoticeRejected) {
 			sendErr = fmt.Errorf("%w: digest %s: %w", ErrDecisionNoticeGaveUp, day.Format(time.DateOnly), sendErr)
 			_, err = tx.Exec(settle, `UPDATE decision_notify_digest SET state='failed',attempts=$2,last_error=$3 WHERE day=$1::date`, day, attempts+1, lastError)
 		} else {
 			_, err = tx.Exec(settle, `UPDATE decision_notify_digest SET attempts=$2,last_error=$3,next_attempt_at=$4 WHERE day=$1::date`,
-				day, attempts+1, lastError, now.Add(linearDecisionOpBackoff(attempts)))
+				day, attempts+1, lastError, now.Add(deliveryBackoff(attempts)))
 		}
 	}
 	if err != nil {

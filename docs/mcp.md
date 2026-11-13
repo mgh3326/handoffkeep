@@ -40,12 +40,11 @@ to the requester; set `ask_operator` when it needs an hk decision request and
 the task should await that decision. RESULT, BLOCKED, and QUESTION also create
 a result document, result record, and lane notification. START creates only a
 comment and the claim. PROGRESS creates a document, comment, and notification,
-but no `dots_results` row. That keeps the comparison table limited to the
-three kinds recorded by Linear and needs no schema migration. Replies are
+but no `dots_results` row, which records RESULT, BLOCKED and QUESTION only. Replies are
 attributed to the authenticated operator.
 
-The result's `source` is `hk` or `linear`. Existing Linear requests and
-webhooks remain independent and do not need a channel setting.
+The result's `source` is `hk`, or `linear` for a row the retired Linear
+webhook recorded before hk 4425.
 
 `HANDOFFKEEP_DOTS_REPLY_WRITES` controls replies. It defaults to `off`, which
 leaves `dots_inbox` available and makes `dots_reply` return
@@ -210,7 +209,7 @@ omitted.
 `attachments` lists the attachments bound to the task's body document (up to 50;
 `attachments_more` says whether there are more). `external_links` lists the
 task's pull requests (`pr`, `origin_pr`, `revert_pr`), `report`, `document`
-(the body doc key), `linear` and `youtrack`; `url` is set only for an https
+(the body doc key) and `youtrack`; `url` is set only for an https
 value.
 
 Response metadata (`comments_more`, `events_more`, `field_sources` itself) is

@@ -109,7 +109,7 @@ func ticketsCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("tickets emit", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
-	file := fs.String("file", "", "ticket set JSON document (docs/linear-internalize.md, Ticket sets); - reads stdin")
+	file := fs.String("file", "", "ticket set JSON document (git show 1e3d2fa8:docs/linear-internalize.md, Ticket sets); - reads stdin")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
