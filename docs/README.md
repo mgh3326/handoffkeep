@@ -1,7 +1,7 @@
 # handoffkeep
 
 `handoffkeep` is a small PostgreSQL-backed context warehouse for agent
-checkpoints, memory, and handoff documents. It provides one HTTP core through
+checkpoints and handoff documents. It provides one HTTP core through
 a CLI and MCP (stdio and authenticated streamable HTTP).
 
 ## 30-second start
@@ -13,13 +13,11 @@ handoffkeep ctx checkpoint --session demo --kind checkpoint --title 'started' --
 handoffkeep ctx checkpoint --session demo --title 'PR saved' --body 'review next' --ref prs=26 --ref jobs=hk-v0
 handoffkeep ctx recent --session demo
 handoffkeep ctx search 'review' --session demo
-handoffkeep memory push --agent codex --dir ./memory --apply
 ```
 
 For persistent local settings use mode 0600
 `~/.config/handoffkeep/config.env` with `HANDOFFKEEP_URL=` and
-`HANDOFFKEEP_TOKEN=`. `memory push`, `memory pull`, and `doc import` dry-run
-unless `--apply` is supplied.
+`HANDOFFKEEP_TOKEN=`. `doc import` dry-runs unless `--apply` is supplied.
 
 When `HANDOFFKEEP_URL` sits behind Cloudflare Access, a service token lets the
 CLI through without a browser login: set `HANDOFFKEEP_CF_ACCESS_CLIENT_ID` and
@@ -57,8 +55,7 @@ Local stdio delegates to the configured HTTP service:
 For Codex, place the equivalent command entry in its MCP configuration. Remote
 streamable MCP is `http://host:8800/mcp` and requires the same Bearer token.
 Available tools are `search_context`, `recent_checkpoints`, `put_checkpoint`,
-`get_document`, `put_document`, `list_documents`, `memory_get`, `memory_put`,
-and `memory_list`.
+`get_document`, `put_document`, and `list_documents`.
 
 ## Operations
 

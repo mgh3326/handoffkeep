@@ -210,16 +210,6 @@ func (s Service) Checkpoint(ctx context.Context, client string, x store.Checkpoi
 func (s Service) Recent(ctx context.Context, session, kind string, limit int) ([]store.Checkpoint, error) {
 	return s.Store.RecentCheckpoints(ctx, session, kind, limit)
 }
-func (s Service) PutMemory(ctx context.Context, client string, x store.Memory) (store.Memory, error) {
-	x.UpdatedBy = client
-	return s.Store.PutMemory(ctx, x)
-}
-func (s Service) GetMemory(ctx context.Context, agent, name string) (store.Memory, bool, error) {
-	return s.Store.GetMemory(ctx, agent, name)
-}
-func (s Service) ListMemory(ctx context.Context, agent string, content bool) ([]store.Memory, error) {
-	return s.Store.ListMemory(ctx, agent, content)
-}
 func (s Service) PutDocument(ctx context.Context, client string, x store.Document) (store.Document, bool, error) {
 	x.CreatedBy = client
 	return s.Store.PutDocument(ctx, x)
@@ -664,8 +654,6 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/yt/authority", s.ytAuthority)
 	m.HandleFunc("POST /v1/yt/authority", s.ytAuthoritySet)
 	m.HandleFunc("/v1/documents/{key...}", s.document)
-	m.HandleFunc("GET /v1/memory/{agent}", s.memoryList)
-	m.HandleFunc("/v1/memory/{agent}/{name}", s.memory)
 	m.HandleFunc("PUT /v1/attachments", s.attachmentPut)
 	m.HandleFunc("GET /v1/attachments", s.attachments)
 	m.HandleFunc("GET /v1/attachments/{sha}", s.attachment)
@@ -2443,54 +2431,6 @@ func (s Server) document(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOut(w, http.StatusOK, map[string]any{"document": x, "changed": changed})
-		return
-	}
-	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-}
-func (s Server) memoryList(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth(w, r); !ok {
-		return
-	}
-	xs, e := s.Service.ListMemory(r.Context(), r.PathValue("agent"), false)
-	if e != nil {
-		appErr(w, r, e)
-		return
-	}
-	jsonOut(w, http.StatusOK, map[string]any{"memory": xs})
-}
-func (s Server) memory(w http.ResponseWriter, r *http.Request) {
-	client, ok := s.auth(w, r)
-	if !ok {
-		return
-	}
-	agent, name := r.PathValue("agent"), r.PathValue("name")
-	if r.Method == http.MethodGet {
-		x, found, e := s.Service.GetMemory(r.Context(), agent, name)
-		if e != nil {
-			appErr(w, r, e)
-			return
-		}
-		if !found {
-			writeError(w, http.StatusNotFound, "not_found")
-			return
-		}
-		jsonOut(w, http.StatusOK, x)
-		return
-	}
-	if r.Method == http.MethodPut {
-		defer r.Body.Close()
-		var x store.Memory
-		if e := decode(r, &x, store.MaxBytes); e != nil {
-			appErr(w, r, e)
-			return
-		}
-		x.Agent, x.Name = agent, name
-		x, e := s.Service.PutMemory(r.Context(), client, x)
-		if e != nil {
-			appErr(w, r, e)
-			return
-		}
-		jsonOut(w, http.StatusOK, x)
 		return
 	}
 	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
