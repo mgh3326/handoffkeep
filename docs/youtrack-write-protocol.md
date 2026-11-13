@@ -32,10 +32,14 @@ One row per logical write, committed **before** any remote call.
 | `reason`, `last_error`, `attempts`, `reconciles` | latest cause code and detail; dispatch count; evidence-search count |
 | `next_attempt_at`, `dispatched_at`, `resolved_at` | scheduling and lifecycle times (Go clock, passed in) |
 
-`yt_entity_map(entity_kind, hk_key, yt_id, yt_parent_id, op_id)` holds the PG map
-rows an op commits **in the same transaction** as its `applied` (a comment appended
-by op 17 maps `comment/op:17` to its YouTrack comment id). Both directions are
-unique, so one YouTrack id can never name two hk identities.
+`yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id)` holds
+the PG map rows an op commits **in the same transaction** as its `applied` (a
+comment appended by op 17 maps `comment/op:17` to its YouTrack comment id, on
+the op's tenant). One hk identity names one YouTrack id, and one YouTrack id
+names one hk identity **per tenant**: a YouTrack id belongs to its instance, so
+two tenants' issues may share one (hk 3912, migration
+`20261113-yt-entity-map-tenant`, which backfilled each row's tenant from the op
+that wrote it).
 
 A trigger makes the table append-only: identity and payload columns never change,
 a resolved row never changes, only the lifecycle's moves are allowed, nothing is
@@ -161,8 +165,8 @@ Neither is ever `remote_unknown`: nothing was sent.
 Everything else is the protocol's and the same for every kind: claim and
 ordering, the reply classification above, and the evidence rule (exactly one
 exact live match with a valid id, nothing deleted or mismatched, is `applied`;
-otherwise `multiple_matches`, `marker_deleted`, `marker_mismatch` or
-`no_evidence`). An op whose kind is not registered is `rejected /
+otherwise `multiple_matches`, `marker_deleted`, `marker_mismatch`,
+`adoption_unconfirmed` (below) or `no_evidence`). An op whose kind is not registered is `rejected /
 unsupported_kind` when sent, and a failed render is `unsupported_kind` (send) or
 `reconcile_failed` (search). `comment_append` (`kind_comment.go`),
 `issue_create` (`kind_issue.go`, below), `issue_fields` (`kind_fields.go`,
@@ -860,8 +864,13 @@ hk task: #<task id> · project: <hk project>
 **Send.** First the project's fields (one admin GET): without `hk ID`, or
 without `hk 프로젝트` (for an enum field, without the task's project among its
 live values), the op is held `not_sent` until the schema is repaired, never
-rejected. A text `hk 프로젝트` field (the importer's shape) is sent as text, an
-enum field (the legacy push's) as an enum value. Then the project's issues
+rejected. The issue value follows the project field's type: a simple
+`hk 프로젝트` field (`SimpleProjectCustomField`, the importer's shape) as a
+primitive string (`SimpleIssueCustomField`), a formatted text one
+(`TextProjectCustomField`) as `TextIssueCustomField` with a `{"text": …}`
+value, and an enum field (the legacy push's) as an enum value; sending a
+primitive to a text field is a 4xx that would reject the op for good. Then the
+project's issues
 with `hk ID` = task id (one GET, checked against the project id and the
 field). Exactly one, whose summary names the task (`SummaryNamesTask`), is
 adopted (`AdoptedError`): no POST, the op applies with its id and its map rows
@@ -869,17 +878,27 @@ are marked `Adopted`. Any other hit (two or more, or one that does not name the 
 `rejected / ambiguous_issue`, no POST. None: exactly one POST with the
 project, summary, description and only the `hk ID` and `hk 프로젝트` fields
 (state, lane, kind, grade and tags are the later snapshot op's). The reply
-classification is the shared one; a failed search is `not_sent` (above).
+classification is the shared one; a failed search is `not_sent` (above), and
+so is a create the dispatch budget cannot start: the field read and the search
+share one budget, and an expired one means nothing was sent, so the op is
+prepared again instead of becoming `remote_unknown` with no evidence to find.
 
 **Evidence.** The same search. Exactly one issue with the task's `hk ID`,
 whose description is exactly the rendered text, applies the op; a quoted or
-copied marker is not ownership. Zero, two exact hits, an edited description,
-or a hit beside another issue with that `hk ID` keep it `remote_unknown`;
-there is never an automatic re-create. An adoption whose settlement was lost (a crash or
-a failed apply after Send adopted) is `remote_unknown / marker_mismatch` too:
-the adopted issue has no marker, and an issue's age does not prove the
-dispatch's search saw it (its `hk ID` or summary may have been set after the
-search while a POST was in flight), so the operator resolves it.
+copied marker is not ownership. The one issue whose summary names the task and
+whose description carries no marker of this op's is the issue Send adopts
+(this kind's create always writes the marker), so an adoption whose settlement
+was lost (a crash or a failed apply after Send adopted) is reported as that
+adoption, but never applied by the search: the ledger cannot tell that crash
+from a POST whose reply was lost, nothing bounds when such a POST lands, and an
+applied op is never searched again, so a late create would be a second issue
+no one sees. The op stays `remote_unknown / adoption_unconfirmed` with the
+issue id in its detail, and `yt ops resolve <op> --applied <issue id>
+--adopted` applies it with its map rows marked `Adopted` (hk 3911; a POST that
+lands first is a second hit, `marker_mismatch`).
+Zero, two exact hits, an edited description, or a hit beside another issue
+with that `hk ID` keep it `remote_unknown`; there is never an automatic
+re-create.
 
 **Binding.** Applying the op (send, evidence or `yt ops resolve`) takes the
 task's lane lock, first checks every mapping hk keeps (the task's binding and
@@ -1357,7 +1376,11 @@ release rollback never meets an authority value it cannot parse (consult hk
   the binding against every local source, as a fresh comment's enqueue does
   (for example a task moved to another project while its create was pending):
   on a disagreement the op is `rejected / ambiguous_issue` and nothing is
-  sent. A task with no pending create, a body
+  sent; it never waits in the lane for a later move (hk 4457's hold was
+  taken out of PR #383 because a hold that waits for a later op on a
+  strictly ordered lane can wedge it; redesign hk 4569). Migration
+  `20261113-yt-comment-hold` stays registered and unused. A task with no
+  pending create, a body
   the protocol cannot send, and a mapping disagreement are still refused.
   The previous release's comment gate never admits a targetless op, so it
   holds such an op rather than send it. A dots reply (`ReplyDots`), which prepares no op

@@ -329,8 +329,8 @@ func (s *Store) enqueueYTCommentModeTx(ctx context.Context, tx pgx.Tx, c TaskCom
 		// agree with it. ON CONFLICT without a target also covers the issue
 		// being mapped to another task.
 		taskKey := strconv.FormatInt(c.TaskID, 10)
-		tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, yt_parent_id, op_id, created_at)
-			VALUES ('task',$1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, taskKey, issueID, projectID, op.ID, now)
+		tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
+			VALUES ('task',$1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, tenant, taskKey, issueID, projectID, op.ID, now)
 		if err != nil {
 			return ytwrite.Op{}, false, err
 		}
@@ -544,7 +544,7 @@ func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verif
 	}
 	var mapped bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task'
-		AND ((hk_key=$1 AND yt_id<>$2) OR (hk_key<>$1 AND yt_id=$2)))`, taskKey, c.IssueID).Scan(&mapped); err != nil {
+		AND ((hk_key=$1 AND yt_id<>$2) OR (hk_key<>$1 AND (tenant=$3 OR tenant='') AND yt_id=$2)))`, taskKey, c.IssueID, c.Tenant).Scan(&mapped); err != nil {
 		return YTCommentCanary{}, err
 	}
 	if mapped {
