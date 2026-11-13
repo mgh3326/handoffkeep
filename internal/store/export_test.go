@@ -303,9 +303,29 @@ func TestExportTasksValidation(t *testing.T) {
 	if out.Watermark.TaskEventMaxID < 0 || out.Watermark.RelayEventMaxID < 0 {
 		t.Fatalf("watermark=%+v", out.Watermark)
 	}
-	for state := range taskStates {
+		for state := range taskStates {
 		if _, ok := out.Counts.ByState[state]; !ok {
 			t.Fatalf("by_state missing %q: %+v", state, out.Counts.ByState)
 		}
+	}
+
+	// hk 3921: tasks export returns the computed stalled flag.
+	stalledTask := flowTask(t, s, s.pool, "implement", StateDeveloping, true)
+	ageTask(t, s, stalledTask.ID, time.Now().UTC().Add(-72*time.Hour))
+	exp, err := s.ExportTasks(t.Context(), lane, "", "", nil, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, task := range exp.Tasks {
+		if task.ID == stalledTask.ID {
+			found = true
+			if !task.Stalled {
+				t.Fatalf("task %d stalled=%t, want true", task.ID, task.Stalled)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("task %d not found in export", stalledTask.ID)
 	}
 }

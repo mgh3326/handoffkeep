@@ -256,6 +256,10 @@ func (s *Store) ExportTasks(ctx context.Context, lane, state, parentLane string,
 		return TaskExport{}, err
 	}
 
+	if err = s.markStalled(ctx, tx, out.Tasks, out.DBTime); err != nil {
+		return TaskExport{}, err
+	}
+
 	idsHash := sha256.New()
 	rowsHash := sha256.New()
 	for _, task := range out.Tasks {

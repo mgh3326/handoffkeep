@@ -98,6 +98,7 @@ var errorRules = []errorRule{
 	{store.ErrLabelCycle, http.StatusConflict, "label_cycle", false},
 	{store.ErrLabelRetired, http.StatusBadRequest, "label_retired", false},
 	{store.ErrTaskTerminal, http.StatusConflict, "task_terminal", false},
+	{store.ErrInvalidTaskPriority, http.StatusBadRequest, "invalid_task_priority", false},
 	{store.ErrDecisionRequestOpen, http.StatusConflict, "decision_request_open", false},
 	{store.ErrDecisionRequestStale, http.StatusConflict, "decision_request_stale", false},
 	{store.ErrDecisionRequestResolved, http.StatusConflict, "decision_request_resolved", false},

@@ -38,4 +38,26 @@ func TestSetTaskPriority(t *testing.T) {
 	if _, err = s.SetTaskPriority(ctx, x.ID, 1, "operator:test", "", "three"); !errors.Is(err, ErrTaskTerminal) {
 		t.Fatalf("terminal: %v", err)
 	}
+
+	// hk 3219: SetTaskPriorityDirect changes priority and records event.
+	live, err := s.CreateTask(ctx, Task{Lane: taskProjectLane(t), Title: "priority direct", Kind: "implement", CreatedBy: "test", Project: projectPtr("experiment")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, changed, err := s.SetTaskPriorityDirect(ctx, live.ID, 5, "cli-user", "raised priority")
+	if err != nil || !changed || updated.Priority != 5 {
+		t.Fatalf("direct priority: %+v, changed=%v, err=%v", updated, changed, err)
+	}
+	// No-op does not change
+	updated, changed, err = s.SetTaskPriorityDirect(ctx, live.ID, 5, "cli-user", "no op")
+	if err != nil || changed || updated.Priority != 5 {
+		t.Fatalf("direct no-op: %+v, changed=%v, err=%v", updated, changed, err)
+	}
+	// Terminal is rejected
+	if _, err = s.TransitionTask(ctx, live.ID, "completed", "test", "done", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.SetTaskPriorityDirect(ctx, live.ID, 1, "cli-user", "after completion"); !errors.Is(err, ErrTaskTerminal) {
+		t.Fatalf("terminal direct: %v, want ErrTaskTerminal", err)
+	}
 }
