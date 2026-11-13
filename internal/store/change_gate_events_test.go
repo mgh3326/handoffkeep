@@ -109,7 +109,8 @@ func TestChangeGateEventsMigrationKeepsPostedVerdicts(t *testing.T) {
 	if err := s.pool.QueryRow(ctx, `SELECT id FROM changes WHERE repo=$1 AND pr_number=$2`, ref.Repo, ref.PR).Scan(&changeID); err != nil {
 		t.Fatal(err)
 	}
-	task, err := s.CreateTask(ctx, Task{Lane: relaneLane(t, "gate-migration"), Title: "gate verdict posted before the upgrade", Kind: "implement", Priority: 5, CreatedBy: "tester"})
+	project := testProjectName
+	task, err := s.CreateTask(ctx, Task{Lane: relaneLane(t, "gate-migration"), Title: "gate verdict posted before the upgrade", Kind: "implement", Priority: 5, CreatedBy: "tester", Project: &project})
 	if err != nil {
 		t.Fatal(err)
 	}

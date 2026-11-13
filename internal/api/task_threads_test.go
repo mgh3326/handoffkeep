@@ -399,11 +399,12 @@ func TestTaskThreadFlowPostsEveryGateVerdict(t *testing.T) {
 	pr := "https://github.com/example/app/pull/8"
 	taskEvent(t, st, store.TaskSourceEvent{Source: store.SourceMergewakePR, SourceRef: pr, TaskID: x.ID, HeadSHA: threadHead})
 	ref := store.ChangeRef{Repo: "example/app", PR: 8}
-	now := time.Now().UTC()
-	if _, err = st.ApplyChangeGate(ctx, ref, store.ChangeGateWrite{HeadSHA: threadHead, State: "blocked", Reasons: []string{"open_high"}, DecidedAt: now.Add(-time.Second)}); err != nil {
+	// Both decisions come after the thread's start, which the poster checks,
+	// and the second one after the first has been stored.
+	if _, err = st.ApplyChangeGate(ctx, ref, store.ChangeGateWrite{HeadSHA: threadHead, State: "blocked", Reasons: []string{"open_high"}, DecidedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = st.ApplyChangeGate(ctx, ref, store.ChangeGateWrite{HeadSHA: threadHead, State: "ready", DecidedAt: now}); err != nil {
+	if _, err = st.ApplyChangeGate(ctx, ref, store.ChangeGateWrite{HeadSHA: threadHead, State: "ready", DecidedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	p.Drain(ctx)
