@@ -54,7 +54,7 @@ func TestSetTaskPriority(t *testing.T) {
 		t.Fatalf("direct no-op: %+v, changed=%v, err=%v", updated, changed, err)
 	}
 	// Terminal is rejected
-	if _, err = s.TransitionTask(ctx, live.ID, "completed", "test", "done", nil, ""); err != nil {
+	if _, err = s.TransitionTask(ctx, live.ID, "dropped", "test", "closed", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err = s.SetTaskPriorityDirect(ctx, live.ID, 1, "cli-user", "after completion"); !errors.Is(err, ErrTaskTerminal) {

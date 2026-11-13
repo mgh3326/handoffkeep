@@ -54,7 +54,7 @@ func TestTaskPriorityAPI(t *testing.T) {
 	}
 
 	// Terminal task rejects priority change with 409
-	if _, err = st.TransitionTask(context.Background(), x.ID, "completed", "test", "done", nil, ""); err != nil {
+	if _, err = st.TransitionTask(context.Background(), x.ID, "dropped", "test", "closed", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	code, out = projectRequest(t, h.URL, http.MethodPost, fmt.Sprintf("/v1/tasks/%d/priority", x.ID), "tok", map[string]any{

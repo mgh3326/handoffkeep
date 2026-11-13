@@ -879,11 +879,7 @@ func (c Client) SetTaskPriority(ctx context.Context, id int64, priority int, not
 	var out store.Task
 	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/priority", id), map[string]any{"priority": priority, "note": note}, &out)
 	if err != nil {
-		var he *HTTPError
-		if errors.As(err, &he) && (he.Status == 404 || he.Status == 405) {
-			return out, fmt.Errorf("task_priority_unsupported: server predates the task priority route")
-		}
-		return out, err
+		return out, unsupportedRoute(err, "task_priority_unsupported", "the task priority route")
 	}
 	if out.Priority != priority {
 		return out, fmt.Errorf("priority_not_applied: server response has priority %d, want %d", out.Priority, priority)
