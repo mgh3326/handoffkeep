@@ -148,7 +148,7 @@ func TestCheckSearchRefusesWhatSearchRefused(t *testing.T) {
 			t.Fatalf("CheckSearch(%q, %q, %d-byte session) = %v, want invalid search", c.q, c.scope, len(c.session), err)
 		}
 	}
-	for _, scope := range []string{"all", "ctx", "docs", "memory", "tasks"} {
+	for _, scope := range []string{"all", "ctx", "docs", "tasks"} {
 		if err := CheckSearch("x", scope, ""); err != nil {
 			t.Fatalf("CheckSearch scope %s = %v, want accepted", scope, err)
 		}

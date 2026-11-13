@@ -33,7 +33,6 @@ import (
 const MaxBytes = 64 << 10
 const DocumentMaxBytes = 512 << 10
 const CheckpointKeep = 500
-const MemoryKeep = 2000
 
 var ErrTrigramUnavailable = errors.New("PostgreSQL pg_trgm extension unavailable: grant CREATE on the database/schema or install pg_trgm as an administrator")
 
@@ -42,7 +41,6 @@ var ErrTrigramUnavailable = errors.New("PostgreSQL pg_trgm extension unavailable
 var ErrSearchTimeout = errors.New("search_timeout")
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 var kinds = map[string]bool{"checkpoint": true, "handoff": true, "decision": true, "open_question": true, "next_action": true}
-var memoryTypes = map[string]bool{"user": true, "feedback": true, "project": true, "reference": true}
 var documentKinds = map[string]bool{"brief": true, "report": true, "answer": true, "handoff": true, "note": true, "other": true, "decision": true, "research": true, "design": true, "policy": true, "evidence": true}
 var documentOriginClasses = map[string]bool{"authored": true, "job": true, "import": true}
 var taskKinds = map[string]bool{"implement": true, "verify": true, "fix": true, "decide": true, "ops": true}
@@ -520,18 +518,10 @@ type Task struct {
 	SourceRef string `json:"source_ref,omitempty"`
 	// Stalled is computed at read time: a started task with no
 	// awaiting_decision and no activity within started_stalled_hours.
-	Stalled bool `json:"stalled"`
-	// PrioritySource and LaneSource say where the served value came from
-	// ("hk" or "youtrack"); ValuesFetchedAt is when the cache row was last
-	// refreshed, and Stale marks a value whose last YouTrack refresh failed.
-	// All four are derived at read time and never stored.
-	PrioritySource  string         `json:"priority_source,omitempty"`
-	LaneSource      string         `json:"lane_source,omitempty"`
-	ValuesFetchedAt *time.Time     `json:"values_fetched_at,omitempty"`
-	Stale           bool           `json:"stale,omitempty"`
-	Children        []TaskChild    `json:"children,omitempty"`
-	Relations       []TaskRelation `json:"relations,omitempty"`
-	Events          []TaskEvent    `json:"events,omitempty"`
+	Stalled   bool           `json:"stalled"`
+	Children  []TaskChild    `json:"children,omitempty"`
+	Relations []TaskRelation `json:"relations,omitempty"`
+	Events    []TaskEvent    `json:"events,omitempty"`
 	// Spawn is where the task's panewire spawn request stands (hk 4377); absent
 	// when no request was recorded. Read with the task, never stored on it.
 	Spawn *TaskSpawn `json:"spawn,omitempty"`
@@ -657,15 +647,6 @@ type Checkpoint struct {
 	Refs      Refs      `json:"refs"`
 	CreatedBy string    `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
-}
-type Memory struct {
-	Agent       string    `json:"agent"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Type        string    `json:"type"`
-	Content     string    `json:"content,omitempty"`
-	UpdatedBy   string    `json:"updated_by,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at"`
 }
 type Document struct {
 	ID        int64     `json:"id"`
@@ -3828,74 +3809,6 @@ func (s *Store) RecentCheckpoints(ctx context.Context, session, kind string, lim
 	}
 	return out, rows.Err()
 }
-func (s *Store) PutMemory(ctx context.Context, x Memory) (Memory, error) {
-	if !validName(x.Agent) || !validName(x.Name) || !memoryTypes[x.Type] || !validText(x.Description, MaxBytes) || !validText(x.Content, MaxBytes) {
-		return x, errors.New("invalid memory")
-	}
-	if !ValidActor(x.UpdatedBy) {
-		return x, errors.New("invalid memory updated_by")
-	}
-	if e := guard.Reject(x.Description + "\n" + x.Content); e != nil {
-		return x, e
-	}
-	x.UpdatedAt = time.Now().UTC()
-	tx, e := s.pool.Begin(ctx)
-	if e != nil {
-		return x, e
-	}
-	defer tx.Rollback(ctx)
-	_, e = tx.Exec(ctx, `INSERT INTO memory(agent,name,description,memory_type,content,updated_by,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(agent,name) DO UPDATE SET description=EXCLUDED.description,memory_type=EXCLUDED.memory_type,content=EXCLUDED.content,updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at`, x.Agent, x.Name, x.Description, x.Type, x.Content, x.UpdatedBy, x.UpdatedAt)
-	if e != nil {
-		return x, e
-	}
-	_, e = tx.Exec(ctx, `DELETE FROM memory WHERE agent=$1 AND name IN (SELECT name FROM memory WHERE agent=$1 ORDER BY updated_at DESC,name DESC OFFSET $2)`, x.Agent, MemoryKeep)
-	if e != nil {
-		return x, e
-	}
-	return x, tx.Commit(ctx)
-}
-func (s *Store) ListMemory(ctx context.Context, agent string, content bool) ([]Memory, error) {
-	if !validName(agent) {
-		return nil, errors.New("invalid memory agent")
-	}
-	cols := "agent,name,description,memory_type,updated_by,updated_at"
-	if content {
-		cols = "agent,name,description,memory_type,content,updated_by,updated_at"
-	}
-	rows, e := s.pool.Query(ctx, "SELECT "+cols+" FROM memory WHERE agent=$1 ORDER BY name", agent)
-	if e != nil {
-		return nil, e
-	}
-	defer rows.Close()
-	out := []Memory{}
-	for rows.Next() {
-		var x Memory
-		if content {
-			e = rows.Scan(&x.Agent, &x.Name, &x.Description, &x.Type, &x.Content, &x.UpdatedBy, &x.UpdatedAt)
-		} else {
-			e = rows.Scan(&x.Agent, &x.Name, &x.Description, &x.Type, &x.UpdatedBy, &x.UpdatedAt)
-		}
-		if e != nil {
-			return nil, e
-		}
-		out = append(out, x)
-	}
-	return out, rows.Err()
-}
-func (s *Store) GetMemory(ctx context.Context, agent, name string) (Memory, bool, error) {
-	if !validName(agent) || !validName(name) {
-		return Memory{}, false, errors.New("invalid memory")
-	}
-	var x Memory
-	e := s.pool.QueryRow(ctx, `SELECT agent,name,description,memory_type,content,updated_by,updated_at FROM memory WHERE agent=$1 AND name=$2`, agent, name).Scan(&x.Agent, &x.Name, &x.Description, &x.Type, &x.Content, &x.UpdatedBy, &x.UpdatedAt)
-	if e != nil {
-		if errors.Is(e, pgx.ErrNoRows) {
-			return x, false, nil
-		}
-		return x, false, e
-	}
-	return x, true, nil
-}
 func validDocKey(k string) bool {
 	return len(k) > 0 && len(k) <= 512 && !strings.HasPrefix(k, "/") && !strings.Contains(k, "..") && !strings.ContainsRune(k, 0)
 }
@@ -4318,7 +4231,7 @@ func (s *Store) Search(ctx context.Context, q, scope, session string, limit int)
 // YouTrack backend calls it before asking YouTrack, so both backends refuse
 // the same inputs.
 func CheckSearch(q, scope, session string) error {
-	if strings.TrimSpace(q) == "" || !validText(q, 512) || !validText(session, 128) || (scope != "all" && scope != "ctx" && scope != "docs" && scope != "memory" && scope != "tasks") {
+	if strings.TrimSpace(q) == "" || !validText(q, 512) || !validText(session, 128) || (scope != "all" && scope != "ctx" && scope != "docs" && scope != "tasks") {
 		return errors.New("invalid search")
 	}
 	return nil
@@ -4367,10 +4280,6 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 	if scope == "all" || scope == "ctx" {
 		parts = append(parts, `(SELECT 'ctx' scope,'' key,session,title,created_at,id row_id FROM checkpoints WHERE ($1='' OR session=$1) AND (to_tsvector('simple',title || ' ' || body) @@ plainto_tsquery('simple',$2) OR title || ' ' || body ILIKE '%' || $2 || '%') ORDER BY created_at DESC,key,session,title LIMIT $3)`)
 	}
-	if scope == "all" || scope == "memory" {
-		// Memory's unique identity is (agent,name), carried in session and title.
-		parts = append(parts, `(SELECT 'memory' scope,'' key,agent session,name title,updated_at created_at,NULL::bigint row_id FROM memory WHERE ($1='' OR agent=$1) AND (to_tsvector('simple',name || ' ' || description || ' ' || content) @@ plainto_tsquery('simple',$2) OR name || ' ' || description || ' ' || content ILIKE '%' || $2 || '%') ORDER BY created_at DESC,key,session,title LIMIT $3)`)
-	}
 	if scope == "all" || scope == "docs" {
 		parts = append(parts, `(SELECT 'docs' scope,key,session,key title,created_at,id row_id FROM documents WHERE ($1='' OR session=$1) AND (to_tsvector('simple',key || ' ' || body) @@ plainto_tsquery('simple',$2) OR key || ' ' || body ILIKE '%' || $2 || '%') ORDER BY created_at DESC,key,session,title LIMIT $3)`)
 	}
@@ -4379,17 +4288,15 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 		ORDER BY created_at DESC,scope,key,session,title LIMIT $3
 	)
 	SELECT p.scope,p.key,p.session,
-		CASE p.scope WHEN 'ctx' THEN cp.kind WHEN 'memory' THEN m.memory_type ELSE d.kind END kind,
+		CASE p.scope WHEN 'ctx' THEN cp.kind ELSE d.kind END kind,
 		p.title,
 		CASE p.scope
 			WHEN 'ctx' THEN ts_headline('simple',cp.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8')
-			WHEN 'memory' THEN ts_headline('simple',m.content,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8')
 			ELSE ts_headline('simple',d.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8')
 		END snippet,
 		CASE p.scope WHEN 'ctx' THEN cp.refs ELSE '{}'::jsonb END refs,p.created_at
 	FROM page p
 	LEFT JOIN checkpoints cp ON p.scope='ctx' AND cp.id=p.row_id
-	LEFT JOIN memory m ON p.scope='memory' AND m.agent=p.session AND m.name=p.title
 	LEFT JOIN documents d ON p.scope='docs' AND d.id=p.row_id
 	ORDER BY p.created_at DESC,p.scope,p.key,p.session,p.title`
 	if capture, ok := ctx.Value(searchCaptureKey{}).(searchCapture); ok {

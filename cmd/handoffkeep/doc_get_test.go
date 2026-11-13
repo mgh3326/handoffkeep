@@ -129,7 +129,7 @@ func TestCtxSearchDefaultLimit(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_URL", server.URL)
 	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
 
-	for _, scope := range []string{"all", "docs", "ctx", "memory", "tasks"} {
+	for _, scope := range []string{"all", "docs", "ctx", "tasks"} {
 		if err := ctxCmd([]string{"search", "--scope", scope, "probe"}, &bytes.Buffer{}); err != nil {
 			t.Fatalf("scope %s: %v", scope, err)
 		}
@@ -141,7 +141,7 @@ func TestCtxSearchDefaultLimit(t *testing.T) {
 	if err := ctxCmd([]string{"recent", "--session", "s"}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"21", "21", "21", "21", "21", "8", "recent:3"}
+	want := []string{"21", "21", "21", "21", "8", "recent:3"}
 	if strings.Join(limits, ",") != strings.Join(want, ",") {
 		t.Fatalf("limits=%v want %v", limits, want)
 	}

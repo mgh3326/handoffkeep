@@ -2,16 +2,12 @@ package youtrack
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/mgh3326/handoffkeep/internal/store"
-	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 // Point 1: a response over maxBodyBytes is an error. The first maxBodyBytes
@@ -148,138 +144,6 @@ func TestRetryAfterWaitEndsWhenContextIsCancelled(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second || attempts.Load() != 1 {
 		t.Fatalf("elapsed=%v attempts=%d: the wait ignored the context", elapsed, attempts.Load())
-	}
-}
-
-// Point 4: YouTrack stores a comment, the response is lost, and the next run
-// must link the stored comment instead of posting it again.
-func TestCommentWithLostResponseIsNotPostedTwice(t *testing.T) {
-	fs := newFakeStore()
-	yt := newFakeYouTrack()
-	task := fs.addTask("handoffkeep", "handoffkeep", "English title", store.StateBacklog, 3)
-	fs.comments[task.ID] = []store.TaskComment{{ID: 1, TaskID: task.ID, Body: "첫 코멘트", Author: "worker", CreatedAt: time.Now().UTC()}}
-	yt.loseCommentResponses = 1
-	svc := newTestService(t, yt, fs)
-
-	first, err := svc.Sync(context.Background(), SyncOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(first.Errors) == 0 {
-		t.Fatal("the lost response should surface as a run error")
-	}
-	fs.elapseBackoff()
-	second, err := svc.Sync(context.Background(), SyncOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(second.Errors) != 0 {
-		t.Fatalf("second run errors: %v", second.Errors)
-	}
-	if n := yt.commentsOn("1-1"); n != 1 {
-		t.Fatalf("comment is on the issue %d times, want 1", n)
-	}
-}
-
-// Point 4 for articles: the design index article is created, its response is
-// lost, and the next run adopts it through its hk marker.
-func TestArticleWithLostResponseIsAdoptedNotCreatedAgain(t *testing.T) {
-	fs := newFakeStore()
-	fy := newFakeYouTrack()
-	fs.putDoc("design/alpha", "# Alpha design\n\nbody A")
-	fy.loseArticleResponses = 1
-	svc := newTestService(t, fy, fs)
-
-	first, err := svc.Sync(context.Background(), SyncOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(first.Errors) == 0 {
-		t.Fatal("the lost response should surface as a run error")
-	}
-	fs.elapseBackoff()
-	second, err := svc.Sync(context.Background(), SyncOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(second.Errors) != 0 {
-		t.Fatalf("second run errors: %v", second.Errors)
-	}
-	_, _, byID, _, _ := fy.articleSnapshot()
-	titles := map[string]int{}
-	for _, a := range byID {
-		titles[a.Summary]++
-	}
-	if titles["design"] != 1 || titles["Alpha design"] != 1 {
-		t.Fatalf("article titles after the lost response = %v, want one index and one document", titles)
-	}
-}
-
-// A human comment well over the old 60000-rune mirror cut is mirrored whole
-// (about 1.5 MB of UTF-8): the mirror cuts nothing that YouTrack would accept.
-func TestCommentMirrorIsNotCutBelowYouTrackBound(t *testing.T) {
-	fs := newFakeStore()
-	yt := newFakeYouTrack()
-	task := fs.addTask("handoffkeep", "handoffkeep", "English title", store.StateBacklog, 3)
-	body := strings.Repeat("가", 500_000)
-	fs.comments[task.ID] = []store.TaskComment{{ID: 1, TaskID: task.ID, Body: body, Author: "worker", CreatedAt: time.Now().UTC()}}
-	svc := newTestService(t, yt, fs)
-	if _, err := svc.Sync(context.Background(), SyncOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if len(yt.comments) != 1 {
-		t.Fatalf("comments=%d, want 1", len(yt.comments))
-	}
-	if !strings.Contains(yt.comments[0], body) {
-		t.Fatalf("mirrored comment was cut: %d characters, body %d", len([]rune(yt.comments[0])), len([]rune(body)))
-	}
-}
-
-// A comment whose mirrored text is over YouTrack's bound is refused by name
-// (errCommentTooLong), never cut; one at the bound less its header and marker
-// is sent.
-func TestCommentTextRefusesOverYouTrackBound(t *testing.T) {
-	c := store.TaskComment{ID: 7, Author: "worker", CreatedAt: time.Now().UTC()}
-	c.Body = strings.Repeat("x", ytwrite.TextMaxChars-200)
-	if _, err := commentText(c); err != nil {
-		t.Fatalf("comment within the bound refused: %v", err)
-	}
-	c.Body = strings.Repeat("x", ytwrite.TextMaxChars)
-	if _, err := commentText(c); !errors.Is(err, errCommentTooLong) {
-		t.Fatalf("comment over the bound: err=%v, want errCommentTooLong", err)
-	}
-}
-
-// Point 1, paging: a stalled-task read whose cursor does not move forward is
-// an error. The store here ignores the cursor and always returns a full page;
-// the bounded call count only keeps a failing run from spinning forever.
-type cursorIgnoringStore struct {
-	*fakeStore
-	calls *atomic.Int32
-}
-
-func (s cursorIgnoringStore) ListTasksFiltered(_ context.Context, _ store.TaskQuery) ([]store.Task, error) {
-	if s.calls.Add(1) > 50 {
-		return nil, nil
-	}
-	page := make([]store.Task, stalledPageSize)
-	for i := range page {
-		page[i] = store.Task{ID: int64(i + 1)}
-	}
-	return page, nil
-}
-
-func TestStalledPagingFailsOnACursorThatDoesNotAdvance(t *testing.T) {
-	fy := newFakeYouTrack()
-	client, err := New(Config{BaseURL: fy.server(t).URL, Token: "fixture-token", Sleep: noSleep})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var calls atomic.Int32
-	svc := NewService(cursorIgnoringStore{fakeStore: newFakeStore(), calls: &calls}, client, Options{Now: time.Now})
-	_, err = svc.stalledTaskIDs(context.Background())
-	if err == nil {
-		t.Fatalf("stalled read accepted a page that repeats its cursor (%d calls)", calls.Load())
 	}
 }
 

@@ -292,7 +292,6 @@ func TestSearchExactLookupsStayOnPostgres(t *testing.T) {
 		{"#42", "all"},
 		{"42", "tasks"},
 		{"hello", "ctx"},
-		{"hello", "memory"},
 	}
 	for _, c := range cases {
 		fb := &fallbackRecorder{rows: map[string][]store.SearchResult{c.scope: {{Scope: c.scope, Key: "pg"}}}}
@@ -435,8 +434,7 @@ func TestSearchAllInterleavesLanesAndKeepsPostgresHits(t *testing.T) {
 	}
 
 	fb := &fallbackRecorder{rows: map[string][]store.SearchResult{
-		"ctx":    {{Scope: "ctx", Key: "checkpoint-1"}},
-		"memory": {{Scope: "memory", Key: "memory-1"}},
+		"ctx": {{Scope: "ctx", Key: "checkpoint-1"}},
 	}}
 	got, err := svc.Search(ctx, fb.search, "one", "all", "", 20)
 	if err != nil {
@@ -447,13 +445,12 @@ func TestSearchAllInterleavesLanesAndKeepsPostgresHits(t *testing.T) {
 		"docs:design/one",
 		"ctx:checkpoint-1",
 		"tasks:" + strconv.FormatInt(t2.ID, 10),
-		"memory:memory-1",
 	}
 	if keys := searchKeys(got); strings.Join(keys, ",") != strings.Join(want, ",") {
 		t.Fatalf("keys = %v, want round-robin %v", keys, want)
 	}
-	if strings.Join(fb.calls, ",") != "ctx,memory" {
-		t.Fatalf("PostgreSQL asked for %v, want ctx and memory only", fb.calls)
+	if strings.Join(fb.calls, ",") != "ctx" {
+		t.Fatalf("PostgreSQL asked for %v, want ctx only", fb.calls)
 	}
 }
 

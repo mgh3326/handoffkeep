@@ -22,7 +22,6 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/cfaccess"
 	"github.com/mgh3326/handoffkeep/internal/store"
-	"github.com/mgh3326/handoffkeep/internal/youtrack"
 )
 
 //go:embed templates/*.html static
@@ -45,12 +44,13 @@ type Config struct {
 	HubHTTPClient *http.Client
 	PollInterval  time.Duration
 	HubCacheTTL   time.Duration
-	// YouTrack is serve's legacy read-through service (api.Service.YouTrack):
-	// it overlays the cached YouTrack priority and lane on linked tasks and
-	// queues priority and lane changes for export after the PG write. serve
-	// sets it only with HANDOFFKEEP_YT_READTHROUGH_MODE=on. Nil keeps the
-	// console exactly as it was.
-	YouTrack *youtrack.Service
+	// TaskIssues turns on the YouTrack-backed task pages (hk 4430): the
+	// board, the work status page and the Home task counts read task issues
+	// through it, in TaskIssuesTenant, cached for TaskIssuesTTL (zero is 15
+	// seconds). Nil keeps those pages on hk's task tables.
+	TaskIssues       TaskIssueLister
+	TaskIssuesTenant string
+	TaskIssuesTTL    time.Duration
 }
 
 // Handler is a Cloudflare Access-authenticated UI handler.
@@ -60,11 +60,10 @@ type Handler struct {
 	access       *cfaccess.Verifier
 	templates    *template.Template
 	hub          *hubProxy
-	youTrack     *youtrack.Service
+	ytTasks      *ytTaskSource
 	pollInterval time.Duration
 	static       fs.FS
 	csrfKey      []byte
-	lanes        []string
 	// assetVersion is the build stamp appended to static asset URLs (?v=). It
 	// is empty on unstamped builds, where the static handler must not emit a
 	// long-lived cache policy.
@@ -118,11 +117,13 @@ func New(config Config) (*Handler, error) {
 		attachments:  config.Attachments,
 		access:       config.Access,
 		hub:          hub,
-		youTrack:     config.YouTrack,
 		pollInterval: poll,
 		static:       static,
 		csrfKey:      csrfKey,
 		assetVersion: vcsRevision(),
+	}
+	if config.TaskIssues != nil {
+		h.ytTasks = newYTTaskSource(config.TaskIssues, config.Store, config.TaskIssuesTenant, config.TaskIssuesTTL)
 	}
 	tmpl, err := template.New("ui").Funcs(template.FuncMap{
 		"assetURL": h.assetURL,
