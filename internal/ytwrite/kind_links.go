@@ -215,5 +215,4 @@ func sortedLinks(ids []string) []string {
 	return ids
 }
 
-
 func (issueLinks) MapRows(Op, string) []MapRow { return nil }
