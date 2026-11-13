@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
 // A decision record is the one row decision_requests keeps per question put to
@@ -631,6 +632,11 @@ func (s *Store) RecordSessionDecision(ctx context.Context, in SessionDecisionInp
 				return SessionDecisionResult{}, errors.New("invalid session decision ground")
 			}
 		}
+	}
+	secretFields := []string{in.Reading, in.Quote}
+	secretFields = append(secretFields, in.Grounds...)
+	if err := guard.Reject(strings.Join(secretFields, "\n")); err != nil {
+		return SessionDecisionResult{}, err
 	}
 	now = now.UTC()
 	decidedAt := in.DecidedAt.UTC()

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
 // Each test runs in a throwaway schema so it can count every decision row.
@@ -147,6 +149,22 @@ func TestRecordSessionDecisionClosesAndReplaysVerbatimRecord(t *testing.T) {
 	in.Quote = "Changed words"
 	if _, err := s.RecordSessionDecision(t.Context(), in, now, nil); !errors.Is(err, ErrSessionDecisionConflict) {
 		t.Fatalf("changed retry err=%v, want conflict", err)
+	}
+}
+
+func TestRecordSessionDecisionRejectsSecretsBeforeInsert(t *testing.T) {
+	s := decisionStore(t)
+	in := SessionDecisionInput{
+		Key: "secret-quote", Lane: "design-lane", By: "settling-session", Reading: "Keep the boundary.",
+		Quote: "The credential is AKIA1234567890ABCDEF", DecidedAt: time.Date(2026, 11, 13, 7, 0, 0, 0, time.UTC),
+		Grounds: []string{"hk:doc decision/2026-11-13/session-a"},
+	}
+	_, err := s.RecordSessionDecision(t.Context(), in, time.Date(2026, 11, 13, 8, 0, 0, 0, time.UTC), nil)
+	if pattern, ok := guard.SecretPattern(err); !ok || pattern != "aws_access_key" {
+		t.Fatalf("error=%v, secret pattern=%q ok=%t", err, pattern, ok)
+	}
+	if rows := decisionRowsOf(t, s, DecisionSourceSessionChat, "design-lane:secret-quote"); len(rows) != 0 {
+		t.Fatalf("secret-bearing decision was inserted: %+v", rows)
 	}
 }
 
