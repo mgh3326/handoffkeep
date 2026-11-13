@@ -421,6 +421,7 @@ func TestYTCommentQueuedBindingDisagreement(t *testing.T) {
 func TestYTCommentQueuedHoldLetsTheLaneDrain(t *testing.T) {
 	s, x, op := ytqHeld(t, "ytq_hold_drain")
 	ctx := t.Context()
+	s.SetYTFieldsMode(YTFieldsOn, ytcTenant)
 	n, err := ytwrite.FieldsOp(ytwrite.FieldsRequest{Principal: YTFieldsPrincipal, Actor: YTFieldsPrincipal, Tenant: ytcTenant,
 		IssueID: "2-900", ProjectID: ytbProjectID, Task: ytwrite.TaskFields{TaskID: x.ID, Title: x.Title, State: "todo"}})
 	if err != nil {
