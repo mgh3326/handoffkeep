@@ -681,7 +681,7 @@ func TestUIDeployRecentContract(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	svc := serviceView(t, getDeployPending(t, h, assertion), "handoffkeep")
-	want := []string{"current", "doc_url", "invalid", "invalid_count", "latest", "merged_boundary", "merged_since", "recent", "record_count", "repo", "service", "target"}
+	want := []string{"current", "doc_url", "invalid", "invalid_count", "latest", "merged_boundary", "merged_since", "recent", "record_count", "repo", "service", "state", "target"}
 	keys := make([]string, 0, len(svc))
 	for key := range svc {
 		keys = append(keys, key)
