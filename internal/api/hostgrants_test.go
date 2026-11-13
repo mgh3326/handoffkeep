@@ -61,12 +61,12 @@ func TestHostGrantFile(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			allowed, listed := grants.Allows("a", "host-a")
-			if tc.restrict && (allowed || !listed) {
-				t.Fatalf("Allows = %v, %v; a bad line must leave the client listed with no hosts", allowed, listed)
+			allowed := grants.Allows("a", "host-a")
+			if tc.restrict && allowed {
+				t.Fatal("Allows = true; a bad line must leave the client with no usable host")
 			}
-			if !tc.restrict && (!allowed || listed) {
-				t.Fatalf("Allows = %v, %v; a dropped line must leave the client with no line", allowed, listed)
+			if !tc.restrict && allowed {
+				t.Fatal("Allows = true; a dropped line must leave the client with no line")
 			}
 			if !strings.Contains(logs.String(), "api.host_grants_skipped") || !strings.Contains(logs.String(), "reason="+tc.logReason) {
 				t.Fatalf("skip not logged: %q", logs)
@@ -85,11 +85,11 @@ func TestHostGrantFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if allowed, listed := grants.Allows("a", "host-a"); !allowed || !listed {
-		t.Errorf("good line lost: %v, %v", allowed, listed)
+	if !grants.Allows("a", "host-a") {
+		t.Error("good line lost")
 	}
-	if allowed, listed := grants.Allows("a", "host-b"); allowed || !listed {
-		t.Errorf("bad line granted a host: %v, %v", allowed, listed)
+	if grants.Allows("a", "host-b") {
+		t.Error("bad line granted a host")
 	}
 	if !strings.Contains(logs.String(), "api.host_grants_skipped") {
 		t.Errorf("bad line not logged: %q", logs)
@@ -106,20 +106,20 @@ func TestHostGrantFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		client, host    string
-		allowed, listed bool
+		client, host string
+		allowed      bool
 	}{
-		{"a", "host-a", true, true},
-		{"a", "host-b", true, true}, // spaces around an entry are trimmed
-		{"a", "host-c", true, true}, // lines for one client add up
-		{"a", "host-d", false, true},
-		{"b", "host-d", true, true},
-		{"b", "host-a", false, true},
-		{"c", "host-a", true, false}, // a token without a line
-		{"nobody", "host-a", true, false},
+		{"a", "host-a", true},
+		{"a", "host-b", true}, // spaces around an entry are trimmed
+		{"a", "host-c", true}, // lines for one client add up
+		{"a", "host-d", false},
+		{"b", "host-d", true},
+		{"b", "host-a", false},
+		{"c", "host-a", false}, // a token without a line
+		{"nobody", "host-a", false},
 	} {
-		if allowed, listed := grants.Allows(tc.client, tc.host); allowed != tc.allowed || listed != tc.listed {
-			t.Errorf("Allows(%s, %s) = %v, %v; want %v, %v", tc.client, tc.host, allowed, listed, tc.allowed, tc.listed)
+		if allowed := grants.Allows(tc.client, tc.host); allowed != tc.allowed {
+			t.Errorf("Allows(%s, %s) = %v; want %v", tc.client, tc.host, allowed, tc.allowed)
 		}
 	}
 	if logs.Len() != 0 {
@@ -145,6 +145,8 @@ func TestQuotaPresenceHostGrantGuards(t *testing.T) {
 	}{
 		{"unlisted host", body("host-c"), "token-l", "quota_host_forbidden", http.StatusForbidden},
 		{"another clients host", body("host-d"), "token-l", "quota_host_forbidden", http.StatusForbidden},
+		// A client with no HANDOFFKEEP_HOSTS_ line publishes for no host.
+		{"no host line", body("host-a"), "token-o", "quota_host_forbidden", http.StatusForbidden},
 		{"case differs", body("Host-A"), "token-l", "quota_host_forbidden", http.StatusForbidden},
 		// Validation and the account grant still run first.
 		{"invalid host", body("host/a"), "token-l", "invalid_quota_presence", http.StatusBadRequest},
@@ -180,8 +182,8 @@ func TestQuotaPresenceAccountGrantBeforeHost(t *testing.T) {
 }
 
 // The accepted paths reach the store, so they run against Postgres in CI: a
-// listed host is stored, a client with no line is stored and warned about
-// (once per route), and an unlisted host leaves no row.
+// listed host is stored, while an unlisted host and a client with no line
+// both answer 403 and leave no row.
 func TestQuotaPresenceHostGrantsPostgres(t *testing.T) {
 	_, st := relaneAPIServer(t)
 	const key = "codex:0123456789abcdef"
@@ -195,8 +197,6 @@ func TestQuotaPresenceHostGrantsPostgres(t *testing.T) {
 		HostGrants: HostGrants{"hosts-listed": {"host-a": true}},
 	}.Handler())
 	t.Cleanup(srv.Close)
-	noHostLineWarned.Delete("hosts-nolines\x00quota_presence")
-	logs := captureLog(t)
 	put := func(token, host string) int {
 		t.Helper()
 		body := `{"host_id":"` + host + `","account_key":"` + key + `","last_seen":"` + time.Now().UTC().Add(-time.Minute).Format(time.RFC3339) + `"}`
@@ -218,17 +218,11 @@ func TestQuotaPresenceHostGrantsPostgres(t *testing.T) {
 	if code := put("token-l", "host-z"); code != http.StatusForbidden {
 		t.Fatalf("unlisted host: %d", code)
 	}
-	if strings.Contains(logs.String(), "api.host_grants_missing") {
-		t.Fatalf("a client with a line was warned about: %q", logs)
+	if code := put("token-n", "host-n1"); code != http.StatusForbidden {
+		t.Fatalf("no line: %d", code)
 	}
-	if code := put("token-n", "host-n1"); code != http.StatusOK {
-		t.Fatalf("no line, first: %d", code)
-	}
-	if code := put("token-n", "host-n2"); code != http.StatusOK {
-		t.Fatalf("no line, second: %d", code)
-	}
-	if n := strings.Count(logs.String(), "api.host_grants_missing client=hosts-nolines route=quota_presence host=host-n1"); n != 1 {
-		t.Fatalf("want one warning for the client, got %d: %q", n, logs)
+	if code := put("token-n", "host-a"); code != http.StatusForbidden {
+		t.Fatalf("no line, listed host of another client: %d", code)
 	}
 	rows, _, err := st.QuotaPresence(t.Context(), "", key, quotaPresenceLimit)
 	if err != nil {
@@ -238,7 +232,7 @@ func TestQuotaPresenceHostGrantsPostgres(t *testing.T) {
 	for _, row := range rows {
 		got[row.HostID] = true
 	}
-	if len(got) != 3 || !got["host-a"] || !got["host-n1"] || !got["host-n2"] || got["host-z"] {
+	if len(got) != 1 || !got["host-a"] || got["host-n1"] || got["host-z"] {
 		t.Fatalf("stored hosts = %v", got)
 	}
 }

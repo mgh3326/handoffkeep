@@ -252,6 +252,43 @@ func TestWorkStatusQueuesOnlyRequestsInFlight(t *testing.T) {
 	}
 }
 
+// The YouTrack-backed work status decides from YouTrack whether a task is
+// open, so the overlay lists a task's in-flight spawn request even when hk's
+// own copy of the task is merged or completed (YouTrack reopened it). The
+// hk-only page keeps the open-task test.
+func TestWorkStatusOverlayQueuesRequestsWhateverHKStateSays(t *testing.T) {
+	s := schemaStore(t, "task_spawn_overlay")
+	ctx := t.Context()
+	x := relaneTask(t, s, relaneLane(t, "spawn-overlay"), "spawn overlay")
+	at := time.Date(2026, 11, 13, 1, 0, 0, 0, time.UTC)
+	if _, _, err := s.PutTaskSpawn(ctx, x.ID, spawnTestInput(SpawnPending, at), "svc-panewire"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET state=$2 WHERE id=$1`, x.ID, StateMerged); err != nil {
+		t.Fatal(err)
+	}
+	overlay, err := s.ReadWorkStatusOverlay(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, q := range overlay.Inputs.Queued {
+		found = found || q.ID == x.ID
+	}
+	if !found {
+		t.Fatalf("overlay dropped a request in flight because hk says merged: %+v", overlay.Inputs.Queued)
+	}
+	ws, err := s.ReadWorkStatus(ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range ws.Queued {
+		if q.ID == x.ID {
+			t.Fatalf("hk-only page queues a task hk holds merged: %+v", q)
+		}
+	}
+}
+
 // checkTaskSpawnInput is pure: no database needed. It refuses values the
 // table or the ordering cannot hold: an attempt past int32, an updated_at far
 // ahead of the clock (it would win every later comparison), and secret-like

@@ -24,19 +24,30 @@ import (
 type ytServer struct {
 	mu     sync.Mutex
 	issues []youtrack.Issue
-	fail   bool
+	// changes are the state changes /api/activities serves, in the wire shape.
+	changes []map[string]any
+	fail    bool
 }
 
 func (f *ytServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if r.Method != http.MethodGet || r.URL.Path != "/api/issues" {
+	if r.Method != http.MethodGet || (r.URL.Path != "/api/issues" && r.URL.Path != "/api/activities") {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 	if f.fail {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte(`{"error":"unavailable"}`))
+		return
+	}
+	if r.URL.Path == "/api/activities" {
+		skip, _ := strconv.Atoi(r.URL.Query().Get("$skip"))
+		page := []map[string]any{}
+		if skip < len(f.changes) {
+			page = f.changes[skip:]
+		}
+		_ = json.NewEncoder(w).Encode(page)
 		return
 	}
 	skip, _ := strconv.Atoi(r.URL.Query().Get("$skip"))
@@ -51,6 +62,22 @@ func (f *ytServer) set(issues ...youtrack.Issue) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.issues = issues
+}
+
+// setChanges serves state changes to developing and so on, as the activity log
+// records them: field name, new value, target issue and a millisecond time.
+func (f *ytServer) setChanges(changes ...youtrack.StateChange) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.changes = nil
+	for _, c := range changes {
+		f.changes = append(f.changes, map[string]any{
+			"timestamp": c.At.UnixMilli(),
+			"field":     map[string]any{"name": "hk 상태"},
+			"added":     []map[string]any{{"name": youtrack.StateLabel(c.State)}},
+			"target":    map[string]any{"id": c.IssueID},
+		})
+	}
 }
 
 func (f *ytServer) setFail(fail bool) {
@@ -174,6 +201,8 @@ func TestYouTrackWorkStatusReadsIssues(t *testing.T) {
 	f := newYTRouteFixture(t)
 	task := f.task(t, "hk title")
 	f.fake.set(ytIssue("2-1", task.ID, "yt title", "developing", "handoffkeep", 0))
+	enteredAt := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Second)
+	f.fake.setChanges(youtrack.StateChange{IssueID: "2-1", At: enteredAt, State: "developing"})
 	rec := httptest.NewRecorder()
 	f.h.workStatus(rec, httptest.NewRequest(http.MethodGet, "/ui/api/work-status", nil), operator)
 	if rec.Code != http.StatusOK {
@@ -186,6 +215,10 @@ func TestYouTrackWorkStatusReadsIssues(t *testing.T) {
 	// hk still holds the task in backlog; YouTrack's state is the one shown.
 	if status.Summary.InWork != 1 || status.Summary.Backlog != 0 || len(status.InWork) != 1 || status.InWork[0].Title != "yt title" {
 		t.Fatalf("work status=%+v", status)
+	}
+	// The age is YouTrack's activity time, not hk's: hk has no event for it.
+	if since := status.InWork[0].Since; since == nil || !since.Equal(enteredAt) {
+		t.Fatalf("in work since=%v want %v", since, enteredAt)
 	}
 	f.fake.setFail(true)
 	rec = httptest.NewRecorder()

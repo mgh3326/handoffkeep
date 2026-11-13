@@ -243,6 +243,7 @@ func TestQuotaPresenceAPIPostgres(t *testing.T) {
 		Service:       Service{Store: st},
 		Tokens:        Tokens{"writer": "token-w", "reader": "token-r"},
 		QuotaAccounts: QuotaAccounts{"writer": {"codex:0123456789abcdef": true}},
+		HostGrants:    HostGrants{"writer": {"host-0123456789abcdef": true}},
 	}.Handler())
 	t.Cleanup(srv.Close)
 	call := func(method, path, token, body string) (int, []byte) {
