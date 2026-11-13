@@ -53,9 +53,10 @@ func (s *Store) CountMergedChangesSince(ctx context.Context, repo string, since 
 }
 
 // deployLagStatusTx is the one lag measure the console and the notifier share.
-// The boundary is the service's last successful deploy (the same value
-// readProjectLastSuccessfulDeploysTx returns). A service with no successful
-// deploy has no boundary: its lag is unknown, so it reports HasDeployed=false,
+// The boundary is the service's last successful deploy with an explicit
+// deployed_at value (the same value readProjectLastMeasuredDeploysTx returns).
+// A service with no successful deploy has no boundary: its lag is unknown,
+// so it reports HasDeployed=false,
 // LagCount=0 and Lagging=false. Counting from time zero would report the whole
 // merge history as lag.
 func deployLagStatusTx(ctx context.Context, q rowQuerier, svc DeployService, since time.Time, hasSince bool) (DeployLagServiceStatus, error) {
@@ -83,7 +84,7 @@ func (s *Store) DeployLagStatus(ctx context.Context, svc DeployService) (DeployL
 		return DeployLagServiceStatus{}, err
 	}
 	defer tx.Rollback(ctx)
-	lastDeploys, err := readProjectLastSuccessfulDeploysTx(ctx, tx)
+	lastDeploys, err := readProjectLastMeasuredDeploysTx(ctx, tx)
 	if err != nil {
 		return DeployLagServiceStatus{}, err
 	}
@@ -113,7 +114,7 @@ func (s *Store) EnqueueDeployLagNotices(ctx context.Context, now time.Time) (int
 		return 0, err
 	}
 
-	lastDeploys, err := readProjectLastSuccessfulDeploysTx(ctx, tx)
+	lastDeploys, err := readProjectLastMeasuredDeploysTx(ctx, tx)
 	if err != nil {
 		return 0, err
 	}

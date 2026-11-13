@@ -176,3 +176,45 @@ func TestDeployLagEnqueueAndNoticeDB(t *testing.T) {
 		t.Fatalf("expected 2 total notices in outbox, got %d", nextDayCount)
 	}
 }
+
+func TestDeployLagNeedsMeasuredDeployTimeAndClassifiesAlias(t *testing.T) {
+	s := schemaStore(t, "deploy_lag_boundary")
+	ctx := t.Context()
+	deployAt := time.Date(2026, 11, 13, 8, 0, 0, 0, time.UTC)
+
+	for _, svc := range []DeployService{
+		{Name: "alias-hub", Repo: "mgh3326/legacy-hub", RecordPrefixes: []string{"deploy/legacy-hub/"}, Active: true},
+		{Name: "unmeasured", Repo: "mgh3326/unmeasured", RecordPrefixes: []string{"deploy/unmeasured/"}, Active: true},
+	} {
+		if _, err := s.PutDeployService(ctx, svc); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, doc := range []struct {
+		key, body string
+	}{
+		{"deploy/legacy-hub/20261113T080000Z", `{"schema":"deploy-record/v0","service":"legacy-hub","result":"success","deployed_at":"2026-11-13T08:00:00Z"}`},
+		{"deploy/unmeasured/20261113T080000Z", `{"schema":"deploy-record/v0","service":"unmeasured","result":"success"}`},
+	} {
+		if _, _, err := s.PutDocument(ctx, Document{Key: doc.key, Kind: "report", Session: "test", Body: doc.body, CreatedBy: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	alias, err := s.DeployLagStatus(ctx, DeployService{Name: "alias-hub", Repo: "mgh3326/legacy-hub"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !alias.HasDeployed || alias.DeployedAt == nil || !alias.DeployedAt.Equal(deployAt) {
+		t.Fatalf("alias deploy status=%+v, want measured legacy-prefix deploy at %s", alias, deployAt)
+	}
+
+	unmeasured, err := s.DeployLagStatus(ctx, DeployService{Name: "unmeasured", Repo: "mgh3326/unmeasured"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unmeasured.HasDeployed || unmeasured.DeployedAt != nil || unmeasured.LagCount != 0 || unmeasured.Lagging {
+		t.Fatalf("unmeasured deploy status=%+v, want unknown lag and no boundary", unmeasured)
+	}
+}
