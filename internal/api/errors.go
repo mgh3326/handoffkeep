@@ -101,6 +101,7 @@ var errorRules = []errorRule{
 	{store.ErrDecisionRequestOpen, http.StatusConflict, "decision_request_open", false},
 	{store.ErrDecisionRequestStale, http.StatusConflict, "decision_request_stale", false},
 	{store.ErrDecisionRequestResolved, http.StatusConflict, "decision_request_resolved", false},
+	{store.ErrNoOpenDecisionRequest, http.StatusConflict, "no_open_decision_request", false},
 	{store.ErrDecisionEventKeyConflict, http.StatusConflict, "decision_event_key_conflict", false},
 	{store.ErrDecisionAttemptNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrDecisionAttemptNotPending, http.StatusConflict, "decision_attempt_not_pending", false},

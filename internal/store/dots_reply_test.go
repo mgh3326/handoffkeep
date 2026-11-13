@@ -406,3 +406,77 @@ func TestDotsOperatorAnswerLetsResultComplete(t *testing.T) {
 		t.Fatalf("state=%s, want %s", done.State, StateCompleted)
 	}
 }
+
+func TestAnswerDotsQuestion(t *testing.T) {
+	s := schemaStore(t, "dots_answer_q")
+	ctx := t.Context()
+
+	// 1. Task with no open decision request -> ErrNoOpenDecisionRequest
+	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "answer"}); !errors.Is(err, ErrNoOpenDecisionRequest) {
+		t.Fatalf("expected ErrNoOpenDecisionRequest, got %v", err)
+	}
+
+	// 2. Open dots QUESTION
+	started, _ := startDotsRun(t, s, task.ID, "start")
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{
+		TaskID:         task.ID,
+		Kind:           "QUESTION",
+		Body:           "Which option?",
+		AskOperator:    true,
+		IdempotencyKey: "question",
+		RunToken:       started.RunToken,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	asked, _, _ := s.GetTask(ctx, task.ID)
+	if !asked.AwaitingDecision || asked.Refs.DecisionRequest == nil {
+		t.Fatalf("question did not flag task: %+v", asked)
+	}
+
+	// 3. Plain comment does NOT resolve it
+	comment, err := s.CreateTaskComment(ctx, task.ID, "caller", "just a comment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if comment.ID == 0 {
+		t.Fatal("comment ID is 0")
+	}
+	afterComment, _, _ := s.GetTask(ctx, task.ID)
+	if !afterComment.AwaitingDecision || afterComment.Refs.DecisionRequest.Status != DecisionRequestOpen {
+		t.Fatalf("comment should not resolve decision: awaiting=%v status=%s", afterComment.AwaitingDecision, afterComment.Refs.DecisionRequest.Status)
+	}
+
+	// 4. AnswerDotsQuestion resolves request, clears awaiting_decision, records comment
+	answerRes, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "proceed with option B"})
+	if err != nil {
+		t.Fatalf("AnswerDotsQuestion failed: %v", err)
+	}
+	if answerRes.Task.AwaitingDecision {
+		t.Fatalf("awaiting_decision should be false, got true")
+	}
+	if answerRes.Request.Status != DecisionRequestAnswered {
+		t.Fatalf("request status should be answered, got %s", answerRes.Request.Status)
+	}
+	if answerRes.Request.Resolution == nil || answerRes.Request.Resolution.Text != "proceed with option B" || answerRes.Request.Resolution.Responder != "caller" {
+		t.Fatalf("unexpected resolution: %+v", answerRes.Request.Resolution)
+	}
+	if answerRes.Comment.Body != "proceed with option B" || answerRes.Comment.Author != "caller" {
+		t.Fatalf("unexpected comment: %+v", answerRes.Comment)
+	}
+
+	answeredTask, _, _ := s.GetTask(ctx, task.ID)
+	if answeredTask.AwaitingDecision {
+		t.Fatalf("answered task awaiting_decision should be false, got true")
+	}
+
+	// 5. A second answer is refused with a clear code (ErrDecisionRequestResolved)
+	if _, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "another answer"}); !errors.Is(err, ErrDecisionRequestResolved) {
+		t.Fatalf("second answer expected ErrDecisionRequestResolved, got %v", err)
+	}
+}
+

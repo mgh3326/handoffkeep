@@ -57,3 +57,14 @@ func (c Client) SetDotsAdoption(ctx context.Context, id int64, in store.DotsAdop
 	}
 	return out, nil
 }
+
+// AnswerDots resolves a task's open dots decision request and records the comment.
+func (c Client) AnswerDots(ctx context.Context, taskID int64, text string) (store.DotsAnswerResult, error) {
+	var out store.DotsAnswerResult
+	payload := map[string]any{"task": taskID, "text": text}
+	err := c.call(ctx, "POST", "/v1/dots/answer", payload, &out)
+	if err != nil {
+		return out, unsupportedRoute(err, "dots_answer_unsupported", "the dots answer route")
+	}
+	return out, nil
+}
