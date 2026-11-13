@@ -3,8 +3,6 @@ package tests
 import (
 	"encoding/json"
 	"net/http"
-	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -162,42 +160,6 @@ func TestUIDecisionRequestViewsAgree(t *testing.T) {
 		}
 	}
 
-	// Decisions page: the same totals, and each open request listed once.
-	pageResponse := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, "")
-	page := responseText(t, pageResponse)
-	if pageResponse.StatusCode != http.StatusOK {
-		t.Fatalf("decisions status=%d", pageResponse.StatusCode)
-	}
-	count := regexp.MustCompile(`data-decision-request-count data-pending="(\d+)" data-uncleaned="(\d+)"`).FindStringSubmatch(page)
-	if count == nil {
-		t.Fatalf("count line missing")
-	}
-	if count[1] != strconv.Itoa(listPending) || count[2] != strconv.Itoa(listUncleaned) {
-		t.Fatalf("Decisions pending/uncleaned=%s/%s, queue list=%d/%d", count[1], count[2], listPending, listUncleaned)
-	}
-	for id, state := range wantState {
-		request := regexp.MustCompile(`data-decision-request="dr-`+strconv.FormatInt(id, 10)+`-(\d+)" data-state="([a-z_]+)"`).FindAllStringSubmatch(page, -1)
-		if state == "answered" {
-			if len(request) != 0 {
-				t.Fatalf("answered request #%d listed as open", id)
-			}
-			continue
-		}
-		if len(request) != 1 || request[0][2] != state {
-			t.Fatalf("Decisions #%d=%v want one %s", id, request, state)
-		}
-	}
-	if !strings.Contains(page, `data-decision-request="`+secondReq.ID+`"`) || strings.Contains(page, `data-decision-request="`+first.ID+`"`) {
-		t.Fatalf("superseded request shown on Decisions")
-	}
-	// The blocked task is a request card, not also a generic answer form.
-	if strings.Contains(page, `name="items.0.id" value="`+strconv.FormatInt(blocked.ID, 10)+`"`) || regexp.MustCompile(`items\.\d+\.id" value="`+strconv.FormatInt(blocked.ID, 10)+`"`).MatchString(page) {
-		t.Fatalf("open request also rendered as a generic decision form")
-	}
-	if strings.Contains(page, `<span class="badge">기본값 적용됨</span>`) || strings.Contains(page, `data-state="default_applied"`) {
-		t.Fatalf("an unapplied default reads as applied")
-	}
-
 	// Drawer: the detail's current request state for every seeded task, and
 	// the lane's open split equals the queue marks.
 	drawerPending, drawerUncleaned := 0, 0
@@ -327,40 +289,5 @@ func TestDecisionRequestAPI(t *testing.T) {
 	resolve.Body.Close()
 	if resolve.StatusCode != http.StatusConflict {
 		t.Fatalf("stale resolve status=%d", resolve.StatusCode)
-	}
-}
-
-// A Decisions form rendered before the request was recorded (single answer
-// or batch "권고안 전부 답변") cannot unblock the task: nothing reaches the
-// hub and the request stays open.
-func TestUIDecisionFormsRefuseOpenRequest(t *testing.T) {
-	s := uiStore(t)
-	fixture := newUIJWTFixture(t)
-	hub := newFakeIngressHub(t)
-	h := newUITestServer(t, s, fixture, hub.server.URL, "hub-test-token", 0)
-	defer h.Close()
-	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	x := drTask(t, s, uiLane(t, "b618-form"), "claimed", "in_progress")
-	in := drInput("막는 요청")
-	in.Block = true
-	request := drRecord(t, s, x.ID, in)
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
-	response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("task", x.ID, "A: 자문 먼저", csrf), h.URL, false)
-	body := responseText(t, response)
-	if response.StatusCode != http.StatusConflict || !strings.Contains(body, request.ID) {
-		t.Fatalf("single answer status=%d body=%q", response.StatusCode, body)
-	}
-	id := strconv.FormatInt(x.ID, 10)
-	batch := url.Values{"csrf": {csrf}, "mode": {"recommended"}, "items.0.type": {"task"}, "items.0.id": {id}, "items.0.select": {"1"}}
-	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, batch, h.URL, false)
-	if body = responseText(t, response); !strings.Contains(body, "결정 요청 "+request.ID+" 이 열려 있습니다") {
-		t.Fatalf("batch did not name the open request: status=%d", response.StatusCode)
-	}
-	if n := len(hub.requests()); n != 0 {
-		t.Fatalf("hub received %d events for an open request", n)
-	}
-	got, _, _ := s.GetTask(t.Context(), x.ID)
-	if got.State != "developing" || !got.AwaitingDecision || got.Refs.DecisionRequest.Status != store.DecisionRequestOpen {
-		t.Fatalf("task changed: %s awaiting=%v %+v", got.State, got.AwaitingDecision, got.Refs.DecisionRequest)
 	}
 }

@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"net/http"
 	"strings"
 	"time"
 
@@ -131,35 +130,4 @@ func taskDecisionViews(task store.Task, now time.Time) ([]decisionRequestView, *
 		legacy.AllowFree = task.Refs.DecisionOptions.AllowFree
 	}
 	return views, legacy
-}
-
-type decisionRequestCard struct {
-	Task store.Task
-	View decisionRequestView
-}
-
-// decisionRequestSection is the Decisions page block. Pending and Uncleaned
-// come from store.DecisionRequestCounts — the same split the queue shows.
-type decisionRequestSection struct {
-	Pending   int
-	Uncleaned int
-	Truncated bool
-	Items     []decisionRequestCard
-}
-
-const decisionRequestListLimit = 1000
-
-func (h *Handler) decisionRequestData(r *http.Request) (decisionRequestSection, error) {
-	tasks, err := h.store.ListOpenDecisionRequests(r.Context(), decisionRequestListLimit)
-	if err != nil {
-		return decisionRequestSection{}, err
-	}
-	now := time.Now().UTC()
-	section := decisionRequestSection{Truncated: len(tasks) == decisionRequestListLimit}
-	section.Pending, section.Uncleaned = store.DecisionRequestCounts(tasks)
-	for _, task := range tasks {
-		entry := store.DecisionRequestEntry{Request: *task.Refs.DecisionRequest, Options: task.Refs.DecisionOptions, Current: true}
-		section.Items = append(section.Items, decisionRequestCard{Task: task, View: projectDecisionRequest(entry, task.State, now)})
-	}
-	return section, nil
 }

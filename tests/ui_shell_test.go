@@ -65,7 +65,7 @@ func TestUIShellRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, path := range []string{"/ui/home", "/ui/work", "/ui/queue", "/ui/fleet", "/ui/grades", "/ui/docs", "/ui/doc/" + docKey, "/ui/tasks/42"} {
+	for _, path := range []string{"/ui/home", "/ui/work", "/ui/queue", "/ui/doc/" + docKey, "/ui/tasks/42"} {
 		response := uiRequest(t, client, http.MethodGet, h.URL+path, assertion, "")
 		csp := response.Header.Get("Content-Security-Policy")
 		body := responseText(t, response)

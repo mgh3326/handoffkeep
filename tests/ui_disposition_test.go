@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"html"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -39,13 +37,45 @@ func uiGetWithCookie(t *testing.T, client *http.Client, endpoint, assertion stri
 	return body
 }
 
-func hiddenValue(t *testing.T, body, name string) string {
+// uiDispositionPage is the JSON view of GET /ui/api/dispositions: the open
+// items, the signed batch snapshot, and the unnotified answers.
+type uiDispositionPage struct {
+	Head  string `json:"head"`
+	Items []struct {
+		Task        store.Task `json:"task"`
+		Gen         int64      `json:"gen"`
+		Recommended string     `json:"recommended"`
+	} `json:"items"`
+	BatchN     int    `json:"batch_n"`
+	Counts     string `json:"counts"`
+	NextBatch  int    `json:"next_batch"`
+	BatchID    string `json:"batch_id"`
+	IssuedAt   string `json:"issued_at"`
+	Snapshot   string `json:"snapshot"`
+	Token      string `json:"token"`
+	CSRF       string `json:"csrf"`
+	Unnotified []struct {
+		EventID string `json:"event_id"`
+		IDs     string `json:"ids"`
+	} `json:"unnotified"`
+}
+
+func uiDispositions(t *testing.T, client *http.Client, base, assertion string, cookie *http.Cookie) uiDispositionPage {
 	t.Helper()
-	match := regexp.MustCompile(`name="` + regexp.QuoteMeta(name) + `" value="([^"]*)"`).FindStringSubmatch(body)
-	if match == nil {
-		t.Fatalf("hidden field %q not rendered", name)
+	var page uiDispositionPage
+	if err := json.Unmarshal([]byte(uiGetWithCookie(t, client, base+"/ui/api/dispositions", assertion, cookie)), &page); err != nil {
+		t.Fatalf("decode /ui/api/dispositions: %v", err)
 	}
-	return html.UnescapeString(match[1])
+	return page
+}
+
+func uiUnnotified(page uiDispositionPage, eventID string) bool {
+	for _, notice := range page.Unnotified {
+		if notice.EventID == eventID {
+			return true
+		}
+	}
+	return false
 }
 
 func persistToStore(t *testing.T, s *store.Store) func(ingressRequest) {
@@ -76,17 +106,14 @@ func TestUIDispositionSingleAnswerRecordsThenNotifies(t *testing.T) {
 	x := mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 2, "C"))
 	gen := openGen(t, s, x.ID)
 
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
-	body := uiGetWithCookie(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion, cookie)
-	if !strings.Contains(body, `data-disposition-head>미처분 1 · 최고령 0일<`) || !strings.Contains(body, fmt.Sprintf(`data-disposition-id="%d"`, x.ID)) || !strings.Contains(body, `value="C" checked`) {
-		t.Fatalf("disposition section not rendered: %q", body)
-	}
-	if strings.Contains(body, fmt.Sprintf(`name="items.0.id" value="%d"`, x.ID)) {
-		t.Fatal("disposition item leaked into the generic decision form")
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/queue", assertion)
+	page := uiDispositions(t, h.Client(), h.URL, assertion, cookie)
+	if !strings.Contains(page.Head, "미처분 1 · 최고령 0일") || len(page.Items) != 1 || page.Items[0].Task.ID != x.ID || page.Items[0].Recommended != "C" {
+		t.Fatalf("disposition section not served: %+v", page)
 	}
 	fields := url.Values{"csrf": {csrf}, "id": {strconv.FormatInt(x.ID, 10)}, "gen": {strconv.FormatInt(gen, 10)}, "key": {"B"}}
 	response := uiPostForm(t, h.Client(), h.URL+"/ui/dispositions/answer", assertion, cookie, fields, h.URL, true)
-	body = responseText(t, response)
+	body := responseText(t, response)
 	eventID := fmt.Sprintf("web-disposition-%d-g%d", x.ID, gen)
 	if response.StatusCode != http.StatusOK || !strings.Contains(body, "처분 기록·전송됨(event_id="+eventID+")") {
 		t.Fatalf("answer status=%d body=%q", response.StatusCode, body)
@@ -123,13 +150,16 @@ func TestUIDispositionEmitFailureStaysRecordedAndRenotifies(t *testing.T) {
 	lane := uiLane(t, "director")
 	x := mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "A"))
 	gen := openGen(t, s, x.ID)
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/queue", assertion)
 	fields := url.Values{"csrf": {csrf}, "id": {strconv.FormatInt(x.ID, 10)}, "gen": {strconv.FormatInt(gen, 10)}, "key": {"A"}}
 	response := uiPostForm(t, h.Client(), h.URL+"/ui/dispositions/answer", assertion, cookie, fields, h.URL, true)
 	body := responseText(t, response)
 	eventID := fmt.Sprintf("web-disposition-%d-g%d", x.ID, gen)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, "처분 기록됨 · 레인 통지 실패") || !strings.Contains(body, `data-disposition-unnotified="`+eventID+`"`) {
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "처분 기록됨 · 레인 통지 실패") || !strings.Contains(body, "event_id="+eventID) {
 		t.Fatalf("emit failure status=%d body=%q", response.StatusCode, body)
+	}
+	if !uiUnnotified(uiDispositions(t, h.Client(), h.URL, assertion, cookie), eventID) {
+		t.Fatal("failed emit is not listed as awaiting notification")
 	}
 	if got, _, _ := s.GetTask(t.Context(), x.ID); got.State != "researching" || got.Refs.Disposition.Answer.EventID != eventID {
 		t.Fatalf("failed emit must keep the recorded answer: %+v", got)
@@ -142,7 +172,7 @@ func TestUIDispositionEmitFailureStaysRecordedAndRenotifies(t *testing.T) {
 	if response.StatusCode != http.StatusOK || !strings.Contains(body, "재통지됨") || len(requests) != 2 || requests[1].EventID != eventID || requests[1].Text != first.Text {
 		t.Fatalf("renotify status=%d requests=%+v body=%q", response.StatusCode, requests, body)
 	}
-	if strings.Contains(body, `data-disposition-unnotified="`+eventID+`"`) {
+	if uiUnnotified(uiDispositions(t, h.Client(), h.URL, assertion, cookie), eventID) {
 		t.Fatal("notified item still listed as pending")
 	}
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/dispositions/renotify", assertion, cookie, url.Values{"csrf": {csrf}, "event_id": {eventID}}, h.URL, true)
@@ -168,12 +198,12 @@ func TestUIDispositionBatchIsOneActionOverTheSnapshot(t *testing.T) {
 		mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 1, "C")),
 		mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "E")),
 	}
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
-	body := uiGetWithCookie(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion, cookie)
-	if !strings.Contains(body, "권고 일괄 수락 3건 (A 1 · C 1 · E 1)") || strings.Contains(body, "data-next-batch") {
-		t.Fatalf("batch button: %q", body)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/queue", assertion)
+	page := uiDispositions(t, h.Client(), h.URL, assertion, cookie)
+	if page.BatchN != 3 || page.Counts != "A 1 · C 1 · E 1" || page.NextBatch != 0 {
+		t.Fatalf("batch section: %+v", page)
 	}
-	fields := url.Values{"csrf": {csrf}, "batch_id": {hiddenValue(t, body, "batch_id")}, "issued_at": {hiddenValue(t, body, "issued_at")}, "snapshot": {hiddenValue(t, body, "snapshot")}, "token": {hiddenValue(t, body, "token")}}
+	fields := url.Values{"csrf": {csrf}, "batch_id": {page.BatchID}, "issued_at": {page.IssuedAt}, "snapshot": {page.Snapshot}, "token": {page.Token}}
 	late := mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "A"))
 
 	// Tampering with the snapshot (dropping an item) is refused with no write.
@@ -190,7 +220,7 @@ func TestUIDispositionBatchIsOneActionOverTheSnapshot(t *testing.T) {
 	}
 
 	response = uiPostForm(t, h.Client(), h.URL+"/ui/dispositions/accept-batch", assertion, cookie, fields, h.URL, true)
-	body = responseText(t, response)
+	body := responseText(t, response)
 	if response.StatusCode != http.StatusOK || !strings.Contains(body, "권고 일괄 수락 3건 기록") {
 		t.Fatalf("batch status=%d body=%q", response.StatusCode, body)
 	}
@@ -229,15 +259,12 @@ func TestUIDispositionNextBatchIsShown(t *testing.T) {
 	for i := 0; i < store.DispositionBatchLimit+2; i++ {
 		mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "E"))
 	}
-	cookie, _ := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
-	body := uiGetWithCookie(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion, cookie)
-	if !strings.Contains(body, "data-disposition-head>미처분 52 · 최고령 0일 · 다음 묶음 2건<") {
-		t.Fatalf("header does not name the next batch: %q", body)
+	cookie, _ := uiCSRF(t, h.Client(), h.URL+"/ui/queue", assertion)
+	page := uiDispositions(t, h.Client(), h.URL, assertion, cookie)
+	if !strings.Contains(page.Head, "미처분 52 · 최고령 0일 · 다음 묶음 2건") || page.BatchN != store.DispositionBatchLimit || page.Counts != "E 50" || page.NextBatch != 2 {
+		t.Fatalf("next batch not named: %+v", page)
 	}
-	if !strings.Contains(body, "권고 일괄 수락 50건 (E 50)</button> <span class=\"badge\" data-next-batch>다음 묶음 2건</span>") {
-		t.Fatalf("button does not name the next batch: %q", body)
-	}
-	if n := len(strings.Split(hiddenValue(t, body, "snapshot"), ",")); n != store.DispositionBatchLimit {
+	if n := len(strings.Split(page.Snapshot, ",")); n != store.DispositionBatchLimit {
 		t.Fatalf("snapshot size=%d", n)
 	}
 }
@@ -248,7 +275,6 @@ func TestUIDispositionRefusesNonOperatorPaths(t *testing.T) {
 	drainOpenDispositions(t, s)
 	t.Cleanup(func() { drainOpenDispositions(t, s) })
 	lane := uiLane(t, "director")
-	t.Setenv("HANDOFFKEEP_UI_LANES", lane)
 	fixture := newUIJWTFixture(t)
 	hub := newFakeIngressHub(t)
 	setHub(hub, "created", persistToStore(t, s))
@@ -257,7 +283,7 @@ func TestUIDispositionRefusesNonOperatorPaths(t *testing.T) {
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	x := mustCreateDisposition(t, s, dispositionInput(lane, dispositionPR(t), 0, "A"))
 	gen := openGen(t, s, x.ID)
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/decisions/legacy", assertion)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/queue", assertion)
 	answer := url.Values{"csrf": {csrf}, "id": {strconv.FormatInt(x.ID, 10)}, "gen": {strconv.FormatInt(gen, 10)}, "key": {"A"}}
 	before := uiRowCountsAt(t, dbURL)
 	unchanged := func(label string) {
@@ -293,24 +319,19 @@ func TestUIDispositionRefusesNonOperatorPaths(t *testing.T) {
 	}
 	unchanged("no JWT")
 
-	// Generic decision routes refuse before emitting.
-	response := uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer", assertion, cookie, decisionFields("task", x.ID, "A: 배포", csrf), h.URL, false)
-	responseText(t, response)
-	if response.StatusCode != http.StatusConflict {
-		t.Fatalf("generic answer status=%d", response.StatusCode)
-	}
-	batch := url.Values{"csrf": {csrf}, "mode": {"recommended"}, "items.0.type": {"task"}, "items.0.id": {strconv.FormatInt(x.ID, 10)}}
-	response = uiPostForm(t, h.Client(), h.URL+"/ui/decisions/answer-batch", assertion, cookie, batch, h.URL, false)
-	responseText(t, response)
-	compose := url.Values{"csrf": {csrf}, "lane": {lane}, "text": {fmt.Sprintf("[decision] #%d: A: 배포", x.ID)}}
-	response = uiPostForm(t, h.Client(), h.URL+"/ui/compose", assertion, cookie, compose, h.URL, false)
-	responseText(t, response)
-	for _, request := range hub.requests() {
-		if !strings.HasPrefix(request.Text, "[event]") {
-			t.Fatalf("a generic route emitted a decision for a disposition item: %+v", request)
+	// The retired generic decision and compose POST routes are gone: they
+	// answer 405 and emit nothing.
+	for _, path := range []string{"/ui/decisions/answer", "/ui/decisions/answer-batch", "/ui/compose"} {
+		response := uiPostForm(t, h.Client(), h.URL+path, assertion, cookie, answer, h.URL, false)
+		responseText(t, response)
+		if response.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("retired route %s status=%d", path, response.StatusCode)
 		}
 	}
-	unchanged("generic routes")
+	if len(hub.requests()) != 0 {
+		t.Fatalf("a retired route emitted: %+v", hub.requests())
+	}
+	unchanged("retired routes")
 
 	// Bearer-token API: the transition and resolve routes refuse.
 	for path, payload := range map[string]any{
@@ -332,7 +353,7 @@ func TestUIDispositionRefusesNonOperatorPaths(t *testing.T) {
 	unchanged("bearer API")
 
 	// The operator's own route still works afterwards.
-	response = uiPostForm(t, h.Client(), h.URL+"/ui/dispositions/answer", assertion, cookie, answer, h.URL, true)
+	response := uiPostForm(t, h.Client(), h.URL+"/ui/dispositions/answer", assertion, cookie, answer, h.URL, true)
 	responseText(t, response)
 	if got, _, _ := s.GetTask(t.Context(), x.ID); response.StatusCode != http.StatusOK || got.State != "researching" {
 		t.Fatalf("operator answer status=%d state=%s", response.StatusCode, got.State)
