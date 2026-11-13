@@ -277,9 +277,6 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 		return Task{}, false, err
 	}
 	question := DispositionQuestion(refs, in.Note)
-	if len([]byte(question+"\n"+FormatDecisionOptions(options))) > RelayLaneEventMaxBytes {
-		return Task{}, false, errors.New("disposition question and options exceed 2048 bytes")
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Task{}, false, err
