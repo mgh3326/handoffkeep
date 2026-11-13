@@ -893,6 +893,19 @@ func (c Client) SetTaskArea(ctx context.Context, id int64, area *string, note st
 	return out, nil
 }
 
+// SetTaskPriority changes a task's priority and returns the updated row (hk 3219).
+func (c Client) SetTaskPriority(ctx context.Context, id int64, priority int, note string) (store.Task, error) {
+	var out store.Task
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/priority", id), map[string]any{"priority": priority, "note": note}, &out)
+	if err != nil {
+		return out, unsupportedRoute(err, "task_priority_unsupported", "the task priority route")
+	}
+	if out.Priority != priority {
+		return out, fmt.Errorf("priority_not_applied: server response has priority %d, want %d", out.Priority, priority)
+	}
+	return out, nil
+}
+
 // ListTaskAreas answers the server's closed area vocabulary in order. A
 // server that predates the endpoint 404s it.
 func (c Client) ListTaskAreas(ctx context.Context) ([]string, error) {
