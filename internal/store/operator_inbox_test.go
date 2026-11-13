@@ -165,29 +165,29 @@ func TestApplyInboxValidates(t *testing.T) {
 	}
 }
 
-func TestApplyInboxBatchCapAndUndo(t *testing.T) {
+func TestApplyInboxBatchProcessesEveryItemAndUndo(t *testing.T) {
 	s := schemaStore(t, "inbox_batch")
 	ctx := t.Context()
-	keys := make([]string, 0, InboxBatchLimit+2)
-	for i := 0; i < InboxBatchLimit+2; i++ {
+	keys := make([]string, 0, 52)
+	for i := 0; i < 52; i++ {
 		keys = append(keys, inboxKeyTask(int64(i+1)))
 	}
 	result, err := s.ApplyInbox(ctx, keys, InboxActionDone, nil, "operator:test", "bulk")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Items) != InboxBatchLimit || result.Skipped != 2 {
-		t.Fatalf("applied %d skipped %d, want %d and 2", len(result.Items), result.Skipped, InboxBatchLimit)
+	if len(result.Items) != len(keys) || result.Skipped != 0 {
+		t.Fatalf("applied %d skipped %d, want all %d and none skipped", len(result.Items), result.Skipped, len(keys))
 	}
 	states, err := s.InboxStates(ctx, keys)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(states) != InboxBatchLimit {
-		t.Fatalf("stored %d states, want %d", len(states), InboxBatchLimit)
+	if len(states) != len(keys) {
+		t.Fatalf("stored %d states, want %d", len(states), len(keys))
 	}
 	restored, err := s.UndoInbox(ctx, "bulk", "operator:test")
-	if err != nil || len(restored) != InboxBatchLimit {
+	if err != nil || len(restored) != len(keys) {
 		t.Fatalf("undo: %d items %v", len(restored), err)
 	}
 	states, _ = s.InboxStates(ctx, keys)

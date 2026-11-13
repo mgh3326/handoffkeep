@@ -39,9 +39,6 @@ const (
 	// activities: past the movement window (8 KST days), far enough that most
 	// open tasks show when they entered their state.
 	stateHistoryLookback = 30 * 24 * time.Hour
-	// maxTaskIssues bounds one read; past it the read fails rather than
-	// showing a partial board as complete.
-	maxTaskIssues = 20000
 )
 
 // taskSourceYouTrack is the board's source field on the YouTrack-backed read.
@@ -168,9 +165,6 @@ func (s *ytTaskSource) fetch(ctx context.Context, now time.Time) (*ytSnapshot, e
 			return nil, fmt.Errorf("%w: %v", errYouTrackRead, err)
 		}
 		issues = append(issues, page...)
-		if len(issues) > maxTaskIssues {
-			return nil, fmt.Errorf("%w: more than %d task issues", errYouTrackRead, maxTaskIssues)
-		}
 		if len(page) < youtrack.TaskIssuePageSize {
 			break
 		}
