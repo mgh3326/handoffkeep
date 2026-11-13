@@ -24,6 +24,21 @@ type fakeTaskIssues struct {
 	fail    bool
 	reads   int
 	queries []string
+	changes []youtrack.StateChange
+	// historyReads counts the StateChanges calls; sinces holds their bounds.
+	historyReads int
+	sinces       []time.Time
+}
+
+func (f *fakeTaskIssues) StateChanges(_ context.Context, _ youtrack.Schema, since time.Time) ([]youtrack.StateChange, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.historyReads++
+	f.sinces = append(f.sinces, since)
+	if f.fail {
+		return nil, errors.New("youtrack GET /api/activities: 503")
+	}
+	return f.changes, nil
 }
 
 func (f *fakeTaskIssues) ListTaskIssues(_ context.Context, query string, skip, top int) ([]youtrack.Issue, error) {
@@ -185,18 +200,20 @@ func TestYouTrackAttentionTasksTakesYouTrackFieldsAndDropsClosed(t *testing.T) {
 func TestYouTrackWorkStatusJoinsHKOverlay(t *testing.T) {
 	now := time.Date(2026, 11, 13, 3, 0, 0, 0, time.UTC)
 	merged := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
-	resolved := time.Date(2026, 11, 12, 13, 0, 0, 0, time.UTC).UnixMilli()
 	parent := int64(3)
-	closedIssue := ytIssue("2-5", 5, "done", "completed", "a", 0)
-	closedIssue.Resolved = &resolved
 	snap := buildYTSnapshot(youtrack.DefaultSchema(), []youtrack.Issue{
 		ytIssue("2-1", 1, "in work", "developing", "a", 0),
 		ytIssue("2-2", 2, "waiting deploy", "merged", "a", 0),
 		ytIssue("2-3", 3, "[bundle x B01]", "backlog", "a", 0),
 		ytIssue("2-4", 4, "child", "backlog", "a", 2),
-		closedIssue,
+		ytIssue("2-5", 5, "done", "completed", "a", 0),
 		ytIssue("2-6", 6, "queued but closed in YouTrack", "dropped", "a", 0),
 	}, nil, now)
+	hist := newYTHistory([]youtrack.StateChange{
+		ytChange("2-1", "developing", now.Add(-time.Hour)),
+		ytChange("2-2", "merged", merged),
+		ytChange("2-5", "completed", time.Date(2026, 11, 12, 13, 0, 0, 0, time.UTC)),
+	}, now.Add(-stateHistoryLookback), now)
 	overlay := store.WorkStatusOverlay{
 		Inputs: store.WorkStatusInputs{
 			LastDeploy: map[string]time.Time{"handoffkeep": merged.Add(-time.Hour)},
@@ -204,12 +221,11 @@ func TestYouTrackWorkStatusJoinsHKOverlay(t *testing.T) {
 			Queued:     []store.WorkStatusQueuedTask{{ID: 4, Title: "hk title", State: "backlog"}, {ID: 6, Title: "x", State: "backlog"}},
 		},
 		Tasks: map[int64]store.WorkStatusTaskOverlay{
-			1: {JobID: "job-1", Host: "m1b", JobState: "spawned", PR: "https://github.com/o/r/pull/7", EnteredAt: map[string]time.Time{"developing": now.Add(-time.Hour)}},
-			2: {EnteredAt: map[string]time.Time{"merged": merged}},
-			4: {ParentID: &parent, ParentTitle: "hk parent title", EnteredAt: map[string]time.Time{}},
+			1: {JobID: "job-1", Host: "m1b", JobState: "spawned", PR: "https://github.com/o/r/pull/7"},
+			4: {ParentID: &parent, ParentTitle: "hk parent title"},
 		},
 	}
-	got := youTrackWorkStatus(now, snap, overlay)
+	got := youTrackWorkStatus(now, snap, hist, overlay)
 	if got.Summary.InWork != 1 || got.Summary.WaitingDeploy != 1 || got.Summary.Backlog != 1 || got.Summary.BundleParents != 1 || got.Summary.TotalOpen != 3 {
 		t.Fatalf("summary=%+v", got.Summary)
 	}
@@ -227,10 +243,121 @@ func TestYouTrackWorkStatusJoinsHKOverlay(t *testing.T) {
 		created += day.Created
 		closed += day.Closed
 	}
-	// Five non-bundle issues were created in the window; one was resolved
-	// into a closed state (the dropped one has no resolved time).
+	// Five non-bundle issues were created in the window; one moved into a
+	// closed state (the dropped one has no state change in the history).
 	if len(got.Movement) != 8 || created != 5 || closed != 1 {
 		t.Fatalf("movement=%+v", got.Movement)
+	}
+}
+
+// ytChange is one YouTrack state change into state.
+func ytChange(issueID, state string, at time.Time) youtrack.StateChange {
+	return youtrack.StateChange{IssueID: issueID, At: at, State: state, StateKnown: true}
+}
+
+// An open task YouTrack shows developing again after review has been in that
+// state since YouTrack's last change into it, not since an earlier visit hk
+// recorded: the age follows YouTrack's log. With no change in the log the
+// bound is the creation time inside the lookback and the update time past it.
+func TestYouTrackStateSinceFollowsTheCurrentVisit(t *testing.T) {
+	now := time.Date(2026, 11, 13, 3, 0, 0, 0, time.UTC)
+	old := ytIssue("2-2", 2, "created before the lookback", "developing", "a", 0)
+	old.Created = now.Add(-60 * 24 * time.Hour).UnixMilli()
+	snap := buildYTSnapshot(youtrack.DefaultSchema(), []youtrack.Issue{
+		ytIssue("2-1", 1, "back in development", "developing", "a", 0),
+		old,
+		ytIssue("2-3", 3, "never changed", "developing", "a", 0),
+	}, nil, now)
+	hist := newYTHistory([]youtrack.StateChange{
+		ytChange("2-1", "developing", now.Add(-10*time.Hour)),
+		ytChange("2-1", "reviewing", now.Add(-5*time.Hour)),
+		ytChange("2-1", "developing", now.Add(-2*time.Hour)),
+	}, now.Add(-stateHistoryLookback), now)
+	age := map[int64]int64{}
+	for _, x := range youTrackWorkStatus(now, snap, hist, store.WorkStatusOverlay{}).InWork {
+		age[x.ID] = x.AgeSeconds
+	}
+	want := map[int64]int64{
+		1: 2 * 3600,
+		2: int64(now.Sub(time.Date(2026, 11, 12, 2, 0, 0, 0, time.UTC)).Seconds()), // updated
+		3: int64(now.Sub(time.Date(2026, 11, 12, 1, 0, 0, 0, time.UTC)).Seconds()), // created
+	}
+	for id, w := range want {
+		if age[id] != w {
+			t.Fatalf("task %d age=%d want %d; ages=%v", id, age[id], w, age)
+		}
+	}
+}
+
+// A task merged again in YouTrack waits for the deploy; a deployed task
+// counts as closed on the day YouTrack recorded its deployment, however much
+// later hk caught up, and on no other day.
+func TestYouTrackWorkStatusUsesYouTrackTimes(t *testing.T) {
+	now := time.Date(2026, 11, 13, 3, 0, 0, 0, time.UTC)
+	deploy := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)    // the project's last deploy
+	firstMerge := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC) // an earlier lifecycle
+	remerged := time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC)  // merged again in YouTrack
+	monday := time.Date(2026, 11, 9, 1, 0, 0, 0, time.UTC)     // 2026-11-09 KST
+	tuesday := time.Date(2026, 11, 10, 1, 0, 0, 0, time.UTC)   // 2026-11-10 KST
+	snap := buildYTSnapshot(youtrack.DefaultSchema(), []youtrack.Issue{
+		ytIssue("2-1", 1, "merged again", "merged", "a", 0),
+		ytIssue("2-2", 2, "completed Monday, again Tuesday", "completed", "a", 0),
+		ytIssue("2-3", 3, "completed Monday, reopened", "developing", "a", 0),
+		ytIssue("2-4", 4, "merged Monday, deployed Tuesday", "deployed", "a", 0),
+	}, nil, now)
+	hist := newYTHistory([]youtrack.StateChange{
+		ytChange("2-1", "merged", firstMerge),
+		ytChange("2-1", "developing", firstMerge.Add(time.Hour)),
+		ytChange("2-1", "merged", remerged),
+		ytChange("2-2", "completed", monday),
+		ytChange("2-2", "developing", monday.Add(time.Hour)),
+		ytChange("2-2", "completed", tuesday),
+		ytChange("2-3", "completed", monday),
+		ytChange("2-3", "developing", tuesday),
+		ytChange("2-4", "merged", monday),
+		ytChange("2-4", "deployed", tuesday),
+	}, now.Add(-stateHistoryLookback), now)
+	overlay := store.WorkStatusOverlay{Inputs: store.WorkStatusInputs{LastDeploy: map[string]time.Time{"handoffkeep": deploy}}}
+	got := youTrackWorkStatus(now, snap, hist, overlay)
+	if got.Summary.WaitingDeploy != 1 || got.Summary.MergedBeforeDeploy != 0 {
+		t.Fatalf("a merge after the deploy must wait for deploy: summary=%+v", got.Summary)
+	}
+	closedOn := map[string]int{}
+	for _, day := range got.Movement {
+		closedOn[day.Date] = day.Closed
+	}
+	// Monday: tasks 2 and 3. Tuesday: tasks 2 (again) and 4 (deployed; its
+	// merge on Monday is not a close).
+	if closedOn["2026-11-09"] != 2 || closedOn["2026-11-10"] != 2 || closedOn["2026-11-12"] != 0 {
+		t.Fatalf("movement=%+v", got.Movement)
+	}
+}
+
+// The work status reads the history once per TTL and fails with the page when
+// YouTrack's activity log cannot be read.
+func TestYTHistoryCachesForTheTTLAndFailsWithYouTrack(t *testing.T) {
+	fake := &fakeTaskIssues{changes: []youtrack.StateChange{ytChange("2-1", "developing", time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC))}}
+	src := newYTTaskSource(fake, fakeYTStore{}, "tenant", time.Minute)
+	clock := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	src.now = func() time.Time { return clock }
+	h, err := src.history(context.Background())
+	if err != nil || len(h.byIssue["2-1"]) != 1 {
+		t.Fatalf("history=%+v err=%v", h, err)
+	}
+	if want := clock.Add(-stateHistoryLookback); !fake.sinces[0].Equal(want) {
+		t.Fatalf("since=%s want %s", fake.sinces[0], want)
+	}
+	clock = clock.Add(59 * time.Second)
+	if _, err := src.history(context.Background()); err != nil || fake.historyReads != 1 {
+		t.Fatalf("within TTL: err=%v reads=%d", err, fake.historyReads)
+	}
+	clock = clock.Add(2 * time.Second)
+	fake.fail = true
+	if _, err := src.history(context.Background()); !errors.Is(err, errYouTrackRead) {
+		t.Fatalf("after TTL with the log down: err=%v", err)
+	}
+	if _, err := src.history(context.Background()); !errors.Is(err, errYouTrackRead) || fake.historyReads != 3 {
+		t.Fatalf("a failed read is not cached: err=%v reads=%d", err, fake.historyReads)
 	}
 }
 
@@ -247,73 +374,6 @@ func TestYouTrackReadFailedAnswers502ForYouTrackOnly(t *testing.T) {
 		youTrackReadFailed(rec, httptest.NewRequest(http.MethodGet, "/ui/api/board/tasks", nil), tc.err)
 		if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.code) {
 			t.Fatalf("err=%v: %d %s", tc.err, rec.Code, rec.Body.String())
-		}
-	}
-}
-
-func TestYouTrackWorkStatusUsesTheCurrentMergeAndCloseTimes(t *testing.T) {
-	now := time.Date(2026, 11, 13, 3, 0, 0, 0, time.UTC)
-	oldMerge := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)       // hk's event from an earlier lifecycle
-	deploy := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)        // the project's last deploy
-	remerged := time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC)      // merged again in YouTrack, no hk event
-	mergedLongAgo := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC) // a deployed issue's resolved time
-	deployedAt := time.Date(2026, 11, 11, 1, 0, 0, 0, time.UTC)    // hk's deployed transition, in the window
-	remergedMS, mergedLongAgoMS := remerged.UnixMilli(), mergedLongAgo.UnixMilli()
-	waiting := ytIssue("2-1", 1, "merged again", "merged", "a", 0)
-	waiting.Resolved = &remergedMS
-	deployedWithEvent := ytIssue("2-2", 2, "deployed", "deployed", "a", 0)
-	deployedWithEvent.Resolved = &mergedLongAgoMS
-	deployedNoEvent := ytIssue("2-3", 3, "deployed, no event", "deployed", "a", 0)
-	deployedNoEvent.Resolved = &remergedMS
-	snap := buildYTSnapshot(youtrack.DefaultSchema(), []youtrack.Issue{waiting, deployedWithEvent, deployedNoEvent}, nil, now)
-	overlay := store.WorkStatusOverlay{
-		Inputs:       store.WorkStatusInputs{LastDeploy: map[string]time.Time{"handoffkeep": deploy}},
-		Tasks:        map[int64]store.WorkStatusTaskOverlay{1: {EnteredAt: map[string]time.Time{"merged": oldMerge}}},
-		ClosedEvents: map[int64][]time.Time{2: {deployedAt}},
-		LastClosed:   map[int64]time.Time{2: deployedAt},
-	}
-	got := youTrackWorkStatus(now, snap, overlay)
-	if got.Summary.WaitingDeploy != 1 || got.Summary.MergedBeforeDeploy != 0 {
-		t.Fatalf("a merge after the deploy must wait for deploy: summary=%+v", got.Summary)
-	}
-	closedOn := map[string]int{}
-	for _, day := range got.Movement {
-		closedOn[day.Date] = day.Closed
-	}
-	// The deploy closed on its own (KST) day; a deployed issue with no hk
-	// event is not counted on its merge-time resolved day.
-	if closedOn["2026-11-11"] != 1 || closedOn["2026-11-12"] != 0 {
-		t.Fatalf("movement=%+v", got.Movement)
-	}
-}
-
-func TestYouTrackMovementCountsCloseHistory(t *testing.T) {
-	now := time.Date(2026, 11, 13, 3, 0, 0, 0, time.UTC)
-	monday := time.Date(2026, 11, 9, 1, 0, 0, 0, time.UTC)    // 2026-11-09 KST
-	tuesday := time.Date(2026, 11, 10, 1, 0, 0, 0, time.UTC)  // 2026-11-10 KST
-	thursday := time.Date(2026, 11, 12, 1, 0, 0, 0, time.UTC) // 2026-11-12 KST
-	thursdayMS, mondayMS := thursday.UnixMilli(), monday.UnixMilli()
-	reopened := ytIssue("2-1", 1, "closed then reopened", "developing", "a", 0)
-	twice := ytIssue("2-2", 2, "closed twice", "completed", "a", 0)
-	tuesdayMS := tuesday.UnixMilli()
-	twice.Resolved = &tuesdayMS
-	againInYT := ytIssue("2-3", 3, "completed again in YouTrack", "completed", "a", 0)
-	againInYT.Resolved = &thursdayMS
-	afterMerge := ytIssue("2-4", 4, "completed after merge", "completed", "a", 0)
-	afterMerge.Resolved = &mondayMS // resolved at merge, before hk's completed event
-	snap := buildYTSnapshot(youtrack.DefaultSchema(), []youtrack.Issue{reopened, twice, againInYT, afterMerge}, nil, now)
-	overlay := store.WorkStatusOverlay{
-		ClosedEvents: map[int64][]time.Time{1: {monday}, 2: {monday, tuesday}, 3: {monday}, 4: {tuesday}},
-		LastClosed:   map[int64]time.Time{1: monday, 2: tuesday, 3: monday, 4: tuesday},
-	}
-	closedOn := map[string]int{}
-	for _, day := range youTrackWorkStatus(now, snap, overlay).Movement {
-		closedOn[day.Date] = day.Closed
-	}
-	want := map[string]int{"2026-11-09": 3, "2026-11-10": 2, "2026-11-12": 1}
-	for day, n := range want {
-		if closedOn[day] != n {
-			t.Fatalf("closed on %s = %d, want %d; all=%v", day, closedOn[day], n, closedOn)
 		}
 	}
 }

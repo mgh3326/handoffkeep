@@ -24,15 +24,21 @@ import (
 // cannot be read the page answers 502 youtrack_unavailable: it never falls
 // back to hk's own task copy.
 
-// TaskIssueLister reads one page of task issues; *youtrack.Client is one.
+// TaskIssueLister reads one page of task issues and the state changes in
+// YouTrack's activity log; *youtrack.Client is one.
 type TaskIssueLister interface {
 	ListTaskIssues(ctx context.Context, query string, skip, top int) ([]youtrack.Issue, error)
+	StateChanges(ctx context.Context, schema youtrack.Schema, since time.Time) ([]youtrack.StateChange, error)
 }
 
 const (
 	// defaultTaskIssuesTTL is how long one YouTrack read serves the pages.
 	// YouTrack's issue list sends no ETag, so the cache is time-bound only.
 	defaultTaskIssuesTTL = 15 * time.Second
+	// stateHistoryLookback is how far back the work status reads YouTrack's
+	// activities: past the movement window (8 KST days), far enough that most
+	// open tasks show when they entered their state.
+	stateHistoryLookback = 30 * 24 * time.Hour
 )
 
 // taskSourceYouTrack is the board's source field on the YouTrack-backed read.
@@ -54,6 +60,11 @@ type ytTaskSource struct {
 
 	mu     sync.Mutex
 	cached *ytSnapshot
+
+	// hmu guards the state history, read apart from the snapshot because only
+	// the work status needs it.
+	hmu  sync.Mutex
+	hist *ytHistory
 }
 
 // ytTaskStore is the part of the store the read needs: the mirrored
@@ -116,6 +127,25 @@ func (s *ytTaskSource) snapshot(ctx context.Context) (*ytSnapshot, error) {
 	}
 	s.cached = snap
 	return snap, nil
+}
+
+// history returns YouTrack's state changes of the last stateHistoryLookback,
+// no older than the TTL. A failed read is not cached.
+func (s *ytTaskSource) history(ctx context.Context) (*ytHistory, error) {
+	s.hmu.Lock()
+	defer s.hmu.Unlock()
+	now := s.now()
+	if s.hist != nil && now.Sub(s.hist.FetchedAt) < s.ttl {
+		return s.hist, nil
+	}
+	since := now.Add(-stateHistoryLookback)
+	changes, err := s.issues.StateChanges(ctx, s.schema, since)
+	if err != nil {
+		s.hist = nil
+		return nil, fmt.Errorf("%w: %v", errYouTrackRead, err)
+	}
+	s.hist = newYTHistory(changes, since, now)
+	return s.hist, nil
 }
 
 func (s *ytTaskSource) fetch(ctx context.Context, now time.Time) (*ytSnapshot, error) {
@@ -250,29 +280,74 @@ func youTrackAttentionTasks(candidates []store.AttentionTask, snap *ytSnapshot) 
 	return out
 }
 
-// closeDays are the KST days a task closed on within the window: every hk
-// transition into a closed state, whatever the task's state now, plus
-// YouTrack's resolved time when the task is completed, dropped or duplicate
-// in YouTrack and resolved after hk's last close (closed again in YouTrack
-// with no hk event). A deployed issue's resolved time is its merge, and a
-// resolved time before hk's last close belongs to an earlier lifecycle or to
-// a resolved state before this one, so neither adds a day.
-func closeDays(t youtrack.TaskIssue, events []time.Time, lastClosed time.Time, hasLast bool, start time.Time, kst *time.Location) map[string]bool {
-	days := map[string]bool{}
-	for _, at := range events {
-		days[at.In(kst).Format("2006-01-02")] = true
+// ytHistory is YouTrack's state changes since Since, per issue, oldest first.
+// Every state and close time the work status shows comes from here: hk's own
+// event times are when hk noticed a change, which is later than YouTrack's
+// when hk is out of step, and cover only the changes hk saw.
+type ytHistory struct {
+	FetchedAt time.Time
+	Since     time.Time
+	byIssue   map[string][]youtrack.StateChange
+}
+
+func newYTHistory(changes []youtrack.StateChange, since, now time.Time) *ytHistory {
+	h := &ytHistory{FetchedAt: now, Since: since, byIssue: map[string][]youtrack.StateChange{}}
+	for _, c := range changes {
+		h.byIssue[c.IssueID] = append(h.byIssue[c.IssueID], c)
 	}
-	ytClosed := t.StateKnown && (t.State == store.StateCompleted || t.State == store.StateDropped || t.State == store.StateDuplicate)
-	if ytClosed && t.Resolved != nil && !t.Resolved.Before(start) && (!hasLast || t.Resolved.After(lastClosed)) {
-		days[t.Resolved.In(kst).Format("2006-01-02")] = true
+	for _, xs := range h.byIssue {
+		sort.SliceStable(xs, func(i, j int) bool { return xs[i].At.Before(xs[j].At) })
+	}
+	return h
+}
+
+// stateSince is when the issue entered the state it is in now: the time of
+// the last state change when that change moved it into this state. Without
+// one the answer is the nearest honest bound: the creation time of an issue
+// created within the history and never changed, a merged issue's resolved time
+// (YouTrack resolves on merge), and otherwise the issue's update time, which
+// is never earlier than the real entry.
+func (h *ytHistory) stateSince(t youtrack.TaskIssue) time.Time {
+	if xs := h.byIssue[t.IssueID]; len(xs) > 0 {
+		if last := xs[len(xs)-1]; last.StateKnown && last.State == t.State {
+			return last.At
+		}
+	} else if !t.Created.IsZero() && !t.Created.Before(h.Since) {
+		return t.Created
+	}
+	if t.State == store.StateMerged && t.Resolved != nil {
+		return *t.Resolved
+	}
+	return t.Updated
+}
+
+// closeDays are the KST days the issue moved into a closed state on, within
+// the window starting at start, from YouTrack's own change times: every move,
+// whatever state the issue is in now.
+func (h *ytHistory) closeDays(t youtrack.TaskIssue, start time.Time, kst *time.Location) map[string]bool {
+	days := map[string]bool{}
+	for _, c := range h.byIssue[t.IssueID] {
+		if c.StateKnown && ytClosedStates[c.State] && !c.At.Before(start) {
+			days[c.At.In(kst).Format("2006-01-02")] = true
+		}
 	}
 	return days
 }
 
-// youTrackWorkStatus builds the work status document from YouTrack's tasks
-// and hk's overlay. Movement counts, per KST day, issues created and the
-// distinct YouTrack tasks that closed that day (closeDays).
-func youTrackWorkStatus(now time.Time, snap *ytSnapshot, overlay store.WorkStatusOverlay) *store.WorkStatus {
+// ytClosedStates are the states the movement counts as closed.
+var ytClosedStates = func() map[string]bool {
+	m := map[string]bool{}
+	for _, s := range store.WorkStatusClosedStates {
+		m[s] = true
+	}
+	return m
+}()
+
+// youTrackWorkStatus builds the work status document from YouTrack's tasks,
+// YouTrack's state history and hk's overlay. Movement counts, per KST day,
+// issues created and the distinct tasks that moved into a closed state that
+// day (ytHistory.closeDays).
+func youTrackWorkStatus(now time.Time, snap *ytSnapshot, hist *ytHistory, overlay store.WorkStatusOverlay) *store.WorkStatus {
 	inSet := map[string]bool{}
 	for _, s := range store.WorkStatusStates {
 		inSet[s] = true
@@ -287,16 +362,19 @@ func youTrackWorkStatus(now time.Time, snap *ytSnapshot, overlay store.WorkStatu
 			createdDays[t.Created.In(kst).Format("2006-01-02")]++
 		}
 		if !bundle {
-			last, hasLast := overlay.LastClosed[t.TaskID]
-			for day := range closeDays(t, overlay.ClosedEvents[t.TaskID], last, hasLast, start, kst) {
+			for day := range hist.closeDays(t, start, kst) {
 				closedDays[day]++
 			}
 		}
 		if !t.StateKnown || !inSet[t.State] {
 			continue
 		}
+		since := hist.stateSince(t)
 		row := store.WorkStatusRow{ID: t.TaskID, Title: t.Title, Project: optionalText(t.Project), State: t.State,
-			Priority: t.Priority, CreatedAt: t.Created, UpdatedAt: t.Updated, JobID: t.Job, PR: t.PR}
+			Priority: t.Priority, CreatedAt: t.Created, UpdatedAt: t.Updated, JobID: t.Job, PR: t.PR, InStateSince: &since}
+		if t.State == store.StateMerged {
+			row.MergedAt = &since
+		}
 		if x, ok := overlay.Tasks[t.TaskID]; ok {
 			if x.JobID != "" {
 				row.JobID = x.JobID
@@ -312,23 +390,13 @@ func youTrackWorkStatus(now time.Time, snap *ytSnapshot, overlay store.WorkStatu
 					row.BundleTitle = parent.Title
 				}
 			}
-			if at, ok := x.EnteredAt[t.State]; ok {
-				row.InStateSince = &at
-			}
-			if at, ok := x.EnteredAt[store.StateMerged]; ok {
-				row.MergedAt = &at
-			}
-		}
-		// YouTrack resolves an issue when it merges. A later resolved time
-		// than hk's last merge event is a merge hk has no event for (a
-		// reopen merged again in YouTrack): the current merge is the later.
-		if t.Resolved != nil && (row.MergedAt == nil || t.Resolved.After(*row.MergedAt)) {
-			row.MergedAt = t.Resolved
 		}
 		rows = append(rows, row)
 	}
 	in := overlay.Inputs
 	in.Movement = store.WorkStatusMovementDays(now, createdDays, closedDays)
+	// The overlay lists every in-flight spawn request, whatever hk's copy of
+	// the task's state; YouTrack decides which of them are open.
 	queued := make([]store.WorkStatusQueuedTask, 0, len(in.Queued))
 	for _, q := range in.Queued {
 		issue, ok := snap.task(q.ID)

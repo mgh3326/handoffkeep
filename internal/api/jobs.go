@@ -8,12 +8,10 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-// jobHostAllowed enforces the job host rule from the start (unlike presence,
-// there is no legacy warn mode): the client must have a HANDOFFKEEP_HOSTS_
-// line and the line must list host.
+// jobHostAllowed: the client must have a HANDOFFKEEP_HOSTS_ line and the line
+// must list host (the same rule as presence writes).
 func (s Server) jobHostAllowed(client, host string) bool {
-	allowed, listed := s.HostGrants.Allows(client, host)
-	return listed && allowed
+	return s.HostGrants.Allows(client, host)
 }
 
 // jobClaim is POST /v1/jobs: {job_id, task_id, host} claims an id on the

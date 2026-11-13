@@ -571,7 +571,7 @@ type Server struct {
 	// QuotaAccounts scopes quota writes; a nil map refuses every account.
 	QuotaAccounts QuotaAccounts
 	// HostGrants binds a client to the host ids it may act for. A client with
-	// no entry keeps today's behavior and is logged (see HostGrants.Allows).
+	// no entry may act for no host (see HostGrants.Allows).
 	HostGrants HostGrants
 	// UI is independently authenticated by Cloudflare Access. A nil UI leaves
 	// the route unregistered so deployments without complete Access settings
@@ -601,6 +601,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/yt/ops/{id}/resolve", s.ytOpsResolve)
 	m.HandleFunc("GET /v1/yt/authority", s.ytAuthority)
 	m.HandleFunc("POST /v1/yt/authority", s.ytAuthoritySet)
+	m.HandleFunc("POST /v1/documents/prune", s.docPrune)
 	m.HandleFunc("/v1/documents/{key...}", s.document)
 	m.HandleFunc("PUT /v1/attachments", s.attachmentPut)
 	m.HandleFunc("GET /v1/attachments", s.attachments)

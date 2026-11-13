@@ -33,8 +33,9 @@ func (h *Handler) workStatus(w http.ResponseWriter, r *http.Request, identity cf
 }
 
 // workStatusYouTrack builds the work status from YouTrack's task issues and
-// hk's overlay (jobs, hosts, PRs, bundle parents, state entry times, deploy
-// records, queued spawns) for the tasks the page lists.
+// YouTrack's state changes (state entry and close times) and hk's overlay
+// (jobs, hosts, PRs, bundle parents, deploy records, queued spawns) for the
+// tasks the page lists.
 func (h *Handler) workStatusYouTrack(w http.ResponseWriter, r *http.Request, now time.Time) {
 	snap, err := h.ytTasks.snapshot(r.Context())
 	if err != nil {
@@ -51,11 +52,15 @@ func (h *Handler) workStatusYouTrack(w http.ResponseWriter, r *http.Request, now
 			ids = append(ids, t.TaskID)
 		}
 	}
-	_, closedSince := store.WorkStatusMovementStart(now)
-	overlay, err := h.store.ReadWorkStatusOverlay(r.Context(), ids, closedSince)
+	hist, err := h.ytTasks.history(r.Context())
 	if err != nil {
 		youTrackReadFailed(w, r, err)
 		return
 	}
-	writeBoardJSON(w, youTrackWorkStatus(now, snap, overlay))
+	overlay, err := h.store.ReadWorkStatusOverlay(r.Context(), ids)
+	if err != nil {
+		youTrackReadFailed(w, r, err)
+		return
+	}
+	writeBoardJSON(w, youTrackWorkStatus(now, snap, hist, overlay))
 }
