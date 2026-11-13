@@ -544,11 +544,13 @@ func (s *Store) adoptMergedPRTx(ctx context.Context, tx pgx.Tx, x Task, ev sourc
 		return TaskEventResult{State: x.State, Reason: reason, Task: x}, nil
 	}
 	x.Refs.PR = ev.PR
+	x.UpdatedAt = now
 	if x, err = writeTaskTx(ctx, tx, x); err != nil {
 		return TaskEventResult{}, err
 	}
+	// Same-state row: kind source_event, so transition readers skip it.
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{
-		TaskID: x.ID, From: x.State, To: x.State, By: ev.Source, Note: joinNote(ev.Note, "adopted the PR; the task was already merged"), Refs: x.Refs, At: ev.At,
+		TaskID: x.ID, Kind: TaskEventSource, From: x.State, To: x.State, By: ev.Source, Note: joinNote(ev.Note, "adopted the PR; the task was already merged"), Refs: x.Refs, At: ev.At,
 		Source: ev.Source, SourceRef: ev.SourceRef, Auto: true,
 	}); err != nil {
 		return TaskEventResult{}, err
