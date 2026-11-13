@@ -194,7 +194,7 @@ func TestRecordDotsResultKindsAndFollowupKinds(t *testing.T) {
 	if err != nil || len(rows) != 3 {
 		t.Fatalf("outbox=%+v err=%v", rows, err)
 	}
-	if rows[0].Kind != OutboxKindDotsDecision || rows[1].Kind != OutboxKindDotsDecision || rows[2].Kind != OutboxKindDotsFollowup || rows[2].EventID != "dots-followup-"+commentID || rows[2].Text != dotsFollowupText(issue) {
+	if rows[0].Kind != OutboxKindDotsBlocked || rows[1].Kind != OutboxKindDotsDecision || rows[2].Kind != OutboxKindDotsFollowup || rows[2].EventID != "dots-followup-"+commentID || rows[2].Text != dotsFollowupText(issue) {
 		t.Fatalf("outbox=%+v", rows)
 	}
 }

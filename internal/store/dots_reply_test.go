@@ -365,8 +365,9 @@ func TestDotsProgressRecordsPartialResult(t *testing.T) {
 	if err != nil || len(replies) != 2 || replies[1].Kind != "PROGRESS" {
 		t.Fatalf("replies=%+v err=%v", replies, err)
 	}
+	// PROGRESS is kept as a document and sends no lane event (operator decision 166).
 	var count int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE target_lane='requester' AND kind=$1`, OutboxKindDotsReport).Scan(&count); err != nil || count != 1 {
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE target_lane='requester'`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("notifications=%d err=%v", count, err)
 	}
 	if DotsKindRecorded("PROGRESS") {

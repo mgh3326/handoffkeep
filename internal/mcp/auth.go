@@ -27,11 +27,13 @@ type principal struct {
 	Access  bool
 }
 
+// decisionChannel is the route an MCP answer came through, recorded as the
+// answer's channel: the chatgpt (dots) channel or any other MCP caller.
 func (p principal) decisionChannel() string {
-	if p.Access {
-		return store.DecisionChannelConsole
+	if p.Channel == ChannelChatGPT {
+		return store.DecisionChannelDots
 	}
-	return store.DecisionChannelCLI
+	return store.DecisionChannelMCP
 }
 
 type principalKey struct{}

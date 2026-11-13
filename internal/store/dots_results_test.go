@@ -160,7 +160,7 @@ func TestRecordDotsResultLinksAndRoutes(t *testing.T) {
 	if err != nil || len(rows) != 3 {
 		t.Fatalf("outbox=%+v err=%v", rows, err)
 	}
-	if rows[1].Kind != OutboxKindDotsFollowup || rows[1].TargetLane != "hk-design" || rows[2].Kind != OutboxKindDotsDecision || rows[2].TargetLane != DotsLane || rows[2].EventID != "dots-"+sc.ID {
+	if rows[1].Kind != OutboxKindDotsFollowup || rows[1].TargetLane != "hk-design" || rows[2].Kind != OutboxKindDotsBlocked || rows[2].TargetLane != DotsLane || rows[2].EventID != "dots-"+sc.ID {
 		t.Fatalf("outbox=%+v", rows)
 	}
 }
