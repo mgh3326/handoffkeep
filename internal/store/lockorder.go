@@ -43,11 +43,14 @@ package store
 //
 //  5. Rows that belong to a locked task: task_events (its foreign key takes
 //     KEY SHARE on the task row), task_labels, task_relations,
-//     task_subscribers, task_origins, task_spawn_records, task_spawn_notices
-//     (PutTaskSpawn, under the key share lock on its one task row), linear_board_tasks, linear_outbox,
+//     task_subscribers, task_origins, linear_board_tasks, linear_outbox,
 //     sync_decisions, ticket_sets, decision_answer_attempts and
 //     decision_resolutions (inserted by ResolveDecision after its task row,
 //     under the level-2 lock; append-only and never locked by a reader), and
+//     task_spawn_records and task_spawn_notices (PutTaskSpawn: one task row
+//     under its key share lock; a terminal write takes the comment insert
+//     lock before that row, as ApplyYouTrackActivity and ReplyDots do, and its
+//     comment is a savepoint so a YouTrack refusal skips only the comment),
 //     the work record: changes, change_tasks and reviews. ApplyTaskSourceEvent
 //     writes the work record under the level-2 lock after its task row
 //     (recordChangeTx); a revert locks two changes rows, the reverted PR's

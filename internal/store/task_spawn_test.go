@@ -2,9 +2,12 @@ package store
 
 import (
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
 func spawnTestInput(state string, at time.Time) TaskSpawnInput {
@@ -246,5 +249,37 @@ func TestWorkStatusQueuesOnlyRequestsInFlight(t *testing.T) {
 	}
 	if q := queued(); q != nil {
 		t.Fatalf("landed request still queued: %+v", q)
+	}
+}
+
+// checkTaskSpawnInput is pure: no database needed. It refuses values the
+// table or the ordering cannot hold: an attempt past int32, an updated_at far
+// ahead of the clock (it would win every later comparison), and secret-like
+// text in any field a notice comment carries.
+func TestCheckTaskSpawnInputRefusesUnboundedValues(t *testing.T) {
+	now := time.Now().UTC()
+	ok := spawnTestInput(SpawnWaiting, now)
+	if err := checkTaskSpawnInput(ok); err != nil {
+		t.Fatalf("valid input refused: %v", err)
+	}
+	tooBig := ok
+	tooBig.Attempt = math.MaxInt32 + 1
+	if err := checkTaskSpawnInput(tooBig); !errors.Is(err, ErrSpawnInvalid) {
+		t.Fatalf("attempt past int32 err=%v", err)
+	}
+	far := ok
+	far.UpdatedAt = now.Add(48 * time.Hour)
+	if err := checkTaskSpawnInput(far); !errors.Is(err, ErrSpawnInvalid) {
+		t.Fatalf("far-future updated_at err=%v", err)
+	}
+	near := ok
+	near.UpdatedAt = now.Add(10 * time.Minute)
+	if err := checkTaskSpawnInput(near); err != nil {
+		t.Fatalf("near-future updated_at refused: %v", err)
+	}
+	secret := ok
+	secret.Job = "ghp_" + strings.Repeat("a", 36)
+	if p, ok := guard.SecretPattern(checkTaskSpawnInput(secret)); !ok || p != "github_token" {
+		t.Fatalf("secret in job not refused as a secret: pattern=%q ok=%t", p, ok)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -40,6 +41,12 @@ var spawnStateList = []string{SpawnWaiting, SpawnPending, SpawnParked, SpawnBoun
 
 // TaskStatesMax bounds one GET /v1/tasks/states query.
 const TaskStatesMax = 200
+
+// spawnMaxClockSkew bounds how far ahead of this server's clock a record's
+// updated_at may be. A record stamped further ahead would win the
+// updated_at comparison and block every later write until that time, so the
+// bound caps the damage a bad sender can do to an hour.
+const spawnMaxClockSkew = time.Hour
 
 // ErrSpawnInvalid refuses a spawn record or a states query the store cannot
 // accept. Its text is the wire code (TestErrorRuleCodesMatchSentinels); the
@@ -130,10 +137,12 @@ func checkTaskSpawnInput(in TaskSpawnInput) error {
 		return spawnInvalid("role is at most 64 bytes")
 	case !validText(in.Host, 128):
 		return spawnInvalid("host is at most 128 bytes")
-	case in.Attempt < 1:
-		return spawnInvalid("attempt must be 1 or more")
+	case in.Attempt < 1 || in.Attempt > math.MaxInt32:
+		return spawnInvalid("attempt must be 1 to 2147483647")
 	case in.UpdatedAt.IsZero():
 		return spawnInvalid("updated_at is required")
+	case in.UpdatedAt.After(time.Now().Add(spawnMaxClockSkew)):
+		return spawnInvalid("updated_at is more than an hour ahead of the server clock")
 	case !spawnKnown(in.State):
 		return spawnInvalid("state is not a spawn state; want one of " + strings.Join(spawnStateList, ", "))
 	case !validText(in.Reason, 1024):
@@ -147,7 +156,14 @@ func checkTaskSpawnInput(in TaskSpawnInput) error {
 			return spawnInvalid("start_condition.until must be merged or deployed")
 		}
 	}
-	return guard.Reject(in.Reason)
+	// A terminal write's notice comment carries request_id and job, so they
+	// are guarded with the reason.
+	for _, text := range []string{in.RequestID, in.Job, in.Reason} {
+		if err := guard.Reject(text); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func spawnKnown(state string) bool {
@@ -180,6 +196,14 @@ func (s *Store) PutTaskSpawn(ctx context.Context, id int64, in TaskSpawnInput, a
 		return TaskSpawn{}, false, err
 	}
 	defer tx.Rollback(ctx)
+	// A terminal write may comment, so it takes the comment insert lock before
+	// its task row, the order ApplyYouTrackActivity and ReplyDots use (see
+	// lockorder.go). Holding the task row first would cycle with them.
+	if spawnTerminal(in.State) {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+			return TaskSpawn{}, false, err
+		}
+	}
 	// One task row, read under a key share lock so the task cannot be deleted
 	// while its spawn record is written. Locking no second task row keeps this
 	// transaction below the task-mutation lock (lockorder.go level 2).
@@ -236,9 +260,28 @@ WHERE task_spawn_records.updated_at < EXCLUDED.updated_at`,
 }
 
 // spawnNoticeTx writes the task comment for a terminal spawn state, once per
-// notice key. It takes the comment insert lock the way CreateTaskComment does,
-// so the comment's id order matches its visibility order.
+// notice key. The caller holds the comment insert lock (PutTaskSpawn takes it
+// before the task row). The notice and comment run in a savepoint: when the
+// YouTrack mirror refuses the comment (ErrYTCommentUnsendable, comments
+// canonical in YouTrack) the savepoint is rolled back and the comment is
+// skipped, so the spawn record itself still applies. A later applied write for
+// the same key tries the comment again.
 func (s *Store) spawnNoticeTx(ctx context.Context, tx pgx.Tx, id int64, in TaskSpawnInput, author string) error {
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer sp.Rollback(ctx)
+	if err := s.writeSpawnNoticeTx(ctx, sp, id, in, author); err != nil {
+		if errors.Is(err, ErrYTCommentUnsendable) {
+			return nil
+		}
+		return err
+	}
+	return sp.Commit(ctx)
+}
+
+func (s *Store) writeSpawnNoticeTx(ctx context.Context, tx pgx.Tx, id int64, in TaskSpawnInput, author string) error {
 	key := fmt.Sprintf("%d|%s|%d|%s", id, in.RequestID, in.Attempt, in.State)
 	tag, err := tx.Exec(ctx, `INSERT INTO task_spawn_notices(notice_key,task_id,created_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, key, id, time.Now().UTC())
 	if err != nil {
@@ -252,9 +295,6 @@ func (s *Store) spawnNoticeTx(ctx context.Context, tx pgx.Tx, id int64, in TaskS
 		body += " reason=" + in.Reason
 	}
 	if err := CheckTaskCommentBody(body); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
 		return err
 	}
 	var c TaskComment
