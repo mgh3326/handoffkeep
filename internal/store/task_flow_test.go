@@ -290,42 +290,6 @@ func TestClaimSetsSubstateFromKind(t *testing.T) {
 	}
 }
 
-func TestNextTaskServesBacklogAndUnstarted(t *testing.T) {
-	s, pool := searchTestStore(t)
-	ctx := t.Context()
-	lane := relaneLane(t, "next")
-	mk := func(state string, priority int) Task {
-		t.Helper()
-		x, err := s.CreateTask(ctx, Task{Lane: lane, Title: "next " + state, Kind: "implement", Priority: priority, CreatedBy: "tester", Project: projectPtr(testProjectName)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(ctx, `UPDATE tasks SET state=$2 WHERE id=$1`, x.ID, state); err != nil {
-			t.Fatal(err)
-		}
-		return x
-	}
-	backlog, unstarted := mk("backlog", 1), mk("unstarted", 9)
-	for _, state := range []string{"triage", "icebox", "reviewing", "merged"} {
-		mk(state, 100)
-	}
-	flagged := mk("backlog", 50)
-	if _, err := pool.Exec(ctx, `UPDATE tasks SET awaiting_decision=true WHERE id=$1`, flagged.ID); err != nil {
-		t.Fatal(err)
-	}
-	first, err := s.NextTask(ctx, lane, "worker-1", "job-next-1", "")
-	if err != nil || first.ID != unstarted.ID || first.State != StateDeveloping {
-		t.Fatalf("first next: %+v err=%v, want task %d developing", first, err, unstarted.ID)
-	}
-	second, err := s.NextTask(ctx, lane, "worker-1", "job-next-2", "")
-	if err != nil || second.ID != backlog.ID {
-		t.Fatalf("second next: %+v err=%v, want task %d", second, err, backlog.ID)
-	}
-	if _, err := s.NextTask(ctx, lane, "worker-1", "job-next-3", ""); !errors.Is(err, ErrQueueEmpty) {
-		t.Fatalf("third next: err=%v, want ErrQueueEmpty (flagged, triage and icebox are not served)", err)
-	}
-}
-
 func TestAwaitingDecisionFlag(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := t.Context()

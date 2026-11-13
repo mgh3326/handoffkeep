@@ -52,7 +52,6 @@ type taskGetOut struct {
 	Lane      string  `json:"lane"`
 	Project   *string `json:"project"`
 	Area      *string `json:"area"`
-	Labels    []int64 `json:"labels"`
 	ClaimedBy string  `json:"claimed_by"`
 	Refs      struct {
 		PR    string `json:"pr"`
@@ -153,18 +152,6 @@ func TestTaskGetCompleteFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for i := 0; i < 6; i++ {
-		label, err := st.SaveLabel(ctx, store.Label{
-			Name: fmt.Sprintf("mcp-get-label-%d", i), Color: "#123456", EditLevel: "anyone",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, _, err := st.SetTaskLabel(ctx, subject.ID, label.ID, "tester", true); err != nil {
-			t.Fatal(err)
-		}
-	}
-
 	if err := st.PutTranslation(ctx, store.Translation{
 		Entity: "task", EntityID: fmt.Sprint(subject.ID), Field: "title", Lang: "ko",
 		SourceSHA256: store.SourceSHA256(subject.Title), Text: "MCP 조회 제목", Translator: "test",
@@ -182,6 +169,13 @@ func TestTaskGetCompleteFields(t *testing.T) {
 		Tenant: "test", Role: "mirror",
 	}); err != nil {
 		t.Fatal(err)
+	}
+	// Six priority changes stand in for the label events the preview used to
+	// count: each one appends a task event.
+	for i := 0; i < 6; i++ {
+		if _, _, err := st.SetTaskPriorityDirect(ctx, subject.ID, 10+i, "tester", "fixture event"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for i := 0; i < 6; i++ {
 		if _, err := st.CreateTaskComment(ctx, subject.ID, "tester", fmt.Sprintf("fixture comment %d", i)); err != nil {
@@ -202,9 +196,6 @@ func TestTaskGetCompleteFields(t *testing.T) {
 	}
 	if out.Kind != "implement" || out.Lane != "mcp-get-lane" || out.Project == nil || *out.Project != "mcp-project" {
 		t.Fatalf("kind/lane/project=%q/%q/%v", out.Kind, out.Lane, out.Project)
-	}
-	if len(out.Labels) != 6 {
-		t.Fatalf("labels=%v", out.Labels)
 	}
 	if out.Refs.PR != "https://github.com/mgh3326/handoffkeep/pull/9" || out.Refs.JobID != "job-9" {
 		t.Fatalf("refs=%+v", out.Refs)
@@ -261,7 +252,7 @@ func TestTaskGetCompleteFields(t *testing.T) {
 	for field, want := range map[string]string{
 		"id": "hk", "title": "hk", "body": "hk", "body_doc": "hk",
 		"state": "hk", "priority": "hk", "kind": "hk", "lane": "hk",
-		"project": "hk", "area": "hk", "labels": "hk", "claimed_by": "hk",
+		"project": "hk", "area": "hk", "claimed_by": "hk",
 		"created_by": "hk", "refs": "hk", "created_at": "hk", "updated_at": "hk",
 		"started_at": "hk", "completed_at": "hk", "canceled_at": "hk", "closed_at": "hk",
 		"parent": "hk", "children": "hk", "relations": "hk", "blockers": "hk",
@@ -491,17 +482,6 @@ func TestTaskCommentsAndEventsPaging(t *testing.T) {
 	task := newOperatorTask(t, st, "MCP paging fixture")
 	for i := 0; i < 7; i++ {
 		if _, err := st.CreateTaskComment(ctx, task.ID, "tester", fmt.Sprintf("paged comment %d", i)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for i := 0; i < 5; i++ {
-		label, err := st.SaveLabel(ctx, store.Label{
-			Name: fmt.Sprintf("mcp-page-label-%d", i), Color: "#654321", EditLevel: "anyone",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, _, err := st.SetTaskLabel(ctx, task.ID, label.ID, "tester", true); err != nil {
 			t.Fatal(err)
 		}
 	}

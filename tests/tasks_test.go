@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -133,43 +132,6 @@ func TestTaskEveryTransitionWritesOneEvent(t *testing.T) {
 		if event.TaskID != task.ID || event.From == "" || event.To == "" || event.By == "" {
 			t.Fatalf("event[%d]=%+v", i, event)
 		}
-	}
-}
-
-func TestTaskNextClaimsPriorityThenCreationOrder(t *testing.T) {
-	s := taskTestStore(t)
-	lane := taskLane(t)
-	low := newTask(t, s, lane, "low", 1)
-	highFirst := newTask(t, s, lane, "high first", 9)
-	highSecond := newTask(t, s, lane, "high second", 9)
-	for _, want := range []int64{highFirst.ID, highSecond.ID, low.ID} {
-		got, err := s.NextTask(t.Context(), lane, "captain-a", "job-1", "")
-		if err != nil || got.ID != want || got.State != "developing" {
-			t.Fatalf("got=%+v err=%v want=%d", got, err, want)
-		}
-	}
-	if _, err := s.NextTask(t.Context(), lane, "captain-a", "job-1", ""); !errors.Is(err, store.ErrQueueEmpty) {
-		t.Fatalf("empty next err=%v", err)
-	}
-}
-
-func TestTaskNextEmptyIsExplicitQueueEmptyAndCLIExitThree(t *testing.T) {
-	s := taskTestStore(t)
-	h := taskHTTP(s)
-	defer h.Close()
-	lane := taskLane(t)
-	resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/tasks/next", "node-token", map[string]string{"lane": lane, "claimed_by": "captain"})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("status=%d", resp.StatusCode)
-	}
-	var body map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || body["error"] != "queue_empty" {
-		t.Fatalf("body=%v err=%v", body, err)
-	}
-	client := remote.Client{URL: h.URL, Token: "node-token", HTTP: h.Client()}
-	if _, err := client.NextTask(t.Context(), lane, "captain", "job-1", ""); err == nil || err.Error() != "queue_empty" {
-		t.Fatalf("remote error=%v", err)
 	}
 }
 

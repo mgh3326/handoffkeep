@@ -31,7 +31,6 @@ import (
 
 const MaxBytes = 64 << 10
 const DocumentMaxBytes = 512 << 10
-const CheckpointKeep = 500
 
 var ErrTrigramUnavailable = errors.New("PostgreSQL pg_trgm extension unavailable: grant CREATE on the database/schema or install pg_trgm as an administrator")
 
@@ -39,7 +38,6 @@ var ErrTrigramUnavailable = errors.New("PostgreSQL pg_trgm extension unavailable
 // deadline (searchTimeout). The statement is cancelled on the server as well.
 var ErrSearchTimeout = errors.New("search_timeout")
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
-var kinds = map[string]bool{"checkpoint": true, "handoff": true, "decision": true, "open_question": true, "next_action": true}
 var documentKinds = map[string]bool{"brief": true, "report": true, "answer": true, "handoff": true, "note": true, "other": true, "decision": true, "research": true, "design": true, "policy": true, "evidence": true}
 var documentOriginClasses = map[string]bool{"authored": true, "job": true, "import": true}
 var taskKinds = map[string]bool{"implement": true, "verify": true, "research": true, "fix": true, "decide": true, "ops": true}
@@ -83,17 +81,6 @@ var (
 	// decision record or task comment that approved it — an exception is
 	// never automatic.
 	ErrDecisionRefRequired = errors.New("decision_ref_required")
-	// ErrBenchAreaExceptionProfileUnknown rejects an exception whose
-	// (profile, effort) has no bench_catalog row, live or retired — no
-	// exception may name a profile the catalog does not know.
-	ErrBenchAreaExceptionProfileUnknown = errors.New("bench_area_exception_profile_unknown")
-	// ErrBenchAreaExceptionConflict rejects a write that would leave prefer
-	// and exclude live for one (profile, effort, area) key. Flipping a live
-	// row's action must go through retirement first.
-	ErrBenchAreaExceptionConflict = errors.New("bench_area_exception_action_conflict")
-	// ErrQueueEmpty is deliberately distinct from a missing task.  It lets
-	// queue consumers treat an empty lane as an expected terminal condition.
-	ErrQueueEmpty = errors.New("queue_empty")
 	// ErrTaskTerminal rejects a relane on a merged or dropped task. Terminal
 	// rows are history: moving them between lanes never returns them to a
 	// queue and would falsify lane-level end-state reports.
@@ -556,7 +543,6 @@ type Task struct {
 	TriagedAt       *time.Time `json:"triaged_at"`
 	StartedTriageAt *time.Time `json:"started_triage_at"`
 	MilestoneID     *int64     `json:"milestone_id"`
-	Labels          []int64    `json:"labels"`
 	DueAt           *time.Time `json:"due_at"`
 	SLAStartedAt    *time.Time `json:"sla_started_at"`
 	SLAMediumRiskAt *time.Time `json:"sla_medium_risk_at"`
@@ -686,16 +672,6 @@ func (r *Refs) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-type Checkpoint struct {
-	ID        int64     `json:"id"`
-	Session   string    `json:"session"`
-	Kind      string    `json:"kind"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	Refs      Refs      `json:"refs"`
-	CreatedBy string    `json:"created_by"`
-	CreatedAt time.Time `json:"created_at"`
-}
 type Document struct {
 	ID        int64     `json:"id"`
 	Key       string    `json:"key"`
@@ -711,22 +687,6 @@ type Document struct {
 	TaskID *int64 `json:"task_id,omitempty"`
 	// OriginClass is authored, job or import; empty is unknown (NULL).
 	OriginClass string `json:"origin_class,omitempty"`
-}
-
-type BenchScore struct {
-	ModelID        string    `json:"model_id"`
-	Effort         string    `json:"effort"`
-	Harness        string    `json:"harness"`
-	Source         string    `json:"source"`
-	Metric         string    `json:"metric"`
-	Score          *float64  `json:"score"`
-	Rank           *int      `json:"rank"`
-	CapturedAt     time.Time `json:"captured_at"`
-	TimePerTaskMin *float64  `json:"time_per_task_min"`
-	CostPerTaskUSD *float64  `json:"cost_per_task_usd"`
-	Provenance     string    `json:"provenance"`
-	UpdatedBy      string    `json:"updated_by"`
-	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type BenchRep struct {
@@ -785,29 +745,6 @@ type BenchCatalogEntry struct {
 	DecidedAt           time.Time  `json:"decided_at"`
 	DecidedBy           string     `json:"decided_by"`
 	RetiredAt           *time.Time `json:"retired_at"`
-}
-
-// BenchAreaException is one row of the (profile, effort, area)-keyed routing
-// exception list (hk 1944, K5 of hk 1937). It sits next to the grade catalog
-// as canon but is deliberately not a grade row: a grade stays one axis, and
-// an exception only adjusts routing within or under it. Effort "" means
-// every effort of that profile; Action is the closed pair exclude|prefer.
-// DecidedBy and DecidedAt are server-set on write — unlike the catalog,
-// where the caller supplies provenance, the exception writer is always the
-// authenticated operator client. ExpiresWithModelID names the model id the
-// evidence was measured on; readers deactivate a row whose catalog model id
-// moved on.
-type BenchAreaException struct {
-	Profile            string     `json:"profile"`
-	Effort             string     `json:"effort"`
-	Area               string     `json:"area"`
-	Action             string     `json:"action"`
-	EvidenceRefs       []string   `json:"evidence_refs"`
-	DecisionRef        string     `json:"decision_ref"`
-	DecidedBy          string     `json:"decided_by"`
-	DecidedAt          time.Time  `json:"decided_at"`
-	ExpiresWithModelID string     `json:"expires_with_model_id"`
-	RetiredAt          *time.Time `json:"retired_at"`
 }
 
 // Attachment is immutable binary metadata. PostgreSQL holds the content address,
@@ -1587,25 +1524,6 @@ func validBenchClient(x string) bool {
 	return x != "" && validText(x, 128)
 }
 
-func validBenchScore(x BenchScore) bool {
-	if !validBenchRequiredText(x.ModelID) || !validBenchRequiredText(x.Source) || !validBenchRequiredText(x.Metric) ||
-		!validBenchText(x.Effort) || !validBenchText(x.Harness) || !validBenchText(x.Provenance) || !validBenchClient(x.UpdatedBy) || x.CapturedAt.IsZero() {
-		return false
-	}
-	if x.Score != nil && (math.IsNaN(*x.Score) || math.IsInf(*x.Score, 0) || *x.Score < 0 || *x.Score > 100) {
-		return false
-	}
-	if x.Rank != nil && *x.Rank < 1 {
-		return false
-	}
-	for _, value := range []*float64{x.TimePerTaskMin, x.CostPerTaskUSD} {
-		if value != nil && (math.IsNaN(*value) || math.IsInf(*value, 0) || *value < 0) {
-			return false
-		}
-	}
-	return true
-}
-
 func validBenchRep(x BenchRep) bool {
 	if x.OriginID < 1 || !validBenchText(x.Profile) || x.RecordedAt.IsZero() || !validBenchClient(x.CreatedBy) {
 		return false
@@ -1673,124 +1591,6 @@ const benchAreaExceptionMaxRefs = 64
 // Numeric refs are capped at 18 digits so every value fits an int64.
 var benchAreaExceptionTaskRefRE = regexp.MustCompile(`^hk:task/[0-9]{1,18}$`)
 var benchAreaExceptionSrvRefRE = regexp.MustCompile(`^srv:[0-9]{1,18}$`)
-
-// validBenchAreaExceptionRef accepts exactly the three evidence ref shapes:
-// hk:task/N, hk:doc/KEY and srv:N. A document key must pass the store's own
-// document key validator and use printable ASCII only (0x21-0x7e): no
-// whitespace, control or non-ASCII bytes. Anything else — other schemes,
-// bare numbers — is not evidence.
-func validBenchAreaExceptionRef(ref string) bool {
-	switch {
-	case benchAreaExceptionTaskRefRE.MatchString(ref):
-		return true
-	case benchAreaExceptionSrvRefRE.MatchString(ref):
-		return true
-	case strings.HasPrefix(ref, "hk:doc/"):
-		key := strings.TrimPrefix(ref, "hk:doc/")
-		for i := 0; i < len(key); i++ {
-			if key[i] < 0x21 || key[i] > 0x7e {
-				return false
-			}
-		}
-		return validDocKey(key)
-	}
-	return false
-}
-
-// checkBenchAreaException validates one exception row against every rule the
-// write path enforces without consulting the database: required fields, the
-// closed action, the K1 area vocabulary, and the evidence ref shapes. The
-// (profile, effort) catalog lookup happens inside the upsert transaction.
-func checkBenchAreaException(x BenchAreaException) error {
-	if !validBenchRequiredText(x.Profile) {
-		return errors.New("invalid bench area exception profile")
-	}
-	if !validText(x.Effort, 200) {
-		return errors.New("invalid bench area exception effort")
-	}
-	if err := CheckTaskArea(&x.Area); err != nil {
-		return err
-	}
-	if !benchAreaExceptionActions[x.Action] {
-		return errors.New("invalid bench area exception action")
-	}
-	if len(x.EvidenceRefs) < 1 || len(x.EvidenceRefs) > benchAreaExceptionMaxRefs {
-		return errors.New("invalid bench area exception evidence_refs")
-	}
-	for _, ref := range x.EvidenceRefs {
-		if !validBenchAreaExceptionRef(ref) {
-			return errors.New("invalid bench area exception evidence_refs")
-		}
-	}
-	if strings.TrimSpace(x.DecisionRef) == "" {
-		return ErrDecisionRefRequired
-	}
-	if !validBenchText(x.DecisionRef) {
-		return errors.New("invalid bench area exception decision_ref")
-	}
-	if !validBenchRequiredText(x.ExpiresWithModelID) {
-		return errors.New("invalid bench area exception expires_with_model_id")
-	}
-	if !validBenchClient(x.DecidedBy) {
-		return ErrDecidedByRequired
-	}
-	return nil
-}
-
-func (s *Store) UpsertBenchScores(ctx context.Context, xs []BenchScore) (int, error) {
-	if len(xs) < 1 || len(xs) > benchBatchMax {
-		return 0, errors.New("invalid bench scores")
-	}
-	for _, x := range xs {
-		if !validBenchScore(x) {
-			return 0, errors.New("invalid bench score")
-		}
-		if err := guard.Reject(x.Provenance); err != nil {
-			return 0, err
-		}
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback(ctx)
-	now := time.Now().UTC()
-	for _, x := range xs {
-		_, err = tx.Exec(ctx, `INSERT INTO bench_scores(model_id,effort,harness,source,metric,score,rank,captured_at,time_per_task_min,cost_per_task_usd,provenance,updated_by,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (model_id,effort,harness,source,metric) DO UPDATE SET score=EXCLUDED.score,rank=EXCLUDED.rank,captured_at=EXCLUDED.captured_at,time_per_task_min=EXCLUDED.time_per_task_min,cost_per_task_usd=EXCLUDED.cost_per_task_usd,provenance=EXCLUDED.provenance,updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at`, x.ModelID, x.Effort, x.Harness, x.Source, x.Metric, x.Score, x.Rank, x.CapturedAt, x.TimePerTaskMin, x.CostPerTaskUSD, x.Provenance, x.UpdatedBy, now)
-		if err != nil {
-			return 0, err
-		}
-	}
-	return len(xs), tx.Commit(ctx)
-}
-
-func (s *Store) ListBenchScores(ctx context.Context, modelID, source string, limit int) ([]BenchScore, error) {
-	if !validBenchText(modelID) || !validBenchText(source) {
-		return nil, errors.New("invalid bench score query")
-	}
-	if limit < 1 {
-		limit = benchBatchMax
-	}
-	if limit > 5000 {
-		limit = 5000
-	}
-	rows, err := s.pool.Query(ctx, `SELECT model_id,effort,harness,source,metric,score,rank,captured_at,time_per_task_min,cost_per_task_usd,provenance,updated_by,updated_at FROM bench_scores WHERE ($1='' OR model_id=$1) AND ($2='' OR source=$2) ORDER BY source,metric,model_id,effort,harness LIMIT $3`, modelID, source, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []BenchScore{}
-	for rows.Next() {
-		var x BenchScore
-		if err := rows.Scan(&x.ModelID, &x.Effort, &x.Harness, &x.Source, &x.Metric, &x.Score, &x.Rank, &x.CapturedAt, &x.TimePerTaskMin, &x.CostPerTaskUSD, &x.Provenance, &x.UpdatedBy, &x.UpdatedAt); err != nil {
-			return nil, err
-		}
-		x.CapturedAt = x.CapturedAt.UTC()
-		x.UpdatedAt = x.UpdatedAt.UTC()
-		out = append(out, x)
-	}
-	return out, rows.Err()
-}
 
 // BenchRepConflict names one input row whose (created_by, origin_id) slot is
 // already held by a different rep: its position in the batch, the client's
@@ -2240,98 +2040,6 @@ func (s *Store) ListBenchCatalog(ctx context.Context, pool string, includeRetire
 	return out, rows.Err()
 }
 
-// upsertBenchAreaException is one race-free statement. The DO UPDATE lock
-// serializes writers on the key: a racer waits for the winner and then
-// re-evaluates the WHERE against the committed row. The WHERE admits the
-// write unless both sides would be live with different actions — an
-// unconditional update for a retired row or a retirement, a same-action
-// upsert otherwise. Nothing is written when prefer and exclude would both
-// be live; the empty RETURNING surfaces that as ErrBenchAreaExceptionConflict.
-const upsertBenchAreaException = `INSERT INTO bench_area_exceptions(profile,effort,area,action,evidence_refs,decision_ref,decided_by,decided_at,expires_with_model_id,retired_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (profile,effort,area) DO UPDATE SET action=EXCLUDED.action,evidence_refs=EXCLUDED.evidence_refs,decision_ref=EXCLUDED.decision_ref,decided_by=EXCLUDED.decided_by,decided_at=EXCLUDED.decided_at,expires_with_model_id=EXCLUDED.expires_with_model_id,retired_at=EXCLUDED.retired_at WHERE bench_area_exceptions.retired_at IS NOT NULL OR EXCLUDED.retired_at IS NOT NULL OR bench_area_exceptions.action = EXCLUDED.action RETURNING profile`
-
-// UpsertBenchAreaExceptions is the operator write path for the area
-// exception list, called only after the API has stamped DecidedBy and
-// DecidedAt. The batch is atomic: every row validates first, each
-// (profile, effort) must name a bench_catalog row — live or retired — and
-// prefer and exclude may never both be live for one key, whether the
-// conflict comes from the stored row or from another row in this batch.
-func (s *Store) UpsertBenchAreaExceptions(ctx context.Context, xs []BenchAreaException) (int, error) {
-	if len(xs) < 1 || len(xs) > benchBatchMax {
-		return 0, errors.New("invalid bench area exceptions")
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback(ctx)
-	now := time.Now().UTC()
-	for _, x := range xs {
-		if err := checkBenchAreaException(x); err != nil {
-			return 0, err
-		}
-		if err := guard.Reject(x.DecisionRef); err != nil {
-			return 0, err
-		}
-		if err := guard.Reject(x.ExpiresWithModelID); err != nil {
-			return 0, err
-		}
-		for _, ref := range x.EvidenceRefs {
-			if err := guard.Reject(ref); err != nil {
-				return 0, err
-			}
-		}
-		if x.DecidedAt.IsZero() {
-			x.DecidedAt = now
-		}
-		var known bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bench_catalog WHERE profile=$1 AND effort=$2)`, x.Profile, x.Effort).Scan(&known); err != nil {
-			return 0, err
-		}
-		if !known {
-			return 0, fmt.Errorf("%w: %s effort %q", ErrBenchAreaExceptionProfileUnknown, x.Profile, x.Effort)
-		}
-		var key string
-		err = tx.QueryRow(ctx, upsertBenchAreaException, x.Profile, x.Effort, x.Area, x.Action, x.EvidenceRefs, x.DecisionRef, x.DecidedBy, x.DecidedAt, x.ExpiresWithModelID, x.RetiredAt).Scan(&key)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, fmt.Errorf("%w: %s effort %q area %s", ErrBenchAreaExceptionConflict, x.Profile, x.Effort, x.Area)
-		}
-		if err != nil {
-			return 0, err
-		}
-	}
-	return len(xs), tx.Commit(ctx)
-}
-
-// ListBenchAreaExceptions returns exception rows ordered by area, profile
-// and effort rung. Retired rows are hidden unless includeRetired is set; the
-// area filter is exact against the TaskAreas vocabulary.
-func (s *Store) ListBenchAreaExceptions(ctx context.Context, area string, includeRetired bool) ([]BenchAreaException, error) {
-	if area != "" {
-		if err := CheckTaskArea(&area); err != nil {
-			return nil, err
-		}
-	}
-	rows, err := s.pool.Query(ctx, `SELECT profile,effort,area,action,evidence_refs,decision_ref,decided_by,decided_at,expires_with_model_id,retired_at FROM bench_area_exceptions WHERE ($1='' OR area=$1) AND ($2 OR retired_at IS NULL) ORDER BY area, profile, CASE effort WHEN '' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2 WHEN 'high' THEN 3 WHEN 'xhigh' THEN 4 WHEN 'max' THEN 5 ELSE 6 END, effort`, area, includeRetired)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []BenchAreaException{}
-	for rows.Next() {
-		var x BenchAreaException
-		if err := rows.Scan(&x.Profile, &x.Effort, &x.Area, &x.Action, &x.EvidenceRefs, &x.DecisionRef, &x.DecidedBy, &x.DecidedAt, &x.ExpiresWithModelID, &x.RetiredAt); err != nil {
-			return nil, err
-		}
-		x.DecidedAt = x.DecidedAt.UTC()
-		if x.RetiredAt != nil {
-			t := x.RetiredAt.UTC()
-			x.RetiredAt = &t
-		}
-		out = append(out, x)
-	}
-	return out, rows.Err()
-}
-
 func validTaskRefs(x TaskRefs) bool {
 	for _, v := range []string{x.PR, x.HeadSHA, x.ReportPath, x.JobID} {
 		if !validText(v, 4096) {
@@ -2550,7 +2258,7 @@ func ValidBodyDoc(v string) bool {
 
 func scanTask(row interface{ Scan(...any) error }, x *Task, extra ...any) error {
 	var refs []byte
-	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.LastActivityAt, &x.BodyDoc, &x.Project, &x.Area, &x.Expected, &x.AwaitingDecision, &x.ParentID, &x.StartedAt, &x.CompletedAt, &x.CanceledAt, &x.TriagedAt, &x.StartedTriageAt, &x.MilestoneID, &x.DueAt, &x.SLAStartedAt, &x.SLAMediumRiskAt, &x.SLAHighRiskAt, &x.SLABreachesAt, &x.Source, &x.SourceRef, &x.Labels}
+	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.LastActivityAt, &x.BodyDoc, &x.Project, &x.Area, &x.Expected, &x.AwaitingDecision, &x.ParentID, &x.StartedAt, &x.CompletedAt, &x.CanceledAt, &x.TriagedAt, &x.StartedTriageAt, &x.MilestoneID, &x.DueAt, &x.SLAStartedAt, &x.SLAMediumRiskAt, &x.SLAHighRiskAt, &x.SLABreachesAt, &x.Source, &x.SourceRef}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return err
 	}
@@ -2560,7 +2268,7 @@ func scanTask(row interface{ Scan(...any) error }, x *Task, extra ...any) error 
 }
 
 const taskBaseColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,last_activity_at,body_doc,project,area,expected,awaiting_decision,parent_id,started_at,completed_at,canceled_at,triaged_at,started_triage_at,milestone_id,due_at,sla_started_at,sla_medium_risk_at,sla_high_risk_at,sla_breaches_at,source,source_ref`
-const taskColumns = taskBaseColumns + `,ARRAY(SELECT label_id FROM task_labels WHERE task_id=tasks.id ORDER BY label_id)`
+const taskColumns = taskBaseColumns
 
 // taskProjectQuerier is the row-query seam requireTaskProject runs against:
 // the caller's transaction, so membership is judged in the same snapshot the
@@ -2848,36 +2556,6 @@ func rebindableState(state string) bool {
 		return true
 	}
 	return false
-}
-
-// NextTask claims the oldest highest-priority runnable task in one
-// transaction. Like ClaimTask, the claim must carry jobID or a recorded
-// noJob reason; a bare pull is refused with ErrTaskJobRequired.
-func (s *Store) NextTask(ctx context.Context, lane, by, jobID, noJob string) (Task, error) {
-	if !validName(lane) {
-		return Task{}, errors.New("invalid task lane")
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Task{}, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-		return Task{}, err
-	}
-	var id int64
-	err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE lane=$1 AND state IN ('backlog','unstarted') AND NOT awaiting_decision AND NOT (refs ? 'disposition') ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, lane).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Task{}, ErrQueueEmpty
-	}
-	if err != nil {
-		return Task{}, err
-	}
-	x, err := s.claimTaskTx(ctx, tx, id, by, jobID, noJob)
-	if err != nil {
-		return Task{}, err
-	}
-	return x, tx.Commit(ctx)
 }
 
 // knownTaskLanesTx reports whether name is a lane some current row uses. hk
@@ -3590,37 +3268,6 @@ func (s *Store) EventWatermarks(ctx context.Context) (EventWatermarks, error) {
 	return w, err
 }
 
-// LatestCheckpointsBySession returns one newest checkpoint for every session.
-func (s *Store) LatestCheckpointsBySession(ctx context.Context, limit int) ([]Checkpoint, error) {
-	if limit < 1 {
-		limit = 100
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
-	rows, err := s.pool.Query(ctx, `SELECT id,session,kind,title,body,refs,created_by,created_at FROM (
-		SELECT DISTINCT ON (session) id,session,kind,title,body,refs,created_by,created_at
-		FROM checkpoints ORDER BY session,created_at DESC,id DESC
-	) latest ORDER BY created_at DESC,id DESC LIMIT $1`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []Checkpoint{}
-	for rows.Next() {
-		var x Checkpoint
-		var refs []byte
-		if err := rows.Scan(&x.ID, &x.Session, &x.Kind, &x.Title, &x.Body, &refs, &x.CreatedBy, &x.CreatedAt); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(refs, &x.Refs); err != nil {
-			return nil, err
-		}
-		out = append(out, x)
-	}
-	return out, rows.Err()
-}
-
 // awaitingEventSQL selects the events that set the awaiting_decision flag: the
 // current awaiting_decision rows and, for history, the transitions into the
 // old needs_decision state. History keeps the old vocabulary as written.
@@ -3741,77 +3388,6 @@ func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEv
 		return nil, err
 	}
 	return out, nil
-}
-func (s *Store) CreateCheckpoint(ctx context.Context, x Checkpoint) (Checkpoint, error) {
-	if !validName(x.Session) || !kinds[x.Kind] || x.Title == "" || !validText(x.Title, MaxBytes) || !validText(x.Body, MaxBytes) {
-		return x, errors.New("invalid checkpoint")
-	}
-	if !ValidActor(x.CreatedBy) {
-		return x, errors.New("invalid checkpoint created_by")
-	}
-	if e := guard.Reject(x.Title + "\n" + x.Body); e != nil {
-		return x, e
-	}
-	refs, e := json.Marshal(x.Refs)
-	if e != nil || len(refs) > MaxBytes {
-		return x, errors.New("invalid checkpoint refs")
-	}
-	if e = guard.Reject(string(refs)); e != nil {
-		return x, e
-	}
-	x.CreatedAt = time.Now().UTC()
-	tx, e := s.pool.Begin(ctx)
-	if e != nil {
-		return x, e
-	}
-	defer tx.Rollback(ctx)
-	e = tx.QueryRow(ctx, `INSERT INTO checkpoints(session,kind,title,body,refs,created_by,created_at) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7) RETURNING id`, x.Session, x.Kind, x.Title, x.Body, string(refs), x.CreatedBy, x.CreatedAt).Scan(&x.ID)
-	if e != nil {
-		return x, e
-	}
-	_, e = tx.Exec(ctx, `DELETE FROM checkpoints WHERE session=$1 AND id IN (SELECT id FROM checkpoints WHERE session=$1 ORDER BY created_at DESC,id DESC OFFSET $2)`, x.Session, CheckpointKeep)
-	if e != nil {
-		return x, e
-	}
-	return x, tx.Commit(ctx)
-}
-func (s *Store) RecentCheckpoints(ctx context.Context, session, kind string, limit int) ([]Checkpoint, error) {
-	if !validName(session) || (kind != "" && !kinds[kind]) {
-		return nil, errors.New("invalid checkpoint query")
-	}
-	if limit < 1 {
-		limit = 3
-	}
-	if limit > CheckpointKeep {
-		limit = CheckpointKeep
-	}
-	q := `SELECT id,session,kind,title,body,refs,created_by,created_at FROM checkpoints WHERE session=$1`
-	args := []any{session}
-	if kind != "" {
-		q += " AND kind=$2 ORDER BY created_at DESC,id DESC LIMIT $3"
-		args = append(args, kind, limit)
-	} else {
-		q += " ORDER BY created_at DESC,id DESC LIMIT $2"
-		args = append(args, limit)
-	}
-	rows, e := s.pool.Query(ctx, q, args...)
-	if e != nil {
-		return nil, e
-	}
-	defer rows.Close()
-	out := []Checkpoint{}
-	for rows.Next() {
-		var x Checkpoint
-		var r []byte
-		if e = rows.Scan(&x.ID, &x.Session, &x.Kind, &x.Title, &x.Body, &r, &x.CreatedBy, &x.CreatedAt); e != nil {
-			return nil, e
-		}
-		if e = json.Unmarshal(r, &x.Refs); e != nil {
-			return nil, e
-		}
-		out = append(out, x)
-	}
-	return out, rows.Err()
 }
 func validDocKey(k string) bool {
 	return len(k) > 0 && len(k) <= 512 && !strings.HasPrefix(k, "/") && !strings.Contains(k, "..") && !strings.ContainsRune(k, 0)
@@ -3957,13 +3533,12 @@ func validAttachmentRef(kind, id string) bool {
 	if kind == "none" {
 		return id == ""
 	}
-	if kind == "checkpoint" {
-		_, e := strconv.ParseInt(id, 10, 64)
-		return e == nil && id != ""
-	}
 	if kind == "document" {
 		return validDocKey(id)
 	}
+	// memory refs stay valid: the previous release still writes ref_kind
+	// 'memory' during the blue-green overlap, and the List filter must keep
+	// reading those rows. The memory API itself is gone.
 	if kind == "memory" {
 		a, n, ok := strings.Cut(id, "/")
 		return ok && validName(a) && validName(n)
@@ -4235,7 +3810,7 @@ func (s *Store) Search(ctx context.Context, q, scope, session string, limit int)
 // YouTrack backend calls it before asking YouTrack, so both backends refuse
 // the same inputs.
 func CheckSearch(q, scope, session string) error {
-	if strings.TrimSpace(q) == "" || !validText(q, 512) || !validText(session, 128) || (scope != "all" && scope != "ctx" && scope != "docs" && scope != "tasks") {
+	if strings.TrimSpace(q) == "" || !validText(q, 512) || !validText(session, 128) || (scope != "all" && scope != "docs" && scope != "tasks") {
 		return errors.New("invalid search")
 	}
 	return nil
@@ -4281,9 +3856,6 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 		}
 	}
 	parts := []string{}
-	if scope == "all" || scope == "ctx" {
-		parts = append(parts, `(SELECT 'ctx' scope,'' key,session,title,created_at,id row_id FROM checkpoints WHERE ($1='' OR session=$1) AND (to_tsvector('simple',title || ' ' || body) @@ plainto_tsquery('simple',$2) OR title || ' ' || body ILIKE '%' || $2 || '%') ORDER BY created_at DESC,key,session,title LIMIT $3)`)
-	}
 	if scope == "all" || scope == "docs" {
 		parts = append(parts, `(SELECT 'docs' scope,key,session,key title,created_at,id row_id FROM documents WHERE ($1='' OR session=$1) AND (to_tsvector('simple',key || ' ' || body) @@ plainto_tsquery('simple',$2) OR key || ' ' || body ILIKE '%' || $2 || '%') ORDER BY created_at DESC,key,session,title LIMIT $3)`)
 	}
@@ -4292,15 +3864,11 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 		ORDER BY created_at DESC,scope,key,session,title LIMIT $3
 	)
 	SELECT p.scope,p.key,p.session,
-		CASE p.scope WHEN 'ctx' THEN cp.kind ELSE d.kind END kind,
+		d.kind kind,
 		p.title,
-		CASE p.scope
-			WHEN 'ctx' THEN ts_headline('simple',cp.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8')
-			ELSE ts_headline('simple',d.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8')
-		END snippet,
-		CASE p.scope WHEN 'ctx' THEN cp.refs ELSE '{}'::jsonb END refs,p.created_at
+		ts_headline('simple',d.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8') snippet,
+		'{}'::jsonb refs,p.created_at
 	FROM page p
-	LEFT JOIN checkpoints cp ON p.scope='ctx' AND cp.id=p.row_id
 	LEFT JOIN documents d ON p.scope='docs' AND d.id=p.row_id
 	ORDER BY p.created_at DESC,p.scope,p.key,p.session,p.title`
 	if capture, ok := ctx.Value(searchCaptureKey{}).(searchCapture); ok {

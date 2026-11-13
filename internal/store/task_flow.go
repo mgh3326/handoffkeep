@@ -208,7 +208,7 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 		}
 		return Task{}, err
 	}
-	// Match NextTask's key-presence exclusion, including malformed/null refs.
+	// Match the claim path's key-presence exclusion, including malformed/null refs.
 	if hasDisposition {
 		return Task{}, fmt.Errorf("%w: disposition items cannot be claimed directly", ErrTaskConflict)
 	}
