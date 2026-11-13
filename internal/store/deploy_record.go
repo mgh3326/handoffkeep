@@ -24,19 +24,24 @@ var deployRecordKeyRE = regexp.MustCompile(`^deploy/([A-Za-z0-9._-]{1,128})/([0-
 // fields the writer did not know arrive as JSON null. IncludedPRs is nil when
 // the record carries null, which moves nothing.
 type DeployRecord struct {
-	Schema      string   `json:"schema"`
-	Service     string   `json:"service"`
-	Target      string   `json:"target"`
-	HeadSHA     *string  `json:"head_sha"`
-	DeployedRef *string  `json:"deployed_ref"`
-	PreviousRef *string  `json:"previous_ref"`
-	DeployedAt  *string  `json:"deployed_at"`
-	Result      string   `json:"result"`
-	FailedStep  *int     `json:"failed_step"`
-	JobID       *string  `json:"job_id"`
-	ApprovalRef *string  `json:"approval_ref"`
-	IncludedPRs []string `json:"included_prs"`
-	Source      string   `json:"source"`
+	Schema      string  `json:"schema"`
+	Service     string  `json:"service"`
+	Target      string  `json:"target"`
+	HeadSHA     *string `json:"head_sha"`
+	DeployedRef *string `json:"deployed_ref"`
+	PreviousRef *string `json:"previous_ref"`
+	DeployedAt  *string `json:"deployed_at"`
+	Result      string  `json:"result"`
+	FailedStep  *int    `json:"failed_step"`
+	// FailedStepName is the writer's name for the failed step
+	// (hk-follow: shiftgate_<svc>_exit_<rc>, healthz_<svc>,
+	// healthz_<svc>_rollback_failed, interrupted). It is the only failure
+	// reason a deploy record carries, so readers show it verbatim.
+	FailedStepName *string  `json:"failed_step_name"`
+	JobID          *string  `json:"job_id"`
+	ApprovalRef    *string  `json:"approval_ref"`
+	IncludedPRs    []string `json:"included_prs"`
+	Source         string   `json:"source"`
 }
 
 // DeployRecordKeyTime extracts the UTC timestamp embedded in a

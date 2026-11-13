@@ -38,13 +38,24 @@ func deployRepoOfPR(pr string) string {
 }
 
 type deployRecordView struct {
-	RecordKey   string     `json:"record_key"`
-	Result      string     `json:"result"`
+	RecordKey string `json:"record_key"`
+	Result    string `json:"result"`
+	// Target is the environment the record's attempt names (hk-ship/hk-follow
+	// write "ncp", "mbp", …). Empty on a record that did not name one.
+	Target      string     `json:"target,omitempty"`
+	HeadSHA     *string    `json:"head_sha"`
 	DeployedRef *string    `json:"deployed_ref"`
 	DeployedAt  *time.Time `json:"deployed_at"`
 	FailedStep  *int       `json:"failed_step"`
-	RecordedAt  time.Time  `json:"recorded_at"`
-	Source      string     `json:"source"`
+	// FailedStepName is the writer's name for the failed step — the one
+	// failure reason a deploy record carries. Null when the writer did not
+	// record one (older installer records).
+	FailedStepName *string   `json:"failed_step_name"`
+	RecordedAt     time.Time `json:"recorded_at"`
+	Source         string    `json:"source"`
+	// IncludedPRs is the record's frozen PR list: the PRs the running build
+	// carries. It is the PR→sha link of the task→PR→sha→deploy chain.
+	IncludedPRs []string `json:"included_prs"`
 	// ServingMaybeChanged is the R12 caveat: a failed record with
 	// failed_step >= 6 ran the deploy command before stopping, so the serving
 	// version may already differ from Current.
@@ -96,7 +107,24 @@ type deployServiceView struct {
 	// record exists at all).
 	MergedBoundary string             `json:"merged_boundary"`
 	MergedSince    []deployMergedTask `json:"merged_since"`
+	// State is what the records prove about the newest attempt, in the order
+	// the operator reads it: the latest attempt's outcome first, then whether
+	// merges are waiting for a deploy. States that a deploy record cannot
+	// carry (not built, disabled, check failed, awaiting approval — holds and
+	// refusals write no record, deploy/hk-follow/README.md §Report shape) are
+	// never invented here.
+	State string `json:"state"`
 }
+
+// The states deployServiceView.State can hold.
+const (
+	DeployStateDeployed     = "deployed"      // newest attempt succeeded
+	DeployStatePending      = "pending"       // newest attempt succeeded; merges wait for the next deploy
+	DeployStateDeployFailed = "deploy_failed" // newest attempt failed before the new version served
+	DeployStateHealthFailed = "health_failed" // newest attempt served, failed its health check, was rolled back
+	DeployStateNoRecord     = "no_record"     // no parseable deploy record
+	DeployStatePartial      = "partial"       // the scan stopped early: the newest record may be unscanned
+)
 
 type deployPendingResponse struct {
 	GeneratedAt time.Time           `json:"generated_at"`
@@ -184,6 +212,7 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 		MergedBoundary: "no_current",
 		MergedSince:    []deployMergedTask{},
 		Recent:         []deployRecordView{},
+		State:          DeployStateNoRecord,
 	}
 	parsed := []deployParsedDoc{}
 	seen := map[string]bool{}
@@ -263,11 +292,15 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 		return deployRecordView{
 			RecordKey:           p.key,
 			Result:              p.rec.Result,
+			Target:              p.rec.Target,
+			HeadSHA:             p.rec.HeadSHA,
 			DeployedRef:         p.rec.DeployedRef,
 			DeployedAt:          p.deployedAt,
 			FailedStep:          p.rec.FailedStep,
+			FailedStepName:      p.rec.FailedStepName,
 			RecordedAt:          p.recordedAt.UTC(),
 			Source:              p.rec.Source,
+			IncludedPRs:         append([]string{}, p.rec.IncludedPRs...),
 			ServingMaybeChanged: p.rec.Result == "failed" && p.rec.FailedStep != nil && *p.rec.FailedStep >= 6,
 		}
 	}
@@ -297,7 +330,34 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 		}
 		view.Recent = append(view.Recent, toView(p))
 	}
+	view.State = deployServiceState(view.DocsCapped, latest.rec, len(view.MergedSince))
 	return view, nil
+}
+
+// deployServiceState names what the newest record and the merged-since list
+// prove. A success with merges waiting is "pending" — the next deploy has
+// work, not that this one failed. A capped scan cannot name the newest
+// attempt at all, so it stays "partial" and the panel scopes every value.
+func deployServiceState(docsCapped bool, latest *store.DeployRecord, mergedSince int) string {
+	if docsCapped {
+		return DeployStatePartial
+	}
+	switch {
+	case latest.Result == "success":
+		if mergedSince > 0 {
+			return DeployStatePending
+		}
+		return DeployStateDeployed
+	case latest.Result == "rolled_back":
+		return DeployStateHealthFailed
+	case latest.FailedStep != nil && *latest.FailedStep >= 7:
+		// 7 (healthz, rolled back) and 8 (rollback failed) both mean the new
+		// version served and failed its health check. 6 is the deploy command
+		// itself failing (deploy/hk-follow/README.md §Report shape).
+		return DeployStateHealthFailed
+	default:
+		return DeployStateDeployFailed
+	}
 }
 
 // deployRecordLess orders success records by deployed_at, falling back to the

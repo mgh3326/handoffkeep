@@ -9,13 +9,29 @@ import { getJSON } from "../shared/http";
 export type DeployRecordView = {
   record_key: string;
   result: string;
+  /** The environment the attempt names (hk-ship/hk-follow write "ncp").
+   * Absent on a record that did not name one. */
+  target?: string;
+  /** The commit the attempt ran: the running SHA of a success record. Null
+   * when the writer recorded no head_sha — shown as an explicit gap. */
+  head_sha: string | null;
   deployed_ref: string | null;
   deployed_at: string | null;
   failed_step: number | null;
+  /** The writer's name for the failed step (hk-follow: shiftgate_…,
+   * healthz_…, interrupted) — the one failure reason a record carries. */
+  failed_step_name: string | null;
   recorded_at: string;
   source: string;
+  /** The PRs the build carries: the PR→SHA link of the chain. */
+  included_prs: string[];
   serving_maybe_changed?: boolean;
 };
+
+/** What the newest record plus the merged-since list prove. States a deploy
+ * record cannot carry (not built, disabled, check failed, awaiting approval)
+ * are never invented client-side. */
+export type DeployState = "deployed" | "pending" | "deploy_failed" | "health_failed" | "no_record" | "partial";
 
 export type DeployMergedTask = {
   task_id: number;
@@ -43,6 +59,7 @@ export type DeployServiceView = {
   invalid_count?: number;
   invalid?: DeployInvalidRecord[];
   docs_capped?: boolean;
+  state: DeployState;
   current: DeployRecordView | null;
   recent: DeployRecordView[];
   latest?: DeployRecordView;
@@ -59,6 +76,14 @@ export type DeployPendingResponse = {
 
 const MERGED_BOUNDARIES = new Set(["deployed_at", "unrecorded", "no_current"]);
 const RECORD_RESULTS = new Set(["success", "failed", "rolled_back"]);
+const DEPLOY_STATES: Record<DeployState, true> = {
+  deployed: true,
+  pending: true,
+  deploy_failed: true,
+  health_failed: true,
+  no_record: true,
+  partial: true,
+};
 
 // Every field the panel dereferences is checked, including nullable ones —
 // a record missing failed_step must not pass and render "step undefined"
@@ -71,11 +96,16 @@ const isRecordView = (v: unknown): v is DeployRecordView => {
   return (
     typeof r.record_key === "string" &&
     RECORD_RESULTS.has(r.result) &&
+    (r.target === undefined || typeof r.target === "string") &&
+    (r.head_sha === null || typeof r.head_sha === "string") &&
     (r.deployed_ref === null || typeof r.deployed_ref === "string") &&
     (r.deployed_at === null || typeof r.deployed_at === "string") &&
     (r.failed_step === null || typeof r.failed_step === "number") &&
+    (r.failed_step_name === null || typeof r.failed_step_name === "string") &&
     typeof r.recorded_at === "string" &&
     typeof r.source === "string" &&
+    Array.isArray(r.included_prs) &&
+    r.included_prs.every((pr) => typeof pr === "string") &&
     (r.serving_maybe_changed === undefined || typeof r.serving_maybe_changed === "boolean")
   );
 };
@@ -121,6 +151,7 @@ const isServiceView = (v: unknown): v is DeployServiceView => {
     (s.invalid_count === undefined || typeof s.invalid_count === "number") &&
     (s.invalid === undefined || (Array.isArray(s.invalid) && s.invalid.every(isInvalidRecord))) &&
     (s.docs_capped === undefined || typeof s.docs_capped === "boolean") &&
+    DEPLOY_STATES[s.state] === true &&
     MERGED_BOUNDARIES.has(s.merged_boundary) &&
     Array.isArray(s.merged_since) &&
     s.merged_since.every(isMergedTask) &&
