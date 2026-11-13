@@ -85,7 +85,7 @@ values, or database error text are attached.
 
 `tasks` is the durable, Postgres-backed work queue for captains. A task belongs
 to a lane; `parent_lane` lets a parent captain list pending decisions from its
-child lanes. Creation starts in `backlog`. Claiming and `next` are atomic, so
+child lanes. Creation starts in `backlog`. A claim is atomic, so
 only one session can claim an item. Every state change, including a claim, is
 recorded in `task_events`.
 
@@ -428,8 +428,7 @@ itself stays registered.
 
 The HTTP API uses the usual bearer token: `POST /v1/tasks`, `GET /v1/tasks`,
 `GET /v1/tasks/{id}`, `POST /v1/tasks/{id}/claim`, and
-`POST /v1/tasks/{id}/transition`. `POST /v1/tasks/next` supports the CLI's
-atomic `next` operation. Invalid state changes and competing claims return 409.
+`POST /v1/tasks/{id}/transition`. Invalid state changes and competing claims return 409.
 `GET /v1/capabilities` (bearer, any client) returns `{"protocol_version": N,
 "features": [...]}`: the request shapes this build accepts, such as
 `claim_job_id`, `claim_no_job`, `next_job_id`, `next_no_job`,
