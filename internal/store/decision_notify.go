@@ -140,15 +140,19 @@ const decisionMentionSQL = `coalesce(n.applied_version='' AND (coalesce(t.awaiti
 var decisionRecordColumnsD = "d." + strings.ReplaceAll(decisionRecordColumns, ",", ",d.")
 
 func scanDecisionNoticeRow(row pgx.Row, x *DecisionNotice, now time.Time, extra ...any) error {
-	var options, refsRaw []byte
+	var options, grounds, refsRaw []byte
 	r := &x.Record
-	dest := []any{&r.ID, &r.Source, &r.SourceRef, &r.TaskID, &r.JobID, &r.Lane, &r.Question, &options, &r.Recommended, &r.DefaultAction,
+	dest := []any{&r.ID, &r.Source, &r.SourceRef, &r.TaskID, &r.JobID, &r.Lane, &r.Question, &r.Reading, &grounds, &options, &r.Recommended, &r.DefaultAction,
 		&r.DueAt, &r.SnoozedUntil, &r.ExpiresAt, &r.Status, &r.Answer, &r.AnsweredBy, &r.AnsweredAt, &r.SupersededBy, &r.CreatedAt, &r.UpdatedAt, &x.TaskTitle, &refsRaw}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return err
 	}
 	var refs TaskRefs
 	if _, err := scanJSONB(refsRaw, &refs); err != nil {
+		return err
+	}
+	r.Grounds = []string{}
+	if _, err := scanJSONB(grounds, &r.Grounds); err != nil {
 		return err
 	}
 	if refs.DecisionRequest != nil && refs.DecisionRequest.ID == r.SourceRef && refs.DecisionRequest.Status == DecisionRequestOpen {

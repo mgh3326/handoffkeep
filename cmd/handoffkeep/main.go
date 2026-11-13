@@ -767,10 +767,12 @@ func decisionsCmd(args []string, out io.Writer) error {
 			return decisionBackfillCmd(args[1:], out)
 		case "hygiene":
 			return decisionHygieneCmd(args[1:], out)
+		case "record":
+			return decisionRecordCmd(args[1:], out)
 		}
 	}
 	if len(args) == 0 || args[0] != "resolve" {
-		return errors.New("usage: decisions resolve <task|escalation|lane> <id> --by <lane> --answer <answer> [--note <note>] [--no-inject]\n       " + decisionResolveRequestUsage + "\n       " + decisionAskUsage + "\n       " + decisionListUsage + "\n       " + decisionSnoozeUsage + "\n       " + decisionBackfillUsage + "\n       " + decisionHygieneUsage)
+		return errors.New("usage: decisions resolve <task|escalation|lane> <id> --by <lane> --answer <answer> [--note <note>] [--no-inject]\n       " + decisionResolveRequestUsage + "\n       " + decisionAskUsage + "\n       " + decisionListUsage + "\n       " + decisionSnoozeUsage + "\n       " + decisionBackfillUsage + "\n       " + decisionHygieneUsage + "\n       " + decisionRecordUsage)
 	}
 	if len(args) > 1 && args[1] == "request" {
 		return decisionResolveRequestCmd(args[2:], out)

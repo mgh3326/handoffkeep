@@ -168,3 +168,74 @@ func TestDecisionsHistoryPagesClosedRequests(t *testing.T) {
 		t.Fatalf("open request appeared in history: %v", seen)
 	}
 }
+
+func TestDecisionRecordAndOperatorAttentionTools(t *testing.T) {
+	st, pool := newOperatorStoreWithPool(t)
+	ctx := context.Background()
+	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, api.Tokens{"tester": "bearer-secret"}, nil))
+	defer srv.Close()
+	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+
+	type sessionDecision struct {
+		Reading  string    `json:"reading"`
+		Quote    string    `json:"quote"`
+		Decided  time.Time `json:"decided_at"`
+		Grounds  []string  `json:"grounds"`
+		Recorded string    `json:"recorded_by"`
+	}
+	type historyOut struct {
+		SessionDecisions []sessionDecision `json:"session_decisions"`
+	}
+	at := time.Date(2026, 11, 11, 5, 0, 0, 0, time.UTC)
+	args := map[string]any{
+		"key": "a27", "lane": "mcp-lane", "reading": "MCP answers count as the operator's own.",
+		"quote": "hk web and MCP can answer.", "decided_at": at.Format(time.RFC3339),
+		"grounds": []string{"hk:doc decision/2026-11-11/model-routing-escalation"},
+	}
+	recorded := callTool[store.SessionDecisionResult](t, session, "decision_record", args)
+	if recorded.Duplicate || recorded.Record.Source != store.DecisionSourceSessionChat || recorded.Record.Answer != "hk web and MCP can answer." {
+		t.Fatalf("record=%+v", recorded)
+	}
+	var auditCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM mcp_write_audit WHERE tool='decision_record' AND actor='tester' AND channel='bearer' AND idempotency_key='a27'`).Scan(&auditCount); err != nil || auditCount != 1 {
+		t.Fatalf("decision record audit count=%d err=%v", auditCount, err)
+	}
+	replay := callTool[store.SessionDecisionResult](t, session, "decision_record", args)
+	if !replay.Duplicate || replay.Record.ID != recorded.Record.ID {
+		t.Fatalf("replay=%+v", replay)
+	}
+	changed := map[string]any{}
+	for key, value := range args {
+		changed[key] = value
+	}
+	changed["quote"] = "different words"
+	if text, isError := toolText(t, session, "decision_record", changed); !isError || !strings.Contains(text, "idempotency_key_reused") {
+		t.Fatalf("changed key result=%q isError=%t", text, isError)
+	}
+	history := callTool[historyOut](t, session, "decisions_history", map[string]any{})
+	if len(history.SessionDecisions) != 1 || history.SessionDecisions[0].Quote != "hk web and MCP can answer." || history.SessionDecisions[0].Reading == "" || !history.SessionDecisions[0].Decided.Equal(at) || len(history.SessionDecisions[0].Grounds) != 1 {
+		t.Fatalf("session decisions=%+v", history.SessionDecisions)
+	}
+
+	task := newOperatorTask(t, st, "operator attention fixture")
+	_, err := st.RecordDecisionRequest(ctx, task.ID, "tester", store.DecisionRequestInput{
+		Question: "Choose?", Options: store.DecisionOptions{Options: []store.DecisionOption{{Key: "A", Label: "A"}}},
+		DefaultAction: "hold", Block: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type attentionPart struct {
+		Count int              `json:"count"`
+		Items []map[string]any `json:"items"`
+	}
+	type attentionOut struct {
+		Decisions attentionPart `json:"decisions"`
+		Tasks     attentionPart `json:"tasks"`
+		AsOf      time.Time     `json:"as_of"`
+	}
+	attention := callTool[attentionOut](t, session, "operator_attention", map[string]any{})
+	if attention.Decisions.Count != 1 || len(attention.Decisions.Items) != 1 || attention.Tasks.Count < 1 || attention.AsOf.IsZero() {
+		t.Fatalf("attention=%+v", attention)
+	}
+}

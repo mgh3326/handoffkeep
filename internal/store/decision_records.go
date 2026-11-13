@@ -54,12 +54,13 @@ const (
 	DecisionSourceJobEscalate = "job_escalate"
 	DecisionSourceLaneEvent   = "lane_event"
 	DecisionSourceChat        = "chat"
+	DecisionSourceSessionChat = "session_chat"
 	DecisionSourceLinear      = "linear"
 )
 
 // DecisionSources lists the sources in a fixed order.
 func DecisionSources() []string {
-	return []string{DecisionSourceTaskFlag, DecisionSourceTaskRequest, DecisionSourceJobEscalate, DecisionSourceLaneEvent, DecisionSourceChat, DecisionSourceLinear}
+	return []string{DecisionSourceTaskFlag, DecisionSourceTaskRequest, DecisionSourceJobEscalate, DecisionSourceLaneEvent, DecisionSourceChat, DecisionSourceSessionChat, DecisionSourceLinear}
 }
 
 const (
@@ -72,9 +73,28 @@ const (
 )
 
 var (
-	ErrDecisionRecordNotFound = errors.New("decision_record_not_found")
-	ErrDecisionRecordNotOpen  = errors.New("decision_record_not_open")
+	ErrDecisionRecordNotFound  = errors.New("decision_record_not_found")
+	ErrDecisionRecordNotOpen   = errors.New("decision_record_not_open")
+	ErrSessionDecisionConflict = errors.New("session_decision_conflict")
 )
+
+// SessionDecisionInput records a decision made in a session chat. Key makes
+// retries safe within Lane; Quote preserves the operator's words verbatim.
+type SessionDecisionInput struct {
+	Key       string    `json:"key"`
+	Lane      string    `json:"lane"`
+	By        string    `json:"-"`
+	Reading   string    `json:"reading"`
+	Quote     string    `json:"quote"`
+	DecidedAt time.Time `json:"decided_at"`
+	Grounds   []string  `json:"grounds"`
+}
+
+// SessionDecisionResult distinguishes a first write from an idempotent retry.
+type SessionDecisionResult struct {
+	Record    DecisionRecord `json:"record"`
+	Duplicate bool           `json:"duplicate"`
+}
 
 // DecisionRecord is one decision_requests row as read. Status is the stored
 // status, or expired for an open row past expires_at; Overdue and Snoozed are
@@ -87,6 +107,8 @@ type DecisionRecord struct {
 	JobID         string           `json:"job_id"`
 	Lane          string           `json:"lane"`
 	Question      string           `json:"question"`
+	Reading       string           `json:"reading,omitempty"`
+	Grounds       []string         `json:"grounds,omitempty"`
 	Options       *DecisionOptions `json:"options,omitempty"`
 	Recommended   string           `json:"recommended"`
 	DefaultAction string           `json:"default_action"`
@@ -104,12 +126,16 @@ type DecisionRecord struct {
 	UpdatedAt     time.Time        `json:"updated_at"`
 }
 
-const decisionRecordColumns = `id,source,source_ref,task_id,job_id,lane,question,options,recommended,default_action,due_at,snoozed_until,expires_at,status,answer,answered_by,answered_at,superseded_by,created_at,updated_at`
+const decisionRecordColumns = `id,source,source_ref,task_id,job_id,lane,question,reading,grounds,options,recommended,default_action,due_at,snoozed_until,expires_at,status,answer,answered_by,answered_at,superseded_by,created_at,updated_at`
 
 func scanDecisionRecord(row pgx.Row, x *DecisionRecord, now time.Time) error {
-	var options []byte
-	if err := row.Scan(&x.ID, &x.Source, &x.SourceRef, &x.TaskID, &x.JobID, &x.Lane, &x.Question, &options, &x.Recommended, &x.DefaultAction,
+	var options, grounds []byte
+	if err := row.Scan(&x.ID, &x.Source, &x.SourceRef, &x.TaskID, &x.JobID, &x.Lane, &x.Question, &x.Reading, &grounds, &options, &x.Recommended, &x.DefaultAction,
 		&x.DueAt, &x.SnoozedUntil, &x.ExpiresAt, &x.Status, &x.Answer, &x.AnsweredBy, &x.AnsweredAt, &x.SupersededBy, &x.CreatedAt, &x.UpdatedAt); err != nil {
+		return err
+	}
+	x.Grounds = []string{}
+	if _, err := scanJSONB(grounds, &x.Grounds); err != nil {
 		return err
 	}
 	x.Options = nil
@@ -476,6 +502,7 @@ type DecisionRecordFilter struct {
 	// the first row.
 	AfterCreatedAt *time.Time
 	AfterID        int64
+	NewestFirst    bool
 	// unbounded drops the 1000-row cap and ignores Limit. Only package code
 	// sets it: the ledger must see every open request, while API callers keep
 	// the cap.
@@ -545,7 +572,11 @@ func listDecisionRecords(ctx context.Context, pq poolQuerier, f DecisionRecordFi
 		args = append(args, f.AfterCreatedAt.UTC(), f.AfterID)
 		q += fmt.Sprintf(` AND (created_at,id)>($%d,$%d)`, len(args)-1, len(args))
 	}
-	q += ` ORDER BY created_at ASC,id ASC`
+	if f.NewestFirst {
+		q += ` ORDER BY created_at DESC,id DESC`
+	} else {
+		q += ` ORDER BY created_at ASC,id ASC`
+	}
 	if !f.unbounded {
 		args = append(args, f.Limit)
 		q += fmt.Sprintf(` LIMIT $%d`, len(args))
@@ -574,6 +605,123 @@ func (s *Store) GetDecisionRecord(ctx context.Context, id int64, now time.Time) 
 		return DecisionRecord{}, false, nil
 	}
 	return x, err == nil, err
+}
+
+// RecordSessionDecision creates a closed record for a new decision settled in
+// a session chat. It does not backfill decision documents. The request row is
+// the canonical record; its source_ref is stable within the settling lane.
+func (s *Store) RecordSessionDecision(ctx context.Context, in SessionDecisionInput, now time.Time, audit *MCPWrite) (SessionDecisionResult, error) {
+	if strings.TrimSpace(in.Key) == "" || len(in.Key) > 128 || strings.ContainsRune(in.Key, '\x00') ||
+		!validName(in.Lane) || !validText(in.By, 256) || strings.TrimSpace(in.By) == "" || strings.TrimSpace(in.Reading) == "" || len(in.Reading) > 2000 ||
+		strings.TrimSpace(in.Quote) == "" || len(in.Quote) > DecisionRequestTextMaxBytes || in.DecidedAt.IsZero() ||
+		len(in.Grounds) == 0 || len(in.Grounds) > DecisionRequestMaxRefs {
+		return SessionDecisionResult{}, errors.New("invalid session decision")
+	}
+	for _, value := range []string{in.Reading, in.Quote} {
+		if !validText(value, 2000) {
+			return SessionDecisionResult{}, errors.New("invalid session decision")
+		}
+	}
+	for _, ground := range in.Grounds {
+		if strings.TrimSpace(ground) == "" || len(ground) > 512 || strings.ContainsRune(ground, '\x00') {
+			return SessionDecisionResult{}, errors.New("invalid session decision ground")
+		}
+		for _, r := range ground {
+			if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
+				return SessionDecisionResult{}, errors.New("invalid session decision ground")
+			}
+		}
+	}
+	now = now.UTC()
+	decidedAt := in.DecidedAt.UTC()
+	ref := in.Lane + ":" + in.Key
+	b, err := json.Marshal(in.Grounds)
+	if err != nil {
+		return SessionDecisionResult{}, err
+	}
+	if audit != nil && (audit.Tool != "decision_record" || audit.Key != in.Key || audit.Key == "") {
+		return SessionDecisionResult{}, ErrInvalidMCPWrite
+	}
+	if audit != nil {
+		if err := audit.validate(); err != nil {
+			return SessionDecisionResult{}, err
+		}
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return SessionDecisionResult{}, err
+	}
+	defer tx.Rollback(ctx)
+	if audit != nil {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, mcpWriteLock(*audit)); err != nil {
+			return SessionDecisionResult{}, err
+		}
+		var recorded SessionDecisionResult
+		replayed, err := replayMCPWriteTx(ctx, tx, *audit, &recorded)
+		if err != nil {
+			return SessionDecisionResult{}, err
+		}
+		if replayed {
+			if !sessionDecisionMatches(recorded.Record, in) {
+				return SessionDecisionResult{}, ErrIdempotencyKeyReused
+			}
+			recorded.Duplicate = true
+			return recorded, tx.Commit(ctx)
+		}
+	}
+	var id int64
+	err = tx.QueryRow(ctx, `INSERT INTO decision_requests(source,source_ref,lane,question,reading,grounds,status,answer,answered_by,answered_at,created_at,updated_at)
+		VALUES($1,$2,$3,$4,$5,$6::jsonb,'answered',$7,$8,$9,$10,$10)
+		ON CONFLICT(source,source_ref) DO NOTHING RETURNING id`,
+		DecisionSourceSessionChat, ref, in.Lane, in.Reading, in.Reading, string(b), in.Quote, in.By, decidedAt, now).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var existing DecisionRecord
+		if err := scanDecisionRecord(tx.QueryRow(ctx, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE source=$1 AND source_ref=$2`, DecisionSourceSessionChat, ref), &existing, now); err != nil {
+			return SessionDecisionResult{}, err
+		}
+		if !sessionDecisionMatches(existing, in) {
+			return SessionDecisionResult{}, ErrSessionDecisionConflict
+		}
+		result := SessionDecisionResult{Record: existing, Duplicate: true}
+		if audit != nil {
+			if err := insertMCPWriteAuditTx(ctx, tx, *audit, 0, result, now); err != nil {
+				return SessionDecisionResult{}, err
+			}
+		}
+		return result, tx.Commit(ctx)
+	}
+	if err != nil {
+		return SessionDecisionResult{}, err
+	}
+	var record DecisionRecord
+	if err := scanDecisionRecord(tx.QueryRow(ctx, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id=$1`, id), &record, now); err != nil {
+		return SessionDecisionResult{}, err
+	}
+	result := SessionDecisionResult{Record: record}
+	if audit != nil {
+		if err := insertMCPWriteAuditTx(ctx, tx, *audit, 0, result, now); err != nil {
+			return SessionDecisionResult{}, err
+		}
+	}
+	return result, tx.Commit(ctx)
+}
+
+func sessionDecisionMatches(record DecisionRecord, in SessionDecisionInput) bool {
+	return record.SourceRef == in.Lane+":"+in.Key && record.Lane == in.Lane && record.Question == in.Reading &&
+		record.Reading == in.Reading && record.Answer == in.Quote && record.AnsweredBy == in.By && record.AnsweredAt != nil &&
+		record.AnsweredAt.Equal(in.DecidedAt.UTC()) && sameStrings(record.Grounds, in.Grounds)
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // SnoozeDecisionRecord hides an open row from the default list until until.

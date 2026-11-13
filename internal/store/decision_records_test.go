@@ -118,6 +118,38 @@ func TestDecisionRecordTaskFlag(t *testing.T) {
 	}
 }
 
+func TestRecordSessionDecisionClosesAndReplaysVerbatimRecord(t *testing.T) {
+	s := decisionStore(t)
+	now := time.Date(2026, 11, 13, 8, 0, 0, 0, time.UTC)
+	decidedAt := now.Add(-time.Hour)
+	in := SessionDecisionInput{
+		Key: "chat-42", Lane: "design-lane", By: "settling-session", Reading: "Keep the current boundary.",
+		Quote: "Keep the existing boundary as-is.", DecidedAt: decidedAt,
+		Grounds: []string{"hk:doc decision/2026-11-13/session-a", "https://example.test/ground"},
+	}
+	first, err := s.RecordSessionDecision(t.Context(), in, now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := first.Record
+	if first.Duplicate || r.Source != DecisionSourceSessionChat || r.SourceRef != "design-lane:chat-42" || r.Status != DecisionStatusAnswered ||
+		r.Question != in.Reading || r.Reading != in.Reading || r.Answer != in.Quote || r.AnsweredBy != in.By || r.AnsweredAt == nil || !r.AnsweredAt.Equal(decidedAt) || !sameStrings(r.Grounds, in.Grounds) {
+		t.Fatalf("record=%+v, duplicate=%t", r, first.Duplicate)
+	}
+	issue := decisionTextOf(r, "")
+	if issue.Reading != in.Reading || !sameStrings(issue.Grounds, in.Grounds) || issue.Answer != in.Quote {
+		t.Fatalf("YouTrack decision text=%+v", issue)
+	}
+	second, err := s.RecordSessionDecision(t.Context(), in, now.Add(time.Minute), nil)
+	if err != nil || !second.Duplicate || second.Record.ID != r.ID {
+		t.Fatalf("retry=%+v err=%v", second, err)
+	}
+	in.Quote = "Changed words"
+	if _, err := s.RecordSessionDecision(t.Context(), in, now, nil); !errors.Is(err, ErrSessionDecisionConflict) {
+		t.Fatalf("changed retry err=%v, want conflict", err)
+	}
+}
+
 // A disposition item is a task_flag question only the operator's web answer
 // resolves; any other answer leaves the item and its row open.
 func TestDecisionRecordDispositionOperatorOnly(t *testing.T) {

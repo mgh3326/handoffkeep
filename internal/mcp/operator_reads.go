@@ -143,7 +143,8 @@ var decisionHistoryFieldSources = map[string]string{
 	"status": "hk", "operator_only": "hk", "options": "hk", "recommended_option": "hk",
 	"chosen_option": "hk", "text": "hk", "receipt": "hk", "rationale": "hk",
 	"decider": "hk", "responder": "hk", "provenance": "hk", "decided_at": "hk",
-	"console_url": "hk",
+	"console_url": "hk", "record_id": "hk", "key": "hk", "lane": "hk",
+	"reading": "hk", "quote": "hk", "recorded_by": "hk", "grounds": "hk",
 }
 
 type decisionsHistoryInput struct {
@@ -195,6 +196,12 @@ func (o operatorTools) decisionsHistory(ctx context.Context, _ *gmcp.CallToolReq
 	if err != nil {
 		return nil, nil, err
 	}
+	sessionRecords, err := o.service.Store.ListDecisionRecords(ctx, store.DecisionRecordFilter{
+		Status: store.DecisionStatusAnswered, Source: store.DecisionSourceSessionChat, Limit: decisionsHistoryMaxLimit, NewestFirst: true,
+	}, time.Now().UTC())
+	if err != nil {
+		return nil, nil, err
+	}
 	hasMore := len(tasks) > limit
 	if hasMore {
 		tasks = tasks[:limit]
@@ -235,8 +242,16 @@ func (o operatorTools) decisionsHistory(ctx context.Context, _ *gmcp.CallToolReq
 		}
 		items = append(items, item)
 	}
+	sessionDecisions := make([]map[string]any, 0, len(sessionRecords))
+	for _, x := range sessionRecords {
+		sessionDecisions = append(sessionDecisions, map[string]any{
+			"record_id": x.ID, "key": x.SourceRef, "lane": x.Lane,
+			"reading": x.Reading, "quote": x.Answer, "decided_at": x.AnsweredAt,
+			"recorded_by": x.AnsweredBy, "grounds": x.Grounds,
+		})
+	}
 	return jsonResult(map[string]any{
-		"decisions": items, "truncated": hasMore, "next_cursor": next,
+		"decisions": items, "session_decisions": sessionDecisions, "truncated": hasMore, "next_cursor": next,
 		"as_of": time.Now().UTC(), "field_sources": decisionHistoryFieldSources,
 	})
 }

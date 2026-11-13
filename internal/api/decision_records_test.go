@@ -147,3 +147,28 @@ func TestDecisionRequestsListSnoozeAndSourcesAPI(t *testing.T) {
 		t.Fatalf("unauthenticated list: %d", resp.StatusCode)
 	}
 }
+
+func TestRecordSessionDecisionAPIIsIdempotentAndListed(t *testing.T) {
+	h, _ := decisionAPIServer(t)
+	in := store.SessionDecisionInput{
+		Key: "chat-a27", Lane: "design-lane", Reading: "Use the hk web and MCP paths.",
+		Quote: "Let's answer from hk web or MCP.", DecidedAt: time.Date(2026, 11, 11, 5, 0, 0, 0, time.UTC),
+		Grounds: []string{"hk:doc decision/2026-11-11/model-routing-escalation"},
+	}
+	var first store.SessionDecisionResult
+	if status := decisionAPICall(t, h, http.MethodPost, "/v1/decisions/record", in, &first); status != http.StatusCreated || first.Duplicate || first.Record.Answer != in.Quote || first.Record.AnsweredBy != "tester" {
+		t.Fatalf("first record: %d %+v", status, first)
+	}
+	var replay store.SessionDecisionResult
+	if status := decisionAPICall(t, h, http.MethodPost, "/v1/decisions/record", in, &replay); status != http.StatusOK || !replay.Duplicate || replay.Record.ID != first.Record.ID {
+		t.Fatalf("replay: %d %+v", status, replay)
+	}
+	in.Quote = "changed"
+	if status := decisionAPICall(t, h, http.MethodPost, "/v1/decisions/record", in, nil); status != http.StatusConflict {
+		t.Fatalf("key reuse status=%d, want conflict", status)
+	}
+	var listed decisionListBody
+	if status := decisionAPICall(t, h, http.MethodGet, "/v1/decision-requests?status=answered&source=session_chat", nil, &listed); status != http.StatusOK || len(listed.DecisionRequests) != 1 || listed.DecisionRequests[0].Reading != "Use the hk web and MCP paths." || len(listed.DecisionRequests[0].Grounds) != 1 {
+		t.Fatalf("listed record: %d %+v", status, listed)
+	}
+}

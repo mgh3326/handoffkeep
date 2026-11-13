@@ -83,9 +83,14 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.decisionsPending)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "decisions_history",
-		Description: "Read closed structured decision requests (answered, default_applied or withdrawn), newest task update first, up to 100 per page. Pass cursor (empty for the first page) and follow next_cursor until it is empty. Each item has its options, recommended_option and chosen_option, rationale (the request's reason), decider, responder, provenance and decided_at, text or receipt, operator_only, the linked task and console_url. Lists the current request of each task; an earlier revision that was superseded is not listed.",
+		Description: "Read closed structured decision requests and chat-settled decision records. Task requests are newest task update first, up to 100 per page; pass cursor and follow next_cursor. Session decisions appear in session_decisions with the reading, verbatim quote, decision time and ground links.",
 		Annotations: readOnlyAnnotations(),
 	}, o.decisionsHistory)
+	gmcp.AddTool(s, &gmcp.Tool{
+		Name:        "operator_attention",
+		Description: "Read the operator attention inbox: bounded lists and counts of open decisions and tasks awaiting a decision or stalled. Includes read and snooze-woken state; it does not change inbox state.",
+		Annotations: readOnlyAnnotations(),
+	}, o.operatorAttention)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "decision_answer",
 		Description: "Answer one open hk decision request by request id, with an option key or free text and an optional note. Uses the same store path and validation as the console answer. The answer is recorded with the channel it came through (mcp, or dots for the chatgpt channel). Pass idempotency_key to make a retry safe: the same key with the same answer returns the first result. A request that is operator_only is refused with decision_operator_only unless the call comes through a verified operator path; the attempt is kept and waits for that operator. An already answered or stale request returns the store's error code.",
@@ -111,6 +116,11 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 		Description: "Ask the operator a structured decision on one hk task, recorded the same way as tasks decision-request. idempotency_key is required; a repeat returns the first result. The operator answers with decision_answer; a request marked operator-only (answer_policy operator_direct) cannot be answered from this channel.",
 		Annotations: writeAnnotations(),
 	}, o.decisionAsk)
+	gmcp.AddTool(s, &gmcp.Tool{
+		Name:        "decision_record",
+		Description: "Record a new decision settled in a session chat as a closed decision request. Supply a stable key, settling lane, reading, the operator's exact quote, decision time and ground links. Reusing the key with the same values returns the original record; changed values are refused. Existing decision documents are not imported.",
+		Annotations: writeAnnotations(),
+	}, o.decisionRecord)
 	registerMetaTools(s, o)
 }
 
@@ -638,6 +648,35 @@ func (o operatorTools) decisionsPending(ctx context.Context, _ *gmcp.CallToolReq
 		decisions = append(decisions, item)
 	}
 	return jsonResult(map[string]any{"decisions": decisions, "needs_cleanup": cleanup, "truncated": truncated})
+}
+
+func (o operatorTools) operatorAttention(ctx context.Context, _ *gmcp.CallToolRequest, _ struct{}) (*gmcp.CallToolResult, any, error) {
+	now := time.Now().UTC()
+	attention, err := o.service.Store.Attention(ctx, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	decisions := make([]map[string]any, 0, len(attention.Decisions.Items))
+	for _, x := range attention.Decisions.Items {
+		decisions = append(decisions, map[string]any{
+			"key": x.Key, "source": x.Source, "source_ref": x.SourceRef, "id": x.ID,
+			"lane": x.Lane, "question": x.Question, "created_at": x.CreatedAt,
+			"due_at": x.DueAt, "overdue": x.Overdue, "read": x.Read, "woken": x.Woken,
+		})
+	}
+	tasks := make([]map[string]any, 0, len(attention.Tasks.Items))
+	for _, x := range attention.Tasks.Items {
+		tasks = append(tasks, map[string]any{
+			"key": x.Key, "id": x.ID, "title": x.Title, "lane": x.Lane,
+			"state": x.State, "priority": x.Priority, "reason": x.Reason,
+			"since": x.Since, "read": x.Read, "woken": x.Woken,
+		})
+	}
+	return jsonResult(map[string]any{
+		"decisions": map[string]any{"count": attention.Decisions.Count, "overdue": attention.Decisions.Overdue, "items": decisions},
+		"tasks":     map[string]any{"count": attention.Tasks.Count, "awaiting_decision": attention.Tasks.AwaitingDecision, "stalled": attention.Tasks.Stalled, "items": tasks},
+		"as_of":     now,
+	})
 }
 
 // decisionPendingReason says why an open request is listed. An uncleaned
