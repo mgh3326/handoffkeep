@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/guard"
-	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
 // YouTrack is the operator's screen; hk is the record agents use. PG columns
@@ -992,10 +991,6 @@ func youtrackRefusal(err error) (string, bool) {
 	case errors.Is(err, ErrTaskTerminal):
 		return "이미 종료된 작업입니다", true
 	}
-	var denied wrkrecords.Error
-	if errors.As(err, &denied) {
-		return "hk 기록 잠금이 이 상태 변경을 거부했습니다", true
-	}
 	return "", false
 }
 
@@ -1012,10 +1007,6 @@ func youtrackLaneRefusal(err error) (string, bool) {
 	}
 	if strings.HasPrefix(err.Error(), "invalid task relane") {
 		return "레인 이름이 올바르지 않습니다", true
-	}
-	var denied wrkrecords.Error
-	if errors.As(err, &denied) {
-		return "hk 기록 잠금이 레인 변경을 거부했습니다", true
 	}
 	return "", false
 }
