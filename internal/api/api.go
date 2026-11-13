@@ -514,6 +514,7 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 	}
 	out := Tokens{}
 	grants := QuotaAccounts{}
+	var retiredImportGrants []string
 	for _, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -558,8 +559,11 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 			continue
 		}
 		// Import read grants (HANDOFFKEEP_IMPORT_READONLY_*) were removed with
-		// the /v1/import feed. A leftover line is ignored, not an error.
-		if strings.HasPrefix(k, "HANDOFFKEEP_IMPORT_READONLY_") {
+		// the /v1/import feed. A grant still naming a live token would widen
+		// that token to every route, so it is checked once the tokens are
+		// known below; a grant for no live token is ignored.
+		if id, isGrant := strings.CutPrefix(k, "HANDOFFKEEP_IMPORT_READONLY_"); isGrant {
+			retiredImportGrants = append(retiredImportGrants, id)
 			continue
 		}
 		if !ok || v == "" {
@@ -586,6 +590,13 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 	}
 	if len(out) == 0 {
 		return nil, nil, errors.New("HANDOFFKEEP_AUTH_FILE contains no tokens")
+	}
+	// Refuse to start rather than silently turn an import-only client into a
+	// full bearer credential. The operator deletes the grant and the token.
+	for _, id := range retiredImportGrants {
+		if _, live := out[id]; live {
+			return nil, nil, fmt.Errorf("HANDOFFKEEP_IMPORT_READONLY_%s is retired (the /v1/import feed was removed): delete that line and revoke HANDOFFKEEP_TOKEN_%s; it would otherwise grant full access", id, id)
+		}
 	}
 	for id := range grants {
 		if _, ok := out[id]; !ok {
