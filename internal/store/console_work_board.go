@@ -72,17 +72,22 @@ func (b *TaskWorkBoard) applyJob(job Job) {
 // remains a live pending replacement.
 func (b *TaskWorkBoard) endReplacedSessions(events []taskJobBindingEvent) {
 	bound := ""
+	ended := map[string]time.Time{}
 	for _, event := range events {
 		if event.FromJob != "" {
-			b.endSession(event.FromJob, event.At)
+			ended[event.FromJob] = event.At
 		}
-		if event.JobID == "" || event.JobID == bound {
+		if event.JobID == "" {
 			continue
 		}
-		if bound != "" {
-			b.endSession(bound, event.At)
+		if bound != "" && event.JobID != bound {
+			ended[bound] = event.At
 		}
+		delete(ended, event.JobID)
 		bound = event.JobID
+	}
+	for jobID, at := range ended {
+		b.endSession(jobID, at)
 	}
 }
 

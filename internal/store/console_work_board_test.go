@@ -138,10 +138,26 @@ func TestReadTaskWorkBoardsEndsReplacedJobsFromTaskEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	placeForTask(reclaimed, "first-claim")
+	if _, err := st.RebindTaskJob(t.Context(), reclaimed.ID, "first-claim", "second-claim", "second-worker", "take over"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.TransitionTask(t.Context(), reclaimed.ID, StateUnstarted, "operator", "release for a fresh claim", nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.ClaimTask(t.Context(), reclaimed.ID, "second-worker", "second-claim", ""); err != nil {
+	if _, err := st.ClaimTask(t.Context(), reclaimed.ID, "first-worker-again", "first-claim", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	reboundBack := workBoardTask(t, st, TaskRefs{})
+	if _, err := st.ClaimTask(t.Context(), reboundBack.ID, "first-worker", "rebound-a", ""); err != nil {
+		t.Fatal(err)
+	}
+	placeForTask(reboundBack, "rebound-a")
+	placeForTask(reboundBack, "rebound-b")
+	if _, err := st.RebindTaskJob(t.Context(), reboundBack.ID, "rebound-a", "rebound-b", "second-worker", "take over"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RebindTaskJob(t.Context(), reboundBack.ID, "rebound-b", "rebound-a", "first-worker-again", "return to first job"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -156,13 +172,21 @@ func TestReadTaskWorkBoardsEndsReplacedJobsFromTaskEvents(t *testing.T) {
 		t.Fatalf("unreplaced placement = %+v, found %t", pendingSession, ok)
 	}
 
-	claimBoards, err := st.ReadTaskWorkBoards(t.Context(), []Task{reclaimed})
+	claimBoards, err := st.ReadTaskWorkBoards(t.Context(), []Task{reclaimed, reboundBack})
 	if err != nil {
 		t.Fatal(err)
 	}
 	firstClaim, ok := byJob(claimBoards[reclaimed.ID], "first-claim")
-	if !ok || firstClaim.Active || firstClaim.EndedAt.IsZero() {
-		t.Fatalf("session replaced by a later claim = %+v, found %t", firstClaim, ok)
+	if !ok || !firstClaim.Active {
+		t.Fatalf("session after release and re-claim = %+v, found %t", firstClaim, ok)
+	}
+	firstAgain, ok := byJob(claimBoards[reboundBack.ID], "rebound-a")
+	if !ok || !firstAgain.Active {
+		t.Fatalf("session after A→B→A rebind = %+v, found %t", firstAgain, ok)
+	}
+	second, ok := byJob(claimBoards[reboundBack.ID], "rebound-b")
+	if !ok || second.Active || second.EndedAt.IsZero() {
+		t.Fatalf("session after replacing B with A = %+v, found %t", second, ok)
 	}
 }
 
