@@ -51,7 +51,7 @@ func TestUIDecisions(t *testing.T) {
 	if body := responseText(t, serviceResponse); serviceResponse.StatusCode != http.StatusForbidden || !strings.Contains(body, `"forbidden"`) {
 		t.Fatalf("service status=%d body=%s", serviceResponse.StatusCode, body)
 	}
-	for path, want := range map[string]int{"/ui/decisions": 200, fmt.Sprintf("/ui/decisions/%d", id): 200, "/ui/decisions/abc": 400, "/ui/decisions/legacy": 200, "/ui/api/decisions/999999999": 404, "/ui/api/decisions?tab=x": 400} {
+	for path, want := range map[string]int{"/ui/decisions": 200, fmt.Sprintf("/ui/decisions/%d", id): 200, "/ui/decisions/abc": 400, "/ui/api/decisions/999999999": 404, "/ui/api/decisions?tab=x": 400} {
 		r := uiRequest(t, h.Client(), http.MethodGet, h.URL+path, token, "")
 		body := responseText(t, r)
 		if r.StatusCode != want {

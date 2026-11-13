@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 	"github.com/mgh3326/handoffkeep/internal/ui"
@@ -60,11 +59,6 @@ func seedPolicyDoc(t *testing.T, s *store.Store, key, body string) {
 	}
 }
 
-func boardPolicyKey(t *testing.T, suffix string) string {
-	t.Helper()
-	return fmt.Sprintf("policy/test-%d-%s", time.Now().UnixNano(), suffix)
-}
-
 func TestUIBoardAuthBoundary(t *testing.T) {
 	s := uiStore(t)
 	fixture := newUIJWTFixture(t)
@@ -72,7 +66,7 @@ func TestUIBoardAuthBoundary(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 
-	for _, path := range []string{"/ui/api/board/tasks", "/ui/api/board/tasks/1", "/ui/api/policy/active", "/ui/queue", "/ui/tasks/1"} {
+	for _, path := range []string{"/ui/api/board/tasks", "/ui/api/board/tasks/1", "/ui/queue", "/ui/tasks/1"} {
 		response := uiRequest(t, h.Client(), http.MethodGet, h.URL+path, "", "")
 		if response.StatusCode != http.StatusUnauthorized || responseText(t, response) != "" {
 			t.Fatalf("%s unauthenticated status=%d", path, response.StatusCode)
@@ -92,7 +86,7 @@ func TestUIBoardAuthBoundary(t *testing.T) {
 	service := newP3UITestServer(t, s, fixture, "", "", []string{"glance-fixture"})
 	defer service.Close()
 	serviceAssertion := p3ServiceAssertion(t, fixture)
-	for _, path := range []string{"/ui/api/board/tasks", "/ui/api/policy/active"} {
+	for _, path := range []string{"/ui/api/board/tasks"} {
 		response := p3Request(t, service.Client(), http.MethodGet, service.URL+path, serviceAssertion, nil, "")
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("service %s status=%d body=%q", path, response.StatusCode, responseText(t, response))
@@ -132,7 +126,7 @@ func TestUIBoardPageCSPAndNoSecret(t *testing.T) {
 		}
 		response.Body.Close()
 	}
-	for _, path := range []string{"/ui/api/board/tasks", "/ui/api/policy/active"} {
+	for _, path := range []string{"/ui/api/board/tasks"} {
 		response = uiRequest(t, h.Client(), http.MethodGet, h.URL+path, assertion, "")
 		body = responseText(t, response)
 		if response.Header.Get("Cache-Control") != "no-store" {
@@ -473,117 +467,6 @@ func TestUIBoardTaskDetailRepsTruncated(t *testing.T) {
 	}
 }
 
-func TestUIBoardPolicyActive(t *testing.T) {
-	s := uiStore(t)
-	fixture := newUIJWTFixture(t)
-	h := newUITestServer(t, s, fixture, "", "", 0)
-	defer h.Close()
-	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-
-	// policy/active is a single fixed key in a shared database: remove any
-	// pointer a previous run left behind so each status is exercised from a
-	// known state.
-	db, err := pgx.Connect(t.Context(), testdb.URL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close(t.Context())
-	if _, err := db.Exec(t.Context(), `DELETE FROM documents WHERE key='policy/active' OR key LIKE 'policy/test-%'`); err != nil {
-		t.Fatal(err)
-	}
-
-	type policy struct {
-		Status        string `json:"status"`
-		PointerKey    string `json:"pointer_key"`
-		PointerDocURL string `json:"pointer_doc_url"`
-		ManifestKey   string `json:"manifest_key"`
-		ManifestURL   string `json:"manifest_doc_url"`
-		Release       string `json:"release"`
-		Items         []struct {
-			Key    string `json:"key"`
-			Title  string `json:"title"`
-			DocURL string `json:"doc_url"`
-			Exists bool   `json:"exists"`
-		} `json:"items"`
-		Truncated bool `json:"truncated"`
-	}
-	get := func() policy {
-		var out policy
-		if status := boardJSON(t, h.Client(), h.URL+"/ui/api/policy/active", assertion, &out); status != http.StatusOK {
-			t.Fatalf("policy status=%d", status)
-		}
-		return out
-	}
-
-	if got := get(); got.Status != "not_configured" || got.PointerKey != "policy/active" || len(got.Items) != 0 {
-		t.Fatalf("empty policy=%+v", got)
-	}
-
-	seedPolicyDoc(t, s, "policy/active", "not a valid key")
-	if got := get(); got.Status != "invalid_pointer" {
-		t.Fatalf("bad pointer=%+v", got)
-	}
-
-	manifest := boardPolicyKey(t, "manifest")
-	seedPolicyDoc(t, s, "policy/active", manifest+"\n")
-	if got := get(); got.Status != "manifest_missing" || got.ManifestKey != manifest || got.ManifestURL != "/ui/doc/"+manifest {
-		t.Fatalf("missing manifest=%+v", got)
-	}
-
-	seedPolicyDoc(t, s, manifest, "{not json")
-	if got := get(); got.Status != "invalid_manifest" {
-		t.Fatalf("bad manifest=%+v", got)
-	}
-
-	seedPolicyDoc(t, s, manifest, `{"release":"r1","items":[{"key":"bad key!"}]}`)
-	if got := get(); got.Status != "invalid_manifest" {
-		t.Fatalf("bad item key=%+v", got)
-	}
-
-	// The manifest must be one complete JSON document: a second value or any
-	// trailing non-whitespace content is invalid, not silently ignored.
-	seedPolicyDoc(t, s, manifest, `{"release":"r1","items":[]} {"extra":1}`)
-	if got := get(); got.Status != "invalid_manifest" {
-		t.Fatalf("trailing json manifest=%+v", got)
-	}
-	seedPolicyDoc(t, s, manifest, `{"release":"r1","items":[]} junk`)
-	if got := get(); got.Status != "invalid_manifest" {
-		t.Fatalf("trailing junk manifest=%+v", got)
-	}
-
-	itemA := boardPolicyKey(t, "a")
-	itemB := boardPolicyKey(t, "b")
-	seedPolicyDoc(t, s, itemA, "doc A body")
-	seedPolicyDoc(t, s, manifest, fmt.Sprintf(`{"release":"2026-09-19","items":[{"key":%q,"title":"Doc A"},{"key":%q}]}`+"\n  \n", itemA, itemB))
-	got := get()
-	if got.Status != "ok" || got.Release != "2026-09-19" || len(got.Items) != 2 {
-		t.Fatalf("ok policy=%+v", got)
-	}
-	if got.Items[0].Key != itemA || got.Items[0].Title != "Doc A" || got.Items[0].DocURL != "/ui/doc/"+itemA || !got.Items[0].Exists {
-		t.Fatalf("item A=%+v", got.Items[0])
-	}
-	if got.Items[1].Key != itemB || got.Items[1].Exists {
-		t.Fatalf("missing item not explicit: %+v", got.Items[1])
-	}
-
-	// The manifest is bounded: beyond the cap the response reports truncation
-	// rather than implying complete coverage.
-	var bulk strings.Builder
-	bulk.WriteString(`{"release":"bulk","items":[`)
-	for i := 0; i < 205; i++ {
-		if i > 0 {
-			bulk.WriteString(",")
-		}
-		fmt.Fprintf(&bulk, `{"key":%q}`, boardPolicyKey(t, strconv.Itoa(i)))
-	}
-	bulk.WriteString(`]}`)
-	seedPolicyDoc(t, s, manifest, bulk.String())
-	got = get()
-	if got.Status != "ok" || !got.Truncated || len(got.Items) != 200 {
-		t.Fatalf("bulk policy status=%q truncated=%t items=%d", got.Status, got.Truncated, len(got.Items))
-	}
-}
-
 // A closed pool makes every store call fail; the BFF must surface the
 // unavailable state as a bounded 500, not a partial payload.
 func TestUIBoardStoreFailure(t *testing.T) {
@@ -597,7 +480,7 @@ func TestUIBoardStoreFailure(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	s.Close()
-	for _, path := range []string{"/ui/api/board/tasks", "/ui/api/board/tasks/1", "/ui/api/policy/active"} {
+	for _, path := range []string{"/ui/api/board/tasks", "/ui/api/board/tasks/1"} {
 		response := uiRequest(t, h.Client(), http.MethodGet, h.URL+path, assertion, "")
 		if response.StatusCode != http.StatusInternalServerError {
 			t.Fatalf("%s status=%d", path, response.StatusCode)

@@ -76,21 +76,6 @@ var ConsoleWrites = []ConsoleWrite{
 		Except: "follow-up: hk 3474 — re-notifying a recorded disposition belongs to the attention inbox.",
 	},
 	{
-		Route:  "/ui/decisions/answer",
-		Source: "/ui/decisions/answer",
-		Except: "operator-only: the generic task/escalation/lane answer emits a lane event and transitions; structured requests use /ui/api/decision-requests/resolve, which maps to decision_answer.",
-	},
-	{
-		Route:  "/ui/decisions/answer-batch",
-		Source: "/ui/decisions/answer-batch",
-		Except: "operator-only: the generic batch answer is superseded by structured requests; its MCP bulk equivalent is hk 3474.",
-	},
-	{
-		Route:  "/ui/compose",
-		Source: "/ui/compose",
-		Except: "operator-only: compose sends one free-text lane event to a configured lane; it is a relay message, not task data.",
-	},
-	{
 		Route:  "/ui/tasks/{id}/comments",
 		Source: "taskCommentsPathRE",
 		MCP:    []string{"task_comment"},

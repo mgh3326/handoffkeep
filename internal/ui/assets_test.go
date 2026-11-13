@@ -23,16 +23,8 @@ func newAssetTestHandler(t *testing.T, version string) *Handler {
 	}
 	h := &Handler{static: static, assetVersion: version}
 	tmpl, err := template.New("ui").Funcs(template.FuncMap{
-		"formatTime":       formatTime,
-		"formatTimePtr":    formatTimePtr,
-		"shortHead":        shortHead,
-		"githubLink":       githubLink,
-		"message":          messageParts,
-		"ingressLabel":     ingressLabel,
-		"decisionFormData": decisionFormData,
-		"eventFormData":    eventFormData,
-		"assetURL":         h.assetURL,
-	}).ParseFS(assets, "templates/*.html")
+		"assetURL": h.assetURL,
+	}).ParseFS(assets, "templates/console.html")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +83,7 @@ func TestAssetURLUnstampedDisablesCaching(t *testing.T) {
 	if !strings.Contains(body, "/ui/static/console/shell.js") {
 		t.Fatalf("unstamped page did not reference shell.js: %q", body)
 	}
-	for _, target := range []string{"/ui/static/console/shell.js", "/ui/static/console/shared-client.js", "/ui/static/htmx.min.js"} {
+	for _, target := range []string{"/ui/static/console/shell.js", "/ui/static/console/shared-client.js"} {
 		if rec := serveStatic(t, h, target); rec.Header().Get("Cache-Control") != "no-cache" {
 			t.Fatalf("unstamped %s cache-control=%q — must not stay long-lived", target, rec.Header().Get("Cache-Control"))
 		}
