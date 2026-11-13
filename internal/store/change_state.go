@@ -509,8 +509,6 @@ type changeLock struct {
 	mergedAt                                                                      *time.Time
 	draft                                                                         *bool
 	stateObserved, checksObserved, threadsObserved, findingsObserved, gateDecided *time.Time
-	// gateState and gateHead are the verdict the snapshot held before this write.
-	gateState, gateHead *string
 }
 
 // stubHead is the head a new row starts at: the first one a section names.
@@ -537,9 +535,9 @@ VALUES($1,$2,'open',$3,$4,$4,$4) ON CONFLICT(repo,pr_number) DO NOTHING`, b.Repo
 		return changeLock{}, err
 	}
 	var c changeLock
-	err := tx.QueryRow(ctx, `SELECT id,state,head_sha,base_sha,merge_sha,base_ref,title,author,merged_at,draft,state_observed_at,checks_observed_at,threads_observed_at,findings_observed_at,gate_decided_at,gate_state,gate_head
+	err := tx.QueryRow(ctx, `SELECT id,state,head_sha,base_sha,merge_sha,base_ref,title,author,merged_at,draft,state_observed_at,checks_observed_at,threads_observed_at,findings_observed_at,gate_decided_at
 FROM changes WHERE repo=$1 AND pr_number=$2 FOR UPDATE`, b.Repo, b.PR).Scan(&c.id, &c.state, &c.head, &c.base, &c.mergeSHA, &c.baseRef, &c.title, &c.author, &c.mergedAt, &c.draft,
-		&c.stateObserved, &c.checksObserved, &c.threadsObserved, &c.findingsObserved, &c.gateDecided, &c.gateState, &c.gateHead)
+		&c.stateObserved, &c.checksObserved, &c.threadsObserved, &c.findingsObserved, &c.gateDecided)
 	return c, err
 }
 
@@ -796,14 +794,6 @@ func applyGateTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeGateWrite
 	}
 	raw, err := json.Marshal(reasons)
 	if err != nil {
-		return ChangeSectionResult{}, err
-	}
-	// The history the Discord poster reads (change_gate_events, hk 4000). A
-	// decision that repeats the held verdict is recorded but not changed.
-	changed := c.gateState == nil || c.gateHead == nil || *c.gateState != w.State || *c.gateHead != w.HeadSHA
-	if _, err := tx.Exec(ctx, `INSERT INTO change_gate_events(change_id,head_sha,state,changed,reasons,policy_revision,decided_at,source)
-VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8) ON CONFLICT(change_id,head_sha,state,decided_at) DO NOTHING`,
-		c.id, w.HeadSHA, w.State, changed, string(raw), nullStr(w.PolicyRevision), w.DecidedAt, source); err != nil {
 		return ChangeSectionResult{}, err
 	}
 	err = updateChangeCols(ctx, tx, c.id, nil,

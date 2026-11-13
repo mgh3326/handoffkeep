@@ -58,6 +58,43 @@ func TestChangeGateDecisionsAreAppendOnly(t *testing.T) {
 	}
 }
 
+// A gate write that bypasses applyGateTx, as the previous release's writer
+// does, still leaves a history row: the trigger records it (hk 4000).
+func TestChangeGateEventsRecordEveryWriter(t *testing.T) {
+	s := schemaStore(t, "change_gate_events_writer")
+	ctx := t.Context()
+	ref := ChangeRef{Repo: "example/app", PR: 23}
+	now := time.Now().UTC()
+	if _, err := s.ApplyChangeGate(ctx, ref, ChangeGateWrite{HeadSHA: testSHA1, State: "ready", DecidedAt: now.Add(-2 * time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE changes SET gate_state='blocked', gate_reasons='[]', gate_decided_at=$3
+		WHERE repo=$1 AND pr_number=$2`, ref.Repo, ref.PR, now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT e.state,e.changed FROM change_gate_events e JOIN changes c ON c.id=e.change_id
+		WHERE c.repo=$1 AND c.pr_number=$2 ORDER BY e.id`, ref.Repo, ref.PR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var state string
+		var changed bool
+		if err := rows.Scan(&state, &changed); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, fmt.Sprintf("%s/%t", state, changed))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"ready/true", "blocked/true"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("gate events %v, want %v", got, want)
+	}
+}
+
 // The migration keeps the gate snapshot as history and rewrites the keys the
 // old poster posted, so an upgrade does not post a verdict a second time (hk 4000).
 func TestChangeGateEventsMigrationKeepsPostedVerdicts(t *testing.T) {
@@ -86,6 +123,7 @@ func TestChangeGateEventsMigrationKeepsPostedVerdicts(t *testing.T) {
 	// goes, and the delivery holds the key the old poster wrote for the verdict.
 	oldKey := fmt.Sprintf("g:%d:%s:ready", changeID, testSHA1)
 	exec(`INSERT INTO change_tasks(change_id,task_id,relation,created_at) VALUES($1,$2,'implements',$3)`, changeID, task.ID, now)
+	exec(`DROP TRIGGER change_gate_events_record ON changes`)
 	exec(`DROP TABLE change_gate_events`)
 	exec(`INSERT INTO task_thread_deliveries(task_id,destination,thread_id,thread_name,start_event_id,since,last_event_id,posted,state,next_attempt_at,created_at,updated_at)
 		VALUES($1,'discord','4242','#1 gate',0,$2,0,ARRAY[$3]::text[],'active',$4,$4,$4)`, task.ID, now.Add(-2*time.Hour), oldKey, now)
