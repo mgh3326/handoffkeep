@@ -24,12 +24,23 @@ import (
 )
 
 const (
-	DefaultMaxBytes         int64 = 50 << 20
-	DefaultStorageCap       int64 = 20_000_000_000
-	DefaultPutCap           int64 = 800000
-	DefaultGetCap           int64 = 8000000
-	DefaultStagingCap       int64 = 1 << 30
-	DefaultStagingClientCap int64 = 256 << 20
+	// OCI Object Storage accepts a single PutObject up to 50 GiB. Direct
+	// uploads use that path; multipart is unnecessary at the service ceiling.
+	DefaultMaxBytes int64 = 50 << 30
+	// BufferedCompletionMaxBytes is one quarter of Handoffkeep's 1 GiB
+	// container memory limit (docker HostConfig.Memory on ncp). Completion
+	// currently buffers the verified object before promotion, so this fuse
+	// bounds that request path until streaming completion lands (hk 4466).
+	BufferedCompletionMaxBytes int64 = 256 << 20
+	// DefaultStorageCap is the account storage fuse; its OCI allowance basis
+	// is still to confirm.
+	DefaultStorageCap int64 = 20_000_000_000 // OCI allowance — to confirm
+	DefaultPutCap     int64 = 800000
+	DefaultGetCap     int64 = 8000000
+	// Each staging fuse permits one OCI-maximum object to be in flight; the
+	// account storage fuse remains the independent stored-bytes limit.
+	DefaultStagingCap       int64 = DefaultMaxBytes
+	DefaultStagingClientCap int64 = DefaultMaxBytes
 )
 
 // DefaultMIMEAllow is the MIME allowlist used when HK_ATTACH_MIME_ALLOW is
@@ -127,6 +138,9 @@ func ConfigFromPrefix(prefix string) (Config, bool, error) {
 	var e error
 	if c.MaxBytes, e = envInt("HK_ATTACH_MAX_BYTES", DefaultMaxBytes); e != nil {
 		return c, false, e
+	}
+	if c.MaxBytes > DefaultMaxBytes {
+		return c, false, fmt.Errorf("HK_ATTACH_MAX_BYTES cannot exceed OCI PutObject's 50 GiB limit")
 	}
 	if c.StorageCap, e = envInt("HK_ATTACH_STORAGE_CAP_BYTES", DefaultStorageCap); e != nil {
 		return c, false, e
@@ -578,7 +592,7 @@ func (m *Manager) List(ctx context.Context, ref string, limit int) ([]store.Atta
 	if ref == "" {
 		return m.Store.ListAttachments(ctx, "", "", limit)
 	}
-	k, id, e := ParseRef(ref)
+	k, id, e := parseListRef(ref)
 	if e != nil {
 		return nil, e
 	}
@@ -589,6 +603,17 @@ func (m *Manager) Usage(ctx context.Context) (store.AttachmentUsage, error) {
 		return store.AttachmentUsage{}, ErrDisabled
 	}
 	return m.Store.AttachmentUsage(ctx)
+}
+
+// parseListRef is ParseRef plus the ref kinds only a read may name: the
+// previous release still writes ref_kind 'checkpoint' rows during the
+// blue-green overlap, and the List filter must keep reading them. Upload paths
+// call ParseRef, so a new checkpoint ref is still refused.
+func parseListRef(ref string) (string, string, error) {
+	if v, ok := strings.CutPrefix(ref, "checkpoint:"); ok {
+		return "checkpoint", v, nil
+	}
+	return ParseRef(ref)
 }
 func ParseRef(ref string) (string, string, error) {
 	if ref == "" || ref == "none" {

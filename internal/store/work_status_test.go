@@ -38,6 +38,14 @@ func TestWorkStatusRead(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.PutDeployService(ctx, DeployService{
+		Name:           "canonical-hub",
+		Repo:           "mgh3326/canonical-hub",
+		RecordPrefixes: []string{"deploy/legacy-hub/"},
+		Active:         true,
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	hkDeployTime := time.Date(2026, 11, 12, 7, 0, 0, 0, time.UTC)
 	pwDeployTime := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
@@ -52,6 +60,31 @@ func TestWorkStatusRead(t *testing.T) {
 	if _, err := st.pool.Exec(ctx, `INSERT INTO documents(key, kind, session, job, body, sha256, created_by, created_at, updated_at) VALUES($1, 'report', '', '', $2, 'sha2', 'test', $3, $3)`,
 		"deploy/panewire-hub/20261111T120000Z", pwDeployDoc, pwDeployTime); err != nil {
 		t.Fatal(err)
+	}
+	// Backfilled records can omit deployed_at, and a legacy prefix can still
+	// contain a record written under the canonical configured service name.
+	canonicalBackfillTime := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	canonicalBackfillDoc := `{"schema":"deploy-record/v0","service":"canonical-hub","result":"success","source":"backfill"}`
+	if _, _, err := st.PutDocument(ctx, Document{
+		Key:       "deploy/legacy-hub/20261110T120000Z",
+		Kind:      "report",
+		Session:   "test",
+		Body:      canonicalBackfillDoc,
+		CreatedBy: "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastDeploys, err := readProjectLastSuccessfulDeploysTx(ctx, tx)
+	_ = tx.Rollback(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := lastDeploys["canonical-hub"]; !ok || !got.Equal(canonicalBackfillTime) {
+		t.Fatalf("canonical service deploy boundary=(%s,%v), want %s from its legacy-prefix backfill", got, ok, canonicalBackfillTime)
 	}
 
 	setTask := func(id int64, state string, createdAt time.Time, claimedBy string) {

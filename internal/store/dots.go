@@ -724,8 +724,8 @@ func dotsResultBody(kind string, issue DotsIssue, c DotsComment) string {
 	return "# [dots] " + kind + " " + issue.Identifier + " — " + issue.Title + "\n\n" + issue.URL + "\n\n" + c.Body + "\n"
 }
 
-// dotsLaneText makes a notification drainable: the hub rejects C0/C1 control
-// characters and text over the lane-event byte cap.
+// dotsLaneText replaces controls that the hub rejects while retaining the
+// full event text.
 func dotsLaneText(text string) string {
 	return assistantLaneText("", strings.Map(func(r rune) rune {
 		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {

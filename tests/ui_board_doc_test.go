@@ -95,7 +95,7 @@ func TestUIBoardDoc(t *testing.T) {
 	large := strings.Repeat("a", 256<<10+1)
 	seedPolicyDoc(t, s, base+"/large", large)
 	got = boardDocPayload{}
-	if status := boardJSON(t, h.Client(), docURL(base+"/large"), assertion, &got); status != http.StatusOK || got.Format != "unsupported" || got.Reason != "too_large" || got.Body != large {
+	if status := boardJSON(t, h.Client(), docURL(base+"/large"), assertion, &got); status != http.StatusOK || got.Format != "markdown" || got.Reason != "" || got.Body != large || got.Bytes != len(large) {
 		t.Fatalf("large status=%d format=%q reason=%q bytes=%d", status, got.Format, got.Reason, got.Bytes)
 	}
 
