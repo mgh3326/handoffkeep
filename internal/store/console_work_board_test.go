@@ -212,3 +212,60 @@ func TestTaskWorkBoardPlacementOrder(t *testing.T) {
 		t.Fatal(view)
 	}
 }
+
+// endReplacedSessions must end only jobs replaced and not later rebound, each
+// at its last unbind time. A job rebound back (A->B->A) or re-claimed after a
+// release stays Active.
+func TestEndReplacedSessionsFollowsBindingHistory(t *testing.T) {
+	t0 := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	at := func(m int) time.Time { return t0.Add(time.Duration(m) * time.Minute) }
+	cases := []struct {
+		name   string
+		events []taskJobBindingEvent
+		ended  map[string]time.Time
+	}{
+		{
+			name:   "rebound back A->B->A keeps A active and ends B",
+			events: []taskJobBindingEvent{{JobID: "A", At: at(1)}, {JobID: "B", FromJob: "A", At: at(2)}, {JobID: "A", FromJob: "B", At: at(3)}},
+			ended:  map[string]time.Time{"B": at(3)},
+		},
+		{
+			name:   "release then re-claim A keeps A active",
+			events: []taskJobBindingEvent{{JobID: "A", At: at(1)}, {JobID: "B", FromJob: "A", At: at(2)}, {JobID: "B", At: at(3)}, {JobID: "A", At: at(4)}},
+			ended:  map[string]time.Time{"B": at(4)},
+		},
+		{
+			name:   "reopen clears job then re-claim A keeps A active",
+			events: []taskJobBindingEvent{{JobID: "A", At: at(1)}, {At: at(2)}, {JobID: "A", At: at(3)}},
+			ended:  map[string]time.Time{},
+		},
+		{
+			name:   "A->B->C ends A at its replacement and B at its replacement",
+			events: []taskJobBindingEvent{{JobID: "A", At: at(1)}, {JobID: "B", FromJob: "A", At: at(2)}, {JobID: "C", FromJob: "B", At: at(3)}},
+			ended:  map[string]time.Time{"A": at(2), "B": at(3)},
+		},
+		{
+			name:   "placed but never claimed stays active",
+			events: []taskJobBindingEvent{{JobID: "A", At: at(1)}},
+			ended:  map[string]time.Time{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var b TaskWorkBoard
+			for _, id := range []string{"A", "B", "C"} {
+				b.Sessions = append(b.Sessions, TaskWorkSession{JobID: id, Active: true})
+			}
+			b.endReplacedSessions(tc.events)
+			for _, s := range b.Sessions {
+				want, wantEnded := tc.ended[s.JobID]
+				if s.Active == wantEnded {
+					t.Fatalf("%s: active=%v, want ended=%v (%+v)", s.JobID, s.Active, wantEnded, s)
+				}
+				if wantEnded && !s.EndedAt.Equal(want) {
+					t.Fatalf("%s: EndedAt=%v, want %v", s.JobID, s.EndedAt, want)
+				}
+			}
+		})
+	}
+}
