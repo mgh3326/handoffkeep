@@ -257,7 +257,7 @@ func TestClaimSetsSubstateFromKind(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := t.Context()
 	for _, state := range []string{"backlog", "unstarted"} {
-		for kind, want := range map[string]string{"implement": "developing", "fix": "developing", "ops": "developing", "verify": "researching", "decide": "researching"} {
+		for kind, want := range map[string]string{"implement": "developing", "fix": "developing", "ops": "developing", "verify": "researching", "research": "researching", "decide": "researching"} {
 			x := flowTask(t, s, pool, kind, state, false)
 			got, err := s.ClaimTask(ctx, x.ID, "worker-1", "job-"+kind+"-"+state, "")
 			if err != nil {
