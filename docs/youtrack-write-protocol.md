@@ -661,31 +661,60 @@ its reads scan `origin` as a string, and it never names the new table
 During the rollout nobody runs `youtrack canary add` from the previous
 release: it does not take the ownership lock or check bindings.
 
-**Stop and rollback.** Set `HANDOFFKEEP_YT_COMMENTS_MODE=canary` **before**
-`shiftgate rollback`: a release older than this one fails startup on `on`.
-In mode `canary` the ops prepared in mode `on` for tasks outside the canary
-are held, not lost: they stay `prepared`, visible in `yt ops`, and their
-comments are owned by their links, so neither the legacy push nor the import
-sends them. Setting `on` again releases them. There is no unbind command yet
-and no recovery of held ops; both come with the automatic binder (follow-up).
+**Stop and rollback.** `handoffkeep youtrack comments-drain [--tenant T]
+[--wait 10m] [--reject-held] [--task N]` is a read-only monitor unless
+`--reject-held`를 지정하지 않으면 읽기 전용 감시다. 이 명령은 op를 보내지 않는다.
+코멘트 모드가 `on`이면 이 테넌트의 작업 바인딩 op(`comment_append`, `issue_fields`,
+`issue_move`)를 `ready`, `held_binding`, `held_binding_changed`,
+`held_other_tenant`, `held_authority_youtrack`, `remote_unknown`으로 분류한다.
+모드가 `off` 또는 `canary`이면 준비된 op는 `held_mode`다. 발송된 op는 워커가
+정산할 때까지 `ready`로 센다. 대상과 일치하는 바인딩은 바로 허용되므로 현재 복구
+코드에는 `held_ambiguous` 사례가 없다. 결과에는 각 클래스의 개수가 나온다.
+`--wait`는 `ready`가 없어지거나 지정 시간이 끝날 때까지 확인한다. 종료 코드 `0`은
+ready op가 없음을, `3`은 ready op가 남았음을, `4`는 `youtrack ops resolve`가 필요한
+`remote_unknown` op가 있음을 뜻한다. 종료 코드 `2`는 설정 오류이며, 코멘트 모드가
+`on`이 아닐 때 `--reject-held`를 지정한 경우도 포함한다.
+
+서빙 중인 릴리스가 남아 있을 때 다음 순서로 중단한다.
+
+1. `handoffkeep youtrack comments-drain --wait 10m`을 실행하고 종료 코드 `0`일 때만
+   진행한다. `3`이면 serve가 ready op를 아직 비우지 못했다. `4`이면
+   `handoffkeep youtrack ops --state remote_unknown`으로 op를 확인해 각각 해결하거나
+   중단한다.
+2. 결과에 안전하게 닫을 held op가 있으면
+   `handoffkeep youtrack comments-drain --reject-held`를 실행한다. 이 명령은 해당
+   데이터의 정본이 hk일 때만 `held_binding`과 `held_binding_changed`를 거부한다.
+   `held_mode`, `held_other_tenant`, YouTrack 정본 데이터는 거부하지 않는다. 다시
+   결과를 확인하고 남은 hold는 담당 테넌트·모드·바인딩을 해결한다.
+3. 큐를 비운 뒤에만 `HANDOFFKEEP_YT_COMMENTS_MODE=canary`(또는 `off`)로 바꾸고
+   `shiftgate rollback`을 실행한다. `canary`/`off`에서는 준비된 쓰기가 대기하며,
+   다시 `on`으로 바꾸면 현재 바인딩이 허용하는 op가 풀린다.
+4. 롤백 뒤 `handoffkeep youtrack comments-preflight`를 실행해 중단한 릴리스가 만든
+   바인딩이 계속 남아 있는지 확인한다.
+
+`comments-unbind`는 더 이른 릴리스가 더 이상 서빙할 수 없을 때만 실행한다. 이전
+릴리스는 바인딩 이력을 읽지 않으므로, 그렇지 않으면 바인딩을 지운 작업에
+`issue_create`를 준비할 수 있다. 현재 세대 안에서는 바인딩 테이블을 아는 릴리스가
+더 새로운 릴리스가 기록한 행을 계속 읽을 수 있다.
 
 **Residuals.**
 
-- A task created after the backfill has no binding until the backfill runs
-  again; its comments go through the legacy push and the import meanwhile,
-  and the binding never copies them (`comments_from`).
-- With the catch-up enabled, a sync that posts and ends without linking
-  (lost response, failed link insert, dead process) leaves the comment
-  unlinked, and the next catch-up pass can copy it again: the legacy push's
-  own retry reads the issue's comments first, the catch-up does not. Hence
-  the gate above, until hk 3907.
-- The enqueue reads its sources without locks, so a project change or mirror
-  write that commits during a comment's transaction is caught by the next
-  comment, not this one; the issue binding itself cannot change under the
-  lane lock.
-- A YouTrack-side move of a bound issue to another project is not seen
-  locally: the binding keeps the stable internal id, so comments still land
-  on the moved issue.
+- 자동 바인더는 선택 기능이며 `HANDOFFKEEP_YT_BIND` 기본값은 `off`다. `on`이면
+  10분마다 코멘트 변경을 스캔하고, 기존 이슈와 코멘트 이력을 확인한 뒤, 증거
+  워터마크가 있는 바인딩을 기록하고 YouTrack에 없다고 확인된 코멘트의 op를 준비한다.
+  이슈를 만들거나 운영자의 unbind를 되돌리지 않는다. 모호하거나 완전성을 확인할 수
+  없는 이력은 거부되어 운영자 확인이 필요하며, 일시 오류는 백오프 후 재시도한다.
+- held-op 복구는 코멘트 모드 `on`에서 catch-up 전에 5분마다 돈다. 한 시간 지난 뒤
+  바인딩이 없거나 바뀐 op를 데이터 정본이 hk인 경우에만 거부한다. YouTrack이 정본인
+  op와 다른 테넌트가 소유한 op는 그대로 둔다. `held_mode`는 중단 상태이며, 모드를
+  다시 켜면 바인딩이 허용하는 op가 풀린다.
+- drain은 감시자이지 디스패처가 아니다. 서빙 워커가 없으면 ready op가 남고 대기
+  시간이 끝나면 종료 코드 `3`을 반환한다.
+- enqueue는 매핑 출처를 잠금 없이 읽으므로 코멘트 트랜잭션 중 커밋된 프로젝트 변경
+  또는 미러 쓰기는 그 코멘트가 아니라 다음 코멘트에서 감지된다. 이슈 바인딩 자체는
+  lane lock 아래에서 바뀌지 않는다.
+- YouTrack에서 바인딩된 이슈를 다른 프로젝트로 옮겨도 로컬에서는 알 수 없다.
+  바인딩이 안정적인 내부 id를 유지하므로 코멘트는 이동한 이슈에 계속 간다.
 
 ## Comment audit (hk 3899)
 
@@ -1841,11 +1870,10 @@ a crash at each boundary) over both ledgers (hk 3910).
 
 ## Not yet (later slices)
 
-- Turning the mode on in production (handoffkeep-design with the operator,
-  after deploy), and the authority epoch (design v2.3).
-- An automatic binder for new tasks, `comments-unbind`, and recovery of ops
-  held after a stop (hk 3810 follow-up).
-- The event-feed row an applied op commits, parent/child settling (b3),
-  article generations for split documents (Y5c), claims with a fencing generation (v2.2).
-- A direct GET of the created comment before answering `applied`; the live
-  canary measures index latency, marker preservation and read-after-write.
+- 운영자와 배포 뒤 운영 환경에서 모드를 켜는 절차, authority epoch (design v2.3).
+- 다른 테넌트가 소유하거나 YouTrack이 정본이어서 drain 후에도 남는 held op의 복구
+  또는 수동 해결. drain은 이를 보고하지만 해당 소유자의 권한을 가져오지 않는다.
+- 적용된 op가 커밋하는 event-feed 행, parent/child 정산 (b3), 분할 문서의 article
+  세대 (Y5c), fencing generation이 있는 claim (v2.2).
+- `applied` 응답 전에 생성된 코멘트를 직접 GET하는 절차. 라이브 canary에서 인덱스
+  지연, marker 보존, 쓰기 직후 읽기를 측정한다.
