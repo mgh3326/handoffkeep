@@ -16,6 +16,15 @@ second task. The API accepts the same value as `idempotency_key`. Each request
 is a task in the `dots` lane; its body is an hk
 document and its `parent_lane` identifies the requester.
 
+A design request is filed with `--type CREATE_MOCKUP`, `CREATE_ASSET` or
+`REVIEW_IMPLEMENTATION`. Its body must carry the policy template sections
+`[목적]`, `[유지할 것]`, `[범위]`, `[제약]`, `[산출물]`, `[완료 기준]` and `[입력]`,
+and `[입력]` must name a commit SHA and the capture environment; otherwise the
+request is refused. The stored body starts with a `[유형]` line. Requests with no
+type (research, for example) take no template. `dots adopt` may record the
+adopted Canva design with `--canva-url` (https), `--canva-page` and
+`--canva-version`, for `accepted` or `partially_used` results only.
+
 On the authenticated ChatGPT connection, `dots_inbox` lists open requests in
 creation order. Use the returned `next_cursor` to fetch another page.
 `dots_reply` takes `task_id`, structured `kind`, `body`, and an

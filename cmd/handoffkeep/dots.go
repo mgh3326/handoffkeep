@@ -12,7 +12,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const dotsUsage = "usage: dots request --title TITLE --body BODY [--requester-lane L] [--project P] [--idempotency-key KEY]\n       dots results [--task N] [--issue ID]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID]\n       dots answer <task> --text <answer>\n\nNote: A requester-lane comment alone does NOT resolve an open dots question (explicit beats implicit); use dots answer."
+const dotsUsage = "usage: dots request --title TITLE --body BODY [--type CREATE_MOCKUP|CREATE_ASSET|REVIEW_IMPLEMENTATION] [--requester-lane L] [--project P] [--idempotency-key KEY]\n       dots results [--task N] [--issue ID]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID] [--canva-url U --canva-page P --canva-version V]\n       dots answer <task> --text <answer>\n\nNote: A requester-lane comment alone does NOT resolve an open dots question (explicit beats implicit); use dots answer."
 
 func dotsRequestCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("dots request", flag.ContinueOnError)
@@ -24,6 +24,7 @@ func dotsRequestCmd(args []string, out io.Writer) error {
 	fs.StringVar(&in.RequesterLane, "requester-lane", "", "lane to notify")
 	fs.StringVar(&in.Project, "project", "", "task project")
 	fs.StringVar(&in.IdempotencyKey, "idempotency-key", "", "reuse to retry the same request")
+	fs.StringVar(&in.Type, "type", "", "CREATE_MOCKUP, CREATE_ASSET or REVIEW_IMPLEMENTATION; a typed body needs the policy template with [입력] naming the commit SHA and capture environment")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -68,7 +69,7 @@ func dotsRequestCmd(args []string, out io.Writer) error {
 // dotsCmd lists recorded dots answers and records what became of them.
 //
 //	dots results --task N | --issue ROB-1
-//	dots adopt ID --state S [--ref R] [--superseded-by ID]
+//	dots adopt ID --state S [--ref R] [--superseded-by ID] [--canva-url U --canva-page P --canva-version V]
 //	dots answer TASK --text ANSWER
 func dotsCmd(args []string, out io.Writer) error {
 	if len(args) == 0 || (args[0] != "request" && args[0] != "results" && args[0] != "adopt" && args[0] != "answer") {
@@ -97,7 +98,10 @@ func dotsCmd(args []string, out io.Writer) error {
 		fs.StringVar(&in.State, "state", "", "accepted, partially_used, rejected or superseded")
 		fs.StringVar(&in.Ref, "ref", "", "what adopted it: a GitHub PR URL, hk:task/<id> or hk:doc <key>")
 		fs.Int64Var(&in.SupersededBy, "superseded-by", 0, "id of the result that replaced it")
-		valueFlags = []string{"state", "ref", "superseded-by"}
+		fs.StringVar(&in.CanvaURL, "canva-url", "", "Canva design link, https; with --canva-page and --canva-version, for accepted or partially_used")
+		fs.StringVar(&in.CanvaPage, "canva-page", "", "Canva page the adopted design is on")
+		fs.StringVar(&in.CanvaVersion, "canva-version", "", "Canva version of that page")
+		valueFlags = []string{"state", "ref", "superseded-by", "canva-url", "canva-page", "canva-version"}
 	case "answer":
 		fs.StringVar(&text, "text", "", "answer text")
 		valueFlags = []string{"text"}
