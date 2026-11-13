@@ -77,6 +77,16 @@ type Config struct {
 // value is not a real rate limit; it is recorded as this cap, never dropped.
 const RetryAfterCap = 30 * 24 * time.Hour
 
+// AdoptionSettle is how long after an op's last dispatch reconcile waits
+// before it accepts evidence that is only an adoption (Evidence.Adopted): an
+// unmarked issue Send would have adopted. Until then a POST that Send made
+// may still be landing (the reply was lost to a timeout or a proxy error), and
+// adopting the old issue would leave the late create as a second issue for
+// the task. Once a POST lands it is a second hit, a mismatch, and the op
+// stays remote_unknown for an operator. The wait is far beyond any request's
+// life on the server.
+const AdoptionSettle = 5 * time.Minute
+
 // maxDrivePasses bounds the passes of one Drive call.
 const maxDrivePasses = 16
 
@@ -573,7 +583,8 @@ func (p *Protocol) Drive(ctx context.Context, limit int) (DriveStats, error) {
 // reconcile searches the op's target for its exact rendered text through the
 // op's kind. One exact match is positive evidence and applies the op; one
 // match the kind reports as the thing Send would have adopted applies it as
-// that adoption. Anything else leaves it remote_unknown: no match is not proof
+// that adoption, once AdoptionSettle has passed since the op's dispatch.
+// Anything else leaves it remote_unknown: no match is not proof
 // the write did not happen, so there is no automatic re-create. The decision
 // is the same for every kind; a kind only reports what it found (Evidence).
 func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err error) {
@@ -604,6 +615,10 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	}
 	switch {
 	case len(ev.Matches) == 1 && ev.Deleted == 0 && ev.Mismatched == 0 && resultIDRE.MatchString(ev.Matches[0]):
+		if settled := op.DispatchedAt.Add(AdoptionSettle); ev.Adopted && p.now().Before(settled) {
+			wait = settled.Sub(p.now())
+			return touch(ReasonNoEvidence, "only an unmarked issue so far; a create sent at "+op.DispatchedAt.Format(time.RFC3339)+" may still land")
+		}
 		s := p.apply(ctx, kind, op, ev.Matches[0], ev.Adopted)
 		if s.err == nil {
 			logTransition(s.op)

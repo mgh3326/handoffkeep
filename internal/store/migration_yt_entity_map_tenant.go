@@ -20,18 +20,22 @@ import (
 // (unchanged) and checks conflicts by yt_id; among the rows it writes (all
 // ”) the new index enforces what the old one did.
 //
-// Locks: ADD COLUMN takes ACCESS EXCLUSIVE on yt_entity_map for the catalog
-// change only (no rewrite: the default fills existing rows), the UPDATE takes
-// the table's row locks, DROP CONSTRAINT and CREATE UNIQUE INDEX take SHARE.
-// No other table is written. An Apply that inserts a map row waits for the
-// ACCESS EXCLUSIVE lock and then runs against the new shape.
+// Locks: ADD COLUMN takes ACCESS EXCLUSIVE on yt_entity_map (no rewrite: the
+// default fills existing rows), and so does DROP CONSTRAINT. The runner
+// applies the entry in one transaction (migrateRegistered), so that lock is
+// held through the backfill UPDATE and the CREATE UNIQUE INDEX build until
+// commit: every read and write of yt_entity_map, the previous release's
+// included, waits for the migration. The table holds one row per mapped
+// entity, so this is a short stall, not an outage. yt_write_ops is only read
+// (ACCESS SHARE); no other table is written. An Apply that inserts a map row
+// waits for the lock and then runs against the new shape.
 //
 // After names the migration that creates the table and the op log this one
-// reads, the dependency its statements have.
+// reads, and the one that adds yt_write_ops.tenant, which the backfill reads.
 const YTEntityMapTenantMigration = "20261113-yt-entity-map-tenant"
 
 func init() {
-	registerMigration(migration{ID: YTEntityMapTenantMigration, After: []string{"20261109-yt-write-ops"}, Apply: func(ctx context.Context, tx pgx.Tx) error {
+	registerMigration(migration{ID: YTEntityMapTenantMigration, After: []string{"20261109-yt-write-ops", "20261109-yt-comment-canary"}, Apply: func(ctx context.Context, tx pgx.Tx) error {
 		return execAll(ctx, tx, ytEntityMapTenantStatements)
 	}})
 }

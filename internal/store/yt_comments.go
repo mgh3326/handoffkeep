@@ -53,6 +53,13 @@ const ytCommentKeyPrefix = "task-comment:"
 // comment follows the issue_move that fixes it.
 const ytCommentHoldWait = time.Minute
 
+// ytCommentHoldGrace bounds a hold that no issue_move explains: the fields
+// feed prepares the move when it sees the task's project change, so a comment
+// whose op is younger than this is held for it; an older one with no move
+// pending (moves mode off, the move refused, nothing to move to) is rejected
+// ambiguous_issue as before hk 4457, so the task's lane is never wedged.
+const ytCommentHoldGrace = time.Hour
+
 // YTCommentKey is the idempotency key of the op that copies one comment.
 func YTCommentKey(commentID int64) string {
 	return ytCommentKeyPrefix + strconv.FormatInt(commentID, 10)
@@ -236,14 +243,17 @@ func queueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op
 //
 // reject is the reason Claim rejects the op with, in the same transaction,
 // instead of dispatching it: ytwrite.ReasonIssueNotBound when the task has no
-// such binding (the create was rejected, or applied with binding_conflict).
-// hold says the binding disagrees with a local source: the op is kept
-// prepared and retried, so a comment queued behind a create that landed in a
-// project the task has left goes out once an issue_move places the issue in
-// the task's project, instead of being rejected for good (hk 4457). A
-// targetless op is never dispatched, so it never reaches stale recovery or
+// such binding (the create was rejected, or applied with binding_conflict),
+// ytwrite.ReasonAmbiguousIssue when a source disagrees with it, except for
+// hold: when the only disagreement is the project (ytBindingDisagreement
+// names it last, so no other source disagrees; a create that landed in a
+// project the task has left) and an issue_move of that issue is pending, or
+// the op is younger than ytCommentHoldGrace, the op is kept prepared and
+// retried, and goes out once the move places the issue in the task's project
+// (hk 4457). The held op does not block that move on the lane (ytLaneBlocksSQL).
+// A targetless op is never dispatched, so it never reaches stale recovery or
 // remote_unknown. Any other op is returned unchanged.
-func claimYTCommentTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (target, sha, reject, detail string, hold bool, err error) {
+func claimYTCommentTargetTx(ctx context.Context, tx pgx.Tx, now time.Time, op ytwrite.Op) (target, sha, reject, detail string, hold bool, err error) {
 	if op.Kind != ytwrite.KindCommentAppend || op.Principal != YTCommentPrincipal || op.EntityKind != "task" || op.YTTargetID != "" {
 		return op.YTTargetID, op.PayloadSHA, "", "", false, nil
 	}
@@ -273,8 +283,18 @@ func claimYTCommentTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (targ
 		return "", "", "", "", false, err
 	}
 	if source != "" {
-		log.Printf("ytwrite.comment_queued_held op_id=%d task_id=%d issue_id=%q source=%s", op.ID, taskID, b.IssueID, source)
-		return "", "", "", "", true, nil
+		pending := ""
+		if source == ytSourceProject {
+			if pending, err = ytPendingMoveTx(ctx, tx, taskID, b.IssueID); err != nil {
+				return "", "", "", "", false, err
+			}
+		}
+		if source == ytSourceProject && (pending != "" || now.Sub(op.CreatedAt) < ytCommentHoldGrace) {
+			log.Printf("ytwrite.comment_queued_held op_id=%d task_id=%d issue_id=%q source=%s", op.ID, taskID, b.IssueID, source)
+			return "", "", "", "", true, nil
+		}
+		log.Printf("ytwrite.comment_queued_ambiguous op_id=%d task_id=%d issue_id=%q source=%s", op.ID, taskID, b.IssueID, source)
+		return "", "", ytwrite.ReasonAmbiguousIssue, "binding to " + b.IssueID + " disagrees with " + source, false, nil
 	}
 	var p ytwrite.CommentPayload
 	if err := json.Unmarshal(op.Payload, &p); err != nil {

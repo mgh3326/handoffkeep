@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -589,11 +590,13 @@ const ytCommentCanaryMigrationID = "20261109-yt-comment-canary"
 
 // A database already current on every other ID gains the new tables when the
 // binary that registers this one opens it, and records the ID exactly once.
+// The migrations that run After it (the entity map's tenant backfill reads
+// yt_write_ops.tenant) are held back with it.
 func TestCanaryMigrationUpgradesAlreadyCurrentDatabase(t *testing.T) {
 	_, url := testdb.Schema(t, "ytc_mig")
 	var without []migration
 	for _, m := range migrationRegistry {
-		if m.ID != ytCommentCanaryMigrationID {
+		if m.ID != ytCommentCanaryMigrationID && !slices.Contains(m.After, ytCommentCanaryMigrationID) {
 			without = append(without, m)
 		}
 	}

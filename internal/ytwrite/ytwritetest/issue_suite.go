@@ -258,8 +258,14 @@ func RunIssueProtocol(t *testing.T, nl NewLedger) {
 			t.Fatalf("op %+v, want the adopted issue %s after one attempt", op, existing)
 		}
 		m, ok, err := e.ledger.MapGet(context.Background(), "task", itoa(testTask))
-		if err != nil || !ok || m.YTID != existing || !m.Adopted || m.OpID != op.ID {
-			t.Fatalf("task map row %+v %v %v, want adopted %s", m, ok, err, existing)
+		if err != nil || !ok || m.YTID != existing || m.OpID != op.ID {
+			t.Fatalf("task map row %+v %v %v, want %s", m, ok, err, existing)
+		}
+		// MapRow.Adopted is not stored in the map: the memory ledger keeps
+		// what apply passed it, the store publishes it in the binding's
+		// comments_from (store TestYTIssueAdoptedBindingSkipsHistory).
+		if _, mem := e.ledger.(*MemLedger); mem && !m.Adopted {
+			t.Fatalf("task map row %+v, want adopted", m)
 		}
 		e.wantRemote(0, 0)
 	})

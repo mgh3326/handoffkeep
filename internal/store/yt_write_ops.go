@@ -284,8 +284,9 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 		}
 	}
 	var blocked bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops
-		WHERE entity_kind=$1 AND entity_id=$2 AND id < $3 AND state NOT IN ('applied','rejected'))`, kind, entity, id).Scan(&blocked); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o JOIN yt_write_ops e
+		ON e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id
+		WHERE o.id=$1 AND `+ytLaneBlocksSQL+`)`, id).Scan(&blocked); err != nil {
 		return ytwrite.Op{}, "", err
 	}
 	if blocked {
@@ -293,17 +294,19 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	}
 	// A comment queued behind its task's issue_create gets its target here,
 	// from the binding that create published, once the lane is clear
-	// (hk 4263); with no such binding it is rejected here, never dispatched,
-	// and while a local source disagrees with the binding it is held for a
-	// later claim (hk 4457). Every other op keeps its own.
-	target, sha, reject, detail, hold, err := claimYTCommentTargetTx(ctx, tx, op)
+	// (hk 4263); with no such binding, or a binding a local source disagrees
+	// with, it is rejected here, never dispatched, and while only the
+	// project disagrees and a move may still fix it, it is held for a later
+	// claim (hk 4457). Every other op keeps its own.
+	target, sha, reject, detail, hold, err := claimYTCommentTargetTx(ctx, tx, now, op)
 	if err != nil {
 		return ytwrite.Op{}, "", err
 	}
 	if hold {
 		// A create that landed in a project the task has left is not worth
 		// rejecting the comment for: an issue_move can still place the issue
-		// in the task's project, so the op stays prepared and due again after
+		// in the task's project (it passes this op on the lane,
+		// ytLaneBlocksSQL), so the op stays prepared and due again after
 		// ytCommentHoldWait, out of the way of this pass's due list.
 		if _, err := tx.Exec(ctx, `UPDATE yt_write_ops SET next_attempt_at=$2 WHERE id=$1`, id, now.Add(ytCommentHoldWait).UTC()); err != nil {
 			return ytwrite.Op{}, "", err
@@ -522,6 +525,19 @@ func ytLimit(n int) int {
 	return n
 }
 
+// ytLaneBlocksSQL says that op e, earlier on op o's lane, holds o back: e is
+// not resolved. One exception (hk 4457): an issue_move passes a queued comment
+// op still prepared with no target. The claim holds such a comment while its
+// issue is in a project the task has left (claimYTCommentTargetTx), and the
+// move is what places the issue in the task's project; behind the comment it
+// would never be claimed, and the comment would be held until it is rejected.
+// The comment takes its target at a later claim, from the binding the move
+// keeps (a move changes only the project), so passing it reorders nothing
+// YouTrack shows. Every other op still waits for the comment.
+const ytLaneBlocksSQL = `e.state NOT IN ('applied','rejected')
+	AND NOT (o.kind = '` + ytwrite.KindIssueMove + `' AND e.kind = '` + ytwrite.KindCommentAppend + `'
+		AND e.principal = '` + YTCommentPrincipal + `' AND e.state = 'prepared' AND e.yt_target_id = '')`
+
 func (l *YTWriteLedger) Due(ctx context.Context, now time.Time, limit int) ([]ytwrite.Op, error) {
 	if l.scoped {
 		// Held prepared ops (not admitted, or the mode is off) are left out
@@ -533,13 +549,13 @@ func (l *YTWriteLedger) Due(ctx context.Context, now time.Time, limit int) ([]yt
 			AND ((o.state = 'remote_unknown' AND o.tenant = $3)
 				OR (o.state = 'prepared' AND `+l.s.ytAdmitSQL("$3")+`
 					AND NOT EXISTS (SELECT 1 FROM yt_write_ops e
-						WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected'))))
+						WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND `+ytLaneBlocksSQL+`)))
 			ORDER BY o.id LIMIT $2`, now.UTC(), ytLimit(limit), l.tenant)
 	}
 	return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops o
 		WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= $1
 		AND (o.state = 'remote_unknown' OR NOT EXISTS (SELECT 1 FROM yt_write_ops e
-			WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected')))
+			WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND `+ytLaneBlocksSQL+`))
 		ORDER BY o.id LIMIT $2`, now.UTC(), ytLimit(limit))
 }
 

@@ -282,6 +282,46 @@ func TestIssueCreateEvidenceRecoversTheAdoption(t *testing.T) {
 	}
 }
 
+// A POST whose reply was lost may still be landing: while the op's dispatch
+// is younger than AdoptionSettle an unmarked issue alone is not taken as the
+// adoption (review of PR #383), and a create that lands in that window is a
+// second hit that keeps the op remote_unknown instead of a duplicate issue.
+func TestIssueCreateAdoptionWaitsForAPostInFlight(t *testing.T) {
+	t.Run("late_create_lands", func(t *testing.T) {
+		e := newIssueEnv(t)
+		e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.Refuse, Status: http.StatusBadGateway})
+		op := e.prepareIssue()
+		e.drive()
+		e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+		e.yt.InjectIssue(issueProject, issueTask, "#3898 imported earlier", "legacy body")
+		e.clock.Advance(ytwrite.AdoptionSettle / 2)
+		e.drive()
+		if got := e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonNoEvidence); got.Reconciles == 0 {
+			t.Fatalf("op %+v: no evidence search ran inside the window", got)
+		}
+		_, description := e.rendered(op)
+		e.yt.InjectIssue(issueProject, issueTask, "#3898 late", description)
+		e.clock.Advance(time.Hour)
+		e.drive()
+		e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonMarkerMismatch)
+	})
+	t.Run("nothing_lands", func(t *testing.T) {
+		e := newIssueEnv(t)
+		e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.Refuse, Status: http.StatusBadGateway})
+		op := e.prepareIssue()
+		e.drive()
+		id := e.yt.InjectIssue(issueProject, issueTask, "#3898 imported earlier", "legacy body")
+		e.clock.Advance(ytwrite.AdoptionSettle / 2)
+		e.drive()
+		e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonNoEvidence)
+		e.clock.Advance(time.Hour)
+		e.drive()
+		if got := e.want(op.ID, ytwrite.StateApplied, ""); got.YTResultID != id {
+			t.Fatalf("op %+v, want the adopted %s", got, id)
+		}
+	})
+}
+
 func TestIssueCreate4xxRejected(t *testing.T) {
 	e := newIssueEnv(t)
 	e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.Refuse, Status: http.StatusBadRequest})

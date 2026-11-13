@@ -882,6 +882,10 @@ whose description carries no marker of this op's is the issue Send adopts
 (this kind's create always writes the marker), so an adoption whose settlement
 was lost (a crash or a failed apply after Send adopted) is recovered as that
 adoption: the op applies with that id and its map rows are marked `Adopted`.
+That adoption is accepted only once `AdoptionSettle` (5 minutes) has passed
+since the op's dispatch: until then a POST whose reply was lost may still
+land, and is then a second hit that keeps the op `remote_unknown` instead of
+a second issue for the task.
 Zero, two exact hits, an edited description, or a hit beside another issue
 with that `hk ID` keep it `remote_unknown`; there is never an automatic
 re-create.
@@ -1358,11 +1362,19 @@ release rollback never meets an authority value it cannot parse (consult hk
   `remote_unknown`). Nothing is sent, and the rejected-op alert reports it.
   `Send` also refuses an empty target as a backstop. The claim also checks
   the binding against every local source, as a fresh comment's enqueue does
-  (for example a task moved to another project while its create was pending):
-  on a disagreement the op is held (`held`, still `prepared` and due again a
-  minute later, nothing sent), so a comment queued behind a create that landed
-  in a project the task has left goes out once an `issue_move` places the
-  issue in the task's project instead of being rejected for good. A task with
+  (for example a task moved to another project while its create was pending).
+  When only the project disagrees and an `issue_move` of the issue is pending,
+  or the op is under an hour old (the fields feed has not prepared the move
+  yet), the op is held (`held`, still `prepared` and due again a minute later,
+  nothing sent), so a comment queued behind a create that landed in a project
+  the task has left goes out once the move places the issue in the task's
+  project instead of being rejected for good. The move passes the held op on
+  the task's lane (`Claim` and `Due` let an `issue_move` go ahead of a
+  `prepared` comment op with no target); every other op still waits for it.
+  Any other disagreement, or a project one an hour old with no move pending
+  (moves mode off, the move refused), is `rejected / ambiguous_issue`, so the
+  lane is never wedged. The guard lets such an op stay `prepared` in place
+  (migration `20261113-yt-comment-hold`). A task with
   no pending create, a body
   the protocol cannot send, and a mapping disagreement are still refused.
   The previous release's comment gate never admits a targetless op, so it

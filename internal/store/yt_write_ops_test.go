@@ -77,6 +77,9 @@ func TestYTWriteOpsGuards(t *testing.T) {
 	wantErr(exec(`DELETE FROM yt_write_ops WHERE id=$1`, a.ID), "append-only")
 	wantErr(exec(`UPDATE yt_write_ops SET state='applied', yt_result_id='c-1', resolved_at=now() WHERE id=$1`, a.ID), "cannot move from prepared to applied")
 	wantErr(exec(`UPDATE yt_write_ops SET state='bogus' WHERE id=$1`, a.ID), "cannot move from prepared to bogus")
+	// Only a targetless queued comment may stay prepared in place (its hold,
+	// hk 4457); an op that has its target is never rescheduled in place.
+	wantErr(exec(`UPDATE yt_write_ops SET next_attempt_at=now() WHERE id=$1`, a.ID), "cannot move from prepared to prepared")
 	if _, out, err := l.Claim(ctx, now, a.ID); err != nil || out != ytwrite.ClaimClaimed {
 		t.Fatalf("claim = %s %v", out, err)
 	}
