@@ -296,7 +296,7 @@ func TaskSummary(taskID int64, title string) string {
 
 // TaskIssueSnapshot is the snapshot of t's issue with the import's value
 // mapping (youtrack/import/client.js issue()): the state as its Korean
-// label, the grade and tier from the title marker or refs.linear, 멈춤 when
+// label, the grade and tier from the title marker or the task refs, 멈춤 when
 // stalled. A field with no value is in the list with "" so the update clears
 // it.
 func TaskIssueSnapshot(t TaskFields) IssueSnapshot {

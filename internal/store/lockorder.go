@@ -25,11 +25,11 @@ package store
 //     when it locks a task row and also a job lock from level 3. Holders run
 //     one at a time, so the order in which a holder locks task rows (a child
 //     before its parent in autoCloseTx and applySourceEventTx, ascending id
-//     in applyDeployRecordTx, propagateMergeTx and recordLinearBoardRelayTx,
+//     in applyDeployRecordTx and propagateMergeTx,
 //     task_id then each of tasks in the order sent in ApplyTaskSourceEvent,
 //     then ascending id in propagateRevertTx) cannot form a
-//     cycle with another holder. UpdateJob, AppendRelayEvent (work board on,
-//     or an event that answers or ends a decision: relayTouchesDecisions),
+//     cycle with another holder. UpdateJob, AppendRelayEvent (an event that
+//     answers or ends a decision: relayTouchesDecisions),
 //     WrkAppend (completed or joined records) and PutDocument (deploy
 //     records) take it first for that reason. Taking it again in the
 //     same transaction (applyJobRoleTx, applyDeployRecordTx) is a no-op:
@@ -41,12 +41,11 @@ package store
 //  4. Task rows: SELECT ... FOR UPDATE, or an UPDATE of tasks. Without the
 //     level-2 lock a transaction locks at most one task row and no job lock
 //     (the single-task edits: area, milestone, labels, subscribers,
-//     deadlines, placement, work-board reconcile).
+//     deadlines, placement).
 //
 //  5. Rows that belong to a locked task: task_events (its foreign key takes
 //     KEY SHARE on the task row), task_labels, task_relations,
-//     task_subscribers, task_origins, linear_board_tasks, linear_outbox,
-//     sync_decisions, ticket_sets, decision_answer_attempts and
+//     task_subscribers, task_origins, sync_decisions, ticket_sets, decision_answer_attempts and
 //     decision_resolutions (inserted by ResolveDecision after its task row,
 //     under the level-2 lock; append-only and never locked by a reader), and
 //     task_spawn_records and task_spawn_notices (PutTaskSpawn: one task row
@@ -98,9 +97,6 @@ package store
 //   - IntakeTask and EmitTicketSet insert each body as the document
 //     task-body/<id>, named after a task created in the same transaction
 //     under the level-2 lock: a new key that no other writer holds.
-//   - processNextLinearOutbox and ProcessNextLinearDecisionOp lock their
-//     queue row before the task row; only the processor locks an existing
-//     queue row, so no task writer waits on it.
 //   - decision_requests rows outside level 2: an INSERT takes a new key and
 //     waits on no existing row (CreateDisposition, a new chat question or
 //     relay ask); chat rows are written only by the chat writers, after their
@@ -164,7 +160,7 @@ package store
 //   - Deploy-service puts take the deploy_services_prefixes advisory lock
 //     before reading or writing registry rows, to serialize prefix claims.
 //   - Other advisory locks (disposition origin, task comment insert, labels,
-//     Linear board ownership, quota presence) are each the first lock of
+//     quota presence) are each the first lock of
 //     their transaction, and no transaction requests one while it holds a
 //     lock from levels 2-5, with two exceptions: ApplyYouTrackActivity and
 //     ReplyDots take level 2, then taskCommentInsertLock, then the task row.
@@ -350,6 +346,6 @@ package store
 //     ACCESS EXCLUSIVE in the same order with a 5s lock_timeout. No other
 //     transaction combines these tables with task or job locks.
 
-// Serve's hub-forward and Linear-board workers hold session locks 8241873510
-// and 8241873511 respectively on separate pooled connections. They take the
+// Serve's hub-forward and task-thread workers hold session locks 8241873510
+// and 8241873512 respectively on separate pooled connections. They take the
 // lock before running and never request each other's lock, so they add no cycle.

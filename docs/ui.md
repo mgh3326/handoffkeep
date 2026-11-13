@@ -80,8 +80,7 @@ starts with `https://github.com/`; other values are rendered as text.
   parameters in stable id order. `truncated` and `next_after_id` continue the
   page; the client owns grouping and ordering.
 - `GET /ui/api/board/tasks/<id>` returns the task with refs, the append-only
-  transition history, per-state dwell segments, the joined Linear identifier
-  when present, and participant segments aggregated from `bench_reps` with an
+  transition history, per-state dwell segments, and participant segments aggregated from `bench_reps` with an
   exact `task_ref=hk:task/<id>` match. Empty telemetry is `not_collected`;
   when matching reps exceed the 500-rep bound, `truncated` marks the segment
   totals as partial rather than complete.

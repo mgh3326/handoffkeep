@@ -124,7 +124,7 @@ var dashboardMissingSources = []dashboardMissing{
 	{"prs", "PR review / CI / mergeability state", "hk stores only refs.pr, refs.head_sha and the task state; no GitHub review or check status is recorded"},
 	{"quota_stops", "quota-stop decisions", "no hk table or document records pacelever gate verdicts"},
 	{"hosts", "per-account host presence (PUT /v1/quota/presence)", "pacelever publishes it best-effort but hk has no endpoint or table; hosts come from the hub via /ui/api/live"},
-	{"jobs", "per-job model", "hub jobs report a tier only; tasks show refs.linear.tier when set"},
+	{"jobs", "per-job model", "hub jobs report a tier only; tasks show refs.tier when set"},
 }
 
 func (h *Handler) dashboardAPI(w http.ResponseWriter, r *http.Request) {

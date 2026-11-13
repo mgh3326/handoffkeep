@@ -298,7 +298,7 @@ const taskThreadPostableEventSQL = `(e.source IN ('` + SourceMergewakePR + `','`
 // opened or answered since the thread's start that it has not posted. $1 is
 // the destination, $2 now, $3 the cutoff before which a settled task is no
 // longer checked, $4 the cutoff a decision must be older than (as for the
-// decisions channel, so the Linear path can supersede it first).
+// decisions channel, DecisionNoticePostDelay).
 const taskThreadItemsSQL = `WITH d AS (
 	SELECT n.task_id,n.since,n.last_event_id,n.posted FROM task_thread_deliveries n JOIN tasks t ON t.id=n.task_id
 	WHERE n.destination=$1 AND n.state='` + TaskThreadActive + `' AND n.claim_key='' AND n.next_attempt_at<=$2::timestamptz
@@ -501,7 +501,7 @@ func (s *Store) SettleTaskThread(ctx context.Context, now time.Time, x TaskThrea
 		if wait > 0 {
 			attempts = x.Attempts
 		} else {
-			wait = linearDecisionOpBackoff(x.Attempts)
+			wait = deliveryBackoff(x.Attempts)
 		}
 		switch {
 		case attempts >= taskThreadMaxAttempts && create && x.Lookup:

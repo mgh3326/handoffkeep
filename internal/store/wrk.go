@@ -280,9 +280,6 @@ func (s *Store) WrkAppend(ctx context.Context, actor, job, key string, r wrkreco
 		if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET refs=jsonb_set(refs,'{job_id}',to_jsonb($2::text)),claimed_by=$3,updated_at=now() WHERE id=$1 RETURNING `+taskColumns, id, job, wrkrecords.Text(rec.Payload, "owner_lane")), &task); err != nil {
 			return out, err
 		}
-		if err = s.recordLinearBoardTaskTx(ctx, tx, task, "wrk claim"); err != nil {
-			return out, err
-		}
 	}
 	payload, _ := json.Marshal(rec.Payload)
 	var source any
@@ -315,15 +312,6 @@ func (s *Store) WrkAppend(ctx context.Context, actor, job, key string, r wrkreco
 		// The relay row closes the job's escalations (ListOpenEscalations).
 		if err = supersedeJobDecisionsTx(ctx, tx, job, rec.Kind, time.Now().UTC()); err != nil {
 			return out, err
-		}
-		if s.LinearBoardEnabled() {
-			var event RelayEvent
-			if err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE kind=$1 AND job_id=$2 AND report_path=$3 AND epoch=0 AND reason=''`, "job."+rec.Kind, job, "wrk:"+job+":"+intString(rec.Seq)), &event); err != nil {
-				return out, err
-			}
-			if err = s.recordLinearBoardRelayTx(ctx, tx, event); err != nil {
-				return out, err
-			}
 		}
 	}
 	err = tx.Commit(ctx)

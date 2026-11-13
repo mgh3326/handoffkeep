@@ -46,12 +46,7 @@ Optional server configuration:
   `HANDOFFKEEP_UI_LANES`, `HANDOFFKEEP_UI_ADMIRAL_LANES`,
   `HANDOFFKEEP_UI_DIRECTOR_LANES`
 - Hub proxy: `HANDOFFKEEP_HUB_URL`, `HANDOFFKEEP_HUB_TOKEN`
-- Linear webhook (all-or-none, see [linear-webhook.md](linear-webhook.md)):
-  `HANDOFFKEEP_LINEAR_WEBHOOK_SECRET`, `HANDOFFKEEP_LINEAR_API_KEY`
-- Operator decisions through Linear (see
-  [linear-decisions.md](linear-decisions.md)):
-  `HANDOFFKEEP_LINEAR_OPERATOR_USER_ID`, `HANDOFFKEEP_LINEAR_DECISION_TEAM`,
-  `HANDOFFKEEP_LINEAR_DECISION_STATES`,
+- Decision notices in Discord (see [decision-discord.md](decision-discord.md)):
   `HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL`
 - Outbox forwarding to the hub: `HANDOFFKEEP_NOTIFICATION_FORWARD=on`, with the
   hub proxy variables above

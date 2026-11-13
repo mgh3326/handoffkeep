@@ -594,10 +594,8 @@ type RelayEvent struct {
 type Store struct {
 	pool *pgxpool.Pool
 	// registry replaces migrationRegistry when set; tests use it.
-	registry    []migration
-	linearSync  atomic.Bool
-	linearBoard atomic.Bool
-	wrk         atomic.Pointer[wrkrecords.Engine]
+	registry []migration
+	wrk      atomic.Pointer[wrkrecords.Engine]
 	// autoCloseOff inverts the auto_close_parent setting so the zero Store has
 	// it on, the default.
 	autoCloseOff atomic.Bool
@@ -2735,11 +2733,6 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 			return x, err
 		}
 	}
-	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
-		if err = enqueueLinearTaskCreate(ctx, tx, x); err != nil {
-			return x, err
-		}
-	}
 	if err = s.enqueueYTIssueTx(ctx, tx, x); err != nil {
 		return x, err
 	}
@@ -2839,9 +2832,6 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		return Task{}, err
 	} else if moved {
 		x.LastActivityAt = now.Truncate(time.Microsecond)
-	}
-	if err := s.recordLinearBoardTaskTx(ctx, tx, x, reason); err != nil {
-		return Task{}, err
 	}
 	return x, tx.Commit(ctx)
 }
@@ -2982,9 +2972,6 @@ func (s *Store) relaneTaskTx(ctx context.Context, tx pgx.Tx, id int64, to, by, n
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "relane", From: from, To: to, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "lane", FromValue: from, ToValue: to, Source: source, SourceRef: ref}); err != nil {
 		return Task{}, false, err
 	}
-	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
-		return Task{}, false, err
-	}
 	return x, true, nil
 }
 
@@ -3053,9 +3040,6 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "project", From: from, To: project, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "project", FromValue: from, ToValue: project}); err != nil {
 		return Task{}, false, err
 	}
-	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
-		return Task{}, false, err
-	}
 	if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
 		return Task{}, false, err
 	}
@@ -3103,9 +3087,6 @@ func (s *Store) SetTaskArea(ctx context.Context, id int64, area *string, by, not
 		return Task{}, false, err
 	}
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "area", From: from, To: to, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "area", FromValue: from, ToValue: to}); err != nil {
-		return Task{}, false, err
-	}
-	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
 		return Task{}, false, err
 	}
 	return x, true, tx.Commit(ctx)
@@ -3428,12 +3409,10 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 		return x, false, err
 	}
 	defer tx.Rollback(ctx)
-	// With the work board on, recordLinearBoardRelayTx below locks every task
-	// the event matches: the task-mutation lock comes first, before the job
-	// lock (lock order, lockorder.go).
 	// Mirroring an answer or a job's end updates decision records that name a
-	// task or a job, which needs the same lock (decision_records.go).
-	if s.LinearBoardEnabled() || relayTouchesDecisions(x) {
+	// task or a job, which needs the task-mutation lock, taken before the job
+	// lock (lock order, lockorder.go; decision_records.go).
+	if relayTouchesDecisions(x) {
 		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 			return x, false, err
 		}
@@ -3496,9 +3475,6 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 		return x, false, err
 	}
 	if created {
-		if err = s.recordLinearBoardRelayTx(ctx, tx, x); err != nil {
-			return x, false, err
-		}
 		if err = mirrorRelayDecisionsTx(ctx, tx, x); err != nil {
 			return x, false, err
 		}

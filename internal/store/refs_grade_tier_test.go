@@ -66,7 +66,7 @@ func TestTaskRefsGradeTierStored(t *testing.T) {
 	if stored["grade"] != "A" || stored["tier"] != "T2" || stored["linear"] != nil {
 		t.Fatalf("stored refs %s", raw)
 	}
-	if _, err := s.TransitionTask(ctx, x.ID, "dropped", "test", "abandon", &TaskRefs{PR: "o/r#1"}, ""); err != nil {
+	if _, err := s.TransitionTask(ctx, x.ID, "unstarted", "test", "ready", &TaskRefs{PR: "o/r#1"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	got, _, err := s.GetTask(ctx, x.ID)
