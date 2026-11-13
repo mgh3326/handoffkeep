@@ -83,11 +83,11 @@ func TestSearchScopesCapAndTruncated(t *testing.T) {
 	s, _ := searchTestStore(t)
 	ctx := context.Background()
 	for i := 0; i < 7; i++ {
-		if _, err := s.CreateCheckpoint(ctx, Checkpoint{Session: "ss", Kind: "checkpoint", Title: fmt.Sprintf("capprobe %d", i), Body: "x", CreatedBy: "t"}); err != nil {
+		if _, _, err := s.PutDocument(ctx, Document{Key: fmt.Sprintf("capprobe/%d", i), Kind: "note", Body: "x", CreatedBy: "t"}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	xs, err := s.Search(ctx, "capprobe", "ctx", "", 5)
+	xs, err := s.Search(ctx, "capprobe", "docs", "", 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestSearchScopesCapAndTruncated(t *testing.T) {
 			t.Fatal("truncated page must mark every row")
 		}
 	}
-	xs, err = s.Search(ctx, "capprobe", "ctx", "", 10)
+	xs, err = s.Search(ctx, "capprobe", "docs", "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestSearchScopesCapAndTruncated(t *testing.T) {
 		}
 	}
 	// An exact-fit page (rows == limit) is not truncation.
-	xs, err = s.Search(ctx, "capprobe", "ctx", "", 7)
+	xs, err = s.Search(ctx, "capprobe", "docs", "", 7)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -608,9 +608,6 @@ func ParseRef(ref string) (string, string, error) {
 	if ref == "" || ref == "none" {
 		return "none", "", nil
 	}
-	if v, ok := strings.CutPrefix(ref, "checkpoint:"); ok {
-		return "checkpoint", v, nil
-	}
 	if v, ok := strings.CutPrefix(ref, "document:"); ok {
 		return "document", v, nil
 	}
@@ -623,5 +620,5 @@ func ParseRef(ref string) (string, string, error) {
 		}
 		return "task", v, nil
 	}
-	return "", "", errors.New("ref must be checkpoint:<id>, document:<key>, memory:<agent>/<name>, or task:<id>")
+	return "", "", errors.New("ref must be document:<key>, memory:<agent>/<name>, or task:<id>")
 }

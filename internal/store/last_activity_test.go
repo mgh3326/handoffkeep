@@ -208,7 +208,6 @@ func TestLastActivityMigrationKeepsPreviousBinaryInserts(t *testing.T) {
 func TestLastActivityReturnedTaskMatchesRow(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := t.Context()
-	due := time.Now().UTC().Add(48 * time.Hour)
 	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
 	edits := map[string]func(id int64) (Task, error){
 		"parent": func(id int64) (Task, error) {
@@ -225,10 +224,6 @@ func TestLastActivityReturnedTaskMatchesRow(t *testing.T) {
 		},
 		"area": func(id int64) (Task, error) {
 			x, _, err := s.SetTaskArea(ctx, id, areaPtr("blender"), "tester", "move")
-			return x, err
-		},
-		"due": func(id int64) (Task, error) {
-			x, _, err := s.SetTaskDue(ctx, id, &due, "tester")
 			return x, err
 		},
 	}

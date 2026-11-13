@@ -146,7 +146,7 @@ type projectHealthView struct {
 }
 
 func TestProjectsListHealthCountsReasonsAndAssignees(t *testing.T) {
-	st, _ := newMetaStore(t)
+	st, conn := newMetaStore(t)
 	ctx := context.Background()
 	if _, err := st.AddTaskProject(ctx, "health-project", "tester"); err != nil {
 		t.Fatal(err)
@@ -172,7 +172,7 @@ func TestProjectsListHealthCountsReasonsAndAssignees(t *testing.T) {
 	}
 	overdue := create("health overdue")
 	past := time.Date(2000, 1, 2, 0, 0, 0, 0, time.UTC)
-	if _, _, err := st.SetTaskDue(ctx, overdue.ID, &past, "tester"); err != nil {
+	if _, err := conn.Exec(ctx, `UPDATE tasks SET due_at=$2 WHERE id=$1`, overdue.ID, past); err != nil {
 		t.Fatal(err)
 	}
 
@@ -232,7 +232,6 @@ type statesOut struct {
 	States               []stateView `json:"states"`
 	Categories           []string    `json:"categories"`
 	AcceptedStateNames   []string    `json:"accepted_state_names"`
-	LegacyStateNames     []string    `json:"legacy_state_names"`
 	AwaitingDecisionFlag string      `json:"awaiting_decision_flag"`
 }
 
@@ -296,9 +295,6 @@ func TestTaskStatesMatchesStoreTables(t *testing.T) {
 	}
 	if !reflect.DeepEqual(out.Categories, store.TaskCategories()) {
 		t.Fatalf("categories=%v want %v", out.Categories, store.TaskCategories())
-	}
-	if !reflect.DeepEqual(out.LegacyStateNames, store.LegacyTaskStates()) {
-		t.Fatalf("legacy names=%v want %v", out.LegacyStateNames, store.LegacyTaskStates())
 	}
 	if out.AwaitingDecisionFlag != store.AwaitingDecisionKey {
 		t.Fatalf("awaiting flag=%q", out.AwaitingDecisionFlag)

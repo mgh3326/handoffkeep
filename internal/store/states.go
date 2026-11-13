@@ -74,7 +74,7 @@ func IsSettledState(state string) bool {
 	return false
 }
 
-// IsClaimableState reports whether claim and NextTask serve state.
+// IsClaimableState reports whether claim serves state.
 func IsClaimableState(state string) bool {
 	return state == StateBacklog || state == StateUnstarted
 }
