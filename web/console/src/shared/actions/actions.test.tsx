@@ -44,6 +44,24 @@ it("shows the current priority and accepts a number key", async () => {
   expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body)).priority).toBe(4);
 });
 
+it("keeps a task's current priority outside the presets and accepts any typed value", async () => {
+  const meta = document.createElement("meta"); meta.name = "hk-csrf"; meta.content = "token"; document.head.append(meta);
+  const fetcher = vi.spyOn(window, "fetch").mockResolvedValue(new Response(JSON.stringify({ previous: 20, priority: 50 }), { status: 200 }));
+  render(<div data-action-task="8"><TaskActions compact target={{ id: 8, state: "developing", priority: 20 }} onPriority={() => {}} /></div>);
+  fireEvent.click(screen.getByRole("button", { name: "작업 #8 메뉴" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "우선순위 변경" }));
+  expect(screen.getByRole("menuitemradio", { name: "P20 · 현재" }).getAttribute("aria-checked")).toBe("true");
+  const entry = screen.getByRole("spinbutton", { name: "직접 입력" });
+  fireEvent.keyDown(entry, { key: "3" });
+  expect(fetcher).not.toHaveBeenCalled();
+  fireEvent.change(entry, { target: { value: "2147483648" } });
+  expect((screen.getByRole("button", { name: "적용" }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.change(entry, { target: { value: "50" } });
+  fireEvent.click(screen.getByRole("button", { name: "적용" }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+  expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body)).priority).toBe(50);
+});
+
 it("opens only the action belonging to the focused row or detail for the same task", () => {
   const target = { id: 101, state: "developing", priority: 2 };
   render(<><div data-action-task="101"><a href="#row">행</a><TaskActions compact target={target} onPriority={() => {}} /></div><header data-action-task="101"><a href="#detail">상세</a><TaskActions target={target} onPriority={() => {}} /></header></>);
