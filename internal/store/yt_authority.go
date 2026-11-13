@@ -14,10 +14,9 @@ import (
 
 // The canonical side per content kind (hk 4122, docs/youtrack-write-protocol.md
 // §Authority). Authority hk is today's behaviour exactly. While a kind is
-// youtrack: the import read API (/v1/import/*) answers empty pages for it, the
-// legacy `youtrack sync` and `adopt` refuse, `youtrack audit` repairs it from
-// YouTrack to PG and enqueues nothing, and a write the protocol cannot send for
-// it is refused instead of committed with a born-rejected op.
+// youtrack: `youtrack audit` repairs it from YouTrack to PG and enqueues
+// nothing, and a write the protocol cannot send for it is refused instead of
+// committed with a born-rejected op.
 
 // YTAuthorityKind is one content kind the switch flips.
 type YTAuthorityKind string

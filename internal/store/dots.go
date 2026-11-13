@@ -269,7 +269,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 		return DotsReplyResult{}, err
 	}
 	defer tx.Rollback(ctx)
-	// Match ApplyYouTrackActivity: mutation lock, comment lock, then task row.
+	// Lock order: mutation lock, comment lock, then task row.
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return DotsReplyResult{}, err
 	}
@@ -427,7 +427,7 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 	}
 	defer tx.Rollback(ctx)
 
-	// Lock order matches ApplyYouTrackActivity and ReplyDots: task-mutation
+	// Lock order matches ReplyDots: task-mutation
 	// advisory lock (level 2), then taskCommentInsertLock, then task row FOR UPDATE.
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return DotsAnswerResult{}, err

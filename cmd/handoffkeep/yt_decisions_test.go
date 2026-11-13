@@ -140,8 +140,8 @@ func TestYTDecisionsBackfillBindsOnlyVerified(t *testing.T) {
 }
 
 // The decisions mode alone starts the write worker, needs the YouTrack
-// credentials, reads the DEC project's id once at start (a failed read stops
-// the start), and blocks the legacy push, which also mirrors DEC issues.
+// credentials, and reads the DEC project's id once at start (a failed read
+// stops the start).
 func TestYTDecisionsModeStartsTheWriteWorker(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_YT_COMMENTS_MODE", "off")
 	t.Setenv("HANDOFFKEEP_YT_ISSUES_MODE", "off")
@@ -151,9 +151,6 @@ func TestYTDecisionsModeStartsTheWriteWorker(t *testing.T) {
 	t.Setenv("YOUTRACK_BOT_API_KEY", "")
 	if _, err := ytCommentsWorkerFromEnv(nil); err == nil || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_DECISIONS_MODE=on") || !strings.Contains(err.Error(), "YOUTRACK_URL") {
 		t.Fatalf("on without credentials: %v", err)
-	}
-	if owner, err := youtrackProtocolOwner(); err != nil || owner != "HANDOFFKEEP_YT_DECISIONS_MODE=on" {
-		t.Fatalf("protocol owner %q, %v", owner, err)
 	}
 	projects := http.StatusOK
 	reads := 0
@@ -171,7 +168,7 @@ func TestYTDecisionsModeStartsTheWriteWorker(t *testing.T) {
 	}))
 	defer ts.Close()
 	t.Setenv("YOUTRACK_URL", ts.URL)
-	t.Setenv("YOUTRACK_BOT_API_KEY", readthroughTestKey)
+	t.Setenv("YOUTRACK_BOT_API_KEY", serveTestKey)
 	if w, err := ytCommentsWorkerFromEnv(&store.Store{}); err != nil || w == nil || reads != 1 {
 		t.Fatalf("decisions on: worker %v err %v reads %d", w, err, reads)
 	}
@@ -182,9 +179,6 @@ func TestYTDecisionsModeStartsTheWriteWorker(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_YT_DECISIONS_MODE", "yes")
 	if _, err := ytCommentsWorkerFromEnv(&store.Store{}); err == nil || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_DECISIONS_MODE") {
 		t.Fatalf("an unknown decisions mode: %v", err)
-	}
-	if _, err := youtrackProtocolOwner(); err == nil {
-		t.Fatal("an unknown decisions mode let the legacy push run")
 	}
 	t.Setenv("HANDOFFKEEP_YT_DECISIONS_MODE", "off")
 	if w, err := ytCommentsWorkerFromEnv(&store.Store{}); err != nil || w != nil {

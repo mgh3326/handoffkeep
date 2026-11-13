@@ -31,7 +31,6 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/telemetry"
 	"github.com/mgh3326/handoffkeep/internal/ui"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
-	"github.com/mgh3326/handoffkeep/internal/youtrack"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -1810,10 +1809,6 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	importReadGrants, e := api.LoadImportReadGrants(auth, tokens)
-	if e != nil {
-		return e
-	}
 	hostGrants, e := api.LoadHostGrants(auth, tokens)
 	if e != nil {
 		return e
@@ -1826,8 +1821,7 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	youTrack := yt.readThrough
-	svc := api.Service{Store: st, Attachments: am, YouTrack: youTrack, SearchBackend: yt.searchBackend}
+	svc := api.Service{Store: st, Attachments: am, YouTrack: yt.search, SearchBackend: yt.searchBackend}
 	workers := []backgroundWorker{chatRetentionWorker{store: st}, placementRetentionWorker{store: st}, syncRetentionWorker{store: st, retention: retention}}
 	workers = append(workers, ytOpsAlertWorker{store: st})
 	if *iceboxDays > 0 {
@@ -1858,7 +1852,7 @@ func serve(args []string, errout io.Writer) error {
 	if threads != nil {
 		workers = append(workers, singletonWorker{store: st, id: store.TaskThreadWorkerLock, worker: threads})
 	}
-	uiHandler, e := uiFromEnv(st, youTrack, am)
+	uiHandler, e := uiFromEnv(st, am)
 	if e != nil {
 		return e
 	}
@@ -1866,7 +1860,7 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, ImportReadGrants: importReadGrants, HostGrants: hostGrants, UI: uiHandler, ClientRevisions: api.NewClientRevisions()}, monitor, mcpAccess)
+	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, ClientRevisions: api.NewClientRevisions()}, monitor, mcpAccess)
 	addresses := []string{*listen}
 	if *tail != "" {
 		addresses = append(addresses, *tail)
@@ -1891,16 +1885,7 @@ func serve(args []string, errout io.Writer) error {
 
 func serverHandler(server api.Server, monitor *telemetry.Monitor, mcpAccess *cfaccess.Verifier) http.Handler {
 	mux := http.NewServeMux()
-	mcp := hkmcp.HTTPHandler(server.Service, server.Tokens, mcpAccess)
-	mux.Handle("/mcp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if client, ok := server.Tokens.Client(r); ok && server.ImportReadGrants[client] {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = io.WriteString(w, `{"error":"import_read_only"}`+"\n")
-			return
-		}
-		mcp.ServeHTTP(w, r)
-	}))
+	mux.Handle("/mcp", hkmcp.HTTPHandler(server.Service, server.Tokens, mcpAccess))
 	mux.Handle("/", server.Handler())
 	return monitor.Handler(mux)
 }
@@ -1930,7 +1915,7 @@ func mcpAccessFromEnv() (*cfaccess.Verifier, error) {
 
 // uiFromEnv intentionally treats incomplete Cloudflare Access configuration as
 // disabled. The API remains available, but api.Server does not register /ui.
-func uiFromEnv(st *store.Store, youTrack *youtrack.Service, am *attachments.Manager) (http.Handler, error) {
+func uiFromEnv(st *store.Store, am *attachments.Manager) (http.Handler, error) {
 	team := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_CF_TEAM_DOMAIN"))
 	aud := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_CF_AUD"))
 	emails := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_ALLOWED_EMAILS"))
@@ -1952,7 +1937,6 @@ func uiFromEnv(st *store.Store, youTrack *youtrack.Service, am *attachments.Mana
 		Access:      access,
 		HubURL:      strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_URL")),
 		HubToken:    strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_TOKEN")),
-		YouTrack:    youTrack,
 	})
 }
 
