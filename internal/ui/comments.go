@@ -21,9 +21,9 @@ import (
 // to tell "this is all of them" from "the page bound was hit".
 const boardCommentsPage = 200
 
-// uiCommentFormMax bounds the urlencoded write form: the request fuse for the
-// route, with the value it has always had (hk 4404 owns the fuses). A larger
-// request is answered as comment_too_long, never as a generic error.
+// uiCommentFormMax is the request-memory budget for ParseForm on this route.
+// It leaves room for the comment body plus its form encoding and CSRF fields;
+// a larger request is answered as comment_too_long.
 const uiCommentFormMax = 3*store.MaxBytes + 4096
 
 var taskCommentsPathRE = regexp.MustCompile(`^/ui/tasks/([1-9][0-9]{0,14})/comments$`)

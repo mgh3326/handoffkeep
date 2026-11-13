@@ -27,11 +27,6 @@ const (
 	InboxActionSnooze = "snooze"
 )
 
-// InboxBatchLimit is how many items one write applies. A longer list is cut
-// here and reported as Skipped, so the console can ask the operator to
-// resubmit rather than dropping the rest silently.
-const InboxBatchLimit = 50
-
 // MaxInboxSnooze bounds how far ahead one snooze may end.
 const MaxInboxSnooze = 366 * 24 * time.Hour
 
@@ -94,8 +89,8 @@ type InboxWriteResult struct {
 	Skipped int
 }
 
-// ApplyInbox applies one action to up to InboxBatchLimit item keys. Each item
-// is its own transaction so one refusal does not roll back the rest. The
+// ApplyInbox applies one action to every submitted item key. Each item is its
+// own transaction so one refusal does not roll back the rest. The
 // event key is the idempotency key: applying it again returns the current
 // state and writes nothing.
 func (s *Store) ApplyInbox(ctx context.Context, keys []string, action string, until *time.Time, actor, eventKey string) (InboxWriteResult, error) {
@@ -126,10 +121,6 @@ func (s *Store) ApplyInbox(ctx context.Context, keys []string, action string, un
 			continue
 		}
 		seen[key] = true
-		if len(seen) > InboxBatchLimit {
-			out.Skipped++
-			continue
-		}
 		state, err := s.applyInboxItem(ctx, key, action, until, actor, eventKey, now)
 		out.Items = append(out.Items, InboxWrite{ItemKey: key, State: state, Err: err})
 	}

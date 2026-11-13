@@ -19,11 +19,18 @@ type fakeObjects struct {
 	puts, stats int
 	fail        bool
 	objects     map[string][]byte
+	headSizes   map[string]int64
 	// modified overrides a key's last-modified time; unset keys count as now.
 	modified map[string]time.Time
 	// beforePut, when set, runs before each Put stores its object. A test uses
 	// it to overwrite the staging object between verify and promote.
 	beforePut func(key string)
+}
+
+func TestDefaultMaxBytesMatchesOCIPutObjectSingleObjectLimit(t *testing.T) {
+	if DefaultMaxBytes != 50<<30 {
+		t.Fatalf("DefaultMaxBytes=%d, want 50 GiB", DefaultMaxBytes)
+	}
 }
 
 func (f *fakeObjects) Stat(_ context.Context, k string) error {
@@ -74,7 +81,11 @@ func (f *fakeObjects) Head(_ context.Context, k string) (ObjectInfo, error) {
 	if !ok {
 		return ObjectInfo{}, ErrObjectNotFound
 	}
-	return ObjectInfo{Key: k, Size: int64(len(b)), Modified: f.modifiedAt(k)}, nil
+	size, overridden := f.headSizes[k]
+	if !overridden {
+		size = int64(len(b))
+	}
+	return ObjectInfo{Key: k, Size: size, Modified: f.modifiedAt(k)}, nil
 }
 func (f *fakeObjects) Delete(_ context.Context, k string) error {
 	f.mu.Lock()
