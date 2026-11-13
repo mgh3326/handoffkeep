@@ -20,8 +20,8 @@ The current Go sync contract in `internal/youtrack/schema.go` and `internal/yout
 | `hk 우선순위` | integer | task priority |
 | `레인` | enum, values discovered from task rows | lane |
 | `종류` | enum, values discovered from task rows | task kind |
-| `등급` | enum (`S+`, `S`, `A+`, `A`, `B`, `C`, plus observed values) | title marker `(grade X, Tn)`, then `refs.linear.grade`, as `internal/youtrack/sync.go` does |
-| `티어` | enum (`T0`–`T3`, plus observed values) | title marker, then `refs.linear.tier` |
+| `등급` | enum (`S+`, `S`, `A+`, `A`, `B`, `C`, plus observed values) | title marker `(grade X, Tn)`, then `refs.grade` (`refs.linear.grade` for a task filed before hk 4425), as `internal/youtrack/sync.go` does |
+| `티어` | enum (`T0`–`T3`, plus observed values) | title marker, then `refs.tier` (`refs.linear.tier` before hk 4425) |
 | `PR` | string | `refs.pr` |
 | `작업 job` | string | `refs.job_id` |
 | `멈춤` | enum with `멈춤` | `stalled=true` |

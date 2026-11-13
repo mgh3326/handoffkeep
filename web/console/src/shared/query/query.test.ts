@@ -56,7 +56,11 @@ describe("query syntax", () => {
 
   it("filters tasks by every field", () => {
     const filters: QueryFilters = { ...EMPTY_QUERY, text: "compact", state: "developing", lane: "console-demo", project: "console-demo", kind: "build", priority: "2", grade: "B", tier: "T2" };
+    expect(taskMatchesQuery(task({ refs: { grade: "B", tier: "T2" } }), filters)).toBe(true);
+    // A task filed before hk 4425 carries its grade only under refs.linear.
     expect(taskMatchesQuery(task({ refs: { linear: { grade: "B", tier: "T2" } } }), filters)).toBe(true);
+    // refs.grade wins over a stale legacy copy.
+    expect(taskMatchesQuery(task({ refs: { grade: "A", tier: "T2", linear: { grade: "B", tier: "T2" } } }), filters)).toBe(false);
     expect(taskMatchesQuery(task(), filters)).toBe(false);
     expect(taskMatchesQuery(task({ title: "Other" }), { ...filters, text: "compact" })).toBe(false);
     expect(taskMatchesQuery(task(), { ...filters, state: "reviewing" })).toBe(false);

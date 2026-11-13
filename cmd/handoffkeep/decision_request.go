@@ -18,7 +18,7 @@ import (
 
 const decisionRequestUsage = "usage: tasks decision-request <id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only] [--answer-policy operator_direct|operator_relay_allowed]"
 
-const decisionAskUsage = "usage: decisions ask <task-id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only] [--answer-policy operator_direct|operator_relay_allowed] [--linear]"
+const decisionAskUsage = "usage: decisions ask <task-id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only] [--answer-policy operator_direct|operator_relay_allowed]"
 
 const decisionResolveRequestUsage = "usage: decisions resolve request <dr-id> --channel cli|session [--option A] [--text <text>] [--quote '<operator words>'] [--event-key <key>]"
 
@@ -53,9 +53,6 @@ func serverRefused(err error) bool {
 		return true
 	case 400:
 		return httpErr.Code != "" && httpErr.Code != "invalid_context"
-	case 503:
-		// The ask route answers this before it writes anything.
-		return httpErr.Code == "linear_decisions_disabled"
 	}
 	return false
 }
@@ -234,14 +231,11 @@ func decisionRequestCmd(args []string, out io.Writer) error {
 	return printJSON(out, output)
 }
 
-// decisionAskCmd records a decision request for the operator. Without
-// --linear it is the record-only route and opens no Linear issue; with
-// --linear the server also opens the request's Linear issue, so it gets a
-// longer budget than a plain record. Re-sending the same command after any
-// failure creates nothing twice.
+// decisionAskCmd records a decision request for the operator through the
+// record-only route. Re-sending the same command after any failure creates
+// nothing twice.
 func decisionAskCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("decisions ask", flag.ContinueOnError)
-	linear := fs.Bool("linear", false, "also open the request's Linear issue")
 	ko := addDecisionTranslationFlags(fs)
 	c, id, input, err := decisionRequestFlags(fs, decisionAskUsage, args)
 	if err != nil {
@@ -251,46 +245,26 @@ func decisionAskCmd(args []string, out io.Writer) error {
 	if err != nil {
 		return notRecorded(err)
 	}
-	var result store.DecisionAskResult
-	if *linear {
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-		defer cancel()
-		result, err = c.AskDecision(ctx, id, input)
-		if err != nil {
-			return writeFailed("decision ask", id, err)
-		}
-	} else {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		recorded, err := c.RecordDecisionRequest(ctx, id, input)
-		if err != nil {
-			return writeFailed("decision ask", id, err)
-		}
-		var options store.DecisionOptions
-		if recorded.Task.Refs.DecisionOptions != nil {
-			options = *recorded.Task.Refs.DecisionOptions
-		}
-		request := recorded.Request
-		result = store.DecisionAskResult{
-			Task: recorded.Task, Request: request, Duplicate: recorded.Duplicate,
-			DecisionRef: store.DecisionRef(request.ID), Ver: store.DecisionRequestVer(request.Question, options, request.Doc, request.Refs),
-		}
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	translationErr := putDecisionTranslations(ctx, c, result.Request, rows)
-	output := map[string]any{
-		"recorded":      true,
-		"duplicate":     result.Duplicate,
-		"issue_created": result.IssueCreated,
-		"task_id":       result.Task.ID,
-		"request_id":    result.Request.ID,
-		"decision_ref":  result.DecisionRef,
-		"ver":           result.Ver,
-		"status":        result.Request.Status,
+	recorded, err := c.RecordDecisionRequest(ctx, id, input)
+	if err != nil {
+		return writeFailed("decision ask", id, err)
 	}
-	if result.Issue != nil {
-		output["issue"] = result.Issue
+	var options store.DecisionOptions
+	if recorded.Task.Refs.DecisionOptions != nil {
+		options = *recorded.Task.Refs.DecisionOptions
+	}
+	request := recorded.Request
+	translationErr := putDecisionTranslations(ctx, c, request, rows)
+	output := map[string]any{
+		"recorded":     true,
+		"duplicate":    recorded.Duplicate,
+		"task_id":      recorded.Task.ID,
+		"request_id":   request.ID,
+		"decision_ref": store.DecisionRef(request.ID),
+		"ver":          store.DecisionRequestVer(request.Question, options, request.Doc, request.Refs),
+		"status":       request.Status,
 	}
 	if translationErr != nil {
 		output["translation_error"] = "translation_write_failed"

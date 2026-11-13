@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -16,7 +14,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -189,13 +186,21 @@ func checkpointRefs(values []string) (store.Refs, error) {
 	return refs, nil
 }
 
-func taskRefs(pr, headSHA, reportPath, jobID string, linear *store.TaskLinear) (*store.TaskRefs, bool) {
-	x := &store.TaskRefs{PR: pr, HeadSHA: headSHA, ReportPath: reportPath, JobID: jobID, Linear: linear}
-	return x, pr != "" || headSHA != "" || reportPath != "" || jobID != "" || linear != nil
+// taskRefs builds a refs patch. Grade and tier go on the wire as
+// refs.linear.{grade,tier} for one release (hk 4425): the CLI deploys before
+// the server, and the previous server refuses an unknown refs.grade key. This
+// server stores them as refs.grade/refs.tier too (store.syncLegacyGradeTier).
+// The next release sends refs.grade/refs.tier.
+func taskRefs(pr, headSHA, reportPath, jobID, grade, tier string) (*store.TaskRefs, bool) {
+	x := &store.TaskRefs{PR: pr, HeadSHA: headSHA, ReportPath: reportPath, JobID: jobID}
+	if grade != "" || tier != "" {
+		x.Linear = &store.TaskLinear{Grade: grade, Tier: tier}
+	}
+	return x, pr != "" || headSHA != "" || reportPath != "" || jobID != "" || x.Linear != nil
 }
 
 func normalizeTaskArgs(args []string) ([]string, error) {
-	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--title-ko": true, "--body-ko": true, "--kind": true, "--priority": true, "--expected": true, "--by": true, "--to": true, "--closure": true, "--evidence": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--brief-key": true, "--label": true, "--linear-report-key": true, "--linear-verify-key": true, "--linear-decision-key": true, "--deploy-sha": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true, "--parent": true, "--duplicate-of": true, "--link": true}
+	valueFlags := map[string]bool{"--url": true, "--token": true, "--lane": true, "--parent-lane": true, "--state": true, "--title": true, "--title-ko": true, "--body-ko": true, "--kind": true, "--priority": true, "--expected": true, "--by": true, "--to": true, "--closure": true, "--evidence": true, "--note": true, "--reason": true, "--question": true, "--limit": true, "--pr": true, "--head-sha": true, "--report-path": true, "--job-id": true, "--no-job": true, "--option": true, "--recommended": true, "--tier": true, "--grade": true, "--origin-pr": true, "--origin-task": true, "--doc": true, "--project": true, "--area": true, "--parent": true, "--duplicate-of": true, "--link": true}
 	flags, positional := []string{}, []string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -332,16 +337,8 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	originPR := fs.String("origin-pr", "", "merged pull request this task came from")
 	originTask := fs.Int64("origin-task", 0, "task this task came from (a disposition item for an ordered follow-up)")
 	bodyDoc := fs.String("doc", "", "hk document key holding the task body: key or key#section (tasks add only)")
-	tier := fs.String("tier", "", "Linear task tier metadata (T0..T3)")
-	grade := fs.String("grade", "", "Linear task grade metadata (SS..C)")
-	briefKey := fs.String("brief-key", "", "handoffkeep brief document key for the Linear issue")
-	linearSync := fs.Bool("linear-sync", false, "retain legacy Linear task metadata (sync connector retired)")
-	linearReportKey := fs.String("linear-report-key", "", "handoffkeep report document key for a terminal Linear comment")
-	linearVerifyKey := fs.String("linear-verify-key", "", "independent verification report key for a terminal Linear comment")
-	linearDecisionKey := fs.String("linear-decision-key", "", "decision document key for a terminal Linear comment")
-	deploySHA := fs.String("deploy-sha", "", "deployed revision for a terminal Linear comment")
-	var linearLabels refFlags
-	fs.Var(&linearLabels, "label", "existing Linear label name (repeatable; labels are never created)")
+	tier := fs.String("tier", "", "task tier, refs.tier (T0..T3)")
+	grade := fs.String("grade", "", "task grade, refs.grade (SS..C)")
 	var optionValues refFlags
 	fs.Var(&optionValues, "option", "decision option A|label (repeatable)")
 	recommended := fs.String("recommended", "", "recommended decision option key")
@@ -353,7 +350,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	if err := fs.Parse(parseArgs); err != nil {
 		return err
 	}
-	linearFlagsUsed, docFlagUsed, noJobSet, projectSet, areaSet, expectedSet := false, false, false, false, false, false
+	docFlagUsed, noJobSet, projectSet, areaSet, expectedSet := false, false, false, false, false
 	parentSet, duplicateOfSet, stalledSet := false, false, false
 	linkSet, kindSet, prioritySet := false, false, false
 	closureSet := false
@@ -392,10 +389,6 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if item.Name == "area" {
 			areaSet = true
 		}
-		switch item.Name {
-		case "linear-sync", "tier", "grade", "brief-key", "label", "linear-report-key", "linear-verify-key", "linear-decision-key", "deploy-sha":
-			linearFlagsUsed = true
-		}
 	})
 	noJobReason := ""
 	if noJobSet {
@@ -409,20 +402,6 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		case "claim", "next", "transition":
 		default:
 			return fmt.Errorf("--no-job is not accepted by tasks %s", args[0])
-		}
-	}
-	var linearRefs *store.TaskLinear
-	if linearFlagsUsed {
-		linearRefs = &store.TaskLinear{
-			Sync:      *linearSync,
-			Tier:      *tier,
-			Grade:     *grade,
-			Brief:     *briefKey,
-			Labels:    append([]string{}, linearLabels...),
-			Report:    *linearReportKey,
-			Verify:    *linearVerifyKey,
-			Decision:  *linearDecisionKey,
-			DeploySHA: *deploySHA,
 		}
 	}
 	// A task body is attached only when the task is filed; no other
@@ -494,7 +473,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if *bodyDoc != "" && !store.ValidBodyDoc(*bodyDoc) {
 			return errors.New("--doc must be a document key or key#section")
 		}
-		refs, _ := taskRefs(*pr, *headSHA, *reportPath, *jobID, linearRefs)
+		refs, _ := taskRefs(*pr, *headSHA, *reportPath, *jobID, *grade, *tier)
 		refs.OriginPR, refs.OriginTask = *originPR, *originTask
 		var areaTag *string
 		if areaSet {
@@ -664,7 +643,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 				*note = *question
 			}
 		}
-		refs, hasRefs := taskRefs(*pr, *headSHA, *reportPath, *jobID, linearRefs)
+		refs, hasRefs := taskRefs(*pr, *headSHA, *reportPath, *jobID, *grade, *tier)
 		if usingOptions {
 			options, err := parseTaskDecisionOptions(optionValues, *recommended, *noFreeAnswer)
 			if err != nil {
@@ -952,16 +931,7 @@ func docCmd(args []string, out io.Writer) error {
 	}
 	fs := flag.NewFlagSet("doc "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	var c *remote.Client
-	if args[0] == "import" && hasFlag(args[1:], "manifest-out") {
-		// Candidate generation is intentionally local-only. Avoid even loading
-		// handoffkeep credentials when no service call can be made.
-		c = &remote.Client{}
-		fs.StringVar(&c.URL, "url", "", "handoffkeep HTTP URL")
-		fs.StringVar(&c.Token, "token", "", "handoffkeep bearer token")
-	} else {
-		c = remoteClient(fs)
-	}
+	c := remoteClient(fs)
 	key := fs.String("key", "", "key")
 	docID := fs.String("id", "", "document id")
 	kind := fs.String("kind", "", "kind")
@@ -973,8 +943,6 @@ func docCmd(args []string, out io.Writer) error {
 	prefix := fs.String("prefix", "", "prefix")
 	dir := fs.String("dir", "", "directory")
 	glob := fs.String("glob", "**/*.md", "glob")
-	manifest := fs.String("manifest", "", "JSON import manifest")
-	manifestOut := fs.String("manifest-out", "", "write a candidate JSON manifest without importing")
 	apply := fs.Bool("apply", false, "apply changes")
 	if e := fs.Parse(args[1:]); e != nil {
 		return e
@@ -992,12 +960,6 @@ func docCmd(args []string, out io.Writer) error {
 		return errors.New("--task applies to doc put and doc list, --origin-class to doc put")
 	}
 	ctx := context.Background()
-	if args[0] == "import" && *manifestOut != "" {
-		if *manifest != "" || *apply {
-			return errors.New("--manifest-out cannot be combined with --manifest or --apply")
-		}
-		return writeImportManifest(*dir, *glob, *manifestOut, out)
-	}
 	if e := mustClient(c); e != nil {
 		return e
 	}
@@ -1061,12 +1023,6 @@ func docCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, v)
 	case "import":
-		if *manifest != "" {
-			if *dir != "" {
-				return errors.New("--manifest cannot be combined with --dir")
-			}
-			return importDocsManifest(ctx, c, *manifest, *apply, out)
-		}
 		return importDocs(ctx, c, *dir, *glob, *apply, out)
 	default:
 		return errors.New("usage: doc put|get|list|import")
@@ -1087,212 +1043,6 @@ func parseDocumentID(arg string) (int64, error) {
 		return 0, errors.New("invalid document id")
 	}
 	return id, nil
-}
-
-func hasFlag(args []string, name string) bool {
-	want := "--" + name
-	for _, arg := range args {
-		if arg == want || strings.HasPrefix(arg, want+"=") {
-			return true
-		}
-	}
-	return false
-}
-
-type docImportManifestEntry struct {
-	Key    string `json:"key"`
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
-	Kind   string `json:"kind"`
-}
-
-type docImportManifestItemResult struct {
-	Key     string `json:"key"`
-	Status  string `json:"status"`
-	Pattern string `json:"pattern,omitempty"`
-	Error   string `json:"error,omitempty"`
-}
-
-type docImportManifestResult struct {
-	DryRun bool                          `json:"dry_run"`
-	Items  []docImportManifestItemResult `json:"items"`
-}
-
-type docImportManifestSkipped struct {
-	Path   string `json:"path"`
-	Reason string `json:"reason"`
-}
-
-var (
-	robManifestName = regexp.MustCompile(`^ROB-(\d+)`)
-	robManifestKey  = regexp.MustCompile(`^linear/ROB-\d+$`)
-	manifestSHA256  = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
-)
-
-func sha256Hex(body []byte) string {
-	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:])
-}
-
-func writeImportManifest(dir, glob, destination string, out io.Writer) error {
-	if dir == "" || destination == "" {
-		return errors.New("doc import --manifest-out requires --dir and an output file")
-	}
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		return err
-	}
-	entries := []docImportManifestEntry{}
-	skipped := []docImportManifestSkipped{}
-	byKey := map[string]string{}
-	err = filepath.WalkDir(absDir, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
-			return nil
-		}
-		relative, err := filepath.Rel(absDir, path)
-		if err != nil {
-			return err
-		}
-		relative = filepath.ToSlash(relative)
-		if glob != "**/*.md" {
-			matched, matchErr := filepath.Match(glob, relative)
-			if matchErr != nil {
-				return matchErr
-			}
-			if !matched {
-				return nil
-			}
-		}
-		match := robManifestName.FindStringSubmatch(d.Name())
-		if len(match) != 2 {
-			skipped = append(skipped, docImportManifestSkipped{Path: relative, Reason: "basename does not match ^ROB-(\\d+)"})
-			return nil
-		}
-		key := "linear/ROB-" + match[1]
-		if previous, exists := byKey[key]; exists {
-			return fmt.Errorf("duplicate generated manifest key %q: %q and %q", key, previous, path)
-		}
-		body, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		byKey[key] = path
-		entries = append(entries, docImportManifestEntry{Key: key, Path: path, SHA256: sha256Hex(body), Kind: "note"})
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
-	sort.Slice(skipped, func(i, j int) bool { return skipped[i].Path < skipped[j].Path })
-	raw, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return err
-	}
-	raw = append(raw, '\n')
-	if err := os.WriteFile(destination, raw, 0600); err != nil {
-		return err
-	}
-	return printJSON(out, map[string]any{
-		"dry_run": true, "manifest_out": destination, "matched": len(entries), "skipped": skipped,
-	})
-}
-
-func readImportManifest(path string) ([]docImportManifestEntry, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	decoder := json.NewDecoder(file)
-	decoder.DisallowUnknownFields()
-	var entries []docImportManifestEntry
-	if err := decoder.Decode(&entries); err != nil {
-		return nil, err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return nil, errors.New("manifest contains trailing JSON values")
-		}
-		return nil, err
-	}
-	byKey := map[string]string{}
-	for _, entry := range entries {
-		if !robManifestKey.MatchString(entry.Key) || !filepath.IsAbs(entry.Path) || !manifestSHA256.MatchString(entry.SHA256) || entry.Kind != "note" {
-			return nil, fmt.Errorf("invalid manifest entry for key %q", entry.Key)
-		}
-		if previous, exists := byKey[entry.Key]; exists {
-			return nil, fmt.Errorf("duplicate manifest key %q: %q and %q", entry.Key, previous, entry.Path)
-		}
-		byKey[entry.Key] = entry.Path
-	}
-	return entries, nil
-}
-
-func importDocsManifest(ctx context.Context, c *remote.Client, path string, apply bool, out io.Writer) error {
-	entries, err := readImportManifest(path)
-	if err != nil {
-		return err
-	}
-	result := docImportManifestResult{DryRun: !apply, Items: make([]docImportManifestItemResult, 0, len(entries))}
-	for _, entry := range entries {
-		item := docImportManifestItemResult{Key: entry.Key}
-		body, err := os.ReadFile(entry.Path)
-		if err != nil {
-			return err
-		}
-		actualSHA := sha256Hex(body)
-		if !strings.EqualFold(actualSHA, entry.SHA256) {
-			item.Status = "sha_mismatch"
-			item.Error = fmt.Sprintf("expected %s, got %s", strings.ToLower(entry.SHA256), actualSHA)
-			result.Items = append(result.Items, item)
-			continue
-		}
-		existing, found, err := c.GetDocument(ctx, entry.Key)
-		if err != nil {
-			return err
-		}
-		if found {
-			existingSHA := existing.SHA256
-			if existingSHA == "" {
-				existingSHA = sha256Hex([]byte(existing.Body))
-			}
-			if !strings.EqualFold(existingSHA, actualSHA) || existing.Kind != entry.Kind {
-				item.Status = "conflict"
-				item.Error = "existing document body or kind differs"
-			} else {
-				item.Status = "unchanged"
-			}
-			result.Items = append(result.Items, item)
-			continue
-		}
-		if !apply {
-			item.Status = "created"
-			result.Items = append(result.Items, item)
-			continue
-		}
-		_, changed, err := c.PutDocument(ctx, "", store.Document{Key: entry.Key, Kind: entry.Kind, Body: string(body)})
-		if err != nil {
-			if pattern, rejected := remote.SecretPattern(err); rejected {
-				item.Status = "rejected"
-				item.Pattern = pattern
-				result.Items = append(result.Items, item)
-				continue
-			}
-			return err
-		}
-		if changed {
-			item.Status = "created"
-		} else {
-			item.Status = "unchanged"
-		}
-		result.Items = append(result.Items, item)
-	}
-	return printJSON(out, result)
 }
 
 func importDocs(ctx context.Context, c *remote.Client, dir, glob string, apply bool, out io.Writer) error {
@@ -1707,6 +1457,26 @@ type storeCloser interface {
 // run deletes at most store.ChatPruneMaxDelete expired terminal-state rows
 // per table so a single execution can never empty a table; non-terminal rows
 // are never deleted regardless of age.
+type placementRetentionWorker struct{ store *store.Store }
+
+func (w placementRetentionWorker) Run(ctx context.Context) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		deleted, err := w.store.PrunePlacements(ctx)
+		if err != nil && ctx.Err() == nil {
+			log.Printf("placement.prune_failed err=%q", err)
+		} else if deleted > 0 {
+			log.Printf("placement.pruned rows=%d", deleted)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 type chatRetentionWorker struct {
 	store    *store.Store
 	interval time.Duration
@@ -1926,13 +1696,6 @@ func serve(args []string, errout io.Writer) error {
 	if am != nil && am.Enabled {
 		workers = append(workers, attachmentStagingSweepWorker{am: am})
 	}
-	linear := linearFromEnv(st)
-	if linear.boardWorker != nil {
-		workers = append(workers, singletonWorker{store: st, id: store.LinearBoardWorkerLock, worker: linear.boardWorker})
-	}
-	if linear.opsWorker != nil {
-		workers = append(workers, linear.opsWorker)
-	}
 	if forwarder := notificationForwarderFromEnv(st); forwarder != nil {
 		workers = append(workers, singletonWorker{store: st, id: store.HubForwardWorkerLock, worker: forwarder})
 	}
@@ -1959,7 +1722,7 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions, ClientRevisions: api.NewClientRevisions()}, monitor, mcpAccess)
+	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, ClientRevisions: api.NewClientRevisions()}, monitor, mcpAccess)
 	addresses := []string{*listen}
 	if *tail != "" {
 		addresses = append(addresses, *tail)
@@ -2048,74 +1811,8 @@ func uiFromEnv(st *store.Store, am *attachments.Manager) (http.Handler, error) {
 	return ui.New(config)
 }
 
-// linearServer is what the Linear configuration turns on. Any field may be nil.
-type linearServer struct {
-	webhook     http.Handler
-	decisions   *api.LinearDecisions
-	opsWorker   backgroundWorker
-	boardWorker backgroundWorker
-}
-
-// linearFromEnv follows uiFromEnv: incomplete configuration disables the route
-// and leaves the rest of the server running. Linear's Comment payload has no
-// labels, so the webhook cannot work on the secret alone. Decisions need the
-// webhook, since that is how answers arrive, plus the operator's user id.
-func linearFromEnv(st *store.Store) linearServer {
-	secret := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_WEBHOOK_SECRET"))
-	key := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_API_KEY"))
-	clientID := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CLIENT_ID"))
-	clientSecret := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CLIENT_SECRET"))
-	var app *api.LinearAppToken
-	if (clientID == "") != (clientSecret == "") {
-		// Half a pair would fall back to the personal key silently.
-		log.Printf("linear_oauth.disabled reason=incomplete_config")
-	}
-	if clientID != "" && clientSecret != "" {
-		// An OAuth application wins over a personal key: its writes show as the
-		// app, so nothing hk posts can be read as the operator's answer.
-		app = &api.LinearAppToken{ClientID: clientID, ClientSecret: clientSecret}
-		key = ""
-	}
-	// Either credential lets hk read Linear; the app is carried on its own
-	// field, never as a placeholder in the key slot.
-	credential := key != "" || app != nil
-	operator := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_OPERATOR_USER_ID"))
-	capacityPolicy, capacityErr := linearCapacityPolicyFromEnv()
-	if capacityErr != nil {
-		log.Printf("linear_capacity.disabled reason=invalid_policy err=%q", capacityErr)
-	}
-	linearAPI := api.LinearAPI{Key: key, App: app, RateGate: &api.LinearRateGate{}, Admission: st, CapacityPolicy: capacityPolicy, CapacityScopeVerified: capacityErr == nil && strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_CAPACITY_SCOPE")) == "workspace"}
-	out := linearServer{boardWorker: linearBoardFromEnv(st, linearAPI)}
-	if secret == "" || !credential {
-		if secret != "" || operator != "" {
-			log.Printf("linear_webhook.disabled reason=incomplete_config")
-		}
-		return out
-	}
-	webhook := api.LinearWebhook{Secret: secret, Issues: linearAPI, Store: st}
-	if operator == "" {
-		out.webhook = webhook
-		return out
-	}
-	states, err := api.ParseLinearDecisionStates(os.Getenv("HANDOFFKEEP_LINEAR_DECISION_STATES"))
-	if err != nil {
-		// Comments still answer; only moving an issue to a state stops counting.
-		log.Printf("linear_decisions.state_mapping_ignored err=%q", err.Error())
-		states = nil
-	}
-	webhook.Decisions, webhook.Operator, webhook.StateOptions = st, operator, states
-	team := strings.TrimSpace(os.Getenv("HANDOFFKEEP_LINEAR_DECISION_TEAM"))
-	if team == "" {
-		team = "ROB"
-	}
-	out.webhook = webhook
-	out.decisions = &api.LinearDecisions{Team: team, Linear: linearAPI}
-	out.opsWorker = api.LinearDecisionOpsWorker{Store: st, Linear: linearAPI, RateGate: linearAPI.RateGate, Discord: discordDecisionsFromEnv()}
-	return out
-}
-
-// discordDecisionsFromEnv returns nil when the channel is not configured, which
-// leaves the Linear flow working without channel posts.
+// discordDecisionsFromEnv returns nil when the channel is not configured;
+// decision notices then settle unsent.
 func discordDecisionsFromEnv() *api.DiscordWebhook {
 	raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL"))
 	if raw == "" {
@@ -2123,7 +1820,7 @@ func discordDecisionsFromEnv() *api.DiscordWebhook {
 	}
 	webhook, err := api.ParseDiscordWebhookURL(raw)
 	if err != nil {
-		log.Printf("linear_decisions.discord_disabled err=%q", err.Error())
+		log.Printf("decision_discord.disabled err=%q", err.Error())
 		return nil
 	}
 	return &api.DiscordWebhook{URL: webhook}

@@ -1,14 +1,14 @@
 # Decision requests in Discord
 
-Every open decision request (`decision_requests`, see
-[linear-internalize.md](linear-internalize.md#decision-requests)) gets one
+Every open decision request (`decision_requests`, see "Decision requests" in
+`git show 1e3d2fa8:docs/linear-internalize.md`) gets one
 message in the decisions channel. When the request is answered, superseded or
 expires, hk edits that message instead of posting a new one. Once a day, one
 digest lists the requests that have been open for more than 24 hours.
 
-This is outbound only. hk posts and edits through the incoming webhook it
-already uses for [Linear decisions](linear-decisions.md#discord). There is no
-bot, no inbound route and no new credential. To answer a request, use the
+This is outbound only. hk posts and edits through one incoming webhook
+(`HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL`). There is no bot, no inbound
+route and no new credential. To answer a request, use the
 console or the CLI, as before.
 
 ## Configuration
@@ -17,7 +17,7 @@ Set these on the server.
 
 | Variable | Value |
 |---|---|
-| `HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL` | The decisions channel's incoming webhook, `https` only. This is the variable the Linear flow uses. Unset sends nothing. |
+| `HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL` | The decisions channel's incoming webhook, `https` only. Unset sends nothing. |
 | `HANDOFFKEEP_CONSOLE_URL` | The console's base URL, `https` only, for example `https://console.example`. A request's message links to `<base>/ui/decisions/<id>`, where `<id>` is the `decision_requests` id; the digest links to `<base>/ui/decisions?tab=open`. Unset leaves the link out, and the message says to look on the console's Decisions page or run `handoffkeep decisions list`. A value that is not an `https` URL stops `serve` at startup. |
 | `HANDOFFKEEP_DISCORD_OPERATOR_USER_ID` | The operator's Discord user id (17 to 20 digits). A pressing request's first post mentions this user. Unset mentions nobody. Any other value stops `serve` at startup; the error does not quote the value. |
 
@@ -49,20 +49,15 @@ holds at the time of its first post:
 - its due time is within 2 hours, or already past.
 
 Edits never mention, and a request that becomes near-due after its first post
-is not mentioned again. Messages from the Linear flow never mention anyone.
+is not mentioned again.
 
 The first post waits one minute after the request opens. A request that closes
 in that minute is never posted.
 
 ## Requests asked through Linear
 
-Requests with source `linear` are not posted here. The Linear flow already
-announces them ([linear-decisions.md](linear-decisions.md#discord)). Asking
-through Linear first opens a `task_request` row, and recording the Linear issue
-supersedes that row within seconds. Because of the one-minute wait, that row
-closes before its first post, so it is never posted either. If creating the
-issue fails, the `task_request` row stays open and is posted here, so the
-question is still seen.
+The Linear decision flow was retired in hk 4425. Rows with source `linear`
+that it left are not posted, and no new ones are made.
 
 The digest lists every open request older than 24 hours, whatever its source,
 `linear` included. Snoozed requests are left out.

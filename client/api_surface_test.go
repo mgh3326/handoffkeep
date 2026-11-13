@@ -19,7 +19,6 @@ import (
 var exportedAPI = []string{
 	// The client and its fleet calls.
 	"Client",
-	"Client.AskDecision",
 	"Client.AttachmentURL",
 	"Client.BeginAttachmentUpload",
 	"Client.CompleteAttachmentUpload",
@@ -43,7 +42,6 @@ var exportedAPI = []string{
 	"Attachment",
 	"AttachmentUploadTicket",
 	"DecisionAskInput",
-	"DecisionAskResult",
 	"DecisionOption",
 	"DecisionOptions",
 	"DecisionRequest",

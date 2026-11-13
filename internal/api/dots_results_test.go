@@ -3,55 +3,12 @@ package api
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
-
-// The Comment payload carries no description: the webhook reads it from
-// Linear and hands it, with the issue UUID, to the store for routing.
-func TestLinearWebhookDotsDescription(t *testing.T) {
-	const issueUUID = "0a1b2c3d-0000-4000-8000-0000000000c1"
-	build := func(comment, issue string) []byte {
-		return []byte(fmt.Sprintf(`{"action":"create","type":"Comment","webhookTimestamp":%d,"data":{"id":"0a1b2c3d-0000","body":%q,"createdAt":"2026-11-02T01:02:03.000Z","issueId":%q,"issue":%s}}`, time.Now().UnixMilli(), comment, issueUUID, issue))
-	}
-	const complete = `"identifier":"ZZZ-2","title":"t","url":"u","labels":[{"name":"dots"}],"state":{"type":"started"}`
-	for _, tc := range []struct {
-		name        string
-		issue       string
-		fetches     int
-		description string
-	}{
-		{"payload without description", `{` + complete + `}`, 1, "hk-lane: hk-design"},
-		{"payload without issue", `null`, 1, "hk-lane: hk-design"},
-		{"payload with description", `{` + complete + `,"description":"hk-lane: own"}`, 0, "hk-lane: own"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fetched := dotsLinearIssue()
-			fetched.Description = "hk-lane: hk-design"
-			issues, dots := &fakeIssues{issue: fetched}, &fakeDots{}
-			body := build("[dots] BLOCKED need a key", tc.issue)
-			status, out := postLinear(t, LinearWebhook{Secret: fakeLinearSigningValue, Issues: issues, Store: dots}, body, linearSign(fakeLinearSigningValue, body))
-			if status != http.StatusOK || out["status"] != "recorded" || issues.calls != tc.fetches || len(dots.issues) != 1 {
-				t.Fatalf("status=%d out=%v fetches=%d dots=%+v", status, out, issues.calls, dots)
-			}
-			if got := dots.issues[0]; got.Description != tc.description || got.IssueUUID != issueUUID {
-				t.Fatalf("issue=%+v", got)
-			}
-		})
-	}
-	// A failed description read is retried by Linear, not recorded without it.
-	body := build("[dots] RESULT done", `{`+complete+`}`)
-	dots := &fakeDots{}
-	status, out := postLinear(t, LinearWebhook{Secret: fakeLinearSigningValue, Issues: &fakeIssues{err: errors.New("boom")}, Store: dots}, body, linearSign(fakeLinearSigningValue, body))
-	if status != http.StatusServiceUnavailable || out["error"] != "linear_unavailable" || len(dots.results) != 0 {
-		t.Fatalf("status=%d out=%v", status, out)
-	}
-}
 
 // fakeDotsResults answers like the store: id 1 is pending, id 2 superseded,
 // any other id is missing.

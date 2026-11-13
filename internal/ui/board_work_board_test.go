@@ -15,21 +15,21 @@ import (
 
 func TestWorkBoardConsoleProjection(t *testing.T) {
 	at := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
-	board := store.LinearBoard{Task: store.Task{ID: 101, State: "developing", Refs: store.TaskRefs{JobID: "example-lead", PR: "https://github.com/example/project/pull/42", HeadSHA: "example-head"}}, Sessions: []store.LinearBoardSession{
-		{JobID: "example-lead", Host: "example-a", Role: "lead", Family: "openai", Model: "example-builder", At: at, Active: false, Pane: "private-pane", Profile: "private-profile", Verdict: "private-verdict"},
+	board := store.TaskWorkBoard{JobID: "example-lead", PR: "https://github.com/example/project/pull/42", HeadSHA: "example-head", Sessions: []store.TaskWorkSession{
+		{JobID: "example-lead", Host: "example-a", Role: "lead", Family: "openai", Model: "example-builder", At: at, Active: false},
 		{JobID: "example-review", Host: "example-b", Role: "review", Family: "anthropic", Model: "example-reviewer", At: at, Active: true},
 		{JobID: "example-consult", Host: "example-c", Role: "consult", Model: "example-consultant", At: at, Active: true},
 		{JobID: "old-worker", Host: "old-host", Role: "worker", At: at, Active: false},
 	}}
 	view := projectWorkBoard(board)
-	if view.PrimaryJobID != "example-lead" || view.PR != board.Task.Refs.PR || view.HeadSHA != "example-head" || len(view.Sessions) != 3 {
+	if view.PrimaryJobID != "example-lead" || view.PR != board.PR || view.HeadSHA != "example-head" || len(view.Sessions) != 3 {
 		t.Fatalf("projection=%+v", view)
 	}
 	raw, err := json.Marshal(view)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, private := range []string{"private-pane", "private-profile", "private-verdict", "old-worker", "account_key", "candidates", "power"} {
+	for _, private := range []string{"old-worker", "account_key", "candidates", "power"} {
 		if strings.Contains(string(raw), private) {
 			t.Fatalf("unexpected field %s in %s", private, raw)
 		}
@@ -37,7 +37,7 @@ func TestWorkBoardConsoleProjection(t *testing.T) {
 	if view.Sessions[0].Host != "example-a" || view.Sessions[0].Model != "example-builder" || view.Sessions[1].Role != "review" {
 		t.Fatal(view)
 	}
-	if projectWorkBoard(store.LinearBoard{}) != nil {
+	if projectWorkBoard(store.TaskWorkBoard{}) != nil {
 		t.Fatal("empty projection must preserve old-server fallback")
 	}
 }

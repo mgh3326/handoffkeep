@@ -86,44 +86,10 @@ Completed-job duration remains a read-time join to `jobs`, using
 `jobs.updated_at - jobs.created_at` when `jobs.state='completed'`. Lost-job time
 is not a completion duration.
 
-## Board events
+## Console work overlay
 
-Placement writes supply host, family, model, profile, role, repository, and pane.
-Job updates supply later pane and completion details. Task claims, transitions,
-rebinds, decision requests, and WRK claims queue updates in their transactions.
-
-Existing relay ingestion supplies terminal events. `job.completed` and
-`job.joined` map to READY, `job.escalate` maps to ESC, and `job.lost` and
-`job.revoked` map to BLOCKED. Lane events use the existing one-line form:
-
-```text
-[<job-id>] READY | PR and head
-[<job-id>] ESC | question
-[<job-id>] BLOCKED | reason
-[<job-id>] FINDINGS | count and verdict
-[<job-id>] MERGED | PR
-```
-
-An exact bracketed job id, the event's `job_id`, or its explicit `pr` field
-associates an event with a task. The existing mergewake form also works:
-
-```text
-[mergewake] FINDINGS handoffkeep#123 head=abc1234 | 2 finding(s) for lane work
-```
-
-The writer matches that PR against the task's URL or repository-number reference.
-A placed review's explicit owning task takes precedence over its separate job
-task. Lane names alone never associate a task.
-The producer includes the findings count and verdict in the event text.
-READY, ESC, BLOCKED, FINDINGS, and MERGED append a short comment. Comments
-carry at most 1,800 runes of event text; hk retains the full record. A replay of
-the same relay event appends none.
-
-The work-board state mapping is `backlog` and `reopened` to Backlog, `claimed`
-and `in_progress` to In Progress, an open PR or READY to In Review, `merged` or
-MERGED to Done, and `dropped` to Canceled. `verifying` and `join` also map to
-In Review. A late READY cannot reopen a terminal hk task.
-
-The writer uses Linear's documented
-[GraphQL API](https://linear.app/developers/graphql) and its
-[official schema](https://github.com/linear/linear/blob/master/packages/sdk/src/schema.graphql).
+The console's per-task work overlay (`ReadTaskWorkBoards`,
+`internal/store/console_work_board.go`) reads placed decisions owned by a
+task, ends a session once its job is terminal, and takes the PR and head from
+the task's refs. It writes nothing. The Linear work board that also consumed
+these rows was retired in hk 4425.
