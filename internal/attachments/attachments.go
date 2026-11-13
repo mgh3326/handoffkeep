@@ -578,7 +578,7 @@ func (m *Manager) List(ctx context.Context, ref string, limit int) ([]store.Atta
 	if ref == "" {
 		return m.Store.ListAttachments(ctx, "", "", limit)
 	}
-	k, id, e := ParseRef(ref)
+	k, id, e := parseListRef(ref)
 	if e != nil {
 		return nil, e
 	}
@@ -589,6 +589,17 @@ func (m *Manager) Usage(ctx context.Context) (store.AttachmentUsage, error) {
 		return store.AttachmentUsage{}, ErrDisabled
 	}
 	return m.Store.AttachmentUsage(ctx)
+}
+
+// parseListRef is ParseRef plus the ref kinds only a read may name: the
+// previous release still writes ref_kind 'checkpoint' rows during the
+// blue-green overlap, and the List filter must keep reading them. Upload paths
+// call ParseRef, so a new checkpoint ref is still refused.
+func parseListRef(ref string) (string, string, error) {
+	if v, ok := strings.CutPrefix(ref, "checkpoint:"); ok {
+		return "checkpoint", v, nil
+	}
+	return ParseRef(ref)
 }
 func ParseRef(ref string) (string, string, error) {
 	if ref == "" || ref == "none" {
