@@ -59,6 +59,7 @@ var errorRules = []errorRule{
 	{store.ErrStandingNotNewer, http.StatusConflict, "standing_not_newer", false},
 	{store.ErrStandingConflict, http.StatusConflict, "standing_conflict", false},
 	{store.ErrInvalidSync, http.StatusBadRequest, "invalid_context", false},
+	{store.ErrDocPruneInvalid, http.StatusBadRequest, "invalid_doc_prune", true},
 	{store.ErrSpawnInvalid, http.StatusBadRequest, "invalid_context", true},
 	{attachments.ErrDisabled, http.StatusServiceUnavailable, "attachments_disabled", false},
 	{attachments.ErrTooLarge, http.StatusRequestEntityTooLarge, "attachment_too_large", false},
