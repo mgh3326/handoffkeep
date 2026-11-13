@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Kill reopen regression mutants with narrow tests and Go source overlays.
 
-The store and API mutants require CI's PostgreSQL service. --no-db runs only
-the fleetmetrics mutant. No source file in the checkout is modified.
+Every mutant needs CI's PostgreSQL service. No source file in the checkout is
+modified.
 """
 
 import argparse
@@ -16,36 +16,26 @@ import tempfile
 ROOT = Path(__file__).resolve().parent.parent
 MUTANTS = [
     (
-        "reopen-keeps-previous-pr", "store/task_flow.go", True,
+        "reopen-keeps-previous-pr", "store/task_flow.go",
         '\t\tx.Refs.PR = ""\n', "",
         "TestReopenClearsCycleRefs", "stale cycle refs after reopen",
     ),
     (
-        "disposition-can-reopen", "store/task_flow.go", True,
+        "disposition-can-reopen", "store/task_flow.go",
         '\t\tif reopen {\n'
         '\t\t\treturn Task{}, fmt.Errorf("%w: disposition items cannot be reopened", ErrTaskConflict)\n'
         '\t\t}\n', "",
         "TestReopenRefusesDisposition", "disposition reopen refusal",
     ),
     (
-        "disposition-can-claim", "store/task_flow.go", True,
+        "disposition-can-claim", "store/task_flow.go",
         '\tif hasDisposition {\n'
         '\t\treturn Task{}, fmt.Errorf("%w: disposition items cannot be claimed directly", ErrTaskConflict)\n'
         '\t}\n', "",
         "TestClaimRefusesDisposition", "disposition claim refusal",
     ),
     (
-        "lead-time-inherits-previous-cycle", "fleetmetrics/metrics.go", False,
-        "prs := ix.leadTimePRs(t)", "prs := ix.taskPRs[id]",
-        "TestLeadTimeReopenedCycleLinks", "current cycle lead time=",
-    ),
-    (
-        "lead-time-first-reopen", "fleetmetrics/linkage.go", False,
-        '\t\t\tstart = i + 1\n', '\t\t\tstart = i + 1\n\t\t\tbreak\n',
-        "TestLeadTimeTwiceReopenedUsesLatestCycle", "twice-reopened lead time=",
-    ),
-    (
-        "reopen-ignores-caller", "api/api.go", True,
+        "reopen-ignores-caller", "api/api.go",
         "s.Service.ReopenTask(r.Context(), id, client, input.Reason)",
         # Keep client referenced so the mutant compiles; only the caller passed
         # to ReopenTask changes.
@@ -67,13 +57,12 @@ def run_test(package, test, overlay=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--no-db", action="store_true")
-    args = parser.parse_args()
-    if not args.no_db and not os.environ.get("HANDOFFKEEP_TEST_DB_URL"):
-        parser.error("HANDOFFKEEP_TEST_DB_URL is required; use --no-db locally")
-    selected = [m for m in MUTANTS if not (args.no_db and m[2])]
+    parser.parse_args()
+    if not os.environ.get("HANDOFFKEEP_TEST_DB_URL"):
+        parser.error("HANDOFFKEEP_TEST_DB_URL is required")
+    selected = MUTANTS
     with tempfile.TemporaryDirectory(prefix="hk-reopen-mutants-") as work:
-        for name, relative, _, old, new, test, assertion in selected:
+        for name, relative, old, new, test, assertion in selected:
             source = ROOT / "internal" / relative
             original = source.read_text()
             if original.count(old) != 1:

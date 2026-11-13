@@ -77,39 +77,6 @@ func (c Client) call(ctx context.Context, method, path string, input, output any
 }
 
 func esc(x string) string { return url.PathEscape(x) }
-func (c Client) PutMemory(ctx context.Context, _ string, x store.Memory) (store.Memory, error) {
-	var out store.Memory
-	e := c.call(ctx, "PUT", "/v1/memory/"+esc(x.Agent)+"/"+esc(x.Name), x, &out)
-	return out, e
-}
-func (c Client) GetMemory(ctx context.Context, agent, name string) (store.Memory, bool, error) {
-	var out store.Memory
-	e := c.call(ctx, "GET", "/v1/memory/"+esc(agent)+"/"+esc(name), nil, &out)
-	if ErrorCode(e) == "not_found" {
-		return out, false, nil
-	}
-	return out, e == nil, e
-}
-func (c Client) ListMemory(ctx context.Context, agent string, content bool) ([]store.Memory, error) {
-	var out struct {
-		Memory []store.Memory `json:"memory"`
-	}
-	e := c.call(ctx, "GET", "/v1/memory/"+esc(agent), nil, &out)
-	if e != nil || !content {
-		return out.Memory, e
-	}
-	for i := range out.Memory {
-		item, found, err := c.GetMemory(ctx, agent, out.Memory[i].Name)
-		if err != nil {
-			return nil, err
-		}
-		if !found {
-			return nil, errors.New("memory disappeared during pull")
-		}
-		out.Memory[i] = item
-	}
-	return out.Memory, nil
-}
 func (c Client) PutDocument(ctx context.Context, _ string, x store.Document) (store.Document, bool, error) {
 	var out struct {
 		Document store.Document `json:"document"`

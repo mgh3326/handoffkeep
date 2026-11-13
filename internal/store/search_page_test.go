@@ -16,20 +16,13 @@ func TestSearchPageOrdersScopesAndMarksTruncatedTies(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, name := range []string{"alpha memoryorderprobe", "beta memoryorderprobe", "gamma memoryorderprobe"} {
-		if _, err := s.pool.Exec(ctx, `INSERT INTO memory(agent,name,description,memory_type,content,updated_by,updated_at) VALUES('lane-a',$1,'','reference','memoryorderprobe body','test',$2)`, name, createdAt); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	got, err := s.Search(ctx, "orderprobe", "all", "", 4)
+	// Two documents and a page of one: the first in order is cut, and its
+	// row is marked truncated.
+	got, err := s.Search(ctx, "orderprobe", "all", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{
-		"docs:a-doc-orderprobe", "docs:z-doc-orderprobe",
-		"memory:alpha memoryorderprobe", "memory:beta memoryorderprobe",
-	}
+	want := []string{"docs:a-doc-orderprobe"}
 	keys := make([]string, 0, len(got))
 	for _, row := range got {
 		keys = append(keys, row.Scope+":"+row.Title)

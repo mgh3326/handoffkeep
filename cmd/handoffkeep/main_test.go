@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -93,50 +91,6 @@ func TestListenValidation(t *testing.T) {
 	}
 	if err := validListen("100.122.100.56:8800", true); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestMemoryPushPullPreservesBytes(t *testing.T) {
-	var saved store.Memory
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/v1/memory/hk-probe/probe-2":
-			if err := json.NewDecoder(r.Body).Decode(&saved); err != nil {
-				t.Fatal(err)
-			}
-			_ = json.NewEncoder(w).Encode(saved)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/memory/hk-probe":
-			_ = json.NewEncoder(w).Encode(map[string]any{"memory": []store.Memory{{Agent: saved.Agent, Name: saved.Name, Description: saved.Description, Type: saved.Type}}})
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/memory/hk-probe/probe-2":
-			_ = json.NewEncoder(w).Encode(saved)
-		default:
-			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer server.Close()
-	t.Setenv("HANDOFFKEEP_URL", server.URL)
-	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
-	source, destination := t.TempDir(), t.TempDir()
-	raw := "---\nname: probe-2\ndescription: retained description\nmetadata:\n  type: reference\n---\n\n프로브 메모리 2 본문\n"
-	if err := os.WriteFile(filepath.Join(source, "probe-2.md"), []byte(raw), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := memoryCmd([]string{"push", "--agent", "hk-probe", "--dir", source, "--apply"}, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-	if saved.Content != raw {
-		t.Fatalf("push content=%q want raw=%q", saved.Content, raw)
-	}
-	if err := memoryCmd([]string{"pull", "--agent", "hk-probe", "--dir", destination, "--apply"}, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile(filepath.Join(destination, "probe-2.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, []byte(raw)) {
-		t.Fatalf("round trip differs\ngot:  %q\nwant: %q", got, raw)
 	}
 }
 

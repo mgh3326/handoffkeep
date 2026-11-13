@@ -14,15 +14,6 @@ import (
 
 type spyBackend struct{}
 
-func (*spyBackend) PutMemory(context.Context, string, store.Memory) (store.Memory, error) {
-	return store.Memory{}, errors.New("unexpected")
-}
-func (*spyBackend) GetMemory(context.Context, string, string) (store.Memory, bool, error) {
-	return store.Memory{}, false, errors.New("unexpected")
-}
-func (*spyBackend) ListMemory(context.Context, string, bool) ([]store.Memory, error) {
-	return nil, errors.New("unexpected")
-}
 func (*spyBackend) PutDocument(context.Context, string, store.Document) (store.Document, bool, error) {
 	return store.Document{}, false, errors.New("unexpected")
 }

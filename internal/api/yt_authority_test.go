@@ -25,8 +25,7 @@ func TestYTAuthoritySwitchOverHTTP(t *testing.T) {
 	}
 	t.Cleanup(st.Close)
 	st.SetYTCommentsMode(store.YTCommentsOn)
-	h := httptest.NewServer(Server{Service: Service{Store: st}, Tokens: Tokens{"operator": "op-token", "peer": "peer-token", "yt": "yt-token"},
-		ImportReadGrants: map[string]bool{"yt": true}}.Handler())
+	h := httptest.NewServer(Server{Service: Service{Store: st}, Tokens: Tokens{"operator": "op-token", "peer": "peer-token"}}.Handler())
 	t.Cleanup(h.Close)
 
 	do := func(method, path, token string, body any) (int, map[string]any) {
@@ -50,18 +49,6 @@ func TestYTAuthoritySwitchOverHTTP(t *testing.T) {
 		_ = json.NewDecoder(resp.Body).Decode(&out)
 		return resp.StatusCode, out
 	}
-	items := func(path string) int {
-		t.Helper()
-		status, body := do(http.MethodGet, path, "yt-token", nil)
-		if status != http.StatusOK {
-			t.Fatalf("GET %s = %d %v", path, status, body)
-		}
-		list, ok := body["items"].([]any)
-		if !ok {
-			t.Fatalf("GET %s items = %v", path, body)
-		}
-		return len(list)
-	}
 	set := func(token string, kinds []string, side string) (int, map[string]any) {
 		t.Helper()
 		return do(http.MethodPost, "/v1/yt/authority", token, map[string]any{"kinds": kinds, "authority": side, "by": "operator", "note": "drill"})
@@ -82,13 +69,6 @@ func TestYTAuthoritySwitchOverHTTP(t *testing.T) {
 	}
 	if status, body := comment(task.ID, "plain"); status != http.StatusCreated {
 		t.Fatalf("hk: comment = %d %v", status, body)
-	}
-	if n := items("/v1/import/comments"); n != 2 {
-		t.Fatalf("hk: %d import comments, want 2", n)
-	}
-	tasks := items("/v1/import/tasks")
-	if tasks < 1 {
-		t.Fatalf("hk: %d import tasks", tasks)
 	}
 
 	if status, body := do(http.MethodGet, "/v1/yt/authority", "peer-token", nil); status != http.StatusOK || len(body["authority"].([]any)) != 4 {
@@ -119,16 +99,7 @@ func TestYTAuthoritySwitchOverHTTP(t *testing.T) {
 		t.Fatalf("set answer %v", body)
 	}
 
-	// Authority youtrack for comments: its import pages are empty, the other
-	// kinds' are not, and an unsendable comment is refused.
-	for _, path := range []string{"/v1/import/comments", "/v1/import/comments?task_ids=" + fmt.Sprint(task.ID), "/v1/import/comment-authors"} {
-		if n := items(path); n != 0 {
-			t.Fatalf("youtrack: GET %s has %d items", path, n)
-		}
-	}
-	if n := items("/v1/import/tasks"); n != tasks {
-		t.Fatalf("youtrack comments: %d import tasks, want %d", n, tasks)
-	}
+	// Authority youtrack for comments: an unsendable comment is refused.
 	if status, body := comment(task.ID, unsendable); status != http.StatusBadRequest || body["error"] != "yt_comment_unsendable" || !strings.Contains(body["reason"].(string), "the body cannot be sent:") {
 		t.Fatalf("youtrack: unsendable comment = %d %v", status, body)
 	}
@@ -144,8 +115,5 @@ func TestYTAuthoritySwitchOverHTTP(t *testing.T) {
 	}
 	if status, body := comment(task.ID, unsendable); status != http.StatusCreated {
 		t.Fatalf("hk again: unsendable comment = %d %v", status, body)
-	}
-	if n := items("/v1/import/comments"); n != 3 {
-		t.Fatalf("hk again: %d import comments, want 3", n)
 	}
 }

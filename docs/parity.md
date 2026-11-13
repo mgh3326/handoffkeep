@@ -18,8 +18,8 @@ Baseline: `handoffkeep@64942ff`, the commit this matrix was taken from.
 | Thing counted | Count at 64942ff | Now |
 | --- | --- | --- |
 | Console write routes | 14: 7 JSON routes in `internal/ui/api.go`, 7 HTML form routes in `internal/ui/ui.go` | 14 (unchanged) |
-| MCP tool definitions | 22: 21 exposed on HTTP `/mcp`, 12 on stdio (the operator/meta tools are HTTP-only; `attachment_put_from_path` is stdio-only) | 34 exposed on HTTP `/mcp` and 15 on stdio, counted by listing the registered tools at hk 3683 and adding `fleet_capacity` (the earlier "25" was stale; `attachment_put` and the two direct-upload tools are in both counts) |
-| `/v1` write registrations | 81 method-scoped write registrations, plus four method-agnostic handlers that also accept writes: `/v1/checkpoints`, `/v1/documents/{key}`, `/v1/memory/{agent}/{name}`, `/v1/wrk/{path}` (the rows below cover the user-facing capabilities) | 81 (unchanged) |
+| MCP tool definitions | 22: 21 exposed on HTTP `/mcp`, 12 on stdio (the operator/meta tools are HTTP-only; `attachment_put_from_path` is stdio-only) | 31 exposed on HTTP `/mcp` and 12 on stdio (after hk 4437 removed `memory_get`, `memory_put` and `memory_list`), counted by listing the registered tools at hk 3683 and adding `fleet_capacity` (the earlier "25" was stale; `attachment_put` and the two direct-upload tools are in both counts) |
+| `/v1` write registrations | 81 method-scoped write registrations, plus three method-agnostic handlers that also accept writes: `/v1/checkpoints`, `/v1/documents/{key}`, `/v1/wrk/{path}` (the rows below cover the user-facing capabilities) | 81 (unchanged) |
 
 Legend: **—** means the surface has no path for that capability. **ui.write** is
 the console's log line `ui.write email= action= target= event_id= result=`
@@ -68,7 +68,6 @@ inbox and disposition writes refuse them.
 | Context | Search across context, documents and tasks | — | GET /ui/api/search | GET /v1/search | ctx search | search_context | Operator, bearer, MCP bearer/Access | None (read) | n/a | internal/mcp/server_test.go, internal/store/search_tasks_test.go |
 | Context | Watch every task change exactly once | — | — | GET /v1/sync/delta, GET /v1/ledger | since | changes_since | bearer; MCP bearer/Access | None (read; the consumer cursor moves only through `ledger ack`) | n/a; a pruned cursor answers `reset` with `min_cursor` | internal/mcp/operator_reads_test.go, internal/api/sync_test.go, internal/api/ledger_test.go |
 | Context | Checkpoints | — | — (timeline shows relay events, not checkpoints) | GET/POST /v1/checkpoints | ctx checkpoint, ctx recent | put_checkpoint, recent_checkpoints | bearer; MCP stdio/HTTP | checkpoint rows | Checkpoints are append-only | internal/mcp/server_test.go |
-| Context | Agent memory | — | — | GET /v1/memory/{agent}, GET/PUT /v1/memory/{agent}/{name} | memory list, memory push, memory pull | memory_get, memory_put, memory_list | bearer; MCP stdio/HTTP | memory rows | Overwrite by name; push/pull reflect a directory | internal/mcp/server_test.go |
 | Attachments | List attachments and mint a private URL | — | — | GET /v1/attachments, GET /v1/attachments/{sha} | attach list, attach get, attach usage | attachment_list, attachment_get_url | bearer; MCP stdio/HTTP | Attachment metadata | Immutable by design | internal/mcp/server_test.go, internal/attachments/attachments_test.go |
 | Attachments | Upload an attachment | — | — | PUT /v1/attachments | attach put | attachment_put (base64, HTTP and stdio); attachment_put_from_path (stdio only) | bearer; MCP stdio/HTTP for attachment_put, local stdio MCP for attachment_put_from_path | Attachment row | Immutable by design; the same bytes return the same record | internal/mcp/server_test.go, internal/mcp/attachment_put_test.go |
 | Projects | Read projects, their owner and health (open counts, in progress / waiting / blocked / done / overdue, assignees, top blocked and overdue tasks) | — | GET /ui/api/board/projects, GET /ui/api/board/lanes | GET /v1/tasks/projects, GET /v1/tasks/projects/owners, GET /v1/tasks/projects/{project}/owner, GET /v1/projects/{name}/frontier | tasks projects, tasks owner, tasks owners | projects_list | Operator, bearer, MCP bearer/Access | None (read) | n/a | internal/api/project_owner_test.go, internal/mcp/meta_test.go |
@@ -82,7 +81,6 @@ inbox and disposition writes refuse them.
 | Deploys | Configure deploy services | — | — | PUT /v1/deploy-services/{name}, POST /v1/deploy-services/{name}/deactivate, PUT /v1/services/{name} | services records-put, services records-deactivate, services put | — | bearer | service row | Configure again; deactivate is not a delete | internal/api/deploy_services_test.go, cmd/handoffkeep/deploys_test.go |
 | Translations | Read Korean translations | YouTrack owns the Korean summary and displays it | Rendered title/body/question/options everywhere | GET /v1/translations/missing | translations list | task_show (title_ko), decisions_pending (question_ko, options_ko) | Operator, bearer, MCP bearer/Access | Translation row (source hash, translator, stale flag) | n/a | internal/api/translations_test.go, internal/mcp/operator_test.go |
 | Translations | Write Korean translations | The YouTrack summary is the operator's edit path for the displayed title | — | PUT /v1/translations | translations put, translations import | — | bearer | Translation row (translator, source hash) | Overwrite; a changed original marks the row stale | internal/api/translations_test.go, cmd/handoffkeep/translations_test.go |
-| YouTrack | Run sync and read its health | The sync itself; cursor, outbox and processed activities are hk bookkeeping | Board detail shows the cached priority/lane with a stale flag | — | youtrack sync | sync_status | bearer (CLI); MCP bearer/Access | cursor, outbox, processed activities, field cache | Rerun; pending outbox is retried with backoff | internal/youtrack/sync_test.go, internal/mcp/meta_test.go |
 | YouTrack | Map hk projects to YouTrack projects | `youtrack_projects` is the mapping | — | — | youtrack projects list, youtrack projects put | — | bearer (CLI) | youtrack_projects row | put again | internal/youtrack/client_test.go, cmd/handoffkeep/youtrack_test.go |
 | Fleet | Set a host's accepting flag | — | POST /ui/api/nodes/{machine}/accepting | — (the hub route is /v1/nodes/{machine}/accepting on the hub, not hk) | — | — | Operator, or a service identity with JSON content type | ui.write | Set again | internal/ui/routes_test.go |
 | Fleet | Inspect quota, host/account presence and recent placement attempts | — | — | GET /v1/quota/accounts/{key}/latest, GET /v1/quota/presence, GET /v1/placements | — | fleet_capacity | Operator, bearer, MCP bearer/Access | None (read) | n/a | internal/mcp/fleet_capacity_test.go |
@@ -141,9 +139,6 @@ because that path has an authenticated principal.
 | get_document | read | HTTP, stdio | Documents read |
 | put_document | write | HTTP, stdio | Documents write |
 | list_documents | read | HTTP, stdio | Documents read |
-| memory_get | read | HTTP, stdio | Agent memory |
-| memory_put | write | HTTP, stdio | Agent memory |
-| memory_list | read | HTTP, stdio | Agent memory |
 | attachment_list | read | HTTP, stdio | Attachments read |
 | attachment_get_url | read | HTTP, stdio | Attachments read |
 | attachment_put | write | HTTP, stdio | Attachment upload from base64; returns the stable reference |
@@ -164,11 +159,10 @@ because that path has an authenticated principal.
 | task_intake | write | HTTP | Task create |
 | projects_list | read | HTTP | Projects read |
 | task_states | read | HTTP | State machine |
-| sync_status | read | HTTP | YouTrack sync health |
 | fleet_capacity | read | HTTP | Fleet quota and placement capacity evidence |
 
 Read tools set `readOnlyHint: true`. The write tools (`put_checkpoint`,
-`put_document`, `memory_put`, `attachment_put`, `attachment_upload_begin`, `attachment_upload_complete`, `attachment_put_from_path`, `decision_answer`,
+`put_document`, `attachment_put`, `attachment_upload_begin`, `attachment_upload_complete`, `attachment_put_from_path`, `decision_answer`,
 `task_comment`, `task_intake`) set `readOnlyHint: false` and
 `destructiveHint: false`. Of these, `decision_answer` moves a task's state by
 answering the task's request; the rest add records. `task_update` (hk 3465)

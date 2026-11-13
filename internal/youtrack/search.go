@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -61,15 +60,15 @@ func (c *Client) SearchArticleText(ctx context.Context, query string, top int) (
 }
 
 // Search answers one /v1/search call. Scope tasks and docs ask YouTrack, and
-// scope all asks it for both and adds PostgreSQL's ctx and memory hits. Every
-// other request goes to fallback: scope ctx or memory, a bare id or "#<id>",
+// scope all asks it for both. Every other request goes to fallback: a bare id
+// or "#<id>",
 // an exact document key, and any YouTrack failure (timeout, HTTP error,
 // oversize answer). A YouTrack failure is logged once as
 // search.youtrack_fallback with its reason.
 //
 // Scope all merges three lanes round-robin, one hit from each non-empty lane in
 // turn: YouTrack issues (tasks), YouTrack articles (docs), and PostgreSQL ctx
-// and memory newest first. Each lane keeps its own order, so the YouTrack lanes
+// newest first. Each lane keeps its own order, so the YouTrack lanes
 // keep YouTrack's relevance order. Scopes tasks and docs keep YouTrack's order.
 //
 // Each YouTrack request asks for limit+1 hits. The page is truncated when a
@@ -159,27 +158,6 @@ func (s *Service) Search(ctx context.Context, fallback SearchFallback, q, scope,
 		}
 		lanes = append(lanes, lane)
 	}
-	if scope == "all" {
-		var pg []store.SearchResult
-		for _, sc := range []string{"memory"} {
-			rows, err := fallback(ctx, q, sc, session, limit)
-			if err != nil {
-				return nil, err
-			}
-			for i := range rows {
-				if rows[i].Truncated {
-					overflow = true
-					rows[i].Truncated = false
-				}
-			}
-			pg = append(pg, rows...)
-		}
-		sort.SliceStable(pg, func(i, j int) bool { return pg[i].CreatedAt.After(pg[j].CreatedAt) })
-		if len(pg) > 0 {
-			lanes = append(lanes, pg)
-		}
-	}
-
 	merged := interleave(lanes)
 	truncated := overflow || len(merged) > limit
 	if len(merged) > limit {

@@ -21,9 +21,6 @@ import (
 )
 
 type Backend interface {
-	PutMemory(context.Context, string, store.Memory) (store.Memory, error)
-	GetMemory(context.Context, string, string) (store.Memory, bool, error)
-	ListMemory(context.Context, string, bool) ([]store.Memory, error)
 	PutDocument(context.Context, string, store.Document) (store.Document, bool, error)
 	GetDocument(context.Context, string) (store.Document, bool, error)
 	ListDocuments(context.Context, string, string, string, int64, int) ([]store.Document, error)
@@ -122,7 +119,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return &gmcp.CallToolResult{Content: []gmcp.Content{&gmcp.TextContent{Text: string(b)}}}, nil, nil
 	}
-	gmcp.AddTool(s, &gmcp.Tool{Name: "search_context", Description: "Search documents, memory or tasks.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "search_context", Description: "Search documents or tasks.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Q       string `json:"q"`
 		Scope   string `json:"scope,omitempty"`
 		Session string `json:"session,omitempty"`
@@ -170,38 +167,6 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 			return nil, nil, e
 		}
 		return result(map[string]any{"documents": v})
-	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "memory_get", Description: "Get one agent memory.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
-		Agent string `json:"agent"`
-		Name  string `json:"name"`
-	}) (*gmcp.CallToolResult, any, error) {
-		v, ok, e := service.GetMemory(ctx, x.Agent, x.Name)
-		if e != nil {
-			return nil, nil, e
-		}
-		return result(map[string]any{"found": ok, "memory": v})
-	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "memory_put", Description: "Create or update agent memory.", Annotations: writeAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
-		Agent       string `json:"agent"`
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Type        string `json:"type"`
-		Content     string `json:"content"`
-	}) (*gmcp.CallToolResult, any, error) {
-		v, e := service.PutMemory(ctx, client, store.Memory{Agent: x.Agent, Name: x.Name, Description: x.Description, Type: x.Type, Content: x.Content})
-		if e != nil {
-			return nil, nil, e
-		}
-		return result(v)
-	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "memory_list", Description: "List agent memory metadata.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
-		Agent string `json:"agent"`
-	}) (*gmcp.CallToolResult, any, error) {
-		v, e := service.ListMemory(ctx, x.Agent, false)
-		if e != nil {
-			return nil, nil, e
-		}
-		return result(map[string]any{"memory": v})
 	})
 	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_list", Description: "List immutable attachment metadata, optionally by reference.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Ref   string `json:"ref,omitempty"`
