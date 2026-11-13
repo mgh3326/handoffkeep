@@ -375,6 +375,63 @@ func TestTaskThreadFlowOneThreadLinesInOrder(t *testing.T) {
 	}
 }
 
+// A verdict that flips between two decisions before one poll (blocked, then
+// ready) posts a line for each, and a decision that repeats the held verdict
+// posts none (hk 4000). The poster reads every decision, not the snapshot.
+func TestTaskThreadFlowPostsEveryGateVerdict(t *testing.T) {
+	st, _ := notifyStoreFixture(t)
+	ctx := t.Context()
+	f := newFakeForum(t)
+	clock := &testClock{at: time.Now().UTC()}
+	p := threadPoster(st, f, clock)
+	p.Drain(ctx)
+	f.take()
+
+	x := threadTask(t, st, "handoffkeep", "Gate verdicts between polls")
+	p.Drain(ctx)
+	f.take()
+	state, found, err := st.GetTaskThread(ctx, x.ID)
+	if err != nil || !found || state.ThreadID == nil {
+		t.Fatalf("delivery %+v found=%v err=%v", state, found, err)
+	}
+	thread := *state.ThreadID
+
+	pr := "https://github.com/example/app/pull/8"
+	taskEvent(t, st, store.TaskSourceEvent{Source: store.SourceMergewakePR, SourceRef: pr, TaskID: x.ID, HeadSHA: threadHead})
+	ref := store.ChangeRef{Repo: "example/app", PR: 8}
+	now := time.Now().UTC()
+	if _, err = st.ApplyChangeGate(ctx, ref, store.ChangeGateWrite{HeadSHA: threadHead, State: "blocked", Reasons: []string{"open_high"}, DecidedAt: now.Add(-time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.ApplyChangeGate(ctx, ref, store.ChangeGateWrite{HeadSHA: threadHead, State: "ready", DecidedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	p.Drain(ctx)
+	var reviews []forumCall
+	for _, c := range f.take() {
+		if strings.Contains(c.Content, "리뷰 판정") {
+			reviews = append(reviews, c)
+		}
+	}
+	if len(reviews) != 2 || !strings.Contains(reviews[0].Content, "⛔ 리뷰 판정: 차단") || !strings.Contains(reviews[1].Content, "✅ 리뷰 판정: 통과") {
+		t.Fatalf("review lines %+v, want blocked then ready", reviews)
+	}
+	for _, c := range reviews {
+		if c.ThreadID != thread {
+			t.Fatalf("review line in thread %s, want %s", c.ThreadID, thread)
+		}
+	}
+
+	// The held verdict again, decided later: recorded, and no line.
+	if _, err = st.ApplyChangeGate(ctx, ref, store.ChangeGateWrite{HeadSHA: threadHead, State: "ready", DecidedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	p.Drain(ctx)
+	if again := f.take(); len(again) != 0 {
+		t.Fatalf("a repeated verdict sent %+v", again)
+	}
+}
+
 func TestTaskThreadRetriedLineIsNotDuplicated(t *testing.T) {
 	st, _ := notifyStoreFixture(t)
 	ctx := t.Context()
