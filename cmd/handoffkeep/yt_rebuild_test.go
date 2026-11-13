@@ -111,17 +111,18 @@ type ytrbComment struct {
 // Retry-After seconds, "" for none) served before the real one. Anything but a
 // GET is refused and counted.
 type ytrbFake struct {
-	mu       sync.Mutex
-	issues   map[string]map[string]any
-	articles map[string]string
-	comments map[string][]ytrbComment
-	limited  map[string][]string
-	gets     map[string]int
-	refused  int
+	mu           sync.Mutex
+	issues       map[string]map[string]any
+	articles     map[string]string
+	comments     map[string][]ytrbComment
+	commentsGone map[string]bool
+	limited      map[string][]string
+	gets         map[string]int
+	refused      int
 }
 
 func newYTRBFake() *ytrbFake {
-	return &ytrbFake{issues: map[string]map[string]any{}, articles: map[string]string{}, comments: map[string][]ytrbComment{}, limited: map[string][]string{}, gets: map[string]int{}}
+	return &ytrbFake{issues: map[string]map[string]any{}, articles: map[string]string{}, comments: map[string][]ytrbComment{}, commentsGone: map[string]bool{}, limited: map[string][]string{}, gets: map[string]int{}}
 }
 
 func (f *ytrbFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -160,6 +161,11 @@ func (f *ytrbFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if issue, ok := strings.CutSuffix(rest, "/comments"); ok {
+		if f.commentsGone[issue] {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"Entity with id not found"}`))
+			return
+		}
 		skip, _ := strconv.Atoi(r.URL.Query().Get("$skip"))
 		top, _ := strconv.Atoi(r.URL.Query().Get("$top"))
 		all := f.comments[issue]
@@ -278,6 +284,56 @@ func TestYouTrackRebuildTasks(t *testing.T) {
 	r, _ = ytrbRun(t, fake, src, "beta")
 	if r.Tasks.Checked != 1 || r.Tasks.Equal != 1 || r.Project != "beta" {
 		t.Fatalf("--project beta: %+v", r.Tasks)
+	}
+}
+
+// hk 4156 (r4545346442): the import's title may span lines and ends where
+// the import's metadata block begins, not at the first newline. A title
+// line that itself looks like a metadata prefix still parses when the title
+// PG holds is the whole body up to the real block.
+func TestYouTrackRebuildImportMultilineTitle(t *testing.T) {
+	fake := newYTRBFake()
+	fake.issue("2-1", 1, "alpha", "Original hk title: first line\nsecond line\n제목(한국어): 한국어\nPR: https://x/1")
+	fake.issue("2-2", 2, "alpha", "Original hk title: has\nPR: line\nJob: j-9")
+	fake.issue("2-3", 3, "alpha", "Original hk title: no metadata\ntitle continues")
+	src := &ytrbSource{tasks: []store.YTRebuildTask{
+		{TaskID: 1, Title: "first line\nsecond line", Project: "alpha", IssueID: "2-1"},
+		{TaskID: 2, Title: "has\nPR: line", Project: "alpha", IssueID: "2-2"},
+		{TaskID: 3, Title: "no metadata\ntitle continues", Project: "alpha", IssueID: "2-3"},
+	}}
+	r, _ := ytrbRun(t, fake, src, "")
+	if r.Tasks.Checked != 3 || r.Tasks.Equal != 3 || r.Tasks.Differ.Count != 0 || r.Tasks.Errors.Count != 0 {
+		t.Fatalf("tasks = %+v", r.Tasks)
+	}
+
+	// A PG title the issue does not carry still differs, and the reason keeps
+	// the whole rebuilt title, not its first line.
+	src.tasks[2].Title = "no metadata"
+	r, _ = ytrbRun(t, fake, src, "")
+	if r.Tasks.Equal != 2 || r.Tasks.Differ.Count != 1 {
+		t.Fatalf("tasks = %+v", r.Tasks)
+	}
+	if got := r.Tasks.Differ.Items[0].Reason; got != `title "no metadata\ntitle continues"` {
+		t.Fatalf("reason %q", got)
+	}
+}
+
+// hk 4156 (r4545399265): when the issue the binding names is gone, its
+// comments endpoint answers 404 too; that is the same difference the tasks
+// target reports, not a failed read.
+func TestYouTrackRebuildCommentsMissingIssue(t *testing.T) {
+	fake := newYTRBFake()
+	fake.commentsGone["2-9"] = true
+	src := &ytrbSource{
+		tasks:    []store.YTRebuildTask{{TaskID: 9, IssueID: "2-9"}},
+		comments: map[int64]store.YTRebuildComments{9: {}},
+	}
+	r, _ := ytrbRun(t, fake, src, "")
+	if r.Comments.Differ.Count != 1 || r.Comments.Errors.Count != 0 || r.Comments.Tasks != 1 {
+		t.Fatalf("comments = %+v", r.Comments)
+	}
+	if got := r.Comments.Differ.Items[0].Reason; got != "issue 2-9 not found" {
+		t.Fatalf("reason %q", got)
 	}
 }
 

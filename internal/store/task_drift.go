@@ -101,13 +101,13 @@ var driftMergedPRSQL = `SELECT ` + driftColumns + `updated_at FROM tasks t
 // driftAutoCloseHeldSQL is class (e): an unsettled parent in an auto-close
 // state whose sub-tasks are all settled, one of which did work, and whose
 // automatic close would move it to merged or deployed (or to completed, for a
-// decide, ops or verify parent, the kinds canCompleteKind names). The close is
+// decide, ops, verify or research parent, the kinds canCompleteKind names). The close is
 // due and was not made: it is held, or was held and nothing re-ran it.
 var driftAutoCloseHeldSQL = `SELECT ` + driftColumns + `updated_at FROM tasks p
 	WHERE p.state IN (` + autoCloseStatesSQL + `)
 	AND EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=p.id AND k.state IN ('completed','merged','deployed'))
 	AND NOT EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=p.id AND k.state NOT IN (` + settledStatesSQL + `))
-	AND (p.kind IN ('decide','ops','verify') OR EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=p.id AND k.state IN ('merged','deployed')))
+	AND (p.kind IN ('decide','ops','verify','research') OR EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=p.id AND k.state IN ('merged','deployed')))
 	ORDER BY p.id`
 
 // driftMergedPageSQL is one page of class (c)'s candidates: merged for at least
@@ -150,7 +150,7 @@ func (s *Store) TaskDrift(ctx context.Context, now time.Time, mergedDays int) (T
 	if err = s.annotateDriftHolds(ctx, tx, &out.MergedPRNotMerged, mergeAppliesFrom); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_pr_not_merged: %w", err)
 	}
-	if out.AutoCloseHeld, err = driftList(ctx, tx, "auto-close due and not made: an unsettled parent in an auto-close state, every sub-task settled and one did work, moving it to merged, deployed, or completed for decide, ops and verify", driftAutoCloseHeldSQL); err != nil {
+	if out.AutoCloseHeld, err = driftList(ctx, tx, "auto-close due and not made: an unsettled parent in an auto-close state, every sub-task settled and one did work, moving it to merged, deployed, or completed for decide, ops, verify and research", driftAutoCloseHeldSQL); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift auto_close_held: %w", err)
 	}
 	if err = s.annotateDriftHolds(ctx, tx, &out.AutoCloseHeld, autoCloseAppliesFrom); err != nil {
