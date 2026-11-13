@@ -40,6 +40,10 @@ func seedSchemaTenant(t *testing.T) (*fakeTenant, *fakeSchemaStore, *SchemaRunne
 	f.attach(hk, schema.GradeField, KindEnum, []BundleValue{{Name: "A"}, {Name: "B"}})
 	f.attach(hk, schema.TierField, KindEnum, []BundleValue{{Name: "T1"}})
 	f.attach(hk, schema.LaneField, KindEnum, []BundleValue{{Name: "lane-a"}})
+	// The importer creates these two fields as strings. Planning against an
+	// imported project must accept them without a type-mismatch report.
+	f.attach(hk, schema.AreaField, KindString, nil)
+	f.attach(hk, schema.MilestoneField, KindString, nil)
 
 	// A project that has every field the schema declares, complete, but no
 	// mapping row.
@@ -136,8 +140,6 @@ func TestSchemaPlanListsExactlyWhatIsMissing(t *testing.T) {
 		"handoffkeep\t작업 job\tattach\tstring",
 		"handoffkeep\t멈춤\tattach\tenum[*] with 1 values",
 		"handoffkeep\t마감\tattach\tdate",
-		"handoffkeep\t영역\tattach\tstring",
-		"handoffkeep\t마일스톤\tattach\tstring",
 		"handoffkeep\t예상 소요\tattach\tperiod",
 		// missing bundle values, in the declaration's order
 		"handoffkeep\thk 상태\tadd-value\t분류 대기 (resolved=false ordinal=0)",
