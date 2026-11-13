@@ -19,11 +19,18 @@ type fakeObjects struct {
 	puts, stats int
 	fail        bool
 	objects     map[string][]byte
+	headSizes   map[string]int64
 	// modified overrides a key's last-modified time; unset keys count as now.
 	modified map[string]time.Time
 	// beforePut, when set, runs before each Put stores its object. A test uses
 	// it to overwrite the staging object between verify and promote.
 	beforePut func(key string)
+}
+
+func TestDefaultMaxBytesMatchesOCIPutObjectSingleObjectLimit(t *testing.T) {
+	if DefaultMaxBytes != 50<<30 {
+		t.Fatalf("DefaultMaxBytes=%d, want 50 GiB", DefaultMaxBytes)
+	}
 }
 
 func (f *fakeObjects) Stat(_ context.Context, k string) error {
@@ -74,7 +81,11 @@ func (f *fakeObjects) Head(_ context.Context, k string) (ObjectInfo, error) {
 	if !ok {
 		return ObjectInfo{}, ErrObjectNotFound
 	}
-	return ObjectInfo{Key: k, Size: int64(len(b)), Modified: f.modifiedAt(k)}, nil
+	size, overridden := f.headSizes[k]
+	if !overridden {
+		size = int64(len(b))
+	}
+	return ObjectInfo{Key: k, Size: size, Modified: f.modifiedAt(k)}, nil
 }
 func (f *fakeObjects) Delete(_ context.Context, k string) error {
 	f.mu.Lock()
@@ -101,12 +112,14 @@ func (f *fakeObjects) modifiedAt(k string) time.Time {
 }
 
 type fakeDB struct {
-	mu      sync.Mutex
-	rows    map[string]store.Attachment
-	puts    int
-	capErr  error
-	hideGet bool
-	uploads map[string]store.AttachmentUpload
+	mu       sync.Mutex
+	rows     map[string]store.Attachment
+	puts     int
+	capErr   error
+	hideGet  bool
+	uploads  map[string]store.AttachmentUpload
+	listKind string
+	listID   string
 }
 
 func (f *fakeDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap, clientCap int64) error {
@@ -168,7 +181,10 @@ func (f *fakeDB) PutAttachment(_ context.Context, x store.Attachment, _, _ int64
 }
 func (f *fakeDB) CheckAttachmentCapacity(context.Context, int64, int64, int64) error { return f.capErr }
 func (*fakeDB) RecordAttachmentGet(context.Context, string, int64) error             { return nil }
-func (*fakeDB) ListAttachments(context.Context, string, string, int) ([]store.Attachment, error) {
+func (f *fakeDB) ListAttachments(_ context.Context, kind, id string, _ int) ([]store.Attachment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listKind, f.listID = kind, id
 	return nil, nil
 }
 func (*fakeDB) AttachmentUsage(context.Context) (store.AttachmentUsage, error) {
@@ -287,6 +303,30 @@ func TestParseRef(t *testing.T) {
 		if _, _, err := ParseRef(bad); err == nil {
 			t.Fatalf("%q accepted", bad)
 		}
+	}
+}
+
+// A checkpoint ref is no longer written, but attachment_refs rows the previous
+// release writes during the blue-green overlap stay readable through the List
+// filter. The upload paths keep ParseRef, so no new checkpoint ref is stored.
+func TestListReadsCheckpointRefsWhileUploadPathsRefuseThem(t *testing.T) {
+	db := &fakeDB{rows: map[string]store.Attachment{}}
+	obj := &fakeObjects{objects: map[string][]byte{}}
+	m := &Manager{Store: db, Objects: obj, Enabled: true, Config: Config{MaxBytes: 100, StorageCap: 100, PutCap: 10, GetCap: 10, Allow: map[string]bool{"text/plain": true}}}
+	if _, e := m.List(t.Context(), "checkpoint:42", 10); e != nil {
+		t.Fatalf("list checkpoint:42: %v", e)
+	}
+	if db.listKind != "checkpoint" || db.listID != "42" {
+		t.Fatalf("list asked for kind=%q id=%q, want checkpoint/42", db.listKind, db.listID)
+	}
+	if _, _, e := ParseRef("checkpoint:42"); e == nil {
+		t.Fatal("ParseRef accepted a checkpoint ref; upload paths would store it")
+	}
+	if _, _, e := m.Put(t.Context(), "node", "note.txt", "text/plain", "checkpoint:42", []byte("safe")); e == nil {
+		t.Fatal("Put accepted a checkpoint ref")
+	}
+	if obj.puts != 0 || db.puts != 0 {
+		t.Fatalf("refused checkpoint put had effects: object puts=%d metadata puts=%d", obj.puts, db.puts)
 	}
 }
 

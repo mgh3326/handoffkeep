@@ -142,9 +142,8 @@ func recordedLifecyclePath(ctx context.Context, tx pgx.Tx, id int64, source, key
 	return path, len(path) > 0, nil
 }
 
-// CloseTaskCompleted closes a decide, ops, verify or research task with a result link.
-// The store's existing guards apply: the kind must be completable and the
-// evidence must be an https URL or an hk:doc key.
+// CloseTaskCompleted closes a decide, ops, verify or research task with a result link,
+// document key, task reference, or written reason as evidence.
 func (s *Store) CloseTaskCompleted(ctx context.Context, id int64, evidence, by, note, key string) (Task, error) {
 	return s.operatorTransition(ctx, id, lifecycleSourceCloseCompleted, key, TransitionInput{
 		To: StateCompleted, Closure: "resolved", Evidence: strings.TrimSpace(evidence), By: by, Note: note,

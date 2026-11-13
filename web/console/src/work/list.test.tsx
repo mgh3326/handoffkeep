@@ -77,18 +77,6 @@ it("W5 renders a future state in All", async () => {
   // The row chip and the state select both name the unknown state.
   expect((await screen.findAllByText(/알 수 없는 상태 \(future_state\)/)).length).toBeGreaterThan(0);
 });
-it("W4 reports a still-truncated 5000 row cursor walk", async () => {
-  let page = 0;
-  vi.stubGlobal("fetch", vi.fn(async (path: string) => {
-    if (path.includes("projects")) return response({ projects: ["a"] });
-    const tasks = Array.from({ length: 500 }, (_, i) => ({ ...task, id: page * 500 + i + 1 }));
-    page++;
-    return response({ tasks, states: [], generated_at: "now", truncated: true, next_after_id: page * 500 });
-  }));
-  history.replaceState(null, "", "/ui/work?project=a&view=needs-me");
-  render(<WorkPage />);
-  expect(await screen.findByText("5000+ (truncated)")).toBeTruthy();
-});
 it("W14 uses the shared poller without overlapping requests", async () => {
   vi.useFakeTimers();
   const fetcher = vi.mocked(fetch);

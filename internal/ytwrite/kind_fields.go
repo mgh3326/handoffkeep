@@ -423,8 +423,9 @@ type IssueFieldsRemote interface {
 	// take is a *RefusedError (ReasonFieldRefused) naming the field and the
 	// value; neither sends the update. An open-set value (레인, 영역,
 	// 마일스톤) its bundle lacks is added to the bundle first (a failed add
-	// is a *NotSentError, a 403 a *RefusedError). Other errors follow
-	// CreateComment's.
+	// is a *NotSentError, a 403 a *RefusedError); a value differing from a
+	// bundle value only in case is sent with the bundle's spelling. Other
+	// errors follow CreateComment's.
 	UpdateIssueFields(ctx context.Context, in IssueFieldsUpdate) (id string, err error)
 	// ReadIssueFields reads the issue's summary, description and fields,
 	// each field's value in the canonical text of FieldValue ("" for none).
@@ -500,6 +501,17 @@ func (k issueFields) Evidence(ctx context.Context, remote Remote, op Op, _ strin
 	return ev, nil
 }
 
+// openSetFields are the snapshot fields whose values hk owns as an open set
+// (a lane, an area, a milestone name appears in hk first): the YouTrack
+// adapter adds a bundle value the project lacks (hk 4051), sends the bundle's
+// own spelling when a value differs from it only in case — YouTrack enum
+// names are case-insensitively unique (hk 4234) — and evidence compares them
+// case-insensitively.
+var openSetFields = map[string]bool{FieldLane: true, FieldArea: true, FieldMilestone: true}
+
+// OpenSetField reports whether name is an open-set snapshot field.
+func OpenSetField(name string) bool { return openSetFields[name] }
+
 // SnapshotDiff names the first part of want that got does not equal (""
 // when every part does). A field got lacks counts as "".
 func SnapshotDiff(want, got IssueSnapshot) string {
@@ -524,6 +536,9 @@ func SnapshotDiff(want, got IssueSnapshot) string {
 // YouTrack's date field stores a date as noon UTC. Compare 마감 by the UTC
 // calendar date it represents; every other snapshot field remains exact.
 func snapshotFieldEqual(name, want, got string) bool {
+	if openSetFields[name] {
+		return strings.EqualFold(want, got)
+	}
 	if name != FieldDue || want == "" || got == "" {
 		return want == got
 	}
