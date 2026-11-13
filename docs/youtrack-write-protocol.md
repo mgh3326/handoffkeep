@@ -71,7 +71,12 @@ Submit ─► prepared ─Claim─► dispatched ─┬─ 2xx + valid id ──
   assumption about order) and find exactly one whose text equals the rendered body,
   marker included. Absence, several matches, a deleted match, a marker with other
   text, or a failed search all keep `remote_unknown` (each with its own reason
-  code). Search is a candidate finder, never negative proof.
+  code). Search is a candidate finder, never negative proof. `issue_links` is
+  the one idempotent snapshot exception: after a mismatch, reconciliation
+  re-reads current links and applies only remaining per-link mutations from
+  the snapshot; it never resends a replacement request. If one link mutation
+  succeeds before a later response fails (including a 4xx), the op enters
+  `remote_unknown` so this read-then-diff recovery can finish the snapshot.
 - **429 honours Retry-After** as the server sent it, seconds or HTTP date, to the
   second: `next_attempt_at` is the server's deadline and no request (the POST, or
   the evidence search after a listing 429) is made before it. The only cap is a
@@ -1038,17 +1043,20 @@ target does not yet requeue the source task; the source must change again for
 its link snapshot to be prepared.
 
 The `issue_links` kind updates only the YouTrack link directions hk projects:
-Subtask-of (`targetToSource`), Relates, and Duplicate (`sourceToTarget`). It
+Subtask-of (`targetToSource`), Relates, and Duplicate (`targetToSource`). It
 uses the link-issues API to add and remove individual links. A removal is sent
-only for a link in the last successfully projected snapshot; an existing link
-outside that snapshot is preserved and makes the op fail with
-`issue_links_conflict`, before any mutation. Evidence requires the desired
-links to exist and previously projected removals to be absent, so unrelated
-YouTrack links remain intact.
+only for a link named by a previously applied hk `issue_links` op; an existing
+link outside that evidence is preserved and records `unowned_link` before any
+mutation. Evidence requires the desired links to exist and previously
+projected removals to be absent, so imported and other YouTrack links remain
+intact.
 
 Mode off is the default and admits none of these ops. Turn it on only after the
 last YouTrack import run and removal of its grant; the import client cannot
-delete a link when the corresponding hk edge is absent.
+delete a link when the corresponding hk edge is absent. When the write worker
+starts with link mode on, it also backfills every bound task in bounded batches,
+so changes consumed while the mode was off and tasks unchanged since import get
+their current snapshot.
 
 ## Article bindings (hk 4053)
 

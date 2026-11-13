@@ -188,7 +188,13 @@ package store
 //     first origin insert (UpsertYouTrackMirror, AddTaskOrigin) reaches the
 //     task row only through its foreign key's KEY SHARE, which FOR SHARE
 //     allows and FOR UPDATE blocks; so no first mirror link commits between
-//     an issue writer's checks and its commit. The comment worker's Claim
+//     an issue writer's checks and its commit.
+//     For issue-link snapshots, AddYTTaskBinding discovers children and
+//     active relation dependents before taking the target and dependent task
+//     lanes in ascending id order. The task_links feed uses that same lane
+//     order when it prepares a batch, so these multi-lane transactions cannot
+//     wait on one another in opposite orders.
+//     The comment worker's Claim
 //     (YTTenantLedger) reads the task's canary row (mode canary) or binding
 //     (mode on) under the same lane lock, which is what orders an enrollment,
 //     a removal or a binding against a claim. Claim also reads, without a

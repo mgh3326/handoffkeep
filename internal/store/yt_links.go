@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -21,6 +23,8 @@ const (
 	YTLinksOff YTLinksMode = "off"
 	YTLinksOn  YTLinksMode = "on"
 )
+
+var ErrYTLinksOff = errors.New("yt_links_off")
 
 const (
 	YTLinksPrincipal = "hk:task-links"
@@ -77,6 +81,7 @@ func ytLinksHandler(s *Store, now time.Time) FeedHandler {
 			return nil
 		}
 		counts := map[ytLinksOutcome]int{}
+		ids := make([]int64, 0, len(rows))
 		for _, row := range rows {
 			if row.Model != "task" {
 				continue
@@ -85,6 +90,11 @@ func ytLinksHandler(s *Store, now time.Time) FeedHandler {
 			if err != nil || id < 1 {
 				continue
 			}
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		ids = slices.Compact(ids)
+		for _, id := range ids {
 			outcome, err := prepareYTLinksTx(ctx, tx, now, tenant, id)
 			if err != nil {
 				return err
@@ -194,7 +204,8 @@ func prepareYTLinksTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant stri
 func previousYTLinksTx(ctx context.Context, tx pgx.Tx, tenant string, taskID int64, issueID string) (ytwrite.IssueLinks, error) {
 	var payload []byte
 	err := tx.QueryRow(ctx, `SELECT payload FROM yt_write_ops
-		WHERE principal=$1 AND kind=$2 AND entity_kind='task' AND entity_id=$3 AND yt_target_id=$4 AND tenant=$5 AND state='applied'
+		WHERE principal=$1 AND kind=$2 AND entity_kind='task' AND entity_id=$3 AND yt_target_id=$4 AND tenant=$5
+		AND state IN ('prepared','dispatched','remote_unknown','applied')
 		ORDER BY id DESC LIMIT 1`, YTLinksPrincipal, ytwrite.KindIssueLinks, strconv.FormatInt(taskID, 10), issueID, tenant).Scan(&payload)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ytwrite.IssueLinks{Related: []string{}, Duplicates: []string{}}, nil
@@ -209,15 +220,151 @@ func previousYTLinksTx(ctx context.Context, tx pgx.Tx, tenant string, taskID int
 	return snapshot.Desired, nil
 }
 
-func (s *Store) ytLinksOnBindTx(ctx context.Context, tx pgx.Tx, taskID int64, now time.Time) error {
+// claimYTLinksOwnershipTx ensures every link a snapshot may remove was named
+// by a prior applied hk issue_links op. Pending snapshots can describe a
+// prospective baseline, but they do not grant deletion authority until the
+// preceding op has applied.
+func claimYTLinksOwnershipTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (string, error) {
+	snapshot, err := ytwrite.IssueLinksPayload(op)
+	if err != nil {
+		return "", err
+	}
+	var payloads [][]byte
+	rows, err := tx.Query(ctx, `SELECT payload FROM yt_write_ops
+		WHERE principal=$1 AND kind=$2 AND entity_kind='task' AND entity_id=$3 AND yt_target_id=$4 AND tenant=$5
+		AND state='applied' AND id<$6 ORDER BY id`, op.Principal, ytwrite.KindIssueLinks, op.EntityID, op.YTTargetID, op.Tenant, op.ID)
+	if err != nil {
+		return "", err
+	}
+	for rows.Next() {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			rows.Close()
+			return "", err
+		}
+		payloads = append(payloads, payload)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", err
+	}
+	rows.Close()
+	ownedParent := []string{}
+	ownedRelated := []string{}
+	ownedDuplicates := []string{}
+	for _, payload := range payloads {
+		prior, err := ytwrite.DecodeIssueLinksSnapshot(payload)
+		if err != nil {
+			return "", err
+		}
+		if prior.Desired.Parent != "" {
+			ownedParent = append(ownedParent, prior.Desired.Parent)
+		}
+		ownedRelated = append(ownedRelated, prior.Desired.Related...)
+		ownedDuplicates = append(ownedDuplicates, prior.Desired.Duplicates...)
+	}
+	if snapshot.Previous.Parent != "" && !containsYTLink(ownedParent, snapshot.Previous.Parent) {
+		return "unowned parent link to " + snapshot.Previous.Parent, nil
+	}
+	for _, id := range snapshot.Previous.Related {
+		if !containsYTLink(ownedRelated, id) {
+			return "unowned relates link to " + id, nil
+		}
+	}
+	for _, id := range snapshot.Previous.Duplicates {
+		if !containsYTLink(ownedDuplicates, id) {
+			return "unowned duplicate link to " + id, nil
+		}
+	}
+	return "", nil
+}
+
+func containsYTLink(ids []string, want string) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) ytLinksOnBindTx(ctx context.Context, tx pgx.Tx, taskIDs []int64, now time.Time) error {
 	mode, tenant := s.ytLinksNow()
 	if mode != YTLinksOn {
 		return nil
 	}
-	outcome, err := prepareYTLinksTx(ctx, tx, now, tenant, taskID)
-	if err != nil {
-		return err
+	for _, taskID := range taskIDs {
+		outcome, err := prepareYTLinksTx(ctx, tx, now, tenant, taskID)
+		if err != nil {
+			return err
+		}
+		log.Printf("ytwrite.links_on_bind task_id=%d outcome=%s", taskID, outcome)
 	}
-	log.Printf("ytwrite.links_on_bind task_id=%d outcome=%s", taskID, outcome)
 	return nil
+}
+
+// BackfillYTLinksOps prepares current snapshots for bound tasks in one tenant.
+// afterID and limit make the walk resumable between worker passes.
+func (s *Store) BackfillYTLinksOps(ctx context.Context, afterID int64, limit int) (nextID int64, done bool, err error) {
+	mode, tenant := s.ytLinksNow()
+	if mode != YTLinksOn {
+		return afterID, false, ErrYTLinksOff
+	}
+	if afterID < 0 || limit < 1 {
+		return afterID, false, errors.New("backfill cursor must be nonnegative and limit must be positive")
+	}
+	rows, err := s.pool.Query(ctx, `SELECT task_id FROM yt_task_bindings WHERE tenant=$1 AND task_id>$2 ORDER BY task_id LIMIT $3`, tenant, afterID, limit)
+	if err != nil {
+		return afterID, false, err
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return afterID, false, err
+	}
+	for _, id := range ids {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return nextID, false, err
+		}
+		if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(id, 10)); err != nil {
+			_ = tx.Rollback(ctx)
+			return nextID, false, err
+		}
+		if _, err := prepareYTLinksTx(ctx, tx, time.Now().UTC(), tenant, id); err != nil {
+			_ = tx.Rollback(ctx)
+			return nextID, false, fmt.Errorf("task %d: %w", id, err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nextID, false, err
+		}
+		nextID = id
+	}
+	return nextID, len(ids) < limit, nil
+}
+
+func ytLinksBindingTasksTx(ctx context.Context, tx pgx.Tx, taskID int64) ([]int64, error) {
+	rows, err := tx.Query(ctx, `SELECT id FROM tasks WHERE parent_id=$1
+		UNION
+		SELECT CASE WHEN r.src_id=$1 THEN r.dst_id ELSE r.src_id END
+		FROM task_relations r WHERE r.archived_at IS NULL AND (
+			(r.kind='related' AND (r.src_id=$1 OR r.dst_id=$1)) OR
+			(r.kind='duplicate_of' AND r.dst_id=$1))
+		ORDER BY 1`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []int64{taskID}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return slices.Compact(ids), nil
 }

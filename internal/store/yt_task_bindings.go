@@ -257,9 +257,11 @@ func ytCommentOnOpTx(ctx context.Context, tx pgx.Tx, c TaskComment, now time.Tim
 // row's comments_from is the task's highest comment id read in the same
 // transaction, so the binding never copies a comment written before it.
 //
-// Locks, in this order (lockorder.go): the issue ownership lock, FOR UPDATE on
-// the task row, the task's lane lock, FOR SHARE on the task's youtrack_projects
-// and task_origins rows, then the new binding row.
+// Locks, in this order (lockorder.go): the issue ownership lock, then the task
+// lane locks in ascending task id (the target plus link dependents when link
+// mode is on), FOR SHARE on the task's YouTrack mappings, then the new binding
+// row. Acquiring dependent lane locks in sorted order keeps bind-triggered
+// snapshot preparation deadlock-free with feed batches.
 func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified YTCanaryCandidate) (YTTaskBinding, error) {
 	if b.TaskID < 1 || b.Tenant == "" || len(b.Tenant) > 255 || b.IssueID == "" || len(b.IssueID) > 64 ||
 		len(b.IssueReadable) > 64 || b.ProjectID == "" || len(b.ProjectID) > 64 || b.BoundBy == "" || !validText(b.BoundBy, 200) || verified.TaskID != b.TaskID {
@@ -273,8 +275,17 @@ func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified 
 	if err := lockYTIssueOwnershipTx(ctx, tx, b.TaskID); err != nil {
 		return YTTaskBinding{}, err
 	}
-	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(b.TaskID, 10)); err != nil {
-		return YTTaskBinding{}, err
+	linkTasks := []int64{b.TaskID}
+	if mode, _ := s.ytLinksNow(); mode == YTLinksOn {
+		linkTasks, err = ytLinksBindingTasksTx(ctx, tx, b.TaskID)
+		if err != nil {
+			return YTTaskBinding{}, err
+		}
+	}
+	for _, taskID := range linkTasks {
+		if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(taskID, 10)); err != nil {
+			return YTTaskBinding{}, err
+		}
 	}
 	current, err := readYTCanaryCandidate(ctx, tx, b.TaskID, " FOR SHARE")
 	if err != nil {
@@ -330,7 +341,7 @@ func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified 
 	if err := s.ytFieldsOnBindTx(ctx, tx, b.TaskID, now); err != nil {
 		return YTTaskBinding{}, err
 	}
-	if err := s.ytLinksOnBindTx(ctx, tx, b.TaskID, now); err != nil {
+	if err := s.ytLinksOnBindTx(ctx, tx, linkTasks, now); err != nil {
 		return YTTaskBinding{}, err
 	}
 	return got, tx.Commit(ctx)

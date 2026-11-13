@@ -18,9 +18,10 @@ type Kind interface {
 	// (issue_fields compares its whole snapshot instead). An error means the
 	// op cannot be sent.
 	Render(op Op) (string, error)
-	// Send makes exactly one remote attempt to write text for op and returns
-	// the created YouTrack id. No retry inside: a retry after a lost reply
-	// could duplicate the write. Errors follow Remote (a *RemoteError is an
+	// Send makes exactly one logical remote attempt for op and returns the
+	// YouTrack id. A kind with idempotent per-item mutations may make several
+	// requests; it must report partial completion as uncertain. No retry is
+	// hidden inside a write request. Errors follow Remote (a *RemoteError is an
 	// HTTP answer, anything else is a transport failure).
 	Send(ctx context.Context, remote Remote, op Op, text string) (ytID string, err error)
 	// Evidence enumerates op's target completely and classifies every
@@ -63,6 +64,16 @@ type NotSentError struct {
 
 func (e *NotSentError) Error() string { return "not sent: " + e.Err.Error() }
 func (e *NotSentError) Unwrap() error { return e.Err }
+
+// PartialWriteError marks a call that completed at least one remote mutation
+// before a later mutation failed. The protocol must reconcile it as uncertain,
+// even when the final response is a 4xx.
+type PartialWriteError struct {
+	Err error
+}
+
+func (e *PartialWriteError) Error() string { return "partial write: " + e.Err.Error() }
+func (e *PartialWriteError) Unwrap() error { return e.Err }
 
 // Evidence is what one search of an op's target found: the candidates that
 // carry the op's marker, by how they compare with the rendered text.

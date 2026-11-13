@@ -104,6 +104,7 @@ const (
 	ReasonNoEvidence        = "no_evidence"
 	ReasonMultipleMatches   = "multiple_matches"
 	ReasonMarkerMismatch    = "marker_mismatch"
+	ReasonPartialWrite      = "partial_write"
 	ReasonMarkerDeleted     = "marker_deleted"
 	ReasonReconcileFailed   = "reconcile_failed"
 	ReasonOperatorNotDone   = "operator_not_applied"

@@ -33,13 +33,13 @@ func (f *FakeYouTrack) UpdateIssueLinks(ctx context.Context, issueID string, sna
 	}
 	current := cloneLinks(f.issueLinks[issueID])
 	if current.Parent != "" && current.Parent != snapshot.Desired.Parent && current.Parent != snapshot.Previous.Parent {
-		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonIssueLinksConflict, Detail: "unmanaged parent link to " + current.Parent}
+		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonUnownedLink, Detail: "unowned parent link to " + current.Parent}
 	}
 	if id := unexpectedFakeLink(current.Related, snapshot.Previous.Related, snapshot.Desired.Related); id != "" {
-		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonIssueLinksConflict, Detail: "unmanaged relates link to " + id}
+		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonUnownedLink, Detail: "unowned relates link to " + id}
 	}
 	if id := unexpectedFakeLink(current.Duplicates, snapshot.Previous.Duplicates, snapshot.Desired.Duplicates); id != "" {
-		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonIssueLinksConflict, Detail: "unmanaged duplicate link to " + id}
+		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonUnownedLink, Detail: "unowned duplicate link to " + id}
 	}
 	if snapshot.Desired.Parent != "" {
 		current.Parent = snapshot.Desired.Parent

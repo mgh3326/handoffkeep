@@ -31,7 +31,7 @@ func TestWriteRemoteAddsIssueLinksWithSupportedMutationAPI(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/issues/2-9/links/105-0/issues":
 			targetBodyIs(t, y, "2-3")
 			_, _ = w.Write([]byte(`{"id":"2-3"}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/api/issues/2-9/links/105-1s/issues":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/issues/2-9/links/105-1t/issues":
 			targetBodyIs(t, y, "2-4")
 			_, _ = w.Write([]byte(`{"id":"2-4"}`))
 		default:
@@ -46,7 +46,7 @@ func TestWriteRemoteAddsIssueLinksWithSupportedMutationAPI(t *testing.T) {
 	}
 	if got, expected := y.requests, []string{
 		"GET /api/issueLinkTypes", "GET /api/issues/2-9/links",
-		"POST /api/issues/2-9/links/105-3t/issues", "POST /api/issues/2-9/links/105-0/issues", "POST /api/issues/2-9/links/105-1s/issues",
+		"POST /api/issues/2-9/links/105-3t/issues", "POST /api/issues/2-9/links/105-0/issues", "POST /api/issues/2-9/links/105-1t/issues",
 		"GET /api/issues/2-9/links",
 	}; !reflect.DeepEqual(got, expected) {
 		t.Fatalf("requests %v, want %v", got, expected)
@@ -82,7 +82,7 @@ func TestWriteRemoteRemovesOnlyPreviouslyProjectedIssueLinks(t *testing.T) {
 	wantDeletes := []string{
 		"DELETE /api/issues/2-9/links/105-3t/issues/2-old-parent",
 		"DELETE /api/issues/2-9/links/105-0/issues/2-old-related",
-		"DELETE /api/issues/2-9/links/105-1s/issues/2-old-duplicate",
+		"DELETE /api/issues/2-9/links/105-1t/issues/2-old-duplicate",
 	}
 	var gotDeletes []string
 	for _, request := range y.requests {
@@ -110,11 +110,33 @@ func TestWriteRemoteRefusesUnmanagedIssueLinkWithoutMutation(t *testing.T) {
 	}}
 	_, err := y.serve(t).UpdateIssueLinks(t.Context(), "2-9", ytwrite.IssueLinksSnapshot{Desired: ytwrite.IssueLinks{Related: []string{}, Duplicates: []string{}}})
 	var refused *ytwrite.RefusedError
-	if !errors.As(err, &refused) || refused.Reason != ytwrite.ReasonIssueLinksConflict {
-		t.Fatalf("update error %v, want issue link conflict", err)
+	if !errors.As(err, &refused) || refused.Reason != ytwrite.ReasonUnownedLink {
+		t.Fatalf("update error %v, want unowned-link refusal", err)
 	}
 	if y.count() != 2 {
 		t.Fatalf("made requests after detecting unmanaged link: %v", y.requests)
+	}
+}
+
+func TestReadIssueLinksUsesDirectionFieldNotRowID(t *testing.T) {
+	y := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/issues/2-9/links" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`[
+			{"id":"901","direction":"INWARD","linkType":{"name":"Subtask","sourceToTarget":"parent for","targetToSource":"subtask of"},"issues":[{"id":"2-parent"}]},
+			{"id":"902","direction":"OUTWARD","linkType":{"name":"Subtask","sourceToTarget":"parent for","targetToSource":"subtask of"},"issues":[{"id":"2-child"}]},
+			{"id":"903","direction":"INWARD","linkType":{"name":"Duplicate","sourceToTarget":"is duplicated by","targetToSource":"duplicates"},"issues":[{"id":"2-duplicate"}]},
+			{"id":"904","direction":"OUTWARD","linkType":{"name":"Duplicate","sourceToTarget":"is duplicated by","targetToSource":"duplicates"},"issues":[{"id":"2-duplicated-by"}]},
+			{"id":"905","direction":"BOTH","linkType":{"name":"Relates","sourceToTarget":"relates to","targetToSource":""},"issues":[{"id":"2-related"}]}
+		]`))
+	}}
+	got, err := y.serve(t).ReadIssueLinks(t.Context(), "2-9")
+	want := ytwrite.IssueLinks{Parent: "2-parent", Related: []string{"2-related"}, Duplicates: []string{"2-duplicate"}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("ReadIssueLinks = %+v, %v; want %+v", got, err, want)
 	}
 }
 
@@ -137,15 +159,20 @@ func issueLinkFixture(links ytwrite.IssueLinks) []byte {
 		ID string `json:"id"`
 	}
 	type row struct {
-		ID       string `json:"id"`
-		LinkType struct {
-			Name string `json:"name"`
+		ID        string `json:"id"`
+		Direction string `json:"direction"`
+		LinkType  struct {
+			Name           string `json:"name"`
+			SourceToTarget string `json:"sourceToTarget"`
+			TargetToSource string `json:"targetToSource"`
 		} `json:"linkType"`
 		Issues []issueRef `json:"issues"`
 	}
-	makeRow := func(id, name string, targets []string) row {
-		out := row{ID: id, Issues: []issueRef{}}
+	makeRow := func(id, direction, name, sourceToTarget, targetToSource string, targets []string) row {
+		out := row{ID: id, Direction: direction, Issues: []issueRef{}}
 		out.LinkType.Name = name
+		out.LinkType.SourceToTarget = sourceToTarget
+		out.LinkType.TargetToSource = targetToSource
 		for _, target := range targets {
 			out.Issues = append(out.Issues, issueRef{ID: target})
 		}
@@ -153,13 +180,13 @@ func issueLinkFixture(links ytwrite.IssueLinks) []byte {
 	}
 	rows := []row{}
 	if links.Parent != "" {
-		rows = append(rows, makeRow("105-3t", "Subtask", []string{links.Parent}))
+		rows = append(rows, makeRow("901", "INWARD", "Subtask", "parent for", "subtask of", []string{links.Parent}))
 	}
 	if len(links.Related) > 0 {
-		rows = append(rows, makeRow("105-0", "Relates", links.Related))
+		rows = append(rows, makeRow("902", "BOTH", "Relates", "relates to", "", links.Related))
 	}
 	if len(links.Duplicates) > 0 {
-		rows = append(rows, makeRow("105-1s", "Duplicate", links.Duplicates))
+		rows = append(rows, makeRow("903", "INWARD", "Duplicate", "is duplicated by", "duplicates", links.Duplicates))
 	}
 	data, _ := json.Marshal(rows)
 	return data

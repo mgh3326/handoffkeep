@@ -13,7 +13,7 @@ import (
 // KindIssueLinks writes the complete hk-owned link snapshot for a task issue.
 const KindIssueLinks = "issue_links"
 
-const ReasonIssueLinksConflict = "issue_links_conflict"
+const ReasonUnownedLink = "unowned_link"
 
 func init() { registerKind(KindIssueLinks, func(Config) Kind { return issueLinks{} }) }
 
@@ -171,6 +171,21 @@ func (issueLinks) Evidence(ctx context.Context, remote Remote, op Op, _ string) 
 		ev.Mismatched = 1
 	}
 	return ev, nil
+}
+
+// Recover re-reads and diffs the remote link set before applying only the
+// remaining per-link mutations. These operations are idempotent; recovery
+// never replays a stored replacement request.
+func (issueLinks) Recover(ctx context.Context, remote Remote, op Op) (string, error) {
+	r, ok := remote.(IssueLinksRemote)
+	if !ok {
+		return "", errors.New("the remote cannot recover issue links")
+	}
+	snapshot, err := IssueLinksPayload(op)
+	if err != nil {
+		return "", err
+	}
+	return r.UpdateIssueLinks(ctx, op.YTTargetID, snapshot)
 }
 
 func issueLinksConverged(snapshot IssueLinksSnapshot, got IssueLinks) bool {

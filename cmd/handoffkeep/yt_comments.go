@@ -40,6 +40,7 @@ const (
 	ytCommentsDispatchTimeout = 3 * time.Second
 	ytCommentsSettleTimeout   = 1 * time.Second
 	ytCommentsPassLimit       = 50
+	ytLinksBackfillLimit      = 100
 	// ytCommentsCatchUpLimit bounds the comments one catch-up pass prepares
 	// ops for (store.CatchUpYTComments), oldest first.
 	ytCommentsCatchUpLimit = 200
@@ -364,7 +365,11 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 	log.Printf("ytwrite.docs_mode mode=%s tenant=%q shared=%q unassigned=%q", articles.mode, tenant,
 		articles.buckets[store.YTArticleBucketShared].ID, articles.buckets[store.YTArticleBucketUnassigned].ID)
 	if comments != store.YTCommentsOff {
-		return newYTCommentsWorker(st, remote, tenant, comments, catchUp, now)
+		w, err := newYTCommentsWorker(st, remote, tenant, comments, catchUp, now)
+		if err == nil && links == store.YTLinksOn {
+			w.linksBackfill = st
+		}
+		return w, err
 	}
 	p, err := ytwrite.New(st.YTCommentConfig(tenant, ytwrite.Config{
 		Remote:          remote,
@@ -376,7 +381,11 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 		return ytCommentsWorker{}, err
 	}
 	st.SetYTCommentsMode(store.YTCommentsOff)
-	return ytCommentsWorker{protocol: p, feed: st, intents: st}, nil
+	w := ytCommentsWorker{protocol: p, feed: st, intents: st}
+	if links == store.YTLinksOn {
+		w.linksBackfill = st
+	}
+	return w, nil
 }
 
 // newYTCommentsWorker sets the gate to mode (canary or on) and builds the
@@ -435,6 +444,10 @@ type ytIssueIntents interface {
 	PrepareMappedYTIssues(ctx context.Context, limit int) (int, error)
 }
 
+type ytLinksBackfiller interface {
+	BackfillYTLinksOps(ctx context.Context, afterID int64, limit int) (nextID int64, done bool, err error)
+}
+
 // ytCommentsWorker runs one sequential Drive pass every interval. Two serve
 // processes (blue-green) may both run it: the ledger's compare-and-set claim
 // is the boundary, so an op is sent at most once. Its ledger is scoped to the
@@ -448,18 +461,20 @@ type ytIssueIntents interface {
 // process, so it is logged once and never crowds out the others; a restart
 // looks at it again.
 //
-// After the catch-up, feed (when set) runs each registered change-feed
+// Link backfill (when configured) walks bound tasks in bounded batches once
+// before feed changes become eligible to send. After the catch-up, feed (when set) runs each registered change-feed
 // consumer once, up to ytFeedPassLimit rows each, so the ops they prepare
 // go out in the same pass's Drive. With no consumer registered it does
 // nothing. Then intents (when set) prepares the issue ops of this tenant's
 // intents whose task's project got its mapping (nothing outside issue mode
 // on).
 type ytCommentsWorker struct {
-	protocol *ytwrite.Protocol
-	catchUp  ytCommentCatchUpper
-	feed     ytFeedRunner
-	intents  ytIssueIntents
-	interval time.Duration
+	protocol      *ytwrite.Protocol
+	catchUp       ytCommentCatchUpper
+	feed          ytFeedRunner
+	intents       ytIssueIntents
+	linksBackfill ytLinksBackfiller
+	interval      time.Duration
 }
 
 func (w ytCommentsWorker) Run(ctx context.Context) {
@@ -470,6 +485,7 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	skipped := []int64{}
+	linksAfterID := int64(0)
 	for {
 		if w.catchUp != nil {
 			got, err := w.catchUp.CatchUpYTComments(ctx, ytCommentsCatchUpLimit, skipped)
@@ -481,6 +497,18 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 		if w.feed != nil {
 			// Each failing consumer is logged by the store (ytwrite.feed_failed).
 			_, _ = w.feed.RunYTFeedConsumers(ctx, ytFeedPassLimit)
+		}
+		if w.linksBackfill != nil {
+			nextID, done, err := w.linksBackfill.BackfillYTLinksOps(ctx, linksAfterID, ytLinksBackfillLimit)
+			if err != nil && ctx.Err() == nil {
+				log.Printf("ytwrite.links_backfill_failed err=%q", err.Error())
+			} else if err == nil {
+				linksAfterID = nextID
+				if done {
+					w.linksBackfill = nil
+					log.Printf("ytwrite.links_backfill_complete last_task_id=%d", linksAfterID)
+				}
+			}
 		}
 		if w.intents != nil {
 			if _, err := w.intents.PrepareMappedYTIssues(ctx, ytCommentsCatchUpLimit); err != nil && ctx.Err() == nil {

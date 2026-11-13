@@ -38,6 +38,73 @@ func TestYTLinksRelationArchiveRemovesYouTrackLink(t *testing.T) {
 	}
 }
 
+func TestYTLinksQueuedAddThenRemovalUsesAppliedOwnership(t *testing.T) {
+	s := schemaStore(t, "yt_links_queued_remove")
+	ytbMapped(t, s)
+	source, target := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
+	ytbBind(t, s, ytbBinding(source))
+	ytbBind(t, s, ytbBinding(target))
+	if pass := ytFeedPassOK(t, s, ytFeedConsumers[ytLinksConsumer]); !pass.Created {
+		t.Fatalf("initial pass %+v", pass)
+	}
+	s.SetYTLinksMode(YTLinksOn, ytcTenant)
+	remote := ytwritetest.NewFake()
+	remote.SetIssueLinks(ytfIssue(source), ytwrite.IssueLinks{Related: []string{}, Duplicates: []string{}})
+	if _, err := s.AddTaskRelation(t.Context(), source, RelationRelated, target, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if pass := ytFeedPassOK(t, s, ytFeedConsumers[ytLinksConsumer]); pass.Handled == 0 {
+		t.Fatalf("add feed pass %+v", pass)
+	}
+	if changed, err := s.RemoveTaskRelation(t.Context(), source, RelationRelated, target, "test"); err != nil || !changed {
+		t.Fatalf("remove changed=%t err=%v", changed, err)
+	}
+	if pass := ytFeedPassOK(t, s, ytFeedConsumers[ytLinksConsumer]); pass.Handled == 0 {
+		t.Fatalf("remove feed pass %+v", pass)
+	}
+	p, err := ytwrite.New(ytwrite.Config{Ledger: s.YTTenantLedger(ytcTenant), Remote: remote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Drive(t.Context(), 20); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := remote.ReadIssueLinks(t.Context(), ytfIssue(source)); err != nil || len(got.Related) != 0 {
+		t.Fatalf("queued relation removal left stale link: %+v err=%v", got, err)
+	}
+}
+
+func TestYTLinksPreservesImportedLinkWithoutAppliedOwnership(t *testing.T) {
+	s := schemaStore(t, "yt_links_imported")
+	ytbMapped(t, s)
+	source, target := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
+	ytbBind(t, s, ytbBinding(source))
+	ytbBind(t, s, ytbBinding(target))
+	if pass := ytFeedPassOK(t, s, ytFeedConsumers[ytLinksConsumer]); !pass.Created {
+		t.Fatalf("initial pass %+v", pass)
+	}
+	s.SetYTLinksMode(YTLinksOn, ytcTenant)
+	remote := ytwritetest.NewFake()
+	remote.SetIssueLinks(ytfIssue(source), ytwrite.IssueLinks{Related: []string{ytfIssue(target)}, Duplicates: []string{}})
+	if _, err := s.AddTaskRelation(t.Context(), source, RelationRelated, target, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := s.RemoveTaskRelation(t.Context(), source, RelationRelated, target, "test"); err != nil || !changed {
+		t.Fatalf("remove changed=%t err=%v", changed, err)
+	}
+	linksPass(t, s, remote)
+	var reason string
+	if err := s.pool.QueryRow(t.Context(), `SELECT reason FROM yt_write_ops WHERE principal=$1 AND entity_id=$2 ORDER BY id DESC LIMIT 1`, YTLinksPrincipal, fmt.Sprint(source)).Scan(&reason); err != nil {
+		t.Fatal(err)
+	}
+	if reason != ytwrite.ReasonUnownedLink {
+		t.Fatalf("op reason %q, want %q", reason, ytwrite.ReasonUnownedLink)
+	}
+	if got, err := remote.ReadIssueLinks(t.Context(), ytfIssue(source)); err != nil || len(got.Related) != 1 || got.Related[0] != ytfIssue(target) {
+		t.Fatalf("unowned imported link changed: %+v err=%v", got, err)
+	}
+}
+
 func TestYTLinksClearedParentRemovesYouTrackLink(t *testing.T) {
 	s := schemaStore(t, "yt_links_parent")
 	ytbMapped(t, s)
@@ -72,46 +139,95 @@ func TestYTLinksHigherEndpointKeepsNormalizedRelatedEdge(t *testing.T) {
 	lower, higher := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
 	ytbBind(t, s, ytbBinding(lower))
 	ytbBind(t, s, ytbBinding(higher))
+	if pass := ytFeedPassOK(t, s, ytFeedConsumers[ytLinksConsumer]); !pass.Created {
+		t.Fatalf("initial pass %+v", pass)
+	}
+	s.SetYTLinksMode(YTLinksOn, ytcTenant)
+	remote := ytwritetest.NewFake()
+	remote.SetIssueLinks(ytfIssue(lower), ytwrite.IssueLinks{Related: []string{}, Duplicates: []string{}})
+	remote.SetIssueLinks(ytfIssue(higher), ytwrite.IssueLinks{Related: []string{}, Duplicates: []string{}})
 	if _, err := s.AddTaskRelation(t.Context(), higher, RelationRelated, lower, "test"); err != nil {
 		t.Fatal(err)
 	}
+	linksPass(t, s, remote)
+	for issue, target := range map[string]string{ytfIssue(lower): ytfIssue(higher), ytfIssue(higher): ytfIssue(lower)} {
+		if got, err := remote.ReadIssueLinks(t.Context(), issue); err != nil || len(got.Related) != 1 || got.Related[0] != target {
+			t.Fatalf("relation was not projected on %s: %+v err=%v", issue, got, err)
+		}
+	}
+	if changed, err := s.RemoveTaskRelation(t.Context(), higher, RelationRelated, lower, "test"); err != nil || !changed {
+		t.Fatalf("remove changed=%t err=%v", changed, err)
+	}
+	linksPass(t, s, remote)
+	for _, issue := range []string{ytfIssue(lower), ytfIssue(higher)} {
+		if got, err := remote.ReadIssueLinks(t.Context(), issue); err != nil || len(got.Related) != 0 {
+			t.Fatalf("archived relation remains on %s: %+v err=%v", issue, got, err)
+		}
+	}
+}
+
+func TestYTLinksBindingTargetPreparesDependentTasks(t *testing.T) {
+	s := schemaStore(t, "yt_links_bind_target")
+	ytbMapped(t, s)
+	source, target := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
+	ytbBind(t, s, ytbBinding(source))
+	if pass := ytFeedPassOK(t, s, ytFeedConsumers[ytLinksConsumer]); !pass.Created {
+		t.Fatalf("initial pass %+v", pass)
+	}
 	s.SetYTLinksMode(YTLinksOn, ytcTenant)
-	tx, err := s.pool.Begin(t.Context())
-	if err != nil {
+	if _, err := s.AddTaskRelation(t.Context(), source, RelationRelated, target, "test"); err != nil {
 		t.Fatal(err)
 	}
-	outcome, err := prepareYTLinksTx(t.Context(), tx, time.Now().UTC(), ytcTenant, higher)
-	if err != nil {
-		_ = tx.Rollback(t.Context())
-		t.Fatal(err)
-	}
-	if outcome != ytLinksPrepared {
-		_ = tx.Rollback(t.Context())
-		t.Fatalf("higher endpoint outcome %s, want prepared", outcome)
-	}
-	if err := tx.Commit(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	var payload []byte
-	if err := s.pool.QueryRow(t.Context(), `SELECT payload FROM yt_write_ops WHERE principal=$1 AND entity_id=$2`, YTLinksPrincipal, fmt.Sprint(higher)).Scan(&payload); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := ytwrite.DecodeIssueLinksSnapshot(payload)
-	if err != nil || len(snapshot.Desired.Related) != 1 || snapshot.Desired.Related[0] != ytfIssue(lower) {
-		t.Fatalf("higher endpoint snapshot %+v err=%v", snapshot, err)
+	if pass := ytFeedPassOK(t, s, ytFeedConsumers[ytLinksConsumer]); pass.Read == 0 {
+		t.Fatalf("source feed was not consumed while target was unmapped: %+v", pass)
 	}
 	remote := ytwritetest.NewFake()
-	remote.SetIssueLinks(ytfIssue(lower), ytwrite.IssueLinks{Related: []string{ytfIssue(higher)}, Duplicates: []string{}})
-	remote.SetIssueLinks(ytfIssue(higher), ytwrite.IssueLinks{Related: []string{ytfIssue(lower)}, Duplicates: []string{}})
-	p, err := ytwrite.New(ytwrite.Config{Ledger: s.YTTenantLedger(ytcTenant), Remote: remote, Now: func() time.Time { return time.Now().UTC() }})
+	remote.SetIssueLinks(ytfIssue(source), ytwrite.IssueLinks{Related: []string{}, Duplicates: []string{}})
+	remote.SetIssueLinks(ytfIssue(target), ytwrite.IssueLinks{Related: []string{}, Duplicates: []string{}})
+	ytbBind(t, s, ytbBinding(target))
+	linksPass(t, s, remote)
+	for issue, targetIssue := range map[string]string{ytfIssue(source): ytfIssue(target), ytfIssue(target): ytfIssue(source)} {
+		if got, err := remote.ReadIssueLinks(t.Context(), issue); err != nil || len(got.Related) != 1 || got.Related[0] != targetIssue {
+			t.Fatalf("dependent relation was not projected on %s: %+v err=%v", issue, got, err)
+		}
+	}
+}
+
+func TestYTLinksEnableBackfillCatchesChangesConsumedWhileOff(t *testing.T) {
+	s := schemaStore(t, "yt_links_backfill")
+	ytbMapped(t, s)
+	source, target := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
+	ytbBind(t, s, ytbBinding(source))
+	ytbBind(t, s, ytbBinding(target))
+	if pass := ytFeedPassOK(t, s, ytFeedConsumers[ytLinksConsumer]); !pass.Created {
+		t.Fatalf("initial pass %+v", pass)
+	}
+	if _, err := s.AddTaskRelation(t.Context(), source, RelationRelated, target, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if pass := ytFeedPassOK(t, s, ytFeedConsumers[ytLinksConsumer]); pass.Read == 0 {
+		t.Fatalf("off-mode change was not consumed: %+v", pass)
+	}
+	s.SetYTLinksMode(YTLinksOn, ytcTenant)
+	remote := ytwritetest.NewFake()
+	for _, task := range []int64{source, target} {
+		remote.SetIssueLinks(ytfIssue(task), ytwrite.IssueLinks{Related: []string{}, Duplicates: []string{}})
+	}
+	_, done, err := s.BackfillYTLinksOps(t.Context(), 0, 100)
+	if err != nil || !done {
+		t.Fatalf("backfill done=%t err=%v", done, err)
+	}
+	p, err := ytwrite.New(ytwrite.Config{Ledger: s.YTTenantLedger(ytcTenant), Remote: remote})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Drive(context.Background(), 20); err != nil {
+	if _, err := p.Drive(t.Context(), 20); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := remote.ReadIssueLinks(t.Context(), ytfIssue(lower)); err != nil || len(got.Related) != 1 || got.Related[0] != ytfIssue(higher) {
-		t.Fatalf("lower endpoint relation was erased: %+v err=%v", got, err)
+	for issue, targetIssue := range map[string]string{ytfIssue(source): ytfIssue(target), ytfIssue(target): ytfIssue(source)} {
+		if got, err := remote.ReadIssueLinks(t.Context(), issue); err != nil || len(got.Related) != 1 || got.Related[0] != targetIssue {
+			t.Fatalf("backfill missed current state on %s: %+v err=%v", issue, got, err)
+		}
 	}
 }
 

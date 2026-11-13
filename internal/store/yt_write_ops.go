@@ -310,6 +310,15 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 		}
 	}
 	if reject == "" {
+		if op.Kind == ytwrite.KindIssueLinks {
+			if detail, err = claimYTLinksOwnershipTx(ctx, tx, op); err != nil {
+				return ytwrite.Op{}, "", err
+			} else if detail != "" {
+				reject = ytwrite.ReasonUnownedLink
+			}
+		}
+	}
+	if reject == "" {
 		// A snapshot prepared behind a move that was refused names a project
 		// its issue is not in; it is rejected, never written there (hk 4111).
 		if reject, detail, err = claimYTFieldsProjectTx(ctx, tx, op); err != nil {

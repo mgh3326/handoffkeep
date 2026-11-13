@@ -39,13 +39,13 @@ func (r *WriteRemote) UpdateIssueLinks(ctx context.Context, issueID string, snap
 		return "", &ytwrite.NotSentError{Err: err}
 	}
 	if detail := unexpectedIssueLink(current.Parent, snapshot.Previous.Parent, snapshot.Desired.Parent); detail != "" {
-		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonIssueLinksConflict, Detail: "unmanaged parent link to " + detail}
+		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonUnownedLink, Detail: "unowned parent link to " + detail}
 	}
 	if detail := unexpectedIssueLinkSet(current.Related, snapshot.Previous.Related, snapshot.Desired.Related); detail != "" {
-		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonIssueLinksConflict, Detail: "unmanaged relates link to " + detail}
+		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonUnownedLink, Detail: "unowned relates link to " + detail}
 	}
 	if detail := unexpectedIssueLinkSet(current.Duplicates, snapshot.Previous.Duplicates, snapshot.Desired.Duplicates); detail != "" {
-		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonIssueLinksConflict, Detail: "unmanaged duplicate link to " + detail}
+		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonUnownedLink, Detail: "unowned duplicate link to " + detail}
 	}
 	linkID := func(name, side string) string {
 		typ := byName[name]
@@ -54,6 +54,7 @@ func (r *WriteRemote) UpdateIssueLinks(ctx context.Context, issueID string, snap
 		}
 		return typ.ID + side
 	}
+	mutations := 0
 	for _, change := range []struct {
 		name     string
 		side     string
@@ -63,23 +64,31 @@ func (r *WriteRemote) UpdateIssueLinks(ctx context.Context, issueID string, snap
 	}{
 		{"subtask", "t", optionalTarget(snapshot.Previous.Parent), optionalTarget(snapshot.Desired.Parent), optionalTarget(current.Parent)},
 		{"relates", "", snapshot.Previous.Related, snapshot.Desired.Related, current.Related},
-		{"duplicate", "s", snapshot.Previous.Duplicates, snapshot.Desired.Duplicates, current.Duplicates},
+		{"duplicate", "t", snapshot.Previous.Duplicates, snapshot.Desired.Duplicates, current.Duplicates},
 	} {
 		for _, target := range change.desired {
 			if containsLink(change.current, target) {
 				continue
 			}
 			if err := r.mutateIssueLink(ctx, http.MethodPost, issueID, linkID(change.name, change.side), target); err != nil {
+				if mutations > 0 {
+					return "", &ytwrite.PartialWriteError{Err: err}
+				}
 				return "", err
 			}
+			mutations++
 		}
 		for _, target := range change.previous {
 			if containsLink(change.desired, target) || !containsLink(change.current, target) {
 				continue
 			}
 			if err := r.mutateIssueLink(ctx, http.MethodDelete, issueID, linkID(change.name, change.side), target); err != nil {
+				if mutations > 0 {
+					return "", &ytwrite.PartialWriteError{Err: err}
+				}
 				return "", err
 			}
+			mutations++
 		}
 	}
 	verified, err := r.ReadIssueLinks(ctx, issueID)
@@ -165,7 +174,7 @@ func issueLinkSetConverged(previous, desired, got []string) bool {
 // ReadIssueLinks reads the currently configured hk-owned link directions.
 func (r *WriteRemote) ReadIssueLinks(ctx context.Context, issueID string) (ytwrite.IssueLinks, error) {
 	q := url.Values{}
-	q.Set("fields", "id,direction,linkType(name),issues(id)")
+	q.Set("fields", "id,direction,linkType(name,sourceToTarget,targetToSource),issues(id)")
 	path := "/api/issues/" + url.PathEscape(issueID) + "/links"
 	data, readErr, err := r.send(ctx, http.MethodGet, path, q, nil)
 	if err != nil {
@@ -175,9 +184,12 @@ func (r *WriteRemote) ReadIssueLinks(ctx context.Context, issueID string) (ytwri
 		return ytwrite.IssueLinks{}, readErr
 	}
 	var rows []struct {
-		ID       string `json:"id"`
-		LinkType struct {
-			Name string `json:"name"`
+		ID        string `json:"id"`
+		Direction string `json:"direction"`
+		LinkType  struct {
+			Name           string `json:"name"`
+			SourceToTarget string `json:"sourceToTarget"`
+			TargetToSource string `json:"targetToSource"`
 		} `json:"linkType"`
 		Issues []struct {
 			ID string `json:"id"`
@@ -191,13 +203,13 @@ func (r *WriteRemote) ReadIssueLinks(ctx context.Context, issueID string) (ytwri
 		for _, issue := range row.Issues {
 			switch strings.ToLower(row.LinkType.Name) {
 			case "subtask":
-				if strings.HasSuffix(row.ID, "t") {
+				if row.Direction == "INWARD" && row.LinkType.TargetToSource != "" {
 					out.Parent = issue.ID
 				}
 			case "relates", "relate":
 				out.Related = append(out.Related, issue.ID)
 			case "duplicate":
-				if strings.HasSuffix(row.ID, "s") {
+				if row.Direction == "INWARD" && row.LinkType.TargetToSource != "" {
 					out.Duplicates = append(out.Duplicates, issue.ID)
 				}
 			}

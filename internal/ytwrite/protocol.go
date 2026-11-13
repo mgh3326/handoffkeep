@@ -359,6 +359,7 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 	var re *RemoteError
 	var refused *RefusedError
 	var notSent *NotSentError
+	var partial *PartialWriteError
 	var adopted *AdoptedError
 	switch {
 	case err == nil && resultIDRE.MatchString(id):
@@ -371,6 +372,8 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 	case err == nil:
 		// 2xx without a usable id: the write may exist.
 		return p.record(op, p.markUnknown(ctx, op, ReasonNoID, "2xx reply without a valid id"))
+	case errors.As(err, &partial):
+		return p.record(op, p.markUnknown(ctx, op, ReasonPartialWrite, partial.Error()))
 	case errors.As(err, &refused):
 		// The kind refused before it wrote anything.
 		return p.record(op, p.reject(ctx, op, refused.Reason, refused.Detail))
@@ -613,6 +616,25 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	case ev.Deleted > 0:
 		return touch(ReasonMarkerDeleted, "the marked candidate was deleted")
 	case ev.Mismatched > 0:
+		if recoverable, ok := kind.(interface {
+			Recover(context.Context, Remote, Op) (string, error)
+		}); ok {
+			id, recErr := recoverable.Recover(cctx, p.Remote, op)
+			if recErr != nil {
+				var refused *RefusedError
+				if errors.As(recErr, &refused) && refused.Reason == ReasonUnownedLink {
+					return touch(ReasonUnownedLink, refused.Detail)
+				}
+				return touch(ReasonReconcileFailed, recErr.Error())
+			}
+			if resultIDRE.MatchString(id) {
+				s := p.apply(ctx, kind, op, id, false)
+				if s.err == nil {
+					logTransition(s.op)
+				}
+				return s.err == nil, s.err
+			}
+		}
 		return touch(ReasonMarkerMismatch, fmt.Sprintf("%d candidates disagree with the rendered text", ev.Mismatched))
 	}
 	return touch(ReasonNoEvidence, "no candidate carries the marker")
