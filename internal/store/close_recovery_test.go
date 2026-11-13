@@ -288,3 +288,25 @@ func TestHeldParentAdoptsThePRWhenItsChildClosesIt(t *testing.T) {
 		t.Fatalf("parent=%s refs.pr=%q, want merged adopting %s", got.State, got.Refs.PR, own)
 	}
 }
+
+// TestRefusedMergeIsNotAdopted (hk 4172 review): a merge refused by a gate
+// other than mergeHoldTx (here, the task is in triage) is recorded not applied
+// but is not a held merge. When the task later leaves triage and an automatic
+// close moves it to merged, it does not adopt that refused PR.
+func TestRefusedMergeIsNotAdopted(t *testing.T) {
+	s, pool := searchTestStore(t)
+	parent := flowTask(t, s, pool, "implement", StateTriage, true)
+	child := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setParent(t, s, child, parent)
+	if res := send(t, s, mergeEvent(parent.ID, testPR(9701))); res.Applied {
+		t.Fatalf("merge applied in triage: %+v", res)
+	}
+	move(t, s, parent.ID, StateBacklog)
+	if res := send(t, s, mergeEvent(child.ID, testPR(9702))); !res.Applied {
+		t.Fatalf("child merge %+v", res)
+	}
+	got := stateOf(t, s, parent.ID)
+	if got.State != StateMerged || got.Refs.PR != "" {
+		t.Fatalf("parent=%s refs.pr=%q, want merged with no adopted PR", got.State, got.Refs.PR)
+	}
+}

@@ -33,6 +33,11 @@ const TaskEventSource = "source_event"
 // the row's to_value is the reverted PR URL, applied or not.
 const revertedPRField = "reverted_pr"
 
+// heldMergeField marks a mergewake.merge row that mergeHoldTx held (hk 4172),
+// as opposed to one a gate refused. Only a held merge names a PR an automatic
+// close may adopt (heldMergePRTx).
+const heldMergeField = "merge_held"
+
 // taskEventPRRE is the PR URL shape an event names. A source_ref of a
 // mergewake event is a PR URL (rule 10).
 var taskEventPRRE = regexp.MustCompile(`^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+$`)
@@ -444,6 +449,9 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 	}
 	if reason != "" {
 		note := joinNote(ev.Note, "not applied: "+reason)
+		if held {
+			field = heldMergeField
+		}
 		if _, _, err := insertEvent(ctx, tx, taskEventInput{
 			TaskID: x.ID, Kind: TaskEventSource, From: x.State, To: x.State, By: ev.Source, Note: note, Refs: x.Refs, At: ev.At,
 			Source: ev.Source, SourceRef: ev.SourceRef, Field: field, ToValue: revertedPR, Auto: true, NotApplied: true,
@@ -587,8 +595,8 @@ func hasSubTasksTx(ctx context.Context, tx pgx.Tx, taskID int64) (bool, error) {
 func heldMergePRTx(ctx context.Context, tx pgx.Tx, taskID int64) (string, error) {
 	var pr string
 	err := tx.QueryRow(ctx, `SELECT e.source_ref FROM task_events e JOIN changes c ON (`+prURLSQL+`)=e.source_ref
-		WHERE e.task_id=$1 AND e.source=$2 AND NOT e.applied AND c.state='merged' AND c.reverted_by_change_id IS NULL
-		ORDER BY e.id DESC LIMIT 1`, taskID, SourceMergewakeMerge).Scan(&pr)
+		WHERE e.task_id=$1 AND e.source=$2 AND e.field=$3 AND NOT e.applied AND c.state='merged' AND c.reverted_by_change_id IS NULL
+		ORDER BY e.id DESC LIMIT 1`, taskID, SourceMergewakeMerge, heldMergeField).Scan(&pr)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
