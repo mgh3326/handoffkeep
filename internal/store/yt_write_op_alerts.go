@@ -193,8 +193,7 @@ func (s *Store) ytWriteOpAlertCandidates(ctx context.Context, tx pgx.Tx, class s
 
 // ytWriteOpAlertText is one batched notice:
 // "[ytwrite] <n> <class> (<label>: <count>, …) op ids <ids> | <command>".
-// It names at most ytWriteOpAlertIDsShown ids and stays within the lane-event
-// byte cap.
+// It names at most ytWriteOpAlertIDsShown ids and retains its full text.
 func ytWriteOpAlertText(class string, cands []ytWriteOpAlertCandidate) string {
 	counts := map[string]int{}
 	for _, c := range cands {
@@ -219,8 +218,5 @@ func ytWriteOpAlertText(class string, cands []ytWriteOpAlertCandidate) string {
 		more = fmt.Sprintf(" +%d more", rest)
 	}
 	text := fmt.Sprintf("[ytwrite] %d %s (%s) op ids %s%s | %s", len(cands), class, strings.Join(parts, ", "), strings.Join(ids, ", "), more, ytWriteOpAlertPointer[class])
-	if len(text) > RelayLaneEventMaxBytes {
-		text = clipText(text, RelayLaneEventMaxBytes-len("…")) + "…"
-	}
 	return text
 }
