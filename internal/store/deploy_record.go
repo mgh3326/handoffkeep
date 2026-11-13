@@ -24,19 +24,24 @@ var deployRecordKeyRE = regexp.MustCompile(`^deploy/([A-Za-z0-9._-]{1,128})/([0-
 // fields the writer did not know arrive as JSON null. IncludedPRs is nil when
 // the record carries null, which moves nothing.
 type DeployRecord struct {
-	Schema      string   `json:"schema"`
-	Service     string   `json:"service"`
-	Target      string   `json:"target"`
-	HeadSHA     *string  `json:"head_sha"`
-	DeployedRef *string  `json:"deployed_ref"`
-	PreviousRef *string  `json:"previous_ref"`
-	DeployedAt  *string  `json:"deployed_at"`
-	Result      string   `json:"result"`
-	FailedStep  *int     `json:"failed_step"`
-	JobID       *string  `json:"job_id"`
-	ApprovalRef *string  `json:"approval_ref"`
-	IncludedPRs []string `json:"included_prs"`
-	Source      string   `json:"source"`
+	Schema      string  `json:"schema"`
+	Service     string  `json:"service"`
+	Target      string  `json:"target"`
+	HeadSHA     *string `json:"head_sha"`
+	DeployedRef *string `json:"deployed_ref"`
+	PreviousRef *string `json:"previous_ref"`
+	DeployedAt  *string `json:"deployed_at"`
+	Result      string  `json:"result"`
+	FailedStep  *int    `json:"failed_step"`
+	// FailedStepName is the writer's name for the failed step
+	// (hk-follow: shiftgate_<svc>_exit_<rc>, healthz_<svc>,
+	// healthz_<svc>_rollback_failed, interrupted). It is the only failure
+	// reason a deploy record carries, so readers show it verbatim.
+	FailedStepName *string  `json:"failed_step_name"`
+	JobID          *string  `json:"job_id"`
+	ApprovalRef    *string  `json:"approval_ref"`
+	IncludedPRs    []string `json:"included_prs"`
+	Source         string   `json:"source"`
 }
 
 // DeployRecordKeyTime extracts the UTC timestamp embedded in a
@@ -151,7 +156,10 @@ func writeDeployProjection(ctx context.Context, tx pgx.Tx, x StoredDeployRecord)
 }
 
 // ListDeployRecords pages projected deploy state. The fallback is deliberately
-// limited to missing or stale projections from previous-release writers.
+// limited to projections that are missing, undecodable, stale or written
+// before DeployRecord.FailedStepName existed (the marshalled record then has
+// no such key): the previous release can still write the old shape during a
+// blue-green rollout, so the document body is authoritative for those rows.
 func (s *Store) ListDeployRecords(ctx context.Context, prefix, before string, limit int) ([]StoredDeployRecord, error) {
 	if prefix == "" || !validText(prefix, maxDocumentPrefixBytes) || !validText(before, 512) {
 		return nil, errors.New("invalid deploy record prefix or cursor")
@@ -162,7 +170,10 @@ func (s *Store) ListDeployRecords(ctx context.Context, prefix, before string, li
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT d.key,d.sha256,d.created_at,p.record,p.decoded,CASE WHEN p.key IS NULL THEN d.body ELSE NULL END FROM documents d LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256 WHERE strpos(d.key,$1)=1 AND ($2='' OR d.key<$2) ORDER BY d.key DESC LIMIT $3`, prefix, before, limit)
+	rows, err := s.pool.Query(ctx, `SELECT d.key,d.sha256,d.created_at,p.record,p.decoded,
+CASE WHEN p.key IS NULL OR NOT p.decoded OR strpos(convert_from(p.record,'UTF8'), '"failed_step_name"') = 0 THEN d.body ELSE NULL END
+FROM documents d LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256
+WHERE strpos(d.key,$1)=1 AND ($2='' OR d.key<$2) ORDER BY d.key DESC LIMIT $3`, prefix, before, limit)
 	if err != nil {
 		return nil, err
 	}
