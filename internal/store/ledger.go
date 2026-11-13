@@ -79,19 +79,15 @@ type LedgerStartedTask struct {
 	NextSource  string       `json:"next_source"`
 }
 
-// LedgerProjectStatus is one project with started tasks, in the In flight
-// header: its latest status update and whether that update is stale.
-type LedgerProjectStatus struct {
-	Project      string     `json:"project"`
-	Started      int        `json:"started"`
-	Health       string     `json:"health"`
-	LastUpdateAt *time.Time `json:"last_update_at"`
-	Stale        bool       `json:"stale"`
+// LedgerProject is one project with started tasks, in the In flight header.
+type LedgerProject struct {
+	Project string `json:"project"`
+	Started int    `json:"started"`
 }
 
 type LedgerInFlight struct {
-	Projects []LedgerProjectStatus `json:"projects"`
-	Tasks    []LedgerStartedTask   `json:"tasks"`
+	Projects []LedgerProject     `json:"projects"`
+	Tasks    []LedgerStartedTask `json:"tasks"`
 }
 
 // LedgerDecisionGroup is the open requests of one task, or (TaskID nil) the
@@ -215,7 +211,7 @@ func ledgerNextTrigger(state, pr string) (trigger, source string) {
 // unexpired request (snoozed included) or the awaiting_decision flag is in
 // neither In flight nor Stalled; one with a listed request is under Waiting.
 func ledgerSections(started []ledgerStartedRow, records []DecisionRecord, tasks map[int64]LedgerTask, events []LedgerFlaggedEvent, now time.Time, stalledAfter time.Duration) (LedgerInFlight, LedgerWaiting, LedgerStalled) {
-	inFlight := LedgerInFlight{Projects: []LedgerProjectStatus{}, Tasks: []LedgerStartedTask{}}
+	inFlight := LedgerInFlight{Projects: []LedgerProject{}, Tasks: []LedgerStartedTask{}}
 	waiting := LedgerWaiting{Count: len(records), Groups: []LedgerDecisionGroup{}}
 	stalled := LedgerStalled{Tasks: []LedgerStartedTask{}, Events: []LedgerFlaggedEvent{}}
 
@@ -280,30 +276,18 @@ func ledgerSections(started []ledgerStartedRow, records []DecisionRecord, tasks 
 	return inFlight, waiting, stalled
 }
 
-// statusLatest is a project's newest status update.
-type statusLatest struct {
-	Health string
-	At     time.Time
-}
-
 // ledgerProjects is the In flight header: every project with started tasks,
-// by name, with its latest status update and staleness at now.
-func ledgerProjects(started []ledgerStartedRow, latest map[string]statusLatest, now time.Time) []LedgerProjectStatus {
+// by name, with how many are started.
+func ledgerProjects(started []ledgerStartedRow) []LedgerProject {
 	counts := map[string]int{}
 	for _, r := range started {
 		if r.Project != nil && *r.Project != "" {
 			counts[*r.Project]++
 		}
 	}
-	out := make([]LedgerProjectStatus, 0, len(counts))
+	out := make([]LedgerProject, 0, len(counts))
 	for name, n := range counts {
-		p := LedgerProjectStatus{Project: name, Started: n}
-		if u, ok := latest[name]; ok {
-			at := u.At
-			p.Health, p.LastUpdateAt = u.Health, &at
-		}
-		p.Stale = StatusUpdateStale(p.LastUpdateAt, now)
-		out = append(out, p)
+		out = append(out, LedgerProject{Project: name, Started: n})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Project < out[j].Project })
 	return out
@@ -364,19 +348,7 @@ func (s *Store) Ledger(ctx context.Context, consumer string, now time.Time) (Led
 	}
 	out.InFlight, out.WaitingOnOperator, out.Stalled = ledgerSections(started, records, tasks, events, now, after)
 
-	projects := []string{}
-	seen := map[string]bool{}
-	for _, r := range started {
-		if r.Project != nil && !seen[*r.Project] {
-			seen[*r.Project] = true
-			projects = append(projects, *r.Project)
-		}
-	}
-	latest, err := latestStatusUpdatesTx(ctx, tx, projects)
-	if err != nil {
-		return Ledger{}, err
-	}
-	out.InFlight.Projects = ledgerProjects(started, latest, now)
+	out.InFlight.Projects = ledgerProjects(started)
 
 	if out.Triage, err = ledgerTriageTx(ctx, tx, now); err != nil {
 		return Ledger{}, err
