@@ -88,4 +88,21 @@ func TestTaskWorkBoardPlacementOrder(t *testing.T) {
 	if !b.Sessions[1].Active || b.PrimaryJob() != "k" {
 		t.Fatalf("%+v", b)
 	}
+
+	// The task rebound to job m: k's lead session ends even though k's row
+	// is still running; a reviewer beside the task's job stays live.
+	b.applyPlacement(PlacementDecision{JobID: "m", ChosenHost: &host, Role: "worker", DecidedAt: at.Add(4 * time.Minute)})
+	b.applyPlacement(PlacementDecision{JobID: "r", ChosenHost: &host, Role: "review", DecidedAt: at.Add(5 * time.Minute)})
+	b.JobID = "m"
+	b.endReplacedSessions()
+	active := map[string]bool{}
+	for _, s := range b.Sessions {
+		active[s.JobID] = s.Active
+	}
+	if active["k"] || !active["m"] || !active["r"] || b.PrimaryJob() != "m" {
+		t.Fatalf("after rebind %+v", b.Sessions)
+	}
+	if view := (TaskWorkBoard{}); view.PrimaryJob() != "" {
+		t.Fatal(view)
+	}
 }

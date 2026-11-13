@@ -65,6 +65,22 @@ func (b *TaskWorkBoard) applyJob(job Job) {
 	}
 }
 
+// endReplacedSessions ends the lead and worker sessions of a job the task no
+// longer runs: a rebind or a new claim moves refs.job_id and leaves the old
+// job's row as it was, so its session would otherwise show as live. Other
+// roles (review, consult) work beside the task's job and are left alone.
+func (b *TaskWorkBoard) endReplacedSessions() {
+	if b.JobID == "" {
+		return
+	}
+	for i := range b.Sessions {
+		s := &b.Sessions[i]
+		if s.Active && s.JobID != b.JobID && (s.Role == "lead" || s.Role == "worker") {
+			s.Active = false
+		}
+	}
+}
+
 // PrimaryJob is the task's job, else the latest lead or worker placed for
 // it (a placement can arrive before the claim sets refs.job_id).
 func (b TaskWorkBoard) PrimaryJob() string {
@@ -82,7 +98,9 @@ func (b TaskWorkBoard) PrimaryJob() string {
 
 // ReadTaskWorkBoards derives the work overlay of every task in one read
 // snapshot: placed decisions owned by the tasks, then the jobs they name.
-// It writes nothing. Queries are batched for the whole UI page.
+// It writes nothing. Queries are batched for the whole UI page. A session
+// lives as long as its placement row: once PlacementRetention prunes the
+// row (180 days), the overlay no longer shows that session, by design.
 func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64]TaskWorkBoard, error) {
 	boards := make(map[int64]TaskWorkBoard, len(tasks))
 	if len(tasks) == 0 {
@@ -154,6 +172,10 @@ func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64
 		if err != nil {
 			return nil, err
 		}
+	}
+	for id, board := range boards {
+		board.endReplacedSessions()
+		boards[id] = board
 	}
 	return boards, tx.Commit(ctx)
 }
