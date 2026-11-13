@@ -21,6 +21,7 @@ const (
 	toolTaskUpdate     = "task_update"
 	toolDecisionAsk    = "decision_ask"
 	toolDecisionAnswer = "decision_answer"
+	toolDecisionRecord = "decision_record"
 	toolTaskComment    = "task_comment"
 	toolTaskIntake     = "task_intake"
 )
@@ -139,6 +140,33 @@ type decisionAskInput struct {
 	Block          bool                   `json:"block,omitempty"`
 	HumanOnly      bool                   `json:"human_only,omitempty"`
 	AnswerPolicy   string                 `json:"answer_policy,omitempty"`
+}
+
+type decisionRecordInput struct {
+	Key       string    `json:"key"`
+	Lane      string    `json:"lane"`
+	Reading   string    `json:"reading"`
+	Quote     string    `json:"quote"`
+	DecidedAt time.Time `json:"decided_at"`
+	Grounds   []string  `json:"grounds"`
+}
+
+func (o operatorTools) decisionRecord(ctx context.Context, _ *gmcp.CallToolRequest, in decisionRecordInput) (*gmcp.CallToolResult, any, error) {
+	if !o.principal.Access {
+		return nil, nil, errors.New("operator_required")
+	}
+	write, err := o.write(toolDecisionRecord, in.Key)
+	if err != nil {
+		return nil, nil, err
+	}
+	result, err := o.service.Store.RecordSessionDecision(ctx, store.SessionDecisionInput{
+		Key: in.Key, Lane: in.Lane, By: o.principal.Actor, Reading: in.Reading,
+		Quote: in.Quote, DecidedAt: in.DecidedAt, Grounds: in.Grounds,
+	}, time.Now().UTC(), &write)
+	if err != nil {
+		return nil, nil, err
+	}
+	return jsonResult(result)
 }
 
 // decisionAsk records a structured decision request on a task, through the same
