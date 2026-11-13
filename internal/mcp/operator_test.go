@@ -476,7 +476,8 @@ func TestAccessIdentityWritesRecordOperator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(attempts) != 1 || attempts[0].Channel != store.DecisionChannelConsole || attempts[0].Actor != operator || attempts[0].Provenance != store.DecisionProvenanceOperatorDirect {
+	// The chatgpt channel records its answers as dots, not as the console.
+	if len(attempts) != 1 || attempts[0].Channel != store.DecisionChannelDots || attempts[0].Actor != operator || attempts[0].Provenance != store.DecisionProvenanceOperatorDirect {
 		t.Fatalf("attempts=%+v", attempts)
 	}
 

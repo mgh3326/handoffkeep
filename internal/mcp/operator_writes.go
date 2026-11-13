@@ -18,10 +18,11 @@ import (
 // keyed write replays its first result when the same key comes back.
 
 const (
-	toolTaskUpdate  = "task_update"
-	toolDecisionAsk = "decision_ask"
-	toolTaskComment = "task_comment"
-	toolTaskIntake  = "task_intake"
+	toolTaskUpdate     = "task_update"
+	toolDecisionAsk    = "decision_ask"
+	toolDecisionAnswer = "decision_answer"
+	toolTaskComment    = "task_comment"
+	toolTaskIntake     = "task_intake"
 )
 
 // writeAuthor is the author label a write records. The ChatGPT channel is dots,
