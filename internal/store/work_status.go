@@ -541,17 +541,10 @@ func (s *Store) ReadWorkStatusOverlay(ctx context.Context, ids []int64) (WorkSta
 // readProjectLastSuccessfulDeploysTx scans active deploy services and records
 // to find the most recent successful deploy timestamp per project.
 func readProjectLastSuccessfulDeploysTx(ctx context.Context, tx pgx.Tx) (map[string]time.Time, error) {
-	return readProjectLastSuccessfulDeploys(ctx, tx, false)
+	return readProjectLastSuccessfulDeploys(ctx, tx)
 }
 
-// readProjectLastMeasuredDeploysTx returns only deploy boundaries backed by an
-// explicit deployed_at value. A record-key timestamp is useful for sorting a
-// record, but it is not evidence of when a version began serving.
-func readProjectLastMeasuredDeploysTx(ctx context.Context, tx pgx.Tx) (map[string]time.Time, error) {
-	return readProjectLastSuccessfulDeploys(ctx, tx, true)
-}
-
-func readProjectLastSuccessfulDeploys(ctx context.Context, tx pgx.Tx, requireMeasuredTime bool) (map[string]time.Time, error) {
+func readProjectLastSuccessfulDeploys(ctx context.Context, tx pgx.Tx) (map[string]time.Time, error) {
 	result := make(map[string]time.Time)
 
 	// Fetch active deploy services
@@ -581,13 +574,17 @@ func readProjectLastSuccessfulDeploys(ctx context.Context, tx pgx.Tx, requireMea
 	for _, svc := range services {
 		var newestSuccess *time.Time
 		for _, prefix := range svc.prefixes {
-			// Alias prefixes store the legacy service name in each document
-			// (for example deploy/panewire/ for panewire-hub).
+			// A prefix may be legacy-named while the document uses the canonical
+			// configured service name (for example deploy/panewire/ for panewire-hub).
 			alias := strings.TrimSuffix(prefix, "/")
 			if i := strings.LastIndex(alias, "/"); i >= 0 {
 				alias = alias[i+1:]
 			}
-			t, err := scanPrefixLastSuccessDeployTx(ctx, tx, prefix, alias, requireMeasuredTime)
+			services := []string{svc.name}
+			if alias != svc.name {
+				services = append(services, alias)
+			}
+			t, err := scanPrefixLastSuccessDeployTx(ctx, tx, prefix, services)
 			if err != nil {
 				return nil, err
 			}
@@ -608,7 +605,7 @@ func readProjectLastSuccessfulDeploys(ctx context.Context, tx pgx.Tx, requireMea
 	return result, nil
 }
 
-func scanPrefixLastSuccessDeployTx(ctx context.Context, tx pgx.Tx, prefix, service string, requireMeasuredTime bool) (*time.Time, error) {
+func scanPrefixLastSuccessDeployTx(ctx context.Context, tx pgx.Tx, prefix string, services []string) (*time.Time, error) {
 	rows, err := tx.Query(ctx, `SELECT d.key, d.sha256, d.created_at, p.record, p.decoded,
 		CASE WHEN p.key IS NULL THEN d.body ELSE NULL END
 		FROM documents d
@@ -638,11 +635,21 @@ func scanPrefixLastSuccessDeployTx(ctx context.Context, tx pgx.Tx, prefix, servi
 		var reasons []string
 
 		if body != nil {
-			rec, deployedAt, reasons = ClassifyDeployRecord(key, service, *body)
+			for _, service := range services {
+				rec, deployedAt, reasons = ClassifyDeployRecord(key, service, *body)
+				if rec != nil && len(reasons) == 0 {
+					break
+				}
+			}
 		} else if raw != nil && decoded != nil && *decoded {
 			var parsed DeployRecord
 			if err := json.Unmarshal(raw, &parsed); err == nil {
-				rec, deployedAt, reasons = classifyParsedDeployRecord(key, service, &parsed, true)
+				for _, service := range services {
+					rec, deployedAt, reasons = classifyParsedDeployRecord(key, service, &parsed, true)
+					if rec != nil && len(reasons) == 0 {
+						break
+					}
+				}
 			}
 		}
 
@@ -655,9 +662,6 @@ func scanPrefixLastSuccessDeployTx(ctx context.Context, tx pgx.Tx, prefix, servi
 
 		t := deployedAt
 		if t == nil {
-			if requireMeasuredTime {
-				continue
-			}
 			kt, ok := DeployRecordKeyTime(key)
 			if ok {
 				t = &kt
