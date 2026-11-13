@@ -1806,13 +1806,22 @@ func uiFromEnv(st *store.Store, am *attachments.Manager) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ui.New(ui.Config{
+	taskIssues, err := uiTaskIssuesFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	config := ui.Config{
 		Store:       st,
 		Attachments: am,
 		Access:      access,
 		HubURL:      strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_URL")),
 		HubToken:    strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_TOKEN")),
-	})
+	}
+	if taskIssues != nil {
+		config.TaskIssues = taskIssues
+		config.TaskIssuesTenant = taskIssues.Tenant()
+	}
+	return ui.New(config)
 }
 
 // discordDecisionsFromEnv returns nil when the channel is not configured;

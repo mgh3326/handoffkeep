@@ -55,4 +55,8 @@ func tenantFromClient(c *Client) string {
 	return u.Host
 }
 
+// Tenant is the host of the configured YouTrack: the tenant hk's bindings
+// and mirror links are recorded under.
+func (c *Client) Tenant() string { return tenantFromClient(c) }
+
 func (s *Service) Tenant() string { return s.tenant }
