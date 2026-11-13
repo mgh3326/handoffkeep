@@ -112,7 +112,7 @@ func TestSearchScopesCapAndTruncated(t *testing.T) {
 		}
 	}
 	// An exact-fit page (rows == limit) is not truncation.
-	xs, err = s.Search(ctx, "capprobe", "ctx", "", 7)
+	xs, err = s.Search(ctx, "capprobe", "docs", "", 7)
 	if err != nil {
 		t.Fatal(err)
 	}
