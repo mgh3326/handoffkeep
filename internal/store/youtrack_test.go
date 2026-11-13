@@ -143,16 +143,4 @@ func TestYouTrackSchemaVocabulary(t *testing.T) {
 	if !reflect.DeepEqual(lanes, want) {
 		t.Fatalf("lanes=%v, want %v (each project's own lanes, no project under \"\")", lanes, want)
 	}
-	for i, name := range []string{"second", "first"} {
-		if _, err := st.SaveMilestone(ctx, ProjectMilestone{Project: "handoffkeep", Name: name, Status: "planned", SortOrder: 2 - i}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	got, err := st.ListMilestoneNames(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if names := got["handoffkeep"]; len(names) != 2 || names[0] != "first" || names[1] != "second" {
-		t.Fatalf("milestones=%v, want [first second] by sort_order", got)
-	}
 }

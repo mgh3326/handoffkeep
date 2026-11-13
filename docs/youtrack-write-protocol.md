@@ -680,10 +680,15 @@ and `youtrack_comment_links` (legacy and pulled comments). It is read-only: `sto
 
 | Target | Scope | Rebuilt from | Equal when |
 |---|---|---|---|
-| documents | every `yt_article_bindings` row on the tenant | the article's content; for an `op_applied` binding the body inside hk's rendered form (`ytwrite.ParseArticleContent`; another form differs) | its sha256 is `documents.sha256`. A binding that names the import's split index (articles-backfill stored no content sha) is `exception_not_updated` (D4), not a failure, and its article is not read; the current body size decides nothing, so a document that grew past 240 KiB after a single-part import is compared. A body quoting the op marker whose article holds it escaped (hk 4295) is the exception `escaped_marker` |
-| comments | `--sample-comments` random bound tasks (default 200, by `md5("<seed>:<task id>")`) and the 20 bound tasks with the most comments | the issue's comments, listed stably | every hk comment has exactly one copy with the same (author, time, body), and every YouTrack comment copies one |
-| tasks | every `yt_task_bindings` row on the tenant | the issue | hk ID → id, the description's title line → title, the project → project |
+| documents | every `yt_article_bindings` row on the tenant; under `--project P`, only those of P's tasks — a document with no task is excluded | the article's content; for an `op_applied` binding the body inside hk's rendered form (`ytwrite.ParseArticleContent`; another form differs) | its sha256 is `documents.sha256`. A binding that names the import's split index (articles-backfill stored no content sha) is `exception_not_updated` (D4), not a failure, and its article is not read; the current body size decides nothing, so a document that grew past 240 KiB after a single-part import is compared. A body quoting the op marker whose article holds it escaped (hk 4295) is the exception `escaped_marker` |
+| comments | `--sample-comments` random bound tasks (default 200, by `md5("<seed>:<task id>")`) and the 20 bound tasks with the most comments; under `--project P`, only P's tasks are sampled | the issue's comments, listed stably | every hk comment has exactly one copy with the same (author, time, body), and every YouTrack comment copies one |
+| tasks | every `yt_task_bindings` row on the tenant; under `--project P`, only bindings whose task is in P | the issue | hk ID → id, the description's title line → title, the project → project |
 | decisions | every `yt_decision_bindings` row on the tenant | the DEC issue's description | question, options and answer equal (the Y6 block) |
+
+`--project P` narrows tasks, the comment sample and documents to P; it never
+narrows decisions (below). A clean result under `--project P` certifies only
+what was checked: bindings outside P, and documents with no task, were not
+read, so their differences would not have shown.
 
 **Comments.** A comment in the rendered form of op N (`RenderedOpID`) whose op
 is one of the task's comments' (`yt_comment_write_links`) gives its author and
@@ -716,9 +721,12 @@ sample on the same data.
 **Tasks.** The id is the `hk ID` field (else the description's `hk task: #N`
 line). The title is the description's title line in whichever form wrote it:
 issue_fields' `RenderFields` (whitespace collapsed, so PG's title is compared
-collapsed), issue_create's `RenderIssue` or the import's `Original hk title:`
-(both exact). The project is the `hk 프로젝트` field (else the description's
-project; both, when present, must agree), with `Unassigned` read as none.
+collapsed), issue_create's `RenderIssue`, or the import's `Original hk title:`
+(the last two exact; the import's title may span lines and ends where its
+metadata block — `제목(한국어):`, `Body document:`, `PR:`, `Job:`, `Parent
+task:` — begins). The project is the `hk 프로젝트` field (else the
+description's project; both, when present, must agree), with `Unassigned`
+read as none.
 
 **Decisions.** The DEC issue's description is read in the Y6 form only:
 `RenderDecision`'s block (a decision_fields snapshot), or the block between
@@ -968,9 +976,11 @@ and the value; a 4xx from the POST is `rejected / http_4xx`. Either raises the
 rejected-op alert, and the next feed change or backfill run prepares the
 snapshot again (Rejected snapshots above). No map rows.
 
-`레인`, `영역` and `마일스톤` are open sets hk owns (a new lane appears in hk
-first, hk 4051). When nothing above refuses, a value of theirs missing from
-the project's bundle is added to that bundle (`POST
+`레인`, `영역` and `마일스톤` are open sets hk owns (a new value appears in
+hk first, hk 4051); `영역` and `마일스톤` are the import's string fields
+(hk 4305), so the bundle rule applies to them only on a project that carries
+them as an enum. When nothing above refuses, a value of an enum-shaped field
+of theirs missing from the project's bundle is added to that bundle (`POST
 /api/admin/customFieldSettings/bundles/enum/<bundle>/values` with `$type` and
 `name`), and an archived one is un-archived (`POST .../values/<value id>` with
 `archived: false`), never duplicated. The add goes to the bundle the project's
