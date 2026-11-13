@@ -3,7 +3,6 @@ package ui
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -33,9 +32,6 @@ const (
 	boardTasksDefaultLimit = 200
 	boardTasksMaxLimit     = 500
 	boardDetailRepsLimit   = 500
-	policyItemsMax         = 200
-	policyPointerKey       = "policy/active"
-	policyTitleMax         = 200
 	// boardDocRenderMaxBytes is the inline-render budget: a larger document
 	// is served as unsupported and the console offers only the raw view.
 	boardDocRenderMaxBytes = 256 << 10
@@ -784,97 +780,12 @@ func (h *Handler) boardDoc(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Policy canon is resolved from two exact document keys. The pointer document
-// policy/active holds the exact manifest document key; the manifest document
-// holds a JSON item list. Anything else is exploration, never coverage, so the
-// endpoint reports an explicit status instead of scanning prefixes.
-type policyResponse struct {
-	Status        string       `json:"status"`
-	PointerKey    string       `json:"pointer_key"`
-	PointerDocURL string       `json:"pointer_doc_url"`
-	ManifestKey   string       `json:"manifest_key,omitempty"`
-	ManifestURL   string       `json:"manifest_doc_url,omitempty"`
-	Release       string       `json:"release,omitempty"`
-	Items         []policyItem `json:"items"`
-	Truncated     bool         `json:"truncated,omitempty"`
-}
-
-type policyItem struct {
-	Key    string `json:"key"`
-	Title  string `json:"title,omitempty"`
-	DocURL string `json:"doc_url"`
-	Exists bool   `json:"exists"`
-}
-
 type policyManifest struct {
 	Release string `json:"release"`
 	Items   []struct {
 		Key   string `json:"key"`
 		Title string `json:"title"`
 	} `json:"items"`
-}
-
-func (h *Handler) policyActive(w http.ResponseWriter, r *http.Request) {
-	response := policyResponse{Status: "not_configured", PointerKey: policyPointerKey, PointerDocURL: "/ui/doc/" + policyPointerKey, Items: []policyItem{}}
-	pointer, found, err := h.store.GetDocument(r.Context(), policyPointerKey)
-	if err != nil {
-		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
-		return
-	}
-	if !found {
-		writeBoardJSON(w, response)
-		return
-	}
-	manifestKey := strings.TrimSpace(pointer.Body)
-	if !validDocumentKey(manifestKey) {
-		response.Status = "invalid_pointer"
-		writeBoardJSON(w, response)
-		return
-	}
-	response.ManifestKey = manifestKey
-	response.ManifestURL = "/ui/doc/" + manifestKey
-	manifest, found, err := h.store.GetDocument(r.Context(), manifestKey)
-	if err != nil {
-		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
-		return
-	}
-	if !found {
-		response.Status = "manifest_missing"
-		writeBoardJSON(w, response)
-		return
-	}
-	var parsed policyManifest
-	decoder := json.NewDecoder(strings.NewReader(manifest.Body))
-	var trailing any
-	if err := decoder.Decode(&parsed); err != nil || decoder.Decode(&trailing) != io.EOF {
-		response.Status = "invalid_manifest"
-		writeBoardJSON(w, response)
-		return
-	}
-	if len(parsed.Items) > policyItemsMax {
-		parsed.Items = parsed.Items[:policyItemsMax]
-		response.Truncated = true
-	}
-	for _, item := range parsed.Items {
-		if !validDocumentKey(item.Key) || len(item.Title) > policyTitleMax {
-			response.Status = "invalid_manifest"
-			response.Items = []policyItem{}
-			writeBoardJSON(w, response)
-			return
-		}
-	}
-	response.Release = parsed.Release
-	response.Status = "ok"
-	for _, item := range parsed.Items {
-		entry := policyItem{Key: item.Key, Title: item.Title, DocURL: "/ui/doc/" + item.Key}
-		_, entry.Exists, err = h.store.GetDocument(r.Context(), item.Key)
-		if err != nil {
-			http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
-			return
-		}
-		response.Items = append(response.Items, entry)
-	}
-	writeBoardJSON(w, response)
 }
 
 func writeBoardJSON(w http.ResponseWriter, response any) {

@@ -396,20 +396,14 @@ func TestFleetAPICSPHeader(t *testing.T) {
 	apiResp := uiRequest(t, server.Client(), http.MethodGet, server.URL+"/ui/api/fleet", assertion, "")
 	apiCSP := apiResp.Header.Get("Content-Security-Policy")
 	_ = responseText(t, apiResp)
-	pageResp := uiRequest(t, server.Client(), http.MethodGet, server.URL+"/ui/fleet", assertion, "")
-	pageCSP := pageResp.Header.Get("Content-Security-Policy")
-	pageBody := responseText(t, pageResp)
-	if apiCSP != ui.ConsoleCSP || pageCSP != ui.ConsoleCSP {
-		t.Fatalf("csp api=%q page=%q", apiCSP, pageCSP)
+	if apiCSP != ui.ConsoleCSP {
+		t.Fatalf("csp api=%q", apiCSP)
 	}
-	if !strings.Contains(pageBody, `id="shell-root"`) || !strings.Contains(pageBody, `/ui/static/console/shell.js`) {
-		t.Fatalf("fleet page mount missing: %q", pageBody)
+	queue := uiRequest(t, server.Client(), http.MethodGet, server.URL+"/ui/queue", assertion, "")
+	if queue.Header.Get("Content-Security-Policy") != ui.ConsoleCSP {
+		t.Fatalf("shell CSP=%q", queue.Header.Get("Content-Security-Policy"))
 	}
-	timeline := uiRequest(t, server.Client(), http.MethodGet, server.URL+"/ui/timeline", assertion, "")
-	if timeline.Header.Get("Content-Security-Policy") != "" {
-		t.Fatal("CSP applied to an htmx page")
-	}
-	_ = responseText(t, timeline)
+	_ = responseText(t, queue)
 }
 
 func TestFleetAPISecretNotExposed(t *testing.T) {
@@ -427,8 +421,6 @@ func TestFleetAPISecretNotExposed(t *testing.T) {
 		t.Fatalf("secret fields present: %v", got)
 	}
 	assertNoSecret(t, body, header, fleetTestSecret, upstream.URL)
-	page := uiRequest(t, server.Client(), http.MethodGet, server.URL+"/ui/fleet", assertion, "")
-	assertNoSecret(t, responseText(t, page), page.Header, fleetTestSecret, upstream.URL)
 }
 
 func TestFleetAPINoExtraNotifications(t *testing.T) {
@@ -467,7 +459,7 @@ func TestFleetAPISharedPolling(t *testing.T) {
 	})
 	upstream := startFleetHub(t, hub)
 	server, assertion := newFleetUI(t, upstream.URL, fleetTestSecret, 10*time.Second)
-	warmup := uiRequest(t, server.Client(), http.MethodGet, server.URL+"/ui/fleet", assertion, "")
+	warmup := uiRequest(t, server.Client(), http.MethodGet, server.URL+"/ui/api/fleet", assertion, "")
 	if warmup.StatusCode != http.StatusOK {
 		t.Fatalf("warmup status=%d", warmup.StatusCode)
 	}
@@ -628,14 +620,14 @@ func TestFleetAPIDisplayState(t *testing.T) {
 func TestFleetAPIUnauthorizedSameAsUI(t *testing.T) {
 	server, _ := newFleetUI(t, "", "", 0)
 	fleet := uiRequest(t, server.Client(), http.MethodGet, server.URL+"/ui/api/fleet", "", "")
-	timeline := uiRequest(t, server.Client(), http.MethodGet, server.URL+"/ui/timeline", "", "")
+	queue := uiRequest(t, server.Client(), http.MethodGet, server.URL+"/ui/queue", "", "")
 	fleetBody := responseText(t, fleet)
-	timelineBody := responseText(t, timeline)
-	if fleet.StatusCode != http.StatusUnauthorized || timeline.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status fleet=%d timeline=%d", fleet.StatusCode, timeline.StatusCode)
+	queueBody := responseText(t, queue)
+	if fleet.StatusCode != http.StatusUnauthorized || queue.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status fleet=%d queue=%d", fleet.StatusCode, queue.StatusCode)
 	}
-	if fleetBody != "" || timelineBody != "" {
-		t.Fatalf("bodies fleet=%q timeline=%q", fleetBody, timelineBody)
+	if fleetBody != "" || queueBody != "" {
+		t.Fatalf("bodies fleet=%q queue=%q", fleetBody, queueBody)
 	}
 	apiOK := uiRequest(t, server.Client(), http.MethodGet, server.URL+"/v1/tasks", "", "node-token")
 	if apiOK.StatusCode != http.StatusOK {

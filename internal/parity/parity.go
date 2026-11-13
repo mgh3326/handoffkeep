@@ -61,36 +61,6 @@ var ConsoleWrites = []ConsoleWrite{
 		Except: "operator-only: setting a fleet host's accepting flag controls dispatch, not task data, and stays on the console fleet page.",
 	},
 	{
-		Route:  "/ui/dispositions/answer",
-		Source: "/ui/dispositions/answer",
-		Except: "follow-up: hk 3474 — disposition answers belong to the attention inbox work.",
-	},
-	{
-		Route:  "/ui/dispositions/accept-batch",
-		Source: "/ui/dispositions/accept-batch",
-		Except: "follow-up: hk 3474 — bulk accept with per-item results is the MCP bulk-change design.",
-	},
-	{
-		Route:  "/ui/dispositions/renotify",
-		Source: "/ui/dispositions/renotify",
-		Except: "follow-up: hk 3474 — re-notifying a recorded disposition belongs to the attention inbox.",
-	},
-	{
-		Route:  "/ui/decisions/answer",
-		Source: "/ui/decisions/answer",
-		Except: "operator-only: the generic task/escalation/lane answer emits a lane event and transitions; structured requests use /ui/api/decision-requests/resolve, which maps to decision_answer.",
-	},
-	{
-		Route:  "/ui/decisions/answer-batch",
-		Source: "/ui/decisions/answer-batch",
-		Except: "operator-only: the generic batch answer is superseded by structured requests; its MCP bulk equivalent is hk 3474.",
-	},
-	{
-		Route:  "/ui/compose",
-		Source: "/ui/compose",
-		Except: "operator-only: compose sends one free-text lane event to a configured lane; it is a relay message, not task data.",
-	},
-	{
 		Route:  "/ui/tasks/{id}/comments",
 		Source: "taskCommentsPathRE",
 		MCP:    []string{"task_comment"},

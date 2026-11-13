@@ -6,16 +6,11 @@ import "strings"
 // dispatcher, including auth failures. Never fall back to an unknown raw path.
 func routePattern(path string) string {
 	switch path {
-	case "/ui", "/ui/timeline", "/ui/queue", "/ui/decisions", "/ui/decisions/legacy", "/ui/compose",
-		"/ui/work", "/ui/fleet", "/ui/grades", "/ui/deploys", "/ui/docs", "/ui/home", "/ui/events",
+	case "/ui", "/ui/queue", "/ui/decisions", "/ui/work", "/ui/deploys", "/ui/home",
 		"/ui/work-status",
-		"/ui/dispositions/answer", "/ui/dispositions/accept-batch", "/ui/dispositions/renotify",
-		"/ui/decisions/answer", "/ui/decisions/answer-batch",
-		"/ui/fragments/timeline", "/ui/fragments/decisions", "/ui/fragments/fleet", "/ui/fragments/compose",
-		"/ui/api/fleet", "/ui/api/live", "/ui/api/reap", "/ui/api/glance", "/ui/api/board/tasks",
+		"/ui/api/fleet", "/ui/api/glance", "/ui/api/board/tasks",
 		"/ui/api/attention", "/ui/api/decisions", "/ui/api/board/projects", "/ui/api/board/lanes",
-		"/ui/api/search", "/ui/api/policy/active", "/ui/api/board/doc", "/ui/api/docs",
-		"/ui/api/docs/prefixes", "/ui/api/dashboard", "/ui/api/bench/catalog", "/ui/api/deploy-pending",
+		"/ui/api/board/doc", "/ui/api/deploy-pending",
 		"/ui/api/decision-requests/resolve", "/ui/api/decision-requests/deny",
 		"/ui/api/inbox/state", "/ui/api/inbox/undo", "/ui/api/work-status":
 		return path // only literal, exact matches can reach here

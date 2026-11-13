@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -254,19 +253,6 @@ func TestWrkAuthenticatedUIHasNoImplicitCentralPrincipal(t *testing.T) {
 	}
 	if page.Code != 200 || cookie == nil {
 		t.Fatal("authenticated UI form fixture")
-	}
-	for _, path := range []string{"/ui/decisions/answer", "/ui/dispositions/answer"} {
-		form := url.Values{"csrf": {cookie.Value}, "id": {"2400"}, "type": {"task"}, "answer": {"A"}, "gen": {"1"}, "key": {"A"}}
-		request := httptest.NewRequest("POST", "http://example.com"+path, strings.NewReader(form.Encode()))
-		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		request.Header.Set("Origin", "http://example.com")
-		request.Header.Set("Cf-Access-Jwt-Assertion", assertion)
-		request.AddCookie(cookie)
-		out := httptest.NewRecorder()
-		handler.ServeHTTP(out, request)
-		if out.Code != 403 || strings.TrimSpace(out.Body.String()) != `{"error":"scope_denied"}` {
-			t.Fatalf("UI scope refusal %s: status=%d", path, out.Code)
-		}
 	}
 	// The console's structured-decision route repeats the same refusal: the
 	// Access identity is not a central principal, so the store fence stops it.
