@@ -102,6 +102,22 @@ func TestTaskWorkBoardPlacementOrder(t *testing.T) {
 	if active["k"] || !active["m"] || !active["r"] || b.PrimaryJob() != "m" {
 		t.Fatalf("after rebind %+v", b.Sessions)
 	}
+
+	// A replacement placed after the current job, still starting before its
+	// claim or rebind, stays live; so does everything when the current job
+	// has no placement to date the binding.
+	b.applyPlacement(PlacementDecision{JobID: "n", ChosenHost: &host, Role: "worker", DecidedAt: at.Add(6 * time.Minute)})
+	b.endReplacedSessions()
+	for _, s := range b.Sessions {
+		if s.JobID == "n" && !s.Active {
+			t.Fatalf("pending replacement hidden: %+v", b.Sessions)
+		}
+	}
+	unplaced := TaskWorkBoard{JobID: "x", Sessions: []TaskWorkSession{{JobID: "y", Role: "lead", Active: true, At: at}}}
+	unplaced.endReplacedSessions()
+	if !unplaced.Sessions[0].Active {
+		t.Fatalf("ended without a binding time: %+v", unplaced.Sessions)
+	}
 	if view := (TaskWorkBoard{}); view.PrimaryJob() != "" {
 		t.Fatal(view)
 	}
