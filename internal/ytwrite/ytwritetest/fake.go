@@ -79,7 +79,8 @@ type FakeYouTrack struct {
 	readFaults []error
 	// moves are the MoveIssueToProject calls received, in order (fake_move.go).
 	moves []FakeMove
-	// issueLinks are the current hk-owned issue links and their write calls.
+	// issueLinks are the current issue links (including external links) and
+	// linkWrites records each hk desired snapshot.
 	issueLinks map[string]ytwrite.IssueLinks
 	linkWrites []FakeIssueLinksWrite
 	// articles are the articles of every project, in creation order, and

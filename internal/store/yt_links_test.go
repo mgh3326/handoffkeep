@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -62,6 +63,55 @@ func TestYTLinksClearedParentRemovesYouTrackLink(t *testing.T) {
 	linksPass(t, s, remote)
 	if got, err := remote.ReadIssueLinks(t.Context(), ytfIssue(child)); err != nil || got.Parent != "" {
 		t.Fatalf("cleared parent remains in YouTrack: %+v err=%v", got, err)
+	}
+}
+
+func TestYTLinksHigherEndpointKeepsNormalizedRelatedEdge(t *testing.T) {
+	s := schemaStore(t, "yt_links_higher")
+	ytbMapped(t, s)
+	lower, higher := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
+	ytbBind(t, s, ytbBinding(lower))
+	ytbBind(t, s, ytbBinding(higher))
+	if _, err := s.AddTaskRelation(t.Context(), higher, RelationRelated, lower, "test"); err != nil {
+		t.Fatal(err)
+	}
+	s.SetYTLinksMode(YTLinksOn, ytcTenant)
+	tx, err := s.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := prepareYTLinksTx(t.Context(), tx, time.Now().UTC(), ytcTenant, higher)
+	if err != nil {
+		_ = tx.Rollback(t.Context())
+		t.Fatal(err)
+	}
+	if outcome != ytLinksPrepared {
+		_ = tx.Rollback(t.Context())
+		t.Fatalf("higher endpoint outcome %s, want prepared", outcome)
+	}
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	var payload []byte
+	if err := s.pool.QueryRow(t.Context(), `SELECT payload FROM yt_write_ops WHERE principal=$1 AND entity_id=$2`, YTLinksPrincipal, fmt.Sprint(higher)).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := ytwrite.DecodeIssueLinksSnapshot(payload)
+	if err != nil || len(snapshot.Desired.Related) != 1 || snapshot.Desired.Related[0] != ytfIssue(lower) {
+		t.Fatalf("higher endpoint snapshot %+v err=%v", snapshot, err)
+	}
+	remote := ytwritetest.NewFake()
+	remote.SetIssueLinks(ytfIssue(lower), ytwrite.IssueLinks{Related: []string{ytfIssue(higher)}, Duplicates: []string{}})
+	remote.SetIssueLinks(ytfIssue(higher), ytwrite.IssueLinks{Related: []string{ytfIssue(lower)}, Duplicates: []string{}})
+	p, err := ytwrite.New(ytwrite.Config{Ledger: s.YTTenantLedger(ytcTenant), Remote: remote, Now: func() time.Time { return time.Now().UTC() }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Drive(context.Background(), 20); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := remote.ReadIssueLinks(t.Context(), ytfIssue(lower)); err != nil || len(got.Related) != 1 || got.Related[0] != ytfIssue(higher) {
+		t.Fatalf("lower endpoint relation was erased: %+v err=%v", got, err)
 	}
 }
 

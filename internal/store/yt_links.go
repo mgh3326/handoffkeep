@@ -133,8 +133,12 @@ func prepareYTLinksTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant stri
 		}
 		links.Parent = issue
 	}
-	rels, err := tx.Query(ctx, `SELECT r.kind,r.dst_id,b.issue_id FROM task_relations r LEFT JOIN yt_task_bindings b ON b.task_id=r.dst_id AND b.tenant=$2
-		WHERE r.src_id=$1 AND r.archived_at IS NULL AND r.kind IN ('related','duplicate_of') ORDER BY r.kind,r.dst_id`, id, tenant)
+	rels, err := tx.Query(ctx, `SELECT r.kind, CASE WHEN r.src_id=$1 THEN r.dst_id ELSE r.src_id END AS other_id, b.issue_id
+		FROM task_relations r
+		LEFT JOIN yt_task_bindings b ON b.task_id=CASE WHEN r.src_id=$1 THEN r.dst_id ELSE r.src_id END AND b.tenant=$2
+		WHERE r.archived_at IS NULL AND r.kind IN ('related','duplicate_of')
+		AND (r.src_id=$1 OR (r.kind='related' AND r.dst_id=$1))
+		ORDER BY r.kind,other_id`, id, tenant)
 	if err != nil {
 		return "", err
 	}
@@ -164,8 +168,12 @@ func prepareYTLinksTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant stri
 	rels.Close()
 	sort.Strings(links.Related)
 	sort.Strings(links.Duplicates)
+	previous, err := previousYTLinksTx(ctx, tx, tenant, id, b.IssueID)
+	if err != nil {
+		return "", err
+	}
 	n, err := ytwrite.IssueLinksOp(ytwrite.IssueLinksRequest{Principal: YTLinksPrincipal, Actor: YTLinksPrincipal, Tenant: tenant,
-		IssueID: b.IssueID, TaskID: id, Links: links})
+		IssueID: b.IssueID, TaskID: id, Previous: previous, Links: links})
 	if errors.Is(err, ytwrite.ErrInvalid) {
 		return ytLinksInvalid, nil
 	}
@@ -181,6 +189,24 @@ func prepareYTLinksTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant stri
 	}
 	log.Printf("ytwrite.links_enqueued op_id=%d task_id=%d issue_id=%q", op.ID, id, b.IssueID)
 	return ytLinksPrepared, nil
+}
+
+func previousYTLinksTx(ctx context.Context, tx pgx.Tx, tenant string, taskID int64, issueID string) (ytwrite.IssueLinks, error) {
+	var payload []byte
+	err := tx.QueryRow(ctx, `SELECT payload FROM yt_write_ops
+		WHERE principal=$1 AND kind=$2 AND entity_kind='task' AND entity_id=$3 AND yt_target_id=$4 AND tenant=$5 AND state='applied'
+		ORDER BY id DESC LIMIT 1`, YTLinksPrincipal, ytwrite.KindIssueLinks, strconv.FormatInt(taskID, 10), issueID, tenant).Scan(&payload)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ytwrite.IssueLinks{Related: []string{}, Duplicates: []string{}}, nil
+	}
+	if err != nil {
+		return ytwrite.IssueLinks{}, err
+	}
+	snapshot, err := ytwrite.DecodeIssueLinksSnapshot(payload)
+	if err != nil {
+		return ytwrite.IssueLinks{}, err
+	}
+	return snapshot.Desired, nil
 }
 
 func (s *Store) ytLinksOnBindTx(ctx context.Context, tx pgx.Tx, taskID int64, now time.Time) error {

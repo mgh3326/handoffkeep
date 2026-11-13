@@ -1028,13 +1028,18 @@ one complete snapshot on the task's lane. Clearing `parent_id` or archiving a
 relation changes the task's `updated_at` in the same transaction, so the feed
 prepares a snapshot with that link removed. A live link target must have a
 binding in the same tenant; otherwise the snapshot is held out until that
-target is bound, so an incomplete mapping cannot erase a link.
+target is bound, so an incomplete mapping cannot erase a link. Binding that
+target does not yet requeue the source task; the source must change again for
+its link snapshot to be prepared.
 
-The `issue_links` kind updates only the YouTrack link directions hk owns:
-Subtask-of (`targetToSource`), Relates, and Duplicate (`sourceToTarget`). Each
-type direction is replaced as a set, including an empty set to remove old
-links. Its evidence read compares those same link sets, so a lost update reply
-can be resolved by reading the issue. Other YouTrack link types remain intact.
+The `issue_links` kind updates only the YouTrack link directions hk projects:
+Subtask-of (`targetToSource`), Relates, and Duplicate (`sourceToTarget`). It
+uses the link-issues API to add and remove individual links. A removal is sent
+only for a link in the last successfully projected snapshot; an existing link
+outside that snapshot is preserved and makes the op fail with
+`issue_links_conflict`, before any mutation. Evidence requires the desired
+links to exist and previously projected removals to be absent, so unrelated
+YouTrack links remain intact.
 
 Mode off is the default and admits none of these ops. Turn it on only after the
 last YouTrack import run and removal of its grant; the import client cannot

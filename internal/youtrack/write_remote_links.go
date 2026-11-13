@@ -14,10 +14,9 @@ import (
 
 var _ ytwrite.IssueLinksRemote = (*WriteRemote)(nil)
 
-// UpdateIssueLinks replaces only the three link directions hk owns on one
-// issue. YouTrack treats links in an issue update as a replacement per type
-// direction, so empty issue lists remove stale hk-owned links.
-func (r *WriteRemote) UpdateIssueLinks(ctx context.Context, issueID string, links ytwrite.IssueLinks) (string, error) {
+// UpdateIssueLinks changes individual links after checking that every link it
+// would remove appeared in the last successfully projected hk snapshot.
+func (r *WriteRemote) UpdateIssueLinks(ctx context.Context, issueID string, snapshot ytwrite.IssueLinksSnapshot) (string, error) {
 	types, err := r.c.ListLinkTypes(ctx)
 	if err != nil {
 		return "", &ytwrite.NotSentError{Err: err}
@@ -35,6 +34,19 @@ func (r *WriteRemote) UpdateIssueLinks(ctx context.Context, issueID string, link
 			return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonInvalidIssue, Detail: fmt.Sprintf("YouTrack link type %q is missing or has the wrong direction", want.name)}
 		}
 	}
+	current, err := r.ReadIssueLinks(ctx, issueID)
+	if err != nil {
+		return "", &ytwrite.NotSentError{Err: err}
+	}
+	if detail := unexpectedIssueLink(current.Parent, snapshot.Previous.Parent, snapshot.Desired.Parent); detail != "" {
+		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonIssueLinksConflict, Detail: "unmanaged parent link to " + detail}
+	}
+	if detail := unexpectedIssueLinkSet(current.Related, snapshot.Previous.Related, snapshot.Desired.Related); detail != "" {
+		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonIssueLinksConflict, Detail: "unmanaged relates link to " + detail}
+	}
+	if detail := unexpectedIssueLinkSet(current.Duplicates, snapshot.Previous.Duplicates, snapshot.Desired.Duplicates); detail != "" {
+		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonIssueLinksConflict, Detail: "unmanaged duplicate link to " + detail}
+	}
 	linkID := func(name, side string) string {
 		typ := byName[name]
 		if !typ.Directed {
@@ -42,46 +54,55 @@ func (r *WriteRemote) UpdateIssueLinks(ctx context.Context, issueID string, link
 		}
 		return typ.ID + side
 	}
-	type linkPayload struct {
-		ID     string `json:"id"`
-		Issues []struct {
-			ID string `json:"id"`
-		} `json:"issues"`
-	}
-	makeLink := func(id string, targets []string) linkPayload {
-		p := linkPayload{ID: id, Issues: make([]struct {
-			ID string `json:"id"`
-		}, 0, len(targets))}
-		for _, target := range targets {
-			p.Issues = append(p.Issues, struct {
-				ID string `json:"id"`
-			}{target})
+	for _, change := range []struct {
+		name     string
+		side     string
+		previous []string
+		desired  []string
+		current  []string
+	}{
+		{"subtask", "t", optionalTarget(snapshot.Previous.Parent), optionalTarget(snapshot.Desired.Parent), optionalTarget(current.Parent)},
+		{"relates", "", snapshot.Previous.Related, snapshot.Desired.Related, current.Related},
+		{"duplicate", "s", snapshot.Previous.Duplicates, snapshot.Desired.Duplicates, current.Duplicates},
+	} {
+		for _, target := range change.desired {
+			if containsLink(change.current, target) {
+				continue
+			}
+			if err := r.mutateIssueLink(ctx, http.MethodPost, issueID, linkID(change.name, change.side), target); err != nil {
+				return "", err
+			}
 		}
-		return p
+		for _, target := range change.previous {
+			if containsLink(change.desired, target) || !containsLink(change.current, target) {
+				continue
+			}
+			if err := r.mutateIssueLink(ctx, http.MethodDelete, issueID, linkID(change.name, change.side), target); err != nil {
+				return "", err
+			}
+		}
 	}
-	body := struct {
-		Links []linkPayload `json:"links"`
-	}{Links: []linkPayload{
-		makeLink(linkID("subtask", "t"), optionalTarget(links.Parent)),
-		makeLink(linkID("relates", ""), links.Related),
-		makeLink(linkID("duplicate", "s"), links.Duplicates),
-	}}
+	verified, err := r.ReadIssueLinks(ctx, issueID)
+	if err != nil {
+		return "", fmt.Errorf("link update verification uncertain: %v", err)
+	}
+	if !issueLinkSnapshotConverged(snapshot, verified) {
+		return "", nil
+	}
+	return issueID, nil
+}
+
+func (r *WriteRemote) mutateIssueLink(ctx context.Context, method, issueID, linkID, target string) error {
+	path := "/api/issues/" + url.PathEscape(issueID) + "/links/" + url.PathEscape(linkID) + "/issues/" + url.PathEscape(target)
+	var body any
+	if method == http.MethodPost {
+		path = "/api/issues/" + url.PathEscape(issueID) + "/links/" + url.PathEscape(linkID) + "/issues"
+		body = map[string]string{"id": target}
+	}
 	q := url.Values{}
 	q.Set("fields", "id")
-	data, readErr, err := r.send(ctx, http.MethodPost, "/api/issues/"+url.PathEscape(issueID), q, body)
-	if err != nil {
-		return "", err
-	}
-	if readErr != nil {
-		return "", nil
-	}
-	var out struct {
-		ID string `json:"id"`
-	}
-	if json.Unmarshal(data, &out) != nil || out.ID != issueID {
-		return "", nil
-	}
-	return out.ID, nil
+	_, _, err := r.send(ctx, method, path, q, body)
+	return err
 }
 
 func optionalTarget(target string) []string {
@@ -89,6 +110,56 @@ func optionalTarget(target string) []string {
 		return []string{}
 	}
 	return []string{target}
+}
+
+func unexpectedIssueLink(current, previous, desired string) string {
+	if current != "" && current != desired && current != previous {
+		return current
+	}
+	return ""
+}
+
+func unexpectedIssueLinkSet(current, previous, desired []string) string {
+	for _, id := range current {
+		if !containsLink(desired, id) && !containsLink(previous, id) {
+			return id
+		}
+	}
+	return ""
+}
+
+func containsLink(ids []string, want string) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
+}
+
+func issueLinkSnapshotConverged(snapshot ytwrite.IssueLinksSnapshot, got ytwrite.IssueLinks) bool {
+	if snapshot.Desired.Parent != "" && got.Parent != snapshot.Desired.Parent {
+		return false
+	}
+	if snapshot.Previous.Parent != "" && snapshot.Previous.Parent != snapshot.Desired.Parent && got.Parent == snapshot.Previous.Parent {
+		return false
+	}
+	return issueLinkSetConverged(snapshot.Previous.Related, snapshot.Desired.Related, got.Related) &&
+		issueLinkSetConverged(snapshot.Previous.Duplicates, snapshot.Desired.Duplicates, got.Duplicates)
+}
+
+func issueLinkSetConverged(previous, desired, got []string) bool {
+	for _, id := range desired {
+		if !containsLink(got, id) {
+			return false
+		}
+	}
+	for _, id := range previous {
+		if !containsLink(desired, id) && containsLink(got, id) {
+			return false
+		}
+	}
+	return true
 }
 
 // ReadIssueLinks reads the currently configured hk-owned link directions.

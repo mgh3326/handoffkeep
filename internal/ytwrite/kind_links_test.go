@@ -11,9 +11,18 @@ import (
 func TestIssueLinksSnapshotRemovesStaleParentAndRelations(t *testing.T) {
 	e := newKindEnv(t)
 	issue := "2-3864"
-	e.yt.SetIssueLinks(issue, ytwrite.IssueLinks{Parent: "2-old", Related: []string{"2-old-related"}, Duplicates: []string{"2-old-duplicate"}})
+	want := ytwrite.IssueLinks{Parent: "2-parent", Related: []string{"2-related"}, Duplicates: []string{}}
+	previous := ytwrite.IssueLinks{Parent: "2-old", Related: []string{"2-old-related"}, Duplicates: []string{"2-old-duplicate"}}
+	e.yt.SetIssueLinks(issue, previous)
 	request := func(key string, links ytwrite.IssueLinks) int64 {
-		n, err := ytwrite.IssueLinksOp(ytwrite.IssueLinksRequest{Principal: "hk:task-links", Actor: "hk:task-links", Tenant: "tenant.youtrack.cloud", IssueID: issue, TaskID: 3864, Links: links})
+		var owned ytwrite.IssueLinks
+		if key == "links-one" {
+			owned = previous
+		}
+		if key == "links-two" {
+			owned = want
+		}
+		n, err := ytwrite.IssueLinksOp(ytwrite.IssueLinksRequest{Principal: "hk:task-links", Actor: "hk:task-links", Tenant: "tenant.youtrack.cloud", IssueID: issue, TaskID: 3864, Previous: owned, Links: links})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -24,7 +33,6 @@ func TestIssueLinksSnapshotRemovesStaleParentAndRelations(t *testing.T) {
 		}
 		return op.ID
 	}
-	want := ytwrite.IssueLinks{Parent: "2-parent", Related: []string{"2-related"}, Duplicates: []string{}}
 	first := request("links-one", want)
 	e.drive()
 	e.want(first, ytwrite.StateApplied, "")
@@ -47,6 +55,29 @@ func TestIssueLinksRejectsSelfLink(t *testing.T) {
 		Links: ytwrite.IssueLinks{Parent: "2-1"}})
 	if err == nil {
 		t.Fatal("self-link accepted")
+	}
+}
+
+func TestIssueLinksDoesNotRemoveUnownedYouTrackLinks(t *testing.T) {
+	e := newKindEnv(t)
+	issue := "2-3864"
+	human := ytwrite.IssueLinks{Related: []string{"2-human"}, Duplicates: []string{}}
+	e.yt.SetIssueLinks(issue, human)
+	n, err := ytwrite.IssueLinksOp(ytwrite.IssueLinksRequest{Principal: "hk:task-links", Actor: "hk:task-links", Tenant: "tenant.youtrack.cloud", IssueID: issue, TaskID: 3864,
+		Links: ytwrite.IssueLinks{Related: []string{"2-hk"}, Duplicates: []string{}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.Key = "human-link-conflict"
+	op, _, err := e.ledger.Prepare(context.Background(), e.clock.Now(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.drive()
+	e.want(op.ID, ytwrite.StateRejected, ytwrite.ReasonIssueLinksConflict)
+	got, err := e.yt.ReadIssueLinks(context.Background(), issue)
+	if err != nil || len(got.Related) != 1 || got.Related[0] != "2-human" || len(e.yt.IssueLinkWrites()) != 0 {
+		t.Fatalf("unowned link changed: got=%+v writes=%+v err=%v", got, e.yt.IssueLinkWrites(), err)
 	}
 }
 

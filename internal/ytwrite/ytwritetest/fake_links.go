@@ -25,15 +25,67 @@ func (f *FakeYouTrack) IssueLinkWrites() []FakeIssueLinksWrite {
 	return out
 }
 
-func (f *FakeYouTrack) UpdateIssueLinks(ctx context.Context, issueID string, links ytwrite.IssueLinks) (string, error) {
+func (f *FakeYouTrack) UpdateIssueLinks(ctx context.Context, issueID string, snapshot ytwrite.IssueLinksSnapshot) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	f.issueLinks[issueID] = cloneLinks(links)
-	f.linkWrites = append(f.linkWrites, FakeIssueLinksWrite{IssueID: issueID, Links: cloneLinks(links)})
+	current := cloneLinks(f.issueLinks[issueID])
+	if current.Parent != "" && current.Parent != snapshot.Desired.Parent && current.Parent != snapshot.Previous.Parent {
+		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonIssueLinksConflict, Detail: "unmanaged parent link to " + current.Parent}
+	}
+	if id := unexpectedFakeLink(current.Related, snapshot.Previous.Related, snapshot.Desired.Related); id != "" {
+		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonIssueLinksConflict, Detail: "unmanaged relates link to " + id}
+	}
+	if id := unexpectedFakeLink(current.Duplicates, snapshot.Previous.Duplicates, snapshot.Desired.Duplicates); id != "" {
+		return "", &ytwrite.RefusedError{Reason: ytwrite.ReasonIssueLinksConflict, Detail: "unmanaged duplicate link to " + id}
+	}
+	if snapshot.Desired.Parent != "" {
+		current.Parent = snapshot.Desired.Parent
+	} else if current.Parent == snapshot.Previous.Parent {
+		current.Parent = ""
+	}
+	current.Related = updateFakeLinkSet(current.Related, snapshot.Previous.Related, snapshot.Desired.Related)
+	current.Duplicates = updateFakeLinkSet(current.Duplicates, snapshot.Previous.Duplicates, snapshot.Desired.Duplicates)
+	f.issueLinks[issueID] = current
+	f.linkWrites = append(f.linkWrites, FakeIssueLinksWrite{IssueID: issueID, Links: cloneLinks(snapshot.Desired)})
 	return issueID, nil
+}
+
+func unexpectedFakeLink(current, previous, desired []string) string {
+	for _, id := range current {
+		if !containsFakeLink(desired, id) && !containsFakeLink(previous, id) {
+			return id
+		}
+	}
+	return ""
+}
+
+func updateFakeLinkSet(current, previous, desired []string) []string {
+	out := make([]string, 0, len(current)+len(desired))
+	for _, id := range current {
+		if containsFakeLink(previous, id) && !containsFakeLink(desired, id) {
+			continue
+		}
+		out = append(out, id)
+	}
+	for _, id := range desired {
+		if !containsFakeLink(out, id) {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func containsFakeLink(ids []string, want string) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *FakeYouTrack) ReadIssueLinks(ctx context.Context, issueID string) (ytwrite.IssueLinks, error) {
