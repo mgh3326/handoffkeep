@@ -233,14 +233,13 @@ func RunIssueProtocol(t *testing.T, nl NewLedger) {
 	})
 
 	// Send adopted the task's existing issue and the process died before the
-	// apply committed. The adopted issue carries no marker, and nothing durable
-	// says this dispatch adopted rather than POSTed (its hk ID may have been
-	// set after the search, with a POST still in flight), so the op stays
-	// remote_unknown for the operator and nothing is re-created (PR #335
-	// review; hk 3911 needs durable adoption evidence first).
-	t.Run("lost_adoption_settlement_stays_unknown", func(t *testing.T) {
+	// apply committed. This kind's create always writes the marker, so the
+	// unmarked issue is the one Send adopts: the evidence search recovers the
+	// adoption (the map row marked adopted, no second create) instead of
+	// leaving the op for an operator (PR #335 review; hk 3911).
+	t.Run("lost_adoption_settlement_recovers_the_adoption", func(t *testing.T) {
 		e := newEnv(t, nl)
-		e.yt.InjectIssue(issueSuiteProject, testTask, "#"+itoa(testTask)+" imported", "legacy body")
+		existing := e.yt.InjectIssue(issueSuiteProject, testTask, "#"+itoa(testTask)+" imported", "legacy body")
 		e.clock.Advance(time.Hour)
 		cl := &CrashLedger{Ledger: e.ledger, Method: "Apply"}
 		e.restart(cl)
@@ -254,7 +253,14 @@ func RunIssueProtocol(t *testing.T, nl NewLedger) {
 		e.restart(e.ledger)
 		e.clock.Advance(10 * time.Minute)
 		e.drive()
-		e.wantOp(1, ytwrite.StateRemoteUnknown, ytwrite.ReasonMarkerMismatch)
+		op := e.wantOp(1, ytwrite.StateApplied, "")
+		if op.YTResultID != existing || op.Attempts != 1 || op.Reconciles != 0 {
+			t.Fatalf("op %+v, want the adopted issue %s after one attempt", op, existing)
+		}
+		m, ok, err := e.ledger.MapGet(context.Background(), "task", itoa(testTask))
+		if err != nil || !ok || m.YTID != existing || !m.Adopted || m.OpID != op.ID {
+			t.Fatalf("task map row %+v %v %v, want adopted %s", m, ok, err, existing)
+		}
 		e.wantRemote(0, 0)
 	})
 

@@ -184,15 +184,28 @@ func TestIssueCreateEvidenceNeedsTheExactText(t *testing.T) {
 	}
 }
 
-// A text hk project field (the importer's shape) is sent as text.
+// Each project-field shape is sent as the issue-field shape that takes it: a
+// text hk 프로젝트 field (TextProjectCustomField, the importer's shape) as
+// formatted text, a simple one as a primitive string, an enum as an enum
+// value (hk 3940).
 func TestIssueCreateSendsTheProjectFieldShape(t *testing.T) {
-	e := newIssueEnv(t)
-	e.yt.SetProjectFieldText(issueProject)
-	op := e.prepareIssue()
-	e.drive()
-	e.want(op.ID, ytwrite.StateApplied, "")
-	if c := e.yt.Created(); len(c) != 1 || !c[0].HKProjectText || c[0].HKProject != "handoffkeep" || c[0].TaskID != issueTask {
-		t.Fatalf("creates %+v", c)
+	for _, tc := range []struct {
+		kind ytwrite.IssueProjectField
+	}{
+		{ytwrite.IssueProjectText},
+		{ytwrite.IssueProjectString},
+		{ytwrite.IssueProjectEnum},
+	} {
+		t.Run(string(tc.kind), func(t *testing.T) {
+			e := newIssueEnv(t)
+			e.yt.SetProjectField(issueProject, tc.kind)
+			op := e.prepareIssue()
+			e.drive()
+			e.want(op.ID, ytwrite.StateApplied, "")
+			if c := e.yt.Created(); len(c) != 1 || c[0].ProjectField != tc.kind || c[0].HKProject != "handoffkeep" || c[0].TaskID != issueTask {
+				t.Fatalf("creates %+v", c)
+			}
+		})
 	}
 }
 
@@ -203,12 +216,6 @@ func TestIssueCreateEvidenceOtherwiseUnknown(t *testing.T) {
 		seed   func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op, desc string)
 	}{
 		{"zero_issues", ytwrite.ReasonNoEvidence, func(*ytwritetest.FakeYouTrack, ytwrite.Op, string) {}},
-		{"issue_without_marker", ytwrite.ReasonMarkerMismatch, func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op, desc string) {
-			yt.InjectIssue(issueProject, issueTask, "#3898 made by hand", "no marker")
-		}},
-		{"another_ops_marker", ytwrite.ReasonMarkerMismatch, func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op, desc string) {
-			yt.InjectIssue(issueProject, issueTask, "#3898", ytwrite.OpMarker(op.ID*10))
-		}},
 		{"quoted_marker", ytwrite.ReasonMarkerMismatch, func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op, desc string) {
 			yt.InjectIssue(issueProject, issueTask, "#3898", "quote "+ytwrite.OpMarker(op.ID))
 		}},
@@ -235,6 +242,41 @@ func TestIssueCreateEvidenceOtherwiseUnknown(t *testing.T) {
 			got := e.want(op.ID, ytwrite.StateRemoteUnknown, tc.reason)
 			if got.Reconciles != 3 || e.yt.Calls() != 1 {
 				t.Fatalf("op %+v, creates %d: an unknown issue op is never re-created", got, e.yt.Calls())
+			}
+		})
+	}
+}
+
+// The one issue whose summary names the task, carrying no marker of this
+// op's, is the issue Send adopts: a create whose reply was lost recovers as
+// that adoption, with no second create and the map row marked adopted
+// (hk 3911). Send's rule reads the summary, not the description, so another
+// op's marker does not change the decision.
+func TestIssueCreateEvidenceRecoversTheAdoption(t *testing.T) {
+	for name, seed := range map[string]func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op) string{
+		"unmarked_issue": func(yt *ytwritetest.FakeYouTrack, _ ytwrite.Op) string {
+			return yt.InjectIssue(issueProject, issueTask, "#3898 imported earlier", "legacy body")
+		},
+		"another_ops_marker": func(yt *ytwritetest.FakeYouTrack, op ytwrite.Op) string {
+			return yt.InjectIssue(issueProject, issueTask, "#3898", ytwrite.OpMarker(op.ID+1000))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newIssueEnv(t)
+			e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.Refuse, Status: http.StatusBadGateway})
+			op := e.prepareIssue()
+			e.drive()
+			e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+			id := seed(e.yt, op)
+			e.clock.Advance(time.Hour)
+			e.drive()
+			got := e.want(op.ID, ytwrite.StateApplied, "")
+			if got.YTResultID != id || e.yt.Calls() != 1 || len(e.yt.Issues(issueProject)) != 1 {
+				t.Fatalf("op %+v, creates %d, issues %+v", got, e.yt.Calls(), e.yt.Issues(issueProject))
+			}
+			e.wantMap(got, id)
+			if m, _, _ := e.ledger.MapGet(context.Background(), "task", "3898"); !m.Adopted {
+				t.Fatalf("map row %+v not marked adopted", m)
 			}
 		})
 	}
@@ -291,6 +333,44 @@ func TestIssueCreateFindFailureSendsNothing(t *testing.T) {
 			t.Fatalf("creates %d", e.yt.Calls())
 		}
 	})
+}
+
+// slowSearch answers the task search after d without failing on the expired
+// dispatch budget, as a reply that arrives as the deadline passes.
+type slowSearch struct {
+	*ytwritetest.FakeYouTrack
+	d *time.Duration
+}
+
+func (s slowSearch) FindTaskIssues(context.Context, string, string, int64) ([]ytwrite.RemoteIssue, error) {
+	time.Sleep(*s.d)
+	return nil, nil
+}
+
+// The field check and the search share one dispatch budget. When they use it
+// up, the create is not attempted at all: the op is prepared again
+// (not_sent), so the next attempt can send it, instead of becoming
+// remote_unknown with nothing for the evidence search to find (hk 3943).
+func TestIssueCreateExpiredBudgetSendsNothing(t *testing.T) {
+	e := newIssueEnv(t)
+	d := 80 * time.Millisecond
+	p, err := ytwrite.New(ytwrite.Config{Ledger: e.ledger, Remote: slowSearch{FakeYouTrack: e.yt, d: &d}, Now: e.clock.Now,
+		DispatchTimeout: 50 * time.Millisecond, StaleAfter: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.p = p
+	op := e.prepareIssue()
+	e.drive()
+	if got := e.want(op.ID, ytwrite.StatePrepared, ytwrite.ReasonNotSent); e.yt.Calls() != 0 || got.Attempts != 1 {
+		t.Fatalf("op %+v, creates %d: an expired budget attempted the create", got, e.yt.Calls())
+	}
+	d = 0
+	e.clock.Advance(time.Hour)
+	e.drive()
+	if got := e.want(op.ID, ytwrite.StateApplied, ""); e.yt.Calls() != 1 || got.Attempts != 2 {
+		t.Fatalf("op %+v, creates %d", got, e.yt.Calls())
+	}
 }
 
 // commentsOnly is a Remote that cannot create issues.

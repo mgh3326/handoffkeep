@@ -90,12 +90,14 @@ const (
 
 // ytBindingSourcesSQL reads, in one statement, which sources disagree with
 // the binding ($1 task id, $2 tenant, $3 issue id, $4 task id as text, $5
-// YouTrack project id). Plain reads: the caller decides the locks.
+// YouTrack project id). Plain reads: the caller decides the locks. The map
+// rows that name an issue are read on the binding's tenant: the same YouTrack
+// id on another tenant is another issue (hk 3912).
 const ytBindingSourcesSQL = `SELECT
 	EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack'
 		AND (coalesce(external_id,'') <> $3 OR (coalesce(tenant,'') <> '' AND tenant <> $2))),
 	EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$4 AND yt_id <> $3),
-	EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND yt_id=$3 AND hk_key <> $4),
+	EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND tenant=$2 AND yt_id=$3 AND hk_key <> $4),
 	EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1 AND (tenant <> $2 OR issue_id <> $3)),
 	EXISTS(SELECT 1 FROM yt_comment_canary WHERE tenant=$2 AND issue_id=$3 AND task_id <> $1),
 	EXISTS(SELECT 1 FROM yt_task_bindings WHERE tenant=$2 AND issue_id=$3 AND task_id <> $1),
@@ -226,8 +228,8 @@ func ytCommentOnOpTx(ctx context.Context, tx pgx.Tx, c TaskComment, now time.Tim
 		}
 		return op, true, "", nil
 	}
-	tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, yt_parent_id, op_id, created_at)
-		VALUES ('task',$1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, taskKey, b.IssueID, b.ProjectID, op.ID, now)
+	tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
+		VALUES ('task',$1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, b.Tenant, taskKey, b.IssueID, b.ProjectID, op.ID, now)
 	if err != nil {
 		return ytwrite.Op{}, false, "", err
 	}

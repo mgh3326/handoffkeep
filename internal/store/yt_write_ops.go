@@ -293,12 +293,22 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	}
 	// A comment queued behind its task's issue_create gets its target here,
 	// from the binding that create published, once the lane is clear
-	// (hk 4263); with no such binding, or one a local source disagrees
-	// with, it is rejected here, never dispatched. Every other op keeps its
-	// own.
-	target, sha, reject, detail, err := claimYTCommentTargetTx(ctx, tx, op)
+	// (hk 4263); with no such binding it is rejected here, never dispatched,
+	// and while a local source disagrees with the binding it is held for a
+	// later claim (hk 4457). Every other op keeps its own.
+	target, sha, reject, detail, hold, err := claimYTCommentTargetTx(ctx, tx, op)
 	if err != nil {
 		return ytwrite.Op{}, "", err
+	}
+	if hold {
+		// A create that landed in a project the task has left is not worth
+		// rejecting the comment for: an issue_move can still place the issue
+		// in the task's project, so the op stays prepared and due again after
+		// ytCommentHoldWait, out of the way of this pass's due list.
+		if _, err := tx.Exec(ctx, `UPDATE yt_write_ops SET next_attempt_at=$2 WHERE id=$1`, id, now.Add(ytCommentHoldWait).UTC()); err != nil {
+			return ytwrite.Op{}, "", err
+		}
+		return op, ytwrite.ClaimHeld, tx.Commit(ctx)
 	}
 	// An issue_create op is dispatched to the YouTrack project its task's
 	// project maps to now, not the one it was prepared for (hk 3909, 4318);
@@ -416,9 +426,12 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 		}
 	}
 	for _, m := range maps {
-		tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, yt_parent_id, op_id, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (entity_kind, hk_key) DO NOTHING`,
-			m.EntityKind, m.HKKey, m.YTID, m.YTParentID, id, now.UTC())
+		// The tenant is part of the issue's identity: the same YouTrack id on
+		// another tenant is another issue (hk 3912, migration
+		// 20261113-yt-entity-map-tenant).
+		tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (entity_kind, hk_key) DO NOTHING`,
+			m.EntityKind, op.Tenant, m.HKKey, m.YTID, m.YTParentID, id, now.UTC())
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return ytwrite.Op{}, ytwrite.ErrConflictingResult // the yt id already maps to another hk key

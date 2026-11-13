@@ -129,7 +129,7 @@ func TestWriteRemoteCheckIssueFields(t *testing.T) {
 		return f
 	}
 	text := func(name string) map[string]any {
-		return map[string]any{"$type": "SimpleProjectCustomField", "field": map[string]any{"name": name}}
+		return map[string]any{"$type": "TextProjectCustomField", "field": map[string]any{"name": name}}
 	}
 	value := func(name string, archived bool) map[string]any {
 		return map[string]any{"name": name, "archived": archived}
@@ -139,16 +139,17 @@ func TestWriteRemoteCheckIssueFields(t *testing.T) {
 		fields   []any
 		project  string
 		want     string
-		wantText bool
+		wantKind ytwrite.IssueProjectField
 	}{
-		{"text_project_field", []any{field("hk ID"), text("hk 프로젝트")}, "handoffkeep", "", true},
-		{"other_type", []any{field("hk ID"), map[string]any{"$type": "UserProjectCustomField", "field": map[string]any{"name": "hk 프로젝트"}}}, "handoffkeep", "not a text or enum field", false},
-		{"ok", []any{field("hk ID"), field("hk 프로젝트", value("handoffkeep", false))}, "handoffkeep", "", false},
-		{"no_project_value_needed", []any{field("hk ID")}, "", "", false},
-		{"no_hk_id", []any{field("hk 프로젝트", value("handoffkeep", false))}, "handoffkeep", `"hk ID"`, false},
-		{"no_project_field", []any{field("hk ID")}, "handoffkeep", `"hk 프로젝트" field`, false},
-		{"no_value", []any{field("hk ID"), field("hk 프로젝트", value("other", false))}, "handoffkeep", `no value "handoffkeep"`, false},
-		{"archived_value", []any{field("hk ID"), field("hk 프로젝트", value("handoffkeep", true))}, "handoffkeep", `no value "handoffkeep"`, false},
+		{"text_project_field", []any{field("hk ID"), text("hk 프로젝트")}, "handoffkeep", "", ytwrite.IssueProjectText},
+		{"string_project_field", []any{field("hk ID"), field("hk 프로젝트")}, "handoffkeep", "", ytwrite.IssueProjectString},
+		{"other_type", []any{field("hk ID"), map[string]any{"$type": "UserProjectCustomField", "field": map[string]any{"name": "hk 프로젝트"}}}, "handoffkeep", "not a text, string or enum field", ""},
+		{"ok", []any{field("hk ID"), field("hk 프로젝트", value("handoffkeep", false))}, "handoffkeep", "", ytwrite.IssueProjectEnum},
+		{"no_project_value_needed", []any{field("hk ID")}, "", "", ""},
+		{"no_hk_id", []any{field("hk 프로젝트", value("handoffkeep", false))}, "handoffkeep", `"hk ID"`, ""},
+		{"no_project_field", []any{field("hk ID")}, "handoffkeep", `"hk 프로젝트" field`, ""},
+		{"no_value", []any{field("hk ID"), field("hk 프로젝트", value("other", false))}, "handoffkeep", `no value "handoffkeep"`, ""},
+		{"archived_value", []any{field("hk ID"), field("hk 프로젝트", value("handoffkeep", true))}, "handoffkeep", `no value "handoffkeep"`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var path string
@@ -157,8 +158,8 @@ func TestWriteRemoteCheckIssueFields(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(tc.fields)
 			}}
 			got, err := y.serve(t).CheckIssueFields(t.Context(), "0-7", tc.project)
-			if (tc.want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tc.want)) || got.ProjectText != tc.wantText {
-				t.Fatalf("got %+v err %v, want %q text %v", got, err, tc.want, tc.wantText)
+			if (tc.want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tc.want)) || got.Project != tc.wantKind {
+				t.Fatalf("got %+v err %v, want %q kind %q", got, err, tc.want, tc.wantKind)
 			}
 			if path != "/api/admin/projects/0-7/customFields" || y.count() != 1 {
 				t.Fatalf("path %q, requests %d", path, y.count())
@@ -172,10 +173,23 @@ func TestWriteRemoteCheckIssueFields(t *testing.T) {
 	}
 }
 
-// A text hk 프로젝트 field (the importer's shape) gets the project as text.
+// A TextProjectCustomField hk 프로젝트 field takes its issue value only as
+// TextIssueCustomField with a text object; a primitive string is a 4xx that
+// would reject the op for good (hk 3940).
 func TestWriteRemoteCreateIssueTextProject(t *testing.T) {
 	y := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"id":"2-1"}`)) }}
-	if _, err := y.serve(t).CreateIssue(t.Context(), ytwrite.IssueCreate{ProjectID: "0-7", Summary: "s", TaskID: 1, HKProject: "handoffkeep", HKProjectText: true}); err != nil {
+	if _, err := y.serve(t).CreateIssue(t.Context(), ytwrite.IssueCreate{ProjectID: "0-7", Summary: "s", TaskID: 1, HKProject: "handoffkeep", ProjectField: ytwrite.IssueProjectText}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(y.bodies[0], `{"$type":"TextIssueCustomField","name":"hk 프로젝트","value":{"$type":"TextFieldValue","text":"handoffkeep"}}`) {
+		t.Fatalf("body %s", y.bodies[0])
+	}
+}
+
+// A SimpleProjectCustomField keeps a primitive string value.
+func TestWriteRemoteCreateIssueStringProject(t *testing.T) {
+	y := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"id":"2-1"}`)) }}
+	if _, err := y.serve(t).CreateIssue(t.Context(), ytwrite.IssueCreate{ProjectID: "0-7", Summary: "s", TaskID: 1, HKProject: "handoffkeep", ProjectField: ytwrite.IssueProjectString}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(y.bodies[0], `{"$type":"SimpleIssueCustomField","name":"hk 프로젝트","value":"handoffkeep"}`) {

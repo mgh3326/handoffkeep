@@ -88,10 +88,14 @@ func TestYTWriteOpsGuards(t *testing.T) {
 	// A resolved row without its timestamp, and applied without an id, cannot exist.
 	b := mk("b")
 	wantErr(exec(`UPDATE yt_write_ops SET state='rejected' WHERE id=$1`, b.ID), "violates check constraint")
-	// Map rows: one hk key per yt id and the reverse.
+	// Map rows: one hk key per yt id and the reverse, per tenant (hk 3912).
 	if err := exec(`INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, op_id, created_at) VALUES ('comment','op:1','c-1',$1,now())`, a.ID); err != nil {
 		t.Fatal(err)
 	}
-	wantErr(exec(`INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, op_id, created_at) VALUES ('comment','op:2','c-1',$1,now())`, a.ID), "yt_entity_map_entity_kind_yt_id_key")
+	wantErr(exec(`INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, op_id, created_at) VALUES ('comment','op:2','c-1',$1,now())`, a.ID), "yt_entity_map_entity_kind_tenant_yt_id_key")
 	wantErr(exec(`INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, op_id, created_at) VALUES ('comment','op:1','c-2',$1,now())`, a.ID), "yt_entity_map_pkey")
+	// The same yt id on another tenant is another issue.
+	if err := exec(`INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, op_id, created_at) VALUES ('comment','other','op:3','c-1',$1,now())`, a.ID); err != nil {
+		t.Fatalf("the same yt id on another tenant: %v", err)
+	}
 }

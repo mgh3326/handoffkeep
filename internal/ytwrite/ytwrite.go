@@ -239,7 +239,9 @@ const (
 	ClaimBlocked     ClaimOutcome = "blocked"
 	// ClaimHeld: the ledger does not admit the dispatch now (for the comment
 	// canary: the task left the canary, the mode is off, or the op is bound
-	// to another tenant). Nothing is sent and the op stays prepared.
+	// to another tenant; for a comment queued behind its task's issue_create:
+	// the issue is in a project the task has left). Nothing is sent and the
+	// op stays prepared.
 	ClaimHeld ClaimOutcome = "held"
 )
 
@@ -350,15 +352,34 @@ type IssueCreate struct {
 	Description string
 	TaskID      int64
 	HKProject   string
-	// HKProjectText sends the hk project as text instead of an enum value.
-	HKProjectText bool
+	// ProjectField is the project's hk 프로젝트 field type, which decides the
+	// issue-field shape the value is sent as (IssueFields.Project).
+	ProjectField IssueProjectField
 }
+
+// IssueProjectField is the type of a project's hk 프로젝트 field: the
+// issue_create write must send the issue-field shape that matches it, or
+// YouTrack refuses the POST.
+type IssueProjectField string
+
+const (
+	// IssueProjectEnum is EnumProjectCustomField (the legacy push's shape):
+	// an enum value.
+	IssueProjectEnum IssueProjectField = "enum"
+	// IssueProjectString is SimpleProjectCustomField (the importer's shape):
+	// a primitive string, sent as SimpleIssueCustomField.
+	IssueProjectString IssueProjectField = "string"
+	// IssueProjectText is TextProjectCustomField: formatted text, which
+	// YouTrack takes only as TextIssueCustomField with a {"text": ...}
+	// value. A primitive string there is a 4xx (hk 3940).
+	IssueProjectText IssueProjectField = "text"
+)
 
 // IssueFields is how the project's fields take an issue_create write.
 type IssueFields struct {
-	// ProjectText: the hk project field is a text field (the importer's
-	// shape), not an enum (the legacy push's).
-	ProjectText bool
+	// Project is the hk 프로젝트 field's type (IssueProjectEnum when the
+	// project has an enum field, the legacy push's shape).
+	Project IssueProjectField
 }
 
 // IssueRemote is the YouTrack surface of the issue_create kind. A Remote
@@ -367,9 +388,10 @@ type IssueFields struct {
 type IssueRemote interface {
 	// CheckIssueFields reports whether the project can take an issue_create
 	// write: it has the hk ID field and the hk project field with hkProject
-	// among its values (when hkProject is not ""). A missing field or value
-	// is a plain error (the op is held, not rejected, until the schema is
-	// repaired); a failed read follows CreateComment's errors.
+	// among its values (when hkProject is not ""), and it says which issue
+	// shape that field takes. A missing field or value is a plain error (the
+	// op is held, not rejected, until the schema is repaired); a failed read
+	// follows CreateComment's errors.
 	CheckIssueFields(ctx context.Context, projectID, hkProject string) (IssueFields, error)
 	// FindTaskIssues returns every issue of the project (short name and id)
 	// whose hk ID is taskID, checked against both, or an error. A result it

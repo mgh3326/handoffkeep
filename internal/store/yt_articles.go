@@ -500,7 +500,7 @@ func ytArticleConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID str
 		(SELECT 'document is mapped to article '||yt_id FROM yt_entity_map
 			WHERE entity_kind='document' AND hk_key=$4 AND yt_id<>$3),
 		(SELECT 'article is mapped to document '||hk_key FROM yt_entity_map
-			WHERE entity_kind='document' AND yt_id=$3 AND hk_key<>$4),
+			WHERE entity_kind='document' AND tenant=$2 AND yt_id=$3 AND hk_key<>$4),
 		'')`, id, op.Tenant, ytID, op.EntityID).Scan(&detail)
 	if err != nil {
 		return "", err

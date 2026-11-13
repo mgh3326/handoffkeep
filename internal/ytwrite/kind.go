@@ -77,6 +77,11 @@ type Evidence struct {
 	// RetryAfter is the wait a rate-limited (429) search asked for; the next
 	// search waits at least this long.
 	RetryAfter time.Duration
+	// Adopted: the one match existed before the op and is the thing Send
+	// would have adopted (a create kind's adoption rule, not this op's
+	// marker). Reconcile applies it as an adoption, so the store publishes it
+	// as one (hk 3911).
+	Adopted bool
 }
 
 // kindBuilders are the registered kinds, by op kind. Each kind registers

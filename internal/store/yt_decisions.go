@@ -499,7 +499,7 @@ func ytDecisionConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID st
 		(SELECT 'decision is mapped to issue '||yt_id FROM yt_entity_map
 			WHERE entity_kind='decision' AND hk_key=$1 AND yt_id<>$3),
 		(SELECT 'issue is mapped to decision '||hk_key FROM yt_entity_map
-			WHERE entity_kind='decision' AND yt_id=$3 AND hk_key<>$1),
+			WHERE entity_kind='decision' AND tenant=$2 AND yt_id=$3 AND hk_key<>$1),
 		'')`, op.EntityID, op.Tenant, ytID).Scan(&detail)
 	if err != nil {
 		return "", err

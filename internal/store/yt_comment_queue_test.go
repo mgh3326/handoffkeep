@@ -284,11 +284,13 @@ func TestYTWriteOpsGuardQueuedTarget(t *testing.T) {
 
 // A binding the create publishes is checked against every local source at the
 // claim, as a fresh comment's is: a task moved to another project while its
-// create was pending keeps a binding in the old project, and the queued
-// comment is rejected instead of sent there.
+// create was pending keeps a binding in the old project. The queued comment is
+// held, not rejected, and once an issue_move places the issue in the task's
+// project the same op is claimed and delivered there (hk 4457).
 func TestYTCommentQueuedBindingDisagreement(t *testing.T) {
 	s, x, create := ytqSetup(t, "ytq_moved")
 	ctx := t.Context()
+	logs := ytbLog(t)
 	c, err := s.CreateTaskComment(ctx, x.ID, "worker", "queued, then the task moved")
 	if err != nil {
 		t.Fatal(err)
@@ -313,14 +315,45 @@ func TestYTCommentQueuedBindingDisagreement(t *testing.T) {
 	if _, err := s.YTWriteLedger().Apply(ctx, time.Now().UTC(), create.ID, "2-900", ytiMaps(create, "2-900")); err != nil {
 		t.Fatal(err)
 	}
-	if b, found, err := s.YTTaskBinding(ctx, x.ID); err != nil || !found || b.IssueID != "2-900" {
+	if b, found, err := s.YTTaskBinding(ctx, x.ID); err != nil || !found || b.IssueID != "2-900" || b.ProjectID != ytbProjectID {
 		t.Fatalf("binding %+v %v %v", b, found, err)
 	}
-	counting := &ytcCounting{Remote: ytwritetest.NewFake()}
+	// The claim holds the op: still prepared, no target, nothing sent.
+	if out := ytiClaim(t, s, op); out != ytwrite.ClaimHeld {
+		t.Fatalf("claim with the issue in the old project = %s", out)
+	}
+	held, err := s.YTWriteLedger().ByID(ctx, op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held.State != ytwrite.StatePrepared || held.YTTargetID != "" || held.Attempts != 0 ||
+		!held.NextAttemptAt.After(time.Now().UTC().Add(30*time.Second)) {
+		t.Fatalf("held op %+v", held)
+	}
+	if want := "ytwrite.comment_queued_held op_id=" + strconv.FormatInt(op.ID, 10); !contains(logs(), want) {
+		t.Fatalf("log %q, want %q", logs(), want)
+	}
+	if _, err := s.EnqueueYTWriteOpAlerts(ctx, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if n := ytcCount(t, s, `SELECT count(*) FROM yt_write_op_alerts WHERE op_id=$1 AND alert_class='rejected'`, op.ID); n != 0 {
+		t.Fatalf("a held op was alerted as rejected: %d rows", n)
+	}
+
+	// The issue moves to the task's project (the issue_move's apply writes
+	// the binding's project). The held op is due again and delivered there.
+	if _, err := s.pool.Exec(ctx, `UPDATE yt_task_bindings SET project_id='0-9' WHERE task_id=$1`, x.ID); err != nil {
+		t.Fatal(err)
+	}
+	yt := ytwritetest.NewFake()
 	var offset atomic.Int64
-	got := ytqDrive(t, s, ytcProtocol(t, s, counting, &offset), op.ID)
-	if got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonAmbiguousIssue || got.YTTargetID != "" || got.Attempts != 0 || counting.posts.Load() != 0 {
-		t.Fatalf("comment op %+v, posts %d", got, counting.posts.Load())
+	offset.Store(int64(2 * time.Minute))
+	got := ytqDrive(t, s, ytcProtocol(t, s, yt, &offset), op.ID)
+	if got.State != ytwrite.StateApplied || got.YTTargetID != "2-900" || got.Attempts != 1 {
+		t.Fatalf("comment op after the move %+v", got)
+	}
+	if comments := yt.Comments("2-900"); len(comments) != 1 || !strings.Contains(comments[0].Text, "queued, then the task moved") {
+		t.Fatalf("issue 2-900 comments %+v", comments)
 	}
 }
 
