@@ -550,7 +550,13 @@ func (s *Store) adoptMergedPRTx(ctx context.Context, tx pgx.Tx, x Task, ev sourc
 	if err != nil {
 		return TaskEventResult{}, err
 	}
-	if roll.merged == 0 {
+	// The deploy also waits for the task's other changes: an open or
+	// unrelanded implements change (other than the incoming PR) holds it.
+	holds, err := taskHoldsTx(ctx, tx, x.ID, ev.PR)
+	if err != nil {
+		return TaskEventResult{}, err
+	}
+	if roll.merged == 0 && holds.none() {
 		if x, err = s.deployOnMergedTx(ctx, tx, x, now); err != nil {
 			return TaskEventResult{}, err
 		}
