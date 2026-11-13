@@ -44,6 +44,16 @@ func TestCheckDotsAdoptionCanva(t *testing.T) {
 			in.CanvaURL = "https://example.com/design/DAF123/edit"
 			return in
 		}(), false},
+		{"a Canva link with no design ID is refused", func() DotsAdoptionInput {
+			in := canva(DotsAdoptionInput{State: DotsAdoptionAccepted, Ref: "hk:task/12"})
+			in.CanvaURL = "https://www.canva.com/design/"
+			return in
+		}(), false},
+		{"a Canva link with only a query is refused", func() DotsAdoptionInput {
+			in := canva(DotsAdoptionInput{State: DotsAdoptionAccepted, Ref: "hk:task/12"})
+			in.CanvaURL = "https://www.canva.com/design/?x=1"
+			return in
+		}(), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

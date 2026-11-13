@@ -167,7 +167,9 @@ func validDotsCanvaURL(s string) bool {
 		return false
 	}
 	host := u.Hostname()
-	return (host == "canva.com" || strings.HasSuffix(host, ".canva.com")) && strings.HasPrefix(u.Path, "/design/")
+	design, ok := strings.CutPrefix(u.Path, "/design/")
+	id, _, _ := strings.Cut(design, "/")
+	return ok && id != "" && (host == "canva.com" || strings.HasSuffix(host, ".canva.com"))
 }
 
 // keepDotsAdoptionCanva keeps the Canva design already recorded on an accepted
