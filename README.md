@@ -248,8 +248,16 @@ or a no-job reason. Waiting on the operator is the `awaiting_decision` flag,
 not a state: the task keeps its work state, cannot be claimed while flagged,
 and the answer paths clear the flag. A task leaves `triage` for `backlog` or
 `unstarted` only with a priority above 0, a project and a kind. No manual edge
-enters `deployed`, and a task cannot enter `merged` from `researching` or
-`developing` by hand. A `merged` task closes as `completed` only with a result
+enters `deployed`, and the manual edge into `merged` is from `reviewing`.
+A task that a merged PR delivered closes in one step from any open state
+(`triage`, `backlog`, `unstarted`, `researching`, `developing`) with
+`tasks transition <id> --to merged --pr <url>` (hk 4322). hk accepts it only
+when the PR's change record shows it merged: hk holds no GitHub credential,
+so the change record written from mergewake's PR and merge events is the
+evidence it checks. A reverted PR is refused, and the merge holds below
+apply as for a merge event. The PR becomes the closure evidence, and the task is
+linked to the change as `implements`, so a later revert of the PR reopens it. A refused move answers `task_conflict`
+with a `reason` that names the states allowed from the current one. A `merged` task closes as `completed` only with a result
 link (an https URL or `hk:doc <key>`), the same evidence `completed` takes; the
 kind rule for `completed` does not apply to this edge.
 
@@ -332,14 +340,25 @@ Ticket sets never stop for this check.
 
 Integration events move tasks forward under the rules in
 `docs/linear-internalize.md` ("Event-driven transitions").
-`POST /v1/task-events` takes `{source, source_ref, task_id, pr, reverted_pr,
-revert_pr, at}` for `mergewake.pr`, `mergewake.review`, `mergewake.merge` and
+`POST /v1/task-events` takes `{source, source_ref, task_id, tasks, pr,
+reverted_pr, revert_pr, at}` for `mergewake.pr`, `mergewake.review`, `mergewake.merge` and
 `mergewake.revert`; `source_ref` is the PR URL, and for a revert the revert PR
 URL with `reverted_pr` naming the PR it undoes. Every event is recorded in
 `task_events` with its source, applied or not, and the answer carries
 `applied`, `redelivered`, `state` and, when nothing moved, `reason`. The same
-`(task, source, source_ref)` again changes nothing. `handoffkeep tasks event
-<id> --source S --source-ref URL [--reverted-pr URL]` posts one by hand.
+`(task, source, source_ref)` again changes nothing. `tasks` names up to 32
+other tasks the PR delivers (one per `Mergewake-Task` line, such as a bundle
+PR's sub-tasks); each gets the event as `task_id` does, and the answer's
+`tasks` holds one result per named task (`reason` `task_not_found` for a
+missing one, which writes nothing). A merge closes a task only when it is the
+task's last open piece: while another `implements` change of the task is still
+open, one was reverted and not relanded, or a sub-task is not settled, the
+merge is recorded with `applied=false`
+and the reason names what holds it (a parent then closes through
+`auto_close_parent`, which waits on the parent's own open or reverted
+`implements` changes too). A revert also reopens every other `merged` or
+`deployed` task linked to the reverted PR as `implements`. `handoffkeep tasks event <id> --source S --source-ref
+URL [--reverted-pr URL] [--tasks ID,...]` posts one by hand.
 Storing a `deploy/<service>/<YYYYMMDDTHHMMSSZ>` document whose record has
 `result` `success` and a non-null `included_prs` moves each `merged` task whose
 `refs.pr` is listed to `deployed` (`hk.deploy`); a task that enters `merged`
