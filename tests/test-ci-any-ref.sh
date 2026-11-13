@@ -10,7 +10,8 @@
 #       inputs.ref alone
 # and that mutants (merge main first; post on the dispatch sha; ci-ok for a
 # partial suite; inline inputs.* in a run body; drop the sha from the group key;
-# drop the suite from the group key) are RED.
+# drop the suite from the group key; a side checkout outside its sparse scope;
+# a checkout without a ref pin) are RED.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -199,11 +200,24 @@ def validate(wf_text: str, ci_text: str) -> None:
     assert 'resolve-ci-ref "${{ inputs.ref }}"' not in wf_text, \
         "inputs.ref must not be expanded into the run script"
 
-    # exact checkout: every checkout in ci.yml honors inputs.ref; no merge anywhere.
-    n_checkout = len(re.findall(r"uses: actions/checkout@[\w.:-]+", ci_text))
-    n_ref = len(re.findall(r"ref: \$\{\{ inputs\.ref \}\}", ci_text))
-    assert n_checkout > 0 and n_checkout == n_ref, \
-        f"every checkout must pin inputs.ref ({n_ref}/{n_checkout})"
+    # exact checkout: every checkout in ci.yml honors inputs.ref, except the
+    # sparse side checkout of the workflow revision that carries only the
+    # local setup-go-cached action (hk 3629); no merge anywhere.
+    n_checkout = 0
+    for block in re.split(r"(?m)(?=^      - )", ci_text):
+        if "uses: actions/checkout@" not in block:
+            continue
+        n_checkout += 1
+        if "github.workflow_sha" in block:
+            assert re.search(r"ref: \$\{\{ github\.workflow_sha \}\}", block), \
+                "a workflow-revision checkout must pin github.workflow_sha"
+            assert "path: workflow" in block and \
+                "sparse-checkout: .github/actions/setup-go-cached" in block, \
+                "a github.workflow_sha checkout must sparse-fetch only setup-go-cached into workflow/"
+        else:
+            assert re.search(r"ref: \$\{\{ inputs\.ref \}\}", block), \
+                "every checkout must pin inputs.ref or github.workflow_sha"
+    assert n_checkout > 0, "ci.yml must check out at least once"
     for text in (ci_text, wf_text):
         assert not re.search(r"\bgit (merge(?!-base)|pull|rebase|reset)\b", text), \
             "workflow must not merge or move the checkout onto main"
@@ -308,7 +322,23 @@ mutant_ctx2 = wf.replace(
 )
 expect_red(mutant_ctx2, ci, "extra-ci-ok-writer")
 
-print("structural checks ok (incl. 11 mutants)")
+# Mutant 12: the workflow side checkout drops its sparse action scope -> RED.
+mutant_wfco = ci.replace(
+    "sparse-checkout: .github/actions/setup-go-cached",
+    "sparse-checkout: .github/workflows",
+    1,
+)
+expect_red(wf, mutant_wfco, "workflow-side-checkout-wrong-sparse")
+
+# Mutant 13: a checkout loses its ref pin -> must be RED.
+mutant_noref = ci.replace(
+    "        with:\n          ref: ${{ inputs.ref }}\n          fetch-depth: 0",
+    "        with:\n          fetch-depth: 0",
+    1,
+)
+expect_red(wf, mutant_noref, "checkout-without-ref")
+
+print("structural checks ok (incl. 13 mutants)")
 PY
 
 # --- live-ish harness: resolver + checkout simulation against a fixture repo ---

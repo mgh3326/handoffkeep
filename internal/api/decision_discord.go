@@ -274,7 +274,7 @@ func clipRunes(s string, n int) string {
 }
 
 func decisionTime(t time.Time) string {
-	return t.In(linearDecisionDeadlineZone).Format("2006-01-02 15:04 MST")
+	return t.In(decisionDeadlineZone).Format("2006-01-02 15:04 MST")
 }
 
 // decisionAge is a short duration: 45m, 5h, 3d 4h.

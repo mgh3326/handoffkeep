@@ -280,3 +280,7 @@
   color: var(--hk-text-muted);
   font-size: var(--hk-type-meta);
 }
+
+/* Job chip: a running job is green; a finished one (completed, lost, escalated) is muted. */
+.ws-job:not(.ws-job--live) { color: var(--hk-text-muted); }
+.ws-job--live { color: var(--hk-green); }

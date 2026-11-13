@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/mgh3326/handoffkeep/client"
+	"github.com/mgh3326/handoffkeep/internal/capabilities"
 	"github.com/mgh3326/handoffkeep/internal/hktransport"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -87,39 +88,6 @@ func (c Client) Recent(ctx context.Context, session, kind string, limit int) ([]
 	}
 	e := c.call(ctx, "GET", "/v1/checkpoints?session="+url.QueryEscape(session)+"&kind="+url.QueryEscape(kind)+fmt.Sprintf("&limit=%d", limit), nil, &out)
 	return out.Checkpoints, e
-}
-func (c Client) PutMemory(ctx context.Context, _ string, x store.Memory) (store.Memory, error) {
-	var out store.Memory
-	e := c.call(ctx, "PUT", "/v1/memory/"+esc(x.Agent)+"/"+esc(x.Name), x, &out)
-	return out, e
-}
-func (c Client) GetMemory(ctx context.Context, agent, name string) (store.Memory, bool, error) {
-	var out store.Memory
-	e := c.call(ctx, "GET", "/v1/memory/"+esc(agent)+"/"+esc(name), nil, &out)
-	if ErrorCode(e) == "not_found" {
-		return out, false, nil
-	}
-	return out, e == nil, e
-}
-func (c Client) ListMemory(ctx context.Context, agent string, content bool) ([]store.Memory, error) {
-	var out struct {
-		Memory []store.Memory `json:"memory"`
-	}
-	e := c.call(ctx, "GET", "/v1/memory/"+esc(agent), nil, &out)
-	if e != nil || !content {
-		return out.Memory, e
-	}
-	for i := range out.Memory {
-		item, found, err := c.GetMemory(ctx, agent, out.Memory[i].Name)
-		if err != nil {
-			return nil, err
-		}
-		if !found {
-			return nil, errors.New("memory disappeared during pull")
-		}
-		out.Memory[i] = item
-	}
-	return out.Memory, nil
 }
 func (c Client) PutDocument(ctx context.Context, _ string, x store.Document) (store.Document, bool, error) {
 	var out struct {
@@ -283,6 +251,12 @@ func (c Client) CreateTaskChecked(ctx context.Context, x store.Task, check store
 }
 func (c Client) ClaimTask(ctx context.Context, id int64, claimedBy, jobID, noJob string) (store.Task, error) {
 	var out store.Task
+	if err := c.requireFeatureWhen(ctx, jobID != "", capabilities.FeatureClaimJobID); err != nil {
+		return out, err
+	}
+	if err := c.requireFeatureWhen(ctx, noJob != "", capabilities.FeatureClaimNoJob); err != nil {
+		return out, err
+	}
 	body := map[string]string{"claimed_by": claimedBy}
 	if jobID != "" {
 		body["job_id"] = jobID
@@ -348,6 +322,12 @@ func (c Client) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 
 func (c Client) NextTask(ctx context.Context, lane, claimedBy, jobID, noJob string) (store.Task, error) {
 	var out store.Task
+	if err := c.requireFeatureWhen(ctx, jobID != "", capabilities.FeatureNextJobID); err != nil {
+		return out, err
+	}
+	if err := c.requireFeatureWhen(ctx, noJob != "", capabilities.FeatureNextNoJob); err != nil {
+		return out, err
+	}
 	body := map[string]string{"lane": lane, "claimed_by": claimedBy}
 	if jobID != "" {
 		body["job_id"] = jobID
@@ -383,6 +363,9 @@ func (c Client) TransitionTask(ctx context.Context, id int64, to, note string, r
 func (c Client) TransitionTaskWith(ctx context.Context, id int64, in store.TransitionInput) (store.Task, error) {
 	to, note, refs, noJob := in.To, in.Note, in.Refs, in.NoJob
 	var out store.Task
+	if err := c.requireFeatureWhen(ctx, noJob != "", capabilities.FeatureTransitionNoJob); err != nil {
+		return out, err
+	}
 	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/transition", id), struct {
 		To          string          `json:"to"`
 		Closure     string          `json:"closure,omitempty"`
@@ -561,13 +544,6 @@ func (c Client) ResolveDecisionChannel(ctx context.Context, id int64, in Decisio
 	return out, err
 }
 
-// AskDecision records a decision request and gives it its Linear issue.
-func (c Client) AskDecision(ctx context.Context, id int64, in store.DecisionRequestInput) (store.DecisionAskResult, error) {
-	var out store.DecisionAskResult
-	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/decision-request/ask", id), in, &out)
-	return out, err
-}
-
 // AssistantPending fetches the assistant surface's pending work list
 // (MGH-36): open decision requests on live tasks, pending chat questions
 // with their revision, and the server's clock.
@@ -614,6 +590,18 @@ func (c Client) MarkNotificationSent(ctx context.Context, eventID string, hubRow
 	return out, err
 }
 
+// MarkNotificationApplied reports that the receiving lane applied an outbox
+// event the hub had already accepted. The server attributes the receipt to
+// the client's token, so the call names no identity. It is idempotent per
+// event id and client.
+func (c Client) MarkNotificationApplied(ctx context.Context, eventID string) (store.NotificationOutbox, error) {
+	var out store.NotificationOutbox
+	err := c.call(ctx, "POST", "/v1/assistant/outbox/applied", struct {
+		EventID string `json:"event_id"`
+	}{eventID}, &out)
+	return out, err
+}
+
 // RelaneResult is one item's outcome in a RelaneTasks response. The batch
 // continues past item failures, so callers must inspect every entry.
 type RelaneResult struct {
@@ -650,6 +638,9 @@ func (c Client) CreateDisposition(ctx context.Context, x store.DispositionInput)
 	var out struct {
 		Task    store.Task `json:"task"`
 		Created bool       `json:"created"`
+	}
+	if err := c.requireFeatureWhen(ctx, x.Project != "", capabilities.FeatureDispositionProject); err != nil {
+		return out.Task, false, err
 	}
 	err := c.call(ctx, "POST", "/v1/tasks/dispositions", x, &out)
 	if err != nil && x.Project != "" {
@@ -874,6 +865,19 @@ func (c Client) SetTaskArea(ctx context.Context, id int64, area *string, note st
 	return out, nil
 }
 
+// SetTaskPriority changes a task's priority and returns the updated row (hk 3219).
+func (c Client) SetTaskPriority(ctx context.Context, id int64, priority int, note string) (store.Task, error) {
+	var out store.Task
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/priority", id), map[string]any{"priority": priority, "note": note}, &out)
+	if err != nil {
+		return out, unsupportedRoute(err, "task_priority_unsupported", "the task priority route")
+	}
+	if out.Priority != priority {
+		return out, fmt.Errorf("priority_not_applied: server response has priority %d, want %d", out.Priority, priority)
+	}
+	return out, nil
+}
+
 // ListTaskAreas answers the server's closed area vocabulary in order. A
 // server that predates the endpoint 404s it.
 func (c Client) ListTaskAreas(ctx context.Context) ([]string, error) {
@@ -1010,6 +1014,9 @@ func (c Client) GetTask(ctx context.Context, id int64) (store.Task, bool, error)
 func (c Client) ResolveDecision(ctx context.Context, kind string, id int64, by, answer, note string, noInject bool, noJob string) (store.RelayEvent, error) {
 	var out struct {
 		Event store.RelayEvent `json:"event"`
+	}
+	if err := c.requireFeatureWhen(ctx, noJob != "", capabilities.FeatureResolveNoJob); err != nil {
+		return out.Event, err
 	}
 	err := c.call(ctx, "POST", "/v1/decisions/resolve", struct {
 		Type     string `json:"type"`

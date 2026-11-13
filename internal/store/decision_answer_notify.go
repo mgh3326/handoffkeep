@@ -16,6 +16,13 @@ func decisionAnswerNoticeEventID(requestID string, resolutionID int64) string {
 	return "decision-answered-" + requestID + "-" + strconv.FormatInt(resolutionID, 10)
 }
 
+// decisionDenyNoticeEventID is the outbox id of one deny. It names the deny
+// attempt, which is written at most once per pending attempt, so a replayed
+// deny returns before any write and owns no second row.
+func decisionDenyNoticeEventID(requestID string, denyAttemptID int64) string {
+	return "decision-denied-" + requestID + "-" + strconv.FormatInt(denyAttemptID, 10)
+}
+
 // SetConsoleURL sets the console base URL the answer notification links to.
 // Empty leaves the link out.
 func (s *Store) SetConsoleURL(base string) {
@@ -38,11 +45,36 @@ func (s *Store) queueDecisionAnswerNotice(ctx context.Context, tx pgx.Tx, x Task
 	lane := x.Lane
 	taskID := strconv.FormatInt(x.ID, 10)
 	prefix := "[hk] 결정 답변 " + resolved.ID + " task " + taskID + ": "
-	body := decisionAnswerChoice(x.Refs.DecisionOptions, in, resolved.Status) + " by " + decider + " via " + in.Channel
+	choice := decisionAnswerChoice(x.Refs.DecisionOptions, in, resolved.Status)
+	if resolved.Status != DecisionRequestAnswered && choice != resolved.Status {
+		// The pointer carries the state: a withdrawn or default_applied
+		// request says so, whatever its text.
+		choice = resolved.Status + ": " + choice
+	}
+	body := choice + " by " + decider + " via " + in.Channel
 	if base := s.decisionConsoleURL(); base != "" {
 		body += " | " + base + "/ui/tasks/" + taskID
 	}
 	_, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindDecisionAnswered, lane, decisionAnswerNoticeEventID(resolved.ID, resolutionID), assistantLaneText(prefix, body), at)
+	return err
+}
+
+// queueDecisionDenyNotice writes the lane notification for one operator deny,
+// inside the deny transaction. A deny closes nothing: the pointer names the
+// request, the denied attempt and the state the request stays in (open), so
+// the asking lane learns its relayed answer was refused and must wait for a
+// verified one.
+func (s *Store) queueDecisionDenyNotice(ctx context.Context, tx pgx.Tx, x Task, request DecisionRequest, in ResolveDecisionInput, denyAttemptID int64, at time.Time) error {
+	taskID := strconv.FormatInt(x.ID, 10)
+	prefix := "[hk] 결정 거부 " + request.ID + " task " + taskID + ": "
+	body := "attempt " + strconv.FormatInt(in.DeniesAttemptID, 10) + " denied by " + in.Actor + " via " + in.Channel + "; request stays " + request.Status
+	if in.Receipt != "" {
+		body += " | " + in.Receipt
+	}
+	if base := s.decisionConsoleURL(); base != "" {
+		body += " | " + base + "/ui/tasks/" + taskID
+	}
+	_, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindDecisionDenied, x.Lane, decisionDenyNoticeEventID(request.ID, denyAttemptID), assistantLaneText(prefix, body), at)
 	return err
 }
 

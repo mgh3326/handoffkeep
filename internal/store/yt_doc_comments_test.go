@@ -250,3 +250,31 @@ func TestYTDocCommentsModeOff(t *testing.T) {
 		t.Fatalf("after the mode is on, ops %d, want 1", n)
 	}
 }
+
+// The audit reads a document copy's op by its principal, kind, tenant and
+// issue (hk 4245): another issue or tenant does not name it.
+func TestYTDocCommentOpIDs(t *testing.T) {
+	s, bound, _ := ytdSetup(t, "ytd_op_ids")
+	ctx := t.Context()
+	id := ytdDoc(t, s, "reports/job-b/report.md", "report", "hi\n", bound)
+	ytdPass(t, s)
+	ops := ytdOps(t, s, id)
+	if len(ops) != 1 {
+		t.Fatalf("ops %+v", ops)
+	}
+	op := ops[0].ID
+
+	got, err := s.YTDocCommentOpIDs(ctx, ytcTenant, ytdIssue(bound), []int64{op, op + 1000})
+	if err != nil || !got[op] || got[op+1000] || len(got) != 1 {
+		t.Fatalf("doc op ids on its issue: %v %v", got, err)
+	}
+	if other, err := s.YTDocCommentOpIDs(ctx, ytcTenant, "2-999999", []int64{op}); err != nil || other[op] {
+		t.Fatalf("doc op named on another issue: %v %v", other, err)
+	}
+	if other, err := s.YTDocCommentOpIDs(ctx, "other.example", ytdIssue(bound), []int64{op}); err != nil || other[op] {
+		t.Fatalf("doc op named on another tenant: %v %v", other, err)
+	}
+	if none, err := s.YTDocCommentOpIDs(ctx, ytcTenant, ytdIssue(bound), nil); err != nil || len(none) != 0 {
+		t.Fatalf("no ids: %v %v", none, err)
+	}
+}

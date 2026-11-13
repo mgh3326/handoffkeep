@@ -177,6 +177,8 @@ type ytArticler struct {
 	// unstable is the YouTrack projects whose article list differed between
 	// the two reads (decision-4): their documents are never bound.
 	unstable map[string]bool
+	// indexErr is the article list's read error, kept for the run (loadIndex).
+	indexErr error
 }
 
 // ytArticleListUnstable is the reason a project's documents are not
@@ -260,21 +262,41 @@ func ytArticleVerifies(x youtrack.Article, projectID, single, index string) bool
 	return x.ID != "" && !x.HasParent() && x.Project != nil && x.Project.ID == projectID && (x.Summary == single || x.Summary == index)
 }
 
-// needsLookup reports whether classify reads YouTrack for d.
+// needsLookup reports whether classify reads YouTrack for d. A document whose
+// project has no YouTrack project is missing without a read, so it does not
+// load the article list either (hk 4119 b).
 func (a *ytArticler) needsLookup(d store.YTArticleDoc) bool {
-	return d.BoundTenant == "" && !store.YTArticleExcluded(d.Key, d.TaskID) && !store.YTArticleSummaryCut(d.Key, d.Kind)
+	if d.BoundTenant != "" || store.YTArticleExcluded(d.Key, d.TaskID) || store.YTArticleSummaryCut(d.Key, d.Kind) {
+		return false
+	}
+	_, _, missing := a.target(d.YTArticleCandidate)
+	return missing == ""
 }
 
-// loadIndex reads the article list twice, as EnumerateStableComments reads
+// loadIndex makes the article index once per run. A failed read is kept for
+// the rest of the run: the next document gets the same error without another
+// list read (hk 4119 c).
+func (a *ytArticler) loadIndex(ctx context.Context) error {
+	if a.index != nil {
+		return nil
+	}
+	if a.indexErr != nil {
+		return a.indexErr
+	}
+	if err := a.readIndex(ctx); err != nil {
+		a.indexErr = err
+		return err
+	}
+	return nil
+}
+
+// readIndex reads the article list twice, as EnumerateStableComments reads
 // comments (internal/ytwrite/enumerate.go), and keeps the second read. A
 // project whose articles (ids, summaries, parents) differ between the two
 // reads, or repeat within one, is unstable: offset pages shifted or a writer
 // ran while it was read. The backfill's precondition is that no article
 // writer runs (the import ended, D3); the double read detects a breach.
-func (a *ytArticler) loadIndex(ctx context.Context) error {
-	if a.index != nil {
-		return nil
-	}
+func (a *ytArticler) readIndex(ctx context.Context) error {
 	_, first, dup1, err := a.readArticleList(ctx)
 	if err != nil {
 		return err
@@ -388,11 +410,9 @@ func (a *ytArticler) classify(ctx context.Context, d store.YTArticleDoc, bindBy 
 	default:
 		return ambiguous(hits)
 	}
-	b := store.YTArticleBinding{DocumentID: c.DocumentID, Tenant: a.tenant, ArticleID: found.ID, ArticleReadable: found.IDReadable, ProjectID: projectID, BoundBy: bindBy}
-	if found.Summary == index {
-		b.NeedsUpdate = true
-		return ytArticleResult{class: ytArticleSHADiffers, detail: "split document: index article " + found.ID, binding: b}
-	}
+	// Every article is read and verified before it is bound, the index
+	// article too: the list only finds it, and the article may have moved
+	// since the list was read (hk 4119 a).
 	if !haveContent {
 		gctx, cancel := context.WithTimeout(ctx, ytCommentsGetTimeout)
 		x, err := a.remote.ReadArticle(gctx, found.ID)
@@ -404,6 +424,11 @@ func (a *ytArticler) classify(ctx context.Context, d store.YTArticleDoc, bindBy 
 			return ytArticleResult{class: ytArticleAmbiguous, detail: "article " + found.ID + " changed while it was read"}
 		}
 		found = x
+	}
+	b := store.YTArticleBinding{DocumentID: c.DocumentID, Tenant: a.tenant, ArticleID: found.ID, ArticleReadable: found.IDReadable, ProjectID: projectID, BoundBy: bindBy}
+	if found.Summary == index {
+		b.NeedsUpdate = true
+		return ytArticleResult{class: ytArticleSHADiffers, detail: "split document: index article " + found.ID, binding: b}
 	}
 	sum := sha256.Sum256([]byte(found.Content))
 	b.ContentSHA = hex.EncodeToString(sum[:])

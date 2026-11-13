@@ -15,7 +15,6 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/telemetry"
-	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -60,6 +59,7 @@ var errorRules = []errorRule{
 	{store.ErrStandingNotNewer, http.StatusConflict, "standing_not_newer", false},
 	{store.ErrStandingConflict, http.StatusConflict, "standing_conflict", false},
 	{store.ErrInvalidSync, http.StatusBadRequest, "invalid_context", false},
+	{store.ErrSpawnInvalid, http.StatusBadRequest, "invalid_context", true},
 	{attachments.ErrDisabled, http.StatusServiceUnavailable, "attachments_disabled", false},
 	{attachments.ErrTooLarge, http.StatusRequestEntityTooLarge, "attachment_too_large", false},
 	{store.ErrAttachmentStorageCap, http.StatusInsufficientStorage, "attachment_storage_cap", false},
@@ -98,9 +98,11 @@ var errorRules = []errorRule{
 	{store.ErrLabelCycle, http.StatusConflict, "label_cycle", false},
 	{store.ErrLabelRetired, http.StatusBadRequest, "label_retired", false},
 	{store.ErrTaskTerminal, http.StatusConflict, "task_terminal", false},
+	{store.ErrInvalidTaskPriority, http.StatusBadRequest, "invalid_task_priority", false},
 	{store.ErrDecisionRequestOpen, http.StatusConflict, "decision_request_open", false},
 	{store.ErrDecisionRequestStale, http.StatusConflict, "decision_request_stale", false},
 	{store.ErrDecisionRequestResolved, http.StatusConflict, "decision_request_resolved", false},
+	{store.ErrNoOpenDecisionRequest, http.StatusConflict, "no_open_decision_request", false},
 	{store.ErrDecisionEventKeyConflict, http.StatusConflict, "decision_event_key_conflict", false},
 	{store.ErrDecisionAttemptNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrDecisionAttemptNotPending, http.StatusConflict, "decision_attempt_not_pending", false},
@@ -130,6 +132,7 @@ var errorRules = []errorRule{
 	{store.ErrJobStateConflict, http.StatusConflict, "job_state_conflict", true},
 	{store.ErrOutboxEventNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrOutboxConflict, http.StatusConflict, "notification_outbox_conflict", false},
+	{store.ErrOutboxNotReceived, http.StatusConflict, "notification_outbox_not_received", false},
 	{store.ErrChatConversation, http.StatusConflict, "chat_conversation_conflict", false},
 	{store.ErrChatMessageConflict, http.StatusConflict, "chat_message_conflict", false},
 	{store.ErrDecisionRecordNotFound, http.StatusNotFound, "not_found", false},
@@ -155,11 +158,6 @@ var errorRules = []errorRule{
 // database or network, not the request) is logged and answered 500
 // internal_error. Anything else is a rejected request: 400 invalid_context.
 func appErr(w http.ResponseWriter, r *http.Request, e error) {
-	var wrkErr wrkrecords.Error
-	if errors.As(e, &wrkErr) {
-		writeError(w, wrkrecords.Status(wrkErr), wrkrecords.Code(wrkErr))
-		return
-	}
 	// These codes are the error's own text: fixed strings or store-built
 	// validator messages, never echoed input.
 	if errors.Is(e, attachments.ErrMIME) || errors.Is(e, attachments.ErrExtension) || errors.Is(e, store.ErrInvalidDecisionRequest) {
@@ -212,7 +210,7 @@ func appErr(w http.ResponseWriter, r *http.Request, e error) {
 func writeInternal(w http.ResponseWriter, r *http.Request, code string, e error) {
 	requestID := telemetry.RequestID(r.Context())
 	traceID := telemetry.TraceID(r.Context())
-	client, _ := store.WrkPrincipal(r.Context())
+	client := clientOf(r.Context())
 	log.Printf("api.internal_error request_id=%s trace_id=%s route=%q client=%q code=%s err=%q", requestID, traceID, r.Pattern, client, code, e.Error())
 	body := map[string]string{"error": code}
 	if requestID != "" {

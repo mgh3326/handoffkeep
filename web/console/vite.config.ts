@@ -21,9 +21,6 @@ export default defineConfig({
         // /ui, /ui/work, /ui/doc/{key} and /ui/tasks/{id} load the shell: Home,
         // Work and the lazy document viewer behind one router (hk 3140).
         shell: resolve(root, "src/app/main.tsx"),
-        // The server-rendered pages (/ui/decisions, /ui/timeline, /ui/compose)
-        // mount their htmx content inside the shell chrome.
-        server: resolve(root, "src/server.tsx"),
         // The --hk-* design tokens ship as their own static stylesheet so the
         // React entries and the Go templates link one and the same file.
         tokens: resolve(root, "src/design/tokens.css"),

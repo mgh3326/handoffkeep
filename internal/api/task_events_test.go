@@ -68,6 +68,25 @@ func TestTaskEventsAPI(t *testing.T) {
 			t.Fatalf("%s: %d %v, want %d %s", tc.name, status, body, tc.status, tc.code)
 		}
 	}
+
+	// hk 3200: store validation errors return 400 invalid_context with store-authored reason.
+	status, body = taskEventPost(t, h, map[string]any{
+		"source":     "mergewake.review",
+		"source_ref": pr,
+		"task_id":    x.ID,
+		"reviews": []any{
+			map[string]any{
+				"reviewed_head": "1111111111111111111111111111111111111111",
+				"patch_id":      "not-a-valid-hex-patch-id!",
+				"round":         1,
+				"pass":          1,
+				"lens":          "correctness",
+			},
+		},
+	})
+	if status != http.StatusBadRequest || body["error"] != "invalid_context" || body["reason"] != "reviews[0]: patch_id must be 7 to 64 lower-case hex digits" {
+		t.Fatalf("hk 3200 invalid review patch_id: %d %v", status, body)
+	}
 }
 
 func TestTasksStalledFilterAndSweepPreviewAPI(t *testing.T) {

@@ -16,7 +16,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
-// Triage intake and ticket sets (docs/linear-internalize.md, "Triage intake"
+// Triage intake and ticket sets (git show 1e3d2fa8:docs/linear-internalize.md, "Triage intake"
 // and "Ticket sets"). Integrations and repo sessions put work into triage
 // idempotently on (source, source_ref); the desk accepts or declines it
 // through the triage gate in transitionTask.
@@ -133,10 +133,10 @@ func validSourceRef(x string) bool {
 }
 
 func checkTriageItem(x triageItem) error {
-	if x.Title == "" || !validText(x.Title, MaxBytes) || strings.ContainsAny(x.Title, "\r\n") {
+	if x.Title == "" || !validTextBound(x.Title) || strings.ContainsAny(x.Title, "\r\n") {
 		return errors.New("invalid intake: title must be one non-empty line")
 	}
-	if !validText(x.Body, DocumentMaxBytes) {
+	if !validTextBound(x.Body) {
 		return errors.New("invalid intake: body is too long")
 	}
 	if x.Kind != "" && !taskKinds[x.Kind] {

@@ -1,9 +1,12 @@
+import type { TaskSpawn } from "../shared/spawn";
+
 export interface WorkStatusCounts {
   backlog: number;
   in_work: number;
   in_review: number;
   waiting_deploy: number;
-  merged_no_deploy_record: number;
+  merged_no_deploy_project: number;
+  merged_before_deploy: number;
   total_open: number;
   bundle_parents: number;
 }
@@ -19,7 +22,8 @@ export interface WorkStatusSummary {
   in_work: number;
   in_review: number;
   waiting_deploy: number;
-  merged_no_deploy_record: number;
+  merged_no_deploy_project: number;
+  merged_before_deploy: number;
   bundle_parents: number;
 }
 
@@ -29,6 +33,7 @@ export interface WorkStatusInWorkTask {
   project?: string | null;
   state: string;
   job_id?: string | null;
+  job_state?: string | null;
   host?: string | null;
   pr?: string | null;
   since?: string | null;
@@ -47,6 +52,15 @@ export interface WorkStatusBacklogTask {
   bundle_title?: string | null;
 }
 
+/** An open task whose spawn request has not ended (hk 4377). */
+export interface WorkStatusQueuedTask {
+  id: number;
+  title: string;
+  project?: string | null;
+  state: string;
+  spawn: TaskSpawn;
+}
+
 export interface WorkStatusMovementDay {
   date: string;
   created: number;
@@ -59,5 +73,6 @@ export interface WorkStatusResponse {
   projects: WorkStatusProject[];
   in_work: WorkStatusInWorkTask[];
   backlog: WorkStatusBacklogTask[];
+  queued: WorkStatusQueuedTask[];
   movement: WorkStatusMovementDay[];
 }

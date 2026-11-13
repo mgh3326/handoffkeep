@@ -32,9 +32,6 @@ func TestActorWriteRefusalsNameField(t *testing.T) {
 			if _, err := (*Store)(nil).CreateCheckpoint(ctx, Checkpoint{Session: "session", Kind: "checkpoint", Title: "title", CreatedBy: actor}); err == nil || !strings.Contains(err.Error(), "created_by") {
 				t.Fatalf("CreateCheckpoint error=%v, want created_by refusal", err)
 			}
-			if _, err := (*Store)(nil).PutMemory(ctx, Memory{Agent: "agent", Name: "memory", Type: "user", UpdatedBy: actor}); err == nil || !strings.Contains(err.Error(), "updated_by") {
-				t.Fatalf("PutMemory error=%v, want updated_by refusal", err)
-			}
 			if _, _, err := (*Store)(nil).PutDocument(ctx, Document{Key: "actor-test", Kind: "note", CreatedBy: actor}); err == nil || !strings.Contains(err.Error(), "created_by") {
 				t.Fatalf("PutDocument error=%v, want created_by refusal", err)
 			}

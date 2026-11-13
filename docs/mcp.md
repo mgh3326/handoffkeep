@@ -40,12 +40,11 @@ to the requester; set `ask_operator` when it needs an hk decision request and
 the task should await that decision. RESULT, BLOCKED, and QUESTION also create
 a result document, result record, and lane notification. START creates only a
 comment and the claim. PROGRESS creates a document, comment, and notification,
-but no `dots_results` row. That keeps the comparison table limited to the
-three kinds recorded by Linear and needs no schema migration. Replies are
+but no `dots_results` row, which records RESULT, BLOCKED and QUESTION only. Replies are
 attributed to the authenticated operator.
 
-The result's `source` is `hk` or `linear`. Existing Linear requests and
-webhooks remain independent and do not need a channel setting.
+The result's `source` is `hk`, or `linear` for a row the retired Linear
+webhook recorded before hk 4425.
 
 `HANDOFFKEEP_DOTS_REPLY_WRITES` controls replies. It defaults to `off`, which
 leaves `dots_inbox` available and makes `dots_reply` return
@@ -171,7 +170,6 @@ priority or lane.
 | `decision_ask` | write | `task_id`, `idempotency_key`, `question`, `options`, `default_action`, optional `answer_policy`, `human_only`, `block` and the other `tasks decision-request` fields | The recorded request id and whether it was a duplicate |
 | `projects_list` | read | none | Every project with `design_lane`/`effective_owner`, status and dates, open task counts by state, and `health` (in_progress, waiting, blocked, done, overdue counts; assignees; top blocked and overdue tasks) with `as_of` |
 | `task_states` | read | none | The twelve states with category, terminal and claimable flags, allowed manual transitions and closure requirements |
-| `sync_status` | read | none | YouTrack cursor, pending outbox backlog, processed outcomes in the last 24 hours, mirrored tasks and last run |
 
 The parity matrix — every console write route, `/v1` route, CLI command and MCP
 tool, with the MCP gaps grouped as follow-ups — is [parity.md](parity.md). The
@@ -211,7 +209,7 @@ omitted.
 `attachments` lists the attachments bound to the task's body document (up to 50;
 `attachments_more` says whether there are more). `external_links` lists the
 task's pull requests (`pr`, `origin_pr`, `revert_pr`), `report`, `document`
-(the body doc key), `linear` and `youtrack`; `url` is set only for an https
+(the body doc key) and `youtrack`; `url` is set only for an https
 value.
 
 Response metadata (`comments_more`, `events_more`, `field_sources` itself) is
@@ -275,12 +273,8 @@ overdue while its due date is before `as_of`. Assignees are the claimers of
 open tasks (up to 10); the top blocked and overdue lists hold 5 tasks per
 project, highest priority and earliest due first. `task_states` derives the state graph, categories, terminal
 flags and closure requirements from the tables the store enforces, never from a
-second copy in this package. `sync_status` derives its last-run time from the
-sync bookkeeping timestamps (cursor, processed activities, mirrors, field
-cache, outbox completions, comment links) and reports `"never"` when none
-exist; a pending outbox row's age is how long its write has waited. The Python
-mirror may still be the active YouTrack writer until the Dagu job switches, so
-the status result says so too (docs/youtrack.md).
+second copy in this package.
+
 
 ## Turning it off
 

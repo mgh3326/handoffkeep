@@ -50,17 +50,15 @@ presign answer (`AttachmentURL`) is returned, never followed.
 `GetTask`, `ListTasks`, `ClaimTask`, `RebindTaskJob`, `ReopenTask`,
 `CommentTask`, `ProjectOwner`, `GetDocument`, `ListDocuments`,
 `PutDocument`, `PutAttachment`, `GetAttachment`, `AttachmentURL`,
-`RecordDecisionRequest`, `AskDecision` and `ListQuotaObservations`. Each uses
+`RecordDecisionRequest`, `ListQuotaObservations`,
+`PutTaskSpawn` and `TaskStates`. Each uses
 its documented `/v1` route and JSON shape; `internal/clientparity` checks that
 the two list calls send the same query. `ListTasks` and `ListDocuments` take a
 limit from 1 to 1000 and return at most that many rows, with no sign that
 more exist. `ListDocuments` matches its prefix with SQL `LIKE` (`_` and `%`
 are wildcards) and returns documents without their body.
-`RecordDecisionRequest` only records the request (the CLI's `decisions ask`);
-`AskDecision` also opens its Linear issue (`decisions ask --linear`) and fails
-with `503 linear_decisions_disabled` when hk runs without Linear decisions. A
-service that must not open issues uses `RecordDecisionRequest`. Both take the
-same `DecisionAskInput`. A non-2xx answer is a
+`RecordDecisionRequest` records the request (the CLI's `decisions ask`) and
+takes a `DecisionAskInput`. A non-2xx answer is a
 `*client.HTTPError`; branch on `client.ErrorCode(err)`, never on the error
 text.
 

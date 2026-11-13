@@ -8,7 +8,7 @@ package store
 // listed at the end, each with the reason it cannot close a cycle. The
 // lock_order_test.go tests drive the cycles this order removed.
 //
-//  1. Schema locks. DDL runs only in Store.migrate, MigrateWrk and their
+//  1. Schema locks. DDL runs only in Store.migrate and its
 //     version-gated steps, under pg_advisory_xact_lock(migrationLockID).
 //     Open runs Store.migrate only when the schema is missing a version it
 //     writes (migrateIfBehind, migrateCurrent), so opening a store beside
@@ -22,31 +22,34 @@ package store
 //
 //  2. The task-mutation lock, pg_advisory_xact_lock(8241873001). A
 //     transaction takes it first when it locks more than one task row, or
-//     when it locks a task row and also a job lock from level 3. Holders run
+//     when it locks a task row and also the jobs row from level 3. Holders run
 //     one at a time, so the order in which a holder locks task rows (a child
 //     before its parent in autoCloseTx and applySourceEventTx, ascending id
-//     in applyDeployRecordTx, propagateMergeTx and recordLinearBoardRelayTx) cannot form a
-//     cycle with another holder. UpdateJob, AppendRelayEvent (work board on,
-//     or an event that answers or ends a decision: relayTouchesDecisions),
-//     WrkAppend (completed or joined records) and PutDocument (deploy
-//     records) take it first for that reason. Taking it again in the
+//     in applyDeployRecordTx and propagateMergeTx,
+//     task_id then each of tasks in the order sent in ApplyTaskSourceEvent,
+//     then ascending id in propagateRevertTx) cannot form a
+//     cycle with another holder. UpdateJob, AppendRelayEvent (an event that
+//     answers or ends a decision: relayTouchesDecisions) and PutDocument
+//     (deploy records) take it first for that reason. Taking it again in the
 //     same transaction (applyJobRoleTx, applyDeployRecordTx) is a no-op:
 //     advisory locks are re-entrant.
 //
-//  3. Job locks: wrk_job_locks rows in job_id order (WrkAppend sorts them),
-//     then the jobs row (UpdateJob).
+//  3. Job locks: the jobs row (UpdateJob).
 //
 //  4. Task rows: SELECT ... FOR UPDATE, or an UPDATE of tasks. Without the
 //     level-2 lock a transaction locks at most one task row and no job lock
 //     (the single-task edits: area, milestone, labels, subscribers,
-//     deadlines, placement, work-board reconcile).
+//     deadlines, placement).
 //
 //  5. Rows that belong to a locked task: task_events (its foreign key takes
 //     KEY SHARE on the task row), task_labels, task_relations,
-//     task_subscribers, task_origins, linear_board_tasks, linear_outbox,
-//     sync_decisions, ticket_sets, decision_answer_attempts and
+//     task_subscribers, task_origins, sync_decisions, ticket_sets, decision_answer_attempts and
 //     decision_resolutions (inserted by ResolveDecision after its task row,
 //     under the level-2 lock; append-only and never locked by a reader), and
+//     task_spawn_records and task_spawn_notices (PutTaskSpawn: one task row
+//     under its key share lock; a terminal write takes the comment insert
+//     lock before that row, as ReplyDots does, and its
+//     comment is a savepoint so a YouTrack refusal skips only the comment),
 //     the work record: changes, change_tasks and reviews. ApplyTaskSourceEvent
 //     writes the work record under the level-2 lock after its task row
 //     (recordChangeTx); a revert locks two changes rows, the reverted PR's
@@ -92,9 +95,6 @@ package store
 //   - IntakeTask and EmitTicketSet insert each body as the document
 //     task-body/<id>, named after a task created in the same transaction
 //     under the level-2 lock: a new key that no other writer holds.
-//   - processNextLinearOutbox and ProcessNextLinearDecisionOp lock their
-//     queue row before the task row; only the processor locks an existing
-//     queue row, so no task writer waits on it.
 //   - decision_requests rows outside level 2: an INSERT takes a new key and
 //     waits on no existing row (CreateDisposition, a new chat question or
 //     relay ask); chat rows are written only by the chat writers, after their
@@ -158,10 +158,10 @@ package store
 //   - Deploy-service puts take the deploy_services_prefixes advisory lock
 //     before reading or writing registry rows, to serialize prefix claims.
 //   - Other advisory locks (disposition origin, task comment insert, labels,
-//     Linear board ownership, quota presence) are each the first lock of
+//     quota presence) are each the first lock of
 //     their transaction, and no transaction requests one while it holds a
-//     lock from levels 2-5, with two exceptions: ApplyYouTrackActivity and
-//     ReplyDots take level 2, then taskCommentInsertLock, then the task row.
+//     lock from levels 2-5, with one exception: ReplyDots takes level 2, then
+//     taskCommentInsertLock, then the task row.
 //     CreateTaskComment takes the comment lock first and reaches the task row
 //     only through the foreign key's KEY SHARE, so it cannot wait on level 2
 //     and the pair cannot cycle.
@@ -238,18 +238,15 @@ package store
 //         are one statement: a first insert takes KEY SHARE after its new
 //         row, which the issue writer's FOR SHARE read cannot see and so never
 //         waits for, and the conflict update keeps task_id and takes no task
-//         lock. MarkYouTrackTaskSynced, UpdateYouTrackMirrorDisplay and
-//         SetYouTrackProjectID are one UPDATE that keeps the key;
-//         PutYouTrackProject then deletes only youtrack_attempts rows.
-//         ApplyYouTrackActivity reaches task_origins only after FOR UPDATE on
-//         its task row, or for a task it created in the same transaction.
+//         lock. SetYouTrackProjectID is one UPDATE that keeps the key, and
+//         PutYouTrackProject is one upsert that keeps it too.
 //       - The level-4 task writers hold level-2 and level-3 locks, other task
 //         rows and the level-5 rows of tasks they already hold; an issue
 //         writer requests none of those. No task writer locks a
 //         youtrack_projects row.
 //     So the comment lock -> task row -> lane lock, ownership lock -> task
 //     row -> lane lock and lane lock -> mapping row edges cannot close a
-//     cycle. ApplyYouTrackActivity takes level 2 and never enqueues an op.
+//     cycle.
 //     ReplyDots takes level 2 and its task row FOR UPDATE, and enqueues only
 //     while comments are canonical in YouTrack (hk 4122): then the authority
 //     row FOR SHARE and the task's lane lock follow. No lane holder requests
@@ -359,6 +356,6 @@ package store
 //     ACCESS EXCLUSIVE in the same order with a 5s lock_timeout. No other
 //     transaction combines these tables with task or job locks.
 
-// Serve's hub-forward and Linear-board workers hold session locks 8241873510
-// and 8241873511 respectively on separate pooled connections. They take the
+// Serve's hub-forward and task-thread workers hold session locks 8241873510
+// and 8241873512 respectively on separate pooled connections. They take the
 // lock before running and never request each other's lock, so they add no cycle.

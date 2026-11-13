@@ -1,27 +1,17 @@
 # handoffkeep
-A durable home for coding-agent handoffs, working memory, and documents across sessions and machines.
+A durable home for coding-agent handoffs and documents across sessions and machines.
 
 ## Fleet console (/ui)
 
-The optional fleet console renders relay timelines, task queues, unresolved
-decisions, session checkpoints, and hub status. Authenticated operators can
-answer decision items individually or in batches, compose lane events, and
-close externally answered decisions with `handoffkeep decisions resolve`. It
-is mounted only when the Cloudflare Access configuration is
-complete and uses a separate Access assertion from the API bearer token. See
-[docs/ui.md](docs/ui.md) for configuration, security boundaries, hub behavior,
-and the SSE contract.
+The optional fleet console is a React app over `/ui/api/*`. It shows the work
+queue and task records, unresolved decisions, deploy status, and attention
+items. Authenticated operators answer structured decision requests and set
+task priority and lifecycle from it. It is mounted only when the Cloudflare
+Access configuration is complete and uses a separate Access assertion from the
+API bearer token. See [docs/ui.md](docs/ui.md) for views, configuration,
+security boundaries, and the write routes.
 
 Tasks may specify an optional expected duration at creation, for example `tasks add --expected 4h` or `--expected 1d`. Durations must be between 1 minute and 90 days; the server stores a normalized Go duration. The task API returns `expected` as a string, or `null` when unset.
-
-## Fleet metrics
-
-`handoffkeep fleet-metrics --machine <hub id> --since 7d` prints the five fleet
-operating metrics (order → usable time, verify rounds, empty task slots,
-decision dwell, normal-path share), each with the coverage of the identifiers
-it needs; a missing identifier lowers coverage and is never counted as 0. It
-only reads (hk GETs, local job directories, `pacelever reps list`, `gh api`).
-See [docs/fleet-metrics.md](docs/fleet-metrics.md).
 
 ## Version
 
@@ -160,10 +150,11 @@ handoffkeep tasks disposition summary [--as-of RFC3339] [--json]
 handoffkeep tasks disposition apply <id> [--note text]
 ```
 
-Only the operator's Access-authenticated web route answers an item
-(`/ui/dispositions/answer`, `/ui/dispositions/accept-batch`); generic
-transitions, `decisions resolve`, and compose are refused with
-`disposition_operator_only`. Silence changes nothing: no code path answers,
+Only the operator answers an item, through the console's email-identity routes
+`POST /ui/dispositions/answer` (one item) and `POST /ui/dispositions/accept-batch`
+(the recommended answer for a signed snapshot), with CSRF; see
+[docs/ui.md](docs/ui.md#disposition-items). Generic transitions and
+`decisions resolve` are refused with `disposition_operator_only`. Silence changes nothing: no code path answers,
 demotes, or claims an open item. `apply` records the director's application of
 the operator's answer with legal edges only (A/B/C → `merged`, D → `icebox`,
 E → `dropped`); an item never returns to `backlog`. An "A 배포" answer is
@@ -248,8 +239,16 @@ or a no-job reason. Waiting on the operator is the `awaiting_decision` flag,
 not a state: the task keeps its work state, cannot be claimed while flagged,
 and the answer paths clear the flag. A task leaves `triage` for `backlog` or
 `unstarted` only with a priority above 0, a project and a kind. No manual edge
-enters `deployed`, and a task cannot enter `merged` from `researching` or
-`developing` by hand. A `merged` task closes as `completed` only with a result
+enters `deployed`, and the manual edge into `merged` is from `reviewing`.
+A task that a merged PR delivered closes in one step from any open state
+(`triage`, `backlog`, `unstarted`, `researching`, `developing`) with
+`tasks transition <id> --to merged --pr <url>` (hk 4322). hk accepts it only
+when the PR's change record shows it merged: hk holds no GitHub credential,
+so the change record written from mergewake's PR and merge events is the
+evidence it checks. A reverted PR is refused, and the merge holds below
+apply as for a merge event. The PR becomes the closure evidence, and the task is
+linked to the change as `implements`, so a later revert of the PR reopens it. A refused move answers `task_conflict`
+with a `reason` that names the states allowed from the current one. A `merged` task closes as `completed` only with a result
 link (an https URL or `hk:doc <key>`), the same evidence `completed` takes; the
 kind rule for `completed` does not apply to this edge.
 
@@ -302,7 +301,7 @@ the document `task-body/<id>` and linked by `body_doc`.
 
 A repo session emits a whole ticket set with `POST /v1/ticket-sets` (`tickets
 emit --file set.json`; the document is described in
-`docs/linear-internalize.md`, "Ticket sets"). Every body needs the headings
+`git show 1e3d2fa8:git show 1e3d2fa8:docs/linear-internalize.md`, "Ticket sets"). Every body needs the headings
 Current, Desired, Key interfaces, Out of scope and Acceptance. One transaction
 creates the parent, the children (`parent_id`), their bodies and the `blocks`
 edges (`blocked_by` names a `ref` in the set or an existing task id); an
@@ -331,15 +330,26 @@ Ticket sets never stop for this check.
 ### Event-driven transitions, stalled and the backlog sweep
 
 Integration events move tasks forward under the rules in
-`docs/linear-internalize.md` ("Event-driven transitions").
-`POST /v1/task-events` takes `{source, source_ref, task_id, pr, reverted_pr,
-revert_pr, at}` for `mergewake.pr`, `mergewake.review`, `mergewake.merge` and
+`git show 1e3d2fa8:git show 1e3d2fa8:docs/linear-internalize.md` ("Event-driven transitions").
+`POST /v1/task-events` takes `{source, source_ref, task_id, tasks, pr,
+reverted_pr, revert_pr, at}` for `mergewake.pr`, `mergewake.review`, `mergewake.merge` and
 `mergewake.revert`; `source_ref` is the PR URL, and for a revert the revert PR
 URL with `reverted_pr` naming the PR it undoes. Every event is recorded in
 `task_events` with its source, applied or not, and the answer carries
 `applied`, `redelivered`, `state` and, when nothing moved, `reason`. The same
-`(task, source, source_ref)` again changes nothing. `handoffkeep tasks event
-<id> --source S --source-ref URL [--reverted-pr URL]` posts one by hand.
+`(task, source, source_ref)` again changes nothing. `tasks` names up to 32
+other tasks the PR delivers (one per `Mergewake-Task` line, such as a bundle
+PR's sub-tasks); each gets the event as `task_id` does, and the answer's
+`tasks` holds one result per named task (`reason` `task_not_found` for a
+missing one, which writes nothing). A merge closes a task only when it is the
+task's last open piece: while another `implements` change of the task is still
+open, one was reverted and not relanded, or a sub-task is not settled, the
+merge is recorded with `applied=false`
+and the reason names what holds it (a parent then closes through
+`auto_close_parent`, which waits on the parent's own open or reverted
+`implements` changes too). A revert also reopens every other `merged` or
+`deployed` task linked to the reverted PR as `implements`. `handoffkeep tasks event <id> --source S --source-ref
+URL [--reverted-pr URL] [--tasks ID,...]` posts one by hand.
 Storing a `deploy/<service>/<YYYYMMDDTHHMMSSZ>` document whose record has
 `result` `success` and a non-null `included_prs` moves each `merged` task whose
 `refs.pr` is listed to `deployed` (`hk.deploy`); a task that enters `merged`
@@ -416,7 +426,7 @@ N]`) lists updates newest first with the project's `stale` flag. Schema
 version 36 adds `ledger_cursors` and `status_updates`.
 
 The schema migration to this model (version 32) moves existing rows by the
-map in `docs/linear-internalize.md` and is reversible with
+map in `git show 1e3d2fa8:git show 1e3d2fa8:docs/linear-internalize.md` and is reversible with
 `scripts/rollback-state-migration.sql`; `handoffkeep tasks migrate-states
 --dry-run` (reads `HANDOFFKEEP_DB_URL`, writes nothing) prints the counts per
 `(legacy_state, rule, new_state)` before the server is upgraded.
@@ -425,6 +435,15 @@ The HTTP API uses the usual bearer token: `POST /v1/tasks`, `GET /v1/tasks`,
 `GET /v1/tasks/{id}`, `POST /v1/tasks/{id}/claim`, and
 `POST /v1/tasks/{id}/transition`. `POST /v1/tasks/next` supports the CLI's
 atomic `next` operation. Invalid state changes and competing claims return 409.
+`GET /v1/capabilities` (bearer, any client) returns `{"protocol_version": N,
+"features": [...]}`: the request shapes this build accepts, such as
+`claim_job_id`, `claim_no_job`, `next_job_id`, `next_no_job`,
+`transition_no_job`, `resolve_no_job` and `disposition_project`. The CLI reads
+it once per process and refuses a shape the server does not list, with
+`server_lacks_feature:<name>`, before it sends anything. A server that answers
+404 predates the route, and its requests go out as before. The list is
+`internal/capabilities.Features`, and a test fails when a `Feature` constant is
+missing from it.
 A claim may carry `job_id`: the server writes `claimed_by` and `refs.job_id`
 in the same transaction, and replaying the identical claim (same claimant,
 same non-empty job id) is a no-op that returns the row instead of a 409.
@@ -687,8 +706,8 @@ Configure `HK_S3_ENDPOINT`, `HK_S3_BUCKET`, `HK_S3_ACCESS_KEY_ID`, and
 also be `virtual`. OCI Object Storage uses
 `https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`, requires
 `HK_S3_REGION` to match the endpoint region, and uses path lookup. When any
-required setting is absent, only attachments are disabled; checkpoints, memory,
-and documents continue to work.
+required setting is absent, only attachments are disabled; checkpoints and
+documents continue to work.
 
 The default safety limits are a 50 MiB object maximum, 20 GB total storage,
 800,000 monthly writes, and 8,000,000 monthly reads. Set the corresponding
@@ -733,18 +752,6 @@ restart forgets it until each client calls again. The server logs
 `api.client_revision client=... rev=... prev=...` when a client's revision
 changes (including its first request after a restart). `r2usage` is optional
 and safely reports `skipped` when Cloudflare analytics credentials are absent.
-
-## O3 contract fixture pack
-
-`testdata/o3/` is the machine-readable contract pack for the O3 authority
-design (`hk:doc designs/hk1873/b1873a-sol-r4`, doc 44185, revision 4,
-amendment 1): the Draft 2020-12 schema bundle, every normative vector
-table as data, sanitized legacy event fixtures, the command matrix, CLI
-subcommand/exit maps, and a hashed manifest. It changes only with a new
-design revision. `go test ./internal/o3contract/...` verifies the pack
-against itself — schema validity, internal ref resolution, per-vector
-request/record conformance, error-code/exit-map consistency, manifest
-hashes, and per-table case counts. See `testdata/o3/README.md`.
 
 ## Container image
 

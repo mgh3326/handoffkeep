@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/internal/guard"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 // TranslationBatchMaxBytes bounds a batch while allowing one maximally escaped task body.
@@ -64,13 +65,13 @@ func checkTranslation(t Translation) error {
 	if !translationHash.MatchString(t.SourceSHA256) {
 		return fmt.Errorf("invalid translation: source_sha256 must be a lowercase SHA-256 digest")
 	}
-	textLimit := MaxBytes
-	if t.Entity == "task" && t.Field == "body" {
-		textLimit = 3 * DocumentMaxBytes
-	} else if t.Entity == "task_comment" && t.Field == "body" {
-		textLimit = DocumentMaxBytes
+	// A task or comment body is task text: YouTrack's text bound, in
+	// characters. Other translated fields keep the note-sized byte cap.
+	tooLong := len(t.Text) > MaxBytes
+	if (t.Entity == "task" || t.Entity == "task_comment") && t.Field == "body" {
+		tooLong = !ytwrite.WithinTextMax(t.Text)
 	}
-	if strings.TrimSpace(t.Text) == "" || len(t.Text) > textLimit || !utf8.ValidString(t.Text) || strings.ContainsRune(t.Text, 0) {
+	if strings.TrimSpace(t.Text) == "" || tooLong || !utf8.ValidString(t.Text) || strings.ContainsRune(t.Text, 0) {
 		return fmt.Errorf("invalid translation: text is empty, invalid, or too long")
 	}
 	if strings.TrimSpace(t.Translator) == "" || !validText(t.Translator, 128) {

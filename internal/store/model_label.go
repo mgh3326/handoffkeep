@@ -136,9 +136,6 @@ func (s *Store) SetTaskLabel(ctx context.Context, id, labelID int64, by string, 
 // the new updated_at.
 func (s *Store) setTaskLabelTx(ctx context.Context, tx pgx.Tx, x *Task, labelID int64, by string, attach bool) (bool, error) {
 	id := x.ID
-	if err := s.wrkTaskFenceTx(ctx, tx, *x, "", true); err != nil {
-		return false, err
-	}
 	var retired *time.Time
 	if err := tx.QueryRow(ctx, `SELECT retired_at FROM labels WHERE id=$1 FOR SHARE`, labelID).Scan(&retired); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

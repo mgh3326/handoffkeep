@@ -1,6 +1,6 @@
 package store
 
-// Version 37 adds triage intake (docs/linear-internalize.md, "Triage
+// Version 37 adds triage intake (git show 1e3d2fa8:docs/linear-internalize.md, "Triage
 // intake"):
 //
 //   - tasks.source and tasks.source_ref name the producer of a task that came

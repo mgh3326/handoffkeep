@@ -67,9 +67,6 @@ func (s *Store) setTaskDeadlines(ctx context.Context, id int64, d TaskDeadlines,
 		}
 		return Task{}, false, err
 	}
-	if err = s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
-		return Task{}, false, err
-	}
 	if dueOnly {
 		d.SLAStartedAt, d.SLAMediumRiskAt, d.SLAHighRiskAt, d.SLABreachesAt = x.SLAStartedAt, x.SLAMediumRiskAt, x.SLAHighRiskAt, x.SLABreachesAt
 	}

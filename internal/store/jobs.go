@@ -600,9 +600,9 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 		return j, err
 	}
 	defer tx.Rollback(ctx)
-	// The work board (recordLinearBoardJobTx) and a new role (applyJobRoleTx)
-	// lock the job's task row below: the task-mutation lock comes first,
-	// before the job row (lock order, lockorder.go).
+	// A new role (applyJobRoleTx) locks the job's task row below: the
+	// task-mutation lock comes first, before the job row (lock order,
+	// lockorder.go).
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return j, err
 	}
@@ -774,9 +774,6 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 		resultArg, j.UpdatedAt,
 		usage.InputTokens, usage.OutputTokens, usage.ReasoningTokens, usage.CacheReadTokens, usage.CacheWriteTokens, usageSource, usage.RecordedAt, j.Harness, j.Effort, j.SpawnedAt, j.SpawnedReceivedAt, j.ReadyAt, j.ReadyReceivedAt, j.EndedAt, j.EndedReceivedAt, j.ReportSHA256, j.ReportVersion, skillsArg, j.SkillsSupported, j.EndReason, diffFiles, diffInsertions, diffDeletions, selectionArg))
 	if err != nil {
-		return j, err
-	}
-	if err = s.recordLinearBoardJobTx(ctx, tx, j); err != nil {
 		return j, err
 	}
 	// A job that ends supersedes its open decision records; the

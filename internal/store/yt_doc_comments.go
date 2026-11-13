@@ -245,3 +245,29 @@ func ytDocCommentsHandler(s *Store, now time.Time) FeedHandler {
 		return nil
 	}
 }
+
+// YTDocCommentOpIDs returns the ids, among ids, of the comment ops that wrote a
+// document copy on issueID of tenant: comment_append ops under the task_docs
+// principal (hk:doc-comments). The comment audit reads it to tell a bot comment
+// that is a document copy from any other bot comment (hk 4245). Read-only.
+func (s *Store) YTDocCommentOpIDs(ctx context.Context, tenant, issueID string, ids []int64) (map[int64]bool, error) {
+	out := map[int64]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id FROM yt_write_ops
+		WHERE id = ANY($1::bigint[]) AND principal = $2 AND kind = $3 AND tenant = $4 AND yt_target_id = $5`,
+		ids, ytDocCommentPrincipal, ytwrite.KindCommentAppend, tenant, issueID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}

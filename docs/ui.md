@@ -1,9 +1,27 @@
 # Fleet console (`/ui`)
 
-The optional fleet console is an Access-protected view of relay events, the task
-queue, decision inbox, session checkpoints, and the configured hub. It also has
-two operator write routes for answering decisions and composing lane events.
-`GET /ui` redirects to `GET /ui/timeline`.
+The optional fleet console is an Access-protected React app (`web/console`,
+built into `internal/ui/static/console`, committed) plus the JSON routes it
+calls under `/ui/api/*`. The server renders one shell page for every view
+route; the browser picks the view from `location.pathname`. There are no
+server-rendered pages, no htmx, and no SSE stream.
+
+`GET /ui` serves the Home view. The console's views are:
+
+| Path | View |
+| --- | --- |
+| `/ui`, `/ui/home` | Home: what is waiting on the operator (`/ui/api/attention`) |
+| `/ui/queue` | Board mount point; the React Work page takes the same data |
+| `/ui/work` | Work: task board and task detail (`/ui/api/board/*`) |
+| `/ui/tasks/{id}` | Task record (deep link) |
+| `/ui/decisions`, `/ui/decisions/{id}` | Decision list and one decision |
+| `/ui/deploys` | Deploy status (`/ui/api/deploy-pending`) |
+| `/ui/work-status` | Work status (`/ui/api/work-status`) |
+| `/ui/doc/{key}` | Document viewer (`/ui/api/board/doc`) |
+
+Retired paths (`/ui/timeline`, `/ui/compose`, `/ui/fleet`, `/ui/grades`,
+`/ui/docs`, `/ui/events`, `/ui/decisions/legacy`) are not routed; the fleet
+page is the panewire hub's `/ui`.
 
 ## Configuration
 
@@ -19,9 +37,6 @@ and returns the normal 404 response.
 | `HANDOFFKEEP_UI_ALLOWED_SERVICE_NAMES` | Comma-separated Access service-token `common_name` allowlist for `/ui/api/*` | `glance-reader` |
 | `HANDOFFKEEP_HUB_URL` | Optional hub origin for fleet status | `http://127.0.0.1:9000` |
 | `HANDOFFKEEP_HUB_TOKEN` | Optional server-side hub credential | set outside source control |
-| `HANDOFFKEEP_UI_LANES` | Comma-separated compose destination lanes | `lane-a,lane-b` |
-| `HANDOFFKEEP_UI_DIRECTOR_LANES` | Comma-separated lanes whose task decisions are pinned for approval | `lane-a` |
-| `HANDOFFKEEP_UI_ADMIRAL_LANES` | Legacy alias — 병기 수용, 제거는 별도 태스크. Comma-separated lanes whose task decisions are pinned for approval | `lane-b` |
 
 Create a Cloudflare Access application for the UI origin, set its team domain
 and audience tag in the first two settings, and add an Access policy that
@@ -37,183 +52,22 @@ minute; no usable cached key or failed retrieval is an unauthenticated request.
 
 ## Security boundary
 
-`/ui` accepts `GET` plus only `POST /ui/decisions/answer`,
-`POST /ui/decisions/answer-batch`, and `POST /ui/compose`.
-All other non-GET UI methods receive `405 Allow: GET`. It does not read API
-bearer tokens. Conversely, `/v1/*` and `/metrics` do not read Cloudflare Access
-assertions. This prevents either credential type from substituting for the
-other.
+`/ui` does not read API bearer tokens, and `/v1/*` and `/metrics` do not read
+Cloudflare Access assertions. This prevents either credential type from
+substituting for the other.
 
 The absent-route 404 is fail-closed: an incomplete Access configuration cannot
 accidentally expose a console without origin-side verification. Hub credentials
-remain in the server process; browser responses, templates, static assets, and
-SSE messages contain only the fetched operational fields, never the hub token.
+remain in the server process; browser responses, the shell page, and static
+assets contain only fetched operational fields, never the hub token.
 
 Email identities may use every console route. An allowlisted service identity
-may use only `/ui/api/*`; every HTML, fragment, document, static, SSE, and
-operator-write route returns `403`. An empty
+may use only `/ui/api/*`; every page, document, file, static, and operator-write
+route returns `403`. The one exception is `POST /ui/api/nodes/{machine}/accepting`,
+which a service identity may call with `Content-Type: application/json` and
+without a CSRF token or origin check (see below). An empty
 `HANDOFFKEEP_UI_ALLOWED_SERVICE_NAMES` allowlist creates no service identity
-path, while the email allowlist behavior remains unchanged. Service POSTs have
-no browser cookie or CSRF requirement, but must use `Content-Type:
-application/json`; email API POSTs retain the same-host Origin/Referer and
-email-bound `hk_ui_csrf` validation used by the operator forms.
-
-All database content is passed to Go's `html/template` without typed HTML,
-JavaScript, or URL wrappers. A task PR is linked only when its stored value
-starts with `https://github.com/`; other values are rendered as text.
-
-## Pages and data
-
-- `/ui/timeline` shows relay events in descending durable-ID order. It supports
-  `lane`, `kind`, `since`, `until`, and exclusive `before_id` parameters. Date
-  bounds apply to `received_at` in UTC (`since` inclusive, `until` inclusive
-  through the end of that UTC day). Pages contain at most 200 events; the store
-  hard-caps any timeline query at 1000.
-- `/ui/queue` mounts the React queue board in the existing queue slot. Cards
-  group by canonical state and order deterministically by priority then id.
-  Client-side filters (lane, kind, state toggles, title/id search, 운영자
-  필요만) never drop server data; the board polls the same-origin BFF every
-  fifteen seconds with non-overlapping refreshes and keeps the last good data
-  on failure. Selecting a card fetches its detail.
-- `GET /ui/api/board/tasks` is a `no-store` JSON list with `lane`, `state`,
-  `parent_lane`, exclusive `after_id`, and `limit` (default 200, max 500)
-  parameters in stable id order. `truncated` and `next_after_id` continue the
-  page; the client owns grouping and ordering.
-- `GET /ui/api/board/tasks/<id>` returns the task with refs, the append-only
-  transition history, per-state dwell segments, the joined Linear identifier
-  when present, and participant segments aggregated from `bench_reps` with an
-  exact `task_ref=hk:task/<id>` match. Empty telemetry is `not_collected`;
-  when matching reps exceed the 500-rep bound, `truncated` marks the segment
-  totals as partial rather than complete.
-- `GET /ui/api/policy/active` resolves the exact `policy/active` pointer to
-  its manifest document key, validates the manifest as a single JSON document
-  (a second value or trailing content is `invalid_manifest`), and lists
-  manifest items with `/ui/doc/<key>` links and `exists` flags. Statuses are
-  `not_configured`, `invalid_pointer`, `manifest_missing`,
-  `invalid_manifest`, or `ok`; beyond 200 items `truncated` is set.
-- `/ui/decisions` shows only unresolved items. The definitions are exact:
-  1. A task is shown when its `awaiting_decision` flag is set; its question is
-     the `note` from that task's latest `awaiting_decision` event that set the
-     flag (history written before the flag, a transition `to='needs_decision'`,
-     counts the same).
-  2. A `job.escalate` relay event is *open* when no later-ID event with the
-     same `job_id` has kind `job.joined`, `job.completed`, `job.lost`, or
-     `job.revoked`, and no later
-     `lane.event` from the same `owner_lane` has an `event_id` matching
-     `%decision-escalation-<escalation id>-%`. This event-ID condition closes
-     web and CLI escalation answers without allowing an unrelated task answer
-     with the same numeric ID to close the escalation. An open escalation is
-     *answerable* only when its effective question — `question`, else `text`,
-     else `report_last_line` — begins with `[decision-needed]` after leading
-     whitespace. Every other open escalation is an operational signal and is
-     retained under the folded `signals` section with no answer controls and
-     no contribution to the answerable-card budget; signal retention is a
-     display classification, not resolution — a signal still closes only
-     through the two open-condition mechanisms above. The marker is stripped
-     for the answer form's question display only; durable event text is never
-     rewritten.
-  3. A `lane.event` whose `text` begins `[decision-needed]` is shown when no
-     later-ID `lane.event` from the same `owner_lane` has text beginning with
-     the exact prefix `[decision-answered] #<event id>:` naming that question's
-     durable id.
-
-  The P2 lane-answer route emits a later event beginning exactly
-  `[decision-answered] #<event id>:`; that exact-prefix and same-owner-lane
-  relationship closes only the question with that id. Other
-  `[decision-answered]` messages — generic text, a different id, or another
-  lane — do not close it.
-- `/ui/fleet` is a React session table mounted in the existing fleet slot. The
-  browser calls only `GET /ui/api/fleet` every ten seconds. `/ui/queue` is the
-  other React page; timeline and decisions remain htmx. React pages and every
-  `/ui/api/*` response send
-  `Content-Security-Policy` (`default-src 'self'; connect-src 'self'; …`); htmx
-  pages keep their inline script and do not receive that header.
-- `GET /ui/api/fleet` is a `no-store` JSON projection of hub `/v1/nodes`
-  `session_snapshot`. Each node carries `machine_id`, `state`, `last_ping`,
-  sessions (`pane_id`, `workspace_id`, `label`, `status`, `interactive_ready`),
-  `snapshot_status`, `truncated`, original hub `received_at`, and `stale`. The
-  envelope has `fetched_at` (last **successful** hub read) and
-  `upstream` (`ok|timeout|auth_failed|http_error|unconfigured`). Session `model`
-  is always `미수집`. Empty `sessions` with `snapshot_status=ok` is not
-  collection failure. Hub credentials and the hub URL never appear in the
-  response. Shared polling means at most one upstream `/v1/nodes` read per ten
-  seconds (single-flight + cache); the three-second hub timeout and last-success
-  snapshot are retained. This route does not call jobs, relay, or lane.event.
-
-## Live refresh and vendored assets
-
-`GET /ui/events` is an SSE stream with `Content-Type: text/event-stream` and
-`Cache-Control: no-cache`. It sends an initial `delta` event then polls three
-watermarks every ten seconds: the maximum `relay_events.id`, the maximum
-`task_events.id`, and the change feed's committed `sync_state.max_sync_id`
-([sync-feed.md](sync-feed.md)). The sync watermark moves on document, task,
-task comment and decision request writes, so those refresh the page too. A
-change to any watermark produces:
-
-```text
-event: delta
-data: {"relay_max_id":123,"task_event_max_id":456,"sync_max_id":789}
-```
-
-The first block also carries `retry: 5000`, so a browser reconnects five
-seconds after the stream drops (a deploy restart or a proxy closing it). An
-idle stream gets a `: ping` comment every 25 seconds, well inside Cloudflare's
-100-second proxy idle timeout; `EventSource` ignores comments. The stream sends
-no `id:`: every (re)connection starts with a fresh `delta`, which already
-makes the page catch up. Readers must ignore unknown `data` keys; `sync_max_id`
-was added after the first two.
-
-React console views poll through `usePoll`, which skips ticks while the tab
-is hidden and reads once as soon as it becomes visible again.
-
-The page uses that event to have htmx fetch its current `/ui/fragments/...`
-view. It uses vendored htmx 2.0.4 from `internal/ui/static/htmx.min.js`; the
-adjacent `htmx.LICENSE` is the htmx 0BSD license. No external CDN is used.
-
-## P2 operator write path
-
-The decisions page presents forms for unresolved tasks, open
-`[decision-needed]` job escalations, and open `[decision-needed]` lane
-events. A question line beginning `options:`
-is split on `|` into up to eight radio choices with an `only=<n>` submit button;
-otherwise the operator enters free text. Tasks in `HANDOFFKEEP_UI_DIRECTOR_LANES`
-(with the legacy alias `HANDOFFKEEP_UI_ADMIRAL_LANES` accepted alongside it)
-appear first under
-**Awaiting your approval**, with their task references, and are not repeated in
-the ordinary task section. Open job escalations without a leading
-`[decision-needed]` marker are operational signals: they are retained under
-the folded `signals` section rather than treated as questions, and direct
-answer writes against them are rejected like unknown or closed decisions.
-
-`GET /ui/compose` provides a destination dropdown from
-`HANDOFFKEEP_UI_LANES`. If that setting is empty, or if either hub setting is
-missing, write forms are disabled and direct POSTs are rejected. Compose wraps
-the submitted text as `[event] <text> (from operator(web) <email>)`; the final
-wrapped text, not merely the input, must be at most 2048 bytes and contain no
-NUL, C0, or C1 controls. The page's byte counter and the server both enforce
-the limit. Timeline's `✓ delivered` marker is the delivery-status view.
-
-Both write routes invoke the server-side hub ingress before any task state
-change:
-
-```text
-POST /v1/relay/events
-Authorization: Bearer <hub token>
-Content-Type: application/json
-
-{"kind":"lane.event","lane":"lane-a","event_id":"web-msg-0123abcd","text":"…","label":"operator-web"}
-```
-
-The hub returns `201` for an accepted event and `409` with
-`duplicate_event_id` for a duplicate; both are successful UI sends, while `409`
-is displayed as “already sent”. A `400`, `401`, `502`, timeout, or network
-failure is a lane-send failure. For a task answer only, a `201` or `409` is
-followed by `ClearAwaitingDecision(..., "operator:<email>", ...)`.
-Therefore a failed emit never transitions the task. A conflict is shown as
-“already answered”; any other transition failure names the emitted event ID and
-asks for manual transition. Lane answers use `[decision-answered]` as described
-above. Normal form POSTs redirect with a fixed relative `303`; htmx POSTs
-replace `#ui-content` immediately.
+path.
 
 Every UI POST first verifies the same Cloudflare Access assertion as GET, then
 requires a same-host `Origin` (or, only when Origin is absent, `Referer`) and a
@@ -224,115 +78,30 @@ has no hub or database write. Each POST produces one server audit line with
 only `email`, `action`, `target`, `event_id`, and `result`; message text, hub
 credentials, and CSRF values are never logged.
 
-`GET /ui/doc/<key>` opens a stored document in an escaped `<pre>`. Keys reject
-leading `/` and `..`. Event text tokens of the form `doc:<key>` (where key uses
-`[A-Za-z0-9._\-/]`) link to that viewer without typed HTML. For events written
-by hub HTTP ingress, a `reason` beginning `http_ingress:` renders the trailing
-producer label as a sender badge; other `reason` values remain hidden.
+Any other non-GET UI method receives `405 Allow: GET`.
 
-## P3 glance API
+All database content is rendered as text. A task PR is linked only when its
+stored value starts with `https://github.com/`.
 
-`GET /ui/api/glance` is a `no-store` JSON snapshot for service clients. It
-contains the UTC generation time, sanitized hub health, raw hub `nodes`,
-`lanes`, and `jobs` data (with only per-node `active_jobs` added), task
-state totals (the twelve states plus `awaiting_decision`), unresolved decisions, the newest 20 active tasks, and fixed
-console paths. `tasks.decisions_pending` counts generic tasks with `awaiting_decision` set
-plus open `[decision-needed]` lane events; open disposition items are reported
-separately as `tasks.dispositions_open` and are not part of that sum.
-`tasks.by_state.awaiting_decision` is the raw tally of flagged tasks and includes both. Hub setup, transport, decoding, and non-200 failures retain a
-200 response with empty hub arrays and only `unconfigured`, `unreachable`, or
-`status_<code>` as the health error. The body is capped at 256 KiB by dropping
-oldest entries from `tasks.active` and marking `truncated`.
+## Operator writes
 
-`POST /ui/api/nodes/{machine}/accepting` accepts JSON `{ "accepting": bool,
-"reason": string }`, validates a lowercase machine name and a 120-byte reason,
-then relays it to the hub with the server-side credential. Hub status and up to
-64 KiB of its body are forwarded without exposing hub configuration; an
-unconfigured or unreachable hub returns `502 {"error":"hub_unavailable"}`.
+| Route | Writes |
+| --- | --- |
+| `POST /ui/api/decision-requests/resolve` | Answers a structured `dr-` decision request |
+| `POST /ui/api/decision-requests/deny` | Denies one `pending_confirmation` attempt |
+| `POST /ui/api/tasks/{id}/priority` | Task priority |
+| `POST /ui/api/tasks/{id}/{action}` | Task lifecycle actions (close, hold, reopen, relane, drop) |
+| `POST /ui/api/inbox/state`, `POST /ui/api/inbox/undo` | Attention inbox state |
+| `POST /ui/tasks/{id}/comments` | Task comment |
+| `POST /ui/api/nodes/{machine}/accepting` | Fleet host accepting flag (relayed to the hub) |
+| `POST /ui/dispositions/answer`, `POST /ui/dispositions/accept-batch`, `POST /ui/dispositions/renotify` | Disposition answers (email identity only; form-encoded) |
 
-## Disposition items (#493)
+Each write verifies the signed-in email, origin, and CSRF token before any hub
+or store call. Decision answers return a structured result (`answered`,
+`denied`, `pending_confirmation`). An Access identity is not an O3 central
+principal; where the write needs one, the store's fence refuses it.
 
-`/ui/decisions` renders a **처분 대기** section above the generic form. Its
-header is `DispositionSummary` (the same function as
-`handoffkeep tasks disposition summary`): `미처분 n · 최고령 x일`, then
-`다음 묶음 m건` when more than 50 items are open, and a detail line with
-pending application, holds, merged PRs without an item (candidates), and the
-last 24 hours of batch and single answers. Disposition items never appear in
-the generic task cards or `mode=recommended`; glance reports them as
-`tasks.dispositions_open`, outside `tasks.decisions_pending`. The generic answer
-routes refuse them before any hub emit. Origins and options are fixed at
-creation (transition refs patches touching `origin_pr`, `origin_task`, or
-`decision_options` are refused in every state), and re-asking
-(setting the `awaiting_decision` flag again) clears the previous answer.
-
-- `POST /ui/dispositions/answer` (`id`, `gen`, `key`) records the answer first
-  (flag cleared and state `researching`, `by=operator:<email>`, `refs.disposition.answer`)
-  and then emits `[decision] #<id>: <key>: <label> (from operator(web) <email>)`
-  with event ID `web-disposition-<id>-g<gen>`. A changed question generation is
-  409; a second answer is 409 and emits nothing.
-- `POST /ui/dispositions/accept-batch` answers, in one transaction, exactly the
-  oldest-50 snapshot the page rendered. The snapshot (`id:gen` list) is signed
-  with the process key and bound to the operator email, batch ID and issue time
-  (12 h). Items created after rendering are not in it; items whose generation
-  changed are skipped. One lane event per lane:
-  `[decision] disposition-batch <batch>: #a=A #b=C … (from operator(web) <email>)`
-  with ID `web-disposition-batch-<batch>-<lane>`.
-- If the emit fails the answer stays recorded and the item is listed under
-  **통지 대기**; `POST /ui/dispositions/renotify` (`event_id`) re-sends the same
-  text under the same event ID until that event reaches `relay_events`.
-
-These routes are outside `/ui/api/`, so `ServeHTTP` refuses Access service
-identities, and each handler independently requires an Access **email**
-identity before origin, CSRF, hub, or store checks. Requests without an Access
-assertion — including ones sent straight to the tailnet listener, which serves
-the same mux — are 401 before any handler runs.
-
-## P4 decision options, batch answers, and resolve
-
-Structured choices are stored additively in `tasks.refs.decision_options`; no
-schema migration is required. Each key is `A` through `F`, labels are trimmed
-to 1--120 bytes, and at most one choice is recommended. The closed lane-event
-syntax is a final line such as:
-
-```text
-[options] A|노드 로컬 저장;B|중앙 저장 선행;rec=A;free=0
-```
-
-Options use `;`, key and label use `|`, and `rec=<key>` is optional immediately
-before optional final `free=0`. Omitting `free=0` permits direct answers. The
-parser recognizes options only when the final line fully matches; malformed
-tokens, duplicate keys, unknown recommendations, too many options, or an
-options line elsewhere stay ordinary body text. The question and serialized
-options together must fit the 2048-byte event limit.
-
-The Decisions page renders structured choices as radios. A recommendation is
-default-selected and marked `권고`; when permitted, a direct-answer radio and
-input are available and a nonempty direct answer wins. Legacy `options:` lines
-also use the batch radio plus `only=<n>` convention, accepting only their parsed
-options and exposing no direct-answer field; plain questions retain the free-text path.
-
-All cards share `POST /ui/decisions/answer-batch`. Cards provide
-`items.<n>.type`, `items.<n>.id`, `items.<n>.select`,
-`items.<n>.answer`, `items.<n>.custom`, and `items.<n>.note`. `only=<n>` takes
-priority; otherwise `mode=recommended` sends every open structured item with a
-recommendation, then `mode=selected` sends checked cards. The maximum is 50
-items. Empty selection sends nothing and reports `선택된 항목이 없습니다.`
-
-Each batch item independently follows normal validation, hub emission, then
-task transition, in card order. After authentication and form checks the HTTP
-response is 200; rows expose `data-item-status` values: 200 for
-`전송됨(event_id=...)`, 409 for `이미 답변됨`, 502 for a lane-send failure,
-and 400 or 500 for other errors. Processed items each emit exactly one
-`action=decision-batch` audit entry without answer text, hub credentials, or
-CSRF values.
-
-Use `handoffkeep decisions resolve <task|escalation|lane> <id> --by <lane>
---answer <answer>` to close an answer made outside the console. It records a
-`cli-decision-<type>-<id>-<8 hex>` lane event and, for a task, clears its
-`awaiting_decision` flag (the work state is unchanged). `--no-inject` marks that new event delivered as `resolve/<lane>`;
-without it, normal node injection sees the event as undelivered.
-
-### Console decision routes
+### Decision requests
 
 Two JSON routes answer a structured `dr-` request through
 `Store.ResolveDecision` on the console channel. Both require an Access email
@@ -346,7 +115,7 @@ same `event_key` with the same body replays the first result.
   event_key}` answers the request as `operator_direct`.
 - `POST /ui/api/decision-requests/deny` with `{request_id, attempt_id, receipt,
   event_key}` denies one `pending_confirmation` attempt of the current request
-  revision ([아님]): a new attempt with result `denied`, the operator's optional
+  revision: a new attempt with result `denied`, the operator's optional
   `receipt` and a `decision-denied` task event; the request stays open. A target
   that is not pending, or belongs to another task or revision, is `409
   decision_attempt_not_pending`; an attempt already denied is `409
@@ -356,8 +125,113 @@ Results and statuses follow `api.DecisionResolveResponse`: `answered` and
 `denied` are 200, `pending_confirmation` 202, and a request that is no longer
 open is `409 decision_request_resolved`.
 
-The board's **운영자 필요만** preset mirrors the retired htmx operator view as a
-client-side filter only: the backlog column collapses to a count and other
-columns show non-settled `decide` work and tasks with `awaiting_decision` set. It narrows the
-rendered cards, never the API response — `GET /ui/api/board/tasks` always
-returns the complete task set for the requested lane.
+## Read APIs
+
+All `GET` responses are `no-store` JSON. Each route is an email-only or
+email-or-service route as noted.
+
+- `GET /ui/api/board/tasks` lists tasks with `lane`, `state`, `parent_lane`,
+  exclusive `after_id`, and `limit` (default 200, max 500) parameters in stable
+  id order. `truncated` and `next_after_id` continue the page.
+- `GET /ui/api/board/tasks/<id>` returns the task with refs, the append-only
+  transition history, per-state dwell segments, and participant segments aggregated from `bench_reps` with an
+  exact `task_ref=hk:task/<id>` match. Empty telemetry is `not_collected`;
+  when matching reps exceed the 500-rep bound, `truncated` marks the segment
+  totals as partial rather than complete.
+- `GET /ui/api/board/tasks/<id>/comments`, `.../attachments`,
+  `GET /ui/api/board/projects`, `GET /ui/api/board/lanes`,
+  `GET /ui/api/board/doc?key=` and `GET /ui/api/board/doc/attachments?key=`
+  serve the board and document views. Document routes are email-only.
+- `GET /ui/api/decisions` and `GET /ui/api/decisions/<id>` list and read
+  structured decision requests. `GET /ui/api/attention` lists what waits on the
+  operator (Home).
+- `GET /ui/api/work-status` and `GET /ui/api/deploy-pending` serve the Work
+  status and Deploys views. Deploy status is assembled from deploy-record
+  documents and task events; it is email-only.
+- `GET /ui/api/fleet` is a projection of hub `/v1/nodes` `session_snapshot`.
+  Each node carries `machine_id`, `state`, `last_ping`, sessions (`pane_id`,
+  `workspace_id`, `label`, `status`, `interactive_ready`), `snapshot_status`,
+  `truncated`, original hub `received_at`, and `stale`. The envelope has
+  `fetched_at` (last **successful** hub read) and `upstream`
+  (`ok|timeout|auth_failed|http_error|unconfigured`). Session `model` is always
+  `미수집`. Empty `sessions` with `snapshot_status=ok` is not collection
+  failure. Hub credentials and the hub URL never appear in the response. Shared
+  polling means at most one upstream `/v1/nodes` read per ten seconds
+  (single-flight + cache); the three-second hub timeout and last-success
+  snapshot are retained. This route does not call jobs, relay, or lane.event.
+- `GET /ui/api/dispositions` (email identity only) returns the open disposition
+  items, the signed batch snapshot that `accept-batch` requires, and the form CSRF
+  token; see [Disposition items](#disposition-items).
+- `GET /ui/api/glance` is a `no-store` JSON snapshot for service clients. It
+  contains the UTC generation time, sanitized hub health, raw hub `nodes`,
+  `lanes`, and `jobs` data (with only per-node `active_jobs` added), task state
+  totals (the twelve states plus `awaiting_decision`), unresolved decisions, the
+  newest 20 active tasks, and `console_paths` (`decisions`, `queue`).
+  `tasks.decisions_pending` counts generic tasks with `awaiting_decision` set
+  plus open `[decision-needed]` lane events. Hub setup, transport, decoding,
+  and non-200 failures retain a 200 response with empty hub arrays and only
+  `unconfigured`, `unreachable`, or `status_<code>` as the health error. The
+  body is capped at 256 KiB by dropping oldest entries from `tasks.active` and
+  marking `truncated`.
+
+`POST /ui/api/nodes/{machine}/accepting` accepts JSON `{ "accepting": bool,
+"reason": string }`, validates a lowercase machine name and a 120-byte reason,
+then relays it to the hub with the server-side credential. Hub status and up to
+64 KiB of its body are forwarded without exposing hub configuration; an
+unconfigured or unreachable hub returns `502 {"error":"hub_unavailable"}`.
+
+Who may call it, and which checks apply:
+
+- A signed-in email identity must send a same-host `Origin` (or `Referer` when
+  Origin is absent) and the `X-CSRF-Token` header that matches its
+  `hk_ui_csrf` cookie. A missing or wrong header is `403`.
+- A service identity (allowlisted Access service token) must send
+  `Content-Type: application/json`. It has no cookie, origin, or CSRF check. A
+  different content type is `415`.
+
+## Frontend rules
+
+React views poll through `usePoll`, which skips ticks while the tab is hidden
+and reads once as soon as it becomes visible again. Every `/ui/api/*` response
+and every shell page sends `Content-Security-Policy` (`default-src 'self';
+connect-src 'self'; …`). Assets are served from `/ui/static/console/` with a
+build stamp (`?v=<vcs revision>`); the stamped URL is cached for a day, every
+other request revalidates. No external CDN is used.
+
+The bundle is rebuilt with `npm run build` in `web/console` and committed
+together with the source change; CI fails on a stale bundle.
+
+## Disposition items
+
+Disposition items (`tasks disposition`, `/v1/tasks/dispositions*`) are stored
+and served by the bearer API and the CLI. The operator answers an item through
+the console routes below. They take form-encoded bodies and an email identity;
+the console has no page for them, so a caller reads the notice from a
+plain-text response (`200` on success, `4xx`/`5xx` with the message as body).
+
+- `GET /ui/api/dispositions` returns the open items (oldest 50), `counts`,
+  `next_batch`, unnotified answers, a fresh `csrf` token, and, when items are
+  open, a batch snapshot: `batch_id`, `issued_at`, `snapshot` (`id:gen` list),
+  and `token`, an HMAC bound to the operator email, batch ID and issue time.
+- `POST /ui/dispositions/answer` (`id`, `gen`, `key`, `csrf`) records the answer
+  first (flag cleared and state `researching`, `by=operator:<email>`,
+  `refs.disposition.answer`) and then emits `[decision] #<id>: <key>: <label>
+  (from operator(web) <email>)` with event ID `web-disposition-<id>-g<gen>`. A
+  changed question generation is `409`; a second answer is `409` and emits
+  nothing.
+- `POST /ui/dispositions/accept-batch` (`batch_id`, `issued_at`, `snapshot`,
+  `token`, `csrf`) answers, in one transaction, exactly the snapshot items whose
+  generation is unchanged. The snapshot is rejected (`403`) when the token does
+  not match the email, batch ID and issue time, and expires after 12 hours.
+  Items created after the snapshot are not in it. One lane event per lane:
+  `[decision] disposition-batch <batch>: #a=A #b=C … (from operator(web) <email>)`
+  with ID `web-disposition-batch-<batch>-<lane>`.
+- If the emit fails the answer stays recorded and the item appears under
+  `unnotified`; `POST /ui/dispositions/renotify` (`event_id`, `csrf`) re-sends
+  the same text under the same event ID until that event reaches
+  `relay_events`.
+
+These routes are outside `/ui/api/` for the POSTs, so `ServeHTTP` refuses
+service identities, and each handler independently requires an Access **email**
+identity before origin, CSRF, hub, or store checks. Requests without an Access
+assertion are `401` before any handler runs.

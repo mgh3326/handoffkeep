@@ -309,7 +309,7 @@ export function DecisionPage({ id }: { id: string }) {
     !detail.disabled_reason
       ? `${states.unknown} ${state}`
       : detail.disabled_reason === "source_elsewhere"
-        ? "이 원천은 기존 페이지에서 답합니다"
+        ? "이 원천은 이 페이지에서 답할 수 없습니다"
         : detail.disabled_reason === "superseded"
           ? "대체된 요청입니다"
           : detail.disabled_reason === "closed"
@@ -499,9 +499,7 @@ export function DecisionPage({ id }: { id: string }) {
             {reason && (
               <p>
                 {reason}{" "}
-                {detail.disabled_reason === "source_elsewhere" ? (
-                  <a href="/ui/decisions/legacy">기존 페이지</a>
-                ) : detail.disabled_reason === "superseded" &&
+                {detail.disabled_reason === "superseded" &&
                   detail.record.superseded_record_id ? (
                   <a
                     href={`/ui/decisions/${detail.record.superseded_record_id}`}

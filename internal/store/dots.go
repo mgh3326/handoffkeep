@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -17,22 +18,17 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
-// dots is an external research AI that answers on Linear issues labelled
-// "dots" with comments starting "[dots] <KIND>". These records are written by
-// two independent paths, the Linear webhook and an hourly reconciling poller
-// that keeps its own seen-set. The key, the body and the event ids below must
-// stay byte-identical to the poller's: the document key is what makes a second
-// write a no-op, and the shared event id is what lets the hub dedupe the lane
-// notification when both paths notify the same lane (it keys on lane and id).
+// dots is an external research AI that answers hk dots requests with replies
+// "[dots] <KIND>" (ReplyDots). Each recorded reply becomes a document, a
+// dots_results row and a lane notification. The record format (key, body,
+// event id) is the one the retired Linear webhook path wrote, so documents
+// and rows from before hk 4425 read the same.
 
 const (
 	// DotsLabel is the Linear label that puts an issue in dots' scope.
 	DotsLabel = "dots"
-	// DotsLane is the session of every dots document and the lane a
-	// notification goes to when its request names no other (dotsRequesterLane).
+	// DotsLane is the session of every dots document.
 	DotsLane = "operator-desk"
-
-	dotsCreatedBy = "linear-webhook"
 )
 
 // dotsResultKinds maps a comment kind that is recorded to the outbox kind that
@@ -45,26 +41,7 @@ var dotsResultKinds = map[string]string{
 
 var (
 	dotsIdentifierRE = regexp.MustCompile(`^[A-Za-z0-9_]+-[0-9]+$`)
-	dotsCommentIDRE  = regexp.MustCompile(`^[0-9A-Za-z-]{8,64}$`)
-	// dotsLaneDeclRE finds the first line that declares a lane; dotsLaneLineRE
-	// judges it, its group being nameRE.
-	dotsLaneDeclRE = regexp.MustCompile(`(?m)^hk-lane:.*$`)
-	dotsLaneLineRE = regexp.MustCompile(`^hk-lane:[ \t]*([A-Za-z0-9._-]{1,128})[ \t]*\r?$`)
 )
-
-// dotsRequesterLane picks the lane owed a dots notification: the lane named
-// on the first "hk-lane:" line of the description, else the lane of the one
-// task linked to the issue, else DotsLane. Only the first "hk-lane:" line is
-// read: when it names no valid lane, the next rule applies, not a later line.
-func dotsRequesterLane(description string, linkedTask *Task) string {
-	if m := dotsLaneLineRE.FindStringSubmatch(dotsLaneDeclRE.FindString(description)); m != nil {
-		return m[1]
-	}
-	if linkedTask != nil && validName(linkedTask.Lane) {
-		return linkedTask.Lane
-	}
-	return DotsLane
-}
 
 // DotsIssue is the part of a Linear issue a dots record quotes. IssueUUID is
 // Linear's durable id, the external_id of a task origin; Description is read
@@ -292,7 +269,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 		return DotsReplyResult{}, err
 	}
 	defer tx.Rollback(ctx)
-	// Match ApplyYouTrackActivity: mutation lock, comment lock, then task row.
+	// Lock order: mutation lock, comment lock, then task row.
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return DotsReplyResult{}, err
 	}
@@ -412,6 +389,196 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	return DotsReplyResult{TaskID: task.ID, State: task.State, DocumentKey: docKey, RunToken: runToken}, nil
 }
 
+// DotsAnswerInput carries the text answering a task's open dots question.
+type DotsAnswerInput struct {
+	Text string `json:"text"`
+}
+
+// DotsAnswerResult is the outcome of answering a task's open dots question.
+type DotsAnswerResult struct {
+	TaskID    int64              `json:"task_id"`
+	RequestID string             `json:"request_id"`
+	CommentID int64              `json:"comment_id"`
+	Task      Task               `json:"task"`
+	Request   DecisionRequest    `json:"request"`
+	Comment   CreatedTaskComment `json:"comment"`
+}
+
+// AnswerDotsQuestion resolves a task's open dots decision request (kind answered,
+// responder = caller) and records the answer text as a task comment, in one
+// transaction. A requester-lane comment alone does not resolve it.
+func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller string, in DotsAnswerInput) (DotsAnswerResult, error) {
+	if taskID < 1 {
+		return DotsAnswerResult{}, ErrTaskNotFound
+	}
+	if caller == "" || !validText(caller, 128) {
+		return DotsAnswerResult{}, errors.New("caller is required")
+	}
+	if err := CheckTaskCommentBody(in.Text); err != nil {
+		return DotsAnswerResult{}, err
+	}
+	if err := guard.Reject(in.Text); err != nil {
+		return DotsAnswerResult{}, err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return DotsAnswerResult{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock order matches ReplyDots: task-mutation
+	// advisory lock (level 2), then taskCommentInsertLock, then task row FOR UPDATE.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return DotsAnswerResult{}, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+		return DotsAnswerResult{}, err
+	}
+
+	var x Task
+	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, taskID), &x); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return DotsAnswerResult{}, ErrTaskNotFound
+		}
+		return DotsAnswerResult{}, err
+	}
+
+	if x.Lane != "dots" || !IsHKDotsRequest(x) {
+		return DotsAnswerResult{}, errors.New("invalid dots request task")
+	}
+	if x.Refs.Disposition != nil {
+		return DotsAnswerResult{}, ErrDispositionOperatorOnly
+	}
+	if isTerminalTaskState(x.State) {
+		return DotsAnswerResult{}, ErrTaskTerminal
+	}
+
+	current := x.Refs.DecisionRequest
+	if current == nil {
+		return DotsAnswerResult{}, ErrNoOpenDecisionRequest
+	}
+	if current.Status != DecisionRequestOpen {
+		return DotsAnswerResult{}, ErrDecisionRequestResolved
+	}
+	if current.EffectivePolicy(false) == DecisionPolicyOperatorDirect {
+		return DotsAnswerResult{}, ErrDecisionRequestHumanOnly
+	}
+
+	now := time.Now().UTC()
+
+	// 1. Insert comment
+	var comment TaskComment
+	err = scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,$2,$3,$4) RETURNING `+taskCommentColumns, taskID, in.Text, caller, now), &comment)
+	if err != nil {
+		return DotsAnswerResult{}, err
+	}
+	op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, comment)
+	if err != nil {
+		return DotsAnswerResult{}, err
+	}
+
+	// 2. Resolve decision request
+	decisionBefore := decisionBeforeOf(x)
+	root := current.RootID()
+	eventKey := fmt.Sprintf("auto:dots-answer:%d:%s", taskID, current.ID)
+
+	attempt := decisionAttempt{
+		channel:           DecisionChannelCLI,
+		eventKey:          eventKey,
+		taskID:            taskID,
+		revisionRequestID: current.ID,
+		revision:          current.Revision,
+		root:              root,
+		provenance:        DecisionProvenanceOperatorRelay,
+		actor:             caller,
+		at:                now,
+		text:              in.Text,
+		result:            DecisionResultAnswered,
+	}
+	attemptID, err := insertDecisionAttempt(ctx, tx, attempt)
+	if err != nil {
+		return DotsAnswerResult{}, err
+	}
+
+	resolved := *current
+	resolved.Status = DecisionRequestAnswered
+	resolved.Resolution = &DecisionResolution{
+		Kind:      DecisionRequestAnswered,
+		Text:      in.Text,
+		Responder: caller,
+		By:        caller,
+		At:        now,
+	}
+	x.Refs.DecisionRequest = &resolved
+
+	flagWas := x.AwaitingDecision
+	if flagWas {
+		var others int
+		if others, err = otherBlockingDecisionsTx(ctx, tx, x.ID, resolved.ID); err != nil {
+			return DotsAnswerResult{}, err
+		}
+		x.AwaitingDecision = others > 0
+	}
+
+	encoded, err := json.Marshal(x.Refs)
+	if err != nil {
+		return DotsAnswerResult{}, err
+	}
+	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET refs=$2::jsonb,awaiting_decision=$4,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, x.ID, string(encoded), now, x.AwaitingDecision), &x); err != nil {
+		return DotsAnswerResult{}, err
+	}
+
+	var resolutionID int64
+	err = tx.QueryRow(ctx, `INSERT INTO decision_resolutions(request_id,question_revision,revision_request_id,task_id,kind,option_id,text,receipt,provenance,channel,decided_by,recorded_by,attempt_id,committed_at)
+		VALUES($1,$2,$3,$4,$5,NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),$9,$10,$11,$12,$13,$14) RETURNING resolution_id`,
+		root, current.Revision, resolved.ID, x.ID, DecisionRequestAnswered, "", in.Text, "", DecisionProvenanceOperatorRelay, DecisionChannelCLI,
+		caller, caller, attemptID, now).Scan(&resolutionID)
+	if err != nil {
+		return DotsAnswerResult{}, err
+	}
+
+	note := "decision-" + DecisionRequestAnswered + " " + resolved.ID + ": " + in.Text
+	resolveIn := ResolveDecisionInput{
+		TaskID:    taskID,
+		RequestID: current.ID,
+		Kind:      DecisionRequestAnswered,
+		Text:      in.Text,
+		Responder: caller,
+		Channel:   DecisionChannelCLI,
+		Actor:     caller,
+	}
+	if err = s.queueDecisionAnswerNotice(ctx, tx, x, resolved, resolveIn, caller, resolutionID, now); err != nil {
+		return DotsAnswerResult{}, err
+	}
+	if flagWas && !x.AwaitingDecision {
+		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: caller, Note: "decision-clear " + resolved.ID + " by " + caller, Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
+			return DotsAnswerResult{}, err
+		}
+	}
+	if err = insertDecisionEvent(ctx, tx, &x, caller, note, now); err != nil {
+		return DotsAnswerResult{}, err
+	}
+	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, caller, note, 0, now); err != nil {
+		return DotsAnswerResult{}, err
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return DotsAnswerResult{}, err
+	}
+	logYTCommentEnqueued(comment, op, enqueued)
+	projection := ytProjectionOf(op, enqueued)
+
+	return DotsAnswerResult{
+		TaskID:    taskID,
+		RequestID: resolved.ID,
+		CommentID: comment.ID,
+		Task:      x,
+		Request:   resolved,
+		Comment:   CreatedTaskComment{TaskComment: comment, YouTrackProjection: &projection},
+	}, nil
+}
+
 // DotsComment is one Linear comment. CreatedAt keeps Linear's own ISO-8601
 // text: the document key takes its date from that text, not from a parsed and
 // re-rendered time.
@@ -513,72 +680,6 @@ func dotsResultText(kind, key string, issue DotsIssue, c DotsComment) string {
 	return dotsLaneText("[dots] " + kind + " " + issue.Identifier + " " + firstRunes(issue.Title, 60) + " :: " + dotsSummaryLine(c.Body) + " → hk:doc " + key + " · " + issue.URL)
 }
 
-func dotsFollowupText(issue DotsIssue) string {
-	return dotsLaneText("[dots-watch] " + issue.Identifier + " is closed but got a new comment after closing; dots will not pick it up. Reopen it if it is a request. " + issue.URL)
-}
-
-func validDotsIssue(issue DotsIssue, commentID string) bool {
-	return dotsIdentifierRE.MatchString(issue.Identifier) && dotsCommentIDRE.MatchString(commentID) && originUUIDRE.MatchString(issue.IssueUUID)
-}
-
-// dotsLinkedTask returns the one task whose Linear origin is the issue, or
-// nil when none or several are: an ambiguous link is unknown, not a guess.
-// The caller's later write that names the task takes KEY SHARE on its row.
-func dotsLinkedTask(ctx context.Context, tx pgx.Tx, issueUUID string) (*Task, error) {
-	rows, err := tx.Query(ctx, `SELECT DISTINCT o.task_id, t.lane FROM task_origins o JOIN tasks t ON t.id = o.task_id WHERE o.provider = $1 AND o.external_id = $2 ORDER BY o.task_id LIMIT 2`, OriginLinear, issueUUID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var found []Task
-	for rows.Next() {
-		var t Task
-		if err := rows.Scan(&t.ID, &t.Lane); err != nil {
-			return nil, err
-		}
-		found = append(found, t)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(found) != 1 {
-		return nil, nil
-	}
-	return &found[0], nil
-}
-
-// RecordDotsResult writes the document for one dots answer, its dots_results
-// row and the lane notification owed for it, in one transaction. The first
-// writer of a key wins: a redelivery, or a poller that got there first, keeps
-// the document body and queues nothing (that poller notified on its own), but
-// the dots_results row is still written and a NULL task link filled in.
-// created reports whether this call wrote the document.
-//
-// Locks (lockorder.go, level 4): the documents row and the dots_results row,
-// each insert or update taking KEY SHARE on the one linked task row.
-func (s *Store) RecordDotsResult(ctx context.Context, kind string, issue DotsIssue, c DotsComment) (key string, created bool, err error) {
-	if !validDotsIssue(issue, c.ID) {
-		return "", false, errors.New("invalid dots result")
-	}
-	if err := checkDotsResult(kind, issue, c, false); err != nil {
-		return "", false, err
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return "", false, err
-	}
-	defer tx.Rollback(ctx)
-	task, err := dotsLinkedTask(ctx, tx, issue.IssueUUID)
-	if err != nil {
-		return "", false, err
-	}
-	key, created, err = recordDotsResultTx(ctx, tx, kind, issue, c, task, dotsRequesterLane(issue.Description, task), dotsCreatedBy)
-	if err != nil {
-		return "", false, err
-	}
-	return key, created, tx.Commit(ctx)
-}
-
 func checkDotsResult(kind string, issue DotsIssue, c DotsComment, allowProgress bool) error {
 	if !DotsKindRecorded(kind) && !(allowProgress && kind == "PROGRESS") {
 		return errors.New("invalid dots result")
@@ -591,7 +692,7 @@ func checkDotsResult(kind string, issue DotsIssue, c DotsComment, allowProgress 
 	}
 	key := dotsResultKey(issue, c)
 	body := dotsResultBody(kind, issue, c)
-	if !validDocKey(key) || !validText(body, DocumentMaxBytes) {
+	if !validDocKey(key) || !validDocumentText(body) {
 		return errors.New("invalid dots result")
 	}
 	return guard.Reject(key + "\n" + body)
@@ -644,27 +745,4 @@ func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsI
 		}
 	}
 	return key, created, nil
-}
-
-// RecordDotsFollowup records the flag for a non-dots comment added after an
-// issue closed: dots ignores closed issues, so the comment would otherwise be
-// lost. created is false when this comment was already flagged.
-func (s *Store) RecordDotsFollowup(ctx context.Context, issue DotsIssue, commentID string) (created bool, err error) {
-	if !validDotsIssue(issue, commentID) {
-		return false, errors.New("invalid dots followup")
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(ctx)
-	task, err := dotsLinkedTask(ctx, tx, issue.IssueUUID)
-	if err != nil {
-		return false, err
-	}
-	created, err = insertNotificationOutboxOnce(ctx, tx, OutboxKindDotsFollowup, dotsRequesterLane(issue.Description, task), "dots-followup-"+commentID, dotsFollowupText(issue), time.Now().UTC())
-	if err != nil {
-		return false, err
-	}
-	return created, tx.Commit(ctx)
 }

@@ -632,7 +632,10 @@ page at a time, at most `--limit` (default all), audited one at a time. For each
   `missing_in_yt` (none), `duplicate` (two or more), `adopted_unmatched`
   (none, but the adoption's `adopted:` link says the Python mirror posted it
   in a form hk cannot identify; never enqueued), and for a YouTrack
-  comment that copies nothing `yt_only_bot` (written by the bot key's user)
+  comment that copies nothing `yt_only_bot` (written by the bot key's user;
+  a bot comment whose rendered form names a `comment_append` op of the
+  task_docs principal `hk:doc-comments` on the same issue is `doc_comment`,
+  hk 4245, `ytwrite.ReclassifyDocOps`)
   or `yt_only_human`.
 - **Not bound here**, by reason under `unbound`: `no_project`, `no_issue`
   (unmapped project, no YouTrack project id, no such issue), `ambiguous` (the
@@ -935,7 +938,7 @@ snapshot. `PayloadSHA` covers the snapshot, the issue and the tenant.
 collapsed, cut to 250 runes. Fields, every one in every op (no value clears
 it): `hk ID`, `hk 프로젝트` (the project, `Unassigned` for none), `hk 상태` (the
 Korean label), `hk 우선순위`, `레인`, `종류`, `등급` and `티어` (the title's `(grade
-G, T)` marker, else `refs.linear`), `PR`, `작업 job`, `멈춤` (`멈춤` when stalled),
+G, T)` marker, else `refs.grade`/`refs.tier`), `PR`, `작업 job`, `멈춤` (`멈춤` when stalled),
 `마감` (epoch ms), `영역`, `마일스톤` (the milestone's name), `예상 소요` (whole
 minutes). The description is a stable hk block with no op marker and no
 provenance line, so the same task renders the same text; empty lines after
@@ -1237,7 +1240,9 @@ lines, cut between characters for a longer line; a brief is one
 SHA-256 to the import's output.
 
 **Cap.** A document part may be up to `MaxDocCommentBodyBytes` (the import's
-240 KiB, `CheckDocComment`); hk's own comments keep `MaxBodyBytes` (64 KiB).
+240 KiB, `CheckDocComment`). hk's own comments take YouTrack's text bound
+(`TextMaxChars`, 20,000,000 characters; `internal/ytwrite/bounds.go`, measured
+2026-11-13), the same bound as a task title, task text and an issue description.
 
 **Audit.** A document copy is not an hk comment. One the import posted
 (`documentIssueComments`' `# <key>` report parts and `Article:` brief lines)
@@ -1450,6 +1455,14 @@ text quotes the marker gets its create rejected `invalid_issue`.
 an open request past its expiry, read when the row changes), `레인`, `권장`,
 `결정 기한` (epoch ms), `연결 task ID`. Every field is in every op; empty
 clears.
+
+**Expiry sweep (hk 4116).** An open request's expiry changes no row, so the
+feed never sees it. `catchUpYTDecisionExpiries` runs after each feed pass,
+at most once a minute, and prepares the snapshot of every bound decision
+(on the gate's tenant) whose `expires_at` passed since the last completed
+sweep; the first sweep of a process covers every expired decision. The
+snapshot is keyed by its hash, so each expiry prepares one op. A failed
+sweep keeps its window and runs again.
 
 **Send.** `decision_create`: the project's fields (one admin GET; without
 `hk ID` or `결정 ID` the op is held `not_sent`), then the DEC issues with

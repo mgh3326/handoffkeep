@@ -162,7 +162,7 @@ func TestCommentOpAndCheck(t *testing.T) {
 	r = commentReq("k", "x")
 	r.Actor = "a · b"
 	bad["separator in actor"] = r
-	r = commentReq("k", strings.Repeat("x", ytwrite.MaxBodyBytes+1))
+	r = commentReq("k", strings.Repeat("x", ytwrite.TextMaxChars+1))
 	bad["body too large"] = r
 	for name, req := range bad {
 		if err := ytwrite.CheckComment(req); !errors.Is(err, ytwrite.ErrInvalid) {

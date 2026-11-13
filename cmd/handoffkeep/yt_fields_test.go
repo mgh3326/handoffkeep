@@ -18,11 +18,8 @@ func TestYTFieldsModeStartsTheWriteWorker(t *testing.T) {
 	if _, err := ytCommentsWorkerFromEnv(nil); err == nil || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_FIELDS_MODE=on") || !strings.Contains(err.Error(), "YOUTRACK_URL") {
 		t.Fatalf("on without credentials: %v", err)
 	}
-	if owner, err := youtrackProtocolOwner(); err != nil || owner != "HANDOFFKEEP_YT_FIELDS_MODE=on" {
-		t.Fatalf("protocol owner %q, %v", owner, err)
-	}
-	t.Setenv("YOUTRACK_URL", readthroughTestURL)
-	t.Setenv("YOUTRACK_BOT_API_KEY", readthroughTestKey)
+	t.Setenv("YOUTRACK_URL", serveTestURL)
+	t.Setenv("YOUTRACK_BOT_API_KEY", serveTestKey)
 	if w, err := ytCommentsWorkerFromEnv(&store.Store{}); err != nil || w == nil {
 		t.Fatalf("fields on: worker %v err %v", w, err)
 	}
@@ -30,14 +27,8 @@ func TestYTFieldsModeStartsTheWriteWorker(t *testing.T) {
 	if _, err := ytCommentsWorkerFromEnv(&store.Store{}); err == nil || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_FIELDS_MODE") {
 		t.Fatalf("an unknown fields mode: %v", err)
 	}
-	if _, err := youtrackProtocolOwner(); err == nil {
-		t.Fatal("an unknown fields mode let the legacy push run")
-	}
 	t.Setenv("HANDOFFKEEP_YT_FIELDS_MODE", "off")
 	if w, err := ytCommentsWorkerFromEnv(&store.Store{}); err != nil || w != nil {
 		t.Fatalf("all off: worker %v err %v", w, err)
-	}
-	if owner, err := youtrackProtocolOwner(); err != nil || owner != "" {
-		t.Fatalf("all off: owner %q, %v", owner, err)
 	}
 }

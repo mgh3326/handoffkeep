@@ -145,8 +145,6 @@ func auditTarget(value string) string {
 // an infrastructure failure, logged and answered 500.
 func decisionResolveError(w http.ResponseWriter, err error) string {
 	switch {
-	case uiWrkError(w, err):
-		return "wrk_reject"
 	case errors.Is(err, store.ErrTaskNotFound):
 		writeJSONError(w, http.StatusNotFound, "not_found")
 	case errors.Is(err, store.ErrDecisionEventKeyConflict):

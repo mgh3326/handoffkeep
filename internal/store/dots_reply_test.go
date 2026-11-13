@@ -156,29 +156,6 @@ func TestDotsStartConcurrentClaim(t *testing.T) {
 	}
 }
 
-func TestDotsRequestNeverEnqueuesLinearMirror(t *testing.T) {
-	s := schemaStore(t, "dots_single_channel")
-	s.EnableLinearBoard()
-	s.EnableLinearSync()
-	ctx := t.Context()
-	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	started, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "START", Body: "Starting", IdempotencyKey: "start", ExpectedUpdatedAt: &task.UpdatedAt})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "QUESTION", Body: "Which option?", AskOperator: true, IdempotencyKey: "question", RunToken: started.RunToken})
-	if err != nil {
-		t.Fatal(err)
-	}
-	outbox, err := s.ListLinearOutbox(ctx, task.ID)
-	if err != nil || len(outbox) != 0 {
-		t.Fatalf("linear outbox=%+v err=%v", outbox, err)
-	}
-}
-
 func TestDotsOperatorQuestionRollsBackAndRetries(t *testing.T) {
 	s := schemaStore(t, "dots_question")
 	ctx := t.Context()
@@ -240,49 +217,6 @@ func TestDotsOperatorQuestionRollsBackAndRetries(t *testing.T) {
 	results, err = s.ListDotsResults(ctx, task.ID, "", 10)
 	if err != nil || len(results) != 1 {
 		t.Fatalf("results=%v err=%v", results, err)
-	}
-}
-
-func TestDotsReplyMatchesLinearRecord(t *testing.T) {
-	s := schemaStore(t, "dots_compare")
-	ctx := t.Context()
-	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	issue := DotsIssue{Identifier: "ZZZ-1", Title: task.Title, URL: "https://linear.example/ZZZ-1", IssueUUID: "0a1b2c3d-0000-4000-8000-0000000000b1", Description: "hk-lane: requester"}
-	origin := validOrigin()
-	origin.ExternalID = issue.IssueUUID
-	if _, _, err := s.AddTaskOrigin(ctx, task.ID, "caller", origin); err != nil {
-		t.Fatal(err)
-	}
-	started, _ := startDotsRun(t, s, task.ID, "start")
-	comment := DotsComment{ID: "0a1b2c3d-1111-4111-8111-111111111111", CreatedAt: time.Now().UTC().Format(time.RFC3339), Body: "[dots] RESULT\nThe answer"}
-	linearKey, created, err := s.RecordDotsResult(ctx, "RESULT", issue, comment)
-	if err != nil || !created {
-		t.Fatalf("linear: key=%s created=%v err=%v", linearKey, created, err)
-	}
-	hk, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "RESULT", Body: "The answer", IdempotencyKey: "key", RunToken: started.RunToken})
-	if err != nil {
-		t.Fatal(err)
-	}
-	results, err := s.ListDotsResults(ctx, task.ID, "", 10)
-	if err != nil || len(results) != 2 {
-		t.Fatalf("results=%+v err=%v", results, err)
-	}
-	a, b := results[0], results[1]
-	if a.Source != "hk" || b.Source != "linear" || a.Kind != b.Kind || a.Verdict != b.Verdict || a.ArtefactSHA256 != b.ArtefactSHA256 || a.RoutedLane != b.RoutedLane {
-		t.Fatalf("hk=%+v linear=%+v", a, b)
-	}
-	for _, key := range []string{linearKey, hk.DocumentKey} {
-		doc, found, err := s.GetDocument(ctx, key)
-		if err != nil || !found || !strings.HasSuffix(doc.Body, "\n\n"+comment.Body+"\n") {
-			t.Fatalf("document=%+v found=%v err=%v", doc, found, err)
-		}
-	}
-	var count int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE target_lane='requester' AND kind=$1`, OutboxKindDotsReport).Scan(&count); err != nil || count != 2 {
-		t.Fatalf("notifications=%d err=%v", count, err)
 	}
 }
 
@@ -404,5 +338,111 @@ func TestDotsOperatorAnswerLetsResultComplete(t *testing.T) {
 	done, _, _ := s.GetTask(ctx, task.ID)
 	if done.State != StateCompleted {
 		t.Fatalf("state=%s, want %s", done.State, StateCompleted)
+	}
+}
+
+func TestAnswerDotsQuestion(t *testing.T) {
+	s := schemaStore(t, "dots_answer_q")
+	ctx := t.Context()
+
+	// 1. Task with no open decision request -> ErrNoOpenDecisionRequest
+	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "answer"}); !errors.Is(err, ErrNoOpenDecisionRequest) {
+		t.Fatalf("expected ErrNoOpenDecisionRequest, got %v", err)
+	}
+
+	// 2. Open dots QUESTION
+	started, _ := startDotsRun(t, s, task.ID, "start")
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{
+		TaskID:         task.ID,
+		Kind:           "QUESTION",
+		Body:           "Which option?",
+		AskOperator:    true,
+		IdempotencyKey: "question",
+		RunToken:       started.RunToken,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	asked, _, _ := s.GetTask(ctx, task.ID)
+	if !asked.AwaitingDecision || asked.Refs.DecisionRequest == nil {
+		t.Fatalf("question did not flag task: %+v", asked)
+	}
+
+	// 3. Plain comment does NOT resolve it
+	comment, err := s.CreateTaskComment(ctx, task.ID, "caller", "just a comment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if comment.ID == 0 {
+		t.Fatal("comment ID is 0")
+	}
+	afterComment, _, _ := s.GetTask(ctx, task.ID)
+	if !afterComment.AwaitingDecision || afterComment.Refs.DecisionRequest.Status != DecisionRequestOpen {
+		t.Fatalf("comment should not resolve decision: awaiting=%v status=%s", afterComment.AwaitingDecision, afterComment.Refs.DecisionRequest.Status)
+	}
+
+	// 4. AnswerDotsQuestion resolves request, clears awaiting_decision, records comment
+	answerRes, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "proceed with option B"})
+	if err != nil {
+		t.Fatalf("AnswerDotsQuestion failed: %v", err)
+	}
+	if answerRes.Task.AwaitingDecision {
+		t.Fatalf("awaiting_decision should be false, got true")
+	}
+	if answerRes.Request.Status != DecisionRequestAnswered {
+		t.Fatalf("request status should be answered, got %s", answerRes.Request.Status)
+	}
+	if answerRes.Request.Resolution == nil || answerRes.Request.Resolution.Text != "proceed with option B" || answerRes.Request.Resolution.Responder != "caller" {
+		t.Fatalf("unexpected resolution: %+v", answerRes.Request.Resolution)
+	}
+	if answerRes.Comment.Body != "proceed with option B" || answerRes.Comment.Author != "caller" {
+		t.Fatalf("unexpected comment: %+v", answerRes.Comment)
+	}
+
+	answeredTask, _, _ := s.GetTask(ctx, task.ID)
+	if answeredTask.AwaitingDecision {
+		t.Fatalf("answered task awaiting_decision should be false, got true")
+	}
+
+	// 5. A second answer is refused with a clear code (ErrDecisionRequestResolved)
+	if _, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "another answer"}); !errors.Is(err, ErrDecisionRequestResolved) {
+		t.Fatalf("second answer expected ErrDecisionRequestResolved, got %v", err)
+	}
+
+	// 6. Policy checks: human_only / operator_direct request is refused
+	opTask, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Op", Body: "Op Question", RequesterLane: "requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opStarted, _ := startDotsRun(t, s, opTask.ID, "start-op")
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{
+		TaskID:         opTask.ID,
+		Kind:           "QUESTION",
+		Body:           "Needs operator?",
+		AskOperator:    true,
+		IdempotencyKey: "question-op",
+		RunToken:       opStarted.RunToken,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Make decision request human-only / operator_direct
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET refs=jsonb_set(refs, '{decision_request,human_only}', 'true') WHERE id=$1`, opTask.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AnswerDotsQuestion(ctx, opTask.ID, "caller", DotsAnswerInput{Text: "unauthorized"}); !errors.Is(err, ErrDecisionRequestHumanOnly) {
+		t.Fatalf("expected ErrDecisionRequestHumanOnly, got %v", err)
+	}
+
+	// 7. Non-dots request task is refused
+	plainTask, err := s.CreateTask(ctx, Task{Lane: "dev", Title: "Plain task", Kind: "implement", CreatedBy: "tester", Project: projectPtr(testProjectName)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AnswerDotsQuestion(ctx, plainTask.ID, "caller", DotsAnswerInput{Text: "answer"}); err == nil || !strings.Contains(err.Error(), "invalid dots request task") {
+		t.Fatalf("expected invalid dots request task error, got %v", err)
 	}
 }

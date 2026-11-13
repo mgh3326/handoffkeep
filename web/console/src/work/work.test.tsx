@@ -7,7 +7,7 @@ import { inView } from "./views";
 import { navKey } from "../app/routes";
 
 const task: BoardTask = { id: 101, title: "Example task", lane: "x", kind: "implement", state: "developing", priority: 2, created_by: "operator", created_at: "2026-11-05T00:00:00Z", updated_at: "2026-11-05T01:00:00Z", refs: {}, project: "a" };
-const detail = { task, events: [], dwell: [], linear: null, participants: { task_ref: "hk:task/101", coverage: "not_collected", segments: [] }, origins: [], documents: [], documents_truncated: false, changes: [], jobs: [], origins_truncated: false, changes_truncated: false, jobs_truncated: false };
+const detail = { task, events: [], dwell: [], participants: { task_ref: "hk:task/101", coverage: "not_collected", segments: [] }, origins: [], documents: [], documents_truncated: false, changes: [], jobs: [], origins_truncated: false, changes_truncated: false, jobs_truncated: false };
 const json = (data: unknown) => new Response(JSON.stringify(data), { status: 200, headers: { "Content-Type": "application/json" } });
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
@@ -94,6 +94,20 @@ describe("Work", () => {
     render(<TaskRecord id={101} />);
     expect(await screen.findByText(/alpha \(2\), beta \(3\)/)).toBeTruthy();
     expect(screen.getByText(/skills not supported/)).toBeTruthy();
+  });
+  it("shows the task's spawn request, its state and start condition", async () => {
+    const spawn = { request_id: "req-7", job: "hk4377-spawn", role: "worker", state: "waiting", reason: "", attempt: 1, host: "m1b", next_check_at: null, expires_at: null, updated_at: "2026-11-13T00:00:00Z", start_condition: { task_id: 4376, until: "merged", task_state: "reviewing", met: false } };
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...detail, spawn })));
+    render(<TaskRecord id={101} />);
+    expect(await screen.findByRole("heading", { name: "실행 요청" })).toBeTruthy();
+    expect(screen.getByText("조건 대기")).toBeTruthy();
+    expect(screen.getByText("#4376 (검토 중) 머지 후 시작 · 미충족")).toBeTruthy();
+  });
+  it("shows no spawn section when the task has no spawn request", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json(detail)));
+    render(<TaskRecord id={101} />);
+    expect(await screen.findByRole("heading", { name: "작업 실행" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "실행 요청" })).toBeNull();
   });
   it("W6 reports a terminal task without closure", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({ ...detail, task: { ...task, state: "dropped" } })));

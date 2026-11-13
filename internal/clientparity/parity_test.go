@@ -28,16 +28,18 @@ var pairs = []struct {
 	{client.DecisionRequest{}, store.DecisionRequest{}},
 	{client.DecisionResolution{}, store.DecisionResolution{}},
 	{client.TaskComment{}, store.TaskComment{}},
+	{client.TaskSpawn{}, store.TaskSpawn{}},
+	{client.TaskSpawnStart{}, store.TaskSpawnStart{}},
+	{client.TaskSpawnInput{}, store.TaskSpawnInput{}},
+	{client.TaskSpawnStartInput{}, store.TaskSpawnStartInput{}},
+	{client.TaskStateEntry{}, store.TaskStateEntry{}},
 	{client.ProjectOwner{}, store.ProjectOwnerDetail{}},
 	{client.Document{}, store.Document{}},
 	{client.Attachment{}, store.Attachment{}},
-	// One input type serves both decision routes: POST
-	// /v1/tasks/{id}/decision-request and .../decision-request/ask each
-	// decode store.DecisionRequestInput.
+	// POST /v1/tasks/{id}/decision-request decodes store.DecisionRequestInput.
 	{client.DecisionAskInput{}, store.DecisionRequestInput{}},
 	{client.DecisionOptions{}, store.DecisionOptions{}},
 	{client.DecisionOption{}, store.DecisionOption{}},
-	{client.DecisionAskResult{}, store.DecisionAskResult{}},
 	{client.DecisionRequestResult{}, store.DecisionRequestResult{}},
 	{client.SimilarTask{}, store.SimilarTask{}},
 }
