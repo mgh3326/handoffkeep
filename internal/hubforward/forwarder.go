@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -23,6 +24,10 @@ const (
 	baseBackoff     = 30 * time.Second
 	maxBackoff      = 10 * time.Minute
 	batchSize       = 200
+	// hubLaneTextMaxBytes is the current panewire relay ingress limit. Handoffkeep
+	// stores the full outbox text; this cap applies only to the forwarded copy.
+	hubLaneTextMaxBytes = 2048
+	laneTextMarker      = "… [truncated; full text in hk]"
 	// label is the hub's name for this sender.
 	label = "hk-outbox"
 )
@@ -178,15 +183,23 @@ func (f *Forwarder) post(ctx context.Context, row store.NotificationOutbox) (int
 	return out.ID, nil
 }
 
-// laneText replaces the control characters the hub refuses; older rows were not
-// written with that rule in mind.
+// laneText sanitizes and bounds only the forwarded copy. The durable outbox
+// retains the full text so the hub's current limit cannot refuse or lose it.
 func laneText(text string) string {
-	return strings.Map(func(r rune) rune {
+	text = strings.Map(func(r rune) rune {
 		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
 			return ' '
 		}
 		return r
 	}, text)
+	if len(text) <= hubLaneTextMaxBytes {
+		return text
+	}
+	keep := hubLaneTextMaxBytes - len(laneTextMarker)
+	for keep > 0 && !utf8.ValidString(text[:keep]) {
+		keep--
+	}
+	return text[:keep] + laneTextMarker
 }
 
 func (f *Forwarder) now() time.Time {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -137,6 +138,30 @@ func TestForwardSendsOneEventAndRecordsTheReceipt(t *testing.T) {
 	sent, failed, err = f.Once(t.Context())
 	if err != nil || sent != 0 || failed != 0 || len(hub.posts) != len(want) {
 		t.Fatalf("second pass sent=%d failed=%d posts=%d err=%v", sent, failed, len(hub.posts), err)
+	}
+}
+
+func TestForwardTruncatesOnlyTheHubCopy(t *testing.T) {
+	fullText := strings.Repeat("한글 lane event ", 300)
+	if len(fullText) <= hubLaneTextMaxBytes {
+		t.Fatalf("fixture bytes=%d, want more than the hub limit %d", len(fullText), hubLaneTextMaxBytes)
+	}
+	outbox := &fakeOutbox{rows: []store.NotificationOutbox{{
+		Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "long-lane-text", Text: fullText,
+	}}}
+	f, hub, _ := forwarderFixture(t, outbox)
+	if sent, failed, err := f.Once(t.Context()); err != nil || sent != 1 || failed != 0 {
+		t.Fatalf("sent=%d failed=%d err=%v", sent, failed, err)
+	}
+	if len(hub.posts) != 1 {
+		t.Fatalf("hub posts=%d", len(hub.posts))
+	}
+	forwarded := hub.posts[0]["text"]
+	if len(forwarded) > hubLaneTextMaxBytes || !utf8.ValidString(forwarded) || !strings.HasSuffix(forwarded, laneTextMarker) {
+		t.Fatalf("forwarded bytes=%d valid=%t suffix=%t", len(forwarded), utf8.ValidString(forwarded), strings.HasSuffix(forwarded, laneTextMarker))
+	}
+	if outbox.rows[0].Text != fullText {
+		t.Fatalf("outbox text changed: got %d bytes, want %d", len(outbox.rows[0].Text), len(fullText))
 	}
 }
 
