@@ -288,3 +288,84 @@ func TestAutoCloseKeepsTheReceiptFence(t *testing.T) {
 		t.Fatalf("fenced parent auto-closed to %s", got)
 	}
 }
+
+// TestAutoCloseHoldsAParentOnItsOwnPieces (PR #351 review H1): the last
+// sub-task settling does not close a parent while one of the parent's own
+// implements changes is open, or is reverted and not relanded; the not-applied
+// auto_close row names the change.
+func TestAutoCloseHoldsAParentOnItsOwnPieces(t *testing.T) {
+	s, pool := searchTestStore(t)
+
+	// An open implements PR of the parent's own.
+	parent := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	child := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setParent(t, s, child, parent)
+	open := testPR(7201)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: open, TaskID: parent.ID})
+	if res := send(t, s, mergeEvent(child.ID, testPR(7202))); !res.Applied || res.State != StateMerged {
+		t.Fatalf("child merge %+v", res)
+	}
+	got := stateOf(t, s, parent.ID)
+	if got.State != StateReviewing {
+		t.Fatalf("parent with an open implements PR moved to %s, want reviewing", got.State)
+	}
+	if skips := eventsOfKind(got, TaskEventAutoClose); len(skips) != 1 || skips[0].Applied || !strings.Contains(skips[0].Note, open) {
+		t.Fatalf("auto_close rows %+v, want one not-applied naming %s", skips, open)
+	}
+
+	// A reverted implements PR of the parent's own, not relanded.
+	parent2 := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	child2 := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setParent(t, s, child2, parent2)
+	piece := testPR(7203)
+	if res := send(t, s, mergeEvent(parent2.ID, piece)); res.Applied {
+		t.Fatalf("parent merge with an open sub-task applied: %+v", res)
+	}
+	send(t, s, revertEvent(parent2.ID, piece, testPR(7204)))
+	send(t, s, mergeEvent(child2.ID, testPR(7205)))
+	got = stateOf(t, s, parent2.ID)
+	if got.State != StateDeveloping {
+		t.Fatalf("parent with a reverted piece auto-closed to %s", got.State)
+	}
+	if skips := eventsOfKind(got, TaskEventAutoClose); len(skips) != 1 || !strings.Contains(skips[0].Note, "reverted") {
+		t.Fatalf("auto_close rows %+v, want one naming the revert", skips)
+	}
+}
+
+// TestRevertReachesEveryTaskClosedOnThePR (PR #351 review H3): a revert event
+// names one task, and it also reopens every other task that implements the
+// reverted PR and is closed on it: one closed by naming the PR (hk 4322) and
+// a sibling the merge propagated to.
+func TestRevertReachesEveryTaskClosedOnThePR(t *testing.T) {
+	s, pool := searchTestStore(t)
+	pr := testPR(7301)
+	carrier := flowTask(t, s, pool, "implement", StateReviewing, true)
+	sibling := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setRefsPR(t, s, carrier.ID, pr)
+	setRefsPR(t, s, sibling.ID, pr)
+	send(t, s, mergeEvent(carrier.ID, pr))
+	delivered := flowTask(t, s, pool, "fix", StateBacklog, false)
+	if got, err := s.TransitionTask(t.Context(), delivered.ID, StateMerged, "tester", "", &TaskRefs{PR: pr}, ""); err != nil || got.State != StateMerged {
+		t.Fatalf("delivered close: %+v err=%v", got, err)
+	}
+	revert := testPR(7302)
+	if res := send(t, s, revertEvent(carrier.ID, pr, revert)); !res.Applied || res.State != StateDeveloping {
+		t.Fatalf("revert %+v", res)
+	}
+	for _, id := range []int64{sibling.ID, delivered.ID} {
+		got := stateOf(t, s, id)
+		if got.State != StateDeveloping || got.Refs.RevertPR != revert {
+			t.Fatalf("task %d after the revert: state=%s revert_pr=%q, want developing", id, got.State, got.Refs.RevertPR)
+		}
+		if rows := sourceRows(t, s, id, SourceMergewakeRevert); len(rows) != 1 || !rows[0].Applied {
+			t.Fatalf("task %d revert rows %+v", id, rows)
+		}
+	}
+	// A redelivery changes nothing.
+	if res := send(t, s, revertEvent(carrier.ID, pr, revert)); !res.Redelivered {
+		t.Fatalf("redelivery %+v", res)
+	}
+	if rows := sourceRows(t, s, delivered.ID, SourceMergewakeRevert); len(rows) != 1 {
+		t.Fatalf("redelivered revert rows %+v", rows)
+	}
+}

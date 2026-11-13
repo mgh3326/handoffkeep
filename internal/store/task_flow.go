@@ -505,6 +505,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 	// any open state before reviewing when the transition names that PR
 	// (refs.pr) and its change record shows it merged. The PR becomes the
 	// closure evidence.
+	now := time.Now().UTC()
 	var deliveredBy int64
 	if action == actMove && to == StateMerged && !reopen && refs != nil && refs.PR != "" && deliveredOpenStates[x.State] {
 		if deliveredBy, err = mergedChangeTx(ctx, tx, refs.PR); err != nil {
@@ -512,6 +513,23 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		}
 		if x.Kind == "" {
 			return Task{}, fmt.Errorf("%w: a triage task without a kind cannot close as merged; set its kind first", ErrTaskConflict)
+		}
+		// The delivered task implements the PR, like a task its merge event
+		// names, so the PR's deploy and revert reach it (deployedTasksTx,
+		// propagateRevertTx). It is linked before the hold below so a reland
+		// PR counts as one; a refusal rolls the link back.
+		if err = linkChangeTaskTx(ctx, tx, deliveredBy, id, ChangeImplements, false, now); err != nil {
+			return Task{}, err
+		}
+		// The close-on-merge rule a merge event applies (hk 3294) holds here
+		// too: another implements change still open, a reverted piece not
+		// relanded or an open sub-task keeps the task open.
+		hold, err := mergeHoldTx(ctx, tx, id, refs.PR)
+		if err != nil {
+			return Task{}, err
+		}
+		if hold != "" {
+			return Task{}, fmt.Errorf("%w: %s", ErrTaskConflict, hold)
 		}
 		if strings.TrimSpace(note) == "" {
 			note = "delivered by merged PR " + refs.PR
@@ -678,7 +696,6 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 			recordedNoJob = noJob
 		}
 	}
-	now := time.Now().UTC()
 	var duplicateEdge bool
 	if action == actMove && taskClosureRules[to].DuplicateOf {
 		if in.DuplicateOf != 0 {
@@ -810,9 +827,9 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		return Task{}, err
 	}
 	if leavingTriage {
-		cascade := in.Set
 		// A delivered close is not a decline: the set's children keep their
-		// own state.
+		// own state, with --set too.
+		cascade := in.Set && deliveredBy == 0
 		if !accepting && !cascade && deliveredBy == 0 {
 			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM ticket_sets WHERE parent_task_id=$1)`, id).Scan(&cascade); err != nil {
 				return Task{}, err
@@ -822,13 +839,6 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 			if err = s.cascadeTriageTx(ctx, tx, x, accepting, by, note, now); err != nil {
 				return Task{}, err
 			}
-		}
-	}
-	// The delivered task implements the PR, like a task its merge event
-	// names, so the PR's deploy and revert reach it (deployedTasksTx).
-	if deliveredBy != 0 {
-		if err = linkChangeTaskTx(ctx, tx, deliveredBy, id, ChangeImplements, false, now); err != nil {
-			return Task{}, err
 		}
 	}
 	// Rule 8: entering merged by hand also looks for a deploy record that
@@ -861,7 +871,8 @@ func mergedChangeTx(ctx context.Context, tx pgx.Tx, pr string) (int64, error) {
 	}
 	var id int64
 	var state string
-	err := tx.QueryRow(ctx, `SELECT id,state FROM changes WHERE repo=$1 AND pr_number=$2`, repo, n).Scan(&id, &state)
+	var reverted bool
+	err := tx.QueryRow(ctx, `SELECT id,state,reverted_by_change_id IS NOT NULL FROM changes WHERE repo=$1 AND pr_number=$2`, repo, n).Scan(&id, &state, &reverted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, fmt.Errorf("%w: hk has no change record of %s, so it cannot verify the merge; the merge event records it", ErrTaskConflict, pr)
 	}
@@ -870,6 +881,9 @@ func mergedChangeTx(ctx context.Context, tx pgx.Tx, pr string) (int64, error) {
 	}
 	if state != ChangeMerged {
 		return 0, fmt.Errorf("%w: %s is %s, not merged", ErrTaskConflict, pr, state)
+	}
+	if reverted {
+		return 0, fmt.Errorf("%w: %s was reverted; relanding takes a new PR", ErrTaskConflict, pr)
 	}
 	return id, nil
 }

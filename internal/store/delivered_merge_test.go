@@ -98,3 +98,71 @@ func TestTransitionConflictText(t *testing.T) {
 		}
 	}
 }
+
+// TestDeliveredCloseKeepsTheMergeRules (PR #351 review H2): the one-step close
+// refuses a PR that was reverted, and it holds as a merge event does while the
+// task has another implements change open; a refusal leaves the task and its
+// change links as they were.
+func TestDeliveredCloseKeepsTheMergeRules(t *testing.T) {
+	s, pool := searchTestStore(t)
+	reverted := testPR(4331)
+	carrier := flowTask(t, s, pool, "implement", StateReviewing, true)
+	send(t, s, mergeEvent(carrier.ID, reverted))
+	send(t, s, revertEvent(carrier.ID, reverted, testPR(4332)))
+	x := flowTask(t, s, pool, "fix", StateDeveloping, true)
+	if _, err := s.TransitionTask(t.Context(), x.ID, StateMerged, "tester", "", &TaskRefs{PR: reverted}, ""); !errors.Is(err, ErrTaskConflict) || !strings.Contains(err.Error(), "reverted") {
+		t.Fatalf("close by a reverted PR: err=%v", err)
+	}
+	if got := stateOf(t, s, x.ID).State; got != StateDeveloping {
+		t.Fatalf("task closed by a reverted PR: %s", got)
+	}
+
+	merged, open := testPR(4333), testPR(4334)
+	other := flowTask(t, s, pool, "implement", StateReviewing, true)
+	send(t, s, mergeEvent(other.ID, merged))
+	y := flowTask(t, s, pool, "fix", StateDeveloping, true)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: open, TaskID: y.ID})
+	// The PR event moved y to reviewing; put it back where the one-step close
+	// applies.
+	if _, err := pool.Exec(t.Context(), `UPDATE tasks SET state='developing' WHERE id=$1`, y.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TransitionTask(t.Context(), y.ID, StateMerged, "tester", "", &TaskRefs{PR: merged}, ""); !errors.Is(err, ErrTaskConflict) || !strings.Contains(err.Error(), open) {
+		t.Fatalf("close with another implements PR open: err=%v, want task_conflict naming %s", err, open)
+	}
+	if got := stateOf(t, s, y.ID).State; got != StateDeveloping {
+		t.Fatalf("held task moved to %s", got)
+	}
+	if links := changeLinks(t, s, mustChange(t, s, "example/app", 4333).ID); links[y.ID] != "" {
+		t.Fatalf("a refused close left the link %v", links)
+	}
+}
+
+// TestDeliveredCloseOfASetParent (PR #351 review, --set): a ticket set's
+// parent with children still in triage is held like a merge event's parent,
+// with or without --set, and the children are not declined.
+func TestDeliveredCloseOfASetParent(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := t.Context()
+	pr := testPR(4335)
+	carrier := flowTask(t, s, pool, "implement", StateReviewing, true)
+	send(t, s, mergeEvent(carrier.ID, pr))
+	set, _, err := s.EmitTicketSet(ctx, ticketSetFixture("delivered"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET kind='implement' WHERE id=$1`, set.ParentID); err != nil {
+		t.Fatal(err)
+	}
+	for _, withSet := range []bool{false, true} {
+		_, err := s.TransitionTaskWith(ctx, set.ParentID, TransitionInput{To: StateMerged, By: "desk", Refs: &TaskRefs{PR: pr}, Set: withSet})
+		if !errors.Is(err, ErrTaskConflict) || !strings.Contains(err.Error(), "sub-tasks") {
+			t.Fatalf("set=%t: err=%v, want held on its sub-tasks", withSet, err)
+		}
+		for _, ch := range set.Children {
+			if got := stateOf(t, s, ch.ID).State; got != StateTriage {
+				t.Fatalf("set=%t: child %d moved to %s", withSet, ch.ID, got)
+			}
+		}
+	}
+}

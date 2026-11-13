@@ -26,7 +26,8 @@ package store
 //     one at a time, so the order in which a holder locks task rows (a child
 //     before its parent in autoCloseTx and applySourceEventTx, ascending id
 //     in applyDeployRecordTx, propagateMergeTx and recordLinearBoardRelayTx,
-//     task_id then each of tasks in the order sent in ApplyTaskSourceEvent) cannot form a
+//     task_id then each of tasks in the order sent in ApplyTaskSourceEvent,
+//     then ascending id in propagateRevertTx) cannot form a
 //     cycle with another holder. UpdateJob, AppendRelayEvent (work board on,
 //     or an event that answers or ends a decision: relayTouchesDecisions),
 //     WrkAppend (completed or joined records) and PutDocument (deploy

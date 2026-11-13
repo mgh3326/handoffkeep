@@ -254,8 +254,9 @@ A task that a merged PR delivered closes in one step from any open state
 `tasks transition <id> --to merged --pr <url>` (hk 4322). hk accepts it only
 when the PR's change record shows it merged: hk holds no GitHub credential,
 so the change record written from mergewake's PR and merge events is the
-evidence it checks. The PR becomes the closure evidence, and the task is
-linked to the change as `implements`. A refused move answers `task_conflict`
+evidence it checks. A reverted PR is refused, and the merge holds below
+apply as for a merge event. The PR becomes the closure evidence, and the task is
+linked to the change as `implements`, so a later revert of the PR reopens it. A refused move answers `task_conflict`
 with a `reason` that names the states allowed from the current one. A `merged` task closes as `completed` only with a result
 link (an https URL or `hk:doc <key>`), the same evidence `completed` takes; the
 kind rule for `completed` does not apply to this edge.
@@ -354,7 +355,9 @@ task's last open piece: while another `implements` change of the task is still
 open, one was reverted and not relanded, or a sub-task is not settled, the
 merge is recorded with `applied=false`
 and the reason names what holds it (a parent then closes through
-`auto_close_parent`). `handoffkeep tasks event <id> --source S --source-ref
+`auto_close_parent`, which waits on the parent's own open or reverted
+`implements` changes too). A revert also reopens every other `merged` or
+`deployed` task linked to the reverted PR as `implements`. `handoffkeep tasks event <id> --source S --source-ref
 URL [--reverted-pr URL] [--tasks ID,...]` posts one by hand.
 Storing a `deploy/<service>/<YYYYMMDDTHHMMSSZ>` document whose record has
 `result` `success` and a non-null `included_prs` moves each `merged` task whose

@@ -232,7 +232,63 @@ func (s *Store) ApplyTaskSourceEvent(ctx context.Context, in TaskSourceEvent) (T
 		}
 		res.Tasks = append(res.Tasks, r)
 	}
+	if in.Source == SourceMergewakeRevert {
+		if err = s.propagateRevertTx(ctx, tx, in, at, now); err != nil {
+			return TaskEventResult{}, err
+		}
+	}
 	return res, tx.Commit(ctx)
+}
+
+// propagateRevertTx carries a revert to every other task that implements the
+// reverted PR and is closed on it: a task closed by naming the PR (hk 4322)
+// or a sibling the merge propagated to. The event names one task, so without
+// this those stay closed on undone work. Each goes through recordChangeTx and
+// applySourceEventTx as a named task does, in ascending id, under the
+// task-mutation lock the caller holds.
+func (s *Store) propagateRevertTx(ctx context.Context, tx pgx.Tx, in TaskSourceEvent, at, now time.Time) error {
+	repo, n, ok := parsePRURL(in.PR)
+	if !ok {
+		return nil
+	}
+	named := map[int64]bool{in.TaskID: true}
+	for _, id := range in.Tasks {
+		named[id] = true
+	}
+	rows, err := tx.Query(ctx, `SELECT `+prefixedTaskColumns("t")+` FROM change_tasks ct JOIN changes c ON c.id=ct.change_id JOIN tasks t ON t.id=ct.task_id
+		WHERE c.repo=$1 AND c.pr_number=$2 AND ct.relation='implements' AND t.state IN ($3,$4) ORDER BY t.id FOR UPDATE OF t`, repo, n, StateMerged, StateDeployed)
+	if err != nil {
+		return err
+	}
+	linked, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Task, error) {
+		var x Task
+		return x, scanTask(row, &x)
+	})
+	if err != nil {
+		return err
+	}
+	// Each linked task gets the revert in its own turn, so rule 9 skips a
+	// linked parent rather than take its event key (as for a named one).
+	var todo []Task
+	for _, x := range linked {
+		if !named[x.ID] {
+			todo = append(todo, x)
+		}
+	}
+	for _, x := range todo {
+		named[x.ID] = true
+	}
+	for _, x := range todo {
+		if err = recordChangeTx(ctx, tx, x, in, at, now); err != nil {
+			return err
+		}
+		ev := sourceEvent{Source: in.Source, SourceRef: in.SourceRef, PR: in.PR, RevertedPR: in.RevertedPR, RevertPR: in.RevertPR, At: at, Named: named,
+			Note: fmt.Sprintf("the reverted PR also delivered this task; reverted with task #%d", in.TaskID)}
+		if _, err = s.applySourceEventTx(ctx, tx, x, ev, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // applyTaskSourceEventTx applies one event to task id: it locks the row,
@@ -491,6 +547,32 @@ const openSubTasksSQL = `SELECT id FROM tasks WHERE parent_id=$1 AND state NOT I
 // its sub-tasks is not settled (a parent closes through auto_close_parent
 // when its last sub-task settles).
 func mergeHoldTx(ctx context.Context, tx pgx.Tx, taskID int64, pr string) (string, error) {
+	if reason, err := pieceHoldTx(ctx, tx, taskID, pr); err != nil || reason != "" {
+		return reason, err
+	}
+	rows, err := tx.Query(ctx, openSubTasksSQL, taskID)
+	if err != nil {
+		return "", err
+	}
+	children, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return "", err
+	}
+	if len(children) > 0 {
+		ids := make([]string, len(children))
+		for i, id := range children {
+			ids[i] = fmt.Sprintf("#%d", id)
+		}
+		return "sub-tasks " + strings.Join(ids, ", ") + " are not settled; the parent closes when its last sub-task does (auto_close_parent)", nil
+	}
+	return "", nil
+}
+
+// pieceHoldTx is the part of mergeHoldTx about the task's own changes: it
+// returns why the task may not close while one of its implements changes
+// other than pr ("" for none) is open, or one is reverted and not relanded.
+// An automatic close of a parent passes it too (closeGateTx).
+func pieceHoldTx(ctx context.Context, tx pgx.Tx, taskID int64, pr string) (string, error) {
 	repo, n, _ := parsePRURL(pr)
 	rows, err := tx.Query(ctx, openImplementsSQL, taskID, repo, n)
 	if err != nil {
@@ -513,21 +595,6 @@ func mergeHoldTx(ctx context.Context, tx pgx.Tx, taskID int64, pr string) (strin
 	}
 	if len(reverted) > 0 {
 		return "implements change " + strings.Join(reverted, ", ") + " was reverted and not relanded; relanding takes a new PR", nil
-	}
-	rows, err = tx.Query(ctx, openSubTasksSQL, taskID)
-	if err != nil {
-		return "", err
-	}
-	children, err := pgx.CollectRows(rows, pgx.RowTo[int64])
-	if err != nil {
-		return "", err
-	}
-	if len(children) > 0 {
-		ids := make([]string, len(children))
-		for i, id := range children {
-			ids[i] = fmt.Sprintf("#%d", id)
-		}
-		return "sub-tasks " + strings.Join(ids, ", ") + " are not settled; the parent closes when its last sub-task does (auto_close_parent)", nil
 	}
 	return "", nil
 }
