@@ -187,30 +187,39 @@ func TestYTBindingIntentBackoff(t *testing.T) {
 	ybbNoIntent(t, s, "after a drop", task)
 }
 
-// The binder's publication carries the evidence watermark, not the task's
-// highest comment id, and records origin auto_verified and its actor (I8).
-func TestAddYTTaskBindingFromKeepsWatermark(t *testing.T) {
-	s := schemaStore(t, "ybb_from")
+// The binder's publication stores the evidence watermark, copies the
+// evidence's missing comments in the same transaction, and records origin
+// auto_verified and its actor (I3, I8).
+func TestPublishYTAutoBinding(t *testing.T) {
+	s := schemaStore(t, "ybb_publish")
 	ctx := t.Context()
 	ytbMapped(t, s)
 	task := ytcTask(t, s, ytbProject)
 	first := ytcuRawComment(t, s, task, "worker")
-	ytcuRawComment(t, s, task, "worker")
+	second := ytcuRawComment(t, s, task, "worker")
 	b := ytbBinding(task)
 	verified, err := s.YTCanaryCandidate(ctx, task)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.AddYTTaskBindingFrom(ctx, b, verified, first.ID, YTBindingAutoVerified, ytBindTestActor)
+	got, err := s.PublishYTAutoBinding(ctx, b, verified,
+		YTAutoBindEvidence{Authority: YTAuthorityHK, CommentsFrom: first.ID, Missing: []int64{second.ID}}, ytBindTestActor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.CommentsFrom != first.ID || got.Origin != YTBindingAutoVerified {
-		t.Fatalf("published %+v, want comments_from %d and origin %s", got, first.ID, YTBindingAutoVerified)
+	if got.Binding.CommentsFrom != first.ID || got.Binding.Origin != YTBindingAutoVerified || got.Prepared != 1 || got.Linked != 0 {
+		t.Fatalf("published %+v, want comments_from %d, origin %s, one prepared copy", got, first.ID, YTBindingAutoVerified)
 	}
 	want := []ybhRow{{Action: "bound", Origin: YTBindingAutoVerified, Actor: ytBindTestActor, Issue: b.IssueID}}
 	if hist := ybhHistory(t, s, task); len(hist) != 1 || hist[0] != want[0] {
 		t.Fatalf("history %+v, want %+v", hist, want)
+	}
+	op, ok := ytcOpFor(t, s, second.ID)
+	if !ok || op.State != ytwrite.StatePrepared || op.Tenant != b.Tenant || op.YTTargetID != b.IssueID {
+		t.Fatalf("missing comment's op %+v %v", op, ok)
+	}
+	if _, ok := ytcOpFor(t, s, first.ID); ok {
+		t.Fatal("a comment above the watermark got a copy")
 	}
 	// A watermark of 0 is real: the issue holds none of the task's comments.
 	other := ytcTask(t, s, ytbProject)
@@ -219,19 +228,57 @@ func TestAddYTTaskBindingFromKeepsWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := s.AddYTTaskBindingFrom(ctx, ytbBinding(other), verified, 0, YTBindingAutoVerified, ytBindTestActor); err != nil || got.CommentsFrom != 0 {
+	if got, err := s.PublishYTAutoBinding(ctx, ytbBinding(other), verified, YTAutoBindEvidence{Authority: YTAuthorityHK}, ytBindTestActor); err != nil || got.Binding.CommentsFrom != 0 || got.Prepared != 0 {
 		t.Fatalf("zero watermark: %+v %v", got, err)
 	}
-	// A negative watermark and an unknown origin are refused.
-	if _, err := s.AddYTTaskBindingFrom(ctx, ytbBinding(ytcTask(t, s, ytbProject)), YTCanaryCandidate{}, -1, YTBindingAutoVerified, ytBindTestActor); err == nil {
-		t.Fatal("a negative watermark was accepted")
-	}
-	verified, err = s.YTCanaryCandidate(ctx, task)
+}
+
+// An existing binding of any origin is a competitor: the automatic
+// publication writes nothing, copies nothing, and refuses evidence whose
+// authority changed or whose comment is not the task's.
+func TestPublishYTAutoBindingRefusals(t *testing.T) {
+	s := schemaStore(t, "ybb_refuse")
+	ctx := t.Context()
+	ytbMapped(t, s)
+	task := ytcTask(t, s, ytbProject)
+	c := ytcuRawComment(t, s, task, "worker")
+	b := ytbBinding(task)
+	ytbBind(t, s, b)
+	verified, err := s.YTCanaryCandidate(ctx, task)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AddYTTaskBindingFrom(ctx, b, verified, 0, "auto", ytBindTestActor); err == nil {
-		t.Fatal("an unknown origin was accepted")
+	if _, err := s.PublishYTAutoBinding(ctx, b, verified,
+		YTAutoBindEvidence{Authority: YTAuthorityHK, Missing: []int64{c.ID}}, ytBindTestActor); !errors.Is(err, ErrYTBindingExists) {
+		t.Fatalf("automatic publication over an existing binding: %v, want ErrYTBindingExists", err)
+	}
+	if _, ok := ytcOpFor(t, s, c.ID); ok {
+		t.Fatal("a competitor's publication copied the comment")
+	}
+	// The evidence authority must be the side the publication reads, and
+	// evidence copying comments under youtrack is invalid.
+	other := ytcTask(t, s, ytbProject)
+	verified, err = s.YTCanaryCandidate(ctx, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PublishYTAutoBinding(ctx, ytbBinding(other), verified, YTAutoBindEvidence{Authority: YTAuthorityYouTrack}, ytBindTestActor); !errors.Is(err, ErrYTBindingConflict) {
+		t.Fatalf("authority changed: %v, want ErrYTBindingConflict", err)
+	}
+	if _, err := s.PublishYTAutoBinding(ctx, ytbBinding(other), verified,
+		YTAutoBindEvidence{Authority: YTAuthorityYouTrack, Missing: []int64{c.ID}}, ytBindTestActor); err == nil {
+		t.Fatal("evidence copying under youtrack was accepted")
+	}
+	// Evidence naming another task's comment rolls the binding back.
+	if _, err := s.PublishYTAutoBinding(ctx, ytbBinding(other), verified,
+		YTAutoBindEvidence{Authority: YTAuthorityHK, Missing: []int64{c.ID}}, ytBindTestActor); err == nil {
+		t.Fatal("evidence from another task was accepted")
+	}
+	if _, found, err := s.YTTaskBinding(ctx, other); err != nil || found {
+		t.Fatalf("a failed publication wrote the binding: found=%v err=%v", found, err)
+	}
+	if _, ok := ytcOpFor(t, s, c.ID); ok {
+		t.Fatal("a failed publication copied a comment")
 	}
 }
 
@@ -273,7 +320,7 @@ func TestYTBindingExcluded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AddYTTaskBindingFrom(ctx, b, verified, 0, YTBindingAutoVerified, ytBindTestActor); !errors.Is(err, ErrYTBindingExcluded) {
+	if _, err := s.PublishYTAutoBinding(ctx, b, verified, YTAutoBindEvidence{Authority: YTAuthorityHK}, ytBindTestActor); !errors.Is(err, ErrYTBindingExcluded) {
 		t.Fatalf("automatic publication after an unbind: %v, want ErrYTBindingExcluded", err)
 	}
 	if _, found, err := s.YTTaskBinding(ctx, task); err != nil || found {
@@ -296,7 +343,7 @@ func TestYTAutoVerifiedBindingIssueCatchUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AddYTTaskBindingFrom(ctx, ytbBinding(task), verified, 0, YTBindingAutoVerified, ytBindTestActor); err != nil {
+	if _, err := s.PublishYTAutoBinding(ctx, ytbBinding(task), verified, YTAutoBindEvidence{Authority: YTAuthorityHK}, ytBindTestActor); err != nil {
 		t.Fatal(err)
 	}
 	// Committed after the binder's listing, so it is above the watermark and

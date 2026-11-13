@@ -277,130 +277,15 @@ func ytCommentOnOpTx(ctx context.Context, tx pgx.Tx, c TaskComment, now time.Tim
 // prepares the task's first issue_fields op in this transaction. The new
 // row's comments_from is the task's highest comment id read in the same
 // transaction, so the binding never copies a comment written before it.
-// It is addYTTaskBinding with that rule; the automatic binder publishes
-// through AddYTTaskBindingFrom, which names its own watermark and origin.
+// The automatic binder publishes through PublishYTAutoBinding, which shares
+// this publication and copies its evidence's missing comments in it.
 //
 // Locks, in this order (lockorder.go): the issue ownership lock, FOR UPDATE on
 // the task row, the task's lane lock, FOR SHARE on the task's youtrack_projects
 // and task_origins rows, then the new binding row and its history row.
 func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified YTCanaryCandidate) (YTTaskBinding, error) {
-	return s.addYTTaskBinding(ctx, b, verified, -1, YTBindingImportVerified, "")
-}
-
-// AddYTTaskBindingFrom publishes a verified binding from the automatic binder
-// (hk 4492, design/2026-11-13/yt-comment-binding-lifecycle §6.6). It is
-// AddYTTaskBinding's transaction with two differences: commentsFrom is the
-// evidence watermark the binder computed from the issue's own listing (I8)
-// instead of the task's highest comment id, and origin/actor record who
-// published it. The binder drops the task's intent once it has enqueued the
-// comments the issue lacks, so a crash between the publication and the
-// enqueue leaves the intent for the next pass, which finds the binding and
-// finishes the copies instead of binding again. A negative watermark is
-// refused: 0 is a real value (the issue holds none of the task's comments).
-func (s *Store) AddYTTaskBindingFrom(ctx context.Context, b YTTaskBinding, verified YTCanaryCandidate, commentsFrom int64, origin, actor string) (YTTaskBinding, error) {
-	if commentsFrom < 0 || (origin != YTBindingImportVerified && origin != YTBindingAutoVerified) {
-		return YTTaskBinding{}, errors.New("invalid task binding publication")
-	}
-	return s.addYTTaskBinding(ctx, b, verified, commentsFrom, origin, actor)
-}
-
-// addYTTaskBinding is the publication both callers share. commentsFrom < 0
-// means "the task's highest comment id, read in this transaction" (the
-// backfill's rule); actor "" means the binding's BoundBy.
-func (s *Store) addYTTaskBinding(ctx context.Context, b YTTaskBinding, verified YTCanaryCandidate, commentsFrom int64, origin, actor string) (YTTaskBinding, error) {
-	if b.TaskID < 1 || b.Tenant == "" || len(b.Tenant) > 255 || b.IssueID == "" || len(b.IssueID) > 64 ||
-		len(b.IssueReadable) > 64 || b.ProjectID == "" || len(b.ProjectID) > 64 || b.BoundBy == "" || !validText(b.BoundBy, 200) || verified.TaskID != b.TaskID ||
-		(actor != "" && !validText(actor, 200)) {
-		return YTTaskBinding{}, errors.New("invalid task binding")
-	}
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return YTTaskBinding{}, err
-	}
-	defer tx.Rollback(ctx)
-	if err := lockYTIssueOwnershipTx(ctx, tx, b.TaskID); err != nil {
-		return YTTaskBinding{}, err
-	}
-	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(b.TaskID, 10)); err != nil {
-		return YTTaskBinding{}, err
-	}
-	current, err := readYTCanaryCandidate(ctx, tx, b.TaskID, " FOR SHARE")
-	if err != nil {
-		return YTTaskBinding{}, err
-	}
-	if current != verified {
-		return YTTaskBinding{}, fmt.Errorf("%w: task %d's YouTrack mappings changed after verification (verified %+v, now %+v); verify again",
-			ErrYTBindingConflict, b.TaskID, verified, current)
-	}
-	have, found, err := readYTBinding(ctx, tx, b.TaskID)
-	if err != nil {
-		return YTTaskBinding{}, err
-	}
-	// An operator unbind recorded while the binder was doing its YouTrack
-	// reads is not undone by this publication (I7): UnbindYTTaskBinding takes
-	// the same ownership lock first, so one of the two sees the other whole.
-	// The operator's backfill (origin import_verified) is the supported way
-	// past an unbind and is not checked.
-	if origin == YTBindingAutoVerified {
-		action, err := ytBindingLatestActionTx(ctx, tx, b.TaskID)
-		if err != nil {
-			return YTTaskBinding{}, err
-		}
-		if action == ytBindingActionUnbound {
-			return YTTaskBinding{}, fmt.Errorf("%w: task %d was unbound by the operator", ErrYTBindingExcluded, b.TaskID)
-		}
-	}
-	if !found {
-		// hk is creating (or adopting) the task's issue itself (hk 3898):
-		// that op publishes the binding when it is applied.
-		pending, err := ytIssueOpPendingTx(ctx, tx, b.TaskID)
-		if err != nil {
-			return YTTaskBinding{}, err
-		}
-		if pending {
-			return YTTaskBinding{}, fmt.Errorf("%w: task %d has an unresolved issue_create op", ErrYTBindingConflict, b.TaskID)
-		}
-	}
-	if found {
-		if have.Tenant != b.Tenant || have.IssueID != b.IssueID {
-			return YTTaskBinding{}, fmt.Errorf("%w: task %d is bound to issue %s on %s", ErrYTBindingConflict, b.TaskID, have.IssueID, have.Tenant)
-		}
-		return have, tx.Commit(ctx)
-	}
-	source, err := ytBindingDisagreement(ctx, tx, b)
-	if err != nil {
-		return YTTaskBinding{}, err
-	}
-	if source != "" {
-		return YTTaskBinding{}, fmt.Errorf("%w: %s disagrees with binding task %d to issue %s on %s", ErrYTBindingConflict, source, b.TaskID, b.IssueID, b.Tenant)
-	}
-	if s.ytBindingChecked != nil {
-		s.ytBindingChecked()
-	}
-	now := time.Now().UTC()
-	var got YTTaskBinding
-	err = scanYTBinding(tx.QueryRow(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, comments_from)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,
-			CASE WHEN $9 < 0 THEN (SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$1) ELSE $9 END)
-		ON CONFLICT DO NOTHING RETURNING `+ytBindingColumns,
-		b.TaskID, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, now, origin, commentsFrom), &got)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return YTTaskBinding{}, fmt.Errorf("%w: issue %s on %s is bound to another task", ErrYTBindingConflict, b.IssueID, b.Tenant)
-	}
-	if err != nil {
-		return YTTaskBinding{}, err
-	}
-	if actor == "" {
-		actor = got.BoundBy
-	}
-	if err := insertYTBindingHistoryTx(ctx, tx, got, ytBindingActionBound, actor, "", now); err != nil {
-		return YTTaskBinding{}, err
-	}
-	if err := s.ytFieldsOnBindTx(ctx, tx, b.TaskID, now); err != nil {
-		return YTTaskBinding{}, err
-	}
-	return got, tx.Commit(ctx)
+	got, _, _, err := s.publishYTBinding(ctx, b, verified, ytBindingPublication{origin: YTBindingImportVerified})
+	return got, err
 }
 
 // YTCommentCandidate is a task the comments preflight and backfill classify.

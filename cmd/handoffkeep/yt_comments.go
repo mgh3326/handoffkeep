@@ -60,11 +60,10 @@ const (
 	// ytBindActor is who an automatic binding is attributed to in its history
 	// row: the pass runs inside serve, not for a person.
 	ytBindActor = "operator:auto-bind"
-	// ytBindEnqueueLimit bounds the new comment ops one binder pass
-	// prepares; the task's intent stays until every missing comment has its
-	// op, so a later pass copies the rest (the comments above the watermark
-	// are also the issue-only catch-up's).
-	ytBindEnqueueLimit = 200
+	// ytBindCopyMax is the most missing comments one automatic publication
+	// copies in its own transaction (store.YTAutoBindCopyMax); a larger
+	// history is refused with history_large before anything is written.
+	ytBindCopyMax = store.YTAutoBindCopyMax
 )
 
 // ytCommentsModeFromEnv reads HANDOFFKEEP_YT_COMMENTS_MODE: unset or "off"
@@ -639,10 +638,11 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 // The classes an automatic binding is refused or ended with (design §6.6,
 // §6.8).
 const (
-	ytBindNoIssue     = "no_issue"
-	ytBindAmbiguous   = "ambiguous"
-	ytBindHistory     = "history_ambiguous"
-	ytBindOtherTenant = "other_tenant"
+	ytBindNoIssue      = "no_issue"
+	ytBindAmbiguous    = "ambiguous"
+	ytBindHistory      = "history_ambiguous"
+	ytBindHistoryLarge = "history_large"
+	ytBindOtherTenant  = "other_tenant"
 )
 
 // ytBindRemote is what the binder needs from YouTrack: the comment listing
@@ -721,18 +721,14 @@ func (b ytBindingBinder) bindTask(ctx context.Context, now time.Time, in store.Y
 		b.exclude(ctx, now, in.TaskID, "excluded", "the operator unbound the task", rep)
 		return
 	}
-	// 2. A task bound meanwhile (the backfill, an applied issue_create, or a
-	// crash between the publication and the enqueue) needs only the copy of
-	// what its issue lacks.
+	// 2. A task bound by anyone already (the backfill, an applied
+	// issue_create, another worker) owns its comments_from and everything at
+	// or below it: the intent is done (B2 in the consult's design).
 	if bound, found, err := b.st.YTTaskBinding(ctx, in.TaskID); err != nil {
 		b.fail(ctx, now, in.TaskID, err, rep)
 		return
 	} else if found {
-		if bound.Tenant != b.tenant {
-			b.exclude(ctx, now, in.TaskID, ytBindOtherTenant, "bound on tenant "+bound.Tenant, rep)
-			return
-		}
-		b.finish(ctx, now, bound, rep)
+		b.settleBound(ctx, now, in.TaskID, bound, 0, rep)
 		return
 	}
 	// 3. Verify the issue with the enrollment rules (design §6.8).
@@ -756,9 +752,9 @@ func (b ytBindingBinder) bindTask(ctx context.Context, now time.Time, in store.Y
 		return
 	}
 	binding.BoundBy = ytBindActor
-	// 4. The watermark comes from positive evidence (I8), or is the task's
-	// highest comment id when YouTrack already holds the comments.
-	watermark, missing, class, err := b.watermark(ctx, in.TaskID, binding.IssueID)
+	// 4. The copies come from positive evidence (I8); a history that is not
+	// provably complete, or too large to copy in one transaction, refuses.
+	ev, class, err := b.evidence(ctx, in.TaskID, binding.IssueID)
 	if err != nil {
 		b.fail(ctx, now, in.TaskID, err, rep)
 		return
@@ -767,115 +763,77 @@ func (b ytBindingBinder) bindTask(ctx context.Context, now time.Time, in store.Y
 		b.refuse(ctx, now, in.TaskID, class, "the comment history is not provably complete", rep)
 		return
 	}
-	// 5. Publish. The publication rechecks the unbind under the ownership
-	// lock: one that commits during the YouTrack reads refuses here.
-	if _, err := b.st.AddYTTaskBindingFrom(ctx, binding, candidate, watermark, store.YTBindingAutoVerified, ytBindActor); err != nil {
-		switch {
-		case errors.Is(err, store.ErrYTBindingExcluded):
-			b.exclude(ctx, now, in.TaskID, "excluded", err.Error(), rep)
-		case errors.Is(err, store.ErrYTBindingConflict):
-			// A competing publication won, most often the operator's backfill
-			// or an issue_create that adopted the issue. Its watermark is not
-			// this binder's to complete: settle the intent as that binding's
-			// instead of retrying the bind.
-			if bound, found, rerr := b.st.YTTaskBinding(ctx, in.TaskID); rerr == nil && found && bound.Tenant == b.tenant {
-				b.finish(ctx, now, bound, rep)
-				return
-			}
-			b.refuse(ctx, now, in.TaskID, ytBindAmbiguous, err.Error(), rep)
-		default:
+	// 5. Publish the binding and its copies in one transaction. The
+	// publication rechecks the unbind and the comments authority under its
+	// locks and never adopts another publisher's binding.
+	got, err := b.st.PublishYTAutoBinding(ctx, binding, candidate, ev, ytBindActor)
+	switch {
+	case errors.Is(err, store.ErrYTBindingExcluded):
+		b.exclude(ctx, now, in.TaskID, "excluded", err.Error(), rep)
+		return
+	case errors.Is(err, store.ErrYTBindingExists):
+		if bound, found, rerr := b.st.YTTaskBinding(ctx, in.TaskID); rerr != nil {
+			b.fail(ctx, now, in.TaskID, rerr, rep)
+		} else if found {
+			b.settleBound(ctx, now, in.TaskID, bound, 0, rep)
+		} else {
 			b.fail(ctx, now, in.TaskID, err, rep)
 		}
 		return
-	}
-	rep.Bound++
-	// 6. Copy the comments the listing proved missing. The intent stays
-	// while any remain, so a task with more than the pass can copy makes
-	// durable progress; dropping it would leave the rest below the watermark
-	// invisible to the catch-up.
-	enqueued, pending, err := b.enqueue(ctx, in.TaskID, missing)
-	rep.Enqueued += enqueued
-	if err != nil {
+	case errors.Is(err, store.ErrYTBindingConflict):
+		b.refuse(ctx, now, in.TaskID, ytBindAmbiguous, err.Error(), rep)
+		return
+	case err != nil:
 		b.fail(ctx, now, in.TaskID, err, rep)
 		return
 	}
-	if pending {
-		log.Printf("ytwrite.bind_task task_id=%d class=bound issue_id=%q comments_from=%d enqueued=%d pending=true", in.TaskID, binding.IssueID, watermark, enqueued)
-		return
-	}
-	if err := b.st.DropYTBindingIntent(ctx, in.TaskID); err != nil {
-		log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", in.TaskID, err.Error())
-	}
-	log.Printf("ytwrite.bind_task task_id=%d class=bound issue_id=%q comments_from=%d enqueued=%d", in.TaskID, binding.IssueID, watermark, enqueued)
+	rep.Bound++
+	rep.Enqueued += got.Prepared
+	b.settleBound(ctx, now, in.TaskID, got.Binding, got.Prepared, rep)
 }
 
-// finish settles an intent whose task is bound already. Only a binding this
-// binder published is completed: a backfill (import_verified) or an adopted
-// issue (op_applied) sets comments_from to the latest comment on purpose, so
-// copying below that watermark could post a second copy of an old comment the
-// audit cannot recognise. Any other origin drops the intent and leaves the
-// copies to that binding's own catch-up. An auto_verified binding whose
-// history is not provably complete keeps its intent as a durable refusal: the
-// intent is the only record of the copies still owed, and the operator's
-// repair (the audit, deleting a duplicate) resumes them.
-func (b ytBindingBinder) finish(ctx context.Context, now time.Time, bound store.YTTaskBinding, rep *ytBindReport) {
-	if bound.Origin != store.YTBindingAutoVerified {
-		log.Printf("ytwrite.bind_task task_id=%d class=bound origin=%s detail=%q", bound.TaskID, bound.Origin, "not the binder's binding; its catch-up owns the copies")
-		if err := b.st.DropYTBindingIntent(ctx, bound.TaskID); err != nil {
-			log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", bound.TaskID, err.Error())
-		}
+// settleBound drops the task's intent. A binding exists, and its publisher
+// owns the copies at or below its watermark; the ones above it are the
+// issue-only catch-up's. A binding on another tenant excludes the task here.
+// A crash between the publication's commit and this call is harmless: the
+// next pass takes step 2 and drops the intent.
+func (b ytBindingBinder) settleBound(ctx context.Context, now time.Time, taskID int64, bound store.YTTaskBinding, prepared int, rep *ytBindReport) {
+	if bound.Tenant != b.tenant {
+		b.exclude(ctx, now, taskID, ytBindOtherTenant, "bound on tenant "+bound.Tenant, rep)
 		return
 	}
-	_, missing, class, err := b.watermark(ctx, bound.TaskID, bound.IssueID)
-	if err != nil {
-		b.fail(ctx, now, bound.TaskID, err, rep)
-		return
+	if err := b.st.DropYTBindingIntent(ctx, taskID); err != nil {
+		log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", taskID, err.Error())
 	}
-	if class != "" {
-		b.refuse(ctx, now, bound.TaskID, class, "the binding's comment history is not provably complete", rep)
-		return
-	}
-	enqueued, pending, err := b.enqueue(ctx, bound.TaskID, missing)
-	rep.Enqueued += enqueued
-	if err != nil {
-		b.fail(ctx, now, bound.TaskID, err, rep)
-		return
-	}
-	if pending {
-		log.Printf("ytwrite.bind_task task_id=%d class=bound issue_id=%q enqueued=%d pending=true", bound.TaskID, bound.IssueID, enqueued)
-		return
-	}
-	if err := b.st.DropYTBindingIntent(ctx, bound.TaskID); err != nil {
-		log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", bound.TaskID, err.Error())
-	}
-	log.Printf("ytwrite.bind_task task_id=%d class=bound issue_id=%q enqueued=%d", bound.TaskID, bound.IssueID, enqueued)
+	log.Printf("ytwrite.bind_task task_id=%d class=bound issue_id=%q origin=%s prepared=%d", taskID, bound.IssueID, bound.Origin, prepared)
 }
 
-// watermark lists the issue's comments once and classifies the task's
-// comments against them with the audit's matcher (design §6.7). It returns the
-// highest comment id the issue holds, the comments it provably lacks (oldest
-// first, with the op and link evidence the audit already has), and a class
-// when the history is not provably complete. Under comments authority
-// youtrack it lists nothing: the watermark is the task's highest comment id
-// and there is nothing to copy.
-func (b ytBindingBinder) watermark(ctx context.Context, taskID int64, issueID string) (int64, []ytwrite.AuditCopies, string, error) {
+// evidence lists the issue's comments once and classifies the task's
+// comments against them with the audit's matcher (design §6.7). The
+// publication rechecks the authority it read and copies the Missing set in
+// its own transaction, so nothing here is owed after the publication commits.
+// A history that is not provably complete, or larger than one publication
+// copies, is a class the intent refuses with.
+func (b ytBindingBinder) evidence(ctx context.Context, taskID int64, issueID string) (store.YTAutoBindEvidence, string, error) {
 	authority, err := b.st.YTAuthorityOf(ctx, store.YTAuthorityComments)
 	if err != nil {
-		return 0, nil, "", err
+		return store.YTAutoBindEvidence{}, "", err
 	}
+	ev := store.YTAutoBindEvidence{Authority: authority}
 	if authority == store.YTAuthorityYouTrack {
-		id, err := b.st.YTHighestCommentID(ctx, taskID)
-		return id, nil, "", err
+		// YouTrack already holds the comments; the publication applies the
+		// in-transaction max-id watermark and copies nothing.
+		return ev, "", nil
 	}
 	hk, err := b.st.YTAuditTaskComments(ctx, taskID, issueID)
 	if err != nil {
-		return 0, nil, "", err
+		return ev, "", err
 	}
 	lctx, cancel := context.WithTimeout(ctx, ytCommentsGetTimeout)
 	listed, err := b.remote.ListComments(lctx, issueID, ytAuditPageSize)
 	cancel()
 	if err != nil {
-		return 0, nil, "", err
+		return ev, "", err
 	}
 	// A YouTrack comment the activity pull copied into hk is not the
 	// issue's evidence. The legacy push's links are, by its own rules.
@@ -892,50 +850,27 @@ func (b ytBindingBinder) watermark(ctx context.Context, taskID int64, issueID st
 	}
 	got := ytwrite.AuditComments(hk.Comments, yt, "", youtrack.LegacyCommentID)
 	if len(got.AmbiguousCopy) > 0 || len(got.Duplicate) > 0 {
-		return 0, nil, ytBindHistory, nil
+		return ev, ytBindHistory, nil
 	}
-	var watermark int64
-	missing := make([]ytwrite.AuditCopies, 0, len(got.Missing))
+	missing := make([]int64, 0, len(got.Missing))
 	for _, x := range got.Present {
-		if x.CommentID > watermark {
-			watermark = x.CommentID
+		if x.CommentID > ev.CommentsFrom {
+			ev.CommentsFrom = x.CommentID
 		}
 	}
 	for _, x := range got.Missing {
 		// A comment the adoption linked was posted in a form hk cannot
 		// recognise; a second copy may be the result (R2).
 		if youtrack.CommentLinkIsAdopted(hk.Links[x.CommentID]) {
-			return 0, nil, ytBindHistory, nil
+			return ev, ytBindHistory, nil
 		}
-		missing = append(missing, x)
+		missing = append(missing, x.CommentID)
 	}
-	return watermark, missing, "", nil
-}
-
-// enqueue prepares the op of each missing comment through the audit's own
-// path (store.EnqueueYTAuditComment), oldest first, at most
-// ytBindEnqueueLimit new ops. A missing comment that already has its op
-// (AuditCopies.OpID) is skipped rather than retried, so each pass copies the
-// next comments instead of the same first ones; pending reports that missing
-// comments without an op remain, and the caller keeps the intent for them. It
-// is idempotent: a comment that already has its op is left as it is (I3).
-func (b ytBindingBinder) enqueue(ctx context.Context, taskID int64, missing []ytwrite.AuditCopies) (enqueued int, pending bool, err error) {
-	for _, x := range missing {
-		if x.OpID > 0 {
-			continue
-		}
-		if enqueued >= ytBindEnqueueLimit {
-			return enqueued, true, nil
-		}
-		outcome, _, err := b.st.EnqueueYTAuditComment(ctx, x.CommentID)
-		if err != nil {
-			return enqueued, false, err
-		}
-		if outcome == store.YTAuditPrepared {
-			enqueued++
-		}
+	if len(missing) > ytBindCopyMax {
+		return ev, ytBindHistoryLarge, nil
 	}
-	return enqueued, false, nil
+	ev.Missing = missing
+	return ev, "", nil
 }
 
 // refuse settles an intent as refused with its class and the backoff, and

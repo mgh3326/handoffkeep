@@ -275,44 +275,67 @@ func ytbOpFor(t *testing.T, conn *pgx.Conn, commentID int64) (ytbOp, bool) {
 	return op, true
 }
 
-// A task with more missing comments than one pass copies makes durable
-// progress: the intent survives, and the next pass copies the rest, so none
-// stays below the watermark and invisible to the catch-up.
-func TestYTBindingBinderCopiesAllMissing(t *testing.T) {
-	e := newYTBEnv(t, "ytb_many")
-	ctx := t.Context()
+// A history larger than one publication copies is refused before anything is
+// written; the intent keeps the class and the operator path handles it.
+func TestYTBindingBinderRefusesLargeHistory(t *testing.T) {
+	e := newYTBEnv(t, "ytb_large")
 	now := time.Now().UTC().Truncate(time.Second)
 	task := e.task(t, true)
-	const comments = 201
-	for i := range comments {
+	for i := range ytBindCopyMax + 1 {
 		e.comment(t, task, "c"+strconv.Itoa(i))
 	}
 	rep := ytbPass(t, e.worker, now)
-	if rep.Bound != 1 || rep.Enqueued != ytBindEnqueueLimit {
-		t.Fatalf("first pass %+v, want one binding and %d copies", rep, ytBindEnqueueLimit)
+	if rep.Bound != 0 || rep.Enqueued != 0 || rep.Refused["history_large"] != 1 {
+		t.Fatalf("the large pass %+v", rep)
 	}
-	if state, _, _, ok := e.intent(t, task); !ok || state != "pending" {
-		t.Fatalf("the intent was dropped with comments left: %q %v", state, ok)
+	if state, reason, _, ok := e.intent(t, task); !ok || state != "refused" || reason != "history_large" {
+		t.Fatalf("the intent %q %q %v", state, reason, ok)
 	}
-	rep = ytbPass(t, e.worker, now.Add(time.Minute))
-	if rep.Bound != 0 || rep.Enqueued != comments-ytBindEnqueueLimit {
-		t.Fatalf("second pass %+v, want the rest copied", rep)
+	if _, found := e.binding(t, task); found {
+		t.Fatal("a refused history was published")
+	}
+}
+
+// An ambiguous history refuses before publication and keeps the intent; once
+// the operator removes the duplicate, the publication copies the older
+// comment in the same transaction as the binding.
+func TestYTBindingBinderKeepsIntentWhileAmbiguous(t *testing.T) {
+	e := newYTBEnv(t, "ytb_ambiguous")
+	now := time.Now().UTC().Truncate(time.Second)
+	task := e.task(t, true)
+	older := e.comment(t, task, "c0")
+	e.comment(t, task, "c1")
+	issue := "2-" + strconv.FormatInt(task, 10)
+	e.fake.Inject(issue, "c1")
+	duplicate := e.fake.Inject(issue, "c1")
+	rep := ytbPass(t, e.worker, now)
+	if rep.Enqueued != 0 || rep.Refused["history_ambiguous"] != 1 {
+		t.Fatalf("the ambiguous pass %+v", rep)
+	}
+	if state, reason, attempts, ok := e.intent(t, task); !ok || state != "refused" || reason != "history_ambiguous" || attempts != 1 {
+		t.Fatalf("the intent was not kept as a durable refusal: %q %q %d %v", state, reason, attempts, ok)
+	}
+	if _, found := e.binding(t, task); found {
+		t.Fatal("the ambiguous task was bound")
+	}
+	// The operator removes the duplicate; the next attempt publishes and
+	// copies c0 with the binding.
+	e.fake.Delete(issue, duplicate)
+	rep = ytbPass(t, e.worker, now.Add(time.Hour+2*time.Minute))
+	if rep.Bound != 1 || rep.Enqueued != 1 {
+		t.Fatalf("the resumed pass %+v, want the binding and c0", rep)
+	}
+	if op, ok := ytbOpFor(t, e.conn, older); !ok || op.State != ytwrite.StatePrepared {
+		t.Fatalf("c0 op %+v %v", op, ok)
 	}
 	if state, _, _, ok := e.intent(t, task); ok {
 		t.Fatalf("the intent survived: %q", state)
 	}
-	var linked int
-	if err := e.conn.QueryRow(ctx, `SELECT count(*) FROM yt_comment_write_links w JOIN task_comments c ON c.id = w.comment_id WHERE c.task_id=$1`, task).Scan(&linked); err != nil {
-		t.Fatal(err)
-	}
-	if linked != comments {
-		t.Fatalf("%d comments have an op, want %d", linked, comments)
-	}
 }
 
-// A deferred intent that outlives an operator backfill does not copy the
-// history that binding deliberately excludes: only the binder's own
-// auto_verified binding is finished.
+// A deferred intent that outlives an operator backfill is dropped: the
+// publisher owns its comments_from and everything below it, so the binder
+// never copies that history.
 func TestYTBindingBinderLeavesOtherOriginsAlone(t *testing.T) {
 	e := newYTBEnv(t, "ytb_origin")
 	ctx := t.Context()
@@ -343,61 +366,10 @@ func TestYTBindingBinderLeavesOtherOriginsAlone(t *testing.T) {
 	}
 }
 
-// An auto_verified binding whose retry finds an ambiguous history keeps its
-// intent, so the copies still owed below the watermark resume once the
-// ambiguity is gone instead of being lost.
-func TestYTBindingBinderKeepsIntentWhileAmbiguous(t *testing.T) {
-	e := newYTBEnv(t, "ytb_ambiguous")
-	ctx := t.Context()
-	now := time.Now().UTC().Truncate(time.Second)
-	task := e.task(t, true)
-	older := e.comment(t, task, "c0")
-	newer := e.comment(t, task, "c1")
-	issue := "2-" + strconv.FormatInt(task, 10)
-	if _, err := e.st.ScanYTBindingCandidates(ctx, e.tenant, ytBindScanLimit, now); err != nil {
-		t.Fatal(err)
-	}
-	candidate, err := e.st.YTCanaryCandidate(ctx, task)
-	if err != nil {
-		t.Fatal(err)
-	}
-	binding, err := youtrack.VerifyBinding(ctx, e.remote, e.tenant, ytpBucketID, candidate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	binding.BoundBy = ytBindActor
-	// The binder listed the issue with c1 present and c0 missing, published,
-	// and then crashed before copying c0.
-	e.fake.Inject(issue, "c1")
-	if _, err := e.st.AddYTTaskBindingFrom(ctx, binding, candidate, newer, store.YTBindingAutoVerified, ytBindActor); err != nil {
-		t.Fatal(err)
-	}
-	// A second copy of c1 makes the history ambiguous before the retry.
-	duplicate := e.fake.Inject(issue, "c1")
-	rep := ytbPass(t, e.worker, now.Add(time.Minute))
-	if rep.Enqueued != 0 {
-		t.Fatalf("the ambiguous pass copied something: %+v", rep)
-	}
-	if state, reason, attempts, ok := e.intent(t, task); !ok || state != "refused" || reason != "history_ambiguous" || attempts != 1 {
-		t.Fatalf("the intent was not kept as a durable refusal: %q %q %d %v", state, reason, attempts, ok)
-	}
-	// The operator removes the duplicate; the next attempt copies the rest.
-	e.fake.Delete(issue, duplicate)
-	rep = ytbPass(t, e.worker, now.Add(time.Hour+2*time.Minute))
-	if rep.Enqueued != 1 {
-		t.Fatalf("the resumed pass %+v, want c0 copied", rep)
-	}
-	if op, ok := ytbOpFor(t, e.conn, older); !ok || op.State != ytwrite.StatePrepared {
-		t.Fatalf("c0 op %+v %v", op, ok)
-	}
-	if state, _, _, ok := e.intent(t, task); ok {
-		t.Fatalf("the intent survived: %q", state)
-	}
-}
-
-// A pass that crashes after the publication leaves the intent: the next pass
-// finds the binding and copies what the issue lacks instead of binding again.
-func TestYTBindingBinderFinishesAfterBind(t *testing.T) {
+// A crash between the publication's commit and dropping the intent is
+// harmless: the next pass sees the binding and drops the intent, and the
+// copies committed with the binding are not written twice.
+func TestYTBindingBinderDropsIntentAfterCommit(t *testing.T) {
 	e := newYTBEnv(t, "ytb_crash")
 	ctx := t.Context()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -415,15 +387,15 @@ func TestYTBindingBinderFinishesAfterBind(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding.BoundBy = ytBindActor
-	if _, err := e.st.AddYTTaskBindingFrom(ctx, binding, candidate, 0, store.YTBindingAutoVerified, ytBindActor); err != nil {
-		t.Fatal(err)
+	got, err := e.st.PublishYTAutoBinding(ctx, binding, candidate,
+		store.YTAutoBindEvidence{Authority: store.YTAuthorityHK, Missing: []int64{c1}}, ytBindActor)
+	if err != nil || got.Prepared != 1 {
+		t.Fatalf("the publication %+v %v", got, err)
 	}
-	if _, ok := ytbOpFor(t, e.conn, c1); ok {
-		t.Fatal("the simulated crash already enqueued c1")
-	}
+	// The publication committed; the process crashed before the intent drop.
 	rep := ytbPass(t, e.worker, now.Add(time.Minute))
-	if rep.Bound != 0 || rep.Enqueued != 1 {
-		t.Fatalf("the finish pass %+v", rep)
+	if rep.Bound != 0 || rep.Enqueued != 0 {
+		t.Fatalf("the recovery pass %+v, want the intent dropped and nothing written", rep)
 	}
 	if state, _, _, ok := e.intent(t, task); ok {
 		t.Fatalf("the intent survived: %q", state)
@@ -431,8 +403,12 @@ func TestYTBindingBinderFinishesAfterBind(t *testing.T) {
 	if op, ok := ytbOpFor(t, e.conn, c1); !ok || op.State != ytwrite.StatePrepared {
 		t.Fatalf("c1 op %+v %v", op, ok)
 	}
-	if rep := ytbPass(t, e.worker, now.Add(2*time.Minute)); rep.Enqueued != 0 {
-		t.Fatalf("a second pass enqueued again: %+v", rep)
+	var links int
+	if err := e.conn.QueryRow(ctx, `SELECT count(*) FROM yt_comment_write_links WHERE comment_id=$1`, c1).Scan(&links); err != nil {
+		t.Fatal(err)
+	}
+	if links != 1 {
+		t.Fatalf("c1 has %d links, want exactly one", links)
 	}
 }
 

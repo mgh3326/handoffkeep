@@ -243,9 +243,8 @@ func (s *Store) YTBindingExcluded(ctx context.Context, taskID int64) (bool, erro
 }
 
 // YTHighestCommentID is the task's highest task_comments id (0 when it has
-// none). The binder uses it as the watermark under comments authority
-// youtrack, where it lists no issue and copies nothing: every comment is
-// already canonical in YouTrack.
+// none). The publication's max-id watermark uses the same rule in its own
+// transaction; this read is for the read-only commands and tests.
 func (s *Store) YTHighestCommentID(ctx context.Context, taskID int64) (int64, error) {
 	if taskID < 1 {
 		return 0, errors.New("invalid comment task")
