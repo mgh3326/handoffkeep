@@ -1608,6 +1608,10 @@ mode on, for each changed document, in order:
   and the rescan both find such a document: the rescan lists every unbound
   post-import document whose create is not held, so no document change is
   needed.
+- no binding, created after the import ended, and a decision whose body
+  amends a policy document with no bound article on the tenant:
+  `parent_pending`, no op. The catch-up and the rescan retry it once that
+  policy is bound.
 
 **Catch-up.** The consumer's cursor starts at the feed's end, so each
 process in mode on runs, after the cursor exists, one full catch-up: every
@@ -1624,7 +1628,8 @@ Mode off prepares nothing and advances the cursor. Each pass logs
 `ytwrite.articles_feed documents= create_prepared= create_rejected=
 create_exists= update_prepared= unchanged= exception_not_updated=
 exception_unbound_imported= out_of_scope= deleted= other_tenant= no_project=
-invalid=`. No parent is set: hk 3995 had no settled rule when this shipped.
+invalid=`. A document waiting on its policy's article logs
+`ytwrite.article_parent_pending`; see Parent.
 
 **Op.** Principal and actor `hk:documents`, lane `document:<id>`. An
 `article_create` targets the project id and carries the summary, the body
@@ -1669,6 +1674,33 @@ Anything else (gone, another project, no marker) rejects the op
 `legacy_synced_unverified`, and so does, at prepare time, a legacy article
 the sync split into parts or whose legacy project has no YouTrack id. A
 rejected document stays unbound and holds the documents authority switch. Any other failed read leaves the op `not_sent`.
+
+**Parent** (hk 3995). A payload may name a parent: `parent_article_id` (the
+article it goes under) or `parent_family` (the family whose root it goes
+under); setting both is refused by `CheckArticle`. A payload with neither,
+as every create made before this shipped, stays top-level, and so does a
+legacy-synced document (it is adopted where it is). The parent is decided at
+prepare time and kept in the payload, so an op prepared earlier stays
+top-level.
+- A decision whose body has an `amends: policy/<key>` line (the first such
+  line; the value must be a `policy/` key) goes under the article of that
+  policy document, bound on the tenant. Until that policy has one, the prepare
+  writes no op: outcome `parent_pending`, logged per document as
+  `ytwrite.article_parent_pending`; the catch-up and the rescan retry it.
+- Any other document whose key has a `/` goes under its family root: the
+  key's first segment. A segment that is not `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`
+  gets no parent, logged `ytwrite.article_family_skipped`, so no create is
+  refused for its key.
+- A family root is a top-level article: summary the family, content
+  `Family root for <family> documents.` and the marker
+  `<!-- hk-family:<family> -->` (`ytwrite.FamilyRootMarker`). Send finds it
+  by summary and marker: none, and it creates one before the document; one,
+  it is the parent; two or more, the op is `rejected / ambiguous_issue` (no
+  POST). Root creation is not an op, so no op records it. Residual risk: two
+  first creates of one family in one project, running at once, can make two
+  roots; the next create of that family then refuses `ambiguous_issue` until
+  an operator merges them.
+- Evidence looks for the root without creating it: no root, no match.
 
 **Send.** `article_create`: one search of the project for the summary
 (`GET /api/articles`, query `project: <SHORT> "<summary>"`, at most 100 hits,

@@ -72,7 +72,13 @@ setup() {
 	# shellcheck source=hk-follow
 	source "$SCRIPT"
 	gh_get() { local f="$FIX/gh/$(key "$1")"; [[ -f "$f" ]] && cp "$f" "$2"; }
-	gh_status() { echo "status $1 $2 $3 $4" >>"$FIX/calls"; }
+	gh_status() {
+		if [[ -f "$FIX/gh_status_error" ]]; then
+			echo "status_failed $1 $2 $3 $4" >>"$FIX/calls"
+			return 1
+		fi
+		echo "status $1 $2 $3 $4" >>"$FIX/calls"
+	}
 	registry_manifest() {
 		local f="$FIX/reg/${1//\//_}"
 		[[ -f "$FIX/reg_error" ]] && return 1
@@ -93,6 +99,7 @@ setup() {
 		cp "$f" "$2"
 	}
 	hk_doc_put() {
+		[[ -f "$FIX/hk_put_error" ]] && return 1
 		cp "$2" "$FIX/records/$(key "$1")"
 		echo "record $1" >>"$FIX/calls"
 		# HK_FOLLOW_RECORD_OUT: internal/ciworkflow parses every record with
@@ -629,6 +636,80 @@ t_tick_lock() {
 	(tick) 2>"$FIX/log"
 	want "" "$(calls)"
 	grep -q 'hk_follow.busy reason=lock' "$FIX/log"
+}
+
+t_gh_get_without_token() {
+	# gh_get must not abort under set -u on bash <4.4 when GH_TOKEN is unset.
+	# /bin/bash is 3.2 on macOS; the regression only reproduces there.
+	setup
+	env -u GH_TOKEN /bin/bash -c 'set -u; HK_FOLLOW_LIB=1; source "$1"; curl() { printf "%s\n" "$@" >"$2"; printf 200; }; gh_get /repos/x "$3" && echo ok' _ "$SCRIPT" "$FIX/curl-args" "$FIX/out" >"$FIX/ok" 2>&1
+	want "ok" "$(cat "$FIX/ok")"
+	fails grep -q Authorization "$FIX/curl-args"
+}
+
+t_tick_no_services_refused() {
+	# A whitespace-only HK_FOLLOW_SERVICES must refuse, not strand the digest as noop serving.
+	setup; setup_tick
+	local saved="$HK_FOLLOW_SERVICES"
+	HK_FOLLOW_SERVICES="   "
+	fails tick
+	want "" "$(state_field verdict)"
+	want 0 "$(count '^deploy ')"
+	want 0 "$(count '^status ')"
+	HK_FOLLOW_SERVICES="$saved"
+	tick
+	want "deployed" "$(state_field verdict)"
+}
+
+t_tick_records_retried_after_hk_outage() {
+	# Terminal state must not be saved while records are undelivered; a later tick delivers them.
+	setup; setup_tick
+	touch "$FIX/hk_put_error"
+	tick
+	want "deployed" "$(state_field verdict)"
+	want 0 "$(count '^record ')"
+	rm -f "$FIX/hk_put_error"
+	tick
+	want 2 "$(count '^record deploy/handoffkeep')"
+	want 2 "$(count '^deploy ')"
+	want 1 "$(count 'notify .* deployed on ncp')"
+}
+
+t_tick_status_retried() {
+	# A failed GitHub status post stays queued and is retried on the next tick.
+	setup; setup_tick
+	touch "$FIX/gh_status_error"
+	tick
+	want 0 "$(count "^status $SHA_NEW deployed success")"
+	rm -f "$FIX/gh_status_error"
+	tick
+	want 1 "$(count "^status $SHA_NEW deployed success")"
+}
+
+t_tick_interrupted_records_retried() {
+	# The interrupted-attempt report is queued, not lost, when hk is down.
+	setup; setup_tick
+	local dig
+	dig="sha256:$(sha256sum <"$FIX/reg/deploy" | cut -d' ' -f1)"
+	save_state "$dig" "$SHA_NEW" started ""
+	touch "$FIX/hk_put_error"
+	tick
+	want 0 "$(count '^record ')"
+	rm -f "$FIX/hk_put_error"
+	tick
+	want 2 "$(count '^record deploy/handoffkeep')"
+}
+
+t_tick_refusal_report_retried() {
+	# A refusal whose status post fails is retried; the terminal state is not lost.
+	setup; setup_tick
+	fx_manifest deploy "$(index_json "$SHA_NEW" "$D3")"
+	touch "$FIX/gh_status_error"
+	tick
+	want "refuse tag_not_bound" "$(state_field verdict) $(state_field reason)"
+	rm -f "$FIX/gh_status_error"
+	tick
+	want 1 "$(count 'status .* deploy-refused:tag_not_bound')"
 }
 
 # --- promote ---------------------------------------------------------------
