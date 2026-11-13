@@ -720,6 +720,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/attachments/uploads", s.attachmentUploadBegin)
 	m.HandleFunc("POST /v1/attachments/uploads/{id}/complete", s.attachmentUploadComplete)
 	m.HandleFunc("GET /v1/usage", s.usage)
+	m.HandleFunc("GET /v1/capabilities", s.capabilityList)
 	m.HandleFunc("GET /metrics", s.metrics)
 	m.HandleFunc("POST /v1/tasks", s.tasksCreate)
 	m.HandleFunc("POST /v1/intake", s.intake)
