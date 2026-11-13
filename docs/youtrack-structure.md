@@ -48,7 +48,7 @@ Documents over the importer's conservative 240 KiB part target get an index arti
 - `handoffkeep tasks projects` returned the 26 project names above.
 - `handoffkeep tasks list --project=handoffkeep --limit=2` returned ID-ordered task records with `title`, `kind`, `state`, `priority`, `refs`, `created_by`, `created_at`, `updated_at`, `project`, labels and lifecycle fields. The unfiltered CLI sample included old rows with `project: null`; the HK bucket accounts for them.
 - `handoffkeep doc list --prefix design/` returned keys such as `design/2026-11-09/youtrack-canonical-r8` and nested keys such as `design/2026-11-09/placement-measure-review/code-findings`, confirming that path components are useful for article grouping.
-- `internal/youtrack/sync.go` writes the task state, priority, PR, lane, project, kind, grade, tier and stalled fields. `internal/youtrack/docs.go` currently mirrors a narrower set of document prefixes and caps a single article body at 256 KiB; this initial custom import intentionally includes all document prefixes and parts large text instead of leaving it only in hk.
+- `internal/youtrack/sync.go` writes the task state, priority, PR, lane, project, kind, grade, tier and stalled fields. `internal/youtrack/docs.go` currently mirrors a narrower set of document prefixes and caps a single article part at the measured 240 KiB (`ytwrite.ArticlePartMaxBytes`) and splits a longer document over more parts; this initial custom import intentionally includes all document prefixes and parts large text instead of leaving it only in hk.
 - The stated import volume is approximately 3.6k tasks, 13k comments and 11k documents / 96 MB. The spike will replace the estimate with measurements.
 
 ## Import mode and provenance

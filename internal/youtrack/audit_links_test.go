@@ -24,7 +24,10 @@ func TestAuditReadsLegacyCommentEvidence(t *testing.T) {
 			t.Errorf("link %q: id %v adopted %v, want %v %v", tc.link, CommentLinkIsID(tc.link), CommentLinkIsAdopted(tc.link), tc.id, tc.adopted)
 		}
 	}
-	text := commentText(store.TaskComment{ID: 42, Body: "본문", Author: "worker", CreatedAt: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)})
+	text, err := commentText(store.TaskComment{ID: 42, Body: "본문", Author: "worker", CreatedAt: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if id, ok := LegacyCommentID(text); !ok || id != 42 {
 		t.Fatalf("LegacyCommentID(%q) = %d %v, want 42", text, id, ok)
 	}

@@ -27,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 const MaxBytes = 64 << 10
@@ -1407,6 +1408,17 @@ func validName(x string) bool { return nameRE.MatchString(x) }
 func ValidProjectName(x string) bool { return validName(x) }
 func validText(x string, n int) bool { return len(x) <= n && !strings.ContainsRune(x, 0) }
 
+// validTextBound is validText for a task title or task text: the size is
+// YouTrack's text bound (ytwrite.TextMaxChars, in characters), so text it
+// would accept is accepted here.
+func validTextBound(x string) bool { return ytwrite.WithinTextMax(x) && !strings.ContainsRune(x, 0) }
+
+// validDocumentText refuses NUL only. A document has no size refusal: a
+// document longer than one article part is split over more parts when it is
+// mirrored (ytwrite.ArticlePartMaxBytes), so YouTrack never sees a whole
+// document at once.
+func validDocumentText(x string) bool { return !strings.ContainsRune(x, 0) }
+
 // ValidActor accepts ordinary store names and the operator:<email> identity
 // used by authenticated console and MCP requests. Actor text remains bounded
 // and cannot contain NUL or other control characters.
@@ -2419,7 +2431,7 @@ func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
 }
 
 func validTask(x Task) bool {
-	return validName(x.Lane) && (x.ParentLane == "" || validName(x.ParentLane)) && x.Title != "" && validText(x.Title, MaxBytes) && taskKinds[x.Kind] && x.CreatedBy != "" && validText(x.CreatedBy, 128) && validTaskRefs(x.Refs) && (x.BodyDoc == "" || ValidBodyDoc(x.BodyDoc))
+	return validName(x.Lane) && (x.ParentLane == "" || validName(x.ParentLane)) && x.Title != "" && validTextBound(x.Title) && taskKinds[x.Kind] && x.CreatedBy != "" && validText(x.CreatedBy, 128) && validTaskRefs(x.Refs) && (x.BodyDoc == "" || ValidBodyDoc(x.BodyDoc))
 }
 
 // bodyDocKeyRE is the document key alphabet the console can fetch and link
@@ -3888,7 +3900,7 @@ func validDocKey(k string) bool {
 	return len(k) > 0 && len(k) <= 512 && !strings.HasPrefix(k, "/") && !strings.Contains(k, "..") && !strings.ContainsRune(k, 0)
 }
 func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, error) {
-	if !validDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validText(x.Body, DocumentMaxBytes) {
+	if !validDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validDocumentText(x.Body) {
 		return x, false, errors.New("invalid document")
 	}
 	if !ValidActor(x.CreatedBy) {

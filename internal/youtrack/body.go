@@ -1,6 +1,7 @@
 package youtrack
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -20,9 +21,13 @@ import (
 
 const (
 	descriptionTimeLayout = "2006-01-02 15:04"
-	commentTextLimit      = 60000
-	summaryLimit          = 250
+	summaryLimit          = ytwrite.SummaryMaxChars
 )
+
+// errCommentTooLong means a mirrored comment, with its header and marker, is
+// over YouTrack's text bound. The comment stays whole in hk; it is not sent
+// cut short.
+var errCommentTooLong = errors.New("comment is over YouTrack's text bound")
 
 var (
 	// noiseRE marks a task comment the machinery wrote (spawn logs, lane
@@ -90,15 +95,19 @@ func humanComment(body string) bool {
 // commentText is the body of the YouTrack comment for one hk comment: who
 // wrote it, when, the text, and the marker that names the hk comment. The
 // marker lets a run that lost the create response find the comment and link
-// it instead of posting it again.
-func commentText(c store.TaskComment) string {
+// it instead of posting it again. A comment whose text with its header and
+// marker is over YouTrack's bound is refused (errCommentTooLong), never cut.
+func commentText(c store.TaskComment) (string, error) {
 	who := "운영자"
 	if !strings.HasPrefix(c.Author, "operator") {
 		who = fmt.Sprintf("에이전트 메모 (%s)", c.Author)
 	}
 	marker := commentMarker(c.ID)
-	text := fmt.Sprintf("**%s** · %s\n\n%s", who, c.CreatedAt.UTC().Format(descriptionTimeLayout), c.Body)
-	return truncateRunes(text, commentTextLimit-len(marker)-len("\n\n")) + "\n\n" + marker
+	text := fmt.Sprintf("**%s** · %s\n\n%s", who, c.CreatedAt.UTC().Format(descriptionTimeLayout), c.Body) + "\n\n" + marker
+	if !ytwrite.WithinTextMax(text) {
+		return "", errCommentTooLong
+	}
+	return text, nil
 }
 
 // commentMarker is the HTML comment that ends a mirrored comment. Its id is the

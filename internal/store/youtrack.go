@@ -926,7 +926,7 @@ func (s *Store) applyYouTrackCommentTx(ctx context.Context, tx pgx.Tx, taskID in
 
 func (s *Store) createYouTrackIssueTx(ctx context.Context, tx pgx.Tx, in YouTrackNewIssue) (int64, error) {
 	title := strings.TrimSpace(in.Title)
-	if title == "" || !validText(title, MaxBytes) || !validName(in.Lane) || !taskKinds[in.Kind] || strings.TrimSpace(in.Tenant) == "" {
+	if title == "" || !validTextBound(title) || !validName(in.Lane) || !taskKinds[in.Kind] || strings.TrimSpace(in.Tenant) == "" {
 		return 0, ErrYouTrackActivityInput
 	}
 	if err := guard.Reject(title); err != nil {

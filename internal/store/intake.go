@@ -133,10 +133,10 @@ func validSourceRef(x string) bool {
 }
 
 func checkTriageItem(x triageItem) error {
-	if x.Title == "" || !validText(x.Title, MaxBytes) || strings.ContainsAny(x.Title, "\r\n") {
+	if x.Title == "" || !validTextBound(x.Title) || strings.ContainsAny(x.Title, "\r\n") {
 		return errors.New("invalid intake: title must be one non-empty line")
 	}
-	if !validText(x.Body, DocumentMaxBytes) {
+	if !validTextBound(x.Body) {
 		return errors.New("invalid intake: body is too long")
 	}
 	if x.Kind != "" && !taskKinds[x.Kind] {
