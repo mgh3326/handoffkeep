@@ -30,8 +30,16 @@ export type DeployRecordView = {
 
 /** What the newest record plus the merged-since list prove. States a deploy
  * record cannot carry (not built, disabled, check failed, awaiting approval)
- * are never invented client-side. */
-export type DeployState = "deployed" | "pending" | "deploy_failed" | "health_failed" | "no_record" | "partial";
+ * are never invented client-side. `serving_unknown` is the interrupted tick:
+ * the record cannot say which version serves. */
+export type DeployState =
+  | "deployed"
+  | "pending"
+  | "deploy_failed"
+  | "health_failed"
+  | "serving_unknown"
+  | "no_record"
+  | "partial";
 
 export type DeployMergedTask = {
   task_id: number;
@@ -81,6 +89,7 @@ const DEPLOY_STATES: Record<DeployState, true> = {
   pending: true,
   deploy_failed: true,
   health_failed: true,
+  serving_unknown: true,
   no_record: true,
   partial: true,
 };

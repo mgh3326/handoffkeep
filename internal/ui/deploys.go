@@ -118,12 +118,13 @@ type deployServiceView struct {
 
 // The states deployServiceView.State can hold.
 const (
-	DeployStateDeployed     = "deployed"      // newest attempt succeeded
-	DeployStatePending      = "pending"       // newest attempt succeeded; merges wait for the next deploy
-	DeployStateDeployFailed = "deploy_failed" // newest attempt failed before the new version served
-	DeployStateHealthFailed = "health_failed" // newest attempt served, failed its health check, was rolled back
-	DeployStateNoRecord     = "no_record"     // no parseable deploy record
-	DeployStatePartial      = "partial"       // the scan stopped early: the newest record may be unscanned
+	DeployStateDeployed       = "deployed"        // newest attempt succeeded
+	DeployStatePending        = "pending"         // newest attempt succeeded; merges wait for the next deploy
+	DeployStateDeployFailed   = "deploy_failed"   // newest attempt failed before its deploy step reported success
+	DeployStateHealthFailed   = "health_failed"   // newest attempt served and failed its health check; the row names the step
+	DeployStateServingUnknown = "serving_unknown" // newest attempt failed and the record cannot say which version serves
+	DeployStateNoRecord       = "no_record"       // no parseable deploy record
+	DeployStatePartial        = "partial"         // the scan stopped early: the newest record may be unscanned
 )
 
 type deployPendingResponse struct {
@@ -338,6 +339,10 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 // prove. A success with merges waiting is "pending" — the next deploy has
 // work, not that this one failed. A capped scan cannot name the newest
 // attempt at all, so it stays "partial" and the panel scopes every value.
+// An interrupted tick wrote a failed step-6 record without knowing which
+// services flipped (deploy/hk-follow/README.md §Report shape item 2), so it
+// gets "serving_unknown" rather than a state that claims the old version
+// serves.
 func deployServiceState(docsCapped bool, latest *store.DeployRecord, mergedSince int) string {
 	if docsCapped {
 		return DeployStatePartial
@@ -348,12 +353,15 @@ func deployServiceState(docsCapped bool, latest *store.DeployRecord, mergedSince
 			return DeployStatePending
 		}
 		return DeployStateDeployed
+	case latest.FailedStepName != nil && *latest.FailedStepName == "interrupted":
+		return DeployStateServingUnknown
 	case latest.Result == "rolled_back":
 		return DeployStateHealthFailed
 	case latest.FailedStep != nil && *latest.FailedStep >= 7:
 		// 7 (healthz, rolled back) and 8 (rollback failed) both mean the new
 		// version served and failed its health check. 6 is the deploy command
-		// itself failing (deploy/hk-follow/README.md §Report shape).
+		// itself failing or an interrupted tick (deploy/hk-follow/README.md
+		// §Report shape), whose serving state the record does not prove.
 		return DeployStateHealthFailed
 	default:
 		return DeployStateDeployFailed

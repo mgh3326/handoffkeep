@@ -43,6 +43,7 @@ const DEPLOY_STATE_LABEL: Record<DeployState, string> = {
   pending: "배포 대기",
   deploy_failed: "배포 실패",
   health_failed: "헬스체크 실패",
+  serving_unknown: "서빙 판 미확인",
   no_record: "기록 없음",
   partial: "조회 범위 내",
 };
@@ -269,7 +270,9 @@ function ServiceCard({ svc, now }: { svc: DeployServiceView; now: string }) {
           <Chip
             kind="status"
             state={svc.state}
-            stalled={svc.state === "deploy_failed" || svc.state === "health_failed"}
+            stalled={
+              svc.state === "deploy_failed" || svc.state === "health_failed" || svc.state === "serving_unknown"
+            }
             label={DEPLOY_STATE_LABEL[svc.state]}
           />
         ) : null}

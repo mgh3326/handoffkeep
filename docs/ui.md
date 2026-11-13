@@ -152,10 +152,10 @@ email-or-service route as noted.
   status and Deploys views. Deploy status is assembled from deploy-record
   documents and task events; it is email-only. Each service carries the
   `state` its newest record and merged-since list prove
-  (`deployed`, `pending`, `deploy_failed`, `health_failed`, `no_record`,
-  `partial`); a state a record cannot carry (not built, disabled, check
-  failed, awaiting approval — holds and refusals write no record) is never
-  reported. Each record carries the `target` environment, the `head_sha` it
+  (`deployed`, `pending`, `deploy_failed`, `health_failed`,
+  `serving_unknown` for an interrupted tick, `no_record`, `partial`); a state
+  a record cannot carry (not built, disabled, check failed, awaiting approval
+  — holds and refusals write no record) is never reported. Each record carries the `target` environment, the `head_sha` it
   ran, its `included_prs` and `failed_step_name`, so the view shows
   task→PR→SHA→deploy-record and the running SHA beside the deployed ref.
   Records hold no CI, deploy-ok or health-check timestamp; a success record's

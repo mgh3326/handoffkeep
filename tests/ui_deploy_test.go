@@ -786,6 +786,13 @@ func TestUIDeployPendingChainAndState(t *testing.T) {
 	seedDeployDoc(t, s, "deploy/panewire-hub/20260923T040000Z",
 		deployChainBody(t, "panewire-hub", "failed", next, "", "2026-09-23T04:00:00Z", nil, "", nil))
 
+	// pacelever: an interrupted tick writes a failed step-6 record whose
+	// serving version is unknown — never "deploy_failed" (the old version
+	// serving) and never a current SHA.
+	six := 6
+	seedDeployDoc(t, s, "deploy/pacelever/20260923T050000Z",
+		deployChainBody(t, "pacelever", "failed", next, "", "2026-09-23T05:00:00Z", &six, "interrupted", nil))
+
 	response := getDeployPending(t, h, assertion)
 
 	hk := serviceView(t, response, "handoffkeep")
@@ -841,5 +848,13 @@ func TestUIDeployPendingChainAndState(t *testing.T) {
 
 	if mergewake := serviceView(t, response, "mergewake"); mergewake["state"] != "no_record" {
 		t.Fatalf("mergewake state=%v, want no_record", mergewake["state"])
+	}
+
+	pl := serviceView(t, response, "pacelever")
+	if pl["state"] != "serving_unknown" || pl["current"] != nil {
+		t.Fatalf("pacelever state=%v current=%v, want serving_unknown with no running SHA", pl["state"], pl["current"])
+	}
+	if pl["latest"].(map[string]any)["failed_step_name"] != "interrupted" {
+		t.Fatalf("pacelever latest=%v", pl["latest"])
 	}
 }

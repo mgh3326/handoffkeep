@@ -149,6 +149,18 @@ describe("DeployPanel", () => {
     expect(pw.querySelector('[data-chip="status"]')).toBeNull();
   });
 
+  it("names an interrupted tick as serving-unknown, not as the old version serving", async () => {
+    // An interrupted tick writes a failed step-6 record without knowing
+    // which services flipped; the card must not claim a serving version.
+    const data = fixture();
+    data.services[1].state = "serving_unknown";
+    render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
+    const at = await screen.findByLabelText("auto_trader 배포");
+    expect(at.getAttribute("data-state")).toBe("serving_unknown");
+    expect(within(at).getByText("서빙 판 미확인")).toBeTruthy();
+    expect(at.querySelector('[data-chip="status"]')?.getAttribute("data-group")).toBe("failed");
+  });
+
   it("shows SHA 미기록 when a record carries no head_sha, never a guess", async () => {
     render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
     const at = await screen.findByLabelText("auto_trader 배포");
