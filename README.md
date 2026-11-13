@@ -252,6 +252,11 @@ with a `reason` that names the states allowed from the current one. A `merged` t
 link (an https URL or `hk:doc <key>`), the same evidence `completed` takes; the
 kind rule for `completed` does not apply to this edge.
 
+An `implement` task closes as `completed` only when no change it implements is
+unmerged and no sub-task is open (a sub-task whose state is not in the completed or canceled category; merged and deployed count as completed).
+A refusal answers `task_conflict` and names the open PR (`repo#number`) or the
+open sub-task. Closed-without-merge PRs also count as unmerged.
+
 Old state names still work as input and in `--state` filters (`in_progress` →
 the claim's sub-state, `verifying` and `join` → `reviewing`, `hold` →
 `icebox`, `needs_decision` → set `awaiting_decision`, `claimed` → the claim

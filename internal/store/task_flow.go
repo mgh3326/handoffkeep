@@ -560,6 +560,17 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		if to == StateCompleted && from != StateMerged && !canCompleteKind(x.Kind) && x.Kind != "implement" {
 			return Task{}, fmt.Errorf("%w: completed applies to implement, decide, ops, verify and research tasks", ErrTaskConflict)
 		}
+		// An implement task completes only with no unmerged PR and no open
+		// sub-task; a refusal names them (hk 4050).
+		if to == StateCompleted && x.Kind == "implement" {
+			blockers, err := implementCompletionBlockers(ctx, tx, x.ID)
+			if err != nil {
+				return Task{}, err
+			}
+			if blockers != "" {
+				return Task{}, fmt.Errorf("%w: implement cannot complete while %s", ErrTaskConflict, blockers)
+			}
+		}
 		// A task waiting on a decision leaves only the way the old
 		// needs_decision state did: back to backlog, parked, or dropped.
 		if x.AwaitingDecision {
@@ -835,6 +846,50 @@ func allowedNextStates(from string) string {
 		}
 	}
 	return strings.Join(allowed, ", ")
+}
+
+// implementCompletionBlockers names what keeps an implement task from
+// completing: each change it implements that is not merged, and each sub-task
+// not yet completed or canceled. It returns "" when nothing blocks it.
+func implementCompletionBlockers(ctx context.Context, tx pgx.Tx, taskID int64) (string, error) {
+	var parts []string
+	rows, err := tx.Query(ctx, `SELECT c.repo,c.pr_number FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND ct.relation=$2 AND c.state<>$3 ORDER BY c.repo,c.pr_number`, taskID, ChangeImplements, ChangeMerged)
+	if err != nil {
+		return "", err
+	}
+	for rows.Next() {
+		var repo string
+		var n int
+		if err := rows.Scan(&repo, &n); err != nil {
+			rows.Close()
+			return "", err
+		}
+		parts = append(parts, fmt.Sprintf("open PR %s#%d", repo, n))
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	rows, err = tx.Query(ctx, `SELECT id,state FROM tasks WHERE parent_id=$1 ORDER BY id`, taskID)
+	if err != nil {
+		return "", err
+	}
+	for rows.Next() {
+		var id int64
+		var state string
+		if err := rows.Scan(&id, &state); err != nil {
+			rows.Close()
+			return "", err
+		}
+		if c := TaskCategory(state); c != CategoryCompleted && c != CategoryCanceled {
+			parts = append(parts, fmt.Sprintf("open sub-task %d (%s)", id, state))
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return strings.Join(parts, ", "), nil
 }
 
 // transitionConflict is the task_conflict of a refused manual move: it names
