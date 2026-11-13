@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"strconv"
 	"testing"
@@ -309,5 +310,64 @@ func TestYTIssueBackfillHonoursTheIntentTenant(t *testing.T) {
 	}
 	if ops := ytiOps(t, s, x.ID); len(ops) != 1 || ops[0].Tenant != ytcTenant || ytrIntent(t, s, x.ID) != "" {
 		t.Fatalf("ops %+v, intent %q", ops, ytrIntent(t, s, x.ID))
+	}
+}
+
+// issues-backfill reads the task under its lane lock (PR #357 review, round
+// 2): a move that holds the lane when the backfill starts is what the backfill
+// sees, so it neither prepares the old project's op nor drops the new intent.
+func TestYTIssueBackfillReadsTheTaskUnderTheLaneLock(t *testing.T) {
+	s := schemaStore(t, "ytr_backfill_race")
+	ytrProject(t, s, "ytr-mapped", "")
+	ytrProject(t, s, "ytr-unmapped", "")
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	x := ytiCreate(t, s, "ytr-mapped")
+	if err := s.PutYouTrackProject(t.Context(), YouTrackProject{HKProject: "ytr-mapped", ProjectID: "0-11", ShortName: "HL"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	// The move, as SetTaskProject runs it: task row, then the lane lock.
+	if _, err := tx.Exec(ctx, `UPDATE tasks SET project='ytr-unmapped' WHERE id=$1`, x.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(x.ID, 10)); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	var r YTIssueBackfillReport
+	go func() {
+		var err error
+		r, err = s.BackfillYTIssueOps(context.Background(), ytcTenant, "", false)
+		done <- err
+	}()
+	// The backfill lists the task, then waits on the lane lock.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting bool
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted AND objsubid=1
+			AND ((classid::bigint << 32) | objid::bigint) = hashtextextended('yt_write_entity:task:' || $1, 0))`, strconv.FormatInt(x.ID, 10)).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("backfill never waited on the lane lock")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if ops := ytiOps(t, s, x.ID); len(ops) != 0 || ytrIntent(t, s, x.ID) != ytcTenant {
+		t.Fatalf("backfill used the stale project: report %+v ops %+v intent %q", r, ops, ytrIntent(t, s, x.ID))
 	}
 }

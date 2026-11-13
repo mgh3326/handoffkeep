@@ -764,19 +764,31 @@ pass the write worker in mode on prepares the op of every intent of its own
 tenant whose task's project now has its mapping, under the task's lane lock,
 and drops the intent; an intent of another tenant is never consumed there. A
 task that got an issue another way meanwhile only loses its intent.
-`issues-backfill` on another tenant than an intent's leaves that task alone
-(counted `other_tenant`); on the intent's tenant it prepares the op and drops
-the intent. `AddYTTaskBinding` and canary enrollment refuse a task with a
+`issues-backfill` reads the task under its lane lock; on another tenant than
+an intent's it leaves that task alone (counted `other_tenant`); on the
+intent's tenant it prepares the op and drops the intent. A task whose op was
+rejected `project_changed` counts `existing` there: its intent is the
+worker's intent pass's (below). `AddYTTaskBinding` and canary enrollment refuse a task with a
 pending issue_create op or a comment op queued with no target, so a queued
 comment is never left with a binding no issue_create op published.
 
 **Project changes (hk 3909).** Gated by `HANDOFFKEEP_YT_ISSUE_RETARGET`
 (`off` or `on`, default `off`, hk 4318). Off, a moved task's unsent op is left
-as it is (its issue is created in the old project; moves follow the binding).
-Turn it on only once no older release serves, and off before rolling back to
-one: an older worker orders a lane by id alone and takes a queued comment's
-target only from the binding of the op keyed `task-issue:<id>`, so it would
-reject a comment queued behind a replaced op `issue_not_bound`. On,
+as it is (its issue is created in the old project; moves follow the binding),
+and no replacement is written at all: a task whose op was already rejected
+`project_changed` (while the gate was on) waits as an intent on that op's
+tenant, skipped by the worker's intent pass, until the gate is on again.
+Turn it on only once no older release serves. An older worker orders a lane
+by id alone and takes a queued comment's target only from the binding of the
+op keyed `task-issue:<id>`, so it would reject a comment queued behind a
+replaced op `issue_not_bound`, and turning the gate off does not undo state
+written while it was on. The rollback barrier is therefore: turn the gate off,
+let this release's worker deliver the queued comments of moved tasks, and roll
+back only when `handoffkeep youtrack issues-retarget-drain` (read-only; opens
+`HANDOFFKEEP_DB_URL`) reports `"drained": true` (exit 0). It counts the
+comment ops queued with no target on a task with a `project_changed` op, and
+lists those tasks; one held by an intent drains once its project is mapped
+and the gate is on, or once the comment op is resolved by hand. On,
 `SetTaskProject` syncs the task's latest
 issue_create op in its own transaction: an op still `prepared` (nothing sent)
 whose YouTrack project or hk project is no longer the task's is rejected

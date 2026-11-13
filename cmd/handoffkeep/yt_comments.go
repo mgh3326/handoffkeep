@@ -1159,6 +1159,39 @@ func youtrackIssuesBackfillCmd(args []string, out io.Writer) error {
 	return printJSON(out, report)
 }
 
+// youtrackIssuesRetargetDrainCmd is `youtrack issues-retarget-drain`
+// (hk 4318): the read-only rollback barrier of HANDOFFKEEP_YT_ISSUE_RETARGET.
+// It prints store.YTIssueRetargetDrain and exits youtrackExitFailed while
+// a comment queued on a moved task would be rejected by an older release
+// (drained false). It opens the database directly, like `youtrack canary`.
+func youtrackIssuesRetargetDrainCmd(args []string, out io.Writer) error {
+	if len(args) != 0 {
+		return errors.New("usage: youtrack issues-retarget-drain")
+	}
+	dbURL := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DB_URL"))
+	if dbURL == "" {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("HANDOFFKEEP_DB_URL is required")}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := store.Open(ctx, dbURL)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	d, err := st.YTIssueRetargetDrain(ctx)
+	if err != nil {
+		return err
+	}
+	if err := printJSON(out, d); err != nil {
+		return err
+	}
+	if !d.Drained {
+		return exitCodeError{code: youtrackExitFailed, err: fmt.Errorf("%d queued comments on moved tasks; not safe to roll back to a release before hk 4318", d.QueuedComments)}
+	}
+	return nil
+}
+
 const youtrackFieldsBackfillUsage = "usage: youtrack fields-backfill [--project P] [--task N] [--limit N] [--dry-run]"
 
 // youtrackFieldsBackfillCmd is `youtrack fields-backfill` (hk 4022): it

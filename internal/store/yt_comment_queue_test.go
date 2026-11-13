@@ -519,3 +519,68 @@ func TestYTCommentQueuedRefusesABindingWhileItWaits(t *testing.T) {
 		t.Fatalf("comment op %+v", got)
 	}
 }
+
+// The retarget gate's rollback barrier (PR #357 review, round 2). With the gate
+// on, comment op 2 queues behind issue op 1 and the task moves to an unmapped
+// project: op 1 is rejected and an intent recorded. Turning the gate off writes
+// no replacement, even once the project is mapped, and the drain report holds
+// the rollback until the comment is delivered under this release.
+func TestYTCommentQueuedHoldsTheRollbackUntilDrained(t *testing.T) {
+	s, x, _ := ytqSetup(t, "ytq_drain")
+	s.SetYTIssueRetarget(true)
+	ctx := t.Context()
+	ytrProject(t, s, "ytq-later", "")
+	ytrProject(t, s, "ytq-other", "0-9")
+	c, err := s.CreateTaskComment(ctx, x.ID, "worker", "queued behind op 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, ok := ytcOpFor(t, s, c.ID)
+	if !ok || op.YTTargetID != "" {
+		t.Fatalf("queued op %+v %v", op, ok)
+	}
+	ytrMove(t, s, x.ID, "ytq-later")
+	if ops := ytiOps(t, s, x.ID); len(ops) != 1 || ops[0].Reason != ytwrite.ReasonProjectChanged || ytrIntent(t, s, x.ID) != ytcTenant {
+		t.Fatalf("ops after the move %+v, intent %q", ops, ytrIntent(t, s, x.ID))
+	}
+	d, err := s.YTIssueRetargetDrain(ctx)
+	if err != nil || d.Drained || d.QueuedComments != 1 || d.Intents != 1 || len(d.TaskIDs) != 1 || d.TaskIDs[0] != x.ID {
+		t.Fatalf("drain with a held comment %+v %v", d, err)
+	}
+
+	s.SetYTIssueRetarget(false)
+	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "ytq-later", ProjectID: "0-11", ShortName: "HL"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.PrepareMappedYTIssues(ctx, 10); err != nil || n != 0 {
+		t.Fatalf("gate-off pass prepared %d, %v", n, err)
+	}
+	ytrMove(t, s, x.ID, "ytq-other")
+	if ops := ytiOps(t, s, x.ID); len(ops) != 1 || ytrIntent(t, s, x.ID) != ytcTenant {
+		t.Fatalf("a replacement was written with the gate off: %+v, intent %q", ops, ytrIntent(t, s, x.ID))
+	}
+	if d, err := s.YTIssueRetargetDrain(ctx); err != nil || d.Drained {
+		t.Fatalf("drain with the gate off %+v %v", d, err)
+	}
+
+	s.SetYTIssueRetarget(true)
+	if n, err := s.PrepareMappedYTIssues(ctx, 10); err != nil || n != 1 {
+		t.Fatalf("gate-on pass prepared %d, %v", n, err)
+	}
+	ops := ytiOps(t, s, x.ID)
+	if len(ops) != 2 || ops[1].YTTargetID != "0-9" {
+		t.Fatalf("ops after the gate is on %+v", ops)
+	}
+	if d, err := s.YTIssueRetargetDrain(ctx); err != nil || d.Drained || d.Replacements != 1 || d.Intents != 0 {
+		t.Fatalf("drain with the replacement pending %+v %v", d, err)
+	}
+	s.SetYTIssueRetarget(false)
+	yt := ytwritetest.NewFake()
+	var offset atomic.Int64
+	if got := ytqDrive(t, s, ytcProtocol(t, s, yt, &offset), op.ID); got.State != ytwrite.StateApplied {
+		t.Fatalf("comment op %+v", got)
+	}
+	if d, err := s.YTIssueRetargetDrain(ctx); err != nil || !d.Drained || d.QueuedComments != 0 || d.Replacements != 0 {
+		t.Fatalf("drain after delivery %+v %v", d, err)
+	}
+}
