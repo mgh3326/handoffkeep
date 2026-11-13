@@ -186,7 +186,7 @@ var TaskTransitions = map[string]map[string]bool{
 	StateCompleted:   {StateUnstarted: true},
 	StateDropped:     {StateUnstarted: true},
 	StateDuplicate:   {StateUnstarted: true},
-	StateIcebox:      {StateBacklog: true, StateUnstarted: true},
+	StateIcebox:      {StateBacklog: true, StateUnstarted: true, StateDropped: true},
 }
 
 var taskStates = func() map[string]bool {

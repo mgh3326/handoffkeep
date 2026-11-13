@@ -191,21 +191,21 @@ stateDiagram-v2
     researching --> icebox
     researching --> dropped
     researching --> duplicate
-    researching --> completed: decide, ops, verify; result link required
+    researching --> completed: decide, ops, verify, implement; closure evidence required
     developing --> researching
     developing --> reviewing
     developing --> unstarted
     developing --> icebox
     developing --> dropped
     developing --> duplicate
-    developing --> completed: decide, ops, verify; result link required
+    developing --> completed: decide, ops, verify, implement; closure evidence required
     reviewing --> developing: fix needed
     reviewing --> merged: reference flag stores refs.pr
     reviewing --> unstarted
     reviewing --> icebox
     reviewing --> dropped
     reviewing --> duplicate
-    reviewing --> completed: decide, ops, verify; result link required
+    reviewing --> completed: decide, ops, verify, implement; closure evidence required
     merged --> unstarted: reopen (reason required)
     merged --> completed: closure evidence (result link or hk:doc)
     deployed --> unstarted: reopen (reason required)
@@ -214,6 +214,7 @@ stateDiagram-v2
     duplicate --> unstarted: reopen (reason required)
     icebox --> backlog: revive
     icebox --> unstarted: reopen (reason required)
+    icebox --> dropped: closure evidence
 ```
 
 ### State model, hierarchy and relations
