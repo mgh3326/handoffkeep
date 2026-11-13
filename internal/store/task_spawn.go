@@ -197,7 +197,7 @@ func (s *Store) PutTaskSpawn(ctx context.Context, id int64, in TaskSpawnInput, a
 	}
 	defer tx.Rollback(ctx)
 	// A terminal write may comment, so it takes the comment insert lock before
-	// its task row, the order ApplyYouTrackActivity and ReplyDots use (see
+	// its task row, the order ReplyDots uses (see
 	// lockorder.go). Holding the task row first would cycle with them.
 	if spawnTerminal(in.State) {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {

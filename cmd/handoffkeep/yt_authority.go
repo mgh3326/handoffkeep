@@ -107,25 +107,3 @@ func ytAuthorityKindsArg(arg string) ([]store.YTAuthorityKind, error) {
 	}
 	return nil, fmt.Errorf("unknown kind %q; %s", arg, youtrackAuthorityUsage)
 }
-
-// youtrackRefuseAuthority refuses a legacy push (sync, adopt) while any kind
-// is canonical in YouTrack: the push copies PG over YouTrack. The protocol
-// mode guard (youtrackRefuseLegacyPush) already refuses while a mode is on;
-// this one also holds after a mode is turned off.
-func youtrackRefuseAuthority(ctx context.Context, st *store.Store, sub string) error {
-	rows, err := st.YTAuthorities(ctx)
-	if err != nil {
-		return err
-	}
-	var canonical []string
-	for _, a := range rows {
-		if a.Authority == store.YTAuthorityYouTrack {
-			canonical = append(canonical, string(a.Kind))
-		}
-	}
-	if len(canonical) == 0 {
-		return nil
-	}
-	return exitCodeError{code: youtrackExitProtocolOwned, err: fmt.Errorf("youtrack %s refused: YouTrack is canonical for %s (youtrack authority show); a legacy push would copy PG over it (hk 4122)",
-		sub, strings.Join(canonical, ", "))}
-}

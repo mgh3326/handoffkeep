@@ -68,22 +68,14 @@ func ytbComment(t *testing.T, s *Store, task int64, body string) CreatedTaskComm
 	return c
 }
 
-// ytbLegacyCarries asserts that comment c has no op and no ownership link,
-// so the legacy push still selects it.
-func ytbLegacyCarries(t *testing.T, s *Store, c TaskComment) {
+// ytbUnowned asserts that comment c has no op and no ownership link.
+func ytbUnowned(t *testing.T, s *Store, c TaskComment) {
 	t.Helper()
 	if op, ok := ytcOpFor(t, s, c.ID); ok {
 		t.Fatalf("comment %d got op %+v", c.ID, op)
 	}
 	if n := ytcCount(t, s, `SELECT count(*) FROM yt_comment_write_links WHERE comment_id=$1`, c.ID); n != 0 {
 		t.Fatalf("comment %d has %d ownership links", c.ID, n)
-	}
-	got, err := s.UnpushedYouTrackComments(t.Context(), c.TaskID, 0, 500)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.ContainsFunc(got, func(x TaskComment) bool { return x.ID == c.ID }) {
-		t.Fatalf("the legacy push does not select comment %d: %+v", c.ID, got)
 	}
 }
 
@@ -160,9 +152,6 @@ func TestYTCommentsOnBoundTaskEnqueuesAndDelivers(t *testing.T) {
 	if err != nil || !ok || row.YTID != b.IssueID || row.OpID != op.ID {
 		t.Fatalf("task map anchor %+v %v %v", row, ok, err)
 	}
-	if got, err := s.UnpushedYouTrackComments(ctx, task, 0, 50); err != nil || len(got) != 0 {
-		t.Fatalf("the legacy push would also post %+v (%v)", got, err)
-	}
 	yt := ytwritetest.NewFake()
 	var offset atomic.Int64
 	p := ytcProtocol(t, s, yt, &offset)
@@ -199,7 +188,7 @@ func TestYTCommentsOnUnboundTaskWritesNothing(t *testing.T) {
 		t.Fatalf("mcp comment %+v %v", m, err)
 	}
 	for _, x := range []TaskComment{c.TaskComment, m.TaskComment} {
-		ytbLegacyCarries(t, s, x)
+		ytbUnowned(t, s, x)
 	}
 	if n := ytcCount(t, s, `SELECT (SELECT count(*) FROM yt_write_ops)+(SELECT count(*) FROM yt_entity_map)+(SELECT count(*) FROM yt_comment_write_links)`); n != 0 {
 		t.Fatalf("an unbound task wrote %d op/map/link rows", n)
@@ -273,7 +262,7 @@ func TestYTCommentsOnAmbiguousBindingSkips(t *testing.T) {
 			if c.YouTrackProjection == nil || c.YouTrackProjection.Status != YTProjectionNone {
 				t.Fatalf("projection %+v", c.YouTrackProjection)
 			}
-			ytbLegacyCarries(t, s, c.TaskComment)
+			ytbUnowned(t, s, c.TaskComment)
 			if n := ytcCount(t, s, `SELECT count(*) FROM yt_write_ops WHERE entity_kind='task' AND entity_id=$1`, strconv.FormatInt(task, 10)); n != 0 {
 				t.Fatalf("%d ops on the ambiguous task's lane", n)
 			}
@@ -301,7 +290,7 @@ func TestYTCommentsCanaryModeIgnoresBindings(t *testing.T) {
 	if op, ok := ytcOpFor(t, s, c.ID); !ok || op.YTTargetID != ytcBinding(enrolled).IssueID {
 		t.Fatalf("an enrolled task in canary mode: op %+v %v", op, ok)
 	}
-	ytbLegacyCarries(t, s, ytbComment(t, s, bound, "bound, not enrolled").TaskComment)
+	ytbUnowned(t, s, ytbComment(t, s, bound, "bound, not enrolled").TaskComment)
 }
 
 // T5: mode off writes no op row, bound or not.
@@ -315,7 +304,7 @@ func TestYTCommentsOffIgnoresBindings(t *testing.T) {
 			s.SetYTCommentsMode(YTCommentsOff)
 		}
 		for _, task := range []int64{bound, unbound} {
-			ytbLegacyCarries(t, s, ytbComment(t, s, task, "off").TaskComment)
+			ytbUnowned(t, s, ytbComment(t, s, task, "off").TaskComment)
 		}
 	}
 	if n := ytcCount(t, s, `SELECT (SELECT count(*) FROM yt_write_ops)+(SELECT count(*) FROM yt_entity_map)+(SELECT count(*) FROM yt_comment_write_links)`); n != 0 {
@@ -324,10 +313,9 @@ func TestYTCommentsOffIgnoresBindings(t *testing.T) {
 }
 
 // T6: a binding added later covers only the comments written after it; the
-// earlier ones stay with the legacy push and are never backfilled.
+// earlier ones are never backfilled.
 func TestYTCommentsOnLateBinding(t *testing.T) {
 	s := schemaStore(t, "ytb_t6")
-	ctx := t.Context()
 	ytbMapped(t, s)
 	s.SetYTCommentsMode(YTCommentsOn)
 	task := ytcTask(t, s, ytbProject)
@@ -338,14 +326,10 @@ func TestYTCommentsOnLateBinding(t *testing.T) {
 		t.Fatalf("comment after the binding: %+v %v", op, ok)
 	}
 	for _, c := range early {
-		ytbLegacyCarries(t, s, c)
+		ytbUnowned(t, s, c)
 	}
 	if n := ytcCount(t, s, `SELECT count(*) FROM yt_write_ops`); n != 1 {
 		t.Fatalf("%d ops after a late binding, want 1", n)
-	}
-	got, err := s.UnpushedYouTrackComments(ctx, task, 0, 50)
-	if err != nil || len(got) != 2 || got[0].ID != early[0].ID || got[1].ID != early[1].ID {
-		t.Fatalf("legacy selection %+v %v", got, err)
 	}
 }
 
@@ -675,7 +659,7 @@ func TestAddYTTaskBindingHoldsFirstMirrorLinkUntilCommit(t *testing.T) {
 	logs := ytbLog(t)
 	binder.SetYTCommentsMode(YTCommentsOn)
 	c := ytbComment(t, binder, task, "after the late mirror link")
-	ytbLegacyCarries(t, binder, c.TaskComment)
+	ytbUnowned(t, binder, c.TaskComment)
 	want := "ytwrite.comment_skipped_ambiguous task_id=" + strconv.FormatInt(task, 10) + " comment_id=" + strconv.FormatInt(c.ID, 10) + " source=task_origins"
 	if !strings.Contains(logs(), want) {
 		t.Errorf("log %q does not contain %q", logs(), want)

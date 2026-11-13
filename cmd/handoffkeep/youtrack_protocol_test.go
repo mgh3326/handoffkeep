@@ -2,8 +2,6 @@ package main
 
 import (
 	"errors"
-	"io"
-	"strings"
 	"testing"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -37,95 +35,6 @@ func exitCodeOf(err error) int {
 	return -1
 }
 
-func TestYouTrackLegacyPushRefusedWhileProtocolOwnsWrites(t *testing.T) {
-	cases := []struct {
-		name     string
-		comments string
-		issues   string
-		want     string
-	}{
-		{"comments canary", "canary", "", "HANDOFFKEEP_YT_COMMENTS_MODE=canary"},
-		{"comments on", "on", "", "HANDOFFKEEP_YT_COMMENTS_MODE=on"},
-		{"issues on", "", "on", "HANDOFFKEEP_YT_ISSUES_MODE=on"},
-		{"both on", "on", "on", "HANDOFFKEEP_YT_COMMENTS_MODE=on"},
-	}
-	argvs := map[string][]string{
-		"sync":          {"sync"},
-		"sync dry-run":  {"sync", "--dry-run"},
-		"adopt":         {"adopt", "--state", "/nonexistent/yt_state.json"},
-		"adopt dry-run": {"adopt", "--state", "/nonexistent/yt_state.json", "--dry-run"},
-	}
-	for _, tc := range cases {
-		for argName, argv := range argvs {
-			t.Run(tc.name+"/"+argName, func(t *testing.T) {
-				protocolEnv(t, tc.comments, tc.issues)
-				err := youtrackCmd(argv, io.Discard)
-				if got := exitCodeOf(err); got != youtrackExitProtocolOwned {
-					t.Fatalf("exit %d, want %d (err %v)", got, youtrackExitProtocolOwned, err)
-				}
-				if !strings.Contains(err.Error(), tc.want) {
-					t.Fatalf("refusal %q does not name %s", err, tc.want)
-				}
-				if strings.Contains(err.Error(), "protocol-test") {
-					t.Fatalf("refusal carries the database or YouTrack address: %q", err)
-				}
-			})
-		}
-	}
-}
-
-func TestYouTrackLegacyPushOffReachesTodaysPath(t *testing.T) {
-	// Off/off gets past the guard and fails on the config check, which runs
-	// before any store call, so no exit code 5 and no connection.
-	protocolEnv(t, "", "")
-	t.Setenv("HANDOFFKEEP_DB_URL", "")
-	if got := exitCodeOf(youtrackCmd([]string{"sync"}, io.Discard)); got != youtrackExitConfig {
-		t.Fatalf("sync off/off: exit %d, want config %d", got, youtrackExitConfig)
-	}
-	if got := exitCodeOf(youtrackCmd([]string{"adopt", "--state", "/nonexistent/yt_state.json"}, io.Discard)); got != youtrackExitConfig {
-		t.Fatalf("adopt off/off: exit %d, want config %d (read state)", got, youtrackExitConfig)
-	}
-	for _, mode := range []string{"off", " off "} {
-		protocolEnv(t, mode, mode)
-		t.Setenv("HANDOFFKEEP_DB_URL", "")
-		if got := exitCodeOf(youtrackCmd([]string{"sync"}, io.Discard)); got == youtrackExitProtocolOwned {
-			t.Fatalf("sync with %q modes refused as protocol-owned", mode)
-		}
-	}
-}
-
-func TestYouTrackLegacyPushUnparsableModeFailsClosed(t *testing.T) {
-	protocolEnv(t, "On", "")
-	err := youtrackCmd([]string{"sync"}, io.Discard)
-	if got := exitCodeOf(err); got != youtrackExitConfig || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_COMMENTS_MODE") {
-		t.Fatalf("comments mode \"On\": exit %d err %v, want config naming the comments mode", got, err)
-	}
-	protocolEnv(t, "", "Yes")
-	err = youtrackCmd([]string{"adopt", "--state", "/nonexistent/yt_state.json"}, io.Discard)
-	if got := exitCodeOf(err); got != youtrackExitConfig || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_ISSUES_MODE") {
-		t.Fatalf("issues mode \"Yes\": exit %d err %v, want config naming the issues mode", got, err)
-	}
-	// A bad value is a config error even when an earlier mode already owns
-	// the writes: the guard parses every mode before it picks the owner.
-	protocolEnv(t, "on", "bogus")
-	err = youtrackCmd([]string{"sync"}, io.Discard)
-	if got := exitCodeOf(err); got != youtrackExitConfig || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_ISSUES_MODE") {
-		t.Fatalf("comments on + issues \"bogus\": exit %d err %v, want config naming the issues mode", got, err)
-	}
-	protocolEnv(t, "on", "")
-	t.Setenv("HANDOFFKEEP_YT_FIELDS_MODE", "bogus")
-	err = youtrackCmd([]string{"sync"}, io.Discard)
-	if got := exitCodeOf(err); got != youtrackExitConfig || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_FIELDS_MODE") {
-		t.Fatalf("comments on + fields \"bogus\": exit %d err %v, want config naming the fields mode", got, err)
-	}
-	protocolEnv(t, "on", "")
-	t.Setenv("HANDOFFKEEP_YT_DOC_COMMENTS_MODE", "bogus")
-	err = youtrackCmd([]string{"sync"}, io.Discard)
-	if got := exitCodeOf(err); got != youtrackExitConfig || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_DOC_COMMENTS_MODE") {
-		t.Fatalf("comments on + doc-comments \"bogus\": exit %d err %v, want config naming the doc-comments mode", got, err)
-	}
-}
-
 func TestYTIssuesModeFromEnv(t *testing.T) {
 	for raw, want := range map[string]store.YTIssuesMode{"": store.YTIssuesOff, "off": store.YTIssuesOff, " off ": store.YTIssuesOff, "on": store.YTIssuesOn, " on ": store.YTIssuesOn} {
 		t.Setenv("HANDOFFKEEP_YT_ISSUES_MODE", raw)
@@ -138,32 +47,5 @@ func TestYTIssuesModeFromEnv(t *testing.T) {
 		if _, err := ytIssuesModeFromEnv(); err == nil {
 			t.Errorf("%q: want an error", raw)
 		}
-	}
-}
-
-// Read-only subcommands and the write-protocol subcommands keep running while
-// the protocol owns writes; the guard is not on them.
-func TestYouTrackUnguardedSubcommandsRunWhileProtocolOwnsWrites(t *testing.T) {
-	argvs := [][]string{
-		{"ops"},
-		{"schema", "plan"},
-		{"comments-preflight"},
-		{"comments-backfill"},
-		{"articles-preflight"},
-		{"articles-backfill"},
-		{"audit"},
-		{"audit", "--enqueue"},
-		{"canary", "list"},
-		{"projects", "list"},
-	}
-	for _, argv := range argvs {
-		t.Run(strings.Join(argv, " "), func(t *testing.T) {
-			protocolEnv(t, "on", "on")
-			t.Setenv("HANDOFFKEEP_DB_URL", "")
-			err := youtrackCmd(argv, io.Discard)
-			if got := exitCodeOf(err); got == youtrackExitProtocolOwned {
-				t.Fatalf("%v refused as protocol-owned: %v", argv, err)
-			}
-		})
 	}
 }

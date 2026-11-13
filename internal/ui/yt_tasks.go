@@ -38,6 +38,9 @@ const (
 	maxTaskIssues = 20000
 )
 
+// taskSourceYouTrack is the board's source field on the YouTrack-backed read.
+const taskSourceYouTrack = "youtrack"
+
 // errYouTrackRead marks a failure of YouTrack itself, as opposed to hk's
 // database: the page answers 502 for it and 500 for the rest.
 var errYouTrackRead = errors.New("youtrack_unavailable")
@@ -203,7 +206,7 @@ func youTrackReadFailed(w http.ResponseWriter, r *http.Request, err error) {
 // withYouTrackFields puts the YouTrack-owned fields of an issue on hk's row of
 // the same task. hk keeps the protocol fields: refs, claim, parent, decision
 // flag, lifecycle timestamps.
-func withYouTrackFields(task store.Task, issue youtrack.TaskIssue, fetchedAt time.Time) store.Task {
+func withYouTrackFields(task store.Task, issue youtrack.TaskIssue) store.Task {
 	task.Title = issue.Title
 	task.State = issue.State
 	task.Category = store.TaskCategory(issue.State)
@@ -212,11 +215,6 @@ func withYouTrackFields(task store.Task, issue youtrack.TaskIssue, fetchedAt tim
 	task.Priority = issue.Priority
 	task.Project = optionalText(issue.Project)
 	task.Area = optionalText(issue.Area)
-	task.PrioritySource = store.YouTrackSourceYouTrack
-	task.LaneSource = store.YouTrackSourceYouTrack
-	at := fetchedAt
-	task.ValuesFetchedAt = &at
-	task.Stale = false
 	return task
 }
 

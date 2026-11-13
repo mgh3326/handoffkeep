@@ -152,7 +152,7 @@ func TestYouTrackBoardReadsIssuesAndJoinsHK(t *testing.T) {
 	}
 	a, b := page.Tasks[0], page.Tasks[1]
 	if a.ID != byField.ID || a.Title != "yt title A" || a.State != "developing" || a.Lane != "rstack" || a.Priority != 7 ||
-		a.Grade != "A" || a.Issue != "HK-2-1" || a.CreatedBy != "test" || a.LaneSource != "youtrack" {
+		a.Grade != "A" || a.Issue != "HK-2-1" || a.CreatedBy != "test" {
 		t.Fatalf("task A=%+v", a)
 	}
 	if b.ID != byMirror.ID || b.Title != "yt title B" || b.State != "reviewing" {

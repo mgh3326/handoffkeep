@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -166,12 +165,6 @@ type boardTask struct {
 	// Area is the task's routing tag from the closed area vocabulary, null
 	// when unset. The console shows it as a read-only label.
 	Area *string `json:"area"`
-	// PrioritySource and LaneSource are "youtrack" when the value came from
-	// the YouTrack-owned cache; Stale marks a value whose last refresh failed.
-	PrioritySource  string     `json:"priority_source,omitempty"`
-	LaneSource      string     `json:"lane_source,omitempty"`
-	ValuesFetchedAt *time.Time `json:"values_fetched_at,omitempty"`
-	Stale           bool       `json:"stale,omitempty"`
 	// Issue, Grade and Tier are the YouTrack issue and its 등급/티어 values,
 	// set on the YouTrack-backed board only (hk 4430).
 	Issue string `json:"youtrack_issue,omitempty"`
@@ -213,19 +206,6 @@ func projectBoardTask(task store.Task) boardTask {
 		BodyDoc:          task.BodyDoc,
 		Project:          task.Project,
 		Area:             task.Area,
-		PrioritySource:   task.PrioritySource,
-		LaneSource:       task.LaneSource,
-		ValuesFetchedAt:  task.ValuesFetchedAt,
-		Stale:            task.Stale,
-	}
-}
-
-// overlayYouTrack replaces priority and lane on linked tasks with the cached
-// YouTrack-owned values. It is a no-op without a configured service, so an
-// unlinked task and a deployment without YouTrack render exactly as before.
-func (h *Handler) overlayYouTrack(ctx context.Context, tasks []store.Task) {
-	if h.youTrack != nil {
-		h.youTrack.Overlay(ctx, tasks)
 	}
 }
 
@@ -282,7 +262,6 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 	if truncated {
 		tasks = tasks[:limit]
 	}
-	h.overlayYouTrack(r.Context(), tasks)
 	h.writeBoardTasks(w, r, tasks, truncated, nil)
 }
 
@@ -329,7 +308,7 @@ func (h *Handler) boardTasksYouTrack(w http.ResponseWriter, r *http.Request, lan
 			if !ok || (parentLane != "" && row.ParentLane != parentLane) {
 				continue
 			}
-			tasks = append(tasks, withYouTrackFields(row, t, snap.FetchedAt))
+			tasks = append(tasks, withYouTrackFields(row, t))
 			issues[t.TaskID] = t
 			if len(tasks) > limit {
 				break
@@ -354,7 +333,7 @@ func (h *Handler) writeBoardTasks(w http.ResponseWriter, r *http.Request, tasks 
 		Truncated:   truncated,
 	}
 	if issues != nil {
-		response.Source = store.YouTrackSourceYouTrack
+		response.Source = taskSourceYouTrack
 	}
 	workBoards, err := h.store.ReadTaskWorkBoards(r.Context(), tasks)
 	if err != nil {
@@ -670,7 +649,6 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	overlay := []store.Task{task}
-	h.overlayYouTrack(r.Context(), overlay)
 	task = overlay[0]
 	origins, err := h.store.ListTaskOriginsPage(r.Context(), id, 101)
 	if err != nil {
