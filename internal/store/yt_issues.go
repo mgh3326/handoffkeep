@@ -65,22 +65,6 @@ func (s *Store) SetYTIssuesBucketProject(projectID string) {
 	s.ytIssues.Store(&gate)
 }
 
-// SetYTIssueRetarget sets the issue-retarget gate for this process (hk 4318,
-// HANDOFFKEEP_YT_ISSUE_RETARGET; default off). On, a task moved before its
-// issue_create op was sent gets the op rejected project_changed and replaced
-// (syncYTIssueTx). Off, the op is left as it is, as before hk 4318: its issue
-// is created in the old project and moves follow the binding.
-//
-// It is a gate and not always on because of blue-green: the previous
-// release's worker orders a lane by id alone and takes a queued comment's
-// target only from the binding of the op keyed IssueKey, so it would claim a
-// comment queued behind the rejected op before the replacement and reject it
-// issue_not_bound. The operator turns it on once no release older than this
-// one serves. Off writes no replacement, but cannot undo what was written
-// while it was on: before rolling back to an older release the operator turns
-// it off and waits for YTIssueRetargetDrain to report drained.
-func (s *Store) SetYTIssueRetarget(on bool) { s.ytIssueRetarget.Store(on) }
-
 // ytIssuesNow is the gate: on and its tenant, or off.
 func (s *Store) ytIssuesNow() (YTIssuesMode, string) {
 	g := s.ytIssues.Load()
@@ -156,13 +140,12 @@ func (s *Store) ytIssueProject(ctx context.Context, q ytRowQuerier, project stri
 }
 
 // prepareYTIssueTx stores task's issue_create op in tx, bound to tenant, at
-// now; replaces is the op it replaces (IssueRequest.Replaces), 0 for the
-// task's first. A task the protocol cannot render gets a rejected op
-// (invalid_issue) and nothing is ever sent. created is false when the task
-// already had its op (the key replays). The caller has read p.
-func prepareYTIssueTx(ctx context.Context, tx pgx.Tx, now time.Time, t Task, p ytIssueProject, tenant string, replaces int64) (ytwrite.Op, bool, error) {
+// now. A task the protocol cannot render gets a rejected op (invalid_issue)
+// and nothing is ever sent. created is false when the task already had its op
+// (the key replays). The caller has read p.
+func prepareYTIssueTx(ctx context.Context, tx pgx.Tx, now time.Time, t Task, p ytIssueProject, tenant string) (ytwrite.Op, bool, error) {
 	req := ytwrite.IssueRequest{Principal: YTIssuePrincipal, Actor: t.CreatedBy, TaskID: t.ID, Title: t.Title,
-		Project: p.project, YTProjectID: p.projectID, YTProjectShort: p.shortName, Tenant: tenant, Replaces: replaces}
+		Project: p.project, YTProjectID: p.projectID, YTProjectShort: p.shortName, Tenant: tenant}
 	n, err := ytwrite.IssueOp(req)
 	if err != nil {
 		return ytwrite.Op{}, false, err
@@ -177,196 +160,83 @@ func prepareYTIssueTx(ctx context.Context, tx pgx.Tx, now time.Time, t Task, p y
 	return op, true, err
 }
 
-// enqueueYTIssueTx is every task creator's step (CreateTask, intake, ticket
-// sets, dots, dispositions), after the task insert and before its commit:
-// syncYTIssueTx at the task's creation time, which gives the task its first
-// op or, when its project maps to no YouTrack project, its intent. A brand-new
-// task has no op and no intent, so in issue mode off there is nothing to do.
-// Any database error fails the whole create.
+// enqueueYTIssueTx is every task creator's step in mode on (CreateTask,
+// intake, ticket sets, dots, dispositions), after the task insert and before
+// its commit: the task's issue_create op, or, when its project maps to no
+// YouTrack project, an issue intent on the gate's tenant (hk 3942). Any
+// database error fails the whole create.
 func (s *Store) enqueueYTIssueTx(ctx context.Context, tx pgx.Tx, t Task) error {
-	if mode, _ := s.ytIssuesNow(); mode != YTIssuesOn {
-		return nil
-	}
-	_, _, err := s.syncYTIssueTx(ctx, tx, t, t.CreatedAt.UTC())
+	_, err := s.ensureYTIssueTx(ctx, tx, t, t.CreatedAt.UTC(), true)
 	return err
 }
 
-// syncYTIssueTx keeps task t's issue_create op on t's project as it is in tx
-// (hk 3909, 3942), under the task's lane lock, which it takes first. The
-// task's latest issue_create op (YTIssuePrincipal, any key) decides:
-//
-//   - prepared (nothing sent): kept when its YouTrack project and its
-//     payload's hk project are t's; otherwise rejected project_changed and
-//     replaced, on its tenant, keyed after it (IssueRequest.Replaces); with
-//     the retarget gate off, kept.
-//   - rejected project_changed (its replacement waits for a mapping):
-//     replaced on its tenant; with the retarget gate off, an intent on its
-//     tenant instead, so no replacement is written while an older release
-//     may serve.
-//   - none: in issue mode on, the task's first op on the gate's tenant.
-//   - any other state (sent, uncertain, resolved): left alone; its issue may
-//     exist in the old project, and moves (yt_move.go) follow the binding.
-//
-// A replacement or first op whose project maps to no YouTrack project is a
-// yt_issue_intents row on that tenant instead (one ytwrite.issue_skipped
-// line); a task that already has an issue some other way
-// (ytTaskHasIssueOwnershipTx) gets neither. An intent row is dropped once the
-// op exists or nothing is left to create. rejected is the op this call
-// rejected project_changed (0 when none); created reports a new op.
+// ensureYTIssueTx gives task t its issue_create op in mode on, under the
+// task's lane lock, which it takes first: on the tenant of the task's
+// yt_issue_intents row when it has one, else on the gate's tenant. A task
+// that already has its op, or an issue some other way
+// (ytTaskHasIssueOwnershipTx), gets nothing and loses its intent. A task
+// whose project maps to no YouTrack project gets no op (one
+// ytwrite.issue_skipped line); atCreate records the intent then, so the
+// intent pass (PrepareMappedYTIssues) prepares the op once the project is
+// mapped. An intent is made only at create time: a task moved to an unmapped
+// project keeps the op or the intent it has (hk 4318). created reports a new
+// op. A prepared op is never changed here: its claim targets the task's
+// project then (claimYTIssueTargetTx).
 //
 // Locks, after the caller's (lockorder.go): the task's lane lock, then plain
-// reads of youtrack_projects and the ownership rows, then its yt_write_ops
-// rows (FOR UPDATE through rejectYTOpTx and prepareYTOpTx) and its
+// reads of its yt_issue_intents row, the ownership rows and
+// youtrack_projects, then its new yt_write_ops row (prepareYTOpTx) and its
 // yt_issue_intents row.
-func (s *Store) syncYTIssueTx(ctx context.Context, tx pgx.Tx, t Task, now time.Time) (rejected int64, created bool, err error) {
-	entityID := strconv.FormatInt(t.ID, 10)
-	if err := lockYTEntity(ctx, tx, "task", entityID); err != nil {
-		return 0, false, err
+func (s *Store) ensureYTIssueTx(ctx context.Context, tx pgx.Tx, t Task, now time.Time, atCreate bool) (created bool, err error) {
+	mode, tenant := s.ytIssuesNow()
+	if mode != YTIssuesOn {
+		return false, nil
 	}
-	latest, err := scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE principal=$1 AND kind=$2
-		AND entity_kind='task' AND entity_id=$3 ORDER BY id DESC LIMIT 1`, YTIssuePrincipal, ytwrite.KindIssueCreate, entityID))
-	hasOp := err == nil
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return 0, false, err
+	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(t.ID, 10)); err != nil {
+		return false, err
 	}
-	p, found, err := s.ytIssueProject(ctx, tx, deref(t.Project))
-	if err != nil {
-		return 0, false, err
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3)`,
+		YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(t.ID)).Scan(&exists); err != nil {
+		return false, err
 	}
-	var tenant string
-	var replaces int64
-	var hold bool
-	switch {
-	case hasOp && latest.State == ytwrite.StatePrepared:
-		if found && ytIssueOpTargets(latest, p) {
-			return 0, false, dropYTIssueIntentTx(ctx, tx, t.ID)
-		}
-		if !s.ytIssueRetarget.Load() {
-			// The gate is off: the op is left as it is (SetYTIssueRetarget).
-			return 0, false, nil
-		}
-		if !found && deref(t.Project) == "" {
-			// A task with no project goes to the HK bucket, whose id only a
-			// process in issue mode on knows: one that does not cannot tell
-			// whether the op still targets it, so it leaves the op alone.
-			return 0, false, nil
-		}
-		if _, err := rejectYTOpTx(ctx, tx, now, latest.ID, ytwrite.ReasonProjectChanged,
-			fmt.Sprintf("task moved to project %q before the issue was created", deref(t.Project))); err != nil {
-			return 0, false, err
-		}
-		rejected, tenant, replaces = latest.ID, latest.Tenant, latest.ID
-	case hasOp && latest.State == ytwrite.StateRejected && latest.Reason == ytwrite.ReasonProjectChanged:
-		tenant, replaces = latest.Tenant, latest.ID
-		// With the gate off no replacement is prepared, even for an op
-		// rejected while it was on: the task waits as an intent on that
-		// tenant (an older release ignores the table), consumed once the
-		// gate is on again (PR #357 review).
-		hold = !s.ytIssueRetarget.Load()
-	case hasOp:
-		return 0, false, dropYTIssueIntentTx(ctx, tx, t.ID)
-	default:
-		err := tx.QueryRow(ctx, `SELECT tenant FROM yt_issue_intents WHERE task_id=$1`, t.ID).Scan(&tenant)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return 0, false, err
-		}
-		if errors.Is(err, pgx.ErrNoRows) {
-			mode, gate := s.ytIssuesNow()
-			if mode != YTIssuesOn {
-				return 0, false, nil
-			}
-			tenant = gate
-		}
+	if exists {
+		return false, dropYTIssueIntentTx(ctx, tx, t.ID)
+	}
+	var intent string
+	if err := tx.QueryRow(ctx, `SELECT coalesce((SELECT tenant FROM yt_issue_intents WHERE task_id=$1),'')`, t.ID).Scan(&intent); err != nil {
+		return false, err
+	}
+	if intent != "" {
+		tenant = intent
 	}
 	owned, err := ytTaskHasIssueOwnershipTx(ctx, tx, t.ID)
 	if err != nil {
-		return rejected, false, err
+		return false, err
 	}
 	if owned {
 		log.Printf("ytwrite.issue_skipped task_id=%d project=%q reason=issue_owned", t.ID, deref(t.Project))
-		return rejected, false, dropYTIssueIntentTx(ctx, tx, t.ID)
+		return false, dropYTIssueIntentTx(ctx, tx, t.ID)
 	}
-	if !found || hold {
-		reason := "project_unmapped"
-		if hold {
-			reason = "retarget_off"
+	p, found, err := s.ytIssueProject(ctx, tx, deref(t.Project))
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		log.Printf("ytwrite.issue_skipped task_id=%d project=%q reason=project_unmapped", t.ID, deref(t.Project))
+		if !atCreate {
+			return false, nil
 		}
-		log.Printf("ytwrite.issue_skipped task_id=%d project=%q reason=%s", t.ID, deref(t.Project), reason)
 		_, err := tx.Exec(ctx, `INSERT INTO yt_issue_intents(task_id, tenant, recorded_at) VALUES ($1,$2,$3)
 			ON CONFLICT (task_id) DO NOTHING`, t.ID, tenant, now.UTC())
-		return rejected, false, err
+		return false, err
 	}
-	op, created, err := prepareYTIssueTx(ctx, tx, now, t, p, tenant, replaces)
+	op, created, err := prepareYTIssueTx(ctx, tx, now, t, p, tenant)
 	if err != nil {
-		return rejected, false, err
+		return false, err
 	}
-	log.Printf("ytwrite.issue_enqueued op_id=%d task_id=%d state=%s reason=%q replaced_op_id=%d", op.ID, t.ID, op.State, op.Reason, replaces)
-	return rejected, created, dropYTIssueIntentTx(ctx, tx, t.ID)
-}
-
-// YTIssueRetargetDrain is what `youtrack issues-retarget-drain` reports: the
-// state retargeting wrote that a release older than hk 4318 misreads.
-// QueuedComments is the rollback barrier: a comment op queued with no target
-// on a task whose issue op was rejected project_changed, which an older
-// worker claims ahead of the replacement (it orders a lane by id alone) or
-// cannot target from the replacement's binding, and rejects issue_not_bound.
-// Replacements and Intents are the ops and intents still to be resolved on
-// such tasks. Drained is QueuedComments == 0.
-type YTIssueRetargetDrain struct {
-	Drained        bool    `json:"drained"`
-	QueuedComments int     `json:"queued_comments"`
-	Replacements   int     `json:"pending_replacements"`
-	Intents        int     `json:"intents"`
-	TaskIDs        []int64 `json:"task_ids"`
-}
-
-// YTIssueRetargetDrain reads the rollback barrier of the retarget gate
-// (SetYTIssueRetarget): turn the gate off, let this release's worker deliver
-// what it can, and roll back to an older release only once Drained. A comment
-// that cannot drain (its task's project stays unmapped) is listed by task.
-// It is read-only.
-func (s *Store) YTIssueRetargetDrain(ctx context.Context) (YTIssueRetargetDrain, error) {
-	d := YTIssueRetargetDrain{TaskIDs: []int64{}}
-	const moved = `SELECT DISTINCT entity_id FROM yt_write_ops WHERE principal = $1 AND kind = $2
-		AND entity_kind = 'task' AND state = 'rejected' AND reason = $3`
-	err := s.pool.QueryRow(ctx, `WITH moved AS (`+moved+`)
-		SELECT
-			(SELECT count(*) FROM yt_write_ops o JOIN moved m ON m.entity_id = o.entity_id
-				WHERE o.entity_kind = 'task' AND o.principal = $4 AND o.kind = $5 AND o.yt_target_id = ''
-				AND o.state NOT IN ('applied','rejected')),
-			(SELECT count(*) FROM yt_write_ops o JOIN moved m ON m.entity_id = o.entity_id
-				WHERE o.entity_kind = 'task' AND o.principal = $1 AND o.kind = $2 AND o.state NOT IN ('applied','rejected')),
-			(SELECT count(*) FROM yt_issue_intents i JOIN moved m ON m.entity_id = i.task_id::text)`,
-		YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.ReasonProjectChanged, YTCommentPrincipal, ytwrite.KindCommentAppend).
-		Scan(&d.QueuedComments, &d.Replacements, &d.Intents)
-	if err != nil {
-		return d, err
-	}
-	rows, err := s.pool.Query(ctx, `WITH moved AS (`+moved+`)
-		SELECT DISTINCT o.entity_id::bigint FROM yt_write_ops o JOIN moved m ON m.entity_id = o.entity_id
-		WHERE o.entity_kind = 'task' AND o.principal = $4 AND o.kind = $5 AND o.yt_target_id = ''
-		AND o.state NOT IN ('applied','rejected')
-		ORDER BY 1 LIMIT 100`,
-		YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.ReasonProjectChanged, YTCommentPrincipal, ytwrite.KindCommentAppend)
-	if err != nil {
-		return d, err
-	}
-	if d.TaskIDs, err = pgx.CollectRows(rows, pgx.RowTo[int64]); err != nil {
-		return d, err
-	}
-	if d.TaskIDs == nil {
-		d.TaskIDs = []int64{}
-	}
-	d.Drained = d.QueuedComments == 0
-	return d, nil
-}
-
-// ytIssueOpTargets reports whether issue op op creates the issue in p: its
-// YouTrack project and its payload's hk project (two hk projects may map to
-// one YouTrack project, and the payload names the hk one).
-func ytIssueOpTargets(op ytwrite.Op, p ytIssueProject) bool {
-	var payload ytwrite.IssueCreatePayload
-	return op.YTTargetID == p.projectID && json.Unmarshal(op.Payload, &payload) == nil && payload.Project == p.project
+	log.Printf("ytwrite.issue_enqueued op_id=%d task_id=%d state=%s reason=%q", op.ID, t.ID, op.State, op.Reason)
+	return created, dropYTIssueIntentTx(ctx, tx, t.ID)
 }
 
 func dropYTIssueIntentTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
@@ -374,42 +244,64 @@ func dropYTIssueIntentTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
 	return err
 }
 
-// claimSyncYTIssueTx is syncYTIssueTx for prepared issue op op at its claim,
-// in Claim's transaction under the task's lane lock: a task moved by a writer
-// that does not sync (a triage), or while op was dispatched and then deferred
-// back to prepared, is replaced here rather than created in the old project.
-// moved reports that op was rejected, so Claim must not dispatch it. The task
-// row is read without a lock (no lane holder locks a task row); a task that
-// no longer exists leaves op as it is.
-func (s *Store) claimSyncYTIssueTx(ctx context.Context, tx pgx.Tx, now time.Time, op ytwrite.Op) (moved bool, err error) {
-	if op.Kind != ytwrite.KindIssueCreate || op.Principal != YTIssuePrincipal || op.EntityKind != "task" || !s.ytIssueRetarget.Load() {
-		return false, nil
+// claimYTIssueTargetTx is the target and payload issue_create op op is
+// dispatched with, in Claim's transaction under the task's lane lock
+// (hk 3909, 4318): the YouTrack project the task's project maps to now, so a
+// task moved before its issue was created gets it in its current project. The
+// op keeps its id, its key (ytwrite.IssueKey) and its place on the lane, and
+// only its yt_target_id, payload and payload_sha change, in the update that
+// dispatches it (migration 20261113-yt-issue-claim-target); a release that
+// does not retarget reads the same op and creates the issue where it was
+// prepared. The op is dispatched as it is (payload nil) when its project is
+// still the task's, when the task's project maps to no YouTrack project (or
+// it has none and this process does not know the HK bucket), or when the task
+// is gone. The task row is read without a lock (no lane holder locks a task
+// row): a move that commits after this read finds the op dispatched, and the
+// issue follows the task as any bound task's does (issue_move, yt_move.go).
+func (s *Store) claimYTIssueTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (target, sha string, payload []byte, err error) {
+	target, sha = op.YTTargetID, op.PayloadSHA
+	if op.Kind != ytwrite.KindIssueCreate || op.Principal != YTIssuePrincipal || op.EntityKind != "task" {
+		return target, sha, nil, nil
 	}
 	taskID, err := strconv.ParseInt(op.EntityID, 10, 64)
 	if err != nil {
-		return false, nil
+		return target, sha, nil, nil
 	}
-	var t Task
-	err = tx.QueryRow(ctx, `SELECT id, title, created_by, project FROM tasks WHERE id=$1`, taskID).Scan(&t.ID, &t.Title, &t.CreatedBy, &t.Project)
+	var project *string
+	err = tx.QueryRow(ctx, `SELECT project FROM tasks WHERE id=$1`, taskID).Scan(&project)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return target, sha, nil, nil
 	}
 	if err != nil {
-		return false, err
+		return "", "", nil, err
 	}
-	rejected, _, err := s.syncYTIssueTx(ctx, tx, t, now.UTC())
-	return rejected == op.ID, err
+	p, found, err := s.ytIssueProject(ctx, tx, deref(project))
+	if err != nil || !found {
+		return target, sha, nil, err
+	}
+	var was ytwrite.IssueCreatePayload
+	if err := json.Unmarshal(op.Payload, &was); err != nil {
+		return target, sha, nil, nil
+	}
+	if op.YTTargetID == p.projectID && was.Project == p.project {
+		return target, sha, nil, nil
+	}
+	n, err := ytwrite.IssueOp(ytwrite.IssueRequest{Principal: op.Principal, Actor: op.Actor, TaskID: taskID, Title: was.Title,
+		Project: p.project, YTProjectID: p.projectID, YTProjectShort: p.shortName, Tenant: op.Tenant})
+	if err != nil {
+		return "", "", nil, err
+	}
+	log.Printf("ytwrite.issue_retargeted op_id=%d task_id=%d from_project=%q to_project=%q yt_project_id=%q", op.ID, taskID, was.Project, p.project, p.projectID)
+	return n.YTTargetID, n.PayloadSHA, n.Payload, nil
 }
 
 // PrepareMappedYTIssues prepares, for up to limit yt_issue_intents rows of
-// tenant whose task's project now maps to a YouTrack project (or has no
-// project while the HK bucket is known), the task's issue_create op through
-// syncYTIssueTx, each task in its own transaction, and returns how many ops
-// it prepared (hk 3942). The write worker of tenant runs it before each Drive
-// pass in issue mode on, so the op goes out in that pass; an intent of
-// another tenant is never consumed here. With the retarget gate off it skips
-// the intent of a task whose op was rejected project_changed: that one waits
-// for the gate (syncYTIssueTx), and would otherwise fill every pass's limit.
+// the gate's tenant whose task's project now maps to a YouTrack project (or
+// has no project while the HK bucket is known), the task's issue_create op
+// through ensureYTIssueTx, each task in its own transaction, and returns how
+// many ops it prepared (hk 3942). The write worker of that tenant runs it
+// before each Drive pass in issue mode on, so the op goes out in that pass;
+// an intent of another tenant is never consumed here.
 func (s *Store) PrepareMappedYTIssues(ctx context.Context, limit int) (int, error) {
 	mode, tenant := s.ytIssuesNow()
 	if mode != YTIssuesOn {
@@ -424,10 +316,7 @@ func (s *Store) PrepareMappedYTIssues(ctx context.Context, limit int) (int, erro
 			(coalesce(t.project,'') = '' AND $2 <> '')
 			OR EXISTS (SELECT 1 FROM youtrack_projects yp WHERE yp.hk_project = t.project
 				AND coalesce(yp.yt_project_id,'') <> '' AND coalesce(yp.short_name,'') <> ''))
-		AND ($4 OR NOT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.principal = $5 AND o.kind = $6
-			AND o.entity_kind = 'task' AND o.entity_id = i.task_id::text AND o.state = 'rejected' AND o.reason = $7))
-		ORDER BY i.task_id LIMIT $3`, tenant, bucket, ytLimit(limit), s.ytIssueRetarget.Load(),
-		YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.ReasonProjectChanged)
+		ORDER BY i.task_id LIMIT $3`, tenant, bucket, ytLimit(limit))
 	if err != nil {
 		return 0, err
 	}
@@ -451,17 +340,16 @@ func (s *Store) PrepareMappedYTIssues(ctx context.Context, limit int) (int, erro
 // prepareYTIssueIntent is one task of PrepareMappedYTIssues: the task's lane
 // lock first, as backfillYTIssue takes it, then the task row read without a
 // lock (after the lane lock, so it sees the project a SetTaskProject
-// committed under that lane, or that change waits and syncs what this
-// prepared), then syncYTIssueTx. An intent that moved to another tenant
-// meanwhile is left alone. prepared reports a new op.
+// committed under that lane, or that change waits and finds the op), then
+// ensureYTIssueTx. An intent that moved to another tenant meanwhile is left
+// alone. prepared reports a new op.
 func (s *Store) prepareYTIssueIntent(ctx context.Context, tenant string, taskID int64) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	entityID := strconv.FormatInt(taskID, 10)
-	if err := lockYTEntity(ctx, tx, "task", entityID); err != nil {
+	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(taskID, 10)); err != nil {
 		return false, err
 	}
 	var have string
@@ -476,7 +364,7 @@ func (s *Store) prepareYTIssueIntent(ctx context.Context, tenant string, taskID 
 	if err := tx.QueryRow(ctx, `SELECT id, title, created_by, project FROM tasks WHERE id=$1`, taskID).Scan(&t.ID, &t.Title, &t.CreatedBy, &t.Project); err != nil {
 		return false, err
 	}
-	_, created, err := s.syncYTIssueTx(ctx, tx, t, time.Now().UTC())
+	created, err := s.ensureYTIssueTx(ctx, tx, t, time.Now().UTC(), false)
 	if err != nil {
 		return false, err
 	}
@@ -566,19 +454,13 @@ func bindYTIssueTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string, n
 }
 
 // ytIssueOpPendingTx reports whether task has an issue_create op that is not
-// yet applied or rejected, or a comment op queued with no target
-// (queueYTCommentTx): the writers that give the task an issue another way
-// (AddYTTaskBinding, AddYTCommentCanary) refuse while it does, so the op
-// never races them to a second issue, and a queued comment, which takes its
-// target only from a binding an issue_create op published, is not left with
-// a binding it must reject (hk 4318: its create may be a replacement still
-// waiting as an issue intent). The caller holds the task's lane lock.
+// yet applied or rejected: the writers that give the task an issue another
+// way (AddYTTaskBinding, AddYTCommentCanary) refuse while it does, so the op
+// never races them to a second issue. The caller holds the task's lane lock.
 func ytIssueOpPendingTx(ctx context.Context, q ytRowQuerier, taskID int64) (bool, error) {
 	var pending bool
-	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE entity_kind='task' AND entity_id=$2
-		AND ((kind=$1 AND state NOT IN ('applied','rejected'))
-			OR (kind=$3 AND principal=$4 AND yt_target_id='' AND state='prepared')))`,
-		ytwrite.KindIssueCreate, strconv.FormatInt(taskID, 10), ytwrite.KindCommentAppend, YTCommentPrincipal).Scan(&pending)
+	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$1 AND entity_kind='task' AND entity_id=$2
+		AND state NOT IN ('applied','rejected'))`, ytwrite.KindIssueCreate, strconv.FormatInt(taskID, 10)).Scan(&pending)
 	return pending, err
 }
 
@@ -721,7 +603,7 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 	if dryRun {
 		return "prepared", name, nil
 	}
-	op, created, err := prepareYTIssueTx(ctx, tx, time.Now().UTC(), t, p, tenant, 0)
+	op, created, err := prepareYTIssueTx(ctx, tx, time.Now().UTC(), t, p, tenant)
 	if err != nil {
 		return "", "", err
 	}

@@ -241,33 +241,6 @@ func (l *YTWriteLedger) ByID(ctx context.Context, id int64) (ytwrite.Op, error) 
 	return op, err
 }
 
-// ytLaneBlockedSQL is true when op o (the alias) must wait on its lane
-// (entity_kind, entity_id): Claim refuses it (ClaimBlocked) and Due leaves it
-// out. One rule, so Due never lists an op Claim would block nor hides the one
-// it would claim. An op waits for every earlier op of its lane that is not
-// applied or rejected, with two exceptions for a task whose issue is being
-// created (hk 4263, 4318):
-//
-//   - a comment_append op queued with no target (queueYTCommentTx) waits for
-//     every issue_create op of the task that is not applied or rejected,
-//     whatever its id or key, and for the task's yt_issue_intents row: it
-//     follows the task's active issue op, including a replacement prepared
-//     after it when the task moved (syncYTIssueTx), so it is claimed only
-//     once that op has published the binding it takes its target from;
-//   - so an issue_create op does not wait for those queued comments, which
-//     wait for it.
-//
-// Queued comments keep their id order among themselves, and every other op
-// keeps the plain lane order.
-const ytLaneBlockedSQL = `(EXISTS (SELECT 1 FROM yt_write_ops e
-		WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected')
-		AND NOT (o.kind = '` + ytwrite.KindIssueCreate + `' AND e.kind = '` + ytwrite.KindCommentAppend + `'
-			AND e.principal = '` + YTCommentPrincipal + `' AND e.yt_target_id = '' AND e.state = 'prepared'))
-	OR (o.kind = '` + ytwrite.KindCommentAppend + `' AND o.principal = '` + YTCommentPrincipal + `' AND o.entity_kind = 'task' AND o.yt_target_id = ''
-		AND (EXISTS (SELECT 1 FROM yt_write_ops e WHERE e.entity_kind = 'task' AND e.entity_id = o.entity_id
-				AND e.kind = '` + ytwrite.KindIssueCreate + `' AND e.principal = '` + YTIssuePrincipal + `' AND e.state NOT IN ('applied','rejected'))
-			OR EXISTS (SELECT 1 FROM yt_issue_intents i WHERE i.task_id::text = o.entity_id))))`
-
 func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytwrite.Op, ytwrite.ClaimOutcome, error) {
 	tx, err := l.s.pool.Begin(ctx)
 	if err != nil {
@@ -311,26 +284,12 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 		}
 	}
 	var blocked bool
-	if err := tx.QueryRow(ctx, `SELECT `+ytLaneBlockedSQL+` FROM yt_write_ops o WHERE o.id=$1`, id).Scan(&blocked); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops
+		WHERE entity_kind=$1 AND entity_id=$2 AND id < $3 AND state NOT IN ('applied','rejected'))`, kind, entity, id).Scan(&blocked); err != nil {
 		return ytwrite.Op{}, "", err
 	}
 	if blocked {
 		return op, ytwrite.ClaimBlocked, tx.Commit(ctx)
-	}
-	// An issue_create op is checked against its task's project here, under
-	// the lane lock every project writer's sync also takes: a task moved by
-	// a writer that does not sync (a triage), or while the op was dispatched
-	// and then deferred back to prepared, gets the op replaced now instead of
-	// the issue created in the old project (hk 3909).
-	moved, err := l.s.claimSyncYTIssueTx(ctx, tx, now, op)
-	if err != nil {
-		return ytwrite.Op{}, "", err
-	}
-	if moved {
-		if op, err = scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1`, id)); err != nil {
-			return ytwrite.Op{}, "", err
-		}
-		return op, ytwrite.ClaimNotPrepared, tx.Commit(ctx)
 	}
 	// A comment queued behind its task's issue_create gets its target here,
 	// from the binding that create published, once the lane is clear
@@ -340,6 +299,15 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	target, sha, reject, detail, err := claimYTCommentTargetTx(ctx, tx, op)
 	if err != nil {
 		return ytwrite.Op{}, "", err
+	}
+	// An issue_create op is dispatched to the YouTrack project its task's
+	// project maps to now, not the one it was prepared for (hk 3909, 4318);
+	// payload is nil when that is unchanged.
+	var payload []byte
+	if reject == "" && op.Kind == ytwrite.KindIssueCreate {
+		if target, sha, payload, err = l.s.claimYTIssueTargetTx(ctx, tx, op); err != nil {
+			return ytwrite.Op{}, "", err
+		}
 	}
 	if reject == "" {
 		// A snapshot prepared behind a move that was refused names a project
@@ -355,9 +323,14 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 		}
 		return op, ytwrite.ClaimNotPrepared, tx.Commit(ctx)
 	}
+	var newPayload *string
+	if payload != nil {
+		p := string(payload)
+		newPayload = &p
+	}
 	op, err = scanYTOp(tx.QueryRow(ctx, `UPDATE yt_write_ops SET state='dispatched', attempts=attempts+1, dispatched_at=$2,
-		yt_target_id=$3, payload_sha=$4
-		WHERE id=$1 RETURNING `+ytOpColumns, id, now.UTC(), target, sha))
+		yt_target_id=$3, payload_sha=$4, payload=coalesce($5::jsonb, payload)
+		WHERE id=$1 RETURNING `+ytOpColumns, id, now.UTC(), target, sha, newPayload))
 	if err != nil {
 		return ytwrite.Op{}, "", err
 	}
@@ -546,12 +519,14 @@ func (l *YTWriteLedger) Due(ctx context.Context, now time.Time, limit int) ([]yt
 			WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= $1
 			AND ((o.state = 'remote_unknown' AND o.tenant = $3)
 				OR (o.state = 'prepared' AND `+l.s.ytAdmitSQL("$3")+`
-					AND NOT `+ytLaneBlockedSQL+`))
+					AND NOT EXISTS (SELECT 1 FROM yt_write_ops e
+						WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected'))))
 			ORDER BY o.id LIMIT $2`, now.UTC(), ytLimit(limit), l.tenant)
 	}
 	return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops o
 		WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= $1
-		AND (o.state = 'remote_unknown' OR NOT `+ytLaneBlockedSQL+`)
+		AND (o.state = 'remote_unknown' OR NOT EXISTS (SELECT 1 FROM yt_write_ops e
+			WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected')))
 		ORDER BY o.id LIMIT $2`, now.UTC(), ytLimit(limit))
 }
 

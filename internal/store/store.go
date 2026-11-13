@@ -632,10 +632,6 @@ type Store struct {
 	// YTMovesMode; unset is off. On prepares and admits issue_move ops
 	// (yt_move.go).
 	ytMoves atomic.Value
-	// ytIssueRetarget is the issue-retarget gate (SetYTIssueRetarget,
-	// HANDOFFKEEP_YT_ISSUE_RETARGET); false is off. On replaces an unsent
-	// issue_create op whose task moved (syncYTIssueTx, hk 4318).
-	ytIssueRetarget atomic.Bool
 	// ytDocComments is the YouTrack document-comment gate
 	// (SetYTDocCommentsMode), a YTDocCommentsMode; unset is off. On copies
 	// task-tied reports and briefs from the change feed (yt_doc_comments.go).
@@ -3030,10 +3026,11 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "project", From: from, To: project, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "project", FromValue: from, ToValue: project}); err != nil {
 		return Task{}, false, err
 	}
-	// The task's issue op follows its new project (hk 3909, 3942): an unsent
-	// op is replaced, a task with none gets its first, an unmapped project
-	// an intent. Task row, then lane lock, as CreateTask (lockorder.go).
-	if _, _, err := s.syncYTIssueTx(ctx, tx, x, x.UpdatedAt); err != nil {
+	// A task with no op gets its first, on its intent's tenant when it has
+	// one (hk 3942); an existing op is left as it is: its claim targets the
+	// task's project then (claimYTIssueTargetTx, hk 3909). Task row, then
+	// lane lock, as CreateTask (lockorder.go).
+	if _, err := s.ensureYTIssueTx(ctx, tx, x, x.UpdatedAt, false); err != nil {
 		return Task{}, false, err
 	}
 	return x, true, tx.Commit(ctx)

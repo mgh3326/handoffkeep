@@ -759,47 +759,35 @@ project and the YouTrack project's short name. In mode on, every task creator
 task's own transaction when its project has a `youtrack_projects` row with a
 project id, or when its project is empty (to the `HK` bucket); otherwise no op,
 one `ytwrite.issue_skipped` line and a `yt_issue_intents` row on the gate's
-tenant (migration `20261113-yt-issue-intents`, hk 3942). Before each Drive
-pass the write worker in mode on prepares the op of every intent of its own
-tenant whose task's project now has its mapping, under the task's lane lock,
-and drops the intent; an intent of another tenant is never consumed there. A
-task that got an issue another way meanwhile only loses its intent.
-`issues-backfill` reads the task under its lane lock; on another tenant than
-an intent's it leaves that task alone (counted `other_tenant`); on the
-intent's tenant it prepares the op and drops the intent. A task whose op was
-rejected `project_changed` counts `existing` there: its intent is the
-worker's intent pass's (below). `AddYTTaskBinding` and canary enrollment refuse a task with a
-pending issue_create op or a comment op queued with no target, so a queued
-comment is never left with a binding no issue_create op published.
+tenant (migration `20261113-yt-issue-intents`, hk 3942). An intent is made
+only when the task is created. Before each Drive pass the write worker in mode
+on prepares the op of every intent of its own tenant whose task's project now
+has its mapping, under the task's lane lock, and drops the intent; an intent of
+another tenant is never consumed there. Setting or changing the project of an
+unbound task also prepares its issue_create when no create op already exists,
+on its intent's tenant when it has one (and drops the intent); a move to an
+unmapped project records nothing. A task that got an issue another way
+meanwhile only loses its intent. `issues-backfill` reads the task under its
+lane lock; on another tenant than an intent's it leaves that task alone
+(counted `other_tenant`); on the intent's tenant it prepares the op and drops
+the intent.
 
-**Project changes (hk 3909).** Gated by `HANDOFFKEEP_YT_ISSUE_RETARGET`
-(`off` or `on`, default `off`, hk 4318). Off, a moved task's unsent op is left
-as it is (its issue is created in the old project; moves follow the binding),
-and no replacement is written at all: a task whose op was already rejected
-`project_changed` (while the gate was on) waits as an intent on that op's
-tenant, skipped by the worker's intent pass, until the gate is on again.
-Turn it on only once no older release serves. An older worker orders a lane
-by id alone and takes a queued comment's target only from the binding of the
-op keyed `task-issue:<id>`, so it would reject a comment queued behind a
-replaced op `issue_not_bound`, and turning the gate off does not undo state
-written while it was on. The rollback barrier is therefore: turn the gate off,
-let this release's worker deliver the queued comments of moved tasks, and roll
-back only when `handoffkeep youtrack issues-retarget-drain` (read-only; opens
-`HANDOFFKEEP_DB_URL`) reports `"drained": true` (exit 0). It counts the
-comment ops queued with no target on a task with a `project_changed` op, and
-lists those tasks; one held by an intent drains once its project is mapped
-and the gate is on, or once the comment op is resolved by hand. On,
-`SetTaskProject` syncs the task's latest
-issue_create op in its own transaction: an op still `prepared` (nothing sent)
-whose YouTrack project or hk project is no longer the task's is rejected
-`project_changed` and replaced, on the same tenant, by the current project's
-op keyed `task-issue:<id>:after-<old op id>` (or an intent on that tenant when
-the project is unmapped); a task with no op gets its first; an op already
-`dispatched`, `remote_unknown` or resolved is left alone (its issue may exist
-in the old project; moves follow the binding). Every claim of an issue_create
-op makes the same check under the lane lock, so a task moved by a triage, or
-moved while its op was in flight and then deferred back to `prepared`, has its
-op replaced there instead of dispatched.
+**Project changes (hk 3909, 4318).** A move never touches a prepared op: its
+claim does. The claim that dispatches an issue_create op reads the task's
+project under the lane lock and, when it maps to another YouTrack project (or
+to the same one under another hk project), sends the op there: the same op,
+with the same id, key (`task-issue:<id>`) and place on the lane, gets the
+current project's `yt_target_id`, payload and payload hash in the update that
+dispatches it (`ytwrite.issue_retargeted` line). The `yt_write_ops` guard
+allows exactly that change (migration `20261113-yt-issue-claim-target`). A
+task whose project now maps to no YouTrack project (or that has none in a
+process that does not know the `HK` bucket) has its op sent as it was
+prepared, as before hk 4318. An op deferred back to `prepared` is retargeted
+at its next claim; one already sent is never changed, and a move that commits
+after the claim is followed like any bound task's (`issue_move`). Comments
+queued behind the op stay behind it and take their target from the binding
+it publishes, which names that op, so the previous release reads the same
+state the same way: it creates the issue where the op was prepared.
 A task the protocol cannot render (an actor
 with ` · `, a title quoting the marker) gets the op rejected `invalid_issue`.
 `handoffkeep youtrack issues-backfill [--project P] [--dry-run]` prepares the
@@ -1308,16 +1296,8 @@ release rollback never meets an authority value it cannot parse (consult hk
   it fills the target, and the payload hash with it, from the binding that
   create published (`origin = 'op_applied'`, `op_id` the create); the
   `yt_write_ops` guard allows exactly that change (migration
-  `20261112-yt-comment-queued-target`). The queued op follows the task's
-  active issue op whatever its key (hk 4318): it is accepted behind a
-  replacement as behind the first op, and it waits for every issue_create op
-  of the task that is not applied or rejected, and for the task's issue
-  intent, even one prepared after it, while an issue_create op does not wait
-  for queued comments (`ytLaneBlockedSQL`; `Due` and `Claim` share the rule).
-  Its target comes from the binding any issue_create op of the task
-  published. A create that ends rejected (other than `project_changed`, which
-  leaves its replacement or an intent), or applied with `binding_conflict`,
-  publishes no such binding: the claim rejects the op
+  `20261112-yt-comment-queued-target`). A create that ends rejected, or applied
+  with `binding_conflict`, publishes no such binding: the claim rejects the op
   in its own transaction, `rejected / issue_not_bound`, so it is never
   dispatched without a target (and never reaches stale recovery or
   `remote_unknown`). Nothing is sent, and the rejected-op alert reports it.
