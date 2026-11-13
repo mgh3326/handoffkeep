@@ -64,7 +64,7 @@ func TestManualTransitionTableIsTheDesignTable(t *testing.T) {
 		"completed":   {"unstarted"},
 		"dropped":     {"unstarted"},
 		"duplicate":   {"unstarted"},
-		"icebox":      {"backlog", "unstarted"},
+		"icebox":      {"backlog", "unstarted", "dropped"},
 	}
 	got := map[string][]string{}
 	for from, targets := range TaskTransitions {

@@ -191,21 +191,21 @@ stateDiagram-v2
     researching --> icebox
     researching --> dropped
     researching --> duplicate
-    researching --> completed: decide, ops, verify; result link required
+    researching --> completed: decide, ops, verify, implement; closure evidence required
     developing --> researching
     developing --> reviewing
     developing --> unstarted
     developing --> icebox
     developing --> dropped
     developing --> duplicate
-    developing --> completed: decide, ops, verify; result link required
+    developing --> completed: decide, ops, verify, implement; closure evidence required
     reviewing --> developing: fix needed
     reviewing --> merged: reference flag stores refs.pr
     reviewing --> unstarted
     reviewing --> icebox
     reviewing --> dropped
     reviewing --> duplicate
-    reviewing --> completed: decide, ops, verify; result link required
+    reviewing --> completed: decide, ops, verify, implement; closure evidence required
     merged --> unstarted: reopen (reason required)
     merged --> completed: closure evidence (result link or hk:doc)
     deployed --> unstarted: reopen (reason required)
@@ -214,6 +214,7 @@ stateDiagram-v2
     duplicate --> unstarted: reopen (reason required)
     icebox --> backlog: revive
     icebox --> unstarted: reopen (reason required)
+    icebox --> dropped: closure evidence
 ```
 
 ### State model, hierarchy and relations
@@ -250,6 +251,11 @@ linked to the change as `implements`, so a later revert of the PR reopens it. A 
 with a `reason` that names the states allowed from the current one. A `merged` task closes as `completed` only with a result
 link (an https URL or `hk:doc <key>`), the same evidence `completed` takes; the
 kind rule for `completed` does not apply to this edge.
+
+An `implement` task closes as `completed` only when no change it implements is
+unmerged and no sub-task is open (a sub-task whose state is not in the completed or canceled category; merged and deployed count as completed).
+A refusal answers `task_conflict` and names the unmerged PR (`repo#number`, with its state) or the
+open sub-task. A closed-without-merge PR counts as unmerged.
 
 Old state names still work as input and in `--state` filters (`in_progress` →
 the claim's sub-state, `verifying` and `join` → `reviewing`, `hold` →
@@ -377,8 +383,10 @@ row the hygiene job may apply. `handoffkeep tasks settle-merged [--project P]
 [--dry-run]` (`POST /v1/tasks/settle-merged`, body `{project, dry_run}`) moves
 each merged task whose implementing changes are all deployed to `deployed`
 (source `deploy`, ref `deploy:<attempt_id>`), and reports every other merged
-task with the reason it stayed merged: `no_merge_commit`, `no_deploy_stage`
-or `not_yet_deployed`. `--dry-run` defaults to true: nothing is written unless
+task with the reason it stayed merged: `no_merge_commit`, `no_deploy_stage`,
+`not_yet_deployed`, or `redelivered` (its covering deploy event was already
+recorded, so a reopened task re-merged under the same attempt stays merged and
+needs an operator decision). `--dry-run` defaults to true: nothing is written unless
 `--dry-run=false` is given.
 Schema version 34 adds the `source_event` kind for events
 recorded with `applied=false`, so they never read as transitions.

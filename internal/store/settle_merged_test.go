@@ -109,6 +109,45 @@ func TestSettleMergedReasons(t *testing.T) {
 	}
 }
 
+// TestSettleMergedRedeliveredStaysMerged: a task settled deployed, then reopened
+// and merged again under the same attempt, already has that attempt's deploy
+// event recorded. The event cannot apply twice, so the sweep must count the
+// task as redelivered, not deployed, and leave it merged.
+func TestSettleMergedRedeliveredStaysMerged(t *testing.T) {
+	f := newDeployFixture(t, "settle_redelivered", "prod")
+	f.start(t, "s-1", "deploy", []string{"prod"}, f.cand(1, "internal/x.go"))
+	f.finish(t, "s-1", "success")
+	covered := f.mergedWithSHA(t, 1)
+	if _, err := f.s.SettleMerged(t.Context(), "", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := settleState(t, f.s, covered.ID); got != StateDeployed {
+		t.Fatalf("setup: covered task state %s, want deployed", got)
+	}
+	// Reopened and re-merged: the task is merged again under the attempt whose
+	// deploy event it already carries.
+	if _, err := f.s.pool.Exec(t.Context(), `UPDATE tasks SET state=$2 WHERE id=$1`, covered.ID, StateMerged); err != nil {
+		t.Fatal(err)
+	}
+	dry, err := f.s.SettleMerged(t.Context(), "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dry.Counts[SettleDeployed] != 0 || dry.Counts[SettleRedelivered] != 1 {
+		t.Fatalf("dry-run counts %+v, want the task redelivered", dry.Counts)
+	}
+	applied, err := f.s.SettleMerged(t.Context(), "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Counts[SettleDeployed] != 0 || applied.Counts[SettleRedelivered] != 1 {
+		t.Fatalf("apply counts %+v, want the task redelivered", applied.Counts)
+	}
+	if got := settleState(t, f.s, covered.ID); got != StateMerged {
+		t.Fatalf("redelivered task state %s after apply, want merged", got)
+	}
+}
+
 // TestSettleMergedRejectsBadProject needs no database: a project filter must be
 // a project name before any query runs.
 func TestSettleMergedRejectsBadProject(t *testing.T) {

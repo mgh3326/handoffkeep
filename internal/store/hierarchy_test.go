@@ -359,7 +359,8 @@ func TestAutoCloseTable(t *testing.T) {
 			t.Fatalf("parent=%s, want reviewing", got.State)
 		}
 		// Once the parked child is dropped, the rest settle and the parent closes.
-		// icebox -> dropped is not a manual edge; revive it to backlog first.
+		// The parked child leaves icebox through backlog first; icebox -> dropped
+		// is also a manual edge (hk 4050), so either path settles the parent.
 		move(t, s, kids[0].ID, "backlog")
 		move(t, s, kids[0].ID, "dropped")
 		if got := stateOf(t, s, parent.ID); got.State != StateMerged {

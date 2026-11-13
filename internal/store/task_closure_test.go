@@ -68,8 +68,8 @@ func TestCompletedKindGate(t *testing.T) {
 			t.Run(kind+"/"+from, func(t *testing.T) {
 				x := flowTask(t, s, s.pool, kind, from, true)
 				got, err := s.TransitionTaskWith(t.Context(), x.ID, TransitionInput{To: StateCompleted, By: "tester", Evidence: "https://example.com/result"})
-				if kind == "implement" || kind == "fix" {
-					if !errors.Is(err, ErrTaskConflict) || err.Error() != "task_conflict: completed applies to decide, ops, verify and research tasks" {
+				if kind == "fix" {
+					if !errors.Is(err, ErrTaskConflict) {
 						t.Fatalf("err=%v", err)
 					}
 					return
@@ -86,6 +86,15 @@ func TestCompletedKindGate(t *testing.T) {
 	}
 	if _, err := s.TransitionTaskWith(t.Context(), x.ID, TransitionInput{To: StateCompleted, By: "tester", Evidence: "https://example.com/result"}); !errors.Is(err, ErrTaskConflict) {
 		t.Fatalf("flagged err=%v", err)
+	}
+}
+
+func TestIceboxDropsWithClosure(t *testing.T) {
+	s := schemaStore(t, "icebox_drop")
+	x := flowTask(t, s, s.pool, "implement", StateIcebox, true)
+	got, err := s.TransitionTaskWith(t.Context(), x.ID, TransitionInput{To: StateDropped, By: "tester", Closure: "cancelled", Evidence: "https://example.com/r"})
+	if err != nil || got.State != StateDropped {
+		t.Fatalf("state=%s err=%v", got.State, err)
 	}
 }
 
