@@ -24,9 +24,6 @@ func (s *Store) SetTaskSubscriber(ctx context.Context, id int64, subscriber, sou
 		}
 		return Task{}, false, err
 	}
-	if err = s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
-		return Task{}, false, err
-	}
 	var exists bool
 	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_subscribers WHERE task_id=$1 AND subscriber=$2 AND archived_at IS NULL)`, id, subscriber).Scan(&exists); err != nil {
 		return Task{}, false, err

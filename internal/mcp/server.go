@@ -318,13 +318,6 @@ func HTTPHandler(service api.Service, tokens api.Tokens, access *cfaccess.Verifi
 			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 			return
 		}
-		ctx := withPrincipal(r.Context(), p)
-		// A bearer token is fenced as the transport-authenticated client id it
-		// always was. An Access identity is an operator path like the console,
-		// which deliberately has no implicit central-role principal.
-		if !p.Access {
-			ctx = store.WithWrkPrincipal(ctx, p.Actor, nil)
-		}
-		h.ServeHTTP(w, r.WithContext(ctx))
+		h.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), p)))
 	})
 }

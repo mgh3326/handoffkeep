@@ -34,7 +34,7 @@ import (
 //	51                         changeStateV51 (migration_change_state.go), called from Store.migrate
 //	52                         reviewHistoryV52 (migration_review_history.go), called from Store.migrate
 //	53                         schemaMigrationsV53 (migration_ids.go), called from Store.migrate
-//	20                         migrateWrk (wrk_migration.go), owner-only via MigrateWrk
+//	20                         retired (hk 4427): the wrk_* tables stay in place, unused
 //	23, 24                     migrateQuota (quota.go)
 //
 // Store.migrate runs the integer versions first, then the registered IDs in
@@ -58,7 +58,7 @@ const SchemaVersion = 53
 const migrationLockID = 824180045
 
 // migrateVersions lists every version Store.migrate records: 1 through
-// SchemaVersion except 8 (never used) and 20 (MigrateWrk, owner-only).
+// SchemaVersion except 8 (never used) and 20 (retired with the wrk tables).
 func migrateVersions() []int {
 	out := make([]int, 0, SchemaVersion)
 	for v := 1; v <= SchemaVersion; v++ {

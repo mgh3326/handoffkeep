@@ -182,7 +182,7 @@ func TestSenderRefusesRetargetedRequest(t *testing.T) {
 
 // Go parses a redirect's Location before any redirect policy runs and puts it
 // verbatim in the error when it does not parse. The no-follow sender (the
-// presign and wrk path) and the following sender both collapse that error to
+// presign path) and the following sender both collapse that error to
 // a named one, so a signed query in the Location never reaches a log.
 func TestMalformedLocationNeverInError(t *testing.T) {
 	const canary = "SECRET-canary-3544"

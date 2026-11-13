@@ -25,7 +25,6 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
-	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 	"github.com/mgh3326/handoffkeep/internal/youtrack"
 )
 
@@ -108,9 +107,6 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 
 	lane := ""
 	if input.Type == "task" {
-		if err := s.wrkTaskPrecheck(ctx, input.ID, "claimed", false); err != nil {
-			return store.RelayEvent{}, err
-		}
 		task, found, err := s.Store.GetTask(ctx, input.ID)
 		if err != nil {
 			return store.RelayEvent{}, err
@@ -285,23 +281,14 @@ func (s Service) CreateTask(ctx context.Context, client string, x store.Task, ch
 	return s.Store.CreateTaskChecked(ctx, x, check)
 }
 func (s Service) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string) (store.Task, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return store.Task{}, err
-	}
 	return s.Store.ClaimTask(ctx, id, by, jobID, noJob)
 }
 
 func (s Service) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by, reason string) (store.Task, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return store.Task{}, err
-	}
 	return s.Store.RebindTaskJob(ctx, id, fromJob, toJob, by, reason)
 }
 
 func (s Service) NextTask(ctx context.Context, lane, by, jobID, noJob string) (store.Task, error) {
-	if err := s.Store.WrkFence(ctx, wrkrecords.LegacyIntent{JobID: jobID, Binding: true}); err != nil {
-		return store.Task{}, err
-	}
 	return s.Store.NextTask(ctx, lane, by, jobID, noJob)
 }
 func (s Service) CreateDisposition(ctx context.Context, client string, x store.DispositionInput) (store.Task, bool, error) {
@@ -312,19 +299,9 @@ func (s Service) DispositionSummary(ctx context.Context, asOf time.Time) (store.
 	return s.Store.DispositionSummary(ctx, asOf)
 }
 func (s Service) ApplyDisposition(ctx context.Context, id int64, client, note string) (store.Task, error) {
-	task, _, err := s.Store.GetTask(ctx, id)
-	if err != nil {
-		return store.Task{}, err
-	}
-	if err := s.wrkTaskPrecheck(ctx, id, store.DispositionTarget(task), false); err != nil {
-		return store.Task{}, err
-	}
 	return s.Store.ApplyDisposition(ctx, id, client, note)
 }
 func (s Service) ReopenTask(ctx context.Context, id int64, client, reason string) (store.Task, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "reopened", true); err != nil {
-		return store.Task{}, err
-	}
 	return s.Store.ReopenTask(ctx, id, client, reason)
 }
 func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note string, refs *store.TaskRefs, noJob string) (store.Task, error) {
@@ -334,46 +311,28 @@ func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note 
 // TransitionTaskWith is TransitionTask with the options a plain call cannot
 // carry, such as the duplicate_of target.
 func (s Service) TransitionTaskWith(ctx context.Context, id int64, client string, in store.TransitionInput) (store.Task, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, store.FenceTarget(in.To), in.Refs != nil); err != nil {
-		return store.Task{}, err
-	}
 	in.By = client
 	return s.Store.TransitionTaskWith(ctx, id, in)
 }
 
 // SetTaskParent sets or clears a task's parent.
 func (s Service) SetTaskParent(ctx context.Context, id int64, parent *int64, client string) (store.Task, bool, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return store.Task{}, false, err
-	}
 	return s.Store.SetTaskParent(ctx, id, parent, client)
 }
 
 // AddTaskRelation adds an edge from the task to another.
 func (s Service) AddTaskRelation(ctx context.Context, id int64, kind string, other int64, client string) (bool, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return false, err
-	}
 	return s.Store.AddTaskRelation(ctx, id, kind, other, client)
 }
 
 // RemoveTaskRelation archives an edge.
 func (s Service) RemoveTaskRelation(ctx context.Context, id int64, kind string, other int64, client string) (bool, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return false, err
-	}
 	return s.Store.RemoveTaskRelation(ctx, id, kind, other, client)
 }
 func (s Service) RelaneTask(ctx context.Context, id int64, to, client, note string, allowNewLane bool) (store.Task, bool, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return store.Task{}, false, err
-	}
 	return s.Store.RelaneTask(ctx, id, to, client, note, allowNewLane)
 }
 func (s Service) SetTaskProject(ctx context.Context, id int64, project, client, note string) (store.Task, bool, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return store.Task{}, false, err
-	}
 	return s.Store.SetTaskProject(ctx, id, project, client, note)
 }
 func (s Service) SetTaskArea(ctx context.Context, id int64, area *string, client, note string) (store.Task, bool, error) {
@@ -417,10 +376,6 @@ func (s Service) GetTask(ctx context.Context, id int64) (store.Task, bool, error
 	return s.Store.GetTask(ctx, id)
 }
 func (s Service) AppendRelayEvent(ctx context.Context, x store.RelayEvent) (store.RelayEvent, bool, error) {
-	if err := s.Store.WrkFence(ctx, wrkrecords.LegacyIntent{JobID: x.JobID, Kind: x.Kind, Head: x.Head, Digest: x.ReportSHA, Receipt: x.WrkReceipt}); err != nil {
-		return store.RelayEvent{}, false, err
-	}
-
 	return s.Store.AppendRelayEvent(ctx, x)
 }
 func (s Service) MarkRelayEventDelivered(ctx context.Context, id int64, machine, pane string) (store.RelayEvent, error) {
@@ -632,10 +587,6 @@ type Server struct {
 
 func (s Server) Handler() http.Handler {
 	m := http.NewServeMux()
-	wrkRegistered := s.Service.Store != nil && (s.Service.Store.WrkEngine().Mode != "off" || s.Service.Store.HasWrkEnrollment(context.Background()))
-	if wrkRegistered {
-		m.HandleFunc("/v1/wrk/", s.wrk)
-	}
 	m.HandleFunc("GET /healthz", healthz)
 	m.HandleFunc("/v1/checkpoints", s.checkpoints)
 	m.HandleFunc("GET /v1/search", s.search)
@@ -795,49 +746,23 @@ func (s Server) Handler() http.Handler {
 		m.Handle("/ui", s.UI)
 		m.Handle("/ui/", s.UI)
 	}
-	v1 := v1Handler{mux: m, legacy: s.legacyWrkFence(m)}
-	if wrkRegistered {
-		v1.wrk = http.HandlerFunc(s.wrk)
-	}
-	return v1
+	return v1Handler{mux: m}
 }
 
-// wrkPattern is the route pattern reported for the /v1/wrk surface.
-const wrkPattern = "/v1/wrk/{path...}"
-
-// v1Handler serves the /v1 surface behind the legacy wrk fence. Its Handler
-// method reports the route a request dispatches to without serving it, the way
-// *http.ServeMux does, so telemetry can key the head sampling decision on the
-// route before the request starts (telemetry.routePattern follows any value
-// with this method).
+// v1Handler serves the /v1 surface. Its Handler method reports the route a
+// request dispatches to without serving it, the way *http.ServeMux does, so
+// telemetry can key the head sampling decision on the route before the request
+// starts (telemetry.routePattern follows any value with this method).
 type v1Handler struct {
-	mux    *http.ServeMux
-	legacy http.Handler
-	wrk    http.Handler // nil when the wrk routes are not registered
-}
-
-func (h v1Handler) isWrk(r *http.Request) bool {
-	return h.wrk != nil && (r.URL.Path == "/v1/wrk" || strings.HasPrefix(r.URL.Path, "/v1/wrk/"))
+	mux *http.ServeMux
 }
 
 func (h v1Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// The legacy fence may return before ServeMux dispatches the request.
-	_, r.Pattern = h.mux.Handler(r)
-	// ServeMux cleans dot/slash paths with redirects before dispatch. O3
-	// must authenticate and reject those paths without ever sending Location.
-	if h.isWrk(r) {
-		r.Pattern = wrkPattern
-		h.wrk.ServeHTTP(w, r)
-		return
-	}
-	h.legacy.ServeHTTP(w, r)
+	h.mux.ServeHTTP(w, r)
 }
 
 // Handler reports the route ServeHTTP would dispatch to, without serving it.
 func (h v1Handler) Handler(r *http.Request) (http.Handler, string) {
-	if h.isWrk(r) {
-		return h.wrk, wrkPattern
-	}
 	return h.mux.Handler(r)
 }
 
@@ -866,14 +791,27 @@ func healthz(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, out)
 }
 
+// clientKey carries the authenticated client id on a request context so logs
+// on the error path can name the caller.
+type clientKey struct{}
+
+func withClient(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, clientKey{}, id)
+}
+
+// clientOf returns the client id auth stored on ctx, or "" before auth ran.
+func clientOf(ctx context.Context) string {
+	id, _ := ctx.Value(clientKey{}).(string)
+	return id
+}
+
 func (s Server) auth(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id, ok := s.Tokens.Client(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 	}
 	if ok {
-		_, receipt := store.WrkPrincipal(r.Context())
-		*r = *r.WithContext(store.WithWrkPrincipal(r.Context(), id, receipt))
+		*r = *r.WithContext(withClient(r.Context(), id))
 		s.ClientRevisions.observe(id, r.UserAgent())
 	}
 	return id, ok
@@ -1140,10 +1078,6 @@ func (s Server) taskProject(w http.ResponseWriter, r *http.Request) {
 		Metadata *store.ProjectMetadataPatch `json:"metadata,omitempty"`
 	}
 	if err := decode(r, &input, bodySmall); err != nil {
-		appErr(w, r, err)
-		return
-	}
-	if err := s.Service.wrkTaskPrecheck(r.Context(), id, "", true); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -1600,10 +1534,6 @@ type taskRelaneResult struct {
 // errors (driver faults, cancelled contexts) report internal_error rather
 // than leaking internals or posing as a retry-safe validation failure.
 func relaneErrorCode(err error) string {
-	var denied wrkrecords.Error
-	if errors.As(err, &denied) {
-		return wrkrecords.Code(denied)
-	}
 	switch {
 	case errors.Is(err, store.ErrTaskNotFound):
 		return "not_found"

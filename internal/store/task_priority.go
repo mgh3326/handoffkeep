@@ -85,9 +85,6 @@ func (s *Store) SetTaskPriorityDirect(ctx context.Context, id int64, priority in
 		}
 		return Task{}, false, err
 	}
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
-		return Task{}, false, err
-	}
 	if IsSettledState(x.State) {
 		return Task{}, false, ErrTaskTerminal
 	}

@@ -683,9 +683,6 @@ func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID i
 		return DecisionRequestResult{}, err
 	}
 
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "needs_decision", false); err != nil {
-		return DecisionRequestResult{}, err
-	}
 	decisionBefore := decisionBeforeOf(x)
 	// Disposition items have their own closed options and operator route.
 	if x.Refs.Disposition != nil {
