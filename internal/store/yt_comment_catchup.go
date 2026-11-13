@@ -41,11 +41,15 @@ type YTCatchUp struct {
 // frozen since the legacy push's removal but its rows still count), with no
 // ownership link and no op under its key. $1 the pull's author, $2 the
 // principal, $3 the kind, $4 the key prefix (YTCommentKey), $5 comment ids to
-// leave out, $6 the limit, $7 true for only the bindings an issue_create op
-// published (origin op_applied).
+// leave out, $6 the limit, $7 true for only the bindings that publish
+// without a comment at write time: an issue_create op's (origin op_applied)
+// and the automatic binder's (origin auto_verified, hk 4492). A comment
+// committed between the binder's listing and its publication got no op, and
+// is above the binding's comments_from, so this pass copies it even when the
+// general catch-up is off.
 const ytCatchUpSelectSQL = `SELECT c.id, c.task_id, c.body, c.author, c.created_at
 	FROM yt_task_bindings b JOIN task_comments c ON c.task_id = b.task_id AND c.id > b.comments_from
-	WHERE c.author <> $1 AND (NOT $7 OR b.origin = 'op_applied')
+	WHERE c.author <> $1 AND (NOT $7 OR b.origin IN ('op_applied','auto_verified'))
 	  AND NOT EXISTS (SELECT 1 FROM youtrack_comment_links l WHERE l.hk_comment_id = c.id)
 	  AND NOT EXISTS (SELECT 1 FROM yt_comment_write_links w WHERE w.comment_id = c.id)
 	  AND NOT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.principal = $2 AND o.kind = $3 AND o.idem_key = $4 || c.id::text)
@@ -79,13 +83,15 @@ func (s *Store) CatchUpYTComments(ctx context.Context, limit int, skip []int64) 
 	return s.catchUpYTComments(ctx, limit, skip, false)
 }
 
-// CatchUpYTIssueComments is CatchUpYTComments for the tasks whose binding an
-// issue_create op published (hk 3914). Such a task's comments written while
-// its op was pending got no op (the task had no binding yet), and the
-// binding's comments_from (0 for a created issue, the latest comment for an
-// adopted one) says which of them the issue still lacks. The write worker
-// runs it in mode on even when the general catch-up
-// (HANDOFFKEEP_YT_COMMENTS_CATCHUP) is off.
+// CatchUpYTIssueComments is CatchUpYTComments for the bindings that publish
+// without a comment at write time: the ones an issue_create op published
+// (hk 3914) and the automatic binder's auto_verified ones (hk 4492). Such a
+// task's comments written while its op was pending, or between the binder's
+// YouTrack listing and its publication, got no op (the task had no binding
+// yet), and the binding's comments_from (0 for a created issue, the highest
+// comment the binder found present, the latest comment for an adopted one)
+// says which of them the issue still lacks. The write worker runs it in mode
+// on even when the general catch-up (HANDOFFKEEP_YT_COMMENTS_CATCHUP) is off.
 func (s *Store) CatchUpYTIssueComments(ctx context.Context, limit int, skip []int64) (YTCatchUp, error) {
 	return s.catchUpYTComments(ctx, limit, skip, true)
 }

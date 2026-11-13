@@ -40,8 +40,9 @@ func ybbNoIntent(t *testing.T, s *Store, name string, task int64) {
 }
 
 // The scan queues one intent per unbound task it sees, advances the cursor,
-// and leaves a bound task and one whose issue_create is pending alone. It
-// never resets an existing row, so a backoff survives a second pass.
+// leaves a bound task alone, and defers a task whose issue may still be
+// created by an hour. It never resets an existing row, so a backoff survives
+// a second pass.
 func TestScanYTBindingCandidates(t *testing.T) {
 	s := schemaStore(t, "ybb_scan")
 	ctx := t.Context()
@@ -56,7 +57,8 @@ func TestScanYTBindingCandidates(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A task whose issue_create op is still unresolved publishes its binding
-	// when the op applies: the binder leaves it alone too.
+	// when the op applies, and is reconsidered if it is rejected: it gets a
+	// deferred intent too.
 	inFlight := ytcTask(t, s, ytbProject)
 	ybhOp(t, s, YTIssuePrincipal, ytwrite.KindIssueCreate, inFlight, "ytb-issue")
 	ytcuRawComment(t, s, first, "worker")
@@ -69,8 +71,8 @@ func TestScanYTBindingCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scan.Comments != 5 || scan.Tasks != 2 {
-		t.Fatalf("scan %+v, want 5 comments and 2 intents", scan)
+	if scan.Comments != 5 || scan.Tasks != 4 {
+		t.Fatalf("scan %+v, want 5 comments and 4 intents", scan)
 	}
 	for _, task := range []int64{first, second} {
 		in, ok := ybbIntent(t, s, task)
@@ -79,9 +81,19 @@ func TestScanYTBindingCandidates(t *testing.T) {
 			t.Fatalf("task %d intent %+v %v", task, in, ok)
 		}
 	}
+	for _, task := range []int64{pending, inFlight} {
+		in, ok := ybbIntent(t, s, task)
+		if !ok || in.State != YTBindingIntentPending || !in.NextAttemptAt.Equal(now.Add(time.Hour)) {
+			t.Fatalf("deferred task %d intent %+v %v", task, in, ok)
+		}
+	}
 	ybbNoIntent(t, s, "bound task", bound)
-	ybbNoIntent(t, s, "pending issue task", pending)
-	ybbNoIntent(t, s, "in-flight issue task", inFlight)
+	if due, err := s.YTBindingIntentsDue(ctx, ytcTenant, now, 20); err != nil || len(due) != 2 {
+		t.Fatalf("due at scan time %+v %v, want the two immediate intents", due, err)
+	}
+	if due, err := s.YTBindingIntentsDue(ctx, ytcTenant, now.Add(time.Hour), 20); err != nil || len(due) != 4 {
+		t.Fatalf("due after the deferral %+v %v, want all four", due, err)
+	}
 
 	// The cursor moved: nothing is read or queued twice.
 	if again, err := s.ScanYTBindingCandidates(ctx, ytcTenant, 200, now.Add(time.Minute)); err != nil || again.Comments != 0 || again.Tasks != 0 {
@@ -249,5 +261,53 @@ func TestYTBindingExcluded(t *testing.T) {
 	}
 	if id, err := s.YTHighestCommentID(ctx, task); err != nil || id != 0 {
 		t.Fatalf("highest comment id %d %v, want 0", id, err)
+	}
+	// The automatic publication rechecks the unbind in its own transaction
+	// under the ownership lock, so an unbind that commits while the binder is
+	// doing its YouTrack reads is not undone. The operator's backfill still
+	// works (the supported way past an unbind).
+	if _, err := s.UnbindYTTaskBinding(ctx, task, YTUnbindOptions{By: "operator", Reason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := s.YTCanaryCandidate(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddYTTaskBindingFrom(ctx, b, verified, 0, YTBindingAutoVerified, ytBindTestActor); !errors.Is(err, ErrYTBindingExcluded) {
+		t.Fatalf("automatic publication after an unbind: %v, want ErrYTBindingExcluded", err)
+	}
+	if _, found, err := s.YTTaskBinding(ctx, task); err != nil || found {
+		t.Fatalf("the excluded task was bound: found=%v err=%v", found, err)
+	}
+	if _, err := s.AddYTTaskBinding(ctx, b, verified); err != nil {
+		t.Fatalf("the operator's backfill was refused: %v", err)
+	}
+}
+
+// An auto_verified binding is covered by the issue-only catch-up, so a comment
+// that commits between the binder's listing and its publication is copied
+// even with HANDOFFKEEP_YT_COMMENTS_CATCHUP=off (findings on the gap).
+func TestYTAutoVerifiedBindingIssueCatchUp(t *testing.T) {
+	s := schemaStore(t, "ybb_catchup")
+	ctx := t.Context()
+	ytbMapped(t, s)
+	task := ytcTask(t, s, ytbProject)
+	verified, err := s.YTCanaryCandidate(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddYTTaskBindingFrom(ctx, ytbBinding(task), verified, 0, YTBindingAutoVerified, ytBindTestActor); err != nil {
+		t.Fatal(err)
+	}
+	// Committed after the binder's listing, so it is above the watermark and
+	// has no op of its own.
+	c := ytcuRawComment(t, s, task, "worker")
+	s.SetYTCommentsMode(YTCommentsOn)
+	got, err := s.CatchUpYTIssueComments(ctx, 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Prepared) != 1 || got.Prepared[0].Key != YTCommentKey(c.ID) {
+		t.Fatalf("issue-only catch-up prepared %+v, want comment %d", got.Prepared, c.ID)
 	}
 }

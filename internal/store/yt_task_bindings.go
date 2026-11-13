@@ -61,6 +61,13 @@ const (
 // keeps, or one verified against mappings that changed since.
 var ErrYTBindingConflict = errors.New("yt_binding_conflict")
 
+// ErrYTBindingExcluded is an automatic publication refused because the
+// operator unbound the task and nothing bound it since (I7): the binder read
+// that before it verified the issue, but the unbind may commit while it does
+// its YouTrack reads, so the publication rechecks it under the ownership lock.
+// Nothing was written.
+var ErrYTBindingExcluded = errors.New("yt_binding_excluded")
+
 // ytIssueOwnershipLock serialises the writers that give a YouTrack issue to a
 // task: AddYTTaskBinding and AddYTCommentCanary. Each checks the other's
 // table, and neither table's unique index spans both.
@@ -329,6 +336,20 @@ func (s *Store) addYTTaskBinding(ctx context.Context, b YTTaskBinding, verified 
 	have, found, err := readYTBinding(ctx, tx, b.TaskID)
 	if err != nil {
 		return YTTaskBinding{}, err
+	}
+	// An operator unbind recorded while the binder was doing its YouTrack
+	// reads is not undone by this publication (I7): UnbindYTTaskBinding takes
+	// the same ownership lock first, so one of the two sees the other whole.
+	// The operator's backfill (origin import_verified) is the supported way
+	// past an unbind and is not checked.
+	if origin == YTBindingAutoVerified {
+		action, err := ytBindingLatestActionTx(ctx, tx, b.TaskID)
+		if err != nil {
+			return YTTaskBinding{}, err
+		}
+		if action == ytBindingActionUnbound {
+			return YTTaskBinding{}, fmt.Errorf("%w: task %d was unbound by the operator", ErrYTBindingExcluded, b.TaskID)
+		}
 	}
 	if !found {
 		// hk is creating (or adopting) the task's issue itself (hk 3898):

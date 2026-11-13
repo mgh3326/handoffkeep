@@ -76,10 +76,13 @@ func ytBindingIntentBackoff(attempts int) time.Duration {
 // ScanYTBindingCandidates reads the next page of task_comments above the
 // binder's cursor and records an intent for every task it has not seen, in one
 // transaction: either the cursor moves and the intents commit, or neither
-// does. A task with a binding is left out (it needs no automatic bind), and so
-// is one whose issue may still be created (a yt_issue_intents row, or an
-// unresolved issue_create op): that op publishes the binding when it applies.
-// An existing intent row is never reset, so a backoff survives a re-scan.
+// does. A task with a binding is left out (it needs no automatic bind). A task
+// whose issue may still be created (a yt_issue_intents row, or an unresolved
+// issue_create op) gets its intent due in an hour instead of no intent: that
+// op publishes the binding when it applies, and if it is rejected the task is
+// reconsidered rather than stranded with its comments already past the
+// cursor. An existing intent row is never reset, so a backoff survives a
+// re-scan.
 //
 // Locks (lockorder.go): the cursor row FOR UPDATE, then plain reads of
 // task_comments, yt_task_bindings and yt_issue_intents, then new rows of
@@ -127,11 +130,13 @@ func (s *Store) ScanYTBindingCandidates(ctx context.Context, tenant string, limi
 	now = now.UTC()
 	for _, taskID := range taskIDs {
 		tag, err := tx.Exec(ctx, `INSERT INTO yt_binding_intents(task_id, tenant, state, next_attempt_at, recorded_at)
-			SELECT $1,$2,'pending',$3,$3
+			SELECT $1,$2,'pending',
+				CASE WHEN EXISTS(SELECT 1 FROM yt_issue_intents WHERE task_id=$1)
+					OR EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$4 AND entity_kind='task' AND entity_id=$1::text
+						AND state NOT IN ('applied','rejected'))
+				THEN $3 + interval '1 hour' ELSE $3 END,
+				$3
 			WHERE NOT EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=$1)
-			  AND NOT EXISTS(SELECT 1 FROM yt_issue_intents WHERE task_id=$1)
-			  AND NOT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$4 AND entity_kind='task' AND entity_id=$1::text
-				AND state NOT IN ('applied','rejected'))
 			ON CONFLICT (task_id) DO NOTHING`, taskID, tenant, now, ytwrite.KindIssueCreate)
 		if err != nil {
 			return out, err
@@ -215,6 +220,17 @@ func (s *Store) DropYTBindingIntent(ctx context.Context, taskID int64) error {
 	return err
 }
 
+// ytBindingLatestActionTx is the action of the task's latest
+// yt_binding_history row ("" when it has none), in the caller's transaction.
+func ytBindingLatestActionTx(ctx context.Context, q ytRowQuerier, taskID int64) (string, error) {
+	var action string
+	err := q.QueryRow(ctx, `SELECT action FROM yt_binding_history WHERE task_id=$1 ORDER BY id DESC LIMIT 1`, taskID).Scan(&action)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return action, err
+}
+
 // YTBindingExcluded reports whether the operator unbound the task and nothing
 // bound it since: the latest yt_binding_history row's action is 'unbound'.
 // Counted in, the binder must not bind it again (I7).
@@ -222,11 +238,7 @@ func (s *Store) YTBindingExcluded(ctx context.Context, taskID int64) (bool, erro
 	if taskID < 1 {
 		return false, errors.New("invalid binding history task")
 	}
-	var action string
-	err := s.pool.QueryRow(ctx, `SELECT action FROM yt_binding_history WHERE task_id=$1 ORDER BY id DESC LIMIT 1`, taskID).Scan(&action)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
+	action, err := ytBindingLatestActionTx(ctx, s.pool, taskID)
 	return action == ytBindingActionUnbound, err
 }
 

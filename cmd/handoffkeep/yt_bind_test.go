@@ -275,6 +275,41 @@ func ytbOpFor(t *testing.T, conn *pgx.Conn, commentID int64) (ytbOp, bool) {
 	return op, true
 }
 
+// A task with more missing comments than one pass copies makes durable
+// progress: the intent survives, and the next pass copies the rest, so none
+// stays below the watermark and invisible to the catch-up.
+func TestYTBindingBinderCopiesAllMissing(t *testing.T) {
+	e := newYTBEnv(t, "ytb_many")
+	ctx := t.Context()
+	now := time.Now().UTC().Truncate(time.Second)
+	task := e.task(t, true)
+	const comments = 201
+	for i := range comments {
+		e.comment(t, task, "c"+strconv.Itoa(i))
+	}
+	rep := ytbPass(t, e.worker, now)
+	if rep.Bound != 1 || rep.Enqueued != ytBindEnqueueLimit {
+		t.Fatalf("first pass %+v, want one binding and %d copies", rep, ytBindEnqueueLimit)
+	}
+	if state, _, _, ok := e.intent(t, task); !ok || state != "pending" {
+		t.Fatalf("the intent was dropped with comments left: %q %v", state, ok)
+	}
+	rep = ytbPass(t, e.worker, now.Add(time.Minute))
+	if rep.Bound != 0 || rep.Enqueued != comments-ytBindEnqueueLimit {
+		t.Fatalf("second pass %+v, want the rest copied", rep)
+	}
+	if state, _, _, ok := e.intent(t, task); ok {
+		t.Fatalf("the intent survived: %q", state)
+	}
+	var linked int
+	if err := e.conn.QueryRow(ctx, `SELECT count(*) FROM yt_comment_write_links w JOIN task_comments c ON c.id = w.comment_id WHERE c.task_id=$1`, task).Scan(&linked); err != nil {
+		t.Fatal(err)
+	}
+	if linked != comments {
+		t.Fatalf("%d comments have an op, want %d", linked, comments)
+	}
+}
+
 // A pass that crashes after the publication leaves the intent: the next pass
 // finds the binding and copies what the issue lacks instead of binding again.
 func TestYTBindingBinderFinishesAfterBind(t *testing.T) {
