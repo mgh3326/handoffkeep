@@ -52,7 +52,6 @@ type taskGetOut struct {
 	Lane      string  `json:"lane"`
 	Project   *string `json:"project"`
 	Area      *string `json:"area"`
-	Labels    []int64 `json:"labels"`
 	ClaimedBy string  `json:"claimed_by"`
 	Refs      struct {
 		PR    string `json:"pr"`
@@ -253,7 +252,7 @@ func TestTaskGetCompleteFields(t *testing.T) {
 	for field, want := range map[string]string{
 		"id": "hk", "title": "hk", "body": "hk", "body_doc": "hk",
 		"state": "hk", "priority": "hk", "kind": "hk", "lane": "hk",
-		"project": "hk", "area": "hk", "labels": "hk", "claimed_by": "hk",
+		"project": "hk", "area": "hk", "claimed_by": "hk",
 		"created_by": "hk", "refs": "hk", "created_at": "hk", "updated_at": "hk",
 		"started_at": "hk", "completed_at": "hk", "canceled_at": "hk", "closed_at": "hk",
 		"parent": "hk", "children": "hk", "relations": "hk", "blockers": "hk",
