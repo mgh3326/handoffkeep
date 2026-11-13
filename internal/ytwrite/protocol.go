@@ -584,10 +584,16 @@ func (p *Protocol) Drive(ctx context.Context, limit int) (DriveStats, error) {
 }
 
 // reconcile searches the op's target for its exact rendered text through the
-// op's kind. One exact match is positive evidence and applies the op. Anything
-// else leaves it remote_unknown: no match is not proof the write did not
-// happen, so there is no automatic re-create. The decision is the same for
-// every kind; a kind only reports what it found (Evidence).
+// op's kind. One exact match is positive evidence and applies the op; one
+// match the kind reports as the thing Send would have adopted
+// (Evidence.Adopted) is not applied: nothing bounds when a create the op's
+// dispatch may have sent lands, and an applied op is never searched again, so
+// a late create would be a second issue no one sees (review of PR #383). It
+// stays remote_unknown / adoption_unconfirmed, the candidate named in the
+// detail, for an operator's resolve --adopted. Anything else leaves it
+// remote_unknown: no match is not proof
+// the write did not happen, so there is no automatic re-create. The decision
+// is the same for every kind; a kind only reports what it found (Evidence).
 func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err error) {
 	var wait time.Duration
 	touch := func(reason, detail string) (bool, error) {
@@ -619,6 +625,9 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	}
 	switch {
 	case len(ev.Matches) == 1 && ev.Deleted == 0 && ev.Mismatched == 0 && resultIDRE.MatchString(ev.Matches[0]):
+		if ev.Adopted {
+			return touch(ReasonAdoptionUnconfirmed, ev.Matches[0]+" is the task's unmarked issue, the one Send adopts; a create this op sent may still land, so an operator resolves it (--applied "+ev.Matches[0]+" --adopted)")
+		}
 		s := p.apply(ctx, kind, op, ev.Matches[0], false)
 		if s.err == nil {
 			logTransition(s.op)

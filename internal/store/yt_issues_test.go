@@ -339,6 +339,59 @@ func TestYTIssueBindingNeverOverwritten(t *testing.T) {
 	}
 }
 
+// A YouTrack id is the tenant's: two tenants' creates may publish issues with
+// the same stable id for different tasks, and each apply writes its own map
+// row and binding instead of the second failing ErrConflictingResult on an op
+// whose create already succeeded (hk 3912).
+func TestYTIssueMapIsScopedToItsTenant(t *testing.T) {
+	s := schemaStore(t, "yti_tenant")
+	ytbMapped(t, s)
+	const other = "other.youtrack.cloud"
+	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
+	a := ytiCreate(t, s, ytbProject)
+	s.SetYTIssuesMode(YTIssuesOn, other)
+	b := ytiCreate(t, s, ytbProject)
+	opsA, opsB := ytiOps(t, s, a.ID), ytiOps(t, s, b.ID)
+	if len(opsA) != 1 || len(opsB) != 1 || opsA[0].Tenant != ytcTenant || opsB[0].Tenant != other {
+		t.Fatalf("ops %+v %+v", opsA, opsB)
+	}
+	for _, x := range []struct {
+		task   int64
+		op     ytwrite.Op
+		tenant string
+	}{{a.ID, opsA[0], ytcTenant}, {b.ID, opsB[0], other}} {
+		ytiDispatch(t, s, x.op)
+		got, err := s.YTWriteLedger().Apply(t.Context(), time.Now().UTC(), x.op.ID, "2-1", ytiMaps(x.op, "2-1"))
+		if err != nil || got.State != ytwrite.StateApplied || got.Reason != "" || got.YTResultID != "2-1" {
+			t.Fatalf("task %d apply %+v %v", x.task, got, err)
+		}
+		bind, found, err := s.YTTaskBinding(t.Context(), x.task)
+		if err != nil || !found || bind.IssueID != "2-1" || bind.Tenant != x.tenant || bind.OpID != x.op.ID {
+			t.Fatalf("task %d binding %+v %v %v", x.task, bind, found, err)
+		}
+	}
+	rows, err := s.pool.Query(t.Context(), `SELECT tenant, hk_key FROM yt_entity_map WHERE entity_kind='task' AND yt_id='2-1' ORDER BY tenant`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var tenant, key string
+		if err := rows.Scan(&tenant, &key); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, tenant+"/"+key)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{other + "/" + strconv.FormatInt(b.ID, 10), ytcTenant + "/" + strconv.FormatInt(a.ID, 10)}
+	if !slices.Equal(got, want) {
+		t.Fatalf("map rows %v, want %v", got, want)
+	}
+}
+
 // The worker admits an issue_create op only in mode on, on its tenant, and
 // while the task has no binding or one this op published.
 func TestYTIssueGate(t *testing.T) {

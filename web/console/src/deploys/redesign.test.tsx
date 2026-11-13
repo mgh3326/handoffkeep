@@ -13,11 +13,15 @@ const DIGEST = "sha256:e0580273a4c31cd56a1028389212a1e101c40f130231f6dd2c49b3b5b
 const rec = (over: Partial<DeployRecordView> = {}): DeployRecordView => ({
   record_key: "deploy/example-console/20261101T090000Z",
   result: "success",
+  target: "host-a",
+  head_sha: SHA,
   deployed_ref: SHA,
   deployed_at: "2026-11-01T09:00:00Z",
   failed_step: null,
+  failed_step_name: null,
   recorded_at: "2026-11-01T09:00:00Z",
   source: "installer",
+  included_prs: [],
   ...over,
 });
 
@@ -27,6 +31,7 @@ const service = (over: Partial<DeployServiceView> = {}): DeployServiceView => ({
   target: "host-a",
   doc_url: "/ui/doc/deploy/example-console/",
   record_count: 1,
+  state: "deployed",
   current: rec(),
   recent: [rec()],
   merged_boundary: "deployed_at",
@@ -133,18 +138,18 @@ describe("shortened refs with a copy button", () => {
       service({ current: rec({ deployed_ref: SHA }), recent: [] }),
       service({ service: "other", current: rec({ deployed_ref: DIGEST }), recent: [] }),
     ]);
-    const sha = await screen.findByText("92ee9e2d0ddc");
+    const sha = within(await screen.findByRole("region", { name: "example-console 배포" })).getByText("92ee9e2d0ddc");
     expect(sha.className).toContain("hk-mono");
     expect(sha.parentElement?.getAttribute("title")).toBe(SHA);
-    const digest = screen.getByText("sha256:e0580273a4c3…");
+    const digest = within(screen.getByRole("region", { name: "other 배포" })).getByText("sha256:e0580273a4c3…");
     expect(digest.className).toContain("hk-mono");
     expect(digest.parentElement?.getAttribute("title")).toBe(DIGEST);
   });
 
   it("a version string is shown whole, with no copy button", async () => {
     show([service({ current: rec({ deployed_ref: "pw-e401923" }), recent: [] })]);
-    await screen.findByText("pw-e401923");
-    expect(screen.queryByRole("button", { name: /복사/ })).toBeNull();
+    const version = await screen.findByText("pw-e401923");
+    expect(version.closest(".hk-monoref")?.querySelector("button")).toBeNull();
   });
 
   it("the copy button has an accessible name, copies the full value and announces it", async () => {
@@ -154,7 +159,7 @@ describe("shortened refs with a copy button", () => {
     const listen = (e: Event) => spoken.push((e as CustomEvent<string>).detail);
     window.addEventListener("hk-console-announce", listen);
     show([service({ recent: [] })]);
-    const button = await screen.findByRole("button", { name: "example-console 현재 판 전체 값 복사" });
+    const button = await screen.findByRole("button", { name: "example-console 실행 SHA 전체 값 복사" });
     expect(button.getAttribute("type")).toBe("button");
     await act(async () => { fireEvent.click(button); });
     expect(writeText).toHaveBeenCalledWith(SHA);

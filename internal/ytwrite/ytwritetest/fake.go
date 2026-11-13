@@ -63,9 +63,10 @@ type FakeYouTrack struct {
 	findFaults []error
 	finds      int
 	// fieldsMissing names the projects whose issue fields are not set up;
-	// projectText those whose hk project field is text.
+	// projectField the type of each project's hk project field (an enum
+	// unless SetProjectField says otherwise).
 	fieldsMissing map[string]bool
-	projectText   map[string]bool
+	projectField  map[string]ytwrite.IssueProjectField
 	created       []ytwrite.IssueCreate
 	// decisionCreates every DecisionIssueCreate received (fake_decision.go).
 	decisionCreates []ytwrite.DecisionIssueCreate
@@ -107,7 +108,7 @@ type fakeIssue struct {
 
 // NewFake returns an empty fake with no faults queued.
 func NewFake() *FakeYouTrack {
-	return &FakeYouTrack{issues: map[string][]*ytwrite.RemoteComment{}, projects: map[string][]*fakeIssue{}, fieldsMissing: map[string]bool{}, projectText: map[string]bool{}, bundles: map[string]map[string]bool{}}
+	return &FakeYouTrack{issues: map[string][]*ytwrite.RemoteComment{}, projects: map[string][]*fakeIssue{}, fieldsMissing: map[string]bool{}, projectField: map[string]ytwrite.IssueProjectField{}, bundles: map[string]map[string]bool{}}
 }
 
 // Queue adds faults for the next CreateComment calls.
@@ -613,11 +614,12 @@ func (f *FakeYouTrack) SetIssueFieldsMissing(projectID string, missing bool) {
 	f.fieldsMissing[projectID] = missing
 }
 
-// SetProjectFieldText makes the project's hk project field a text field.
-func (f *FakeYouTrack) SetProjectFieldText(projectID string) {
+// SetProjectField makes the project's hk project field kind, as the admin
+// field listing reports it.
+func (f *FakeYouTrack) SetProjectField(projectID string, kind ytwrite.IssueProjectField) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.projectText[projectID] = true
+	f.projectField[projectID] = kind
 }
 
 // Created returns every IssueCreate the fake received, in order.
@@ -637,5 +639,9 @@ func (f *FakeYouTrack) CheckIssueFields(ctx context.Context, projectID, _ string
 	if f.fieldsMissing[projectID] {
 		return ytwrite.IssueFields{}, fmt.Errorf("project %s has no hk ID field", projectID)
 	}
-	return ytwrite.IssueFields{ProjectText: f.projectText[projectID]}, nil
+	kind := f.projectField[projectID]
+	if kind == "" {
+		kind = ytwrite.IssueProjectEnum
+	}
+	return ytwrite.IssueFields{Project: kind}, nil
 }

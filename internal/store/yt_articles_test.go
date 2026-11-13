@@ -980,3 +980,36 @@ func TestYTArticlesRescanSkipsMovedBaseline(t *testing.T) {
 		t.Fatalf("%d ops, want the one rejected update only", n)
 	}
 }
+
+// During blue-green the previous release writes yt_entity_map rows with no
+// tenant, so a tenantless row and a tenant row can map the same article to two
+// other documents (the unique index is (entity_kind, tenant, yt_id)). The
+// conflict check reports one of them, the lowest hk_key, instead of failing
+// the apply with "more than one row returned by a subquery" (review of
+// PR #383, r4563234420).
+func TestYTArticleConflictWithTenantlessAndTenantRows(t *testing.T) {
+	s := schemaStore(t, "ytart_conflict_rows")
+	ctx := t.Context()
+	now := time.Now().UTC()
+	src, _, err := s.YTWriteLedger().Prepare(ctx, now, ytwrite.NewOp{Principal: "p", Kind: ytwrite.KindCommentAppend, Key: "k", PayloadSHA: "s",
+		Payload: []byte(`{"body":"x"}`), EntityKind: "task", EntityID: "1", YTTargetID: "2-1", Actor: "a", Tenant: ytcTenant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct{ tenant, key string }{{"", "901"}, {ytcTenant, "902"}} {
+		if _, err := s.pool.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, op_id, created_at) VALUES ('document',$1,$2,'A-1',$3,$4)`,
+			row.tenant, row.key, src.ID, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	op := ytwrite.Op{ID: src.ID, EntityKind: ytwrite.ArticleEntity, EntityID: "903", Tenant: ytcTenant}
+	detail, err := ytArticleConflictTx(ctx, tx, op, "A-1")
+	if err != nil || detail != "article is mapped to document 901" {
+		t.Fatalf("conflict = %q %v", detail, err)
+	}
+}

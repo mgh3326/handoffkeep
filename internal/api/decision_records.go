@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -37,6 +38,40 @@ func (s Server) decisionRecordsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"server_time": now, "decision_requests": xs})
+}
+
+// decisionRecordSession records a decision settled in a session chat as a
+// closed decision request. The authenticated client is the recorder.
+func (s Server) decisionRecordSession(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	if client != operatorClientID {
+		writeError(w, http.StatusForbidden, "operator_required")
+		return
+	}
+	defer r.Body.Close()
+	var input store.SessionDecisionInput
+	if err := decode(r, &input, bodySmall); err != nil {
+		appErr(w, r, err)
+		return
+	}
+	input.By = client
+	out, err := s.Service.Store.RecordSessionDecision(r.Context(), input, time.Now().UTC(), nil)
+	if err != nil {
+		if errors.Is(err, store.ErrSessionDecisionConflict) {
+			writeError(w, http.StatusConflict, "session_decision_conflict")
+			return
+		}
+		appErr(w, r, err)
+		return
+	}
+	status := http.StatusCreated
+	if out.Duplicate {
+		status = http.StatusOK
+	}
+	jsonOut(w, status, out)
 }
 
 type decisionSnoozeInput struct {

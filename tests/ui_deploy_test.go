@@ -24,20 +24,21 @@ import (
 )
 
 type deployRecordFixture struct {
-	Schema      string  `json:"schema"`
-	Target      string  `json:"target"`
-	HeadSHA     *string `json:"head_sha"`
-	PreviousRef *string `json:"previous_ref"`
-	Result      string  `json:"result"`
-	FailedStep  *int    `json:"failed_step"`
-	JobID       *string `json:"job_id"`
-	ApprovalRef *string `json:"approval_ref"`
-	IncludedPRs any     `json:"included_prs"`
-	Source      string  `json:"source"`
-	Service     string  `json:"service"`
-	DeployedRef *string `json:"deployed_ref"`
-	DeployedAt  *string `json:"deployed_at"`
-	Evidence    any     `json:"evidence"`
+	Schema         string  `json:"schema"`
+	Target         string  `json:"target"`
+	HeadSHA        *string `json:"head_sha"`
+	PreviousRef    *string `json:"previous_ref"`
+	Result         string  `json:"result"`
+	FailedStep     *int    `json:"failed_step"`
+	FailedStepName *string `json:"failed_step_name"`
+	JobID          *string `json:"job_id"`
+	ApprovalRef    *string `json:"approval_ref"`
+	IncludedPRs    any     `json:"included_prs"`
+	Source         string  `json:"source"`
+	Service        string  `json:"service"`
+	DeployedRef    *string `json:"deployed_ref"`
+	DeployedAt     *string `json:"deployed_at"`
+	Evidence       any     `json:"evidence"`
 }
 
 func deployFixtureBody(t *testing.T, service, result, deployedRef, deployedAt string, failedStep *int) string {
@@ -56,6 +57,43 @@ func deployFixtureBody(t *testing.T, service, result, deployedRef, deployedAt st
 	}
 	if deployedAt != "" {
 		rec.DeployedAt = &deployedAt
+	}
+	body, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+// deployChainBody writes a record with the fields the chain view reads:
+// head_sha (the running commit), target (the environment), included_prs (the
+// PR→sha link) and failed_step_name (the failure reason). It is the
+// hk-follow writer's shape; only the values are synthetic.
+func deployChainBody(t *testing.T, service, result, headSHA, deployedRef, deployedAt string, failedStep *int, failedStepName string, prs []string) string {
+	t.Helper()
+	rec := deployRecordFixture{
+		Schema:     "deploy-record/v0",
+		Target:     "ncp",
+		Result:     result,
+		FailedStep: failedStep,
+		Source:     "hk-follow",
+		Service:    service,
+		Evidence:   map[string]string{"deployed_ref": "test fixture — real shape, synthetic values"},
+	}
+	if headSHA != "" {
+		rec.HeadSHA = &headSHA
+	}
+	if deployedRef != "" {
+		rec.DeployedRef = &deployedRef
+	}
+	if deployedAt != "" {
+		rec.DeployedAt = &deployedAt
+	}
+	if failedStepName != "" {
+		rec.FailedStepName = &failedStepName
+	}
+	if prs != nil {
+		rec.IncludedPRs = prs
 	}
 	body, err := json.Marshal(rec)
 	if err != nil {
@@ -345,6 +383,31 @@ func TestUIDeployPendingDocsCapped(t *testing.T) {
 	pw := serviceView(t, response, "panewire-hub")
 	if pw["docs_capped"] == true || pw["record_count"] != float64(201) || pw["current"] != nil {
 		t.Fatalf("exhausted scan must clear docs_capped and report honest no-success: %v", pw)
+	}
+}
+
+// Regression (mergewake r2): a capped scan whose every scanned document is
+// invalid took the empty-parsed return and reported no_record. A valid record
+// may sit beyond the cap, so the state must be partial there too.
+func TestUIDeployPendingCappedInvalidOnlyIsPartial(t *testing.T) {
+	s := uiStore(t)
+	db := deployDB(t)
+	wipeDeployDocs(t, db)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+
+	base := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	for i := 0; i <= 2000; i++ {
+		seedDeployDoc(t, s, "deploy/handoffkeep/"+base.Add(time.Duration(i)*time.Second).Format("20060102T150405Z"), "not a deploy record")
+	}
+	hk := serviceView(t, getDeployPending(t, h, assertion), "handoffkeep")
+	if hk["docs_capped"] != true || hk["state"] != "partial" || hk["current"] != nil {
+		t.Fatalf("capped invalid-only scan must be partial: %v", hk)
+	}
+	if hk["record_count"] != float64(2000) {
+		t.Fatalf("record_count=%v, want the 2000 scanned at the hard cap", hk["record_count"])
 	}
 }
 
@@ -643,7 +706,7 @@ func TestUIDeployRecentContract(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	svc := serviceView(t, getDeployPending(t, h, assertion), "handoffkeep")
-	want := []string{"current", "doc_url", "invalid", "invalid_count", "latest", "merged_boundary", "merged_since", "recent", "record_count", "repo", "service", "target"}
+	want := []string{"current", "doc_url", "invalid", "invalid_count", "latest", "merged_boundary", "merged_since", "recent", "record_count", "repo", "service", "state", "target"}
 	keys := make([]string, 0, len(svc))
 	for key := range svc {
 		keys = append(keys, key)
@@ -704,5 +767,119 @@ func TestUIDeployRegisteredServicesAndAlias(t *testing.T) {
 		if raw.(map[string]any)["service"] == "pacelever" {
 			t.Fatal("inactive service shown")
 		}
+	}
+}
+
+// hk 3523 — the deploy view shows the chain from the records only: the
+// running SHA, the environment, the PR→SHA link, the failure name and a state
+// the records prove. Holds/refusals write no record, so states a record cannot
+// carry (not built, check failed, awaiting approval) are never invented.
+func TestUIDeployPendingChainAndState(t *testing.T) {
+	s := uiStore(t)
+	db := deployDB(t)
+	wipeDeployDocs(t, db)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+
+	head := "1111111111111111111111111111111111111111"
+	next := "2222222222222222222222222222222222222222"
+	deployedAt := "2026-09-20T01:00:00Z"
+	base, err := time.Parse(time.RFC3339, deployedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// handoffkeep: a success with its running SHA and one included PR, and a
+	// different task merged after it — the newest attempt succeeded, the next
+	// deploy has work.
+	seedDeployDoc(t, s, "deploy/handoffkeep/20260920T010000Z",
+		deployChainBody(t, "handoffkeep", "success", head, "ghcr.io/mgh3326/handoffkeep@sha256:aaaa", deployedAt, nil, "", []string{"https://github.com/mgh3326/handoffkeep/pull/11"}))
+	seedMergedEvent(t, db, s, "waiting for the next deploy", "https://github.com/mgh3326/handoffkeep/pull/12", base.Add(time.Hour))
+
+	// auto_trader: a success, then an attempt whose new revision served and
+	// failed its health check (step 7) — the failure name is the reason.
+	step := 7
+	seedDeployDoc(t, s, "deploy/auto_trader/20260920T010000Z",
+		deployChainBody(t, "auto_trader", "success", head, "sha256:bbbb", deployedAt, nil, "", nil))
+	seedDeployDoc(t, s, "deploy/auto_trader/20260923T020000Z",
+		deployChainBody(t, "auto_trader", "failed", next, "", "2026-09-23T02:00:00Z", &step, "healthz_auto_trader", nil))
+
+	// panewire-hub: only a failure with no deploy step — the deploy itself
+	// failed, and no success means no running SHA.
+	seedDeployDoc(t, s, "deploy/panewire-hub/20260923T040000Z",
+		deployChainBody(t, "panewire-hub", "failed", next, "", "2026-09-23T04:00:00Z", nil, "", nil))
+
+	// pacelever: an interrupted tick writes a failed step-6 record whose
+	// serving version is unknown — never "deploy_failed" (the old version
+	// serving) and never a current SHA.
+	six := 6
+	seedDeployDoc(t, s, "deploy/pacelever/20260923T050000Z",
+		deployChainBody(t, "pacelever", "failed", next, "", "2026-09-23T05:00:00Z", &six, "interrupted", nil))
+
+	response := getDeployPending(t, h, assertion)
+
+	hk := serviceView(t, response, "handoffkeep")
+	if hk["state"] != "pending" {
+		t.Fatalf("handoffkeep state=%v, want pending (success, one merge waiting)", hk["state"])
+	}
+	current, ok := hk["current"].(map[string]any)
+	if !ok {
+		t.Fatalf("handoffkeep current=%v", hk["current"])
+	}
+	if current["head_sha"] != head {
+		t.Fatalf("current head_sha=%v, want the running SHA %s", current["head_sha"], head)
+	}
+	if current["target"] != "ncp" {
+		t.Fatalf("current target=%v", current["target"])
+	}
+	if current["failed_step_name"] != nil {
+		t.Fatalf("a success record has no failure name: %v", current["failed_step_name"])
+	}
+	prs, ok := current["included_prs"].([]any)
+	if !ok || len(prs) != 1 || prs[0] != "https://github.com/mgh3326/handoffkeep/pull/11" {
+		t.Fatalf("included_prs=%v, want the record's PR list", current["included_prs"])
+	}
+	if hk["latest"] != nil {
+		t.Fatalf("handoffkeep latest must be absent when the newest record is the current one: %v", hk["latest"])
+	}
+	if ids := mergedIDs(hk); len(ids) == 0 {
+		t.Fatalf("merged_since=%v, want the task merged after the deploy", ids)
+	}
+
+	at := serviceView(t, response, "auto_trader")
+	if at["state"] != "health_failed" {
+		t.Fatalf("auto_trader state=%v, want health_failed (step 7)", at["state"])
+	}
+	latest, ok := at["latest"].(map[string]any)
+	if !ok {
+		t.Fatalf("auto_trader latest=%v", at["latest"])
+	}
+	if latest["head_sha"] != next {
+		t.Fatalf("latest head_sha=%v, want the attempted SHA %s", latest["head_sha"], next)
+	}
+	if latest["failed_step"] != float64(7) || latest["failed_step_name"] != "healthz_auto_trader" {
+		t.Fatalf("latest failure step=%v name=%v", latest["failed_step"], latest["failed_step_name"])
+	}
+	if at["current"].(map[string]any)["head_sha"] != head {
+		t.Fatalf("the running SHA must stay the last success: %v", at["current"])
+	}
+
+	pw := serviceView(t, response, "panewire-hub")
+	if pw["state"] != "deploy_failed" || pw["current"] != nil {
+		t.Fatalf("panewire-hub state=%v current=%v, want deploy_failed with no running SHA", pw["state"], pw["current"])
+	}
+
+	if mergewake := serviceView(t, response, "mergewake"); mergewake["state"] != "no_record" {
+		t.Fatalf("mergewake state=%v, want no_record", mergewake["state"])
+	}
+
+	pl := serviceView(t, response, "pacelever")
+	if pl["state"] != "serving_unknown" || pl["current"] != nil {
+		t.Fatalf("pacelever state=%v current=%v, want serving_unknown with no running SHA", pl["state"], pl["current"])
+	}
+	if pl["latest"].(map[string]any)["failed_step_name"] != "interrupted" {
+		t.Fatalf("pacelever latest=%v", pl["latest"])
 	}
 }

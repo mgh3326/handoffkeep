@@ -3,6 +3,7 @@ package ytwritetest
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -233,14 +234,16 @@ func RunIssueProtocol(t *testing.T, nl NewLedger) {
 	})
 
 	// Send adopted the task's existing issue and the process died before the
-	// apply committed. The adopted issue carries no marker, and nothing durable
-	// says this dispatch adopted rather than POSTed (its hk ID may have been
-	// set after the search, with a POST still in flight), so the op stays
-	// remote_unknown for the operator and nothing is re-created (PR #335
-	// review; hk 3911 needs durable adoption evidence first).
-	t.Run("lost_adoption_settlement_stays_unknown", func(t *testing.T) {
+	// apply committed. This kind's create always writes the marker, so the
+	// unmarked issue is the one Send adopts: the evidence search names it
+	// (remote_unknown / adoption_unconfirmed, the issue in the detail, no
+	// second create) but does not apply it, because the ledger cannot tell
+	// this crash from a POST whose reply was lost and may still land (review
+	// of PR #383). The operator's resolve --adopted applies it with the map
+	// row marked adopted (hk 3911).
+	t.Run("lost_adoption_settlement_names_the_adoption", func(t *testing.T) {
 		e := newEnv(t, nl)
-		e.yt.InjectIssue(issueSuiteProject, testTask, "#"+itoa(testTask)+" imported", "legacy body")
+		existing := e.yt.InjectIssue(issueSuiteProject, testTask, "#"+itoa(testTask)+" imported", "legacy body")
 		e.clock.Advance(time.Hour)
 		cl := &CrashLedger{Ledger: e.ledger, Method: "Apply"}
 		e.restart(cl)
@@ -252,9 +255,29 @@ func RunIssueProtocol(t *testing.T, nl NewLedger) {
 			t.Fatal("the crash at Apply never fired")
 		}
 		e.restart(e.ledger)
-		e.clock.Advance(10 * time.Minute)
+		e.clock.Advance(24 * time.Hour)
 		e.drive()
-		e.wantOp(1, ytwrite.StateRemoteUnknown, ytwrite.ReasonMarkerMismatch)
+		if got := e.wantOp(1, ytwrite.StateRemoteUnknown, ytwrite.ReasonAdoptionUnconfirmed); !strings.Contains(got.LastError, existing) {
+			t.Fatalf("op %+v, want the candidate %s in its detail", got, existing)
+		}
+		adopted := true
+		if _, err := e.p.Resolve(context.Background(), 1, ytwrite.Resolution{Applied: true, YTID: existing, Adopted: &adopted, By: "operator"}); err != nil {
+			t.Fatal(err)
+		}
+		op := e.wantOp(1, ytwrite.StateApplied, "")
+		if op.YTResultID != existing || op.Attempts != 1 {
+			t.Fatalf("op %+v, want the adopted issue %s after one attempt", op, existing)
+		}
+		m, ok, err := e.ledger.MapGet(context.Background(), "task", itoa(testTask))
+		if err != nil || !ok || m.YTID != existing || m.OpID != op.ID {
+			t.Fatalf("task map row %+v %v %v, want %s", m, ok, err, existing)
+		}
+		// MapRow.Adopted is not stored in the map: the memory ledger keeps
+		// what apply passed it, the store publishes it in the binding's
+		// comments_from (store TestYTIssueAdoptedBindingSkipsHistory).
+		if _, mem := e.ledger.(*MemLedger); mem && !m.Adopted {
+			t.Fatalf("task map row %+v, want adopted", m)
+		}
 		e.wantRemote(0, 0)
 	})
 
