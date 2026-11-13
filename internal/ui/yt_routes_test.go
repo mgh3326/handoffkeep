@@ -187,10 +187,16 @@ func TestYouTrackHomeTaskCounts(t *testing.T) {
 	f := newYTRouteFixture(t)
 	open := f.task(t, "hk open")
 	closed := f.task(t, "hk closed")
+	// hk still says backlog for this one; YouTrack says developing, and it
+	// has had no activity for a month: a stall by YouTrack's state.
+	stalled := f.task(t, "hk stalled")
 	f.exec(t, `UPDATE tasks SET awaiting_decision=true WHERE id = ANY($1)`, []int64{open.ID, closed.ID})
+	f.exec(t, `UPDATE tasks SET created_at=now()-interval '30 days' WHERE id=$1`, stalled.ID)
+	f.exec(t, `UPDATE task_events SET at=now()-interval '30 days' WHERE task_id=$1`, stalled.ID)
 	f.fake.set(
 		ytIssue("2-1", open.ID, "yt open", "backlog", "rstack", 4),
 		ytIssue("2-2", closed.ID, "yt closed", "completed", "handoffkeep", 0),
+		ytIssue("2-3", stalled.ID, "yt stalled", "developing", "handoffkeep", 0),
 	)
 	rec := httptest.NewRecorder()
 	f.h.attention(rec, httptest.NewRequest(http.MethodGet, "/ui/api/attention", nil), operator)
@@ -201,11 +207,18 @@ func TestYouTrackHomeTaskCounts(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Tasks.Count != 1 || response.Tasks.AwaitingDecision != 1 || len(response.Tasks.Items) != 1 {
+	if response.Tasks.Count != 2 || response.Tasks.AwaitingDecision != 1 || response.Tasks.Stalled != 1 || len(response.Tasks.Items) != 2 {
 		t.Fatalf("tasks=%+v", response.Tasks)
 	}
-	if x := response.Tasks.Items[0]; x.ID != open.ID || x.Title != "yt open" || x.Lane != "rstack" || x.Priority != 4 {
+	items := map[int64]attentionTaskView{}
+	for _, x := range response.Tasks.Items {
+		items[x.ID] = x
+	}
+	if x := items[open.ID]; x.Title != "yt open" || x.Lane != "rstack" || x.Priority != 4 || x.Reason != store.AttentionReasonAwaitingDecision {
 		t.Fatalf("item=%+v", x)
+	}
+	if x := items[stalled.ID]; x.Title != "yt stalled" || x.State != "developing" || x.Reason != store.AttentionReasonStalled {
+		t.Fatalf("stalled item=%+v", x)
 	}
 	f.fake.setFail(true)
 	rec = httptest.NewRecorder()

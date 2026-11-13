@@ -80,6 +80,18 @@ func (s *ytSnapshot) task(id int64) (youtrack.TaskIssue, bool) {
 	return s.Tasks[i], true
 }
 
+// startedIDs are the tasks YouTrack shows in a started state: the only ones
+// a stall can count for.
+func (s *ytSnapshot) startedIDs() []int64 {
+	ids := []int64{}
+	for _, t := range s.Tasks {
+		if t.StateKnown && ytStartedStates[t.State] {
+			ids = append(ids, t.TaskID)
+		}
+	}
+	return ids
+}
+
 func newYTTaskSource(issues TaskIssueLister, st ytTaskStore, tenant string, ttl time.Duration) *ytTaskSource {
 	if ttl <= 0 {
 		ttl = defaultTaskIssuesTTL
@@ -246,9 +258,23 @@ func youTrackAttentionTasks(candidates []store.AttentionTask, snap *ytSnapshot) 
 	return out
 }
 
+// closedAt is when a task in a closed state closed: hk's latest transition
+// into that state, else YouTrack's resolved time. The resolved time is used
+// for completed, dropped and duplicate only: a deployed issue was resolved
+// when it merged, so its resolved time is not the deploy.
+func closedAt(t youtrack.TaskIssue, transitions map[string]time.Time) (time.Time, bool) {
+	if at, ok := transitions[t.State]; ok {
+		return at, true
+	}
+	if t.Resolved != nil && t.State != store.StateDeployed {
+		return *t.Resolved, true
+	}
+	return time.Time{}, false
+}
+
 // youTrackWorkStatus builds the work status document from YouTrack's tasks
-// and hk's overlay. Movement counts issues created, and issues resolved into
-// a closed state, per KST day.
+// and hk's overlay. Movement counts issues created, and tasks that entered
+// their current closed state, per KST day.
 func youTrackWorkStatus(now time.Time, snap *ytSnapshot, overlay store.WorkStatusOverlay) *store.WorkStatus {
 	inSet := map[string]bool{}
 	for _, s := range store.WorkStatusStates {
@@ -267,8 +293,10 @@ func youTrackWorkStatus(now time.Time, snap *ytSnapshot, overlay store.WorkStatu
 		if !bundle && !t.Created.IsZero() && !t.Created.Before(start) {
 			createdDays[t.Created.In(kst).Format("2006-01-02")]++
 		}
-		if !bundle && t.StateKnown && closed[t.State] && t.Resolved != nil && !t.Resolved.Before(start) {
-			closedDays[t.Resolved.In(kst).Format("2006-01-02")]++
+		if !bundle && t.StateKnown && closed[t.State] {
+			if at, ok := closedAt(t, overlay.ClosedAt[t.TaskID]); ok && !at.Before(start) {
+				closedDays[at.In(kst).Format("2006-01-02")]++
+			}
 		}
 		if !t.StateKnown || !inSet[t.State] {
 			continue
@@ -297,7 +325,10 @@ func youTrackWorkStatus(now time.Time, snap *ytSnapshot, overlay store.WorkStatu
 				row.MergedAt = &at
 			}
 		}
-		if row.MergedAt == nil && t.Resolved != nil {
+		// YouTrack resolves an issue when it merges. A later resolved time
+		// than hk's last merge event is a merge hk has no event for (a
+		// reopen merged again in YouTrack): the current merge is the later.
+		if t.Resolved != nil && (row.MergedAt == nil || t.Resolved.After(*row.MergedAt)) {
 			row.MergedAt = t.Resolved
 		}
 		rows = append(rows, row)

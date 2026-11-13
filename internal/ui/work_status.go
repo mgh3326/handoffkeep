@@ -51,7 +51,8 @@ func (h *Handler) workStatusYouTrack(w http.ResponseWriter, r *http.Request, now
 			ids = append(ids, t.TaskID)
 		}
 	}
-	overlay, err := h.store.ReadWorkStatusOverlay(r.Context(), ids)
+	_, closedSince := store.WorkStatusMovementStart(now)
+	overlay, err := h.store.ReadWorkStatusOverlay(r.Context(), ids, closedSince)
 	if err != nil {
 		youTrackReadFailed(w, r, err)
 		return

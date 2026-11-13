@@ -470,12 +470,16 @@ type WorkStatusTaskOverlay struct {
 type WorkStatusOverlay struct {
 	Inputs WorkStatusInputs
 	Tasks  map[int64]WorkStatusTaskOverlay
+	// ClosedAt is, per task, the latest transition into each closed state
+	// (WorkStatusClosedStates) at or after the movement window's start.
+	ClosedAt map[int64]map[string]time.Time
 }
 
-// ReadWorkStatusOverlay reads the hk side of the work status for ids in one
-// consistent read. A task id hk does not know has no overlay row.
-func (s *Store) ReadWorkStatusOverlay(ctx context.Context, ids []int64) (WorkStatusOverlay, error) {
-	out := WorkStatusOverlay{Tasks: map[int64]WorkStatusTaskOverlay{}}
+// ReadWorkStatusOverlay reads the hk side of the work status for ids, and
+// the closed transitions since closedSince, in one consistent read. A task id
+// hk does not know has no overlay row.
+func (s *Store) ReadWorkStatusOverlay(ctx context.Context, ids []int64, closedSince time.Time) (WorkStatusOverlay, error) {
+	out := WorkStatusOverlay{Tasks: map[int64]WorkStatusTaskOverlay{}, ClosedAt: map[int64]map[string]time.Time{}}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return out, err
@@ -488,6 +492,28 @@ func (s *Store) ReadWorkStatusOverlay(ctx context.Context, ids []int64) (WorkSta
 		return out, err
 	}
 	if out.Inputs.Queued, err = readQueuedSpawnsTx(ctx, tx); err != nil {
+		return out, err
+	}
+	closedRows, err := tx.Query(ctx, `SELECT task_id, "to", max(at) FROM task_events
+		WHERE kind = 'transition' AND "to" = ANY($1) AND at >= $2 GROUP BY task_id, "to"`, WorkStatusClosedStates, closedSince)
+	if err != nil {
+		return out, err
+	}
+	for closedRows.Next() {
+		var id int64
+		var to string
+		var at time.Time
+		if err := closedRows.Scan(&id, &to, &at); err != nil {
+			closedRows.Close()
+			return out, err
+		}
+		if out.ClosedAt[id] == nil {
+			out.ClosedAt[id] = map[string]time.Time{}
+		}
+		out.ClosedAt[id][to] = at.UTC()
+	}
+	closedRows.Close()
+	if err := closedRows.Err(); err != nil {
 		return out, err
 	}
 	if len(ids) > 0 {

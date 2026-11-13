@@ -112,7 +112,7 @@ func (h *Handler) attention(w http.ResponseWriter, r *http.Request, identity cfa
 			youTrackReadFailed(w, r, err)
 			return
 		}
-		candidates, err := h.store.AttentionTaskCandidates(r.Context(), now)
+		candidates, err := h.store.AttentionTaskCandidates(r.Context(), now, snap.startedIDs())
 		if err != nil {
 			h.attentionFailed(w, err)
 			return

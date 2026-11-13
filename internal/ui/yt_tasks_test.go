@@ -248,3 +248,38 @@ func TestYouTrackReadFailedAnswers502ForYouTrackOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestYouTrackWorkStatusUsesTheCurrentMergeAndCloseTimes(t *testing.T) {
+	now := time.Date(2026, 11, 13, 3, 0, 0, 0, time.UTC)
+	oldMerge := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)       // hk's event from an earlier lifecycle
+	deploy := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)        // the project's last deploy
+	remerged := time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC)      // merged again in YouTrack, no hk event
+	mergedLongAgo := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC) // a deployed issue's resolved time
+	deployedAt := time.Date(2026, 11, 11, 1, 0, 0, 0, time.UTC)    // hk's deployed transition, in the window
+	remergedMS, mergedLongAgoMS := remerged.UnixMilli(), mergedLongAgo.UnixMilli()
+	waiting := ytIssue("2-1", 1, "merged again", "merged", "a", 0)
+	waiting.Resolved = &remergedMS
+	deployedWithEvent := ytIssue("2-2", 2, "deployed", "deployed", "a", 0)
+	deployedWithEvent.Resolved = &mergedLongAgoMS
+	deployedNoEvent := ytIssue("2-3", 3, "deployed, no event", "deployed", "a", 0)
+	deployedNoEvent.Resolved = &remergedMS
+	snap := buildYTSnapshot(youtrack.DefaultSchema(), []youtrack.Issue{waiting, deployedWithEvent, deployedNoEvent}, nil, now)
+	overlay := store.WorkStatusOverlay{
+		Inputs:   store.WorkStatusInputs{LastDeploy: map[string]time.Time{"handoffkeep": deploy}},
+		Tasks:    map[int64]store.WorkStatusTaskOverlay{1: {EnteredAt: map[string]time.Time{"merged": oldMerge}}},
+		ClosedAt: map[int64]map[string]time.Time{2: {"deployed": deployedAt}},
+	}
+	got := youTrackWorkStatus(now, snap, overlay)
+	if got.Summary.WaitingDeploy != 1 || got.Summary.MergedBeforeDeploy != 0 {
+		t.Fatalf("a merge after the deploy must wait for deploy: summary=%+v", got.Summary)
+	}
+	closedOn := map[string]int{}
+	for _, day := range got.Movement {
+		closedOn[day.Date] = day.Closed
+	}
+	// The deploy closed on its own (KST) day; a deployed issue with no hk
+	// event is not counted on its merge-time resolved day.
+	if closedOn["2026-11-11"] != 1 || closedOn["2026-11-12"] != 0 {
+		t.Fatalf("movement=%+v", got.Movement)
+	}
+}
