@@ -5,7 +5,6 @@ import type {
   BoardAttachment,
   BoardCommentsResponse,
   BoardDetail,
-  BoardDoc,
   BoardTask,
   BoardTasksResponse,
 } from "./boardTypes";
@@ -89,12 +88,6 @@ export async function fetchTaskDetail(id: number): Promise<BoardDetail> {
   )
     throw new Error("malformed task detail");
   return data;
-}
-
-/** Reads one hk document by key for the task overview. The key is the part of
- * body_doc before "#"; the section suffix never leaves the browser. */
-export function fetchBoardDoc(key: string): Promise<BoardDoc> {
-  return getJSON<BoardDoc>(`/ui/api/board/doc?key=${encodeURIComponent(key)}`);
 }
 
 export type TaskComments = { comments: BoardComment[]; truncated: boolean };

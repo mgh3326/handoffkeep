@@ -3,14 +3,13 @@ A durable home for coding-agent handoffs and documents across sessions and machi
 
 ## Fleet console (/ui)
 
-The optional fleet console renders relay timelines, task queues, unresolved
-decisions, and hub status. Authenticated operators can
-answer decision items individually or in batches, compose lane events, and
-close externally answered decisions with `handoffkeep decisions resolve`. It
-is mounted only when the Cloudflare Access configuration is
-complete and uses a separate Access assertion from the API bearer token. See
-[docs/ui.md](docs/ui.md) for configuration, security boundaries, hub behavior,
-and the SSE contract.
+The optional fleet console is a React app over `/ui/api/*`. It shows the work
+queue and task records, unresolved decisions, deploy status, and attention
+items. Authenticated operators answer structured decision requests and set
+task priority and lifecycle from it. It is mounted only when the Cloudflare
+Access configuration is complete and uses a separate Access assertion from the
+API bearer token. See [docs/ui.md](docs/ui.md) for views, configuration,
+security boundaries, and the write routes.
 
 Tasks may specify an optional expected duration at creation, for example `tasks add --expected 4h` or `--expected 1d`. Durations must be between 1 minute and 90 days; the server stores a normalized Go duration. The task API returns `expected` as a string, or `null` when unset.
 
@@ -150,10 +149,11 @@ handoffkeep tasks disposition summary [--as-of RFC3339] [--json]
 handoffkeep tasks disposition apply <id> [--note text]
 ```
 
-Only the operator's Access-authenticated web route answers an item
-(`/ui/dispositions/answer`, `/ui/dispositions/accept-batch`); generic
-transitions, `decisions resolve`, and compose are refused with
-`disposition_operator_only`. Silence changes nothing: no code path answers,
+Only the operator answers an item, through the console's email-identity routes
+`POST /ui/dispositions/answer` (one item) and `POST /ui/dispositions/accept-batch`
+(the recommended answer for a signed snapshot), with CSRF; see
+[docs/ui.md](docs/ui.md#disposition-items). Generic transitions and
+`decisions resolve` are refused with `disposition_operator_only`. Silence changes nothing: no code path answers,
 demotes, or claims an open item. `apply` records the director's application of
 the operator's answer with legal edges only (A/B/C → `merged`, D → `icebox`,
 E → `dropped`); an item never returns to `backlog`. An "A 배포" answer is

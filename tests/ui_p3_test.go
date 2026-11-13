@@ -222,7 +222,7 @@ func TestUIP3GlanceSuccessAndNoLeakage(t *testing.T) {
 	if !reflect.DeepEqual(got["lanes"], wantLanes["lanes"]) {
 		t.Fatalf("lanes changed: got=%v want=%v", got["lanes"], wantLanes["lanes"])
 	}
-	if paths := got["console_paths"]; !reflect.DeepEqual(paths, map[string]any{"decisions": "/ui/decisions", "queue": "/ui/queue", "fleet": "/ui/fleet"}) {
+	if paths := got["console_paths"]; !reflect.DeepEqual(paths, map[string]any{"decisions": "/ui/decisions", "queue": "/ui/queue"}) {
 		t.Fatalf("console paths=%v", paths)
 	}
 }
@@ -382,7 +382,7 @@ func TestUIP3ServiceIdentityBoundaryAndFailClosed(t *testing.T) {
 		h := newP3UITestServer(t, s, fixture, "", "", []string{"glance-fixture"})
 		defer h.Close()
 		for _, test := range []struct{ method, path string }{
-			{http.MethodGet, "/ui"}, {http.MethodGet, "/ui/timeline"}, {http.MethodGet, "/ui/queue"}, {http.MethodGet, "/ui/deploys"}, {http.MethodGet, "/ui/decisions"}, {http.MethodGet, "/ui/decisions/legacy"}, {http.MethodGet, "/ui/compose"}, {http.MethodGet, "/ui/fleet"}, {http.MethodGet, "/ui/events"}, {http.MethodGet, "/ui/fragments/timeline"}, {http.MethodGet, "/ui/doc/synthetic"}, {http.MethodGet, "/ui/static/htmx.min.js"}, {http.MethodPost, "/ui/decisions/answer"}, {http.MethodPost, "/ui/compose"},
+			{http.MethodGet, "/ui"}, {http.MethodGet, "/ui/queue"}, {http.MethodGet, "/ui/deploys"}, {http.MethodGet, "/ui/decisions"}, {http.MethodGet, "/ui/doc/synthetic"}, {http.MethodGet, "/ui/static/console/shell.js"}, {http.MethodPost, "/ui/queue"},
 		} {
 			response := p3Request(t, h.Client(), test.method, h.URL+test.path, service, nil, "")
 			if response.StatusCode != http.StatusForbidden {
@@ -402,7 +402,7 @@ func TestUIP3ServiceIdentityBoundaryAndFailClosed(t *testing.T) {
 		}
 		_ = responseText(t, response)
 		email := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-		for _, path := range []string{"/ui/timeline", "/ui/api/glance"} {
+		for _, path := range []string{"/ui/queue", "/ui/api/glance"} {
 			response = p3Request(t, h.Client(), http.MethodGet, h.URL+path, email, nil, "")
 			if response.StatusCode != http.StatusOK {
 				body := responseText(t, response)
@@ -423,7 +423,7 @@ func TestUIP3AcceptingEmailCSRFAndServiceProxy(t *testing.T) {
 	service := p3ServiceAssertion(t, fixture)
 	payload := []byte(`{"accepting":true,"reason":"synthetic"}`)
 
-	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/compose", email)
+	cookie, csrf := uiCSRF(t, h.Client(), h.URL+"/ui/queue", email)
 	validReq, err := http.NewRequestWithContext(t.Context(), http.MethodPost, h.URL+"/ui/api/nodes/machine-a/accepting", bytes.NewReader(payload))
 	if err != nil {
 		t.Fatal(err)

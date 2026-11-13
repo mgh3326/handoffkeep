@@ -1,8 +1,6 @@
 package tests
 
 import (
-	"bufio"
-	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -12,8 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -221,12 +217,12 @@ func TestUIAuthenticationAndBoundarySeparation(t *testing.T) {
 	h := newUITestServer(t, s, fixture, "", "", 0)
 	defer h.Close()
 	lane := uiLane(t, "lane-a")
-	seedRelay(t, s, lane, "lane.event", "", "timeline body", "", "")
+	seedRelay(t, s, lane, "lane.event", "", "queue body", "", "")
 	valid := fixture.token(t, "ADMIN@example.com", []string{"ui-audience", "other"}, time.Now().Add(time.Hour), nil)
 
-	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/timeline", valid, "")
-	if response.StatusCode != http.StatusOK || !strings.Contains(responseText(t, response), "timeline body") {
-		t.Fatal("valid CF Access assertion did not render the timeline")
+	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue", valid, "")
+	if response.StatusCode != http.StatusOK || !strings.Contains(responseText(t, response), `id="shell-root"`) {
+		t.Fatal("valid CF Access assertion did not render the console shell")
 	}
 	for name, assertion := range map[string]string{
 		"expired":           fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(-time.Minute), nil),
@@ -236,13 +232,13 @@ func TestUIAuthenticationAndBoundarySeparation(t *testing.T) {
 		"alg HS256":         fixture.hsToken(t),
 		"invalid signature": fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), mustOtherKey(t)),
 	} {
-		response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/timeline", assertion, "")
+		response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue", assertion, "")
 		body := responseText(t, response)
 		if response.StatusCode != http.StatusUnauthorized || strings.Contains(body, "Fleet console") {
 			t.Fatalf("%s: status=%d body=%q", name, response.StatusCode, body)
 		}
 	}
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/timeline", "", "")
+	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue", "", "")
 	if response.StatusCode != http.StatusUnauthorized || responseText(t, response) != "" {
 		t.Fatal("missing assertion was not a bodyless 401")
 	}
@@ -251,7 +247,7 @@ func TestUIAuthenticationAndBoundarySeparation(t *testing.T) {
 		t.Fatalf("CF assertion authenticated API: %d", response.StatusCode)
 	}
 	response.Body.Close()
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/timeline", "", "node-token")
+	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue", "", "node-token")
 	if response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("bearer token authenticated UI: %d", response.StatusCode)
 	}
@@ -271,7 +267,7 @@ func TestUIFailClosedAndMethodGuard(t *testing.T) {
 	s, dbURL := schemaTestStore(t, "ui_method_guard")
 	bare := httptest.NewServer(api.Server{Service: api.Service{Store: s}, Tokens: api.Tokens{"node": "node-token"}}.Handler())
 	defer bare.Close()
-	for _, endpoint := range []string{"/ui", "/ui/timeline", "/ui/events", "/ui/static/htmx.min.js"} {
+	for _, endpoint := range []string{"/ui", "/ui/queue", "/ui/timeline", "/ui/events", "/ui/static/htmx.min.js"} {
 		response := uiRequest(t, bare.Client(), http.MethodGet, bare.URL+endpoint, "", "")
 		if response.StatusCode != http.StatusNotFound {
 			t.Fatalf("%s status=%d, want 404", endpoint, response.StatusCode)
@@ -294,7 +290,7 @@ func TestUIFailClosedAndMethodGuard(t *testing.T) {
 	defer h.Close()
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 	before := uiRowCountsAt(t, dbURL)
-	for _, endpoint := range []string{"/ui", "/ui/timeline", "/ui/queue", "/ui/deploys", "/ui/decisions", "/ui/decisions/legacy", "/ui/fleet", "/ui/events", "/ui/fragments/timeline"} {
+	for _, endpoint := range []string{"/ui", "/ui/queue", "/ui/deploys", "/ui/decisions", "/ui/home", "/ui/work"} {
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 			response := uiRequest(t, h.Client(), method, h.URL+endpoint, assertion, "")
 			if response.StatusCode != http.StatusMethodNotAllowed {
@@ -350,160 +346,18 @@ func uiRowCountsAt(t *testing.T, dbURL string) rowCounts {
 	return counts
 }
 
-func TestUITimelineQueueAndEscaping(t *testing.T) {
-	s := uiStore(t)
-	fixture := newUIJWTFixture(t)
-	h := newUITestServer(t, s, fixture, "", "", 0)
-	defer h.Close()
-	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	laneA, laneB := uiLane(t, "lane-a"), uiLane(t, "lane-b")
-	textEvent := seedRelay(t, s, laneA, "lane.event", "", "text wins", "", "")
-	questionEvent := seedRelay(t, s, laneA, "job.escalate", "", "", "question wins", "line loses")
-	lineEvent := seedRelay(t, s, laneB, "job.joined", "", "", "", "line wins")
-	if _, err := s.MarkRelayEventDelivered(t.Context(), textEvent.ID, "host-a", "pane-a"); err != nil {
-		t.Fatal(err)
-	}
-	seedRelay(t, s, laneA, "lane.event", "", "<script>alert(1)</script>", "", "")
-	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/timeline?lane="+laneA, assertion, "")
-	body := responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, "text wins") || !strings.Contains(body, "question wins") || strings.Contains(body, "line wins") {
-		t.Fatalf("timeline lane filter/content status=%d body=%q", response.StatusCode, body)
-	}
-	if !strings.Contains(body, "✓ delivered") || !strings.Contains(body, "title=\"host-a/pane-a\"") {
-		t.Fatal("delivery marker or tooltip missing")
-	}
-	if !strings.Contains(body, "&lt;script&gt;alert(1)&lt;/script&gt;") || strings.Contains(body, "<script>alert(1)</script>") {
-		t.Fatal("stored XSS text was not escaped")
-	}
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/timeline?kind=job.escalate", assertion, "")
-	body = responseText(t, response)
-	if !strings.Contains(body, "question wins") || strings.Contains(body, "text wins") {
-		t.Fatal("kind filter did not restrict timeline")
-	}
-	today := time.Now().UTC().Format("2006-01-02")
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/timeline?lane="+laneA+"&since="+today, assertion, "")
-	if !strings.Contains(responseText(t, response), "text wins") {
-		t.Fatal("since date boundary did not include today's relay event")
-	}
-	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/timeline?lane="+laneA+"&until="+yesterday, assertion, "")
-	if strings.Contains(responseText(t, response), "text wins") {
-		t.Fatal("until date boundary did not exclude a later relay event")
-	}
-	_ = questionEvent
-	_ = lineEvent
-
-	pageLane := uiLane(t, "page")
-	for i := 0; i < 201; i++ {
-		seedRelay(t, s, pageLane, "lane.event", "", "page-item-"+strconv.Itoa(i), "", "")
-	}
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/timeline?lane="+pageLane, assertion, "")
-	body = responseText(t, response)
-	if response.StatusCode != http.StatusOK || strings.Count(body, "page-item-") != 200 || !strings.Contains(body, "before_id=") {
-		t.Fatalf("first page did not have 200 rows: count=%d", strings.Count(body, "page-item-"))
-	}
-	beforeID := beforeIDFromBody(t, body)
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/timeline?lane="+pageLane+"&before_id="+beforeID, assertion, "")
-	body = responseText(t, response)
-	if strings.Count(body, "page-item-") != 1 {
-		t.Fatalf("cursor page count=%d", strings.Count(body, "page-item-"))
-	}
-
-	queueLane := uiLane(t, "queue")
-	active := createUITask(t, s, queueLane, "in progress title")
-	claimAndTransition(t, s, active, "in_progress", "started work")
-	decision := createUITask(t, s, queueLane, "decision title")
-	claimAndTransition(t, s, decision, "needs_decision", "choose a path")
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/queue", assertion, "")
-	body = responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, `id="shell-root"`) || !strings.Contains(body, "/ui/static/console/shell.js") {
-		t.Fatal("queue page did not mount the shell")
-	}
-	if strings.Contains(body, "in progress title") || strings.Contains(body, "decision title") {
-		t.Fatal("queue page leaked server data into the mount HTML")
-	}
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/board/tasks?lane="+queueLane, assertion, "")
-	body = responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, "in progress title") || !strings.Contains(body, "decision title") {
-		t.Fatal("board tasks API did not return the seeded queue tasks")
-	}
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/board/tasks/"+strconv.FormatInt(active.ID, 10), assertion, "")
-	body = responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, `"from":"backlog","to":"developing"`) {
-		t.Fatal("task detail API did not render ordered history")
-	}
-}
-
-func beforeIDFromBody(t *testing.T, body string) string {
-	t.Helper()
-	marker := "before_id="
-	index := strings.Index(body, marker)
-	if index < 0 {
-		t.Fatal("missing timeline cursor")
-	}
-	value := body[index+len(marker):]
-	for i, r := range value {
-		if r < '0' || r > '9' {
-			return value[:i]
-		}
-	}
-	return value
-}
-
-func TestUIDecisionInbox(t *testing.T) {
-	s := uiStore(t)
-	fixture := newUIJWTFixture(t)
-	h := newUITestServer(t, s, fixture, "", "", 0)
-	defer h.Close()
-	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	lane := uiLane(t, "lane-a")
-	question := strings.Repeat("q", 2048)
-	openTask := createUITask(t, s, lane, "open decision")
-	claimAndTransition(t, s, openTask, "needs_decision", question)
-	closedTask := createUITask(t, s, lane, "closed decision")
-	claimAndTransition(t, s, closedTask, "needs_decision", "closed question")
-	if _, err := s.TransitionTask(t.Context(), closedTask.ID, "claimed", "test-node", "resolved", nil, ""); err != nil {
-		t.Fatal(err)
-	}
-	openEscalation := seedRelay(t, s, lane, "job.escalate", "open-escalation-"+strconv.FormatInt(time.Now().UnixNano(), 10), "", "[decision-needed] open escalation", "")
-	closedJob := "closed-escalation-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	seedRelay(t, s, lane, "job.escalate", closedJob, "", "closed escalation", "")
-	seedRelay(t, s, lane, "job.joined", closedJob, "", "", "")
-	openLane := seedRelay(t, s, lane, "lane.event", "", "[decision-needed] decide this", "", "")
-	answeredLane := uiLane(t, "lane-b")
-	closedLane := seedRelay(t, s, answeredLane, "lane.event", "", "[decision-needed] already answered", "", "")
-	seedRelay(t, s, answeredLane, "lane.event", "", "[decision-answered] #"+strconv.FormatInt(closedLane.ID, 10)+": answer", "", "")
-	seedRelay(t, s, lane, "lane.event", "", "ordinary event", "", "")
-	response := uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/decisions/legacy", assertion, "")
-	body := responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, question) || strings.Contains(body, "closed question") {
-		t.Fatal("task decision inbox did not preserve only unresolved full question")
-	}
-	if !strings.Contains(body, openEscalation.JobID) || strings.Contains(body, "closed escalation") {
-		t.Fatal("escalation unresolved definition was not applied")
-	}
-	if !strings.Contains(body, openLane.Text) || strings.Contains(body, "already answered") || strings.Contains(body, "ordinary event") {
-		t.Fatal("lane event unresolved definition was not applied")
-	}
-}
-
 func TestUIFleetProxyAndTokenBoundary(t *testing.T) {
 	s := uiStore(t)
 	fixture := newUIJWTFixture(t)
 	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
 
 	unconfigured := newUITestServer(t, s, fixture, "", "", 0)
-	response := uiRequest(t, unconfigured.Client(), http.MethodGet, unconfigured.URL+"/ui/fleet", assertion, "")
-	page := responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(page, `id="shell-root"`) {
-		t.Fatal("unconfigured hub did not leave fleet page available")
-	}
 	apiResp := uiRequest(t, unconfigured.Client(), http.MethodGet, unconfigured.URL+"/ui/api/fleet", assertion, "")
 	apiBody := responseText(t, apiResp)
 	if apiResp.StatusCode != http.StatusOK || !strings.Contains(apiBody, `"upstream":"unconfigured"`) {
 		t.Fatalf("unconfigured fleet API=%q", apiBody)
 	}
-	for _, endpoint := range []string{"/ui/timeline", "/ui/queue", "/ui/decisions"} {
+	for _, endpoint := range []string{"/ui/queue", "/ui/decisions"} {
 		response := uiRequest(t, unconfigured.Client(), http.MethodGet, unconfigured.URL+endpoint, assertion, "")
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("%s status=%d with hub unset", endpoint, response.StatusCode)
@@ -529,27 +383,10 @@ func TestUIFleetProxyAndTokenBoundary(t *testing.T) {
 	hubValue := "hub-test-value"
 	h := newUITestServer(t, s, fixture, hub.URL, hubValue, 0)
 	defer h.Close()
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/fleet", assertion, "")
-	body := responseText(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, `id="shell-root"`) || !strings.Contains(body, "/ui/static/console/shell.js") {
-		t.Fatalf("normal fleet page failed: %q", body)
-	}
-	if strings.Contains(body, hubValue) {
-		t.Fatal("hub credential was rendered")
-	}
-	for key, values := range response.Header {
-		if strings.Contains(strings.Join(values, ","), hubValue) {
-			t.Fatalf("hub credential leaked in header %s", key)
-		}
-	}
 	apiResp = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/fleet", assertion, "")
 	apiBody = responseText(t, apiResp)
 	if apiResp.StatusCode != http.StatusOK || !strings.Contains(apiBody, `"machine_id":"host-a"`) || !strings.Contains(apiBody, `"pane_id":"pane-1"`) || strings.Contains(apiBody, hubValue) {
 		t.Fatalf("normal fleet API failed: %q", apiBody)
-	}
-	response = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/static/htmx.min.js", assertion, "")
-	if strings.Contains(responseText(t, response), hubValue) {
-		t.Fatal("hub credential leaked in static content")
 	}
 	mode = "fail"
 	apiResp = uiRequest(t, h.Client(), http.MethodGet, h.URL+"/ui/api/fleet", assertion, "")
@@ -564,10 +401,6 @@ func TestUIFleetProxyAndTokenBoundary(t *testing.T) {
 	apiBody = responseText(t, apiResp)
 	if apiResp.StatusCode != http.StatusOK || !strings.Contains(apiBody, `"upstream":"http_error"`) || strings.Contains(apiBody, `"state":"down"`) {
 		t.Fatalf("initial hub failure was not available without marking nodes down: %q", apiBody)
-	}
-	pageResp := uiRequest(t, freshFailure.Client(), http.MethodGet, freshFailure.URL+"/ui/fleet", assertion, "")
-	if pageResp.StatusCode != http.StatusOK || !strings.Contains(responseText(t, pageResp), `id="shell-root"`) {
-		t.Fatal("initial hub failure hid the fleet page")
 	}
 }
 
@@ -597,68 +430,5 @@ func TestUIFleetThresholdsAndNullableMemory(t *testing.T) {
 	}
 	if strings.Contains(body, `"state":"down"`) {
 		t.Fatal("nullable memory nodes were marked down")
-	}
-}
-
-func TestUIEvents(t *testing.T) {
-	s := uiStore(t)
-	fixture := newUIJWTFixture(t)
-	h := newUITestServer(t, s, fixture, "", "", 25*time.Millisecond)
-	defer h.Close()
-	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, h.URL+"/ui/events", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Cf-Access-Jwt-Assertion", assertion)
-	response, err := h.Client().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK || !strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
-		t.Fatalf("SSE status=%d content-type=%q", response.StatusCode, response.Header.Get("Content-Type"))
-	}
-	reader := bufio.NewReader(response.Body)
-	if line, _ := reader.ReadString('\n'); line != "retry: 5000\n" {
-		t.Fatalf("initial retry=%q", line)
-	}
-	if line, _ := reader.ReadString('\n'); line != "event: delta\n" {
-		t.Fatalf("initial event=%q", line)
-	}
-	if line, _ := reader.ReadString('\n'); !strings.Contains(line, "relay_max_id") || !strings.Contains(line, "task_event_max_id") {
-		t.Fatalf("initial data=%q", line)
-	}
-	if line, _ := reader.ReadString('\n'); line != "\n" {
-		t.Fatalf("initial terminator=%q", line)
-	}
-	noDelta := make(chan string, 1)
-	go func() {
-		line, _ := reader.ReadString('\n')
-		noDelta <- line
-	}()
-	select {
-	case line := <-noDelta:
-		t.Fatalf("unexpected delta without a change: %q", line)
-	case <-time.After(80 * time.Millisecond):
-	}
-	seedRelay(t, s, uiLane(t, "lane-a"), "lane.event", "", "SSE update", "", "")
-	select {
-	case line := <-noDelta:
-		if line != "event: delta\n" {
-			t.Fatalf("delta event=%q", line)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("did not receive an SSE delta after a relay event")
-	}
-}
-
-func TestUIStaticDoesNotUseExternalCDN(t *testing.T) {
-	b, err := os.ReadFile("../internal/ui/static/htmx.min.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(b) == 0 || bytes.Contains(b, []byte("https://")) {
-		t.Fatal("vendored htmx asset is missing or contains an external CDN reference")
 	}
 }
