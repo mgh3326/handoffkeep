@@ -120,18 +120,16 @@ observations, which still carry no host identity.
   `^[a-z0-9-]{1,32}$`, a node's `HUB_MACHINE_ID`). A client with a line may
   publish presence only for the hosts it lists; any other `host_id` returns
   403 `quota_host_forbidden`, after the `account_key` grant is checked. A
-  client with no line is still accepted, as before, and the server logs
-  `api.host_grants_missing` once per client per process. Several lines for
+  client with no line gets the same 403 for every host: no line means no
+  host, the same rule job writes follow (`docs/jobs.md` §Host grants). Several lines for
   one client add up. A malformed line (a bad id, an empty entry, a missing `=`) is logged as
   `api.host_grants_skipped` and skipped, never a startup error, but it fails
   closed: its client still counts as having a line, with only the hosts its
   good lines list, so a client whose only line is bad is refused every host
   until the line is fixed. A line with no client id, or for a client with no
-  token, is logged and dropped. Without a
-  line, a granted client is trusted for the whole account and may write any
-  host's row; the host's own next publish moves it forward again (a spoofed
-  `last_seen` can be at most the server clock). Enforcement for clients
-  without a line is a later change, once every client has one.
+  token, is logged and dropped; a client left with no usable line publishes
+  for no host. The host's own next publish moves its row forward again (a
+  spoofed `last_seen` can be at most the server clock).
 - `GET /v1/quota/presence` returns `{"records":[...],"truncated":false}`,
   newest `last_seen` first. `records` is always a list (`[]` when empty),
   never null. Optional `?host_id=` and `?account_key=` filters must be valid
