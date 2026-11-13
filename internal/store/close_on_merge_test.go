@@ -273,22 +273,6 @@ func TestAutoCloseKeepsTheDecisionGates(t *testing.T) {
 	}
 }
 
-// TestAutoCloseKeepsTheReceiptFence (PR #331 review round 4): a parent the
-// work-receipt fence protects is not auto-closed by its sub-task's merge.
-func TestAutoCloseKeepsTheReceiptFence(t *testing.T) {
-	s := wrkCIStore(t)
-	storeActivate(t, s, "job-a", "builder-a", 9001)
-	if _, err := s.pool.Exec(t.Context(), `INSERT INTO tasks(id,lane,parent_lane,title,kind,state,claimed_by,parent_id,created_by,created_at,updated_at,last_activity_at) VALUES(9003,'builder-a','director-1','fenced child','implement','reviewing','',9001,'test',now(),now(),now())`); err != nil {
-		t.Fatal(err)
-	}
-	if res := send(t, s, mergeEvent(9003, testPR(7101))); !res.Applied || res.State != StateMerged {
-		t.Fatalf("child merge %+v", res)
-	}
-	if got := stateOf(t, s, 9001).State; got != StateBacklog {
-		t.Fatalf("fenced parent auto-closed to %s", got)
-	}
-}
-
 // TestAutoCloseHoldsAParentOnItsOwnPieces (PR #351 review H1): the last
 // sub-task settling does not close a parent while one of the parent's own
 // implements changes is open, or is reverted and not relanded; the not-applied

@@ -19,7 +19,7 @@ Baseline: `handoffkeep@64942ff`, the commit this matrix was taken from.
 | --- | --- | --- |
 | Console write routes | 14: 7 JSON routes in `internal/ui/api.go`, 7 HTML form routes in `internal/ui/ui.go` | 14 (unchanged) |
 | MCP tool definitions | 22: 21 exposed on HTTP `/mcp`, 12 on stdio (the operator/meta tools are HTTP-only; `attachment_put_from_path` is stdio-only) | 31 exposed on HTTP `/mcp` and 12 on stdio (after hk 4437 removed `memory_get`, `memory_put` and `memory_list`), counted by listing the registered tools at hk 3683 and adding `fleet_capacity` (the earlier "25" was stale; `attachment_put` and the two direct-upload tools are in both counts) |
-| `/v1` write registrations | 81 method-scoped write registrations, plus three method-agnostic handlers that also accept writes: `/v1/checkpoints`, `/v1/documents/{key}`, `/v1/wrk/{path}` (the rows below cover the user-facing capabilities) | 81 (unchanged) |
+| `/v1` write registrations | 81 method-scoped write registrations, plus two method-agnostic handlers that also accept writes: `/v1/checkpoints`, `/v1/documents/{key}` (the rows below cover the user-facing capabilities) | 81 (unchanged) |
 
 Legend: **—** means the surface has no path for that capability. **ui.write** is
 the console's log line `ui.write email= action= target= event_id= result=`

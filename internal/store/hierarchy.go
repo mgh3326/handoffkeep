@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
 // Relation kinds. blocks and duplicate_of point from Src to Dst (Src blocks
@@ -348,9 +347,6 @@ func (s *Store) SetTaskParent(ctx context.Context, id int64, parent *int64, by s
 		}
 		return Task{}, false, err
 	}
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
-		return Task{}, false, err
-	}
 	same := (x.ParentID == nil && parent == nil) || (x.ParentID != nil && parent != nil && *x.ParentID == *parent)
 	if same {
 		return x, false, tx.Commit(ctx)
@@ -409,41 +405,21 @@ func (s *Store) afterStateChangeTx(ctx context.Context, tx pgx.Tx, x Task, from,
 	return nil
 }
 
-// closeGateTx is the gate an automatic close of x to state to passes (hk
-// 3294; the hygiene close of hk 3292 is to reuse it): it returns
-// why the close must wait for a person, or "". x waits while it is awaiting a
-// decision, while its decision request is open, while one of its own
-// implements changes is open or reverted and not relanded (pieceHoldTx, the
-// last-piece rule of a merge), or while the work-receipt fence refuses the
-// move.
-func (s *Store) closeGateTx(ctx context.Context, tx pgx.Tx, x Task, to string) (string, error) {
+// closeGateTx is the gate an automatic close of x passes (hk 3294; the
+// hygiene close of hk 3292 is to reuse it): it returns why the close must
+// wait for a person, or "". x waits while one of its own implements changes is
+// open or reverted and not relanded (pieceHoldTx, the last-piece rule of a
+// merge), while it is awaiting a decision, or while its decision request is
+// open.
+func (s *Store) closeGateTx(ctx context.Context, tx pgx.Tx, x Task) (string, error) {
 	if reason, err := pieceHoldTx(ctx, tx, x.ID, ""); err != nil || reason != "" {
 		return reason, err
 	}
-	return s.closeGate(ctx, x, to, func() (wrkrecords.Snapshot, error) { return loadWrkSnapshot(ctx, tx) })
-}
-
-// closeGate is closeGateTx with the work-record snapshot read through
-// snapshot, called only when the decision gates pass, so a caller checking
-// many tasks can read it once.
-func (s *Store) closeGate(ctx context.Context, x Task, to string, snapshot func() (wrkrecords.Snapshot, error)) (string, error) {
 	if x.AwaitingDecision {
 		return "parent is awaiting a decision", nil
 	}
 	if x.Refs.DecisionRequest != nil && x.Refs.DecisionRequest.Status == DecisionRequestOpen {
 		return "parent has an open decision request", nil
-	}
-	snap, err := snapshot()
-	if err != nil {
-		return "", err
-	}
-	actor, receipt := WrkPrincipal(ctx)
-	if err := snap.CheckLegacy(s.WrkEngine().Policy, actor, wrkrecords.LegacyIntent{TaskID: x.ID, CurrentJob: x.Refs.JobID, To: FenceTarget(to), Receipt: receipt}); err != nil {
-		switch wrkrecords.Code(err) {
-		case "scope_denied", "wrk_receipt_required":
-			return "parent needs a work receipt", nil
-		}
-		return "", err
 	}
 	return "", nil
 }
@@ -525,7 +501,7 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 		if deployed == completed {
 			to = StateDeployed
 		}
-		if gate, err := s.closeGateTx(ctx, tx, p, to); err != nil || gate != "" {
+		if gate, err := s.closeGateTx(ctx, tx, p); err != nil || gate != "" {
 			if err != nil {
 				return err
 			}
