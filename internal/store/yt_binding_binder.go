@@ -134,7 +134,7 @@ func (s *Store) ScanYTBindingCandidates(ctx context.Context, tenant string, limi
 				CASE WHEN EXISTS(SELECT 1 FROM yt_issue_intents WHERE task_id=$1)
 					OR EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$4 AND entity_kind='task' AND entity_id=$1::text
 						AND state NOT IN ('applied','rejected'))
-				THEN $3 + interval '1 hour' ELSE $3 END,
+				THEN $3::timestamptz + interval '1 hour' ELSE $3::timestamptz END,
 				$3
 			WHERE NOT EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=$1)
 			ON CONFLICT (task_id) DO NOTHING`, taskID, tenant, now, ytwrite.KindIssueCreate)
@@ -188,11 +188,11 @@ func (s *Store) RetryYTBindingIntent(ctx context.Context, taskID int64, state YT
 	_, err := s.pool.Exec(ctx, `UPDATE yt_binding_intents SET
 			state=$2, reason=$3, last_error=$4,
 			attempts=least(attempts+1, 8),
-			next_attempt_at=$5 + CASE least(attempts+1, 8)
+			next_attempt_at=$5::timestamptz + (CASE least(attempts+1, 8)
 				WHEN 1 THEN interval '1 hour'
 				WHEN 2 THEN interval '6 hours'
 				WHEN 3 THEN interval '24 hours'
-				ELSE interval '7 days' END,
+				ELSE interval '7 days' END),
 			recorded_at=$5
 		WHERE task_id=$1 AND state IN ('pending','refused','error')`,
 		taskID, string(state), clipText(reason, 200), clipText(detail, 2000), now.UTC())
@@ -205,7 +205,7 @@ func (s *Store) ExcludeYTBindingIntent(ctx context.Context, taskID int64, reason
 	if taskID < 1 {
 		return errors.New("invalid binding intent task")
 	}
-	_, err := s.pool.Exec(ctx, `UPDATE yt_binding_intents SET state='excluded', reason=$2, last_error='', next_attempt_at=$3, recorded_at=$3
+	_, err := s.pool.Exec(ctx, `UPDATE yt_binding_intents SET state='excluded', reason=$2, last_error='', next_attempt_at=$3::timestamptz, recorded_at=$3::timestamptz
 		WHERE task_id=$1 AND state <> 'excluded'`, taskID, clipText(reason, 200), now.UTC())
 	return err
 }
