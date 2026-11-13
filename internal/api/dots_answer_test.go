@@ -35,6 +35,7 @@ func TestDotsAnswerAPI(t *testing.T) {
 	started, err := st.ReplyDots(t.Context(), "dots", "chatgpt", store.DotsReplyInput{
 		TaskID:            task.ID,
 		Kind:              "START",
+		Body:              "Starting",
 		ExpectedUpdatedAt: &task.UpdatedAt,
 		IdempotencyKey:    "start",
 	})

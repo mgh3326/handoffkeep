@@ -504,7 +504,7 @@ func TestAnswerDotsQuestion(t *testing.T) {
 	}
 
 	// 7. Non-dots request task is refused
-	plainTask, err := s.CreateTask(ctx, Task{Lane: "dev", Title: "Plain task", Kind: "implement", CreatedBy: "tester"})
+	plainTask, err := s.CreateTask(ctx, Task{Lane: "dev", Title: "Plain task", Kind: "implement", CreatedBy: "tester", Project: projectPtr(testProjectName)})
 	if err != nil {
 		t.Fatal(err)
 	}
