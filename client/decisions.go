@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// DecisionAskInput is a structured decision request put to the operator. It
-// is the body of both AskDecision and RecordDecisionRequest.
+// DecisionAskInput is a structured decision request put to the operator, the
+// body of RecordDecisionRequest.
 type DecisionAskInput struct {
 	Question       string          `json:"question"`
 	Options        DecisionOptions `json:"options"`
@@ -42,29 +42,6 @@ type DecisionOption struct {
 	Recommended bool   `json:"recommended,omitempty"`
 }
 
-// DecisionAskResult is the answer to AskDecision. Request.ID is the request's
-// id and DecisionRef its structured reference: look the decision up by them,
-// not by question text.
-type DecisionAskResult struct {
-	Task        Task            `json:"task"`
-	Request     DecisionRequest `json:"request"`
-	DecisionRef string          `json:"decision_ref"`
-	Ver         string          `json:"ver"`
-	// Duplicate is true when an identical open request already existed.
-	Duplicate    bool `json:"duplicate"`
-	IssueCreated bool `json:"issue_created"`
-}
-
-// AskDecision records a decision request on task taskID and opens its Linear
-// issue (the hk CLI's `decisions ask --linear`). When hk runs without Linear
-// decisions it fails with a 503 linear_decisions_disabled HTTPError. A
-// service that must not open an issue uses RecordDecisionRequest.
-func (c Client) AskDecision(ctx context.Context, taskID int64, in DecisionAskInput) (DecisionAskResult, error) {
-	var out DecisionAskResult
-	err := c.transport().Call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/decision-request/ask", taskID), in, &out)
-	return out, err
-}
-
 // DecisionRequestResult is the answer to RecordDecisionRequest. Request.ID is
 // the request's id: look the decision up by it, not by question text.
 type DecisionRequestResult struct {
@@ -75,10 +52,8 @@ type DecisionRequestResult struct {
 	Duplicate bool `json:"duplicate"`
 }
 
-// RecordDecisionRequest records a decision request on task taskID and nothing
-// else: it opens no Linear issue (the hk CLI's `decisions ask` without
-// --linear). Services that must not open issues, such as mergewake's deploy
-// approval, use it instead of AskDecision.
+// RecordDecisionRequest records a decision request on task taskID (the hk
+// CLI's `decisions ask`).
 func (c Client) RecordDecisionRequest(ctx context.Context, taskID int64, in DecisionAskInput) (DecisionRequestResult, error) {
 	var out DecisionRequestResult
 	err := c.transport().Call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/decision-request", taskID), in, &out)

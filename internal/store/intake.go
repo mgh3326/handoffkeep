@@ -16,7 +16,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
-// Triage intake and ticket sets (docs/linear-internalize.md, "Triage intake"
+// Triage intake and ticket sets (git show 1e3d2fa8:docs/linear-internalize.md, "Triage intake"
 // and "Ticket sets"). Integrations and repo sessions put work into triage
 // idempotently on (source, source_ref); the desk accepts or declines it
 // through the triage gate in transitionTask.

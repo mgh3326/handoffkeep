@@ -371,9 +371,6 @@ func (s *Store) SetTaskParent(ctx context.Context, id int64, parent *int64, by s
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: TaskEventParent, From: x.State, To: x.State, By: by, At: now, Refs: x.Refs, Into: &x, Field: "parent_id", FromValue: from, ToValue: to}); err != nil {
 		return Task{}, false, err
 	}
-	if err := s.recordLinearBoardTaskTx(ctx, tx, x, ""); err != nil {
-		return Task{}, false, err
-	}
 	return x, true, tx.Commit(ctx)
 }
 
@@ -598,14 +595,6 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 			Note:   fmt.Sprintf("every sub-task is settled; closed by #%d", child.ID),
 			Source: "hk.auto_close", SourceRef: ref, Auto: true,
 		}); err != nil {
-			return err
-		}
-		if s.LinearSyncEnabled() && p.Refs.Linear != nil && p.Refs.Linear.Sync {
-			if err = enqueueLinearTaskTransition(ctx, tx, p, ""); err != nil {
-				return err
-			}
-		}
-		if err = s.recordLinearBoardTaskTx(ctx, tx, p, ""); err != nil {
 			return err
 		}
 		// Rule 8 (a deploy record lists the PR) is not applied here. A close to
