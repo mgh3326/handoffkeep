@@ -14,7 +14,7 @@ import (
 )
 
 // stateSeed is one row of the migration map ("Migrating existing states" in
-// docs/linear-internalize.md): a legacy task, what surrounds it, and what the
+// git show 1e3d2fa8:docs/linear-internalize.md): a legacy task, what surrounds it, and what the
 // migration must make of it.
 type stateSeed struct {
 	name      string

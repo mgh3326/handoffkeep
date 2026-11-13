@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Event sources (docs/linear-internalize.md, "Event-driven transitions").
+// Event sources (git show 1e3d2fa8:docs/linear-internalize.md, "Event-driven transitions").
 const (
 	SourcePanewireJob     = "panewire.job"
 	SourceMergewakePR     = "mergewake.pr"
@@ -607,17 +607,9 @@ func joinNote(a, b string) string {
 }
 
 // afterSourceMoveTx runs what every state change runs after an automatic
-// move: the hierarchy rules and the Linear records.
+// move: the hierarchy rules.
 func (s *Store) afterSourceMoveTx(ctx context.Context, tx pgx.Tx, x Task, from, by string, now time.Time) error {
-	if err := s.afterStateChangeTx(ctx, tx, x, from, by, now); err != nil {
-		return err
-	}
-	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
-		if err := enqueueLinearTaskTransition(ctx, tx, x, ""); err != nil {
-			return err
-		}
-	}
-	return s.recordLinearBoardTaskTx(ctx, tx, x, "")
+	return s.afterStateChangeTx(ctx, tx, x, from, by, now)
 }
 
 // deployRef is the source_ref of an hk.deploy event: the record key and the

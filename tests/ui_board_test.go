@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 	"github.com/mgh3326/handoffkeep/internal/ui"
@@ -308,9 +307,6 @@ func TestUIBoardTaskDetail(t *testing.T) {
 			Seconds int64  `json:"seconds"`
 			Open    bool   `json:"open"`
 		} `json:"dwell"`
-		Linear *struct {
-			Identifier string `json:"identifier"`
-		} `json:"linear"`
 		Participants struct {
 			TaskRef   string `json:"task_ref"`
 			Coverage  string `json:"coverage"`
@@ -343,9 +339,6 @@ func TestUIBoardTaskDetail(t *testing.T) {
 	}
 	if open != 1 {
 		t.Fatalf("dwell missing open in_progress segment: %+v", got.Dwell)
-	}
-	if got.Linear != nil {
-		t.Fatalf("unexpected linear: %+v", got.Linear)
 	}
 	if got.Participants.TaskRef != "hk:task/"+strconv.FormatInt(task.ID, 10) || got.Participants.Coverage != "not_collected" || len(got.Participants.Segments) != 0 {
 		t.Fatalf("participants=%+v", got.Participants)
@@ -389,18 +382,13 @@ func TestUIBoardTaskDetail(t *testing.T) {
 		t.Fatalf("participant segments wrong: reps=%d impl=%t unknown=%t %+v", totalReps, implSeen, unknownSeen, p.Segments)
 	}
 
-	// Linear issue projection is included only when the join row exists.
-	db, err := pgx.Connect(t.Context(), testdb.URL(t))
-	if err != nil {
-		t.Fatal(err)
+	// The retired Linear identifier is no longer part of the detail (hk 4425).
+	var raw map[string]any
+	if status := boardJSON(t, h.Client(), url, assertion, &raw); status != http.StatusOK {
+		t.Fatalf("detail status=%d", status)
 	}
-	defer db.Close(t.Context())
-	if _, err := db.Exec(t.Context(), `INSERT INTO linear_issues(task_id,issue_id,identifier,created_at,updated_at) VALUES($1,'issue-1','ROB-99',now(),now())`, task.ID); err != nil {
-		t.Fatal(err)
-	}
-	got = detail{}
-	if status := boardJSON(t, h.Client(), url, assertion, &got); status != http.StatusOK || got.Linear == nil || got.Linear.Identifier != "ROB-99" {
-		t.Fatalf("linear status=%d linear=%+v", status, got.Linear)
+	if _, has := raw["linear"]; has {
+		t.Fatalf("detail still carries linear: %v", raw["linear"])
 	}
 
 	for _, path := range []string{"/ui/api/board/tasks/abc", "/ui/api/board/tasks/-1"} {

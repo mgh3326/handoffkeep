@@ -155,7 +155,8 @@ func (s *Store) ListOpenDecisionSources(ctx context.Context) (OpenDecisionSource
 	add(DecisionSourceChat, len(items), items)
 
 	// linear: an issue not superseded whose request is still the task's open
-	// one (AnswerLinearDecision answers nothing else).
+	// one. The retired Linear decision flow (hk 4425) wrote these rows; no
+	// new ones are made.
 	rows, err = s.pool.Query(ctx, `SELECT l.request_id,l.created_at,t.id,t.lane,t.state,COALESCE(t.refs->'decision_request'->>'question','')
 		FROM linear_decision_issues l JOIN tasks t ON t.id=l.task_id
 		WHERE l.superseded_by='' AND t.refs->'decision_request'->>'id'=l.request_id AND t.refs->'decision_request'->>'status'='open'

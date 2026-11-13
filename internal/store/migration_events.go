@@ -1,7 +1,7 @@
 package store
 
 // Version 34 lets task_events record a source event that changed nothing
-// (kind source_event, docs/linear-internalize.md rule 2): every mergewake,
+// (kind source_event, git show 1e3d2fa8:docs/linear-internalize.md rule 2): every mergewake,
 // deploy, job and sweep event is recorded, applied or not, and a row that
 // moved nothing must not read as a transition. The constraint is replaced
 // NOT VALID, so existing rows are not scanned; ALTER TABLE takes a brief
