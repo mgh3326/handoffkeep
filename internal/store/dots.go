@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -303,8 +304,10 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	var previous string
 	err = tx.QueryRow(ctx, `SELECT note FROM task_events WHERE task_id=$1 AND source='dots-hk-chatgpt' AND source_ref=$2`, in.TaskID, commentID).Scan(&previous)
 	if err == nil {
-		parts := strings.SplitN(previous, " ", 3)
-		if len(parts) != 3 {
+		// payload state document [skipped notify lanes]: the last field is
+		// absent on replies recorded before it was kept.
+		parts := strings.SplitN(previous, " ", 4)
+		if len(parts) < 3 {
 			return DotsReplyResult{}, errors.New("invalid recorded dots reply")
 		}
 		if parts[0] != payload {
@@ -316,7 +319,11 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 				return DotsReplyResult{}, err
 			}
 		}
-		return DotsReplyResult{TaskID: task.ID, State: parts[1], DocumentKey: parts[2], Duplicate: true, RunToken: replayToken}, nil
+		var skipped []string
+		if len(parts) == 4 {
+			skipped = dotsSkippedLanesFromNote(parts[3])
+		}
+		return DotsReplyResult{TaskID: task.ID, State: parts[1], DocumentKey: parts[2], Duplicate: true, RunToken: replayToken, InvalidNotifyLanes: skipped}, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return DotsReplyResult{}, err
@@ -399,7 +406,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	if err != nil {
 		return DotsReplyResult{}, err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: task.ID, Kind: "source_event", By: actor, Note: payload + " " + task.State + " " + docKey, At: now, Source: "dots-hk-chatgpt", SourceRef: commentID, Field: "dots_reply", FromValue: in.Kind, ToValue: strconv.FormatInt(commentRowID, 10)}); err != nil {
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: task.ID, Kind: "source_event", By: actor, Note: payload + " " + task.State + " " + docKey + dotsSkippedLanesNote(invalidLanes), At: now, Source: "dots-hk-chatgpt", SourceRef: commentID, Field: "dots_reply", FromValue: in.Kind, ToValue: strconv.FormatInt(commentRowID, 10)}); err != nil {
 		return DotsReplyResult{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -407,6 +414,30 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	}
 	logYTCommentEnqueued(reply, replyOp, replyEnqueued)
 	return DotsReplyResult{TaskID: task.ID, State: task.State, DocumentKey: docKey, RunToken: runToken, InvalidNotifyLanes: invalidLanes}, nil
+}
+
+// dotsSkippedLanesNote is the optional last field of a reply's event note: the
+// notify names a RESULT skipped, escaped so the field has no space.
+func dotsSkippedLanesNote(lanes []string) string {
+	if len(lanes) == 0 {
+		return ""
+	}
+	escaped := make([]string, len(lanes))
+	for i, lane := range lanes {
+		escaped[i] = url.PathEscape(lane)
+	}
+	return " " + strings.Join(escaped, ",")
+}
+
+// dotsSkippedLanesFromNote reads the field dotsSkippedLanesNote wrote.
+func dotsSkippedLanesFromNote(field string) []string {
+	var lanes []string
+	for _, part := range strings.Split(field, ",") {
+		if lane, err := url.PathUnescape(part); err == nil && lane != "" {
+			lanes = append(lanes, lane)
+		}
+	}
+	return lanes
 }
 
 // DotsAnswerInput carries the text answering a task's open dots question.
