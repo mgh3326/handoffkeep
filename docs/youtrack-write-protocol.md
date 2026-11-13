@@ -588,7 +588,11 @@ verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
   first comment op), mirror link and canary row alone, so a replacement that
   is a different issue is refused naming the source that disagrees
   (`yt_entity_map_task`, `task_origins`) until its owner reconciles it. A
-  later comment on an unbound task gets no op.
+  later comment on an unbound task gets no op. Run it only while every release
+  that can serve (a blue-green overlap, a rollback target) is this one or
+  later: an earlier release's issue ownership check does not read
+  `yt_binding_history`, so its project change would prepare an `issue_create`
+  for an unbound task that has no map row, mirror link or canary row.
 - Each YouTrack read has its own 15 s timeout and each task 60 s; there is no
   budget for the whole run. A task in class `error` makes either command exit
   1 after the report.
