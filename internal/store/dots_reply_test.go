@@ -156,29 +156,6 @@ func TestDotsStartConcurrentClaim(t *testing.T) {
 	}
 }
 
-func TestDotsRequestNeverEnqueuesLinearMirror(t *testing.T) {
-	s := schemaStore(t, "dots_single_channel")
-	s.EnableLinearBoard()
-	s.EnableLinearSync()
-	ctx := t.Context()
-	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	started, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "START", Body: "Starting", IdempotencyKey: "start", ExpectedUpdatedAt: &task.UpdatedAt})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "QUESTION", Body: "Which option?", AskOperator: true, IdempotencyKey: "question", RunToken: started.RunToken})
-	if err != nil {
-		t.Fatal(err)
-	}
-	outbox, err := s.ListLinearOutbox(ctx, task.ID)
-	if err != nil || len(outbox) != 0 {
-		t.Fatalf("linear outbox=%+v err=%v", outbox, err)
-	}
-}
-
 func TestDotsOperatorQuestionRollsBackAndRetries(t *testing.T) {
 	s := schemaStore(t, "dots_question")
 	ctx := t.Context()
@@ -240,49 +217,6 @@ func TestDotsOperatorQuestionRollsBackAndRetries(t *testing.T) {
 	results, err = s.ListDotsResults(ctx, task.ID, "", 10)
 	if err != nil || len(results) != 1 {
 		t.Fatalf("results=%v err=%v", results, err)
-	}
-}
-
-func TestDotsReplyMatchesLinearRecord(t *testing.T) {
-	s := schemaStore(t, "dots_compare")
-	ctx := t.Context()
-	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	issue := DotsIssue{Identifier: "ZZZ-1", Title: task.Title, URL: "https://linear.example/ZZZ-1", IssueUUID: "0a1b2c3d-0000-4000-8000-0000000000b1", Description: "hk-lane: requester"}
-	origin := validOrigin()
-	origin.ExternalID = issue.IssueUUID
-	if _, _, err := s.AddTaskOrigin(ctx, task.ID, "caller", origin); err != nil {
-		t.Fatal(err)
-	}
-	started, _ := startDotsRun(t, s, task.ID, "start")
-	comment := DotsComment{ID: "0a1b2c3d-1111-4111-8111-111111111111", CreatedAt: time.Now().UTC().Format(time.RFC3339), Body: "[dots] RESULT\nThe answer"}
-	linearKey, created, err := s.RecordDotsResult(ctx, "RESULT", issue, comment)
-	if err != nil || !created {
-		t.Fatalf("linear: key=%s created=%v err=%v", linearKey, created, err)
-	}
-	hk, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "RESULT", Body: "The answer", IdempotencyKey: "key", RunToken: started.RunToken})
-	if err != nil {
-		t.Fatal(err)
-	}
-	results, err := s.ListDotsResults(ctx, task.ID, "", 10)
-	if err != nil || len(results) != 2 {
-		t.Fatalf("results=%+v err=%v", results, err)
-	}
-	a, b := results[0], results[1]
-	if a.Source != "hk" || b.Source != "linear" || a.Kind != b.Kind || a.Verdict != b.Verdict || a.ArtefactSHA256 != b.ArtefactSHA256 || a.RoutedLane != b.RoutedLane {
-		t.Fatalf("hk=%+v linear=%+v", a, b)
-	}
-	for _, key := range []string{linearKey, hk.DocumentKey} {
-		doc, found, err := s.GetDocument(ctx, key)
-		if err != nil || !found || !strings.HasSuffix(doc.Body, "\n\n"+comment.Body+"\n") {
-			t.Fatalf("document=%+v found=%v err=%v", doc, found, err)
-		}
-	}
-	var count int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE target_lane='requester' AND kind=$1`, OutboxKindDotsReport).Scan(&count); err != nil || count != 2 {
-		t.Fatalf("notifications=%d err=%v", count, err)
 	}
 }
 
@@ -365,8 +299,9 @@ func TestDotsProgressRecordsPartialResult(t *testing.T) {
 	if err != nil || len(replies) != 2 || replies[1].Kind != "PROGRESS" {
 		t.Fatalf("replies=%+v err=%v", replies, err)
 	}
+	// PROGRESS is kept as a document and sends no lane event (operator decision 166).
 	var count int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE target_lane='requester' AND kind=$1`, OutboxKindDotsReport).Scan(&count); err != nil || count != 1 {
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE target_lane='requester'`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("notifications=%d err=%v", count, err)
 	}
 	if DotsKindRecorded("PROGRESS") {

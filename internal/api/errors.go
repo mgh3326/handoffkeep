@@ -15,7 +15,6 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/telemetry"
-	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -57,9 +56,8 @@ var errorRules = []errorRule{
 	{ytwrite.ErrConflictingResult, http.StatusConflict, "ytwrite_conflicting_result", false},
 	{store.ErrYTAuthorityRefused, http.StatusConflict, "yt_authority_refused", true},
 	{store.ErrYTCommentUnsendable, http.StatusBadRequest, "yt_comment_unsendable", true},
-	{store.ErrStandingNotNewer, http.StatusConflict, "standing_not_newer", false},
-	{store.ErrStandingConflict, http.StatusConflict, "standing_conflict", false},
 	{store.ErrInvalidSync, http.StatusBadRequest, "invalid_context", false},
+	{store.ErrDocPruneInvalid, http.StatusBadRequest, "invalid_doc_prune", true},
 	{store.ErrSpawnInvalid, http.StatusBadRequest, "invalid_context", true},
 	{attachments.ErrDisabled, http.StatusServiceUnavailable, "attachments_disabled", false},
 	{attachments.ErrTooLarge, http.StatusRequestEntityTooLarge, "attachment_too_large", false},
@@ -94,10 +92,6 @@ var errorRules = []errorRule{
 	{store.ErrProjectNotFound, http.StatusNotFound, "project_not_found", false},
 	{store.ErrMilestoneNotFound, http.StatusNotFound, "milestone_not_found", false},
 	{store.ErrMilestoneProject, http.StatusBadRequest, "milestone_project", false},
-	{store.ErrLabelNotFound, http.StatusNotFound, "label_not_found", false},
-	{store.ErrLabelParent, http.StatusBadRequest, "label_parent_invalid", false},
-	{store.ErrLabelCycle, http.StatusConflict, "label_cycle", false},
-	{store.ErrLabelRetired, http.StatusBadRequest, "label_retired", false},
 	{store.ErrTaskTerminal, http.StatusConflict, "task_terminal", false},
 	{store.ErrInvalidTaskPriority, http.StatusBadRequest, "invalid_task_priority", false},
 	{store.ErrDecisionRequestOpen, http.StatusConflict, "decision_request_open", false},
@@ -114,10 +108,7 @@ var errorRules = []errorRule{
 	{store.ErrBenchCatalogMonotonicity, http.StatusBadRequest, "bench_catalog_not_monotonic", false},
 	{store.ErrBenchCatalogScoredSolUnrated, http.StatusBadRequest, "bench_catalog_scored_sol_unrated", false},
 	{store.ErrDecisionRefRequired, http.StatusBadRequest, "decision_ref_required", false},
-	{store.ErrBenchAreaExceptionProfileUnknown, http.StatusBadRequest, "bench_area_exception_profile_unknown", false},
-	{store.ErrBenchAreaExceptionConflict, http.StatusConflict, "bench_area_exception_action_conflict", false},
 	{store.ErrBenchRepsRetryable, http.StatusServiceUnavailable, "bench_reps_retryable", false},
-	{store.ErrQueueEmpty, http.StatusNotFound, "queue_empty", false},
 	{store.ErrChatQuestionNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrChatMessageNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrChatQuestionConflict, http.StatusConflict, "chat_question_conflict", false},
@@ -139,7 +130,6 @@ var errorRules = []errorRule{
 	{store.ErrDecisionRecordNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrDecisionRecordNotOpen, http.StatusConflict, "decision_request_not_open", false},
 	{store.ErrLedgerAckBackward, http.StatusConflict, "ledger_ack_backward", true},
-	{store.ErrStatusUpdateInvalid, http.StatusBadRequest, "invalid_status_update", true},
 	{store.ErrChangeNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrChangeDependencyCycle, http.StatusConflict, "change_dependency_cycle", false},
 	{store.ErrVerificationExists, http.StatusConflict, "verification_exists", false},
@@ -159,11 +149,6 @@ var errorRules = []errorRule{
 // database or network, not the request) is logged and answered 500
 // internal_error. Anything else is a rejected request: 400 invalid_context.
 func appErr(w http.ResponseWriter, r *http.Request, e error) {
-	var wrkErr wrkrecords.Error
-	if errors.As(e, &wrkErr) {
-		writeError(w, wrkrecords.Status(wrkErr), wrkrecords.Code(wrkErr))
-		return
-	}
 	// These codes are the error's own text: fixed strings or store-built
 	// validator messages, never echoed input.
 	if errors.Is(e, attachments.ErrMIME) || errors.Is(e, attachments.ErrExtension) || errors.Is(e, store.ErrInvalidDecisionRequest) {
@@ -216,7 +201,7 @@ func appErr(w http.ResponseWriter, r *http.Request, e error) {
 func writeInternal(w http.ResponseWriter, r *http.Request, code string, e error) {
 	requestID := telemetry.RequestID(r.Context())
 	traceID := telemetry.TraceID(r.Context())
-	client, _ := store.WrkPrincipal(r.Context())
+	client := clientOf(r.Context())
 	log.Printf("api.internal_error request_id=%s trace_id=%s route=%q client=%q code=%s err=%q", requestID, traceID, r.Pattern, client, code, e.Error())
 	body := map[string]string{"error": code}
 	if requestID != "" {

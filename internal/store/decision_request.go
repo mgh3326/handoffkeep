@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -229,8 +230,9 @@ type DecisionResolution struct {
 	DecidedBy     string `json:"decided_by,omitempty"`
 
 	// Linear is the audit record of an answer given on the request's Linear
-	// issue. Every other path leaves it nil.
-	Linear *DecisionLinearAudit `json:"linear,omitempty"`
+	// issue before the connector was retired (hk 4425). Nothing writes it
+	// now; it is kept verbatim so a stored answer keeps its audit.
+	Linear json.RawMessage `json:"linear,omitempty"`
 }
 
 // DecisionRequestInput is the producer's request. Options carries the
@@ -681,9 +683,6 @@ func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID i
 		return DecisionRequestResult{}, err
 	}
 
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "needs_decision", false); err != nil {
-		return DecisionRequestResult{}, err
-	}
 	decisionBefore := decisionBeforeOf(x)
 	// Disposition items have their own closed options and operator route.
 	if x.Refs.Disposition != nil {
@@ -757,18 +756,10 @@ func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID i
 		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: taskID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: by, Note: request.Question, Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"}); err != nil {
 			return DecisionRequestResult{}, err
 		}
-		if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
-			if err = enqueueLinearTaskTransition(ctx, tx, x, request.Question); err != nil {
-				return DecisionRequestResult{}, err
-			}
-		}
 	} else if err = insertDecisionEvent(ctx, tx, &x, by, note, now); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, by, request.Question, 0, now); err != nil {
-		return DecisionRequestResult{}, err
-	}
-	if err = s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	return DecisionRequestResult{Task: x, Request: request}, nil

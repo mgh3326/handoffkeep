@@ -74,9 +74,6 @@ func (s *Store) SetTaskMilestone(ctx context.Context, id int64, milestone *int64
 		}
 		return Task{}, false, err
 	}
-	if err = s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
-		return Task{}, false, err
-	}
 	if milestone != nil {
 		var project string
 		if err = tx.QueryRow(ctx, `SELECT project FROM project_milestones WHERE id=$1`, *milestone).Scan(&project); err != nil {

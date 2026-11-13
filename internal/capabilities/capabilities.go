@@ -14,8 +14,6 @@ const ProtocolVersion = 1
 const (
 	FeatureClaimJobID         = "claim_job_id"
 	FeatureClaimNoJob         = "claim_no_job"
-	FeatureNextJobID          = "next_job_id"
-	FeatureNextNoJob          = "next_no_job"
 	FeatureTransitionNoJob    = "transition_no_job"
 	FeatureResolveNoJob       = "resolve_no_job"
 	FeatureDispositionProject = "disposition_project"
@@ -26,8 +24,6 @@ const (
 var Features = []string{
 	FeatureClaimJobID,
 	FeatureClaimNoJob,
-	FeatureNextJobID,
-	FeatureNextNoJob,
 	FeatureTransitionNoJob,
 	FeatureResolveNoJob,
 	FeatureDispositionProject,

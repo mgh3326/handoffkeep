@@ -218,15 +218,10 @@ func (h *Handler) relaneTask(w http.ResponseWriter, r *http.Request, identity cf
 	if note == "" {
 		note = "콘솔에서 레인 이동"
 	}
-	// PG is the execution value. The YouTrack export is queued after the
-	// write, so a YouTrack outage never blocks the move.
 	result, err := h.store.OperatorRelaneTask(r.Context(), id, input.Lane, apiIdentity(identity), note, input.EventKey, input.FromKey)
 	if err != nil {
 		outcome.result = lifecycleError(w, err)
 		return
-	}
-	if h.youTrack != nil && result.Changed {
-		h.youTrack.RecordLane(r.Context(), id, input.Lane)
 	}
 	relay := "none"
 	if result.Changed {
@@ -272,8 +267,6 @@ func (h *Handler) emitRelaneNotices(ctx context.Context, task store.Task, from, 
 // validation refusal is invalid_request; anything else is logged and 500.
 func lifecycleError(w http.ResponseWriter, err error) string {
 	switch {
-	case uiWrkError(w, err):
-		return "wrk_reject"
 	case errors.Is(err, store.ErrTaskNotFound):
 		writeJSONError(w, http.StatusNotFound, "not_found")
 	case errors.Is(err, store.ErrTaskMergePath):

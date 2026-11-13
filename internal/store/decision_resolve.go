@@ -48,6 +48,11 @@ const (
 	DecisionChannelAssistant = "assistant"
 	DecisionChannelConsole   = "console"
 	DecisionChannelSession   = "session"
+	// DecisionChannelMCP is an MCP decision_answer from a bearer caller;
+	// DecisionChannelDots is one from the chatgpt (dots) channel. They are the
+	// route the answer came through (20261113-decision-mcp-channel).
+	DecisionChannelMCP  = "mcp"
+	DecisionChannelDots = "dots"
 )
 
 // ResolveDecision results (R2). A result is the classification of one answer
@@ -120,6 +125,11 @@ type ResolveDecisionInput struct {
 	// under the task lock, before any attempt is written, so the refusal leaves
 	// no attempt row and cannot race a policy change.
 	RefuseOperatorOnly bool
+
+	// Audit, when set, is the MCP write this answer is: its audit row is written
+	// in the same transaction as the attempt, so the answer and its record
+	// commit together (mcp_write_audit, hk 3465).
+	Audit *MCPWrite
 
 	// The relayed claim (channels assistant and session only): the provenance
 	// it names, the operator's verbatim words and the request id they are
@@ -203,6 +213,9 @@ type decisionAttempt struct {
 	// The proposed answer, kept whatever the result so a pending or refused
 	// attempt can still be shown.
 	option, text, quote string
+	// audit is the MCP write behind the attempt, if any; its row is written
+	// with the attempt.
+	audit *MCPWrite
 }
 
 func insertDecisionAttempt(ctx context.Context, tx pgx.Tx, a decisionAttempt) (int64, error) {
@@ -211,7 +224,16 @@ func insertDecisionAttempt(ctx context.Context, tx pgx.Tx, a decisionAttempt) (i
 		VALUES($1,$2,$3,$4,NULLIF($5,''),$6,NULLIF($7,0),NULLIF($8,''),$9,$10,$11,NULLIF($12,0),NULLIF($13,''),NULLIF($14,''),NULLIF($15,''),NULLIF($16,'')) RETURNING id`,
 		a.channel, a.eventKey, a.hash, a.taskID, a.root, a.revisionRequestID, a.revision, a.provenance, a.actor, a.result, a.at, a.deniesAttemptID, a.receipt,
 		a.option, a.text, a.quote).Scan(&id)
-	return id, err
+	if err != nil {
+		return 0, err
+	}
+	if a.audit != nil {
+		result := map[string]any{"result": a.result, "attempt_id": id, "request_id": a.revisionRequestID}
+		if err := insertMCPWriteAuditTx(ctx, tx, *a.audit, a.taskID, result, a.at); err != nil {
+			return 0, err
+		}
+	}
+	return id, nil
 }
 
 // derivedProvenance is the provenance of an answer, from the verified channel
@@ -247,8 +269,7 @@ func decidedBy(in ResolveDecisionInput, prov *assistantProvenance) string {
 }
 
 // ResolveDecision classifies one answer to a dr- request and records it; see
-// the file comment. Validation failures, and a wrk fence refusal, return an
-// error and write nothing. An assistant judgement on a request whose
+// the file comment. Validation failures return an error and write nothing. An assistant judgement on a request whose
 // effective policy is operator_direct is refused: the attempt is recorded and
 // the error returned.
 func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (ResolveDecisionOutcome, error) {
@@ -257,9 +278,15 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	// and an operator session. Only the [via berry] note is assistant-only.
 	relayed := assistant || in.Channel == DecisionChannelSession
 	switch in.Channel {
-	case DecisionChannelCLI, DecisionChannelAssistant, DecisionChannelConsole, DecisionChannelSession:
+	case DecisionChannelCLI, DecisionChannelAssistant, DecisionChannelConsole, DecisionChannelSession,
+		DecisionChannelMCP, DecisionChannelDots:
 	default:
-		return ResolveDecisionOutcome{}, invalidDecisionRequest("channel must be cli, assistant, console or session")
+		return ResolveDecisionOutcome{}, invalidDecisionRequest("channel must be cli, assistant, console, session, mcp or dots")
+	}
+	if in.Audit != nil {
+		if err := in.Audit.validate(); err != nil {
+			return ResolveDecisionOutcome{}, err
+		}
 	}
 	if in.Verified && relayed {
 		return ResolveDecisionOutcome{}, invalidDecisionRequest("the " + in.Channel + " channel is never verified")
@@ -335,9 +362,6 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 		}
 		return ResolveDecisionOutcome{}, err
 	}
-	if err = s.wrkTaskFenceTx(ctx, tx, x, "claimed", false); err != nil {
-		return ResolveDecisionOutcome{}, err
-	}
 
 	// A replay answers what the first delivery got, even after a newer
 	// revision exists, so the key is looked up before any classification.
@@ -359,7 +383,7 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	now := time.Now().UTC()
 	attempt := decisionAttempt{
 		channel: in.Channel, eventKey: eventKey, hash: hash, taskID: x.ID, revisionRequestID: in.RequestID,
-		provenance: provenance, actor: in.Actor, at: now, option: in.Option, text: in.Text,
+		provenance: provenance, actor: in.Actor, at: now, option: in.Option, text: in.Text, audit: in.Audit,
 	}
 	if prov != nil {
 		// The attempt keeps the quote whatever the result, so it is checked
@@ -585,12 +609,6 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 		return ResolveDecisionOutcome{}, err
 	}
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, in.Actor, note, 0, now); err != nil {
-		return ResolveDecisionOutcome{}, err
-	}
-	if err = queueDecisionClosedPost(ctx, tx, resolved, x.Refs.DecisionOptions, now); err != nil {
-		return ResolveDecisionOutcome{}, err
-	}
-	if err = s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

@@ -30,7 +30,6 @@ func TestAppErrMapping(t *testing.T) {
 		body   map[string]string
 	}{
 		{"sentinel", store.ErrTaskNotFound, http.StatusNotFound, map[string]string{"error": "not_found"}},
-		{"wrapped sentinel", fmt.Errorf("claim: %w", store.ErrQueueEmpty), http.StatusNotFound, map[string]string{"error": "queue_empty"}},
 		{"sentinel with reason", fmt.Errorf("%w: claimed by another job", store.ErrTaskConflict), http.StatusConflict, map[string]string{"error": "task_conflict", "reason": "claimed by another job"}},
 		{"YouTrack result conflict", ytwrite.ErrConflictingResult, http.StatusConflict, map[string]string{"error": "ytwrite_conflicting_result"}},
 		{"store validation", errors.New("invalid bench rep"), http.StatusBadRequest, map[string]string{"error": "invalid_context"}},
@@ -72,7 +71,7 @@ func TestInternalErrorCarriesRequestID(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
-		*r = *r.WithContext(store.WithWrkPrincipal(r.Context(), "node-a", nil))
+		*r = *r.WithContext(withClient(r.Context(), "node-a"))
 		appErr(w, r, fmt.Errorf("query: %w", context.DeadlineExceeded))
 	})
 	w := httptest.NewRecorder()
@@ -118,7 +117,7 @@ func TestInternalErrorCarriesTraceID(t *testing.T) {
 			log.SetOutput(&logs)
 			t.Cleanup(func() { log.SetOutput(os.Stderr) })
 			r := httptest.NewRequest(http.MethodGet, "/v1/tasks/7", nil)
-			r = r.WithContext(store.WithWrkPrincipal(ctx, "node-a", nil))
+			r = r.WithContext(withClient(ctx, "node-a"))
 			w := httptest.NewRecorder()
 			appErr(w, r, fmt.Errorf("query: %w", context.DeadlineExceeded))
 			var body map[string]string

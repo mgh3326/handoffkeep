@@ -102,7 +102,6 @@ jobs:
       - run: go mod tidy -diff
       - name: go test (no race, no PostgreSQL)
         run: go test -timeout 10m ./...
-      - run: python3 scripts/o3gen/test_gen.py
       # Scan only the history reachable from the commit under test (hk 3145).
       # fetch-depth 0 fetches every branch and ref, and off a pull request the
       # action runs `git log --all`, so an old false positive on one branch
@@ -183,6 +182,8 @@ jobs:
           ref: ${{ inputs.ref }}
       - run: python3 scripts/test-auto-tag.py
       - run: python3 scripts/test-repair-release.py
+      # hk-follow's gate and rollout decisions against fake APIs (hk 3509).
+      - run: bash deploy/hk-follow/test-hk-follow.sh
 
   pr-store-db:
     # Runs on every event, so it always reports a conclusion and can be a

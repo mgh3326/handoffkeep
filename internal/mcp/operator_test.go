@@ -210,7 +210,7 @@ func TestToolListAnnotations(t *testing.T) {
 	for _, tool := range result.Tools {
 		annotations[tool.Name] = tool.Annotations
 	}
-	for _, name := range []string{"task_search", "task_show", "task_get", "task_list", "task_comments", "task_events", "changes_since", "decisions_pending", "decisions_history", "projects_list", "task_states", "sync_status", "fleet_capacity"} {
+	for _, name := range []string{"task_search", "task_show", "task_get", "task_list", "task_comments", "task_events", "changes_since", "decisions_pending", "decisions_history", "projects_list", "task_states", "fleet_capacity"} {
 		a := annotations[name]
 		if a == nil || !a.ReadOnlyHint {
 			t.Errorf("%s is not marked read-only: %+v", name, a)
@@ -476,7 +476,8 @@ func TestAccessIdentityWritesRecordOperator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(attempts) != 1 || attempts[0].Channel != store.DecisionChannelConsole || attempts[0].Actor != operator || attempts[0].Provenance != store.DecisionProvenanceOperatorDirect {
+	// The chatgpt channel records its answers as dots, not as the console.
+	if len(attempts) != 1 || attempts[0].Channel != store.DecisionChannelDots || attempts[0].Actor != operator || attempts[0].Provenance != store.DecisionProvenanceOperatorDirect {
 		t.Fatalf("attempts=%+v", attempts)
 	}
 

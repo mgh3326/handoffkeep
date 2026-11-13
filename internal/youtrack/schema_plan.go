@@ -630,3 +630,7 @@ func (r *SchemaRunner) Apply(ctx context.Context, plan Plan) (int, error) {
 	}
 	return applied, nil
 }
+
+// defaultHKProject is the hk project a task or document without one is filed
+// under when the schema is planned.
+const defaultHKProject = "other"

@@ -9,7 +9,7 @@ import (
 )
 
 // TestStateCategoriesAreTheDesignTable pins the derived category of each of
-// the eleven states to docs/linear-internalize.md "State model".
+// the eleven states to git show 1e3d2fa8:docs/linear-internalize.md "State model".
 func TestStateCategoriesAreTheDesignTable(t *testing.T) {
 	want := map[string]string{
 		"triage": "triage", "backlog": "backlog", "unstarted": "unstarted",
@@ -145,26 +145,6 @@ func TestOldNamesParseAsFilters(t *testing.T) {
 	}
 }
 
-// TestLinearMappingCoversEveryState keeps the Linear table total over the
-// eleven states, with the design's terminal set.
-func TestLinearMappingCoversEveryState(t *testing.T) {
-	terminal := map[string]bool{"merged": true, "deployed": true, "completed": true, "dropped": true, "duplicate": true, "icebox": true}
-	names := map[string]string{
-		"triage": "Backlog", "backlog": "Backlog", "unstarted": "Backlog",
-		"researching": "In Progress", "developing": "In Progress", "reviewing": "In Review",
-		"merged": "Done", "deployed": "Done", "completed": "Done", "dropped": "Canceled", "duplicate": "Canceled", "icebox": "Canceled",
-	}
-	for _, state := range TaskStates() {
-		m, ok := LinearTaskStateMapping[state]
-		if !ok || !m.Mutate || m.Name != names[state] || m.Terminal != terminal[state] {
-			t.Errorf("LinearTaskStateMapping[%q]=%+v ok=%t", state, m, ok)
-		}
-	}
-	if len(LinearTaskStateMapping) != len(TaskStates()) {
-		t.Errorf("mapping has %d entries for %d states", len(LinearTaskStateMapping), len(TaskStates()))
-	}
-}
-
 // TestTaskStateMachineReturnsDetachedClosureTypes keeps the exported read
 // model from aliasing the enforcement table: a caller mutating the returned
 // rule must not change what applyLifecycle accepts.
@@ -185,22 +165,6 @@ func TestTaskStateMachineReturnsDetachedClosureTypes(t *testing.T) {
 	x := Task{}
 	if err := applyLifecycle(&x, StateReviewing, StateMerged, time.Now().UTC(), &TaskClosure{Type: "resolved", Evidence: "https://example.com/r"}); err != nil {
 		t.Fatalf("enforcement refused resolved after the read model was mutated: %v", err)
-	}
-}
-
-func TestRollbackScriptVersion(t *testing.T) {
-	b, err := readRepoFile("scripts/rollback-state-migration.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := "schema_version: " + itoaForTest(stateMigrationVersion); !contains(string(b), want) {
-		t.Errorf("rollback script does not carry %q", want)
-	}
-	if want := "DELETE FROM schema_version WHERE version = " + itoaForTest(stateMigrationVersion) + ";"; !contains(string(b), want) {
-		t.Errorf("rollback script does not delete schema version %d", stateMigrationVersion)
-	}
-	if SchemaVersion < stateMigrationVersion {
-		t.Errorf("SchemaVersion=%d is below the state migration %d", SchemaVersion, stateMigrationVersion)
 	}
 }
 

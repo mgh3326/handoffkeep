@@ -58,10 +58,6 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/fleet":
 		h.fleetAPI(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/live":
-		h.liveAPI(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/reap":
-		h.reapAPI(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/glance":
 		h.glance(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/projects":
@@ -82,10 +78,6 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 		h.boardTaskAttachments(w, r, id)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ui/api/board/tasks/"):
 		h.boardTaskDetail(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/search":
-		h.search(w, r, identity)
-	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/policy/active":
-		h.policyActive(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/doc":
 		// Documents are operator reading material: a service principal has no
 		// /ui/doc access, and this JSON view must not widen that.
@@ -100,36 +92,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 			return
 		}
 		h.boardDocumentAttachments(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/docs":
-		// The browse listing is the same operator-only reading material as
-		// /ui/api/board/doc.
-		if identity.ServiceName != "" {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		h.docsList(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/docs/prefixes":
-		if identity.ServiceName != "" {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		h.docsPrefixes(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/dashboard":
-		// The home dashboard aggregates task titles and quota state for the
-		// operator's browser; service principals have no page that reads it.
-		if identity.ServiceName != "" {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		h.dashboardAPI(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/bench/catalog":
-		// The grade catalog is the same operator-only reading material as
-		// /ui/api/board/doc — provenance fields are not for service tokens.
-		if identity.ServiceName != "" {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		h.benchCatalog(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/dispositions":
+		h.dispositionsAPI(w, r, identity)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/deploy-pending":
 		// Deploy status is assembled from deploy-record documents and task
 		// events — the same operator-only reading material as /ui/api/board/doc.
@@ -206,7 +170,6 @@ func (h *Handler) glance(w http.ResponseWriter, r *http.Request) {
 		ConsolePaths: map[string]string{
 			"decisions": "/ui/decisions",
 			"queue":     "/ui/queue",
-			"fleet":     "/ui/fleet",
 		},
 	}
 

@@ -50,7 +50,6 @@ var taskFieldSources = map[string]string{
 	"lane":             "hk",
 	"project":          "hk",
 	"area":             "hk",
-	"labels":           "hk",
 	"claimed_by":       "hk",
 	"created_by":       "hk",
 	"refs":             "hk",
@@ -460,7 +459,6 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 		"lane":             summary.Lane,
 		"project":          summary.Project,
 		"area":             task.Area,
-		"labels":           task.Labels,
 		"claimed_by":       task.ClaimedBy,
 		"created_by":       task.CreatedBy,
 		"refs":             task.Refs,
@@ -530,7 +528,7 @@ func httpsOrNil(value string) *string {
 }
 
 // externalLinksOf lists the task's links to pull requests, reports, documents,
-// the legacy Linear mirror and YouTrack, in a fixed order.
+// and YouTrack, in a fixed order.
 func externalLinksOf(task store.Task, mirror store.YouTrackMirror, mirrored bool) []externalLinkView {
 	links := []externalLinkView{}
 	add := func(kind, source, ref string) {
@@ -543,9 +541,6 @@ func externalLinksOf(task store.Task, mirror store.YouTrackMirror, mirrored bool
 	add("revert_pr", "hk", task.Refs.RevertPR)
 	add("report", "hk", task.Refs.ReportPath)
 	add("document", "hk", task.BodyDoc)
-	if task.Refs.Linear != nil {
-		add("linear", "hk", task.Refs.Linear.Identifier)
-	}
 	if mirrored && mirror.DisplayRef != "" {
 		links = append(links, externalLinkView{Kind: "youtrack", Source: "youtrack", Ref: mirror.DisplayRef, URL: httpsOrNil(mirror.URL)})
 	}

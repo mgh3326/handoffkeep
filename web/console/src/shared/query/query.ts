@@ -386,9 +386,19 @@ export function taskMatchesQuery(task: BoardTask, filters: QueryFilters): boolea
   if (filters.priority === "0") {
     if (task.priority !== 0) return false;
   } else if (filters.priority && task.priority < Number(filters.priority)) return false;
-  if (filters.grade && task.refs.linear?.grade !== filters.grade) return false;
-  if (filters.tier && task.refs.linear?.tier !== filters.tier) return false;
+  if (filters.grade && taskGrade(task) !== filters.grade) return false;
+  if (filters.tier && taskTier(task) !== filters.tier) return false;
   return true;
+}
+
+/** The task's grade: refs.grade, else the legacy refs.linear copy (hk 4425). */
+export function taskGrade(task: BoardTask): string {
+  return task.refs.grade || task.refs.linear?.grade || "";
+}
+
+/** The task's tier: refs.tier, else the legacy refs.linear copy (hk 4425). */
+export function taskTier(task: BoardTask): string {
+  return task.refs.tier || task.refs.linear?.tier || "";
 }
 
 function stateOrder(state: string): number {

@@ -18,10 +18,11 @@ import (
 // keyed write replays its first result when the same key comes back.
 
 const (
-	toolTaskUpdate  = "task_update"
-	toolDecisionAsk = "decision_ask"
-	toolTaskComment = "task_comment"
-	toolTaskIntake  = "task_intake"
+	toolTaskUpdate     = "task_update"
+	toolDecisionAsk    = "decision_ask"
+	toolDecisionAnswer = "decision_answer"
+	toolTaskComment    = "task_comment"
+	toolTaskIntake     = "task_intake"
 )
 
 // writeAuthor is the author label a write records. The ChatGPT channel is dots,
@@ -52,15 +53,13 @@ func intakeSourceRef(actor, key string) string {
 }
 
 type taskUpdateInput struct {
-	ID                int64    `json:"id"`
-	ExpectedUpdatedAt string   `json:"expected_updated_at"`
-	IdempotencyKey    string   `json:"idempotency_key"`
-	State             string   `json:"state,omitempty"`
-	Lane              string   `json:"lane,omitempty"`
-	Priority          *int     `json:"priority,omitempty"`
-	AddLabels         []string `json:"add_labels,omitempty"`
-	RemoveLabels      []string `json:"remove_labels,omitempty"`
-	Note              string   `json:"note,omitempty"`
+	ID                int64  `json:"id"`
+	ExpectedUpdatedAt string `json:"expected_updated_at"`
+	IdempotencyKey    string `json:"idempotency_key"`
+	State             string `json:"state,omitempty"`
+	Lane              string `json:"lane,omitempty"`
+	Priority          *int   `json:"priority,omitempty"`
+	Note              string `json:"note,omitempty"`
 }
 
 // taskUpdate changes a task's state, lane or priority. expected_updated_at is
@@ -85,8 +84,8 @@ func (o operatorTools) taskUpdate(ctx context.Context, _ *gmcp.CallToolRequest, 
 	}
 	result, err := o.service.Store.UpdateTask(ctx, in.ID, store.TaskUpdateInput{
 		ExpectedUpdatedAt: expected, State: strings.TrimSpace(in.State), Lane: strings.TrimSpace(in.Lane),
-		Priority: in.Priority, AddLabels: trimNames(in.AddLabels), RemoveLabels: trimNames(in.RemoveLabels),
-		Note: in.Note,
+		Priority: in.Priority,
+		Note:     in.Note,
 	}, write)
 	if err != nil {
 		return nil, nil, err
@@ -110,16 +109,6 @@ func (o operatorTools) taskUpdate(ctx context.Context, _ *gmcp.CallToolRequest, 
 		"youtrack_sync": youTrackSyncStatus(mirrored, len(result.Changed)),
 	}
 	return jsonResult(out)
-}
-
-// trimNames trims each label name the caller sent, so " dots " and "dots" name
-// one label.
-func trimNames(names []string) []string {
-	out := make([]string, 0, len(names))
-	for _, name := range names {
-		out = append(out, strings.TrimSpace(name))
-	}
-	return out
 }
 
 // youTrackSyncStatus names the YouTrack state of a write: applied when there is

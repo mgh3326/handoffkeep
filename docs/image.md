@@ -46,12 +46,7 @@ Optional server configuration:
   `HANDOFFKEEP_UI_LANES`, `HANDOFFKEEP_UI_ADMIRAL_LANES`,
   `HANDOFFKEEP_UI_DIRECTOR_LANES`
 - Hub proxy: `HANDOFFKEEP_HUB_URL`, `HANDOFFKEEP_HUB_TOKEN`
-- Linear webhook (all-or-none, see [linear-webhook.md](linear-webhook.md)):
-  `HANDOFFKEEP_LINEAR_WEBHOOK_SECRET`, `HANDOFFKEEP_LINEAR_API_KEY`
-- Operator decisions through Linear (see
-  [linear-decisions.md](linear-decisions.md)):
-  `HANDOFFKEEP_LINEAR_OPERATOR_USER_ID`, `HANDOFFKEEP_LINEAR_DECISION_TEAM`,
-  `HANDOFFKEEP_LINEAR_DECISION_STATES`,
+- Decision notices in Discord (see [decision-discord.md](decision-discord.md)):
   `HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL`
 - Outbox forwarding to the hub: `HANDOFFKEEP_NOTIFICATION_FORWARD=on`, with the
   hub proxy variables above
@@ -61,8 +56,7 @@ Optional server configuration:
   `HK_ATTACH_MAX_BYTES`, `HK_ATTACH_STORAGE_CAP_BYTES`,
   `HK_ATTACH_MONTHLY_PUT_CAP`, `HK_ATTACH_MONTHLY_GET_CAP`,
   `HK_ATTACH_MIME_ALLOW`
-- `r2usage`: `CF_API_TOKEN`, `CF_ACCOUNT_ID`; alert webhook:
-  `HK_ALERT_DISCORD_WEBHOOK`
+- alert webhook (removed with `r2usage`): `HK_ALERT_DISCORD_WEBHOOK`
 
 Client subcommands (`mcp`, `ctx`, `doc`, `tasks`, …) use `HANDOFFKEEP_URL` and
 `HANDOFFKEEP_TOKEN`. A Cloudflare Access service token for an hk URL behind

@@ -25,7 +25,6 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
-	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 	"github.com/mgh3326/handoffkeep/internal/youtrack"
 )
 
@@ -34,11 +33,8 @@ type Service struct {
 	Attachments *attachments.Manager
 	// Dots backs the /v1/dots/results routes; nil uses Store.
 	Dots DotsResultStore
-	// YouTrack is the legacy read-through service: it overlays the cached
-	// YouTrack priority and lane on linked tasks, answers YouTrack search, and
-	// queues lane changes for export to YouTrack (PG is written first). serve
-	// sets it only with HANDOFFKEEP_YT_READTHROUGH_MODE=on (docs/youtrack.md).
-	// Nil disables the feature; every other route behaves exactly as before.
+	// YouTrack answers /v1/search from YouTrack when SearchBackend is
+	// "youtrack". Nil disables it; every other route is unaffected.
 	YouTrack *youtrack.Service
 	// SearchBackend is "youtrack" to answer /v1/search from YouTrack, with
 	// PostgreSQL as the fallback; it takes effect only with YouTrack set.
@@ -50,14 +46,6 @@ type Service struct {
 type DotsResultStore interface {
 	ListDotsResults(ctx context.Context, taskID int64, issue string, limit int) ([]store.DotsResult, error)
 	SetDotsAdoption(ctx context.Context, id int64, by string, in store.DotsAdoptionInput) (store.DotsResult, bool, error)
-}
-
-// overlayTasks replaces priority and lane on linked tasks with the cached
-// YouTrack values. Unlinked tasks keep their hk columns unchanged.
-func (s Service) overlayTasks(ctx context.Context, tasks []store.Task) {
-	if s.YouTrack != nil {
-		s.YouTrack.Overlay(ctx, tasks)
-	}
 }
 
 func (s Service) dotsResults() DotsResultStore {
@@ -119,9 +107,6 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 
 	lane := ""
 	if input.Type == "task" {
-		if err := s.wrkTaskPrecheck(ctx, input.ID, "claimed", false); err != nil {
-			return store.RelayEvent{}, err
-		}
 		task, found, err := s.Store.GetTask(ctx, input.ID)
 		if err != nil {
 			return store.RelayEvent{}, err
@@ -214,23 +199,6 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 	return event, nil
 }
 
-func (s Service) Checkpoint(ctx context.Context, client string, x store.Checkpoint) (store.Checkpoint, error) {
-	x.CreatedBy = client
-	return s.Store.CreateCheckpoint(ctx, x)
-}
-func (s Service) Recent(ctx context.Context, session, kind string, limit int) ([]store.Checkpoint, error) {
-	return s.Store.RecentCheckpoints(ctx, session, kind, limit)
-}
-func (s Service) PutMemory(ctx context.Context, client string, x store.Memory) (store.Memory, error) {
-	x.UpdatedBy = client
-	return s.Store.PutMemory(ctx, x)
-}
-func (s Service) GetMemory(ctx context.Context, agent, name string) (store.Memory, bool, error) {
-	return s.Store.GetMemory(ctx, agent, name)
-}
-func (s Service) ListMemory(ctx context.Context, agent string, content bool) ([]store.Memory, error) {
-	return s.Store.ListMemory(ctx, agent, content)
-}
 func (s Service) PutDocument(ctx context.Context, client string, x store.Document) (store.Document, bool, error) {
 	x.CreatedBy = client
 	return s.Store.PutDocument(ctx, x)
@@ -306,25 +274,13 @@ func (s Service) CreateTask(ctx context.Context, client string, x store.Task, ch
 	return s.Store.CreateTaskChecked(ctx, x, check)
 }
 func (s Service) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string) (store.Task, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return store.Task{}, err
-	}
 	return s.Store.ClaimTask(ctx, id, by, jobID, noJob)
 }
 
 func (s Service) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by, reason string) (store.Task, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return store.Task{}, err
-	}
 	return s.Store.RebindTaskJob(ctx, id, fromJob, toJob, by, reason)
 }
 
-func (s Service) NextTask(ctx context.Context, lane, by, jobID, noJob string) (store.Task, error) {
-	if err := s.Store.WrkFence(ctx, wrkrecords.LegacyIntent{JobID: jobID, Binding: true}); err != nil {
-		return store.Task{}, err
-	}
-	return s.Store.NextTask(ctx, lane, by, jobID, noJob)
-}
 func (s Service) CreateDisposition(ctx context.Context, client string, x store.DispositionInput) (store.Task, bool, error) {
 	x.CreatedBy = client
 	return s.Store.CreateDisposition(ctx, x)
@@ -333,19 +289,9 @@ func (s Service) DispositionSummary(ctx context.Context, asOf time.Time) (store.
 	return s.Store.DispositionSummary(ctx, asOf)
 }
 func (s Service) ApplyDisposition(ctx context.Context, id int64, client, note string) (store.Task, error) {
-	task, _, err := s.Store.GetTask(ctx, id)
-	if err != nil {
-		return store.Task{}, err
-	}
-	if err := s.wrkTaskPrecheck(ctx, id, store.DispositionTarget(task), false); err != nil {
-		return store.Task{}, err
-	}
 	return s.Store.ApplyDisposition(ctx, id, client, note)
 }
 func (s Service) ReopenTask(ctx context.Context, id int64, client, reason string) (store.Task, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "reopened", true); err != nil {
-		return store.Task{}, err
-	}
 	return s.Store.ReopenTask(ctx, id, client, reason)
 }
 func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note string, refs *store.TaskRefs, noJob string) (store.Task, error) {
@@ -355,55 +301,28 @@ func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note 
 // TransitionTaskWith is TransitionTask with the options a plain call cannot
 // carry, such as the duplicate_of target.
 func (s Service) TransitionTaskWith(ctx context.Context, id int64, client string, in store.TransitionInput) (store.Task, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, store.FenceTarget(in.To), in.Refs != nil); err != nil {
-		return store.Task{}, err
-	}
 	in.By = client
 	return s.Store.TransitionTaskWith(ctx, id, in)
 }
 
 // SetTaskParent sets or clears a task's parent.
 func (s Service) SetTaskParent(ctx context.Context, id int64, parent *int64, client string) (store.Task, bool, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return store.Task{}, false, err
-	}
 	return s.Store.SetTaskParent(ctx, id, parent, client)
 }
 
 // AddTaskRelation adds an edge from the task to another.
 func (s Service) AddTaskRelation(ctx context.Context, id int64, kind string, other int64, client string) (bool, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return false, err
-	}
 	return s.Store.AddTaskRelation(ctx, id, kind, other, client)
 }
 
 // RemoveTaskRelation archives an edge.
 func (s Service) RemoveTaskRelation(ctx context.Context, id int64, kind string, other int64, client string) (bool, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return false, err
-	}
 	return s.Store.RemoveTaskRelation(ctx, id, kind, other, client)
 }
 func (s Service) RelaneTask(ctx context.Context, id int64, to, client, note string, allowNewLane bool) (store.Task, bool, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return store.Task{}, false, err
-	}
-	// PG is the execution value. The YouTrack export is queued after the
-	// write, so a YouTrack outage never blocks the move.
-	task, changed, err := s.Store.RelaneTask(ctx, id, to, client, note, allowNewLane)
-	if err != nil {
-		return store.Task{}, false, err
-	}
-	if s.YouTrack != nil && changed {
-		s.YouTrack.RecordLane(ctx, id, to)
-	}
-	return task, changed, nil
+	return s.Store.RelaneTask(ctx, id, to, client, note, allowNewLane)
 }
 func (s Service) SetTaskProject(ctx context.Context, id int64, project, client, note string) (store.Task, bool, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return store.Task{}, false, err
-	}
 	return s.Store.SetTaskProject(ctx, id, project, client, note)
 }
 func (s Service) SetTaskArea(ctx context.Context, id int64, area *string, client, note string) (store.Task, bool, error) {
@@ -447,10 +366,6 @@ func (s Service) GetTask(ctx context.Context, id int64) (store.Task, bool, error
 	return s.Store.GetTask(ctx, id)
 }
 func (s Service) AppendRelayEvent(ctx context.Context, x store.RelayEvent) (store.RelayEvent, bool, error) {
-	if err := s.Store.WrkFence(ctx, wrkrecords.LegacyIntent{JobID: x.JobID, Kind: x.Kind, Head: x.Head, Digest: x.ReportSHA, Receipt: x.WrkReceipt}); err != nil {
-		return store.RelayEvent{}, false, err
-	}
-
 	return s.Store.AppendRelayEvent(ctx, x)
 }
 func (s Service) MarkRelayEventDelivered(ctx context.Context, id int64, machine, pane string) (store.RelayEvent, error) {
@@ -458,15 +373,6 @@ func (s Service) MarkRelayEventDelivered(ctx context.Context, id int64, machine,
 }
 func (s Service) ListRelayEvents(ctx context.Context, lane, kind string, undelivered bool, afterID int64, limit int) ([]store.RelayEvent, error) {
 	return s.Store.ListRelayEventsPage(ctx, lane, kind, undelivered, afterID, limit)
-}
-func (s Service) ListBenchScores(ctx context.Context, modelID, source string, limit int) ([]store.BenchScore, error) {
-	return s.Store.ListBenchScores(ctx, modelID, source, limit)
-}
-func (s Service) UpsertBenchScores(ctx context.Context, client string, xs []store.BenchScore) (int, error) {
-	for i := range xs {
-		xs[i].UpdatedBy = client
-	}
-	return s.Store.UpsertBenchScores(ctx, xs)
 }
 func (s Service) ListBenchReps(ctx context.Context, profile, grade, effort string, limit int) ([]store.BenchRep, error) {
 	return s.Store.ListBenchReps(ctx, profile, grade, effort, limit)
@@ -499,21 +405,6 @@ func (s Service) ListBenchCatalog(ctx context.Context, pool string, includeRetir
 func (s Service) UpsertBenchCatalog(ctx context.Context, xs []store.BenchCatalogEntry) (int, error) {
 	return s.Store.UpsertBenchCatalog(ctx, xs)
 }
-func (s Service) ListBenchAreaExceptions(ctx context.Context, area string, includeRetired bool) ([]store.BenchAreaException, error) {
-	return s.Store.ListBenchAreaExceptions(ctx, area, includeRetired)
-}
-
-// UpsertBenchAreaExceptions stamps decided_by with the authenticated client
-// and decided_at with the server clock — unlike the catalog's caller-carried
-// provenance, an exception row's writer is always the operator client.
-func (s Service) UpsertBenchAreaExceptions(ctx context.Context, client string, xs []store.BenchAreaException) (int, error) {
-	now := time.Now().UTC()
-	for i := range xs {
-		xs[i].DecidedBy = client
-		xs[i].DecidedAt = now
-	}
-	return s.Store.UpsertBenchAreaExceptions(ctx, xs)
-}
 
 type Tokens map[string]string
 
@@ -534,6 +425,7 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 	}
 	out := Tokens{}
 	grants := QuotaAccounts{}
+	var retiredImportGrants []string
 	for _, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -577,9 +469,12 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 		if strings.HasPrefix(k, hostGrantPrefix) {
 			continue
 		}
-		// Import grants are read by LoadImportReadGrants from the same
-		// auth file; they are not bearer-token lines.
-		if strings.HasPrefix(k, "HANDOFFKEEP_IMPORT_READONLY_") {
+		// Import read grants (HANDOFFKEEP_IMPORT_READONLY_*) were removed with
+		// the /v1/import feed. A grant still naming a live token would widen
+		// that token to every route, so it is checked once the tokens are
+		// known below; a grant for no live token is ignored.
+		if id, isGrant := strings.CutPrefix(k, "HANDOFFKEEP_IMPORT_READONLY_"); isGrant {
+			retiredImportGrants = append(retiredImportGrants, id)
 			continue
 		}
 		if !ok || v == "" {
@@ -607,6 +502,13 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 	if len(out) == 0 {
 		return nil, nil, errors.New("HANDOFFKEEP_AUTH_FILE contains no tokens")
 	}
+	// Refuse to start rather than silently turn an import-only client into a
+	// full bearer credential. The operator deletes the grant and the token.
+	for _, id := range retiredImportGrants {
+		if _, live := out[id]; live {
+			return nil, nil, fmt.Errorf("HANDOFFKEEP_IMPORT_READONLY_%s is retired (the /v1/import feed was removed): delete that line and revoke HANDOFFKEEP_TOKEN_%s; it would otherwise grant full access", id, id)
+		}
+	}
 	for id := range grants {
 		if _, ok := out[id]; !ok {
 			fmt.Fprintf(os.Stderr, "handoffkeep: ignoring HANDOFFKEEP_QUOTA_ grants for unknown client %q\n", id)
@@ -616,37 +518,6 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 	return out, grants, nil
 }
 
-// LoadImportReadGrants reads exact opt-in read-only YouTrack import grants.
-// A grant is HANDOFFKEEP_IMPORT_READONLY_<CLIENT>=true next to that client's
-// bearer token; it grants access only to /v1/import/*.
-func LoadImportReadGrants(path string, tokens Tokens) (map[string]bool, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	grants := map[string]bool{}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		id, found := strings.CutPrefix(k, "HANDOFFKEEP_IMPORT_READONLY_")
-		if !found {
-			continue
-		}
-		if !ok || v != "true" || id == "" {
-			fmt.Fprintf(os.Stderr, "handoffkeep: ignoring invalid import read grant for %q\n", id)
-			continue
-		}
-		if _, known := tokens[id]; !known {
-			fmt.Fprintf(os.Stderr, "handoffkeep: ignoring import read grant for unknown client %q\n", id)
-			continue
-		}
-		grants[id] = true
-	}
-	return grants, nil
-}
 func (t Tokens) Client(r *http.Request) (string, bool) {
 	header := r.Header.Get("Authorization")
 	if !strings.HasPrefix(header, "Bearer ") || len(header) == len("Bearer ") {
@@ -668,23 +539,13 @@ type Server struct {
 	Tokens  Tokens
 	// QuotaAccounts scopes quota writes; a nil map refuses every account.
 	QuotaAccounts QuotaAccounts
-	// ImportReadGrants restricts a client to GET /v1/import/* and denies every
-	// other route, including all writes.
-	ImportReadGrants map[string]bool
 	// HostGrants binds a client to the host ids it may act for. A client with
-	// no entry keeps today's behavior and is logged (see HostGrants.Allows).
+	// no entry may act for no host (see HostGrants.Allows).
 	HostGrants HostGrants
 	// UI is independently authenticated by Cloudflare Access. A nil UI leaves
 	// the route unregistered so deployments without complete Access settings
 	// fail closed with the standard ServeMux 404.
 	UI http.Handler
-	// LinearWebhook authenticates by signature, not bearer token. A nil handler
-	// leaves POST /hooks/linear unregistered, so an unconfigured deployment
-	// answers it with the standard ServeMux 404.
-	LinearWebhook http.Handler
-	// LinearDecisions backs POST /v1/tasks/{id}/decision-request/ask. Nil answers
-	// that route 503 linear_decisions_disabled.
-	LinearDecisions *LinearDecisions
 	// ClientRevisions records each authenticated client's CLI revision from
 	// its User-Agent and reports it on GET /metrics. Nil records nothing.
 	ClientRevisions *ClientRevisions
@@ -692,31 +553,20 @@ type Server struct {
 
 func (s Server) Handler() http.Handler {
 	m := http.NewServeMux()
-	wrkRegistered := s.Service.Store != nil && (s.Service.Store.WrkEngine().Mode != "off" || s.Service.Store.HasWrkEnrollment(context.Background()))
-	if wrkRegistered {
-		m.HandleFunc("/v1/wrk/", s.wrk)
-	}
 	m.HandleFunc("GET /healthz", healthz)
-	m.HandleFunc("/v1/checkpoints", s.checkpoints)
 	m.HandleFunc("GET /v1/search", s.search)
 	m.HandleFunc("PUT /v1/translations", s.translationsPut)
 	m.HandleFunc("GET /v1/translations/missing", s.translationsMissing)
 	m.HandleFunc("GET /v1/sync/delta", s.syncDelta)
-	m.HandleFunc("GET /v1/sync/bootstrap", s.syncBootstrap)
-	m.HandleFunc("GET /v1/sync/rows/{model}/{model_id...}", s.syncRow)
 	m.HandleFunc("GET /v1/ledger", s.ledger)
 	m.HandleFunc("POST /v1/ledger/ack", s.ledgerAck)
-	m.HandleFunc("GET /v1/projects/{name}/status-updates", s.statusUpdates)
-	m.HandleFunc("POST /v1/projects/{name}/status-updates", s.statusUpdates)
 	m.HandleFunc("GET /v1/documents", s.documents)
-	m.HandleFunc("GET /v1/import/{resource}", s.importExport)
 	m.HandleFunc("GET /v1/yt/ops", s.ytOps)
 	m.HandleFunc("POST /v1/yt/ops/{id}/resolve", s.ytOpsResolve)
 	m.HandleFunc("GET /v1/yt/authority", s.ytAuthority)
 	m.HandleFunc("POST /v1/yt/authority", s.ytAuthoritySet)
+	m.HandleFunc("POST /v1/documents/prune", s.docPrune)
 	m.HandleFunc("/v1/documents/{key...}", s.document)
-	m.HandleFunc("GET /v1/memory/{agent}", s.memoryList)
-	m.HandleFunc("/v1/memory/{agent}/{name}", s.memory)
 	m.HandleFunc("PUT /v1/attachments", s.attachmentPut)
 	m.HandleFunc("GET /v1/attachments", s.attachments)
 	m.HandleFunc("GET /v1/attachments/{sha}", s.attachment)
@@ -735,8 +585,6 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/tasks/drift", s.tasksDrift)
 	m.HandleFunc("POST /v1/tasks/settle-merged", s.tasksSettleMerged)
 	m.HandleFunc("POST /v1/task-events", s.taskEvents)
-	m.HandleFunc("GET /v1/standing-orders", s.standingList)
-	m.HandleFunc("POST /v1/standing-orders", s.standingPut)
 	m.HandleFunc("GET /v1/projects/{name}/frontier", s.projectFrontier)
 	m.HandleFunc("GET /v1/changes", s.changesList)
 	m.HandleFunc("POST /v1/changes/{id}/merge-flow", s.changeMergeFlow)
@@ -756,7 +604,6 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/services/{name}/pending", s.servicePending)
 	m.HandleFunc("POST /v1/deploys", s.deployStart)
 	m.HandleFunc("POST /v1/deploys/{attempt_id}/finish", s.deployFinish)
-	m.HandleFunc("POST /v1/tasks/next", s.tasksNext)
 	m.HandleFunc("GET /v1/tasks/projects", s.taskProjectsList)
 	m.HandleFunc("POST /v1/tasks/projects", s.taskProjectsCreate)
 	m.HandleFunc("GET /v1/tasks/projects/owners", s.projectOwnersList)
@@ -769,10 +616,6 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("PUT /v1/milestones/{milestone}", s.milestoneSave)
 	m.HandleFunc("PATCH /v1/milestones/{milestone}", s.milestonePatch)
 	m.HandleFunc("GET /v1/milestones/{milestone}", s.milestoneGet)
-	m.HandleFunc("GET /v1/labels", s.labelsList)
-	m.HandleFunc("POST /v1/labels", s.labelSave)
-	m.HandleFunc("PUT /v1/labels/{label}", s.labelSave)
-	m.HandleFunc("POST /v1/labels/{label}/retire", s.labelRetire)
 	m.HandleFunc("GET /v1/tasks/states", s.taskStates)
 	m.HandleFunc("PUT /v1/tasks/{id}/spawn", s.taskSpawnPut)
 	m.HandleFunc("GET /v1/tasks/{id}", s.task)
@@ -782,9 +625,6 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/{id}/parent", s.taskParent)
 	m.HandleFunc("POST /v1/tasks/{id}/relations", s.taskRelationAdd)
 	m.HandleFunc("POST /v1/tasks/{id}/relations/remove", s.taskRelationRemove)
-	m.HandleFunc("POST /v1/tasks/{id}/origins", s.taskOriginAdd)
-	m.HandleFunc("GET /v1/tasks/{id}/origins", s.taskOriginList)
-	m.HandleFunc("GET /v1/task-origins", s.taskOriginFind)
 	m.HandleFunc("GET /v1/dots/results", s.dotsResultsList)
 	m.HandleFunc("POST /v1/dots/requests", s.dotsRequestCreate)
 	m.HandleFunc("POST /v1/dots/results/{id}/adoption", s.dotsAdoption)
@@ -794,15 +634,10 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/{id}/area", s.taskArea)
 	m.HandleFunc("POST /v1/tasks/{id}/priority", s.taskPriority)
 	m.HandleFunc("POST /v1/tasks/{id}/milestone", s.taskMilestone)
-	m.HandleFunc("POST /v1/tasks/{id}/labels", s.taskLabel)
-	m.HandleFunc("POST /v1/tasks/{id}/deadlines", s.taskDeadlines)
-	m.HandleFunc("POST /v1/tasks/{id}/due", s.taskDue)
-	m.HandleFunc("POST /v1/tasks/{id}/subscribers", s.taskSubscriber)
 	m.HandleFunc("GET /v1/task-areas", s.taskAreasList)
 	m.HandleFunc("POST /v1/tasks/relane", s.tasksRelane)
 	m.HandleFunc("POST /v1/tasks/{id}/decision-request", s.taskDecisionRequest)
 	m.HandleFunc("POST /v1/tasks/{id}/decision-request/resolve", s.taskDecisionResolve)
-	m.HandleFunc("POST /v1/tasks/{id}/decision-request/ask", s.taskDecisionAsk)
 	m.HandleFunc("POST /v1/tasks/dispositions", s.dispositionCreate)
 	m.HandleFunc("GET /v1/tasks/dispositions/summary", s.dispositionSummary)
 	m.HandleFunc("POST /v1/tasks/dispositions/{id}/apply", s.dispositionApply)
@@ -830,8 +665,6 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("DELETE /v1/quota/accounts/{key}/lease", s.quotaRelease)
 	m.HandleFunc("GET /v1/quota/presence", s.quotaPresenceList)
 	m.HandleFunc("PUT /v1/quota/presence", s.quotaPresencePut)
-	m.HandleFunc("GET /v1/bench/scores", s.benchScoresList)
-	m.HandleFunc("PUT /v1/bench/scores", s.benchScoresPut)
 	m.HandleFunc("GET /v1/bench/reps", s.benchRepsList)
 	m.HandleFunc("PUT /v1/bench/reps", s.benchRepsPut)
 	m.HandleFunc("PATCH /v1/bench/reps/{id}", s.benchRepPatch)
@@ -839,8 +672,6 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("PUT /v1/bench/grades", s.benchGradesPut)
 	m.HandleFunc("GET /v1/bench/catalog", s.benchCatalogList)
 	m.HandleFunc("PUT /v1/bench/catalog", s.benchCatalogPut)
-	m.HandleFunc("GET /v1/bench/area-exceptions", s.benchAreaExceptionsList)
-	m.HandleFunc("PUT /v1/bench/area-exceptions", s.benchAreaExceptionsPut)
 	m.HandleFunc("PUT /v1/chat/questions/{id}", s.chatQuestionPut)
 	m.HandleFunc("GET /v1/chat/questions/{id}", s.chatQuestionGet)
 	m.HandleFunc("POST /v1/chat/questions", s.chatQuestionPost)
@@ -859,75 +690,23 @@ func (s Server) Handler() http.Handler {
 		m.Handle("/ui", s.UI)
 		m.Handle("/ui/", s.UI)
 	}
-	if s.LinearWebhook != nil {
-		m.Handle("POST /hooks/linear", s.LinearWebhook)
-	}
-	v1 := v1Handler{mux: m, legacy: s.legacyWrkFence(m)}
-	if wrkRegistered {
-		v1.wrk = http.HandlerFunc(s.wrk)
-	}
-	return importGrantHandler{v1: v1, tokens: s.Tokens, grants: s.ImportReadGrants}
+	return v1Handler{mux: m}
 }
 
-// importGrantHandler preserves v1 route resolution for telemetry while
-// restricting import-only clients to the GET import surface.
-type importGrantHandler struct {
-	v1     v1Handler
-	tokens Tokens
-	grants map[string]bool
-}
-
-func (h importGrantHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if client, ok := h.tokens.Client(r); ok && h.grants[client] {
-		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/v1/import/") {
-			writeError(w, http.StatusForbidden, "import_read_only")
-			return
-		}
-	}
-	h.v1.ServeHTTP(w, r)
-}
-
-// Handler reports the route the wrapped v1 handler will dispatch to.
-func (h importGrantHandler) Handler(r *http.Request) (http.Handler, string) {
-	return h.v1.Handler(r)
-}
-
-// wrkPattern is the route pattern reported for the /v1/wrk surface.
-const wrkPattern = "/v1/wrk/{path...}"
-
-// v1Handler serves the /v1 surface behind the legacy wrk fence. Its Handler
-// method reports the route a request dispatches to without serving it, the way
-// *http.ServeMux does, so telemetry can key the head sampling decision on the
-// route before the request starts (telemetry.routePattern follows any value
-// with this method).
+// v1Handler serves the /v1 surface. Its Handler method reports the route a
+// request dispatches to without serving it, the way *http.ServeMux does, so
+// telemetry can key the head sampling decision on the route before the request
+// starts (telemetry.routePattern follows any value with this method).
 type v1Handler struct {
-	mux    *http.ServeMux
-	legacy http.Handler
-	wrk    http.Handler // nil when the wrk routes are not registered
-}
-
-func (h v1Handler) isWrk(r *http.Request) bool {
-	return h.wrk != nil && (r.URL.Path == "/v1/wrk" || strings.HasPrefix(r.URL.Path, "/v1/wrk/"))
+	mux *http.ServeMux
 }
 
 func (h v1Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// The legacy fence may return before ServeMux dispatches the request.
-	_, r.Pattern = h.mux.Handler(r)
-	// ServeMux cleans dot/slash paths with redirects before dispatch. O3
-	// must authenticate and reject those paths without ever sending Location.
-	if h.isWrk(r) {
-		r.Pattern = wrkPattern
-		h.wrk.ServeHTTP(w, r)
-		return
-	}
-	h.legacy.ServeHTTP(w, r)
+	h.mux.ServeHTTP(w, r)
 }
 
 // Handler reports the route ServeHTTP would dispatch to, without serving it.
 func (h v1Handler) Handler(r *http.Request) (http.Handler, string) {
-	if h.isWrk(r) {
-		return h.wrk, wrkPattern
-	}
 	return h.mux.Handler(r)
 }
 
@@ -956,14 +735,27 @@ func healthz(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, out)
 }
 
+// clientKey carries the authenticated client id on a request context so logs
+// on the error path can name the caller.
+type clientKey struct{}
+
+func withClient(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, clientKey{}, id)
+}
+
+// clientOf returns the client id auth stored on ctx, or "" before auth ran.
+func clientOf(ctx context.Context) string {
+	id, _ := ctx.Value(clientKey{}).(string)
+	return id
+}
+
 func (s Server) auth(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id, ok := s.Tokens.Client(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 	}
 	if ok {
-		_, receipt := store.WrkPrincipal(r.Context())
-		*r = *r.WithContext(store.WithWrkPrincipal(r.Context(), id, receipt))
+		*r = *r.WithContext(withClient(r.Context(), id))
 		s.ClientRevisions.observe(id, r.UserAgent())
 	}
 	return id, ok
@@ -1033,7 +825,6 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		}
 		// Echoed like project: an old server that drops the parameter would
 		// answer with every task.
-		s.Service.overlayTasks(r.Context(), xs)
 		jsonOut(w, http.StatusOK, map[string]any{"tasks": xs, "change": changeID})
 		return
 	}
@@ -1090,7 +881,6 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
-	s.Service.overlayTasks(r.Context(), xs)
 	body := map[string]any{"tasks": xs}
 	if project != nil {
 		// Echo the requested filter so new clients can tell a filtered
@@ -1159,9 +949,7 @@ func (s Server) task(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 		return
 	}
-	tasks := []store.Task{x}
-	s.Service.overlayTasks(r.Context(), tasks)
-	jsonOut(w, http.StatusOK, tasks[0])
+	jsonOut(w, http.StatusOK, x)
 }
 
 type taskClaimInput struct {
@@ -1234,10 +1022,6 @@ func (s Server) taskProject(w http.ResponseWriter, r *http.Request) {
 		Metadata *store.ProjectMetadataPatch `json:"metadata,omitempty"`
 	}
 	if err := decode(r, &input, bodySmall); err != nil {
-		appErr(w, r, err)
-		return
-	}
-	if err := s.Service.wrkTaskPrecheck(r.Context(), id, "", true); err != nil {
 		appErr(w, r, err)
 		return
 	}
@@ -1389,29 +1173,6 @@ func (s Server) taskRebind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	x, err := s.Service.RebindTaskJob(r.Context(), id, input.FromJob, input.ToJob, input.By, input.Reason)
-	if err != nil {
-		appErr(w, r, err)
-		return
-	}
-	jsonOut(w, http.StatusOK, x)
-}
-
-func (s Server) tasksNext(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth(w, r); !ok {
-		return
-	}
-	defer r.Body.Close()
-	var input struct {
-		Lane      string `json:"lane"`
-		ClaimedBy string `json:"claimed_by"`
-		JobID     string `json:"job_id"`
-		NoJob     string `json:"no_job,omitempty"`
-	}
-	if err := decode(r, &input, bodySmall); err != nil {
-		appErr(w, r, err)
-		return
-	}
-	x, err := s.Service.NextTask(r.Context(), input.Lane, input.ClaimedBy, input.JobID, input.NoJob)
 	if err != nil {
 		appErr(w, r, err)
 		return
@@ -1694,10 +1455,6 @@ type taskRelaneResult struct {
 // errors (driver faults, cancelled contexts) report internal_error rather
 // than leaking internals or posing as a retry-safe validation failure.
 func relaneErrorCode(err error) string {
-	var denied wrkrecords.Error
-	if errors.As(err, &denied) {
-		return wrkrecords.Code(denied)
-	}
 	switch {
 	case errors.Is(err, store.ErrTaskNotFound):
 		return "not_found"
@@ -1957,10 +1714,6 @@ func (s Server) relayEventsList(w http.ResponseWriter, r *http.Request) {
 
 const benchRequestMaxBytes = 8 << 20
 
-type benchScoresInput struct {
-	Scores []store.BenchScore `json:"scores"`
-}
-
 type benchRepsInput struct {
 	Reps []store.BenchRep `json:"reps"`
 }
@@ -1971,45 +1724,6 @@ type benchGradesInput struct {
 
 func benchBatchValid(n int) bool {
 	return n >= 1 && n <= 1000
-}
-
-func (s Server) benchScoresList(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth(w, r); !ok {
-		return
-	}
-	limit, err := queryLimit(r, 1000, 5000)
-	if err != nil {
-		appErr(w, r, err)
-		return
-	}
-	xs, err := s.Service.ListBenchScores(r.Context(), r.URL.Query().Get("model_id"), r.URL.Query().Get("source"), limit)
-	if err != nil {
-		appErr(w, r, err)
-		return
-	}
-	jsonOut(w, http.StatusOK, map[string]any{"scores": xs})
-}
-
-func (s Server) benchScoresPut(w http.ResponseWriter, r *http.Request) {
-	client, ok := s.auth(w, r)
-	if !ok {
-		return
-	}
-	defer r.Body.Close()
-	var input benchScoresInput
-	if err := decode(r, &input, benchRequestMaxBytes); err != nil || !benchBatchValid(len(input.Scores)) {
-		if err == nil {
-			err = errors.New("invalid bench scores")
-		}
-		appErr(w, r, err)
-		return
-	}
-	n, err := s.Service.UpsertBenchScores(r.Context(), client, input.Scores)
-	if err != nil {
-		appErr(w, r, err)
-		return
-	}
-	jsonOut(w, http.StatusOK, map[string]int{"upserted": n})
 }
 
 func (s Server) benchRepsList(w http.ResponseWriter, r *http.Request) {
@@ -2124,19 +1838,18 @@ const operatorClientID = "operator"
 
 // operatorDeskClientID is the operator-desk session's client id. It records
 // the operator's catalog decisions on the operator's behalf, so it may write
-// the bench catalog and area exceptions too (operator 2026-11-01). Every other
+// the bench catalog too (operator 2026-11-01). Every other
 // client still gets operator_required.
 const operatorDeskClientID = "operator-desk"
 
 // panewireDesignClientID is the panewire design session's client id. It owns
-// the bench catalog, so it writes the catalog and area exceptions under its
+// the bench catalog, so it writes the catalog under its
 // own id instead of going through operator-desk (decision
 // hk:doc decision/2026-11-08/panewire-design-catalog-writer). It gains no other
 // right: quota grants, host grants and task writes are unchanged.
 const panewireDesignClientID = "panewire-design"
 
-// benchCatalogWriter reports whether client may write the bench catalog and
-// the area exceptions.
+// benchCatalogWriter reports whether client may write the bench catalog.
 func benchCatalogWriter(client string) bool {
 	return client == operatorClientID || client == operatorDeskClientID || client == panewireDesignClientID
 }
@@ -2195,77 +1908,6 @@ func (s Server) benchCatalogPut(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, map[string]int{"upserted": n})
 }
 
-type benchAreaExceptionsInput struct {
-	Exceptions []store.BenchAreaException `json:"exceptions"`
-}
-
-// benchAreaExceptionsList answers the routing exception list to any
-// authenticated client — hosts read it for routing, only the operator
-// client writes it.
-func (s Server) benchAreaExceptionsList(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth(w, r); !ok {
-		return
-	}
-	q := r.URL.Query()
-	includeRetired := q.Get("include_retired") == "1" || q.Get("include_retired") == "true"
-	xs, err := s.Service.ListBenchAreaExceptions(r.Context(), q.Get("area"), includeRetired)
-	if err != nil {
-		appErr(w, r, err)
-		return
-	}
-	jsonOut(w, http.StatusOK, map[string]any{"exceptions": xs})
-}
-
-// benchAreaExceptionsPut upserts exception rows under the same
-// operator-client rule and decode strictness as benchCatalogPut. Retiring a
-// row means sending retired_at; there is no DELETE.
-func (s Server) benchAreaExceptionsPut(w http.ResponseWriter, r *http.Request) {
-	client, ok := s.auth(w, r)
-	if !ok {
-		return
-	}
-	if !benchCatalogWriter(client) {
-		writeError(w, http.StatusForbidden, "operator_required")
-		return
-	}
-	defer r.Body.Close()
-	// The body is buffered so a decode failure can be re-walked to name the
-	// field that failed, exactly like the catalog path. One byte past the
-	// limit is read on purpose: a body that fills the cap is refused as too
-	// large instead of silently decoding a truncated prefix.
-	body, err := io.ReadAll(io.LimitReader(r.Body, int64(benchRequestMaxBytes+4096)+1))
-	if err != nil {
-		appErr(w, r, err)
-		return
-	}
-	if len(body) > benchRequestMaxBytes+4096 {
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_bench_area_exceptions_json", "detail": "body exceeds the request limit"})
-		return
-	}
-	var input benchAreaExceptionsInput
-	de := json.NewDecoder(bytes.NewReader(body))
-	de.DisallowUnknownFields()
-	if err := de.Decode(&input); err != nil {
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_bench_area_exceptions_json", "detail": benchListDecodeDetail[store.BenchAreaException](body, "exceptions", benchAreaExceptionFieldTypes, err)})
-		return
-	}
-	var extra json.RawMessage
-	if err := de.Decode(&extra); err != io.EOF {
-		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_bench_area_exceptions_json", "detail": "trailing data after the request object"})
-		return
-	}
-	if !benchBatchValid(len(input.Exceptions)) {
-		writeError(w, http.StatusBadRequest, "invalid_context")
-		return
-	}
-	n, err := s.Service.UpsertBenchAreaExceptions(r.Context(), client, input.Exceptions)
-	if err != nil {
-		appErr(w, r, err)
-		return
-	}
-	jsonOut(w, http.StatusOK, map[string]int{"upserted": n})
-}
-
 // benchRowFieldTypes maps each JSON field name of T to its Go type so a
 // decode failure can be re-walked field by field.
 func benchRowFieldTypes[T any]() map[string]reflect.Type {
@@ -2279,10 +1921,7 @@ func benchRowFieldTypes[T any]() map[string]reflect.Type {
 	return m
 }
 
-var (
-	benchCatalogEntryFieldTypes  = benchRowFieldTypes[store.BenchCatalogEntry]()
-	benchAreaExceptionFieldTypes = benchRowFieldTypes[store.BenchAreaException]()
-)
+var benchCatalogEntryFieldTypes = benchRowFieldTypes[store.BenchCatalogEntry]()
 
 // benchListDecodeDetail renders a bench-list PUT decode failure for the
 // operator. When the decoder's own message already names the field (unknown
@@ -2357,12 +1996,11 @@ func benchRowErrorField(row []byte, fieldTypes map[string]reflect.Type) string {
 // Payload caps for decode, by what the body carries. A route picks one of
 // these or a store-owned limit (store.MaxBytes, benchRequestMaxBytes, ...).
 const (
-	bodyTiny     = 1 << 10  // an id or two and a short reason
-	bodyStanding = 8 << 10  // standing order
-	bodySmall    = 4 << 10  // one entity's short fields
-	bodyEvent    = 16 << 10 // one external event with its references (16 review items fill ~11 KiB)
-	bodyLarge    = 64 << 10 // free text or a list: descriptions, candidates
-	bodyPRState  = 2 << 20  // one PR-state write: ~200 checks, 100 threads and a pass of findings (hk 3198)
+	bodyTiny    = 1 << 10  // an id or two and a short reason
+	bodySmall   = 4 << 10  // one entity's short fields
+	bodyEvent   = 16 << 10 // one external event with its references (16 review items fill ~11 KiB)
+	bodyLarge   = 64 << 10 // free text or a list: descriptions, candidates
+	bodyPRState = 2 << 20  // one PR-state write: ~200 checks, 100 threads and a pass of findings (hk 3198)
 )
 
 // decode reads one JSON request body into v. max is the payload's own byte
@@ -2394,42 +2032,6 @@ func queryLimit(r *http.Request, def, max int) (int, error) {
 		}
 	}
 	return x, nil
-}
-func (s Server) checkpoints(w http.ResponseWriter, r *http.Request) {
-	client, ok := s.auth(w, r)
-	if !ok {
-		return
-	}
-	if r.Method == http.MethodPost {
-		defer r.Body.Close()
-		var x store.Checkpoint
-		if e := decode(r, &x, store.MaxBytes); e != nil {
-			appErr(w, r, e)
-			return
-		}
-		x, e := s.Service.Checkpoint(r.Context(), client, x)
-		if e != nil {
-			appErr(w, r, e)
-			return
-		}
-		jsonOut(w, http.StatusCreated, x)
-		return
-	}
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-		return
-	}
-	n, e := queryLimit(r, 3, store.CheckpointKeep)
-	if e != nil {
-		appErr(w, r, e)
-		return
-	}
-	xs, e := s.Service.Recent(r.Context(), r.URL.Query().Get("session"), r.URL.Query().Get("kind"), n)
-	if e != nil {
-		appErr(w, r, e)
-		return
-	}
-	jsonOut(w, http.StatusOK, map[string]any{"checkpoints": xs})
 }
 func (s Server) search(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
@@ -2525,54 +2127,6 @@ func (s Server) document(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOut(w, http.StatusOK, map[string]any{"document": x, "changed": changed})
-		return
-	}
-	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-}
-func (s Server) memoryList(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth(w, r); !ok {
-		return
-	}
-	xs, e := s.Service.ListMemory(r.Context(), r.PathValue("agent"), false)
-	if e != nil {
-		appErr(w, r, e)
-		return
-	}
-	jsonOut(w, http.StatusOK, map[string]any{"memory": xs})
-}
-func (s Server) memory(w http.ResponseWriter, r *http.Request) {
-	client, ok := s.auth(w, r)
-	if !ok {
-		return
-	}
-	agent, name := r.PathValue("agent"), r.PathValue("name")
-	if r.Method == http.MethodGet {
-		x, found, e := s.Service.GetMemory(r.Context(), agent, name)
-		if e != nil {
-			appErr(w, r, e)
-			return
-		}
-		if !found {
-			writeError(w, http.StatusNotFound, "not_found")
-			return
-		}
-		jsonOut(w, http.StatusOK, x)
-		return
-	}
-	if r.Method == http.MethodPut {
-		defer r.Body.Close()
-		var x store.Memory
-		if e := decode(r, &x, store.MaxBytes); e != nil {
-			appErr(w, r, e)
-			return
-		}
-		x.Agent, x.Name = agent, name
-		x, e := s.Service.PutMemory(r.Context(), client, x)
-		if e != nil {
-			appErr(w, r, e)
-			return
-		}
-		jsonOut(w, http.StatusOK, x)
 		return
 	}
 	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")

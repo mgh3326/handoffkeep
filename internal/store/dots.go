@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,54 +19,34 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
-// dots is an external research AI that answers on Linear issues labelled
-// "dots" with comments starting "[dots] <KIND>". These records are written by
-// two independent paths, the Linear webhook and an hourly reconciling poller
-// that keeps its own seen-set. The key, the body and the event ids below must
-// stay byte-identical to the poller's: the document key is what makes a second
-// write a no-op, and the shared event id is what lets the hub dedupe the lane
-// notification when both paths notify the same lane (it keys on lane and id).
+// dots is an external research AI that answers hk dots requests with replies
+// "[dots] <KIND>" (ReplyDots). Each recorded reply becomes a document, a
+// dots_results row and a lane notification. The record format (key, body,
+// event id) is the one the retired Linear webhook path wrote, so documents
+// and rows from before hk 4425 read the same.
 
 const (
 	// DotsLabel is the Linear label that puts an issue in dots' scope.
 	DotsLabel = "dots"
-	// DotsLane is the session of every dots document and the lane a
-	// notification goes to when its request names no other (dotsRequesterLane).
+	// DotsLane is the session of every dots document.
 	DotsLane = "operator-desk"
-
-	dotsCreatedBy = "linear-webhook"
 )
 
 // dotsResultKinds maps a comment kind that is recorded to the outbox kind that
 // notifies about it. Everything else ("START", unknown words) is not recorded.
 var dotsResultKinds = map[string]string{
 	"RESULT":   OutboxKindDotsReport,
-	"BLOCKED":  OutboxKindDotsDecision,
+	"BLOCKED":  OutboxKindDotsBlocked,
 	"QUESTION": OutboxKindDotsDecision,
 }
 
+// dotsNotifyLaneLineRE finds the "[알릴 레인] <lane>[, <lane>]" lines of a
+// request body: the lanes that also hear a RESULT (operator decision 166).
+var dotsNotifyLaneLineRE = regexp.MustCompile(`(?m)^\[알릴 레인\][ \t]*(.*?)[ \t]*\r?$`)
+
 var (
 	dotsIdentifierRE = regexp.MustCompile(`^[A-Za-z0-9_]+-[0-9]+$`)
-	dotsCommentIDRE  = regexp.MustCompile(`^[0-9A-Za-z-]{8,64}$`)
-	// dotsLaneDeclRE finds the first line that declares a lane; dotsLaneLineRE
-	// judges it, its group being nameRE.
-	dotsLaneDeclRE = regexp.MustCompile(`(?m)^hk-lane:.*$`)
-	dotsLaneLineRE = regexp.MustCompile(`^hk-lane:[ \t]*([A-Za-z0-9._-]{1,128})[ \t]*\r?$`)
 )
-
-// dotsRequesterLane picks the lane owed a dots notification: the lane named
-// on the first "hk-lane:" line of the description, else the lane of the one
-// task linked to the issue, else DotsLane. Only the first "hk-lane:" line is
-// read: when it names no valid lane, the next rule applies, not a later line.
-func dotsRequesterLane(description string, linkedTask *Task) string {
-	if m := dotsLaneLineRE.FindStringSubmatch(dotsLaneDeclRE.FindString(description)); m != nil {
-		return m[1]
-	}
-	if linkedTask != nil && validName(linkedTask.Lane) {
-		return linkedTask.Lane
-	}
-	return DotsLane
-}
 
 // DotsIssue is the part of a Linear issue a dots record quotes. IssueUUID is
 // Linear's durable id, the external_id of a task origin; Description is read
@@ -95,6 +76,9 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 	}
 	if !validName(lane) || by == "" || !validText(by, 128) || strings.TrimSpace(in.Body) == "" {
 		return Task{}, errors.New("invalid dots request")
+	}
+	if _, invalid := dotsNotifyLanes(in.Body, lane); len(invalid) > 0 {
+		return Task{}, fmt.Errorf("invalid dots notify lane %q", invalid[0])
 	}
 	var project *string
 	if in.Project != "" {
@@ -217,6 +201,9 @@ type DotsReplyResult struct {
 	// this run must carry. A START replay returns the token its first call
 	// issued, which a takeover may since have superseded.
 	RunToken string `json:"run_token,omitempty"`
+	// InvalidNotifyLanes names the "[알릴 레인]" entries of the request body that
+	// are not valid lanes. Those lanes were not notified; the reply is recorded.
+	InvalidNotifyLanes []string `json:"invalid_notify_lanes,omitempty"`
 }
 
 // ErrDotsReplyKeyConflict rejects an idempotency key used for another reply.
@@ -293,7 +280,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 		return DotsReplyResult{}, err
 	}
 	defer tx.Rollback(ctx)
-	// Match ApplyYouTrackActivity: mutation lock, comment lock, then task row.
+	// Lock order: mutation lock, comment lock, then task row.
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return DotsReplyResult{}, err
 	}
@@ -317,8 +304,10 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	var previous string
 	err = tx.QueryRow(ctx, `SELECT note FROM task_events WHERE task_id=$1 AND source='dots-hk-chatgpt' AND source_ref=$2`, in.TaskID, commentID).Scan(&previous)
 	if err == nil {
-		parts := strings.SplitN(previous, " ", 3)
-		if len(parts) != 3 {
+		// payload state document [skipped notify lanes]: the last field is
+		// absent on replies recorded before it was kept.
+		parts := strings.SplitN(previous, " ", 4)
+		if len(parts) < 3 {
 			return DotsReplyResult{}, errors.New("invalid recorded dots reply")
 		}
 		if parts[0] != payload {
@@ -330,7 +319,11 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 				return DotsReplyResult{}, err
 			}
 		}
-		return DotsReplyResult{TaskID: task.ID, State: parts[1], DocumentKey: parts[2], Duplicate: true, RunToken: replayToken}, nil
+		var skipped []string
+		if len(parts) == 4 {
+			skipped = dotsSkippedLanesFromNote(parts[3])
+		}
+		return DotsReplyResult{TaskID: task.ID, State: parts[1], DocumentKey: parts[2], Duplicate: true, RunToken: replayToken, InvalidNotifyLanes: skipped}, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return DotsReplyResult{}, err
@@ -367,13 +360,23 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	}
 
 	var docKey string
+	var invalidLanes []string
 	if in.Kind != "START" {
 		issue := DotsIssue{Identifier: "hk-" + strconv.FormatInt(task.ID, 10), Title: task.Title, URL: fmt.Sprintf("hk:task/%d", task.ID), IssueUUID: fmt.Sprintf("hk:%d", task.ID)}
 		comment := DotsComment{ID: commentID, CreatedAt: now.Format(time.RFC3339Nano), Body: "[dots] " + in.Kind + "\n" + in.Body}
 		if _, ok := DotsKind(comment.Body); !ok {
 			return DotsReplyResult{}, errors.New("invalid dots reply")
 		}
-		docKey, _, err = recordDotsResultTx(ctx, tx, in.Kind, issue, comment, &task, task.ParentLane, "hk-mcp")
+		// The body document is editable after creation, so a bad notify line
+		// cannot refuse the reply (that would roll back the RESULT). It is
+		// skipped and reported in the result instead.
+		var notifyLanes []string
+		if in.Kind == "RESULT" {
+			if notifyLanes, invalidLanes, err = dotsNotifyLanesTx(ctx, tx, task); err != nil {
+				return DotsReplyResult{}, err
+			}
+		}
+		docKey, _, err = recordDotsResultTx(ctx, tx, in.Kind, issue, comment, &task, task.ParentLane, "hk-mcp", notifyLanes...)
 		if err != nil {
 			return DotsReplyResult{}, err
 		}
@@ -403,14 +406,38 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	if err != nil {
 		return DotsReplyResult{}, err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: task.ID, Kind: "source_event", By: actor, Note: payload + " " + task.State + " " + docKey, At: now, Source: "dots-hk-chatgpt", SourceRef: commentID, Field: "dots_reply", FromValue: in.Kind, ToValue: strconv.FormatInt(commentRowID, 10)}); err != nil {
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: task.ID, Kind: "source_event", By: actor, Note: payload + " " + task.State + " " + docKey + dotsSkippedLanesNote(invalidLanes), At: now, Source: "dots-hk-chatgpt", SourceRef: commentID, Field: "dots_reply", FromValue: in.Kind, ToValue: strconv.FormatInt(commentRowID, 10)}); err != nil {
 		return DotsReplyResult{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return DotsReplyResult{}, err
 	}
 	logYTCommentEnqueued(reply, replyOp, replyEnqueued)
-	return DotsReplyResult{TaskID: task.ID, State: task.State, DocumentKey: docKey, RunToken: runToken}, nil
+	return DotsReplyResult{TaskID: task.ID, State: task.State, DocumentKey: docKey, RunToken: runToken, InvalidNotifyLanes: invalidLanes}, nil
+}
+
+// dotsSkippedLanesNote is the optional last field of a reply's event note: the
+// notify names a RESULT skipped, escaped so the field has no space.
+func dotsSkippedLanesNote(lanes []string) string {
+	if len(lanes) == 0 {
+		return ""
+	}
+	escaped := make([]string, len(lanes))
+	for i, lane := range lanes {
+		escaped[i] = url.PathEscape(lane)
+	}
+	return " " + strings.Join(escaped, ",")
+}
+
+// dotsSkippedLanesFromNote reads the field dotsSkippedLanesNote wrote.
+func dotsSkippedLanesFromNote(field string) []string {
+	var lanes []string
+	for _, part := range strings.Split(field, ",") {
+		if lane, err := url.PathUnescape(part); err == nil && lane != "" {
+			lanes = append(lanes, lane)
+		}
+	}
+	return lanes
 }
 
 // DotsAnswerInput carries the text answering a task's open dots question.
@@ -451,7 +478,7 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 	}
 	defer tx.Rollback(ctx)
 
-	// Lock order matches ApplyYouTrackActivity and ReplyDots: task-mutation
+	// Lock order matches ReplyDots: task-mutation
 	// advisory lock (level 2), then taskCommentInsertLock, then task row FOR UPDATE.
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return DotsAnswerResult{}, err
@@ -586,12 +613,6 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, caller, note, 0, now); err != nil {
 		return DotsAnswerResult{}, err
 	}
-	if err = queueDecisionClosedPost(ctx, tx, resolved, x.Refs.DecisionOptions, now); err != nil {
-		return DotsAnswerResult{}, err
-	}
-	if err = s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
-		return DotsAnswerResult{}, err
-	}
 
 	if err = tx.Commit(ctx); err != nil {
 		return DotsAnswerResult{}, err
@@ -710,72 +731,6 @@ func dotsResultText(kind, key string, issue DotsIssue, c DotsComment) string {
 	return dotsLaneText("[dots] " + kind + " " + issue.Identifier + " " + firstRunes(issue.Title, 60) + " :: " + dotsSummaryLine(c.Body) + " → hk:doc " + key + " · " + issue.URL)
 }
 
-func dotsFollowupText(issue DotsIssue) string {
-	return dotsLaneText("[dots-watch] " + issue.Identifier + " is closed but got a new comment after closing; dots will not pick it up. Reopen it if it is a request. " + issue.URL)
-}
-
-func validDotsIssue(issue DotsIssue, commentID string) bool {
-	return dotsIdentifierRE.MatchString(issue.Identifier) && dotsCommentIDRE.MatchString(commentID) && originUUIDRE.MatchString(issue.IssueUUID)
-}
-
-// dotsLinkedTask returns the one task whose Linear origin is the issue, or
-// nil when none or several are: an ambiguous link is unknown, not a guess.
-// The caller's later write that names the task takes KEY SHARE on its row.
-func dotsLinkedTask(ctx context.Context, tx pgx.Tx, issueUUID string) (*Task, error) {
-	rows, err := tx.Query(ctx, `SELECT DISTINCT o.task_id, t.lane FROM task_origins o JOIN tasks t ON t.id = o.task_id WHERE o.provider = $1 AND o.external_id = $2 ORDER BY o.task_id LIMIT 2`, OriginLinear, issueUUID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var found []Task
-	for rows.Next() {
-		var t Task
-		if err := rows.Scan(&t.ID, &t.Lane); err != nil {
-			return nil, err
-		}
-		found = append(found, t)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(found) != 1 {
-		return nil, nil
-	}
-	return &found[0], nil
-}
-
-// RecordDotsResult writes the document for one dots answer, its dots_results
-// row and the lane notification owed for it, in one transaction. The first
-// writer of a key wins: a redelivery, or a poller that got there first, keeps
-// the document body and queues nothing (that poller notified on its own), but
-// the dots_results row is still written and a NULL task link filled in.
-// created reports whether this call wrote the document.
-//
-// Locks (lockorder.go, level 4): the documents row and the dots_results row,
-// each insert or update taking KEY SHARE on the one linked task row.
-func (s *Store) RecordDotsResult(ctx context.Context, kind string, issue DotsIssue, c DotsComment) (key string, created bool, err error) {
-	if !validDotsIssue(issue, c.ID) {
-		return "", false, errors.New("invalid dots result")
-	}
-	if err := checkDotsResult(kind, issue, c, false); err != nil {
-		return "", false, err
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return "", false, err
-	}
-	defer tx.Rollback(ctx)
-	task, err := dotsLinkedTask(ctx, tx, issue.IssueUUID)
-	if err != nil {
-		return "", false, err
-	}
-	key, created, err = recordDotsResultTx(ctx, tx, kind, issue, c, task, dotsRequesterLane(issue.Description, task), dotsCreatedBy)
-	if err != nil {
-		return "", false, err
-	}
-	return key, created, tx.Commit(ctx)
-}
-
 func checkDotsResult(kind string, issue DotsIssue, c DotsComment, allowProgress bool) error {
 	if !DotsKindRecorded(kind) && !(allowProgress && kind == "PROGRESS") {
 		return errors.New("invalid dots result")
@@ -794,7 +749,53 @@ func checkDotsResult(kind string, issue DotsIssue, c DotsComment, allowProgress 
 	return guard.Reject(key + "\n" + body)
 }
 
-func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsIssue, c DotsComment, task *Task, lane, createdBy string) (key string, created bool, err error) {
+// dotsNotifyLanes splits the lanes a request body names with a "[알릴 레인]" line
+// into valid lanes (other than the requester) and invalid names. CreateDotsRequest
+// refuses a body with an invalid name; a reply skips and reports it, because a
+// body document can be edited after creation.
+func dotsNotifyLanes(body, requester string) (lanes, invalid []string) {
+	seen := map[string]bool{requester: true}
+	for _, m := range dotsNotifyLaneLineRE.FindAllStringSubmatch(body, -1) {
+		for _, name := range strings.Split(m[1], ",") {
+			name = strings.TrimSpace(name)
+			if name == "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			if validName(name) {
+				lanes = append(lanes, name)
+			} else {
+				invalid = append(invalid, name)
+			}
+		}
+	}
+	return lanes, invalid
+}
+
+// dotsNotifyLanesTx reads the body of a dots request and returns its valid and
+// invalid notify lanes. A body_doc may carry a "#section" suffix (ValidBodyDoc
+// admits it), so the document key is the part before the "#".
+func dotsNotifyLanesTx(ctx context.Context, tx pgx.Tx, task Task) (lanes, invalid []string, err error) {
+	if task.BodyDoc == "" {
+		return nil, nil, nil
+	}
+	key, _, _ := strings.Cut(task.BodyDoc, "#")
+	var body string
+	if err := tx.QueryRow(ctx, `SELECT body FROM documents WHERE key=$1`, key).Scan(&body); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, nil
+		}
+		return nil, nil, err
+	}
+	lanes, invalid = dotsNotifyLanes(body, task.ParentLane)
+	return lanes, invalid, nil
+}
+
+// recordDotsResultTx records a dots comment and its document. Only a RESULT
+// or a QUESTION or BLOCKED reaches an outbox row (lane event); PROGRESS is
+// kept as a document and sends nothing. notifyLanes add one lane event each,
+// beside the requester lane, for a RESULT.
+func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsIssue, c DotsComment, task *Task, lane, createdBy string, notifyLanes ...string) (key string, created bool, err error) {
 	progress := kind == "PROGRESS" && createdBy == "hk-mcp"
 	if err := checkDotsResult(kind, issue, c, progress); err != nil {
 		return "", false, err
@@ -835,33 +836,16 @@ func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsI
 			return "", false, err
 		}
 	}
-	if created {
-		if err := insertNotificationOutbox(ctx, tx, outboxKind, lane, "dots-"+c.ID, dotsResultText(kind, key, issue, c), now); err != nil {
+	if created && !progress {
+		text := dotsResultText(kind, key, issue, c)
+		if err := insertNotificationOutbox(ctx, tx, outboxKind, lane, "dots-"+c.ID, text, now); err != nil {
 			return "", false, err
+		}
+		for _, extra := range notifyLanes {
+			if err := insertNotificationOutbox(ctx, tx, outboxKind, extra, "dots-"+c.ID+"-"+extra, text, now); err != nil {
+				return "", false, err
+			}
 		}
 	}
 	return key, created, nil
-}
-
-// RecordDotsFollowup records the flag for a non-dots comment added after an
-// issue closed: dots ignores closed issues, so the comment would otherwise be
-// lost. created is false when this comment was already flagged.
-func (s *Store) RecordDotsFollowup(ctx context.Context, issue DotsIssue, commentID string) (created bool, err error) {
-	if !validDotsIssue(issue, commentID) {
-		return false, errors.New("invalid dots followup")
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(ctx)
-	task, err := dotsLinkedTask(ctx, tx, issue.IssueUUID)
-	if err != nil {
-		return false, err
-	}
-	created, err = insertNotificationOutboxOnce(ctx, tx, OutboxKindDotsFollowup, dotsRequesterLane(issue.Description, task), "dots-followup-"+commentID, dotsFollowupText(issue), time.Now().UTC())
-	if err != nil {
-		return false, err
-	}
-	return created, tx.Commit(ctx)
 }

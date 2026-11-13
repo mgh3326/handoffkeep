@@ -33,10 +33,6 @@ type hubProxy struct {
 	lastResult  fleetResponse
 	fleetWait   chan struct{}
 	lastSuccess *fleetResponse
-
-	liveMu     sync.Mutex
-	liveJobsC  liveJobsCache
-	liveNodesC liveNodesCache
 }
 
 type hubStatusError int

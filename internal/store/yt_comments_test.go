@@ -287,43 +287,6 @@ func TestCommentLocalRejects(t *testing.T) {
 	}
 }
 
-func TestLegacyMirrorCannotPostProtocolOwnedComment(t *testing.T) {
-	s := schemaStore(t, "ytc_legacy")
-	ctx := t.Context()
-	task := ytcTask(t, s, "handoffkeep")
-	if _, err := s.UpsertYouTrackMirror(ctx, YouTrackMirrorInput{TaskID: task, IssueID: "9-1", DisplayRef: "HK-1", Tenant: ytcTenant, Role: "mirror", SyncedAt: time.Now().UTC().Add(time.Hour)}); err != nil {
-		t.Fatal(err)
-	}
-	ytcEnroll(t, s, task)
-	s.SetYTCommentsMode(YTCommentsCanary)
-	owned, err := s.CreateTaskComment(ctx, task, "worker", "owned by the protocol")
-	if err != nil {
-		t.Fatal(err)
-	}
-	due, err := s.DueYouTrackPushTasks(ctx, 50)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, d := range due {
-		if d.ID == task {
-			t.Fatal("the legacy push picked a task whose only new comment the protocol owns")
-		}
-	}
-	got, err := s.UnpushedYouTrackComments(ctx, task, 0, 50)
-	if err != nil || len(got) != 0 {
-		t.Fatalf("legacy push would post %+v (%v)", got, err)
-	}
-	s.SetYTCommentsMode(YTCommentsOff)
-	free, err := s.CreateTaskComment(ctx, task, "worker", "not owned")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err = s.UnpushedYouTrackComments(ctx, task, 0, 50)
-	if err != nil || len(got) != 1 || got[0].ID != free.ID || got[0].ID == owned.ID {
-		t.Fatalf("unowned comment not offered to the legacy push: %+v %v", got, err)
-	}
-}
-
 func TestImportMarksProtocolOwnedComments(t *testing.T) {
 	s := schemaStore(t, "ytc_import")
 	ctx := t.Context()

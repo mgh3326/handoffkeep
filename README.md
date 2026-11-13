@@ -1,27 +1,17 @@
 # handoffkeep
-A durable home for coding-agent handoffs, working memory, and documents across sessions and machines.
+A durable home for coding-agent handoffs and documents across sessions and machines.
 
 ## Fleet console (/ui)
 
-The optional fleet console renders relay timelines, task queues, unresolved
-decisions, session checkpoints, and hub status. Authenticated operators can
-answer decision items individually or in batches, compose lane events, and
-close externally answered decisions with `handoffkeep decisions resolve`. It
-is mounted only when the Cloudflare Access configuration is
-complete and uses a separate Access assertion from the API bearer token. See
-[docs/ui.md](docs/ui.md) for configuration, security boundaries, hub behavior,
-and the SSE contract.
+The optional fleet console is a React app over `/ui/api/*`. It shows the work
+queue and task records, unresolved decisions, deploy status, and attention
+items. Authenticated operators answer structured decision requests and set
+task priority and lifecycle from it. It is mounted only when the Cloudflare
+Access configuration is complete and uses a separate Access assertion from the
+API bearer token. See [docs/ui.md](docs/ui.md) for views, configuration,
+security boundaries, and the write routes.
 
 Tasks may specify an optional expected duration at creation, for example `tasks add --expected 4h` or `--expected 1d`. Durations must be between 1 minute and 90 days; the server stores a normalized Go duration. The task API returns `expected` as a string, or `null` when unset.
-
-## Fleet metrics
-
-`handoffkeep fleet-metrics --machine <hub id> --since 7d` prints the five fleet
-operating metrics (order → usable time, verify rounds, empty task slots,
-decision dwell, normal-path share), each with the coverage of the identifiers
-it needs; a missing identifier lowers coverage and is never counted as 0. It
-only reads (hk GETs, local job directories, `pacelever reps list`, `gh api`).
-See [docs/fleet-metrics.md](docs/fleet-metrics.md).
 
 ## Version
 
@@ -85,14 +75,13 @@ values, or database error text are attached.
 
 `tasks` is the durable, Postgres-backed work queue for captains. A task belongs
 to a lane; `parent_lane` lets a parent captain list pending decisions from its
-child lanes. Creation starts in `backlog`. Claiming and `next` are atomic, so
+child lanes. Creation starts in `backlog`. A claim is atomic, so
 only one session can claim an item. Every state change, including a claim, is
 recorded in `task_events`.
 
 ```bash
 handoffkeep tasks add --lane lane-a --title "add queue endpoint" --kind implement --priority 10
 handoffkeep tasks list --lane lane-a --state backlog
-handoffkeep tasks next --lane lane-a --by session-a  # exits 3 when empty
 handoffkeep tasks transition 42 --to reviewing --pr https://github.com/org/repo/pull/7 --note "PR open"
 handoffkeep tasks rebind 42 --from-job old-job --to-job new-job --by new-builder --reason "builder takeover"
 handoffkeep tasks transition 42 --to needs_decision --question "Which interface should own this?"  # sets the awaiting_decision flag
@@ -160,10 +149,11 @@ handoffkeep tasks disposition summary [--as-of RFC3339] [--json]
 handoffkeep tasks disposition apply <id> [--note text]
 ```
 
-Only the operator's Access-authenticated web route answers an item
-(`/ui/dispositions/answer`, `/ui/dispositions/accept-batch`); generic
-transitions, `decisions resolve`, and compose are refused with
-`disposition_operator_only`. Silence changes nothing: no code path answers,
+Only the operator answers an item, through the console's email-identity routes
+`POST /ui/dispositions/answer` (one item) and `POST /ui/dispositions/accept-batch`
+(the recommended answer for a signed snapshot), with CSRF; see
+[docs/ui.md](docs/ui.md#disposition-items). Generic transitions and
+`decisions resolve` are refused with `disposition_operator_only`. Silence changes nothing: no code path answers,
 demotes, or claims an open item. `apply` records the director's application of
 the operator's answer with legal edges only (A/B/C → `merged`, D → `icebox`,
 E → `dropped`); an item never returns to `backlog`. An "A 배포" answer is
@@ -240,7 +230,7 @@ is never stored (API rows carry it read-only as `category`):
 | `completed` | `merged`, `deployed`, `completed` |
 | `canceled` | `dropped`, `duplicate`, `icebox` |
 
-Open means `started` and nothing else. A claim (`tasks claim`, `tasks next`)
+Open means `started` and nothing else. A claim (`tasks claim`)
 serves `backlog` and `unstarted` and sets the sub-state from the task kind:
 `implement`, `fix` and `ops` give `developing`; `verify` and `decide` give
 `researching`. Entering a started state needs `claimed_by` plus `refs.job_id`
@@ -266,16 +256,9 @@ the claim's sub-state, `verifying` and `join` → `reviewing`, `hold` →
 `icebox`, `needs_decision` → set `awaiting_decision`, `claimed` → the claim
 path, `reopened` → the reopen path); responses use only the current names.
 
-`task_origins` records where a task came from by the provider's durable id,
-not by its display number: `tasks origin add <id> --provider linear
---namespace NS --external-id <issue UUID> [--display-ref MGH-151]
-[--origin-url U] [--title T]`. A task may have any number of origins. Adding the
-same UUID again (an issue that moved from MGH-151 to ROB-1514) refreshes the
-display number, URL and title and makes no second row; `tasks origin list <id>`
-lists a task's origins and `tasks origin find --provider P --external-id UUID`
-finds every task that came from one external object. (`--url` stays the hk
-server, so the origin's own URL is `--origin-url`.) Origins between hk tasks are
-`task_relations`. `doc put --task N --origin-class authored|job|import` names the
+`task_origins` records where a task came from, keyed by the provider's durable
+id. The console shows a task's origins; this build has no API or CLI that adds
+one, and origins between hk tasks are `task_relations`. `doc put --task N --origin-class authored|job|import` names the
 task a document belongs to and how it came to be (kinds `decision`, `research`,
 `design`, `policy` and `evidence` are accepted too); `doc list --task N` lists
 them. A re-put that omits the two keeps the stored values; an unknown value
@@ -310,7 +293,7 @@ the document `task-body/<id>` and linked by `body_doc`.
 
 A repo session emits a whole ticket set with `POST /v1/ticket-sets` (`tickets
 emit --file set.json`; the document is described in
-`docs/linear-internalize.md`, "Ticket sets"). Every body needs the headings
+`git show 1e3d2fa8:git show 1e3d2fa8:docs/linear-internalize.md`, "Ticket sets"). Every body needs the headings
 Current, Desired, Key interfaces, Out of scope and Acceptance. One transaction
 creates the parent, the children (`parent_id`), their bodies and the `blocks`
 edges (`blocked_by` names a `ref` in the set or an existing task id); an
@@ -339,7 +322,7 @@ Ticket sets never stop for this check.
 ### Event-driven transitions, stalled and the backlog sweep
 
 Integration events move tasks forward under the rules in
-`docs/linear-internalize.md` ("Event-driven transitions").
+`git show 1e3d2fa8:git show 1e3d2fa8:docs/linear-internalize.md` ("Event-driven transitions").
 `POST /v1/task-events` takes `{source, source_ref, task_id, tasks, pr,
 reverted_pr, revert_pr, at}` for `mergewake.pr`, `mergewake.review`, `mergewake.merge` and
 `mergewake.revert`; `source_ref` is the PR URL, and for a revert the revert PR
@@ -381,11 +364,16 @@ A `mergewake.merge` event that applies to a task also applies, in the same
 transaction, to every other non-settled task whose `refs.pr` is that PR:
 implement tasks move to `merged`, and decide, verify and ops tasks close at
 `completed` with the PR as the result link. `handoffkeep tasks drift [--json]
-[--merged-days N]` (`GET /v1/tasks/drift?merged_days=N`, default 2) reads four
+[--merged-days N]` (`GET /v1/tasks/drift?merged_days=N`, default 2) reads five
 drift classes and writes nothing: settled tasks with an open decision request,
-unsettled tasks whose PR is already merged, merged tasks older than N days that
-no deploy record lists, and researching or developing tasks idle for
-`started_stalled_hours`. `handoffkeep tasks settle-merged [--project P]
+unsettled tasks whose PR is already merged (an implements change is merged and
+not reverted, and no revert is unrelanded), parents whose automatic close is due
+but not made (every sub-task settled, one did work, nothing re-ran the close),
+merged tasks older than N days that no deploy record lists, and researching or
+developing tasks idle for `started_stalled_hours`. The two close classes name
+what holds each task (`open_prs`, `reverted_prs`, `open_sub_tasks`, `hold`) and
+set `mechanical` when nothing holds it and the close gate passes: that is the
+row the hygiene job may apply. `handoffkeep tasks settle-merged [--project P]
 [--dry-run]` (`POST /v1/tasks/settle-merged`, body `{project, dry_run}`) moves
 each merged task whose implementing changes are all deployed to `deployed`
 (source `deploy`, ref `deploy:<attempt_id>`), and reports every other merged
@@ -403,8 +391,7 @@ recorded with `applied=false`, so they never read as transitions.
 1. `in_flight`: started tasks that are not waiting on a decision and not
    stalled, each with its newest event and `next_trigger` (`review`, `merge`
    or `deploy`, with the source that sends it). The header lists every project
-   with started tasks, its latest status update and `stale` when that update
-   is older than 7 days or missing.
+   with started tasks and how many of them are started.
 2. `waiting_on_operator`: open, not snoozed decision requests, grouped by
    task in the order of each task's oldest request; requests with no task last.
 3. `stalled`: stalled started tasks, oldest activity first, and `mergewake.merge`
@@ -426,28 +413,21 @@ empty delta, and the first ack starts the cursor at the feed's current
 continue. `handoffkeep since [--consumer desk] [--json]` prints section 5 with
 its rows.
 
-`POST /v1/projects/{name}/status-updates {health, body}` (`handoffkeep tasks
-project-status <name> --health on_track|at_risk|off_track --body <text>`)
-records a project's health. The server stores the project's task counts by
-category as `snapshot` and the change from the previous update as `diff`.
-`GET` on the same path (`handoffkeep tasks project-status <name> [--limit
-N]`) lists updates newest first with the project's `stale` flag. Schema
-version 36 adds `ledger_cursors` and `status_updates`.
+Project status updates (`status_updates`) are removed: no API, CLI or ledger
+line reads or writes them. Schema version 36 added that table and
+`ledger_cursors`; the table is left in place unused.
 
 The schema migration to this model (version 32) moves existing rows by the
-map in `docs/linear-internalize.md` and is reversible with
-`scripts/rollback-state-migration.sql`; `handoffkeep tasks migrate-states
---dry-run` (reads `HANDOFFKEEP_DB_URL`, writes nothing) prints the counts per
-`(legacy_state, rule, new_state)` before the server is upgraded.
+map in `docs/linear-internalize.md`. Its rollback script and the
+`tasks migrate-states` dry-run were removed after the upgrade; the migration
+itself stays registered.
 
 The HTTP API uses the usual bearer token: `POST /v1/tasks`, `GET /v1/tasks`,
 `GET /v1/tasks/{id}`, `POST /v1/tasks/{id}/claim`, and
-`POST /v1/tasks/{id}/transition`. `POST /v1/tasks/next` supports the CLI's
-atomic `next` operation. Invalid state changes and competing claims return 409.
+`POST /v1/tasks/{id}/transition`. Invalid state changes and competing claims return 409.
 `GET /v1/capabilities` (bearer, any client) returns `{"protocol_version": N,
 "features": [...]}`: the request shapes this build accepts, such as
-`claim_job_id`, `claim_no_job`, `next_job_id`, `next_no_job`,
-`transition_no_job`, `resolve_no_job` and `disposition_project`. The CLI reads
+`claim_job_id`, `claim_no_job`, `transition_no_job`, `resolve_no_job` and `disposition_project`. The CLI reads
 it once per process and refuses a shape the server does not list, with
 `server_lacks_feature:<name>`, before it sends anything. A server that answers
 404 predates the route, and its requests go out as before. The list is
@@ -612,13 +592,13 @@ on serve's YouTrack read-through, which has its own
 
 `doc get <key>` fetches a document by key; `doc get --id <n>` fetches one by
 its numeric id (`GET /v1/documents?id=<n>`, `404 not_found` when absent,
-`400 invalid_document_id` for a malformed id). `ctx search --scope docs` and
-`ctx search --scope all` treat a bare-number or `#<n>` query as a document-id
-lookup — the exact match leads the page and a missing id returns an empty
-result set, the same way
-`--scope tasks` resolves task ids. Search pages default to 20 rows (hard cap
-100, `--scope tasks` 50); a page cut at the cap marks every row
-`truncated: true` rather than presenting a partial set as complete.
+`400 invalid_document_id` for a malformed id). `GET /v1/search` treats a
+bare-number or `#<n>` query as a document-id lookup — the exact match leads the
+page and a missing id returns an empty result set, the same way `--scope tasks`
+resolves task ids. Search pages default to 20 rows (hard cap 100, `tasks` scope
+50); a page cut at the cap marks every row `truncated: true` rather than
+presenting a partial set as complete. (The checkpoint search, `ctx`, was removed:
+`scope=ctx` is refused.)
 
 ## Relay events
 
@@ -715,8 +695,8 @@ Configure `HK_S3_ENDPOINT`, `HK_S3_BUCKET`, `HK_S3_ACCESS_KEY_ID`, and
 also be `virtual`. OCI Object Storage uses
 `https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`, requires
 `HK_S3_REGION` to match the endpoint region, and uses path lookup. When any
-required setting is absent, only attachments are disabled; checkpoints, memory,
-and documents continue to work.
+required setting is absent, only attachments are disabled; documents
+continue to work.
 
 The default safety limits are a 50 MiB object maximum, 20 GB total storage,
 800,000 monthly writes, and 8,000,000 monthly reads. Set the corresponding
@@ -725,11 +705,10 @@ are secret-scanned, MIME is sniffed and allowlisted, and dump/archive filename
 extensions are rejected. Objects are never made public.
 
 ```bash
-handoffkeep attach put image.png --checkpoint 42
+handoffkeep attach put image.png --task 42
 handoffkeep attach get SHA256 -o image.png
 handoffkeep attach list --doc jobs/example/brief.md
 handoffkeep attach usage
-handoffkeep r2usage --alert
 ```
 
 `attach migrate` copies every object from one environment prefix to another,
@@ -745,7 +724,7 @@ handoffkeep attach migrate --from HK --to OCI --apply
 ```
 
 HTTP clients use raw `PUT /v1/attachments` with `X-HK-Name`, `Content-Type`,
-and optional `X-HK-Ref` (`checkpoint:<id>`, `document:<key>`,
+and optional `X-HK-Ref` (`document:<key>`,
 `memory:<agent>/<name>`, or `task:<id>`). Remote MCP clients use the
 `attachment_put` tool instead: base64 `content_base64`, `name`, optional `mime`
 and `ref`, at most 10 MiB raw. It returns the `sha256`, `size_bytes`, `mime`,
@@ -759,20 +738,7 @@ reports, per authenticated client, the CLI revision from its last
 `handoffkeep_client_last_seen_seconds{client}`). This is process memory: a
 restart forgets it until each client calls again. The server logs
 `api.client_revision client=... rev=... prev=...` when a client's revision
-changes (including its first request after a restart). `r2usage` is optional
-and safely reports `skipped` when Cloudflare analytics credentials are absent.
-
-## O3 contract fixture pack
-
-`testdata/o3/` is the machine-readable contract pack for the O3 authority
-design (`hk:doc designs/hk1873/b1873a-sol-r4`, doc 44185, revision 4,
-amendment 1): the Draft 2020-12 schema bundle, every normative vector
-table as data, sanitized legacy event fixtures, the command matrix, CLI
-subcommand/exit maps, and a hashed manifest. It changes only with a new
-design revision. `go test ./internal/o3contract/...` verifies the pack
-against itself — schema validity, internal ref resolution, per-vector
-request/record conformance, error-code/exit-map consistency, manifest
-hashes, and per-table case counts. See `testdata/o3/README.md`.
+changes (including its first request after a restart).
 
 ## Container image
 

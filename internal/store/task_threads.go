@@ -17,8 +17,9 @@ import (
 // first enters a started state, then one line per record about it: PR
 // opened, review gate verdict, merged, deployed, deploy failed or rolled back,
 // reverted, decision opened, decision answered, and closed. Discord is a view:
-// every line is rendered from the record (task_events, changes, deploys,
-// decision_requests), and nothing is read back.
+// every line is rendered from the record (task_events, change_gate_events,
+// changes, deploys, decision_requests), and nothing is read back. A review
+// line is one gate decision in change_gate_events, keyed by its id (hk 4000).
 //
 // Delivery is at most once per line. The worker claims a row (claim_key,
 // claimed_at) and commits the claim before it sends, then settles the send's
@@ -294,11 +295,11 @@ const taskThreadPostableEventSQL = `(e.source IN ('` + SourceMergewakePR + `','`
 
 // taskThreadItemsSQL lists the next line owed to every active, unclaimed,
 // due delivery: per delivery its first postable task event past the cursor,
-// and every review gate verdict, deploy failure or rollback, and decision
+// and every review gate decision that changed the verdict, deploy failure or rollback, and decision
 // opened or answered since the thread's start that it has not posted. $1 is
 // the destination, $2 now, $3 the cutoff before which a settled task is no
 // longer checked, $4 the cutoff a decision must be older than (as for the
-// decisions channel, so the Linear path can supersede it first).
+// decisions channel, DecisionNoticePostDelay).
 const taskThreadItemsSQL = `WITH d AS (
 	SELECT n.task_id,n.since,n.last_event_id,n.posted FROM task_thread_deliveries n JOIN tasks t ON t.id=n.task_id
 	WHERE n.destination=$1 AND n.state='` + TaskThreadActive + `' AND n.claim_key='' AND n.next_attempt_at<=$2::timestamptz
@@ -307,10 +308,10 @@ const taskThreadItemsSQL = `WITH d AS (
 	SELECT d.task_id,e.at,'e:'||e.id AS key,1 AS src,e.id AS ref FROM d CROSS JOIN LATERAL (
 		SELECT e.id,e.at FROM task_events e WHERE e.task_id=d.task_id AND e.id>d.last_event_id AND ` + taskThreadPostableEventSQL + ` ORDER BY e.id LIMIT 1) e
 	UNION
-	SELECT d.task_id,c.gate_decided_at,'g:'||c.id||':'||c.gate_head||':'||c.gate_state,2,c.id
-	FROM d JOIN change_tasks ct ON ct.task_id=d.task_id JOIN changes c ON c.id=ct.change_id
-	WHERE c.gate_state IN ('ready','blocked') AND c.gate_head IS NOT NULL AND c.gate_decided_at>=d.since
-	AND NOT (('g:'||c.id||':'||c.gate_head||':'||c.gate_state)=ANY(d.posted))
+	SELECT d.task_id,ev.decided_at,'g:'||ev.id,2,ev.id
+	FROM d JOIN change_tasks ct ON ct.task_id=d.task_id JOIN change_gate_events ev ON ev.change_id=ct.change_id
+	WHERE ev.changed AND ev.state IN ('ready','blocked') AND ev.decided_at>=d.since
+	AND NOT (('g:'||ev.id)=ANY(d.posted))
 	UNION
 	SELECT d.task_id,dp.finished_at,'d:'||dp.id,3,dp.id
 	FROM d JOIN change_tasks ct ON ct.task_id=d.task_id JOIN deploy_changes dc ON dc.change_id=ct.change_id AND dc.included JOIN deploys dp ON dp.id=dc.deploy_id
@@ -341,7 +342,7 @@ func (s *Store) ClaimTaskThread(ctx context.Context, now time.Time) (TaskThreadI
 	}
 	defer tx.Rollback(ctx)
 	x := TaskThreadItem{Destination: dest, Type: TaskThreadCreate, Key: TaskThreadCreate}
-	err = tx.QueryRow(ctx, `SELECT n.task_id,n.thread_name,n.attempts,n.state='`+TaskThreadCreating+`',coalesce(t.project,''),t.kind,coalesce(t.refs->'linear'->>'grade',''),coalesce(t.refs->'linear'->>'tier','')
+	err = tx.QueryRow(ctx, `SELECT n.task_id,n.thread_name,n.attempts,n.state='`+TaskThreadCreating+`',coalesce(t.project,''),t.kind,coalesce(nullif(t.refs->>'grade',''),t.refs->'linear'->>'grade',''),coalesce(nullif(t.refs->>'tier',''),t.refs->'linear'->>'tier','')
 		FROM task_thread_deliveries n JOIN tasks t ON t.id=n.task_id
 		WHERE n.destination=$1 AND n.state IN ('`+TaskThreadPending+`','`+TaskThreadCreating+`') AND n.claim_key='' AND n.next_attempt_at<=$2::timestamptz
 		ORDER BY n.next_attempt_at,n.start_event_id LIMIT 1 FOR UPDATE OF n SKIP LOCKED`, dest, now).
@@ -415,9 +416,13 @@ func loadTaskThreadLine(ctx context.Context, tx pgx.Tx, x *TaskThreadItem, src i
 			x.Type = TaskLineIcebox
 		}
 	case 2:
-		// The key carries the verdict the line reports: g:<change>:<head>:<state>.
+		// ref is the gate decision (change_gate_events, hk 4000): its verdict
+		// and change are the record; the key is g:<event id>.
 		x.Type = TaskLineReview
-		x.GateState = x.Key[strings.LastIndex(x.Key, ":")+1:]
+		var changeID int64
+		if err := tx.QueryRow(ctx, `SELECT change_id,state FROM change_gate_events WHERE id=$1`, ref).Scan(&changeID, &x.GateState); err != nil {
+			return err
+		}
 		var repo string
 		var number int
 		f := &x.Open
@@ -427,7 +432,7 @@ func loadTaskThreadLine(ctx context.Context, tx pgx.Tx, x *TaskThreadItem, src i
 				count(*) FILTER (WHERE f.severity='medium' AND `+findingStatusSQL+`='open'),
 				count(*) FILTER (WHERE f.severity='low' AND `+findingStatusSQL+`='open')
 			FROM changes c LEFT JOIN change_findings f ON f.change_id=c.id `+findingThreadJoin+`
-			WHERE c.id=$1 GROUP BY c.id`, ref).Scan(&repo, &number, &f.Critical, &f.High, &f.Medium, &f.Low); err != nil {
+			WHERE c.id=$1 GROUP BY c.id`, changeID).Scan(&repo, &number, &f.Critical, &f.High, &f.Medium, &f.Low); err != nil {
 			return err
 		}
 		x.PR = changeURL(repo, number)
@@ -501,7 +506,7 @@ func (s *Store) SettleTaskThread(ctx context.Context, now time.Time, x TaskThrea
 		if wait > 0 {
 			attempts = x.Attempts
 		} else {
-			wait = linearDecisionOpBackoff(x.Attempts)
+			wait = deliveryBackoff(x.Attempts)
 		}
 		switch {
 		case attempts >= taskThreadMaxAttempts && create && x.Lookup:

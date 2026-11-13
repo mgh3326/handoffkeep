@@ -254,59 +254,6 @@ func TestDecisionDeliveryWorkerPostsOnceAndEditsEachClose(t *testing.T) {
 	}
 }
 
-// A request asked through Linear is announced by the Linear flow only: its
-// task_request row is superseded before the post delay ends, and the linear
-// row is never queued. A plain request on another task still posts.
-func TestDecisionNotifierLeavesLinearRequestsToTheLinearFlow(t *testing.T) {
-	st, task := decisionStoreFixture(t)
-	discord := newFakeDiscord(t)
-	if _, err := (LinearDecisions{Team: "ROB", Linear: newFakeLinear()}).Ask(t.Context(), st, task.ID, "test-answerer", askInput()); err != nil {
-		t.Fatal(err)
-	}
-	plainTask, err := st.CreateTask(t.Context(), store.Task{Lane: "decision-lane", Title: "plain ask", Kind: "implement", CreatedBy: "t", Project: task.Project})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.RecordDecisionRequest(t.Context(), plainTask.ID, "test-answerer", askInput()); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	rows := map[string][]store.DecisionRecord{}
-	for _, status := range []string{store.DecisionStatusOpen, store.DecisionStatusSuperseded} {
-		list, err := st.ListDecisionRecords(t.Context(), store.DecisionRecordFilter{Status: status}, now)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, x := range list {
-			rows[x.Source] = append(rows[x.Source], x)
-		}
-	}
-	if len(rows[store.DecisionSourceLinear]) != 1 || len(rows[store.DecisionSourceTaskRequest]) != 2 {
-		t.Fatalf("rows=%+v", rows)
-	}
-	DecisionNotifier{Store: st, Discord: discord.webhook(), Now: clockAt(now.Add(2 * time.Minute))}.Drain(t.Context())
-	posts := discord.take()
-	if len(posts) != 1 || !strings.Contains(posts[0].Content, fmt.Sprintf("task #%d: plain ask", plainTask.ID)) {
-		t.Fatalf("posts=%+v", posts)
-	}
-	if _, found, err := st.GetDecisionNotice(t.Context(), rows[store.DecisionSourceLinear][0].ID); err != nil || found {
-		t.Fatalf("linear row queued: found=%v err=%v", found, err)
-	}
-	for _, x := range rows[store.DecisionSourceTaskRequest] {
-		state := noticeOf(t, st, x.ID)
-		switch x.TaskID != nil && *x.TaskID == task.ID {
-		case true:
-			if state.AppliedVersion != store.DecisionStatusSuperseded || state.MessageID != "" {
-				t.Errorf("the Linear request's task_request row: %+v", state)
-			}
-		default:
-			if state.AppliedVersion != store.DecisionStatusOpen || state.MessageID == "" {
-				t.Errorf("plain request row: %+v", state)
-			}
-		}
-	}
-}
-
 // The webhook URL is a credential: no failure may put it in an error, a log
 // line or last_error_code.
 func TestDecisionDeliveryWorkerRetriesWithoutLeakingTheWebhookURL(t *testing.T) {
@@ -736,12 +683,12 @@ func TestDecisionNoticeMentionsTheOperatorOnPressingFirstPosts(t *testing.T) {
 		}
 		mentionsOff(t, calls)
 	}
-	if err := discord.webhook().Post(t.Context(), "<@"+op+"> linear flow"); err != nil {
+	if err := discord.webhook().Post(t.Context(), "<@"+op+"> plain send"); err != nil {
 		t.Fatal(err)
 	}
 	calls = discord.take()
 	if len(calls) != 1 || calls[0].Users != nil {
-		t.Fatalf("linear flow send: %+v", calls)
+		t.Fatalf("plain send: %+v", calls)
 	}
 	mentionsOff(t, calls)
 }
@@ -892,5 +839,34 @@ func TestDecisionDiscordTemplate(t *testing.T) {
 		if !strings.Contains(posts[0].Content, want) {
 			t.Errorf("missing %q in %q", want, posts[0].Content)
 		}
+	}
+}
+
+// decisionStoreFixture is a real store with one task, in a throwaway schema.
+func decisionStoreFixture(t *testing.T) (*store.Store, store.Task) {
+	t.Helper()
+	_, url := testdb.Schema(t, "hkdecide")
+	st, err := store.Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	project := "decision-project"
+	if _, err := st.AddTaskProject(t.Context(), project, "t"); err != nil {
+		t.Fatal(err)
+	}
+	x, err := st.CreateTask(t.Context(), store.Task{Lane: "decision-lane", Title: "decide", Kind: "implement", CreatedBy: "t", Project: &project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st, x
+}
+
+func askInput() store.DecisionRequestInput {
+	due := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	return store.DecisionRequestInput{
+		Question: "Ship the migration?",
+		Options:  store.DecisionOptions{Options: []store.DecisionOption{{Key: "A", Label: "ship now", Recommended: true}, {Key: "B", Label: "wait a week"}}},
+		Reason:   "low risk", DefaultAction: "hold", DefaultOption: "B", DueAt: &due, Doc: "design/x", Refs: []string{"handoffkeep#107"},
 	}
 }

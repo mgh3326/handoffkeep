@@ -21,11 +21,6 @@ import (
 )
 
 type Backend interface {
-	Checkpoint(context.Context, string, store.Checkpoint) (store.Checkpoint, error)
-	Recent(context.Context, string, string, int) ([]store.Checkpoint, error)
-	PutMemory(context.Context, string, store.Memory) (store.Memory, error)
-	GetMemory(context.Context, string, string) (store.Memory, bool, error)
-	ListMemory(context.Context, string, bool) ([]store.Memory, error)
 	PutDocument(context.Context, string, store.Document) (store.Document, bool, error)
 	GetDocument(context.Context, string) (store.Document, bool, error)
 	ListDocuments(context.Context, string, string, string, int64, int) ([]store.Document, error)
@@ -55,7 +50,7 @@ var attachmentPutDescription = "Upload one attachment from base64 content; the r
 	"name is the original file name; mime is optional and defaults to the sniffed type. " +
 	"Allowed types by default: " + strings.ReplaceAll(attachments.DefaultMIMEAllow, ",", ", ") + ". " +
 	"Text is refused when the secret guard matches it. " +
-	"ref is optional: checkpoint:<id>, document:<key>, memory:<agent>/<name>, task:<id>, or none. " +
+	"ref is optional: document:<key>, memory:<agent>/<name>, task:<id>, or none. " +
 	"Returns sha256, size_bytes, mime, ref, reference (hk:attachment/<sha256>, the stable reference records store) " +
 	"and lookup_path (GET /v1/attachments/<sha256> with the bearer token). " +
 	"The signed download URL is never returned; attachment_get_url issues one valid for ten minutes."
@@ -64,7 +59,7 @@ var attachmentPutDescription = "Upload one attachment from base64 content; the r
 // allowed-type list comes from the same constant the manager enforces.
 var attachmentUploadBeginDescription = "Start a direct upload: hk checks the declaration and returns upload_id and a presigned PUT url for a staging object, so the file bytes do not pass through hk. " +
 	"PUT exactly size bytes to url with no authorization header; the url is the credential, valid for ten minutes. Then call attachment_upload_complete with upload_id. " +
-	"Declared: name; mime (allowed by default: " + strings.ReplaceAll(attachments.DefaultMIMEAllow, ",", ", ") + "); size in bytes, at most the server cap; sha256 of the bytes as lowercase hex; optional ref (checkpoint:<id>, document:<key>, memory:<agent>/<name>, task:<id>, or none). " +
+	"Declared: name; mime (allowed by default: " + strings.ReplaceAll(attachments.DefaultMIMEAllow, ",", ", ") + "); size in bytes, at most the server cap; sha256 of the bytes as lowercase hex; optional ref (document:<key>, memory:<agent>/<name>, task:<id>, or none). " +
 	"Refused now: a disallowed name, mime or size, a bad sha256 or ref, or no capacity. " +
 	"Completion checks the bytes against size and sha256, sniffs the type and secret-scans text; a mismatch or refusal deletes the staged object and is final. " +
 	"Never log the url."
@@ -124,7 +119,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		}
 		return &gmcp.CallToolResult{Content: []gmcp.Content{&gmcp.TextContent{Text: string(b)}}}, nil, nil
 	}
-	gmcp.AddTool(s, &gmcp.Tool{Name: "search_context", Description: "Search checkpoints, documents, or memory.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
+	gmcp.AddTool(s, &gmcp.Tool{Name: "search_context", Description: "Search documents or tasks.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Q       string `json:"q"`
 		Scope   string `json:"scope,omitempty"`
 		Session string `json:"session,omitempty"`
@@ -138,29 +133,6 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 			return nil, nil, e
 		}
 		return result(map[string]any{"results": v})
-	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "recent_checkpoints", Description: "Read recent checkpoints for one session.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
-		Session string `json:"session"`
-		Limit   int    `json:"limit,omitempty"`
-	}) (*gmcp.CallToolResult, any, error) {
-		v, e := service.Recent(ctx, x.Session, "", x.Limit)
-		if e != nil {
-			return nil, nil, e
-		}
-		return result(map[string]any{"checkpoints": v})
-	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "put_checkpoint", Description: "Store a session checkpoint.", Annotations: writeAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
-		Session string     `json:"session"`
-		Kind    string     `json:"kind"`
-		Title   string     `json:"title"`
-		Body    string     `json:"body"`
-		Refs    store.Refs `json:"refs,omitempty"`
-	}) (*gmcp.CallToolResult, any, error) {
-		v, e := service.Checkpoint(ctx, client, store.Checkpoint{Session: x.Session, Kind: x.Kind, Title: x.Title, Body: x.Body, Refs: x.Refs})
-		if e != nil {
-			return nil, nil, e
-		}
-		return result(v)
 	})
 	gmcp.AddTool(s, &gmcp.Tool{Name: "get_document", Description: "Get a document by key.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Key string `json:"key"`
@@ -195,38 +167,6 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 			return nil, nil, e
 		}
 		return result(map[string]any{"documents": v})
-	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "memory_get", Description: "Get one agent memory.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
-		Agent string `json:"agent"`
-		Name  string `json:"name"`
-	}) (*gmcp.CallToolResult, any, error) {
-		v, ok, e := service.GetMemory(ctx, x.Agent, x.Name)
-		if e != nil {
-			return nil, nil, e
-		}
-		return result(map[string]any{"found": ok, "memory": v})
-	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "memory_put", Description: "Create or update agent memory.", Annotations: writeAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
-		Agent       string `json:"agent"`
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Type        string `json:"type"`
-		Content     string `json:"content"`
-	}) (*gmcp.CallToolResult, any, error) {
-		v, e := service.PutMemory(ctx, client, store.Memory{Agent: x.Agent, Name: x.Name, Description: x.Description, Type: x.Type, Content: x.Content})
-		if e != nil {
-			return nil, nil, e
-		}
-		return result(v)
-	})
-	gmcp.AddTool(s, &gmcp.Tool{Name: "memory_list", Description: "List agent memory metadata.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
-		Agent string `json:"agent"`
-	}) (*gmcp.CallToolResult, any, error) {
-		v, e := service.ListMemory(ctx, x.Agent, false)
-		if e != nil {
-			return nil, nil, e
-		}
-		return result(map[string]any{"memory": v})
 	})
 	gmcp.AddTool(s, &gmcp.Tool{Name: "attachment_list", Description: "List immutable attachment metadata, optionally by reference.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Ref   string `json:"ref,omitempty"`
@@ -353,13 +293,6 @@ func HTTPHandler(service api.Service, tokens api.Tokens, access *cfaccess.Verifi
 			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 			return
 		}
-		ctx := withPrincipal(r.Context(), p)
-		// A bearer token is fenced as the transport-authenticated client id it
-		// always was. An Access identity is an operator path like the console,
-		// which deliberately has no implicit central-role principal.
-		if !p.Access {
-			ctx = store.WithWrkPrincipal(ctx, p.Actor, nil)
-		}
-		h.ServeHTTP(w, r.WithContext(ctx))
+		h.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), p)))
 	})
 }

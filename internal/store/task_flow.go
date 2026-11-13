@@ -11,7 +11,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
-	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
 var (
@@ -209,17 +208,11 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 		}
 		return Task{}, err
 	}
-	// Match NextTask's key-presence exclusion, including malformed/null refs.
+	// Match the claim path's key-presence exclusion, including malformed/null refs.
 	if hasDisposition {
 		return Task{}, fmt.Errorf("%w: disposition items cannot be claimed directly", ErrTaskConflict)
 	}
 
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
-		return Task{}, err
-	}
-	if err := s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: jobID, Binding: true}); err != nil {
-		return Task{}, err
-	}
 	if !IsClaimableState(x.State) || x.AwaitingDecision {
 		// A replayed claim — same claimant, same non-empty job id — is a
 		// no-op: the row is returned as recorded and no second event is
@@ -267,14 +260,6 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 		return Task{}, err
 	} else if moved {
 		x.LastActivityAt = now.Truncate(time.Microsecond)
-	}
-	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
-		if err := enqueueLinearTaskTransition(ctx, tx, x, ""); err != nil {
-			return Task{}, err
-		}
-	}
-	if err := s.recordLinearBoardTaskTx(ctx, tx, x, ""); err != nil {
-		return Task{}, err
 	}
 	return x, nil
 }
@@ -408,32 +393,6 @@ func resolveTransitionTarget(x Task, to string) (transitionAction, string, error
 	return actMove, to, nil
 }
 
-// fenceTarget is the target the wrk receipt fence judges. The fence predates
-// the new names: it asks for a joined receipt on join and merged and an end
-// receipt on dropped, so a caller that sent the old name keeps its receipt
-// requirement and a duplicate counts as dropped.
-func fenceTarget(requested, canonical string) string {
-	if requested == legacyJoin {
-		return legacyJoin
-	}
-	return FenceTarget(canonical)
-}
-
-// FenceTarget maps a requested state name to the target the wrk receipt fence
-// understands: a duplicate counts as dropped, deployed as merged, and
-// reviewing as verifying, so terminal moves retain a terminal receipt gate.
-func FenceTarget(to string) string {
-	switch to {
-	case StateDuplicate:
-		return StateDropped
-	case StateDeployed:
-		return StateMerged
-	case StateReviewing:
-		return legacyVerifying
-	}
-	return to
-}
-
 func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput, reopen bool) (Task, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -542,14 +501,6 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		action, to = actClearFlag, x.State
 	}
 
-	if err := s.wrkTaskFenceTx(ctx, tx, x, fenceTarget(in.To, to), refs != nil || reopen); err != nil {
-		return Task{}, err
-	}
-	if refs != nil && refs.JobID != "" {
-		if err := s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: refs.JobID, Binding: true}); err != nil {
-			return Task{}, err
-		}
-	}
 	from := x.State
 	if in.DuplicateOf != 0 && (action != actMove || to != StateDuplicate) {
 		return Task{}, errors.New("invalid task transition: duplicate_of applies only to a duplicate transition")
@@ -818,14 +769,6 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 			return Task{}, err
 		}
 	}
-	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
-		if err = enqueueLinearTaskTransition(ctx, tx, x, note); err != nil {
-			return Task{}, err
-		}
-	}
-	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
-		return Task{}, err
-	}
 	if leavingTriage {
 		// A delivered close is not a decline: the set's children keep their
 		// own state, with --set too.
@@ -1024,9 +967,6 @@ func (s *Store) cascadeTriageTx(ctx context.Context, tx pgx.Tx, parent Task, acc
 		if err = triageGate(c, to, childNote); err != nil {
 			return fmt.Errorf("sub-task #%d: %w", c.ID, err)
 		}
-		if err = s.wrkTaskFenceTx(ctx, tx, c, FenceTarget(to), false); err != nil {
-			return err
-		}
 		if accepting {
 			if err = writeTriageFieldsTx(ctx, tx, before, c, by, now); err != nil {
 				return err
@@ -1046,14 +986,6 @@ func (s *Store) cascadeTriageTx(ctx context.Context, tx pgx.Tx, parent Task, acc
 			return err
 		}
 		if err = s.afterStateChangeTx(ctx, tx, c, StateTriage, by, now); err != nil {
-			return err
-		}
-		if s.LinearSyncEnabled() && c.Refs.Linear != nil && c.Refs.Linear.Sync {
-			if err = enqueueLinearTaskTransition(ctx, tx, c, childNote); err != nil {
-				return err
-			}
-		}
-		if err = s.recordLinearBoardTaskTx(ctx, tx, c, childNote); err != nil {
 			return err
 		}
 	}

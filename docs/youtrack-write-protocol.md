@@ -757,9 +757,37 @@ list. A task with no hk project uses that bucket, matching the import's
 project and the YouTrack project's short name. In mode on, every task creator
 (`CreateTask`, intake, ticket sets, dots, dispositions) prepares it in the
 task's own transaction when its project has a `youtrack_projects` row with a
-project id, or when its project is empty (to the `HK` bucket); otherwise no op
-and one `ytwrite.issue_skipped` line. Setting or changing the project of an
-unbound task also prepares its issue_create when no create op already exists.
+project id, or when its project is empty (to the `HK` bucket); otherwise no op,
+one `ytwrite.issue_skipped` line and a `yt_issue_intents` row on the gate's
+tenant (migration `20261113-yt-issue-intents`, hk 3942). An intent is made
+only when the task is created. Before each Drive pass the write worker in mode
+on prepares the op of every intent of its own tenant whose task's project now
+has its mapping, under the task's lane lock, and drops the intent; an intent of
+another tenant is never consumed there. Setting or changing the project of an
+unbound task also prepares its issue_create when no create op already exists,
+on its intent's tenant when it has one (and drops the intent); a move to an
+unmapped project records nothing. A task that got an issue another way
+meanwhile only loses its intent. `issues-backfill` reads the task under its
+lane lock; on another tenant than an intent's it leaves that task alone
+(counted `other_tenant`); on the intent's tenant it prepares the op and drops
+the intent.
+
+**Project changes (hk 3909, 4318).** A move never touches a prepared op: its
+claim does. The claim that dispatches an issue_create op reads the task's
+project under the lane lock and, when it maps to another YouTrack project (or
+to the same one under another hk project), sends the op there: the same op,
+with the same id, key (`task-issue:<id>`) and place on the lane, gets the
+current project's `yt_target_id`, payload and payload hash in the update that
+dispatches it (`ytwrite.issue_retargeted` line). The `yt_write_ops` guard
+allows exactly that change (migration `20261113-yt-issue-claim-target`). A
+task whose project now maps to no YouTrack project (or that has none in a
+process that does not know the `HK` bucket) has its op sent as it was
+prepared, as before hk 4318. An op deferred back to `prepared` is retargeted
+at its next claim; one already sent is never changed, and a move that commits
+after the claim is followed like any bound task's (`issue_move`). Comments
+queued behind the op stay behind it and take their target from the binding
+it publishes, which names that op, so the previous release reads the same
+state the same way: it creates the issue where the op was prepared.
 A task the protocol cannot render (an actor
 with ` · `, a title quoting the marker) gets the op rejected `invalid_issue`.
 `handoffkeep youtrack issues-backfill [--project P] [--dry-run]` prepares the
@@ -910,7 +938,7 @@ snapshot. `PayloadSHA` covers the snapshot, the issue and the tenant.
 collapsed, cut to 250 runes. Fields, every one in every op (no value clears
 it): `hk ID`, `hk 프로젝트` (the project, `Unassigned` for none), `hk 상태` (the
 Korean label), `hk 우선순위`, `레인`, `종류`, `등급` and `티어` (the title's `(grade
-G, T)` marker, else `refs.linear`), `PR`, `작업 job`, `멈춤` (`멈춤` when stalled),
+G, T)` marker, else `refs.grade`/`refs.tier`), `PR`, `작업 job`, `멈춤` (`멈춤` when stalled),
 `마감` (epoch ms), `영역`, `마일스톤` (the milestone's name), `예상 소요` (whole
 minutes). The description is a stable hk block with no op marker and no
 provenance line, so the same task renders the same text; empty lines after

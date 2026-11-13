@@ -5,8 +5,7 @@ the task record and document deep links. This page describes the system that
 ships, not a proposal. Palette derivation, the component specification and the
 pre-delivery checklist live in the hk doc
 `design/2026-11-06/console-design-system`; the checklist is answered for the
-whole console in the change that updates this page. Captures with fictional data
-are in [console-shots](console-shots/capture.json).
+whole console in the change that updates this page.
 
 ## Superseded
 
@@ -17,9 +16,9 @@ here.
 
 The mock pages, **My work**, the command palette and the Fleet hosts, Grades and
 docs-browse screens no longer have a view. `/ui/fleet`, `/ui/grades` and
-`/ui/docs` render the moved notice, and the `/ui/queue` bookmark redirects to
-Work. The server-rendered `/ui/timeline`, `/ui/compose` and
-`/ui/decisions/legacy` pages remain outside the new navigation.
+`/ui/docs` are not routed, and the `/ui/queue` bookmark redirects to Work. The
+server-rendered `/ui/timeline`, `/ui/compose` and `/ui/decisions/legacy` pages
+were removed (hk 4429); see [ui.md](ui.md).
 
 ## Tokens
 
@@ -164,26 +163,3 @@ Jobs, Durations and Events. Work rows, Home rows and decision pages link here.
 markdown through a lazy renderer; a payload that cannot be rendered is shown as
 raw text rather than an empty document. The document is the only view that loads
 the markdown chunk, so Home and Work never pay for it.
-
-## Captures
-
-Seven routes — home, work, task, decisions, decision, deploys and document — at
-1440px and 390px in dark and light, 28 PNGs. Each page is one viewport as tall
-as the document, so the fixed tab bar sits at the real bottom edge instead of
-being stitched into the middle by a full-page capture. The filenames encode
-page, theme and width; the [manifest](console-shots/capture.json) records the
-browser, URL, overflow check and page errors for every view.
-
-Regenerate with the pinned Node runtime and an isolated `playwright-core`
-install:
-
-```sh
-HK_CONSOLE_CAPTURE_DIR=/tmp/hk-console-pages go test -p 2 ./internal/ui -run TestConsoleRouteDocuments
-NODE_PATH=/tmp/hk-console-capture/node_modules node docs/console-capture.cjs
-```
-
-Set `CHROME_PATH` when Chrome is installed elsewhere. The harness serves the
-embedded shell document and the committed bundle against fictional same-origin
-responses; it starts no server and closes the Chrome process it launches. A
-`/ui/static/*` request is read from `internal/ui/static`, so fonts load from the
-same bundle as production.

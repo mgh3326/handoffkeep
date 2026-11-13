@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
@@ -105,18 +106,20 @@ func TestForwardSendsOneEventAndRecordsTheReceipt(t *testing.T) {
 		{Kind: store.OutboxKindDotsFollowup, TargetLane: "operator-desk", EventID: "dots-followup-3", Text: "f"},
 		{Kind: store.OutboxKindDecisionAnswered, TargetLane: "operator-desk", EventID: "dr-1-1-answered", Text: "d"},
 		{Kind: store.OutboxKindChatAnswer, TargetLane: "other-lane", EventID: "Q-1-rev1-answered", Text: "c"},
+		{Kind: store.OutboxKindDotsBlocked, TargetLane: "operator-desk", EventID: "dots-4", Text: "b"},
 	}}
 	f, hub, _ := forwarderFixture(t, outbox)
 	sent, failed, err := f.Once(t.Context())
-	if err != nil || sent != 5 || failed != 0 {
+	if err != nil || sent != 6 || failed != 0 {
 		t.Fatalf("sent=%d failed=%d err=%v", sent, failed, err)
 	}
 	want := []struct{ lane, event, typ string }{
-		{"operator-desk", "dots-1", "report"},
+		{"operator-desk", "dots-1", "ready"},
 		{"operator-desk", "dots-2", "decision"},
 		{"operator-desk", "dots-followup-3", "info"},
 		{"operator-desk", "dr-1-1-answered", "decision"},
 		{"other-lane", "Q-1-rev1-answered", "info"},
+		{"operator-desk", "dots-4", "blocked"},
 	}
 	if len(hub.posts) != len(want) {
 		t.Fatalf("posts=%v", hub.posts)
@@ -227,9 +230,7 @@ func TestForwardAgainstStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	if _, err := st.RecordDotsFollowup(t.Context(), store.DotsIssue{Identifier: "ZZZ-1", Title: "t", URL: "u", IssueUUID: "0a1b2c3d-0000-4000-8000-0000000000f1"}, "0a1b2c3d-0000"); err != nil {
-		t.Fatal(err)
-	}
+	seedOutboxRow(t, url)
 	f, hub, now := forwarderFixture(t, st)
 	hub.failures = 1
 	if _, failed, err := f.Once(t.Context()); err != nil || failed != 1 {
@@ -251,5 +252,19 @@ func TestForwardAgainstStore(t *testing.T) {
 	}
 	if len(hub.rows) != 1 {
 		t.Fatalf("hub rows=%v", hub.rows)
+	}
+}
+
+// seedOutboxRow queues one lane notification in the schema at url, the row
+// a dots follow-up writes.
+func seedOutboxRow(t *testing.T, url string) {
+	t.Helper()
+	conn, err := pgx.Connect(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(t.Context())
+	if _, err := conn.Exec(t.Context(), `INSERT INTO notification_outbox(kind,target_lane,event_id,text,created_at) VALUES('dots_followup','operator-desk','forward-test-1','[dots-watch] test',now())`); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -26,12 +26,12 @@ func TestUIFromEnvLeavesRouteAbsentWhenAccessConfigIncomplete(t *testing.T) {
 			} else {
 				t.Setenv(missing, " ")
 			}
-			handler, err := uiFromEnv(nil, nil, nil)
+			handler, err := uiFromEnv(nil, nil)
 			if err != nil || handler != nil {
 				t.Fatalf("handler=%v err=%v", handler, err)
 			}
 			server := api.Server{UI: handler}.Handler()
-			for _, path := range []string{"/ui", "/ui/timeline", "/ui/events", "/ui/static/htmx.min.js"} {
+			for _, path := range []string{"/ui", "/ui/queue", "/ui/static/console/shell.js"} {
 				response := httptest.NewRecorder()
 				server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 				if response.Code != http.StatusNotFound {

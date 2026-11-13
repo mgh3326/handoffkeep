@@ -110,6 +110,22 @@ func (h *Handler) attention(w http.ResponseWriter, r *http.Request, identity cfa
 		h.attentionFailed(w, err)
 		return
 	}
+	if h.ytTasks != nil {
+		// The task half reads YouTrack (hk 4430); decisions and deploys stay
+		// hk's. A YouTrack failure fails the page rather than showing hk's
+		// task copy.
+		snap, err := h.ytTasks.snapshot(r.Context())
+		if err != nil {
+			youTrackReadFailed(w, r, err)
+			return
+		}
+		candidates, err := h.store.AttentionTaskCandidates(r.Context(), now, snap.startedIDs())
+		if err != nil {
+			h.attentionFailed(w, err)
+			return
+		}
+		waiting.Tasks = youTrackAttentionTasks(candidates, snap)
+	}
 	deploys, err := h.pendingDeploys(r)
 	if err != nil {
 		h.attentionFailed(w, err)

@@ -42,7 +42,12 @@ type Issue struct {
 	Description  string       `json:"description"`
 	Project      *ProjectRef  `json:"project"`
 	CustomFields []IssueField `json:"customFields"`
-	Type         string       `json:"$type"`
+	// Created, Updated and Resolved are epoch milliseconds; only the task
+	// list (ListTaskIssues) asks for them. Resolved is null while open.
+	Created  int64  `json:"created,omitempty"`
+	Updated  int64  `json:"updated,omitempty"`
+	Resolved *int64 `json:"resolved,omitempty"`
+	Type     string `json:"$type"`
 }
 
 // Comment is one YouTrack comment.

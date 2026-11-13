@@ -2,7 +2,7 @@ package store
 
 import "sort"
 
-// Task states (docs/linear-internalize.md, "State model"). tasks.state holds
+// Task states (git show 1e3d2fa8:docs/linear-internalize.md, "State model"). tasks.state holds
 // one of twelve leaf states. The category is derived from the leaf by
 // taskCategories and is never stored, so a category and a sub-state cannot
 // disagree.
@@ -74,7 +74,7 @@ func IsSettledState(state string) bool {
 	return false
 }
 
-// IsClaimableState reports whether claim and NextTask serve state.
+// IsClaimableState reports whether claim serves state.
 func IsClaimableState(state string) bool {
 	return state == StateBacklog || state == StateUnstarted
 }

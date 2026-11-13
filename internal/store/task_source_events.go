@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Event sources (docs/linear-internalize.md, "Event-driven transitions").
+// Event sources (git show 1e3d2fa8:docs/linear-internalize.md, "Event-driven transitions").
 const (
 	SourcePanewireJob     = "panewire.job"
 	SourceMergewakePR     = "mergewake.pr"
@@ -32,6 +32,11 @@ const TaskEventSource = "source_event"
 // revertedPRField names the reverted PR on a mergewake.revert row (rule 10):
 // the row's to_value is the reverted PR URL, applied or not.
 const revertedPRField = "reverted_pr"
+
+// heldMergeField marks a mergewake.merge row that mergeHoldTx held (hk 4172),
+// as opposed to one a gate refused. Only a held merge names a PR an automatic
+// close may adopt (heldMergePRTx).
+const heldMergeField = "merge_held"
 
 // taskEventPRRE is the PR URL shape an event names. A source_ref of a
 // mergewake event is a PR URL (rule 10).
@@ -402,6 +407,17 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return TaskEventResult{}, err
 	}
+	if x.State == StateMerged && x.Refs.PR == "" && ev.Source == SourceMergewakeMerge && ev.PR != "" {
+		// A parent that an automatic close moved to merged before its own PR was
+		// named adopts it (hk 4172). Any other merged task is not adopting.
+		hasSub, err := hasSubTasksTx(ctx, tx, x.ID)
+		if err != nil {
+			return TaskEventResult{}, err
+		}
+		if hasSub {
+			return s.adoptMergedPRTx(ctx, tx, x, ev, now)
+		}
+	}
 	field, revertedPR := "", ""
 	if ev.Source == SourceMergewakeRevert {
 		field, revertedPR = revertedPRField, ev.RevertedPR
@@ -433,6 +449,9 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 	}
 	if reason != "" {
 		note := joinNote(ev.Note, "not applied: "+reason)
+		if held {
+			field = heldMergeField
+		}
 		if _, _, err := insertEvent(ctx, tx, taskEventInput{
 			TaskID: x.ID, Kind: TaskEventSource, From: x.State, To: x.State, By: ev.Source, Note: note, Refs: x.Refs, At: ev.At,
 			Source: ev.Source, SourceRef: ev.SourceRef, Field: field, ToValue: revertedPR, Auto: true, NotApplied: true,
@@ -512,6 +531,78 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 	return TaskEventResult{Applied: true, State: x.State, Task: x}, nil
 }
 
+// adoptMergedPRTx is named-parent PR adoption (hk 4172): a merge names a task
+// that an automatic close already moved to merged, with no PR of its own (its
+// merge was held on an open sub-task, or came after the close). The task
+// adopts the PR, so a deploy record that lists it can apply. Adoption does not
+// deploy the task past a sub-task that is merged and not yet deployed.
+func (s *Store) adoptMergedPRTx(ctx context.Context, tx pgx.Tx, x Task, ev sourceEvent, now time.Time) (TaskEventResult, error) {
+	reverted, err := revertNamesPRTx(ctx, tx, x.ID, ev.PR)
+	if err != nil {
+		return TaskEventResult{}, err
+	}
+	if reverted {
+		reason := "the PR was reverted; relanding takes a new PR"
+		if _, _, err := insertEvent(ctx, tx, taskEventInput{
+			TaskID: x.ID, Kind: TaskEventSource, From: x.State, To: x.State, By: ev.Source, Note: joinNote(ev.Note, "not applied: "+reason), Refs: x.Refs, At: ev.At,
+			Source: ev.Source, SourceRef: ev.SourceRef, Auto: true, NotApplied: true,
+		}); err != nil {
+			return TaskEventResult{}, err
+		}
+		return TaskEventResult{State: x.State, Reason: reason, Task: x}, nil
+	}
+	x.Refs.PR = ev.PR
+	x.UpdatedAt = now
+	if x, err = writeTaskTx(ctx, tx, x); err != nil {
+		return TaskEventResult{}, err
+	}
+	// Same-state row: kind source_event, so transition readers skip it.
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{
+		TaskID: x.ID, Kind: TaskEventSource, From: x.State, To: x.State, By: ev.Source, Note: joinNote(ev.Note, "adopted the PR; the task was already merged"), Refs: x.Refs, At: ev.At,
+		Source: ev.Source, SourceRef: ev.SourceRef, Auto: true,
+	}); err != nil {
+		return TaskEventResult{}, err
+	}
+	roll, err := subTaskRollupTx(ctx, tx, x.ID)
+	if err != nil {
+		return TaskEventResult{}, err
+	}
+	// The deploy also waits for the task's other changes: an open or
+	// unrelanded implements change (other than the incoming PR) holds it.
+	holds, err := taskHoldsTx(ctx, tx, x.ID, ev.PR)
+	if err != nil {
+		return TaskEventResult{}, err
+	}
+	if roll.merged == 0 && holds.none() {
+		if x, err = s.deployOnMergedTx(ctx, tx, x, now); err != nil {
+			return TaskEventResult{}, err
+		}
+	}
+	return TaskEventResult{Applied: true, State: x.State, Task: x}, nil
+}
+
+// hasSubTasksTx reports whether task taskID has any sub-task.
+func hasSubTasksTx(ctx context.Context, tx pgx.Tx, taskID int64) (bool, error) {
+	var has bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_id=$1)`, taskID).Scan(&has)
+	return has, err
+}
+
+// heldMergePRTx is the PR of the newest held merge that named task taskID, when
+// that PR's change is merged and not reverted, or "". A merge held by
+// mergeHoldTx records no PR on the task; an automatic close to merged adopts it
+// (hk 4172), so the task does not stay merged with no PR of its own.
+func heldMergePRTx(ctx context.Context, tx pgx.Tx, taskID int64) (string, error) {
+	var pr string
+	err := tx.QueryRow(ctx, `SELECT e.source_ref FROM task_events e JOIN changes c ON (`+prURLSQL+`)=e.source_ref
+		WHERE e.task_id=$1 AND e.source=$2 AND e.field=$3 AND NOT e.applied AND c.state='merged' AND c.reverted_by_change_id IS NULL
+		ORDER BY e.id DESC LIMIT 1`, taskID, SourceMergewakeMerge, heldMergeField).Scan(&pr)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return pr, err
+}
+
 // prURLSQL is the PR URL of changes row c.
 const prURLSQL = `'https://github.com/'||c.repo||'/pull/'||c.pr_number::text`
 
@@ -547,25 +638,81 @@ const openSubTasksSQL = `SELECT id FROM tasks WHERE parent_id=$1 AND state NOT I
 // its sub-tasks is not settled (a parent closes through auto_close_parent
 // when its last sub-task settles).
 func mergeHoldTx(ctx context.Context, tx pgx.Tx, taskID int64, pr string) (string, error) {
-	if reason, err := pieceHoldTx(ctx, tx, taskID, pr); err != nil || reason != "" {
-		return reason, err
-	}
-	rows, err := tx.Query(ctx, openSubTasksSQL, taskID)
+	h, err := taskHoldsTx(ctx, tx, taskID, pr)
 	if err != nil {
 		return "", err
 	}
-	children, err := pgx.CollectRows(rows, pgx.RowTo[int64])
-	if err != nil {
-		return "", err
+	return h.mergeReason(), nil
+}
+
+// taskHolds is what holds a task's close: its implements changes still open
+// (other than the PR being merged), its implements changes reverted and not
+// relanded (unresolvedRevertSQL), and its sub-tasks not yet settled. It is the
+// one read of the close-on-merge holds, shared by the merge gate, the automatic
+// close of a parent (closeGateTx) and the drift report.
+type taskHolds struct {
+	OpenPRs      []string
+	RevertedPRs  []string
+	OpenSubTasks []int64
+}
+
+// none reports whether nothing holds the task's close.
+func (h taskHolds) none() bool {
+	return len(h.OpenPRs) == 0 && len(h.RevertedPRs) == 0 && len(h.OpenSubTasks) == 0
+}
+
+// pieceReason says why the task's own changes hold its close, or "" for none.
+func (h taskHolds) pieceReason() string {
+	if len(h.OpenPRs) > 0 {
+		return "implements change " + strings.Join(h.OpenPRs, ", ") + " is still open; the task closes when its last implements change merges"
 	}
-	if len(children) > 0 {
-		ids := make([]string, len(children))
-		for i, id := range children {
+	if len(h.RevertedPRs) > 0 {
+		return "implements change " + strings.Join(h.RevertedPRs, ", ") + " was reverted and not relanded; relanding takes a new PR"
+	}
+	return ""
+}
+
+// mergeReason says why a merge of the task is held, or "" for none: its own
+// changes first, then its sub-tasks that are not settled.
+func (h taskHolds) mergeReason() string {
+	if reason := h.pieceReason(); reason != "" {
+		return reason
+	}
+	if len(h.OpenSubTasks) > 0 {
+		ids := make([]string, len(h.OpenSubTasks))
+		for i, id := range h.OpenSubTasks {
 			ids[i] = fmt.Sprintf("#%d", id)
 		}
-		return "sub-tasks " + strings.Join(ids, ", ") + " are not settled; the parent closes when its last sub-task does (auto_close_parent)", nil
+		return "sub-tasks " + strings.Join(ids, ", ") + " are not settled; the parent closes when its last sub-task does (auto_close_parent)"
 	}
-	return "", nil
+	return ""
+}
+
+// taskHoldsTx reads the holds on task taskID. pr, when set, is the PR the
+// caller is merging: it is not an open hold on the task.
+func taskHoldsTx(ctx context.Context, tx pgx.Tx, taskID int64, pr string) (taskHolds, error) {
+	var h taskHolds
+	repo, n, _ := parsePRURL(pr)
+	rows, err := tx.Query(ctx, openImplementsSQL, taskID, repo, n)
+	if err != nil {
+		return h, err
+	}
+	if h.OpenPRs, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
+		return h, err
+	}
+	rows, err = tx.Query(ctx, `SELECT `+prURLSQL+` FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE `+unresolvedRevertSQL("$1")+` ORDER BY c.id`, taskID)
+	if err != nil {
+		return h, err
+	}
+	if h.RevertedPRs, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
+		return h, err
+	}
+	rows, err = tx.Query(ctx, openSubTasksSQL, taskID)
+	if err != nil {
+		return h, err
+	}
+	h.OpenSubTasks, err = pgx.CollectRows(rows, pgx.RowTo[int64])
+	return h, err
 }
 
 // pieceHoldTx is the part of mergeHoldTx about the task's own changes: it
@@ -573,30 +720,11 @@ func mergeHoldTx(ctx context.Context, tx pgx.Tx, taskID int64, pr string) (strin
 // other than pr ("" for none) is open, or one is reverted and not relanded.
 // An automatic close of a parent passes it too (closeGateTx).
 func pieceHoldTx(ctx context.Context, tx pgx.Tx, taskID int64, pr string) (string, error) {
-	repo, n, _ := parsePRURL(pr)
-	rows, err := tx.Query(ctx, openImplementsSQL, taskID, repo, n)
+	h, err := taskHoldsTx(ctx, tx, taskID, pr)
 	if err != nil {
 		return "", err
 	}
-	open, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return "", err
-	}
-	if len(open) > 0 {
-		return "implements change " + strings.Join(open, ", ") + " is still open; the task closes when its last implements change merges", nil
-	}
-	rows, err = tx.Query(ctx, `SELECT `+prURLSQL+` FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE `+unresolvedRevertSQL("$1")+` ORDER BY c.id`, taskID)
-	if err != nil {
-		return "", err
-	}
-	reverted, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return "", err
-	}
-	if len(reverted) > 0 {
-		return "implements change " + strings.Join(reverted, ", ") + " was reverted and not relanded; relanding takes a new PR", nil
-	}
-	return "", nil
+	return h.pieceReason(), nil
 }
 
 func joinNote(a, b string) string {
@@ -607,17 +735,9 @@ func joinNote(a, b string) string {
 }
 
 // afterSourceMoveTx runs what every state change runs after an automatic
-// move: the hierarchy rules and the Linear records.
+// move: the hierarchy rules.
 func (s *Store) afterSourceMoveTx(ctx context.Context, tx pgx.Tx, x Task, from, by string, now time.Time) error {
-	if err := s.afterStateChangeTx(ctx, tx, x, from, by, now); err != nil {
-		return err
-	}
-	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
-		if err := enqueueLinearTaskTransition(ctx, tx, x, ""); err != nil {
-			return err
-		}
-	}
-	return s.recordLinearBoardTaskTx(ctx, tx, x, "")
+	return s.afterStateChangeTx(ctx, tx, x, from, by, now)
 }
 
 // deployRef is the source_ref of an hk.deploy event: the record key and the

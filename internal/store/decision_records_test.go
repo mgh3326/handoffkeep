@@ -325,39 +325,6 @@ func TestDecisionRecordChat(t *testing.T) {
 	}
 }
 
-func TestDecisionRecordLinear(t *testing.T) {
-	s := decisionStore(t)
-	ctx := t.Context()
-	task := decisionTask(t, s, "in_progress")
-	got, err := s.RecordDecisionRequest(ctx, task.ID, "director-1", decisionInput())
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := got.Request
-	link := LinearDecisionLink{RequestID: r.ID, TaskID: task.ID, Ver: DecisionRequestVer(r.Question, *got.Task.Refs.DecisionOptions, r.Doc, r.Refs), IssueID: "issue-decision-1", Identifier: "HK-1", URL: "https://linear.example/issue/HK-1"}
-	if _, created, err := s.RecordLinearDecisionIssue(ctx, link, "", "", "asked"); err != nil || !created {
-		t.Fatalf("link created=%v err=%v", created, err)
-	}
-	onlyDecision(t, decisionRowsOf(t, s, DecisionSourceLinear, r.ID), DecisionStatusOpen)
-	if row := onlyDecision(t, decisionRowsOf(t, s, DecisionSourceTaskRequest, r.ID), DecisionStatusSuperseded); row.SupersededBy != "linear:"+r.ID {
-		t.Fatalf("task_request row=%+v", row)
-	}
-	onlyDecision(t, decisionRowsWhere(t, s, `task_id=$1 AND status='open'`, task.ID), DecisionStatusOpen)
-	if _, created, err := s.RecordLinearDecisionIssue(ctx, link, "", "", "asked"); err != nil || created {
-		t.Fatalf("re-link created=%v err=%v", created, err)
-	}
-	onlyDecision(t, decisionRowsOf(t, s, DecisionSourceLinear, r.ID), DecisionStatusOpen)
-
-	outcome, err := s.AnswerLinearDecision(ctx, LinearDecisionAnswer{IssueID: link.IssueID, Source: LinearDecisionSourceComment, UserID: "op", CommentID: "c1", Choice: "1"})
-	if err != nil || outcome != LinearDecisionRecorded {
-		t.Fatalf("answer outcome=%s err=%v", outcome, err)
-	}
-	row := onlyDecision(t, decisionRowsOf(t, s, DecisionSourceLinear, r.ID), DecisionStatusAnswered)
-	if row.Answer != "A" || row.AnsweredBy != linearDecisionResponder {
-		t.Fatalf("answered row=%+v", row)
-	}
-}
-
 func TestDecisionRecordSupersededWhenTaskEnds(t *testing.T) {
 	for _, tc := range []struct {
 		name string

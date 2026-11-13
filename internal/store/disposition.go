@@ -250,7 +250,7 @@ func insertTaskEvent(ctx context.Context, tx pgx.Tx, id int64, from, to, by, not
 
 // CreateDisposition creates at most one open (awaiting_decision) item per
 // origin. The row is born in backlog with the awaiting_decision flag set, so
-// it is never observable unflagged and NextTask can never claim it.
+// it is never observable unflagged and no claim can take it.
 // created=false returns the already open item for the same origin.
 func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Task, bool, error) {
 	if !validName(in.Lane) || strings.TrimSpace(in.Title) == "" || !validText(in.Title, MaxBytes) || in.CreatedBy == "" || !validText(in.CreatedBy, 128) || !validText(in.Note, 512) {
@@ -411,9 +411,6 @@ func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in Dispositi
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, "not_found", nil
 		}
-		return Task{}, "", err
-	}
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "claimed", false); err != nil {
 		return Task{}, "", err
 	}
 	if x.Refs.Disposition == nil {
@@ -598,9 +595,6 @@ func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string)
 		return Task{}, err
 	}
 
-	if err := s.wrkTaskFenceTx(ctx, tx, x, DispositionTarget(x), false); err != nil {
-		return Task{}, err
-	}
 	if x.Refs.Disposition == nil || x.Refs.Disposition.Answer == nil || x.State != StateResearching || x.AwaitingDecision {
 		return Task{}, ErrTaskConflict
 	}
@@ -697,7 +691,7 @@ func prefixedTaskColumns(alias string) string {
 	for i := range cols {
 		cols[i] = alias + "." + cols[i]
 	}
-	return strings.Join(cols, ",") + ",ARRAY(SELECT label_id FROM task_labels WHERE task_id=" + alias + ".id ORDER BY label_id)"
+	return strings.Join(cols, ",")
 }
 
 // CountNeedsDecision splits pending decisions, in one statement, into
