@@ -1,5 +1,5 @@
 # handoffkeep
-A durable home for coding-agent handoffs, working memory, and documents across sessions and machines.
+A durable home for coding-agent handoffs and documents across sessions and machines.
 
 ## Fleet console (/ui)
 
@@ -13,15 +13,6 @@ complete and uses a separate Access assertion from the API bearer token. See
 and the SSE contract.
 
 Tasks may specify an optional expected duration at creation, for example `tasks add --expected 4h` or `--expected 1d`. Durations must be between 1 minute and 90 days; the server stores a normalized Go duration. The task API returns `expected` as a string, or `null` when unset.
-
-## Fleet metrics
-
-`handoffkeep fleet-metrics --machine <hub id> --since 7d` prints the five fleet
-operating metrics (order → usable time, verify rounds, empty task slots,
-decision dwell, normal-path share), each with the coverage of the identifiers
-it needs; a missing identifier lowers coverage and is never counted as 0. It
-only reads (hk GETs, local job directories, `pacelever reps list`, `gh api`).
-See [docs/fleet-metrics.md](docs/fleet-metrics.md).
 
 ## Version
 
@@ -715,8 +706,8 @@ Configure `HK_S3_ENDPOINT`, `HK_S3_BUCKET`, `HK_S3_ACCESS_KEY_ID`, and
 also be `virtual`. OCI Object Storage uses
 `https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`, requires
 `HK_S3_REGION` to match the endpoint region, and uses path lookup. When any
-required setting is absent, only attachments are disabled; checkpoints, memory,
-and documents continue to work.
+required setting is absent, only attachments are disabled; checkpoints and
+documents continue to work.
 
 The default safety limits are a 50 MiB object maximum, 20 GB total storage,
 800,000 monthly writes, and 8,000,000 monthly reads. Set the corresponding

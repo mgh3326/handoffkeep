@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -110,13 +109,5 @@ func TestHTTPPersistenceSearchAndRetention(t *testing.T) {
 	}
 	if xs, err := s.RecentCheckpoints(t.Context(), "cap-test", "", store.CheckpointKeep+1); err != nil || len(xs) != store.CheckpointKeep {
 		t.Fatalf("checkpoint cap=%d err=%v", len(xs), err)
-	}
-	for i := 0; i < store.MemoryKeep+2; i++ {
-		if _, err := s.PutMemory(t.Context(), store.Memory{Agent: "cap-agent", Name: "m" + strconv.Itoa(i), Type: "project", Content: "x", UpdatedBy: "node"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if xs, err := s.ListMemory(t.Context(), "cap-agent", true); err != nil || len(xs) != store.MemoryKeep {
-		t.Fatalf("memory cap=%d err=%v", len(xs), err)
 	}
 }

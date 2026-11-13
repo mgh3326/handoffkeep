@@ -66,12 +66,6 @@ func TestAccessAndBearerActorMCPWrites(t *testing.T) {
 				t.Fatalf("document created_by=%q", document.Document.CreatedBy)
 			}
 
-			memory := callTool[store.Memory](t, tc.session, "memory_put", map[string]any{"agent": "actor-agent", "name": suffix, "description": "actor test", "type": "user", "content": "memory"})
-			storedMemory, found, err := st.GetMemory(t.Context(), "actor-agent", suffix)
-			if err != nil || !found || memory.UpdatedBy != tc.actor || storedMemory.UpdatedBy != tc.actor {
-				t.Fatalf("memory actor: result=%+v stored=%+v found=%v err=%v", memory, storedMemory, found, err)
-			}
-
 			_, err = attachmentCall(t, tc.session, "attachment_put", map[string]any{"name": suffix + ".txt", "mime": "text/plain", "content_base64": base64.StdEncoding.EncodeToString([]byte("attachment-" + suffix))})
 			if err != nil {
 				t.Fatal(err)
