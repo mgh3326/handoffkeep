@@ -50,9 +50,11 @@ An expired cursor returns HTTP 410 and JSON:
 {"reset":true,"min_sync_id":123}
 ```
 
-Discard the index and restart the retained feed at `after=min_sync_id-1`. The
-410 names `min_sync_id`, not `pruned_through`: `after=min_sync_id` skips that
-change, because the query is `sync_id > after`. The reset boundary records the highest
+Do not discard the index. Keep it as stale and resume the retained feed at
+`after=min_sync_id-1`. Records whose last change was pruned are not recovered by
+this: see the discovery gap below. The 410 names `min_sync_id`, not
+`pruned_through`: `after=min_sync_id` skips that change, because the query is
+`sync_id > after`. The reset boundary records the highest
 pruned ID, surviving an entirely empty log. A cursor exactly at that boundary
 can continue safely. Sequence gaps alone do not cause a reset. `min_sync_id` is
 the oldest retained ID, or the committed watermark plus one when none remain.
