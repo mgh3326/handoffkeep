@@ -330,4 +330,60 @@ func TestWriteRemoteUpdateIssueFieldsAddsOpenSetValue(t *testing.T) {
 	}
 }
 
+// An open-set value differing from a bundle value only in case is the same
+// value (YouTrack enum names are case-insensitively unique, hk 4234): nothing
+// is added, the update sends the bundle's spelling, and an archived one is
+// un-archived rather than duplicated.
+func TestWriteRemoteUpdateIssueFieldsOpenSetCaseFold(t *testing.T) {
+	const addPath = "/api/admin/customFieldSettings/bundles/enum/b-레인/values"
+	get, post := "GET /api/admin/projects/0-7/customFields", "POST /api/issues/2-9"
+	for name, tc := range map[string]struct {
+		lane     string
+		spelling string
+		requests []string
+	}{
+		"live_case_variant": {lane: "HANDOFFKEEP-DESIGN", spelling: "handoffkeep-design", requests: []string{get, post}},
+		"archived_case_variant": {lane: "Archived-Lane", spelling: "archived-lane",
+			requests: []string{get, "POST " + addPath + "/레인-varch", post}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			y := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/admin/projects/0-7/customFields":
+					_ = json.NewEncoder(w).Encode(projectFieldsJSON())
+				case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, addPath):
+					_, _ = w.Write([]byte(`{"id":"레인-varch","archived":false}`))
+				case r.Method == http.MethodPost && r.URL.Path == "/api/issues/2-9":
+					_, _ = w.Write([]byte(`{"id":"2-9"}`))
+				default:
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}}
+			snap := fieldsSnapshot()
+			setField(&snap, ytwrite.FieldLane, tc.lane)
+			if _, err := y.serve(t).UpdateIssueFields(t.Context(), ytwrite.IssueFieldsUpdate{IssueID: "2-9", ProjectID: "0-7", IssueSnapshot: snap}); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(y.requests, "|") != strings.Join(tc.requests, "|") {
+				t.Fatalf("requests %q, want %q", y.requests, tc.requests)
+			}
+			var body struct {
+				CustomFields []struct {
+					Name  string          `json:"name"`
+					Value json.RawMessage `json:"value"`
+				} `json:"customFields"`
+			}
+			if err := json.Unmarshal([]byte(y.bodies[len(y.bodies)-1]), &body); err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range body.CustomFields {
+				if f.Name == ytwrite.FieldLane && string(f.Value) != `{"$type":"EnumBundleElement","name":`+quoteJSON(tc.spelling)+`}` {
+					t.Fatalf("레인 sent as %s, want the bundle's %q", f.Value, tc.spelling)
+				}
+			}
+		})
+	}
+}
+
 func quoteJSON(s string) string { b, _ := json.Marshal(s); return string(b) }
