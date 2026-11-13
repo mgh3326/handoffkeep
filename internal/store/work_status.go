@@ -81,7 +81,9 @@ type WorkStatus struct {
 	Projects    []WorkStatusProject     `json:"projects"`
 	InWork      []WorkStatusInWorkTask  `json:"in_work"`
 	Backlog     []WorkStatusBacklogTask `json:"backlog"`
-	Movement    []WorkStatusMovementDay `json:"movement"`
+	// Queued is every open task whose spawn request has not ended (hk 4377).
+	Queued   []WorkStatusQueuedTask  `json:"queued"`
+	Movement []WorkStatusMovementDay `json:"movement"`
 }
 
 func isBundleParentTitle(title string) bool {
@@ -461,12 +463,17 @@ func (s *Store) ReadWorkStatus(ctx context.Context, now time.Time) (*WorkStatus,
 		return inWork[i].ID > inWork[j].ID
 	})
 
+	queued, err := readQueuedSpawnsTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
 	return &WorkStatus{
 		GeneratedAt: now.UTC(),
 		Summary:     summary,
 		Projects:    projects,
 		InWork:      inWork,
 		Backlog:     backlog,
+		Queued:      queued,
 		Movement:    movement,
 	}, nil
 }
