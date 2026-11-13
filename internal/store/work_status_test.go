@@ -150,6 +150,52 @@ func TestWorkStatusRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// inWorkLinked has no refs.pr: its PR is the open change linked to it. Its only job
+	// has finished, so the list must report that job as completed, not running.
+	inWorkLinked, err := st.CreateTask(ctx, Task{
+		Lane:      "handoffkeep-design",
+		Title:     "Developing task with linked change and finished job",
+		Kind:      "implement",
+		State:     StateDeveloping,
+		Priority:  4,
+		CreatedBy: "test",
+		CreatedAt: now.Add(-20 * time.Hour),
+		Project:   strPtr("handoffkeep"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTask(inWorkLinked.ID, StateDeveloping, now.Add(-20*time.Hour), "")
+	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
+		TaskID: inWorkLinked.ID,
+		From:   StateBacklog,
+		To:     StateDeveloping,
+		By:     "test",
+		At:     now.Add(-20 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.ClaimJob(ctx, Job{
+		JobID:     "job-linked-done",
+		TaskID:    &inWorkLinked.ID,
+		Host:      "mac-linked",
+		CreatedBy: "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE jobs SET state='completed' WHERE job_id='job-linked-done'`); err != nil {
+		t.Fatal(err)
+	}
+	var linkedChangeID int64
+	if err := st.pool.QueryRow(ctx, `INSERT INTO changes(repo, pr_number, state, opened_at, created_at, updated_at)
+		VALUES('mgh3326/handoffkeep', 321, 'open', $1, $1, $1) RETURNING id`, now.Add(-19*time.Hour)).Scan(&linkedChangeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `INSERT INTO change_tasks(change_id, task_id, relation, created_at) VALUES($1, $2, 'implements', $3)`,
+		linkedChangeID, inWorkLinked.ID, now.Add(-19*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
 	inWork2, err := st.CreateTask(ctx, Task{
 		Lane:      "panewire-design",
 		Title:     "Reviewing task",
@@ -203,7 +249,7 @@ func TestWorkStatusRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// mergedBefore: merged BEFORE handoffkeep deploy time -> merged_no_deploy_record (already deployed)
+	// mergedBefore: merged BEFORE handoffkeep deploy time -> merged_before_deploy (already deployed)
 	mergedBefore, err := st.CreateTask(ctx, Task{
 		Lane:      "handoffkeep-design",
 		Title:     "Merged before deploy: already deployed",
@@ -229,7 +275,7 @@ func TestWorkStatusRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// mergedNoRecord: ParkingArcade has no deploy service -> merged_no_deploy_record
+	// mergedNoRecord: ParkingArcade has no deploy service -> merged_no_deploy_project
 	mergedNoRecord, err := st.CreateTask(ctx, Task{
 		Lane:      "parkingarcade-design",
 		Title:     "Merged in project with no deploy record",
@@ -317,13 +363,13 @@ func TestWorkStatusRead(t *testing.T) {
 	// - in_work: inWork1 (1)
 	// - in_review: 0
 	// - waiting_deploy: mergedWaiting (1)
-	// - merged_no_deploy_record: mergedBefore (1)
+	// - merged_before_deploy: mergedBefore (1)
 	// - total_open: 2 + 1 + 0 + 1 = 4
 	// - bundle_parents: 1
 	// panewire has:
 	// - backlog: 0, in_work: 0, in_review: 1 (inWork2), waiting_deploy: 0, total_open: 1
 	// ParkingArcade has:
-	// - backlog: 0, in_work: 0, in_review: 0, waiting_deploy: 0, merged_no_deploy_record: 1, total_open: 0
+	// - backlog: 0, in_work: 0, in_review: 0, waiting_deploy: 0, merged_no_deploy_project: 1, total_open: 0
 	// Total open: 4 (hk) + 1 (pw) + 0 (pa) = 5
 	if status.Summary.TotalOpen != 5 {
 		t.Errorf("got Summary.TotalOpen=%d, want 5", status.Summary.TotalOpen)
@@ -340,8 +386,11 @@ func TestWorkStatusRead(t *testing.T) {
 	if status.Summary.WaitingDeploy != 1 {
 		t.Errorf("got Summary.WaitingDeploy=%d, want 1", status.Summary.WaitingDeploy)
 	}
-	if status.Summary.MergedNoDeployRecord != 2 {
-		t.Errorf("got Summary.MergedNoDeployRecord=%d, want 2", status.Summary.MergedNoDeployRecord)
+	if status.Summary.MergedNoDeployProject != 1 {
+		t.Errorf("got Summary.MergedNoDeployProject=%d, want 1", status.Summary.MergedNoDeployProject)
+	}
+	if status.Summary.MergedBeforeDeploy != 1 {
+		t.Errorf("got Summary.MergedBeforeDeploy=%d, want 1", status.Summary.MergedBeforeDeploy)
 	}
 	if status.Summary.BundleParents != 1 {
 		t.Errorf("got Summary.BundleParents=%d, want 1", status.Summary.BundleParents)
@@ -364,8 +413,11 @@ func TestWorkStatusRead(t *testing.T) {
 			if p.Counts.WaitingDeploy != 1 {
 				t.Errorf("handoffkeep WaitingDeploy=%d, want 1", p.Counts.WaitingDeploy)
 			}
-			if p.Counts.MergedNoDeployRecord != 1 {
-				t.Errorf("handoffkeep MergedNoDeployRecord=%d, want 1", p.Counts.MergedNoDeployRecord)
+			if p.Counts.MergedBeforeDeploy != 1 {
+				t.Errorf("handoffkeep MergedBeforeDeploy=%d, want 1", p.Counts.MergedBeforeDeploy)
+			}
+			if p.Counts.MergedNoDeployProject != 0 {
+				t.Errorf("handoffkeep MergedNoDeployProject=%d, want 0", p.Counts.MergedNoDeployProject)
 			}
 			if p.Counts.BundleParents != 1 {
 				t.Errorf("handoffkeep BundleParents=%d, want 1", p.Counts.BundleParents)
@@ -377,8 +429,8 @@ func TestWorkStatusRead(t *testing.T) {
 	}
 
 	// VERIFY 2: In-work list (with job, host, PR, age)
-	if len(status.InWork) != 2 {
-		t.Fatalf("got len(InWork)=%d, want 2", len(status.InWork))
+	if len(status.InWork) != 3 {
+		t.Fatalf("got len(InWork)=%d, want 3", len(status.InWork))
 	}
 	// inWork2 (reviewing, since 1h ago) vs inWork1 (developing, since 3h ago)
 	// Ordered by since DESC, so inWork2 should be first
@@ -402,6 +454,19 @@ func TestWorkStatusRead(t *testing.T) {
 	}
 	if status.InWork[1].AgeSeconds < 10000 || status.InWork[1].AgeSeconds > 12000 {
 		t.Errorf("InWork[1].AgeSeconds=%d, want around 10800s (3h)", status.InWork[1].AgeSeconds)
+	}
+	if status.InWork[1].JobState != "claimed" {
+		t.Errorf("InWork[1].JobState=%q, want 'claimed'", status.InWork[1].JobState)
+	}
+	// VERIFY 2b: PR from the linked change, and a finished job keeps its state.
+	if status.InWork[2].ID != inWorkLinked.ID {
+		t.Fatalf("InWork[2].ID=%d, want inWorkLinked %d", status.InWork[2].ID, inWorkLinked.ID)
+	}
+	if status.InWork[2].PR != "https://github.com/mgh3326/handoffkeep/pull/321" {
+		t.Errorf("InWork[2].PR=%q, want the linked change's PR url", status.InWork[2].PR)
+	}
+	if status.InWork[2].JobState != "completed" {
+		t.Errorf("InWork[2].JobState=%q, want 'completed'", status.InWork[2].JobState)
 	}
 
 	// VERIFY 3: Backlog list order (priority DESC, age ASC) and bundle link
@@ -443,7 +508,7 @@ func TestWorkStatusRead(t *testing.T) {
 
 	// VERIFY 5: Deploy-waiting rule
 	// mergedWaiting was counted as WaitingDeploy (1)
-	// mergedBefore was counted as MergedNoDeployRecord (1)
-	// mergedNoRecord (ParkingArcade) was counted as MergedNoDeployRecord (1)
+	// mergedBefore was counted as MergedBeforeDeploy (1)
+	// mergedNoRecord (ParkingArcade) was counted as MergedNoDeployProject (1)
 	// Already confirmed in Summary and Projects checks above!
 }

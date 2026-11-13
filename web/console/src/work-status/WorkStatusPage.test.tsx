@@ -11,7 +11,8 @@ const mockWorkStatus: WorkStatusResponse = {
     in_work: 1,
     in_review: 1,
     waiting_deploy: 1,
-    merged_no_deploy_record: 0,
+    merged_no_deploy_project: 0,
+    merged_before_deploy: 0,
     bundle_parents: 1,
   },
   projects: [
@@ -23,7 +24,8 @@ const mockWorkStatus: WorkStatusResponse = {
         in_work: 1,
         in_review: 0,
         waiting_deploy: 1,
-        merged_no_deploy_record: 0,
+        merged_no_deploy_project: 0,
+        merged_before_deploy: 0,
         bundle_parents: 1,
       },
     },
@@ -35,7 +37,8 @@ const mockWorkStatus: WorkStatusResponse = {
         in_work: 0,
         in_review: 1,
         waiting_deploy: 0,
-        merged_no_deploy_record: 0,
+        merged_no_deploy_project: 0,
+        merged_before_deploy: 0,
         bundle_parents: 0,
       },
     },
@@ -49,8 +52,21 @@ const mockWorkStatus: WorkStatusResponse = {
       since: "2026-11-12T09:00:00Z",
       age_seconds: 3600,
       job_id: "job-101",
+      job_state: "spawned",
       host: "instance-1",
       pr: "https://github.com/example/repo/pull/4265",
+    },
+    {
+      id: 4267,
+      title: "Finished job task",
+      project: "handoffkeep",
+      state: "developing",
+      since: "2026-11-12T08:00:00Z",
+      age_seconds: 7200,
+      job_id: "job-done",
+      job_state: "completed",
+      host: "mac-done",
+      pr: null,
     },
     {
       id: 4266,
@@ -136,7 +152,8 @@ describe("WorkStatusPage", () => {
     const region = await screen.findByRole("region", { name: "요약 지표" });
     expect(within(region).getByText("전체 열린 작업")).toBeTruthy();
     expect(within(region).getByText("6")).toBeTruthy();
-    expect(within(region).getByText("머지됨 (배포 기록 없음)")).toBeTruthy();
+    expect(within(region).getByText("머지됨 (프로젝트 배포 기록 없음)")).toBeTruthy();
+    expect(within(region).getByText("머지됨 (마지막 배포 이전)")).toBeTruthy();
     expect(within(region).getByText("번들 (작업 제외)")).toBeTruthy();
   });
 
@@ -161,7 +178,9 @@ describe("WorkStatusPage", () => {
     render(<WorkStatusPage />);
     const region = await screen.findByRole("region", { name: "진행 중인 작업 목록" });
     expect(within(region).getByText("Console work status page")).toBeTruthy();
-    expect(within(region).getByText("instance-1 · job-101")).toBeTruthy();
+    expect(within(region).getByText("instance-1 · job-101 · 실행 중")).toBeTruthy();
+    expect(within(region).getByText("mac-done · job-done · 완료")).toBeTruthy();
+    expect(within(region).queryByText(/mac-done · job-done · 실행 중/)).toBeNull();
     const prLink = within(region).getByRole("link", { name: "PR ↗" });
     expect(prLink.getAttribute("href")).toBe("https://github.com/example/repo/pull/4265");
     expect(within(region).getByText("1시간")).toBeTruthy();
