@@ -171,25 +171,6 @@ func (h *Handler) dispositionData(r *http.Request, csrf, email string, canWrite 
 	return section, nil
 }
 
-// dispositionEventText is deterministic in the recorded answers, so a
-// re-notification sends the same text under the same event ID.
-func dispositionEventText(tasks []store.Task) (string, error) {
-	if len(tasks) == 0 {
-		return "", errors.New("no answered items")
-	}
-	first := tasks[0].Refs.Disposition.Answer
-	email := strings.TrimPrefix(first.By, "operator:")
-	if len(tasks) == 1 && first.BatchID == "" {
-		label, _ := store.DispositionOptionLabel(first.Key)
-		return fmt.Sprintf("[decision] #%d: %s: %s (from operator(web) %s)", tasks[0].ID, first.Key, label, email), nil
-	}
-	parts := make([]string, 0, len(tasks))
-	for _, task := range tasks {
-		parts = append(parts, fmt.Sprintf("#%d=%s", task.ID, task.Refs.Disposition.Answer.Key))
-	}
-	return fmt.Sprintf("[decision] disposition-batch %s: %s (from operator(web) %s)", first.BatchID, strings.Join(parts, " "), email), nil
-}
-
 func (h *Handler) dispositionWriteGate(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity, action string) (string, bool) {
 	email, ok := operatorEmail(identity)
 	if !ok {
@@ -256,7 +237,7 @@ func (h *Handler) answerDisposition(w http.ResponseWriter, r *http.Request, iden
 		}
 		return
 	}
-	text, err := dispositionEventText([]store.Task{task})
+	text, err := store.DispositionEventText([]store.Task{task})
 	if err == nil {
 		_, err = h.hub.emitLaneEvent(r.Context(), task.Lane, eventID, text)
 	}
@@ -313,7 +294,7 @@ func (h *Handler) acceptDispositionBatch(w http.ResponseWriter, r *http.Request,
 	sort.Strings(lanes)
 	failed := []string{}
 	for _, lane := range lanes {
-		text, err := dispositionEventText(byLane[lane])
+		text, err := store.DispositionEventText(byLane[lane])
 		if err == nil {
 			_, err = h.hub.emitLaneEvent(r.Context(), lane, eventFor(lane), text)
 		}
@@ -366,7 +347,7 @@ func (h *Handler) renotifyDisposition(w http.ResponseWriter, r *http.Request, id
 		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
 		return
 	}
-	text, err := dispositionEventText(tasks)
+	text, err := store.DispositionEventText(tasks)
 	if err == nil {
 		_, err = h.hub.emitLaneEvent(r.Context(), tasks[0].Lane, eventID, text)
 	}

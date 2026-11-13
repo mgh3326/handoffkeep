@@ -845,6 +845,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/assistant/pending", s.assistantPending)
 	m.HandleFunc("GET /v1/assistant/outbox", s.assistantOutboxList)
 	m.HandleFunc("POST /v1/assistant/outbox/sent", s.assistantOutboxSent)
+	m.HandleFunc("POST /v1/assistant/outbox/applied", s.assistantOutboxApplied)
 	m.HandleFunc("POST /v1/assistant/decisions/resolve", s.assistantDecisionResolve)
 	if s.UI != nil {
 		m.Handle("/ui", s.UI)

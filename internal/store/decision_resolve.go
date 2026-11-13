@@ -447,7 +447,7 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 		return record(DecisionResultConflict, ErrDecisionRequestResolved)
 	}
 	if in.Kind == DecisionKindDeny {
-		return denyDecisionAttempt(ctx, tx, in, attempt, x, currentCopy)
+		return s.denyDecisionAttempt(ctx, tx, in, attempt, x, currentCopy)
 	}
 
 	if relayed {
@@ -625,7 +625,7 @@ func checkDecisionDenyInput(in ResolveDecisionInput) error {
 // attempt of the open request revision. The denied row is never updated: the
 // deny is its own attempt pointing at it, the request stays open and no
 // resolution is written. The caller holds the task row lock.
-func denyDecisionAttempt(ctx context.Context, tx pgx.Tx, in ResolveDecisionInput, attempt decisionAttempt, x Task, request DecisionRequest) (ResolveDecisionOutcome, error) {
+func (s *Store) denyDecisionAttempt(ctx context.Context, tx pgx.Tx, in ResolveDecisionInput, attempt decisionAttempt, x Task, request DecisionRequest) (ResolveDecisionOutcome, error) {
 	var taskID int64
 	var result, revisionRequestID string
 	err := tx.QueryRow(ctx, `SELECT task_id,result,revision_request_id FROM decision_answer_attempts WHERE id=$1 FOR SHARE`, in.DeniesAttemptID).Scan(&taskID, &result, &revisionRequestID)
@@ -659,6 +659,9 @@ func denyDecisionAttempt(ctx context.Context, tx pgx.Tx, in ResolveDecisionInput
 	note := fmt.Sprintf("decision-denied %s attempt %d", request.ID, in.DeniesAttemptID)
 	if in.Receipt != "" {
 		note += " receipt " + in.Receipt
+	}
+	if err = s.queueDecisionDenyNotice(ctx, tx, x, request, in, id, attempt.at); err != nil {
+		return ResolveDecisionOutcome{}, err
 	}
 	if err = insertDecisionEvent(ctx, tx, &x, in.Actor, note, attempt.at); err != nil {
 		return ResolveDecisionOutcome{}, err

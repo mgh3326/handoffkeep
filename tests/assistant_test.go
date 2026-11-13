@@ -667,4 +667,61 @@ func TestAssistantOutboxAPI(t *testing.T) {
 	if present, _ := unsentHas(); present {
 		t.Fatalf("sent row still listed")
 	}
+	// The lane's ack is the second receipt; it follows the hub's.
+	applied := func(eventID, by string) (int, map[string]any) {
+		t.Helper()
+		resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/assistant/outbox/applied", "node-token", map[string]any{"event_id": eventID, "by": by})
+		defer resp.Body.Close()
+		out := map[string]any{}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+	status, ack := applied(eventID, "lane-a")
+	if status != http.StatusOK || ack["applied_by"] != "lane-a" || ack["applied_at"] == nil || ack["sent_at"] == nil {
+		t.Fatalf("applied status=%d body=%v", status, ack)
+	}
+	if status, again := applied(eventID, "lane-a"); status != http.StatusOK || again["applied_at"] != ack["applied_at"] {
+		t.Fatalf("repeat applied status=%d body=%v", status, again)
+	}
+	if status, out := applied(eventID, "lane-b"); status != http.StatusConflict {
+		t.Fatalf("applied by another identity status=%d body=%v", status, out)
+	}
+	if status, out := applied("dr-999999-1-answered", "lane-a"); status != http.StatusNotFound {
+		t.Fatalf("applied unknown event status=%d body=%v", status, out)
+	}
+}
+
+// An ack for a row the hub has not accepted is refused with its own code:
+// applied never precedes received.
+func TestAssistantOutboxAppliedNeedsReceived(t *testing.T) {
+	s := taskTestStore(t)
+	h := taskHTTP(s)
+	defer h.Close()
+	task := drTask(t, s, taskLane(t), "claimed", "in_progress")
+	req := drRecord(t, s, task.ID, drInput("applied 요청"))
+	resolve := request(t, h.Client(), http.MethodPost, h.URL+"/v1/assistant/decisions/resolve", "node-token", map[string]any{"request_id": req.ID, "option": "B"})
+	resolve.Body.Close()
+	if resolve.StatusCode != http.StatusOK {
+		t.Fatalf("resolve status=%d", resolve.StatusCode)
+	}
+	unsent, err := s.ListUnsentNotifications(t.Context(), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventID := ""
+	for _, row := range unsent {
+		if strings.HasPrefix(row.EventID, "decision-answered-"+req.ID+"-") {
+			eventID = row.EventID
+		}
+	}
+	if eventID == "" {
+		t.Fatal("resolve queued no notice")
+	}
+	resp := request(t, h.Client(), http.MethodPost, h.URL+"/v1/assistant/outbox/applied", "node-token", map[string]any{"event_id": eventID, "by": "lane-a"})
+	defer resp.Body.Close()
+	out := map[string]any{}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if resp.StatusCode != http.StatusConflict || out["error"] != "notification_outbox_not_received" {
+		t.Fatalf("applied before received status=%d body=%v", resp.StatusCode, out)
+	}
 }

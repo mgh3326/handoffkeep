@@ -3951,6 +3951,9 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 		if e = s.applyDeployRecordTx(ctx, tx, projection, now); e != nil {
 			return x, true, e
 		}
+		if e = queueDeployRecordNoticeTx(ctx, tx, projection, now); e != nil {
+			return x, true, e
+		}
 	}
 	return x, true, tx.Commit(ctx)
 }

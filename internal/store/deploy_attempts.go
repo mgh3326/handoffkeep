@@ -450,7 +450,8 @@ func readDeployTx(ctx context.Context, q pgx.Tx, attemptID string) (Deploy, erro
 // FinishDeploy ends an attempt: requested or running moves to success, failed
 // or rolled_back once. The same state again returns the stored attempt;
 // another state fails with ErrDeployAttemptFinished. A success applies the
-// task rule (deployedTasksTx) in the same transaction.
+// task rule (deployedTasksTx) in the same transaction, and a finish with a job
+// queues one result notice for the lane that asked (deploy_result_notify.go).
 func (s *Store) FinishDeploy(ctx context.Context, attemptID string, in DeployFinish) (Deploy, error) {
 	switch {
 	case !attemptIDRE.MatchString(attemptID):
@@ -499,6 +500,15 @@ func (s *Store) FinishDeploy(ctx context.Context, attemptID string, in DeployFin
 	d, err := readDeployTx(ctx, tx, attemptID)
 	if err != nil {
 		return Deploy{}, err
+	}
+	if d.JobID != nil {
+		failed := ""
+		if d.FailedStep != nil {
+			failed = *d.FailedStep
+		}
+		if err = queueDeployResultNoticeTx(ctx, tx, d.Service, *d.JobID, d.DeployedRef, d.State, nil, failed, now); err != nil {
+			return Deploy{}, err
+		}
 	}
 	return d, tx.Commit(ctx)
 }

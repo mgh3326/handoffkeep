@@ -36,7 +36,7 @@ type Store interface {
 // notifyType is the lane-event type a row goes out with.
 func notifyType(kind string) string {
 	switch kind {
-	case store.OutboxKindDotsDecision, store.OutboxKindDecisionAnswered:
+	case store.OutboxKindDotsDecision, store.OutboxKindDecisionAnswered, store.OutboxKindDecisionDenied, store.OutboxKindDispositionAnswered:
 		return "decision"
 	case store.OutboxKindDotsReport:
 		return "report"
