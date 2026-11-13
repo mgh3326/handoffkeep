@@ -530,7 +530,9 @@ verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
   false` and writes nothing. It refuses, writing nothing, while an op of the
   task's lane is `dispatched` or `remote_unknown` (an uncertain write may have
   landed on the old issue: `yt ops resolve` it first), while the task has an
-  unresolved `issue_create` op, and, with comments canonical in YouTrack,
+  unresolved `issue_create` op, while the task is enrolled in the comment canary
+  (which routes comments without the binding: `canary remove` it first), and,
+  with comments canonical in YouTrack,
   while a hk comment op is `prepared` unless `--force`. Otherwise, in one
   transaction, it rejects every `prepared` op of the lane that the binding
   admits (the hk `comment_append`, `issue_fields` and `issue_move` ops on the
@@ -542,9 +544,13 @@ verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
   leaves `task_origins`, `yt_entity_map` and the canary alone. The result lists
   `rejected` ops and the `released` comment ids (hk keeps them; the comment
   gets no op) or, under comments authority `youtrack` with `--force`, the
-  `stranded` ones (nothing will carry them). To bind the task to another
-  issue run `comments-backfill --task N` afterwards; a later comment on an
-  unbound task gets no op.
+  `stranded` ones (nothing will carry them). `comments-backfill --task N`
+  binds the task again once its other records agree with the issue it
+  verifies. Unbind leaves the task's `yt_entity_map` row (anchored by its
+  first comment op), mirror link and canary row alone, so a replacement that
+  is a different issue is refused naming the source that disagrees
+  (`yt_entity_map_task`, `task_origins`) until its owner reconciles it. A
+  later comment on an unbound task gets no op.
 - Each YouTrack read has its own 15 s timeout and each task 60 s; there is no
   budget for the whole run. A task in class `error` makes either command exit
   1 after the report.

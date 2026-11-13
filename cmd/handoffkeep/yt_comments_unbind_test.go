@@ -34,6 +34,9 @@ func TestYTUsageNamesCommentsUnbind(t *testing.T) {
 		{"yt", "comments-preflight", "--task", "-1"},
 		{"yt", "comments-preflight", "--task", "1", "--project", "p"},
 		{"yt", "comments-backfill", "--task", "1", "--all"},
+		{"yt", "comments-backfill", "--task", "0"},
+		{"yt", "comments-backfill", "--task", "0", "--all"},
+		{"yt", "comments-preflight", "--task", "0"},
 	} {
 		if err := run(args, io.Discard, io.Discard); err == nil {
 			t.Errorf("%v accepted", args)

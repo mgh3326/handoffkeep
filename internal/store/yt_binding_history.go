@@ -77,7 +77,9 @@ func insertYTBindingHistoryTx(ctx context.Context, tx pgx.Tx, b YTTaskBinding, a
 //     first;
 //  2. the task has no unresolved issue_create op (AddYTTaskBinding makes the
 //     same check);
-//  3. while comments are canonical in YouTrack, no prepared hk comment op
+//  3. the task is not enrolled in the comment canary, which routes comments
+//     in mode canary with no regard for the binding (`youtrack canary remove`);
+//  4. while comments are canonical in YouTrack, no prepared hk comment op
 //     exists, unless o.Force: closing it would delete the only delivery of a
 //     comment YouTrack owns.
 //
@@ -131,6 +133,16 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	}
 	if pending {
 		return res, refuse("an issue_create op is unresolved")
+	}
+	// In mode canary the task's enrollment routes its comments by itself,
+	// without the binding, so an unbind that left it would not stop delivery
+	// to the issue. The canary has its own remover.
+	var enrolled bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1)`, taskID).Scan(&enrolled); err != nil {
+		return res, err
+	}
+	if enrolled {
+		return res, refuse("the task is enrolled in the comment canary, which routes its comments without the binding; run youtrack canary remove %d first", taskID)
 	}
 	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments)
 	if err != nil {

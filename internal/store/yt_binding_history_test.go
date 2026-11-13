@@ -444,3 +444,29 @@ func TestYTBindingHistoryMigration(t *testing.T) {
 		}
 	}
 }
+
+// In mode canary the enrollment routes a task's comments without the binding,
+// so an unbind that left it would keep delivering to the issue: it refuses
+// until the canary row is removed.
+func TestUnbindRefusesCanaryEnrollment(t *testing.T) {
+	s := schemaStore(t, "ybh_canary")
+	ctx := t.Context()
+	ytbMapped(t, s)
+	task := ytcTask(t, s, ytbProject)
+	ytcEnroll(t, s, task)
+	ytbBind(t, s, ytbBinding(task))
+	before := ybhWritten(t, s, task)
+	_, err := s.UnbindYTTaskBinding(ctx, task, YTUnbindOptions{By: "op", Force: true})
+	if !errors.Is(err, ErrYTUnbindRefused) || !strings.Contains(err.Error(), "canary remove") {
+		t.Fatalf("enrolled task: %v", err)
+	}
+	if after := ybhWritten(t, s, task); after != before {
+		t.Fatalf("a refusal wrote: %s -> %s", before, after)
+	}
+	if removed, err := s.RemoveYTCommentCanary(ctx, task); err != nil || !removed {
+		t.Fatalf("remove canary: %v %v", removed, err)
+	}
+	if got, err := s.UnbindYTTaskBinding(ctx, task, YTUnbindOptions{By: "op"}); err != nil || !got.Removed {
+		t.Fatalf("unbind after the canary was removed: %+v %v", got, err)
+	}
+}

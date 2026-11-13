@@ -1043,7 +1043,11 @@ func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 	if err := fs.Parse(ordered); err != nil {
 		return fmt.Errorf("%v; %s", err, usage)
 	}
-	if fs.NArg() != 0 || *days < 1 || *task < 0 || (*task > 0 && (*project != "" || *all)) {
+	// --task 0 is a supplied flag, not an absent one: it must not fall back
+	// to the multi-task run.
+	taskSet := false
+	fs.Visit(func(f *flag.Flag) { taskSet = taskSet || f.Name == "task" })
+	if fs.NArg() != 0 || *days < 1 || (taskSet && (*task < 1 || *project != "" || *all)) {
 		return errors.New(usage)
 	}
 	bindBy := ""
@@ -1121,8 +1125,10 @@ const youtrackCommentsUnbindUsage = "usage: youtrack comments-unbind <task> [--b
 // may have reached the issue, and, with comments canonical in YouTrack, while a
 // comment op is prepared unless --force. A task with no binding answers
 // removed false and writes nothing. It opens the database directly, like
-// `youtrack canary`, and calls no YouTrack. To bind the task to another issue
-// run `youtrack comments-backfill --task N` afterwards.
+// `youtrack canary`, and calls no YouTrack. `youtrack comments-backfill --task
+// N` binds the task again once every other record hk keeps for it (map row,
+// mirror link) agrees with the issue it verifies; one that does not is named
+// in the refusal, and unbind does not touch it.
 func youtrackCommentsUnbindCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("youtrack comments-unbind", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
