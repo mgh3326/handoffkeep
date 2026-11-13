@@ -50,6 +50,20 @@ const (
 	// ytFeedPassLimit bounds the sync_log rows each feed consumer reads in
 	// one worker pass (store.RunYTFeedConsumers).
 	ytFeedPassLimit = 200
+	// ytBindInterval is how often the worker runs the automatic binder pass
+	// (HANDOFFKEEP_YT_BIND=on); ytBindScanLimit is how many new comments it
+	// reads from the stream and ytBindPassLimit how many intents it binds or
+	// refuses in one pass.
+	ytBindInterval  = 10 * time.Minute
+	ytBindScanLimit = 200
+	ytBindPassLimit = 20
+	// ytBindActor is who an automatic binding is attributed to in its history
+	// row: the pass runs inside serve, not for a person.
+	ytBindActor = "operator:auto-bind"
+	// ytBindCopyMax is the most missing comments one automatic publication
+	// copies in its own transaction (store.YTAutoBindCopyMax); a larger
+	// history is refused with history_large before anything is written.
+	ytBindCopyMax = store.YTAutoBindCopyMax
 )
 
 // ytCommentsModeFromEnv reads HANDOFFKEEP_YT_COMMENTS_MODE: unset or "off"
@@ -188,6 +202,21 @@ func ytCommentsCatchUpFromEnv() (bool, error) {
 	}
 }
 
+// ytBindModeFromEnv reads HANDOFFKEEP_YT_BIND (hk 4492): unset or "off" (the
+// default) or "on", trimmed and exactly in lower case like the modes. On makes
+// the comment worker bind the tasks whose comments it sees to an issue that
+// already verifies. Any other value is an error, so a typo fails closed.
+func ytBindModeFromEnv() (bool, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_BIND")); raw {
+	case "", "off":
+		return false, nil
+	case "on":
+		return true, nil
+	default:
+		return false, fmt.Errorf("HANDOFFKEEP_YT_BIND=%q: want off or on", raw)
+	}
+}
+
 // ytCommentsWorkerFromEnv sets the store's gates and returns the write
 // dispatcher for serve's worker list, or nil when the comments, issues,
 // fields, document-comment, decisions and document-article modes are all off
@@ -227,6 +256,16 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	catchUp, err := ytCommentsCatchUpFromEnv()
 	if err != nil {
 		return nil, err
+	}
+	bind, err := ytBindModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	// The binder publishes bindings the comment enqueue then reads, so it
+	// needs the comment gate on: with the gate off it would bind tasks whose
+	// comments nothing copies.
+	if bind && mode != store.YTCommentsOn {
+		return nil, fmt.Errorf("HANDOFFKEEP_YT_BIND=on needs HANDOFFKEEP_YT_COMMENTS_MODE=on; got HANDOFFKEEP_YT_COMMENTS_MODE=%s", mode)
 	}
 	// Moves are prepared only by the task_fields consumer and their
 	// snapshots ride the fields gate, so moves on with fields off would start
@@ -308,16 +347,16 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 		}
 	}
 	var issueBucketID string
-	if issues == store.YTIssuesOn {
+	if issues == store.YTIssuesOn || bind {
 		ctx, cancel := context.WithTimeout(context.Background(), ytCommentsGetTimeout)
 		issueBucketID, err = youtrack.ResolveBucketProject(ctx, client)
 		cancel()
 		if err != nil {
-			return nil, fmt.Errorf("HANDOFFKEEP_YT_ISSUES_MODE=on: resolve the %s bucket project: %w", youtrack.BucketShortName, err)
+			return nil, fmt.Errorf("%s: resolve the %s bucket project: %w", which, youtrack.BucketShortName, err)
 		}
 	}
 	st.SetYTIssuesBucketProject(issueBucketID)
-	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, docs, dec, art, catchUp, nil)
+	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, docs, dec, art, catchUp, bind, issueBucketID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -327,8 +366,9 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 // newYTWriteWorker sets the gates (the comments mode may be off when the
 // issues, fields, document-comment or decisions mode is on) and builds the
 // dispatcher for one tenant over remote. catchUp applies to the comments mode
-// only.
-func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, comments store.YTCommentsMode, issues store.YTIssuesMode, fields store.YTFieldsMode, docs store.YTDocCommentsMode, decisions ytDecisionsSetting, articles ytDocsSetting, catchUp bool, now func() time.Time) (ytCommentsWorker, error) {
+// only; bind (HANDOFFKEEP_YT_BIND) runs the automatic binder in that same
+// worker, verifying no-project tasks against bucketID.
+func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, comments store.YTCommentsMode, issues store.YTIssuesMode, fields store.YTFieldsMode, docs store.YTDocCommentsMode, decisions ytDecisionsSetting, articles ytDocsSetting, catchUp, bind bool, bucketID string, now func() time.Time) (ytCommentsWorker, error) {
 	if comments == store.YTCommentsOff && issues != store.YTIssuesOn && fields != store.YTFieldsOn && docs != store.YTDocCommentsOn && decisions.mode != store.YTDecisionsOn && articles.mode != store.YTDocsOn {
 		return ytCommentsWorker{}, errors.New("the write worker runs with the comments, issues, fields, document-comment, decisions or docs mode on")
 	}
@@ -344,7 +384,7 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 	log.Printf("ytwrite.docs_mode mode=%s tenant=%q shared=%q unassigned=%q", articles.mode, tenant,
 		articles.buckets[store.YTArticleBucketShared].ID, articles.buckets[store.YTArticleBucketUnassigned].ID)
 	if comments != store.YTCommentsOff {
-		return newYTCommentsWorker(st, remote, tenant, comments, catchUp, now)
+		return newYTCommentsWorker(st, remote, tenant, comments, catchUp, bind, bucketID, now)
 	}
 	p, err := ytwrite.New(st.YTCommentConfig(tenant, ytwrite.Config{
 		Remote:          remote,
@@ -361,9 +401,10 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 
 // newYTCommentsWorker sets the gate to mode (canary or on) and builds the
 // dispatcher for one tenant over remote; catchUp runs the catch-up before
-// each Drive pass (HANDOFFKEEP_YT_COMMENTS_CATCHUP). now is the protocol clock
-// (nil: the wall clock).
-func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, mode store.YTCommentsMode, catchUp bool, now func() time.Time) (ytCommentsWorker, error) {
+// each Drive pass (HANDOFFKEEP_YT_COMMENTS_CATCHUP), and bind
+// (HANDOFFKEEP_YT_BIND) the automatic binder. now is the protocol clock (nil:
+// the wall clock).
+func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, mode store.YTCommentsMode, catchUp, bind bool, bucketID string, now func() time.Time) (ytCommentsWorker, error) {
 	if mode != store.YTCommentsCanary && mode != store.YTCommentsOn {
 		return ytCommentsWorker{}, fmt.Errorf("the comment worker runs in mode canary or on, not %q", mode)
 	}
@@ -379,6 +420,14 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 	st.SetYTCommentsMode(mode)
 	log.Printf("ytwrite.comments_enabled mode=%s tenant=%q catchup=%t", mode, tenant, catchUp)
 	w := ytCommentsWorker{protocol: p, feed: st, intents: st, recovery: st, tenant: tenant}
+	if bind {
+		b, err := newYTBindingBinder(st, remote, tenant, bucketID)
+		if err != nil {
+			return ytCommentsWorker{}, err
+		}
+		log.Printf("ytwrite.bind_mode mode=on tenant=%q", tenant)
+		w.binder = b
+	}
 	if catchUp {
 		w.catchUp = st
 	} else {
@@ -421,6 +470,25 @@ type ytIssueIntents interface {
 	PrepareMappedYTIssues(ctx context.Context, limit int) (int, error)
 }
 
+// ytBinder runs one automatic binder pass (HANDOFFKEEP_YT_BIND=on, hk 4492).
+type ytBinder interface {
+	BindPass(ctx context.Context, now time.Time) (ytBindReport, error)
+}
+
+// ytBindReport is what one binder pass did (design §6.6).
+type ytBindReport struct {
+	// Scanned is how many intents the pass examined.
+	Scanned int `json:"scanned"`
+	// Bound is how many tasks got a binding, and Enqueued how many missing
+	// comments got an op.
+	Bound    int `json:"bound"`
+	Enqueued int `json:"enqueued"`
+	// Refused counts the refusals by class.
+	Refused map[string]int `json:"refused"`
+	// Errors counts the tasks whose reads or writes failed.
+	Errors int `json:"errors"`
+}
+
 // ytCommentsWorker runs one sequential Drive pass every interval. Two serve
 // processes (blue-green) may both run it: the ledger's compare-and-set claim
 // is the boundary, so an op is sent at most once. Its ledger is scoped to the
@@ -434,6 +502,12 @@ type ytIssueIntents interface {
 // comment it skipped as ambiguous is left out of later passes of this
 // process, so it is logged once and never crowds out the others; a restart
 // looks at it again.
+//
+// Every ytBindInterval, before the recovery and the catch-up, binder (when
+// set, HANDOFFKEEP_YT_BIND=on) binds the tasks whose comments appeared since
+// its cursor to an issue that verifies and copies the comments the issue
+// provably lacks (hk 4492). It runs before the recovery so a task it binds
+// admits its prepared ops instead of having them closed as stranded.
 //
 // Every ytHeldRecoveryInterval, before the catch-up, recovery (when set)
 // closes the ops that have been held for store.YTHeldRecoveryGrace because
@@ -454,10 +528,15 @@ type ytCommentsWorker struct {
 	feed     ytFeedRunner
 	intents  ytIssueIntents
 	recovery ytHeldRecoverer
-	// tenant is the tenant the worker acts for; recovery closes only its ops.
+	// binder is the automatic binder (HANDOFFKEEP_YT_BIND=on, hk 4492), when
+	// set.
+	binder ytBinder
+	// tenant is the tenant the worker acts for; recovery closes only its ops
+	// and the binder reads and binds only its tenant's tasks.
 	tenant   string
 	interval time.Duration
-	// now is the clock of the recovery pass (nil: the wall clock).
+	// now is the clock of the recovery and binder passes (nil: the wall
+	// clock).
 	now func() time.Time
 }
 
@@ -484,6 +563,27 @@ func (w ytCommentsWorker) recoverHeld(ctx context.Context, last *time.Time) {
 	}
 }
 
+// bindPass runs the automatic binder when ytBindInterval has passed since
+// last, and records the time of the run in last. It runs before the held-op
+// recovery so a task the pass binds admits its prepared ops instead of having
+// them closed as stranded.
+func (w ytCommentsWorker) bindPass(ctx context.Context, last *time.Time) {
+	if w.binder == nil {
+		return
+	}
+	now := time.Now().UTC()
+	if w.now != nil {
+		now = w.now().UTC()
+	}
+	if !last.IsZero() && now.Sub(*last) < ytBindInterval {
+		return
+	}
+	*last = now
+	if _, err := w.binder.BindPass(ctx, now); err != nil && ctx.Err() == nil {
+		log.Printf("ytwrite.bind_pass_failed err=%q", err.Error())
+	}
+}
+
 func (w ytCommentsWorker) Run(ctx context.Context) {
 	interval := w.interval
 	if interval <= 0 {
@@ -492,8 +592,9 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	skipped := []int64{}
-	var recovered time.Time
+	var recovered, bound time.Time
 	for {
+		w.bindPass(ctx, &bound)
 		w.recoverHeld(ctx, &recovered)
 		if w.catchUp != nil {
 			got, err := w.catchUp.CatchUpYTComments(ctx, ytCommentsCatchUpLimit, skipped)
@@ -524,6 +625,282 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// The automatic binder (hk 4492, design/2026-11-13/yt-comment-binding-lifecycle
+// §6.6, §6.7). HANDOFFKEEP_YT_BIND=on makes the comment worker, every
+// ytBindInterval, take the tasks whose comments appeared since its cursor and
+// bind the ones whose YouTrack issue verifies, with a watermark computed from
+// the issue's own listing, then copy the comments the issue provably lacks.
+// It never creates an issue, never rebinds a bound task, and never undoes an
+// operator unbind (I7).
+
+// The classes an automatic binding is refused or ended with (design §6.6,
+// §6.8).
+const (
+	ytBindNoIssue      = "no_issue"
+	ytBindAmbiguous    = "ambiguous"
+	ytBindHistory      = "history_ambiguous"
+	ytBindHistoryLarge = "history_large"
+	ytBindOtherTenant  = "other_tenant"
+)
+
+// ytBindRemote is what the binder needs from YouTrack: the comment listing
+// and the issue read the enrollment rules use.
+type ytBindRemote interface {
+	ytwrite.Remote
+	youtrack.IssueReader
+}
+
+// ytBindingBinder settles the durable intents the store's cursor pass
+// recorded (store.ScanYTBindingCandidates). bucketID is the HK bucket project
+// a task with no hk project verifies against.
+type ytBindingBinder struct {
+	st       *store.Store
+	remote   ytBindRemote
+	tenant   string
+	bucketID string
+}
+
+func newYTBindingBinder(st *store.Store, remote ytwrite.Remote, tenant, bucketID string) (ytBindingBinder, error) {
+	r, ok := remote.(ytBindRemote)
+	if !ok {
+		return ytBindingBinder{}, errors.New("the automatic binder needs a remote that reads issues")
+	}
+	return ytBindingBinder{st: st, remote: r, tenant: tenant, bucketID: bucketID}, nil
+}
+
+// BindPass reads the next page of the comment stream into intents and settles
+// up to ytBindPassLimit due ones. One task's failure never stops the pass.
+func (b ytBindingBinder) BindPass(ctx context.Context, now time.Time) (ytBindReport, error) {
+	rep := ytBindReport{Refused: map[string]int{}}
+	scan, err := b.st.ScanYTBindingCandidates(ctx, b.tenant, ytBindScanLimit, now)
+	if err != nil {
+		return rep, err
+	}
+	intents, err := b.st.YTBindingIntentsDue(ctx, b.tenant, now, ytBindPassLimit)
+	if err != nil {
+		return rep, err
+	}
+	for _, in := range intents {
+		rep.Scanned++
+		b.bindTask(ctx, now, in, &rep)
+	}
+	log.Printf("ytwrite.bind_pass scanned=%d bound=%d enqueued=%d errors=%d refused=%q queued=%d",
+		rep.Scanned, rep.Bound, rep.Enqueued, rep.Errors, ytBindRefusedText(rep.Refused), scan.Tasks)
+	return rep, nil
+}
+
+// ytBindRefusedText renders the refusal counts as class:count pairs, in
+// class order, for one log line.
+func ytBindRefusedText(refused map[string]int) string {
+	classes := make([]string, 0, len(refused))
+	for class := range refused {
+		classes = append(classes, class)
+	}
+	sort.Strings(classes)
+	parts := make([]string, 0, len(classes))
+	for _, class := range classes {
+		parts = append(parts, fmt.Sprintf("%s:%d", class, refused[class]))
+	}
+	return strings.Join(parts, ",")
+}
+
+// bindTask moves one intent: excluded when the operator unbound the task,
+// finished when the task is bound already, or verified, published and copied
+// otherwise.
+func (b ytBindingBinder) bindTask(ctx context.Context, now time.Time, in store.YTBindingIntent, rep *ytBindReport) {
+	// 1. An operator unbind outlives the deleted row and is never undone
+	// (I7): no YouTrack call, no retry.
+	excluded, err := b.st.YTBindingExcluded(ctx, in.TaskID)
+	if err != nil {
+		b.fail(ctx, now, in.TaskID, err, rep)
+		return
+	}
+	if excluded {
+		b.exclude(ctx, now, in.TaskID, "excluded", "the operator unbound the task", rep)
+		return
+	}
+	// 2. A task bound by anyone already (the backfill, an applied
+	// issue_create, another worker) owns its comments_from and everything at
+	// or below it: the intent is done (B2 in the consult's design).
+	if bound, found, err := b.st.YTTaskBinding(ctx, in.TaskID); err != nil {
+		b.fail(ctx, now, in.TaskID, err, rep)
+		return
+	} else if found {
+		b.settleBound(ctx, now, in.TaskID, bound, 0, rep)
+		return
+	}
+	// 3. Verify the issue with the enrollment rules (design §6.8).
+	candidate, err := b.st.YTCanaryCandidate(ctx, in.TaskID)
+	if err != nil {
+		b.fail(ctx, now, in.TaskID, err, rep)
+		return
+	}
+	gctx, cancel := context.WithTimeout(ctx, ytCommentsGetTimeout)
+	binding, err := youtrack.VerifyBinding(gctx, b.remote, b.tenant, b.bucketID, candidate)
+	cancel()
+	switch {
+	case errors.Is(err, youtrack.ErrNoIssue):
+		b.refuse(ctx, now, in.TaskID, ytBindNoIssue, err.Error(), rep)
+		return
+	case errors.Is(err, youtrack.ErrCanaryRefused):
+		b.refuse(ctx, now, in.TaskID, ytBindAmbiguous, err.Error(), rep)
+		return
+	case err != nil:
+		b.fail(ctx, now, in.TaskID, err, rep)
+		return
+	}
+	binding.BoundBy = ytBindActor
+	// 4. The copies come from positive evidence (I8); a history that is not
+	// provably complete, or too large to copy in one transaction, refuses.
+	ev, class, err := b.evidence(ctx, in.TaskID, binding.IssueID)
+	if err != nil {
+		b.fail(ctx, now, in.TaskID, err, rep)
+		return
+	}
+	if class != "" {
+		b.refuse(ctx, now, in.TaskID, class, "the comment history is not provably complete", rep)
+		return
+	}
+	// 5. Publish the binding and its copies in one transaction. The
+	// publication rechecks the unbind and the comments authority under its
+	// locks and never adopts another publisher's binding.
+	got, err := b.st.PublishYTAutoBinding(ctx, binding, candidate, ev, ytBindActor)
+	switch {
+	case errors.Is(err, store.ErrYTBindingExcluded):
+		b.exclude(ctx, now, in.TaskID, "excluded", err.Error(), rep)
+		return
+	case errors.Is(err, store.ErrYTBindingExists):
+		if bound, found, rerr := b.st.YTTaskBinding(ctx, in.TaskID); rerr != nil {
+			b.fail(ctx, now, in.TaskID, rerr, rep)
+		} else if found {
+			b.settleBound(ctx, now, in.TaskID, bound, 0, rep)
+		} else {
+			b.fail(ctx, now, in.TaskID, err, rep)
+		}
+		return
+	case errors.Is(err, store.ErrYTBindingConflict):
+		b.refuse(ctx, now, in.TaskID, ytBindAmbiguous, err.Error(), rep)
+		return
+	case err != nil:
+		b.fail(ctx, now, in.TaskID, err, rep)
+		return
+	}
+	rep.Bound++
+	rep.Enqueued += got.Prepared
+	b.settleBound(ctx, now, in.TaskID, got.Binding, got.Prepared, rep)
+}
+
+// settleBound drops the task's intent. A binding exists, and its publisher
+// owns the copies at or below its watermark; the ones above it are the
+// issue-only catch-up's. A binding on another tenant excludes the task here.
+// A crash between the publication's commit and this call is harmless: the
+// next pass takes step 2 and drops the intent.
+func (b ytBindingBinder) settleBound(ctx context.Context, now time.Time, taskID int64, bound store.YTTaskBinding, prepared int, rep *ytBindReport) {
+	if bound.Tenant != b.tenant {
+		b.exclude(ctx, now, taskID, ytBindOtherTenant, "bound on tenant "+bound.Tenant, rep)
+		return
+	}
+	if err := b.st.DropYTBindingIntent(ctx, taskID); err != nil {
+		log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", taskID, err.Error())
+	}
+	log.Printf("ytwrite.bind_task task_id=%d class=bound issue_id=%q origin=%s prepared=%d", taskID, bound.IssueID, bound.Origin, prepared)
+}
+
+// evidence lists the issue's comments once and classifies the task's
+// comments against them with the audit's matcher (design §6.7). The
+// publication rechecks the authority it read and copies the Missing set in
+// its own transaction, so nothing here is owed after the publication commits.
+// A history that is not provably complete, or larger than one publication
+// copies, is a class the intent refuses with.
+func (b ytBindingBinder) evidence(ctx context.Context, taskID int64, issueID string) (store.YTAutoBindEvidence, string, error) {
+	authority, err := b.st.YTAuthorityOf(ctx, store.YTAuthorityComments)
+	if err != nil {
+		return store.YTAutoBindEvidence{}, "", err
+	}
+	ev := store.YTAutoBindEvidence{Authority: authority}
+	if authority == store.YTAuthorityYouTrack {
+		// YouTrack already holds the comments; the publication applies the
+		// in-transaction max-id watermark and copies nothing.
+		return ev, "", nil
+	}
+	hk, err := b.st.YTAuditTaskComments(ctx, taskID, issueID)
+	if err != nil {
+		return ev, "", err
+	}
+	lctx, cancel := context.WithTimeout(ctx, ytCommentsGetTimeout)
+	listed, err := b.remote.ListComments(lctx, issueID, ytAuditPageSize)
+	cancel()
+	if err != nil {
+		return ev, "", err
+	}
+	// A YouTrack comment the activity pull copied into hk is not the
+	// issue's evidence. The legacy push's links are, by its own rules.
+	yt := listed[:0:0]
+	for _, c := range listed {
+		if !hk.PulledYTIDs[c.ID] {
+			yt = append(yt, c)
+		}
+	}
+	for i, c := range hk.Comments {
+		if link := hk.Links[c.ID]; youtrack.CommentLinkIsID(link) {
+			hk.Comments[i].LinkedYTIDs = append(hk.Comments[i].LinkedYTIDs, link)
+		}
+	}
+	got := ytwrite.AuditComments(hk.Comments, yt, "", youtrack.LegacyCommentID)
+	if len(got.AmbiguousCopy) > 0 || len(got.Duplicate) > 0 {
+		return ev, ytBindHistory, nil
+	}
+	missing := make([]int64, 0, len(got.Missing))
+	for _, x := range got.Present {
+		if x.CommentID > ev.CommentsFrom {
+			ev.CommentsFrom = x.CommentID
+		}
+	}
+	for _, x := range got.Missing {
+		// A comment the adoption linked was posted in a form hk cannot
+		// recognise; a second copy may be the result (R2).
+		if youtrack.CommentLinkIsAdopted(hk.Links[x.CommentID]) {
+			return ev, ytBindHistory, nil
+		}
+		missing = append(missing, x.CommentID)
+	}
+	if len(missing) > ytBindCopyMax {
+		return ev, ytBindHistoryLarge, nil
+	}
+	ev.Missing = missing
+	return ev, "", nil
+}
+
+// refuse settles an intent as refused with its class and the backoff, and
+// counts it.
+func (b ytBindingBinder) refuse(ctx context.Context, now time.Time, taskID int64, class, detail string, rep *ytBindReport) {
+	rep.Refused[class]++
+	if err := b.st.RetryYTBindingIntent(ctx, taskID, store.YTBindingIntentRefused, class, detail, now); err != nil {
+		log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", taskID, err.Error())
+	}
+	log.Printf("ytwrite.bind_task task_id=%d class=%s detail=%q", taskID, class, detail)
+}
+
+// exclude settles an intent as terminal: no automatic binding will try the
+// task again.
+func (b ytBindingBinder) exclude(ctx context.Context, now time.Time, taskID int64, class, detail string, rep *ytBindReport) {
+	rep.Refused[class]++
+	if err := b.st.ExcludeYTBindingIntent(ctx, taskID, class, now); err != nil {
+		log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", taskID, err.Error())
+	}
+	log.Printf("ytwrite.bind_task task_id=%d class=%s detail=%q", taskID, class, detail)
+}
+
+// fail settles an intent as an error with the backoff: a read or a write
+// failed, and the next pass tries again.
+func (b ytBindingBinder) fail(ctx context.Context, now time.Time, taskID int64, cause error, rep *ytBindReport) {
+	rep.Errors++
+	if err := b.st.RetryYTBindingIntent(ctx, taskID, store.YTBindingIntentError, "", cause.Error(), now); err != nil {
+		log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", taskID, err.Error())
+	}
+	log.Printf("ytwrite.bind_task task_id=%d class=error detail=%q", taskID, cause.Error())
 }
 
 // ytOpsAlertWorker scans the durable ledger independently of dispatch mode,
