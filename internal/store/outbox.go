@@ -26,6 +26,7 @@ const (
 	OutboxKindDotsBlocked  = "dots_blocked"
 	OutboxKindDotsFollowup = "dots_followup"
 	OutboxKindYTWriteOp    = "yt_write_op"
+	OutboxKindDeployLag    = "deploy_lag"
 	// The resolution kinds of hk 3295: an operator deny of a pending decision
 	// attempt, a disposition (ESC) answer, and a deploy result.
 	OutboxKindDecisionDenied      = "decision_denied"
