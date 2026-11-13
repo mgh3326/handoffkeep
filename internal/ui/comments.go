@@ -21,10 +21,10 @@ import (
 // to tell "this is all of them" from "the page bound was hit".
 const boardCommentsPage = 200
 
-// uiCommentFormMax bounds the urlencoded write form: a body at the store
-// limit can triple under percent-encoding, plus room for the CSRF field. A
-// larger request is answered as comment_too_long, never as a generic error.
-const uiCommentFormMax = 3*store.TaskCommentMaxBytes + 4096
+// uiCommentFormMax is the request-memory budget for ParseForm on this route.
+// It leaves room for the comment body plus its form encoding and CSRF fields;
+// a larger request is answered as comment_too_long.
+const uiCommentFormMax = 3*store.MaxBytes + 4096
 
 var taskCommentsPathRE = regexp.MustCompile(`^/ui/tasks/([1-9][0-9]{0,14})/comments$`)
 var boardCommentsPathRE = regexp.MustCompile(`^/ui/api/board/tasks/([1-9][0-9]{0,14})/comments$`)
@@ -108,7 +108,7 @@ func (h *Handler) boardTaskComments(w http.ResponseWriter, r *http.Request, task
 }
 
 // createTaskComment is the console's comment write. It takes the same
-// authentication, origin, and CSRF path as /ui/decisions/answer: ServeHTTP
+// authentication, origin, and CSRF path as the other console writes: ServeHTTP
 // has already required a verified operator email (service principals are
 // refused on non-/ui/api routes), then sameOrigin, ParseForm, validCSRF, and
 // one audit line. The author is the verified email; the form carries only

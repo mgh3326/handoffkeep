@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -26,36 +27,68 @@ import (
 const dispositionSnapshotTTL = 12 * time.Hour
 
 type dispositionItemView struct {
-	Task        store.Task
-	Gen         int64
-	Question    string
-	Recommended string
-	Options     []store.DecisionOption
-	AgeDays     int
-	CSRF        string
-	CanWrite    bool
+	Task        store.Task             `json:"task"`
+	Gen         int64                  `json:"gen"`
+	Question    string                 `json:"question"`
+	Recommended string                 `json:"recommended"`
+	Options     []store.DecisionOption `json:"options,omitempty"`
+	AgeDays     int                    `json:"age_days"`
+	CSRF        string                 `json:"csrf"`
+	CanWrite    bool                   `json:"can_write"`
 }
 
 type dispositionNoticeView struct {
-	EventID string
-	IDs     string
-	CSRF    string
+	EventID string `json:"event_id"`
+	IDs     string `json:"ids"`
+	CSRF    string `json:"csrf"`
 }
 
 type dispositionSection struct {
-	Head       string
-	Detail     string
-	Items      []dispositionItemView
-	BatchN     int
-	Counts     string
-	NextBatch  int
-	BatchID    string
-	IssuedAt   string
-	Snapshot   string
-	Token      string
-	CSRF       string
-	CanWrite   bool
-	Unnotified []dispositionNoticeView
+	Head       string                  `json:"head"`
+	Detail     string                  `json:"detail"`
+	Items      []dispositionItemView   `json:"items"`
+	BatchN     int                     `json:"batch_n"`
+	Counts     string                  `json:"counts"`
+	NextBatch  int                     `json:"next_batch"`
+	BatchID    string                  `json:"batch_id"`
+	IssuedAt   string                  `json:"issued_at"`
+	Snapshot   string                  `json:"snapshot"`
+	Token      string                  `json:"token"`
+	CSRF       string                  `json:"csrf"`
+	CanWrite   bool                    `json:"can_write"`
+	Unnotified []dispositionNoticeView `json:"unnotified"`
+}
+
+// dispositionsAPI serves GET /ui/api/dispositions: the open disposition
+// items, the signed batch snapshot that POST /ui/dispositions/accept-batch
+// requires, and the form CSRF token. Operator email identities only.
+func (h *Handler) dispositionsAPI(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity) {
+	email, ok := operatorEmail(identity)
+	if !ok {
+		writeJSONError(w, http.StatusForbidden, "operator_only")
+		return
+	}
+	section, err := h.dispositionData(r, h.csrfForForm(w, r, email), email, h.hub.configured())
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeBoardJSON(w, section)
+}
+
+// dispositionResult answers a disposition write with its notice as plain
+// text. The console has no page to redirect to, so the caller reads the
+// notice from the body.
+func dispositionResult(w http.ResponseWriter, notice string, status int) {
+	if status >= http.StatusBadRequest {
+		http.Error(w, notice, status)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, notice)
 }
 
 func operatorEmail(identity cfaccess.Identity) (string, bool) {
@@ -171,25 +204,6 @@ func (h *Handler) dispositionData(r *http.Request, csrf, email string, canWrite 
 	return section, nil
 }
 
-// dispositionEventText is deterministic in the recorded answers, so a
-// re-notification sends the same text under the same event ID.
-func dispositionEventText(tasks []store.Task) (string, error) {
-	if len(tasks) == 0 {
-		return "", errors.New("no answered items")
-	}
-	first := tasks[0].Refs.Disposition.Answer
-	email := strings.TrimPrefix(first.By, "operator:")
-	if len(tasks) == 1 && first.BatchID == "" {
-		label, _ := store.DispositionOptionLabel(first.Key)
-		return fmt.Sprintf("[decision] #%d: %s: %s (from operator(web) %s)", tasks[0].ID, first.Key, label, email), nil
-	}
-	parts := make([]string, 0, len(tasks))
-	for _, task := range tasks {
-		parts = append(parts, fmt.Sprintf("#%d=%s", task.ID, task.Refs.Disposition.Answer.Key))
-	}
-	return fmt.Sprintf("[decision] disposition-batch %s: %s (from operator(web) %s)", first.BatchID, strings.Join(parts, " "), email), nil
-}
-
 func (h *Handler) dispositionWriteGate(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity, action string) (string, bool) {
 	email, ok := operatorEmail(identity)
 	if !ok {
@@ -240,9 +254,6 @@ func (h *Handler) answerDisposition(w http.ResponseWriter, r *http.Request, iden
 	// answer in the director's lane (ESC-5).
 	task, err := h.store.AnswerDisposition(r.Context(), store.DispositionAnswerInput{ID: id, Gen: gen, Key: key, OperatorEmail: email, EventID: eventID})
 	if err != nil {
-		if uiWrkError(w, err) {
-			return
-		}
 		switch {
 		case errors.Is(err, store.ErrDispositionStale):
 			h.audit(email, "disposition", target, eventID, "stale")
@@ -256,17 +267,17 @@ func (h *Handler) answerDisposition(w http.ResponseWriter, r *http.Request, iden
 		}
 		return
 	}
-	text, err := dispositionEventText([]store.Task{task})
+	text, err := store.DispositionEventText([]store.Task{task})
 	if err == nil {
 		_, err = h.hub.emitLaneEvent(r.Context(), task.Lane, eventID, text)
 	}
 	if err != nil {
 		h.audit(email, "disposition", target, eventID, "recorded_notify_failed")
-		h.decisionResult(w, r, email, "처분 기록됨 · 레인 통지 실패: "+hubReason(err)+" — 통지 대기에서 재통지하세요(event_id="+eventID+")", http.StatusOK)
+		dispositionResult(w, "처분 기록됨 · 레인 통지 실패: "+hubReason(err)+" — 통지 대기에서 재통지하세요(event_id="+eventID+")", http.StatusOK)
 		return
 	}
 	h.audit(email, "disposition", target, eventID, "ok")
-	h.decisionResult(w, r, email, "처분 기록·전송됨(event_id="+eventID+")", http.StatusOK)
+	dispositionResult(w, "처분 기록·전송됨(event_id="+eventID+")", http.StatusOK)
 }
 
 func (h *Handler) acceptDispositionBatch(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity) {
@@ -295,9 +306,6 @@ func (h *Handler) acceptDispositionBatch(w http.ResponseWriter, r *http.Request,
 	eventFor := func(lane string) string { return "web-disposition-batch-" + batchID + "-" + lane }
 	answered, skipped, err := h.store.AnswerDispositionBatch(r.Context(), refs, email, batchID, eventFor)
 	if err != nil {
-		if uiWrkError(w, err) {
-			return
-		}
 		h.audit(email, "disposition-batch", "-", "-", "error")
 		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
 		return
@@ -313,7 +321,7 @@ func (h *Handler) acceptDispositionBatch(w http.ResponseWriter, r *http.Request,
 	sort.Strings(lanes)
 	failed := []string{}
 	for _, lane := range lanes {
-		text, err := dispositionEventText(byLane[lane])
+		text, err := store.DispositionEventText(byLane[lane])
 		if err == nil {
 			_, err = h.hub.emitLaneEvent(r.Context(), lane, eventFor(lane), text)
 		}
@@ -331,7 +339,7 @@ func (h *Handler) acceptDispositionBatch(w http.ResponseWriter, r *http.Request,
 	if len(failed) > 0 {
 		notice += " · 레인 통지 실패: " + strings.Join(failed, ", ") + " — 통지 대기에서 재통지하세요"
 	}
-	h.decisionResult(w, r, email, notice, http.StatusOK)
+	dispositionResult(w, notice, http.StatusOK)
 }
 
 func (h *Handler) renotifyDisposition(w http.ResponseWriter, r *http.Request, identity cfaccess.Identity) {
@@ -358,7 +366,7 @@ func (h *Handler) renotifyDisposition(w http.ResponseWriter, r *http.Request, id
 	}
 	if !stillPending {
 		h.audit(email, "disposition-renotify", "-", eventID, "already_notified")
-		h.decisionResult(w, r, email, "이미 통지됨", http.StatusOK)
+		dispositionResult(w, "이미 통지됨", http.StatusOK)
 		return
 	}
 	tasks, err := h.store.ListDispositionsByAnswerEvent(r.Context(), eventID)
@@ -366,15 +374,15 @@ func (h *Handler) renotifyDisposition(w http.ResponseWriter, r *http.Request, id
 		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
 		return
 	}
-	text, err := dispositionEventText(tasks)
+	text, err := store.DispositionEventText(tasks)
 	if err == nil {
 		_, err = h.hub.emitLaneEvent(r.Context(), tasks[0].Lane, eventID, text)
 	}
 	if err != nil {
 		h.audit(email, "disposition-renotify", tasks[0].Lane, eventID, "hub_error")
-		h.decisionResult(w, r, email, "재통지 실패: "+hubReason(err), http.StatusOK)
+		dispositionResult(w, "재통지 실패: "+hubReason(err), http.StatusOK)
 		return
 	}
 	h.audit(email, "disposition-renotify", tasks[0].Lane, eventID, "ok")
-	h.decisionResult(w, r, email, "재통지됨(event_id="+eventID+")", http.StatusOK)
+	dispositionResult(w, "재통지됨(event_id="+eventID+")", http.StatusOK)
 }

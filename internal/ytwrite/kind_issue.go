@@ -25,7 +25,7 @@ func init() {
 }
 
 // IssueSummaryLimit is the most runes an issue summary carries.
-const IssueSummaryLimit = 250
+const IssueSummaryLimit = SummaryMaxChars
 
 // IssueCreatePayload is the immutable outbound payload of an issue_create op.
 // The task id is the op's EntityID and the YouTrack project id its
@@ -81,6 +81,13 @@ func CheckIssue(req IssueRequest) error {
 	}
 	if err := checkBody(req.Title); err != nil {
 		return fmt.Errorf("title: %w", err)
+	}
+	// The description adds the provenance, task and project lines and the
+	// marker around the title. Measure it with the largest op and task ids, so
+	// an issue admitted here renders within the bound under any id.
+	_, description := RenderIssue(IssueText{Actor: req.Actor, OpID: worstOpID, TaskID: worstOpID, Project: req.Project, Title: req.Title})
+	if !WithinTextMax(description) {
+		return fmt.Errorf("%w: rendered issue description is over %d characters (YouTrack's text bound)", ErrInvalid, TextMaxChars)
 	}
 	return nil
 }
@@ -213,6 +220,11 @@ func (issueCreate) Render(op Op) (string, error) {
 		return "", err
 	}
 	_, description := RenderIssue(x)
+	// The provenance lines and the marker add to the title, so the description
+	// can exceed the bound the title alone met. YouTrack would refuse it.
+	if !WithinTextMax(description) {
+		return "", fmt.Errorf("%w: rendered issue description is over %d characters (YouTrack's text bound)", ErrInvalid, TextMaxChars)
+	}
 	return description, nil
 }
 

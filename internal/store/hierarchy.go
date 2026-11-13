@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
 // Relation kinds. blocks and duplicate_of point from Src to Dst (Src blocks
@@ -348,9 +347,6 @@ func (s *Store) SetTaskParent(ctx context.Context, id int64, parent *int64, by s
 		}
 		return Task{}, false, err
 	}
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
-		return Task{}, false, err
-	}
 	same := (x.ParentID == nil && parent == nil) || (x.ParentID != nil && parent != nil && *x.ParentID == *parent)
 	if same {
 		return x, false, tx.Commit(ctx)
@@ -407,6 +403,25 @@ func (s *Store) afterStateChangeTx(ctx context.Context, tx pgx.Tx, x Task, from,
 		}
 	}
 	return nil
+}
+
+// closeGateTx is the gate an automatic close of x passes (hk 3294; the
+// hygiene close of hk 3292 is to reuse it): it returns why the close must
+// wait for a person, or "". x waits while one of its own implements changes is
+// open or reverted and not relanded (pieceHoldTx, the last-piece rule of a
+// merge), while it is awaiting a decision, or while its decision request is
+// open.
+func (s *Store) closeGateTx(ctx context.Context, tx pgx.Tx, x Task) (string, error) {
+	if reason, err := pieceHoldTx(ctx, tx, x.ID, ""); err != nil || reason != "" {
+		return reason, err
+	}
+	if x.AwaitingDecision {
+		return "parent is awaiting a decision", nil
+	}
+	if x.Refs.DecisionRequest != nil && x.Refs.DecisionRequest.Status == DecisionRequestOpen {
+		return "parent has an open decision request", nil
+	}
+	return "", nil
 }
 
 // autoCloseTx runs auto_close_parent in the transaction of a child's
@@ -479,20 +494,23 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 			})
 			return err
 		}
-		if p.AwaitingDecision {
-			_, _, err = insertEvent(ctx, tx, taskEventInput{
-				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
-				Note:   "parent is awaiting a decision; the parent stays where it is",
-				Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
-			})
-			return err
-		}
 		to := StateCompleted
 		if merged > 0 || deployed > 0 {
 			to = StateMerged
 		}
 		if deployed == completed {
 			to = StateDeployed
+		}
+		if gate, err := s.closeGateTx(ctx, tx, p); err != nil || gate != "" {
+			if err != nil {
+				return err
+			}
+			_, _, err = insertEvent(ctx, tx, taskEventInput{
+				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
+				Note:   gate + "; the parent stays where it is",
+				Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
+			})
+			return err
 		}
 		if to == StateCompleted && !canCompleteKind(p.Kind) {
 			_, _, err = insertEvent(ctx, tx, taskEventInput{
@@ -501,19 +519,6 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 				Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
 			})
 			return err
-		}
-		if err := s.wrkTaskFenceTx(ctx, tx, p, FenceTarget(to), false); err != nil {
-			switch wrkrecords.Code(err) {
-			case "scope_denied", "wrk_receipt_required":
-				_, _, err = insertEvent(ctx, tx, taskEventInput{
-					TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
-					Note:   "parent needs a work receipt; the parent stays where it is",
-					Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
-				})
-				return err
-			default:
-				return err
-			}
 		}
 		from := p.State
 		decisionBefore := decisionBeforeOf(p)

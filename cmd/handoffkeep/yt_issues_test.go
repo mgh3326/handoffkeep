@@ -30,7 +30,7 @@ func TestYTIssuesModeStartsTheWriteWorker(t *testing.T) {
 	}))
 	t.Cleanup(bucket.Close)
 	t.Setenv("YOUTRACK_URL", bucket.URL)
-	t.Setenv("YOUTRACK_BOT_API_KEY", readthroughTestKey)
+	t.Setenv("YOUTRACK_BOT_API_KEY", serveTestKey)
 	if w, err := ytCommentsWorkerFromEnv(&store.Store{}); err != nil || w == nil {
 		t.Fatalf("issues on: worker %v err %v", w, err)
 	}

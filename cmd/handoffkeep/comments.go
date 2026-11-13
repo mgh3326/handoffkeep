@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 // taskCommentsCmd serves "tasks comment <id> --body|--file" and
@@ -77,7 +78,7 @@ func taskCommentsCmd(args []string, in io.Reader, out io.Writer) error {
 			}
 			// Read one byte past the limit so an oversized file is reported
 			// as too long without loading all of it.
-			b, err := io.ReadAll(io.LimitReader(src, store.TaskCommentMaxBytes+1))
+			b, err := io.ReadAll(io.LimitReader(src, 4*ytwrite.TextMaxChars+1))
 			if err != nil {
 				return err
 			}

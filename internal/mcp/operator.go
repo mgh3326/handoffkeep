@@ -162,13 +162,15 @@ type taskSummary struct {
 	UpdatedAt  time.Time    `json:"updated_at"`
 	ConsoleURL string       `json:"console_url"`
 	YouTrack   *youTrackRef `json:"youtrack,omitempty"`
+	// Spawn is the task's panewire spawn request, when one was recorded (hk 4377).
+	Spawn *store.TaskSpawn `json:"spawn,omitempty"`
 }
 
 func taskSummaryOf(task store.Task, mirror store.YouTrackMirror, mirrored bool) taskSummary {
 	out := taskSummary{
 		ID: task.ID, Title: task.Title, State: task.State, Priority: task.Priority,
 		Lane: task.Lane, Project: task.Project, PR: task.Refs.PR, UpdatedAt: task.UpdatedAt,
-		ConsoleURL: taskURL(task.ID),
+		ConsoleURL: taskURL(task.ID), Spawn: task.Spawn,
 	}
 	if mirrored && mirror.DisplayRef != "" {
 		out.YouTrack = &youTrackRef{ID: mirror.DisplayRef, URL: mirror.URL}

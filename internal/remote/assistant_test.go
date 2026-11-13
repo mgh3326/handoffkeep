@@ -18,7 +18,7 @@ import (
 // call — the shared call() path carries Bearer and CF-Access headers, and
 // error strings never carry credentials or a redirect Location.
 
-// assistantHK serves the four /v1/assistant routes the client can hit.
+// assistantHK serves the five /v1/assistant routes the client can hit.
 func assistantHK(t *testing.T) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -28,6 +28,8 @@ func assistantHK(t *testing.T) func(http.ResponseWriter, *http.Request) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/assistant/outbox":
 			_ = json.NewEncoder(w).Encode(map[string]any{"notifications": []store.NotificationOutbox{{ID: 1, Kind: store.OutboxKindDecisionAnswered, EventID: "dr-1-1-answered"}}})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/assistant/outbox/sent":
+			_ = json.NewEncoder(w).Encode(store.NotificationOutbox{ID: 1, EventID: "dr-1-1-answered"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/assistant/outbox/applied":
 			_ = json.NewEncoder(w).Encode(store.NotificationOutbox{ID: 1, EventID: "dr-1-1-answered"})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/assistant/decisions/resolve":
 			_ = json.NewEncoder(w).Encode(store.DecisionRequestResult{Request: store.DecisionRequest{ID: "dr-1-1"}})
@@ -50,6 +52,9 @@ func exerciseAssistant(t *testing.T, c Client) {
 	if _, e := c.MarkNotificationSent(ctx, "dr-1-1-answered", 7); e != nil {
 		t.Fatalf("MarkNotificationSent: %v", e)
 	}
+	if _, e := c.MarkNotificationApplied(ctx, "dr-1-1-answered"); e != nil {
+		t.Fatalf("MarkNotificationApplied: %v", e)
+	}
 	if _, e := c.AssistantResolve(ctx, store.DecisionAssistantResolveInput{RequestID: "dr-1-1", Option: "A"}); e != nil {
 		t.Fatalf("AssistantResolve: %v", e)
 	}
@@ -64,8 +69,8 @@ func TestAssistantMethodsCarryCFHeaders(t *testing.T) {
 	exerciseAssistant(t, c)
 
 	got := hk.requests()
-	if len(got) != 4 {
-		t.Fatalf("requests=%d want 4", len(got))
+	if len(got) != 5 {
+		t.Fatalf("requests=%d want 5", len(got))
 	}
 	for i, h := range got {
 		if h.id != cfFixtureID || h.secret != cfFixtureSecret {

@@ -1,3 +1,4 @@
+import type { TaskSpawn } from "./spawn";
 export type TaskRefs = {
   closure?: { type: string; evidence: string };
   pr?: string;
@@ -251,21 +252,10 @@ export type BoardDetail = {
   decision_legacy?: LegacyDecisionView | null;
   /** Child tasks; absent when none or on pre-hierarchy servers. */
   children?: TaskChildRef[];
+  /** The task's panewire spawn request (hk 4377); absent or null when none. */
+  spawn?: TaskSpawn | null;
   /** Inter-task relations; absent when none or on pre-hierarchy servers. */
   relations?: TaskRelation[];
-};
-
-/** GET /ui/api/board/doc — one hk document by exact key. Only "markdown"
- * may reach the renderer; "unsupported" is shown as raw text only. */
-export type BoardDoc = {
-  key: string;
-  kind: string;
-  sha256: string;
-  updated_at: string;
-  bytes: number;
-  format: "markdown" | "unsupported";
-  reason?: "not_text" | "too_large" | "json";
-  body: string;
 };
 
 /** One append-only task comment from /ui/api/board/tasks/<id>/comments.

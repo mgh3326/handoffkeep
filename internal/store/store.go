@@ -26,13 +26,12 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/guard"
-	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 const MaxBytes = 64 << 10
 const DocumentMaxBytes = 512 << 10
 const CheckpointKeep = 500
-const MemoryKeep = 2000
 
 var ErrTrigramUnavailable = errors.New("PostgreSQL pg_trgm extension unavailable: grant CREATE on the database/schema or install pg_trgm as an administrator")
 
@@ -41,7 +40,6 @@ var ErrTrigramUnavailable = errors.New("PostgreSQL pg_trgm extension unavailable
 var ErrSearchTimeout = errors.New("search_timeout")
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 var kinds = map[string]bool{"checkpoint": true, "handoff": true, "decision": true, "open_question": true, "next_action": true}
-var memoryTypes = map[string]bool{"user": true, "feedback": true, "project": true, "reference": true}
 var documentKinds = map[string]bool{"brief": true, "report": true, "answer": true, "handoff": true, "note": true, "other": true, "decision": true, "research": true, "design": true, "policy": true, "evidence": true}
 var documentOriginClasses = map[string]bool{"authored": true, "job": true, "import": true}
 var taskKinds = map[string]bool{"implement": true, "verify": true, "fix": true, "decide": true, "ops": true}
@@ -517,45 +515,39 @@ type Task struct {
 	SourceRef string `json:"source_ref,omitempty"`
 	// Stalled is computed at read time: a started task with no
 	// awaiting_decision and no activity within started_stalled_hours.
-	Stalled bool `json:"stalled"`
-	// PrioritySource and LaneSource say where the served value came from
-	// ("hk" or "youtrack"); ValuesFetchedAt is when the cache row was last
-	// refreshed, and Stale marks a value whose last YouTrack refresh failed.
-	// All four are derived at read time and never stored.
-	PrioritySource  string         `json:"priority_source,omitempty"`
-	LaneSource      string         `json:"lane_source,omitempty"`
-	ValuesFetchedAt *time.Time     `json:"values_fetched_at,omitempty"`
-	Stale           bool           `json:"stale,omitempty"`
-	Children        []TaskChild    `json:"children,omitempty"`
-	Relations       []TaskRelation `json:"relations,omitempty"`
-	Events          []TaskEvent    `json:"events,omitempty"`
+	Stalled   bool           `json:"stalled"`
+	Children  []TaskChild    `json:"children,omitempty"`
+	Relations []TaskRelation `json:"relations,omitempty"`
+	Events    []TaskEvent    `json:"events,omitempty"`
+	// Spawn is where the task's panewire spawn request stands (hk 4377); absent
+	// when no request was recorded. Read with the task, never stored on it.
+	Spawn *TaskSpawn `json:"spawn,omitempty"`
 }
 
 // RelayEvent is a durable report from a worker to its owning lane.  Delivery
 // state belongs here rather than in the relay hub so it survives restarts.
 type RelayEvent struct {
-	WrkReceipt     *wrkrecords.Receipt `json:"wrk_receipt,omitempty"`
-	ReportSHA      string              `json:"report_sha256,omitempty"`
-	ID             int64               `json:"id"`
-	Kind           string              `json:"kind"`
-	JobID          string              `json:"job_id"`
-	Epoch          int                 `json:"epoch"`
-	OwnerLane      string              `json:"owner_lane"`
-	Machine        string              `json:"machine"`
-	PaneID         string              `json:"pane_id"`
-	ReportPath     string              `json:"report_path"`
-	ReportLastLine string              `json:"report_last_line"`
-	Question       string              `json:"question"`
-	PR             string              `json:"pr"`
-	Head           string              `json:"head"`
-	Reason         string              `json:"reason"`
-	EventID        string              `json:"event_id"`
-	Text           string              `json:"text"`
-	EventTime      *time.Time          `json:"event_time"`
-	ReceivedAt     time.Time           `json:"received_at"`
-	DeliveredAt    *time.Time          `json:"delivered_at"`
-	DeliveredTo    string              `json:"delivered_to"`
-	Attempts       int                 `json:"attempts"`
+	ReportSHA      string     `json:"report_sha256,omitempty"`
+	ID             int64      `json:"id"`
+	Kind           string     `json:"kind"`
+	JobID          string     `json:"job_id"`
+	Epoch          int        `json:"epoch"`
+	OwnerLane      string     `json:"owner_lane"`
+	Machine        string     `json:"machine"`
+	PaneID         string     `json:"pane_id"`
+	ReportPath     string     `json:"report_path"`
+	ReportLastLine string     `json:"report_last_line"`
+	Question       string     `json:"question"`
+	PR             string     `json:"pr"`
+	Head           string     `json:"head"`
+	Reason         string     `json:"reason"`
+	EventID        string     `json:"event_id"`
+	Text           string     `json:"text"`
+	EventTime      *time.Time `json:"event_time"`
+	ReceivedAt     time.Time  `json:"received_at"`
+	DeliveredAt    *time.Time `json:"delivered_at"`
+	DeliveredTo    string     `json:"delivered_to"`
+	Attempts       int        `json:"attempts"`
 }
 
 type Store struct {
@@ -564,7 +556,6 @@ type Store struct {
 	registry    []migration
 	linearSync  atomic.Bool
 	linearBoard atomic.Bool
-	wrk         atomic.Pointer[wrkrecords.Engine]
 	// autoCloseOff inverts the auto_close_parent setting so the zero Store has
 	// it on, the default.
 	autoCloseOff atomic.Bool
@@ -651,15 +642,6 @@ type Checkpoint struct {
 	Refs      Refs      `json:"refs"`
 	CreatedBy string    `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
-}
-type Memory struct {
-	Agent       string    `json:"agent"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Type        string    `json:"type"`
-	Content     string    `json:"content,omitempty"`
-	UpdatedBy   string    `json:"updated_by,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at"`
 }
 type Document struct {
 	ID        int64     `json:"id"`
@@ -810,6 +792,24 @@ type SearchResult struct {
 }
 
 func Open(ctx context.Context, url string) (*Store, error) { return open(ctx, url, nil) }
+
+// OpenWithoutMigration connects without inspecting or changing the schema, so
+// a dry run never executes DDL. Callers learn whether their tables exist from
+// their own query.
+func OpenWithoutMigration(ctx context.Context, url string) (*Store, error) {
+	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
+		return nil, errors.New("database URL must use postgres:// or postgresql://")
+	}
+	p, err := newPool(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("open database pool: %w", err)
+	}
+	if err = p.Ping(ctx); err != nil {
+		p.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+	return &Store{pool: p}, nil
+}
 
 // open is Open with an explicit migration registry; nil means the real one.
 func open(ctx context.Context, url string, registry []migration) (*Store, error) {
@@ -1401,6 +1401,17 @@ func validName(x string) bool { return nameRE.MatchString(x) }
 // ValidProjectName reports whether x has the shape of a task project name.
 func ValidProjectName(x string) bool { return validName(x) }
 func validText(x string, n int) bool { return len(x) <= n && !strings.ContainsRune(x, 0) }
+
+// validTextBound is validText for a task title or task text: the size is
+// YouTrack's text bound (ytwrite.TextMaxChars, in characters), so text it
+// would accept is accepted here.
+func validTextBound(x string) bool { return ytwrite.WithinTextMax(x) && !strings.ContainsRune(x, 0) }
+
+// validDocumentText refuses NUL only. A document has no size refusal: a
+// document longer than one article part is split over more parts when it is
+// mirrored (ytwrite.ArticlePartMaxBytes), so YouTrack never sees a whole
+// document at once.
+func validDocumentText(x string) bool { return !strings.ContainsRune(x, 0) }
 
 // ValidActor accepts ordinary store names and the operator:<email> identity
 // used by authenticated console and MCP requests. Actor text remains bounded
@@ -2414,7 +2425,7 @@ func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
 }
 
 func validTask(x Task) bool {
-	return validName(x.Lane) && (x.ParentLane == "" || validName(x.ParentLane)) && x.Title != "" && validText(x.Title, MaxBytes) && taskKinds[x.Kind] && x.CreatedBy != "" && validText(x.CreatedBy, 128) && validTaskRefs(x.Refs) && (x.BodyDoc == "" || ValidBodyDoc(x.BodyDoc))
+	return validName(x.Lane) && (x.ParentLane == "" || validName(x.ParentLane)) && x.Title != "" && validTextBound(x.Title) && taskKinds[x.Kind] && x.CreatedBy != "" && validText(x.CreatedBy, 128) && validTaskRefs(x.Refs) && (x.BodyDoc == "" || ValidBodyDoc(x.BodyDoc))
 }
 
 // bodyDocKeyRE is the document key alphabet the console can fetch and link
@@ -2611,18 +2622,6 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 		return x, err
 	}
 
-	if x.Refs.JobID != "" && wrkTablesExist(ctx, tx) {
-		if _, err = tx.Exec(ctx, `INSERT INTO wrk_job_locks(job_id) VALUES($1) ON CONFLICT DO NOTHING`, x.Refs.JobID); err != nil {
-			return x, err
-		}
-		var locked string
-		if err = tx.QueryRow(ctx, `SELECT job_id FROM wrk_job_locks WHERE job_id=$1 FOR UPDATE`, x.Refs.JobID).Scan(&locked); err != nil {
-			return x, err
-		}
-		if err = s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: x.Refs.JobID, Binding: true}); err != nil {
-			return x, err
-		}
-	}
 	if err = requireTaskProject(ctx, tx, x.Project); err != nil {
 		return x, err
 	}
@@ -2723,13 +2722,6 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		return Task{}, err
 	}
 
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
-		return Task{}, err
-	}
-	if err := s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: toJob, Binding: true}); err != nil {
-		return Task{}, err
-	}
-
 	if rebindableState(x.State) && x.Refs.JobID == toJob && x.ClaimedBy == by {
 		var replay bool
 		err = tx.QueryRow(ctx, `SELECT EXISTS (
@@ -2793,21 +2785,8 @@ func (s *Store) NextTask(ctx context.Context, lane, by, jobID, noJob string) (Ta
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return Task{}, err
 	}
-	// Naming an enrolled job is an explicit protected claim attempt, even
-	// when selection would otherwise exclude every protected task (S1 #14).
-	if err = s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: jobID, Binding: true}); err != nil {
-		return Task{}, err
-	}
-
 	var id int64
-	selection := `SELECT id FROM tasks WHERE lane=$1 AND state IN ('backlog','unstarted') AND NOT awaiting_decision AND NOT (refs ? 'disposition')`
-	if wrkTablesExist(ctx, tx) {
-		// Same enrollment predicate as Snapshot.ProtectedTask: only the latest
-		// subject claim at activation, including ended predecessor enrollment.
-		selection += ` AND NOT EXISTS(SELECT 1 FROM wrk_records wr WHERE wr.kind='claim' AND wr.payload->>'role' IN ('builder','worker') AND wr.payload->>'task_id'=tasks.id::text AND NOT EXISTS(SELECT 1 FROM wrk_records newer WHERE newer.job_id=wr.job_id AND newer.kind='claim' AND newer.seq>wr.seq) AND EXISTS(SELECT 1 FROM wrk_records a WHERE a.job_id=wr.job_id AND a.kind='activate'))`
-	}
-	selection += ` ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`
-	err = tx.QueryRow(ctx, selection, lane).Scan(&id)
+	err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE lane=$1 AND state IN ('backlog','unstarted') AND NOT awaiting_decision AND NOT (refs ? 'disposition') ORDER BY priority DESC,created_at ASC,id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, lane).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Task{}, ErrQueueEmpty
 	}
@@ -2879,9 +2858,6 @@ func (s *Store) relaneTaskTx(ctx context.Context, tx pgx.Tx, id int64, to, by, n
 		return Task{}, false, err
 	}
 
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
-		return Task{}, false, err
-	}
 	if IsSettledState(x.State) {
 		return Task{}, false, ErrTaskTerminal
 	}
@@ -2944,9 +2920,6 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 		return Task{}, false, err
 	}
 
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "", true); err != nil {
-		return Task{}, false, err
-	}
 	var known bool
 	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, project).Scan(&known); err != nil {
 		return Task{}, false, err
@@ -3191,7 +3164,10 @@ func (s *Store) ListTasksFiltered(ctx context.Context, tq TaskQuery) ([]Task, er
 		return nil, err
 	}
 	rows.Close()
-	return out, s.markStalled(ctx, s.pool, out, now)
+	if err := s.markStalled(ctx, s.pool, out, now); err != nil {
+		return out, err
+	}
+	return out, attachTaskSpawns(ctx, s.pool, out)
 }
 
 // GlanceTasks returns the counts and active task slice needed by the compact UI
@@ -3254,6 +3230,9 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 	}
 	one := []Task{x}
 	if err := s.markStalled(ctx, s.pool, one, time.Now().UTC()); err != nil {
+		return Task{}, false, err
+	}
+	if err := attachTaskSpawns(ctx, s.pool, one); err != nil {
 		return Task{}, false, err
 	}
 	x = one[0]
@@ -3355,40 +3334,6 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 			return x, false, err
 		}
 	}
-	if x.JobID != "" && wrkTablesExist(ctx, tx) {
-		if _, err = tx.Exec(ctx, `INSERT INTO wrk_job_locks(job_id) VALUES($1) ON CONFLICT DO NOTHING`, x.JobID); err != nil {
-			return x, false, err
-		}
-		var locked string
-		if err = tx.QueryRow(ctx, `SELECT job_id FROM wrk_job_locks WHERE job_id=$1 FOR UPDATE`, x.JobID).Scan(&locked); err != nil {
-			return x, false, err
-		}
-	}
-	if err = s.wrkFence(ctx, tx, wrkrecords.LegacyIntent{JobID: x.JobID, Kind: x.Kind, Head: x.Head, Digest: x.ReportSHA, Receipt: x.WrkReceipt}); err != nil {
-		return x, false, err
-	}
-	if x.Kind == "job.completed" || x.Kind == "job.joined" {
-		snapshot, e := loadWrkSnapshot(ctx, tx)
-		if e != nil {
-			return x, false, e
-		}
-		if snapshot.ReceiptRequired(x.JobID) {
-			receipt := x.WrkReceipt
-			if receipt == nil {
-				_, receipt = WrkPrincipal(ctx)
-			}
-			if receipt == nil {
-				return x, false, wrkrecords.Error("wrk_receipt_required")
-			}
-			err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE kind=$1 AND job_id=$2 AND report_path=$3 AND epoch=0 AND reason=''`, x.Kind, x.JobID, "wrk:"+x.JobID+":"+intString(receipt.Seq)), &x)
-			if err != nil {
-				return x, false, wrkrecords.Error("wrk_unavailable")
-			}
-			hydrateWrkRelay(ctx, tx, &x)
-			return x, false, tx.Commit(ctx)
-		}
-	}
-
 	if !validRelayEvent(x) {
 		return x, false, errors.New("invalid relay event")
 	}
@@ -3420,7 +3365,6 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 			return x, false, err
 		}
 	}
-	hydrateWrkRelay(ctx, tx, &x)
 	return x, created, tx.Commit(ctx)
 }
 
@@ -3433,7 +3377,6 @@ func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, 
 	var x RelayEvent
 	err := scanRelayEvent(s.pool.QueryRow(ctx, `UPDATE relay_events SET delivered_at=now(),delivered_to=$2 WHERE id=$1 AND delivered_at IS NULL RETURNING `+relayEventColumns, id, machine+"/"+pane), &x)
 	if err == nil {
-		hydrateWrkRelay(ctx, s.pool, &x)
 		return x, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -3445,7 +3388,6 @@ func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, 
 		}
 		return RelayEvent{}, err
 	}
-	hydrateWrkRelay(ctx, s.pool, &x)
 	return x, nil
 }
 
@@ -3502,7 +3444,6 @@ func (s *Store) ListRelayEventsPage(ctx context.Context, lane, kind string, unde
 	if err != nil {
 		return nil, err
 	}
-	s.hydrateWrkRelays(ctx, out)
 	return out, nil
 }
 
@@ -3559,7 +3500,6 @@ func (s *Store) ListRelayEventsTimeline(ctx context.Context, lane, kind string, 
 	if err != nil {
 		return nil, err
 	}
-	s.hydrateWrkRelays(ctx, out)
 	return out, nil
 }
 
@@ -3694,7 +3634,6 @@ func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEven
 	if err != nil {
 		return nil, err
 	}
-	s.hydrateWrkRelays(ctx, out)
 	return out, nil
 }
 
@@ -3722,7 +3661,6 @@ func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEv
 	if err != nil {
 		return nil, err
 	}
-	s.hydrateWrkRelays(ctx, out)
 	return out, nil
 }
 func (s *Store) CreateCheckpoint(ctx context.Context, x Checkpoint) (Checkpoint, error) {
@@ -3796,79 +3734,11 @@ func (s *Store) RecentCheckpoints(ctx context.Context, session, kind string, lim
 	}
 	return out, rows.Err()
 }
-func (s *Store) PutMemory(ctx context.Context, x Memory) (Memory, error) {
-	if !validName(x.Agent) || !validName(x.Name) || !memoryTypes[x.Type] || !validText(x.Description, MaxBytes) || !validText(x.Content, MaxBytes) {
-		return x, errors.New("invalid memory")
-	}
-	if !ValidActor(x.UpdatedBy) {
-		return x, errors.New("invalid memory updated_by")
-	}
-	if e := guard.Reject(x.Description + "\n" + x.Content); e != nil {
-		return x, e
-	}
-	x.UpdatedAt = time.Now().UTC()
-	tx, e := s.pool.Begin(ctx)
-	if e != nil {
-		return x, e
-	}
-	defer tx.Rollback(ctx)
-	_, e = tx.Exec(ctx, `INSERT INTO memory(agent,name,description,memory_type,content,updated_by,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(agent,name) DO UPDATE SET description=EXCLUDED.description,memory_type=EXCLUDED.memory_type,content=EXCLUDED.content,updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at`, x.Agent, x.Name, x.Description, x.Type, x.Content, x.UpdatedBy, x.UpdatedAt)
-	if e != nil {
-		return x, e
-	}
-	_, e = tx.Exec(ctx, `DELETE FROM memory WHERE agent=$1 AND name IN (SELECT name FROM memory WHERE agent=$1 ORDER BY updated_at DESC,name DESC OFFSET $2)`, x.Agent, MemoryKeep)
-	if e != nil {
-		return x, e
-	}
-	return x, tx.Commit(ctx)
-}
-func (s *Store) ListMemory(ctx context.Context, agent string, content bool) ([]Memory, error) {
-	if !validName(agent) {
-		return nil, errors.New("invalid memory agent")
-	}
-	cols := "agent,name,description,memory_type,updated_by,updated_at"
-	if content {
-		cols = "agent,name,description,memory_type,content,updated_by,updated_at"
-	}
-	rows, e := s.pool.Query(ctx, "SELECT "+cols+" FROM memory WHERE agent=$1 ORDER BY name", agent)
-	if e != nil {
-		return nil, e
-	}
-	defer rows.Close()
-	out := []Memory{}
-	for rows.Next() {
-		var x Memory
-		if content {
-			e = rows.Scan(&x.Agent, &x.Name, &x.Description, &x.Type, &x.Content, &x.UpdatedBy, &x.UpdatedAt)
-		} else {
-			e = rows.Scan(&x.Agent, &x.Name, &x.Description, &x.Type, &x.UpdatedBy, &x.UpdatedAt)
-		}
-		if e != nil {
-			return nil, e
-		}
-		out = append(out, x)
-	}
-	return out, rows.Err()
-}
-func (s *Store) GetMemory(ctx context.Context, agent, name string) (Memory, bool, error) {
-	if !validName(agent) || !validName(name) {
-		return Memory{}, false, errors.New("invalid memory")
-	}
-	var x Memory
-	e := s.pool.QueryRow(ctx, `SELECT agent,name,description,memory_type,content,updated_by,updated_at FROM memory WHERE agent=$1 AND name=$2`, agent, name).Scan(&x.Agent, &x.Name, &x.Description, &x.Type, &x.Content, &x.UpdatedBy, &x.UpdatedAt)
-	if e != nil {
-		if errors.Is(e, pgx.ErrNoRows) {
-			return x, false, nil
-		}
-		return x, false, e
-	}
-	return x, true, nil
-}
 func validDocKey(k string) bool {
 	return len(k) > 0 && len(k) <= 512 && !strings.HasPrefix(k, "/") && !strings.Contains(k, "..") && !strings.ContainsRune(k, 0)
 }
 func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, error) {
-	if !validDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validText(x.Body, DocumentMaxBytes) {
+	if !validDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validDocumentText(x.Body) {
 		return x, false, errors.New("invalid document")
 	}
 	if !ValidActor(x.CreatedBy) {
@@ -3940,6 +3810,9 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 		if e = s.applyDeployRecordTx(ctx, tx, projection, now); e != nil {
 			return x, true, e
 		}
+		if e = queueDeployRecordNoticeTx(ctx, tx, projection, now); e != nil {
+			return x, true, e
+		}
 	}
 	return x, true, tx.Commit(ctx)
 }
@@ -3984,7 +3857,8 @@ func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string,
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, e := s.pool.Query(ctx, `SELECT id,key,kind,session,job,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE ($1='' OR key LIKE $1 || '%') AND ($2='' OR kind=$2) AND ($3='' OR session=$3) AND ($4::bigint=0 OR task_id=$4::bigint) ORDER BY key LIMIT $5`, prefix, kind, session, task, limit)
+	likePrefix := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
+	rows, e := s.pool.Query(ctx, `SELECT id,key,kind,session,job,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE ($1='' OR key LIKE $2 || '%' ESCAPE '\') AND ($3='' OR kind=$3) AND ($4='' OR session=$4) AND ($5::bigint=0 OR task_id=$5::bigint) ORDER BY key LIMIT $6`, prefix, likePrefix, kind, session, task, limit)
 	if e != nil {
 		return nil, e
 	}
@@ -4282,7 +4156,7 @@ func (s *Store) Search(ctx context.Context, q, scope, session string, limit int)
 // YouTrack backend calls it before asking YouTrack, so both backends refuse
 // the same inputs.
 func CheckSearch(q, scope, session string) error {
-	if strings.TrimSpace(q) == "" || !validText(q, 512) || !validText(session, 128) || (scope != "all" && scope != "ctx" && scope != "docs" && scope != "memory" && scope != "tasks") {
+	if strings.TrimSpace(q) == "" || !validText(q, 512) || !validText(session, 128) || (scope != "all" && scope != "ctx" && scope != "docs" && scope != "tasks") {
 		return errors.New("invalid search")
 	}
 	return nil
@@ -4331,10 +4205,6 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 	if scope == "all" || scope == "ctx" {
 		parts = append(parts, `(SELECT 'ctx' scope,'' key,session,title,created_at,id row_id FROM checkpoints WHERE ($1='' OR session=$1) AND (to_tsvector('simple',title || ' ' || body) @@ plainto_tsquery('simple',$2) OR title || ' ' || body ILIKE '%' || $2 || '%') ORDER BY created_at DESC,key,session,title LIMIT $3)`)
 	}
-	if scope == "all" || scope == "memory" {
-		// Memory's unique identity is (agent,name), carried in session and title.
-		parts = append(parts, `(SELECT 'memory' scope,'' key,agent session,name title,updated_at created_at,NULL::bigint row_id FROM memory WHERE ($1='' OR agent=$1) AND (to_tsvector('simple',name || ' ' || description || ' ' || content) @@ plainto_tsquery('simple',$2) OR name || ' ' || description || ' ' || content ILIKE '%' || $2 || '%') ORDER BY created_at DESC,key,session,title LIMIT $3)`)
-	}
 	if scope == "all" || scope == "docs" {
 		parts = append(parts, `(SELECT 'docs' scope,key,session,key title,created_at,id row_id FROM documents WHERE ($1='' OR session=$1) AND (to_tsvector('simple',key || ' ' || body) @@ plainto_tsquery('simple',$2) OR key || ' ' || body ILIKE '%' || $2 || '%') ORDER BY created_at DESC,key,session,title LIMIT $3)`)
 	}
@@ -4343,17 +4213,15 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 		ORDER BY created_at DESC,scope,key,session,title LIMIT $3
 	)
 	SELECT p.scope,p.key,p.session,
-		CASE p.scope WHEN 'ctx' THEN cp.kind WHEN 'memory' THEN m.memory_type ELSE d.kind END kind,
+		CASE p.scope WHEN 'ctx' THEN cp.kind ELSE d.kind END kind,
 		p.title,
 		CASE p.scope
 			WHEN 'ctx' THEN ts_headline('simple',cp.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8')
-			WHEN 'memory' THEN ts_headline('simple',m.content,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8')
 			ELSE ts_headline('simple',d.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8')
 		END snippet,
 		CASE p.scope WHEN 'ctx' THEN cp.refs ELSE '{}'::jsonb END refs,p.created_at
 	FROM page p
 	LEFT JOIN checkpoints cp ON p.scope='ctx' AND cp.id=p.row_id
-	LEFT JOIN memory m ON p.scope='memory' AND m.agent=p.session AND m.name=p.title
 	LEFT JOIN documents d ON p.scope='docs' AND d.id=p.row_id
 	ORDER BY p.created_at DESC,p.scope,p.key,p.session,p.title`
 	if capture, ok := ctx.Value(searchCaptureKey{}).(searchCapture); ok {

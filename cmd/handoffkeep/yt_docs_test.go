@@ -24,9 +24,6 @@ func TestYTDocsModeStartsTheWriteWorker(t *testing.T) {
 	if _, err := ytCommentsWorkerFromEnv(nil); err == nil || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_DOCS_MODE=on") || !strings.Contains(err.Error(), "YOUTRACK_URL") {
 		t.Fatalf("on without credentials: %v", err)
 	}
-	if owner, err := youtrackProtocolOwner(); err != nil || owner != "HANDOFFKEEP_YT_DOCS_MODE=on" {
-		t.Fatalf("protocol owner %q, %v", owner, err)
-	}
 	status := http.StatusOK
 	list := `[{"id":"0-1","shortName":"HK","name":"Unassigned hk tasks"},{"id":"0-40","shortName":"SHRDOC2","name":"Shared documents"}]`
 	reads := 0
@@ -44,7 +41,7 @@ func TestYTDocsModeStartsTheWriteWorker(t *testing.T) {
 	}))
 	defer ts.Close()
 	t.Setenv("YOUTRACK_URL", ts.URL)
-	t.Setenv("YOUTRACK_BOT_API_KEY", readthroughTestKey)
+	t.Setenv("YOUTRACK_BOT_API_KEY", serveTestKey)
 	if w, err := ytCommentsWorkerFromEnv(&store.Store{}); err != nil || w == nil || reads != 1 {
 		t.Fatalf("docs on: worker %v err %v reads %d", w, err, reads)
 	}
@@ -59,9 +56,6 @@ func TestYTDocsModeStartsTheWriteWorker(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_YT_DOCS_MODE", "yes")
 	if _, err := ytCommentsWorkerFromEnv(&store.Store{}); err == nil || !strings.Contains(err.Error(), "HANDOFFKEEP_YT_DOCS_MODE") {
 		t.Fatalf("an unknown docs mode: %v", err)
-	}
-	if _, err := youtrackProtocolOwner(); err == nil {
-		t.Fatal("an unknown docs mode let the legacy push run")
 	}
 	t.Setenv("HANDOFFKEEP_YT_DOCS_MODE", "off")
 	if w, err := ytCommentsWorkerFromEnv(&store.Store{}); err != nil || w != nil {

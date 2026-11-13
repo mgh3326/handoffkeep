@@ -113,4 +113,23 @@ func TestDocumentTaskAndOrigin(t *testing.T) {
 	if _, err := s.ListDocuments(ctx, "", "", "", -1, 10); err == nil {
 		t.Error("negative task filter accepted")
 	}
+
+	// hk 3073: LIKE wildcards (_ and %) in prefix match literally.
+	if _, _, err := s.PutDocument(ctx, Document{Key: "dots_a/1", Kind: "note", Body: "x", CreatedBy: "tester"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.PutDocument(ctx, Document{Key: "dots/a/1", Kind: "note", Body: "x", CreatedBy: "tester"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.PutDocument(ctx, Document{Key: "dots%a/1", Kind: "note", Body: "x", CreatedBy: "tester"}); err != nil {
+		t.Fatal(err)
+	}
+	listed, err = s.ListDocuments(ctx, "dots_a/", "", "", 0, 100)
+	if err != nil || len(listed) != 1 || listed[0].Key != "dots_a/1" {
+		t.Fatalf("list dots_a/ returned %+v err=%v", listed, err)
+	}
+	listed, err = s.ListDocuments(ctx, "dots%a/", "", "", 0, 100)
+	if err != nil || len(listed) != 1 || listed[0].Key != "dots%a/1" {
+		t.Fatalf("list dots%%a/ returned %+v err=%v", listed, err)
+	}
 }

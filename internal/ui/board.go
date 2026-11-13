@@ -1,9 +1,7 @@
 package ui
 
 import (
-	"context"
 	"encoding/json"
-	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -14,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/youtrack"
 )
 
 var boardNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
@@ -33,9 +32,6 @@ const (
 	boardTasksDefaultLimit = 200
 	boardTasksPageLimit    = 500
 	boardDetailRepsLimit   = 500
-	policyItemsMax         = 200
-	policyPointerKey       = "policy/active"
-	policyTitleMax         = 200
 )
 
 type boardAttachment struct {
@@ -162,12 +158,11 @@ type boardTask struct {
 	// Area is the task's routing tag from the closed area vocabulary, null
 	// when unset. The console shows it as a read-only label.
 	Area *string `json:"area"`
-	// PrioritySource and LaneSource are "youtrack" when the value came from
-	// the YouTrack-owned cache; Stale marks a value whose last refresh failed.
-	PrioritySource  string     `json:"priority_source,omitempty"`
-	LaneSource      string     `json:"lane_source,omitempty"`
-	ValuesFetchedAt *time.Time `json:"values_fetched_at,omitempty"`
-	Stale           bool       `json:"stale,omitempty"`
+	// Issue, Grade and Tier are the YouTrack issue and its 등급/티어 values,
+	// set on the YouTrack-backed board only (hk 4430).
+	Issue string `json:"youtrack_issue,omitempty"`
+	Grade string `json:"grade,omitempty"`
+	Tier  string `json:"tier,omitempty"`
 }
 
 type boardTasksResponse struct {
@@ -176,6 +171,8 @@ type boardTasksResponse struct {
 	Tasks       []boardTask `json:"tasks"`
 	NextAfterID int64       `json:"next_after_id,omitempty"`
 	Truncated   bool        `json:"truncated"`
+	// Source is "youtrack" when the tasks were read from YouTrack (hk 4430).
+	Source string `json:"source,omitempty"`
 }
 
 func projectBoardTask(task store.Task) boardTask {
@@ -202,19 +199,6 @@ func projectBoardTask(task store.Task) boardTask {
 		BodyDoc:          task.BodyDoc,
 		Project:          task.Project,
 		Area:             task.Area,
-		PrioritySource:   task.PrioritySource,
-		LaneSource:       task.LaneSource,
-		ValuesFetchedAt:  task.ValuesFetchedAt,
-		Stale:            task.Stale,
-	}
-}
-
-// overlayYouTrack replaces priority and lane on linked tasks with the cached
-// YouTrack-owned values. It is a no-op without a configured service, so an
-// unlinked task and a deployment without YouTrack render exactly as before.
-func (h *Handler) overlayYouTrack(ctx context.Context, tasks []store.Task) {
-	if h.youTrack != nil {
-		h.youTrack.Overlay(ctx, tasks)
 	}
 }
 
@@ -253,6 +237,10 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid board query", http.StatusBadRequest)
 		return
 	}
+	if h.ytTasks != nil {
+		h.boardTasksYouTrack(w, r, lane, state, parentLane, project, afterID, limit)
+		return
+	}
 	var projectFilter *string
 	if project != "" {
 		projectFilter = &project
@@ -267,12 +255,78 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 	if truncated {
 		tasks = tasks[:limit]
 	}
-	h.overlayYouTrack(r.Context(), tasks)
+	h.writeBoardTasks(w, r, tasks, truncated, nil)
+}
+
+// boardTaskChunk is how many YouTrack tasks one hk read joins; TasksByIDs
+// takes at most 1000 ids.
+const boardTaskChunk = 500
+
+// boardTasksYouTrack pages the YouTrack task issues in task id order with the
+// same filters and cursor as the hk read. Lane, state and project filter on
+// YouTrack's values; parent_lane is hk's. An issue whose task hk does not know
+// is left out: its hk-only fields cannot be joined.
+func (h *Handler) boardTasksYouTrack(w http.ResponseWriter, r *http.Request, lane, state, parentLane, project string, afterID int64, limit int) {
+	snap, err := h.ytTasks.snapshot(r.Context())
+	if err != nil {
+		youTrackReadFailed(w, r, err)
+		return
+	}
+	var candidates []youtrack.TaskIssue
+	for _, t := range snap.Tasks {
+		if t.TaskID <= afterID || (lane != "" && t.Lane != lane) || (state != "" && t.State != state) || (project != "" && t.Project != project) {
+			continue
+		}
+		candidates = append(candidates, t)
+	}
+	tasks := make([]store.Task, 0, limit+1)
+	issues := map[int64]youtrack.TaskIssue{}
+	for start := 0; start < len(candidates) && len(tasks) <= limit; start += boardTaskChunk {
+		chunk := candidates[start:min(start+boardTaskChunk, len(candidates))]
+		ids := make([]int64, 0, len(chunk))
+		for _, t := range chunk {
+			ids = append(ids, t.TaskID)
+		}
+		rows, err := h.store.TasksByIDs(r.Context(), ids)
+		if err != nil {
+			youTrackReadFailed(w, r, err)
+			return
+		}
+		byID := make(map[int64]store.Task, len(rows))
+		for _, row := range rows {
+			byID[row.ID] = row
+		}
+		for _, t := range chunk {
+			row, ok := byID[t.TaskID]
+			if !ok || (parentLane != "" && row.ParentLane != parentLane) {
+				continue
+			}
+			tasks = append(tasks, withYouTrackFields(row, t))
+			issues[t.TaskID] = t
+			if len(tasks) > limit {
+				break
+			}
+		}
+	}
+	truncated := len(tasks) > limit
+	if truncated {
+		tasks = tasks[:limit]
+	}
+	h.writeBoardTasks(w, r, tasks, truncated, issues)
+}
+
+// writeBoardTasks joins hk's work board, active job and title translation to
+// each task and writes the page. issues is the YouTrack issue of each task on
+// the YouTrack-backed board, nil on the hk one.
+func (h *Handler) writeBoardTasks(w http.ResponseWriter, r *http.Request, tasks []store.Task, truncated bool, issues map[int64]youtrack.TaskIssue) {
 	response := boardTasksResponse{
 		GeneratedAt: time.Now().UTC(),
 		States:      taskStates,
 		Tasks:       make([]boardTask, 0, len(tasks)),
 		Truncated:   truncated,
+	}
+	if issues != nil {
+		response.Source = taskSourceYouTrack
 	}
 	workBoards, err := h.store.ReadTaskWorkBoards(r.Context(), tasks)
 	if err != nil {
@@ -311,6 +365,9 @@ func (h *Handler) boardTasks(w http.ResponseWriter, r *http.Request) {
 		row.WorkBoard = projectWorkBoard(workBoards[task.ID])
 		if job, ok := activeJobs[task.ID]; ok {
 			row.ActiveJob = &job
+		}
+		if issue, ok := issues[task.ID]; ok {
+			row.Issue, row.Grade, row.Tier = issue.IssueReadable, issue.Grade, issue.Tier
 		}
 		response.Tasks = append(response.Tasks, row)
 		response.NextAfterID = task.ID
@@ -458,6 +515,8 @@ type boardDetailResponse struct {
 	// Children and Relations come from GetTask; absent when none.
 	Children  []store.TaskChild    `json:"children,omitempty"`
 	Relations []store.TaskRelation `json:"relations,omitempty"`
+	// Spawn is the task's panewire spawn request record (hk 4377); absent when none.
+	Spawn *store.TaskSpawn `json:"spawn,omitempty"`
 }
 
 func taskRef(id int64) string {
@@ -583,7 +642,6 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	overlay := []store.Task{task}
-	h.overlayYouTrack(r.Context(), overlay)
 	task = overlay[0]
 	origins, err := h.store.ListTaskOriginsPage(r.Context(), id, 101)
 	if err != nil {
@@ -639,6 +697,7 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	response := boardDetailResponse{
+		Spawn:     task.Spawn,
 		Documents: projectedDocuments, DocumentsTruncated: documentsTruncated,
 		Origins: origins, Changes: changes, Jobs: projectedJobs, OriginsTruncated: originsTruncated, ChangesTruncated: changesTruncated, JobsTruncated: jobsTruncated,
 		Task:      projectBoardTask(task),
@@ -776,97 +835,12 @@ func (h *Handler) boardDoc(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Policy canon is resolved from two exact document keys. The pointer document
-// policy/active holds the exact manifest document key; the manifest document
-// holds a JSON item list. Anything else is exploration, never coverage, so the
-// endpoint reports an explicit status instead of scanning prefixes.
-type policyResponse struct {
-	Status        string       `json:"status"`
-	PointerKey    string       `json:"pointer_key"`
-	PointerDocURL string       `json:"pointer_doc_url"`
-	ManifestKey   string       `json:"manifest_key,omitempty"`
-	ManifestURL   string       `json:"manifest_doc_url,omitempty"`
-	Release       string       `json:"release,omitempty"`
-	Items         []policyItem `json:"items"`
-	Truncated     bool         `json:"truncated,omitempty"`
-}
-
-type policyItem struct {
-	Key    string `json:"key"`
-	Title  string `json:"title,omitempty"`
-	DocURL string `json:"doc_url"`
-	Exists bool   `json:"exists"`
-}
-
 type policyManifest struct {
 	Release string `json:"release"`
 	Items   []struct {
 		Key   string `json:"key"`
 		Title string `json:"title"`
 	} `json:"items"`
-}
-
-func (h *Handler) policyActive(w http.ResponseWriter, r *http.Request) {
-	response := policyResponse{Status: "not_configured", PointerKey: policyPointerKey, PointerDocURL: "/ui/doc/" + policyPointerKey, Items: []policyItem{}}
-	pointer, found, err := h.store.GetDocument(r.Context(), policyPointerKey)
-	if err != nil {
-		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
-		return
-	}
-	if !found {
-		writeBoardJSON(w, response)
-		return
-	}
-	manifestKey := strings.TrimSpace(pointer.Body)
-	if !validDocumentKey(manifestKey) {
-		response.Status = "invalid_pointer"
-		writeBoardJSON(w, response)
-		return
-	}
-	response.ManifestKey = manifestKey
-	response.ManifestURL = "/ui/doc/" + manifestKey
-	manifest, found, err := h.store.GetDocument(r.Context(), manifestKey)
-	if err != nil {
-		http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
-		return
-	}
-	if !found {
-		response.Status = "manifest_missing"
-		writeBoardJSON(w, response)
-		return
-	}
-	var parsed policyManifest
-	decoder := json.NewDecoder(strings.NewReader(manifest.Body))
-	var trailing any
-	if err := decoder.Decode(&parsed); err != nil || decoder.Decode(&trailing) != io.EOF {
-		response.Status = "invalid_manifest"
-		writeBoardJSON(w, response)
-		return
-	}
-	if len(parsed.Items) > policyItemsMax {
-		parsed.Items = parsed.Items[:policyItemsMax]
-		response.Truncated = true
-	}
-	for _, item := range parsed.Items {
-		if !validDocumentKey(item.Key) || len(item.Title) > policyTitleMax {
-			response.Status = "invalid_manifest"
-			response.Items = []policyItem{}
-			writeBoardJSON(w, response)
-			return
-		}
-	}
-	response.Release = parsed.Release
-	response.Status = "ok"
-	for _, item := range parsed.Items {
-		entry := policyItem{Key: item.Key, Title: item.Title, DocURL: "/ui/doc/" + item.Key}
-		_, entry.Exists, err = h.store.GetDocument(r.Context(), item.Key)
-		if err != nil {
-			http.Error(w, "fleet console unavailable", http.StatusInternalServerError)
-			return
-		}
-		response.Items = append(response.Items, entry)
-	}
-	writeBoardJSON(w, response)
 }
 
 func writeBoardJSON(w http.ResponseWriter, response any) {

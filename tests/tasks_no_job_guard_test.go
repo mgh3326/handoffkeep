@@ -391,8 +391,13 @@ func TestDispositionInternalHopsRecordNoJob(t *testing.T) {
 func TestTaskNoJobWireCompatWithOldServer(t *testing.T) {
 	// A pre-change server decodes with DisallowUnknownFields: bodies carrying
 	// no_job fail with the generic invalid_context, and the client translates
-	// it into a named refusal instead of reporting a fake success.
+	// it into a named refusal instead of reporting a fake success. It predates
+	// /v1/capabilities, so that route answers 404.
 	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/capabilities" {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprint(w, `{"error":"invalid_context"}`)
@@ -422,6 +427,9 @@ func TestTaskNoJobWireCompatWithOldServer(t *testing.T) {
 func TestTaskClientRejectsContradictory200(t *testing.T) {
 	var h *httptest.Server
 	h = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerCurrentCapabilities(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
@@ -444,6 +452,9 @@ func TestTaskClientRejectsContradictory200(t *testing.T) {
 	// A replayed claim on an already-active row is honest: in_progress is
 	// accepted when claimant and job match the request.
 	h2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerCurrentCapabilities(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"id":7,"lane":"x","title":"t","state":"in_progress","claimed_by":"captain-a","refs":{"job_id":"job-1"},"priority":0,"kind":"implement","created_by":"x","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}`)
 	}))
@@ -534,6 +545,9 @@ func TestTaskNoJobReasonInvisibleCharsRefused(t *testing.T) {
 // claimant or job link is refused rather than reported as linked work.
 func TestTaskClientRejectsUnlinkedActive200(t *testing.T) {
 	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerCurrentCapabilities(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"id":9,"lane":"x","title":"t","state":"claimed","claimed_by":"intruder","refs":{"job_id":"job-1"},"priority":0,"kind":"implement","created_by":"x","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}`)
 	}))

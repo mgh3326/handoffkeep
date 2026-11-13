@@ -15,7 +15,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
-	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 )
 
 // The desk asks the operator through a Linear issue; the operator answers there
@@ -499,18 +498,6 @@ func (s *Store) AnswerLinearDecision(ctx context.Context, in LinearDecisionAnswe
 	decisionBefore := decisionBeforeOf(x)
 	v := decideLinearAnswer(link, x.State, x.Refs.DecisionRequest, x.Refs.DecisionOptions, in)
 	now := time.Now().UTC()
-	if v.outcome == LinearDecisionRecorded {
-		// A webhook holds no wrk receipt, so a task under an activated wrk job
-		// refuses this write like any other receiptless one. Say so on the issue:
-		// Linear cannot act on the refusal, and the operator would see nothing.
-		if err := s.wrkTaskFenceTx(ctx, tx, x, "claimed", false); err != nil {
-			var refused wrkrecords.Error
-			if !errors.As(err, &refused) {
-				return "", err
-			}
-			v = linearDecisionVerdict{outcome: LinearDecisionRejected, reply: "⚠️ not recorded: the task is under a protected job (" + string(refused) + "). Answer in the console."}
-		}
-	}
 	if v.outcome == LinearDecisionRecorded {
 		resolved := *x.Refs.DecisionRequest
 		resolved.Status = DecisionRequestAnswered

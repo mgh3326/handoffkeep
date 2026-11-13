@@ -3,17 +3,15 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
-
-// TaskCommentMaxBytes bounds one comment body. It matches the transition note
-// limit so a comment can carry anything a note could.
-const TaskCommentMaxBytes = MaxBytes
 
 // TaskCommentListMax bounds one page of comments.
 const TaskCommentListMax = 500
@@ -65,12 +63,14 @@ func scanTaskComment(row interface{ Scan(...any) error }, x *TaskComment) error 
 
 // CheckTaskCommentBody reports the specific reason a body is unacceptable
 // so callers can answer empty and oversized bodies with distinct responses.
+// The size is YouTrack's text bound (ytwrite.TextMaxChars, in characters).
 func CheckTaskCommentBody(body string) error {
 	if strings.TrimSpace(body) == "" {
 		return ErrTaskCommentEmpty
 	}
-	if len(body) > TaskCommentMaxBytes {
-		return ErrTaskCommentTooLong
+	if !ytwrite.WithinTextMax(body) {
+		// The code stays comment_too_long; the message names the bound.
+		return fmt.Errorf("%w: body is over %d characters (YouTrack's text bound)", ErrTaskCommentTooLong, ytwrite.TextMaxChars)
 	}
 	if !utf8.ValidString(body) || strings.ContainsRune(body, 0) {
 		return ErrTaskCommentInvalid

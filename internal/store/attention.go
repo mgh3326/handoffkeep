@@ -295,3 +295,42 @@ func attentionTasksTx(ctx context.Context, tx pgx.Tx, stalledBefore, now time.Ti
 	}
 	return out, rows.Err()
 }
+
+// AttentionTaskCandidates is every waiting task for the YouTrack-backed Home
+// (hk 4430), unbounded, newest activity first. Why a task waits stays hk's
+// protocol record: an open decision, or no activity for the stall window. The
+// started-state test of a stall is YouTrack's, so the caller names the tasks
+// YouTrack shows started; hk's own state is not consulted for a stall.
+func (s *Store) AttentionTaskCandidates(ctx context.Context, now time.Time, startedIDs []int64) ([]AttentionTask, error) {
+	now = now.UTC()
+	if startedIDs == nil {
+		startedIDs = []int64{}
+	}
+	rows, err := s.pool.Query(ctx, `SELECT tasks.id,title,lane,state,priority,(`+awaitingTaskDecisionSQL+`) AS awaiting,`+taskActivitySQL+` AS since,s.read_at,s.done_at,s.snoozed_until
+		FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key='task:'||tasks.id
+		WHERE ((`+awaitingTaskDecisionSQL+`) OR (tasks.id = ANY($3) AND NOT awaiting_decision AND `+taskActivitySQL+` < $1::timestamptz)) AND `+attentionTaskVisible("$2")+`
+		ORDER BY since DESC, tasks.id DESC`, now.Add(-s.StartedStalledHours()), now, startedIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AttentionTask{}
+	for rows.Next() {
+		var x AttentionTask
+		var awaiting bool
+		var readAt, doneAt, snoozedUntil *time.Time
+		if err := rows.Scan(&x.ID, &x.Title, &x.Lane, &x.State, &x.Priority, &awaiting, &x.Since, &readAt, &doneAt, &snoozedUntil); err != nil {
+			return nil, err
+		}
+		x.Key = "task:" + strconv.FormatInt(x.ID, 10)
+		x.Since = x.Since.UTC()
+		x.Read = readAt != nil
+		x.Woken = inboxWoken(doneAt, snoozedUntil, now)
+		x.Reason = AttentionReasonStalled
+		if awaiting {
+			x.Reason = AttentionReasonAwaitingDecision
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}

@@ -5,7 +5,6 @@ import type {
   BoardAttachment,
   BoardCommentsResponse,
   BoardDetail,
-  BoardDoc,
   BoardTask,
   BoardTasksResponse,
 } from "./boardTypes";
@@ -57,7 +56,7 @@ export async function fetchBoardTasks(project?: string): Promise<BoardData> {
     const next = page.next_after_id ?? 0;
     if (!Number.isSafeInteger(next) || next <= afterID || page.tasks.length === 0) {
       // A cursor that does not advance would re-request the same page until
-      // the cap — reject loudly instead of looping on a server violation.
+      // completion — reject loudly instead of looping on a server violation.
       throw new Error(
         `non-advancing board cursor: after_id=${afterID} next_after_id=${next}`,
       );
@@ -85,12 +84,6 @@ export async function fetchTaskDetail(id: number): Promise<BoardDetail> {
   )
     throw new Error("malformed task detail");
   return data;
-}
-
-/** Reads one hk document by key for the task overview. The key is the part of
- * body_doc before "#"; the section suffix never leaves the browser. */
-export function fetchBoardDoc(key: string): Promise<BoardDoc> {
-  return getJSON<BoardDoc>(`/ui/api/board/doc?key=${encodeURIComponent(key)}`);
 }
 
 export type TaskComments = { comments: BoardComment[]; truncated: boolean };

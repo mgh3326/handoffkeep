@@ -207,7 +207,7 @@ it("A9 pending relay remains open with its deadline", async () => {
   expect(screen.getByText(/기한:/)).toBeTruthy();
   expect(screen.queryByText("답변됨")).toBeNull();
 });
-it("A10 source elsewhere links to legacy", async () => {
+it("A10 source elsewhere explains why it cannot be answered here", async () => {
   fetcher.mockResolvedValue(
     response({
       ...detail,
@@ -217,9 +217,8 @@ it("A10 source elsewhere links to legacy", async () => {
     }),
   );
   await start();
-  expect(
-    screen.getByRole("link", { name: "기존 페이지" }).getAttribute("href"),
-  ).toBe("/ui/decisions/legacy");
+  expect(screen.getByText(/이 페이지에서 답할 수 없습니다/)).toBeTruthy();
+  expect(screen.queryByRole("link", { name: "기존 페이지" })).toBeNull();
 });
 it("A11 restores a request-specific draft", async () => {
   saveDraft("42", "dr-7-2", { option: "B", text: "memo", saved_at: "now" });

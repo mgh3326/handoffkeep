@@ -25,7 +25,6 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/store"
-	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
 	"github.com/mgh3326/handoffkeep/internal/youtrack"
 )
 
@@ -34,11 +33,8 @@ type Service struct {
 	Attachments *attachments.Manager
 	// Dots backs the /v1/dots/results routes; nil uses Store.
 	Dots DotsResultStore
-	// YouTrack is the legacy read-through service: it overlays the cached
-	// YouTrack priority and lane on linked tasks, answers YouTrack search, and
-	// queues lane changes for export to YouTrack (PG is written first). serve
-	// sets it only with HANDOFFKEEP_YT_READTHROUGH_MODE=on (docs/youtrack.md).
-	// Nil disables the feature; every other route behaves exactly as before.
+	// YouTrack answers /v1/search from YouTrack when SearchBackend is
+	// "youtrack". Nil disables it; every other route is unaffected.
 	YouTrack *youtrack.Service
 	// SearchBackend is "youtrack" to answer /v1/search from YouTrack, with
 	// PostgreSQL as the fallback; it takes effect only with YouTrack set.
@@ -50,14 +46,6 @@ type Service struct {
 type DotsResultStore interface {
 	ListDotsResults(ctx context.Context, taskID int64, issue string, limit int) ([]store.DotsResult, error)
 	SetDotsAdoption(ctx context.Context, id int64, by string, in store.DotsAdoptionInput) (store.DotsResult, bool, error)
-}
-
-// overlayTasks replaces priority and lane on linked tasks with the cached
-// YouTrack values. Unlinked tasks keep their hk columns unchanged.
-func (s Service) overlayTasks(ctx context.Context, tasks []store.Task) {
-	if s.YouTrack != nil {
-		s.YouTrack.Overlay(ctx, tasks)
-	}
 }
 
 func (s Service) dotsResults() DotsResultStore {
@@ -116,9 +104,6 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 
 	lane := ""
 	if input.Type == "task" {
-		if err := s.wrkTaskPrecheck(ctx, input.ID, "claimed", false); err != nil {
-			return store.RelayEvent{}, err
-		}
 		task, found, err := s.Store.GetTask(ctx, input.ID)
 		if err != nil {
 			return store.RelayEvent{}, err
@@ -218,16 +203,6 @@ func (s Service) Checkpoint(ctx context.Context, client string, x store.Checkpoi
 func (s Service) Recent(ctx context.Context, session, kind string, limit int) ([]store.Checkpoint, error) {
 	return s.Store.RecentCheckpoints(ctx, session, kind, limit)
 }
-func (s Service) PutMemory(ctx context.Context, client string, x store.Memory) (store.Memory, error) {
-	x.UpdatedBy = client
-	return s.Store.PutMemory(ctx, x)
-}
-func (s Service) GetMemory(ctx context.Context, agent, name string) (store.Memory, bool, error) {
-	return s.Store.GetMemory(ctx, agent, name)
-}
-func (s Service) ListMemory(ctx context.Context, agent string, content bool) ([]store.Memory, error) {
-	return s.Store.ListMemory(ctx, agent, content)
-}
 func (s Service) PutDocument(ctx context.Context, client string, x store.Document) (store.Document, bool, error) {
 	x.CreatedBy = client
 	return s.Store.PutDocument(ctx, x)
@@ -303,23 +278,14 @@ func (s Service) CreateTask(ctx context.Context, client string, x store.Task, ch
 	return s.Store.CreateTaskChecked(ctx, x, check)
 }
 func (s Service) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string) (store.Task, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return store.Task{}, err
-	}
 	return s.Store.ClaimTask(ctx, id, by, jobID, noJob)
 }
 
 func (s Service) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by, reason string) (store.Task, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return store.Task{}, err
-	}
 	return s.Store.RebindTaskJob(ctx, id, fromJob, toJob, by, reason)
 }
 
 func (s Service) NextTask(ctx context.Context, lane, by, jobID, noJob string) (store.Task, error) {
-	if err := s.Store.WrkFence(ctx, wrkrecords.LegacyIntent{JobID: jobID, Binding: true}); err != nil {
-		return store.Task{}, err
-	}
 	return s.Store.NextTask(ctx, lane, by, jobID, noJob)
 }
 func (s Service) CreateDisposition(ctx context.Context, client string, x store.DispositionInput) (store.Task, bool, error) {
@@ -330,19 +296,9 @@ func (s Service) DispositionSummary(ctx context.Context, asOf time.Time) (store.
 	return s.Store.DispositionSummary(ctx, asOf)
 }
 func (s Service) ApplyDisposition(ctx context.Context, id int64, client, note string) (store.Task, error) {
-	task, _, err := s.Store.GetTask(ctx, id)
-	if err != nil {
-		return store.Task{}, err
-	}
-	if err := s.wrkTaskPrecheck(ctx, id, store.DispositionTarget(task), false); err != nil {
-		return store.Task{}, err
-	}
 	return s.Store.ApplyDisposition(ctx, id, client, note)
 }
 func (s Service) ReopenTask(ctx context.Context, id int64, client, reason string) (store.Task, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "reopened", true); err != nil {
-		return store.Task{}, err
-	}
 	return s.Store.ReopenTask(ctx, id, client, reason)
 }
 func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note string, refs *store.TaskRefs, noJob string) (store.Task, error) {
@@ -352,59 +308,35 @@ func (s Service) TransitionTask(ctx context.Context, id int64, to, client, note 
 // TransitionTaskWith is TransitionTask with the options a plain call cannot
 // carry, such as the duplicate_of target.
 func (s Service) TransitionTaskWith(ctx context.Context, id int64, client string, in store.TransitionInput) (store.Task, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, store.FenceTarget(in.To), in.Refs != nil); err != nil {
-		return store.Task{}, err
-	}
 	in.By = client
 	return s.Store.TransitionTaskWith(ctx, id, in)
 }
 
 // SetTaskParent sets or clears a task's parent.
 func (s Service) SetTaskParent(ctx context.Context, id int64, parent *int64, client string) (store.Task, bool, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return store.Task{}, false, err
-	}
 	return s.Store.SetTaskParent(ctx, id, parent, client)
 }
 
 // AddTaskRelation adds an edge from the task to another.
 func (s Service) AddTaskRelation(ctx context.Context, id int64, kind string, other int64, client string) (bool, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return false, err
-	}
 	return s.Store.AddTaskRelation(ctx, id, kind, other, client)
 }
 
 // RemoveTaskRelation archives an edge.
 func (s Service) RemoveTaskRelation(ctx context.Context, id int64, kind string, other int64, client string) (bool, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return false, err
-	}
 	return s.Store.RemoveTaskRelation(ctx, id, kind, other, client)
 }
 func (s Service) RelaneTask(ctx context.Context, id int64, to, client, note string, allowNewLane bool) (store.Task, bool, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return store.Task{}, false, err
-	}
-	// PG is the execution value. The YouTrack export is queued after the
-	// write, so a YouTrack outage never blocks the move.
-	task, changed, err := s.Store.RelaneTask(ctx, id, to, client, note, allowNewLane)
-	if err != nil {
-		return store.Task{}, false, err
-	}
-	if s.YouTrack != nil && changed {
-		s.YouTrack.RecordLane(ctx, id, to)
-	}
-	return task, changed, nil
+	return s.Store.RelaneTask(ctx, id, to, client, note, allowNewLane)
 }
 func (s Service) SetTaskProject(ctx context.Context, id int64, project, client, note string) (store.Task, bool, error) {
-	if err := s.wrkTaskPrecheck(ctx, id, "", true); err != nil {
-		return store.Task{}, false, err
-	}
 	return s.Store.SetTaskProject(ctx, id, project, client, note)
 }
 func (s Service) SetTaskArea(ctx context.Context, id int64, area *string, client, note string) (store.Task, bool, error) {
 	return s.Store.SetTaskArea(ctx, id, area, client, note)
+}
+func (s Service) SetTaskPriority(ctx context.Context, id int64, priority int, client, note string) (store.Task, bool, error) {
+	return s.Store.SetTaskPriorityDirect(ctx, id, priority, client, note)
 }
 func (s Service) ListTaskProjects(ctx context.Context) ([]string, error) {
 	return s.Store.ListTaskProjects(ctx)
@@ -441,10 +373,6 @@ func (s Service) GetTask(ctx context.Context, id int64) (store.Task, bool, error
 	return s.Store.GetTask(ctx, id)
 }
 func (s Service) AppendRelayEvent(ctx context.Context, x store.RelayEvent) (store.RelayEvent, bool, error) {
-	if err := s.Store.WrkFence(ctx, wrkrecords.LegacyIntent{JobID: x.JobID, Kind: x.Kind, Head: x.Head, Digest: x.ReportSHA, Receipt: x.WrkReceipt}); err != nil {
-		return store.RelayEvent{}, false, err
-	}
-
 	return s.Store.AppendRelayEvent(ctx, x)
 }
 func (s Service) MarkRelayEventDelivered(ctx context.Context, id int64, machine, pane string) (store.RelayEvent, error) {
@@ -528,6 +456,7 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 	}
 	out := Tokens{}
 	grants := QuotaAccounts{}
+	var retiredImportGrants []string
 	for _, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -571,9 +500,12 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 		if strings.HasPrefix(k, hostGrantPrefix) {
 			continue
 		}
-		// Import grants are read by LoadImportReadGrants from the same
-		// auth file; they are not bearer-token lines.
-		if strings.HasPrefix(k, "HANDOFFKEEP_IMPORT_READONLY_") {
+		// Import read grants (HANDOFFKEEP_IMPORT_READONLY_*) were removed with
+		// the /v1/import feed. A grant still naming a live token would widen
+		// that token to every route, so it is checked once the tokens are
+		// known below; a grant for no live token is ignored.
+		if id, isGrant := strings.CutPrefix(k, "HANDOFFKEEP_IMPORT_READONLY_"); isGrant {
+			retiredImportGrants = append(retiredImportGrants, id)
 			continue
 		}
 		if !ok || v == "" {
@@ -601,6 +533,13 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 	if len(out) == 0 {
 		return nil, nil, errors.New("HANDOFFKEEP_AUTH_FILE contains no tokens")
 	}
+	// Refuse to start rather than silently turn an import-only client into a
+	// full bearer credential. The operator deletes the grant and the token.
+	for _, id := range retiredImportGrants {
+		if _, live := out[id]; live {
+			return nil, nil, fmt.Errorf("HANDOFFKEEP_IMPORT_READONLY_%s is retired (the /v1/import feed was removed): delete that line and revoke HANDOFFKEEP_TOKEN_%s; it would otherwise grant full access", id, id)
+		}
+	}
 	for id := range grants {
 		if _, ok := out[id]; !ok {
 			fmt.Fprintf(os.Stderr, "handoffkeep: ignoring HANDOFFKEEP_QUOTA_ grants for unknown client %q\n", id)
@@ -610,37 +549,6 @@ func LoadTokens(path string) (Tokens, QuotaAccounts, error) {
 	return out, grants, nil
 }
 
-// LoadImportReadGrants reads exact opt-in read-only YouTrack import grants.
-// A grant is HANDOFFKEEP_IMPORT_READONLY_<CLIENT>=true next to that client's
-// bearer token; it grants access only to /v1/import/*.
-func LoadImportReadGrants(path string, tokens Tokens) (map[string]bool, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	grants := map[string]bool{}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		id, found := strings.CutPrefix(k, "HANDOFFKEEP_IMPORT_READONLY_")
-		if !found {
-			continue
-		}
-		if !ok || v != "true" || id == "" {
-			fmt.Fprintf(os.Stderr, "handoffkeep: ignoring invalid import read grant for %q\n", id)
-			continue
-		}
-		if _, known := tokens[id]; !known {
-			fmt.Fprintf(os.Stderr, "handoffkeep: ignoring import read grant for unknown client %q\n", id)
-			continue
-		}
-		grants[id] = true
-	}
-	return grants, nil
-}
 func (t Tokens) Client(r *http.Request) (string, bool) {
 	header := r.Header.Get("Authorization")
 	if !strings.HasPrefix(header, "Bearer ") || len(header) == len("Bearer ") {
@@ -662,9 +570,6 @@ type Server struct {
 	Tokens  Tokens
 	// QuotaAccounts scopes quota writes; a nil map refuses every account.
 	QuotaAccounts QuotaAccounts
-	// ImportReadGrants restricts a client to GET /v1/import/* and denies every
-	// other route, including all writes.
-	ImportReadGrants map[string]bool
 	// HostGrants binds a client to the host ids it may act for. A client with
 	// no entry keeps today's behavior and is logged (see HostGrants.Allows).
 	HostGrants HostGrants
@@ -686,10 +591,6 @@ type Server struct {
 
 func (s Server) Handler() http.Handler {
 	m := http.NewServeMux()
-	wrkRegistered := s.Service.Store != nil && (s.Service.Store.WrkEngine().Mode != "off" || s.Service.Store.HasWrkEnrollment(context.Background()))
-	if wrkRegistered {
-		m.HandleFunc("/v1/wrk/", s.wrk)
-	}
 	m.HandleFunc("GET /healthz", healthz)
 	m.HandleFunc("/v1/checkpoints", s.checkpoints)
 	m.HandleFunc("GET /v1/search", s.search)
@@ -703,20 +604,18 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/projects/{name}/status-updates", s.statusUpdates)
 	m.HandleFunc("POST /v1/projects/{name}/status-updates", s.statusUpdates)
 	m.HandleFunc("GET /v1/documents", s.documents)
-	m.HandleFunc("GET /v1/import/{resource}", s.importExport)
 	m.HandleFunc("GET /v1/yt/ops", s.ytOps)
 	m.HandleFunc("POST /v1/yt/ops/{id}/resolve", s.ytOpsResolve)
 	m.HandleFunc("GET /v1/yt/authority", s.ytAuthority)
 	m.HandleFunc("POST /v1/yt/authority", s.ytAuthoritySet)
 	m.HandleFunc("/v1/documents/{key...}", s.document)
-	m.HandleFunc("GET /v1/memory/{agent}", s.memoryList)
-	m.HandleFunc("/v1/memory/{agent}/{name}", s.memory)
 	m.HandleFunc("PUT /v1/attachments", s.attachmentPut)
 	m.HandleFunc("GET /v1/attachments", s.attachments)
 	m.HandleFunc("GET /v1/attachments/{sha}", s.attachment)
 	m.HandleFunc("POST /v1/attachments/uploads", s.attachmentUploadBegin)
 	m.HandleFunc("POST /v1/attachments/uploads/{id}/complete", s.attachmentUploadComplete)
 	m.HandleFunc("GET /v1/usage", s.usage)
+	m.HandleFunc("GET /v1/capabilities", s.capabilityList)
 	m.HandleFunc("GET /metrics", s.metrics)
 	m.HandleFunc("POST /v1/tasks", s.tasksCreate)
 	m.HandleFunc("POST /v1/intake", s.intake)
@@ -766,6 +665,8 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/labels", s.labelSave)
 	m.HandleFunc("PUT /v1/labels/{label}", s.labelSave)
 	m.HandleFunc("POST /v1/labels/{label}/retire", s.labelRetire)
+	m.HandleFunc("GET /v1/tasks/states", s.taskStates)
+	m.HandleFunc("PUT /v1/tasks/{id}/spawn", s.taskSpawnPut)
 	m.HandleFunc("GET /v1/tasks/{id}", s.task)
 	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)
 	m.HandleFunc("POST /v1/tasks/{id}/rebind", s.taskRebind)
@@ -779,9 +680,11 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/dots/results", s.dotsResultsList)
 	m.HandleFunc("POST /v1/dots/requests", s.dotsRequestCreate)
 	m.HandleFunc("POST /v1/dots/results/{id}/adoption", s.dotsAdoption)
+	m.HandleFunc("POST /v1/dots/answer", s.dotsAnswer)
 	m.HandleFunc("POST /v1/tasks/{id}/reopen", s.taskReopen)
 	m.HandleFunc("POST /v1/tasks/{id}/project", s.taskProject)
 	m.HandleFunc("POST /v1/tasks/{id}/area", s.taskArea)
+	m.HandleFunc("POST /v1/tasks/{id}/priority", s.taskPriority)
 	m.HandleFunc("POST /v1/tasks/{id}/milestone", s.taskMilestone)
 	m.HandleFunc("POST /v1/tasks/{id}/labels", s.taskLabel)
 	m.HandleFunc("POST /v1/tasks/{id}/deadlines", s.taskDeadlines)
@@ -842,6 +745,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/assistant/pending", s.assistantPending)
 	m.HandleFunc("GET /v1/assistant/outbox", s.assistantOutboxList)
 	m.HandleFunc("POST /v1/assistant/outbox/sent", s.assistantOutboxSent)
+	m.HandleFunc("POST /v1/assistant/outbox/applied", s.assistantOutboxApplied)
 	m.HandleFunc("POST /v1/assistant/decisions/resolve", s.assistantDecisionResolve)
 	if s.UI != nil {
 		m.Handle("/ui", s.UI)
@@ -850,72 +754,23 @@ func (s Server) Handler() http.Handler {
 	if s.LinearWebhook != nil {
 		m.Handle("POST /hooks/linear", s.LinearWebhook)
 	}
-	v1 := v1Handler{mux: m, legacy: s.legacyWrkFence(m)}
-	if wrkRegistered {
-		v1.wrk = http.HandlerFunc(s.wrk)
-	}
-	return importGrantHandler{v1: v1, tokens: s.Tokens, grants: s.ImportReadGrants}
+	return v1Handler{mux: m}
 }
 
-// importGrantHandler preserves v1 route resolution for telemetry while
-// restricting import-only clients to the GET import surface.
-type importGrantHandler struct {
-	v1     v1Handler
-	tokens Tokens
-	grants map[string]bool
-}
-
-func (h importGrantHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if client, ok := h.tokens.Client(r); ok && h.grants[client] {
-		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/v1/import/") {
-			writeError(w, http.StatusForbidden, "import_read_only")
-			return
-		}
-	}
-	h.v1.ServeHTTP(w, r)
-}
-
-// Handler reports the route the wrapped v1 handler will dispatch to.
-func (h importGrantHandler) Handler(r *http.Request) (http.Handler, string) {
-	return h.v1.Handler(r)
-}
-
-// wrkPattern is the route pattern reported for the /v1/wrk surface.
-const wrkPattern = "/v1/wrk/{path...}"
-
-// v1Handler serves the /v1 surface behind the legacy wrk fence. Its Handler
-// method reports the route a request dispatches to without serving it, the way
-// *http.ServeMux does, so telemetry can key the head sampling decision on the
-// route before the request starts (telemetry.routePattern follows any value
-// with this method).
+// v1Handler serves the /v1 surface. Its Handler method reports the route a
+// request dispatches to without serving it, the way *http.ServeMux does, so
+// telemetry can key the head sampling decision on the route before the request
+// starts (telemetry.routePattern follows any value with this method).
 type v1Handler struct {
-	mux    *http.ServeMux
-	legacy http.Handler
-	wrk    http.Handler // nil when the wrk routes are not registered
-}
-
-func (h v1Handler) isWrk(r *http.Request) bool {
-	return h.wrk != nil && (r.URL.Path == "/v1/wrk" || strings.HasPrefix(r.URL.Path, "/v1/wrk/"))
+	mux *http.ServeMux
 }
 
 func (h v1Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// The legacy fence may return before ServeMux dispatches the request.
-	_, r.Pattern = h.mux.Handler(r)
-	// ServeMux cleans dot/slash paths with redirects before dispatch. O3
-	// must authenticate and reject those paths without ever sending Location.
-	if h.isWrk(r) {
-		r.Pattern = wrkPattern
-		h.wrk.ServeHTTP(w, r)
-		return
-	}
-	h.legacy.ServeHTTP(w, r)
+	h.mux.ServeHTTP(w, r)
 }
 
 // Handler reports the route ServeHTTP would dispatch to, without serving it.
 func (h v1Handler) Handler(r *http.Request) (http.Handler, string) {
-	if h.isWrk(r) {
-		return h.wrk, wrkPattern
-	}
 	return h.mux.Handler(r)
 }
 
@@ -944,14 +799,27 @@ func healthz(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, out)
 }
 
+// clientKey carries the authenticated client id on a request context so logs
+// on the error path can name the caller.
+type clientKey struct{}
+
+func withClient(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, clientKey{}, id)
+}
+
+// clientOf returns the client id auth stored on ctx, or "" before auth ran.
+func clientOf(ctx context.Context) string {
+	id, _ := ctx.Value(clientKey{}).(string)
+	return id
+}
+
 func (s Server) auth(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id, ok := s.Tokens.Client(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 	}
 	if ok {
-		_, receipt := store.WrkPrincipal(r.Context())
-		*r = *r.WithContext(store.WithWrkPrincipal(r.Context(), id, receipt))
+		*r = *r.WithContext(withClient(r.Context(), id))
 		s.ClientRevisions.observe(id, r.UserAgent())
 	}
 	return id, ok
@@ -1021,7 +889,6 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		}
 		// Echoed like project: an old server that drops the parameter would
 		// answer with every task.
-		s.Service.overlayTasks(r.Context(), xs)
 		jsonOut(w, http.StatusOK, map[string]any{"tasks": xs, "change": changeID})
 		return
 	}
@@ -1078,7 +945,6 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
-	s.Service.overlayTasks(r.Context(), xs)
 	body := map[string]any{"tasks": xs}
 	if project != nil {
 		// Echo the requested filter so new clients can tell a filtered
@@ -1147,9 +1013,7 @@ func (s Server) task(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 		return
 	}
-	tasks := []store.Task{x}
-	s.Service.overlayTasks(r.Context(), tasks)
-	jsonOut(w, http.StatusOK, tasks[0])
+	jsonOut(w, http.StatusOK, x)
 }
 
 type taskClaimInput struct {
@@ -1225,10 +1089,6 @@ func (s Server) taskProject(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
-	if err := s.Service.wrkTaskPrecheck(r.Context(), id, "", true); err != nil {
-		appErr(w, r, err)
-		return
-	}
 	x, _, err := s.Service.Store.SetTaskProjectWithMetadata(r.Context(), id, input.Project, client, input.Note, input.Metadata)
 	if err != nil {
 		appErr(w, r, err)
@@ -1287,6 +1147,43 @@ func (s Server) taskArea(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	x, _, err := s.Service.SetTaskArea(r.Context(), id, area, client, input.Note)
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
+}
+
+// taskPriority sets a task's priority and records the change as a metadata event (hk 3219).
+func (s Server) taskPriority(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	id, err := pathID(r, "id")
+	if err != nil || id < 1 {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	defer r.Body.Close()
+	var input struct {
+		Priority *int   `json:"priority"`
+		Note     string `json:"note"`
+		Reason   string `json:"reason"`
+	}
+	if err := decode(r, &input, bodySmall); err != nil {
+		appErr(w, r, err)
+		return
+	}
+	if input.Priority == nil {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	note := input.Note
+	if note == "" {
+		note = input.Reason
+	}
+	x, _, err := s.Service.SetTaskPriority(r.Context(), id, *input.Priority, client, note)
 	if err != nil {
 		appErr(w, r, err)
 		return
@@ -1645,10 +1542,6 @@ type taskRelaneResult struct {
 // errors (driver faults, cancelled contexts) report internal_error rather
 // than leaking internals or posing as a retry-safe validation failure.
 func relaneErrorCode(err error) string {
-	var denied wrkrecords.Error
-	if errors.As(err, &denied) {
-		return wrkrecords.Code(denied)
-	}
 	switch {
 	case errors.Is(err, store.ErrTaskNotFound):
 		return "not_found"
@@ -2478,54 +2371,6 @@ func (s Server) document(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOut(w, http.StatusOK, map[string]any{"document": x, "changed": changed})
-		return
-	}
-	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-}
-func (s Server) memoryList(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth(w, r); !ok {
-		return
-	}
-	xs, e := s.Service.ListMemory(r.Context(), r.PathValue("agent"), false)
-	if e != nil {
-		appErr(w, r, e)
-		return
-	}
-	jsonOut(w, http.StatusOK, map[string]any{"memory": xs})
-}
-func (s Server) memory(w http.ResponseWriter, r *http.Request) {
-	client, ok := s.auth(w, r)
-	if !ok {
-		return
-	}
-	agent, name := r.PathValue("agent"), r.PathValue("name")
-	if r.Method == http.MethodGet {
-		x, found, e := s.Service.GetMemory(r.Context(), agent, name)
-		if e != nil {
-			appErr(w, r, e)
-			return
-		}
-		if !found {
-			writeError(w, http.StatusNotFound, "not_found")
-			return
-		}
-		jsonOut(w, http.StatusOK, x)
-		return
-	}
-	if r.Method == http.MethodPut {
-		defer r.Body.Close()
-		var x store.Memory
-		if e := decode(r, &x, store.MaxBytes); e != nil {
-			appErr(w, r, e)
-			return
-		}
-		x.Agent, x.Name = agent, name
-		x, e := s.Service.PutMemory(r.Context(), client, x)
-		if e != nil {
-			appErr(w, r, e)
-			return
-		}
-		jsonOut(w, http.StatusOK, x)
 		return
 	}
 	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")

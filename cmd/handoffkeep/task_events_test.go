@@ -90,9 +90,13 @@ func TestTasksEventCLI(t *testing.T) {
 	if _, err = cli("1", "--source", "mergewake.revert", "--source-ref", pr+"1", "--reverted-pr", pr); err != nil || got[len(got)-1].RevertedPR != pr {
 		t.Fatalf("revert: %+v %v", got[len(got)-1], err)
 	}
+	// --tasks names the other tasks the PR delivers (hk 3294).
+	if _, err = cli("1", "--source", "mergewake.merge", "--source-ref", pr, "--tasks", "8, 9"); err != nil || fmt.Sprint(got[len(got)-1].Tasks) != "[8 9]" {
+		t.Fatalf("tasks: %+v %v", got[len(got)-1], err)
+	}
 	// Refused before any request.
 	n := len(got)
-	for _, args := range [][]string{{"--source", "mergewake.merge", "--source-ref", pr}, {"1", "--source-ref", pr}, {"1", "--source", "mergewake.merge", "--source-ref", pr, "--at", "yesterday"}} {
+	for _, args := range [][]string{{"--source", "mergewake.merge", "--source-ref", pr}, {"1", "--source-ref", pr}, {"1", "--source", "mergewake.merge", "--source-ref", pr, "--at", "yesterday"}, {"1", "--source", "mergewake.merge", "--source-ref", pr, "--tasks", "8,x"}, {"1", "--source", "mergewake.merge", "--source-ref", pr, "--tasks", "0"}} {
 		if _, err = cli(args...); err == nil {
 			t.Fatalf("accepted %v", args)
 		}

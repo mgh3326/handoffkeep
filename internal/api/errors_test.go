@@ -72,7 +72,7 @@ func TestInternalErrorCarriesRequestID(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
-		*r = *r.WithContext(store.WithWrkPrincipal(r.Context(), "node-a", nil))
+		*r = *r.WithContext(withClient(r.Context(), "node-a"))
 		appErr(w, r, fmt.Errorf("query: %w", context.DeadlineExceeded))
 	})
 	w := httptest.NewRecorder()
@@ -118,7 +118,7 @@ func TestInternalErrorCarriesTraceID(t *testing.T) {
 			log.SetOutput(&logs)
 			t.Cleanup(func() { log.SetOutput(os.Stderr) })
 			r := httptest.NewRequest(http.MethodGet, "/v1/tasks/7", nil)
-			r = r.WithContext(store.WithWrkPrincipal(ctx, "node-a", nil))
+			r = r.WithContext(withClient(ctx, "node-a"))
 			w := httptest.NewRecorder()
 			appErr(w, r, fmt.Errorf("query: %w", context.DeadlineExceeded))
 			var body map[string]string

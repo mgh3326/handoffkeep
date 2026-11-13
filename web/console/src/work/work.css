@@ -43,3 +43,8 @@
 .work-job-run dd p { margin: var(--hk-space-1) 0 0; color: var(--hk-text-secondary); }
 .work-job-run ul { margin: 0; padding-left: var(--hk-space-4); }
 .work-job-skills { margin: var(--hk-space-1) 0 0; color: var(--hk-text-muted); font-size: var(--hk-type-meta); }
+
+/* A task's panewire spawn request (hk 4377): the state, reason and start condition. */
+.spawn-block { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
+.spawn-block dt { color: var(--hk-text-muted); }
+.spawn-block dd { margin: 0; }

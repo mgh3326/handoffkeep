@@ -361,6 +361,42 @@ type DispositionAnswerInput struct {
 	BatchID       string
 }
 
+// DispositionEventText is the lane event text of answered items that share one
+// answer event id: one single answer, or one lane of one batch. It is
+// deterministic in the recorded answers, so the console's direct emit, a
+// re-notification and the outbox row all carry the same text under the same
+// event id.
+func DispositionEventText(tasks []Task) (string, error) {
+	if len(tasks) == 0 {
+		return "", errors.New("no answered items")
+	}
+	first := tasks[0].Refs.Disposition.Answer
+	email := strings.TrimPrefix(first.By, "operator:")
+	if len(tasks) == 1 && first.BatchID == "" {
+		label, _ := DispositionOptionLabel(first.Key)
+		return fmt.Sprintf("[decision] #%d: %s: %s (from operator(web) %s)", tasks[0].ID, first.Key, label, email), nil
+	}
+	parts := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		parts = append(parts, fmt.Sprintf("#%d=%s", task.ID, task.Refs.Disposition.Answer.Key))
+	}
+	return fmt.Sprintf("[decision] disposition-batch %s: %s (from operator(web) %s)", first.BatchID, strings.Join(parts, " "), email), nil
+}
+
+// queueDispositionAnswerNotice writes the lane notification for answered
+// disposition items sharing one answer event id, inside the answering
+// transaction: a rollback takes the answer and the notice together, and the
+// event id makes a second write a no-op. The console's direct emit uses the
+// same lane and event id, so the hub dedupes the two paths into one event.
+func queueDispositionAnswerNotice(ctx context.Context, tx pgx.Tx, lane, eventID string, tasks []Task, at time.Time) error {
+	text, err := DispositionEventText(tasks)
+	if err != nil {
+		return err
+	}
+	_, err = insertNotificationOutboxOnce(ctx, tx, OutboxKindDispositionAnswered, lane, eventID, assistantLaneText("", text), at)
+	return err
+}
+
 // answerDispositionTx returns (task, skipReason, error). A non-empty skip
 // reason means nothing was written for this item.
 func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in DispositionAnswerInput, useRecommended bool) (Task, string, error) {
@@ -372,9 +408,6 @@ func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in Dispositi
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, "not_found", nil
 		}
-		return Task{}, "", err
-	}
-	if err := s.wrkTaskFenceTx(ctx, tx, x, "claimed", false); err != nil {
 		return Task{}, "", err
 	}
 	if x.Refs.Disposition == nil {
@@ -458,6 +491,9 @@ func (s *Store) AnswerDisposition(ctx context.Context, in DispositionAnswerInput
 	default:
 		return Task{}, ErrTaskConflict
 	}
+	if err = queueDispositionAnswerNotice(ctx, tx, x.Lane, in.EventID, []Task{x}, x.Refs.Disposition.Answer.At); err != nil {
+		return Task{}, err
+	}
 	return x, tx.Commit(ctx)
 }
 
@@ -511,6 +547,21 @@ func (s *Store) AnswerDispositionBatch(ctx context.Context, refs []DispositionRe
 		}
 		answered = append(answered, x)
 	}
+	// One notice per lane, under the lane's batch event id: the answered
+	// items of a lane share one lane event.
+	byLane, lanes := map[string][]Task{}, []string{}
+	for _, x := range answered {
+		if _, seen := byLane[x.Lane]; !seen {
+			lanes = append(lanes, x.Lane)
+		}
+		byLane[x.Lane] = append(byLane[x.Lane], x)
+	}
+	for _, lane := range lanes {
+		tasks := byLane[lane]
+		if err := queueDispositionAnswerNotice(ctx, tx, lane, tasks[0].Refs.Disposition.Answer.EventID, tasks, tasks[0].Refs.Disposition.Answer.At); err != nil {
+			return nil, nil, err
+		}
+	}
 	return answered, skipped, tx.Commit(ctx)
 }
 
@@ -541,9 +592,6 @@ func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string)
 		return Task{}, err
 	}
 
-	if err := s.wrkTaskFenceTx(ctx, tx, x, DispositionTarget(x), false); err != nil {
-		return Task{}, err
-	}
 	if x.Refs.Disposition == nil || x.Refs.Disposition.Answer == nil || x.State != StateResearching || x.AwaitingDecision {
 		return Task{}, ErrTaskConflict
 	}

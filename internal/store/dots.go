@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -292,7 +293,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 		return DotsReplyResult{}, err
 	}
 	defer tx.Rollback(ctx)
-	// Match ApplyYouTrackActivity: mutation lock, comment lock, then task row.
+	// Lock order: mutation lock, comment lock, then task row.
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return DotsReplyResult{}, err
 	}
@@ -410,6 +411,202 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	}
 	logYTCommentEnqueued(reply, replyOp, replyEnqueued)
 	return DotsReplyResult{TaskID: task.ID, State: task.State, DocumentKey: docKey, RunToken: runToken}, nil
+}
+
+// DotsAnswerInput carries the text answering a task's open dots question.
+type DotsAnswerInput struct {
+	Text string `json:"text"`
+}
+
+// DotsAnswerResult is the outcome of answering a task's open dots question.
+type DotsAnswerResult struct {
+	TaskID    int64              `json:"task_id"`
+	RequestID string             `json:"request_id"`
+	CommentID int64              `json:"comment_id"`
+	Task      Task               `json:"task"`
+	Request   DecisionRequest    `json:"request"`
+	Comment   CreatedTaskComment `json:"comment"`
+}
+
+// AnswerDotsQuestion resolves a task's open dots decision request (kind answered,
+// responder = caller) and records the answer text as a task comment, in one
+// transaction. A requester-lane comment alone does not resolve it.
+func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller string, in DotsAnswerInput) (DotsAnswerResult, error) {
+	if taskID < 1 {
+		return DotsAnswerResult{}, ErrTaskNotFound
+	}
+	if caller == "" || !validText(caller, 128) {
+		return DotsAnswerResult{}, errors.New("caller is required")
+	}
+	if err := CheckTaskCommentBody(in.Text); err != nil {
+		return DotsAnswerResult{}, err
+	}
+	if err := guard.Reject(in.Text); err != nil {
+		return DotsAnswerResult{}, err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return DotsAnswerResult{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock order matches ReplyDots: task-mutation
+	// advisory lock (level 2), then taskCommentInsertLock, then task row FOR UPDATE.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return DotsAnswerResult{}, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+		return DotsAnswerResult{}, err
+	}
+
+	var x Task
+	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, taskID), &x); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return DotsAnswerResult{}, ErrTaskNotFound
+		}
+		return DotsAnswerResult{}, err
+	}
+
+	if x.Lane != "dots" || !IsHKDotsRequest(x) {
+		return DotsAnswerResult{}, errors.New("invalid dots request task")
+	}
+	if x.Refs.Disposition != nil {
+		return DotsAnswerResult{}, ErrDispositionOperatorOnly
+	}
+	if isTerminalTaskState(x.State) {
+		return DotsAnswerResult{}, ErrTaskTerminal
+	}
+
+	current := x.Refs.DecisionRequest
+	if current == nil {
+		return DotsAnswerResult{}, ErrNoOpenDecisionRequest
+	}
+	if current.Status != DecisionRequestOpen {
+		return DotsAnswerResult{}, ErrDecisionRequestResolved
+	}
+	if current.EffectivePolicy(false) == DecisionPolicyOperatorDirect {
+		return DotsAnswerResult{}, ErrDecisionRequestHumanOnly
+	}
+
+	now := time.Now().UTC()
+
+	// 1. Insert comment
+	var comment TaskComment
+	err = scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,$2,$3,$4) RETURNING `+taskCommentColumns, taskID, in.Text, caller, now), &comment)
+	if err != nil {
+		return DotsAnswerResult{}, err
+	}
+	op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, comment)
+	if err != nil {
+		return DotsAnswerResult{}, err
+	}
+
+	// 2. Resolve decision request
+	decisionBefore := decisionBeforeOf(x)
+	root := current.RootID()
+	eventKey := fmt.Sprintf("auto:dots-answer:%d:%s", taskID, current.ID)
+
+	attempt := decisionAttempt{
+		channel:           DecisionChannelCLI,
+		eventKey:          eventKey,
+		taskID:            taskID,
+		revisionRequestID: current.ID,
+		revision:          current.Revision,
+		root:              root,
+		provenance:        DecisionProvenanceOperatorRelay,
+		actor:             caller,
+		at:                now,
+		text:              in.Text,
+		result:            DecisionResultAnswered,
+	}
+	attemptID, err := insertDecisionAttempt(ctx, tx, attempt)
+	if err != nil {
+		return DotsAnswerResult{}, err
+	}
+
+	resolved := *current
+	resolved.Status = DecisionRequestAnswered
+	resolved.Resolution = &DecisionResolution{
+		Kind:      DecisionRequestAnswered,
+		Text:      in.Text,
+		Responder: caller,
+		By:        caller,
+		At:        now,
+	}
+	x.Refs.DecisionRequest = &resolved
+
+	flagWas := x.AwaitingDecision
+	if flagWas {
+		var others int
+		if others, err = otherBlockingDecisionsTx(ctx, tx, x.ID, resolved.ID); err != nil {
+			return DotsAnswerResult{}, err
+		}
+		x.AwaitingDecision = others > 0
+	}
+
+	encoded, err := json.Marshal(x.Refs)
+	if err != nil {
+		return DotsAnswerResult{}, err
+	}
+	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET refs=$2::jsonb,awaiting_decision=$4,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, x.ID, string(encoded), now, x.AwaitingDecision), &x); err != nil {
+		return DotsAnswerResult{}, err
+	}
+
+	var resolutionID int64
+	err = tx.QueryRow(ctx, `INSERT INTO decision_resolutions(request_id,question_revision,revision_request_id,task_id,kind,option_id,text,receipt,provenance,channel,decided_by,recorded_by,attempt_id,committed_at)
+		VALUES($1,$2,$3,$4,$5,NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),$9,$10,$11,$12,$13,$14) RETURNING resolution_id`,
+		root, current.Revision, resolved.ID, x.ID, DecisionRequestAnswered, "", in.Text, "", DecisionProvenanceOperatorRelay, DecisionChannelCLI,
+		caller, caller, attemptID, now).Scan(&resolutionID)
+	if err != nil {
+		return DotsAnswerResult{}, err
+	}
+
+	note := "decision-" + DecisionRequestAnswered + " " + resolved.ID + ": " + in.Text
+	resolveIn := ResolveDecisionInput{
+		TaskID:    taskID,
+		RequestID: current.ID,
+		Kind:      DecisionRequestAnswered,
+		Text:      in.Text,
+		Responder: caller,
+		Channel:   DecisionChannelCLI,
+		Actor:     caller,
+	}
+	if err = s.queueDecisionAnswerNotice(ctx, tx, x, resolved, resolveIn, caller, resolutionID, now); err != nil {
+		return DotsAnswerResult{}, err
+	}
+	if flagWas && !x.AwaitingDecision {
+		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: caller, Note: "decision-clear " + resolved.ID + " by " + caller, Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
+			return DotsAnswerResult{}, err
+		}
+	}
+	if err = insertDecisionEvent(ctx, tx, &x, caller, note, now); err != nil {
+		return DotsAnswerResult{}, err
+	}
+	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, caller, note, 0, now); err != nil {
+		return DotsAnswerResult{}, err
+	}
+	if err = queueDecisionClosedPost(ctx, tx, resolved, x.Refs.DecisionOptions, now); err != nil {
+		return DotsAnswerResult{}, err
+	}
+	if err = s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
+		return DotsAnswerResult{}, err
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return DotsAnswerResult{}, err
+	}
+	logYTCommentEnqueued(comment, op, enqueued)
+	projection := ytProjectionOf(op, enqueued)
+
+	return DotsAnswerResult{
+		TaskID:    taskID,
+		RequestID: resolved.ID,
+		CommentID: comment.ID,
+		Task:      x,
+		Request:   resolved,
+		Comment:   CreatedTaskComment{TaskComment: comment, YouTrackProjection: &projection},
+	}, nil
 }
 
 // DotsComment is one Linear comment. CreatedAt keeps Linear's own ISO-8601
@@ -591,7 +788,7 @@ func checkDotsResult(kind string, issue DotsIssue, c DotsComment, allowProgress 
 	}
 	key := dotsResultKey(issue, c)
 	body := dotsResultBody(kind, issue, c)
-	if !validDocKey(key) || !validText(body, DocumentMaxBytes) {
+	if !validDocKey(key) || !validDocumentText(body) {
 		return errors.New("invalid dots result")
 	}
 	return guard.Reject(key + "\n" + body)

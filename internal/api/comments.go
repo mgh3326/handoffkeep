@@ -31,7 +31,10 @@ type taskCommentInput struct {
 
 // taskCommentRequestMax leaves room for JSON escaping (up to six bytes per
 // body byte) so an oversized body is reported as too long, not as malformed.
-const taskCommentRequestMax = 6*store.TaskCommentMaxBytes + 4096
+// It is the request fuse for the route, a server-memory bound with the value
+// it has always had (hk 4404 owns the fuses); the comment text bound itself is
+// ytwrite.TextMaxChars.
+const taskCommentRequestMax = 6*store.MaxBytes + 4096
 
 func taskCommentErr(w http.ResponseWriter, r *http.Request, err error) {
 	switch {

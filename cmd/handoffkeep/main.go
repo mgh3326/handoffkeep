@@ -32,18 +32,11 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/telemetry"
 	"github.com/mgh3326/handoffkeep/internal/ui"
-	"github.com/mgh3326/handoffkeep/internal/wrkrecords"
-	"github.com/mgh3326/handoffkeep/internal/youtrack"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		var wrkErr wrkCLIError
-		if errors.As(err, &wrkErr) {
-			fmt.Fprintln(os.Stderr, "handoffkeep wrk: "+wrkErr.code)
-			os.Exit(wrkrecords.Exit(wrkErr.code))
-		}
 		fmt.Fprintln(os.Stderr, "handoffkeep:", err)
 		var exit exitCodeError
 		if errors.As(err, &exit) {
@@ -54,11 +47,9 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|placements|standing|dots|services|deploys|fleet-metrics|bench|changes|youtrack|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|doc|attach|r2usage|tasks|tickets|decisions|placements|standing|dots|services|deploys|bench|changes|youtrack|version")
 	}
 	switch args[0] {
-	case "wrk":
-		return wrkCmd(args[1:], os.Stdin, out)
 	case "sync":
 		return syncCmd(args[1:], out)
 	case "ledger":
@@ -73,8 +64,6 @@ func run(args []string, out, errout io.Writer) error {
 		return runMCP()
 	case "ctx":
 		return ctxCmd(args[1:], out)
-	case "memory":
-		return memoryCmd(args[1:], out)
 	case "doc":
 		return docCmd(args[1:], out)
 	case "attach":
@@ -95,8 +84,6 @@ func run(args []string, out, errout io.Writer) error {
 		return placementsCmd(args[1:], out)
 	case "dots":
 		return dotsCmd(args[1:], out)
-	case "fleet-metrics":
-		return fleetMetricsCmd(args[1:], out)
 	case "bench":
 		return benchCmd(args[1:], out)
 	case "jobs":
@@ -112,7 +99,7 @@ func run(args []string, out, errout io.Writer) error {
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|memory|doc|attach|r2usage|tasks|tickets|decisions|placements|standing|dots|services|deploys|fleet-metrics|bench|changes|youtrack|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|ctx|doc|attach|r2usage|tasks|tickets|decisions|placements|standing|dots|services|deploys|bench|changes|youtrack|version")
 	}
 }
 
@@ -241,7 +228,7 @@ func tasksCmd(args []string, out io.Writer) error {
 
 func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|parent|relate|unrelate|origin|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|drift|settle-merged|project-status|intake|triage")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|label|labels|due|subscribe|unsubscribe|set-area|areas|set-priority|parent|relate|unrelate|origin|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|drift|settle-merged|project-status|intake|triage")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -254,6 +241,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if args[0] == "rebind" {
 		return taskRebindCmd(args[1:], out)
+	}
+	if args[0] == "set-priority" {
+		return taskPriorityCmd(args, out)
 	}
 	if args[0] == "parent" {
 		return taskParentCmd(args[1:], out)
@@ -334,7 +324,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	question := fs.String("question", "", "question required for needs_decision")
 	limit := fs.Int("limit", 20, "maximum results")
 	stalled := fs.Bool("stalled", false, "list only stalled tasks: started, not awaiting a decision, no activity within the server's started_stalled_hours (tasks list only)")
-	pr := fs.String("pr", "", "pull request reference")
+	pr := fs.String("pr", "", "pull request reference; with --to merged from an open state before reviewing, the merged PR that delivered the task (hk checks its change record)")
 	headSHA := fs.String("head-sha", "", "head revision reference")
 	reportPath := fs.String("report-path", "", "report path reference")
 	jobID := fs.String("job-id", "", "job reference")
@@ -717,7 +707,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		}
 		return printJSON(out, x)
 	default:
-		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|owner|owners|set-area|areas|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|intake|triage")
+		return errors.New("usage: tasks add|list|export|claim|next|transition|reopen|rebind|relane|project|projects|owner|owners|set-area|areas|set-priority|parent|relate|unrelate|migrate-states|decision-request|decision-resolve|show|comment|comments|disposition|intake|triage")
 	}
 }
 
@@ -951,126 +941,6 @@ func ctxCmd(args []string, out io.Writer) error {
 	default:
 		return errors.New("usage: ctx checkpoint|recent|search")
 	}
-}
-
-func memoryCmd(args []string, out io.Writer) error {
-	if len(args) == 0 {
-		return errors.New("usage: memory push|pull|list")
-	}
-	fs := flag.NewFlagSet("memory "+args[0], flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	c := remoteClient(fs)
-	agent := fs.String("agent", "", "agent")
-	dir := fs.String("dir", "", "directory")
-	apply := fs.Bool("apply", false, "apply changes")
-	if e := fs.Parse(args[1:]); e != nil {
-		return e
-	}
-	if e := mustClient(c); e != nil {
-		return e
-	}
-	ctx := context.Background()
-	switch args[0] {
-	case "list":
-		v, e := c.ListMemory(ctx, *agent, false)
-		if e != nil {
-			return e
-		}
-		return printJSON(out, v)
-	case "push":
-		items, e := readMem(*agent, *dir)
-		if e != nil {
-			return e
-		}
-		if !*apply {
-			return printJSON(out, map[string]any{"dry_run": true, "count": len(items)})
-		}
-		for _, x := range items {
-			if _, e = c.PutMemory(ctx, "", x); e != nil {
-				return e
-			}
-		}
-		return printJSON(out, map[string]any{"pushed": len(items)})
-	case "pull":
-		items, e := c.ListMemory(ctx, *agent, true)
-		if e != nil {
-			return e
-		}
-		if !*apply {
-			return printJSON(out, map[string]any{"dry_run": true, "count": len(items)})
-		}
-		if e = writeMem(*dir, items); e != nil {
-			return e
-		}
-		return printJSON(out, map[string]any{"pulled": len(items)})
-	default:
-		return errors.New("usage: memory push|pull|list")
-	}
-}
-func readMem(agent, dir string) ([]store.Memory, error) {
-	ents, e := os.ReadDir(dir)
-	if e != nil {
-		return nil, e
-	}
-	out := []store.Memory{}
-	for _, x := range ents {
-		if x.IsDir() || !strings.HasSuffix(x.Name(), ".md") {
-			continue
-		}
-		b, e := os.ReadFile(filepath.Join(dir, x.Name()))
-		if e != nil {
-			return nil, e
-		}
-		m, e := parseMem(agent, strings.TrimSuffix(x.Name(), ".md"), string(b))
-		if e != nil {
-			return nil, e
-		}
-		out = append(out, m)
-	}
-	return out, nil
-}
-func parseMem(agent, fallback, raw string) (store.Memory, error) {
-	m := store.Memory{Agent: agent, Name: fallback, Type: "project", Content: raw}
-	if !strings.HasPrefix(raw, "---\n") {
-		return m, nil
-	}
-	parts := strings.SplitN(raw, "---\n", 3)
-	if len(parts) != 3 {
-		return m, errors.New("invalid memory frontmatter")
-	}
-	for _, l := range strings.Split(parts[1], "\n") {
-		k, v, ok := strings.Cut(l, ":")
-		if !ok {
-			continue
-		}
-		switch strings.TrimSpace(k) {
-		case "name":
-			m.Name = strings.TrimSpace(v)
-		case "description":
-			m.Description = strings.TrimSpace(v)
-		case "type":
-			m.Type = strings.TrimSpace(v)
-		}
-	}
-	return m, nil
-}
-func writeMem(dir string, items []store.Memory) error {
-	if e := os.MkdirAll(dir, 0700); e != nil {
-		return e
-	}
-	names := []string{}
-	for _, x := range items {
-		raw := x.Content
-		if !strings.HasPrefix(raw, "---\n") {
-			raw = fmt.Sprintf("---\nname: %s\ndescription: %s\nmetadata:\n  type: %s\n---\n%s", x.Name, x.Description, x.Type, x.Content)
-		}
-		if e := os.WriteFile(filepath.Join(dir, x.Name+".md"), []byte(raw), 0600); e != nil {
-			return e
-		}
-		names = append(names, fmt.Sprintf("- [%s](%s.md) — %s", x.Name, x.Name, x.Description))
-	}
-	sort.Strings(names)
-	return os.WriteFile(filepath.Join(dir, "MEMORY.md"), []byte(strings.Join(names, "\n")+"\n"), 0600)
 }
 
 func docCmd(args []string, out io.Writer) error {
@@ -1645,7 +1515,11 @@ func attachMigrateCmd(args []string, out io.Writer) error {
 	if dbURL == "" {
 		return errors.New("HANDOFFKEEP_DB_URL is required")
 	}
-	st, e := store.OpenExisting(context.Background(), dbURL, *apply)
+	open := store.OpenWithoutMigration
+	if *apply {
+		open = store.Open
+	}
+	st, e := open(context.Background(), dbURL)
 	if e != nil {
 		return e
 	}
@@ -2007,16 +1881,7 @@ func serve(args []string, errout io.Writer) error {
 		return err
 	}
 	defer monitor.Close()
-	mode := os.Getenv("WRK_RECORDS_API")
-	var policy *wrkrecords.Policy
-	var e error
-	if mode != "" && mode != "off" {
-		policy, e = wrkrecords.LoadPolicy(os.Getenv("WRK_RECORDS_POLICY_FILE"))
-		if e != nil {
-			return e
-		}
-	}
-	st, e := store.OpenServer(ctx, dbURL, os.Getenv("HANDOFFKEEP_MIGRATE_DB_URL"), mode, policy, os.Getenv("WRK_RECORDS_STORE_GENERATION"), os.Getenv("WRK_RECORDS_RECOVERY_REQUIRED") == "true")
+	st, e := store.Open(ctx, dbURL)
 	if e != nil {
 		return e
 	}
@@ -2033,10 +1898,6 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	importReadGrants, e := api.LoadImportReadGrants(auth, tokens)
-	if e != nil {
-		return e
-	}
 	hostGrants, e := api.LoadHostGrants(auth, tokens)
 	if e != nil {
 		return e
@@ -2049,8 +1910,7 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	youTrack := yt.readThrough
-	svc := api.Service{Store: st, Attachments: am, YouTrack: youTrack, SearchBackend: yt.searchBackend}
+	svc := api.Service{Store: st, Attachments: am, YouTrack: yt.search, SearchBackend: yt.searchBackend}
 	workers := []backgroundWorker{chatRetentionWorker{store: st}, placementRetentionWorker{store: st}, syncRetentionWorker{store: st, retention: retention}}
 	workers = append(workers, ytOpsAlertWorker{store: st})
 	if *iceboxDays > 0 {
@@ -2088,7 +1948,7 @@ func serve(args []string, errout io.Writer) error {
 	if threads != nil {
 		workers = append(workers, singletonWorker{store: st, id: store.TaskThreadWorkerLock, worker: threads})
 	}
-	uiHandler, e := uiFromEnv(st, youTrack, am)
+	uiHandler, e := uiFromEnv(st, am)
 	if e != nil {
 		return e
 	}
@@ -2096,7 +1956,7 @@ func serve(args []string, errout io.Writer) error {
 	if e != nil {
 		return e
 	}
-	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, ImportReadGrants: importReadGrants, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions, ClientRevisions: api.NewClientRevisions()}, monitor, mcpAccess)
+	handler := serverHandler(api.Server{Service: svc, Tokens: tokens, QuotaAccounts: quotaAccounts, HostGrants: hostGrants, UI: uiHandler, LinearWebhook: linear.webhook, LinearDecisions: linear.decisions, ClientRevisions: api.NewClientRevisions()}, monitor, mcpAccess)
 	addresses := []string{*listen}
 	if *tail != "" {
 		addresses = append(addresses, *tail)
@@ -2121,16 +1981,7 @@ func serve(args []string, errout io.Writer) error {
 
 func serverHandler(server api.Server, monitor *telemetry.Monitor, mcpAccess *cfaccess.Verifier) http.Handler {
 	mux := http.NewServeMux()
-	mcp := hkmcp.HTTPHandler(server.Service, server.Tokens, mcpAccess)
-	mux.Handle("/mcp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if client, ok := server.Tokens.Client(r); ok && server.ImportReadGrants[client] {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = io.WriteString(w, `{"error":"import_read_only"}`+"\n")
-			return
-		}
-		mcp.ServeHTTP(w, r)
-	}))
+	mux.Handle("/mcp", hkmcp.HTTPHandler(server.Service, server.Tokens, mcpAccess))
 	mux.Handle("/", server.Handler())
 	return monitor.Handler(mux)
 }
@@ -2160,7 +2011,7 @@ func mcpAccessFromEnv() (*cfaccess.Verifier, error) {
 
 // uiFromEnv intentionally treats incomplete Cloudflare Access configuration as
 // disabled. The API remains available, but api.Server does not register /ui.
-func uiFromEnv(st *store.Store, youTrack *youtrack.Service, am *attachments.Manager) (http.Handler, error) {
+func uiFromEnv(st *store.Store, am *attachments.Manager) (http.Handler, error) {
 	team := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_CF_TEAM_DOMAIN"))
 	aud := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_CF_AUD"))
 	emails := strings.TrimSpace(os.Getenv("HANDOFFKEEP_UI_ALLOWED_EMAILS"))
@@ -2176,14 +2027,22 @@ func uiFromEnv(st *store.Store, youTrack *youtrack.Service, am *attachments.Mana
 	if err != nil {
 		return nil, err
 	}
-	return ui.New(ui.Config{
+	taskIssues, err := uiTaskIssuesFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	config := ui.Config{
 		Store:       st,
 		Attachments: am,
 		Access:      access,
 		HubURL:      strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_URL")),
 		HubToken:    strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_TOKEN")),
-		YouTrack:    youTrack,
-	})
+	}
+	if taskIssues != nil {
+		config.TaskIssues = taskIssues
+		config.TaskIssuesTenant = taskIssues.Tenant()
+	}
+	return ui.New(config)
 }
 
 // linearServer is what the Linear configuration turns on. Any field may be nil.
