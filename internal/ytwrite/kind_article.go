@@ -483,7 +483,13 @@ func articleParent(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreate
 		return "", false, nil
 	}
 	id, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, Summary: p.ParentFamily, Content: "Family root for " + p.ParentFamily + " documents.\n\n" + marker})
-	return id, err == nil, err
+	if err != nil {
+		return "", false, err
+	}
+	if id == "" {
+		return "", false, errors.New("family root create returned no id")
+	}
+	return id, true, nil
 }
 
 // readFailure is Evidence's error: a 429 keeps its RetryAfter for the shared rule.

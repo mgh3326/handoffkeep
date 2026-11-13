@@ -4,8 +4,10 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
+	"github.com/mgh3326/handoffkeep/internal/ytwrite/ytwritetest"
 )
 
 // The document's article goes under its parent (hk 3995): the amended policy
@@ -125,5 +127,40 @@ func TestCheckArticleParents(t *testing.T) {
 		if err := ytwrite.CheckArticle(r); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// A family-root create that commits but returns no id must not send the
+// document top-level: the op is not applied, and the next drive re-resolves
+// the root and creates the document under it.
+func TestArticleCreateRootWithoutIDIsNotCreatedTopLevel(t *testing.T) {
+	e := newArticleEnv(t)
+	e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.NoID})
+	req := articleReq()
+	req.ParentFamily = "design"
+	op := prepareWith(t, e, req)
+	e.drive()
+	if got, err := e.ledger.ByID(context.Background(), op.ID); err != nil || got.State == ytwrite.StateApplied {
+		t.Fatalf("op %d = %s, %v: applied without a resolved family root", op.ID, got.State, err)
+	}
+	for _, a := range e.yt.Articles(artProject) {
+		if a.Summary == artSummary {
+			t.Fatalf("document created before its family root resolved: %+v", a)
+		}
+	}
+	e.clock.Advance(time.Hour)
+	e.drive()
+	e.want(op.ID, ytwrite.StateApplied, "")
+	var roots []ytwrite.RemoteArticle
+	for _, a := range e.yt.Articles(artProject) {
+		if a.Summary == "design" {
+			roots = append(roots, a)
+		}
+	}
+	if len(roots) != 1 {
+		t.Fatalf("%d family roots, want exactly 1: %+v", len(roots), roots)
+	}
+	if doc := docArticleOf(t, e); doc.ParentID != roots[0].ID {
+		t.Fatalf("document under %q, want family root %q", doc.ParentID, roots[0].ID)
 	}
 }
