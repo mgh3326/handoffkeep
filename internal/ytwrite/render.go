@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -92,14 +93,32 @@ func RenderComment(op Op) (string, error) {
 	if err := json.Unmarshal(op.Payload, &p); err != nil {
 		return "", fmt.Errorf("%w: payload of op %d: %v", ErrInvalid, op.ID, err)
 	}
-	text := ProvenanceLine(op.Actor, op.CreatedAt, op.ID) + "\n\n" + p.Body + "\n\n" + OpMarker(op.ID)
-	// The provenance line and the marker add to the body, so the sent text can
-	// exceed the bound the body alone met. YouTrack would refuse it: refuse it
-	// here, by name, instead of sending a truncated or failed write.
+	text := renderCommentText(op.Actor, op.CreatedAt, op.ID, p.Body)
+	// Admission refuses every body whose text would not fit (CheckComment,
+	// CheckCommentContent). This is the backstop: refuse by name, never send
+	// a cut or failed write.
 	if !WithinTextMax(text) {
 		return "", fmt.Errorf("%w: rendered comment is over %d characters (YouTrack's text bound)", ErrInvalid, TextMaxChars)
 	}
 	return text, nil
+}
+
+// renderCommentText is the exact text of a comment: the provenance line, the
+// body, the op marker. The op id is part of the text, so its length is part of
+// what the bound counts.
+func renderCommentText(actor string, at time.Time, opID int64, body string) string {
+	return ProvenanceLine(actor, at, opID) + "\n\n" + body + "\n\n" + OpMarker(opID)
+}
+
+// worstOpID is the largest op id: 19 decimal digits, the longest the provenance
+// line and the marker can carry. An op id is only known once the op is stored,
+// so admission measures with this id; a text that fits with it fits with any.
+const worstOpID = math.MaxInt64
+
+// commentFitsAnyOpID reports whether a comment by actor with body is sendable
+// under every op id, so admission refuses what Render would refuse later.
+func commentFitsAnyOpID(actor, body string) bool {
+	return WithinTextMax(renderCommentText(actor, time.Time{}, worstOpID, body))
 }
 
 const maxIdentLen = 200

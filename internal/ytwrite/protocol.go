@@ -155,7 +155,20 @@ func CheckCommentContent(actor, body string) error {
 	if err := checkActor(actor); err != nil {
 		return err
 	}
-	return checkBodyMax(body, textBodyLimit)
+	if err := checkBodyMax(body, textBodyLimit); err != nil {
+		return err
+	}
+	return checkCommentFits(actor, body)
+}
+
+// checkCommentFits refuses a comment whose sent text would be over YouTrack's
+// bound under some op id. The body alone may be within the bound: the
+// provenance line and the marker are added to it when the text is rendered.
+func checkCommentFits(actor, body string) error {
+	if !commentFitsAnyOpID(actor, body) {
+		return fmt.Errorf("%w: rendered comment is over %d characters (YouTrack's text bound)", ErrInvalid, TextMaxChars)
+	}
+	return nil
 }
 
 // checkCommentRequest is CheckComment with the body size rule given.
@@ -173,6 +186,9 @@ func checkCommentRequest(req CommentRequest, lim bodyLimit) error {
 		return fmt.Errorf("%w: youtrack issue id is empty or malformed", ErrInvalid)
 	}
 	if err := checkBodyMax(req.Body, lim); err != nil {
+		return err
+	}
+	if err := checkCommentFits(req.Actor, req.Body); err != nil {
 		return err
 	}
 	if req.Key != "" && !keyRE.MatchString(req.Key) {

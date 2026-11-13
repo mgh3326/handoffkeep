@@ -82,6 +82,13 @@ func CheckIssue(req IssueRequest) error {
 	if err := checkBody(req.Title); err != nil {
 		return fmt.Errorf("title: %w", err)
 	}
+	// The description adds the provenance, task and project lines and the
+	// marker around the title. Measure it with the largest op and task ids, so
+	// an issue admitted here renders within the bound under any id.
+	_, description := RenderIssue(IssueText{Actor: req.Actor, OpID: worstOpID, TaskID: worstOpID, Project: req.Project, Title: req.Title})
+	if !WithinTextMax(description) {
+		return fmt.Errorf("%w: rendered issue description is over %d characters (YouTrack's text bound)", ErrInvalid, TextMaxChars)
+	}
 	return nil
 }
 
