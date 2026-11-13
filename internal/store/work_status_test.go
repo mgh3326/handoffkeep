@@ -360,25 +360,25 @@ func TestWorkStatusRead(t *testing.T) {
 	// Bundle parent is NOT counted as work.
 	// handoffkeep has:
 	// - backlog: backlog1, backlog2 (2)
-	// - in_work: inWork1 (1)
+	// - in_work: inWork1, inWorkLinked (2)
 	// - in_review: 0
 	// - waiting_deploy: mergedWaiting (1)
 	// - merged_before_deploy: mergedBefore (1)
-	// - total_open: 2 + 1 + 0 + 1 = 4
+	// - total_open: 2 + 2 + 0 + 1 = 5
 	// - bundle_parents: 1
 	// panewire has:
 	// - backlog: 0, in_work: 0, in_review: 1 (inWork2), waiting_deploy: 0, total_open: 1
 	// ParkingArcade has:
 	// - backlog: 0, in_work: 0, in_review: 0, waiting_deploy: 0, merged_no_deploy_project: 1, total_open: 0
-	// Total open: 4 (hk) + 1 (pw) + 0 (pa) = 5
-	if status.Summary.TotalOpen != 5 {
-		t.Errorf("got Summary.TotalOpen=%d, want 5", status.Summary.TotalOpen)
+	// Total open: 5 (hk) + 1 (pw) + 0 (pa) = 6
+	if status.Summary.TotalOpen != 6 {
+		t.Errorf("got Summary.TotalOpen=%d, want 6", status.Summary.TotalOpen)
 	}
 	if status.Summary.Backlog != 2 {
 		t.Errorf("got Summary.Backlog=%d, want 2", status.Summary.Backlog)
 	}
-	if status.Summary.InWork != 1 {
-		t.Errorf("got Summary.InWork=%d, want 1", status.Summary.InWork)
+	if status.Summary.InWork != 2 {
+		t.Errorf("got Summary.InWork=%d, want 2", status.Summary.InWork)
 	}
 	if status.Summary.InReview != 1 {
 		t.Errorf("got Summary.InReview=%d, want 1", status.Summary.InReview)
@@ -401,14 +401,14 @@ func TestWorkStatusRead(t *testing.T) {
 	for _, p := range status.Projects {
 		if p.Project == "handoffkeep" {
 			hkFound = true
-			if p.Counts.TotalOpen != 4 {
-				t.Errorf("handoffkeep TotalOpen=%d, want 4", p.Counts.TotalOpen)
+			if p.Counts.TotalOpen != 5 {
+				t.Errorf("handoffkeep TotalOpen=%d, want 5", p.Counts.TotalOpen)
 			}
 			if p.Counts.Backlog != 2 {
 				t.Errorf("handoffkeep Backlog=%d, want 2", p.Counts.Backlog)
 			}
-			if p.Counts.InWork != 1 {
-				t.Errorf("handoffkeep InWork=%d, want 1", p.Counts.InWork)
+			if p.Counts.InWork != 2 {
+				t.Errorf("handoffkeep InWork=%d, want 2", p.Counts.InWork)
 			}
 			if p.Counts.WaitingDeploy != 1 {
 				t.Errorf("handoffkeep WaitingDeploy=%d, want 1", p.Counts.WaitingDeploy)
