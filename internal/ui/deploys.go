@@ -269,6 +269,12 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 		}
 	}
 	if len(parsed) == 0 {
+		// No parseable record in the scanned window. Under a capped scan that
+		// is not "no record": a valid record may sit beyond the cap, so the
+		// view must stay partial rather than claim there is none.
+		if view.DocsCapped {
+			view.State = DeployStatePartial
+		}
 		return view, nil
 	}
 	// Both selections are by contract time (deployed_at, key time fallback),

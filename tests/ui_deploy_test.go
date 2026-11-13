@@ -386,6 +386,31 @@ func TestUIDeployPendingDocsCapped(t *testing.T) {
 	}
 }
 
+// Regression (mergewake r2): a capped scan whose every scanned document is
+// invalid took the empty-parsed return and reported no_record. A valid record
+// may sit beyond the cap, so the state must be partial there too.
+func TestUIDeployPendingCappedInvalidOnlyIsPartial(t *testing.T) {
+	s := uiStore(t)
+	db := deployDB(t)
+	wipeDeployDocs(t, db)
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	assertion := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+
+	base := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	for i := 0; i <= 2000; i++ {
+		seedDeployDoc(t, s, "deploy/handoffkeep/"+base.Add(time.Duration(i)*time.Second).Format("20060102T150405Z"), "not a deploy record")
+	}
+	hk := serviceView(t, getDeployPending(t, h, assertion), "handoffkeep")
+	if hk["docs_capped"] != true || hk["state"] != "partial" || hk["current"] != nil {
+		t.Fatalf("capped invalid-only scan must be partial: %v", hk)
+	}
+	if hk["record_count"] != float64(2000) {
+		t.Fatalf("record_count=%v, want the 2000 scanned at the hard cap", hk["record_count"])
+	}
+}
+
 // Regression (tester SHOULD): the last success may sit beyond the first
 // window — a full page of failed attempts must not hide it. The handler
 // pages deeper and the oldest success becomes current.
