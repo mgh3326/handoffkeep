@@ -83,57 +83,6 @@ type StateMigrationCount struct {
 	Count       int    `json:"count"`
 }
 
-// StateMigrationPlan is the read-only result of the dry-run.
-type StateMigrationPlan struct {
-	Counts []StateMigrationCount `json:"counts"`
-	// HoldMirroredToCanceled counts hold tasks that carry a Linear issue link;
-	// after the migration they are icebox, which Linear shows as Canceled.
-	HoldMirroredToCanceled int `json:"hold_mirrored_to_canceled"`
-	// Migrated is true when the database already records the migration, in
-	// which case no legacy state is left to plan.
-	Migrated bool `json:"migrated"`
-}
-
-// PlanStateMigration counts the rows the migration would change, per
-// (legacy_state, rule, new_state), and writes nothing. It uses only columns
-// that exist before the migration, so it runs against an unmigrated database.
-func (s *Store) PlanStateMigration(ctx context.Context) (StateMigrationPlan, error) {
-	var plan StateMigrationPlan
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return plan, err
-	}
-	defer tx.Rollback(ctx)
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=$1)`, stateMigrationVersion).Scan(&plan.Migrated); err != nil {
-		return plan, err
-	}
-	if plan.Migrated {
-		plan.Counts = []StateMigrationCount{}
-		return plan, tx.Commit(ctx)
-	}
-	rows, err := tx.Query(ctx, `SELECT legacy_state, rule, new_state, count(*) FROM (`+stateMigrationPlanSQL+`) plan GROUP BY legacy_state, rule, new_state ORDER BY legacy_state COLLATE "C", rule COLLATE "C", new_state COLLATE "C"`)
-	if err != nil {
-		return plan, err
-	}
-	defer rows.Close()
-	plan.Counts = []StateMigrationCount{}
-	for rows.Next() {
-		var c StateMigrationCount
-		if err = rows.Scan(&c.LegacyState, &c.Rule, &c.NewState, &c.Count); err != nil {
-			return plan, err
-		}
-		plan.Counts = append(plan.Counts, c)
-	}
-	if err = rows.Err(); err != nil {
-		return plan, err
-	}
-	rows.Close()
-	if err = tx.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE state='hold' AND COALESCE(refs->'linear'->>'issue_id','')<>''`).Scan(&plan.HoldMirroredToCanceled); err != nil {
-		return plan, err
-	}
-	return plan, tx.Commit(ctx)
-}
-
 // OpenForPlan opens a pool and runs no migration. It exists for the
 // migrate-states dry-run, which must see the database exactly as the
 // unmigrated server left it.

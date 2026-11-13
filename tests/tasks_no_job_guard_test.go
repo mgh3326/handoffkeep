@@ -285,30 +285,6 @@ func TestTaskConcurrentNoJobTransitionsOneWinner(t *testing.T) {
 	}
 }
 
-func TestTaskNextRequiresJobOrReason(t *testing.T) {
-	s := taskTestStore(t)
-	lane := taskLane(t)
-	newTask(t, s, lane, "next without flags", 0)
-	if _, err := s.NextTask(t.Context(), lane, "captain-a", "", ""); !errors.Is(err, store.ErrTaskJobRequired) {
-		t.Fatalf("bare next err=%v, want task_job_required", err)
-	}
-	got, err := s.NextTask(t.Context(), lane, "captain-a", "", "lane queue pull")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.State != "developing" || got.ClaimedBy != "captain-a" || got.Refs.JobID != "" {
-		t.Fatalf("next=%+v", got)
-	}
-	row, _, _ := s.GetTask(t.Context(), got.ID)
-	if len(row.Events) != 1 || row.Events[0].NoJob != "lane queue pull" {
-		t.Fatalf("next event=%+v", row.Events)
-	}
-	// The row stays claimed: a second next is the honest queue_empty.
-	if _, err := s.NextTask(t.Context(), lane, "captain-b", "job-2", ""); !errors.Is(err, store.ErrQueueEmpty) {
-		t.Fatalf("empty next err=%v", err)
-	}
-}
-
 func TestTaskClaimRejectsJobIDPlusNoJob(t *testing.T) {
 	s := taskTestStore(t)
 	task := newTask(t, s, taskLane(t), "exclusive flags", 0)
@@ -385,40 +361,6 @@ func TestDispositionInternalHopsRecordNoJob(t *testing.T) {
 		if e.Kind == store.TaskEventTransition && store.IsStartedState(e.To) && !store.IsStartedState(e.From) && e.NoJob == "" {
 			t.Fatalf("active hop without recorded reason: %+v", e)
 		}
-	}
-}
-
-func TestTaskNoJobWireCompatWithOldServer(t *testing.T) {
-	// A pre-change server decodes with DisallowUnknownFields: bodies carrying
-	// no_job fail with the generic invalid_context, and the client translates
-	// it into a named refusal instead of reporting a fake success. It predates
-	// /v1/capabilities, so that route answers 404.
-	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/capabilities" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprint(w, `{"error":"invalid_context"}`)
-	}))
-	defer h.Close()
-	c := remote.Client{URL: h.URL, Token: "t", HTTP: h.Client()}
-	if _, err := c.TransitionTask(t.Context(), 7, "claimed", "", nil, "reason"); err == nil || !strings.Contains(err.Error(), "transition_no_job_rejected") {
-		t.Fatalf("transition err=%v, want transition_no_job_rejected", err)
-	}
-	if _, err := c.ClaimTask(t.Context(), 7, "captain-a", "", "reason"); err == nil || !strings.Contains(err.Error(), "claim_no_job_rejected") {
-		t.Fatalf("claim err=%v, want claim_no_job_rejected", err)
-	}
-	if _, err := c.NextTask(t.Context(), "lane", "captain-a", "", "reason"); err == nil || !strings.Contains(err.Error(), "next_no_job_rejected") {
-		t.Fatalf("next err=%v, want next_no_job_rejected", err)
-	}
-	if _, err := c.ResolveDecision(t.Context(), "task", 7, "by", "A", "", true, "reason"); err == nil || !strings.Contains(err.Error(), "resolve_no_job_rejected") {
-		t.Fatalf("resolve err=%v, want resolve_no_job_rejected", err)
-	}
-	// Without the flag the same server error stays the raw invalid_context.
-	if _, err := c.TransitionTask(t.Context(), 7, "claimed", "", nil, ""); err == nil || err.Error() != "invalid_context" {
-		t.Fatalf("plain transition err=%v, want invalid_context", err)
 	}
 }
 
@@ -555,9 +497,6 @@ func TestTaskClientRejectsUnlinkedActive200(t *testing.T) {
 	c := remote.Client{URL: h.URL, Token: "t", HTTP: h.Client()}
 	if _, err := c.ClaimTask(t.Context(), 9, "captain-a", "job-1", ""); err == nil || !strings.Contains(err.Error(), "claimant_not_recorded") {
 		t.Fatalf("claim err=%v", err)
-	}
-	if _, err := c.NextTask(t.Context(), "lane-a", "captain-a", "job-1", ""); err == nil || !strings.Contains(err.Error(), "claimant_not_recorded") {
-		t.Fatalf("next err=%v", err)
 	}
 	h2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

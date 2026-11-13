@@ -1,6 +1,6 @@
 # Benchmark canonical store
 
-The benchmark API is the canonical PostgreSQL store for scores, repetitions,
+The benchmark API is the canonical PostgreSQL store for repetitions,
 and grade decisions. It is served below `/v1/bench/` and uses the same bearer
 token map as the other `/v1` routes. Every write records the authenticated
 client ID; client-supplied `updated_by`, `created_by`, and `decided_by` values
@@ -12,8 +12,6 @@ All requests and responses use `Content-Type: application/json`.
 
 | Method | Path | Result |
 |---|---|---|
-| GET | `/v1/bench/scores?model_id=&source=&limit=` | `{"scores":[...]}`; exact optional filters, ordered by `source, metric, model_id, effort, harness` |
-| PUT | `/v1/bench/scores` | Body `{"scores":[...]}`; 1–1000 rows, response `{"upserted":N}` |
 | GET | `/v1/bench/reps?profile=&grade=&effort=&limit=` | `{"reps":[...]}`; ordered by `id DESC` |
 | PUT | `/v1/bench/reps` | Body `{"reps":[...]}`; 1–1000 rows, response `{"upserted":N,"ids":[...]}` — `ids` carries the server id of every accepted row aligned to the input order |
 | PATCH | `/v1/bench/reps/{id}` | Set-once outcome patch of the rep with server id `{id}` (below); response is the row |
@@ -24,33 +22,6 @@ All requests and responses use `Content-Type: application/json`.
 
 GET limits default to 1000 and are capped at 5000. Each PUT is one database
 transaction: a validation or storage error rejects the complete batch.
-
-Scores use the unique key `(model_id, effort, harness, source, metric)`:
-
-```json
-{
-  "model_id": "model",
-  "effort": "high",
-  "harness": "runner",
-  "source": "source",
-  "metric": "metric",
-  "score": 13.4,
-  "rank": 18,
-  "captured_at": "2026-07-31T00:00:00Z",
-  "time_per_task_min": 13.4,
-  "cost_per_task_usd": 3.8,
-  "provenance": "operator-approved import",
-  "updated_by": "ignored",
-  "updated_at": "2026-09-07T04:30:00Z"
-}
-```
-
-`effort`, `harness`, and `provenance` are stored as `''` when absent, never as
-JSON `null`. PostgreSQL treats NULL values as distinct inside a UNIQUE key, so
-nullable key fields would allow duplicate logical rows and break idempotent
-upsert. Nullable measurements remain JSON `null`. `rank` is computed by the
-client; the server stores it and does not compare or re-rank values from
-different source/metric pairs.
 
 Repetitions retain the existing client columns unchanged in name and meaning:
 `profile`, `model_id`, `task_ref`, `tier`, `role`, `rounds`, `blockers_found`,
@@ -210,8 +181,7 @@ Catalog rows have this shape:
   or the operator-desk session's client id `operator-desk`, which records the
   operator's catalog decisions on the operator's behalf, or the panewire design
   session's client id `panewire-design`, which owns the bench catalog (decision
-  `hk:doc decision/2026-11-08/panewire-design-catalog-writer`). The area-exceptions
-  PUT follows the same rule. Other tokens get 403
+  `hk:doc decision/2026-11-08/panewire-design-catalog-writer`). Other tokens get 403
   `{"error":"operator_required"}`; deployments without the entries fail
   closed.
 

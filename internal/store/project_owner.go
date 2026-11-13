@@ -120,8 +120,8 @@ func (s *Store) SetProjectDesignLane(ctx context.Context, project, lane, actor, 
 	}
 	defer tx.Rollback(ctx)
 	var previous string
-	// FOR NO KEY UPDATE is the task_projects row lock this package already
-	// uses (CreateStatusUpdate): it serializes the project writers without
+	// FOR NO KEY UPDATE is the task_projects row lock the project writers
+	// share: it serializes the project writers without
 	// conflicting with the KEY SHARE a task or milestone insert takes through
 	// the foreign key (lockorder.go, exceptions).
 	if err = tx.QueryRow(ctx, `SELECT design_lane FROM task_projects WHERE name=$1 FOR NO KEY UPDATE`, project).Scan(&previous); err != nil {
