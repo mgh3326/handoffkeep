@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strconv"
 	"strings"
@@ -344,66 +346,75 @@ func TestDeployResultNotice(t *testing.T) {
 		t.Fatalf("replayed finish left %d notices", len(rows))
 	}
 
-	// A record document is its own report: the same job, ref and result at
-	// another target still notifies, and replaying it writes nothing new.
-	body := func(target, ref, result, job string) string {
-		return `{"schema":"` + DeployRecordSchema + `","service":"` + f.svc + `","target":"` + target + `","deployed_ref":` + ref + `,"result":"` + result + `","job_id":"` + job + `","included_prs":[]}`
+	// A record document is its own report, identified by its key and the
+	// SHA256 of its stored body: the same job, ref and result at another
+	// target still notifies, replaying a body writes nothing new, and any
+	// corrected body (result, step, target, job or ref) notifies once.
+	body := func(target, ref, result, step, job string) string {
+		return `{"schema":"` + DeployRecordSchema + `","service":"` + f.svc + `","target":"` + target + `","deployed_ref":` + ref + `,"result":"` + result + `",` + step + `"job_id":"` + job + `","included_prs":[]}`
 	}
-	doc := Document{Key: "deploy/" + f.svc + "/20261113T010203Z", Kind: "report", Session: "test", CreatedBy: "tester", Body: body("staging", `"ref-att-1"`, "success", "job-deploy-1")}
-	for i := 0; i < 2; i++ {
+	put := func(key, text string) string {
+		t.Helper()
+		doc := Document{Key: key, Kind: "report", Session: "test", CreatedBy: "tester", Body: text}
 		if _, _, err := f.s.PutDocument(ctx, doc); err != nil {
-			t.Fatal(err)
+			t.Fatalf("put %s: %v", key, err)
 		}
+		sum := sha256.Sum256([]byte(text))
+		return deployResultRecordEventID(key, hex.EncodeToString(sum[:]))
 	}
-	recID := deployResultRecordEventID(doc.Key, "staging", "job-deploy-1", "ref-att-1", "success")
+	rec := "deploy/" + f.svc + "/20261113T010203Z"
+	recID := put(rec, body("staging", `"ref-att-1"`, "success", "", "job-deploy-1"))
+	if again := put(rec, body("staging", `"ref-att-1"`, "success", "", "job-deploy-1")); again != recID {
+		t.Fatal("same body, different id")
+	}
 	if rows := outboxByPrefix(t, pool, recID); len(rows) != 1 || rows[0].TargetLane != "asker-lane" {
-		t.Fatalf("record rows=%+v", rows)
+		t.Fatalf("record rows=%+v (replay must add none)", rows)
 	}
 	if rows := outboxByPrefix(t, pool, id); len(rows) != 1 {
 		t.Fatalf("record disturbed the attempt's notice: %d rows", len(rows))
 	}
-	// A correction at the same key (result changed) is reported again.
-	doc.Body = body("staging", `"ref-att-1"`, "failed", "job-deploy-1")
-	if _, _, err := f.s.PutDocument(ctx, doc); err != nil {
-		t.Fatal(err)
+	// A correction at the same key notifies again: result, then failed step.
+	failedID := put(rec, body("staging", `"ref-att-1"`, "failed", `"failed_step":2,`, "job-deploy-1"))
+	step3ID := put(rec, body("staging", `"ref-att-1"`, "failed", `"failed_step":3,`, "job-deploy-1"))
+	for step, eid := range map[string]string{"2": failedID, "3": step3ID} {
+		if rows := outboxByPrefix(t, pool, eid); len(rows) != 1 || !strings.HasSuffix(rows[0].Text, ": failed at step "+step) {
+			t.Fatalf("corrected record (step %s) rows=%+v", step, rows)
+		}
 	}
-	if rows := outboxByPrefix(t, pool, deployResultRecordEventID(doc.Key, "staging", "job-deploy-1", "ref-att-1", "failed")); len(rows) != 1 || !strings.HasSuffix(rows[0].Text, ": failed") {
-		t.Fatalf("corrected record rows=%+v", rows)
+	// Bodies whose free-text fields would join to the same string still own
+	// distinct ids (no NUL-joined identity), each on its own job's lane.
+	claim("job-amb-a", "lane-amb-a", "")
+	claim("job-amb-b", "lane-amb-b", "")
+	ambKey := "deploy/" + f.svc + "/20261113T010253Z"
+	ambA := put(ambKey, body("prod", `"b\u0000c"`, "failed", "", "job-amb-a"))
+	ambB := put(ambKey, body("prod\u0000job-amb-a", `"c"`, "failed", "", "job-amb-b"))
+	if ambA == ambB {
+		t.Fatal("distinct bodies share an id")
+	}
+	for eid, lane := range map[string]string{ambA: "lane-amb-a", ambB: "lane-amb-b"} {
+		if rows := outboxByPrefix(t, pool, eid); len(rows) != 1 || rows[0].TargetLane != lane {
+			t.Fatalf("ambiguous-field record rows=%+v want lane %s", rows, lane)
+		}
 	}
 	// Control characters in a field are mapped, NUL in the job id names no
 	// job; the document write commits either way.
-	doc.Key = "deploy/" + f.svc + "/20261113T010303Z"
-	doc.Body = body("prod", `"ref\nwith\u0000nul"`, "success", "job-deploy-1")
-	if _, _, err := f.s.PutDocument(ctx, doc); err != nil {
-		t.Fatalf("record with control characters: %v", err)
-	}
-	rows = outboxByPrefix(t, pool, deployResultRecordEventID(doc.Key, "prod", "job-deploy-1", "ref\nwith\x00nul", "success"))
-	if len(rows) != 1 || !validLaneEventText(rows[0].Text) {
+	ctlID := put("deploy/"+f.svc+"/20261113T010303Z", body("prod", `"ref\nwith\u0000nul"`, "success", "", "job-deploy-1"))
+	if rows := outboxByPrefix(t, pool, ctlID); len(rows) != 1 || !validLaneEventText(rows[0].Text) {
 		t.Fatalf("control character record rows=%+v", rows)
 	}
-	doc.Key = "deploy/" + f.svc + "/20261113T010403Z"
-	doc.Body = body("prod", `"ref-x"`, "success", "job-deploy-1\u0000x")
-	if _, _, err := f.s.PutDocument(ctx, doc); err != nil {
-		t.Fatalf("record with NUL job id: %v", err)
+	nulID := put("deploy/"+f.svc+"/20261113T010403Z", body("prod", `"ref-x"`, "success", "", "job-deploy-1\u0000x"))
+	if rows := outboxByPrefix(t, pool, nulID); len(rows) != 0 {
+		t.Fatalf("NUL job id queued %d notices", len(rows))
 	}
 	// A record of another ref is another result, and a failed one says so.
-	doc.Key = "deploy/" + f.svc + "/20261113T020203Z"
-	doc.Body = `{"schema":"` + DeployRecordSchema + `","service":"` + f.svc + `","target":"prod","deployed_ref":"ref-doc","result":"failed","failed_step":3,"job_id":"job-deploy-2","included_prs":null}`
-	if _, _, err := f.s.PutDocument(ctx, doc); err != nil {
-		t.Fatal(err)
-	}
-	rows = outboxByPrefix(t, pool, deployResultRecordEventID(doc.Key, "prod", "job-deploy-2", "ref-doc", "failed"))
-	if len(rows) != 1 || rows[0].TargetLane != "owner-only-lane" || rows[0].Text != "[hk] deploy "+f.svc+" ref-doc job job-deploy-2: failed at step 3" {
+	docID := put("deploy/"+f.svc+"/20261113T020203Z", `{"schema":"`+DeployRecordSchema+`","service":"`+f.svc+`","target":"prod","deployed_ref":"ref-doc","result":"failed","failed_step":3,"job_id":"job-deploy-2","included_prs":null}`)
+	if rows := outboxByPrefix(t, pool, docID); len(rows) != 1 || rows[0].TargetLane != "owner-only-lane" || rows[0].Text != "[hk] deploy "+f.svc+" ref-doc job job-deploy-2: failed at step 3" {
 		t.Fatalf("record rows=%+v", rows)
 	}
 
-	// A record without a ref is still a result, identified by its key.
-	doc.Key = "deploy/" + f.svc + "/20261113T030203Z"
-	doc.Body = `{"schema":"` + DeployRecordSchema + `","service":"` + f.svc + `","target":"prod","deployed_ref":null,"result":"failed","job_id":"job-deploy-2","included_prs":null}`
-	if _, _, err := f.s.PutDocument(ctx, doc); err != nil {
-		t.Fatal(err)
-	}
-	if rows = outboxByPrefix(t, pool, deployResultRecordEventID(doc.Key, "prod", "job-deploy-2", "ref-doc", "failed")); len(rows) != 1 || rows[0].TargetLane != "owner-only-lane" || rows[0].Text != "[hk] deploy "+f.svc+" (no ref) job job-deploy-2: failed" {
+	// A record without a ref is still a result of its own.
+	noRefID := put("deploy/"+f.svc+"/20261113T030203Z", `{"schema":"`+DeployRecordSchema+`","service":"`+f.svc+`","target":"prod","deployed_ref":null,"result":"failed","job_id":"job-deploy-2","included_prs":null}`)
+	if rows := outboxByPrefix(t, pool, noRefID); len(rows) != 1 || rows[0].TargetLane != "owner-only-lane" || rows[0].Text != "[hk] deploy "+f.svc+" (no ref) job job-deploy-2: failed" {
 		t.Fatalf("record without ref rows=%+v", rows)
 	}
 
@@ -514,18 +525,13 @@ func TestLaneSafeTextAndRecordEventID(t *testing.T) {
 	if laneSafeText("plain ref-1 한글") != "plain ref-1 한글" {
 		t.Fatal("laneSafeText changed a clean string")
 	}
-	base := deployResultRecordEventID("k", "prod", "j", "r", "failed")
-	for _, other := range []string{
-		deployResultRecordEventID("k", "staging", "j", "r", "failed"),
-		deployResultRecordEventID("k", "prod", "j", "r", "success"),
-		deployResultRecordEventID("k", "prod", "j-", "r", "failed"),
-		deployResultRecordEventID("k", "prod", "j", "-r", "failed"),
-	} {
+	base := deployResultRecordEventID("k", "aa")
+	for _, other := range []string{deployResultRecordEventID("k", "ab"), deployResultRecordEventID("k2", "aa"), deployResultRecordEventID("ka", "a")} {
 		if other == base {
 			t.Fatal("distinct records share an event id")
 		}
 	}
-	if base != deployResultRecordEventID("k", "prod", "j", "r", "failed") {
+	if base != deployResultRecordEventID("k", "aa") {
 		t.Fatal("event id is not stable")
 	}
 }

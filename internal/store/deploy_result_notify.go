@@ -28,21 +28,16 @@ func deployResultAttemptEventID(attemptID string) string {
 	return "deploy-result-attempt-" + hex.EncodeToString(sum[:16])
 }
 
-// deployResultRecordEventID names the result one deploy record document
-// reports. A record is its own report, never matched to a hub attempt: the
-// document carries no attempt identity, and service, job, ref and result do
-// not establish one (a job can deploy a ref to several targets or retry a
-// failure), so sharing an attempt's id could silence a different deploy's
-// result. The id covers the key and the fields the notice states, so the same
-// document replayed owns one row and a corrected result or job at the same
-// key notifies again.
-func deployResultRecordEventID(key, target, job, ref, result string) string {
-	h := sha256.New()
-	for _, f := range []string{"record", key, target, job, ref, result} {
-		h.Write([]byte(f))
-		h.Write([]byte{0})
-	}
-	return "deploy-result-record-" + hex.EncodeToString(h.Sum(nil)[:16])
+// deployResultRecordEventID names the result one stored deploy record
+// document reports: the document key and the SHA256 of its stored body. A
+// record is its own report, never matched to a hub attempt (service, job, ref
+// and result do not identify one), and its identity is never built from its
+// free-text fields: a key and a fixed-length hex digest cannot be joined
+// ambiguously, replaying the same body writes nothing new, and any corrected
+// body (result, step, job, ref or target) notifies once.
+func deployResultRecordEventID(key, sha256Hex string) string {
+	sum := sha256.Sum256([]byte("record\x00" + key + "\x00" + sha256Hex))
+	return "deploy-result-record-" + hex.EncodeToString(sum[:16])
 }
 
 // laneSafeText maps what the lane-event contract refuses (control characters,
@@ -107,13 +102,13 @@ func queueDeployRecordNoticeTx(ctx context.Context, tx pgx.Tx, x StoredDeployRec
 		return nil
 	}
 	rec, _, reasons := x.Classify(m[1])
-	if len(reasons) > 0 || rec.JobID == nil {
+	if len(reasons) > 0 || rec.JobID == nil || x.SHA256 == "" {
 		return nil
 	}
 	ref := "(no ref)"
 	if rec.DeployedRef != nil {
 		ref = *rec.DeployedRef
 	}
-	eventID := deployResultRecordEventID(x.Key, rec.Target, *rec.JobID, ref, rec.Result)
+	eventID := deployResultRecordEventID(x.Key, x.SHA256)
 	return queueDeployResultNoticeTx(ctx, tx, eventID, rec.Service, *rec.JobID, ref, rec.Result, rec.FailedStep, "", at)
 }
