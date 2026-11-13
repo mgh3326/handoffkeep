@@ -346,6 +346,30 @@ func TestIssueFieldsMissingBundleValueRejected(t *testing.T) {
 	}
 }
 
+// Evidence compares an open-set value case-insensitively: the adapter sends
+// the bundle's spelling, so the issue can carry a different case than the
+// snapshot (hk 4234). A closed-set value stays exact.
+func TestSnapshotDiffOpenSetCase(t *testing.T) {
+	want := ytwrite.TaskIssueSnapshot(fieldsTaskRow())
+	set := func(s *ytwrite.IssueSnapshot, name, value string) {
+		for i := range s.Fields {
+			if s.Fields[i].Name == name {
+				s.Fields[i].Value = value
+			}
+		}
+	}
+	got := want
+	got.Fields = append([]ytwrite.FieldValue(nil), want.Fields...)
+	set(&got, ytwrite.FieldLane, "HANDOFFKEEP-DESIGN")
+	if d := ytwrite.SnapshotDiff(want, got); d != "" {
+		t.Fatalf("open-set case variant diffs at %s", d)
+	}
+	set(&got, ytwrite.FieldGrade, "a")
+	if d := ytwrite.SnapshotDiff(want, got); d != ytwrite.FieldGrade {
+		t.Fatalf("closed-set case variant diffs at %q, want %s", d, ytwrite.FieldGrade)
+	}
+}
+
 // Ops queue on the task's lane: the second snapshot goes out after the
 // first, so YouTrack ends at the latest.
 func TestIssueFieldsOrderedOnTheTaskLane(t *testing.T) {

@@ -15,7 +15,11 @@ import (
 )
 
 func TestPostgresMigrationAndCoreRoundTrip(t *testing.T) {
-	url := testdb.URL(t)
+	// Own schema: the document keys are fixed, so a shared schema would let a
+	// repeated or concurrent run overwrite the same rows and leave fixtures for
+	// other tests. A throwaway schema also proves the migrations run on an
+	// empty database.
+	_, url := testdb.Schema(t, "core_round_trip")
 	s, err := store.Open(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +68,10 @@ func request(t *testing.T, c *http.Client, method, url, token string, body any) 
 }
 
 func TestHTTPPersistenceSearchAndRetention(t *testing.T) {
-	url := testdb.URL(t)
+	// Own schema: the document keys are fixed, so a shared schema would let a
+	// repeated or concurrent run overwrite the same rows and leave fixtures for
+	// other tests.
+	_, url := testdb.Schema(t, "http_persistence")
 	s, err := store.Open(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)
