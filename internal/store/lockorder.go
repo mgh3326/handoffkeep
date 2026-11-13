@@ -203,8 +203,8 @@ package store
 //     order, then reads the comments authority row FOR SHARE (as prepareYTOpTx
 //     does after its lane lock), rejects the task's prepared yt_write_ops rows
 //     (ops of the task's lane, which no other holder of that lane lock can
-//     change meanwhile), deletes the task's yt_task_bindings row and inserts a
-//     yt_binding_history row. AddYTTaskBinding inserts its history row the same
+//     change meanwhile), deletes the task's yt_task_bindings row and yt_issue_intents row and
+//     inserts a yt_binding_history row. AddYTTaskBinding inserts its history row the same
 //     way; nothing else locks a history row.
 //     No cycle, lock by lock:
 //       - The ownership lock: only those three writers take it, always first

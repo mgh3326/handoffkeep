@@ -90,7 +90,8 @@ func insertYTBindingHistoryTx(ctx context.Context, tx pgx.Tx, b YTTaskBinding, a
 // or aimed at another issue was never this binding's to admit and stays
 // prepared, as does a document comment's copy (it reads its article binding)
 // and every other kind. The binding row is deleted and the history row
-// appended in the same transaction.
+// appended in the same transaction, and the task's pending issue intent, if
+// any, is dropped with them so the issue worker cannot bind it again.
 //
 // Locks, as AddYTTaskBinding takes them (lockorder.go): the issue ownership
 // lock, FOR UPDATE on the task row, the task's lane lock, then the comments
@@ -205,6 +206,14 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 		res.Released = comments
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM yt_task_bindings WHERE task_id=$1`, taskID); err != nil {
+		return res, err
+	}
+	// A pending issue intent (a task created while its project was unmapped)
+	// would make the issue worker create or adopt an issue and publish a
+	// binding again, undoing the unbind. The operator took over the task's
+	// issue; dropYTIssueIntentTx is what ensureYTIssueTx does for a task that
+	// has one.
+	if err := dropYTIssueIntentTx(ctx, tx, taskID); err != nil {
 		return res, err
 	}
 	if err := insertYTBindingHistoryTx(ctx, tx, b, ytBindingActionUnbound, o.By, o.Reason, now); err != nil {

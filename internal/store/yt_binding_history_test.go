@@ -470,3 +470,28 @@ func TestUnbindRefusesCanaryEnrollment(t *testing.T) {
 		t.Fatalf("unbind after the canary was removed: %+v %v", got, err)
 	}
 }
+
+// A pending issue intent would let the issue worker create or adopt an issue
+// for the task after the unbind and publish a binding without the operator:
+// the unbind drops it.
+func TestUnbindDropsPendingIssueIntent(t *testing.T) {
+	s := schemaStore(t, "ybh_intent")
+	ctx := t.Context()
+	ytbMapped(t, s)
+	task, other := ytcTask(t, s, ytbProject), ytcTask(t, s, ytbProject)
+	ytbBind(t, s, ytbBinding(task))
+	for _, id := range []int64{task, other} {
+		if _, err := s.pool.Exec(ctx, `INSERT INTO yt_issue_intents(task_id, tenant, recorded_at) VALUES ($1,$2,now())`, id, ytcTenant); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := s.UnbindYTTaskBinding(ctx, task, YTUnbindOptions{By: "op"}); err != nil || !got.Removed {
+		t.Fatalf("unbind: %+v %v", got, err)
+	}
+	if n := ytcCount(t, s, `SELECT count(*) FROM yt_issue_intents WHERE task_id=$1`, task); n != 0 {
+		t.Fatalf("the unbound task keeps %d issue intents", n)
+	}
+	if n := ytcCount(t, s, `SELECT count(*) FROM yt_issue_intents WHERE task_id=$1`, other); n != 1 {
+		t.Fatalf("another task's intent: %d rows, want 1", n)
+	}
+}

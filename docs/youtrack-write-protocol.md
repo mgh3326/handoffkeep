@@ -539,7 +539,8 @@ verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
   binding's tenant and issue, and a comment queued with no target; not an op of
   another tenant or issue, which stays for the recovery pass, and not a
   document comment's copy, which reads its article binding) with reason
-  `binding_removed` (`unbind_forced` under `--force`), deletes the binding and
+  `binding_removed` (`unbind_forced` under `--force`), deletes the binding, drops the
+  task's pending issue intent (so the issue worker cannot bind it again) and
   appends an `unbound` row to `yt_binding_history`. It retargets nothing and
   leaves `task_origins`, `yt_entity_map` and the canary alone. The result lists
   `rejected` ops and the `released` comment ids (hk keeps them; the comment
