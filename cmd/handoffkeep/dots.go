@@ -98,7 +98,7 @@ func dotsCmd(args []string, out io.Writer) error {
 		fs.StringVar(&in.State, "state", "", "accepted, partially_used, rejected or superseded")
 		fs.StringVar(&in.Ref, "ref", "", "what adopted it: a GitHub PR URL, hk:task/<id> or hk:doc <key>")
 		fs.Int64Var(&in.SupersededBy, "superseded-by", 0, "id of the result that replaced it")
-		fs.StringVar(&in.CanvaURL, "canva-url", "", "Canva design link, https; with --canva-page and --canva-version, for accepted or partially_used")
+		fs.StringVar(&in.CanvaURL, "canva-url", "", "Canva design link, an https canva.com design URL; with --canva-page and --canva-version, for accepted or partially_used")
 		fs.StringVar(&in.CanvaPage, "canva-page", "", "Canva page the adopted design is on")
 		fs.StringVar(&in.CanvaVersion, "canva-version", "", "Canva version of that page")
 		valueFlags = []string{"state", "ref", "superseded-by", "canva-url", "canva-page", "canva-version"}

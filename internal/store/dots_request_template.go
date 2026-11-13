@@ -15,9 +15,9 @@ const (
 	DotsRequestReviewImplementation = "REVIEW_IMPLEMENTATION"
 )
 
-// dotsRequestSections are the labels the policy template requires in a typed
+// dotsRequestLabels are the labels the policy template requires in a typed
 // body. [기준] sits inside [목적], so it is not a label of its own.
-var dotsRequestSections = []string{"[목적]", "[유지할 것]", "[범위]", "[제약]", "[산출물]", "[완료 기준]", "[입력]"}
+var dotsRequestLabels = []string{"[목적]", "[유지할 것]", "[범위]", "[제약]", "[산출물]", "[완료 기준]", "[입력]"}
 
 var dotsCommitTokenRE = regexp.MustCompile(`\b[0-9a-f]{7,40}\b`)
 
@@ -35,12 +35,13 @@ func checkDotsRequestTemplate(in DotsRequestInput) error {
 	default:
 		return errors.New("invalid dots request type: CREATE_MOCKUP, CREATE_ASSET or REVIEW_IMPLEMENTATION")
 	}
-	for _, label := range dotsRequestSections {
-		if !strings.Contains(in.Body, label) {
-			return errors.New("invalid dots request: the body lacks the " + label + " section")
+	sections := dotsRequestSections(in.Body)
+	for _, label := range dotsRequestLabels {
+		if strings.TrimSpace(sections[label]) == "" {
+			return errors.New("invalid dots request: the body lacks a " + label + " section with content")
 		}
 	}
-	input := dotsRequestSection(in.Body, "[입력]")
+	input := sections["[입력]"]
 	if !hasDotsCommitToken(input) {
 		return errors.New("invalid dots request: [입력] names no commit SHA")
 	}
@@ -51,12 +52,34 @@ func checkDotsRequestTemplate(in DotsRequestInput) error {
 	return nil
 }
 
-// dotsRequestSection returns the text after label up to the next line that
-// starts a new bracket section.
-func dotsRequestSection(body, label string) string {
-	_, rest, _ := strings.Cut(body, label)
-	section, _, _ := strings.Cut(rest, "\n[")
-	return section
+// dotsRequestSections splits a body into its policy sections. A section starts
+// at a line whose text begins with one of the labels and runs to the next such
+// line. A label inside a line starts nothing, so a label quoted in prose does
+// not count as a section.
+func dotsRequestSections(body string) map[string]string {
+	sections := map[string]string{}
+	current := ""
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if label := dotsRequestLabelAt(trimmed); label != "" {
+			current = label
+			line = strings.TrimPrefix(trimmed, label)
+		}
+		if current != "" {
+			sections[current] += line + "\n"
+		}
+	}
+	return sections
+}
+
+// dotsRequestLabelAt returns the template label that line begins with, or "".
+func dotsRequestLabelAt(line string) string {
+	for _, label := range dotsRequestLabels {
+		if strings.HasPrefix(line, label) {
+			return label
+		}
+	}
+	return ""
 }
 
 func hasDotsCommitToken(s string) bool {

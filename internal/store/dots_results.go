@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -137,8 +138,8 @@ func checkDotsAdoption(id int64, in DotsAdoptionInput) error {
 		if in.State != DotsAdoptionAccepted && in.State != DotsAdoptionPartial {
 			return errors.New("invalid dots adoption: canva_url, canva_page and canva_version name the adopted design; only accepted and partially_used take them")
 		}
-		if !strings.HasPrefix(in.CanvaURL, "https://") || !validText(in.CanvaURL, 512) || in.CanvaPage == "" || !validText(in.CanvaPage, 128) || in.CanvaVersion == "" || !validText(in.CanvaVersion, 128) {
-			return errors.New("invalid dots adoption: canva needs canva_url (https, at most 512 bytes), canva_page and canva_version (1 to 128 bytes each)")
+		if !validDotsCanvaURL(in.CanvaURL) || in.CanvaPage == "" || !validText(in.CanvaPage, 128) || in.CanvaVersion == "" || !validText(in.CanvaVersion, 128) {
+			return errors.New("invalid dots adoption: canva needs canva_url (an https link to a canva.com design, at most 512 bytes), canva_page and canva_version (1 to 128 bytes each)")
 		}
 	}
 	if (in.State == DotsAdoptionSuperseded) != (in.SupersededBy != 0) {
@@ -158,10 +159,35 @@ func validDotsAdoptedRef(ref string) bool {
 	return m != nil && validDocKey(m[1])
 }
 
+// validDotsCanvaURL accepts an https link to a Canva design: a canva.com host
+// or one of its subdomains, with a /design/ path and no user info.
+func validDotsCanvaURL(s string) bool {
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme != "https" || u.User != nil || !validText(s, 512) {
+		return false
+	}
+	host := u.Hostname()
+	return (host == "canva.com" || strings.HasSuffix(host, ".canva.com")) && strings.HasPrefix(u.Path, "/design/")
+}
+
+// keepDotsAdoptionCanva keeps the Canva design already recorded on an accepted
+// or partially_used result when the change names none, so a repeat from a
+// client that predates the Canva fields neither erases it nor counts as a
+// change. Other states take the input as given: rejected and superseded clear
+// the design, as they always did.
+func keepDotsAdoptionCanva(cur DotsResult, in DotsAdoptionInput) DotsAdoptionInput {
+	if (in.State == DotsAdoptionAccepted || in.State == DotsAdoptionPartial) && in.CanvaURL == "" && in.CanvaPage == "" && in.CanvaVersion == "" {
+		in.CanvaURL, in.CanvaPage, in.CanvaVersion = cur.CanvaURL, cur.CanvaPage, cur.CanvaVersion
+	}
+	return in
+}
+
 // SetDotsAdoption moves a result to an adoption state. Repeating the stored
 // change changes nothing and answers changed=false; superseded is final, so
 // any other change to a superseded result is ErrDotsAdoptionFinal. It locks
 // one dots_results row and reads the superseding one.
+// An accepted or partially_used change that names no Canva design keeps the
+// one already recorded.
 func (s *Store) SetDotsAdoption(ctx context.Context, id int64, by string, in DotsAdoptionInput) (DotsResult, bool, error) {
 	if id < 1 || by == "" || !validText(by, 128) {
 		return DotsResult{}, false, errors.New("invalid dots adoption")
@@ -181,6 +207,8 @@ func (s *Store) SetDotsAdoption(ctx context.Context, id int64, by string, in Dot
 		}
 		return DotsResult{}, false, err
 	}
+	in = keepDotsAdoptionCanva(cur, in)
+
 	var curSupersededBy int64
 	if cur.SupersededBy != nil {
 		curSupersededBy = *cur.SupersededBy
