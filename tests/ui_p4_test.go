@@ -221,6 +221,7 @@ func TestUIP4ResolveClosesOnlyItsDecision(t *testing.T) {
 		Event struct {
 			DeliveredAt *time.Time `json:"delivered_at"`
 			EventID     string     `json:"event_id"`
+			Text        string     `json:"text"`
 		} `json:"event"`
 	}
 	if err := json.Unmarshal([]byte(body), &output); err != nil || output.Event.DeliveredAt == nil || !strings.HasPrefix(output.Event.EventID, "cli-decision-escalation-") {
@@ -281,11 +282,21 @@ func TestUIP4ResolveClosesOnlyItsDecision(t *testing.T) {
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("invalid by status=%d", response.StatusCode)
 	}
-	tooLong := p4DecisionTask(t, h, lane, "too long resolve", p4Options(true, true))
+	longTextTask := p4DecisionTask(t, h, lane, "long resolve", p4Options(true, true))
+	longAnswer := strings.Repeat("x", 2049)
 	before = uiLaneRowCountsAt(t, p4URL(t, s), lane).Relay
-	response, _ = p4Resolve(t, h, map[string]any{"type": "task", "id": tooLong, "by": "lane-ops", "answer": strings.Repeat("x", 2049)})
-	if after := uiLaneRowCountsAt(t, p4URL(t, s), lane).Relay; response.StatusCode != http.StatusBadRequest || after != before {
-		t.Fatalf("oversized resolve status=%d relay before=%d after=%d", response.StatusCode, before, after)
+	response, body = p4Resolve(t, h, map[string]any{"type": "task", "id": longTextTask, "by": "lane-ops", "answer": longAnswer})
+	var longOutput struct {
+		Event store.RelayEvent `json:"event"`
+	}
+	if err := json.Unmarshal([]byte(body), &longOutput); err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("long resolve status=%d body=%q err=%v", response.StatusCode, body, err)
+	}
+	if !strings.Contains(longOutput.Event.Text, longAnswer) {
+		t.Fatalf("long resolve text lost: event bytes=%d answer bytes=%d", len(longOutput.Event.Text), len(longAnswer))
+	}
+	if after := uiLaneRowCountsAt(t, p4URL(t, s), lane).Relay; after != before+1 {
+		t.Fatalf("long resolve relay before=%d after=%d", before, after)
 	}
 }
 

@@ -28,16 +28,21 @@ describe("Work", () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({ tasks: [task], states: [], generated_at: "now", truncated: true, next_after_id: 101 })));
     await expect(fetchBoardTasks("a")).rejects.toThrow("non-advancing");
   });
-  it("W4 caps a long cursor walk at 5000", async () => {
-    let page = 0;
-    vi.stubGlobal("fetch", vi.fn(async () => {
-      const rows = Array.from({ length: 500 }, (_, i) => ({ ...task, id: page * 500 + i + 1 }));
-      page++;
-      return json({ tasks: rows, states: [], generated_at: "now", truncated: true, next_after_id: page * 500 });
+  it("W4 walks a task list beyond 5000 rows to the end", async () => {
+    const cursors: number[] = [];
+    const count = 5050;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const afterID = Number(new URL(String(input), "https://hk.test").searchParams.get("after_id") ?? 0);
+      cursors.push(afterID);
+      const endID = Math.min(count, afterID + 500);
+      const rows = Array.from({ length: endID - afterID }, (_, i) => ({ ...task, id: afterID + i + 1 }));
+      return json({ tasks: rows, states: [], generated_at: "now", truncated: endID < count, next_after_id: endID });
     }));
     const result = await fetchBoardTasks("a");
-    expect(result.tasks).toHaveLength(5000);
-    expect(result.truncated).toBe(true);
+    expect(result.tasks).toHaveLength(count);
+    expect(result.truncated).toBe(false);
+    expect(cursors).toContain(5000);
+    expect(Math.max(...cursors)).toBe(5000);
   });
   it("W5 includes unknown states in All", () => { expect(inView({ ...task, state: "future_state" }, "all")).toBe(true); });
   it("W6 displays closure evidence and never calls a merged change completion", async () => {

@@ -40,6 +40,10 @@ const (
 	ytCommentsDispatchTimeout = 3 * time.Second
 	ytCommentsSettleTimeout   = 1 * time.Second
 	ytCommentsPassLimit       = 50
+	// ytHeldRecoveryInterval is how often the worker runs the held-op
+	// recovery pass (store.RecoverHeldYTOps); the pass only closes ops that
+	// have been held for store.YTHeldRecoveryGrace.
+	ytHeldRecoveryInterval = 5 * time.Minute
 	// ytCommentsCatchUpLimit bounds the comments one catch-up pass prepares
 	// ops for (store.CatchUpYTComments), oldest first.
 	ytCommentsCatchUpLimit = 200
@@ -167,17 +171,18 @@ type ytDecisionsSetting struct {
 }
 
 // ytCommentsCatchUpFromEnv reads HANDOFFKEEP_YT_COMMENTS_CATCHUP: unset or
-// "off" (the default) runs no catch-up, "on" runs it before each Drive pass
-// in mode on. Any other value is an error, as for the mode. The catch-up
-// stays off until the legacy comment push (`youtrack sync`) refuses to post
-// while the mode is canary or on (hk 3907): the push can post a comment and
-// end without linking it, which the catch-up cannot see.
+// "on" (the default) runs the catch-up before each Drive pass in mode on,
+// "off" runs only the issue-create catch-up (hk 3914). Any other value is an
+// error, as for the mode. The default flipped with the removals (hk 4426):
+// the legacy comment push that could post a comment and end without linking
+// it no longer exists, so a comment with no op would otherwise stay in PG
+// only.
 func ytCommentsCatchUpFromEnv() (bool, error) {
 	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_COMMENTS_CATCHUP")); raw {
-	case "", "off":
-		return false, nil
-	case "on":
+	case "", "on":
 		return true, nil
+	case "off":
+		return false, nil
 	default:
 		return false, fmt.Errorf("HANDOFFKEEP_YT_COMMENTS_CATCHUP=%q: want off or on", raw)
 	}
@@ -351,7 +356,7 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 		return ytCommentsWorker{}, err
 	}
 	st.SetYTCommentsMode(store.YTCommentsOff)
-	return ytCommentsWorker{protocol: p, feed: st, intents: st}, nil
+	return ytCommentsWorker{protocol: p, feed: st, intents: st, recovery: st, tenant: tenant}, nil
 }
 
 // newYTCommentsWorker sets the gate to mode (canary or on) and builds the
@@ -373,7 +378,7 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 	}
 	st.SetYTCommentsMode(mode)
 	log.Printf("ytwrite.comments_enabled mode=%s tenant=%q catchup=%t", mode, tenant, catchUp)
-	w := ytCommentsWorker{protocol: p, feed: st, intents: st}
+	w := ytCommentsWorker{protocol: p, feed: st, intents: st, recovery: st, tenant: tenant}
 	if catchUp {
 		w.catchUp = st
 	} else {
@@ -397,6 +402,12 @@ func (c ytIssueCommentCatchUp) CatchUpYTComments(ctx context.Context, limit int,
 	return c.st.CatchUpYTIssueComments(ctx, limit, skip)
 }
 
+// ytHeldRecoverer closes the prepared ops whose task lost the binding that
+// admitted them (store.RecoverHeldYTOps, hk 4491).
+type ytHeldRecoverer interface {
+	RecoverHeldYTOps(ctx context.Context, tenant string, now time.Time, grace time.Duration) (store.YTRecovery, error)
+}
+
 // ytFeedRunner runs one pass of every registered change-feed consumer
 // (store.RunYTFeedConsumers, hk 3997).
 type ytFeedRunner interface {
@@ -416,12 +427,20 @@ type ytIssueIntents interface {
 // tenant it was configured for (store.YTTenantLedger): it neither sends nor
 // searches for an op bound to another tenant.
 //
-// Before each Drive pass, catchUp (HANDOFFKEEP_YT_COMMENTS_CATCHUP=on, or
-// else only for bindings issue_create ops published, hk 3914) prepares the ops of comments on
-// bound tasks that the enqueue missed; it does nothing outside mode on. A
+// Before each Drive pass, catchUp (HANDOFFKEEP_YT_COMMENTS_CATCHUP, on
+// unless set to off; with off, only for bindings issue_create ops published,
+// hk 3914) prepares the ops of comments on bound tasks that the enqueue
+// missed; it does nothing outside mode on. A
 // comment it skipped as ambiguous is left out of later passes of this
 // process, so it is logged once and never crowds out the others; a restart
 // looks at it again.
+//
+// Every ytHeldRecoveryInterval, before the catch-up, recovery (when set)
+// closes the ops that have been held for store.YTHeldRecoveryGrace because
+// their task has no binding or another one, so they stop blocking the task's
+// lane. It decides each kind by that kind's own mode, so an op of a kind whose
+// mode is not on is never touched, and it closes nothing whose content is
+// canonical in YouTrack.
 //
 // After the catch-up, feed (when set) runs each registered change-feed
 // consumer once, up to ytFeedPassLimit rows each, so the ops they prepare
@@ -434,7 +453,35 @@ type ytCommentsWorker struct {
 	catchUp  ytCommentCatchUpper
 	feed     ytFeedRunner
 	intents  ytIssueIntents
+	recovery ytHeldRecoverer
+	// tenant is the tenant the worker acts for; recovery closes only its ops.
+	tenant   string
 	interval time.Duration
+	// now is the clock of the recovery pass (nil: the wall clock).
+	now func() time.Time
+}
+
+// recoverHeld runs the held-op recovery pass when ytHeldRecoveryInterval has
+// passed since last, and records the time of the run in last.
+func (w ytCommentsWorker) recoverHeld(ctx context.Context, last *time.Time) {
+	if w.recovery == nil {
+		return
+	}
+	now := time.Now().UTC()
+	if w.now != nil {
+		now = w.now().UTC()
+	}
+	if !last.IsZero() && now.Sub(*last) < ytHeldRecoveryInterval {
+		return
+	}
+	*last = now
+	got, err := w.recovery.RecoverHeldYTOps(ctx, w.tenant, now, store.YTHeldRecoveryGrace)
+	if err != nil && ctx.Err() == nil {
+		log.Printf("ytwrite.held_recovery_failed err=%q", err.Error())
+	}
+	if got.Rejected > 0 {
+		log.Printf("ytwrite.held_recovery rejected=%d kept=%d", got.Rejected, got.Kept)
+	}
 }
 
 func (w ytCommentsWorker) Run(ctx context.Context) {
@@ -445,7 +492,9 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	skipped := []int64{}
+	var recovered time.Time
 	for {
+		w.recoverHeld(ctx, &recovered)
 		if w.catchUp != nil {
 			got, err := w.catchUp.CatchUpYTComments(ctx, ytCommentsCatchUpLimit, skipped)
 			if err != nil && ctx.Err() == nil {

@@ -108,6 +108,38 @@ func TestAttachmentObjectLocationRecorded(t *testing.T) {
 	}
 }
 
+// A checkpoint ref is no longer written here, but the previous release writes
+// attachment_refs rows with ref_kind 'checkpoint' during the blue-green
+// overlap, and the List filter must keep reading them. The write path still
+// refuses the ref, so the new release adds no checkpoint row of its own.
+func TestAttachmentCheckpointRefIsListedButNotStored(t *testing.T) {
+	s := testAttachmentStore(t)
+	x := attachmentFor(50)
+	if _, created, e := s.PutAttachment(t.Context(), x, 100, 10); e != nil || !created {
+		t.Fatalf("attachment created=%v err=%v", created, e)
+	}
+	// The row the previous release leaves behind: its validator accepted any
+	// decimal checkpoint id, so this is what the List filter must still find.
+	if _, e := s.pool.Exec(t.Context(), `INSERT INTO attachment_refs(sha256,ref_kind,ref_id) VALUES($1,'checkpoint','42')`, x.SHA256); e != nil {
+		t.Fatal(e)
+	}
+	rows, e := s.ListAttachments(t.Context(), "checkpoint", "42", 10)
+	if e != nil {
+		t.Fatalf("list checkpoint:42: %v", e)
+	}
+	if len(rows) != 1 || rows[0].SHA256 != x.SHA256 || rows[0].RefKind != "checkpoint" || rows[0].RefID != "42" {
+		t.Fatalf("list checkpoint:42 rows=%+v", rows)
+	}
+	if _, e := s.ListAttachments(t.Context(), "checkpoint", "x42", 10); e == nil {
+		t.Fatal("non-decimal checkpoint id accepted by the list filter")
+	}
+	bad := attachmentFor(51)
+	bad.RefKind, bad.RefID = "checkpoint", "42"
+	if _, _, e := s.PutAttachment(t.Context(), bad, 100, 10); e == nil {
+		t.Fatal("checkpoint ref stored by the write path")
+	}
+}
+
 // A task ref is stored in attachment_refs, whose CHECK must admit 'task' after
 // the attachment-task-ref migration. A non-canonical task id is refused by the
 // store's validator before any row is written.

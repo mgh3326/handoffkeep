@@ -129,8 +129,7 @@ func TestYTWriteOpAlertsBatchPerWindowAndClass(t *testing.T) {
 	}
 }
 
-// The notice names at most ytWriteOpAlertIDsShown ids and stays within the
-// lane-event byte cap, whatever the labels are.
+// The notice names at most ytWriteOpAlertIDsShown ids and retains long labels.
 func TestYTWriteOpAlertTextIsBounded(t *testing.T) {
 	var cands []ytWriteOpAlertCandidate
 	var wantIDs []string
@@ -151,7 +150,7 @@ func TestYTWriteOpAlertTextIsBounded(t *testing.T) {
 		long = append(long, ytWriteOpAlertCandidate{id: int64(i + 1), label: fmt.Sprintf("label-%02d-%s", i, strings.Repeat("x", 60))})
 	}
 	text := ytWriteOpAlertText(ytWriteOpAlertRejected, long)
-	if len(text) > RelayLaneEventMaxBytes || !strings.HasSuffix(text, "…") {
-		t.Fatalf("long text = %d bytes, want at most %d and ending in an ellipsis: %q", len(text), RelayLaneEventMaxBytes, text)
+	if !strings.Contains(text, strings.Repeat("x", 60)) || strings.HasSuffix(text, "…") {
+		t.Fatalf("long text was changed: %q", text)
 	}
 }
