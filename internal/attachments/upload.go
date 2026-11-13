@@ -86,6 +86,9 @@ func (m *Manager) BeginUpload(ctx context.Context, client, name, mime string, si
 	if size < 0 || size > m.Config.MaxBytes {
 		return UploadTicket{}, ErrTooLarge
 	}
+	if size > BufferedCompletionMaxBytes {
+		return UploadTicket{}, fmt.Errorf("%w: upload_completion_buffer_limit_exceeded", ErrUploadRefused)
+	}
 	if !shaPattern.MatchString(sha) {
 		return UploadTicket{}, errors.New("sha256 must be 64 lowercase hex characters")
 	}

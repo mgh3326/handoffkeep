@@ -298,7 +298,7 @@ func TestAttachmentPutIsRegisteredOnBothTransportsWithItsContract(t *testing.T) 
 					t.Errorf("description omits allowed type %s", mime)
 				}
 			}
-			for _, want := range []string{"10 MiB", "attachment_upload_begin", "attachment_upload_complete", "task:<id>", "hk:attachment/<sha256>", "/v1/attachments/<sha256>", "attachment_get_url"} {
+			for _, want := range []string{"10 MiB", "attachment_upload_begin", "attachment_upload_complete", "256 MiB", "50 GiB", "hk 4466", "task:<id>", "hk:attachment/<sha256>", "/v1/attachments/<sha256>", "attachment_get_url"} {
 				if !strings.Contains(desc, want) {
 					t.Errorf("description omits %q", want)
 				}
