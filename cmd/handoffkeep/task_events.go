@@ -260,6 +260,7 @@ func writeTaskDriftText(out io.Writer, rep store.TaskDrift) error {
 	}{
 		{"settled_open_decision", rep.SettledOpenDecision},
 		{"merged_pr_not_merged", rep.MergedPRNotMerged},
+		{"auto_close_held", rep.AutoCloseHeld},
 		{"merged_without_deploy", rep.MergedWithoutDeploy},
 		{"idle_started", rep.IdleStarted},
 	}
@@ -276,6 +277,18 @@ func writeTaskDriftText(out io.Writer, rep store.TaskDrift) error {
 			}
 			if x.DecisionRequest != "" {
 				fmt.Fprintf(&b, " decision_request=%s", x.DecisionRequest)
+			}
+			if len(x.OpenPRs) > 0 {
+				fmt.Fprintf(&b, " open_prs=%s", strings.Join(x.OpenPRs, ","))
+			}
+			if len(x.RevertedPRs) > 0 {
+				fmt.Fprintf(&b, " reverted_prs=%s", strings.Join(x.RevertedPRs, ","))
+			}
+			if len(x.OpenSubTasks) > 0 {
+				fmt.Fprintf(&b, " open_sub_tasks=%v", x.OpenSubTasks)
+			}
+			if x.Mechanical {
+				b.WriteString(" mechanical")
 			}
 			fmt.Fprintf(&b, " %s\n", x.Title)
 		}

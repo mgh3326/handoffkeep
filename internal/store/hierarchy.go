@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -424,21 +425,97 @@ func (s *Store) closeGateTx(ctx context.Context, tx pgx.Tx, x Task) (string, err
 	return "", nil
 }
 
+// autoCloseStateList are the parent states an automatic close applies from.
+var autoCloseStateList = []string{StateBacklog, StateUnstarted, StateResearching, StateDeveloping, StateReviewing}
+
+// autoCloseStates is autoCloseStateList as a set; autoCloseStatesSQL as a SQL list.
+var (
+	autoCloseStates    = states(autoCloseStateList...)
+	autoCloseStatesSQL = "'" + strings.Join(autoCloseStateList, "','") + "'"
+)
+
+// autoCloseAppliesFrom reports whether an automatic close may move a parent in
+// state.
+func autoCloseAppliesFrom(state string) bool { return autoCloseStates[state] }
+
+// subTaskRollup is what a parent's sub-tasks say about its close.
+type subTaskRollup struct {
+	settled  bool // every sub-task is settled
+	worked   int  // sub-tasks that did work: completed, merged or deployed
+	merged   int  // sub-tasks merged and not yet deployed
+	deployed int  // sub-tasks deployed
+}
+
+// rollupStates is the rollup of the sub-task states.
+func rollupStates(sub []string) subTaskRollup {
+	r := subTaskRollup{settled: true}
+	for _, state := range sub {
+		switch state {
+		case StateCompleted:
+			r.worked++
+		case StateMerged:
+			r.worked++
+			r.merged++
+		case StateDeployed:
+			r.worked++
+			r.deployed++
+		case StateDropped, StateDuplicate:
+		default:
+			r.settled = false
+		}
+	}
+	return r
+}
+
+// closeTarget is the state an automatic close moves a parent to, from its
+// sub-tasks: merged while one waits for its deploy, deployed when one is
+// deployed and none waits (completed sub-tasks never deploy and do not wait),
+// completed when only completed sub-tasks did work, and "" when the close does
+// not apply (an unsettled sub-task, or none did work).
+func (r subTaskRollup) closeTarget() string {
+	switch {
+	case !r.settled || r.worked == 0:
+		return ""
+	case r.merged > 0:
+		return StateMerged
+	case r.deployed > 0:
+		return StateDeployed
+	default:
+		return StateCompleted
+	}
+}
+
+// subTaskRollupTx reads the rollup of the sub-tasks of parentID.
+func subTaskRollupTx(ctx context.Context, tx pgx.Tx, parentID int64) (subTaskRollup, error) {
+	rows, err := tx.Query(ctx, `SELECT state FROM tasks WHERE parent_id=$1`, parentID)
+	if err != nil {
+		return subTaskRollup{}, err
+	}
+	sub, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return subTaskRollup{}, err
+	}
+	return rollupStates(sub), nil
+}
+
 // autoCloseTx runs auto_close_parent in the transaction of a child's
 // transition. A child is settled when it is merged, deployed, completed, dropped or
 // duplicate; a child in triage, backlog, unstarted, a started state or icebox
 // blocks the close (icebox is parked work, not finished work).
 //
 //	any child not settled             -> no change
-//	some completed, all deployed      -> parent deployed
-//	some completed, some merged       -> parent merged
-//	all done children completed       -> completed for decide, ops, verify;
+//	some child merged, not deployed   -> parent merged
+//	some deployed, none merged        -> parent deployed (completed children do not wait)
+//	only completed children           -> completed for decide, ops, verify;
 //	                                     otherwise no change; skip recorded
 //	all dropped or duplicate          -> no change; the skip is recorded
 //
 // The close applies to a parent in backlog, unstarted or a started state; it
 // does not bypass triage and does not touch canceled or completed parents. A
-// parent that closes may in turn close its own parent.
+// parent that closes may in turn close its own parent. A merged parent is not
+// settled by its sub-tasks again until a sub-task deploys (hk 4172): then the
+// same rule is applied to it, and it deploys once no sub-task waits for its
+// deploy.
 func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by string, now time.Time) error {
 	if !s.AutoCloseParent() {
 		return nil
@@ -448,45 +525,26 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 		if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, *child.ParentID), &p); err != nil {
 			return err
 		}
-		switch p.State {
-		case StateBacklog, StateUnstarted, StateResearching, StateDeveloping, StateReviewing:
-		default:
+		switch {
+		case p.State == StateMerged:
+			// A merged parent waits for its sub-tasks to deploy: only a
+			// sub-task's deploy moves it on (hk 4172).
+			if child.State != StateDeployed {
+				return nil
+			}
+		case !autoCloseAppliesFrom(p.State):
 			return nil
 		}
-		rows, err := tx.Query(ctx, `SELECT state FROM tasks WHERE parent_id=$1`, p.ID)
+		roll, err := subTaskRollupTx(ctx, tx, p.ID)
 		if err != nil {
 			return err
 		}
-		settled, completed, deployed, merged := true, 0, 0, 0
-		for rows.Next() {
-			var state string
-			if err = rows.Scan(&state); err != nil {
-				rows.Close()
-				return err
-			}
-			switch state {
-			case StateCompleted:
-				completed++
-			case StateMerged:
-				completed++
-				merged++
-			case StateDeployed:
-				completed++
-				deployed++
-			case StateDropped, StateDuplicate:
-			default:
-				settled = false
-			}
-		}
-		rows.Close()
-		if err = rows.Err(); err != nil {
-			return err
-		}
-		if !settled {
+		if !roll.settled {
 			return nil
 		}
 		ref := fmt.Sprintf("hk:doc child/%d@%s", child.ID, now.Format(time.RFC3339Nano))
-		if completed == 0 {
+		to := roll.closeTarget()
+		if to == "" {
 			_, _, err = insertEvent(ctx, tx, taskEventInput{
 				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
 				Note:   "every sub-task is dropped or duplicate; the parent stays where it is",
@@ -494,12 +552,9 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 			})
 			return err
 		}
-		to := StateCompleted
-		if merged > 0 || deployed > 0 {
-			to = StateMerged
-		}
-		if deployed == completed {
-			to = StateDeployed
+		if p.State == StateMerged && to != StateDeployed {
+			// A sub-task is still merged and waiting for its deploy.
+			return nil
 		}
 		if gate, err := s.closeGateTx(ctx, tx, p); err != nil || gate != "" {
 			if err != nil {
@@ -522,6 +577,12 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 		}
 		from := p.State
 		decisionBefore := decisionBeforeOf(p)
+		if to == StateMerged && p.Refs.PR == "" {
+			// The close is the parent's merge: it adopts a held merge's PR (hk 4172).
+			if p.Refs.PR, err = heldMergePRTx(ctx, tx, p.ID); err != nil {
+				return err
+			}
+		}
 		p.State, p.UpdatedAt = to, now
 		if err := applyLifecycle(&p, from, to, now, &TaskClosure{Type: "resolved", Evidence: ref}); err != nil {
 			return err
@@ -547,10 +608,10 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 		if err = s.recordLinearBoardTaskTx(ctx, tx, p, ""); err != nil {
 			return err
 		}
-		// Rule 8 holds on every path into merged, auto-close included.
-		if p, err = s.deployOnMergedTx(ctx, tx, p, now); err != nil {
-			return err
-		}
+		// Rule 8 (a deploy record lists the PR) is not applied here. A close to
+		// merged always has a merged sub-task waiting for its deploy, and a
+		// close to deployed was made by that deploy: neither may deploy the
+		// parent past a sub-task (hk 4172).
 		child = p
 	}
 	return nil

@@ -372,11 +372,16 @@ A `mergewake.merge` event that applies to a task also applies, in the same
 transaction, to every other non-settled task whose `refs.pr` is that PR:
 implement tasks move to `merged`, and decide, verify and ops tasks close at
 `completed` with the PR as the result link. `handoffkeep tasks drift [--json]
-[--merged-days N]` (`GET /v1/tasks/drift?merged_days=N`, default 2) reads four
+[--merged-days N]` (`GET /v1/tasks/drift?merged_days=N`, default 2) reads five
 drift classes and writes nothing: settled tasks with an open decision request,
-unsettled tasks whose PR is already merged, merged tasks older than N days that
-no deploy record lists, and researching or developing tasks idle for
-`started_stalled_hours`. `handoffkeep tasks settle-merged [--project P]
+unsettled tasks whose PR is already merged (an implements change is merged and
+not reverted, and no revert is unrelanded), parents whose automatic close is due
+but not made (every sub-task settled, one did work, nothing re-ran the close),
+merged tasks older than N days that no deploy record lists, and researching or
+developing tasks idle for `started_stalled_hours`. The two close classes name
+what holds each task (`open_prs`, `reverted_prs`, `open_sub_tasks`, `hold`) and
+set `mechanical` when nothing holds it and the close gate passes: that is the
+row the hygiene job may apply. `handoffkeep tasks settle-merged [--project P]
 [--dry-run]` (`POST /v1/tasks/settle-merged`, body `{project, dry_run}`) moves
 each merged task whose implementing changes are all deployed to `deployed`
 (source `deploy`, ref `deploy:<attempt_id>`), and reports every other merged
