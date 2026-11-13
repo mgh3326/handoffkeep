@@ -167,17 +167,18 @@ type ytDecisionsSetting struct {
 }
 
 // ytCommentsCatchUpFromEnv reads HANDOFFKEEP_YT_COMMENTS_CATCHUP: unset or
-// "off" (the default) runs no catch-up, "on" runs it before each Drive pass
-// in mode on. Any other value is an error, as for the mode. The catch-up
-// stays off until the legacy comment push (`youtrack sync`) refuses to post
-// while the mode is canary or on (hk 3907): the push can post a comment and
-// end without linking it, which the catch-up cannot see.
+// "on" (the default) runs the catch-up before each Drive pass in mode on,
+// "off" runs only the issue-create catch-up (hk 3914). Any other value is an
+// error, as for the mode. The default flipped with the removals (hk 4426):
+// the legacy comment push that could post a comment and end without linking
+// it no longer exists, so a comment with no op would otherwise stay in PG
+// only.
 func ytCommentsCatchUpFromEnv() (bool, error) {
 	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_COMMENTS_CATCHUP")); raw {
-	case "", "off":
-		return false, nil
-	case "on":
+	case "", "on":
 		return true, nil
+	case "off":
+		return false, nil
 	default:
 		return false, fmt.Errorf("HANDOFFKEEP_YT_COMMENTS_CATCHUP=%q: want off or on", raw)
 	}
@@ -416,9 +417,10 @@ type ytIssueIntents interface {
 // tenant it was configured for (store.YTTenantLedger): it neither sends nor
 // searches for an op bound to another tenant.
 //
-// Before each Drive pass, catchUp (HANDOFFKEEP_YT_COMMENTS_CATCHUP=on, or
-// else only for bindings issue_create ops published, hk 3914) prepares the ops of comments on
-// bound tasks that the enqueue missed; it does nothing outside mode on. A
+// Before each Drive pass, catchUp (HANDOFFKEEP_YT_COMMENTS_CATCHUP, on
+// unless set to off; with off, only for bindings issue_create ops published,
+// hk 3914) prepares the ops of comments on bound tasks that the enqueue
+// missed; it does nothing outside mode on. A
 // comment it skipped as ambiguous is left out of later passes of this
 // process, so it is logged once and never crowds out the others; a restart
 // looks at it again.

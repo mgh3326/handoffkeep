@@ -422,23 +422,27 @@ which would leave the comment on no path; an anchor that still conflicts after
 the checks fails the comment. A body or actor the protocol cannot send keeps
 b1a's locally rejected op and link.
 
-**Catch-up** (hk 3897). **Off by default**: it runs only with
-`HANDOFFKEEP_YT_COMMENTS_CATCHUP=on` (unset or `off` runs none; any other
-value fails startup), and stays off until the legacy comment push refuses to
-post while the mode is `canary` or `on` (hk 3907). A legacy push that posts a
-comment and ends without linking it (a lost response, a failed link insert, a
-dead process) leaves no local trace, so the catch-up would copy that comment
-again. When enabled, before each `Drive` pass the worker in mode on runs
-`Store.CatchUpYTComments`: up to 200 comments (`ytCommentsCatchUpLimit`),
+**Catch-up** (hk 3897). **On by default in mode `on`**: it runs before each
+`Drive` pass unless `HANDOFFKEEP_YT_COMMENTS_CATCHUP=off` (unset or `on` runs
+it; any other value fails startup). `off` still runs the issue-create
+catch-up for `op_applied` bindings (`CatchUpYTIssueComments`, hk 3914). The
+default flipped with the removals (hk 4426): the legacy comment push that
+could post a comment and end without linking it no longer exists, and nothing
+else delivers a comment now, so a comment with no op would stay in PG only.
+While comments are canonical in YouTrack the pass prepares nothing (hk 4122).
+When it runs, the worker in mode on runs `Store.CatchUpYTComments`: up to 200
+comments (`ytCommentsCatchUpLimit`),
 oldest first, on a bound task, above the binding's `comments_from`, not
-written by the YouTrack pull, not already mirrored by the legacy push
-(`youtrack_comment_links`), with no ownership link and no op under
+written by the YouTrack pull, not already mirrored (`youtrack_comment_links`
+is frozen since the push's removal, but its rows still count), with no
+ownership link and no op under
 `task-comment:<id>`. These are comments written after the binding that the
 enqueue did not copy: a writer that does not enqueue (a dots reply) or a
 comment written while the mode was not `on`. Each gets, in its own
 transaction, exactly what the enqueue would have written (`ytCommentOnOpTx`),
-with the op's `created_at` the pass's time; the transaction takes the task's
-lane lock first and reads the link and the op again, and the op's unique
+with the op's `created_at` the pass's time; the transaction reads the comments
+authority row `FOR SHARE` first, then takes the task's
+lane lock and reads the link and the op again, and the op's unique
 `(principal, kind, idem_key)` keeps two workers to one op. It logs
 `ytwrite.comment_catchup task_id=<id> comment_id=<id> op_id=<id>`; a
 disagreeing source gets no op and `ytwrite.comment_catchup_skipped_ambiguous
@@ -446,22 +450,18 @@ task_id=<id> comment_id=<id> source=<source>`, once per worker process (the
 worker leaves the comment out of its later passes; a restart looks again). A
 failed pass logs `ytwrite.comment_catchup_failed`. No YouTrack call.
 
-**The catch-up and the legacy push.** The legacy push (`youtrack sync`,
-`UnpushedYouTrackComments`) keeps selecting every comment with no link, in
-every mode, and posts each before it links it. The catch-up never runs
-beside it: when a pass finds comments it tries the sync lock
-(`pg_try_advisory_lock(8241873404)`, `TryYouTrackSyncLock`), which every sync
-run of this release and of the releases before it holds for its whole run,
-across its selection, its POSTs and its `youtrack_comment_links` inserts. A
-held lock defers the pass (`ytwrite.comment_catchup_deferred comments=<n>
-reason=sync_running`, nothing written); otherwise the pass holds the lock
-until it ends and runs each comment's transaction on the lock's own
-connection (no second pool connection, so a pool of one cannot hang), and
-each transaction re-reads the push's link under the lane lock, so a comment a
-finished sync posted and linked is left. A sync that
-starts during a pass exits 3 ("another youtrack sync is running") and its
-next run goes on. Neither waits for the lock, so the lock order is
-unchanged.
+**The catch-up's sync lock.** No legacy push runs any more, but a pass that
+finds comments still tries the sync lock (`pg_try_advisory_lock(8241873404)`,
+`TryYouTrackSyncLock`) and works only while it holds it: the lock is what an
+authority switch to youtrack tries first (`SetYTAuthority`), so no switch
+commits in the middle of a pass, and each comment's transaction reads the
+authority row `FOR SHARE` besides. A held lock defers the pass
+(`ytwrite.comment_catchup_deferred comments=<n> reason=sync_running`, nothing
+written) — another catch-up pass or a previous release's sync can hold it —
+and the pass holds the lock until it ends, running each comment's
+transaction on the lock's own connection (no second pool connection, so a
+pool of one cannot hang). Both sides only try the lock, never wait for it,
+so the lock order is unchanged.
 
 **Legacy sync is refused while the protocol owns writes (hk 3907).** The
 legacy push and the adoption are a second writer to the same YouTrack objects,
