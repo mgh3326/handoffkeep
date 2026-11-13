@@ -403,8 +403,15 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 		return TaskEventResult{}, err
 	}
 	if x.State == StateMerged && x.Refs.PR == "" && ev.Source == SourceMergewakeMerge && ev.PR != "" {
-		// The task closed before its own PR was named (hk 4172): it adopts it.
-		return s.adoptMergedPRTx(ctx, tx, x, ev, now)
+		// A parent that an automatic close moved to merged before its own PR was
+		// named adopts it (hk 4172). Any other merged task is not adopting.
+		hasSub, err := hasSubTasksTx(ctx, tx, x.ID)
+		if err != nil {
+			return TaskEventResult{}, err
+		}
+		if hasSub {
+			return s.adoptMergedPRTx(ctx, tx, x, ev, now)
+		}
 	}
 	field, revertedPR := "", ""
 	if ev.Source == SourceMergewakeRevert {
@@ -562,6 +569,13 @@ func (s *Store) adoptMergedPRTx(ctx context.Context, tx pgx.Tx, x Task, ev sourc
 		}
 	}
 	return TaskEventResult{Applied: true, State: x.State, Task: x}, nil
+}
+
+// hasSubTasksTx reports whether task taskID has any sub-task.
+func hasSubTasksTx(ctx context.Context, tx pgx.Tx, taskID int64) (bool, error) {
+	var has bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_id=$1)`, taskID).Scan(&has)
+	return has, err
 }
 
 // heldMergePRTx is the PR of the newest held merge that named task taskID, when
