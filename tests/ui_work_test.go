@@ -92,7 +92,7 @@ func TestUIWorkRecords(t *testing.T) {
 	if status := boardJSON(t, h.Client(), path, assertion, &d); status != http.StatusOK {
 		t.Fatalf("detail status=%d", status)
 	}
-	for _, key := range []string{"task", "events", "dwell", "linear", "participants", "decision_requests", "origins", "changes", "jobs"} {
+	for _, key := range []string{"task", "events", "dwell", "participants", "decision_requests", "origins", "changes", "jobs"} {
 		if _, ok := d[key]; !ok {
 			t.Errorf("missing %s", key)
 		}

@@ -580,13 +580,6 @@ type Server struct {
 	// the route unregistered so deployments without complete Access settings
 	// fail closed with the standard ServeMux 404.
 	UI http.Handler
-	// LinearWebhook authenticates by signature, not bearer token. A nil handler
-	// leaves POST /hooks/linear unregistered, so an unconfigured deployment
-	// answers it with the standard ServeMux 404.
-	LinearWebhook http.Handler
-	// LinearDecisions backs POST /v1/tasks/{id}/decision-request/ask. Nil answers
-	// that route 503 linear_decisions_disabled.
-	LinearDecisions *LinearDecisions
 	// ClientRevisions records each authenticated client's CLI revision from
 	// its User-Agent and reports it on GET /metrics. Nil records nothing.
 	ClientRevisions *ClientRevisions
@@ -697,7 +690,6 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/relane", s.tasksRelane)
 	m.HandleFunc("POST /v1/tasks/{id}/decision-request", s.taskDecisionRequest)
 	m.HandleFunc("POST /v1/tasks/{id}/decision-request/resolve", s.taskDecisionResolve)
-	m.HandleFunc("POST /v1/tasks/{id}/decision-request/ask", s.taskDecisionAsk)
 	m.HandleFunc("POST /v1/tasks/dispositions", s.dispositionCreate)
 	m.HandleFunc("GET /v1/tasks/dispositions/summary", s.dispositionSummary)
 	m.HandleFunc("POST /v1/tasks/dispositions/{id}/apply", s.dispositionApply)
@@ -753,9 +745,6 @@ func (s Server) Handler() http.Handler {
 	if s.UI != nil {
 		m.Handle("/ui", s.UI)
 		m.Handle("/ui/", s.UI)
-	}
-	if s.LinearWebhook != nil {
-		m.Handle("POST /hooks/linear", s.LinearWebhook)
 	}
 	return v1Handler{mux: m}
 }

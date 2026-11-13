@@ -14,7 +14,7 @@ import (
 const stateMigrationVersion = 32
 
 // stateMigrationPlanSQL maps every changed legacy task row to its new state
-// ("Migrating existing states" in docs/linear-internalize.md). It reads only
+// ("Migrating existing states" in git show 1e3d2fa8:docs/linear-internalize.md). It reads only
 // columns that exist before this migration, so the same text serves the real
 // migration and `tasks migrate-states --dry-run` against an unmigrated
 // database. Rows that keep their state and need no flag (backlog, merged,

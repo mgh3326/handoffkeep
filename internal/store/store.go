@@ -146,7 +146,16 @@ type TaskRefs struct {
 	// ResolveDecisionRequest; while it exists, decision_options are its
 	// choices and are not patchable by a generic transition.
 	DecisionRequest *DecisionRequest `json:"decision_request,omitempty"`
-	Linear          *TaskLinear      `json:"linear,omitempty"`
+	// Grade and Tier are the task's (grade X, Tn) marker values (hk 4425).
+	// Read them through TaskRefs.GradeTier, which falls back to the legacy
+	// refs.linear copy this release still keeps.
+	Grade string `json:"grade,omitempty"`
+	Tier  string `json:"tier,omitempty"`
+	// Linear is the retired Linear connector's metadata. Nothing writes it
+	// now except a previous-release client during a blue-green overlap; it is
+	// kept so stored values survive a transition and so GradeTier can fall
+	// back to its grade and tier. A later contract release drops it.
+	Linear *TaskLinear `json:"linear,omitempty"`
 	// OriginPR and OriginTask are the typed "this row came from" relations
 	// shared with #494 (hk:doc design/2026-09-21/task493-disposition-contract
 	// §3). Unknown refs keys are dropped by the next transition, so these names
@@ -159,6 +168,50 @@ type TaskRefs struct {
 	RevertPR string `json:"revert_pr,omitempty"`
 }
 
+// GradeTier returns the task's grade and tier: refs.grade and refs.tier,
+// else the legacy refs.linear values a task filed before hk 4425 (or by a
+// previous-release client) carries.
+func (r TaskRefs) GradeTier() (grade, tier string) {
+	grade, tier = r.Grade, r.Tier
+	if r.Linear != nil {
+		if grade == "" {
+			grade = r.Linear.Grade
+		}
+		if tier == "" {
+			tier = r.Linear.Tier
+		}
+	}
+	return grade, tier
+}
+
+// syncLegacyGradeTier keeps refs.grade/refs.tier and the legacy
+// refs.linear copy equal for the blue-green overlap (hk 4425): the previous
+// release reads and keeps only refs.linear, and drops refs.grade on its next
+// rewrite of the column. A new key wins; an empty new key is filled from the
+// legacy copy. The release that drops the refs.linear fallback removes this.
+func syncLegacyGradeTier(r *TaskRefs) {
+	if r.Linear != nil {
+		if r.Grade == "" {
+			r.Grade = r.Linear.Grade
+		}
+		if r.Tier == "" {
+			r.Tier = r.Linear.Tier
+		}
+	}
+	if r.Grade == "" && r.Tier == "" {
+		return
+	}
+	if r.Linear == nil {
+		r.Linear = &TaskLinear{}
+	} else {
+		legacy := *r.Linear
+		r.Linear = &legacy
+	}
+	r.Linear.Grade, r.Linear.Tier = r.Grade, r.Tier
+}
+
+// TaskLinear is the legacy refs.linear shape, kept as stored (see
+// TaskRefs.Linear).
 type TaskLinear struct {
 	MirrorReason string   `json:"mirror_reason,omitempty"`
 	IssueID      string   `json:"issue_id,omitempty"`
@@ -555,9 +608,7 @@ type RelayEvent struct {
 type Store struct {
 	pool *pgxpool.Pool
 	// registry replaces migrationRegistry when set; tests use it.
-	registry    []migration
-	linearSync  atomic.Bool
-	linearBoard atomic.Bool
+	registry []migration
 	// autoCloseOff inverts the auto_close_parent setting so the zero Store has
 	// it on, the default.
 	autoCloseOff atomic.Bool
@@ -2290,6 +2341,12 @@ func validTaskRefs(x TaskRefs) bool {
 	if x.DecisionOptions != nil && !validDecisionOptions(*x.DecisionOptions) {
 		return false
 	}
+	if x.Grade != "" && !validTaskGrade(x.Grade) {
+		return false
+	}
+	if x.Tier != "" && !validTaskTier(x.Tier) {
+		return false
+	}
 	if x.Linear != nil && !validTaskLinear(*x.Linear) {
 		return false
 	}
@@ -2308,14 +2365,26 @@ func validTaskRefs(x TaskRefs) bool {
 	return true
 }
 
+func validTaskTier(tier string) bool {
+	switch tier {
+	case "T0", "T1", "T2", "T3":
+		return true
+	}
+	return false
+}
+
+// validTaskLinear accepts every refs.linear value the retired connector
+// stored, so a task carrying one can still transition.
 func validTaskLinear(x TaskLinear) bool {
-	if !validLinearMirrorReason(x.MirrorReason) {
+	switch x.MirrorReason {
+	case "", "dots", "operator_visible", "linear_opened":
+	default:
 		return false
 	}
 	if !validText(x.IssueID, 256) || !validText(x.Identifier, 256) {
 		return false
 	}
-	if x.Tier != "" && x.Tier != "T0" && x.Tier != "T1" && x.Tier != "T2" && x.Tier != "T3" {
+	if x.Tier != "" && !validTaskTier(x.Tier) {
 		return false
 	}
 	if x.Grade != "" && !validTaskGrade(x.Grade) {
@@ -2341,7 +2410,7 @@ func validTaskLinear(x TaskLinear) bool {
 }
 
 func rejectTaskRefs(x TaskRefs) error {
-	values := []string{x.PR, x.HeadSHA, x.ReportPath, x.JobID}
+	values := []string{x.PR, x.HeadSHA, x.ReportPath, x.JobID, x.Grade, x.Tier}
 	if x.DecisionOptions != nil {
 		for _, option := range x.DecisionOptions.Options {
 			values = append(values, option.Label)
@@ -2382,7 +2451,22 @@ func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
 	if patch.OriginTask != 0 {
 		old.OriginTask = patch.OriginTask
 	}
+	if patch.Grade != "" {
+		old.Grade = patch.Grade
+	}
+	if patch.Tier != "" {
+		old.Tier = patch.Tier
+	}
 	if patch.Linear != nil {
+		// A previous-release client still sends grade and tier under
+		// refs.linear during a blue-green overlap; they land in the new keys
+		// too, so GradeTier never reads a stale refs.grade over them.
+		if patch.Grade == "" && patch.Linear.Grade != "" {
+			old.Grade = patch.Linear.Grade
+		}
+		if patch.Tier == "" && patch.Linear.Tier != "" {
+			old.Tier = patch.Linear.Tier
+		}
 		merged := TaskLinear{}
 		if old.Linear != nil {
 			merged = *old.Linear
@@ -2423,6 +2507,7 @@ func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
 		}
 		old.Linear = &merged
 	}
+	syncLegacyGradeTier(&old)
 	return old
 }
 
@@ -2582,6 +2667,7 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 	if x.BodyDoc != "" && !ValidBodyDoc(x.BodyDoc) {
 		return x, errors.New("invalid task: body_doc must be a document key or key#section")
 	}
+	syncLegacyGradeTier(&x.Refs)
 	if !validTask(x) {
 		return x, errors.New("invalid task")
 	}
@@ -2656,11 +2742,6 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 	}
 	if check != nil && check.Link != 0 {
 		if _, err = addRelationTx(ctx, tx, x.ID, RelationRelated, check.Link, x.CreatedBy, x.CreatedAt); err != nil {
-			return x, err
-		}
-	}
-	if s.LinearSyncEnabled() && x.Refs.Linear != nil && x.Refs.Linear.Sync {
-		if err = enqueueLinearTaskCreate(ctx, tx, x); err != nil {
 			return x, err
 		}
 	}
@@ -2756,9 +2837,6 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		return Task{}, err
 	} else if moved {
 		x.LastActivityAt = now.Truncate(time.Microsecond)
-	}
-	if err := s.recordLinearBoardTaskTx(ctx, tx, x, reason); err != nil {
-		return Task{}, err
 	}
 	return x, tx.Commit(ctx)
 }
@@ -2883,9 +2961,6 @@ func (s *Store) relaneTaskTx(ctx context.Context, tx pgx.Tx, id int64, to, by, n
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "relane", From: from, To: to, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "lane", FromValue: from, ToValue: to, Source: source, SourceRef: ref}); err != nil {
 		return Task{}, false, err
 	}
-	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
-		return Task{}, false, err
-	}
 	return x, true, nil
 }
 
@@ -2951,9 +3026,6 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "project", From: from, To: project, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "project", FromValue: from, ToValue: project}); err != nil {
 		return Task{}, false, err
 	}
-	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
-		return Task{}, false, err
-	}
 	if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
 		return Task{}, false, err
 	}
@@ -3001,9 +3073,6 @@ func (s *Store) SetTaskArea(ctx context.Context, id int64, area *string, by, not
 		return Task{}, false, err
 	}
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "area", From: from, To: to, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "area", FromValue: from, ToValue: to}); err != nil {
-		return Task{}, false, err
-	}
-	if err := s.recordLinearBoardTaskTx(ctx, tx, x, note); err != nil {
 		return Task{}, false, err
 	}
 	return x, true, tx.Commit(ctx)
@@ -3326,12 +3395,10 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 		return x, false, err
 	}
 	defer tx.Rollback(ctx)
-	// With the work board on, recordLinearBoardRelayTx below locks every task
-	// the event matches: the task-mutation lock comes first, before the job
-	// lock (lock order, lockorder.go).
 	// Mirroring an answer or a job's end updates decision records that name a
-	// task or a job, which needs the same lock (decision_records.go).
-	if s.LinearBoardEnabled() || relayTouchesDecisions(x) {
+	// task or a job, which needs the task-mutation lock, taken before the job
+	// lock (lock order, lockorder.go; decision_records.go).
+	if relayTouchesDecisions(x) {
 		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 			return x, false, err
 		}
@@ -3360,9 +3427,6 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 		return x, false, err
 	}
 	if created {
-		if err = s.recordLinearBoardRelayTx(ctx, tx, x); err != nil {
-			return x, false, err
-		}
 		if err = mirrorRelayDecisionsTx(ctx, tx, x); err != nil {
 			return x, false, err
 		}

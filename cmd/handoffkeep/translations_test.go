@@ -109,7 +109,7 @@ func TestCreateOutputsSurviveTranslationFailure(t *testing.T) {
 		{"comment", []string{"tasks", "comment", "42", "--body", "hello", "--body-ko", "안녕"}, `{"id":7,"task_id":42,"body":"hello","author":"node","created_at":"2026-09-21T00:00:00Z"}`, map[string]any{"id": float64(7)}},
 		{"task", []string{"tasks", "add", "--lane", "d", "--title", "hello", "--title-ko", "안녕", "--project", "experiment"}, `{"id":9,"title":"hello","project":"experiment"}`, map[string]any{"id": float64(9)}},
 		{"decision", []string{"tasks", "decision-request", "618", "--question", "q", "--question-ko", "질문", "--option", "A|x", "--default-action", "보류"}, decisionRequestOKBody, map[string]any{"request_id": "dr-618-1", "recorded": true}},
-		{"ask", []string{"decisions", "ask", "618", "--question", "q", "--question-ko", "질문", "--option", "A|x", "--default-action", "보류", "--linear"}, decisionAskOKBody, map[string]any{"request_id": "dr-618-1", "issue_created": true}},
+		{"ask", []string{"decisions", "ask", "618", "--question", "q", "--question-ko", "질문", "--option", "A|x", "--default-action", "보류"}, decisionRequestOKBody, map[string]any{"request_id": "dr-618-1", "decision_ref": "D-618-1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			posts, puts := 0, 0
@@ -145,15 +145,12 @@ func TestCreateOutputsSurviveTranslationFailure(t *testing.T) {
 			if tc.name == "decision" && got["notify"] == "" {
 				t.Fatalf("notify missing: %v", got)
 			}
-			if tc.name == "ask" && got["issue"] == nil {
-				t.Fatalf("issue missing: %v", got)
-			}
 		})
 	}
 }
 
 func TestDecisionTranslationInvalidOptionsDoNotRecord(t *testing.T) {
-	for _, command := range [][]string{{"tasks", "decision-request", "618"}, {"decisions", "ask", "618"}, {"decisions", "ask", "618", "--linear"}} {
+	for _, command := range [][]string{{"tasks", "decision-request", "618"}, {"decisions", "ask", "618"}} {
 		for _, tc := range []struct {
 			name    string
 			options []string

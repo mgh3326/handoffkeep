@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
 
 # Final stage: exactly one static binary, nonroot, no shell, no source, no env
 # files, no secrets. distroless/static-debian12 ships CA certs and a nonroot
-# user (65532) so TLS clients (Linear, R2, hub) work unchanged.
+# user (65532) so TLS clients (YouTrack, R2, hub) work unchanged.
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/handoffkeep /handoffkeep
 USER nonroot
