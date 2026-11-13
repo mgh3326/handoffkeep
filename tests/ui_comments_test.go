@@ -234,8 +234,8 @@ func TestUITaskCommentWrite(t *testing.T) {
 		{"two bodies", assertion, cookie, url.Values{"body": {"x", "y"}, "csrf": {csrf}}, h.URL, "", http.StatusBadRequest, "invalid_form"},
 		{"empty body", assertion, cookie, url.Values{"body": {"  \n "}, "csrf": {csrf}}, h.URL, "", http.StatusBadRequest, "comment_empty"},
 		{"missing body", assertion, cookie, url.Values{"csrf": {csrf}}, h.URL, "", http.StatusBadRequest, "comment_empty"},
-		{"too long", assertion, cookie, url.Values{"body": {strings.Repeat("a", store.TaskCommentMaxBytes+1)}, "csrf": {csrf}}, h.URL, "", http.StatusRequestEntityTooLarge, "comment_too_long"},
-		{"far too long", assertion, cookie, url.Values{"body": {strings.Repeat("%", 3*store.TaskCommentMaxBytes)}, "csrf": {csrf}}, h.URL, "", http.StatusRequestEntityTooLarge, "comment_too_long"},
+		{"over the form fuse", assertion, cookie, url.Values{"body": {strings.Repeat("a", 400<<10)}, "csrf": {csrf}}, h.URL, "", http.StatusRequestEntityTooLarge, "comment_too_long"},
+		{"far over the form fuse", assertion, cookie, url.Values{"body": {strings.Repeat("%", 3*store.MaxBytes)}, "csrf": {csrf}}, h.URL, "", http.StatusRequestEntityTooLarge, "comment_too_long"},
 		{"secret-like", assertion, cookie, url.Values{"body": {"see ghp_" + strings.Repeat("a", 36)}, "csrf": {csrf}}, h.URL, "", http.StatusBadRequest, "comment_secret_like"},
 		{"missing task", assertion, cookie, url.Values{"body": {"x"}, "csrf": {csrf}}, h.URL, uiCommentURL(h.URL, 999999999999), http.StatusNotFound, "not_found"},
 	} {
@@ -253,8 +253,8 @@ func TestUITaskCommentWrite(t *testing.T) {
 			}
 		})
 	}
-	// Exactly at the limit is accepted.
-	response = uiPostForm(t, h.Client(), uiCommentURL(h.URL, task.ID), assertion, cookie, url.Values{"body": {strings.Repeat("b", store.TaskCommentMaxBytes)}, "csrf": {csrf}}, h.URL, false)
+	// A body the form fuse admits is accepted.
+	response = uiPostForm(t, h.Client(), uiCommentURL(h.URL, task.ID), assertion, cookie, url.Values{"body": {strings.Repeat("b", store.MaxBytes)}, "csrf": {csrf}}, h.URL, false)
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf("limit-size status=%d", response.StatusCode)
 	}

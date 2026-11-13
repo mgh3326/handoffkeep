@@ -18,11 +18,11 @@ import (
 // DocCommentPartBytes is the import's SAFE_PART_BYTES: one document comment
 // body is at most this many bytes. A report is split at
 // DocCommentPartBytes-docCommentHeadingBytes so its heading fits in each part.
-const DocCommentPartBytes = 240 << 10
+const DocCommentPartBytes = ArticlePartMaxBytes
 
-// MaxDocCommentBodyBytes is the cap on one document comment body. It is the
-// import's proven limit, larger than the cap on hk's own comments
-// (MaxBodyBytes), so a split part is accepted and an hk comment is not.
+// MaxDocCommentBodyBytes is the cap on one document comment body, in bytes.
+// It is the import's bound (bounds.go ArticlePartMaxBytes); a split part
+// always fits it.
 const MaxDocCommentBodyBytes = DocCommentPartBytes
 
 const (
@@ -184,5 +184,5 @@ func ImportedDocCommentKey(text string) (string, bool) {
 // CheckDocComment is CheckComment with the document cap: the same request
 // checks, and a body up to MaxDocCommentBodyBytes.
 func CheckDocComment(req CommentRequest) error {
-	return checkCommentRequest(req, MaxDocCommentBodyBytes)
+	return checkCommentRequest(req, docPartBodyLimit)
 }

@@ -42,10 +42,10 @@ const (
 // MaxArticleBytes is the import's SAFE_PART_BYTES (youtrack/import/client.js):
 // a body longer than this many UTF-8 bytes was imported as an index and
 // parts, which the document kinds do not write.
-const MaxArticleBytes = 240 * 1024
+const MaxArticleBytes = ArticlePartMaxBytes
 
 // ArticleSummaryLimit is the import's summary cut, in code points.
-const ArticleSummaryLimit = 250
+const ArticleSummaryLimit = SummaryMaxChars
 
 // ReasonLegacySyncedUnverified: the document has an article the legacy
 // `youtrack sync` made (youtrack_doc_articles) that the create could not

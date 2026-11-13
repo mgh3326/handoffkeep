@@ -574,7 +574,18 @@ func (s *Service) pushTask(ctx context.Context, task store.Task, opts SyncOption
 			}
 			continue
 		}
-		mirroredComment, err := s.client.AddComment(ctx, action.IssueID, commentText(comment))
+		text, err := commentText(comment)
+		if errors.Is(err, errCommentTooLong) {
+			// YouTrack would refuse this text. It stays whole in hk, which is
+			// canonical; the mirror skips it and says so, instead of retrying
+			// the same refusal on every sync.
+			log.Printf("youtrack.comment_not_mirrored task_id=%d comment_id=%d reason=%q", task.ID, comment.ID, "over_youtrack_text_bound")
+			continue
+		}
+		if err != nil {
+			return action, err
+		}
+		mirroredComment, err := s.client.AddComment(ctx, action.IssueID, text)
 		if err != nil {
 			return action, err
 		}

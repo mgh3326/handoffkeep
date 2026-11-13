@@ -1212,7 +1212,9 @@ lines, cut between characters for a longer line; a brief is one
 SHA-256 to the import's output.
 
 **Cap.** A document part may be up to `MaxDocCommentBodyBytes` (the import's
-240 KiB, `CheckDocComment`); hk's own comments keep `MaxBodyBytes` (64 KiB).
+240 KiB, `CheckDocComment`). hk's own comments take YouTrack's text bound
+(`TextMaxChars`, 20,000,000 characters; `internal/ytwrite/bounds.go`, measured
+2026-11-13), the same bound as a task title, task text and an issue description.
 
 **Audit.** A document copy is not an hk comment. One the import posted
 (`documentIssueComments`' `# <key>` report parts and `Article:` brief lines)
