@@ -13,8 +13,6 @@
         "source": "backfill"
       },
       "doc_url": "/ui/doc/deploy/auto_trader/",
-      "lag_count": 0,
-      "lagging": false,
       "merged_boundary": "unrecorded",
       "merged_since": [],
       "recent": [
@@ -54,8 +52,6 @@
         }
       ],
       "invalid_count": 1,
-      "lag_count": 0,
-      "lagging": false,
       "latest": {
         "deployed_at": "2026-09-23T02:00:00Z",
         "deployed_ref": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -110,8 +106,6 @@
     {
       "current": null,
       "doc_url": "/ui/doc/deploy/mergewake/",
-      "lag_count": 0,
-      "lagging": false,
       "merged_boundary": "no_current",
       "merged_since": [],
       "recent": [],
@@ -122,8 +116,6 @@
     {
       "current": null,
       "doc_url": "/ui/doc/deploy/pacelever/",
-      "lag_count": 0,
-      "lagging": false,
       "merged_boundary": "no_current",
       "merged_since": [],
       "recent": [],
@@ -134,8 +126,6 @@
     {
       "current": null,
       "doc_url": "/ui/doc/deploy/panewire-hub/",
-      "lag_count": 0,
-      "lagging": false,
       "latest": {
         "deployed_at": "2026-09-23T04:00:00Z",
         "deployed_ref": null,
