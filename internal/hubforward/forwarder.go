@@ -40,6 +40,8 @@ func notifyType(kind string) string {
 		return "decision"
 	case store.OutboxKindDotsReport:
 		return "report"
+	case store.OutboxKindDeployLag:
+		return "info"
 	default:
 		return "info"
 	}

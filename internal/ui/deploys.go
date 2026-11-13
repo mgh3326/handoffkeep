@@ -96,6 +96,8 @@ type deployServiceView struct {
 	// record exists at all).
 	MergedBoundary string             `json:"merged_boundary"`
 	MergedSince    []deployMergedTask `json:"merged_since"`
+	LagCount       int                `json:"lag_count"`
+	Lagging        bool               `json:"lagging"`
 }
 
 type deployPendingResponse struct {
@@ -281,6 +283,11 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 		if current.deployedAt != nil {
 			view.MergedBoundary = "deployed_at"
 			view.MergedSince = mergedTasksSince(events, repo, *current.deployedAt)
+			lag, err := h.store.CountMergedChangesSince(r.Context(), repo, *current.deployedAt)
+			if err == nil {
+				view.LagCount = lag
+				view.Lagging = store.IsDeployLagging(lag)
+			}
 		} else {
 			// The current version is known but its deploy time is not —
 			// "merged since" has no honest boundary to measure from.
@@ -289,6 +296,11 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 	} else {
 		lv := toView(latest)
 		view.Latest = &lv
+		lag, err := h.store.CountMergedChangesSince(r.Context(), repo, time.Time{})
+		if err == nil {
+			view.LagCount = lag
+			view.Lagging = store.IsDeployLagging(lag)
+		}
 	}
 	sort.Slice(parsed, func(i, j int) bool { return deployRecordLess(parsed[j], parsed[i]) })
 	for _, p := range parsed {

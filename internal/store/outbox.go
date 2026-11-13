@@ -25,6 +25,7 @@ const (
 	OutboxKindDotsDecision = "dots_decision"
 	OutboxKindDotsFollowup = "dots_followup"
 	OutboxKindYTWriteOp    = "yt_write_op"
+	OutboxKindDeployLag    = "deploy_lag"
 )
 
 var (
