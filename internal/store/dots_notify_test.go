@@ -135,4 +135,12 @@ func TestDotsResultSurvivesInvalidLaneEditedAfterCreation(t *testing.T) {
 	if n := notifyRows(t, s, "lane-a", OutboxKindDotsReport); n != 1 {
 		t.Fatalf("lane-a got %d ready events, want 1", n)
 	}
+	// A retry of the same RESULT (its response was lost) reports the same skipped lanes.
+	replay, err := s.ReplyDots(t.Context(), "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "RESULT", Body: "Done", IdempotencyKey: "key", RunToken: started.RunToken})
+	if err != nil || !replay.Duplicate {
+		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
+	if len(replay.InvalidNotifyLanes) != 1 || replay.InvalidNotifyLanes[0] != "Bad Lane" {
+		t.Fatalf("replay invalid lanes=%v", replay.InvalidNotifyLanes)
+	}
 }
