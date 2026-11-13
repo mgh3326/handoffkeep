@@ -284,7 +284,7 @@ func TestTaskStatesMatchesStoreTables(t *testing.T) {
 			t.Errorf("%s is not terminal but carries a closure rule", state.Name)
 		}
 	}
-	if completed := byName[store.StateCompleted].Closure; completed == nil || !completed.ResultLink || completed.EvidenceMaxBytes != 1024 {
+	if completed := byName[store.StateCompleted].Closure; completed == nil || completed.ResultLink || completed.EvidenceMaxBytes != 1024 {
 		t.Fatalf("completed closure=%+v", completed)
 	}
 	if duplicate := byName[store.StateDuplicate].Closure; duplicate == nil || !duplicate.DuplicateOf || !reflect.DeepEqual(duplicate.Types, []string{"superseded"}) {

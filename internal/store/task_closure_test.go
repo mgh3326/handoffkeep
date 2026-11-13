@@ -108,19 +108,15 @@ func TestTaskClosure(t *testing.T) {
 	for _, tc := range []struct {
 		evidence string
 		ok       bool
-	}{{"notes", false}, {"hk:doc research/x", true}} {
+	}{{"notes", true}, {"hk:task/4404", true}, {"decision/2026-11-13/caps", true}, {"hk:doc research/x", true}, {"", false}} {
 		x := Task{}
 		err := applyLifecycle(&x, StateBacklog, StateCompleted, time.Now().UTC(), &TaskClosure{Type: "resolved", Evidence: tc.evidence})
 		if (err == nil) != tc.ok {
 			t.Fatalf("%q: %v", tc.evidence, err)
 		}
 	}
-	// Trailing text after an hk:doc key is refused, and the refusal names the
-	// accepted form (hk 4050).
-	trailing := Task{}
-	err := applyLifecycle(&trailing, StateBacklog, StateCompleted, time.Now().UTC(), &TaskClosure{Type: "resolved", Evidence: "hk:doc research/x and more"})
-	if !errors.Is(err, ErrClosureInvalid) || !strings.Contains(err.Error(), "hk:doc <key> with nothing after the key") {
-		t.Fatalf("trailing evidence: %v", err)
+	if rule := taskClosureRules[StateCompleted]; rule.ResultLink {
+		t.Fatal("completed still requires a result-link form")
 	}
 	t.Run("settled transitions retain and reopen clears closure", func(t *testing.T) {
 		now := time.Now().UTC()

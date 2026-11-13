@@ -179,7 +179,7 @@ func TestDirectUploadToolsDescribeTheContract(t *testing.T) {
 			if begin == "" || complete == "" {
 				t.Fatalf("upload tools registered: begin=%t complete=%t", begin != "", complete != "")
 			}
-			for _, want := range []string{"presigned PUT", "no authorization header", "ten minutes", "Never log the url", "attachment_upload_complete"} {
+			for _, want := range []string{"presigned PUT", "no authorization header", "ten minutes", "256 MiB", "50 GiB", "hk 4466", "Never log the url", "attachment_upload_complete"} {
 				if !strings.Contains(begin, want) {
 					t.Errorf("begin description omits %q", want)
 				}

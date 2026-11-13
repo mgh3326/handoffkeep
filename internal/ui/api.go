@@ -17,6 +17,9 @@ import (
 
 const glanceBodyLimit = 256 * 1024
 
+// acceptingBodyLimit is this route's small JSON request-memory budget.
+const acceptingBodyLimit = 4 * 1024
+
 var glanceStates = append(store.TaskStates(), store.AwaitingDecisionKey)
 
 type glanceHub struct {
@@ -308,7 +311,7 @@ func (h *Handler) setAccepting(w http.ResponseWriter, r *http.Request, identity 
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 4*1024)
+	r.Body = http.MaxBytesReader(w, r.Body, acceptingBodyLimit)
 	var input struct {
 		Accepting *bool  `json:"accepting"`
 		Reason    string `json:"reason"`

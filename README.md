@@ -627,8 +627,9 @@ uses the five-field key, never that producer filename.
 `lane.event` is a directly addressed, durable lane notification. Its required
 fields are `kind: "lane.event"`, `owner_lane`, `event_id`, and `text`; its
 idempotency key is `(owner_lane, event_id)`. `owner_lane` is the destination
-lane, not a parent-routing hint. `text` must be nonempty, at most 2048 bytes,
-and contain no NUL or C0/C1 control characters (including tab, CR, and LF).
+lane, not a parent-routing hint. `text` must be nonempty and contain no NUL
+or C0/C1 control characters (including tab, CR, and LF). The relay stores the
+full text; presentation layers may show its head on a typed line.
 Job event kinds reject a nonempty `text`; their `event_id` is a stored
 producer label rather than a deduplication input, so the two idempotency
 families stay unambiguous. As with job events, duplicate lane-event
@@ -700,7 +701,7 @@ also be `virtual`. OCI Object Storage uses
 required setting is absent, only attachments are disabled; documents
 continue to work.
 
-The default safety limits are a 50 MiB object maximum, 20 GB total storage,
+The OCI per-object ceiling is 50 GiB (single PutObject). The default safety limits are a 50 GiB configured object maximum, a 256 MiB buffered-completion fuse (one quarter of the 1 GiB Handoffkeep container memory limit), 20 GB total storage,
 800,000 monthly writes, and 8,000,000 monthly reads. Set the corresponding
 `HK_ATTACH_*` variables to positive values to adjust them. Text attachments
 are secret-scanned, MIME is sniffed and allowlisted, and dump/archive filename
@@ -729,9 +730,14 @@ HTTP clients use raw `PUT /v1/attachments` with `X-HK-Name`, `Content-Type`,
 and optional `X-HK-Ref` (`document:<key>`,
 `memory:<agent>/<name>`, or `task:<id>`). Remote MCP clients use the
 `attachment_put` tool instead: base64 `content_base64`, `name`, optional `mime`
-and `ref`, at most 10 MiB raw. It returns the `sha256`, `size_bytes`, `mime`,
+and `ref`, at most 10 MiB raw. Larger files use the MCP direct-upload tools,
+which currently accept up to 256 MiB because completion buffers the verified
+object; larger begin requests are refused with
+`upload_completion_buffer_limit_exceeded`. This is a separate server-path fuse
+from OCI's 50 GiB per-object ceiling. Streaming completion is tracked in hk
+4466. It returns the `sha256`, `size_bytes`, `mime`,
 `ref`, a stable `reference` (`hk:attachment/<sha256>`) for records to store, and
-a `lookup_path`, never a signed URL. Direct upload is **off** unless `HK_ATTACH_DIRECT_UPLOAD=1` is set. Enable it only after the real-bucket negative test passes on the target store: an oversized PUT to a presigned URL must be refused. `HK_ATTACH_STAGING_CAP_BYTES` (default 1 GiB) bounds the declared bytes of direct uploads whose staging object may still exist, and `HK_ATTACH_STAGING_CLIENT_CAP_BYTES` (default 256 MiB) bounds one creator's share. An upload stays charged until its staging object is confirmed absent and its presigned URL has expired; completing or refusing it does not release the charge. A begin over either budget is refused with `attachment_staging_cap`. Large files can skip hk entirely with a direct upload: `POST /v1/attachments/uploads` (MCP `attachment_upload_begin`) checks the declared name, type, size, sha256 and ref and returns a presigned PUT for a staging object; the client PUTs the bytes there, then `POST /v1/attachments/uploads/{id}/complete` (MCP `attachment_upload_complete`) checks size, sha256, type and secrets, then stores them under the same content key as `PUT /v1/attachments`. The server checks size, sha256, type and secrets whatever the declaration said. The presigned PUT signs its Content-Length where the store honours signed headers. The stored object is written from the bytes hk verified, so a later overwrite of the staging object cannot change it. A completed upload is idempotent, and concurrent completions register one attachment. The signed URL is a secret for one object: it appears only in the begin answer, so do not log it. A refusal is final and deletes the staging object. Staging objects that are never completed are swept hourly. `GET /v1/attachments/{sha}` streams through the
+a `lookup_path`, never a signed URL. Direct upload is **off** unless `HK_ATTACH_DIRECT_UPLOAD=1` is set. Enable it only after the real-bucket negative test passes on the target store: an oversized PUT to a presigned URL must be refused. `HK_ATTACH_STAGING_CAP_BYTES` and `HK_ATTACH_STAGING_CLIENT_CAP_BYTES` (both default 50 GiB) each permit one OCI-maximum object in staging. An upload stays charged until its staging object is confirmed absent and its presigned URL has expired; completing or refusing it does not release the charge. A begin over either budget is refused with `attachment_staging_cap`. Large files can skip hk entirely with a direct upload: `POST /v1/attachments/uploads` (MCP `attachment_upload_begin`) checks the declared name, type, size, sha256 and ref and returns a presigned PUT for a staging object; the client PUTs the bytes there, then `POST /v1/attachments/uploads/{id}/complete` (MCP `attachment_upload_complete`) checks size, sha256, type and secrets, then stores them under the same content key as `PUT /v1/attachments`. The server checks size, sha256, type and secrets whatever the declaration said. The presigned PUT signs its Content-Length where the store honours signed headers. The stored object is written from the bytes hk verified, so a later overwrite of the staging object cannot change it. A completed upload is idempotent, and concurrent completions register one attachment. The signed URL is a secret for one object: it appears only in the begin answer, so do not log it. A refusal is final and deletes the staging object. Staging objects that are never completed are swept hourly. `GET /v1/attachments/{sha}` streams through the
 service; add `?presign=1` for a ten-minute private URL. `/v1/usage` and
 authenticated `/metrics` expose the local fuse counters. `/metrics` also
 reports, per authenticated client, the CLI revision from its last

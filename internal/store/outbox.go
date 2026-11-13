@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -81,26 +80,9 @@ func chatAnsweredEventID(questionID string, revision int) string {
 	return fmt.Sprintf("%s-rev%d-answered", questionID, revision)
 }
 
-// assistantLaneText bounds one notification to the lane-event byte cap the
-// hub enforces, so a written row can never be undrainable. The full answer
-// lives in the message body or the decision record; the lane event is a
-// pointer with a quote.
+// assistantLaneText keeps the full notification text for the lane inbox.
 func assistantLaneText(prefix, body string) string {
-	text := prefix + body
-	if len(text) <= RelayLaneEventMaxBytes {
-		return text
-	}
-	keep := RelayLaneEventMaxBytes - len(prefix) - len("…")
-	if keep < 0 {
-		keep = 0
-	}
-	if len(body) > keep {
-		body = body[:keep]
-	}
-	for len(body) > 0 && !utf8.ValidString(body) {
-		body = body[:len(body)-1]
-	}
-	return prefix + body + "…"
+	return prefix + body
 }
 
 // insertNotificationOutbox records one owed lane notification inside the
@@ -119,60 +101,6 @@ func insertNotificationOutboxOnce(ctx context.Context, tx pgx.Tx, kind, lane, ev
 		return false, err
 	}
 	return tag.RowsAffected() == 1, nil
-}
-
-// AssistantPendingDecision is one open decision request with the task it
-// blocks on — what an assistant poller needs to read, answer or skip it.
-type AssistantPendingDecision struct {
-	TaskID  int64            `json:"task_id"`
-	Lane    string           `json:"lane"`
-	State   string           `json:"state"`
-	Title   string           `json:"title"`
-	Request DecisionRequest  `json:"request"`
-	Options *DecisionOptions `json:"options,omitempty"`
-}
-
-// AssistantPending is the assistant surface's pending work list: open
-// decision requests on live tasks (merged and dropped tasks are terminal —
-// an uncleaned open request left on them is not answerable work) plus every
-// pending chat question carrying its revision. ServerTime is the hk clock so
-// a poller judges deadlines against the server's time, never its own.
-type AssistantPending struct {
-	ServerTime       time.Time                  `json:"server_time"`
-	DecisionRequests []AssistantPendingDecision `json:"decision_requests"`
-	ChatQuestions    []ChatQuestion             `json:"chat_questions"`
-}
-
-// ListAssistantPending reads the two pending sets with the database clock.
-func (s *Store) ListAssistantPending(ctx context.Context) (AssistantPending, error) {
-	out := AssistantPending{DecisionRequests: []AssistantPendingDecision{}, ChatQuestions: []ChatQuestion{}}
-	if err := s.pool.QueryRow(ctx, `SELECT now()`).Scan(&out.ServerTime); err != nil {
-		return out, err
-	}
-	tasks, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs->'decision_request'->>'status'='open' AND state NOT IN (`+settledStatesSQL+`) ORDER BY id ASC`)
-	if err != nil {
-		return out, err
-	}
-	defer tasks.Close()
-	for tasks.Next() {
-		var x Task
-		if err := scanTask(tasks, &x); err != nil {
-			return out, err
-		}
-		if x.Refs.DecisionRequest == nil {
-			continue
-		}
-		out.DecisionRequests = append(out.DecisionRequests, AssistantPendingDecision{TaskID: x.ID, Lane: x.Lane, State: x.State, Title: x.Title, Request: *x.Refs.DecisionRequest, Options: x.Refs.DecisionOptions})
-	}
-	if err := tasks.Err(); err != nil {
-		return out, err
-	}
-	questions, err := s.ListChatQuestions(ctx, "", "pending", "", 1000)
-	if err != nil {
-		return out, err
-	}
-	out.ChatQuestions = questions
-	return out, nil
 }
 
 // ListUnsentNotifications returns outbox rows the drainer still owes the
