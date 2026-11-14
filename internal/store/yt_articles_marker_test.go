@@ -128,6 +128,63 @@ func TestYTArticlesRescanRetriesOnlyPrepareTimeInvalid(t *testing.T) {
 	}
 }
 
+func TestYTArticleCreateClaimRechecksDocumentScope(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		remove func(t *testing.T, s *Store, id int64, key string)
+	}{
+		{
+			name: "deleted",
+			remove: func(t *testing.T, s *Store, id int64, _ string) {
+				t.Helper()
+				if _, err := s.pool.Exec(t.Context(), `DELETE FROM documents WHERE id=$1`, id); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "task report",
+			remove: func(t *testing.T, s *Store, _ int64, key string) {
+				t.Helper()
+				task, err := s.CreateTask(t.Context(), Task{Lane: "ytart-lane", Title: "article scope", Kind: "implement", CreatedBy: "test", Project: projectPtr(testProjectName)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := s.PutDocument(t.Context(), Document{Key: key, Kind: "report", Body: "body", CreatedBy: "test", TaskID: &task.ID}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := ytartSetup(t, "ytart_claim_scope_"+strings.ReplaceAll(tc.name, " ", "_"), true)
+			key := "reports/job/report.md"
+			id := ytartPut(t, s, key, "body", nil)
+			ytartPass(t, s)
+			ops := ytartOps(t, s, id)
+			if len(ops) != 1 || ops[0].State != ytwrite.StatePrepared {
+				t.Fatalf("prepared ops %+v", ops)
+			}
+
+			tc.remove(t, s, id, key)
+			yt := ytwritetest.NewFake()
+			var offset atomic.Int64
+			ytartDrive(t, s, yt, &offset)
+
+			got := ytartOps(t, s, id)
+			if len(got) != 1 || got[0].State != ytwrite.StateRejected || got[0].Reason != ytwrite.ReasonOutOfScope || got[0].Attempts != 0 {
+				t.Fatalf("out-of-scope create %+v", got)
+			}
+			if len(yt.ArticleWrites()) != 0 {
+				t.Fatalf("article writes after scope changed: %+v", yt.ArticleWrites())
+			}
+			if yt.Calls() != 0 {
+				t.Fatalf("remote calls after scope changed: %d", yt.Calls())
+			}
+		})
+	}
+}
+
 // hk 4357: at the deploy that prepared the retries, the previous colour,
 // still serving, claimed them and its render refused the quoted marker
 // (unsupported_kind, attempts 1: the claim counts the attempt before the
