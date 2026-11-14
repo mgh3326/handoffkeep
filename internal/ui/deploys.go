@@ -101,10 +101,11 @@ type deployServiceView struct {
 	// not the current one, so a failed/rolled_back attempt after the last
 	// success is visible instead of hidden behind the good deploy.
 	Latest *deployRecordView `json:"latest,omitempty"`
-	// MergedBoundary is the deployed_at instant the merged list is measured
-	// against: "deployed_at", "unrecorded" (current record's deployed_at is
-	// null — the list cannot be computed), or "no_current" (no success
-	// record exists at all).
+	// MergedBoundary names the instant the merged list is measured against,
+	// the same one DeployLagStatus counts lag from: "deployed_at", or
+	// "deploy_record_key" (the current record carries no deployed_at, so the
+	// timestamp in its key stands in), or "no_current" (no success record
+	// exists at all).
 	MergedBoundary string             `json:"merged_boundary"`
 	MergedSince    []deployMergedTask `json:"merged_since"`
 	LagCount       int                `json:"lag_count,omitempty"`
@@ -116,6 +117,9 @@ type deployServiceView struct {
 	// refusals write no record, deploy/hk-follow/README.md §Report shape) are
 	// never invented here.
 	State string `json:"state"`
+	// mergedFrom is the instant MergedBoundary names, nil for "no_current".
+	// The caller reads it to tell a truncated merged scan from a complete one.
+	mergedFrom *time.Time
 }
 
 // The states deployServiceView.State can hold.
@@ -182,8 +186,7 @@ func (h *Handler) pendingDeploys(r *http.Request) (deployPendingResponse, error)
 		// The DESC-ordered scan truncates this service's list only when its
 		// oldest scanned event is still after the boundary — a full cap with
 		// an older tail means the list is complete and must not warn.
-		if scanCapped && view.Current != nil && view.Current.DeployedAt != nil &&
-			events[len(events)-1].At.After(*view.Current.DeployedAt) {
+		if scanCapped && view.mergedFrom != nil && events[len(events)-1].At.After(*view.mergedFrom) {
 			response.EventsCapped = true
 		}
 		response.Services = append(response.Services, view)
@@ -320,14 +323,18 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 			lv := toView(latest)
 			view.Latest = &lv
 		}
+		// The boundary is the one DeployLagStatus counts lag from:
+		// deployed_at, else the record key's timestamp (a parsed record's
+		// key always carries one). A list measured from anywhere else would
+		// disagree with lagging and with the state it feeds.
+		boundary := current.keyTime
+		view.MergedBoundary = "deploy_record_key"
 		if current.deployedAt != nil {
+			boundary = *current.deployedAt
 			view.MergedBoundary = "deployed_at"
-			view.MergedSince = mergedTasksSince(events, repo, *current.deployedAt)
-		} else {
-			// The current version is known but its deploy time is not —
-			// "merged since" has no honest boundary to measure from.
-			view.MergedBoundary = "unrecorded"
 		}
+		view.mergedFrom = &boundary
+		view.MergedSince = mergedTasksSince(events, repo, boundary)
 	} else {
 		lv := toView(latest)
 		view.Latest = &lv
