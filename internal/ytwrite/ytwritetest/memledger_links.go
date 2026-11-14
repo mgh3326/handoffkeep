@@ -213,7 +213,17 @@ func (l *MemLedger) SettleLinks(_ context.Context, now time.Time, id int64, f yt
 	if err := ytwrite.CheckLinkSettlement(*op, s); err != nil {
 		return ytwrite.Op{}, err
 	}
-	if ps := l.links.plans[id]; len(ps) > 0 {
+	ps := l.links.plans[id]
+	if f.Epoch == ytwrite.EpochOperator {
+		var latest ytwrite.LinkPlanRecord
+		if len(ps) > 0 {
+			latest = ps[len(ps)-1]
+		}
+		if err := ytwrite.CheckOperatorSaw(s, latest, len(ps) > 0); err != nil {
+			return ytwrite.Op{}, err
+		}
+	}
+	if len(ps) > 0 {
 		latest := &ps[len(ps)-1]
 		if step, outcome, ok := s.StepRecord(latest.Marked); ok && latest.Attempt == f.Attempt && latest.Recover == f.Recover && step == latest.Marked-1 {
 			latest.Outcome = outcome

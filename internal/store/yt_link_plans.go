@@ -338,6 +338,11 @@ func (l *YTWriteLedger) SettleLinks(ctx context.Context, now time.Time, id int64
 	if err != nil {
 		return ytwrite.Op{}, err
 	}
+	if f.Epoch == ytwrite.EpochOperator {
+		if err := ytwrite.CheckOperatorSaw(st, latest, found); err != nil {
+			return ytwrite.Op{}, err
+		}
+	}
 	if found {
 		if step, outcome, ok := st.StepRecord(latest.Marked); ok && latest.Attempt == f.Attempt && latest.Recover == f.Recover && step == latest.Marked-1 {
 			if _, err := tx.Exec(ctx, `UPDATE yt_link_steps SET outcome=$5 WHERE op_id=$1 AND attempt=$2 AND recover=$3 AND step=$4`,

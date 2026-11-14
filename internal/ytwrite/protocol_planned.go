@@ -305,14 +305,14 @@ func (p *Protocol) resolvePlanned(ctx context.Context, op Op, r Resolution) (Res
 	if found && latest.Attempt == op.Attempts {
 		st.f.Recover = latest.Recover
 	}
-	var s settled
+	ls := LinkSettlement{To: StateRejected, Reason: ReasonOperatorNotDone, Detail: "by " + r.By + ": " + r.Note,
+		SawPlan: found, SawAttempt: latest.Attempt, SawRec: latest.Recover}
+	st.outcome = StepDefinite
 	if r.Applied {
+		ls.To, ls.YTID, ls.Reason, ls.Detail = StateApplied, op.YTTargetID, "", ""
 		st.outcome = StepOK
-		s = st.settle(ctx, op, LinkSettlement{To: StateApplied, YTID: op.YTTargetID})
-	} else {
-		st.outcome = StepDefinite
-		s = st.reject(ctx, op, ReasonOperatorNotDone, "by "+r.By+": "+r.Note)
 	}
+	s := st.settle(ctx, op, ls)
 	if s.err != nil {
 		return Result{}, s.err
 	}

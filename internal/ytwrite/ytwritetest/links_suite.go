@@ -675,6 +675,54 @@ func RunLinksProtocol(t *testing.T, nl NewLedger) {
 		e.wantState(op, ytwrite.StateRejected, ytwrite.ReasonOperatorNotDone)
 	})
 
+	// Review of PR #425 (r4574836066, r4574836289): an operator's resolve
+	// judges the plan it read. When a recovery pass plans and marks an add
+	// after that read and its lease then runs out, the stale "not done" is
+	// refused and changes nothing. A resolve that reads the current plan
+	// then records its add as not made and closes the claim.
+	t.Run("operator_resolve_of_a_superseded_plan_is_refused", func(t *testing.T) {
+		e := newLinksEnv(t, nl)
+		e.yt.QueueLinkCallFaults(LinkCallFault{Op: LinkOpAdd, Status: http.StatusBadGateway, Count: 1})
+		op := e.prepare(lWriter, lIssue, related(21), nil)
+		e.drive()
+		held := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+		ctx := context.Background()
+		e.clock.Advance(time.Hour)
+		e.restart(&dueHook{CrashLedger: &CrashLedger{Ledger: e.ledger}, afterLatest: func() {
+			// A recovery pass between the operator's read and its settlement.
+			now := e.clock.Now()
+			epoch, ok, err := e.ll.LeaseLinkRecovery(ctx, now, op.ID, held.Reconciles, now.Add(time.Minute))
+			if err != nil || !ok {
+				t.Fatalf("lease = %v %v", ok, err)
+			}
+			f := ytwrite.LinkFence{Attempt: held.Attempts, Recover: 1, Epoch: epoch}
+			if _, err := e.ll.PlanLinks(ctx, now, op.ID, f, e.yt.IssueLinks(lIssue)); err != nil {
+				t.Fatalf("plan: %v", err)
+			}
+			if err := e.ll.MarkLinkStep(ctx, now, op.ID, f, 0); err != nil {
+				t.Fatalf("mark: %v", err)
+			}
+			e.clock.Advance(2 * time.Minute) // the pass's lease runs out
+		}})
+		r := ytwrite.Resolution{Applied: false, By: "operator", Note: "looked in YouTrack"}
+		if _, err := e.p.Resolve(ctx, op.ID, r); !errors.Is(err, ytwrite.ErrState) {
+			t.Fatalf("resolve of a superseded plan = %v, want ErrState", err)
+		}
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonLinkRecovery)
+		if p := e.latestPlan(op); p.Recover != 1 || p.Marked != 1 || p.Outcome != "" {
+			t.Fatalf("plan record = %+v", p)
+		}
+		e.wantOwnedOpen(lIssue, rel("2-21"))
+		e.restart(e.ledger)
+		e.resolve(op, false)
+		e.wantState(op, ytwrite.StateRejected, ytwrite.ReasonOperatorNotDone)
+		for _, o := range e.records(lIssue).Owned {
+			if o.Open() {
+				t.Fatalf("open row after the operator's not done: %+v", o)
+			}
+		}
+	})
+
 	// I12: a re-parent removes the old parent before it adds the new one.
 	t.Run("reparent_removes_old_parent_first", func(t *testing.T) {
 		e := newLinksEnv(t, nl)
@@ -969,6 +1017,8 @@ type dueHook struct {
 	// error (its reply lost).
 	loseMark int
 	marks    int
+	// afterLatest runs once, after the first LatestLinkPlan answers.
+	afterLatest func()
 }
 
 var errHookTransient = errors.New("ytwritetest: transient ledger failure")
@@ -985,7 +1035,12 @@ func (d *dueHook) LatestLinkPlan(ctx context.Context, id int64) (ytwrite.LinkPla
 	if d.failLatest {
 		return ytwrite.LinkPlanRecord{}, false, errHookTransient
 	}
-	return d.CrashLedger.LatestLinkPlan(ctx, id)
+	rec, found, err := d.CrashLedger.LatestLinkPlan(ctx, id)
+	if f := d.afterLatest; f != nil && err == nil {
+		d.afterLatest = nil
+		f()
+	}
+	return rec, found, err
 }
 
 func (d *dueHook) SettleLinks(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, ls ytwrite.LinkSettlement) (ytwrite.Op, error) {
