@@ -89,10 +89,12 @@ func countPath(f *ytwritetest.FakeYouTrack, path string) int {
 	return n
 }
 
-func swapDuplicate(types []ytwrite.RemoteLinkType) []ytwrite.RemoteLinkType {
+// swapRoles turns the named type's role names round: its writer side moves to
+// the other direction.
+func swapRoles(types []ytwrite.RemoteLinkType, name string) []ytwrite.RemoteLinkType {
 	out := append([]ytwrite.RemoteLinkType(nil), types...)
 	for i := range out {
-		if out[i].Name == "Duplicate" {
+		if out[i].Name == name {
 			out[i].SourceToTarget, out[i].TargetToSource = out[i].TargetToSource, out[i].SourceToTarget
 		}
 	}
@@ -116,10 +118,17 @@ func TestReadIssueLinksClassifiesByDirectionAndRoleNames(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		types         []ytwrite.RemoteLinkType
+		wantSubtask   ytwrite.ManagedLinkType
 		wantDuplicate ytwrite.ManagedLinkType
 	}{
-		{"default types", ytwritetest.DefaultLinkTypes(), ytwrite.ManagedLinkType{ID: "105-1", Direction: ytwrite.LinkInward}},
-		{"duplicate roles swapped", swapDuplicate(ytwritetest.DefaultLinkTypes()), ytwrite.ManagedLinkType{ID: "105-1", Direction: ytwrite.LinkOutward}},
+		{"default types", ytwritetest.DefaultLinkTypes(),
+			ytwrite.ManagedLinkType{ID: "105-3", Direction: ytwrite.LinkInward}, ytwrite.ManagedLinkType{ID: "105-1", Direction: ytwrite.LinkInward}},
+		{"duplicate roles swapped", swapRoles(ytwritetest.DefaultLinkTypes(), "Duplicate"),
+			ytwrite.ManagedLinkType{ID: "105-3", Direction: ytwrite.LinkInward}, ytwrite.ManagedLinkType{ID: "105-1", Direction: ytwrite.LinkOutward}},
+		{"subtask roles swapped", swapRoles(ytwritetest.DefaultLinkTypes(), "Subtask"),
+			ytwrite.ManagedLinkType{ID: "105-3", Direction: ytwrite.LinkOutward}, ytwrite.ManagedLinkType{ID: "105-1", Direction: ytwrite.LinkInward}},
+		{"both swapped", swapRoles(swapRoles(ytwritetest.DefaultLinkTypes(), "Subtask"), "Duplicate"),
+			ytwrite.ManagedLinkType{ID: "105-3", Direction: ytwrite.LinkOutward}, ytwrite.ManagedLinkType{ID: "105-1", Direction: ytwrite.LinkOutward}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := ytwritetest.NewFake()
@@ -141,7 +150,7 @@ func TestReadIssueLinksClassifiesByDirectionAndRoleNames(t *testing.T) {
 			}
 			want := ytwrite.IssueLinksRead{
 				Types: ytwrite.LinkTypes{
-					Subtask:   ytwrite.ManagedLinkType{ID: "105-3", Direction: ytwrite.LinkInward},
+					Subtask:   tc.wantSubtask,
 					Relates:   ytwrite.ManagedLinkType{ID: "105-0", Direction: ytwrite.LinkBoth},
 					Duplicate: tc.wantDuplicate,
 				},
@@ -167,24 +176,28 @@ func TestReadIssueLinksClassifiesByDirectionAndRoleNames(t *testing.T) {
 	}
 }
 
-// I11, S1 acceptance: 120 link rows with the managed rows on page 3. The server
-// caps its pages at 50 below the $top the client asks for, so the pages are
-// 50, 50, 20 and a "short page ends it" rule would stop after the first; the
-// read goes on by the rows received and ends on an empty page.
+// I11, S1 acceptance: 120 link rows with the managed rows on page 3, and 43+
+// rows with managed rows on page 2. The server caps its pages below the $top
+// the client asks for, so the pages are 50, 50, 20 and a "short page ends it"
+// rule would stop after the first; the read goes on by the rows received and
+// ends on an empty page.
 func TestReadIssueLinksPagesRowsUntilAnEmptyPage(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		cap       int
-		wantSkips []string
+		name                 string
+		directed, undirected int // filler link types ahead of the four default ones
+		cap                  int
+		wantSkips            []string
 	}{
-		{"server caps pages at 50", 50, []string{"0", "50", "100", "120"}},
-		{"server honors $top", 0, []string{"0", "100", "120"}},
+		// 56 directed + 1 undirected filler = 113 rows, then the default types'
+		// 7 rows: 120, the managed ones from row 113 on.
+		{"120 rows, server caps pages at 50", 56, 1, 50, []string{"0", "50", "100", "120"}},
+		{"120 rows, server honors $top", 56, 1, 0, []string{"0", "100", "120"}},
+		// 40 filler rows + 7 = 47: the Duplicate and Subtask rows are on page 2.
+		{"47 rows, server caps pages at 42", 20, 0, 42, []string{"0", "42", "47"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := ytwritetest.NewFake()
-			// 56 directed + 1 undirected filler = 113 rows, then the four
-			// default types' 7 rows: 120 rows, the managed ones from row 113 on.
-			f.SetLinkTypes(append(fillers(56, 1), ytwritetest.DefaultLinkTypes()...))
+			f.SetLinkTypes(append(fillers(tc.directed, tc.undirected), ytwritetest.DefaultLinkTypes()...))
 			f.SetLinkPageCaps(tc.cap, 0)
 			f.SeedIssueLink("2-5", ytwrite.IssueLink{Kind: ytwrite.LinkSubtask, Target: "2-1"})
 			f.SeedIssueLink("2-5", ytwrite.IssueLink{Kind: ytwrite.LinkDuplicate, Target: "2-4"})
@@ -349,8 +362,10 @@ func TestIssueLinkMutationURLShapes(t *testing.T) {
 	}{
 		{"default types", ytwritetest.DefaultLinkTypes(), map[ytwrite.LinkKind]string{
 			ytwrite.LinkSubtask: "105-3t", ytwrite.LinkDuplicate: "105-1t", ytwrite.LinkRelates: "105-0"}},
-		{"duplicate roles swapped", swapDuplicate(ytwritetest.DefaultLinkTypes()), map[ytwrite.LinkKind]string{
+		{"duplicate roles swapped", swapRoles(ytwritetest.DefaultLinkTypes(), "Duplicate"), map[ytwrite.LinkKind]string{
 			ytwrite.LinkSubtask: "105-3t", ytwrite.LinkDuplicate: "105-1s", ytwrite.LinkRelates: "105-0"}},
+		{"subtask roles swapped", swapRoles(ytwritetest.DefaultLinkTypes(), "Subtask"), map[ytwrite.LinkKind]string{
+			ytwrite.LinkSubtask: "105-3s", ytwrite.LinkDuplicate: "105-1t", ytwrite.LinkRelates: "105-0"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
