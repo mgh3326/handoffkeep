@@ -51,32 +51,63 @@ func TestReserveAttachmentUploadEnforcesTheStagingBudget(t *testing.T) {
 	const a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	const c = "cccccccccccccccccccccccccccccccc"
-	if err := s.ReserveAttachmentUpload(t.Context(), mk(a, "node", 60), 100, 100); err != nil {
+	// storageCap is far above every staging cap here so only the staging
+	// budget binds; the storage-fuse case has its own test below.
+	const storageCap = int64(1) << 40
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(a, "node", 60), 100, 100, storageCap); err != nil {
 		t.Fatalf("first reserve: %v", err)
 	}
-	if err := s.ReserveAttachmentUpload(t.Context(), mk(b, "other", 60), 100, 100); !errors.Is(err, ErrAttachmentStagingCap) {
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(b, "other", 60), 100, 100, storageCap); !errors.Is(err, ErrAttachmentStagingCap) {
 		t.Fatalf("over-budget reserve err=%v", err)
 	}
 	if _, ok, _ := s.GetAttachmentUpload(t.Context(), b); ok {
 		t.Fatal("a refused reservation left a row")
 	}
-	if err := s.ReserveAttachmentUpload(t.Context(), mk(c, "node", 60), 1000, 100); !errors.Is(err, ErrAttachmentStagingCap) {
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(c, "node", 60), 1000, 100, storageCap); !errors.Is(err, ErrAttachmentStagingCap) {
 		t.Fatalf("per-client reserve err=%v", err)
 	}
 	if ok, err := s.TransitionAttachmentUpload(t.Context(), a, AttachmentUploadPending, AttachmentUploadDone, "", now); err != nil || !ok {
 		t.Fatalf("finish first: ok=%v err=%v", ok, err)
 	}
-	if err := s.ReserveAttachmentUpload(t.Context(), mk(b, "other", 60), 100, 100); !errors.Is(err, ErrAttachmentStagingCap) {
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(b, "other", 60), 100, 100, storageCap); !errors.Is(err, ErrAttachmentStagingCap) {
 		t.Fatalf("done upload released its charge before its staging object was confirmed gone: %v", err)
 	}
 	if err := s.MarkAttachmentUploadStagingDeleted(t.Context(), a, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReserveAttachmentUpload(t.Context(), mk(b, "other", 60), 100, 100); err != nil {
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(b, "other", 60), 100, 100, storageCap); err != nil {
 		t.Fatalf("reserve after the staging object was confirmed gone: %v", err)
 	}
 	unreleased, err := s.ListUnreleasedAttachmentUploads(t.Context(), now.Add(time.Hour), 10)
 	if err != nil || len(unreleased) != 1 || unreleased[0].ID != b {
 		t.Fatalf("unreleased=%v err=%v", unreleased, err)
+	}
+}
+
+// Pending reservations count against the storage fuse at begin: committed
+// bytes plus still-charged upload bytes plus the new declaration may not
+// exceed it, even when every staging cap would allow the upload.
+func TestReserveAttachmentUploadCountsPendingAgainstStorageCap(t *testing.T) {
+	s := schemaStore(t, "attachment_pending_storage")
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	mk := func(id string, size int64) AttachmentUpload {
+		return AttachmentUpload{ID: id, StagingKey: "incoming/" + id, Name: "a.txt", MIME: "text/plain", SizeBytes: size, SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", RefKind: "none", CreatedBy: "node", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	}
+	const a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const c = "cccccccccccccccccccccccccccccccc"
+	// stagingCap and clientCap are far above storageCap, so only the storage
+	// fuse can refuse.
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(a, 40), 1<<40, 1<<40, 100); err != nil {
+		t.Fatalf("first reserve: %v", err)
+	}
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(b, 50), 1<<40, 1<<40, 100); err != nil {
+		t.Fatalf("second reserve inside the fuse: %v", err)
+	}
+	if err := s.ReserveAttachmentUpload(t.Context(), mk(c, 20), 1<<40, 1<<40, 100); !errors.Is(err, ErrAttachmentStorageCap) {
+		t.Fatalf("pending over the storage fuse err=%v", err)
+	}
+	if _, ok, _ := s.GetAttachmentUpload(t.Context(), c); ok {
+		t.Fatal("a storage-cap refusal left a row")
 	}
 }

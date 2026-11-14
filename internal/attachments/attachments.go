@@ -27,20 +27,25 @@ const (
 	// OCI Object Storage accepts a single PutObject up to 50 GiB. Direct
 	// uploads use that path; multipart is unnecessary at the service ceiling.
 	DefaultMaxBytes int64 = 50 << 30
-	// BufferedCompletionMaxBytes is one quarter of Handoffkeep's 1 GiB
-	// container memory limit (docker HostConfig.Memory on ncp). Completion
-	// currently buffers the verified object before promotion, so this fuse
-	// bounds that request path until streaming completion lands (hk 4466).
+	// BufferedCompletionMaxBytes bounds the completion path that holds the
+	// verified object in memory: every buffered Put, and the direct-upload
+	// completion of a text type, whose secret scan needs the whole body.
+	// Larger non-text uploads complete by streaming (hk 4466): size and
+	// sha256 are checked while the staged object is copied to a private
+	// holding object, then promoted to the content key without the body
+	// entering memory.
 	BufferedCompletionMaxBytes int64 = 256 << 20
 	// DefaultStorageCap is the account storage fuse; its OCI allowance basis
 	// is still to confirm.
 	DefaultStorageCap int64 = 20_000_000_000 // OCI allowance — to confirm
 	DefaultPutCap     int64 = 800000
 	DefaultGetCap     int64 = 8000000
-	// Each staging fuse permits one OCI-maximum object to be in flight; the
-	// account storage fuse remains the independent stored-bytes limit.
-	DefaultStagingCap       int64 = DefaultMaxBytes
-	DefaultStagingClientCap int64 = DefaultMaxBytes
+	// Staging pending bytes count against the storage fuse at begin, so the
+	// staging budget can never admit more than could commit. The global cap
+	// is that fuse; the per-client cap is a quarter of it, so several clients
+	// can hold pending uploads at once and none can monopolize the budget.
+	DefaultStagingCap       int64 = DefaultStorageCap
+	DefaultStagingClientCap int64 = DefaultStorageCap / 4
 )
 
 // DefaultMIMEAllow is the MIME allowlist used when HK_ATTACH_MIME_ALLOW is
@@ -318,7 +323,7 @@ type AttachmentDB interface {
 	RecordAttachmentGet(context.Context, string, int64) error
 	ListAttachments(context.Context, string, string, int) ([]store.Attachment, error)
 	AttachmentUsage(context.Context) (store.AttachmentUsage, error)
-	ReserveAttachmentUpload(ctx context.Context, u store.AttachmentUpload, stagingCap, clientCap int64) error
+	ReserveAttachmentUpload(ctx context.Context, u store.AttachmentUpload, stagingCap, clientCap, storageCap int64) error
 	ListUnreleasedAttachmentUploads(ctx context.Context, createdBefore time.Time, limit int) ([]store.AttachmentUpload, error)
 	MarkAttachmentUploadStagingDeleted(ctx context.Context, id string, now time.Time) error
 	GetAttachmentUpload(context.Context, string) (store.AttachmentUpload, bool, error)
@@ -483,6 +488,29 @@ func validate(c Config, name, declared string, body []byte) (string, error) {
 	}
 	return declared, nil
 }
+
+// validateStreamed is validate for a body that stays in the object store:
+// the same name, allowlist and sniff rules over the captured head, without
+// the size bound (the stream counted it) and without the secret scan, which
+// only text types need — a text upload above BufferedCompletionMaxBytes is
+// refused before it is streamed, so isText here is unreachable and refused
+// as a mime mismatch rather than scanned.
+func validateStreamed(c Config, name, declared string, head []byte) (string, error) {
+	if err := checkName(name); err != nil {
+		return "", err
+	}
+	sniff := strings.ToLower(strings.TrimSpace(strings.Split(http.DetectContentType(head), ";")[0]))
+	declared = strings.ToLower(strings.TrimSpace(strings.Split(declared, ";")[0]))
+	if declared == "" {
+		declared = sniff
+	}
+	// Every non-text allowlisted type requires the sniff to equal the
+	// declaration (validate's image/pdf and fallthrough branches agree).
+	if !c.Allow[declared] || isText(declared) || sniff != declared {
+		return "", ErrMIME
+	}
+	return declared, nil
+}
 func (m *Manager) Put(ctx context.Context, client, name, mime, ref string, body []byte) (store.Attachment, bool, error) {
 	if !m.Enabled {
 		return store.Attachment{}, false, ErrDisabled
@@ -490,22 +518,33 @@ func (m *Manager) Put(ctx context.Context, client, name, mime, ref string, body 
 	return m.putBytes(ctx, client, name, mime, ref, body)
 }
 
-// putBytes is the one store path for a body: validate, dedupe, capacity, object
-// put, then the metadata row. Put and a completed direct upload both call it.
+// putBytes is the buffered store path for a body: validate, then putVerified.
 func (m *Manager) putBytes(ctx context.Context, client, name, mime, ref string, body []byte) (store.Attachment, bool, error) {
-	if !store.ValidActor(client) {
-		return store.Attachment{}, false, errors.New("invalid attachment created_by")
-	}
 	mime, e := validate(m.Config, name, mime, body)
-	if e != nil {
-		return store.Attachment{}, false, e
-	}
-	kind, id, e := ParseRef(ref)
 	if e != nil {
 		return store.Attachment{}, false, e
 	}
 	sum := sha256.Sum256(body)
 	sha := hex.EncodeToString(sum[:])
+	k := key(sha)
+	return m.putVerified(ctx, client, name, mime, ref, sha, int64(len(body)), func(ctx context.Context) error {
+		return m.Objects.Put(ctx, k, bytes.NewReader(body), int64(len(body)), mime)
+	})
+}
+
+// putVerified is the one store path for content whose bytes are already
+// verified: dedupe, the capacity preflight, the content-key write (skipped
+// when the object already exists), then the metadata row. write performs the
+// object put for key(sha); a completed direct upload streams its verified
+// holding object through it instead of holding the body.
+func (m *Manager) putVerified(ctx context.Context, client, name, mime, ref, sha string, size int64, write func(context.Context) error) (store.Attachment, bool, error) {
+	if !store.ValidActor(client) {
+		return store.Attachment{}, false, errors.New("invalid attachment created_by")
+	}
+	kind, id, e := ParseRef(ref)
+	if e != nil {
+		return store.Attachment{}, false, e
+	}
 	if old, ok, e := m.Store.GetAttachment(ctx, sha); e != nil {
 		return old, false, e
 	} else if ok {
@@ -513,16 +552,15 @@ func (m *Manager) putBytes(ctx context.Context, client, name, mime, ref string, 
 		out, new, e := m.Store.PutAttachment(ctx, old, m.Config.StorageCap, m.Config.PutCap)
 		return out, new, e
 	}
-	if e = m.Store.CheckAttachmentCapacity(ctx, int64(len(body)), m.Config.StorageCap, m.Config.PutCap); e != nil {
+	if e = m.Store.CheckAttachmentCapacity(ctx, size, m.Config.StorageCap, m.Config.PutCap); e != nil {
 		return store.Attachment{}, false, e
 	}
-	k := key(sha)
-	if e = m.Objects.Stat(ctx, k); e != nil {
-		if e = m.Objects.Put(ctx, k, bytes.NewReader(body), int64(len(body)), mime); e != nil {
+	if e = m.Objects.Stat(ctx, key(sha)); e != nil {
+		if e = write(ctx); e != nil {
 			return store.Attachment{}, false, fmt.Errorf("%w: %v", ErrObjectStore, e)
 		}
 	}
-	x := store.Attachment{SHA256: sha, SizeBytes: int64(len(body)), MIME: mime, OriginalName: name, CreatedBy: client, RefKind: kind, RefID: id, ObjectLocation: ObjectLocation(m.Config)}
+	x := store.Attachment{SHA256: sha, SizeBytes: size, MIME: mime, OriginalName: name, CreatedBy: client, RefKind: kind, RefID: id, ObjectLocation: ObjectLocation(m.Config)}
 	out, new, e := m.Store.PutAttachment(ctx, x, m.Config.StorageCap, m.Config.PutCap)
 	return out, new, e
 }

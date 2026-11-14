@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/url"
 	"strings"
@@ -42,6 +43,35 @@ func TestBeginRefusesAboveBufferedCompletionFuse(t *testing.T) {
 	}
 }
 
+// Only text stays fuse-bound at begin: a binary upload above the buffered
+// fuse gets a ticket and completes by streaming (hk 4466). Under the old
+// completion this declaration was refused.
+func TestBeginAllowsLargeBinaryUpload(t *testing.T) {
+	db := &fakeDB{rows: map[string]store.Attachment{}}
+	objects := &fakeObjects{objects: map[string][]byte{}}
+	m := &Manager{
+		Store:   db,
+		Objects: objects,
+		Enabled: true,
+		Config: Config{
+			MaxBytes: DefaultMaxBytes, StorageCap: 1 << 40, PutCap: 10, GetCap: 10,
+			Allow: map[string]bool{"image/png": true, "text/plain": true}, DirectUpload: true,
+			StagingCap: 1 << 40, StagingClientCap: 1 << 40,
+		},
+	}
+	ticket, err := m.BeginUpload(t.Context(), "node", "big.png", "image/png", BufferedCompletionMaxBytes+1, strings.Repeat("a", 64), "")
+	if err != nil {
+		t.Fatalf("large binary begin err=%v", err)
+	}
+	if ticket.UploadID == "" || ticket.URL == "" {
+		t.Fatalf("ticket=%+v", ticket)
+	}
+	row, ok := db.uploads[ticket.UploadID]
+	if !ok || row.SizeBytes != BufferedCompletionMaxBytes+1 {
+		t.Fatalf("row=%+v ok=%v", row, ok)
+	}
+}
+
 func TestCompleteRefusesObjectsAboveBufferedCompletionFuse(t *testing.T) {
 	m, db, objs := newUploadManager(t)
 	if BufferedCompletionMaxBytes != 256<<20 {
@@ -68,6 +98,224 @@ func TestCompleteRefusesObjectsAboveBufferedCompletionFuse(t *testing.T) {
 	}
 	if got := db.uploads[uploadID].Reason; got != "upload_completion_buffer_limit_exceeded" {
 		t.Fatalf("refusal reason=%q", got)
+	}
+}
+
+// A non-text upload above the buffered-completion fuse completes by
+// streaming: the staged object is verified while it is copied to a private
+// holding object, then promoted to the content key. Under the old
+// whole-buffer completion this upload was refused outright.
+func TestStreamedCompletionStoresALargeBinaryUpload(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	m.Config.MaxBytes = DefaultMaxBytes
+	m.Config.StorageCap = 1 << 40
+	m.Config.StagingCap = 1 << 40
+	m.Config.StagingClientCap = 1 << 40
+	size := BufferedCompletionMaxBytes + 1
+	body := make([]byte, size)
+	copy(body, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
+	sha := shaOf(body)
+	const uploadID = "0123456789abcdef0123456789abcdef"
+	stagingKey := stagingPrefix + uploadID
+	holdingKey := stagingPrefix + "done-" + uploadID
+	db.uploads = map[string]store.AttachmentUpload{uploadID: {
+		ID: uploadID, StagingKey: stagingKey, Name: "big.png", MIME: "image/png", SizeBytes: size,
+		SHA256: sha, CreatedBy: "node", Status: store.AttachmentUploadPending,
+		CreatedAt: m.now(), ExpiresAt: m.now().Add(time.Hour), UpdatedAt: m.now(),
+	}}
+	objs.objects[stagingKey] = body
+
+	x, created, err := m.CompleteUpload(t.Context(), "node", uploadID)
+	if err != nil || !created {
+		t.Fatalf("streamed complete created=%v err=%v", created, err)
+	}
+	if x.SHA256 != sha || x.MIME != "image/png" || x.SizeBytes != size {
+		t.Fatalf("stored attachment=%+v", x)
+	}
+	objs.mu.Lock()
+	stored, staged, held := objs.objects[key(sha)], objs.objects[stagingKey], objs.objects[holdingKey]
+	objs.mu.Unlock()
+	if !bytes.Equal(stored, body) {
+		t.Fatalf("promoted object holds %d bytes, want the verified %d", len(stored), len(body))
+	}
+	if staged != nil || held != nil {
+		t.Fatalf("staging or holding object survived: staged=%v held=%v", staged != nil, held != nil)
+	}
+	if row := db.uploads[uploadID]; row.Status != store.AttachmentUploadDone {
+		t.Fatalf("row status=%q", row.Status)
+	}
+}
+
+// The streamed path keeps the same refusals as the buffered one: a staging
+// object whose size or sha256 does not match the declaration is refused and
+// its objects deleted.
+func TestStreamedCompletionRefusesMismatchedBytes(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	m.Config.MaxBytes = DefaultMaxBytes
+	m.Config.StorageCap = 1 << 40
+	size := BufferedCompletionMaxBytes + 1
+	const uploadID = "0123456789abcdef0123456789abcdef"
+	stagingKey := stagingPrefix + uploadID
+	db.uploads = map[string]store.AttachmentUpload{uploadID: {
+		ID: uploadID, StagingKey: stagingKey, Name: "big.png", MIME: "image/png", SizeBytes: size,
+		SHA256: strings.Repeat("a", 64), CreatedBy: "node", Status: store.AttachmentUploadPending,
+		CreatedAt: m.now(), ExpiresAt: m.now().Add(time.Hour), UpdatedAt: m.now(),
+	}}
+	png := func(n int64) []byte {
+		b := make([]byte, n)
+		copy(b, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
+		return b
+	}
+	// Right size, wrong bytes: the sha check refuses after the stream.
+	objs.objects[stagingKey] = png(size)
+	_, _, err := m.CompleteUpload(t.Context(), "node", uploadID)
+	if !errors.Is(err, ErrUploadRefused) || !strings.Contains(err.Error(), "upload_sha256_mismatch") {
+		t.Fatalf("sha mismatch err=%v", err)
+	}
+	objs.mu.Lock()
+	_, held := objs.objects[stagingPrefix+"done-"+uploadID]
+	objs.mu.Unlock()
+	if held {
+		t.Fatal("holding object survived a refusal")
+	}
+	// The object is one byte short of the declaration: Head agrees with the
+	// row (the fake reports the declared size), so the stream itself must
+	// catch the shortfall.
+	db.uploads[uploadID] = store.AttachmentUpload{
+		ID: uploadID, StagingKey: stagingKey, Name: "big.png", MIME: "image/png", SizeBytes: size + 1,
+		SHA256: strings.Repeat("a", 64), CreatedBy: "node", Status: store.AttachmentUploadPending,
+		CreatedAt: m.now(), ExpiresAt: m.now().Add(time.Hour), UpdatedAt: m.now(),
+	}
+	objs.objects[stagingKey] = png(size)
+	objs.headSizes = map[string]int64{stagingKey: size + 1}
+	_, _, err = m.CompleteUpload(t.Context(), "node", uploadID)
+	if !errors.Is(err, ErrUploadRefused) || !strings.Contains(err.Error(), "upload_size_mismatch") {
+		t.Fatalf("short stream err=%v", err)
+	}
+	// The object is one byte longer than the declaration: the extra byte is
+	// never stored, and the count check refuses.
+	db.uploads[uploadID] = store.AttachmentUpload{
+		ID: uploadID, StagingKey: stagingKey, Name: "big.png", MIME: "image/png", SizeBytes: size,
+		SHA256: strings.Repeat("a", 64), CreatedBy: "node", Status: store.AttachmentUploadPending,
+		CreatedAt: m.now(), ExpiresAt: m.now().Add(time.Hour), UpdatedAt: m.now(),
+	}
+	objs.objects[stagingKey] = png(size + 1)
+	objs.headSizes = map[string]int64{stagingKey: size}
+	_, _, err = m.CompleteUpload(t.Context(), "node", uploadID)
+	if !errors.Is(err, ErrUploadRefused) || !strings.Contains(err.Error(), "upload_size_mismatch") {
+		t.Fatalf("long stream err=%v", err)
+	}
+}
+
+// A staging overwrite after the streamed verify cannot reach the content
+// key: promotion writes the verified holding object, never the staging one.
+// The presigned PUT stays valid until it expires, so this is the race the
+// buffered path already guarded against.
+func TestStreamedCompletionOverwriteBetweenVerifyAndPromote(t *testing.T) {
+	m, _, objs := newUploadManager(t)
+	m.Config.MaxBytes = DefaultMaxBytes
+	m.Config.StorageCap = 1 << 40
+	size := BufferedCompletionMaxBytes + 1
+	body := make([]byte, size)
+	copy(body, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
+	sha := shaOf(body)
+	const uploadID = "0123456789abcdef0123456789abcdef"
+	stagingKey := stagingPrefix + uploadID
+	db := m.Store.(*fakeDB)
+	db.uploads = map[string]store.AttachmentUpload{uploadID: {
+		ID: uploadID, StagingKey: stagingKey, Name: "big.png", MIME: "image/png", SizeBytes: size,
+		SHA256: sha, CreatedBy: "node", Status: store.AttachmentUploadPending,
+		CreatedAt: m.now(), ExpiresAt: m.now().Add(time.Hour), UpdatedAt: m.now(),
+	}}
+	objs.objects[stagingKey] = body
+	overwrote := false
+	objs.beforePut = func(k string) {
+		// The first hk/ put is the promotion: the staging object is forged
+		// in place, as a reused presigned URL would. The stored object must
+		// still be the bytes hk checked.
+		if strings.HasPrefix(k, "hk/") && !overwrote {
+			overwrote = true
+			objs.mu.Lock()
+			objs.objects[stagingKey] = bytes.Repeat([]byte("x"), int(size))
+			objs.mu.Unlock()
+		}
+	}
+	x, created, err := m.CompleteUpload(t.Context(), "node", uploadID)
+	if err != nil {
+		t.Fatalf("streamed complete err=%v", err)
+	}
+	if !created {
+		t.Fatal("streamed complete was not created")
+	}
+	objs.mu.Lock()
+	stored := objs.objects[key(x.SHA256)]
+	objs.mu.Unlock()
+	if !bytes.Equal(stored, body) {
+		t.Fatal("promoted object does not hold the verified bytes")
+	}
+}
+
+// corruptGetObjects forges a key's bytes the first time it is read, the way
+// a corrupted holding object would look to the promotion.
+type corruptGetObjects struct {
+	*fakeObjects
+	key    string
+	forged []byte
+	done   bool
+}
+
+func (c *corruptGetObjects) Get(ctx context.Context, k string) (io.ReadCloser, error) {
+	if k == c.key && !c.done {
+		c.done = true
+		c.mu.Lock()
+		c.objects[c.key] = c.forged
+		c.mu.Unlock()
+	}
+	return c.fakeObjects.Get(ctx, k)
+}
+
+// The promotion re-verifies the holding object as it streams: bytes that do
+// not match the declaration are never stored, the partial object is removed,
+// and the failure is retryable rather than a refusal.
+func TestStreamedCompletionRefusesCorruptedHoldingObject(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	m.Config.MaxBytes = DefaultMaxBytes
+	m.Config.StorageCap = 1 << 40
+	size := BufferedCompletionMaxBytes + 1
+	body := make([]byte, size)
+	copy(body, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
+	sha := shaOf(body)
+	const uploadID = "0123456789abcdef0123456789abcdef"
+	stagingKey := stagingPrefix + uploadID
+	holdingKey := stagingPrefix + "done-" + uploadID
+	db.uploads = map[string]store.AttachmentUpload{uploadID: {
+		ID: uploadID, StagingKey: stagingKey, Name: "big.png", MIME: "image/png", SizeBytes: size,
+		SHA256: sha, CreatedBy: "node", Status: store.AttachmentUploadPending,
+		CreatedAt: m.now(), ExpiresAt: m.now().Add(time.Hour), UpdatedAt: m.now(),
+	}}
+	objs.objects[stagingKey] = body
+	forged := bytes.Repeat([]byte("x"), int(size))
+	m.Objects = &corruptGetObjects{fakeObjects: objs, key: holdingKey, forged: forged}
+
+	_, _, err := m.CompleteUpload(t.Context(), "node", uploadID)
+	if !errors.Is(err, ErrUploadNotReceived) {
+		t.Fatalf("corrupted holding err=%v", err)
+	}
+	objs.mu.Lock()
+	stored, held, staged := objs.objects[key(sha)], objs.objects[holdingKey], objs.objects[stagingKey]
+	row := db.uploads[uploadID]
+	objs.mu.Unlock()
+	if stored != nil {
+		t.Fatal("a corrupted holding object reached the content key")
+	}
+	if held != nil {
+		t.Fatal("holding object survived")
+	}
+	if staged == nil {
+		t.Fatal("staging object deleted on a retryable failure")
+	}
+	if row.Status != store.AttachmentUploadPending {
+		t.Fatalf("row status=%q, want pending for retry", row.Status)
 	}
 }
 

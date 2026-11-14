@@ -43,11 +43,15 @@ func (m *memObjects) List(_ context.Context, prefix string) ([]attachments.Objec
 	return out, nil
 }
 
-func (m *memAttachmentDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap, clientCap int64) error {
+func (m *memAttachmentDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap, clientCap, storageCap int64) error {
 	if m.uploads == nil {
 		m.uploads = map[string]store.AttachmentUpload{}
 	}
-	return reserveFake(m.uploads, u, stagingCap, clientCap)
+	var committed int64
+	for _, x := range m.rows {
+		committed += x.SizeBytes
+	}
+	return reserveFake(m.uploads, committed, u, stagingCap, clientCap, storageCap)
 }
 func (m *memAttachmentDB) ListUnreleasedAttachmentUploads(_ context.Context, createdBefore time.Time, limit int) ([]store.AttachmentUpload, error) {
 	return unreleasedFake(m.uploads, createdBefore, limit), nil
@@ -179,7 +183,7 @@ func TestDirectUploadToolsDescribeTheContract(t *testing.T) {
 			if begin == "" || complete == "" {
 				t.Fatalf("upload tools registered: begin=%t complete=%t", begin != "", complete != "")
 			}
-			for _, want := range []string{"presigned PUT", "no authorization header", "ten minutes", "256 MiB", "50 GiB", "hk 4466", "Never log the url", "attachment_upload_complete"} {
+			for _, want := range []string{"presigned PUT", "no authorization header", "ten minutes", "HK_ATTACH_DIRECT_UPLOAD", "attachment_direct_upload_disabled", "256 MiB", "50 GiB", "Never log the url", "attachment_upload_complete"} {
 				if !strings.Contains(begin, want) {
 					t.Errorf("begin description omits %q", want)
 				}
@@ -209,9 +213,10 @@ func (*spyBackend) CompleteAttachmentUpload(context.Context, string, string) (st
 	return store.Attachment{}, false, errors.New("unexpected")
 }
 
-// reserveFake applies the store's budget: rows whose staging object may still
-// exist count against the global and the per-creator cap.
-func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUpload, stagingCap, clientCap int64) error {
+// reserveFake applies the store's budget: committed attachments plus rows
+// whose staging object may still exist count against the storage fuse, and
+// the charged rows against the global and the per-creator cap.
+func reserveFake(uploads map[string]store.AttachmentUpload, committed int64, u store.AttachmentUpload, stagingCap, clientCap, storageCap int64) error {
 	var used, usedByClient int64
 	for _, o := range uploads {
 		if !o.StagingDeletedAt.IsZero() {
@@ -221,6 +226,9 @@ func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUp
 		if o.CreatedBy == u.CreatedBy {
 			usedByClient += o.SizeBytes
 		}
+	}
+	if committed+used+u.SizeBytes > storageCap {
+		return store.ErrAttachmentStorageCap
 	}
 	if used+u.SizeBytes > stagingCap || usedByClient+u.SizeBytes > clientCap {
 		return store.ErrAttachmentStagingCap

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"regexp"
 	"strings"
@@ -86,7 +87,10 @@ func (m *Manager) BeginUpload(ctx context.Context, client, name, mime string, si
 	if size < 0 || size > m.Config.MaxBytes {
 		return UploadTicket{}, ErrTooLarge
 	}
-	if size > BufferedCompletionMaxBytes {
+	// A text upload above the buffered-completion fuse can never complete:
+	// its secret scan needs the whole body in memory. Refuse it here, before
+	// any bytes move; binary types complete by streaming (hk 4466).
+	if size > BufferedCompletionMaxBytes && isText(declared) {
 		return UploadTicket{}, fmt.Errorf("%w: upload_completion_buffer_limit_exceeded", ErrUploadRefused)
 	}
 	if !shaPattern.MatchString(sha) {
@@ -107,12 +111,13 @@ func (m *Manager) BeginUpload(ctx context.Context, client, name, mime string, si
 	}
 	now := m.now()
 	row := store.AttachmentUpload{ID: uid, StagingKey: key, Name: name, MIME: declared, SizeBytes: size, SHA256: sha, RefKind: kind, RefID: id, CreatedBy: client, Status: store.AttachmentUploadPending, CreatedAt: now, ExpiresAt: now.Add(uploadRowTTL), UpdatedAt: now}
-	// The reservation checks the staging budget, global and per creator, with
-	// the insert; a refusal creates no row. The storage caps are checked first.
+	// The reservation checks the staging budget, global and per creator, and
+	// the storage fuse including every still-charged pending upload, with the
+	// insert; a refusal creates no row. The capacity preflight runs first.
 	if err := m.Store.CheckAttachmentCapacity(ctx, size, m.Config.StorageCap, m.Config.PutCap); err != nil {
 		return UploadTicket{}, err
 	}
-	if err := m.Store.ReserveAttachmentUpload(ctx, row, m.Config.StagingCap, m.Config.StagingClientCap); err != nil {
+	if err := m.Store.ReserveAttachmentUpload(ctx, row, m.Config.StagingCap, m.Config.StagingClientCap, m.Config.StorageCap); err != nil {
 		return UploadTicket{}, err
 	}
 	return UploadTicket{UploadID: uid, Method: "PUT", URL: u, ExpiresInSeconds: int(UploadTTL / time.Second)}, nil
@@ -208,9 +213,6 @@ func (m *Manager) completeClaimed(ctx context.Context, row store.AttachmentUploa
 		}
 		return store.Attachment{}, false, fmt.Errorf("%w: %s", ErrUploadRefused, reason)
 	}
-	if row.SizeBytes > BufferedCompletionMaxBytes {
-		return refuse("upload_completion_buffer_limit_exceeded")
-	}
 	head, err := m.Objects.Head(ctx, row.StagingKey)
 	if err != nil {
 		return release(err)
@@ -220,12 +222,18 @@ func (m *Manager) completeClaimed(ctx context.Context, row store.AttachmentUploa
 	if head.Size > m.Config.MaxBytes {
 		return refuse("upload_too_large")
 	}
-	if head.Size > BufferedCompletionMaxBytes {
-		return refuse("upload_completion_buffer_limit_exceeded")
-	}
 	if head.Size != row.SizeBytes {
 		return refuse("upload_size_mismatch")
 	}
+	if row.SizeBytes <= BufferedCompletionMaxBytes {
+		return m.completeBuffered(ctx, row, release, refuse)
+	}
+	return m.completeStreamed(ctx, row, release, refuse)
+}
+
+// completeBuffered verifies an upload small enough to hold in memory, then
+// stores it through the buffered path.
+func (m *Manager) completeBuffered(ctx context.Context, row store.AttachmentUpload, release func(error) (store.Attachment, bool, error), refuse func(string) (store.Attachment, bool, error)) (store.Attachment, bool, error) {
 	// Promotion choice: the content-addressed object is written from the bytes
 	// read and verified below, never by copying or re-reading the staging
 	// object. A presigned PUT can be reused until it expires, so the staging
@@ -251,6 +259,112 @@ func (m *Manager) completeClaimed(ctx context.Context, row store.AttachmentUploa
 		return refuse("upload_sha256_mismatch")
 	}
 	x, created, err := m.putBytes(ctx, row.CreatedBy, row.Name, row.MIME, uploadRefString(row), body)
+	if err != nil {
+		reason, refusable := uploadRefusalReason(err)
+		if !refusable {
+			return release(err)
+		}
+		return refuse(reason)
+	}
+	if _, err := m.Store.TransitionAttachmentUpload(ctx, row.ID, store.AttachmentUploadCompleting, store.AttachmentUploadDone, "", m.now()); err != nil {
+		return x, created, err
+	}
+	m.deleteStaging(ctx, row.StagingKey)
+	return x, created, nil
+}
+
+// verifyHeadBytes is how much of a streamed upload is kept for the sniff and
+// NUL checks; both read at most this much of a body.
+const verifyHeadBytes = 8 << 10
+
+// streamVerifier observes what an ObjectStore Put consumes: the byte count,
+// the sha256 and the first verifyHeadBytes for content sniffing.
+type streamVerifier struct {
+	r    io.Reader
+	sum  hash.Hash
+	n    int64
+	head []byte
+}
+
+func (v *streamVerifier) Read(p []byte) (int, error) {
+	n, err := v.r.Read(p)
+	if n > 0 {
+		v.sum.Write(p[:n])
+		v.n += int64(n)
+		if rem := verifyHeadBytes - len(v.head); rem > 0 {
+			if n < rem {
+				rem = n
+			}
+			v.head = append(v.head, p[:rem]...)
+		}
+	}
+	return n, err
+}
+
+// overflow reports whether the stream held a byte past what the Put consumed
+// (the LimitReader caps it at one).
+func (v *streamVerifier) overflow() bool {
+	var b [1]byte
+	n, _ := v.r.Read(b[:])
+	return n > 0
+}
+
+// completeStreamed verifies an upload too large to hold in memory. The staged
+// object is copied to a private holding object while size and sha256 are
+// checked in the same pass; only the verified holding object is promoted to
+// the content key, re-verified as it streams, so the stored object is always
+// the checked bytes and a staging overwrite after the read changes nothing.
+// Text types stay on the buffered path: their secret scan needs the body.
+func (m *Manager) completeStreamed(ctx context.Context, row store.AttachmentUpload, release func(error) (store.Attachment, bool, error), refuse func(string) (store.Attachment, bool, error)) (store.Attachment, bool, error) {
+	if isText(row.MIME) {
+		return refuse("upload_completion_buffer_limit_exceeded")
+	}
+	holdingKey := stagingPrefix + "done-" + row.ID
+	// Whatever happens next, the holding object is private and disposable.
+	defer func() { _ = m.Objects.Delete(ctx, holdingKey) }()
+	r, err := m.Objects.Get(ctx, row.StagingKey)
+	if err != nil {
+		return release(err)
+	}
+	// The Put consumes at most the declared size; the byte past it, when the
+	// staging object is longer, is seen by overflow without being stored.
+	v := &streamVerifier{r: io.LimitReader(r, row.SizeBytes+1), sum: sha256.New(), head: make([]byte, 0, verifyHeadBytes)}
+	putErr := m.Objects.Put(ctx, holdingKey, v, row.SizeBytes, row.MIME)
+	_ = r.Close()
+	if putErr != nil {
+		return release(putErr)
+	}
+	if v.n != row.SizeBytes || v.overflow() {
+		return refuse("upload_size_mismatch")
+	}
+	if hex.EncodeToString(v.sum.Sum(nil)) != row.SHA256 {
+		return refuse("upload_sha256_mismatch")
+	}
+	mime, err := validateStreamed(m.Config, row.Name, row.MIME, v.head)
+	if err != nil {
+		reason, refusable := uploadRefusalReason(err)
+		if !refusable {
+			return release(err)
+		}
+		return refuse(reason)
+	}
+	x, created, err := m.putVerified(ctx, row.CreatedBy, row.Name, mime, uploadRefString(row), row.SHA256, row.SizeBytes, func(ctx context.Context) error {
+		tr, err := m.Objects.Get(ctx, holdingKey)
+		if err != nil {
+			return err
+		}
+		defer tr.Close()
+		pv := &streamVerifier{r: tr, sum: sha256.New()}
+		k := key(row.SHA256)
+		if err := m.Objects.Put(ctx, k, pv, row.SizeBytes, mime); err != nil {
+			return err
+		}
+		if pv.n != row.SizeBytes || pv.overflow() || hex.EncodeToString(pv.sum.Sum(nil)) != row.SHA256 {
+			_ = m.Objects.Delete(ctx, k)
+			return errors.New("promoted object failed verification")
+		}
+		return nil
+	})
 	if err != nil {
 		reason, refusable := uploadRefusalReason(err)
 		if !refusable {

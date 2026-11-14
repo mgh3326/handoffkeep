@@ -91,8 +91,12 @@ func (*uploadDB) ListAttachments(context.Context, string, string, int) ([]store.
 func (*uploadDB) AttachmentUsage(context.Context) (store.AttachmentUsage, error) {
 	return store.AttachmentUsage{}, nil
 }
-func (d *uploadDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap, clientCap int64) error {
-	return reserveFake(d.uploads, u, stagingCap, clientCap)
+func (d *uploadDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap, clientCap, storageCap int64) error {
+	var committed int64
+	for _, x := range d.rows {
+		committed += x.SizeBytes
+	}
+	return reserveFake(d.uploads, committed, u, stagingCap, clientCap, storageCap)
 }
 func (d *uploadDB) ListUnreleasedAttachmentUploads(_ context.Context, createdBefore time.Time, limit int) ([]store.AttachmentUpload, error) {
 	return unreleasedFake(d.uploads, createdBefore, limit), nil
@@ -210,9 +214,10 @@ func TestDirectUploadRoutesBeginCompleteAndRefuse(t *testing.T) {
 	}
 }
 
-// reserveFake applies the store's budget: rows whose staging object may still
-// exist count against the global and the per-creator cap.
-func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUpload, stagingCap, clientCap int64) error {
+// reserveFake applies the store's budget: committed attachments plus rows
+// whose staging object may still exist count against the storage fuse, and
+// the charged rows against the global and the per-creator cap.
+func reserveFake(uploads map[string]store.AttachmentUpload, committed int64, u store.AttachmentUpload, stagingCap, clientCap, storageCap int64) error {
 	var used, usedByClient int64
 	for _, o := range uploads {
 		if !o.StagingDeletedAt.IsZero() {
@@ -222,6 +227,9 @@ func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUp
 		if o.CreatedBy == u.CreatedBy {
 			usedByClient += o.SizeBytes
 		}
+	}
+	if committed+used+u.SizeBytes > storageCap {
+		return store.ErrAttachmentStorageCap
 	}
 	if used+u.SizeBytes > stagingCap || usedByClient+u.SizeBytes > clientCap {
 		return store.ErrAttachmentStagingCap

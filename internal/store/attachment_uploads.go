@@ -127,13 +127,15 @@ func (s *Store) ListUnreleasedAttachmentUploads(ctx context.Context, createdBefo
 var ErrAttachmentStagingCap = errors.New("attachment_staging_cap")
 
 // ReserveAttachmentUpload records a begun upload only if the bytes it declares,
-// added to the bytes still charged to the budget, stay within stagingCap, and
-// the bytes charged to its creator stay within clientCap. Charged means the
+// added to committed attachments and to the bytes still charged to the budget,
+// stay within storageCap, the charged bytes stay within stagingCap, and the
+// bytes charged to its creator stay within clientCap. Charged means the
 // staging object may still exist: a row stops counting only after
 // MarkAttachmentUploadStagingDeleted, not when it is completed or refused. The
 // check and the insert run under one advisory lock, so concurrent begins cannot
-// both pass it.
-func (s *Store) ReserveAttachmentUpload(ctx context.Context, u AttachmentUpload, stagingCap, clientCap int64) error {
+// both pass it, and pending reservations count against the storage fuse so
+// transient staging spend is bounded by what could ever commit.
+func (s *Store) ReserveAttachmentUpload(ctx context.Context, u AttachmentUpload, stagingCap, clientCap, storageCap int64) error {
 	if !attachmentUploadIDPattern.MatchString(u.ID) {
 		return errors.New("invalid attachment upload id")
 	}
@@ -145,12 +147,18 @@ func (s *Store) ReserveAttachmentUpload(ctx context.Context, u AttachmentUpload,
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('attachment_staging_budget', 0))`); err != nil {
 		return err
 	}
-	var used, usedByClient int64
+	var committed, used, usedByClient int64
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes), 0)::BIGINT FROM attachments`).Scan(&committed); err != nil {
+		return err
+	}
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes), 0)::BIGINT FROM attachment_uploads WHERE staging_deleted_at IS NULL`).Scan(&used); err != nil {
 		return err
 	}
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes), 0)::BIGINT FROM attachment_uploads WHERE staging_deleted_at IS NULL AND created_by=$1`, u.CreatedBy).Scan(&usedByClient); err != nil {
 		return err
+	}
+	if committed+used+u.SizeBytes > storageCap {
+		return ErrAttachmentStorageCap
 	}
 	if used+u.SizeBytes > stagingCap || usedByClient+u.SizeBytes > clientCap {
 		return ErrAttachmentStagingCap
