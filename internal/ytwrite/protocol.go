@@ -675,7 +675,9 @@ type Resolution struct {
 	// Adopted says whether YTID existed before the op (it adopted an issue
 	// made elsewhere: true) or was created by it (false); only with Applied.
 	// An adopted issue already holds the task's history, so its binding
-	// starts after the latest comment; a created one starts at 0. nil is "not
+	// starts after the comments the task had when the op was prepared (the
+	// store's yt_issue_comment_bounds, hk 4301); a created one starts at 0.
+	// nil is "not
 	// stated", which a kind whose binding depends on it refuses
 	// (issue_create), so an older client cannot pick a cutoff by omission.
 	Adopted *bool

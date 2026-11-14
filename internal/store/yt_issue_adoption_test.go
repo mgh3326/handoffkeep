@@ -106,15 +106,18 @@ func TestYTIssueBucketOpTakesTheProjectSetLater(t *testing.T) {
 	}
 
 	s.SetYTIssuesMode(YTIssuesOff, "")
-	later := ytaNoProjectTask(t, s)
+	later, err := s.CreateTask(t.Context(), Task{Lane: "yta-lane", Title: "yta later", Kind: "implement", CreatedBy: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	s.SetYTIssuesMode(YTIssuesOn, ytcTenant)
-	updated, changed, err := s.SetTaskProject(t.Context(), later, "yta-later", "test", "assign")
+	updated, changed, err := s.SetTaskProject(t.Context(), later.ID, "yta-later", "test", "assign")
 	if err != nil || !changed {
 		t.Fatalf("SetTaskProject changed=%t err=%v", changed, err)
 	}
-	ops := ytiOps(t, s, later)
-	if len(ops) != 1 || !ops[0].CreatedAt.Equal(updated.UpdatedAt) || ops[0].CreatedAt.Equal(updated.CreatedAt) {
-		t.Fatalf("ops %+v, want created_at %s (the project set), task created %s", ops, updated.UpdatedAt, updated.CreatedAt)
+	ops := ytiOps(t, s, later.ID)
+	if len(ops) != 1 || !ops[0].CreatedAt.Equal(updated.UpdatedAt) || ops[0].CreatedAt.Equal(later.CreatedAt) {
+		t.Fatalf("ops %+v, want created_at %s (the project set), task created %s", ops, updated.UpdatedAt, later.CreatedAt)
 	}
 }
 

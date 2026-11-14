@@ -156,8 +156,9 @@ func prepareYTIssueTx(ctx context.Context, tx pgx.Tx, now time.Time, t Task, p y
 	}
 	// The boundary an adopted issue's binding starts its comment catch-up
 	// from (hk 4301, bindYTIssueTx): the comments the task has now. The
-	// caller holds the task's lane lock, which a mode-on comment takes
-	// before it reads the binding.
+	// boundary is exact: comment inserts hold taskCommentInsertLock until
+	// they commit, so ids commit in order and no comment at or below the
+	// highest committed id can commit after this read.
 	if _, err := tx.Exec(ctx, `INSERT INTO yt_issue_comment_bounds(op_id, task_id, comments_from, recorded_at)
 		VALUES ($1,$2,(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$2),$3) ON CONFLICT (op_id) DO NOTHING`,
 		op.ID, t.ID, now.UTC()); err != nil {

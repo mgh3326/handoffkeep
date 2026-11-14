@@ -318,9 +318,10 @@ func RunIssueProtocol(t *testing.T, nl NewLedger) {
 		e.wantRemote(0, 0)
 	})
 
-	// An adoption record is proof only for the issue it names: an op whose
-	// record names another issue, and one whose sole candidate is unmarked
-	// but whose record is of another attempt, stay adoption_unconfirmed.
+	// An adoption record is proof only for the issue it names, in the op's
+	// last attempt: an op whose record names another issue, and one whose
+	// record is of an earlier attempt (a later one may have sent a create),
+	// stay adoption_unconfirmed.
 	t.Run("adoption_record_of_another_issue_is_no_proof", func(t *testing.T) {
 		e := newEnv(t, nl)
 		existing := e.yt.InjectIssue(issueSuiteProject, testTask, "#"+itoa(testTask)+" imported", "legacy body")
@@ -332,6 +333,35 @@ func RunIssueProtocol(t *testing.T, nl NewLedger) {
 		}
 		if err := e.ledger.RecordAdoption(ctx, e.clock.Now(), op.ID, cur.Attempts, "9-999"); err != nil {
 			t.Fatal(err)
+		}
+		if _, err := e.ledger.MarkUnknown(ctx, e.clock.Now(), op.ID, e.clock.Now(), ytwrite.ReasonTransport, "lost"); err != nil {
+			t.Fatal(err)
+		}
+		e.clock.Advance(time.Hour)
+		e.drive()
+		if got := e.wantOp(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonAdoptionUnconfirmed); !strings.Contains(got.LastError, existing) {
+			t.Fatalf("op %+v, want the candidate %s in its detail", got, existing)
+		}
+		e.wantRemote(0, 0)
+	})
+
+	t.Run("adoption_record_of_an_earlier_attempt_is_no_proof", func(t *testing.T) {
+		e := newEnv(t, nl)
+		existing := e.yt.InjectIssue(issueSuiteProject, testTask, "#"+itoa(testTask)+" imported", "legacy body")
+		ctx := context.Background()
+		op := e.mustPrepareIssue()
+		cur, out, err := e.ledger.Claim(ctx, e.clock.Now(), op.ID)
+		if err != nil || out != ytwrite.ClaimClaimed {
+			t.Fatalf("claim = %s %v", out, err)
+		}
+		if err := e.ledger.RecordAdoption(ctx, e.clock.Now(), op.ID, cur.Attempts, existing); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.ledger.Defer(ctx, e.clock.Now(), op.ID, e.clock.Now(), ytwrite.ReasonRateLimited, "429"); err != nil {
+			t.Fatal(err)
+		}
+		if cur, out, err = e.ledger.Claim(ctx, e.clock.Now(), op.ID); err != nil || out != ytwrite.ClaimClaimed || cur.Attempts != 2 {
+			t.Fatalf("second claim = %+v %s %v", cur, out, err)
 		}
 		if _, err := e.ledger.MarkUnknown(ctx, e.clock.Now(), op.ID, e.clock.Now(), ytwrite.ReasonTransport, "lost"); err != nil {
 			t.Fatal(err)

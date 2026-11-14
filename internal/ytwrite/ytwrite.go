@@ -328,7 +328,9 @@ type Ledger interface {
 // prepared is never dispatched again; the attempts before it ended deferred
 // (429, 401, not sent), which the protocol treats as not processed. So an
 // op with this record sent no create that can still land, and reconcile may
-// apply the adoption its settlement lost.
+// apply the adoption its settlement lost. Send records every AdoptedError;
+// reconcile reads the record only when the kind's Evidence reports the
+// adopted thing (Evidence.Adopted: issue_create).
 type Adoption struct {
 	Attempts int
 	YTID     string
