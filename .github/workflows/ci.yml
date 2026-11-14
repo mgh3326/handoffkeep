@@ -343,79 +343,106 @@ jobs:
           fi
           go test -timeout 20m -count=1 -v "${pkgs[@]}"
 
-  main-linux:
-    # T-MAIN only. The whole Go suite against PostgreSQL WITHOUT -race, the
-    # migration and startup smoke, the mutant suites and bundle freshness: the
-    # list every merged head runs, kept under 10 minutes (hk 3440). -race,
-    # macOS and the release dry run live in the deploy tier, which deploy.yml
-    # starts after this whole tier is green. PostgreSQL is a docker container
-    # started only when the selected packages can have DB-backed tests
-    # (hk 4342); the full suite always can, a packages selection is
-    # classified by scripts/ci-db-needed.sh. Docker on Linux: a self-hosted
-    # runner named by HANDOFFKEEP_POST_LINUX_RUNNER must provide it, and the
-    # stop step removes the container because service containers would have
-    # been cleaned up automatically.
+  main-store-1:
     if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
-    name: 'main: postgres'
+    name: 'main: store shard 1'
     runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
-    timeout-minutes: 30
+    timeout-minutes: 20
     env:
-      # Fallback only: the start step below re-exports this with the
-      # ephemeral port it actually bound (hk 4342 review).
       HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: handoffkeep
+          POSTGRES_PASSWORD: handoffkeep
+          POSTGRES_DB: handoffkeep
+        ports: ["127.0.0.1:5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
-      - name: decide whether the selected packages need PostgreSQL
-        id: dbplan
-        if: ${{ inputs.packages != '' }}
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          sparse-checkout: .github/actions/setup-go-cached
+      - uses: ./workflow/.github/actions/setup-go-cached
+      - name: go test store shard 1
         env:
-          PACKAGES: ${{ inputs.packages }}
+          HANDOFFKEEP_SEARCH_LATENCY: ${{ inputs.packages == './internal/store' && '1' || '' }}
         run: |
-          # The classifier ships with this change, so a ci-any-ref run on an
-          # older sha has no script: fail safe to starting PostgreSQL, the
-          # behaviour before hk 4342.
-          if [ -f scripts/ci-db-needed.sh ]; then
-            needed=$(bash scripts/ci-db-needed.sh $PACKAGES) || needed=yes
+          if [ -f scripts/store-test-shard.sh ]; then
+            RUN_REGEX=$(bash scripts/store-test-shard.sh 1)
+            go test -v -timeout 20m ./internal/store -run "$RUN_REGEX"
           else
-            needed=yes
+            go test -v -timeout 20m ./internal/store
           fi
-          echo "packages need PostgreSQL: $needed"
-          echo "needed=$needed" >> "$GITHUB_OUTPUT"
-      - name: start PostgreSQL
-        if: ${{ inputs.packages == '' || steps.dbplan.outputs.needed == 'yes' }}
+
+  main-store-2:
+    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    name: 'main: store shard 2'
+    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    env:
+      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+    services:
+      postgres:
+        image: postgres:17
         env:
-          PG_NAME: postgres-${{ github.run_id }}-${{ github.run_attempt }}
+          POSTGRES_USER: handoffkeep
+          POSTGRES_PASSWORD: handoffkeep
+          POSTGRES_DB: handoffkeep
+        ports: ["127.0.0.1:5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          sparse-checkout: .github/actions/setup-go-cached
+      - uses: ./workflow/.github/actions/setup-go-cached
+      - name: go test store shard 2
+        env:
+          HANDOFFKEEP_SEARCH_LATENCY: ${{ inputs.packages == './internal/store' && '1' || '' }}
         run: |
-          docker rm -f "$PG_NAME" >/dev/null 2>&1 || true
-          # An ephemeral host port: a container an agent that died mid-job
-          # leaves behind cannot collide with the next run on a self-hosted
-          # runner, and neither can a concurrent run (review on #358).
-          docker run -d --name "$PG_NAME" \
-            -e POSTGRES_USER=handoffkeep \
-            -e POSTGRES_PASSWORD=handoffkeep \
-            -e POSTGRES_DB=handoffkeep \
-            -p 127.0.0.1::5432 \
-            postgres:17
-          port=""
-          for i in $(seq 1 60); do
-            port=$(docker port "$PG_NAME" 5432/tcp 2>/dev/null | sed -n 's/.*:\([0-9]*\)$/\1/p' | head -1)
-            if [ -n "$port" ] && docker exec "$PG_NAME" pg_isready -U handoffkeep >/dev/null 2>&1; then
-              break
-            fi
-            sleep 2
-          done
-          if [ -z "$port" ] || ! docker exec "$PG_NAME" pg_isready -U handoffkeep >/dev/null 2>&1; then
-            docker logs "$PG_NAME" >&2 || true
-            exit 1
+          if [ -f scripts/store-test-shard.sh ]; then
+            RUN_REGEX=$(bash scripts/store-test-shard.sh 2)
+            go test -v -timeout 20m ./internal/store -run "$RUN_REGEX"
+          else
+            echo "historical ref without store sharding script; shard 1 ran internal/store"
           fi
-          echo "HANDOFFKEEP_TEST_DB_URL=postgres://handoffkeep:handoffkeep@127.0.0.1:$port/handoffkeep?sslmode=disable" >> "$GITHUB_ENV"
-      # The local action comes from the workflow revision, not the ref under
-      # test: ci-any-ref and dispatches can name a commit that predates
-      # .github/actions/setup-go-cached (hk 3629). Sparse keeps the side
-      # tree to the action alone, so repo-wide checks never see it.
+
+  main-packages:
+    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    name: 'main: other packages'
+    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    env:
+      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: handoffkeep
+          POSTGRES_PASSWORD: handoffkeep
+          POSTGRES_DB: handoffkeep
+        ports: ["127.0.0.1:5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ github.workflow_sha }}
@@ -430,47 +457,146 @@ jobs:
         working-directory: web/console
       - run: git diff --exit-code -- internal/ui/static/console
       - run: test -z "$(git status --porcelain --untracked-files=all -- internal/ui/static/console)"
+      - name: go test (PostgreSQL, non-store DB packages)
+        run: |
+          if [ -f scripts/ci-db-non-store.sh ]; then
+            pkgs=($(bash scripts/ci-db-non-store.sh))
+          else
+            marker='^[[:space:]]*(import[[:space:]]+)?([[:alnum:]_.]+[[:space:]]+)?"[^"]*/internal/testdb"'
+            dbfiles=$(git grep -l -E "$marker" -- '*_test.go' 2>/dev/null || true)
+            dirs=$(printf '%s\n' "$dbfiles" | sed -e '/^$/d' -e 's|^[^/]*$|./&|' -e 's|/[^/]*$||' | sort -u)
+            if [ -d internal/testdb ]; then
+              dirs=$(printf '%s\ninternal/testdb\n' "$dirs" | sed '/^$/d' | sort -u)
+            fi
+            pkgs=()
+            for d in $dirs; do
+              if [ "$d" != "internal/store" ] && [ -d "$d" ]; then
+                pkgs+=("./$d")
+              fi
+            done
+          fi
+          if [ "${#pkgs[@]}" -gt 0 ]; then
+            go test -v -timeout 20m "${pkgs[@]}"
+          fi
+
+  main-migration:
+    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    name: 'main: migration smoke'
+    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    env:
+      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: handoffkeep
+          POSTGRES_PASSWORD: handoffkeep
+          POSTGRES_DB: handoffkeep
+        ports: ["127.0.0.1:5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          sparse-checkout: .github/actions/setup-go-cached
+      - uses: ./workflow/.github/actions/setup-go-cached
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: {node-version-file: web/console/.nvmrc, cache: npm, cache-dependency-path: web/console/package-lock.json}
+      - run: npm ci
+        working-directory: web/console
+      - run: npm run build
+        working-directory: web/console
       - name: Task expected migration and server startup
-        if: ${{ inputs.packages == '' }}
         env:
           PUSH_BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: bash scripts/test-task-expected-migration.sh
-      - name: go test (PostgreSQL, no race)
-        if: ${{ inputs.packages == '' }}
-        run: go test -v -timeout 30m ./...
-      - name: go test (PostgreSQL, no race, packages)
-        if: ${{ inputs.packages != '' }}
+
+  main-reopen-mutants:
+    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    name: 'main: reopen mutants'
+    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    env:
+      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+    services:
+      postgres:
+        image: postgres:17
         env:
-          SUITE: ${{ inputs.suite }}
-          PACKAGES: ${{ inputs.packages }}
-          # hk 2658: the search latency measurement runs only on a dispatch
-          # that names ./internal/store, never in the full or PR suites.
-          HANDOFFKEEP_SEARCH_LATENCY: ${{ inputs.packages == './internal/store' && '1' || '' }}
-        run: |
-          bash scripts/validate-ci-packages.sh
-          echo "go test -v -timeout 30m $PACKAGES"
-          go test -v -timeout 30m $PACKAGES
+          POSTGRES_USER: handoffkeep
+          POSTGRES_PASSWORD: handoffkeep
+          POSTGRES_DB: handoffkeep
+        ports: ["127.0.0.1:5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          sparse-checkout: .github/actions/setup-go-cached
+      - uses: ./workflow/.github/actions/setup-go-cached
       - name: Reopen regression mutants
-        if: ${{ inputs.packages == '' }}
         run: python3 scripts/task-reopen-mutants.py
-      - name: Quota regression mutants
-        if: ${{ inputs.packages == '' }}
-        run: python3 scripts/quota-mutants.py
-      - name: Release build dry run
-        # Kept in the main tier for the transition (design session, hk 3440):
-        # release.yml still gates on ci-ok, so while that gate holds a green
-        # ci-ok must keep proving the release assets build. deploy-release runs
-        # it too; the duplication ends when the gate switches to deploy-ok
-        # (decision §4-3), when this step and deploy-release's collapse to one.
-        if: ${{ inputs.packages == '' }}
-        run: bash scripts/test-build-release.sh
-      # Service containers would be removed with the runner; a docker run
-      # container on a self-hosted runner is not (hk 4342).
-      - name: stop PostgreSQL
-        if: ${{ always() }}
+
+  main-quota-mutants:
+    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    name: 'main: quota mutants'
+    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    env:
+      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+    services:
+      postgres:
+        image: postgres:17
         env:
-          PG_NAME: postgres-${{ github.run_id }}-${{ github.run_attempt }}
-        run: docker rm -f "$PG_NAME" >/dev/null 2>&1 || true
+          POSTGRES_USER: handoffkeep
+          POSTGRES_PASSWORD: handoffkeep
+          POSTGRES_DB: handoffkeep
+        ports: ["127.0.0.1:5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          sparse-checkout: .github/actions/setup-go-cached
+      - uses: ./workflow/.github/actions/setup-go-cached
+      - name: Quota regression mutants
+        run: python3 scripts/quota-mutants.py
+
+  main-release-dryrun:
+    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    name: 'main: release build'
+    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          sparse-checkout: .github/actions/setup-go-cached
+      - uses: ./workflow/.github/actions/setup-go-cached
+      - name: Release build dry run
+        run: bash scripts/test-build-release.sh
 
   deploy-linux:
     # T-DEPLOY (hk 3440): the -race suite against PostgreSQL. It runs on a
@@ -592,7 +718,7 @@ jobs:
     # the needs context although the jobs API says cancelled (run
     # 42061203904: a deploy job abandoned, hk 3155).
     name: ${{ inputs.packages != '' && 'ci-ok (test, packages)' || ((inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite)) }}
-    needs: [test, pr-store-db, vitest, build, auto-tag-test, main-linux, deploy-linux, deploy-macos, deploy-release]
+    needs: [test, pr-store-db, vitest, build, auto-tag-test, main-store-1, main-store-2, main-packages, main-migration, main-reopen-mutants, main-quota-mutants, main-release-dryrun, deploy-linux, deploy-macos, deploy-release]
     if: ${{ always() && (contains(needs.*.result, 'failure') || !(contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'abandoned'))) }}
     runs-on: ubuntu-latest
     steps:
@@ -606,7 +732,13 @@ jobs:
           VITEST: ${{ needs.vitest.result }}
           BUILD: ${{ needs.build.result }}
           AUTO_TAG: ${{ needs.auto-tag-test.result }}
-          MAIN_LINUX: ${{ needs.main-linux.result }}
+          MAIN_STORE_1: ${{ needs.main-store-1.result }}
+          MAIN_STORE_2: ${{ needs.main-store-2.result }}
+          MAIN_PACKAGES: ${{ needs.main-packages.result }}
+          MAIN_MIGRATION: ${{ needs.main-migration.result }}
+          MAIN_REOPEN_MUTANTS: ${{ needs.main-reopen-mutants.result }}
+          MAIN_QUOTA_MUTANTS: ${{ needs.main-quota-mutants.result }}
+          MAIN_RELEASE_DRYRUN: ${{ needs.main-release-dryrun.result }}
           DEPLOY_LINUX: ${{ needs.deploy-linux.result }}
           DEPLOY_MACOS: ${{ needs.deploy-macos.result }}
           DEPLOY_RELEASE: ${{ needs.deploy-release.result }}
@@ -640,5 +772,11 @@ jobs:
           require "$(in_suite vitest)" vitest "$VITEST"
           require "$(in_suite build)" build "$BUILD"
           main_test=no; [ "$main" = yes ] && main_test=$(in_suite test)
-          require "$main_test" main-linux "$MAIN_LINUX"
+          require "$main_test" main-store-1 "$MAIN_STORE_1"
+          require "$main_test" main-store-2 "$MAIN_STORE_2"
+          require "$main_test" main-packages "$MAIN_PACKAGES"
+          require "$main_test" main-migration "$MAIN_MIGRATION"
+          require "$main_test" main-reopen-mutants "$MAIN_REOPEN_MUTANTS"
+          require "$main_test" main-quota-mutants "$MAIN_QUOTA_MUTANTS"
+          require "$main_test" main-release-dryrun "$MAIN_RELEASE_DRYRUN"
           exit "$bad"

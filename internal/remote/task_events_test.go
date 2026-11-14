@@ -109,3 +109,43 @@ func TestSweepPreview(t *testing.T) {
 		t.Fatalf("preview: %+v %v", xs, err)
 	}
 }
+
+func TestTaskHygieneRemote(t *testing.T) {
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/tasks/hygiene" {
+			t.Errorf("request %s %s", r.Method, r.URL.Path)
+		}
+		var in struct {
+			Project string `json:"project"`
+			DryRun  *bool  `json:"dry_run"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			t.Error(err)
+		}
+		if in.Project != "my-project" {
+			t.Errorf("expected project my-project, got %q", in.Project)
+		}
+		if in.DryRun == nil || !*in.DryRun {
+			t.Errorf("expected dry_run=true, got %v", in.DryRun)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(store.TaskHygieneReport{
+			DryRun:           true,
+			Project:          in.Project,
+			MechanicalCloses: []store.TaskHygieneClose{{TaskID: 10, ToState: "merged", Rule: "merged_pr"}},
+		})
+	}))
+	defer h.Close()
+	c := Client{URL: h.URL, Token: "t"}
+	rep, err := c.TaskHygiene(t.Context(), "my-project", true)
+	if err != nil || !rep.DryRun || rep.Project != "my-project" || len(rep.MechanicalCloses) != 1 || rep.MechanicalCloses[0].TaskID != 10 {
+		t.Fatalf("TaskHygiene: %+v %v", rep, err)
+	}
+
+	hOld := httptest.NewServer(http.NotFoundHandler())
+	defer hOld.Close()
+	cOld := Client{URL: hOld.URL, Token: "t"}
+	if _, err := cOld.TaskHygiene(t.Context(), "", true); err == nil || !strings.Contains(err.Error(), "task_hygiene_unsupported") {
+		t.Fatalf("old server: %v", err)
+	}
+}

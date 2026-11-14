@@ -122,6 +122,7 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 		Annotations: writeAnnotations(),
 	}, o.decisionRecord)
 	registerMetaTools(s, o)
+	registerTaskContextTool(s, o)
 }
 
 func readOnlyAnnotations() *gmcp.ToolAnnotations {
