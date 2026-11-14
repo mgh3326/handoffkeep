@@ -90,6 +90,9 @@ type FakeYouTrack struct {
 	// DelayCommit fault held back; ReleaseDelayed runs each commit.
 	delayedCreates []func() string
 
+	// links is the issue-link store (fake_links.go).
+	links fakeLinks
+
 	// BeforeCreate runs at the start of every CreateComment, with the caller's
 	// context, before anything else. Tests use it to cancel a caller mid-call.
 	BeforeCreate func(ctx context.Context)
