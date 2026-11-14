@@ -151,6 +151,12 @@ const (
 	// task is bound to another issue on the op's tenant; nothing was sent
 	// and the op was never retargeted.
 	ReasonBindingChanged = "binding_changed"
+	// ReasonLinkTargetChanged: a prepared issue_links op names a link target
+	// (a parent, related or duplicate task and its issue) that task is no
+	// longer bound to on the op's tenant: the target was unbound or rebound
+	// after the snapshot was prepared. It is closed without being sent; the
+	// writer's next snapshot, prepared from the current bindings, replaces it.
+	ReasonLinkTargetChanged = "link_target_changed"
 )
 
 // CancelledByUnbind reports whether reason closed an op because its task's

@@ -517,3 +517,110 @@ func TestYTLinksConsumerRegistered(t *testing.T) {
 		t.Fatalf("task_links consumer = %+v, %v", c, ok)
 	}
 }
+
+// ytlfStaleSetup is a writer with a related edge to a bound target and the
+// writer's prepared op that names the target's issue; it returns the store,
+// the writer, the target and that op.
+func ytlfStaleSetup(t *testing.T, prefix string) (*Store, int64, int64, ytwrite.Op) {
+	t.Helper()
+	s, ids := ytlfSetup(t, prefix, YTLinksOn, 2)
+	writer, target := ids[0], ids[1]
+	if changed, err := s.AddTaskRelation(t.Context(), writer, RelationRelated, target, "tester"); err != nil || !changed {
+		t.Fatalf("add: changed=%t err=%v", changed, err)
+	}
+	ytlfPass(t, s)
+	ops := ytlfOps(t, s, writer)
+	op := ops[len(ops)-1]
+	if snap := ytlfLast(t, s, writer); op.State != ytwrite.StatePrepared || !reflect.DeepEqual(snap.Desired.Related, ytlfTargets(target)) {
+		t.Fatalf("writer's op %+v names %+v, want a prepared op naming task %d", op, snap.Desired.Related, target)
+	}
+	return s, writer, target, op
+}
+
+func ytlfOp(t *testing.T, s *Store, id int64) ytwrite.Op {
+	t.Helper()
+	op, err := s.YTWriteLedger().ByID(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return op
+}
+
+// Unbinding a link target (hk 4711, #426 r4575608730): the writer's prepared
+// op still names the removed issue. The unbind requests the writer's next
+// snapshot in its own transaction, and a claim that comes before that
+// snapshot rejects the stale op instead of writing the link to an issue the
+// target no longer owns. The next snapshot holds the edge.
+func TestYTLinksUnbindTargetRejectsDependentsStaleOps(t *testing.T) {
+	s, writer, target, stale := ytlfStaleSetup(t, "yt_links_unbind_target")
+	ctx := t.Context()
+	before := ytFeedMaxSyncID(t, s)
+	if _, err := s.UnbindYTTaskBinding(ctx, target, YTUnbindOptions{By: "operator", Reason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ytlFeedIDs(t, s, before); !reflect.DeepEqual(got, ytlIDs(writer)) {
+		t.Fatalf("the unbind wrote feed rows for tasks %v, want the writer %d", got, writer)
+	}
+	now := time.Now().UTC().Add(time.Minute)
+	got, out, err := s.YTTenantLedger(ytcTenant).Claim(ctx, now, stale.ID)
+	if err != nil || out == ytwrite.ClaimClaimed || got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonLinkTargetChanged {
+		t.Fatalf("claim of the stale op: %s %+v %v, want it rejected with %s", out, got, err, ytwrite.ReasonLinkTargetChanged)
+	}
+	ytlfPass(t, s)
+	next := ytlfOps(t, s, writer)
+	if len(next) == 0 || next[len(next)-1].ID == stale.ID {
+		t.Fatalf("the unbind's feed row made no new op for the writer: %+v", next)
+	}
+	snap := ytlfLast(t, s, writer)
+	if len(snap.Desired.Related) != 0 || !reflect.DeepEqual(snap.Held, []ytwrite.IssueLinkHeld{{Kind: ytwrite.LinkEdgeRelated, TaskID: target}}) {
+		t.Fatalf("writer's next snapshot %+v, want the edge to %d held", snap, target)
+	}
+	if got, out, err := s.YTTenantLedger(ytcTenant).Claim(ctx, now, next[len(next)-1].ID); err != nil || out != ytwrite.ClaimClaimed {
+		t.Fatalf("claim of the next snapshot: %s %+v %v", out, got, err)
+	}
+}
+
+// Rebinding a link target to another issue (hk 4711, #426 r4575608733): the
+// writer's op prepared before names the old issue. The bind's feed row makes
+// the consumer reject it before it prepares the snapshot that names the new
+// issue, so the lane is not blocked by an op the gate would admit.
+func TestYTLinksRebindTargetRejectsDependentsStaleOps(t *testing.T) {
+	s, writer, target, stale := ytlfStaleSetup(t, "yt_links_rebind_target")
+	ctx := t.Context()
+	if _, err := s.UnbindYTTaskBinding(ctx, target, YTUnbindOptions{By: "operator", Reason: "wrong issue"}); err != nil {
+		t.Fatal(err)
+	}
+	other := ytbBinding(target)
+	other.IssueID, other.IssueReadable = "2-other", "HK-other"
+	ytbBind(t, s, other)
+	ytlfPass(t, s)
+	if got := ytlfOp(t, s, stale.ID); got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonLinkTargetChanged {
+		t.Fatalf("the stale op after the rebind = %+v, want rejected with %s", got, ytwrite.ReasonLinkTargetChanged)
+	}
+	next := ytlfOps(t, s, writer)
+	op := next[len(next)-1]
+	snap := ytlfLast(t, s, writer)
+	if op.ID == stale.ID || !reflect.DeepEqual(snap.Desired.Related, []ytwrite.IssueLinkTarget{{TaskID: target, IssueID: other.IssueID}}) {
+		t.Fatalf("writer's next op %+v names %+v, want task %d on %s", op, snap.Desired.Related, target, other.IssueID)
+	}
+	if got, out, err := s.YTTenantLedger(ytcTenant).Claim(ctx, time.Now().UTC().Add(time.Minute), op.ID); err != nil || out != ytwrite.ClaimClaimed {
+		t.Fatalf("claim of the new snapshot: %s %+v %v", out, got, err)
+	}
+}
+
+// The claim's check alone: a rebind whose feed row the consumer has not read
+// yet leaves the stale op first in the writer's lane, and the claim rejects it.
+func TestYTLinksClaimRejectsOpNamingARebound(t *testing.T) {
+	s, _, target, stale := ytlfStaleSetup(t, "yt_links_claim_rebound")
+	ctx := t.Context()
+	if _, err := s.UnbindYTTaskBinding(ctx, target, YTUnbindOptions{By: "operator", Reason: "wrong issue"}); err != nil {
+		t.Fatal(err)
+	}
+	other := ytbBinding(target)
+	other.IssueID, other.IssueReadable = "2-other", "HK-other"
+	ytbBind(t, s, other)
+	got, out, err := s.YTTenantLedger(ytcTenant).Claim(ctx, time.Now().UTC().Add(time.Minute), stale.ID)
+	if err != nil || out == ytwrite.ClaimClaimed || got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonLinkTargetChanged {
+		t.Fatalf("claim of the stale op: %s %+v %v, want it rejected with %s", out, got, err, ytwrite.ReasonLinkTargetChanged)
+	}
+}

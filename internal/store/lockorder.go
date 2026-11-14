@@ -354,7 +354,14 @@ package store
 //     are not locked there, because only a feed pass may hold more than one
 //     lane lock. It inserts one task 'U' sync_log row for each of them
 //     (level 6 at commit), and the consumer prepares their snapshots under
-//     its own lane locks in a later pass. SetYTAuthority reads yt_links_sweep
+//     its own lane locks in a later pass. UnbindYTTaskBinding does the same
+//     for the writers that point at the unbound task (ytLinksOnUnbindTx,
+//     hk 4711) and does not update their yt_write_ops rows: a feed pass may
+//     hold a writer's lane lock and those rows while it waits for the unbound
+//     task's lane lock. Their stale ops (ytLinksStaleSQL) are rejected under
+//     the writer's own lane lock instead, by the consumer before it prepares
+//     the next snapshot and by Claim, which reads the target tasks'
+//     yt_task_bindings rows without a lock. SetYTAuthority reads yt_links_sweep
 //     without a lock, after the authority rows.
 //
 //   - Decision mode (yt_decisions.go, hk 4054). Its lanes are decisions

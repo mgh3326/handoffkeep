@@ -88,6 +88,73 @@ func ytLinksGateSQL(s *Store) string {
 		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
 }
 
+// ytLinksStaleSQL is the one staleness rule of a prepared issue_links op o
+// (hk 4711): o is stale once any link target it names (the payload's parent,
+// related and duplicate entries, each a task id and that task's issue) is no
+// longer that task's binding on o's tenant, because the target was unbound or
+// rebound after o was prepared. Written as it stands, o would add a link to
+// an issue the target task no longer owns, so a stale op is never sent:
+// Claim rejects it under the writer's lane lock (claimYTLinksTargetsTx), and
+// the writer's next snapshot rejects the ones still queued before it is
+// prepared (rejectStaleYTLinksOpsTx). The binding of a target is changed
+// under the target's lane lock, not the writer's, so neither place can be
+// the only one: a binding that commits after a claim's read is ordered after
+// that op (it was correct when sent, and the dependent's next snapshot,
+// which the binding's feed rows request, corrects it); one that commits
+// before is seen. o's own target is not part of this rule: the gate checks
+// it, and the held-op recovery closes an op whose own binding moved.
+const ytLinksStaleSQL = `EXISTS (SELECT 1 FROM (
+		SELECT o.payload->'desired'->'parent' AS t
+		UNION ALL SELECT jsonb_array_elements(CASE WHEN jsonb_typeof(o.payload->'desired'->'related') = 'array'
+			THEN o.payload->'desired'->'related' ELSE '[]'::jsonb END)
+		UNION ALL SELECT jsonb_array_elements(CASE WHEN jsonb_typeof(o.payload->'desired'->'duplicates') = 'array'
+			THEN o.payload->'desired'->'duplicates' ELSE '[]'::jsonb END)
+	) n WHERE jsonb_typeof(n.t) = 'object' AND NOT EXISTS (SELECT 1 FROM yt_task_bindings b
+		WHERE b.task_id::text = n.t->>'task_id' AND b.issue_id = n.t->>'issue' AND b.tenant = o.tenant))`
+
+// claimYTLinksTargetsTx is Claim's check of an issue_links op (ytLinksStaleSQL):
+// a stale op is rejected with ReasonLinkTargetChanged, never dispatched. The
+// claim holds the writer's lane lock and the op row, so no new snapshot of
+// the writer and no other claim of it runs in between.
+func claimYTLinksTargetsTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (reject, detail string, err error) {
+	if op.Kind != ytwrite.KindIssueLinks {
+		return "", "", nil
+	}
+	var stale bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id = $1 AND `+ytLinksStaleSQL+`)`, op.ID).Scan(&stale); err != nil {
+		return "", "", err
+	}
+	if !stale {
+		return "", "", nil
+	}
+	log.Printf("ytwrite.links_target_changed op_id=%d task_id=%s issue_id=%q", op.ID, op.EntityID, op.YTTargetID)
+	return ytwrite.ReasonLinkTargetChanged, "a link target of this snapshot is no longer bound to the issue it names", nil
+}
+
+// rejectStaleYTLinksOpsTx rejects the prepared issue_links ops of task key on
+// tenant that ytLinksStaleSQL calls stale, so the snapshot prepared next is
+// not queued behind an op the claim would only reject. The caller holds the
+// task's lane lock; the rows are the task's own yt_write_ops rows, which a
+// lane holder updates after the lock (lockorder.go).
+func rejectStaleYTLinksOpsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant, taskKey string) error {
+	rows, err := tx.Query(ctx, `UPDATE yt_write_ops o SET state='rejected', reason=$4, last_error=$5, resolved_at=$6
+		WHERE o.entity_kind='task' AND o.entity_id=$1 AND o.state='prepared' AND o.tenant=$2 AND o.principal=$3 AND o.kind=$7
+			AND `+ytLinksStaleSQL+`
+		RETURNING o.id`, taskKey, tenant, YTLinksPrincipal, ytwrite.ReasonLinkTargetChanged,
+		"a link target of this snapshot is no longer bound to the issue it names", now.UTC(), ytwrite.KindIssueLinks)
+	if err != nil {
+		return err
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		log.Printf("ytwrite.links_target_changed op_id=%d task_id=%s", id, taskKey)
+	}
+	return nil
+}
+
 // ytLinkKindParent names a parent edge in a desired or held set; the other
 // two kinds are the relation kinds RelationRelated and RelationDuplicateOf.
 // blocks is not projected.
@@ -278,6 +345,9 @@ func prepareYTLinksTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant stri
 		log.Printf("ytwrite.links_skipped task_id=%d reason=binding_disagreement source=%q", id, source)
 		return ytLinksDisagrees, nil
 	}
+	if err := rejectStaleYTLinksOpsTx(ctx, tx, now, tenant, strconv.FormatInt(id, 10)); err != nil {
+		return "", err
+	}
 	d, exists, err := ytLinksDesiredTx(ctx, tx, tenant, id)
 	if err != nil {
 		return "", err
@@ -359,15 +429,37 @@ func ytLinksHandler(s *Store, now time.Time) FeedHandler {
 // rows take the commit-time sync allocator lock, last, as every task write
 // does.
 func ytLinksOnBindTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
+	return ytLinksWakeTx(ctx, tx, taskID, true)
+}
+
+// ytLinksOnUnbindTx is ytLinksOnBindTx for the removal of task id's binding
+// (hk 4711): the writers that point at id prepared snapshots naming id's
+// issue, which are stale now (ytLinksStaleSQL), and their next snapshot holds
+// the edge instead. One 'U' row per writer makes the consumer prepare it, and
+// that preparation rejects the stale ops first; a claim that comes before the
+// consumer rejects them itself. id's own ops are the unbind's. The unbind
+// does not reject the writers' ops itself: it holds id's lane lock, and a
+// feed pass that holds a writer's lane lock and its op rows may be waiting
+// for id's lane lock, so updating those rows there could close a cycle.
+func ytLinksOnUnbindTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
+	return ytLinksWakeTx(ctx, tx, taskID, false)
+}
+
+// ytLinksWakeTx writes the task 'U' feed rows of ytLinksOnBindTx: one for
+// each writer that points at task id, and one for id itself when self is set
+// and id writes a link.
+func ytLinksWakeTx(ctx context.Context, tx pgx.Tx, taskID int64, self bool) error {
 	ids, err := ytLinkWritersOfTx(ctx, tx, taskID)
 	if err != nil {
 		return err
 	}
 	var writes bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1 AND parent_id IS NOT NULL)
+	if self {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1 AND parent_id IS NOT NULL)
 		OR EXISTS (SELECT 1 FROM task_relations WHERE src_id = $1 AND archived_at IS NULL AND kind IN ('related','duplicate_of'))`,
-		taskID).Scan(&writes); err != nil {
-		return err
+			taskID).Scan(&writes); err != nil {
+			return err
+		}
 	}
 	if writes {
 		ids = append(ids, taskID)
@@ -385,6 +477,6 @@ func ytLinksOnBindTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
 		SELECT 'task', u.model_id, 'U', clock_timestamp() FROM unnest($1::text[]) AS u(model_id)`, texts); err != nil {
 		return err
 	}
-	log.Printf("ytwrite.links_on_bind task_id=%d tasks=%d", taskID, len(ids))
+	log.Printf("ytwrite.links_wake task_id=%d self=%t tasks=%d", taskID, self, len(ids))
 	return nil
 }

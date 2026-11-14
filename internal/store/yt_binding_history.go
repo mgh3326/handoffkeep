@@ -245,6 +245,11 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	if err := insertYTBindingHistoryTx(ctx, tx, b, ytBindingActionUnbound, o.By, o.Reason, now); err != nil {
 		return res, err
 	}
+	// The tasks whose links snapshots name this issue as a target are stale
+	// now; their next snapshot is requested in this transaction (hk 4711).
+	if err := ytLinksOnUnbindTx(ctx, tx, taskID); err != nil {
+		return res, err
+	}
 	res.Removed, res.Binding = true, &b
 	return res, tx.Commit(ctx)
 }
