@@ -383,6 +383,18 @@ package store
 //     the recovery commits, and a recovery that starts after a switch sees
 //     youtrack and keeps the op.
 //
+//   - The moved-comment requeue (RequeueYTMovedComments,
+//     yt_comment_requeue.go, hk 4569). Its candidate scan is one statement
+//     and locks nothing. Each candidate is its own transaction, in the
+//     catch-up's order: the comments authority row FOR SHARE, then the task's
+//     lane lock, then plain reads of yt_comment_write_links, the rejected op,
+//     yt_task_bindings, the binding's sources, the lane's unresolved
+//     issue_move ops and the comment, then a new
+//     yt_write_ops row (prepareYTOpTx, whose lane lock is re-entrant and whose
+//     authority FOR SHARE is already held) and an UPDATE of the comment's
+//     yt_comment_write_links row. It takes no task row, no level 1-5 lock and
+//     no sync lock, so it adds no edge the catch-up does not already have.
+//
 //   - The automatic binder (yt_binding_binder.go, yt_binding_publish.go,
 //     hk 4492). Its candidate scan takes the yt_binding_cursor row FOR UPDATE,
 //     reads task_comments, yt_task_bindings and yt_issue_intents without a

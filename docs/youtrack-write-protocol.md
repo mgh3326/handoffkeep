@@ -1482,8 +1482,22 @@ release rollback never meets an authority value it cannot parse (consult hk
   on a disagreement the op is `rejected / ambiguous_issue` and nothing is
   sent; it never waits in the lane for a later move (hk 4457's hold was
   taken out of PR #383 because a hold that waits for a later op on a
-  strictly ordered lane can wedge it; redesign hk 4569). Migration
-  `20261113-yt-comment-hold` stays registered and unused. A task with no
+  strictly ordered lane can wedge it). Instead (hk 4569) the comment worker's
+  requeue pass (`RequeueYTMovedComments`, before each Drive pass in mode
+  `on`) copies such a comment again once the binding agrees with every local
+  source (the `issue_move` applied, or the task came back to the issue's
+  project): a new `comment_append` op, key
+  `task-comment:<comment id>:requeue:<rejected op id>`, targeting the binding's
+  issue, prepared at the tail of the task's lane, so it waits only for ops
+  with smaller ids. The comment's `yt_comment_write_links` row moves from the
+  rejected op to the new one, and the projection reads the new op. Only an op
+  rejected `ambiguous_issue` with no target and no attempt, whose binding is
+  the one the task's own applied `issue_create` published, is copied again;
+  the rejected op itself never changes, and the rejected-op alert still
+  reports it. The copy lands after any comment already on the lane, so the
+  issue shows it after them. Logs: `ytwrite.comment_requeued`,
+  `ytwrite.comment_requeue_skipped`. Migration `20261113-yt-comment-hold`
+  stays registered and unused. A task with no
   pending create, a body
   the protocol cannot send, and a mapping disagreement are still refused.
   The previous release's comment gate never admits a targetless op, so it
