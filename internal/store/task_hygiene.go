@@ -229,23 +229,31 @@ func (s *Store) TaskHygiene(ctx context.Context, now time.Time, project string, 
 				continue
 			}
 			fromState := t.State
-			ev := sourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, PR: pr, At: now, Note: "hygiene: mechanical close of merged PR"}
-			res, err := s.applySourceEventTx(ctx, tx, t, ev, now)
+			toState := StateMerged
+			if canCompleteKind(t.Kind) {
+				toState = StateCompleted
+			}
+			updated, err := s.transitionTaskTx(ctx, tx, t.ID, TransitionInput{
+				To:       toState,
+				By:       "hk.hygiene",
+				Note:     "hygiene: mechanical close of merged PR",
+				Refs:     &TaskRefs{PR: pr},
+				Evidence: pr,
+			}, false)
 			if err != nil {
 				return TaskHygieneReport{}, err
 			}
-			if res.Applied {
-				rep.MechanicalCloses = append(rep.MechanicalCloses, TaskHygieneClose{
-					TaskID:    t.ID,
-					Title:     t.Title,
-					Lane:      t.Lane,
-					Kind:      t.Kind,
-					FromState: fromState,
-					ToState:   res.State,
-					Rule:      "merged_pr",
-					PR:        pr,
-				})
-			}
+			rep.MechanicalCloses = append(rep.MechanicalCloses, TaskHygieneClose{
+				TaskID:    t.ID,
+				Title:     t.Title,
+				Lane:      t.Lane,
+				Kind:      t.Kind,
+				FromState: fromState,
+				ToState:   updated.State,
+				Rule:      "merged_pr",
+				PR:        pr,
+			})
+
 		}
 
 		for _, cand := range mechanicalAutoCloseParents {
