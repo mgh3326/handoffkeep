@@ -187,3 +187,34 @@ func TestTaskHygieneProjectScope(t *testing.T) {
 		t.Fatalf("project scoped findings: %+v, want only task %d", rep.Findings.SettledOpenDecisions, p1Task.ID)
 	}
 }
+
+func TestHygieneConsultFindingCollector(t *testing.T) {
+	for _, rule := range []hygieneRule{hygieneMergedRule, hygieneParentRule} {
+		t.Run(rule.name(), func(t *testing.T) {
+			rep := TaskHygieneReport{}
+			for i := 0; i < hygieneFindingsLimit; i++ {
+				hygieneAddFinding(&rep, rule, TaskDriftTask{ID: int64(i + 1), Mechanical: true, Hold: "current recheck hold"})
+			}
+			get := func() ([]TaskDriftTask, bool) {
+				if rule == hygieneMergedRule {
+					return rep.Findings.MergedPROpenTasks, rep.Findings.MergedPROpenTasksTruncated
+				}
+				return rep.Findings.AutoCloseHeldParents, rep.Findings.AutoCloseHeldParentsTruncated
+			}
+			rows, truncated := get()
+			if len(rows) != 200 || truncated {
+				t.Fatalf("exact cap: %d rows, truncated=%v", len(rows), truncated)
+			}
+			for _, row := range rows {
+				if row.Mechanical || row.Hold != "current recheck hold" {
+					t.Fatalf("incorrect finding: %+v", row)
+				}
+			}
+			hygieneAddFinding(&rep, rule, TaskDriftTask{ID: 201, Mechanical: true})
+			rows, truncated = get()
+			if len(rows) != 200 || !truncated {
+				t.Fatalf("overflow: %d rows, truncated=%v", len(rows), truncated)
+			}
+		})
+	}
+}

@@ -21,7 +21,10 @@ type TaskHygieneReport struct {
 	SettleMerged     *SettleMergedReport `json:"settle_merged,omitempty"`
 }
 
-// TaskHygieneClose records one task closed mechanically.
+// TaskHygieneClose records a net task state change in one mechanical command.
+// Apply reports include every changed ancestor, including merged-to-deployed.
+// Dry-run rows are direct candidate predictions in the discovery snapshot;
+// they do not simulate newly enabled closes or cascading transitions.
 type TaskHygieneClose struct {
 	TaskID    int64  `json:"task_id"`
 	Title     string `json:"title"`
@@ -69,513 +72,540 @@ const (
 	hygienePageSize      = 200
 )
 
-// hygieneLaggingDecisionsSQL selects decision_deliveries rows lagging behind
-// effective status past DecisionDeliveryLagAge. $1 is now (for effective status),
-// $2 is the lag cutoff, $3 is the optional project filter, $4 is the request_id cursor,
-// and $5 is the limit.
-const hygieneLaggingDecisionsSQL = `SELECT n.request_id, n.destination, COALESCE(t.title, ''), n.desired_version, n.applied_version, n.attempts, n.next_attempt_at, n.last_error_code
-FROM decision_deliveries n
-JOIN decision_requests d ON d.id = n.request_id
-LEFT JOIN tasks t ON t.id = d.task_id
-WHERE n.state = 'pending'
-  AND n.applied_version <> ` + decisionEffectiveStatusSQL + `
-  AND n.next_attempt_at < $2::timestamptz
-  AND ($3::text IS NULL OR t.project = $3)
-  AND n.request_id > $4
-ORDER BY n.request_id LIMIT $5`
+// All predicates below are composed with FROM tasks, without an alias.
+// In particular taskActivitySQL requires the relation name tasks.
+var hygieneMergedPredicate = `state NOT IN (` + settledStatesSQL + `)
+ AND (
+   EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
+     WHERE ct.task_id=tasks.id AND ct.relation='implements'
+       AND c.state='merged' AND c.reverted_by_change_id IS NULL)
+   OR (COALESCE(refs->>'pr','')<>'' AND (
+     EXISTS (SELECT 1 FROM changes c WHERE c.state='merged'
+       AND (` + prURLSQL + `)=tasks.refs->>'pr')
+     OR EXISTS (SELECT 1 FROM tasks m WHERE m.id<>tasks.id
+       AND m.state IN ('merged','deployed') AND m.refs->>'pr'=tasks.refs->>'pr')))
+ ) AND NOT EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
+   WHERE ` + unresolvedRevertSQL("tasks.id") + `)`
 
-// hygieneMergedPRPageSQL pages candidates for Mergewake PR not merged.
-// $1 is id cursor (t.id > $1), $2 is project (or NULL), $3 is limit.
-var hygieneMergedPRPageSQL = `SELECT ` + driftColumns + `t.updated_at FROM tasks t
-	WHERE t.state NOT IN (` + settledStatesSQL + `)
-	  AND t.id > $1
-	  AND ($2::text IS NULL OR t.project = $2)
-	  AND (
-		EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
-			WHERE ct.task_id=t.id AND ct.relation='implements' AND c.state='merged' AND c.reverted_by_change_id IS NULL)
-		OR (COALESCE(t.refs->>'pr','')<>'' AND (
-			EXISTS (SELECT 1 FROM changes c WHERE c.state='merged' AND (` + prURLSQL + `)=t.refs->>'pr')
-			OR EXISTS (SELECT 1 FROM tasks m WHERE m.id<>t.id AND m.state IN ('merged','deployed') AND m.refs->>'pr'=t.refs->>'pr')))
-	) AND NOT EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ` + unresolvedRevertSQL("t.id") + `)
-	ORDER BY t.id LIMIT $3`
+var hygieneParentPredicate = `state IN (` + autoCloseStatesSQL + `)
+ AND EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=tasks.id
+   AND k.state IN ('completed','merged','deployed'))
+ AND NOT EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=tasks.id
+   AND k.state NOT IN (` + settledStatesSQL + `))
+ AND (kind IN ('decide','ops','verify','research')
+   OR EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=tasks.id
+     AND k.state IN ('merged','deployed')))`
 
-// hygieneAutoCloseHeldPageSQL pages candidates for auto-close held parents.
-// $1 is id cursor (p.id > $1), $2 is project (or NULL), $3 is limit.
-var hygieneAutoCloseHeldPageSQL = `SELECT ` + driftColumns + `p.updated_at FROM tasks p
-	WHERE p.state IN (` + autoCloseStatesSQL + `)
-	  AND p.id > $1
-	  AND ($2::text IS NULL OR p.project = $2)
-	  AND EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=p.id AND k.state IN ('completed','merged','deployed'))
-	  AND NOT EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=p.id AND k.state NOT IN (` + settledStatesSQL + `))
-	  AND (p.kind IN ('decide','ops','verify','research') OR EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=p.id AND k.state IN ('merged','deployed')))
-	ORDER BY p.id LIMIT $3`
+// $1 now, $2 cutoff, $3 project, ($4,$5) full primary-key cursor, $6 limit.
+const hygieneLaggingDecisionsSQL = `SELECT n.request_id,n.destination,
+ COALESCE(t.title,''),n.desired_version,n.applied_version,n.attempts,
+ n.next_attempt_at,n.last_error_code
+ FROM decision_deliveries n JOIN decision_requests d ON d.id=n.request_id
+ LEFT JOIN tasks t ON t.id=d.task_id
+ WHERE n.state='pending' AND n.applied_version<>` + decisionEffectiveStatusSQL + `
+ AND n.next_attempt_at<$2::timestamptz
+ AND ($3::text IS NULL OR t.project=$3)
+ AND (n.request_id,n.destination)>($4::bigint,$5::text)
+ ORDER BY n.request_id,n.destination LIMIT $6`
 
-// hygieneSettledOpenPageSQL pages settled open decisions.
-// $1 is status ('open'), $2 is id cursor (t.id > $2), $3 is project (or NULL), $4 is limit.
-const hygieneSettledOpenPageSQL = `SELECT ` + driftColumns + `updated_at FROM tasks t
-	WHERE t.state IN (` + settledStatesSQL + `)
-	  AND t.refs->'decision_request'->>'status'=$1
-	  AND t.id > $2
-	  AND ($3::text IS NULL OR t.project = $3)
-	ORDER BY t.id LIMIT $4`
+type hygieneRule uint8
 
-// hygieneIdleStartedPageSQL pages idle started tasks.
-// $1 is cutoff time, $2 is id cursor (id > $2), $3 is project (or NULL), $4 is limit.
-const hygieneIdleStartedPageSQL = `SELECT ` + driftColumns + taskActivitySQL + ` FROM tasks
-	WHERE state IN ('researching','developing')
-	  AND ` + taskActivitySQL + ` < $1::timestamptz
-	  AND id > $2
-	  AND ($3::text IS NULL OR project = $3)
-	ORDER BY id LIMIT $4`
+const (
+	hygieneMergedRule hygieneRule = iota
+	hygieneParentRule
+)
 
-// hygieneMergedWithoutDeployPageSQL pages merged tasks without deploy.
-// $1 is cutoff time, $2 is since cursor, $3 is id cursor, $4 is project (or NULL), $5 is limit.
-const hygieneMergedWithoutDeployPageSQL = `SELECT ` + driftColumns + `COALESCE(t.completed_at,t.updated_at) FROM tasks t
-	WHERE t.state='merged'
-	  AND COALESCE(t.completed_at,t.updated_at)<$1
-	  AND ($4::text IS NULL OR t.project = $4)
-	  AND (COALESCE(t.completed_at,t.updated_at),t.id)>($2,$3)
-	ORDER BY COALESCE(t.completed_at,t.updated_at),t.id LIMIT $5`
+func (r hygieneRule) name() string {
+	if r == hygieneMergedRule {
+		return "merged_pr"
+	}
+	return "auto_close_parent"
+}
 
-// TaskHygiene runs the daily hygiene job (hk 3292): it checks for merged PRs
-// with open tasks, live attempts without lease (idle started tasks), and
-// answered decisions not delivered. Mechanical closes are applied when dryRun
-// is false, and findings are gathered for operator inbox attention.
+func (r hygieneRule) predicate() string {
+	if r == hygieneMergedRule {
+		return hygieneMergedPredicate
+	}
+	return hygieneParentPredicate
+}
+
+type hygieneCandidate struct {
+	rule hygieneRule
+	id   int64
+}
+
+// A discovered ID is only a hint. This decision is rebuilt in the execution
+// transaction, under the mutation lock and task row lock.
+type hygieneDecision struct {
+	task       Task
+	finding    TaskDriftTask
+	present    bool
+	ready      bool
+	target     string
+	pr         string
+	childID    int64
+	childState string
+}
+
+// hygieneAppend is the only insertion path for bounded findings. Truncated
+// means that an additional qualifying row was actually observed.
+func hygieneAppend[T any](dst *[]T, truncated *bool, x T) {
+	if len(*dst) < hygieneFindingsLimit {
+		*dst = append(*dst, x)
+	} else {
+		*truncated = true
+	}
+}
+
+func hygieneAddFinding(rep *TaskHygieneReport, rule hygieneRule, x TaskDriftTask) {
+	x.Mechanical = false
+	if rule == hygieneMergedRule {
+		hygieneAppend(&rep.Findings.MergedPROpenTasks, &rep.Findings.MergedPROpenTasksTruncated, x)
+	} else {
+		hygieneAppend(&rep.Findings.AutoCloseHeldParents, &rep.Findings.AutoCloseHeldParentsTruncated, x)
+	}
+}
+
+// TaskHygiene discovers discrepancies in one read-only snapshot, then handles
+// each mechanical candidate in its own transaction. A domain refusal rolls
+// back that entire candidate, including any links or ancestor events, and is
+// reported as a finding. Unexpected errors stop the sweep and return the
+// report of already committed commands alongside the error.
+//
+// AsOf is the observation/age-cutoff clock. Existing transitionTaskTx and
+// SettleMerged own their mutation clocks; it is not a transaction timestamp.
+// Project scopes candidate roots; existing hierarchy rules may close ancestors
+// in other projects, and those effects are included in the apply report.
 func (s *Store) TaskHygiene(ctx context.Context, now time.Time, project string, dryRun bool) (TaskHygieneReport, error) {
 	if project != "" && !validName(project) {
 		return TaskHygieneReport{}, errors.New("invalid task hygiene: project must be a project name")
 	}
 	now = now.UTC()
 	rep := TaskHygieneReport{
-		AsOf:             now,
-		DryRun:           dryRun,
-		Project:          project,
+		AsOf: now, DryRun: dryRun, Project: project,
 		MechanicalCloses: []TaskHygieneClose{},
 		Findings: TaskHygieneFindings{
-			MergedPROpenTasks:             []TaskDriftTask{},
-			AutoCloseHeldParents:          []TaskDriftTask{},
-			SettledOpenDecisions:          []TaskDriftTask{},
-			LiveAttemptsWithoutLease:      []TaskDriftTask{},
-			AnsweredDecisionsNotDelivered: []TaskHygieneLaggingDecision{},
-			MergedWithoutDeploy:           []TaskDriftTask{},
+			MergedPROpenTasks: []TaskDriftTask{}, AutoCloseHeldParents: []TaskDriftTask{},
+			SettledOpenDecisions: []TaskDriftTask{}, LiveAttemptsWithoutLease: []TaskDriftTask{},
+			AnsweredDecisionsNotDelivered: []TaskHygieneLaggingDecision{}, MergedWithoutDeploy: []TaskDriftTask{},
 		},
 	}
-
-	var projArg *string
+	var projectArg *string
 	if project != "" {
-		projArg = &project
+		projectArg = &project
 	}
-
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return TaskHygieneReport{}, err
+		return rep, err
 	}
 	defer tx.Rollback(ctx)
+	candidates, err := s.hygieneDiscoverTx(ctx, tx, now, projectArg, &rep)
+	if err != nil {
+		return rep, fmt.Errorf("task hygiene discover: %w", err)
+	}
+	if dryRun {
+		// Preview is read-only and snapshot-based. Overlapping rules produce one
+		// direct prediction per task, in the same rule priority as execution.
+		seen := map[int64]bool{}
+		for _, candidate := range candidates {
+			if seen[candidate.id] {
+				continue
+			}
+			d, err := s.hygieneDecideTx(ctx, tx, candidate, project, false)
+			if err != nil {
+				return rep, fmt.Errorf("task hygiene preview task %d: %w", candidate.id, err)
+			}
+			if !d.present {
+				continue
+			}
+			if !d.ready {
+				hygieneAddFinding(&rep, candidate.rule, d.finding)
+				continue
+			}
+			seen[candidate.id] = true
+			rep.MechanicalCloses = append(rep.MechanicalCloses, hygieneClose(d.task, d.target, d.pr, candidate.rule.name()))
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return rep, err
+	}
+	if !dryRun {
+		for _, candidate := range candidates {
+			effects, finding, err := s.hygieneExecute(ctx, candidate, project, now)
+			if err != nil {
+				return rep, fmt.Errorf("task hygiene %s task %d: %w", candidate.rule.name(), candidate.id, err)
+			}
+			if finding != nil {
+				hygieneAddFinding(&rep, candidate.rule, *finding)
+			}
+			// hygieneExecute returns effects only after a successful commit.
+			rep.MechanicalCloses = append(rep.MechanicalCloses, effects...)
+		}
+	}
+	settle, err := s.SettleMerged(ctx, project, dryRun)
+	if err != nil {
+		return rep, fmt.Errorf("task hygiene settle-merged: %w", err)
+	}
+	rep.SettleMerged = &settle
+	return rep, nil
+}
 
-	// 1. Gather MergedPRNotMerged candidates (paged by keyset).
-	var mechanicalMergedTasks []TaskDriftTask
+// hygieneWalkTasksTx applies project filtering before pagination. Discovery
+// has no report cap. A visitor may stop after observing the first omitted
+// qualifying finding. Extra SQL arguments start at $4.
+func hygieneWalkTasksTx(ctx context.Context, tx pgx.Tx, project *string, predicate, since string, visit func(TaskDriftTask) (bool, error), extra ...any) error {
+	sql := `SELECT ` + driftColumns + since + ` FROM tasks WHERE (` + predicate + `)
+   AND id>$1 AND ($2::text IS NULL OR project=$2) ORDER BY id LIMIT $3`
+	var after int64
+	for {
+		args := []any{after, project, hygienePageSize}
+		args = append(args, extra...)
+		rows, err := tx.Query(ctx, sql, args...)
+		if err != nil {
+			return err
+		}
+		page, err := scanDriftTasks(rows)
+		if err != nil {
+			return err
+		}
+		for _, x := range page {
+			stop, err := visit(x)
+			if err != nil {
+				return err
+			}
+			if stop {
+				return nil
+			}
+		}
+		if len(page) < hygienePageSize {
+			return nil
+		}
+		after = page[len(page)-1].ID
+	}
+}
+
+func (s *Store) hygieneDiscoverTx(ctx context.Context, tx pgx.Tx, now time.Time, project *string, rep *TaskHygieneReport) ([]hygieneCandidate, error) {
+	var candidates []hygieneCandidate
+	for _, rule := range []hygieneRule{hygieneMergedRule, hygieneParentRule} {
+		err := hygieneWalkTasksTx(ctx, tx, project, rule.predicate(), "updated_at", func(x TaskDriftTask) (bool, error) {
+			candidates = append(candidates, hygieneCandidate{rule: rule, id: x.ID})
+			return false, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	err := hygieneWalkTasksTx(ctx, tx, project, `state IN (`+settledStatesSQL+`) AND refs->'decision_request'->>'status'=$4`, "updated_at", func(x TaskDriftTask) (bool, error) {
+		hygieneAppend(&rep.Findings.SettledOpenDecisions, &rep.Findings.SettledOpenDecisionsTruncated, x)
+		return rep.Findings.SettledOpenDecisionsTruncated, nil
+	}, DecisionRequestOpen)
+	if err != nil {
+		return nil, err
+	}
+	err = hygieneWalkTasksTx(ctx, tx, project, `state IN ('researching','developing') AND `+taskActivitySQL+`<$4::timestamptz`, taskActivitySQL, func(x TaskDriftTask) (bool, error) {
+		hygieneAppend(&rep.Findings.LiveAttemptsWithoutLease, &rep.Findings.LiveAttemptsWithoutLeaseTruncated, x)
+		return rep.Findings.LiveAttemptsWithoutLeaseTruncated, nil
+	}, now.Add(-s.StartedStalledHours()))
+	if err != nil {
+		return nil, err
+	}
+	if err = hygieneReadLaggingTx(ctx, tx, now, project, rep); err != nil {
+		return nil, err
+	}
+	err = hygieneWalkTasksTx(ctx, tx, project, `state='merged' AND COALESCE(completed_at,updated_at)<$4::timestamptz`, "COALESCE(completed_at,updated_at)", func(x TaskDriftTask) (bool, error) {
+		if x.PR != "" {
+			key, err := deployRecordKeyForPRTx(ctx, tx, x.PR)
+			if err != nil {
+				return false, err
+			}
+			if key != "" {
+				return false, nil
+			}
+		}
+		hygieneAppend(&rep.Findings.MergedWithoutDeploy, &rep.Findings.MergedWithoutDeployTruncated, x)
+		return rep.Findings.MergedWithoutDeployTruncated, nil
+	}, now.Add(-time.Duration(DriftDefaultMergedDays)*24*time.Hour))
+	if err != nil {
+		return nil, err
+	}
+	return candidates, nil
+}
+
+func hygieneReadLaggingTx(ctx context.Context, tx pgx.Tx, now time.Time, project *string, rep *TaskHygieneReport) error {
 	var afterID int64
+	afterDestination := ""
 	for {
-		rows, err := tx.Query(ctx, hygieneMergedPRPageSQL, afterID, projArg, hygienePageSize)
+		rows, err := tx.Query(ctx, hygieneLaggingDecisionsSQL, now, now.Add(-DecisionDeliveryLagAge), project, afterID, afterDestination, hygienePageSize)
 		if err != nil {
-			return TaskHygieneReport{}, fmt.Errorf("task hygiene merged PR candidates: %w", err)
+			return err
 		}
-		page, err := scanDriftTasks(rows)
+		page, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (TaskHygieneLaggingDecision, error) {
+			var x TaskHygieneLaggingDecision
+			err := row.Scan(&x.RequestID, &x.Destination, &x.TaskTitle, &x.DesiredVersion, &x.AppliedVersion, &x.Attempts, &x.NextAttemptAt, &x.LastErrorCode)
+			x.NextAttemptAt = x.NextAttemptAt.UTC()
+			return x, err
+		})
 		if err != nil {
-			return TaskHygieneReport{}, fmt.Errorf("task hygiene scan merged PR candidates: %w", err)
+			return err
 		}
-		for i := range page {
-			x := &page[i]
-			if err := s.annotateOneDriftHold(ctx, tx, x, mergeAppliesFrom); err != nil {
-				return TaskHygieneReport{}, err
-			}
-			if x.Mechanical {
-				mechanicalMergedTasks = append(mechanicalMergedTasks, *x)
-			} else {
-				if len(rep.Findings.MergedPROpenTasks) < hygieneFindingsLimit {
-					rep.Findings.MergedPROpenTasks = append(rep.Findings.MergedPROpenTasks, *x)
-				} else {
-					rep.Findings.MergedPROpenTasksTruncated = true
-				}
+		for _, x := range page {
+			hygieneAppend(&rep.Findings.AnsweredDecisionsNotDelivered, &rep.Findings.AnsweredDecisionsNotDeliveredTruncated, x)
+			if rep.Findings.AnsweredDecisionsNotDeliveredTruncated {
+				return nil
 			}
 		}
 		if len(page) < hygienePageSize {
-			break
-		}
-		afterID = page[len(page)-1].ID
-	}
-
-	// 2. Gather AutoCloseHeldParents candidates (paged by keyset).
-	var mechanicalAutoCloseParents []TaskDriftTask
-	afterID = 0
-	for {
-		rows, err := tx.Query(ctx, hygieneAutoCloseHeldPageSQL, afterID, projArg, hygienePageSize)
-		if err != nil {
-			return TaskHygieneReport{}, fmt.Errorf("task hygiene auto close candidates: %w", err)
-		}
-		page, err := scanDriftTasks(rows)
-		if err != nil {
-			return TaskHygieneReport{}, fmt.Errorf("task hygiene scan auto close candidates: %w", err)
-		}
-		for i := range page {
-			x := &page[i]
-			if err := s.annotateOneDriftHold(ctx, tx, x, autoCloseAppliesFrom); err != nil {
-				return TaskHygieneReport{}, err
-			}
-			if x.Mechanical && s.AutoCloseParent() {
-				mechanicalAutoCloseParents = append(mechanicalAutoCloseParents, *x)
-			} else {
-				if len(rep.Findings.AutoCloseHeldParents) < hygieneFindingsLimit {
-					rep.Findings.AutoCloseHeldParents = append(rep.Findings.AutoCloseHeldParents, *x)
-				} else {
-					rep.Findings.AutoCloseHeldParentsTruncated = true
-				}
-			}
-		}
-		if len(page) < hygienePageSize {
-			break
-		}
-		afterID = page[len(page)-1].ID
-	}
-
-	// 3. Gather SettledOpenDecisions (paged by keyset).
-	afterID = 0
-	for {
-		rows, err := tx.Query(ctx, hygieneSettledOpenPageSQL, DecisionRequestOpen, afterID, projArg, hygienePageSize)
-		if err != nil {
-			return TaskHygieneReport{}, fmt.Errorf("task hygiene settled open decisions: %w", err)
-		}
-		page, err := scanDriftTasks(rows)
-		if err != nil {
-			return TaskHygieneReport{}, fmt.Errorf("task hygiene scan settled open decisions: %w", err)
-		}
-		for _, x := range page {
-			if len(rep.Findings.SettledOpenDecisions) < hygieneFindingsLimit {
-				rep.Findings.SettledOpenDecisions = append(rep.Findings.SettledOpenDecisions, x)
-			} else {
-				rep.Findings.SettledOpenDecisionsTruncated = true
-				break
-			}
-		}
-		if len(page) < hygienePageSize || rep.Findings.SettledOpenDecisionsTruncated {
-			break
-		}
-		afterID = page[len(page)-1].ID
-	}
-
-	// 4. Gather LiveAttemptsWithoutLease (idle started, paged by keyset).
-	stalledCutoff := now.Add(-s.StartedStalledHours())
-	afterID = 0
-	for {
-		rows, err := tx.Query(ctx, hygieneIdleStartedPageSQL, stalledCutoff, afterID, projArg, hygienePageSize)
-		if err != nil {
-			return TaskHygieneReport{}, fmt.Errorf("task hygiene idle started: %w", err)
-		}
-		page, err := scanDriftTasks(rows)
-		if err != nil {
-			return TaskHygieneReport{}, fmt.Errorf("task hygiene scan idle started: %w", err)
-		}
-		for _, x := range page {
-			if len(rep.Findings.LiveAttemptsWithoutLease) < hygieneFindingsLimit {
-				rep.Findings.LiveAttemptsWithoutLease = append(rep.Findings.LiveAttemptsWithoutLease, x)
-			} else {
-				rep.Findings.LiveAttemptsWithoutLeaseTruncated = true
-				break
-			}
-		}
-		if len(page) < hygienePageSize || rep.Findings.LiveAttemptsWithoutLeaseTruncated {
-			break
-		}
-		afterID = page[len(page)-1].ID
-	}
-
-	// 5. Gather lagging decisions (paged by keyset).
-	lagCutoff := now.Add(-DecisionDeliveryLagAge)
-	afterReqID := int64(0)
-	for {
-		rows, err := tx.Query(ctx, hygieneLaggingDecisionsSQL, now, lagCutoff, projArg, afterReqID, hygienePageSize)
-		if err != nil {
-			return TaskHygieneReport{}, fmt.Errorf("task hygiene lagging decisions: %w", err)
-		}
-		var page []TaskHygieneLaggingDecision
-		for rows.Next() {
-			var d TaskHygieneLaggingDecision
-			if err := rows.Scan(&d.RequestID, &d.Destination, &d.TaskTitle, &d.DesiredVersion, &d.AppliedVersion, &d.Attempts, &d.NextAttemptAt, &d.LastErrorCode); err != nil {
-				rows.Close()
-				return TaskHygieneReport{}, fmt.Errorf("task hygiene scan lagging decision: %w", err)
-			}
-			d.NextAttemptAt = d.NextAttemptAt.UTC()
-			page = append(page, d)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return TaskHygieneReport{}, fmt.Errorf("task hygiene lagging decisions rows: %w", err)
-		}
-		for _, d := range page {
-			if len(rep.Findings.AnsweredDecisionsNotDelivered) < hygieneFindingsLimit {
-				rep.Findings.AnsweredDecisionsNotDelivered = append(rep.Findings.AnsweredDecisionsNotDelivered, d)
-			} else {
-				rep.Findings.AnsweredDecisionsNotDeliveredTruncated = true
-				break
-			}
-		}
-		if len(page) < hygienePageSize || rep.Findings.AnsweredDecisionsNotDeliveredTruncated {
-			break
-		}
-		afterReqID = page[len(page)-1].RequestID
-	}
-
-	// 6. Gather MergedWithoutDeploy (paged by keyset).
-	mergedCutoff := now.Add(-time.Duration(DriftDefaultMergedDays) * 24 * time.Hour)
-	afterTime, afterMergedID := time.Unix(0, 0).UTC(), int64(0)
-	for {
-		rows, err := tx.Query(ctx, hygieneMergedWithoutDeployPageSQL, mergedCutoff, afterTime, afterMergedID, projArg, hygienePageSize)
-		if err != nil {
-			return TaskHygieneReport{}, fmt.Errorf("task hygiene merged without deploy: %w", err)
-		}
-		page, err := scanDriftTasks(rows)
-		if err != nil {
-			return TaskHygieneReport{}, fmt.Errorf("task hygiene scan merged without deploy: %w", err)
-		}
-		for _, x := range page {
-			if x.PR != "" {
-				key, err := deployRecordKeyForPRTx(ctx, tx, x.PR)
-				if err != nil {
-					return TaskHygieneReport{}, err
-				}
-				if key != "" {
-					continue
-				}
-			}
-			if len(rep.Findings.MergedWithoutDeploy) < hygieneFindingsLimit {
-				rep.Findings.MergedWithoutDeploy = append(rep.Findings.MergedWithoutDeploy, x)
-			} else {
-				rep.Findings.MergedWithoutDeployTruncated = true
-				break
-			}
-		}
-		if len(page) < hygienePageSize || rep.Findings.MergedWithoutDeployTruncated {
-			break
+			return nil
 		}
 		last := page[len(page)-1]
-		afterTime, afterMergedID = last.Since, last.ID
+		afterID, afterDestination = last.RequestID, last.Destination
 	}
-
-	_ = tx.Rollback(ctx)
-
-	if dryRun {
-		// In dry-run mode, report prospective mechanical closes without writing.
-		for _, x := range mechanicalMergedTasks {
-			toState := StateMerged
-			if canCompleteKind(x.Kind) {
-				toState = StateCompleted
-			}
-			rep.MechanicalCloses = append(rep.MechanicalCloses, TaskHygieneClose{
-				TaskID:    x.ID,
-				Title:     x.Title,
-				Lane:      x.Lane,
-				Kind:      x.Kind,
-				FromState: x.State,
-				ToState:   toState,
-				Rule:      "merged_pr",
-				PR:        x.PR,
-			})
-		}
-		if s.AutoCloseParent() {
-			for _, x := range mechanicalAutoCloseParents {
-				roll, err := s.subTaskRollupForParent(ctx, x.ID)
-				if err != nil {
-					return TaskHygieneReport{}, err
-				}
-				rep.MechanicalCloses = append(rep.MechanicalCloses, TaskHygieneClose{
-					TaskID:    x.ID,
-					Title:     x.Title,
-					Lane:      x.Lane,
-					Kind:      x.Kind,
-					FromState: x.State,
-					ToState:   roll.closeTarget(),
-					Rule:      "auto_close_parent",
-				})
-			}
-		}
-	} else {
-		// In apply mode, execute the mechanical closes under the level-2 task mutation lock.
-		txMut, err := s.pool.Begin(ctx)
-		if err != nil {
-			return TaskHygieneReport{}, err
-		}
-		defer txMut.Rollback(ctx)
-
-		if _, err := txMut.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-			return TaskHygieneReport{}, err
-		}
-
-		for _, cand := range mechanicalMergedTasks {
-			var t Task
-			if err := scanTask(txMut.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, cand.ID), &t); err != nil {
-				return TaskHygieneReport{}, err
-			}
-			if project != "" && (t.Project == nil || *t.Project != project) {
-				continue
-			}
-			h, err := taskHoldsTx(ctx, txMut, t.ID, "")
-			if err != nil {
-				return TaskHygieneReport{}, err
-			}
-			gate, err := s.closeGateTx(ctx, txMut, t)
-			if err != nil {
-				return TaskHygieneReport{}, err
-			}
-			if !driftMechanical(h, gate, t.State, mergeAppliesFrom) {
-				rep.Findings.MergedPROpenTasks = append(rep.Findings.MergedPROpenTasks, cand)
-				continue
-			}
-			pr := t.Refs.PR
-			if pr == "" {
-				pr, _ = heldMergePRTx(ctx, txMut, t.ID)
-			}
-			if pr == "" {
-				_ = txMut.QueryRow(ctx, `SELECT COALESCE(NULLIF(t.refs->>'pr',''), c.pr_url, `+prURLSQL+`) FROM tasks t JOIN change_tasks ct ON ct.task_id=t.id AND ct.relation='implements' JOIN changes c ON c.id=ct.change_id AND c.state='merged' AND c.reverted_by_change_id IS NULL WHERE t.id=$1 ORDER BY c.id DESC LIMIT 1`, t.ID).Scan(&pr)
-			}
-			if pr == "" {
-				rep.Findings.MergedPROpenTasks = append(rep.Findings.MergedPROpenTasks, cand)
-				continue
-			}
-			fromState := t.State
-			toState := StateMerged
-			if canCompleteKind(t.Kind) {
-				toState = StateCompleted
-			}
-			updated, err := s.transitionTaskTx(ctx, txMut, t.ID, TransitionInput{
-				To:       toState,
-				By:       "hk.hygiene",
-				Note:     "hygiene: mechanical close of merged PR",
-				Refs:     &TaskRefs{PR: pr},
-				Evidence: pr,
-			}, false)
-			if err != nil {
-				return TaskHygieneReport{}, err
-			}
-			rep.MechanicalCloses = append(rep.MechanicalCloses, TaskHygieneClose{
-				TaskID:    t.ID,
-				Title:     t.Title,
-				Lane:      t.Lane,
-				Kind:      t.Kind,
-				FromState: fromState,
-				ToState:   updated.State,
-				Rule:      "merged_pr",
-				PR:        pr,
-			})
-		}
-
-		if s.AutoCloseParent() {
-			for _, cand := range mechanicalAutoCloseParents {
-				var p Task
-				if err := scanTask(txMut.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, cand.ID), &p); err != nil {
-					return TaskHygieneReport{}, err
-				}
-				if project != "" && (p.Project == nil || *p.Project != project) {
-					continue
-				}
-				h, err := taskHoldsTx(ctx, txMut, p.ID, "")
-				if err != nil {
-					return TaskHygieneReport{}, err
-				}
-				gate, err := s.closeGateTx(ctx, txMut, p)
-				if err != nil {
-					return TaskHygieneReport{}, err
-				}
-				if !driftMechanical(h, gate, p.State, autoCloseAppliesFrom) {
-					rep.Findings.AutoCloseHeldParents = append(rep.Findings.AutoCloseHeldParents, cand)
-					continue
-				}
-				var childID int64
-				var childState string
-				err = txMut.QueryRow(ctx, `SELECT id, state FROM tasks WHERE parent_id=$1 AND state IN ('completed','merged','deployed') ORDER BY updated_at DESC LIMIT 1`, p.ID).Scan(&childID, &childState)
-				if err != nil {
-					rep.Findings.AutoCloseHeldParents = append(rep.Findings.AutoCloseHeldParents, cand)
-					continue
-				}
-				fromState := p.State
-				closed, nextP, err := s.autoCloseOneParentTx(ctx, txMut, p, childID, childState, now)
-				if err != nil {
-					return TaskHygieneReport{}, err
-				}
-				if closed {
-					rep.MechanicalCloses = append(rep.MechanicalCloses, TaskHygieneClose{
-						TaskID:    p.ID,
-						Title:     p.Title,
-						Lane:      p.Lane,
-						Kind:      p.Kind,
-						FromState: fromState,
-						ToState:   nextP.State,
-						Rule:      "auto_close_parent",
-					})
-					if nextP.ParentID != nil {
-						if err := s.autoCloseTx(ctx, txMut, nextP, "hk", now); err != nil {
-							return TaskHygieneReport{}, err
-						}
-					}
-				}
-			}
-		}
-
-		if err := txMut.Commit(ctx); err != nil {
-			return TaskHygieneReport{}, err
-		}
-	}
-
-	settleRep, err := s.SettleMerged(ctx, project, dryRun)
-	if err != nil {
-		return TaskHygieneReport{}, fmt.Errorf("task hygiene settle-merged: %w", err)
-	}
-	rep.SettleMerged = &settleRep
-
-	return rep, nil
 }
 
 func scanDriftTasks(rows pgx.Rows) ([]TaskDriftTask, error) {
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (TaskDriftTask, error) {
 		var x TaskDriftTask
 		err := row.Scan(&x.ID, &x.Lane, &x.Title, &x.Kind, &x.State, &x.PR, &x.DecisionRequest, &x.Since)
-		if err != nil {
-			return TaskDriftTask{}, err
-		}
 		x.Since = x.Since.UTC()
-		return x, nil
+		return x, err
 	})
 }
 
-func (s *Store) annotateOneDriftHold(ctx context.Context, tx pgx.Tx, x *TaskDriftTask, applies func(state string) bool) error {
-	var t Task
-	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, x.ID), &t); err != nil {
-		return err
+// hygieneVerifiedPRTx trusts merged, unreverted changes only. An old refs.pr
+// is preferred only if it passes that test. Other eligible evidence is a
+// linked implements change or a recorded held merge of this task.
+func hygieneVerifiedPRTx(ctx context.Context, tx pgx.Tx, t Task) (string, error) {
+	var pr string
+	err := tx.QueryRow(ctx, `SELECT `+prURLSQL+` FROM changes c
+   WHERE c.state='merged' AND c.reverted_by_change_id IS NULL
+   AND ((`+prURLSQL+`)=$2
+     OR EXISTS(SELECT 1 FROM change_tasks ct WHERE ct.change_id=c.id
+       AND ct.task_id=$1 AND ct.relation='implements')
+     OR EXISTS(SELECT 1 FROM task_events e WHERE e.task_id=$1
+       AND e.source=$3 AND e.field=$4 AND NOT e.applied
+       AND e.source_ref=(`+prURLSQL+`)))
+   ORDER BY ((`+prURLSQL+`)=$2) DESC,c.id DESC LIMIT 1`, t.ID, t.Refs.PR, SourceMergewakeMerge, heldMergeField).Scan(&pr)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
 	}
-	h, err := taskHoldsTx(ctx, tx, x.ID, "")
+	return pr, err
+}
+
+func (s *Store) hygieneDecideTx(ctx context.Context, tx pgx.Tx, c hygieneCandidate, project string, lock bool) (hygieneDecision, error) {
+	var d hygieneDecision
+	sql := `SELECT ` + taskColumns + ` FROM tasks WHERE id=$1`
+	if lock {
+		sql += ` FOR UPDATE`
+	}
+	if err := scanTask(tx.QueryRow(ctx, sql, c.id), &d.task); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return d, nil
+		}
+		return d, err
+	}
+	t := d.task
+	if project != "" && (t.Project == nil || *t.Project != project) {
+		return d, nil
+	}
+	// Recheck the discrepancy, not only its holds. A PR can have been reverted
+	// or a parent can have acquired an unsettled child since discovery.
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND (`+c.rule.predicate()+`))`, t.ID).Scan(&d.present); err != nil {
+		return d, err
+	}
+	if !d.present {
+		return d, nil
+	}
+	d.finding = TaskDriftTask{ID: t.ID, Lane: t.Lane, Title: t.Title, Kind: t.Kind, State: t.State, PR: t.Refs.PR, Since: t.UpdatedAt.UTC()}
+	if t.Refs.DecisionRequest != nil {
+		d.finding.DecisionRequest = t.Refs.DecisionRequest.ID
+	}
+	h, err := taskHoldsTx(ctx, tx, t.ID, "")
 	if err != nil {
-		return err
+		return d, err
 	}
 	gate, err := s.closeGateTx(ctx, tx, t)
 	if err != nil {
-		return err
+		return d, err
 	}
-	x.OpenPRs, x.RevertedPRs, x.OpenSubTasks = h.OpenPRs, h.RevertedPRs, h.OpenSubTasks
-	x.Hold = h.mergeReason()
-	if x.Hold == "" {
-		x.Hold = gate
+	d.finding.OpenPRs, d.finding.RevertedPRs, d.finding.OpenSubTasks = h.OpenPRs, h.RevertedPRs, h.OpenSubTasks
+	d.finding.Hold = h.mergeReason()
+	if d.finding.Hold == "" {
+		d.finding.Hold = gate
 	}
-	x.Mechanical = driftMechanical(h, gate, t.State, applies)
-	return nil
+	applies := mergeAppliesFrom
+	if c.rule == hygieneParentRule {
+		applies = autoCloseAppliesFrom
+	}
+	if !driftMechanical(h, gate, t.State, applies) {
+		if d.finding.Hold == "" {
+			d.finding.Hold = "automatic close does not apply from " + t.State
+		}
+		return d, nil
+	}
+	if c.rule == hygieneParentRule {
+		if !s.AutoCloseParent() {
+			d.finding.Hold = "auto_close_parent is disabled"
+			return d, nil
+		}
+		roll, err := subTaskRollupTx(ctx, tx, t.ID)
+		if err != nil {
+			return d, err
+		}
+		d.target = roll.closeTarget()
+		if d.target == "" || (d.target == StateCompleted && !canCompleteKind(t.Kind)) {
+			d.finding.Hold = "sub-task rollup does not permit this parent to close"
+			return d, nil
+		}
+		err = tx.QueryRow(ctx, `SELECT id,state FROM tasks WHERE parent_id=$1
+     AND state IN ('completed','merged','deployed')
+     ORDER BY updated_at DESC,id DESC LIMIT 1`, t.ID).Scan(&d.childID, &d.childState)
+		if errors.Is(err, pgx.ErrNoRows) {
+			d.finding.Hold = "no settled child with work remains"
+			return d, nil
+		}
+		if err != nil {
+			return d, err
+		}
+		d.pr = t.Refs.PR
+		if d.target == StateMerged && d.pr == "" {
+			d.pr, err = heldMergePRTx(ctx, tx, t.ID)
+			if err != nil {
+				return d, err
+			}
+		}
+	} else {
+		d.pr, err = hygieneVerifiedPRTx(ctx, tx, t)
+		if err != nil {
+			return d, err
+		}
+		if d.pr == "" {
+			d.finding.Hold = "no merged, unreverted change verifies the closing PR"
+			return d, nil
+		}
+		d.target = StateMerged
+		if canCompleteKind(t.Kind) {
+			d.target = StateCompleted
+		}
+		if !taskTransitionAllowed(t.State, d.target) && !(d.target == StateMerged && deliveredOpenStates[t.State]) {
+			d.finding.Hold = "the task transition graph does not permit the close"
+			return d, nil
+		}
+	}
+	d.ready = true
+	d.finding.Mechanical = true
+	return d, nil
 }
 
-func (s *Store) subTaskRollupForParent(ctx context.Context, parentID int64) (subTaskRollup, error) {
-	rows, err := s.pool.Query(ctx, `SELECT state FROM tasks WHERE parent_id=$1`, parentID)
+// Each command owns its transaction. Expected domain refusal must roll it
+// back even if PostgreSQL is still usable: transitionTaskTx may have inserted
+// an implements link before returning ErrTaskConflict.
+func (s *Store) hygieneExecute(ctx context.Context, c hygieneCandidate, project string, now time.Time) ([]TaskHygieneClose, *TaskDriftTask, error) {
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return subTaskRollup{}, err
+		return nil, nil, err
 	}
-	sub, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		return nil, nil, err
+	}
+	d, err := s.hygieneDecideTx(ctx, tx, c, project, true)
 	if err != nil {
-		return subTaskRollup{}, err
+		return nil, nil, err
 	}
-	return rollupStates(sub), nil
+	if !d.present {
+		return nil, nil, nil
+	}
+	if !d.ready {
+		return nil, &d.finding, nil
+	}
+	before, err := hygieneAncestorTasksTx(ctx, tx, d.task)
+	if err != nil {
+		return nil, nil, err
+	}
+	if c.rule == hygieneMergedRule {
+		_, err = s.transitionTaskTx(ctx, tx, c.id, TransitionInput{
+			To: d.target, By: "hk.hygiene", Note: "hygiene: mechanical close of merged PR",
+			Refs: &TaskRefs{PR: d.pr}, Evidence: d.pr,
+		}, false)
+	} else if s.AutoCloseParent() {
+		var closed bool
+		var next Task
+		closed, next, err = s.autoCloseOneParentTx(ctx, tx, d.task, d.childID, d.childState, now)
+		if err == nil && closed {
+			err = s.autoCloseTx(ctx, tx, next, "hk", now)
+		}
+	} else {
+		d.finding.Mechanical = false
+		d.finding.Hold = "auto_close_parent is disabled"
+		return nil, &d.finding, nil
+	}
+	if err != nil {
+		if errors.Is(err, ErrTaskConflict) {
+			d.finding.Mechanical = false
+			d.finding.Hold = err.Error() // Presentation only; classification uses errors.Is.
+			return nil, &d.finding, nil
+		}
+		return nil, nil, err
+	}
+	effects, err := hygieneNetEffectsTx(ctx, tx, before, c)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(effects) == 0 {
+		// In particular roll back any not-applied auto-close event. A recheck
+		// refusal is a finding, never a claimed close.
+		d.finding.Mechanical = false
+		d.finding.Hold = "automatic close was not applied after recheck"
+		return nil, &d.finding, nil
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+	return effects, nil, nil
+}
+
+// These helpers snapshot only the command's task and its ancestor chain.
+// The mutation lock stabilizes topology and state transitions; row locks
+// protect the snapshots against the permitted single-row task editors.
+// Current transitionTaskTx cannot change any other task for these non-triage
+// close inputs. If that helper's effect scope grows, change this contract too.
+func hygieneAncestorTasksTx(ctx context.Context, tx pgx.Tx, root Task) ([]Task, error) {
+	out := []Task{root}
+	child := root
+	for child.ParentID != nil {
+		var p Task
+		if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, *child.ParentID), &p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+		child = p
+	}
+	return out, nil
+}
+
+func hygieneNetEffectsTx(ctx context.Context, tx pgx.Tx, before []Task, c hygieneCandidate) ([]TaskHygieneClose, error) {
+	effects := []TaskHygieneClose{}
+	for _, old := range before {
+		var current Task
+		if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, old.ID), &current); err != nil {
+			return nil, err
+		}
+		if old.State == current.State {
+			continue
+		}
+		if !IsSettledState(current.State) {
+			return nil, fmt.Errorf("task hygiene: unexpected resulting state %q for task %d", current.State, current.ID)
+		}
+		rule := "auto_close_parent"
+		if old.ID == c.id {
+			rule = c.rule.name()
+		}
+		effects = append(effects, hygieneClose(old, current.State, current.Refs.PR, rule))
+	}
+	return effects, nil
+}
+
+func hygieneClose(t Task, to, pr, rule string) TaskHygieneClose {
+	return TaskHygieneClose{TaskID: t.ID, Title: t.Title, Lane: t.Lane, Kind: t.Kind,
+		FromState: t.State, ToState: to, Rule: rule, PR: pr}
 }
