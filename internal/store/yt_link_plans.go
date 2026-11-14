@@ -192,7 +192,7 @@ func (l *YTWriteLedger) PlanLinks(ctx context.Context, now time.Time, id int64, 
 	if err != nil {
 		return ytwrite.LinkPlan{}, err
 	}
-	if err := ytwrite.CheckLinkFence(op, f); err != nil {
+	if err := ytwrite.CheckLinkFence(op, f, now); err != nil {
 		return ytwrite.LinkPlan{}, err
 	}
 	latest, found, err := latestYTLinkPlan(ctx, tx, id)
@@ -299,7 +299,7 @@ func (l *YTWriteLedger) MarkLinkStep(ctx context.Context, now time.Time, id int6
 	if err != nil {
 		return err
 	}
-	if err := ytwrite.CheckLinkFence(op, f); err != nil {
+	if err := ytwrite.CheckLinkFence(op, f, now); err != nil {
 		return err
 	}
 	latest, found, err := latestYTLinkPlan(ctx, tx, id)
@@ -328,7 +328,7 @@ func (l *YTWriteLedger) SettleLinks(ctx context.Context, now time.Time, id int64
 	if err != nil {
 		return ytwrite.Op{}, err
 	}
-	if err := ytwrite.CheckLinkFence(op, f); err != nil {
+	if err := ytwrite.CheckLinkFence(op, f, now); err != nil {
 		return ytwrite.Op{}, err
 	}
 	if err := ytwrite.CheckLinkSettlement(op, st); err != nil {
@@ -339,12 +339,12 @@ func (l *YTWriteLedger) SettleLinks(ctx context.Context, now time.Time, id int64
 		return ytwrite.Op{}, err
 	}
 	if found {
-		if st.Outcome != "" && latest.Attempt == f.Attempt && latest.Recover == f.Recover && latest.Marked > 0 {
+		if step, outcome, ok := st.StepRecord(latest.Marked); ok && latest.Attempt == f.Attempt && latest.Recover == f.Recover && step == latest.Marked-1 {
 			if _, err := tx.Exec(ctx, `UPDATE yt_link_steps SET outcome=$5 WHERE op_id=$1 AND attempt=$2 AND recover=$3 AND step=$4`,
-				id, f.Attempt, f.Recover, latest.Marked-1, string(st.Outcome)); err != nil {
+				id, f.Attempt, f.Recover, step, string(outcome)); err != nil {
 				return ytwrite.Op{}, err
 			}
-			latest.Outcome = st.Outcome
+			latest.Outcome = outcome
 		}
 		if err := releaseUnsentTx(ctx, tx, op, latest, now); err != nil {
 			return ytwrite.Op{}, err
@@ -387,9 +387,9 @@ func (l *YTWriteLedger) SettleLinks(ctx context.Context, now time.Time, id int64
 
 func (l *YTWriteLedger) LeaseLinkRecovery(ctx context.Context, now time.Time, id int64, reconciles int, until time.Time) (int, bool, error) {
 	var epoch int
-	err := l.s.pool.QueryRow(ctx, `UPDATE yt_write_ops SET next_attempt_at=$4, reconciles=reconciles+1
+	err := l.s.pool.QueryRow(ctx, `UPDATE yt_write_ops SET next_attempt_at=$4, reconciles=reconciles+1, reason=$5
 		WHERE id=$1 AND state='remote_unknown' AND next_attempt_at <= $2 AND reconciles=$3 RETURNING reconciles`,
-		id, now.UTC(), reconciles, until.UTC()).Scan(&epoch)
+		id, now.UTC(), reconciles, until.UTC(), ytwrite.ReasonLinkRecovery).Scan(&epoch)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
 	}

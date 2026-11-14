@@ -44,6 +44,10 @@ const (
 	// ReasonRecoverExhausted: LinkRecoverMax recovery plans did not converge;
 	// the op stays remote_unknown for an operator (I9).
 	ReasonRecoverExhausted = "recover_exhausted"
+	// ReasonLinkRecovery: a recovery pass holds the op's lease (until its
+	// NextAttemptAt); the pass's settlement replaces it. An operator's
+	// resolve waits for it (CheckLinkFence).
+	ReasonLinkRecovery = "link_recovery"
 	// ReasonOutcomeLost: the latest plan's in-flight step is an add whose
 	// outcome was never recorded. A 4xx followed by a person making the same
 	// link and an add that landed read the same, so recovery makes no
@@ -144,7 +148,9 @@ func UnsentLinkAdds(r LinkPlanRecord) []IssueLink {
 // Epoch 0 is that send: the op must still be dispatched in Attempt. Epoch n >
 // 0 is a recovery pass: the op must be remote_unknown in Attempt with
 // reconciles n, the epoch LeaseLinkRecovery issued it. EpochOperator is an
-// operator's resolve: the op must be remote_unknown in Attempt.
+// operator's resolve: the op must be remote_unknown in Attempt and no
+// recovery pass may hold its lease (reason link_recovery, due after now),
+// since that pass may have a request in flight.
 type LinkFence struct {
 	Attempt, Recover, Epoch int
 }
@@ -153,14 +159,15 @@ type LinkFence struct {
 const EpochOperator = -1
 
 // CheckLinkFence is the fence both ledgers check, under the op's row lock,
-// before any write of a planned kind. A refusal is ErrState.
-func CheckLinkFence(op Op, f LinkFence) error {
+// before any write of a planned kind, now being the write's time. A refusal
+// is ErrState.
+func CheckLinkFence(op Op, f LinkFence, now time.Time) error {
 	ok := op.Attempts == f.Attempt
 	switch {
 	case f.Epoch == 0:
 		ok = ok && op.State == StateDispatched
 	case f.Epoch == EpochOperator:
-		ok = ok && op.State == StateRemoteUnknown
+		ok = ok && op.State == StateRemoteUnknown && !(op.Reason == ReasonLinkRecovery && op.NextAttemptAt.After(now))
 	default:
 		ok = ok && op.State == StateRemoteUnknown && op.Reconciles == f.Epoch
 	}
@@ -182,6 +189,11 @@ type LinkSettlement struct {
 	// Outcome is the in-flight step's outcome; "" when this executor sent
 	// nothing.
 	Outcome StepOutcome
+	// Stopped says the executor stopped before sending step Step because
+	// its mark failed. The mark may have committed with its reply lost:
+	// the ledger then records that step as definite (never sent).
+	Stopped bool
+	Step    int
 	// Read and Cur: for applied, the read that showed the plan done. An
 	// operator's apply has no read.
 	Read bool
@@ -190,6 +202,20 @@ type LinkSettlement struct {
 	YTID           string
 	Next           time.Time
 	Reason, Detail string
+}
+
+// StepRecord is the outcome s records for its executor's plan, which has
+// marked steps: the stopped step as definite when its mark committed, else
+// s.Outcome for the in-flight step. ok is false when there is nothing to
+// record.
+func (s LinkSettlement) StepRecord(marked int) (step int, outcome StepOutcome, ok bool) {
+	if s.Stopped && marked == s.Step+1 {
+		return s.Step, StepDefinite, true
+	}
+	if s.Outcome != "" && marked > 0 {
+		return marked - 1, s.Outcome, true
+	}
+	return 0, "", false
 }
 
 // CheckLinkSettlement checks that s can move op (already fenced). A refusal is
@@ -286,8 +312,8 @@ type LinksLedger interface {
 	// step must be the plan's next (Marked). Else ErrState.
 	MarkLinkStep(ctx context.Context, now time.Time, id int64, f LinkFence, step int) error
 	// SettleLinks settles op id for the executor f in one transaction: it
-	// records s.Outcome as the outcome of the in-flight step when f's plan is
-	// the latest, closes ownership of the latest plan's unsent adds
+	// records s.StepRecord as the outcome of that step when f's plan is the
+	// latest, closes ownership of the latest plan's unsent adds
 	// (UnsentLinkAdds, from the record just written), and moves the op
 	// (CheckLinkSettlement). An applied op with a read also closes the
 	// writer's releasing rows and the issue's unowned rows that s.Cur no
@@ -297,7 +323,8 @@ type LinksLedger interface {
 	// LeaseLinkRecovery gives one recovery pass of op id exclusive use of it
 	// until until: a compare-and-set that holds only while the op is
 	// remote_unknown, due at or before now, and has reconciles as listed. It
-	// adds one to reconciles (one per pass) and moves the due time to until;
+	// adds one to reconciles (one per pass), sets reason link_recovery and
+	// moves the due time to until;
 	// epoch is the new reconciles, the pass's fence. ok is false when another
 	// pass won it or the op moved on; that pass makes no request.
 	LeaseLinkRecovery(ctx context.Context, now time.Time, id int64, reconciles int, until time.Time) (epoch int, ok bool, err error)

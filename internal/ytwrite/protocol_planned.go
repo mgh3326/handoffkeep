@@ -67,7 +67,9 @@ func (p *Protocol) sendPlanned(ctx context.Context, op Op, kind PlannedKind) Res
 			if errors.Is(markErr, ErrState) {
 				return p.record(op, settled{err: markErr})
 			}
-			// Step n was not sent; every step before it succeeded.
+			// Step n was not sent (its mark may still have committed);
+			// every step before it succeeded.
+			st.stopped, st.step = true, n
 			if n > 0 {
 				st.outcome = StepOK
 				return settle(func(c context.Context) settled {
@@ -249,6 +251,7 @@ func (p *Protocol) reconcilePlanned(ctx context.Context, op Op, kind PlannedKind
 			if errors.Is(markErr, ErrState) {
 				return false, nil
 			}
+			st.stopped, st.step = true, n
 			if n > 0 {
 				st.outcome = StepOK
 			}
@@ -326,12 +329,15 @@ type linkSettler struct {
 	ll      LinksLedger
 	f       LinkFence
 	outcome StepOutcome
+	// stopped, step: Execute stopped before sending step (a failed mark).
+	stopped bool
+	step    int
 }
 
 var _ settler = (*linkSettler)(nil)
 
 func (s *linkSettler) settle(ctx context.Context, op Op, ls LinkSettlement) settled {
-	ls.Outcome = s.outcome
+	ls.Outcome, ls.Stopped, ls.Step = s.outcome, s.stopped, s.step
 	got, err := s.ll.SettleLinks(ctx, s.p.now(), op.ID, s.f, ls)
 	return settled{got, err}
 }

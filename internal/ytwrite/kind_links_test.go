@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
@@ -208,6 +209,11 @@ func TestUnsentLinkAddsAndLostAdd(t *testing.T) {
 func TestCheckLinkFence(t *testing.T) {
 	dispatched := ytwrite.Op{ID: 1, State: ytwrite.StateDispatched, Attempts: 2, Reconciles: 0}
 	unknown := ytwrite.Op{ID: 1, State: ytwrite.StateRemoteUnknown, Attempts: 2, Reconciles: 3}
+	now := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
+	leased := unknown
+	leased.Reason, leased.NextAttemptAt = ytwrite.ReasonLinkRecovery, now.Add(time.Minute)
+	leaseOver := leased
+	leaseOver.NextAttemptAt = now
 	for _, c := range []struct {
 		name string
 		op   ytwrite.Op
@@ -222,10 +228,39 @@ func TestCheckLinkFence(t *testing.T) {
 		{"recovery of a dispatched op", dispatched, ytwrite.LinkFence{Attempt: 2, Epoch: 3}, false},
 		{"operator", unknown, ytwrite.LinkFence{Attempt: 2, Epoch: ytwrite.EpochOperator}, true},
 		{"operator on a dispatched op", dispatched, ytwrite.LinkFence{Attempt: 2, Epoch: ytwrite.EpochOperator}, false},
+		{"operator while a pass holds the lease", leased, ytwrite.LinkFence{Attempt: 2, Epoch: ytwrite.EpochOperator}, false},
+		{"operator after the lease ran out", leaseOver, ytwrite.LinkFence{Attempt: 2, Epoch: ytwrite.EpochOperator}, true},
+		{"the pass holding the lease", leased, ytwrite.LinkFence{Attempt: 2, Epoch: 3}, true},
 	} {
-		err := ytwrite.CheckLinkFence(c.op, c.f)
+		err := ytwrite.CheckLinkFence(c.op, c.f, now)
 		if (err == nil) != c.ok || (err != nil && !errors.Is(err, ytwrite.ErrState)) {
 			t.Errorf("%s: err = %v", c.name, err)
+		}
+	}
+}
+
+// Review of PR #425: a failed mark whose transaction committed records its
+// step as definite (never sent); one that did not commit leaves the earlier
+// step's outcome.
+func TestLinkSettlementStepRecord(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		s       ytwrite.LinkSettlement
+		marked  int
+		step    int
+		outcome ytwrite.StepOutcome
+		ok      bool
+	}{
+		{"in-flight outcome", ytwrite.LinkSettlement{Outcome: ytwrite.StepAmbiguous}, 2, 1, ytwrite.StepAmbiguous, true},
+		{"nothing sent", ytwrite.LinkSettlement{}, 0, 0, "", false},
+		{"first mark committed, reply lost", ytwrite.LinkSettlement{Stopped: true, Step: 0}, 1, 0, ytwrite.StepDefinite, true},
+		{"first mark not committed", ytwrite.LinkSettlement{Stopped: true, Step: 0}, 0, 0, "", false},
+		{"later mark committed, reply lost", ytwrite.LinkSettlement{Outcome: ytwrite.StepOK, Stopped: true, Step: 1}, 2, 1, ytwrite.StepDefinite, true},
+		{"later mark not committed", ytwrite.LinkSettlement{Outcome: ytwrite.StepOK, Stopped: true, Step: 1}, 1, 0, ytwrite.StepOK, true},
+	} {
+		step, outcome, ok := c.s.StepRecord(c.marked)
+		if step != c.step || outcome != c.outcome || ok != c.ok {
+			t.Errorf("%s: = %d %q %v, want %d %q %v", c.name, step, outcome, ok, c.step, c.outcome, c.ok)
 		}
 	}
 }

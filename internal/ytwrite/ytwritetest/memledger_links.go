@@ -65,7 +65,7 @@ func (l *MemLedger) PlanLinks(_ context.Context, now time.Time, id int64, f ytwr
 	if err != nil {
 		return ytwrite.LinkPlan{}, err
 	}
-	if err := ytwrite.CheckLinkFence(*op, f); err != nil {
+	if err := ytwrite.CheckLinkFence(*op, f, now); err != nil {
 		return ytwrite.LinkPlan{}, err
 	}
 	latest, found := l.latestPlan(id)
@@ -178,14 +178,14 @@ func (l *MemLedger) releaseUnsent(op ytwrite.Op, rec ytwrite.LinkPlanRecord, now
 	}
 }
 
-func (l *MemLedger) MarkLinkStep(_ context.Context, _ time.Time, id int64, f ytwrite.LinkFence, step int) error {
+func (l *MemLedger) MarkLinkStep(_ context.Context, now time.Time, id int64, f ytwrite.LinkFence, step int) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	op, err := l.get(id)
 	if err != nil {
 		return err
 	}
-	if err := ytwrite.CheckLinkFence(*op, f); err != nil {
+	if err := ytwrite.CheckLinkFence(*op, f, now); err != nil {
 		return err
 	}
 	ps := l.links.plans[id]
@@ -207,7 +207,7 @@ func (l *MemLedger) SettleLinks(_ context.Context, now time.Time, id int64, f yt
 	if err != nil {
 		return ytwrite.Op{}, err
 	}
-	if err := ytwrite.CheckLinkFence(*op, f); err != nil {
+	if err := ytwrite.CheckLinkFence(*op, f, now); err != nil {
 		return ytwrite.Op{}, err
 	}
 	if err := ytwrite.CheckLinkSettlement(*op, s); err != nil {
@@ -215,8 +215,8 @@ func (l *MemLedger) SettleLinks(_ context.Context, now time.Time, id int64, f yt
 	}
 	if ps := l.links.plans[id]; len(ps) > 0 {
 		latest := &ps[len(ps)-1]
-		if s.Outcome != "" && latest.Attempt == f.Attempt && latest.Recover == f.Recover && latest.Marked > 0 {
-			latest.Outcome = s.Outcome
+		if step, outcome, ok := s.StepRecord(latest.Marked); ok && latest.Attempt == f.Attempt && latest.Recover == f.Recover && step == latest.Marked-1 {
+			latest.Outcome = outcome
 		}
 		l.releaseUnsent(*op, *latest, now)
 	}
@@ -250,7 +250,7 @@ func (l *MemLedger) LeaseLinkRecovery(_ context.Context, now time.Time, id int64
 		return 0, false, nil
 	}
 	op.Reconciles++
-	op.NextAttemptAt = until
+	op.NextAttemptAt, op.Reason = until, ytwrite.ReasonLinkRecovery
 	return op.Reconciles, true, nil
 }
 

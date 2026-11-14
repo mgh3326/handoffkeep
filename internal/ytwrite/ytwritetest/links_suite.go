@@ -396,7 +396,7 @@ func RunLinksProtocol(t *testing.T, nl NewLedger) {
 		if !leasedByA {
 			t.Fatal("worker B never listed the op")
 		}
-		got := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonPartialWrite)
+		got := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonLinkRecovery)
 		if n := len(e.yt.LinkCalls()); n != calls || got.Reconciles != held.Reconciles+1 || e.latestPlan(op).Recover != 0 {
 			t.Fatalf("worker B acted without the lease: %d requests, reconciles %d, plan %+v", n-calls, got.Reconciles, e.latestPlan(op))
 		}
@@ -431,7 +431,7 @@ func RunLinksProtocol(t *testing.T, nl NewLedger) {
 			}
 		}})
 		_, _ = e.p.Drive(ctx, 100)
-		got := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonPartialWrite)
+		got := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonLinkRecovery)
 		if got.Reconciles != held.Reconciles+1 || !got.NextAttemptAt.Equal(until) {
 			t.Fatalf("worker B touched the op: reconciles %d -> %d, next attempt %s (A's lease until %s)",
 				held.Reconciles, got.Reconciles, got.NextAttemptAt, until)
@@ -528,7 +528,7 @@ func RunLinksProtocol(t *testing.T, nl NewLedger) {
 		if _, err := e.ll.PlanLinks(ctx, now, op.ID, ytwrite.LinkFence{Attempt: held.Attempts, Recover: 1, Epoch: b}, e.yt.IssueLinks(lIssue)); err != nil {
 			t.Fatalf("B's plan: %v", err)
 		}
-		before := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonPartialWrite)
+		before := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonLinkRecovery)
 		rows := e.records(lIssue)
 		planBefore := e.latestPlan(op)
 		if planBefore.Recover != 1 || len(ytwrite.ExecuteOrder(planBefore.Plan)) == 0 {
@@ -557,7 +557,7 @@ func RunLinksProtocol(t *testing.T, nl NewLedger) {
 		if _, err := e.ll.SettleLinks(ctx, now, op.ID, send, ytwrite.LinkSettlement{To: ytwrite.StateRejected, Outcome: ytwrite.StepDefinite}); !errors.Is(err, ytwrite.ErrState) {
 			t.Errorf("send-path settle of a recovered op = %v", err)
 		}
-		after := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonPartialWrite)
+		after := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonLinkRecovery)
 		if after.Reconciles != before.Reconciles || !after.NextAttemptAt.Equal(before.NextAttemptAt) {
 			t.Fatalf("op changed: %+v -> %+v", before, after)
 		}
@@ -585,7 +585,7 @@ func RunLinksProtocol(t *testing.T, nl NewLedger) {
 		if _, err := e.p.Drive(context.Background(), 100); err != nil {
 			t.Fatal(err)
 		}
-		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonPartialWrite)
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonLinkRecovery)
 		if n := len(e.yt.LinkCalls()); n != calls || e.latestPlan(op).Recover != 0 {
 			t.Fatalf("a late lease worked: %d requests, plan %+v", n-calls, e.latestPlan(op))
 		}
@@ -594,6 +594,85 @@ func RunLinksProtocol(t *testing.T, nl NewLedger) {
 		e.drive()
 		e.wantState(op, ytwrite.StateApplied, "")
 		e.wantLinks(lIssue, rel("2-21"))
+	})
+
+	// Review of PR #425 (r4574806299, r4574806315): a mark whose
+	// transaction commits while its reply is lost stops Execute before that
+	// step's request. The settlement records the step as definite (never
+	// sent), so its add's ownership closes; a person who then makes the
+	// link keeps it. On the first step the op is deferred; on a later step
+	// the earlier add stays owned.
+	t.Run("mark_committed_with_its_reply_lost_records_the_step_unsent", func(t *testing.T) {
+		for _, c := range []struct {
+			name  string
+			step  int
+			state ytwrite.State
+			owned []ytwrite.IssueLink
+		}{
+			{"first", 0, ytwrite.StatePrepared, nil},
+			{"second", 1, ytwrite.StateRemoteUnknown, []ytwrite.IssueLink{rel("2-20")}},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				e := newLinksEnv(t, nl)
+				e.restart(&dueHook{CrashLedger: &CrashLedger{Ledger: e.ledger}, loseMark: c.step + 1})
+				op := e.prepare(lWriter, lIssue, ytwrite.IssueLinksDesired{Related: []ytwrite.IssueLinkTarget{{TaskID: 20, IssueID: "2-20"}, {TaskID: 21, IssueID: "2-21"}}}, nil)
+				_, _ = e.p.Drive(context.Background(), 100)
+				got := e.wantState(op, c.state, map[ytwrite.State]string{ytwrite.StatePrepared: ytwrite.ReasonNotSent, ytwrite.StateRemoteUnknown: ytwrite.ReasonPartialWrite}[c.state])
+				if p := e.latestPlan(op); p.Marked != c.step+1 || p.Outcome != ytwrite.StepDefinite {
+					t.Fatalf("plan record = marked %d, outcome %q; want step %d definite", p.Marked, p.Outcome, c.step)
+				}
+				if adds := e.count(LinkOpAdd); adds != c.step {
+					t.Fatalf("adds = %d, want %d", adds, c.step)
+				}
+				var open []ytwrite.IssueLink
+				for _, o := range e.records(lIssue).Owned {
+					if o.Open() {
+						open = append(open, ytwrite.IssueLink{Kind: o.LinkType, Target: o.To})
+					}
+				}
+				if !slices.Equal(open, c.owned) {
+					t.Fatalf("open rows = %+v, want %+v", open, c.owned)
+				}
+				// A person makes the unsent link; the op finishes without
+				// claiming it, and a later empty op leaves it.
+				e.restart(e.ledger)
+				e.yt.SeedIssueLink(lIssue, rel("2-21"))
+				e.clock.Advance(48 * time.Hour)
+				e.drive()
+				e.wantState(got, ytwrite.StateApplied, "")
+				e.drive()
+				next := e.prepare(lWriter, lIssue, ytwrite.IssueLinksDesired{}, nil)
+				e.drive()
+				e.wantState(next, ytwrite.StateApplied, "")
+				e.wantLinks(lIssue, rel("2-21"))
+			})
+		}
+	})
+
+	// Review of PR #425 (r4574806302): an operator's resolve waits while a
+	// recovery pass holds the lease (it may have a request in flight), and
+	// is accepted once the lease ran out.
+	t.Run("operator_resolve_waits_for_the_recovery_lease", func(t *testing.T) {
+		e := newLinksEnv(t, nl)
+		e.applyRelated(20)
+		e.yt.QueueLinkCallFaults(LinkCallFault{Op: LinkOpRemove, Status: http.StatusServiceUnavailable, Count: 1})
+		op := e.prepare(lWriter, lIssue, related(21), nil)
+		e.drive()
+		held := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonPartialWrite)
+		e.clock.Advance(time.Hour)
+		ctx := context.Background()
+		now := e.clock.Now()
+		if _, ok, err := e.ll.LeaseLinkRecovery(ctx, now, op.ID, held.Reconciles, now.Add(time.Minute)); err != nil || !ok {
+			t.Fatalf("lease = %v %v", ok, err)
+		}
+		r := ytwrite.Resolution{Applied: false, By: "operator", Note: "looked in YouTrack"}
+		if _, err := e.p.Resolve(ctx, op.ID, r); !errors.Is(err, ytwrite.ErrState) {
+			t.Fatalf("resolve during the lease = %v, want ErrState", err)
+		}
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonLinkRecovery)
+		e.clock.Advance(2 * time.Minute)
+		e.resolve(op, false)
+		e.wantState(op, ytwrite.StateRejected, ytwrite.ReasonOperatorNotDone)
 	})
 
 	// I12: a re-parent removes the old parent before it adds the new one.
@@ -886,6 +965,10 @@ type dueHook struct {
 	failLatest bool
 	failSettle int
 	slowLease  func()
+	// loseMark n > 0: the n-th MarkLinkStep commits and then answers an
+	// error (its reply lost).
+	loseMark int
+	marks    int
 }
 
 var errHookTransient = errors.New("ytwritetest: transient ledger failure")
@@ -911,6 +994,15 @@ func (d *dueHook) SettleLinks(ctx context.Context, now time.Time, id int64, f yt
 		return ytwrite.Op{}, errHookTransient
 	}
 	return d.CrashLedger.SettleLinks(ctx, now, id, f, ls)
+}
+
+func (d *dueHook) MarkLinkStep(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, step int) error {
+	err := d.CrashLedger.MarkLinkStep(ctx, now, id, f, step)
+	d.marks++
+	if err == nil && d.marks == d.loseMark {
+		return errHookTransient
+	}
+	return err
 }
 
 func (d *dueHook) LeaseLinkRecovery(ctx context.Context, now time.Time, id int64, reconciles int, until time.Time) (int, bool, error) {
