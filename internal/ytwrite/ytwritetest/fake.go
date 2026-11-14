@@ -90,6 +90,9 @@ type FakeYouTrack struct {
 	// DelayCommit fault held back; ReleaseDelayed runs each commit.
 	delayedCreates []func() string
 
+	// links is the issue-link store (fake_links.go).
+	links fakeLinks
+
 	// BeforeCreate runs at the start of every CreateComment, with the caller's
 	// context, before anything else. Tests use it to cancel a caller mid-call.
 	BeforeCreate func(ctx context.Context)
@@ -485,6 +488,20 @@ func (c *CrashLedger) MapGet(ctx context.Context, entityKind, hkKey string) (ytw
 		return ytwrite.MapRow{}, false, err
 	}
 	return c.Ledger.MapGet(ctx, entityKind, hkKey)
+}
+
+func (c *CrashLedger) RecordAdoption(ctx context.Context, now time.Time, id int64, attempts int, ytID string) error {
+	if err := c.enter("RecordAdoption"); err != nil {
+		return err
+	}
+	return c.leave("RecordAdoption", c.Ledger.RecordAdoption(ctx, now, id, attempts, ytID))
+}
+
+func (c *CrashLedger) Adoption(ctx context.Context, id int64) (ytwrite.Adoption, bool, error) {
+	if err := c.enter("Adoption"); err != nil {
+		return ytwrite.Adoption{}, false, err
+	}
+	return c.Ledger.Adoption(ctx, id)
 }
 
 // InjectIssue adds an issue hk did not create (or created earlier) to the

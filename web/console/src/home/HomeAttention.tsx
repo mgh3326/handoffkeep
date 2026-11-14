@@ -169,7 +169,8 @@ function HomeTaskAction({ id }: { id: number }) {
   return task && <TaskActions compact target={task} onPriority={priority => setTask(old => old ? { ...old, priority } : old)} onApplied={() => setAttempt(value => value + 1)} />;
 }
 function Body({ data, workStatus, triage, items, queryActive, unsupported }: { data: Attention; workStatus: WorkStatusResponse | null; triage: Triage; items: { action: Item[]; fyi: Item[] }; queryActive: boolean; unsupported: boolean }) {
-  if (!(data.decisions.count + data.tasks.count + data.deploys.count)) return <div className="ha-empty"><IconFrame><path d="M4 5h16v14H4zM4 14h5l2 2h2l2-2h5" /></IconFrame><p>대기 중인 일 없음</p></div>;
+  const lagging = data.deploys.lagging ?? [];
+  if (!(data.decisions.count + data.tasks.count + data.deploys.count) && lagging.length === 0) return <div className="ha-empty"><IconFrame><path d="M4 5h16v14H4zM4 14h5l2 2h2l2-2h5" /></IconFrame><p>대기 중인 일 없음</p></div>;
   if (queryActive && items.action.length + items.fyi.length === 0) return <p className="ha-note">조건에 맞는 항목이 없습니다.</p>;
   const section = (title: string, list: Item[], count: number) => {
     const groups: { label: string; rows: Item[] }[] = [];
@@ -181,7 +182,14 @@ function Body({ data, workStatus, triage, items, queryActive, unsupported }: { d
     }
     return <section className="ha-section" aria-label={title}><h2>{title} <span>{count}</span></h2>{groups.map((group, index) => <div key={`${group.label}:${index}`}><h3>{group.label}</h3><ul className="ha-list">{group.rows.map(item => <Row key={item.key} item={item} now={data.generated_at} selected={triage.selected.has(item.key)} toggle={triage.toggle} />)}</ul></div>)}{count > list.length ? <p className="ha-note">+{count - list.length}개 더 있음</p> : null}</section>;
   };
-  return <><p className="ha-summary-count">결정 {data.decisions.count} (기한 경과 {data.decisions.overdue}) · 작업 {data.tasks.count} · 배포 대기 {data.deploys.count}{workStatus ? <> · <a href="/ui/work-status" className="ha-work-status-link">열린 작업 {workStatus.summary.total_open}</a></> : null}</p>{queryActive ? <p className="ha-note">현재 목록에서 필터한 결과입니다.</p> : null}{unsupported ? <p className="ha-note">프로젝트·종류·등급·티어 필터는 작업 화면에서만 적용됩니다.</p> : null}{section("지금 할 일", items.action, queryActive ? items.action.length : data.decisions.count + data.tasks.count)}{section("참고", items.fyi, queryActive ? items.fyi.length : data.deploys.count)}{data.deploys.events_capped ? <p className="ha-note">조회 범위에 제한이 있어 목록이 불완전할 수 있습니다.</p> : null}</>;
+  return <>{lagging.length > 0 ? (
+    <div className="ha-lag-banner" role="alert" data-testid="home-lag-banner">
+      <IconFrame><path d="M12 2L1 21h22L12 2zm0 3.5L20.3 19H3.7L12 5.5zM11 10v4h2v-4h-2zm0 6v2h2v-2h-2z" /></IconFrame>
+      <span>
+        배포 지연: {lagging.map((s) => `${s.service}(main보다 ${s.lag_count}개 뒤처짐)`).join(", ")} · <a href="/ui/deploys">배포 관리</a>
+      </span>
+    </div>
+  ) : null}<p className="ha-summary-count">결정 {data.decisions.count} (기한 경과 {data.decisions.overdue}) · 작업 {data.tasks.count} · 배포 대기 {data.deploys.count}{workStatus ? <> · <a href="/ui/work-status" className="ha-work-status-link">열린 작업 {workStatus.summary.total_open}</a></> : null}</p>{queryActive ? <p className="ha-note">현재 목록에서 필터한 결과입니다.</p> : null}{unsupported ? <p className="ha-note">프로젝트·종류·등급·티어 필터는 작업 화면에서만 적용됩니다.</p> : null}{section("지금 할 일", items.action, queryActive ? items.action.length : data.decisions.count + data.tasks.count)}{section("참고", items.fyi, queryActive ? items.fyi.length : data.deploys.count)}{data.deploys.events_capped ? <p className="ha-note">조회 범위에 제한이 있어 목록이 불완전할 수 있습니다.</p> : null}</>;
 }
 export function HomeAttention() {
   const [refresh, setRefresh] = useState(0);

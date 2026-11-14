@@ -58,12 +58,15 @@ type ytuResult struct {
 		Kind   string `json:"kind"`
 		Reason string `json:"reason"`
 	} `json:"rejected"`
-	Released []int64 `json:"released"`
-	Stranded []int64 `json:"stranded"`
+	Released       []int64 `json:"released"`
+	Stranded       []int64 `json:"stranded"`
+	AnchorReleased bool    `json:"anchor_released"`
 }
 
 // An operator unbinds a task, the rejected op is reported, and
-// `comments-backfill --task N` binds exactly that task again.
+// `comments-backfill --task N` binds exactly that task again, to the issue it
+// verifies: also an issue other than the one the task's first comment
+// anchored in yt_entity_map, which the unbind released (hk 4536).
 func TestCommentsUnbindThenRebindOneTask(t *testing.T) {
 	_, dbURL := testdb.Schema(t, "ytu_cmd")
 	ctx := t.Context()
@@ -141,17 +144,25 @@ func TestCommentsUnbindThenRebindOneTask(t *testing.T) {
 	}
 	if res.TaskID != target || !res.Removed || res.Binding == nil || res.Binding.IssueID != "2-"+id || len(res.Rejected) != 1 ||
 		res.Rejected[0].Kind != ytwrite.KindCommentAppend || res.Rejected[0].Reason != ytwrite.ReasonBindingRemoved ||
-		len(res.Released) != 1 || res.Released[0] != c.ID || len(res.Stranded) != 0 {
+		len(res.Released) != 1 || res.Released[0] != c.ID || len(res.Stranded) != 0 || !res.AnchorReleased {
 		t.Fatalf("unbind result %+v", res)
 	}
 	if _, found, err := st.YTTaskBinding(ctx, target); err != nil || found {
 		t.Fatalf("binding after unbind: %v %v", found, err)
 	}
+	if cand, err := st.YTCanaryCandidate(ctx, target); err != nil || cand.MappedIssueID != "" {
+		t.Fatalf("candidate after unbind: %+v %v, want no mapped issue", cand, err)
+	}
 	// Idempotent: a second run reports nothing removed.
 	res = ytuResult{}
-	if err := runJSON(&res, "yt", "comments-unbind", id); err != nil || res.Removed || res.Binding != nil {
+	if err := runJSON(&res, "yt", "comments-unbind", id); err != nil || res.Removed || res.Binding != nil || res.AnchorReleased {
 		t.Fatalf("second unbind: %+v %v", res, err)
 	}
+
+	// The operator's issue is another one now (recreated under a new id).
+	fake.mu.Lock()
+	fake.issues[ytpIssuePath(target)]["id"] = "2-recreated"
+	fake.mu.Unlock()
 
 	// --task N covers that task alone, whatever else would verify.
 	var report ytpReport
@@ -174,8 +185,8 @@ func TestCommentsUnbindThenRebindOneTask(t *testing.T) {
 	p := report.project(t, project)
 	ytpIDs(t, "bound", p.Bound)
 	ytpIDs(t, "verifies", p.Verifies, target)
-	if b, found, err := st.YTTaskBinding(ctx, target); err != nil || !found || b.Origin != store.YTBindingImportVerified {
-		t.Fatalf("rebind: %+v %v %v", b, found, err)
+	if b, found, err := st.YTTaskBinding(ctx, target); err != nil || !found || b.Origin != store.YTBindingImportVerified || b.IssueID != "2-recreated" {
+		t.Fatalf("rebind: %+v %v %v, want import_verified on 2-recreated", b, found, err)
 	}
 	if _, found, _ := st.YTTaskBinding(ctx, bystander); found {
 		t.Fatal("--task bound another task")

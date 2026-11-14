@@ -274,15 +274,20 @@ func ytCommentOnOpTx(ctx context.Context, tx pgx.Tx, c TaskComment, now time.Tim
 // A new binding appends a 'bound' row to yt_binding_history in its
 // transaction (the one UnbindYTTaskBinding's 'unbound' row follows).
 // A new binding creates no map row; when task fields mode is on, it also
-// prepares the task's first issue_fields op in this transaction. The new
-// row's comments_from is the task's highest comment id read in the same
-// transaction, so the binding never copies a comment written before it.
+// prepares the task's first issue_fields op in this transaction. A binding
+// published after an operator unbind also appends one task 'U' row to
+// sync_log, whatever this process's fields mode, so the serve worker's
+// task_fields consumer prepares the task's move and snapshot for it (hk 4539).
+// The new row's comments_from is the task's highest comment id read in the
+// same transaction, so the binding never copies a comment written before it.
 // The automatic binder publishes through PublishYTAutoBinding, which shares
 // this publication and copies its evidence's missing comments in it.
 //
 // Locks, in this order (lockorder.go): the issue ownership lock, FOR UPDATE on
 // the task row, the task's lane lock, FOR SHARE on the task's youtrack_projects
-// and task_origins rows, then the new binding row and its history row.
+// and task_origins rows, then the new binding row and its history row and,
+// after an unbind, its sync_log row (taking the commit-time allocator lock
+// every task write takes, sync_migration.go).
 func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified YTCanaryCandidate) (YTTaskBinding, error) {
 	got, _, _, err := s.publishYTBinding(ctx, b, verified, ytBindingPublication{origin: YTBindingImportVerified})
 	return got, err

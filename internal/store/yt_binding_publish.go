@@ -150,19 +150,17 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 	if err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	}
+	latest, err := ytBindingLatestActionTx(ctx, tx, b.TaskID)
+	if err != nil {
+		return YTTaskBinding{}, 0, 0, err
+	}
 	// An operator unbind recorded while the binder was doing its YouTrack
 	// reads is not undone by this publication (I7): UnbindYTTaskBinding takes
 	// the same ownership lock first, so one of the two sees the other whole.
 	// The operator's backfill (origin import_verified) is the supported way
 	// past an unbind and is not checked.
-	if p.auto {
-		action, err := ytBindingLatestActionTx(ctx, tx, b.TaskID)
-		if err != nil {
-			return YTTaskBinding{}, 0, 0, err
-		}
-		if action == ytBindingActionUnbound {
-			return YTTaskBinding{}, 0, 0, fmt.Errorf("%w: task %d was unbound by the operator", ErrYTBindingExcluded, b.TaskID)
-		}
+	if p.auto && latest == ytBindingActionUnbound {
+		return YTTaskBinding{}, 0, 0, fmt.Errorf("%w: task %d was unbound by the operator", ErrYTBindingExcluded, b.TaskID)
 	}
 	if found {
 		if p.auto {
@@ -224,6 +222,19 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 	}
 	if err := s.ytFieldsOnBindTx(ctx, tx, b.TaskID, now); err != nil {
 		return YTTaskBinding{}, 0, 0, err
+	}
+	// A binding the operator published after an unbind is no task change, so
+	// the task_fields feed would not see it, and the unbind rejected the
+	// task's prepared snapshot and move. This process's fields mode may be off
+	// (the CLI's is), so ytFieldsOnBindTx may have prepared nothing: one task
+	// 'U' row, as translations.go writes for a title, makes the serve
+	// worker's consumer read the task again and prepare its move and snapshot
+	// for the new binding (hk 4539). An unchanged snapshot makes no op.
+	if latest == ytBindingActionUnbound {
+		if _, err := tx.Exec(ctx, `INSERT INTO sync_log(model,model_id,action,at) VALUES('task',$1,'U',clock_timestamp())`,
+			strconv.FormatInt(b.TaskID, 10)); err != nil {
+			return YTTaskBinding{}, 0, 0, err
+		}
 	}
 	prepared, linked := 0, 0
 	var enqueued []ytEnqueuedCopy

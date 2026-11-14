@@ -28,7 +28,13 @@ package store
 //     in applyDeployRecordTx and propagateMergeTx,
 //     task_id then each of tasks in the order sent in ApplyTaskSourceEvent,
 //     then ascending id in propagateRevertTx) cannot form a
-//     cycle with another holder. UpdateJob, AppendRelayEvent (an event that
+//     cycle with another holder. A relation write (addRelationTx,
+//     RemoveTaskRelation, archiveLiveRelationsTx; hk 4637) locks the edge's
+//     src row first and then updates both endpoints' rows in one statement
+//     (bumpRelationEndpointsTx), so it locks the second endpoint after src;
+//     every caller (AddTaskRelation, RemoveTaskRelation, TransitionTaskWith,
+//     CreateTaskChecked, EmitTicketSet) holds this lock first for that
+//     reason (TestLockOrderRelationEndpointsVersusRelationWrite). UpdateJob, AppendRelayEvent (an event that
 //     answers or ends a decision: relayTouchesDecisions) and PutDocument
 //     (deploy records) take it first for that reason. Taking it again in the
 //     same transaction (applyJobRoleTx, applyDeployRecordTx) is a no-op:
@@ -185,7 +191,9 @@ package store
 //     ownership lock pg_advisory_xact_lock(8241873810) first, then FOR UPDATE
 //     on the task row, then the task's lane lock, then FOR SHARE on its
 //     youtrack_projects and task_origins rows, then read the other mappings
-//     without a lock and insert their own new row. FOR UPDATE and not FOR
+//     without a lock and insert their own new row (a binding published after
+//     an unbind also inserts one task row into sync_log, hk 4539, which takes
+//     no lock before the level 6 allocator at commit). FOR UPDATE and not FOR
 //     SHARE: a task with no task_origins row has no origin row to lock, and a
 //     first origin insert (UpsertYouTrackMirror, AddTaskOrigin) reaches the
 //     task row only through its foreign key's KEY SHARE, which FOR SHARE
@@ -203,8 +211,10 @@ package store
 //     order, then reads the comments authority row FOR SHARE (as prepareYTOpTx
 //     does after its lane lock), rejects the task's prepared yt_write_ops rows
 //     (ops of the task's lane, which no other holder of that lane lock can
-//     change meanwhile), deletes the task's yt_task_bindings row and yt_issue_intents row and
-//     inserts a yt_binding_history row. AddYTTaskBinding inserts its history row the same
+//     change meanwhile), deletes the task's yt_task_bindings row, its yt_issue_intents
+//     row and its yt_entity_map row when that names the binding's issue (hk 4536:
+//     every writer of the map row holds the lane lock) and inserts a
+//     yt_binding_history row. AddYTTaskBinding inserts its history row the same
 //     way; nothing else locks a history row.
 //     No cycle, lock by lock:
 //       - The ownership lock: only those three writers take it, always first
@@ -278,8 +288,12 @@ package store
 //     lock, as AddYTTaskBinding), take the task's lane lock, then read
 //     yt_issue_intents, the ownership rows (the task's latest
 //     yt_binding_history row among them, hk 4490) and youtrack_projects
-//     without a lock, then insert its yt_write_ops row and insert or delete its
-//     yt_issue_intents row (no foreign key, nobody else locks it).
+//     without a lock, then insert its yt_write_ops row, its
+//     yt_issue_comment_bounds row (reading task_comments without a lock;
+//     hk 4301) and insert or delete its yt_issue_intents row (no foreign
+//     key, nobody else locks them). RecordAdoption (hk 4570) takes FOR SHARE
+//     on one op row, then inserts its yt_write_op_adoptions row; it takes no
+//     lane lock and holds nothing else.
 //     PrepareMappedYTIssues takes the lane lock as the first lock of each
 //     task's transaction (as backfillYTIssue), then reads the task row
 //     without a lock. Claim of an issue_create op, under the lane lock and

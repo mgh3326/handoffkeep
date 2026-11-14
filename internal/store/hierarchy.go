@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -133,8 +134,27 @@ func addRelationTx(ctx context.Context, tx pgx.Tx, src int64, kind string, dst i
 	} else if _, err = tx.Exec(ctx, `INSERT INTO task_relations(kind,src_id,dst_id,created_by,created_at) VALUES($1,$2,$3,$4,$5)`, kind, src, dst, by, now); err != nil {
 		return false, err
 	}
-	_, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: src, Kind: TaskEventRelation, From: "", To: "", By: by, At: now, Field: "relation", ToValue: fmt.Sprintf("%s:%d", kind, dst), Refs: TaskRefs{}})
-	return true, err
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: src, Kind: TaskEventRelation, From: "", To: "", By: by, At: now, Field: "relation", ToValue: fmt.Sprintf("%s:%d", kind, dst), Refs: TaskRefs{}}); err != nil {
+		return false, err
+	}
+	return true, bumpRelationEndpointsTx(ctx, tx, now, src, dst)
+}
+
+// bumpRelationEndpointsTx sets updated_at on both endpoints of a changed edge,
+// in the edge's own transaction, so the change reaches the task feed for
+// each (design/2026-11-13/yt-issue-links I3). Only one endpoint writes the
+// YouTrack link (ytLinkWriter), but bumping both keeps the rule "an edge
+// change reaches both endpoints" true whichever is the writer; the other's
+// snapshot is unchanged and makes no op. Every caller holds the task-mutation
+// lock (lockorder.go level 2) and already holds src's row, so the second row
+// lock cannot close a cycle with another task writer. updated_at never moves
+// backwards: callers read now under that lock, and GREATEST keeps a newer
+// revision if a clock step put one ahead of now.
+func bumpRelationEndpointsTx(ctx context.Context, tx pgx.Tx, now time.Time, src, dst int64) error {
+	ids := []int64{src, dst}
+	slices.Sort(ids)
+	_, err := tx.Exec(ctx, `UPDATE tasks SET updated_at=GREATEST(updated_at, $2) WHERE id = ANY($1)`, ids, now)
+	return err
 }
 
 // archiveLiveRelationsTx archives every live edge of kind that starts at src.
@@ -158,6 +178,9 @@ func archiveLiveRelationsTx(ctx context.Context, tx pgx.Tx, src int64, kind, by 
 	}
 	for _, dst := range dsts {
 		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: src, Kind: TaskEventRelation, By: by, At: now, Field: "relation", FromValue: fmt.Sprintf("%s:%d", kind, dst), Refs: TaskRefs{}}); err != nil {
+			return err
+		}
+		if err = bumpRelationEndpointsTx(ctx, tx, now, src, dst); err != nil {
 			return err
 		}
 	}
@@ -246,6 +269,9 @@ func (s *Store) RemoveTaskRelation(ctx context.Context, src int64, kind string, 
 		return false, tx.Commit(ctx)
 	}
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: src, Kind: TaskEventRelation, By: by, At: now, Field: "relation", FromValue: fmt.Sprintf("%s:%d", kind, dst), Refs: TaskRefs{}}); err != nil {
+		return false, err
+	}
+	if err = bumpRelationEndpointsTx(ctx, tx, now, src, dst); err != nil {
 		return false, err
 	}
 	return true, tx.Commit(ctx)
