@@ -638,3 +638,36 @@ func TestUnbindKeepsAnAnchorItDoesNotName(t *testing.T) {
 		})
 	}
 }
+
+// The map row an applied issue_create wrote is the same routing anchor, and
+// it is released with the binding that create published (hk 4536): the old
+// issue stays on record in the create op, its result and the history.
+func TestUnbindReleasesTheAnchorAnIssueCreateWrote(t *testing.T) {
+	s := schemaStore(t, "ybh_anchor_create")
+	ctx := t.Context()
+	ytbMapped(t, s)
+	task := ytcTask(t, s, ytbProject)
+	create := ytiPrepare(t, s, task, ytcTenant)
+	ytiDispatch(t, s, create)
+	issue := "2-" + strconv.FormatInt(task, 10)
+	if _, err := s.YTWriteLedger().Apply(ctx, time.Now().UTC(), create.ID, issue, ytiMaps(create, issue)); err != nil {
+		t.Fatal(err)
+	}
+	if got := ybhAnchor(t, s, task); got != issue {
+		t.Fatalf("anchor after the applied create = %q, want %q", got, issue)
+	}
+
+	res, err := s.UnbindYTTaskBinding(ctx, task, YTUnbindOptions{By: "operator:me", Reason: "created in the wrong project"})
+	if err != nil || !res.Removed || !res.AnchorReleased || res.Binding == nil || res.Binding.Origin != YTBindingOpApplied {
+		t.Fatalf("unbind = %+v %v, want the create's binding removed and its anchor released", res, err)
+	}
+	if got := ybhAnchor(t, s, task); got != "" {
+		t.Fatalf("anchor after the unbind = %q, want none", got)
+	}
+	if got := ybhState(t, s, create); got.State != ytwrite.StateApplied || got.YTResultID != issue {
+		t.Fatalf("the create op after the unbind = %+v, want it applied to %s", got, issue)
+	}
+	other := ytbBinding(task)
+	other.IssueID, other.IssueReadable = "2-other", "HK-other"
+	ytbBind(t, s, other)
+}

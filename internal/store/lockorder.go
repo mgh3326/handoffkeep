@@ -185,7 +185,9 @@ package store
 //     ownership lock pg_advisory_xact_lock(8241873810) first, then FOR UPDATE
 //     on the task row, then the task's lane lock, then FOR SHARE on its
 //     youtrack_projects and task_origins rows, then read the other mappings
-//     without a lock and insert their own new row. FOR UPDATE and not FOR
+//     without a lock and insert their own new row (a binding published after
+//     an unbind also inserts one task row into sync_log, hk 4539, which takes
+//     no lock before the level 6 allocator at commit). FOR UPDATE and not FOR
 //     SHARE: a task with no task_origins row has no origin row to lock, and a
 //     first origin insert (UpsertYouTrackMirror, AddTaskOrigin) reaches the
 //     task row only through its foreign key's KEY SHARE, which FOR SHARE
