@@ -153,6 +153,15 @@ const (
 	ReasonBindingChanged = "binding_changed"
 )
 
+// CancelledByUnbind reports whether reason closed an op because its task's
+// binding was removed (ReasonBindingRemoved, ReasonUnbindForced). Such an op
+// was never sent and YouTrack never refused it, so a request the feed made
+// once is not suppressed by it: the same request is prepared again once the
+// task is bound again (prepareYTOnceTx, hk 4539).
+func CancelledByUnbind(reason string) bool {
+	return reason == ReasonBindingRemoved || reason == ReasonUnbindForced
+}
+
 var (
 	// ErrInvalid is a request the protocol refuses before anything is stored.
 	ErrInvalid = errors.New("ytwrite_invalid")

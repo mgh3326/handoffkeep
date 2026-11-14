@@ -185,7 +185,9 @@ package store
 //     ownership lock pg_advisory_xact_lock(8241873810) first, then FOR UPDATE
 //     on the task row, then the task's lane lock, then FOR SHARE on its
 //     youtrack_projects and task_origins rows, then read the other mappings
-//     without a lock and insert their own new row. FOR UPDATE and not FOR
+//     without a lock and insert their own new row (a binding published after
+//     an unbind also inserts one task row into sync_log, hk 4539, which takes
+//     no lock before the level 6 allocator at commit). FOR UPDATE and not FOR
 //     SHARE: a task with no task_origins row has no origin row to lock, and a
 //     first origin insert (UpsertYouTrackMirror, AddTaskOrigin) reaches the
 //     task row only through its foreign key's KEY SHARE, which FOR SHARE
@@ -203,8 +205,10 @@ package store
 //     order, then reads the comments authority row FOR SHARE (as prepareYTOpTx
 //     does after its lane lock), rejects the task's prepared yt_write_ops rows
 //     (ops of the task's lane, which no other holder of that lane lock can
-//     change meanwhile), deletes the task's yt_task_bindings row and yt_issue_intents row and
-//     inserts a yt_binding_history row. AddYTTaskBinding inserts its history row the same
+//     change meanwhile), deletes the task's yt_task_bindings row, its yt_issue_intents
+//     row and its yt_entity_map row when that names the binding's issue (hk 4536:
+//     every writer of the map row holds the lane lock) and inserts a
+//     yt_binding_history row. AddYTTaskBinding inserts its history row the same
 //     way; nothing else locks a history row.
 //     No cycle, lock by lock:
 //       - The ownership lock: only those three writers take it, always first

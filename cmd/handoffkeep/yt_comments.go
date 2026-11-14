@@ -1536,9 +1536,11 @@ const youtrackCommentsUnbindUsage = "usage: youtrack comments-unbind <task> [--b
 // comment op is prepared unless --force. A task with no binding answers
 // removed false and writes nothing. It opens the database directly, like
 // `youtrack canary`, and calls no YouTrack. `youtrack comments-backfill --task
-// N` binds the task again once every other record hk keeps for it (map row,
-// mirror link) agrees with the issue it verifies; one that does not is named
-// in the refusal, and unbind does not touch it.
+// N` binds the task again once every other record hk keeps for it (mirror
+// link, canary row) agrees with the issue it verifies; one that does not is
+// named in the refusal, and unbind does not touch it. The task's map row, the
+// anchor its first op wrote, is released with the binding when it names the
+// binding's issue (anchor_released), so a different issue can bind (hk 4536).
 func youtrackCommentsUnbindCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("youtrack comments-unbind", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)

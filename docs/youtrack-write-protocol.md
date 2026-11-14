@@ -581,22 +581,34 @@ verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
   another tenant or issue, which stays for the recovery pass, and not a
   document comment's copy, which reads its article binding) with reason
   `binding_removed` (`unbind_forced` under `--force`), deletes the binding, drops the
-  task's pending issue intent (so the issue worker cannot bind it again) and
-  appends an `unbound` row to `yt_binding_history`. It retargets nothing and
-  leaves `task_origins`, `yt_entity_map` and the canary alone. The result lists
+  task's pending issue intent (so the issue worker cannot bind it again),
+  deletes the task's `yt_entity_map` row when it names the binding's issue on
+  the binding's tenant (hk 4536; `"anchor_released": true`) and appends an
+  `unbound` row to `yt_binding_history`. It retargets nothing and leaves
+  `task_origins` and the canary alone. The result lists
   `rejected` ops and the `released` comment ids (hk keeps them; the comment
   gets no op) or, under comments authority `youtrack` with `--force`, the
   `stranded` ones (nothing will carry them). `comments-backfill --task N`
   binds the task again once its other records agree with the issue it
-  verifies. Unbind leaves the task's `yt_entity_map` row (anchored by its
-  first comment op), mirror link and canary row alone, so a replacement that
-  is a different issue is refused naming the source that disagrees
-  (`yt_entity_map_task`, `task_origins`) until its owner reconciles it. A
-  later comment on an unbound task gets no op. Run it only while every release
+  verifies. The map row is the routing anchor the task's first op wrote, so
+  releasing it is what lets a verified issue other than the old one bind; the
+  old issue stays on record in the `unbound` history row and in the ops. The
+  mirror link and the canary row have their own owners, so a replacement that
+  is a different issue is still refused naming the source that disagrees
+  (`task_origins`) until its owner reconciles it, and so is a map row that
+  names another issue or tenant (`yt_entity_map_task`). A task unbound before
+  hk 4536 keeps its map row, and unbinding it again writes nothing. A later
+  comment on an unbound task gets no op. A binding published after an unbind
+  also appends one `task` `U` row to the change feed (`sync_log`), whatever
+  fields mode the CLI process runs in, so serve's `task_fields` consumer
+  prepares the task's `issue_move` and `issue_fields` ops for the new binding
+  (hk 4539); with serve's fields mode off it prepares nothing, as for any
+  change made while off. Run it only while every release
   that can serve (a blue-green overlap, a rollback target) is this one or
   later: an earlier release's issue ownership check does not read
-  `yt_binding_history`, so its project change would prepare an `issue_create`
-  for an unbound task that has no map row, mirror link or canary row.
+  `yt_binding_history`, and the map row it would otherwise find is released
+  with the binding, so its project change would prepare an `issue_create`
+  for an unbound task that has no mirror link or canary row.
 - Each YouTrack read has its own 15 s timeout and each task 60 s; there is no
   budget for the whole run. A task in class `error` makes either command exit
   1 after the report.
@@ -1317,7 +1329,10 @@ apply, so a move YouTrack refused is not prepared again on the task's next
 change or a backfill run, only when the task's project maps to another target
 (a new sha). Until then `ytwrite.move_stuck` is logged, counted as
 `move_skipped=`, and the task's snapshot is prepared for the project the
-issue is in (or on its way to), so its fields keep reaching it there.
+issue is in (or on its way to), so its fields keep reaching it there. A move
+the operator's unbind closed (reason `binding_removed` or `unbind_forced`, hk
+4539) is no refusal: YouTrack never saw it, so once the task is bound again
+the same move is prepared as a new op (the next seq).
 
 **A snapshot behind a refused move** (hk 4111). The lane treats a rejected
 op as resolved, so an `issue_fields` op prepared behind a move that was then
