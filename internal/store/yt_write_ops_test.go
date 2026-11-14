@@ -17,7 +17,7 @@ func ytLedgerFactory(t *testing.T) ytwritetest.NewLedger {
 	s := schemaStore(t, "ytw")
 	return func(t *testing.T) ytwrite.Ledger {
 		t.Helper()
-		if _, err := s.pool.Exec(t.Context(), `TRUNCATE yt_comment_write_links, yt_entity_map, yt_write_ops RESTART IDENTITY`); err != nil {
+		if _, err := s.pool.Exec(t.Context(), `TRUNCATE yt_comment_write_links, yt_entity_map, yt_write_ops, yt_write_op_adoptions, yt_issue_comment_bounds RESTART IDENTITY`); err != nil {
 			t.Fatal(err)
 		}
 		return s.YTWriteLedger()
@@ -35,7 +35,7 @@ func TestYTIssueProtocolOverPostgres(t *testing.T) {
 	s := schemaStore(t, "ytwi")
 	ytwritetest.RunIssueProtocol(t, func(t *testing.T) ytwrite.Ledger {
 		t.Helper()
-		if _, err := s.pool.Exec(t.Context(), `TRUNCATE yt_task_bindings, yt_comment_write_links, yt_entity_map, yt_write_ops RESTART IDENTITY`); err != nil {
+		if _, err := s.pool.Exec(t.Context(), `TRUNCATE yt_task_bindings, yt_comment_write_links, yt_entity_map, yt_write_ops, yt_write_op_adoptions, yt_issue_comment_bounds RESTART IDENTITY`); err != nil {
 			t.Fatal(err)
 		}
 		return s.YTWriteLedger()

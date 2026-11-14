@@ -278,8 +278,12 @@ package store
 //     lock, as AddYTTaskBinding), take the task's lane lock, then read
 //     yt_issue_intents, the ownership rows (the task's latest
 //     yt_binding_history row among them, hk 4490) and youtrack_projects
-//     without a lock, then insert its yt_write_ops row and insert or delete its
-//     yt_issue_intents row (no foreign key, nobody else locks it).
+//     without a lock, then insert its yt_write_ops row, its
+//     yt_issue_comment_bounds row (reading task_comments without a lock;
+//     hk 4301) and insert or delete its yt_issue_intents row (no foreign
+//     key, nobody else locks them). RecordAdoption (hk 4570) takes FOR SHARE
+//     on one op row, then inserts its yt_write_op_adoptions row; it takes no
+//     lane lock and holds nothing else.
 //     PrepareMappedYTIssues takes the lane lock as the first lock of each
 //     task's transaction (as backfillYTIssue), then reads the task row
 //     without a lock. Claim of an issue_create op, under the lane lock and

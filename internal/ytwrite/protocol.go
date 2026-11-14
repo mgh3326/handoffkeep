@@ -365,6 +365,13 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 	case err == nil && resultIDRE.MatchString(id):
 		return p.record(op, p.apply(ctx, kind, op, id, false))
 	case errors.As(err, &adopted) && resultIDRE.MatchString(adopted.ID):
+		// The decision is recorded before it is applied, so an apply that
+		// is lost leaves reconcile the proof that nothing was sent (hk
+		// 4570). A record that fails leaves the operator's resolve, as
+		// before; the apply is still tried.
+		if rerr := p.Ledger.RecordAdoption(ctx, now, op.ID, op.Attempts, adopted.ID); rerr != nil {
+			log.Printf("ytwrite.adoption_record_failed op_id=%d yt_id=%q err=%q", op.ID, adopted.ID, rerr.Error())
+		}
 		return p.record(op, p.apply(ctx, kind, op, adopted.ID, true))
 	case adopted != nil:
 		// Nothing was written; an id the ledger cannot hold is no adoption.
@@ -586,11 +593,13 @@ func (p *Protocol) Drive(ctx context.Context, limit int) (DriveStats, error) {
 // reconcile searches the op's target for its exact rendered text through the
 // op's kind. One exact match is positive evidence and applies the op; one
 // match the kind reports as the thing Send would have adopted
-// (Evidence.Adopted) is not applied: nothing bounds when a create the op's
-// dispatch may have sent lands, and an applied op is never searched again, so
-// a late create would be a second issue no one sees (review of PR #383). It
-// stays remote_unknown / adoption_unconfirmed, the candidate named in the
-// detail, for an operator's resolve --adopted. Anything else leaves it
+// (Evidence.Adopted) is applied as adopted only when the op's last dispatch
+// recorded that it adopted that same thing (Ledger.RecordAdoption, hk 4570):
+// then it sent nothing. Without that record nothing bounds when a create the
+// op's dispatch may have sent lands, and an applied op is never searched
+// again, so a late create would be a second issue no one sees (review of PR
+// #383). It stays remote_unknown / adoption_unconfirmed, the candidate named
+// in the detail, for an operator's resolve --adopted. Anything else leaves it
 // remote_unknown: no match is not proof
 // the write did not happen, so there is no automatic re-create. The decision
 // is the same for every kind; a kind only reports what it found (Evidence).
@@ -626,6 +635,19 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	switch {
 	case len(ev.Matches) == 1 && ev.Deleted == 0 && ev.Mismatched == 0 && resultIDRE.MatchString(ev.Matches[0]):
 		if ev.Adopted {
+			a, found, aerr := p.Ledger.Adoption(ctx, op.ID)
+			if aerr != nil {
+				return touch(ReasonReconcileFailed, aerr.Error())
+			}
+			if found && a.YTID == ev.Matches[0] && a.Attempts == op.Attempts {
+				// This op's last dispatch adopted this issue and sent
+				// nothing (RecordAdoption): no create of its can land.
+				s := p.apply(ctx, kind, op, a.YTID, true)
+				if s.err == nil {
+					logTransition(s.op)
+				}
+				return s.err == nil, s.err
+			}
 			return touch(ReasonAdoptionUnconfirmed, ev.Matches[0]+" is the task's unmarked issue, the one Send adopts; a create this op sent may still land, so an operator resolves it (--applied "+ev.Matches[0]+" --adopted)")
 		}
 		s := p.apply(ctx, kind, op, ev.Matches[0], false)
@@ -653,7 +675,9 @@ type Resolution struct {
 	// Adopted says whether YTID existed before the op (it adopted an issue
 	// made elsewhere: true) or was created by it (false); only with Applied.
 	// An adopted issue already holds the task's history, so its binding
-	// starts after the latest comment; a created one starts at 0. nil is "not
+	// starts after the comments the task had when the op was prepared (the
+	// store's yt_issue_comment_bounds, hk 4301); a created one starts at 0.
+	// nil is "not
 	// stated", which a kind whose binding depends on it refuses
 	// (issue_create), so an older client cannot pick a cutoff by omission.
 	Adopted *bool

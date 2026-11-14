@@ -154,6 +154,16 @@ func prepareYTIssueTx(ctx context.Context, tx pgx.Tx, now time.Time, t Task, p y
 	if err != nil || !created {
 		return op, created, err
 	}
+	// The boundary an adopted issue's binding starts its comment catch-up
+	// from (hk 4301, bindYTIssueTx): the comments the task has now. The
+	// boundary is exact: comment inserts hold taskCommentInsertLock until
+	// they commit, so ids commit in order and no comment at or below the
+	// highest committed id can commit after this read.
+	if _, err := tx.Exec(ctx, `INSERT INTO yt_issue_comment_bounds(op_id, task_id, comments_from, recorded_at)
+		VALUES ($1,$2,(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$2),$3) ON CONFLICT (op_id) DO NOTHING`,
+		op.ID, t.ID, now.UTC()); err != nil {
+		return op, true, err
+	}
 	if cerr := ytwrite.CheckIssue(req); cerr != nil {
 		op, err = rejectYTOpTx(ctx, tx, now, op.ID, ytwrite.ReasonInvalidIssue, cerr.Error())
 	}
@@ -436,14 +446,19 @@ func ytIssueConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID strin
 //
 // comments_from: for an issue this op created, 0, so the comment catch-up
 // copies every comment the task has. For an adopted issue (made before the
-// op, by the importer or the legacy push), the task's highest comment id now,
-// as a verified binding gets it: the issue already holds that history, and
-// copying it again would duplicate it.
+// op, by the importer or the legacy push), the task's highest comment id when
+// the op was prepared (yt_issue_comment_bounds, hk 4301): the issue already
+// holds the history before it, and copying that again would duplicate it,
+// but nothing copied a comment written while the op was pending (under hk
+// comments authority it got no op), so the catch-up copies those. An op
+// prepared by a release before that table has no row and gets the task's
+// highest comment id now, as a verified binding gets it.
 func bindYTIssueTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
 	taskID, _ := strconv.ParseInt(op.EntityID, 10, 64)
 	tag, err := tx.Exec(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, op_id, comments_from)
 		VALUES ($1,$2,$3,'',$4,$5,$6,'op_applied',$7,
-			CASE WHEN $8 THEN (SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$1) ELSE 0 END)
+			CASE WHEN $8 THEN coalesce((SELECT comments_from FROM yt_issue_comment_bounds WHERE op_id=$7),
+				(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$1)) ELSE 0 END)
 		ON CONFLICT DO NOTHING`,
 		taskID, op.Tenant, ytID, op.YTTargetID, op.Principal, now.UTC(), op.ID, adopted)
 	if err != nil || tag.RowsAffected() == 1 {
