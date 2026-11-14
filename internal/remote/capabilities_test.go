@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -18,6 +19,7 @@ import (
 func resetCapabilitiesCache() {
 	capsCache.Lock()
 	capsCache.byOrigin = map[string]serverCaps{}
+	capsCache.flight = map[string]*capabilitiesFlight{}
 	capsCache.Unlock()
 }
 
@@ -128,6 +130,62 @@ func TestCapabilitiesReadOncePerOrigin(t *testing.T) {
 	}
 	if n := reads.Load(); n != 1 {
 		t.Fatalf("capabilities reads=%d, want 1", n)
+	}
+}
+
+func TestConcurrentFirstCallsShareCapabilitiesRead(t *testing.T) {
+	resetCapabilitiesCache()
+	const callers = 12
+	var reads atomic.Int32
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/capabilities" {
+			reads.Add(1)
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+			answerCurrentCapabilities(w, r)
+			return
+		}
+		if r.URL.Path == "/v1/tasks/7/claim" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(store.Task{ID: 7, State: "developing", ClaimedBy: "worker", Refs: store.TaskRefs{JobID: "job-1"}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	c := Client{URL: server.URL, Token: "t"}
+	start := make(chan struct{})
+	var ready, done sync.WaitGroup
+	ready.Add(callers)
+	done.Add(callers)
+	errs := make(chan error, callers)
+	for range callers {
+		go func() {
+			defer done.Done()
+			ready.Done()
+			<-start
+			_, err := c.ClaimTask(context.Background(), 7, "worker", "job-1", "")
+			errs <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+	<-entered
+	close(release)
+	done.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent claim: %v", err)
+		}
+	}
+	if n := reads.Load(); n != 1 {
+		t.Fatalf("concurrent capabilities reads=%d, want 1", n)
 	}
 }
 
