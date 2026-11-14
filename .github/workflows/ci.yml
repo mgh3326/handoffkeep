@@ -462,11 +462,22 @@ jobs:
           if [ -f scripts/ci-db-non-store.sh ]; then
             pkgs=($(bash scripts/ci-db-non-store.sh))
           else
-            pkgs=($(./workflow/.github/actions/setup-go-cached/../../.. 2>/dev/null || true))
-            # Fall back to testing all packages if ci-db-non-store.sh does not exist on older ref
-            pkgs=(./cmd/handoffkeep ./internal/api ./internal/hubforward ./internal/mcp ./internal/testdb ./internal/ui ./tests)
+            marker='^[[:space:]]*(import[[:space:]]+)?([[:alnum:]_.]+[[:space:]]+)?"[^"]*/internal/testdb"'
+            dbfiles=$(git grep -l -E "$marker" -- '*_test.go' 2>/dev/null || true)
+            dirs=$(printf '%s\n' "$dbfiles" | sed -e '/^$/d' -e 's|^[^/]*$|./&|' -e 's|/[^/]*$||' | sort -u)
+            if [ -d internal/testdb ]; then
+              dirs=$(printf '%s\ninternal/testdb\n' "$dirs" | sed '/^$/d' | sort -u)
+            fi
+            pkgs=()
+            for d in $dirs; do
+              if [ "$d" != "internal/store" ] && [ -d "$d" ]; then
+                pkgs+=("./$d")
+              fi
+            done
           fi
-          go test -v -timeout 20m "${pkgs[@]}"
+          if [ "${#pkgs[@]}" -gt 0 ]; then
+            go test -v -timeout 20m "${pkgs[@]}"
+          fi
 
   main-migration:
     if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
