@@ -654,7 +654,7 @@ func TestYTLinksUnbindTargetRefusedWhileDependentOpInFlight(t *testing.T) {
 	if n := ytcCount(t, s, `SELECT count(*) FROM yt_task_bindings WHERE task_id=$1`, target); n != 1 {
 		t.Fatalf("the refused unbind removed the binding (%d rows)", n)
 	}
-	if _, err := s.pool.Exec(ctx, `UPDATE yt_write_ops SET state='applied', resolved_at=now() WHERE id=$1`, op.ID); err != nil {
+	if _, err := s.pool.Exec(ctx, `UPDATE yt_write_ops SET state='applied', yt_result_id='done', resolved_at=now() WHERE id=$1`, op.ID); err != nil {
 		t.Fatal(err)
 	}
 	if res, err := s.UnbindYTTaskBinding(ctx, target, YTUnbindOptions{By: "operator", Reason: "test"}); err != nil || !res.Removed {
