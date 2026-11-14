@@ -233,9 +233,11 @@ func TestYTFieldsBackfillLimitDoesNotSplitMovedTask(t *testing.T) {
 	ytmMapped(t, s)
 	ytFeedExec(t, s, `UPDATE tasks SET project=$2 WHERE id=$1`, bound, ytmProject)
 
+	// The walk goes on past the over-limit moved task, so the setup's unbound
+	// task behind it is read; the moved task itself is in no count.
 	r := ytfBackfill(t, s, YTFieldsBackfillOptions{Limit: 1})
-	if r.Total != (YTFieldsBackfillCounts{}) {
-		t.Fatalf("limit 1 prepared part of a moved task: %+v", r.Total)
+	if r.Total != (YTFieldsBackfillCounts{Scanned: 1, Unbound: 1}) || r.OverLimit != 1 {
+		t.Fatalf("limit 1 prepared part of a moved task: %+v over_limit %d", r.Total, r.OverLimit)
 	}
 	if moves, fields := ytmOps(t, s, bound), ytfOps(t, s, bound); len(moves) != 0 || len(fields) != 0 {
 		t.Fatalf("limit 1 wrote partial task ops: moves %+v snapshots %+v", moves, fields)
