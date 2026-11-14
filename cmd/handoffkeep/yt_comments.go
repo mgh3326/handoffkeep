@@ -1970,7 +1970,10 @@ func youtrackIssuesBackfillCmd(args []string, out io.Writer) error {
 	return printJSON(out, report)
 }
 
-const youtrackFieldsBackfillUsage = "usage: youtrack fields-backfill [--project P] [--task N] [--limit N] [--dry-run]"
+// --limit counts ops, and a task whose project moved makes two (the move and
+// its snapshot), so the least limit that can prepare one is 2; a task that does
+// not fit what is left of the limit is skipped (over_limit in the report).
+const youtrackFieldsBackfillUsage = "usage: youtrack fields-backfill [--project P] [--task N] [--limit N] [--dry-run] (--limit counts ops; a moved task makes two, so use --limit 2 or more to prepare one)"
 
 // youtrackFieldsBackfillCmd is `youtrack fields-backfill` (hk 4022): it
 // prepares the issue_fields snapshot of every bound task whose snapshot
@@ -1985,7 +1988,7 @@ func youtrackFieldsBackfillCmd(args []string, out io.Writer) error {
 	fs.SetOutput(io.Discard)
 	project := fs.String("project", "", "only tasks of this hk project")
 	task := fs.Int64("task", 0, "only this task")
-	limit := fs.Int("limit", 0, "maximum ops prepared in this run (0: no cap)")
+	limit := fs.Int("limit", 0, "maximum ops prepared in this run (0: no cap; a moved task makes two)")
 	dryRun := fs.Bool("dry-run", false, "count the tasks without preparing ops")
 	ordered, err := splitArgs(args, "project", "task", "limit")
 	if err != nil {

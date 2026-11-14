@@ -148,6 +148,11 @@ func normalizeTaskSourceEvent(in TaskSourceEvent) (TaskSourceEvent, error) {
 	if !taskEventPRRE.MatchString(in.SourceRef) {
 		return in, invalidChangeWrite("source_ref must be a PR URL")
 	}
+	// One PR is one spelling from here on: the event key, refs.pr and every
+	// comparison of them see /pull/0042 as /pull/42, as a manual move to merged
+	// already does (PR #385 review).
+	in.SourceRef, in.PR = canonicalPRURL(in.SourceRef), canonicalPRURL(in.PR)
+	in.RevertPR, in.RevertedPR = canonicalPRURL(in.RevertPR), canonicalPRURL(in.RevertedPR)
 	switch in.Source {
 	case SourceMergewakePR, SourceMergewakeReview, SourceMergewakeMerge:
 		if in.PR == "" {
@@ -412,18 +417,26 @@ func liveJobTx(ctx context.Context, q rowQuerier, x Task) (bool, error) {
 	return live, err
 }
 
+// sourceEventRecordedTx reports whether task taskID already has a row for
+// (source, sourceRef), applied or not: that event's turn on the task is over,
+// and applySourceEventTx answers a redelivery with no change.
+func sourceEventRecordedTx(ctx context.Context, q rowQuerier, taskID int64, source, sourceRef string) (bool, error) {
+	var recorded bool
+	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3)`, taskID, source, sourceRef).Scan(&recorded)
+	return recorded, err
+}
+
 // applySourceEventTx applies one event to x, which the caller has locked in
 // tx. A (task, source, source_ref) already recorded changes nothing. Every
 // other event is recorded: applied with the move, or with applied=false and
 // the reason in the note.
 func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev sourceEvent, now time.Time) (TaskEventResult, error) {
-	var recorded bool
-	err := tx.QueryRow(ctx, `SELECT applied FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3`, x.ID, ev.Source, ev.SourceRef).Scan(&recorded)
-	if err == nil {
-		return TaskEventResult{Redelivered: true, State: x.State, Task: x}, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	recorded, err := sourceEventRecordedTx(ctx, tx, x.ID, ev.Source, ev.SourceRef)
+	if err != nil {
 		return TaskEventResult{}, err
+	}
+	if recorded {
+		return TaskEventResult{Redelivered: true, State: x.State, Task: x}, nil
 	}
 	if x.State == StateMerged && x.Refs.PR == "" && ev.Source == SourceMergewakeMerge && ev.PR != "" {
 		// A parent that an automatic close moved to merged before its own PR was
@@ -534,6 +547,18 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 			return TaskEventResult{}, err
 		}
 		deferNamedParentClose = !IsSettledState(pstate) || (pstate == StateMerged && ppr == "")
+	}
+	if deferNamedParentClose {
+		// The parent's pending turn is the merge of ev.PR (a deploy applied in
+		// a merge's turn carries the PR of that merge). When the parent already
+		// has that row — a held merge the same event or its redelivery recorded
+		// earlier — its turn is a no-op redelivery that rolls nothing up, so
+		// this turn closes the parent itself (PR #385 review).
+		recorded, err := sourceEventRecordedTx(ctx, tx, *x.ParentID, SourceMergewakeMerge, ev.PR)
+		if err != nil {
+			return TaskEventResult{}, err
+		}
+		deferNamedParentClose = !recorded
 	}
 	if err = s.afterSourceMoveTx(ctx, tx, x, from, ev.Source, now, deferNamedParentClose); err != nil {
 		return TaskEventResult{}, err

@@ -628,3 +628,46 @@ func TestMergePropagatesToEverySiblingOnThePR(t *testing.T) {
 		t.Fatalf("redelivery recorded again: %+v", rows)
 	}
 }
+
+// An event names a PR in one spelling (PR #385 review): a zero-padded number is
+// the same PR as the plain one, so the event key, refs.pr and the revert's
+// comparison all see the canonical URL.
+func TestEventPRSpellingIsCanonical(t *testing.T) {
+	const raw, want = "https://github.com/example/app/pull/0042", "https://github.com/example/app/pull/42"
+	merge, err := normalizeTaskSourceEvent(TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: raw, TaskID: 1})
+	if err != nil || merge.SourceRef != want || merge.PR != want {
+		t.Fatalf("merge: %+v err=%v, want source_ref and pr %s", merge, err, want)
+	}
+	// pr and source_ref in two spellings are one PR, not a mismatch.
+	other, err := normalizeTaskSourceEvent(TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: want, PR: raw, TaskID: 1})
+	if err != nil || other.PR != want || other.SourceRef != want {
+		t.Fatalf("pr and source_ref in two spellings: %+v err=%v", other, err)
+	}
+	revert, err := normalizeTaskSourceEvent(TaskSourceEvent{Source: SourceMergewakeRevert, SourceRef: "https://github.com/example/app/pull/0100", RevertedPR: raw, TaskID: 1})
+	if err != nil || revert.RevertPR != "https://github.com/example/app/pull/100" || revert.SourceRef != revert.RevertPR || revert.RevertedPR != want || revert.PR != want {
+		t.Fatalf("revert: %+v err=%v", revert, err)
+	}
+	// Not a different PR: the numbers still differ.
+	if _, err := normalizeTaskSourceEvent(TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: want, PR: testPR(43), TaskID: 1}); err == nil {
+		t.Fatal("a pr naming another PR than source_ref was accepted")
+	}
+}
+
+// The canonical URL is what the task and the event key carry: a merge named
+// with a zero-padded number is redelivered by the plain spelling, and the
+// revert of that PR matches it in either spelling.
+func TestEventPRSpellingReachesTheTask(t *testing.T) {
+	s, pool := searchTestStore(t)
+	x := flowTask(t, s, pool, "implement", StateReviewing, true)
+	res := send(t, s, mergeEvent(x.ID, "https://github.com/example/app/pull/04675"))
+	if !res.Applied || res.Task.Refs.PR != testPR(4675) {
+		t.Fatalf("merge: %+v, want applied with refs.pr %s", res, testPR(4675))
+	}
+	if again := send(t, s, mergeEvent(x.ID, testPR(4675))); !again.Redelivered {
+		t.Fatalf("the plain spelling of the same merge: %+v, want a redelivery", again)
+	}
+	rev := send(t, s, revertEvent(x.ID, "https://github.com/example/app/pull/004675", "https://github.com/example/app/pull/04676"))
+	if !rev.Applied || rev.State != StateDeveloping || rev.Task.Refs.RevertPR != testPR(4676) {
+		t.Fatalf("revert in another spelling: %+v, want applied with revert_pr %s", rev, testPR(4676))
+	}
+}

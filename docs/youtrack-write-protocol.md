@@ -1177,12 +1177,18 @@ once the first run's ops are pending or sent, a run re-prepares exactly the
 rejected ones, and a run beside the feed prepares one op per snapshot. It only prepares; serve's write worker sends the
 ops and honours YouTrack's 429s. `--limit` stops after that many prepared ops,
 for pacing, counting `issue_move` ops with the `issue_fields` ones (a moved
-task makes two, hk 4112); the next run passes the sent ones as unchanged. `--dry-run`
+task makes two, hk 4112); the next run passes the sent ones as unchanged. A
+task whose ops do not fit what is left of the limit is skipped for that run
+and the walk goes on to the tasks after it, so a run may stop one op short of
+the limit; the skipped tasks are the report's `over_limit` count, in no other
+count. A moved task needs two ops, so `--limit 1` can never prepare one: use 2
+or more while moved tasks are pending. `--dry-run`
 applies the same rule (an unchanged hash whose op was rejected counts as
 prepared) and writes nothing. It
 prints one JSON summary, `scanned ops prepared unchanged unbound moved
 move_skipped other_tenant invalid` per hk project (`ops` is every op made,
-moves included) and in `total`, and exits 6 without
+moves included) and in `total`, plus `over_limit` when a task was skipped
+for the limit, and exits 6 without
 touching the database unless `HANDOFFKEEP_YT_FIELDS_MODE=on`.
 
 **Not here.** Tags and issue links (parent, relations) stay as the import set
