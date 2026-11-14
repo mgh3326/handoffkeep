@@ -293,7 +293,12 @@ package store
 //     hk 4301) and insert or delete its yt_issue_intents row (no foreign
 //     key, nobody else locks them). RecordAdoption (hk 4570) takes FOR SHARE
 //     on one op row, then inserts its yt_write_op_adoptions row; it takes no
-//     lane lock and holds nothing else.
+//     lane lock and holds nothing else. PlanLinks and ApplyLinks of an
+//     issue_links op (yt_link_plans.go, hk 4638) take the op's lane lock
+//     first, then FOR UPDATE on its op row, then write yt_link_owned,
+//     yt_link_unowned and yt_link_plans rows, which no other writer locks,
+//     and read task_relations and yt_task_bindings without a lock; they take
+//     no task row.
 //     PrepareMappedYTIssues takes the lane lock as the first lock of each
 //     task's transaction (as backfillYTIssue), then reads the task row
 //     without a lock. Claim of an issue_create op, under the lane lock and

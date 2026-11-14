@@ -367,9 +367,15 @@ const (
 	lIssue  = "2-10"
 )
 
-func rel(id string) ytwrite.IssueLink { return ytwrite.IssueLink{Kind: ytwrite.LinkRelates, Target: id} }
-func sub(id string) ytwrite.IssueLink { return ytwrite.IssueLink{Kind: ytwrite.LinkSubtask, Target: id} }
-func dup(id string) ytwrite.IssueLink { return ytwrite.IssueLink{Kind: ytwrite.LinkDuplicate, Target: id} }
+func rel(id string) ytwrite.IssueLink {
+	return ytwrite.IssueLink{Kind: ytwrite.LinkRelates, Target: id}
+}
+func sub(id string) ytwrite.IssueLink {
+	return ytwrite.IssueLink{Kind: ytwrite.LinkSubtask, Target: id}
+}
+func dup(id string) ytwrite.IssueLink {
+	return ytwrite.IssueLink{Kind: ytwrite.LinkDuplicate, Target: id}
+}
 
 // related is a desired set of one related edge to task id, bound to "2-<id>".
 func related(id int64) ytwrite.IssueLinksDesired {
