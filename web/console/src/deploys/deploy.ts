@@ -71,7 +71,7 @@ export type DeployServiceView = {
   current: DeployRecordView | null;
   recent: DeployRecordView[];
   latest?: DeployRecordView;
-  merged_boundary: "deployed_at" | "unrecorded" | "no_current";
+  merged_boundary: "deployed_at" | "deploy_record_key" | "no_current";
   merged_since: DeployMergedTask[];
   lag_count?: number;
   lagging?: boolean;
@@ -84,7 +84,7 @@ export type DeployPendingResponse = {
   events_capped?: boolean;
 };
 
-const MERGED_BOUNDARIES = new Set(["deployed_at", "unrecorded", "no_current"]);
+const MERGED_BOUNDARIES = new Set(["deployed_at", "deploy_record_key", "no_current"]);
 const RECORD_RESULTS = new Set(["success", "failed", "rolled_back"]);
 const DEPLOY_STATES: Record<DeployState, true> = {
   deployed: true,

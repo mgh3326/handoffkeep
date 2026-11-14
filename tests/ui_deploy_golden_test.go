@@ -40,7 +40,7 @@ func attentionSchemaStore(t *testing.T, prefix string) (*store.Store, *pgx.Conn)
 
 // seedDeployGolden is the fixed deploy state both the golden and the
 // attention tests read: handoffkeep with a success, a later failure and three
-// merges, auto_trader with an unrecorded deploy time, panewire-hub with only
+// merges, auto_trader with no recorded deploy time (the record key stands in), panewire-hub with only
 // a failure, and one invalid document.
 func seedDeployGolden(t *testing.T, s *store.Store, db *pgx.Conn) {
 	t.Helper()

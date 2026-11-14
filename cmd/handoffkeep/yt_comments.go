@@ -48,6 +48,9 @@ const (
 	// ytCommentsCatchUpLimit bounds the comments one catch-up pass prepares
 	// ops for (store.CatchUpYTComments), oldest first.
 	ytCommentsCatchUpLimit = 200
+	// ytCommentsRequeueLimit bounds the comments one requeue pass copies
+	// again (store.RequeueYTMovedComments), oldest first.
+	ytCommentsRequeueLimit = 200
 	// ytFeedPassLimit bounds the sync_log rows each feed consumer reads in
 	// one worker pass (store.RunYTFeedConsumers).
 	ytFeedPassLimit = 200
@@ -421,6 +424,11 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 	st.SetYTCommentsMode(mode)
 	log.Printf("ytwrite.comments_enabled mode=%s tenant=%q catchup=%t", mode, tenant, catchUp)
 	w := ytCommentsWorker{protocol: p, feed: st, intents: st, recovery: st, tenant: tenant}
+	if mode == store.YTCommentsOn {
+		// Only mode on queues a comment behind its task's issue_create, so
+		// only mode on has queued comments to copy again (hk 4569).
+		w.requeue = st
+	}
 	if bind {
 		b, err := newYTBindingBinder(st, remote, tenant, bucketID)
 		if err != nil {
@@ -450,6 +458,13 @@ type ytIssueCommentCatchUp struct{ st *store.Store }
 
 func (c ytIssueCommentCatchUp) CatchUpYTComments(ctx context.Context, limit int, skip []int64) (store.YTCatchUp, error) {
 	return c.st.CatchUpYTIssueComments(ctx, limit, skip)
+}
+
+// ytCommentRequeuer copies again the queued comments rejected at their claim
+// because the binding disagreed, once it agrees (store.RequeueYTMovedComments,
+// hk 4569).
+type ytCommentRequeuer interface {
+	RequeueYTMovedComments(ctx context.Context, tenant string, limit int) ([]store.YTRequeued, error)
 }
 
 // ytHeldRecoverer closes the prepared ops whose task lost the binding that
@@ -517,7 +532,13 @@ type ytBindReport struct {
 // mode is not on is never touched, and it closes nothing whose content is
 // canonical in YouTrack.
 //
-// After the catch-up, feed (when set) runs each registered change-feed
+// After the catch-up, requeue (when set, mode on) copies again each comment
+// queued behind its task's issue_create that its claim rejected because the
+// binding disagreed (the task changed project while the issue was being
+// created) and whose binding every local source agrees with now: a new op at
+// the tail of the task's lane, so it waits only for ops before it (hk 4569).
+//
+// After the requeue, feed (when set) runs each registered change-feed
 // consumer once, up to ytFeedPassLimit rows each, so the ops they prepare
 // go out in the same pass's Drive. With no consumer registered it does
 // nothing. Then intents (when set) prepares the issue ops of this tenant's
@@ -529,6 +550,8 @@ type ytCommentsWorker struct {
 	feed     ytFeedRunner
 	intents  ytIssueIntents
 	recovery ytHeldRecoverer
+	// requeue copies rejected queued comments again (mode on only).
+	requeue ytCommentRequeuer
 	// binder is the automatic binder (HANDOFFKEEP_YT_BIND=on, hk 4492), when
 	// set.
 	binder ytBinder
@@ -561,6 +584,20 @@ func (w ytCommentsWorker) recoverHeld(ctx context.Context, last *time.Time) {
 	}
 	if got.Rejected > 0 {
 		log.Printf("ytwrite.held_recovery rejected=%d kept=%d", got.Rejected, got.Kept)
+	}
+}
+
+// requeueMoved runs one requeue pass for the worker's tenant (hk 4569).
+func (w ytCommentsWorker) requeueMoved(ctx context.Context) {
+	if w.requeue == nil {
+		return
+	}
+	got, err := w.requeue.RequeueYTMovedComments(ctx, w.tenant, ytCommentsRequeueLimit)
+	if err != nil && ctx.Err() == nil {
+		log.Printf("ytwrite.comment_requeue_failed err=%q", err.Error())
+	}
+	if len(got) > 0 {
+		log.Printf("ytwrite.comment_requeue requeued=%d", len(got))
 	}
 }
 
@@ -604,6 +641,7 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 			}
 			skipped = append(skipped, got.Skipped...)
 		}
+		w.requeueMoved(ctx)
 		if w.feed != nil {
 			// Each failing consumer is logged by the store (ytwrite.feed_failed).
 			_, _ = w.feed.RunYTFeedConsumers(ctx, ytFeedPassLimit)
