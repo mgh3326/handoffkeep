@@ -462,6 +462,66 @@ func TestStreamedCompletionVerifiesPublishedObject(t *testing.T) {
 	}
 }
 
+// failGetObjects fails Get for one key: the post-copy read of the published
+// object errors after Copy already landed bytes there.
+type failGetObjects struct {
+	*fakeObjects
+	key string
+}
+
+func (o *failGetObjects) Get(ctx context.Context, k string) (io.ReadCloser, error) {
+	if k == o.key {
+		return nil, errors.New("read failed")
+	}
+	return o.fakeObjects.Get(ctx, k)
+}
+
+// A failed post-copy read must not leave the unverified object at the shared
+// key: the released claim's retry would Stat-adopt it without re-writing.
+func TestStreamedCompletionFailedPublishedReadCleansUp(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	m.Config.MaxBytes = DefaultMaxBytes
+	m.Config.StorageCap = 1 << 40
+	m.Config.StagingCap = 1 << 40
+	m.Config.StagingClientCap = 1 << 40
+	size := BufferedCompletionMaxBytes + 1
+	body := make([]byte, size)
+	copy(body, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
+	sha := shaOf(body)
+	const uploadID = "0123456789abcdef0123456789abcdef"
+	stagingKey := stagingPrefix + uploadID
+	db.uploads = map[string]store.AttachmentUpload{uploadID: {
+		ID: uploadID, StagingKey: stagingKey, Name: "big.png", MIME: "image/png", SizeBytes: size,
+		SHA256: sha, CreatedBy: "node", Status: store.AttachmentUploadPending,
+		CreatedAt: m.now(), ExpiresAt: m.now().Add(time.Hour), UpdatedAt: m.now(),
+	}}
+	objs.objects[stagingKey] = body
+
+	m.Objects = &failGetObjects{fakeObjects: objs, key: key(sha)}
+	_, _, err := m.CompleteUpload(t.Context(), "node", uploadID)
+	if !errors.Is(err, ErrUploadNotReceived) {
+		t.Fatalf("failed published read err=%v", err)
+	}
+	objs.mu.Lock()
+	_, published := objs.objects[key(sha)]
+	objs.mu.Unlock()
+	if published {
+		t.Fatal("the unverified content key survived a failed read")
+	}
+	if db.uploads[uploadID].Status != store.AttachmentUploadPending {
+		t.Fatalf("claim not released: status=%q", db.uploads[uploadID].Status)
+	}
+
+	m.Objects = objs
+	x, created, err := m.CompleteUpload(t.Context(), "node", uploadID)
+	if err != nil {
+		t.Fatalf("retry after failed read: %v", err)
+	}
+	if x.SHA256 != sha || !created || db.uploads[uploadID].Status != store.AttachmentUploadDone {
+		t.Fatalf("recovered sha=%s created=%v status=%q", x.SHA256, created, db.uploads[uploadID].Status)
+	}
+}
+
 func newUploadManager(t *testing.T) (*Manager, *fakeDB, *fakeObjects) {
 	t.Helper()
 	db := &fakeDB{rows: map[string]store.Attachment{}}

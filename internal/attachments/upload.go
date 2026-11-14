@@ -414,15 +414,22 @@ func (m *Manager) completeStreamed(ctx context.Context, row store.AttachmentUplo
 				return errors.New("promoted object failed verification")
 			}
 			published := key(row.SHA256)
+			// Whatever ends the verification — a copy error, a failed read, a
+			// size or sha mismatch — the shared key must not keep bytes that
+			// were never verified: a retry's Stat would adopt them. Only a
+			// fully verified publish survives.
+			verified := false
+			defer func() {
+				if !verified {
+					_ = m.Objects.Delete(ctx, published)
+				}
+			}()
 			if err := m.Objects.Copy(ctx, promoKey, published); err != nil {
 				return err
 			}
 			// The copy's output is what readers adopt, so the published object
 			// itself is re-hashed — a backend fault between promo and content
-			// key must not reach the dedup path. On mismatch the bad object is
-			// removed so a retry re-copies instead of adopting it; a concurrent
-			// same-sha completion in that window is the same residual exposure
-			// an overwrite at any shared key already carries.
+			// key must not reach the dedup path.
 			dtr, err := m.Objects.Get(ctx, published)
 			if err != nil {
 				return err
@@ -434,9 +441,9 @@ func (m *Manager) completeStreamed(ctx context.Context, row store.AttachmentUplo
 				return err
 			}
 			if dv.n != row.SizeBytes || hex.EncodeToString(dv.sum.Sum(nil)) != row.SHA256 {
-				_ = m.Objects.Delete(ctx, published)
 				return errors.New("published object failed verification")
 			}
+			verified = true
 			return nil
 		})
 	if err != nil {
