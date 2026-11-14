@@ -177,23 +177,72 @@ func RunLinksProtocol(t *testing.T, nl NewLedger) {
 		}
 	})
 
-	// A 429 on the first add was not processed: the op waits as prepared,
-	// the next attempt plans again and reuses the ownership row.
-	t.Run("rate_limited_add_replans_and_reuses_the_row", func(t *testing.T) {
+	// A 429 on the first add was not processed: the op waits as prepared
+	// and its ownership of the add is closed (the add was definitely not
+	// made); the next attempt plans again and owns the link anew.
+	t.Run("rate_limited_add_releases_then_owns_again", func(t *testing.T) {
 		e := newLinksEnv(t, nl)
 		e.yt.QueueLinkCallFaults(LinkCallFault{Op: LinkOpAdd, Status: http.StatusTooManyRequests, RetryAfter: 10 * time.Second, Count: 1})
 		op := e.prepare(lWriter, lIssue, related(20), nil)
 		e.drive()
 		e.wantState(op, ytwrite.StatePrepared, ytwrite.ReasonRateLimited)
+		if rec := e.records(lIssue); len(rec.Owned) != 1 || rec.Owned[0].Open() || rec.Owned[0].ReleasedOp != op.ID {
+			t.Fatalf("owned rows after the 429 = %+v", rec.Owned)
+		}
 		e.clock.Advance(11 * time.Second)
 		e.drive()
 		e.wantState(op, ytwrite.StateApplied, "")
-		if rec := e.records(lIssue); len(rec.Owned) != 1 || !rec.Owned[0].Open() {
-			t.Fatalf("owned rows = %+v", rec.Owned)
-		}
+		e.wantOwnedOpen(lIssue, rel("2-20"))
 		if p := e.latestPlan(op); p.Attempt != 2 || p.Recover != 0 {
 			t.Fatalf("latest plan = %+v", p)
 		}
+	})
+
+	// Review of PR #425: an add refused with a 4xx was never made, so its
+	// ownership is closed. A person who later makes the same link keeps it
+	// when a later op wants nothing. Ownership of the adds after the
+	// failing step, never sent, is closed too.
+	t.Run("refused_add_leaves_no_ownership", func(t *testing.T) {
+		e := newLinksEnv(t, nl)
+		e.yt.QueueLinkCallFaults(LinkCallFault{Op: LinkOpAdd, Status: http.StatusBadRequest, Count: 1})
+		op := e.prepare(lWriter, lIssue, ytwrite.IssueLinksDesired{Related: []ytwrite.IssueLinkTarget{{TaskID: 20, IssueID: "2-20"}, {TaskID: 21, IssueID: "2-21"}}}, nil)
+		e.drive()
+		e.wantState(op, ytwrite.StateRejected, "http_400")
+		for _, o := range e.records(lIssue).Owned {
+			if o.Open() {
+				t.Fatalf("open row after a refused add: %+v", o)
+			}
+		}
+		e.yt.SeedIssueLink(lIssue, rel("2-20"))
+		e.yt.SeedIssueLink(lIssue, rel("2-21"))
+		next := e.prepare(lWriter, lIssue, ytwrite.IssueLinksDesired{}, nil)
+		e.drive()
+		e.wantState(next, ytwrite.StateApplied, "")
+		e.wantLinks(lIssue, rel("2-20"), rel("2-21"))
+	})
+
+	// An add whose answer was ambiguous (5xx) may have landed: its ownership
+	// stays, and only the adds after it, never sent, are closed.
+	t.Run("ambiguous_add_keeps_ownership_unsent_adds_do_not", func(t *testing.T) {
+		e := newLinksEnv(t, nl)
+		e.yt.QueueLinkCallFaults(LinkCallFault{Op: LinkOpAdd, Status: http.StatusBadGateway, Landed: true, Count: 1})
+		op := e.prepare(lWriter, lIssue, ytwrite.IssueLinksDesired{Related: []ytwrite.IssueLinkTarget{{TaskID: 20, IssueID: "2-20"}, {TaskID: 21, IssueID: "2-21"}}}, nil)
+		e.drive()
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+		open := map[string]bool{}
+		for _, o := range e.records(lIssue).Owned {
+			open[o.To] = o.Open()
+		}
+		if !open["2-20"] || open["2-21"] {
+			t.Fatalf("open rows = %v, want 2-20 open (ambiguous) and 2-21 closed (unsent)", open)
+		}
+		e.clock.Advance(time.Hour)
+		e.drive()
+		e.wantState(op, ytwrite.StateApplied, "")
+		e.wantLinks(lIssue, rel("2-20"), rel("2-21"))
+		e.wantOwnedOpen(lIssue, rel("2-20"))
+		e.wantOwnedOpen(lIssue, rel("2-21"))
+		e.removeAll(lWriter, lIssue)
 	})
 
 	// I8, send path: a 4xx on the first mutation is final.

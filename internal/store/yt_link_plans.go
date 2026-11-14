@@ -298,6 +298,31 @@ func (l *YTWriteLedger) LeaseLinkRecovery(ctx context.Context, now time.Time, id
 	return tag.RowsAffected() == 1, nil
 }
 
+func (l *YTWriteLedger) ReleaseUnsentLinks(ctx context.Context, now time.Time, id int64, links []ytwrite.IssueLink) error {
+	tx, err := l.s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	op, err := lockYTOpTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	writer, err := ytwrite.LinkWriter(op)
+	if err != nil {
+		return err
+	}
+	for _, link := range links {
+		if _, err := tx.Exec(ctx, `UPDATE yt_link_owned SET released_op_id=$1, released_at=$2
+			WHERE tenant=$3 AND from_issue=$4 AND writer_task_id=$5 AND link_type=$6 AND to_issue=$7
+				AND released_op_id IS NULL AND released_at IS NULL`,
+			id, now.UTC(), op.Tenant, op.YTTargetID, writer, string(link.Kind), link.Target); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 func (l *YTWriteLedger) LinkRecords(ctx context.Context, tenant, issueID string) (ytwrite.IssueLinkRecords, error) {
 	owned, unowned, err := ytLinkRowsTx(ctx, l.s.pool, tenant, issueID, false)
 	if err != nil {

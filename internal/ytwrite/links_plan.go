@@ -153,6 +153,10 @@ type LinksLedger interface {
 	// searches; it moves the op's due time to until. ok is false when another
 	// pass won it or the op moved on; that pass makes no request.
 	LeaseLinkRecovery(ctx context.Context, now time.Time, id int64, reconciles int, until time.Time) (ok bool, err error)
+	// ReleaseUnsentLinks closes the writer's open, unreleased ownership rows
+	// of links from op id's issue: adds that op id planned and that were
+	// definitely not made (released_op_id = id, released_at = now).
+	ReleaseUnsentLinks(ctx context.Context, now time.Time, id int64, links []IssueLink) error
 	// LinkRecords reads what the ledger holds about issueID on tenant.
 	LinkRecords(ctx context.Context, tenant, issueID string) (IssueLinkRecords, error)
 }

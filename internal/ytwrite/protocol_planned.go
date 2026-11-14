@@ -61,6 +61,7 @@ func (p *Protocol) sendPlanned(ctx context.Context, op Op, kind PlannedKind) Res
 	// 3. Execute the diff (I12 order).
 	n, err := kind.Execute(rctx, p.Remote, op, read.Types, plan)
 	if err != nil {
+		p.releaseUnsent(ctx, ll, op, plan, n, err)
 		var partial *PartialWriteError
 		var refused *RefusedError
 		switch {
@@ -194,6 +195,7 @@ func (p *Protocol) reconcilePlanned(ctx context.Context, op Op, kind PlannedKind
 	}
 	n, err := kind.Execute(rctx, p.Remote, op, read.Types, plan)
 	if err != nil {
+		p.releaseUnsent(ctx, ll, op, plan, n, err)
 		var partial *PartialWriteError
 		if errors.As(err, &partial) {
 			err = partial.Err
@@ -241,4 +243,51 @@ func (p *Protocol) rejectRecovered(ctx context.Context, op Op, reason, detail st
 // SettleTimeout of margin for a commit whose reply was lost.
 func (p *Protocol) linkRecoveryLease() time.Duration {
 	return p.DispatchTimeout + 2*p.SettleTimeout
+}
+
+// releaseUnsent closes this op's ownership of the adds Execute did not make:
+// the steps after the failing one, and the failing step itself when its
+// answer was definite (a refusal, or a 4xx including 401 and 429: not
+// processed). Ownership of an add whose answer was ambiguous (5xx, 408,
+// transport) stays: it may have landed. Without this a refused add would
+// leave an open row, and a person who later made the same link would see a
+// later op delete it as hk's (review of PR #425). A failure to record is
+// logged; the plan rows stay as they were.
+func (p *Protocol) releaseUnsent(ctx context.Context, ll LinksLedger, op Op, plan LinkPlan, n int, err error) {
+	links := UnsentAdds(plan, n, definiteFailure(err))
+	if len(links) == 0 {
+		return
+	}
+	sctx, cancel := p.settling(ctx)
+	defer cancel()
+	if rerr := ll.ReleaseUnsentLinks(sctx, p.now(), op.ID, links); rerr != nil {
+		log.Printf("ytwrite.links_release_failed op_id=%d links=%d err=%q", op.ID, len(links), rerr.Error())
+	}
+}
+
+// definiteFailure reports an error that says the request was not applied:
+// a refusal before sending, or a 4xx other than 408.
+func definiteFailure(err error) bool {
+	var refused *RefusedError
+	var re *RemoteError
+	switch {
+	case errors.As(err, &refused):
+		return true
+	case errors.As(err, &re):
+		return re.Status >= 400 && re.Status < 500 && re.Status != http.StatusRequestTimeout
+	}
+	return false
+}
+
+// UnsentAdds lists the adds of plan that Execute did not make when it
+// stopped at step n (ExecuteOrder) with an error: every add after step n,
+// and step n's own add when its failure was definite.
+func UnsentAdds(plan LinkPlan, n int, definite bool) []IssueLink {
+	var out []IssueLink
+	for i, s := range ExecuteOrder(plan) {
+		if s.Add && (i > n || (i == n && definite)) {
+			out = append(out, s.Link)
+		}
+	}
+	return out
 }

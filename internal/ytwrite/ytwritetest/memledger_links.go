@@ -190,6 +190,28 @@ func (l *MemLedger) LeaseLinkRecovery(_ context.Context, now time.Time, id int64
 	return true, nil
 }
 
+func (l *MemLedger) ReleaseUnsentLinks(_ context.Context, now time.Time, id int64, links []ytwrite.IssueLink) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	op, err := l.get(id)
+	if err != nil {
+		return err
+	}
+	writer, err := ytwrite.LinkWriter(*op)
+	if err != nil {
+		return err
+	}
+	for _, link := range links {
+		for _, o := range l.links.owned {
+			if o.Open() && o.ReleasedOp == 0 && o.Tenant == op.Tenant && o.From == op.YTTargetID && o.WriterTask == writer &&
+				o.LinkType == link.Kind && o.To == link.Target {
+				o.ReleasedOp, o.ReleasedAt = id, now
+			}
+		}
+	}
+	return nil
+}
+
 func (l *MemLedger) LinkRecords(_ context.Context, tenant, issueID string) (ytwrite.IssueLinkRecords, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -270,6 +292,17 @@ func (c *CrashLedger) LeaseLinkRecovery(ctx context.Context, now time.Time, id i
 		return false, err
 	}
 	return ok, nil
+}
+
+func (c *CrashLedger) ReleaseUnsentLinks(ctx context.Context, now time.Time, id int64, links []ytwrite.IssueLink) error {
+	if err := c.enter("ReleaseUnsentLinks"); err != nil {
+		return err
+	}
+	ll, err := c.links()
+	if err != nil {
+		return err
+	}
+	return c.leave("ReleaseUnsentLinks", ll.ReleaseUnsentLinks(ctx, now, id, links))
 }
 
 func (c *CrashLedger) LinkRecords(ctx context.Context, tenant, issueID string) (ytwrite.IssueLinkRecords, error) {
