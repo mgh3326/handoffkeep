@@ -13,7 +13,7 @@ fi
 here=$(cd "$(dirname "$0")/.." && pwd)
 cd "$here"
 
-tests=$(go test -list . ./internal/store | grep "^Test" | sort)
+tests=$(go test -list . ./internal/store | grep "^Test" | LC_ALL=C sort)
 total=$(wc -l <<< "$tests")
 mid=$(( total / 2 ))
 

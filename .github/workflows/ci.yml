@@ -372,9 +372,15 @@ jobs:
           sparse-checkout: .github/actions/setup-go-cached
       - uses: ./workflow/.github/actions/setup-go-cached
       - name: go test store shard 1
+        env:
+          HANDOFFKEEP_SEARCH_LATENCY: ${{ inputs.packages == './internal/store' && '1' || '' }}
         run: |
-          RUN_REGEX=$(bash scripts/store-test-shard.sh 1)
-          go test -v -timeout 20m ./internal/store -run "$RUN_REGEX"
+          if [ -f scripts/store-test-shard.sh ]; then
+            RUN_REGEX=$(bash scripts/store-test-shard.sh 1)
+            go test -v -timeout 20m ./internal/store -run "$RUN_REGEX"
+          else
+            go test -v -timeout 20m ./internal/store
+          fi
 
   main-store-2:
     if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
@@ -405,9 +411,15 @@ jobs:
           sparse-checkout: .github/actions/setup-go-cached
       - uses: ./workflow/.github/actions/setup-go-cached
       - name: go test store shard 2
+        env:
+          HANDOFFKEEP_SEARCH_LATENCY: ${{ inputs.packages == './internal/store' && '1' || '' }}
         run: |
-          RUN_REGEX=$(bash scripts/store-test-shard.sh 2)
-          go test -v -timeout 20m ./internal/store -run "$RUN_REGEX"
+          if [ -f scripts/store-test-shard.sh ]; then
+            RUN_REGEX=$(bash scripts/store-test-shard.sh 2)
+            go test -v -timeout 20m ./internal/store -run "$RUN_REGEX"
+          else
+            echo "historical ref without store sharding script; shard 1 ran internal/store"
+          fi
 
   main-packages:
     if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
@@ -447,7 +459,13 @@ jobs:
       - run: test -z "$(git status --porcelain --untracked-files=all -- internal/ui/static/console)"
       - name: go test (PostgreSQL, non-store DB packages)
         run: |
-          pkgs=($(bash scripts/ci-db-non-store.sh))
+          if [ -f scripts/ci-db-non-store.sh ]; then
+            pkgs=($(bash scripts/ci-db-non-store.sh))
+          else
+            pkgs=($(./workflow/.github/actions/setup-go-cached/../../.. 2>/dev/null || true))
+            # Fall back to testing all packages if ci-db-non-store.sh does not exist on older ref
+            pkgs=(./cmd/handoffkeep ./internal/api ./internal/hubforward ./internal/mcp ./internal/testdb ./internal/ui ./tests)
+          fi
           go test -v -timeout 20m "${pkgs[@]}"
 
   main-migration:
