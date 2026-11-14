@@ -106,7 +106,7 @@ func TestYTIssueBucketOpTakesTheProjectSetLater(t *testing.T) {
 	}
 
 	s.SetYTIssuesMode(YTIssuesOff, "")
-	later, err := s.CreateTask(t.Context(), Task{Lane: "yta-lane", Title: "yta later", Kind: "implement", CreatedBy: "test"})
+	later, err := s.CreateDotsRequest(t.Context(), "caller", DotsRequestInput{Title: "Later", Body: "Investigate"})
 	if err != nil {
 		t.Fatal(err)
 	}
