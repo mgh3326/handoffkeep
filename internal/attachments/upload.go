@@ -413,7 +413,31 @@ func (m *Manager) completeStreamed(ctx context.Context, row store.AttachmentUplo
 			if pv.n != row.SizeBytes || pv.overflow() || hex.EncodeToString(pv.sum.Sum(nil)) != row.SHA256 {
 				return errors.New("promoted object failed verification")
 			}
-			return m.Objects.Copy(ctx, promoKey, key(row.SHA256))
+			published := key(row.SHA256)
+			if err := m.Objects.Copy(ctx, promoKey, published); err != nil {
+				return err
+			}
+			// The copy's output is what readers adopt, so the published object
+			// itself is re-hashed — a backend fault between promo and content
+			// key must not reach the dedup path. On mismatch the bad object is
+			// removed so a retry re-copies instead of adopting it; a concurrent
+			// same-sha completion in that window is the same residual exposure
+			// an overwrite at any shared key already carries.
+			dtr, err := m.Objects.Get(ctx, published)
+			if err != nil {
+				return err
+			}
+			dv := &streamVerifier{r: io.LimitReader(dtr, row.SizeBytes+1), sum: sha256.New()}
+			_, err = io.Copy(io.Discard, dv)
+			dtr.Close()
+			if err != nil {
+				return err
+			}
+			if dv.n != row.SizeBytes || hex.EncodeToString(dv.sum.Sum(nil)) != row.SHA256 {
+				_ = m.Objects.Delete(ctx, published)
+				return errors.New("published object failed verification")
+			}
+			return nil
 		})
 	if err != nil {
 		if errors.Is(err, store.ErrUploadClaimLost) {
