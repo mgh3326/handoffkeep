@@ -204,13 +204,56 @@ func TestNamedTasksKeepTheirOwnEventKey(t *testing.T) {
 	child := flowTask(t, s, pool, "implement", StateReviewing, true)
 	setParent(t, s, child, parent)
 	merged := testPR(6302)
+	putDeploy(t, s, "deploy/svc/20261113T010000Z", "svc", "success", []string{merged})
 	send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: merged, TaskID: child.ID, Tasks: []int64{parent.ID}})
-	if st := stateOf(t, s, parent.ID).State; st != StateMerged {
-		t.Fatalf("parent after the merge: %s", st)
+	if got := stateOf(t, s, parent.ID); got.State != StateDeployed || got.Refs.PR != merged {
+		t.Fatalf("named parent after the merge: state=%s refs.pr=%q, want deployed on %s", got.State, got.Refs.PR, merged)
 	}
 	rev := send(t, s, TaskSourceEvent{Source: SourceMergewakeRevert, SourceRef: testPR(6303), RevertedPR: merged, TaskID: child.ID, Tasks: []int64{parent.ID}})
 	if !rev.Applied || len(rev.Tasks) != 1 || !rev.Tasks[0].Applied || rev.Tasks[0].State != StateDeveloping {
 		t.Fatalf("revert naming the parent: %+v", rev)
+	}
+}
+
+// TestParentFirstNamedOrderStillCloses (mergewake review of the named-parent
+// deferral): when task_id is the parent and the child comes later in tasks,
+// the parent's merge is held while the child is open. The child's turn does
+// not defer — the parent's turn already ran — so the child auto-closes the
+// parent itself.
+func TestParentFirstNamedOrderStillCloses(t *testing.T) {
+	s, pool := searchTestStore(t)
+	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
+	child := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setParent(t, s, child, parent)
+	merged := testPR(6305)
+	putDeploy(t, s, "deploy/svc/20261114T010000Z", "svc", "success", []string{merged})
+	res := send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: merged, TaskID: parent.ID, Tasks: []int64{child.ID}})
+	if res.Applied || len(res.Tasks) != 1 || !res.Tasks[0].Applied || res.Tasks[0].State != StateDeployed {
+		t.Fatalf("parent-first merge: %+v / %+v", res, res.Tasks)
+	}
+	if got := stateOf(t, s, parent.ID); got.State != StateDeployed {
+		t.Fatalf("parent after the child's merge: state=%s, want deployed", got.State)
+	}
+	if got := stateOf(t, s, child.ID); got.State != StateDeployed {
+		t.Fatalf("child after the merge: state=%s, want deployed", got.State)
+	}
+}
+
+// TestSettledNamedParentIsClosedByTheChildsTurn (mergewake review of the
+// deploy-turn deferral): a parent already merged with its PR cannot move in
+// its own event turn, so a settling child's turns must not defer the rollup
+// close to it — the child deploys the parent itself.
+func TestSettledNamedParentIsClosedByTheChildsTurn(t *testing.T) {
+	s, pool := searchTestStore(t)
+	parent := flowTask(t, s, pool, "implement", StateMerged, false)
+	setRefsPR(t, s, parent.ID, testPR(6306))
+	child := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setParent(t, s, child, parent)
+	merged := testPR(6307)
+	putDeploy(t, s, "deploy/svc/20261114T020000Z", "svc", "success", []string{merged})
+	send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: merged, TaskID: child.ID, Tasks: []int64{parent.ID}})
+	if got := stateOf(t, s, parent.ID); got.State != StateDeployed {
+		t.Fatalf("merged parent after the child's deploy: state=%s, want deployed", got.State)
 	}
 }
 
@@ -332,11 +375,23 @@ func TestRevertReachesEveryTaskClosedOnThePR(t *testing.T) {
 	if got, err := s.TransitionTask(t.Context(), delivered.ID, StateMerged, "tester", "", &TaskRefs{PR: pr}, ""); err != nil || got.State != StateMerged {
 		t.Fatalf("delivered close: %+v err=%v", got, err)
 	}
+	// Closed on the PR without a link: by hand from reviewing with --pr, and a
+	// sibling a merge closed before siblings were linked.
+	byHand := flowTask(t, s, pool, "implement", StateReviewing, true)
+	if got, err := s.TransitionTask(t.Context(), byHand.ID, StateMerged, "tester", "", &TaskRefs{PR: pr}, ""); err != nil || got.State != StateMerged {
+		t.Fatalf("reviewing -> merged --pr: %+v err=%v", got, err)
+	}
+	legacy := flowTask(t, s, pool, "implement", StateMerged, false)
+	setRefsPR(t, s, legacy.ID, pr)
+	links := changeLinks(t, s, mustChange(t, s, "example/app", 7301).ID)
+	if links[byHand.ID] != "" || links[legacy.ID] != "" {
+		t.Fatalf("links %v, want the by-hand and legacy tasks unlinked", links)
+	}
 	revert := testPR(7302)
 	if res := send(t, s, revertEvent(carrier.ID, pr, revert)); !res.Applied || res.State != StateDeveloping {
 		t.Fatalf("revert %+v", res)
 	}
-	for _, id := range []int64{sibling.ID, delivered.ID} {
+	for _, id := range []int64{sibling.ID, delivered.ID, byHand.ID, legacy.ID} {
 		got := stateOf(t, s, id)
 		if got.State != StateDeveloping || got.Refs.RevertPR != revert {
 			t.Fatalf("task %d after the revert: state=%s revert_pr=%q, want developing", id, got.State, got.Refs.RevertPR)

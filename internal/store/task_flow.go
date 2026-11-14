@@ -452,6 +452,13 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 	if err != nil {
 		return Task{}, err
 	}
+	if action == actMove && to == StateMerged && refs != nil && refs.PR != "" {
+		if canonical := canonicalPRURL(refs.PR); canonical != refs.PR {
+			fixed := *refs
+			fixed.PR = canonical
+			refs = &fixed
+		}
+	}
 	if reopen {
 		action, to = actMove, StateUnstarted
 	}
@@ -472,7 +479,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		// names, so the PR's deploy and revert reach it (deployedTasksTx,
 		// propagateRevertTx). It is linked before the hold below so a reland
 		// PR counts as one; a refusal rolls the link back.
-		if err = linkChangeTaskTx(ctx, tx, deliveredBy, id, ChangeImplements, false, now); err != nil {
+		if err = linkChangeTaskTx(ctx, tx, deliveredBy, id, ChangeImplements, true, now); err != nil {
 			return Task{}, err
 		}
 		// The close-on-merge rule a merge event applies (hk 3294) holds here
@@ -792,7 +799,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 	// Rule 8: entering merged by hand also looks for a deploy record that
 	// already lists the task's PR.
 	if action == actMove && to == StateMerged {
-		if x, err = s.deployOnMergedTx(ctx, tx, x, now); err != nil {
+		if x, err = s.deployOnMergedTx(ctx, tx, x, now, nil, nil); err != nil {
 			return Task{}, err
 		}
 	}

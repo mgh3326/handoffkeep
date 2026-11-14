@@ -223,3 +223,24 @@ func TestYTFieldsBackfillLimitCountsMoves(t *testing.T) {
 		}
 	}
 }
+
+// A moved task needs two ops. A one-op budget must leave it untouched instead
+// of preparing both ops and exceeding the limit.
+func TestYTFieldsBackfillLimitDoesNotSplitMovedTask(t *testing.T) {
+	s, bound, _ := ytmSetup(t, "ytfb_limit_one_move")
+	ytmMapped(t, s)
+	ytFeedExec(t, s, `UPDATE tasks SET project=$2 WHERE id=$1`, bound, ytmProject)
+
+	r := ytfBackfill(t, s, YTFieldsBackfillOptions{Limit: 1})
+	if r.Total != (YTFieldsBackfillCounts{}) {
+		t.Fatalf("limit 1 prepared part of a moved task: %+v", r.Total)
+	}
+	if moves, fields := ytmOps(t, s, bound), ytfOps(t, s, bound); len(moves) != 0 || len(fields) != 0 {
+		t.Fatalf("limit 1 wrote partial task ops: moves %+v snapshots %+v", moves, fields)
+	}
+
+	r = ytfBackfill(t, s, YTFieldsBackfillOptions{Limit: 2})
+	if r.Total != (YTFieldsBackfillCounts{Scanned: 1, Ops: 2, Moved: 1}) {
+		t.Fatalf("limit 2 did not resume the moved task: %+v", r.Total)
+	}
+}

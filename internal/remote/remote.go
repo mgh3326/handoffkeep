@@ -461,6 +461,10 @@ func transitionApplied(to string, out store.Task) bool {
 		return newServer && out.AwaitingDecision
 	case "reopened":
 		return out.State == store.StateUnstarted
+	case store.StateMerged:
+		// A merge transition can race with a deploy record that lands before
+		// this response is read. Deployed is later on the same path.
+		return out.State == store.StateDeployed
 	}
 	return false
 }
