@@ -147,11 +147,13 @@ func addRelationTx(ctx context.Context, tx pgx.Tx, src int64, kind string, dst i
 // change reaches both endpoints" true whichever is the writer; the other's
 // snapshot is unchanged and makes no op. Every caller holds the task-mutation
 // lock (lockorder.go level 2) and already holds src's row, so the second row
-// lock cannot close a cycle with another task writer.
+// lock cannot close a cycle with another task writer. updated_at never moves
+// backwards: callers read now under that lock, and GREATEST keeps a newer
+// revision if a clock step put one ahead of now.
 func bumpRelationEndpointsTx(ctx context.Context, tx pgx.Tx, now time.Time, src, dst int64) error {
 	ids := []int64{src, dst}
 	slices.Sort(ids)
-	_, err := tx.Exec(ctx, `UPDATE tasks SET updated_at=$2 WHERE id = ANY($1)`, ids, now)
+	_, err := tx.Exec(ctx, `UPDATE tasks SET updated_at=GREATEST(updated_at, $2) WHERE id = ANY($1)`, ids, now)
 	return err
 }
 

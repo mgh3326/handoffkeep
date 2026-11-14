@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -329,4 +330,26 @@ func TestYTIssueLinksMigration(t *testing.T) {
 	wantViolation("a second plan for one attempt", err)
 	_, err = s.pool.Exec(ctx, `UPDATE yt_link_plans SET plan='{"x":1}'`)
 	wantViolation("update of a plan", err)
+}
+
+// TestYTLinksRelationBumpNeverMovesUpdatedAtBack: the endpoint bump keeps a
+// newer revision of the linked task (PR #420 review: a create that links an
+// existing task must not regress that task's updated_at).
+func TestYTLinksRelationBumpNeverMovesUpdatedAtBack(t *testing.T) {
+	s := schemaStore(t, "yt_links_monotonic")
+	ctx := t.Context()
+	linked := ytFeedTask(t, s, "linked")
+	ahead := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
+	ytFeedExec(t, s, `UPDATE tasks SET updated_at=$2 WHERE id=$1`, linked.ID, ahead)
+	before := ytFeedMaxSyncID(t, s)
+	created, err := s.CreateTaskChecked(ctx, Task{Lane: "yt-feed-test", Title: "links to linked", Kind: "implement", CreatedBy: "test", Project: projectPtr(testProjectName)}, DuplicateCheck{Link: linked.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stateOf(t, s, linked.ID).UpdatedAt; !got.Equal(ahead) {
+		t.Fatalf("linked updated_at = %v, want the newer %v kept", got, ahead)
+	}
+	if got, want := ytlFeedIDs(t, s, before), ytlIDs(linked.ID, created.ID); !reflect.DeepEqual(got, want) {
+		t.Fatalf("feed rows for tasks %v, want %v", got, want)
+	}
 }
