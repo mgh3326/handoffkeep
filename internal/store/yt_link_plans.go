@@ -15,15 +15,18 @@ import (
 // The Postgres side of the issue_links kind (hk 4638 S3; design
 // 2026-11-13/yt-issue-links §5.1, §5.4): YTWriteLedger is a
 // ytwrite.LinksLedger over the S2 tables yt_link_plans, yt_link_owned and
-// yt_link_unowned. The plan itself is ytwrite.PlanIssueLinks, the same pure
-// function the in-memory ledger calls; this file reads its inputs and writes
-// its result in one transaction.
+// yt_link_unowned and the executor record yt_link_steps. The plan itself is
+// ytwrite.PlanIssueLinks, the same pure function the in-memory ledger calls,
+// and so are the fence (CheckLinkFence) and the release rule
+// (UnsentLinkAdds); this file reads their inputs and writes their result in
+// one transaction.
 //
-// Lock order (lockorder.go): PlanLinks and ApplyLinks take the op's lane lock
-// first, then FOR UPDATE on the op row, then write yt_link_owned,
-// yt_link_unowned and yt_link_plans rows (no other writer locks them) and
-// read task_relations and yt_task_bindings without a lock. They take no task
-// row.
+// Lock order (lockorder.go): PlanLinks and SettleLinks take the op's lane
+// lock first, then FOR UPDATE on the op row, then write yt_link_owned,
+// yt_link_unowned, yt_link_plans and yt_link_steps rows (no other writer
+// locks them) and read task_relations and yt_task_bindings without a lock.
+// MarkLinkStep takes only FOR UPDATE on the op row, then writes one
+// yt_link_steps row. None takes a task row.
 
 // The kind is registered so the store knows it, but no gate admits it until
 // its consumer and mode land (S4): the worker's ledger never claims one.
@@ -88,8 +91,14 @@ func latestYTLinkPlan(ctx context.Context, q interface {
 }, id int64) (ytwrite.LinkPlanRecord, bool, error) {
 	var rec ytwrite.LinkPlanRecord
 	var raw []byte
-	err := q.QueryRow(ctx, `SELECT attempt, recover, plan, created_at FROM yt_link_plans WHERE op_id=$1 ORDER BY id DESC LIMIT 1`, id).
-		Scan(&rec.Attempt, &rec.Recover, &raw, &rec.CreatedAt)
+	var outcome string
+	// Steps are marked in order from 0, so their count is the next step.
+	err := q.QueryRow(ctx, `SELECT p.attempt, p.recover, p.plan, p.created_at,
+			(SELECT count(*) FROM yt_link_steps s WHERE s.op_id=p.op_id AND s.attempt=p.attempt AND s.recover=p.recover),
+			coalesce((SELECT s.outcome FROM yt_link_steps s WHERE s.op_id=p.op_id AND s.attempt=p.attempt AND s.recover=p.recover
+				ORDER BY s.step DESC LIMIT 1), '')
+		FROM yt_link_plans p WHERE p.op_id=$1 ORDER BY p.id DESC LIMIT 1`, id).
+		Scan(&rec.Attempt, &rec.Recover, &raw, &rec.CreatedAt, &rec.Marked, &outcome)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ytwrite.LinkPlanRecord{}, false, nil
 	}
@@ -99,8 +108,30 @@ func latestYTLinkPlan(ctx context.Context, q interface {
 	if _, err := scanJSONB(raw, &rec.Plan); err != nil {
 		return ytwrite.LinkPlanRecord{}, false, fmt.Errorf("plan of op %d: %w", id, err)
 	}
-	rec.CreatedAt = rec.CreatedAt.UTC()
+	rec.CreatedAt, rec.Outcome = rec.CreatedAt.UTC(), ytwrite.StepOutcome(outcome)
 	return rec, true, nil
+}
+
+// releaseUnsentTx closes the writer's open, unreleased rows of rec's unsent
+// adds (ytwrite.UnsentLinkAdds) for op.
+func releaseUnsentTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, rec ytwrite.LinkPlanRecord, now time.Time) error {
+	links := ytwrite.UnsentLinkAdds(rec)
+	if len(links) == 0 {
+		return nil
+	}
+	writer, err := ytwrite.LinkWriter(op)
+	if err != nil {
+		return err
+	}
+	for _, link := range links {
+		if _, err := tx.Exec(ctx, `UPDATE yt_link_owned SET released_op_id=$1, released_at=$2
+			WHERE tenant=$3 AND from_issue=$4 AND writer_task_id=$5 AND link_type=$6 AND to_issue=$7
+				AND released_op_id IS NULL AND released_at IS NULL`,
+			op.ID, now, op.Tenant, op.YTTargetID, writer, string(link.Kind), link.Target); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ytLinkRowsTx reads the ownership rows naming issue on tenant (on either
@@ -150,7 +181,7 @@ func ytLinkPeerEdgesTx(ctx context.Context, tx pgx.Tx, tenant string, writer int
 	return out, nil
 }
 
-func (l *YTWriteLedger) PlanLinks(ctx context.Context, now time.Time, id int64, attempt, recover int, cur []ytwrite.IssueLink) (ytwrite.LinkPlan, error) {
+func (l *YTWriteLedger) PlanLinks(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, cur []ytwrite.IssueLink) (ytwrite.LinkPlan, error) {
 	now = now.UTC()
 	tx, err := l.s.pool.Begin(ctx)
 	if err != nil {
@@ -161,11 +192,14 @@ func (l *YTWriteLedger) PlanLinks(ctx context.Context, now time.Time, id int64, 
 	if err != nil {
 		return ytwrite.LinkPlan{}, err
 	}
+	if err := ytwrite.CheckLinkFence(op, f); err != nil {
+		return ytwrite.LinkPlan{}, err
+	}
 	latest, found, err := latestYTLinkPlan(ctx, tx, id)
 	if err != nil {
 		return ytwrite.LinkPlan{}, err
 	}
-	if err := ytwrite.CheckLinkPlanStep(op, attempt, recover, latest, found); err != nil {
+	if err := ytwrite.CheckLinkPlanStep(op, f.Attempt, f.Recover, latest, found); err != nil {
 		return ytwrite.LinkPlan{}, err
 	}
 	snap, err := ytwrite.IssueLinksPayload(op)
@@ -175,6 +209,13 @@ func (l *YTWriteLedger) PlanLinks(ctx context.Context, now time.Time, id int64, 
 	writer, err := ytwrite.LinkWriter(op)
 	if err != nil {
 		return ytwrite.LinkPlan{}, err
+	}
+	// The plan this one supersedes: ownership of its unsent adds closes
+	// first, so the new plan sees only links hk may have made.
+	if found {
+		if err := releaseUnsentTx(ctx, tx, op, latest, now); err != nil {
+			return ytwrite.LinkPlan{}, err
+		}
 	}
 	owned, unowned, err := ytLinkRowsTx(ctx, tx, op.Tenant, op.YTTargetID, true)
 	if err != nil {
@@ -235,7 +276,7 @@ func (l *YTWriteLedger) PlanLinks(ctx context.Context, now time.Time, id int64, 
 		return ytwrite.LinkPlan{}, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO yt_link_plans(op_id, attempt, recover, plan, created_at) VALUES ($1,$2,$3,$4::jsonb,$5)`,
-		id, attempt, recover, string(raw), now); err != nil {
+		id, f.Attempt, f.Recover, string(raw), now); err != nil {
 		return ytwrite.LinkPlan{}, err
 	}
 	return plan, tx.Commit(ctx)
@@ -245,7 +286,38 @@ func (l *YTWriteLedger) LatestLinkPlan(ctx context.Context, id int64) (ytwrite.L
 	return latestYTLinkPlan(ctx, l.s.pool, id)
 }
 
-func (l *YTWriteLedger) ApplyLinks(ctx context.Context, now time.Time, id int64, ytID string, cur []ytwrite.IssueLink) (ytwrite.Op, error) {
+func (l *YTWriteLedger) MarkLinkStep(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, step int) error {
+	tx, err := l.s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	op, err := scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1 FOR UPDATE`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ytwrite.ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if err := ytwrite.CheckLinkFence(op, f); err != nil {
+		return err
+	}
+	latest, found, err := latestYTLinkPlan(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if !found || latest.Attempt != f.Attempt || latest.Recover != f.Recover || step != latest.Marked || step >= len(ytwrite.ExecuteOrder(latest.Plan)) {
+		return fmt.Errorf("%w: mark step %d of plan %d.%d; latest is %d.%d (found %v), marked %d",
+			ytwrite.ErrState, step, f.Attempt, f.Recover, latest.Attempt, latest.Recover, found, latest.Marked)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO yt_link_steps(op_id, attempt, recover, step, marked_at) VALUES ($1,$2,$3,$4,$5)`,
+		id, f.Attempt, f.Recover, step, now.UTC()); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (l *YTWriteLedger) SettleLinks(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, st ytwrite.LinkSettlement) (ytwrite.Op, error) {
 	now = now.UTC()
 	tx, err := l.s.pool.Begin(ctx)
 	if err != nil {
@@ -256,71 +328,75 @@ func (l *YTWriteLedger) ApplyLinks(ctx context.Context, now time.Time, id int64,
 	if err != nil {
 		return ytwrite.Op{}, err
 	}
-	switch op.State {
-	case ytwrite.StateApplied:
-		if op.YTResultID == ytID {
-			return op, nil
-		}
-		return ytwrite.Op{}, ytwrite.ErrConflictingResult
-	case ytwrite.StateDispatched, ytwrite.StateRemoteUnknown:
-	default:
-		return ytwrite.Op{}, fmt.Errorf("%w: apply from %s", ytwrite.ErrState, op.State)
+	if err := ytwrite.CheckLinkFence(op, f); err != nil {
+		return ytwrite.Op{}, err
 	}
-	owned, unowned, err := ytLinkRowsTx(ctx, tx, op.Tenant, op.YTTargetID, true)
+	if err := ytwrite.CheckLinkSettlement(op, st); err != nil {
+		return ytwrite.Op{}, err
+	}
+	latest, found, err := latestYTLinkPlan(ctx, tx, id)
 	if err != nil {
 		return ytwrite.Op{}, err
 	}
-	closeOwned, gone := ytwrite.ClosedByRead(op, owned, unowned, cur)
-	if len(closeOwned) > 0 {
-		if _, err := tx.Exec(ctx, `UPDATE yt_link_owned SET released_at=$2 WHERE id = ANY($1)`, closeOwned, now); err != nil {
+	if found {
+		if st.Outcome != "" && latest.Attempt == f.Attempt && latest.Recover == f.Recover && latest.Marked > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE yt_link_steps SET outcome=$5 WHERE op_id=$1 AND attempt=$2 AND recover=$3 AND step=$4`,
+				id, f.Attempt, f.Recover, latest.Marked-1, string(st.Outcome)); err != nil {
+				return ytwrite.Op{}, err
+			}
+			latest.Outcome = st.Outcome
+		}
+		if err := releaseUnsentTx(ctx, tx, op, latest, now); err != nil {
 			return ytwrite.Op{}, err
 		}
 	}
-	if len(gone) > 0 {
-		if _, err := tx.Exec(ctx, `UPDATE yt_link_unowned SET gone_at=$2 WHERE id = ANY($1)`, gone, now); err != nil {
-			return ytwrite.Op{}, err
+	reason, detail := clipText(st.Reason, 200), clipText(st.Detail, 2000)
+	switch st.To {
+	case ytwrite.StateApplied:
+		if st.Read {
+			owned, unowned, err := ytLinkRowsTx(ctx, tx, op.Tenant, op.YTTargetID, true)
+			if err != nil {
+				return ytwrite.Op{}, err
+			}
+			closeOwned, gone := ytwrite.ClosedByRead(op, owned, unowned, st.Cur)
+			if len(closeOwned) > 0 {
+				if _, err := tx.Exec(ctx, `UPDATE yt_link_owned SET released_at=$2 WHERE id = ANY($1)`, closeOwned, now); err != nil {
+					return ytwrite.Op{}, err
+				}
+			}
+			if len(gone) > 0 {
+				if _, err := tx.Exec(ctx, `UPDATE yt_link_unowned SET gone_at=$2 WHERE id = ANY($1)`, gone, now); err != nil {
+					return ytwrite.Op{}, err
+				}
+			}
 		}
+		op, err = scanYTOp(tx.QueryRow(ctx, `UPDATE yt_write_ops SET state='applied', yt_result_id=$2, reason='', last_error='', resolved_at=$3
+			WHERE id=$1 RETURNING `+ytOpColumns, id, st.YTID, now))
+	case ytwrite.StateRejected:
+		op, err = scanYTOp(tx.QueryRow(ctx, `UPDATE yt_write_ops SET state='rejected', reason=$2, last_error=$3, resolved_at=$4
+			WHERE id=$1 RETURNING `+ytOpColumns, id, reason, detail, now))
+	default: // prepared, remote_unknown (CheckLinkSettlement)
+		op, err = scanYTOp(tx.QueryRow(ctx, `UPDATE yt_write_ops SET state=$2, next_attempt_at=$3, reason=$4, last_error=$5
+			WHERE id=$1 RETURNING `+ytOpColumns, id, string(st.To), st.Next.UTC(), reason, detail))
 	}
-	op, err = scanYTOp(tx.QueryRow(ctx, `UPDATE yt_write_ops SET state='applied', yt_result_id=$2, reason='', last_error='', resolved_at=$3
-		WHERE id=$1 RETURNING `+ytOpColumns, id, ytID, now))
 	if err != nil {
 		return ytwrite.Op{}, err
 	}
 	return op, tx.Commit(ctx)
 }
 
-func (l *YTWriteLedger) LeaseLinkRecovery(ctx context.Context, now time.Time, id int64, reconciles int, until time.Time) (bool, error) {
-	tag, err := l.s.pool.Exec(ctx, `UPDATE yt_write_ops SET next_attempt_at=$4
-		WHERE id=$1 AND state='remote_unknown' AND next_attempt_at <= $2 AND reconciles=$3`, id, now.UTC(), reconciles, until.UTC())
+func (l *YTWriteLedger) LeaseLinkRecovery(ctx context.Context, now time.Time, id int64, reconciles int, until time.Time) (int, bool, error) {
+	var epoch int
+	err := l.s.pool.QueryRow(ctx, `UPDATE yt_write_ops SET next_attempt_at=$4, reconciles=reconciles+1
+		WHERE id=$1 AND state='remote_unknown' AND next_attempt_at <= $2 AND reconciles=$3 RETURNING reconciles`,
+		id, now.UTC(), reconciles, until.UTC()).Scan(&epoch)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
 	if err != nil {
-		return false, err
+		return 0, false, err
 	}
-	return tag.RowsAffected() == 1, nil
-}
-
-func (l *YTWriteLedger) ReleaseUnsentLinks(ctx context.Context, now time.Time, id int64, links []ytwrite.IssueLink) error {
-	tx, err := l.s.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	op, err := lockYTOpTx(ctx, tx, id)
-	if err != nil {
-		return err
-	}
-	writer, err := ytwrite.LinkWriter(op)
-	if err != nil {
-		return err
-	}
-	for _, link := range links {
-		if _, err := tx.Exec(ctx, `UPDATE yt_link_owned SET released_op_id=$1, released_at=$2
-			WHERE tenant=$3 AND from_issue=$4 AND writer_task_id=$5 AND link_type=$6 AND to_issue=$7
-				AND released_op_id IS NULL AND released_at IS NULL`,
-			id, now.UTC(), op.Tenant, op.YTTargetID, writer, string(link.Kind), link.Target); err != nil {
-			return err
-		}
-	}
-	return tx.Commit(ctx)
+	return epoch, true, nil
 }
 
 func (l *YTWriteLedger) LinkRecords(ctx context.Context, tenant, issueID string) (ytwrite.IssueLinkRecords, error) {

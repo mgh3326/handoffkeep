@@ -15,7 +15,7 @@ func TestYTLinksProtocolOverPostgres(t *testing.T) {
 	s := schemaStore(t, "ytlp")
 	ytwritetest.RunLinksProtocol(t, func(t *testing.T) ytwrite.Ledger {
 		t.Helper()
-		if _, err := s.pool.Exec(t.Context(), `TRUNCATE yt_link_owned, yt_link_unowned, yt_comment_write_links, yt_entity_map, yt_write_ops, yt_write_op_adoptions, yt_issue_comment_bounds`); err != nil {
+		if _, err := s.pool.Exec(t.Context(), `TRUNCATE yt_link_owned, yt_link_unowned, yt_link_steps, yt_comment_write_links, yt_entity_map, yt_write_ops, yt_write_op_adoptions, yt_issue_comment_bounds`); err != nil {
 			t.Fatal(err)
 		}
 		return s.YTWriteLedger()

@@ -9,8 +9,9 @@ import (
 )
 
 // The in-memory ledger's side of the issue_links kind (hk 4638 S3): the same
-// plan (ytwrite.PlanIssueLinks) and compare-and-set (CheckLinkPlanStep) as the
-// Postgres ledger, over in-memory rows. It knows no hk edges, so it passes no
+// plan (ytwrite.PlanIssueLinks), fence (CheckLinkFence), compare-and-set
+// (CheckLinkPlanStep) and release rule (UnsentLinkAdds) as the Postgres
+// ledger, over in-memory rows. It knows no hk edges, so it passes no
 // peer edges: a relates link another task writes and nobody owns is recorded
 // as unowned here and as peer there; neither changes what is sent.
 
@@ -57,20 +58,31 @@ func (l *MemLedger) ownedByID(id int64) *ytwrite.OwnedLink {
 	return nil
 }
 
-func (l *MemLedger) PlanLinks(_ context.Context, now time.Time, id int64, attempt, recover int, cur []ytwrite.IssueLink) (ytwrite.LinkPlan, error) {
+func (l *MemLedger) PlanLinks(_ context.Context, now time.Time, id int64, f ytwrite.LinkFence, cur []ytwrite.IssueLink) (ytwrite.LinkPlan, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	op, err := l.get(id)
 	if err != nil {
 		return ytwrite.LinkPlan{}, err
 	}
+	if err := ytwrite.CheckLinkFence(*op, f); err != nil {
+		return ytwrite.LinkPlan{}, err
+	}
 	latest, found := l.latestPlan(id)
-	if err := ytwrite.CheckLinkPlanStep(*op, attempt, recover, latest, found); err != nil {
+	if err := ytwrite.CheckLinkPlanStep(*op, f.Attempt, f.Recover, latest, found); err != nil {
 		return ytwrite.LinkPlan{}, err
 	}
 	snap, err := ytwrite.IssueLinksPayload(*op)
 	if err != nil {
 		return ytwrite.LinkPlan{}, err
+	}
+	if _, err := ytwrite.LinkWriter(*op); err != nil {
+		return ytwrite.LinkPlan{}, err
+	}
+	// The plan this one supersedes: ownership of its unsent adds closes
+	// first, so the new plan sees only links hk may have made.
+	if found {
+		l.releaseUnsent(*op, latest, now)
 	}
 	owned, unowned := l.rowsOf(op.Tenant, op.YTTargetID)
 	var open []ytwrite.OwnedLink
@@ -117,7 +129,7 @@ func (l *MemLedger) PlanLinks(_ context.Context, now time.Time, id int64, attemp
 	if l.links.plans == nil {
 		l.links.plans = map[int64][]ytwrite.LinkPlanRecord{}
 	}
-	l.links.plans[id] = append(l.links.plans[id], ytwrite.LinkPlanRecord{Attempt: attempt, Recover: recover, Plan: plan, CreatedAt: now})
+	l.links.plans[id] = append(l.links.plans[id], ytwrite.LinkPlanRecord{Attempt: f.Attempt, Recover: f.Recover, Plan: plan, CreatedAt: now})
 	return plan, nil
 }
 
@@ -149,67 +161,97 @@ func (l *MemLedger) LatestLinkPlan(_ context.Context, id int64) (ytwrite.LinkPla
 	return rec, found, nil
 }
 
-func (l *MemLedger) ApplyLinks(_ context.Context, now time.Time, id int64, ytID string, cur []ytwrite.IssueLink) (ytwrite.Op, error) {
+// releaseUnsent closes the writer's open, unreleased rows of rec's unsent
+// adds (ytwrite.UnsentLinkAdds).
+func (l *MemLedger) releaseUnsent(op ytwrite.Op, rec ytwrite.LinkPlanRecord, now time.Time) {
+	writer, err := ytwrite.LinkWriter(op)
+	if err != nil {
+		return
+	}
+	for _, link := range ytwrite.UnsentLinkAdds(rec) {
+		for _, o := range l.links.owned {
+			if o.Open() && o.ReleasedOp == 0 && o.Tenant == op.Tenant && o.From == op.YTTargetID && o.WriterTask == writer &&
+				o.LinkType == link.Kind && o.To == link.Target {
+				o.ReleasedOp, o.ReleasedAt = op.ID, now
+			}
+		}
+	}
+}
+
+func (l *MemLedger) MarkLinkStep(_ context.Context, _ time.Time, id int64, f ytwrite.LinkFence, step int) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	op, err := l.get(id)
+	if err != nil {
+		return err
+	}
+	if err := ytwrite.CheckLinkFence(*op, f); err != nil {
+		return err
+	}
+	ps := l.links.plans[id]
+	if len(ps) == 0 {
+		return fmt.Errorf("%w: op %d has no plan", ytwrite.ErrState, id)
+	}
+	latest := &ps[len(ps)-1]
+	if latest.Attempt != f.Attempt || latest.Recover != f.Recover || step != latest.Marked || step >= len(ytwrite.ExecuteOrder(latest.Plan)) {
+		return fmt.Errorf("%w: mark step %d of plan %d.%d; latest is %d.%d, marked %d", ytwrite.ErrState, step, f.Attempt, f.Recover, latest.Attempt, latest.Recover, latest.Marked)
+	}
+	latest.Marked++
+	return nil
+}
+
+func (l *MemLedger) SettleLinks(_ context.Context, now time.Time, id int64, f ytwrite.LinkFence, s ytwrite.LinkSettlement) (ytwrite.Op, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	op, err := l.get(id)
 	if err != nil {
 		return ytwrite.Op{}, err
 	}
-	switch op.State {
-	case ytwrite.StateApplied:
-		if op.YTResultID == ytID {
-			return *op, nil
+	if err := ytwrite.CheckLinkFence(*op, f); err != nil {
+		return ytwrite.Op{}, err
+	}
+	if err := ytwrite.CheckLinkSettlement(*op, s); err != nil {
+		return ytwrite.Op{}, err
+	}
+	if ps := l.links.plans[id]; len(ps) > 0 {
+		latest := &ps[len(ps)-1]
+		if s.Outcome != "" && latest.Attempt == f.Attempt && latest.Recover == f.Recover && latest.Marked > 0 {
+			latest.Outcome = s.Outcome
 		}
-		return ytwrite.Op{}, ytwrite.ErrConflictingResult
-	case ytwrite.StateDispatched, ytwrite.StateRemoteUnknown:
-	default:
-		return ytwrite.Op{}, fmt.Errorf("%w: apply from %s", ytwrite.ErrState, op.State)
+		l.releaseUnsent(*op, *latest, now)
 	}
-	owned, unowned := l.rowsOf(op.Tenant, op.YTTargetID)
-	closeOwned, gone := ytwrite.ClosedByRead(*op, owned, unowned, cur)
-	for _, rid := range closeOwned {
-		l.ownedByID(rid).ReleasedAt = now
+	switch s.To {
+	case ytwrite.StateApplied:
+		if s.Read {
+			owned, unowned := l.rowsOf(op.Tenant, op.YTTargetID)
+			closeOwned, gone := ytwrite.ClosedByRead(*op, owned, unowned, s.Cur)
+			for _, rid := range closeOwned {
+				l.ownedByID(rid).ReleasedAt = now
+			}
+			l.goneUnowned(gone, now)
+		}
+		op.State, op.YTResultID, op.Reason, op.LastError, op.ResolvedAt = ytwrite.StateApplied, s.YTID, "", "", now
+	case ytwrite.StateRejected:
+		op.State, op.Reason, op.LastError, op.ResolvedAt = ytwrite.StateRejected, s.Reason, s.Detail, now
+	default: // prepared, remote_unknown
+		op.State, op.NextAttemptAt, op.Reason, op.LastError = s.To, s.Next, s.Reason, s.Detail
 	}
-	l.goneUnowned(gone, now)
-	op.State, op.YTResultID, op.Reason, op.LastError, op.ResolvedAt = ytwrite.StateApplied, ytID, "", "", now
 	return *op, nil
 }
 
-func (l *MemLedger) LeaseLinkRecovery(_ context.Context, now time.Time, id int64, reconciles int, until time.Time) (bool, error) {
+func (l *MemLedger) LeaseLinkRecovery(_ context.Context, now time.Time, id int64, reconciles int, until time.Time) (int, bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	op, err := l.get(id)
 	if err != nil {
-		return false, err
+		return 0, false, err
 	}
 	if op.State != ytwrite.StateRemoteUnknown || op.NextAttemptAt.After(now) || op.Reconciles != reconciles {
-		return false, nil
+		return 0, false, nil
 	}
+	op.Reconciles++
 	op.NextAttemptAt = until
-	return true, nil
-}
-
-func (l *MemLedger) ReleaseUnsentLinks(_ context.Context, now time.Time, id int64, links []ytwrite.IssueLink) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	op, err := l.get(id)
-	if err != nil {
-		return err
-	}
-	writer, err := ytwrite.LinkWriter(*op)
-	if err != nil {
-		return err
-	}
-	for _, link := range links {
-		for _, o := range l.links.owned {
-			if o.Open() && o.ReleasedOp == 0 && o.Tenant == op.Tenant && o.From == op.YTTargetID && o.WriterTask == writer &&
-				o.LinkType == link.Kind && o.To == link.Target {
-				o.ReleasedOp, o.ReleasedAt = id, now
-			}
-		}
-	}
-	return nil
+	return op.Reconciles, true, nil
 }
 
 func (l *MemLedger) LinkRecords(_ context.Context, tenant, issueID string) (ytwrite.IssueLinkRecords, error) {
@@ -238,7 +280,7 @@ func (c *CrashLedger) links() (ytwrite.LinksLedger, error) {
 	return ll, nil
 }
 
-func (c *CrashLedger) PlanLinks(ctx context.Context, now time.Time, id int64, attempt, recover int, cur []ytwrite.IssueLink) (ytwrite.LinkPlan, error) {
+func (c *CrashLedger) PlanLinks(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, cur []ytwrite.IssueLink) (ytwrite.LinkPlan, error) {
 	if err := c.enter("PlanLinks"); err != nil {
 		return ytwrite.LinkPlan{}, err
 	}
@@ -246,7 +288,7 @@ func (c *CrashLedger) PlanLinks(ctx context.Context, now time.Time, id int64, at
 	if err != nil {
 		return ytwrite.LinkPlan{}, err
 	}
-	plan, err := ll.PlanLinks(ctx, now, id, attempt, recover, cur)
+	plan, err := ll.PlanLinks(ctx, now, id, f, cur)
 	if err := c.leave("PlanLinks", err); err != nil {
 		return ytwrite.LinkPlan{}, err
 	}
@@ -264,45 +306,45 @@ func (c *CrashLedger) LatestLinkPlan(ctx context.Context, id int64) (ytwrite.Lin
 	return ll.LatestLinkPlan(ctx, id)
 }
 
-func (c *CrashLedger) ApplyLinks(ctx context.Context, now time.Time, id int64, ytID string, cur []ytwrite.IssueLink) (ytwrite.Op, error) {
-	if err := c.enter("ApplyLinks"); err != nil {
+func (c *CrashLedger) MarkLinkStep(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, step int) error {
+	if err := c.enter("MarkLinkStep"); err != nil {
+		return err
+	}
+	ll, err := c.links()
+	if err != nil {
+		return err
+	}
+	return c.leave("MarkLinkStep", ll.MarkLinkStep(ctx, now, id, f, step))
+}
+
+func (c *CrashLedger) SettleLinks(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, s ytwrite.LinkSettlement) (ytwrite.Op, error) {
+	if err := c.enter("SettleLinks"); err != nil {
 		return ytwrite.Op{}, err
 	}
 	ll, err := c.links()
 	if err != nil {
 		return ytwrite.Op{}, err
 	}
-	op, err := ll.ApplyLinks(ctx, now, id, ytID, cur)
-	if err := c.leave("ApplyLinks", err); err != nil {
+	op, err := ll.SettleLinks(ctx, now, id, f, s)
+	if err := c.leave("SettleLinks", err); err != nil {
 		return ytwrite.Op{}, err
 	}
 	return op, nil
 }
 
-func (c *CrashLedger) LeaseLinkRecovery(ctx context.Context, now time.Time, id int64, reconciles int, until time.Time) (bool, error) {
+func (c *CrashLedger) LeaseLinkRecovery(ctx context.Context, now time.Time, id int64, reconciles int, until time.Time) (int, bool, error) {
 	if err := c.enter("LeaseLinkRecovery"); err != nil {
-		return false, err
+		return 0, false, err
 	}
 	ll, err := c.links()
 	if err != nil {
-		return false, err
+		return 0, false, err
 	}
-	ok, err := ll.LeaseLinkRecovery(ctx, now, id, reconciles, until)
+	epoch, ok, err := ll.LeaseLinkRecovery(ctx, now, id, reconciles, until)
 	if err := c.leave("LeaseLinkRecovery", err); err != nil {
-		return false, err
+		return 0, false, err
 	}
-	return ok, nil
-}
-
-func (c *CrashLedger) ReleaseUnsentLinks(ctx context.Context, now time.Time, id int64, links []ytwrite.IssueLink) error {
-	if err := c.enter("ReleaseUnsentLinks"); err != nil {
-		return err
-	}
-	ll, err := c.links()
-	if err != nil {
-		return err
-	}
-	return c.leave("ReleaseUnsentLinks", ll.ReleaseUnsentLinks(ctx, now, id, links))
+	return epoch, ok, nil
 }
 
 func (c *CrashLedger) LinkRecords(ctx context.Context, tenant, issueID string) (ytwrite.IssueLinkRecords, error) {

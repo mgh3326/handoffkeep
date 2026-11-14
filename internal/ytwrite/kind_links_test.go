@@ -2,6 +2,7 @@ package ytwrite_test
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -169,6 +170,61 @@ func TestCheckLinkPlanStep(t *testing.T) {
 		{"recovery of a dispatched op", op, 2, 1, none, false, state},
 	} {
 		if err := ytwrite.CheckLinkPlanStep(c.op, c.attempt, c.recover, c.latest, c.found); !c.want(err) {
+			t.Errorf("%s: err = %v", c.name, err)
+		}
+	}
+}
+
+// Review of PR #425: what a plan's durable record says was not made, and
+// when its in-flight add was lost. Order: add 2-21, add 2-22, remove 2-20.
+func TestUnsentLinkAddsAndLostAdd(t *testing.T) {
+	l := func(id string) ytwrite.IssueLink { return ytwrite.IssueLink{Kind: ytwrite.LinkRelates, Target: id} }
+	plan := ytwrite.LinkPlan{Add: []ytwrite.IssueLink{l("2-21"), l("2-22")}, Remove: []ytwrite.IssueLink{l("2-20")}}
+	for _, c := range []struct {
+		name    string
+		marked  int
+		outcome ytwrite.StepOutcome
+		unsent  []ytwrite.IssueLink
+		lost    bool
+	}{
+		{"nothing marked", 0, "", []ytwrite.IssueLink{l("2-21"), l("2-22")}, false},
+		{"first add lost", 1, "", []ytwrite.IssueLink{l("2-22")}, true},
+		{"first add refused", 1, ytwrite.StepDefinite, []ytwrite.IssueLink{l("2-21"), l("2-22")}, false},
+		{"first add ambiguous", 1, ytwrite.StepAmbiguous, []ytwrite.IssueLink{l("2-22")}, false},
+		{"second add ok", 2, ytwrite.StepOK, nil, false},
+		{"remove lost", 3, "", nil, false},
+	} {
+		r := ytwrite.LinkPlanRecord{Plan: plan, Marked: c.marked, Outcome: c.outcome}
+		if got := ytwrite.UnsentLinkAdds(r); !slices.Equal(got, c.unsent) {
+			t.Errorf("%s: unsent = %+v, want %+v", c.name, got, c.unsent)
+		}
+		if got := r.LostAdd(); got != c.lost {
+			t.Errorf("%s: lost = %v", c.name, got)
+		}
+	}
+}
+
+// Review of PR #425: the fence of every planned-kind ledger write.
+func TestCheckLinkFence(t *testing.T) {
+	dispatched := ytwrite.Op{ID: 1, State: ytwrite.StateDispatched, Attempts: 2, Reconciles: 0}
+	unknown := ytwrite.Op{ID: 1, State: ytwrite.StateRemoteUnknown, Attempts: 2, Reconciles: 3}
+	for _, c := range []struct {
+		name string
+		op   ytwrite.Op
+		f    ytwrite.LinkFence
+		ok   bool
+	}{
+		{"send", dispatched, ytwrite.LinkFence{Attempt: 2}, true},
+		{"send of an earlier attempt", dispatched, ytwrite.LinkFence{Attempt: 1}, false},
+		{"send after stale recovery", unknown, ytwrite.LinkFence{Attempt: 2}, false},
+		{"recovery holding the lease", unknown, ytwrite.LinkFence{Attempt: 2, Epoch: 3}, true},
+		{"superseded recovery", unknown, ytwrite.LinkFence{Attempt: 2, Epoch: 2}, false},
+		{"recovery of a dispatched op", dispatched, ytwrite.LinkFence{Attempt: 2, Epoch: 3}, false},
+		{"operator", unknown, ytwrite.LinkFence{Attempt: 2, Epoch: ytwrite.EpochOperator}, true},
+		{"operator on a dispatched op", dispatched, ytwrite.LinkFence{Attempt: 2, Epoch: ytwrite.EpochOperator}, false},
+	} {
+		err := ytwrite.CheckLinkFence(c.op, c.f)
+		if (err == nil) != c.ok || (err != nil && !errors.Is(err, ytwrite.ErrState)) {
 			t.Errorf("%s: err = %v", c.name, err)
 		}
 	}

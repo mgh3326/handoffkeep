@@ -385,9 +385,9 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 		// The kind refused before it wrote anything.
 		return p.record(op, p.reject(ctx, op, refused.Reason, refused.Detail))
 	case errors.As(err, &notSent):
-		return p.record(op, p.notSent(ctx, op, notSent))
+		return p.record(op, p.notSent(ctx, p, op, notSent))
 	default:
-		return p.record(op, p.writeFailed(ctx, op, err))
+		return p.record(op, p.writeFailed(ctx, p, op, err))
 	}
 }
 
@@ -395,7 +395,7 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 // known to have taken effect: 429 and 401 were not processed (prepared, after
 // the wait), another 4xx is final, and a 5xx, 408 or transport failure may
 // have taken effect (remote_unknown).
-func (p *Protocol) writeFailed(ctx context.Context, op Op, err error) settled {
+func (p *Protocol) writeFailed(ctx context.Context, st settler, op Op, err error) settled {
 	now := p.now()
 	var re *RemoteError
 	switch {
@@ -407,19 +407,29 @@ func (p *Protocol) writeFailed(ctx context.Context, op Op, err error) settled {
 				wait = p.RateLimitWait
 			}
 			wait = min(wait, p.MaxRetryAfter)
-			return p.deferOp(ctx, op, now.Add(wait), ReasonRateLimited, re.Error())
+			return st.deferOp(ctx, op, now.Add(wait), ReasonRateLimited, re.Error())
 		case re.Status == http.StatusUnauthorized:
-			return p.deferOp(ctx, op, now.Add(p.AuthWait), ReasonUnauthorized, re.Error())
+			return st.deferOp(ctx, op, now.Add(p.AuthWait), ReasonUnauthorized, re.Error())
 		case re.Status >= 500 || re.Status == http.StatusRequestTimeout:
-			return p.markUnknown(ctx, op, ReasonServerError, re.Error())
+			return st.markUnknown(ctx, op, ReasonServerError, re.Error())
 		case re.Status >= 400 && re.Status < 500:
-			return p.reject(ctx, op, "http_"+strconv.Itoa(re.Status), re.Error())
+			return st.reject(ctx, op, "http_"+strconv.Itoa(re.Status), re.Error())
 		}
-		return p.markUnknown(ctx, op, ReasonTransport, re.Error())
+		return st.markUnknown(ctx, op, ReasonTransport, re.Error())
 	default:
-		return p.markUnknown(ctx, op, ReasonTransport, err.Error())
+		return st.markUnknown(ctx, op, ReasonTransport, err.Error())
 	}
 }
+
+// settler records one remote outcome: the Protocol itself through the
+// generic Ledger, or a planned kind's fenced settlement (linkSettler).
+type settler interface {
+	reject(ctx context.Context, op Op, reason, detail string) settled
+	deferOp(ctx context.Context, op Op, next time.Time, reason, detail string) settled
+	markUnknown(ctx context.Context, op Op, reason, detail string) settled
+}
+
+var _ settler = (*Protocol)(nil)
 
 // settled is the outcome of one ledger step after a remote answer: the op as
 // recorded, or the error that kept it from being recorded.
@@ -451,7 +461,7 @@ func logTransition(op Op) {
 // written, so the op is not uncertain. A 429 or 401 waits as a refused write
 // would, another 4xx is final, and anything else (5xx, transport) is tried
 // again after the capped dispatch retry backoff.
-func (p *Protocol) notSent(ctx context.Context, op Op, ns *NotSentError) settled {
+func (p *Protocol) notSent(ctx context.Context, st settler, op Op, ns *NotSentError) settled {
 	now := p.now()
 	var re *RemoteError
 	if errors.As(ns.Err, &re) {
@@ -461,14 +471,14 @@ func (p *Protocol) notSent(ctx context.Context, op Op, ns *NotSentError) settled
 			if wait <= 0 {
 				wait = p.RateLimitWait
 			}
-			return p.deferOp(ctx, op, now.Add(min(wait, p.MaxRetryAfter)), ReasonRateLimited, re.Error())
+			return st.deferOp(ctx, op, now.Add(min(wait, p.MaxRetryAfter)), ReasonRateLimited, re.Error())
 		case re.Status == http.StatusUnauthorized:
-			return p.deferOp(ctx, op, now.Add(p.AuthWait), ReasonUnauthorized, re.Error())
+			return st.deferOp(ctx, op, now.Add(p.AuthWait), ReasonUnauthorized, re.Error())
 		case re.Status >= 400 && re.Status < 500 && re.Status != http.StatusRequestTimeout:
-			return p.reject(ctx, op, "http_"+strconv.Itoa(re.Status), re.Error())
+			return st.reject(ctx, op, "http_"+strconv.Itoa(re.Status), re.Error())
 		}
 	}
-	return p.deferOp(ctx, op, now.Add(p.retryDelay(max(op.Attempts-1, 0))), ReasonNotSent, ns.Error())
+	return st.deferOp(ctx, op, now.Add(p.retryDelay(max(op.Attempts-1, 0))), ReasonNotSent, ns.Error())
 }
 
 func (p *Protocol) apply(ctx context.Context, kind Kind, op Op, ytID string, adopted bool) settled {
@@ -725,6 +735,11 @@ func (p *Protocol) Resolve(ctx context.Context, id int64, r Resolution) (Result,
 	}
 	if r.Adopted != nil && !r.Applied {
 		return Result{}, fmt.Errorf("%w: adopted goes with applied only", ErrInvalid)
+	}
+	if kind, ok := p.kindFor(op.Kind); ok {
+		if _, planned := kind.(PlannedKind); planned {
+			return p.resolvePlanned(ctx, op, r)
+		}
 	}
 	var got Op
 	if r.Applied {

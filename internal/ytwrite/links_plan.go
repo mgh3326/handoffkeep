@@ -14,6 +14,25 @@ import (
 // that diff, and reads again. Adding a link the read shows present is never
 // planned, so a replan cannot duplicate anything; that is why recovery may
 // mutate, which no other kind does (I5).
+//
+// What a read cannot tell is who made a present link, or whether a request
+// that left was applied (review of PR #425, consult-hk4638-links-root). So
+// the ledger also keeps what each executor did: before each request the
+// executor marks its step in flight (MarkLinkStep), and its settlement
+// records the outcome of that step together with the release of the adds it
+// did not make and the op's state change, in one transaction (SettleLinks).
+// Ownership of an add is closed from that durable record, never from memory:
+// every add after the in-flight step was never sent, and the in-flight add
+// was not made when its outcome is definite. An in-flight add with no
+// recorded outcome (the executor stopped between the request and its
+// settlement) is lost: recovery holds the op for an operator rather than
+// guess (ReasonOutcomeLost).
+//
+// Every ledger write of an executor is fenced (LinkFence): the send by its
+// dispatch attempt, a recovery pass by the epoch its lease issued. A writer
+// that was superseded changes nothing. The fence cannot stop a request a
+// superseded executor already sent; the work deadline, which ends before
+// the lease, bounds that.
 
 // Reasons of the planned path.
 const (
@@ -25,6 +44,11 @@ const (
 	// ReasonRecoverExhausted: LinkRecoverMax recovery plans did not converge;
 	// the op stays remote_unknown for an operator (I9).
 	ReasonRecoverExhausted = "recover_exhausted"
+	// ReasonOutcomeLost: the latest plan's in-flight step is an add whose
+	// outcome was never recorded. A 4xx followed by a person making the same
+	// link and an add that landed read the same, so recovery makes no
+	// request and the op stays remote_unknown for an operator's resolve.
+	ReasonOutcomeLost = "outcome_lost"
 )
 
 // LinkRecoverMax bounds the recovery plans of one op (I9). After it the op
@@ -38,8 +62,10 @@ type PlannedKind interface {
 	// Read reads the target's current links; no mutation. An error is
 	// "nothing sent".
 	Read(ctx context.Context, remote Remote, op Op) (IssueLinksRead, error)
-	// Execute sends plan's diff and returns the mutations it completed.
-	Execute(ctx context.Context, remote Remote, op Op, types LinkTypes, plan LinkPlan) (int, error)
+	// Execute sends plan's diff in ExecuteOrder and returns the mutations it
+	// completed. It calls mark(i) before step i's request and stops, sending
+	// nothing more, when mark fails.
+	Execute(ctx context.Context, remote Remote, op Op, types LinkTypes, plan LinkPlan, mark func(step int) error) (int, error)
 	// Converged reports whether cur shows plan done.
 	Converged(op Op, plan LinkPlan, cur []IssueLink) (bool, error)
 }
@@ -62,12 +88,124 @@ type LinkPlan struct {
 	Kept    []IssueLink `json:"kept"`
 }
 
-// LinkPlanRecord is one stored plan.
+// LinkPlanRecord is one stored plan and what its executor recorded.
 type LinkPlanRecord struct {
 	Attempt   int
 	Recover   int
 	Plan      LinkPlan
 	CreatedAt time.Time
+	// Marked is how many steps of the plan (ExecuteOrder) were marked in
+	// flight; step Marked-1 is the in-flight one. Every step before it
+	// succeeded (the next was marked only after it), none after it was sent.
+	Marked int
+	// Outcome is the in-flight step's outcome as its settlement recorded
+	// it; "" when none was recorded.
+	Outcome StepOutcome
+}
+
+// StepOutcome is what the executor of a plan saw of its in-flight step.
+type StepOutcome string
+
+const (
+	// StepOK: the step succeeded (the plan ran to its end, or stopped
+	// before the next step was sent).
+	StepOK StepOutcome = "ok"
+	// StepDefinite: the step was not applied (refused before sending, or a
+	// 4xx other than 408).
+	StepDefinite StepOutcome = "definite"
+	// StepAmbiguous: the step may have been applied (5xx, 408, transport).
+	StepAmbiguous StepOutcome = "ambiguous"
+)
+
+// LostAdd reports a plan whose in-flight step is an add with no recorded
+// outcome (ReasonOutcomeLost).
+func (r LinkPlanRecord) LostAdd() bool {
+	steps := ExecuteOrder(r.Plan)
+	return r.Outcome == "" && r.Marked > 0 && r.Marked <= len(steps) && steps[r.Marked-1].Add
+}
+
+// UnsentLinkAdds are the adds of r's plan that were not made, by its durable
+// record: every add after the in-flight step (never sent), and the in-flight
+// step's own add when its outcome is definite. Both ledgers close their
+// ownership whenever anything settles or supersedes the plan. An add whose
+// outcome is ok, ambiguous or lost stays owned.
+func UnsentLinkAdds(r LinkPlanRecord) []IssueLink {
+	var out []IssueLink
+	for i, s := range ExecuteOrder(r.Plan) {
+		if s.Add && (i >= r.Marked || (i == r.Marked-1 && r.Outcome == StepDefinite)) {
+			out = append(out, s.Link)
+		}
+	}
+	return out
+}
+
+// LinkFence names the executor a ledger write of a planned kind comes from.
+// Attempt and Recover name its plan (Recover 0: the send of dispatch Attempt).
+// Epoch 0 is that send: the op must still be dispatched in Attempt. Epoch n >
+// 0 is a recovery pass: the op must be remote_unknown in Attempt with
+// reconciles n, the epoch LeaseLinkRecovery issued it. EpochOperator is an
+// operator's resolve: the op must be remote_unknown in Attempt.
+type LinkFence struct {
+	Attempt, Recover, Epoch int
+}
+
+// EpochOperator is the fence epoch of an operator's resolve.
+const EpochOperator = -1
+
+// CheckLinkFence is the fence both ledgers check, under the op's row lock,
+// before any write of a planned kind. A refusal is ErrState.
+func CheckLinkFence(op Op, f LinkFence) error {
+	ok := op.Attempts == f.Attempt
+	switch {
+	case f.Epoch == 0:
+		ok = ok && op.State == StateDispatched
+	case f.Epoch == EpochOperator:
+		ok = ok && op.State == StateRemoteUnknown
+	default:
+		ok = ok && op.State == StateRemoteUnknown && op.Reconciles == f.Epoch
+	}
+	if !ok {
+		return fmt.Errorf("%w: op %d is %s at attempt %d, reconciles %d; the writer holds attempt %d, epoch %d",
+			ErrState, op.ID, op.State, op.Attempts, op.Reconciles, f.Attempt, f.Epoch)
+	}
+	return nil
+}
+
+// LinkSettlement is one settlement of a planned op: the outcome of the
+// executor's in-flight step, and the state the op moves to.
+type LinkSettlement struct {
+	// To is applied, rejected, prepared (defer, from dispatched only) or
+	// remote_unknown (from dispatched: mark unknown; from remote_unknown:
+	// the end of a recovery pass, due again at Next; the lease already
+	// counted the pass).
+	To State
+	// Outcome is the in-flight step's outcome; "" when this executor sent
+	// nothing.
+	Outcome StepOutcome
+	// Read and Cur: for applied, the read that showed the plan done. An
+	// operator's apply has no read.
+	Read bool
+	Cur  []IssueLink
+	// YTID is the applied op's result id (its issue).
+	YTID           string
+	Next           time.Time
+	Reason, Detail string
+}
+
+// CheckLinkSettlement checks that s can move op (already fenced). A refusal is
+// ErrState.
+func CheckLinkSettlement(op Op, s LinkSettlement) error {
+	ok := false
+	switch s.To {
+	case StateApplied, StateRejected, StateRemoteUnknown:
+		ok = op.State == StateDispatched || op.State == StateRemoteUnknown
+	case StatePrepared:
+		ok = op.State == StateDispatched
+	}
+	if !ok {
+		return fmt.Errorf("%w: settle op %d from %s to %s", ErrState, op.ID, op.State, s.To)
+	}
+	return nil
 }
 
 // OwnedLink is one yt_link_owned row: a link hk planned to create, at a
@@ -132,31 +270,37 @@ type IssueLinkRecords struct {
 // anything is read).
 type LinksLedger interface {
 	// PlanLinks plans op id from cur, the links a read of its target just
-	// showed, in one transaction under the op's lane lock: it records
-	// ownership of each link it adds (I6), marks each link it removes as
-	// releasing, records unowned links, closes rows the read shows gone, and
-	// appends the plan (attempt, recover). recover 0 is a send and needs the
-	// op dispatched in that attempt; recover n > 0 is a recovery pass and
-	// needs the op remote_unknown in that attempt with n-1 recovery plans
-	// before it. Anything else is ErrState and changes nothing.
-	PlanLinks(ctx context.Context, now time.Time, id int64, attempt, recover int, cur []IssueLink) (LinkPlan, error)
-	// LatestLinkPlan is op id's newest plan; found is false for none.
+	// showed, in one transaction under the op's lane lock, for the executor
+	// f. It first closes ownership of the latest plan's unsent adds
+	// (UnsentLinkAdds), then records ownership of each link it adds (I6),
+	// marks each link it removes as releasing, records unowned links, closes
+	// rows the read shows gone, and appends the plan (f.Attempt, f.Recover).
+	// f must pass CheckLinkFence and the plan CheckLinkPlanStep; anything
+	// else is ErrState and changes nothing.
+	PlanLinks(ctx context.Context, now time.Time, id int64, f LinkFence, cur []IssueLink) (LinkPlan, error)
+	// LatestLinkPlan is op id's newest plan with its executor's record;
+	// found is false for none.
 	LatestLinkPlan(ctx context.Context, id int64) (rec LinkPlanRecord, found bool, err error)
-	// ApplyLinks applies op id as Apply does (from dispatched or
-	// remote_unknown, ytID its issue) and, in the same transaction, closes
-	// the writer's releasing rows and the issue's unowned rows that cur, the
-	// read that showed the plan done, no longer shows.
-	ApplyLinks(ctx context.Context, now time.Time, id int64, ytID string, cur []IssueLink) (Op, error)
+	// MarkLinkStep records that f's executor is about to send step of its
+	// plan: f must pass CheckLinkFence, its plan must be op id's latest, and
+	// step must be the plan's next (Marked). Else ErrState.
+	MarkLinkStep(ctx context.Context, now time.Time, id int64, f LinkFence, step int) error
+	// SettleLinks settles op id for the executor f in one transaction: it
+	// records s.Outcome as the outcome of the in-flight step when f's plan is
+	// the latest, closes ownership of the latest plan's unsent adds
+	// (UnsentLinkAdds, from the record just written), and moves the op
+	// (CheckLinkSettlement). An applied op with a read also closes the
+	// writer's releasing rows and the issue's unowned rows that s.Cur no
+	// longer shows. f must pass CheckLinkFence, else ErrState and nothing
+	// changes.
+	SettleLinks(ctx context.Context, now time.Time, id int64, f LinkFence, s LinkSettlement) (Op, error)
 	// LeaseLinkRecovery gives one recovery pass of op id exclusive use of it
 	// until until: a compare-and-set that holds only while the op is
-	// remote_unknown, due at or before now, and has made reconciles evidence
-	// searches; it moves the op's due time to until. ok is false when another
+	// remote_unknown, due at or before now, and has reconciles as listed. It
+	// adds one to reconciles (one per pass) and moves the due time to until;
+	// epoch is the new reconciles, the pass's fence. ok is false when another
 	// pass won it or the op moved on; that pass makes no request.
-	LeaseLinkRecovery(ctx context.Context, now time.Time, id int64, reconciles int, until time.Time) (ok bool, err error)
-	// ReleaseUnsentLinks closes the writer's open, unreleased ownership rows
-	// of links from op id's issue: adds that op id planned and that were
-	// definitely not made (released_op_id = id, released_at = now).
-	ReleaseUnsentLinks(ctx context.Context, now time.Time, id int64, links []IssueLink) error
+	LeaseLinkRecovery(ctx context.Context, now time.Time, id int64, reconciles int, until time.Time) (epoch int, ok bool, err error)
 	// LinkRecords reads what the ledger holds about issueID on tenant.
 	LinkRecords(ctx context.Context, tenant, issueID string) (IssueLinkRecords, error)
 }
@@ -352,7 +496,7 @@ func CheckLinkPlanStep(op Op, attempt, recover int, latest LinkPlanRecord, found
 // ClosedByRead is what a read that showed op's plan done closes: the
 // writer's releasing ownership rows whose link cur no longer shows, and the
 // open unowned rows of op's issue that cur no longer shows (ids, ascending
-// as given). ApplyLinks writes both; PlanLinks writes the unowned part (its
+// as given). SettleLinks (applied) writes both; PlanLinks writes the unowned part (its
 // ownership part is PlanIssueLinks's Close).
 func ClosedByRead(op Op, owned []OwnedLink, unowned []UnownedLink, cur []IssueLink) (closeOwned, goneUnowned []int64) {
 	writer, err := LinkWriter(op)

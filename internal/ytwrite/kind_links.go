@@ -325,21 +325,24 @@ func (issueLinks) Read(ctx context.Context, remote Remote, op Op) (IssueLinksRea
 
 // Execute sends the plan's diff, one request per link, in the order I12
 // fixes: subtask removes, subtask adds, the other adds, the other removes, so
-// a re-parent drops the old parent before it adds the new one. It stops at
-// the first error and returns how many mutations it completed; an error after
-// one is a *PartialWriteError.
-func (issueLinks) Execute(ctx context.Context, remote Remote, op Op, types LinkTypes, plan LinkPlan) (int, error) {
+// a re-parent drops the old parent before it adds the new one. Before each
+// request it calls mark with the step's index; a mark that fails stops it
+// with nothing more sent. It stops at the first error and returns how many
+// mutations it completed; an error after one is a *PartialWriteError.
+func (issueLinks) Execute(ctx context.Context, remote Remote, op Op, types LinkTypes, plan LinkPlan, mark func(int) error) (int, error) {
 	lr, ok := remote.(IssueLinksRemote)
 	if !ok {
 		return 0, &RefusedError{Reason: ReasonUnsupportedKind, Detail: "the remote cannot read or write issue links"}
 	}
 	steps := ExecuteOrder(plan)
 	for i, s := range steps {
-		var err error
-		if s.Add {
-			err = lr.AddIssueLink(ctx, op.YTTargetID, types, s.Link)
-		} else {
-			err = lr.RemoveIssueLink(ctx, op.YTTargetID, types, s.Link)
+		err := mark(i)
+		if err == nil {
+			if s.Add {
+				err = lr.AddIssueLink(ctx, op.YTTargetID, types, s.Link)
+			} else {
+				err = lr.RemoveIssueLink(ctx, op.YTTargetID, types, s.Link)
+			}
 		}
 		if err != nil {
 			if i > 0 {
