@@ -90,7 +90,7 @@ var ytIssueLinksStatements = []string{
 		tenant TEXT NOT NULL CHECK(tenant <> '' AND length(tenant) <= 255),
 		issue_id TEXT NOT NULL CHECK(issue_id <> '' AND length(issue_id) <= 64),
 		link_type TEXT NOT NULL CHECK(link_type IN ('subtask','relates','duplicate')),
-		side TEXT NOT NULL CHECK(side IN ('outward','inward','both')),
+		side TEXT NOT NULL CHECK(side <> '' AND length(side) <= 32),
 		other_issue TEXT NOT NULL CHECK(other_issue <> '' AND length(other_issue) <= 64),
 		first_seen_op_id BIGINT NOT NULL CHECK(first_seen_op_id > 0),
 		last_seen_op_id BIGINT NOT NULL CHECK(last_seen_op_id >= first_seen_op_id),
