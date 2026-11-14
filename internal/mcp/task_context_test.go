@@ -49,6 +49,22 @@ func TestTaskContextBundle(t *testing.T) {
 	subject := create("MCP context subject")
 	other := create("MCP context other")
 
+	// An answered request on the subject: record it first because a newer
+	// request supersedes the one before it.
+	second, err := st.RecordDecisionRequest(ctx, subject.ID, "tester", store.DecisionRequestInput{
+		Question: "pick a colour", DefaultAction: "blue",
+		Options: store.DecisionOptions{AllowFree: true, Options: []store.DecisionOption{
+			{Key: "A", Label: "red"}, {Key: "B", Label: "blue"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ResolveDecisionRequest(ctx, subject.ID, "tester", store.DecisionResolveInput{
+		RequestID: second.Request.ID, Kind: store.DecisionRequestAnswered, Option: "B", Responder: "operator",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	// An open structured request on the subject and one on another task; only
 	// the subject's may appear.
 	if _, err := st.RecordDecisionRequest(ctx, subject.ID, "tester", store.DecisionRequestInput{
@@ -61,18 +77,9 @@ func TestTaskContextBundle(t *testing.T) {
 	}
 	if _, err := st.RecordDecisionRequest(ctx, other.ID, "tester", store.DecisionRequestInput{
 		Question: "other task question", DefaultAction: "hold",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	// A second request answered on the subject.
-	second, err := st.RecordDecisionRequest(ctx, subject.ID, "tester", store.DecisionRequestInput{
-		Question: "pick a colour", DefaultAction: "blue",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.ResolveDecisionRequest(ctx, subject.ID, "tester", store.DecisionResolveInput{
-		RequestID: second.Request.ID, Kind: store.DecisionRequestAnswered, Option: "B", Responder: "operator",
+		Options: store.DecisionOptions{AllowFree: true, Options: []store.DecisionOption{
+			{Key: "A", Label: "yes"}, {Key: "B", Label: "no"},
+		}},
 	}); err != nil {
 		t.Fatal(err)
 	}
