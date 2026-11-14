@@ -257,6 +257,70 @@ func TestSettledNamedParentIsClosedByTheChildsTurn(t *testing.T) {
 	}
 }
 
+// A named parent whose own turn is a redelivery cannot do the rollup (PR #385
+// review, hk 4671): its merge of the PR was recorded held while a sub-task was
+// open, and the later event for the same PR names the last sub-task first and
+// the parent after it. The parent's turn then answers from the recorded row and
+// moves nothing, so the settling child's turn must close the parent itself
+// instead of deferring to a turn that does nothing.
+func TestNamedParentWithRecordedMergeIsClosedByTheChildsTurn(t *testing.T) {
+	s, pool := searchTestStore(t)
+	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
+	delivered := flowTask(t, s, pool, "implement", StateReviewing, true)
+	last := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setParent(t, s, delivered, parent)
+	setParent(t, s, last, parent)
+
+	pr := testPR(4671)
+	first := send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: parent.ID, Tasks: []int64{delivered.ID}})
+	if first.Applied || !strings.Contains(first.Reason, "sub-tasks") {
+		t.Fatalf("first event: parent %+v, want its merge held on the open sub-task", first)
+	}
+	if got := stateOf(t, s, delivered.ID).State; got != StateMerged {
+		t.Fatalf("delivered sub-task: %s, want merged", got)
+	}
+	if rows := sourceRows(t, s, parent.ID, SourceMergewakeMerge); len(rows) != 1 || rows[0].Applied {
+		t.Fatalf("parent merge rows %+v, want one held row", rows)
+	}
+
+	res := send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: last.ID, Tasks: []int64{parent.ID}})
+	if len(res.Tasks) != 1 || !res.Tasks[0].Redelivered {
+		t.Fatalf("the parent's own turn: %+v, want a redelivery", res.Tasks)
+	}
+	if got := stateOf(t, s, last.ID).State; got != StateMerged {
+		t.Fatalf("last sub-task: %s, want merged", got)
+	}
+	got := stateOf(t, s, parent.ID)
+	if got.State != StateMerged || got.Refs.PR != pr {
+		t.Fatalf("parent after every sub-task settled: state=%s refs.pr=%q, want merged on %s", got.State, got.Refs.PR, pr)
+	}
+}
+
+// The deploy a merge fires in the same turn has the same rule: when the
+// parent's merge row exists, the settling child deploys and closes the parent
+// itself, and the parent ends deployed with its sub-tasks.
+func TestNamedParentWithRecordedMergeIsDeployedByTheChildsTurn(t *testing.T) {
+	s, pool := searchTestStore(t)
+	parent := flowTask(t, s, pool, "implement", StateBacklog, false)
+	delivered := flowTask(t, s, pool, "implement", StateReviewing, true)
+	last := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setParent(t, s, delivered, parent)
+	setParent(t, s, last, parent)
+
+	pr := testPR(4672)
+	putDeploy(t, s, "deploy/svc/20261115T010000Z", "svc", "success", []string{pr})
+	send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: parent.ID, Tasks: []int64{delivered.ID}})
+	if got := stateOf(t, s, parent.ID).State; got != StateBacklog {
+		t.Fatalf("parent after the first event: %s, want backlog (held)", got)
+	}
+	send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: last.ID, Tasks: []int64{parent.ID}})
+	for name, id := range map[string]int64{"delivered": delivered.ID, "last": last.ID, "parent": parent.ID} {
+		if got := stateOf(t, s, id).State; got != StateDeployed {
+			t.Fatalf("%s after the deploying merge: %s, want deployed", name, got)
+		}
+	}
+}
+
 // TestRelandIsJudgedByOpenTime (PR #331 review round 2): a PR opened before
 // the revert merged does not reland the reverted piece, even when its row was
 // written after the revert PR's row.
