@@ -173,10 +173,12 @@ package store
 //     yt_comment_canary and youtrack_projects rows) and insert new rows of
 //     yt_write_ops, yt_comment_write_links and yt_entity_map. The comment
 //     worker's catch-up (CatchUpYTComments, hk 3897) makes the same reads and
-//     inserts for a committed comment, with the lane lock as the first lock
-//     of its transaction and no comment lock. A pass first tries (never
-//     waits for) the session-scoped `youtrack sync` lock, so it cannot wait
-//     in a cycle with a sync run. RemoveYTCommentCanary
+//     inserts for a committed comment, in its own transaction and with no
+//     comment lock: the comments authority row FOR SHARE first (hk 4489), then
+//     the lane lock. A pass first tries (never waits for) the legacy sync lock
+//     8241873404, which since the sync's removal (hk 4426) only an authority
+//     switch also takes, so it cannot wait in a cycle with a switch.
+//     RemoveYTCommentCanary
 //     takes the task's lane lock first and then deletes its yt_comment_canary
 //     row. The two writers that give an issue to a task, AddYTCommentCanary
 //     and AddYTTaskBinding (yt_task_bindings.go, hk 3810), take the issue
@@ -196,8 +198,16 @@ package store
 //     target (hk 4263, claimYTCommentTargetTx) before it updates its own op
 //     row; the enqueue that queued it (queueYTCommentTx) makes the same plain
 //     reads under the lane lock it already holds.
+//     The writer that takes an issue away, UnbindYTTaskBinding
+//     (yt_binding_history.go, hk 4490), takes the same three locks in the same
+//     order, then reads the comments authority row FOR SHARE (as prepareYTOpTx
+//     does after its lane lock), rejects the task's prepared yt_write_ops rows
+//     (ops of the task's lane, which no other holder of that lane lock can
+//     change meanwhile), deletes the task's yt_task_bindings row and yt_issue_intents row and
+//     inserts a yt_binding_history row. AddYTTaskBinding inserts its history row the same
+//     way; nothing else locks a history row.
 //     No cycle, lock by lock:
-//       - The ownership lock: only those two writers take it, always first
+//       - The ownership lock: only those three writers take it, always first
 //         and while holding nothing, so no transaction waits for it while
 //         holding another lock.
 //       - The task row: an issue writer waits for it holding only the
@@ -266,8 +276,9 @@ package store
 //     3942, 4318): the task creators above, and SetTaskProject after its
 //     level-1 lock and FOR UPDATE on the task row (task row before lane
 //     lock, as AddYTTaskBinding), take the task's lane lock, then read
-//     yt_issue_intents, the ownership rows and youtrack_projects without a
-//     lock, then insert its yt_write_ops row and insert or delete its
+//     yt_issue_intents, the ownership rows (the task's latest
+//     yt_binding_history row among them, hk 4490) and youtrack_projects
+//     without a lock, then insert its yt_write_ops row and insert or delete its
 //     yt_issue_intents row (no foreign key, nobody else locks it).
 //     PrepareMappedYTIssues takes the lane lock as the first lock of each
 //     task's transaction (as backfillYTIssue), then reads the task row
@@ -327,7 +338,8 @@ package store
 //     rollback to hk skips it. Then it locks yt_authority rows FOR UPDATE in
 //     kind order, reads yt_write_ops, yt_feed_cursors and sync_log without a
 //     lock and updates only its locked rows. Every op preparation
-//     (prepareYTOpTx, after its lane lock) and the comment writers and the
+//     (prepareYTOpTx, after its lane lock), UnbindYTTaskBinding (the comments
+//     row, after its lane lock) and the comment writers and the
 //     audit enqueue (after the comment's task KEY SHARE, before the lane
 //     lock; ReplyDots after its task row) read their kind's row FOR SHARE,
 //     first inserting it ON CONFLICT DO NOTHING if it is missing
@@ -336,6 +348,37 @@ package store
 //     those rows, and a FOR SHARE holder never waits for the sync lock (sync,
 //     adopt and the comment catch-up only try it, before any row lock), so
 //     no cycle closes.
+//
+//   - Held-op recovery (RecoverHeldYTOps, yt_binding_recovery.go, hk 4491).
+//     Its candidate scan is one statement and locks nothing. It then decides
+//     each candidate in its own transaction: the task's lane lock first, then
+//     the op row FOR UPDATE, then the kind's authority row FOR SHARE
+//     (ytAuthorityShareTx, as op preparation does after its lane lock), then
+//     plain reads of yt_task_bindings and the kind gates, then one UPDATE of
+//     its op row. It holds one lane lock and takes no task row, level 1-5
+//     lock or ownership lock. A switch holds only authority rows and waits
+//     for nothing a recovery transaction holds (it reads yt_write_ops
+//     without a lock), and the alert pass holds op rows FOR SHARE and waits
+//     for no lane or authority row, so neither can close a cycle with it. A
+//     switch that waits for the authority row counts the op as resolved once
+//     the recovery commits, and a recovery that starts after a switch sees
+//     youtrack and keeps the op.
+//
+//   - The automatic binder (yt_binding_binder.go, yt_binding_publish.go,
+//     hk 4492). Its candidate scan takes the yt_binding_cursor row FOR UPDATE,
+//     reads task_comments, yt_task_bindings and yt_issue_intents without a
+//     lock, and inserts new yt_binding_intents rows. Its publication
+//     (PublishYTAutoBinding) takes AddYTTaskBinding's locks in the same order,
+//     then the comments authority row FOR SHARE as UnbindYTTaskBinding does,
+//     and inside the lane lock it already holds prepares the comment ops of
+//     the evidence it copied (yt_write_ops, yt_comment_write_links,
+//     yt_entity_map) as ytCommentOnOpTx does. Settling an intent is one UPDATE
+//     or DELETE of its own row, and YTBindingExcluded one plain read of
+//     yt_binding_history. The ownership lock is held for the whole publication
+//     and bounds the copied comments (YTAutoBindCopyMax); no holder takes a
+//     task row, a lane lock, the ownership lock or a level 1-5 lock beyond
+//     those AddYTTaskBinding already takes, and no other transaction locks a
+//     cursor or intent row, so the binder adds no wait cycle.
 //
 //   - The YouTrack sync's single-run guard is a session-scoped
 //     pg_try_advisory_lock(8241873404) on its own pooled connection. It is

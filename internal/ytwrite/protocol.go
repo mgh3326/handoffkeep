@@ -63,8 +63,9 @@ type Config struct {
 	MaxRetryAfter time.Duration
 	// AuthWait is the wait after a 401, which needs a repaired token (5m).
 	AuthWait time.Duration
-	// ReconcileBase and ReconcileMax bound the doubling wait between evidence
-	// searches for one remote_unknown op (5s, 5m).
+	// ReconcileBase and ReconcileMax bound the initial doubling wait between
+	// evidence searches for one remote_unknown op (5s, 5m). After 50 searches,
+	// the protocol retries hourly, then daily after 24 more evidence searches.
 	ReconcileBase time.Duration
 	ReconcileMax  time.Duration
 	// BlockedWait is the retry hint for an op queued behind an earlier one (5s).
@@ -427,7 +428,7 @@ func logTransition(op Op) {
 // notSent records a read that failed before the write left: nothing was
 // written, so the op is not uncertain. A 429 or 401 waits as a refused write
 // would, another 4xx is final, and anything else (5xx, transport) is tried
-// again after the reconcile backoff.
+// again after the capped dispatch retry backoff.
 func (p *Protocol) notSent(ctx context.Context, op Op, ns *NotSentError) settled {
 	now := p.now()
 	var re *RemoteError
@@ -445,7 +446,7 @@ func (p *Protocol) notSent(ctx context.Context, op Op, ns *NotSentError) settled
 			return p.reject(ctx, op, "http_"+strconv.Itoa(re.Status), re.Error())
 		}
 	}
-	return p.deferOp(ctx, op, now.Add(p.reconcileDelay(max(op.Attempts-1, 0))), ReasonNotSent, ns.Error())
+	return p.deferOp(ctx, op, now.Add(p.retryDelay(max(op.Attempts-1, 0))), ReasonNotSent, ns.Error())
 }
 
 func (p *Protocol) apply(ctx context.Context, kind Kind, op Op, ytID string, adopted bool) settled {
@@ -481,8 +482,20 @@ func (p *Protocol) markUnknown(ctx context.Context, op Op, reason, detail string
 	return settled{got, err}
 }
 
-// reconcileDelay is the wait before the n-th evidence search of an op.
+// reconcileDelay is the wait after the n-th evidence search of an op.
 func (p *Protocol) reconcileDelay(n int) time.Duration {
+	if n >= 74 {
+		return 24 * time.Hour
+	}
+	if n >= 50 {
+		return time.Hour
+	}
+	return p.retryDelay(n)
+}
+
+// retryDelay is the capped exponential wait used for dispatch retries and as
+// the initial wait before evidence-search thresholds take effect.
+func (p *Protocol) retryDelay(n int) time.Duration {
 	d := p.ReconcileBase
 	for i := 0; i < n && d < p.ReconcileMax; i++ {
 		d *= 2
@@ -571,15 +584,24 @@ func (p *Protocol) Drive(ctx context.Context, limit int) (DriveStats, error) {
 }
 
 // reconcile searches the op's target for its exact rendered text through the
-// op's kind. One exact match is positive evidence and applies the op. Anything
-// else leaves it remote_unknown: no match is not proof the write did not
-// happen, so there is no automatic re-create. The decision is the same for
-// every kind; a kind only reports what it found (Evidence).
+// op's kind. One exact match is positive evidence and applies the op; one
+// match the kind reports as the thing Send would have adopted
+// (Evidence.Adopted) is not applied: nothing bounds when a create the op's
+// dispatch may have sent lands, and an applied op is never searched again, so
+// a late create would be a second issue no one sees (review of PR #383). It
+// stays remote_unknown / adoption_unconfirmed, the candidate named in the
+// detail, for an operator's resolve --adopted. Anything else leaves it
+// remote_unknown: no match is not proof
+// the write did not happen, so there is no automatic re-create. The decision
+// is the same for every kind; a kind only reports what it found (Evidence).
 func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err error) {
 	var wait time.Duration
 	touch := func(reason, detail string) (bool, error) {
 		now := p.now()
 		delay := max(p.reconcileDelay(op.Reconciles+1), min(wait, p.MaxRetryAfter))
+		if op.Reconciles >= 49 {
+			log.Printf("ytwrite.reconcile_warning op_id=%d reconciles=%d next_after=%q reason=%q", op.ID, op.Reconciles+1, delay, reason)
+		}
 		got, terr := p.Ledger.TouchUnknown(ctx, now, op.ID, now.Add(delay), reason, detail)
 		if terr == nil {
 			logTransition(got)
@@ -603,6 +625,9 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	}
 	switch {
 	case len(ev.Matches) == 1 && ev.Deleted == 0 && ev.Mismatched == 0 && resultIDRE.MatchString(ev.Matches[0]):
+		if ev.Adopted {
+			return touch(ReasonAdoptionUnconfirmed, ev.Matches[0]+" is the task's unmarked issue, the one Send adopts; a create this op sent may still land, so an operator resolves it (--applied "+ev.Matches[0]+" --adopted)")
+		}
 		s := p.apply(ctx, kind, op, ev.Matches[0], false)
 		if s.err == nil {
 			logTransition(s.op)

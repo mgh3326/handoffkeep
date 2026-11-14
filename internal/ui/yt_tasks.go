@@ -162,6 +162,7 @@ func (s *ytTaskSource) fetch(ctx context.Context, now time.Time) (*ytSnapshot, e
 	}
 	query := youtrack.TaskIssuesQuery(names)
 	var issues []youtrack.Issue
+	seen := map[string]bool{}
 	for skip := 0; ; skip += youtrack.TaskIssuePageSize {
 		page, err := s.issues.ListTaskIssues(ctx, query, skip, youtrack.TaskIssuePageSize)
 		if err != nil {
@@ -173,6 +174,18 @@ func (s *ytTaskSource) fetch(ctx context.Context, now time.Time) (*ytSnapshot, e
 		}
 		if len(page) < youtrack.TaskIssuePageSize {
 			break
+		}
+		// A full page that adds no new issue ID means the server ignored
+		// $skip; without this the loop would page forever.
+		fresh := 0
+		for _, issue := range page {
+			if !seen[issue.ID] {
+				seen[issue.ID] = true
+				fresh++
+			}
+		}
+		if fresh == 0 {
+			return nil, fmt.Errorf("%w: task issue page at offset %d repeated earlier issues", errYouTrackRead, skip)
 		}
 	}
 	links, err := s.store.YTIssueTaskIDs(ctx, s.tenant)

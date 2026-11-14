@@ -34,7 +34,10 @@ import (
 //     document's index: exception_not_updated, no op (D4, no Y5c now).
 //
 // The ops ride the document's lane (document:<id>) under principal
-// hk:documents. No parent is set (hk 3995 has no settled rule).
+// hk:documents. A new article goes under a parent (ytArticleParentTx): a
+// decision whose body has an `amends: policy/<key>` line under that policy
+// document's article; any other document whose key has a '/' under its
+// family's root (the key's first segment); the rest under none.
 
 // YTDocsMode gates the document articles (HANDOFFKEEP_YT_DOCS_MODE).
 type YTDocsMode string
@@ -127,6 +130,39 @@ func ytArticleCreateGateSQL(s *Store) string {
 	}
 	return `o.entity_kind = 'document' AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b
 		WHERE b.document_id::text = o.entity_id AND b.op_id IS DISTINCT FROM o.id)`
+}
+
+// claimYTArticleCreateTx re-checks the source document while Claim holds its
+// document lane lock. A prepared create is rejected before dispatch if its
+// document was deleted or moved out of the article scope in the meantime.
+func claimYTArticleCreateTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (reject, detail string, err error) {
+	if op.Kind != ytwrite.KindArticleCreate || op.Principal != YTDocsPrincipal {
+		return "", "", nil
+	}
+	id, parseErr := strconv.ParseInt(op.EntityID, 10, 64)
+	if parseErr != nil || id < 1 || op.EntityKind != ytwrite.ArticleEntity {
+		return ytwrite.ReasonOutOfScope, "article_create is not on a document lane", nil
+	}
+	var key string
+	var taskID *int64
+	err = tx.QueryRow(ctx, `SELECT key, task_id FROM documents WHERE id=$1 FOR SHARE`, id).Scan(&key, &taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ytwrite.ReasonOutOfScope, "document was deleted before article_create dispatch", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if !ytArticleInScope(key, taskIDValue(taskID)) {
+		return ytwrite.ReasonOutOfScope, "document moved out of article scope before dispatch", nil
+	}
+	return "", "", nil
+}
+
+func taskIDValue(id *int64) int64 {
+	if id == nil {
+		return 0
+	}
+	return *id
 }
 
 // ytArticleUpdateGateSQL is the article_update gate: mode on, and o's
@@ -274,6 +310,66 @@ func readYTArticleRow(ctx context.Context, tx pgx.Tx, id int64) (*ytArticleRow, 
 	return r, nil
 }
 
+// ytArticleAmends is the policy document a decision body names in its
+// `amends:` line ("" for none). The first such line counts, and only a value
+// that is a policy/ key does; other documents name none.
+func ytArticleAmends(key, body string) string {
+	if !strings.HasPrefix(key, "decision/") {
+		return ""
+	}
+	for _, line := range strings.Split(body, "\n") {
+		v, ok := strings.CutPrefix(strings.TrimSpace(line), "amends:")
+		if !ok {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		if strings.HasPrefix(v, "policy/") && validDocKey(v) {
+			return v
+		}
+		return ""
+	}
+	return ""
+}
+
+// ytArticleFamily is a document key's family: its first segment, when the key
+// has a '/' and the segment is a valid family name. A segment that is not
+// gets no parent and a log line: a create must not be refused for its key.
+func ytArticleFamily(id int64, key string) string {
+	first, _, found := strings.Cut(key, "/")
+	if !found {
+		return ""
+	}
+	if !ytwrite.ValidFamily(first) {
+		log.Printf("ytwrite.article_family_skipped document_id=%d family=%q", id, first)
+		return ""
+	}
+	return first
+}
+
+// ytArticleParentTx is the parent of a new document's article: the article of
+// the policy document its body amends (ytArticleAmends), else its family root
+// (ytArticleFamily). pending is true while that policy has no article on
+// tenant: the create waits, prepares no op, and the catch-up retries it.
+func ytArticleParentTx(ctx context.Context, tx pgx.Tx, tenant string, id int64, doc YTArticleCandidate, body string) (family, articleID string, pending bool, err error) {
+	policy := ytArticleAmends(doc.Key, body)
+	if policy == "" {
+		return ytArticleFamily(id, doc.Key), "", false, nil
+	}
+	var bt, article string
+	err = tx.QueryRow(ctx, `SELECT b.tenant, b.article_id FROM documents d JOIN yt_article_bindings b ON b.document_id = d.id WHERE d.key = $1`, policy).Scan(&bt, &article)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	if bt != tenant || article == "" {
+		log.Printf("ytwrite.article_parent_pending document_id=%d policy=%q", id, policy)
+		return "", "", true, nil
+	}
+	return "", article, false, nil
+}
+
 // ytArticleOutcome is what prepareYTArticleTx did with one document.
 type ytArticleOutcome string
 
@@ -289,6 +385,7 @@ const (
 	ytArticleCreateRejected  ytArticleOutcome = "create_rejected"
 	ytArticleCreatePending   ytArticleOutcome = "create_exists"
 	ytArticleNoProject       ytArticleOutcome = "no_project"
+	ytArticleParentPending   ytArticleOutcome = "parent_pending"
 	ytArticleInvalid         ytArticleOutcome = "invalid"
 	// ytArticleSuperseded: documents are canonical in YouTrack and the
 	// document's body is the post-switch baseline its article superseded.
@@ -383,6 +480,16 @@ func prepareYTArticleTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDocsG
 		// The legacy sync wrote this document's article: the create adopts
 		// it once verified, and never makes a second one.
 		req.LegacyArticleID, req.LegacyProjectID, req.LegacyMarker = r.legacyArticle, r.legacyProject, ytwrite.LegacyDocMarker(r.doc.Key)
+	}
+	if r.legacyArticle == "" {
+		family, parent, pending, err := ytArticleParentTx(ctx, tx, g.tenant, id, r.doc, r.body)
+		if err != nil {
+			return "", err
+		}
+		if pending {
+			return ytArticleParentPending, nil
+		}
+		req.ParentFamily, req.ParentArticleID = family, parent
 	}
 	if r.retryOf > 0 {
 		// Its only creates were refused before they were sent: replace the
@@ -485,7 +592,10 @@ func ytDocsHandler(s *Store, now time.Time) FeedHandler {
 // would contradict a mapping hk already keeps: the document bound or mapped
 // to another article, or the article bound or mapped to another document.
 // It returns the conflict ("" when none) and logs it as
-// ytwrite.binding_conflict.
+// ytwrite.binding_conflict. Each lookup returns at most one row: a map row
+// the previous release wrote with no tenant can sit beside this tenant's row
+// for the same article (the unique index is per tenant), and either one is a
+// conflict, never a "more than one row" error that fails the apply.
 func ytArticleConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string) (string, error) {
 	id, err := strconv.ParseInt(op.EntityID, 10, 64)
 	if err != nil || id < 1 || op.EntityKind != ytwrite.ArticleEntity {
@@ -500,7 +610,8 @@ func ytArticleConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID str
 		(SELECT 'document is mapped to article '||yt_id FROM yt_entity_map
 			WHERE entity_kind='document' AND hk_key=$4 AND yt_id<>$3),
 		(SELECT 'article is mapped to document '||hk_key FROM yt_entity_map
-			WHERE entity_kind='document' AND yt_id=$3 AND hk_key<>$4),
+			WHERE entity_kind='document' AND (tenant=$2 OR tenant='') AND yt_id=$3 AND hk_key<>$4
+			ORDER BY hk_key LIMIT 1),
 		'')`, id, op.Tenant, ytID, op.EntityID).Scan(&detail)
 	if err != nil {
 		return "", err

@@ -94,9 +94,9 @@ func bindYTIssueApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.Op,
 // ytIssueGateSQL is the issue_create gate (ytAdmitSQL): mode on, and o's task
 // has no binding or a binding this op published. A binding from the import
 // (or another op) holds the op: the task already has its issue. Mode off
-// admits nothing. Issue mode assumes the legacy `youtrack sync` refuses to
-// write while it is on (hk 3907) and the import has ended (D3); nothing here
-// coordinates with them (docs/youtrack-write-protocol.md).
+// admits nothing. The legacy `youtrack sync` and the import are gone (hk
+// 4426), so the binding row is the whole coordination
+// (docs/youtrack-write-protocol.md).
 func ytIssueGateSQL(s *Store) string {
 	if mode, _ := s.ytIssuesNow(); mode != YTIssuesOn {
 		return `FALSE`
@@ -373,13 +373,19 @@ func (s *Store) prepareYTIssueIntent(ctx context.Context, tenant string, taskID 
 
 // ytTaskHasIssueOwnershipTx mirrors the task ownership evidence used by
 // issue backfill. Any of these records means an issue already belongs to the
-// task, even when the canonical binding has not been published yet.
+// task, even when the canonical binding has not been published yet. So does an
+// operator unbind (hk 4490): a task whose latest yt_binding_history row is
+// 'unbound' is the operator's until they bind it again, and no automatic
+// issue_create op is prepared for it, on create, on a project change or by the
+// backfill. The callers hold the task's lane lock, which the unbind holds when
+// it appends that row.
 func ytTaskHasIssueOwnershipTx(ctx context.Context, q ytRowQuerier, taskID int64) (bool, error) {
 	var owned bool
 	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1)
 		OR EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$2)
 		OR EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=$1)
-		OR EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack')`,
+		OR EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack')
+		OR coalesce((SELECT action FROM yt_binding_history WHERE task_id=$1 ORDER BY id DESC LIMIT 1), '') = '`+ytBindingActionUnbound+`'`,
 		taskID, strconv.FormatInt(taskID, 10)).Scan(&owned)
 	return owned, err
 }
@@ -391,7 +397,10 @@ func ytTaskHasIssueOwnershipTx(ctx context.Context, q ytRowQuerier, taskID int64
 // giving the issue to another task, or the task's YouTrack origin naming
 // another issue. It returns the conflict ("" when none)
 // and logs it as ytwrite.binding_conflict. A binding or map row naming this
-// same issue is no conflict. Nothing is written.
+// same issue is no conflict, and neither is a map row on another tenant: a
+// YouTrack id is the tenant's (hk 3912), and a row with no tenant (one a
+// release that predates the column wrote) counts as this one's. Nothing is
+// written.
 func ytIssueConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string) (string, error) {
 	taskID, err := strconv.ParseInt(op.EntityID, 10, 64)
 	if err != nil || taskID < 1 || op.EntityKind != "task" {
@@ -406,7 +415,7 @@ func ytIssueConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID strin
 		(SELECT 'task is mapped to issue '||yt_id FROM yt_entity_map
 			WHERE entity_kind='task' AND hk_key=$4 AND yt_id<>$3),
 		(SELECT 'issue is mapped to task '||hk_key FROM yt_entity_map
-			WHERE entity_kind='task' AND yt_id=$3 AND hk_key<>$4),
+			WHERE entity_kind='task' AND (tenant=$2 OR tenant='') AND yt_id=$3 AND hk_key<>$4),
 		(SELECT 'task''s YouTrack origin names issue '||coalesce(external_id,'')||' on '||coalesce(tenant,'') FROM task_origins
 			WHERE task_id=$1 AND provider='youtrack' AND (coalesce(external_id,'')<>$3 OR (coalesce(tenant,'')<>'' AND tenant<>$2))),
 		'')`, taskID, op.Tenant, ytID, op.EntityID).Scan(&detail)

@@ -24,12 +24,28 @@ import (
 )
 
 const (
-	DefaultMaxBytes         int64 = 50 << 20
-	DefaultStorageCap       int64 = 20_000_000_000
-	DefaultPutCap           int64 = 800000
-	DefaultGetCap           int64 = 8000000
-	DefaultStagingCap       int64 = 1 << 30
-	DefaultStagingClientCap int64 = 256 << 20
+	// OCI Object Storage accepts a single PutObject up to 50 GiB. Direct
+	// uploads use that path; multipart is unnecessary at the service ceiling.
+	DefaultMaxBytes int64 = 50 << 30
+	// BufferedCompletionMaxBytes bounds the completion path that holds the
+	// verified object in memory: every buffered Put, and the direct-upload
+	// completion of a text type, whose secret scan needs the whole body.
+	// Larger non-text uploads complete by streaming (hk 4466): size and
+	// sha256 are checked while the staged object is copied to a private
+	// holding object, then promoted to the content key without the body
+	// entering memory.
+	BufferedCompletionMaxBytes int64 = 256 << 20
+	// DefaultStorageCap is the account storage fuse; its OCI allowance basis
+	// is still to confirm.
+	DefaultStorageCap int64 = 20_000_000_000 // OCI allowance — to confirm
+	DefaultPutCap     int64 = 800000
+	DefaultGetCap     int64 = 8000000
+	// Staging pending bytes count against the storage fuse at begin, so the
+	// staging budget can never admit more than could commit. The global cap
+	// is that fuse; the per-client cap is a quarter of it, so several clients
+	// can hold pending uploads at once and none can monopolize the budget.
+	DefaultStagingCap       int64 = DefaultStorageCap
+	DefaultStagingClientCap int64 = DefaultStorageCap / 4
 )
 
 // DefaultMIMEAllow is the MIME allowlist used when HK_ATTACH_MIME_ALLOW is
@@ -128,6 +144,9 @@ func ConfigFromPrefix(prefix string) (Config, bool, error) {
 	if c.MaxBytes, e = envInt("HK_ATTACH_MAX_BYTES", DefaultMaxBytes); e != nil {
 		return c, false, e
 	}
+	if c.MaxBytes > DefaultMaxBytes {
+		return c, false, fmt.Errorf("HK_ATTACH_MAX_BYTES cannot exceed OCI PutObject's 50 GiB limit")
+	}
 	if c.StorageCap, e = envInt("HK_ATTACH_STORAGE_CAP_BYTES", DefaultStorageCap); e != nil {
 		return c, false, e
 	}
@@ -183,6 +202,9 @@ type ObjectStore interface {
 	Head(context.Context, string) (ObjectInfo, error)
 	Delete(context.Context, string) error
 	List(context.Context, string) ([]ObjectInfo, error)
+	// Copy publishes src to dst server-side, so dst appears atomically with
+	// the bytes src held when the copy ran. Callers verify src before copying.
+	Copy(context.Context, string, string) error
 }
 type minioStore struct {
 	client *minio.Client
@@ -240,6 +262,13 @@ func (m minioStore) Head(ctx context.Context, key string) (ObjectInfo, error) {
 }
 func (m minioStore) Delete(ctx context.Context, key string) error {
 	return m.client.RemoveObject(ctx, m.bucket, key, minio.RemoveObjectOptions{})
+}
+func (m minioStore) Copy(ctx context.Context, src, dst string) error {
+	// ComposeObject delegates to a single CopyObject at or below 5 GiB and
+	// switches to UploadPartCopy above it, so promotion works across the whole
+	// DefaultMaxBytes range; a single-request CopyObject would fail past 5 GiB.
+	_, err := m.client.ComposeObject(ctx, minio.CopyDestOptions{Bucket: m.bucket, Object: dst}, minio.CopySrcOptions{Bucket: m.bucket, Object: src})
+	return err
 }
 func (m minioStore) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
 	lctx, cancel := context.WithCancel(ctx)
@@ -299,16 +328,23 @@ func (m *Manager) now() time.Time {
 // AttachmentDB keeps the object transport testable without a live S3 account.
 type AttachmentDB interface {
 	GetAttachment(context.Context, string) (store.Attachment, bool, error)
-	CheckAttachmentCapacity(context.Context, int64, int64, int64) error
+	CheckAttachmentCapacity(context.Context, int64, int64, int64, string) error
 	PutAttachment(context.Context, store.Attachment, int64, int64) (store.Attachment, bool, error)
+	// FinalizeAttachmentUpload commits a completing upload's verified bytes in
+	// one transaction: metadata, refs, fuse charge and the done transition
+	// that consumes its reservation.
+	FinalizeAttachmentUpload(context.Context, string, string, store.Attachment, int64, int64) (store.Attachment, bool, error)
 	RecordAttachmentGet(context.Context, string, int64) error
 	ListAttachments(context.Context, string, string, int) ([]store.Attachment, error)
 	AttachmentUsage(context.Context) (store.AttachmentUsage, error)
-	ReserveAttachmentUpload(ctx context.Context, u store.AttachmentUpload, stagingCap, clientCap int64) error
+	ReserveAttachmentUpload(ctx context.Context, u store.AttachmentUpload, stagingCap, clientCap, storageCap int64) error
 	ListUnreleasedAttachmentUploads(ctx context.Context, createdBefore time.Time, limit int) ([]store.AttachmentUpload, error)
 	MarkAttachmentUploadStagingDeleted(ctx context.Context, id string, now time.Time) error
 	GetAttachmentUpload(context.Context, string) (store.AttachmentUpload, bool, error)
 	TransitionAttachmentUpload(ctx context.Context, id, from, to, reason string, now time.Time) (bool, error)
+	ClaimAttachmentUpload(ctx context.Context, id, nonce string, now time.Time) (bool, error)
+	TransitionAttachmentUploadClaim(ctx context.Context, id, nonce, to, reason string, now time.Time) (bool, error)
+	TouchAttachmentUploadClaim(ctx context.Context, id, nonce string, now time.Time) (bool, error)
 }
 
 type MigrationDB interface {
@@ -469,6 +505,29 @@ func validate(c Config, name, declared string, body []byte) (string, error) {
 	}
 	return declared, nil
 }
+
+// validateStreamed is validate for a body that stays in the object store:
+// the same name, allowlist and sniff rules over the captured head, without
+// the size bound (the stream counted it) and without the secret scan, which
+// only text types need — a text upload above BufferedCompletionMaxBytes is
+// refused before it is streamed, so isText here is unreachable and refused
+// as a mime mismatch rather than scanned.
+func validateStreamed(c Config, name, declared string, head []byte) (string, error) {
+	if err := checkName(name); err != nil {
+		return "", err
+	}
+	sniff := strings.ToLower(strings.TrimSpace(strings.Split(http.DetectContentType(head), ";")[0]))
+	declared = strings.ToLower(strings.TrimSpace(strings.Split(declared, ";")[0]))
+	if declared == "" {
+		declared = sniff
+	}
+	// Every non-text allowlisted type requires the sniff to equal the
+	// declaration (validate's image/pdf and fallthrough branches agree).
+	if !c.Allow[declared] || isText(declared) || sniff != declared {
+		return "", ErrMIME
+	}
+	return declared, nil
+}
 func (m *Manager) Put(ctx context.Context, client, name, mime, ref string, body []byte) (store.Attachment, bool, error) {
 	if !m.Enabled {
 		return store.Attachment{}, false, ErrDisabled
@@ -476,41 +535,64 @@ func (m *Manager) Put(ctx context.Context, client, name, mime, ref string, body 
 	return m.putBytes(ctx, client, name, mime, ref, body)
 }
 
-// putBytes is the one store path for a body: validate, dedupe, capacity, object
-// put, then the metadata row. Put and a completed direct upload both call it.
+// putBytes is the buffered store path for a body: validate, then putVerified.
 func (m *Manager) putBytes(ctx context.Context, client, name, mime, ref string, body []byte) (store.Attachment, bool, error) {
-	if !store.ValidActor(client) {
-		return store.Attachment{}, false, errors.New("invalid attachment created_by")
-	}
 	mime, e := validate(m.Config, name, mime, body)
-	if e != nil {
-		return store.Attachment{}, false, e
-	}
-	kind, id, e := ParseRef(ref)
 	if e != nil {
 		return store.Attachment{}, false, e
 	}
 	sum := sha256.Sum256(body)
 	sha := hex.EncodeToString(sum[:])
+	k := key(sha)
+	return m.putVerified(ctx, client, name, mime, ref, sha, int64(len(body)), "", false, nil, func(ctx context.Context) error {
+		return m.Objects.Put(ctx, k, bytes.NewReader(body), int64(len(body)), mime)
+	})
+}
+
+// putVerified is the one store path for content whose bytes are already
+// verified: dedupe, the capacity preflight, the content-key write (skipped
+// when the object already exists unless alwaysWrite), then the metadata
+// commit. write performs the object put for key(sha); a completed direct
+// upload streams its verified holding object through it instead of holding
+// the body, and passes alwaysWrite so a retry re-publishes and re-verifies
+// rather than Stat-adopting whatever a failed attempt left behind.
+// exceptUpload names the completing upload being committed so its
+// reservation is not counted twice; commit is the metadata write —
+// PutAttachment for a plain buffered put (nil selects it),
+// FinalizeAttachmentUpload for a direct upload.
+func (m *Manager) putVerified(ctx context.Context, client, name, mime, ref, sha string, size int64, exceptUpload string, alwaysWrite bool, commit func(store.Attachment) (store.Attachment, bool, error), write func(context.Context) error) (store.Attachment, bool, error) {
+	if !store.ValidActor(client) {
+		return store.Attachment{}, false, errors.New("invalid attachment created_by")
+	}
+	kind, id, e := ParseRef(ref)
+	if e != nil {
+		return store.Attachment{}, false, e
+	}
+	if commit == nil {
+		commit = func(x store.Attachment) (store.Attachment, bool, error) {
+			return m.Store.PutAttachment(ctx, x, m.Config.StorageCap, m.Config.PutCap)
+		}
+	}
 	if old, ok, e := m.Store.GetAttachment(ctx, sha); e != nil {
 		return old, false, e
 	} else if ok {
 		old.RefKind, old.RefID = kind, id
-		out, new, e := m.Store.PutAttachment(ctx, old, m.Config.StorageCap, m.Config.PutCap)
-		return out, new, e
+		return commit(old)
 	}
-	if e = m.Store.CheckAttachmentCapacity(ctx, int64(len(body)), m.Config.StorageCap, m.Config.PutCap); e != nil {
+	if e = m.Store.CheckAttachmentCapacity(ctx, size, m.Config.StorageCap, m.Config.PutCap, exceptUpload); e != nil {
 		return store.Attachment{}, false, e
 	}
-	k := key(sha)
-	if e = m.Objects.Stat(ctx, k); e != nil {
-		if e = m.Objects.Put(ctx, k, bytes.NewReader(body), int64(len(body)), mime); e != nil {
+	if alwaysWrite {
+		if e = write(ctx); e != nil {
+			return store.Attachment{}, false, fmt.Errorf("%w: %v", ErrObjectStore, e)
+		}
+	} else if e = m.Objects.Stat(ctx, key(sha)); e != nil {
+		if e = write(ctx); e != nil {
 			return store.Attachment{}, false, fmt.Errorf("%w: %v", ErrObjectStore, e)
 		}
 	}
-	x := store.Attachment{SHA256: sha, SizeBytes: int64(len(body)), MIME: mime, OriginalName: name, CreatedBy: client, RefKind: kind, RefID: id, ObjectLocation: ObjectLocation(m.Config)}
-	out, new, e := m.Store.PutAttachment(ctx, x, m.Config.StorageCap, m.Config.PutCap)
-	return out, new, e
+	x := store.Attachment{SHA256: sha, SizeBytes: size, MIME: mime, OriginalName: name, CreatedBy: client, RefKind: kind, RefID: id, ObjectLocation: ObjectLocation(m.Config)}
+	return commit(x)
 }
 func (m *Manager) Get(ctx context.Context, sha string) (store.Attachment, io.ReadCloser, error) {
 	if !m.Enabled {
@@ -578,7 +660,7 @@ func (m *Manager) List(ctx context.Context, ref string, limit int) ([]store.Atta
 	if ref == "" {
 		return m.Store.ListAttachments(ctx, "", "", limit)
 	}
-	k, id, e := ParseRef(ref)
+	k, id, e := parseListRef(ref)
 	if e != nil {
 		return nil, e
 	}
@@ -589,6 +671,17 @@ func (m *Manager) Usage(ctx context.Context) (store.AttachmentUsage, error) {
 		return store.AttachmentUsage{}, ErrDisabled
 	}
 	return m.Store.AttachmentUsage(ctx)
+}
+
+// parseListRef is ParseRef plus the ref kinds only a read may name: the
+// previous release still writes ref_kind 'checkpoint' rows during the
+// blue-green overlap, and the List filter must keep reading them. Upload paths
+// call ParseRef, so a new checkpoint ref is still refused.
+func parseListRef(ref string) (string, string, error) {
+	if v, ok := strings.CutPrefix(ref, "checkpoint:"); ok {
+		return "checkpoint", v, nil
+	}
+	return ParseRef(ref)
 }
 func ParseRef(ref string) (string, string, error) {
 	if ref == "" || ref == "none" {

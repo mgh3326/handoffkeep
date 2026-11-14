@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"slices"
 	"sort"
@@ -40,12 +41,30 @@ const (
 	ytCommentsDispatchTimeout = 3 * time.Second
 	ytCommentsSettleTimeout   = 1 * time.Second
 	ytCommentsPassLimit       = 50
+	// ytHeldRecoveryInterval is how often the worker runs the held-op
+	// recovery pass (store.RecoverHeldYTOps); the pass only closes ops that
+	// have been held for store.YTHeldRecoveryGrace.
+	ytHeldRecoveryInterval = 5 * time.Minute
 	// ytCommentsCatchUpLimit bounds the comments one catch-up pass prepares
 	// ops for (store.CatchUpYTComments), oldest first.
 	ytCommentsCatchUpLimit = 200
 	// ytFeedPassLimit bounds the sync_log rows each feed consumer reads in
 	// one worker pass (store.RunYTFeedConsumers).
 	ytFeedPassLimit = 200
+	// ytBindInterval is how often the worker runs the automatic binder pass
+	// (HANDOFFKEEP_YT_BIND=on); ytBindScanLimit is how many new comments it
+	// reads from the stream and ytBindPassLimit how many intents it binds or
+	// refuses in one pass.
+	ytBindInterval  = 10 * time.Minute
+	ytBindScanLimit = 200
+	ytBindPassLimit = 20
+	// ytBindActor is who an automatic binding is attributed to in its history
+	// row: the pass runs inside serve, not for a person.
+	ytBindActor = "operator:auto-bind"
+	// ytBindCopyMax is the most missing comments one automatic publication
+	// copies in its own transaction (store.YTAutoBindCopyMax); a larger
+	// history is refused with history_large before anything is written.
+	ytBindCopyMax = store.YTAutoBindCopyMax
 )
 
 // ytCommentsModeFromEnv reads HANDOFFKEEP_YT_COMMENTS_MODE: unset or "off"
@@ -167,19 +186,35 @@ type ytDecisionsSetting struct {
 }
 
 // ytCommentsCatchUpFromEnv reads HANDOFFKEEP_YT_COMMENTS_CATCHUP: unset or
-// "off" (the default) runs no catch-up, "on" runs it before each Drive pass
-// in mode on. Any other value is an error, as for the mode. The catch-up
-// stays off until the legacy comment push (`youtrack sync`) refuses to post
-// while the mode is canary or on (hk 3907): the push can post a comment and
-// end without linking it, which the catch-up cannot see.
+// "on" (the default) runs the catch-up before each Drive pass in mode on,
+// "off" runs only the issue-create catch-up (hk 3914). Any other value is an
+// error, as for the mode. The default flipped with the removals (hk 4426):
+// the legacy comment push that could post a comment and end without linking
+// it no longer exists, so a comment with no op would otherwise stay in PG
+// only.
 func ytCommentsCatchUpFromEnv() (bool, error) {
 	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_COMMENTS_CATCHUP")); raw {
+	case "", "on":
+		return true, nil
+	case "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("HANDOFFKEEP_YT_COMMENTS_CATCHUP=%q: want off or on", raw)
+	}
+}
+
+// ytBindModeFromEnv reads HANDOFFKEEP_YT_BIND (hk 4492): unset or "off" (the
+// default) or "on", trimmed and exactly in lower case like the modes. On makes
+// the comment worker bind the tasks whose comments it sees to an issue that
+// already verifies. Any other value is an error, so a typo fails closed.
+func ytBindModeFromEnv() (bool, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_BIND")); raw {
 	case "", "off":
 		return false, nil
 	case "on":
 		return true, nil
 	default:
-		return false, fmt.Errorf("HANDOFFKEEP_YT_COMMENTS_CATCHUP=%q: want off or on", raw)
+		return false, fmt.Errorf("HANDOFFKEEP_YT_BIND=%q: want off or on", raw)
 	}
 }
 
@@ -222,6 +257,16 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	catchUp, err := ytCommentsCatchUpFromEnv()
 	if err != nil {
 		return nil, err
+	}
+	bind, err := ytBindModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	// The binder publishes bindings the comment enqueue then reads, so it
+	// needs the comment gate on: with the gate off it would bind tasks whose
+	// comments nothing copies.
+	if bind && mode != store.YTCommentsOn {
+		return nil, fmt.Errorf("HANDOFFKEEP_YT_BIND=on needs HANDOFFKEEP_YT_COMMENTS_MODE=on; got HANDOFFKEEP_YT_COMMENTS_MODE=%s", mode)
 	}
 	// Moves are prepared only by the task_fields consumer and their
 	// snapshots ride the fields gate, so moves on with fields off would start
@@ -303,16 +348,16 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 		}
 	}
 	var issueBucketID string
-	if issues == store.YTIssuesOn {
+	if issues == store.YTIssuesOn || bind {
 		ctx, cancel := context.WithTimeout(context.Background(), ytCommentsGetTimeout)
 		issueBucketID, err = youtrack.ResolveBucketProject(ctx, client)
 		cancel()
 		if err != nil {
-			return nil, fmt.Errorf("HANDOFFKEEP_YT_ISSUES_MODE=on: resolve the %s bucket project: %w", youtrack.BucketShortName, err)
+			return nil, fmt.Errorf("%s: resolve the %s bucket project: %w", which, youtrack.BucketShortName, err)
 		}
 	}
 	st.SetYTIssuesBucketProject(issueBucketID)
-	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, docs, dec, art, catchUp, nil)
+	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, docs, dec, art, catchUp, bind, issueBucketID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -322,8 +367,9 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 // newYTWriteWorker sets the gates (the comments mode may be off when the
 // issues, fields, document-comment or decisions mode is on) and builds the
 // dispatcher for one tenant over remote. catchUp applies to the comments mode
-// only.
-func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, comments store.YTCommentsMode, issues store.YTIssuesMode, fields store.YTFieldsMode, docs store.YTDocCommentsMode, decisions ytDecisionsSetting, articles ytDocsSetting, catchUp bool, now func() time.Time) (ytCommentsWorker, error) {
+// only; bind (HANDOFFKEEP_YT_BIND) runs the automatic binder in that same
+// worker, verifying no-project tasks against bucketID.
+func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, comments store.YTCommentsMode, issues store.YTIssuesMode, fields store.YTFieldsMode, docs store.YTDocCommentsMode, decisions ytDecisionsSetting, articles ytDocsSetting, catchUp, bind bool, bucketID string, now func() time.Time) (ytCommentsWorker, error) {
 	if comments == store.YTCommentsOff && issues != store.YTIssuesOn && fields != store.YTFieldsOn && docs != store.YTDocCommentsOn && decisions.mode != store.YTDecisionsOn && articles.mode != store.YTDocsOn {
 		return ytCommentsWorker{}, errors.New("the write worker runs with the comments, issues, fields, document-comment, decisions or docs mode on")
 	}
@@ -339,7 +385,7 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 	log.Printf("ytwrite.docs_mode mode=%s tenant=%q shared=%q unassigned=%q", articles.mode, tenant,
 		articles.buckets[store.YTArticleBucketShared].ID, articles.buckets[store.YTArticleBucketUnassigned].ID)
 	if comments != store.YTCommentsOff {
-		return newYTCommentsWorker(st, remote, tenant, comments, catchUp, now)
+		return newYTCommentsWorker(st, remote, tenant, comments, catchUp, bind, bucketID, now)
 	}
 	p, err := ytwrite.New(st.YTCommentConfig(tenant, ytwrite.Config{
 		Remote:          remote,
@@ -351,14 +397,15 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 		return ytCommentsWorker{}, err
 	}
 	st.SetYTCommentsMode(store.YTCommentsOff)
-	return ytCommentsWorker{protocol: p, feed: st, intents: st}, nil
+	return ytCommentsWorker{protocol: p, feed: st, intents: st, recovery: st, tenant: tenant}, nil
 }
 
 // newYTCommentsWorker sets the gate to mode (canary or on) and builds the
 // dispatcher for one tenant over remote; catchUp runs the catch-up before
-// each Drive pass (HANDOFFKEEP_YT_COMMENTS_CATCHUP). now is the protocol clock
-// (nil: the wall clock).
-func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, mode store.YTCommentsMode, catchUp bool, now func() time.Time) (ytCommentsWorker, error) {
+// each Drive pass (HANDOFFKEEP_YT_COMMENTS_CATCHUP), and bind
+// (HANDOFFKEEP_YT_BIND) the automatic binder. now is the protocol clock (nil:
+// the wall clock).
+func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, mode store.YTCommentsMode, catchUp, bind bool, bucketID string, now func() time.Time) (ytCommentsWorker, error) {
 	if mode != store.YTCommentsCanary && mode != store.YTCommentsOn {
 		return ytCommentsWorker{}, fmt.Errorf("the comment worker runs in mode canary or on, not %q", mode)
 	}
@@ -373,7 +420,15 @@ func newYTCommentsWorker(st *store.Store, remote ytwrite.Remote, tenant string, 
 	}
 	st.SetYTCommentsMode(mode)
 	log.Printf("ytwrite.comments_enabled mode=%s tenant=%q catchup=%t", mode, tenant, catchUp)
-	w := ytCommentsWorker{protocol: p, feed: st, intents: st}
+	w := ytCommentsWorker{protocol: p, feed: st, intents: st, recovery: st, tenant: tenant}
+	if bind {
+		b, err := newYTBindingBinder(st, remote, tenant, bucketID)
+		if err != nil {
+			return ytCommentsWorker{}, err
+		}
+		log.Printf("ytwrite.bind_mode mode=on tenant=%q", tenant)
+		w.binder = b
+	}
 	if catchUp {
 		w.catchUp = st
 	} else {
@@ -397,6 +452,12 @@ func (c ytIssueCommentCatchUp) CatchUpYTComments(ctx context.Context, limit int,
 	return c.st.CatchUpYTIssueComments(ctx, limit, skip)
 }
 
+// ytHeldRecoverer closes the prepared ops whose task lost the binding that
+// admitted them (store.RecoverHeldYTOps, hk 4491).
+type ytHeldRecoverer interface {
+	RecoverHeldYTOps(ctx context.Context, tenant string, now time.Time, grace time.Duration) (store.YTRecovery, error)
+}
+
 // ytFeedRunner runs one pass of every registered change-feed consumer
 // (store.RunYTFeedConsumers, hk 3997).
 type ytFeedRunner interface {
@@ -410,18 +471,51 @@ type ytIssueIntents interface {
 	PrepareMappedYTIssues(ctx context.Context, limit int) (int, error)
 }
 
+// ytBinder runs one automatic binder pass (HANDOFFKEEP_YT_BIND=on, hk 4492).
+type ytBinder interface {
+	BindPass(ctx context.Context, now time.Time) (ytBindReport, error)
+}
+
+// ytBindReport is what one binder pass did (design §6.6).
+type ytBindReport struct {
+	// Scanned is how many intents the pass examined.
+	Scanned int `json:"scanned"`
+	// Bound is how many tasks got a binding, and Enqueued how many missing
+	// comments got an op.
+	Bound    int `json:"bound"`
+	Enqueued int `json:"enqueued"`
+	// Refused counts the refusals by class.
+	Refused map[string]int `json:"refused"`
+	// Errors counts the tasks whose reads or writes failed.
+	Errors int `json:"errors"`
+}
+
 // ytCommentsWorker runs one sequential Drive pass every interval. Two serve
 // processes (blue-green) may both run it: the ledger's compare-and-set claim
 // is the boundary, so an op is sent at most once. Its ledger is scoped to the
 // tenant it was configured for (store.YTTenantLedger): it neither sends nor
 // searches for an op bound to another tenant.
 //
-// Before each Drive pass, catchUp (HANDOFFKEEP_YT_COMMENTS_CATCHUP=on, or
-// else only for bindings issue_create ops published, hk 3914) prepares the ops of comments on
-// bound tasks that the enqueue missed; it does nothing outside mode on. A
+// Before each Drive pass, catchUp (HANDOFFKEEP_YT_COMMENTS_CATCHUP, on
+// unless set to off; with off, only for bindings issue_create ops published,
+// hk 3914) prepares the ops of comments on bound tasks that the enqueue
+// missed; it does nothing outside mode on. A
 // comment it skipped as ambiguous is left out of later passes of this
 // process, so it is logged once and never crowds out the others; a restart
 // looks at it again.
+//
+// Every ytBindInterval, before the recovery and the catch-up, binder (when
+// set, HANDOFFKEEP_YT_BIND=on) binds the tasks whose comments appeared since
+// its cursor to an issue that verifies and copies the comments the issue
+// provably lacks (hk 4492). It runs before the recovery so a task it binds
+// admits its prepared ops instead of having them closed as stranded.
+//
+// Every ytHeldRecoveryInterval, before the catch-up, recovery (when set)
+// closes the ops that have been held for store.YTHeldRecoveryGrace because
+// their task has no binding or another one, so they stop blocking the task's
+// lane. It decides each kind by that kind's own mode, so an op of a kind whose
+// mode is not on is never touched, and it closes nothing whose content is
+// canonical in YouTrack.
 //
 // After the catch-up, feed (when set) runs each registered change-feed
 // consumer once, up to ytFeedPassLimit rows each, so the ops they prepare
@@ -434,7 +528,61 @@ type ytCommentsWorker struct {
 	catchUp  ytCommentCatchUpper
 	feed     ytFeedRunner
 	intents  ytIssueIntents
+	recovery ytHeldRecoverer
+	// binder is the automatic binder (HANDOFFKEEP_YT_BIND=on, hk 4492), when
+	// set.
+	binder ytBinder
+	// tenant is the tenant the worker acts for; recovery closes only its ops
+	// and the binder reads and binds only its tenant's tasks.
+	tenant   string
 	interval time.Duration
+	// now is the clock of the recovery and binder passes (nil: the wall
+	// clock).
+	now func() time.Time
+}
+
+// recoverHeld runs the held-op recovery pass when ytHeldRecoveryInterval has
+// passed since last, and records the time of the run in last.
+func (w ytCommentsWorker) recoverHeld(ctx context.Context, last *time.Time) {
+	if w.recovery == nil {
+		return
+	}
+	now := time.Now().UTC()
+	if w.now != nil {
+		now = w.now().UTC()
+	}
+	if !last.IsZero() && now.Sub(*last) < ytHeldRecoveryInterval {
+		return
+	}
+	*last = now
+	got, err := w.recovery.RecoverHeldYTOps(ctx, w.tenant, now, store.YTHeldRecoveryGrace)
+	if err != nil && ctx.Err() == nil {
+		log.Printf("ytwrite.held_recovery_failed err=%q", err.Error())
+	}
+	if got.Rejected > 0 {
+		log.Printf("ytwrite.held_recovery rejected=%d kept=%d", got.Rejected, got.Kept)
+	}
+}
+
+// bindPass runs the automatic binder when ytBindInterval has passed since
+// last, and records the time of the run in last. It runs before the held-op
+// recovery so a task the pass binds admits its prepared ops instead of having
+// them closed as stranded.
+func (w ytCommentsWorker) bindPass(ctx context.Context, last *time.Time) {
+	if w.binder == nil {
+		return
+	}
+	now := time.Now().UTC()
+	if w.now != nil {
+		now = w.now().UTC()
+	}
+	if !last.IsZero() && now.Sub(*last) < ytBindInterval {
+		return
+	}
+	*last = now
+	if _, err := w.binder.BindPass(ctx, now); err != nil && ctx.Err() == nil {
+		log.Printf("ytwrite.bind_pass_failed err=%q", err.Error())
+	}
 }
 
 func (w ytCommentsWorker) Run(ctx context.Context) {
@@ -445,7 +593,10 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	skipped := []int64{}
+	var recovered, bound time.Time
 	for {
+		w.bindPass(ctx, &bound)
+		w.recoverHeld(ctx, &recovered)
 		if w.catchUp != nil {
 			got, err := w.catchUp.CatchUpYTComments(ctx, ytCommentsCatchUpLimit, skipped)
 			if err != nil && ctx.Err() == nil {
@@ -475,6 +626,282 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// The automatic binder (hk 4492, design/2026-11-13/yt-comment-binding-lifecycle
+// §6.6, §6.7). HANDOFFKEEP_YT_BIND=on makes the comment worker, every
+// ytBindInterval, take the tasks whose comments appeared since its cursor and
+// bind the ones whose YouTrack issue verifies, with a watermark computed from
+// the issue's own listing, then copy the comments the issue provably lacks.
+// It never creates an issue, never rebinds a bound task, and never undoes an
+// operator unbind (I7).
+
+// The classes an automatic binding is refused or ended with (design §6.6,
+// §6.8).
+const (
+	ytBindNoIssue      = "no_issue"
+	ytBindAmbiguous    = "ambiguous"
+	ytBindHistory      = "history_ambiguous"
+	ytBindHistoryLarge = "history_large"
+	ytBindOtherTenant  = "other_tenant"
+)
+
+// ytBindRemote is what the binder needs from YouTrack: the comment listing
+// and the issue read the enrollment rules use.
+type ytBindRemote interface {
+	ytwrite.Remote
+	youtrack.IssueReader
+}
+
+// ytBindingBinder settles the durable intents the store's cursor pass
+// recorded (store.ScanYTBindingCandidates). bucketID is the HK bucket project
+// a task with no hk project verifies against.
+type ytBindingBinder struct {
+	st       *store.Store
+	remote   ytBindRemote
+	tenant   string
+	bucketID string
+}
+
+func newYTBindingBinder(st *store.Store, remote ytwrite.Remote, tenant, bucketID string) (ytBindingBinder, error) {
+	r, ok := remote.(ytBindRemote)
+	if !ok {
+		return ytBindingBinder{}, errors.New("the automatic binder needs a remote that reads issues")
+	}
+	return ytBindingBinder{st: st, remote: r, tenant: tenant, bucketID: bucketID}, nil
+}
+
+// BindPass reads the next page of the comment stream into intents and settles
+// up to ytBindPassLimit due ones. One task's failure never stops the pass.
+func (b ytBindingBinder) BindPass(ctx context.Context, now time.Time) (ytBindReport, error) {
+	rep := ytBindReport{Refused: map[string]int{}}
+	scan, err := b.st.ScanYTBindingCandidates(ctx, b.tenant, ytBindScanLimit, now)
+	if err != nil {
+		return rep, err
+	}
+	intents, err := b.st.YTBindingIntentsDue(ctx, b.tenant, now, ytBindPassLimit)
+	if err != nil {
+		return rep, err
+	}
+	for _, in := range intents {
+		rep.Scanned++
+		b.bindTask(ctx, now, in, &rep)
+	}
+	log.Printf("ytwrite.bind_pass scanned=%d bound=%d enqueued=%d errors=%d refused=%q queued=%d",
+		rep.Scanned, rep.Bound, rep.Enqueued, rep.Errors, ytBindRefusedText(rep.Refused), scan.Tasks)
+	return rep, nil
+}
+
+// ytBindRefusedText renders the refusal counts as class:count pairs, in
+// class order, for one log line.
+func ytBindRefusedText(refused map[string]int) string {
+	classes := make([]string, 0, len(refused))
+	for class := range refused {
+		classes = append(classes, class)
+	}
+	sort.Strings(classes)
+	parts := make([]string, 0, len(classes))
+	for _, class := range classes {
+		parts = append(parts, fmt.Sprintf("%s:%d", class, refused[class]))
+	}
+	return strings.Join(parts, ",")
+}
+
+// bindTask moves one intent: excluded when the operator unbound the task,
+// finished when the task is bound already, or verified, published and copied
+// otherwise.
+func (b ytBindingBinder) bindTask(ctx context.Context, now time.Time, in store.YTBindingIntent, rep *ytBindReport) {
+	// 1. An operator unbind outlives the deleted row and is never undone
+	// (I7): no YouTrack call, no retry.
+	excluded, err := b.st.YTBindingExcluded(ctx, in.TaskID)
+	if err != nil {
+		b.fail(ctx, now, in.TaskID, err, rep)
+		return
+	}
+	if excluded {
+		b.exclude(ctx, now, in.TaskID, "excluded", "the operator unbound the task", rep)
+		return
+	}
+	// 2. A task bound by anyone already (the backfill, an applied
+	// issue_create, another worker) owns its comments_from and everything at
+	// or below it: the intent is done (B2 in the consult's design).
+	if bound, found, err := b.st.YTTaskBinding(ctx, in.TaskID); err != nil {
+		b.fail(ctx, now, in.TaskID, err, rep)
+		return
+	} else if found {
+		b.settleBound(ctx, now, in.TaskID, bound, 0, rep)
+		return
+	}
+	// 3. Verify the issue with the enrollment rules (design §6.8).
+	candidate, err := b.st.YTCanaryCandidate(ctx, in.TaskID)
+	if err != nil {
+		b.fail(ctx, now, in.TaskID, err, rep)
+		return
+	}
+	gctx, cancel := context.WithTimeout(ctx, ytCommentsGetTimeout)
+	binding, err := youtrack.VerifyBinding(gctx, b.remote, b.tenant, b.bucketID, candidate)
+	cancel()
+	switch {
+	case errors.Is(err, youtrack.ErrNoIssue):
+		b.refuse(ctx, now, in.TaskID, ytBindNoIssue, err.Error(), rep)
+		return
+	case errors.Is(err, youtrack.ErrCanaryRefused):
+		b.refuse(ctx, now, in.TaskID, ytBindAmbiguous, err.Error(), rep)
+		return
+	case err != nil:
+		b.fail(ctx, now, in.TaskID, err, rep)
+		return
+	}
+	binding.BoundBy = ytBindActor
+	// 4. The copies come from positive evidence (I8); a history that is not
+	// provably complete, or too large to copy in one transaction, refuses.
+	ev, class, err := b.evidence(ctx, in.TaskID, binding.IssueID)
+	if err != nil {
+		b.fail(ctx, now, in.TaskID, err, rep)
+		return
+	}
+	if class != "" {
+		b.refuse(ctx, now, in.TaskID, class, "the comment history is not provably complete", rep)
+		return
+	}
+	// 5. Publish the binding and its copies in one transaction. The
+	// publication rechecks the unbind and the comments authority under its
+	// locks and never adopts another publisher's binding.
+	got, err := b.st.PublishYTAutoBinding(ctx, binding, candidate, ev, ytBindActor)
+	switch {
+	case errors.Is(err, store.ErrYTBindingExcluded):
+		b.exclude(ctx, now, in.TaskID, "excluded", err.Error(), rep)
+		return
+	case errors.Is(err, store.ErrYTBindingExists):
+		if bound, found, rerr := b.st.YTTaskBinding(ctx, in.TaskID); rerr != nil {
+			b.fail(ctx, now, in.TaskID, rerr, rep)
+		} else if found {
+			b.settleBound(ctx, now, in.TaskID, bound, 0, rep)
+		} else {
+			b.fail(ctx, now, in.TaskID, err, rep)
+		}
+		return
+	case errors.Is(err, store.ErrYTBindingConflict):
+		b.refuse(ctx, now, in.TaskID, ytBindAmbiguous, err.Error(), rep)
+		return
+	case err != nil:
+		b.fail(ctx, now, in.TaskID, err, rep)
+		return
+	}
+	rep.Bound++
+	rep.Enqueued += got.Prepared
+	b.settleBound(ctx, now, in.TaskID, got.Binding, got.Prepared, rep)
+}
+
+// settleBound drops the task's intent. A binding exists, and its publisher
+// owns the copies at or below its watermark; the ones above it are the
+// issue-only catch-up's. A binding on another tenant excludes the task here.
+// A crash between the publication's commit and this call is harmless: the
+// next pass takes step 2 and drops the intent.
+func (b ytBindingBinder) settleBound(ctx context.Context, now time.Time, taskID int64, bound store.YTTaskBinding, prepared int, rep *ytBindReport) {
+	if bound.Tenant != b.tenant {
+		b.exclude(ctx, now, taskID, ytBindOtherTenant, "bound on tenant "+bound.Tenant, rep)
+		return
+	}
+	if err := b.st.DropYTBindingIntent(ctx, taskID); err != nil {
+		log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", taskID, err.Error())
+	}
+	log.Printf("ytwrite.bind_task task_id=%d class=bound issue_id=%q origin=%s prepared=%d", taskID, bound.IssueID, bound.Origin, prepared)
+}
+
+// evidence lists the issue's comments once and classifies the task's
+// comments against them with the audit's matcher (design §6.7). The
+// publication rechecks the authority it read and copies the Missing set in
+// its own transaction, so nothing here is owed after the publication commits.
+// A history that is not provably complete, or larger than one publication
+// copies, is a class the intent refuses with.
+func (b ytBindingBinder) evidence(ctx context.Context, taskID int64, issueID string) (store.YTAutoBindEvidence, string, error) {
+	authority, err := b.st.YTAuthorityOf(ctx, store.YTAuthorityComments)
+	if err != nil {
+		return store.YTAutoBindEvidence{}, "", err
+	}
+	ev := store.YTAutoBindEvidence{Authority: authority}
+	if authority == store.YTAuthorityYouTrack {
+		// YouTrack already holds the comments; the publication applies the
+		// in-transaction max-id watermark and copies nothing.
+		return ev, "", nil
+	}
+	hk, err := b.st.YTAuditTaskComments(ctx, taskID, issueID)
+	if err != nil {
+		return ev, "", err
+	}
+	lctx, cancel := context.WithTimeout(ctx, ytCommentsGetTimeout)
+	listed, err := b.remote.ListComments(lctx, issueID, ytAuditPageSize)
+	cancel()
+	if err != nil {
+		return ev, "", err
+	}
+	// A YouTrack comment the activity pull copied into hk is not the
+	// issue's evidence. The legacy push's links are, by its own rules.
+	yt := listed[:0:0]
+	for _, c := range listed {
+		if !hk.PulledYTIDs[c.ID] {
+			yt = append(yt, c)
+		}
+	}
+	for i, c := range hk.Comments {
+		if link := hk.Links[c.ID]; youtrack.CommentLinkIsID(link) {
+			hk.Comments[i].LinkedYTIDs = append(hk.Comments[i].LinkedYTIDs, link)
+		}
+	}
+	got := ytwrite.AuditComments(hk.Comments, yt, "", youtrack.LegacyCommentID)
+	if len(got.AmbiguousCopy) > 0 || len(got.Duplicate) > 0 {
+		return ev, ytBindHistory, nil
+	}
+	missing := make([]int64, 0, len(got.Missing))
+	for _, x := range got.Present {
+		if x.CommentID > ev.CommentsFrom {
+			ev.CommentsFrom = x.CommentID
+		}
+	}
+	for _, x := range got.Missing {
+		// A comment the adoption linked was posted in a form hk cannot
+		// recognise; a second copy may be the result (R2).
+		if youtrack.CommentLinkIsAdopted(hk.Links[x.CommentID]) {
+			return ev, ytBindHistory, nil
+		}
+		missing = append(missing, x.CommentID)
+	}
+	if len(missing) > ytBindCopyMax {
+		return ev, ytBindHistoryLarge, nil
+	}
+	ev.Missing = missing
+	return ev, "", nil
+}
+
+// refuse settles an intent as refused with its class and the backoff, and
+// counts it.
+func (b ytBindingBinder) refuse(ctx context.Context, now time.Time, taskID int64, class, detail string, rep *ytBindReport) {
+	rep.Refused[class]++
+	if err := b.st.RetryYTBindingIntent(ctx, taskID, store.YTBindingIntentRefused, class, detail, now); err != nil {
+		log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", taskID, err.Error())
+	}
+	log.Printf("ytwrite.bind_task task_id=%d class=%s detail=%q", taskID, class, detail)
+}
+
+// exclude settles an intent as terminal: no automatic binding will try the
+// task again.
+func (b ytBindingBinder) exclude(ctx context.Context, now time.Time, taskID int64, class, detail string, rep *ytBindReport) {
+	rep.Refused[class]++
+	if err := b.st.ExcludeYTBindingIntent(ctx, taskID, class, now); err != nil {
+		log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", taskID, err.Error())
+	}
+	log.Printf("ytwrite.bind_task task_id=%d class=%s detail=%q", taskID, class, detail)
+}
+
+// fail settles an intent as an error with the backoff: a read or a write
+// failed, and the next pass tries again.
+func (b ytBindingBinder) fail(ctx context.Context, now time.Time, taskID int64, cause error, rep *ytBindReport) {
+	rep.Errors++
+	if err := b.st.RetryYTBindingIntent(ctx, taskID, store.YTBindingIntentError, "", cause.Error(), now); err != nil {
+		log.Printf("ytwrite.bind_settle_failed task_id=%d err=%q", taskID, err.Error())
+	}
+	log.Printf("ytwrite.bind_task task_id=%d class=error detail=%q", taskID, cause.Error())
 }
 
 // ytOpsAlertWorker scans the durable ledger independently of dispatch mode,
@@ -791,6 +1218,7 @@ type ytCommentsReport struct {
 	Days               int                  `json:"days"`
 	All                bool                 `json:"all,omitempty"`
 	Project            string               `json:"project,omitempty"`
+	Task               int64                `json:"task,omitempty"`
 	CommentsTotal      int                  `json:"comments_total"`
 	MaxCommentsPerHour int                  `json:"max_comments_per_hour"`
 	Projects           []*ytCommentsProject `json:"projects"`
@@ -867,6 +1295,9 @@ type ytCommentsOptions struct {
 	Days int
 	// All makes every task a candidate (bind-all, hk 3897).
 	All bool
+	// Task, when not 0, makes that one task the only candidate (a rebind
+	// after `youtrack comments-unbind`); Project and All are then unused.
+	Task int64
 	// BucketID is the YouTrack project a task with no hk project verifies
 	// against (youtrack.ResolveBucketProject).
 	BucketID string
@@ -879,15 +1310,24 @@ type ytCommentsOptions struct {
 // as ambiguous and the run goes on. It never stops on one task.
 func ytCommentsRun(ctx context.Context, st *store.Store, issues youtrack.IssueReader, tenant string, o ytCommentsOptions) (ytCommentsReport, error) {
 	project, days, bindBy := o.Project, o.Days, o.BindBy
-	r := ytCommentsReport{Tenant: tenant, Days: days, All: o.All, Project: project, Projects: []*ytCommentsProject{}}
+	r := ytCommentsReport{Tenant: tenant, Days: days, All: o.All, Project: project, Task: o.Task, Projects: []*ytCommentsProject{}}
 	r.Uncovered.OpIDs = []int64{}
 	since := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
 	var err error
 	if r.CommentsTotal, r.MaxCommentsPerHour, err = st.YTCommentVolume(ctx, since, project); err != nil {
 		return r, err
 	}
-	candidates, err := st.YTCommentCandidates(ctx, since, project, o.All)
-	if err != nil {
+	var candidates []store.YTCommentCandidate
+	if o.Task > 0 {
+		c, found, err := st.YTCommentCandidateOf(ctx, o.Task)
+		if err != nil {
+			return r, err
+		}
+		if !found {
+			return r, fmt.Errorf("task %d does not exist", o.Task)
+		}
+		candidates = []store.YTCommentCandidate{c}
+	} else if candidates, err = st.YTCommentCandidates(ctx, since, project, o.All); err != nil {
 		return r, err
 	}
 	byProject := map[string]*ytCommentsProject{}
@@ -974,8 +1414,8 @@ func ytCommentsRun(ctx context.Context, st *store.Store, issues youtrack.IssueRe
 }
 
 const (
-	youtrackCommentsPreflightUsage = "usage: youtrack comments-preflight [--project P] [--days N] [--all]"
-	youtrackCommentsBackfillUsage  = "usage: youtrack comments-backfill [--project P] [--days N] [--all] [--by NAME]"
+	youtrackCommentsPreflightUsage = "usage: youtrack comments-preflight [--project P] [--days N] [--all] [--task N]"
+	youtrackCommentsBackfillUsage  = "usage: youtrack comments-backfill [--project P] [--days N] [--all] [--task N] [--by NAME]"
 )
 
 // ytBindingMigrations are the registered migrations a binding read needs:
@@ -999,7 +1439,8 @@ func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 	project := fs.String("project", "", "only tasks of this hk project")
 	days := fs.Int("days", ytCommentsDefaultDays, "tasks with a comment in the last N days")
 	all := fs.Bool("all", false, "every task, not only those with a recent comment")
-	valueFlags := []string{"project", "days"}
+	task := fs.Int64("task", 0, "only this task (not with --project or --all)")
+	valueFlags := []string{"project", "days", "task"}
 	var by *string
 	if backfill {
 		by = fs.String("by", "operator:cli", "who bound the tasks")
@@ -1012,7 +1453,11 @@ func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 	if err := fs.Parse(ordered); err != nil {
 		return fmt.Errorf("%v; %s", err, usage)
 	}
-	if fs.NArg() != 0 || *days < 1 {
+	// --task 0 is a supplied flag, not an absent one: it must not fall back
+	// to the multi-task run.
+	taskSet := false
+	fs.Visit(func(f *flag.Flag) { taskSet = taskSet || f.Name == "task" })
+	if fs.NArg() != 0 || *days < 1 || (taskSet && (*task < 1 || *project != "" || *all)) {
 		return errors.New(usage)
 	}
 	bindBy := ""
@@ -1069,7 +1514,7 @@ func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 	if err != nil {
 		return exitCodeError{code: youtrackExitFailed, err: fmt.Errorf("list YouTrack projects: %w", err)}
 	}
-	report, err := ytCommentsRun(context.Background(), st, remote, remote.Tenant(), ytCommentsOptions{Project: *project, Days: *days, All: *all, BucketID: bucketID, BindBy: bindBy})
+	report, err := ytCommentsRun(context.Background(), st, remote, remote.Tenant(), ytCommentsOptions{Project: *project, Days: *days, All: *all, Task: *task, BucketID: bucketID, BindBy: bindBy})
 	if err != nil {
 		return err
 	}
@@ -1080,6 +1525,282 @@ func youtrackCommentsCmd(args []string, out io.Writer, backfill bool) error {
 		return exitCodeError{code: youtrackExitFailed, err: fmt.Errorf("%d tasks could not be classified (class error); run again", report.errors)}
 	}
 	return nil
+}
+
+const youtrackCommentsUnbindUsage = "usage: youtrack comments-unbind <task> [--by NAME] [--reason TEXT] [--force]"
+
+// youtrackCommentsUnbindCmd is `youtrack comments-unbind` (hk 4490): it removes
+// a task's binding, rejects the prepared ops the binding admitted and records
+// the unbind (store.UnbindYTTaskBinding). It refuses while an op of the task
+// may have reached the issue, and, with comments canonical in YouTrack, while a
+// comment op is prepared unless --force. A task with no binding answers
+// removed false and writes nothing. It opens the database directly, like
+// `youtrack canary`, and calls no YouTrack. `youtrack comments-backfill --task
+// N` binds the task again once every other record hk keeps for it (map row,
+// mirror link) agrees with the issue it verifies; one that does not is named
+// in the refusal, and unbind does not touch it.
+func youtrackCommentsUnbindCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("youtrack comments-unbind", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	by := fs.String("by", "operator:cli", "who unbinds the task")
+	reason := fs.String("reason", "", "why the task is unbound")
+	force := fs.Bool("force", false, "reject prepared comment ops even when comments are canonical in YouTrack")
+	ordered, err := splitArgs(args, "by", "reason")
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(ordered); err != nil {
+		return fmt.Errorf("%v; %s", err, youtrackCommentsUnbindUsage)
+	}
+	if fs.NArg() != 1 || strings.TrimSpace(*by) == "" {
+		return errors.New(youtrackCommentsUnbindUsage)
+	}
+	taskID, err := strconv.ParseInt(fs.Arg(0), 10, 64)
+	if err != nil || taskID < 1 {
+		return errors.New("task id must be positive")
+	}
+	dbURL := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DB_URL"))
+	if dbURL == "" {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("HANDOFFKEEP_DB_URL is required")}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := store.Open(ctx, dbURL)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	res, err := st.UnbindYTTaskBinding(ctx, taskID, store.YTUnbindOptions{By: strings.TrimSpace(*by), Reason: strings.TrimSpace(*reason), Force: *force})
+	if err != nil {
+		return err
+	}
+	return printJSON(out, res)
+}
+
+const youtrackCommentsDrainUsage = "usage: youtrack comments-drain [--tenant T] [--wait 10m] [--reject-held] [--task N]"
+
+type ytCommentDrainReport struct {
+	Tenant   string            `json:"tenant"`
+	Task     int64             `json:"task,omitempty"`
+	Modes    map[string]string `json:"modes"`
+	Counts   map[string]int    `json:"counts"`
+	Rejected []int64           `json:"rejected,omitempty"`
+}
+
+// youtrackCommentsDrainCmd monitors the comment ops the serve worker can
+// send. It never dispatches. --reject-held reuses the recovery path so every
+// rejection is serialized with the lane and authority switches.
+func youtrackCommentsDrainCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("youtrack comments-drain", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	tenantFlag := fs.String("tenant", "", "YouTrack tenant host")
+	wait := fs.Duration("wait", 0, "wait for ready ops to drain")
+	rejectHeld := fs.Bool("reject-held", false, "close held ops that are safe to reject")
+	taskID := fs.Int64("task", 0, "only classify one task")
+	ordered, err := splitArgs(args, "tenant", "wait", "task")
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(ordered); err != nil || fs.NArg() != 0 || *wait < 0 || *taskID < 0 {
+		return errors.New(youtrackCommentsDrainUsage)
+	}
+	taskSpecified := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "task" {
+			taskSpecified = true
+		}
+	})
+	if taskSpecified && *taskID < 1 {
+		return errors.New(youtrackCommentsDrainUsage)
+	}
+	mode, err := ytCommentsModeFromEnv()
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	if *rejectHeld && mode != store.YTCommentsOn {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("--reject-held requires HANDOFFKEEP_YT_COMMENTS_MODE=on")}
+	}
+	fields, err := ytFieldsModeFromEnv()
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	moves, err := ytMovesModeFromEnv()
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	if moves == store.YTMovesOn && fields != store.YTFieldsOn {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("HANDOFFKEEP_YT_MOVES_MODE=on requires HANDOFFKEEP_YT_FIELDS_MODE=on")}
+	}
+	tenant := strings.TrimSpace(*tenantFlag)
+	if tenant == "" {
+		u, parseErr := url.Parse(strings.TrimSpace(os.Getenv("YOUTRACK_URL")))
+		if parseErr == nil && u != nil && u.Host != "" {
+			tenant = u.Host
+		}
+	}
+	if tenant == "" {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("--tenant or YOUTRACK_URL is required")}
+	}
+	dbURL := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DB_URL"))
+	if dbURL == "" {
+		return exitCodeError{code: youtrackExitConfig, err: errors.New("HANDOFFKEEP_DB_URL is required")}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second+*wait)
+	defer cancel()
+	var st *store.Store
+	if *rejectHeld {
+		st, err = store.Open(ctx, dbURL)
+	} else {
+		st, err = store.OpenReadOnly(ctx, dbURL)
+	}
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	st.SetYTCommentsMode(mode)
+	st.SetYTFieldsMode(fields, tenant)
+	st.SetYTMovesMode(moves)
+
+	deadline := time.Now().Add(*wait)
+	var report ytCommentDrainReport
+	for {
+		report, err = ytCommentDrainSnapshot(ctx, st, tenant, *taskID, mode, fields, moves)
+		if err != nil {
+			return err
+		}
+		if report.Counts["remote_unknown"] > 0 {
+			if err := printJSON(out, report); err != nil {
+				return err
+			}
+			return exitCodeError{code: youtrackExitRemoteUnknown, err: errors.New("remote_unknown comment ops require `youtrack ops resolve`")}
+		}
+		if report.Counts["ready"] == 0 || time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return exitCodeError{code: youtrackExitPending, err: ctx.Err()}
+		case <-time.After(time.Second):
+		}
+	}
+	if *rejectHeld {
+		var got store.YTRecovery
+		if *taskID > 0 {
+			got, err = st.RecoverHeldYTOpsForTask(ctx, tenant, *taskID, time.Now().UTC(), 0)
+		} else {
+			got, err = st.RecoverHeldYTOps(ctx, tenant, time.Now().UTC(), 0)
+		}
+		if err != nil {
+			return err
+		}
+		report.Rejected = got.OpIDs
+		report, err = ytCommentDrainSnapshot(ctx, st, tenant, *taskID, mode, fields, moves)
+		if err != nil {
+			return err
+		}
+		report.Rejected = got.OpIDs
+		if report.Counts["remote_unknown"] > 0 {
+			if err := printJSON(out, report); err != nil {
+				return err
+			}
+			return exitCodeError{code: youtrackExitRemoteUnknown, err: errors.New("remote_unknown comment ops require `youtrack ops resolve`")}
+		}
+	}
+	if err := printJSON(out, report); err != nil {
+		return err
+	}
+	if report.Counts["ready"] > 0 {
+		return exitCodeError{code: youtrackExitPending, err: errors.New("comment ops are still ready; serve has not drained them")}
+	}
+	return nil
+}
+
+const (
+	youtrackExitPending       = 3
+	youtrackExitRemoteUnknown = 4
+)
+
+func ytCommentDrainSnapshot(ctx context.Context, st *store.Store, tenant string, taskID int64, comments store.YTCommentsMode, fields store.YTFieldsMode, moves store.YTMovesMode) (ytCommentDrainReport, error) {
+	report := ytCommentDrainReport{Tenant: tenant, Task: taskID, Modes: map[string]string{"comments": string(comments), "fields": string(fields), "moves": string(moves)}, Counts: map[string]int{
+		"ready": 0, "held_binding": 0, "held_binding_changed": 0, "held_other_tenant": 0,
+		"held_authority_youtrack": 0, "held_ambiguous": 0, "held_mode": 0, "remote_unknown": 0,
+	}}
+	commentAuthority, err := st.YTAuthorityOf(ctx, store.YTAuthorityComments)
+	if err != nil {
+		return report, err
+	}
+	taskAuthority, err := st.YTAuthorityOf(ctx, store.YTAuthorityTasks)
+	if err != nil {
+		return report, err
+	}
+	for afterID := int64(0); ; {
+		ops, err := st.ListYTWriteOps(ctx, store.YTOpFilter{State: "pending", TaskID: taskID, AfterID: afterID, Limit: store.YTOpListMax})
+		if err != nil {
+			return report, err
+		}
+		for _, op := range ops {
+			afterID = op.ID
+			if op.Tenant != tenant || !ytBindingDrainOp(op) {
+				continue
+			}
+			binding, found, err := st.YTTaskBinding(ctx, parseTaskID(op.EntityID))
+			if err != nil {
+				return report, err
+			}
+			modeOn, side := ytBindingDrainModeAndAuthority(op, comments, fields, moves, commentAuthority, taskAuthority)
+			class := ytBindingDrainClass(op, binding, found, tenant, modeOn, side)
+			report.Counts[class]++
+		}
+		if len(ops) < store.YTOpListMax {
+			break
+		}
+	}
+	return report, nil
+}
+
+func parseTaskID(raw string) int64 {
+	id, _ := strconv.ParseInt(raw, 10, 64)
+	return id
+}
+
+func ytBindingDrainOp(op ytwrite.Op) bool {
+	return (op.Kind == ytwrite.KindCommentAppend && op.Principal == store.YTCommentPrincipal) ||
+		((op.Kind == ytwrite.KindIssueFields || op.Kind == ytwrite.KindIssueMove) && op.Principal == store.YTFieldsPrincipal)
+}
+
+func ytBindingDrainModeAndAuthority(op ytwrite.Op, comments store.YTCommentsMode, fields store.YTFieldsMode, moves store.YTMovesMode, commentAuthority, taskAuthority store.YTAuthoritySide) (bool, store.YTAuthoritySide) {
+	if op.Kind == ytwrite.KindCommentAppend {
+		return comments == store.YTCommentsOn, commentAuthority
+	}
+	return fields == store.YTFieldsOn && (op.Kind != ytwrite.KindIssueMove || moves == store.YTMovesOn), taskAuthority
+}
+
+func ytBindingDrainClass(op ytwrite.Op, binding store.YTTaskBinding, found bool, tenant string, modeOn bool, authority store.YTAuthoritySide) string {
+	switch op.State {
+	case ytwrite.StateRemoteUnknown:
+		return "remote_unknown"
+	case ytwrite.StateDispatched:
+		return "ready"
+	}
+	if !modeOn {
+		return "held_mode"
+	}
+	if op.YTTargetID == "" {
+		return "ready"
+	}
+	if found && binding.Tenant != tenant {
+		return "held_other_tenant"
+	}
+	if (!found || (op.YTTargetID != "" && binding.IssueID != op.YTTargetID)) && authority == store.YTAuthorityYouTrack {
+		return "held_authority_youtrack"
+	}
+	if !found {
+		return "held_binding"
+	}
+	if op.YTTargetID != "" && binding.IssueID != op.YTTargetID {
+		return "held_binding_changed"
+	}
+	return "ready"
 }
 
 const youtrackIssuesBackfillUsage = "usage: youtrack issues-backfill [--project P] [--dry-run]"

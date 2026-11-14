@@ -110,3 +110,50 @@ func TestDeployProjectionEscapedNULWriteAndBackfill(t *testing.T) {
 	}
 	check()
 }
+
+// A projection written before FailedStepName existed stores the marshalled
+// record without the key. The reader must use the document body for it, and
+// the registered rebuild must fill the projection so that fallback is not
+// needed forever.
+func TestDeployProjectionRecoversFailedStepName(t *testing.T) {
+	s := schemaStore(t, "deploy_projection_failed_step")
+	ctx := t.Context()
+	key := "deploy/svc/20261105T100000Z"
+	body := `{"schema":"deploy-record/v0","service":"svc","target":"ncp","head_sha":"1111111111111111111111111111111111111111","result":"failed","failed_step":6,"failed_step_name":"interrupted","included_prs":[]}`
+	if _, _, err := s.PutDocument(ctx, Document{Key: key, Kind: "report", Session: "test", Body: body, CreatedBy: "tester"}); err != nil {
+		t.Fatal(err)
+	}
+	// The previous binary's projection: the same record marshalled without the
+	// new field.
+	old := `{"schema":"deploy-record/v0","service":"svc","target":"ncp","head_sha":"1111111111111111111111111111111111111111","result":"failed","failed_step":6,"included_prs":[]}`
+	tag, err := s.pool.Exec(ctx, `UPDATE deploy_record_projection SET record=$2 WHERE key=$1`, key, []byte(old))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tag.RowsAffected() != 1 {
+		t.Fatal("projection row missing")
+	}
+	records, err := s.ListDeployRecords(ctx, "deploy/svc/", "", 10)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	rec, _, reasons := records[0].Classify("svc")
+	if len(reasons) != 0 || rec.FailedStepName == nil || *rec.FailedStepName != "interrupted" {
+		t.Fatalf("record=%+v reasons=%v, want failed_step_name from the body", rec, reasons)
+	}
+
+	// Re-run the registered rebuild over the old row.
+	if _, err := s.pool.Exec(ctx, `DELETE FROM schema_migrations WHERE id='20261114-deploy-record-projection-failed-step'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var has bool
+	if err := s.pool.QueryRow(ctx, `SELECT strpos(convert_from(record,'UTF8'), '"failed_step_name"') > 0 FROM deploy_record_projection WHERE key=$1`, key).Scan(&has); err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Fatal("rebuild did not add failed_step_name to the projection")
+	}
+}

@@ -15,10 +15,11 @@ import (
 // only when its task is bound at comment time and the writer enqueues at all.
 // A comment written after the binding that got no op (a writer that does not
 // enqueue, such as a dots reply, or a comment written while the mode was not
-// on) would otherwise reach YouTrack only through the legacy push and the
-// import. Before each Drive pass the comment worker prepares the missing ops
-// here, with the enqueue's own rules (ytCommentOnOpTx). Nothing here calls
-// YouTrack.
+// on) would otherwise stay in PG only: the legacy push and the import are
+// gone (hk 4426). Before each Drive pass the comment worker prepares the
+// missing ops here, with the enqueue's own rules (ytCommentOnOpTx). Nothing
+// here calls YouTrack, and while comments are canonical in YouTrack the pass
+// prepares nothing (hk 4122).
 
 // YTCatchUpMax bounds the comments one catch-up pass considers.
 const YTCatchUpMax = 500
@@ -26,7 +27,7 @@ const YTCatchUpMax = 500
 // YTCatchUp is what one catch-up pass did: the ops it prepared, and the
 // comments it skipped because a local source disagrees with their task's
 // binding (each logged once per pass). Deferred is a pass that found
-// comments but left them because a `youtrack sync` run held the sync lock.
+// comments but left them because another holder had the sync lock.
 type YTCatchUp struct {
 	Prepared []ytwrite.Op
 	Skipped  []int64
@@ -36,14 +37,19 @@ type YTCatchUp struct {
 // ytCatchUpSelectSQL lists the comments a catch-up prepares an op for, oldest
 // first: a comment on a bound task above the binding's comments_from, written
 // through an hk entry point (not the YouTrack activity pull, whose comments
-// are never copied, and not one the legacy push already mirrored), with no
+// are never copied, and not one already mirrored — youtrack_comment_links is
+// frozen since the legacy push's removal but its rows still count), with no
 // ownership link and no op under its key. $1 the pull's author, $2 the
 // principal, $3 the kind, $4 the key prefix (YTCommentKey), $5 comment ids to
-// leave out, $6 the limit, $7 true for only the bindings an issue_create op
-// published (origin op_applied).
+// leave out, $6 the limit, $7 true for only the bindings that publish
+// without a comment at write time: an issue_create op's (origin op_applied)
+// and the automatic binder's (origin auto_verified, hk 4492). A comment
+// committed between the binder's listing and its publication got no op, and
+// is above the binding's comments_from, so this pass copies it even when the
+// general catch-up is off.
 const ytCatchUpSelectSQL = `SELECT c.id, c.task_id, c.body, c.author, c.created_at
 	FROM yt_task_bindings b JOIN task_comments c ON c.task_id = b.task_id AND c.id > b.comments_from
-	WHERE c.author <> $1 AND (NOT $7 OR b.origin = 'op_applied')
+	WHERE c.author <> $1 AND (NOT $7 OR b.origin IN ('op_applied','auto_verified'))
 	  AND NOT EXISTS (SELECT 1 FROM youtrack_comment_links l WHERE l.hk_comment_id = c.id)
 	  AND NOT EXISTS (SELECT 1 FROM yt_comment_write_links w WHERE w.comment_id = c.id)
 	  AND NOT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.principal = $2 AND o.kind = $3 AND o.idem_key = $4 || c.id::text)
@@ -52,39 +58,40 @@ const ytCatchUpSelectSQL = `SELECT c.id, c.task_id, c.body, c.author, c.created_
 
 // CatchUpYTComments prepares, in mode on, the op of each comment that the
 // enqueue would have copied but that has none: up to limit comments, oldest
-// first, each in its own transaction.
-//
-// The legacy push (`youtrack sync`) selects the same comments in every mode
-// and posts each before it links it. The two never both send one: when the
-// scan finds comments, the pass works only while it holds the sync lock
-// (TryYouTrackSyncLock), which every sync run of this release and of the
-// releases before it holds for the whole run, across its selection, its POST
-// and its youtrack_comment_links insert. A sync that is running defers the
-// pass (Deferred, nothing written); a sync that has finished has linked what
-// it posted, and the per-comment read under the lane lock sees that link.
-// While a pass holds the lock, a sync that starts exits as "another youtrack
-// sync is running" and its next run goes on. skip lists comment ids to leave out
+// first, each in its own transaction. skip lists comment ids to leave out
 // (the worker passes the ones an earlier pass skipped as ambiguous, so they
-// are logged once and never crowd out the others). Any other mode does
-// nothing. It is idempotent: under the task's lane lock it reads the
-// comment's link and its op again, and prepareYTOpTx keeps one op per
-// (principal, kind, key), so two workers (blue-green) prepare one op.
+// are logged once and never crowd out the others).
+//
+// No legacy push runs any more (hk 4426), but a pass that finds comments
+// still works only while it holds the sync lock (TryYouTrackSyncLock): the
+// lock is what an authority switch to youtrack tries first
+// (SetYTAuthority), so no switch commits in the middle of a pass, and each
+// comment's transaction reads the authority row FOR SHARE besides. A lock
+// another holder has defers the pass (Deferred, nothing written); the
+// per-comment read under the lane lock re-checks the comment's link and op,
+// so a writer that finished after the scan is seen. Any other mode, and
+// comments canonical in YouTrack, do nothing. It is idempotent: under the
+// task's lane lock it reads the comment's link and its op again, and
+// prepareYTOpTx keeps one op per (principal, kind, key), so two workers
+// (blue-green) prepare one op.
 //
 // Locks (lockorder.go): the session-scoped sync lock, only tried, never
-// waited for; then per comment the task's lane lock as the first lock of the
-// transaction, then what ytCommentOnOpTx reads and writes. It never takes
+// waited for; then per comment the comments authority row FOR SHARE, the
+// task's lane lock, and what ytCommentOnOpTx reads and writes. It never takes
 // taskCommentInsertLock or a task row.
 func (s *Store) CatchUpYTComments(ctx context.Context, limit int, skip []int64) (YTCatchUp, error) {
 	return s.catchUpYTComments(ctx, limit, skip, false)
 }
 
-// CatchUpYTIssueComments is CatchUpYTComments for the tasks whose binding an
-// issue_create op published (hk 3914). Such a task's comments written while
-// its op was pending got no op (the task had no binding yet), and the
-// binding's comments_from (0 for a created issue, the latest comment for an
-// adopted one) says which of them the issue still lacks. The write worker
-// runs it in mode on even when the general catch-up
-// (HANDOFFKEEP_YT_COMMENTS_CATCHUP) is off.
+// CatchUpYTIssueComments is CatchUpYTComments for the bindings that publish
+// without a comment at write time: the ones an issue_create op published
+// (hk 3914) and the automatic binder's auto_verified ones (hk 4492). Such a
+// task's comments written while its op was pending, or between the binder's
+// YouTrack listing and its publication, got no op (the task had no binding
+// yet), and the binding's comments_from (0 for a created issue, the highest
+// comment the binder found present, the latest comment for an adopted one)
+// says which of them the issue still lacks. The write worker runs it in mode
+// on even when the general catch-up (HANDOFFKEEP_YT_COMMENTS_CATCHUP) is off.
 func (s *Store) CatchUpYTIssueComments(ctx context.Context, limit int, skip []int64) (YTCatchUp, error) {
 	return s.catchUpYTComments(ctx, limit, skip, true)
 }
@@ -99,6 +106,17 @@ func (s *Store) catchUpYTComments(ctx context.Context, limit int, skip []int64, 
 	}
 	if skip == nil {
 		skip = []int64{}
+	}
+	// Comments canonical in YouTrack get no PG→YouTrack copy (hk 4122): the
+	// pass prepares nothing. This read is unlocked; each comment's
+	// transaction reads the row FOR SHARE and checks again, so a switch
+	// committing mid-pass still stops it.
+	side, err := s.YTAuthorityOf(ctx, YTAuthorityComments)
+	if err != nil {
+		return out, err
+	}
+	if side == YTAuthorityYouTrack {
+		return out, nil
 	}
 	rows, err := s.pool.Query(ctx, ytCatchUpSelectSQL, YouTrackOwnedActor, YTCommentPrincipal, ytwrite.KindCommentAppend, ytCommentKeyPrefix, skip, limit, issueOnly)
 	if err != nil {
@@ -160,8 +178,9 @@ type ytTxBeginner interface {
 }
 
 // catchUpYTComment prepares comment c's op in its own transaction on db.
-// prepared is false when another writer linked the comment first (an op link
-// or a legacy push link) or the task has no binding; source is the
+// prepared is false when comments are canonical in YouTrack, when another
+// writer linked the comment first (an op link or a youtrack_comment_links
+// row) or the task has no binding; source is the
 // disagreeing source when the binding is ambiguous.
 func catchUpYTComment(ctx context.Context, db ytTxBeginner, c TaskComment) (ytwrite.Op, bool, string, error) {
 	tx, err := db.Begin(ctx)
@@ -169,12 +188,22 @@ func catchUpYTComment(ctx context.Context, db ytTxBeginner, c TaskComment) (ytwr
 		return ytwrite.Op{}, false, "", err
 	}
 	defer tx.Rollback(ctx)
+	// FOR SHARE on the comments authority row, as the audit enqueue reads it
+	// (EnqueueYTAuditComment): a switch to youtrack commits before this read
+	// or after this transaction, never inside it.
+	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments)
+	if err != nil {
+		return ytwrite.Op{}, false, "", err
+	}
+	if side == YTAuthorityYouTrack {
+		return ytwrite.Op{}, false, "", nil
+	}
 	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(c.TaskID, 10)); err != nil {
 		return ytwrite.Op{}, false, "", err
 	}
 	// Read again under the lane lock, with the sync lock held: another
-	// worker's op and link, and the link of a legacy push that finished
-	// after the scan.
+	// worker's op and link, and a youtrack_comment_links row another writer
+	// left after the scan.
 	var owned bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_write_links WHERE comment_id=$1)
 		OR EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$2 AND kind=$3 AND idem_key=$4)

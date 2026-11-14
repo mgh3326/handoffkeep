@@ -1,12 +1,14 @@
 package attachments
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"regexp"
 	"strings"
@@ -29,8 +31,8 @@ const (
 	StagingSweepAge = 2 * time.Hour
 	stagingPrefix   = "incoming/"
 	// uploadLease is how long a completion may hold its claim before another
-	// call may reclaim the upload. A claim older than this belongs to a
-	// completion that stopped before it finished.
+	// call may reclaim the upload. A claim whose heartbeat has been silent
+	// this long belongs to a completion that stopped before it finished.
 	uploadLease = 5 * time.Minute
 	// releaseGrace is slack past a presigned URL's life before a missing staging
 	// object is treated as final.
@@ -48,6 +50,10 @@ var (
 	// ErrDirectUploadDisabled means HK_ATTACH_DIRECT_UPLOAD is not set.
 	ErrDirectUploadDisabled = errors.New("attachment_direct_upload_disabled")
 )
+
+// uploadHeartbeat is how often a live completion refreshes its claim lease.
+// It is a var so tests can shorten it.
+var uploadHeartbeat = 30 * time.Second
 
 var (
 	shaPattern      = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -86,6 +92,12 @@ func (m *Manager) BeginUpload(ctx context.Context, client, name, mime string, si
 	if size < 0 || size > m.Config.MaxBytes {
 		return UploadTicket{}, ErrTooLarge
 	}
+	// A text upload above the buffered-completion fuse can never complete:
+	// its secret scan needs the whole body in memory. Refuse it here, before
+	// any bytes move; binary types complete by streaming (hk 4466).
+	if size > BufferedCompletionMaxBytes && isText(declared) {
+		return UploadTicket{}, fmt.Errorf("%w: upload_completion_buffer_limit_exceeded", ErrUploadRefused)
+	}
 	if !shaPattern.MatchString(sha) {
 		return UploadTicket{}, errors.New("sha256 must be 64 lowercase hex characters")
 	}
@@ -104,12 +116,13 @@ func (m *Manager) BeginUpload(ctx context.Context, client, name, mime string, si
 	}
 	now := m.now()
 	row := store.AttachmentUpload{ID: uid, StagingKey: key, Name: name, MIME: declared, SizeBytes: size, SHA256: sha, RefKind: kind, RefID: id, CreatedBy: client, Status: store.AttachmentUploadPending, CreatedAt: now, ExpiresAt: now.Add(uploadRowTTL), UpdatedAt: now}
-	// The reservation checks the staging budget, global and per creator, with
-	// the insert; a refusal creates no row. The storage caps are checked first.
-	if err := m.Store.CheckAttachmentCapacity(ctx, size, m.Config.StorageCap, m.Config.PutCap); err != nil {
+	// The reservation checks the staging budget, global and per creator, and
+	// the storage fuse including every still-charged pending upload, with the
+	// insert; a refusal creates no row. The capacity preflight runs first.
+	if err := m.Store.CheckAttachmentCapacity(ctx, size, m.Config.StorageCap, m.Config.PutCap, ""); err != nil {
 		return UploadTicket{}, err
 	}
-	if err := m.Store.ReserveAttachmentUpload(ctx, row, m.Config.StagingCap, m.Config.StagingClientCap); err != nil {
+	if err := m.Store.ReserveAttachmentUpload(ctx, row, m.Config.StagingCap, m.Config.StagingClientCap, m.Config.StorageCap); err != nil {
 		return UploadTicket{}, err
 	}
 	return UploadTicket{UploadID: uid, Method: "PUT", URL: u, ExpiresInSeconds: int(UploadTTL / time.Second)}, nil
@@ -148,10 +161,11 @@ func (m *Manager) CompleteUpload(ctx context.Context, client, uploadID string) (
 	case store.AttachmentUploadRefused:
 		return store.Attachment{}, false, fmt.Errorf("%w: %s", ErrUploadRefused, row.Reason)
 	case store.AttachmentUploadCompleting:
-		// A claim older than the lease belongs to a completion that stopped before
-		// it moved the row to done. Its staging object is still there (deletion
-		// follows done), so the claim goes back to pending and this call redoes
-		// the completion; the store path is idempotent, so the redo is safe.
+		// A claim whose heartbeat has been silent for the lease belongs to a
+		// completion that stopped before it moved the row to done. Its staging
+		// object is still there (deletion follows done), so the claim goes back
+		// to pending and this call redoes the completion; the store path is
+		// idempotent, so the redo is safe.
 		if now.Before(row.UpdatedAt.Add(uploadLease)) {
 			return store.Attachment{}, false, ErrUploadInProgress
 		}
@@ -176,33 +190,50 @@ func (m *Manager) CompleteUpload(ctx context.Context, client, uploadID string) (
 		}
 		return store.Attachment{}, false, ErrUploadExpired
 	}
-	claimed, err := m.Store.TransitionAttachmentUpload(ctx, row.ID, store.AttachmentUploadPending, store.AttachmentUploadCompleting, "", now)
+	nonce, err := newClaimNonce()
+	if err != nil {
+		return store.Attachment{}, false, err
+	}
+	claimed, err := m.Store.ClaimAttachmentUpload(ctx, row.ID, nonce, now)
 	if err != nil {
 		return store.Attachment{}, false, err
 	}
 	if !claimed {
 		return store.Attachment{}, false, ErrUploadInProgress
 	}
+	row.Status = store.AttachmentUploadCompleting
+	row.ClaimNonce = nonce
+	row.UpdatedAt = now
 	return m.completeClaimed(ctx, row)
 }
 
-// completeClaimed runs with the row in completing. Every exit either moves the
-// row to done, to refused (final, staging deleted), or back to pending.
+// completeClaimed runs with the row in completing under this call's claim
+// nonce. Every exit either moves the row to done, to refused (final, staging
+// deleted), or back to pending — and only while the claim is still held, so a
+// completion whose lease was reclaimed cannot move the row another completion
+// owns.
 func (m *Manager) completeClaimed(ctx context.Context, row store.AttachmentUpload) (store.Attachment, bool, error) {
+	stopBeat := m.heartbeatUpload(ctx, row)
+	defer stopBeat()
 	release := func(cause error) (store.Attachment, bool, error) {
-		if _, e := m.Store.TransitionAttachmentUpload(ctx, row.ID, store.AttachmentUploadCompleting, store.AttachmentUploadPending, "", m.now()); e != nil {
-			return store.Attachment{}, false, e
-		}
-		return store.Attachment{}, false, fmt.Errorf("%w: %v", ErrUploadNotReceived, cause)
-	}
-	refuse := func(reason string) (store.Attachment, bool, error) {
-		changed, e := m.finishUpload(ctx, row, store.AttachmentUploadCompleting, store.AttachmentUploadRefused, reason, m.now())
+		changed, e := m.Store.TransitionAttachmentUploadClaim(ctx, row.ID, row.ClaimNonce, store.AttachmentUploadPending, "", m.now())
 		if e != nil {
 			return store.Attachment{}, false, e
 		}
 		if !changed {
 			return store.Attachment{}, false, ErrUploadInProgress
 		}
+		return store.Attachment{}, false, fmt.Errorf("%w: %v", ErrUploadNotReceived, cause)
+	}
+	refuse := func(reason string) (store.Attachment, bool, error) {
+		changed, e := m.Store.TransitionAttachmentUploadClaim(ctx, row.ID, row.ClaimNonce, store.AttachmentUploadRefused, reason, m.now())
+		if e != nil {
+			return store.Attachment{}, false, e
+		}
+		if !changed {
+			return store.Attachment{}, false, ErrUploadInProgress
+		}
+		m.deleteStaging(ctx, row.StagingKey)
 		return store.Attachment{}, false, fmt.Errorf("%w: %s", ErrUploadRefused, reason)
 	}
 	head, err := m.Objects.Head(ctx, row.StagingKey)
@@ -217,6 +248,15 @@ func (m *Manager) completeClaimed(ctx context.Context, row store.AttachmentUploa
 	if head.Size != row.SizeBytes {
 		return refuse("upload_size_mismatch")
 	}
+	if row.SizeBytes <= BufferedCompletionMaxBytes {
+		return m.completeBuffered(ctx, row, release, refuse)
+	}
+	return m.completeStreamed(ctx, row, release, refuse)
+}
+
+// completeBuffered verifies an upload small enough to hold in memory, then
+// stores it through the buffered path.
+func (m *Manager) completeBuffered(ctx context.Context, row store.AttachmentUpload, release func(error) (store.Attachment, bool, error), refuse func(string) (store.Attachment, bool, error)) (store.Attachment, bool, error) {
 	// Promotion choice: the content-addressed object is written from the bytes
 	// read and verified below, never by copying or re-reading the staging
 	// object. A presigned PUT can be reused until it expires, so the staging
@@ -241,7 +281,7 @@ func (m *Manager) completeClaimed(ctx context.Context, row store.AttachmentUploa
 	if hex.EncodeToString(sum[:]) != row.SHA256 {
 		return refuse("upload_sha256_mismatch")
 	}
-	x, created, err := m.putBytes(ctx, row.CreatedBy, row.Name, row.MIME, uploadRefString(row), body)
+	mime, err := validate(m.Config, row.Name, row.MIME, body)
 	if err != nil {
 		reason, refusable := uploadRefusalReason(err)
 		if !refusable {
@@ -249,11 +289,249 @@ func (m *Manager) completeClaimed(ctx context.Context, row store.AttachmentUploa
 		}
 		return refuse(reason)
 	}
-	if _, err := m.Store.TransitionAttachmentUpload(ctx, row.ID, store.AttachmentUploadCompleting, store.AttachmentUploadDone, "", m.now()); err != nil {
-		return x, created, err
+	x, created, err := m.putVerified(ctx, row.CreatedBy, row.Name, mime, uploadRefString(row), row.SHA256, row.SizeBytes, row.ID, false,
+		m.finalizeCommit(ctx, row),
+		func(ctx context.Context) error {
+			return m.Objects.Put(ctx, key(row.SHA256), bytes.NewReader(body), row.SizeBytes, mime)
+		})
+	if err != nil {
+		if errors.Is(err, store.ErrUploadClaimLost) {
+			return m.uploadFinalizeFallback(ctx, row)
+		}
+		reason, refusable := uploadRefusalReason(err)
+		if !refusable {
+			return release(err)
+		}
+		return refuse(reason)
 	}
 	m.deleteStaging(ctx, row.StagingKey)
 	return x, created, nil
+}
+
+// verifyHeadBytes is how much of a streamed upload is kept for the sniff and
+// NUL checks; both read at most this much of a body.
+const verifyHeadBytes = 8 << 10
+
+// streamVerifier observes what an ObjectStore Put consumes: the byte count,
+// the sha256 and the first verifyHeadBytes for content sniffing.
+type streamVerifier struct {
+	r    io.Reader
+	sum  hash.Hash
+	n    int64
+	head []byte
+}
+
+func (v *streamVerifier) Read(p []byte) (int, error) {
+	n, err := v.r.Read(p)
+	if n > 0 {
+		v.sum.Write(p[:n])
+		v.n += int64(n)
+		if rem := verifyHeadBytes - len(v.head); rem > 0 {
+			if n < rem {
+				rem = n
+			}
+			v.head = append(v.head, p[:rem]...)
+		}
+	}
+	return n, err
+}
+
+// overflow reports whether the stream held a byte past what the Put consumed
+// (the LimitReader caps it at one).
+func (v *streamVerifier) overflow() bool {
+	var b [1]byte
+	n, _ := v.r.Read(b[:])
+	return n > 0
+}
+
+// completeStreamed verifies an upload too large to hold in memory. The staged
+// object is copied to a private holding object while size and sha256 are
+// checked in the same pass; only the verified holding object is promoted to
+// the content key, re-verified as it streams, so the stored object is always
+// the checked bytes and a staging overwrite after the read changes nothing.
+// Text types stay on the buffered path: their secret scan needs the body.
+func (m *Manager) completeStreamed(ctx context.Context, row store.AttachmentUpload, release func(error) (store.Attachment, bool, error), refuse func(string) (store.Attachment, bool, error)) (store.Attachment, bool, error) {
+	if isText(row.MIME) {
+		return refuse("upload_completion_buffer_limit_exceeded")
+	}
+	// The holding key is per claim: a completion whose lease was reclaimed can
+	// still be streaming, and two claims must not overwrite each other's
+	// holding object mid-copy.
+	holdingKey := stagingPrefix + "done-" + row.ID + "-" + row.ClaimNonce
+	// Whatever happens next, the holding object is private and disposable.
+	defer func() { _ = m.Objects.Delete(ctx, holdingKey) }()
+	r, err := m.Objects.Get(ctx, row.StagingKey)
+	if err != nil {
+		return release(err)
+	}
+	// The Put consumes at most the declared size; the byte past it, when the
+	// staging object is longer, is seen by overflow without being stored.
+	v := &streamVerifier{r: io.LimitReader(r, row.SizeBytes+1), sum: sha256.New(), head: make([]byte, 0, verifyHeadBytes)}
+	putErr := m.Objects.Put(ctx, holdingKey, v, row.SizeBytes, row.MIME)
+	// overflow reads one byte past what the Put consumed, so it must run
+	// before the staging body is closed: a real object store invalidates the
+	// body on Close.
+	grown := v.overflow()
+	_ = r.Close()
+	if putErr != nil {
+		return release(putErr)
+	}
+	if v.n != row.SizeBytes || grown {
+		return refuse("upload_size_mismatch")
+	}
+	if hex.EncodeToString(v.sum.Sum(nil)) != row.SHA256 {
+		return refuse("upload_sha256_mismatch")
+	}
+	mime, err := validateStreamed(m.Config, row.Name, row.MIME, v.head)
+	if err != nil {
+		reason, refusable := uploadRefusalReason(err)
+		if !refusable {
+			return release(err)
+		}
+		return refuse(reason)
+	}
+	x, created, err := m.putVerified(ctx, row.CreatedBy, row.Name, mime, uploadRefString(row), row.SHA256, row.SizeBytes, row.ID, true,
+		m.finalizeCommit(ctx, row),
+		func(ctx context.Context) error {
+			tr, err := m.Objects.Get(ctx, holdingKey)
+			if err != nil {
+				return err
+			}
+			defer tr.Close()
+			pv := &streamVerifier{r: tr, sum: sha256.New()}
+			// Promotion output stays on a private per-claim key until verification
+			// passes: a concurrent putVerified for the same sha can Stat the shared
+			// content key and register it, so publishing unverified bytes there and
+			// deleting them on a failed check would leave metadata pointing at a
+			// missing object. Only a server-side copy of the verified private
+			// object publishes, and a failed check deletes just the private key.
+			promoKey := stagingPrefix + "promo-" + row.ID + "-" + row.ClaimNonce
+			defer func() { _ = m.Objects.Delete(ctx, promoKey) }()
+			if err := m.Objects.Put(ctx, promoKey, pv, row.SizeBytes, mime); err != nil {
+				return err
+			}
+			if pv.n != row.SizeBytes || pv.overflow() || hex.EncodeToString(pv.sum.Sum(nil)) != row.SHA256 {
+				return errors.New("promoted object failed verification")
+			}
+			published := key(row.SHA256)
+			// The published object is what readers adopt, so it is re-hashed
+			// after the copy — a backend fault between promo and content key
+			// must not reach the dedup path. A completed verification that
+			// still mismatches proves the key does not hold this sha's bytes,
+			// so it is deleted on a detached context (the request ctx may
+			// already be cancelled) — it cannot be valid committed content.
+			// A copy or read error leaves the object's state unknown and a
+			// concurrent commit may reference it, so nothing is deleted then:
+			// alwaysWrite makes the next attempt re-copy and re-verify,
+			// which repairs whatever is there.
+			verified, provenBad := false, false
+			defer func() {
+				if !verified && provenBad {
+					dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+					defer cancel()
+					_ = m.Objects.Delete(dctx, published)
+				}
+			}()
+			for attempt := 0; attempt < 2 && !verified; attempt++ {
+				// Each attempt starts unknown: only a verification completed
+				// against this attempt's copy may prove the key bad. A failed
+				// Copy can leave a concurrent publish intact, so a stale
+				// provenBad must not survive into it.
+				provenBad = false
+				if err := m.Objects.Copy(ctx, promoKey, published); err != nil {
+					return err
+				}
+				dtr, err := m.Objects.Get(ctx, published)
+				if err != nil {
+					return err
+				}
+				dv := &streamVerifier{r: io.LimitReader(dtr, row.SizeBytes+1), sum: sha256.New()}
+				_, err = io.Copy(io.Discard, dv)
+				dtr.Close()
+				if err != nil {
+					return err
+				}
+				if dv.n == row.SizeBytes && hex.EncodeToString(dv.sum.Sum(nil)) == row.SHA256 {
+					verified = true
+				} else {
+					provenBad = true
+				}
+			}
+			if !verified {
+				return errors.New("published object failed verification")
+			}
+			return nil
+		})
+	if err != nil {
+		if errors.Is(err, store.ErrUploadClaimLost) {
+			return m.uploadFinalizeFallback(ctx, row)
+		}
+		reason, refusable := uploadRefusalReason(err)
+		if !refusable {
+			return release(err)
+		}
+		return refuse(reason)
+	}
+	m.deleteStaging(ctx, row.StagingKey)
+	return x, created, nil
+}
+
+// finalizeCommit is the metadata commit for a completing upload:
+// FinalizeAttachmentUpload validates the claim, inserts or dedups the
+// attachment, charges the fuses and marks the row done in one transaction, so
+// the reservation is consumed exactly when the bytes commit.
+func (m *Manager) finalizeCommit(ctx context.Context, row store.AttachmentUpload) func(store.Attachment) (store.Attachment, bool, error) {
+	return func(x store.Attachment) (store.Attachment, bool, error) {
+		return m.Store.FinalizeAttachmentUpload(ctx, row.ID, row.ClaimNonce, x, m.Config.StorageCap, m.Config.PutCap)
+	}
+}
+
+// uploadFinalizeFallback answers a completion whose claim-scoped finalize did
+// not apply because its lease was reclaimed while it ran. The row is re-read
+// so the caller learns the truth: done means another completion of the same
+// verified bytes finished, refused means the upload is final, anything else
+// means a completion still owns it.
+func (m *Manager) uploadFinalizeFallback(ctx context.Context, row store.AttachmentUpload) (store.Attachment, bool, error) {
+	cur, ok, err := m.Store.GetAttachmentUpload(ctx, row.ID)
+	if err != nil {
+		return store.Attachment{}, false, err
+	}
+	if ok && cur.Status == store.AttachmentUploadDone {
+		x, found, err := m.Store.GetAttachment(ctx, row.SHA256)
+		if err != nil {
+			return store.Attachment{}, false, err
+		}
+		if found {
+			return x, false, nil
+		}
+	}
+	if ok && cur.Status == store.AttachmentUploadRefused {
+		return store.Attachment{}, false, fmt.Errorf("%w: %s", ErrUploadRefused, cur.Reason)
+	}
+	return store.Attachment{}, false, ErrUploadInProgress
+}
+
+// heartbeatUpload refreshes the claim lease while a completion runs, so a
+// streamed upload that takes longer than uploadLease is not reclaimed. The
+// touch is claim-scoped: once the lease is truly lost the beats stop matching
+// and the row can be reclaimed. The returned func stops the heartbeat.
+func (m *Manager) heartbeatUpload(ctx context.Context, row store.AttachmentUpload) func() {
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(uploadHeartbeat)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				_, _ = m.Store.TouchAttachmentUploadClaim(ctx, row.ID, row.ClaimNonce, m.now())
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 // finishUpload moves a row to a final state and deletes its staging object,
@@ -348,7 +626,13 @@ func uploadRefString(row store.AttachmentUpload) string {
 	return row.RefKind + ":" + row.RefID
 }
 
-func newUploadID() (string, error) {
+func newUploadID() (string, error) { return randomHex() }
+
+// newClaimNonce is the per-claim token a completion presents on every
+// transition out of completing.
+func newClaimNonce() (string, error) { return randomHex() }
+
+func randomHex() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err

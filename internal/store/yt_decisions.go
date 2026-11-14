@@ -225,11 +225,11 @@ func readYTDecisionRows(ctx context.Context, q pgx.Tx, ids []int64, now time.Tim
 	return out, rows.Err()
 }
 
-// decisionTextOf is the DEC issue text of a record (the stored question and
-// options; the 3514 display rendering is the console's).
+// decisionTextOf is the DEC issue text of a record, including the session
+// reading and grounds when present (the 3514 display rendering is the console's).
 func decisionTextOf(d DecisionRecord, channel string) ytwrite.DecisionText {
 	x := ytwrite.DecisionText{DecisionID: d.ID, Question: d.Question, Recommended: d.Recommended, DefaultAction: d.DefaultAction,
-		Answer: d.Answer, AnsweredBy: d.AnsweredBy, Channel: channel, AnsweredAt: d.AnsweredAt}
+		Reading: d.Reading, Grounds: d.Grounds, Answer: d.Answer, AnsweredBy: d.AnsweredBy, Channel: channel, AnsweredAt: d.AnsweredAt}
 	if d.TaskID != nil {
 		x.TaskID = *d.TaskID
 	}
@@ -499,7 +499,7 @@ func ytDecisionConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID st
 		(SELECT 'decision is mapped to issue '||yt_id FROM yt_entity_map
 			WHERE entity_kind='decision' AND hk_key=$1 AND yt_id<>$3),
 		(SELECT 'issue is mapped to decision '||hk_key FROM yt_entity_map
-			WHERE entity_kind='decision' AND yt_id=$3 AND hk_key<>$1),
+			WHERE entity_kind='decision' AND (tenant=$2 OR tenant='') AND yt_id=$3 AND hk_key<>$1),
 		'')`, op.EntityID, op.Tenant, ytID).Scan(&detail)
 	if err != nil {
 		return "", err

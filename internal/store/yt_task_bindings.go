@@ -45,13 +45,28 @@ type YTTaskBinding struct {
 
 // The origins of a binding (yt_task_bindings.origin).
 const (
+	// YTBindingImportVerified is a binding `youtrack comments-backfill`
+	// published after its verification.
 	YTBindingImportVerified = "import_verified"
-	YTBindingOpApplied      = "op_applied"
+	// YTBindingOpApplied is a binding an applied issue_create op published.
+	YTBindingOpApplied = "op_applied"
+	// YTBindingAutoVerified is a binding the automatic binder published (hk
+	// 4492, HANDOFFKEEP_YT_BIND): the same verification as the backfill, with
+	// the comment watermark computed from the issue's own listing instead of
+	// the task's highest comment id.
+	YTBindingAutoVerified = "auto_verified"
 )
 
 // ErrYTBindingConflict is a binding that disagrees with a mapping hk already
 // keeps, or one verified against mappings that changed since.
 var ErrYTBindingConflict = errors.New("yt_binding_conflict")
+
+// ErrYTBindingExcluded is an automatic publication refused because the
+// operator unbound the task and nothing bound it since (I7): the binder read
+// that before it verified the issue, but the unbind may commit while it does
+// its YouTrack reads, so the publication rechecks it under the ownership lock.
+// Nothing was written.
+var ErrYTBindingExcluded = errors.New("yt_binding_excluded")
 
 // ytIssueOwnershipLock serialises the writers that give a YouTrack issue to a
 // task: AddYTTaskBinding and AddYTCommentCanary. Each checks the other's
@@ -90,12 +105,16 @@ const (
 
 // ytBindingSourcesSQL reads, in one statement, which sources disagree with
 // the binding ($1 task id, $2 tenant, $3 issue id, $4 task id as text, $5
-// YouTrack project id). Plain reads: the caller decides the locks.
+// YouTrack project id). Plain reads: the caller decides the locks. The map
+// rows that name an issue are read on the binding's tenant: the same YouTrack
+// id on another tenant is another issue (hk 3912). A row a release that
+// predates the tenant column wrote (tenant ”) is read as this tenant's, the
+// safe direction for a check that refuses.
 const ytBindingSourcesSQL = `SELECT
 	EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack'
 		AND (coalesce(external_id,'') <> $3 OR (coalesce(tenant,'') <> '' AND tenant <> $2))),
 	EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$4 AND yt_id <> $3),
-	EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND yt_id=$3 AND hk_key <> $4),
+	EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND (tenant=$2 OR tenant='') AND yt_id=$3 AND hk_key <> $4),
 	EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1 AND (tenant <> $2 OR issue_id <> $3)),
 	EXISTS(SELECT 1 FROM yt_comment_canary WHERE tenant=$2 AND issue_id=$3 AND task_id <> $1),
 	EXISTS(SELECT 1 FROM yt_task_bindings WHERE tenant=$2 AND issue_id=$3 AND task_id <> $1),
@@ -226,8 +245,8 @@ func ytCommentOnOpTx(ctx context.Context, tx pgx.Tx, c TaskComment, now time.Tim
 		}
 		return op, true, "", nil
 	}
-	tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, yt_parent_id, op_id, created_at)
-		VALUES ('task',$1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, taskKey, b.IssueID, b.ProjectID, op.ID, now)
+	tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
+		VALUES ('task',$1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, b.Tenant, taskKey, b.IssueID, b.ProjectID, op.ID, now)
 	if err != nil {
 		return ytwrite.Op{}, false, "", err
 	}
@@ -252,85 +271,21 @@ func ytCommentOnOpTx(ctx context.Context, tx pgx.Tx, c TaskComment, now time.Tim
 // any of them changed since, then refuses if any local source disagrees with
 // the binding (ytBindingDisagreement) or another binding holds the task.
 // Adding the same binding again is a no-op that returns the stored row.
+// A new binding appends a 'bound' row to yt_binding_history in its
+// transaction (the one UnbindYTTaskBinding's 'unbound' row follows).
 // A new binding creates no map row; when task fields mode is on, it also
 // prepares the task's first issue_fields op in this transaction. The new
 // row's comments_from is the task's highest comment id read in the same
 // transaction, so the binding never copies a comment written before it.
+// The automatic binder publishes through PublishYTAutoBinding, which shares
+// this publication and copies its evidence's missing comments in it.
 //
 // Locks, in this order (lockorder.go): the issue ownership lock, FOR UPDATE on
 // the task row, the task's lane lock, FOR SHARE on the task's youtrack_projects
-// and task_origins rows, then the new binding row.
+// and task_origins rows, then the new binding row and its history row.
 func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified YTCanaryCandidate) (YTTaskBinding, error) {
-	if b.TaskID < 1 || b.Tenant == "" || len(b.Tenant) > 255 || b.IssueID == "" || len(b.IssueID) > 64 ||
-		len(b.IssueReadable) > 64 || b.ProjectID == "" || len(b.ProjectID) > 64 || b.BoundBy == "" || !validText(b.BoundBy, 200) || verified.TaskID != b.TaskID {
-		return YTTaskBinding{}, errors.New("invalid task binding")
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return YTTaskBinding{}, err
-	}
-	defer tx.Rollback(ctx)
-	if err := lockYTIssueOwnershipTx(ctx, tx, b.TaskID); err != nil {
-		return YTTaskBinding{}, err
-	}
-	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(b.TaskID, 10)); err != nil {
-		return YTTaskBinding{}, err
-	}
-	current, err := readYTCanaryCandidate(ctx, tx, b.TaskID, " FOR SHARE")
-	if err != nil {
-		return YTTaskBinding{}, err
-	}
-	if current != verified {
-		return YTTaskBinding{}, fmt.Errorf("%w: task %d's YouTrack mappings changed after verification (verified %+v, now %+v); verify again",
-			ErrYTBindingConflict, b.TaskID, verified, current)
-	}
-	have, found, err := readYTBinding(ctx, tx, b.TaskID)
-	if err != nil {
-		return YTTaskBinding{}, err
-	}
-	if !found {
-		// hk is creating (or adopting) the task's issue itself (hk 3898):
-		// that op publishes the binding when it is applied.
-		pending, err := ytIssueOpPendingTx(ctx, tx, b.TaskID)
-		if err != nil {
-			return YTTaskBinding{}, err
-		}
-		if pending {
-			return YTTaskBinding{}, fmt.Errorf("%w: task %d has an unresolved issue_create op", ErrYTBindingConflict, b.TaskID)
-		}
-	}
-	if found {
-		if have.Tenant != b.Tenant || have.IssueID != b.IssueID {
-			return YTTaskBinding{}, fmt.Errorf("%w: task %d is bound to issue %s on %s", ErrYTBindingConflict, b.TaskID, have.IssueID, have.Tenant)
-		}
-		return have, tx.Commit(ctx)
-	}
-	source, err := ytBindingDisagreement(ctx, tx, b)
-	if err != nil {
-		return YTTaskBinding{}, err
-	}
-	if source != "" {
-		return YTTaskBinding{}, fmt.Errorf("%w: %s disagrees with binding task %d to issue %s on %s", ErrYTBindingConflict, source, b.TaskID, b.IssueID, b.Tenant)
-	}
-	if s.ytBindingChecked != nil {
-		s.ytBindingChecked()
-	}
-	now := time.Now().UTC()
-	var got YTTaskBinding
-	err = scanYTBinding(tx.QueryRow(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, comments_from)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$1))
-		ON CONFLICT DO NOTHING RETURNING `+ytBindingColumns,
-		b.TaskID, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, now), &got)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return YTTaskBinding{}, fmt.Errorf("%w: issue %s on %s is bound to another task", ErrYTBindingConflict, b.IssueID, b.Tenant)
-	}
-	if err != nil {
-		return YTTaskBinding{}, err
-	}
-	if err := s.ytFieldsOnBindTx(ctx, tx, b.TaskID, now); err != nil {
-		return YTTaskBinding{}, err
-	}
-	return got, tx.Commit(ctx)
+	got, _, _, err := s.publishYTBinding(ctx, b, verified, ytBindingPublication{origin: YTBindingImportVerified})
+	return got, err
 }
 
 // YTCommentCandidate is a task the comments preflight and backfill classify.
@@ -366,6 +321,18 @@ func (s *Store) YTCommentCandidates(ctx context.Context, since time.Time, projec
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// YTCommentCandidateOf reads one task as a candidate (`--task N` of the
+// comments preflight and backfill); found is false for a task that does not
+// exist.
+func (s *Store) YTCommentCandidateOf(ctx context.Context, taskID int64) (YTCommentCandidate, bool, error) {
+	var c YTCommentCandidate
+	err := s.pool.QueryRow(ctx, `SELECT id, coalesce(project,'') FROM tasks WHERE id=$1`, taskID).Scan(&c.TaskID, &c.Project)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return YTCommentCandidate{}, false, nil
+	}
+	return c, err == nil, err
 }
 
 // YTCommentVolume counts the comments created at or after since that an hk

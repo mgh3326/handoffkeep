@@ -503,7 +503,7 @@ func subTaskRollupTx(ctx context.Context, tx pgx.Tx, parentID int64) (subTaskRol
 //	any child not settled             -> no change
 //	some child merged, not deployed   -> parent merged
 //	some deployed, none merged        -> parent deployed (completed children do not wait)
-//	only completed children           -> completed for decide, ops, verify;
+//	only completed children           -> completed for decide, ops, verify, research;
 //	                                     otherwise no change; skip recorded
 //	all dropped or duplicate          -> no change; the skip is recorded
 //

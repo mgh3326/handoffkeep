@@ -66,6 +66,7 @@ type DotsRequestInput struct {
 	RequesterLane  string `json:"requester_lane,omitempty"`
 	Project        string `json:"project,omitempty"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	Type           string `json:"type,omitempty"`
 }
 
 // CreateDotsRequest creates a standalone request and its body in one transaction.
@@ -77,6 +78,9 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 	if !validName(lane) || by == "" || !validText(by, 128) || strings.TrimSpace(in.Body) == "" {
 		return Task{}, errors.New("invalid dots request")
 	}
+	if err := checkDotsRequestTemplate(in); err != nil {
+		return Task{}, err
+	}
 	if _, invalid := dotsNotifyLanes(in.Body, lane); len(invalid) > 0 {
 		return Task{}, fmt.Errorf("invalid dots notify lane %q", invalid[0])
 	}
@@ -84,11 +88,15 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 	if in.Project != "" {
 		project = &in.Project
 	}
-	item := triageItem{Title: in.Title, Body: in.Body, Kind: "verify", Project: project}
+	item := triageItem{Title: in.Title, Body: dotsRequestBody(in), Kind: "verify", Project: project}
 	if err := checkTriageItem(item); err != nil {
 		return Task{}, err
 	}
-	requestHash := sha256.Sum256([]byte(strings.Join([]string{in.Title, in.Body, lane, in.Project}, "\x00")))
+	digestParts := []string{in.Title, in.Body, lane, in.Project}
+	if in.Type != "" {
+		digestParts = append(digestParts, in.Type)
+	}
+	requestHash := sha256.Sum256([]byte(strings.Join(digestParts, "\x00")))
 	requestDigest := hex.EncodeToString(requestHash[:])
 	var sourceRef string
 	if in.IdempotencyKey != "" {
@@ -716,8 +724,8 @@ func dotsResultBody(kind string, issue DotsIssue, c DotsComment) string {
 	return "# [dots] " + kind + " " + issue.Identifier + " — " + issue.Title + "\n\n" + issue.URL + "\n\n" + c.Body + "\n"
 }
 
-// dotsLaneText makes a notification drainable: the hub rejects C0/C1 control
-// characters and text over the lane-event byte cap.
+// dotsLaneText replaces controls that the hub rejects while retaining the
+// full event text.
 func dotsLaneText(text string) string {
 	return assistantLaneText("", strings.Map(func(r rune) rune {
 		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {

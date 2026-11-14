@@ -79,9 +79,6 @@ func validDecisionResolveText(value string, required bool) bool {
 	if value == "" {
 		return true
 	}
-	if len(value) > store.RelayLaneEventMaxBytes {
-		return false
-	}
 	for _, r := range value {
 		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
 			return false
@@ -166,8 +163,8 @@ func (s Service) ResolveDecision(ctx context.Context, input DecisionResolveInput
 	if input.Note != "" {
 		text += " — " + input.Note
 	}
-	if len([]byte(text)) > store.RelayLaneEventMaxBytes || !validDecisionResolveText(text, true) {
-		return store.RelayEvent{}, errors.New("decision response is too long")
+	if !validDecisionResolveText(text, true) {
+		return store.RelayEvent{}, errors.New("invalid decision response")
 	}
 	eventID, err := decisionEventID(fmt.Sprintf("cli-decision-%s-%d-", input.Type, input.ID))
 	if err != nil {
@@ -644,6 +641,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/tasks/{id}/comments", s.taskCommentsList)
 	m.HandleFunc("POST /v1/tasks/{id}/comments", s.taskCommentCreate)
 	m.HandleFunc("POST /v1/decisions/resolve", s.decisionResolve)
+	m.HandleFunc("POST /v1/decisions/record", s.decisionRecordSession)
 	m.HandleFunc("GET /v1/decisions/deliveries/hygiene", s.decisionDeliveryHygiene)
 	m.HandleFunc("GET /v1/decision-requests", s.decisionRecordsList)
 	m.HandleFunc("GET /v1/decision-requests/sources", s.decisionSources)
@@ -681,11 +679,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/chat/messages", s.chatMessagesList)
 	m.HandleFunc("POST /v1/chat/messages/{id}/delivered", s.chatMessageDelivered)
 	m.HandleFunc("POST /v1/chat/messages/{id}/failed", s.chatMessageFailed)
-	m.HandleFunc("GET /v1/assistant/pending", s.assistantPending)
-	m.HandleFunc("GET /v1/assistant/outbox", s.assistantOutboxList)
-	m.HandleFunc("POST /v1/assistant/outbox/sent", s.assistantOutboxSent)
 	m.HandleFunc("POST /v1/assistant/outbox/applied", s.assistantOutboxApplied)
-	m.HandleFunc("POST /v1/assistant/decisions/resolve", s.assistantDecisionResolve)
 	if s.UI != nil {
 		m.Handle("/ui", s.UI)
 		m.Handle("/ui/", s.UI)
@@ -1849,9 +1843,13 @@ const operatorDeskClientID = "operator-desk"
 // right: quota grants, host grants and task writes are unchanged.
 const panewireDesignClientID = "panewire-design"
 
+// fleetPolicyClientID is the fleet-policy design session's catalog writer,
+// admitted by routing-policy decision 21. Its token is provisioned separately.
+const fleetPolicyClientID = "fleet-policy"
+
 // benchCatalogWriter reports whether client may write the bench catalog.
 func benchCatalogWriter(client string) bool {
-	return client == operatorClientID || client == operatorDeskClientID || client == panewireDesignClientID
+	return client == operatorClientID || client == operatorDeskClientID || client == panewireDesignClientID || client == fleetPolicyClientID
 }
 
 type benchCatalogInput struct {
@@ -2006,6 +2004,8 @@ const (
 // decode reads one JSON request body into v. max is the payload's own byte
 // cap; 4 KiB of slack covers the envelope keys around it.
 func decode(r *http.Request, v any, max int) error {
+	// Every route chooses one bound for this buffered decode; the extra space
+	// is a fixed JSON-envelope allowance within the route's request budget.
 	return decodeLimited(r.Body, v, int64(max+4096))
 }
 
@@ -2147,7 +2147,9 @@ func (s Server) attachmentPut(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, attachments.ErrDisabled)
 		return
 	}
-	max := s.Service.Attachments.Config.MaxBytes
+	// This buffered route has a 64 MiB server-memory budget; larger OCI-sized
+	// files use the direct begin/complete upload endpoints.
+	max := min(s.Service.Attachments.Config.MaxBytes, int64(64<<20))
 	b, e := io.ReadAll(http.MaxBytesReader(w, r.Body, max))
 	if e != nil {
 		appErr(w, r, attachments.ErrTooLarge)
@@ -2270,9 +2272,21 @@ func (s Server) metrics(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
+	// The outbox gauges come from the database. A Server with no Store (tests
+	// that exercise only the client-revision series) reports none.
+	var outbox bytes.Buffer
+	if st := s.Service.Store; st != nil {
+		o, e := st.YTWriteOutboxStatus(r.Context(), time.Now())
+		if e != nil {
+			appErr(w, r, e)
+			return
+		}
+		writeYTWriteOutboxMetrics(&outbox, o)
+	}
 	if s.Service.Attachments == nil || !s.Service.Attachments.Enabled {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		_, _ = w.Write([]byte("handoffkeep_attach_enabled 0\n"))
+		_, _ = w.Write(outbox.Bytes())
 		s.ClientRevisions.writeMetrics(w)
 		return
 	}
@@ -2289,6 +2303,7 @@ func (s Server) metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprintf(w, "handoffkeep_attach_bytes_total %d\nhandoffkeep_attach_objects %d\nhandoffkeep_attach_puts_month %d\nhandoffkeep_attach_gets_month %d\nhandoffkeep_attach_cap_bytes %d\nhandoffkeep_attach_cap_ratio %.8f\n", u.TotalBytes, objects, u.Puts, u.Gets, c.StorageCap, float64(u.TotalBytes)/float64(c.StorageCap))
+	_, _ = w.Write(outbox.Bytes())
 	s.ClientRevisions.writeMetrics(w)
 }
 

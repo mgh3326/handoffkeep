@@ -18,6 +18,52 @@ const decisionListUsage = "usage: decisions list [--status open|answered|superse
 const decisionSnoozeUsage = "usage: decisions snooze <id> --until <RFC3339>"
 const decisionBackfillUsage = "usage: decisions backfill --dry-run [--json]"
 const decisionHygieneUsage = "usage: decisions hygiene"
+const decisionRecordUsage = "usage: decisions record --key <stable-key> --lane <lane> --reading <interpretation> --quote <verbatim-words> --decided-at <RFC3339> --ground <link> [--ground <link> ...]"
+
+func decisionRecordCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("decisions record", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	c := remoteClient(fs)
+	var in store.SessionDecisionInput
+	var decidedAt string
+	var grounds stringSliceFlag
+	fs.StringVar(&in.Key, "key", "", "stable retry key")
+	fs.StringVar(&in.Lane, "lane", "", "settling session lane")
+	fs.StringVar(&in.Reading, "reading", "", "what the decision means")
+	fs.StringVar(&in.Quote, "quote", "", "operator's exact words")
+	fs.StringVar(&decidedAt, "decided-at", "", "time the decision was made (RFC3339)")
+	fs.Var(&grounds, "ground", "ground link (repeatable)")
+	parsed, err := splitArgs(args, "key", "lane", "reading", "quote", "decided-at", "ground")
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(parsed); err != nil || fs.NArg() != 0 || in.Key == "" || in.Lane == "" || in.Reading == "" || in.Quote == "" || decidedAt == "" || len(grounds) == 0 {
+		return errors.New(decisionRecordUsage)
+	}
+	in.DecidedAt, err = time.Parse(time.RFC3339Nano, decidedAt)
+	if err != nil {
+		return errors.New("--decided-at must be RFC3339")
+	}
+	in.Grounds = []string(grounds)
+	if err := mustClient(c); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	result, err := c.RecordSessionDecision(ctx, in)
+	if err != nil {
+		return err
+	}
+	return printJSON(out, result)
+}
+
+type stringSliceFlag []string
+
+func (f *stringSliceFlag) String() string { return strings.Join(*f, ",") }
+func (f *stringSliceFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
 
 // decisionListCmd prints decision records as JSON, oldest first.
 func decisionListCmd(args []string, out io.Writer) error {

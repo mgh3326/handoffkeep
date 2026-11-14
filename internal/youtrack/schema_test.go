@@ -26,12 +26,11 @@ func seedSchemaTenant(t *testing.T) (*fakeTenant, *fakeSchemaStore, *SchemaRunne
 	f.seedBuiltinLinks()
 	schema := DefaultSchema()
 	st := &fakeSchemaStore{
-		projects:   []string{"factortrail", "handoffkeep", "mergewake"},
-		lanes:      map[string][]string{"factortrail": {"lane-a"}, "handoffkeep": {"lane-a", "lane-b"}, "mergewake": {"lane-a", "lane-b"}},
-		milestones: map[string][]string{"handoffkeep": {"M1", "M2"}},
-		rows:       map[string]store.YouTrackProject{},
+		projects: []string{"factortrail", "handoffkeep", "mergewake"},
+		lanes:    map[string][]string{"factortrail": {"lane-a"}, "handoffkeep": {"lane-a", "lane-b"}, "mergewake": {"lane-a", "lane-b"}},
+		rows:     map[string]store.YouTrackProject{},
 	}
-	vocab := Vocabulary{Kinds: store.TaskKinds(), Lanes: st.lanes, Areas: store.TaskAreas(), Milestones: st.milestones}
+	vocab := Vocabulary{Kinds: store.TaskKinds(), Lanes: st.lanes}
 
 	// The import's project: only the values rows used, no resolved flag set.
 	hk := f.addProject("HANDOFFKEE", "handoffkeep")
@@ -41,6 +40,10 @@ func seedSchemaTenant(t *testing.T) (*fakeTenant, *fakeSchemaStore, *SchemaRunne
 	f.attach(hk, schema.GradeField, KindEnum, []BundleValue{{Name: "A"}, {Name: "B"}})
 	f.attach(hk, schema.TierField, KindEnum, []BundleValue{{Name: "T1"}})
 	f.attach(hk, schema.LaneField, KindEnum, []BundleValue{{Name: "lane-a"}})
+	// The importer creates these two fields as strings. Planning against an
+	// imported project must accept them without a type-mismatch report.
+	f.attach(hk, schema.AreaField, KindString, nil)
+	f.attach(hk, schema.MilestoneField, KindString, nil)
 
 	// A project that has every field the schema declares, complete, but no
 	// mapping row.
@@ -86,6 +89,22 @@ func TestDesiredListsEveryImportFieldInImportOrder(t *testing.T) {
 	}
 }
 
+// hk 4305: the importer's fieldsForProject declared 영역 and 마일스톤 as
+// string fields; Desired must say the same so a project the run creates
+// takes the writes an import-created one does.
+func TestDesiredDeclaresAreaAndMilestoneAsString(t *testing.T) {
+	byName := map[string]FieldSpec{}
+	for _, spec := range DefaultSchema().Desired(Vocabulary{}, "x") {
+		byName[spec.Name] = spec
+	}
+	for _, name := range []string{"영역", "마일스톤"} {
+		spec, ok := byName[name]
+		if !ok || spec.Kind != KindString || len(spec.Values) != 0 {
+			t.Fatalf("%s spec=%+v want a string field with no bundle", name, spec)
+		}
+	}
+}
+
 func TestSchemaPlanListsExactlyWhatIsMissing(t *testing.T) {
 	f, _, runner := seedSchemaTenant(t)
 	plan, err := runner.Plan(context.Background(), "")
@@ -104,15 +123,15 @@ func TestSchemaPlanListsExactlyWhatIsMissing(t *testing.T) {
 		"factortrail\thk 상태\tattach\tstate[1] with 12 values",
 		"factortrail\thk 우선순위\tattach\tinteger",
 		"factortrail\t레인\tattach\tenum[1] with 1 values",
-		"factortrail\t종류\tattach\tenum[1] with 5 values",
+		"factortrail\t종류\tattach\tenum[1] with 6 values",
 		"factortrail\t등급\tattach\tenum[1] with 7 values",
 		"factortrail\t티어\tattach\tenum[1] with 4 values",
 		"factortrail\tPR\tattach\tstring",
 		"factortrail\t작업 job\tattach\tstring",
 		"factortrail\t멈춤\tattach\tenum[*] with 1 values",
 		"factortrail\t마감\tattach\tdate",
-		"factortrail\t영역\tattach\tenum[1] with 13 values",
-		"factortrail\t마일스톤\tattach\tenum[1] with 0 values",
+		"factortrail\t영역\tattach\tstring",
+		"factortrail\t마일스톤\tattach\tstring",
 		"factortrail\t예상 소요\tattach\tperiod",
 		"handoffkeep\thk ID\tattach\tinteger",
 		"handoffkeep\thk 프로젝트\tattach\tstring",
@@ -121,8 +140,6 @@ func TestSchemaPlanListsExactlyWhatIsMissing(t *testing.T) {
 		"handoffkeep\t작업 job\tattach\tstring",
 		"handoffkeep\t멈춤\tattach\tenum[*] with 1 values",
 		"handoffkeep\t마감\tattach\tdate",
-		"handoffkeep\t영역\tattach\tenum[1] with 13 values",
-		"handoffkeep\t마일스톤\tattach\tenum[1] with 2 values",
 		"handoffkeep\t예상 소요\tattach\tperiod",
 		// missing bundle values, in the declaration's order
 		"handoffkeep\thk 상태\tadd-value\t분류 대기 (resolved=false ordinal=0)",
@@ -135,6 +152,7 @@ func TestSchemaPlanListsExactlyWhatIsMissing(t *testing.T) {
 		"handoffkeep\t레인\tadd-value\tlane-b",
 		"handoffkeep\t종류\tadd-value\tdecide",
 		"handoffkeep\t종류\tadd-value\tops",
+		"handoffkeep\t종류\tadd-value\tresearch",
 		"handoffkeep\t종류\tadd-value\tverify",
 		"handoffkeep\t등급\tadd-value\tSS",
 		"handoffkeep\t등급\tadd-value\tS+",
@@ -592,10 +610,9 @@ func TestSchemaRepairsAStaleMappingAfterAFailedPut(t *testing.T) {
 }
 
 func TestSchemaPlansASharedBundleOnce(t *testing.T) {
-	f, st, runner := seedSchemaTenant(t)
+	f, _, runner := seedSchemaTenant(t)
 	ctx := context.Background()
-	// mergewake's lane field uses handoffkeep's bundle, which lacks lane-b; both
-	// projects' milestones go into one shared milestone bundle.
+	// mergewake's lane field uses handoffkeep's bundle, which lacks lane-b.
 	hk, mw := f.projects[0], f.projects[1]
 	var laneBundle *fakeBundle
 	for _, pf := range hk.Fields {
@@ -610,7 +627,6 @@ func TestSchemaPlansASharedBundleOnce(t *testing.T) {
 		}
 	}
 	f.share(mw, "레인", KindEnum, laneBundle)
-	st.milestones["mergewake"] = []string{"M2", "M3"}
 	plan, err := runner.Plan(ctx, "")
 	if err != nil {
 		t.Fatal(err)

@@ -285,8 +285,13 @@ func (r *WriteRemote) CreateIssue(ctx context.Context, in ytwrite.IssueCreate) (
 	fields := []CustomField{IntField(schema.HKIDField, int(in.TaskID))}
 	switch {
 	case in.HKProject == "":
-	case in.HKProjectText:
+	case in.ProjectField == ytwrite.IssueProjectString:
+		// SimpleProjectCustomField (the importer's shape) takes a primitive.
 		fields = append(fields, StringField(schema.ProjectField, in.HKProject))
+	case in.ProjectField == ytwrite.IssueProjectText:
+		// TextProjectCustomField is formatted text: a primitive string here
+		// is a 4xx that would reject the op for good (hk 3940).
+		fields = append(fields, TextField(schema.ProjectField, in.HKProject))
 	default:
 		fields = append(fields, EnumField(schema.ProjectField, in.HKProject))
 	}
@@ -362,12 +367,17 @@ func (r *WriteRemote) CheckIssueFields(ctx context.Context, projectID, hkProject
 		case schema.ProjectField:
 			hasProject = true
 			switch f.Type {
-			case "SimpleProjectCustomField", "TextProjectCustomField":
-				// The importer's text field takes any value.
-				out.ProjectText, hasValue = true, true
+			case "SimpleProjectCustomField":
+				// The importer's string field takes a primitive.
+				out.Project, hasValue = ytwrite.IssueProjectString, true
+			case "TextProjectCustomField":
+				// Formatted text: the create must send TextIssueCustomField
+				// with a text value, not a primitive (hk 3940).
+				out.Project, hasValue = ytwrite.IssueProjectText, true
 			case "EnumProjectCustomField":
+				out.Project = ytwrite.IssueProjectEnum
 			default:
-				return none, fmt.Errorf("youtrack project %s: %q is a %s, not a text or enum field", projectID, schema.ProjectField, f.Type)
+				return none, fmt.Errorf("youtrack project %s: %q is a %s, not a text, string or enum field", projectID, schema.ProjectField, f.Type)
 			}
 			if f.Bundle != nil {
 				for _, v := range f.Bundle.Values {

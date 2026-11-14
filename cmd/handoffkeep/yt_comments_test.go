@@ -40,10 +40,11 @@ func TestYTCommentsModeFromEnv(t *testing.T) {
 	}
 }
 
-// HANDOFFKEEP_YT_COMMENTS_CATCHUP is off unless it is exactly "on" (hk
-// 3897: the catch-up stays off until hk 3907); any other value fails closed.
+// HANDOFFKEEP_YT_COMMENTS_CATCHUP is on unless it is exactly "off" (hk 4489:
+// the legacy push whose unlinked posts justified the opt-in is gone); any
+// other value fails closed.
 func TestYTCommentsCatchUpFromEnv(t *testing.T) {
-	for value, want := range map[string]bool{"": false, "off": false, " off ": false, "on": true, " on\n": true} {
+	for value, want := range map[string]bool{"": true, "off": false, " off ": false, "on": true, " on\n": true} {
 		t.Setenv("HANDOFFKEEP_YT_COMMENTS_CATCHUP", value)
 		if got, err := ytCommentsCatchUpFromEnv(); err != nil || got != want {
 			t.Errorf("%q: %v %v, want %v", value, got, err, want)
@@ -319,7 +320,7 @@ func TestYTCommentsWorkerStopIsBoundedWhileSettling(t *testing.T) {
 		stoppedAt = time.Now()
 		stop()
 	}
-	w, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsCanary, false, nil)
+	w, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsCanary, false, false, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +365,7 @@ func TestYTCommentsWorkerStopIsBoundedWhileSettling(t *testing.T) {
 		t.Fatalf("op after a stop during settlement: %+v %v; want dispatched (durable, unrecorded)", op, err)
 	}
 
-	restarted, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsCanary, false, func() time.Time { return time.Now().UTC().Add(time.Minute) })
+	restarted, err := newYTCommentsWorker(st, remote, tenant, store.YTCommentsCanary, false, false, "", func() time.Time { return time.Now().UTC().Add(time.Minute) })
 	if err != nil {
 		t.Fatal(err)
 	}

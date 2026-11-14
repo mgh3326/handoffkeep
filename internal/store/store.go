@@ -40,7 +40,7 @@ var ErrSearchTimeout = errors.New("search_timeout")
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 var documentKinds = map[string]bool{"brief": true, "report": true, "answer": true, "handoff": true, "note": true, "other": true, "decision": true, "research": true, "design": true, "policy": true, "evidence": true}
 var documentOriginClasses = map[string]bool{"authored": true, "job": true, "import": true}
-var taskKinds = map[string]bool{"implement": true, "verify": true, "fix": true, "decide": true, "ops": true}
+var taskKinds = map[string]bool{"implement": true, "verify": true, "research": true, "fix": true, "decide": true, "ops": true}
 
 // TaskKinds is the server's task kind vocabulary — the single source of truth
 // client hints render so the two cannot drift.
@@ -59,8 +59,6 @@ var relayEventKinds = map[string]bool{"job.completed": true, "job.escalate": tru
 // predicate. Keep both predicates explicit so a one-sided edit is testable.
 const relayJobIndexPredicate = "kind IN ('job.completed','job.escalate','job.joined','job.lost','job.revoked')"
 const relayJobConflictPredicate = "kind IN ('job.completed','job.escalate','job.joined','job.lost','job.revoked')"
-
-const RelayLaneEventMaxBytes = 2048
 
 var (
 	ErrTaskConflict         = errors.New("task_conflict")
@@ -215,8 +213,8 @@ type TaskLinear struct {
 }
 
 // DecisionOption is one bounded, operator-visible answer for a decision.
-// Keys are deliberately compact so the same representation can be carried in
-// a lane event without consuming much of its 2048-byte limit.
+// Keys are deliberately compact so the same representation stays readable in
+// a lane event.
 type DecisionOption struct {
 	Key         string `json:"key"`
 	Label       string `json:"label"`
@@ -3058,7 +3056,7 @@ func validRelayEvent(x RelayEvent) bool {
 }
 
 func validLaneEventText(value string) bool {
-	if len(value) == 0 || len(value) > RelayLaneEventMaxBytes {
+	if len(value) == 0 {
 		return false
 	}
 	for _, r := range value {
@@ -3302,9 +3300,6 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 	if limit < 1 {
 		limit = 1000
 	}
-	if limit > 1000 {
-		limit = 1000
-	}
 	rows, err := s.pool.Query(ctx, `SELECT `+prefixedTaskColumns("t")+`,
 		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND `+awaitingEventSQL+` ORDER BY at DESC,id DESC LIMIT 1),'')
 		FROM tasks t WHERE `+awaitingTaskDecisionSQL+` ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, limit)
@@ -3326,9 +3321,6 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 // ListOpenEscalations implements the decision inbox job escalation definition.
 func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEvent, error) {
 	if limit < 1 {
-		limit = 1000
-	}
-	if limit > 1000 {
 		limit = 1000
 	}
 	rows, err := s.pool.Query(ctx, `SELECT `+relayEventColumns+` FROM relay_events e
@@ -3363,9 +3355,6 @@ func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEven
 // ListOpenLaneDecisions implements the decision inbox lane.event definition.
 func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEvent, error) {
 	if limit < 1 {
-		limit = 1000
-	}
-	if limit > 1000 {
 		limit = 1000
 	}
 	rows, err := s.pool.Query(ctx, `SELECT `+relayEventColumns+` FROM relay_events e
@@ -3549,6 +3538,23 @@ func validAttachmentRef(kind, id string) bool {
 	return false
 }
 
+// validAttachmentListRef reports whether kind/id may filter ListAttachments.
+// It accepts every ref a new attachment can be written with plus the checkpoint
+// refs the previous release still writes during the blue-green overlap: the
+// checkpoint API is gone, so nothing writes them here, but the rows stay
+// readable. The id check is the previous release's, so every row it could
+// write is still listed.
+func validAttachmentListRef(kind, id string) bool {
+	if validAttachmentRef(kind, id) {
+		return true
+	}
+	if kind == "checkpoint" {
+		_, e := strconv.ParseInt(id, 10, 64)
+		return e == nil
+	}
+	return false
+}
+
 // ValidTaskRefID reports whether id is a task id written the way ParseRef and
 // the attachment_refs row store it: a positive decimal with no sign or leading
 // zero, so "task:12" and "task:012" cannot name two different refs.
@@ -3605,6 +3611,17 @@ func (s *Store) SetAttachmentObjectLocation(ctx context.Context, sha, location s
 	return nil
 }
 
+// attachmentChargedBytes is the storage-fuse total for a new attachment
+// write: committed attachment bytes plus the bytes still reserved by uploads
+// that can still commit — pending and completing rows whose staging object is
+// not yet confirmed gone. Done and refused rows are excluded: their bytes are
+// either already committed or can never commit again. $1 names one upload to
+// exclude (the completing upload whose own commit this is); every other
+// caller passes ”. ReserveAttachmentUpload keeps its own wider sum — every
+// unreleased row, resolved ones included — because at begin time nothing is
+// mid-commit and a stricter admission only refuses earlier.
+const attachmentChargedBytes = `SELECT (SELECT COALESCE(SUM(size_bytes),0) FROM attachments) + (SELECT COALESCE(SUM(size_bytes),0) FROM attachment_uploads WHERE staging_deleted_at IS NULL AND status IN ('pending','completing') AND ($1='' OR id<>$1))`
+
 // PutAttachment records an immutable object and its reference after S3 PUT has
 // succeeded. It serializes quota accounting with a locked monthly usage row.
 func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, putCap int64) (Attachment, bool, error) {
@@ -3622,6 +3639,13 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 		return x, false, e
 	}
 	defer tx.Rollback(ctx)
+	// Serialize with ReserveAttachmentUpload under the staging-budget lock so
+	// a buffered write and a direct-upload reservation cannot both pass the
+	// same storage fuse. Taken before the usage-row lock; Reserve takes no
+	// row lock, so no cycle is possible (lockorder.go).
+	if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('attachment_staging_budget', 0))`); e != nil {
+		return x, false, e
+	}
 	month := monthNow()
 	if _, e = tx.Exec(ctx, `INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, month); e != nil {
 		return x, false, e
@@ -3630,7 +3654,7 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 	if e = tx.QueryRow(ctx, `SELECT puts FROM attachment_usage WHERE month=$1 FOR UPDATE`, month).Scan(&puts); e != nil {
 		return x, false, e
 	}
-	if e = tx.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes),0) FROM attachments`).Scan(&total); e != nil {
+	if e = tx.QueryRow(ctx, attachmentChargedBytes, "").Scan(&total); e != nil {
 		return x, false, e
 	}
 	var present bool
@@ -3664,13 +3688,19 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 }
 
 // CheckAttachmentCapacity is the preflight fuse before an S3 PUT. PutAttachment
-// repeats these checks in its transaction to make accounting authoritative.
-func (s *Store) CheckAttachmentCapacity(ctx context.Context, size, storageCap, putCap int64) error {
+// and FinalizeAttachmentUpload repeat these checks in their transactions to
+// make accounting authoritative. exceptUpload names the completing upload a
+// caller is about to finalize, so its own reservation is not counted twice;
+// every other caller passes ”.
+func (s *Store) CheckAttachmentCapacity(ctx context.Context, size, storageCap, putCap int64, exceptUpload string) error {
 	tx, e := s.pool.Begin(ctx)
 	if e != nil {
 		return e
 	}
 	defer tx.Rollback(ctx)
+	if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('attachment_staging_budget', 0))`); e != nil {
+		return e
+	}
 	m := monthNow()
 	if _, e = tx.Exec(ctx, `INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, m); e != nil {
 		return e
@@ -3679,7 +3709,7 @@ func (s *Store) CheckAttachmentCapacity(ctx context.Context, size, storageCap, p
 	if e = tx.QueryRow(ctx, `SELECT puts FROM attachment_usage WHERE month=$1 FOR UPDATE`, m).Scan(&puts); e != nil {
 		return e
 	}
-	if e = tx.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes),0) FROM attachments`).Scan(&total); e != nil {
+	if e = tx.QueryRow(ctx, attachmentChargedBytes, exceptUpload).Scan(&total); e != nil {
 		return e
 	}
 	if total+size > storageCap {
@@ -3689,6 +3719,94 @@ func (s *Store) CheckAttachmentCapacity(ctx context.Context, size, storageCap, p
 		return ErrAttachmentPutCap
 	}
 	return tx.Commit(ctx)
+}
+
+// ErrUploadClaimLost reports that FinalizeAttachmentUpload found the upload
+// row no longer completing under the caller's claim nonce — its lease was
+// reclaimed and another completion owns it.
+var ErrUploadClaimLost = errors.New("upload_claim_lost")
+
+// FinalizeAttachmentUpload commits a verified direct upload in one
+// transaction: it validates the completing claim, inserts or dedups the
+// attachment metadata and refs, charges the write once against the fuses, and
+// marks the upload done — consuming its reservation atomically, so no other
+// writer can ever see the bytes as both committed and still reserved. Lock
+// order follows ReserveAttachmentUpload and the capacity checks: the
+// staging-budget advisory lock, then the upload row, then the usage row.
+func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, x Attachment, storageCap, putCap int64) (Attachment, bool, error) {
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(x.SHA256) || x.SizeBytes < 0 || x.MIME == "" || !validText(x.OriginalName, 512) || !validAttachmentRef(x.RefKind, x.RefID) {
+		return x, false, errors.New("invalid attachment")
+	}
+	if !ValidActor(x.CreatedBy) {
+		return x, false, errors.New("invalid attachment created_by")
+	}
+	if x.RefKind == "" {
+		x.RefKind = "none"
+	}
+	tx, e := s.pool.Begin(ctx)
+	if e != nil {
+		return x, false, e
+	}
+	defer tx.Rollback(ctx)
+	if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('attachment_staging_budget', 0))`); e != nil {
+		return x, false, e
+	}
+	var status, claimNonce, rowSHA string
+	var rowSize int64
+	e = tx.QueryRow(ctx, `SELECT status, COALESCE(claim_nonce,''), sha256, size_bytes FROM attachment_uploads WHERE id=$1 FOR UPDATE`, id).Scan(&status, &claimNonce, &rowSHA, &rowSize)
+	if e != nil {
+		if errors.Is(e, pgx.ErrNoRows) {
+			return x, false, ErrUploadClaimLost
+		}
+		return x, false, e
+	}
+	if status != AttachmentUploadCompleting || claimNonce != nonce || rowSHA != x.SHA256 || rowSize != x.SizeBytes {
+		return x, false, ErrUploadClaimLost
+	}
+	month := monthNow()
+	if _, e = tx.Exec(ctx, `INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, month); e != nil {
+		return x, false, e
+	}
+	var puts, total int64
+	if e = tx.QueryRow(ctx, `SELECT puts FROM attachment_usage WHERE month=$1 FOR UPDATE`, month).Scan(&puts); e != nil {
+		return x, false, e
+	}
+	if e = tx.QueryRow(ctx, attachmentChargedBytes, id).Scan(&total); e != nil {
+		return x, false, e
+	}
+	var present bool
+	e = tx.QueryRow(ctx, `SELECT true FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&present)
+	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
+		return x, false, e
+	}
+	if !present {
+		if total+x.SizeBytes > storageCap {
+			return x, false, ErrAttachmentStorageCap
+		}
+		if puts+1 > putCap {
+			return x, false, ErrAttachmentPutCap
+		}
+		x.CreatedAt = time.Now().UTC()
+		if _, e = tx.Exec(ctx, `INSERT INTO attachments(sha256,size_bytes,mime,original_name,created_by,created_at,object_location) VALUES($1,$2,$3,$4,$5,$6,$7)`, x.SHA256, x.SizeBytes, x.MIME, x.OriginalName, x.CreatedBy, x.CreatedAt, x.ObjectLocation); e != nil {
+			return x, false, e
+		}
+		if _, e = tx.Exec(ctx, `UPDATE attachment_usage SET puts=puts+1,bytes_added=bytes_added+$2 WHERE month=$1`, month, x.SizeBytes); e != nil {
+			return x, false, e
+		}
+	} else {
+		if e = tx.QueryRow(ctx, `SELECT size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); e != nil {
+			return x, false, e
+		}
+	}
+	if _, e = tx.Exec(ctx, `INSERT INTO attachment_refs(sha256,ref_kind,ref_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, x.SHA256, x.RefKind, x.RefID); e != nil {
+		return x, false, e
+	}
+	// The status flip consumes the reservation: a done row leaves the
+	// pending/completing sum, so committed and reserved bytes never overlap.
+	if _, e = tx.Exec(ctx, `UPDATE attachment_uploads SET status='done', reason='', updated_at=$3, claim_nonce=NULL WHERE id=$1 AND status='completing' AND claim_nonce=$2`, id, nonce, time.Now().UTC()); e != nil {
+		return x, false, e
+	}
+	return x, !present, tx.Commit(ctx)
 }
 
 var ErrAttachmentStorageCap = errors.New("attachment_storage_cap")
@@ -3721,7 +3839,7 @@ func (s *Store) RecordAttachmentGet(ctx context.Context, sha string, getCap int6
 	return tx.Commit(ctx)
 }
 func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limit int) ([]Attachment, error) {
-	if refKind != "" && !validAttachmentRef(refKind, refID) {
+	if refKind != "" && !validAttachmentListRef(refKind, refID) {
 		return nil, errors.New("invalid attachment ref")
 	}
 	if limit < 1 {

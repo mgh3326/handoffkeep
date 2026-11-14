@@ -60,7 +60,7 @@ func (m *memAttachmentDB) GetAttachment(_ context.Context, sha string) (store.At
 	x, ok := m.rows[sha]
 	return x, ok, nil
 }
-func (*memAttachmentDB) CheckAttachmentCapacity(context.Context, int64, int64, int64) error {
+func (*memAttachmentDB) CheckAttachmentCapacity(context.Context, int64, int64, int64, string) error {
 	return nil
 }
 func (m *memAttachmentDB) PutAttachment(_ context.Context, x store.Attachment, _, _ int64) (store.Attachment, bool, error) {
@@ -70,6 +70,21 @@ func (m *memAttachmentDB) PutAttachment(_ context.Context, x store.Attachment, _
 	}
 	m.rows[x.SHA256] = x
 	return x, true, nil
+}
+func (m *memAttachmentDB) FinalizeAttachmentUpload(_ context.Context, id, nonce string, x store.Attachment, _, _ int64) (store.Attachment, bool, error) {
+	u, ok := m.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce || u.SHA256 != x.SHA256 || u.SizeBytes != x.SizeBytes {
+		return store.Attachment{}, false, store.ErrUploadClaimLost
+	}
+	created := true
+	if old, ok := m.rows[x.SHA256]; ok {
+		x, created = old, false
+	} else {
+		m.rows[x.SHA256] = x
+	}
+	u.Status, u.Reason, u.ClaimNonce = store.AttachmentUploadDone, "", ""
+	m.uploads[id] = u
+	return x, created, nil
 }
 func (m *memAttachmentDB) ListAttachments(_ context.Context, kind, id string, _ int) ([]store.Attachment, error) {
 	var out []store.Attachment
@@ -249,14 +264,14 @@ func TestAttachmentPutEnforcesTheRawCap(t *testing.T) {
 		t.Fatalf("one-over fixture no longer shares the cap's base64 length; the post-decode check is untested")
 	}
 	_, err := attachmentCall(t, cs, "attachment_put", map[string]any{"name": "over.png", "mime": "image/png", "content_base64": base64.StdEncoding.EncodeToString(oneOver)})
-	if err == nil || !strings.Contains(err.Error(), "attachment_too_large") {
-		t.Fatalf("one byte over the raw cap err=%v", err)
+	if err == nil || !strings.Contains(err.Error(), "attachment_too_large") || !strings.Contains(err.Error(), "attachment_upload_begin") || !strings.Contains(err.Error(), "HK_ATTACH_DIRECT_UPLOAD") {
+		t.Fatalf("one byte over the raw cap lacks direct-upload instructions naming the enabling flag: %v", err)
 	}
 	// Three bytes over is longer than the cap in base64, refused before decoding.
 	threeOver := append(append([]byte{}, atCap...), 0, 0, 0)
 	_, err = attachmentCall(t, cs, "attachment_put", map[string]any{"name": "over3.png", "mime": "image/png", "content_base64": base64.StdEncoding.EncodeToString(threeOver)})
-	if err == nil || !strings.Contains(err.Error(), "attachment_too_large") {
-		t.Fatalf("three bytes over the raw cap err=%v", err)
+	if err == nil || !strings.Contains(err.Error(), "attachment_too_large") || !strings.Contains(err.Error(), "HK_ATTACH_DIRECT_UPLOAD") {
+		t.Fatalf("three bytes over the raw cap lacks direct-upload instructions naming the enabling flag: %v", err)
 	}
 	if db.puts != 1 {
 		t.Fatalf("over-cap payloads reached the store: puts=%d", db.puts)
@@ -298,7 +313,7 @@ func TestAttachmentPutIsRegisteredOnBothTransportsWithItsContract(t *testing.T) 
 					t.Errorf("description omits allowed type %s", mime)
 				}
 			}
-			for _, want := range []string{"10 MiB", "task:<id>", "hk:attachment/<sha256>", "/v1/attachments/<sha256>", "attachment_get_url"} {
+			for _, want := range []string{"10 MiB", "attachment_upload_begin", "attachment_upload_complete", "HK_ATTACH_DIRECT_UPLOAD", "256 MiB", "50 GiB", "task:<id>", "hk:attachment/<sha256>", "/v1/attachments/<sha256>", "attachment_get_url"} {
 				if !strings.Contains(desc, want) {
 					t.Errorf("description omits %q", want)
 				}

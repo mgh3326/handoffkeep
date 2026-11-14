@@ -300,6 +300,11 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	if err != nil {
 		return ytwrite.Op{}, "", err
 	}
+	if reject == "" {
+		if reject, detail, err = claimYTArticleCreateTx(ctx, tx, op); err != nil {
+			return ytwrite.Op{}, "", err
+		}
+	}
 	// An issue_create op is dispatched to the YouTrack project its task's
 	// project maps to now, not the one it was prepared for (hk 3909, 4318);
 	// payload is nil when that is unchanged.
@@ -416,9 +421,12 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 		}
 	}
 	for _, m := range maps {
-		tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, hk_key, yt_id, yt_parent_id, op_id, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (entity_kind, hk_key) DO NOTHING`,
-			m.EntityKind, m.HKKey, m.YTID, m.YTParentID, id, now.UTC())
+		// The tenant is part of the issue's identity: the same YouTrack id on
+		// another tenant is another issue (hk 3912, migration
+		// 20261113-yt-entity-map-tenant).
+		tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (entity_kind, hk_key) DO NOTHING`,
+			m.EntityKind, op.Tenant, m.HKKey, m.YTID, m.YTParentID, id, now.UTC())
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return ytwrite.Op{}, ytwrite.ErrConflictingResult // the yt id already maps to another hk key

@@ -132,7 +132,8 @@ email-or-service route as noted.
 
 - `GET /ui/api/board/tasks` lists tasks with `lane`, `state`, `parent_lane`,
   exclusive `after_id`, and `limit` (default 200, max 500) parameters in stable
-  id order. `truncated` and `next_after_id` continue the page.
+  id order. `truncated` and `next_after_id` continue the page; the browser walks
+  pages to the end and there is no total task limit.
 - `GET /ui/api/board/tasks/<id>` returns the task with refs, the append-only
   transition history, per-state dwell segments, and participant segments aggregated from `bench_reps` with an
   exact `task_ref=hk:task/<id>` match. Empty telemetry is `not_collected`;
@@ -141,13 +142,24 @@ email-or-service route as noted.
 - `GET /ui/api/board/tasks/<id>/comments`, `.../attachments`,
   `GET /ui/api/board/projects`, `GET /ui/api/board/lanes`,
   `GET /ui/api/board/doc?key=` and `GET /ui/api/board/doc/attachments?key=`
-  serve the board and document views. Document routes are email-only.
+  serve the board and document views. Comments use 200-row transport pages;
+  the browser follows the cursor through the full list. Document routes are
+  email-only, and the document viewer renders the full stored body.
 - `GET /ui/api/decisions` and `GET /ui/api/decisions/<id>` list and read
   structured decision requests. `GET /ui/api/attention` lists what waits on the
   operator (Home).
 - `GET /ui/api/work-status` and `GET /ui/api/deploy-pending` serve the Work
   status and Deploys views. Deploy status is assembled from deploy-record
-  documents and task events; it is email-only.
+  documents and task events; it is email-only. Each service carries the
+  `state` its newest record and merged-since list prove
+  (`deployed`, `pending`, `deploy_failed`, `health_failed`,
+  `serving_unknown` for an interrupted tick, `no_record`, `partial`); a state
+  a record cannot carry (not built, disabled, check failed, awaiting approval
+  — holds and refusals write no record) is never reported. Each record carries the `target` environment, the `head_sha` it
+  ran, its `included_prs` and `failed_step_name`, so the view shows
+  task→PR→SHA→deploy-record and the running SHA beside the deployed ref.
+  Records hold no CI, deploy-ok or health-check timestamp; a success record's
+  `deployed_at` is after its health check.
 - `GET /ui/api/fleet` is a projection of hub `/v1/nodes` `session_snapshot`.
   Each node carries `machine_id`, `state`, `last_ping`, sessions (`pane_id`,
   `workspace_id`, `label`, `status`, `interactive_ready`), `snapshot_status`,

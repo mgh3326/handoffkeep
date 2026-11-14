@@ -20,6 +20,7 @@ import {
   type DeployPendingResponse,
   type DeployRecordView,
   type DeployServiceView,
+  type DeployState,
 } from "./deploy";
 import { useDeployPending } from "./deployPoll";
 
@@ -32,6 +33,19 @@ const RESULT_LABEL: Record<string, string> = {
   success: "성공",
   failed: "실패",
   rolled_back: "롤백",
+};
+
+/** What the deploy records prove about the newest attempt. A record cannot
+ * carry "not built", "disabled", "check failed" or "awaiting approval" —
+ * holds and refusals write no record — so those never appear here. */
+const DEPLOY_STATE_LABEL: Record<DeployState, string> = {
+  deployed: "배포됨",
+  pending: "배포 대기",
+  deploy_failed: "배포 실패",
+  health_failed: "헬스체크 실패",
+  serving_unknown: "서빙 판 미확인",
+  no_record: "기록 없음",
+  partial: "조회 범위 내",
 };
 
 /** Reason classes the server emits for a malformed deploy record; anything
@@ -49,16 +63,17 @@ function ResultChip({ result }: { result: string }) {
   return <Chip kind="status" state="deployed" stalled={result !== "success"} label={RESULT_LABEL[result] ?? result} />;
 }
 
-/** The deployed version: a SHA or digest cut to 12 characters with a copy
- * button, a version string verbatim, or an explicit gap. */
-function VersionChip({ deployedRef, what }: { deployedRef: string | null; what: string }) {
-  const short = shortDeployedRef(deployedRef);
-  if (deployedRef === null || short === null) {
-    return <span className="hk-chip dp-chip-muted">ref 없음</span>;
+/** A version ref or commit SHA cut to 12 characters with a copy button, a
+ * version string verbatim, or the caller's explicit gap text — a value the
+ * writer did not record is never invented. */
+function RefChip({ value, what, gap }: { value: string | null; what: string; gap: string }) {
+  const short = shortDeployedRef(value);
+  if (value === null || short === null) {
+    return <span className="hk-chip dp-chip-muted">{gap}</span>;
   }
   return (
     <span className="hk-chip dp-chip-ref">
-      <MonoRef value={deployedRef} short={short} label={`${what} 전체 값 복사`} />
+      <MonoRef value={value} short={short} label={`${what} 전체 값 복사`} />
     </span>
   );
 }
@@ -79,16 +94,50 @@ function When({ now, iso }: { now: string; iso: string | null }) {
 
 const docHref = (key: string) => `/ui/doc/${key.split("/").map(encodeURIComponent).join("/")}`;
 
-function AttemptRow({ rec, now }: { rec: DeployRecordView; now: string }) {
+/** The running build's PRs: the PR→SHA link of the task→PR→SHA→deploy chain.
+ * A value that is not a GitHub pull URL renders as text, never a link. */
+function IncludedPRs({ prs }: { prs: string[] }) {
+  if (prs.length === 0) return null;
+  return (
+    <p className="dp-prs">
+      <span className="dp-muted">포함 PR</span>
+      {prs.map((pr) => {
+        const href = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[0-9]+$/.test(pr) ? pr : null;
+        return href === null ? (
+          <span key={pr} className="hk-mono">
+            {pr}
+          </span>
+        ) : (
+          <a key={pr} className="dp-nowrap" href={href} target="_blank" rel="noreferrer">
+            {deployPRLabel(pr)}
+          </a>
+        );
+      })}
+    </p>
+  );
+}
+
+function AttemptRow({ rec, now, cardTarget }: { rec: DeployRecordView; now: string; cardTarget?: string }) {
   return (
     <li className="dp-attempt" data-result={rec.result}>
       <ResultChip result={rec.result} />
-      <VersionChip deployedRef={rec.deployed_ref} what="시도 버전" />
+      <RefChip value={rec.head_sha} what="시도 SHA" gap="SHA 미기록" />
+      {rec.deployed_ref !== rec.head_sha ? (
+        <RefChip value={rec.deployed_ref} what="시도 버전" gap="ref 없음" />
+      ) : null}
+      {rec.target !== undefined && rec.target !== "" && rec.target !== cardTarget ? (
+        <span className="hk-chip dp-chip-host">{rec.target}</span>
+      ) : null}
       <a className="dp-key" href={docHref(rec.record_key)}>
         {rec.record_key}
       </a>
       <When now={now} iso={rec.deployed_at} />
       {rec.failed_step !== null ? <span className="dp-muted">{rec.failed_step}단계</span> : null}
+      {rec.failed_step_name !== null ? (
+        <span className="dp-warn hk-mono" role="note">
+          {rec.failed_step_name}
+        </span>
+      ) : null}
       {rec.serving_maybe_changed ? (
         <span className="dp-warn dp-attempt-note" role="note">
           <Icon name="warning" />
@@ -109,7 +158,7 @@ function RecentAttempts({ svc, now }: { svc: DeployServiceView; now: string }) {
       <h4 className="dp-subhead">{svc.docs_capped ? "최근 시도(조회 범위 내)" : "최근 시도"}</h4>
       <ul className="dp-attempts" aria-label={`${svc.service} 최근 배포`}>
         {shown.map((rec) => (
-          <AttemptRow key={rec.record_key} rec={rec} now={now} />
+          <AttemptRow key={rec.record_key} rec={rec} now={now} cardTarget={svc.target} />
         ))}
       </ul>
       {hidden > 0 ? (
@@ -214,9 +263,19 @@ function ServiceCard({ svc, now }: { svc: DeployServiceView; now: string }) {
           "조회 범위 안에 성공 배포 기록이 없습니다 — 상한 밖은 미확인"
         : "성공 배포 기록 없음";
   return (
-    <section className="dp-card" aria-label={`${svc.service} 배포`}>
+    <section className="dp-card" aria-label={`${svc.service} 배포`} data-state={svc.state}>
       <header className="dp-card-head">
         <h3 className="dp-svc">{svc.service}</h3>
+        {svc.state !== "no_record" ? (
+          <Chip
+            kind="status"
+            state={svc.state}
+            stalled={
+              svc.state === "deploy_failed" || svc.state === "health_failed" || svc.state === "serving_unknown"
+            }
+            label={DEPLOY_STATE_LABEL[svc.state]}
+          />
+        ) : null}
         {svc.target ? <span className="hk-chip dp-chip-host">{svc.target}</span> : null}
         <span className="hk-mono dp-muted">{svc.repo}</span>
       </header>
@@ -230,17 +289,25 @@ function ServiceCard({ svc, now }: { svc: DeployServiceView; now: string }) {
                 deployed_at, so the shown current/latest are in-window results,
                 not fleet truth. */}
             <span className="dp-muted">{svc.docs_capped ? "현재 판(조회 범위 내)" : "현재 판"}</span>
-            <VersionChip deployedRef={svc.current.deployed_ref} what={`${svc.service} 현재 판`} />
+            <RefChip value={svc.current.head_sha} what={`${svc.service} 실행 SHA`} gap="SHA 미기록" />
+            {svc.current.deployed_ref !== svc.current.head_sha ? (
+              <RefChip value={svc.current.deployed_ref} what={`${svc.service} 현재 판`} gap="ref 없음" />
+            ) : null}
+            <span className="dp-muted">출처 {svc.current.source}</span>
           </>
         )}
         {last !== null ? (
           <>
             <span className="dp-muted">마지막 시도</span>
             <ResultChip result={last.result} />
+            {last.head_sha !== null && last.head_sha !== svc.current?.head_sha ? (
+              <RefChip value={last.head_sha} what={`${svc.service} 마지막 시도 SHA`} gap="SHA 미기록" />
+            ) : null}
             <When now={now} iso={last.deployed_at} />
           </>
         ) : null}
       </div>
+      {svc.current !== null ? <IncludedPRs prs={svc.current.included_prs} /> : null}
       <RecentAttempts svc={svc} now={now} />
       {svc.docs_capped ? (
         <p className="dp-warn dp-note">
@@ -297,8 +364,9 @@ export function DeployPanel({ fetchStatus = fetchDeployPending, pollMs = 15_000 
         <ServiceCard key={svc.service} svc={svc} now={data.generated_at} />
       ))}
       <p className="dp-note">
-        배포가 필요 없는 머지(문서·CI·스킬)도 목록에 섞여 있을 수 있습니다. PR은 태스크에 적힌 PR을 기준으로 연결하며, 머지를 마친 PR이
-        아니라 처음 연 PR일 수 있습니다.
+        실행 SHA와 포함 PR은 배포 기록에 적힌 값입니다. 기록에는 CI·deploy-ok 상태나 헬스체크 시각이 따로 없고, 성공 기록의 시각은
+        헬스체크를 통과한 뒤입니다. 배포가 필요 없는 머지(문서·CI·스킬)도 목록에 섞여 있을 수 있습니다. PR은 태스크에 적힌 PR을
+        기준으로 연결하며, 머지를 마친 PR이 아니라 처음 연 PR일 수 있습니다.
       </p>
     </section>
   );

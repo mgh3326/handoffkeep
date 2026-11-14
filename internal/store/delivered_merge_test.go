@@ -80,6 +80,17 @@ func TestTransitionConflictNamesAllowedStates(t *testing.T) {
 	}
 }
 
+// TestRefusedReopenNamesAllowedStates (hk 2863): a reopen of an open task is
+// refused as task_conflict and names the states the task can move to instead.
+func TestRefusedReopenNamesAllowedStates(t *testing.T) {
+	s, pool := searchTestStore(t)
+	x := flowTask(t, s, pool, "fix", StateBacklog, false)
+	_, err := s.transitionTask(t.Context(), x.ID, TransitionInput{To: StateUnstarted, By: "tester", Note: "reopen"}, true)
+	if !errors.Is(err, ErrTaskConflict) || !strings.Contains(err.Error(), "from backlog a task can move to unstarted, researching, developing, completed, dropped, duplicate, icebox") {
+		t.Fatalf("reopen of backlog: %v", err)
+	}
+}
+
 // TestTransitionConflictText pins the refusal text without a database.
 func TestTransitionConflictText(t *testing.T) {
 	for _, c := range []struct{ from, to, want, not string }{

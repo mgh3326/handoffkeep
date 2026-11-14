@@ -22,10 +22,14 @@ const (
 	// SettleNotYetDeployed: a deploy stage exists but a change is not yet
 	// contained on every target, or no successful deploy includes it.
 	SettleNotYetDeployed = "not_yet_deployed"
+	// SettleRedelivered: the covering attempt's deploy event is already
+	// recorded for this task (a reopened task merged again under the same
+	// attempt). The event cannot apply twice, so the task stays merged.
+	SettleRedelivered = "redelivered"
 )
 
 // settleReasons lists the reasons in report order.
-var settleReasons = []string{SettleDeployed, SettleNoMergeCommit, SettleNoDeployStage, SettleNotYetDeployed}
+var settleReasons = []string{SettleDeployed, SettleNoMergeCommit, SettleNoDeployStage, SettleNotYetDeployed, SettleRedelivered}
 
 // SettleMergedReport is one settle-merged sweep. Counts and Tasks carry the
 // same figures per reason; Tasks lists task ids in ascending order.
@@ -140,6 +144,13 @@ ORDER BY d.finished_at DESC, d.id DESC LIMIT 1`, taskID, ChangeImplements).Scan(
 	}
 	if err != nil {
 		return "", "", err
+	}
+	var recorded bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3)`, taskID, SourceDeploy, "deploy:"+attempt).Scan(&recorded); err != nil {
+		return "", "", err
+	}
+	if recorded {
+		return SettleRedelivered, attempt, nil
 	}
 	return SettleDeployed, attempt, nil
 }

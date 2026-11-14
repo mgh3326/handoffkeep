@@ -57,6 +57,14 @@ func (o *uploadObjects) Delete(_ context.Context, k string) error {
 	delete(o.objects, k)
 	return nil
 }
+func (o *uploadObjects) Copy(_ context.Context, src, dst string) error {
+	b, ok := o.objects[src]
+	if !ok {
+		return errors.New("missing")
+	}
+	o.objects[dst] = b
+	return nil
+}
 func (o *uploadObjects) List(_ context.Context, prefix string) ([]attachments.ObjectInfo, error) {
 	var out []attachments.ObjectInfo
 	for k := range o.objects {
@@ -76,13 +84,30 @@ func (d *uploadDB) GetAttachment(_ context.Context, sha string) (store.Attachmen
 	x, ok := d.rows[sha]
 	return x, ok, nil
 }
-func (*uploadDB) CheckAttachmentCapacity(context.Context, int64, int64, int64) error { return nil }
+func (*uploadDB) CheckAttachmentCapacity(context.Context, int64, int64, int64, string) error {
+	return nil
+}
 func (d *uploadDB) PutAttachment(_ context.Context, x store.Attachment, _, _ int64) (store.Attachment, bool, error) {
 	if old, ok := d.rows[x.SHA256]; ok {
 		return old, false, nil
 	}
 	d.rows[x.SHA256] = x
 	return x, true, nil
+}
+func (d *uploadDB) FinalizeAttachmentUpload(_ context.Context, id, nonce string, x store.Attachment, _, _ int64) (store.Attachment, bool, error) {
+	u, ok := d.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce || u.SHA256 != x.SHA256 || u.SizeBytes != x.SizeBytes {
+		return store.Attachment{}, false, store.ErrUploadClaimLost
+	}
+	created := true
+	if old, ok := d.rows[x.SHA256]; ok {
+		x, created = old, false
+	} else {
+		d.rows[x.SHA256] = x
+	}
+	u.Status, u.Reason, u.ClaimNonce = store.AttachmentUploadDone, "", ""
+	d.uploads[id] = u
+	return x, created, nil
 }
 func (*uploadDB) RecordAttachmentGet(context.Context, string, int64) error { return nil }
 func (*uploadDB) ListAttachments(context.Context, string, string, int) ([]store.Attachment, error) {
@@ -91,8 +116,12 @@ func (*uploadDB) ListAttachments(context.Context, string, string, int) ([]store.
 func (*uploadDB) AttachmentUsage(context.Context) (store.AttachmentUsage, error) {
 	return store.AttachmentUsage{}, nil
 }
-func (d *uploadDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap, clientCap int64) error {
-	return reserveFake(d.uploads, u, stagingCap, clientCap)
+func (d *uploadDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap, clientCap, storageCap int64) error {
+	var committed int64
+	for _, x := range d.rows {
+		committed += x.SizeBytes
+	}
+	return reserveFake(d.uploads, committed, u, stagingCap, clientCap, storageCap)
 }
 func (d *uploadDB) ListUnreleasedAttachmentUploads(_ context.Context, createdBefore time.Time, limit int) ([]store.AttachmentUpload, error) {
 	return unreleasedFake(d.uploads, createdBefore, limit), nil
@@ -112,6 +141,33 @@ func (d *uploadDB) TransitionAttachmentUpload(_ context.Context, id, from, to, r
 		return false, nil
 	}
 	u.Status, u.Reason, u.UpdatedAt = to, reason, now
+	d.uploads[id] = u
+	return true, nil
+}
+func (d *uploadDB) ClaimAttachmentUpload(_ context.Context, id, nonce string, now time.Time) (bool, error) {
+	u, ok := d.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadPending {
+		return false, nil
+	}
+	u.Status, u.Reason, u.UpdatedAt, u.ClaimNonce = store.AttachmentUploadCompleting, "", now, nonce
+	d.uploads[id] = u
+	return true, nil
+}
+func (d *uploadDB) TransitionAttachmentUploadClaim(_ context.Context, id, nonce, to, reason string, now time.Time) (bool, error) {
+	u, ok := d.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce {
+		return false, nil
+	}
+	u.Status, u.Reason, u.UpdatedAt, u.ClaimNonce = to, reason, now, ""
+	d.uploads[id] = u
+	return true, nil
+}
+func (d *uploadDB) TouchAttachmentUploadClaim(_ context.Context, id, nonce string, now time.Time) (bool, error) {
+	u, ok := d.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce {
+		return false, nil
+	}
+	u.UpdatedAt = now
 	d.uploads[id] = u
 	return true, nil
 }
@@ -210,9 +266,10 @@ func TestDirectUploadRoutesBeginCompleteAndRefuse(t *testing.T) {
 	}
 }
 
-// reserveFake applies the store's budget: rows whose staging object may still
-// exist count against the global and the per-creator cap.
-func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUpload, stagingCap, clientCap int64) error {
+// reserveFake applies the store's budget: committed attachments plus rows
+// whose staging object may still exist count against the storage fuse, and
+// the charged rows against the global and the per-creator cap.
+func reserveFake(uploads map[string]store.AttachmentUpload, committed int64, u store.AttachmentUpload, stagingCap, clientCap, storageCap int64) error {
 	var used, usedByClient int64
 	for _, o := range uploads {
 		if !o.StagingDeletedAt.IsZero() {
@@ -222,6 +279,9 @@ func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUp
 		if o.CreatedBy == u.CreatedBy {
 			usedByClient += o.SizeBytes
 		}
+	}
+	if committed+used+u.SizeBytes > storageCap {
+		return store.ErrAttachmentStorageCap
 	}
 	if used+u.SizeBytes > stagingCap || usedByClient+u.SizeBytes > clientCap {
 		return store.ErrAttachmentStagingCap

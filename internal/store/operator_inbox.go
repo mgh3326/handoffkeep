@@ -29,7 +29,9 @@ const (
 
 // InboxBatchLimit is how many items one write applies. A longer list is cut
 // here and reported as Skipped, so the console can ask the operator to
-// resubmit rather than dropping the rest silently.
+// resubmit rather than dropping the rest silently. It matches the console's
+// BULK_LIMIT, and bounds the per-item transactions one request runs and the
+// rows one undo locks.
 const InboxBatchLimit = 50
 
 // MaxInboxSnooze bounds how far ahead one snooze may end.

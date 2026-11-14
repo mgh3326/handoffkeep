@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	// inboxWriteBodyLimit holds a full batch: 50 item keys, an action, a
-	// snooze time and an event key.
+	// inboxWriteBodyLimit holds a full batch: InboxBatchLimit item keys, an
+	// action, a snooze time and an event key.
 	inboxWriteBodyLimit = 16 * 1024
 	// inboxWritePath applies one inbox action to one or more items.
 	inboxWritePath = "/ui/api/inbox/state"
