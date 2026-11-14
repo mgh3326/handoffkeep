@@ -289,7 +289,7 @@ func (m *Manager) completeBuffered(ctx context.Context, row store.AttachmentUplo
 		}
 		return refuse(reason)
 	}
-	x, created, err := m.putVerified(ctx, row.CreatedBy, row.Name, mime, uploadRefString(row), row.SHA256, row.SizeBytes, row.ID,
+	x, created, err := m.putVerified(ctx, row.CreatedBy, row.Name, mime, uploadRefString(row), row.SHA256, row.SizeBytes, row.ID, false,
 		m.finalizeCommit(ctx, row),
 		func(ctx context.Context) error {
 			return m.Objects.Put(ctx, key(row.SHA256), bytes.NewReader(body), row.SizeBytes, mime)
@@ -390,7 +390,7 @@ func (m *Manager) completeStreamed(ctx context.Context, row store.AttachmentUplo
 		}
 		return refuse(reason)
 	}
-	x, created, err := m.putVerified(ctx, row.CreatedBy, row.Name, mime, uploadRefString(row), row.SHA256, row.SizeBytes, row.ID,
+	x, created, err := m.putVerified(ctx, row.CreatedBy, row.Name, mime, uploadRefString(row), row.SHA256, row.SizeBytes, row.ID, true,
 		m.finalizeCommit(ctx, row),
 		func(ctx context.Context) error {
 			tr, err := m.Objects.Get(ctx, holdingKey)
@@ -414,36 +414,49 @@ func (m *Manager) completeStreamed(ctx context.Context, row store.AttachmentUplo
 				return errors.New("promoted object failed verification")
 			}
 			published := key(row.SHA256)
-			// Whatever ends the verification — a copy error, a failed read, a
-			// size or sha mismatch — the shared key must not keep bytes that
-			// were never verified: a retry's Stat would adopt them. Only a
-			// fully verified publish survives.
-			verified := false
+			// The published object is what readers adopt, so it is re-hashed
+			// after the copy — a backend fault between promo and content key
+			// must not reach the dedup path. A completed verification that
+			// still mismatches proves the key does not hold this sha's bytes,
+			// so it is deleted on a detached context (the request ctx may
+			// already be cancelled) — it cannot be valid committed content.
+			// A copy or read error leaves the object's state unknown and a
+			// concurrent commit may reference it, so nothing is deleted then:
+			// alwaysWrite makes the next attempt re-copy and re-verify,
+			// which repairs whatever is there.
+			verified, provenBad := false, false
 			defer func() {
-				if !verified {
-					_ = m.Objects.Delete(ctx, published)
+				if !verified && provenBad {
+					dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+					defer cancel()
+					_ = m.Objects.Delete(dctx, published)
 				}
 			}()
-			if err := m.Objects.Copy(ctx, promoKey, published); err != nil {
-				return err
+			for attempt := 0; attempt < 2 && !verified; attempt++ {
+				if err := m.Objects.Copy(ctx, promoKey, published); err != nil {
+					return err
+				}
+				dtr, err := m.Objects.Get(ctx, published)
+				if err != nil {
+					provenBad = false
+					return err
+				}
+				dv := &streamVerifier{r: io.LimitReader(dtr, row.SizeBytes+1), sum: sha256.New()}
+				_, err = io.Copy(io.Discard, dv)
+				dtr.Close()
+				if err != nil {
+					provenBad = false
+					return err
+				}
+				if dv.n == row.SizeBytes && hex.EncodeToString(dv.sum.Sum(nil)) == row.SHA256 {
+					verified = true
+				} else {
+					provenBad = true
+				}
 			}
-			// The copy's output is what readers adopt, so the published object
-			// itself is re-hashed — a backend fault between promo and content
-			// key must not reach the dedup path.
-			dtr, err := m.Objects.Get(ctx, published)
-			if err != nil {
-				return err
-			}
-			dv := &streamVerifier{r: io.LimitReader(dtr, row.SizeBytes+1), sum: sha256.New()}
-			_, err = io.Copy(io.Discard, dv)
-			dtr.Close()
-			if err != nil {
-				return err
-			}
-			if dv.n != row.SizeBytes || hex.EncodeToString(dv.sum.Sum(nil)) != row.SHA256 {
+			if !verified {
 				return errors.New("published object failed verification")
 			}
-			verified = true
 			return nil
 		})
 	if err != nil {

@@ -544,20 +544,23 @@ func (m *Manager) putBytes(ctx context.Context, client, name, mime, ref string, 
 	sum := sha256.Sum256(body)
 	sha := hex.EncodeToString(sum[:])
 	k := key(sha)
-	return m.putVerified(ctx, client, name, mime, ref, sha, int64(len(body)), "", nil, func(ctx context.Context) error {
+	return m.putVerified(ctx, client, name, mime, ref, sha, int64(len(body)), "", false, nil, func(ctx context.Context) error {
 		return m.Objects.Put(ctx, k, bytes.NewReader(body), int64(len(body)), mime)
 	})
 }
 
 // putVerified is the one store path for content whose bytes are already
 // verified: dedupe, the capacity preflight, the content-key write (skipped
-// when the object already exists), then the metadata commit. write performs
-// the object put for key(sha); a completed direct upload streams its verified
-// holding object through it instead of holding the body. exceptUpload names
-// the completing upload being committed so its reservation is not counted
-// twice; commit is the metadata write — PutAttachment for a plain buffered
-// put (nil selects it), FinalizeAttachmentUpload for a direct upload.
-func (m *Manager) putVerified(ctx context.Context, client, name, mime, ref, sha string, size int64, exceptUpload string, commit func(store.Attachment) (store.Attachment, bool, error), write func(context.Context) error) (store.Attachment, bool, error) {
+// when the object already exists unless alwaysWrite), then the metadata
+// commit. write performs the object put for key(sha); a completed direct
+// upload streams its verified holding object through it instead of holding
+// the body, and passes alwaysWrite so a retry re-publishes and re-verifies
+// rather than Stat-adopting whatever a failed attempt left behind.
+// exceptUpload names the completing upload being committed so its
+// reservation is not counted twice; commit is the metadata write —
+// PutAttachment for a plain buffered put (nil selects it),
+// FinalizeAttachmentUpload for a direct upload.
+func (m *Manager) putVerified(ctx context.Context, client, name, mime, ref, sha string, size int64, exceptUpload string, alwaysWrite bool, commit func(store.Attachment) (store.Attachment, bool, error), write func(context.Context) error) (store.Attachment, bool, error) {
 	if !store.ValidActor(client) {
 		return store.Attachment{}, false, errors.New("invalid attachment created_by")
 	}
@@ -579,7 +582,11 @@ func (m *Manager) putVerified(ctx context.Context, client, name, mime, ref, sha 
 	if e = m.Store.CheckAttachmentCapacity(ctx, size, m.Config.StorageCap, m.Config.PutCap, exceptUpload); e != nil {
 		return store.Attachment{}, false, e
 	}
-	if e = m.Objects.Stat(ctx, key(sha)); e != nil {
+	if alwaysWrite {
+		if e = write(ctx); e != nil {
+			return store.Attachment{}, false, fmt.Errorf("%w: %v", ErrObjectStore, e)
+		}
+	} else if e = m.Objects.Stat(ctx, key(sha)); e != nil {
 		if e = write(ctx); e != nil {
 			return store.Attachment{}, false, fmt.Errorf("%w: %v", ErrObjectStore, e)
 		}

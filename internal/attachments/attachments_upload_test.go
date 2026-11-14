@@ -476,8 +476,10 @@ func (o *failGetObjects) Get(ctx context.Context, k string) (io.ReadCloser, erro
 	return o.fakeObjects.Get(ctx, k)
 }
 
-// A failed post-copy read must not leave the unverified object at the shared
-// key: the released claim's retry would Stat-adopt it without re-writing.
+// A failed post-copy read leaves the object's state unknown — it may hold
+// valid bytes a concurrent commit already references — so it is not deleted.
+// alwaysWrite makes the released claim's retry re-copy and re-verify the
+// published key instead of Stat-adopting whatever is there.
 func TestStreamedCompletionFailedPublishedReadCleansUp(t *testing.T) {
 	m, db, objs := newUploadManager(t)
 	m.Config.MaxBytes = DefaultMaxBytes
@@ -503,10 +505,13 @@ func TestStreamedCompletionFailedPublishedReadCleansUp(t *testing.T) {
 		t.Fatalf("failed published read err=%v", err)
 	}
 	objs.mu.Lock()
-	_, published := objs.objects[key(sha)]
+	stored, published := objs.objects[key(sha)]
 	objs.mu.Unlock()
-	if published {
-		t.Fatal("the unverified content key survived a failed read")
+	if !published {
+		t.Fatal("a read-error cleanup deleted possibly-valid shared content")
+	}
+	if !bytes.Equal(stored, body) {
+		t.Fatal("the surviving published object is not the verified bytes")
 	}
 	if db.uploads[uploadID].Status != store.AttachmentUploadPending {
 		t.Fatalf("claim not released: status=%q", db.uploads[uploadID].Status)
@@ -519,6 +524,12 @@ func TestStreamedCompletionFailedPublishedReadCleansUp(t *testing.T) {
 	}
 	if x.SHA256 != sha || !created || db.uploads[uploadID].Status != store.AttachmentUploadDone {
 		t.Fatalf("recovered sha=%s created=%v status=%q", x.SHA256, created, db.uploads[uploadID].Status)
+	}
+	objs.mu.Lock()
+	stored = objs.objects[key(sha)]
+	objs.mu.Unlock()
+	if !bytes.Equal(stored, body) {
+		t.Fatal("the retried publication does not hold the verified bytes")
 	}
 }
 
