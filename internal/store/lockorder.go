@@ -28,7 +28,13 @@ package store
 //     in applyDeployRecordTx and propagateMergeTx,
 //     task_id then each of tasks in the order sent in ApplyTaskSourceEvent,
 //     then ascending id in propagateRevertTx) cannot form a
-//     cycle with another holder. UpdateJob, AppendRelayEvent (an event that
+//     cycle with another holder. A relation write (addRelationTx,
+//     RemoveTaskRelation, archiveLiveRelationsTx; hk 4637) locks the edge's
+//     src row first and then updates both endpoints' rows in one statement
+//     (bumpRelationEndpointsTx), so it locks the second endpoint after src;
+//     every caller (AddTaskRelation, RemoveTaskRelation, TransitionTaskWith,
+//     CreateTaskChecked, EmitTicketSet) holds this lock first for that
+//     reason (TestLockOrderRelationEndpointsVersusRelationWrite). UpdateJob, AppendRelayEvent (an event that
 //     answers or ends a decision: relayTouchesDecisions) and PutDocument
 //     (deploy records) take it first for that reason. Taking it again in the
 //     same transaction (applyJobRoleTx, applyDeployRecordTx) is a no-op:
