@@ -433,19 +433,22 @@ func (m *Manager) completeStreamed(ctx context.Context, row store.AttachmentUplo
 				}
 			}()
 			for attempt := 0; attempt < 2 && !verified; attempt++ {
+				// Each attempt starts unknown: only a verification completed
+				// against this attempt's copy may prove the key bad. A failed
+				// Copy can leave a concurrent publish intact, so a stale
+				// provenBad must not survive into it.
+				provenBad = false
 				if err := m.Objects.Copy(ctx, promoKey, published); err != nil {
 					return err
 				}
 				dtr, err := m.Objects.Get(ctx, published)
 				if err != nil {
-					provenBad = false
 					return err
 				}
 				dv := &streamVerifier{r: io.LimitReader(dtr, row.SizeBytes+1), sum: sha256.New()}
 				_, err = io.Copy(io.Discard, dv)
 				dtr.Close()
 				if err != nil {
-					provenBad = false
 					return err
 				}
 				if dv.n == row.SizeBytes && hex.EncodeToString(dv.sum.Sum(nil)) == row.SHA256 {

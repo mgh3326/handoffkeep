@@ -462,6 +462,66 @@ func TestStreamedCompletionVerifiesPublishedObject(t *testing.T) {
 	}
 }
 
+// flakyCopyObjects corrupts the first copy's destination, then fails the
+// second: attempt 0 proves the key bad, attempt 1's Copy error must not let
+// the stale proof delete whatever now sits there — a concurrent publish may
+// have replaced it.
+type flakyCopyObjects struct {
+	*fakeObjects
+	calls int
+}
+
+func (o *flakyCopyObjects) Copy(ctx context.Context, src, dst string) error {
+	o.calls++
+	if o.calls > 1 {
+		return errors.New("copy failed")
+	}
+	if err := o.fakeObjects.Copy(ctx, src, dst); err != nil {
+		return err
+	}
+	o.mu.Lock()
+	b := append([]byte(nil), o.objects[dst]...)
+	b[0] ^= 0xff
+	o.objects[dst] = b
+	o.mu.Unlock()
+	return nil
+}
+
+func TestStreamedCompletionCopyErrorAfterMismatchKeepsPublishedKey(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	m.Config.MaxBytes = DefaultMaxBytes
+	m.Config.StorageCap = 1 << 40
+	m.Config.StagingCap = 1 << 40
+	m.Config.StagingClientCap = 1 << 40
+	size := BufferedCompletionMaxBytes + 1
+	body := make([]byte, size)
+	copy(body, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
+	sha := shaOf(body)
+	const uploadID = "0123456789abcdef0123456789abcdef"
+	stagingKey := stagingPrefix + uploadID
+	db.uploads = map[string]store.AttachmentUpload{uploadID: {
+		ID: uploadID, StagingKey: stagingKey, Name: "big.png", MIME: "image/png", SizeBytes: size,
+		SHA256: sha, CreatedBy: "node", Status: store.AttachmentUploadPending,
+		CreatedAt: m.now(), ExpiresAt: m.now().Add(time.Hour), UpdatedAt: m.now(),
+	}}
+	objs.objects[stagingKey] = body
+
+	m.Objects = &flakyCopyObjects{fakeObjects: objs}
+	_, _, err := m.CompleteUpload(t.Context(), "node", uploadID)
+	if !errors.Is(err, ErrUploadNotReceived) {
+		t.Fatalf("copy error after mismatch err=%v", err)
+	}
+	objs.mu.Lock()
+	_, published := objs.objects[key(sha)]
+	objs.mu.Unlock()
+	if !published {
+		t.Fatal("a failed retry Copy deleted the shared key on a stale mismatch")
+	}
+	if db.uploads[uploadID].Status != store.AttachmentUploadPending {
+		t.Fatalf("claim not released: status=%q", db.uploads[uploadID].Status)
+	}
+}
+
 // failGetObjects fails Get for one key: the post-copy read of the published
 // object errors after Copy already landed bytes there.
 type failGetObjects struct {
