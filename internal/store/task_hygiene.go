@@ -120,13 +120,13 @@ const hygieneSettledOpenPageSQL = `SELECT ` + driftColumns + `updated_at FROM ta
 	ORDER BY t.id LIMIT $4`
 
 // hygieneIdleStartedPageSQL pages idle started tasks.
-// $1 is cutoff time, $2 is id cursor (t.id > $2), $3 is project (or NULL), $4 is limit.
-const hygieneIdleStartedPageSQL = `SELECT ` + driftColumns + taskActivitySQL + ` FROM tasks t
-	WHERE t.state IN ('researching','developing')
+// $1 is cutoff time, $2 is id cursor (id > $2), $3 is project (or NULL), $4 is limit.
+const hygieneIdleStartedPageSQL = `SELECT ` + driftColumns + taskActivitySQL + ` FROM tasks
+	WHERE state IN ('researching','developing')
 	  AND ` + taskActivitySQL + ` < $1::timestamptz
-	  AND t.id > $2
-	  AND ($3::text IS NULL OR t.project = $3)
-	ORDER BY t.id LIMIT $4`
+	  AND id > $2
+	  AND ($3::text IS NULL OR project = $3)
+	ORDER BY id LIMIT $4`
 
 // hygieneMergedWithoutDeployPageSQL pages merged tasks without deploy.
 // $1 is cutoff time, $2 is since cursor, $3 is id cursor, $4 is project (or NULL), $5 is limit.
