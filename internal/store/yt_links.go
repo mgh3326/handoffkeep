@@ -88,37 +88,53 @@ func ytLinksGateSQL(s *Store) string {
 		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
 }
 
-// ytLinksStaleSQL is the one staleness rule of a prepared issue_links op o
-// (hk 4711): o is stale once any link target it names (the payload's parent,
-// related and duplicate entries, each a task id and that task's issue) is no
-// longer that task's binding on o's tenant, because the target was unbound or
-// rebound after o was prepared. Written as it stands, o would add a link to
-// an issue the target task no longer owns, so a stale op is never sent:
-// Claim rejects it under the writer's lane lock (claimYTLinksTargetsTx), and
-// the writer's next snapshot rejects the ones still queued before it is
-// prepared (rejectStaleYTLinksOpsTx). The binding of a target is changed
-// under the target's lane lock, not the writer's, so neither place can be
-// the only one: a binding that commits after a claim's read is ordered after
-// that op (it was correct when sent, and the dependent's next snapshot,
-// which the binding's feed rows request, corrects it); one that commits
-// before is seen. o's own target is not part of this rule: the gate checks
-// it, and the held-op recovery closes an op whose own binding moved.
-const ytLinksStaleSQL = `EXISTS (SELECT 1 FROM (
-		SELECT o.payload->'desired'->'parent' AS t
+// ytLinksTargetsSQL lists the link targets an issue_links op o names, one
+// jsonb object {task_id, issue} per row in column t: the payload's parent,
+// related and duplicate entries (rows whose t is not an object are noise and
+// filtered by the callers).
+const ytLinksTargetsSQL = `(SELECT o.payload->'desired'->'parent' AS t
 		UNION ALL SELECT jsonb_array_elements(CASE WHEN jsonb_typeof(o.payload->'desired'->'related') = 'array'
 			THEN o.payload->'desired'->'related' ELSE '[]'::jsonb END)
 		UNION ALL SELECT jsonb_array_elements(CASE WHEN jsonb_typeof(o.payload->'desired'->'duplicates') = 'array'
-			THEN o.payload->'desired'->'duplicates' ELSE '[]'::jsonb END)
-	) n WHERE jsonb_typeof(n.t) = 'object' AND NOT EXISTS (SELECT 1 FROM yt_task_bindings b
+			THEN o.payload->'desired'->'duplicates' ELSE '[]'::jsonb END))`
+
+// ytLinksStaleSQL is the one staleness rule of a prepared issue_links op o
+// (hk 4711): o is stale once any link target it names (ytLinksTargetsSQL) is
+// no longer that task's binding on o's tenant, because the target was unbound
+// (and maybe bound again elsewhere) after o was prepared. Written as it
+// stands, o would add a link to an issue the target task no longer owns, so a
+// stale op is never sent: Claim rejects it under the writer's lane lock
+// (claimYTLinksTargetsTx), and the writer's next snapshot rejects the ones
+// still queued before it is prepared (rejectStaleYTLinksOpsTx). The only
+// writer that takes an issue away from a task is UnbindYTTaskBinding's
+// DELETE; Claim holds the target binding rows FOR KEY SHARE across its check
+// and its dispatch, and the unbind refuses while a writer's op that names the
+// issue is in flight (ytLinksInFlightToTx), so a claim and an unbind are
+// ordered either way. o's own target is not part of this rule: the gate
+// checks it, and the held-op recovery closes an op whose own binding moved.
+const ytLinksStaleSQL = `EXISTS (SELECT 1 FROM ` + ytLinksTargetsSQL + ` n
+	WHERE jsonb_typeof(n.t) = 'object' AND NOT EXISTS (SELECT 1 FROM yt_task_bindings b
 		WHERE b.task_id::text = n.t->>'task_id' AND b.issue_id = n.t->>'issue' AND b.tenant = o.tenant))`
 
-// claimYTLinksTargetsTx is Claim's check of an issue_links op (ytLinksStaleSQL):
-// a stale op is rejected with ReasonLinkTargetChanged, never dispatched. The
-// claim holds the writer's lane lock and the op row, so no new snapshot of
-// the writer and no other claim of it runs in between.
+// claimYTLinksTargetsTx is Claim's check of an issue_links op (ytLinksStaleSQL).
+// It first takes FOR KEY SHARE on the binding rows of the op's targets, in
+// task id order, and holds them until the claim commits: an unbind's DELETE of
+// one of them either committed before (the check sees it) or waits for this
+// claim and then finds the op dispatched and refuses (ytLinksInFlightToTx).
+// A stale op is rejected with ReasonLinkTargetChanged, never dispatched, and
+// the writer gets a task 'U' feed row in the same transaction so its next
+// snapshot is prepared from the current bindings: without it, a stale op
+// whose writer nothing else changes would leave its other link changes
+// unsent. The claim holds the writer's lane lock and the op row.
 func claimYTLinksTargetsTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (reject, detail string, err error) {
 	if op.Kind != ytwrite.KindIssueLinks {
 		return "", "", nil
+	}
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM yt_task_bindings b WHERE b.task_id IN (
+			SELECT (n.t->>'task_id')::bigint FROM yt_write_ops o, LATERAL `+ytLinksTargetsSQL+` n
+			WHERE o.id = $1 AND jsonb_typeof(n.t) = 'object' AND n.t->>'task_id' ~ '^[0-9]{1,18}$')
+		ORDER BY b.task_id FOR KEY SHARE OF b`, op.ID); err != nil {
+		return "", "", err
 	}
 	var stale bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id = $1 AND `+ytLinksStaleSQL+`)`, op.ID).Scan(&stale); err != nil {
@@ -127,8 +143,40 @@ func claimYTLinksTargetsTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (rejec
 	if !stale {
 		return "", "", nil
 	}
+	if _, err := tx.Exec(ctx, `INSERT INTO sync_log(model,model_id,action,at) VALUES ('task', $1, 'U', clock_timestamp())`, op.EntityID); err != nil {
+		return "", "", err
+	}
 	log.Printf("ytwrite.links_target_changed op_id=%d task_id=%s issue_id=%q", op.ID, op.EntityID, op.YTTargetID)
 	return ytwrite.ReasonLinkTargetChanged, "a link target of this snapshot is no longer bound to the issue it names", nil
+}
+
+// ytLinksInFlightToTx lists the issue_links ops of other tasks on tenant that
+// name task id bound to issue as a link target and may be writing it now
+// (dispatched, remote_unknown). UnbindYTTaskBinding refuses while there are
+// any, as it does for the task's own uncertain ops. It runs after the
+// unbind's DELETE of the binding row, so a claim that held the row FOR KEY
+// SHARE has committed and its op is seen here, and a later claim waits for
+// the unbind and then sees no binding.
+func ytLinksInFlightToTx(ctx context.Context, tx pgx.Tx, tenant string, id int64, issue string) ([]ytLaneOp, error) {
+	rows, err := tx.Query(ctx, `SELECT o.id, o.kind FROM yt_write_ops o
+		WHERE o.kind = $1 AND o.tenant = $2 AND o.entity_kind = 'task' AND o.entity_id <> $3::text
+			AND o.state IN ('dispatched','remote_unknown')
+			AND EXISTS (SELECT 1 FROM `+ytLinksTargetsSQL+` n
+				WHERE jsonb_typeof(n.t) = 'object' AND n.t->>'task_id' = $3::text AND n.t->>'issue' = $4)
+		ORDER BY o.id`, ytwrite.KindIssueLinks, tenant, strconv.FormatInt(id, 10), issue)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ytLaneOp
+	for rows.Next() {
+		var op ytLaneOp
+		if err := rows.Scan(&op.id, &op.kind); err != nil {
+			return nil, err
+		}
+		out = append(out, op)
+	}
+	return out, rows.Err()
 }
 
 // rejectStaleYTLinksOpsTx rejects the prepared issue_links ops of task key on

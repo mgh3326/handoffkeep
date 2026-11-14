@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"reflect"
 	"strconv"
 	"strings"
@@ -611,7 +612,7 @@ func TestYTLinksRebindTargetRejectsDependentsStaleOps(t *testing.T) {
 // The claim's check alone: a rebind whose feed row the consumer has not read
 // yet leaves the stale op first in the writer's lane, and the claim rejects it.
 func TestYTLinksClaimRejectsOpNamingARebound(t *testing.T) {
-	s, _, target, stale := ytlfStaleSetup(t, "yt_links_claim_rebound")
+	s, writer, target, stale := ytlfStaleSetup(t, "yt_links_claim_rebound")
 	ctx := t.Context()
 	if _, err := s.UnbindYTTaskBinding(ctx, target, YTUnbindOptions{By: "operator", Reason: "wrong issue"}); err != nil {
 		t.Fatal(err)
@@ -619,8 +620,44 @@ func TestYTLinksClaimRejectsOpNamingARebound(t *testing.T) {
 	other := ytbBinding(target)
 	other.IssueID, other.IssueReadable = "2-other", "HK-other"
 	ytbBind(t, s, other)
+	before := ytFeedMaxSyncID(t, s)
 	got, out, err := s.YTTenantLedger(ytcTenant).Claim(ctx, time.Now().UTC().Add(time.Minute), stale.ID)
 	if err != nil || out == ytwrite.ClaimClaimed || got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonLinkTargetChanged {
 		t.Fatalf("claim of the stale op: %s %+v %v, want it rejected with %s", out, got, err, ytwrite.ReasonLinkTargetChanged)
+	}
+	// #428 r4576211846: the rejection asks for the writer's next snapshot
+	// itself, so a stale op whose writer nothing else touches is not the
+	// last word on its links.
+	if ids := ytlFeedIDs(t, s, before); !reflect.DeepEqual(ids, ytlIDs(writer)) {
+		t.Fatalf("the claim's rejection wrote feed rows for %v, want the writer %d", ids, writer)
+	}
+	ytlfPass(t, s)
+	if snap := ytlfLast(t, s, writer); !reflect.DeepEqual(snap.Desired.Related, []ytwrite.IssueLinkTarget{{TaskID: target, IssueID: other.IssueID}}) {
+		t.Fatalf("writer's next snapshot names %+v, want task %d on %s", snap.Desired.Related, target, other.IssueID)
+	}
+}
+
+// #428 r4576211378: an unbind of a target is refused while another task's
+// links op that names the target's issue is dispatched, as it is for the
+// target's own uncertain ops: completing it would let that op add the link
+// after the issue was taken away. Once the op settles the unbind goes ahead.
+func TestYTLinksUnbindTargetRefusedWhileDependentOpInFlight(t *testing.T) {
+	s, _, target, op := ytlfStaleSetup(t, "yt_links_unbind_inflight")
+	ctx := t.Context()
+	now := time.Now().UTC().Add(time.Minute)
+	if got, out, err := s.YTTenantLedger(ytcTenant).Claim(ctx, now, op.ID); err != nil || out != ytwrite.ClaimClaimed {
+		t.Fatalf("claim: %s %+v %v", out, got, err)
+	}
+	if _, err := s.UnbindYTTaskBinding(ctx, target, YTUnbindOptions{By: "operator", Reason: "test", Force: true}); !errors.Is(err, ErrYTUnbindRefused) {
+		t.Fatalf("unbind with a dependent links op in flight: %v, want refused", err)
+	}
+	if n := ytcCount(t, s, `SELECT count(*) FROM yt_task_bindings WHERE task_id=$1`, target); n != 1 {
+		t.Fatalf("the refused unbind removed the binding (%d rows)", n)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE yt_write_ops SET state='applied', resolved_at=now() WHERE id=$1`, op.ID); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := s.UnbindYTTaskBinding(ctx, target, YTUnbindOptions{By: "operator", Reason: "test"}); err != nil || !res.Removed {
+		t.Fatalf("unbind after the op settled: %+v %v", res, err)
 	}
 }

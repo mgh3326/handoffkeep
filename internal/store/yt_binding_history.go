@@ -224,6 +224,17 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	if _, err := tx.Exec(ctx, `DELETE FROM yt_task_bindings WHERE task_id=$1`, taskID); err != nil {
 		return res, err
 	}
+	// Another task's links op that names this issue as a target and may be
+	// writing it now would add that link after the issue was taken away
+	// (hk 4711). Read after the DELETE: a claim that held the row FOR KEY
+	// SHARE has committed by now (claimYTLinksTargetsTx).
+	inflight, err := ytLinksInFlightToTx(ctx, tx, b.Tenant, taskID, b.IssueID)
+	if err != nil {
+		return res, err
+	}
+	if len(inflight) > 0 {
+		return res, refuse("links ops %s of other tasks may be writing a link to issue %s; resolve them first (yt ops resolve)", ytUnbindOpList(inflight), b.IssueID)
+	}
 	// The anchor's writers (the comment enqueue, the canary, the apply of an
 	// issue_create) all hold the task's lane lock, which this transaction
 	// holds, so the row cannot appear or change between the read of the
