@@ -35,10 +35,14 @@ type taskContextOut struct {
 func TestTaskContextBundle(t *testing.T) {
 	st := newOperatorStore(t)
 	ctx := context.Background()
+	if _, err := st.AddTaskProject(ctx, "mcp-ctx-project", "tester"); err != nil {
+		t.Fatal(err)
+	}
+	project := "mcp-ctx-project"
 	create := func(title string) store.Task {
 		t.Helper()
 		task, err := st.CreateTask(ctx, store.Task{
-			Lane: "mcp-ctx-lane", Title: title, Kind: "implement", CreatedBy: "tester",
+			Lane: "mcp-ctx-lane", Title: title, Kind: "implement", CreatedBy: "tester", Project: &project,
 			Refs: store.TaskRefs{PR: "https://github.com/mgh3326/handoffkeep/pull/41"},
 		})
 		if err != nil {
