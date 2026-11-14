@@ -264,7 +264,10 @@ func (m minioStore) Delete(ctx context.Context, key string) error {
 	return m.client.RemoveObject(ctx, m.bucket, key, minio.RemoveObjectOptions{})
 }
 func (m minioStore) Copy(ctx context.Context, src, dst string) error {
-	_, err := m.client.CopyObject(ctx, minio.CopyDestOptions{Bucket: m.bucket, Object: dst}, minio.CopySrcOptions{Bucket: m.bucket, Object: src})
+	// ComposeObject delegates to a single CopyObject at or below 5 GiB and
+	// switches to UploadPartCopy above it, so promotion works across the whole
+	// DefaultMaxBytes range; a single-request CopyObject would fail past 5 GiB.
+	_, err := m.client.ComposeObject(ctx, minio.CopyDestOptions{Bucket: m.bucket, Object: dst}, minio.CopySrcOptions{Bucket: m.bucket, Object: src})
 	return err
 }
 func (m minioStore) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
@@ -325,8 +328,12 @@ func (m *Manager) now() time.Time {
 // AttachmentDB keeps the object transport testable without a live S3 account.
 type AttachmentDB interface {
 	GetAttachment(context.Context, string) (store.Attachment, bool, error)
-	CheckAttachmentCapacity(context.Context, int64, int64, int64) error
+	CheckAttachmentCapacity(context.Context, int64, int64, int64, string) error
 	PutAttachment(context.Context, store.Attachment, int64, int64) (store.Attachment, bool, error)
+	// FinalizeAttachmentUpload commits a completing upload's verified bytes in
+	// one transaction: metadata, refs, fuse charge and the done transition
+	// that consumes its reservation.
+	FinalizeAttachmentUpload(context.Context, string, string, store.Attachment, int64, int64) (store.Attachment, bool, error)
 	RecordAttachmentGet(context.Context, string, int64) error
 	ListAttachments(context.Context, string, string, int) ([]store.Attachment, error)
 	AttachmentUsage(context.Context) (store.AttachmentUsage, error)
@@ -537,17 +544,20 @@ func (m *Manager) putBytes(ctx context.Context, client, name, mime, ref string, 
 	sum := sha256.Sum256(body)
 	sha := hex.EncodeToString(sum[:])
 	k := key(sha)
-	return m.putVerified(ctx, client, name, mime, ref, sha, int64(len(body)), func(ctx context.Context) error {
+	return m.putVerified(ctx, client, name, mime, ref, sha, int64(len(body)), "", nil, func(ctx context.Context) error {
 		return m.Objects.Put(ctx, k, bytes.NewReader(body), int64(len(body)), mime)
 	})
 }
 
 // putVerified is the one store path for content whose bytes are already
 // verified: dedupe, the capacity preflight, the content-key write (skipped
-// when the object already exists), then the metadata row. write performs the
-// object put for key(sha); a completed direct upload streams its verified
-// holding object through it instead of holding the body.
-func (m *Manager) putVerified(ctx context.Context, client, name, mime, ref, sha string, size int64, write func(context.Context) error) (store.Attachment, bool, error) {
+// when the object already exists), then the metadata commit. write performs
+// the object put for key(sha); a completed direct upload streams its verified
+// holding object through it instead of holding the body. exceptUpload names
+// the completing upload being committed so its reservation is not counted
+// twice; commit is the metadata write — PutAttachment for a plain buffered
+// put (nil selects it), FinalizeAttachmentUpload for a direct upload.
+func (m *Manager) putVerified(ctx context.Context, client, name, mime, ref, sha string, size int64, exceptUpload string, commit func(store.Attachment) (store.Attachment, bool, error), write func(context.Context) error) (store.Attachment, bool, error) {
 	if !store.ValidActor(client) {
 		return store.Attachment{}, false, errors.New("invalid attachment created_by")
 	}
@@ -555,14 +565,18 @@ func (m *Manager) putVerified(ctx context.Context, client, name, mime, ref, sha 
 	if e != nil {
 		return store.Attachment{}, false, e
 	}
+	if commit == nil {
+		commit = func(x store.Attachment) (store.Attachment, bool, error) {
+			return m.Store.PutAttachment(ctx, x, m.Config.StorageCap, m.Config.PutCap)
+		}
+	}
 	if old, ok, e := m.Store.GetAttachment(ctx, sha); e != nil {
 		return old, false, e
 	} else if ok {
 		old.RefKind, old.RefID = kind, id
-		out, new, e := m.Store.PutAttachment(ctx, old, m.Config.StorageCap, m.Config.PutCap)
-		return out, new, e
+		return commit(old)
 	}
-	if e = m.Store.CheckAttachmentCapacity(ctx, size, m.Config.StorageCap, m.Config.PutCap); e != nil {
+	if e = m.Store.CheckAttachmentCapacity(ctx, size, m.Config.StorageCap, m.Config.PutCap, exceptUpload); e != nil {
 		return store.Attachment{}, false, e
 	}
 	if e = m.Objects.Stat(ctx, key(sha)); e != nil {
@@ -571,8 +585,7 @@ func (m *Manager) putVerified(ctx context.Context, client, name, mime, ref, sha 
 		}
 	}
 	x := store.Attachment{SHA256: sha, SizeBytes: size, MIME: mime, OriginalName: name, CreatedBy: client, RefKind: kind, RefID: id, ObjectLocation: ObjectLocation(m.Config)}
-	out, new, e := m.Store.PutAttachment(ctx, x, m.Config.StorageCap, m.Config.PutCap)
-	return out, new, e
+	return commit(x)
 }
 func (m *Manager) Get(ctx context.Context, sha string) (store.Attachment, io.ReadCloser, error) {
 	if !m.Enabled {

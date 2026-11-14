@@ -222,8 +222,31 @@ func (f *fakeDB) PutAttachment(_ context.Context, x store.Attachment, _, _ int64
 	f.rows[x.SHA256] = x
 	return x, true, nil
 }
-func (f *fakeDB) CheckAttachmentCapacity(context.Context, int64, int64, int64) error { return f.capErr }
-func (*fakeDB) RecordAttachmentGet(context.Context, string, int64) error             { return nil }
+func (f *fakeDB) CheckAttachmentCapacity(context.Context, int64, int64, int64, string) error {
+	return f.capErr
+}
+
+// FinalizeAttachmentUpload mirrors the store contract the tests exercise:
+// claim-scoped, atomic with the done transition.
+func (f *fakeDB) FinalizeAttachmentUpload(_ context.Context, id, nonce string, x store.Attachment, _, _ int64) (store.Attachment, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce || u.SHA256 != x.SHA256 || u.SizeBytes != x.SizeBytes {
+		return store.Attachment{}, false, store.ErrUploadClaimLost
+	}
+	f.puts++
+	created := true
+	if old, ok := f.rows[x.SHA256]; ok {
+		x, created = old, false
+	} else {
+		f.rows[x.SHA256] = x
+	}
+	u.Status, u.Reason, u.ClaimNonce = store.AttachmentUploadDone, "", ""
+	f.uploads[id] = u
+	return x, created, nil
+}
+func (*fakeDB) RecordAttachmentGet(context.Context, string, int64) error { return nil }
 func (f *fakeDB) ListAttachments(_ context.Context, kind, id string, _ int) ([]store.Attachment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

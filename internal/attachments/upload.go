@@ -1,6 +1,7 @@
 package attachments
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -118,7 +119,7 @@ func (m *Manager) BeginUpload(ctx context.Context, client, name, mime string, si
 	// The reservation checks the staging budget, global and per creator, and
 	// the storage fuse including every still-charged pending upload, with the
 	// insert; a refusal creates no row. The capacity preflight runs first.
-	if err := m.Store.CheckAttachmentCapacity(ctx, size, m.Config.StorageCap, m.Config.PutCap); err != nil {
+	if err := m.Store.CheckAttachmentCapacity(ctx, size, m.Config.StorageCap, m.Config.PutCap, ""); err != nil {
 		return UploadTicket{}, err
 	}
 	if err := m.Store.ReserveAttachmentUpload(ctx, row, m.Config.StagingCap, m.Config.StagingClientCap, m.Config.StorageCap); err != nil {
@@ -280,7 +281,7 @@ func (m *Manager) completeBuffered(ctx context.Context, row store.AttachmentUplo
 	if hex.EncodeToString(sum[:]) != row.SHA256 {
 		return refuse("upload_sha256_mismatch")
 	}
-	x, created, err := m.putBytes(ctx, row.CreatedBy, row.Name, row.MIME, uploadRefString(row), body)
+	mime, err := validate(m.Config, row.Name, row.MIME, body)
 	if err != nil {
 		reason, refusable := uploadRefusalReason(err)
 		if !refusable {
@@ -288,12 +289,20 @@ func (m *Manager) completeBuffered(ctx context.Context, row store.AttachmentUplo
 		}
 		return refuse(reason)
 	}
-	changed, err := m.Store.TransitionAttachmentUploadClaim(ctx, row.ID, row.ClaimNonce, store.AttachmentUploadDone, "", m.now())
+	x, created, err := m.putVerified(ctx, row.CreatedBy, row.Name, mime, uploadRefString(row), row.SHA256, row.SizeBytes, row.ID,
+		m.finalizeCommit(ctx, row),
+		func(ctx context.Context) error {
+			return m.Objects.Put(ctx, key(row.SHA256), bytes.NewReader(body), row.SizeBytes, mime)
+		})
 	if err != nil {
-		return x, created, err
-	}
-	if !changed {
-		return m.uploadDoneFallback(ctx, row, x, created)
+		if errors.Is(err, store.ErrUploadClaimLost) {
+			return m.uploadFinalizeFallback(ctx, row)
+		}
+		reason, refusable := uploadRefusalReason(err)
+		if !refusable {
+			return release(err)
+		}
+		return refuse(reason)
 	}
 	m.deleteStaging(ctx, row.StagingKey)
 	return x, created, nil
@@ -381,59 +390,73 @@ func (m *Manager) completeStreamed(ctx context.Context, row store.AttachmentUplo
 		}
 		return refuse(reason)
 	}
-	x, created, err := m.putVerified(ctx, row.CreatedBy, row.Name, mime, uploadRefString(row), row.SHA256, row.SizeBytes, func(ctx context.Context) error {
-		tr, err := m.Objects.Get(ctx, holdingKey)
-		if err != nil {
-			return err
-		}
-		defer tr.Close()
-		pv := &streamVerifier{r: tr, sum: sha256.New()}
-		// Promotion output stays on a private per-claim key until verification
-		// passes: a concurrent putVerified for the same sha can Stat the shared
-		// content key and register it, so publishing unverified bytes there and
-		// deleting them on a failed check would leave metadata pointing at a
-		// missing object. Only a server-side copy of the verified private
-		// object publishes, and a failed check deletes just the private key.
-		promoKey := stagingPrefix + "promo-" + row.ID + "-" + row.ClaimNonce
-		defer func() { _ = m.Objects.Delete(ctx, promoKey) }()
-		if err := m.Objects.Put(ctx, promoKey, pv, row.SizeBytes, mime); err != nil {
-			return err
-		}
-		if pv.n != row.SizeBytes || pv.overflow() || hex.EncodeToString(pv.sum.Sum(nil)) != row.SHA256 {
-			return errors.New("promoted object failed verification")
-		}
-		return m.Objects.Copy(ctx, promoKey, key(row.SHA256))
-	})
+	x, created, err := m.putVerified(ctx, row.CreatedBy, row.Name, mime, uploadRefString(row), row.SHA256, row.SizeBytes, row.ID,
+		m.finalizeCommit(ctx, row),
+		func(ctx context.Context) error {
+			tr, err := m.Objects.Get(ctx, holdingKey)
+			if err != nil {
+				return err
+			}
+			defer tr.Close()
+			pv := &streamVerifier{r: tr, sum: sha256.New()}
+			// Promotion output stays on a private per-claim key until verification
+			// passes: a concurrent putVerified for the same sha can Stat the shared
+			// content key and register it, so publishing unverified bytes there and
+			// deleting them on a failed check would leave metadata pointing at a
+			// missing object. Only a server-side copy of the verified private
+			// object publishes, and a failed check deletes just the private key.
+			promoKey := stagingPrefix + "promo-" + row.ID + "-" + row.ClaimNonce
+			defer func() { _ = m.Objects.Delete(ctx, promoKey) }()
+			if err := m.Objects.Put(ctx, promoKey, pv, row.SizeBytes, mime); err != nil {
+				return err
+			}
+			if pv.n != row.SizeBytes || pv.overflow() || hex.EncodeToString(pv.sum.Sum(nil)) != row.SHA256 {
+				return errors.New("promoted object failed verification")
+			}
+			return m.Objects.Copy(ctx, promoKey, key(row.SHA256))
+		})
 	if err != nil {
+		if errors.Is(err, store.ErrUploadClaimLost) {
+			return m.uploadFinalizeFallback(ctx, row)
+		}
 		reason, refusable := uploadRefusalReason(err)
 		if !refusable {
 			return release(err)
 		}
 		return refuse(reason)
 	}
-	changed, err := m.Store.TransitionAttachmentUploadClaim(ctx, row.ID, row.ClaimNonce, store.AttachmentUploadDone, "", m.now())
-	if err != nil {
-		return x, created, err
-	}
-	if !changed {
-		return m.uploadDoneFallback(ctx, row, x, created)
-	}
 	m.deleteStaging(ctx, row.StagingKey)
 	return x, created, nil
 }
 
-// uploadDoneFallback answers a completion whose claim-scoped move to done did
+// finalizeCommit is the metadata commit for a completing upload:
+// FinalizeAttachmentUpload validates the claim, inserts or dedups the
+// attachment, charges the fuses and marks the row done in one transaction, so
+// the reservation is consumed exactly when the bytes commit.
+func (m *Manager) finalizeCommit(ctx context.Context, row store.AttachmentUpload) func(store.Attachment) (store.Attachment, bool, error) {
+	return func(x store.Attachment) (store.Attachment, bool, error) {
+		return m.Store.FinalizeAttachmentUpload(ctx, row.ID, row.ClaimNonce, x, m.Config.StorageCap, m.Config.PutCap)
+	}
+}
+
+// uploadFinalizeFallback answers a completion whose claim-scoped finalize did
 // not apply because its lease was reclaimed while it ran. The row is re-read
 // so the caller learns the truth: done means another completion of the same
 // verified bytes finished, refused means the upload is final, anything else
 // means a completion still owns it.
-func (m *Manager) uploadDoneFallback(ctx context.Context, row store.AttachmentUpload, x store.Attachment, created bool) (store.Attachment, bool, error) {
+func (m *Manager) uploadFinalizeFallback(ctx context.Context, row store.AttachmentUpload) (store.Attachment, bool, error) {
 	cur, ok, err := m.Store.GetAttachmentUpload(ctx, row.ID)
 	if err != nil {
 		return store.Attachment{}, false, err
 	}
 	if ok && cur.Status == store.AttachmentUploadDone {
-		return x, created, nil
+		x, found, err := m.Store.GetAttachment(ctx, row.SHA256)
+		if err != nil {
+			return store.Attachment{}, false, err
+		}
+		if found {
+			return x, false, nil
+		}
 	}
 	if ok && cur.Status == store.AttachmentUploadRefused {
 		return store.Attachment{}, false, fmt.Errorf("%w: %s", ErrUploadRefused, cur.Reason)

@@ -60,7 +60,7 @@ func (m *memAttachmentDB) GetAttachment(_ context.Context, sha string) (store.At
 	x, ok := m.rows[sha]
 	return x, ok, nil
 }
-func (*memAttachmentDB) CheckAttachmentCapacity(context.Context, int64, int64, int64) error {
+func (*memAttachmentDB) CheckAttachmentCapacity(context.Context, int64, int64, int64, string) error {
 	return nil
 }
 func (m *memAttachmentDB) PutAttachment(_ context.Context, x store.Attachment, _, _ int64) (store.Attachment, bool, error) {
@@ -70,6 +70,21 @@ func (m *memAttachmentDB) PutAttachment(_ context.Context, x store.Attachment, _
 	}
 	m.rows[x.SHA256] = x
 	return x, true, nil
+}
+func (m *memAttachmentDB) FinalizeAttachmentUpload(_ context.Context, id, nonce string, x store.Attachment, _, _ int64) (store.Attachment, bool, error) {
+	u, ok := m.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce || u.SHA256 != x.SHA256 || u.SizeBytes != x.SizeBytes {
+		return store.Attachment{}, false, store.ErrUploadClaimLost
+	}
+	created := true
+	if old, ok := m.rows[x.SHA256]; ok {
+		x, created = old, false
+	} else {
+		m.rows[x.SHA256] = x
+	}
+	u.Status, u.Reason, u.ClaimNonce = store.AttachmentUploadDone, "", ""
+	m.uploads[id] = u
+	return x, created, nil
 }
 func (m *memAttachmentDB) ListAttachments(_ context.Context, kind, id string, _ int) ([]store.Attachment, error) {
 	var out []store.Attachment

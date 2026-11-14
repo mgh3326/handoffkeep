@@ -1152,24 +1152,25 @@ func TestStreamedCompletionRefusesGrowthBetweenHeadAndGet(t *testing.T) {
 	}
 }
 
-// failingFinalize fails the completing -> done transition a fixed number of
-// times, the transient database error after the attachment was stored.
+// failingFinalize fails FinalizeAttachmentUpload a fixed number of times, the
+// transient database error before the claim's commit landed.
 type failingFinalize struct {
 	*fakeDB
 	fail int
 }
 
-func (f *failingFinalize) TransitionAttachmentUploadClaim(ctx context.Context, id, nonce, to, reason string, now time.Time) (bool, error) {
-	if to == store.AttachmentUploadDone && f.fail > 0 {
+func (f *failingFinalize) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, x store.Attachment, storageCap, putCap int64) (store.Attachment, bool, error) {
+	if f.fail > 0 {
 		f.fail--
-		return false, errors.New("database unavailable")
+		return store.Attachment{}, false, errors.New("database unavailable")
 	}
-	return f.fakeDB.TransitionAttachmentUploadClaim(ctx, id, nonce, to, reason, now)
+	return f.fakeDB.FinalizeAttachmentUpload(ctx, id, nonce, x, storageCap, putCap)
 }
 
-// If the final transition fails after the attachment is stored, the row stays
-// completing. Retries inside the lease are refused; after the lease the claim
-// is reclaimed and the completion is redone, and the client gets the result.
+// If the atomic finalize fails, its transaction rolled back and the claim is
+// released: the row is pending again, the already-written content object is
+// deduplicated by Stat on the retry, and the client gets the result without
+// waiting out the lease.
 func TestRetryAfterFinalizeFailureRecovers(t *testing.T) {
 	m, db, objs := newUploadManager(t)
 	body := []byte("finalize may fail once\n")
@@ -1179,16 +1180,12 @@ func TestRetryAfterFinalizeFailureRecovers(t *testing.T) {
 	if _, _, err := m.CompleteUpload(t.Context(), "node", tk.UploadID); err == nil {
 		t.Fatal("the failed finalize was reported as success")
 	}
-	if _, _, err := m.CompleteUpload(t.Context(), "node", tk.UploadID); !errors.Is(err, ErrUploadInProgress) {
-		t.Fatalf("retry inside the lease err=%v; want in progress", err)
-	}
-	m.Now = func() time.Time { return time.Now().Add(uploadLease + time.Minute) }
-	x, _, err := m.CompleteUpload(t.Context(), "node", tk.UploadID)
+	x, created, err := m.CompleteUpload(t.Context(), "node", tk.UploadID)
 	if err != nil {
-		t.Fatalf("retry after the lease: %v", err)
+		t.Fatalf("retry after the released claim: %v", err)
 	}
-	if x.SHA256 != shaOf(body) || db.uploads[tk.UploadID].Status != store.AttachmentUploadDone {
-		t.Fatalf("recovered sha=%s status=%q", x.SHA256, db.uploads[tk.UploadID].Status)
+	if x.SHA256 != shaOf(body) || !created || db.uploads[tk.UploadID].Status != store.AttachmentUploadDone {
+		t.Fatalf("recovered sha=%s created=%v status=%q", x.SHA256, created, db.uploads[tk.UploadID].Status)
 	}
 	if _, ok := objs.objects[stagingPrefix+tk.UploadID]; ok {
 		t.Fatal("staging object survived the recovered completion")

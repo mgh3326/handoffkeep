@@ -163,12 +163,13 @@ func TestReserveAttachmentUploadCountsPendingAgainstStorageCap(t *testing.T) {
 	}
 }
 
-// Buffered writes count still-pending direct-upload reservations against the
-// storage fuse too, under the same advisory lock ReserveAttachmentUpload
-// takes: without it a buffered Put could spend bytes an upload already
-// reserved and doom the completion. A completing upload's own commit is not
-// double-counted — its row already left 'pending' — and resolved rows cannot
-// commit again.
+// Buffered writes count every upload reservation that can still commit —
+// pending and completing — against the storage fuse, under the same advisory
+// lock ReserveAttachmentUpload takes: without it a buffered Put could spend
+// bytes an upload already reserved and doom the completion. A completing
+// upload's own commit is the exception: FinalizeAttachmentUpload excludes its
+// own row so the reservation is consumed exactly once, atomically with the
+// metadata and the done transition.
 func TestPutAttachmentCountsPendingUploadReservations(t *testing.T) {
 	s := schemaStore(t, "attachment_pending_put")
 	now := time.Now().UTC().Truncate(time.Microsecond)
@@ -184,7 +185,7 @@ func TestPutAttachmentCountsPendingUploadReservations(t *testing.T) {
 		t.Fatalf("reserve: %v", err)
 	}
 	const fuse = int64(100)
-	if err := s.CheckAttachmentCapacity(t.Context(), 20, fuse, 1<<40); !errors.Is(err, ErrAttachmentStorageCap) {
+	if err := s.CheckAttachmentCapacity(t.Context(), 20, fuse, 1<<40, ""); !errors.Is(err, ErrAttachmentStorageCap) {
 		t.Fatalf("preflight over pending+committed err=%v", err)
 	}
 	if _, _, err := s.PutAttachment(t.Context(), att('a', 20), fuse, 1<<40); !errors.Is(err, ErrAttachmentStorageCap) {
@@ -197,12 +198,57 @@ func TestPutAttachmentCountsPendingUploadReservations(t *testing.T) {
 	if _, _, err := s.PutAttachment(t.Context(), att('b', 1), fuse, 1<<40); !errors.Is(err, ErrAttachmentStorageCap) {
 		t.Fatalf("put past the fuse err=%v", err)
 	}
-	// A completing upload is mid-commit, not pending: its own PutAttachment
-	// must not count its reservation twice.
+	// Once claimed the upload is completing, not pending — but its bytes can
+	// still commit, so other writers keep paying for the reservation.
 	if ok, err := s.ClaimAttachmentUpload(t.Context(), upload.ID, "nonce", now); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	if _, created, err := s.PutAttachment(t.Context(), att('c', 11), fuse, 1<<40); err != nil || !created {
-		t.Fatalf("completing upload's commit counted its reservation twice: created=%v err=%v", created, err)
+	if _, _, err := s.PutAttachment(t.Context(), att('c', 11), fuse, 1<<40); !errors.Is(err, ErrAttachmentStorageCap) {
+		t.Fatalf("unrelated put spent a completing upload's reservation: %v", err)
+	}
+	// The completing upload finalizes its own reservation: 10 committed + its
+	// own 90 fits exactly, the done transition consumes the charge, and a
+	// second finalize under the same nonce is fenced out.
+	if _, created, err := s.FinalizeAttachmentUpload(t.Context(), upload.ID, "nonce", att('f', 90), fuse, 1<<40); err != nil || !created {
+		t.Fatalf("finalize inside the fuse created=%v err=%v", created, err)
+	}
+	if _, _, err := s.FinalizeAttachmentUpload(t.Context(), upload.ID, "nonce", att('f', 90), fuse, 1<<40); !errors.Is(err, ErrUploadClaimLost) {
+		t.Fatalf("second finalize err=%v", err)
+	}
+	if _, _, err := s.PutAttachment(t.Context(), att('d', 1), fuse, 1<<40); !errors.Is(err, ErrAttachmentStorageCap) {
+		t.Fatalf("committed bytes escaped the fuse after finalize: %v", err)
+	}
+}
+
+// FinalizeAttachmentUpload refuses a claim that does not own the row: a wrong
+// nonce, a pending row, or bytes that do not match the reservation.
+func TestFinalizeAttachmentUploadFencesClaims(t *testing.T) {
+	s := schemaStore(t, "attachment_finalize_fence")
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	sha := strings.Repeat("e", 64)
+	upload := AttachmentUpload{ID: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", StagingKey: "incoming/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", Name: "a.txt", MIME: "text/plain", SizeBytes: 5, SHA256: sha, RefKind: "none", CreatedBy: "node", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	att := Attachment{SHA256: sha, SizeBytes: 5, MIME: "text/plain", OriginalName: "a.txt", CreatedBy: "node", RefKind: "none"}
+	if err := s.ReserveAttachmentUpload(t.Context(), upload, 1<<40, 1<<40, 1<<40); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if _, _, err := s.FinalizeAttachmentUpload(t.Context(), upload.ID, "nonce", att, 1<<40, 1<<40); !errors.Is(err, ErrUploadClaimLost) {
+		t.Fatalf("pending finalize err=%v", err)
+	}
+	if ok, err := s.ClaimAttachmentUpload(t.Context(), upload.ID, "nonce", now); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if _, _, err := s.FinalizeAttachmentUpload(t.Context(), upload.ID, "other", att, 1<<40, 1<<40); !errors.Is(err, ErrUploadClaimLost) {
+		t.Fatalf("wrong-nonce finalize err=%v", err)
+	}
+	wrong := att
+	wrong.SizeBytes = 6
+	if _, _, err := s.FinalizeAttachmentUpload(t.Context(), upload.ID, "nonce", wrong, 1<<40, 1<<40); !errors.Is(err, ErrUploadClaimLost) {
+		t.Fatalf("size-mismatch finalize err=%v", err)
+	}
+	if _, created, err := s.FinalizeAttachmentUpload(t.Context(), upload.ID, "nonce", att, 1<<40, 1<<40); err != nil || !created {
+		t.Fatalf("finalize created=%v err=%v", created, err)
+	}
+	if u, ok, err := s.GetAttachmentUpload(t.Context(), upload.ID); err != nil || !ok || u.Status != AttachmentUploadDone {
+		t.Fatalf("upload after finalize=%+v ok=%v err=%v", u, ok, err)
 	}
 }

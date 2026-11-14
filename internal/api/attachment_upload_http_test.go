@@ -84,13 +84,30 @@ func (d *uploadDB) GetAttachment(_ context.Context, sha string) (store.Attachmen
 	x, ok := d.rows[sha]
 	return x, ok, nil
 }
-func (*uploadDB) CheckAttachmentCapacity(context.Context, int64, int64, int64) error { return nil }
+func (*uploadDB) CheckAttachmentCapacity(context.Context, int64, int64, int64, string) error {
+	return nil
+}
 func (d *uploadDB) PutAttachment(_ context.Context, x store.Attachment, _, _ int64) (store.Attachment, bool, error) {
 	if old, ok := d.rows[x.SHA256]; ok {
 		return old, false, nil
 	}
 	d.rows[x.SHA256] = x
 	return x, true, nil
+}
+func (d *uploadDB) FinalizeAttachmentUpload(_ context.Context, id, nonce string, x store.Attachment, _, _ int64) (store.Attachment, bool, error) {
+	u, ok := d.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce || u.SHA256 != x.SHA256 || u.SizeBytes != x.SizeBytes {
+		return store.Attachment{}, false, store.ErrUploadClaimLost
+	}
+	created := true
+	if old, ok := d.rows[x.SHA256]; ok {
+		x, created = old, false
+	} else {
+		d.rows[x.SHA256] = x
+	}
+	u.Status, u.Reason, u.ClaimNonce = store.AttachmentUploadDone, "", ""
+	d.uploads[id] = u
+	return x, created, nil
 }
 func (*uploadDB) RecordAttachmentGet(context.Context, string, int64) error { return nil }
 func (*uploadDB) ListAttachments(context.Context, string, string, int) ([]store.Attachment, error) {
