@@ -223,6 +223,9 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 	if err := s.ytFieldsOnBindTx(ctx, tx, b.TaskID, now); err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	}
+	if err := ytLinksOnBindTx(ctx, tx, b.TaskID); err != nil {
+		return YTTaskBinding{}, 0, 0, err
+	}
 	// A binding the operator published after an unbind is no task change, so
 	// the task_fields feed would not see it, and the unbind rejected the
 	// task's prepared snapshot and move. This process's fields mode may be off

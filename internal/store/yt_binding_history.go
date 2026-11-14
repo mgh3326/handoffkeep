@@ -185,10 +185,12 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	rows, err := tx.Query(ctx, `UPDATE yt_write_ops SET state='rejected', reason=$2, last_error=$3, resolved_at=$4
 		WHERE entity_kind='task' AND entity_id=$1 AND state='prepared' AND tenant=$10
 			AND ((principal=$5 AND kind=$6 AND (yt_target_id=$11 OR yt_target_id=''))
-				OR (principal=$7 AND kind IN ($8,$9) AND yt_target_id=$11))
+				OR (principal=$7 AND kind IN ($8,$9) AND yt_target_id=$11)
+				OR (principal=$12 AND kind=$13 AND yt_target_id=$11))
 		RETURNING id, principal, kind`,
 		taskKey, reason, clipText(fmt.Sprintf("the binding to %s on %s was removed by %s", b.IssueID, b.Tenant, o.By), 2000), now,
-		YTCommentPrincipal, ytwrite.KindCommentAppend, YTFieldsPrincipal, ytwrite.KindIssueFields, ytwrite.KindIssueMove, b.Tenant, b.IssueID)
+		YTCommentPrincipal, ytwrite.KindCommentAppend, YTFieldsPrincipal, ytwrite.KindIssueFields, ytwrite.KindIssueMove, b.Tenant, b.IssueID,
+		YTLinksPrincipal, ytwrite.KindIssueLinks)
 	if err != nil {
 		return res, err
 	}

@@ -612,6 +612,10 @@ type Store struct {
 	// ytFields is the YouTrack task-fields gate and tenant (SetYTFieldsMode);
 	// nil is off. On prepares issue_fields ops from the change feed.
 	ytFields atomic.Pointer[ytFieldsGate]
+	// ytLinks is the YouTrack issue-link gate and tenant (SetYTLinksMode);
+	// nil is off. On prepares issue_links ops from the change feed, the
+	// sweep and the bind hook (yt_links.go).
+	ytLinks atomic.Pointer[ytLinksGate]
 	// ytMoves is the YouTrack project-move gate (SetYTMovesMode), a
 	// YTMovesMode; unset is off. On prepares and admits issue_move ops
 	// (yt_move.go).
@@ -642,6 +646,9 @@ type Store struct {
 	// after every check has passed and before the binding row is inserted,
 	// with every lock of the publication held.
 	ytBindingChecked func()
+	// ytLinksSweepVisited, when set (tests only), runs in RunYTLinksSweep
+	// after each task of a slice, before the position update.
+	ytLinksSweepVisited func(taskID int64)
 }
 
 // Refs stores repeatable named references. Its decoder accepts legacy scalar

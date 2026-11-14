@@ -336,6 +336,26 @@ package store
 //     commit takes level 6 like any feed writer. Every decision_requests
 //     write inserts its sync_log row from a row trigger (hk 4054,
 //     migration_decision_record_feed.go) and so takes level 6 at commit too.
+//     The issue-link projection (yt_links.go, yt_links_sweep.go, hk 4639) adds
+//     three lane holders and no new lock order. The task_links consumer is a
+//     feed handler like task_fields: it takes the lane lock of each changed
+//     task in ascending id order, then that task's yt_snapshot_state row and
+//     the yt_write_ops rows. Its cursor creation, and an off-mode pass that
+//     read a row, upsert the one yt_links_sweep row (bumpYTLinksSweepTx)
+//     after the feed lock and the cursor row and before any lane lock of the
+//     pass. A sweep slice (RunYTLinksSweep) runs each task in its own
+//     transaction, one lane lock and what a handler takes after it, and
+//     updates the yt_links_sweep row in a separate transaction that holds no
+//     lane lock, so the row is never held across a lane wait. A binding's
+//     links hook (ytLinksOnBindTx, in AddYTTaskBinding and the issue_create
+//     bind) takes no lane lock beyond the bound task's own, which the
+//     publication holds already: the writers that point at the new target
+//     (its children, the duplicates of it, the lower id of each related edge)
+//     are not locked there, because only a feed pass may hold more than one
+//     lane lock. It inserts one task 'U' sync_log row for each of them
+//     (level 6 at commit), and the consumer prepares their snapshots under
+//     its own lane locks in a later pass. SetYTAuthority reads yt_links_sweep
+//     without a lock, after the authority rows.
 //
 //   - Decision mode (yt_decisions.go, hk 4054). Its lanes are decisions
 //     (yt_write_entity:decision:<id>), which no task writer or comment
