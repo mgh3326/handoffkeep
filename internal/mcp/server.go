@@ -35,7 +35,8 @@ type Backend interface {
 
 // attachmentPutMaxRawBytes is the body-carried MCP upload budget. Larger files
 // use attachment_upload_begin and attachment_upload_complete, which transfer
-// bytes directly to object storage, up to the buffered-completion fuse.
+// bytes directly to object storage; binary files stream up to the server's
+// per-file limit, text files are capped by the buffered secret scan.
 const attachmentPutMaxRawBytes = 10 << 20
 
 var attachmentPutMaxBase64 = base64.StdEncoding.EncodedLen(attachmentPutMaxRawBytes)
@@ -44,10 +45,16 @@ var attachmentPutMaxBase64 = base64.StdEncoding.EncodedLen(attachmentPutMaxRawBy
 // allows one 10 MiB body-carried upload plus protocol overhead.
 const mcpRequestBodyLimit = 16 << 20
 
+// attachmentDirectUploadHint names the oversized-upload path and the server
+// setting that enables it, so a default deployment is not sent to tools that
+// refuse with attachment_direct_upload_disabled.
+const attachmentDirectUploadHint = "use attachment_upload_begin, PUT the returned URL, then attachment_upload_complete; the server enables this with HK_ATTACH_DIRECT_UPLOAD"
+
 // attachmentPutDescription states the allowed types from the same constant the
 // attachment manager reads, so the list cannot drift from the enforced one.
 var attachmentPutDescription = "Upload one attachment from base64 content; the remote-safe path, with no server file path. " +
-	"content_base64 is standard padded base64 of at most 10 MiB raw (" + strconv.Itoa(attachmentPutMaxBase64) + " base64 characters); for larger files use attachment_upload_begin, PUT the returned URL, then attachment_upload_complete (up to 256 MiB buffered completion). The OCI per-object ceiling is 50 GiB, but this server path currently has a separate 256 MiB fuse; streaming completion is tracked in hk 4466. " +
+	"content_base64 is standard padded base64 of at most 10 MiB raw (" + strconv.Itoa(attachmentPutMaxBase64) + " base64 characters). " +
+	"Larger files need the direct-upload tools — attachment_upload_begin, PUT the returned URL, then attachment_upload_complete — which the server enables with HK_ATTACH_DIRECT_UPLOAD; without it this tool accepts at most 10 MiB. Direct upload stores binary files up to the server's per-file limit — the OCI object ceiling is 50 GiB — by streaming; text files are capped at 256 MiB because the secret scan buffers the body. " +
 	"name is the original file name; mime is optional and defaults to the sniffed type. " +
 	"Allowed types by default: " + strings.ReplaceAll(attachments.DefaultMIMEAllow, ",", ", ") + ". " +
 	"Text is refused when the secret guard matches it. " +
@@ -58,9 +65,9 @@ var attachmentPutDescription = "Upload one attachment from base64 content; the r
 
 // attachmentUploadBeginDescription states the direct-upload contract. Its
 // allowed-type list comes from the same constant the manager enforces.
-var attachmentUploadBeginDescription = "Start a direct upload: hk checks the declaration and returns upload_id and a presigned PUT url for a staging object, so the file bytes do not pass through hk. " +
+var attachmentUploadBeginDescription = "Start a direct upload (the server enables this with HK_ATTACH_DIRECT_UPLOAD; without it the call returns attachment_direct_upload_disabled): hk checks the declaration and returns upload_id and a presigned PUT url for a staging object, so the file bytes do not pass through hk. " +
 	"PUT exactly size bytes to url with no authorization header; the url is the credential, valid for ten minutes. Then call attachment_upload_complete with upload_id. " +
-	"Declared: name; mime (allowed by default: " + strings.ReplaceAll(attachments.DefaultMIMEAllow, ",", ", ") + "); size in bytes, at most 256 MiB for buffered completion (the OCI per-object ceiling is 50 GiB, but this server path currently has a separate fuse; streaming completion is tracked in hk 4466); sha256 of the bytes as lowercase hex; optional ref (document:<key>, memory:<agent>/<name>, task:<id>, or none). " +
+	"Declared: name; mime (allowed by default: " + strings.ReplaceAll(attachments.DefaultMIMEAllow, ",", ", ") + "); size in bytes up to the server's per-file limit (the OCI object ceiling is 50 GiB) — binary types complete by streaming, text types are capped at 256 MiB because the secret scan buffers the body; sha256 of the bytes as lowercase hex; optional ref (document:<key>, memory:<agent>/<name>, task:<id>, or none). " +
 	"Refused now: a disallowed name, mime or size, a bad sha256 or ref, or no capacity. " +
 	"Completion checks the bytes against size and sha256, sniffs the type and secret-scans text; a mismatch or refusal deletes the staged object and is final. " +
 	"Never log the url."
@@ -197,7 +204,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		// The base64 length is checked before decoding so an oversized payload
 		// is refused without allocating its decoded form.
 		if len(x.ContentBase64) > attachmentPutMaxBase64 {
-			return nil, nil, fmt.Errorf("%w: use attachment_upload_begin, PUT the returned URL, then attachment_upload_complete", attachments.ErrTooLarge)
+			return nil, nil, fmt.Errorf("%w: %s", attachments.ErrTooLarge, attachmentDirectUploadHint)
 		}
 		body, e := base64.StdEncoding.DecodeString(x.ContentBase64)
 		if e != nil {
@@ -207,7 +214,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		// the raw ceiling can share the encoded length of one at it; the raw
 		// size is checked here so the ceiling is exact.
 		if len(body) > attachmentPutMaxRawBytes {
-			return nil, nil, fmt.Errorf("%w: use attachment_upload_begin, PUT the returned URL, then attachment_upload_complete", attachments.ErrTooLarge)
+			return nil, nil, fmt.Errorf("%w: %s", attachments.ErrTooLarge, attachmentDirectUploadHint)
 		}
 		v, created, e := service.PutAttachment(ctx, client, x.Name, x.MIME, x.Ref, body)
 		if e != nil {

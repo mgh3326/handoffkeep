@@ -96,8 +96,7 @@ func ytIssue(id string, hkID int64, title, state, lane string, priority int, ext
 
 func TestYTSnapshotPagesEveryIssueAndCachesForTheTTL(t *testing.T) {
 	fake := &fakeTaskIssues{}
-	const count = 20_001
-	for i := 0; i < count; i++ {
+	for i := 0; i < youtrack.TaskIssuePageSize+3; i++ {
 		fake.issues = append(fake.issues, ytIssue(fmt.Sprintf("2-%d", i), int64(i+1), "t", "backlog", "handoffkeep", 0))
 	}
 	src := newYTTaskSource(fake, fakeYTStore{projects: []store.YouTrackProject{{HKProject: "handoffkeep", ShortName: "HKW"}}}, "tenant", time.Minute)
@@ -107,20 +106,82 @@ func TestYTSnapshotPagesEveryIssueAndCachesForTheTTL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantReads := (count + youtrack.TaskIssuePageSize - 1) / youtrack.TaskIssuePageSize
-	if len(snap.Tasks) != count || fake.reads != wantReads {
-		t.Fatalf("tasks=%d reads=%d, want %d tasks across %d pages", len(snap.Tasks), fake.reads, count, wantReads)
+	if len(snap.Tasks) != youtrack.TaskIssuePageSize+3 || fake.reads != 2 {
+		t.Fatalf("tasks=%d reads=%d", len(snap.Tasks), fake.reads)
 	}
 	if fake.queries[0] != "(project: {HK} or project: {HKW}) sort by: created asc" {
 		t.Fatalf("query=%q", fake.queries[0])
 	}
 	clock = clock.Add(59 * time.Second)
-	if _, err := src.snapshot(context.Background()); err != nil || fake.reads != wantReads {
+	if _, err := src.snapshot(context.Background()); err != nil || fake.reads != 2 {
 		t.Fatalf("within TTL: err=%v reads=%d", err, fake.reads)
 	}
 	clock = clock.Add(2 * time.Second)
-	if _, err := src.snapshot(context.Background()); err != nil || fake.reads != 2*wantReads {
+	if _, err := src.snapshot(context.Background()); err != nil || fake.reads != 4 {
 		t.Fatalf("after TTL: err=%v reads=%d", err, fake.reads)
+	}
+}
+
+// stuckTaskIssues answers every page request with the same full page, the
+// way a proxy that ignores $skip behaves.
+type stuckTaskIssues struct {
+	page  []youtrack.Issue
+	reads int
+}
+
+func (f *stuckTaskIssues) ListTaskIssues(_ context.Context, _ string, _, top int) ([]youtrack.Issue, error) {
+	f.reads++
+	return f.page[:min(top, len(f.page))], nil
+}
+
+func (f *stuckTaskIssues) StateChanges(context.Context, youtrack.Schema, time.Time) ([]youtrack.StateChange, error) {
+	return nil, nil
+}
+
+// A page that repeats issue IDs already seen means $skip was ignored: the
+// read fails as a YouTrack failure instead of paging forever.
+func TestYTSnapshotFailsWhenAPageMakesNoProgress(t *testing.T) {
+	fake := &stuckTaskIssues{}
+	for i := 0; i < youtrack.TaskIssuePageSize; i++ {
+		fake.page = append(fake.page, ytIssue(fmt.Sprintf("2-%d", i), int64(i+1), "t", "backlog", "handoffkeep", 0))
+	}
+	src := newYTTaskSource(fake, fakeYTStore{}, "tenant", time.Minute)
+	if _, err := src.snapshot(context.Background()); !errors.Is(err, errYouTrackRead) {
+		t.Fatalf("repeated page err=%v, want errYouTrackRead", err)
+	}
+	if fake.reads != 2 {
+		t.Fatalf("reads=%d, want 2 (first page, then the repeated one)", fake.reads)
+	}
+}
+
+// endlessTaskIssues fabricates a fresh full page of unique issues for every
+// offset, so the read can only end at the ceiling.
+type endlessTaskIssues struct{ reads int }
+
+func (f *endlessTaskIssues) ListTaskIssues(_ context.Context, _ string, skip, top int) ([]youtrack.Issue, error) {
+	f.reads++
+	page := make([]youtrack.Issue, 0, top)
+	for i := 0; i < top; i++ {
+		page = append(page, ytIssue(fmt.Sprintf("2-%d", skip+i), int64(skip+i+1), "t", "backlog", "handoffkeep", 0))
+	}
+	return page, nil
+}
+
+func (f *endlessTaskIssues) StateChanges(context.Context, youtrack.Schema, time.Time) ([]youtrack.StateChange, error) {
+	return nil, nil
+}
+
+// Past maxTaskIssues the read fails rather than holding an unbounded issue
+// list; it never serves a partial board as complete.
+func TestYTSnapshotFailsPastMaxTaskIssues(t *testing.T) {
+	fake := &endlessTaskIssues{}
+	src := newYTTaskSource(fake, fakeYTStore{}, "tenant", time.Minute)
+	if _, err := src.snapshot(context.Background()); !errors.Is(err, errYouTrackRead) {
+		t.Fatalf("over-ceiling err=%v, want errYouTrackRead", err)
+	}
+	wantReads := maxTaskIssues/youtrack.TaskIssuePageSize + 1
+	if fake.reads != wantReads {
+		t.Fatalf("reads=%d, want %d", fake.reads, wantReads)
 	}
 }
 
