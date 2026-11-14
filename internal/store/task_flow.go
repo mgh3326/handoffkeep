@@ -799,7 +799,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 	// Rule 8: entering merged by hand also looks for a deploy record that
 	// already lists the task's PR.
 	if action == actMove && to == StateMerged {
-		if x, err = s.deployOnMergedTx(ctx, tx, x, now); err != nil {
+		if x, err = s.deployOnMergedTx(ctx, tx, x, now, nil); err != nil {
 			return Task{}, err
 		}
 	}
