@@ -147,6 +147,12 @@ type LinksLedger interface {
 	// the writer's releasing rows and the issue's unowned rows that cur, the
 	// read that showed the plan done, no longer shows.
 	ApplyLinks(ctx context.Context, now time.Time, id int64, ytID string, cur []IssueLink) (Op, error)
+	// LeaseLinkRecovery gives one recovery pass of op id exclusive use of it
+	// until until: a compare-and-set that holds only while the op is
+	// remote_unknown, due at or before now, and has made reconciles evidence
+	// searches; it moves the op's due time to until. ok is false when another
+	// pass won it or the op moved on; that pass makes no request.
+	LeaseLinkRecovery(ctx context.Context, now time.Time, id int64, reconciles int, until time.Time) (ok bool, err error)
 	// LinkRecords reads what the ledger holds about issueID on tenant.
 	LinkRecords(ctx context.Context, tenant, issueID string) (IssueLinkRecords, error)
 }

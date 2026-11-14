@@ -176,6 +176,20 @@ func (l *MemLedger) ApplyLinks(_ context.Context, now time.Time, id int64, ytID 
 	return *op, nil
 }
 
+func (l *MemLedger) LeaseLinkRecovery(_ context.Context, now time.Time, id int64, reconciles int, until time.Time) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	op, err := l.get(id)
+	if err != nil {
+		return false, err
+	}
+	if op.State != ytwrite.StateRemoteUnknown || op.NextAttemptAt.After(now) || op.Reconciles != reconciles {
+		return false, nil
+	}
+	op.NextAttemptAt = until
+	return true, nil
+}
+
 func (l *MemLedger) LinkRecords(_ context.Context, tenant, issueID string) (ytwrite.IssueLinkRecords, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -241,6 +255,21 @@ func (c *CrashLedger) ApplyLinks(ctx context.Context, now time.Time, id int64, y
 		return ytwrite.Op{}, err
 	}
 	return op, nil
+}
+
+func (c *CrashLedger) LeaseLinkRecovery(ctx context.Context, now time.Time, id int64, reconciles int, until time.Time) (bool, error) {
+	if err := c.enter("LeaseLinkRecovery"); err != nil {
+		return false, err
+	}
+	ll, err := c.links()
+	if err != nil {
+		return false, err
+	}
+	ok, err := ll.LeaseLinkRecovery(ctx, now, id, reconciles, until)
+	if err := c.leave("LeaseLinkRecovery", err); err != nil {
+		return false, err
+	}
+	return ok, nil
 }
 
 func (c *CrashLedger) LinkRecords(ctx context.Context, tenant, issueID string) (ytwrite.IssueLinkRecords, error) {

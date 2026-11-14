@@ -289,6 +289,15 @@ func (l *YTWriteLedger) ApplyLinks(ctx context.Context, now time.Time, id int64,
 	return op, tx.Commit(ctx)
 }
 
+func (l *YTWriteLedger) LeaseLinkRecovery(ctx context.Context, now time.Time, id int64, reconciles int, until time.Time) (bool, error) {
+	tag, err := l.s.pool.Exec(ctx, `UPDATE yt_write_ops SET next_attempt_at=$4
+		WHERE id=$1 AND state='remote_unknown' AND next_attempt_at <= $2 AND reconciles=$3`, id, now.UTC(), reconciles, until.UTC())
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 func (l *YTWriteLedger) LinkRecords(ctx context.Context, tenant, issueID string) (ytwrite.IssueLinkRecords, error) {
 	owned, unowned, err := ytLinkRowsTx(ctx, l.s.pool, tenant, issueID, false)
 	if err != nil {

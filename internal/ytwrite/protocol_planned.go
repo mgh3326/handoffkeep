@@ -132,7 +132,25 @@ func (p *Protocol) reconcilePlanned(ctx context.Context, op Op, kind PlannedKind
 		log.Printf("ytwrite.links_recover_exhausted op_id=%d recovers=%d", op.ID, recovers)
 		return touch(0, ReasonRecoverExhausted, fmt.Sprintf("%d recovery plans did not converge; an operator resolves it", recovers))
 	}
-	rctx, cancelRemote := p.detached(ctx)
+	// One recovery at a time per op (review of PR #425): Drive reconciles a
+	// remote_unknown op without a claim, and a recovery mutates, so two
+	// workers must never overlap. The lease is a compare-and-set on the op's
+	// due time and reconcile count, taken before the read; the losers make
+	// no request. Everything this recovery does (remote steps and ledger
+	// steps) runs under a deadline that ends a SettleTimeout before the
+	// lease does, so no later holder starts while this one can still act.
+	start := p.now()
+	leased, err := ll.LeaseLinkRecovery(ctx, start, op.ID, op.Reconciles, start.Add(p.linkRecoveryLease()))
+	if err != nil {
+		return false, err
+	}
+	if !leased {
+		return false, nil
+	}
+	wctx, cancelWork := context.WithTimeout(context.WithoutCancel(ctx), p.DispatchTimeout+p.SettleTimeout)
+	defer cancelWork()
+	ctx = wctx
+	rctx, cancelRemote := context.WithTimeout(wctx, p.DispatchTimeout)
 	defer cancelRemote()
 	// failed classifies a recovery request's error.
 	failed := func(err error) (bool, error) {
@@ -216,4 +234,11 @@ func (p *Protocol) rejectRecovered(ctx context.Context, op Op, reason, detail st
 	}
 	logTransition(s.op)
 	return false, nil
+}
+
+// linkRecoveryLease is how long one recovery pass holds its op: its remote
+// steps (DispatchTimeout), its ledger steps (SettleTimeout), and a
+// SettleTimeout of margin for a commit whose reply was lost.
+func (p *Protocol) linkRecoveryLease() time.Duration {
+	return p.DispatchTimeout + 2*p.SettleTimeout
 }

@@ -294,6 +294,56 @@ func RunLinksProtocol(t *testing.T, nl NewLedger) {
 		}
 	})
 
+	// Review of PR #425: one recovery at a time per op. Worker B has listed
+	// the op as due; worker A takes the recovery lease before B reconciles
+	// it. B then makes no request and changes nothing. A stale reconcile
+	// count or a second lease loses the compare-and-set.
+	t.Run("recovery_is_leased_to_one_worker", func(t *testing.T) {
+		e := newLinksEnv(t, nl)
+		e.applyRelated(20)
+		e.yt.QueueLinkCallFaults(LinkCallFault{Op: LinkOpRemove, Status: http.StatusServiceUnavailable, Count: 1})
+		op := e.prepare(lWriter, lIssue, related(21), nil)
+		e.drive()
+		held := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonPartialWrite)
+		e.clock.Advance(time.Hour)
+		ctx := context.Background()
+		leasedByA := false
+		e.restart(&dueHook{CrashLedger: &CrashLedger{Ledger: e.ledger}, after: func(due []ytwrite.Op) {
+			for _, d := range due {
+				if d.ID != op.ID || leasedByA {
+					continue
+				}
+				now := e.clock.Now()
+				if ok, err := e.ll.LeaseLinkRecovery(ctx, now, op.ID, held.Reconciles+1, now.Add(time.Minute)); err != nil || ok {
+					t.Errorf("lease with a stale reconcile count = %v %v", ok, err)
+				}
+				if ok, err := e.ll.LeaseLinkRecovery(ctx, now, op.ID, held.Reconciles, now.Add(time.Minute)); err != nil || !ok {
+					t.Errorf("worker A's lease = %v %v", ok, err)
+				}
+				if ok, err := e.ll.LeaseLinkRecovery(ctx, now, op.ID, held.Reconciles, now.Add(time.Minute)); err != nil || ok {
+					t.Errorf("a second lease = %v %v", ok, err)
+				}
+				leasedByA = true
+			}
+		}})
+		calls := len(e.yt.LinkCalls())
+		if _, err := e.p.Drive(ctx, 100); err != nil {
+			t.Fatal(err)
+		}
+		if !leasedByA {
+			t.Fatal("worker B never listed the op")
+		}
+		got := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonPartialWrite)
+		if n := len(e.yt.LinkCalls()); n != calls || got.Reconciles != held.Reconciles || e.latestPlan(op).Recover != 0 {
+			t.Fatalf("worker B acted without the lease: %d requests, reconciles %d, plan %+v", n-calls, got.Reconciles, e.latestPlan(op))
+		}
+		e.restart(e.ledger)
+		e.clock.Advance(2 * time.Minute) // worker A's lease ends
+		e.drive()
+		e.wantState(op, ytwrite.StateApplied, "")
+		e.wantLinks(lIssue, rel("2-21"))
+	})
+
 	// I12: a re-parent removes the old parent before it adds the new one.
 	t.Run("reparent_removes_old_parent_first", func(t *testing.T) {
 		e := newLinksEnv(t, nl)
@@ -558,4 +608,20 @@ func (e *linksEnv) removeAll(writer int64, issue string) {
 			e.t.Fatalf("row still open after the removal: %+v", o)
 		}
 	}
+}
+
+// dueHook is a ledger whose Due runs after on the ops it lists before the
+// protocol sees them: another worker acting between one worker's Due and
+// its reconcile.
+type dueHook struct {
+	*CrashLedger
+	after func([]ytwrite.Op)
+}
+
+func (d *dueHook) Due(ctx context.Context, now time.Time, limit int) ([]ytwrite.Op, error) {
+	ops, err := d.CrashLedger.Due(ctx, now, limit)
+	if err == nil {
+		d.after(ops)
+	}
+	return ops, err
 }
