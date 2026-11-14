@@ -61,7 +61,15 @@ func (p *Protocol) sendPlanned(ctx context.Context, op Op, kind PlannedKind) Res
 	// 3. Execute the diff (I12 order).
 	n, err := kind.Execute(rctx, p.Remote, op, read.Types, plan)
 	if err != nil {
-		p.releaseUnsent(ctx, ll, op, plan, n, err)
+		// The release is recorded before any settlement; when it cannot be,
+		// the op is left dispatched (stale recovery replans it), never
+		// settled with an unsent add still owned.
+		relCtx, cancelRelease := p.settling(ctx)
+		rerr := p.releaseUnsent(relCtx, ll, op, plan, n, err)
+		cancelRelease()
+		if rerr != nil {
+			return p.record(op, settled{err: rerr})
+		}
 		var partial *PartialWriteError
 		var refused *RefusedError
 		switch {
@@ -116,6 +124,26 @@ func (p *Protocol) reconcilePlanned(ctx context.Context, op Op, kind PlannedKind
 	if !ok {
 		return touch(0, ReasonReconcileFailed, "the ledger cannot plan "+op.Kind)
 	}
+	// One recovery at a time per op (review of PR #425): Drive reconciles a
+	// remote_unknown op without a claim, and a recovery mutates, so two
+	// workers must never overlap. The lease is a compare-and-set on the op's
+	// due time and reconcile count, taken before anything else this pass
+	// reads or writes; the losers make no request and touch nothing, so
+	// they can neither shorten the holder's lease nor move its count.
+	// Everything this recovery does (remote steps and ledger steps) runs
+	// under a deadline that ends a SettleTimeout before the lease does, so
+	// no later holder starts while this one can still act.
+	start := p.now()
+	leased, err := ll.LeaseLinkRecovery(ctx, start, op.ID, op.Reconciles, start.Add(p.linkRecoveryLease()))
+	if err != nil {
+		return false, err
+	}
+	if !leased {
+		return false, nil
+	}
+	wctx, cancelWork := context.WithTimeout(context.WithoutCancel(ctx), p.DispatchTimeout+p.SettleTimeout)
+	defer cancelWork()
+	ctx = wctx
 	latest, found, err := ll.LatestLinkPlan(ctx, op.ID)
 	if err != nil {
 		return touch(0, ReasonReconcileFailed, err.Error())
@@ -133,24 +161,6 @@ func (p *Protocol) reconcilePlanned(ctx context.Context, op Op, kind PlannedKind
 		log.Printf("ytwrite.links_recover_exhausted op_id=%d recovers=%d", op.ID, recovers)
 		return touch(0, ReasonRecoverExhausted, fmt.Sprintf("%d recovery plans did not converge; an operator resolves it", recovers))
 	}
-	// One recovery at a time per op (review of PR #425): Drive reconciles a
-	// remote_unknown op without a claim, and a recovery mutates, so two
-	// workers must never overlap. The lease is a compare-and-set on the op's
-	// due time and reconcile count, taken before the read; the losers make
-	// no request. Everything this recovery does (remote steps and ledger
-	// steps) runs under a deadline that ends a SettleTimeout before the
-	// lease does, so no later holder starts while this one can still act.
-	start := p.now()
-	leased, err := ll.LeaseLinkRecovery(ctx, start, op.ID, op.Reconciles, start.Add(p.linkRecoveryLease()))
-	if err != nil {
-		return false, err
-	}
-	if !leased {
-		return false, nil
-	}
-	wctx, cancelWork := context.WithTimeout(context.WithoutCancel(ctx), p.DispatchTimeout+p.SettleTimeout)
-	defer cancelWork()
-	ctx = wctx
 	rctx, cancelRemote := context.WithTimeout(wctx, p.DispatchTimeout)
 	defer cancelRemote()
 	// failed classifies a recovery request's error.
@@ -195,7 +205,12 @@ func (p *Protocol) reconcilePlanned(ctx context.Context, op Op, kind PlannedKind
 	}
 	n, err := kind.Execute(rctx, p.Remote, op, read.Types, plan)
 	if err != nil {
-		p.releaseUnsent(ctx, ll, op, plan, n, err)
+		// As on the send path: no settlement before the release is recorded.
+		// On failure the op stays remote_unknown under this lease, and the
+		// next pass after it replans.
+		if rerr := p.releaseUnsent(ctx, ll, op, plan, n, err); rerr != nil {
+			return false, rerr
+		}
 		var partial *PartialWriteError
 		if errors.As(err, &partial) {
 			err = partial.Err
@@ -251,18 +266,18 @@ func (p *Protocol) linkRecoveryLease() time.Duration {
 // processed). Ownership of an add whose answer was ambiguous (5xx, 408,
 // transport) stays: it may have landed. Without this a refused add would
 // leave an open row, and a person who later made the same link would see a
-// later op delete it as hk's (review of PR #425). A failure to record is
-// logged; the plan rows stay as they were.
-func (p *Protocol) releaseUnsent(ctx context.Context, ll LinksLedger, op Op, plan LinkPlan, n int, err error) {
+// later op delete it as hk's (review of PR #425). It runs on ctx as given
+// (bounded by the caller); its error must keep the caller from settling.
+func (p *Protocol) releaseUnsent(ctx context.Context, ll LinksLedger, op Op, plan LinkPlan, n int, err error) error {
 	links := UnsentAdds(plan, n, definiteFailure(err))
 	if len(links) == 0 {
-		return
+		return nil
 	}
-	sctx, cancel := p.settling(ctx)
-	defer cancel()
-	if rerr := ll.ReleaseUnsentLinks(sctx, p.now(), op.ID, links); rerr != nil {
+	if rerr := ll.ReleaseUnsentLinks(ctx, p.now(), op.ID, links); rerr != nil {
 		log.Printf("ytwrite.links_release_failed op_id=%d links=%d err=%q", op.ID, len(links), rerr.Error())
+		return rerr
 	}
+	return nil
 }
 
 // definiteFailure reports an error that says the request was not applied:

@@ -2,6 +2,7 @@ package ytwritetest
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"slices"
 	"testing"
@@ -393,6 +394,60 @@ func RunLinksProtocol(t *testing.T, nl NewLedger) {
 		e.wantLinks(lIssue, rel("2-21"))
 	})
 
+	// Review of PR #425: the lease comes before every other ledger step of
+	// a recovery pass. Worker B lost the lease and its plan lookup fails
+	// (transient); B must not touch the op, which would shorten A's lease
+	// and move its reconcile count.
+	t.Run("worker_without_the_lease_touches_nothing", func(t *testing.T) {
+		e := newLinksEnv(t, nl)
+		e.applyRelated(20)
+		e.yt.QueueLinkCallFaults(LinkCallFault{Op: LinkOpRemove, Status: http.StatusServiceUnavailable, Count: 1})
+		op := e.prepare(lWriter, lIssue, related(21), nil)
+		e.drive()
+		held := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonPartialWrite)
+		e.clock.Advance(time.Hour)
+		ctx := context.Background()
+		until := e.clock.Now().Add(time.Minute)
+		e.restart(&dueHook{CrashLedger: &CrashLedger{Ledger: e.ledger}, failLatest: true, after: func(due []ytwrite.Op) {
+			for _, d := range due {
+				if d.ID == op.ID {
+					if ok, err := e.ll.LeaseLinkRecovery(ctx, e.clock.Now(), op.ID, held.Reconciles, until); err != nil || !ok {
+						t.Errorf("worker A's lease = %v %v", ok, err)
+					}
+				}
+			}
+		}})
+		_, _ = e.p.Drive(ctx, 100)
+		got := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonPartialWrite)
+		if got.Reconciles != held.Reconciles || !got.NextAttemptAt.Equal(until) {
+			t.Fatalf("worker B touched the op: reconciles %d -> %d, next attempt %s (A's lease until %s)",
+				held.Reconciles, got.Reconciles, got.NextAttemptAt, until)
+		}
+	})
+
+	// Review of PR #425: an op is not settled before the release of its
+	// unsent adds is recorded. The release fails once: the refused op stays
+	// dispatched with its row open; stale recovery replans it, the add is
+	// refused again, the release is recorded and only then is it rejected.
+	t.Run("release_failure_keeps_the_op_unsettled", func(t *testing.T) {
+		e := newLinksEnv(t, nl)
+		e.yt.QueueLinkCallFaults(LinkCallFault{Op: LinkOpAdd, Status: http.StatusBadRequest, Count: 2})
+		e.restart(&dueHook{CrashLedger: &CrashLedger{Ledger: e.ledger}, failRelease: 1})
+		op := e.prepare(lWriter, lIssue, related(20), nil)
+		_, _ = e.p.Drive(context.Background(), 100)
+		e.wantState(op, ytwrite.StateDispatched, "")
+		e.wantOwnedOpen(lIssue, rel("2-20"))
+		e.restart(e.ledger)
+		e.clock.Advance(2 * time.Minute) // past StaleAfter
+		e.drive()
+		e.wantState(op, ytwrite.StateRejected, "http_400")
+		for _, o := range e.records(lIssue).Owned {
+			if o.Open() {
+				t.Fatalf("open row after the refused op settled: %+v", o)
+			}
+		}
+	})
+
 	// I12: a re-parent removes the old parent before it adds the new one.
 	t.Run("reparent_removes_old_parent_first", func(t *testing.T) {
 		e := newLinksEnv(t, nl)
@@ -660,17 +715,37 @@ func (e *linksEnv) removeAll(writer int64, issue string) {
 }
 
 // dueHook is a ledger whose Due runs after on the ops it lists before the
-// protocol sees them: another worker acting between one worker's Due and
-// its reconcile.
+// protocol sees them (another worker acting between one worker's Due and
+// its reconcile), and that can fail LatestLinkPlan always and
+// ReleaseUnsentLinks a number of times (a transient database failure).
 type dueHook struct {
 	*CrashLedger
-	after func([]ytwrite.Op)
+	after       func([]ytwrite.Op)
+	failLatest  bool
+	failRelease int
 }
+
+var errHookTransient = errors.New("ytwritetest: transient ledger failure")
 
 func (d *dueHook) Due(ctx context.Context, now time.Time, limit int) ([]ytwrite.Op, error) {
 	ops, err := d.CrashLedger.Due(ctx, now, limit)
-	if err == nil {
+	if err == nil && d.after != nil {
 		d.after(ops)
 	}
 	return ops, err
+}
+
+func (d *dueHook) LatestLinkPlan(ctx context.Context, id int64) (ytwrite.LinkPlanRecord, bool, error) {
+	if d.failLatest {
+		return ytwrite.LinkPlanRecord{}, false, errHookTransient
+	}
+	return d.CrashLedger.LatestLinkPlan(ctx, id)
+}
+
+func (d *dueHook) ReleaseUnsentLinks(ctx context.Context, now time.Time, id int64, links []ytwrite.IssueLink) error {
+	if d.failRelease > 0 {
+		d.failRelease--
+		return errHookTransient
+	}
+	return d.CrashLedger.ReleaseUnsentLinks(ctx, now, id, links)
 }
