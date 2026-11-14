@@ -38,16 +38,18 @@ func serveLinks(t *testing.T, f *ytwritetest.FakeYouTrack, wrap func(http.Handle
 	return NewWriteRemote(c)
 }
 
-// without drops query parameters before the fake sees them: a server that does
-// not know them.
-func without(params ...string) func(http.Handler) http.Handler {
+// without drops query parameters from the requests whose path ends in suffix
+// before the fake sees them: a server that does not know them.
+func without(suffix string, params ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			q := r.URL.Query()
-			for _, p := range params {
-				q.Del(p)
+			if strings.HasSuffix(r.URL.Path, suffix) {
+				q := r.URL.Query()
+				for _, p := range params {
+					q.Del(p)
+				}
+				r.URL.RawQuery = q.Encode()
 			}
-			r.URL.RawQuery = q.Encode()
 			next.ServeHTTP(w, r)
 		})
 	}
@@ -236,7 +238,7 @@ func TestReadIssueLinksEndsWhenTheServerIgnoresSkipLinks(t *testing.T) {
 	f := ytwritetest.NewFake()
 	f.SeedIssueLink("2-5", ytwrite.IssueLink{Kind: ytwrite.LinkSubtask, Target: "2-1"})
 	f.SeedIssueLink("2-5", ytwrite.IssueLink{Kind: ytwrite.LinkRelates, Target: "2-6"})
-	got, err := serveLinks(t, f, without("$topLinks", "$skipLinks")).ReadIssueLinks(context.Background(), "2-5")
+	got, err := serveLinks(t, f, without("/links", "$topLinks", "$skipLinks")).ReadIssueLinks(context.Background(), "2-5")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +256,7 @@ func TestReadIssueLinksEndsWhenTheServerIgnoresSkipLinks(t *testing.T) {
 // not a loop to the cap.
 func TestReadIssueLinksRefusesRowsRepeatedAcrossPages(t *testing.T) {
 	f := ytwritetest.NewFake()
-	_, err := serveLinks(t, f, without("$skip")).ReadIssueLinks(context.Background(), "2-5")
+	_, err := serveLinks(t, f, without("/links", "$skip")).ReadIssueLinks(context.Background(), "2-5")
 	if !errors.Is(err, ytwrite.ErrInconsistentEnumeration) {
 		t.Fatalf("ReadIssueLinks error %v, want ErrInconsistentEnumeration", err)
 	}
