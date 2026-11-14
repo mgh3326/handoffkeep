@@ -82,7 +82,9 @@ func RunLinksProtocol(t *testing.T, nl NewLedger) {
 			}
 		}
 		// A person removes it: the next read closes the row.
-		e.yt.RemoveIssueLink(context.Background(), lIssue, e.types(), rel("2-99"))
+		if err := e.yt.RemoveIssueLink(context.Background(), lIssue, e.types(), rel("2-99")); err != nil {
+			t.Fatal(err)
+		}
 		op3 := e.prepare(lWriter, lIssue, related(20), nil)
 		e.drive()
 		e.wantState(op3, ytwrite.StateApplied, "")
