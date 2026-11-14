@@ -194,11 +194,14 @@ type LinkSettlement struct {
 	// the ledger then records that step as definite (never sent).
 	Stopped bool
 	Step    int
-	// Saw is the latest plan an operator's resolve read (SawPlan false: it
-	// read none). The ledger refuses an operator's settlement when the
-	// latest plan is no longer that one (CheckOperatorSaw).
+	// Saw is the latest plan an operator's resolve read, with its record
+	// (SawPlan false: it read none). The ledger refuses an operator's
+	// settlement when the latest plan or its record is no longer that one
+	// (CheckOperatorSaw).
 	SawPlan            bool
 	SawAttempt, SawRec int
+	SawMarked          int
+	SawOutcome         StepOutcome
 	// Read and Cur: for applied, the read that showed the plan done. An
 	// operator's apply has no read.
 	Read bool
@@ -224,14 +227,15 @@ func (s LinkSettlement) StepRecord(marked int) (step int, outcome StepOutcome, o
 }
 
 // CheckOperatorSaw refuses (ErrState) an operator's settlement made from a
-// plan that is no longer op's latest: a recovery pass planned, marked or
-// settled after the operator read it, so its outcome is not the one the
-// operator judged. latest and found are the ledger's latest plan under the
+// plan, or a record of it, that is no longer op's latest: a recovery pass
+// planned, marked a step or recorded an outcome after the operator read it,
+// so the in-flight step is not the one the operator judged. latest and found are the ledger's latest plan under the
 // op's lock.
 func CheckOperatorSaw(s LinkSettlement, latest LinkPlanRecord, found bool) error {
-	if found != s.SawPlan || (found && (latest.Attempt != s.SawAttempt || latest.Recover != s.SawRec)) {
-		return fmt.Errorf("%w: the operator resolved plan %d.%d (found %v); the latest is %d.%d (found %v)",
-			ErrState, s.SawAttempt, s.SawRec, s.SawPlan, latest.Attempt, latest.Recover, found)
+	if found != s.SawPlan || (found && (latest.Attempt != s.SawAttempt || latest.Recover != s.SawRec ||
+		latest.Marked != s.SawMarked || latest.Outcome != s.SawOutcome)) {
+		return fmt.Errorf("%w: the operator resolved plan %d.%d marked %d %q (found %v); the latest is %d.%d marked %d %q (found %v)",
+			ErrState, s.SawAttempt, s.SawRec, s.SawMarked, s.SawOutcome, s.SawPlan, latest.Attempt, latest.Recover, latest.Marked, latest.Outcome, found)
 	}
 	return nil
 }

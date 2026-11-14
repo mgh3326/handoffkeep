@@ -306,7 +306,7 @@ func (p *Protocol) resolvePlanned(ctx context.Context, op Op, r Resolution) (Res
 		st.f.Recover = latest.Recover
 	}
 	ls := LinkSettlement{To: StateRejected, Reason: ReasonOperatorNotDone, Detail: "by " + r.By + ": " + r.Note,
-		SawPlan: found, SawAttempt: latest.Attempt, SawRec: latest.Recover}
+		SawPlan: found, SawAttempt: latest.Attempt, SawRec: latest.Recover, SawMarked: latest.Marked, SawOutcome: latest.Outcome}
 	st.outcome = StepDefinite
 	if r.Applied {
 		ls.To, ls.YTID, ls.Reason, ls.Detail = StateApplied, op.YTTargetID, "", ""

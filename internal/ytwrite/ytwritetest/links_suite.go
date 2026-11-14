@@ -723,6 +723,51 @@ func RunLinksProtocol(t *testing.T, nl NewLedger) {
 		}
 	})
 
+	// Review of PR #425 (r4575367527): the operator's snapshot covers the
+	// plan's record too. The operator reads recovery plan 1 before any step
+	// is marked; the pass then marks and sends its add and stops before
+	// settling. Once its lease ran out, the stale "not done" is refused;
+	// the add may have landed, so its claim stays until a resolve made from
+	// the current record.
+	t.Run("operator_resolve_of_a_since_marked_plan_is_refused", func(t *testing.T) {
+		e := newLinksEnv(t, nl)
+		e.yt.QueueLinkCallFaults(LinkCallFault{Op: LinkOpAdd, Status: http.StatusBadGateway, Count: 1})
+		op := e.prepare(lWriter, lIssue, related(21), nil)
+		e.drive()
+		held := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+		ctx := context.Background()
+		e.clock.Advance(time.Hour)
+		now := e.clock.Now()
+		epoch, ok, err := e.ll.LeaseLinkRecovery(ctx, now, op.ID, held.Reconciles, now.Add(time.Minute))
+		if err != nil || !ok {
+			t.Fatalf("lease = %v %v", ok, err)
+		}
+		f := ytwrite.LinkFence{Attempt: held.Attempts, Recover: 1, Epoch: epoch}
+		if _, err := e.ll.PlanLinks(ctx, now, op.ID, f, e.yt.IssueLinks(lIssue)); err != nil {
+			t.Fatalf("plan: %v", err)
+		}
+		e.clock.Advance(2 * time.Minute) // the lease runs out before the operator reads
+		e.restart(&dueHook{CrashLedger: &CrashLedger{Ledger: e.ledger}, afterLatest: func() {
+			// The pass marks and sends its add after the operator's read.
+			if err := e.ll.MarkLinkStep(ctx, e.clock.Now(), op.ID, f, 0); err != nil {
+				t.Fatalf("mark: %v", err)
+			}
+		}})
+		r := ytwrite.Resolution{Applied: false, By: "operator", Note: "looked in YouTrack"}
+		if _, err := e.p.Resolve(ctx, op.ID, r); !errors.Is(err, ytwrite.ErrState) {
+			t.Fatalf("resolve from a since-marked record = %v, want ErrState", err)
+		}
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonLinkRecovery)
+		if p := e.latestPlan(op); p.Recover != 1 || p.Marked != 1 || p.Outcome != "" {
+			t.Fatalf("plan record = %+v", p)
+		}
+		e.wantOwnedOpen(lIssue, rel("2-21"))
+		e.restart(e.ledger)
+		e.resolve(op, true)
+		e.wantState(op, ytwrite.StateApplied, "")
+		e.wantOwnedOpen(lIssue, rel("2-21"))
+	})
+
 	// I12: a re-parent removes the old parent before it adds the new one.
 	t.Run("reparent_removes_old_parent_first", func(t *testing.T) {
 		e := newLinksEnv(t, nl)
