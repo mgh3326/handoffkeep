@@ -571,6 +571,14 @@ func readProjectLastSuccessfulDeploys(ctx context.Context, tx pgx.Tx) (map[strin
 		return nil, err
 	}
 
+	// A service's own name is its canonical key. A repo base name that equals
+	// another active service's name must not overwrite that service's boundary:
+	// DeployLagStatus and EnqueueDeployLagNotices read the map by service name.
+	serviceNames := make(map[string]bool, len(services))
+	for _, svc := range services {
+		serviceNames[svc.name] = true
+	}
+
 	for _, svc := range services {
 		var newestSuccess *time.Time
 		for _, prefix := range svc.prefixes {
@@ -597,7 +605,9 @@ func readProjectLastSuccessfulDeploys(ctx context.Context, tx pgx.Tx) (map[strin
 			// Map repo base name as well (e.g. mgh3326/panewire -> panewire)
 			if idx := strings.LastIndex(svc.repo, "/"); idx >= 0 && idx+1 < len(svc.repo) {
 				repoBase := svc.repo[idx+1:]
-				result[repoBase] = *newestSuccess
+				if !serviceNames[repoBase] {
+					result[repoBase] = *newestSuccess
+				}
 			}
 		}
 	}
@@ -605,20 +615,50 @@ func readProjectLastSuccessfulDeploys(ctx context.Context, tx pgx.Tx) (map[strin
 	return result, nil
 }
 
+// lastSuccessPageSize is how many documents one page of the last-success scan
+// reads. It bounds one query, not the scan: scanPrefixLastSuccessDeployTx
+// keeps paging until it finds a success or runs out of documents.
+const lastSuccessPageSize = 200
+
+// scanPrefixLastSuccessDeployTx returns the newest successful deploy under one
+// record prefix. It reads newest-key-first pages and stops at the first page
+// that holds a success, so a long run of newer failed or invalid records
+// cannot hide the last success: a service is reported as never deployed only
+// when its whole prefix has no success.
 func scanPrefixLastSuccessDeployTx(ctx context.Context, tx pgx.Tx, prefix string, services []string) (*time.Time, error) {
+	after := ""
+	for {
+		newest, lastKey, n, err := scanPrefixLastSuccessPageTx(ctx, tx, prefix, services, after)
+		if err != nil {
+			return nil, err
+		}
+		if newest != nil || n < lastSuccessPageSize {
+			return newest, nil
+		}
+		after = lastKey
+	}
+}
+
+// scanPrefixLastSuccessPageTx reads one page of documents under prefix whose
+// key sorts before after (all of them when after is empty), newest key first.
+// It returns the newest success on the page, the last key read and the row
+// count; the keys are unique, so the last key is a stable cursor.
+func scanPrefixLastSuccessPageTx(ctx context.Context, tx pgx.Tx, prefix string, services []string, after string) (*time.Time, string, int, error) {
 	rows, err := tx.Query(ctx, `SELECT d.key, d.sha256, d.created_at, p.record, p.decoded,
 		CASE WHEN p.key IS NULL THEN d.body ELSE NULL END
 		FROM documents d
 		LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256
-		WHERE strpos(d.key, $1) = 1
+		WHERE strpos(d.key, $1) = 1 AND ($2::text = '' OR d.key < $2::text)
 		ORDER BY d.key DESC
-		LIMIT 200`, prefix)
+		LIMIT $3`, prefix, after, lastSuccessPageSize)
 	if err != nil {
-		return nil, err
+		return nil, "", 0, err
 	}
 	defer rows.Close()
 
 	var newest *time.Time
+	var lastKey string
+	n := 0
 	for rows.Next() {
 		var key, sha256 string
 		var createdAt time.Time
@@ -627,8 +667,10 @@ func scanPrefixLastSuccessDeployTx(ctx context.Context, tx pgx.Tx, prefix string
 		var body *string
 
 		if err := rows.Scan(&key, &sha256, &createdAt, &raw, &decoded, &body); err != nil {
-			return nil, err
+			return nil, "", 0, err
 		}
+		lastKey = key
+		n++
 
 		var rec *DeployRecord
 		var deployedAt *time.Time
@@ -675,5 +717,5 @@ func scanPrefixLastSuccessDeployTx(ctx context.Context, tx pgx.Tx, prefix string
 		}
 	}
 
-	return newest, rows.Err()
+	return newest, lastKey, n, rows.Err()
 }

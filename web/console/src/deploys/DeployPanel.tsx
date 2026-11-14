@@ -171,9 +171,6 @@ function RecentAttempts({ svc, now }: { svc: DeployServiceView; now: string }) {
 }
 
 function MergedList({ svc, now }: { svc: DeployServiceView; now: string }) {
-  if (svc.merged_boundary === "unrecorded") {
-    return <p className="dp-note">배포 시각이 기록되지 않아 마지막 배포 이후 머지 목록을 계산할 수 없습니다.</p>;
-  }
   if (svc.merged_boundary === "no_current") {
     return (
       <p className="dp-note">
@@ -186,6 +183,9 @@ function MergedList({ svc, now }: { svc: DeployServiceView; now: string }) {
   return (
     <div className="dp-merged">
       <h4 className="dp-subhead">마지막 배포 이후 머지됨 ({svc.merged_since.length})</h4>
+      {svc.merged_boundary === "deploy_record_key" ? (
+        <p className="dp-note">배포 시각이 기록되지 않아 배포 기록 키의 시각을 기준으로 합니다.</p>
+      ) : null}
       {svc.merged_since.length === 0 ? (
         <p className="dp-note">해당 없음</p>
       ) : (

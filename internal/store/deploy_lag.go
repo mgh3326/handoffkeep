@@ -108,7 +108,7 @@ func (s *Store) EnqueueDeployLagNotices(ctx context.Context, now time.Time) (int
 		return 0, err
 	}
 
-	services, err := s.ListDeployServices(ctx)
+	services, err := listDeployServices(ctx, tx)
 	if err != nil {
 		return 0, err
 	}
