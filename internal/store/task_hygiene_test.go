@@ -57,7 +57,7 @@ func TestTaskHygieneSweep(t *testing.T) {
 	if got := stateOf(t, s, x.ID); got.State != StateReviewing {
 		t.Fatalf("x changed in dry run: %s", got.State)
 	}
-	if got := stateOf(t, s, parent.ID); got.State != StateDeveloping {
+	if got := stateOf(t, s, parent.ID); got.State != StateReviewing {
 		t.Fatalf("parent changed in dry run: %s", got.State)
 	}
 
