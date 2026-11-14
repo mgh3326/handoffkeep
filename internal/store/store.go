@@ -3611,6 +3611,14 @@ func (s *Store) SetAttachmentObjectLocation(ctx context.Context, sha, location s
 	return nil
 }
 
+// attachmentChargedBytes is the storage-fuse total for a new attachment
+// write: committed attachment bytes plus the bytes still reserved by pending
+// direct uploads. Completing, done and refused upload rows are excluded: a
+// completing upload's own PutAttachment would otherwise count its reservation
+// twice, and resolved rows cannot commit again. ReserveAttachmentUpload
+// counts every unreleased row because at begin time none is mid-commit.
+const attachmentChargedBytes = `SELECT (SELECT COALESCE(SUM(size_bytes),0) FROM attachments) + (SELECT COALESCE(SUM(size_bytes),0) FROM attachment_uploads WHERE staging_deleted_at IS NULL AND status='pending')`
+
 // PutAttachment records an immutable object and its reference after S3 PUT has
 // succeeded. It serializes quota accounting with a locked monthly usage row.
 func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, putCap int64) (Attachment, bool, error) {
@@ -3628,6 +3636,13 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 		return x, false, e
 	}
 	defer tx.Rollback(ctx)
+	// Serialize with ReserveAttachmentUpload under the staging-budget lock so
+	// a buffered write and a direct-upload reservation cannot both pass the
+	// same storage fuse. Taken before the usage-row lock; Reserve takes no
+	// row lock, so no cycle is possible (lockorder.go).
+	if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('attachment_staging_budget', 0))`); e != nil {
+		return x, false, e
+	}
 	month := monthNow()
 	if _, e = tx.Exec(ctx, `INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, month); e != nil {
 		return x, false, e
@@ -3636,7 +3651,7 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 	if e = tx.QueryRow(ctx, `SELECT puts FROM attachment_usage WHERE month=$1 FOR UPDATE`, month).Scan(&puts); e != nil {
 		return x, false, e
 	}
-	if e = tx.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes),0) FROM attachments`).Scan(&total); e != nil {
+	if e = tx.QueryRow(ctx, attachmentChargedBytes).Scan(&total); e != nil {
 		return x, false, e
 	}
 	var present bool
@@ -3671,12 +3686,18 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 
 // CheckAttachmentCapacity is the preflight fuse before an S3 PUT. PutAttachment
 // repeats these checks in its transaction to make accounting authoritative.
+// Like PutAttachment it counts still-pending direct-upload reservations under
+// the staging-budget lock, so a buffered write cannot spend bytes an upload
+// already reserved.
 func (s *Store) CheckAttachmentCapacity(ctx context.Context, size, storageCap, putCap int64) error {
 	tx, e := s.pool.Begin(ctx)
 	if e != nil {
 		return e
 	}
 	defer tx.Rollback(ctx)
+	if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('attachment_staging_budget', 0))`); e != nil {
+		return e
+	}
 	m := monthNow()
 	if _, e = tx.Exec(ctx, `INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, m); e != nil {
 		return e
@@ -3685,7 +3706,7 @@ func (s *Store) CheckAttachmentCapacity(ctx context.Context, size, storageCap, p
 	if e = tx.QueryRow(ctx, `SELECT puts FROM attachment_usage WHERE month=$1 FOR UPDATE`, m).Scan(&puts); e != nil {
 		return e
 	}
-	if e = tx.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes),0) FROM attachments`).Scan(&total); e != nil {
+	if e = tx.QueryRow(ctx, attachmentChargedBytes).Scan(&total); e != nil {
 		return e
 	}
 	if total+size > storageCap {

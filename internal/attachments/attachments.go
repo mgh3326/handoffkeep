@@ -202,6 +202,9 @@ type ObjectStore interface {
 	Head(context.Context, string) (ObjectInfo, error)
 	Delete(context.Context, string) error
 	List(context.Context, string) ([]ObjectInfo, error)
+	// Copy publishes src to dst server-side, so dst appears atomically with
+	// the bytes src held when the copy ran. Callers verify src before copying.
+	Copy(context.Context, string, string) error
 }
 type minioStore struct {
 	client *minio.Client
@@ -259,6 +262,10 @@ func (m minioStore) Head(ctx context.Context, key string) (ObjectInfo, error) {
 }
 func (m minioStore) Delete(ctx context.Context, key string) error {
 	return m.client.RemoveObject(ctx, m.bucket, key, minio.RemoveObjectOptions{})
+}
+func (m minioStore) Copy(ctx context.Context, src, dst string) error {
+	_, err := m.client.CopyObject(ctx, minio.CopyDestOptions{Bucket: m.bucket, Object: dst}, minio.CopySrcOptions{Bucket: m.bucket, Object: src})
+	return err
 }
 func (m minioStore) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
 	lctx, cancel := context.WithCancel(ctx)

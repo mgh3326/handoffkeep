@@ -57,6 +57,14 @@ func (o *uploadObjects) Delete(_ context.Context, k string) error {
 	delete(o.objects, k)
 	return nil
 }
+func (o *uploadObjects) Copy(_ context.Context, src, dst string) error {
+	b, ok := o.objects[src]
+	if !ok {
+		return errors.New("missing")
+	}
+	o.objects[dst] = b
+	return nil
+}
 func (o *uploadObjects) List(_ context.Context, prefix string) ([]attachments.ObjectInfo, error) {
 	var out []attachments.ObjectInfo
 	for k := range o.objects {

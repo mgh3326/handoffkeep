@@ -333,6 +333,64 @@ func TestStreamedCompletionRefusesCorruptedHoldingObject(t *testing.T) {
 	}
 }
 
+// A promotion that fails verification must not delete the shared content key:
+// a concurrent completion for the same sha can Stat the key while the
+// promotion is in flight, skip its own write and register the attachment, so
+// deleting the object afterwards would leave metadata pointing at nothing.
+// The promotion writes a private per-claim key and publishes it with a
+// server-side copy only after verification passes.
+func TestStreamedCompletionFailedPromotionKeepsPublishedContentKey(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	m.Config.MaxBytes = DefaultMaxBytes
+	m.Config.StorageCap = 1 << 40
+	m.Config.StagingCap = 1 << 40
+	m.Config.StagingClientCap = 1 << 40
+	size := BufferedCompletionMaxBytes + 1
+	body := make([]byte, size)
+	copy(body, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
+	sha := shaOf(body)
+	const uploadID = "0123456789abcdef0123456789abcdef"
+	stagingKey := stagingPrefix + uploadID
+	db.uploads = map[string]store.AttachmentUpload{uploadID: {
+		ID: uploadID, StagingKey: stagingKey, Name: "big.png", MIME: "image/png", SizeBytes: size,
+		SHA256: sha, CreatedBy: "node", Status: store.AttachmentUploadPending,
+		CreatedAt: m.now(), ExpiresAt: m.now().Add(time.Hour), UpdatedAt: m.now(),
+	}}
+	objs.objects[stagingKey] = body
+
+	// While the promotion streams, a concurrent completion for the same sha
+	// publishes the verified content key and registers the attachment, the way
+	// a putVerified that Stat-hit the in-flight object would.
+	registered := false
+	objs.beforePut = func(k string) {
+		if registered || (k != key(sha) && !strings.HasPrefix(k, stagingPrefix+"promo-")) {
+			return
+		}
+		registered = true
+		objs.objects[key(sha)] = body
+		_, _, _ = db.PutAttachment(t.Context(), store.Attachment{SHA256: sha, SizeBytes: size, MIME: "image/png", OriginalName: "big.png", CreatedBy: "node"}, 1<<40, 100)
+	}
+	forged := bytes.Repeat([]byte("x"), int(size))
+	m.Objects = &corruptGetObjects{fakeObjects: objs, prefix: holdingKeyPrefix(uploadID), forged: forged}
+
+	_, _, err := m.CompleteUpload(t.Context(), "node", uploadID)
+	if !errors.Is(err, ErrUploadNotReceived) {
+		t.Fatalf("corrupted holding err=%v", err)
+	}
+	if !registered {
+		t.Fatal("the promotion never reached its private publish key")
+	}
+	objs.mu.Lock()
+	stored := objs.objects[key(sha)]
+	objs.mu.Unlock()
+	if !bytes.Equal(stored, body) {
+		t.Fatal("a failed promotion deleted or overwrote the published content key")
+	}
+	if _, ok := db.rows[sha]; !ok {
+		t.Fatal("the concurrently registered attachment is gone")
+	}
+}
+
 func newUploadManager(t *testing.T) (*Manager, *fakeDB, *fakeObjects) {
 	t.Helper()
 	db := &fakeDB{rows: map[string]store.Attachment{}}

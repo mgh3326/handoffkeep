@@ -388,15 +388,21 @@ func (m *Manager) completeStreamed(ctx context.Context, row store.AttachmentUplo
 		}
 		defer tr.Close()
 		pv := &streamVerifier{r: tr, sum: sha256.New()}
-		k := key(row.SHA256)
-		if err := m.Objects.Put(ctx, k, pv, row.SizeBytes, mime); err != nil {
+		// Promotion output stays on a private per-claim key until verification
+		// passes: a concurrent putVerified for the same sha can Stat the shared
+		// content key and register it, so publishing unverified bytes there and
+		// deleting them on a failed check would leave metadata pointing at a
+		// missing object. Only a server-side copy of the verified private
+		// object publishes, and a failed check deletes just the private key.
+		promoKey := stagingPrefix + "promo-" + row.ID + "-" + row.ClaimNonce
+		defer func() { _ = m.Objects.Delete(ctx, promoKey) }()
+		if err := m.Objects.Put(ctx, promoKey, pv, row.SizeBytes, mime); err != nil {
 			return err
 		}
 		if pv.n != row.SizeBytes || pv.overflow() || hex.EncodeToString(pv.sum.Sum(nil)) != row.SHA256 {
-			_ = m.Objects.Delete(ctx, k)
 			return errors.New("promoted object failed verification")
 		}
-		return nil
+		return m.Objects.Copy(ctx, promoKey, key(row.SHA256))
 	})
 	if err != nil {
 		reason, refusable := uploadRefusalReason(err)

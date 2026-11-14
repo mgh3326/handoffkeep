@@ -93,6 +93,16 @@ func (f *fakeObjects) Delete(_ context.Context, k string) error {
 	delete(f.objects, k)
 	return nil
 }
+func (f *fakeObjects) Copy(_ context.Context, src, dst string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, ok := f.objects[src]
+	if !ok {
+		return ErrObjectNotFound
+	}
+	f.objects[dst] = b
+	return nil
+}
 func (f *fakeObjects) List(_ context.Context, prefix string) ([]ObjectInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -33,6 +33,14 @@ func (m *memObjects) Delete(_ context.Context, k string) error {
 	delete(m.objects, k)
 	return nil
 }
+func (m *memObjects) Copy(_ context.Context, src, dst string) error {
+	b, ok := m.objects[src]
+	if !ok {
+		return errors.New("missing")
+	}
+	m.objects[dst] = b
+	return nil
+}
 func (m *memObjects) List(_ context.Context, prefix string) ([]attachments.ObjectInfo, error) {
 	var out []attachments.ObjectInfo
 	for k, b := range m.objects {

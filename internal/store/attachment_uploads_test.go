@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -159,5 +160,49 @@ func TestReserveAttachmentUploadCountsPendingAgainstStorageCap(t *testing.T) {
 	}
 	if _, ok, _ := s.GetAttachmentUpload(t.Context(), c); ok {
 		t.Fatal("a storage-cap refusal left a row")
+	}
+}
+
+// Buffered writes count still-pending direct-upload reservations against the
+// storage fuse too, under the same advisory lock ReserveAttachmentUpload
+// takes: without it a buffered Put could spend bytes an upload already
+// reserved and doom the completion. A completing upload's own commit is not
+// double-counted — its row already left 'pending' — and resolved rows cannot
+// commit again.
+func TestPutAttachmentCountsPendingUploadReservations(t *testing.T) {
+	s := schemaStore(t, "attachment_pending_put")
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	sha := func(c byte) string { return strings.Repeat(string(c), 64) }
+	att := func(c byte, size int64) Attachment {
+		return Attachment{SHA256: sha(c), SizeBytes: size, MIME: "text/plain", OriginalName: "a.txt", CreatedBy: "node", RefKind: "none"}
+	}
+	upload := AttachmentUpload{ID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", StagingKey: "incoming/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Name: "a.txt", MIME: "text/plain", SizeBytes: 90, SHA256: sha('f'), RefKind: "none", CreatedBy: "node", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	// The reservation itself passes because its own storageCap argument is
+	// generous; the fuse under test is the one PutAttachment/CheckAttachmentCapacity
+	// apply to later writes.
+	if err := s.ReserveAttachmentUpload(t.Context(), upload, 1<<40, 1<<40, 1<<40); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	const fuse = int64(100)
+	if err := s.CheckAttachmentCapacity(t.Context(), 20, fuse, 1<<40); !errors.Is(err, ErrAttachmentStorageCap) {
+		t.Fatalf("preflight over pending+committed err=%v", err)
+	}
+	if _, _, err := s.PutAttachment(t.Context(), att('a', 20), fuse, 1<<40); !errors.Is(err, ErrAttachmentStorageCap) {
+		t.Fatalf("put over pending+committed err=%v", err)
+	}
+	// 90 pending + 10 committed fits exactly; the 11th byte does not.
+	if _, created, err := s.PutAttachment(t.Context(), att('a', 10), fuse, 1<<40); err != nil || !created {
+		t.Fatalf("put inside the fuse created=%v err=%v", created, err)
+	}
+	if _, _, err := s.PutAttachment(t.Context(), att('b', 1), fuse, 1<<40); !errors.Is(err, ErrAttachmentStorageCap) {
+		t.Fatalf("put past the fuse err=%v", err)
+	}
+	// A completing upload is mid-commit, not pending: its own PutAttachment
+	// must not count its reservation twice.
+	if ok, err := s.ClaimAttachmentUpload(t.Context(), upload.ID, "nonce", now); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if _, created, err := s.PutAttachment(t.Context(), att('c', 11), fuse, 1<<40); err != nil || !created {
+		t.Fatalf("completing upload's commit counted its reservation twice: created=%v err=%v", created, err)
 	}
 }
