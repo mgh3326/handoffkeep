@@ -49,6 +49,10 @@ handoffkeep youtrack fields-backfill    [--project P] [--task N] [--limit N] [--
 handoffkeep youtrack decisions-backfill [--apply] [--by NAME] [--limit N]
 ```
 
+`fields-backfill`의 `--limit`은 만든 op 개수를 센다. 프로젝트가 옮겨진 task는 op가 둘(이동과
+스냅샷)이라 `--limit 1`로는 준비되지 않으니 `2` 이상을 쓴다. 남은 한도에 맞지 않는 task는 그
+실행에서 건너뛰고 뒤의 task로 계속하며, 건너뛴 수는 보고서의 `over_limit`에 나온다.
+
 ## 스키마 (`youtrack schema`)
 
 YouTrack 쪽 필드·번들·프로젝트의 계약은 `internal/youtrack/schema.go`의 `Desired`

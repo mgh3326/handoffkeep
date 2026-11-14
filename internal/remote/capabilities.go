@@ -24,46 +24,74 @@ var capsCache = struct {
 	flight   map[string]*capabilitiesFlight
 }{byOrigin: map[string]serverCaps{}}
 
+// capabilitiesFlight is one in-progress read of an origin's capabilities,
+// shared by every caller that arrives while it runs. caps, err and retry are
+// written under capsCache's lock before done is closed and read only after.
 type capabilitiesFlight struct {
 	done chan struct{}
 	caps serverCaps
 	err  error
+	// retry means the leader's own context ended the read, which says nothing
+	// about the server: a waiter whose context is still live looks the origin
+	// up again instead of returning the leader's cancellation.
+	retry bool
 }
 
+// errCapabilitiesUnfinished is what waiters see when the leader's read
+// stopped without an answer (a panic); like any failure it is not cached.
+var errCapabilitiesUnfinished = errors.New("capabilities_unavailable: the read did not finish")
+
 // capabilitiesOf returns the origin's capabilities, read from the server once
-// per process.
+// per process. Concurrent first calls share one read, and a caller's own
+// context only ever ends that caller's wait: when the leader's context ends
+// the read, a waiter whose context is live reads again.
 func (c Client) capabilitiesOf(ctx context.Context) (serverCaps, error) {
-	capsCache.Lock()
-	got, ok := capsCache.byOrigin[c.URL]
-	if ok {
-		capsCache.Unlock()
-		return got, nil
-	}
-	if flight := capsCache.flight[c.URL]; flight != nil {
+	for {
+		capsCache.Lock()
+		if got, ok := capsCache.byOrigin[c.URL]; ok {
+			capsCache.Unlock()
+			return got, nil
+		}
+		flight := capsCache.flight[c.URL]
+		if flight == nil {
+			flight = &capabilitiesFlight{done: make(chan struct{})}
+			if capsCache.flight == nil {
+				capsCache.flight = map[string]*capabilitiesFlight{}
+			}
+			capsCache.flight[c.URL] = flight
+			capsCache.Unlock()
+			return c.leadCapabilities(ctx, flight)
+		}
 		capsCache.Unlock()
 		select {
 		case <-flight.done:
-			return flight.caps, flight.err
 		case <-ctx.Done():
 			return serverCaps{}, ctx.Err()
 		}
+		if !flight.retry {
+			return flight.caps, flight.err
+		}
 	}
-	flight := &capabilitiesFlight{done: make(chan struct{})}
-	if capsCache.flight == nil {
-		capsCache.flight = map[string]*capabilitiesFlight{}
-	}
-	capsCache.flight[c.URL] = flight
-	capsCache.Unlock()
+}
 
-	got, err := c.fetchCapabilities(ctx)
-	capsCache.Lock()
-	flight.caps, flight.err = got, err
-	if err == nil {
-		capsCache.byOrigin[c.URL] = got
-	}
-	delete(capsCache.flight, c.URL)
-	close(flight.done)
-	capsCache.Unlock()
+// leadCapabilities reads the capabilities as the one leader of flight and
+// publishes the outcome in a defer, so a panic in the read still removes the
+// flight and wakes its waiters instead of wedging every later caller.
+func (c Client) leadCapabilities(ctx context.Context, flight *capabilitiesFlight) (serverCaps, error) {
+	var got serverCaps
+	err := errCapabilitiesUnfinished
+	defer func() {
+		capsCache.Lock()
+		defer capsCache.Unlock()
+		flight.caps, flight.err = got, err
+		flight.retry = err != nil && ctx.Err() != nil
+		if err == nil {
+			capsCache.byOrigin[c.URL] = got
+		}
+		delete(capsCache.flight, c.URL)
+		close(flight.done)
+	}()
+	got, err = c.fetchCapabilities(ctx)
 	return got, err
 }
 

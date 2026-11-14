@@ -199,10 +199,11 @@ func ytFieldsSkipOutcome(tenant string, t ytFieldsRow, found bool) ytFieldsOutco
 // A snapshot the protocol cannot store is skipped and logged. Every other task
 // prepares its snapshot through prepareYTSnapshotTx, which makes no op when
 // the snapshot is the one last prepared. It returns the task's outcome and
-// the number of ops it prepared (a move and a snapshot are two).
-func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant string, movesOn bool, id int64, t ytFieldsRow, found bool) (ytFieldsOutcome, int, error) {
+// the number of ops it prepared (a move and a snapshot are two) and the id of
+// the snapshot op it made, or 0.
+func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant string, movesOn bool, id int64, t ytFieldsRow, found bool) (ytFieldsOutcome, int, int64, error) {
 	if skip := ytFieldsSkipOutcome(tenant, t, found); skip != "" {
-		return skip, 0, nil
+		return skip, 0, 0, nil
 	}
 	mv := ytMoveDecision{project: t.bindingProjectID}
 	if movesOn {
@@ -215,18 +216,18 @@ func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant str
 		mv, err = ytMoveForTx(ctx, tx, now, id, t)
 		if errors.Is(err, ytwrite.ErrInvalid) {
 			log.Printf("ytwrite.move_skipped task_id=%d reason=invalid err=%q", id, err.Error())
-			return ytFieldsInvalid, 0, nil
+			return ytFieldsInvalid, 0, 0, nil
 		}
 		if err != nil {
-			return "", 0, err
+			return "", 0, 0, err
 		}
 		if mv.project == "" {
-			return ytFieldsMoveSkipped, 0, nil
+			return ytFieldsMoveSkipped, 0, 0, nil
 		}
 	} else if !t.projectAgrees {
 		log.Printf("ytwrite.fields_skipped_moved task_id=%d project=%q issue_id=%q binding_project_id=%q project_id=%q",
 			id, t.fields.Project, t.issueID, t.bindingProjectID, t.mappedProjectID)
-		return ytFieldsMoved, 0, nil
+		return ytFieldsMoved, 0, 0, nil
 	}
 	ops := 0
 	if mv.prepared {
@@ -234,25 +235,36 @@ func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant str
 	}
 	n, outcome, err := ytFieldsOpFor(id, t, mv.project)
 	if outcome != "" || err != nil {
-		return outcome, ops, err
+		return outcome, ops, 0, err
 	}
 	op, made, err := prepareYTSnapshotTx(ctx, tx, now, n, n.PayloadSHA)
 	if err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
+	var opID int64
 	if made {
 		ops++
-		log.Printf("ytwrite.fields_enqueued op_id=%d task_id=%d issue_id=%q", op.ID, id, t.issueID)
+		opID = op.ID
 	}
 	switch {
 	case mv.skipped:
-		return ytFieldsMoveSkipped, ops, nil
+		return ytFieldsMoveSkipped, ops, opID, nil
 	case mv.moving:
-		return ytFieldsMoved, ops, nil
+		return ytFieldsMoved, ops, opID, nil
 	case !made:
-		return ytFieldsUnchanged, ops, nil
+		return ytFieldsUnchanged, ops, opID, nil
 	}
-	return ytFieldsPrepared, ops, nil
+	return ytFieldsPrepared, ops, opID, nil
+}
+
+// logYTFieldsEnqueued is the log line of a snapshot op that prepareYTFieldsTx
+// made (its third result, opID, when non-zero). The caller logs it once the op
+// is committed or kept by the pass: a backfill that rolls the task back over
+// its limit, or only counts (a dry run), enqueued nothing.
+func logYTFieldsEnqueued(opID, taskID int64, t ytFieldsRow) {
+	if opID != 0 {
+		log.Printf("ytwrite.fields_enqueued op_id=%d task_id=%d issue_id=%q", opID, taskID, t.issueID)
+	}
 }
 
 // ytFieldsOpFor is task id's snapshot op for the issue in project (its project
@@ -291,10 +303,11 @@ func (s *Store) ytFieldsOnBindTx(ctx context.Context, tx pgx.Tx, taskID int64, n
 		return err
 	}
 	t, found := tasks[taskID]
-	outcome, _, err := prepareYTFieldsTx(ctx, tx, now, tenant, s.ytMovesNow() == YTMovesOn, taskID, t, found)
+	outcome, _, opID, err := prepareYTFieldsTx(ctx, tx, now, tenant, s.ytMovesNow() == YTMovesOn, taskID, t, found)
 	if err != nil {
 		return err
 	}
+	logYTFieldsEnqueued(opID, taskID, t)
 	log.Printf("ytwrite.fields_on_bind task_id=%d outcome=%s", taskID, outcome)
 	return nil
 }
@@ -322,10 +335,11 @@ func ytFieldsHandler(s *Store, now time.Time) FeedHandler {
 		counts := map[ytFieldsOutcome]int{}
 		for _, id := range ids {
 			t, found := tasks[id]
-			outcome, _, err := prepareYTFieldsTx(ctx, tx, now, tenant, movesOn, id, t, found)
+			outcome, _, opID, err := prepareYTFieldsTx(ctx, tx, now, tenant, movesOn, id, t, found)
 			if err != nil {
 				return err
 			}
+			logYTFieldsEnqueued(opID, id, t)
 			counts[outcome]++
 		}
 		log.Printf("ytwrite.fields_feed tasks=%d prepared=%d unchanged=%d deleted=%d unbound=%d other_tenant=%d moved=%d move_skipped=%d invalid=%d",
