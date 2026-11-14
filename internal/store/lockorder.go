@@ -369,7 +369,8 @@ package store
 //     and locks nothing. Each candidate is its own transaction, in the
 //     catch-up's order: the comments authority row FOR SHARE, then the task's
 //     lane lock, then plain reads of yt_comment_write_links, the rejected op,
-//     yt_task_bindings and the binding's sources and the comment, then a new
+//     yt_task_bindings, the binding's sources, the lane's unresolved
+//     issue_move ops and the comment, then a new
 //     yt_write_ops row (prepareYTOpTx, whose lane lock is re-entrant and whose
 //     authority FOR SHARE is already held) and an UPDATE of the comment's
 //     yt_comment_write_links row. It takes no task row, no level 1-5 lock and

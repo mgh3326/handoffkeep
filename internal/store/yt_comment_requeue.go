@@ -60,11 +60,13 @@ type YTRequeued struct {
 // (yt_comment_write_links; the comment exists on the op's task), on a task
 // whose binding is the one the task's own
 // applied issue_create op ($4 principal, $5 kind) published on the op's
-// tenant, above the binding's comments_from, and that every local source
-// agrees with now. The agreement is ytBindingSourcesSQL's, written over the
+// tenant, above the binding's comments_from, with no issue_move on the
+// binding's issue still unresolved and comments not canonical in YouTrack,
+// and that every local source agrees with now. The agreement is ytBindingSourcesSQL's, written over the
 // binding's columns so a binding that still disagrees is never listed: it
 // would otherwise stay at the head of the limit ($6) and starve the rest.
-// The pass checks it again under the lane lock with ytBindingDisagreement.
+// The pass checks all of it again under the lane lock (ytBindingDisagreement,
+// ytPendingMoveTx, the authority row).
 const ytRequeueSelectSQL = `SELECT o.id, w.comment_id, b.task_id
 	FROM yt_write_ops o
 	JOIN yt_comment_write_links w ON w.op_id = o.id
@@ -87,6 +89,9 @@ const ytRequeueSelectSQL = `SELECT o.id, w.comment_id, b.task_id
 	  AND (EXISTS (SELECT 1 FROM tasks t JOIN youtrack_projects p ON p.hk_project = t.project WHERE t.id = b.task_id AND p.yt_project_id = b.project_id)
 		OR (EXISTS (SELECT 1 FROM tasks t WHERE t.id = b.task_id AND coalesce(t.project,'') = '')
 			AND NOT EXISTS (SELECT 1 FROM youtrack_projects p WHERE p.yt_project_id = b.project_id)))
+	  AND NOT EXISTS (SELECT 1 FROM yt_write_ops mv WHERE mv.kind = '` + ytwrite.KindIssueMove + `' AND mv.entity_kind = 'task'
+		AND mv.entity_id = o.entity_id AND mv.yt_target_id = b.issue_id AND mv.state NOT IN ('applied','rejected'))
+	  AND NOT EXISTS (SELECT 1 FROM yt_authority a WHERE a.kind = '` + string(YTAuthorityComments) + `' AND a.authority = '` + string(YTAuthorityYouTrack) + `')
 	ORDER BY w.comment_id, o.id LIMIT $6`
 
 // RequeueYTMovedComments copies again, for the worker of tenant, each comment
@@ -104,7 +109,7 @@ const ytRequeueSelectSQL = `SELECT o.id, w.comment_id, b.task_id
 //
 // Locks (lockorder.go): per comment, the comments authority row FOR SHARE,
 // then the task's lane lock, then plain reads of the link, the binding, its
-// sources and the comment, then a new yt_write_ops row (prepareYTOpTx) and an
+// sources, the lane's pending moves and the comment, then a new yt_write_ops row (prepareYTOpTx) and an
 // UPDATE of the comment's yt_comment_write_links row.
 func (s *Store) RequeueYTMovedComments(ctx context.Context, tenant string, limit int) ([]YTRequeued, error) {
 	out := []YTRequeued{}
@@ -167,9 +172,16 @@ func (s *Store) requeueYTComment(ctx context.Context, fromOp, commentID, taskID 
 	}
 	defer tx.Rollback(ctx)
 	// The authority row first, as the catch-up takes it: a switch commits
-	// before this read or after this transaction.
-	if _, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments); err != nil {
+	// before this read or after this transaction. Rejected ops do not hold a
+	// switch to youtrack, so a rejected comment can still be here after it;
+	// with comments canonical in YouTrack nothing is copied there again
+	// (review r4573479593), and the link stays on the rejected op.
+	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments)
+	if err != nil {
 		return YTRequeued{}, false, err
+	}
+	if side == YTAuthorityYouTrack {
+		return YTRequeued{}, false, nil
 	}
 	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(taskID, 10)); err != nil {
 		return YTRequeued{}, false, err
@@ -213,6 +225,20 @@ func (s *Store) requeueYTComment(ctx context.Context, fromOp, commentID, taskID 
 	}
 	if source != "" {
 		log.Printf("ytwrite.comment_requeue_skipped op_id=%d task_id=%d comment_id=%d source=%s", fromOp, taskID, commentID, source)
+		return YTRequeued{}, false, nil
+	}
+	// The binding's project is where the issue is now, not where it will be:
+	// a move still unresolved on the lane would apply before the copy and
+	// take the issue elsewhere (review r4573479597; the task left for B and
+	// came back to A before the move to B applied). The copy waits for a
+	// later pass: once the move applies the binding disagrees with the task
+	// until the move back applies too. Nothing waits on the lane for it.
+	pending, err := ytPendingMoveTx(ctx, tx, taskID, b.IssueID)
+	if err != nil {
+		return YTRequeued{}, false, err
+	}
+	if pending != "" {
+		log.Printf("ytwrite.comment_requeue_skipped op_id=%d task_id=%d comment_id=%d source=pending_move", fromOp, taskID, commentID)
 		return YTRequeued{}, false, nil
 	}
 	var c TaskComment
