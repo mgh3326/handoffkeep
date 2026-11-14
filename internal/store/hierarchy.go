@@ -522,86 +522,96 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 		if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, *child.ParentID), &p); err != nil {
 			return err
 		}
-		switch {
-		case p.State == StateMerged:
-			// A merged parent waits for its sub-tasks to deploy: only a
-			// sub-task's deploy moves it on (hk 4172).
-			if child.State != StateDeployed {
-				return nil
-			}
-		case !autoCloseAppliesFrom(p.State):
-			return nil
-		}
-		roll, err := subTaskRollupTx(ctx, tx, p.ID)
-		if err != nil {
+		closed, nextP, err := s.autoCloseOneParentTx(ctx, tx, p, child.ID, child.State, now)
+		if err != nil || !closed {
 			return err
 		}
-		if !roll.settled {
-			return nil
-		}
-		ref := fmt.Sprintf("hk:doc child/%d@%s", child.ID, now.Format(time.RFC3339Nano))
-		to := roll.closeTarget()
-		if to == "" {
-			_, _, err = insertEvent(ctx, tx, taskEventInput{
-				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
-				Note:   "every sub-task is dropped or duplicate; the parent stays where it is",
-				Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
-			})
-			return err
-		}
-		if p.State == StateMerged && to != StateDeployed {
-			// A sub-task is still merged and waiting for its deploy.
-			return nil
-		}
-		if gate, err := s.closeGateTx(ctx, tx, p); err != nil || gate != "" {
-			if err != nil {
-				return err
-			}
-			_, _, err = insertEvent(ctx, tx, taskEventInput{
-				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
-				Note:   gate + "; the parent stays where it is",
-				Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
-			})
-			return err
-		}
-		if to == StateCompleted && !canCompleteKind(p.Kind) {
-			_, _, err = insertEvent(ctx, tx, taskEventInput{
-				TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
-				Note:   fmt.Sprintf("sub-task #%d completed; this parent kind remains open", child.ID),
-				Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
-			})
-			return err
-		}
-		from := p.State
-		decisionBefore := decisionBeforeOf(p)
-		if to == StateMerged && p.Refs.PR == "" {
-			// The close is the parent's merge: it adopts a held merge's PR (hk 4172).
-			if p.Refs.PR, err = heldMergePRTx(ctx, tx, p.ID); err != nil {
-				return err
-			}
-		}
-		p.State, p.UpdatedAt = to, now
-		if err := applyLifecycle(&p, from, to, now, &TaskClosure{Type: "resolved", Evidence: ref}); err != nil {
-			return err
-		}
-		if p, err = writeTaskTx(ctx, tx, p); err != nil {
-			return err
-		}
-		if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, p, "hk", "", 0, now); err != nil {
-			return err
-		}
-		if _, _, err = insertEvent(ctx, tx, taskEventInput{
-			TaskID: p.ID, From: from, To: to, By: "hk", At: now, Refs: p.Refs,
-			Note:   fmt.Sprintf("every sub-task is settled; closed by #%d", child.ID),
-			Source: "hk.auto_close", SourceRef: ref, Auto: true,
-		}); err != nil {
-			return err
-		}
-		// Rule 8 (a deploy record lists the PR) is not applied here. A close to
-		// merged always has a merged sub-task waiting for its deploy, and a
-		// close to deployed was made by that deploy: neither may deploy the
-		// parent past a sub-task (hk 4172).
-		child = p
+		child = nextP
 	}
 	return nil
+}
+
+// autoCloseOneParentTx evaluates auto-close for parent p under its row lock.
+// It returns applied=true if the parent moved, along with the updated parent.
+func (s *Store) autoCloseOneParentTx(ctx context.Context, tx pgx.Tx, p Task, childID int64, childState string, now time.Time) (bool, Task, error) {
+	switch {
+	case p.State == StateMerged:
+		// A merged parent waits for its sub-tasks to deploy: only a
+		// sub-task's deploy moves it on (hk 4172).
+		if childState != StateDeployed {
+			return false, p, nil
+		}
+	case !autoCloseAppliesFrom(p.State):
+		return false, p, nil
+	}
+	roll, err := subTaskRollupTx(ctx, tx, p.ID)
+	if err != nil {
+		return false, p, err
+	}
+	if !roll.settled {
+		return false, p, nil
+	}
+	ref := fmt.Sprintf("hk:doc child/%d@%s", childID, now.Format(time.RFC3339Nano))
+	to := roll.closeTarget()
+	if to == "" {
+		_, _, err = insertEvent(ctx, tx, taskEventInput{
+			TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
+			Note:   "every sub-task is dropped or duplicate; the parent stays where it is",
+			Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
+		})
+		return false, p, err
+	}
+	if p.State == StateMerged && to != StateDeployed {
+		// A sub-task is still merged and waiting for its deploy.
+		return false, p, nil
+	}
+	if gate, err := s.closeGateTx(ctx, tx, p); err != nil || gate != "" {
+		if err != nil {
+			return false, p, err
+		}
+		_, _, err = insertEvent(ctx, tx, taskEventInput{
+			TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
+			Note:   gate + "; the parent stays where it is",
+			Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
+		})
+		return false, p, err
+	}
+	if to == StateCompleted && !canCompleteKind(p.Kind) {
+		_, _, err = insertEvent(ctx, tx, taskEventInput{
+			TaskID: p.ID, Kind: TaskEventAutoClose, From: p.State, To: p.State, By: "hk", At: now, Refs: p.Refs,
+			Note:   fmt.Sprintf("sub-task #%d completed; this parent kind remains open", childID),
+			Source: "hk.auto_close", SourceRef: ref, Auto: true, NotApplied: true,
+		})
+		return false, p, err
+	}
+	from := p.State
+	decisionBefore := decisionBeforeOf(p)
+	if to == StateMerged && p.Refs.PR == "" {
+		// The close is the parent's merge: it adopts a held merge's PR (hk 4172).
+		if p.Refs.PR, err = heldMergePRTx(ctx, tx, p.ID); err != nil {
+			return false, p, err
+		}
+	}
+	p.State, p.UpdatedAt = to, now
+	if err := applyLifecycle(&p, from, to, now, &TaskClosure{Type: "resolved", Evidence: ref}); err != nil {
+		return false, p, err
+	}
+	if p, err = writeTaskTx(ctx, tx, p); err != nil {
+		return false, p, err
+	}
+	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, p, "hk", "", 0, now); err != nil {
+		return false, p, err
+	}
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{
+		TaskID: p.ID, From: from, To: to, By: "hk", At: now, Refs: p.Refs,
+		Note:   fmt.Sprintf("every sub-task is settled; closed by #%d", childID),
+		Source: "hk.auto_close", SourceRef: ref, Auto: true,
+	}); err != nil {
+		return false, p, err
+	}
+	// Rule 8 (a deploy record lists the PR) is not applied here. A close to
+	// merged always has a merged sub-task waiting for its deploy, and a
+	// close to deployed was made by that deploy: neither may deploy the
+	// parent past a sub-task (hk 4172).
+	return true, p, nil
 }
