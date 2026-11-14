@@ -17,6 +17,8 @@ func TestIssueProtocolOverMemoryLedger(t *testing.T) { ytwritetest.RunIssueProto
 
 func TestMemoryLedgerContract(t *testing.T) { ytwritetest.RunLedger(t, memory) }
 
+func TestLinksProtocolOverMemoryLedger(t *testing.T) { ytwritetest.RunLinksProtocol(t, memory) }
+
 // StaleAfter must exceed DispatchTimeout: a dispatch still inside its call
 // would otherwise be recovered as lost while it may yet send, and sent again.
 func TestNewRefusesStaleAfterWithinDispatchTimeout(t *testing.T) {

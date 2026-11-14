@@ -31,6 +31,8 @@ type MemLedger struct {
 	maps   map[[2]string]ytwrite.MapRow
 	mapIDs map[[2]string]string // (entity kind, yt id) -> hk key
 	adopts map[int64]ytwrite.Adoption
+	// links is the issue_links record (memledger_links.go).
+	links memLinks
 }
 
 // NewMemLedger returns an empty ledger.
