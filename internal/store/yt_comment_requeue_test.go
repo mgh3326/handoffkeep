@@ -144,18 +144,19 @@ func ytrqWantRequeued(t *testing.T, s *Store, got []YTRequeued, c TaskComment, f
 	return op
 }
 
-// ytrqDeliver drives the comment worker until op resolves and checks it was
-// sent once to the issue.
-func ytrqDeliver(t *testing.T, s *Store, op ytwrite.Op, body string) {
+// ytrqDeliver drives the comment worker over fake until op resolves and
+// checks it was sent once, to the issue, as the issue's last comment. One
+// fake per test: two fakes would hand out the same YouTrack comment ids.
+func ytrqDeliver(t *testing.T, s *Store, fake *ytwritetest.FakeYouTrack, op ytwrite.Op, body string) {
 	t.Helper()
-	fake := ytwritetest.NewFake()
+	before := len(fake.Comments(ytrqIssue))
 	counting := &ytcCounting{Remote: fake}
 	var offset atomic.Int64
 	got := ytqDrive(t, s, ytcProtocol(t, s, counting, &offset), op.ID)
 	if got.State != ytwrite.StateApplied || got.YTTargetID != ytrqIssue || counting.posts.Load() != 1 {
 		t.Fatalf("requeued op after the drive %+v, posts %d", got, counting.posts.Load())
 	}
-	if cs := fake.Comments(ytrqIssue); len(cs) != 1 || !contains(cs[0].Text, body) {
+	if cs := fake.Comments(ytrqIssue); len(cs) != before+1 || !contains(cs[len(cs)-1].Text, body) {
 		t.Fatalf("remote comments %+v", cs)
 	}
 }
@@ -191,7 +192,8 @@ func TestYTCommentRequeuedAfterTheMove(t *testing.T) {
 	if linked, ok := ytcOpFor(t, s, c1.ID); !ok || linked.ID != op1.ID {
 		t.Fatalf("link moved before the binding agreed: %+v", linked)
 	}
-	counting := &ytcCounting{Remote: ytwritetest.NewFake()}
+	fake := ytwritetest.NewFake()
+	counting := &ytcCounting{Remote: fake}
 	var offset atomic.Int64
 	if got := ytqDrive(t, s, ytcProtocol(t, s, counting, &offset), op2.ID); got.State != ytwrite.StateApplied {
 		t.Fatalf("targeted comment %+v", got)
@@ -214,7 +216,10 @@ func TestYTCommentRequeuedAfterTheMove(t *testing.T) {
 		t.Fatalf("comment ops on the task = %d, want 3 (C1, C2, C1 again)", n)
 	}
 	s.SetYTMovesMode(YTMovesOff)
-	ytrqDeliver(t, s, again, c1.Body)
+	ytrqDeliver(t, s, fake, again, c1.Body)
+	if cs := fake.Comments(ytrqIssue); len(cs) != 2 || !contains(cs[0].Text, c2.Body) {
+		t.Fatalf("issue comments %+v, want C2 then C1", cs)
+	}
 	if got := ytrqRequeue(t, s); len(got) != 0 {
 		t.Fatalf("requeued after delivery: %+v", got)
 	}
@@ -239,7 +244,7 @@ func TestYTCommentRequeuedWhenTheTaskComesBack(t *testing.T) {
 	if ops := ytmOps(t, s, x.ID); len(ops) != 0 {
 		t.Fatalf("move ops %+v", ops)
 	}
-	ytrqDeliver(t, s, again, c1.Body)
+	ytrqDeliver(t, s, ytwritetest.NewFake(), again, c1.Body)
 }
 
 // Two moves (r4564127096): the task moves to B, then to C, before the queued
@@ -266,7 +271,7 @@ func TestYTCommentRequeuedAfterTheLastMove(t *testing.T) {
 	ytmSettle(t, s, moveB, ytrqIssue)
 	again := ytrqWantRequeued(t, s, ytrqRequeue(t, s), c1, op1, moveA, moveB)
 	s.SetYTMovesMode(YTMovesOff)
-	ytrqDeliver(t, s, again, c1.Body)
+	ytrqDeliver(t, s, ytwritetest.NewFake(), again, c1.Body)
 }
 
 // With fields and moves on, the create's apply prepares the move and the
@@ -307,7 +312,7 @@ func TestYTCommentRequeuedAfterTheSnapshot(t *testing.T) {
 	again := ytrqWantRequeued(t, s, ytrqRequeue(t, s), c1, op1, moves[0], snaps[0])
 	s.SetYTFieldsMode(YTFieldsOff, "")
 	s.SetYTMovesMode(YTMovesOff)
-	ytrqDeliver(t, s, again, c1.Body)
+	ytrqDeliver(t, s, ytwritetest.NewFake(), again, c1.Body)
 }
 
 // Only a comment rejected ambiguous_issue at its claim is copied again: one
