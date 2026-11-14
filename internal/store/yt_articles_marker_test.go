@@ -146,7 +146,7 @@ func TestYTArticleCreateClaimRechecksDocumentScope(t *testing.T) {
 			name: "task report",
 			remove: func(t *testing.T, s *Store, _ int64, key string) {
 				t.Helper()
-				task, err := s.CreateTask(t.Context(), Task{Lane: "ytart-lane", Title: "article scope", Kind: "implement", CreatedBy: "test"})
+				task, err := s.CreateTask(t.Context(), Task{Lane: "ytart-lane", Title: "article scope", Kind: "implement", CreatedBy: "test", Project: projectPtr(testProjectName)})
 				if err != nil {
 					t.Fatal(err)
 				}
