@@ -192,7 +192,7 @@ func TestRecordSessionDecisionAPILargeGrounds(t *testing.T) {
 	h, _ := decisionAPIServer(t)
 	grounds := make([]string, 10)
 	for i := range grounds {
-		grounds[i] = fmt.Sprintf("hk:doc decision/2026-11-13/ground-%02d-%s", i, strings.Repeat("g", 480))
+		grounds[i] = fmt.Sprintf("hk:doc decision/2026-11-13/ground-%02d-%s", i, strings.Repeat("g", 470))
 	}
 	in := store.SessionDecisionInput{
 		Key: "chat-big", Lane: "design-lane", Reading: "Use every ground.",
