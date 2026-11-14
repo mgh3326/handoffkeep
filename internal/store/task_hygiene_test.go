@@ -101,3 +101,89 @@ func TestTaskHygieneSweep(t *testing.T) {
 		t.Fatalf("expected 0 mechanical closes on second run, got %d: %+v", len(repAgain.MechanicalCloses), repAgain.MechanicalCloses)
 	}
 }
+
+func TestTaskHygieneAutoCloseParentOff(t *testing.T) {
+	s, pool := searchTestStore(t)
+	s.SetAutoCloseParent(false)
+	defer s.SetAutoCloseParent(true)
+
+	// Set up a parent whose sub-tasks have all settled and unheld
+	parent := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	child := flowTask(t, s, pool, "implement", StateReviewing, true)
+	setParent(t, s, child, parent)
+	open := testPR(9601)
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: open, TaskID: parent.ID})
+	if res := send(t, s, mergeEvent(child.ID, testPR(9602))); !res.Applied {
+		t.Fatalf("child merge %+v", res)
+	}
+	if _, err := pool.Exec(t.Context(), `UPDATE changes SET state='closed' WHERE repo='example/app' AND pr_number=9601`); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+
+	// Dry run: does not report parent as prospective mechanical close
+	repDry, err := s.TaskHygiene(t.Context(), now, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repDry.MechanicalCloses) != 0 {
+		t.Fatalf("expected 0 mechanical closes when auto_close_parent is off, got %d", len(repDry.MechanicalCloses))
+	}
+	// Parent should be listed under findings
+	found := false
+	for _, f := range repDry.Findings.AutoCloseHeldParents {
+		if f.ID == parent.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("parent %d not reported under AutoCloseHeldParents findings", parent.ID)
+	}
+
+	// Apply run: does not close parent
+	repRun, err := s.TaskHygiene(t.Context(), now, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repRun.MechanicalCloses) != 0 {
+		t.Fatalf("expected 0 mechanical closes in apply run when auto_close_parent is off, got %d", len(repRun.MechanicalCloses))
+	}
+	if got := stateOf(t, s, parent.ID); got.State != StateReviewing {
+		t.Fatalf("parent state changed to %s when auto_close_parent was off", got.State)
+	}
+}
+
+func TestTaskHygieneProjectScope(t *testing.T) {
+	s, pool := searchTestStore(t)
+
+	p1Task := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	p2Task := flowTask(t, s, pool, "implement", StateDeveloping, true)
+
+	proj1 := "proj-one"
+	proj2 := "proj-two"
+	if _, err := pool.Exec(t.Context(), `UPDATE tasks SET project=$1 WHERE id=$2`, proj1, p1Task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `UPDATE tasks SET project=$1 WHERE id=$2`, proj2, p2Task.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Settled open decisions on both
+	if _, err := pool.Exec(t.Context(), `UPDATE tasks SET state='merged', refs=refs||jsonb_build_object('decision_request',jsonb_build_object('id',$2::text,'status','open')) WHERE id=$1`, p1Task.ID, fmt.Sprintf("dr-%d-1", p1Task.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `UPDATE tasks SET state='merged', refs=refs||jsonb_build_object('decision_request',jsonb_build_object('id',$2::text,'status','open')) WHERE id=$1`, p2Task.ID, fmt.Sprintf("dr-%d-1", p2Task.ID)); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	rep, err := s.TaskHygiene(t.Context(), now, proj1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Findings.SettledOpenDecisions) != 1 || rep.Findings.SettledOpenDecisions[0].ID != p1Task.ID {
+		t.Fatalf("project scoped findings: %+v, want only task %d", rep.Findings.SettledOpenDecisions, p1Task.ID)
+	}
+}
