@@ -2405,8 +2405,6 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 		return x, errors.New("invalid task refs")
 	}
 	x.State, x.ClaimedBy = StateBacklog, ""
-	x.CreatedAt = time.Now().UTC()
-	x.UpdatedAt = x.CreatedAt
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return x, err
@@ -2415,6 +2413,11 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return x, err
 	}
+	// Read the clock under the task-mutation lock: the link relation below
+	// writes this time to the linked task's updated_at, which a writer that
+	// held the lock before us may already have moved past (hk 4637).
+	x.CreatedAt = time.Now().UTC()
+	x.UpdatedAt = x.CreatedAt
 
 	if err = requireTaskProject(ctx, tx, x.Project); err != nil {
 		return x, err
