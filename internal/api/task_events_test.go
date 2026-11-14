@@ -225,4 +225,3 @@ func TestTasksHygieneWithStoreAPI(t *testing.T) {
 		t.Fatalf("hygiene body: %v", body)
 	}
 }
-

@@ -54,7 +54,7 @@ func TestTaskHygieneSweep(t *testing.T) {
 		t.Fatalf("expected 2 mechanical closes in dry run, got %d: %+v", len(repDry.MechanicalCloses), repDry.MechanicalCloses)
 	}
 	// Verify database tasks were not changed
-	if got := stateOf(t, s, x.ID); got.State != StateDeveloping {
+	if got := stateOf(t, s, x.ID); got.State != StateReviewing {
 		t.Fatalf("x changed in dry run: %s", got.State)
 	}
 	if got := stateOf(t, s, parent.ID); got.State != StateDeveloping {

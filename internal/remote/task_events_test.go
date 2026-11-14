@@ -149,4 +149,3 @@ func TestTaskHygieneRemote(t *testing.T) {
 		t.Fatalf("old server: %v", err)
 	}
 }
-

@@ -13,12 +13,12 @@ import (
 // reports mechanical closes (applied when dryRun=false, or prospective when
 // dryRun=true) and findings that require operator attention.
 type TaskHygieneReport struct {
-	AsOf             time.Time            `json:"as_of"`
-	DryRun           bool                 `json:"dry_run"`
-	Project          string               `json:"project,omitempty"`
-	MechanicalCloses []TaskHygieneClose   `json:"mechanical_closes"`
-	Findings         TaskHygieneFindings  `json:"findings"`
-	SettleMerged     *SettleMergedReport  `json:"settle_merged,omitempty"`
+	AsOf             time.Time           `json:"as_of"`
+	DryRun           bool                `json:"dry_run"`
+	Project          string              `json:"project,omitempty"`
+	MechanicalCloses []TaskHygieneClose  `json:"mechanical_closes"`
+	Findings         TaskHygieneFindings `json:"findings"`
+	SettleMerged     *SettleMergedReport `json:"settle_merged,omitempty"`
 }
 
 // TaskHygieneClose records one task closed mechanically.
