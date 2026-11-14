@@ -100,14 +100,19 @@ const (
 var errInvalidCursor = errors.New("invalid cursor")
 
 // mcpCursor is the decoded form of every cursor these tools hand out. Time
-// carries the (updated_at,id) keyset position for task_list; ID carries the
-// after-id position for comments and events; Sync carries the sync_log
-// position for changes_since.
+// carries the (updated_at,id) keyset position for task_list and the task
+// position for decisions_history; ID carries the after-id position for
+// comments and events; Sync carries the sync_log position for changes_since.
+// SessionTime, SessionID and SessionDone carry the session_decisions position
+// for decisions_history.
 type mcpCursor struct {
-	Kind string `json:"k"`
-	Time string `json:"t,omitempty"`
-	ID   int64  `json:"i,omitempty"`
-	Sync int64  `json:"s,omitempty"`
+	Kind        string `json:"k"`
+	Time        string `json:"t,omitempty"`
+	ID          int64  `json:"i,omitempty"`
+	Sync        int64  `json:"s,omitempty"`
+	SessionTime string `json:"st,omitempty"`
+	SessionID   int64  `json:"si,omitempty"`
+	SessionDone bool   `json:"sd,omitempty"`
 }
 
 func encodeCursor(c mcpCursor) string {
@@ -175,40 +180,90 @@ type decisionHistoryView struct {
 }
 
 // decisionsHistory pages closed structured requests newest task update first,
-// keyset on (updated_at,id). A task touched after a page was read moves ahead
-// of the cursor, as it does in task_list.
+// keyset on (updated_at,id), and session-settled records newest record first,
+// keyset on (created_at,id). A task touched after a page was read moves ahead
+// of the cursor, as it does in task_list. One cursor carries both positions:
+// next_cursor is empty only when both lists are exhausted.
 func (o operatorTools) decisionsHistory(ctx context.Context, _ *gmcp.CallToolRequest, in decisionsHistoryInput) (*gmcp.CallToolResult, any, error) {
 	limit := clampLimit(in.Limit, decisionsHistoryDefaultLimit, decisionsHistoryMaxLimit)
 	var before *store.DecisionListPosition
+	var sessionBefore *store.DecisionListPosition
+	sessionDone := false
 	if in.Cursor != "" {
 		var cur mcpCursor
 		if err := decodeCursor(in.Cursor, cursorDecisions, &cur); err != nil {
 			return nil, nil, err
 		}
-		at, err := time.Parse(time.RFC3339Nano, cur.Time)
-		if err != nil || cur.ID < 1 {
+		if cur.Time != "" {
+			at, err := time.Parse(time.RFC3339Nano, cur.Time)
+			if err != nil || cur.ID < 1 {
+				return nil, nil, errInvalidCursor
+			}
+			before = &store.DecisionListPosition{UpdatedAt: at, ID: cur.ID}
+		} else if cur.SessionTime == "" && !cur.SessionDone {
 			return nil, nil, errInvalidCursor
 		}
-		before = &store.DecisionListPosition{UpdatedAt: at, ID: cur.ID}
+		switch {
+		case cur.SessionDone:
+			sessionDone = true
+		case cur.SessionTime != "":
+			at, err := time.Parse(time.RFC3339Nano, cur.SessionTime)
+			if err != nil || cur.SessionID < 1 {
+				return nil, nil, errInvalidCursor
+			}
+			sessionBefore = &store.DecisionListPosition{UpdatedAt: at, ID: cur.SessionID}
+		}
 	}
+	now := time.Now().UTC()
 	tasks, err := o.service.Store.ListClosedDecisionRequests(ctx, before, limit+1)
 	if err != nil {
 		return nil, nil, err
 	}
-	sessionRecords, err := o.service.Store.ListDecisionRecords(ctx, store.DecisionRecordFilter{
-		Status: store.DecisionStatusAnswered, Source: store.DecisionSourceSessionChat, Limit: decisionsHistoryMaxLimit, NewestFirst: true,
-	}, time.Now().UTC())
-	if err != nil {
-		return nil, nil, err
+	var sessionRecords []store.DecisionRecord
+	if !sessionDone {
+		f := store.DecisionRecordFilter{
+			Status: store.DecisionStatusAnswered, Source: store.DecisionSourceSessionChat, Limit: limit + 1, NewestFirst: true,
+		}
+		if sessionBefore != nil {
+			f.BeforeCreatedAt = &sessionBefore.UpdatedAt
+			f.BeforeID = sessionBefore.ID
+		}
+		sessionRecords, err = o.service.Store.ListDecisionRecords(ctx, f, now)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	hasMore := len(tasks) > limit
 	if hasMore {
 		tasks = tasks[:limit]
 	}
+	sessionHasMore := len(sessionRecords) > limit
+	if sessionHasMore {
+		sessionRecords = sessionRecords[:limit]
+	}
+	truncated := hasMore || sessionHasMore
 	next := ""
-	if hasMore {
-		last := tasks[len(tasks)-1]
-		next = encodeCursor(mcpCursor{Kind: string(cursorDecisions), Time: last.UpdatedAt.UTC().Format(time.RFC3339Nano), ID: last.ID})
+	if truncated {
+		cur := mcpCursor{Kind: string(cursorDecisions), SessionDone: true}
+		if hasMore || len(tasks) > 0 || before != nil {
+			var pos store.DecisionListPosition
+			switch {
+			case len(tasks) > 0:
+				last := tasks[len(tasks)-1]
+				pos = store.DecisionListPosition{UpdatedAt: last.UpdatedAt, ID: last.ID}
+			default:
+				pos = *before
+			}
+			cur.Time = pos.UpdatedAt.UTC().Format(time.RFC3339Nano)
+			cur.ID = pos.ID
+		}
+		if sessionHasMore && len(sessionRecords) > 0 {
+			last := sessionRecords[len(sessionRecords)-1]
+			cur.SessionDone = false
+			cur.SessionTime = last.CreatedAt.UTC().Format(time.RFC3339Nano)
+			cur.SessionID = last.ID
+		}
+		next = encodeCursor(cur)
 	}
 	items := make([]decisionHistoryView, 0, len(tasks))
 	for _, task := range tasks {
@@ -250,8 +305,8 @@ func (o operatorTools) decisionsHistory(ctx context.Context, _ *gmcp.CallToolReq
 		})
 	}
 	return jsonResult(map[string]any{
-		"decisions": items, "session_decisions": sessionDecisions, "truncated": hasMore, "next_cursor": next,
-		"as_of": time.Now().UTC(), "field_sources": decisionHistoryFieldSources,
+		"decisions": items, "session_decisions": sessionDecisions, "truncated": truncated, "next_cursor": next,
+		"as_of": now, "field_sources": decisionHistoryFieldSources,
 	})
 }
 

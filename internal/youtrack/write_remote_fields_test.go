@@ -191,10 +191,10 @@ func TestWriteRemoteReadIssueFieldsRoundTrip(t *testing.T) {
 		_, _ = w.Write([]byte(`{"summary":` + quoteJSON(snap.Summary) + `,"description":` + quoteJSON(snap.Description) + `,"customFields":[
 			{"name":"hk ID","value":4003},{"name":"hk 프로젝트","value":"handoffkeep"},
 			{"name":"hk 상태","value":{"name":"개발 중","$type":"StateBundleElement"}},{"name":"hk 우선순위","value":2},
-			{"name":"레인","value":{"name":"handoffkeep-design"}},{"name":"종류","value":{"name":"implement"}},
+			{"name":"레인","field":{"name":"레인","fieldType":{"id":"enum[1]"}},"value":{"name":"handoffkeep-design"}},{"name":"종류","value":{"name":"implement"}},
 			{"name":"등급","value":{"name":"A"}},{"name":"티어","value":{"name":"T2"}},{"name":"PR","value":null},
 			{"name":"작업 job","value":null},{"name":"멈춤","value":[]},{"name":"마감","value":1795176000000},
-			{"name":"영역","value":null},{"name":"마일스톤","value":null},{"name":"예상 소요","value":{"minutes":90,"presentation":"1h 30m"}},
+			{"name":"영역","field":{"name":"영역","fieldType":{"id":"string"}},"value":null},{"name":"마일스톤","value":null},{"name":"예상 소요","value":{"minutes":90,"presentation":"1h 30m"}},
 			{"name":"Assignee","value":{"name":"someone"}}]}`))
 	}}
 	got, err := y.serve(t).ReadIssueFields(t.Context(), "2-9")
@@ -203,6 +203,13 @@ func TestWriteRemoteReadIssueFieldsRoundTrip(t *testing.T) {
 	}
 	if d := ytwrite.SnapshotDiff(snap, got); d != "" {
 		t.Fatalf("read differs at %s: %+v", d, got)
+	}
+	types := map[string]ytwrite.FieldType{}
+	for _, f := range got.Fields {
+		types[f.Name] = f.Type
+	}
+	if types[ytwrite.FieldLane] != ytwrite.FieldTypeEnum || types[ytwrite.FieldArea] != ytwrite.FieldTypeText {
+		t.Fatalf("field types=%v", types)
 	}
 	for raw, want := range map[string]string{`[{"name":"b"},{"name":"a"}]`: "a,b", `{"text":"x"}`: "x", `null`: "", `12.5`: "12.5"} {
 		if v := canonicalFieldValue(json.RawMessage(raw)); v != want {
