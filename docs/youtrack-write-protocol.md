@@ -581,22 +581,34 @@ verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
   another tenant or issue, which stays for the recovery pass, and not a
   document comment's copy, which reads its article binding) with reason
   `binding_removed` (`unbind_forced` under `--force`), deletes the binding, drops the
-  task's pending issue intent (so the issue worker cannot bind it again) and
-  appends an `unbound` row to `yt_binding_history`. It retargets nothing and
-  leaves `task_origins`, `yt_entity_map` and the canary alone. The result lists
+  task's pending issue intent (so the issue worker cannot bind it again),
+  deletes the task's `yt_entity_map` row when it names the binding's issue on
+  the binding's tenant (hk 4536; `"anchor_released": true`) and appends an
+  `unbound` row to `yt_binding_history`. It retargets nothing and leaves
+  `task_origins` and the canary alone. The result lists
   `rejected` ops and the `released` comment ids (hk keeps them; the comment
   gets no op) or, under comments authority `youtrack` with `--force`, the
   `stranded` ones (nothing will carry them). `comments-backfill --task N`
   binds the task again once its other records agree with the issue it
-  verifies. Unbind leaves the task's `yt_entity_map` row (anchored by its
-  first comment op), mirror link and canary row alone, so a replacement that
-  is a different issue is refused naming the source that disagrees
-  (`yt_entity_map_task`, `task_origins`) until its owner reconciles it. A
-  later comment on an unbound task gets no op. Run it only while every release
+  verifies. The map row is the routing anchor the task's first op wrote, so
+  releasing it is what lets a verified issue other than the old one bind; the
+  old issue stays on record in the `unbound` history row and in the ops. The
+  mirror link and the canary row have their own owners, so a replacement that
+  is a different issue is still refused naming the source that disagrees
+  (`task_origins`) until its owner reconciles it, and so is a map row that
+  names another issue or tenant (`yt_entity_map_task`). A task unbound before
+  hk 4536 keeps its map row, and unbinding it again writes nothing. A later
+  comment on an unbound task gets no op. A binding published after an unbind
+  also appends one `task` `U` row to the change feed (`sync_log`), whatever
+  fields mode the CLI process runs in, so serve's `task_fields` consumer
+  prepares the task's `issue_move` and `issue_fields` ops for the new binding
+  (hk 4539); with serve's fields mode off it prepares nothing, as for any
+  change made while off. Run it only while every release
   that can serve (a blue-green overlap, a rollback target) is this one or
   later: an earlier release's issue ownership check does not read
-  `yt_binding_history`, so its project change would prepare an `issue_create`
-  for an unbound task that has no map row, mirror link or canary row.
+  `yt_binding_history`, and the map row it would otherwise find is released
+  with the binding, so its project change would prepare an `issue_create`
+  for an unbound task that has no mirror link or canary row.
 - Each YouTrack read has its own 15 s timeout and each task 60 s; there is no
   budget for the whole run. A task in class `error` makes either command exit
   1 after the report.
@@ -916,8 +928,9 @@ A task the protocol cannot render (an actor
 with ` · `, a title quoting the marker) gets the op rejected `invalid_issue`.
 `handoffkeep youtrack issues-backfill [--project P] [--dry-run]` prepares the
 op for every task with no binding, bound to the host of `YOUTRACK_URL`; it
-reads the YouTrack project list to resolve the `HK` bucket, but does not search
-for or create issues. It skips a task that already has its op, and so is idempotent.
+reads the YouTrack project list to resolve the `HK` bucket, so a task with no
+project gets its op in that bucket (a process that does not know the bucket
+counts it `unmapped`), but does not search for or create issues. It skips a task that already has its op, and so is idempotent.
 It also skips (counts as `owned`) a task hk already ties to an issue: a
 binding, a canary enrollment, a task map row or a YouTrack `task_origins` row
 recorded earlier (a pull or `youtrack adopt`), read again under the task's
@@ -964,13 +977,22 @@ copied marker is not ownership. The one issue whose summary names the task and
 whose description carries no marker of this op's is the issue Send adopts
 (this kind's create always writes the marker), so an adoption whose settlement
 was lost (a crash or a failed apply after Send adopted) is reported as that
-adoption, but never applied by the search: the ledger cannot tell that crash
-from a POST whose reply was lost, nothing bounds when such a POST lands, and an
-applied op is never searched again, so a late create would be a second issue
-no one sees. The op stays `remote_unknown / adoption_unconfirmed` with the
-issue id in its detail, and `yt ops resolve <op> --applied <issue id>
---adopted` applies it with its map rows marked `Adopted` (hk 3911; a POST that
-lands first is a second hit, `marker_mismatch`).
+adoption. Before it applies an adoption, the dispatch records it
+(`yt_write_op_adoptions`: op, attempt, issue id; migration
+`20261114-yt-issue-adoption`, hk 4570). The attempt that adopts sends
+nothing, an op that leaves `dispatched` other than back to `prepared` is never
+dispatched again, and the attempts before it ended deferred (429, 401,
+`not_sent`), which the protocol treats as not processed; so the search applies
+the adoption, with its map rows marked `Adopted`, when the op's record names
+that same issue for its last attempt. Without the record (the record write was
+lost too, or a previous release dispatched the op) the search never applies
+it: the ledger cannot tell that crash from a POST whose reply was lost,
+nothing bounds when such a POST lands, and an applied op is never searched
+again, so a late create would be a second issue no one sees. The op stays
+`remote_unknown / adoption_unconfirmed` with the issue id in its detail, and
+`yt ops resolve <op> --applied <issue id> --adopted` applies it with its map
+rows marked `Adopted` (hk 3911; a POST that lands first is a second hit,
+`marker_mismatch`).
 Zero, two exact hits, an edited description, or a hit beside another issue
 with that `hk ID` keep it `remote_unknown`; there is never an automatic
 re-create.
@@ -984,9 +1006,13 @@ default `import_verified`, and `op_id`, and a trigger that refuses to apply
 an `issue_create` op without its binding, so a resolver that does not know the
 kind cannot close one). `issue_readable` is left empty: the protocol carries
 only the stable id. `comments_from` is 0 for an issue the op created (the
-catch-up copies the task's comments) and the task's highest comment id for an
-adopted one (it already holds that history). A comment written while the op
-was pending gets no op (the task has no binding yet), so in comments mode on
+catch-up copies the task's comments) and, for an adopted one, the task's
+highest comment id when the op was prepared (`yt_issue_comment_bounds`, hk
+4301): the issue already holds the history before that, but not the comments
+written while the op was pending. An op a previous release prepared has no
+such row and starts at the task's highest comment id at the apply. A comment
+written while the op was pending gets no op (the task has no binding yet,
+except one queued behind the op under comments authority youtrack), so in comments mode on
 the write worker runs the catch-up for `op_applied` bindings before every
 Drive pass even when `HANDOFFKEEP_YT_COMMENTS_CATCHUP` is off
 (`CatchUpYTIssueComments`, hk 3914). Nothing is overwritten: the same
@@ -1003,8 +1029,8 @@ While the op is unresolved, `comments-backfill` binding and canary enrollment
 of the task are refused. An operator's `yt ops resolve <op> --applied <issue id>`
 states the issue's provenance, which the ledger did not record: by default the
 op created it (`comments_from` 0, the catch-up copies the task's comments);
-with `--adopted` the issue existed before (its binding starts after the task's
-latest comment). For an `issue_create` op the CLI always sends the choice (API
+with `--adopted` the issue existed before (its binding starts after the
+comments the task had when the op was prepared, as above). For an `issue_create` op the CLI always sends the choice (API
 `"adopted": true|false`; it reads the op's kind from `GET /v1/yt/ops` first),
 and for any other op it sends the old request shape, which a server that
 predates the field accepts. A resolution of an `issue_create` op that omits it
@@ -1303,7 +1329,10 @@ apply, so a move YouTrack refused is not prepared again on the task's next
 change or a backfill run, only when the task's project maps to another target
 (a new sha). Until then `ytwrite.move_stuck` is logged, counted as
 `move_skipped=`, and the task's snapshot is prepared for the project the
-issue is in (or on its way to), so its fields keep reaching it there.
+issue is in (or on its way to), so its fields keep reaching it there. A move
+the operator's unbind closed (reason `binding_removed` or `unbind_forced`, hk
+4539) is no refusal: YouTrack never saw it, so once the task is bound again
+the same move is prepared as a new op (the next seq).
 
 **A snapshot behind a refused move** (hk 4111). The lane treats a rejected
 op as resolved, so an `issue_fields` op prepared behind a move that was then

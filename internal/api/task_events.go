@@ -36,6 +36,10 @@ func (s Service) SettleMerged(ctx context.Context, project string, dryRun bool) 
 	return s.Store.SettleMerged(ctx, project, dryRun)
 }
 
+func (s Service) TaskHygiene(ctx context.Context, now time.Time, project string, dryRun bool) (store.TaskHygieneReport, error) {
+	return s.Store.TaskHygiene(ctx, now, project, dryRun)
+}
+
 // tasksSettleMerged is POST /v1/tasks/settle-merged: body {"project": "",
 // "dry_run": true}. dry_run defaults to true when omitted, so a bare POST
 // writes nothing; the CLI always sends it explicitly.
@@ -54,6 +58,31 @@ func (s Server) tasksSettleMerged(w http.ResponseWriter, r *http.Request) {
 	}
 	dryRun := input.DryRun == nil || *input.DryRun
 	rep, err := s.Service.SettleMerged(r.Context(), input.Project, dryRun)
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, rep)
+}
+
+// tasksHygiene is POST /v1/tasks/hygiene: body {"project": "", "dry_run": true}.
+// dry_run defaults to true when omitted, so a bare POST writes nothing; the
+// CLI always sends it explicitly.
+func (s Server) tasksHygiene(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	defer r.Body.Close()
+	input := struct {
+		Project string `json:"project"`
+		DryRun  *bool  `json:"dry_run"`
+	}{}
+	if err := decode(r, &input, bodyTiny); err != nil {
+		appErr(w, r, err)
+		return
+	}
+	dryRun := input.DryRun == nil || *input.DryRun
+	rep, err := s.Service.TaskHygiene(r.Context(), time.Now().UTC(), input.Project, dryRun)
 	if err != nil {
 		appErr(w, r, err)
 		return

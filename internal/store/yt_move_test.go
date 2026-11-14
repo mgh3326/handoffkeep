@@ -332,3 +332,49 @@ func TestYTMoveModeOffPreparesNothing(t *testing.T) {
 		t.Fatalf("claim of a move with moves off: %s", out)
 	}
 }
+
+// hk 4539: a move the operator's unbind closed (binding_removed) was never
+// sent and YouTrack never refused it, so it must not suppress the same move
+// once the task is bound again. The review's sequence: a pending A-to-B move
+// is cancelled, the task goes back to A and binds the same issue, then moves
+// to B again. A move YouTrack refused stays suppressed (hk 4111, above).
+func TestYTMoveCancelledByUnbindIsPreparedAgainAfterARebind(t *testing.T) {
+	s, bound, _ := ytmSetup(t, "ytm_rebind")
+	ctx := t.Context()
+	ytmMapped(t, s)
+	ytFeedExec(t, s, `UPDATE tasks SET project=$2 WHERE id=$1`, bound, ytmProject)
+	ytfPass(t, s)
+	first := ytmOps(t, s, bound)
+	if len(first) != 1 || first[0].State != ytwrite.StatePrepared {
+		t.Fatalf("move ops %+v, want one prepared", first)
+	}
+
+	res, err := s.UnbindYTTaskBinding(ctx, bound, YTUnbindOptions{By: "operator:me"})
+	if err != nil || !res.Removed {
+		t.Fatalf("unbind = %+v %v", res, err)
+	}
+	if got := ybhState(t, s, first[0]); got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonBindingRemoved {
+		t.Fatalf("move after the unbind = %+v, want rejected binding_removed", got)
+	}
+
+	// Back in A, the task binds its issue again, then moves to B.
+	ytFeedExec(t, s, `UPDATE tasks SET project=$2 WHERE id=$1`, bound, ytbProject)
+	ytbBind(t, s, ytbBinding(bound))
+	ytFeedExec(t, s, `UPDATE tasks SET project=$2 WHERE id=$1`, bound, ytmProject)
+	ytfPass(t, s)
+	moves := ytmOps(t, s, bound)
+	if len(moves) != 2 || moves[1].State != ytwrite.StatePrepared || moves[1].ID <= first[0].ID ||
+		!strings.HasPrefix(moves[1].Key, ytwrite.KindIssueMove+":"+strconv.FormatInt(bound, 10)+":2:") {
+		t.Fatalf("move ops %+v, want a second one prepared with seq 2", moves)
+	}
+	if p, err := ytwrite.IssueMoveProject(moves[1]); err != nil || p != ytmProjectID {
+		t.Fatalf("second move target %q %v", p, err)
+	}
+
+	// Once prepared and pending, it is not prepared a third time.
+	ytFeedExec(t, s, `UPDATE tasks SET priority=6 WHERE id=$1`, bound)
+	ytfPass(t, s)
+	if moves := ytmOps(t, s, bound); len(moves) != 2 {
+		t.Fatalf("move ops after another change %+v, want two", moves)
+	}
+}

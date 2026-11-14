@@ -387,7 +387,15 @@ task with the reason it stayed merged: `no_merge_commit`, `no_deploy_stage`,
 `not_yet_deployed`, or `redelivered` (its covering deploy event was already
 recorded, so a reopened task re-merged under the same attempt stays merged and
 needs an operator decision). `--dry-run` defaults to true: nothing is written unless
-`--dry-run=false` is given.
+`--dry-run=false` is given. `handoffkeep tasks hygiene [--project P] [--dry-run]`
+(`POST /v1/tasks/hygiene`, body `{project, dry_run}`) runs the daily hygiene sweep
+(hk 3292): it mechanically applies clean closures where an implements change merged
+or parent automatic close was held without conflict (moving implement tasks to `merged`,
+and closing parents), runs `settle-merged` to advance covered tasks to `deployed`,
+and gathers discrepancy findings needing operator triage (settled tasks with open
+decisions, live attempts without lease, lagging answered decisions, and held tasks).
+`--dry-run` defaults to true: prospective actions are reported and nothing is written
+unless `--dry-run=false` is given.
 Schema version 34 adds the `source_event` kind for events
 recorded with `applied=false`, so they never read as transitions.
 

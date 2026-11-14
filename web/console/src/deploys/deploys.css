@@ -15,11 +15,13 @@
 .dp-note { display: flex; align-items: baseline; gap: var(--hk-space-1); margin: 0; color: var(--hk-text-muted); font-size: var(--hk-type-meta); line-height: var(--hk-line-meta); }
 .dp-note.dp-warn { color: var(--hk-warning); }
 
+.dp-lag-banner { display: flex; align-items: center; gap: var(--hk-space-2); padding: var(--hk-space-2) var(--hk-space-3); border: var(--hk-border-width) solid var(--hk-warning); border-radius: var(--hk-radius-card); background: rgb(229 187 112 / 8%); color: var(--hk-warning); font: var(--hk-weight-medium) var(--hk-type-row)/var(--hk-line-row) var(--hk-font-ui); }
+.dp-card-lag-banner { display: flex; align-items: center; gap: var(--hk-space-2); padding: var(--hk-space-1) var(--hk-space-2); border: var(--hk-border-width) solid var(--hk-warning); border-radius: var(--hk-radius-control); background: rgb(229 187 112 / 8%); color: var(--hk-warning); font: var(--hk-weight-medium) var(--hk-type-meta)/var(--hk-line-meta) var(--hk-font-ui); }
+
 .dp-card { display: flex; flex-direction: column; gap: var(--hk-space-2); min-width: 0; padding: var(--hk-space-3); border: var(--hk-border-width) solid var(--hk-border-subtle); border-radius: var(--hk-radius-card); background: var(--hk-surface-1); }
 .dp-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--hk-space-1) var(--hk-space-2); font-size: var(--hk-type-meta); line-height: var(--hk-line-meta); }
 .dp-svc { margin: 0; font: var(--hk-weight-strong) var(--hk-type-section)/var(--hk-line-section) var(--hk-font-ui); overflow-wrap: anywhere; }
 .dp-status { display: flex; flex-wrap: wrap; align-items: center; gap: var(--hk-space-1) var(--hk-space-2); font-size: var(--hk-type-meta); line-height: var(--hk-line-meta); }
-.dp-prs { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--hk-space-1) var(--hk-space-2); margin: 0; font-size: var(--hk-type-meta); line-height: var(--hk-line-meta); }
 .dp-subhead { margin: var(--hk-space-1) 0 0; color: var(--hk-text-muted); font: var(--hk-weight-medium) var(--hk-type-meta)/var(--hk-line-meta) var(--hk-font-ui); }
 
 .dp-chip-ref { padding-inline-end: var(--hk-space-1); background: var(--hk-surface-2); color: var(--hk-text-primary); }

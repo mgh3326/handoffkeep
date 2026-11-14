@@ -73,6 +73,8 @@ export type DeployServiceView = {
   latest?: DeployRecordView;
   merged_boundary: "deployed_at" | "unrecorded" | "no_current";
   merged_since: DeployMergedTask[];
+  lag_count?: number;
+  lagging?: boolean;
 };
 
 export type DeployPendingResponse = {
@@ -166,7 +168,9 @@ const isServiceView = (v: unknown): v is DeployServiceView => {
     s.merged_since.every(isMergedTask) &&
     Array.isArray(s.recent) && s.recent.every(isRecordView) &&
     (s.current === null || isRecordView(s.current)) &&
-    (s.latest === undefined || isRecordView(s.latest))
+    (s.latest === undefined || isRecordView(s.latest)) &&
+    (s.lag_count === undefined || typeof s.lag_count === "number") &&
+    (s.lagging === undefined || typeof s.lagging === "boolean")
   );
 };
 

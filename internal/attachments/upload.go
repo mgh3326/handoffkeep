@@ -517,8 +517,11 @@ func (m *Manager) uploadFinalizeFallback(ctx context.Context, row store.Attachme
 // and the row can be reclaimed. The returned func stops the heartbeat.
 func (m *Manager) heartbeatUpload(ctx context.Context, row store.AttachmentUpload) func() {
 	done := make(chan struct{})
+	exited := make(chan struct{})
+	every := uploadHeartbeat // read once here, not inside the goroutine
 	go func() {
-		t := time.NewTicker(uploadHeartbeat)
+		defer close(exited)
+		t := time.NewTicker(every)
 		defer t.Stop()
 		for {
 			select {
@@ -531,7 +534,8 @@ func (m *Manager) heartbeatUpload(ctx context.Context, row store.AttachmentUploa
 			}
 		}
 	}()
-	return func() { close(done) }
+	// Stop waits for the goroutine, so no beat runs after the completion ends.
+	return func() { close(done); <-exited }
 }
 
 // finishUpload moves a row to a final state and deletes its staging object,

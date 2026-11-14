@@ -179,7 +179,7 @@ Catalog rows have this shape:
   whose auth-file client id is `operator` (`HANDOFFKEEP_TOKEN_operator`), the
   same hardened-boundary convention as panewire #68's `HUB_TOKEN_operator`,
   or the operator-desk session's client id `operator-desk`, which records the
-  operator's catalog decisions on the operator's behalf, the panewire design
+  operator's catalog decisions on the operator's behalf, or the panewire design
   session's client id `panewire-design`, which owns the bench catalog (decision
   `hk:doc decision/2026-11-08/panewire-design-catalog-writer`), or the fleet-policy
   session's client id `fleet-policy` (decision

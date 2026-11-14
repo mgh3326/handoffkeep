@@ -317,12 +317,22 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 	if in.ID < 1 {
 		return nil, nil, errors.New("id must be positive")
 	}
-	task, found, err := o.service.GetTask(ctx, in.ID)
+	view, err := o.taskGetView(ctx, in.ID)
 	if err != nil {
 		return nil, nil, err
 	}
+	return jsonResult(view)
+}
+
+// taskGetView builds the task_get payload. task_context embeds it under
+// "task" so the bundle and the single-task read never drift apart.
+func (o operatorTools) taskGetView(ctx context.Context, id int64) (map[string]any, error) {
+	task, found, err := o.service.GetTask(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	if !found {
-		return nil, nil, errors.New("not_found")
+		return nil, errors.New("not_found")
 	}
 	body := ""
 	bodyKey := task.BodyDoc
@@ -332,7 +342,7 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 	if bodyKey != "" {
 		doc, ok, err := o.service.GetDocument(ctx, bodyKey)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if ok {
 			body = doc.Body
@@ -340,7 +350,7 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 	}
 	mirrors, err := o.service.Store.ListYouTrackMirrors(ctx, []int64{task.ID})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	mirror, mirrored := mirrors[task.ID]
 	summary := taskSummaryOf(task, mirror, mirrored)
@@ -349,7 +359,7 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 	if task.Project != nil && *task.Project != "" {
 		projectOwner, err := o.service.Store.GetProjectOwner(ctx, *task.Project)
 		if err != nil && !errors.Is(err, store.ErrProjectNotFound) {
-			return nil, nil, err
+			return nil, err
 		}
 		if err == nil {
 			owner = &projectOwner
@@ -367,7 +377,7 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 	}
 	translated, err := o.service.Store.ListTranslations(ctx, "task", sources)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	for _, row := range translated {
 		translations[row.Field] = translationView{Text: row.Text, Stale: row.Stale}
@@ -384,7 +394,7 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 	}
 	briefs, err := o.service.Store.TaskBriefs(ctx, briefIDs)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	var parent *store.TaskChild
 	if task.ParentID != nil {
@@ -408,7 +418,7 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 
 	comments, err := o.service.Store.RecentTaskComments(ctx, task.ID, taskGetPreviewLimit+1)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	commentsMore := len(comments) > taskGetPreviewLimit
 	if commentsMore {
@@ -422,7 +432,7 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 
 	jobRows, err := o.service.Store.ListJobsByTask(ctx, task.ID, taskGetJobsLimit+1)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	jobsMore := len(jobRows) > taskGetJobsLimit
 	if jobsMore {
@@ -441,7 +451,7 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 	if bodyKey != "" {
 		attachmentRows, err = o.service.Store.ListAttachments(ctx, "document", bodyKey, taskGetAttachmentsLimit+1)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	attachmentsMore := len(attachmentRows) > taskGetAttachmentsLimit
@@ -463,7 +473,7 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 		closedAt = task.CanceledAt
 	}
 
-	return jsonResult(map[string]any{
+	return map[string]any{
 		"id":               summary.ID,
 		"title":            summary.Title,
 		"body":             body,
@@ -503,7 +513,7 @@ func (o operatorTools) taskGet(ctx context.Context, _ *gmcp.CallToolRequest, in 
 		"youtrack":         summary.YouTrack,
 		"console_url":      summary.ConsoleURL,
 		"field_sources":    taskFieldSources,
-	})
+	}, nil
 }
 
 // attachmentView is one attachment bound to a task through its body document.
@@ -517,12 +527,16 @@ type attachmentView struct {
 }
 
 // externalLinkView is one link from a task to a system outside its row. Ref is
-// the stored value; URL is set only when that value is an https link.
+// the stored value; URL is set only when that value is an https link. Access
+// keeps "link stored" and "access verified" separate (hk 3475): "stored" means
+// hk holds the reference; nothing verifies it is reachable from the reader's
+// side yet, so "verified" and "unreachable" are reserved for a checker.
 type externalLinkView struct {
 	Kind   string  `json:"kind"`
 	Source string  `json:"source"`
 	Ref    string  `json:"ref"`
 	URL    *string `json:"url"`
+	Access string  `json:"access"`
 }
 
 // fieldSyncView says when a YouTrack-owned field was last synced and where it
@@ -548,7 +562,7 @@ func externalLinksOf(task store.Task, mirror store.YouTrackMirror, mirrored bool
 	links := []externalLinkView{}
 	add := func(kind, source, ref string) {
 		if ref != "" {
-			links = append(links, externalLinkView{Kind: kind, Source: source, Ref: ref, URL: httpsOrNil(ref)})
+			links = append(links, externalLinkView{Kind: kind, Source: source, Ref: ref, URL: httpsOrNil(ref), Access: "stored"})
 		}
 	}
 	add("pr", "hk", task.Refs.PR)
@@ -557,7 +571,7 @@ func externalLinksOf(task store.Task, mirror store.YouTrackMirror, mirrored bool
 	add("report", "hk", task.Refs.ReportPath)
 	add("document", "hk", task.BodyDoc)
 	if mirrored && mirror.DisplayRef != "" {
-		links = append(links, externalLinkView{Kind: "youtrack", Source: "youtrack", Ref: mirror.DisplayRef, URL: httpsOrNil(mirror.URL)})
+		links = append(links, externalLinkView{Kind: "youtrack", Source: "youtrack", Ref: mirror.DisplayRef, URL: httpsOrNil(mirror.URL), Access: "stored"})
 	}
 	return links
 }

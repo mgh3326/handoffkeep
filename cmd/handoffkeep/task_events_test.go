@@ -306,3 +306,47 @@ func TestTasksDriftCLI(t *testing.T) {
 		t.Fatalf("refused commands sent requests: %v", paths)
 	}
 }
+
+func TestTasksHygieneCLI(t *testing.T) {
+	cliEnv(t)
+	var calls []struct {
+		method string
+		path   string
+		body   map[string]any
+	}
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		calls = append(calls, struct {
+			method string
+			path   string
+			body   map[string]any
+		}{r.Method, r.URL.Path, b})
+		_, _ = io.WriteString(w, `{"as_of":"2026-11-14T00:00:00Z","dry_run":true,"mechanical_closes":[],"findings":{"merged_pr_open_tasks":[],"auto_close_held_parents":[],"settled_open_decisions":[],"live_attempts_without_lease":[],"answered_decisions_not_delivered":[],"merged_without_deploy":[]}}`)
+	}))
+	defer h.Close()
+
+	var out bytes.Buffer
+	if err := run([]string{"tasks", "hygiene", "--url", h.URL, "--token", "tok"}, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls[0].method != "POST" || calls[0].path != "/v1/tasks/hygiene" || calls[0].body["dry_run"] != true {
+		t.Fatalf("calls=%+v out=%s", calls, out.String())
+	}
+	if !strings.Contains(out.String(), `"mechanical_closes":[]`) {
+		t.Fatalf("output missing mechanical_closes: %s", out.String())
+	}
+
+	calls = nil
+	out.Reset()
+	if err := run([]string{"tasks", "hygiene", "--dry-run=false", "--project", "myproject", "--url", h.URL, "--token", "tok"}, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls[0].method != "POST" || calls[0].path != "/v1/tasks/hygiene" || calls[0].body["dry_run"] != false || calls[0].body["project"] != "myproject" {
+		t.Fatalf("calls=%+v out=%s", calls, out.String())
+	}
+
+	if err := run([]string{"tasks", "hygiene", "extra", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "tasks hygiene takes flags only") {
+		t.Fatalf("extra argument accepted: %v", err)
+	}
+}

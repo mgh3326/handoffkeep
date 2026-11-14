@@ -41,6 +41,40 @@ func RunLedger(t *testing.T, nl NewLedger) {
 		return out
 	}
 
+	// hk 4570: an adoption is recorded only for the dispatch attempt that
+	// is in flight, once per op; the same record again is a no-op.
+	t.Run("adoption_is_recorded_for_the_dispatch_in_flight", func(t *testing.T) {
+		l := nl(t)
+		op := prepare(t, l, "adopt", "1")
+		if err := l.RecordAdoption(ctx, t0, op.ID, 1, "0-1"); !errors.Is(err, ytwrite.ErrState) {
+			t.Fatalf("record on a prepared op = %v", err)
+		}
+		if out := claim(t, l, op.ID); out != ytwrite.ClaimClaimed {
+			t.Fatalf("claim = %s", out)
+		}
+		if err := l.RecordAdoption(ctx, t0, op.ID, 2, "0-1"); !errors.Is(err, ytwrite.ErrState) {
+			t.Fatalf("record of another attempt = %v", err)
+		}
+		if _, found, err := l.Adoption(ctx, op.ID); err != nil || found {
+			t.Fatalf("adoption before the record = %v %v", found, err)
+		}
+		if err := l.RecordAdoption(ctx, t0, op.ID, 1, "0-1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.RecordAdoption(ctx, t0, op.ID, 1, "0-1"); err != nil {
+			t.Fatalf("same record again = %v", err)
+		}
+		if err := l.RecordAdoption(ctx, t0, op.ID, 1, "0-2"); !errors.Is(err, ytwrite.ErrConflictingResult) {
+			t.Fatalf("another record = %v", err)
+		}
+		if a, found, err := l.Adoption(ctx, op.ID); err != nil || !found || a != (ytwrite.Adoption{Attempts: 1, YTID: "0-1"}) {
+			t.Fatalf("adoption = %+v %v %v", a, found, err)
+		}
+		if err := l.RecordAdoption(ctx, t0, 1<<40, 1, "0-1"); !errors.Is(err, ytwrite.ErrNotFound) {
+			t.Fatalf("record of an unknown op = %v", err)
+		}
+	})
+
 	t.Run("prepare_is_keyed_by_principal_kind_key", func(t *testing.T) {
 		l := nl(t)
 		a := prepare(t, l, "k", "1")

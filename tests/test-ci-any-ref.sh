@@ -104,7 +104,24 @@ def validate(wf_text: str, ci_text: str) -> None:
     status_if = re.search(r"(?ms)^  status:.*?^    if: (.*)$", wf_text)
     assert status_if and "needs.resolve.result == 'success'" in status_if.group(1), \
         "status job must be gated on resolve success"
-    assert "needs: [resolve, ci]" in wf_text
+    assert "needs: [resolve, ci, schema-compat]" in wf_text
+
+    schema = job_block(wf_text, "schema-compat")
+    assert "needs: resolve" in schema and "inputs.suite == 'deploy'" in schema, \
+        "schema compatibility must run only for deploy diagnostics after target resolution"
+    assert "image: postgres:17" in schema and "HANDOFFKEEP_TEST_DB_URL:" in schema, \
+        "schema compatibility must use its PostgreSQL 17 test database"
+    assert "TARGET_SHA: ${{ needs.resolve.outputs.sha }}" in schema, \
+        "schema compatibility must check the resolved target sha"
+    assert "ref: ${{ github.workflow_sha }}" in schema and \
+        'git fetch --no-tags origin "$TARGET_SHA"' in schema, \
+        "schema compatibility must use the workflow script and fetch arbitrary target commits"
+    assert "bash scripts/test-previous-release-schema.sh" in schema, \
+        "deploy diagnostics must exercise the previous release on the target schema"
+    assert "    permissions:\n      contents: read\n" in schema and "statuses" not in schema, \
+        "schema compatibility runs TARGET_SHA code and must hold contents: read only, no status write"
+    assert re.search(r"(?m)^          persist-credentials: false$", schema), \
+        "schema compatibility runs TARGET_SHA code, so its checkout must not persist the job token"
 
     # Concurrency (hk 2199): the group is keyed on the RESOLVED sha plus the
     # suite on the ci and status jobs, never on inputs.ref alone. The resolve
@@ -155,6 +172,11 @@ def validate(wf_text: str, ci_text: str) -> None:
     # status target: must be the resolved sha, never github.sha / the dispatch sha.
     assert "statuses/${TARGET_SHA}" in wf_text, "status must post to statuses/<target sha>"
     assert "TARGET_SHA: ${{ needs.resolve.outputs.sha }}" in wf_text
+    assert "CI_RESULT: ${{ needs.ci.result }}" in status_block
+    assert "SCHEMA_COMPAT_RESULT: ${{ needs.schema-compat.result }}" in status_block
+    assert '"$SUITE" == deploy' in status_block and \
+        'RESULT=$SCHEMA_COMPAT_RESULT' in status_block, \
+        "deploy status must include the schema compatibility result"
     status_section = wf_text.split("status:", 1)[1]
     assert "target_url" in status_section, "status must carry the run URL"
     assert "GITHUB_SHA" not in status_section and "github.sha" not in status_section \
@@ -222,7 +244,7 @@ def validate(wf_text: str, ci_text: str) -> None:
         assert not re.search(r"\bgit (merge(?!-base)|pull|rebase|reset)\b", text), \
             "workflow must not merge or move the checkout onto main"
     assert "workflow_call:" in ci_text
-    assert "actions/checkout" not in wf_text.split("ci:", 1)[1].split("status:", 1)[0], \
+    assert "actions/checkout" not in job_block(wf_text, "ci"), \
         "the reusable call must not re-checkout"
 
 
@@ -338,7 +360,23 @@ mutant_noref = ci.replace(
 )
 expect_red(wf, mutant_noref, "checkout-without-ref")
 
-print("structural checks ok (incl. 13 mutants)")
+# Mutant 14: schema-compat persists the job token beside TARGET_SHA code -> RED.
+mutant_persist = wf.replace(
+    "          fetch-depth: 0\n          persist-credentials: false\n      - name: Fetch the target commit",
+    "          fetch-depth: 0\n      - name: Fetch the target commit",
+    1,
+)
+expect_red(mutant_persist, ci, "schema-compat-persists-credentials")
+
+# Mutant 15: schema-compat inherits the workflow's statuses: write -> RED.
+mutant_schema_perm = wf.replace(
+    "    if: ${{ inputs.suite == 'deploy' }}\n    permissions:\n      contents: read\n",
+    "    if: ${{ inputs.suite == 'deploy' }}\n",
+    1,
+)
+expect_red(mutant_schema_perm, ci, "schema-compat-inherits-write-scope")
+
+print("structural checks ok (incl. 15 mutants)")
 PY
 
 # --- live-ish harness: resolver + checkout simulation against a fixture repo ---
@@ -427,6 +465,16 @@ check_state() { RESULT="$1" bash -c "$state_case"$'\nprintf \'%s\' "$STATE"'; }
 [[ -z "$(check_state cancelled)" ]]  # cancelled posts nothing (hk 2924)
 [[ "$(check_state failure)" == failure ]]
 [[ "$(check_state skipped)" == failure ]]
+combined_state="$(sed -n '/RESULT=\$CI_RESULT/,/esac/p' "$root/.github/workflows/ci-any-ref.yml")"
+[[ -n "$combined_state" ]]
+check_combined_state() {
+  CI_RESULT="$1" SUITE="$2" SCHEMA_COMPAT_RESULT="$3" \
+    bash -c "$combined_state"$'\nprintf \'%s\' "$STATE"'
+}
+[[ "$(check_combined_state success deploy success)" == success ]]
+[[ "$(check_combined_state success deploy failure)" == failure ]]
+[[ -z "$(check_combined_state success deploy cancelled)" ]]
+[[ "$(check_combined_state success all skipped)" == success ]]
 
 # (b) status target: simulate the status step against the resolved sha.
 TARGET_SHA="$SHA_A"

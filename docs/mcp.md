@@ -168,6 +168,7 @@ file tasks, or attach files.
 | `task_list` | read | optional `state`/`lane`/`project`, `limit` ≤ 100, `cursor`, `updated_since` | Task summaries; paged calls also carry `next_cursor` |
 | `task_comments` | read | `id`, optional `cursor`, `limit` ≤ 100 | One page of comments, oldest first, with `next_cursor` and `has_more` |
 | `task_events` | read | `id`, optional `cursor`, `limit` ≤ 100 | One page of events, oldest first, with `next_cursor` and `has_more` |
+| `task_context` | read | `id` | One-call context bundle: `task` (the full `task_get` payload), `open_decisions`, `answered_decisions`, `decision_attempts`, `documents` bound to the task, `changes` (the task's mergewake change/PR rows), `field_sources`; each `external_links` entry carries `access` (`stored`) |
 | `changes_since` | read | optional `cursor` or `since`, `limit` ≤ 100 | One page of the change feed: `items`, `next_cursor`, `max_cursor`, `has_more` |
 | `decisions_pending` | read | none | Open structured requests with question, options, `question_ko`/`options_ko` when fresh, and state |
 | `decisions_history` | read | optional `cursor`, `limit` | Closed structured requests plus session decisions with reading, verbatim quote, decision time and ground links |

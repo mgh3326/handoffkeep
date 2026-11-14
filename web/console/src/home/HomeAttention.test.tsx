@@ -272,7 +272,7 @@ it("preserves inbox selection and read state for a translated decision", async (
   fireEvent.click(select);
   expect(select.getAttribute("aria-pressed")).toBe("true");
   fireEvent.click(within(row).getByRole("button", { name: "원문 보기" }));
-  expect(within(row).getByText("Ship the console?")).toBeTruthy();
+  expect(await within(row).findByText("Ship the console?")).toBeTruthy();
 });
 
 it("links to work status page from open task summary count", async () => {
@@ -280,4 +280,22 @@ it("links to work status page from open task summary count", async () => {
   render(<HomeAttention />);
   const link = await screen.findByRole("link", { name: "열린 작업 42" });
   expect(link.getAttribute("href")).toBe("/ui/work-status");
+});
+
+it("shows a deploy lag banner when a service is lagging", async () => {
+  serve(
+    payload({
+      deploys: {
+        count: 1,
+        events_capped: false,
+        items: [deploy],
+        lagging: [{ service: "auto_trader", repo: "mgh3326/auto_trader", lag_count: 5 }],
+      },
+    }),
+  );
+  render(<HomeAttention />);
+  const banner = await screen.findByTestId("home-lag-banner");
+  expect(banner).toBeTruthy();
+  expect(banner.textContent).toContain("배포 지연: auto_trader(main보다 5개 뒤처짐)");
+  expect(banner.textContent).toContain("배포 관리");
 });

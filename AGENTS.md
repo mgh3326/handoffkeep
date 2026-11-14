@@ -36,7 +36,8 @@ and CI.
 CI has three tiers (`.github/workflows/ci.yml` plus `deploy.yml`). A pull
 request runs the light jobs only: no `-race`, hosted runners, PostgreSQL only
 for the DB-backed packages it changes (below). The main tier is every other non-PR event: the light
-jobs plus `main-linux`, which runs the whole Go suite against PostgreSQL
+jobs plus the parallel main jobs (`main-store-1`, `main-store-2`, `main-packages`,
+`main-migration`, `main-reopen-mutants`, `main-quota-mutants`, `main-release-dryrun`), which run the Go suite against PostgreSQL
 **without** `-race`, the migration/startup smoke, the reopen/quota mutants and
 bundle freshness, targeting 10 minutes; its aggregate is `ci-ok`. The deploy
 tier (`deploy.yml`, `suite=deploy`) runs `-race` with PostgreSQL, the same
