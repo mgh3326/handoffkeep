@@ -27,11 +27,11 @@ func greenEnv(suite string, overrides ...string) map[string]string {
 	env := map[string]string{
 		"EVENT": "workflow_dispatch", "SUITE": suite,
 		"TEST": "success", "PR_STORE_DB": "success", "VITEST": "skipped", "BUILD": "skipped",
-		"AUTO_TAG": "success",
+		"AUTO_TAG":     "success",
 		"MAIN_STORE_1": "success", "MAIN_STORE_2": "success", "MAIN_PACKAGES": "success",
 		"MAIN_MIGRATION": "success", "MAIN_REOPEN_MUTANTS": "success", "MAIN_QUOTA_MUTANTS": "success",
 		"MAIN_RELEASE_DRYRUN": "success",
-		"DEPLOY_LINUX": "skipped", "DEPLOY_MACOS": "skipped", "DEPLOY_RELEASE": "skipped",
+		"DEPLOY_LINUX":        "skipped", "DEPLOY_MACOS": "skipped", "DEPLOY_RELEASE": "skipped",
 	}
 	if suite == "all" {
 		env["VITEST"], env["BUILD"] = "success", "success"
