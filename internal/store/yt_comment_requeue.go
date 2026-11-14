@@ -61,12 +61,12 @@ type YTRequeued struct {
 // whose binding is the one the task's own
 // applied issue_create op ($4 principal, $5 kind) published on the op's
 // tenant, above the binding's comments_from, with no issue_move on the
-// binding's issue still unresolved and comments not canonical in YouTrack,
-// and that every local source agrees with now. The agreement is ytBindingSourcesSQL's, written over the
+// binding's issue still unresolved, and that every local source agrees with
+// now. The agreement is ytBindingSourcesSQL's, written over the
 // binding's columns so a binding that still disagrees is never listed: it
 // would otherwise stay at the head of the limit ($6) and starve the rest.
 // The pass checks all of it again under the lane lock (ytBindingDisagreement,
-// ytPendingMoveTx, the authority row).
+// ytPendingMoveTx).
 const ytRequeueSelectSQL = `SELECT o.id, w.comment_id, b.task_id
 	FROM yt_write_ops o
 	JOIN yt_comment_write_links w ON w.op_id = o.id
@@ -91,7 +91,6 @@ const ytRequeueSelectSQL = `SELECT o.id, w.comment_id, b.task_id
 			AND NOT EXISTS (SELECT 1 FROM youtrack_projects p WHERE p.yt_project_id = b.project_id)))
 	  AND NOT EXISTS (SELECT 1 FROM yt_write_ops mv WHERE mv.kind = '` + ytwrite.KindIssueMove + `' AND mv.entity_kind = 'task'
 		AND mv.entity_id = o.entity_id AND mv.yt_target_id = b.issue_id AND mv.state NOT IN ('applied','rejected'))
-	  AND NOT EXISTS (SELECT 1 FROM yt_authority a WHERE a.kind = '` + string(YTAuthorityComments) + `' AND a.authority = '` + string(YTAuthorityYouTrack) + `')
 	ORDER BY w.comment_id, o.id LIMIT $6`
 
 // RequeueYTMovedComments copies again, for the worker of tenant, each comment
@@ -172,16 +171,13 @@ func (s *Store) requeueYTComment(ctx context.Context, fromOp, commentID, taskID 
 	}
 	defer tx.Rollback(ctx)
 	// The authority row first, as the catch-up takes it: a switch commits
-	// before this read or after this transaction. Rejected ops do not hold a
-	// switch to youtrack, so a rejected comment can still be here after it;
-	// with comments canonical in YouTrack nothing is copied there again
-	// (review r4573479593), and the link stays on the rejected op.
-	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments)
-	if err != nil {
+	// before this read or after this transaction. Unlike the catch-up, the
+	// copy runs under either side: a queued comment exists only because
+	// comments are canonical in YouTrack (enqueueYTCommentTx queues one only
+	// then, hk 4263), and hk accepted it on the promise that its op carries it
+	// there, so YouTrack authority is the case this pass is for.
+	if _, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments); err != nil {
 		return YTRequeued{}, false, err
-	}
-	if side == YTAuthorityYouTrack {
-		return YTRequeued{}, false, nil
 	}
 	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(taskID, 10)); err != nil {
 		return YTRequeued{}, false, err

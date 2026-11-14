@@ -290,39 +290,6 @@ func TestYTCommentRequeueWaitsForAPendingMove(t *testing.T) {
 	ytrqDeliver(t, s, ytwritetest.NewFake(), again, c1.Body)
 }
 
-// With comments canonical in YouTrack (review r4573479593) nothing is copied
-// there again, even when the binding agrees: rejected ops do not hold the
-// switch, and the link stays on the rejected op. Back on hk, the pass copies.
-func TestYTCommentRequeueSkipsYouTrackAuthority(t *testing.T) {
-	s, x, create := ytqSetup(t, "ytrq_authority")
-	ytrqMapped(t, s)
-	c1, op1 := ytrqQueued(t, s, x.ID, "queued, then comments switched to youtrack")
-	ytiDispatch(t, s, create)
-	ytrqMoveTask(t, s, x.ID, ytrqOther)
-	ytrqApplyCreate(t, s, create)
-	ytrqRejectedAmbiguous(t, s, op1)
-	ytrqMoveTask(t, s, x.ID, ytbProject)
-	setSide := func(side YTAuthoritySide) {
-		t.Helper()
-		if _, err := s.pool.Exec(t.Context(), `UPDATE yt_authority SET authority=$1 WHERE kind='comments'`, string(side)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	setSide(YTAuthorityYouTrack)
-	t.Cleanup(func() { setSide(YTAuthorityHK) })
-	if got := ytrqRequeue(t, s); len(got) != 0 {
-		t.Fatalf("requeued with comments canonical in youtrack: %+v", got)
-	}
-	if _, done, err := s.requeueYTComment(t.Context(), op1.ID, c1.ID, x.ID); err != nil || done {
-		t.Fatalf("requeue under the authority row with youtrack canonical: done=%v err=%v", done, err)
-	}
-	if linked, ok := ytcOpFor(t, s, c1.ID); !ok || linked.ID != op1.ID {
-		t.Fatalf("link moved with youtrack canonical: %+v", linked)
-	}
-	setSide(YTAuthorityHK)
-	ytrqWantRequeued(t, s, ytrqRequeue(t, s), c1, op1)
-}
-
 // Two moves (r4564127096): the task moves to B, then to C, before the queued
 // comment's claim. After move A applies, the binding (in B) still disagrees
 // with the task (in C) and nothing is copied; after move B applies it agrees
