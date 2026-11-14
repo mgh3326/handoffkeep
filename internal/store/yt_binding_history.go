@@ -46,14 +46,17 @@ type YTUnbindOp struct {
 // nothing was written, when the task had no binding. Released lists the
 // comments whose ops were rejected: hk keeps them and the operator can copy
 // them again. Stranded lists the same comments when comments are canonical in
-// YouTrack (Force only): no op will ever carry them.
+// YouTrack (Force only): no op will ever carry them. AnchorReleased is true
+// when the task's yt_entity_map row, which named the removed binding's issue,
+// was deleted with it (hk 4536).
 type YTUnbindResult struct {
-	TaskID   int64          `json:"task_id"`
-	Removed  bool           `json:"removed"`
-	Binding  *YTTaskBinding `json:"binding,omitempty"`
-	Rejected []YTUnbindOp   `json:"rejected"`
-	Released []int64        `json:"released"`
-	Stranded []int64        `json:"stranded"`
+	TaskID         int64          `json:"task_id"`
+	Removed        bool           `json:"removed"`
+	Binding        *YTTaskBinding `json:"binding,omitempty"`
+	Rejected       []YTUnbindOp   `json:"rejected"`
+	Released       []int64        `json:"released"`
+	Stranded       []int64        `json:"stranded"`
+	AnchorReleased bool           `json:"anchor_released"`
 }
 
 // insertYTBindingHistoryTx appends one row to the task's binding history in
@@ -93,10 +96,21 @@ func insertYTBindingHistoryTx(ctx context.Context, tx pgx.Tx, b YTTaskBinding, a
 // appended in the same transaction, and the task's pending issue intent, if
 // any, is dropped with them so the issue worker cannot bind it again.
 //
+// The task's yt_entity_map row goes with the binding when it names the
+// binding's issue on the binding's tenant (hk 4536). The row is the routing
+// anchor the task's first op wrote, and every later binding is checked against
+// it (ytBindingDisagreement, and the candidate the CLI verifies): left in
+// place it would refuse every verified issue but the old one, so
+// `comments-backfill --task` could not repair a wrong binding. The old issue
+// stays on record without it: the unbound history row and the ops name it,
+// and the comments already applied there stay there. A row that names another
+// issue or tenant is not this binding's anchor and stays, and so do the mirror
+// link (task_origins) and the canary row, which have their own owners.
+//
 // Locks, as AddYTTaskBinding takes them (lockorder.go): the issue ownership
 // lock, FOR UPDATE on the task row, the task's lane lock, then the comments
 // authority row FOR SHARE (the order prepareYTOpTx has), then the task's
-// yt_write_ops rows and its binding row.
+// yt_write_ops rows, its binding row and its yt_entity_map row.
 func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbindOptions) (YTUnbindResult, error) {
 	res := YTUnbindResult{TaskID: taskID, Rejected: []YTUnbindOp{}, Released: []int64{}, Stranded: []int64{}}
 	if taskID < 1 || o.By == "" || !validText(o.By, 200) || !validText(o.Reason, 2000) {
@@ -208,6 +222,16 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	if _, err := tx.Exec(ctx, `DELETE FROM yt_task_bindings WHERE task_id=$1`, taskID); err != nil {
 		return res, err
 	}
+	// The anchor's writers (the comment enqueue, the canary, the apply of an
+	// issue_create) all hold the task's lane lock, which this transaction
+	// holds, so the row cannot appear or change between the read of the
+	// binding and this delete.
+	anchor, err := tx.Exec(ctx, `DELETE FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$1 AND yt_id=$2 AND (tenant=$3 OR tenant='')`,
+		taskKey, b.IssueID, b.Tenant)
+	if err != nil {
+		return res, err
+	}
+	res.AnchorReleased = anchor.RowsAffected() > 0
 	// A pending issue intent (a task created while its project was unmapped)
 	// would make the issue worker create or adopt an issue and publish a
 	// binding again, undoing the unbind. The operator took over the task's

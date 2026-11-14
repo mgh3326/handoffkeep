@@ -324,3 +324,64 @@ func TestYTFieldsSnapshotOnTaskBindingRollsBackWithBinding(t *testing.T) {
 		t.Fatalf("ops after binding rollback %+v", ops)
 	}
 }
+
+// hk 4539: the operator's unbind rejects a task's prepared snapshot, and the
+// documented rebind (`comments-backfill --task`) runs in a process whose
+// fields mode is off, so the publication itself prepares nothing. The binding
+// is no task change either, so the feed would not see it. A publication after
+// an unbind appends one task 'U' row, and the serve worker's consumer prepares
+// the snapshot the unbind rejected.
+func TestRebindAfterUnbindResnapshotsThroughTheFeed(t *testing.T) {
+	s, _, task := ytfSetup(t, "ytf_rebind")
+	ctx := t.Context()
+	b := ytbBinding(task)
+	feedRows := func() int {
+		return ytcCount(t, s, `SELECT count(*) FROM sync_log WHERE model='task' AND model_id=$1 AND action='U'`, strconv.FormatInt(task, 10))
+	}
+
+	// A first binding prepares its snapshot in its own transaction (fields
+	// mode on) and adds no feed row.
+	before := feedRows()
+	ytbBind(t, s, b)
+	first := ytfOps(t, s, task)
+	if len(first) != 1 || first[0].State != ytwrite.StatePrepared {
+		t.Fatalf("snapshot ops after the first binding %+v, want one prepared", first)
+	}
+	if n := feedRows(); n != before {
+		t.Fatalf("a first binding wrote %d task feed rows", n-before)
+	}
+
+	res, err := s.UnbindYTTaskBinding(ctx, task, YTUnbindOptions{By: "operator:me"})
+	if err != nil || !res.Removed || len(res.Rejected) != 1 || res.Rejected[0].OpID != first[0].ID {
+		t.Fatalf("unbind = %+v %v, want the snapshot op %d rejected", res, err, first[0].ID)
+	}
+	if got := ybhState(t, s, first[0]); got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonBindingRemoved {
+		t.Fatalf("snapshot op after the unbind = %+v", got)
+	}
+	if n := feedRows(); n != before {
+		t.Fatalf("an unbind wrote %d task feed rows", n-before)
+	}
+
+	// The CLI rebinds with fields mode off: nothing is prepared in its
+	// transaction, and the feed row is.
+	s.SetYTFieldsMode(YTFieldsOff, "")
+	ytbBind(t, s, b)
+	if got := ytfOps(t, s, task); len(got) != 1 {
+		t.Fatalf("a publication with fields mode off prepared %+v", got)
+	}
+	if n := feedRows(); n != before+1 {
+		t.Fatalf("task feed rows after the rebind = %d, want %d", n, before+1)
+	}
+
+	// The serve worker's consumer prepares the snapshot, once.
+	s.SetYTFieldsMode(YTFieldsOn, ytcTenant)
+	ytfPass(t, s)
+	got := ytfOps(t, s, task)
+	if len(got) != 2 || got[1].State != ytwrite.StatePrepared || got[1].YTTargetID != ytfIssue(task) || got[1].ID <= first[0].ID {
+		t.Fatalf("snapshot ops after the feed pass %+v, want a second prepared one aimed at %s", got, ytfIssue(task))
+	}
+	ytfPass(t, s)
+	if again := ytfOps(t, s, task); len(again) != 2 {
+		t.Fatalf("a second pass prepared %+v", again)
+	}
+}
