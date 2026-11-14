@@ -57,7 +57,8 @@ type YTRequeued struct {
 // first: a comment_append op of the comment principal ($1) on tenant $2,
 // rejected ambiguous_issue ($3) at its claim with no target and no attempt
 // (a queued comment that was never sent), that still owns its comment
-// (yt_comment_write_links), on a task whose binding is the one the task's own
+// (yt_comment_write_links; the comment exists on the op's task), on a task
+// whose binding is the one the task's own
 // applied issue_create op ($4 principal, $5 kind) published on the op's
 // tenant, above the binding's comments_from, and that every local source
 // agrees with now. The agreement is ytBindingSourcesSQL's, written over the
@@ -67,6 +68,7 @@ type YTRequeued struct {
 const ytRequeueSelectSQL = `SELECT o.id, w.comment_id, b.task_id
 	FROM yt_write_ops o
 	JOIN yt_comment_write_links w ON w.op_id = o.id
+	JOIN task_comments tc ON tc.id = w.comment_id AND tc.task_id::text = o.entity_id
 	JOIN yt_task_bindings b ON b.task_id::text = o.entity_id AND b.tenant = o.tenant
 	WHERE o.principal = $1 AND o.kind = '` + ytwrite.KindCommentAppend + `' AND o.tenant = $2 AND o.entity_kind = 'task'
 	  AND o.state = 'rejected' AND o.reason = $3 AND o.yt_target_id = '' AND o.attempts = 0
@@ -131,16 +133,27 @@ func (s *Store) RequeueYTMovedComments(ctx context.Context, tenant string, limit
 	if err := rows.Err(); err != nil {
 		return out, err
 	}
+	// A candidate that fails is logged and passed over, so one bad row
+	// (listed first on every pass, by comment id) never stops the rest; the
+	// pass returns the first error after trying them all.
+	var first error
 	for _, c := range cands {
 		r, done, err := s.requeueYTComment(ctx, c.op, c.comment, c.task)
 		if err != nil {
-			return out, err
+			if ctx.Err() != nil {
+				return out, err
+			}
+			log.Printf("ytwrite.comment_requeue_failed op_id=%d task_id=%d comment_id=%d err=%q", c.op, c.task, c.comment, err.Error())
+			if first == nil {
+				first = err
+			}
+			continue
 		}
 		if done {
 			out = append(out, r)
 		}
 	}
-	return out, nil
+	return out, first
 }
 
 // requeueYTComment copies comment again after its op fromOp was rejected, in

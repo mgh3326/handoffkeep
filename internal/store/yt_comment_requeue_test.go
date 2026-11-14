@@ -352,7 +352,48 @@ func TestYTCommentRequeueScope(t *testing.T) {
 		t.Fatalf("requeued in mode canary: %+v", got)
 	}
 	s.SetYTCommentsMode(YTCommentsOn)
+
+	// A comment at or below the binding's comments_from is one the issue
+	// already has: nothing.
+	var ycID int64
+	if err := s.pool.QueryRow(t.Context(), `SELECT comment_id FROM yt_comment_write_links WHERE op_id=$1`, yop.ID).Scan(&ycID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(t.Context(), `UPDATE yt_task_bindings SET comments_from=$2 WHERE task_id=$1`, y.ID, ycID); err != nil {
+		t.Fatal(err)
+	}
+	if got := ytrqRequeue(t, s); len(got) != 0 {
+		t.Fatalf("requeued a comment at comments_from: %+v", got)
+	}
+	if _, err := s.pool.Exec(t.Context(), `UPDATE yt_task_bindings SET comments_from=0 WHERE task_id=$1`, y.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// A rejected ambiguous_issue op that has a target was never a queued
+	// comment: nothing.
+	tc, err := s.CreateTaskComment(t.Context(), y.ID, "worker", "targeted, then refused")
+	if err != nil {
+		t.Fatal(err)
+	}
+	top, ok := ytcOpFor(t, s, tc.ID)
+	if !ok || top.YTTargetID != ytrqIssue {
+		t.Fatalf("targeted op %+v %v", top, ok)
+	}
+	tx, err := s.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rejectYTOpTx(t.Context(), tx, time.Now().UTC(), top.ID, ytwrite.ReasonAmbiguousIssue, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
 	if got := ytrqRequeue(t, s); len(got) != 1 || got[0].From != yop.ID {
-		t.Fatalf("requeued in mode on: %+v", got)
+		t.Fatalf("requeued in mode on: %+v (want only op %d, not the targeted op %d)", got, yop.ID, top.ID)
+	}
+	if again := ytrqRequeue(t, s); len(again) != 0 {
+		t.Fatalf("second pass: %+v", again)
 	}
 }
