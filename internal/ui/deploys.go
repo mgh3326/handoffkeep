@@ -107,6 +107,8 @@ type deployServiceView struct {
 	// record exists at all).
 	MergedBoundary string             `json:"merged_boundary"`
 	MergedSince    []deployMergedTask `json:"merged_since"`
+	LagCount       int                `json:"lag_count,omitempty"`
+	Lagging        bool               `json:"lagging,omitempty"`
 	// State is what the records prove about the newest attempt, in the order
 	// the operator reads it: the latest attempt's outcome first, then whether
 	// merges are waiting for a deploy. States that a deploy record cannot
@@ -330,6 +332,15 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 		lv := toView(latest)
 		view.Latest = &lv
 	}
+	// Lag and the merged-since list share one boundary (the last successful
+	// deploy), the same one the operator-desk notice uses. A service without
+	// one has unknown lag, not all-time lag.
+	st, err := h.store.DeployLagStatus(r.Context(), svc)
+	if err != nil {
+		return deployServiceView{}, err
+	}
+	view.LagCount = st.LagCount
+	view.Lagging = st.Lagging
 	sort.Slice(parsed, func(i, j int) bool { return deployRecordLess(parsed[j], parsed[i]) })
 	for _, p := range parsed {
 		if len(view.Recent) == 10 {
