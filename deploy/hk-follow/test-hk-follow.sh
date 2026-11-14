@@ -686,6 +686,30 @@ t_tick_status_retried() {
 	want 1 "$(count "^status $SHA_NEW deployed success")"
 }
 
+t_outbox_fifo() {
+	# hk 4562: a failed older report stops the pass, so a newer one never
+	# overtakes it; the retry delivers both in order.
+	setup
+	local dir="$HK_FOLLOW_STATE_DIR/outbox"
+	mkdir -p "$dir"
+	printf '%s\n' "$(jq -cn --arg s "$SHA_OLD" '{kind:"status", sha:$s, context:"deploy-ok", state:"success", description:"older"}')" \
+		>"$dir/20260101T000000Z.000001.json"
+	printf '%s\n' "$(jq -cn --arg s "$SHA_NEW" '{kind:"status", sha:$s, context:"deploy-ok", state:"success", description:"newer"}')" \
+		>"$dir/20260101T000001Z.000001.json"
+	gh_status() {
+		echo "status $1 $2 $3 $4" >>"$FIX/calls"
+		[[ $1 == "$SHA_OLD" ]] && return 1
+	}
+	deliver_outbox
+	want "status $SHA_OLD deploy-ok success older" "$(calls)"
+	[[ -f "$dir/20260101T000000Z.000001.json" && -f "$dir/20260101T000001Z.000001.json" ]]
+	gh_status() { echo "status $1 $2 $3 $4" >>"$FIX/calls"; }
+	: >"$FIX/calls"
+	deliver_outbox
+	want "$(printf 'status %s deploy-ok success older\nstatus %s deploy-ok success newer' "$SHA_OLD" "$SHA_NEW")" "$(calls)"
+	[[ -z "$(ls "$dir")" ]]
+}
+
 t_tick_interrupted_records_retried() {
 	# The interrupted-attempt report is queued, not lost, when hk is down.
 	setup; setup_tick

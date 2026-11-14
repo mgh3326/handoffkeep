@@ -377,7 +377,7 @@ func (r *WriteRemote) UpdateIssueFields(ctx context.Context, in ytwrite.IssueFie
 // minutes, a text field as its text, null as "".
 func (r *WriteRemote) ReadIssueFields(ctx context.Context, issueID string) (ytwrite.IssueSnapshot, error) {
 	q := url.Values{}
-	q.Set("fields", "summary,description,customFields(name,value(name,minutes,text))")
+	q.Set("fields", "summary,description,customFields(name,value(name,minutes,text),field(fieldType(id)))")
 	data, readErr, err := r.send(ctx, http.MethodGet, "/api/issues/"+url.PathEscape(issueID), q, nil)
 	if err != nil {
 		return ytwrite.IssueSnapshot{}, err
@@ -391,6 +391,11 @@ func (r *WriteRemote) ReadIssueFields(ctx context.Context, issueID string) (ytwr
 		CustomFields []struct {
 			Name  string          `json:"name"`
 			Value json.RawMessage `json:"value"`
+			Field struct {
+				FieldType struct {
+					ID string `json:"id"`
+				} `json:"fieldType"`
+			} `json:"field"`
 		} `json:"customFields"`
 	}
 	if err := json.Unmarshal(data, &issue); err != nil {
@@ -398,9 +403,32 @@ func (r *WriteRemote) ReadIssueFields(ctx context.Context, issueID string) (ytwr
 	}
 	out := ytwrite.IssueSnapshot{Summary: issue.Summary, Description: issue.Description, Fields: []ytwrite.FieldValue{}}
 	for _, f := range issue.CustomFields {
-		out.Fields = append(out.Fields, ytwrite.FieldValue{Name: f.Name, Value: canonicalFieldValue(f.Value)})
+		out.Fields = append(out.Fields, ytwrite.FieldValue{Name: f.Name, Type: fieldValueType(f.Field.FieldType.ID), Value: canonicalFieldValue(f.Value)})
 	}
 	return out, nil
+}
+
+// fieldValueType maps a YouTrack field type id to the snapshot FieldType the
+// evidence comparison reads: enum and state are the bundle-backed kinds an
+// open-set value may fold case on.
+func fieldValueType(typeID string) ytwrite.FieldType {
+	if _, _, ok := bundleKindPath(typeID); ok {
+		if typeID == "state[1]" {
+			return ytwrite.FieldTypeState
+		}
+		return ytwrite.FieldTypeEnum
+	}
+	switch typeID {
+	case "integer":
+		return ytwrite.FieldTypeInt
+	case "date", "date and time":
+		return ytwrite.FieldTypeDate
+	case "period":
+		return ytwrite.FieldTypePeriod
+	case "string", "text":
+		return ytwrite.FieldTypeText
+	}
+	return ""
 }
 
 // canonicalFieldValue is the FieldValue text of one raw field value. A value

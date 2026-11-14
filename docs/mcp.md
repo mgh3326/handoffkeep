@@ -171,7 +171,7 @@ file tasks, or attach files.
 | `task_context` | read | `id` | One-call context bundle: `task` (the full `task_get` payload), `open_decisions`, `answered_decisions`, `decision_attempts`, `documents` bound to the task, `changes` (the task's mergewake change/PR rows), `field_sources`; each `external_links` entry carries `access` (`stored`) |
 | `changes_since` | read | optional `cursor` or `since`, `limit` ≤ 100 | One page of the change feed: `items`, `next_cursor`, `max_cursor`, `has_more` |
 | `decisions_pending` | read | none | Open structured requests with question, options, `question_ko`/`options_ko` when fresh, and state |
-| `decisions_history` | read | optional `cursor`, `limit` | Closed structured requests plus session decisions with reading, verbatim quote, decision time and ground links |
+| `decisions_history` | read | optional `cursor`, `limit` | Closed structured requests plus session decisions with reading, verbatim quote, decision time and ground links; one `next_cursor` pages both lists. A cursor issued before session decisions were paged carries only the task position, so the session list restarts at its newest record once (bounded by `limit`, self-corrects on the next cursor) |
 | `operator_attention` | read | none | Counts and bounded items for open decisions and tasks awaiting a decision or stalled |
 | `decision_answer` | write | `request_id`, `option` or `text`, optional `note`, optional `idempotency_key` | Store result with channel `mcp` or `dots`; an already answered or stale request returns its error code |
 | `task_comment` | write | `id`, `body`, optional `idempotency_key` | The appended comment, its author, and `replayed` (a repeated key returns the comment it first made) |

@@ -506,7 +506,8 @@ func (k issueFields) Evidence(ctx context.Context, remote Remote, op Op, _ strin
 // adapter adds a bundle value the project lacks (hk 4051), sends the bundle's
 // own spelling when a value differs from it only in case — YouTrack enum
 // names are case-insensitively unique (hk 4234) — and evidence compares them
-// case-insensitively.
+// case-insensitively only where the issue field is a bundle (enum or state);
+// a plain text field keeps exact comparison.
 var openSetFields = map[string]bool{FieldLane: true, FieldArea: true, FieldMilestone: true}
 
 // OpenSetField reports whether name is an open-set snapshot field.
@@ -521,12 +522,12 @@ func SnapshotDiff(want, got IssueSnapshot) string {
 	if want.Description != got.Description {
 		return "description"
 	}
-	have := make(map[string]string, len(got.Fields))
+	have := make(map[string]FieldValue, len(got.Fields))
 	for _, f := range got.Fields {
-		have[f.Name] = f.Value
+		have[f.Name] = f
 	}
 	for _, f := range want.Fields {
-		if !snapshotFieldEqual(f.Name, f.Value, have[f.Name]) {
+		if !snapshotFieldEqual(f, have[f.Name]) {
 			return f.Name
 		}
 	}
@@ -534,16 +535,18 @@ func SnapshotDiff(want, got IssueSnapshot) string {
 }
 
 // YouTrack's date field stores a date as noon UTC. Compare 마감 by the UTC
-// calendar date it represents; every other snapshot field remains exact.
-func snapshotFieldEqual(name, want, got string) bool {
-	if openSetFields[name] {
-		return strings.EqualFold(want, got)
+// calendar date it represents; every other snapshot field remains exact,
+// except an open-set value on a bundle-backed issue field, which compares
+// case-insensitively.
+func snapshotFieldEqual(want, got FieldValue) bool {
+	if openSetFields[want.Name] && (got.Type == FieldTypeEnum || got.Type == FieldTypeState) {
+		return strings.EqualFold(want.Value, got.Value)
 	}
-	if name != FieldDue || want == "" || got == "" {
-		return want == got
+	if want.Name != FieldDue || want.Value == "" || got.Value == "" {
+		return want.Value == got.Value
 	}
-	wantMS, wantErr := strconv.ParseInt(want, 10, 64)
-	gotMS, gotErr := strconv.ParseInt(got, 10, 64)
+	wantMS, wantErr := strconv.ParseInt(want.Value, 10, 64)
+	gotMS, gotErr := strconv.ParseInt(got.Value, 10, 64)
 	if wantErr != nil || gotErr != nil {
 		return false
 	}

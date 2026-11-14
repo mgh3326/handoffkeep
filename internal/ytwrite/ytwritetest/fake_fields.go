@@ -59,7 +59,7 @@ func (f *FakeYouTrack) IssueFields(issueID string) (ytwrite.IssueSnapshot, bool)
 	if i == nil {
 		return ytwrite.IssueSnapshot{}, false
 	}
-	return snapshotOf(i), true
+	return f.snapshotOf(i), true
 }
 
 func (f *FakeYouTrack) issueLocked(issueID string) *fakeIssue {
@@ -84,10 +84,14 @@ func setFakeField(i *fakeIssue, name, value string) {
 	i.fields[name] = value
 }
 
-func snapshotOf(i *fakeIssue) ytwrite.IssueSnapshot {
+func (f *FakeYouTrack) snapshotOf(i *fakeIssue) ytwrite.IssueSnapshot {
 	s := ytwrite.IssueSnapshot{Summary: i.Summary, Description: i.Description, Fields: []ytwrite.FieldValue{}}
 	for name, v := range i.fields {
-		s.Fields = append(s.Fields, ytwrite.FieldValue{Name: name, Value: v})
+		fv := ytwrite.FieldValue{Name: name, Value: v}
+		if _, ok := f.bundles[name]; ok {
+			fv.Type = ytwrite.FieldTypeEnum
+		}
+		s.Fields = append(s.Fields, fv)
 	}
 	return s
 }
@@ -167,5 +171,5 @@ func (f *FakeYouTrack) ReadIssueFields(ctx context.Context, issueID string) (ytw
 	if i == nil {
 		return ytwrite.IssueSnapshot{}, &ytwrite.RemoteError{Status: http.StatusNotFound, Message: "issue not found"}
 	}
-	return snapshotOf(i), nil
+	return f.snapshotOf(i), nil
 }

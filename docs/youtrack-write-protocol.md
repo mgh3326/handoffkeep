@@ -1155,9 +1155,10 @@ the one POST above.
 
 **Evidence.** A GET of the issue: the summary, the description and every
 snapshot field equal (a field the issue lacks counts as empty; an open-set
-value compares case-insensitively, since the issue carries the bundle's
-spelling) applies the op; anything else is one mismatch and keeps it
-`remote_unknown`. Resending an
+value on a bundle-backed issue field — an enum or a state — compares
+case-insensitively, since the issue carries the bundle's spelling, while the
+same value on a plain text field compares exactly) applies the op; anything
+else is one mismatch and keeps it `remote_unknown`. Resending an
 identical snapshot would be harmless, but the shared rule holds: no automatic
 resend.
 

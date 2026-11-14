@@ -505,7 +505,12 @@ type DecisionRecordFilter struct {
 	// the first row.
 	AfterCreatedAt *time.Time
 	AfterID        int64
-	NewestFirst    bool
+	// BeforeCreatedAt and BeforeID page past one row in the newest-first order
+	// (created_at DESC, id DESC). Both are read together; a nil
+	// BeforeCreatedAt starts at the newest row.
+	BeforeCreatedAt *time.Time
+	BeforeID        int64
+	NewestFirst     bool
 	// unbounded drops the 1000-row cap and ignores Limit. Only package code
 	// sets it: the ledger must see every open request, while API callers keep
 	// the cap.
@@ -579,6 +584,10 @@ func listDecisionRecords(ctx context.Context, pq poolQuerier, f DecisionRecordFi
 		args = append(args, f.AfterCreatedAt.UTC(), f.AfterID)
 		q += fmt.Sprintf(` AND (created_at,id)>($%d,$%d)`, len(args)-1, len(args))
 	}
+	if f.BeforeCreatedAt != nil {
+		args = append(args, f.BeforeCreatedAt.UTC(), f.BeforeID)
+		q += fmt.Sprintf(` AND (created_at,id)<($%d,$%d)`, len(args)-1, len(args))
+	}
 	if f.NewestFirst {
 		q += ` ORDER BY created_at DESC,id DESC`
 	} else {
@@ -645,7 +654,10 @@ func (s *Store) RecordSessionDecision(ctx context.Context, in SessionDecisionInp
 		return SessionDecisionResult{}, err
 	}
 	now = now.UTC()
-	decidedAt := in.DecidedAt.UTC()
+	// answered_at is TIMESTAMPTZ: Postgres keeps microseconds, so the same
+	// request retried with a nanosecond decided_at must compare equal.
+	decidedAt := in.DecidedAt.UTC().Truncate(time.Microsecond)
+	in.DecidedAt = decidedAt
 	ref := in.Lane + ":" + in.Key
 	b, err := json.Marshal(in.Grounds)
 	if err != nil {
@@ -719,8 +731,11 @@ func (s *Store) RecordSessionDecision(ctx context.Context, in SessionDecisionInp
 }
 
 func sessionDecisionMatches(record DecisionRecord, in SessionDecisionInput) bool {
+	// AnsweredBy stays the first channel's recorder; a verified operator
+	// retry through the other channel (MCP Access vs the reserved operator
+	// bearer) replays the same record instead of conflicting.
 	return record.SourceRef == in.Lane+":"+in.Key && record.Lane == in.Lane && record.Question == in.Reading &&
-		record.Reading == in.Reading && record.Answer == in.Quote && record.AnsweredBy == in.By && record.AnsweredAt != nil &&
+		record.Reading == in.Reading && record.Answer == in.Quote && record.AnsweredAt != nil &&
 		record.AnsweredAt.Equal(in.DecidedAt.UTC()) && sameStrings(record.Grounds, in.Grounds)
 }
 

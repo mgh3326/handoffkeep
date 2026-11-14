@@ -219,7 +219,9 @@ deliver_item() {
 }
 
 # deliver_outbox: send every queued report, oldest first, removing each one
-# that is delivered. Dry runs deliver nothing.
+# that is delivered. The first failure stops the pass: an older report must
+# never be overtaken by a newer one, whose retry could overwrite the state
+# the older report still carries (hk 4562). Dry runs deliver nothing.
 deliver_outbox() {
 	local f
 	[[ $DRY_RUN -eq 1 ]] && return 0
@@ -229,6 +231,7 @@ deliver_outbox() {
 			rm -f "$f"
 		else
 			log "hk_follow.outbox_retry file=$(basename "$f")"
+			return 0
 		fi
 	done
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,5 +183,24 @@ func TestRecordSessionDecisionAPIIsIdempotentAndListed(t *testing.T) {
 	listed = decisionListBody{}
 	if status := decisionAPICall(t, h, http.MethodGet, "/v1/decision-requests?status=answered&source=session_chat", nil, &listed); status != http.StatusOK || len(listed.DecisionRequests) != 1 || listed.DecisionRequests[0].Reading != "Use the hk web and MCP paths." || len(listed.DecisionRequests[0].Grounds) != 1 {
 		t.Fatalf("listed record: %d %+v", status, listed)
+	}
+}
+
+// hk 4518: a maximal session decision — ten 500-byte grounds — is larger
+// than bodySmall; the route takes bodyLarge.
+func TestRecordSessionDecisionAPILargeGrounds(t *testing.T) {
+	h, _ := decisionAPIServer(t)
+	grounds := make([]string, 10)
+	for i := range grounds {
+		grounds[i] = fmt.Sprintf("hk:doc decision/2026-11-13/ground-%02d-%s", i, strings.Repeat("g", 470))
+	}
+	in := store.SessionDecisionInput{
+		Key: "chat-big", Lane: "design-lane", Reading: "Use every ground.",
+		Quote: "All of them.", DecidedAt: time.Date(2026, 11, 13, 7, 0, 0, 0, time.UTC),
+		Grounds: grounds,
+	}
+	var out store.SessionDecisionResult
+	if status := decisionAPICallAs(t, h, "operator-tok", http.MethodPost, "/v1/decisions/record", in, &out); status != http.StatusCreated || out.Duplicate || len(out.Record.Grounds) != 10 {
+		t.Fatalf("record: %d %+v", status, out)
 	}
 }

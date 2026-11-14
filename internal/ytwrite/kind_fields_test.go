@@ -346,25 +346,35 @@ func TestIssueFieldsMissingBundleValueRejected(t *testing.T) {
 	}
 }
 
-// Evidence compares an open-set value case-insensitively: the adapter sends
-// the bundle's spelling, so the issue can carry a different case than the
-// snapshot (hk 4234). A closed-set value stays exact.
+// Evidence compares an open-set value case-insensitively only where the
+// issue field is a bundle: the adapter sends the bundle's spelling, so the
+// issue can carry a different case than the snapshot (hk 4234). A closed-set
+// value, and an open-set value on a plain text field, stays exact.
 func TestSnapshotDiffOpenSetCase(t *testing.T) {
 	want := ytwrite.TaskIssueSnapshot(fieldsTaskRow())
-	set := func(s *ytwrite.IssueSnapshot, name, value string) {
+	set := func(s *ytwrite.IssueSnapshot, name, value string, typ ytwrite.FieldType) {
 		for i := range s.Fields {
 			if s.Fields[i].Name == name {
 				s.Fields[i].Value = value
+				s.Fields[i].Type = typ
 			}
 		}
 	}
 	got := want
 	got.Fields = append([]ytwrite.FieldValue(nil), want.Fields...)
-	set(&got, ytwrite.FieldLane, "HANDOFFKEEP-DESIGN")
+	set(&got, ytwrite.FieldLane, "HANDOFFKEEP-DESIGN", ytwrite.FieldTypeEnum)
 	if d := ytwrite.SnapshotDiff(want, got); d != "" {
-		t.Fatalf("open-set case variant diffs at %s", d)
+		t.Fatalf("bundle open-set case variant diffs at %s", d)
 	}
-	set(&got, ytwrite.FieldGrade, "a")
+	set(&got, ytwrite.FieldArea, "YOUTRACK", ytwrite.FieldTypeText)
+	if d := ytwrite.SnapshotDiff(want, got); d != ytwrite.FieldArea {
+		t.Fatalf("text open-set case variant diffs at %q, want %s", d, ytwrite.FieldArea)
+	}
+	set(&got, ytwrite.FieldArea, "youtrack", ytwrite.FieldTypeEnum)
+	if d := ytwrite.SnapshotDiff(want, got); d != "" {
+		t.Fatalf("bundle-backed open-set case variant diffs at %s", d)
+	}
+	set(&got, ytwrite.FieldGrade, "a", ytwrite.FieldTypeEnum)
 	if d := ytwrite.SnapshotDiff(want, got); d != ytwrite.FieldGrade {
 		t.Fatalf("closed-set case variant diffs at %q, want %s", d, ytwrite.FieldGrade)
 	}

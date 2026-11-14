@@ -44,3 +44,10 @@ service. If the version or service check fails, it restores
   is active, and that `handoffkeep version` reports the old `release=` tag.
   Then pin that tag, so that the next run does not reinstall the bad
   release.
+- **Known rollback limit — `research` tasks:** the release carrying migration
+  `20261113-task-research` admits `research` in `tasks.kind`. The schema
+  stays expand-only, so the previous release still serves, but it does not
+  know the kind: it maps an unknown kind to `developing` and cannot complete
+  a `research` task with result evidence. Before rolling back past that
+  release, finish or re-kind its open `research` tasks, or keep the pin on
+  the newer release until none remain.
