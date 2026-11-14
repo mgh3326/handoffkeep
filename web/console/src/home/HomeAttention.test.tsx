@@ -272,7 +272,7 @@ it("preserves inbox selection and read state for a translated decision", async (
   fireEvent.click(select);
   expect(select.getAttribute("aria-pressed")).toBe("true");
   fireEvent.click(within(row).getByRole("button", { name: "원문 보기" }));
-  expect(within(row).getByText("Ship the console?")).toBeTruthy();
+  expect(await within(row).findByText("Ship the console?")).toBeTruthy();
 });
 
 it("links to work status page from open task summary count", async () => {

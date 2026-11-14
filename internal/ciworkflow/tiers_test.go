@@ -18,7 +18,7 @@ import (
 //
 //	pr      a pull request: light jobs, hosted runners, no -race, PostgreSQL
 //	        only in pr-store-db. The merge gate.
-//	main    every other event: the light jobs plus main-linux, the whole Go
+//	main    every other event: the light jobs plus parallel main jobs, the Go
 //	        suite against PostgreSQL WITHOUT -race, the migration smoke, the
 //	        mutant suites and bundle freshness. Target under 10 minutes. Its
 //	        aggregate is ci-ok.
@@ -375,92 +375,52 @@ func mainTierProblems(wf tierWorkflow) []string {
 		}
 	}
 	sort.Strings(mainJobs)
-	if !slices.Equal(mainJobs, []string{"main-linux"}) {
-		return []string{fmt.Sprintf("main tier must be exactly [main-linux], got %v", mainJobs)}
+	wantMain := []string{
+		"main-migration", "main-packages", "main-quota-mutants",
+		"main-release-dryrun", "main-reopen-mutants", "main-store-1", "main-store-2",
 	}
-	j := wf.Jobs["main-linux"]
-	if j.Name != "main: postgres" {
-		add("main-linux name is %q, want %q", j.Name, "main: postgres")
+	if !slices.Equal(mainJobs, wantMain) {
+		return []string{fmt.Sprintf("main tier must be exactly %v, got %v", wantMain, mainJobs)}
 	}
-	if unwrap(j.If) != mainGuard {
-		add("main-linux if is %q, want %q", j.If, mainGuard)
-	}
-	// (hk 4342) No job-level postgres service: a packages selection with no
-	// DB-backed package would still boot one. The full suite always needs
-	// it; a packages selection is classified by ci-db-needed.sh, and the
-	// container is a docker run a step starts only when needed.
-	if len(j.Services) > 0 {
-		add("main-linux must not declare services; postgres starts in a step gated on the package selection (hk 4342)")
-	}
-	if fmt.Sprint(j.Env["HANDOFFKEEP_TEST_DB_URL"]) == "" {
-		add("main-linux must set HANDOFFKEEP_TEST_DB_URL")
-	}
-	var dbplanStep, pgStartStep, pgStopStep *step
-	for i, s := range j.Steps {
-		if strings.Contains(s.Run, "ci-db-needed.sh") {
-			dbplanStep = &j.Steps[i]
+	for _, name := range wantMain {
+		j := wf.Jobs[name]
+		if unwrap(j.If) != mainGuard {
+			add("job %s if is %q, want %q", name, j.If, mainGuard)
 		}
-		if strings.Contains(s.Run, "docker run") && strings.Contains(s.Run, "postgres:17") {
-			pgStartStep = &j.Steps[i]
+		if hasRace(j) {
+			add("job %s must not run -race (deploy tier owns it)", name)
 		}
-		if strings.Contains(s.Run, "docker rm -f") && !strings.Contains(s.Run, "docker run") {
-			pgStopStep = &j.Steps[i]
+		ro := runsOnText(j.RunsOn)
+		if !strings.Contains(ro, "("+mainPush+" && vars.HANDOFFKEEP_POST_LINUX_RUNNER)") || !strings.Contains(ro, ") || '") {
+			add("job %s runs-on %q must read HANDOFFKEEP_POST_LINUX_RUNNER on a main push only, with a hosted fallback", name, ro)
+		}
+		if name != "main-release-dryrun" {
+			if _, ok := j.Services["postgres"]; !ok {
+				add("job %s needs a postgres service (hk 3478)", name)
+			}
+			if fmt.Sprint(j.Env["HANDOFFKEEP_TEST_DB_URL"]) == "" {
+				add("job %s must set HANDOFFKEEP_TEST_DB_URL", name)
+			}
+		} else if len(j.Services) > 0 {
+			add("job %s must not declare services (release build needs no database)", name)
 		}
 	}
-	if dbplanStep == nil {
-		add("main-linux needs a step that classifies packages with scripts/ci-db-needed.sh (hk 4342)")
-	} else {
-		if dbplanStep.If != "${{ inputs.packages != '' }}" {
-			add("the package classifier must run only when packages is set, got %q", dbplanStep.If)
-		}
-		if fmt.Sprint(dbplanStep.Env["PACKAGES"]) != "${{ inputs.packages }}" {
-			add("the package classifier must read PACKAGES from ${{ inputs.packages }}")
-		}
-		if !strings.Contains(dbplanStep.Run, "GITHUB_OUTPUT") {
-			add("the package classifier must write its answer to GITHUB_OUTPUT")
-		}
-	}
-	if pgStartStep == nil {
-		add("main-linux needs a step that starts postgres:17 with docker run (hk 4342)")
-	} else {
-		if pgStartStep.If != "${{ inputs.packages == '' || steps.dbplan.outputs.needed == 'yes' }}" {
-			add("the postgres step must start for the full suite or a DB-backed selection, got %q", pgStartStep.If)
-		}
-		// A fixed host port collides with a container a dead agent leaves
-		// behind on a self-hosted runner, and with a concurrent run.
-		if !strings.Contains(pgStartStep.Run, "-p 127.0.0.1::5432") || !strings.Contains(pgStartStep.Run, "GITHUB_ENV") {
-			add("the postgres step must bind an ephemeral port and export HANDOFFKEEP_TEST_DB_URL with it (review on #358)")
-		}
-	}
-	if pgStopStep == nil || !strings.Contains(pgStopStep.If, "always()") {
-		add("main-linux needs an always() step that removes the postgres container (self-hosted runners keep it, hk 4342)")
-	}
-	if hasRace(j) {
-		add("main-linux must not run -race (deploy tier owns it)")
-	}
-	ro := runsOnText(j.RunsOn)
-	if !strings.Contains(ro, "("+mainPush+" && vars.HANDOFFKEEP_POST_LINUX_RUNNER)") || !strings.Contains(ro, ") || '") {
-		add("main-linux runs-on %q must read HANDOFFKEEP_POST_LINUX_RUNNER on a main push only, with a hosted fallback", ro)
-	}
-	runs := stepRuns(j)
-	for _, want := range []struct{ needle, what string }{
-		{"scripts/test-task-expected-migration.sh", "the migration and startup smoke"},
-		{"scripts/task-reopen-mutants.py", "the reopen mutants"},
-		{"scripts/quota-mutants.py", "the quota mutants"},
-		{"scripts/test-build-release.sh", "the release-build dry run (release still gates on ci-ok)"},
+
+	for _, check := range []struct {
+		job, needle, what string
+	}{
+		{"main-store-1", "scripts/store-test-shard.sh 1", "store shard 1 script"},
+		{"main-store-2", "scripts/store-test-shard.sh 2", "store shard 2 script"},
+		{"main-packages", "scripts/ci-db-non-store.sh", "non-store DB packages script"},
+		{"main-migration", "scripts/test-task-expected-migration.sh", "migration and startup smoke"},
+		{"main-reopen-mutants", "scripts/task-reopen-mutants.py", "reopen mutants"},
+		{"main-quota-mutants", "scripts/quota-mutants.py", "quota mutants"},
+		{"main-release-dryrun", "scripts/test-build-release.sh", "release-build dry run"},
 	} {
-		if !strings.Contains(runs, want.needle) {
-			add("main-linux must run %s", want.what)
+		j := wf.Jobs[check.job]
+		if !strings.Contains(stepRuns(j), check.needle) {
+			add("job %s must run %s (%s)", check.job, check.needle, check.what)
 		}
-	}
-	full := false
-	for _, s := range j.Steps {
-		if strings.TrimSpace(s.Run) == "go test -v -timeout 30m ./..." && s.If == "${{ inputs.packages == '' }}" {
-			full = true
-		}
-	}
-	if !full {
-		add("main-linux must run the full suite without -race when packages is empty")
 	}
 	return out
 }
@@ -919,8 +879,9 @@ func TestCITierMatrix(t *testing.T) {
 	light := []string{"auto-tag-test", "build", "pr-store-db", "test", "vitest"}
 	// suite=test drops the vitest and build jobs (their own suite selectors).
 	testOnly := []string{"auto-tag-test", "pr-store-db", "test"}
-	mainTier := append(append([]string{}, light...), "main-linux")
-	mainTest := append(append([]string{}, testOnly...), "main-linux")
+	mainJobsList := []string{"main-migration", "main-packages", "main-quota-mutants", "main-release-dryrun", "main-reopen-mutants", "main-store-1", "main-store-2"}
+	mainTier := append(append([]string{}, light...), mainJobsList...)
+	mainTest := append(append([]string{}, testOnly...), mainJobsList...)
 	deploy := []string{"deploy-linux", "deploy-macos", "deploy-release"}
 	for _, c := range []struct {
 		name, event, suite string
@@ -1137,7 +1098,7 @@ func TestCITierJobInventory(t *testing.T) {
 		file string
 		want []string
 	}{
-		{"ci.yml", []string{"auto-tag-test", "build", "ci-ok", "deploy-linux", "deploy-macos", "deploy-release", "main-linux", "pr-store-db", "test", "vitest"}},
+		{"ci.yml", []string{"auto-tag-test", "build", "ci-ok", "deploy-linux", "deploy-macos", "deploy-release", "main-migration", "main-packages", "main-quota-mutants", "main-release-dryrun", "main-reopen-mutants", "main-store-1", "main-store-2", "pr-store-db", "test", "vitest"}},
 		{"deploy.yml", []string{"ci", "promote", "schema-compat", "status", "target"}},
 	} {
 		var wf tierWorkflow
@@ -1189,27 +1150,27 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 	const storeEnv = "        env:\n          HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable\n          PACKAGES: ${{ steps.decide.outputs.packages }}\n"
 	for _, m := range []struct{ name, old, new string }{
 		{"race-in-pr-test", "run: go test -timeout 10m ./...", "run: go test -race -timeout 10m ./..."},
-		{"race-in-main-linux", "run: go test -v -timeout 30m ./...", "run: go test -v -race -timeout 30m ./..."},
-		{"main-linux-race-only", "        run: go test -v -timeout 30m ./...\n", "        run: go test -v -race -timeout 30m ./...\n"},
+		{"race-in-main-store-1", "      - name: go test store shard 1\n        env:\n          HANDOFFKEEP_SEARCH_LATENCY: ${{ inputs.packages == './internal/store' && '1' || '' }}\n        run: |\n          if [ -f scripts/store-test-shard.sh ]; then\n            RUN_REGEX=$(bash scripts/store-test-shard.sh 1)\n            go test -v -timeout 20m ./internal/store -run \"$RUN_REGEX\"", "      - name: go test store shard 1\n        env:\n          HANDOFFKEEP_SEARCH_LATENCY: ${{ inputs.packages == './internal/store' && '1' || '' }}\n        run: |\n          if [ -f scripts/store-test-shard.sh ]; then\n            RUN_REGEX=$(bash scripts/store-test-shard.sh 1)\n            go test -v -race -timeout 20m ./internal/store -run \"$RUN_REGEX\""},
+		{"main-packages-race-only", `go test -v -timeout 20m "${pkgs[@]}"`, `go test -v -race -timeout 20m "${pkgs[@]}"`},
 		{"self-hosted-pr-test", "'all') }}\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n", "'all') }}\n    runs-on: [self-hosted, linux]\n    timeout-minutes: 15\n"},
 		{"runner-variable-pr-test", "'all') }}\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n", "'all') }}\n    runs-on: ${{ vars.HANDOFFKEEP_POST_LINUX_RUNNER || 'ubuntu-latest' }}\n    timeout-minutes: 15\n"},
 		{"no-concurrency", "concurrency: {group:", "x-concurrency: {group:"},
 		{"no-cancel-in-progress", "cancel-in-progress: true}", "cancel-in-progress: false}"},
 		{"main-push-keeps-running", "cancel-in-progress: true}", `cancel-in-progress: "${{ github.event_name == 'pull_request' }}"}`},
-		{"main-linux-unguarded", "    if: ${{ " + mainGuard + " }}\n    name: 'main: postgres'", "    if: ${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'main: postgres'"},
+		{"main-store-1-unguarded", "    if: ${{ " + mainGuard + " }}\n    name: 'main: store shard 1'", "    if: ${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'main: store shard 1'"},
 		{"deploy-linux-unguarded", "    if: ${{ " + deployGuard + " }}\n    name: 'deploy: race + postgres'", "    if: ${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'deploy: race + postgres'"},
 		{"deploy-linux-race-removed", "go test -v -race -timeout 30m ./...", "go test -v -timeout 30m ./..."},
 		{"deploy-macos-on-linux", "'deploy: macos'\n    runs-on: macos-latest", "'deploy: macos'\n    runs-on: ubuntu-latest"},
 		{"deploy-macos-no-db-switch", "      HANDOFFKEEP_TEST_NO_DB: \"1\"\n    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          ref: ${{ inputs.ref }}\n      # The local action comes from the workflow revision", "    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          ref: ${{ inputs.ref }}\n      # The local action comes from the workflow revision"},
 		{"deploy-release-dropped", "      - run: bash scripts/test-build-release.sh", "      - run: true"},
 		// The main tier keeps the release build during the transition. Two
-		// distinct anchors: ci.yml has it in both main-linux and deploy-release.
-		{"main-linux-release-dropped", "        run: bash scripts/test-build-release.sh\n", "        run: true\n"},
-		{"main-linux-migration-dropped", "        run: bash scripts/test-task-expected-migration.sh", "        run: true"},
-		{"main-linux-mutants-dropped", "        run: python3 scripts/task-reopen-mutants.py", "        run: true"},
+		// distinct anchors: ci.yml has it in both main-release-dryrun and deploy-release.
+		{"main-release-dropped", "      - name: Release build dry run\n        run: bash scripts/test-build-release.sh\n", "      - name: Release build dry run\n        run: true\n"},
+		{"main-migration-dropped", "        run: bash scripts/test-task-expected-migration.sh", "        run: true"},
+		{"main-reopen-mutants-dropped", "        run: python3 scripts/task-reopen-mutants.py", "        run: true"},
 		{"ci-ok-always", "if: ${{ " + ciOkIf + " }}", "if: ${{ always() }}"},
 		{"ci-ok-ignores-abandoned", "if: ${{ " + ciOkIf + " }}", "if: ${{ " + ciOkIfCancelledOnly + " }}"},
-		{"self-hosted-on-dispatch", "runs-on: ${{ (" + mainPush + " && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}", "runs-on: ${{ vars.HANDOFFKEEP_POST_LINUX_RUNNER || 'ubuntu-latest' }}"},
+		{"self-hosted-on-dispatch", "main-store-1:\n    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'main: store shard 1'\n    runs-on: ${{ (" + mainPush + " && vars.HANDOFFKEEP_POST_LINUX_RUNNER) || 'ubuntu-latest' }}", "main-store-1:\n    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'main: store shard 1'\n    runs-on: ${{ vars.HANDOFFKEEP_POST_LINUX_RUNNER || 'ubuntu-latest' }}"},
 		{"no-ref-pruning", "          git for-each-ref --format='delete %(refname)' | git update-ref --no-deref --stdin\n", "          true\n"},
 		{"prune-on-pull-request-too", "        if: ${{ github.event_name != 'pull_request' }}\n        run: |\n          git checkout --detach", "        run: |\n          git checkout --detach"},
 		{"pr-store-db-pr-only-if", storeIf, "    if: ${{ github.event_name == 'pull_request' && contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'pr: store + postgres'"},
@@ -1224,9 +1185,7 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		// PostgreSQL even when the decision selects nothing.
 		{"pr-store-db-service-back", "    timeout-minutes: 25\n    steps:", "    timeout-minutes: 25\n    services:\n      postgres:\n        image: postgres:17\n    steps:"},
 		{"pr-store-db-pg-ungated", "      - name: start PostgreSQL\n        if: ${{ steps.decide.outputs.run == 'yes' }}\n        run: |\n          docker run -d --name postgres \\", "      - name: start PostgreSQL\n        run: |\n          docker run -d --name postgres \\"},
-		{"main-linux-service-back", "    timeout-minutes: 30\n    env:", "    timeout-minutes: 30\n    services:\n      postgres:\n        image: postgres:17\n    env:"},
-		{"main-linux-pg-ungated", "        if: ${{ inputs.packages == '' || steps.dbplan.outputs.needed == 'yes' }}\n        env:\n          PG_NAME:", "        env:\n          PG_NAME:"},
-		{"main-linux-fixed-port", "-p 127.0.0.1::5432", "-p 127.0.0.1:5432:5432"},
+		{"main-release-dryrun-has-service", "main-release-dryrun:\n    if:", "main-release-dryrun:\n    services:\n      postgres:\n        image: postgres:17\n    if:"},
 		// hk 3629: the composite action must come from the workflow revision,
 		// never from the ref under test (a pre-#255 sha has no such file).
 		{"local-action-from-target-ref", "uses: ./workflow/.github/actions/setup-go-cached\n      - run: bash scripts/test-build-release.sh", "uses: ./.github/actions/setup-go-cached\n      - run: bash scripts/test-build-release.sh"},
@@ -1252,10 +1211,8 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		name, old, new string
 		targetCI       bool
 	}{
-		{"packages-in-run", "          go test -v -timeout 30m $PACKAGES", "          go test -v -timeout 30m ${{ inputs.packages }}", true},
 		{"packages-posts-ci-ok-test", "then CONTEXT=ci-ok-test-packages;", "then CONTEXT=ci-ok-test;", false},
 		{"packages-concurrency-shared", "-${{ inputs.packages }}", "", false},
-		{"packages-skips-full-suite", "        if: ${{ inputs.packages == '' }}\n        run: go test -v -timeout 30m ./...", "        if: ${{ inputs.packages != '' }}\n        run: go test -v -timeout 30m ./...", true},
 		{"packages-default-nonempty", "        default: ''\n        type: string\n# Three tiers", "        default: './internal/store'\n        type: string\n# Three tiers", true},
 		{"deploy-ok-from-any-ref", `-f context="$CONTEXT"`, `-f context="$CONTEXT" -f context=deploy-ok`, false},
 		{"deploy-suite-not-an-option", "\n          - deploy\n", "\n", false},

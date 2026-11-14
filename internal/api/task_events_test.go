@@ -159,3 +159,69 @@ func TestTasksDriftRefusesBadMergedDaysAPI(t *testing.T) {
 		}
 	}
 }
+
+func TestTasksHygieneAPI(t *testing.T) {
+	h := areaNoDBServer(t)
+
+	post := func(path string, body any, token string) (int, map[string]any) {
+		t.Helper()
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, _ := http.NewRequest(http.MethodPost, h.URL+path, bytes.NewReader(raw))
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		out := map[string]any{}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+
+	// Unauthenticated request returns 401
+	status, body := post("/v1/tasks/hygiene", map[string]any{}, "")
+	if status != http.StatusUnauthorized || body["error"] != "unauthorized" {
+		t.Fatalf("unauthorized: %d %v", status, body)
+	}
+
+	// Unknown field returns 400 invalid_context
+	status, body = post("/v1/tasks/hygiene", map[string]any{"bad_field": 123}, "tok")
+	if status != http.StatusBadRequest || body["error"] != "invalid_context" {
+		t.Fatalf("unknown field: %d %v", status, body)
+	}
+}
+
+func TestTasksHygieneWithStoreAPI(t *testing.T) {
+	h, _ := relaneAPIServer(t)
+	post := func(path string, body any) (int, map[string]any) {
+		t.Helper()
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, _ := http.NewRequest(http.MethodPost, h.URL+path, bytes.NewReader(raw))
+		req.Header.Set("Authorization", "Bearer tok")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		out := map[string]any{}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+
+	// Default dry_run is true
+	status, body := post("/v1/tasks/hygiene", map[string]any{"project": "test-p"})
+	if status != http.StatusOK {
+		t.Fatalf("hygiene default dry_run: %d %v", status, body)
+	}
+	if body["dry_run"] != true || body["project"] != "test-p" {
+		t.Fatalf("hygiene body: %v", body)
+	}
+}

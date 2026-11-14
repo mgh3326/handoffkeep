@@ -249,6 +249,34 @@ func taskSettleMergedCmd(args []string, out io.Writer) error {
 	return printJSON(out, rep)
 }
 
+// taskHygieneCmd runs the daily task hygiene sweep (tasks hygiene). It
+// defaults to --dry-run: the report lists prospective mechanical moves and
+// operator findings, writing nothing. --dry-run=false applies mechanical
+// moves. Output is JSON.
+func taskHygieneCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("tasks hygiene", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	c := remoteClient(fs)
+	project := fs.String("project", "", "hygiene sweep only this project (default every project)")
+	dryRun := fs.Bool("dry-run", true, "print prospective moves and findings without writing; --dry-run=false applies")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("tasks hygiene takes flags only")
+	}
+	if err := mustClient(c); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	rep, err := c.TaskHygiene(ctx, *project, *dryRun)
+	if err != nil {
+		return err
+	}
+	return printJSON(out, rep)
+}
+
 // writeTaskDriftText prints one heading per drift class, then one line per
 // task it names.
 func writeTaskDriftText(out io.Writer, rep store.TaskDrift) error {
