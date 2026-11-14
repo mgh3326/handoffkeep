@@ -916,8 +916,9 @@ A task the protocol cannot render (an actor
 with ` · `, a title quoting the marker) gets the op rejected `invalid_issue`.
 `handoffkeep youtrack issues-backfill [--project P] [--dry-run]` prepares the
 op for every task with no binding, bound to the host of `YOUTRACK_URL`; it
-reads the YouTrack project list to resolve the `HK` bucket, but does not search
-for or create issues. It skips a task that already has its op, and so is idempotent.
+reads the YouTrack project list to resolve the `HK` bucket, so a task with no
+project gets its op in that bucket (a process that does not know the bucket
+counts it `unmapped`), but does not search for or create issues. It skips a task that already has its op, and so is idempotent.
 It also skips (counts as `owned`) a task hk already ties to an issue: a
 binding, a canary enrollment, a task map row or a YouTrack `task_origins` row
 recorded earlier (a pull or `youtrack adopt`), read again under the task's
@@ -964,13 +965,22 @@ copied marker is not ownership. The one issue whose summary names the task and
 whose description carries no marker of this op's is the issue Send adopts
 (this kind's create always writes the marker), so an adoption whose settlement
 was lost (a crash or a failed apply after Send adopted) is reported as that
-adoption, but never applied by the search: the ledger cannot tell that crash
-from a POST whose reply was lost, nothing bounds when such a POST lands, and an
-applied op is never searched again, so a late create would be a second issue
-no one sees. The op stays `remote_unknown / adoption_unconfirmed` with the
-issue id in its detail, and `yt ops resolve <op> --applied <issue id>
---adopted` applies it with its map rows marked `Adopted` (hk 3911; a POST that
-lands first is a second hit, `marker_mismatch`).
+adoption. Before it applies an adoption, the dispatch records it
+(`yt_write_op_adoptions`: op, attempt, issue id; migration
+`20261114-yt-issue-adoption`, hk 4570). The attempt that adopts sends
+nothing, an op that leaves `dispatched` other than back to `prepared` is never
+dispatched again, and the attempts before it ended deferred (429, 401,
+`not_sent`), which the protocol treats as not processed; so the search applies
+the adoption, with its map rows marked `Adopted`, when the op's record names
+that same issue for its last attempt. Without the record (the record write was
+lost too, or a previous release dispatched the op) the search never applies
+it: the ledger cannot tell that crash from a POST whose reply was lost,
+nothing bounds when such a POST lands, and an applied op is never searched
+again, so a late create would be a second issue no one sees. The op stays
+`remote_unknown / adoption_unconfirmed` with the issue id in its detail, and
+`yt ops resolve <op> --applied <issue id> --adopted` applies it with its map
+rows marked `Adopted` (hk 3911; a POST that lands first is a second hit,
+`marker_mismatch`).
 Zero, two exact hits, an edited description, or a hit beside another issue
 with that `hk ID` keep it `remote_unknown`; there is never an automatic
 re-create.
@@ -984,9 +994,13 @@ default `import_verified`, and `op_id`, and a trigger that refuses to apply
 an `issue_create` op without its binding, so a resolver that does not know the
 kind cannot close one). `issue_readable` is left empty: the protocol carries
 only the stable id. `comments_from` is 0 for an issue the op created (the
-catch-up copies the task's comments) and the task's highest comment id for an
-adopted one (it already holds that history). A comment written while the op
-was pending gets no op (the task has no binding yet), so in comments mode on
+catch-up copies the task's comments) and, for an adopted one, the task's
+highest comment id when the op was prepared (`yt_issue_comment_bounds`, hk
+4301): the issue already holds the history before that, but not the comments
+written while the op was pending. An op a previous release prepared has no
+such row and starts at the task's highest comment id at the apply. A comment
+written while the op was pending gets no op (the task has no binding yet,
+except one queued behind the op under comments authority youtrack), so in comments mode on
 the write worker runs the catch-up for `op_applied` bindings before every
 Drive pass even when `HANDOFFKEEP_YT_COMMENTS_CATCHUP` is off
 (`CatchUpYTIssueComments`, hk 3914). Nothing is overwritten: the same
@@ -1003,8 +1017,8 @@ While the op is unresolved, `comments-backfill` binding and canary enrollment
 of the task are refused. An operator's `yt ops resolve <op> --applied <issue id>`
 states the issue's provenance, which the ledger did not record: by default the
 op created it (`comments_from` 0, the catch-up copies the task's comments);
-with `--adopted` the issue existed before (its binding starts after the task's
-latest comment). For an `issue_create` op the CLI always sends the choice (API
+with `--adopted` the issue existed before (its binding starts after the
+comments the task had when the op was prepared, as above). For an `issue_create` op the CLI always sends the choice (API
 `"adopted": true|false`; it reads the op's kind from `GET /v1/yt/ops` first),
 and for any other op it sends the old request shape, which a server that
 predates the field accepts. A resolution of an `issue_create` op that omits it
