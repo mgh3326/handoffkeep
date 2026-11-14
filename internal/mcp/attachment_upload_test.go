@@ -74,6 +74,33 @@ func (m *memAttachmentDB) TransitionAttachmentUpload(_ context.Context, id, from
 	m.uploads[id] = u
 	return true, nil
 }
+func (m *memAttachmentDB) ClaimAttachmentUpload(_ context.Context, id, nonce string, now time.Time) (bool, error) {
+	u, ok := m.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadPending {
+		return false, nil
+	}
+	u.Status, u.Reason, u.UpdatedAt, u.ClaimNonce = store.AttachmentUploadCompleting, "", now, nonce
+	m.uploads[id] = u
+	return true, nil
+}
+func (m *memAttachmentDB) TransitionAttachmentUploadClaim(_ context.Context, id, nonce, to, reason string, now time.Time) (bool, error) {
+	u, ok := m.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce {
+		return false, nil
+	}
+	u.Status, u.Reason, u.UpdatedAt, u.ClaimNonce = to, reason, now, ""
+	m.uploads[id] = u
+	return true, nil
+}
+func (m *memAttachmentDB) TouchAttachmentUploadClaim(_ context.Context, id, nonce string, now time.Time) (bool, error) {
+	u, ok := m.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce {
+		return false, nil
+	}
+	u.UpdatedAt = now
+	m.uploads[id] = u
+	return true, nil
+}
 
 func (b attachmentBackend) BeginAttachmentUpload(ctx context.Context, client, name, mime string, size int64, sha, ref string) (attachments.UploadTicket, error) {
 	return b.m.BeginUpload(ctx, client, name, mime, size, sha, ref)

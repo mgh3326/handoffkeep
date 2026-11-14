@@ -328,6 +328,9 @@ type AttachmentDB interface {
 	MarkAttachmentUploadStagingDeleted(ctx context.Context, id string, now time.Time) error
 	GetAttachmentUpload(context.Context, string) (store.AttachmentUpload, bool, error)
 	TransitionAttachmentUpload(ctx context.Context, id, from, to, reason string, now time.Time) (bool, error)
+	ClaimAttachmentUpload(ctx context.Context, id, nonce string, now time.Time) (bool, error)
+	TransitionAttachmentUploadClaim(ctx context.Context, id, nonce, to, reason string, now time.Time) (bool, error)
+	TouchAttachmentUploadClaim(ctx context.Context, id, nonce string, now time.Time) (bool, error)
 }
 
 type MigrationDB interface {

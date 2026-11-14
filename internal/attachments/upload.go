@@ -30,8 +30,8 @@ const (
 	StagingSweepAge = 2 * time.Hour
 	stagingPrefix   = "incoming/"
 	// uploadLease is how long a completion may hold its claim before another
-	// call may reclaim the upload. A claim older than this belongs to a
-	// completion that stopped before it finished.
+	// call may reclaim the upload. A claim whose heartbeat has been silent
+	// this long belongs to a completion that stopped before it finished.
 	uploadLease = 5 * time.Minute
 	// releaseGrace is slack past a presigned URL's life before a missing staging
 	// object is treated as final.
@@ -49,6 +49,10 @@ var (
 	// ErrDirectUploadDisabled means HK_ATTACH_DIRECT_UPLOAD is not set.
 	ErrDirectUploadDisabled = errors.New("attachment_direct_upload_disabled")
 )
+
+// uploadHeartbeat is how often a live completion refreshes its claim lease.
+// It is a var so tests can shorten it.
+var uploadHeartbeat = 30 * time.Second
 
 var (
 	shaPattern      = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -156,10 +160,11 @@ func (m *Manager) CompleteUpload(ctx context.Context, client, uploadID string) (
 	case store.AttachmentUploadRefused:
 		return store.Attachment{}, false, fmt.Errorf("%w: %s", ErrUploadRefused, row.Reason)
 	case store.AttachmentUploadCompleting:
-		// A claim older than the lease belongs to a completion that stopped before
-		// it moved the row to done. Its staging object is still there (deletion
-		// follows done), so the claim goes back to pending and this call redoes
-		// the completion; the store path is idempotent, so the redo is safe.
+		// A claim whose heartbeat has been silent for the lease belongs to a
+		// completion that stopped before it moved the row to done. Its staging
+		// object is still there (deletion follows done), so the claim goes back
+		// to pending and this call redoes the completion; the store path is
+		// idempotent, so the redo is safe.
 		if now.Before(row.UpdatedAt.Add(uploadLease)) {
 			return store.Attachment{}, false, ErrUploadInProgress
 		}
@@ -184,33 +189,50 @@ func (m *Manager) CompleteUpload(ctx context.Context, client, uploadID string) (
 		}
 		return store.Attachment{}, false, ErrUploadExpired
 	}
-	claimed, err := m.Store.TransitionAttachmentUpload(ctx, row.ID, store.AttachmentUploadPending, store.AttachmentUploadCompleting, "", now)
+	nonce, err := newClaimNonce()
+	if err != nil {
+		return store.Attachment{}, false, err
+	}
+	claimed, err := m.Store.ClaimAttachmentUpload(ctx, row.ID, nonce, now)
 	if err != nil {
 		return store.Attachment{}, false, err
 	}
 	if !claimed {
 		return store.Attachment{}, false, ErrUploadInProgress
 	}
+	row.Status = store.AttachmentUploadCompleting
+	row.ClaimNonce = nonce
+	row.UpdatedAt = now
 	return m.completeClaimed(ctx, row)
 }
 
-// completeClaimed runs with the row in completing. Every exit either moves the
-// row to done, to refused (final, staging deleted), or back to pending.
+// completeClaimed runs with the row in completing under this call's claim
+// nonce. Every exit either moves the row to done, to refused (final, staging
+// deleted), or back to pending — and only while the claim is still held, so a
+// completion whose lease was reclaimed cannot move the row another completion
+// owns.
 func (m *Manager) completeClaimed(ctx context.Context, row store.AttachmentUpload) (store.Attachment, bool, error) {
+	stopBeat := m.heartbeatUpload(ctx, row)
+	defer stopBeat()
 	release := func(cause error) (store.Attachment, bool, error) {
-		if _, e := m.Store.TransitionAttachmentUpload(ctx, row.ID, store.AttachmentUploadCompleting, store.AttachmentUploadPending, "", m.now()); e != nil {
-			return store.Attachment{}, false, e
-		}
-		return store.Attachment{}, false, fmt.Errorf("%w: %v", ErrUploadNotReceived, cause)
-	}
-	refuse := func(reason string) (store.Attachment, bool, error) {
-		changed, e := m.finishUpload(ctx, row, store.AttachmentUploadCompleting, store.AttachmentUploadRefused, reason, m.now())
+		changed, e := m.Store.TransitionAttachmentUploadClaim(ctx, row.ID, row.ClaimNonce, store.AttachmentUploadPending, "", m.now())
 		if e != nil {
 			return store.Attachment{}, false, e
 		}
 		if !changed {
 			return store.Attachment{}, false, ErrUploadInProgress
 		}
+		return store.Attachment{}, false, fmt.Errorf("%w: %v", ErrUploadNotReceived, cause)
+	}
+	refuse := func(reason string) (store.Attachment, bool, error) {
+		changed, e := m.Store.TransitionAttachmentUploadClaim(ctx, row.ID, row.ClaimNonce, store.AttachmentUploadRefused, reason, m.now())
+		if e != nil {
+			return store.Attachment{}, false, e
+		}
+		if !changed {
+			return store.Attachment{}, false, ErrUploadInProgress
+		}
+		m.deleteStaging(ctx, row.StagingKey)
 		return store.Attachment{}, false, fmt.Errorf("%w: %s", ErrUploadRefused, reason)
 	}
 	head, err := m.Objects.Head(ctx, row.StagingKey)
@@ -266,8 +288,12 @@ func (m *Manager) completeBuffered(ctx context.Context, row store.AttachmentUplo
 		}
 		return refuse(reason)
 	}
-	if _, err := m.Store.TransitionAttachmentUpload(ctx, row.ID, store.AttachmentUploadCompleting, store.AttachmentUploadDone, "", m.now()); err != nil {
+	changed, err := m.Store.TransitionAttachmentUploadClaim(ctx, row.ID, row.ClaimNonce, store.AttachmentUploadDone, "", m.now())
+	if err != nil {
 		return x, created, err
+	}
+	if !changed {
+		return m.uploadDoneFallback(ctx, row, x, created)
 	}
 	m.deleteStaging(ctx, row.StagingKey)
 	return x, created, nil
@@ -319,7 +345,10 @@ func (m *Manager) completeStreamed(ctx context.Context, row store.AttachmentUplo
 	if isText(row.MIME) {
 		return refuse("upload_completion_buffer_limit_exceeded")
 	}
-	holdingKey := stagingPrefix + "done-" + row.ID
+	// The holding key is per claim: a completion whose lease was reclaimed can
+	// still be streaming, and two claims must not overwrite each other's
+	// holding object mid-copy.
+	holdingKey := stagingPrefix + "done-" + row.ID + "-" + row.ClaimNonce
 	// Whatever happens next, the holding object is private and disposable.
 	defer func() { _ = m.Objects.Delete(ctx, holdingKey) }()
 	r, err := m.Objects.Get(ctx, row.StagingKey)
@@ -330,11 +359,15 @@ func (m *Manager) completeStreamed(ctx context.Context, row store.AttachmentUplo
 	// staging object is longer, is seen by overflow without being stored.
 	v := &streamVerifier{r: io.LimitReader(r, row.SizeBytes+1), sum: sha256.New(), head: make([]byte, 0, verifyHeadBytes)}
 	putErr := m.Objects.Put(ctx, holdingKey, v, row.SizeBytes, row.MIME)
+	// overflow reads one byte past what the Put consumed, so it must run
+	// before the staging body is closed: a real object store invalidates the
+	// body on Close.
+	grown := v.overflow()
 	_ = r.Close()
 	if putErr != nil {
 		return release(putErr)
 	}
-	if v.n != row.SizeBytes || v.overflow() {
+	if v.n != row.SizeBytes || grown {
 		return refuse("upload_size_mismatch")
 	}
 	if hex.EncodeToString(v.sum.Sum(nil)) != row.SHA256 {
@@ -372,11 +405,57 @@ func (m *Manager) completeStreamed(ctx context.Context, row store.AttachmentUplo
 		}
 		return refuse(reason)
 	}
-	if _, err := m.Store.TransitionAttachmentUpload(ctx, row.ID, store.AttachmentUploadCompleting, store.AttachmentUploadDone, "", m.now()); err != nil {
+	changed, err := m.Store.TransitionAttachmentUploadClaim(ctx, row.ID, row.ClaimNonce, store.AttachmentUploadDone, "", m.now())
+	if err != nil {
 		return x, created, err
+	}
+	if !changed {
+		return m.uploadDoneFallback(ctx, row, x, created)
 	}
 	m.deleteStaging(ctx, row.StagingKey)
 	return x, created, nil
+}
+
+// uploadDoneFallback answers a completion whose claim-scoped move to done did
+// not apply because its lease was reclaimed while it ran. The row is re-read
+// so the caller learns the truth: done means another completion of the same
+// verified bytes finished, refused means the upload is final, anything else
+// means a completion still owns it.
+func (m *Manager) uploadDoneFallback(ctx context.Context, row store.AttachmentUpload, x store.Attachment, created bool) (store.Attachment, bool, error) {
+	cur, ok, err := m.Store.GetAttachmentUpload(ctx, row.ID)
+	if err != nil {
+		return store.Attachment{}, false, err
+	}
+	if ok && cur.Status == store.AttachmentUploadDone {
+		return x, created, nil
+	}
+	if ok && cur.Status == store.AttachmentUploadRefused {
+		return store.Attachment{}, false, fmt.Errorf("%w: %s", ErrUploadRefused, cur.Reason)
+	}
+	return store.Attachment{}, false, ErrUploadInProgress
+}
+
+// heartbeatUpload refreshes the claim lease while a completion runs, so a
+// streamed upload that takes longer than uploadLease is not reclaimed. The
+// touch is claim-scoped: once the lease is truly lost the beats stop matching
+// and the row can be reclaimed. The returned func stops the heartbeat.
+func (m *Manager) heartbeatUpload(ctx context.Context, row store.AttachmentUpload) func() {
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(uploadHeartbeat)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				_, _ = m.Store.TouchAttachmentUploadClaim(ctx, row.ID, row.ClaimNonce, m.now())
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 // finishUpload moves a row to a final state and deletes its staging object,
@@ -471,7 +550,13 @@ func uploadRefString(row store.AttachmentUpload) string {
 	return row.RefKind + ":" + row.RefID
 }
 
-func newUploadID() (string, error) {
+func newUploadID() (string, error) { return randomHex() }
+
+// newClaimNonce is the per-claim token a completion presents on every
+// transition out of completing.
+func newClaimNonce() (string, error) { return randomHex() }
+
+func randomHex() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err

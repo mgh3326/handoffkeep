@@ -119,6 +119,33 @@ func (d *uploadDB) TransitionAttachmentUpload(_ context.Context, id, from, to, r
 	d.uploads[id] = u
 	return true, nil
 }
+func (d *uploadDB) ClaimAttachmentUpload(_ context.Context, id, nonce string, now time.Time) (bool, error) {
+	u, ok := d.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadPending {
+		return false, nil
+	}
+	u.Status, u.Reason, u.UpdatedAt, u.ClaimNonce = store.AttachmentUploadCompleting, "", now, nonce
+	d.uploads[id] = u
+	return true, nil
+}
+func (d *uploadDB) TransitionAttachmentUploadClaim(_ context.Context, id, nonce, to, reason string, now time.Time) (bool, error) {
+	u, ok := d.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce {
+		return false, nil
+	}
+	u.Status, u.Reason, u.UpdatedAt, u.ClaimNonce = to, reason, now, ""
+	d.uploads[id] = u
+	return true, nil
+}
+func (d *uploadDB) TouchAttachmentUploadClaim(_ context.Context, id, nonce string, now time.Time) (bool, error) {
+	u, ok := d.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce {
+		return false, nil
+	}
+	u.UpdatedAt = now
+	d.uploads[id] = u
+	return true, nil
+}
 
 func uploadServer(t *testing.T) (*httptest.Server, *uploadObjects) {
 	t.Helper()

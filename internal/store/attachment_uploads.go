@@ -22,6 +22,9 @@ const (
 // the client PUTs to, and the state of the completion. StagingDeletedAt is zero
 // while the staging budget still charges the upload; it is set only once the
 // staging object is confirmed absent and its presigned URL has expired.
+// ClaimNonce is the token the completion that moved the row to completing
+// presents on every later transition; it is meaningful only while the row is
+// completing, so a completion whose lease was reclaimed cannot move the row.
 type AttachmentUpload struct {
 	ID               string
 	StagingKey       string
@@ -38,19 +41,24 @@ type AttachmentUpload struct {
 	ExpiresAt        time.Time
 	UpdatedAt        time.Time
 	StagingDeletedAt time.Time
+	ClaimNonce       string
 }
 
 var attachmentUploadIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 // uploadColumns is the one column list for reading an upload row.
-const uploadColumns = `id,staging_key,name,mime,size_bytes,sha256,ref_kind,ref_id,created_by,status,reason,created_at,expires_at,updated_at,staging_deleted_at`
+const uploadColumns = `id,staging_key,name,mime,size_bytes,sha256,ref_kind,ref_id,created_by,status,reason,created_at,expires_at,updated_at,staging_deleted_at,claim_nonce`
 
 func scanUpload(row pgx.Row) (AttachmentUpload, error) {
 	var u AttachmentUpload
 	var released *time.Time
-	err := row.Scan(&u.ID, &u.StagingKey, &u.Name, &u.MIME, &u.SizeBytes, &u.SHA256, &u.RefKind, &u.RefID, &u.CreatedBy, &u.Status, &u.Reason, &u.CreatedAt, &u.ExpiresAt, &u.UpdatedAt, &released)
+	var nonce *string
+	err := row.Scan(&u.ID, &u.StagingKey, &u.Name, &u.MIME, &u.SizeBytes, &u.SHA256, &u.RefKind, &u.RefID, &u.CreatedBy, &u.Status, &u.Reason, &u.CreatedAt, &u.ExpiresAt, &u.UpdatedAt, &released, &nonce)
 	if released != nil {
 		u.StagingDeletedAt = *released
+	}
+	if nonce != nil {
+		u.ClaimNonce = *nonce
 	}
 	return u, err
 }
@@ -84,9 +92,46 @@ func (s *Store) GetAttachmentUpload(ctx context.Context, id string) (AttachmentU
 // TransitionAttachmentUpload moves one upload from one state to another only if
 // it is still in from. It reports whether this call made the move, so two
 // concurrent completions cannot both claim the same upload. updated_at records
-// when the state last changed; a completion uses it as its lease start.
+// the last claim or heartbeat while completing and when the state last changed
+// otherwise; a completion uses it as its lease start. It is not claim-scoped:
+// the lease reclaim and the pre-claim expiry refusal use it; every transition
+// out of completing goes through the claim-scoped variants below.
 func (s *Store) TransitionAttachmentUpload(ctx context.Context, id, from, to, reason string, now time.Time) (bool, error) {
 	tag, e := s.pool.Exec(ctx, `UPDATE attachment_uploads SET status=$3, reason=$4, updated_at=$5 WHERE id=$1 AND status=$2`, id, from, to, reason, now)
+	if e != nil {
+		return false, e
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// ClaimAttachmentUpload moves a pending upload to completing and stamps the
+// caller's nonce as its claim. Only one caller can win because the update is
+// conditional on status='pending'.
+func (s *Store) ClaimAttachmentUpload(ctx context.Context, id, nonce string, now time.Time) (bool, error) {
+	tag, e := s.pool.Exec(ctx, `UPDATE attachment_uploads SET status='completing', claim_nonce=$2, reason='', updated_at=$3 WHERE id=$1 AND status='pending'`, id, nonce, now)
+	if e != nil {
+		return false, e
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// TransitionAttachmentUploadClaim moves a completing upload to to only while
+// the caller still holds its claim nonce, and consumes the claim. A completion
+// whose lease was reclaimed finds its nonce replaced (or the row already
+// final) and cannot move the row.
+func (s *Store) TransitionAttachmentUploadClaim(ctx context.Context, id, nonce, to, reason string, now time.Time) (bool, error) {
+	tag, e := s.pool.Exec(ctx, `UPDATE attachment_uploads SET status=$3, reason=$4, updated_at=$5, claim_nonce=NULL WHERE id=$1 AND status='completing' AND claim_nonce=$2`, id, nonce, to, reason, now)
+	if e != nil {
+		return false, e
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// TouchAttachmentUploadClaim refreshes the lease of a completing upload the
+// caller still holds, so a live completion that streams longer than the lease
+// is not reclaimed. It reports whether the claim is still held.
+func (s *Store) TouchAttachmentUploadClaim(ctx context.Context, id, nonce string, now time.Time) (bool, error) {
+	tag, e := s.pool.Exec(ctx, `UPDATE attachment_uploads SET updated_at=$3 WHERE id=$1 AND status='completing' AND claim_nonce=$2`, id, nonce, now)
 	if e != nil {
 		return false, e
 	}

@@ -159,6 +159,39 @@ func (f *fakeDB) TransitionAttachmentUpload(_ context.Context, id, from, to, rea
 	f.uploads[id] = u
 	return true, nil
 }
+func (f *fakeDB) ClaimAttachmentUpload(_ context.Context, id, nonce string, now time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadPending {
+		return false, nil
+	}
+	u.Status, u.Reason, u.UpdatedAt, u.ClaimNonce = store.AttachmentUploadCompleting, "", now, nonce
+	f.uploads[id] = u
+	return true, nil
+}
+func (f *fakeDB) TransitionAttachmentUploadClaim(_ context.Context, id, nonce, to, reason string, now time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce {
+		return false, nil
+	}
+	u.Status, u.Reason, u.UpdatedAt, u.ClaimNonce = to, reason, now, ""
+	f.uploads[id] = u
+	return true, nil
+}
+func (f *fakeDB) TouchAttachmentUploadClaim(_ context.Context, id, nonce string, now time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce {
+		return false, nil
+	}
+	u.UpdatedAt = now
+	f.uploads[id] = u
+	return true, nil
+}
 
 func (f *fakeDB) GetAttachment(_ context.Context, sha string) (store.Attachment, bool, error) {
 	f.mu.Lock()

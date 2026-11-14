@@ -117,7 +117,6 @@ func TestStreamedCompletionStoresALargeBinaryUpload(t *testing.T) {
 	sha := shaOf(body)
 	const uploadID = "0123456789abcdef0123456789abcdef"
 	stagingKey := stagingPrefix + uploadID
-	holdingKey := stagingPrefix + "done-" + uploadID
 	db.uploads = map[string]store.AttachmentUpload{uploadID: {
 		ID: uploadID, StagingKey: stagingKey, Name: "big.png", MIME: "image/png", SizeBytes: size,
 		SHA256: sha, CreatedBy: "node", Status: store.AttachmentUploadPending,
@@ -133,13 +132,14 @@ func TestStreamedCompletionStoresALargeBinaryUpload(t *testing.T) {
 		t.Fatalf("stored attachment=%+v", x)
 	}
 	objs.mu.Lock()
-	stored, staged, held := objs.objects[key(sha)], objs.objects[stagingKey], objs.objects[holdingKey]
+	stored, staged := objs.objects[key(sha)], objs.objects[stagingKey]
 	objs.mu.Unlock()
+	held := hasObjectWithPrefix(objs, holdingKeyPrefix(uploadID))
 	if !bytes.Equal(stored, body) {
 		t.Fatalf("promoted object holds %d bytes, want the verified %d", len(stored), len(body))
 	}
-	if staged != nil || held != nil {
-		t.Fatalf("staging or holding object survived: staged=%v held=%v", staged != nil, held != nil)
+	if staged != nil || held {
+		t.Fatalf("staging or holding object survived: staged=%v held=%v", staged != nil, held)
 	}
 	if row := db.uploads[uploadID]; row.Status != store.AttachmentUploadDone {
 		t.Fatalf("row status=%q", row.Status)
@@ -172,10 +172,7 @@ func TestStreamedCompletionRefusesMismatchedBytes(t *testing.T) {
 	if !errors.Is(err, ErrUploadRefused) || !strings.Contains(err.Error(), "upload_sha256_mismatch") {
 		t.Fatalf("sha mismatch err=%v", err)
 	}
-	objs.mu.Lock()
-	_, held := objs.objects[stagingPrefix+"done-"+uploadID]
-	objs.mu.Unlock()
-	if held {
+	if hasObjectWithPrefix(objs, holdingKeyPrefix(uploadID)) {
 		t.Fatal("holding object survived a refusal")
 	}
 	// The object is one byte short of the declaration: Head agrees with the
@@ -255,20 +252,37 @@ func TestStreamedCompletionOverwriteBetweenVerifyAndPromote(t *testing.T) {
 	}
 }
 
-// corruptGetObjects forges a key's bytes the first time it is read, the way
-// a corrupted holding object would look to the promotion.
+// holdingKeyPrefix is the per-claim holding object prefix for an upload; the
+// claim nonce suffix keeps concurrent claims from sharing one object.
+func holdingKeyPrefix(uploadID string) string { return stagingPrefix + "done-" + uploadID + "-" }
+
+// hasObjectWithPrefix reports whether any stored object key starts with p.
+func hasObjectWithPrefix(objs *fakeObjects, p string) bool {
+	objs.mu.Lock()
+	defer objs.mu.Unlock()
+	for k := range objs.objects {
+		if strings.HasPrefix(k, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// corruptGetObjects forges the bytes of the first key under prefix the first
+// time it is read, the way a corrupted holding object would look to the
+// promotion.
 type corruptGetObjects struct {
 	*fakeObjects
-	key    string
+	prefix string
 	forged []byte
 	done   bool
 }
 
 func (c *corruptGetObjects) Get(ctx context.Context, k string) (io.ReadCloser, error) {
-	if k == c.key && !c.done {
+	if strings.HasPrefix(k, c.prefix) && !c.done {
 		c.done = true
 		c.mu.Lock()
-		c.objects[c.key] = c.forged
+		c.objects[k] = c.forged
 		c.mu.Unlock()
 	}
 	return c.fakeObjects.Get(ctx, k)
@@ -287,7 +301,6 @@ func TestStreamedCompletionRefusesCorruptedHoldingObject(t *testing.T) {
 	sha := shaOf(body)
 	const uploadID = "0123456789abcdef0123456789abcdef"
 	stagingKey := stagingPrefix + uploadID
-	holdingKey := stagingPrefix + "done-" + uploadID
 	db.uploads = map[string]store.AttachmentUpload{uploadID: {
 		ID: uploadID, StagingKey: stagingKey, Name: "big.png", MIME: "image/png", SizeBytes: size,
 		SHA256: sha, CreatedBy: "node", Status: store.AttachmentUploadPending,
@@ -295,20 +308,21 @@ func TestStreamedCompletionRefusesCorruptedHoldingObject(t *testing.T) {
 	}}
 	objs.objects[stagingKey] = body
 	forged := bytes.Repeat([]byte("x"), int(size))
-	m.Objects = &corruptGetObjects{fakeObjects: objs, key: holdingKey, forged: forged}
+	m.Objects = &corruptGetObjects{fakeObjects: objs, prefix: holdingKeyPrefix(uploadID), forged: forged}
 
 	_, _, err := m.CompleteUpload(t.Context(), "node", uploadID)
 	if !errors.Is(err, ErrUploadNotReceived) {
 		t.Fatalf("corrupted holding err=%v", err)
 	}
 	objs.mu.Lock()
-	stored, held, staged := objs.objects[key(sha)], objs.objects[holdingKey], objs.objects[stagingKey]
+	stored, staged := objs.objects[key(sha)], objs.objects[stagingKey]
 	row := db.uploads[uploadID]
 	objs.mu.Unlock()
+	held := hasObjectWithPrefix(objs, holdingKeyPrefix(uploadID))
 	if stored != nil {
 		t.Fatal("a corrupted holding object reached the content key")
 	}
-	if held != nil {
+	if held {
 		t.Fatal("holding object survived")
 	}
 	if staged == nil {
@@ -897,6 +911,189 @@ func TestClientBudgetCannotBeMonopolized(t *testing.T) {
 	begin(t, m, "polite", "p1.txt", "text/plain", body, "")
 }
 
+// A completion whose lease was reclaimed while it promoted cannot move the
+// row: its claim-scoped transitions no longer match, so it reports the upload
+// in progress and the new claim is untouched. Under the old unscoped
+// transitions the stale Completing -> Done would have succeeded and stolen
+// the row from the completion that owns it now.
+func TestReclaimedCompletionCannotMoveTheRow(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	body := []byte("promoted while a second completion owns the claim\n")
+	tk := begin(t, m, "node", "race.txt", "text/plain", body, "")
+	clientPUT(objs, tk, body)
+	const otherNonce = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	objs.beforePut = func(k string) {
+		if !strings.HasPrefix(k, "hk/") {
+			return
+		}
+		// The first completion's lease expired and a second CompleteUpload
+		// reclaimed the row while the first was still promoting.
+		ctx := context.Background()
+		now := m.now()
+		if ok, err := db.TransitionAttachmentUpload(ctx, tk.UploadID, store.AttachmentUploadCompleting, store.AttachmentUploadPending, "", now); err != nil || !ok {
+			t.Errorf("reclaim ok=%v err=%v", ok, err)
+		}
+		if ok, err := db.ClaimAttachmentUpload(ctx, tk.UploadID, otherNonce, now); err != nil || !ok {
+			t.Errorf("re-claim ok=%v err=%v", ok, err)
+		}
+	}
+	_, _, err := m.CompleteUpload(t.Context(), "node", tk.UploadID)
+	if !errors.Is(err, ErrUploadInProgress) {
+		t.Fatalf("stale completion err=%v, want in progress", err)
+	}
+	row := db.uploads[tk.UploadID]
+	if row.Status != store.AttachmentUploadCompleting || row.ClaimNonce != otherNonce {
+		t.Fatalf("row=%+v, want completing under the new claim", row)
+	}
+}
+
+// When the reclaiming completion refuses the upload while the stale one is
+// still promoting, the stale completion must not report success: it re-reads
+// the row and returns the refusal the row actually carries.
+func TestReclaimedCompletionReportsTheRowsFinalState(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	body := []byte("promoted while the reclaiming completion refuses\n")
+	tk := begin(t, m, "node", "race2.txt", "text/plain", body, "")
+	clientPUT(objs, tk, body)
+	const otherNonce = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	objs.beforePut = func(k string) {
+		if !strings.HasPrefix(k, "hk/") {
+			return
+		}
+		ctx := context.Background()
+		now := m.now()
+		if ok, _ := db.TransitionAttachmentUpload(ctx, tk.UploadID, store.AttachmentUploadCompleting, store.AttachmentUploadPending, "", now); !ok {
+			t.Error("reclaim failed")
+		}
+		if ok, _ := db.ClaimAttachmentUpload(ctx, tk.UploadID, otherNonce, now); !ok {
+			t.Error("re-claim failed")
+		}
+		if ok, _ := db.TransitionAttachmentUploadClaim(ctx, tk.UploadID, otherNonce, store.AttachmentUploadRefused, "upload_sha256_mismatch", now); !ok {
+			t.Error("refusal failed")
+		}
+	}
+	_, _, err := m.CompleteUpload(t.Context(), "node", tk.UploadID)
+	if !errors.Is(err, ErrUploadRefused) || !strings.Contains(err.Error(), "upload_sha256_mismatch") {
+		t.Fatalf("stale completion err=%v, want the row's refusal", err)
+	}
+	if row := db.uploads[tk.UploadID]; row.Status != store.AttachmentUploadRefused {
+		t.Fatalf("row status=%q, want refused", row.Status)
+	}
+}
+
+// A live completion refreshes its claim lease so a stream that takes longer
+// than uploadLease is not reclaimed; the touch is claim-scoped, so it stops
+// matching once the claim is truly lost.
+func TestCompletionHeartbeatRefreshesTheClaimLease(t *testing.T) {
+	m, db, _ := newUploadManager(t)
+	const uploadID = "0123456789abcdef0123456789abcdef"
+	const nonce = "cccccccccccccccccccccccccccccccc"
+	start := m.now()
+	db.uploads = map[string]store.AttachmentUpload{uploadID: {
+		ID: uploadID, StagingKey: stagingPrefix + uploadID, Name: "a.txt", MIME: "text/plain",
+		SizeBytes: 3, SHA256: strings.Repeat("a", 64), CreatedBy: "node",
+		Status: store.AttachmentUploadCompleting, ClaimNonce: nonce,
+		CreatedAt: start.Add(-time.Hour), ExpiresAt: start.Add(time.Hour), UpdatedAt: start,
+	}}
+	old := uploadHeartbeat
+	uploadHeartbeat = time.Millisecond
+	defer func() { uploadHeartbeat = old }()
+	row := db.uploads[uploadID]
+	stop := m.heartbeatUpload(t.Context(), row)
+	defer stop()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		cur, ok, err := db.GetAttachmentUpload(t.Context(), uploadID)
+		if err == nil && ok && cur.UpdatedAt.After(start) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("heartbeat did not refresh the claim lease")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// closeInvalidatingReader fails reads after Close, like a real object-store
+// response body.
+type closeInvalidatingReader struct {
+	rc     io.ReadCloser
+	closed bool
+}
+
+func (c *closeInvalidatingReader) Read(p []byte) (int, error) {
+	if c.closed {
+		return 0, errors.New("read on closed body")
+	}
+	return c.rc.Read(p)
+}
+func (c *closeInvalidatingReader) Close() error {
+	c.closed = true
+	return c.rc.Close()
+}
+
+// sizeBoundObjects consumes at most the declared size from each Put, the way
+// the object store's size-bound PUT does, and serves the staging object with
+// a body that fails after Close.
+type sizeBoundObjects struct {
+	*fakeObjects
+	stagingKey string
+}
+
+func (s *sizeBoundObjects) Put(_ context.Context, k string, r io.Reader, size int64, _ string) error {
+	buf := make([]byte, size)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.objects[k] = buf
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *sizeBoundObjects) Get(ctx context.Context, k string) (io.ReadCloser, error) {
+	rc, err := s.fakeObjects.Get(ctx, k)
+	if err != nil {
+		return nil, err
+	}
+	if k == s.stagingKey {
+		return &closeInvalidatingReader{rc: rc}, nil
+	}
+	return rc, nil
+}
+
+// A staging object that grew past the declared size between Head and Get is
+// refused as upload_size_mismatch: the Put consumes at most the declared
+// size, and the byte past it is read before the body is closed — a real
+// object store invalidates the body on Close, which is what made the check
+// dead in production.
+func TestStreamedCompletionRefusesGrowthBetweenHeadAndGet(t *testing.T) {
+	m, db, objs := newUploadManager(t)
+	m.Config.MaxBytes = DefaultMaxBytes
+	m.Config.StorageCap = 1 << 40
+	size := BufferedCompletionMaxBytes + 1
+	body := make([]byte, size)
+	copy(body, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
+	sha := shaOf(body)
+	const uploadID = "0123456789abcdef0123456789abcdef"
+	stagingKey := stagingPrefix + uploadID
+	db.uploads = map[string]store.AttachmentUpload{uploadID: {
+		ID: uploadID, StagingKey: stagingKey, Name: "big.png", MIME: "image/png", SizeBytes: size,
+		SHA256: sha, CreatedBy: "node", Status: store.AttachmentUploadPending,
+		CreatedAt: m.now(), ExpiresAt: m.now().Add(time.Hour), UpdatedAt: m.now(),
+	}}
+	// The object is one byte longer than declared while Head still reports the
+	// declared size: it grew after the head check, inside the presigned window.
+	objs.objects[stagingKey] = append(body, 0x00)
+	objs.headSizes = map[string]int64{stagingKey: size}
+	m.Objects = &sizeBoundObjects{fakeObjects: objs, stagingKey: stagingKey}
+
+	_, _, err := m.CompleteUpload(t.Context(), "node", uploadID)
+	if !errors.Is(err, ErrUploadRefused) || !strings.Contains(err.Error(), "upload_size_mismatch") {
+		t.Fatalf("grown staging err=%v, want upload_size_mismatch", err)
+	}
+}
+
 // failingFinalize fails the completing -> done transition a fixed number of
 // times, the transient database error after the attachment was stored.
 type failingFinalize struct {
@@ -904,12 +1101,12 @@ type failingFinalize struct {
 	fail int
 }
 
-func (f *failingFinalize) TransitionAttachmentUpload(ctx context.Context, id, from, to, reason string, now time.Time) (bool, error) {
-	if from == store.AttachmentUploadCompleting && to == store.AttachmentUploadDone && f.fail > 0 {
+func (f *failingFinalize) TransitionAttachmentUploadClaim(ctx context.Context, id, nonce, to, reason string, now time.Time) (bool, error) {
+	if to == store.AttachmentUploadDone && f.fail > 0 {
 		f.fail--
 		return false, errors.New("database unavailable")
 	}
-	return f.fakeDB.TransitionAttachmentUpload(ctx, id, from, to, reason, now)
+	return f.fakeDB.TransitionAttachmentUploadClaim(ctx, id, nonce, to, reason, now)
 }
 
 // If the final transition fails after the attachment is stored, the row stays

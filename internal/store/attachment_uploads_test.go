@@ -39,6 +39,56 @@ func TestAttachmentUploadRowsTransitionOnce(t *testing.T) {
 	}
 }
 
+// A completion's claim nonce scopes every transition out of completing: only
+// the nonce holder can move or heartbeat the row, the nonce is consumed by the
+// final transition, and a reclaimed claim's stale nonce matches nothing.
+func TestAttachmentUploadClaimNonceScopesTransitions(t *testing.T) {
+	s := schemaStore(t, "attachment_upload_claim")
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	const id = "0123456789abcdef0123456789abcdef"
+	row := AttachmentUpload{ID: id, StagingKey: "incoming/" + id, Name: "a.txt", MIME: "text/plain", SizeBytes: 3, SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", RefKind: "none", CreatedBy: "node", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if err := s.CreateAttachmentUpload(t.Context(), row); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.ClaimAttachmentUpload(t.Context(), id, "nonce-a", now); err != nil || !ok {
+		t.Fatalf("claim=%v err=%v", ok, err)
+	}
+	got, _, _ := s.GetAttachmentUpload(t.Context(), id)
+	if got.Status != AttachmentUploadCompleting || got.ClaimNonce != "nonce-a" {
+		t.Fatalf("claimed row=%+v", got)
+	}
+	// A second claim cannot win while the first holds the row.
+	if ok, err := s.ClaimAttachmentUpload(t.Context(), id, "nonce-b", now); err != nil || ok {
+		t.Fatalf("second claim won=%v err=%v", ok, err)
+	}
+	// Neither a transition nor a heartbeat with the wrong nonce applies.
+	if ok, err := s.TransitionAttachmentUploadClaim(t.Context(), id, "nonce-b", AttachmentUploadDone, "", now); err != nil || ok {
+		t.Fatalf("wrong-nonce transition=%v err=%v", ok, err)
+	}
+	if ok, err := s.TouchAttachmentUploadClaim(t.Context(), id, "nonce-b", now.Add(time.Minute)); err != nil || ok {
+		t.Fatalf("wrong-nonce touch=%v err=%v", ok, err)
+	}
+	// The holder's heartbeat refreshes the lease timestamp.
+	if ok, err := s.TouchAttachmentUploadClaim(t.Context(), id, "nonce-a", now.Add(time.Minute)); err != nil || !ok {
+		t.Fatalf("holder touch=%v err=%v", ok, err)
+	}
+	got, _, _ = s.GetAttachmentUpload(t.Context(), id)
+	if !got.UpdatedAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("heartbeat updated_at=%v", got.UpdatedAt)
+	}
+	// The holder's transition to done consumes the claim.
+	if ok, err := s.TransitionAttachmentUploadClaim(t.Context(), id, "nonce-a", AttachmentUploadDone, "", now.Add(2*time.Minute)); err != nil || !ok {
+		t.Fatalf("done=%v err=%v", ok, err)
+	}
+	got, _, _ = s.GetAttachmentUpload(t.Context(), id)
+	if got.Status != AttachmentUploadDone || got.ClaimNonce != "" {
+		t.Fatalf("done row=%+v", got)
+	}
+	if ok, err := s.TransitionAttachmentUploadClaim(t.Context(), id, "nonce-a", AttachmentUploadRefused, "x", now); err != nil || ok {
+		t.Fatalf("post-done transition=%v err=%v", ok, err)
+	}
+}
+
 // The staging budget is checked and the row inserted under one lock. A finished
 // upload stays charged until its staging object is marked deleted, and the
 // per-client cap applies on top of the global one.
