@@ -39,7 +39,7 @@ func TestNotSentKeepsCappedDispatchBackoffAfterManyAttempts(t *testing.T) {
 		ReconcileBase: 5 * time.Second, ReconcileMax: 5 * time.Minute,
 	}}
 
-	got := p.notSent(ctx, op, &NotSentError{Err: errors.New("connection failed")}).op
+	got := p.notSent(ctx, p, op, &NotSentError{Err: errors.New("connection failed")}).op
 	if delay := got.NextAttemptAt.Sub(now); delay != 5*time.Minute {
 		t.Fatalf("notSent delay after %d attempts=%s, want capped dispatch backoff 5m", op.Attempts, delay)
 	}

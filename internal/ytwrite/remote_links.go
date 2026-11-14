@@ -43,8 +43,8 @@ const (
 // end. Links the issue has from the other side (its children, the issues that
 // duplicate it) are not IssueLinks.
 type IssueLink struct {
-	Kind   LinkKind
-	Target string
+	Kind   LinkKind `json:"kind"`
+	Target string   `json:"target"`
 }
 
 // SortLinks orders links by kind (subtask, relates, duplicate), then target.

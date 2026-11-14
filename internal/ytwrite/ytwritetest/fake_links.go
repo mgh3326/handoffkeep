@@ -3,6 +3,7 @@ package ytwritetest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -90,6 +91,73 @@ type fakeLinks struct {
 	rowCap, linksCap int
 	faults           []LinkFault
 	requests         []LinkRequest
+	// calls and callFaults are the in-memory front end's log and failures.
+	calls      []LinkCall
+	callFaults []LinkCallFault
+}
+
+// LinkOp names one call of the in-memory front end.
+type LinkOp string
+
+const (
+	LinkOpRead   LinkOp = "read"
+	LinkOpAdd    LinkOp = "add"
+	LinkOpRemove LinkOp = "remove"
+)
+
+// LinkCall is one call the in-memory front end received (Link is zero for a
+// read).
+type LinkCall struct {
+	Op    LinkOp
+	Issue string
+	Link  ytwrite.IssueLink
+}
+
+// LinkCallFault fails the next Count in-memory calls of Op ("" for any): a
+// *ytwrite.RemoteError with Status and RetryAfter, or a transport error when
+// Status is 0. With Landed the call's effect happens first (an add or remove
+// whose reply was lost).
+type LinkCallFault struct {
+	Op         LinkOp
+	Status     int
+	RetryAfter time.Duration
+	Landed     bool
+	Count      int
+}
+
+// QueueLinkCallFaults adds failures for the next matching in-memory calls.
+func (f *FakeYouTrack) QueueLinkCallFaults(faults ...LinkCallFault) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.links.callFaults = append(f.links.callFaults, faults...)
+}
+
+// LinkCalls returns every in-memory call received, in order.
+func (f *FakeYouTrack) LinkCalls() []LinkCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]LinkCall(nil), f.links.calls...)
+}
+
+// callFault logs a call and takes the first fault matching it.
+func (l *fakeLinks) callFault(c LinkCall) (fault LinkCallFault, ok bool) {
+	l.calls = append(l.calls, c)
+	for i := range l.callFaults {
+		f := &l.callFaults[i]
+		if f.Count <= 0 || (f.Op != "" && f.Op != c.Op) {
+			continue
+		}
+		f.Count--
+		return *f, true
+	}
+	return LinkCallFault{}, false
+}
+
+func (f LinkCallFault) err() error {
+	if f.Status == 0 {
+		return errors.New("ytwritetest: injected transport failure")
+	}
+	return &ytwrite.RemoteError{Status: f.Status, RetryAfter: f.RetryAfter, Message: "injected fault"}
 }
 
 func (l *fakeLinks) init() {
@@ -194,6 +262,9 @@ func (f *FakeYouTrack) ReadIssueLinks(ctx context.Context, issueID string) (ytwr
 		return ytwrite.IssueLinksRead{}, err
 	}
 	f.links.init()
+	if fault, ok := f.links.callFault(LinkCall{Op: LinkOpRead, Issue: issueID}); ok {
+		return ytwrite.IssueLinksRead{}, fault.err()
+	}
 	types, err := ytwrite.ResolveLinkTypes(f.links.types)
 	if err != nil {
 		return ytwrite.IssueLinksRead{}, err
@@ -208,6 +279,12 @@ func (f *FakeYouTrack) AddIssueLink(ctx context.Context, issueID string, types y
 	if err := f.checkLinkCall(ctx, types, link); err != nil {
 		return err
 	}
+	if fault, ok := f.links.callFault(LinkCall{Op: LinkOpAdd, Issue: issueID, Link: link}); ok {
+		if fault.Landed {
+			f.links.pairs[writerPair(issueID, link)] = true
+		}
+		return fault.err()
+	}
 	f.links.pairs[writerPair(issueID, link)] = true
 	return nil
 }
@@ -218,6 +295,12 @@ func (f *FakeYouTrack) RemoveIssueLink(ctx context.Context, issueID string, type
 	defer f.mu.Unlock()
 	if err := f.checkLinkCall(ctx, types, link); err != nil {
 		return err
+	}
+	if fault, ok := f.links.callFault(LinkCall{Op: LinkOpRemove, Issue: issueID, Link: link}); ok {
+		if fault.Landed {
+			delete(f.links.pairs, writerPair(issueID, link))
+		}
+		return fault.err()
 	}
 	delete(f.links.pairs, writerPair(issueID, link))
 	return nil
