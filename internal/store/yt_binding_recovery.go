@@ -221,6 +221,20 @@ type YTRecovery struct {
 // UPDATE, then the authority row FOR SHARE, as op preparation does
 // (lockorder.go). It reads no clock: time is passed in.
 func (s *Store) RecoverHeldYTOps(ctx context.Context, tenant string, now time.Time, grace time.Duration) (YTRecovery, error) {
+	return s.recoverHeldYTOps(ctx, tenant, 0, now, grace)
+}
+
+// RecoverHeldYTOpsForTask is RecoverHeldYTOps restricted to one task. It is
+// used by comments-drain --task so a scoped command cannot reject another
+// task's held ops.
+func (s *Store) RecoverHeldYTOpsForTask(ctx context.Context, tenant string, taskID int64, now time.Time, grace time.Duration) (YTRecovery, error) {
+	if taskID < 1 {
+		return YTRecovery{}, errors.New("invalid task id")
+	}
+	return s.recoverHeldYTOps(ctx, tenant, taskID, now, grace)
+}
+
+func (s *Store) recoverHeldYTOps(ctx context.Context, tenant string, taskID int64, now time.Time, grace time.Duration) (YTRecovery, error) {
 	var out YTRecovery
 	kinds := s.ytHeldKindsOn()
 	if len(kinds) == 0 {
@@ -229,7 +243,7 @@ func (s *Store) RecoverHeldYTOps(ctx context.Context, tenant string, now time.Ti
 	cutoff := now.UTC().Add(-grace)
 	afterAt, afterID := time.Unix(0, 0).UTC(), int64(0)
 	for range ytHeldRecoveryPages {
-		cands, err := s.heldYTCandidates(ctx, tenant, kinds, cutoff, afterAt, afterID, ytHeldRecoveryPage)
+		cands, err := s.heldYTCandidatesForTask(ctx, tenant, taskID, kinds, cutoff, afterAt, afterID, ytHeldRecoveryPage)
 		if err != nil {
 			return out, err
 		}
@@ -267,10 +281,18 @@ var ytHeldKeptSQL = `NOT EXISTS (SELECT 1 FROM yt_task_bindings b WHERE b.task_i
 // at or before cutoff, after the (created_at, id) position, that the gate of
 // their kind does not admit and that the decision may reject.
 func (s *Store) heldYTCandidates(ctx context.Context, tenant string, kinds []string, cutoff, afterAt time.Time, afterID int64, limit int) ([]ytHeldOp, error) {
+	return s.heldYTCandidatesForTask(ctx, tenant, 0, kinds, cutoff, afterAt, afterID, limit)
+}
+
+func (s *Store) heldYTCandidatesForTask(ctx context.Context, tenant string, taskID int64, kinds []string, cutoff, afterAt time.Time, afterID int64, limit int) ([]ytHeldOp, error) {
+	task := ""
+	if taskID > 0 {
+		task = strconv.FormatInt(taskID, 10)
+	}
 	rows, err := s.pool.Query(ctx, `SELECT `+ytHeldOpColumns+` FROM yt_write_ops o
 		WHERE o.state='prepared' AND o.tenant=$6 AND o.created_at <= $1 AND (o.created_at, o.id) > ($2, $3)
-		AND o.kind = ANY($4) AND `+ytHeldScopeSQL+` AND NOT `+s.ytAdmitSQL("$6")+` AND `+ytHeldKeptSQL+`
-		ORDER BY o.created_at, o.id LIMIT $5`, cutoff.UTC(), afterAt.UTC(), afterID, kinds, limit, tenant)
+		AND o.kind = ANY($4) AND ($7 = '' OR o.entity_id = $7) AND `+ytHeldScopeSQL+` AND NOT `+s.ytAdmitSQL("$6")+` AND `+ytHeldKeptSQL+`
+		ORDER BY o.created_at, o.id LIMIT $5`, cutoff.UTC(), afterAt.UTC(), afterID, kinds, limit, tenant, task)
 	if err != nil {
 		return nil, err
 	}

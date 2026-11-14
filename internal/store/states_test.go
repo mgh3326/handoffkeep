@@ -64,7 +64,7 @@ func TestManualTransitionTableIsTheDesignTable(t *testing.T) {
 		"completed":   {"unstarted"},
 		"dropped":     {"unstarted"},
 		"duplicate":   {"unstarted"},
-		"icebox":      {"backlog", "unstarted"},
+		"icebox":      {"backlog", "unstarted", "dropped"},
 	}
 	got := map[string][]string{}
 	for from, targets := range TaskTransitions {
@@ -97,7 +97,7 @@ func TestManualTransitionTableIsTheDesignTable(t *testing.T) {
 }
 
 func TestSpawnRuleSubstates(t *testing.T) {
-	for kind, want := range map[string]string{"implement": "developing", "fix": "developing", "ops": "developing", "verify": "researching", "decide": "researching"} {
+	for kind, want := range map[string]string{"implement": "developing", "fix": "developing", "ops": "developing", "verify": "researching", "research": "researching", "decide": "researching"} {
 		if got := substateForKind(kind); got != want {
 			t.Errorf("substateForKind(%q)=%q, want %q", kind, got, want)
 		}

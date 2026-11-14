@@ -1,0 +1,343 @@
+{
+ "version": 1,
+ "intro": "# policy/index — where each fleet rule lives (v0, 2026-11-04)\n\nEach rule area has one home, and this document only points to it. It never restates a rule. If the home and this index disagree, the home wins, and the index is out of date.\nKinds:\n- `tool`: machine-enforced, in code or config.\n- `method`: rstack.\n- `repo`: AGENTS.md.\n- `policy`: hk policy/*, operator-changeable.\n- `decision`: hk decisions.\n\nEditor: `operator` keys change only on an operator decision; `agent` keys may be edited by agents.\n\n",
+ "rows": [
+  {
+   "key": "g-method",
+   "parent": "",
+   "kind": "method",
+   "title": "Fleet methods (rstack skills)",
+   "home": "rstack `skills/`",
+   "editor": "agent"
+  },
+  {
+   "key": "g-tool",
+   "parent": "",
+   "kind": "tool",
+   "title": "Machine-enforced tools (each home is in its repo or host config)",
+   "home": "per child row",
+   "editor": "operator"
+  },
+  {
+   "key": "g-policy",
+   "parent": "",
+   "kind": "policy",
+   "title": "hk policy/* (operator-changeable)",
+   "home": "hk `policy/`",
+   "editor": "operator"
+  },
+  {
+   "key": "g-decision",
+   "parent": "",
+   "kind": "decision",
+   "title": "Decisions",
+   "home": "hk `decision/<date>/<slug>`",
+   "editor": "operator"
+  },
+  {
+   "key": "g-repo",
+   "parent": "",
+   "kind": "repo",
+   "title": "Repo rules",
+   "home": "`<repo>/AGENTS.md`",
+   "editor": "agent"
+  },
+  {
+   "key": "method-robin-mode",
+   "parent": "g-method",
+   "kind": "method",
+   "title": "Goal, data shape, playbook, self-verification, subagent vs worker",
+   "home": "rstack `skills/robin-mode/SKILL.md`",
+   "editor": "agent"
+  },
+  {
+   "key": "method-wake-pr",
+   "parent": "g-method",
+   "kind": "method",
+   "title": "PR, author and merge ownership; tier; READY contents; hand-off",
+   "home": "rstack `skills/wake/SKILL.md` §READY",
+   "editor": "agent"
+  },
+  {
+   "key": "method-wake-design-loop",
+   "parent": "g-method",
+   "kind": "method",
+   "title": "Design-session loop: settle, slice, task, brief, spawn, landing proof",
+   "home": "rstack `skills/wake/SKILL.md`",
+   "editor": "agent"
+  },
+  {
+   "key": "method-wake-brief",
+   "parent": "g-method",
+   "kind": "method",
+   "title": "Worker brief template, including trailer placement",
+   "home": "rstack `skills/wake/SKILL.md` (brief template)",
+   "editor": "agent"
+  },
+  {
+   "key": "method-fleet-review",
+   "parent": "g-method",
+   "kind": "method",
+   "title": "Finding scope, severity, disposition, rounds, reviewer independence wording",
+   "home": "rstack `skills/fleet-review/SKILL.md`",
+   "editor": "agent"
+  },
+  {
+   "key": "policy-reviewer-family",
+   "parent": "g-policy",
+   "kind": "rule",
+   "title": "Reviewer family: another family preferred, a same-family pass counts (operator decision 215, 2026-11-13)",
+   "home": "hk `policy/model-routing` rule 3",
+   "editor": "routing-policy"
+  },
+  {
+   "key": "method-ops",
+   "parent": "g-method",
+   "kind": "method",
+   "title": "Spawn, relay, consult, wait, reap and deploy mechanics",
+   "home": "rstack `skills/ops/SKILL.md` + `references/`",
+   "editor": "agent"
+  },
+  {
+   "key": "method-desk",
+   "parent": "g-method",
+   "kind": "method",
+   "title": "Desk coordination: commitments, resume, intake, task record",
+   "home": "rstack `skills/desk/SKILL.md`",
+   "editor": "agent"
+  },
+  {
+   "key": "method-decision-request",
+   "parent": "g-method",
+   "kind": "method",
+   "title": "Asking the operator for a decision",
+   "home": "rstack `skills/ops/references/decision-request.md`",
+   "editor": "agent"
+  },
+  {
+   "key": "tool-merge-gate",
+   "parent": "g-tool",
+   "kind": "tool",
+   "title": "Merge gate checks, as enforced",
+   "home": "mergewake `internal/pipeline/gate.go` + each repo's `.mergewake/policy.yaml`",
+   "editor": "operator"
+  },
+  {
+   "key": "tool-task-trailer",
+   "parent": "g-tool",
+   "kind": "tool",
+   "title": "Task trailer lookup order",
+   "home": "mergewake `internal/pipeline/deliver.go` (prTask)",
+   "editor": "operator"
+  },
+  {
+   "key": "tool-repo-policy-yaml",
+   "parent": "g-tool",
+   "kind": "tool",
+   "title": "Blocking paths, deploy approval, fast lane, required checks (per repo)",
+   "home": "`<repo>/.mergewake/policy.yaml`",
+   "editor": "operator"
+  },
+  {
+   "key": "tool-review-profiles",
+   "parent": "g-tool",
+   "kind": "tool",
+   "title": "Review profiles, families and executor",
+   "home": "mergewake host config `review` (`docs/config.md` §review)",
+   "editor": "operator"
+  },
+  {
+   "key": "decision-post-merge-ci",
+   "parent": "g-decision",
+   "kind": "decision",
+   "title": "Post-merge CI and revert",
+   "home": "hk task 2788 (Scion) + decision doc (to be written)",
+   "editor": "operator"
+  },
+  {
+   "key": "tool-brief-policy",
+   "parent": "g-tool",
+   "kind": "tool",
+   "title": "Host safety lines injected into briefs",
+   "home": "panewire `internal/fleet/brief-policy.json`",
+   "editor": "operator"
+  },
+  {
+   "key": "tool-delivery-policy",
+   "parent": "g-tool",
+   "kind": "tool",
+   "title": "Event delivery classes, deadlines and retention",
+   "home": "panewire `delivery-policy.yaml`",
+   "editor": "operator"
+  },
+  {
+   "key": "tool-profile-catalog",
+   "parent": "g-tool",
+   "kind": "tool",
+   "title": "Profile capability and roles catalog",
+   "home": "panewire `internal/fleet/policy.json` (until pacelever owns profile names)",
+   "editor": "operator"
+  },
+  {
+   "key": "policy-model-routing",
+   "parent": "g-policy",
+   "kind": "policy",
+   "title": "Which role may use which profile, effort and grade",
+   "home": "hk `policy/model-routing`",
+   "editor": "operator"
+  },
+  {
+   "key": "policy-model-families",
+   "parent": "g-policy",
+   "kind": "policy",
+   "title": "Model families, effort scales, escalation ladder, consult rule, end dates of free and credit seats",
+   "home": "hk `policy/model-families`",
+   "editor": "operator"
+  },
+  {
+   "key": "tool-bench-catalog",
+   "parent": "g-tool",
+   "kind": "tool",
+   "title": "Catalog rows (grade, gate, retired) and how they change",
+   "home": "hk bench catalog (`panewire catalog list`); a change is a push file `catalog-push/<date>/<name>` with a rollback file and a decision ref",
+   "editor": "operator"
+  },
+  {
+   "key": "method-policy-session",
+   "parent": "g-method",
+   "kind": "method",
+   "title": "Cross-repo policy session: authority, experiments, records",
+   "home": "rstack `skills/fleet-policy/SKILL.md`; hk `decision/2026-11-11/policy-session-role`",
+   "editor": "agent"
+  },
+  {
+   "key": "policy-design-sessions",
+   "parent": "g-policy",
+   "kind": "policy",
+   "title": "Which lane a design session and the policy session use; hand-off rules between sessions; dispatch by bundle",
+   "home": "hk `policy/design-sessions`",
+   "editor": "operator"
+  },
+  {
+   "key": "policy-backlog-pass",
+   "parent": "g-policy",
+   "kind": "policy",
+   "title": "Backlog pass: who runs it, when, the steps, the intake rules",
+   "home": "hk `policy/backlog-pass`",
+   "editor": "operator"
+  },
+  {
+   "key": "report-policy-handoffs",
+   "parent": "",
+   "kind": "report",
+   "title": "What the policy session handed over and is waiting for",
+   "home": "hk `register/routing-policy-handoffs`",
+   "editor": "agent"
+  },
+  {
+   "key": "policy-operator-korean",
+   "parent": "g-policy",
+   "kind": "policy",
+   "title": "Language of operator-facing text (Korean; translations for English originals)",
+   "home": "hk `policy/operator-facing-korean`",
+   "editor": "operator"
+  },
+  {
+   "key": "tool-pool-order",
+   "parent": "g-tool",
+   "kind": "tool",
+   "title": "Spawn-time pool and model order, thresholds",
+   "home": "panewire `internal/fleet/pool-order.json` + `internal/fleet/select.go` (`docs/config.md` §`[quota]`); pending decisions in hk `decision/2026-11-04/pool-order-owner`",
+   "editor": "operator"
+  },
+  {
+   "key": "policy-quota-stop",
+   "parent": "g-policy",
+   "kind": "policy",
+   "title": "Running pane stopped on quota: waits, hand-over, values",
+   "home": "hk `policy/quota-stop` `## Values` (read live by the panewire daemon)",
+   "editor": "operator"
+  },
+  {
+   "key": "policy-placement",
+   "parent": "g-policy",
+   "kind": "policy",
+   "title": "Host tags, placement order and desktop wake",
+   "home": "hk `policy/placement`",
+   "editor": "operator"
+  },
+  {
+   "key": "tool-placement-config",
+   "parent": "g-tool",
+   "kind": "tool",
+   "title": "Placement values as read at runtime",
+   "home": "panewire config `[placement]` (`internal/fleet/placement.go`)",
+   "editor": "operator"
+  },
+  {
+   "key": "tool-launch-profiles",
+   "parent": "g-tool",
+   "kind": "tool",
+   "title": "Launch profiles, pools and quota gates",
+   "home": "pacelever host config (`docs/config.md`)",
+   "editor": "operator"
+  },
+  {
+   "key": "repo-agents-md",
+   "parent": "g-repo",
+   "kind": "repo",
+   "title": "Repo build, test and code conventions",
+   "home": "`<repo>/AGENTS.md`",
+   "editor": "agent"
+  },
+  {
+   "key": "decision-agents-md",
+   "parent": "g-decision",
+   "kind": "decision",
+   "title": "Agent instruction file layout (AGENTS.md canonical, CLAUDE.md stub or root symlink)",
+   "home": "hk `decision/2026-11-04/agents-md-single-file`",
+   "editor": "operator"
+  },
+  {
+   "key": "repo-overrides",
+   "parent": "g-repo",
+   "kind": "repo",
+   "title": "Repo deviations from fleet defaults",
+   "home": "`<repo>/AGENTS.md` `override:` lines",
+   "editor": "operator"
+  },
+  {
+   "key": "decision-operator",
+   "parent": "g-decision",
+   "kind": "decision",
+   "title": "Operator decisions",
+   "home": "hk DecisionRequest (`tasks decision-request`) and `decision/<date>/<slug>`",
+   "editor": "operator"
+  },
+  {
+   "key": "decision-superseded",
+   "parent": "g-decision",
+   "kind": "decision",
+   "title": "Superseded research recommendations",
+   "home": "the `superseded_by` field on the research doc",
+   "editor": "operator"
+  },
+  {
+   "key": "report-drift",
+   "parent": "",
+   "kind": "report",
+   "title": "Drift findings",
+   "home": "hk `drift/<yyyy-mm-dd>`",
+   "editor": "(generated)"
+  },
+  {
+   "key": "memory-facts",
+   "parent": "",
+   "kind": "memory",
+   "title": "Facts, incidents and lessons (not rules)",
+   "home": "session memory / admiral `memory/`",
+   "editor": "agent"
+  }
+ ],
+ "tail": "## Switches (location only; values live in the tool)\n- mergewake acting | mergewake host config `daemon.act`\n- mergewake reap acting | mergewake host config `reap.act`\n- panewire quiet delivery | hub flag `--delivery-policy off`\n- desktop idle shutdown | `policy/placement` (`idle_shutdown`) + node flag `--idle-shutdown`\n- per-repo mergewake | `<repo>/.mergewake/policy.yaml` `enabled`\n\n## Retired names (must not appear in any home except as history)\nruntug, wrk, agent-skills, scopefuel (as quota tool), arbiter, admiral role docs (PLAYBOOK.md, CHECKER.md, SECRETARY.md, …), grok, kimi, pi-* profiles, handoff skill\n\n## Machine block (v0 sketch)\n```json\n{\"version\": 0, \"areas\": [{\"key\": \"merge-gate\", \"kind\": \"tool\", \"home\": \"mergewake:internal/pipeline/gate.go\", \"editor\": \"operator\", \"keywords\": [\"leak scan\", \"required_checks\"], \"claims\": [{\"id\": \"mergewake.gate.leak_scan\", \"said_in\": \"rstack:skills/wake/SKILL.md\", \"truth\": \"mergewake:internal/pipeline\", \"truth_regex\": \"(?i)leak\"}]}], \"retired\": [\"runtug\", \"wrk\", \"agent-skills\"]}\n```\n- `policy/dots-on-hk` — what dots writes to hk and where; since 2026-11-12 also the common rules for mockup and asset requests (Canva source of truth and working mockups, files as hk attachments, adoption with `dots adopt`).\n- `policy/observability` — Sentry and Grafana: the order of work (alert delivery and data loss before new coverage), who owns which configuration, where alerts go (Discord for the operator; lanes read Sentry and Grafana later instead of receiving events), what to connect next.\n"
+}

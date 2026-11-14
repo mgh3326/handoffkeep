@@ -235,7 +235,7 @@ func TestTaskLifecycleRefusals(t *testing.T) {
 		code   string
 	}{
 		{"merge-from-backlog", func() store.Task { return lifecycleSeed(t, st, lane, store.StateBacklog, "implement") }, "close-merged", `{"evidence":"https://example.com/pr/3","event_key":"r1"}`, 409, "task_merge_path"},
-		{"completed-wrong-kind", func() store.Task { return lifecycleSeed(t, st, lane, store.StateReviewing, "implement") }, "close-completed", `{"evidence":"https://example.com/run/3","event_key":"r2"}`, 409, "task_conflict"},
+		{"completed-wrong-kind", func() store.Task { return lifecycleSeed(t, st, lane, store.StateReviewing, "fix") }, "close-completed", `{"evidence":"https://example.com/run/3","event_key":"r2"}`, 409, "task_conflict"},
 		{"drop-bad-closure", func() store.Task { return lifecycleSeed(t, st, lane, store.StateDeveloping, "implement") }, "drop", `{"closure":"resolved","reason":"x","event_key":"r4"}`, 400, "invalid_request"},
 		{"drop-no-duplicate-of", func() store.Task { return lifecycleSeed(t, st, lane, store.StateDeveloping, "implement") }, "drop", `{"closure":"superseded","reason":"x","event_key":"r5"}`, 400, "duplicate_of_required"},
 		{"release-not-held", func() store.Task { return lifecycleSeed(t, st, lane, store.StateBacklog, "implement") }, "hold", `{"held":false,"event_key":"r6"}`, 409, "task_conflict"},

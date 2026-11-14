@@ -155,20 +155,20 @@ type BundleValue struct {
 	Ordinal  int
 }
 
-// Vocabulary is the hk data the desired schema is built from. Lanes and
-// milestones are per hk project; the rest is shared by every project.
+// Vocabulary is the hk data the desired schema is built from. Lanes are per
+// hk project; the rest is shared by every project.
 type Vocabulary struct {
-	Kinds      []string
-	Lanes      map[string][]string
-	Areas      []string
-	Milestones map[string][]string
+	Kinds []string
+	Lanes map[string][]string
 }
 
 // Desired is the one declaration of the schema one hk project should have. Plan
 // and apply both read it, so a field or value is named in this function only.
 // It lists every field the import gives a task project
-// (youtrack/import/client.js fieldsForProject), in that order, so a project the
-// run creates takes the same writes an import-created one does (hk 3972).
+// (youtrack/import/client.js fieldsForProject), in that order and with the
+// types it declared — 영역 and 마일스톤 are string fields there, not enums
+// (hk 4305) — so a project the run creates takes the same writes an
+// import-created one does (hk 3972).
 func (s Schema) Desired(v Vocabulary, hkProject string) []FieldSpec {
 	states := make([]BundleValue, 0, len(StateLabels))
 	for i, state := range store.TaskStates() {
@@ -187,8 +187,8 @@ func (s Schema) Desired(v Vocabulary, hkProject string) []FieldSpec {
 		{Name: s.JobField, Kind: KindString},
 		{Name: s.StallField, Kind: KindMultiEnum, Values: []BundleValue{{Name: StallLabel}}},
 		{Name: s.DueField, Kind: KindDate},
-		{Name: s.AreaField, Kind: KindEnum, Values: enumValues(v.Areas)},
-		{Name: s.MilestoneField, Kind: KindEnum, Values: enumValues(v.Milestones[hkProject])},
+		{Name: s.AreaField, Kind: KindString},
+		{Name: s.MilestoneField, Kind: KindString},
 		{Name: s.ExpectedField, Kind: KindPeriod},
 	}
 }

@@ -16,6 +16,15 @@ second task. The API accepts the same value as `idempotency_key`. Each request
 is a task in the `dots` lane; its body is an hk
 document and its `parent_lane` identifies the requester.
 
+A design request is filed with `--type CREATE_MOCKUP`, `CREATE_ASSET` or
+`REVIEW_IMPLEMENTATION`. Its body must carry the policy template sections
+`[목적]`, `[유지할 것]`, `[범위]`, `[제약]`, `[산출물]`, `[완료 기준]` and `[입력]`,
+and `[입력]` must name a commit SHA and the capture environment; otherwise the
+request is refused. The stored body starts with a `[유형]` line. Requests with no
+type (research, for example) take no template. `dots adopt` may record the
+adopted Canva design with `--canva-url` (an https canva.com design link),
+`--canva-page` and `--canva-version`, for `accepted` or `partially_used` results only. A repeat of such an adoption without the Canva flags keeps the recorded design.
+
 On the authenticated ChatGPT connection, `dots_inbox` lists open requests in
 creation order. Use the returned `next_cursor` to fetch another page.
 `dots_reply` takes `task_id`, structured `kind`, `body`, and an
@@ -140,18 +149,16 @@ An Access identity becomes the principal `operator:<email>` with channel
   response reports the exact `operator:<email>` principal and the `chatgpt`
   channel.
 
-The store's decision channel column has no `chatgpt` value, so a verified Access
-answer is recorded on the existing `console` channel and a bearer answer on the
-existing `cli` channel. Human-only requests therefore stay open for a bearer
-client and close only through an Access identity, matching the console and CLI
-rules. From the ChatGPT channel an operator-only request is refused outright with
-`operator_only_decision`, so dots cannot close one even with a verified identity.
+Decision answers record the actual MCP route: `mcp` for bearer callers and
+`dots` for the verified ChatGPT Access channel. A human-only request is refused
+to a bearer caller and can be answered only on a verified operator path.
 
 ## Tools
 
 Read tools set `readOnlyHint: true`. Write tools set `readOnlyHint: false` and
-`destructiveHint: false`: they add records and never change task state,
-priority or lane.
+`destructiveHint: false`. `task_update` can change a task's state, lane,
+priority and labels; the other write tools add decision or comment records,
+file tasks, or attach files.
 
 | Tool | Kind | Arguments | Result |
 | --- | --- | --- | --- |
@@ -163,11 +170,20 @@ priority or lane.
 | `task_events` | read | `id`, optional `cursor`, `limit` ≤ 100 | One page of events, oldest first, with `next_cursor` and `has_more` |
 | `changes_since` | read | optional `cursor` or `since`, `limit` ≤ 100 | One page of the change feed: `items`, `next_cursor`, `max_cursor`, `has_more` |
 | `decisions_pending` | read | none | Open structured requests with question, options, `question_ko`/`options_ko` when fresh, and state |
-| `decision_answer` | write | `request_id`, `option` or `text`, optional `note` | Store result; an already answered or stale request returns its error code |
+| `decisions_history` | read | optional `cursor`, `limit` | Closed structured requests plus session decisions with reading, verbatim quote, decision time and ground links |
+| `operator_attention` | read | none | Counts and bounded items for open decisions and tasks awaiting a decision or stalled |
+| `decision_answer` | write | `request_id`, `option` or `text`, optional `note`, optional `idempotency_key` | Store result with channel `mcp` or `dots`; an already answered or stale request returns its error code |
 | `task_comment` | write | `id`, `body`, optional `idempotency_key` | The appended comment, its author, and `replayed` (a repeated key returns the comment it first made) |
 | `task_intake` | write | `title`, `body`, `project`, optional `lane`, optional `idempotency_key` | The triage task, `created`, and duplicate candidates found before filing; a repeated key returns the task that key first filed |
 | `task_update` | write | `id`, `expected_updated_at`, `idempotency_key`, one or more of `state`, `lane`, `priority`, optional `note` | `changed`, the new `revision`, `replayed`, `console_url` and `youtrack_sync`; a stale revision returns `revision_conflict` and writes nothing |
 | `decision_ask` | write | `task_id`, `idempotency_key`, `question`, `options`, `default_action`, optional `answer_policy`, `human_only`, `block` and the other `tasks decision-request` fields | The recorded request id and whether it was a duplicate |
+| `decision_record` | write | `key`, `lane`, `reading`, `quote`, `decided_at`, `grounds` | Verified Cloudflare Access operators only; bearer callers receive `operator_required`. The CLI uses the reserved `operator` credential. Same-key retries replay, changed content is refused |
+| `attachment_list` | read | optional `ref`, `limit` | Immutable attachment metadata |
+| `attachment_get_url` | read | `sha256` | Private presigned URL valid for ten minutes |
+| `attachment_put` | write | `content_base64`, `name`, optional `mime`, `ref` | Upload one private attachment without a server path |
+| `attachment_upload_begin` | write | `name`, `mime`, `size`, `sha256`, optional `ref` | Start a direct upload and return an upload id and presigned PUT URL |
+| `attachment_upload_complete` | write | `upload_id` | Finish a direct upload and return attachment metadata |
+| `attachment_put_from_path` | stdio write only | `path`, optional `name`, `mime`, optional `ref` | Upload a local file; this tool is not exposed over HTTP |
 | `projects_list` | read | none | Every project with `design_lane`/`effective_owner`, status and dates, open task counts by state, and `health` (in_progress, waiting, blocked, done, overdue counts; assignees; top blocked and overdue tasks) with `as_of` |
 | `task_states` | read | none | The twelve states with category, terminal and claimable flags, allowed manual transitions and closure requirements |
 

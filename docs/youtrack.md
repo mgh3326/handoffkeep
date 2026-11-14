@@ -107,7 +107,8 @@ YouTrack 호출이 실패하면 PostgreSQL 결과로 돌아가고 이유를 로�
 | `HANDOFFKEEP_SEARCH_BACKEND` | 아니오 | `youtrack`이면 검색을 YouTrack에 묻는다. 그 밖의 값은 PostgreSQL |
 | `HANDOFFKEEP_SEARCH_YOUTRACK_TIMEOUT` | 아니오 | YouTrack 검색 한 번의 상한(Go 기간 문자열) |
 | `HANDOFFKEEP_YT_COMMENTS_MODE` | 아니오 | `off`(기본), `canary` 또는 `on`. 코멘트 쓰기 |
-| `HANDOFFKEEP_YT_COMMENTS_CATCHUP` | 아니오 | `on`이면 코멘트 catch-up 패스를 돈다(기본 `off`) |
+| `HANDOFFKEEP_YT_COMMENTS_CATCHUP` | 아니오 | `on`(기본)이면 코멘트 catch-up 패스를 돈다. `off`면 issue-create catch-up만 돈다 |
+| `HANDOFFKEEP_YT_BIND` | 아니오 | `on`이면 10분마다 새 코멘트가 있는 작업의 기존 YouTrack 이슈를 검증해 자동 바인딩한다(기본 `off`). 이슈를 만들지는 않는다 |
 | `HANDOFFKEEP_YT_ISSUES_MODE` | 아니오 | `on`이면 작업 이슈를 만든다 |
 | `HANDOFFKEEP_YT_FIELDS_MODE` | 아니오 | `on`이면 작업 필드(상태·우선순위·레인 등)를 쓴다 |
 | `HANDOFFKEEP_YT_MOVES_MODE` | 아니오 | `on`이면 프로젝트 이동을 쓴다. `FIELDS_MODE=on`이어야 한다 |
@@ -119,6 +120,14 @@ YouTrack 호출이 실패하면 PostgreSQL 결과로 돌아가고 이유를 로�
 `HANDOFFKEEP_YT_COMMENTS_MODE`만 `canary`를 받는다. 나머지 모드는 `off`나 `on`만
 받고, 다른 값은 시작하거나 커맨드를 실행할 때 오류다. 각 모드의 쓰기는 YouTrack
 자격(`YOUTRACK_URL`, `YOUTRACK_BOT_API_KEY`)이 있어야 시작한다.
+
+`handoffkeep youtrack comments-drain [--tenant T] [--wait 10m]
+[--reject-held] [--task N]`은 작업 바인딩 쓰기 큐를 분류한다. 기본값은 읽기 전용이며,
+`--reject-held`는 `HANDOFFKEEP_YT_COMMENTS_MODE=on`에서만 허용된다. `--tenant`를
+생략하면 `YOUTRACK_URL`의 호스트를 사용한다. `HANDOFFKEEP_DB_URL`은 필요하지만
+YouTrack 토큰은 필요하지 않다. 댓글·필드·이동의 작업 바인딩 op를 분류한다. 종료 코드
+`0`은 보낼 준비가 된 op가 없음을, `3`은 지정한 대기 시간이 끝나도 ready op가 남았음을, `4`는 `remote_unknown` op가 있어
+`youtrack ops resolve`가 필요함을 뜻한다. 설정 오류는 `2`다.
 
 ### 콘솔 작업 화면 (`HANDOFFKEEP_UI_TASKS_SOURCE`, hk 4430)
 

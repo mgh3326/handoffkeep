@@ -32,10 +32,14 @@ One row per logical write, committed **before** any remote call.
 | `reason`, `last_error`, `attempts`, `reconciles` | latest cause code and detail; dispatch count; evidence-search count |
 | `next_attempt_at`, `dispatched_at`, `resolved_at` | scheduling and lifecycle times (Go clock, passed in) |
 
-`yt_entity_map(entity_kind, hk_key, yt_id, yt_parent_id, op_id)` holds the PG map
-rows an op commits **in the same transaction** as its `applied` (a comment appended
-by op 17 maps `comment/op:17` to its YouTrack comment id). Both directions are
-unique, so one YouTrack id can never name two hk identities.
+`yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id)` holds
+the PG map rows an op commits **in the same transaction** as its `applied` (a
+comment appended by op 17 maps `comment/op:17` to its YouTrack comment id, on
+the op's tenant). One hk identity names one YouTrack id, and one YouTrack id
+names one hk identity **per tenant**: a YouTrack id belongs to its instance, so
+two tenants' issues may share one (hk 3912, migration
+`20261113-yt-entity-map-tenant`, which backfilled each row's tenant from the op
+that wrote it).
 
 A trigger makes the table append-only: identity and payload columns never change,
 a resolved row never changes, only the lifecycle's moves are allowed, nothing is
@@ -161,8 +165,8 @@ Neither is ever `remote_unknown`: nothing was sent.
 Everything else is the protocol's and the same for every kind: claim and
 ordering, the reply classification above, and the evidence rule (exactly one
 exact live match with a valid id, nothing deleted or mismatched, is `applied`;
-otherwise `multiple_matches`, `marker_deleted`, `marker_mismatch` or
-`no_evidence`). An op whose kind is not registered is `rejected /
+otherwise `multiple_matches`, `marker_deleted`, `marker_mismatch`,
+`adoption_unconfirmed` (below) or `no_evidence`). An op whose kind is not registered is `rejected /
 unsupported_kind` when sent, and a failed render is `unsupported_kind` (send) or
 `reconcile_failed` (search). `comment_append` (`kind_comment.go`),
 `issue_create` (`kind_issue.go`, below), `issue_fields` (`kind_fields.go`,
@@ -529,8 +533,8 @@ this; the enqueue cross-checks catch what it could write (Rollout).
 **Commands.** Both open the database directly, like `youtrack canary`, and
 verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
 
-- `handoffkeep youtrack comments-preflight [--project P] [--days N] [--all]` is
-  read-only: it reads issues from YouTrack and writes nothing. It opens the
+- `handoffkeep youtrack comments-preflight [--project P] [--days N] [--all]
+  [--task N]` is read-only: it reads issues from YouTrack and writes nothing. It opens the
   database without migrating, on connections whose every transaction is READ
   ONLY, and refuses (exit 2) a database that does not record migrations
   `20261110-yt-task-bindings` and `20261111-yt-binding-comments-from`: deploy
@@ -555,9 +559,44 @@ verify against the tenant the worker uses (the host of `YOUTRACK_URL`).
   task_id=<id> class=<class> detail="..."` to stderr, and each `error` task
   `youtrack.comments_classify_failed task_id=<id> err="..."`.
 - `handoffkeep youtrack comments-backfill [--project P] [--days N] [--all]
-  [--by NAME]` classifies the same way and publishes each `verifies` binding. A
-  refused publication counts as `ambiguous` and the run goes on; the report
-  adds `bound_now`. A re-run reads nothing from YouTrack for a bound task.
+  [--task N] [--by NAME]` classifies the same way and publishes each `verifies`
+  binding. A refused publication counts as `ambiguous` and the run goes on; the
+  report adds `bound_now`. A re-run reads nothing from YouTrack for a bound
+  task. `--task N` (both commands; not with `--project` or `--all`) makes that
+  one task the only candidate, so the operator binds exactly the task they
+  unbound; the report says `"task": N`.
+- `handoffkeep youtrack comments-unbind <task> [--by NAME] [--reason TEXT]
+  [--force]` removes the task's binding (hk 4490). It opens the database
+  directly and calls no YouTrack. A task with no binding answers `"removed":
+  false` and writes nothing. It refuses, writing nothing, while an op of the
+  task's lane is `dispatched` or `remote_unknown` (an uncertain write may have
+  landed on the old issue: `yt ops resolve` it first), while the task has an
+  unresolved `issue_create` op, while the task is enrolled in the comment canary
+  (which routes comments without the binding: `canary remove` it first), and,
+  with comments canonical in YouTrack,
+  while a hk comment op is `prepared` unless `--force`. Otherwise, in one
+  transaction, it rejects every `prepared` op of the lane that the binding
+  admits (the hk `comment_append`, `issue_fields` and `issue_move` ops on the
+  binding's tenant and issue, and a comment queued with no target; not an op of
+  another tenant or issue, which stays for the recovery pass, and not a
+  document comment's copy, which reads its article binding) with reason
+  `binding_removed` (`unbind_forced` under `--force`), deletes the binding, drops the
+  task's pending issue intent (so the issue worker cannot bind it again) and
+  appends an `unbound` row to `yt_binding_history`. It retargets nothing and
+  leaves `task_origins`, `yt_entity_map` and the canary alone. The result lists
+  `rejected` ops and the `released` comment ids (hk keeps them; the comment
+  gets no op) or, under comments authority `youtrack` with `--force`, the
+  `stranded` ones (nothing will carry them). `comments-backfill --task N`
+  binds the task again once its other records agree with the issue it
+  verifies. Unbind leaves the task's `yt_entity_map` row (anchored by its
+  first comment op), mirror link and canary row alone, so a replacement that
+  is a different issue is refused naming the source that disagrees
+  (`yt_entity_map_task`, `task_origins`) until its owner reconciles it. A
+  later comment on an unbound task gets no op. Run it only while every release
+  that can serve (a blue-green overlap, a rollback target) is this one or
+  later: an earlier release's issue ownership check does not read
+  `yt_binding_history`, so its project change would prepare an `issue_create`
+  for an unbound task that has no map row, mirror link or canary row.
 - Each YouTrack read has its own 15 s timeout and each task 60 s; there is no
   budget for the whole run. A task in class `error` makes either command exit
   1 after the report.
@@ -596,6 +635,17 @@ previous release never names the column; a binding it inserts gets 0, and the
 catch-up would then copy all of that task's comments, so `comments-backfill`
 runs from this release only.
 
+**Migration** `20261113-yt-binding-history` (expand-only, `After`
+`20261110-yt-task-bindings` and `20261111-yt-task-binding-origin`, whose table
+and column it uses): the new append-only table `yt_binding_history` (one row
+per binding published by `AddYTTaskBinding` and per `comments-unbind`; no
+foreign key) and a wider CHECK on `yt_task_bindings.origin` that also admits
+`auto_verified` (ACCESS EXCLUSIVE on `yt_task_bindings` for one statement; the
+new CHECK admits every value the old one did). The previous release keeps
+serving on the migrated schema: its binding insert gets the default origin,
+its reads scan `origin` as a string, and it never names the new table
+(`scripts/test-previous-release-schema.sh`).
+
 **Rollout.**
 
 1. Deploy with `HANDOFFKEEP_YT_COMMENTS_MODE=canary`.
@@ -611,31 +661,60 @@ runs from this release only.
 During the rollout nobody runs `youtrack canary add` from the previous
 release: it does not take the ownership lock or check bindings.
 
-**Stop and rollback.** Set `HANDOFFKEEP_YT_COMMENTS_MODE=canary` **before**
-`shiftgate rollback`: a release older than this one fails startup on `on`.
-In mode `canary` the ops prepared in mode `on` for tasks outside the canary
-are held, not lost: they stay `prepared`, visible in `yt ops`, and their
-comments are owned by their links, so neither the legacy push nor the import
-sends them. Setting `on` again releases them. There is no unbind command yet
-and no recovery of held ops; both come with the automatic binder (follow-up).
+**Stop and rollback.** `handoffkeep youtrack comments-drain [--tenant T]
+[--wait 10m] [--reject-held] [--task N]` is a read-only monitor unless
+`--reject-held`를 지정하지 않으면 읽기 전용 감시다. 이 명령은 op를 보내지 않는다.
+코멘트 모드가 `on`이면 이 테넌트의 작업 바인딩 op(`comment_append`, `issue_fields`,
+`issue_move`)를 `ready`, `held_binding`, `held_binding_changed`,
+`held_other_tenant`, `held_authority_youtrack`, `remote_unknown`으로 분류한다.
+모드가 `off` 또는 `canary`이면 준비된 op는 `held_mode`다. 발송된 op는 워커가
+정산할 때까지 `ready`로 센다. 대상과 일치하는 바인딩은 바로 허용되므로 현재 복구
+코드에는 `held_ambiguous` 사례가 없다. 결과에는 각 클래스의 개수가 나온다.
+`--wait`는 `ready`가 없어지거나 지정 시간이 끝날 때까지 확인한다. 종료 코드 `0`은
+ready op가 없음을, `3`은 ready op가 남았음을, `4`는 `youtrack ops resolve`가 필요한
+`remote_unknown` op가 있음을 뜻한다. 종료 코드 `2`는 설정 오류이며, 코멘트 모드가
+`on`이 아닐 때 `--reject-held`를 지정한 경우도 포함한다.
+
+서빙 중인 릴리스가 남아 있을 때 다음 순서로 중단한다.
+
+1. `handoffkeep youtrack comments-drain --wait 10m`을 실행하고 종료 코드 `0`일 때만
+   진행한다. `3`이면 serve가 ready op를 아직 비우지 못했다. `4`이면
+   `handoffkeep youtrack ops --state remote_unknown`으로 op를 확인해 각각 해결하거나
+   중단한다.
+2. 결과에 안전하게 닫을 held op가 있으면
+   `handoffkeep youtrack comments-drain --reject-held`를 실행한다. 이 명령은 해당
+   데이터의 정본이 hk일 때만 `held_binding`과 `held_binding_changed`를 거부한다.
+   `held_mode`, `held_other_tenant`, YouTrack 정본 데이터는 거부하지 않는다. 다시
+   결과를 확인하고 남은 hold는 담당 테넌트·모드·바인딩을 해결한다.
+3. 큐를 비운 뒤에만 `HANDOFFKEEP_YT_COMMENTS_MODE=canary`(또는 `off`)로 바꾸고
+   `shiftgate rollback`을 실행한다. `canary`/`off`에서는 준비된 쓰기가 대기하며,
+   다시 `on`으로 바꾸면 현재 바인딩이 허용하는 op가 풀린다.
+4. 롤백 뒤 `handoffkeep youtrack comments-preflight`를 실행해 중단한 릴리스가 만든
+   바인딩이 계속 남아 있는지 확인한다.
+
+`comments-unbind`는 더 이른 릴리스가 더 이상 서빙할 수 없을 때만 실행한다. 이전
+릴리스는 바인딩 이력을 읽지 않으므로, 그렇지 않으면 바인딩을 지운 작업에
+`issue_create`를 준비할 수 있다. 현재 세대 안에서는 바인딩 테이블을 아는 릴리스가
+더 새로운 릴리스가 기록한 행을 계속 읽을 수 있다.
 
 **Residuals.**
 
-- A task created after the backfill has no binding until the backfill runs
-  again; its comments go through the legacy push and the import meanwhile,
-  and the binding never copies them (`comments_from`).
-- With the catch-up enabled, a sync that posts and ends without linking
-  (lost response, failed link insert, dead process) leaves the comment
-  unlinked, and the next catch-up pass can copy it again: the legacy push's
-  own retry reads the issue's comments first, the catch-up does not. Hence
-  the gate above, until hk 3907.
-- The enqueue reads its sources without locks, so a project change or mirror
-  write that commits during a comment's transaction is caught by the next
-  comment, not this one; the issue binding itself cannot change under the
-  lane lock.
-- A YouTrack-side move of a bound issue to another project is not seen
-  locally: the binding keeps the stable internal id, so comments still land
-  on the moved issue.
+- 자동 바인더는 선택 기능이며 `HANDOFFKEEP_YT_BIND` 기본값은 `off`다. `on`이면
+  10분마다 코멘트 변경을 스캔하고, 기존 이슈와 코멘트 이력을 확인한 뒤, 증거
+  워터마크가 있는 바인딩을 기록하고 YouTrack에 없다고 확인된 코멘트의 op를 준비한다.
+  이슈를 만들거나 운영자의 unbind를 되돌리지 않는다. 모호하거나 완전성을 확인할 수
+  없는 이력은 거부되어 운영자 확인이 필요하며, 일시 오류는 백오프 후 재시도한다.
+- held-op 복구는 코멘트 모드 `on`에서 catch-up 전에 5분마다 돈다. 한 시간 지난 뒤
+  바인딩이 없거나 바뀐 op를 데이터 정본이 hk인 경우에만 거부한다. YouTrack이 정본인
+  op와 다른 테넌트가 소유한 op는 그대로 둔다. `held_mode`는 중단 상태이며, 모드를
+  다시 켜면 바인딩이 허용하는 op가 풀린다.
+- drain은 감시자이지 디스패처가 아니다. 서빙 워커가 없으면 ready op가 남고 대기
+  시간이 끝나면 종료 코드 `3`을 반환한다.
+- enqueue는 매핑 출처를 잠금 없이 읽으므로 코멘트 트랜잭션 중 커밋된 프로젝트 변경
+  또는 미러 쓰기는 그 코멘트가 아니라 다음 코멘트에서 감지된다. 이슈 바인딩 자체는
+  lane lock 아래에서 바뀌지 않는다.
+- YouTrack에서 바인딩된 이슈를 다른 프로젝트로 옮겨도 로컬에서는 알 수 없다.
+  바인딩이 안정적인 내부 id를 유지하므로 코멘트는 이동한 이슈에 계속 간다.
 
 ## Comment audit (hk 3899)
 
@@ -717,10 +796,15 @@ and `youtrack_comment_links` (legacy and pulled comments). It is read-only: `sto
 
 | Target | Scope | Rebuilt from | Equal when |
 |---|---|---|---|
-| documents | every `yt_article_bindings` row on the tenant | the article's content; for an `op_applied` binding the body inside hk's rendered form (`ytwrite.ParseArticleContent`; another form differs) | its sha256 is `documents.sha256`. A binding that names the import's split index (articles-backfill stored no content sha) is `exception_not_updated` (D4), not a failure, and its article is not read; the current body size decides nothing, so a document that grew past 240 KiB after a single-part import is compared. A body quoting the op marker whose article holds it escaped (hk 4295) is the exception `escaped_marker` |
-| comments | `--sample-comments` random bound tasks (default 200, by `md5("<seed>:<task id>")`) and the 20 bound tasks with the most comments | the issue's comments, listed stably | every hk comment has exactly one copy with the same (author, time, body), and every YouTrack comment copies one |
-| tasks | every `yt_task_bindings` row on the tenant | the issue | hk ID → id, the description's title line → title, the project → project |
+| documents | every `yt_article_bindings` row on the tenant; under `--project P`, only those of P's tasks — a document with no task is excluded | the article's content; for an `op_applied` binding the body inside hk's rendered form (`ytwrite.ParseArticleContent`; another form differs) | its sha256 is `documents.sha256`. A binding that names the import's split index (articles-backfill stored no content sha) is `exception_not_updated` (D4), not a failure, and its article is not read; the current body size decides nothing, so a document that grew past 240 KiB after a single-part import is compared. A body quoting the op marker whose article holds it escaped (hk 4295) is the exception `escaped_marker` |
+| comments | `--sample-comments` random bound tasks (default 200, by `md5("<seed>:<task id>")`) and the 20 bound tasks with the most comments; under `--project P`, only P's tasks are sampled | the issue's comments, listed stably | every hk comment has exactly one copy with the same (author, time, body), and every YouTrack comment copies one |
+| tasks | every `yt_task_bindings` row on the tenant; under `--project P`, only bindings whose task is in P | the issue | hk ID → id, the description's title line → title, the project → project |
 | decisions | every `yt_decision_bindings` row on the tenant | the DEC issue's description | question, options and answer equal (the Y6 block) |
+
+`--project P` narrows tasks, the comment sample and documents to P; it never
+narrows decisions (below). A clean result under `--project P` certifies only
+what was checked: bindings outside P, and documents with no task, were not
+read, so their differences would not have shown.
 
 **Comments.** A comment in the rendered form of op N (`RenderedOpID`) whose op
 is one of the task's comments' (`yt_comment_write_links`) gives its author and
@@ -753,9 +837,12 @@ sample on the same data.
 **Tasks.** The id is the `hk ID` field (else the description's `hk task: #N`
 line). The title is the description's title line in whichever form wrote it:
 issue_fields' `RenderFields` (whitespace collapsed, so PG's title is compared
-collapsed), issue_create's `RenderIssue` or the import's `Original hk title:`
-(both exact). The project is the `hk 프로젝트` field (else the description's
-project; both, when present, must agree), with `Unassigned` read as none.
+collapsed), issue_create's `RenderIssue`, or the import's `Original hk title:`
+(the last two exact; the import's title may span lines and ends where its
+metadata block — `제목(한국어):`, `Body document:`, `PR:`, `Job:`, `Parent
+task:` — begins). The project is the `hk 프로젝트` field (else the
+description's project; both, when present, must agree), with `Unassigned`
+read as none.
 
 **Decisions.** The DEC issue's description is read in the Y6 form only:
 `RenderDecision`'s block (a decision_fields snapshot), or the block between
@@ -852,8 +939,13 @@ hk task: #<task id> · project: <hk project>
 **Send.** First the project's fields (one admin GET): without `hk ID`, or
 without `hk 프로젝트` (for an enum field, without the task's project among its
 live values), the op is held `not_sent` until the schema is repaired, never
-rejected. A text `hk 프로젝트` field (the importer's shape) is sent as text, an
-enum field (the legacy push's) as an enum value. Then the project's issues
+rejected. The issue value follows the project field's type: a simple
+`hk 프로젝트` field (`SimpleProjectCustomField`, the importer's shape) as a
+primitive string (`SimpleIssueCustomField`), a formatted text one
+(`TextProjectCustomField`) as `TextIssueCustomField` with a `{"text": …}`
+value, and an enum field (the legacy push's) as an enum value; sending a
+primitive to a text field is a 4xx that would reject the op for good. Then the
+project's issues
 with `hk ID` = task id (one GET, checked against the project id and the
 field). Exactly one, whose summary names the task (`SummaryNamesTask`), is
 adopted (`AdoptedError`): no POST, the op applies with its id and its map rows
@@ -861,17 +953,27 @@ are marked `Adopted`. Any other hit (two or more, or one that does not name the 
 `rejected / ambiguous_issue`, no POST. None: exactly one POST with the
 project, summary, description and only the `hk ID` and `hk 프로젝트` fields
 (state, lane, kind, grade and tags are the later snapshot op's). The reply
-classification is the shared one; a failed search is `not_sent` (above).
+classification is the shared one; a failed search is `not_sent` (above), and
+so is a create the dispatch budget cannot start: the field read and the search
+share one budget, and an expired one means nothing was sent, so the op is
+prepared again instead of becoming `remote_unknown` with no evidence to find.
 
 **Evidence.** The same search. Exactly one issue with the task's `hk ID`,
 whose description is exactly the rendered text, applies the op; a quoted or
-copied marker is not ownership. Zero, two exact hits, an edited description,
-or a hit beside another issue with that `hk ID` keep it `remote_unknown`;
-there is never an automatic re-create. An adoption whose settlement was lost (a crash or
-a failed apply after Send adopted) is `remote_unknown / marker_mismatch` too:
-the adopted issue has no marker, and an issue's age does not prove the
-dispatch's search saw it (its `hk ID` or summary may have been set after the
-search while a POST was in flight), so the operator resolves it.
+copied marker is not ownership. The one issue whose summary names the task and
+whose description carries no marker of this op's is the issue Send adopts
+(this kind's create always writes the marker), so an adoption whose settlement
+was lost (a crash or a failed apply after Send adopted) is reported as that
+adoption, but never applied by the search: the ledger cannot tell that crash
+from a POST whose reply was lost, nothing bounds when such a POST lands, and an
+applied op is never searched again, so a late create would be a second issue
+no one sees. The op stays `remote_unknown / adoption_unconfirmed` with the
+issue id in its detail, and `yt ops resolve <op> --applied <issue id>
+--adopted` applies it with its map rows marked `Adopted` (hk 3911; a POST that
+lands first is a second hit, `marker_mismatch`).
+Zero, two exact hits, an edited description, or a hit beside another issue
+with that `hk ID` keep it `remote_unknown`; there is never an automatic
+re-create.
 
 **Binding.** Applying the op (send, evidence or `yt ops resolve`) takes the
 task's lane lock, first checks every mapping hk keeps (the task's binding and
@@ -1005,12 +1107,14 @@ and the value; a 4xx from the POST is `rejected / http_4xx`. Either raises the
 rejected-op alert, and the next feed change or backfill run prepares the
 snapshot again (Rejected snapshots above). No map rows.
 
-`레인`, `영역` and `마일스톤` are open sets hk owns (a new lane appears in hk
-first, hk 4051). YouTrack enum names are case-insensitively unique, so a
-value differing from a bundle value only in case is not added: the update
-sends the bundle's spelling, and an archived one is un-archived (hk 4234).
-Otherwise, when nothing above refuses, a value of theirs missing from
-the project's bundle is added to that bundle (`POST
+`레인`, `영역` and `마일스톤` are open sets hk owns (a new value appears in hk
+first, hk 4051). `영역` and `마일스톤` are the import's string fields (hk
+4305), so bundle handling applies only to projects that carry them as enums.
+YouTrack enum names are case-insensitively unique, so a value differing from
+a bundle value only in case is not added: the update sends the bundle's
+spelling, and an archived one is un-archived (hk 4234). Otherwise, when
+nothing above refuses, a value of an enum-shaped field missing from the
+project's bundle is added to that bundle (`POST
 /api/admin/customFieldSettings/bundles/enum/<bundle>/values` with `$type` and
 `name`), and an archived one is un-archived (`POST .../values/<value id>` with
 `archived: false`), never duplicated. The add goes to the bundle the project's
@@ -1347,7 +1451,11 @@ release rollback never meets an authority value it cannot parse (consult hk
   the binding against every local source, as a fresh comment's enqueue does
   (for example a task moved to another project while its create was pending):
   on a disagreement the op is `rejected / ambiguous_issue` and nothing is
-  sent. A task with no pending create, a body
+  sent; it never waits in the lane for a later move (hk 4457's hold was
+  taken out of PR #383 because a hold that waits for a later op on a
+  strictly ordered lane can wedge it; redesign hk 4569). Migration
+  `20261113-yt-comment-hold` stays registered and unused. A task with no
+  pending create, a body
   the protocol cannot send, and a mapping disagreement are still refused.
   The previous release's comment gate never admits a targetless op, so it
   holds such an op rather than send it. A dots reply (`ReplyDots`), which prepares no op
@@ -1598,6 +1706,10 @@ mode on, for each changed document, in order:
   and the rescan both find such a document: the rescan lists every unbound
   post-import document whose create is not held, so no document change is
   needed.
+- no binding, created after the import ended, and a decision whose body
+  amends a policy document with no bound article on the tenant:
+  `parent_pending`, no op. The catch-up and the rescan retry it once that
+  policy is bound.
 
 **Catch-up.** The consumer's cursor starts at the feed's end, so each
 process in mode on runs, after the cursor exists, one full catch-up: every
@@ -1614,7 +1726,8 @@ Mode off prepares nothing and advances the cursor. Each pass logs
 `ytwrite.articles_feed documents= create_prepared= create_rejected=
 create_exists= update_prepared= unchanged= exception_not_updated=
 exception_unbound_imported= out_of_scope= deleted= other_tenant= no_project=
-invalid=`. No parent is set: hk 3995 had no settled rule when this shipped.
+invalid=`. A document waiting on its policy's article logs
+`ytwrite.article_parent_pending`; see Parent.
 
 **Op.** Principal and actor `hk:documents`, lane `document:<id>`. An
 `article_create` targets the project id and carries the summary, the body
@@ -1659,6 +1772,33 @@ Anything else (gone, another project, no marker) rejects the op
 `legacy_synced_unverified`, and so does, at prepare time, a legacy article
 the sync split into parts or whose legacy project has no YouTrack id. A
 rejected document stays unbound and holds the documents authority switch. Any other failed read leaves the op `not_sent`.
+
+**Parent** (hk 3995). A payload may name a parent: `parent_article_id` (the
+article it goes under) or `parent_family` (the family whose root it goes
+under); setting both is refused by `CheckArticle`. A payload with neither,
+as every create made before this shipped, stays top-level, and so does a
+legacy-synced document (it is adopted where it is). The parent is decided at
+prepare time and kept in the payload, so an op prepared earlier stays
+top-level.
+- A decision whose body has an `amends: policy/<key>` line (the first such
+  line; the value must be a `policy/` key) goes under the article of that
+  policy document, bound on the tenant. Until that policy has one, the prepare
+  writes no op: outcome `parent_pending`, logged per document as
+  `ytwrite.article_parent_pending`; the catch-up and the rescan retry it.
+- Any other document whose key has a `/` goes under its family root: the
+  key's first segment. A segment that is not `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`
+  gets no parent, logged `ytwrite.article_family_skipped`, so no create is
+  refused for its key.
+- A family root is a top-level article: summary the family, content
+  `Family root for <family> documents.` and the marker
+  `<!-- hk-family:<family> -->` (`ytwrite.FamilyRootMarker`). Send finds it
+  by summary and marker: none, and it creates one before the document; one,
+  it is the parent; two or more, the op is `rejected / ambiguous_issue` (no
+  POST). Root creation is not an op, so no op records it. Residual risk: two
+  first creates of one family in one project, running at once, can make two
+  roots; the next create of that family then refuses `ambiguous_issue` until
+  an operator merges them.
+- Evidence looks for the root without creating it: no root, no match.
 
 **Send.** `article_create`: one search of the project for the summary
 (`GET /api/articles`, query `project: <SHORT> "<summary>"`, at most 100 hits,
@@ -1730,11 +1870,10 @@ a crash at each boundary) over both ledgers (hk 3910).
 
 ## Not yet (later slices)
 
-- Turning the mode on in production (handoffkeep-design with the operator,
-  after deploy), and the authority epoch (design v2.3).
-- An automatic binder for new tasks, `comments-unbind`, and recovery of ops
-  held after a stop (hk 3810 follow-up).
-- The event-feed row an applied op commits, parent/child settling (b3),
-  article generations for split documents (Y5c), claims with a fencing generation (v2.2).
-- A direct GET of the created comment before answering `applied`; the live
-  canary measures index latency, marker preservation and read-after-write.
+- 운영자와 배포 뒤 운영 환경에서 모드를 켜는 절차, authority epoch (design v2.3).
+- 다른 테넌트가 소유하거나 YouTrack이 정본이어서 drain 후에도 남는 held op의 복구
+  또는 수동 해결. drain은 이를 보고하지만 해당 소유자의 권한을 가져오지 않는다.
+- 적용된 op가 커밋하는 event-feed 행, parent/child 정산 (b3), 분할 문서의 article
+  세대 (Y5c), fencing generation이 있는 claim (v2.2).
+- `applied` 응답 전에 생성된 코멘트를 직접 GET하는 절차. 라이브 canary에서 인덱스
+  지연, marker 보존, 쓰기 직후 읽기를 측정한다.

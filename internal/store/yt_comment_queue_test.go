@@ -324,6 +324,94 @@ func TestYTCommentQueuedBindingDisagreement(t *testing.T) {
 	}
 }
 
+// The review's sequence (PR #383, r4564745703; hk 4457's hold was taken out
+// for it, redesign hk 4569): a comment C1 queued behind the create, a comment
+// C2 written once the binding exists (so it has a target), then the task
+// moves and an issue_move M is prepared behind both. C1 is rejected at once
+// (ambiguous_issue) even with M pending, so the lane drains in id order: C2
+// goes out, then M is claimable. Nothing waits for a later op on its lane.
+func TestYTCommentQueuedRejectsWithAMovePending(t *testing.T) {
+	s, x, create := ytqSetup(t, "ytq_move_pending")
+	ctx := t.Context()
+	c1, err := s.CreateTaskComment(ctx, x.ID, "worker", "queued behind the create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	op1, ok := ytcOpFor(t, s, c1.ID)
+	if !ok || op1.YTTargetID != "" {
+		t.Fatalf("queued op %+v %v", op1, ok)
+	}
+	const other = "ytq-other"
+	if _, err := s.AddTaskProject(ctx, other, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: other, ProjectID: "0-9", ShortName: "HKO"}); err != nil {
+		t.Fatal(err)
+	}
+	ytiDispatch(t, s, create)
+	if _, err := s.YTWriteLedger().Apply(ctx, time.Now().UTC(), create.ID, "2-900", ytiMaps(create, "2-900")); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := s.CreateTaskComment(ctx, x.ID, "worker", "written once the issue was bound")
+	if err != nil {
+		t.Fatal(err)
+	}
+	op2, ok := ytcOpFor(t, s, c2.ID)
+	if !ok || op2.YTTargetID != "2-900" || op2.ID <= op1.ID {
+		t.Fatalf("targeted op %+v %v", op2, ok)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET project=$2 WHERE id=$1`, x.ID, other); err != nil {
+		t.Fatal(err)
+	}
+	s.SetYTMovesMode(YTMovesOn)
+	n, err := ytwrite.MoveOp(ytwrite.MoveRequest{Principal: YTFieldsPrincipal, Actor: YTFieldsPrincipal, Tenant: ytcTenant,
+		IssueID: "2-900", ProjectID: "0-9", TaskID: x.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	mv, made, err := prepareYTOnceTx(ctx, tx, time.Now().UTC(), n, n.PayloadSHA)
+	if err != nil || !made {
+		t.Fatalf("prepare move: %v made=%v", err, made)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if mv.ID <= op2.ID {
+		t.Fatalf("move %d before comment %d", mv.ID, op2.ID)
+	}
+	if out := ytiClaim(t, s, mv); out != ytwrite.ClaimBlocked {
+		t.Fatalf("claim of the move behind the comments = %s", out)
+	}
+
+	counting := &ytcCounting{Remote: ytwritetest.NewFake()}
+	var offset atomic.Int64
+	p := ytcProtocol(t, s, counting, &offset)
+	if got := ytqDrive(t, s, p, op1.ID); got.State != ytwrite.StateRejected || got.Reason != ytwrite.ReasonAmbiguousIssue || got.Attempts != 0 {
+		t.Fatalf("queued comment with the move pending %+v", got)
+	}
+	if got := ytqDrive(t, s, p, op2.ID); got.State != ytwrite.StateApplied || got.YTTargetID != "2-900" {
+		t.Fatalf("targeted comment %+v", got)
+	}
+	// The move is no longer behind anything: claimable now, or already
+	// taken by the drive's passes.
+	cur, err := s.YTWriteLedger().ByID(ctx, mv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.State == ytwrite.StatePrepared {
+		if out := ytiClaim(t, s, mv); out != ytwrite.ClaimClaimed {
+			t.Fatalf("claim of the move once the comments resolved = %s", out)
+		}
+	} else if cur.Attempts == 0 {
+		t.Fatalf("move %+v resolved without an attempt", cur)
+	}
+}
+
 // The ESC's sequence (PR #335 round 3), under hk 4318's design: comment op 2
 // is queued behind issue op 1, and the task moves. Op 1 stays the task's one
 // issue op (same id, same key), so op 2 stays behind it in plain lane order,

@@ -73,16 +73,15 @@ gh_get() {
 	# limit), which is what a local `hk-follow gate` uses.
 	[[ -n "${GH_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer ${GH_TOKEN}")
 	code=$(curl -sS -o "$2" -w '%{http_code}' --max-time 20 \
-		"${auth[@]}" \
+		${auth[@]+"${auth[@]}"} \
 		-H 'Accept: application/vnd.github+json' \
 		-H 'X-GitHub-Api-Version: 2022-11-28' \
 		"${HK_FOLLOW_GITHUB_API}$1") || return 1
 	[[ "$code" == 2?? ]]
 }
 
-# gh_status <sha> <context> <state> <description>: post a commit status. A
-# refused status is logged, never fatal: the status is the report, not the
-# gate.
+# gh_status <sha> <context> <state> <description>: post a commit status.
+# rc 0 when GitHub accepted it, 1 otherwise; the caller decides on a retry.
 gh_status() {
 	local desc=${4:0:140} body code
 	body=$(jq -n --arg s "$3" --arg c "$2" --arg d "$desc" '{state:$s, context:$c, description:$d}')
@@ -92,9 +91,11 @@ gh_status() {
 		-H 'X-GitHub-Api-Version: 2022-11-28' \
 		--data "$body" \
 		"${HK_FOLLOW_GITHUB_API}/repos/${HK_FOLLOW_REPO}/statuses/$1") || code=000
-	if [[ "$code" != 2?? ]]; then
-		log "hk_follow.status_failed sha=$1 context=$2 http=$code"
+	if [[ "$code" == 2?? ]]; then
+		return 0
 	fi
+	log "hk_follow.status_failed sha=$1 context=$2 http=$code"
+	return 1
 }
 
 # registry_manifest <ref> <out>: fetch the manifest of image:<ref> (a tag or a
@@ -150,13 +151,16 @@ sg_deploy() { "$SHIFTGATE" deploy "$1" --digest "$2"; }
 sg_rollback() { "$SHIFTGATE" rollback "$1"; }
 
 # notify <text>: one lane event to the design session. Optional: a host
-# without panewire logs the text instead.
+# without panewire logs the text instead. rc 1 when the emit fails, so the
+# caller keeps the event queued.
 notify() {
-	if command -v "$PANEWIRE" >/dev/null 2>&1; then
-		"$PANEWIRE" emit --kind lane.event --lane "$HK_FOLLOW_NOTIFY_LANE" --type info --text "$1" >/dev/null 2>&1 ||
-			log "hk_follow.notify_failed lane=$HK_FOLLOW_NOTIFY_LANE"
-	else
+	if ! command -v "$PANEWIRE" >/dev/null 2>&1; then
 		log "hk_follow.notify_skipped lane=$HK_FOLLOW_NOTIFY_LANE text=$(printf '%q' "$1")"
+		return 0
+	fi
+	if ! "$PANEWIRE" emit --kind lane.event --lane "$HK_FOLLOW_NOTIFY_LANE" --type info --text "$1" >/dev/null 2>&1; then
+		log "hk_follow.notify_failed lane=$HK_FOLLOW_NOTIFY_LANE"
+		return 1
 	fi
 }
 
@@ -166,7 +170,67 @@ post_status() {
 		log "hk_follow.dry_run would_post_status sha=$1 context=$2 state=$3 description=$(printf '%q' "$4")"
 		return 0
 	fi
-	gh_status "$@"
+	gh_status "$@" || true
+}
+
+# The outbox holds the reports of a terminal state (GitHub status, deploy
+# record, lane event) until they are delivered. tick saves a state only after
+# its reports are queued; a report whose delivery fails stays queued for the
+# next tick. A crash or an outage therefore never loses a report, and shiftgate
+# never runs again to make one. Delivery is at least once: a crash between a
+# successful delivery and its removal repeats that one report.
+outbox_dir() { echo "${HK_FOLLOW_STATE_DIR}/outbox"; }
+
+# outbox_add <json>: queue one report. Written under a temp name and renamed,
+# so a half-written entry is never delivered.
+outbox_add() {
+	local dir f
+	dir=$(outbox_dir)
+	mkdir -p "$dir"
+	f=$(mktemp "$dir/$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")
+	printf '%s\n' "$1" >"$f"
+	mv "$f" "$f.json"
+}
+
+queue_status() { # <sha> <context> <state> <description>
+	outbox_add "$(jq -cn --arg s "$1" --arg c "$2" --arg st "$3" --arg d "$4" \
+		'{kind:"status", sha:$s, context:$c, state:$st, description:$d}')"
+}
+
+queue_notify() {
+	outbox_add "$(jq -cn --arg t "$1" '{kind:"notify", text:$t}')"
+}
+
+# deliver_item <file>: send one queued report. rc 0 when it is delivered.
+deliver_item() {
+	case "$(jq -r .kind "$1")" in
+	status)
+		gh_status "$(jq -r .sha "$1")" "$(jq -r .context "$1")" "$(jq -r .state "$1")" "$(jq -r .description "$1")"
+		;;
+	record)
+		jq -c .record "$1" >"$WORK/outbox-record.json" &&
+			hk_doc_put "$(jq -r .key "$1")" "$WORK/outbox-record.json"
+		;;
+	notify)
+		notify "$(jq -r .text "$1")"
+		;;
+	*) return 1 ;;
+	esac
+}
+
+# deliver_outbox: send every queued report, oldest first, removing each one
+# that is delivered. Dry runs deliver nothing.
+deliver_outbox() {
+	local f
+	[[ $DRY_RUN -eq 1 ]] && return 0
+	for f in "$(outbox_dir)"/*.json; do
+		[[ -f "$f" ]] || continue
+		if deliver_item "$f"; then
+			rm -f "$f"
+		else
+			log "hk_follow.outbox_retry file=$(basename "$f")"
+		fi
+	done
 }
 
 now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -503,7 +567,7 @@ record() {
 			approval_ref: (if $appr == "" then null else $appr end),
 			included_prs: $prs, source: "hk-follow", release: null
 		}' >"$f"
-	hk_doc_put "deploy/$1/$7" "$f" || log "hk_follow.record_failed service=$1 sha=$2"
+	outbox_add "$(jq -c --arg k "deploy/$1/$7" '{kind:"record", key:$k, record:.}' "$f")"
 }
 
 # report_gate <sha> <digest> <verdict> <reason>: a tick that will not roll
@@ -512,12 +576,12 @@ report_gate() {
 	[[ $DRY_RUN -eq 1 ]] && return 0
 	case "$3" in
 	hold)
-		post_status "$1" deployed pending "deploy-held:$4 (hk-follow, ${HK_FOLLOW_TARGET})"
-		notify "[hk-follow] handoffkeep ${1:0:12} held: $4; approval doc ${HK_FOLLOW_APPROVAL_PREFIX}/$1"
+		queue_status "$1" deployed pending "deploy-held:$4 (hk-follow, ${HK_FOLLOW_TARGET})"
+		queue_notify "[hk-follow] handoffkeep ${1:0:12} held: $4; approval doc ${HK_FOLLOW_APPROVAL_PREFIX}/$1"
 		;;
 	refuse)
-		post_status "$1" deployed failure "deploy-refused:$4 (hk-follow, ${HK_FOLLOW_TARGET})"
-		notify "[hk-follow] handoffkeep ${1:0:12} refused: $4 (digest $2)"
+		queue_status "$1" deployed failure "deploy-refused:$4 (hk-follow, ${HK_FOLLOW_TARGET})"
+		queue_notify "[hk-follow] handoffkeep ${1:0:12} refused: $4 (digest $2)"
 		;;
 	esac
 }
@@ -538,6 +602,13 @@ tick_locked() {
 	# shellcheck disable=SC2034 # set by resolve
 	local TAG_DIGEST TAG_REV TAG_CHILDREN CAND_DIGEST CAND_REV CAND_CHILDREN
 	mapfile -t svcs < <(services)
+	deliver_outbox
+	if [[ ${#svcs[@]} -eq 0 ]]; then
+		# A config error, not a verdict: nothing is saved, so the digest is
+		# evaluated again once HK_FOLLOW_SERVICES is fixed.
+		log "hk_follow.refused reason=no_services"
+		return 1
+	fi
 
 	rc=0
 	resolve "$HK_FOLLOW_TAG" TAG || rc=$?
@@ -562,12 +633,13 @@ tick_locked() {
 		# the records of the rollout this tick may run next.
 		stamp=$(state_field at | tr -d ':-')
 		[[ "$stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || stamp=$(date -u +%Y%m%dT%H%M%SZ)
-		save_state "$prev_digest" "$prev_sha" failed interrupted
-		post_status "$prev_sha" deployed failure "rollout interrupted on ${HK_FOLLOW_TARGET}; not retried; check shiftgate status"
+		queue_status "$prev_sha" deployed failure "rollout interrupted on ${HK_FOLLOW_TARGET}; not retried; check shiftgate status"
 		for line in "${svcs[@]}"; do
 			record "${line%% *}" "$prev_sha" "$prev_digest" "" failed interrupted "$stamp"
 		done
-		notify "[hk-follow] handoffkeep ${prev_sha:0:12} rollout interrupted on ${HK_FOLLOW_TARGET}; not retried; check shiftgate status"
+		queue_notify "[hk-follow] handoffkeep ${prev_sha:0:12} rollout interrupted on ${HK_FOLLOW_TARGET}; not retried; check shiftgate status"
+		save_state "$prev_digest" "$prev_sha" failed interrupted
+		deliver_outbox
 		[[ "$prev_digest" == "$TAG_DIGEST" ]] && return 0
 		prev_verdict=failed prev_reason=interrupted
 	fi
@@ -614,12 +686,12 @@ tick_locked() {
 			[[ "$rev" == "$sha" ]] && continue
 			all_serving=0
 			prev_rev[$svc]=$rev
-			[[ " ${bases[*]} " == *" ${rev:-<unknown>} "* ]] || bases+=("${rev:-<unknown>}")
+			[[ " ${bases[*]+"${bases[*]}"} " == *" ${rev:-<unknown>} "* ]] || bases+=("${rev:-<unknown>}")
 		done
 		if [[ $all_serving -eq 1 ]]; then
 			verdict=noop reason=serving
 		else
-			for base in "${bases[@]}"; do
+			for base in "${bases[@]+"${bases[@]}"}"; do
 				[[ "$base" == "<unknown>" ]] && base=
 				gate "$sha" "$base"
 				verdict=$GATE_VERDICT reason=$GATE_REASON
@@ -664,6 +736,7 @@ tick_locked() {
 			report_gate "$sha" "$TAG_DIGEST" "$verdict" "$reason"
 		fi
 		save_state "$TAG_DIGEST" "$sha" "$verdict" "$reason"
+		deliver_outbox
 		return 0
 	fi
 	if [[ $DRY_RUN -eq 1 ]]; then
@@ -726,15 +799,13 @@ tick_locked() {
 	done
 
 	if [[ $result == success ]]; then
-		save_state "$TAG_DIGEST" "$sha" deployed ""
 		log "hk_follow.deployed sha=$sha digest=$TAG_DIGEST previous_sha=$(IFS=,; echo "${bases[*]}")"
-		post_status "$sha" deployed success "deployed on ${HK_FOLLOW_TARGET}: $(printf '%s\n' "${svcs[@]%% *}" | paste -sd, -)"
+		queue_status "$sha" deployed success "deployed on ${HK_FOLLOW_TARGET}: $(printf '%s\n' "${svcs[@]%% *}" | paste -sd, -)"
 	else
-		save_state "$TAG_DIGEST" "$sha" failed "$failed_step"
 		log "hk_follow.failed sha=$sha digest=$TAG_DIGEST step=$failed_step"
-		post_status "$sha" deployed failure "failed at ${failed_step} on ${HK_FOLLOW_TARGET}; not retried"
+		queue_status "$sha" deployed failure "failed at ${failed_step} on ${HK_FOLLOW_TARGET}; not retried"
 	fi
-	for svc in "${attempted[@]}"; do
+	for svc in "${attempted[@]+"${attempted[@]}"}"; do
 		# A service that finished before a later one failed serves the new
 		# sha; its own record says so.
 		if [[ "$svc" == "$failed_svc" ]]; then
@@ -744,12 +815,20 @@ tick_locked() {
 		fi
 	done
 	if [[ $result == success ]]; then
-		notify "[hk-follow] handoffkeep ${sha:0:12} deployed on ${HK_FOLLOW_TARGET}"
+		queue_notify "[hk-follow] handoffkeep ${sha:0:12} deployed on ${HK_FOLLOW_TARGET}"
 	elif [[ $failed_step == *_rollback_failed ]]; then
-		notify "[hk-follow] handoffkeep ${sha:0:12} FAILED at ${failed_step} on ${HK_FOLLOW_TARGET}: ${failed_svc} serves a wrong or unhealthy revision and rollback did not restore it; act now"
+		queue_notify "[hk-follow] handoffkeep ${sha:0:12} FAILED at ${failed_step} on ${HK_FOLLOW_TARGET}: ${failed_svc} serves a wrong or unhealthy revision and rollback did not restore it; act now"
 	else
-		notify "[hk-follow] handoffkeep ${sha:0:12} FAILED at ${failed_step} on ${HK_FOLLOW_TARGET}; not retried; ${failed_svc} keeps or was rolled back to its previous colour"
+		queue_notify "[hk-follow] handoffkeep ${sha:0:12} FAILED at ${failed_step} on ${HK_FOLLOW_TARGET}; not retried; ${failed_svc} keeps or was rolled back to its previous colour"
 	fi
+	# Saved last: a crash before this line leaves `started`, which the next tick
+	# reports as interrupted (a duplicate report, never a lost one).
+	if [[ $result == success ]]; then
+		save_state "$TAG_DIGEST" "$sha" deployed ""
+	else
+		save_state "$TAG_DIGEST" "$sha" failed "$failed_step"
+	fi
+	deliver_outbox
 }
 
 # wait_revision <base-url> <sha>: until /healthz serves <sha>, at most

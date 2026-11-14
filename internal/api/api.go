@@ -641,6 +641,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/tasks/{id}/comments", s.taskCommentsList)
 	m.HandleFunc("POST /v1/tasks/{id}/comments", s.taskCommentCreate)
 	m.HandleFunc("POST /v1/decisions/resolve", s.decisionResolve)
+	m.HandleFunc("POST /v1/decisions/record", s.decisionRecordSession)
 	m.HandleFunc("GET /v1/decisions/deliveries/hygiene", s.decisionDeliveryHygiene)
 	m.HandleFunc("GET /v1/decision-requests", s.decisionRecordsList)
 	m.HandleFunc("GET /v1/decision-requests/sources", s.decisionSources)
@@ -1842,9 +1843,13 @@ const operatorDeskClientID = "operator-desk"
 // right: quota grants, host grants and task writes are unchanged.
 const panewireDesignClientID = "panewire-design"
 
+// fleetPolicyClientID is the fleet-policy design session's catalog writer,
+// admitted by routing-policy decision 21. Its token is provisioned separately.
+const fleetPolicyClientID = "fleet-policy"
+
 // benchCatalogWriter reports whether client may write the bench catalog.
 func benchCatalogWriter(client string) bool {
-	return client == operatorClientID || client == operatorDeskClientID || client == panewireDesignClientID
+	return client == operatorClientID || client == operatorDeskClientID || client == panewireDesignClientID || client == fleetPolicyClientID
 }
 
 type benchCatalogInput struct {
@@ -2267,9 +2272,21 @@ func (s Server) metrics(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
+	// The outbox gauges come from the database. A Server with no Store (tests
+	// that exercise only the client-revision series) reports none.
+	var outbox bytes.Buffer
+	if st := s.Service.Store; st != nil {
+		o, e := st.YTWriteOutboxStatus(r.Context(), time.Now())
+		if e != nil {
+			appErr(w, r, e)
+			return
+		}
+		writeYTWriteOutboxMetrics(&outbox, o)
+	}
 	if s.Service.Attachments == nil || !s.Service.Attachments.Enabled {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		_, _ = w.Write([]byte("handoffkeep_attach_enabled 0\n"))
+		_, _ = w.Write(outbox.Bytes())
 		s.ClientRevisions.writeMetrics(w)
 		return
 	}
@@ -2286,6 +2303,7 @@ func (s Server) metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprintf(w, "handoffkeep_attach_bytes_total %d\nhandoffkeep_attach_objects %d\nhandoffkeep_attach_puts_month %d\nhandoffkeep_attach_gets_month %d\nhandoffkeep_attach_cap_bytes %d\nhandoffkeep_attach_cap_ratio %.8f\n", u.TotalBytes, objects, u.Puts, u.Gets, c.StorageCap, float64(u.TotalBytes)/float64(c.StorageCap))
+	_, _ = w.Write(outbox.Bytes())
 	s.ClientRevisions.writeMetrics(w)
 }
 

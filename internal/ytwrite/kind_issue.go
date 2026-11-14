@@ -265,15 +265,25 @@ func (issueCreate) Send(ctx context.Context, remote Remote, op Op, text string) 
 		return "", &RefusedError{Reason: ReasonAmbiguousIssue, Detail: fmt.Sprintf("project %s has %d issues with hk ID %d and none can be adopted: %s", op.YTTargetID, len(hits), x.TaskID, strings.Join(ids, ","))}
 	}
 	summary, _ := RenderIssue(x)
-	return ir.CreateIssue(ctx, IssueCreate{ProjectID: op.YTTargetID, Summary: summary, Description: text, TaskID: x.TaskID, HKProject: p.Project, HKProjectText: fields.ProjectText})
+	// The field check and the search share the dispatch budget: a create that
+	// cannot start sent nothing, so the op is prepared again instead of
+	// becoming remote_unknown with no evidence to find (hk 3943).
+	if err := ctx.Err(); err != nil {
+		return "", &NotSentError{Err: err}
+	}
+	return ir.CreateIssue(ctx, IssueCreate{ProjectID: op.YTTargetID, Summary: summary, Description: text, TaskID: x.TaskID, HKProject: p.Project, ProjectField: fields.Project})
 }
 
 // Evidence lists the project's issues with the task's hk ID. Exactly one,
 // whose description is exactly the rendered text (provenance, task, title and
 // marker), is the match; a quoted or copied marker in other text is not
-// ownership. Every other issue with that hk ID counts as a mismatch, so the
-// shared rule keeps the op remote_unknown unless that one issue is all there
-// is.
+// ownership. The one issue the task already had (no marker of this op's, its
+// summary naming the task) is the issue Send would adopt, reported as
+// Evidence.Adopted so a settlement lost after that decision names the issue
+// an operator resolves it to (hk 3911); reconcile never applies it on its
+// own. Every other issue
+// with that hk ID counts as a mismatch, so the shared rule keeps the op
+// remote_unknown unless one of those two is all there is.
 func (issueCreate) Evidence(ctx context.Context, remote Remote, op Op, text string) (Evidence, error) {
 	var ev Evidence
 	ir, ok := remote.(IssueRemote)
@@ -292,10 +302,17 @@ func (issueCreate) Evidence(ctx context.Context, remote Remote, op Op, text stri
 		}
 		return ev, err
 	}
+	marker := OpMarker(op.ID)
 	for _, h := range hits {
-		if h.Description == text {
+		switch {
+		case h.Description == text:
 			ev.Matches = append(ev.Matches, h.ID)
-		} else {
+		case len(hits) == 1 && !strings.Contains(h.Description, marker) && SummaryNamesTask(h.Summary, x.TaskID):
+			// This kind's create always writes the marker, so an unmarked
+			// issue is not the op's write: it is the one Send adopts.
+			ev.Matches = append(ev.Matches, h.ID)
+			ev.Adopted = true
+		default:
 			ev.Mismatched++
 		}
 	}

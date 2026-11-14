@@ -70,14 +70,14 @@ func TestEveryManualTransitionEdge(t *testing.T) {
 			t.Run(from+"_to_"+to, func(t *testing.T) {
 				x := flowTask(t, s, pool, "implement", from, true)
 				in := TransitionInput{To: to, By: "tester", Note: "why"}
-				if from == StateMerged && to == StateCompleted {
+				if to == StateCompleted {
 					in.Evidence = "hk:doc research/x"
 				}
 				if to == StateDuplicate {
 					in.DuplicateOf = other.ID
 				}
 				got, err := s.TransitionTaskWith(ctx, x.ID, in)
-				allowed := TaskTransitions[from][to] && (!IsSettledState(from) || mergedCompletes(from, to)) && (to != StateCompleted || mergedCompletes(from, to))
+				allowed := TaskTransitions[from][to] && (!IsSettledState(from) || mergedCompletes(from, to))
 				if allowed {
 					if err != nil {
 						t.Fatalf("%s -> %s refused: %v", from, to, err)
@@ -257,7 +257,7 @@ func TestClaimSetsSubstateFromKind(t *testing.T) {
 	s, pool := searchTestStore(t)
 	ctx := t.Context()
 	for _, state := range []string{"backlog", "unstarted"} {
-		for kind, want := range map[string]string{"implement": "developing", "fix": "developing", "ops": "developing", "verify": "researching", "decide": "researching"} {
+		for kind, want := range map[string]string{"implement": "developing", "fix": "developing", "ops": "developing", "verify": "researching", "research": "researching", "decide": "researching"} {
 			x := flowTask(t, s, pool, kind, state, false)
 			got, err := s.ClaimTask(ctx, x.ID, "worker-1", "job-"+kind+"-"+state, "")
 			if err != nil {

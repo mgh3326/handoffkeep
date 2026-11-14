@@ -55,6 +55,22 @@ func TestListDecisionRecordsQuery(t *testing.T) {
 	}
 }
 
+func TestRecordSessionDecisionRequest(t *testing.T) {
+	h, calls := decisionFake(t, `{"record":{"id":12,"source":"session_chat","source_ref":"design-lane:chat-42","status":"answered","answer":"exact words"},"duplicate":false}`)
+	c := Client{URL: h.URL, Token: "tok"}
+	at := time.Date(2026, 11, 11, 5, 0, 0, 0, time.UTC)
+	in := store.SessionDecisionInput{Key: "chat-42", Lane: "design-lane", Reading: "Keep the boundary.", Quote: "exact words", DecidedAt: at, Grounds: []string{"hk:doc decision/example"}}
+	got, err := c.RecordSessionDecision(context.Background(), in)
+	if err != nil || got.Duplicate || got.Record.ID != 12 || got.Record.Answer != in.Quote {
+		t.Fatalf("record=%+v err=%v", got, err)
+	}
+	g := (*calls)[0]
+	if g.method != "POST" || g.path != "/v1/decisions/record" || g.auth != "Bearer tok" ||
+		g.body["key"] != in.Key || g.body["lane"] != in.Lane || g.body["reading"] != in.Reading || g.body["quote"] != in.Quote || len(g.body) != 6 {
+		t.Fatalf("call=%+v", g)
+	}
+}
+
 func TestSnoozeDecisionRecordBody(t *testing.T) {
 	h, calls := decisionFake(t, `{"id":7,"status":"open","snoozed":true}`)
 	c := Client{URL: h.URL, Token: "tok"}

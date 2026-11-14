@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
 // Each test runs in a throwaway schema so it can count every decision row.
@@ -115,6 +117,54 @@ func TestDecisionRecordTaskFlag(t *testing.T) {
 	rows := decisionRowsWhere(t, s, `task_id=$1`, task.ID)
 	if len(rows) != 2 || rows[0].Status != DecisionStatusAnswered || rows[1].Status != DecisionStatusOpen || rows[1].Question != "next?" || rows[0].SourceRef == rows[1].SourceRef {
 		t.Fatalf("re-ask rows=%+v", rows)
+	}
+}
+
+func TestRecordSessionDecisionClosesAndReplaysVerbatimRecord(t *testing.T) {
+	s := decisionStore(t)
+	now := time.Date(2026, 11, 13, 8, 0, 0, 0, time.UTC)
+	decidedAt := now.Add(-time.Hour)
+	in := SessionDecisionInput{
+		Key: "chat-42", Lane: "design-lane", By: "settling-session", Reading: "Keep the current boundary.",
+		Quote: "Keep the existing boundary as-is.", DecidedAt: decidedAt,
+		Grounds: []string{"hk:doc decision/2026-11-13/session-a", "https://example.test/ground"},
+	}
+	first, err := s.RecordSessionDecision(t.Context(), in, now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := first.Record
+	if first.Duplicate || r.Source != DecisionSourceSessionChat || r.SourceRef != "design-lane:chat-42" || r.Status != DecisionStatusAnswered ||
+		r.Question != in.Reading || r.Reading != in.Reading || r.Answer != in.Quote || r.AnsweredBy != in.By || r.AnsweredAt == nil || !r.AnsweredAt.Equal(decidedAt) || !sameStrings(r.Grounds, in.Grounds) {
+		t.Fatalf("record=%+v, duplicate=%t", r, first.Duplicate)
+	}
+	issue := decisionTextOf(r, "")
+	if issue.Reading != in.Reading || !sameStrings(issue.Grounds, in.Grounds) || issue.Answer != in.Quote {
+		t.Fatalf("YouTrack decision text=%+v", issue)
+	}
+	second, err := s.RecordSessionDecision(t.Context(), in, now.Add(time.Minute), nil)
+	if err != nil || !second.Duplicate || second.Record.ID != r.ID {
+		t.Fatalf("retry=%+v err=%v", second, err)
+	}
+	in.Quote = "Changed words"
+	if _, err := s.RecordSessionDecision(t.Context(), in, now, nil); !errors.Is(err, ErrSessionDecisionConflict) {
+		t.Fatalf("changed retry err=%v, want conflict", err)
+	}
+}
+
+func TestRecordSessionDecisionRejectsSecretsBeforeInsert(t *testing.T) {
+	s := decisionStore(t)
+	in := SessionDecisionInput{
+		Key: "secret-quote", Lane: "design-lane", By: "settling-session", Reading: "Keep the boundary.",
+		Quote: "The credential is " + "AKIA" + strings.Repeat("X", 16), DecidedAt: time.Date(2026, 11, 13, 7, 0, 0, 0, time.UTC),
+		Grounds: []string{"hk:doc decision/2026-11-13/session-a"},
+	}
+	_, err := s.RecordSessionDecision(t.Context(), in, time.Date(2026, 11, 13, 8, 0, 0, 0, time.UTC), nil)
+	if pattern, ok := guard.SecretPattern(err); !ok || pattern != "aws_access_key" {
+		t.Fatalf("error=%v, secret pattern=%q ok=%t", err, pattern, ok)
+	}
+	if rows := decisionRowsOf(t, s, DecisionSourceSessionChat, "design-lane:secret-quote"); len(rows) != 0 {
+		t.Fatalf("secret-bearing decision was inserted: %+v", rows)
 	}
 }
 

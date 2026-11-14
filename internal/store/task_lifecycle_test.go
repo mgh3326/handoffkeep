@@ -126,8 +126,8 @@ func TestCloseTaskCompleted(t *testing.T) {
 	}
 
 	implement := flowTask(t, s, pool, "implement", "reviewing", true)
-	if _, err := s.CloseTaskCompleted(ctx, implement.ID, "https://example.com/run/2", "tester", "done", "complete-2"); !errors.Is(err, ErrTaskConflict) {
-		t.Fatalf("implement close err=%v, want ErrTaskConflict", err)
+	if got, err = s.CloseTaskCompleted(ctx, implement.ID, "https://example.com/run/2", "tester", "done", "complete-2"); err != nil || got.State != StateCompleted {
+		t.Fatalf("implement close state=%s err=%v, want completed", got.State, err)
 	}
 
 	writtenReason := flowTask(t, s, pool, "decide", "reviewing", true)

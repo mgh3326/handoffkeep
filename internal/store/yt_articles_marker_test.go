@@ -24,8 +24,10 @@ const ytartQuoted = "the marker is `<!-- hk-op:123 -->`, twice: <!-- hk-op:"
 func ytartRejectedCreate(t *testing.T, s *Store, id int64, key, body, reason string) ytwrite.Op {
 	t.Helper()
 	ctx := t.Context()
+	// The feed sets the key's family on every create; the first op must carry
+	// it too, or the retry's payload hash differs.
 	n, err := ytwrite.ArticleOp(ytwrite.ArticleRequest{Principal: YTDocsPrincipal, Actor: YTDocsPrincipal, YTProjectID: ytartShared, YTProjectShort: "SHRDOC",
-		Tenant: ytcTenant, DocumentID: id, Summary: YTArticleSummary(key, "note"), Body: body})
+		Tenant: ytcTenant, DocumentID: id, Summary: YTArticleSummary(key, "note"), Body: body, ParentFamily: ytArticleFamily(id, key)})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -53,7 +53,7 @@ func TaskStates() []string {
 
 // canCompleteKind reports which task kinds can close without a change.
 func canCompleteKind(kind string) bool {
-	return kind == "decide" || kind == "ops" || kind == "verify"
+	return kind == "decide" || kind == "ops" || kind == "verify" || kind == "research"
 }
 
 // TaskCategory derives the category of a state; "" for an unknown state.
@@ -186,7 +186,7 @@ var TaskTransitions = map[string]map[string]bool{
 	StateCompleted:   {StateUnstarted: true},
 	StateDropped:     {StateUnstarted: true},
 	StateDuplicate:   {StateUnstarted: true},
-	StateIcebox:      {StateBacklog: true, StateUnstarted: true},
+	StateIcebox:      {StateBacklog: true, StateUnstarted: true, StateDropped: true},
 }
 
 var taskStates = func() map[string]bool {
@@ -215,11 +215,11 @@ func closureWrittenBy(from, to string) bool {
 }
 
 // substateForKind is the spawn rule: a claim sets the sub-state from the task
-// kind. implement, fix and ops give developing; verify and decide give
+// kind. implement, fix and ops give developing; verify, research and decide give
 // researching.
 func substateForKind(kind string) string {
 	switch kind {
-	case "verify", "decide":
+	case "verify", "research", "decide":
 		return StateResearching
 	}
 	return StateDeveloping

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"slices"
 	"strconv"
 	"testing"
@@ -192,5 +193,61 @@ func TestYTRebuildDecisionReads(t *testing.T) {
 	page, err := s.YTRebuildDecisions(ctx, ytcTenant, a, 1)
 	if err != nil || len(page) != 1 || page[0].DecisionID != b {
 		t.Fatalf("page after %d: %+v %v", a, page, err)
+	}
+}
+
+// hk 4156 (r4545399286): the decisions page is read in one repeatable-read
+// snapshot. An answer committed after the bindings page is fixed is
+// invisible to the decision rows read, so the rebuilt text never mixes the
+// record from before the answer with the channel from after it.
+func TestYTRebuildDecisionsOneSnapshot(t *testing.T) {
+	s := ytdecSetup(t, "yt_rebuild_dec_snapshot", false)
+	ctx := t.Context()
+	id := ytdecChat(t, s, "Q-20261113-01", "snapshot?")
+	ytFeedExec(t, s, `INSERT INTO yt_decision_bindings(decision_id, tenant, issue_id, origin, bound_by, bound_at)
+		VALUES ($1,$2,$3,'import_verified','test',now())`, strconv.FormatInt(id, 10), ytcTenant, "5-1")
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	ytRebuildDecisionsSeam = func(context.Context) {
+		close(entered)
+		<-release
+	}
+	defer func() { ytRebuildDecisionsSeam = nil }()
+
+	type result struct {
+		got []YTRebuildDecision
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		got, err := s.YTRebuildDecisions(ctx, ytcTenant, 0, 10)
+		done <- result{got, err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("rebuild decisions seam not reached")
+	}
+	// The answer commits after the page's snapshot was fixed but before its
+	// decision rows are read.
+	if _, err := s.TransitionChatQuestion(ctx, "Q-20261113-01", "resolved", "desk"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	var res result
+	select {
+	case res = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("YTRebuildDecisions did not finish")
+	}
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if len(res.got) != 1 {
+		t.Fatalf("decisions %+v", res.got)
+	}
+	if res.got[0].Text.AnsweredBy != "" || res.got[0].Text.AnsweredAt != nil {
+		t.Fatalf("text %+v: the post-snapshot answer leaked into the page", res.got[0].Text)
 	}
 }

@@ -23,14 +23,17 @@ const (
 // YTIssueTaskIDs maps every YouTrack issue id hk links to a task in tenant to
 // that task, from the binding, the mirror link and the write protocol's
 // entity map. When two sources name an issue, the stronger one is kept.
-// Mirror links with no tenant are read as the tenant's. One plain read, no
-// lock: the console joins it to a YouTrack read that is not transactional.
+// Mirror links with no tenant are read as the tenant's, and so are map rows a
+// release that predates the tenant column wrote (hk 3912): the same YouTrack
+// id on another tenant is another issue, so a row with a tenant is read only
+// on it. One plain read, no lock: the console joins it to a YouTrack read that
+// is not transactional.
 func (s *Store) YTIssueTaskIDs(ctx context.Context, tenant string) (map[string]YTIssueTask, error) {
 	rows, err := s.pool.Query(ctx, `SELECT issue_id, task_id::text, 1 FROM yt_task_bindings WHERE tenant=$1
 		UNION ALL
 		SELECT external_id, task_id::text, 2 FROM task_origins WHERE provider='youtrack' AND (coalesce(tenant,'')='' OR tenant=$1)
 		UNION ALL
-		SELECT yt_id, hk_key, 3 FROM yt_entity_map WHERE entity_kind='task'`, tenant)
+		SELECT yt_id, hk_key, 3 FROM yt_entity_map WHERE entity_kind='task' AND (tenant=$1 OR tenant='')`, tenant)
 	if err != nil {
 		return nil, err
 	}

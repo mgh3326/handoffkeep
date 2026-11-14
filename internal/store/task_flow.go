@@ -119,6 +119,7 @@ func applyLifecycle(x *Task, from, to string, now time.Time, c *TaskClosure) err
 		if !valid {
 			return fmt.Errorf("%w: type is not allowed for target state", ErrClosureInvalid)
 		}
+
 		x.Refs.Closure = &TaskClosure{Type: c.Type, Evidence: evidence}
 	} else if !IsSettledState(to) {
 		x.Refs.Closure = nil
@@ -490,7 +491,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 	}
 	if in.ClearOnly {
 		if !x.AwaitingDecision {
-			return Task{}, ErrTaskConflict
+			return Task{}, fmt.Errorf("%w: only a task awaiting a decision can clear its flag", ErrTaskConflict)
 		}
 		action, to = actClearFlag, x.State
 	}
@@ -505,7 +506,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		return x, nil
 	}
 	if reopen && !(IsSettledState(from) || from == StateIcebox) {
-		return Task{}, ErrTaskConflict
+		return Task{}, fmt.Errorf("%w: only a settled or icebox task reopens; from %s a task can move to %s", ErrTaskConflict, from, allowedNextStates(from))
 	}
 	// The unset kind survives only a decline from triage; a reopen would put
 	// it in unstarted, which the kind constraint refuses.
@@ -534,14 +535,17 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		// origin_pr/origin_task would detach the recorded facts from their
 		// source and let one origin own two items over time.
 		if (action == actMove && to == StateBacklog) || (refs != nil && (refs.DecisionOptions != nil || refs.OriginPR != "" || refs.OriginTask != 0)) {
-			return Task{}, ErrTaskConflict
+			return Task{}, fmt.Errorf("%w: a disposition item cannot move back to backlog or change its origin", ErrTaskConflict)
 		}
 	}
 
 	switch action {
 	case actSetFlag:
-		if x.AwaitingDecision || IsSettledState(from) {
-			return Task{}, ErrTaskConflict
+		if x.AwaitingDecision {
+			return Task{}, fmt.Errorf("%w: %s is already awaiting a decision", ErrTaskConflict, from)
+		}
+		if IsSettledState(from) {
+			return Task{}, fmt.Errorf("%w: a settled task cannot be flagged as awaiting a decision; from %s a task can move to %s", ErrTaskConflict, from, allowedNextStates(from))
 		}
 	case actClearFlag, actNoop:
 	default:
@@ -551,8 +555,21 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		if !backToBacklog && deliveredBy == 0 && !taskTransitionAllowed(from, to) {
 			return Task{}, transitionConflict(from, to)
 		}
-		if to == StateCompleted && from != StateMerged && !canCompleteKind(x.Kind) {
-			return Task{}, fmt.Errorf("%w: completed applies to decide, ops and verify tasks", ErrTaskConflict)
+		// An implement task completes on closure evidence like the other kinds;
+		// the evidence rules in applyLifecycle still apply (hk 4050).
+		if to == StateCompleted && from != StateMerged && !canCompleteKind(x.Kind) && x.Kind != "implement" {
+			return Task{}, fmt.Errorf("%w: completed applies to implement, decide, ops, verify and research tasks", ErrTaskConflict)
+		}
+		// An implement task completes only with no unmerged PR and no open
+		// sub-task; a refusal names them (hk 4050).
+		if to == StateCompleted && x.Kind == "implement" {
+			blockers, err := implementCompletionBlockers(ctx, tx, x.ID)
+			if err != nil {
+				return Task{}, err
+			}
+			if blockers != "" {
+				return Task{}, fmt.Errorf("%w: implement cannot complete while %s", ErrTaskConflict, blockers)
+			}
 		}
 		// A task waiting on a decision leaves only the way the old
 		// needs_decision state did: back to backlog, parked, or dropped.
@@ -819,16 +836,66 @@ func mergedChangeTx(ctx context.Context, tx pgx.Tx, pr string) (int64, error) {
 	return id, nil
 }
 
-// transitionConflict is the task_conflict of a refused manual move: it names
-// the states the task can move to from where it is (hk 4322).
-func transitionConflict(from, to string) error {
+// allowedNextStates lists, in state order, the states a task in from can move
+// to. Refusals name them so the caller can pick a legal move (hk 2863).
+func allowedNextStates(from string) string {
 	var allowed []string
 	for _, state := range TaskStates() {
 		if taskTransitionAllowed(from, state) {
 			allowed = append(allowed, state)
 		}
 	}
-	msg := fmt.Sprintf("%s -> %s is not a transition; from %s a task can move to %s", from, to, from, strings.Join(allowed, ", "))
+	return strings.Join(allowed, ", ")
+}
+
+// implementCompletionBlockers names what keeps an implement task from
+// completing: each change it implements that is not merged, and each sub-task
+// not yet completed or canceled. It returns "" when nothing blocks it.
+func implementCompletionBlockers(ctx context.Context, tx pgx.Tx, taskID int64) (string, error) {
+	var parts []string
+	rows, err := tx.Query(ctx, `SELECT c.repo,c.pr_number,c.state FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND ct.relation=$2 AND c.state<>$3 ORDER BY c.repo,c.pr_number`, taskID, ChangeImplements, ChangeMerged)
+	if err != nil {
+		return "", err
+	}
+	for rows.Next() {
+		var repo, state string
+		var n int
+		if err := rows.Scan(&repo, &n, &state); err != nil {
+			rows.Close()
+			return "", err
+		}
+		parts = append(parts, fmt.Sprintf("unmerged PR %s#%d (%s)", repo, n, state))
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	rows, err = tx.Query(ctx, `SELECT id,state FROM tasks WHERE parent_id=$1 ORDER BY id`, taskID)
+	if err != nil {
+		return "", err
+	}
+	for rows.Next() {
+		var id int64
+		var state string
+		if err := rows.Scan(&id, &state); err != nil {
+			rows.Close()
+			return "", err
+		}
+		if c := TaskCategory(state); c != CategoryCompleted && c != CategoryCanceled {
+			parts = append(parts, fmt.Sprintf("open sub-task %d (%s)", id, state))
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return strings.Join(parts, ", "), nil
+}
+
+// transitionConflict is the task_conflict of a refused manual move: it names
+// the states the task can move to from where it is (hk 4322).
+func transitionConflict(from, to string) error {
+	msg := fmt.Sprintf("%s -> %s is not a transition; from %s a task can move to %s", from, to, from, allowedNextStates(from))
 	if to == StateMerged && deliveredOpenStates[from] {
 		msg += ", or to merged with --pr (refs.pr) naming the merged PR that delivered it"
 	}

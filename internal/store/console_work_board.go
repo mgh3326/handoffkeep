@@ -65,6 +65,47 @@ func (b *TaskWorkBoard) applyJob(job Job) {
 	}
 }
 
+// endReplacedSessions applies task_events binding history in append order.
+// Placement timestamps come from the placement client, so they cannot order
+// one job's session against another. Only a job that was bound and then
+// replaced is ended; a placed job that has not been claimed or rebound yet
+// remains a live pending replacement.
+func (b *TaskWorkBoard) endReplacedSessions(events []taskJobBindingEvent) {
+	bound := ""
+	ended := map[string]time.Time{}
+	for _, event := range events {
+		if event.FromJob != "" {
+			ended[event.FromJob] = event.At
+		}
+		if event.JobID == "" {
+			continue
+		}
+		if bound != "" && event.JobID != bound {
+			ended[bound] = event.At
+		}
+		delete(ended, event.JobID)
+		bound = event.JobID
+	}
+	for jobID, at := range ended {
+		b.endSession(jobID, at)
+	}
+}
+
+func (b *TaskWorkBoard) endSession(jobID string, at time.Time) {
+	for i := range b.Sessions {
+		s := &b.Sessions[i]
+		if s.JobID == jobID && s.Active {
+			s.Active, s.EndedAt = false, at
+		}
+	}
+}
+
+type taskJobBindingEvent struct {
+	JobID   string
+	FromJob string
+	At      time.Time
+}
+
 // PrimaryJob is the task's job, else the latest lead or worker placed for
 // it (a placement can arrive before the claim sets refs.job_id).
 func (b TaskWorkBoard) PrimaryJob() string {
@@ -85,9 +126,9 @@ func (b TaskWorkBoard) PrimaryJob() string {
 // It writes nothing. Queries are batched for the whole UI page. A session
 // lives as long as its placement row: once PlacementRetention prunes the
 // row (180 days), the overlay no longer shows that session, by design.
-// A session ends only when its job row is terminal; a job the task was
-// rebound away from shows until its row ends (hk 4441 tracks ending it from
-// the claim/rebind history).
+// A session ends when its job row is terminal or task_events records a later
+// claim/rebind to another job. An unbound placement stays visible while it is
+// a pending replacement.
 func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64]TaskWorkBoard, error) {
 	boards := make(map[int64]TaskWorkBoard, len(tasks))
 	if len(tasks) == 0 {
@@ -159,6 +200,31 @@ func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64
 		if err != nil {
 			return nil, err
 		}
+	}
+	rows, err = tx.Query(ctx, `SELECT task_id,at,COALESCE(refs->>'job_id',''),COALESCE(refs->'job_rebind'->>'from_job','')
+		FROM task_events WHERE task_id=ANY($1) AND refs IS NOT NULL ORDER BY id`, ids)
+	if err != nil {
+		return nil, err
+	}
+	bindings := map[int64][]taskJobBindingEvent{}
+	for rows.Next() {
+		var taskID int64
+		var event taskJobBindingEvent
+		if err := rows.Scan(&taskID, &event.At, &event.JobID, &event.FromJob); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		bindings[taskID] = append(bindings[taskID], event)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	for id, events := range bindings {
+		board := boards[id]
+		board.endReplacedSessions(events)
+		boards[id] = board
 	}
 	return boards, tx.Commit(ctx)
 }

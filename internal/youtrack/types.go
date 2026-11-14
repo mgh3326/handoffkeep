@@ -137,6 +137,15 @@ func StringField(name, value string) CustomField {
 	return CustomField{Type: fieldSimple, Name: name, Value: value}
 }
 
+// TextField writes a formatted text field (a project's TextProjectCustomField
+// takes its issue value only as TextIssueCustomField with a text object).
+func TextField(name, value string) CustomField {
+	return CustomField{Type: "TextIssueCustomField", Name: name, Value: struct {
+		Type string `json:"$type"`
+		Text string `json:"text"`
+	}{"TextFieldValue", value}}
+}
+
 func IntField(name string, value int) CustomField {
 	return CustomField{Type: fieldSimple, Name: name, Value: value}
 }
