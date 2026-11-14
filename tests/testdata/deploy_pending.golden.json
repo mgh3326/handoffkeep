@@ -17,8 +17,15 @@
         "target": "ncp"
       },
       "doc_url": "/ui/doc/deploy/auto_trader/",
-      "merged_boundary": "unrecorded",
-      "merged_since": [],
+      "merged_boundary": "deploy_record_key",
+      "merged_since": [
+        {
+          "merged_at": "2026-09-20T03:00:00Z",
+          "pr": "https://github.com/mgh3326/auto_trader/pull/3",
+          "task_id": 4,
+          "title": "other service"
+        }
+      ],
       "recent": [
         {
           "deployed_at": null,
@@ -37,7 +44,7 @@
       "record_count": 1,
       "repo": "mgh3326/auto_trader",
       "service": "auto_trader",
-      "state": "deployed",
+      "state": "pending",
       "target": "ncp"
     },
     {

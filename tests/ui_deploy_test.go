@@ -216,7 +216,9 @@ func TestUIDeployPendingServiceLines(t *testing.T) {
 	deployedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second).Format(time.RFC3339)
 	seedDeployDoc(t, s, "deploy/handoffkeep/20260923T033049Z", deployFixtureBody(t, "handoffkeep", "success", "92ee9e2d0ddc47593677adcc9e83040dd9873463", deployedAt, nil))
 	// auto_trader: the production backfill has deployed_at=null — the merged
-	// boundary must report "unrecorded", never fall back to record time.
+	// boundary falls back to the record key's timestamp (never the document's
+	// recorded_at), the same instant the lag count and the operator-desk
+	// notice measure from.
 	seedDeployDoc(t, s, "deploy/auto_trader/20260923T033052Z", deployFixtureBody(t, "auto_trader", "success", "sha256:e0580273a4c31cd56a1028389212a1e101c40f130231f6dd2c49b3b5bc0214f6", "", nil))
 
 	base, err := time.Parse(time.RFC3339, deployedAt)
@@ -240,6 +242,13 @@ func TestUIDeployPendingServiceLines(t *testing.T) {
 		seedMergedEvent(t, db, s, "no pr", "", base.Add(2*time.Hour)),
 	}
 	otherRepo := seedMergedEvent(t, db, s, "auto_trader merge", "https://github.com/mgh3326/auto_trader/pull/7", base.Add(2*time.Hour))
+	// The key instant itself and anything before it belong to the recorded
+	// build: the boundary is strict, as it is for deployed_at.
+	atKey := time.Date(2026, 9, 23, 3, 30, 52, 0, time.UTC)
+	atExcluded := []int64{
+		seedMergedEvent(t, db, s, "auto_trader at the record key", "https://github.com/mgh3326/auto_trader/pull/5", atKey),
+		seedMergedEvent(t, db, s, "auto_trader before the record key", "https://github.com/mgh3326/auto_trader/pull/6", atKey.Add(-time.Hour)),
+	}
 
 	response := getDeployPending(t, h, assertion)
 
@@ -273,8 +282,26 @@ func TestUIDeployPendingServiceLines(t *testing.T) {
 	}
 
 	at := serviceView(t, response, "auto_trader")
-	if at["merged_boundary"] != "unrecorded" || len(mergedIDs(at)) != 0 {
-		t.Fatalf("auto_trader boundary=%v merged=%v — must not list task %d without a deployed_at boundary", at["merged_boundary"], mergedIDs(at), otherRepo)
+	if at["merged_boundary"] != "deploy_record_key" {
+		t.Fatalf("auto_trader merged_boundary=%v, want deploy_record_key", at["merged_boundary"])
+	}
+	atIDs := mergedIDs(at)
+	atFound := false
+	for _, id := range atIDs {
+		if id == float64(otherRepo) {
+			atFound = true
+		}
+		for _, excluded := range atExcluded {
+			if id == float64(excluded) {
+				t.Fatalf("auto_trader merged_since contains task %d at or before its record key: %v", excluded, atIDs)
+			}
+		}
+	}
+	if !atFound {
+		t.Fatalf("auto_trader merged_since ids=%v missing %d: the list must be measured from the record key like the lag count", atIDs, otherRepo)
+	}
+	if at["state"] != "pending" {
+		t.Fatalf("auto_trader state=%v, want pending: a success with merges since its boundary", at["state"])
 	}
 
 	pw := serviceView(t, response, "panewire-hub")

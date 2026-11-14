@@ -299,3 +299,25 @@ it("shows a deploy lag banner when a service is lagging", async () => {
   expect(banner.textContent).toContain("배포 지연: auto_trader(main보다 5개 뒤처짐)");
   expect(banner.textContent).toContain("배포 관리");
 });
+
+it("keeps the deploy lag banner when a query matches no row (the lagging service has no row)", async () => {
+  serve(
+    payload({
+      decisions: { count: 0, overdue: 0, items: [] },
+      tasks: { count: 0, awaiting_decision: 0, stalled: 0, items: [] },
+      deploys: {
+        count: 0,
+        events_capped: false,
+        items: [],
+        lagging: [{ service: "auto_trader", repo: "mgh3326/auto_trader", lag_count: 5 }],
+      },
+    }),
+  );
+  render(<HomeAttention />);
+  expect((await screen.findByTestId("home-lag-banner")).textContent).toContain("auto_trader(main보다 5개 뒤처짐)");
+  fireEvent.change(screen.getByLabelText("검색 쿼리"), { target: { value: '"auto_trader"' } });
+  expect(await screen.findByText("조건에 맞는 항목이 없습니다.")).toBeTruthy();
+  const banner = screen.getByTestId("home-lag-banner");
+  expect(banner.textContent).toContain("배포 지연: auto_trader(main보다 5개 뒤처짐)");
+  expect(banner.textContent).toContain("배포 관리");
+});

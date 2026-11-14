@@ -1,9 +1,13 @@
 package store
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 func TestDeployLagCalculation(t *testing.T) {
@@ -174,5 +178,179 @@ func TestDeployLagEnqueueAndNoticeDB(t *testing.T) {
 	}
 	if nextDayCount != 2 {
 		t.Fatalf("expected 2 total notices in outbox, got %d", nextDayCount)
+	}
+}
+
+// seedDeployDocument writes one raw deploy record document.
+func seedDeployDocument(t *testing.T, s *Store, key, body string, at time.Time) {
+	t.Helper()
+	if _, err := s.pool.Exec(t.Context(), `INSERT INTO documents(key, kind, session, job, body, sha256, created_by, created_at, updated_at) VALUES($1, 'report', '', '', $2, $3, 'test', $4, $4)`,
+		key, body, "sha-"+key, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedDeployRecord writes a valid deploy record for service at at, keyed by
+// the contract timestamp.
+func seedDeployRecord(t *testing.T, s *Store, service, result string, at time.Time) {
+	t.Helper()
+	body := fmt.Sprintf(`{"schema":"deploy-record/v0","service":%q,"result":%q,"deployed_at":%q}`, service, result, at.UTC().Format(time.RFC3339))
+	seedDeployDocument(t, s, "deploy/"+service+"/"+at.UTC().Format("20060102T150405Z"), body, at)
+}
+
+func lastSuccessMap(t *testing.T, s *Store) map[string]time.Time {
+	t.Helper()
+	tx, err := s.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background())
+	got, err := readProjectLastSuccessfulDeploysTx(t.Context(), tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// A run of newer failed records longer than one scan page must not hide the
+// last success: the boundary is found by paging, and a service whose whole
+// prefix has no success still reports "never deployed" and terminates.
+func TestLastSuccessScanPagesPastNewerFailures(t *testing.T) {
+	s := schemaStore(t, "deploy_lag_pages")
+	ctx := t.Context()
+	success := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	failuresFrom := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+
+	// Counts straddle the page size: a page of exactly lastSuccessPageSize
+	// failures must still continue to the next page, and more than two pages
+	// must keep going.
+	counts := []int{lastSuccessPageSize, lastSuccessPageSize + 1, 2*lastSuccessPageSize + 5}
+	for _, failures := range counts {
+		withSuccess := fmt.Sprintf("hk-deep-%d", failures)
+		noSuccess := fmt.Sprintf("hk-none-%d", failures)
+		for _, name := range []string{withSuccess, noSuccess} {
+			if _, err := s.PutDeployService(ctx, DeployService{Name: name, Repo: "mgh3326/" + name, RecordPrefixes: []string{"deploy/" + name + "/"}, Active: true}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		seedDeployRecord(t, s, withSuccess, "success", success)
+		for i := 0; i < failures; i++ {
+			at := failuresFrom.Add(time.Duration(i) * time.Second)
+			seedDeployRecord(t, s, withSuccess, "failed", at)
+			seedDeployRecord(t, s, noSuccess, "failed", at)
+		}
+	}
+
+	got := lastSuccessMap(t, s)
+	for _, failures := range counts {
+		withSuccess := fmt.Sprintf("hk-deep-%d", failures)
+		noSuccess := fmt.Sprintf("hk-none-%d", failures)
+		if at, ok := got[withSuccess]; !ok || !at.Equal(success) {
+			t.Fatalf("%d newer failures: last success = (%s, %v), want %s", failures, at, ok, success)
+		}
+		if at, ok := got[noSuccess]; ok {
+			t.Fatalf("%d failures and no success: last success = %s, want none", failures, at)
+		}
+	}
+}
+
+// The lag measure and the operator-desk notice read that boundary, so a deep
+// run of failures after the last deploy still counts the merges behind it.
+func TestDeployLagCountsMergesBehindDeepFailureRun(t *testing.T) {
+	s := schemaStore(t, "deploy_lag_deep")
+	ctx := t.Context()
+	now := time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)
+	svc, err := s.PutDeployService(ctx, DeployService{Name: "hk-deep", Repo: "mgh3326/hk-deep", RecordPrefixes: []string{"deploy/hk-deep/"}, Active: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	success := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	seedDeployRecord(t, s, "hk-deep", "success", success)
+	for i := 0; i < lastSuccessPageSize+5; i++ {
+		seedDeployRecord(t, s, "hk-deep", "failed", time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC).Add(time.Duration(i)*time.Second))
+	}
+	for i := 1; i <= 3; i++ {
+		if _, err := s.pool.Exec(ctx, `INSERT INTO changes(repo, pr_number, state, merged_at, opened_at, created_at, updated_at) VALUES($1, $2, 'merged', $3, $3, $3, $3)`, "mgh3326/hk-deep", i, success.Add(time.Duration(i)*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	st, err := s.DeployLagStatus(ctx, svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.HasDeployed || st.DeployedAt == nil || !st.DeployedAt.Equal(success) || st.LagCount != 3 || !st.Lagging {
+		t.Fatalf("lag status = %+v, want deployed at %s with 3 merges behind and lagging", st, success)
+	}
+	n, err := s.EnqueueDeployLagNotices(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("enqueued = %d, want 1 notice for the lagging service", n)
+	}
+}
+
+// A repo base name is an alias for the project, never a replacement for a
+// service of that name: DeployLagStatus and the notifier read by service name.
+func TestLastSuccessRepoAliasKeepsServiceBoundary(t *testing.T) {
+	s := schemaStore(t, "deploy_lag_alias")
+	ctx := t.Context()
+	alphaAt := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	betaAt := time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)
+	for _, svc := range []DeployService{
+		{Name: "alpha", Repo: "org/alpha", RecordPrefixes: []string{"deploy/alpha/"}, Active: true},
+		// beta sorts after alpha and its repo base name is alpha's service name.
+		{Name: "beta", Repo: "org/alpha", RecordPrefixes: []string{"deploy/beta/"}, Active: true},
+		{Name: "gamma", Repo: "org/gamma-repo", RecordPrefixes: []string{"deploy/gamma/"}, Active: true},
+	} {
+		if _, err := s.PutDeployService(ctx, svc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedDeployRecord(t, s, "alpha", "success", alphaAt)
+	seedDeployRecord(t, s, "beta", "success", betaAt)
+	seedDeployRecord(t, s, "gamma", "success", alphaAt)
+
+	got := lastSuccessMap(t, s)
+	if at := got["alpha"]; !at.Equal(alphaAt) {
+		t.Fatalf("alpha boundary = %s, want its own %s (beta's repo base must not replace it)", at, alphaAt)
+	}
+	if at := got["beta"]; !at.Equal(betaAt) {
+		t.Fatalf("beta boundary = %s, want %s", at, betaAt)
+	}
+	if at, ok := got["gamma-repo"]; !ok || !at.Equal(alphaAt) {
+		t.Fatalf("gamma-repo alias = (%s, %v), want gamma's %s: an alias with no colliding service keeps working", at, ok, alphaAt)
+	}
+}
+
+// EnqueueDeployLagNotices holds one connection for its whole pass, so it reads
+// the services through that transaction. A pool of one connection would
+// otherwise wait on itself until the context ends.
+func TestEnqueueDeployLagNoticesNeedsOneConnection(t *testing.T) {
+	_, url := testdb.Schema(t, "deploy_lag_pool")
+	// Migrate with a normal pool first, so the pool of one only serves the pass.
+	migrated, err := Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated.Close()
+	sep := "?"
+	if strings.Contains(url, "?") {
+		sep = "&"
+	}
+	s, err := Open(t.Context(), url+sep+"pool_max_conns=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.PutDeployService(t.Context(), DeployService{Name: "hk-one", Repo: "mgh3326/hk-one", RecordPrefixes: []string{"deploy/hk-one/"}, Active: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if _, err := s.EnqueueDeployLagNotices(ctx, time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("EnqueueDeployLagNotices on a one-connection pool: %v", err)
 	}
 }
