@@ -108,9 +108,10 @@ const (
 	ReasonReconcileFailed   = "reconcile_failed"
 	ReasonOperatorNotDone   = "operator_not_applied"
 	// ReasonAdoptionUnconfirmed: the only candidate is the issue Send would
-	// have adopted (Evidence.Adopted), named in the detail. It is never
-	// applied by evidence: a create the op sent may still land (hk 3911,
-	// review of PR #383); an operator resolves it.
+	// have adopted (Evidence.Adopted), named in the detail, and the op has
+	// no adoption record naming it (Ledger.RecordAdoption, hk 4570): a
+	// create the op sent may still land (hk 3911, review of PR #383); an
+	// operator resolves it.
 	ReasonAdoptionUnconfirmed = "adoption_unconfirmed"
 	ReasonUnsupportedKind     = "unsupported_kind"
 	// ReasonNotSent: a read a kind makes before its write failed, so nothing
@@ -310,6 +311,27 @@ type Ledger interface {
 	ListState(ctx context.Context, state State, limit int) ([]Op, error)
 	// MapGet reads one committed map row.
 	MapGet(ctx context.Context, entityKind, hkKey string) (MapRow, bool, error)
+	// RecordAdoption records that dispatch attempt attempts of op id adopted
+	// ytID and sent nothing (AdoptedError), before that adoption is applied
+	// (hk 4570). Only for an op still dispatched in that attempt, else
+	// ErrState. One record per op: the same record again is a no-op, another
+	// is ErrConflictingResult.
+	RecordAdoption(ctx context.Context, now time.Time, id int64, attempts int, ytID string) error
+	// Adoption reads op id's adoption record; found is false when it has
+	// none.
+	Adoption(ctx context.Context, id int64) (a Adoption, found bool, err error)
+}
+
+// Adoption is the durable record that one dispatch of an op adopted an
+// existing YouTrack thing instead of writing (hk 4570). The attempt that
+// adopts sends nothing, and an op that leaves dispatched for any state but
+// prepared is never dispatched again; the attempts before it ended deferred
+// (429, 401, not sent), which the protocol treats as not processed. So an
+// op with this record sent no create that can still land, and reconcile may
+// apply the adoption its settlement lost.
+type Adoption struct {
+	Attempts int
+	YTID     string
 }
 
 // RemoteComment is one comment as the remote lists it.

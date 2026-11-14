@@ -487,6 +487,20 @@ func (c *CrashLedger) MapGet(ctx context.Context, entityKind, hkKey string) (ytw
 	return c.Ledger.MapGet(ctx, entityKind, hkKey)
 }
 
+func (c *CrashLedger) RecordAdoption(ctx context.Context, now time.Time, id int64, attempts int, ytID string) error {
+	if err := c.enter("RecordAdoption"); err != nil {
+		return err
+	}
+	return c.leave("RecordAdoption", c.Ledger.RecordAdoption(ctx, now, id, attempts, ytID))
+}
+
+func (c *CrashLedger) Adoption(ctx context.Context, id int64) (ytwrite.Adoption, bool, error) {
+	if err := c.enter("Adoption"); err != nil {
+		return ytwrite.Adoption{}, false, err
+	}
+	return c.Ledger.Adoption(ctx, id)
+}
+
 // InjectIssue adds an issue hk did not create (or created earlier) to the
 // project, carrying hk ID taskID, and returns its id.
 func (f *FakeYouTrack) InjectIssue(projectID string, taskID int64, summary, description string) string {
