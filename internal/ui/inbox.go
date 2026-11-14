@@ -12,9 +12,9 @@ import (
 )
 
 const (
-	// inboxWriteBodyLimit is this route's request memory budget for one full
-	// selected-item batch.
-	inboxWriteBodyLimit = 64 << 20
+	// inboxWriteBodyLimit holds a full batch: InboxBatchLimit item keys, an
+	// action, a snooze time and an event key.
+	inboxWriteBodyLimit = 16 * 1024
 	// inboxWritePath applies one inbox action to one or more items.
 	inboxWritePath = "/ui/api/inbox/state"
 	// inboxUndoPath restores the items of one earlier write.

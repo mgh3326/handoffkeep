@@ -153,6 +153,7 @@ because that path has an authenticated principal.
 | task_list | read | HTTP | Tasks read |
 | task_comments | read | HTTP | Comments read |
 | task_events | read | HTTP | Tasks event history |
+| task_context | read | HTTP | One-call task context bundle: task, decisions, documents, changes (hk 3475) |
 | changes_since | read | HTTP | Change feed |
 | decisions_pending | read | HTTP | Decisions list |
 | decisions_history | read | HTTP | Decisions history (closed requests) |

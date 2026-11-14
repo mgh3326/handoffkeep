@@ -132,6 +132,39 @@ func ytArticleCreateGateSQL(s *Store) string {
 		WHERE b.document_id::text = o.entity_id AND b.op_id IS DISTINCT FROM o.id)`
 }
 
+// claimYTArticleCreateTx re-checks the source document while Claim holds its
+// document lane lock. A prepared create is rejected before dispatch if its
+// document was deleted or moved out of the article scope in the meantime.
+func claimYTArticleCreateTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (reject, detail string, err error) {
+	if op.Kind != ytwrite.KindArticleCreate || op.Principal != YTDocsPrincipal {
+		return "", "", nil
+	}
+	id, parseErr := strconv.ParseInt(op.EntityID, 10, 64)
+	if parseErr != nil || id < 1 || op.EntityKind != ytwrite.ArticleEntity {
+		return ytwrite.ReasonOutOfScope, "article_create is not on a document lane", nil
+	}
+	var key string
+	var taskID *int64
+	err = tx.QueryRow(ctx, `SELECT key, task_id FROM documents WHERE id=$1 FOR SHARE`, id).Scan(&key, &taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ytwrite.ReasonOutOfScope, "document was deleted before article_create dispatch", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if !ytArticleInScope(key, taskIDValue(taskID)) {
+		return ytwrite.ReasonOutOfScope, "document moved out of article scope before dispatch", nil
+	}
+	return "", "", nil
+}
+
+func taskIDValue(id *int64) int64 {
+	if id == nil {
+		return 0
+	}
+	return *id
+}
+
 // ytArticleUpdateGateSQL is the article_update gate: mode on, and o's
 // target is the article o's document is bound to on o's tenant now.
 func ytArticleUpdateGateSQL(s *Store) string {

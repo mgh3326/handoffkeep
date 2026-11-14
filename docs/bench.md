@@ -18,7 +18,7 @@ All requests and responses use `Content-Type: application/json`.
 | GET | `/v1/bench/grades` | `{"grades":[...]}`; ordered by `profile` |
 | PUT | `/v1/bench/grades` | Body `{"grades":[...]}`; 1–1000 rows, response `{"upserted":N}` |
 | GET | `/v1/bench/catalog?pool=&include_retired=` | `{"catalog":[...]}`; ordered by `pool`, grade (`S+`→`C`), `profile`, effort rung |
-| PUT | `/v1/bench/catalog` | **Operator, operator-desk or panewire-design token only.** Body `{"catalog":[...]}`; 1–1000 rows, response `{"upserted":N}` |
+| PUT | `/v1/bench/catalog` | **Operator, operator-desk, panewire-design or fleet-policy token only.** Body `{"catalog":[...]}`; 1–1000 rows, response `{"upserted":N}` |
 
 GET limits default to 1000 and are capped at 5000. Each PUT is one database
 transaction: a validation or storage error rejects the complete batch.
@@ -181,7 +181,9 @@ Catalog rows have this shape:
   or the operator-desk session's client id `operator-desk`, which records the
   operator's catalog decisions on the operator's behalf, or the panewire design
   session's client id `panewire-design`, which owns the bench catalog (decision
-  `hk:doc decision/2026-11-08/panewire-design-catalog-writer`). Other tokens get 403
+  `hk:doc decision/2026-11-08/panewire-design-catalog-writer`), or the fleet-policy
+  session's client id `fleet-policy` (decision
+  `hk:doc decision/2026-11-11/policy-session-role` decision 21). Other tokens get 403
   `{"error":"operator_required"}`; deployments without the entries fail
   closed.
 
@@ -216,7 +218,7 @@ data rollback because it cannot reconstruct the previous grade decisions.
 | 400 | `{"error":"bench_catalog_scored_sol_unrated"}` | Grade write would turn a scored Sol default row `unrated` |
 | 400 | `{"error":"secret_like_content","pattern":"<name>"}` | Secret guard rejected client text |
 | 401 | `{"error":"unauthorized"}` | Missing or unknown bearer token |
-| 403 | `{"error":"operator_required"}` | Catalog write without the operator, operator-desk or panewire-design token |
+| 403 | `{"error":"operator_required"}` | Catalog write without the operator, operator-desk, panewire-design or fleet-policy token |
 | 404 | `{"error":"not_found"}` | Unknown path |
 | 409 | `{"error":"bench_rep_conflict","conflicts":[{"index":I,"origin_id":N,"conflict_server_id":M}]}` | Rep write shares a `(created_by, origin_id)` key with a stored row whose content differs; the whole batch is rejected |
 | 503 | `{"error":"bench_reps_retryable"}` | Rep batch aborted by a deadlock or serialization failure; nothing was written and the identical batch may be retried |
