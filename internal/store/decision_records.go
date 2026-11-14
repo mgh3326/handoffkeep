@@ -493,9 +493,11 @@ func mirrorRelayDecisionsTx(ctx context.Context, tx pgx.Tx, x RelayEvent) error 
 // DecisionRecordFilter selects rows for ListDecisionRecords. Status "" means
 // open. Snoozed open rows are hidden unless IncludeSnoozed.
 type DecisionRecordFilter struct {
-	Status         string
-	Lane           string
-	Source         string
+	Status string
+	Lane   string
+	Source string
+	// TaskID, when non-zero, keeps only records bound to that task.
+	TaskID         int64
 	IncludeSnoozed bool
 	Limit          int
 	// AfterCreatedAt and AfterID page past one row in the oldest-first order
@@ -568,6 +570,10 @@ func listDecisionRecords(ctx context.Context, pq poolQuerier, f DecisionRecordFi
 	if f.Source != "" {
 		args = append(args, f.Source)
 		q += fmt.Sprintf(` AND source=$%d`, len(args))
+	}
+	if f.TaskID != 0 {
+		args = append(args, f.TaskID)
+		q += fmt.Sprintf(` AND task_id=$%d`, len(args))
 	}
 	if f.AfterCreatedAt != nil {
 		args = append(args, f.AfterCreatedAt.UTC(), f.AfterID)
