@@ -111,7 +111,7 @@ func (s Server) changeOpen(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, err := queryLimit(r, 100, 1000)
 	if err != nil {
-		appErr(w, r, err)
+		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
 	out, err := s.Service.Store.ListOpenChanges(r.Context(), limit)

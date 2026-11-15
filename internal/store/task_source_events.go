@@ -291,8 +291,10 @@ func (s *Store) propagateRevertTx(ctx context.Context, tx pgx.Tx, in TaskSourceE
 	}
 	// A task closed on the PR without a link (refs.pr set by a manual
 	// reviewing -> merged, or by a propagated merge before siblings were
-	// linked) is reached by its refs.pr, as a deploy reaches it.
-	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks t WHERE t.state IN ($3,$4) AND (t.refs->>'pr'=$5
+	// linked) is reached by its refs.pr, as a deploy reaches it. A bundle child
+	// with no PR of its own is reached by the bundle parent's PR that delivered
+	// it (taskDeliveredPRSQL, hk 4844).
+	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks t WHERE t.state IN ($3,$4) AND ((`+taskDeliveredPRSQL+`)=$5
 		OR EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=t.id AND c.repo=$1 AND c.pr_number=$2 AND ct.relation='implements'))
 		ORDER BY t.id FOR UPDATE`, repo, n, StateMerged, StateDeployed, in.PR)
 	if err != nil {

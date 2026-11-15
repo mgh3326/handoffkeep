@@ -131,23 +131,24 @@ func TestEpicPRDoesNotDeliverChild(t *testing.T) {
 
 // TestReconciledChangeSettlesHeldTask needs a database: the shape of the four
 // held tasks of hk 4840. A task merged by PR 1 while PR 2, still open in hk,
-// implements it holds in merged. A deploy that includes both PRs does not
-// move it. Once PR 2 is reconciled to merged, settle-merged moves it, and a
-// re-run changes nothing.
+// implements it holds in merged. A deploy that covers both PRs, finished
+// before the open link, does not move it. Once PR 2 is reconciled to merged,
+// settle-merged moves it, and a re-run changes nothing.
 func TestReconciledChangeSettlesHeldTask(t *testing.T) {
 	f := newDeployFixture(t, "reconcile", "prod")
 	held := flowTask(t, f.s, f.s.pool, "implement", StateBacklog, false)
+	// The deploy finishes before the task has any change link, so FinishDeploy's
+	// rule (which moves merged tasks) has nothing to act on. The later merge and
+	// the open PR 2 link then leave the task merged and held, the state of the
+	// four held tasks; settle-merged reaches it only after PR 2 is reconciled.
+	f.start(t, "s-reconcile", "deploy", []string{"prod"}, f.cand(1, "internal/a.go"), f.cand(2, "internal/b.go"))
+	f.finish(t, "s-reconcile", "success")
 	send(t, f.s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: repoPR(f.repo, 1), TaskID: held.ID, MergeSHA: testSHA1})
 	send(t, f.s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: repoPR(f.repo, 2), TaskID: held.ID})
 	if got := settleState(t, f.s, held.ID); got != StateMerged {
 		t.Fatalf("held task state %s, want merged", got)
 	}
 
-	f.start(t, "s-reconcile", "deploy", []string{"prod"}, f.cand(1, "internal/a.go"), f.cand(2, "internal/b.go"))
-	f.finish(t, "s-reconcile", "success")
-	if got := settleState(t, f.s, held.ID); got != StateMerged {
-		t.Fatalf("deploy moved a task with an open change to %s", got)
-	}
 	before, err := f.s.SettleMerged(t.Context(), "", true)
 	if err != nil {
 		t.Fatal(err)
@@ -192,5 +193,63 @@ func TestReconciledChangeSettlesHeldTask(t *testing.T) {
 	}
 	if again.Counts[SettleDeployed] != 0 {
 		t.Fatalf("re-run counts %+v, want nothing newly deployed", again.Counts)
+	}
+}
+
+// TestBundleChildRevertReachesChild needs a database: a revert of the bundle
+// PR that delivered a child with no PR of its own rolls the child back too, as
+// it rolls back a task linked through its own refs.pr (propagateRevertTx).
+func TestBundleChildRevertReachesChild(t *testing.T) {
+	s, pool := searchTestStore(t)
+	bundle := flowTask(t, s, pool, "implement", StateDeveloping, false)
+	setTitle(t, s, bundle.ID, "[bundle hk4844 B02] revert reach")
+	pr := testPR(411)
+	send(t, s, mergeEvent(bundle.ID, pr))
+	child := flowTask(t, s, pool, "implement", StateReviewing, false)
+	linkUnderParent(t, s, child.ID, bundle.ID)
+	closeNoJob(t, s, child.ID)
+	putDeploy(t, s, "deploy/svc/20261105T090000Z", "svc", "success", []string{pr})
+	if got := stateOf(t, s, child.ID); got.State != StateDeployed {
+		t.Fatalf("child before the revert: state %s, want deployed", got.State)
+	}
+	send(t, s, revertEvent(bundle.ID, pr, testPR(412)))
+	if got := stateOf(t, s, child.ID); got.State != StateDeveloping {
+		t.Fatalf("child after the bundle PR was reverted: state %s, want developing", got.State)
+	}
+}
+
+// TestTriageExitResolvesBarePRInDestinationProject needs a database: a triage
+// exit that sets a project leaves the task there, so a bare PR number on that
+// transition resolves against the destination project's repo, not the old one.
+func TestTriageExitResolvesBarePRInDestinationProject(t *testing.T) {
+	s, pool := searchTestStore(t)
+	// experiment's PRs live in example/app (testPR).
+	send(t, s, mergeEvent(flowTask(t, s, pool, "implement", StateDeveloping, false).ID, testPR(421)))
+	// handoffkeep's PRs live in another repo.
+	dest := changeRepo("triage_dest")
+	destTask, err := s.CreateTask(t.Context(), Task{Lane: relaneLane(t, "flow"), Title: "dest", Kind: "implement", Priority: 5, CreatedBy: "tester", Project: projectPtr("handoffkeep")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	send(t, s, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: repoPR(dest, 7), TaskID: destTask.ID, MergeSHA: testSHA1})
+
+	x := flowTask(t, s, pool, "implement", StateTriage, false)
+	if _, err := s.TransitionTaskWith(t.Context(), x.ID, TransitionInput{To: StateBacklog, By: "tester", Project: projectPtr("handoffkeep"), Refs: &TaskRefs{PR: "302"}}); err != nil {
+		t.Fatalf("triage exit with a bare PR number: %v", err)
+	}
+	if got := stateOf(t, s, x.ID); got.Refs.PR != repoPR(dest, 302) {
+		t.Fatalf("refs.pr %q, want %q (the destination project's repo)", got.Refs.PR, repoPR(dest, 302))
+	}
+}
+
+// TestBarePRRefLongDigitsRefused needs a database: a run of more than nine
+// digits is refused, never stored as text.
+func TestBarePRRefLongDigitsRefused(t *testing.T) {
+	s, pool := searchTestStore(t)
+	send(t, s, mergeEvent(flowTask(t, s, pool, "implement", StateDeveloping, false).ID, testPR(431)))
+	x := flowTask(t, s, pool, "implement", StateDeveloping, false)
+	_, err := s.TransitionTaskWith(t.Context(), x.ID, TransitionInput{To: StateReviewing, By: "tester", Refs: &TaskRefs{PR: "1234567890"}})
+	if !errors.Is(err, ErrInvalidChangeWrite) {
+		t.Fatalf("ten-digit PR number: err %v, want invalid_context", err)
 	}
 }

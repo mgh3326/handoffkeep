@@ -466,9 +466,15 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		return Task{}, err
 	}
 	// refs.pr is one full PR URL whatever the target (hk 4844): a bare number
-	// takes the project's repo, or the transition is refused.
+	// takes the project's repo, or the transition is refused. A triage exit
+	// that sets a project leaves the task in that project (applyTriageFieldsTx),
+	// so the number resolves against it.
+	project := x.Project
+	if in.Project != nil && x.State == StateTriage && action == actMove && (to == StateBacklog || to == StateUnstarted) {
+		project = in.Project
+	}
 	if refs != nil && refs.PR != "" {
-		pr, err := normalisePRRefTx(ctx, tx, x.Project, refs.PR)
+		pr, err := normalisePRRefTx(ctx, tx, project, refs.PR)
 		if err != nil {
 			return Task{}, err
 		}
