@@ -77,7 +77,7 @@ func TestAttachmentArchiveCandidateRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := fmt.Sprintf(`{"options":[{"key":"A","label":"a","attachments":[{"sha256":%q}]}],"allow_free":true}`, decisionSha)
-	if _, err := pool.Exec(t.Context(), `INSERT INTO decision_requests(source,source_ref,task_id,job_id,lane,question,options,recommended,default_action,status,created_at,updated_at) VALUES('lane_event','archive-open-decision',NULL,'archive-test','which?',$1::jsonb,'','','open',now(),now())`, options); err != nil {
+	if _, err := pool.Exec(t.Context(), `INSERT INTO decision_requests(source,source_ref,task_id,job_id,lane,question,options,recommended,default_action,status,created_at,updated_at) VALUES('lane_event','archive-open-decision',NULL,'','archive-test','which?',$1::jsonb,'','','open',now(),now())`, options); err != nil {
 		t.Fatal(err)
 	}
 
