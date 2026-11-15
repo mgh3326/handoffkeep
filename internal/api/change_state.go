@@ -102,10 +102,11 @@ func (s Server) changeBatch(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// changeOpen is GET /v1/changes/open[?limit=N]: the PR rows hk holds open,
-// oldest first. A PR-state sync compares them with GitHub and writes the merged
-// ones through PUT /v1/changes/state (hk 4844).
-func (s Server) changeOpen(w http.ResponseWriter, r *http.Request) {
+// changeUnreconciled is GET /v1/changes/unreconciled[?limit=N]: the PR rows that
+// still need GitHub's merge state (open, or merged with no merge commit), oldest
+// first. A PR-state sync compares them with GitHub and writes the merge commit
+// through PUT /v1/changes/state (hk 4844).
+func (s Server) changeUnreconciled(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
@@ -114,7 +115,7 @@ func (s Server) changeOpen(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
-	out, err := s.Service.Store.ListOpenChanges(r.Context(), limit)
+	out, err := s.Service.Store.ListUnreconciledChanges(r.Context(), limit)
 	if err != nil {
 		appErr(w, r, err)
 		return

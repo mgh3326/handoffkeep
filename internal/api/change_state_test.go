@@ -42,7 +42,7 @@ func (n noDB) call(t *testing.T, method, path, token string, body any) (int, map
 	handlers := map[string]http.HandlerFunc{
 		"/v1/changes/state": n.server.changeStatePut, "/v1/changes/checks": n.server.changeChecksPut, "/v1/changes/threads": n.server.changeThreadsPut,
 		"/v1/changes/findings": n.server.changeFindingsPut, "/v1/changes/gate": n.server.changeGatePut, "/v1/changes/batch": n.server.changeBatch,
-		"/v1/changes/one": n.server.changeOne, "/v1/changes/open": n.server.changeOpen,
+		"/v1/changes/one": n.server.changeOne, "/v1/changes/unreconciled": n.server.changeUnreconciled,
 	}
 	rec := httptest.NewRecorder()
 	handlers[req.URL.Path](rec, req)
@@ -63,7 +63,7 @@ var changeStateRoutes = []struct{ method, path string }{
 	{http.MethodPut, "/v1/changes/gate"},
 	{http.MethodPost, "/v1/changes/batch"},
 	{http.MethodGet, "/v1/changes/one?repo=example/app&pr=1"},
-	{http.MethodGet, "/v1/changes/open"},
+	{http.MethodGet, "/v1/changes/unreconciled"},
 }
 
 func TestChangeStateRoutesRequireAuth(t *testing.T) {

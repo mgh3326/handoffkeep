@@ -130,8 +130,9 @@ func TestEpicPRDoesNotDeliverChild(t *testing.T) {
 }
 
 // TestReconciledChangeSettlesHeldTask needs a database: the shape of the four
-// held tasks of hk 4840. A task merged by PR 1 while PR 2, still open in hk,
-// implements it holds in merged. A deploy that covers both PRs, finished
+// held tasks of hk 4840. A task merged by PR 1 while PR 2, unreconciled in hk
+// (its row merged by the deploy with no merge commit), implements it holds in
+// merged. A deploy that covers both PRs, finished
 // before the open link, does not move it. Once PR 2 is reconciled to merged,
 // settle-merged moves it, and a re-run changes nothing.
 func TestReconciledChangeSettlesHeldTask(t *testing.T) {
@@ -157,22 +158,22 @@ func TestReconciledChangeSettlesHeldTask(t *testing.T) {
 		t.Fatalf("before reconcile: %+v, want the task under no_merge_commit", before.Tasks)
 	}
 
-	open, err := f.s.ListOpenChanges(t.Context(), 100)
+	open, err := f.s.ListUnreconciledChanges(t.Context(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.ContainsFunc(open, func(c Change) bool { return c.Repo == f.repo && c.PRNumber == 2 }) {
-		t.Fatalf("open changes do not hold PR 2: %+v", open)
+		t.Fatalf("unreconciled changes do not hold PR 2: %+v", open)
 	}
 	if _, err := f.s.ApplyChangeState(t.Context(), ChangeRef{Repo: f.repo, PR: 2}, ChangeStateWrite{HeadSHA: testSHA2, State: ChangeMerged, MergeSHA: testSHA2, ObservedAt: time.Now().UTC(), Source: "poll"}); err != nil {
 		t.Fatalf("reconcile PR 2 to merged: %v", err)
 	}
-	open, err = f.s.ListOpenChanges(t.Context(), 100)
+	open, err = f.s.ListUnreconciledChanges(t.Context(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if slices.ContainsFunc(open, func(c Change) bool { return c.Repo == f.repo && c.PRNumber == 2 }) {
-		t.Fatalf("reconciled PR 2 is still open: %+v", open)
+		t.Fatalf("reconciled PR 2 is still unreconciled: %+v", open)
 	}
 	after, err := f.s.SettleMerged(t.Context(), "", true)
 	if err != nil {
