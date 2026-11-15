@@ -7,12 +7,13 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const dotsUsage = "usage: dots request --title TITLE --body BODY [--type CREATE_MOCKUP|CREATE_ASSET|REVIEW_IMPLEMENTATION] [--requester-lane L] [--project P] [--idempotency-key KEY]\n       dots results [--task N] [--issue ID]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID] [--canva-url U --canva-page P --canva-version V]\n       dots answer <task> --text <answer>\n\nNote: A requester-lane comment alone does NOT resolve an open dots question (explicit beats implicit); use dots answer."
+const dotsUsage = "usage: dots request --title TITLE --body BODY [--type CREATE_MOCKUP|CREATE_ASSET|REVIEW_IMPLEMENTATION] [--requester-lane L] [--project P] [--idempotency-key KEY] [--option 'A|label' ...] [--option-attachment 'A|sha256[|caption]' ...]\n       dots results [--task N] [--issue ID]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID] [--canva-url U --canva-page P --canva-version V]\n       dots answer <task> --text <answer>\n\nNote: A requester-lane comment alone does NOT resolve an open dots question (explicit beats implicit); use dots answer.\nNote: --option declares that the request ends in the operator's choice; its RESULT opens the decision."
 
 func dotsRequestCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("dots request", flag.ContinueOnError)
@@ -25,11 +26,30 @@ func dotsRequestCmd(args []string, out io.Writer) error {
 	fs.StringVar(&in.Project, "project", "", "task project")
 	fs.StringVar(&in.IdempotencyKey, "idempotency-key", "", "reuse to retry the same request")
 	fs.StringVar(&in.Type, "type", "", "CREATE_MOCKUP, CREATE_ASSET or REVIEW_IMPLEMENTATION; a typed body needs the policy template with [입력] naming the commit SHA and capture environment")
+	var optionValues, attachmentValues stringSliceFlag
+	fs.Var(&optionValues, "option", "option A|label the request ends in the operator's choice between (repeatable, 1-6); dots names its recommendation on RESULT")
+	fs.Var(&attachmentValues, "option-attachment", "option A|sha256[|caption]: a picture or video shown with that option (repeatable, at most 8 per option)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 || in.Title == "" || in.Body == "" {
 		return errors.New("dots request requires --title and --body")
+	}
+	if len(optionValues) > 0 {
+		options := store.DecisionOptions{}
+		for _, value := range optionValues {
+			key, label, ok := strings.Cut(value, "|")
+			if !ok {
+				return errors.New("--option must be A|label")
+			}
+			options.Options = append(options.Options, store.DecisionOption{Key: strings.TrimSpace(key), Label: strings.TrimSpace(label)})
+		}
+		if err := attachOptionMedia(&options, attachmentValues); err != nil {
+			return err
+		}
+		in.Options = options.Options
+	} else if len(attachmentValues) > 0 {
+		return errors.New("--option-attachment names no --option")
 	}
 	if in.RequesterLane == "" {
 		in.RequesterLane = os.Getenv("PANEWIRE_LANE")

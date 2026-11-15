@@ -611,6 +611,12 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, in.Actor, note, 0, now); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
+	// A declaring dots request reconciles its result on every resolution: the
+	// answer completes it, and an answer recorded while another decision still
+	// blocks completes later, when that decision closes (hk 4789).
+	if x, err = s.reconcileDotsChoiceTx(ctx, tx, x, now); err != nil {
+		return ResolveDecisionOutcome{}, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}

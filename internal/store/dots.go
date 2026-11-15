@@ -67,6 +67,12 @@ type DotsRequestInput struct {
 	Project        string `json:"project,omitempty"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 	Type           string `json:"type,omitempty"`
+	// Options declares that the request ends in the operator's choice between
+	// them (hk 4789): on a RESULT hk opens the operator's decision with these
+	// options, their attachments and dots's recommendation. Empty is no
+	// declaration and behaves as before. An option takes no recommended flag
+	// here; dots names its recommendation on RESULT.
+	Options []DecisionOption `json:"options,omitempty"`
 }
 
 // CreateDotsRequest creates a standalone request and its body in one transaction.
@@ -79,6 +85,12 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 		return Task{}, errors.New("invalid dots request")
 	}
 	if err := checkDotsRequestTemplate(in); err != nil {
+		return Task{}, err
+	}
+	if err := CheckDotsChoice(in.Options); err != nil {
+		return Task{}, err
+	}
+	if err := rejectDotsChoiceSecrets(in.Options); err != nil {
 		return Task{}, err
 	}
 	if _, invalid := dotsNotifyLanes(in.Body, lane); len(invalid) > 0 {
@@ -95,6 +107,13 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 	digestParts := []string{in.Title, in.Body, lane, in.Project}
 	if in.Type != "" {
 		digestParts = append(digestParts, in.Type)
+	}
+	if len(in.Options) > 0 {
+		encoded, err := json.Marshal(in.Options)
+		if err != nil {
+			return Task{}, err
+		}
+		digestParts = append(digestParts, string(encoded))
 	}
 	requestHash := sha256.Sum256([]byte(strings.Join(digestParts, "\x00")))
 	requestDigest := hex.EncodeToString(requestHash[:])
@@ -143,12 +162,27 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 	if err != nil {
 		return Task{}, err
 	}
+	// A declared option names pictures and videos this database holds; the
+	// check runs in the writing transaction, before the task is returned, so a
+	// request can never declare an option the operator cannot look at.
+	if err := checkDecisionAttachmentsExist(ctx, tx, DecisionOptions{Options: in.Options}); err != nil {
+		return Task{}, err
+	}
 	if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
 		return Task{}, err
 	}
 	err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,parent_lane=$3,started_triage_at=NULL WHERE id=$1 RETURNING `+taskColumns, x.ID, StateBacklog, lane), &x)
 	if err != nil {
 		return Task{}, err
+	}
+	if len(in.Options) > 0 {
+		declared, err := json.Marshal(DotsChoice{Options: in.Options})
+		if err != nil {
+			return Task{}, err
+		}
+		if err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET refs=jsonb_set(refs,'{dots_choice}',$2::jsonb) WHERE id=$1 RETURNING `+taskColumns, x.ID, string(declared)), &x); err != nil {
+			return Task{}, err
+		}
 	}
 	if in.IdempotencyKey != "" {
 		if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: "source_event", By: by, Note: requestDigest, At: x.CreatedAt, Source: "dots-request", SourceRef: sourceRef}); err != nil {
@@ -198,6 +232,14 @@ type DotsReplyInput struct {
 	// supersedes the active run token and records the handover in the
 	// request's history. The old run's later replies are then refused.
 	Takeover bool `json:"takeover,omitempty"`
+	// Recommended names a declared option key on a RESULT: hk marks it
+	// recommended on the operator's decision. RecommendationReason is dots's
+	// account of why, Unverified lists what dots could not check, and OneFix
+	// is its one suggested fix (hk 4789). All four are RESULT only.
+	Recommended          string   `json:"recommended,omitempty"`
+	RecommendationReason string   `json:"recommendation_reason,omitempty"`
+	Unverified           []string `json:"unverified,omitempty"`
+	OneFix               string   `json:"one_fix,omitempty"`
 }
 
 type DotsReplyResult struct {
@@ -252,6 +294,15 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	if in.Kind != "START" && in.Kind != "PROGRESS" && !DotsKindRecorded(in.Kind) {
 		return DotsReplyResult{}, errors.New("invalid dots reply kind")
 	}
+	annotated := in.Recommended != "" || in.RecommendationReason != "" || len(in.Unverified) > 0 || in.OneFix != ""
+	if annotated && in.Kind != "RESULT" {
+		return DotsReplyResult{}, errors.New("invalid dots reply: recommended, recommendation_reason, unverified and one_fix apply to RESULT only")
+	}
+	if annotated {
+		if err := checkDotsReplyAnnotations(in); err != nil {
+			return DotsReplyResult{}, err
+		}
+	}
 	if in.Kind == "START" && (in.ExpectedUpdatedAt == nil || in.ExpectedUpdatedAt.IsZero()) {
 		return DotsReplyResult{}, errors.New("START requires expected_updated_at")
 	}
@@ -276,6 +327,11 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 		expected = in.ExpectedUpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	payloadSource := fmt.Sprintf("%s\x00%s\x00%t\x00%s\x00%s\x00%s", in.Kind, in.Body, in.AskOperator, actor, channel, expected)
+	if annotated {
+		// Only an annotated reply hash covers the annotations: a reply
+		// recorded before they existed keeps its payload and still replays.
+		payloadSource += "\x00" + in.Recommended + "\x00" + in.RecommendationReason + "\x00" + strings.Join(in.Unverified, "\x1f") + "\x00" + in.OneFix
+	}
 	if in.Takeover {
 		// A takeover is not the same reply as a plain START with its key. Plain
 		// START payloads keep their old hash, so stored replays still match.
@@ -403,7 +459,29 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	case "BLOCKED":
 		task, err = s.transitionTaskTx(ctx, tx, task.ID, TransitionInput{To: "hold", By: actor, Note: in.Body}, false)
 	case "RESULT":
-		task, err = s.transitionTaskTx(ctx, tx, task.ID, TransitionInput{To: StateCompleted, By: actor, Evidence: "hk:doc " + docKey}, false)
+		if task.Refs.DotsChoice == nil {
+			if annotated {
+				err = errors.New("invalid dots reply: the request declares no options, so recommended, recommendation_reason, unverified and one_fix have no decision to carry")
+				break
+			}
+			task, err = s.transitionTaskTx(ctx, tx, task.ID, TransitionInput{To: StateCompleted, By: actor, Evidence: "hk:doc " + docKey}, false)
+			break
+		}
+		// A declaring request ends in the operator's choice: the RESULT opens
+		// that decision, and the task waits on it instead of completing
+		// (hk 4789).
+		input, buildErr := dotsChoiceDecisionInput(task, docKey, in)
+		if buildErr != nil {
+			err = buildErr
+			break
+		}
+		var decision DecisionRequestResult
+		decision, err = s.recordDecisionRequestTx(ctx, tx, task.ID, actor, input)
+		if err != nil {
+			break
+		}
+		task = decision.Task
+		err = markDotsChoiceResultTx(ctx, tx, task.ID, docKey)
 	case "QUESTION":
 		if in.AskOperator {
 			var decision DecisionRequestResult
@@ -619,6 +697,10 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 		return DotsAnswerResult{}, err
 	}
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, caller, note, 0, now); err != nil {
+		return DotsAnswerResult{}, err
+	}
+	// A declaring dots request reconciles its result on the answer (hk 4789).
+	if x, err = s.reconcileDotsChoiceTx(ctx, tx, x, now); err != nil {
 		return DotsAnswerResult{}, err
 	}
 

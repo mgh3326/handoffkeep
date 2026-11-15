@@ -152,6 +152,7 @@ type dotsInboxOut struct {
 		AttachmentsTruncated           bool                     `json:"attachments_truncated"`
 		ReferencedAttachments          []dotsInboxAttachmentOut `json:"referenced_attachments"`
 		ReferencedAttachmentsTruncated bool                     `json:"referenced_attachments_truncated"`
+		Options                        []store.DecisionOption   `json:"options"`
 	} `json:"requests"`
 }
 
@@ -325,5 +326,98 @@ func TestDotsInboxReadsAttachmentsInOneQuery(t *testing.T) {
 	}
 	if queries != 1 {
 		t.Fatalf("attachment queries = %d, want 1 for the whole page", queries)
+	}
+}
+
+// The inbox carries a request's declared options, so dots sees that the
+// request ends in the operator's choice and what the choices are (hk 4789).
+func TestDotsInboxListsDeclaredOptions(t *testing.T) {
+	st := newOperatorStore(t)
+	ctx := context.Background()
+	declared, err := st.CreateDotsRequest(ctx, "caller", store.DotsRequestInput{
+		Title: "Review", Body: "Pick one.", RequesterLane: "requester",
+		Options: []store.DecisionOption{{Key: "A", Label: "시안 A"}, {Key: "B", Label: "시안 B"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := st.CreateDotsRequest(ctx, "caller", store.DotsRequestInput{Title: "Nothing", Body: "No choice here."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := operatorTools{service: api.Service{Store: st}}
+	out := decodeDotsInbox(t, dotsInboxText(t, o, ctx, dotsInboxInput{}))
+	if len(out.Requests) != 2 || out.Requests[0].Task.ID != declared.ID || out.Requests[1].Task.ID != plain.ID {
+		t.Fatalf("requests = %+v", out.Requests)
+	}
+	got := out.Requests[0].Options
+	if len(got) != 2 || got[0].Key != "A" || got[0].Label != "시안 A" || got[1].Key != "B" || got[1].Label != "시안 B" {
+		t.Fatalf("options = %+v", got)
+	}
+	if out.Requests[1].Options != nil {
+		t.Fatalf("undeclared request lists options: %+v", out.Requests[1].Options)
+	}
+}
+
+// dots_reply carries the RESULT-only annotations into the operator's decision,
+// and refuses them on another kind or naming no declared key (hk 4789).
+func TestDotsReplyResultAnnotations(t *testing.T) {
+	t.Setenv("HANDOFFKEEP_DOTS_REPLY_WRITES", "on")
+	st := newOperatorStore(t)
+	ctx := context.Background()
+	task, err := st.CreateDotsRequest(ctx, "caller", store.DotsRequestInput{
+		Title: "Review", Body: "Pick one.", RequesterLane: "requester",
+		Options: []store.DecisionOption{{Key: "A", Label: "시안 A"}, {Key: "B", Label: "시안 B"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := st.ReplyDots(ctx, "operator:test@example.com", "chatgpt", store.DotsReplyInput{TaskID: task.ID, Kind: "START", Body: "starting", IdempotencyKey: "start", ExpectedUpdatedAt: &task.UpdatedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	access := newAccessFixture(t)
+	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, nil, access.verifier))
+	defer srv.Close()
+	// dots connects through Access, so the principal's channel is chatgpt --
+	// the only channel ReplyDots accepts.
+	assertion := access.token(t, jwt.MapClaims{"email": "operator@example.com"})
+	session := connectMCP(t, srv.URL, map[string]string{"Cf-Access-Jwt-Assertion": assertion})
+
+	text, failed := toolText(t, session, "dots_reply", map[string]any{
+		"task_id": task.ID, "kind": "PROGRESS", "body": "half", "idempotency_key": "progress",
+		"run_token": started.RunToken, "one_fix": "fix it",
+	})
+	if !failed || !strings.Contains(text, "apply to RESULT only") {
+		t.Fatalf("one_fix on PROGRESS failed=%v text=%s", failed, text)
+	}
+	text, failed = toolText(t, session, "dots_reply", map[string]any{
+		"task_id": task.ID, "kind": "RESULT", "body": "done", "idempotency_key": "result-bad",
+		"run_token": started.RunToken, "recommended": "C",
+	})
+	if !failed || !strings.Contains(text, "is not a declared option key") {
+		t.Fatalf("unknown recommended failed=%v text=%s", failed, text)
+	}
+	if _, failed := toolText(t, session, "dots_reply", map[string]any{
+		"task_id": task.ID, "kind": "RESULT", "body": "두 시안 완성", "idempotency_key": "result",
+		"run_token": started.RunToken, "recommended": "B", "recommendation_reason": "B가 대비가 좋습니다",
+		"unverified": []string{"모바일 실기기 미확인"}, "one_fix": "결제 버튼 대비를 올리세요",
+	}); failed {
+		t.Fatalf("annotated RESULT failed")
+	}
+	current, found, err := st.GetTask(ctx, task.ID)
+	if err != nil || !found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+	request := current.Refs.DecisionRequest
+	if request == nil || request.Status != store.DecisionRequestOpen || current.State == store.StateCompleted {
+		t.Fatalf("task=%+v request=%+v", current, request)
+	}
+	if request.RecommendationReason != "B가 대비가 좋습니다" || request.OneFix != "결제 버튼 대비를 올리세요" || len(request.Unverified) != 1 {
+		t.Fatalf("request material = %+v", request)
+	}
+	options := current.Refs.DecisionOptions
+	if options == nil || len(options.Options) != 2 || options.Options[0].Recommended || !options.Options[1].Recommended {
+		t.Fatalf("options = %+v", options)
 	}
 }
