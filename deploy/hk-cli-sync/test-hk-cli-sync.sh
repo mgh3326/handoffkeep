@@ -1,0 +1,291 @@
+#!/usr/bin/env bash
+# Tests for deploy/hk-cli-sync/hk-cli-sync against fake gh, ssh and scp on PATH.
+# The fake ssh runs each remote command under a per-host fake HOME, and the
+# fake scp copies into that HOME, so the install steps (checksum, backup,
+# atomic mv) really run against files. Connectivity and ncp's healthz are the
+# only things faked.
+#
+#   bash deploy/hk-cli-sync/test-hk-cli-sync.sh
+set -uo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+SCRIPT="$HERE/hk-cli-sync"
+ROOT=$(mktemp -d)
+trap 'rm -rf "$ROOT"' EXIT
+FAILS=0 PASSES=0
+
+REPO=mgh3326/handoffkeep
+TAG=v0.0.300
+SHA=1111111111111111111111111111111111111111
+OLD=2222222222222222222222222222222222222222
+HOSTS="local:darwin_amd64 m1b:darwin_arm64 pi:linux_arm64"
+
+# --- fake tools -------------------------------------------------------------
+
+write_fakes() {
+	mkdir -p "$FIX/bin"
+	cat >"$FIX/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "gh $*" >>"$FIX/calls"
+case "$1" in
+api)
+	f="$FIX/gh/$(printf '%s' "$2" | tr '/' '_')"
+	[[ -f "$f" ]] && cat "$f" || exit 1
+	;;
+release)
+	case "$2" in
+	view)
+		[[ -f "$FIX/release_view.json" ]] && cat "$FIX/release_view.json" || exit 1
+		;;
+	download)
+		[[ ! -f "$FIX/download_fail" ]] || exit 1
+		dir=""
+		while [[ $# -gt 0 ]]; do
+			[[ "$1" == --dir ]] && dir=$2
+			shift
+		done
+		cp "$FIX"/release/* "$dir"/
+		;;
+	esac
+	;;
+esac
+EOF
+	cat >"$FIX/bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+# Records the call; runs the command with HOME set to the host's fake home.
+args=()
+while [[ $# -gt 0 ]]; do
+	case $1 in
+	-o) shift 2 ;;
+	-*) shift ;;
+	*) args+=("$1"); shift ;;
+	esac
+done
+host=${args[0]}
+cmd=${args[1]:-}
+echo "ssh $host $cmd" >>"$FIX/calls"
+grep -qxF "$host" "$FIX/unreachable" 2>/dev/null && exit 255
+case "$cmd" in
+*healthz*) cat "$FIX/ncp_healthz"; exit 0 ;;
+esac
+mkdir -p "$FIX/remote/$host"
+HOME="$FIX/remote/$host" bash -c "$cmd"
+EOF
+	cat >"$FIX/bin/scp" <<'EOF'
+#!/usr/bin/env bash
+# scp [-o opt]... [-q] src host:path
+args=()
+while [[ $# -gt 0 ]]; do
+	case $1 in
+	-o) shift 2 ;;
+	-*) shift ;;
+	*) args+=("$1"); shift ;;
+	esac
+done
+src=${args[0]}
+host=${args[1]%%:*}
+rel=${args[1]#*:}
+echo "scp $host $rel" >>"$FIX/calls"
+grep -qxF "$host" "$FIX/unreachable" 2>/dev/null && exit 255
+mkdir -p "$FIX/remote/$host/$(dirname "$rel")"
+cp "$src" "$FIX/remote/$host/$rel"
+[[ ! -f "$FIX/tamper/$host" ]] || printf 'tampered' >>"$FIX/remote/$host/$rel"
+EOF
+	chmod +x "$FIX/bin/gh" "$FIX/bin/ssh" "$FIX/bin/scp"
+}
+
+sums() { # <dir>: write SHA256SUMS for the assets in <dir>
+	if command -v sha256sum >/dev/null 2>&1; then
+		(cd "$1" && sha256sum handoffkeep_* >SHA256SUMS)
+	else
+		(cd "$1" && shasum -a 256 handoffkeep_* >SHA256SUMS)
+	fi
+}
+
+# version_script <release-tag>: a CLI that prints the version line.
+version_script() {
+	printf '#!/usr/bin/env bash\necho "handoffkeep rev=%s time=x modified=false module=x go=x release=%s"\n' "$SHA" "$1"
+}
+
+fx_gh() { printf '%s' "$2" >"$FIX/gh/$(printf '%s' "$1" | tr '/' '_')"; }
+
+# green: a tag that is on main, deploy-ok success, a complete release, and
+# ncp serving the tag's commit. Every failure case changes one of these.
+green() {
+	mkdir -p "$FIX/gh" "$FIX/release" "$FIX/remote"
+	fx_gh "repos/$REPO/commits/$TAG" "{\"sha\":\"$SHA\"}"
+	fx_gh "repos/$REPO/compare/main...$SHA" '{"status":"behind"}'
+	fx_gh "repos/$REPO/commits/$SHA/status" '{"statuses":[{"context":"deploy-ok","state":"success"}]}'
+	printf '{"assets":[{"name":"handoffkeep_darwin_amd64"},{"name":"handoffkeep_darwin_arm64"},{"name":"handoffkeep_linux_arm64"},{"name":"SHA256SUMS"}]}' >"$FIX/release_view.json"
+	for arch in darwin_amd64 darwin_arm64 linux_arm64; do
+		version_script "$TAG" >"$FIX/release/handoffkeep_$arch"
+		chmod +x "$FIX/release/handoffkeep_$arch"
+	done
+	sums "$FIX/release"
+	printf '{"vcs_revision":"%s"}' "$SHA" >"$FIX/ncp_healthz"
+}
+
+# setup: a fresh fixture directory for one case.
+setup() {
+	FIX="$ROOT/case$((PASSES + FAILS))"
+	mkdir -p "$FIX/home/.local/bin"
+	: >"$FIX/calls"
+	write_fakes
+	green
+}
+
+# run <args...>: run the script with the fakes first on PATH; sets RC.
+run() {
+	(
+		export FIX HOME="$FIX/home" PATH="$FIX/bin:$PATH" HK_CLI_HOSTS="$HOSTS"
+		bash "$SCRIPT" "$@"
+	) >"$FIX/out" 2>"$FIX/err"
+	RC=$?
+}
+
+check() { # <name> <cmd...>: pass when the command succeeds
+	local name=$1
+	shift
+	if "$@"; then
+		PASSES=$((PASSES + 1))
+	else
+		FAILS=$((FAILS + 1))
+		echo "not ok: $name"
+		echo "  stdout: $(tr '\n' '|' <"$FIX/out")"
+		echo "  stderr: $(tr '\n' '|' <"$FIX/err")"
+		echo "  calls:  $(tr '\n' '|' <"$FIX/calls")"
+	fi
+}
+
+has() { grep -qF -- "$2" "$1"; }      # has <file> <text>
+lacks() { ! grep -qF -- "$2" "$1"; }  # lacks <file> <text>
+rc_is() { [[ "$RC" == "$1" ]]; }
+
+# --- cases ------------------------------------------------------------------
+
+echo "== happy path: every host installs, old binary kept"
+setup
+mkdir -p "$FIX/remote/pi/.local/bin"
+printf '#!/usr/bin/env bash\necho old\n' >"$FIX/remote/pi/.local/bin/handoffkeep"
+run "$TAG"
+check "exit 0" rc_is 0
+check "local CLI ok" has "$FIX/out" "CLI local ok"
+check "m1b CLI ok" has "$FIX/out" "CLI m1b ok"
+check "pi CLI ok" has "$FIX/out" "CLI pi ok"
+check "summary has three installs" has "$FIX/out" "summary tag=$TAG installed=3 skipped=0 unreachable=none failed=none"
+check "local binary installed" has "$FIX/home/.local/bin/handoffkeep" "release=$TAG"
+check "m1b binary installed" has "$FIX/remote/m1b/.local/bin/handoffkeep" "release=$TAG"
+check "pi old binary kept as bak-pre" has "$FIX/remote/pi/.local/bin/handoffkeep.bak-pre-$TAG" "echo old"
+check "no .new left behind" test ! -e "$FIX/remote/m1b/.local/bin/handoffkeep.new"
+
+echo "== dry-run writes nothing"
+setup
+run "$TAG" --dry-run
+check "exit 0" rc_is 0
+check "plan lines" has "$FIX/out" "plan m1b install $TAG"
+check "no local binary" test ! -e "$FIX/home/.local/bin/handoffkeep"
+check "no remote binary" test ! -e "$FIX/remote/m1b/.local/bin/handoffkeep"
+check "no scp" lacks "$FIX/calls" "scp "
+
+echo "== refusal: not on origin/main"
+setup
+fx_gh "repos/$REPO/compare/main...$SHA" '{"status":"ahead"}'
+run "$TAG"
+check "exit 3" rc_is 3
+check "named refusal" has "$FIX/err" "not on origin/main"
+check "no host touched" lacks "$FIX/calls" "ssh m1b"
+check "no scp" lacks "$FIX/calls" "scp "
+
+echo "== refusal: deploy-ok not success"
+setup
+fx_gh "repos/$REPO/commits/$SHA/status" '{"statuses":[{"context":"deploy-ok","state":"pending"}]}'
+run "$TAG"
+check "exit 4" rc_is 4
+check "no host touched" lacks "$FIX/calls" "scp "
+
+echo "== refusal: no SHA256SUMS on the release"
+setup
+printf '{"assets":[{"name":"handoffkeep_darwin_amd64"}]}' >"$FIX/release_view.json"
+run "$TAG"
+check "exit 5" rc_is 5
+check "no download" lacks "$FIX/calls" "gh release download"
+check "no scp" lacks "$FIX/calls" "scp "
+
+echo "== refusal: ncp serves another sha"
+setup
+printf '{"vcs_revision":"%s"}' "$OLD" >"$FIX/ncp_healthz"
+run "$TAG"
+check "exit 6" rc_is 6
+check "no scp" lacks "$FIX/calls" "scp "
+
+echo "== refusal: ncp healthz unreadable"
+setup
+printf 'ncp\n' >"$FIX/unreachable"
+run "$TAG"
+check "exit 6" rc_is 6
+check "no scp" lacks "$FIX/calls" "scp "
+
+echo "== refusal: a download fails SHA256SUMS"
+setup
+{
+	printf '%s  handoffkeep_darwin_amd64\n' 0000000000000000000000000000000000000000000000000000000000000000
+	grep -v darwin_amd64 "$FIX/release/SHA256SUMS"
+} >"$FIX/release/SHA256SUMS.new" && mv "$FIX/release/SHA256SUMS.new" "$FIX/release/SHA256SUMS"
+run "$TAG"
+check "exit 7" rc_is 7
+check "no host touched" lacks "$FIX/calls" "scp "
+check "no ssh to a host" lacks "$FIX/calls" "ssh m1b"
+
+echo "== host already at the tag is skipped"
+setup
+mkdir -p "$FIX/remote/m1b/.local/bin"
+version_script "$TAG" >"$FIX/remote/m1b/.local/bin/handoffkeep"
+chmod +x "$FIX/remote/m1b/.local/bin/handoffkeep"
+run "$TAG"
+check "exit 0" rc_is 0
+check "skip line" has "$FIX/out" "skip m1b already $TAG"
+check "no scp to m1b" lacks "$FIX/calls" "scp m1b"
+check "pi still installed" has "$FIX/out" "CLI pi ok"
+
+echo "== a prefix of the tag does not count as at the tag"
+setup
+mkdir -p "$FIX/remote/m1b/.local/bin"
+version_script "v0.0.3000" >"$FIX/remote/m1b/.local/bin/handoffkeep"
+chmod +x "$FIX/remote/m1b/.local/bin/handoffkeep"
+run "$TAG"
+check "m1b installs" has "$FIX/out" "CLI m1b ok"
+
+echo "== unreachable host is a WARN, the run still succeeds"
+setup
+printf 'pi\n' >"$FIX/unreachable"
+run "$TAG"
+check "exit 0" rc_is 0
+check "WARN line" has "$FIX/out" "WARN pi unreachable"
+check "summary lists it" has "$FIX/out" "unreachable=pi"
+check "others installed" has "$FIX/out" "CLI m1b ok"
+
+echo "== host-side sha mismatch fails that host only"
+setup
+mkdir -p "$FIX/tamper" && : >"$FIX/tamper/m1b"
+run "$TAG"
+check "exit 8" rc_is 8
+check "m1b failed" has "$FIX/out" "FAIL m1b sha_mismatch"
+check "pi still installed" has "$FIX/out" "CLI pi ok"
+check "m1b binary not installed" test ! -e "$FIX/remote/m1b/.local/bin/handoffkeep"
+check "m1b .new removed" test ! -e "$FIX/remote/m1b/.local/bin/handoffkeep.new"
+check "summary names failure" has "$FIX/out" "failed=m1b"
+
+echo "== usage errors"
+setup
+run
+check "no args exit 2" rc_is 2
+setup
+run "1.2.3"
+check "bad tag exit 2" rc_is 2
+setup
+run "$TAG" extra
+check "two positionals exit 2" rc_is 2
+
+echo
+echo "passed: $PASSES  failed: $FAILS"
+[[ "$FAILS" -eq 0 ]]

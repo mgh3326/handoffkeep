@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+# hk-cli-sync — install the release handoffkeep CLI on every fleet host (hk 4721).
+#
+#   hk-cli-sync vX.Y.Z [--dry-run]
+#
+# Push deploy (hk-follow) rolls only the ncp server. This copies the release
+# CLI of the same tag to each host in HK_CLI_HOSTS. The design session runs it
+# by hand after hk-follow reports `[hk-follow] ... deployed on ncp`. It runs on
+# the operator's mac and reaches the hosts with ssh's own configuration.
+#
+# Refusals, each a named exit code, touch no host:
+#   3  the tag's commit is not on origin/main
+#   4  its deploy-ok commit status is not success
+#   5  the release has no SHA256SUMS, or lacks an asset a host needs
+#   6  ncp serves another revision, or its healthz is unreadable
+#   7  a downloaded asset fails SHA256SUMS
+# A reachable host that fails to install does not stop the others; the run
+# ends with exit 8. An unreachable host is a WARN and does not fail the run.
+# Exit 1 is any other error (GitHub, a missing tool); exit 2 is usage.
+#
+# Environment (all optional):
+#   HK_CLI_HOSTS      "host:os_arch ..." (`local` is this machine, no ssh)
+#   HK_CLI_REPO       owner/name of the repository (default mgh3326/handoffkeep)
+#   HK_CLI_NCP        the ncp ssh host (default ncp)
+#   HK_CLI_NCP_HEALTH the healthz URL on ncp (default http://127.0.0.1:8800/healthz)
+# Credentials come from gh's and ssh's own configuration; nothing is printed.
+#
+# Dependencies: bash, gh, jq, ssh, scp, sha256sum or shasum.
+set -euo pipefail
+
+: "${HK_CLI_HOSTS:=local:darwin_amd64 m1b:darwin_arm64 m1:darwin_arm64 desktop:linux_amd64 pi:linux_arm64 oci:linux_arm64 ncp:linux_amd64}"
+: "${HK_CLI_REPO:=mgh3326/handoffkeep}"
+: "${HK_CLI_NCP:=ncp}"
+: "${HK_CLI_NCP_HEALTH:=http://127.0.0.1:8800/healthz}"
+
+readonly EX_ERROR=1
+readonly EX_USAGE=2
+readonly EX_NOT_ON_MAIN=3
+readonly EX_DEPLOY_NOT_OK=4
+readonly EX_NO_SUMS=5
+readonly EX_NCP_MISMATCH=6
+readonly EX_CHECKSUM=7
+readonly EX_HOST_FAILED=8
+
+readonly SSH_OPTS=(-o ConnectTimeout=8 -o BatchMode=yes)
+
+usage() {
+	echo "usage: hk-cli-sync vX.Y.Z [--dry-run]" >&2
+	exit "$EX_USAGE"
+}
+
+die() {
+	echo "hk-cli-sync: $*" >&2
+	exit "$EX_ERROR"
+}
+
+refuse() {
+	local code=$1
+	shift
+	echo "hk-cli-sync: refused: $*" >&2
+	exit "$code"
+}
+
+TAG=""
+DRY_RUN=0
+for arg in "$@"; do
+	case "$arg" in
+	--dry-run) DRY_RUN=1 ;;
+	-*) usage ;;
+	*)
+		[[ -z "$TAG" ]] || usage
+		TAG=$arg
+		;;
+	esac
+done
+[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage
+
+for tool in gh jq ssh scp; do
+	command -v "$tool" >/dev/null 2>&1 || die "missing $tool"
+done
+
+# sha256_of <file>: the hex digest of one file.
+sha256_of() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+# sha256_check <dir>: rc 0 when every line of <dir>/SHA256SUMS matches.
+sha256_check() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		(cd "$1" && sha256sum -c SHA256SUMS >/dev/null 2>&1)
+	else
+		(cd "$1" && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1)
+	fi
+}
+
+REPO_API="repos/$HK_CLI_REPO"
+
+# ---------------------------------------------------------------------------
+# Gates. Every refusal happens before any host is touched.
+# ---------------------------------------------------------------------------
+
+sha=$(gh api "$REPO_API/commits/$TAG" | jq -r '.sha') || die "cannot resolve tag $TAG in $HK_CLI_REPO"
+[[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "tag $TAG did not resolve to a commit"
+
+# main...<sha> is behind when <sha> is an ancestor of main; identical when it is main.
+main_rel=$(gh api "$REPO_API/compare/main...$sha" | jq -r '.status') || die "cannot compare $sha with main"
+case "$main_rel" in
+identical | behind) ;;
+*) refuse "$EX_NOT_ON_MAIN" "$TAG ($sha) is not on origin/main (compare: $main_rel)" ;;
+esac
+
+deploy_ok=$(gh api "$REPO_API/commits/$sha/status" |
+	jq -r '[.statuses[] | select(.context == "deploy-ok")][0].state // "none"') || die "cannot read statuses of $sha"
+[[ "$deploy_ok" == success ]] || refuse "$EX_DEPLOY_NOT_OK" "deploy-ok on $sha is $deploy_ok"
+
+assets=$(gh release view "$TAG" --repo "$HK_CLI_REPO" --json assets | jq -r '.assets[].name') ||
+	die "release $TAG is not readable"
+grep -qxF SHA256SUMS <<<"$assets" || refuse "$EX_NO_SUMS" "release $TAG has no SHA256SUMS"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+gh release download "$TAG" --repo "$HK_CLI_REPO" --pattern 'handoffkeep_*' --pattern SHA256SUMS \
+	--dir "$TMP" || die "download of release $TAG failed"
+sha256_check "$TMP" || refuse "$EX_CHECKSUM" "release $TAG assets fail SHA256SUMS"
+
+for entry in $HK_CLI_HOSTS; do
+	arch=${entry#*:}
+	[[ -f "$TMP/handoffkeep_$arch" ]] ||
+		refuse "$EX_NO_SUMS" "release $TAG has no handoffkeep_$arch (for ${entry%%:*})"
+done
+
+# The healthz URL is meant to expand on ncp, not here.
+# shellcheck disable=SC2029
+served=$(ssh "${SSH_OPTS[@]}" "$HK_CLI_NCP" "curl -fsS $HK_CLI_NCP_HEALTH" 2>/dev/null |
+	jq -r '.vcs_revision // empty' 2>/dev/null) || served=""
+[[ "$served" == "$sha" ]] ||
+	refuse "$EX_NCP_MISMATCH" "$HK_CLI_NCP serves '${served:-unreadable}', tag $TAG is $sha"
+
+# ---------------------------------------------------------------------------
+# Per-host install. `local` runs here; every other host is reached by ssh.
+# ---------------------------------------------------------------------------
+
+# run_on <host> <command>: run a shell command on the host.
+run_on() {
+	if [[ "$1" == local ]]; then
+		bash -c "$2"
+	else
+		# The command is a string for the host's shell; nothing expands here.
+		# shellcheck disable=SC2029
+		ssh "${SSH_OPTS[@]}" "$1" "$2"
+	fi
+}
+
+# put_on <host> <file>: copy <file> to ~/.local/bin/handoffkeep.new on the host.
+put_on() {
+	run_on "$1" 'mkdir -p ~/.local/bin' || return 1
+	if [[ "$1" == local ]]; then
+		cp "$2" "$HOME/.local/bin/handoffkeep.new"
+	else
+		scp -q "${SSH_OPTS[@]}" "$2" "$1:.local/bin/handoffkeep.new"
+	fi
+}
+
+INSTALLED=0
+SKIPPED=0
+UNREACHABLE=""
+FAILED=""
+
+fail_host() {
+	echo "FAIL $1 $2"
+	FAILED="${FAILED:+$FAILED,}$1"
+}
+
+# install_host <host> <arch>: install the tag's CLI on one host.
+install_host() {
+	local host=$1 arch=$2 asset="$TMP/handoffkeep_$2" have want got
+
+	if ! run_on "$host" true >/dev/null 2>&1; then
+		echo "WARN $host unreachable"
+		UNREACHABLE="${UNREACHABLE:+$UNREACHABLE,}$host"
+		return 0
+	fi
+
+	# ~ is for the host's shell (local runs through bash -c), so it stays unexpanded here.
+	# shellcheck disable=SC2088
+	have=$(run_on "$host" '~/.local/bin/handoffkeep version 2>/dev/null' 2>/dev/null || true)
+	case " $(printf '%s' "$have" | tr '\n' ' ') " in
+	*" release=$TAG "*)
+		echo "skip $host already $TAG"
+		SKIPPED=$((SKIPPED + 1))
+		return 0
+		;;
+	esac
+
+	if ((DRY_RUN)); then
+		echo "plan $host install $TAG ($arch)"
+		return 0
+	fi
+
+	put_on "$host" "$asset" || {
+		fail_host "$host" copy_failed
+		return 0
+	}
+
+	want=$(sha256_of "$asset")
+	got=$(run_on "$host" 'if command -v sha256sum >/dev/null 2>&1; then sha256sum ~/.local/bin/handoffkeep.new; else shasum -a 256 ~/.local/bin/handoffkeep.new; fi | cut -d" " -f1' 2>/dev/null) || got=""
+	if [[ "$got" != "$want" ]]; then
+		run_on "$host" 'rm -f ~/.local/bin/handoffkeep.new' >/dev/null 2>&1 || true
+		fail_host "$host" sha_mismatch
+		return 0
+	fi
+
+	run_on "$host" "[ -e ~/.local/bin/handoffkeep ] && cp -p ~/.local/bin/handoffkeep ~/.local/bin/handoffkeep.bak-pre-$TAG; if command -v restorecon >/dev/null 2>&1; then restorecon ~/.local/bin/handoffkeep.new; fi; mv -f ~/.local/bin/handoffkeep.new ~/.local/bin/handoffkeep" || {
+		fail_host "$host" install_failed
+		return 0
+	}
+	echo "CLI $host ok"
+	INSTALLED=$((INSTALLED + 1))
+}
+
+for entry in $HK_CLI_HOSTS; do
+	install_host "${entry%%:*}" "${entry#*:}"
+done
+
+echo "summary tag=$TAG installed=$INSTALLED skipped=$SKIPPED unreachable=${UNREACHABLE:-none} failed=${FAILED:-none}"
+
+[[ -z "$FAILED" ]] || exit "$EX_HOST_FAILED"

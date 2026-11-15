@@ -121,13 +121,14 @@ Nothing here is installed by the PR. These are the steps the design session runs
    Run this from any host logged in to GHCR with `write:packages`. The first tick then finds that sha already serving and records `noop serving`.
 7. **Dry run.** Run `sudo -E hk-follow tick --dry-run` with the env file loaded. It prints the gate verdict and the shiftgate commands it would run, and writes nothing.
 8. **Enable.** Run `systemctl daemon-reload && systemctl enable --now hk-follow.timer`, then `journalctl -u hk-follow -f`.
-9. After two successful push deploys, turn off the mbp rollout and the hk-deploy wrapper (T-f).
+9. hk-deploy is retired (done 2026-11-15). The release CLI reaches the hosts through `deploy/hk-cli-sync <tag>` (see Operations), not through hk-deploy.
 
 ## Operations
 
 - **Pause.** `systemctl stop hk-follow.timer`. Do this before deploying a digest by hand.
 - **Roll back.** Run `shiftgate rollback <svc>`. shiftgate holds the digest it rolled back from, and hk-follow's state already marks that digest handled, so nothing redeploys it. The next promote (a new sha) deploys normally. A source revert and a DB rollback are separate steps (r2 §2).
 - **Retry a failed digest.** Fix the cause, then run `hk-follow reset`. The next tick evaluates the digest again. If shiftgate holds it (an image failure), clear the hold first with an explicit `shiftgate deploy <svc> --digest <d>`.
+- **After a deploy.** Push deploy rolls only the ncp server. Run `deploy/hk-cli-sync <tag>` on the operator's mac after the `[hk-follow] ... deployed on ncp` event, so the release CLI reaches every fleet host too. It refuses unless the tag is on main, its `deploy-ok` is success, the release has `SHA256SUMS`, and ncp serves the tag's commit. `--dry-run` prints the plan and writes nothing.
 
 ## Where this differs from r3
 
