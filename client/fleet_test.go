@@ -21,6 +21,8 @@ const (
 	fixtureToken    = "fixture-token"
 	fixtureCFID     = "cf-access-id.fixture.invalid"
 	fixtureCFSecret = "cf-access-secret-fixture"
+	// attachmentSHA is one content address, for an option's picture.
+	attachmentSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 
 // seen is one request the fake hk server received.
@@ -402,35 +404,46 @@ func fleetCases(t *testing.T) []fleetCase {
 		{
 			// The answer has no decision_ref or ver. 201 means a new request.
 			name: "RecordDecisionRequest", method: "POST", uri: "/v1/tasks/42/decision-request", status: http.StatusCreated,
-			reply: `{"task": ` + taskJSON + `, "request": {"id": "dr-42-4", "revision": 4, "supersedes": "dr-42-3", "root": "dr-42-1", "status": "open", "question": "deploy v2?", "default_action": "hold", "requested_by": "svc-mergewake", "requested_at": "2026-11-08T11:00:00Z", "human_only": true}, "duplicate": false}`,
+			reply: `{"task": ` + taskJSON + `, "request": {"id": "dr-42-4", "revision": 4, "supersedes": "dr-42-3", "root": "dr-42-1", "status": "open", "question": "deploy v2?", "recommendation_reason": "A keeps the rollback window", "unverified": ["host inventory"], "one_fix": "add the rollback step", "default_action": "hold", "requested_by": "svc-mergewake", "requested_at": "2026-11-08T11:00:00Z", "human_only": true}, "duplicate": false}`,
 			wantBody: map[string]any{
 				"question": "deploy v2?",
 				"options": map[string]any{"options": []any{
-					map[string]any{"key": "A", "label": "Approve this deployment", "recommended": true},
+					map[string]any{"key": "A", "label": "Approve this deployment", "recommended": true,
+						"attachments": []any{map[string]any{"sha256": attachmentSHA, "caption": "approach"}}},
 					map[string]any{"key": "B", "label": "Keep the current version"},
 				}, "allow_free": false},
-				"default_action": "Hold; keep the current version",
-				"due_at":         "2026-11-09T00:00:00Z",
-				"supersedes":     "dr-42-3",
-				"human_only":     true,
+				"recommendation_reason": "A keeps the rollback window",
+				"unverified":            []any{"host inventory"},
+				"one_fix":               "add the rollback step",
+				"default_action":        "Hold; keep the current version",
+				"due_at":                "2026-11-09T00:00:00Z",
+				"supersedes":            "dr-42-3",
+				"human_only":            true,
 			},
 			call: func(ctx context.Context, c client.Client) error {
 				x, err := c.RecordDecisionRequest(ctx, 42, client.DecisionAskInput{
 					Question: "deploy v2?",
 					Options: client.DecisionOptions{Options: []client.DecisionOption{
-						{Key: "A", Label: "Approve this deployment", Recommended: true},
+						{Key: "A", Label: "Approve this deployment", Recommended: true,
+							Attachments: []client.DecisionOptionAttachment{{SHA256: attachmentSHA, Caption: "approach"}}},
 						{Key: "B", Label: "Keep the current version"},
 					}},
-					DefaultAction: "Hold; keep the current version",
-					DueAt:         &due,
-					Supersedes:    "dr-42-3",
-					HumanOnly:     true,
+					RecommendationReason: "A keeps the rollback window",
+					Unverified:           []string{"host inventory"},
+					OneFix:               "add the rollback step",
+					DefaultAction:        "Hold; keep the current version",
+					DueAt:                &due,
+					Supersedes:           "dr-42-3",
+					HumanOnly:            true,
 				})
 				if err != nil {
 					return err
 				}
 				if x.Request.ID != "dr-42-4" || x.Request.Revision != 4 || x.Request.Supersedes != "dr-42-3" ||
-					x.Request.Status != "open" || !x.Request.HumanOnly || x.Duplicate {
+					x.Request.Status != "open" || !x.Request.HumanOnly || x.Duplicate ||
+					x.Request.RecommendationReason != "A keeps the rollback window" ||
+					len(x.Request.Unverified) != 1 || x.Request.Unverified[0] != "host inventory" ||
+					x.Request.OneFix != "add the rollback step" {
 					t.Fatalf("record decoded wrong: %+v", x)
 				}
 				checkTask(t, x.Task)

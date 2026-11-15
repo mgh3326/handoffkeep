@@ -11,6 +11,7 @@ import { loadDetail, postResolve } from "./api";
 import { Icon } from "../shared/Icon";
 import { ConfirmSheet } from "./ConfirmSheet";
 import { DecisionChip, stateChip } from "./DecisionChip";
+import { OptionCard, OptionMedia } from "./OptionCard";
 import { readDraft, saveDraft, type Draft } from "./drafts";
 import { ResultBadge, resultLabel } from "./ResultBadge";
 import type {
@@ -356,7 +357,6 @@ export function DecisionPage({ id }: { id: string }) {
         )}
       </header>
       <div className="decision-question-heading"><h2 className="decision-question">{question.heading}{(req?.question_ko_stale ?? detail.record.question_ko_stale) && <small className="hk-translation-stale"> 갱신 필요</small>}</h2>{((req?.question_ko ?? detail.record.question_ko) && !(req?.question_ko_stale ?? detail.record.question_ko_stale) || req?.options_ko && !req.options_ko_stale) && <button className="hk-detail-original" type="button" aria-pressed={original} onClick={() => setDetailOriginal(!original)}>원문 보기</button>}</div>
-      <p>{recommended ? <>권고: {recommendedLabel}{req?.reason && <> — {req.reason}</>}</> : "권고 없음 — 요청자가 권고를 주지 않았습니다"}</p>
       {question.fields.length > 0 && <dl className="decision-question-fields">{question.fields.map(([key, value]) => <div key={key}><dt>{key}</dt><dd><QuestionValue value={value} /></dd></div>)}</dl>}
       {detail.task && (
         <p className="decision-task-state">
@@ -383,21 +383,50 @@ export function DecisionPage({ id }: { id: string }) {
           {detail.answerable ? (
             <div role="radiogroup" aria-label="선택지" aria-describedby={error ? "decision-error" : undefined} className="decision-options">
               {req.options.map((o, i) => (
-                <button type="button" role="radio" className="decision-option" aria-checked={option === o.key} disabled={!editable} key={o.key} onClick={() => { setOption(o.key); setStale(false); }}>
-                  <span className="decision-option-mark" aria-hidden="true">{option === o.key && <Icon name="check" />}</span>
-                  <span className="decision-option-body"><strong>{i + 1}. {!original && req.options_ko && !req.options_ko_stale ? req.options_ko.find((translated) => translated.key === o.key)?.label ?? o.label : o.label}</strong><span className="hk-chips">{o.recommended && <DecisionChip group="done" label="권장" icon="check" />}{req.default_option === o.key && <DecisionChip group="neutral" label="미응답 시 기본값" />}</span></span>
-                </button>
+                <OptionCard
+                  key={o.key}
+                  option={o}
+                  index={i}
+                  label={!original && req.options_ko && !req.options_ko_stale ? req.options_ko.find((translated) => translated.key === o.key)?.label ?? o.label : o.label}
+                  answerable
+                  selected={option === o.key}
+                  editable={editable}
+                  defaultOption={req.default_option}
+                  onSelect={() => { setOption(o.key); setStale(false); }}
+                />
               ))}
             </div>
           ) : (
             <ul className="decision-options decision-options-readonly" aria-label="선택지">
-              {req.options.map((o, i) => <li key={o.key} className="decision-option" aria-current={req.resolution?.option === o.key ? "true" : undefined}>
-                <span className="decision-option-mark" aria-hidden="true">{req.resolution?.option === o.key && <Icon name="check" />}</span>
-                <span className="decision-option-body"><strong>{i + 1}. {!original && req.options_ko && !req.options_ko_stale ? req.options_ko.find((translated) => translated.key === o.key)?.label ?? o.label : o.label}</strong><span className="hk-chips">{req.resolution?.option === o.key && <span>선택됨{answerAttempt && <> · {answerAttempt.actor} · {answerAttempt.channel} · {formatMinuteKST(answerAttempt.received_at) ?? answerAttempt.received_at}</>}</span>}{o.recommended && <DecisionChip group="done" label="권장" icon="check" />}{req.default_option === o.key && <DecisionChip group="neutral" label="미응답 시 기본값" />}</span></span>
-              </li>)}
+              {req.options.map((o, i) => (
+                <li key={o.key} aria-current={req.resolution?.option === o.key ? "true" : undefined} className="decision-option-card decision-option-card--readonly" data-selected={req.resolution?.option === o.key ? "true" : undefined}>
+                  <span className="decision-option-key" aria-hidden="true">{o.key}</span>
+                  <div className="decision-option">
+                    <span className="decision-option-mark" aria-hidden="true">{req.resolution?.option === o.key && <Icon name="check" />}</span>
+                    <span className="decision-option-body"><strong>{i + 1}. {!original && req.options_ko && !req.options_ko_stale ? req.options_ko.find((translated) => translated.key === o.key)?.label ?? o.label : o.label}</strong><span className="hk-chips">{req.resolution?.option === o.key && <span>선택됨{answerAttempt && <> · {answerAttempt.actor} · {answerAttempt.channel} · {formatMinuteKST(answerAttempt.received_at) ?? answerAttempt.received_at}</>}</span>}{o.recommended && <DecisionChip group="done" label="권장" icon="check" />}{req.default_option === o.key && <DecisionChip group="neutral" label="미응답 시 기본값" />}</span></span>
+                  </div>
+                  <OptionMedia attachments={o.attachments} />
+                </li>
+              ))}
             </ul>
           )}
-          {detail.answerable && req.allow_free && <label className="decision-memo">메모<textarea className="hk-input" value={text} disabled={!editable} onChange={(e) => { setText(e.target.value); setStale(false); }} /></label>}
+          <section className="decision-recommendation" aria-label="권고">
+            <p>{recommended ? <>권고: {recommendedLabel}{req.reason && <> — {req.reason}</>}</> : "권고 없음 — 요청자가 권고를 주지 않았습니다"}</p>
+            {req.recommendation_reason && <p className="decision-recommendation-reason">{req.recommendation_reason}</p>}
+          </section>
+          {req.unverified && req.unverified.length > 0 && (
+            <section className="decision-unverified">
+              <h2>검증 안 된 것</h2>
+              <ul>{req.unverified.map((item) => <li key={item}>{item}</li>)}</ul>
+            </section>
+          )}
+          {req.one_fix && (
+            <section className="decision-one-fix">
+              <h2>고칠 점 하나</h2>
+              <p>{req.one_fix}</p>
+            </section>
+          )}
+          {detail.answerable && req.allow_free && <label className="decision-memo">메모 · 한 가지 고칠 점<textarea className="hk-input" value={text} disabled={!editable} onChange={(e) => { setText(e.target.value); setStale(false); }} /></label>}
           {!detail.answerable && req.resolution?.text && <p>메모: {req.resolution.text}</p>}
           <div className="decision-meta">
             {req.due_at && <p>기한: {deadline(req.due_at)}</p>}

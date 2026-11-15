@@ -310,3 +310,67 @@ func TestDecisionRecordAndOperatorAttentionTools(t *testing.T) {
 		t.Fatalf("attention=%+v", attention)
 	}
 }
+
+// hk 4788: the read tools dots uses carry each option's pictures and videos,
+// with the MIME type and original name, and the requester's recommendation
+// reason, unverified list and one fix.
+func TestDecisionsPendingCarriesOptionMedia(t *testing.T) {
+	st := newOperatorStore(t)
+	ctx := context.Background()
+	task := newOperatorTask(t, st, "decision media fixture")
+	sha := strings.Repeat("5", 64)
+	if _, _, err := st.PutAttachment(ctx, store.Attachment{
+		SHA256: sha, SizeBytes: 3, MIME: "image/png", OriginalName: "approach.png",
+		CreatedBy: "tester", RefKind: "task", RefID: fmt.Sprint(task.ID),
+	}, 1<<20, 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RecordDecisionRequest(ctx, task.ID, "desk", store.DecisionRequestInput{
+		Question: "Which card?",
+		Options: store.DecisionOptions{Options: []store.DecisionOption{{
+			Key: "A", Label: "2A", Recommended: true,
+			Attachments: []store.DecisionOptionAttachment{{SHA256: sha, Caption: "approach"}},
+		}}},
+		RecommendationReason: "2A keeps the left line",
+		Unverified:           []string{"head relation"},
+		OneFix:               "move the sign",
+		DefaultAction:        "hold",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, api.Tokens{"tester": "bearer-secret"}, nil))
+	defer srv.Close()
+	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+	type out struct {
+		Decisions []struct {
+			RecommendationReason string   `json:"recommendation_reason"`
+			Unverified           []string `json:"unverified"`
+			OneFix               string   `json:"one_fix"`
+			Options              []struct {
+				Key         string `json:"key"`
+				Attachments []struct {
+					SHA256       string `json:"sha256"`
+					Caption      string `json:"caption"`
+					MIME         string `json:"mime"`
+					OriginalName string `json:"original_name"`
+				} `json:"attachments"`
+			} `json:"options"`
+		} `json:"decisions"`
+	}
+	pending := callTool[out](t, session, "decisions_pending", map[string]any{})
+	if len(pending.Decisions) != 1 {
+		t.Fatalf("decisions=%+v", pending.Decisions)
+	}
+	item := pending.Decisions[0]
+	if item.RecommendationReason != "2A keeps the left line" || item.OneFix != "move the sign" ||
+		len(item.Unverified) != 1 || item.Unverified[0] != "head relation" {
+		t.Fatalf("item=%+v", item)
+	}
+	if len(item.Options) != 1 || len(item.Options[0].Attachments) != 1 {
+		t.Fatalf("options=%+v", item.Options)
+	}
+	attachment := item.Options[0].Attachments[0]
+	if attachment.SHA256 != sha || attachment.Caption != "approach" || attachment.MIME != "image/png" || attachment.OriginalName != "approach.png" {
+		t.Fatalf("attachment=%+v", attachment)
+	}
+}

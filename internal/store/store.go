@@ -219,6 +219,19 @@ type DecisionOption struct {
 	Key         string `json:"key"`
 	Label       string `json:"label"`
 	Recommended bool   `json:"recommended,omitempty"`
+	// Attachments are the pictures and videos the operator compares this
+	// option by (hk 4788), in the order the producer gave them. Each names an
+	// existing attachment; Caption is the one line shown under it.
+	Attachments []DecisionOptionAttachment `json:"attachments,omitempty"`
+}
+
+// DecisionOptionAttachment is one picture or video an option is shown with.
+// Only the content address and its caption are stored: the MIME type and
+// original name are read from the attachments table when a page renders it,
+// so a stored option can never disagree with the object it names.
+type DecisionOptionAttachment struct {
+	SHA256  string `json:"sha256"`
+	Caption string `json:"caption,omitempty"`
 }
 
 // DecisionOptions describes the choices attached to a decision. AllowFree is
@@ -361,9 +374,50 @@ func validDecisionOptions(x DecisionOptions) bool {
 		if option.Recommended {
 			recommended++
 		}
+		if !validDecisionOptionAttachments(option.Attachments) {
+			return false
+		}
 	}
 	return recommended <= 1
 }
+
+// validDecisionOptionAttachments bounds one option's pictures and videos: at
+// most DecisionOptionMaxAttachments, each a content address naming one
+// distinct attachment, with an optional one-line caption. Whether the address
+// exists is a store check (ErrDecisionAttachmentNotFound), not this one.
+func validDecisionOptionAttachments(list []DecisionOptionAttachment) bool {
+	if len(list) > DecisionOptionMaxAttachments {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, attachment := range list {
+		if !attachmentSHARE.MatchString(attachment.SHA256) || seen[attachment.SHA256] {
+			return false
+		}
+		seen[attachment.SHA256] = true
+		if !validDecisionAttachmentCaption(attachment.Caption) {
+			return false
+		}
+	}
+	return true
+}
+
+func validDecisionAttachmentCaption(caption string) bool {
+	if caption == "" {
+		return true
+	}
+	if !validText(caption, DecisionOptionCaptionMaxBytes) || !utf8.ValidString(caption) || caption != strings.TrimSpace(caption) {
+		return false
+	}
+	for _, r := range caption {
+		if r == 0 || r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			return false
+		}
+	}
+	return true
+}
+
+var attachmentSHARE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // CheckDecisionOptions is exported for local producers such as the CLI.
 func CheckDecisionOptions(x DecisionOptions) error {
@@ -3878,6 +3932,36 @@ func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limi
 			return nil, e
 		}
 		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// AttachmentsBySHA returns the stored metadata of every named content
+// address, keyed by address. An address with no row is absent from the map:
+// callers that render an option's pictures read MIME and original name here
+// rather than storing a copy that could drift from the object it names.
+func (s *Store) AttachmentsBySHA(ctx context.Context, shas []string) (map[string]Attachment, error) {
+	out := map[string]Attachment{}
+	valid := make([]string, 0, len(shas))
+	for _, sha := range shas {
+		if attachmentSHARE.MatchString(sha) {
+			valid = append(valid, sha)
+		}
+	}
+	if len(valid) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256 = ANY($1)`, valid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var x Attachment
+		if err = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); err != nil {
+			return nil, err
+		}
+		out[x.SHA256] = x
 	}
 	return out, rows.Err()
 }

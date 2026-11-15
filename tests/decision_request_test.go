@@ -243,6 +243,59 @@ func TestDecisionRequestLegacyAnswerPathsRefuseOpenRequest(t *testing.T) {
 	}
 }
 
+// HTTP: an option's pictures and videos, and the recommendation's reason,
+// what was not verified and one fix, cross the wire and are read back; an
+// option naming an attachment hk does not hold is refused with its own code.
+func TestDecisionRequestAPIOptionMedia(t *testing.T) {
+	s := taskTestStore(t)
+	h := taskHTTP(s)
+	defer h.Close()
+	x := drTask(t, s, taskLane(t), "claimed")
+	sha := strings.Repeat("7", 64)
+	if _, _, err := s.PutAttachment(t.Context(), store.Attachment{
+		SHA256: sha, SizeBytes: 3, MIME: "image/png", OriginalName: "approach.png",
+		CreatedBy: "node", RefKind: "task", RefID: strconv.FormatInt(x.ID, 10),
+	}, 1<<20, 100); err != nil {
+		t.Fatal(err)
+	}
+	url := h.URL + "/v1/tasks/" + strconv.FormatInt(x.ID, 10) + "/decision-request"
+	post := func(body any) (int, map[string]any) {
+		response := request(t, h.Client(), http.MethodPost, url, "node-token", body)
+		defer response.Body.Close()
+		out := map[string]any{}
+		_ = json.NewDecoder(response.Body).Decode(&out)
+		return response.StatusCode, out
+	}
+	in := drInput("어느 카드?")
+	in.Options.Options[0].Attachments = []store.DecisionOptionAttachment{{SHA256: sha, Caption: "approach"}}
+	in.RecommendationReason = "A keeps the left line"
+	in.Unverified = []string{"head relation"}
+	in.OneFix = "move the sign"
+	status, created := post(in)
+	if status != http.StatusCreated {
+		t.Fatalf("create status=%d body=%v", status, created)
+	}
+	request := created["request"].(map[string]any)
+	if request["recommendation_reason"] != "A keeps the left line" || request["one_fix"] != "move the sign" ||
+		len(request["unverified"].([]any)) != 1 {
+		t.Fatalf("request=%v", request)
+	}
+	got, _, err := s.GetTask(t.Context(), x.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := got.Refs.DecisionOptions.Options[0].Attachments
+	if len(attachments) != 1 || attachments[0].SHA256 != sha || attachments[0].Caption != "approach" {
+		t.Fatalf("stored attachments=%+v", attachments)
+	}
+	unknown := drInput("없는 파일")
+	unknown.Options.Options = []store.DecisionOption{{Key: "A", Label: "x", Attachments: []store.DecisionOptionAttachment{{SHA256: strings.Repeat("8", 64)}}}}
+	status, refused := post(unknown)
+	if status != http.StatusBadRequest || refused["error"] != "decision_attachment_not_found" {
+		t.Fatalf("unknown sha status=%d body=%v", status, refused)
+	}
+}
+
 // HTTP: 201 on record, 200 with the same request_id on a re-send, the
 // documented conflicts, and a validation reason the CLI can print.
 func TestDecisionRequestAPI(t *testing.T) {

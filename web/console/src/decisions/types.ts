@@ -47,7 +47,21 @@ export type DecisionRecord = {
   superseded_record_id?: number | null;
   answer: string;
 };
-export type Option = { key: string; label: string; recommended?: boolean };
+// OptionAttachment is one picture or video shown with an option: the stored
+// content address and caption, plus the MIME type and original name the
+// server reads from the attachments table so the page can render it in place.
+export type OptionAttachment = {
+  sha256: string;
+  caption?: string;
+  mime?: string;
+  original_name?: string;
+};
+export type Option = {
+  key: string;
+  label: string;
+  recommended?: boolean;
+  attachments?: OptionAttachment[];
+};
 export type Resolution = {
   kind: string;
   option?: string;
@@ -60,6 +74,9 @@ export type Request = {
   state: string;
   question: string;
   reason?: string;
+  recommendation_reason?: string;
+  unverified?: string[];
+  one_fix?: string;
   question_ko?: string;
   question_ko_stale?: boolean;
   options: Option[];

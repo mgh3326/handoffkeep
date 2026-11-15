@@ -122,3 +122,74 @@ func TestUIDecisions(t *testing.T) {
 		t.Fatalf("failure=%v status=%d", failure, r.StatusCode)
 	}
 }
+
+// hk 4788: the console's decision detail carries each option's pictures and
+// videos with the MIME type and original name the page renders them by.
+func TestUIDecisionDetailOptionMedia(t *testing.T) {
+	_, url := testdb.Schema(t, "ui_decision_media")
+	s, err := store.Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	project := fmt.Sprintf("decision-media-%d", time.Now().UnixNano())
+	if _, err = s.AddTaskProject(t.Context(), project, "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask(t.Context(), store.Task{Lane: "fixture", Title: "media fixture", Kind: "implement", CreatedBy: "fixture", Project: &project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha := strings.Repeat("6", 64)
+	if _, _, err = s.PutAttachment(t.Context(), store.Attachment{
+		SHA256: sha, SizeBytes: 3, MIME: "image/png", OriginalName: "approach.png",
+		CreatedBy: "fixture", RefKind: "task", RefID: fmt.Sprint(task.ID),
+	}, 1<<20, 100); err != nil {
+		t.Fatal(err)
+	}
+	req, err := s.RecordDecisionRequest(t.Context(), task.ID, "fixture", store.DecisionRequestInput{
+		Question: "Which card?",
+		Options: store.DecisionOptions{AllowFree: true, Options: []store.DecisionOption{{
+			Key: "A", Label: "2A", Attachments: []store.DecisionOptionAttachment{{SHA256: sha, Caption: "approach"}},
+		}}},
+		DefaultAction: "wait",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := pgxpool.New(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	var id int64
+	if err = pool.QueryRow(t.Context(), `SELECT id FROM decision_requests WHERE source='task_request' AND source_ref=$1`, req.Request.ID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	token := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	var detail struct {
+		Request struct {
+			Options []struct {
+				Attachments []struct {
+					SHA256       string `json:"sha256"`
+					Caption      string `json:"caption"`
+					MIME         string `json:"mime"`
+					OriginalName string `json:"original_name"`
+				} `json:"attachments"`
+			} `json:"options"`
+		} `json:"request"`
+	}
+	if status := boardJSON(t, h.Client(), fmt.Sprintf("%s/ui/api/decisions/%d", h.URL, id), token, &detail); status != http.StatusOK {
+		t.Fatal(status)
+	}
+	if len(detail.Request.Options) != 1 || len(detail.Request.Options[0].Attachments) != 1 {
+		t.Fatalf("detail=%+v", detail)
+	}
+	attachment := detail.Request.Options[0].Attachments[0]
+	if attachment.SHA256 != sha || attachment.Caption != "approach" || attachment.MIME != "image/png" || attachment.OriginalName != "approach.png" {
+		t.Fatalf("attachment=%+v", attachment)
+	}
+}

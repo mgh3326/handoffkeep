@@ -166,6 +166,24 @@ func (h *Handler) decisionsAPI(w http.ResponseWriter, r *http.Request, identity 
 		decisionsFailed(w, err)
 		return
 	}
+	// An option's pictures and videos are shown in place: one lookup gives
+	// every one of them its MIME type and original name.
+	media, err := h.store.AttachmentsBySHA(r.Context(), decisionMediaSHAs(history))
+	if err != nil {
+		decisionsFailed(w, err)
+		return
+	}
+	for i := range history {
+		for j := range history[i].Options {
+			for k := range history[i].Options[j].Attachments {
+				attachment := &history[i].Options[j].Attachments[k]
+				if stored, ok := media[attachment.SHA256]; ok {
+					attachment.MIME = stored.MIME
+					attachment.OriginalName = stored.OriginalName
+				}
+			}
+		}
+	}
 	if request != nil {
 		for _, v := range history {
 			if v.ID == request.ID {
