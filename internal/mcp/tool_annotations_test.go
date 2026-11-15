@@ -44,7 +44,7 @@ func TestEveryRegisteredToolHasAnnotations(t *testing.T) {
 
 	readOnly := []string{
 		"search_context", "get_document", "list_documents",
-		"attachment_list", "attachment_get_url",
+		"attachment_list", "attachment_get_url", "attachment_read",
 	}
 	for _, name := range readOnly {
 		tool, ok := byName[name]

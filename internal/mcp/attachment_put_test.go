@@ -116,8 +116,11 @@ func (b attachmentBackend) ListAttachments(ctx context.Context, ref string, limi
 func (b attachmentBackend) AttachmentURL(ctx context.Context, sha string) (string, error) {
 	return b.m.Presign(ctx, sha)
 }
+func (b attachmentBackend) GetAttachment(ctx context.Context, sha string) (store.Attachment, io.ReadCloser, error) {
+	return b.m.Get(ctx, sha)
+}
 
-func newAttachmentTestServer(t *testing.T) (*gmcp.ClientSession, *memAttachmentDB, *memObjects, *attachments.Manager) {
+func newAttachmentManager(t *testing.T) (*memAttachmentDB, *memObjects, *attachments.Manager) {
 	t.Helper()
 	db := &memAttachmentDB{rows: map[string]store.Attachment{}}
 	objs := &memObjects{objects: map[string][]byte{}}
@@ -126,7 +129,18 @@ func newAttachmentTestServer(t *testing.T) (*gmcp.ClientSession, *memAttachmentD
 		allow[x] = true
 	}
 	m := &attachments.Manager{Store: db, Objects: objs, Enabled: true, Config: attachments.Config{MaxBytes: 50 << 20, StorageCap: 1 << 30, PutCap: 1000, GetCap: 1000, Allow: allow, DirectUpload: true, StagingCap: 1 << 30, StagingClientCap: 1 << 30}}
-	server := New(attachmentBackend{spyBackend: &spyBackend{}, m: m}, "mcp-test")
+	return db, objs, m
+}
+
+func newAttachmentTestServer(t *testing.T) (*gmcp.ClientSession, *memAttachmentDB, *memObjects, *attachments.Manager) {
+	t.Helper()
+	db, objs, m := newAttachmentManager(t)
+	return connectTestServer(t, New(attachmentBackend{spyBackend: &spyBackend{}, m: m}, "mcp-test")), db, objs, m
+}
+
+// connectTestServer connects an in-memory client session to server.
+func connectTestServer(t *testing.T, server *gmcp.Server) *gmcp.ClientSession {
+	t.Helper()
 	a, b := gmcp.NewInMemoryTransports()
 	ss, err := server.Connect(t.Context(), a, nil)
 	if err != nil {
@@ -138,7 +152,7 @@ func newAttachmentTestServer(t *testing.T) (*gmcp.ClientSession, *memAttachmentD
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cs.Close() })
-	return cs, db, objs, m
+	return cs
 }
 
 // attachmentCall returns the tool's JSON object, or the error text when the tool refused.

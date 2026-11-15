@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -34,6 +35,9 @@ func (*spyBackend) ListAttachments(context.Context, string, int) ([]store.Attach
 }
 func (*spyBackend) AttachmentURL(context.Context, string) (string, error) {
 	return "", errors.New("unexpected")
+}
+func (*spyBackend) GetAttachment(context.Context, string) (store.Attachment, io.ReadCloser, error) {
+	return store.Attachment{}, nil, errors.New("unexpected")
 }
 
 // The MCP server reports the binary's build stamp, the rev `version` prints.
