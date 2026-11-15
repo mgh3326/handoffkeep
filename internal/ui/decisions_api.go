@@ -180,6 +180,7 @@ func (h *Handler) decisionsAPI(w http.ResponseWriter, r *http.Request, identity 
 				if stored, ok := media[attachment.SHA256]; ok {
 					attachment.MIME = stored.MIME
 					attachment.OriginalName = stored.OriginalName
+					attachment.SizeBytes = stored.SizeBytes
 				}
 			}
 		}

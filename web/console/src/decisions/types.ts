@@ -55,6 +55,7 @@ export type OptionAttachment = {
   caption?: string;
   mime?: string;
   original_name?: string;
+  size_bytes?: number;
 };
 export type Option = {
   key: string;

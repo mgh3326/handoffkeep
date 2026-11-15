@@ -315,11 +315,15 @@ type Ledger interface {
 	// again at next. Only for remote_unknown.
 	TouchUnknown(ctx context.Context, now time.Time, id int64, next time.Time, reason, detail string) (Op, error)
 	// Due lists prepared and remote_unknown ops whose NextAttemptAt <= now,
-	// ascending id. A prepared op queued behind an unresolved earlier op on its
-	// entity, or one Claim would hold, is not listed (it cannot be claimed now,
-	// and listing it would let a long blocked or held queue crowd out ops that
-	// can run). A remote_unknown op is listed unless it is bound to a tenant the
-	// ledger does not serve; the evidence search is read-only.
+	// ascending NextAttemptAt then id: an op a failed read or a rate limit
+	// deferred goes behind the ops that have not been tried, so a repeatedly
+	// failing op cannot fill a pass's window (hk 4784). A prepared op queued
+	// behind an unresolved earlier op on its entity, or one Claim would hold,
+	// is not listed (it cannot be claimed now, and listing it would let a long
+	// blocked or held queue crowd out ops that can run); per-entity order is
+	// therefore the same whatever the listing order. A remote_unknown op is
+	// listed unless it is bound to a tenant the ledger does not serve; the
+	// evidence search is read-only.
 	Due(ctx context.Context, now time.Time, limit int) ([]Op, error)
 	// Stale lists dispatched ops whose dispatch began at or before cutoff,
 	// ascending id.

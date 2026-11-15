@@ -178,6 +178,7 @@ func TestUIDecisionDetailOptionMedia(t *testing.T) {
 					Caption      string `json:"caption"`
 					MIME         string `json:"mime"`
 					OriginalName string `json:"original_name"`
+					SizeBytes    int64  `json:"size_bytes"`
 				} `json:"attachments"`
 			} `json:"options"`
 		} `json:"request"`
@@ -189,7 +190,7 @@ func TestUIDecisionDetailOptionMedia(t *testing.T) {
 		t.Fatalf("detail=%+v", detail)
 	}
 	attachment := detail.Request.Options[0].Attachments[0]
-	if attachment.SHA256 != sha || attachment.Caption != "approach" || attachment.MIME != "image/png" || attachment.OriginalName != "approach.png" {
+	if attachment.SHA256 != sha || attachment.Caption != "approach" || attachment.MIME != "image/png" || attachment.OriginalName != "approach.png" || attachment.SizeBytes != 3 {
 		t.Fatalf("attachment=%+v", attachment)
 	}
 }

@@ -236,13 +236,18 @@ func (l *MemLedger) TouchUnknown(_ context.Context, _ time.Time, id int64, next 
 }
 
 func (l *MemLedger) list(keep func(*ytwrite.Op) bool, limit int) []ytwrite.Op {
+	return l.listBy(keep, limit, func(a, b ytwrite.Op) bool { return a.ID < b.ID })
+}
+
+// listBy is list ordered by less, then cut to limit.
+func (l *MemLedger) listBy(keep func(*ytwrite.Op) bool, limit int, less func(a, b ytwrite.Op) bool) []ytwrite.Op {
 	var out []ytwrite.Op
 	for _, op := range l.ops {
 		if keep(op) {
 			out = append(out, *op)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	sort.Slice(out, func(i, j int) bool { return less(out[i], out[j]) })
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
@@ -252,7 +257,11 @@ func (l *MemLedger) list(keep func(*ytwrite.Op) bool, limit int) []ytwrite.Op {
 func (l *MemLedger) Due(_ context.Context, now time.Time, limit int) ([]ytwrite.Op, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.list(func(o *ytwrite.Op) bool {
+	// Due order is the pass's fairness: an op deferred by a failed read goes
+	// behind the ops that have not been tried, so a repeatedly failing op
+	// cannot fill the window (hk 4784). Id breaks ties, so the order is
+	// deterministic.
+	return l.listBy(func(o *ytwrite.Op) bool {
 		if o.NextAttemptAt.After(now) {
 			return false
 		}
@@ -271,7 +280,12 @@ func (l *MemLedger) Due(_ context.Context, now time.Time, limit int) ([]ytwrite.
 			return true
 		}
 		return false
-	}, limit), nil
+	}, limit, func(a, b ytwrite.Op) bool {
+		if !a.NextAttemptAt.Equal(b.NextAttemptAt) {
+			return a.NextAttemptAt.Before(b.NextAttemptAt)
+		}
+		return a.ID < b.ID
+	}), nil
 }
 
 func (l *MemLedger) Stale(_ context.Context, cutoff time.Time, limit int) ([]ytwrite.Op, error) {

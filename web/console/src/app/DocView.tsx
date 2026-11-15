@@ -9,7 +9,6 @@ import { RendererBoundary } from "../shared/doc/RendererBoundary";
 import { formatMinuteUTC } from "../shared/time";
 import { fetchDocumentAttachments } from "../shared/boardApi";
 import type { BoardAttachment } from "../shared/boardTypes";
-import "../shared/doc/doc.css";
 
 const DocMarkdown = lazy(() => import("../shared/doc/DocMarkdown"));
 

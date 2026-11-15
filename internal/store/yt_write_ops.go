@@ -526,6 +526,12 @@ func ytLimit(n int) int {
 }
 
 func (l *YTWriteLedger) Due(ctx context.Context, now time.Time, limit int) ([]ytwrite.Op, error) {
+	// Due order is the pass's fairness (hk 4784): by next_attempt_at, so an
+	// op a failed read deferred goes behind the ops that have not been tried,
+	// and a repeatedly failing op cannot fill the window; id breaks ties, so
+	// the order is deterministic. The partial index yt_write_ops_due is
+	// (next_attempt_at, id) over exactly these two states, so the order costs
+	// no sort.
 	if l.scoped {
 		// Held prepared ops (not admitted, or the mode is off) are left out
 		// before the limit, so a long held queue cannot fill every pass;
@@ -537,13 +543,13 @@ func (l *YTWriteLedger) Due(ctx context.Context, now time.Time, limit int) ([]yt
 				OR (o.state = 'prepared' AND `+l.s.ytAdmitSQL("$3")+`
 					AND NOT EXISTS (SELECT 1 FROM yt_write_ops e
 						WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected'))))
-			ORDER BY o.id LIMIT $2`, now.UTC(), ytLimit(limit), l.tenant)
+			ORDER BY o.next_attempt_at, o.id LIMIT $2`, now.UTC(), ytLimit(limit), l.tenant)
 	}
 	return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops o
 		WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= $1
 		AND (o.state = 'remote_unknown' OR NOT EXISTS (SELECT 1 FROM yt_write_ops e
 			WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected')))
-		ORDER BY o.id LIMIT $2`, now.UTC(), ytLimit(limit))
+		ORDER BY o.next_attempt_at, o.id LIMIT $2`, now.UTC(), ytLimit(limit))
 }
 
 func (l *YTWriteLedger) Stale(ctx context.Context, cutoff time.Time, limit int) ([]ytwrite.Op, error) {

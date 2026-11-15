@@ -16,6 +16,7 @@ import Markdown, { type Components } from "react-markdown";
 import rehypeSanitize, { defaultSchema, type Options as SanitizeSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { findSectionHeading, safeDocUrl } from "./docrender";
+import "./doc.css";
 
 const schema: SanitizeSchema = {
   ...defaultSchema,

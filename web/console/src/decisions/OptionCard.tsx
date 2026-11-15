@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Icon } from "../shared/Icon";
+import { inlineSrc, MAX_INLINE_BYTES, mediaKind } from "../shared/media";
 import { DecisionChip } from "./DecisionChip";
 import type { Option, OptionAttachment } from "./types";
 
@@ -69,25 +70,11 @@ export function OptionCard({
   );
 }
 
-// fileURL is the one place the page names a stored file. inline=1 asks for the
-// object with an inline disposition, so the browser renders it instead of
-// downloading it (hk 4787; the console's CSP admits the object store's origin
-// for exactly these two types).
-function fileURL(sha256: string) {
-  return `/ui/files/${sha256}?inline=1`;
-}
-
-function captionOf(attachment: OptionAttachment) {
-  return (
-    attachment.caption ||
-    attachment.original_name ||
-    `${attachment.sha256.slice(0, 12)}…`
-  );
-}
-
 // OptionMedia shows each attachment in place: a picture renders where it
-// sits, a video renders with controls. A type the page cannot show, and a
-// file the server no longer holds, stay a plain link.
+// sits, a video renders with controls. The server's allowlist and the size
+// cap are the task page's (shared/media.ts), so a type it will not serve
+// inline, a file above the cap, and a file the server no longer holds stay a
+// plain link rather than a picture that cannot decode.
 export function OptionMedia({
   attachments,
 }: {
@@ -97,9 +84,17 @@ export function OptionMedia({
   return (
     <div className="decision-option-media">
       {attachments.map((attachment) => {
-        const url = fileURL(attachment.sha256);
-        const caption = captionOf(attachment);
-        if (attachment.mime?.startsWith("image/"))
+        const url = inlineSrc(attachment.sha256);
+        const caption =
+          attachment.caption ||
+          attachment.original_name ||
+          `${attachment.sha256.slice(0, 12)}…`;
+        const kind =
+          attachment.size_bytes !== undefined &&
+          attachment.size_bytes > MAX_INLINE_BYTES
+            ? null
+            : mediaKind(attachment.mime);
+        if (kind === "image")
           return (
             <figure key={attachment.sha256}>
               <a href={url} target="_blank" rel="noreferrer">
@@ -108,7 +103,7 @@ export function OptionMedia({
               {attachment.caption && <figcaption>{attachment.caption}</figcaption>}
             </figure>
           );
-        if (attachment.mime?.startsWith("video/"))
+        if (kind === "video")
           return (
             <figure key={attachment.sha256}>
               <video controls preload="metadata" src={url} aria-label={caption} />

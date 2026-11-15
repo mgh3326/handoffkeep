@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MAX_INLINE_BYTES } from "../shared/media";
 import { DecisionPage } from "./DecisionPage";
 
 // hk 4788: a decision option carries its pictures and videos, and the page
@@ -188,7 +189,11 @@ it("B5 a file the page cannot show stays a link", async () => {
           {
             key: "A",
             label: "2A left at the signal",
-            attachments: [{ sha256: image, mime: "application/pdf", original_name: "plan.pdf" }],
+            attachments: [
+              { sha256: image, mime: "application/pdf", original_name: "plan.pdf" },
+              { sha256: "c".repeat(64), mime: "image/svg+xml", original_name: "sketch.svg" },
+              { sha256: video, mime: "video/mp4", original_name: "clip.mp4", size_bytes: MAX_INLINE_BYTES + 1 },
+            ],
           },
         ],
       },
@@ -196,7 +201,15 @@ it("B5 a file the page cannot show stays a link", async () => {
   );
   await start();
   expect(document.querySelector(".decision-option-card img")).toBeNull();
+  expect(document.querySelector(".decision-option-card video")).toBeNull();
   expect(
     screen.getByRole("link", { name: "plan.pdf" }).getAttribute("href"),
   ).toBe(`/ui/files/${image}?inline=1`);
+  expect(
+    screen.getByRole("link", { name: "sketch.svg" }).getAttribute("href"),
+  ).toBe(`/ui/files/${"c".repeat(64)}?inline=1`);
+  // Above the task page's threshold a clip stays a link too.
+  expect(
+    screen.getByRole("link", { name: "clip.mp4" }).getAttribute("href"),
+  ).toBe(`/ui/files/${video}?inline=1`);
 });

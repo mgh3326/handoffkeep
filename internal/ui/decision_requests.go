@@ -43,14 +43,17 @@ type decisionOptionView struct {
 	Attachments []decisionAttachmentView `json:"attachments,omitempty"`
 }
 
-// decisionAttachmentView is one attachment of an option. MIME and
-// OriginalName are empty when the attachments table no longer holds the
+// decisionAttachmentView is one attachment of an option. MIME, OriginalName
+// and SizeBytes are empty when the attachments table no longer holds the
 // address: the page then shows a plain link, never a broken picture.
+// SizeBytes also lets the page keep a file too large to render in place a
+// link, the same threshold the task page uses.
 type decisionAttachmentView struct {
 	SHA256       string `json:"sha256"`
 	Caption      string `json:"caption,omitempty"`
 	MIME         string `json:"mime,omitempty"`
 	OriginalName string `json:"original_name,omitempty"`
+	SizeBytes    int64  `json:"size_bytes,omitempty"`
 }
 
 func projectDecisionOptions(options []store.DecisionOption) []decisionOptionView {

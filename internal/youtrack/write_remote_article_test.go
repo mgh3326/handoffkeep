@@ -3,6 +3,7 @@ package youtrack
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -43,7 +44,7 @@ func TestWriteRemoteFindArticles(t *testing.T) {
 			t.Errorf("unexpected %s", r.URL.Path)
 		}
 	}}
-	got, err := y.serve(t).FindArticles(t.Context(), "SHRDOC", "0-30", summary, "")
+	got, err := y.serve(t).FindArticles(t.Context(), ytwrite.ArticleSearch{ProjectShort: "SHRDOC", ProjectID: "0-30", Query: summary, Summary: summary})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +65,8 @@ func TestWriteRemoteFindArticlesFullPageIsAnError(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(page)
 	}}
-	if _, err := y.serve(t).FindArticles(t.Context(), "SHRDOC", "0-30", "s", ""); err == nil || !strings.Contains(err.Error(), "not complete") {
+	search := ytwrite.ArticleSearch{ProjectShort: "SHRDOC", ProjectID: "0-30", Query: "s", Summary: "s"}
+	if _, err := y.serve(t).FindArticles(t.Context(), search); err == nil || !strings.Contains(err.Error(), "not complete") {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -87,7 +89,7 @@ func TestWriteRemoteFindArticlesScopedToParent(t *testing.T) {
 			t.Errorf("unexpected %s", r.URL.Path)
 		}
 	}}
-	got, err := y.serve(t).FindArticles(t.Context(), "SHRDOC", "0-30", summary, "3-1")
+	got, err := y.serve(t).FindArticles(t.Context(), ytwrite.ArticleSearch{ProjectShort: "SHRDOC", ProjectID: "0-30", Query: summary, Summary: summary, ParentID: "3-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,5 +166,56 @@ func TestWriteRemoteArticleCreate5xxIsNotRetried(t *testing.T) {
 	re, ok := err.(*ytwrite.RemoteError)
 	if !ok || re.Status != http.StatusBadGateway || y.count() != 1 {
 		t.Fatalf("err %v requests %v", err, y.requests)
+	}
+}
+
+// A family root is found by its own sentence, not by the family word every
+// document of the family carries (hk 4784): in a project of 120 documents that
+// mention "design", the family word fills a search page (an error, so the
+// create never sent), and the root's own phrase finds the one root.
+func TestWriteRemoteFindArticlesFamilyRootIsNarrow(t *testing.T) {
+	const family = "design"
+	rootContent := ytwrite.FamilyRootContent(family)
+	hits := []map[string]any{articleHit("3-1", "0-30", family, "", rootContent)}
+	for i := 0; i < 120; i++ {
+		hits = append(hits, articleHit("3-"+strconv.Itoa(100+i), "0-30", "design/x"+strconv.Itoa(i)+".md", "", "a design note"))
+	}
+	search := func(t *testing.T, query string) ([]ytwrite.RemoteArticle, error) {
+		t.Helper()
+		y := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/articles/3-1" {
+				_ = json.NewEncoder(w).Encode(hits[0])
+				return
+			}
+			phrase := strings.Trim(strings.SplitN(r.URL.Query().Get("query"), ` "`, 2)[1], `"`)
+			var page []map[string]any
+			for _, h := range hits {
+				text, _ := h["summary"].(string)
+				if c, ok := h["content"].(string); ok {
+					text += "\n" + c
+				}
+				if strings.Contains(text, phrase) {
+					page = append(page, h)
+				}
+			}
+			if len(page) > articleSearchTop {
+				page = page[:articleSearchTop]
+			}
+			_ = json.NewEncoder(w).Encode(page)
+		}}
+		return y.serve(t).FindArticles(t.Context(), ytwrite.ArticleSearch{ProjectShort: "SHRDOC", ProjectID: "0-30", Query: query, Summary: family})
+	}
+
+	// The bare family word matches 121 articles: the page is full, so the
+	// search cannot prove completeness and must not answer.
+	if _, err := search(t, family); err == nil || !strings.Contains(err.Error(), "not complete") {
+		t.Fatalf("a family-word search = %v, want an incomplete-search error", err)
+	}
+	got, err := search(t, ytwrite.FamilyRootPhrase(family))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "3-1" || got[0].Content != rootContent {
+		t.Fatalf("hits %+v, want the family root only", got)
 	}
 }

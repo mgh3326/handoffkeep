@@ -10,9 +10,41 @@ import (
 	"regexp"
 
 	"github.com/mgh3326/handoffkeep/internal/attachments"
+	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
 var attachmentSHA256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// inlineMediaTypes is the whole allowlist behind ?inline=1: the console shows
+// these in place. Everything else — HTML, SVG, PDF, plain text — keeps the
+// download disposition even when asked to go inline, so this origin never
+// renders an attachment as a document. The stored type is the one upload
+// sniffed, not a client's claim (attachments.validate).
+var inlineMediaTypes = map[string]bool{
+	"image/png":  true,
+	"image/jpeg": true,
+	"image/webp": true,
+	"image/gif":  true,
+	"video/mp4":  true,
+	"video/webm": true,
+}
+
+// attachmentDisposition is the Content-Disposition the object store signs into
+// the redirect: inline for an allowlisted image or video requested with
+// ?inline=1, attachment for everything else.
+func attachmentDisposition(r *http.Request, attachment store.Attachment) string {
+	kind := "attachment"
+	if r.URL.Query().Get("inline") == "1" {
+		if mediaType, _, err := mime.ParseMediaType(attachment.MIME); err == nil && inlineMediaTypes[mediaType] {
+			kind = "inline"
+		}
+	}
+	disposition := mime.FormatMediaType(kind, map[string]string{"filename": attachment.OriginalName})
+	if disposition == "" {
+		disposition = kind + "; filename*=UTF-8''" + url.PathEscape(attachment.OriginalName)
+	}
+	return disposition
+}
 
 func (h *Handler) fileDownload(w http.ResponseWriter, r *http.Request, email, sha string) {
 	result := "internal_error"
@@ -24,6 +56,10 @@ func (h *Handler) fileDownload(w http.ResponseWriter, r *http.Request, email, sh
 		}
 		log.Printf("ui.file_download email=%q sha=%q result=%q err=%q", email, sha, result, failure)
 	}()
+	// The redirect itself is the response this handler writes; the object's
+	// bytes come from the object store, so this header does not govern them.
+	// It still keeps a browser from sniffing this route's own answers.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if !attachmentSHA256RE.MatchString(sha) {
 		result = "not_found"
 		http.NotFound(w, r)
@@ -56,10 +92,7 @@ func (h *Handler) fileDownload(w http.ResponseWriter, r *http.Request, email, sh
 		_, _ = fmt.Fprintf(w, "<!doctype html><title>파일 보관됨</title><p>archived at %s; restore is not available yet (hk 3680)</p>", html.EscapeString(location))
 		return
 	}
-	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": attachment.OriginalName})
-	if disposition == "" {
-		disposition = "attachment; filename*=UTF-8''" + url.PathEscape(attachment.OriginalName)
-	}
+	disposition := attachmentDisposition(r, attachment)
 	location, err := h.attachments.PresignDownload(r.Context(), sha, disposition)
 	if err != nil {
 		failure = err.Error()
