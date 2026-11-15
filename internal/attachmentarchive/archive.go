@@ -58,9 +58,9 @@ const (
 
 // API is the hk calls the archiver makes. *client.Client implements it.
 type API interface {
-	ArchiveCandidates(ctx context.Context, limit int, after string) (client.ArchiveCandidatesPage, error)
+	ArchiveCandidates(ctx context.Context, limit int, after string) (client.ArchiveCandidates, error)
 	GetAttachment(ctx context.Context, sha string) (client.Attachment, io.ReadCloser, error)
-	RecordAttachmentArchive(ctx context.Context, sha, location string, size int64) (client.ArchiveRecord, error)
+	RecordAttachmentArchive(ctx context.Context, sha, location string, size int64) (client.AttachmentArchive, error)
 }
 
 // Options is one run's inputs.

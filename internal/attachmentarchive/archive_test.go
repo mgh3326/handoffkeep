@@ -33,7 +33,7 @@ type fakeAPI struct {
 	onRecord func(sha, location string)
 }
 
-func (f *fakeAPI) ArchiveCandidates(_ context.Context, _ int, after string) (client.ArchiveCandidatesPage, error) {
+func (f *fakeAPI) ArchiveCandidates(_ context.Context, _ int, after string) (client.ArchiveCandidates, error) {
 	f.calls = append(f.calls, "candidates")
 	start := 0
 	if after != "" {
@@ -48,7 +48,7 @@ func (f *fakeAPI) ArchiveCandidates(_ context.Context, _ int, after string) (cli
 		size = len(f.candidates) - start
 	}
 	end := start + size
-	page := client.ArchiveCandidatesPage{Candidates: f.candidates[start:end]}
+	page := client.ArchiveCandidates{Candidates: f.candidates[start:end]}
 	if end < len(f.candidates) {
 		page.Next = f.candidates[end-1].SHA256
 	}
@@ -64,15 +64,15 @@ func (f *fakeAPI) GetAttachment(_ context.Context, sha string) (client.Attachmen
 	return client.Attachment{SHA256: sha, SizeBytes: int64(len(b)), MIME: "text/plain"}, io.NopCloser(bytes.NewReader(b)), nil
 }
 
-func (f *fakeAPI) RecordAttachmentArchive(_ context.Context, sha, location string, _ int64) (client.ArchiveRecord, error) {
+func (f *fakeAPI) RecordAttachmentArchive(_ context.Context, sha, location string, _ int64) (client.AttachmentArchive, error) {
 	f.calls = append(f.calls, "record:"+sha)
 	if f.onRecord != nil {
 		f.onRecord(sha, location)
 	}
 	if f.recordErr != nil {
-		return client.ArchiveRecord{}, f.recordErr
+		return client.AttachmentArchive{}, f.recordErr
 	}
-	return client.ArchiveRecord{Location: location, ArchivedAt: time.Now().UTC()}, nil
+	return client.AttachmentArchive{Location: location, ArchivedAt: time.Now().UTC()}, nil
 }
 
 func shaHex(b []byte) string {
@@ -96,9 +96,9 @@ func candidate(body []byte, taskID int64, tasks ...int64) client.ArchiveCandidat
 		tasks = []int64{taskID}
 	}
 	closed := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	refs := make([]client.ArchiveTaskRef, 0, len(tasks))
+	refs := make([]client.ArchiveCandidateTask, 0, len(tasks))
 	for _, id := range tasks {
-		refs = append(refs, client.ArchiveTaskRef{ID: id, State: "completed", ClosedAt: &closed})
+		refs = append(refs, client.ArchiveCandidateTask{ID: id, State: "completed", ClosedAt: closed})
 	}
 	return client.ArchiveCandidate{
 		SHA256:       shaHex(body),
@@ -479,7 +479,7 @@ func TestPagingAndLimit(t *testing.T) {
 // without a download.
 func TestUnusableCandidateIsRefused(t *testing.T) {
 	dir := archiveRoot(t)
-	bad := client.ArchiveCandidate{SHA256: "../../etc/passwd", SizeBytes: 1, OriginalName: "x", TaskID: 3, Tasks: []client.ArchiveTaskRef{{ID: 3}}}
+	bad := client.ArchiveCandidate{SHA256: "../../etc/passwd", SizeBytes: 1, OriginalName: "x", TaskID: 3, Tasks: []client.ArchiveCandidateTask{{ID: 3}}}
 	noTask := candidate([]byte("x"), 0)
 	api := &fakeAPI{candidates: []client.ArchiveCandidate{bad, noTask}}
 	sum, err := Archive(context.Background(), api, Options{Root: dir, Apply: true})
