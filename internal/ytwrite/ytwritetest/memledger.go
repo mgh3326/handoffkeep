@@ -379,6 +379,8 @@ func (l *MemLedger) RecordFamilyRoot(_ context.Context, tenant, projectID, famil
 }
 
 // memFamilyKey is one family on one project (yt_family_roots' primary key).
+// The parts are joined by U+001F, as the store's advisory lock key is: NUL is
+// not a character PostgreSQL text can carry (hk 4797).
 func memFamilyKey(tenant, projectID, family string) string {
-	return tenant + "\x00" + projectID + "\x00" + family
+	return tenant + "\x1f" + projectID + "\x1f" + family
 }

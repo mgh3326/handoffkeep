@@ -28,9 +28,13 @@ import (
 const ytFamilyUnlockTimeout = 5 * time.Second
 
 // ytFamilyLaneKey is the advisory lock key of one family's root: the tenant,
-// project and family, which is the identity of a root (yt_family_roots).
+// project and family, which is the identity of a root (yt_family_roots). The
+// parts are joined by U+001F, the unit separator: PostgreSQL text cannot carry
+// a NUL byte, so a NUL-joined key is refused as a parameter (22021) and no
+// family could ever take its lane. None of the three parts (a YouTrack host, a
+// project id, a family name) holds the separator, so the key is unambiguous.
 func ytFamilyLaneKey(tenant, projectID, family string) string {
-	return "yt_family_root:" + tenant + "\x00" + projectID + "\x00" + family
+	return "yt_family_root:" + tenant + "\x1f" + projectID + "\x1f" + family
 }
 
 // LockFamily takes the family's lane without waiting (hk 4797). ok is false

@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
@@ -21,6 +23,34 @@ func ytFamilyOp(t *testing.T, l ytwrite.Ledger, key string) ytwrite.Op {
 		t.Fatal(err)
 	}
 	return op
+}
+
+// The lane key is bound as a text parameter to hashtextextended, and PostgreSQL
+// text cannot hold a NUL byte: a NUL-joined key is refused with 22021, every
+// LockFamily fails, and every article_create of a new family backs off forever
+// (review of PR #444). The key is also unambiguous, so two families never share
+// a lane.
+func TestYTFamilyLaneKeyIsText(t *testing.T) {
+	keys := map[string]string{}
+	for _, k := range []struct{ tenant, project, family string }{
+		{"yt.example", "0-30", "design"},
+		{"yt.example", "0-30", "briefs"},
+		{"yt.example", "0-31", "design"},
+		{"other.example", "0-30", "design"},
+		{"", "0-30", "design"},
+	} {
+		key := ytFamilyLaneKey(k.tenant, k.project, k.family)
+		if strings.ContainsRune(key, 0) {
+			t.Fatalf("lane key %q holds a NUL byte, which PostgreSQL text cannot carry", key)
+		}
+		if !utf8.ValidString(key) {
+			t.Fatalf("lane key %q is not valid UTF-8", key)
+		}
+		if other, dup := keys[key]; dup {
+			t.Fatalf("%+v and %s share the lane key %q", k, other, key)
+		}
+		keys[key] = k.tenant + "/" + k.project + "/" + k.family
+	}
 }
 
 // One root per family and project, first record wins, and each project's (and
