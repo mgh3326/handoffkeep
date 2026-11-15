@@ -184,6 +184,8 @@ jobs:
       - run: python3 scripts/test-repair-release.py
       # hk-follow's gate and rollout decisions against fake APIs (hk 3509).
       - run: bash deploy/hk-follow/test-hk-follow.sh
+      # hk-cli-sync's refusals and install steps against fake gh, ssh and scp (hk 4721).
+      - run: bash deploy/test-hk-cli-sync.sh
       # The previous-release choice behind schema-compat (hk 4697): a throwaway
       # git history and a stubbed registry read, so it needs no database.
       - run: bash scripts/test-previous-release-base.sh
