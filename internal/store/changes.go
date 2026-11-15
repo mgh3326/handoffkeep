@@ -326,7 +326,7 @@ func scanChange(row pgx.Row, c *Change) error {
 // sync checks them against GitHub and writes the merge commit through the state
 // write, which settle-merged then reads (hk 4844).
 func (s *Store) ListUnreconciledChanges(ctx context.Context, limit int) ([]Change, error) {
-	return s.listChangesWhere(ctx, s.pool, `(state=$1 OR (state=$2 AND merge_sha IS NULL))`, limit, ChangeOpen, ChangeMerged)
+	return s.listChangesWhere(ctx, s.pool, `(state=$1 OR (state=$2 AND merge_sha IS NULL))`, nil, limit, ChangeOpen, ChangeMerged)
 }
 
 // ListChangesByTask lists the changes linked to a task, ordered by id.
