@@ -284,33 +284,33 @@ func ytRootsMergeApply(ctx context.Context, remote ytRootsMergeRemote, report yt
 				log.Printf("yt.roots_merge.moved family=%q article_id=%s parent_id=%s", entry.Family, child.ArticleID, entry.Kept)
 				entry.Counts.Moved++
 			}
+			if !stopped {
+				now, err := remote.ReadArticle(ctx, dup.ArticleID)
+				switch {
+				case err != nil:
+					log.Printf("yt.roots_merge.deleted_failed family=%q article_id=%s err=%q", entry.Family, dup.ArticleID, err.Error())
+					entry.Error = err.Error()
+					stopped = true
+				case len(now.ChildArticles) > 0:
+					dup.Delete, dup.Skip = false, ytSkipHasChildren
+				case now.HasParent():
+					dup.Delete, dup.Skip = false, ytSkipNotTopLevel
+				case !strings.Contains(now.Content, ytwrite.FamilyRootMarker(entry.Family)):
+					dup.Delete, dup.Skip = false, ytSkipMarkerMissing
+				default:
+					if err := remote.DeleteArticle(ctx, dup.ArticleID); err != nil {
+						log.Printf("yt.roots_merge.deleted_failed family=%q article_id=%s err=%q", entry.Family, dup.ArticleID, err.Error())
+						entry.Error = err.Error()
+						stopped = true
+						break
+					}
+					log.Printf("yt.roots_merge.deleted family=%q article_id=%s", entry.Family, dup.ArticleID)
+					entry.Counts.Deleted++
+				}
+			}
 			if stopped {
 				ytRootsMergeStop(entry, di)
 				break
-			}
-			now, err := remote.ReadArticle(ctx, dup.ArticleID)
-			if err != nil {
-				log.Printf("yt.roots_merge.deleted_failed family=%q article_id=%s err=%q", entry.Family, dup.ArticleID, err.Error())
-				entry.Error = err.Error()
-				ytRootsMergeStop(entry, di)
-				break
-			}
-			switch {
-			case len(now.ChildArticles) > 0:
-				dup.Delete, dup.Skip = false, ytSkipHasChildren
-			case now.HasParent():
-				dup.Delete, dup.Skip = false, ytSkipNotTopLevel
-			case !strings.Contains(now.Content, ytwrite.FamilyRootMarker(entry.Family)):
-				dup.Delete, dup.Skip = false, ytSkipMarkerMissing
-			default:
-				if err := remote.DeleteArticle(ctx, dup.ArticleID); err != nil {
-					log.Printf("yt.roots_merge.deleted_failed family=%q article_id=%s err=%q", entry.Family, dup.ArticleID, err.Error())
-					entry.Error = err.Error()
-					ytRootsMergeStop(entry, di)
-					break
-				}
-				log.Printf("yt.roots_merge.deleted family=%q article_id=%s", entry.Family, dup.ArticleID)
-				entry.Counts.Deleted++
 			}
 			if dup.Skip != "" {
 				entry.Counts.Skipped++
