@@ -740,8 +740,8 @@ t_outbox_record_fifo() {
 t_outbox_failure_does_not_block_others() {
 	# A failed status holds back only a later status for the same sha and
 	# context: a status for another sha, a record and a notify are still
-	# attempted in the same pass, and an undeliverable entry stays queued
-	# without blocking the rest.
+	# attempted in the same pass, and an entry that can never be delivered is
+	# rejected without blocking the rest (hk 4749).
 	setup
 	local dir="$HK_FOLLOW_STATE_DIR/outbox"
 	mkdir -p "$dir"
@@ -764,9 +764,184 @@ t_outbox_failure_does_not_block_others() {
 		if [[ $1 == "$SHA_OLD" ]]; then return 1; fi
 	}
 	deliver_outbox
-	want "$(printf 'status %s deploy-ok success older\nrecord deploy/handoffkeep/20260101T000000Z\nstatus %s deploy-ok success newer\nnotify alert' "$SHA_OLD" "$SHA_NEW")" "$(calls)"
-	[[ -f "$dir/20260101T000000Z.000001.json" && -f "$dir/20260101T000004Z.000005.json" ]]
+	want "$(printf 'status %s deploy-ok success older\nrecord deploy/handoffkeep/20260101T000000Z\nstatus %s deploy-ok success newer\nnotify alert\nnotify [hk-follow] outbox entry rejected: 20260101T000004Z.000005.json (unknown_kind); kept in %s/outbox/rejected/20260101T000004Z.000005.json' "$SHA_OLD" "$SHA_NEW" "${HK_FOLLOW_STATE_DIR}")" "$(calls)"
+	[[ -f "$dir/20260101T000000Z.000001.json" ]]
+	[[ -f "$dir/rejected/20260101T000004Z.000005.json" ]]
+	[[ ! -f "$dir/20260101T000004Z.000005.json" ]]
 	[[ ! -f "$dir/20260101T000001Z.000002.json" && ! -f "$dir/20260101T000002Z.000003.json" && ! -f "$dir/20260101T000003Z.000004.json" ]]
+}
+
+# two_same_key_records <dir>: queue two records with one document key, the
+# second strictly later in the queue. The bodies come from the shipped
+# record(), so TestHKFollowRecordsParse parses them.
+two_same_key_records() {
+	local -a files
+	record handoffkeep "$SHA_NEW" "$D1" "$SHA_OLD" success "" 20260101T000000Z
+	record handoffkeep "$SHA_NEW" "$D2" "$SHA_OLD" failed "shiftgate_handoffkeep_exit_1" 20260101T000000Z
+	files=("$1"/*.json)
+	mv "${files[0]}" "$1/20260101T000000Z.000001.json"
+	mv "${files[1]}" "$1/20260101T000001Z.000002.json"
+}
+
+t_outbox_rejected_record_unblocks_same_key() {
+	# hk 4749: a record hk refuses permanently leaves the queue for
+	# rejected/ and holds nothing back, so the later record with the same key
+	# is delivered instead of waiting behind it forever.
+	setup
+	local dir="$HK_FOLLOW_STATE_DIR/outbox" doc_key="deploy/handoffkeep/20260101T000000Z"
+	mkdir -p "$dir"
+	two_same_key_records "$dir"
+	hk_doc_put() {
+		if [[ "$1" == "$doc_key" && ! -f "$FIX/refused" ]]; then
+			touch "$FIX/refused"
+			DELIVER_REASON=invalid_context
+			return 2
+		fi
+		cp "$2" "$FIX/records/$(key "$1")"
+		echo "record $1" >>"$FIX/calls"
+	}
+	deliver_outbox 2>"$FIX/log"
+	[[ ! -f "$dir/20260101T000000Z.000001.json" && ! -f "$dir/20260101T000001Z.000002.json" ]]
+	[[ -f "$dir/rejected/20260101T000000Z.000001.json" ]]
+	want failed "$(jq -r .result "$FIX/records/$(key "$doc_key")")"
+	grep -qx "hk_follow.outbox_rejected key=$doc_key reason=invalid_context" "$FIX/log"
+	want 1 "$(count 'notify \[hk-follow\] outbox entry rejected')"
+}
+
+t_outbox_transient_failure_held() {
+	# A failure a later pass may deliver still holds the later record with the
+	# same key, and nothing moves to rejected/.
+	setup
+	local dir="$HK_FOLLOW_STATE_DIR/outbox"
+	mkdir -p "$dir"
+	two_same_key_records "$dir"
+	hk_doc_put() { return 1; }
+	deliver_outbox 2>"$FIX/log"
+	[[ -f "$dir/20260101T000000Z.000001.json" && -f "$dir/20260101T000001Z.000002.json" ]]
+	[[ ! -e "$dir/rejected" ]]
+	want 1 "$(grep -c hk_follow.outbox_hold "$FIX/log" || true)"
+	want 1 "$(grep -c hk_follow.outbox_retry "$FIX/log" || true)"
+	fails grep -q outbox_rejected "$FIX/log"
+}
+
+t_outbox_unknown_kind_rejected() {
+	# An entry of an unknown kind can never be delivered: it moves to
+	# rejected/ at once instead of being retried every tick.
+	setup
+	local dir="$HK_FOLLOW_STATE_DIR/outbox"
+	mkdir -p "$dir"
+	printf '%s\n' '{"kind":"bogus"}' >"$dir/20260101T000004Z.000005.json"
+	deliver_outbox 2>"$FIX/log"
+	[[ ! -f "$dir/20260101T000004Z.000005.json" ]]
+	[[ -f "$dir/rejected/20260101T000004Z.000005.json" ]]
+	grep -qx 'hk_follow.outbox_rejected key=20260101T000004Z.000005.json reason=unknown_kind' "$FIX/log"
+	want 1 "$(count 'notify \[hk-follow\] outbox entry rejected')"
+}
+
+t_outbox_reject_failure_does_not_stop_the_pass() {
+	# A rejected/ that cannot be created must not abort the pass: the refused
+	# entry stays queued, holds its key like a failed retry, and the reports
+	# behind it are still attempted.
+	setup
+	local dir="$HK_FOLLOW_STATE_DIR/outbox" doc_key="deploy/handoffkeep/20260101T000000Z"
+	mkdir -p "$dir"
+	two_same_key_records "$dir"
+	printf '%s\n' '{"kind":"notify", "text":"alert"}' >"$dir/20260101T000002Z.000003.json"
+	# rejected/ exists as a file, so mkdir -p refuses it.
+	printf '' >"$dir/rejected"
+	hk_doc_put() {
+		if [[ "$1" == "$doc_key" ]]; then
+			DELIVER_REASON=invalid_context
+			return 2
+		fi
+		echo "record $1" >>"$FIX/calls"
+	}
+	deliver_outbox 2>"$FIX/log"
+	[[ -f "$dir/20260101T000000Z.000001.json" && -f "$dir/20260101T000001Z.000002.json" ]]
+	[[ -f "$dir/rejected" && ! -d "$dir/rejected" ]]
+	want "notify alert" "$(calls)"
+	want 1 "$(grep -c hk_follow.outbox_reject_failed "$FIX/log" || true)"
+	fails grep -q 'hk_follow.outbox_rejected key=' "$FIX/log"
+}
+
+t_outbox_status_rejected_only_on_body_refusal() {
+	# Only a 4xx that refuses the body itself (400, 422) is permanent; auth,
+	# rate-limit and server errors stay queued. A permanent one moves to
+	# rejected/ and holds nothing back.
+	setup
+	local dir="$HK_FOLLOW_STATE_DIR/outbox"
+	mkdir -p "$dir"
+	printf '%s\n' "$(jq -cn --arg s "$SHA_OLD" '{kind:"status", sha:$s, context:"deployed", state:"success", description:"refused"}')" \
+		>"$dir/20260101T000000Z.000001.json"
+	printf '%s\n' "$(jq -cn --arg s "$SHA_NEW" '{kind:"status", sha:$s, context:"deployed", state:"success", description:"retry"}')" \
+		>"$dir/20260101T000001Z.000002.json"
+	gh_status() {
+		echo "status $1 $2 $3 $4" >>"$FIX/calls"
+		if [[ $1 == "$SHA_OLD" ]]; then
+			DELIVER_REASON=http_422
+			return 2
+		fi
+		return 1
+	}
+	deliver_outbox 2>"$FIX/log"
+	[[ ! -f "$dir/20260101T000000Z.000001.json" ]]
+	[[ -f "$dir/rejected/20260101T000000Z.000001.json" ]]
+	[[ -f "$dir/20260101T000001Z.000002.json" ]]
+	grep -qx "hk_follow.outbox_rejected key=$SHA_OLD/deployed reason=http_422" "$FIX/log"
+	# The shipped gh_status: only a body refusal is permanent.
+	want "2 http_400" "$(real_status 400)"
+	want "2 http_422" "$(real_status 422)"
+	want "1 none" "$(real_status 401)"
+	want "1 none" "$(real_status 403)"
+	want "1 none" "$(real_status 404)"
+	want "1 none" "$(real_status 429)"
+	want "1 none" "$(real_status 500)"
+}
+
+# real_status <http code>: run the shipped gh_status against a curl that
+# answers <code>; print "<rc> <reason>".
+real_status() {
+	(
+		# shellcheck source=hk-follow
+		source "$SCRIPT"
+		# Not `code`: gh_status declares that name local, and bash's dynamic
+		# scope would make this one unset (set -u) inside the fake.
+		local fake_http=$1
+		curl() { printf '%s' "$fake_http"; }
+		DELIVER_REASON=""
+		rc=0
+		gh_status "$SHA_OLD" deployed success x || rc=$?
+		printf '%s %s\n' "$rc" "${DELIVER_REASON:-none}"
+	)
+}
+
+# real_put <cli error>: run the shipped hk_doc_put against a fake hk CLI that
+# prints "handoffkeep: <cli error>" and exits 1; print "<rc> <reason>".
+real_put() {
+	printf '%s\n' "handoffkeep: $1" >"$FIX/cli.err"
+	printf '#!/bin/sh\ncat "%s" >&2\nexit 1\n' "$FIX/cli.err" >"$FIX/cli"
+	chmod +x "$FIX/cli"
+	(
+		# shellcheck source=hk-follow
+		source "$SCRIPT"
+		HANDOFFKEEP_CLI="$FIX/cli"
+		DELIVER_REASON=""
+		rc=0
+		hk_doc_put k "$FIX/record" || rc=$?
+		printf '%s %s\n' "$rc" "${DELIVER_REASON:-none}"
+	)
+}
+
+t_hk_doc_put_classifies_the_cli() {
+	# `handoffkeep doc put` exits 1 for every failure, so the wire code in its
+	# error line is the signal: invalid_context and secret_like_content mean
+	# the server refused this body and a retry cannot succeed.
+	setup
+	want "2 invalid_context" "$(real_put invalid_context)"
+	want "2 secret_like_content" "$(real_put secret_like_content:aws_access_key)"
+	want "1 none" "$(real_put 'Post "https://hk.example/v1/documents/k": dial tcp 10.0.0.1:443: connect: connection refused')"
+	want "1 none" "$(real_put internal_error)"
+	want "1 none" "$(real_put unauthorized)"
 }
 
 t_tick_rollback_failed_hk_down_notify_delivered() {
