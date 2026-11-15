@@ -3,11 +3,14 @@ package attachments
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -155,5 +158,29 @@ func TestArchivedReadsReportLocation(t *testing.T) {
 	}
 	if row := db.rows[sha]; row.ArchivedAt == nil {
 		t.Fatal("row lost its archive record")
+	}
+}
+
+// TestUploadRefusalReasonNamesAttachmentArchived: a completion whose sha is
+// archived is refused finally, not released for a retry that can never work.
+func TestUploadRefusalReasonNamesAttachmentArchived(t *testing.T) {
+	reason, refusable := uploadRefusalReason(store.ErrAttachmentArchived)
+	if !refusable || reason != "attachment_archived" {
+		t.Fatalf("reason=%q refusable=%t", reason, refusable)
+	}
+}
+
+// TestPutToAnArchivedBlobIsRefused: re-uploading bytes whose sha is archived
+// does not slip a new ref onto the blob.
+func TestPutToAnArchivedBlobIsRefused(t *testing.T) {
+	m, db, _, _ := archiveManager(t, ArchiveModeRecord)
+	m.Config = Config{MaxBytes: 1000, StorageCap: 1 << 20, PutCap: 100, GetCap: 100, Allow: map[string]bool{"text/plain": true}}
+	body := []byte("hello")
+	sha := fmt.Sprintf("%x", sha256.Sum256(body))
+	at := time.Now().UTC()
+	db.rows[sha] = store.Attachment{SHA256: sha, SizeBytes: int64(len(body)), MIME: "text/plain", OriginalName: "a.txt",
+		ArchivedAt: &at, ArchiveLocation: "fleet-artifacts/archive/tasks/1/attachments/a.txt"}
+	if _, _, err := m.Put(t.Context(), "node", "a.txt", "text/plain", "task:1", body); !errors.Is(err, store.ErrAttachmentArchived) {
+		t.Fatalf("put on an archived blob err=%v, want store.ErrAttachmentArchived", err)
 	}
 }

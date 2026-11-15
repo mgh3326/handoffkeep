@@ -588,6 +588,12 @@ func (m *Manager) putVerified(ctx context.Context, client, name, mime, ref, sha 
 	if old, ok, e := m.Store.GetAttachment(ctx, sha); e != nil {
 		return old, false, e
 	} else if ok {
+		// An archived blob takes no new ref. Refuse here as well as in the
+		// store commit, so both a buffered put and a direct completion answer
+		// the same 409 regardless of their commit path.
+		if archived(old) != nil {
+			return old, false, store.ErrAttachmentArchived
+		}
 		old.RefKind, old.RefID = kind, id
 		return commit(old)
 	}

@@ -615,6 +615,10 @@ func uploadRefusalReason(err error) (string, bool) {
 		return "attachment_storage_cap", true
 	case errors.Is(err, store.ErrAttachmentPutCap):
 		return "attachment_put_cap", true
+	case errors.Is(err, store.ErrAttachmentArchived):
+		// An archived blob takes no new ref, and the archive never clears, so
+		// the completion is final rather than retryable.
+		return "attachment_archived", true
 	case isSecretRefusal(err):
 		return "secret_like_content", true
 	}
