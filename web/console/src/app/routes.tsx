@@ -11,6 +11,7 @@ import { Moved } from "./Placeholders";
 import { WorkPage } from "../work/WorkPage";
 import { TaskRecord } from "../work/TaskRecord";
 import { WorkStatusPage } from "../work-status/WorkStatusPage";
+import { FleetStatusPage } from "../fleet-status/FleetStatusPage";
 
 // The document viewer pulls in the markdown renderer, so it is a lazy chunk:
 // Home and Work never load it.
@@ -23,6 +24,7 @@ export type Route =
   | { view: "deploys" }
   | { view: "work"; replaceWith?: string }
   | { view: "work-status" }
+  | { view: "fleet-status" }
   | { view: "doc"; key: string }
   | { view: "task"; id: string }
   | { view: "moved" };
@@ -48,6 +50,7 @@ export function matchRoute(pathname: string): Route {
   if (path === "/ui/deploys") return { view: "deploys" };
   if (path === "/ui/work") return { view: "work" };
   if (path === "/ui/work-status") return { view: "work-status" };
+  if (path === "/ui/fleet-status") return { view: "fleet-status" };
   // /ui/queue is the old bookmark for the queue; it now lands on Work.
   if (path === "/ui/queue") return { view: "work", replaceWith: "/ui/work" };
   if (pathname.startsWith("/ui/doc/")) {
@@ -65,7 +68,7 @@ export function navKey(route: Route): NavKey | null {
     ? "decisions"
     : route.view === "task"
     ? "work"
-    : route.view === "home" || route.view === "work" || route.view === "deploys" || route.view === "work-status"
+    : route.view === "home" || route.view === "work" || route.view === "deploys" || route.view === "work-status" || route.view === "fleet-status"
     ? route.view
     : null;
 }
@@ -92,6 +95,8 @@ export function RouteView({ route }: { route: Route }) {
       return <WorkPage />;
     case "work-status":
       return <WorkStatusPage />;
+    case "fleet-status":
+      return <FleetStatusPage />;
     case "deploys":
       return <DeploysPage />;
     case "task":
