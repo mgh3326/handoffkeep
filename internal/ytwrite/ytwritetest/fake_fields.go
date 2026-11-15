@@ -10,10 +10,21 @@ import (
 
 var _ ytwrite.IssueFieldsRemote = (*FakeYouTrack)(nil)
 
-// SetBundle makes the enum or state field name accept only values: an
-// update setting another value is refused with a 400, as YouTrack refuses a
-// value missing from the field's bundle.
+// SetBundle makes the enum field name accept only values: an update
+// setting another value is refused with a 400, as YouTrack refuses a value
+// missing from the field's bundle.
 func (f *FakeYouTrack) SetBundle(name string, values ...string) {
+	f.setBundleLocked(name, false, values)
+}
+
+// SetStateBundle makes the state field name accept only values, like
+// SetBundle, and reports its type as FieldTypeState on reads: production
+// maps the documented fieldType id the same way.
+func (f *FakeYouTrack) SetStateBundle(name string, values ...string) {
+	f.setBundleLocked(name, true, values)
+}
+
+func (f *FakeYouTrack) setBundleLocked(name string, state bool, values []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	set := map[string]bool{}
@@ -21,6 +32,9 @@ func (f *FakeYouTrack) SetBundle(name string, values ...string) {
 		set[v] = true
 	}
 	f.bundles[name] = set
+	if state {
+		f.stateBundles[name] = true
+	}
 }
 
 // Updates returns every IssueFieldsUpdate the fake received, in order.
@@ -90,6 +104,9 @@ func (f *FakeYouTrack) snapshotOf(i *fakeIssue) ytwrite.IssueSnapshot {
 		fv := ytwrite.FieldValue{Name: name, Value: v}
 		if _, ok := f.bundles[name]; ok {
 			fv.Type = ytwrite.FieldTypeEnum
+			if f.stateBundles[name] {
+				fv.Type = ytwrite.FieldTypeState
+			}
 		}
 		s.Fields = append(s.Fields, fv)
 	}

@@ -191,10 +191,10 @@ func TestWriteRemoteReadIssueFieldsRoundTrip(t *testing.T) {
 		_, _ = w.Write([]byte(`{"summary":` + quoteJSON(snap.Summary) + `,"description":` + quoteJSON(snap.Description) + `,"customFields":[
 			{"name":"hk ID","value":4003},{"name":"hk 프로젝트","value":"handoffkeep"},
 			{"name":"hk 상태","value":{"name":"개발 중","$type":"StateBundleElement"}},{"name":"hk 우선순위","value":2},
-			{"name":"레인","field":{"name":"레인","fieldType":{"id":"enum[1]"}},"value":{"name":"handoffkeep-design"}},{"name":"종류","value":{"name":"implement"}},
+			{"name":"레인","projectCustomField":{"field":{"name":"레인","fieldType":{"id":"enum[1]"}}},"value":{"name":"handoffkeep-design"}},{"name":"종류","value":{"name":"implement"}},
 			{"name":"등급","value":{"name":"A"}},{"name":"티어","value":{"name":"T2"}},{"name":"PR","value":null},
 			{"name":"작업 job","value":null},{"name":"멈춤","value":[]},{"name":"마감","value":1795176000000},
-			{"name":"영역","field":{"name":"영역","fieldType":{"id":"string"}},"value":null},{"name":"마일스톤","value":null},{"name":"예상 소요","value":{"minutes":90,"presentation":"1h 30m"}},
+			{"name":"영역","projectCustomField":{"field":{"name":"영역","fieldType":{"id":"string"}}},"value":null},{"name":"마일스톤","value":null},{"name":"예상 소요","value":{"minutes":90,"presentation":"1h 30m"}},
 			{"name":"Assignee","value":{"name":"someone"}}]}`))
 	}}
 	got, err := y.serve(t).ReadIssueFields(t.Context(), "2-9")
@@ -215,6 +215,36 @@ func TestWriteRemoteReadIssueFieldsRoundTrip(t *testing.T) {
 		if v := canonicalFieldValue(json.RawMessage(raw)); v != want {
 			t.Errorf("canonical(%s) = %q, want %q", raw, v, want)
 		}
+	}
+}
+
+// The issue read asks for the type under projectCustomField, the
+// IssueCustomField attribute the devportal documents. The old
+// field(fieldType(id)) path reads no type in production, so every field
+// compared exact and YouTrack may reject the query: this test fails on
+// the old shape, both on the requested fields and on the parsed types.
+func TestWriteRemoteReadIssueFieldsAsksProjectCustomField(t *testing.T) {
+	var fields string
+	y := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) {
+		fields = r.URL.Query().Get("fields")
+		_, _ = w.Write([]byte(`{"summary":"s","description":"d","customFields":[
+			{"name":"레인","projectCustomField":{"field":{"name":"레인","fieldType":{"id":"enum[1]"}}},"value":{"name":"handoffkeep-design"}},
+			{"name":"hk 상태","projectCustomField":{"field":{"name":"hk 상태","fieldType":{"id":"state[1]"}}},"value":{"name":"개발 중"}},
+			{"name":"영역","projectCustomField":{"field":{"name":"영역","fieldType":{"id":"string"}}},"value":null}]}`))
+	}}
+	got, err := y.serve(t).ReadIssueFields(t.Context(), "2-9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "summary,description,customFields(name,value(name,minutes,text),projectCustomField(field(fieldType(id))))"; fields != want {
+		t.Fatalf("fields = %q, want %q", fields, want)
+	}
+	types := map[string]ytwrite.FieldType{}
+	for _, f := range got.Fields {
+		types[f.Name] = f.Type
+	}
+	if types[ytwrite.FieldLane] != ytwrite.FieldTypeEnum || types[ytwrite.FieldState] != ytwrite.FieldTypeState || types[ytwrite.FieldArea] != ytwrite.FieldTypeText {
+		t.Fatalf("field types=%v", types)
 	}
 }
 
