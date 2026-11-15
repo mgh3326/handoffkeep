@@ -626,16 +626,6 @@ promote() {
 	# shellcheck disable=SC2034 # set by resolve
 	local CAND_DIGEST CAND_REV CAND_CHILDREN CUR_DIGEST CUR_REV CUR_CHILDREN NEW_DIGEST NEW_REV NEW_CHILDREN
 	valid_sha "$sha" || { log "hk_follow.promote_refused sha=$(printf '%q' "$sha") reason=bad_sha"; return 1; }
-	# HK_PROMOTE_URL reaches deploy.yml as HANDOFFKEEP_URL. A private,
-	# loopback or CGNAT (100.64/10, the tailnet range) literal is never
-	# reachable from a GitHub-hosted runner, which is how 4c2b23ca failed
-	# closed with approval_unreadable. Refuse early with the cause in the
-	# reason so the operator sees the URL, not just the hk error.
-	if hk_promote_url_is_private; then
-		log "hk_follow.promote_refused sha=$sha reason=approval_unreadable:private_url url_host=$(hk_promote_url_host)"
-		post_status "$sha" deploy-promote failure "deploy-refused:approval_unreadable:private_url (HK_PROMOTE_URL is not a public origin)"
-		return 1
-	fi
 	# image.yml builds in parallel with ci.yml; give it a bounded time.
 	while :; do
 		rc=0
@@ -698,6 +688,19 @@ promote() {
 		return 1
 		;;
 	wait)
+		# The approval read is the only gate path that reaches hk, so only
+		# here can a private HANDOFFKEEP_URL (HK_PROMOTE_URL in deploy.yml)
+		# be the cause. A private, loopback or CGNAT (100.64/10, the tailnet
+		# range) literal is never reachable from a GitHub-hosted runner,
+		# which is how 4c2b23ca failed closed with approval_unreadable.
+		# The check stays out of gate() on purpose: tick shares gate() and
+		# ncp's HANDOFFKEEP_URL is its loopback hk, so a gate-level check
+		# would hold every migration release on the host forever.
+		if [[ "$reason" == approval_unreadable ]] && hk_promote_url_is_private; then
+			log "hk_follow.promote_refused sha=$sha reason=approval_unreadable:private_url url_host=$(hk_promote_url_host)"
+			post_status "$sha" deploy-promote failure "deploy-refused:approval_unreadable:private_url (HK_PROMOTE_URL is not a public origin)"
+			return 1
+		fi
 		post_status "$sha" deploy-promote failure "deploy-refused:${reason}"
 		return 1
 		;;

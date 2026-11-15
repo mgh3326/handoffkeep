@@ -1079,11 +1079,11 @@ t_promote_refuse() {
 	want "" "$(calls)"
 }
 t_promote_private_url_refused() {
-	# A private, loopback or CGNAT HANDOFFKEEP_URL (HK_PROMOTE_URL in the
-	# workflow) refuses early, without moving the tag, even with an approval.
+	# The private-URL refusal fires only when the approval read fails: the
+	# approval lookup is the one gate path that reaches hk.
 	setup; setup_promote
 	compare "$SHA_OLD" "$SHA_NEW" ahead "$MIG_ADDED"
-	fx_doc "deploy-approval/handoffkeep/$SHA_NEW" "{\"body\":\"approve $SHA_NEW\"}"
+	touch "$FIX/hk_error"
 	local u
 	for u in 'http://127.0.0.1:8800' 'http://10.0.0.5/' 'http://192.168.1.10:8080/x' 'http://172.16.5.4/' 'http://100.96.0.1/' 'http://localhost:8800/' 'http://[::1]/'; do
 		export HANDOFFKEEP_URL="$u"
@@ -1092,10 +1092,47 @@ t_promote_private_url_refused() {
 		want 0 "$(count '^tag ')"
 		: >"$FIX/calls"
 	done
+	# The same hk failure with a public URL keeps the bare reason.
 	export HANDOFFKEEP_URL="https://hk.example.com"
+	fails promote "$SHA_NEW"
+	want 1 "$(count 'deploy-refused:approval_unreadable$')"
+	want 0 "$(count 'private_url')"
+	want 0 "$(count '^tag ')"
+}
+t_promote_private_url_no_migration_promotes() {
+	# A release with no migration never reads hk: a private URL changes nothing.
+	setup; setup_promote
+	export HANDOFFKEEP_URL="http://100.96.0.1/"
 	promote "$SHA_NEW"
-	want 1 "$(count 'deploy-promote success')"
 	want "tag $SHA_NEW" "$(grep '^tag ' "$FIX/calls")"
+	want 1 "$(count "status $SHA_NEW deploy-promote success")"
+}
+t_promote_private_url_diagnostic_passes() {
+	# A diagnostic dispatch (not on main) with a private URL still passes quiet.
+	setup; setup_promote
+	export HANDOFFKEEP_URL="http://127.0.0.1:8800/"
+	fx_gh "/repos/mgh3326/handoffkeep/compare/$SHA_NEW...main" '{"status":"behind"}'
+	promote "$SHA_NEW"
+	want "" "$(calls)"
+}
+t_promote_private_url_no_baseline_pends() {
+	# Before the deploy tag exists, a private URL still pends green.
+	setup; setup_promote
+	rm "$FIX/reg/deploy"
+	export HANDOFFKEEP_URL="http://10.0.0.5/"
+	promote "$SHA_NEW"
+	want 0 "$(count '^tag ')"
+	want 1 "$(count 'no baseline: bootstrap')"
+}
+t_promote_private_url_hold_stays_hold() {
+	# A missing approval still holds (pending), not a refusal.
+	setup; setup_promote
+	compare "$SHA_OLD" "$SHA_NEW" ahead "$MIG_ADDED"
+	export HANDOFFKEEP_URL="http://100.96.0.1/"
+	promote "$SHA_NEW"
+	want 0 "$(count '^tag ')"
+	want 1 "$(count 'deploy-held:migration')"
+	want 0 "$(count 'deploy-refused')"
 }
 t_promote_ci_ok_failure() {
 	setup; setup_promote
