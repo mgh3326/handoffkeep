@@ -60,6 +60,31 @@ func (e *env) append(key, body string) ytwrite.Result {
 	return r
 }
 
+// appendLater stores a comment op without dispatching it, as the store does
+// when it prepares an op inside another transaction.
+func (e *env) appendLater(t *testing.T, key, body string) ytwrite.Op {
+	t.Helper()
+	n, err := ytwrite.CommentOp(e.req(key, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, created, err := e.ledger.Prepare(context.Background(), e.clock.Now(), n)
+	if err != nil || !created {
+		t.Fatalf("Prepare(%s) = %+v %v %v", key, op, created, err)
+	}
+	return op
+}
+
+// opOf reads one op as the ledger holds it now.
+func opOf(t *testing.T, e *env, id int64) ytwrite.Op {
+	t.Helper()
+	op, err := e.ledger.ByID(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ByID(%d): %v", id, err)
+	}
+	return op
+}
+
 func (e *env) drive() ytwrite.DriveStats {
 	e.t.Helper()
 	st, err := e.p.Drive(context.Background(), 100)
@@ -540,6 +565,68 @@ func RunProtocol(t *testing.T, nl NewLedger) {
 			t.Fatalf("invalid requests left %d ops", len(due))
 		}
 		e.wantRemote(0, 0)
+	})
+
+	// hk 4784: an op whose read keeps failing must not fill a pass. Sixty
+	// article_create ops whose search always fails, plus one op prepared
+	// later, with a pass limit of 50: the later op is sent in the second
+	// pass, the failing ops are pushed further out on each attempt instead of
+	// coming back in every pass, and an op queued behind a failing one on its
+	// own entity stays queued.
+	t.Run("a_failing_read_does_not_starve_a_later_op", func(t *testing.T) {
+		e := newEnv(t, nl)
+		const failingSummary = "[hk] policy/index [doc]"
+		e.yt.FailFindsForSummary(failingSummary, errors.New("connection reset by peer"))
+		prepareArticle := func(document int64, summary, key string) ytwrite.Op {
+			t.Helper()
+			n, err := ytwrite.ArticleOp(ytwrite.ArticleRequest{
+				Principal: "agent-a", Actor: "worker", YTProjectID: "0-30", YTProjectShort: "SHRDOC", Tenant: "yt.example",
+				DocumentID: document, Summary: summary, Body: "body of " + key,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			n.Key = key
+			op, _, err := e.ledger.Prepare(context.Background(), e.clock.Now(), n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return op
+		}
+		var failing []ytwrite.Op
+		for i := 0; i < 60; i++ {
+			failing = append(failing, prepareArticle(int64(i+1), failingSummary, "doc-"+itoa(int64(i+1))))
+		}
+		// A second op on the first failing op's lane: it must wait for it.
+		queued := prepareArticle(1, "[hk] policy/index [doc] (v2)", "doc-1-v2")
+		// The good op, prepared a second later, on its own entity.
+		e.clock.Advance(time.Second)
+		good := e.appendLater(t, "good", "the queue moved")
+
+		if st, err := e.p.Drive(context.Background(), 50); err != nil || st.Visited != 50 || st.Applied != 0 {
+			t.Fatalf("pass 1 = %+v %v, want 50 visited and none applied", st, err)
+		}
+		first := opOf(t, e, failing[0].ID)
+		if delay := first.NextAttemptAt.Sub(e.clock.Now()); delay != 10*time.Second || first.Reason != ytwrite.ReasonNotSent {
+			t.Fatalf("after its first failed read op %d is %s due in %s, want not_sent in 10s", failing[0].ID, first.Reason, delay)
+		}
+
+		// Second pass: the failing ops are deferred 10s out, the good op is
+		// due now, so it is sent even though it has the highest id.
+		e.clock.Advance(10 * time.Second)
+		if st, err := e.p.Drive(context.Background(), 50); err != nil || st.Applied != 1 {
+			t.Fatalf("pass 2 = %+v %v, want the good op applied", st, err)
+		}
+		e.wantStatus(e.lookup(ytwrite.Result{OpID: good.ID}), ytwrite.StatusApplied, ytwrite.StateApplied, "")
+		second := opOf(t, e, failing[0].ID)
+		if delay := second.NextAttemptAt.Sub(e.clock.Now()); delay != 20*time.Second {
+			t.Fatalf("after its second failed read op %d is due in %s, want the backoff to grow to 20s", failing[0].ID, delay)
+		}
+		// The op behind it on the same document was never offered.
+		if got := opOf(t, e, queued.ID); got.State != ytwrite.StatePrepared || got.Attempts != 0 {
+			t.Fatalf("op queued behind a failing one on its entity = %+v", got)
+		}
+		e.wantRemote(1, 1)
 	})
 
 	t.Run("caller_cancellation_does_not_cancel_the_write", func(t *testing.T) {

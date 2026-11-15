@@ -100,13 +100,22 @@ Submit ─► prepared ─Claim─► dispatched ─┬─ 2xx + valid id ──
 
 An op is claimed only when the ledger admits it (else `ClaimHeld`: it stays
 `prepared`, nothing is sent) and every earlier op (smaller id) on the same
-`(entity_kind, entity_id)` is `applied` or `rejected`. Admission is decided in the
-claim's own transaction. `Due` leaves out what `Claim` would hold or block, so a
+`(entity_kind, entity_id)` is `applied` or `rejected`. Admission is decided in
+the claim's own transaction. `Due` leaves out what `Claim` would hold or block, so a
 long held or blocked queue never fills a pass. The check and the insert of a
 new op both take an advisory lane lock, so an op that commits after a later op's
 check cannot be passed. A `remote_unknown` op therefore holds its entity's later
 writes (they answer `pending / waiting_for_earlier_op`) until it resolves. Other
 entities are not held.
+
+`Due` lists by `next_attempt_at` then `id` (hk 4784), so the pass offers the op
+that came due first, not the oldest op: an op a failed read, a plan or a rate
+limit deferred goes behind the ops that have not been tried, and one op that
+keeps failing cannot fill the window ahead of the queue. Id breaks ties, so the
+order is deterministic and the partial index `yt_write_ops_due`
+(`next_attempt_at, id`, over the two listed states) serves it. This changes only
+which due ops a pass offers; per-entity order is the `NOT EXISTS` rule above and
+`Claim`'s own check, whatever the listing order.
 
 ## What a caller gets
 
@@ -162,9 +171,18 @@ An op's `kind` picks its YouTrack side from the registry `Protocol.Kinds`
 
 A kind may also refuse in `Send` before it writes anything: a
 `*RefusedError` rejects the op with its reason, and a `*NotSentError` (a read
-before the write failed) puts it back to `prepared` (`not_sent`, after the
-reconcile backoff; a 429 or 401 waits as for a write, another 4xx rejects).
-Neither is ever `remote_unknown`: nothing was sent.
+before the write failed) puts it back to `prepared` (`not_sent`; a 429 or 401
+waits as for a write, another 4xx rejects, and anything else — 5xx, transport,
+a search the adapter cannot prove complete — waits the reconcile backoff:
+5s doubling to 5m, hourly after 50 attempts, daily after 74, hk 4784). A
+dispatch retry caps at `ReconcileMax` (5m), which is the worker's own pass
+interval, so a read that keeps failing would come back in every pass; the
+reconcile backoff is what keeps it out of the window. Each failed read logs one
+`ytwrite.op_not_sent` line with the read's error and the wait it chose, and the
+same detail is stored in `last_error`, so the cause of a `not_sent` loop is
+visible without a database session. A `NotSentError` should name the read it
+failed (`fmt.Errorf("family root %q: %w", …)`), since one kind may read more
+than once before its POST. Neither is ever `remote_unknown`: nothing was sent.
 
 Everything else is the protocol's and the same for every kind: claim and
 ordering, the reply classification above, and the evidence rule (exactly one
@@ -411,7 +429,9 @@ foreign key. No lock on `tasks` or `task_comments` (no foreign key to either).
 The previous release does not read or write any of these objects.
 
 **Logs.** `ytwrite.comment_enqueued`, `ytwrite.op_state` (one per recorded
-transition), `ytwrite.outcome_record_failed` (a settlement that did not finish),
+transition), `ytwrite.op_not_sent` (one per failed read before a write, with
+the read's own error and the wait it chose, hk 4784),
+`ytwrite.outcome_record_failed` (a settlement that did not finish),
 `ytwrite.drive`, `ytwrite.drive_failed`, `ytwrite.comments_enabled`.
 
 ## Mode on (hk 3810)
@@ -2033,13 +2053,22 @@ top-level.
   refused for its key.
 - A family root is a top-level article: summary the family, content
   `Family root for <family> documents.` and the marker
-  `<!-- hk-family:<family> -->` (`ytwrite.FamilyRootMarker`). Send finds it
-  by summary and marker: none, and it creates one before the document; one,
-  it is the parent; two or more, the op is `rejected / ambiguous_issue` (no
-  POST). Root creation is not an op, so no op records it. Residual risk: two
-  first creates of one family in one project, running at once, can make two
-  roots; the next create of that family then refuses `ambiguous_issue` until
-  an operator merges them.
+  `<!-- hk-family:<family> -->` (`ytwrite.FamilyRootContent`). Send finds it
+  with two narrow searches, never with the bare family word: the root's own
+  sentence (`ytwrite.FamilyRootPhrase`) and the family marker, keeping the
+  hits by exact summary and the marker (hk 4784). A family word is what every
+  document of the family carries, so in a project of ~1 200 articles the word
+  search filled its 100-hit page, could never prove completeness, and left the
+  create `not_sent` on every attempt. Both searches are needed: the sentence
+  finds the roots hk wrote, the marker finds a root an operator edited (its
+  sentence gone, the marker kept), which is still the root by identity, so no
+  create makes a second root beside one it cannot see. None, and it creates
+  one before the document; one, it is the parent; two or more, the op is
+  `rejected / ambiguous_issue` (no POST). Root creation is not an op, so no op
+  records it. Residual risk: two first creates of one family in one project,
+  running at once, can make two roots; the next create of that family then
+  refuses `ambiguous_issue` until an operator merges them. A root written by an
+  earlier release carries the same sentence, so the lookup still finds it.
 - Evidence looks for the root without creating it: no root, no match.
 
 **Send.** `article_create`: one search of the project for the summary
@@ -2048,7 +2077,10 @@ a full page is an error and the op is held `not_sent`), keeping the
 top-level articles of the project id whose summary is exact, and one GET of
 each kept hit's content. Exactly one carrying the op's marker is adopted, no
 POST; two are `rejected / ambiguous_issue`; none is exactly one POST with
-the project, summary and content. `article_update`: one POST to the article
+the project, summary and content. A family root is looked up first by its own
+sentence (Parent, above), and that search is narrow for the same reason: a
+search that cannot prove its page complete leaves the op `not_sent`, which is
+a retry, not a refusal. `article_update`: one POST to the article
 with the summary and the rendered content. Whether the live search syntax finds a
 created article is UNVERIFIED until the first live create (hk 4206 report).
 

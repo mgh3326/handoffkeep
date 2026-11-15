@@ -459,10 +459,13 @@ func logTransition(op Op) {
 
 // notSent records a read that failed before the write left: nothing was
 // written, so the op is not uncertain. A 429 or 401 waits as a refused write
-// would, another 4xx is final, and anything else (5xx, transport) is tried
-// again after the capped dispatch retry backoff.
+// would, another 4xx is final, and anything else (5xx, transport, an adapter
+// that cannot prove its search complete) is tried again after the reconcile
+// backoff: 5s doubling to 5m, then hourly after 50 attempts and daily after
+// 74. A dispatch retry caps at ReconcileMax, which is the worker's own pass
+// interval, so a read that keeps failing would come back in every pass; the
+// reconcile backoff is the protocol's policy for exactly that (hk 4784).
 func (p *Protocol) notSent(ctx context.Context, st settler, op Op, ns *NotSentError) settled {
-	now := p.now()
 	var re *RemoteError
 	if errors.As(ns.Err, &re) {
 		switch {
@@ -471,14 +474,25 @@ func (p *Protocol) notSent(ctx context.Context, st settler, op Op, ns *NotSentEr
 			if wait <= 0 {
 				wait = p.RateLimitWait
 			}
-			return st.deferOp(ctx, op, now.Add(min(wait, p.MaxRetryAfter)), ReasonRateLimited, re.Error())
+			return p.deferNotSent(ctx, st, op, min(wait, p.MaxRetryAfter), ReasonRateLimited, re.Error())
 		case re.Status == http.StatusUnauthorized:
-			return st.deferOp(ctx, op, now.Add(p.AuthWait), ReasonUnauthorized, re.Error())
+			return p.deferNotSent(ctx, st, op, p.AuthWait, ReasonUnauthorized, re.Error())
 		case re.Status >= 400 && re.Status < 500 && re.Status != http.StatusRequestTimeout:
 			return st.reject(ctx, op, "http_"+strconv.Itoa(re.Status), re.Error())
 		}
 	}
-	return st.deferOp(ctx, op, now.Add(p.retryDelay(max(op.Attempts-1, 0))), ReasonNotSent, ns.Error())
+	return p.deferNotSent(ctx, st, op, p.reconcileDelay(op.Attempts), ReasonNotSent, ns.Error())
+}
+
+// deferNotSent puts an op back to prepared after delay and logs the read that
+// failed, once per op per attempt: without it the cause of a not_sent loop is
+// only in the op row, and a pass that keeps visiting the same ops is what the
+// operator has to see (hk 4784). detail is the kind's own error text (the
+// adapter redacts the token from a remote error before it gets here).
+func (p *Protocol) deferNotSent(ctx context.Context, st settler, op Op, delay time.Duration, reason, detail string) settled {
+	log.Printf("ytwrite.op_not_sent op_id=%d kind=%s entity_kind=%s entity_id=%q attempts=%d reason=%s next_after=%q err=%q",
+		op.ID, op.Kind, op.EntityKind, op.EntityID, op.Attempts, reason, delay.Round(time.Second), detail)
+	return st.deferOp(ctx, op, p.now().Add(delay), reason, detail)
 }
 
 func (p *Protocol) apply(ctx context.Context, kind Kind, op Op, ytID string, adopted bool) settled {

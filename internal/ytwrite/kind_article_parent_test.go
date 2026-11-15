@@ -2,7 +2,6 @@ package ytwrite_test
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -46,12 +45,19 @@ func TestArticleCreateCreatesTheFamilyRootFirst(t *testing.T) {
 	op := prepareWith(t, e, req)
 	e.drive()
 	e.want(op.ID, ytwrite.StateApplied, "")
+	// The root is looked up by its own sentence and by its marker, never by the
+	// family word every document of the family carries (hk 4784).
+	searches := e.yt.Searches()
+	if len(searches) != 3 || searches[0].Query != ytwrite.FamilyRootPhrase("design") || searches[1].Query != ytwrite.FamilyRootMarker("design") ||
+		searches[0].Summary != "design" || searches[0].ParentID != "" || searches[2].Query != artSummary {
+		t.Fatalf("searches %+v, want the family root by its sentence and marker, then the document's summary", searches)
+	}
 	arts := e.yt.Articles(artProject)
 	if len(arts) != 2 {
 		t.Fatalf("articles %+v, want the family root and the document", arts)
 	}
 	root := arts[0]
-	if root.Summary != "design" || root.ParentID != "" || !strings.Contains(root.Content, ytwrite.FamilyRootMarker("design")) {
+	if root.Summary != "design" || root.ParentID != "" || root.Content != ytwrite.FamilyRootContent("design") {
 		t.Fatalf("family root %+v", root)
 	}
 	if doc := docArticleOf(t, e); doc.ParentID != root.ID {
@@ -61,7 +67,7 @@ func TestArticleCreateCreatesTheFamilyRootFirst(t *testing.T) {
 
 func TestArticleCreateAdoptsTheExistingFamilyRoot(t *testing.T) {
 	e := newArticleEnv(t)
-	root := e.yt.InjectArticle(artProject, "design", "design documents\n\n"+ytwrite.FamilyRootMarker("design"))
+	root := e.yt.InjectArticle(artProject, "design", ytwrite.FamilyRootContent("design"))
 	req := articleReq()
 	req.ParentFamily = "design"
 	op := prepareWith(t, e, req)
@@ -75,10 +81,30 @@ func TestArticleCreateAdoptsTheExistingFamilyRoot(t *testing.T) {
 	}
 }
 
-// Two roots carrying the family's marker are ambiguous: nothing is sent.
+// A root an operator edited — its sentence gone, the marker kept — is still the
+// family's root: the lookup asks for the marker too, so the create adopts it
+// instead of making a second one beside it (review of PR #441).
+func TestArticleCreateAdoptsAnEditedFamilyRoot(t *testing.T) {
+	e := newArticleEnv(t)
+	root := e.yt.InjectArticle(artProject, "design", "design documents, rewritten by hand\n\n"+ytwrite.FamilyRootMarker("design"))
+	req := articleReq()
+	req.ParentFamily = "design"
+	op := prepareWith(t, e, req)
+	e.drive()
+	e.want(op.ID, ytwrite.StateApplied, "")
+	if n := len(e.yt.Articles(artProject)); n != 2 {
+		t.Fatalf("%d articles, want the edited root and the document only", n)
+	}
+	if doc := docArticleOf(t, e); doc.ParentID != root {
+		t.Fatalf("document under %q, want the edited root %q", doc.ParentID, root)
+	}
+}
+
+// Two roots carrying the family's marker are ambiguous, whichever of them the
+// sentence search can see: nothing is sent.
 func TestArticleCreateTwoFamilyRootsRefused(t *testing.T) {
 	e := newArticleEnv(t)
-	e.yt.InjectArticle(artProject, "design", ytwrite.FamilyRootMarker("design"))
+	e.yt.InjectArticle(artProject, "design", ytwrite.FamilyRootContent("design"))
 	e.yt.InjectArticle(artProject, "design", "again\n\n"+ytwrite.FamilyRootMarker("design"))
 	req := articleReq()
 	req.ParentFamily = "design"

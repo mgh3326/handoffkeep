@@ -22,22 +22,24 @@ const articleSearchTop = 100
 // a page of long articles stays under the response cap.
 const articleSearchFields = "id,summary,project(id),parentArticle(id)"
 
-// articleSummaryQuery is the search for the articles of project short whose
-// summary holds summary as a phrase: `project: <short> "<summary>"`, with
-// the quote and the backslash escaped. The hits are checked against the
-// exact summary afterwards.
-func articleSummaryQuery(short, summary string) string {
-	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(summary)
+// articleQuery is the search for the articles of project short whose summary or
+// content holds query as a phrase: `project: <short> "<query>"`, with the quote
+// and the backslash escaped. The hits are checked against the exact summary
+// afterwards.
+func articleQuery(short, query string) string {
+	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(query)
 	return "project: " + short + ` "` + escaped + `"`
 }
 
-// FindArticles searches the project's articles for summary in one request
-// (article_create, hk 4206), keeps the articles of projectID whose summary is
-// exactly summary and whose parent is parentID ("" for a top-level article),
-// and reads each one's content with one GET.
-func (r *WriteRemote) FindArticles(ctx context.Context, projectShort, projectID, summary, parentID string) ([]ytwrite.RemoteArticle, error) {
+// FindArticles searches the project's articles for the search's Query in one
+// request (article_create, hk 4206), keeps the articles of its project whose
+// summary is exactly its Summary and whose parent is its ParentID ("" for a
+// top-level article), and reads each one's content with one GET. Query is what
+// keeps the search narrow: a family root is found by its own sentence, not by
+// the bare family word every document of the family carries (hk 4784).
+func (r *WriteRemote) FindArticles(ctx context.Context, s ytwrite.ArticleSearch) ([]ytwrite.RemoteArticle, error) {
 	q := url.Values{}
-	q.Set("query", articleSummaryQuery(projectShort, summary))
+	q.Set("query", articleQuery(s.ProjectShort, s.Query))
 	q.Set("fields", articleSearchFields)
 	q.Set("$top", strconv.Itoa(articleSearchTop))
 	data, readErr, err := r.send(ctx, http.MethodGet, "/api/articles", q, nil)
@@ -52,11 +54,11 @@ func (r *WriteRemote) FindArticles(ctx context.Context, projectShort, projectID,
 		return nil, fmt.Errorf("youtrack GET /api/articles: decode: %w", err)
 	}
 	if len(page) >= articleSearchTop {
-		return nil, fmt.Errorf("youtrack GET /api/articles: %d or more articles match the summary; the search is not complete", articleSearchTop)
+		return nil, fmt.Errorf("youtrack GET /api/articles: %d or more articles match %q; the search is not complete", articleSearchTop, s.Query)
 	}
 	out := []ytwrite.RemoteArticle{}
 	for _, a := range page {
-		if a.ID == "" || parentOf(a) != parentID || a.Project == nil || a.Project.ID != projectID || a.Summary != summary {
+		if a.ID == "" || parentOf(a) != s.ParentID || a.Project == nil || a.Project.ID != s.ProjectID || a.Summary != s.Summary {
 			continue
 		}
 		full, err := r.ReadArticle(ctx, a.ID)

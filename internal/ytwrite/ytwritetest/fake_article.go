@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
@@ -86,15 +87,28 @@ func (f *FakeYouTrack) ArticleWrites() []FakeArticleWrite {
 	return append([]FakeArticleWrite(nil), f.articleWrites...)
 }
 
-// FindArticles returns every article of the project with exactly summary
-// whose parent is parentID ("" for top-level), failing as QueueFind says.
-// The short name is not checked.
-func (f *FakeYouTrack) FindArticles(ctx context.Context, _, projectID, summary, parentID string) ([]ytwrite.RemoteArticle, error) {
+// Searches returns every FindArticles search the fake received, in order.
+func (f *FakeYouTrack) Searches() []ytwrite.ArticleSearch {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ytwrite.ArticleSearch(nil), f.searches...)
+}
+
+// FindArticles returns every article of the project whose summary or content
+// holds the search's Query and whose summary is exactly its Summary and whose
+// parent is its ParentID ("" for top-level), failing as QueueFind says or, for
+// a Summary FailFindsForSummary names, every time. The short name is not
+// checked.
+func (f *FakeYouTrack) FindArticles(ctx context.Context, s ytwrite.ArticleSearch) ([]ytwrite.RemoteArticle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.finds++
+	f.searches = append(f.searches, s)
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if f.findFail != nil && f.findFailSummary == s.Summary {
+		return nil, f.findFail
 	}
 	if len(f.findFaults) > 0 {
 		err := f.findFaults[0]
@@ -103,9 +117,13 @@ func (f *FakeYouTrack) FindArticles(ctx context.Context, _, projectID, summary, 
 	}
 	out := []ytwrite.RemoteArticle{}
 	for _, a := range f.articles {
-		if a.ProjectID == projectID && a.ParentID == parentID && a.Summary == summary {
-			out = append(out, *a)
+		if a.ProjectID != s.ProjectID || a.ParentID != s.ParentID || a.Summary != s.Summary {
+			continue
 		}
+		if !strings.Contains(a.Summary, s.Query) && !strings.Contains(a.Content, s.Query) {
+			continue
+		}
+		out = append(out, *a)
 	}
 	return out, nil
 }

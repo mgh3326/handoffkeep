@@ -56,7 +56,7 @@ func (p *Protocol) sendPlanned(ctx context.Context, op Op, kind PlannedKind) Res
 		// Nothing was sent. A plan that did commit is superseded by the next
 		// attempt's, which first closes ownership of its adds (none sent).
 		return settle(func(c context.Context) settled {
-			return st.deferOp(c, op, p.now().Add(p.retryDelay(max(op.Attempts-1, 0))), ReasonNotSent, "plan not recorded: "+err.Error())
+			return p.deferNotSent(c, st, op, p.reconcileDelay(op.Attempts), ReasonNotSent, "plan not recorded: "+err.Error())
 		})
 	}
 
@@ -77,7 +77,7 @@ func (p *Protocol) sendPlanned(ctx context.Context, op Op, kind PlannedKind) Res
 				})
 			}
 			return settle(func(c context.Context) settled {
-				return st.deferOp(c, op, p.now().Add(p.retryDelay(max(op.Attempts-1, 0))), ReasonNotSent, "step not marked: "+markErr.Error())
+				return p.deferNotSent(c, st, op, p.reconcileDelay(op.Attempts), ReasonNotSent, "step not marked: "+markErr.Error())
 			})
 		}
 		st.outcome = stepOutcome(err)

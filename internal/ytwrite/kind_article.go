@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -344,12 +345,12 @@ type ArticleCreate struct {
 // ArticleRemote is the YouTrack surface of the document kinds. A Remote that
 // does not implement it cannot send them.
 type ArticleRemote interface {
-	// FindArticles returns the articles of the project (short name and id)
-	// whose summary is exactly summary, with their content, or an error.
-	// parentID "" keeps the top-level articles; otherwise only the children
-	// of parentID. A result it cannot prove complete is an error; a 429 is a
+	// FindArticles returns the project's articles whose summary or content
+	// holds the search's Query, whose summary is exactly the search's
+	// Summary, and whose parent is its ParentID, with their content; or an
+	// error. A result it cannot prove complete is an error; a 429 is a
 	// *RemoteError with the server's RetryAfter.
-	FindArticles(ctx context.Context, projectShort, projectID, summary, parentID string) ([]RemoteArticle, error)
+	FindArticles(ctx context.Context, s ArticleSearch) ([]RemoteArticle, error)
 	// CreateArticle makes exactly one POST and returns the new article's
 	// id. Its errors follow CreateComment's.
 	CreateArticle(ctx context.Context, in ArticleCreate) (id string, err error)
@@ -359,6 +360,24 @@ type ArticleRemote interface {
 	// ReadArticle reads one article by id, with its content. A 429 is a
 	// *RemoteError with the server's RetryAfter.
 	ReadArticle(ctx context.Context, articleID string) (RemoteArticle, error)
+}
+
+// ArticleSearch is one article lookup: the phrase searched, and what a hit
+// must be. Query is what keeps a search narrow: a document's own summary finds
+// its article, and a family root's own text finds the root, where the bare
+// family word matches every article of the family that mentions it (hk 4784).
+type ArticleSearch struct {
+	// ProjectShort is the short name the search is scoped to; ProjectID the
+	// project a hit must be in.
+	ProjectShort string
+	ProjectID    string
+	// Query is the phrase searched in the articles' summary and content.
+	Query string
+	// Summary keeps only the hits whose summary is exactly this.
+	Summary string
+	// ParentID keeps only the children of that article; "" the top-level
+	// articles.
+	ParentID string
 }
 
 // articleCreate is the article_create kind. Its text (Render) is the
@@ -448,6 +467,48 @@ func FamilyRootMarker(family string) string {
 	return "<!-- hk-family:" + family + " -->"
 }
 
+// FamilyRootPhrase is the sentence a family root carries, without its final
+// period: the phrase its lookup searches for. A root is found by its own text,
+// never by the bare family word, which every document of the family also
+// carries (hk 4784: a word search for a family filled a 100-hit page in a
+// project of 1 200 documents, so the search could never prove completeness and
+// the create never sent).
+func FamilyRootPhrase(family string) string {
+	return "Family root for " + family + " documents"
+}
+
+// FamilyRootContent is a family root article's content: FamilyRootPhrase and
+// the marker.
+func FamilyRootContent(family string) string {
+	return FamilyRootPhrase(family) + ".\n\n" + FamilyRootMarker(family)
+}
+
+// familyRoots lists the project's roots of one family: the articles whose
+// summary is the family and whose content carries the family marker. Both
+// queries are narrow — neither is the bare family word, which every document of
+// the family also carries (hk 4784) — and it asks both, because neither alone
+// sees every root: the sentence finds the roots hk wrote, and the marker finds
+// one an operator edited (its sentence gone, the marker kept), the marker being
+// the root's identity. So no marker-carrying root is missed and no create makes
+// a second one beside it (review of PR #441). A search that cannot prove
+// completeness is an error, never a create.
+func familyRoots(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreatePayload) ([]RemoteArticle, error) {
+	marker := FamilyRootMarker(p.ParentFamily)
+	var roots []RemoteArticle
+	for _, query := range []string{FamilyRootPhrase(p.ParentFamily), marker} {
+		hits, err := ar.FindArticles(ctx, ArticleSearch{ProjectShort: p.YTProjectShort, ProjectID: op.YTTargetID, Query: query, Summary: p.ParentFamily})
+		if err != nil {
+			return nil, fmt.Errorf("family root %q: %w", p.ParentFamily, err)
+		}
+		for _, h := range hits {
+			if strings.Contains(h.Content, marker) && !slices.ContainsFunc(roots, func(r RemoteArticle) bool { return r.ID == h.ID }) {
+				roots = append(roots, h)
+			}
+		}
+	}
+	return roots, nil
+}
+
 // articleParent is the article a document's article goes under: the amended
 // policy article when the payload names one, else the family root, else ""
 // for a payload that names neither. create makes a missing family root; with
@@ -460,31 +521,25 @@ func articleParent(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreate
 		return "", true, nil
 	}
 	marker := FamilyRootMarker(p.ParentFamily)
-	hits, err := ar.FindArticles(ctx, p.YTProjectShort, op.YTTargetID, p.ParentFamily, "")
+	roots, err := familyRoots(ctx, ar, op, p)
 	if err != nil {
 		return "", false, err
-	}
-	var roots []RemoteArticle
-	for _, h := range hits {
-		if strings.Contains(h.Content, marker) {
-			roots = append(roots, h)
-		}
 	}
 	switch {
 	case len(roots) == 1:
 		return roots[0].ID, true, nil
 	case len(roots) > 1:
 		ids := make([]string, 0, len(roots))
-		for _, h := range roots {
-			ids = append(ids, h.ID)
+		for _, r := range roots {
+			ids = append(ids, r.ID)
 		}
 		return "", false, &RefusedError{Reason: ReasonAmbiguousIssue, Detail: fmt.Sprintf("project %s has %d %q family roots carrying %s: %s", op.YTTargetID, len(roots), p.ParentFamily, marker, strings.Join(ids, ","))}
 	case !create:
 		return "", false, nil
 	}
-	id, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, Summary: p.ParentFamily, Content: "Family root for " + p.ParentFamily + " documents.\n\n" + marker})
+	id, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, Summary: p.ParentFamily, Content: FamilyRootContent(p.ParentFamily)})
 	if err != nil {
-		return "", false, err
+		return "", false, fmt.Errorf("family root %q: %w", p.ParentFamily, err)
 	}
 	if id == "" {
 		return "", false, errors.New("family root create returned no id")
@@ -533,9 +588,9 @@ func (articleCreate) Send(ctx context.Context, remote Remote, op Op, text string
 		}
 		return "", &NotSentError{Err: err}
 	}
-	hits, err := ar.FindArticles(ctx, p.YTProjectShort, op.YTTargetID, p.Summary, parent)
+	hits, err := ar.FindArticles(ctx, ArticleSearch{ProjectShort: p.YTProjectShort, ProjectID: op.YTTargetID, Query: p.Summary, Summary: p.Summary, ParentID: parent})
 	if err != nil {
-		return "", &NotSentError{Err: err}
+		return "", &NotSentError{Err: fmt.Errorf("articles of %q: %w", p.Summary, err)}
 	}
 	switch marked := markedArticles(hits, op.ID); {
 	case len(marked) == 1:
@@ -561,7 +616,7 @@ func legacyArticle(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreate
 	case errors.As(err, &re) && re.Status == http.StatusNotFound:
 		return &RefusedError{Reason: ReasonLegacySyncedUnverified, Detail: "legacy article " + p.LegacyArticleID + " is gone"}
 	case err != nil:
-		return &NotSentError{Err: err}
+		return &NotSentError{Err: fmt.Errorf("legacy article %s: %w", p.LegacyArticleID, err)}
 	case a.ID != p.LegacyArticleID || p.LegacyProjectID == "" || a.ProjectID != p.LegacyProjectID || p.LegacyMarker == "" || !strings.Contains(a.Content, p.LegacyMarker):
 		return &RefusedError{Reason: ReasonLegacySyncedUnverified, Detail: fmt.Sprintf("legacy article %s (project %s) is not an article of the legacy project %q carrying the document's legacy marker",
 			p.LegacyArticleID, a.ProjectID, p.LegacyProjectID)}
@@ -590,9 +645,9 @@ func (articleCreate) Evidence(ctx context.Context, remote Remote, op Op, text st
 	if !found {
 		return ev, nil
 	}
-	hits, err := ar.FindArticles(ctx, p.YTProjectShort, op.YTTargetID, p.Summary, parent)
+	hits, err := ar.FindArticles(ctx, ArticleSearch{ProjectShort: p.YTProjectShort, ProjectID: op.YTTargetID, Query: p.Summary, Summary: p.Summary, ParentID: parent})
 	if err != nil {
-		return readFailure(ev, err)
+		return readFailure(ev, fmt.Errorf("articles of %q: %w", p.Summary, err))
 	}
 	for _, h := range markedArticles(hits, op.ID) {
 		if h.Content == text {
