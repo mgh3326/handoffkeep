@@ -838,6 +838,32 @@ t_outbox_unknown_kind_rejected() {
 	want 1 "$(count 'notify \[hk-follow\] outbox entry rejected')"
 }
 
+t_outbox_reject_failure_does_not_stop_the_pass() {
+	# A rejected/ that cannot be created must not abort the pass: the refused
+	# entry stays queued, holds its key like a failed retry, and the reports
+	# behind it are still attempted.
+	setup
+	local dir="$HK_FOLLOW_STATE_DIR/outbox" doc_key="deploy/handoffkeep/20260101T000000Z"
+	mkdir -p "$dir"
+	two_same_key_records "$dir"
+	printf '%s\n' '{"kind":"notify", "text":"alert"}' >"$dir/20260101T000002Z.000003.json"
+	# rejected/ exists as a file, so mkdir -p refuses it.
+	printf '' >"$dir/rejected"
+	hk_doc_put() {
+		if [[ "$1" == "$doc_key" ]]; then
+			DELIVER_REASON=invalid_context
+			return 2
+		fi
+		echo "record $1" >>"$FIX/calls"
+	}
+	deliver_outbox 2>"$FIX/log"
+	[[ -f "$dir/20260101T000000Z.000001.json" && -f "$dir/20260101T000001Z.000002.json" ]]
+	[[ -f "$dir/rejected" && ! -d "$dir/rejected" ]]
+	want "notify alert" "$(calls)"
+	want 1 "$(grep -c hk_follow.outbox_reject_failed "$FIX/log" || true)"
+	fails grep -q 'hk_follow.outbox_rejected key=' "$FIX/log"
+}
+
 t_outbox_status_rejected_only_on_body_refusal() {
 	# Only a 4xx that refuses the body itself (400, 422) is permanent; auth,
 	# rate-limit and server errors stay queued. A permanent one moves to

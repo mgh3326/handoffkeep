@@ -294,12 +294,16 @@ rejected_dir() { echo "$(outbox_dir)/rejected"; }
 # permanently refused entry out of the queue, name it in the journal and send
 # one lane event. The entry holds nothing back, so a later entry with the same
 # key (or a later status for the same sha and context) is attempted in this
-# same pass. The event is best effort: the moved file is the record.
+# same pass. The event is best effort: the moved file is the record. rc 1 when
+# the move itself fails, and the caller keeps the entry and its hold: an
+# aborted pass would stall every report behind it, the safety alerts included.
 reject_outbox() {
 	local dir rkey
 	dir=$(rejected_dir)
-	mkdir -p "$dir"
-	mv -f "$1" "$dir/$(basename "$1")"
+	if ! mkdir -p "$dir" || ! mv -f "$1" "$dir/$(basename "$1")"; then
+		log "hk_follow.outbox_reject_failed file=$(basename "$1") reason=$6"
+		return 1
+	fi
 	rkey=$5
 	if [[ "$2" == status && -z "$rkey" ]]; then
 		rkey="$3/$4"
@@ -347,18 +351,19 @@ deliver_outbox() {
 		DELIVER_REASON=""
 		rc=0
 		deliver_item "$f" || rc=$?
-		case "$rc" in
-		0) rm -f "$f" ;;
-		2) reject_outbox "$f" "$kind" "$sha" "$context" "$key" "${DELIVER_REASON:-refused}" ;;
-		*)
-			log "hk_follow.outbox_retry file=$(basename "$f")"
-			if [[ "$kind" == status ]]; then
-				held["status:$sha $context"]=1
-			elif [[ "$kind" == record ]]; then
-				held["record:$key"]=1
-			fi
-			;;
-		esac
+		if [[ $rc -eq 0 ]]; then
+			rm -f "$f"
+			continue
+		fi
+		if [[ $rc -eq 2 ]] && reject_outbox "$f" "$kind" "$sha" "$context" "$key" "${DELIVER_REASON:-refused}"; then
+			continue
+		fi
+		log "hk_follow.outbox_retry file=$(basename "$f")"
+		if [[ "$kind" == status ]]; then
+			held["status:$sha $context"]=1
+		elif [[ "$kind" == record ]]; then
+			held["record:$key"]=1
+		fi
 	done
 }
 
