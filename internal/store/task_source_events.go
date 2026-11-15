@@ -497,11 +497,7 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 			return TaskEventResult{}, err
 		}
 		if hasSub {
-			res, err := s.adoptMergedPRTx(ctx, tx, x, ev, now)
-			if err == nil && res.Applied {
-				writeEventComment()
-			}
-			return res, err
+			return s.adoptMergedPRTx(ctx, tx, x, ev, now, writeEventComment)
 		}
 	}
 	field, revertedPR := "", ""
@@ -649,7 +645,7 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 // merge was held on an open sub-task, or came after the close). The task
 // adopts the PR, so a deploy record that lists it can apply. Adoption does not
 // deploy the task past a sub-task that is merged and not yet deployed.
-func (s *Store) adoptMergedPRTx(ctx context.Context, tx pgx.Tx, x Task, ev sourceEvent, now time.Time) (TaskEventResult, error) {
+func (s *Store) adoptMergedPRTx(ctx context.Context, tx pgx.Tx, x Task, ev sourceEvent, now time.Time, writeComment func()) (TaskEventResult, error) {
 	reverted, err := revertNamesPRTx(ctx, tx, x.ID, ev.PR)
 	if err != nil {
 		return TaskEventResult{}, err
@@ -676,6 +672,9 @@ func (s *Store) adoptMergedPRTx(ctx context.Context, tx pgx.Tx, x Task, ev sourc
 	}); err != nil {
 		return TaskEventResult{}, err
 	}
+	// The merge comment precedes the rule-8 deploy comment, as on the
+	// ordinary merge path.
+	writeComment()
 	roll, err := subTaskRollupTx(ctx, tx, x.ID)
 	if err != nil {
 		return TaskEventResult{}, err
@@ -959,6 +958,12 @@ func deployCommentDetails(record StoredDeployRecord) (body, key string) {
 		body = fmt.Sprintf("Deployed %s (%s) on %s", shortSHA, tag, record.Record.Service)
 	}
 	key = sha
+	if key == "" && record.Record.DeployedRef != nil && *record.Record.DeployedRef != "" {
+		// No commit id: the deployed ref (a tag such as v1.2) is the deploy's
+		// identity shared by every service's record for it; the per-service
+		// record key would write one comment per service.
+		key = *record.Record.DeployedRef
+	}
 	if key == "" {
 		key = record.Key
 	}

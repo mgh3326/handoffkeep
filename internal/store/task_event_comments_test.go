@@ -75,6 +75,66 @@ func TestR12DeployEventCommentDeduplicatesByTaskAndSHA(t *testing.T) {
 	}
 }
 
+func TestDeployCommentWithoutHeadSHADeduplicatesAcrossServices(t *testing.T) {
+	s, pool := searchTestStore(t)
+	task := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	pr := testPR(4740)
+	send(t, s, mergeEvent(task.ID, pr))
+	put := func(key, service string) {
+		t.Helper()
+		body := `{"schema":"deploy-record/v0","service":"` + service + `","target":"prod","result":"success","deployed_ref":"v1.2","included_prs":["` + pr + `"],"source":"test"}`
+		if _, _, err := s.PutDocument(t.Context(), Document{Key: key, Kind: "report", Session: "deploy-test", Body: body, CreatedBy: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mergeBack := func() {
+		t.Helper()
+		if _, err := pool.Exec(t.Context(), `UPDATE tasks SET state='merged' WHERE id=$1`, task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("deploy/api/20261115T010000Z", "api")
+	comments := eventComments(t, s, task.ID)
+	if len(comments) != 2 || comments[1].Body != "Deployed unknown (v1.2) on api" {
+		t.Fatalf("first deploy comments: %+v", comments)
+	}
+	// The second service's record for the same deploy applies on a later
+	// merged entry; its comment key is the shared deployed ref, so it adds
+	// nothing.
+	mergeBack()
+	put("deploy/worker/20261115T020000Z", "worker")
+	mergeBack()
+	put("deploy/api/20261115T010000Z", "api")
+	comments = eventComments(t, s, task.ID)
+	if len(comments) != 2 || comments[1].Body != "Deployed unknown (v1.2) on api" {
+		t.Fatalf("deploy comments after second service and replay: %+v", comments)
+	}
+}
+
+func TestAdoptedPRCommentsOrderMergeBeforeDeploy(t *testing.T) {
+	s, pool := searchTestStore(t)
+	parent := flowTask(t, s, pool, "implement", StateMerged, false)
+	child := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	setParent(t, s, child, parent)
+	if _, err := pool.Exec(t.Context(), `UPDATE tasks SET state='deployed' WHERE id=$1`, child.ID); err != nil {
+		t.Fatal(err)
+	}
+	pr := testPR(4741)
+	sha := strings.Repeat("c", 40)
+	body := `{"schema":"deploy-record/v0","service":"api","target":"prod","result":"success","head_sha":"` + sha + `","deployed_ref":"release-3","included_prs":["` + pr + `"],"source":"test"}`
+	if _, _, err := s.PutDocument(t.Context(), Document{Key: "deploy/api/20261115T030000Z", Kind: "report", Session: "deploy-test", Body: body, CreatedBy: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	res := send(t, s, mergeEvent(parent.ID, pr))
+	if !res.Applied || res.State != StateDeployed {
+		t.Fatalf("adoption with an earlier deploy record: %+v", res)
+	}
+	comments := eventComments(t, s, parent.ID)
+	if len(comments) != 2 || comments[0].Body != "Merged: PR #4741" || comments[1].Body != "Deployed ccccccc (release-3) on api" {
+		t.Fatalf("adoption comments out of order: %+v", comments)
+	}
+}
+
 func TestR12DeployRecordedBeforeMergeCommentsWhenMergeArrives(t *testing.T) {
 	s, pool := searchTestStore(t)
 	task := flowTask(t, s, pool, "implement", StateDeveloping, true)
