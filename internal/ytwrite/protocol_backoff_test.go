@@ -39,7 +39,7 @@ func TestNotSentBackoffGrowsPastTheDispatchCap(t *testing.T) {
 	for _, tc := range []struct {
 		attempts int
 		want     time.Duration
-	}{{1, 10 * time.Second}, {5, 2 * time.Minute + 40*time.Second}, {49, 5 * time.Minute}, {50, time.Hour}, {80, 24 * time.Hour}, {484, 24 * time.Hour}} {
+	}{{1, 10 * time.Second}, {5, 2*time.Minute + 40*time.Second}, {49, 5 * time.Minute}, {50, time.Hour}, {80, 24 * time.Hour}, {484, 24 * time.Hour}} {
 		ledger := &captureDeferLedger{}
 		op := Op{ID: 1, Attempts: tc.attempts}
 		p := &Protocol{Config: Config{
