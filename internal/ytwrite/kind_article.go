@@ -655,6 +655,14 @@ func (a articleCreate) recordedRootID(ctx context.Context, op Op, p ArticleCreat
 	return rootID, nil
 }
 
+// familyRootReconcileTimeout bounds the one search that settles a family root
+// POST whose outcome is unknown, and the record it writes. It runs on a
+// context of its own: a POST that timed out may have spent the whole dispatch
+// budget, and this search is what turns that uncertainty into the root the POST
+// made instead of leaving the document blocked behind it (hk 4797). The
+// protocol bounds its own settlement the same way (SettleTimeout).
+const familyRootReconcileTimeout = 15 * time.Second
+
 // createRoot makes the family's one root article. A root is not an op, so no op
 // row records it; the store's family record does. A POST that may have reached
 // YouTrack is never repeated: one search reconciles it, and the root it made is
@@ -674,7 +682,9 @@ func (a articleCreate) createRoot(ctx context.Context, ar ArticleRemote, op Op, 
 	// 2xx without an id. The search is the only evidence there is, and finding
 	// a root means the create happened (or another op's did, which is the
 	// family's root just the same).
-	roots, rerr := familyRoots(ctx, ar, op, p)
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), familyRootReconcileTimeout)
+	defer cancel()
+	roots, rerr := familyRoots(rctx, ar, op, p)
 	if rerr != nil {
 		return "", fmt.Errorf("family root %q: create failed and its reconcile could not search: %w", p.ParentFamily, rerr)
 	}
@@ -685,7 +695,7 @@ func (a articleCreate) createRoot(ctx context.Context, ar ArticleRemote, op Op, 
 		}
 		return "", fmt.Errorf("family root %q: the create returned no id and no article carries the family marker", p.ParentFamily)
 	}
-	return a.recordedRootID(ctx, op, p, root.ID)
+	return a.recordedRootID(rctx, op, p, root.ID)
 }
 
 // readFailure is Evidence's error: a 429 keeps its RetryAfter for the shared rule.

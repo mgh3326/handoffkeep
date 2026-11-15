@@ -218,9 +218,66 @@ func TestArticleCreateConcurrentFamilyMakesOneRoot(t *testing.T) {
 	}
 }
 
-// The document's own POST that times out is uncertain, not unsent: the op stays
-// remote_unknown until the evidence search finds the article, which is never
-// created twice.
+// rootTestBudget is the dispatch budget the late-reply test sets, small enough
+// that its slow root POST outlasts it without a slow test.
+const rootTestBudget = 20 * time.Millisecond
+
+// slowRootRemote answers the root POST only after the caller's deadline: it
+// creates the root, then reports the deadline, as a server that committed but
+// answered too late does.
+type slowRootRemote struct {
+	*ytwritetest.FakeYouTrack
+	after time.Duration
+}
+
+func (r slowRootRemote) CreateArticle(ctx context.Context, in ytwrite.ArticleCreate) (string, error) {
+	id, err := r.FakeYouTrack.CreateArticle(ctx, in)
+	if err != nil || in.ParentID != "" || in.Summary != "design" {
+		return id, err
+	}
+	time.Sleep(r.after)
+	return "", context.DeadlineExceeded
+}
+
+// A root POST that used the whole dispatch budget and lost its reply leaves the
+// root behind: the reconcile runs on its own bounded context and finds it, the
+// document's search fails on the spent budget (not_sent, no duplicate root), and
+// the next pass creates the document under that one root (hk 4797).
+func TestArticleCreateRootTimeoutAfterBudget(t *testing.T) {
+	e := newArticleEnv(t)
+	remote := slowRootRemote{FakeYouTrack: e.yt, after: 4 * rootTestBudget}
+	p, err := ytwrite.New(ytwrite.Config{Ledger: e.ledger, Remote: remote, Now: e.clock.Now,
+		DispatchTimeout: rootTestBudget, StaleAfter: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := articleReq()
+	req.ParentFamily = "design"
+	op := prepareWith(t, e, req)
+	if _, err := p.Drive(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	got := e.want(op.ID, ytwrite.StatePrepared, ytwrite.ReasonNotSent)
+	if roots := familyRootsOf(t, e, "design"); len(roots) != 1 {
+		t.Fatalf("%d family roots after the late POST, want the one it made: %+v", len(roots), roots)
+	}
+	if _, ok, err := e.ledger.FamilyRoot(context.Background(), decTenant, artProject, "design"); err != nil || !ok {
+		t.Fatalf("the root the late POST made was not recorded: ok %v err %v", ok, err)
+	}
+	e.clock.Advance(got.NextAttemptAt.Sub(e.clock.Now()))
+	if _, err := p.Drive(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	e.want(op.ID, ytwrite.StateApplied, "")
+	roots := familyRootsOf(t, e, "design")
+	if len(roots) != 1 {
+		t.Fatalf("%d family roots after the retry, want 1: %+v", len(roots), roots)
+	}
+	if doc := docArticleWithSummary(t, e, artSummary); doc.ParentID != roots[0].ID {
+		t.Fatalf("document under %q, want the one family root %q", doc.ParentID, roots[0].ID)
+	}
+}
+
 func TestArticleCreateLostReplyIsReconciledWithoutDuplicate(t *testing.T) {
 	e := newArticleEnv(t)
 	e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.DelayCommit}) // the document's POST
