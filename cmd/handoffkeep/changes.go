@@ -101,7 +101,8 @@ func changesShowCmd(args []string, out io.Writer) error {
 		}
 		return printChangeState(c, out, *repo, n, *allHeads, *include, nil)
 	}
-	if (*pr == "") == (*task == 0) || *task < 0 || *allHeads || *include != "" || (afterSet && *afterID < 0) {
+	if (*pr == "") == (*task == 0) || *task < 0 || *allHeads || *include != "" ||
+		(afterSet && (*afterID < 0 || *task == 0)) {
 		return errors.New(changesShowUsage)
 	}
 	var after *int64

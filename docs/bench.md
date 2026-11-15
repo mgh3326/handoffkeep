@@ -22,6 +22,9 @@ All requests and responses use `Content-Type: application/json`.
 
 GET limits default to 1000 and are capped at 5000. Each PUT is one database
 transaction: a validation or storage error rejects the complete batch.
+`after_id` walks the rows committed when each page is read: a row that commits
+after a later id was already returned is not revisited (README §Documents and
+search).
 
 Repetitions retain the existing client columns unchanged in name and meaning:
 `profile`, `model_id`, `task_ref`, `tier`, `role`, `rounds`, `blockers_found`,

@@ -86,7 +86,9 @@ Any authenticated hk client can read the log. The response is
 rows come in `id ASC` with `id > N`, and the response adds
 `"next_after_id": <id or null>` — the last row's id on a full page, null at the
 end. Start with `after_id=0`; without the parameter the newest-first answer is
-unchanged.
+unchanged. A paged walk covers the rows committed when each page is read; a row
+that commits after a later id was already returned is not revisited, so a reader
+that must catch one pages again from 0.
 
 Completed-job duration remains a read-time join to `jobs`, using
 `jobs.updated_at - jobs.created_at` when `jobs.state='completed'`. Lost-job time

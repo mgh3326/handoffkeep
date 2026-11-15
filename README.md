@@ -634,6 +634,11 @@ metadata without bodies in key order; `after_id=N` pages by id instead
 (`changes show --task N --after-id N`); `GET /v1/placements?after_id=N` and
 `GET /v1/bench/reps?after_id=N` do too (`placements list --after-id N`). A
 request without `after_id` keeps the order and body it had before the cursor.
+A cursor walk sees the rows committed when each page is read: a row whose
+INSERT commits after a later id was already paged past is not revisited, so a
+reader that must catch such a late commit walks again from `after_id=0`. That
+is the contract of the repo's other `after_id` lists too (tasks, comments,
+relay events, chat, yt ops).
 `GET /v1/search` treats a
 bare-number or `#<n>` query as a document-id lookup — the exact match leads the
 page and a missing id returns an empty result set, the same way `--scope tasks`

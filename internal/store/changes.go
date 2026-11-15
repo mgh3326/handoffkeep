@@ -331,7 +331,9 @@ func (s *Store) ListUnreconciledChanges(ctx context.Context, limit int) ([]Chang
 
 // ListChangesByTask lists the changes linked to a task, ordered by id.
 // afterID, when set, starts the page after that change id: the order is the
-// same, so a reader pages the whole list with the last id it saw.
+// same, so a reader pages the whole list with the last id it saw. A row whose
+// insert commits after a later id was already returned is not revisited; a
+// reader that must catch one pages again from 0.
 func (s *Store) ListChangesByTask(ctx context.Context, taskID int64, afterID *int64, limit int) ([]Change, error) {
 	return s.listChangesWhere(ctx, s.pool, `id IN (SELECT change_id FROM change_tasks WHERE task_id=$1)`, afterID, limit, taskID)
 }

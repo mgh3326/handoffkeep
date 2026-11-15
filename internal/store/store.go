@@ -1828,8 +1828,9 @@ func (s *Store) UpsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, er
 
 // ListBenchReps lists bench reps newest first. afterID pages by id instead: a
 // page holds the rows with id greater than afterID in id order, so a reader
-// visits every matching row exactly once. A nil afterID keeps the newest-first
-// answer.
+// walks the matching rows without repeats. A row whose insert commits after a
+// later id was already returned is not revisited; a reader that must catch one
+// pages again from 0. A nil afterID keeps the newest-first answer.
 func (s *Store) ListBenchReps(ctx context.Context, profile, grade, effort string, afterID *int64, limit int) ([]BenchRep, error) {
 	if !validBenchText(profile) || !validBenchText(grade) || !validBenchText(effort) || (afterID != nil && *afterID < 0) {
 		return nil, errors.New("invalid bench rep query")
@@ -3597,8 +3598,9 @@ func (s *Store) GetDocumentByID(ctx context.Context, id int64) (Document, bool, 
 
 // ListDocuments lists documents without bodies, in key order. task, when above
 // zero, keeps only the documents that name that task. afterID pages by id
-// instead: a page holds the rows with id greater than afterID in id order, so a
-// reader visits every matching row exactly once. A nil afterID keeps the
+// instead: a page holds the rows with id greater than afterID in id order. A row
+// whose insert commits after a later id was already returned is not revisited; a
+// reader that must catch one pages again from 0. A nil afterID keeps the
 // key-ordered answer.
 func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string, task int64, afterID *int64, limit int) ([]Document, error) {
 	if !validText(prefix, 512) || !validText(session, 128) || (kind != "" && !documentKinds[kind]) || task < 0 || (afterID != nil && *afterID < 0) {

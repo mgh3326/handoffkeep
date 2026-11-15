@@ -83,6 +83,14 @@ func TestChangesShowCLICursor(t *testing.T) {
 	if err := run([]string{"changes", "show", "--url", h.URL, "--token", "tok", "--task", "42", "--after-id", "-1"}, io.Discard, io.Discard); err == nil {
 		t.Fatal("negative --after-id accepted")
 	}
+	// --after-id is a --task cursor: a PR answer is at most one row, so the
+	// flag there would silently hide an existing change.
+	if err := run([]string{"changes", "show", "--url", h.URL, "--token", "tok", "--pr", "https://github.com/example/app/pull/9", "--after-id", "0"}, io.Discard, io.Discard); err == nil {
+		t.Fatal("--after-id accepted with --pr")
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("refused input still called the server: %+v", *calls)
+	}
 }
 
 const changeStateFixture = `{"change":{"id":3,"repo":"example/app","pr_number":9,"pr":"https://github.com/example/app/pull/9","state":"open","head_sha":"1111111111111111111111111111111111111111","opened_at":"2026-11-06T01:00:00Z","updated_at":"2026-11-06T02:00:00Z"},` +

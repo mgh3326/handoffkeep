@@ -258,9 +258,11 @@ func (s *Store) RecordPlacement(ctx context.Context, d PlacementDecision) (Place
 }
 
 // ListPlacements lists placement decisions newest first. afterID pages by id
-// instead: a page holds the rows with id greater than afterID in id order, so
-// a reader visits every matching row exactly once even when decided_at values
-// repeat. A nil afterID keeps the newest-first answer.
+// instead: a page holds the rows with id greater than afterID in id order, so a
+// reader walks the matching rows without repeats even when decided_at values
+// repeat. A row whose insert commits after a later id was already returned is
+// not revisited; a reader that must catch one pages again from 0. A nil afterID
+// keeps the newest-first answer.
 func (s *Store) ListPlacements(ctx context.Context, job, host string, since time.Time, afterID *int64, limit int) ([]PlacementDecision, error) {
 	if (job != "" && !ValidJobID(job)) || (host != "" && !ValidJobHost(host)) || (afterID != nil && *afterID < 0) || limit < 1 || limit > 1000 {
 		return nil, errors.New("invalid placement filter")
