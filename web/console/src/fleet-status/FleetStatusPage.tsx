@@ -54,10 +54,13 @@ function formatInstant(iso: string | undefined): string {
 
 /** The selection band each (host, account) carries in an admitted plan row —
  * the contract's answer to "which pool is in the waste band": a quota row has
- * no band of its own, the plan row for the grade is the trusted source. */
+ * no band of its own, the plan row for the grade is the trusted source. The
+ * writer fills seat/host/pool/account/tier whenever a candidate was chosen,
+ * even when admission then refuses it, so only ADMITTED rows count. */
 function planTiers(snapshot: FleetStatusSnapshot): Map<string, Set<string>> {
   const tiers = new Map<string, Set<string>>();
   for (const plan of snapshot.plan) {
+    if (plan.outcome !== "ADMITTED") continue;
     if (!plan.host || !plan.account || !plan.tier) continue;
     const key = `${plan.host}\n${plan.account}`;
     const set = tiers.get(key) ?? new Set<string>();
@@ -108,8 +111,9 @@ function HostsSection({ snapshot }: { snapshot: FleetStatusSnapshot }) {
 
 function QuotaRow({ row, snapAge, tiers }: { row: FleetStatusQuota; snapAge: number; tiers?: Set<string> }) {
   const age = row.age_s + snapAge;
+  const fresh = row.fresh && age <= row.fresh_ttl_s;
   return (
-    <article className="fs-quota" data-stale={!row.fresh || undefined}>
+    <article className="fs-quota" data-stale={!fresh || undefined}>
       <header className="fs-quota-head">
         <span className="fs-pool">{row.pool}</span>
         <Mono className="fs-account">{row.account}</Mono>
@@ -129,10 +133,10 @@ function QuotaRow({ row, snapAge, tiers }: { row: FleetStatusQuota; snapAge: num
               ))
             : null}
           <span
-            className={`hk-chip ${row.fresh ? "hk-chip--done" : "hk-chip--input"}`}
-            title={`신선도 한도 ${formatAge(row.fresh_ttl_s)}`}
+            className={`hk-chip ${fresh ? "hk-chip--done" : "hk-chip--input"}`}
+            title={`측정 후 ${formatAge(age)} 경과 · 신선도 한도 ${formatAge(row.fresh_ttl_s)}`}
           >
-            {row.fresh ? "최신" : "오래됨"}
+            {fresh ? "최신" : "오래됨"}
           </span>
         </span>
       </header>
@@ -242,8 +246,19 @@ function PlanSection({ snapshot }: { snapshot: FleetStatusSnapshot }) {
   );
 }
 
-function SnapshotView({ snapshot, updatedAt }: { snapshot: FleetStatusSnapshot; updatedAt?: string }) {
+function SnapshotView({
+  snapshot,
+  updatedAt,
+  refreshFailed,
+  lastOkAt,
+}: {
+  snapshot: FleetStatusSnapshot;
+  updatedAt?: string;
+  refreshFailed: boolean;
+  lastOkAt: number | null;
+}) {
   const snapAge = snapshotAgeSec(snapshot.at) ?? 0;
+  const lastOkIso = lastOkAt === null ? null : new Date(lastOkAt).toISOString();
   return (
     <div className="fs-root" role="region" aria-label="플릿 현황">
       <header className="fs-header">
@@ -258,6 +273,13 @@ function SnapshotView({ snapshot, updatedAt }: { snapshot: FleetStatusSnapshot; 
           ) : null}
         </div>
       </header>
+      {refreshFailed ? (
+        <p className="fs-stale" role="alert">
+          갱신 실패 · 마지막 확인{" "}
+          {lastOkIso ? <time dateTime={lastOkIso}>{formatMinuteUTC(lastOkIso) ?? lastOkIso}</time> : "—"}
+          {" "}· 아래 값은 마지막 스냅샷 기준입니다.
+        </p>
+      ) : null}
       <HostsSection snapshot={snapshot} />
       <QuotaSection snapshot={snapshot} snapAge={snapAge} />
       <PlanSection snapshot={snapshot} />
@@ -267,7 +289,7 @@ function SnapshotView({ snapshot, updatedAt }: { snapshot: FleetStatusSnapshot; 
 
 export function FleetStatusPage() {
   const load = useCallback(() => loadFleetStatus(), []);
-  const { data, failed } = usePoll(load, 60_000);
+  const { data, failed, at } = usePoll(load, 60_000);
 
   if (failed && !data) {
     return (
@@ -304,5 +326,12 @@ export function FleetStatusPage() {
     );
   }
 
-  return <SnapshotView snapshot={data.snapshot} updatedAt={data.updated_at} />;
+  return (
+    <SnapshotView
+      snapshot={data.snapshot}
+      updatedAt={data.updated_at}
+      refreshFailed={failed}
+      lastOkAt={at}
+    />
+  );
 }

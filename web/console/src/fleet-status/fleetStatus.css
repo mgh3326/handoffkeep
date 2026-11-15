@@ -59,6 +59,18 @@
   font-size: var(--hk-type-meta);
 }
 
+/* A failed refresh keeps the last snapshot but says so loudly: the numbers
+ * below are only as fresh as the last successful read. */
+.fs-stale {
+  margin: 0;
+  padding: var(--hk-space-2) var(--hk-space-3);
+  border: var(--hk-border-width) solid var(--hk-warning);
+  border-radius: var(--hk-radius-card);
+  background: var(--hk-surface-1);
+  font-size: var(--hk-type-meta);
+  color: var(--hk-text-primary);
+}
+
 .fs-card {
   background: var(--hk-surface-1);
   border: var(--hk-border-width) solid var(--hk-border-subtle);
