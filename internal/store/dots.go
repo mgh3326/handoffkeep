@@ -699,10 +699,8 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, caller, note, 0, now); err != nil {
 		return DotsAnswerResult{}, err
 	}
-	// A declaring dots request completes on the answer to the decision its
-	// RESULT opened, and that answer is the request's result the requester
-	// lane hears (hk 4789).
-	if x, err = s.deliverDotsChoiceAnswerTx(ctx, tx, x, resolved, in.Text, caller, resolutionID, now); err != nil {
+	// A declaring dots request reconciles its result on the answer (hk 4789).
+	if x, err = s.reconcileDotsChoiceTx(ctx, tx, x, now); err != nil {
 		return DotsAnswerResult{}, err
 	}
 

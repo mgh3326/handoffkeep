@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // dotsChoiceAttachment inserts one attachment row and returns the option
@@ -440,5 +441,91 @@ func TestDotsChoiceAnswerClosesParkedRequest(t *testing.T) {
 	}
 	if n := notifyRows(t, s, "requester", OutboxKindDotsReport); n != 2 {
 		t.Fatalf("requester rows=%d, want the RESULT and the answer", n)
+	}
+}
+
+// Invariant (hk 4789): while another blocking decision keeps the task open, an
+// answer to the RESULT decision resumes nothing and notifies nobody; when that
+// other decision closes, the reconcile finishes the request exactly once.
+func TestDotsChoiceAnswerWaitsForAnotherDecision(t *testing.T) {
+	s := schemaStore(t, "dots_choice_second")
+	ctx := context.Background()
+	task, started := dotsChoiceRequest(t, s, "Investigate")
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "BLOCKED", Body: "waiting", IdempotencyKey: "blocked", RunToken: started.RunToken}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "RESULT", Body: "두 시안 완성", IdempotencyKey: "result", RunToken: started.RunToken, Recommended: "A"}); err != nil {
+		t.Fatal(err)
+	}
+	parked, _, err := s.GetTask(ctx, task.ID)
+	if err != nil || parked.State != StateIcebox || parked.Refs.DecisionRequest == nil {
+		t.Fatalf("task=%+v err=%v", parked, err)
+	}
+	// A second blocking decision stays open on the task (a flag row left by
+	// another producer; it is not the RESULT decision).
+	if _, err := s.pool.Exec(ctx, `INSERT INTO decision_requests(source,source_ref,task_id,lane,question,status,created_at,updated_at) VALUES('task_flag','flag-1',$1,'dots','another question','open',now(),now())`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.ResolveDecision(ctx, ResolveDecisionInput{
+		RequestID: parked.Refs.DecisionRequest.ID, Kind: DecisionRequestAnswered, Option: "A", Text: "A로 갑시다",
+		Channel: DecisionChannelConsole, Actor: "operator:robin@example.com", Verified: true, EventKey: "console-blocked",
+	})
+	if err != nil || out.Result != DecisionResultAnswered {
+		t.Fatalf("outcome=%+v err=%v", out, err)
+	}
+	held, _, err := s.GetTask(ctx, task.ID)
+	if err != nil || held.State != StateIcebox || !held.AwaitingDecision {
+		t.Fatalf("task=%+v err=%v, want it parked and still awaiting", held, err)
+	}
+	var n int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE starts_with(event_id,'dots-answer-')`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("answer notices=%d err=%v, want none while another decision blocks", n, err)
+	}
+	// The other decision closes. Its resolve clears the flag and re-runs the
+	// reconcile; here the close is simulated, and the reconcile runs as it does
+	// at the end of every resolving transaction.
+	if _, err := s.pool.Exec(ctx, `UPDATE decision_requests SET status='superseded' WHERE source='task_flag' AND source_ref='flag-1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET awaiting_decision=false WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	closed, _, err := s.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err := s.reconcileDotsChoiceTx(ctx, tx, closed, time.Now().UTC())
+	if err != nil {
+		tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if done.State != StateCompleted {
+		t.Fatalf("state=%s, want completed after the other decision closed", done.State)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE starts_with(event_id,'dots-answer-')`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("answer notices=%d err=%v, want exactly one", n, err)
+	}
+	// A second reconcile sends nothing: the outbox id names the decision and the
+	// task is settled.
+	tx, err = s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.reconcileDotsChoiceTx(ctx, tx, done, time.Now().UTC()); err != nil {
+		tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE starts_with(event_id,'dots-answer-')`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("answer notices after a second reconcile=%d err=%v", n, err)
 	}
 }

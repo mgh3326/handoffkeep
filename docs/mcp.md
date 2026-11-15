@@ -45,9 +45,11 @@ decision instead of completing. The operator answers on the console decision
 page or in the dots chat (`decision_answer`); either way it is the same
 decision record, the task completes with the decision and the answer as its
 evidence, and the requester lane — and each `[알릴 레인]` lane — hears the answer
-once as the request's result. Delivery is keyed by the resolution, so a
-replayed answer sends nothing. `dots adopt` still records what became of a
-result; answering the decision does not run it.
+once as the request's result. Delivery is keyed by the decision, so a replayed
+answer sends nothing. A task that is already settled keeps its closure (the
+answer is recorded as cleanup), and an answer that lands while another decision
+still keeps the task open completes it when that decision closes. `dots adopt`
+still records what became of a result; answering the decision does not run it.
 
 On the authenticated ChatGPT connection, `dots_inbox` lists open requests in
 creation order. Use the returned `next_cursor` to fetch another page.

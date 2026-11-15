@@ -151,41 +151,45 @@ func dotsChoiceDecisionInput(task Task, docKey string, in DotsReplyInput) (Decis
 	return input, nil
 }
 
-// deliverDotsChoiceAnswerTx finishes a declaring dots request whose RESULT
-// decision was closed: the answer is the request's result, so the task
+// reconcileDotsChoiceTx finishes a declaring dots request whose RESULT
+// decision was answered: the answer is the request's result, so the task
 // completes with the decision and the answer as its evidence, and the answer
 // reaches the requester lane (and the request body's "[알릴 레인]" lanes) once
-// per resolution. Both answer paths call it inside their own transaction, so a
-// replayed answer writes nothing. A task whose decision is not the one its
-// RESULT opened is left alone.
-func (s *Store) deliverDotsChoiceAnswerTx(ctx context.Context, tx pgx.Tx, x Task, resolved DecisionRequest, choice, actor string, resolutionID int64, at time.Time) (Task, error) {
+// per decision. It runs at the end of every resolving transaction, because the
+// answer may land while another blocking decision still keeps the task open:
+// nothing is done then, and the reconcile runs again when that decision
+// closes. Outbox ids name the decision, so a second run sends nothing.
+func (s *Store) reconcileDotsChoiceTx(ctx context.Context, tx pgx.Tx, x Task, at time.Time) (Task, error) {
 	declared := x.Refs.DotsChoice
-	if declared == nil || declared.ResultDoc == "" || resolved.Doc != declared.ResultDoc {
+	if declared == nil || declared.ResultDoc == "" {
 		return x, nil
 	}
-	// Only an answer is the request's result: a withdrawn or default_applied
-	// resolution closes the request without a choice, so nothing is delivered
-	// and the request stays open for a replacement RESULT. A task already
-	// settled (dropped, duplicated, merged) keeps its closure — the answer is
-	// still recorded, as cleanup, but must not fail the resolve.
-	if resolved.Status != DecisionRequestAnswered || IsSettledState(x.State) {
+	request := x.Refs.DecisionRequest
+	if request == nil || request.Status != DecisionRequestAnswered || request.Doc != declared.ResultDoc || request.Resolution == nil {
 		return x, nil
 	}
-	// The answer resumes a parked request: its decision is closed, so the
-	// request may close too. Without this an icebox task has no edge to
-	// completed and the answer would roll back.
+	// One verdict before any side effect. A settled task keeps its closure (the
+	// answer is recorded as cleanup — the console's cleanup path), and a task
+	// still waiting on another blocking decision cannot close now.
+	if IsSettledState(x.State) || x.AwaitingDecision {
+		return x, nil
+	}
+	// Verdict made: every action below is unconditional for this call. A parked
+	// request resumes first, because icebox has no edge to completed. The
+	// recorder of the resolution is this task's actor.
+	by := request.Resolution.By
 	if x.State == StateIcebox {
-		resumed, err := s.transitionTaskTx(ctx, tx, x.ID, TransitionInput{To: StateBacklog, By: actor, Note: "decision answered: resume to close"}, false)
+		resumed, err := s.transitionTaskTx(ctx, tx, x.ID, TransitionInput{To: StateBacklog, By: by, Note: "decision answered: resume to close"}, false)
 		if err != nil {
 			return Task{}, err
 		}
 		x = resumed
 	}
-	answer := choice
-	if resolved.Resolution != nil && resolved.Resolution.Text != "" && resolved.Resolution.Text != choice {
-		answer = choice + " — " + resolved.Resolution.Text
+	answer := decisionAnswerChoice(x.Refs.DecisionOptions, ResolveDecisionInput{Option: request.Resolution.Option, Text: request.Resolution.Text}, request.Status)
+	if request.Resolution.Text != "" && request.Resolution.Text != answer {
+		answer += " — " + request.Resolution.Text
 	}
-	evidence := "decision " + resolved.ID + " " + resolved.Status + ": "
+	evidence := "decision " + request.ID + " " + request.Status + ": "
 	evidence += clipBytes(answer, closureEvidenceMaxBytes-len(evidence))
 	lanes := []string{}
 	if x.ParentLane != "" {
@@ -196,18 +200,17 @@ func (s *Store) deliverDotsChoiceAnswerTx(ctx context.Context, tx pgx.Tx, x Task
 		return Task{}, err
 	}
 	lanes = append(lanes, notified...)
-	text := dotsLaneText("[dots] RESULT hk-" + strconv.FormatInt(x.ID, 10) + " " + firstRunes(x.Title, 60) + " :: 결정 " + resolved.ID + ": " + firstRunes(answer, 220) + " → hk:doc " + declared.ResultDoc)
+	text := dotsLaneText("[dots] RESULT hk-" + strconv.FormatInt(x.ID, 10) + " " + firstRunes(x.Title, 60) + " :: 결정 " + request.ID + ": " + firstRunes(answer, 220) + " → hk:doc " + declared.ResultDoc)
 	if base := s.decisionConsoleURL(); base != "" {
 		text += " | " + base + "/ui/tasks/" + strconv.FormatInt(x.ID, 10)
 	}
-	baseEvent := "dots-answer-" + resolved.ID + "-" + strconv.FormatInt(resolutionID, 10)
 	seen := map[string]bool{}
 	for _, lane := range lanes {
 		if lane == "" || seen[lane] {
 			continue
 		}
 		seen[lane] = true
-		eventID := baseEvent
+		eventID := "dots-answer-" + request.ID
 		if lane != x.ParentLane {
 			eventID += "-" + lane
 		}
@@ -215,13 +218,10 @@ func (s *Store) deliverDotsChoiceAnswerTx(ctx context.Context, tx pgx.Tx, x Task
 			return Task{}, err
 		}
 	}
-	// A task still waiting on another blocking decision, or in a state whose
-	// edges do not reach completed, cannot close now: the answer is recorded
-	// and delivered, and the closure stays with whatever resolves that state.
-	if x.AwaitingDecision || !taskTransitionAllowed(x.State, StateCompleted) {
+	if !taskTransitionAllowed(x.State, StateCompleted) {
 		return x, nil
 	}
-	completed, err := s.transitionTaskTx(ctx, tx, x.ID, TransitionInput{To: StateCompleted, By: actor, Evidence: evidence}, false)
+	completed, err := s.transitionTaskTx(ctx, tx, x.ID, TransitionInput{To: StateCompleted, By: by, Evidence: evidence}, false)
 	if err != nil {
 		return Task{}, err
 	}
