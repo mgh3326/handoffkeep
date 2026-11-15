@@ -61,7 +61,7 @@ func run(args []string, out, errout io.Writer) error {
 		return runMCP()
 	case "doc":
 		return docCmd(args[1:], out)
-	case "attach":
+	case "attach", "attachments":
 		return attachCmd(args[1:], out)
 	case "translations":
 		return translationsCmd(args[1:], out)
@@ -1000,10 +1000,13 @@ func importKind(key string) (string, string) {
 
 func attachCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: attach put|get|list|usage|migrate")
+		return errors.New("usage: attach put|get|list|usage|migrate|archive")
 	}
 	if args[0] == "migrate" {
 		return attachMigrateCmd(args[1:], out)
+	}
+	if args[0] == "archive" {
+		return attachArchiveCmd(args[1:], out)
 	}
 	fs := flag.NewFlagSet("attach "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -1113,7 +1116,7 @@ func attachCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, u)
 	default:
-		return errors.New("usage: attach put|get|list|usage|migrate")
+		return errors.New("usage: attach put|get|list|usage|migrate|archive")
 	}
 }
 

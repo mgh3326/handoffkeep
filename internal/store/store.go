@@ -2505,6 +2505,18 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 	if err = requireTaskProject(ctx, tx, x.Project); err != nil {
 		return x, err
 	}
+	// refs.pr is one full PR URL on create too (hk 4844), so it is stored
+	// normalised; the refs JSON above is re-marshalled with it.
+	if x.Refs.PR != "" {
+		pr, err := normalisePRRefTx(ctx, tx, x.Project, x.Refs.PR)
+		if err != nil {
+			return x, err
+		}
+		x.Refs.PR = pr
+		if refs, err = json.Marshal(x.Refs); err != nil {
+			return x, errors.New("invalid task refs")
+		}
+	}
 	if x.ParentID != nil {
 		if err = checkParentTx(ctx, tx, 0, *x.ParentID); err != nil {
 			return x, err

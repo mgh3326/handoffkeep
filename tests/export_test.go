@@ -411,7 +411,7 @@ func TestExportDigests(t *testing.T) {
 	s := taskTestStore(t)
 	lane := taskLane(t)
 	for i := 0; i < 3; i++ {
-		task, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: fmt.Sprintf("digest 태스크 %d <&>", i), Kind: "implement", Priority: i, Refs: store.TaskRefs{PR: strconv.Itoa(100 + i), HeadSHA: fmt.Sprintf("sha%d", i)}, CreatedBy: "node", Project: projectRef("experiment")})
+		task, err := s.CreateTask(t.Context(), store.Task{Lane: lane, Title: fmt.Sprintf("digest 태스크 %d <&>", i), Kind: "implement", Priority: i, Refs: store.TaskRefs{PR: fmt.Sprintf("https://github.com/example/app/pull/%d", 100+i), HeadSHA: fmt.Sprintf("sha%d", i)}, CreatedBy: "node", Project: projectRef("experiment")})
 		if err != nil {
 			t.Fatal(err)
 		}
