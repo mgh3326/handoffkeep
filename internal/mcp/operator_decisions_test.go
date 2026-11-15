@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -308,5 +309,102 @@ func TestDecisionRecordAndOperatorAttentionTools(t *testing.T) {
 	attention := callTool[attentionOut](t, session, "operator_attention", map[string]any{})
 	if attention.Decisions.Count != 1 || len(attention.Decisions.Items) != 1 || attention.Tasks.Count != 0 || attention.AsOf.IsZero() {
 		t.Fatalf("attention=%+v", attention)
+	}
+}
+
+// hk 4788: the read tools dots uses carry each option's pictures and videos,
+// with the MIME type and original name, and the requester's recommendation
+// reason, unverified list and one fix.
+func TestDecisionsPendingCarriesOptionMedia(t *testing.T) {
+	st := newOperatorStore(t)
+	ctx := context.Background()
+	task := newOperatorTask(t, st, "decision media fixture")
+	sha := strings.Repeat("5", 64)
+	if _, _, err := st.PutAttachment(ctx, store.Attachment{
+		SHA256: sha, SizeBytes: 3, MIME: "image/png", OriginalName: "approach.png",
+		CreatedBy: "tester", RefKind: "task", RefID: fmt.Sprint(task.ID),
+	}, 1<<20, 100); err != nil {
+		t.Fatal(err)
+	}
+	recorded, err := st.RecordDecisionRequest(ctx, task.ID, "desk", store.DecisionRequestInput{
+		Question: "Which card?",
+		Options: store.DecisionOptions{Options: []store.DecisionOption{{
+			Key: "A", Label: "2A", Recommended: true,
+			Attachments: []store.DecisionOptionAttachment{{SHA256: sha, Caption: "approach"}},
+		}}},
+		RecommendationReason: "2A keeps the left line",
+		Unverified:           []string{"head relation"},
+		OneFix:               "move the sign",
+		DefaultAction:        "hold",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// options_ko carries the translated labels only. The translated text below
+	// names a different content address than the option does, the shape of a
+	// translator error: it must not put that picture on the option.
+	original, err := json.Marshal(store.DecisionOptions{Options: []store.DecisionOption{{
+		Key: "A", Label: "2A", Recommended: true,
+		Attachments: []store.DecisionOptionAttachment{{SHA256: sha, Caption: "approach"}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	translated, err := json.Marshal(store.DecisionOptions{Options: []store.DecisionOption{{
+		Key: "A", Label: "2A 한국어", Recommended: true,
+		Attachments: []store.DecisionOptionAttachment{{SHA256: strings.Repeat("6", 64), Caption: "wrong"}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutTranslation(ctx, store.Translation{
+		Entity: "decision_request", EntityID: recorded.Request.ID, Field: "options", Lang: "ko",
+		SourceSHA256: store.SourceSHA256(string(original)), Text: string(translated), Translator: "tester",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, api.Tokens{"tester": "bearer-secret"}, nil))
+	defer srv.Close()
+	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+	type attachmentOut struct {
+		SHA256       string `json:"sha256"`
+		Caption      string `json:"caption"`
+		MIME         string `json:"mime"`
+		OriginalName string `json:"original_name"`
+	}
+	type optionOut struct {
+		Key         string          `json:"key"`
+		Label       string          `json:"label"`
+		Attachments []attachmentOut `json:"attachments"`
+	}
+	type out struct {
+		Decisions []struct {
+			RecommendationReason string      `json:"recommendation_reason"`
+			Unverified           []string    `json:"unverified"`
+			OneFix               string      `json:"one_fix"`
+			Options              []optionOut `json:"options"`
+			OptionsKO            []optionOut `json:"options_ko"`
+		} `json:"decisions"`
+	}
+	pending := callTool[out](t, session, "decisions_pending", map[string]any{})
+	if len(pending.Decisions) != 1 {
+		t.Fatalf("decisions=%+v", pending.Decisions)
+	}
+	item := pending.Decisions[0]
+	if item.RecommendationReason != "2A keeps the left line" || item.OneFix != "move the sign" ||
+		len(item.Unverified) != 1 || item.Unverified[0] != "head relation" {
+		t.Fatalf("item=%+v", item)
+	}
+	if len(item.Options) != 1 || len(item.Options[0].Attachments) != 1 {
+		t.Fatalf("options=%+v", item.Options)
+	}
+	attachment := item.Options[0].Attachments[0]
+	if attachment.SHA256 != sha || attachment.Caption != "approach" || attachment.MIME != "image/png" || attachment.OriginalName != "approach.png" {
+		t.Fatalf("attachment=%+v", attachment)
+	}
+	// options_ko is the labels only: the translated text names a different
+	// address, and that picture must not reach the wire.
+	if len(item.OptionsKO) != 1 || item.OptionsKO[0].Label != "2A 한국어" || len(item.OptionsKO[0].Attachments) != 0 {
+		t.Fatalf("options_ko=%+v", item.OptionsKO)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -293,6 +294,47 @@ func TestTasksDecisionWriteOutcomeUnknown(t *testing.T) {
 	var exit exitCodeError
 	if err == nil || errors.As(err, &exit) || !strings.Contains(err.Error(), "NOT recorded") {
 		t.Fatalf("409 refusal: err=%v", err)
+	}
+}
+
+// hk 4788: an option carries its pictures and videos, and the request carries
+// the recommendation's reason, what was not verified and one fix.
+func TestTasksDecisionRequestCLIOptionMedia(t *testing.T) {
+	h, seen := relaneServer(t, 201, decisionRequestOKBody)
+	first, second := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	args := []string{"tasks", "decision-request", "618",
+		"--question", "어느 카드?", "--option", "A|2A", "--option", "B|2B",
+		"--option-attachment", "A|" + first + "|approach",
+		"--option-attachment", "B|" + second,
+		"--recommendation-reason", "2B keeps the left line", "--unverified", "head relation",
+		"--unverified", "checker figures", "--one-fix", "move the sign",
+		"--default-action", "보류", "--url", h.URL, "--token", "tok"}
+	if err := run(args, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	body := (*seen)[0].Body
+	options := body["options"].(map[string]any)["options"].([]any)
+	a := options[0].(map[string]any)["attachments"].([]any)
+	if len(a) != 1 || a[0].(map[string]any)["sha256"] != first || a[0].(map[string]any)["caption"] != "approach" {
+		t.Fatalf("option A attachments=%v", a)
+	}
+	b := options[1].(map[string]any)["attachments"].([]any)
+	if len(b) != 1 || b[0].(map[string]any)["sha256"] != second {
+		t.Fatalf("option B attachments=%v", b)
+	}
+	if _, has := b[0].(map[string]any)["caption"]; has {
+		t.Fatalf("an empty caption was sent: %v", b[0])
+	}
+	if body["recommendation_reason"] != "2B keeps the left line" || body["one_fix"] != "move the sign" ||
+		fmt.Sprint(body["unverified"]) != "[head relation checker figures]" {
+		t.Fatalf("body=%v", body)
+	}
+	// A value naming no supplied option is refused before anything is sent.
+	h, seen = relaneServer(t, 201, decisionRequestOKBody)
+	err := run([]string{"tasks", "decision-request", "618", "--question", "q", "--option", "A|x",
+		"--option-attachment", "C|" + first, "--default-action", "보류", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "names no supplied --option key") || len(*seen) != 0 {
+		t.Fatalf("err=%v seen=%d", err, len(*seen))
 	}
 }
 

@@ -226,7 +226,7 @@ it("A11 restores a request-specific draft", async () => {
   expect(
     screen.getByRole("radio", { name: /Ship/ }).getAttribute("aria-checked"),
   ).toBe("true");
-  expect((screen.getByLabelText("메모") as HTMLTextAreaElement).value).toBe(
+  expect((screen.getByLabelText(/메모/) as HTMLTextAreaElement).value).toBe(
     "memo",
   );
   expect(draftKey("42", "dr-7-2")).toContain("42:dr-7-2");
@@ -263,7 +263,7 @@ it("A14 unknown record states are explicit", async () => {
 });
 it("A16 typing targets do not select via numeric keys", async () => {
   await start();
-  fireEvent.keyDown(screen.getByLabelText("메모"), { key: "1" });
+  fireEvent.keyDown(screen.getByLabelText(/메모/), { key: "1" });
   expect(
     screen.getByRole("radio", { name: /Wait/ }).getAttribute("aria-checked"),
   ).toBe("false");
@@ -354,7 +354,7 @@ it("A9 a 202 response remains pending", async () => {
 it("A16 Escape confirms a dirty memo and returns focus", async () => {
   vi.spyOn(window, "confirm").mockReturnValue(true);
   await start();
-  fireEvent.change(screen.getByLabelText("메모"), {
+  fireEvent.change(screen.getByLabelText(/메모/), {
     target: { value: "memo" },
   });
   const opener = screen.getByRole("button", { name: "답변 확인" });
@@ -476,7 +476,7 @@ it("A8 a refused answer restores its inputs without an unconfirmed retry", async
   const view = render(<DecisionPage id="42" />);
   await screen.findByRole("heading", { name: "Ship it?" });
   fireEvent.click(screen.getByRole("radio", { name: /Ship/ }));
-  fireEvent.change(screen.getByLabelText("메모"), {
+  fireEvent.change(screen.getByLabelText(/메모/), {
     target: { value: "keep this" },
   });
   fireEvent.click(screen.getByRole("button", { name: "답변 확인" }));
@@ -484,7 +484,7 @@ it("A8 a refused answer restores its inputs without an unconfirmed retry", async
   expect((await screen.findByRole("alert")).textContent).toContain(
     "invalid_request",
   );
-  const memo = screen.getByLabelText("메모") as HTMLTextAreaElement;
+  const memo = screen.getByLabelText(/메모/) as HTMLTextAreaElement;
   const wait = screen.getByRole("radio", { name: /Wait/ }) as HTMLButtonElement;
   expect(memo.disabled).toBe(false);
   expect(wait.disabled).toBe(false);
@@ -499,7 +499,7 @@ it("A8 a refused answer restores its inputs without an unconfirmed retry", async
   expect(
     screen.getByRole("radio", { name: /Wait/ }).getAttribute("aria-checked"),
   ).toBe("true");
-  expect((screen.getByLabelText("메모") as HTMLTextAreaElement).value).toBe(
+  expect((screen.getByLabelText(/메모/) as HTMLTextAreaElement).value).toBe(
     "corrected",
   );
 });
@@ -522,7 +522,12 @@ it("D4 options are large radio choices; the recommended one wears a chip", async
   const block = css.slice(at, css.indexOf("}", at));
   expect(block).toContain("width: 100%");
   expect(block).toContain("min-height: var(--hk-touch-height)");
-  expect(block).toContain("padding: var(--hk-space-4)");
+  // The option card owns the padding since hk 4788 (the media sits inside it),
+  // so the radio control itself carries no padding of its own.
+  const cardAt = css.indexOf(".decision-option-card {");
+  const card = css.slice(cardAt, css.indexOf("}", cardAt));
+  expect(card).toContain("padding: var(--hk-space-4)");
+  expect(block).toContain("padding: 0");
 });
 
 it("D4 the picked option shows a check, not only a border color", async () => {

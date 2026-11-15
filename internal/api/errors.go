@@ -102,6 +102,7 @@ var errorRules = []errorRule{
 	{store.ErrDecisionAttemptNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrDecisionAttemptNotPending, http.StatusConflict, "decision_attempt_not_pending", false},
 	{store.ErrDecisionAttemptDenied, http.StatusConflict, "decision_attempt_denied", false},
+	{store.ErrDecisionAttachmentNotFound, http.StatusBadRequest, "decision_attachment_not_found", false},
 	{store.ErrRelayEventNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrDeviationRefRequired, http.StatusBadRequest, "deviation_ref_required", false},
 	{store.ErrDecidedByRequired, http.StatusBadRequest, "decided_by_required", false},

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
@@ -43,7 +44,8 @@ func (f *FakeYouTrack) InjectChildArticle(projectID, summary, content string) st
 func (f *FakeYouTrack) addArticleLocked(projectID, summary, content string) string {
 	f.nextID++
 	id := fmt.Sprintf("3-%d", f.nextID)
-	f.articles = append(f.articles, &ytwrite.RemoteArticle{ID: id, ProjectID: projectID, Summary: summary, Content: content})
+	f.articles = append(f.articles, &ytwrite.RemoteArticle{ID: id, ProjectID: projectID, Summary: summary, Content: content,
+		CreatedAt: time.UnixMilli(int64(f.nextID)).UTC()})
 	return id
 }
 
@@ -130,6 +132,9 @@ func (f *FakeYouTrack) FindArticles(ctx context.Context, s ytwrite.ArticleSearch
 
 // CreateArticle creates one article, failing as the next queued Fault says.
 func (f *FakeYouTrack) CreateArticle(ctx context.Context, in ytwrite.ArticleCreate) (string, error) {
+	if f.BeforeArticleCreate != nil {
+		f.BeforeArticleCreate(ctx, in)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
@@ -20,7 +21,7 @@ const articleSearchTop = 100
 
 // articleSearchFields are what the search reads of each hit: no content, so
 // a page of long articles stays under the response cap.
-const articleSearchFields = "id,summary,project(id),parentArticle(id)"
+const articleSearchFields = "id,summary,project(id),parentArticle(id),created"
 
 // articleQuery is the search for the articles of project short whose summary or
 // content holds query as a phrase: `project: <short> "<query>"`, with the quote
@@ -132,6 +133,9 @@ func (r *WriteRemote) ReadArticle(ctx context.Context, articleID string) (ytwrit
 		return ytwrite.RemoteArticle{}, fmt.Errorf("youtrack GET article %s: decode: %w", articleID, err)
 	}
 	out := ytwrite.RemoteArticle{ID: a.ID, Summary: a.Summary, Content: a.Content, ParentID: parentOf(a)}
+	if a.Created > 0 {
+		out.CreatedAt = time.UnixMilli(a.Created).UTC()
+	}
 	if a.Project != nil {
 		out.ProjectID = a.Project.ID
 	}

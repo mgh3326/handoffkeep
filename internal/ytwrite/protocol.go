@@ -394,7 +394,10 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 // writeFailed records a write request that failed before anything it sent is
 // known to have taken effect: 429 and 401 were not processed (prepared, after
 // the wait), another 4xx is final, and a 5xx, 408 or transport failure may
-// have taken effect (remote_unknown).
+// have taken effect (remote_unknown). The one transport failure that provably
+// did not take effect — it happened before any part of the request was written
+// (beforeSend: DNS, dial) — is prepared again after the reconcile backoff,
+// exactly as a failed read is (hk 4797).
 func (p *Protocol) writeFailed(ctx context.Context, st settler, op Op, err error) settled {
 	now := p.now()
 	var re *RemoteError
@@ -417,6 +420,12 @@ func (p *Protocol) writeFailed(ctx context.Context, st settler, op Op, err error
 		}
 		return st.markUnknown(ctx, op, ReasonTransport, re.Error())
 	default:
+		if beforeSend(err) {
+			// Nothing of the request was written, so nothing it would have
+			// created can exist: the op is prepared again after the reconcile
+			// backoff, never marked uncertain (hk 4797).
+			return p.deferNotSent(ctx, st, op, p.reconcileDelay(op.Attempts), ReasonNotSent, err.Error())
+		}
 		return st.markUnknown(ctx, op, ReasonTransport, err.Error())
 	}
 }

@@ -127,17 +127,23 @@ type TaskClosure struct {
 // request up by ID: a superseding request gets a new ID, and Root names the
 // first revision of the same logical request.
 type DecisionRequest struct {
-	ID          string              `json:"id"`
-	Revision    int                 `json:"revision"`
-	Supersedes  string              `json:"supersedes,omitempty"`
-	Root        string              `json:"root,omitempty"`
-	Status      string              `json:"status"`
-	Question    string              `json:"question"`
-	DueAt       *time.Time          `json:"due_at,omitempty"`
-	RequestedBy string              `json:"requested_by"`
-	RequestedAt time.Time           `json:"requested_at"`
-	HumanOnly   bool                `json:"human_only,omitempty"`
-	Resolution  *DecisionResolution `json:"resolution,omitempty"`
+	ID         string `json:"id"`
+	Revision   int    `json:"revision"`
+	Supersedes string `json:"supersedes,omitempty"`
+	Root       string `json:"root,omitempty"`
+	Status     string `json:"status"`
+	Question   string `json:"question"`
+	// RecommendationReason, Unverified and OneFix are the requester's longer
+	// account of its recommendation, what it could not check, and its one
+	// suggested fix.
+	RecommendationReason string              `json:"recommendation_reason,omitempty"`
+	Unverified           []string            `json:"unverified,omitempty"`
+	OneFix               string              `json:"one_fix,omitempty"`
+	DueAt                *time.Time          `json:"due_at,omitempty"`
+	RequestedBy          string              `json:"requested_by"`
+	RequestedAt          time.Time           `json:"requested_at"`
+	HumanOnly            bool                `json:"human_only,omitempty"`
+	Resolution           *DecisionResolution `json:"resolution,omitempty"`
 }
 
 // DecisionResolution is the answer that closed a decision request.

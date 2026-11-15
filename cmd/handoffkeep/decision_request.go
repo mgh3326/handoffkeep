@@ -16,9 +16,9 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const decisionRequestUsage = "usage: tasks decision-request <id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only] [--answer-policy operator_direct|operator_relay_allowed]"
+const decisionRequestUsage = "usage: tasks decision-request <id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] [--recommendation-reason <text>] [--unverified <text> ...] [--one-fix <text>] [--option-attachment 'A|sha256[|caption]' ...] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only] [--answer-policy operator_direct|operator_relay_allowed]"
 
-const decisionAskUsage = "usage: decisions ask <task-id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only] [--answer-policy operator_direct|operator_relay_allowed]"
+const decisionAskUsage = "usage: decisions ask <task-id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] [--recommendation-reason <text>] [--unverified <text> ...] [--one-fix <text>] [--option-attachment 'A|sha256[|caption]' ...] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only] [--answer-policy operator_direct|operator_relay_allowed]"
 
 const decisionResolveRequestUsage = "usage: decisions resolve request <dr-id> --channel cli|session [--option A] [--text <text>] [--quote '<operator words>'] [--event-key <key>]"
 
@@ -142,11 +142,15 @@ func decisionRequestFlags(fs *flag.FlagSet, usage string, args []string) (*remot
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
 	question := fs.String("question", "", "the question put to the operator")
-	var optionValues, refValues refFlags
+	var optionValues, refValues, unverifiedValues, attachmentValues refFlags
 	fs.Var(&optionValues, "option", "decision option A|label (repeatable, 1-6, label at most 120 bytes)")
 	fs.Var(&refValues, "ref", "short pointer the question depends on (repeatable, counts toward ver)")
+	fs.Var(&unverifiedValues, "unverified", "one thing the requester could not check (repeatable, at most 10)")
+	fs.Var(&attachmentValues, "option-attachment", "option A|sha256[|caption]: a picture or video shown with that option (repeatable, at most 8 per option)")
 	recommended := fs.String("recommended", "", "recommended option key")
 	reason := fs.String("reason", "", "why the recommendation")
+	recommendationReason := fs.String("recommendation-reason", "", "the longer account of the recommendation")
+	oneFix := fs.String("one-fix", "", "the requester's one suggested fix")
 	defaultAction := fs.String("default-action", "", "what happens if nobody answers (\"자동 적용 없음\" when nothing is applied)")
 	defaultOption := fs.String("default-option", "", "option key the default action corresponds to, when it is one")
 	defaultTrigger := fs.String("default-trigger", "", "when/how the default is applied")
@@ -157,7 +161,7 @@ func decisionRequestFlags(fs *flag.FlagSet, usage string, args []string) (*remot
 	noFreeAnswer := fs.Bool("no-free-answer", false, "disallow a free-form answer")
 	humanOnly := fs.Bool("human-only", false, "reserve the request for the human operator; the assistant path refuses it")
 	answerPolicy := fs.String("answer-policy", "", "operator_direct (a relayed answer waits for the operator) or operator_relay_allowed (default)")
-	parseArgs, err := splitArgs(args, "question", "question-ko", "option", "option-ko", "ref", "recommended", "reason", "default-action", "default-option", "default-trigger", "due", "doc", "supersedes", "answer-policy")
+	parseArgs, err := splitArgs(args, "question", "question-ko", "option", "option-ko", "option-attachment", "ref", "recommended", "reason", "recommendation-reason", "unverified", "one-fix", "default-action", "default-option", "default-trigger", "due", "doc", "supersedes", "answer-policy")
 	if err != nil {
 		return nil, 0, store.DecisionRequestInput{}, err
 	}
@@ -169,23 +173,29 @@ func decisionRequestFlags(fs *flag.FlagSet, usage string, args []string) (*remot
 		return nil, 0, store.DecisionRequestInput{}, err
 	}
 	input := store.DecisionRequestInput{
-		Question:       strings.TrimSpace(*question),
-		Reason:         strings.TrimSpace(*reason),
-		DefaultAction:  strings.TrimSpace(*defaultAction),
-		DefaultOption:  strings.TrimSpace(*defaultOption),
-		DefaultTrigger: strings.TrimSpace(*defaultTrigger),
-		Doc:            strings.TrimSpace(*doc),
-		Refs:           refValues,
-		Supersedes:     strings.TrimSpace(*supersedes),
-		Block:          *block,
-		HumanOnly:      *humanOnly,
-		AnswerPolicy:   strings.TrimSpace(*answerPolicy),
+		Question:             strings.TrimSpace(*question),
+		Reason:               strings.TrimSpace(*reason),
+		RecommendationReason: strings.TrimSpace(*recommendationReason),
+		Unverified:           unverifiedValues,
+		OneFix:               strings.TrimSpace(*oneFix),
+		DefaultAction:        strings.TrimSpace(*defaultAction),
+		DefaultOption:        strings.TrimSpace(*defaultOption),
+		DefaultTrigger:       strings.TrimSpace(*defaultTrigger),
+		Doc:                  strings.TrimSpace(*doc),
+		Refs:                 refValues,
+		Supersedes:           strings.TrimSpace(*supersedes),
+		Block:                *block,
+		HumanOnly:            *humanOnly,
+		AnswerPolicy:         strings.TrimSpace(*answerPolicy),
 	}
 	if len(optionValues) == 0 {
 		return nil, 0, store.DecisionRequestInput{}, errors.New("at least one --option is required")
 	}
 	input.Options, err = parseTaskDecisionOptions(optionValues, *recommended, *noFreeAnswer)
 	if err != nil {
+		return nil, 0, store.DecisionRequestInput{}, err
+	}
+	if err := attachOptionMedia(&input.Options, attachmentValues); err != nil {
 		return nil, 0, store.DecisionRequestInput{}, err
 	}
 	if strings.TrimSpace(*due) != "" {
@@ -202,6 +212,35 @@ func decisionRequestFlags(fs *flag.FlagSet, usage string, args []string) (*remot
 		return nil, 0, store.DecisionRequestInput{}, err
 	}
 	return c, id, input, nil
+}
+
+// attachOptionMedia appends each --option-attachment to the option it names,
+// in the order the flags were given. A value is A|sha256 or
+// A|sha256|caption; the store validates the address, the count and the
+// caption, and refuses one that names no stored attachment.
+func attachOptionMedia(options *store.DecisionOptions, values []string) error {
+	for _, value := range values {
+		parts := strings.SplitN(value, "|", 3)
+		if len(parts) < 2 {
+			return errors.New("--option-attachment must be A|sha256 or A|sha256|caption")
+		}
+		key, sha := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+		caption := ""
+		if len(parts) == 3 {
+			caption = strings.TrimSpace(parts[2])
+		}
+		index := -1
+		for i := range options.Options {
+			if options.Options[i].Key == key {
+				index = i
+			}
+		}
+		if index < 0 {
+			return fmt.Errorf("--option-attachment %s names no supplied --option key", key)
+		}
+		options.Options[index].Attachments = append(options.Options[index].Attachments, store.DecisionOptionAttachment{SHA256: sha, Caption: caption})
+	}
+	return nil
 }
 
 // decisionRequestCmd records a structured decision request (#618). The

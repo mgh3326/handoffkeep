@@ -434,9 +434,12 @@ func retryableTransport(err error) bool {
 
 // redact removes the bearer token from anything that might be rendered. The
 // token is only ever placed in a header, but a transport error can echo a
-// request representation.
+// request representation. An error whose text holds no token is returned as
+// it is, so its type survives: the write protocol reads a transport error's
+// type to tell a request that never left (a dial failure, nothing written)
+// from one that may have reached YouTrack (hk 4797).
 func redact(err error, token string) error {
-	if err == nil || token == "" {
+	if err == nil || token == "" || !strings.Contains(err.Error(), token) {
 		return err
 	}
 	text := strings.ReplaceAll(err.Error(), token, "[redacted]")

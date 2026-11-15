@@ -146,6 +146,7 @@ var decisionHistoryFieldSources = map[string]string{
 	"request_id": "hk", "task_id": "hk", "task_title": "hk", "question": "hk",
 	"status": "hk", "operator_only": "hk", "options": "hk", "recommended_option": "hk",
 	"chosen_option": "hk", "text": "hk", "receipt": "hk", "rationale": "hk",
+	"recommendation_reason": "hk", "unverified": "hk", "one_fix": "hk",
 	"decider": "hk", "responder": "hk", "provenance": "hk", "decided_at": "hk",
 	"console_url": "hk", "record_id": "hk", "key": "hk", "lane": "hk",
 	"reading": "hk", "quote": "hk", "recorded_by": "hk", "grounds": "hk",
@@ -172,11 +173,16 @@ type decisionHistoryView struct {
 	Text              string               `json:"text,omitempty"`
 	Receipt           string               `json:"receipt,omitempty"`
 	Rationale         string               `json:"rationale,omitempty"`
-	Decider           string               `json:"decider,omitempty"`
-	Responder         string               `json:"responder,omitempty"`
-	Provenance        string               `json:"provenance,omitempty"`
-	DecidedAt         time.Time            `json:"decided_at"`
-	ConsoleURL        string               `json:"console_url"`
+	// RecommendationReason, Unverified and OneFix are what the requester
+	// said about its recommendation, its limits and its one suggested fix.
+	RecommendationReason string    `json:"recommendation_reason,omitempty"`
+	Unverified           []string  `json:"unverified,omitempty"`
+	OneFix               string    `json:"one_fix,omitempty"`
+	Decider              string    `json:"decider,omitempty"`
+	Responder            string    `json:"responder,omitempty"`
+	Provenance           string    `json:"provenance,omitempty"`
+	DecidedAt            time.Time `json:"decided_at"`
+	ConsoleURL           string    `json:"console_url"`
 }
 
 // decisionsHistory pages closed structured requests newest task update first,
@@ -275,6 +281,7 @@ func (o operatorTools) decisionsHistory(ctx context.Context, _ *gmcp.CallToolReq
 			RequestID: request.ID, TaskID: task.ID, TaskTitle: task.Title, Question: request.Question,
 			Status: request.Status, OperatorOnly: decisionOperatorOnly(task, *request),
 			Options: []decisionOptionView{}, Rationale: request.Reason, ConsoleURL: taskURL(task.ID),
+			RecommendationReason: request.RecommendationReason, Unverified: request.Unverified, OneFix: request.OneFix,
 		}
 		if task.Refs.DecisionOptions != nil {
 			item.Options = decisionOptionViews(task.Refs.DecisionOptions.Options)
@@ -295,6 +302,13 @@ func (o operatorTools) decisionsHistory(ctx context.Context, _ *gmcp.CallToolReq
 			item.DecidedAt = res.At
 		}
 		items = append(items, item)
+	}
+	optionGroups := make([][]decisionOptionView, 0, len(items))
+	for _, item := range items {
+		optionGroups = append(optionGroups, item.Options)
+	}
+	if err := o.decisionMedia(ctx, optionGroups...); err != nil {
+		return nil, nil, err
 	}
 	sessionDecisions := make([]map[string]any, 0, len(sessionRecords))
 	for _, x := range sessionRecords {

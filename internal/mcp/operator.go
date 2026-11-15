@@ -509,10 +509,22 @@ func (o operatorTools) taskListPaged(ctx context.Context, in taskListInput) (*gm
 	return jsonResult(map[string]any{"tasks": summaries, "truncated": hasMore, "next_cursor": next})
 }
 
+// decisionOptionAttachmentView is one picture or video an option is shown
+// with. The content address and caption are the stored record; mime and
+// original_name are read from the attachments table for this answer, so dots
+// can tell a picture from a video without downloading it.
+type decisionOptionAttachmentView struct {
+	SHA256       string `json:"sha256"`
+	Caption      string `json:"caption,omitempty"`
+	MIME         string `json:"mime,omitempty"`
+	OriginalName string `json:"original_name,omitempty"`
+}
+
 type decisionOptionView struct {
-	Key         string `json:"key"`
-	Label       string `json:"label"`
-	Recommended bool   `json:"recommended,omitempty"`
+	Key         string                         `json:"key"`
+	Label       string                         `json:"label"`
+	Recommended bool                           `json:"recommended,omitempty"`
+	Attachments []decisionOptionAttachmentView `json:"attachments,omitempty"`
 }
 
 type decisionView struct {
@@ -529,21 +541,79 @@ type decisionView struct {
 	AllowFree       bool                 `json:"allow_free"`
 	State           string               `json:"state"`
 	Reason          string               `json:"reason"`
-	TaskState       string               `json:"task_state"`
-	OperatorOnly    bool                 `json:"operator_only"`
-	DefaultAction   string               `json:"default_action"`
-	RequestedBy     string               `json:"requested_by"`
-	RequestedAt     time.Time            `json:"requested_at"`
-	DueAt           *time.Time           `json:"due_at,omitempty"`
-	ConsoleURL      string               `json:"console_url"`
+	// RecommendationReason, Unverified and OneFix are the requester's longer
+	// account of its recommendation, what it could not check, and its one
+	// suggested fix — what the operator reads on the console's decision page.
+	RecommendationReason string     `json:"recommendation_reason,omitempty"`
+	Unverified           []string   `json:"unverified,omitempty"`
+	OneFix               string     `json:"one_fix,omitempty"`
+	TaskState            string     `json:"task_state"`
+	OperatorOnly         bool       `json:"operator_only"`
+	DefaultAction        string     `json:"default_action"`
+	RequestedBy          string     `json:"requested_by"`
+	RequestedAt          time.Time  `json:"requested_at"`
+	DueAt                *time.Time `json:"due_at,omitempty"`
+	ConsoleURL           string     `json:"console_url"`
 }
 
 func decisionOptionViews(options []store.DecisionOption) []decisionOptionView {
 	out := make([]decisionOptionView, 0, len(options))
 	for _, option := range options {
-		out = append(out, decisionOptionView{Key: option.Key, Label: option.Label, Recommended: option.Recommended})
+		view := decisionOptionView{Key: option.Key, Label: option.Label, Recommended: option.Recommended}
+		for _, attachment := range option.Attachments {
+			view.Attachments = append(view.Attachments, decisionOptionAttachmentView{SHA256: attachment.SHA256, Caption: attachment.Caption})
+		}
+		out = append(out, view)
 	}
 	return out
+}
+
+// decisionOptionKOViews is what options_ko carries: each option's key and
+// translated label, nothing else. The media and the recommendation belong to
+// the option itself (options[]), so a translated payload can never name a
+// picture the option does not carry or flip a recommendation.
+func decisionOptionKOViews(options []store.DecisionOption) []decisionOptionView {
+	out := make([]decisionOptionView, 0, len(options))
+	for _, option := range options {
+		out = append(out, decisionOptionView{Key: option.Key, Label: option.Label})
+	}
+	return out
+}
+
+// decisionMedia fills every attachment's MIME type and original name in one
+// lookup over the options of a page.
+func (o operatorTools) decisionMedia(ctx context.Context, groups ...[]decisionOptionView) error {
+	shas := []string{}
+	seen := map[string]bool{}
+	for _, group := range groups {
+		for _, option := range group {
+			for _, attachment := range option.Attachments {
+				if !seen[attachment.SHA256] {
+					seen[attachment.SHA256] = true
+					shas = append(shas, attachment.SHA256)
+				}
+			}
+		}
+	}
+	if len(shas) == 0 {
+		return nil
+	}
+	stored, err := o.service.Store.AttachmentsBySHA(ctx, shas)
+	if err != nil {
+		return err
+	}
+	for _, group := range groups {
+		for i := range group {
+			for k := range group[i].Attachments {
+				attachment := &group[i].Attachments[k]
+				if x, ok := stored[attachment.SHA256]; ok {
+					attachment.MIME = x.MIME
+					attachment.OriginalName = x.OriginalName
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (o operatorTools) decisionsPending(ctx context.Context, _ *gmcp.CallToolRequest, _ struct{}) (*gmcp.CallToolResult, any, error) {
@@ -569,6 +639,7 @@ func (o operatorTools) decisionsPending(ctx context.Context, _ *gmcp.CallToolReq
 			RequestID: request.ID, TaskID: task.ID, TaskTitle: task.Title,
 			Question: request.Question, Options: []decisionOptionView{}, State: state,
 			Reason: decisionPendingReason(state), TaskState: task.State, OperatorOnly: decisionOperatorOnly(task, *request),
+			RecommendationReason: request.RecommendationReason, Unverified: request.Unverified, OneFix: request.OneFix,
 			DefaultAction: request.DefaultAction, RequestedBy: request.RequestedBy, RequestedAt: request.RequestedAt,
 			DueAt: request.DueAt, ConsoleURL: taskURL(task.ID),
 		}
@@ -632,7 +703,7 @@ func (o operatorTools) decisionsPending(ctx context.Context, _ *gmcp.CallToolReq
 				if translated.Stale {
 					items[i].OptionsKOStale = true
 				} else {
-					items[i].OptionsKO = decisionOptionViews(options.Options)
+					items[i].OptionsKO = decisionOptionKOViews(options.Options)
 				}
 			} else {
 				items[i].OptionsKOStale = true
@@ -647,6 +718,16 @@ func (o operatorTools) decisionsPending(ctx context.Context, _ *gmcp.CallToolReq
 			continue
 		}
 		decisions = append(decisions, item)
+	}
+	optionGroups := make([][]decisionOptionView, 0, len(decisions)+len(cleanup))
+	for _, item := range decisions {
+		optionGroups = append(optionGroups, item.Options)
+	}
+	for _, item := range cleanup {
+		optionGroups = append(optionGroups, item.Options)
+	}
+	if err := o.decisionMedia(ctx, optionGroups...); err != nil {
+		return nil, nil, err
 	}
 	return jsonResult(map[string]any{"decisions": decisions, "needs_cleanup": cleanup, "truncated": truncated})
 }

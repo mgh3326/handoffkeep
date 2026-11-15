@@ -31,31 +31,101 @@ var decisionStateLabels = map[string]string{
 // request: the question exists only as a transition note.
 const decisionViewUnrecorded = "unrecorded"
 
+// decisionOptionView is one option as the console renders it: the stored
+// option plus, for each of its pictures and videos, the MIME type and
+// original name the page needs to show it in place. The stored record keeps
+// only the address and the caption; the media fields are read from the
+// attachments table for this response.
+type decisionOptionView struct {
+	Key         string                   `json:"key"`
+	Label       string                   `json:"label"`
+	Recommended bool                     `json:"recommended,omitempty"`
+	Attachments []decisionAttachmentView `json:"attachments,omitempty"`
+}
+
+// decisionAttachmentView is one attachment of an option. MIME, OriginalName
+// and SizeBytes are empty when the attachments table no longer holds the
+// address: the page then shows a plain link, never a broken picture.
+// SizeBytes also lets the page keep a file too large to render in place a
+// link, the same threshold the task page uses.
+type decisionAttachmentView struct {
+	SHA256       string `json:"sha256"`
+	Caption      string `json:"caption,omitempty"`
+	MIME         string `json:"mime,omitempty"`
+	OriginalName string `json:"original_name,omitempty"`
+	SizeBytes    int64  `json:"size_bytes,omitempty"`
+}
+
+func projectDecisionOptions(options []store.DecisionOption) []decisionOptionView {
+	out := make([]decisionOptionView, 0, len(options))
+	for _, option := range options {
+		view := decisionOptionView{Key: option.Key, Label: option.Label, Recommended: option.Recommended}
+		for _, attachment := range option.Attachments {
+			view.Attachments = append(view.Attachments, decisionAttachmentView{SHA256: attachment.SHA256, Caption: attachment.Caption})
+		}
+		out = append(out, view)
+	}
+	return out
+}
+
+// decisionOptionKOViews is what options_ko carries: each option's key and
+// translated label, nothing else. The media and the recommendation belong to
+// the option itself (options[]), so a translated payload can never name a
+// picture the option does not carry or flip a recommendation.
+func decisionOptionKOViews(options []store.DecisionOption) []store.DecisionOption {
+	out := make([]store.DecisionOption, 0, len(options))
+	for _, option := range options {
+		out = append(out, store.DecisionOption{Key: option.Key, Label: option.Label})
+	}
+	return out
+}
+
+// storeOptions is the stored shape of these options, for the translation
+// source hash: media metadata is read from the attachments table and is not
+// part of what a translator translated.
+func storeOptions(options []decisionOptionView) []store.DecisionOption {
+	out := make([]store.DecisionOption, 0, len(options))
+	for _, option := range options {
+		stored := store.DecisionOption{Key: option.Key, Label: option.Label, Recommended: option.Recommended}
+		for _, attachment := range option.Attachments {
+			stored.Attachments = append(stored.Attachments, store.DecisionOptionAttachment{SHA256: attachment.SHA256, Caption: attachment.Caption})
+		}
+		out = append(out, stored)
+	}
+	return out
+}
+
 type decisionRequestView struct {
-	ID              string                    `json:"id"`
-	Revision        int                       `json:"revision"`
-	Supersedes      string                    `json:"supersedes,omitempty"`
-	SupersededBy    string                    `json:"superseded_by,omitempty"`
-	Current         bool                      `json:"current"`
-	State           string                    `json:"state"`
-	StateLabel      string                    `json:"state_label"`
-	Question        string                    `json:"question"`
-	QuestionKO      string                    `json:"question_ko,omitempty"`
-	QuestionKOStale bool                      `json:"question_ko_stale,omitempty"`
-	Options         []store.DecisionOption    `json:"options"`
-	OptionsKO       []store.DecisionOption    `json:"options_ko,omitempty"`
-	OptionsKOStale  bool                      `json:"options_ko_stale,omitempty"`
-	AllowFree       bool                      `json:"allow_free"`
-	Reason          string                    `json:"reason,omitempty"`
-	DefaultAction   string                    `json:"default_action"`
-	DefaultOption   string                    `json:"default_option,omitempty"`
-	DefaultTrigger  string                    `json:"default_trigger,omitempty"`
-	DueAt           *time.Time                `json:"due_at,omitempty"`
-	Doc             string                    `json:"doc,omitempty"`
-	Refs            []string                  `json:"refs,omitempty"`
-	RequestedBy     string                    `json:"requested_by"`
-	RequestedAt     time.Time                 `json:"requested_at"`
-	Resolution      *store.DecisionResolution `json:"resolution,omitempty"`
+	ID              string                 `json:"id"`
+	Revision        int                    `json:"revision"`
+	Supersedes      string                 `json:"supersedes,omitempty"`
+	SupersededBy    string                 `json:"superseded_by,omitempty"`
+	Current         bool                   `json:"current"`
+	State           string                 `json:"state"`
+	StateLabel      string                 `json:"state_label"`
+	Question        string                 `json:"question"`
+	QuestionKO      string                 `json:"question_ko,omitempty"`
+	QuestionKOStale bool                   `json:"question_ko_stale,omitempty"`
+	Options         []decisionOptionView   `json:"options"`
+	OptionsKO       []store.DecisionOption `json:"options_ko,omitempty"`
+	OptionsKOStale  bool                   `json:"options_ko_stale,omitempty"`
+	AllowFree       bool                   `json:"allow_free"`
+	Reason          string                 `json:"reason,omitempty"`
+	// RecommendationReason, Unverified and OneFix are the requester's longer
+	// account of its recommendation, what it could not check, and its one
+	// suggested fix (hk 4788).
+	RecommendationReason string                    `json:"recommendation_reason,omitempty"`
+	Unverified           []string                  `json:"unverified,omitempty"`
+	OneFix               string                    `json:"one_fix,omitempty"`
+	DefaultAction        string                    `json:"default_action"`
+	DefaultOption        string                    `json:"default_option,omitempty"`
+	DefaultTrigger       string                    `json:"default_trigger,omitempty"`
+	DueAt                *time.Time                `json:"due_at,omitempty"`
+	Doc                  string                    `json:"doc,omitempty"`
+	Refs                 []string                  `json:"refs,omitempty"`
+	RequestedBy          string                    `json:"requested_by"`
+	RequestedAt          time.Time                 `json:"requested_at"`
+	Resolution           *store.DecisionResolution `json:"resolution,omitempty"`
 }
 
 // legacyDecisionView is a needs_decision task whose question was never
@@ -83,20 +153,21 @@ func projectDecisionRequest(entry store.DecisionRequestEntry, taskState string, 
 	view := decisionRequestView{
 		ID: request.ID, Revision: request.Revision, Supersedes: request.Supersedes, SupersededBy: strings.TrimPrefix(entry.SupersededBy, "?"),
 		Current: entry.Current, State: state, StateLabel: decisionStateLabels[state],
-		Question: request.Question, Options: []store.DecisionOption{}, Reason: request.Reason,
+		Question: request.Question, Options: []decisionOptionView{}, Reason: request.Reason,
+		RecommendationReason: request.RecommendationReason, Unverified: request.Unverified, OneFix: request.OneFix,
 		DefaultAction: request.DefaultAction, DefaultOption: request.DefaultOption, DefaultTrigger: request.DefaultTrigger,
 		DueAt: request.DueAt, Doc: request.Doc, Refs: request.Refs, RequestedBy: request.RequestedBy, RequestedAt: request.RequestedAt.UTC(),
 		Resolution: request.Resolution,
 	}
 	if entry.Options != nil {
-		view.Options = append(view.Options, entry.Options.Options...)
+		view.Options = projectDecisionOptions(entry.Options.Options)
 		view.AllowFree = entry.Options.AllowFree
 	}
 	if request.Status == store.DecisionRequestOpen {
 		if rendered, ok := store.RenderDecisionTemplate(request, entry.Options); ok {
 			view.QuestionKO = rendered.Question
-			view.OptionsKO = rendered.Options.Options
-			view.Options = append([]store.DecisionOption(nil), rendered.Options.Options...)
+			view.OptionsKO = decisionOptionKOViews(rendered.Options.Options)
+			view.Options = projectDecisionOptions(rendered.Options.Options)
 			for i := range view.Options {
 				view.Options[i].Label = entry.Options.Options[i].Label
 			}
@@ -104,6 +175,25 @@ func projectDecisionRequest(entry store.DecisionRequestEntry, taskState string, 
 		}
 	}
 	return view
+}
+
+// decisionMediaSHAs lists the content addresses the views name, for one
+// lookup of the MIME type and original name each picture or video is shown
+// with. options_ko carries labels only, so there is nothing to look up there.
+func decisionMediaSHAs(views []decisionRequestView) []string {
+	shas := []string{}
+	seen := map[string]bool{}
+	for _, view := range views {
+		for _, option := range view.Options {
+			for _, attachment := range option.Attachments {
+				if !seen[attachment.SHA256] {
+					seen[attachment.SHA256] = true
+					shas = append(shas, attachment.SHA256)
+				}
+			}
+		}
+	}
+	return shas
 }
 
 // taskDecisionViews returns every request of a task (newest first) and, for

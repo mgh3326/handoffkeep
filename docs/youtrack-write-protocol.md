@@ -63,6 +63,15 @@ Submit ─► prepared ─Claim─► dispatched ─┬─ 2xx + valid id ──
 ```
 
 - **One attempt per dispatch.** The client never retries a create inside the call.
+- **A request that never left is not uncertain (hk 4797).** A transport failure
+  that provably happened before any part of the request was written — name
+  resolution failed, the connection was never made (`beforeSend`,
+  `internal/ytwrite/transport.go`) — is `not_sent`: the op goes back to
+  `prepared` after the reconcile backoff, and nothing it would have created can
+  exist. Every other failure may have reached YouTrack (a timeout, a connection
+  lost after the request was written, a 5xx, a 3xx not followed) and is
+  `remote_unknown`, reconciled by the evidence search. The adapter keeps the
+  error's type through redaction, so this decision sees the real error.
 - **`prepared` is never sent; `dispatched` may have been.** Dispatch ownership is a
   compare-and-set committed before the remote call, so a crash in `prepared` is safe
   to resume and a crash in `dispatched` is uncertain. A `dispatched` op older than
@@ -2063,13 +2072,25 @@ top-level.
   finds the roots hk wrote, the marker finds a root an operator edited (its
   sentence gone, the marker kept), which is still the root by identity, so no
   create makes a second root beside one it cannot see. None, and it creates
-  one before the document; one, it is the parent; two or more, the op is
-  `rejected / ambiguous_issue` (no POST). Root creation is not an op, so no op
-  records it. Residual risk: two first creates of one family in one project,
-  running at once, can make two roots; the next create of that family then
-  refuses `ambiguous_issue` until an operator merges them. A root written by an
-  earlier release carries the same sentence, so the lookup still finds it.
-- Evidence looks for the root without creating it: no root, no match.
+  one before the document; one or more, it is the parent — when several roots
+  carry the marker (a retry an earlier release made, or an operator's copy)
+  the OLDEST by creation time, then by id, is the family's root
+  (`ytwrite.OldestFamilyRoot`), and nothing is created beside it (hk 4797).
+  Root creation is not an op, so no op records it; the store does
+  (`yt_family_roots`, `Ledger.FamilyRoot` / `RecordFamilyRoot`): the send that
+  resolved a root records its id, and the family's later documents use it
+  without a search. The store's family lane (`Ledger.LockFamily`, a session
+  advisory lock on its own connection) covers the search and the create, so
+  two documents of a new family cannot make two roots: the second is sent
+  nothing that pass (`not_sent`) and uses the recorded root on its next one.
+  A root POST whose outcome is unknown is reconciled by one search, never
+  repeated: a root it made is used, and no root keeps the op `remote_unknown`
+  for the evidence path. A root written by an earlier release carries the same
+  sentence, so the lookup still finds it. `youtrack articles roots` reports
+  each family's roots, their children and the one hk uses.
+- Evidence looks for the root without creating it, and takes the same one Send
+  would (the recorded root, else the oldest carrying the marker): no root, no
+  match.
 
 **Send.** `article_create`: one search of the project for the summary
 (`GET /api/articles`, query `project: <SHORT> "<summary>"`, at most 100 hits,
@@ -2080,7 +2101,9 @@ POST; two are `rejected / ambiguous_issue`; none is exactly one POST with
 the project, summary and content. A family root is looked up first by its own
 sentence (Parent, above), and that search is narrow for the same reason: a
 search that cannot prove its page complete leaves the op `not_sent`, which is
-a retry, not a refusal. `article_update`: one POST to the article
+a retry, not a refusal. The root's POST follows the protocol's classification:
+`beforeSend` (DNS, dial) is `not_sent`, and anything else is `remote_unknown`
+after one marker search (hk 4797). `article_update`: one POST to the article
 with the summary and the rendered content. Whether the live search syntax finds a
 created article is UNVERIFIED until the first live create (hk 4206 report).
 
@@ -2140,7 +2163,14 @@ mark-unknown, defer), two writes to one entity in order, evidence paging and exa
 match, ambiguous evidence, caller cancellation. `ytwritetest.RunIssueProtocol`
 runs the same fault cases for `issue_create` (lost and delayed replies, 2xx
 without an id, 429, 401, 5xx, 4xx, operator resolution, concurrent workers,
-a crash at each boundary) over both ledgers (hk 3910).
+a crash at each boundary) over both ledgers (hk 3910). The family root covers
+what hk 4797 got wrong: a root POST whose reply was lost leaves one root and
+the op applies, a root POST that never left (a dial error) is `not_sent` with
+the backoff, several existing roots resolve to the oldest, a recorded root is
+used without a search, two concurrent documents of a new family make one root,
+and the document's own POST that times out reconciles by its marker without a
+second article. The Postgres side runs the family record and the family lane
+(`TestYTFamilyRoots*`).
 
 ## Not yet (later slices)
 

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { BoardAttachment, BoardTask } from "../shared/boardTypes";
-import { MAX_INLINE_BYTES, TaskAttachments } from "./TaskAttachments";
+import { MAX_INLINE_BYTES } from "../shared/media";
+import { TaskAttachments } from "./TaskAttachments";
 import { TaskRecord } from "./TaskRecord";
 
 const task: BoardTask = { id: 101, title: "Example task", lane: "x", kind: "implement", state: "developing", priority: 2, created_by: "operator", created_at: "2026-11-05T00:00:00Z", updated_at: "2026-11-05T01:00:00Z", refs: {}, project: "a" };
