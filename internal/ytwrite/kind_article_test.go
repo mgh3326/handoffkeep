@@ -2,6 +2,7 @@ package ytwrite_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -393,5 +394,66 @@ func TestLegacyDocMarker(t *testing.T) {
 	if got := ytwrite.LegacyDocMarker("design/x.md"); got != "<!-- hk-marker:"+ytwrite.LegacyDocToken("design/x.md")+" -->" ||
 		len(ytwrite.LegacyDocToken("design/x.md")) != len("hkdoc")+24 || !strings.HasPrefix(got, "<!-- hk-marker:hkdoc") {
 		t.Fatalf("marker %q", got)
+	}
+}
+
+// A read the create makes before its POST that fails sends nothing: the op
+// ends prepared / not_sent, due after the reconcile backoff, and its detail
+// names which read failed, so the cause of a not_sent loop is in the op row
+// and in the log (hk 4784). Nothing is rejected: the read may succeed later.
+func TestArticleCreateReadFailureStaysPrepared(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		family string
+		phase  string
+	}{
+		{"family_root", "design", `family root "design"`},
+		{"articles", "", "articles of"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newArticleEnv(t)
+			req := articleReq()
+			req.ParentFamily = tc.family
+			op := prepareWith(t, e, req)
+			e.yt.QueueFind(errors.New("connection reset by peer"))
+			e.drive()
+			got, err := e.ledger.ByID(context.Background(), op.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.State != ytwrite.StatePrepared || got.Reason != ytwrite.ReasonNotSent || got.Attempts != 1 {
+				t.Fatalf("op = %s/%q attempts %d, want prepared/not_sent after one attempt", got.State, got.Reason, got.Attempts)
+			}
+			if !strings.Contains(got.LastError, tc.phase) || !strings.Contains(got.LastError, "connection reset by peer") {
+				t.Fatalf("last_error = %q, want the %s read and its error", got.LastError, tc.phase)
+			}
+			if delay := got.NextAttemptAt.Sub(e.clock.Now()); delay != 10*time.Second {
+				t.Fatalf("due in %s, want the first reconcile backoff 10s", delay)
+			}
+			if e.yt.Calls() != 0 {
+				t.Fatalf("%d writes after a failed read, want none", e.yt.Calls())
+			}
+		})
+	}
+}
+
+// A family root lookup whose search cannot prove completeness never creates a
+// second root: the op stays prepared / not_sent.
+func TestArticleCreateIncompleteFamilySearchSendsNothing(t *testing.T) {
+	e := newArticleEnv(t)
+	req := articleReq()
+	req.ParentFamily = "design"
+	op := prepareWith(t, e, req)
+	e.yt.QueueFind(errors.New("100 or more articles match the query; the search is not complete"))
+	e.drive()
+	got, err := e.ledger.ByID(context.Background(), op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != ytwrite.StatePrepared || got.Reason != ytwrite.ReasonNotSent {
+		t.Fatalf("op = %s/%q, want prepared/not_sent", got.State, got.Reason)
+	}
+	if arts := e.yt.Articles(artProject); len(arts) != 0 || e.yt.Calls() != 0 {
+		t.Fatalf("articles %+v writes %d, want none", arts, e.yt.Calls())
 	}
 }

@@ -58,10 +58,15 @@ type FakeYouTrack struct {
 	shiftPages bool
 	latency    time.Duration
 	// projects holds the issues by YouTrack project id; findFaults are the
-	// errors the next FindTaskIssues calls return, in order.
-	projects   map[string][]*fakeIssue
-	findFaults []error
-	finds      int
+	// errors the next FindTaskIssues calls return, in order, and
+	// findFail/findFailSummary a failure every FindArticles of one summary
+	// returns (hk 4784).
+	projects        map[string][]*fakeIssue
+	findFaults      []error
+	finds           int
+	findFail        error
+	findFailSummary string
+	searches        []ytwrite.ArticleSearch
 	// fieldsMissing names the projects whose issue fields are not set up;
 	// projectField the type of each project's hk project field (an enum
 	// unless SetProjectField says otherwise).
@@ -534,6 +539,14 @@ func (f *FakeYouTrack) QueueFind(errs ...error) {
 
 // Finds is the number of FindTaskIssues calls received.
 func (f *FakeYouTrack) Finds() int { f.mu.Lock(); defer f.mu.Unlock(); return f.finds }
+
+// FailFindsForSummary makes every FindArticles call for summary fail with err
+// (nil stops it), the persistent read failure a starving op has (hk 4784).
+func (f *FakeYouTrack) FailFindsForSummary(summary string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.findFail, f.findFailSummary = err, summary
+}
 
 func (f *FakeYouTrack) addIssueLocked(projectID string, taskID int64, summary, description string) string {
 	f.nextID++

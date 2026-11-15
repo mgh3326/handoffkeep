@@ -213,6 +213,42 @@ func RunLedger(t *testing.T, nl NewLedger) {
 		}
 	})
 
+	// hk 4784: a pass offers due ops by when they came due, not by id, so an
+	// op a failed read or a rate limit keeps pushing back cannot fill the
+	// window ahead of ops that have not been tried.
+	t.Run("due_is_ordered_by_next_attempt_at_then_id", func(t *testing.T) {
+		l := nl(t)
+		a, b, c := prepare(t, l, "a", "1"), prepare(t, l, "b", "2"), prepare(t, l, "c", "3")
+		if out := claim(t, l, a.ID); out != ytwrite.ClaimClaimed {
+			t.Fatalf("claim = %s", out)
+		}
+		if _, err := l.Defer(ctx, t0, a.ID, t0.Add(10*time.Minute), ytwrite.ReasonNotSent, "read failed"); err != nil {
+			t.Fatal(err)
+		}
+		// b and c have never been tried: they are due at t0, a only at t0+10m,
+		// so the lowest id comes last.
+		due, _ := l.Due(ctx, t0.Add(10*time.Minute), 10)
+		if len(due) != 3 || due[0].ID != b.ID || due[1].ID != c.ID || due[2].ID != a.ID {
+			t.Fatalf("due = %+v, want b, c then the deferred a", due)
+		}
+		if due, _ := l.Due(ctx, t0.Add(10*time.Minute), 2); len(due) != 2 || due[0].ID != b.ID || due[1].ID != c.ID {
+			t.Fatalf("due with limit 2 = %+v, want b and c", due)
+		}
+		// Id still breaks a tie: same due time, lowest id first.
+		for _, op := range []ytwrite.Op{b, c} {
+			if out := claim(t, l, op.ID); out != ytwrite.ClaimClaimed {
+				t.Fatalf("claim %d = %s", op.ID, out)
+			}
+			if _, err := l.Defer(ctx, t0, op.ID, t0.Add(10*time.Minute), ytwrite.ReasonNotSent, "read failed"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		due, _ = l.Due(ctx, t0.Add(10*time.Minute), 10)
+		if len(due) != 3 || due[0].ID != a.ID || due[1].ID != b.ID || due[2].ID != c.ID {
+			t.Fatalf("due with equal due times = %+v, want a, b, c by id", due)
+		}
+	})
+
 	t.Run("a_rejected_op_releases_its_entity", func(t *testing.T) {
 		l := nl(t)
 		a, b := prepare(t, l, "a", "1"), prepare(t, l, "b", "1")
@@ -357,10 +393,12 @@ func RunLedger(t *testing.T, nl NewLedger) {
 		if due, _ := l.Due(ctx, t0, 10); len(due) != 1 || due[0].ID != c.ID {
 			t.Fatalf("due at t0 = %+v (c is prepared and due; a is unknown until later)", due)
 		}
-		if due, _ := l.Due(ctx, t0.Add(time.Hour), 10); len(due) != 2 || due[0].ID != a.ID || due[1].ID != c.ID {
+		// a's evidence search was pushed to t0+2m, c has not been deferred, so
+		// c comes first even though a has the lower id (hk 4784).
+		if due, _ := l.Due(ctx, t0.Add(time.Hour), 10); len(due) != 2 || due[0].ID != c.ID || due[1].ID != a.ID {
 			t.Fatalf("due later = %+v", due)
 		}
-		if due, _ := l.Due(ctx, t0.Add(time.Hour), 1); len(due) != 1 || due[0].ID != a.ID {
+		if due, _ := l.Due(ctx, t0.Add(time.Hour), 1); len(due) != 1 || due[0].ID != c.ID {
 			t.Fatalf("due with limit 1 = %+v", due)
 		}
 		if st, _ := l.Stale(ctx, t0.Add(-time.Second), 10); len(st) != 0 {

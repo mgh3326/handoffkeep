@@ -2,7 +2,6 @@ package ytwrite_test
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -46,12 +45,18 @@ func TestArticleCreateCreatesTheFamilyRootFirst(t *testing.T) {
 	op := prepareWith(t, e, req)
 	e.drive()
 	e.want(op.ID, ytwrite.StateApplied, "")
+	// The root is looked up by its own sentence, not by the family word every
+	// document of the family carries (hk 4784).
+	searches := e.yt.Searches()
+	if len(searches) != 2 || searches[0].Query != ytwrite.FamilyRootPhrase("design") || searches[0].Summary != "design" || searches[0].ParentID != "" {
+		t.Fatalf("searches %+v, want the family root by its phrase then the document's summary", searches)
+	}
 	arts := e.yt.Articles(artProject)
 	if len(arts) != 2 {
 		t.Fatalf("articles %+v, want the family root and the document", arts)
 	}
 	root := arts[0]
-	if root.Summary != "design" || root.ParentID != "" || !strings.Contains(root.Content, ytwrite.FamilyRootMarker("design")) {
+	if root.Summary != "design" || root.ParentID != "" || root.Content != ytwrite.FamilyRootContent("design") {
 		t.Fatalf("family root %+v", root)
 	}
 	if doc := docArticleOf(t, e); doc.ParentID != root.ID {
@@ -61,7 +66,7 @@ func TestArticleCreateCreatesTheFamilyRootFirst(t *testing.T) {
 
 func TestArticleCreateAdoptsTheExistingFamilyRoot(t *testing.T) {
 	e := newArticleEnv(t)
-	root := e.yt.InjectArticle(artProject, "design", "design documents\n\n"+ytwrite.FamilyRootMarker("design"))
+	root := e.yt.InjectArticle(artProject, "design", ytwrite.FamilyRootContent("design"))
 	req := articleReq()
 	req.ParentFamily = "design"
 	op := prepareWith(t, e, req)
@@ -78,8 +83,8 @@ func TestArticleCreateAdoptsTheExistingFamilyRoot(t *testing.T) {
 // Two roots carrying the family's marker are ambiguous: nothing is sent.
 func TestArticleCreateTwoFamilyRootsRefused(t *testing.T) {
 	e := newArticleEnv(t)
-	e.yt.InjectArticle(artProject, "design", ytwrite.FamilyRootMarker("design"))
-	e.yt.InjectArticle(artProject, "design", "again\n\n"+ytwrite.FamilyRootMarker("design"))
+	e.yt.InjectArticle(artProject, "design", ytwrite.FamilyRootContent("design"))
+	e.yt.InjectArticle(artProject, "design", ytwrite.FamilyRootContent("design")+"\n\nedited by hand")
 	req := articleReq()
 	req.ParentFamily = "design"
 	op := prepareWith(t, e, req)
