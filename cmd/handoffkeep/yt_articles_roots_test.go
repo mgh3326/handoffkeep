@@ -391,3 +391,37 @@ func TestYTRootsMergeApplyRerunConverges(t *testing.T) {
 		}
 	}
 }
+
+// A delete failure stops the family: the next duplicate is not processed,
+// and the failing duplicate is counted as skipped once (hk 4806 review).
+func TestYTRootsMergeApplyDeleteFailureStopsTheFamily(t *testing.T) {
+	f := newFakeRootsYT(
+		rootOf("0-30", "3-1", "briefs", 1000),
+		rootOf("0-30", "3-2", "briefs", 2000),
+		rootOf("0-30", "3-3", "briefs", 3000),
+		kidOf("0-30", "3-90", "3-2", "one"),
+		kidOf("0-30", "3-91", "3-3", "two"),
+	)
+	f.failDelete["3-2"] = errors.New("nope")
+	report := ytRootsMergeApply(context.Background(), f, mustRootsMergePlan(t, f, fakeFamilyRoots{}))
+	if len(f.writes) != 1 || f.writes[0] != "move 3-90->3-1" {
+		t.Fatalf("writes %v, want the first duplicate's move only", f.writes)
+	}
+	if got := (ytRootsMergeCounts{Moved: 1, Skipped: 2}); report.Counts != got {
+		t.Fatalf("counts %+v, want %+v", report.Counts, got)
+	}
+	if report.failedCount() != 1 {
+		t.Fatalf("failures %d, want 1", report.failedCount())
+	}
+	for _, dup := range report.Families[0].Duplicates {
+		if dup.Delete || dup.Skip != ytSkipFamilyStopped {
+			t.Fatalf("duplicate %+v, want family_stopped", dup)
+		}
+	}
+	if _, ok := f.articles["3-3"]; !ok {
+		t.Fatal("the second duplicate was deleted after the family stopped")
+	}
+	if got := f.articles["3-91"].ParentArticle.ID; got != "3-3" {
+		t.Fatalf("child 3-91 moved to %s after the family stopped", got)
+	}
+}
