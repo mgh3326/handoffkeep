@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -482,6 +483,32 @@ func FamilyRootContent(family string) string {
 	return FamilyRootPhrase(family) + ".\n\n" + FamilyRootMarker(family)
 }
 
+// familyRoots lists the project's roots of one family: the articles whose
+// summary is the family and whose content carries the family marker. Both
+// queries are narrow — neither is the bare family word, which every document of
+// the family also carries (hk 4784) — and it asks both, because neither alone
+// sees every root: the sentence finds the roots hk wrote, and the marker finds
+// one an operator edited (its sentence gone, the marker kept), the marker being
+// the root's identity. So no marker-carrying root is missed and no create makes
+// a second one beside it (review of PR #441). A search that cannot prove
+// completeness is an error, never a create.
+func familyRoots(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreatePayload) ([]RemoteArticle, error) {
+	marker := FamilyRootMarker(p.ParentFamily)
+	var roots []RemoteArticle
+	for _, query := range []string{FamilyRootPhrase(p.ParentFamily), marker} {
+		hits, err := ar.FindArticles(ctx, ArticleSearch{ProjectShort: p.YTProjectShort, ProjectID: op.YTTargetID, Query: query, Summary: p.ParentFamily})
+		if err != nil {
+			return nil, fmt.Errorf("family root %q: %w", p.ParentFamily, err)
+		}
+		for _, h := range hits {
+			if strings.Contains(h.Content, marker) && !slices.ContainsFunc(roots, func(r RemoteArticle) bool { return r.ID == h.ID }) {
+				roots = append(roots, h)
+			}
+		}
+	}
+	return roots, nil
+}
+
 // articleParent is the article a document's article goes under: the amended
 // policy article when the payload names one, else the family root, else ""
 // for a payload that names neither. create makes a missing family root; with
@@ -494,16 +521,9 @@ func articleParent(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreate
 		return "", true, nil
 	}
 	marker := FamilyRootMarker(p.ParentFamily)
-	hits, err := ar.FindArticles(ctx, ArticleSearch{ProjectShort: p.YTProjectShort, ProjectID: op.YTTargetID,
-		Query: FamilyRootPhrase(p.ParentFamily), Summary: p.ParentFamily})
+	roots, err := familyRoots(ctx, ar, op, p)
 	if err != nil {
-		return "", false, fmt.Errorf("family root %q: %w", p.ParentFamily, err)
-	}
-	var roots []RemoteArticle
-	for _, h := range hits {
-		if strings.Contains(h.Content, marker) {
-			roots = append(roots, h)
-		}
+		return "", false, err
 	}
 	switch {
 	case len(roots) == 1:

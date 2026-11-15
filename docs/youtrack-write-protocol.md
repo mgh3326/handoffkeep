@@ -2054,15 +2054,18 @@ top-level.
 - A family root is a top-level article: summary the family, content
   `Family root for <family> documents.` and the marker
   `<!-- hk-family:<family> -->` (`ytwrite.FamilyRootContent`). Send finds it
-  by its own sentence, not by the bare family word: the search phrase is
-  `ytwrite.FamilyRootPhrase` ("Family root for <family> documents"), and the
-  hits are kept by exact summary and the marker (hk 4784). A family word is
-  what every document of the family carries, so in a project of ~1 200
-  articles the word search filled its 100-hit page, could never prove
-  completeness, and left the create `not_sent` on every attempt. None, and it
-  creates one before the document; one, it is the parent; two or more, the op
-  is `rejected / ambiguous_issue` (no POST). Root creation is not an op, so no
-  op records it. Residual risk: two first creates of one family in one project,
+  with two narrow searches, never with the bare family word: the root's own
+  sentence (`ytwrite.FamilyRootPhrase`) and the family marker, keeping the
+  hits by exact summary and the marker (hk 4784). A family word is what every
+  document of the family carries, so in a project of ~1 200 articles the word
+  search filled its 100-hit page, could never prove completeness, and left the
+  create `not_sent` on every attempt. Both searches are needed: the sentence
+  finds the roots hk wrote, the marker finds a root an operator edited (its
+  sentence gone, the marker kept), which is still the root by identity, so no
+  create makes a second root beside one it cannot see. None, and it creates
+  one before the document; one, it is the parent; two or more, the op is
+  `rejected / ambiguous_issue` (no POST). Root creation is not an op, so no op
+  records it. Residual risk: two first creates of one family in one project,
   running at once, can make two roots; the next create of that family then
   refuses `ambiguous_issue` until an operator merges them. A root written by an
   earlier release carries the same sentence, so the lookup still finds it.
