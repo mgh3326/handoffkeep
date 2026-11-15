@@ -3881,6 +3881,44 @@ func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limi
 	}
 	return out, rows.Err()
 }
+
+// ListTaskAttachmentsByRefs returns the attachments of every task in ids in
+// one statement, at most perRef rows per task, ordered by created_at then task
+// id then sha256. The dots inbox reads a page of requests plus the tasks their
+// bodies name, a set of refs ListAttachments cannot filter, so this is the one
+// query that page makes. Rows carry RefKind "task" and RefID as the canonical
+// task id.
+func (s *Store) ListTaskAttachmentsByRefs(ctx context.Context, ids []int64, perRef int) ([]Attachment, error) {
+	out := []Attachment{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	refs := make([]string, len(ids))
+	for i, id := range ids {
+		if id < 1 {
+			return nil, errors.New("invalid task ref id")
+		}
+		refs[i] = strconv.FormatInt(id, 10)
+	}
+	if perRef < 1 {
+		perRef = 100
+	}
+	// ref_id is a canonical decimal of a requested id, so the bigint sort key
+	// is always valid; the rank bounds the rows one task can contribute.
+	rows, e := s.pool.Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,ref_id FROM (SELECT a.sha256,a.size_bytes,a.mime,a.original_name,a.created_by,a.created_at,r.ref_id,ROW_NUMBER() OVER (PARTITION BY r.ref_id ORDER BY a.created_at,a.sha256) AS rn FROM attachments a JOIN attachment_refs r ON r.sha256=a.sha256 WHERE r.ref_kind='task' AND r.ref_id = ANY($1::text[])) ranked WHERE rn <= $2 ORDER BY created_at,ref_id::bigint,sha256`, refs, perRef)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	for rows.Next() {
+		x := Attachment{RefKind: "task"}
+		if e = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.RefID); e != nil {
+			return nil, e
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
 func (s *Store) AttachmentUsage(ctx context.Context) (AttachmentUsage, error) {
 	x := AttachmentUsage{Month: monthNow()}
 	e := s.pool.QueryRow(ctx, `SELECT puts,gets,bytes_added FROM attachment_usage WHERE month=$1`, x.Month).Scan(&x.Puts, &x.Gets, &x.BytesAdded)

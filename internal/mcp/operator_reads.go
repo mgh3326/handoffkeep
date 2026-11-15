@@ -571,8 +571,9 @@ func (o operatorTools) taskGetView(ctx context.Context, id int64) (map[string]an
 	}, nil
 }
 
-// attachmentView is one attachment bound to a task through its body document.
-// The private object URL is not served here; attachment_get_url mints it.
+// attachmentView is one attachment listed on a task, bound through its body
+// document or its task ref. The private object URL is not served here;
+// attachment_get_url mints it.
 type attachmentView struct {
 	SHA256       string    `json:"sha256"`
 	SizeBytes    int64     `json:"size_bytes"`
