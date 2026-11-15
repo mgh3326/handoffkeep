@@ -5,7 +5,7 @@
 # atomic mv) really run against files. Connectivity and ncp's healthz are the
 # only things faked.
 #
-#   bash deploy/hk-cli-sync/test-hk-cli-sync.sh
+#   bash deploy/test-hk-cli-sync.sh
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -179,7 +179,7 @@ check "local binary executable" test -x "$FIX/home/.local/bin/handoffkeep"
 check "m1b binary installed" has "$FIX/remote/m1b/.local/bin/handoffkeep" "release=$TAG"
 check "m1b binary executable" test -x "$FIX/remote/m1b/.local/bin/handoffkeep"
 check "pi old binary kept as bak-pre" has "$FIX/remote/pi/.local/bin/handoffkeep.bak-pre-$TAG" "echo old"
-check "no .new left behind" test ! -e "$FIX/remote/m1b/.local/bin/handoffkeep.new"
+check "no staging file left" test -z "$(find "$FIX/remote/m1b/.local/bin" -name "handoffkeep.stage*")"
 
 echo "== dry-run writes nothing"
 setup
@@ -275,7 +275,7 @@ check "exit 8" rc_is 8
 check "m1b failed" has "$FIX/out" "FAIL m1b sha_mismatch"
 check "pi still installed" has "$FIX/out" "CLI pi ok"
 check "m1b binary not installed" test ! -e "$FIX/remote/m1b/.local/bin/handoffkeep"
-check "m1b .new removed" test ! -e "$FIX/remote/m1b/.local/bin/handoffkeep.new"
+check "m1b staging file removed" test -z "$(find "$FIX/remote/m1b/.local/bin" -name "handoffkeep.stage*")"
 check "summary names failure" has "$FIX/out" "failed=m1b"
 
 echo "== backup failure stops before the swap: the old binary stays in place"
@@ -289,8 +289,37 @@ check "pi failed" has "$FIX/out" "FAIL pi install_failed"
 check "m1b still installed" has "$FIX/out" "CLI m1b ok"
 check "no backup written" test ! -e "$FIX/remote/pi/.local/bin/handoffkeep.bak-pre-$TAG"
 check "old binary not replaced" test -f "$FIX/remote/pi/.local/bin/handoffkeep"
-check "pi .new removed" test ! -e "$FIX/remote/pi/.local/bin/handoffkeep.new"
+check "pi staging file removed" test -z "$(find "$FIX/remote/pi/.local/bin" -name "handoffkeep.stage*")"
 chmod 644 "$FIX/remote/pi/.local/bin/handoffkeep"
+
+echo "== refusal: SHA256SUMS omits an asset a host needs"
+setup
+grep -v linux_arm64 "$FIX/release/SHA256SUMS" >"$FIX/release/SHA256SUMS.new" && mv "$FIX/release/SHA256SUMS.new" "$FIX/release/SHA256SUMS"
+run "$TAG"
+check "exit 5" rc_is 5
+check "no scp" lacks "$FIX/calls" "scp "
+
+echo "== refusal: an asset does not match its manifest entry"
+setup
+printf 'corrupted' >>"$FIX/release/handoffkeep_linux_arm64"
+run "$TAG"
+check "exit 7" rc_is 7
+check "no scp" lacks "$FIX/calls" "scp "
+
+echo "== post-install check: a CLI that does not report the tag is restored"
+setup
+version_script v0.0.299 >"$FIX/release/handoffkeep_linux_arm64"
+chmod 644 "$FIX/release/handoffkeep_linux_arm64"
+sums "$FIX/release"
+mkdir -p "$FIX/remote/pi/.local/bin"
+printf '#!/usr/bin/env bash\necho old\n' >"$FIX/remote/pi/.local/bin/handoffkeep"
+chmod 755 "$FIX/remote/pi/.local/bin/handoffkeep"
+run "$TAG"
+check "exit 8" rc_is 8
+check "pi version_mismatch" has "$FIX/out" "FAIL pi version_mismatch"
+check "pi old CLI restored" has "$FIX/remote/pi/.local/bin/handoffkeep" "echo old"
+check "pi backup kept" test -f "$FIX/remote/pi/.local/bin/handoffkeep.bak-pre-$TAG"
+check "m1b still installed" has "$FIX/out" "CLI m1b ok"
 
 echo "== usage errors"
 setup
