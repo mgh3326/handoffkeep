@@ -392,8 +392,23 @@ func TestAttachmentReadTruncationLineOnATransportWithoutSize(t *testing.T) {
 	large := strings.Repeat("y", attachmentReadTextProbeMaxBytes+attachmentReadTextMaxBytes+4096)
 	sha = storeRow(db, objs, "large.txt", "text/plain", []byte(large))
 	note = resultText(readTool(t, cs, sha))
-	if !strings.Contains(note, "larger than") {
+	if !strings.Contains(note, "at least") {
 		t.Fatalf("note %q does not mark the size as a lower bound", tail(note))
+	}
+}
+
+// A body that ends exactly at the probe bound was read whole: the line must
+// name the exact size rather than call it a lower bound.
+func TestAttachmentReadNamesTheExactSizeAtTheProbeBoundary(t *testing.T) {
+	db, objs, m := newAttachmentManager(t)
+	cs := connectTestServer(t, New(noSizeBackend{attachmentBackend{spyBackend: &spyBackend{}, m: m}}, "mcp-test"))
+	// The first read takes the cap plus one byte, and the probe reaches one
+	// byte past its bound before it can tell the stream ended there.
+	body := strings.Repeat("z", attachmentReadTextMaxBytes+1+attachmentReadTextProbeMaxBytes+1)
+	sha := storeRow(db, objs, "boundary.txt", "text/plain", []byte(body))
+	note := resultText(readTool(t, cs, sha))
+	if want := fmt.Sprintf("of %d bytes", len(body)); !strings.Contains(note, want) {
+		t.Fatalf("note %q does not name the exact size (%s)", tail(note), want)
 	}
 }
 
