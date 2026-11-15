@@ -7,7 +7,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/attachments"
 )
 
 // ConsoleCSP is applied to the React fleet page and every /ui/api/* response.
@@ -17,8 +20,32 @@ const ConsoleCSP = "default-src 'self'; connect-src 'self'; script-src 'self'; s
 const fleetModelUncollected = "미수집"
 const fleetFailCacheTTL = 2 * time.Second
 
-func setConsoleCSP(w http.ResponseWriter) {
-	w.Header().Set("Content-Security-Policy", ConsoleCSP)
+// consoleCSP is ConsoleCSP, plus the attachment object store's origin when
+// mediaOrigin is set. /ui/files answers a 302 to a presigned URL on that
+// origin, and a browser checks both hops of a redirect against the policy, so
+// without it every inline image and video the task page shows is blocked.
+func consoleCSP(mediaOrigin string) string {
+	if mediaOrigin == "" {
+		return ConsoleCSP
+	}
+	return strings.Replace(ConsoleCSP, "img-src 'self' data:;", "img-src 'self' data: "+mediaOrigin+"; media-src 'self' "+mediaOrigin+";", 1)
+}
+
+// mediaOrigin is the scheme and host of the configured attachment endpoint, or
+// "" when attachments are off or the endpoint does not parse.
+func mediaOrigin(m *attachments.Manager) string {
+	if m == nil || m.Config.Endpoint == "" {
+		return ""
+	}
+	u, err := url.Parse(m.Config.Endpoint)
+	if err != nil || u.Host == "" || u.Scheme != "http" && u.Scheme != "https" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+func (h *Handler) setConsoleCSP(w http.ResponseWriter) {
+	w.Header().Set("Content-Security-Policy", h.csp)
 }
 
 type fleetResponse struct {
