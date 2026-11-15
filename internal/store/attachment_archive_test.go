@@ -208,6 +208,13 @@ func TestAttachmentArchiveRecordChecksAndIdempotency(t *testing.T) {
 		t.Fatalf("stored row %+v", row)
 	}
 
+	// An archived blob takes no new ref. The put takes the same row lock the
+	// archive record takes, so a ref to open work either lands before the
+	// candidate check or is refused here — it can never commit behind it.
+	if _, _, err := s.PutAttachment(t.Context(), Attachment{SHA256: sha, SizeBytes: 10, MIME: "text/plain", OriginalName: "1.txt", CreatedBy: "node", RefKind: "task", RefID: archiveTaskRef(openTask)}, 1<<40, 1<<40); !errors.Is(err, ErrAttachmentArchived) {
+		t.Fatalf("put on an archived blob err=%v, want ErrAttachmentArchived", err)
+	}
+
 	if err := s.MarkAttachmentHotDeleted(t.Context(), sha, now.Add(2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}

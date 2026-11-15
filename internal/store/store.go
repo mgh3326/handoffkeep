@@ -3744,10 +3744,12 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 		return x, false, e
 	}
 	var present bool
-	e = tx.QueryRow(ctx, `SELECT true FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&present)
+	var archivedAt *time.Time
+	e = tx.QueryRow(ctx, `SELECT archived_at FROM attachments WHERE sha256=$1 FOR UPDATE`, x.SHA256).Scan(&archivedAt)
 	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
 		return x, false, e
 	}
+	present = e == nil
 	if !present {
 		if total+x.SizeBytes > storageCap {
 			return x, false, ErrAttachmentStorageCap
@@ -3763,6 +3765,14 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 			return x, false, e
 		}
 	} else {
+		// The row lock above is what orders a new ref against an archive
+		// record: the archive's candidate check takes the same lock, so it
+		// either sees this ref or this put sees archived_at and is refused.
+		// Without it a ref to an open task could commit after the archive
+		// query and leave a deleted hot copy referenced by live work.
+		if archivedAt != nil {
+			return x, false, ErrAttachmentArchived
+		}
 		if e = tx.QueryRow(ctx, `SELECT size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); e != nil {
 			return x, false, e
 		}
@@ -3861,10 +3871,12 @@ func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, 
 		return x, false, e
 	}
 	var present bool
-	e = tx.QueryRow(ctx, `SELECT true FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&present)
+	var archivedAt *time.Time
+	e = tx.QueryRow(ctx, `SELECT archived_at FROM attachments WHERE sha256=$1 FOR UPDATE`, x.SHA256).Scan(&archivedAt)
 	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
 		return x, false, e
 	}
+	present = e == nil
 	if !present {
 		if total+x.SizeBytes > storageCap {
 			return x, false, ErrAttachmentStorageCap
@@ -3880,6 +3892,14 @@ func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, 
 			return x, false, e
 		}
 	} else {
+		// The row lock above is what orders a new ref against an archive
+		// record: the archive's candidate check takes the same lock, so it
+		// either sees this ref or this put sees archived_at and is refused.
+		// Without it a ref to an open task could commit after the archive
+		// query and leave a deleted hot copy referenced by live work.
+		if archivedAt != nil {
+			return x, false, ErrAttachmentArchived
+		}
 		if e = tx.QueryRow(ctx, `SELECT size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); e != nil {
 			return x, false, e
 		}
@@ -3896,6 +3916,11 @@ func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, 
 }
 
 var ErrAttachmentStorageCap = errors.New("attachment_storage_cap")
+
+// ErrAttachmentArchived means the blob's hot copy was archived: its ref set is
+// closed to new puts, so an archived blob cannot gain a reference to open
+// work. Its text is the wire code.
+var ErrAttachmentArchived = errors.New("attachment_archived")
 var ErrAttachmentPutCap = errors.New("attachment_put_cap")
 
 func (s *Store) RecordAttachmentGet(ctx context.Context, sha string, getCap int64) error {

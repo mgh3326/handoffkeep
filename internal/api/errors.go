@@ -61,6 +61,7 @@ var errorRules = []errorRule{
 	{store.ErrSpawnInvalid, http.StatusBadRequest, "invalid_context", true},
 	{attachments.ErrDisabled, http.StatusServiceUnavailable, "attachments_disabled", false},
 	{attachments.ErrArchiveOff, http.StatusConflict, "attachment_archive_off", false},
+	{store.ErrAttachmentArchived, http.StatusConflict, "attachment_archived", false},
 	{store.ErrAttachmentNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrAttachmentNotArchivable, http.StatusConflict, "attachment_not_archivable", false},
 	{store.ErrAttachmentArchiveMismatch, http.StatusConflict, "attachment_archive_mismatch", false},
