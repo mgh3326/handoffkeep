@@ -132,6 +132,10 @@
   --hk-sidebar-width: 216px;
   --hk-properties-width: 248px;
   --hk-reading-width: 660px;
+  /* In-place attachment media (hk 4787): the bounded thumbnail height, and the
+   * taller bound an item may take in the compare view. */
+  --hk-media-thumb-height: 160px;
+  --hk-media-compare-height: 480px;
 }
 
 /* Derived light palette. Same roles, darker state ink, lime action retained. */

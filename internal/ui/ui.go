@@ -71,6 +71,9 @@ type Handler struct {
 	// preloads caches shellPreloads: the embedded bundle never changes.
 	preloadOnce sync.Once
 	preloads    []string
+	// csp is ConsoleCSP, plus the attachment object store origin that inline
+	// media redirects to (see consoleCSP).
+	csp string
 }
 
 // readBuildInfo is a variable so tests can stamp or unstamp build info.
@@ -121,6 +124,7 @@ func New(config Config) (*Handler, error) {
 		static:       static,
 		csrfKey:      csrfKey,
 		assetVersion: vcsRevision(),
+		csp:          consoleCSP(mediaOrigin(config.Attachments)),
 	}
 	if config.TaskIssues != nil {
 		h.ytTasks = newYTTaskSource(config.TaskIssues, config.Store, config.TaskIssuesTenant, config.TaskIssuesTTL)
@@ -151,7 +155,7 @@ func (h *Handler) assetURL(p string) string {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Pattern = routePattern(r.URL.Path)
 	if r.URL.Path == "/ui" || r.URL.Path == "/ui/work" || r.URL.Path == "/ui/queue" || r.URL.Path == "/ui/deploys" || r.URL.Path == "/ui/home" || r.URL.Path == "/ui/decisions" || r.URL.Path == "/ui/work-status" || strings.HasPrefix(r.URL.Path, "/ui/decisions/") || strings.HasPrefix(r.URL.Path, "/ui/doc/") || strings.HasPrefix(r.URL.Path, "/ui/tasks/") || strings.HasPrefix(r.URL.Path, "/ui/files/") || strings.HasPrefix(r.URL.Path, "/ui/api/") {
-		setConsoleCSP(w)
+		h.setConsoleCSP(w)
 	}
 	identity, authenticated := h.access.AuthenticatedIdentity(r)
 	if !authenticated {
