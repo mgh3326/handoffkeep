@@ -374,8 +374,10 @@ type TaskStateEntry struct {
 
 // TaskStatesSnapshot is GET /v1/tasks/states/snapshot: the tasks asked for in
 // request order after de-duplication, the ids that name no task, and the
-// reading transaction's now(). Every requested id appears exactly once, in
-// Tasks or in Missing, so a caller can tell "missing" from "not asked".
+// reading transaction's start time, AsOf. The rows are one snapshot, at least
+// as new as AsOf; AsOf does not date it. Every requested id appears exactly
+// once, in Tasks or in Missing, so a caller can tell "missing" from "not
+// asked".
 type TaskStatesSnapshot struct {
 	AsOf    time.Time        `json:"as_of"`
 	Tasks   []TaskStateEntry `json:"tasks"`
@@ -421,8 +423,10 @@ func (s *Store) TaskStatesSnapshot(ctx context.Context, ids []int64, until strin
 		return out, err
 	}
 	defer tx.Rollback(ctx)
-	// now() is the transaction's start time, so as_of and every row below
-	// come from one snapshot. pgx returns the value in the local zone.
+	// as_of is the transaction's start time: now() is fixed at BEGIN, while
+	// the MVCC snapshot belongs to the first statement after it. The snapshot
+	// is therefore at least as new as as_of, never older, and every row below
+	// comes from that one snapshot. pgx returns the value in the local zone.
 	if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&out.AsOf); err != nil {
 		return out, err
 	}

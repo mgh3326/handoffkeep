@@ -73,8 +73,10 @@ func (s Server) taskStates(w http.ResponseWriter, r *http.Request) {
 
 // taskStatesSnapshot answers
 // GET /v1/tasks/states/snapshot?ids=1,2,3[&until=merged|deployed] with the
-// tasks that exist, the ids that name no task, and the reading transaction's
-// now(), all from one snapshot. Every requested id appears exactly once.
+// tasks that exist, the ids that name no task, and as_of, the reading
+// transaction's start time. The tasks, their blockers and their spawn records
+// are one snapshot, at least as new as as_of. Every requested id appears
+// exactly once.
 func (s Server) taskStatesSnapshot(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
