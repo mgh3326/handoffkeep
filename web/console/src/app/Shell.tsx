@@ -14,7 +14,7 @@ import { applyTheme, loadTheme } from "../shared/theme";
 import { Chip } from "../shared/ui/Chip";
 import { OriginalPreference } from "../shared/translation";
 
-export type NavKey = "home" | "work" | "decisions" | "deploys" | "work-status";
+export type NavKey = "home" | "work" | "decisions" | "deploys" | "work-status" | "fleet-status";
 
 /** Navigation entries are data: a new page is one row here. */
 export const destinations: { key: NavKey; label: string; href: string }[] = [
@@ -23,6 +23,7 @@ export const destinations: { key: NavKey; label: string; href: string }[] = [
   { key: "work", label: "작업", href: "/ui/work" },
   { key: "work-status", label: "작업 현황", href: "/ui/work-status" },
   { key: "deploys", label: "배포", href: "/ui/deploys" },
+  { key: "fleet-status", label: "플릿 현황", href: "/ui/fleet-status" },
 ];
 
 /** The spoken form of the decision counter, also the live announcement. */

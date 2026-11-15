@@ -31,3 +31,19 @@ export function formatMinuteKST(iso: string): string | null {
   const d = new Date(t + 9 * 60 * 60 * 1000);
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} KST`;
 }
+
+/** Compact Korean age ("45초", "12분", "3시간 5분", "2일"); negatives clamp to 0. */
+export function formatAge(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 60) return `${s}초`;
+  const minutes = Math.floor(s / 60);
+  if (minutes < 60) return `${minutes}분`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    const rem = minutes % 60;
+    return rem > 0 ? `${hours}시간 ${rem}분` : `${hours}시간`;
+  }
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  return remHours > 0 ? `${days}일 ${remHours}시간` : `${days}일`;
+}

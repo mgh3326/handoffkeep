@@ -107,6 +107,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 		h.deployPending(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/work-status":
 		h.workStatus(w, r, identity)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/fleet-status":
+		h.fleetStatusAPI(w, r, identity)
 	case r.Method == http.MethodPost && taskPriorityPathRE.MatchString(r.URL.Path):
 		h.taskPriority(w, r, identity)
 	case r.Method == http.MethodPost && taskLifecyclePathRE.MatchString(r.URL.Path):

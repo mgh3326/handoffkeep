@@ -1,0 +1,266 @@
+.fs-root {
+  max-width: 1100px;
+  padding: var(--hk-space-4);
+  color: var(--hk-text-primary);
+  font-family: var(--hk-font-ui);
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-6);
+}
+
+.fs-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--hk-space-2);
+}
+
+.fs-title {
+  margin: 0;
+  font-size: var(--hk-type-page);
+  line-height: var(--hk-line-page);
+}
+
+.fs-time {
+  font-size: var(--hk-type-meta);
+  color: var(--hk-text-muted);
+}
+
+.fs-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-3);
+}
+
+.fs-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--hk-space-2);
+}
+
+.fs-section-title {
+  font-size: var(--hk-type-section);
+  margin: 0;
+  color: var(--hk-text-heading);
+}
+
+.fs-section-note {
+  font-size: var(--hk-type-meta);
+  color: var(--hk-text-muted);
+}
+
+.fs-empty {
+  padding: var(--hk-space-6);
+  text-align: center;
+  color: var(--hk-text-muted);
+  font-size: var(--hk-type-meta);
+}
+
+.fs-card {
+  background: var(--hk-surface-1);
+  border: var(--hk-border-width) solid var(--hk-border-subtle);
+  border-radius: var(--hk-radius-card);
+  padding: var(--hk-space-3) var(--hk-space-4);
+}
+
+/* Hosts: one card per host, wrapping to a single column on a phone. */
+.fs-host-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: var(--hk-space-3);
+}
+
+.fs-host {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-2);
+}
+
+.fs-host-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--hk-space-2);
+}
+
+.fs-host-name {
+  font-weight: var(--hk-weight-strong);
+  color: var(--hk-text-heading);
+  margin-right: auto;
+}
+
+.fs-host-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--hk-space-3);
+  font-size: var(--hk-type-meta);
+  color: var(--hk-text-secondary);
+}
+
+.fs-host-version {
+  color: var(--hk-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Quota: one group per host, one card per (host, account) reading. */
+.fs-quota-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-2);
+}
+
+.fs-group-title {
+  margin: var(--hk-space-2) 0 0;
+  font-size: var(--hk-type-meta);
+  font-weight: var(--hk-weight-medium);
+  color: var(--hk-text-secondary);
+}
+
+.fs-quota {
+  background: var(--hk-surface-1);
+  border: var(--hk-border-width) solid var(--hk-border-subtle);
+  border-left: var(--hk-space-1) solid transparent;
+  border-radius: var(--hk-radius-card);
+  padding: var(--hk-space-3) var(--hk-space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-2);
+}
+
+/* A stale reading keeps its data but is visibly marked: amber edge + the
+ * "오래됨" chip in the head. */
+.fs-quota[data-stale] {
+  border-left-color: var(--hk-warning);
+}
+
+.fs-quota-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--hk-space-2);
+}
+
+.fs-pool {
+  font-weight: var(--hk-weight-strong);
+  color: var(--hk-text-heading);
+}
+
+.fs-account {
+  color: var(--hk-text-secondary);
+}
+
+.fs-quota-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hk-space-1);
+  margin-left: auto;
+}
+
+.fs-windows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hk-space-1) var(--hk-space-4);
+}
+
+.fs-window {
+  display: flex;
+  align-items: baseline;
+  gap: var(--hk-space-2);
+  font-size: var(--hk-type-row);
+}
+
+.fs-window-name {
+  color: var(--hk-text-muted);
+}
+
+.fs-window-pct {
+  color: var(--hk-text-primary);
+}
+
+.fs-window-reset {
+  font-size: var(--hk-type-meta);
+  color: var(--hk-text-muted);
+}
+
+.fs-quota-meta {
+  font-size: var(--hk-type-meta);
+  color: var(--hk-text-muted);
+}
+
+/* Plan: grade | outcome | chosen seat detail, one row per grade. */
+.fs-plan-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-1);
+}
+
+.fs-plan {
+  display: grid;
+  grid-template-columns: 3rem auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--hk-space-3);
+  padding: var(--hk-space-2) var(--hk-space-3);
+  background: var(--hk-surface-1);
+  border: var(--hk-border-width) solid var(--hk-border-subtle);
+  border-radius: var(--hk-radius-card);
+}
+
+.fs-grade {
+  font-size: var(--hk-type-section);
+  font-weight: var(--hk-weight-strong);
+  color: var(--hk-text-heading);
+}
+
+.fs-plan-detail {
+  min-width: 0;
+  font-size: var(--hk-type-row);
+  color: var(--hk-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.fs-plan-none {
+  color: var(--hk-text-muted);
+}
+
+/* Phone: plan rows stack grade+outcome over the detail line instead of
+ * squeezing three columns; cards already collapse via auto-fit grids. */
+@media (max-width: 767.98px) {
+  .fs-root {
+    padding: var(--hk-space-3);
+    gap: var(--hk-space-5);
+  }
+
+  .fs-plan {
+    grid-template-columns: auto auto;
+    grid-template-areas:
+      "grade outcome"
+      "detail detail";
+    row-gap: var(--hk-space-1);
+  }
+
+  .fs-grade {
+    grid-area: grade;
+  }
+
+  .fs-plan > .hk-chip {
+    grid-area: outcome;
+    justify-self: end;
+  }
+
+  .fs-plan-detail {
+    grid-area: detail;
+  }
+
+  .fs-quota-chips {
+    margin-left: 0;
+    width: 100%;
+  }
+}

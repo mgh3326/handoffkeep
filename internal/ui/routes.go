@@ -7,8 +7,8 @@ import "strings"
 func routePattern(path string) string {
 	switch path {
 	case "/ui", "/ui/queue", "/ui/decisions", "/ui/work", "/ui/deploys", "/ui/home",
-		"/ui/work-status",
-		"/ui/api/fleet", "/ui/api/glance", "/ui/api/board/tasks",
+		"/ui/work-status", "/ui/fleet-status",
+		"/ui/api/fleet", "/ui/api/fleet-status", "/ui/api/glance", "/ui/api/board/tasks",
 		"/ui/api/attention", "/ui/api/decisions", "/ui/api/board/projects", "/ui/api/board/lanes",
 		"/ui/api/board/doc", "/ui/api/deploy-pending", "/ui/api/dispositions",
 		"/ui/dispositions/answer", "/ui/dispositions/accept-batch", "/ui/dispositions/renotify",
