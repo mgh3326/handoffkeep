@@ -19,7 +19,11 @@ type Article struct {
 	// ParentArticle is set on a child article (a split document's part);
 	// read by ListArticles and ReadArticle only.
 	ParentArticle *ArticleRef `json:"parentArticle,omitempty"`
-	Type          string      `json:"$type"`
+	// Created is the article's creation time in epoch milliseconds (0 when the
+	// field list did not ask for it). The family root lookup orders the roots
+	// by it (hk 4797).
+	Created int64  `json:"created,omitempty"`
+	Type    string `json:"$type"`
 }
 
 // ArticleRef names another article.

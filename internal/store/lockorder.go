@@ -165,6 +165,15 @@ package store
 //     CreateTaskComment takes the comment lock first and reaches the task row
 //     only through the foreign key's KEY SHARE, so it cannot wait on level 2
 //     and the pair cannot cycle.
+//   - The family lane (yt_family_roots.go, hk 4797): LockFamily takes a
+//     session advisory lock,
+//     pg_try_advisory_lock(hashtextextended('yt_family_root:<tenant>:<project>:<family>', 0)),
+//     on a connection of its own and releases it before the caller returns.
+//     It is never taken inside a transaction, and never while the caller holds
+//     a transaction's lock or a row: the article_create send holds it across
+//     its remote calls only. A process that dies drops its connection and with
+//     it the lock. RecordFamilyRoot and FamilyRoot are single statements over
+//     yt_family_roots and take no other lock.
 //
 //   - The YouTrack write op log (yt_write_ops.go, hk 3697). Prepare and Claim
 //     take one advisory lock, the entity lane lock

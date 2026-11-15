@@ -114,8 +114,10 @@ const (
 	// operator resolves it.
 	ReasonAdoptionUnconfirmed = "adoption_unconfirmed"
 	ReasonUnsupportedKind     = "unsupported_kind"
-	// ReasonNotSent: a read a kind makes before its write failed, so nothing
-	// was sent; the op is prepared again (NotSentError).
+	// ReasonNotSent: a step a kind makes inside Send before or instead of its
+	// write failed with nothing written — a read, a request that never left
+	// the host (DNS, dial), a store step the send needs (a family lane, a root
+	// record). The op is prepared again (NotSentError), never remote_unknown.
 	ReasonNotSent = "not_sent"
 	// Local refusals (slice b1a): the comment row commits and its op is
 	// rejected in the same transaction, before anything is sent.
@@ -333,6 +335,20 @@ type Ledger interface {
 	ListState(ctx context.Context, state State, limit int) ([]Op, error)
 	// MapGet reads one committed map row.
 	MapGet(ctx context.Context, entityKind, hkKey string) (MapRow, bool, error)
+	// LockFamily takes the store's lane for one family's root article (hk
+	// 4797) and returns the function that releases it. ok is false when
+	// another writer holds the lane: a caller that cannot take it leaves its
+	// op for a later pass rather than waiting. The lock spans the remote
+	// calls that find or create the root, so two documents of a new family
+	// cannot both create one.
+	LockFamily(ctx context.Context, tenant, projectID, family string) (unlock func(), ok bool, err error)
+	// FamilyRoot reads the root article id the store recorded for a family on
+	// one project (RecordFamilyRoot); found is false when none is recorded.
+	FamilyRoot(ctx context.Context, tenant, projectID, family string) (articleID string, found bool, err error)
+	// RecordFamilyRoot records the root hk resolved for a family on one
+	// project, so later documents of the family use it without a search. A
+	// recorded root is never overwritten.
+	RecordFamilyRoot(ctx context.Context, tenant, projectID, family, articleID string, opID int64) error
 	// RecordAdoption records that dispatch attempt attempts of op id adopted
 	// ytID and sent nothing (AdoptedError), before that adoption is applied
 	// (hk 4570). Only for an op still dispatched in that attempt, else

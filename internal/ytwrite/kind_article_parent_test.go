@@ -3,7 +3,6 @@ package ytwrite_test
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 	"github.com/mgh3326/handoffkeep/internal/ytwrite/ytwritetest"
@@ -100,19 +99,24 @@ func TestArticleCreateAdoptsAnEditedFamilyRoot(t *testing.T) {
 	}
 }
 
-// Two roots carrying the family's marker are ambiguous, whichever of them the
-// sentence search can see: nothing is sent.
-func TestArticleCreateTwoFamilyRootsRefused(t *testing.T) {
+// Two roots carrying the family's marker — a retry an earlier release made, or
+// a copy a person made — are not ambiguous: the OLDEST is the family's root,
+// every document goes under it, and nothing is created (hk 4797). The marker
+// search alone could see only one of them, the sentence search the other.
+func TestArticleCreateUsesTheOldestFamilyRoot(t *testing.T) {
 	e := newArticleEnv(t)
+	oldest := e.yt.InjectArticle(artProject, "design", "again\n\n"+ytwrite.FamilyRootMarker("design"))
 	e.yt.InjectArticle(artProject, "design", ytwrite.FamilyRootContent("design"))
-	e.yt.InjectArticle(artProject, "design", "again\n\n"+ytwrite.FamilyRootMarker("design"))
 	req := articleReq()
 	req.ParentFamily = "design"
 	op := prepareWith(t, e, req)
 	e.drive()
-	e.want(op.ID, ytwrite.StateRejected, ytwrite.ReasonAmbiguousIssue)
-	if e.yt.Calls() != 0 {
-		t.Fatalf("%d writes, want none", e.yt.Calls())
+	e.want(op.ID, ytwrite.StateApplied, "")
+	if e.yt.Calls() != 1 {
+		t.Fatalf("%d writes, want the document's one create only", e.yt.Calls())
+	}
+	if doc := docArticleOf(t, e); doc.ParentID != oldest {
+		t.Fatalf("document under %q, want the oldest root %q", doc.ParentID, oldest)
 	}
 }
 
@@ -156,25 +160,15 @@ func TestCheckArticleParents(t *testing.T) {
 	}
 }
 
-// A family-root create that commits but returns no id must not send the
-// document top-level: the op is not applied, and the next drive re-resolves
-// the root and creates the document under it.
-func TestArticleCreateRootWithoutIDIsNotCreatedTopLevel(t *testing.T) {
+// A family-root create that commits but returns no id is reconciled by the
+// marker search, never repeated: the root that POST made is the family's, the
+// document goes under it, and the op applies in the same dispatch (hk 4797).
+func TestArticleCreateRootWithoutIDIsReconciled(t *testing.T) {
 	e := newArticleEnv(t)
 	e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.NoID})
 	req := articleReq()
 	req.ParentFamily = "design"
 	op := prepareWith(t, e, req)
-	e.drive()
-	if got, err := e.ledger.ByID(context.Background(), op.ID); err != nil || got.State == ytwrite.StateApplied {
-		t.Fatalf("op %d = %s, %v: applied without a resolved family root", op.ID, got.State, err)
-	}
-	for _, a := range e.yt.Articles(artProject) {
-		if a.Summary == artSummary {
-			t.Fatalf("document created before its family root resolved: %+v", a)
-		}
-	}
-	e.clock.Advance(time.Hour)
 	e.drive()
 	e.want(op.ID, ytwrite.StateApplied, "")
 	var roots []ytwrite.RemoteArticle

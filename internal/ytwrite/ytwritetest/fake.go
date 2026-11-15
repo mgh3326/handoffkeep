@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -30,7 +32,16 @@ const (
 	ServerError
 	// Refuse answers a 4xx (Status) and does not commit.
 	Refuse
+	// DialFail answers a connection failure before the request was written
+	// (DNS, dial): nothing was sent, so the protocol may send again after a
+	// backoff (hk 4797).
+	DialFail
 )
+
+// errDial is DialFail's answer: the shape net/http returns when the connection
+// could not be made at all.
+var errDial = &url.Error{Op: "Post", URL: "https://youtrack.example/api/articles",
+	Err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}}
 
 // Fault is one queued failure; the fake takes one per create call
 // (CreateComment or CreateIssue), in order, and behaves normally once the
@@ -103,6 +114,10 @@ type FakeYouTrack struct {
 	// BeforeCreate runs at the start of every CreateComment, with the caller's
 	// context, before anything else. Tests use it to cancel a caller mid-call.
 	BeforeCreate func(ctx context.Context)
+	// BeforeArticleCreate runs at the start of every CreateArticle, with the
+	// caller's context and the article it would write, before the fake's lock:
+	// tests hold one create open while another writer runs.
+	BeforeArticleCreate func(ctx context.Context, in ytwrite.ArticleCreate)
 }
 
 type delayedComment struct{ issue, text string }
@@ -271,6 +286,8 @@ func (f *FakeYouTrack) CreateComment(ctx context.Context, issueID, text string) 
 		return "", &ytwrite.RemoteError{Status: st, Message: "server error"}
 	case Refuse:
 		return "", &ytwrite.RemoteError{Status: fault.Status, Message: "refused"}
+	case DialFail:
+		return "", errDial
 	}
 	return commit(), nil
 }
@@ -631,6 +648,8 @@ func (f *FakeYouTrack) createLocked(add func() string) (string, error) {
 		return "", &ytwrite.RemoteError{Status: st, Message: "server error"}
 	case Refuse:
 		return "", &ytwrite.RemoteError{Status: fault.Status, Message: "refused"}
+	case DialFail:
+		return "", errDial
 	case DelayCommit:
 		f.delayedCreates = append(f.delayedCreates, commit)
 		return "", context.DeadlineExceeded

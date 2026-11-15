@@ -31,6 +31,10 @@ type MemLedger struct {
 	maps   map[[2]string]ytwrite.MapRow
 	mapIDs map[[2]string]string // (entity kind, yt id) -> hk key
 	adopts map[int64]ytwrite.Adoption
+	// familyRoots is each family's recorded root article id (memFamilyKey),
+	// and familyLanes the family lanes a caller currently holds (hk 4797).
+	familyRoots map[string]string
+	familyLanes map[string]bool
 	// links is the issue_links record (memledger_links.go).
 	links memLinks
 }
@@ -38,11 +42,13 @@ type MemLedger struct {
 // NewMemLedger returns an empty ledger.
 func NewMemLedger() *MemLedger {
 	return &MemLedger{
-		ops:    map[int64]*ytwrite.Op{},
-		byKey:  map[[3]string]int64{},
-		maps:   map[[2]string]ytwrite.MapRow{},
-		mapIDs: map[[2]string]string{},
-		adopts: map[int64]ytwrite.Adoption{},
+		ops:         map[int64]*ytwrite.Op{},
+		byKey:       map[[3]string]int64{},
+		maps:        map[[2]string]ytwrite.MapRow{},
+		mapIDs:      map[[2]string]string{},
+		adopts:      map[int64]ytwrite.Adoption{},
+		familyRoots: map[string]string{},
+		familyLanes: map[string]bool{},
 	}
 }
 
@@ -335,4 +341,44 @@ func (l *MemLedger) Adoption(_ context.Context, id int64) (ytwrite.Adoption, boo
 	defer l.mu.Unlock()
 	a, ok := l.adopts[id]
 	return a, ok, nil
+}
+
+// LockFamily takes the family's lane without waiting: the second caller of a
+// new family is told the lane is taken and comes back in a later pass, exactly
+// as the Postgres ledger's advisory lock does (hk 4797).
+func (l *MemLedger) LockFamily(_ context.Context, tenant, projectID, family string) (func(), bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := memFamilyKey(tenant, projectID, family)
+	if l.familyLanes[key] {
+		return nil, false, nil
+	}
+	l.familyLanes[key] = true
+	return func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		delete(l.familyLanes, key)
+	}, true, nil
+}
+
+func (l *MemLedger) FamilyRoot(_ context.Context, tenant, projectID, family string) (string, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	id, ok := l.familyRoots[memFamilyKey(tenant, projectID, family)]
+	return id, ok, nil
+}
+
+func (l *MemLedger) RecordFamilyRoot(_ context.Context, tenant, projectID, family, articleID string, _ int64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := memFamilyKey(tenant, projectID, family)
+	if _, ok := l.familyRoots[key]; !ok {
+		l.familyRoots[key] = articleID
+	}
+	return nil
+}
+
+// memFamilyKey is one family on one project (yt_family_roots' primary key).
+func memFamilyKey(tenant, projectID, family string) string {
+	return tenant + "\x00" + projectID + "\x00" + family
 }
