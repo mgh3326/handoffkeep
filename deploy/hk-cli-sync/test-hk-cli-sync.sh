@@ -275,6 +275,20 @@ check "m1b binary not installed" test ! -e "$FIX/remote/m1b/.local/bin/handoffke
 check "m1b .new removed" test ! -e "$FIX/remote/m1b/.local/bin/handoffkeep.new"
 check "summary names failure" has "$FIX/out" "failed=m1b"
 
+echo "== backup failure stops before the swap: the old binary stays in place"
+setup
+mkdir -p "$FIX/remote/pi/.local/bin"
+printf '#!/usr/bin/env bash\necho old\n' >"$FIX/remote/pi/.local/bin/handoffkeep"
+chmod 000 "$FIX/remote/pi/.local/bin/handoffkeep"
+run "$TAG"
+check "exit 8" rc_is 8
+check "pi failed" has "$FIX/out" "FAIL pi install_failed"
+check "m1b still installed" has "$FIX/out" "CLI m1b ok"
+check "no backup written" test ! -e "$FIX/remote/pi/.local/bin/handoffkeep.bak-pre-$TAG"
+check "old binary not replaced" test -f "$FIX/remote/pi/.local/bin/handoffkeep"
+check "pi .new removed" test ! -e "$FIX/remote/pi/.local/bin/handoffkeep.new"
+chmod 644 "$FIX/remote/pi/.local/bin/handoffkeep"
+
 echo "== usage errors"
 setup
 run

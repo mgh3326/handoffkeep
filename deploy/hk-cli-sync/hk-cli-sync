@@ -214,7 +214,10 @@ install_host() {
 		return 0
 	fi
 
-	run_on "$host" "[ -e ~/.local/bin/handoffkeep ] && cp -p ~/.local/bin/handoffkeep ~/.local/bin/handoffkeep.bak-pre-$TAG; if command -v restorecon >/dev/null 2>&1; then restorecon ~/.local/bin/handoffkeep.new; fi; mv -f ~/.local/bin/handoffkeep.new ~/.local/bin/handoffkeep" || {
+	# set -e: a failed backup or restorecon stops the chain before the mv, so the
+	# working binary is never replaced without its backup in place.
+	run_on "$host" "set -e; if [ -e ~/.local/bin/handoffkeep ]; then cp -p ~/.local/bin/handoffkeep ~/.local/bin/handoffkeep.bak-pre-$TAG; fi; if command -v restorecon >/dev/null 2>&1; then restorecon ~/.local/bin/handoffkeep.new; fi; mv -f ~/.local/bin/handoffkeep.new ~/.local/bin/handoffkeep" || {
+		run_on "$host" 'rm -f ~/.local/bin/handoffkeep.new' >/dev/null 2>&1 || true
 		fail_host "$host" install_failed
 		return 0
 	}
