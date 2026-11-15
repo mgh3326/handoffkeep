@@ -148,7 +148,7 @@ func TestListDocumentsPagesByID(t *testing.T) {
 // order is unchanged, and the cursor visits each row once.
 func TestListChangesByTaskPagesByID(t *testing.T) {
 	s := schemaStore(t, "list_cursors_changes")
-	x, err := s.CreateTask(t.Context(), Task{Lane: "list-cursors", Title: "cursor target", Kind: "implement", CreatedBy: "list-cursors"})
+	x, err := s.CreateTask(t.Context(), Task{Lane: "list-cursors", Title: "cursor target", Kind: "implement", CreatedBy: "list-cursors", Project: projectPtr(testProjectName)})
 	if err != nil {
 		t.Fatal(err)
 	}
