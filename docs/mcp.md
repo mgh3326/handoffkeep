@@ -186,6 +186,7 @@ file tasks, or attach files.
 | `decision_record` | write | `key`, `lane`, `reading`, `quote`, `decided_at`, `grounds` | Verified Cloudflare Access operators only; bearer callers receive `operator_required`. The CLI uses the reserved `operator` credential. Same-key retries replay, changed content is refused |
 | `attachment_list` | read | optional `ref`, `limit` | Immutable attachment metadata |
 | `attachment_get_url` | read | `sha256` | Private presigned URL valid for ten minutes |
+| `attachment_read` | read | `sha256` | The file inline. `image/png`, `image/jpeg`, `image/gif` and `image/webp` come back as image content; one above 1.5 MiB encoded is downscaled to a 1600 px long edge and re-encoded (PNG, or JPEG q85 for a JPEG), a header declaring more than 40 megapixels is refused without decoding, and one that still does not fit is refused. `text/*`, `application/json`, and a generic type named `.md`/`.tsv`/`.csv`/`.txt` come back as text up to 256 KiB, cut at a UTF-8 boundary with a line naming the full size; bytes that are not UTF-8 are refused. Every other type, and every refusal, returns a text block naming `attachment_get_url` |
 | `attachment_put` | write | `content_base64`, `name`, optional `mime`, `ref` | Upload one private attachment without a server path |
 | `attachment_upload_begin` | write | `name`, `mime`, `size`, `sha256`, optional `ref` | Start a direct upload and return an upload id and presigned PUT URL |
 | `attachment_upload_complete` | write | `upload_id` | Finish a direct upload and return attachment metadata |
