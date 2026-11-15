@@ -95,6 +95,17 @@ type TaskStateEntry struct {
 	ConditionMet *bool   `json:"condition_met,omitempty"`
 }
 
+// TaskStatesSnapshot is the answer to TaskStatesSnapshot: the tasks asked for
+// in request order after de-duplication, the ids that name no task, and the
+// reading transaction's start time, AsOf. The rows are one snapshot, at least
+// as new as AsOf; AsOf does not date it. Every requested id appears exactly
+// once, in Tasks or in Missing.
+type TaskStatesSnapshot struct {
+	AsOf    time.Time        `json:"as_of"`
+	Tasks   []TaskStateEntry `json:"tasks"`
+	Missing []int64          `json:"missing"`
+}
+
 // TaskRefs are a task's typed references.
 type TaskRefs struct {
 	Closure *TaskClosure `json:"closure,omitempty"`
@@ -188,11 +199,8 @@ func (c Client) PutTaskSpawn(ctx context.Context, id int64, in TaskSpawnInput) (
 	return out, err
 }
 
-// TaskStates reads the state, category, open blockers and condition of up to
-// 200 tasks through GET /v1/tasks/states. until, when set, is merged or
-// deployed and the level condition_met is judged against; empty uses each
-// task's own start condition. Ids that name no task are left out of the answer.
-func (c Client) TaskStates(ctx context.Context, ids []int64, until string) ([]TaskStateEntry, error) {
+// taskStatesQuery builds the ids/until query both states routes take.
+func taskStatesQuery(ids []int64, until string) url.Values {
 	parts := make([]string, 0, len(ids))
 	for _, id := range ids {
 		parts = append(parts, fmt.Sprint(id))
@@ -201,11 +209,29 @@ func (c Client) TaskStates(ctx context.Context, ids []int64, until string) ([]Ta
 	if until != "" {
 		q.Set("until", until)
 	}
+	return q
+}
+
+// TaskStates reads the state, category, open blockers and condition of up to
+// 200 tasks through GET /v1/tasks/states. until, when set, is merged or
+// deployed and the level condition_met is judged against; empty uses each
+// task's own start condition. Ids that name no task are left out of the answer.
+func (c Client) TaskStates(ctx context.Context, ids []int64, until string) ([]TaskStateEntry, error) {
 	var out []TaskStateEntry
-	if err := c.transport().Call(ctx, "GET", "/v1/tasks/states?"+q.Encode(), nil, &out); err != nil {
-		return nil, err
-	}
-	return out, nil
+	err := c.transport().Call(ctx, "GET", "/v1/tasks/states?"+taskStatesQuery(ids, until).Encode(), nil, &out)
+	return out, err
+}
+
+// TaskStatesSnapshot reads the same states through
+// GET /v1/tasks/states/snapshot, in one snapshot, and names every requested id
+// with no task in Missing instead of dropping it: a caller can tell a task
+// that does not exist from one it did not ask about. AsOf is the reading
+// transaction's start time; the entries are one snapshot that is at least
+// that new, so they are consistent with each other.
+func (c Client) TaskStatesSnapshot(ctx context.Context, ids []int64, until string) (TaskStatesSnapshot, error) {
+	var out TaskStatesSnapshot
+	err := c.transport().Call(ctx, "GET", "/v1/tasks/states/snapshot?"+taskStatesQuery(ids, until).Encode(), nil, &out)
+	return out, err
 }
 
 // ClaimTask claims a task for claimedBy, linking jobID, or recording noJob as

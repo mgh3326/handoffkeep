@@ -18,8 +18,12 @@ func TestYTWriteProtocolDocDescribesIssueLinks(t *testing.T) {
 	doc := string(raw)
 	for _, want := range []string{
 		"## Kind issue_links (hk 3841)",
-		"### Canary runbook (hk 4640)",
+		"### Canary runbook (hk 4640, hk 4731)",
 		"`handoffkeep youtrack links status [--task N] [--limit N]`",
+		"`handoffkeep youtrack links plan [--task N] [--project P] [--limit N]`",
+		"**Plan the first sweep (mode off).**",
+		"This step is production on.",
+		"the operator decides from them",
 		"`GET /v1/yt/links/status`",
 		"Planned kinds (hk 3841, `issue_links`) are the one exception.",
 		"`hk:task-fields` and `hk:task-links`",
@@ -40,11 +44,18 @@ func TestYTWriteProtocolDocDescribesIssueLinks(t *testing.T) {
 	if strings.Contains(doc, "does not requeue") {
 		t.Error("protocol doc still carries the PR #387 requeue wording")
 	}
-	// The runbook is the section's last part, before the authority section.
+	// The runbook is the section's last part, before the authority section,
+	// and its steps run plan (mode off) → production on → record (hk 4731).
 	start := strings.Index(doc, "## Kind issue_links (hk 3841)")
-	runbook := strings.Index(doc, "### Canary runbook (hk 4640)")
+	runbook := strings.Index(doc, "### Canary runbook (hk 4640, hk 4731)")
 	authority := strings.Index(doc, "## Authority (hk 4122)")
 	if start < 0 || runbook < start || authority < runbook {
 		t.Fatalf("section order: section %d, runbook %d, authority %d", start, runbook, authority)
+	}
+	plan := strings.Index(doc, "**Plan the first sweep (mode off).**")
+	production := strings.Index(doc, "This step is production on.")
+	record := strings.Index(doc, "**Record the results**")
+	if plan < runbook || production < plan || record < production || record > authority {
+		t.Fatalf("runbook step order: plan %d, production %d, record %d", plan, production, record)
 	}
 }

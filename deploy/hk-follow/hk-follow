@@ -231,23 +231,29 @@ deliver_item() {
 # that is delivered. A report whose delivery fails stays queued for the
 # next tick, but every other entry is still attempted in the same pass: a
 # failed record, a failed lane event or an undeliverable entry must not
-# hold back the safety alert queued behind it. Only a later status for the
-# same sha and context waits behind a failed one, which is the ordering
-# hk 4562 needs (a retry must not overwrite the state the older report
-# still carries). Dry runs deliver nothing.
+# hold back the safety alert queued behind it. A later status for the same
+# sha and context waits behind a failed one (hk 4562), and a later record for
+# the same document key waits behind a failed one (hk 4742), so an older
+# retry cannot overwrite newer state. Dry runs deliver nothing.
 deliver_outbox() {
-	local f kind sha context
+	local f kind sha context key
 	local -A held=()
 	[[ $DRY_RUN -eq 1 ]] && return 0
 	for f in "$(outbox_dir)"/*.json; do
 		[[ -f "$f" ]] || continue
 		kind=$(jq -r .kind "$f" 2>/dev/null || echo unknown)
-		sha="" context=""
+		sha="" context="" key=""
 		if [[ "$kind" == status ]]; then
 			sha=$(jq -r .sha "$f" 2>/dev/null || echo "")
 			context=$(jq -r .context "$f" 2>/dev/null || echo "")
-			if [[ -n "${held["$sha $context"]+x}" ]]; then
+			if [[ -n "${held["status:$sha $context"]+x}" ]]; then
 				log "hk_follow.outbox_hold file=$(basename "$f") sha=$sha context=$context"
+				continue
+			fi
+		elif [[ "$kind" == record ]]; then
+			key=$(jq -r .key "$f" 2>/dev/null || echo "")
+			if [[ -n "${held["record:$key"]+x}" ]]; then
+				log "hk_follow.outbox_hold file=$(basename "$f") key=$key"
 				continue
 			fi
 		fi
@@ -256,7 +262,9 @@ deliver_outbox() {
 		else
 			log "hk_follow.outbox_retry file=$(basename "$f")"
 			if [[ "$kind" == status ]]; then
-				held["$sha $context"]=1
+				held["status:$sha $context"]=1
+			elif [[ "$kind" == record ]]; then
+				held["record:$key"]=1
 			fi
 		fi
 	done
