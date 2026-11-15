@@ -86,6 +86,9 @@ func newYTLPlanCLIEnv(t *testing.T, prefix, project string) ytlPlanCLIEnv {
 	if err := st.PutYouTrackProject(ctx, store.YouTrackProject{HKProject: project, ProjectID: "0-2", ShortName: "HK"}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.AddTaskProject(ctx, project, "test"); err != nil {
+		t.Fatal(err)
+	}
 	mk := func(title string) store.Task {
 		task, err := st.CreateTask(ctx, store.Task{Lane: "ytl-plan-cli", Title: title, Kind: "implement",
 			CreatedBy: "test", Project: &project})

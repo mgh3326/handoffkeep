@@ -38,10 +38,13 @@ func ytlpOrder(a, b Task) (Task, Task) {
 	return a, b
 }
 
-// ytlpEnv is one schema with its mapping and mode.
+// ytlpEnv is one schema with its project, mapping and mode.
 func ytlpEnv(t *testing.T, prefix string) *Store {
 	t.Helper()
 	s := schemaStore(t, prefix)
+	if _, err := s.AddTaskProject(t.Context(), ytbProject, "test"); err != nil {
+		t.Fatal(err)
+	}
 	ytbMapped(t, s)
 	s.SetYTLinksMode(YTLinksOff, ytcTenant)
 	return s
@@ -121,8 +124,14 @@ func TestYTLinksPlanWouldAddAndWritesNothing(t *testing.T) {
 	if got, want := ytlpRowCounts(t, s), rowsBefore; !reflect.DeepEqual(got, want) {
 		t.Fatalf("plan wrote rows: before %v, after %v", want, got)
 	}
-	if got, want := ytlpTaskStamps(t, s), stampsBefore; !reflect.DeepEqual(got, want) {
-		t.Fatalf("plan touched a task row: before %v, after %v", want, got)
+	if got, want := ytlpTaskStamps(t, s), stampsBefore; len(got) != len(want) {
+		t.Fatalf("plan changed the task set: before %v, after %v", want, got)
+	} else {
+		for id, at := range want {
+			if !got[id].Equal(at) {
+				t.Fatalf("plan touched task %d: %v → %v", id, at, got[id])
+			}
+		}
 	}
 	for _, c := range fake.LinkCalls() {
 		if c.Op != ytwritetest.LinkOpRead {
