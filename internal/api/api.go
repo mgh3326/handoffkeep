@@ -595,6 +595,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("PUT /v1/changes/gate", s.changeGatePut)
 	m.HandleFunc("POST /v1/changes/batch", s.changeBatch)
 	m.HandleFunc("GET /v1/changes/one", s.changeOne)
+	m.HandleFunc("GET /v1/changes/open", s.changeOpen)
 	m.HandleFunc("GET /v1/deploy-services", s.deployServicesList)
 	m.HandleFunc("PUT /v1/deploy-services/{name}", s.deployServiceWrite)
 	m.HandleFunc("POST /v1/deploy-services/{name}/deactivate", s.deployServiceWrite)

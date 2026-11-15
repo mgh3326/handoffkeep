@@ -866,17 +866,22 @@ func deployRef(key, pr string) string { return key + "|" + pr }
 // record key first. A match applies hk.deploy and moves the task on to
 // deployed. task_events is append-only, so the deploy event is recorded here
 // when it applies; applyDeployRecordTx addresses only merged tasks and never
-// leaves an earlier applied=false row to flip.
+// leaves an earlier applied=false row to flip. The PR matched is the task's
+// delivering PR (taskDeliveredPRSQL: a bundle child's is its parent's).
 func (s *Store) deployOnMergedTx(ctx context.Context, tx pgx.Tx, x Task, now time.Time, named, pending map[int64]bool) (Task, error) {
-	if x.State != StateMerged || !taskEventPRRE.MatchString(x.Refs.PR) {
+	if x.State != StateMerged {
 		return x, nil
 	}
-	record, found, err := deployRecordForPRTx(ctx, tx, x.Refs.PR)
+	pr, err := deliveredPRTx(ctx, tx, x.ID)
+	if err != nil || !taskEventPRRE.MatchString(pr) {
+		return x, err
+	}
+	record, found, err := deployRecordForPRTx(ctx, tx, pr)
 	if err != nil || !found {
 		return x, err
 	}
 	body, commentKey := deployCommentDetails(record)
-	ev := sourceEvent{Source: SourceDeploy, SourceRef: deployRef(record.Key, x.Refs.PR), PR: x.Refs.PR, CommentBody: body, CommentKey: commentKey, At: now, Named: named, Pending: pending, Note: "deploy record " + record.Key + " lists the PR; applied when the task entered merged"}
+	ev := sourceEvent{Source: SourceDeploy, SourceRef: deployRef(record.Key, pr), PR: pr, CommentBody: body, CommentKey: commentKey, At: now, Named: named, Pending: pending, Note: "deploy record " + record.Key + " lists the PR; applied when the task entered merged"}
 	res, err := s.applySourceEventTx(ctx, tx, x, ev, now)
 	if err != nil {
 		return x, err
@@ -988,7 +993,7 @@ func (s *Store) applyDeployRecordTx(ctx context.Context, tx pgx.Tx, record Store
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
 		return err
 	}
-	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE state=$2 AND refs->>'pr' = ANY($1) ORDER BY id FOR UPDATE`, prs, StateMerged)
+	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks t WHERE t.state=$2 AND `+taskDeliveredPRSQL+` = ANY($1) ORDER BY t.id FOR UPDATE`, prs, StateMerged)
 	if err != nil {
 		return err
 	}
@@ -1001,8 +1006,12 @@ func (s *Store) applyDeployRecordTx(ctx context.Context, tx pgx.Tx, record Store
 		return err
 	}
 	for _, x := range tasks {
+		pr, err := deliveredPRTx(ctx, tx, x.ID)
+		if err != nil {
+			return err
+		}
 		body, commentKey := deployCommentDetails(record)
-		ev := sourceEvent{Source: SourceDeploy, SourceRef: deployRef(key, x.Refs.PR), PR: x.Refs.PR, CommentBody: body, CommentKey: commentKey, At: now, Note: "deploy record " + key + " lists the PR"}
+		ev := sourceEvent{Source: SourceDeploy, SourceRef: deployRef(key, pr), PR: pr, CommentBody: body, CommentKey: commentKey, At: now, Note: "deploy record " + key + " lists the PR"}
 		if _, err = s.applySourceEventTx(ctx, tx, x, ev, now); err != nil {
 			return err
 		}

@@ -320,6 +320,13 @@ func scanChange(row pgx.Row, c *Change) error {
 	return nil
 }
 
+// ListOpenChanges lists the PR rows hk holds open, oldest first. A PR-state
+// sync checks them against GitHub and writes the merged ones through the state
+// write, which settle-merged then reads (hk 4844).
+func (s *Store) ListOpenChanges(ctx context.Context, limit int) ([]Change, error) {
+	return s.listChangesWhere(ctx, s.pool, `state=$1`, limit, ChangeOpen)
+}
+
 // ListChangesByTask lists the changes linked to a task, ordered by id.
 func (s *Store) ListChangesByTask(ctx context.Context, taskID int64, limit int) ([]Change, error) {
 	return s.listChangesWhere(ctx, s.pool, `id IN (SELECT change_id FROM change_tasks WHERE task_id=$1)`, limit, taskID)

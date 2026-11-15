@@ -102,6 +102,26 @@ func (s Server) changeBatch(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// changeOpen is GET /v1/changes/open[?limit=N]: the PR rows hk holds open,
+// oldest first. A PR-state sync compares them with GitHub and writes the merged
+// ones through PUT /v1/changes/state (hk 4844).
+func (s Server) changeOpen(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	limit, err := queryLimit(r, 100, 1000)
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	out, err := s.Service.Store.ListOpenChanges(r.Context(), limit)
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"changes": out})
+}
+
 // changeOne is GET /v1/changes/one?repo=owner/name&pr=N[&all_heads=1][&include=checks,threads,findings,gate,reviews]:
 // one PR's state. 404 for a PR hk has never seen.
 func (s Server) changeOne(w http.ResponseWriter, r *http.Request) {

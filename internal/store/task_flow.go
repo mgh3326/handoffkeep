@@ -465,10 +465,16 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 	if err != nil {
 		return Task{}, err
 	}
-	if action == actMove && to == StateMerged && refs != nil && refs.PR != "" {
-		if canonical := canonicalPRURL(refs.PR); canonical != refs.PR {
+	// refs.pr is one full PR URL whatever the target (hk 4844): a bare number
+	// takes the project's repo, or the transition is refused.
+	if refs != nil && refs.PR != "" {
+		pr, err := normalisePRRefTx(ctx, tx, x.Project, refs.PR)
+		if err != nil {
+			return Task{}, err
+		}
+		if pr != refs.PR {
 			fixed := *refs
-			fixed.PR = canonical
+			fixed.PR = pr
 			refs = &fixed
 		}
 	}
