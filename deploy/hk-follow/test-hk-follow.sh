@@ -711,6 +711,32 @@ t_outbox_fifo() {
 	[[ -z "$(ls "$dir")" ]]
 }
 
+t_outbox_record_fifo() {
+	# A failed older put holds back a later record with the same document key,
+	# so the retry cannot overwrite the newer record on the next pass.
+	setup
+	local dir="$HK_FOLLOW_STATE_DIR/outbox" key="deploy/handoffkeep/20260101T000000Z"
+	local -a files
+	mkdir -p "$dir"
+	record handoffkeep "$SHA_NEW" "$D1" "$SHA_OLD" success "" 20260101T000000Z
+	record handoffkeep "$SHA_NEW" "$D2" "$SHA_OLD" failed "shiftgate_handoffkeep_exit_1" 20260101T000000Z
+	files=("$dir"/*.json)
+	mv "${files[0]}" "$dir/20260101T000000Z.000001.json"
+	mv "${files[1]}" "$dir/20260101T000001Z.000002.json"
+	local attempts=0
+	hk_doc_put() {
+		attempts=$((attempts + 1))
+		if [[ $attempts -eq 1 ]]; then return 1; fi
+		cp "$2" "$FIX/records/$(key "$1")"
+		echo "record $1" >>"$FIX/calls"
+	}
+	deliver_outbox
+	[[ -f "$dir/20260101T000000Z.000001.json" && -f "$dir/20260101T000001Z.000002.json" ]]
+	deliver_outbox
+	want failed "$(jq -r .result "$FIX/records/$(key "$key")")"
+	[[ -z "$(ls "$dir")" ]]
+}
+
 t_outbox_failure_does_not_block_others() {
 	# A failed status holds back only a later status for the same sha and
 	# context: a status for another sha, a record and a notify are still
