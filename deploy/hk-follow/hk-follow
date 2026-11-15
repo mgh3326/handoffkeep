@@ -150,14 +150,91 @@ healthz_revision() {
 	curl -fsS --max-time 5 "$1/healthz" 2>/dev/null | jq -r '.vcs_revision // empty' 2>/dev/null || true
 }
 
+# redact_approval_err <file>: first 300 bytes of the CLI's stderr with newlines
+# folded and credentials redacted. The CLI's typed errors (hktransport,
+# internal/remote) never print a header value: HTTPError prints only the
+# wire code plus the server's pattern/reason names (secret_like_content
+# carries a pattern name like aws_access_key, never the secret), redirect
+# failures never print the Location, and transport url.Errors carry the
+# request URL with Go's redacted password. What can surface is the request
+# URL itself (host, path, and any userinfo username), so the userinfo is
+# stripped here; Bearer and CF-Access assignments are scrubbed as
+# defense-in-depth for future CLI text.
+redact_approval_err() {
+	local txt
+	txt=$(head -c 300 "$1" 2>/dev/null | tr '\n\r' '  ' || true)
+	printf '%s' "$txt" | sed -E \
+		-e 's#://[^/@[:space:]]+@#://<redacted>@#g' \
+		-e 's#[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[^[:space:],;]+#Bearer <redacted>#g' \
+		-e 's#[Cc][Ff]-[Aa][Cc][Cc][Ee][Ss][Ss]-[Cc][Ll][Ii][Ee][Nn][Tt]-[Ii][Dd][[:space:]:=_-]+[^[:space:],;]+#CF-Access-Client-Id=<redacted>#g' \
+		-e 's#[Cc][Ff]-[Aa][Cc][Cc][Ee][Ss][Ss]-[Cc][Ll][Ii][Ee][Nn][Tt]-[Ss][Ee][Cc][Rr][Ee][Tt][[:space:]:=_-]+[^[:space:],;]+#CF-Access-Client-Secret=<redacted>#g' \
+		-e 's#([Hh][Aa][Nn][Dd][Oo][Ff][Ff][Kk][Ee][Ee][Pp]_[A-Za-z_]*|[Hh][Kk]_[A-Za-z_]*|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd])[[:space:]:=_-]+[^[:space:],;]+#\1=<redacted>#g'
+}
+
+# hk_promote_url_host: HANDOFFKEEP_URL's host, lowercased without port or
+# brackets, or nothing when the URL is unset or not http(s).
+hk_promote_url_host() {
+	local url=${HANDOFFKEEP_URL:-} authority host
+	case "$url" in
+	http://*|https://*|HTTP://*|HTTPS://*) ;;
+	*) return 1 ;;
+	esac
+	authority=${url#*://}
+	authority=${authority%%/*}
+	case "$authority" in
+	*@*) authority=${authority##*@} ;;
+	esac
+	case "$authority" in
+	\[*\]*)
+		host=${authority%%\]*}
+		host=${host#\[}
+		;;
+	*) host=${authority%%:*} ;;
+	esac
+	host=${host%%%*}
+	printf '%s' "$host" | tr 'A-Z' 'a-z'
+}
+
+# hk_promote_url_is_private: 0 when HANDOFFKEEP_URL names a loopback, private
+# or CGNAT (100.64/10, the tailnet range) literal, which a GitHub-hosted
+# runner cannot reach. Hostnames are not resolved here and pass.
+hk_promote_url_is_private() {
+	local host a b c d
+	host=$(hk_promote_url_host) || return 1
+	[[ -n "$host" ]] || return 1
+	case "$host" in
+	localhost|localhost.) return 0 ;;
+	esac
+	if [[ "$host" == *:* ]]; then
+		case "$host" in
+		::|::1) return 0 ;;
+		fc*|fd*) return 0 ;;
+		fe8*|fe9*|fea*|feb*) return 0 ;;
+		esac
+		return 1
+	fi
+	[[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+	IFS=. read -r a b c d <<<"$host"
+	[[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ && "$c" =~ ^[0-9]+$ && "$d" =~ ^[0-9]+$ ]] || return 1
+	(( 10#$a <= 255 && 10#$b <= 255 && 10#$c <= 255 && 10#$d <= 255 )) || return 1
+	if (( 10#$a == 10 || 10#$a == 127 )); then return 0; fi
+	if (( 10#$a == 192 && 10#$b == 168 )); then return 0; fi
+	if (( 10#$a == 172 && 10#$b >= 16 && 10#$b <= 31 )); then return 0; fi
+	if (( 10#$a == 100 && 10#$b >= 64 && 10#$b <= 127 )); then return 0; fi
+	if (( 10#$a == 0 && 10#$b == 0 && 10#$c == 0 && 10#$d == 0 )); then return 0; fi
+	return 1
+}
+
 # hk_doc_get <key> <out>: rc 0 found, 3 not found, 1 error.
 hk_doc_get() {
-	local err
+	local err redacted
 	if "$HANDOFFKEEP_CLI" doc get "$1" >"$2" 2>"$WORK/hk.err"; then
 		return 0
 	fi
-	err=$(cat "$WORK/hk.err")
+	err=$(cat "$WORK/hk.err" 2>/dev/null || true)
 	[[ "$err" == *not_found* ]] && return 3
+	redacted=$(redact_approval_err "$WORK/hk.err")
+	log "hk_follow.approval_read_failed err=$(printf '%q' "$redacted")"
 	return 1
 }
 
@@ -549,7 +626,6 @@ promote() {
 	# shellcheck disable=SC2034 # set by resolve
 	local CAND_DIGEST CAND_REV CAND_CHILDREN CUR_DIGEST CUR_REV CUR_CHILDREN NEW_DIGEST NEW_REV NEW_CHILDREN
 	valid_sha "$sha" || { log "hk_follow.promote_refused sha=$(printf '%q' "$sha") reason=bad_sha"; return 1; }
-
 	# image.yml builds in parallel with ci.yml; give it a bounded time.
 	while :; do
 		rc=0
@@ -612,6 +688,19 @@ promote() {
 		return 1
 		;;
 	wait)
+		# The approval read is the only gate path that reaches hk, so only
+		# here can a private HANDOFFKEEP_URL (HK_PROMOTE_URL in deploy.yml)
+		# be the cause. A private, loopback or CGNAT (100.64/10, the tailnet
+		# range) literal is never reachable from a GitHub-hosted runner,
+		# which is how 4c2b23ca failed closed with approval_unreadable.
+		# The check stays out of gate() on purpose: tick shares gate() and
+		# ncp's HANDOFFKEEP_URL is its loopback hk, so a gate-level check
+		# would hold every migration release on the host forever.
+		if [[ "$reason" == approval_unreadable ]] && hk_promote_url_is_private; then
+			log "hk_follow.promote_refused sha=$sha reason=approval_unreadable:private_url url_host=$(hk_promote_url_host)"
+			post_status "$sha" deploy-promote failure "deploy-refused:approval_unreadable:private_url (HK_PROMOTE_URL is not a public origin)"
+			return 1
+		fi
 		post_status "$sha" deploy-promote failure "deploy-refused:${reason}"
 		return 1
 		;;

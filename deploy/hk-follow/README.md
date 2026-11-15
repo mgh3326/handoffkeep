@@ -108,7 +108,20 @@ Nothing here is installed by the PR. These are the steps the design session runs
 2. **GitHub token.** Create a fine-grained token for `mgh3326/handoffkeep` only, with Contents read, Actions read and Commit statuses write, and nothing else. Commit statuses write is the only write: hk-follow reports through it. Store it in Infisical and render it as `GH_TOKEN` in the env file. Do not print it.
 3. **Env file** `/etc/hk-follow/env` (mode 0600). It holds `GH_TOKEN=…` and the hk CLI's `HANDOFFKEEP_URL` and `HANDOFFKEEP_TOKEN`, plus the Access pair if the CLI goes through Cloudflare. It may also hold overrides: `HK_FOLLOW_SERVICES`, `HK_FOLLOW_TARGET`, `HK_FOLLOW_HEALTH_WAIT`, `SHIFTGATE`, `HANDOFFKEEP_CLI`, `PANEWIRE`. The defaults are at the top of `hk-follow`.
 4. **Files.** Run `install -m 0755 deploy/hk-follow/hk-follow /usr/local/bin/hk-follow`, then copy both units to `/etc/systemd/system/`.
-5. **GitHub secrets for the promote job.** The job reads hk only to look up an approval: `HK_PROMOTE_URL`, `HK_PROMOTE_TOKEN`, `HK_PROMOTE_CF_ACCESS_CLIENT_ID`, `HK_PROMOTE_CF_ACCESS_CLIENT_SECRET`. Use a token that only reads docs. Without these secrets, a release with a migration fails closed (`deploy-refused:approval_unreadable`); a release without one promotes normally.
+5. **GitHub secrets for the promote job.** The job reads hk only to look up an approval: `HK_PROMOTE_URL`, `HK_PROMOTE_TOKEN`, `HK_PROMOTE_CF_ACCESS_CLIENT_ID`, `HK_PROMOTE_CF_ACCESS_CLIENT_SECRET`. Use a token that only reads docs. `HK_PROMOTE_URL` must be hk's public origin behind Cloudflare Access — the `https://…` URL that answers from GitHub-hosted runners — not a tailnet (`100.64/10`) or LAN (`10/8`, `172.16/12`, `192.168/16`) address and not loopback. The Access service-token pair must be allowed on `/v1/*` (the approval read is `GET /v1/documents/<key>`). When a release needs the approval read and the URL is private, loopback or CGNAT, promote fails with `deploy-refused:approval_unreadable:private_url` (naming the cause) instead of the bare `approval_unreadable`; releases that need no approval never read hk and promote normally. Without these secrets, a release with a migration fails closed (`deploy-refused:approval_unreadable`); a release without one promotes normally. Preflight from any non-tailnet machine (a runner, a VPS, a phone off the tailnet):
+
+   ```bash
+   curl -sS -o /dev/null -w '%{http_code}\n' \
+     -H "CF-Access-Client-Id: $HK_PROMOTE_CF_ACCESS_CLIENT_ID" \
+     -H "CF-Access-Client-Secret: $HK_PROMOTE_CF_ACCESS_CLIENT_SECRET" \
+     'https://hk.example.com/v1/documents/deploy-approval%2Fhandoffkeep%2F<40-hex-sha>'
+   # Want 401: the host is reachable and the pair passed Access, and the app
+   # refused the missing bearer. A timeout or connection refused means the URL
+   # is not reachable from outside the tailnet; a 302 to *.cloudflareaccess.com
+   # means the pair is missing or not allowed on /v1/*. Add
+   # -H "Authorization: Bearer $HK_PROMOTE_TOKEN" to expect 200 (approval
+   # present) or 404 (no approval yet).
+   ```
 6. **Bootstrap the tag.** Promote compares against the sha the `deploy` tag names, so the tag must exist before the first promote. Until it exists, every promote posts `deploy-promote` pending ("no baseline: bootstrap the deploy tag (README step 6)") and passes without promoting, so the deploy workflow stays green before hk-follow is installed. A tag that exists but carries no revision, or a registry error, fails the job (`deploy-refused:baseline_unreadable`). Point it at the sha ncp serves now; the image built for that sha already exists:
 
    ```bash

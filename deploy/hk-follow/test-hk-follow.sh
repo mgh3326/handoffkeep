@@ -92,12 +92,31 @@ setup() {
 		index_json "$1" "${kids[@]}" >"$FIX/reg/deploy"
 	}
 	healthz_revision() { cat "$FIX/health/$(key "$1")" 2>/dev/null || true; }
-	hk_doc_get() {
-		[[ -f "$FIX/hk_error" ]] && return 1
-		local f="$FIX/docs/$(key "$1")"
-		[[ -f "$f" ]] || return 3
-		cp "$f" "$2"
-	}
+	# The real hk_doc_get runs against a fake hk CLI: exit 0 with the fixture
+	# doc, 1 with not_found on stderr when the doc is missing, and 1 with
+	# $FIX/hk_error_text (or a dial error) when $FIX/hk_error exists, so the
+	# approval_read_failed log line is exercised, not mocked.
+	cat >"$FIX/fake-hk" <<'FAKEHK'
+#!/usr/bin/env bash
+set -u
+fkey() { printf '%s' "$1" | tr '/?&=' '____'; }
+if [[ "${1:-}" == doc && "${2:-}" == get ]]; then
+	k="${3:-}"
+	if [[ -f "$FIX/hk_error" ]]; then
+		if [[ -f "$FIX/hk_error_text" ]]; then cat "$FIX/hk_error_text" >&2; else printf 'Get "%s": dial tcp: connect: connection refused\n' "${HANDOFFKEEP_URL:-hk}" >&2; fi
+		exit 1
+	fi
+	f="$FIX/docs/$(fkey "$k")"
+	if [[ -f "$f" ]]; then cat "$f"; exit 0; fi
+	echo "handoffkeep: not_found" >&2
+	exit 1
+fi
+echo "fake-hk: unsupported $*" >&2
+exit 1
+FAKEHK
+	chmod +x "$FIX/fake-hk"
+	export HANDOFFKEEP_CLI="$FIX/fake-hk"
+	unset HANDOFFKEEP_URL
 	hk_doc_put() {
 		[[ -f "$FIX/hk_put_error" ]] && return 1
 		cp "$2" "$FIX/records/$(key "$1")"
@@ -322,6 +341,44 @@ t_gate_migration_hk_down() {
 	touch "$FIX/hk_error"
 	want "wait approval_unreadable" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
 }
+t_gate_approval_read_failed_logged() {
+	# A non-not_found CLI failure logs one approval_read_failed line carrying
+	# the redacted text: userinfo, Bearer and secret assignments scrubbed,
+	# newlines folded, capped at 300 bytes.
+	setup; setup_tick
+	compare "$SHA_OLD" "$SHA_NEW" ahead "$MIG_ADDED"
+	{
+		printf '%s\n' 'Get "https://operator:s3cr3t-oper@hk.internal/v1/documents/x": dial boom Bearer hunter2'
+		printf '%s\n' 'CF-Access-Client-Secret: hunter2 password=hunter3 token=abc'
+		printf 'x%.0s' $(seq 1 500)
+		printf '%s' TAILMARKER_NEVER_LOGGED
+	} >"$FIX/hk_error_text"
+	touch "$FIX/hk_error"
+	gate "$SHA_NEW" "$SHA_OLD" 2>"$FIX/log"
+	want "wait" "$GATE_VERDICT"
+	want "approval_unreadable" "$GATE_REASON"
+	grep -qF 'hk_follow.approval_read_failed' "$FIX/log"
+	# printf %q escapes the redacted text (spaces, <>, quotes), so match the
+	# escaped form; the raw secrets must be absent either way.
+	grep -qF 'dial\ boom' "$FIX/log"
+	grep -qF '\<redacted\>' "$FIX/log"
+	grep -qF '://\<redacted\>@' "$FIX/log"
+	fails grep -qF 'hunter2' "$FIX/log"
+	fails grep -qF 'hunter3' "$FIX/log"
+	fails grep -qF 's3cr3t-oper' "$FIX/log"
+	fails grep -qF 'TAILMARKER_NEVER_LOGGED' "$FIX/log"
+	[[ $(grep -c 'hk_follow.approval_read_failed' "$FIX/log") -eq 1 ]]
+}
+t_gate_migration_not_found_still_hold() {
+	# A not_found CLI failure stays hold migration with no failure log line.
+	setup; setup_tick
+	compare "$SHA_OLD" "$SHA_NEW" ahead "$MIG_ADDED"
+	gate "$SHA_NEW" "$SHA_OLD" 2>"$FIX/log"
+	want "hold" "$GATE_VERDICT"
+	want "migration" "$GATE_REASON"
+	fails grep -q 'approval_read_failed' "$FIX/log"
+}
+
 t_gate_migration_kinds() {
 	setup; setup_tick
 	local f
@@ -1020,6 +1077,62 @@ t_promote_refuse() {
 	fx_gh "/repos/mgh3326/handoffkeep/compare/$SHA_NEW...main" '{"status":"behind"}'
 	promote "$SHA_NEW"
 	want "" "$(calls)"
+}
+t_promote_private_url_refused() {
+	# The private-URL refusal fires only when the approval read fails: the
+	# approval lookup is the one gate path that reaches hk.
+	setup; setup_promote
+	compare "$SHA_OLD" "$SHA_NEW" ahead "$MIG_ADDED"
+	touch "$FIX/hk_error"
+	local u
+	for u in 'http://127.0.0.1:8800' 'http://10.0.0.5/' 'http://192.168.1.10:8080/x' 'http://172.16.5.4/' 'http://100.96.0.1/' 'http://localhost:8800/' 'http://[::1]/'; do
+		export HANDOFFKEEP_URL="$u"
+		fails promote "$SHA_NEW"
+		want 1 "$(count 'deploy-refused:approval_unreadable:private_url')"
+		want 0 "$(count '^tag ')"
+		: >"$FIX/calls"
+	done
+	# The same hk failure with a public URL keeps the bare reason.
+	export HANDOFFKEEP_URL="https://hk.example.com"
+	fails promote "$SHA_NEW"
+	want 1 "$(count 'deploy-refused:approval_unreadable$')"
+	want 0 "$(count 'private_url')"
+	want 0 "$(count '^tag ')"
+}
+t_promote_private_url_no_migration_promotes() {
+	# A release with no migration never reads hk: a private URL changes nothing.
+	setup; setup_promote
+	export HANDOFFKEEP_URL="http://100.96.0.1/"
+	promote "$SHA_NEW"
+	want "tag $SHA_NEW" "$(grep '^tag ' "$FIX/calls")"
+	want 1 "$(count "status $SHA_NEW deploy-promote success")"
+}
+t_promote_private_url_diagnostic_passes() {
+	# A diagnostic dispatch (not on main) with a private URL still passes quiet.
+	setup; setup_promote
+	export HANDOFFKEEP_URL="http://127.0.0.1:8800/"
+	fx_gh "/repos/mgh3326/handoffkeep/compare/$SHA_NEW...main" '{"status":"behind"}'
+	promote "$SHA_NEW"
+	want "" "$(calls)"
+}
+t_promote_private_url_no_baseline_pends() {
+	# Before the deploy tag exists, a private URL still pends green.
+	setup; setup_promote
+	rm "$FIX/reg/deploy"
+	export HANDOFFKEEP_URL="http://10.0.0.5/"
+	promote "$SHA_NEW"
+	want 0 "$(count '^tag ')"
+	want 1 "$(count 'no baseline: bootstrap')"
+}
+t_promote_private_url_hold_stays_hold() {
+	# A missing approval still holds (pending), not a refusal.
+	setup; setup_promote
+	compare "$SHA_OLD" "$SHA_NEW" ahead "$MIG_ADDED"
+	export HANDOFFKEEP_URL="http://100.96.0.1/"
+	promote "$SHA_NEW"
+	want 0 "$(count '^tag ')"
+	want 1 "$(count 'deploy-held:migration')"
+	want 0 "$(count 'deploy-refused')"
 }
 t_promote_ci_ok_failure() {
 	setup; setup_promote
