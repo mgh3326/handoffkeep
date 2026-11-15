@@ -2,13 +2,22 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	gmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestDotsToolsRegistered(t *testing.T) {
@@ -20,13 +29,19 @@ func TestDotsToolsRegistered(t *testing.T) {
 		t.Fatal(err)
 	}
 	tools := map[string]bool{}
+	descriptions := map[string]string{}
 	for _, tool := range list.Tools {
 		if tool.Name == "dots_inbox" || tool.Name == "dots_reply" {
 			tools[tool.Name] = true
+			descriptions[tool.Name] = tool.Description
 		}
 	}
 	if !tools["dots_inbox"] || !tools["dots_reply"] {
 		t.Fatalf("dots tools: %v", tools)
+	}
+	// The inbox must tell dots to read the files rather than ask for a copy.
+	if want := "attachments lists files on the request; read them before asking for a copy"; !strings.Contains(descriptions["dots_inbox"], want) {
+		t.Fatalf("dots_inbox description omits %q: %s", want, descriptions["dots_inbox"])
 	}
 }
 
@@ -93,5 +108,222 @@ func TestDotsReplyExplainsMissingYouTrackIssue(t *testing.T) {
 	})
 	if !failed || !strings.Contains(text, "this task has no YouTrack issue yet; retry in a minute") {
 		t.Fatalf("dots_reply failed=%v text=%s", failed, text)
+	}
+}
+
+func TestDotsNamedTaskIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		self int64
+		max  int
+		want []int64
+	}{
+		{name: "case insensitive", body: "full package on HK 4715", self: 9, max: 5, want: []int64{4715}},
+		{name: "body order and distinct", body: "hk 7 then hk 3 then hk 7", self: 9, max: 5, want: []int64{7, 3}},
+		{name: "never self", body: "this request hk 9 and hk 12", self: 9, max: 5, want: []int64{12}},
+		{name: "at most max", body: "hk 1 hk 2 hk 3 hk 4 hk 5 hk 6 hk 7", self: 9, max: 5, want: []int64{1, 2, 3, 4, 5}},
+		{name: "no id joined to the word", body: "hk4715 and hk 0", self: 9, max: 5, want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dotsNamedTaskIDs(tc.body, tc.self, tc.max); !slices.Equal(got, tc.want) {
+				t.Fatalf("ids = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+type dotsInboxAttachmentOut struct {
+	SHA256       string    `json:"sha256"`
+	SizeBytes    int64     `json:"size_bytes"`
+	MIME         string    `json:"mime"`
+	OriginalName string    `json:"original_name"`
+	CreatedAt    time.Time `json:"created_at"`
+	FromTask     int64     `json:"from_task"`
+}
+
+type dotsInboxOut struct {
+	Requests []struct {
+		Task struct {
+			ID int64 `json:"id"`
+		} `json:"task"`
+		Body                           string                   `json:"body"`
+		Attachments                    []dotsInboxAttachmentOut `json:"attachments"`
+		AttachmentsTruncated           bool                     `json:"attachments_truncated"`
+		ReferencedAttachments          []dotsInboxAttachmentOut `json:"referenced_attachments"`
+		ReferencedAttachmentsTruncated bool                     `json:"referenced_attachments_truncated"`
+	} `json:"requests"`
+}
+
+// dotsInboxText runs the tool directly so a test can carry its own context
+// (the query-count test needs a recording span in it).
+func dotsInboxText(t *testing.T, o operatorTools, ctx context.Context, in dotsInboxInput) string {
+	t.Helper()
+	result, _, err := o.dotsInbox(ctx, nil, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := ""
+	for _, content := range result.Content {
+		if value, ok := content.(*gmcp.TextContent); ok {
+			text += value.Text
+		}
+	}
+	return text
+}
+
+func decodeDotsInbox(t *testing.T, text string) dotsInboxOut {
+	t.Helper()
+	var out dotsInboxOut
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("inbox result is not JSON: %v: %s", err, text)
+	}
+	return out
+}
+
+// dotsAttachment inserts one attachment bound to a task ref at a fixed time,
+// so ordering does not depend on when the test runs.
+func dotsAttachment(t *testing.T, pool *pgxpool.Pool, n int, taskID int64, createdAt time.Time, name string) store.Attachment {
+	t.Helper()
+	sha := fmt.Sprintf("%064x", n)
+	if _, err := pool.Exec(t.Context(), `INSERT INTO attachments(sha256,size_bytes,mime,original_name,created_by,created_at) VALUES($1,$2,'image/png',$3,'desktop',$4)`, sha, n, name, createdAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `INSERT INTO attachment_refs(sha256,ref_kind,ref_id) VALUES($1,'task',$2)`, sha, strconv.FormatInt(taskID, 10)); err != nil {
+		t.Fatal(err)
+	}
+	return store.Attachment{SHA256: sha, SizeBytes: int64(n), MIME: "image/png", OriginalName: name, CreatedBy: "desktop", CreatedAt: createdAt}
+}
+
+func TestDotsInboxListsRequestAndNamedTaskAttachments(t *testing.T) {
+	st, pool := newOperatorStoreWithPool(t)
+	ctx := context.Background()
+	packageTask := newOperatorTask(t, st, "package task")
+	request, err := st.CreateDotsRequest(ctx, "caller", store.DotsRequestInput{Title: "Review", Body: "Review the pair. The full package is on HK " + strconv.FormatInt(packageTask.ID, 10) + "."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, err := st.CreateDotsRequest(ctx, "caller", store.DotsRequestInput{Title: "Nothing", Body: "No files on this one."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 11, 15, 1, 0, 0, 0, time.UTC)
+	second := dotsAttachment(t, pool, 1, request.ID, base.Add(2*time.Second), "second.png")
+	first := dotsAttachment(t, pool, 2, request.ID, base, "first.png")
+	packaged := dotsAttachment(t, pool, 3, packageTask.ID, base.Add(time.Second), "package.png")
+
+	o := operatorTools{service: api.Service{Store: st}}
+	out := decodeDotsInbox(t, dotsInboxText(t, o, ctx, dotsInboxInput{}))
+	if len(out.Requests) != 2 || out.Requests[0].Task.ID != request.ID || out.Requests[1].Task.ID != empty.ID {
+		t.Fatalf("requests = %+v", out.Requests)
+	}
+	got := out.Requests[0]
+	if len(got.Attachments) != 2 || got.Attachments[0].SHA256 != first.SHA256 || got.Attachments[1].SHA256 != second.SHA256 {
+		t.Fatalf("own attachments order = %+v", got.Attachments)
+	}
+	if got.Attachments[0].OriginalName != "first.png" || got.Attachments[0].SizeBytes != first.SizeBytes || got.Attachments[0].MIME != "image/png" || !got.Attachments[0].CreatedAt.Equal(first.CreatedAt) {
+		t.Fatalf("own attachment fields = %+v", got.Attachments[0])
+	}
+	if got.AttachmentsTruncated || got.ReferencedAttachmentsTruncated {
+		t.Fatalf("truncated = %v/%v with two and one attachments", got.AttachmentsTruncated, got.ReferencedAttachmentsTruncated)
+	}
+	if len(got.ReferencedAttachments) != 1 || got.ReferencedAttachments[0].SHA256 != packaged.SHA256 || got.ReferencedAttachments[0].OriginalName != "package.png" {
+		t.Fatalf("referenced attachments = %+v", got.ReferencedAttachments)
+	}
+	// The reference names the task the body named, not the request.
+	if got.ReferencedAttachments[0].FromTask != packageTask.ID {
+		t.Fatalf("referenced from_task = %d, want %d", got.ReferencedAttachments[0].FromTask, packageTask.ID)
+	}
+	// A request with no files carries empty lists, never null.
+	text := dotsInboxText(t, o, ctx, dotsInboxInput{})
+	if !strings.Contains(text, `"attachments":[]`) || !strings.Contains(text, `"referenced_attachments":[]`) {
+		t.Fatalf("empty lists are not []: %s", text)
+	}
+}
+
+func TestDotsInboxCapsAttachmentLists(t *testing.T) {
+	st, pool := newOperatorStoreWithPool(t)
+	ctx := context.Background()
+	packageTask := newOperatorTask(t, st, "package task")
+	request, err := st.CreateDotsRequest(ctx, "caller", store.DotsRequestInput{Title: "Review", Body: "Everything is on hk " + strconv.FormatInt(packageTask.ID, 10) + "."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 11, 15, 2, 0, 0, 0, time.UTC)
+	for i := 0; i < dotsInboxAttachmentLimit+5; i++ {
+		dotsAttachment(t, pool, 100+i, request.ID, base.Add(time.Duration(i)*time.Second), fmt.Sprintf("own-%02d.png", i))
+		dotsAttachment(t, pool, 200+i, packageTask.ID, base.Add(time.Duration(i)*time.Second), fmt.Sprintf("package-%02d.png", i))
+	}
+	o := operatorTools{service: api.Service{Store: st}}
+	got := decodeDotsInbox(t, dotsInboxText(t, o, ctx, dotsInboxInput{})).Requests[0]
+	if len(got.Attachments) != dotsInboxAttachmentLimit || !got.AttachmentsTruncated {
+		t.Fatalf("own attachments = %d truncated=%v", len(got.Attachments), got.AttachmentsTruncated)
+	}
+	if got.Attachments[0].OriginalName != "own-00.png" || got.Attachments[dotsInboxAttachmentLimit-1].OriginalName != "own-19.png" {
+		t.Fatalf("own attachments keep the first 20 by created_at: %s .. %s", got.Attachments[0].OriginalName, got.Attachments[dotsInboxAttachmentLimit-1].OriginalName)
+	}
+	if len(got.ReferencedAttachments) != dotsInboxAttachmentLimit || !got.ReferencedAttachmentsTruncated {
+		t.Fatalf("referenced attachments = %d truncated=%v", len(got.ReferencedAttachments), got.ReferencedAttachmentsTruncated)
+	}
+}
+
+func TestDotsInboxReadsAtMostFiveNamedTasks(t *testing.T) {
+	st, pool := newOperatorStoreWithPool(t)
+	ctx := context.Background()
+	base := time.Date(2026, 11, 15, 3, 0, 0, 0, time.UTC)
+	body := "The package is spread over"
+	ids := make([]int64, 0, 7)
+	for i := 0; i < 7; i++ {
+		task := newOperatorTask(t, st, fmt.Sprintf("package %d", i))
+		ids = append(ids, task.ID)
+		body += " hk " + strconv.FormatInt(task.ID, 10)
+		dotsAttachment(t, pool, 300+i, task.ID, base.Add(time.Duration(i)*time.Second), fmt.Sprintf("package-%d.png", i))
+	}
+	if _, err := st.CreateDotsRequest(ctx, "caller", store.DotsRequestInput{Title: "Review", Body: body + "."}); err != nil {
+		t.Fatal(err)
+	}
+	o := operatorTools{service: api.Service{Store: st}}
+	got := decodeDotsInbox(t, dotsInboxText(t, o, ctx, dotsInboxInput{})).Requests[0]
+	if len(got.ReferencedAttachments) != dotsInboxNamedTaskLimit {
+		t.Fatalf("referenced attachments = %d, want %d", len(got.ReferencedAttachments), dotsInboxNamedTaskLimit)
+	}
+	for i, attachment := range got.ReferencedAttachments {
+		if attachment.OriginalName != fmt.Sprintf("package-%d.png", i) {
+			t.Fatalf("referenced %d = %s, want the first five named tasks in body order", i, attachment.OriginalName)
+		}
+	}
+	if got.ReferencedAttachmentsTruncated {
+		t.Fatal("five items from five tasks reported truncated")
+	}
+}
+
+// One read serves the whole page: three requests with files must still make a
+// single statement that touches attachment_refs.
+func TestDotsInboxReadsAttachmentsInOneQuery(t *testing.T) {
+	st, pool := newOperatorStoreWithPool(t)
+	base := time.Date(2026, 11, 15, 4, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		request, err := st.CreateDotsRequest(context.Background(), "caller", store.DotsRequestInput{Title: fmt.Sprintf("Review %d", i), Body: "One file."})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dotsAttachment(t, pool, 400+i, request.ID, base.Add(time.Duration(i)*time.Second), fmt.Sprintf("file-%d.png", i))
+	}
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	ctx, span := provider.Tracer("dots-test").Start(context.Background(), "dots_inbox")
+	o := operatorTools{service: api.Service{Store: st}}
+	decodeDotsInbox(t, dotsInboxText(t, o, ctx, dotsInboxInput{}))
+	span.End()
+	queries := 0
+	for _, ended := range exporter.GetSpans() {
+		for _, attr := range ended.Attributes {
+			if attr.Key == "db.query.text" && strings.Contains(attr.Value.AsString(), "attachment_refs") {
+				queries++
+			}
+		}
+	}
+	if queries != 1 {
+		t.Fatalf("attachment queries = %d, want 1 for the whole page", queries)
 	}
 }

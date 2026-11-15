@@ -41,7 +41,12 @@ started request, send START with `takeover: true` and the current
 `expected_updated_at`: it returns a new `run_token`, the previous one is refused
 from then on, and the handover is recorded in the task's events. `dots_inbox`
 reports `started` and `run_started_at` (when the current run's token was
-issued) for each request.
+issued) for each request. Each request also lists its `attachments`
+(`original_name`, `size_bytes`, `mime`, `sha256`, `created_at`) and, in
+`referenced_attachments`, the attachments of up to five tasks its body names as
+`hk <id>`, each with `from_task`. Both lists stop at 20 items and set
+`attachments_truncated` or `referenced_attachments_truncated` when more exist;
+`attachment_get_url` issues the ten-minute download link for one.
 `PROGRESS` records a partial result and leaves the task open. `BLOCKED` parks
 it with the reason, and `RESULT`
 completes it with the result document as evidence. A `QUESTION` is delivered

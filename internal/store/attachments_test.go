@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 )
 
 // testAttachmentStore runs in its own schema: the attachment tests count
@@ -161,5 +162,55 @@ func TestAttachmentTaskRefIsStoredAndListedByRef(t *testing.T) {
 	bad.RefKind, bad.RefID = "task", "012"
 	if _, _, e := s.PutAttachment(t.Context(), bad, 100, 10); e == nil {
 		t.Fatal("non-canonical task id stored")
+	}
+}
+
+// The dots inbox reads a page of task refs in one statement. It must filter to
+// the requested set, order by created_at then task id, and bound the rows one
+// task contributes so a single large task cannot flood the page.
+func TestListTaskAttachmentsByRefsFiltersSortsAndCaps(t *testing.T) {
+	s := testAttachmentStore(t)
+	base := time.Date(2026, 11, 15, 1, 0, 0, 0, time.UTC)
+	add := func(n int, refID string, at time.Time) Attachment {
+		x := attachmentFor(n)
+		if _, e := s.pool.Exec(t.Context(), `INSERT INTO attachments(sha256,size_bytes,mime,original_name,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6)`, x.SHA256, x.SizeBytes, x.MIME, x.OriginalName, x.CreatedBy, at); e != nil {
+			t.Fatal(e)
+		}
+		if _, e := s.pool.Exec(t.Context(), `INSERT INTO attachment_refs(sha256,ref_kind,ref_id) VALUES($1,'task',$2)`, x.SHA256, refID); e != nil {
+			t.Fatal(e)
+		}
+		x.RefKind, x.RefID, x.CreatedAt = "task", refID, at
+		return x
+	}
+	late := add(60, "12", base.Add(3*time.Second))
+	early := add(61, "12", base)
+	other := add(62, "13", base.Add(time.Second))
+	add(63, "14", base)
+
+	rows, e := s.ListTaskAttachmentsByRefs(t.Context(), []int64{12, 13}, 10)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	want := []Attachment{early, other, late}
+	for i := range want {
+		if rows[i].SHA256 != want[i].SHA256 || rows[i].RefID != want[i].RefID || rows[i].RefKind != "task" || !rows[i].CreatedAt.Equal(want[i].CreatedAt) {
+			t.Fatalf("row %d = %+v, want %+v", i, rows[i], want[i])
+		}
+	}
+	capped, e := s.ListTaskAttachmentsByRefs(t.Context(), []int64{12, 13}, 1)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(capped) != 2 || capped[0].SHA256 != early.SHA256 || capped[1].SHA256 != other.SHA256 {
+		t.Fatalf("perRef 1 rows = %+v", capped)
+	}
+	if rows, e := s.ListTaskAttachmentsByRefs(t.Context(), nil, 10); e != nil || len(rows) != 0 {
+		t.Fatalf("no refs rows=%+v err=%v", rows, e)
+	}
+	if _, e := s.ListTaskAttachmentsByRefs(t.Context(), []int64{0}, 10); e == nil {
+		t.Fatal("non-positive task id accepted")
 	}
 }
