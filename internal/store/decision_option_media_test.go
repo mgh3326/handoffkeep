@@ -188,12 +188,22 @@ func TestDecisionOptionsWithoutMediaReadAsEmpty(t *testing.T) {
 	x, err := s.CreateTask(ctx, Task{
 		Lane: "b4788-old-shape", Title: "old shape", Kind: "implement", CreatedBy: "dr-test",
 		Project: projectPtr(testProjectName),
-		Refs: TaskRefs{
-			DecisionOptions: &DecisionOptions{AllowFree: true, Options: []DecisionOption{{Key: "A", Label: "old A"}, {Key: "B", Label: "old B", Recommended: true}}},
-			DecisionRequest: &DecisionRequest{ID: "dr-1-1", Revision: 1, Root: "dr-1-1", Status: DecisionRequestOpen, Question: "old?", DefaultAction: "none", RequestedBy: "dr-test"},
-		},
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	// A row written before options could carry media holds the two refs keys
+	// with no attachments field at all. CreateTask refuses decision refs (they
+	// are written by tasks decision-request only), so the old row is written
+	// directly, the way a previous release left it.
+	legacy, err := json.Marshal(TaskRefs{
+		DecisionOptions: &DecisionOptions{AllowFree: true, Options: []DecisionOption{{Key: "A", Label: "old A"}, {Key: "B", Label: "old B", Recommended: true}}},
+		DecisionRequest: &DecisionRequest{ID: "dr-1-1", Revision: 1, Root: "dr-1-1", Status: DecisionRequestOpen, Question: "old?", DefaultAction: "none", RequestedBy: "dr-test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET refs = COALESCE(refs, '{}'::jsonb) || $2::jsonb WHERE id=$1`, x.ID, legacy); err != nil {
 		t.Fatal(err)
 	}
 	var raw string
