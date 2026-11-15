@@ -117,9 +117,10 @@ green() {
 	fx_gh "repos/$REPO/compare/main...$SHA" '{"status":"behind"}'
 	fx_gh "repos/$REPO/commits/$SHA/status" '{"statuses":[{"context":"deploy-ok","state":"success"}]}'
 	printf '{"assets":[{"name":"handoffkeep_darwin_amd64"},{"name":"handoffkeep_darwin_arm64"},{"name":"handoffkeep_linux_arm64"},{"name":"SHA256SUMS"}]}' >"$FIX/release_view.json"
+	# gh release downloads carry no exec bit, so the fake assets are 0644 too.
 	for arch in darwin_amd64 darwin_arm64 linux_arm64; do
 		version_script "$TAG" >"$FIX/release/handoffkeep_$arch"
-		chmod +x "$FIX/release/handoffkeep_$arch"
+		chmod 644 "$FIX/release/handoffkeep_$arch"
 	done
 	sums "$FIX/release"
 	printf '{"vcs_revision":"%s"}' "$SHA" >"$FIX/ncp_healthz"
@@ -174,7 +175,9 @@ check "m1b CLI ok" has "$FIX/out" "CLI m1b ok"
 check "pi CLI ok" has "$FIX/out" "CLI pi ok"
 check "summary has three installs" has "$FIX/out" "summary tag=$TAG installed=3 skipped=0 unreachable=none failed=none"
 check "local binary installed" has "$FIX/home/.local/bin/handoffkeep" "release=$TAG"
+check "local binary executable" test -x "$FIX/home/.local/bin/handoffkeep"
 check "m1b binary installed" has "$FIX/remote/m1b/.local/bin/handoffkeep" "release=$TAG"
+check "m1b binary executable" test -x "$FIX/remote/m1b/.local/bin/handoffkeep"
 check "pi old binary kept as bak-pre" has "$FIX/remote/pi/.local/bin/handoffkeep.bak-pre-$TAG" "echo old"
 check "no .new left behind" test ! -e "$FIX/remote/m1b/.local/bin/handoffkeep.new"
 

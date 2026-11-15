@@ -215,8 +215,9 @@ install_host() {
 	fi
 
 	# set -e: a failed backup or restorecon stops the chain before the mv, so the
-	# working binary is never replaced without its backup in place.
-	run_on "$host" "set -e; if [ -e ~/.local/bin/handoffkeep ]; then cp -p ~/.local/bin/handoffkeep ~/.local/bin/handoffkeep.bak-pre-$TAG; fi; if command -v restorecon >/dev/null 2>&1; then restorecon ~/.local/bin/handoffkeep.new; fi; mv -f ~/.local/bin/handoffkeep.new ~/.local/bin/handoffkeep" || {
+	# working binary is never replaced without its backup in place. gh release
+	# downloads carry no exec bit, so the staged file is made 0755 first.
+	run_on "$host" "set -e; if [ -e ~/.local/bin/handoffkeep ]; then cp -p ~/.local/bin/handoffkeep ~/.local/bin/handoffkeep.bak-pre-$TAG; fi; chmod 755 ~/.local/bin/handoffkeep.new; if command -v restorecon >/dev/null 2>&1; then restorecon ~/.local/bin/handoffkeep.new; fi; mv -f ~/.local/bin/handoffkeep.new ~/.local/bin/handoffkeep" || {
 		run_on "$host" 'rm -f ~/.local/bin/handoffkeep.new' >/dev/null 2>&1 || true
 		fail_host "$host" install_failed
 		return 0
