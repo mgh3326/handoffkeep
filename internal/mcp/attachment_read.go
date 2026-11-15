@@ -35,7 +35,9 @@ const (
 	attachmentReadTextMaxBytes = 256 << 10
 	// attachmentReadTextProbeMaxBytes bounds how far the rest of a truncated
 	// text body is drained to learn its full size, for a transport that does
-	// not carry the stored row's size_bytes.
+	// not carry the stored row's size_bytes. The probe reads two bytes past
+	// it: a count that stops exactly on a limit cannot be told apart from one
+	// that stops short of more.
 	attachmentReadTextProbeMaxBytes = 4 << 20
 )
 
@@ -264,7 +266,7 @@ func attachmentReadText(x store.Attachment, body io.Reader) (*gmcp.CallToolResul
 		return &gmcp.CallToolResult{Content: []gmcp.Content{&gmcp.TextContent{Text: string(text)}}}, nil, nil
 	}
 	size, exact := attachmentTextFullSize(x.SizeBytes, body, len(src))
-	note := fmt.Sprintf("\n\n[attachment_read truncated this text: it showed the first %d bytes of a file larger than %d bytes. Call attachment_get_url with sha256 %q for the whole file.]", len(text), size, x.SHA256)
+	note := fmt.Sprintf("\n\n[attachment_read truncated this text: it showed the first %d bytes of a file of at least %d bytes. Call attachment_get_url with sha256 %q for the whole file.]", len(text), size, x.SHA256)
 	if exact {
 		note = fmt.Sprintf("\n\n[attachment_read truncated this text: it showed the first %d of %d bytes. Call attachment_get_url with sha256 %q for the whole file.]", len(text), size, x.SHA256)
 	}
@@ -273,15 +275,15 @@ func attachmentReadText(x store.Attachment, body io.Reader) (*gmcp.CallToolResul
 
 // attachmentTextFullSize is the file's size for the truncation line: the
 // stored row's size_bytes when the transport carries it, otherwise the rest of
-// the stream counted up to a probe bound. exact is false when the stream ran
-// past that bound, so the line can call the number a lower bound.
+// the stream counted up to the probe limit. exact is false only when the count
+// reached that limit, so the line can call the number a lower bound.
 func attachmentTextFullSize(known int64, rest io.Reader, read int) (size int64, exact bool) {
 	if known > 0 {
 		return max(known, int64(read)), true
 	}
-	n, err := io.Copy(io.Discard, io.LimitReader(rest, attachmentReadTextProbeMaxBytes+1))
+	n, err := io.Copy(io.Discard, io.LimitReader(rest, attachmentReadTextProbeMaxBytes+2))
 	total := int64(read) + n
-	return total, err == nil && n <= attachmentReadTextProbeMaxBytes
+	return total, err == nil && n < attachmentReadTextProbeMaxBytes+2
 }
 
 // trimToUTF8Boundary drops a partial rune at the end of b, so a cut never
