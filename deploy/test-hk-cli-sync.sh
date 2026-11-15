@@ -87,9 +87,15 @@ host=${args[1]%%:*}
 rel=${args[1]#*:}
 echo "scp $host $rel" >>"$FIX/calls"
 grep -qxF "$host" "$FIX/unreachable" 2>/dev/null && exit 255
-mkdir -p "$FIX/remote/$host/$(dirname "$rel")"
-cp "$src" "$FIX/remote/$host/$rel"
-[[ ! -f "$FIX/tamper/$host" ]] || printf 'tampered' >>"$FIX/remote/$host/$rel"
+# An absolute destination is already a path in the host's fake home; a
+# relative one is relative to it.
+case $rel in
+/*) dest=$rel ;;
+*) dest="$FIX/remote/$host/$rel" ;;
+esac
+mkdir -p "$(dirname "$dest")"
+cp "$src" "$dest"
+[[ ! -f "$FIX/tamper/$host" ]] || printf 'tampered' >>"$dest"
 EOF
 	chmod +x "$FIX/bin/gh" "$FIX/bin/ssh" "$FIX/bin/scp"
 }
@@ -320,6 +326,28 @@ check "pi version_mismatch" has "$FIX/out" "FAIL pi version_mismatch"
 check "pi old CLI restored" has "$FIX/remote/pi/.local/bin/handoffkeep" "echo old"
 check "pi backup kept" test -f "$FIX/remote/pi/.local/bin/handoffkeep.bak-pre-$TAG"
 check "m1b still installed" has "$FIX/out" "CLI m1b ok"
+
+echo "== fresh install that fails the version check leaves no CLI behind"
+setup
+version_script v0.0.299 >"$FIX/release/handoffkeep_linux_arm64"
+chmod 644 "$FIX/release/handoffkeep_linux_arm64"
+sums "$FIX/release"
+run "$TAG"
+check "exit 8" rc_is 8
+check "pi version_mismatch" has "$FIX/out" "FAIL pi version_mismatch"
+check "pi has no CLI" test ! -e "$FIX/remote/pi/.local/bin/handoffkeep"
+check "pi staging removed" test -z "$(find "$FIX/remote/pi/.local/bin" -name "handoffkeep.stage*")"
+
+echo "== a re-run never overwrites the first per-tag backup"
+setup
+mkdir -p "$FIX/remote/m1b/.local/bin"
+printf '#!/usr/bin/env bash\necho original\n' >"$FIX/remote/m1b/.local/bin/handoffkeep.bak-pre-$TAG"
+printf '#!/usr/bin/env bash\necho newer-than-tag\n' >"$FIX/remote/m1b/.local/bin/handoffkeep"
+chmod 755 "$FIX/remote/m1b/.local/bin/handoffkeep"
+run "$TAG"
+check "exit 0" rc_is 0
+check "m1b CLI ok" has "$FIX/out" "CLI m1b ok"
+check "original backup kept" has "$FIX/remote/m1b/.local/bin/handoffkeep.bak-pre-$TAG" "echo original"
 
 echo "== usage errors"
 setup
