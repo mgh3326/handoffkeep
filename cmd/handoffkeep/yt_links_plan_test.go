@@ -95,6 +95,9 @@ func newYTLPlanCLIEnv(t *testing.T, prefix, project string) ytlPlanCLIEnv {
 		return task
 	}
 	lo, hi := mk("lower"), mk("higher")
+	if lo.ID > hi.ID {
+		lo, hi = hi, lo
+	}
 	for _, task := range []store.Task{lo, hi} {
 		id := strconv.FormatInt(task.ID, 10)
 		verified, err := st.YTCanaryCandidate(ctx, task.ID)

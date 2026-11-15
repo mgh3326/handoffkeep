@@ -99,9 +99,9 @@ type YTLinksPlanReport struct {
 }
 
 // PlanYTLinks plans every bound writer task opt selects on the configured
-// tenant, in ascending task id, each through read-only transaction, and reads
-// its issue's links through remote. An unknown opt.TaskID is ErrTaskNotFound.
-// Nothing is written.
+// tenant, in ascending task id, each in its own read-only transaction, and
+// reads its issue's links through remote. An unknown opt.TaskID is
+// ErrTaskNotFound. Nothing is written.
 func (s *Store) PlanYTLinks(ctx context.Context, opt YTLinksPlanOptions, remote ytwrite.IssueLinksRemote) (YTLinksPlanReport, error) {
 	mode, tenant := s.ytLinksSetting()
 	r := YTLinksPlanReport{Mode: mode, Tenant: tenant, TaskID: opt.TaskID, Project: opt.Project, Limit: opt.Limit,

@@ -29,6 +29,15 @@ func ytlpTask(t *testing.T, s *Store, title string) Task {
 
 func ytlpIssue(task Task) string { return "2-" + strconv.FormatInt(task.ID, 10) }
 
+// ytlpOrder returns the pair ascending by id: a related edge is stored with
+// src < dst, and the lower id is its writer.
+func ytlpOrder(a, b Task) (Task, Task) {
+	if a.ID > b.ID {
+		return b, a
+	}
+	return a, b
+}
+
 // ytlpEnv is one schema with its mapping and mode.
 func ytlpEnv(t *testing.T, prefix string) *Store {
 	t.Helper()
@@ -95,7 +104,7 @@ func ytlpLink(kind string, task Task) YTLinkPlanLink {
 func TestYTLinksPlanWouldAddAndWritesNothing(t *testing.T) {
 	s := ytlpEnv(t, "ytl_plan_add")
 	ctx := t.Context()
-	lo, hi := ytlpTask(t, s, "lower"), ytlpTask(t, s, "higher")
+	lo, hi := ytlpOrder(ytlpTask(t, s, "lower"), ytlpTask(t, s, "higher"))
 	ytbBind(t, s, ytbBinding(lo.ID))
 	ytbBind(t, s, ytbBinding(hi.ID))
 	if _, err := s.AddTaskRelation(ctx, hi.ID, RelationRelated, lo.ID, "tester"); err != nil {
@@ -153,7 +162,7 @@ func TestYTLinksPlanWouldAddAndWritesNothing(t *testing.T) {
 func TestYTLinksPlanWouldDeleteOwned(t *testing.T) {
 	s := ytlpEnv(t, "ytl_plan_del")
 	ctx := t.Context()
-	lo, hi := ytlpTask(t, s, "lower"), ytlpTask(t, s, "higher")
+	lo, hi := ytlpOrder(ytlpTask(t, s, "lower"), ytlpTask(t, s, "higher"))
 	ytbBind(t, s, ytbBinding(lo.ID))
 	ytbBind(t, s, ytbBinding(hi.ID))
 	if _, err := s.AddTaskRelation(ctx, lo.ID, RelationRelated, hi.ID, "tester"); err != nil {
@@ -282,7 +291,7 @@ func TestYTLinksPlanReparentIsDeleteAndAdd(t *testing.T) {
 func TestYTLinksPlanTaskSelection(t *testing.T) {
 	s := ytlpEnv(t, "ytl_plan_task")
 	ctx := t.Context()
-	lo, hi := ytlpTask(t, s, "lower"), ytlpTask(t, s, "higher")
+	lo, hi := ytlpOrder(ytlpTask(t, s, "lower"), ytlpTask(t, s, "higher"))
 	ytbBind(t, s, ytbBinding(lo.ID))
 	ytbBind(t, s, ytbBinding(hi.ID))
 	if _, err := s.AddTaskRelation(ctx, lo.ID, RelationRelated, hi.ID, "tester"); err != nil {

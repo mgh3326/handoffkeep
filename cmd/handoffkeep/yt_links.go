@@ -122,6 +122,13 @@ func youtrackLinksPlanCmd(args []string, out io.Writer) error {
 		return err
 	}
 	defer st.Close()
+	// OpenReadOnly never migrates: an older schema must say so, not fail
+	// with a missing relation halfway through the walk.
+	if applied, err := st.MigrationApplied(openCtx, store.YTIssueLinksMigration); err != nil {
+		return err
+	} else if !applied {
+		return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("the database lacks migration %s: deploy the release that adds it first", store.YTIssueLinksMigration)}
+	}
 	st.SetYTLinksMode(mode, remote.Tenant())
 	report, err := st.PlanYTLinks(context.Background(), store.YTLinksPlanOptions{
 		Project: strings.TrimSpace(*project), TaskID: *task, Limit: *limit}, remote)
