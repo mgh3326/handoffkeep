@@ -22,9 +22,9 @@ import (
 // roots, 28 "brief", 14 "deploy"). The report names them all, the children
 // each has, and the one hk uses: the OLDEST by creation time, then by id,
 // which is what the article_create send picks when the family has no recorded
-// root. Deleting or merging the other roots is an operator's action in
-// YouTrack; this command writes nothing and reads only.
-const youtrackArticlesRootsUsage = "usage: youtrack articles roots [--family F] [--project P]"
+// root. `roots merge` (yt_articles_roots_merge.go) gathers the duplicates
+// under that root and deletes them; without --apply it only prints that plan.
+const youtrackArticlesRootsUsage = "usage: youtrack articles roots [--family F] [--project P] | youtrack articles roots merge [--family F] [--project P] [--apply]"
 
 // ytArticleRootTimeout bounds the report: one article list, then one GET per
 // top-level article whose summary can be a family.
@@ -65,6 +65,9 @@ func youtrackArticlesRootsCmd(args []string, out io.Writer) error {
 	if len(args) == 0 || args[0] != "roots" {
 		return errors.New(youtrackArticlesRootsUsage)
 	}
+	if len(args) > 1 && args[1] == "merge" {
+		return youtrackArticleRootsMergeCmd(args[2:], out)
+	}
 	fs := flag.NewFlagSet("youtrack articles roots", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	family := fs.String("family", "", "only this family")
@@ -101,21 +104,28 @@ func youtrackArticlesRootsCmd(args []string, out io.Writer) error {
 	return printJSON(out, report)
 }
 
-// ytArticleRoots lists the family roots of every project the bot can see, or
-// of one family, or of one project, and marks the root each family uses.
-func ytArticleRoots(ctx context.Context, remote ytArticleList, family, project string) (ytArticleRootsReport, error) {
-	report := ytArticleRootsReport{Family: family}
+// ytRootScan is what one roots read sees: every top-level article carrying a
+// family's marker, and every article's children by parent id. The report
+// counts a root's children; the merge moves them (hk 4806).
+type ytRootScan struct {
+	roots    []ytArticleRoot
+	children map[string][]youtrack.Article
+}
+
+// ytScanRoots lists the top-level articles of every project the bot can see,
+// or of one family, or of one project, keeps those carrying a family's marker,
+// and collects every article's children by parent id.
+func ytScanRoots(ctx context.Context, remote ytArticleList, family, project string) (ytRootScan, error) {
+	scan := ytRootScan{children: map[string][]youtrack.Article{}}
 	all, err := remote.ListArticles(ctx)
 	if err != nil {
-		return report, fmt.Errorf("list YouTrack articles: %w", err)
+		return scan, fmt.Errorf("list YouTrack articles: %w", err)
 	}
-	children := map[string]int{}
 	for _, a := range all {
 		if a.HasParent() {
-			children[a.ParentArticle.ID]++
+			scan.children[a.ParentArticle.ID] = append(scan.children[a.ParentArticle.ID], a)
 		}
 	}
-	byFamily := map[string][]ytArticleRoot{}
 	for _, a := range all {
 		if a.HasParent() || a.Project == nil || a.ID == "" || !ytwrite.ValidFamily(a.Summary) {
 			continue
@@ -130,17 +140,33 @@ func ytArticleRoots(ctx context.Context, remote ytArticleList, family, project s
 		// family's summary and no marker is someone else's text.
 		full, err := remote.ReadArticle(ctx, a.ID)
 		if err != nil {
-			return report, fmt.Errorf("read article %s: %w", a.ID, err)
+			return scan, fmt.Errorf("read article %s: %w", a.ID, err)
 		}
 		if !strings.Contains(full.Content, ytwrite.FamilyRootMarker(a.Summary)) {
 			continue
 		}
 		root := ytArticleRoot{Family: a.Summary, Project: a.Project.ID, ProjectShort: a.Project.ShortName,
-			ArticleID: a.ID, Children: children[a.ID]}
+			ArticleID: a.ID, Children: len(scan.children[a.ID])}
 		if full.Created > 0 {
 			root.Created = time.UnixMilli(full.Created).UTC().Format(time.RFC3339)
 		}
-		byFamily[a.Project.ID+"\x00"+a.Summary] = append(byFamily[a.Project.ID+"\x00"+a.Summary], root)
+		scan.roots = append(scan.roots, root)
+	}
+	return scan, nil
+}
+
+// ytArticleRoots lists the family roots of every project the bot can see, or
+// of one family, or of one project, and marks the root each family uses.
+func ytArticleRoots(ctx context.Context, remote ytArticleList, family, project string) (ytArticleRootsReport, error) {
+	report := ytArticleRootsReport{Family: family}
+	scan, err := ytScanRoots(ctx, remote, family, project)
+	if err != nil {
+		return report, err
+	}
+	byFamily := map[string][]ytArticleRoot{}
+	for _, r := range scan.roots {
+		key := r.Project + "\x00" + r.Family
+		byFamily[key] = append(byFamily[key], r)
 	}
 	for _, roots := range byFamily {
 		used := ytOldestRoot(roots)
