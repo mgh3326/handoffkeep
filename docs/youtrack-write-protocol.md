@@ -2087,7 +2087,9 @@ top-level.
   repeated: a root it made is used, and no root keeps the op `remote_unknown`
   for the evidence path. A root written by an earlier release carries the same
   sentence, so the lookup still finds it. `youtrack articles roots` reports
-  each family's roots, their children and the one hk uses.
+  each family's roots, their children and the one hk uses; `youtrack articles
+  roots merge` cleans a family's duplicates up (Duplicate roots cleanup
+  runbook, below).
 - Evidence looks for the root without creating it, and takes the same one Send
   would (the recorded root, else the oldest carrying the marker): no root, no
   match.
@@ -2148,6 +2150,43 @@ the content's sha256 and `needs_update` to false in the same transaction.
 `article_create`: the document has no binding, or one this op published (a
 backfill binding holds it). `article_update`: the op's target is the
 document's bound article on that tenant now.
+
+### Duplicate roots cleanup runbook (hk 4806)
+
+A root POST that timed out and was retried left several articles carrying one
+family's marker (production after #441: 30 `briefs` roots, 28 `brief`, 14
+`deploy`). `youtrack articles roots merge` gathers each family's documents
+under the root hk uses and deletes the emptied duplicates. It reads hk
+(`HANDOFFKEEP_DB_URL`, read-only) and YouTrack (`YOUTRACK_URL`,
+`YOUTRACK_BOT_API_KEY`), writes only YouTrack, and needs the bot's Article
+update and delete permissions.
+
+1. **Dry run.** `youtrack articles roots merge [--family F] [--project P]`
+   writes nothing and prints the plan: per family with duplicates, the kept
+   root and its source (`recorded` in `yt_family_roots`, else the oldest by
+   creation time then id), then each duplicate's children (id, summary) and
+   the delete that follows. A family is refused and never touched when the
+   recorded root disagrees with the oldest (`recorded_root_not_oldest`) or is
+   no longer a root in YouTrack (`recorded_root_missing`): a person decides
+   that family. Review the plan.
+2. **Apply.** `youtrack articles roots merge --apply` runs the same plan in
+   order. Each child moves with one `POST /api/articles/{id}` whose body is
+   `{"parentArticle":{"id":"<kept>"}}` (YouTrack's Operations with Specific
+   Article; `project` is read-only, so a move stays in its project). The
+   duplicate is then re-read and deleted only when it has no child left, is
+   top-level and still carries `<!-- hk-family:<family> -->`. The kept root, an
+   article that is not a top-level family root, and an article with children
+   are never deleted.
+3. **Verify.** `youtrack articles roots` lists each family's roots and marks
+   the one hk uses; the cleanup is done when no family reports a duplicate
+   (the report's `duplicates` count is 0).
+
+Each move and delete writes one log line (`yt.roots_merge.moved`,
+`yt.roots_merge.deleted`, or `..._failed` with the error); the JSON report
+counts `moved`, `deleted`, `skipped` and `refused` per family. A failure stops
+that family only, marks its remaining duplicates `skip: family_stopped`, and
+the command exits 1. Rerunning converges: a moved child is already under the
+kept root, and a deleted duplicate is gone.
 
 ## Tests
 
