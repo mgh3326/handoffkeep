@@ -166,8 +166,9 @@ func TestUIDecisionDetailOptionMedia(t *testing.T) {
 	if err = pool.QueryRow(t.Context(), `SELECT id FROM decision_requests WHERE source='task_request' AND source_ref=$1`, req.Request.ID).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
-	// The translated option list names the same media, so its attachments carry
-	// the same shape as the original list.
+	// options_ko carries the translated labels only. The translated text below
+	// names a different content address than the option does, the shape of a
+	// translator error: it must not put that picture on the option.
 	original, err := json.Marshal(store.DecisionOptions{AllowFree: true, Options: []store.DecisionOption{{
 		Key: "A", Label: "2A", Attachments: []store.DecisionOptionAttachment{{SHA256: sha, Caption: "approach"}},
 	}}})
@@ -175,7 +176,7 @@ func TestUIDecisionDetailOptionMedia(t *testing.T) {
 		t.Fatal(err)
 	}
 	translated, err := json.Marshal(store.DecisionOptions{AllowFree: true, Options: []store.DecisionOption{{
-		Key: "A", Label: "2A 한국어", Attachments: []store.DecisionOptionAttachment{{SHA256: sha, Caption: "approach"}},
+		Key: "A", Label: "2A 한국어", Attachments: []store.DecisionOptionAttachment{{SHA256: strings.Repeat("9", 64), Caption: "wrong"}},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -211,16 +212,16 @@ func TestUIDecisionDetailOptionMedia(t *testing.T) {
 	if status := boardJSON(t, h.Client(), fmt.Sprintf("%s/ui/api/decisions/%d", h.URL, id), token, &detail); status != http.StatusOK {
 		t.Fatal(status)
 	}
-	for name, options := range map[string][]optionJSON{"options": detail.Request.Options, "options_ko": detail.Request.OptionsKO} {
-		if len(options) != 1 || len(options[0].Attachments) != 1 {
-			t.Fatalf("%s=%+v", name, options)
-		}
-		attachment := options[0].Attachments[0]
-		if attachment.SHA256 != sha || attachment.Caption != "approach" || attachment.MIME != "image/png" || attachment.OriginalName != "approach.png" || attachment.SizeBytes != 3 {
-			t.Fatalf("%s attachment=%+v", name, attachment)
-		}
+	if len(detail.Request.Options) != 1 || len(detail.Request.Options[0].Attachments) != 1 {
+		t.Fatalf("options=%+v", detail.Request.Options)
 	}
-	if detail.Request.OptionsKO[0].Label != "2A 한국어" {
+	attachment := detail.Request.Options[0].Attachments[0]
+	if attachment.SHA256 != sha || attachment.Caption != "approach" || attachment.MIME != "image/png" || attachment.OriginalName != "approach.png" || attachment.SizeBytes != 3 {
+		t.Fatalf("attachment=%+v", attachment)
+	}
+	// options_ko is the labels only: the translated text names a different
+	// address, and that picture must not reach the page.
+	if len(detail.Request.OptionsKO) != 1 || detail.Request.OptionsKO[0].Label != "2A 한국어" || len(detail.Request.OptionsKO[0].Attachments) != 0 {
 		t.Fatalf("options_ko=%+v", detail.Request.OptionsKO)
 	}
 }

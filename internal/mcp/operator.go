@@ -568,6 +568,18 @@ func decisionOptionViews(options []store.DecisionOption) []decisionOptionView {
 	return out
 }
 
+// decisionOptionKOViews is what options_ko carries: each option's key and
+// translated label, nothing else. The media and the recommendation belong to
+// the option itself (options[]), so a translated payload can never name a
+// picture the option does not carry or flip a recommendation.
+func decisionOptionKOViews(options []store.DecisionOption) []decisionOptionView {
+	out := make([]decisionOptionView, 0, len(options))
+	for _, option := range options {
+		out = append(out, decisionOptionView{Key: option.Key, Label: option.Label})
+	}
+	return out
+}
+
 // decisionMedia fills every attachment's MIME type and original name in one
 // lookup over the options of a page.
 func (o operatorTools) decisionMedia(ctx context.Context, groups ...[]decisionOptionView) error {
@@ -691,7 +703,7 @@ func (o operatorTools) decisionsPending(ctx context.Context, _ *gmcp.CallToolReq
 				if translated.Stale {
 					items[i].OptionsKOStale = true
 				} else {
-					items[i].OptionsKO = decisionOptionViews(options.Options)
+					items[i].OptionsKO = decisionOptionKOViews(options.Options)
 				}
 			} else {
 				items[i].OptionsKOStale = true
@@ -707,17 +719,12 @@ func (o operatorTools) decisionsPending(ctx context.Context, _ *gmcp.CallToolReq
 		}
 		decisions = append(decisions, item)
 	}
-	// Both option groups name the same media: an option carries one attachment
-	// shape on the wire whether it is in the original or the translated list.
-	views := make([]decisionView, 0, len(decisions)+len(cleanup))
-	views = append(views, decisions...)
-	views = append(views, cleanup...)
-	optionGroups := make([][]decisionOptionView, 0, 2*len(views))
-	for _, item := range views {
+	optionGroups := make([][]decisionOptionView, 0, len(decisions)+len(cleanup))
+	for _, item := range decisions {
 		optionGroups = append(optionGroups, item.Options)
-		if len(item.OptionsKO) > 0 {
-			optionGroups = append(optionGroups, item.OptionsKO)
-		}
+	}
+	for _, item := range cleanup {
+		optionGroups = append(optionGroups, item.Options)
 	}
 	if err := o.decisionMedia(ctx, optionGroups...); err != nil {
 		return nil, nil, err

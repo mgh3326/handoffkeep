@@ -68,6 +68,18 @@ func projectDecisionOptions(options []store.DecisionOption) []decisionOptionView
 	return out
 }
 
+// decisionOptionKOViews is what options_ko carries: each option's key and
+// translated label, nothing else. The media and the recommendation belong to
+// the option itself (options[]), so a translated payload can never name a
+// picture the option does not carry or flip a recommendation.
+func decisionOptionKOViews(options []store.DecisionOption) []store.DecisionOption {
+	out := make([]store.DecisionOption, 0, len(options))
+	for _, option := range options {
+		out = append(out, store.DecisionOption{Key: option.Key, Label: option.Label})
+	}
+	return out
+}
+
 // storeOptions is the stored shape of these options, for the translation
 // source hash: media metadata is read from the attachments table and is not
 // part of what a translator translated.
@@ -84,21 +96,21 @@ func storeOptions(options []decisionOptionView) []store.DecisionOption {
 }
 
 type decisionRequestView struct {
-	ID              string               `json:"id"`
-	Revision        int                  `json:"revision"`
-	Supersedes      string               `json:"supersedes,omitempty"`
-	SupersededBy    string               `json:"superseded_by,omitempty"`
-	Current         bool                 `json:"current"`
-	State           string               `json:"state"`
-	StateLabel      string               `json:"state_label"`
-	Question        string               `json:"question"`
-	QuestionKO      string               `json:"question_ko,omitempty"`
-	QuestionKOStale bool                 `json:"question_ko_stale,omitempty"`
-	Options         []decisionOptionView `json:"options"`
-	OptionsKO       []decisionOptionView `json:"options_ko,omitempty"`
-	OptionsKOStale  bool                 `json:"options_ko_stale,omitempty"`
-	AllowFree       bool                 `json:"allow_free"`
-	Reason          string               `json:"reason,omitempty"`
+	ID              string                 `json:"id"`
+	Revision        int                    `json:"revision"`
+	Supersedes      string                 `json:"supersedes,omitempty"`
+	SupersededBy    string                 `json:"superseded_by,omitempty"`
+	Current         bool                   `json:"current"`
+	State           string                 `json:"state"`
+	StateLabel      string                 `json:"state_label"`
+	Question        string                 `json:"question"`
+	QuestionKO      string                 `json:"question_ko,omitempty"`
+	QuestionKOStale bool                   `json:"question_ko_stale,omitempty"`
+	Options         []decisionOptionView   `json:"options"`
+	OptionsKO       []store.DecisionOption `json:"options_ko,omitempty"`
+	OptionsKOStale  bool                   `json:"options_ko_stale,omitempty"`
+	AllowFree       bool                   `json:"allow_free"`
+	Reason          string                 `json:"reason,omitempty"`
 	// RecommendationReason, Unverified and OneFix are the requester's longer
 	// account of its recommendation, what it could not check, and its one
 	// suggested fix (hk 4788).
@@ -154,7 +166,7 @@ func projectDecisionRequest(entry store.DecisionRequestEntry, taskState string, 
 	if request.Status == store.DecisionRequestOpen {
 		if rendered, ok := store.RenderDecisionTemplate(request, entry.Options); ok {
 			view.QuestionKO = rendered.Question
-			view.OptionsKO = projectDecisionOptions(rendered.Options.Options)
+			view.OptionsKO = decisionOptionKOViews(rendered.Options.Options)
 			view.Options = projectDecisionOptions(rendered.Options.Options)
 			for i := range view.Options {
 				view.Options[i].Label = entry.Options.Options[i].Label
@@ -167,19 +179,16 @@ func projectDecisionRequest(entry store.DecisionRequestEntry, taskState string, 
 
 // decisionMediaSHAs lists the content addresses the views name, for one
 // lookup of the MIME type and original name each picture or video is shown
-// with. The translated options name the same media, so they are read too: an
-// option on the wire carries one attachment shape whichever group it is in.
+// with. options_ko carries labels only, so there is nothing to look up there.
 func decisionMediaSHAs(views []decisionRequestView) []string {
 	shas := []string{}
 	seen := map[string]bool{}
 	for _, view := range views {
-		for _, options := range [][]decisionOptionView{view.Options, view.OptionsKO} {
-			for _, option := range options {
-				for _, attachment := range option.Attachments {
-					if !seen[attachment.SHA256] {
-						seen[attachment.SHA256] = true
-						shas = append(shas, attachment.SHA256)
-					}
+		for _, option := range view.Options {
+			for _, attachment := range option.Attachments {
+				if !seen[attachment.SHA256] {
+					seen[attachment.SHA256] = true
+					shas = append(shas, attachment.SHA256)
 				}
 			}
 		}

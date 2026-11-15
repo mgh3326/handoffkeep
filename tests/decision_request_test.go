@@ -290,6 +290,9 @@ func TestDecisionRequestAPIOptionMedia(t *testing.T) {
 	}
 	unknown := drInput("없는 파일")
 	unknown.Options.Options = []store.DecisionOption{{Key: "A", Label: "x", Attachments: []store.DecisionOptionAttachment{{SHA256: strings.Repeat("8", 64)}}}}
+	// Supersede the open request: otherwise the store refuses the second POST
+	// as decision_request_open before it reaches the attachment check.
+	unknown.Supersedes = request["id"].(string)
 	status, refused := post(unknown)
 	if status != http.StatusBadRequest || refused["error"] != "decision_attachment_not_found" {
 		t.Fatalf("unknown sha status=%d body=%v", status, refused)

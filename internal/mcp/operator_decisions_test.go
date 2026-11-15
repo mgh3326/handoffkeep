@@ -340,8 +340,9 @@ func TestDecisionsPendingCarriesOptionMedia(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The translated option list names the same media, so its attachments must
-	// carry the same MIME type and original name as the original list.
+	// options_ko carries the translated labels only. The translated text below
+	// names a different content address than the option does, the shape of a
+	// translator error: it must not put that picture on the option.
 	original, err := json.Marshal(store.DecisionOptions{Options: []store.DecisionOption{{
 		Key: "A", Label: "2A", Recommended: true,
 		Attachments: []store.DecisionOptionAttachment{{SHA256: sha, Caption: "approach"}},
@@ -351,7 +352,7 @@ func TestDecisionsPendingCarriesOptionMedia(t *testing.T) {
 	}
 	translated, err := json.Marshal(store.DecisionOptions{Options: []store.DecisionOption{{
 		Key: "A", Label: "2A 한국어", Recommended: true,
-		Attachments: []store.DecisionOptionAttachment{{SHA256: sha, Caption: "approach"}},
+		Attachments: []store.DecisionOptionAttachment{{SHA256: strings.Repeat("6", 64), Caption: "wrong"}},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -394,16 +395,16 @@ func TestDecisionsPendingCarriesOptionMedia(t *testing.T) {
 		len(item.Unverified) != 1 || item.Unverified[0] != "head relation" {
 		t.Fatalf("item=%+v", item)
 	}
-	for name, options := range map[string][]optionOut{"options": item.Options, "options_ko": item.OptionsKO} {
-		if len(options) != 1 || len(options[0].Attachments) != 1 {
-			t.Fatalf("%s=%+v", name, options)
-		}
-		attachment := options[0].Attachments[0]
-		if attachment.SHA256 != sha || attachment.Caption != "approach" || attachment.MIME != "image/png" || attachment.OriginalName != "approach.png" {
-			t.Fatalf("%s attachment=%+v", name, attachment)
-		}
+	if len(item.Options) != 1 || len(item.Options[0].Attachments) != 1 {
+		t.Fatalf("options=%+v", item.Options)
 	}
-	if item.OptionsKO[0].Label != "2A 한국어" {
+	attachment := item.Options[0].Attachments[0]
+	if attachment.SHA256 != sha || attachment.Caption != "approach" || attachment.MIME != "image/png" || attachment.OriginalName != "approach.png" {
+		t.Fatalf("attachment=%+v", attachment)
+	}
+	// options_ko is the labels only: the translated text names a different
+	// address, and that picture must not reach the wire.
+	if len(item.OptionsKO) != 1 || item.OptionsKO[0].Label != "2A 한국어" || len(item.OptionsKO[0].Attachments) != 0 {
 		t.Fatalf("options_ko=%+v", item.OptionsKO)
 	}
 }
