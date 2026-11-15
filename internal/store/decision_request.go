@@ -55,6 +55,17 @@ const (
 	DecisionRequestTextMaxBytes    = 1000
 	DecisionOptionLabelMaxBytes    = 120
 	DecisionRequestMaxRefs         = 10
+	// The operator's decision page compares options by their pictures and
+	// videos (hk 4788): at most eight per option, each with a one-line caption.
+	DecisionOptionMaxAttachments      = 8
+	DecisionOptionCaptionMaxBytes     = 200
+	DecisionRequestMaxUnverified      = 10
+	DecisionRequestUnverifiedMaxBytes = 300
+	// RecommendationReason and OneFix are free text (the requester's longer
+	// account and its one suggested fix); Reason stays the single line shown
+	// with the recommendation.
+	DecisionRequestRecommendationReasonMaxBytes = 2000
+	DecisionRequestOneFixMaxBytes               = 1000
 )
 
 // TaskEventDecision marks task_events rows that record a decision request or
@@ -104,6 +115,10 @@ var (
 	ErrDecisionAttemptNotPending = errors.New("decision_attempt_not_pending")
 	// ErrDecisionAttemptDenied refuses a second deny of one attempt.
 	ErrDecisionAttemptDenied = errors.New("decision_attempt_denied")
+	// ErrDecisionAttachmentNotFound refuses an option naming a content
+	// address no attachment row holds: the page would show an option the
+	// operator cannot look at.
+	ErrDecisionAttachmentNotFound = errors.New("decision_attachment_not_found")
 )
 
 // DecisionAssistantResponder is the resolution responder the server fixes on
@@ -153,7 +168,15 @@ type DecisionRequest struct {
 	Question string `json:"question"`
 	// Reason explains the recommendation; the recommended key itself is the
 	// existing DecisionOption.Recommended flag.
-	Reason         string     `json:"reason,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	// RecommendationReason is the requester's longer account of why it
+	// recommends an option (free text, may run over several lines).
+	RecommendationReason string `json:"recommendation_reason,omitempty"`
+	// Unverified lists what the requester could not check, so the operator
+	// sees the limits of the material before choosing.
+	Unverified []string `json:"unverified,omitempty"`
+	// OneFix is the requester's one suggested fix (free text).
+	OneFix         string     `json:"one_fix,omitempty"`
 	DefaultAction  string     `json:"default_action"`
 	DefaultOption  string     `json:"default_option,omitempty"`
 	DefaultTrigger string     `json:"default_trigger,omitempty"`
@@ -238,16 +261,23 @@ type DecisionResolution struct {
 // DecisionRequestInput is the producer's request. Options carries the
 // existing decision option model (keys A–F, one optional recommendation).
 type DecisionRequestInput struct {
-	Question       string          `json:"question"`
-	Options        DecisionOptions `json:"options"`
-	Reason         string          `json:"reason,omitempty"`
-	DefaultAction  string          `json:"default_action"`
-	DefaultOption  string          `json:"default_option,omitempty"`
-	DefaultTrigger string          `json:"default_trigger,omitempty"`
-	DueAt          *time.Time      `json:"due_at,omitempty"`
-	Doc            string          `json:"doc,omitempty"`
-	Refs           []string        `json:"refs,omitempty"`
-	Supersedes     string          `json:"supersedes,omitempty"`
+	Question string          `json:"question"`
+	Options  DecisionOptions `json:"options"`
+	Reason   string          `json:"reason,omitempty"`
+	// RecommendationReason, Unverified and OneFix carry the requester's
+	// account of its recommendation, the limits of what it checked, and its
+	// one suggested fix (hk 4788). All optional; a producer that sends none
+	// records the same request it did before they existed.
+	RecommendationReason string     `json:"recommendation_reason,omitempty"`
+	Unverified           []string   `json:"unverified,omitempty"`
+	OneFix               string     `json:"one_fix,omitempty"`
+	DefaultAction        string     `json:"default_action"`
+	DefaultOption        string     `json:"default_option,omitempty"`
+	DefaultTrigger       string     `json:"default_trigger,omitempty"`
+	DueAt                *time.Time `json:"due_at,omitempty"`
+	Doc                  string     `json:"doc,omitempty"`
+	Refs                 []string   `json:"refs,omitempty"`
+	Supersedes           string     `json:"supersedes,omitempty"`
 	// Block also sets the task's awaiting_decision flag in the same
 	// transaction (a request that stops the work). Without it the state is unchanged.
 	Block bool `json:"block,omitempty"`
@@ -461,12 +491,41 @@ func CheckDecisionOptionsDetailed(x DecisionOptions) error {
 		if !validDecisionOptionLabel(option.Label) {
 			return invalidDecisionRequest("option " + option.Key + " label must be one trimmed line without | or ;")
 		}
+		if err := checkDecisionOptionAttachments(option); err != nil {
+			return err
+		}
 		if option.Recommended {
 			recommended++
 		}
 	}
 	if recommended > 1 {
 		return invalidDecisionRequest("at most one option may be recommended")
+	}
+	return nil
+}
+
+// checkDecisionOptionAttachments names the first reason an option's pictures
+// and videos are refused. It checks shape only; whether each address exists
+// is decided against the attachments table when the request is written.
+func checkDecisionOptionAttachments(option DecisionOption) error {
+	if len(option.Attachments) > DecisionOptionMaxAttachments {
+		return invalidDecisionRequest(fmt.Sprintf("option %s has %d attachments; at most %d are allowed", option.Key, len(option.Attachments), DecisionOptionMaxAttachments))
+	}
+	seen := map[string]bool{}
+	for _, attachment := range option.Attachments {
+		if !attachmentSHARE.MatchString(attachment.SHA256) {
+			return invalidDecisionRequest("option " + option.Key + " attachment sha256 must be 64 lower-case hex characters")
+		}
+		if seen[attachment.SHA256] {
+			return invalidDecisionRequest("option " + option.Key + " lists attachment " + attachment.SHA256 + " twice")
+		}
+		seen[attachment.SHA256] = true
+		if attachment.Caption != "" && (!validText(attachment.Caption, DecisionOptionCaptionMaxBytes) || !utf8.ValidString(attachment.Caption)) {
+			return invalidDecisionRequest(fmt.Sprintf("option %s attachment caption is %d bytes; the limit is %d bytes", option.Key, len(attachment.Caption), DecisionOptionCaptionMaxBytes))
+		}
+		if !validDecisionAttachmentCaption(attachment.Caption) {
+			return invalidDecisionRequest("option " + option.Key + " attachment caption must be one trimmed line")
+		}
 	}
 	return nil
 }
@@ -494,6 +553,20 @@ func CheckDecisionRequestInput(in DecisionRequestInput) error {
 	}
 	if in.Reason != "" && !validDecisionLine(in.Reason, DecisionRequestReasonMaxBytes) {
 		return invalidDecisionRequest(fmt.Sprintf("recommendation reason must be one line of at most %d bytes", DecisionRequestReasonMaxBytes))
+	}
+	if in.RecommendationReason != "" && (!validText(in.RecommendationReason, DecisionRequestRecommendationReasonMaxBytes) || !utf8.ValidString(in.RecommendationReason) || strings.TrimSpace(in.RecommendationReason) == "") {
+		return invalidDecisionRequest(fmt.Sprintf("recommendation_reason must be at most %d bytes", DecisionRequestRecommendationReasonMaxBytes))
+	}
+	if in.OneFix != "" && (!validText(in.OneFix, DecisionRequestOneFixMaxBytes) || !utf8.ValidString(in.OneFix) || strings.TrimSpace(in.OneFix) == "") {
+		return invalidDecisionRequest(fmt.Sprintf("one_fix must be at most %d bytes", DecisionRequestOneFixMaxBytes))
+	}
+	if len(in.Unverified) > DecisionRequestMaxUnverified {
+		return invalidDecisionRequest(fmt.Sprintf("at most %d unverified items are allowed", DecisionRequestMaxUnverified))
+	}
+	for _, item := range in.Unverified {
+		if !validDecisionLine(item, DecisionRequestUnverifiedMaxBytes) {
+			return invalidDecisionRequest(fmt.Sprintf("each unverified item must be one line of at most %d bytes", DecisionRequestUnverifiedMaxBytes))
+		}
 	}
 	if in.Doc != "" && !ValidBodyDoc(in.Doc) {
 		return invalidDecisionRequest("doc must be a document key or key#section")
@@ -572,7 +645,9 @@ func sameDecisionOptions(a, b *DecisionOptions) bool {
 		return false
 	}
 	for i := range a.Options {
-		if a.Options[i] != b.Options[i] {
+		if a.Options[i].Key != b.Options[i].Key || a.Options[i].Label != b.Options[i].Label ||
+			a.Options[i].Recommended != b.Options[i].Recommended ||
+			!slices.Equal(a.Options[i].Attachments, b.Options[i].Attachments) {
 			return false
 		}
 	}
@@ -590,6 +665,8 @@ func sameDue(a, b *time.Time) bool {
 // retry case that must return the same request_id instead of a new one.
 func sameDecisionRequest(current DecisionRequest, currentOptions *DecisionOptions, in DecisionRequestInput) bool {
 	return current.Question == in.Question && sameDecisionOptions(currentOptions, &in.Options) && current.Reason == in.Reason &&
+		current.RecommendationReason == in.RecommendationReason && slices.Equal(current.Unverified, in.Unverified) &&
+		current.OneFix == in.OneFix &&
 		current.DefaultAction == in.DefaultAction && current.DefaultOption == in.DefaultOption &&
 		current.DefaultTrigger == in.DefaultTrigger && sameDue(current.DueAt, in.DueAt) && current.Doc == in.Doc &&
 		slices.Equal(current.Refs, in.Refs) && current.HumanOnly == in.HumanOnly &&
@@ -597,12 +674,57 @@ func sameDecisionRequest(current DecisionRequest, currentOptions *DecisionOption
 }
 
 func rejectDecisionRequestSecrets(in DecisionRequestInput) error {
-	values := []string{in.Question, in.Reason, in.DefaultAction, in.DefaultTrigger, in.Doc}
+	values := []string{in.Question, in.Reason, in.RecommendationReason, in.OneFix, in.DefaultAction, in.DefaultTrigger, in.Doc}
 	values = append(values, in.Refs...)
+	values = append(values, in.Unverified...)
 	for _, option := range in.Options.Options {
 		values = append(values, option.Label)
+		for _, attachment := range option.Attachments {
+			values = append(values, attachment.Caption)
+		}
 	}
 	return guard.Reject(strings.Join(values, "\n"))
+}
+
+// checkDecisionAttachmentsExist refuses the first content address no
+// attachments row holds. The sentinel's text is the wire code; the address is
+// the caller's own input, so it is not echoed into the reason.
+func checkDecisionAttachmentsExist(ctx context.Context, tx pgx.Tx, options DecisionOptions) error {
+	shas := []string{}
+	seen := map[string]bool{}
+	for _, option := range options.Options {
+		for _, attachment := range option.Attachments {
+			if !seen[attachment.SHA256] {
+				seen[attachment.SHA256] = true
+				shas = append(shas, attachment.SHA256)
+			}
+		}
+	}
+	if len(shas) == 0 {
+		return nil
+	}
+	rows, err := tx.Query(ctx, `SELECT sha256 FROM attachments WHERE sha256 = ANY($1)`, shas)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	found := map[string]bool{}
+	for rows.Next() {
+		var sha string
+		if err := rows.Scan(&sha); err != nil {
+			return err
+		}
+		found[sha] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, sha := range shas {
+		if !found[sha] {
+			return fmt.Errorf("%w: %s", ErrDecisionAttachmentNotFound, sha)
+		}
+	}
+	return nil
 }
 
 func insertDecisionEvent(ctx context.Context, tx pgx.Tx, x *Task, by, note string, at time.Time) error {
@@ -707,24 +829,34 @@ func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID i
 	}
 	now := time.Now().UTC()
 	options := in.Options
+	// An option's pictures and videos must name attachments this database
+	// holds: the operator's page would otherwise show a choice it cannot look
+	// at. Checked here, in the writing transaction, so a re-send of a
+	// duplicate never reaches it.
+	if err = checkDecisionAttachmentsExist(ctx, tx, options); err != nil {
+		return DecisionRequestResult{}, err
+	}
 	request := DecisionRequest{
-		ID:             decisionRequestID(taskID, revision),
-		Revision:       revision,
-		Supersedes:     in.Supersedes,
-		Root:           decisionRequestID(taskID, revision),
-		Status:         DecisionRequestOpen,
-		Question:       in.Question,
-		Reason:         in.Reason,
-		DefaultAction:  in.DefaultAction,
-		DefaultOption:  in.DefaultOption,
-		DefaultTrigger: in.DefaultTrigger,
-		DueAt:          in.DueAt,
-		Doc:            in.Doc,
-		Refs:           in.Refs,
-		HumanOnly:      in.HumanOnly,
-		AnswerPolicy:   in.AnswerPolicy,
-		RequestedBy:    by,
-		RequestedAt:    now,
+		ID:                   decisionRequestID(taskID, revision),
+		Revision:             revision,
+		Supersedes:           in.Supersedes,
+		Root:                 decisionRequestID(taskID, revision),
+		Status:               DecisionRequestOpen,
+		Question:             in.Question,
+		Reason:               in.Reason,
+		RecommendationReason: in.RecommendationReason,
+		Unverified:           in.Unverified,
+		OneFix:               in.OneFix,
+		DefaultAction:        in.DefaultAction,
+		DefaultOption:        in.DefaultOption,
+		DefaultTrigger:       in.DefaultTrigger,
+		DueAt:                in.DueAt,
+		Doc:                  in.Doc,
+		Refs:                 in.Refs,
+		HumanOnly:            in.HumanOnly,
+		AnswerPolicy:         in.AnswerPolicy,
+		RequestedBy:          by,
+		RequestedAt:          now,
 	}
 	if current != nil && in.Supersedes != "" {
 		request.Root = current.RootID()

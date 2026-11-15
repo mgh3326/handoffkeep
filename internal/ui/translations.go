@@ -12,7 +12,7 @@ func (h *Handler) translateDecisionViews(ctx context.Context, views []decisionRe
 	for _, v := range views {
 		sources = append(sources, store.TranslationSource{EntityID: v.ID, Field: "question", Original: v.Question})
 		if len(v.Options) > 0 {
-			original, err := json.Marshal(store.DecisionOptions{Options: v.Options, AllowFree: v.AllowFree})
+			original, err := json.Marshal(store.DecisionOptions{Options: storeOptions(v.Options), AllowFree: v.AllowFree})
 			if err != nil {
 				return err
 			}
@@ -47,7 +47,7 @@ func (h *Handler) translateDecisionViews(ctx context.Context, views []decisionRe
 						views[i].OptionsKOStale = true
 					}
 				}
-				views[i].OptionsKO = options.Options
+				views[i].OptionsKO = decisionOptionKOViews(options.Options)
 			}
 		}
 	}

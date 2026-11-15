@@ -490,6 +490,8 @@ full request, so history is read back from events and no table is added.
 ```bash
 handoffkeep tasks decision-request 42 --question "Where should the allowlist live?" \
   --option 'A|writer spec' --option 'B|backfill tool' --recommended A --reason "one choke point" \
+  --option-attachment 'A|<sha256>|approach' [--option-attachment 'A|<sha256>' ...] \
+  [--recommendation-reason <text>] [--unverified <text> ...] [--one-fix <text>] \
   --default-action "hold and move to the next task" [--default-option B] \
   [--default-trigger "director applies after the deadline"] [--due 2026-09-25T18:00:00+09:00] \
   [--doc key] [--supersedes dr-42-1] [--block]
@@ -497,6 +499,18 @@ handoffkeep tasks decision-resolve 42 --request dr-42-1 --kind answered --option
 handoffkeep tasks decision-resolve 42 --request dr-42-1 --kind default_applied --receipt <evidence>
 handoffkeep tasks decision-resolve 42 --request dr-42-1 --kind withdrawn --text "no longer relevant"
 ```
+
+An option may carry up to eight pictures or videos, each naming an existing
+attachment by its sha256 with an optional one-line caption
+(`--option-attachment 'A|<sha256>|caption'`); an address no attachment row
+holds is refused (`decision_attachment_not_found`) and nothing is recorded.
+The console's decision page lays the options out side by side with those files
+shown in place, then the recommendation with `--recommendation-reason`, the
+`--unverified` list ("검증 안 된 것") and `--one-fix`, then the answer with a
+free comment ("한 가지 고칠 점"). The same fields are on the `/v1` body
+(`attachments` inside each option, plus `recommendation_reason`, `unverified`
+and `one_fix`) and in the `client` package; a producer that sends none of them
+records the same request as before.
 
 The CLI prints the `request_id` (`dr-<task>-<revision>`) and a `notify` line
 to paste into the pane message. A failure before the request is sent, or a

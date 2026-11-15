@@ -44,6 +44,7 @@ var exportedAPI = []string{
 	"AttachmentUploadTicket",
 	"DecisionAskInput",
 	"DecisionOption",
+	"DecisionOptionAttachment",
 	"DecisionOptions",
 	"DecisionRequest",
 	"DecisionRequestResult",

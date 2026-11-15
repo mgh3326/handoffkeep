@@ -41,6 +41,7 @@ var pairs = []struct {
 	{client.DecisionAskInput{}, store.DecisionRequestInput{}},
 	{client.DecisionOptions{}, store.DecisionOptions{}},
 	{client.DecisionOption{}, store.DecisionOption{}},
+	{client.DecisionOptionAttachment{}, store.DecisionOptionAttachment{}},
 	{client.DecisionRequestResult{}, store.DecisionRequestResult{}},
 	{client.SimilarTask{}, store.SimilarTask{}},
 }

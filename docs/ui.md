@@ -146,8 +146,17 @@ email-or-service route as noted.
   the browser follows the cursor through the full list. Document routes are
   email-only, and the document viewer renders the full stored body.
 - `GET /ui/api/decisions` and `GET /ui/api/decisions/<id>` list and read
-  structured decision requests. `GET /ui/api/attention` lists what waits on the
-  operator (Home).
+  structured decision requests. A request's options carry their `attachments`
+  (`sha256`, `caption`, and the `mime`/`original_name`/`size_bytes` read from
+  the attachments table) plus the requester's `recommendation_reason`,
+  `unverified` and `one_fix`; the page shows the options side by side with
+  their pictures and videos, each file fetched as `/ui/files/<sha>?inline=1`
+  (hk 4787). That route serves inline only the allowlisted image and video
+  types, and the page renders only those under the task page's 25 MiB cap;
+  anything else stays a link. `options_ko` carries each option's key and
+  translated label only: media and the recommendation belong to `options`, so a
+  translated payload can never name a picture the option does not carry.
+  `GET /ui/api/attention` lists what waits on the operator (Home).
 - `GET /ui/api/work-status` and `GET /ui/api/deploy-pending` serve the Work
   status and Deploys views. Deploy status is assembled from deploy-record
   documents and task events; it is email-only. Each service carries the

@@ -4,40 +4,18 @@
 // full-viewport enlarge view. Everything else stays a download link.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { BoardAttachment } from "../shared/boardTypes";
+import { inlineSrc, MAX_INLINE_BYTES, mediaKind } from "../shared/media";
+import type { MediaKind } from "../shared/media";
 import { isTypingTarget } from "../shared/search";
 import { formatMinuteKST } from "../shared/time";
 
-/** Media above this size stays a link and its size: 25 MiB. */
-export const MAX_INLINE_BYTES = 25 * 1024 * 1024;
-
-const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
-const VIDEO_MIMES = new Set(["video/mp4", "video/webm"]);
-
-type MediaKind = "image" | "video";
 type MediaItem = { attachment: BoardAttachment; kind: MediaKind };
-
-function mimeOf(attachment: BoardAttachment): string {
-  return attachment.mime.split(";")[0].trim().toLowerCase();
-}
-
-function mediaKind(attachment: BoardAttachment): MediaKind | null {
-  const mime = mimeOf(attachment);
-  if (IMAGE_MIMES.has(mime)) return "image";
-  if (VIDEO_MIMES.has(mime)) return "video";
-  return null;
-}
-
-/** The inline URL the server answers with `Content-Disposition: inline` for
- * exactly the types above; anything else keeps downloading. */
-export function inlineSrc(attachment: BoardAttachment): string {
-  return `/ui/files/${attachment.sha256}?inline=1`;
-}
 
 function Media({ item }: { item: MediaItem }) {
   if (item.kind === "image") {
-    return <img src={inlineSrc(item.attachment)} alt={item.attachment.original_name} loading="lazy" />;
+    return <img src={inlineSrc(item.attachment.sha256)} alt={item.attachment.original_name} loading="lazy" />;
   }
-  return <video src={inlineSrc(item.attachment)} aria-label={item.attachment.original_name} controls preload="metadata" />;
+  return <video src={inlineSrc(item.attachment.sha256)} aria-label={item.attachment.original_name} controls preload="metadata" />;
 }
 
 function CompareView({ items, onEnlarge }: { items: MediaItem[]; onEnlarge: (index: number) => void }) {
@@ -105,14 +83,14 @@ export function TaskAttachments({ attachments }: { attachments: BoardAttachment[
   const opener = useRef<HTMLElement | null>(null);
   // Above the threshold an image or video keeps the plain link line below.
   const items: MediaItem[] = attachments.flatMap(attachment => {
-    const kind = mediaKind(attachment);
+    const kind = mediaKind(attachment.mime);
     return kind !== null && attachment.size_bytes <= MAX_INLINE_BYTES ? [{ attachment, kind }] : [];
   });
   // Derived, so a list that reloads under a different task drops stale picks.
   const chosen = items.filter(item => selected.includes(item.attachment.sha256));
   // Too large to show in place: the link and its size, nothing else.
-  const oversized = attachments.filter(attachment => mediaKind(attachment) !== null && attachment.size_bytes > MAX_INLINE_BYTES);
-  const links = attachments.filter(attachment => mediaKind(attachment) === null);
+  const oversized = attachments.filter(attachment => mediaKind(attachment.mime) !== null && attachment.size_bytes > MAX_INLINE_BYTES);
+  const links = attachments.filter(attachment => mediaKind(attachment.mime) === null);
   const toggle = (sha: string) => setSelected(old => old.includes(sha) ? old.filter(value => value !== sha) : [...old, sha]);
   const close = useCallback(() => {
     setEnlarged(null);

@@ -23,6 +23,25 @@ function nullableString(v: unknown): boolean {
 function optionalString(v: unknown): boolean {
   return v === undefined || str(v);
 }
+function attachment(v: unknown): boolean {
+  return (
+    obj(v) &&
+    str(v.sha256) &&
+    optionalString(v.caption) &&
+    optionalString(v.mime) &&
+    optionalString(v.original_name)
+  );
+}
+function option(v: unknown): boolean {
+  return (
+    obj(v) &&
+    str(v.key) &&
+    str(v.label) &&
+    (v.recommended === undefined || typeof v.recommended === "boolean") &&
+    (v.attachments === undefined ||
+      (Array.isArray(v.attachments) && v.attachments.every(attachment)))
+  );
+}
 function record(v: unknown): boolean {
   return (
     obj(v) &&
@@ -54,17 +73,15 @@ function request(v: unknown): boolean {
     str(v.state) &&
     str(v.question) &&
     optionalString(v.reason) &&
+    optionalString(v.recommendation_reason) &&
+    (v.unverified === undefined ||
+      (Array.isArray(v.unverified) && v.unverified.every(str))) &&
+    optionalString(v.one_fix) &&
     optionalString(v.question_ko) &&
     (v.question_ko_stale === undefined || typeof v.question_ko_stale === "boolean") &&
     Array.isArray(v.options) &&
-    v.options.every(
-      (x) =>
-        obj(x) &&
-        str(x.key) &&
-        str(x.label) &&
-        (x.recommended === undefined || typeof x.recommended === "boolean"),
-    ) &&
-    (v.options_ko === undefined || (Array.isArray(v.options_ko) && v.options_ko.every(x => obj(x) && str(x.key) && str(x.label)))) &&
+    v.options.every(option) &&
+    (v.options_ko === undefined || (Array.isArray(v.options_ko) && v.options_ko.every(option))) &&
     (v.options_ko_stale === undefined || typeof v.options_ko_stale === "boolean") &&
     typeof v.allow_free === "boolean" &&
     str(v.default_action) &&

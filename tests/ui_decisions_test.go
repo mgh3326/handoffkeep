@@ -122,3 +122,106 @@ func TestUIDecisions(t *testing.T) {
 		t.Fatalf("failure=%v status=%d", failure, r.StatusCode)
 	}
 }
+
+// hk 4788: the console's decision detail carries each option's pictures and
+// videos with the MIME type and original name the page renders them by.
+func TestUIDecisionDetailOptionMedia(t *testing.T) {
+	_, url := testdb.Schema(t, "ui_decision_media")
+	s, err := store.Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	project := fmt.Sprintf("decision-media-%d", time.Now().UnixNano())
+	if _, err = s.AddTaskProject(t.Context(), project, "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask(t.Context(), store.Task{Lane: "fixture", Title: "media fixture", Kind: "implement", CreatedBy: "fixture", Project: &project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha := strings.Repeat("6", 64)
+	if _, _, err = s.PutAttachment(t.Context(), store.Attachment{
+		SHA256: sha, SizeBytes: 3, MIME: "image/png", OriginalName: "approach.png",
+		CreatedBy: "fixture", RefKind: "task", RefID: fmt.Sprint(task.ID),
+	}, 1<<20, 100); err != nil {
+		t.Fatal(err)
+	}
+	req, err := s.RecordDecisionRequest(t.Context(), task.ID, "fixture", store.DecisionRequestInput{
+		Question: "Which card?",
+		Options: store.DecisionOptions{AllowFree: true, Options: []store.DecisionOption{{
+			Key: "A", Label: "2A", Attachments: []store.DecisionOptionAttachment{{SHA256: sha, Caption: "approach"}},
+		}}},
+		DefaultAction: "wait",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := pgxpool.New(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	var id int64
+	if err = pool.QueryRow(t.Context(), `SELECT id FROM decision_requests WHERE source='task_request' AND source_ref=$1`, req.Request.ID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	// options_ko carries the translated labels only. The translated text below
+	// names a different content address than the option does, the shape of a
+	// translator error: it must not put that picture on the option.
+	original, err := json.Marshal(store.DecisionOptions{AllowFree: true, Options: []store.DecisionOption{{
+		Key: "A", Label: "2A", Attachments: []store.DecisionOptionAttachment{{SHA256: sha, Caption: "approach"}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	translated, err := json.Marshal(store.DecisionOptions{AllowFree: true, Options: []store.DecisionOption{{
+		Key: "A", Label: "2A 한국어", Attachments: []store.DecisionOptionAttachment{{SHA256: strings.Repeat("9", 64), Caption: "wrong"}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.PutTranslation(t.Context(), store.Translation{
+		Entity: "decision_request", EntityID: req.Request.ID, Field: "options", Lang: "ko",
+		SourceSHA256: store.SourceSHA256(string(original)), Text: string(translated), Translator: "fixture",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fixture := newUIJWTFixture(t)
+	h := newUITestServer(t, s, fixture, "", "", 0)
+	defer h.Close()
+	token := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	type attachmentJSON struct {
+		SHA256       string `json:"sha256"`
+		Caption      string `json:"caption"`
+		MIME         string `json:"mime"`
+		OriginalName string `json:"original_name"`
+		SizeBytes    int64  `json:"size_bytes"`
+	}
+	type optionJSON struct {
+		Key         string           `json:"key"`
+		Label       string           `json:"label"`
+		Attachments []attachmentJSON `json:"attachments"`
+	}
+	var detail struct {
+		Request struct {
+			Options   []optionJSON `json:"options"`
+			OptionsKO []optionJSON `json:"options_ko"`
+		} `json:"request"`
+	}
+	if status := boardJSON(t, h.Client(), fmt.Sprintf("%s/ui/api/decisions/%d", h.URL, id), token, &detail); status != http.StatusOK {
+		t.Fatal(status)
+	}
+	if len(detail.Request.Options) != 1 || len(detail.Request.Options[0].Attachments) != 1 {
+		t.Fatalf("options=%+v", detail.Request.Options)
+	}
+	attachment := detail.Request.Options[0].Attachments[0]
+	if attachment.SHA256 != sha || attachment.Caption != "approach" || attachment.MIME != "image/png" || attachment.OriginalName != "approach.png" || attachment.SizeBytes != 3 {
+		t.Fatalf("attachment=%+v", attachment)
+	}
+	// options_ko is the labels only: the translated text names a different
+	// address, and that picture must not reach the page.
+	if len(detail.Request.OptionsKO) != 1 || detail.Request.OptionsKO[0].Label != "2A 한국어" || len(detail.Request.OptionsKO[0].Attachments) != 0 {
+		t.Fatalf("options_ko=%+v", detail.Request.OptionsKO)
+	}
+}

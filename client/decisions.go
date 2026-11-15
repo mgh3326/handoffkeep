@@ -9,15 +9,21 @@ import (
 // DecisionAskInput is a structured decision request put to the operator, the
 // body of RecordDecisionRequest.
 type DecisionAskInput struct {
-	Question       string          `json:"question"`
-	Options        DecisionOptions `json:"options"`
-	Reason         string          `json:"reason,omitempty"`
-	DefaultAction  string          `json:"default_action"`
-	DefaultOption  string          `json:"default_option,omitempty"`
-	DefaultTrigger string          `json:"default_trigger,omitempty"`
-	DueAt          *time.Time      `json:"due_at,omitempty"`
-	Doc            string          `json:"doc,omitempty"`
-	Refs           []string        `json:"refs,omitempty"`
+	Question string          `json:"question"`
+	Options  DecisionOptions `json:"options"`
+	Reason   string          `json:"reason,omitempty"`
+	// RecommendationReason is the longer account of why an option is
+	// recommended; Unverified lists what the requester could not check;
+	// OneFix is its one suggested fix. All optional.
+	RecommendationReason string     `json:"recommendation_reason,omitempty"`
+	Unverified           []string   `json:"unverified,omitempty"`
+	OneFix               string     `json:"one_fix,omitempty"`
+	DefaultAction        string     `json:"default_action"`
+	DefaultOption        string     `json:"default_option,omitempty"`
+	DefaultTrigger       string     `json:"default_trigger,omitempty"`
+	DueAt                *time.Time `json:"due_at,omitempty"`
+	Doc                  string     `json:"doc,omitempty"`
+	Refs                 []string   `json:"refs,omitempty"`
 	// Supersedes is the ID of the open request this one replaces.
 	Supersedes string `json:"supersedes,omitempty"`
 	// Block also sets the task's awaiting_decision flag.
@@ -40,6 +46,16 @@ type DecisionOption struct {
 	Key         string `json:"key"`
 	Label       string `json:"label"`
 	Recommended bool   `json:"recommended,omitempty"`
+	// Attachments are the pictures and videos the operator compares this
+	// choice by, in order.
+	Attachments []DecisionOptionAttachment `json:"attachments,omitempty"`
+}
+
+// DecisionOptionAttachment names one attachment shown with an option, with
+// the caption the page puts under it.
+type DecisionOptionAttachment struct {
+	SHA256  string `json:"sha256"`
+	Caption string `json:"caption,omitempty"`
 }
 
 // DecisionRequestResult is the answer to RecordDecisionRequest. Request.ID is
