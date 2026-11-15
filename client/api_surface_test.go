@@ -28,6 +28,7 @@ var exportedAPI = []string{
 	"Client.GetDocument",
 	"Client.GetTask",
 	"Client.ListDocuments",
+	"Client.ListDocumentsPage",
 	"Client.ListTasks",
 	"Client.ProjectOwner",
 	"Client.ListQuotaObservations",

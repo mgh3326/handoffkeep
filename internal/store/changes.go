@@ -321,17 +321,19 @@ func scanChange(row pgx.Row, c *Change) error {
 }
 
 // ListChangesByTask lists the changes linked to a task, ordered by id.
-func (s *Store) ListChangesByTask(ctx context.Context, taskID int64, limit int) ([]Change, error) {
-	return s.listChangesWhere(ctx, s.pool, `id IN (SELECT change_id FROM change_tasks WHERE task_id=$1)`, limit, taskID)
+// afterID, when set, starts the page after that change id: the order is the
+// same, so a reader pages the whole list with the last id it saw.
+func (s *Store) ListChangesByTask(ctx context.Context, taskID int64, afterID *int64, limit int) ([]Change, error) {
+	return s.listChangesWhere(ctx, s.pool, `id IN (SELECT change_id FROM change_tasks WHERE task_id=$1)`, afterID, limit, taskID)
 }
 
 // ListChangesByPR lists the change for a PR URL: none or one row.
-func (s *Store) ListChangesByPR(ctx context.Context, pr string, limit int) ([]Change, error) {
+func (s *Store) ListChangesByPR(ctx context.Context, pr string, afterID *int64, limit int) ([]Change, error) {
 	repo, n, ok := parsePRURL(pr)
 	if !ok || !taskEventPRRE.MatchString(pr) {
 		return nil, errors.New("invalid change query: pr must be a PR URL")
 	}
-	return s.listChangesWhere(ctx, s.pool, `repo=$1 AND pr_number=$2`, limit, repo, n)
+	return s.listChangesWhere(ctx, s.pool, `repo=$1 AND pr_number=$2`, afterID, limit, repo, n)
 }
 
 type changeReader interface {
@@ -359,10 +361,18 @@ func readReviews(ctx context.Context, q changeReader, changeIDs []int64, add fun
 
 // listChangesWhere reads changes ordered by id, then their tasks and reviews,
 // each ordered by id, and their verifications, newest first. where may use
-// only $1..$len(args).
-func (s *Store) listChangesWhere(ctx context.Context, q changeReader, where string, limit int, args ...any) ([]Change, error) {
+// only $1..$len(args). afterID, when set, starts the id-ordered list after
+// that change id.
+func (s *Store) listChangesWhere(ctx context.Context, q changeReader, where string, afterID *int64, limit int, args ...any) ([]Change, error) {
 	if limit < 1 || limit > 1000 {
 		limit = 100
+	}
+	if afterID != nil {
+		if *afterID < 0 {
+			return nil, errors.New("invalid change query")
+		}
+		args = append(args, *afterID)
+		where = fmt.Sprintf("(%s) AND id>$%d", where, len(args))
 	}
 	rows, err := q.Query(ctx, `SELECT `+changeColumns+` FROM changes WHERE `+where+fmt.Sprintf(` ORDER BY id LIMIT $%d`, len(args)+1), append(args, limit)...)
 	if err != nil {
@@ -502,7 +512,7 @@ func (s *Store) SetChangeMergeFlow(ctx context.Context, id int64, in ChangeMerge
 		id, in.Priority, nullStr(in.HoldReason), in.DependsOnChange, state, now); err != nil {
 		return Change{}, err
 	}
-	out, err := s.listChangesWhere(ctx, tx, `id=$1`, 1, id)
+	out, err := s.listChangesWhere(ctx, tx, `id=$1`, nil, 1, id)
 	if err != nil {
 		return Change{}, err
 	}

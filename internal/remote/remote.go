@@ -111,14 +111,22 @@ func (c Client) GetDocumentByID(ctx context.Context, id int64) (store.Document, 
 }
 
 // ListDocuments lists documents; task above zero keeps only the documents
-// that name that task. A server older than the task filter ignores it.
-func (c Client) ListDocuments(ctx context.Context, prefix, kind, session string, task int64, limit int) ([]store.Document, error) {
+// that name that task. afterID, when set, pages by id: the documents with id
+// greater than *afterID in id order (start at 0), and the second result is
+// the next page's cursor, nil at the end. A server older than the task filter
+// ignores it, and a server older than the cursor answers in key order with no
+// cursor.
+func (c Client) ListDocuments(ctx context.Context, prefix, kind, session string, task int64, afterID *int64, limit int) ([]store.Document, *int64, error) {
 	var out struct {
 		Documents []store.Document `json:"documents"`
+		Next      *int64           `json:"next_after_id"`
 	}
 	p := url.Values{"prefix": {prefix}, "kind": {kind}, "session": {session}, "limit": {fmt.Sprint(limit)}}
 	if task > 0 {
 		p.Set("task", fmt.Sprint(task))
+	}
+	if afterID != nil {
+		p.Set("after_id", fmt.Sprint(*afterID))
 	}
 	e := c.call(ctx, "GET", "/v1/documents?"+p.Encode(), nil, &out)
 	if e == nil && task > 0 {
@@ -132,7 +140,7 @@ func (c Client) ListDocuments(ctx context.Context, prefix, kind, session string,
 		}
 		out.Documents = kept
 	}
-	return out.Documents, e
+	return out.Documents, out.Next, e
 }
 
 // searchWireCap is the largest limit the /v1/search API accepts

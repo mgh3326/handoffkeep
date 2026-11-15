@@ -56,7 +56,7 @@ func TestPlacementScoreV2InputsRoundTrip(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("created=%v err=%v", created, err)
 	}
-	list, err := s.ListPlacements(t.Context(), d.JobID, "", time.Now().UTC().Add(-time.Hour), 10)
+	list, err := s.ListPlacements(t.Context(), d.JobID, "", time.Now().UTC().Add(-time.Hour), nil, 10)
 	if err != nil || len(list) != 1 {
 		t.Fatalf("list=%v err=%v", list, err)
 	}

@@ -68,6 +68,23 @@ func TestChangesShowCLI(t *testing.T) {
 	}
 }
 
+func TestChangesShowCLICursor(t *testing.T) {
+	h, calls := ledgerCLIServer(t, http.StatusOK, `{"changes":[],"next_after_id":null}`)
+	var out bytes.Buffer
+	if err := run([]string{"changes", "show", "--url", h.URL, "--token", "tok", "--task", "42", "--after-id", "7"}, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if c := (*calls)[0]; c.Method != "GET" || c.Path != "/v1/changes" || c.Query != "after_id=7&task=42" {
+		t.Fatalf("call=%+v", c)
+	}
+	if out.String() != "{\"changes\":[],\"next_after_id\":null}\n" {
+		t.Fatalf("output=%q", out.String())
+	}
+	if err := run([]string{"changes", "show", "--url", h.URL, "--token", "tok", "--task", "42", "--after-id", "-1"}, io.Discard, io.Discard); err == nil {
+		t.Fatal("negative --after-id accepted")
+	}
+}
+
 const changeStateFixture = `{"change":{"id":3,"repo":"example/app","pr_number":9,"pr":"https://github.com/example/app/pull/9","state":"open","head_sha":"1111111111111111111111111111111111111111","opened_at":"2026-11-06T01:00:00Z","updated_at":"2026-11-06T02:00:00Z"},` +
 	`"gate":{"state":"blocked","head_sha":"1111111111111111111111111111111111111111","current":true,"reasons":["threads_open"],"decided_at":"2026-11-06T02:00:00Z"},` +
 	`"checks":[{"head_sha":"1111111111111111111111111111111111111111","name":"build","state":"completed","conclusion":"success","observed_at":"2026-11-06T02:00:00Z","source":"poll"}],` +

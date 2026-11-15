@@ -23,6 +23,17 @@ func (s Server) changesList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
+	// after_id keeps the id order and starts after that id; absent answers
+	// exactly as before.
+	var afterID *int64
+	if q.Has("after_id") {
+		id, parseErr := queryCursor(r, "after_id")
+		if parseErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_context")
+			return
+		}
+		afterID = &id
+	}
 	var xs []store.Change
 	if q.Has("task") {
 		taskID, parseErr := strconv.ParseInt(q.Get("task"), 10, 64)
@@ -30,15 +41,19 @@ func (s Server) changesList(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_context")
 			return
 		}
-		xs, err = s.Service.Store.ListChangesByTask(r.Context(), taskID, limit)
+		xs, err = s.Service.Store.ListChangesByTask(r.Context(), taskID, afterID, limit)
 	} else {
-		xs, err = s.Service.Store.ListChangesByPR(r.Context(), q.Get("pr"), limit)
+		xs, err = s.Service.Store.ListChangesByPR(r.Context(), q.Get("pr"), afterID, limit)
 	}
 	if err != nil {
 		appErr(w, r, err)
 		return
 	}
-	jsonOut(w, http.StatusOK, map[string]any{"changes": xs})
+	var last int64
+	if len(xs) > 0 {
+		last = xs[len(xs)-1].ID
+	}
+	jsonOut(w, http.StatusOK, listBody("changes", xs, afterID, nextAfterID(afterID, len(xs), limit, last)))
 }
 
 // changeMergeFlow is POST /v1/changes/{id}/merge-flow. It is an operator

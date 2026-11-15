@@ -257,11 +257,25 @@ func (s *Store) RecordPlacement(ctx context.Context, d PlacementDecision) (Place
 	return stored, created, tx.Commit(ctx)
 }
 
-func (s *Store) ListPlacements(ctx context.Context, job, host string, since time.Time, limit int) ([]PlacementDecision, error) {
-	if (job != "" && !ValidJobID(job)) || (host != "" && !ValidJobHost(host)) || limit < 1 || limit > 1000 {
+// ListPlacements lists placement decisions newest first. afterID pages by id
+// instead: a page holds the rows with id greater than afterID in id order, so
+// a reader visits every matching row exactly once even when decided_at values
+// repeat. A nil afterID keeps the newest-first answer.
+func (s *Store) ListPlacements(ctx context.Context, job, host string, since time.Time, afterID *int64, limit int) ([]PlacementDecision, error) {
+	if (job != "" && !ValidJobID(job)) || (host != "" && !ValidJobHost(host)) || (afterID != nil && *afterID < 0) || limit < 1 || limit > 1000 {
 		return nil, errors.New("invalid placement filter")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+placementColumns+` FROM placement_decisions WHERE ($1='' OR job_id=$1) AND ($2='' OR chosen_host=$2) AND decided_at >= $3 ORDER BY decided_at DESC,id DESC LIMIT $4`, job, host, since, limit)
+	q := `SELECT ` + placementColumns + ` FROM placement_decisions WHERE ($1='' OR job_id=$1) AND ($2='' OR chosen_host=$2) AND decided_at >= $3`
+	args := []any{job, host, since}
+	order := ` ORDER BY decided_at DESC,id DESC`
+	if afterID != nil {
+		args = append(args, *afterID)
+		q += fmt.Sprintf(` AND id>$%d`, len(args))
+		order = ` ORDER BY id ASC`
+	}
+	args = append(args, limit)
+	q += order + fmt.Sprintf(` LIMIT $%d`, len(args))
+	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

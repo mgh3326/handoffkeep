@@ -16,19 +16,25 @@ func (c Client) RecordVerification(ctx context.Context, in store.VerificationInp
 	return out, err
 }
 
-// ListChanges reads the changes for a PR URL (pr set) or a task (taskID set).
-func (c Client) ListChanges(ctx context.Context, pr string, taskID int64) ([]store.Change, error) {
+// ListChanges reads the changes for a PR URL (pr set) or a task (taskID set,
+// in id order). afterID, when set, starts the task list after that change id
+// and next is the following page's cursor, nil at the end.
+func (c Client) ListChanges(ctx context.Context, pr string, taskID int64, afterID *int64) ([]store.Change, *int64, error) {
 	q := url.Values{}
 	if pr != "" {
 		q.Set("pr", pr)
 	} else {
 		q.Set("task", strconv.FormatInt(taskID, 10))
 	}
+	if afterID != nil {
+		q.Set("after_id", strconv.FormatInt(*afterID, 10))
+	}
 	var out struct {
 		Changes []store.Change `json:"changes"`
+		Next    *int64         `json:"next_after_id"`
 	}
 	err := c.call(ctx, "GET", "/v1/changes?"+q.Encode(), nil, &out)
-	return out.Changes, err
+	return out.Changes, out.Next, err
 }
 
 // GetChange reads one PR's state (GET /v1/changes/one). include is the

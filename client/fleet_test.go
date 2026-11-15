@@ -271,6 +271,33 @@ func fleetCases(t *testing.T) []fleetCase {
 			},
 		},
 		{
+			// The paged call always sends after_id, so the first request
+			// (after_id 0) is the id-ordered first page.
+			name: "ListDocumentsPage", method: "GET", uri: "/v1/documents?after_id=5&kind=&limit=2&prefix=notes%2F&session=", status: http.StatusOK,
+			reply: `{"documents": [{"id": 9, "key": "notes/b", "kind": "note", "sha256": "cd", "created_by": "svc-panewire", "created_at": "2026-11-08T08:00:00Z", "updated_at": "2026-11-08T08:00:00Z"}], "next_after_id": 9}`,
+			call: func(ctx context.Context, c client.Client) error {
+				xs, next, err := c.ListDocumentsPage(ctx, "notes/", 5, 2)
+				if err != nil {
+					return err
+				}
+				if len(xs) != 1 || xs[0].ID != 9 || xs[0].Key != "notes/b" || next != 9 {
+					t.Fatalf("document page decoded wrong: %+v next=%d", xs, next)
+				}
+				return nil
+			},
+		},
+		{
+			name: "ListDocumentsPageEnd", method: "GET", uri: "/v1/documents?after_id=0&kind=&limit=100&prefix=&session=", status: http.StatusOK,
+			reply: `{"documents": [], "next_after_id": null}`,
+			call: func(ctx context.Context, c client.Client) error {
+				xs, next, err := c.ListDocumentsPage(ctx, "", 0, 100)
+				if err == nil && (len(xs) != 0 || next != 0) {
+					t.Fatalf("empty page decoded to %+v next=%d", xs, next)
+				}
+				return err
+			},
+		},
+		{
 			name: "ListQuotaObservations", method: "GET", uri: "/v1/quota/accounts/codex:0123456789abcdef/observations?limit=5&since=2026-11-08T08%3A00%3A00Z&until=2026-11-08T09%3A00%3A00Z", status: http.StatusOK,
 			reply: `[{"id":7,"kind":"auto","measured_at":"2026-11-08T08:30:00Z","buckets":[{"window":"5h","used_pct":42,"scope":"account"}]}]`,
 			call: func(ctx context.Context, c client.Client) error {

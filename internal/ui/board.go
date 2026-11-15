@@ -643,7 +643,7 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
-	changes, err := h.store.ListChangesByTask(r.Context(), id, 101)
+	changes, err := h.store.ListChangesByTask(r.Context(), id, nil, 101)
 	if err != nil {
 		log.Printf("ui.board_detail_error err=%q", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal_error")
@@ -655,7 +655,7 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
-	documents, err := h.store.ListDocuments(r.Context(), "", "", "", id, 101)
+	documents, err := h.store.ListDocuments(r.Context(), "", "", "", id, nil, 101)
 	if err != nil {
 		log.Printf("ui.board_detail_error err=%q", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal_error")

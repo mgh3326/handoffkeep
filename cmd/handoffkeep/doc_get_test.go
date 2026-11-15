@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -103,5 +104,51 @@ func TestDocGetByIDOldServerSkew(t *testing.T) {
 		if strings.Contains(out.String(), `"id"`) {
 			t.Fatalf("--id %s: printed a document on failure: %s", id, out.String())
 		}
+	}
+}
+
+// doc list --after-id pages by id and prints the next cursor; without the flag
+// the request and the printed array are the ones the command always sent.
+func TestDocListCursor(t *testing.T) {
+	var queries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/documents" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		queries = append(queries, r.URL.RawQuery)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"documents":     []store.Document{{ID: 9, Key: "notes/b", Kind: "note"}},
+			"next_after_id": 9,
+		})
+	}))
+	defer server.Close()
+	t.Setenv("HANDOFFKEEP_URL", server.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+
+	var out bytes.Buffer
+	if err := docCmd([]string{"list", "--prefix", "notes/", "--after-id", "0"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(queries) != 1 || queries[0] != "after_id=0&kind=&limit=100&prefix=notes%2F&session=" {
+		t.Fatalf("query=%v", queries)
+	}
+	var printed map[string]any
+	if err := json.Unmarshal(out.Bytes(), &printed); err != nil || printed["next_after_id"] != float64(9) {
+		t.Fatalf("out=%s err=%v", out.String(), err)
+	}
+
+	out.Reset()
+	if err := docCmd([]string{"list", "--prefix", "notes/"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(queries) != 2 || queries[1] != "kind=&limit=100&prefix=notes%2F&session=" {
+		t.Fatalf("query=%v", queries)
+	}
+	if !strings.HasPrefix(out.String(), "[") {
+		t.Fatalf("no-cursor list printed %q, want the plain array", out.String())
+	}
+	if err := docCmd([]string{"list", "--after-id", "-1"}, io.Discard); err == nil {
+		t.Fatal("negative --after-id accepted")
 	}
 }

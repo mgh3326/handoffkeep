@@ -12,7 +12,7 @@ All requests and responses use `Content-Type: application/json`.
 
 | Method | Path | Result |
 |---|---|---|
-| GET | `/v1/bench/reps?profile=&grade=&effort=&limit=` | `{"reps":[...]}`; ordered by `id DESC` |
+| GET | `/v1/bench/reps?profile=&grade=&effort=&after_id=&limit=` | `{"reps":[...]}`; ordered by `id DESC`, or `id ASC` with `after_id`, which also answers `next_after_id` (null at the end) |
 | PUT | `/v1/bench/reps` | Body `{"reps":[...]}`; 1–1000 rows, response `{"upserted":N,"ids":[...]}` — `ids` carries the server id of every accepted row aligned to the input order |
 | PATCH | `/v1/bench/reps/{id}` | Set-once outcome patch of the rep with server id `{id}` (below); response is the row |
 | GET | `/v1/bench/grades` | `{"grades":[...]}`; ordered by `profile` |

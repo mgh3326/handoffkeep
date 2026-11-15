@@ -821,13 +821,17 @@ func docCmd(args []string, out io.Writer) error {
 	apply := fs.Bool("apply", false, "apply changes")
 	olderThan := fs.String("older-than", "", "prune: delete documents not updated for this many days, like 30d")
 	limit := fs.Int("limit", 1000, "prune: most documents one run deletes")
+	afterID := fs.Int64("after-id", 0, "list: page by id, documents with id greater than this (0 starts)")
 	if e := fs.Parse(args[1:]); e != nil {
 		return e
 	}
-	taskSet := false
+	taskSet, afterSet := false, false
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "task" {
+		switch f.Name {
+		case "task":
 			taskSet = true
+		case "after-id":
+			afterSet = true
 		}
 	})
 	if taskSet && *task < 1 {
@@ -835,6 +839,9 @@ func docCmd(args []string, out io.Writer) error {
 	}
 	if (taskSet && args[0] != "put" && args[0] != "list") || (*originClass != "" && args[0] != "put") {
 		return errors.New("--task applies to doc put and doc list, --origin-class to doc put")
+	}
+	if afterSet && (args[0] != "list" || *afterID < 0) {
+		return errors.New("--after-id applies to doc list and must be >= 0")
 	}
 	ctx := context.Background()
 	if e := mustClient(c); e != nil {
@@ -894,11 +901,18 @@ func docCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, v)
 	case "list":
-		v, e := c.ListDocuments(ctx, *prefix, *kind, *session, *task, 100)
+		var after *int64
+		if afterSet {
+			after = afterID
+		}
+		docs, next, e := c.ListDocuments(ctx, *prefix, *kind, *session, *task, after, 100)
 		if e != nil {
 			return e
 		}
-		return printJSON(out, v)
+		if after == nil {
+			return printJSON(out, docs)
+		}
+		return printJSON(out, map[string]any{"documents": docs, "next_after_id": next})
 	case "policy-index":
 		return docPolicyIndex(ctx, c, *apply, out)
 	case "prune":

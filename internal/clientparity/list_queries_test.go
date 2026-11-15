@@ -106,7 +106,7 @@ func TestListCallsMatchRemote(t *testing.T) {
 		{"", 1000},
 		{"a b&c=d/é", 1},
 	} {
-		want, err := rc.ListDocuments(ctx, in.prefix, "", "", 0, in.limit)
+		want, _, err := rc.ListDocuments(ctx, in.prefix, "", "", 0, nil, in.limit)
 		if err != nil {
 			t.Fatalf("remote ListDocuments %+v: %v", in, err)
 		}
@@ -126,6 +126,39 @@ func TestListCallsMatchRemote(t *testing.T) {
 		}
 		if got[0].Key != want[0].Key || got[0].Key == "" {
 			t.Fatalf("document key %q, internal/remote %q", got[0].Key, want[0].Key)
+		}
+	}
+
+	// The paged form sends the same query and reads the same next cursor.
+	docBody, err = json.Marshal(map[string]any{"documents": []store.Document{doc}, "next_after_id": 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hk = newRecorder(t, docBody)
+	rc, cc = remote.Client{URL: hk.URL, Token: "t"}, client.Client{URL: hk.URL, Token: "t"}
+	for _, in := range []struct {
+		prefix string
+		after  int64
+		limit  int
+	}{
+		{"artifacts/handoffkeep/42/job-7", 0, 100},
+		{"", 7, 1000},
+	} {
+		after := in.after
+		want, wantNext, err := rc.ListDocuments(ctx, in.prefix, "", "", 0, &after, in.limit)
+		if err != nil {
+			t.Fatalf("remote ListDocuments %+v: %v", in, err)
+		}
+		wantReq := hk.take()
+		got, gotNext, err := cc.ListDocumentsPage(ctx, in.prefix, in.after, in.limit)
+		if err != nil {
+			t.Fatalf("client ListDocumentsPage %+v: %v", in, err)
+		}
+		if gotReq := hk.take(); !reflect.DeepEqual(gotReq, wantReq) {
+			t.Fatalf("ListDocumentsPage %+v sent %v, internal/remote sends %v", in, gotReq, wantReq)
+		}
+		if len(got) != 1 || len(want) != 1 || gotNext != 42 || wantNext == nil || *wantNext != 42 {
+			t.Fatalf("ListDocumentsPage %+v: %d docs next=%d, internal/remote %d docs next=%v", in, len(got), gotNext, len(want), wantNext)
 		}
 	}
 }
