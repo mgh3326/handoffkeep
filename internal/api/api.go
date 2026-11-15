@@ -616,6 +616,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("PATCH /v1/milestones/{milestone}", s.milestonePatch)
 	m.HandleFunc("GET /v1/milestones/{milestone}", s.milestoneGet)
 	m.HandleFunc("GET /v1/tasks/states", s.taskStates)
+	m.HandleFunc("GET /v1/tasks/states/snapshot", s.taskStatesSnapshot)
 	m.HandleFunc("PUT /v1/tasks/{id}/spawn", s.taskSpawnPut)
 	m.HandleFunc("GET /v1/tasks/{id}", s.task)
 	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)

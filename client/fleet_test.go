@@ -222,6 +222,25 @@ func fleetCases(t *testing.T) []fleetCase {
 			},
 		},
 		{
+			// The snapshot route answers every requested id once: present tasks
+			// in request order, absent ids in missing, and the snapshot's as_of.
+			name: "TaskStatesSnapshot", method: "GET", uri: "/v1/tasks/states/snapshot?ids=42%2C9%2C42&until=merged", status: http.StatusOK,
+			reply: `{"as_of": "2026-11-08T08:30:00.123456Z", "tasks": [{"id": 42, "state": "merged", "category": "merged", "blockers": [], "condition_met": true}], "missing": [9]}`,
+			call: func(ctx context.Context, c client.Client) error {
+				x, err := c.TaskStatesSnapshot(ctx, []int64{42, 9, 42}, "merged")
+				if err != nil {
+					return err
+				}
+				wantAt := time.Date(2026, 11, 8, 8, 30, 0, 123456000, time.UTC)
+				if !x.AsOf.Equal(wantAt) || len(x.Tasks) != 1 || x.Tasks[0].ID != 42 || x.Tasks[0].State != "merged" ||
+					x.Tasks[0].ConditionMet == nil || !*x.Tasks[0].ConditionMet ||
+					len(x.Missing) != 1 || x.Missing[0] != 9 {
+					t.Fatalf("states snapshot decoded wrong: %+v", x)
+				}
+				return nil
+			},
+		},
+		{
 			// prefix is query-escaped; kind and session go empty, as in
 			// internal/remote.
 			name: "ListDocuments", method: "GET", uri: "/v1/documents?kind=&limit=100&prefix=notes%2Fjob+7&session=", status: http.StatusOK,
