@@ -158,9 +158,11 @@ func TestFleetRuntimeCDNZero(t *testing.T) {
 	}
 }
 
-// Home and Work must not carry the markdown renderer: it ships only in the
-// lazy document-viewer chunk. The check walks shell.js and everything it
-// imports statically, so a static import of the viewer would fail it.
+// The markdown renderer ships only in its own lazy chunk: the shell may name
+// that chunk (a dynamic import), but its static graph must not carry the
+// renderer's code. The check walks shell.js and everything it imports
+// statically and looks for the renderer's own strings, so a static import of
+// it fails here, while Work reaching it through import() stays lazy (hk 4787).
 func TestShellBundleExcludesMarkdownRenderer(t *testing.T) {
 	artifacts := readConsoleArtifacts(t)
 	staticImport := regexp.MustCompile(`(?:from|import)\s*"\./([^"]+\.js)"`)
@@ -182,12 +184,16 @@ func TestShellBundleExcludesMarkdownRenderer(t *testing.T) {
 	walk("shell.js")
 	for name := range seen {
 		body := artifacts[name]
-		if strings.Contains(body, "DocMarkdown") || strings.Contains(body, "data-doc-renderer") || strings.Contains(body, "micromark") {
+		if strings.Contains(body, "micromark") || strings.Contains(body, "data-doc-renderer") {
 			t.Errorf("%s is in the shell's static graph and carries the markdown renderer", name)
 		}
 	}
 	if !strings.Contains(artifacts["shell.js"], "shared-DocView.js") {
 		t.Fatal("shell.js does not reach the document viewer chunk")
+	}
+	// The renderer must still be a separate chunk, not folded into the shell.
+	if renderer := artifacts["shared-DocMarkdown.js"]; !strings.Contains(renderer, "micromark") || !strings.Contains(renderer, "data-doc-renderer") {
+		t.Fatal("the markdown renderer is not a separate chunk carrying its own code")
 	}
 }
 
