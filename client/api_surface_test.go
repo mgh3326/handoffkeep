@@ -38,6 +38,7 @@ var exportedAPI = []string{
 	"Client.PutTaskSpawn",
 	"Client.ReopenTask",
 	"Client.TaskStates",
+	"Client.TaskStatesSnapshot",
 	// Wire types.
 	"Attachment",
 	"AttachmentUploadTicket",
@@ -63,6 +64,7 @@ var exportedAPI = []string{
 	"TaskSpawnStart",
 	"TaskSpawnStartInput",
 	"TaskStateEntry",
+	"TaskStatesSnapshot",
 	// Error helpers and the User-Agent.
 	"ErrTooManyRedirects",
 	"ErrorCode",

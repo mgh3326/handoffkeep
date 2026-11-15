@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -214,6 +215,61 @@ func TestTaskStatesBlockersAndCondition(t *testing.T) {
 		if _, err := s.TaskStates(ctx, bad.ids, bad.until); !errors.Is(err, ErrSpawnInvalid) {
 			t.Fatalf("TaskStates(%d ids, %q) err=%v", len(bad.ids), bad.until, err)
 		}
+	}
+}
+
+// The snapshot route answers every requested id exactly once: present tasks
+// in request order, absent ids ascending, and the reading transaction's
+// now(). TaskStates reads the same entries, so the two routes cannot drift.
+func TestTaskStatesSnapshotAnswersEveryID(t *testing.T) {
+	s := schemaStore(t, "task_spawn_snapshot")
+	ctx := t.Context()
+	lane := relaneLane(t, "spawn-snapshot")
+	first := relaneTask(t, s, lane, "first")
+	second := relaneTask(t, s, lane, "second")
+	missingLow, missingHigh := second.ID+1, second.ID+2
+	ids := []int64{first.ID, missingHigh, second.ID, missingLow, first.ID}
+	snap, err := s.TaskStatesSnapshot(ctx, ids, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Tasks) != 2 || snap.Tasks[0].ID != first.ID || snap.Tasks[1].ID != second.ID {
+		t.Fatalf("tasks=%+v", snap.Tasks)
+	}
+	if !reflect.DeepEqual(snap.Missing, []int64{missingLow, missingHigh}) {
+		t.Fatalf("missing=%v", snap.Missing)
+	}
+	if snap.AsOf.IsZero() || snap.AsOf.Location() != time.UTC {
+		t.Fatalf("as_of=%v", snap.AsOf)
+	}
+	xs, err := s.TaskStates(ctx, ids, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(xs, snap.Tasks) {
+		t.Fatalf("TaskStates=%+v snapshot=%+v", xs, snap.Tasks)
+	}
+	for _, id := range []int64{first.ID, second.ID, missingLow, missingHigh} {
+		n := 0
+		for _, e := range snap.Tasks {
+			if e.ID == id {
+				n++
+			}
+		}
+		for _, m := range snap.Missing {
+			if m == id {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("id %d appears %d times", id, n)
+		}
+	}
+	if _, err := s.TaskStatesSnapshot(ctx, make([]int64, TaskStatesMax+1), ""); !errors.Is(err, ErrSpawnInvalid) {
+		t.Fatalf("201 ids err=%v", err)
+	}
+	if _, err := s.TaskStatesSnapshot(ctx, []int64{first.ID}, "released"); !errors.Is(err, ErrSpawnInvalid) {
+		t.Fatalf("until err=%v", err)
 	}
 }
 
