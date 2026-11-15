@@ -823,6 +823,12 @@ type Attachment struct {
 	CreatedAt      time.Time `json:"created_at"`
 	RefKind        string    `json:"ref_kind,omitempty"`
 	RefID          string    `json:"ref_id,omitempty"`
+	// ArchivedAt and ArchiveLocation are set once the blob's Drive copy has
+	// been verified; HotDeletedAt says the object store copy is gone
+	// (design/2026-11-16/hk-attachment-archive).
+	ArchivedAt      *time.Time `json:"archived_at"`
+	ArchiveLocation string     `json:"archive_location"`
+	HotDeletedAt    *time.Time `json:"-"`
 }
 type AttachmentUsage struct {
 	Month      string `json:"month"`
@@ -3648,7 +3654,7 @@ func (s *Store) GetAttachment(ctx context.Context, sha string) (Attachment, bool
 		return Attachment{}, false, errors.New("invalid attachment sha")
 	}
 	var x Attachment
-	e := s.pool.QueryRow(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256=$1`, sha).Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation)
+	e := s.pool.QueryRow(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments WHERE sha256=$1`, sha).Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation, &x.ArchivedAt, &x.ArchiveLocation, &x.HotDeletedAt)
 	if e != nil {
 		if errors.Is(e, pgx.ErrNoRows) {
 			return x, false, nil
@@ -3661,7 +3667,7 @@ func (s *Store) GetAttachment(ctx context.Context, sha string) (Attachment, bool
 // ListAttachmentObjects returns each stored object once, without multiplying
 // rows by attachment_refs; migration uses this complete inventory.
 func (s *Store) ListAttachmentObjects(ctx context.Context) ([]Attachment, error) {
-	rows, err := s.pool.Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments ORDER BY sha256`)
+	rows, err := s.pool.Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments ORDER BY sha256`)
 	if err != nil {
 		return nil, err
 	}
@@ -3669,7 +3675,7 @@ func (s *Store) ListAttachmentObjects(ctx context.Context) ([]Attachment, error)
 	out := []Attachment{}
 	for rows.Next() {
 		var x Attachment
-		if err = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); err != nil {
+		if err = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation, &x.ArchivedAt, &x.ArchiveLocation, &x.HotDeletedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
@@ -3928,7 +3934,7 @@ func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limi
 	if limit > 1000 {
 		limit = 1000
 	}
-	q := `SELECT a.sha256,a.size_bytes,a.mime,a.original_name,a.created_by,a.created_at,r.ref_kind,r.ref_id,COALESCE(a.object_location,'') FROM attachments a JOIN attachment_refs r ON r.sha256=a.sha256`
+	q := `SELECT a.sha256,a.size_bytes,a.mime,a.original_name,a.created_by,a.created_at,r.ref_kind,r.ref_id,COALESCE(a.object_location,''),a.archived_at,a.archive_location,a.hot_deleted_at FROM attachments a JOIN attachment_refs r ON r.sha256=a.sha256`
 	args := []any{limit}
 	if refKind != "" {
 		q += ` WHERE r.ref_kind=$1 AND r.ref_id=$2 ORDER BY a.created_at DESC,a.sha256,r.ref_kind,r.ref_id LIMIT $3`
@@ -3944,7 +3950,7 @@ func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limi
 	out := []Attachment{}
 	for rows.Next() {
 		var x Attachment
-		if e = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.RefKind, &x.RefID, &x.ObjectLocation); e != nil {
+		if e = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.RefKind, &x.RefID, &x.ObjectLocation, &x.ArchivedAt, &x.ArchiveLocation, &x.HotDeletedAt); e != nil {
 			return nil, e
 		}
 		out = append(out, x)
@@ -3967,14 +3973,14 @@ func (s *Store) AttachmentsBySHA(ctx context.Context, shas []string) (map[string
 	if len(valid) == 0 {
 		return out, nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256 = ANY($1)`, valid)
+	rows, err := s.pool.Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments WHERE sha256 = ANY($1)`, valid)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var x Attachment
-		if err = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); err != nil {
+		if err = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation, &x.ArchivedAt, &x.ArchiveLocation, &x.HotDeletedAt); err != nil {
 			return nil, err
 		}
 		out[x.SHA256] = x

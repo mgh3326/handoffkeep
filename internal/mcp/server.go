@@ -194,6 +194,9 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 	}) (*gmcp.CallToolResult, any, error) {
 		v, e := service.AttachmentURL(ctx, x.SHA256)
 		if e != nil {
+			if archived, ok := attachmentArchivedAnswer(x.SHA256, e); ok {
+				return result(archived)
+			}
 			return nil, nil, e
 		}
 		return result(map[string]any{"url": v, "expires_in_seconds": 600})
@@ -203,6 +206,9 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 	}) (*gmcp.CallToolResult, any, error) {
 		v, body, e := service.GetAttachment(ctx, x.SHA256)
 		if e != nil {
+			if archived, ok := attachmentArchivedAnswer(x.SHA256, e); ok {
+				return result(archived)
+			}
 			return nil, nil, e
 		}
 		defer body.Close()

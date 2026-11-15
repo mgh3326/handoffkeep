@@ -59,7 +59,7 @@ describe("Work", () => {
   it("lists task attachments and shows the empty state", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes("/attachments")) return json({ attachments: [{ sha256: "a".repeat(64), original_name: "notes.txt", size_bytes: 12, mime: "text/plain", created_at: "2026-11-05T00:00:00Z", created_by: "operator" }], truncated: true });
+      if (url.includes("/attachments")) return json({ attachments: [{ sha256: "a".repeat(64), original_name: "notes.txt", size_bytes: 12, mime: "text/plain", created_at: "2026-11-05T00:00:00Z", created_by: "operator", archived_at: null, archive_location: "" }], truncated: true });
       if (url.includes("/comments")) return json({ comments: [], truncated: false });
       return json(detail);
     }));

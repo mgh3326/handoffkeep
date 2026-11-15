@@ -57,6 +57,9 @@ func (s Service) dotsResults() DotsResultStore {
 
 var decisionResolverRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
+// attachmentPathSHARE is a content address in a URL path.
+var attachmentPathSHARE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 // DecisionResolveInput records an answer made outside the web console and
 // closes the matching open decision. It is shared by the HTTP route and the
 // authenticated remote client payload.
@@ -241,6 +244,24 @@ func (s Service) AttachmentURL(ctx context.Context, sha string) (string, error) 
 		return "", attachments.ErrDisabled
 	}
 	return s.Attachments.Presign(ctx, sha)
+}
+
+// AttachmentArchiveCandidates pages the blobs the archiver may copy out. It
+// answers in mode off too: the dry run that must precede the canary reads it.
+func (s Service) AttachmentArchiveCandidates(ctx context.Context, limit int, after string) ([]store.AttachmentArchiveCandidate, string, error) {
+	if s.Attachments == nil {
+		return nil, "", attachments.ErrDisabled
+	}
+	return s.Attachments.Candidates(ctx, limit, after)
+}
+
+// RecordAttachmentArchive records one verified archive copy, and in mode on
+// deletes the hot object.
+func (s Service) RecordAttachmentArchive(ctx context.Context, sha, location string, size int64) (store.AttachmentArchive, error) {
+	if s.Attachments == nil {
+		return store.AttachmentArchive{}, attachments.ErrDisabled
+	}
+	return s.Attachments.Archive(ctx, sha, location, size)
 }
 func (s Service) ListAttachments(ctx context.Context, ref string, limit int) ([]store.Attachment, error) {
 	if s.Attachments == nil {
@@ -567,7 +588,9 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("/v1/documents/{key...}", s.document)
 	m.HandleFunc("PUT /v1/attachments", s.attachmentPut)
 	m.HandleFunc("GET /v1/attachments", s.attachments)
+	m.HandleFunc("GET /v1/attachments/archive-candidates", s.attachmentArchiveCandidates)
 	m.HandleFunc("GET /v1/attachments/{sha}", s.attachment)
+	m.HandleFunc("POST /v1/attachments/{sha}/archive", s.attachmentArchive)
 	m.HandleFunc("POST /v1/attachments/uploads", s.attachmentUploadBegin)
 	m.HandleFunc("POST /v1/attachments/uploads/{id}/complete", s.attachmentUploadComplete)
 	m.HandleFunc("GET /v1/usage", s.usage)
@@ -2236,7 +2259,9 @@ func (s Server) attachment(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("presign") == "1" {
 		u, e := s.Service.AttachmentURL(r.Context(), sha)
 		if e != nil {
-			appErr(w, r, e)
+			if !writeArchivedAnswer(w, e) {
+				appErr(w, r, e)
+			}
 			return
 		}
 		http.Redirect(w, r, u, http.StatusFound)
@@ -2244,11 +2269,14 @@ func (s Server) attachment(w http.ResponseWriter, r *http.Request) {
 	}
 	x, body, e := s.Service.GetAttachment(r.Context(), sha)
 	if e != nil {
-		if e.Error() == "attachment_not_found" {
+		if errors.Is(e, store.ErrAttachmentNotFound) {
 			writeError(w, http.StatusNotFound, "not_found")
-		} else {
-			appErr(w, r, e)
+			return
 		}
+		if writeArchivedAnswer(w, e) {
+			return
+		}
+		appErr(w, r, e)
 		return
 	}
 	defer body.Close()
@@ -2256,6 +2284,72 @@ func (s Server) attachment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(x.OriginalName, "\"", "")+`"`)
 	_, _ = io.Copy(w, body)
 }
+
+// writeArchivedAnswer answers 410 attachment_archived naming the blob and
+// where the archive copy is. It reports whether e was that failure.
+func writeArchivedAnswer(w http.ResponseWriter, e error) bool {
+	var archived *attachments.ArchivedError
+	if !errors.As(e, &archived) {
+		return false
+	}
+	jsonOut(w, http.StatusGone, map[string]string{"error": "attachment_archived", "sha256": archived.SHA256, "location": archived.Location})
+	return true
+}
+
+// attachmentArchiveCandidates answers the archivable blobs in sha order.
+func (s Server) attachmentArchiveCandidates(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	n, e := queryLimit(r, 100, 1000)
+	if e != nil {
+		appErr(w, r, e)
+		return
+	}
+	xs, next, e := s.Service.AttachmentArchiveCandidates(r.Context(), n, r.URL.Query().Get("after"))
+	if e != nil {
+		appErr(w, r, e)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"candidates": xs, "next": next})
+}
+
+// attachmentArchive records one archive copy the archiver verified. The body
+// names where the copy is, its size and its sha; a repeat with the same
+// location answers the recorded result.
+func (s Server) attachmentArchive(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	defer r.Body.Close()
+	sha := r.PathValue("sha")
+	if !attachmentPathSHARE.MatchString(sha) {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	var in struct {
+		Location  string `json:"location"`
+		SizeBytes int64  `json:"size_bytes"`
+		SHA256    string `json:"sha256"`
+	}
+	if err := decode(r, &in, bodySmall); err != nil {
+		appErr(w, r, err)
+		return
+	}
+	// The body's sha names the record the archiver verified; it must be the
+	// one in the path, which is the row this answers for.
+	if in.SHA256 != sha {
+		writeError(w, http.StatusConflict, "attachment_archive_mismatch")
+		return
+	}
+	rec, e := s.Service.RecordAttachmentArchive(r.Context(), sha, in.Location, in.SizeBytes)
+	if e != nil {
+		appErr(w, r, e)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"archived_at": rec.ArchivedAt, "location": rec.Location, "hot_deleted": rec.HotDeleted})
+}
+
 func (s Server) usage(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return

@@ -100,7 +100,7 @@ export async function fetchDocumentAttachments(key: string): Promise<BoardAttach
 
 async function readAttachments(path: string): Promise<BoardAttachments> {
   const data = await getJSON<{ attachments: BoardAttachment[]; truncated: boolean }>(path);
-  if (!data || typeof data.truncated !== "boolean" || !Array.isArray(data.attachments) || !data.attachments.every(a => record(a) && typeof a.sha256 === "string" && typeof a.original_name === "string" && typeof a.size_bytes === "number" && typeof a.mime === "string" && typeof a.created_at === "string" && typeof a.created_by === "string")) throw new Error("malformed attachment response");
+  if (!data || typeof data.truncated !== "boolean" || !Array.isArray(data.attachments) || !data.attachments.every(a => record(a) && typeof a.sha256 === "string" && typeof a.original_name === "string" && typeof a.size_bytes === "number" && typeof a.mime === "string" && typeof a.created_at === "string" && typeof a.created_by === "string" && (a.archived_at === null || typeof a.archived_at === "string") && typeof a.archive_location === "string")) throw new Error("malformed attachment response");
   return data;
 }
 

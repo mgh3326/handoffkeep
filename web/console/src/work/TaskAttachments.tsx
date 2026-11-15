@@ -81,16 +81,20 @@ export function TaskAttachments({ attachments }: { attachments: BoardAttachment[
   const [selected, setSelected] = useState<string[]>([]);
   const [enlarged, setEnlarged] = useState<number | null>(null);
   const opener = useRef<HTMLElement | null>(null);
+  // An archived file has no hot copy, so it is never rendered in place: the
+  // line below names where the archive holds it.
+  const archived = attachments.filter(attachment => attachment.archive_location !== "");
+  const live = attachments.filter(attachment => attachment.archive_location === "");
   // Above the threshold an image or video keeps the plain link line below.
-  const items: MediaItem[] = attachments.flatMap(attachment => {
+  const items: MediaItem[] = live.flatMap(attachment => {
     const kind = mediaKind(attachment.mime);
     return kind !== null && attachment.size_bytes <= MAX_INLINE_BYTES ? [{ attachment, kind }] : [];
   });
   // Derived, so a list that reloads under a different task drops stale picks.
   const chosen = items.filter(item => selected.includes(item.attachment.sha256));
   // Too large to show in place: the link and its size, nothing else.
-  const oversized = attachments.filter(attachment => mediaKind(attachment.mime) !== null && attachment.size_bytes > MAX_INLINE_BYTES);
-  const links = attachments.filter(attachment => mediaKind(attachment.mime) === null);
+  const oversized = live.filter(attachment => mediaKind(attachment.mime) !== null && attachment.size_bytes > MAX_INLINE_BYTES);
+  const links = live.filter(attachment => mediaKind(attachment.mime) === null);
   const toggle = (sha: string) => setSelected(old => old.includes(sha) ? old.filter(value => value !== sha) : [...old, sha]);
   const close = useCallback(() => {
     setEnlarged(null);
@@ -128,6 +132,7 @@ export function TaskAttachments({ attachments }: { attachments: BoardAttachment[
       {chosen.length >= 2 && <CompareView items={chosen} onEnlarge={index => { opener.current = document.activeElement as HTMLElement | null; setEnlarged(index); }} />}
       {oversized.map(attachment => <p key={attachment.sha256}><a href={`/ui/files/${attachment.sha256}`}>{attachment.original_name}</a> · {attachment.size_bytes} bytes</p>)}
       {links.map(attachment => <p key={attachment.sha256}><a href={`/ui/files/${attachment.sha256}`}>{attachment.original_name}</a> · {attachment.size_bytes} bytes · {attachment.mime} · {formatMinuteKST(attachment.created_at)} · {attachment.created_by}</p>)}
+      {archived.map(attachment => <p key={attachment.sha256}><a href={`/ui/files/${attachment.sha256}`}>{attachment.original_name}</a> · {attachment.size_bytes} bytes · 보관됨 · {attachment.archive_location}</p>)}
       {enlarged !== null && chosen[enlarged] && <EnlargeView items={chosen} index={enlarged} onClose={close} onStep={step} />}
     </>
   );

@@ -10,8 +10,8 @@ const detail = { task, events: [], dwell: [], participants: { task_ref: "hk:task
 const json = (data: unknown) => new Response(JSON.stringify(data), { status: 200, headers: { "Content-Type": "application/json" } });
 
 const sha = (c: string) => c.repeat(64);
-function attachment(name: string, mime: string, size = 1200, digest = name): BoardAttachment {
-  return { sha256: sha(digest), original_name: name, size_bytes: size, mime, created_at: "2026-11-05T00:00:00Z", created_by: "operator" };
+function attachment(name: string, mime: string, size = 1200, digest = name, archiveLocation = ""): BoardAttachment {
+  return { sha256: sha(digest), original_name: name, size_bytes: size, mime, created_at: "2026-11-05T00:00:00Z", created_by: "operator", archived_at: archiveLocation ? "2026-11-16T00:00:00Z" : null, archive_location: archiveLocation };
 }
 function stubRecord(attachments: BoardAttachment[], extra: { body?: string; comments?: unknown[] } = {}) {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
@@ -42,6 +42,16 @@ describe("task attachments in place", () => {
     render(<TaskRecord id={101} />);
     const link = await screen.findByRole("link", { name: "plan.pdf" });
     expect(link.getAttribute("href")).toBe(`/ui/files/${sha("c")}`);
+    expect(screen.queryByRole("img")).toBeNull();
+  });
+
+  it("names where an archived file is and does not inline it", async () => {
+    stubRecord([attachment("card-b.png", "image/png", 1200, "e", "fleet-artifacts/archive/tasks/7/attachments/e-card-b.png")]);
+    render(<TaskRecord id={101} />);
+    const link = await screen.findByRole("link", { name: "card-b.png" });
+    expect(link.getAttribute("href")).toBe(`/ui/files/${sha("e")}`);
+    const line = await screen.findByText(/fleet-artifacts\/archive\/tasks\/7/);
+    expect(line.textContent).toContain("보관됨");
     expect(screen.queryByRole("img")).toBeNull();
   });
 

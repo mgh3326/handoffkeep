@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	gmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -49,6 +51,25 @@ var attachmentReadDescription = "Read one attachment's content inline, so the fi
 	"text/*, application/json, and a generic type whose name ends .md, .tsv, .csv or .txt return text up to 256 KiB, cut at a UTF-8 boundary with a line naming the full size; bytes that are not valid UTF-8 are not returned inline. " +
 	"Anything else — video, audio, PDF, another image type — returns a text block instead. " +
 	"Every refusal names attachment_get_url, which mints a ten-minute private URL for the whole file."
+
+// attachmentArchivedAnswer is the tool answer for an attachment whose hot copy
+// is archived: where it is, and that there is no object to read or sign. It
+// reports false for any other error.
+func attachmentArchivedAnswer(sha string, err error) (map[string]any, bool) {
+	var archived *attachments.ArchivedError
+	if !errors.As(err, &archived) {
+		return nil, false
+	}
+	if archived.SHA256 == "" {
+		archived.SHA256 = sha
+	}
+	return map[string]any{
+		"sha256":   archived.SHA256,
+		"archived": true,
+		"location": archived.Location,
+		"note":     "attachment " + archived.SHA256 + " is archived at " + archived.Location + "; hk holds no hot copy, so nothing is read or signed. Restore is not available yet.",
+	}, true
+}
 
 // attachmentRead returns the tool result for one attachment body. The caller
 // closes body.

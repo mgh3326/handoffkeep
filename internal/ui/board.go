@@ -41,6 +41,10 @@ type boardAttachment struct {
 	MIME      string    `json:"mime"`
 	CreatedAt time.Time `json:"created_at"`
 	CreatedBy string    `json:"created_by"`
+	// ArchivedAt and ArchiveLocation name the Drive copy once hk has recorded
+	// it. The console shows such a file as 보관됨 and does not inline it.
+	ArchivedAt      *time.Time `json:"archived_at"`
+	ArchiveLocation string     `json:"archive_location"`
 }
 
 type boardAttachmentsResponse struct {
@@ -87,7 +91,7 @@ func (h *Handler) writeBoardAttachments(w http.ResponseWriter, r *http.Request, 
 	}
 	out := make([]boardAttachment, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, boardAttachment{row.SHA256, row.OriginalName, row.SizeBytes, row.MIME, row.CreatedAt.UTC(), row.CreatedBy})
+		out = append(out, boardAttachment{SHA256: row.SHA256, Name: row.OriginalName, Size: row.SizeBytes, MIME: row.MIME, CreatedAt: row.CreatedAt.UTC(), CreatedBy: row.CreatedBy, ArchivedAt: row.ArchivedAt, ArchiveLocation: row.ArchiveLocation})
 	}
 	writeBoardJSON(w, boardAttachmentsResponse{Attachments: out, Truncated: truncated})
 }
