@@ -376,9 +376,13 @@ func TestDotsReplyResultAnnotations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, api.Tokens{"tester": "bearer-secret"}, nil))
+	access := newAccessFixture(t)
+	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, nil, access.verifier))
 	defer srv.Close()
-	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+	// dots connects through Access, so the principal's channel is chatgpt --
+	// the only channel ReplyDots accepts.
+	assertion := access.token(t, jwt.MapClaims{"email": "operator@example.com"})
+	session := connectMCP(t, srv.URL, map[string]string{"Cf-Access-Jwt-Assertion": assertion})
 
 	text, failed := toolText(t, session, "dots_reply", map[string]any{
 		"task_id": task.ID, "kind": "PROGRESS", "body": "half", "idempotency_key": "progress",

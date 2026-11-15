@@ -163,8 +163,20 @@ func (s *Store) deliverDotsChoiceAnswerTx(ctx context.Context, tx pgx.Tx, x Task
 	if declared == nil || declared.ResultDoc == "" || resolved.Doc != declared.ResultDoc {
 		return x, nil
 	}
+	// Only an answer is the request's result: a withdrawn or default_applied
+	// resolution closes the request without a choice, so nothing is delivered
+	// and the request stays open for a replacement RESULT. A task already
+	// settled (dropped, duplicated, merged) keeps its closure — the answer is
+	// still recorded, as cleanup, but must not fail the resolve.
+	if resolved.Status != DecisionRequestAnswered || IsSettledState(x.State) {
+		return x, nil
+	}
+	answer := choice
+	if resolved.Resolution != nil && resolved.Resolution.Text != "" && resolved.Resolution.Text != choice {
+		answer = choice + " — " + resolved.Resolution.Text
+	}
 	evidence := "decision " + resolved.ID + " " + resolved.Status + ": "
-	evidence += clipBytes(choice, closureEvidenceMaxBytes-len(evidence))
+	evidence += clipBytes(answer, closureEvidenceMaxBytes-len(evidence))
 	completed, err := s.transitionTaskTx(ctx, tx, x.ID, TransitionInput{To: StateCompleted, By: actor, Evidence: evidence}, false)
 	if err != nil {
 		return Task{}, err
@@ -178,7 +190,7 @@ func (s *Store) deliverDotsChoiceAnswerTx(ctx context.Context, tx pgx.Tx, x Task
 		return Task{}, err
 	}
 	lanes = append(lanes, notified...)
-	text := dotsLaneText("[dots] RESULT hk-" + strconv.FormatInt(x.ID, 10) + " " + firstRunes(x.Title, 60) + " :: 결정 " + resolved.ID + ": " + firstRunes(choice, 220) + " → hk:doc " + declared.ResultDoc)
+	text := dotsLaneText("[dots] RESULT hk-" + strconv.FormatInt(x.ID, 10) + " " + firstRunes(x.Title, 60) + " :: 결정 " + resolved.ID + ": " + firstRunes(answer, 220) + " → hk:doc " + declared.ResultDoc)
 	if base := s.decisionConsoleURL(); base != "" {
 		text += " | " + base + "/ui/tasks/" + strconv.FormatInt(x.ID, 10)
 	}

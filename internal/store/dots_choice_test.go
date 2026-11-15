@@ -346,3 +346,60 @@ func TestDotsChoiceAnnotationsRefused(t *testing.T) {
 		t.Fatal("annotation on a request with no declaration accepted")
 	}
 }
+
+// Invariant (hk 4789): an answer to a declaring request's decision on a task
+// that was settled in the meantime is still recorded — the console's cleanup
+// path — but it neither completes the task nor sends the requester a result.
+func TestDotsChoiceAnswerOnSettledTaskResolvesOnly(t *testing.T) {
+	s := schemaStore(t, "dots_choice_settled")
+	ctx := context.Background()
+	task, _ := dotsChoiceAnsweredRequest(t, s, "result")
+	if _, err := s.TransitionTaskWith(ctx, task.ID, TransitionInput{To: StateDropped, By: "operator:test@example.com", Note: "not needed any more", Evidence: "declined"}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.ResolveDecision(ctx, ResolveDecisionInput{
+		RequestID: task.Refs.DecisionRequest.ID, Kind: DecisionRequestAnswered, Option: "A", Text: "A로 갑시다",
+		Channel: DecisionChannelConsole, Actor: "operator:robin@example.com", Verified: true, EventKey: "console-settled",
+	})
+	if err != nil || out.Result != DecisionResultAnswered {
+		t.Fatalf("outcome=%+v err=%v", out, err)
+	}
+	done, _, err := s.GetTask(ctx, task.ID)
+	if err != nil || done.State != StateDropped {
+		t.Fatalf("state=%s err=%v, want the settled state kept", done.State, err)
+	}
+	if done.Refs.DecisionRequest == nil || done.Refs.DecisionRequest.Status != DecisionRequestAnswered {
+		t.Fatalf("request=%+v, want it answered", done.Refs.DecisionRequest)
+	}
+	var n int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE starts_with(event_id,'dots-answer-')`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("answer notices=%d err=%v", n, err)
+	}
+}
+
+// Invariant (hk 4789): a withdrawn decision is not the request's result. The
+// request closes, the task stays open for a replacement RESULT, and the
+// requester lane hears nothing.
+func TestDotsChoiceWithdrawnIsNotAResult(t *testing.T) {
+	s := schemaStore(t, "dots_choice_withdrawn")
+	ctx := context.Background()
+	task, _ := dotsChoiceAnsweredRequest(t, s, "result")
+	out, err := s.ResolveDecision(ctx, ResolveDecisionInput{
+		RequestID: task.Refs.DecisionRequest.ID, Kind: DecisionRequestWithdrawn, Text: "고르지 않겠습니다",
+		Channel: DecisionChannelConsole, Actor: "operator:robin@example.com", Verified: true, EventKey: "console-withdrawn",
+	})
+	if err != nil || out.Result != DecisionResultAnswered {
+		t.Fatalf("outcome=%+v err=%v", out, err)
+	}
+	done, _, err := s.GetTask(ctx, task.ID)
+	if err != nil || done.State != task.State || done.AwaitingDecision {
+		t.Fatalf("task=%+v err=%v, want it open and not awaiting", done, err)
+	}
+	if done.Refs.DecisionRequest == nil || done.Refs.DecisionRequest.Status != DecisionRequestWithdrawn {
+		t.Fatalf("request=%+v, want it withdrawn", done.Refs.DecisionRequest)
+	}
+	var n int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE starts_with(event_id,'dots-answer-')`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("answer notices=%d err=%v", n, err)
+	}
+}
