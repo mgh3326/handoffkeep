@@ -508,6 +508,11 @@ func (s *Store) hygieneExecute(ctx context.Context, c hygieneCandidate, project 
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return nil, nil, err
 	}
+	if c.rule == hygieneMergedRule {
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+			return nil, nil, err
+		}
+	}
 	d, err := s.hygieneDecideTx(ctx, tx, c, project, true)
 	if err != nil {
 		return nil, nil, err

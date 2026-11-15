@@ -362,6 +362,10 @@ func TestEventRule8DeployBeforeMerge(t *testing.T) {
 	if got, err := s.TransitionTask(t.Context(), z.ID, StateMerged, "tester", "merged by hand", &TaskRefs{PR: pr3}, ""); err != nil || got.State != StateDeployed {
 		t.Fatalf("manual merge: state=%s err=%v", got.State, err)
 	}
+	comments := eventComments(t, s, z.ID)
+	if len(comments) != 1 || comments[0].Body != "Deployed unknown on svc" {
+		t.Fatalf("manual merge deploy comments: %+v", comments)
+	}
 }
 
 func TestEventRule8DeployAfterMerge(t *testing.T) {

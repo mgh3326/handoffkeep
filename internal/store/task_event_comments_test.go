@@ -89,7 +89,7 @@ func TestR12DeployRecordedBeforeMergeCommentsWhenMergeArrives(t *testing.T) {
 		t.Fatalf("merge with an earlier deploy record left state %s", res.State)
 	}
 	comments := eventComments(t, s, task.ID)
-	if len(comments) != 1 || comments[0].Body != "Deployed bbbbbbb (release-2) on api" {
+	if len(comments) != 2 || comments[0].Body != "Merged: PR #4734" || comments[1].Body != "Deployed bbbbbbb (release-2) on api" {
 		t.Fatalf("deploy-before-merge comments: %+v", comments)
 	}
 }
@@ -164,5 +164,36 @@ func TestNotAppliedTaskEventDoesNotCreateComment(t *testing.T) {
 	}
 	if got := eventComments(t, s, task.ID); len(got) != 0 {
 		t.Fatalf("unapplied event produced comments: %+v", got)
+	}
+}
+
+func TestRevertedPRAdoptionDoesNotCreateComment(t *testing.T) {
+	s, pool := searchTestStore(t)
+	parent := flowTask(t, s, pool, "implement", StateMerged, false)
+	child := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	setParent(t, s, child, parent)
+	pr, revertPR := testPR(4735), testPR(5735)
+	tx, err := s.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = insertEvent(t.Context(), tx, taskEventInput{
+		TaskID: parent.ID, Kind: TaskEventSource, From: StateMerged, To: StateMerged, By: SourceMergewakeRevert,
+		At: time.Now().UTC(), Source: SourceMergewakeRevert, SourceRef: revertPR,
+		Field: revertedPRField, ToValue: pr, Auto: true, NotApplied: true,
+	})
+	if err != nil {
+		tx.Rollback(t.Context())
+		t.Fatal(err)
+	}
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	res := send(t, s, mergeEvent(parent.ID, pr))
+	if res.Applied || res.Reason == "" {
+		t.Fatalf("reverted PR adoption unexpectedly applied: %+v", res)
+	}
+	if got := eventComments(t, s, parent.ID); len(got) != 0 {
+		t.Fatalf("refused PR adoption produced comments: %+v", got)
 	}
 }

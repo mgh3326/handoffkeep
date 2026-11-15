@@ -498,7 +498,7 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 		}
 		if hasSub {
 			res, err := s.adoptMergedPRTx(ctx, tx, x, ev, now)
-			if err == nil {
+			if err == nil && res.Applied {
 				writeEventComment()
 			}
 			return res, err
