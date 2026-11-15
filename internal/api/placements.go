@@ -66,10 +66,25 @@ func (s Server) placementsList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	rows, err := s.Service.Store.ListPlacements(r.Context(), r.URL.Query().Get("job"), r.URL.Query().Get("host"), since, limit)
+	// after_id pages the same filters by id, oldest first; absent keeps the
+	// newest-first answer.
+	var afterID *int64
+	if r.URL.Query().Has("after_id") {
+		id, parseErr := queryCursor(r, "after_id")
+		if parseErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_context")
+			return
+		}
+		afterID = &id
+	}
+	rows, err := s.Service.Store.ListPlacements(r.Context(), r.URL.Query().Get("job"), r.URL.Query().Get("host"), since, afterID, limit)
 	if err != nil {
 		appErr(w, r, err)
 		return
 	}
-	jsonOut(w, http.StatusOK, map[string]any{"placements": rows})
+	var last int64
+	if len(rows) > 0 {
+		last = rows[len(rows)-1].ID
+	}
+	jsonOut(w, http.StatusOK, listBody("placements", rows, afterID, nextAfterID(afterID, len(rows), limit, last)))
 }

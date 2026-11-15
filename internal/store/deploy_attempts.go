@@ -593,7 +593,7 @@ ORDER BY c.merged_at, c.id LIMIT $2`, service, limit)
 	if len(ids) == 0 {
 		return []Change{}, nil
 	}
-	got, err := s.listChangesWhere(ctx, s.pool, `id = ANY($1)`, len(ids), ids)
+	got, err := s.listChangesWhere(ctx, s.pool, `id = ANY($1)`, nil, len(ids), ids)
 	if err != nil {
 		return nil, err
 	}

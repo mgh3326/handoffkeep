@@ -13,7 +13,7 @@ func strPtr(v string) *string { return &v }
 // API returns.
 func listReviews(t *testing.T, s *Store, repo string) []ChangeReview {
 	t.Helper()
-	cs, err := s.ListChangesByPR(t.Context(), repoPR(repo, 1), 10)
+	cs, err := s.ListChangesByPR(t.Context(), repoPR(repo, 1), nil, 10)
 	if err != nil || len(cs) != 1 {
 		t.Fatalf("ListChangesByPR: n=%d err=%v", len(cs), err)
 	}

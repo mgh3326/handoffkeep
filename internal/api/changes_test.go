@@ -166,7 +166,7 @@ func TestChangesRead(t *testing.T) {
 	if list, ok := body["changes"].([]any); status != http.StatusOK || !ok || len(list) != 0 {
 		t.Fatalf("unknown PR: %d %v", status, body)
 	}
-	for _, q := range []string{"", "?task=1&pr=" + pr, "?pr=not-a-url", "?task=0", "?task=x", "?task=1&limit=0"} {
+	for _, q := range []string{"", "?task=1&pr=" + pr, "?pr=not-a-url", "?task=0", "?task=x", "?task=1&limit=0", "?pr=" + pr + "&after_id=0"} {
 		if status, body = changesCall(t, h, http.MethodGet, "/v1/changes"+q, "peer-token", nil); status != http.StatusBadRequest || body["error"] != "invalid_context" {
 			t.Errorf("%q: %d %v", q, status, body)
 		}

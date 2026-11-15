@@ -98,19 +98,19 @@ func TestDocumentTaskAndOrigin(t *testing.T) {
 	}
 
 	// The list filter returns only that task's documents, with the new fields.
-	listed, err := s.ListDocuments(ctx, "doc-origin/", "", "", taskA, 100)
+	listed, err := s.ListDocuments(ctx, "doc-origin/", "", "", taskA, nil, 100)
 	if err != nil || len(listed) != 1 || listed[0].Key != "doc-origin/a" || listed[0].TaskID == nil || *listed[0].TaskID != taskA || listed[0].OriginClass != "job" {
 		t.Fatalf("list task a: %+v err=%v", listed, err)
 	}
-	listed, err = s.ListDocuments(ctx, "doc-origin/", "", "", taskB, 100)
+	listed, err = s.ListDocuments(ctx, "doc-origin/", "", "", taskB, nil, 100)
 	if err != nil || len(listed) != 1 || listed[0].Key != "doc-origin/b" {
 		t.Fatalf("list task b: %+v err=%v", listed, err)
 	}
-	listed, err = s.ListDocuments(ctx, "doc-origin/", "design", "", 0, 1000)
+	listed, err = s.ListDocuments(ctx, "doc-origin/", "design", "", 0, nil, 1000)
 	if err != nil || len(listed) < 4 {
 		t.Fatalf("list without a task filter: %d docs err=%v", len(listed), err)
 	}
-	if _, err := s.ListDocuments(ctx, "", "", "", -1, 10); err == nil {
+	if _, err := s.ListDocuments(ctx, "", "", "", -1, nil, 10); err == nil {
 		t.Error("negative task filter accepted")
 	}
 
@@ -124,11 +124,11 @@ func TestDocumentTaskAndOrigin(t *testing.T) {
 	if _, _, err := s.PutDocument(ctx, Document{Key: "dots%a/1", Kind: "note", Body: "x", CreatedBy: "tester"}); err != nil {
 		t.Fatal(err)
 	}
-	listed, err = s.ListDocuments(ctx, "dots_a/", "", "", 0, 100)
+	listed, err = s.ListDocuments(ctx, "dots_a/", "", "", 0, nil, 100)
 	if err != nil || len(listed) != 1 || listed[0].Key != "dots_a/1" {
 		t.Fatalf("list dots_a/ returned %+v err=%v", listed, err)
 	}
-	listed, err = s.ListDocuments(ctx, "dots%a/", "", "", 0, 100)
+	listed, err = s.ListDocuments(ctx, "dots%a/", "", "", 0, nil, 100)
 	if err != nil || len(listed) != 1 || listed[0].Key != "dots%a/1" {
 		t.Fatalf("list dots%%a/ returned %+v err=%v", listed, err)
 	}

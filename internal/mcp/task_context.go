@@ -75,11 +75,11 @@ func (o operatorTools) taskContext(ctx context.Context, _ *gmcp.CallToolRequest,
 	if err != nil {
 		return nil, nil, err
 	}
-	documents, err := o.service.Store.ListDocuments(ctx, "", "", "", in.ID, taskContextDocumentsLimit)
+	documents, err := o.service.Store.ListDocuments(ctx, "", "", "", in.ID, nil, taskContextDocumentsLimit)
 	if err != nil {
 		return nil, nil, err
 	}
-	changes, err := o.service.Store.ListChangesByTask(ctx, in.ID, taskContextChangesLimit+1)
+	changes, err := o.service.Store.ListChangesByTask(ctx, in.ID, nil, taskContextChangesLimit+1)
 	if err != nil {
 		return nil, nil, err
 	}

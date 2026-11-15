@@ -15,7 +15,7 @@ import (
 const (
 	changesUsage         = "usage: handoffkeep changes verify|show|checks|findings"
 	changesVerifyUsage   = "usage: handoffkeep changes verify --pr URL --head SHA --level L --verifier V --family F --evidence E [--job ID] [--profile P] [--model M] [--harness H] [--ci success|failure|pending|none] [--source direct_merge|mergewake]"
-	changesShowUsage     = "usage: handoffkeep changes show --pr URL | --task N | --repo OWNER/NAME --pr N [--all-heads] [--include checks,threads,findings,gate,reviews]"
+	changesShowUsage     = "usage: handoffkeep changes show --pr URL | --task N [--after-id N] | --repo OWNER/NAME --pr N [--all-heads] [--include checks,threads,findings,gate,reviews]"
 	changesChecksUsage   = "usage: handoffkeep changes checks --repo OWNER/NAME --pr N [--all-heads]"
 	changesFindingsUsage = "usage: handoffkeep changes findings --repo OWNER/NAME --pr N [--open]"
 )
@@ -84,29 +84,44 @@ func changesShowCmd(args []string, out io.Writer) error {
 	repo := fs.String("repo", "", "owner/name: read one PR's state")
 	allHeads := fs.Bool("all-heads", false, "with --repo: include the checks of earlier heads")
 	include := fs.String("include", "", "with --repo: comma list of checks, threads, findings, gate, reviews")
+	afterID := fs.Int64("after-id", 0, "with --task: list the changes with id greater than this, in id order (0 starts)")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		return errors.New(changesShowUsage)
 	}
+	afterSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "after-id" {
+			afterSet = true
+		}
+	})
 	if *repo != "" {
 		n, err := strconv.Atoi(*pr)
-		if err != nil || n < 1 || *task != 0 {
+		if err != nil || n < 1 || *task != 0 || afterSet {
 			return errors.New(changesShowUsage)
 		}
 		return printChangeState(c, out, *repo, n, *allHeads, *include, nil)
 	}
-	if (*pr == "") == (*task == 0) || *task < 0 || *allHeads || *include != "" {
+	if (*pr == "") == (*task == 0) || *task < 0 || *allHeads || *include != "" ||
+		(afterSet && (*afterID < 0 || *task == 0)) {
 		return errors.New(changesShowUsage)
+	}
+	var after *int64
+	if afterSet {
+		after = afterID
 	}
 	if err := mustClient(c); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	xs, err := c.ListChanges(ctx, *pr, *task)
+	xs, next, err := c.ListChanges(ctx, *pr, *task, after)
 	if err != nil {
 		return err
 	}
-	return printJSON(out, map[string]any{"changes": xs})
+	if after == nil {
+		return printJSON(out, map[string]any{"changes": xs})
+	}
+	return printJSON(out, map[string]any{"changes": xs, "next_after_id": next})
 }
 
 // printChangeState reads one PR's state and prints it; keep, when set,

@@ -54,6 +54,28 @@ func (c Client) ListDocuments(ctx context.Context, prefix string, limit int) ([]
 	return out.Documents, nil
 }
 
+// ListDocumentsPage is ListDocuments with keyset paging: it asks for the
+// documents with id greater than afterID in id order, so a reader visits every
+// document exactly once even when keys share a prefix. Start with afterID 0;
+// next is the after_id of the next page, 0 when the answer held the last rows.
+// A server that predates the cursor ignores after_id, answers in key order and
+// sends no next cursor: next is 0 then too, with no sign that more rows exist.
+func (c Client) ListDocumentsPage(ctx context.Context, prefix string, afterID int64, limit int) ([]Document, int64, error) {
+	var out struct {
+		Documents []Document `json:"documents"`
+		Next      *int64     `json:"next_after_id"`
+	}
+	q := url.Values{"prefix": {prefix}, "kind": {""}, "session": {""}, "after_id": {fmt.Sprint(afterID)}, "limit": {fmt.Sprint(limit)}}
+	if e := c.transport().Call(ctx, "GET", "/v1/documents?"+q.Encode(), nil, &out); e != nil {
+		return nil, 0, e
+	}
+	var next int64
+	if out.Next != nil {
+		next = *out.Next
+	}
+	return out.Documents, next, nil
+}
+
 // PutDocument writes x under x.Key. changed is false when the stored document
 // already had this content.
 func (c Client) PutDocument(ctx context.Context, x Document) (Document, bool, error) {

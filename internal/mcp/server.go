@@ -25,7 +25,7 @@ import (
 type Backend interface {
 	PutDocument(context.Context, string, store.Document) (store.Document, bool, error)
 	GetDocument(context.Context, string) (store.Document, bool, error)
-	ListDocuments(context.Context, string, string, string, int64, int) ([]store.Document, error)
+	ListDocuments(context.Context, string, string, string, int64, *int64, int) ([]store.Document, *int64, error)
 	Search(context.Context, string, string, string, int) ([]store.SearchResult, error)
 	PutAttachment(context.Context, string, string, string, string, []byte) (store.Attachment, bool, error)
 	ListAttachments(context.Context, string, int) ([]store.Attachment, error)
@@ -173,7 +173,7 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		Session string `json:"session,omitempty"`
 		Limit   int    `json:"limit,omitempty"`
 	}) (*gmcp.CallToolResult, any, error) {
-		v, e := service.ListDocuments(ctx, x.Prefix, x.Kind, x.Session, 0, x.Limit)
+		v, _, e := service.ListDocuments(ctx, x.Prefix, x.Kind, x.Session, 0, nil, x.Limit)
 		if e != nil {
 			return nil, nil, e
 		}

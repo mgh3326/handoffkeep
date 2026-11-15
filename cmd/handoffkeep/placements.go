@@ -11,7 +11,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/remote"
 )
 
-const placementsListUsage = "usage: placements list [--since RFC3339] [--host H] [--job J] [--limit N]"
+const placementsListUsage = "usage: placements list [--since RFC3339] [--host H] [--job J] [--after-id N] [--limit N]"
 
 // placementsCmd dispatches the placements subcommands.
 func placementsCmd(args []string, out io.Writer) error {
@@ -36,13 +36,26 @@ func placementsListCmd(args []string, out io.Writer) error {
 	since := fs.String("since", "", "only decisions at or after this RFC3339 time (server default: last 180 days)")
 	host := fs.String("host", "", "only decisions that chose this host")
 	job := fs.String("job", "", "only decisions for this job")
+	afterID := fs.Int64("after-id", 0, "page by id: only decisions with id greater than this, oldest first (0 starts)")
 	limit := fs.String("limit", "", "maximum results, 1-1000 (server default 100)")
-	parsed, err := splitArgs(args, "since", "host", "job", "limit")
+	parsed, err := splitArgs(args, "since", "host", "job", "after-id", "limit")
 	if err != nil {
 		return err
 	}
 	if err := fs.Parse(parsed); err != nil || fs.NArg() != 0 {
 		return errors.New(placementsListUsage)
+	}
+	afterSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "after-id" {
+			afterSet = true
+		}
+	})
+	if afterSet {
+		if *afterID < 0 {
+			return errors.New("placements list: --after-id must be >= 0: " + placementsListUsage)
+		}
+		f.AfterID = afterID
 	}
 	if *since != "" {
 		t, err := time.Parse(time.RFC3339, *since)

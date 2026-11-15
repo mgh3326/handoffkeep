@@ -680,7 +680,7 @@ func TestChangeFindingStatusDerived(t *testing.T) {
 		t.Errorf("newest open finding is not first: %q", list[0].ID)
 	}
 	// The list counts use the same derivation.
-	cs, err := f.s.ListChangesByPR(t.Context(), repoPR(f.ref.Repo, f.ref.PR), 10)
+	cs, err := f.s.ListChangesByPR(t.Context(), repoPR(f.ref.Repo, f.ref.PR), nil, 10)
 	if err != nil || len(cs) != 1 {
 		t.Fatalf("list: %v %v", cs, err)
 	}
@@ -752,7 +752,7 @@ func TestChangeListCarriesPRState(t *testing.T) {
 		Checks:  &ChangeChecksWrite{HeadSHA: testSHA1, ObservedAt: f.at(2), Source: "poll", Checks: []ChangeCheckIn{{Name: "ci", State: "queued"}}},
 		Threads: &ChangeThreadsWrite{ObservedAt: f.at(7), Source: "poll", Threads: []ChangeThreadIn{{ThreadID: "T1", AuthorKind: "human"}, {ThreadID: "T2", AuthorKind: "human", Resolved: true}}},
 		Gate:    &ChangeGateWrite{HeadSHA: testSHA1, State: "pending", DecidedAt: f.at(6)}})
-	cs, err := f.s.ListChangesByPR(t.Context(), repoPR(f.ref.Repo, f.ref.PR), 10)
+	cs, err := f.s.ListChangesByPR(t.Context(), repoPR(f.ref.Repo, f.ref.PR), nil, 10)
 	if err != nil || len(cs) != 1 {
 		t.Fatalf("list: %v %v", cs, err)
 	}

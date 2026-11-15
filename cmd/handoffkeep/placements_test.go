@@ -57,6 +57,24 @@ func TestPlacementsListCLINoFlagsSendsNoQuery(t *testing.T) {
 	}
 }
 
+func TestPlacementsListCLICursor(t *testing.T) {
+	h, calls := decisionCLIServer(t, `{"placements":[{"id":7,"job_id":"job"}],"next_after_id":7}`)
+	var out bytes.Buffer
+	if err := run([]string{"placements", "list", "--after-id", "0", "--limit", "2", "--url", h.URL, "--token", "tok"}, &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if c := (*calls)[0]; c.Method != "GET" || c.Path != "/v1/placements" || c.Query != "after_id=0&limit=2" {
+		t.Fatalf("call=%+v", c)
+	}
+	var printed map[string]any
+	if err := json.Unmarshal(out.Bytes(), &printed); err != nil || printed["next_after_id"] != float64(7) {
+		t.Fatalf("out=%s err=%v", out.String(), err)
+	}
+	if err := run([]string{"placements", "list", "--after-id", "-1", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard); err == nil {
+		t.Fatal("negative --after-id accepted")
+	}
+}
+
 func TestPlacementsListCLIRefusesBadFlagsBeforeCalling(t *testing.T) {
 	cases := map[string][]string{
 		"zero limit":     {"--limit", "0"},

@@ -209,8 +209,16 @@ func (s Service) GetDocument(ctx context.Context, key string) (store.Document, b
 func (s Service) GetDocumentByID(ctx context.Context, id int64) (store.Document, bool, error) {
 	return s.Store.GetDocumentByID(ctx, id)
 }
-func (s Service) ListDocuments(ctx context.Context, prefix, kind, session string, task int64, limit int) ([]store.Document, error) {
-	return s.Store.ListDocuments(ctx, prefix, kind, session, task, limit)
+func (s Service) ListDocuments(ctx context.Context, prefix, kind, session string, task int64, afterID *int64, limit int) ([]store.Document, *int64, error) {
+	xs, err := s.Store.ListDocuments(ctx, prefix, kind, session, task, afterID, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	var last int64
+	if len(xs) > 0 {
+		last = xs[len(xs)-1].ID
+	}
+	return xs, nextAfterID(afterID, len(xs), limit, last), nil
 }
 func (s Service) Search(ctx context.Context, q, scope, session string, limit int) ([]store.SearchResult, error) {
 	if s.SearchBackend == youtrackSearchBackend {
@@ -392,8 +400,8 @@ func (s Service) MarkRelayEventDelivered(ctx context.Context, id int64, machine,
 func (s Service) ListRelayEvents(ctx context.Context, lane, kind string, undelivered bool, afterID int64, limit int) ([]store.RelayEvent, error) {
 	return s.Store.ListRelayEventsPage(ctx, lane, kind, undelivered, afterID, limit)
 }
-func (s Service) ListBenchReps(ctx context.Context, profile, grade, effort string, limit int) ([]store.BenchRep, error) {
-	return s.Store.ListBenchReps(ctx, profile, grade, effort, limit)
+func (s Service) ListBenchReps(ctx context.Context, profile, grade, effort string, afterID *int64, limit int) ([]store.BenchRep, error) {
+	return s.Store.ListBenchReps(ctx, profile, grade, effort, afterID, limit)
 }
 func (s Service) UpsertBenchReps(ctx context.Context, client string, xs []store.BenchRep) ([]int64, error) {
 	for i := range xs {
@@ -1709,6 +1717,28 @@ func queryCursor(r *http.Request, name string) (int64, error) {
 	return cursor, nil
 }
 
+// nextAfterID is the cursor after one page: the last row's id when the page is
+// full, nil when it is short (the end) or no cursor was requested.
+func nextAfterID(afterID *int64, n, limit int, lastID int64) *int64 {
+	if afterID == nil || n != limit {
+		return nil
+	}
+	id := lastID
+	return &id
+}
+
+// listBody is a list answer's body. With a cursor (afterID set) it carries
+// next_after_id — the next page's cursor, null at the end, the same field
+// ytOps returns — so a reader can ask for the next page. Without one the body
+// is only rows: the answer an existing caller already gets.
+func listBody(field string, rows any, afterID, next *int64) map[string]any {
+	body := map[string]any{field: rows}
+	if afterID != nil {
+		body["next_after_id"] = next
+	}
+	return body
+}
+
 func (s Server) relayEventsList(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
@@ -1756,12 +1786,25 @@ func (s Server) benchRepsList(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
-	xs, err := s.Service.ListBenchReps(r.Context(), r.URL.Query().Get("profile"), r.URL.Query().Get("grade"), r.URL.Query().Get("effort"), limit)
+	var afterID *int64
+	if r.URL.Query().Has("after_id") {
+		id, parseErr := queryCursor(r, "after_id")
+		if parseErr != nil {
+			appErr(w, r, parseErr)
+			return
+		}
+		afterID = &id
+	}
+	xs, err := s.Service.ListBenchReps(r.Context(), r.URL.Query().Get("profile"), r.URL.Query().Get("grade"), r.URL.Query().Get("effort"), afterID, limit)
 	if err != nil {
 		appErr(w, r, err)
 		return
 	}
-	jsonOut(w, http.StatusOK, map[string]any{"reps": xs})
+	var last int64
+	if len(xs) > 0 {
+		last = xs[len(xs)-1].ID
+	}
+	jsonOut(w, http.StatusOK, listBody("reps", xs, afterID, nextAfterID(afterID, len(xs), limit, last)))
 }
 
 func (s Server) benchRepsPut(w http.ResponseWriter, r *http.Request) {
@@ -2114,12 +2157,21 @@ func (s Server) documents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	xs, e := s.Service.ListDocuments(r.Context(), r.URL.Query().Get("prefix"), r.URL.Query().Get("kind"), r.URL.Query().Get("session"), task, n)
+	var afterID *int64
+	if r.URL.Query().Has("after_id") {
+		id, parseErr := queryCursor(r, "after_id")
+		if parseErr != nil {
+			appErr(w, r, parseErr)
+			return
+		}
+		afterID = &id
+	}
+	xs, next, e := s.Service.ListDocuments(r.Context(), r.URL.Query().Get("prefix"), r.URL.Query().Get("kind"), r.URL.Query().Get("session"), task, afterID, n)
 	if e != nil {
 		appErr(w, r, e)
 		return
 	}
-	jsonOut(w, http.StatusOK, map[string]any{"documents": xs})
+	jsonOut(w, http.StatusOK, listBody("documents", xs, afterID, next))
 }
 func (s Server) document(w http.ResponseWriter, r *http.Request) {
 	client, ok := s.auth(w, r)

@@ -627,7 +627,19 @@ precede `on` is in `docs/youtrack-write-protocol.md` §Kind issue_links.
 
 `doc get <key>` fetches a document by key; `doc get --id <n>` fetches one by
 its numeric id (`GET /v1/documents?id=<n>`, `404 not_found` when absent,
-`400 invalid_document_id` for a malformed id). `GET /v1/search` treats a
+`400 invalid_document_id` for a malformed id). `GET /v1/documents` lists
+metadata without bodies in key order; `after_id=N` pages by id instead
+(`id ASC`, `id > N`) and adds `next_after_id` (null at the end), which
+`doc list --after-id N` sends. `GET /v1/changes?task=N` pages the same way
+(`changes show --task N --after-id N`); `GET /v1/placements?after_id=N` and
+`GET /v1/bench/reps?after_id=N` do too (`placements list --after-id N`). A
+request without `after_id` keeps the order and body it had before the cursor.
+A cursor walk sees the rows committed when each page is read: a row whose
+INSERT commits after a later id was already paged past is not revisited, so a
+reader that must catch such a late commit walks again from `after_id=0`. That
+is the contract of the repo's other `after_id` lists too (tasks, comments,
+relay events, chat, yt ops).
+`GET /v1/search` treats a
 bare-number or `#<n>` query as a document-id lookup — the exact match leads the
 page and a missing id returns an empty result set, the same way `--scope tasks`
 resolves task ids. Search pages default to 20 rows (hard cap 100, `tasks` scope

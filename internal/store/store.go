@@ -1832,8 +1832,13 @@ func (s *Store) UpsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, er
 	return ids, nil
 }
 
-func (s *Store) ListBenchReps(ctx context.Context, profile, grade, effort string, limit int) ([]BenchRep, error) {
-	if !validBenchText(profile) || !validBenchText(grade) || !validBenchText(effort) {
+// ListBenchReps lists bench reps newest first. afterID pages by id instead: a
+// page holds the rows with id greater than afterID in id order, so a reader
+// walks the matching rows without repeats. A row whose insert commits after a
+// later id was already returned is not revisited; a reader that must catch one
+// pages again from 0. A nil afterID keeps the newest-first answer.
+func (s *Store) ListBenchReps(ctx context.Context, profile, grade, effort string, afterID *int64, limit int) ([]BenchRep, error) {
+	if !validBenchText(profile) || !validBenchText(grade) || !validBenchText(effort) || (afterID != nil && *afterID < 0) {
 		return nil, errors.New("invalid bench rep query")
 	}
 	if limit < 1 {
@@ -1842,7 +1847,17 @@ func (s *Store) ListBenchReps(ctx context.Context, profile, grade, effort string
 	if limit > 5000 {
 		limit = 5000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+benchRepColumns+` FROM bench_reps WHERE ($1='' OR profile=$1) AND ($2='' OR grade=$2) AND ($3='' OR effort=$3) ORDER BY id DESC LIMIT $4`, profile, grade, effort, limit)
+	q := `SELECT ` + benchRepColumns + ` FROM bench_reps WHERE ($1='' OR profile=$1) AND ($2='' OR grade=$2) AND ($3='' OR effort=$3)`
+	args := []any{profile, grade, effort}
+	order := ` ORDER BY id DESC`
+	if afterID != nil {
+		args = append(args, *afterID)
+		q += fmt.Sprintf(` AND id>$%d`, len(args))
+		order = ` ORDER BY id ASC`
+	}
+	args = append(args, limit)
+	q += order + fmt.Sprintf(` LIMIT $%d`, len(args))
+	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -3587,10 +3602,14 @@ func (s *Store) GetDocumentByID(ctx context.Context, id int64) (Document, bool, 
 	return x, true, nil
 }
 
-// ListDocuments lists documents without bodies. task, when above zero, keeps
-// only the documents that name that task.
-func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string, task int64, limit int) ([]Document, error) {
-	if !validText(prefix, 512) || !validText(session, 128) || (kind != "" && !documentKinds[kind]) || task < 0 {
+// ListDocuments lists documents without bodies, in key order. task, when above
+// zero, keeps only the documents that name that task. afterID pages by id
+// instead: a page holds the rows with id greater than afterID in id order. A row
+// whose insert commits after a later id was already returned is not revisited; a
+// reader that must catch one pages again from 0. A nil afterID keeps the
+// key-ordered answer.
+func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string, task int64, afterID *int64, limit int) ([]Document, error) {
+	if !validText(prefix, 512) || !validText(session, 128) || (kind != "" && !documentKinds[kind]) || task < 0 || (afterID != nil && *afterID < 0) {
 		return nil, errors.New("invalid document query")
 	}
 	if limit < 1 {
@@ -3600,7 +3619,17 @@ func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string,
 		limit = 1000
 	}
 	likePrefix := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
-	rows, e := s.pool.Query(ctx, `SELECT id,key,kind,session,job,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE ($1='' OR key LIKE $2 || '%' ESCAPE '\') AND ($3='' OR kind=$3) AND ($4='' OR session=$4) AND ($5::bigint=0 OR task_id=$5::bigint) ORDER BY key LIMIT $6`, prefix, likePrefix, kind, session, task, limit)
+	q := `SELECT id,key,kind,session,job,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE ($1='' OR key LIKE $2 || '%' ESCAPE '\') AND ($3='' OR kind=$3) AND ($4='' OR session=$4) AND ($5::bigint=0 OR task_id=$5::bigint)`
+	args := []any{prefix, likePrefix, kind, session, task}
+	order := ` ORDER BY key`
+	if afterID != nil {
+		args = append(args, *afterID)
+		q += fmt.Sprintf(` AND id>$%d`, len(args))
+		order = ` ORDER BY id ASC`
+	}
+	args = append(args, limit)
+	q += order + fmt.Sprintf(` LIMIT $%d`, len(args))
+	rows, e := s.pool.Query(ctx, q, args...)
 	if e != nil {
 		return nil, e
 	}
