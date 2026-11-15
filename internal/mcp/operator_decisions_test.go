@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -325,7 +326,7 @@ func TestDecisionsPendingCarriesOptionMedia(t *testing.T) {
 	}, 1<<20, 100); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.RecordDecisionRequest(ctx, task.ID, "desk", store.DecisionRequestInput{
+	recorded, err := st.RecordDecisionRequest(ctx, task.ID, "desk", store.DecisionRequestInput{
 		Question: "Which card?",
 		Options: store.DecisionOptions{Options: []store.DecisionOption{{
 			Key: "A", Label: "2A", Recommended: true,
@@ -335,26 +336,53 @@ func TestDecisionsPendingCarriesOptionMedia(t *testing.T) {
 		Unverified:           []string{"head relation"},
 		OneFix:               "move the sign",
 		DefaultAction:        "hold",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The translated option list names the same media, so its attachments must
+	// carry the same MIME type and original name as the original list.
+	original, err := json.Marshal(store.DecisionOptions{Options: []store.DecisionOption{{
+		Key: "A", Label: "2A", Recommended: true,
+		Attachments: []store.DecisionOptionAttachment{{SHA256: sha, Caption: "approach"}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	translated, err := json.Marshal(store.DecisionOptions{Options: []store.DecisionOption{{
+		Key: "A", Label: "2A 한국어", Recommended: true,
+		Attachments: []store.DecisionOptionAttachment{{SHA256: sha, Caption: "approach"}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutTranslation(ctx, store.Translation{
+		Entity: "decision_request", EntityID: recorded.Request.ID, Field: "options", Lang: "ko",
+		SourceSHA256: store.SourceSHA256(string(original)), Text: string(translated), Translator: "tester",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, api.Tokens{"tester": "bearer-secret"}, nil))
 	defer srv.Close()
 	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+	type attachmentOut struct {
+		SHA256       string `json:"sha256"`
+		Caption      string `json:"caption"`
+		MIME         string `json:"mime"`
+		OriginalName string `json:"original_name"`
+	}
+	type optionOut struct {
+		Key         string          `json:"key"`
+		Label       string          `json:"label"`
+		Attachments []attachmentOut `json:"attachments"`
+	}
 	type out struct {
 		Decisions []struct {
-			RecommendationReason string   `json:"recommendation_reason"`
-			Unverified           []string `json:"unverified"`
-			OneFix               string   `json:"one_fix"`
-			Options              []struct {
-				Key         string `json:"key"`
-				Attachments []struct {
-					SHA256       string `json:"sha256"`
-					Caption      string `json:"caption"`
-					MIME         string `json:"mime"`
-					OriginalName string `json:"original_name"`
-				} `json:"attachments"`
-			} `json:"options"`
+			RecommendationReason string      `json:"recommendation_reason"`
+			Unverified           []string    `json:"unverified"`
+			OneFix               string      `json:"one_fix"`
+			Options              []optionOut `json:"options"`
+			OptionsKO            []optionOut `json:"options_ko"`
 		} `json:"decisions"`
 	}
 	pending := callTool[out](t, session, "decisions_pending", map[string]any{})
@@ -366,11 +394,16 @@ func TestDecisionsPendingCarriesOptionMedia(t *testing.T) {
 		len(item.Unverified) != 1 || item.Unverified[0] != "head relation" {
 		t.Fatalf("item=%+v", item)
 	}
-	if len(item.Options) != 1 || len(item.Options[0].Attachments) != 1 {
-		t.Fatalf("options=%+v", item.Options)
+	for name, options := range map[string][]optionOut{"options": item.Options, "options_ko": item.OptionsKO} {
+		if len(options) != 1 || len(options[0].Attachments) != 1 {
+			t.Fatalf("%s=%+v", name, options)
+		}
+		attachment := options[0].Attachments[0]
+		if attachment.SHA256 != sha || attachment.Caption != "approach" || attachment.MIME != "image/png" || attachment.OriginalName != "approach.png" {
+			t.Fatalf("%s attachment=%+v", name, attachment)
+		}
 	}
-	attachment := item.Options[0].Attachments[0]
-	if attachment.SHA256 != sha || attachment.Caption != "approach" || attachment.MIME != "image/png" || attachment.OriginalName != "approach.png" {
-		t.Fatalf("attachment=%+v", attachment)
+	if item.OptionsKO[0].Label != "2A 한국어" {
+		t.Fatalf("options_ko=%+v", item.OptionsKO)
 	}
 }

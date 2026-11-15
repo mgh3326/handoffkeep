@@ -174,13 +174,15 @@ func (h *Handler) decisionsAPI(w http.ResponseWriter, r *http.Request, identity 
 		return
 	}
 	for i := range history {
-		for j := range history[i].Options {
-			for k := range history[i].Options[j].Attachments {
-				attachment := &history[i].Options[j].Attachments[k]
-				if stored, ok := media[attachment.SHA256]; ok {
-					attachment.MIME = stored.MIME
-					attachment.OriginalName = stored.OriginalName
-					attachment.SizeBytes = stored.SizeBytes
+		for _, options := range [][]decisionOptionView{history[i].Options, history[i].OptionsKO} {
+			for j := range options {
+				for k := range options[j].Attachments {
+					attachment := &options[j].Attachments[k]
+					if stored, ok := media[attachment.SHA256]; ok {
+						attachment.MIME = stored.MIME
+						attachment.OriginalName = stored.OriginalName
+						attachment.SizeBytes = stored.SizeBytes
+					}
 				}
 			}
 		}

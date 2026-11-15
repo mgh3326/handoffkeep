@@ -707,12 +707,17 @@ func (o operatorTools) decisionsPending(ctx context.Context, _ *gmcp.CallToolReq
 		}
 		decisions = append(decisions, item)
 	}
-	optionGroups := make([][]decisionOptionView, 0, len(decisions)+len(cleanup))
-	for _, item := range decisions {
+	// Both option groups name the same media: an option carries one attachment
+	// shape on the wire whether it is in the original or the translated list.
+	views := make([]decisionView, 0, len(decisions)+len(cleanup))
+	views = append(views, decisions...)
+	views = append(views, cleanup...)
+	optionGroups := make([][]decisionOptionView, 0, 2*len(views))
+	for _, item := range views {
 		optionGroups = append(optionGroups, item.Options)
-	}
-	for _, item := range cleanup {
-		optionGroups = append(optionGroups, item.Options)
+		if len(item.OptionsKO) > 0 {
+			optionGroups = append(optionGroups, item.OptionsKO)
+		}
 	}
 	if err := o.decisionMedia(ctx, optionGroups...); err != nil {
 		return nil, nil, err

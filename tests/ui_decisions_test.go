@@ -166,31 +166,61 @@ func TestUIDecisionDetailOptionMedia(t *testing.T) {
 	if err = pool.QueryRow(t.Context(), `SELECT id FROM decision_requests WHERE source='task_request' AND source_ref=$1`, req.Request.ID).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
+	// The translated option list names the same media, so its attachments carry
+	// the same shape as the original list.
+	original, err := json.Marshal(store.DecisionOptions{AllowFree: true, Options: []store.DecisionOption{{
+		Key: "A", Label: "2A", Attachments: []store.DecisionOptionAttachment{{SHA256: sha, Caption: "approach"}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	translated, err := json.Marshal(store.DecisionOptions{AllowFree: true, Options: []store.DecisionOption{{
+		Key: "A", Label: "2A 한국어", Attachments: []store.DecisionOptionAttachment{{SHA256: sha, Caption: "approach"}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.PutTranslation(t.Context(), store.Translation{
+		Entity: "decision_request", EntityID: req.Request.ID, Field: "options", Lang: "ko",
+		SourceSHA256: store.SourceSHA256(string(original)), Text: string(translated), Translator: "fixture",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	fixture := newUIJWTFixture(t)
 	h := newUITestServer(t, s, fixture, "", "", 0)
 	defer h.Close()
 	token := fixture.token(t, "admin@example.com", "ui-audience", time.Now().Add(time.Hour), nil)
+	type attachmentJSON struct {
+		SHA256       string `json:"sha256"`
+		Caption      string `json:"caption"`
+		MIME         string `json:"mime"`
+		OriginalName string `json:"original_name"`
+		SizeBytes    int64  `json:"size_bytes"`
+	}
+	type optionJSON struct {
+		Key         string           `json:"key"`
+		Label       string           `json:"label"`
+		Attachments []attachmentJSON `json:"attachments"`
+	}
 	var detail struct {
 		Request struct {
-			Options []struct {
-				Attachments []struct {
-					SHA256       string `json:"sha256"`
-					Caption      string `json:"caption"`
-					MIME         string `json:"mime"`
-					OriginalName string `json:"original_name"`
-					SizeBytes    int64  `json:"size_bytes"`
-				} `json:"attachments"`
-			} `json:"options"`
+			Options   []optionJSON `json:"options"`
+			OptionsKO []optionJSON `json:"options_ko"`
 		} `json:"request"`
 	}
 	if status := boardJSON(t, h.Client(), fmt.Sprintf("%s/ui/api/decisions/%d", h.URL, id), token, &detail); status != http.StatusOK {
 		t.Fatal(status)
 	}
-	if len(detail.Request.Options) != 1 || len(detail.Request.Options[0].Attachments) != 1 {
-		t.Fatalf("detail=%+v", detail)
+	for name, options := range map[string][]optionJSON{"options": detail.Request.Options, "options_ko": detail.Request.OptionsKO} {
+		if len(options) != 1 || len(options[0].Attachments) != 1 {
+			t.Fatalf("%s=%+v", name, options)
+		}
+		attachment := options[0].Attachments[0]
+		if attachment.SHA256 != sha || attachment.Caption != "approach" || attachment.MIME != "image/png" || attachment.OriginalName != "approach.png" || attachment.SizeBytes != 3 {
+			t.Fatalf("%s attachment=%+v", name, attachment)
+		}
 	}
-	attachment := detail.Request.Options[0].Attachments[0]
-	if attachment.SHA256 != sha || attachment.Caption != "approach" || attachment.MIME != "image/png" || attachment.OriginalName != "approach.png" || attachment.SizeBytes != 3 {
-		t.Fatalf("attachment=%+v", attachment)
+	if detail.Request.OptionsKO[0].Label != "2A 한국어" {
+		t.Fatalf("options_ko=%+v", detail.Request.OptionsKO)
 	}
 }

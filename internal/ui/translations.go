@@ -47,7 +47,7 @@ func (h *Handler) translateDecisionViews(ctx context.Context, views []decisionRe
 						views[i].OptionsKOStale = true
 					}
 				}
-				views[i].OptionsKO = options.Options
+				views[i].OptionsKO = projectDecisionOptions(options.Options)
 			}
 		}
 	}
