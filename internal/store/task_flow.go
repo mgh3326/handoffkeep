@@ -438,6 +438,13 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return Task{}, err
 	}
+	if !reopen && in.To == StateMerged {
+		// rule 8 may write a task comment after this row lock; keep comment ids
+		// in commit order by taking their allocator lock before the task row.
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+			return Task{}, err
+		}
+	}
 
 	var x Task
 	var hasDisposition bool

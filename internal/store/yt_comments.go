@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -65,6 +68,49 @@ func (s *Store) ytCommentsModeNow() YTCommentsMode {
 	default:
 		return YTCommentsOff
 	}
+}
+
+// insertSystemTaskCommentTx adds an event comment without making comment
+// delivery part of the event's success condition. The caller holds the
+// comment insert lock before locking task rows; the savepoint contains a
+// guard refusal or any write-protocol failure to this comment alone.
+func (s *Store) insertSystemTaskCommentTx(ctx context.Context, tx pgx.Tx, taskID int64, source, eventKey, body string, createdAt time.Time) error {
+	if err := CheckTaskCommentBody(body); err != nil {
+		if _, ok := guard.SecretPattern(err); ok {
+			return err
+		}
+		return err
+	}
+	key := systemTaskCommentKey(taskID, source, eventKey)
+	if _, err := tx.Exec(ctx, `SAVEPOINT system_task_comment`); err != nil {
+		return err
+	}
+	var c TaskComment
+	err := scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at,system_event_key) VALUES($1,$2,$3,$4,$5) ON CONFLICT (task_id,system_event_key) WHERE system_event_key IS NOT NULL DO NOTHING RETURNING `+taskCommentColumns, taskID, body, YTCommentPrincipal, createdAt.UTC(), key), &c)
+	if errors.Is(err, pgx.ErrNoRows) {
+		_, err = tx.Exec(ctx, `RELEASE SAVEPOINT system_task_comment`)
+		return err
+	}
+	if err == nil {
+		var op ytwrite.Op
+		var enqueued bool
+		op, enqueued, err = s.enqueueYTCommentTx(ctx, tx, c)
+		if err == nil {
+			logYTCommentEnqueued(c, op, enqueued)
+		}
+	}
+	if err != nil {
+		_, rollbackErr := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT system_task_comment`)
+		_, releaseErr := tx.Exec(ctx, `RELEASE SAVEPOINT system_task_comment`)
+		return errors.Join(err, rollbackErr, releaseErr)
+	}
+	_, err = tx.Exec(ctx, `RELEASE SAVEPOINT system_task_comment`)
+	return err
+}
+
+func systemTaskCommentKey(taskID int64, source, eventKey string) string {
+	h := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%s", taskID, source, eventKey)))
+	return "event:" + hex.EncodeToString(h[:])
 }
 
 func init() { registerYTKindGate(ytwrite.KindCommentAppend, ytCommentGateSQL) }

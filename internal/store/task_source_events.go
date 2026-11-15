@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -192,11 +194,14 @@ func normalizeTaskSourceEvent(in TaskSourceEvent) (TaskSourceEvent, error) {
 type sourceEvent struct {
 	Source, SourceRef    string
 	PR                   string
+	MergeSHA             string
 	RevertedPR, RevertPR string
 	// To is the target of a panewire.job event; the table decides the rest.
-	To   string
-	At   time.Time
-	Note string
+	To          string
+	At          time.Time
+	Note        string
+	CommentBody string
+	CommentKey  string
 	// Named is the tasks the event addresses itself (task_id and tasks). Each
 	// gets the event in its own turn, so propagation and the rule 9 parent
 	// row skip them rather than take their (task, source, source_ref) key.
@@ -227,6 +232,11 @@ func (s *Store) ApplyTaskSourceEvent(ctx context.Context, in TaskSourceEvent) (T
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return TaskEventResult{}, err
+	}
+	if in.Source == SourceMergewakePR || in.Source == SourceMergewakeMerge || in.Source == SourceMergewakeRevert {
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+			return TaskEventResult{}, err
+		}
 	}
 	// The named tasks follow task_id, each under its own row lock; the
 	// level-2 lock held above serializes them with every other holder. A
@@ -310,7 +320,7 @@ func (s *Store) propagateRevertTx(ctx context.Context, tx pgx.Tx, in TaskSourceE
 		if err = recordChangeTx(ctx, tx, x, in, at, now); err != nil {
 			return err
 		}
-		ev := sourceEvent{Source: in.Source, SourceRef: in.SourceRef, PR: in.PR, RevertedPR: in.RevertedPR, RevertPR: in.RevertPR, At: at, Named: named,
+		ev := sourceEvent{Source: in.Source, SourceRef: in.SourceRef, PR: in.PR, MergeSHA: in.MergeSHA, RevertedPR: in.RevertedPR, RevertPR: in.RevertPR, At: at, Named: named,
 			Note: fmt.Sprintf("the reverted PR also delivered this task; reverted with task #%d", in.TaskID)}
 		if _, err = s.applySourceEventTx(ctx, tx, x, ev, now); err != nil {
 			return err
@@ -339,7 +349,7 @@ func (s *Store) applyTaskSourceEventTx(ctx context.Context, tx pgx.Tx, id int64,
 	for _, n := range in.Tasks {
 		named[n] = true
 	}
-	ev := sourceEvent{Source: in.Source, SourceRef: in.SourceRef, PR: in.PR, RevertedPR: in.RevertedPR, RevertPR: in.RevertPR, At: at, Named: named, Pending: pending}
+	ev := sourceEvent{Source: in.Source, SourceRef: in.SourceRef, PR: in.PR, MergeSHA: in.MergeSHA, RevertedPR: in.RevertedPR, RevertPR: in.RevertPR, At: at, Named: named, Pending: pending}
 	res, err := s.applySourceEventTx(ctx, tx, x, ev, now)
 	if err != nil {
 		return TaskEventResult{}, false, err
@@ -438,6 +448,47 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 	if recorded {
 		return TaskEventResult{Redelivered: true, State: x.State, Task: x}, nil
 	}
+	commentBody := ev.CommentBody
+	commentKey := ev.SourceRef
+	if ev.CommentKey != "" {
+		commentKey = ev.CommentKey
+	}
+	if commentBody == "" {
+		switch ev.Source {
+		case SourceMergewakePR:
+			_, n, ok := parsePRURL(ev.PR)
+			if ok {
+				commentBody = fmt.Sprintf("PR #%d opened: %s", n, ev.PR)
+			}
+		case SourceMergewakeMerge:
+			_, n, ok := parsePRURL(ev.PR)
+			if ok {
+				sha := ev.MergeSHA
+				if len(sha) > 7 {
+					sha = sha[:7]
+				}
+				if sha == "" {
+					commentBody = fmt.Sprintf("Merged: PR #%d", n)
+				} else {
+					commentBody = fmt.Sprintf("Merged: PR #%d (%s)", n, sha)
+				}
+			}
+		case SourceMergewakeRevert:
+			_, n, ok := parsePRURL(ev.PR)
+			if ok {
+				commentBody = fmt.Sprintf("Reverted: PR #%d", n)
+			}
+		case SourceDeploy:
+		}
+	}
+	writeEventComment := func() {
+		if commentBody == "" {
+			return
+		}
+		if err := s.insertSystemTaskCommentTx(ctx, tx, x.ID, ev.Source, commentKey, commentBody, now); err != nil {
+			log.Printf("task_event_comment_failed task_id=%d source=%q err=%q", x.ID, ev.Source, err)
+		}
+	}
 	if x.State == StateMerged && x.Refs.PR == "" && ev.Source == SourceMergewakeMerge && ev.PR != "" {
 		// A parent that an automatic close moved to merged before its own PR was
 		// named adopts it (hk 4172). Any other merged task is not adopting.
@@ -446,7 +497,11 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 			return TaskEventResult{}, err
 		}
 		if hasSub {
-			return s.adoptMergedPRTx(ctx, tx, x, ev, now)
+			res, err := s.adoptMergedPRTx(ctx, tx, x, ev, now)
+			if err == nil && res.Applied {
+				writeEventComment()
+			}
+			return res, err
 		}
 	}
 	field, revertedPR := "", ""
@@ -531,6 +586,7 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 	}); err != nil {
 		return TaskEventResult{}, err
 	}
+	writeEventComment()
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, ev.Source, ev.Note, 0, now); err != nil {
 		return TaskEventResult{}, err
 	}
@@ -816,11 +872,12 @@ func (s *Store) deployOnMergedTx(ctx context.Context, tx pgx.Tx, x Task, now tim
 	if x.State != StateMerged || !taskEventPRRE.MatchString(x.Refs.PR) {
 		return x, nil
 	}
-	key, err := deployRecordKeyForPRTx(ctx, tx, x.Refs.PR)
-	if err != nil || key == "" {
+	record, found, err := deployRecordForPRTx(ctx, tx, x.Refs.PR)
+	if err != nil || !found {
 		return x, err
 	}
-	ev := sourceEvent{Source: SourceDeploy, SourceRef: deployRef(key, x.Refs.PR), PR: x.Refs.PR, At: now, Named: named, Pending: pending, Note: "deploy record " + key + " lists the PR; applied when the task entered merged"}
+	body, commentKey := deployCommentDetails(record)
+	ev := sourceEvent{Source: SourceDeploy, SourceRef: deployRef(record.Key, x.Refs.PR), PR: x.Refs.PR, CommentBody: body, CommentKey: commentKey, At: now, Named: named, Pending: pending, Note: "deploy record " + record.Key + " lists the PR; applied when the task entered merged"}
 	res, err := s.applySourceEventTx(ctx, tx, x, ev, now)
 	if err != nil {
 		return x, err
@@ -828,43 +885,84 @@ func (s *Store) deployOnMergedTx(ctx context.Context, tx pgx.Tx, x Task, now tim
 	return res.Task, nil
 }
 
-// deployRecordKeyForPRTx is the newest deploy record key whose successful
-// included_prs lists pr, or "" when none does. A record is matched through its
-// projection, or parsed from the document body when the projection is stale
-// (an older server wrote it, or a SHA mismatch). Shared by rule 8 and the
-// drift report.
-func deployRecordKeyForPRTx(ctx context.Context, tx pgx.Tx, pr string) (string, error) {
-	rows, err := tx.Query(ctx, `SELECT d.key,p.record,CASE WHEN p.key IS NULL THEN d.body ELSE NULL END FROM documents d LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256 WHERE strpos(d.key,'deploy/')=1 AND ((p.decoded AND strpos(convert_from(p.record,'UTF8'),$1)>0) OR (p.key IS NULL AND strpos(d.body,$1)>0)) ORDER BY d.key DESC`, pr)
+// deployRecordForPRTx is the newest successful record whose included_prs
+// lists pr. A record is matched through its projection, or parsed from the
+// document body when the projection is stale.
+func deployRecordForPRTx(ctx context.Context, tx pgx.Tx, pr string) (StoredDeployRecord, bool, error) {
+	rows, err := tx.Query(ctx, `SELECT d.key,d.sha256,d.created_at,p.record,p.decoded,CASE WHEN p.key IS NULL THEN d.body ELSE NULL END FROM documents d LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256 WHERE strpos(d.key,'deploy/')=1 AND ((p.decoded AND strpos(convert_from(p.record,'UTF8'),$1)>0) OR (p.key IS NULL AND strpos(d.body,$1)>0)) ORDER BY d.key DESC`, pr)
 	if err != nil {
-		return "", err
+		return StoredDeployRecord{}, false, err
 	}
-	key := ""
-	for key == "" && rows.Next() {
-		var k string
-		var raw []byte
-		var body *string
-		if err = rows.Scan(&k, &raw, &body); err != nil {
-			rows.Close()
-			return "", err
-		}
+	defer rows.Close()
+	for rows.Next() {
 		var record StoredDeployRecord
-		if body != nil {
-			record = parseStoredDeployRecord(k, "", *body, time.Time{})
-		} else {
-			record = parseStoredDeployRecord(k, "", string(raw), time.Time{})
+		var raw []byte
+		var decoded *bool
+		var body *string
+		if err = rows.Scan(&record.Key, &record.SHA256, &record.CreatedAt, &raw, &decoded, &body); err != nil {
+			return StoredDeployRecord{}, false, err
 		}
-		prs, _ := deployedPRs(record)
+		if body != nil {
+			record = parseStoredDeployRecord(record.Key, record.SHA256, *body, record.CreatedAt)
+		} else {
+			if err = json.Unmarshal(raw, &record.Record); err != nil {
+				return StoredDeployRecord{}, false, err
+			}
+			record.Decoded = *decoded
+		}
+		prs, ok := deployedPRs(record)
+		if !ok {
+			continue
+		}
 		for _, listed := range prs {
 			if listed == pr {
-				key = k
+				return record, true, nil
 			}
 		}
 	}
-	rows.Close()
 	if err = rows.Err(); err != nil {
+		return StoredDeployRecord{}, false, err
+	}
+	return StoredDeployRecord{}, false, nil
+}
+
+// deployRecordKeyForPRTx preserves callers that need only the record key.
+func deployRecordKeyForPRTx(ctx context.Context, tx pgx.Tx, pr string) (string, error) {
+	record, found, err := deployRecordForPRTx(ctx, tx, pr)
+	if err != nil || !found {
 		return "", err
 	}
-	return key, nil
+	return record.Key, nil
+}
+
+func deployCommentDetails(record StoredDeployRecord) (body, key string) {
+	sha := ""
+	if record.Record.HeadSHA != nil {
+		sha = *record.Record.HeadSHA
+	}
+	if sha == "" && record.Record.DeployedRef != nil && gitSHARE.MatchString(*record.Record.DeployedRef) {
+		sha = *record.Record.DeployedRef
+	}
+	shortSHA := sha
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+	if shortSHA == "" {
+		shortSHA = "unknown"
+	}
+	tag := ""
+	if record.Record.DeployedRef != nil && *record.Record.DeployedRef != sha {
+		tag = *record.Record.DeployedRef
+	}
+	body = fmt.Sprintf("Deployed %s on %s", shortSHA, record.Record.Service)
+	if tag != "" {
+		body = fmt.Sprintf("Deployed %s (%s) on %s", shortSHA, tag, record.Record.Service)
+	}
+	key = sha
+	if key == "" {
+		key = record.Key
+	}
+	return body, key
 }
 
 // applyDeployRecordTx is the hk.deploy event: a document stored under a
@@ -882,6 +980,9 @@ func (s *Store) applyDeployRecordTx(ctx context.Context, tx pgx.Tx, record Store
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+		return err
+	}
 	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE state=$2 AND refs->>'pr' = ANY($1) ORDER BY id FOR UPDATE`, prs, StateMerged)
 	if err != nil {
 		return err
@@ -895,7 +996,8 @@ func (s *Store) applyDeployRecordTx(ctx context.Context, tx pgx.Tx, record Store
 		return err
 	}
 	for _, x := range tasks {
-		ev := sourceEvent{Source: SourceDeploy, SourceRef: deployRef(key, x.Refs.PR), PR: x.Refs.PR, At: now, Note: "deploy record " + key + " lists the PR"}
+		body, commentKey := deployCommentDetails(record)
+		ev := sourceEvent{Source: SourceDeploy, SourceRef: deployRef(key, x.Refs.PR), PR: x.Refs.PR, CommentBody: body, CommentKey: commentKey, At: now, Note: "deploy record " + key + " lists the PR"}
 		if _, err = s.applySourceEventTx(ctx, tx, x, ev, now); err != nil {
 			return err
 		}
