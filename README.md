@@ -603,6 +603,11 @@ canonical in YouTrack, a comment the protocol cannot send is refused with 400
 `yt_comment_unsendable`. None of these modes turns
 on serve's YouTrack read-through, which has its own
 `HANDOFFKEEP_YT_READTHROUGH_MODE` (`docs/youtrack.md`).
+Parent, related and duplicate links between bound issues are projected by
+`HANDOFFKEEP_YT_LINKS_MODE` (default `off`, hk 4640). `handoffkeep youtrack
+links status [--task N]` (`GET /v1/yt/links/status`) reads the mode, the sweep,
+the links hk owns and the held ops; it changes nothing. The canary that must
+precede `on` is in `docs/youtrack-write-protocol.md` §Kind issue_links.
 
 ## Documents and search
 

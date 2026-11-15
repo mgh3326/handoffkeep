@@ -76,6 +76,10 @@ Submit ─► prepared ─Claim─► dispatched ─┬─ 2xx + valid id ──
   marker included. Absence, several matches, a deleted match, a marker with other
   text, or a failed search all keep `remote_unknown` (each with its own reason
   code). Search is a candidate finder, never negative proof.
+- **Planned kinds (hk 3841, `issue_links`) are the one exception.** A recovery reads the
+  links, plans from that read and sends only the diff. Adding a link that is already present is
+  never planned, so a recovery cannot duplicate one; the plans per op are bounded by
+  `LinkRecoverMax` (5), see the section below.
 - **429 honours Retry-After** as the server sent it, seconds or HTTP date, to the
   second: `next_attempt_at` is the server's deadline and no request (the POST, or
   the evidence search after a listing 429) is made before it. The only cap is a
@@ -1191,7 +1195,7 @@ moves included) and in `total`, plus `over_limit` when a task was skipped
 for the limit, and exits 6 without
 touching the database unless `HANDOFFKEEP_YT_FIELDS_MODE=on`.
 
-**Not here.** Tags and issue links (parent, relations) stay as the import set
+**Not here.** Tags stay as the import set; issue links are projected by the kind `issue_links` (hk 3841, below)
 them; documents are a later slice (a project move and decisions: below). 멈춤, the
 Korean title and the milestone name are read when the task row changes: a
 task that becomes stalled with no change, a new translation or a renamed
@@ -1431,6 +1435,164 @@ classifies as `doc_comment` (`ytwrite.ImportedDocCommentKey`); a protocol
 document copy lists as `yt_only_bot`. Neither class is counted by the
 audit's gate.
 
+## Kind issue_links (hk 3841)
+
+`issue_links` is the one planned kind (`ytwrite.PlannedKind`): hk's parent,
+related and duplicate_of edges, written as YouTrack issue links between the
+bound issues. Design: `design/2026-11-13/yt-issue-links`; slices S1–S5 are
+#422, #420, #425, #428 and this section (S5, hk 4640). `blocks` is not
+projected. The mode is `HANDOFFKEEP_YT_LINKS_MODE`: `off` (the default) or
+`on`. `on` needs the write worker's YouTrack credentials. It stays `off`
+until the canary below is recorded and the operator turns it on.
+
+**Who writes which link (I2).** Every link has one writer task, so two lanes
+never mutate one link:
+
+- parent: the child writes `subtask of` its parent;
+- duplicate_of: the duplicate writes `duplicates` on the original;
+- related: the lower task id writes `relates to` the higher one. The higher
+  endpoint's desired set has no relates link.
+
+**Payload (I4).** `ytwrite.IssueLinksSnapshot`, version 2:
+`{"v":2,"desired":{parent,related,duplicates},"held":[…]}`, sorted, with no
+baseline. `held` lists each edge whose target task has no binding on the
+tenant; the op names no issue for it. `PayloadSHA` covers the kind, task,
+issue, tenant and payload, so an unchanged snapshot makes no op.
+
+**Ownership (I1, I6, I7).** hk removes only a link it created. `yt_link_owned`
+holds one open row per link a plan created or is creating, written in the plan
+transaction before the POST, so a crash after the POST keeps the claim. A row
+is released when a later plan removes the link or a read shows it absent. A
+managed-type link hk did not create is recorded in `yt_link_unowned` and left
+alone. An unowned link never rejects, holds or touches an op. Links present
+from the import are unowned (the default; see the design's open decision §3).
+
+**Send: read, plan, execute, read (I5, I8, I10–I12).** Each send attempt:
+
+1. Reads the issue's links: `/links` paged with `$top`/`$skip` until a short
+   page, each row's `issues` paged with `$topLinks`/`$skipLinks`. More than
+   10 000 rows is an error, never a partial read.
+2. Plans in one transaction under the writer's lane lock, only while the op is
+   still `dispatched` at its attempt: `add = desired − current`,
+   `remove = (current ∩ owned by this writer) − desired − held live edges`.
+   The peer's links and the unowned links are left alone. The transaction
+   inserts the owned rows for the adds and the plan row (`yt_link_plans`,
+   append-only).
+3. Executes, in this order: subtask removes, subtask add, relates and
+   duplicate adds, then their removes. A DELETE answered 404 is re-read before
+   it is classified. The side letter (`s`, `t` or none) is built from the link
+   type's role names (`subtask of`, `duplicates`); it is never read from an
+   id's text.
+4. Reads again. Converged (desired ⊆ current, no planned removal still present)
+   → `applied`, with `yt_result_id` the issue id; the same transaction closes
+   the released owned rows and marks the gone unowned rows. Not converged, or
+   the final read fails → `remote_unknown` (`unverified`).
+
+The error table of the single write applies to the first mutation of a send:
+4xx other than 401, 408 and 429 → `rejected`; 429 and 401 → `prepared` until
+the wait; 5xx, 408 and transport → `remote_unknown`. After one mutation has
+succeeded, any error is `remote_unknown / partial_write`, whatever its status,
+because YouTrack's state has changed.
+
+**Recovery (I8, I9).** A recovery for a planned kind replaces the evidence
+search: it reads, and if the op is converged it is `applied`. Otherwise it
+plans again from that read and executes the new diff. This is the one
+exception to "No automatic re-create" (Lifecycle), with its reason there. At
+most `LinkRecoverMax` (5) plans run per op. A recovery 4xx other than 401, 408
+and 429 is `rejected`. When the plans are exhausted the op stays
+`remote_unknown / recover_exhausted`, raises the stuck-op alert, and waits for
+the operator.
+
+**Stale targets (hk 4711).** A prepared op that names an issue its writer task
+is no longer bound to is rejected `link_target_changed` at claim and never
+dispatched. The consumer rejects such ops before it prepares the writer's next
+snapshot. An unbind or rebind writes the writers' task `U` rows so that the
+next snapshot is prepared. Unbinding an issue a dispatched or `remote_unknown`
+links op names is refused.
+
+**Gate and mode (I13).** The gate admits an `issue_links` op only while the
+mode is `on` and its target is the writer's binding on its tenant. With the
+mode off nothing is prepared, but every pass that reads a change moves the
+sweep generation, so a change made while off is not lost; the first sweep
+after `on` handles it.
+
+**Feed, bind and sweep (I3, I14).** The `task_links` consumer prepares a
+snapshot for each changed task. Binding a task writes one task `U` row for each
+writer that points at it (its children, its duplicates, the lower id of each
+related edge) in the binding's own transaction. The sweep (`yt_links_sweep`,
+`RunYTLinksSweep`) walks the bound tasks of the tenant in ascending order,
+`YTLinksSweepPerPass` (200) per worker pass, each task in its own transaction
+under its lane lock. It marks the generation done at the end; a generation
+bumped during the walk starts the walk again.
+
+**Authority (I15).** `youtrack authority set tasks youtrack` is refused unless
+the links mode is `on`, the `hk:task-links` principal has no `prepared`,
+`dispatched` or `remote_unknown` op, the `task_links` cursor has read every
+change, and the sweep is complete at its current generation.
+
+**Operator surface.** `handoffkeep youtrack links status [--task N] [--limit N]`
+(`GET /v1/yt/links/status`) is read-only. It prints the mode and tenant, the
+sweep row (`generation`, `done_generation`, `after_task_id`, `complete`), the
+open owned and unowned rows, and the held ops with a reason: `remote_unknown`,
+`mode_off`, `target_unbound` or `waiting_for_earlier_op`. The counts cover every
+matching row; the lists stop at `--limit` (default 100). An unknown `--task`
+exits 7 (`not_found`).
+
+**YouTrack facts relied on.** `Issue.links`, `parent` and `subtasks` are
+read-only; links change only through `POST /api/issues/{id}/links/{linkID}/issues`
+(body `{"id": <target db id>}`, `s` outward, `t` inward, bare for an undirected
+type) and `DELETE /api/issues/{id}/links/{linkID}/issues/{targetID}`. The type
+ids come from `GET /api/issueLinkTypes`. On the default types, the child writes
+`subtask` on its inward side (`t`), and the duplicate writes `duplicate` on its
+inward side (`t`). The adapter reads the side from the role names and refuses
+(`rejected / field_refused`, alert) a missing type, an undirected type where a
+directed one is expected, or a type with neither role name; it never guesses.
+
+Three points are **not** verified from the docs. They are checked by the canary
+below, before the mode is turned on: (a) whether YouTrack refuses or replaces
+a second `subtask of` on one issue (the send deletes first either way); (b)
+that a `relates` POST is visible from both issues (the single-writer rule
+relies on it); (c) the status a DELETE of an absent link returns (the adapter
+re-reads on 404).
+
+### Canary runbook (hk 4640)
+
+Run once, by the operator, before `HANDOFFKEEP_YT_LINKS_MODE=on` is set for
+any production worker. It uses one YouTrack test project that no production
+task is bound to, and the write worker's mode stays `off` throughout. The bot
+account's credentials stay where they are; nothing here writes one down.
+
+1. **Preconditions.** `handoffkeep youtrack links status` shows `"mode":"off"`
+   and no held ops for the test tasks. Two test tasks are bound to two issues
+   in the test project.
+2. **Fact (a), second subtask of.** On a test issue `C` that is already a
+   subtask of `P1`, add `subtask of` `P2` through the REST API. Record the
+   status and body. Then read `C`'s links. Record whether `P1` was refused,
+   replaced, or both kept.
+3. **Fact (b), one relates POST.** Add one `relates to` link from issue `A` to
+   issue `B`. Read `GET /api/issues/A/links` and `GET /api/issues/B/links`.
+   Record whether the link is listed from both sides.
+4. **Fact (c), DELETE of an absent link.** Delete a link that does not exist
+   (a known link id already removed). Record the status code. If it is 404, the
+   adapter's re-read path is the one that will run.
+5. **First sweep after on (measurement).** Set `HANDOFFKEEP_YT_LINKS_MODE=on`
+   on the canary worker only, let one full sweep finish, then run
+   `handoffkeep youtrack ops --kind issue_links --state all` and
+   `handoffkeep youtrack links status`. Record the number of bound tasks, the
+   `issue_links` ops prepared (one read-only op per bound task, #428 rollout
+   note), their states and reasons, and the requests made (reads only, unless a
+   link was really missing).
+6. **Record the results** as an hk document under `canary/<date>/yt-issue-links`
+   (`handoffkeep doc put`): each fact with its observed status and body, the
+   measurement, and the decision the results support. Facts (a) to (c) stay
+   UNVERIFIED until this document exists.
+7. **Turn on.** Only then the operator sets `HANDOFFKEEP_YT_LINKS_MODE=on` on the
+   production write worker. That is an operator action, not part of any PR.
+
+**Rollback.** Set `HANDOFFKEEP_YT_LINKS_MODE=off` and restart the worker. Nothing
+is deleted from YouTrack by the switch: the owned rows stay, the links stay, and
+`youtrack links status` shows the state.
+
 ## Authority (hk 4122)
 
 Which side is canonical, per content kind, is a row in `yt_authority`
@@ -1519,18 +1681,18 @@ release rollback never meets an authority value it cannot parse (consult hk
 only) switches in one transaction and prints every row before and after. The
 server first takes the legacy sync lock (a running `youtrack sync`, `adopt`
 or comment catch-up makes it refuse), then checks, for each kind it changes to
-youtrack, that its own write mode is on (tasks: `HANDOFFKEEP_YT_ISSUES_MODE` and `HANDOFFKEEP_YT_FIELDS_MODE`;
+youtrack, that its own write mode is on (tasks: `HANDOFFKEEP_YT_ISSUES_MODE`, `HANDOFFKEEP_YT_FIELDS_MODE` and `HANDOFFKEEP_YT_LINKS_MODE` (hk 4640);
 comments: `HANDOFFKEEP_YT_COMMENTS_MODE=on`; documents:
 `HANDOFFKEEP_YT_DOC_COMMENTS_MODE` and `HANDOFFKEEP_YT_DOCS_MODE`; decisions: `HANDOFFKEEP_YT_DECISIONS_MODE`) and that the kind has no `prepared`, `dispatched` or
-`remote_unknown` op (by principal: `hk:task-issues` and `hk:task-fields`,
+`remote_unknown` op (by principal: `hk:task-issues`, `hk:task-fields` and `hk:task-links`,
 `hk:task-comments`, `hk:doc-comments` and `hk:documents`, `hk:decisions`), and that its feed
-consumers have read every change (`task_fields` for tasks, `task_docs` and
+consumers have read every change (`task_fields` and `task_links` for tasks, `task_docs` and
 `document_articles` for documents, and for documents no in-scope document
 whose content YouTrack lacks with no op writing it: a binding whose article
 is not the document's body, or a document created after the import with no
 binding (no create yet, no YouTrack project, a rejected create);
 `store.ytArticlesUnwrittenTx`, read from the state at the switch, not from a
-record of a catch-up), `decision_issues` for decisions; a consumer
+record of a catch-up), `decision_issues` for decisions, and for tasks the link sweep (`yt_links_sweep`) complete at its current generation (hk 4640); a consumer
 that has never run, or whose cursor is behind `sync_state.pruned_through`,
 refuses). Every op preparation holds its kind's row
 `FOR SHARE`, so the switch counts an op whose transaction was open when it
