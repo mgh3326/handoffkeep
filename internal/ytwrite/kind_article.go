@@ -27,7 +27,7 @@ import (
 // is over MaxArticleBytes (the import would split it) is not written (D4).
 
 func init() {
-	registerKind(KindArticleCreate, func(Config) Kind { return articleCreate{} })
+	registerKind(KindArticleCreate, func(cfg Config) Kind { return articleCreate{ledger: cfg.Ledger} })
 	registerKind(KindArticleUpdate, func(Config) Kind { return articleUpdate{} })
 }
 
@@ -331,6 +331,9 @@ type RemoteArticle struct {
 	// ParentID is the article's parent, "" for a top-level article (a
 	// split document's part is a child of its index article).
 	ParentID string
+	// CreatedAt is when the article was created, zero when the remote did not
+	// say. A family with several roots uses its oldest by this (hk 4797).
+	CreatedAt time.Time
 }
 
 // ArticleCreate is one article create: the project and the text.
@@ -382,8 +385,13 @@ type ArticleSearch struct {
 
 // articleCreate is the article_create kind. Its text (Render) is the
 // article's content, which carries the provenance line and the marker; Send
-// takes the summary from the same op.
-type articleCreate struct{}
+// takes the summary from the same op. Its ledger holds the record of each
+// family's root and the family lane that serialises root creation (hk 4797);
+// a Protocol built without New (the operator's resolve) has none, and Send
+// then finds the root by its marker without recording it.
+type articleCreate struct {
+	ledger Ledger
+}
 
 func articleCreateOf(op Op) (ArticleCreatePayload, error) {
 	var p ArticleCreatePayload
@@ -509,42 +517,185 @@ func familyRoots(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreatePa
 	return roots, nil
 }
 
+// OldestFamilyRoot is the root a family uses when its project holds several
+// articles carrying its marker — a retry an earlier release made, or a copy a
+// person made. It is the oldest by creation time, then by article id (hk
+// 4797), which is the one every document of the family goes under; nothing is
+// created beside it. found is false for no roots.
+func OldestFamilyRoot(roots []RemoteArticle) (root RemoteArticle, found bool) {
+	if len(roots) == 0 {
+		return RemoteArticle{}, false
+	}
+	best := roots[0]
+	for _, r := range roots[1:] {
+		if familyRootOlder(r, best) {
+			best = r
+		}
+	}
+	return best, true
+}
+
+// familyRootOlder orders two roots: an older creation time wins, and a root
+// whose creation time the remote did not report sorts after one it did; the id
+// breaks a tie. The order is total, so the choice does not depend on the order
+// the search returned the roots in.
+func familyRootOlder(a, b RemoteArticle) bool {
+	switch {
+	case a.CreatedAt.IsZero() != b.CreatedAt.IsZero():
+		return b.CreatedAt.IsZero()
+	case !a.CreatedAt.Equal(b.CreatedAt):
+		return a.CreatedAt.Before(b.CreatedAt)
+	default:
+		return a.ID < b.ID
+	}
+}
+
 // articleParent is the article a document's article goes under: the amended
 // policy article when the payload names one, else the family root, else ""
-// for a payload that names neither. create makes a missing family root; with
-// create false a missing root is found false, so Evidence never writes.
-func articleParent(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreatePayload, create bool) (parent string, found bool, err error) {
+// for a payload that names neither. It never writes: a missing root is found
+// false, so Evidence measures only what is there, and when several roots carry
+// the family's marker the oldest one is the family's (hk 4797).
+func articleParent(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreatePayload) (parent string, found bool, err error) {
 	if p.ParentArticleID != "" {
 		return p.ParentArticleID, true, nil
 	}
 	if p.ParentFamily == "" {
 		return "", true, nil
 	}
-	marker := FamilyRootMarker(p.ParentFamily)
 	roots, err := familyRoots(ctx, ar, op, p)
 	if err != nil {
 		return "", false, err
 	}
-	switch {
-	case len(roots) == 1:
-		return roots[0].ID, true, nil
-	case len(roots) > 1:
-		ids := make([]string, 0, len(roots))
-		for _, r := range roots {
-			ids = append(ids, r.ID)
-		}
-		return "", false, &RefusedError{Reason: ReasonAmbiguousIssue, Detail: fmt.Sprintf("project %s has %d %q family roots carrying %s: %s", op.YTTargetID, len(roots), p.ParentFamily, marker, strings.Join(ids, ","))}
-	case !create:
+	root, ok := OldestFamilyRoot(roots)
+	if !ok {
 		return "", false, nil
 	}
-	id, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, Summary: p.ParentFamily, Content: FamilyRootContent(p.ParentFamily)})
-	if err != nil {
-		return "", false, fmt.Errorf("family root %q: %w", p.ParentFamily, err)
+	return root.ID, true, nil
+}
+
+// familyRoot is Send's parent for a document whose payload names a family: the
+// one root article every document of the family goes under. A root the store
+// has recorded is used without a search; one it has not is looked up by its
+// marker and, when the project holds several, the oldest is the family's root.
+// A root is created only when the lookup found none, and the store's family
+// lane (Ledger.LockFamily) covers that lookup and create, so two documents of
+// a new family cannot make two roots (hk 4797).
+func (a articleCreate) familyRoot(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreatePayload) (string, error) {
+	if id, ok, err := a.recordedRoot(ctx, ar, op, p); err != nil || ok {
+		return id, err
 	}
-	if id == "" {
-		return "", false, errors.New("family root create returned no id")
+	if a.ledger == nil {
+		return a.searchOrCreateRoot(ctx, ar, op, p)
+	}
+	unlock, ok, err := a.ledger.LockFamily(ctx, op.Tenant, op.YTTargetID, p.ParentFamily)
+	if err != nil {
+		return "", &NotSentError{Err: fmt.Errorf("family root %q: %w", p.ParentFamily, err)}
+	}
+	if !ok {
+		return "", &NotSentError{Err: fmt.Errorf("family root %q: another op holds the family's lane", p.ParentFamily)}
+	}
+	defer unlock()
+	// The lane may have changed hands since the first read: the op that held it
+	// may have recorded the root the family now uses.
+	if id, ok, err := a.recordedRoot(ctx, ar, op, p); err != nil || ok {
+		return id, err
+	}
+	return a.searchOrCreateRoot(ctx, ar, op, p)
+}
+
+// searchOrCreateRoot finds the family's root and creates it only when the
+// project has none.
+func (a articleCreate) searchOrCreateRoot(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreatePayload) (string, error) {
+	parent, found, err := articleParent(ctx, ar, op, p)
+	if err != nil {
+		return "", &NotSentError{Err: err}
+	}
+	if found {
+		return a.recordedRootID(ctx, op, p, parent)
+	}
+	return a.createRoot(ctx, ar, op, p)
+}
+
+// recordedRoot is the root the store recorded for the family, found false when
+// it recorded none or the article is gone: a deleted root is looked up again
+// instead of failing every document of the family on a bad parent.
+func (a articleCreate) recordedRoot(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreatePayload) (string, bool, error) {
+	if a.ledger == nil {
+		return "", false, nil
+	}
+	id, found, err := a.ledger.FamilyRoot(ctx, op.Tenant, op.YTTargetID, p.ParentFamily)
+	if err != nil || !found {
+		return "", false, err
+	}
+	got, err := ar.ReadArticle(ctx, id)
+	var re *RemoteError
+	if errors.As(err, &re) && re.Status == http.StatusNotFound {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, &NotSentError{Err: fmt.Errorf("family root %q: %w", p.ParentFamily, err)}
+	}
+	if got.ID != id {
+		return "", false, nil
 	}
 	return id, true, nil
+}
+
+// recordedRootID remembers the root, so the family's later documents need no
+// search and cannot race a create. A record that cannot be written leaves the
+// op unsent: the next attempt finds the same root by its marker and records it,
+// and nothing was written to YouTrack in between.
+func (a articleCreate) recordedRootID(ctx context.Context, op Op, p ArticleCreatePayload, rootID string) (string, error) {
+	if a.ledger == nil {
+		return rootID, nil
+	}
+	if err := a.ledger.RecordFamilyRoot(ctx, op.Tenant, op.YTTargetID, p.ParentFamily, rootID, op.ID); err != nil {
+		return "", &NotSentError{Err: fmt.Errorf("family root %q: record: %w", p.ParentFamily, err)}
+	}
+	return rootID, nil
+}
+
+// familyRootReconcileTimeout bounds the one search that settles a family root
+// POST whose outcome is unknown, and the record it writes. It runs on a
+// context of its own: a POST that timed out may have spent the whole dispatch
+// budget, and this search is what turns that uncertainty into the root the POST
+// made instead of leaving the document blocked behind it (hk 4797). The
+// protocol bounds its own settlement the same way (SettleTimeout).
+const familyRootReconcileTimeout = 15 * time.Second
+
+// createRoot makes the family's one root article. A root is not an op, so no op
+// row records it; the store's family record does. A POST that may have reached
+// YouTrack is never repeated: one search reconciles it, and the root it made is
+// the family's. No root after an uncertain POST keeps the failure, which the
+// protocol records remote_unknown (hk 4797: that outcome once became a second
+// root).
+func (a articleCreate) createRoot(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreatePayload) (string, error) {
+	id, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, Summary: p.ParentFamily, Content: FamilyRootContent(p.ParentFamily)})
+	if err == nil && id != "" {
+		return a.recordedRootID(ctx, op, p, id)
+	}
+	if err != nil && beforeSend(err) {
+		// The request never left: nothing can exist to reconcile.
+		return "", fmt.Errorf("family root %q: %w", p.ParentFamily, err)
+	}
+	// The POST may have created the root: a lost reply, a timeout, a 5xx or a
+	// 2xx without an id. The search is the only evidence there is, and finding
+	// a root means the create happened (or another op's did, which is the
+	// family's root just the same).
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), familyRootReconcileTimeout)
+	defer cancel()
+	roots, rerr := familyRoots(rctx, ar, op, p)
+	if rerr != nil {
+		return "", fmt.Errorf("family root %q: create failed and its reconcile could not search: %w", p.ParentFamily, rerr)
+	}
+	root, found := OldestFamilyRoot(roots)
+	if !found {
+		if err != nil {
+			return "", fmt.Errorf("family root %q: %w", p.ParentFamily, err)
+		}
+		return "", fmt.Errorf("family root %q: the create returned no id and no article carries the family marker", p.ParentFamily)
+	}
+	return a.recordedRootID(rctx, op, p, root.ID)
 }
 
 // readFailure is Evidence's error: a 429 keeps its RetryAfter for the shared rule.
@@ -564,11 +715,15 @@ func readFailure(ev Evidence, err error) (Evidence, error) {
 // its prefix's index article). Otherwise the op is rejected
 // legacy_synced_unverified (a 404 included; another failed read is
 // not_sent). Else the parent is the amended policy article or the family
-// root (articleParent; a missing root is created), and exactly one article
-// under it with the op's summary that carries the op's marker is adopted (no
-// POST); two or more are ambiguous_issue (no POST); none is exactly one
-// create under the parent with the summary and the content.
-func (articleCreate) Send(ctx context.Context, remote Remote, op Op, text string) (string, error) {
+// root (familyRoot: the root the store recorded, else the project's oldest
+// one carrying the family marker, else one created — never a second beside an
+// existing root), and exactly one article under it with the op's summary that
+// carries the op's marker is adopted (no POST); two or more are
+// ambiguous_issue (no POST); none is exactly one create under the parent with
+// the summary and the content. This last POST's failure is the protocol's to
+// classify: a timeout or 5xx after it left is uncertain (remote_unknown,
+// reconciled by the summary search), never not_sent (hk 4797).
+func (a articleCreate) Send(ctx context.Context, remote Remote, op Op, text string) (string, error) {
 	ar, ok := remote.(ArticleRemote)
 	if !ok {
 		return "", &RefusedError{Reason: ReasonUnsupportedKind, Detail: "the remote cannot create articles"}
@@ -580,13 +735,9 @@ func (articleCreate) Send(ctx context.Context, remote Remote, op Op, text string
 	if p.LegacyArticleID != "" {
 		return "", legacyArticle(ctx, ar, op, p)
 	}
-	parent, _, err := articleParent(ctx, ar, op, p, true)
+	parent, err := a.sendParent(ctx, ar, op, p)
 	if err != nil {
-		var re *RefusedError
-		if errors.As(err, &re) {
-			return "", re
-		}
-		return "", &NotSentError{Err: err}
+		return "", err
 	}
 	hits, err := ar.FindArticles(ctx, ArticleSearch{ProjectShort: p.YTProjectShort, ProjectID: op.YTTargetID, Query: p.Summary, Summary: p.Summary, ParentID: parent})
 	if err != nil {
@@ -603,6 +754,22 @@ func (articleCreate) Send(ctx context.Context, remote Remote, op Op, text string
 		return "", &RefusedError{Reason: ReasonAmbiguousIssue, Detail: fmt.Sprintf("project %s has %d articles carrying op %d's marker: %s", op.YTTargetID, len(marked), op.ID, strings.Join(ids, ","))}
 	}
 	return ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, ParentID: parent, Summary: p.Summary, Content: text})
+}
+
+// sendParent is the parent Send puts the document's article under, classified
+// for the protocol: a failed read, a busy family lane and a failed family
+// lookup are not_sent (nothing was written), while a root POST the remote may
+// have taken is returned as it is, so writeFailed records it remote_unknown and
+// the evidence search reconciles it (hk 4797).
+func (a articleCreate) sendParent(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreatePayload) (string, error) {
+	if p.ParentFamily == "" || p.ParentArticleID != "" {
+		parent, _, err := articleParent(ctx, ar, op, p)
+		if err != nil {
+			return "", &NotSentError{Err: err}
+		}
+		return parent, nil
+	}
+	return a.familyRoot(ctx, ar, op, p)
 }
 
 // legacyArticle is Send for a document the legacy sync wrote: an
@@ -624,11 +791,24 @@ func legacyArticle(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreate
 	return &AdoptedError{ID: a.ID}
 }
 
+// evidenceParent is the parent Evidence searches the document's article under:
+// the recorded root when the family has one, else the same lookup Send makes,
+// never writing. Kept apart from articleParent so reconcile measures the family
+// the send resolved, not merely the oldest root the project happens to hold.
+func (a articleCreate) evidenceParent(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreatePayload) (string, bool, error) {
+	if p.ParentFamily != "" && p.ParentArticleID == "" {
+		if id, ok, err := a.recordedRoot(ctx, ar, op, p); err != nil || ok {
+			return id, ok, err
+		}
+	}
+	return articleParent(ctx, ar, op, p)
+}
+
 // Evidence lists the project's articles with the op's summary. One that
 // carries the op's marker and whose content is exactly the rendered text is
 // a match; one that carries the marker with other content is a mismatch, so
 // the shared rule keeps the op remote_unknown.
-func (articleCreate) Evidence(ctx context.Context, remote Remote, op Op, text string) (Evidence, error) {
+func (a articleCreate) Evidence(ctx context.Context, remote Remote, op Op, text string) (Evidence, error) {
 	var ev Evidence
 	ar, ok := remote.(ArticleRemote)
 	if !ok {
@@ -638,7 +818,7 @@ func (articleCreate) Evidence(ctx context.Context, remote Remote, op Op, text st
 	if err != nil {
 		return ev, err
 	}
-	parent, found, err := articleParent(ctx, ar, op, p, false)
+	parent, found, err := a.evidenceParent(ctx, ar, op, p)
 	if err != nil {
 		return readFailure(ev, err)
 	}

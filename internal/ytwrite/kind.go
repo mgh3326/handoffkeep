@@ -54,9 +54,12 @@ type AdoptedError struct {
 
 func (e *AdoptedError) Error() string { return "adopted " + e.ID }
 
-// NotSentError is a read in Send that failed before the write request left:
-// nothing was written, so the op goes back to prepared (a 4xx read is
-// rejected). Err is the read's error (a *RemoteError or a transport failure).
+// NotSentError is a step inside Send that provably wrote nothing: a read that
+// failed, a write request that never left (beforeSend: DNS, dial), or a store
+// step the send needs before its write (the family lane, a root record).
+// Nothing was written, so the op goes back to prepared (a 4xx read is
+// rejected). Err is the failure (a *RemoteError, a transport error, a ledger
+// error).
 type NotSentError struct {
 	Err error
 }
