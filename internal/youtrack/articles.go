@@ -19,6 +19,10 @@ type Article struct {
 	// ParentArticle is set on a child article (a split document's part);
 	// read by ListArticles and ReadArticle only.
 	ParentArticle *ArticleRef `json:"parentArticle,omitempty"`
+	// ChildArticles is set by ReadArticle only: the article's sub-articles,
+	// ids alone. The roots merge reads it to prove a duplicate root has no
+	// child left before it deletes it (hk 4806).
+	ChildArticles []ArticleRef `json:"childArticles,omitempty"`
 	// Created is the article's creation time in epoch milliseconds (0 when the
 	// field list did not ask for it). The family root lookup orders the roots
 	// by it (hk 4797).
@@ -45,10 +49,10 @@ func (c *Client) ListArticles(ctx context.Context) ([]Article, error) {
 }
 
 // ReadArticle reads one article by id or readable id, with its content,
-// project and parent. A missing article is a 404 (IsNotFound).
+// project, parent and children. A missing article is a 404 (IsNotFound).
 func (c *Client) ReadArticle(ctx context.Context, articleID string) (Article, error) {
 	q := url.Values{}
-	q.Set("fields", articleBindingFields+",content")
+	q.Set("fields", articleBindingFields+",content,childArticles(id)")
 	var out Article
 	err := c.get(ctx, "/api/articles/"+url.PathEscape(articleID), q, &out)
 	return out, err
@@ -116,6 +120,24 @@ func (c *Client) UpdateArticle(ctx context.Context, articleID, summary, content 
 		Summary string `json:"summary"`
 		Content string `json:"content"`
 	}{summary, content}, &out)
+	return out, err
+}
+
+// SetArticleParent moves an article under another one with one POST to the
+// article whose body sets the parent alone. `parentArticle` is writable and
+// `project` is read-only (YouTrack REST, Operations with Specific Article), so
+// a root's children can be gathered under one root inside the project. The
+// parent of one article is a single value, so a 5xx retry is safe.
+func (c *Client) SetArticleParent(ctx context.Context, articleID, parentID string) (Article, error) {
+	if strings.TrimSpace(articleID) == "" || strings.TrimSpace(parentID) == "" {
+		return Article{}, fmt.Errorf("%w: article and parent are required", ErrConfig)
+	}
+	q := url.Values{}
+	q.Set("fields", articleFields+",parentArticle(id)")
+	var out Article
+	err := c.post(ctx, "/api/articles/"+url.PathEscape(articleID), q, struct {
+		ParentArticle idRef `json:"parentArticle"`
+	}{idRef{ID: parentID}}, &out)
 	return out, err
 }
 
