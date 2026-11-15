@@ -17,7 +17,7 @@ export function MarkdownBody({ original, korean, stale, compact, rawToggle = tru
     <div className={compact ? "work-markdown work-markdown--compact" : "work-markdown"}>
       {(stale || rawToggle) && (
         <div className="work-markdown-bar">
-          {stale && <small className="hk-translation-stale">번역 갱신 필요</small>}
+          {stale && <small className="hk-translation-stale"> 갱신 필요</small>}
           {rawToggle && (
             <button type="button" className="work-markdown-toggle" aria-pressed={raw} onClick={() => setRaw(value => !value)}>
               {raw ? "렌더" : "원문"}
