@@ -53,6 +53,10 @@ set -euo pipefail
 
 REVISION_ANNOTATION=org.opencontainers.image.revision
 DRY_RUN=0
+# DELIVER_REASON: why a delivery was refused permanently, for the
+# hk_follow.outbox_rejected line. The failing call sets it; deliver_outbox
+# clears it before each entry.
+DELIVER_REASON=""
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -80,8 +84,20 @@ gh_get() {
 	[[ "$code" == 2?? ]]
 }
 
+# gh_permanent <http code>: GitHub refused the body itself (400, 422), so a
+# retry cannot deliver it. Auth (401, 403), a repository the token cannot see
+# (404), rate limits (408, 429) and server errors (5xx) are transient: a
+# token, a permission or an outage fix delivers them on a later pass.
+gh_permanent() {
+	case "$1" in
+	400 | 422) return 0 ;;
+	esac
+	return 1
+}
+
 # gh_status <sha> <context> <state> <description>: post a commit status.
-# rc 0 when GitHub accepted it, 1 otherwise; the caller decides on a retry.
+# rc 0 when GitHub accepted it, 2 when it refused this body permanently
+# (DELIVER_REASON carries the code), 1 otherwise; the caller decides on a retry.
 gh_status() {
 	local desc=${4:0:140} body code
 	body=$(jq -n --arg s "$3" --arg c "$2" --arg d "$desc" '{state:$s, context:$c, description:$d}')
@@ -95,6 +111,10 @@ gh_status() {
 		return 0
 	fi
 	log "hk_follow.status_failed sha=$1 context=$2 http=$code"
+	if gh_permanent "$code"; then
+		DELIVER_REASON="http_${code}"
+		return 2
+	fi
 	return 1
 }
 
@@ -141,9 +161,38 @@ hk_doc_get() {
 	return 1
 }
 
-# hk_doc_put <key> <file>: store a deploy record.
+# permanent_doc_code <cli stderr>: the wire code when the server refused the
+# document body itself, so no retry can change the answer. `handoffkeep doc
+# put` exits 1 for every failure, so its error code is the signal:
+#   invalid_context      400: the store refused the key or the body
+#   secret_like_content  400: guard.Reject matched a secret in the key or body
+# A network failure, an auth failure or 500 internal_error names neither and
+# may be delivered on a later pass.
+permanent_doc_code() {
+	case "$1" in
+	*secret_like_content*) echo secret_like_content ;;
+	*invalid_context*) echo invalid_context ;;
+	*) return 1 ;;
+	esac
+}
+
+# hk_doc_put <key> <file>: store a deploy record. rc 0 stored, 2 permanently
+# refused (DELIVER_REASON carries the code), 1 transient. The CLI's own error
+# line keeps reaching the journal.
 hk_doc_put() {
-	"$HANDOFFKEEP_CLI" doc put --key "$1" --kind report --file "$2" >/dev/null
+	local err code
+	if "$HANDOFFKEEP_CLI" doc put --key "$1" --kind report --file "$2" >/dev/null 2>"$WORK/hk.put.err"; then
+		return 0
+	fi
+	err=$(cat "$WORK/hk.put.err")
+	if [[ -n "$err" ]]; then
+		printf '%s\n' "$err" >&2
+	fi
+	if code=$(permanent_doc_code "$err"); then
+		DELIVER_REASON=$code
+		return 2
+	fi
+	return 1
 }
 
 sg_status() { "$SHIFTGATE" status --json; }
@@ -210,21 +259,56 @@ queue_notify() {
 	outbox_add "$(jq -cn --arg t "$1" '{kind:"notify", text:$t}')"
 }
 
-# deliver_item <file>: send one queued report. rc 0 when it is delivered.
+# deliver_item <file>: send one queued report. rc 0 delivered, 2 permanently
+# refused (DELIVER_REASON names the refusal), 1 when a later pass may deliver
+# it. A body the record parser cannot read is refused like a server answer.
 deliver_item() {
-	case "$(jq -r .kind "$1")" in
+	local kind
+	kind=$(jq -r .kind "$1" 2>/dev/null || echo unknown)
+	case "$kind" in
 	status)
 		gh_status "$(jq -r .sha "$1")" "$(jq -r .context "$1")" "$(jq -r .state "$1")" "$(jq -r .description "$1")"
 		;;
 	record)
-		jq -c .record "$1" >"$WORK/outbox-record.json" &&
-			hk_doc_put "$(jq -r .key "$1")" "$WORK/outbox-record.json"
+		if ! jq -c .record "$1" >"$WORK/outbox-record.json" 2>/dev/null; then
+			DELIVER_REASON=malformed
+			return 2
+		fi
+		hk_doc_put "$(jq -r .key "$1")" "$WORK/outbox-record.json"
 		;;
 	notify)
 		notify "$(jq -r .text "$1")"
 		;;
-	*) return 1 ;;
+	*)
+		DELIVER_REASON=unknown_kind
+		return 2
+		;;
 	esac
+}
+
+# rejected_dir: where a permanently refused entry leaves the queue, kept for
+# inspection. Never deleted; README §Operations says how to retry one.
+rejected_dir() { echo "$(outbox_dir)/rejected"; }
+
+# reject_outbox <file> <kind> <sha> <context> <key> <reason>: take one
+# permanently refused entry out of the queue, name it in the journal and send
+# one lane event. The entry holds nothing back, so a later entry with the same
+# key (or a later status for the same sha and context) is attempted in this
+# same pass. The event is best effort: the moved file is the record.
+reject_outbox() {
+	local dir rkey
+	dir=$(rejected_dir)
+	mkdir -p "$dir"
+	mv -f "$1" "$dir/$(basename "$1")"
+	rkey=$5
+	if [[ "$2" == status && -z "$rkey" ]]; then
+		rkey="$3/$4"
+	fi
+	if [[ -z "$rkey" ]]; then
+		rkey=$(basename "$1")
+	fi
+	log "hk_follow.outbox_rejected key=$rkey reason=$6"
+	notify "[hk-follow] outbox entry rejected: $rkey ($6); kept in $dir/$(basename "$1")" || true
 }
 
 # deliver_outbox: send every queued report, oldest first, removing each one
@@ -234,9 +318,12 @@ deliver_item() {
 # hold back the safety alert queued behind it. A later status for the same
 # sha and context waits behind a failed one (hk 4562), and a later record for
 # the same document key waits behind a failed one (hk 4742), so an older
-# retry cannot overwrite newer state. Dry runs deliver nothing.
+# retry cannot overwrite newer state. A permanent refusal has no retry that
+# could succeed, so it moves to rejected/ instead and holds nothing back: a
+# body the server will never accept must not keep its key's later records
+# queued for good (hk 4749). Dry runs deliver nothing.
 deliver_outbox() {
-	local f kind sha context key
+	local f kind sha context key rc
 	local -A held=()
 	[[ $DRY_RUN -eq 1 ]] && return 0
 	for f in "$(outbox_dir)"/*.json; do
@@ -257,16 +344,21 @@ deliver_outbox() {
 				continue
 			fi
 		fi
-		if deliver_item "$f"; then
-			rm -f "$f"
-		else
+		DELIVER_REASON=""
+		rc=0
+		deliver_item "$f" || rc=$?
+		case "$rc" in
+		0) rm -f "$f" ;;
+		2) reject_outbox "$f" "$kind" "$sha" "$context" "$key" "${DELIVER_REASON:-refused}" ;;
+		*)
 			log "hk_follow.outbox_retry file=$(basename "$f")"
 			if [[ "$kind" == status ]]; then
 				held["status:$sha $context"]=1
 			elif [[ "$kind" == record ]]; then
 				held["record:$key"]=1
 			fi
-		fi
+			;;
+		esac
 	done
 }
 
