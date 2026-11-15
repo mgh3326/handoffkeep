@@ -85,11 +85,15 @@ func (h *Handler) fileDownload(w http.ResponseWriter, r *http.Request, email, sh
 	// verified copy is (design/2026-11-16/hk-attachment-archive). A row whose
 	// object_location is another store is the same answer from the migration
 	// that predates archived_at.
+	// A row whose object_location names another store is archived by the
+	// earlier migration; one with no location at all is legacy metadata. Both
+	// keep the old answer, including its empty-location wording.
+	otherStore := attachment.ObjectLocation != attachments.ObjectLocation(h.attachments.Config)
 	archiveLocation := attachment.ArchiveLocation
-	if archiveLocation == "" && attachment.ObjectLocation != attachments.ObjectLocation(h.attachments.Config) {
+	if archiveLocation == "" && otherStore {
 		archiveLocation = attachment.ObjectLocation
 	}
-	if archiveLocation != "" || attachment.ArchivedAt != nil {
+	if otherStore || archiveLocation != "" || attachment.ArchivedAt != nil {
 		result = "archived"
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusConflict)
