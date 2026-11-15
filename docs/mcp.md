@@ -25,6 +25,30 @@ type (research, for example) take no template. `dots adopt` may record the
 adopted Canva design with `--canva-url` (an https canva.com design link),
 `--canva-page` and `--canva-version`, for `accepted` or `partially_used` results only. A repeat of such an adoption without the Canva flags keeps the recorded design.
 
+A request may declare that it ends in the operator's choice. Pass
+`--option 'A|label'` once per option (one to six, keys `A`–`F`) and
+`--option-attachment 'A|sha256[|caption]'` for the pictures and videos that
+show an option (at most eight per option). The API takes the same values as
+`options: [{"key": "A", "label": "…", "attachments": [{"sha256": "…",
+"caption": "…"}]}]`. The declaration is validated when the request is filed —
+every address must name an attachment hk already holds — so a RESULT is never
+refused because of it. A request with no declaration behaves as before.
+
+On a declaring request, RESULT records the result as usual and opens the
+operator's decision on the task in the same transaction: the declared options
+with their materials, the RESULT document as the decision's `doc`, and dots's
+own account — `recommended` (a declared option key), `recommendation_reason`,
+`unverified` and `one_fix`, sent as `dots_reply` fields. Those four are allowed
+only on RESULT, and `recommended` must name a declared key; when it is omitted
+the decision opens with no recommended option. The task then waits on the
+decision instead of completing. The operator answers on the console decision
+page or in the dots chat (`decision_answer`); either way it is the same
+decision record, the task completes with the decision and the answer as its
+evidence, and the requester lane — and each `[알릴 레인]` lane — hears the answer
+once as the request's result. Delivery is keyed by the resolution, so a
+replayed answer sends nothing. `dots adopt` still records what became of a
+result; answering the decision does not run it.
+
 On the authenticated ChatGPT connection, `dots_inbox` lists open requests in
 creation order. Use the returned `next_cursor` to fetch another page.
 `dots_reply` takes `task_id`, structured `kind`, `body`, and an
@@ -49,7 +73,9 @@ issued) for each request. Each request also lists its `attachments`
 `attachment_get_url` issues the ten-minute download link for one.
 `PROGRESS` records a partial result and leaves the task open. `BLOCKED` parks
 it with the reason, and `RESULT`
-completes it with the result document as evidence. A `QUESTION` is delivered
+completes it with the result document as evidence — or, on a declaring request,
+opens the operator's decision and leaves the task waiting on it (above). A
+`QUESTION` is delivered
 to the requester; set `ask_operator` when it needs an hk decision request and
 the task should await that decision. RESULT, BLOCKED, and QUESTION also create
 a result document, result record, and lane notification. START creates only a

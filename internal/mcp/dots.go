@@ -29,8 +29,8 @@ var dotsBodyTaskRef = regexp.MustCompile(`(?i)\bhk\s+([0-9]+)`)
 
 func registerDotsTools(s *gmcp.Server, service api.Service, p principal) {
 	o := operatorTools{service: service, principal: p}
-	gmcp.AddTool(s, &gmcp.Tool{Name: "dots_inbox", Description: "List open dots requests oldest first, with whether each is started and when. Each request lists its attachments (original_name, size_bytes, mime, sha256, created_at) and, in referenced_attachments, the attachments of up to five tasks its body names as hk <id>, each with from_task; attachments lists files on the request; read them before asking for a copy. Each list holds at most 20 items and sets attachments_truncated or referenced_attachments_truncated when more exist. attachment_get_url is the way to download one. The run token is never listed. Pass the last task id as cursor to continue.", Annotations: readOnlyAnnotations()}, o.dotsInbox)
-	gmcp.AddTool(s, &gmcp.Tool{Name: "dots_reply", Description: "Reply to a dots request. START requires expected_updated_at from the inbox and returns run_token; every later reply must send that run_token. START with takeover true takes over an already started request and rotates the run_token. Use ask_operator for questions requiring an operator decision. When the operator answers a dots question in the chat, record it with decision_answer (the operator's words as text) before continuing; never answer it yourself. Reuse an idempotency key only for the same reply.", Annotations: writeAnnotations()}, o.dotsReply)
+	gmcp.AddTool(s, &gmcp.Tool{Name: "dots_inbox", Description: "List open dots requests oldest first, with whether each is started and when. Each request lists its attachments (original_name, size_bytes, mime, sha256, created_at) and, in referenced_attachments, the attachments of up to five tasks its body names as hk <id>, each with from_task; attachments lists files on the request; read them before asking for a copy. Each list holds at most 20 items and sets attachments_truncated or referenced_attachments_truncated when more exist. attachment_get_url is the way to download one. A request whose options list is not empty declares that it ends in the operator's choice: each option has a key, a label and the pictures or videos that show it, and its RESULT opens that decision and must mark one recommended. The run token is never listed. Pass the last task id as cursor to continue.", Annotations: readOnlyAnnotations()}, o.dotsInbox)
+	gmcp.AddTool(s, &gmcp.Tool{Name: "dots_reply", Description: "Reply to a dots request. START requires expected_updated_at from the inbox and returns run_token; every later reply must send that run_token. START with takeover true takes over an already started request and rotates the run_token. Use ask_operator for questions requiring an operator decision. When the operator answers a dots question in the chat, record it with decision_answer (the operator's words as text) before continuing; never answer it yourself. On RESULT of a request that declares options, send recommended (one of its option keys), recommendation_reason, unverified and one_fix: hk opens the operator's decision with the declared options, their materials and those fields, and the task completes when the operator answers (decision_answer accepts that answer too). The four fields apply to RESULT only, and recommended must name a declared key. Reuse an idempotency key only for the same reply.", Annotations: writeAnnotations()}, o.dotsReply)
 }
 
 func (o operatorTools) dotsReply(ctx context.Context, _ *gmcp.CallToolRequest, in store.DotsReplyInput) (*gmcp.CallToolResult, any, error) {
@@ -42,6 +42,15 @@ func (o operatorTools) dotsReply(ctx context.Context, _ *gmcp.CallToolRequest, i
 		return nil, nil, err
 	}
 	return jsonResult(result)
+}
+
+// dotsChoiceOptions is the declaration a request carries, or nil: the inbox
+// shows it so dots can answer in the shape the operator will choose from.
+func dotsChoiceOptions(task store.Task) []store.DecisionOption {
+	if task.Refs.DotsChoice == nil {
+		return nil
+	}
+	return task.Refs.DotsChoice.Options
 }
 
 type dotsInboxInput struct {
@@ -103,6 +112,11 @@ func (o operatorTools) dotsInbox(ctx context.Context, _ *gmcp.CallToolRequest, i
 		// ReferencedAttachments are files on tasks the body names as "hk <id>".
 		ReferencedAttachments          []referencedAttachmentView `json:"referenced_attachments"`
 		ReferencedAttachmentsTruncated bool                       `json:"referenced_attachments_truncated"`
+		// Options is the choice the request declared it ends in (hk 4789).
+		// Non-empty means the request declares that the operator decides:
+		// each option has a key, a label and the pictures or videos that show
+		// it, and the RESULT marks one recommended and carries its reason.
+		Options []store.DecisionOption `json:"options,omitempty"`
 	}
 	items := make([]entry, 0, len(tasks))
 	named := make([][]int64, len(tasks))
@@ -124,7 +138,7 @@ func (o operatorTools) dotsInbox(ctx context.Context, _ *gmcp.CallToolRequest, i
 		if err != nil {
 			return nil, nil, err
 		}
-		items = append(items, entry{Task: task, Body: doc.Body, RequesterLane: task.ParentLane, Replies: comments, Started: task.ClaimedBy != "", RunStartedAt: runStartedAt})
+		items = append(items, entry{Task: task, Body: doc.Body, RequesterLane: task.ParentLane, Replies: comments, Started: task.ClaimedBy != "", RunStartedAt: runStartedAt, Options: dotsChoiceOptions(task)})
 		named[i] = dotsNamedTaskIDs(doc.Body, task.ID, dotsInboxNamedTaskLimit)
 		for _, id := range append([]int64{task.ID}, named[i]...) {
 			if !seen[id] {

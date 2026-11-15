@@ -434,6 +434,12 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		if refs.DecisionRequest != nil {
 			return Task{}, errors.New("invalid task transition: decision_request is written by tasks decision-request only")
 		}
+		// The declared choice is fixed at creation: a transition that could
+		// re-point it would let a RESULT open a decision the request never
+		// declared.
+		if refs.DotsChoice != nil {
+			return Task{}, errors.New("invalid task transition: dots_choice is written by dots request creation only")
+		}
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return Task{}, err

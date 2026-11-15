@@ -611,6 +611,13 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, in.Actor, note, 0, now); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
+	// A declaring dots request completes on the answer to the decision its
+	// RESULT opened, and that answer is the request's result the requester
+	// lane hears (hk 4789). Both the console and decision_answer arrive here.
+	choice := decisionAnswerChoice(x.Refs.DecisionOptions, in, resolved.Status)
+	if x, err = s.deliverDotsChoiceAnswerTx(ctx, tx, x, resolved, choice, in.Actor, resolutionID, now); err != nil {
+		return ResolveDecisionOutcome{}, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}

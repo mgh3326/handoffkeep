@@ -131,6 +131,11 @@ type TaskRefs struct {
 	// ResolveDecisionRequest; while it exists, decision_options are its
 	// choices and are not patchable by a generic transition.
 	DecisionRequest *DecisionRequest `json:"decision_request,omitempty"`
+	// DotsChoice is what a dots request declared when it was filed: it ends in
+	// the operator's choice between these options (hk 4789). Written only by
+	// CreateDotsRequest and the RESULT that opens the decision, never by a
+	// generic transition; a request without one behaves as before.
+	DotsChoice *DotsChoice `json:"dots_choice,omitempty"`
 	// Grade and Tier are the task's (grade X, Tn) marker values (hk 4425).
 	// Read them through TaskRefs.GradeTier, which falls back to the legacy
 	// refs.linear copy this release still keeps.
@@ -2108,6 +2113,9 @@ func validTaskRefs(x TaskRefs) bool {
 	if x.DecisionOptions != nil && !validDecisionOptions(*x.DecisionOptions) {
 		return false
 	}
+	if x.DotsChoice != nil && !validDotsChoice(*x.DotsChoice) {
+		return false
+	}
 	if x.Grade != "" && !validTaskGrade(x.Grade) {
 		return false
 	}
@@ -2181,6 +2189,14 @@ func rejectTaskRefs(x TaskRefs) error {
 	if x.DecisionOptions != nil {
 		for _, option := range x.DecisionOptions.Options {
 			values = append(values, option.Label)
+		}
+	}
+	if x.DotsChoice != nil {
+		for _, option := range x.DotsChoice.Options {
+			values = append(values, option.Label)
+			for _, attachment := range option.Attachments {
+				values = append(values, attachment.Caption)
+			}
 		}
 	}
 	if x.Linear != nil {
