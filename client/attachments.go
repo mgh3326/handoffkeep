@@ -134,14 +134,19 @@ func (c Client) RecordAttachmentArchive(ctx context.Context, sha, location strin
 	return out, e
 }
 
-// attachmentHTTPError decodes a non-2xx answer into *HTTPError. The body is
+// attachmentHTTPError decodes a non-2xx answer into *HTTPError with the same
+// fields hktransport.Call fills: the code, a refusal's reason or secret
+// pattern, the duplicate check's tasks and a change-feed cursor. The body is
 // the server's {"error": "<code>"} envelope with no secret in it.
 func attachmentHTTPError(resp *http.Response) error {
 	var x struct {
-		Error string `json:"error"`
+		Error, Pattern, Reason string
+		SimilarTasks           []SimilarTask `json:"similar_tasks"`
+		Reset                  bool
+		MinSyncID              int64 `json:"min_sync_id"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&x)
-	return &HTTPError{Status: resp.StatusCode, Code: x.Error}
+	return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern, Reason: x.Reason, SimilarTasks: x.SimilarTasks, Reset: x.Reset, MinSyncID: x.MinSyncID}
 }
 
 // PutAttachment uploads body under name with its MIME type and ref
