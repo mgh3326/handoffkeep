@@ -72,6 +72,9 @@ func (s *Store) CloseTaskMerged(ctx context.Context, id int64, evidence, by, not
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return Task{}, nil, err
 	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+		return Task{}, nil, err
+	}
 	var x Task
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
