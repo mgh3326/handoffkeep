@@ -182,6 +182,12 @@ migrates a fresh database with the target binary, then runs the previous
 release's server on that schema and exercises healthz, task list/show/create,
 comment create and list, and the decision list; a failure fails `deploy-ok`.
 
+Registered migrations run inside one transaction, so `CREATE INDEX
+CONCURRENTLY` is not available: an index build takes SHARE on its table for
+the whole scan and blocks the previous release's writes to that table during
+blue-green. Keep an index on a table the previous release writes small enough
+that the build's write pause is acceptable.
+
 **Remote client.** Branch on server error codes with
 `remote.ErrorCode(err) == "not_found"`, never by comparing `err.Error()`.
 
