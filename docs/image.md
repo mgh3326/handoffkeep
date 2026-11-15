@@ -55,7 +55,8 @@ Optional server configuration:
   `HK_S3_REGION`, `HK_S3_BUCKET_LOOKUP`; limits:
   `HK_ATTACH_MAX_BYTES`, `HK_ATTACH_STORAGE_CAP_BYTES`,
   `HK_ATTACH_MONTHLY_PUT_CAP`, `HK_ATTACH_MONTHLY_GET_CAP`,
-  `HK_ATTACH_MIME_ALLOW`
+  `HK_ATTACH_MIME_ALLOW`; archive mode: `HANDOFFKEEP_ATTACH_ARCHIVE_MODE`
+  (`off`, `record` or `on`, default `off`)
 - alert webhook (removed with `r2usage`): `HK_ALERT_DISCORD_WEBHOOK`
 
 Client subcommands (`mcp`, `ctx`, `doc`, `tasks`, …) use `HANDOFFKEEP_URL` and

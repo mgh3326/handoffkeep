@@ -286,4 +286,8 @@ export type BoardAttachment = {
   mime: string;
   created_at: string;
   created_by: string;
+  /** The Drive archive copy's verified timestamp; null while not archived. */
+  archived_at: string | null;
+  /** Where the archive copy is; "" while not archived. */
+  archive_location: string;
 };

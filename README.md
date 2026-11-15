@@ -739,6 +739,24 @@ The OCI per-object ceiling is 50 GiB (single PutObject). The default safety limi
 are secret-scanned, MIME is sniffed and allowlisted, and dump/archive filename
 extensions are rejected. Objects are never made public.
 
+`HANDOFFKEEP_ATTACH_ARCHIVE_MODE` (read at serve start, default `off`) governs
+archiving a blob once every task that refers to it is closed — merged,
+deployed, completed, dropped or duplicate — and the latest close is at least
+seven days old. `off` refuses the archive route; `record` records the verified
+archive location and keeps the hot copy (the canary); `on` records it and then
+deletes the hot object. A failed delete is logged as
+`attach.archive.hot_delete_failed` and retried by the next archive call for that
+sha. `GET /v1/attachments/archive-candidates?limit=&after=` pages what may be
+archived (ordered by sha, already-archived blobs excluded) and
+`POST /v1/attachments/{sha}/archive` with `{"location","size_bytes","sha256"}`
+records one verified copy; a repeat with the same location answers the recorded
+result. A blob with another ref kind, or named by an open decision's options,
+is never a candidate. An archived blob answers 410 `attachment_archived` with
+its `sha256` and `location` on the download, and the MCP and console reads say
+where it is. The rule, layout and slices are in
+`design/2026-11-16/hk-attachment-archive`, under
+`decision/2026-11-09/hk-file-gateway`.
+
 ```bash
 handoffkeep attach put image.png --task 42
 handoffkeep attach get SHA256 -o image.png

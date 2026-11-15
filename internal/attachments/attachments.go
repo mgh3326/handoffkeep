@@ -313,6 +313,9 @@ type Manager struct {
 	Objects ObjectStore
 	Config  Config
 	Enabled bool
+	// ArchiveMode is HANDOFFKEEP_ATTACH_ARCHIVE_MODE, read at serve start.
+	// The zero value is off.
+	ArchiveMode ArchiveMode
 	// Now is the clock for upload expiry and the staging sweep; nil means the
 	// wall clock. Tests inject it.
 	Now func() time.Time
@@ -341,6 +344,11 @@ type AttachmentDB interface {
 	ListUnreleasedAttachmentUploads(ctx context.Context, createdBefore time.Time, limit int) ([]store.AttachmentUpload, error)
 	MarkAttachmentUploadStagingDeleted(ctx context.Context, id string, now time.Time) error
 	GetAttachmentUpload(context.Context, string) (store.AttachmentUpload, bool, error)
+	// RecordAttachmentArchive stores the verified archive location and
+	// MarkAttachmentHotDeleted records that the object was deleted.
+	RecordAttachmentArchive(context.Context, string, string, int64, time.Time) (store.AttachmentArchive, error)
+	MarkAttachmentHotDeleted(context.Context, string, time.Time) error
+	ListAttachmentArchiveCandidates(context.Context, int, string, time.Time) ([]store.AttachmentArchiveCandidate, string, error)
 	TransitionAttachmentUpload(ctx context.Context, id, from, to, reason string, now time.Time) (bool, error)
 	ClaimAttachmentUpload(ctx context.Context, id, nonce string, now time.Time) (bool, error)
 	TransitionAttachmentUploadClaim(ctx context.Context, id, nonce, to, reason string, now time.Time) (bool, error)
@@ -431,7 +439,11 @@ func NewFromEnv(s *store.Store) (*Manager, error) {
 	if e != nil {
 		return nil, e
 	}
-	m := &Manager{Store: s, Config: cfg, Enabled: on}
+	mode, e := ArchiveModeFromEnv()
+	if e != nil {
+		return nil, e
+	}
+	m := &Manager{Store: s, Config: cfg, Enabled: on, ArchiveMode: mode}
 	if !on {
 		return m, nil
 	}
@@ -576,6 +588,12 @@ func (m *Manager) putVerified(ctx context.Context, client, name, mime, ref, sha 
 	if old, ok, e := m.Store.GetAttachment(ctx, sha); e != nil {
 		return old, false, e
 	} else if ok {
+		// An archived blob takes no new ref. Refuse here as well as in the
+		// store commit, so both a buffered put and a direct completion answer
+		// the same 409 regardless of their commit path.
+		if archived(old) != nil {
+			return old, false, store.ErrAttachmentArchived
+		}
 		old.RefKind, old.RefID = kind, id
 		return commit(old)
 	}
@@ -603,7 +621,10 @@ func (m *Manager) Get(ctx context.Context, sha string) (store.Attachment, io.Rea
 		return x, nil, e
 	}
 	if !ok {
-		return x, nil, errors.New("attachment_not_found")
+		return x, nil, store.ErrAttachmentNotFound
+	}
+	if e = archived(x); e != nil {
+		return x, nil, e
 	}
 	r, e := m.Objects.Get(ctx, key(sha))
 	if e != nil {
@@ -619,10 +640,14 @@ func (m *Manager) Presign(ctx context.Context, sha string) (string, error) {
 	if !m.Enabled {
 		return "", ErrDisabled
 	}
-	if _, ok, e := m.Store.GetAttachment(ctx, sha); e != nil {
+	x, ok, e := m.Store.GetAttachment(ctx, sha)
+	if e != nil {
 		return "", e
 	} else if !ok {
-		return "", errors.New("attachment_not_found")
+		return "", store.ErrAttachmentNotFound
+	}
+	if e = archived(x); e != nil {
+		return "", e
 	}
 	u, e := m.Objects.Presign(ctx, key(sha), 10*time.Minute)
 	if e != nil {
@@ -636,10 +661,14 @@ func (m *Manager) PresignDownload(ctx context.Context, sha, disposition string) 
 	if !m.Enabled {
 		return "", ErrDisabled
 	}
-	if _, ok, err := m.Store.GetAttachment(ctx, sha); err != nil {
+	x, ok, err := m.Store.GetAttachment(ctx, sha)
+	if err != nil {
 		return "", err
 	} else if !ok {
-		return "", errors.New("attachment_not_found")
+		return "", store.ErrAttachmentNotFound
+	}
+	if err = archived(x); err != nil {
+		return "", err
 	}
 	objects, ok := m.Objects.(interface {
 		PresignDownload(context.Context, string, time.Duration, string) (string, error)

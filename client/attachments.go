@@ -28,6 +28,11 @@ type Attachment struct {
 	CreatedAt    time.Time `json:"created_at"`
 	RefKind      string    `json:"ref_kind,omitempty"`
 	RefID        string    `json:"ref_id,omitempty"`
+	// ArchivedAt and ArchiveLocation are set once hk records the verified
+	// archive copy of the blob; the hot object is then gone when hot_deleted_at
+	// was set (design/2026-11-16/hk-attachment-archive).
+	ArchivedAt      *time.Time `json:"archived_at"`
+	ArchiveLocation string     `json:"archive_location"`
 }
 
 // ArchiveCandidateTask is one closed task that refers to a candidate.

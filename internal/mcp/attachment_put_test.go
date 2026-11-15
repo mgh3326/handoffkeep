@@ -96,6 +96,43 @@ func (m *memAttachmentDB) ListAttachments(_ context.Context, kind, id string, _ 
 	return out, nil
 }
 func (*memAttachmentDB) RecordAttachmentGet(context.Context, string, int64) error { return nil }
+
+func (m *memAttachmentDB) RecordAttachmentArchive(_ context.Context, sha, location string, size int64, now time.Time) (store.AttachmentArchive, error) {
+	x, ok := m.rows[sha]
+	if !ok {
+		return store.AttachmentArchive{}, store.ErrAttachmentNotFound
+	}
+	if x.SizeBytes != size {
+		return store.AttachmentArchive{}, store.ErrAttachmentArchiveMismatch
+	}
+	if x.ArchivedAt != nil {
+		if x.ArchiveLocation != location {
+			return store.AttachmentArchive{}, store.ErrAttachmentArchiveMismatch
+		}
+		return store.AttachmentArchive{ArchivedAt: x.ArchivedAt.UTC(), Location: x.ArchiveLocation, HotDeleted: x.HotDeletedAt != nil}, nil
+	}
+	at := now.UTC()
+	x.ArchivedAt, x.ArchiveLocation = &at, location
+	m.rows[sha] = x
+	return store.AttachmentArchive{ArchivedAt: at, Location: location}, nil
+}
+
+func (*memAttachmentDB) ListAttachmentArchiveCandidates(context.Context, int, string, time.Time) ([]store.AttachmentArchiveCandidate, string, error) {
+	return nil, "", nil
+}
+
+func (m *memAttachmentDB) MarkAttachmentHotDeleted(_ context.Context, sha string, now time.Time) error {
+	x, ok := m.rows[sha]
+	if !ok {
+		return store.ErrAttachmentNotFound
+	}
+	if x.HotDeletedAt == nil {
+		at := now.UTC()
+		x.HotDeletedAt = &at
+		m.rows[sha] = x
+	}
+	return nil
+}
 func (*memAttachmentDB) AttachmentUsage(context.Context) (store.AttachmentUsage, error) {
 	return store.AttachmentUsage{}, nil
 }

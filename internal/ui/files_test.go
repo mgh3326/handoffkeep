@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/attachments"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/testdb"
@@ -115,6 +116,7 @@ func TestUIFileDownload(t *testing.T) {
 	t.Cleanup(st.Close)
 	shaHot := strings.Repeat("a", 64)
 	shaArchived := strings.Repeat("b", 64)
+	shaArchiveNew := strings.Repeat("3", 64)
 	shaLegacy := strings.Repeat("d", 64)
 	shaPNG := strings.Repeat("e", 64)
 	shaSVG := strings.Repeat("f", 64)
@@ -124,6 +126,7 @@ func TestUIFileDownload(t *testing.T) {
 	for _, x := range []store.Attachment{
 		{SHA256: shaHot, SizeBytes: 1, MIME: "text/plain", OriginalName: "한글 file.txt", CreatedBy: "ui-test", RefKind: "task", RefID: "1", ObjectLocation: attachments.ObjectLocation(config)},
 		{SHA256: shaArchived, SizeBytes: 1, MIME: "text/plain", OriginalName: "old.txt", CreatedBy: "ui-test", RefKind: "task", RefID: "2", ObjectLocation: "archive/2026"},
+		{SHA256: shaArchiveNew, SizeBytes: 1, MIME: "text/plain", OriginalName: "moved.txt", CreatedBy: "ui-test", RefKind: "task", RefID: "8", ArchiveLocation: "fleet-artifacts/archive/tasks/9/attachments/moved.txt"},
 		{SHA256: shaLegacy, SizeBytes: 1, MIME: "text/plain", OriginalName: "legacy.txt", CreatedBy: "ui-test", RefKind: "task", RefID: "3"},
 		{SHA256: shaPNG, SizeBytes: 1, MIME: "image/png", OriginalName: "card.png", CreatedBy: "ui-test", RefKind: "task", RefID: "4", ObjectLocation: attachments.ObjectLocation(config)},
 		{SHA256: shaSVG, SizeBytes: 1, MIME: "image/svg+xml", OriginalName: "drawing.svg", CreatedBy: "ui-test", RefKind: "task", RefID: "5", ObjectLocation: attachments.ObjectLocation(config)},
@@ -133,6 +136,16 @@ func TestUIFileDownload(t *testing.T) {
 		if _, _, err := st.PutAttachment(ctx, x, 100, 100); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// The archive record is written by the archive route, not by a put; seed
+	// it here so the page is exercised against the recorded columns.
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+	if _, err := conn.Exec(ctx, `UPDATE attachments SET archived_at=now(), archive_location=$2 WHERE sha256=$1`, shaArchiveNew, "fleet-artifacts/archive/tasks/9/attachments/moved.txt"); err != nil {
+		t.Fatal(err)
 	}
 	objects := &fileRouteObjects{location: "http://objects.example/file?signature=fresh"}
 	am := &attachments.Manager{Store: st, Objects: objects, Config: config, Enabled: true}
@@ -166,8 +179,11 @@ func TestUIFileDownload(t *testing.T) {
 			t.Fatalf("%s%s disposition %q (%d)", c.sha, c.query, objects.disposition, w.Code)
 		}
 	}
-	if w := call(shaArchived, "?inline=1"); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "archived at archive/2026") || !strings.Contains(w.Body.String(), "hk 3680") {
+	if w := call(shaArchived, "?inline=1"); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "보관됨 · archive/2026") || !strings.Contains(w.Body.String(), "hk 3680") {
 		t.Fatalf("archived response: %d %s", w.Code, w.Body.String())
+	}
+	if w := call(shaArchiveNew, ""); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "보관됨 · fleet-artifacts/archive/tasks/9/attachments/moved.txt") {
+		t.Fatalf("recorded archive response: %d %s", w.Code, w.Body.String())
 	}
 	if w := call(shaLegacy, "?inline=1"); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "unknown location (legacy metadata)") {
 		t.Fatalf("legacy location response: %d %s", w.Code, w.Body.String())

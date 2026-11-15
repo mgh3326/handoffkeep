@@ -823,6 +823,12 @@ type Attachment struct {
 	CreatedAt      time.Time `json:"created_at"`
 	RefKind        string    `json:"ref_kind,omitempty"`
 	RefID          string    `json:"ref_id,omitempty"`
+	// ArchivedAt and ArchiveLocation are set once the blob's Drive copy has
+	// been verified; HotDeletedAt says the object store copy is gone
+	// (design/2026-11-16/hk-attachment-archive).
+	ArchivedAt      *time.Time `json:"archived_at"`
+	ArchiveLocation string     `json:"archive_location"`
+	HotDeletedAt    *time.Time `json:"-"`
 }
 type AttachmentUsage struct {
 	Month      string `json:"month"`
@@ -3660,7 +3666,7 @@ func (s *Store) GetAttachment(ctx context.Context, sha string) (Attachment, bool
 		return Attachment{}, false, errors.New("invalid attachment sha")
 	}
 	var x Attachment
-	e := s.pool.QueryRow(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256=$1`, sha).Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation)
+	e := s.pool.QueryRow(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments WHERE sha256=$1`, sha).Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation, &x.ArchivedAt, &x.ArchiveLocation, &x.HotDeletedAt)
 	if e != nil {
 		if errors.Is(e, pgx.ErrNoRows) {
 			return x, false, nil
@@ -3673,7 +3679,7 @@ func (s *Store) GetAttachment(ctx context.Context, sha string) (Attachment, bool
 // ListAttachmentObjects returns each stored object once, without multiplying
 // rows by attachment_refs; migration uses this complete inventory.
 func (s *Store) ListAttachmentObjects(ctx context.Context) ([]Attachment, error) {
-	rows, err := s.pool.Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments ORDER BY sha256`)
+	rows, err := s.pool.Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments ORDER BY sha256`)
 	if err != nil {
 		return nil, err
 	}
@@ -3681,7 +3687,7 @@ func (s *Store) ListAttachmentObjects(ctx context.Context) ([]Attachment, error)
 	out := []Attachment{}
 	for rows.Next() {
 		var x Attachment
-		if err = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); err != nil {
+		if err = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation, &x.ArchivedAt, &x.ArchiveLocation, &x.HotDeletedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
@@ -3750,10 +3756,12 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 		return x, false, e
 	}
 	var present bool
-	e = tx.QueryRow(ctx, `SELECT true FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&present)
+	var archivedAt *time.Time
+	e = tx.QueryRow(ctx, `SELECT archived_at FROM attachments WHERE sha256=$1 FOR UPDATE`, x.SHA256).Scan(&archivedAt)
 	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
 		return x, false, e
 	}
+	present = e == nil
 	if !present {
 		if total+x.SizeBytes > storageCap {
 			return x, false, ErrAttachmentStorageCap
@@ -3769,6 +3777,14 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 			return x, false, e
 		}
 	} else {
+		// The row lock above is what orders a new ref against an archive
+		// record: the archive's candidate check takes the same lock, so it
+		// either sees this ref or this put sees archived_at and is refused.
+		// Without it a ref to an open task could commit after the archive
+		// query and leave a deleted hot copy referenced by live work.
+		if archivedAt != nil {
+			return x, false, ErrAttachmentArchived
+		}
 		if e = tx.QueryRow(ctx, `SELECT size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); e != nil {
 			return x, false, e
 		}
@@ -3867,10 +3883,12 @@ func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, 
 		return x, false, e
 	}
 	var present bool
-	e = tx.QueryRow(ctx, `SELECT true FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&present)
+	var archivedAt *time.Time
+	e = tx.QueryRow(ctx, `SELECT archived_at FROM attachments WHERE sha256=$1 FOR UPDATE`, x.SHA256).Scan(&archivedAt)
 	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
 		return x, false, e
 	}
+	present = e == nil
 	if !present {
 		if total+x.SizeBytes > storageCap {
 			return x, false, ErrAttachmentStorageCap
@@ -3886,6 +3904,14 @@ func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, 
 			return x, false, e
 		}
 	} else {
+		// The row lock above is what orders a new ref against an archive
+		// record: the archive's candidate check takes the same lock, so it
+		// either sees this ref or this put sees archived_at and is refused.
+		// Without it a ref to an open task could commit after the archive
+		// query and leave a deleted hot copy referenced by live work.
+		if archivedAt != nil {
+			return x, false, ErrAttachmentArchived
+		}
 		if e = tx.QueryRow(ctx, `SELECT size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); e != nil {
 			return x, false, e
 		}
@@ -3902,6 +3928,11 @@ func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, 
 }
 
 var ErrAttachmentStorageCap = errors.New("attachment_storage_cap")
+
+// ErrAttachmentArchived means the blob's hot copy was archived: its ref set is
+// closed to new puts, so an archived blob cannot gain a reference to open
+// work. Its text is the wire code.
+var ErrAttachmentArchived = errors.New("attachment_archived")
 var ErrAttachmentPutCap = errors.New("attachment_put_cap")
 
 func (s *Store) RecordAttachmentGet(ctx context.Context, sha string, getCap int64) error {
@@ -3940,7 +3971,7 @@ func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limi
 	if limit > 1000 {
 		limit = 1000
 	}
-	q := `SELECT a.sha256,a.size_bytes,a.mime,a.original_name,a.created_by,a.created_at,r.ref_kind,r.ref_id,COALESCE(a.object_location,'') FROM attachments a JOIN attachment_refs r ON r.sha256=a.sha256`
+	q := `SELECT a.sha256,a.size_bytes,a.mime,a.original_name,a.created_by,a.created_at,r.ref_kind,r.ref_id,COALESCE(a.object_location,''),a.archived_at,a.archive_location,a.hot_deleted_at FROM attachments a JOIN attachment_refs r ON r.sha256=a.sha256`
 	args := []any{limit}
 	if refKind != "" {
 		q += ` WHERE r.ref_kind=$1 AND r.ref_id=$2 ORDER BY a.created_at DESC,a.sha256,r.ref_kind,r.ref_id LIMIT $3`
@@ -3956,7 +3987,7 @@ func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limi
 	out := []Attachment{}
 	for rows.Next() {
 		var x Attachment
-		if e = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.RefKind, &x.RefID, &x.ObjectLocation); e != nil {
+		if e = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.RefKind, &x.RefID, &x.ObjectLocation, &x.ArchivedAt, &x.ArchiveLocation, &x.HotDeletedAt); e != nil {
 			return nil, e
 		}
 		out = append(out, x)
@@ -3979,14 +4010,14 @@ func (s *Store) AttachmentsBySHA(ctx context.Context, shas []string) (map[string
 	if len(valid) == 0 {
 		return out, nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256 = ANY($1)`, valid)
+	rows, err := s.pool.Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments WHERE sha256 = ANY($1)`, valid)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var x Attachment
-		if err = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); err != nil {
+		if err = rows.Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation, &x.ArchivedAt, &x.ArchiveLocation, &x.HotDeletedAt); err != nil {
 			return nil, err
 		}
 		out[x.SHA256] = x

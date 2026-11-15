@@ -186,7 +186,7 @@ func (c Client) GetAttachment(ctx context.Context, sha string) (store.Attachment
 }
 
 func storeAttachment(x client.Attachment) store.Attachment {
-	return store.Attachment{SHA256: x.SHA256, SizeBytes: x.SizeBytes, MIME: x.MIME, OriginalName: x.OriginalName, CreatedBy: x.CreatedBy, CreatedAt: x.CreatedAt, RefKind: x.RefKind, RefID: x.RefID}
+	return store.Attachment{SHA256: x.SHA256, SizeBytes: x.SizeBytes, MIME: x.MIME, OriginalName: x.OriginalName, CreatedBy: x.CreatedBy, CreatedAt: x.CreatedAt, RefKind: x.RefKind, RefID: x.RefID, ArchivedAt: x.ArchivedAt, ArchiveLocation: x.ArchiveLocation}
 }
 func (c Client) AttachmentUsage(ctx context.Context) (store.AttachmentUsage, error) {
 	var x struct {

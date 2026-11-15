@@ -22,6 +22,8 @@ type fakeObjects struct {
 	headSizes   map[string]int64
 	// modified overrides a key's last-modified time; unset keys count as now.
 	modified map[string]time.Time
+	// deleteErr makes Delete fail while it is set.
+	deleteErr error
 	// beforePut, when set, runs before each Put stores its object. A test uses
 	// it to overwrite the staging object between verify and promote.
 	beforePut func(key string)
@@ -90,6 +92,9 @@ func (f *fakeObjects) Head(_ context.Context, k string) (ObjectInfo, error) {
 func (f *fakeObjects) Delete(_ context.Context, k string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	delete(f.objects, k)
 	return nil
 }
@@ -247,6 +252,47 @@ func (f *fakeDB) FinalizeAttachmentUpload(_ context.Context, id, nonce string, x
 	return x, created, nil
 }
 func (*fakeDB) RecordAttachmentGet(context.Context, string, int64) error { return nil }
+
+func (f *fakeDB) RecordAttachmentArchive(_ context.Context, sha, location string, size int64, now time.Time) (store.AttachmentArchive, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	x, ok := f.rows[sha]
+	if !ok {
+		return store.AttachmentArchive{}, store.ErrAttachmentNotFound
+	}
+	if x.SizeBytes != size {
+		return store.AttachmentArchive{}, store.ErrAttachmentArchiveMismatch
+	}
+	if x.ArchivedAt != nil {
+		if x.ArchiveLocation != location {
+			return store.AttachmentArchive{}, store.ErrAttachmentArchiveMismatch
+		}
+		return store.AttachmentArchive{ArchivedAt: x.ArchivedAt.UTC(), Location: x.ArchiveLocation, HotDeleted: x.HotDeletedAt != nil}, nil
+	}
+	at := now.UTC()
+	x.ArchivedAt, x.ArchiveLocation = &at, location
+	f.rows[sha] = x
+	return store.AttachmentArchive{ArchivedAt: at, Location: location}, nil
+}
+
+func (*fakeDB) ListAttachmentArchiveCandidates(context.Context, int, string, time.Time) ([]store.AttachmentArchiveCandidate, string, error) {
+	return nil, "", nil
+}
+
+func (f *fakeDB) MarkAttachmentHotDeleted(_ context.Context, sha string, now time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	x, ok := f.rows[sha]
+	if !ok {
+		return store.ErrAttachmentNotFound
+	}
+	if x.HotDeletedAt == nil {
+		at := now.UTC()
+		x.HotDeletedAt = &at
+		f.rows[sha] = x
+	}
+	return nil
+}
 func (f *fakeDB) ListAttachments(_ context.Context, kind, id string, _ int) ([]store.Attachment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

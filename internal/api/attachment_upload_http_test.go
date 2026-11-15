@@ -78,6 +78,8 @@ func (o *uploadObjects) List(_ context.Context, prefix string) ([]attachments.Ob
 type uploadDB struct {
 	rows    map[string]store.Attachment
 	uploads map[string]store.AttachmentUpload
+	// candidates is the archivable shas this fake answers, lowest task first.
+	candidates []store.AttachmentArchiveCandidate
 }
 
 func (d *uploadDB) GetAttachment(_ context.Context, sha string) (store.Attachment, bool, error) {
@@ -110,8 +112,71 @@ func (d *uploadDB) FinalizeAttachmentUpload(_ context.Context, id, nonce string,
 	return x, created, nil
 }
 func (*uploadDB) RecordAttachmentGet(context.Context, string, int64) error { return nil }
-func (*uploadDB) ListAttachments(context.Context, string, string, int) ([]store.Attachment, error) {
-	return nil, nil
+
+func (d *uploadDB) RecordAttachmentArchive(_ context.Context, sha, location string, size int64, now time.Time) (store.AttachmentArchive, error) {
+	x, ok := d.rows[sha]
+	if !ok {
+		return store.AttachmentArchive{}, store.ErrAttachmentNotFound
+	}
+	if x.SizeBytes != size {
+		return store.AttachmentArchive{}, store.ErrAttachmentArchiveMismatch
+	}
+	if x.ArchivedAt != nil {
+		if x.ArchiveLocation != location {
+			return store.AttachmentArchive{}, store.ErrAttachmentArchiveMismatch
+		}
+		return store.AttachmentArchive{ArchivedAt: x.ArchivedAt.UTC(), Location: x.ArchiveLocation, HotDeleted: x.HotDeletedAt != nil}, nil
+	}
+	found := false
+	for _, c := range d.candidates {
+		if c.SHA256 == sha {
+			found = true
+		}
+	}
+	if !found {
+		return store.AttachmentArchive{}, store.ErrAttachmentNotArchivable
+	}
+	at := now.UTC()
+	x.ArchivedAt, x.ArchiveLocation = &at, location
+	d.rows[sha] = x
+	return store.AttachmentArchive{ArchivedAt: at, Location: location}, nil
+}
+
+func (d *uploadDB) ListAttachmentArchiveCandidates(_ context.Context, limit int, after string, _ time.Time) ([]store.AttachmentArchiveCandidate, string, error) {
+	out := []store.AttachmentArchiveCandidate{}
+	for _, c := range d.candidates {
+		if c.SHA256 > after {
+			out = append(out, c)
+		}
+	}
+	next := ""
+	if len(out) > limit {
+		out = out[:limit]
+		next = out[len(out)-1].SHA256
+	}
+	return out, next, nil
+}
+
+func (d *uploadDB) MarkAttachmentHotDeleted(_ context.Context, sha string, now time.Time) error {
+	x, ok := d.rows[sha]
+	if !ok {
+		return store.ErrAttachmentNotFound
+	}
+	if x.HotDeletedAt == nil {
+		at := now.UTC()
+		x.HotDeletedAt = &at
+		d.rows[sha] = x
+	}
+	return nil
+}
+func (d *uploadDB) ListAttachments(_ context.Context, kind, id string, _ int) ([]store.Attachment, error) {
+	out := []store.Attachment{}
+	for _, x := range d.rows {
+		if kind == "" || (x.RefKind == kind && x.RefID == id) {
+			out = append(out, x)
+		}
+	}
+	return out, nil
 }
 func (*uploadDB) AttachmentUsage(context.Context) (store.AttachmentUsage, error) {
 	return store.AttachmentUsage{}, nil
