@@ -758,6 +758,17 @@ handoffkeep attach migrate --from HK --to OCI
 handoffkeep attach migrate --from HK --to OCI --apply
 ```
 
+`attach archive` copies attachments whose every referring task is closed into
+the Drive archive mount, verifies each copy by size and sha256, writes the
+task manifests and records the location with hk. It is a dry run unless
+`--apply` is given; `handoffkeep attachments archive` is the same command. See
+`docs/attachment-archive.md` for the folder rule, the manifest and the mode.
+
+```bash
+handoffkeep attachments archive --root <archive-root>
+handoffkeep attachments archive --root <archive-root> --apply
+```
+
 HTTP clients use raw `PUT /v1/attachments` with `X-HK-Name`, `Content-Type`,
 and optional `X-HK-Ref` (`document:<key>`,
 `memory:<agent>/<name>`, or `task:<id>`). Remote MCP clients use the
