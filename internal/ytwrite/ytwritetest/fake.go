@@ -71,13 +71,15 @@ type FakeYouTrack struct {
 	// decisionCreates every DecisionIssueCreate received (fake_decision.go).
 	decisionCreates []ytwrite.DecisionIssueCreate
 	// bundles are the values the named enum or state fields accept (a
-	// field not named takes any value); updates every IssueFieldsUpdate
-	// received; readFaults the errors the next ReadIssueFields calls
-	// return (fake_fields.go).
-	bundles    map[string]map[string]bool
-	updates    []ytwrite.IssueFieldsUpdate
-	reads      int
-	readFaults []error
+	// field not named takes any value); stateBundles names the bundle
+	// fields whose type is state, not enum, as the documented fieldType
+	// id maps them; updates every IssueFieldsUpdate received; readFaults
+	// the errors the next ReadIssueFields calls return (fake_fields.go).
+	bundles      map[string]map[string]bool
+	stateBundles map[string]bool
+	updates      []ytwrite.IssueFieldsUpdate
+	reads        int
+	readFaults   []error
 	// moves are the MoveIssueToProject calls received, in order (fake_move.go).
 	moves []FakeMove
 	// articles are the articles of every project, in creation order, and
@@ -111,7 +113,7 @@ type fakeIssue struct {
 
 // NewFake returns an empty fake with no faults queued.
 func NewFake() *FakeYouTrack {
-	return &FakeYouTrack{issues: map[string][]*ytwrite.RemoteComment{}, projects: map[string][]*fakeIssue{}, fieldsMissing: map[string]bool{}, projectField: map[string]ytwrite.IssueProjectField{}, bundles: map[string]map[string]bool{}}
+	return &FakeYouTrack{issues: map[string][]*ytwrite.RemoteComment{}, projects: map[string][]*fakeIssue{}, fieldsMissing: map[string]bool{}, projectField: map[string]ytwrite.IssueProjectField{}, bundles: map[string]map[string]bool{}, stateBundles: map[string]bool{}}
 }
 
 // Queue adds faults for the next CreateComment calls.

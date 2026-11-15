@@ -170,6 +170,63 @@ func TestDecisionsHistoryPagesClosedRequests(t *testing.T) {
 	}
 }
 
+// TestDecisionsHistoryPagesSessionRecords pages session-settled records two
+// at a time: next_cursor carries the session position after the task one is
+// exhausted, and the last page ends with an empty cursor (hk 4518).
+func TestDecisionsHistoryPagesSessionRecords(t *testing.T) {
+	st := newOperatorStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		_, err := st.RecordSessionDecision(ctx, store.SessionDecisionInput{
+			Key: fmt.Sprintf("sess-%d", i), Lane: "mcp-lane", By: "tester",
+			Reading: fmt.Sprintf("Reading %d", i), Quote: fmt.Sprintf("Quote %d", i),
+			DecidedAt: now.Add(-time.Duration(i) * time.Minute),
+			Grounds:   []string{"hk:doc decision/2026-11-14/session-page"},
+		}, now.Add(time.Duration(i)*time.Second), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, api.Tokens{"tester": "bearer-secret"}, nil))
+	defer srv.Close()
+	session := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer bearer-secret"})
+
+	type sessionDecision struct {
+		Key      string `json:"key"`
+		Recorded string `json:"recorded_by"`
+	}
+	type historyOut struct {
+		SessionDecisions []sessionDecision `json:"session_decisions"`
+		Truncated        bool              `json:"truncated"`
+		NextCursor       string            `json:"next_cursor"`
+	}
+	first := callTool[historyOut](t, session, "decisions_history", map[string]any{"limit": 2})
+	if len(first.SessionDecisions) != 2 || !first.Truncated || first.NextCursor == "" {
+		t.Fatalf("first page=%+v", first)
+	}
+	second := callTool[historyOut](t, session, "decisions_history", map[string]any{"limit": 2, "cursor": first.NextCursor})
+	if len(second.SessionDecisions) != 1 || second.Truncated || second.NextCursor != "" {
+		t.Fatalf("second page=%+v", second)
+	}
+	seen := map[string]int{}
+	for _, x := range append(first.SessionDecisions, second.SessionDecisions...) {
+		seen[x.Key]++
+		if x.Recorded != "tester" {
+			t.Fatalf("recorded_by=%q", x.Recorded)
+		}
+	}
+	// Newest record first: sess-2, sess-1, then sess-0.
+	wantOrder := []string{"mcp-lane:sess-2", "mcp-lane:sess-1", "mcp-lane:sess-0"}
+	got := append(first.SessionDecisions, second.SessionDecisions...)
+	for i, x := range got {
+		if x.Key != wantOrder[i] || seen[x.Key] != 1 {
+			t.Fatalf("page order=%+v", got)
+		}
+	}
+}
+
 func TestDecisionRecordAndOperatorAttentionTools(t *testing.T) {
 	st, pool := newOperatorStoreWithPool(t)
 	ctx := context.Background()

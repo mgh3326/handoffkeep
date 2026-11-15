@@ -686,6 +686,86 @@ t_tick_status_retried() {
 	want 1 "$(count "^status $SHA_NEW deployed success")"
 }
 
+t_outbox_fifo() {
+	# hk 4562: a failed older status holds a later one for the same sha
+	# and context, so a newer report never overtakes it; the retry
+	# delivers both in order.
+	setup
+	local dir="$HK_FOLLOW_STATE_DIR/outbox"
+	mkdir -p "$dir"
+	printf '%s\n' "$(jq -cn --arg s "$SHA_OLD" '{kind:"status", sha:$s, context:"deploy-ok", state:"success", description:"older"}')" \
+		>"$dir/20260101T000000Z.000001.json"
+	printf '%s\n' "$(jq -cn --arg s "$SHA_OLD" '{kind:"status", sha:$s, context:"deploy-ok", state:"success", description:"newer"}')" \
+		>"$dir/20260101T000001Z.000001.json"
+	gh_status() {
+		echo "status $1 $2 $3 $4" >>"$FIX/calls"
+		if [[ $4 == older ]]; then return 1; fi
+	}
+	deliver_outbox
+	want "status $SHA_OLD deploy-ok success older" "$(calls)"
+	[[ -f "$dir/20260101T000000Z.000001.json" && -f "$dir/20260101T000001Z.000001.json" ]]
+	gh_status() { echo "status $1 $2 $3 $4" >>"$FIX/calls"; }
+	: >"$FIX/calls"
+	deliver_outbox
+	want "$(printf 'status %s deploy-ok success older\nstatus %s deploy-ok success newer' "$SHA_OLD" "$SHA_OLD")" "$(calls)"
+	[[ -z "$(ls "$dir")" ]]
+}
+
+t_outbox_failure_does_not_block_others() {
+	# A failed status holds back only a later status for the same sha and
+	# context: a status for another sha, a record and a notify are still
+	# attempted in the same pass, and an undeliverable entry stays queued
+	# without blocking the rest.
+	setup
+	local dir="$HK_FOLLOW_STATE_DIR/outbox"
+	mkdir -p "$dir"
+	# The record body comes from the shipped record(), so this fake is one the
+	# record parser accepts: TestHKFollowRecordsParse parses every record a
+	# successful put writes, and an empty stub body fails it. The outbox is
+	# empty here, so the move renames the entry record() queued.
+	record handoffkeep "$SHA_NEW" "$D1" "$SHA_OLD" success "" 20260101T000000Z
+	mv "$dir"/*.json "$dir/20260101T000001Z.000002.json"
+	printf '%s\n' "$(jq -cn --arg s "$SHA_OLD" '{kind:"status", sha:$s, context:"deploy-ok", state:"success", description:"older"}')" \
+		>"$dir/20260101T000000Z.000001.json"
+	printf '%s\n' "$(jq -cn --arg s "$SHA_NEW" '{kind:"status", sha:$s, context:"deploy-ok", state:"success", description:"newer"}')" \
+		>"$dir/20260101T000002Z.000003.json"
+	printf '%s\n' '{"kind":"notify", "text":"alert"}' \
+		>"$dir/20260101T000003Z.000004.json"
+	printf '%s\n' '{"kind":"bogus"}' \
+		>"$dir/20260101T000004Z.000005.json"
+	gh_status() {
+		echo "status $1 $2 $3 $4" >>"$FIX/calls"
+		if [[ $1 == "$SHA_OLD" ]]; then return 1; fi
+	}
+	deliver_outbox
+	want "$(printf 'status %s deploy-ok success older\nrecord deploy/handoffkeep/20260101T000000Z\nstatus %s deploy-ok success newer\nnotify alert' "$SHA_OLD" "$SHA_NEW")" "$(calls)"
+	[[ -f "$dir/20260101T000000Z.000001.json" && -f "$dir/20260101T000004Z.000005.json" ]]
+	[[ ! -f "$dir/20260101T000001Z.000002.json" && ! -f "$dir/20260101T000002Z.000003.json" && ! -f "$dir/20260101T000003Z.000004.json" ]]
+}
+
+t_tick_rollback_failed_hk_down_notify_delivered() {
+	# Rollback fails and the hk upload fails: the "rollback did not
+	# restore it; act now" lane event is still delivered in the same tick.
+	# Twenty runs, each in a fresh directory: outbox names carry a
+	# sequence, so the queue order is the enqueue order on every run, not
+	# mktemp luck.
+	local i
+	for i in $(seq 1 20); do
+		(
+		setup
+		FIX="$FIX-$i"; export FIX
+		export HK_FOLLOW_STATE_DIR="$FIX/state"
+		mkdir -p "$FIX"/{gh,reg,health,docs,records,state}
+		: >"$FIX/calls"
+		setup_tick
+		touch "$FIX/sg_nohealth_handoffkeep" "$FIX/sg_rollback_fail" "$FIX/hk_put_error"
+		tick
+		want "failed healthz_handoffkeep_rollback_failed" "$(state_field verdict) $(state_field reason)"
+		want 1 "$(count 'notify .*rollback did not restore it; act now')"
+		)
+	done
+}
+
 t_tick_interrupted_records_retried() {
 	# The interrupted-attempt report is queued, not lost, when hk is down.
 	setup; setup_tick

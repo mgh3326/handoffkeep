@@ -152,6 +152,40 @@ func TestRecordSessionDecisionClosesAndReplaysVerbatimRecord(t *testing.T) {
 	}
 }
 
+// hk 4518: the same settled decision retried through the other verified
+// channel — the MCP Access principal vs the reserved operator bearer —
+// replays the first record instead of conflicting on AnsweredBy, and a
+// decided_at finer than Postgres microseconds still matches.
+func TestRecordSessionDecisionReplayAcrossChannels(t *testing.T) {
+	s := decisionStore(t)
+	now := time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)
+	in := SessionDecisionInput{
+		Key: "chat-cross", Lane: "design-lane", By: "operator:admin@example.com",
+		Reading: "Keep the boundary.", Quote: "Keep it.",
+		DecidedAt: time.Date(2026, 11, 13, 8, 30, 0, 123456789, time.UTC),
+		Grounds:   []string{"hk:doc decision/2026-11-13/cross"},
+	}
+	first, err := s.RecordSessionDecision(t.Context(), in, now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The operator bearer retries the identical decision.
+	in.By = "operator"
+	second, err := s.RecordSessionDecision(t.Context(), in, now.Add(time.Minute), nil)
+	if err != nil || !second.Duplicate || second.Record.ID != first.Record.ID {
+		t.Fatalf("cross-channel retry=%+v err=%v", second, err)
+	}
+	if second.Record.AnsweredBy != "operator:admin@example.com" {
+		t.Fatalf("answered_by=%q, want the first channel's recorder", second.Record.AnsweredBy)
+	}
+	// The original channel's own retry matches the truncated timestamp too.
+	in.By = "operator:admin@example.com"
+	third, err := s.RecordSessionDecision(t.Context(), in, now.Add(2*time.Minute), nil)
+	if err != nil || !third.Duplicate || third.Record.ID != first.Record.ID {
+		t.Fatalf("same-channel retry=%+v err=%v", third, err)
+	}
+}
+
 func TestRecordSessionDecisionRejectsSecretsBeforeInsert(t *testing.T) {
 	s := decisionStore(t)
 	in := SessionDecisionInput{

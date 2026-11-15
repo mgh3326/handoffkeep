@@ -10,10 +10,21 @@ import (
 
 var _ ytwrite.IssueFieldsRemote = (*FakeYouTrack)(nil)
 
-// SetBundle makes the enum or state field name accept only values: an
-// update setting another value is refused with a 400, as YouTrack refuses a
-// value missing from the field's bundle.
+// SetBundle makes the enum field name accept only values: an update
+// setting another value is refused with a 400, as YouTrack refuses a value
+// missing from the field's bundle.
 func (f *FakeYouTrack) SetBundle(name string, values ...string) {
+	f.setBundleLocked(name, false, values)
+}
+
+// SetStateBundle makes the state field name accept only values, like
+// SetBundle, and reports its type as FieldTypeState on reads: production
+// maps the documented fieldType id the same way.
+func (f *FakeYouTrack) SetStateBundle(name string, values ...string) {
+	f.setBundleLocked(name, true, values)
+}
+
+func (f *FakeYouTrack) setBundleLocked(name string, state bool, values []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	set := map[string]bool{}
@@ -21,6 +32,9 @@ func (f *FakeYouTrack) SetBundle(name string, values ...string) {
 		set[v] = true
 	}
 	f.bundles[name] = set
+	if state {
+		f.stateBundles[name] = true
+	}
 }
 
 // Updates returns every IssueFieldsUpdate the fake received, in order.
@@ -59,7 +73,7 @@ func (f *FakeYouTrack) IssueFields(issueID string) (ytwrite.IssueSnapshot, bool)
 	if i == nil {
 		return ytwrite.IssueSnapshot{}, false
 	}
-	return snapshotOf(i), true
+	return f.snapshotOf(i), true
 }
 
 func (f *FakeYouTrack) issueLocked(issueID string) *fakeIssue {
@@ -84,10 +98,17 @@ func setFakeField(i *fakeIssue, name, value string) {
 	i.fields[name] = value
 }
 
-func snapshotOf(i *fakeIssue) ytwrite.IssueSnapshot {
+func (f *FakeYouTrack) snapshotOf(i *fakeIssue) ytwrite.IssueSnapshot {
 	s := ytwrite.IssueSnapshot{Summary: i.Summary, Description: i.Description, Fields: []ytwrite.FieldValue{}}
 	for name, v := range i.fields {
-		s.Fields = append(s.Fields, ytwrite.FieldValue{Name: name, Value: v})
+		fv := ytwrite.FieldValue{Name: name, Value: v}
+		if _, ok := f.bundles[name]; ok {
+			fv.Type = ytwrite.FieldTypeEnum
+			if f.stateBundles[name] {
+				fv.Type = ytwrite.FieldTypeState
+			}
+		}
+		s.Fields = append(s.Fields, fv)
 	}
 	return s
 }
@@ -167,5 +188,5 @@ func (f *FakeYouTrack) ReadIssueFields(ctx context.Context, issueID string) (ytw
 	if i == nil {
 		return ytwrite.IssueSnapshot{}, &ytwrite.RemoteError{Status: http.StatusNotFound, Message: "issue not found"}
 	}
-	return snapshotOf(i), nil
+	return f.snapshotOf(i), nil
 }

@@ -181,15 +181,24 @@ post_status() {
 # successful delivery and its removal repeats that one report.
 outbox_dir() { echo "${HK_FOLLOW_STATE_DIR}/outbox"; }
 
-# outbox_add <json>: queue one report. Written under a temp name and renamed,
-# so a half-written entry is never delivered.
+# outbox_add <json>: queue one report. The name is the UTC second plus a
+# per-state-directory sequence, so entries queued in the same second still
+# sort in queue order (mktemp's random suffix did not). Written under a
+# temp name and renamed, so a half-written entry is never delivered.
 outbox_add() {
-	local dir f
+	local dir tmp f ts seq seqf
 	dir=$(outbox_dir)
 	mkdir -p "$dir"
-	f=$(mktemp "$dir/$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")
-	printf '%s\n' "$1" >"$f"
-	mv "$f" "$f.json"
+	ts=$(date -u +%Y%m%dT%H%M%SZ)
+	seqf="${HK_FOLLOW_STATE_DIR}/outbox.seq"
+	seq=$(cat "$seqf" 2>/dev/null || echo 0)
+	[[ "$seq" =~ ^[0-9]+$ ]] || seq=0
+	seq=$((seq + 1))
+	printf '%s\n' "$seq" >"$seqf"
+	tmp=$(mktemp "$dir/.tmp.XXXXXX")
+	printf '%s\n' "$1" >"$tmp"
+	f=$(printf '%s/%s.%08d.json' "$dir" "$ts" "$seq")
+	mv "$tmp" "$f"
 }
 
 queue_status() { # <sha> <context> <state> <description>
@@ -219,16 +228,36 @@ deliver_item() {
 }
 
 # deliver_outbox: send every queued report, oldest first, removing each one
-# that is delivered. Dry runs deliver nothing.
+# that is delivered. A report whose delivery fails stays queued for the
+# next tick, but every other entry is still attempted in the same pass: a
+# failed record, a failed lane event or an undeliverable entry must not
+# hold back the safety alert queued behind it. Only a later status for the
+# same sha and context waits behind a failed one, which is the ordering
+# hk 4562 needs (a retry must not overwrite the state the older report
+# still carries). Dry runs deliver nothing.
 deliver_outbox() {
-	local f
+	local f kind sha context
+	local -A held=()
 	[[ $DRY_RUN -eq 1 ]] && return 0
 	for f in "$(outbox_dir)"/*.json; do
 		[[ -f "$f" ]] || continue
+		kind=$(jq -r .kind "$f" 2>/dev/null || echo unknown)
+		sha="" context=""
+		if [[ "$kind" == status ]]; then
+			sha=$(jq -r .sha "$f" 2>/dev/null || echo "")
+			context=$(jq -r .context "$f" 2>/dev/null || echo "")
+			if [[ -n "${held["$sha $context"]+x}" ]]; then
+				log "hk_follow.outbox_hold file=$(basename "$f") sha=$sha context=$context"
+				continue
+			fi
+		fi
 		if deliver_item "$f"; then
 			rm -f "$f"
 		else
 			log "hk_follow.outbox_retry file=$(basename "$f")"
+			if [[ "$kind" == status ]]; then
+				held["$sha $context"]=1
+			fi
 		fi
 	done
 }
