@@ -67,14 +67,28 @@ func ybhState(t *testing.T, s *Store, op ytwrite.Op) ytwrite.Op {
 	return got
 }
 
-// ybhWritten is every row an unbind could write for the task, so a refusal is
-// checked by comparing two snapshots.
+// ybhAnchor is the YouTrack issue the task's yt_entity_map row names, "" when
+// it has none.
+func ybhAnchor(t *testing.T, s *Store, task int64) string {
+	t.Helper()
+	var issue string
+	if err := s.pool.QueryRow(t.Context(), `SELECT coalesce(max(yt_id), '') FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$1`,
+		strconv.FormatInt(task, 10)).Scan(&issue); err != nil {
+		t.Fatal(err)
+	}
+	return issue
+}
+
+// ybhWritten is every row an unbind could write for the task (its binding,
+// history, map row and ops), so a refusal is checked by comparing two
+// snapshots.
 func ybhWritten(t *testing.T, s *Store, task int64) string {
 	t.Helper()
 	id := strconv.FormatInt(task, 10)
 	var out string
 	err := s.pool.QueryRow(t.Context(), `SELECT concat_ws('|',
 		(SELECT count(*) FROM yt_task_bindings WHERE task_id=$1), (SELECT count(*) FROM yt_binding_history WHERE task_id=$1),
+		coalesce((SELECT string_agg(tenant || '/' || yt_id, ',') FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$2), ''),
 		coalesce((SELECT string_agg(id || ':' || state || ':' || reason, ',' ORDER BY id) FROM yt_write_ops WHERE entity_id=$2), ''))`, task, id).Scan(&out)
 	if err != nil {
 		t.Fatal(err)
@@ -152,8 +166,8 @@ func TestUnbindYTTaskBinding(t *testing.T) {
 		{OpID: queued.ID, Kind: ytwrite.KindCommentAppend, Reason: ytwrite.ReasonBindingRemoved},
 	}
 	if !got.Removed || got.Binding == nil || got.Binding.IssueID != b.IssueID || got.Binding.Tenant != b.Tenant ||
-		!slices.Equal(got.Rejected, wantRejected) || !slices.Equal(got.Released, []int64{c.ID}) || len(got.Stranded) != 0 {
-		t.Fatalf("unbind = %+v, want removed with %+v and comment %d released", got, wantRejected, c.ID)
+		!slices.Equal(got.Rejected, wantRejected) || !slices.Equal(got.Released, []int64{c.ID}) || len(got.Stranded) != 0 || !got.AnchorReleased {
+		t.Fatalf("unbind = %+v, want removed with %+v, comment %d released and the anchor released", got, wantRejected, c.ID)
 	}
 	for _, op := range []ytwrite.Op{comment, fields, move, queued} {
 		if now := ybhState(t, s, op); now.State != ytwrite.StateRejected || now.Reason != ytwrite.ReasonBindingRemoved || now.ResolvedAt.IsZero() {
@@ -187,7 +201,7 @@ func TestUnbindYTTaskBinding(t *testing.T) {
 	}
 	before := ybhWritten(t, s, task)
 	again, err := s.UnbindYTTaskBinding(ctx, task, YTUnbindOptions{By: "operator:me"})
-	if err != nil || again.Removed || again.Binding != nil || len(again.Rejected) != 0 {
+	if err != nil || again.Removed || again.Binding != nil || len(again.Rejected) != 0 || again.AnchorReleased {
 		t.Fatalf("second unbind = %+v %v", again, err)
 	}
 	if after := ybhWritten(t, s, task); after != before {
@@ -195,8 +209,9 @@ func TestUnbindYTTaskBinding(t *testing.T) {
 	}
 
 	// I10: a rebind is a new publication, and the history keeps all three.
-	// The same issue: the task's yt_entity_map row, which the first op
-	// anchored and the unbind leaves alone, names it.
+	// The same issue binds again: the unbind released the task's
+	// yt_entity_map row, which the first op had anchored on it (hk 4536), and
+	// the next op anchors it again.
 	ytbBind(t, s, b)
 	if hist := ybhHistory(t, s, task); len(hist) != 3 || hist[2].Action != "bound" || hist[2].Issue != b.IssueID {
 		t.Fatalf("history after the rebind = %+v", hist)
@@ -529,4 +544,130 @@ func TestUnboundTaskGetsNoAutomaticIssueOnProjectChange(t *testing.T) {
 	if hist := ybhHistory(t, s, unbound); hist[len(hist)-1].Action != "bound" {
 		t.Fatalf("history after the rebind = %+v", hist)
 	}
+}
+
+// hk 4536: the first op of a task anchors its yt_entity_map row on the bound
+// issue, and every later binding is checked against that row, by the CLI's
+// verification (the candidate's MappedIssueID) and again at publication. The
+// unbind releases the row with the binding, so an operator can bind a
+// verified different issue, and the comment after it goes there.
+func TestUnbindReleasesTheAnchorSoADifferentIssueBinds(t *testing.T) {
+	s := schemaStore(t, "ybh_anchor")
+	ctx := t.Context()
+	ytbMapped(t, s)
+	s.SetYTCommentsMode(YTCommentsOn)
+	task := ytcTask(t, s, ytbProject)
+	b := ytbBinding(task)
+	ytbBind(t, s, b)
+	first := ybhComment(t, s, task)
+	firstOp, ok := ytcOpFor(t, s, first.ID)
+	if !ok {
+		t.Fatal("the first comment got no op")
+	}
+	if got := ybhAnchor(t, s, task); got != b.IssueID {
+		t.Fatalf("anchor after the first comment = %q, want %q", got, b.IssueID)
+	}
+	// While the task is bound, another issue is refused (I10).
+	other := b
+	other.IssueID, other.IssueReadable = "2-other", "HK-other"
+	if _, err := ytbAdd(t, s, other); !errors.Is(err, ErrYTBindingConflict) {
+		t.Fatalf("a second issue while bound: %v", err)
+	}
+
+	res, err := s.UnbindYTTaskBinding(ctx, task, YTUnbindOptions{By: "operator:me", Reason: "wrong issue"})
+	if err != nil || !res.Removed || !res.AnchorReleased {
+		t.Fatalf("unbind = %+v %v, want removed with the anchor released", res, err)
+	}
+	if got := ybhAnchor(t, s, task); got != "" {
+		t.Fatalf("anchor after the unbind = %q, want none", got)
+	}
+	// What the CLI verifies against no longer names the old issue, and the
+	// old op is closed where it was aimed: it was never retargeted (I4).
+	if cand, err := s.YTCanaryCandidate(ctx, task); err != nil || cand.MappedIssueID != "" {
+		t.Fatalf("candidate after the unbind = %+v %v, want no mapped issue", cand, err)
+	}
+	if got := ybhState(t, s, firstOp); got.State != ytwrite.StateRejected || got.YTTargetID != b.IssueID {
+		t.Fatalf("first op after the unbind = %+v", got)
+	}
+
+	ytbBind(t, s, other)
+	second := ybhComment(t, s, task)
+	op, ok := ytcOpFor(t, s, second.ID)
+	if !ok || op.YTTargetID != other.IssueID || op.State != ytwrite.StatePrepared {
+		t.Fatalf("comment after the rebind = %+v (ok %v), want a prepared op aimed at %s", op, ok, other.IssueID)
+	}
+	if got := ybhAnchor(t, s, task); got != other.IssueID {
+		t.Fatalf("anchor after the rebind = %q, want %q", got, other.IssueID)
+	}
+	if got, out, err := s.YTTenantLedger(ytcTenant).Claim(ctx, time.Now().UTC().Add(time.Minute), op.ID); err != nil || out != ytwrite.ClaimClaimed || got.YTTargetID != other.IssueID {
+		t.Fatalf("claim after the rebind: %s %+v %v", out, got, err)
+	}
+}
+
+// The unbind releases only the row that anchors the binding it removes: the
+// binding's issue on the binding's tenant. A row that names another tenant or
+// another issue is somebody else's record and stays.
+func TestUnbindKeepsAnAnchorItDoesNotName(t *testing.T) {
+	s := schemaStore(t, "ybh_anchor_kept")
+	ctx := t.Context()
+	ytbMapped(t, s)
+	for _, tc := range []struct{ name, tenant, issue string }{
+		{"another tenant", "other.youtrack.cloud", ""},
+		{"another issue", ytcTenant, "2-elsewhere"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			task := ytcTask(t, s, ytbProject)
+			b := ytbBinding(task)
+			ytbBind(t, s, b)
+			issue := tc.issue
+			if issue == "" {
+				issue = b.IssueID
+			}
+			op := ybhOp(t, s, YTFieldsPrincipal, ytwrite.KindIssueFields, task, "anchor")
+			if _, err := s.pool.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
+				VALUES ('task',$1,$2,$3,'',$4,now())`, tc.tenant, strconv.FormatInt(task, 10), issue, op.ID); err != nil {
+				t.Fatal(err)
+			}
+			res, err := s.UnbindYTTaskBinding(ctx, task, YTUnbindOptions{By: "operator:me"})
+			if err != nil || !res.Removed || res.AnchorReleased {
+				t.Fatalf("unbind = %+v %v, want removed and no anchor released", res, err)
+			}
+			if got := ybhAnchor(t, s, task); got != issue {
+				t.Fatalf("anchor after the unbind = %q, want %q kept", got, issue)
+			}
+		})
+	}
+}
+
+// The map row an applied issue_create wrote is the same routing anchor, and
+// it is released with the binding that create published (hk 4536): the old
+// issue stays on record in the create op, its result and the history.
+func TestUnbindReleasesTheAnchorAnIssueCreateWrote(t *testing.T) {
+	s := schemaStore(t, "ybh_anchor_create")
+	ctx := t.Context()
+	ytbMapped(t, s)
+	task := ytcTask(t, s, ytbProject)
+	create := ytiPrepare(t, s, task, ytcTenant)
+	ytiDispatch(t, s, create)
+	issue := "2-" + strconv.FormatInt(task, 10)
+	if _, err := s.YTWriteLedger().Apply(ctx, time.Now().UTC(), create.ID, issue, ytiMaps(create, issue)); err != nil {
+		t.Fatal(err)
+	}
+	if got := ybhAnchor(t, s, task); got != issue {
+		t.Fatalf("anchor after the applied create = %q, want %q", got, issue)
+	}
+
+	res, err := s.UnbindYTTaskBinding(ctx, task, YTUnbindOptions{By: "operator:me", Reason: "created in the wrong project"})
+	if err != nil || !res.Removed || !res.AnchorReleased || res.Binding == nil || res.Binding.Origin != YTBindingOpApplied {
+		t.Fatalf("unbind = %+v %v, want the create's binding removed and its anchor released", res, err)
+	}
+	if got := ybhAnchor(t, s, task); got != "" {
+		t.Fatalf("anchor after the unbind = %q, want none", got)
+	}
+	if got := ybhState(t, s, create); got.State != ytwrite.StateApplied || got.YTResultID != issue {
+		t.Fatalf("the create op after the unbind = %+v, want it applied to %s", got, issue)
+	}
+	other := ytbBinding(task)
+	other.IssueID, other.IssueReadable = "2-other", "HK-other"
+	ytbBind(t, s, other)
 }

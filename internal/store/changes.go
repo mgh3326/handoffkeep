@@ -149,6 +149,16 @@ func changeURL(repo string, n int) string {
 	return "https://github.com/" + repo + "/pull/" + strconv.Itoa(n)
 }
 
+// canonicalPRURL normalizes numeric spellings accepted by parsePRURL before
+// they are persisted as task delivery evidence.
+func canonicalPRURL(pr string) string {
+	repo, n, ok := parsePRURL(pr)
+	if !ok {
+		return pr
+	}
+	return changeURL(repo, n)
+}
+
 // nullStr maps "" to SQL NULL.
 func nullStr(v string) *string {
 	if v == "" {

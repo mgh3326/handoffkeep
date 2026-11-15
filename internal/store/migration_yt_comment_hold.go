@@ -14,8 +14,10 @@ import (
 // to prepared"), so the claim failed and the op was retried at once.
 //
 // The hold itself was taken out before release (PR #383 review: a hold that
-// waits for a later op on the strictly ordered lane can wedge it; redesign
-// hk 4569), so no code makes that transition now. The migration stays
+// waits for a later op on the strictly ordered lane can wedge it). Its
+// redesign (hk 4569, yt_comment_requeue.go) rejects the comment at its claim
+// and copies it again as a new op, so it needs no prepared to prepared
+// transition either, and no code makes that transition now. The migration stays
 // registered: an ID once shipped on a branch database is never removed, and
 // the wider rule is harmless with nothing using it.
 //

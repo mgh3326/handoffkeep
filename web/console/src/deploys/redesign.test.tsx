@@ -277,3 +277,22 @@ describe("operator-facing copy", () => {
   show(names.map((name) => service({ service: name, repo: `mgh3326/${name}` })));
   for (const name of names) expect(await screen.findByRole("region", { name: `${name} 배포` })).toBeTruthy();
  });
+
+describe("deploy lag banner", () => {
+  it("renders a top-level banner and card warning when a service is lagging", async () => {
+    show([
+      service({ service: "auto_trader", lagging: true, lag_count: 5 }),
+      service({ service: "handoffkeep", lagging: false, lag_count: 1 }),
+    ]);
+    const banner = await screen.findByTestId("deploy-lag-banner");
+    expect(banner).toBeTruthy();
+    expect(banner.textContent).toContain("배포 지연: auto_trader(main보다 5개 뒤처짐)");
+
+    const cardBanner = await screen.findByTestId("card-lag-banner-auto_trader");
+    expect(cardBanner).toBeTruthy();
+    expect(cardBanner.textContent).toContain("배포 지연: main보다 5개 뒤처짐");
+
+    expect(screen.queryByTestId("card-lag-banner-handoffkeep")).toBeNull();
+  });
+});
+

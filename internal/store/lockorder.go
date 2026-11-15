@@ -28,7 +28,13 @@ package store
 //     in applyDeployRecordTx and propagateMergeTx,
 //     task_id then each of tasks in the order sent in ApplyTaskSourceEvent,
 //     then ascending id in propagateRevertTx) cannot form a
-//     cycle with another holder. UpdateJob, AppendRelayEvent (an event that
+//     cycle with another holder. A relation write (addRelationTx,
+//     RemoveTaskRelation, archiveLiveRelationsTx; hk 4637) locks the edge's
+//     src row first and then updates both endpoints' rows in one statement
+//     (bumpRelationEndpointsTx), so it locks the second endpoint after src;
+//     every caller (AddTaskRelation, RemoveTaskRelation, TransitionTaskWith,
+//     CreateTaskChecked, EmitTicketSet) holds this lock first for that
+//     reason (TestLockOrderRelationEndpointsVersusRelationWrite). UpdateJob, AppendRelayEvent (an event that
 //     answers or ends a decision: relayTouchesDecisions) and PutDocument
 //     (deploy records) take it first for that reason. Taking it again in the
 //     same transaction (applyJobRoleTx, applyDeployRecordTx) is a no-op:
@@ -185,7 +191,9 @@ package store
 //     ownership lock pg_advisory_xact_lock(8241873810) first, then FOR UPDATE
 //     on the task row, then the task's lane lock, then FOR SHARE on its
 //     youtrack_projects and task_origins rows, then read the other mappings
-//     without a lock and insert their own new row. FOR UPDATE and not FOR
+//     without a lock and insert their own new row (a binding published after
+//     an unbind also inserts one task row into sync_log, hk 4539, which takes
+//     no lock before the level 6 allocator at commit). FOR UPDATE and not FOR
 //     SHARE: a task with no task_origins row has no origin row to lock, and a
 //     first origin insert (UpsertYouTrackMirror, AddTaskOrigin) reaches the
 //     task row only through its foreign key's KEY SHARE, which FOR SHARE
@@ -203,8 +211,10 @@ package store
 //     order, then reads the comments authority row FOR SHARE (as prepareYTOpTx
 //     does after its lane lock), rejects the task's prepared yt_write_ops rows
 //     (ops of the task's lane, which no other holder of that lane lock can
-//     change meanwhile), deletes the task's yt_task_bindings row and yt_issue_intents row and
-//     inserts a yt_binding_history row. AddYTTaskBinding inserts its history row the same
+//     change meanwhile), deletes the task's yt_task_bindings row, its yt_issue_intents
+//     row and its yt_entity_map row when that names the binding's issue (hk 4536:
+//     every writer of the map row holds the lane lock) and inserts a
+//     yt_binding_history row. AddYTTaskBinding inserts its history row the same
 //     way; nothing else locks a history row.
 //     No cycle, lock by lock:
 //       - The ownership lock: only those three writers take it, always first
@@ -278,8 +288,19 @@ package store
 //     lock, as AddYTTaskBinding), take the task's lane lock, then read
 //     yt_issue_intents, the ownership rows (the task's latest
 //     yt_binding_history row among them, hk 4490) and youtrack_projects
-//     without a lock, then insert its yt_write_ops row and insert or delete its
-//     yt_issue_intents row (no foreign key, nobody else locks it).
+//     without a lock, then insert its yt_write_ops row, its
+//     yt_issue_comment_bounds row (reading task_comments without a lock;
+//     hk 4301) and insert or delete its yt_issue_intents row (no foreign
+//     key, nobody else locks them). RecordAdoption (hk 4570) takes FOR SHARE
+//     on one op row, then inserts its yt_write_op_adoptions row; it takes no
+//     lane lock and holds nothing else. PlanLinks and SettleLinks of an
+//     issue_links op (yt_link_plans.go, hk 4638) take the op's lane lock
+//     first, then FOR UPDATE on its op row, then write yt_link_owned,
+//     yt_link_unowned, yt_link_plans and yt_link_steps rows, which no other
+//     writer locks, and read task_relations and yt_task_bindings without a
+//     lock; they take no task row. MarkLinkStep takes only FOR UPDATE on the
+//     op row, then inserts one yt_link_steps row; LeaseLinkRecovery is one
+//     UPDATE of the op row.
 //     PrepareMappedYTIssues takes the lane lock as the first lock of each
 //     task's transaction (as backfillYTIssue), then reads the task row
 //     without a lock. Claim of an issue_create op, under the lane lock and
@@ -315,6 +336,39 @@ package store
 //     commit takes level 6 like any feed writer. Every decision_requests
 //     write inserts its sync_log row from a row trigger (hk 4054,
 //     migration_decision_record_feed.go) and so takes level 6 at commit too.
+//     The issue-link projection (yt_links.go, yt_links_sweep.go, hk 4639) adds
+//     three lane holders and no new lock order. The task_links consumer is a
+//     feed handler like task_fields: it takes the lane lock of each changed
+//     task in ascending id order, then that task's yt_snapshot_state row and
+//     the yt_write_ops rows. Its cursor creation, and an off-mode pass that
+//     read a row, upsert the one yt_links_sweep row (bumpYTLinksSweepTx)
+//     after the feed lock and the cursor row and before any lane lock of the
+//     pass. A sweep slice (RunYTLinksSweep) runs each task in its own
+//     transaction, one lane lock and what a handler takes after it, and
+//     updates the yt_links_sweep row in a separate transaction that holds no
+//     lane lock, so the row is never held across a lane wait. A binding's
+//     links hook (ytLinksOnBindTx, in AddYTTaskBinding and the issue_create
+//     bind) takes no lane lock beyond the bound task's own, which the
+//     publication holds already: the writers that point at the new target
+//     (its children, the duplicates of it, the lower id of each related edge)
+//     are not locked there, because only a feed pass may hold more than one
+//     lane lock. It inserts one task 'U' sync_log row for each of them
+//     (level 6 at commit), and the consumer prepares their snapshots under
+//     its own lane locks in a later pass. UnbindYTTaskBinding does the same
+//     for the writers that point at the unbound task (ytLinksOnUnbindTx,
+//     hk 4711) and does not update their yt_write_ops rows: a feed pass may
+//     hold a writer's lane lock and those rows while it waits for the unbound
+//     task's lane lock. Their stale ops (ytLinksStaleSQL) are rejected under
+//     the writer's own lane lock instead, by the consumer before it prepares
+//     the next snapshot and by Claim. Claim takes FOR KEY SHARE on the target
+//     tasks' yt_task_bindings rows in task id order, after its lane lock and
+//     op row, and holds them to commit; it may insert the writer's task 'U'
+//     sync_log row (level 6 at commit). The unbind's DELETE of its one binding
+//     row waits for such a claim, and the unbind then reads the other lanes'
+//     in-flight links ops without a lock (ytLinksInFlightToTx); it waits for
+//     no lane lock or op row a claim holds, and a claim waits only on binding
+//     rows, so no cycle. SetYTAuthority reads yt_links_sweep without a lock,
+//     after the authority rows.
 //
 //   - Decision mode (yt_decisions.go, hk 4054). Its lanes are decisions
 //     (yt_write_entity:decision:<id>), which no task writer or comment
@@ -363,6 +417,18 @@ package store
 //     switch that waits for the authority row counts the op as resolved once
 //     the recovery commits, and a recovery that starts after a switch sees
 //     youtrack and keeps the op.
+//
+//   - The moved-comment requeue (RequeueYTMovedComments,
+//     yt_comment_requeue.go, hk 4569). Its candidate scan is one statement
+//     and locks nothing. Each candidate is its own transaction, in the
+//     catch-up's order: the comments authority row FOR SHARE, then the task's
+//     lane lock, then plain reads of yt_comment_write_links, the rejected op,
+//     yt_task_bindings, the binding's sources, the lane's unresolved
+//     issue_move ops and the comment, then a new
+//     yt_write_ops row (prepareYTOpTx, whose lane lock is re-entrant and whose
+//     authority FOR SHARE is already held) and an UPDATE of the comment's
+//     yt_comment_write_links row. It takes no task row, no level 1-5 lock and
+//     no sync lock, so it adds no edge the catch-up does not already have.
 //
 //   - The automatic binder (yt_binding_binder.go, yt_binding_publish.go,
 //     hk 4492). Its candidate scan takes the yt_binding_cursor row FOR UPDATE,

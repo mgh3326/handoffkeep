@@ -233,15 +233,12 @@ func RunIssueProtocol(t *testing.T, nl NewLedger) {
 		e.wantRemote(1, 1)
 	})
 
-	// Send adopted the task's existing issue and the process died before the
-	// apply committed. This kind's create always writes the marker, so the
-	// unmarked issue is the one Send adopts: the evidence search names it
-	// (remote_unknown / adoption_unconfirmed, the issue in the detail, no
-	// second create) but does not apply it, because the ledger cannot tell
-	// this crash from a POST whose reply was lost and may still land (review
-	// of PR #383). The operator's resolve --adopted applies it with the map
-	// row marked adopted (hk 3911).
-	t.Run("lost_adoption_settlement_names_the_adoption", func(t *testing.T) {
+	// Send adopted the task's existing issue, recorded the adoption
+	// (RecordAdoption) and the process died before the apply committed. The
+	// record says that dispatch sent nothing, so no create of this op can
+	// land: the evidence search finds the unmarked issue Send adopted and
+	// applies the op as adopted on its own, with no second create (hk 4570).
+	t.Run("lost_adoption_settlement_recovers_from_the_record", func(t *testing.T) {
 		e := newEnv(t, nl)
 		existing := e.yt.InjectIssue(issueSuiteProject, testTask, "#"+itoa(testTask)+" imported", "legacy body")
 		e.clock.Advance(time.Hour)
@@ -253,6 +250,49 @@ func RunIssueProtocol(t *testing.T, nl NewLedger) {
 		_, _ = e.p.Drive(context.Background(), 10)
 		if !cl.Dead() {
 			t.Fatal("the crash at Apply never fired")
+		}
+		if a, found, err := e.ledger.Adoption(context.Background(), 1); err != nil || !found || a.YTID != existing || a.Attempts != 1 {
+			t.Fatalf("adoption record %+v %v %v, want %s in attempt 1", a, found, err, existing)
+		}
+		e.restart(e.ledger)
+		e.clock.Advance(24 * time.Hour)
+		e.drive()
+		op := e.wantOp(1, ytwrite.StateApplied, "")
+		if op.YTResultID != existing || op.Attempts != 1 {
+			t.Fatalf("op %+v, want the adopted issue %s after one attempt", op, existing)
+		}
+		m, ok, err := e.ledger.MapGet(context.Background(), "task", itoa(testTask))
+		if err != nil || !ok || m.YTID != existing || m.OpID != op.ID {
+			t.Fatalf("task map row %+v %v %v, want %s", m, ok, err, existing)
+		}
+		// MapRow.Adopted is not stored in the map: the memory ledger keeps
+		// what apply passed it, the store publishes it in the binding's
+		// comments_from (store TestYTIssueAdoptedBindingSkipsHistory).
+		if _, mem := e.ledger.(*MemLedger); mem && !m.Adopted {
+			t.Fatalf("task map row %+v, want adopted", m)
+		}
+		e.wantRemote(0, 0)
+	})
+
+	// Send adopted the task's existing issue and the process died before
+	// the adoption record committed, so the ledger cannot tell this crash
+	// from a POST whose reply was lost and may still land (review of PR
+	// #383). The evidence search names the issue (remote_unknown /
+	// adoption_unconfirmed, the issue in the detail, no second create) but
+	// does not apply it; the operator's resolve --adopted does, with the map
+	// row marked adopted (hk 3911).
+	t.Run("lost_adoption_record_names_the_adoption", func(t *testing.T) {
+		e := newEnv(t, nl)
+		existing := e.yt.InjectIssue(issueSuiteProject, testTask, "#"+itoa(testTask)+" imported", "legacy body")
+		e.clock.Advance(time.Hour)
+		cl := &CrashLedger{Ledger: e.ledger, Method: "RecordAdoption"}
+		e.restart(cl)
+		if _, _, err := e.prepareIssue(cl); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = e.p.Drive(context.Background(), 10)
+		if !cl.Dead() {
+			t.Fatal("the crash at RecordAdoption never fired")
 		}
 		e.restart(e.ledger)
 		e.clock.Advance(24 * time.Hour)
@@ -272,11 +312,64 @@ func RunIssueProtocol(t *testing.T, nl NewLedger) {
 		if err != nil || !ok || m.YTID != existing || m.OpID != op.ID {
 			t.Fatalf("task map row %+v %v %v, want %s", m, ok, err, existing)
 		}
-		// MapRow.Adopted is not stored in the map: the memory ledger keeps
-		// what apply passed it, the store publishes it in the binding's
-		// comments_from (store TestYTIssueAdoptedBindingSkipsHistory).
 		if _, mem := e.ledger.(*MemLedger); mem && !m.Adopted {
 			t.Fatalf("task map row %+v, want adopted", m)
+		}
+		e.wantRemote(0, 0)
+	})
+
+	// An adoption record is proof only for the issue it names, in the op's
+	// last attempt: an op whose record names another issue, and one whose
+	// record is of an earlier attempt (a later one may have sent a create),
+	// stay adoption_unconfirmed.
+	t.Run("adoption_record_of_another_issue_is_no_proof", func(t *testing.T) {
+		e := newEnv(t, nl)
+		existing := e.yt.InjectIssue(issueSuiteProject, testTask, "#"+itoa(testTask)+" imported", "legacy body")
+		ctx := context.Background()
+		op := e.mustPrepareIssue()
+		cur, out, err := e.ledger.Claim(ctx, e.clock.Now(), op.ID)
+		if err != nil || out != ytwrite.ClaimClaimed {
+			t.Fatalf("claim = %s %v", out, err)
+		}
+		if err := e.ledger.RecordAdoption(ctx, e.clock.Now(), op.ID, cur.Attempts, "9-999"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.ledger.MarkUnknown(ctx, e.clock.Now(), op.ID, e.clock.Now(), ytwrite.ReasonTransport, "lost"); err != nil {
+			t.Fatal(err)
+		}
+		e.clock.Advance(time.Hour)
+		e.drive()
+		if got := e.wantOp(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonAdoptionUnconfirmed); !strings.Contains(got.LastError, existing) {
+			t.Fatalf("op %+v, want the candidate %s in its detail", got, existing)
+		}
+		e.wantRemote(0, 0)
+	})
+
+	t.Run("adoption_record_of_an_earlier_attempt_is_no_proof", func(t *testing.T) {
+		e := newEnv(t, nl)
+		existing := e.yt.InjectIssue(issueSuiteProject, testTask, "#"+itoa(testTask)+" imported", "legacy body")
+		ctx := context.Background()
+		op := e.mustPrepareIssue()
+		cur, out, err := e.ledger.Claim(ctx, e.clock.Now(), op.ID)
+		if err != nil || out != ytwrite.ClaimClaimed {
+			t.Fatalf("claim = %s %v", out, err)
+		}
+		if err := e.ledger.RecordAdoption(ctx, e.clock.Now(), op.ID, cur.Attempts, existing); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.ledger.Defer(ctx, e.clock.Now(), op.ID, e.clock.Now(), ytwrite.ReasonRateLimited, "429"); err != nil {
+			t.Fatal(err)
+		}
+		if cur, out, err = e.ledger.Claim(ctx, e.clock.Now(), op.ID); err != nil || out != ytwrite.ClaimClaimed || cur.Attempts != 2 {
+			t.Fatalf("second claim = %+v %s %v", cur, out, err)
+		}
+		if _, err := e.ledger.MarkUnknown(ctx, e.clock.Now(), op.ID, e.clock.Now(), ytwrite.ReasonTransport, "lost"); err != nil {
+			t.Fatal(err)
+		}
+		e.clock.Advance(time.Hour)
+		e.drive()
+		if got := e.wantOp(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonAdoptionUnconfirmed); !strings.Contains(got.LastError, existing) {
+			t.Fatalf("op %+v, want the candidate %s in its detail", got, existing)
 		}
 		e.wantRemote(0, 0)
 	})

@@ -93,6 +93,16 @@ func (f *fakeObjects) Delete(_ context.Context, k string) error {
 	delete(f.objects, k)
 	return nil
 }
+func (f *fakeObjects) Copy(_ context.Context, src, dst string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, ok := f.objects[src]
+	if !ok {
+		return ErrObjectNotFound
+	}
+	f.objects[dst] = b
+	return nil
+}
 func (f *fakeObjects) List(_ context.Context, prefix string) ([]ObjectInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -122,13 +132,13 @@ type fakeDB struct {
 	listID   string
 }
 
-func (f *fakeDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap, clientCap int64) error {
+func (f *fakeDB) ReserveAttachmentUpload(_ context.Context, u store.AttachmentUpload, stagingCap, clientCap, storageCap int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.uploads == nil {
 		f.uploads = map[string]store.AttachmentUpload{}
 	}
-	return reserveFake(f.uploads, u, stagingCap, clientCap)
+	return reserveFake(f.uploads, committedFake(f.rows), u, stagingCap, clientCap, storageCap)
 }
 func (f *fakeDB) ListUnreleasedAttachmentUploads(_ context.Context, createdBefore time.Time, limit int) ([]store.AttachmentUpload, error) {
 	f.mu.Lock()
@@ -159,6 +169,39 @@ func (f *fakeDB) TransitionAttachmentUpload(_ context.Context, id, from, to, rea
 	f.uploads[id] = u
 	return true, nil
 }
+func (f *fakeDB) ClaimAttachmentUpload(_ context.Context, id, nonce string, now time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadPending {
+		return false, nil
+	}
+	u.Status, u.Reason, u.UpdatedAt, u.ClaimNonce = store.AttachmentUploadCompleting, "", now, nonce
+	f.uploads[id] = u
+	return true, nil
+}
+func (f *fakeDB) TransitionAttachmentUploadClaim(_ context.Context, id, nonce, to, reason string, now time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce {
+		return false, nil
+	}
+	u.Status, u.Reason, u.UpdatedAt, u.ClaimNonce = to, reason, now, ""
+	f.uploads[id] = u
+	return true, nil
+}
+func (f *fakeDB) TouchAttachmentUploadClaim(_ context.Context, id, nonce string, now time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce {
+		return false, nil
+	}
+	u.UpdatedAt = now
+	f.uploads[id] = u
+	return true, nil
+}
 
 func (f *fakeDB) GetAttachment(_ context.Context, sha string) (store.Attachment, bool, error) {
 	f.mu.Lock()
@@ -179,8 +222,31 @@ func (f *fakeDB) PutAttachment(_ context.Context, x store.Attachment, _, _ int64
 	f.rows[x.SHA256] = x
 	return x, true, nil
 }
-func (f *fakeDB) CheckAttachmentCapacity(context.Context, int64, int64, int64) error { return f.capErr }
-func (*fakeDB) RecordAttachmentGet(context.Context, string, int64) error             { return nil }
+func (f *fakeDB) CheckAttachmentCapacity(context.Context, int64, int64, int64, string) error {
+	return f.capErr
+}
+
+// FinalizeAttachmentUpload mirrors the store contract the tests exercise:
+// claim-scoped, atomic with the done transition.
+func (f *fakeDB) FinalizeAttachmentUpload(_ context.Context, id, nonce string, x store.Attachment, _, _ int64) (store.Attachment, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.uploads[id]
+	if !ok || u.Status != store.AttachmentUploadCompleting || u.ClaimNonce != nonce || u.SHA256 != x.SHA256 || u.SizeBytes != x.SizeBytes {
+		return store.Attachment{}, false, store.ErrUploadClaimLost
+	}
+	f.puts++
+	created := true
+	if old, ok := f.rows[x.SHA256]; ok {
+		x, created = old, false
+	} else {
+		f.rows[x.SHA256] = x
+	}
+	u.Status, u.Reason, u.ClaimNonce = store.AttachmentUploadDone, "", ""
+	f.uploads[id] = u
+	return x, created, nil
+}
+func (*fakeDB) RecordAttachmentGet(context.Context, string, int64) error { return nil }
 func (f *fakeDB) ListAttachments(_ context.Context, kind, id string, _ int) ([]store.Attachment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -413,9 +479,20 @@ func TestStorageFuseBlocksObjectPut(t *testing.T) {
 	}
 }
 
-// reserveFake applies the store's budget: rows whose staging object may still
-// exist count against the global and the per-creator cap.
-func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUpload, stagingCap, clientCap int64) error {
+// committedFake sums the stored attachments' bytes, the store's committed side
+// of the storage fuse.
+func committedFake(rows map[string]store.Attachment) int64 {
+	var n int64
+	for _, x := range rows {
+		n += x.SizeBytes
+	}
+	return n
+}
+
+// reserveFake applies the store's budget: committed attachments plus rows
+// whose staging object may still exist count against the storage fuse, and
+// the charged rows against the global and the per-creator cap.
+func reserveFake(uploads map[string]store.AttachmentUpload, committed int64, u store.AttachmentUpload, stagingCap, clientCap, storageCap int64) error {
 	var used, usedByClient int64
 	for _, o := range uploads {
 		if !o.StagingDeletedAt.IsZero() {
@@ -425,6 +502,9 @@ func reserveFake(uploads map[string]store.AttachmentUpload, u store.AttachmentUp
 		if o.CreatedBy == u.CreatedBy {
 			usedByClient += o.SizeBytes
 		}
+	}
+	if committed+used+u.SizeBytes > storageCap {
+		return store.ErrAttachmentStorageCap
 	}
 	if used+u.SizeBytes > stagingCap || usedByClient+u.SizeBytes > clientCap {
 		return store.ErrAttachmentStagingCap

@@ -39,6 +39,9 @@ func (*fileRouteObjects) Head(context.Context, string) (attachments.ObjectInfo, 
 	return attachments.ObjectInfo{}, nil
 }
 func (*fileRouteObjects) Delete(context.Context, string) error { return nil }
+func (*fileRouteObjects) Copy(context.Context, string, string) error {
+	return nil
+}
 func (*fileRouteObjects) List(context.Context, string) ([]attachments.ObjectInfo, error) {
 	return nil, nil
 }

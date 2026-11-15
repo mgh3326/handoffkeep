@@ -30,6 +30,9 @@ type MemLedger struct {
 	byKey  map[[3]string]int64
 	maps   map[[2]string]ytwrite.MapRow
 	mapIDs map[[2]string]string // (entity kind, yt id) -> hk key
+	adopts map[int64]ytwrite.Adoption
+	// links is the issue_links record (memledger_links.go).
+	links memLinks
 }
 
 // NewMemLedger returns an empty ledger.
@@ -39,6 +42,7 @@ func NewMemLedger() *MemLedger {
 		byKey:  map[[3]string]int64{},
 		maps:   map[[2]string]ytwrite.MapRow{},
 		mapIDs: map[[2]string]string{},
+		adopts: map[int64]ytwrite.Adoption{},
 	}
 }
 
@@ -289,4 +293,32 @@ func (l *MemLedger) MapGet(_ context.Context, entityKind, hkKey string) (ytwrite
 	defer l.mu.Unlock()
 	m, ok := l.maps[[2]string{entityKind, hkKey}]
 	return m, ok, nil
+}
+
+func (l *MemLedger) RecordAdoption(_ context.Context, _ time.Time, id int64, attempts int, ytID string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	op, err := l.get(id)
+	if err != nil {
+		return err
+	}
+	a := ytwrite.Adoption{Attempts: attempts, YTID: ytID}
+	if have, ok := l.adopts[id]; ok {
+		if have != a {
+			return ytwrite.ErrConflictingResult
+		}
+		return nil
+	}
+	if op.State != ytwrite.StateDispatched || op.Attempts != attempts {
+		return fmt.Errorf("%w: record adoption of attempt %d from %s attempt %d", ytwrite.ErrState, attempts, op.State, op.Attempts)
+	}
+	l.adopts[id] = a
+	return nil
+}
+
+func (l *MemLedger) Adoption(_ context.Context, id int64) (ytwrite.Adoption, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a, ok := l.adopts[id]
+	return a, ok, nil
 }

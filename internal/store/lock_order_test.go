@@ -307,3 +307,41 @@ func TestLockOrderJobUpdateVersusTaskWrite(t *testing.T) {
 	}
 	finishLockActors(t, ctx, update, relane)
 }
+
+// TestLockOrderRelationEndpointsVersusRelationWrite: a relation write locks
+// its src row and then the other endpoint (bumpRelationEndpointsTx). Two
+// writes on one pair in opposite directions would each hold one row and wait
+// for the other; the task-mutation lock, taken first by every relation
+// writer, makes the second wait before it locks anything.
+func TestLockOrderRelationEndpointsVersusRelationWrite(t *testing.T) {
+	dbURL, app := lockOrderSchema(t, "lockrel")
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	related := openLockActorStore(t, dbURL, app("related"))
+	blocks := openLockActorStore(t, dbURL, app("blocks"))
+	lo := lockOrderTask(t, related, TaskRefs{})
+	hi := lockOrderTask(t, related, TaskRefs{})
+
+	blocker := lockBlocker(t, ctx, dbURL, app("blocker"))
+	if _, err := blocker.Exec(ctx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, hi.ID); err != nil {
+		t.Fatal(err)
+	}
+	// related is stored lo→hi: it locks lo, then waits for hi.
+	add := startLockActor(app("related"), func() error {
+		_, err := related.AddTaskRelation(ctx, hi.ID, RelationRelated, lo.ID, "lock-order-test")
+		return err
+	})
+	if !waitBlockedBy(t, ctx, related.pool, add, app("blocker")) {
+		t.Fatalf("AddTaskRelation finished before the blocker released: %v", add.err)
+	}
+	// blocks is stored hi→lo: it would lock hi, then wait for lo.
+	reverse := startLockActor(app("blocks"), func() error {
+		_, err := blocks.AddTaskRelation(ctx, hi.ID, RelationBlocks, lo.ID, "lock-order-test")
+		return err
+	})
+	waitBlockedBy(t, ctx, related.pool, reverse, app("related"), app("blocker"))
+	if err := blocker.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	finishLockActors(t, ctx, add, reverse)
+}

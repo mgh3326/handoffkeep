@@ -171,9 +171,6 @@ function RecentAttempts({ svc, now }: { svc: DeployServiceView; now: string }) {
 }
 
 function MergedList({ svc, now }: { svc: DeployServiceView; now: string }) {
-  if (svc.merged_boundary === "unrecorded") {
-    return <p className="dp-note">배포 시각이 기록되지 않아 마지막 배포 이후 머지 목록을 계산할 수 없습니다.</p>;
-  }
   if (svc.merged_boundary === "no_current") {
     return (
       <p className="dp-note">
@@ -186,6 +183,9 @@ function MergedList({ svc, now }: { svc: DeployServiceView; now: string }) {
   return (
     <div className="dp-merged">
       <h4 className="dp-subhead">마지막 배포 이후 머지됨 ({svc.merged_since.length})</h4>
+      {svc.merged_boundary === "deploy_record_key" ? (
+        <p className="dp-note">배포 시각이 기록되지 않아 배포 기록 키의 시각을 기준으로 합니다.</p>
+      ) : null}
       {svc.merged_since.length === 0 ? (
         <p className="dp-note">해당 없음</p>
       ) : (
@@ -279,6 +279,12 @@ function ServiceCard({ svc, now }: { svc: DeployServiceView; now: string }) {
         {svc.target ? <span className="hk-chip dp-chip-host">{svc.target}</span> : null}
         <span className="hk-mono dp-muted">{svc.repo}</span>
       </header>
+      {svc.lagging ? (
+        <div className="dp-card-lag-banner" role="alert" data-testid={`card-lag-banner-${svc.service}`}>
+          <Icon name="warning" />
+          <span>배포 지연: main보다 {svc.lag_count ?? svc.merged_since.length}개 뒤처짐</span>
+        </div>
+      ) : null}
       <div className="dp-status" data-result={svc.current === null ? "none" : svc.current.result}>
         {svc.current === null ? (
           <span className="dp-muted">{noCurrent}</span>
@@ -349,8 +355,18 @@ export function DeployPanel({ fetchStatus = fetchDeployPending, pollMs = 15_000 
       </section>
     );
   }
+  const laggingServices = data.services.filter((svc) => svc.lagging);
+
   return (
     <section className="dp-panel" aria-label="배포 상태" data-deploy-state={failed ? "stale" : "ready"}>
+      {laggingServices.length > 0 ? (
+        <div className="dp-lag-banner" role="alert" data-testid="deploy-lag-banner">
+          <Icon name="warning" />
+          <span>
+            배포 지연: {laggingServices.map((s) => `${s.service}(main보다 ${s.lag_count ?? s.merged_since.length}개 뒤처짐)`).join(", ")}
+          </span>
+        </div>
+      ) : null}
       <div className="dp-panel-head">
         <h2 className="dp-title">서비스별 현황</h2>
         {checked !== null ? (

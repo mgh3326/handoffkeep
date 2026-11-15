@@ -69,6 +69,11 @@ type ytFeedConsumer struct {
 	// build, when set, makes the pass's handler from the store and the
 	// pass's time (registerYTFeedStoreConsumer); handle is then unused.
 	build func(s *Store, now time.Time) FeedHandler
+	// created, when set, runs in the pass transaction that creates the
+	// consumer's cursor, after the cursor row and before the first read: a
+	// consumer whose history before the cursor is not the feed's to handle
+	// records that here (task_links moves its sweep generation, I13).
+	created func(ctx context.Context, tx pgx.Tx, now time.Time) error
 }
 
 // handler is c's handler for one pass of s at now.
@@ -236,6 +241,11 @@ func (s *Store) runYTFeedConsumer(ctx context.Context, c ytFeedConsumer, limit i
 			return pass, err
 		}
 	}
+	if pass.Created && c.created != nil {
+		if err := c.created(ctx, tx, now); err != nil {
+			return YTFeedPass{Consumer: c.name}, fmt.Errorf("yt feed consumer %s: created: %w", c.name, err)
+		}
+	}
 	// One statement, so pruned_through, max_sync_id and the rows come from
 	// one snapshot: a prune that commits later cannot have removed a row this
 	// read skipped, and one that committed earlier shows in pruned_through,
@@ -362,7 +372,10 @@ func prepareYTSnapshotTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrit
 // whose sha equals the last one prepared is never prepared again, whatever
 // that op's state, so a request YouTrack refused is not repeated on every
 // feed or backfill pass (hk 4111). A different sha (a new target) is a new op
-// with the next seq, as for a snapshot. The issue_move ops use it.
+// with the next seq, as for a snapshot. The one exception is a last op the
+// operator's unbind closed (binding_removed, unbind_forced): YouTrack never
+// saw it, so the same request is prepared again, with the next seq, once the
+// task is bound again (hk 4539). The issue_move ops use it.
 func prepareYTOnceTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrite.NewOp, sha string) (ytwrite.Op, bool, error) {
 	return prepareYTSnapshotRuleTx(ctx, tx, now, n, sha, false)
 }
@@ -385,7 +398,10 @@ func prepareYTSnapshotRuleTx(ctx context.Context, tx pgx.Tx, now time.Time, n yt
 	}
 	if err == nil {
 		if !retryRejected && lastSHA == sha {
-			return ytwrite.Op{}, false, nil
+			again, err := ytSnapshotCancelledByUnbind(ctx, tx, lastOpID)
+			if err != nil || !again {
+				return ytwrite.Op{}, false, err
+			}
 		}
 		skip, err := ytSnapshotUnchanged(ctx, tx, lastSHA, lastOpID, sha)
 		if err != nil || skip {
@@ -404,6 +420,22 @@ func prepareYTSnapshotRuleTx(ctx context.Context, tx pgx.Tx, now time.Time, n yt
 		return ytwrite.Op{}, false, err
 	}
 	return op, true, nil
+}
+
+// ytSnapshotCancelledByUnbind reports whether op id was rejected because its
+// task's binding was removed (ytwrite.CancelledByUnbind): it never reached
+// YouTrack, so the once rule does not count it as a refusal. A missing op row
+// is not a cancellation. It reads the op by id without a lock.
+func ytSnapshotCancelledByUnbind(ctx context.Context, tx pgx.Tx, opID int64) (bool, error) {
+	var state, reason string
+	err := tx.QueryRow(ctx, `SELECT state, reason FROM yt_write_ops WHERE id=$1`, opID).Scan(&state, &reason)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return state == string(ytwrite.StateRejected) && ytwrite.CancelledByUnbind(reason), nil
 }
 
 // ytSnapshotUnchanged reports whether a snapshot with sha needs no new op, given

@@ -2,6 +2,8 @@ package store
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
@@ -221,5 +223,83 @@ func TestYTFieldsBackfillLimitCountsMoves(t *testing.T) {
 		if moves, fields := ytmOps(t, s, task), ytfOps(t, s, task); len(moves) != 0 || len(fields) != 0 {
 			t.Fatalf("task %d past the limit: moves %+v snapshots %+v", task, moves, fields)
 		}
+	}
+}
+
+// A moved task needs two ops. A one-op budget must leave it untouched instead
+// of preparing both ops and exceeding the limit.
+func TestYTFieldsBackfillLimitDoesNotSplitMovedTask(t *testing.T) {
+	s, bound, _ := ytmSetup(t, "ytfb_limit_one_move")
+	ytmMapped(t, s)
+	ytFeedExec(t, s, `UPDATE tasks SET project=$2 WHERE id=$1`, bound, ytmProject)
+
+	// The walk goes on past the over-limit moved task, so the setup's unbound
+	// task behind it is read; the moved task itself is in no count.
+	r := ytfBackfill(t, s, YTFieldsBackfillOptions{Limit: 1})
+	if r.Total != (YTFieldsBackfillCounts{Scanned: 1, Unbound: 1}) || r.OverLimit != 1 {
+		t.Fatalf("limit 1 prepared part of a moved task: %+v over_limit %d", r.Total, r.OverLimit)
+	}
+	if moves, fields := ytmOps(t, s, bound), ytfOps(t, s, bound); len(moves) != 0 || len(fields) != 0 {
+		t.Fatalf("limit 1 wrote partial task ops: moves %+v snapshots %+v", moves, fields)
+	}
+
+	r = ytfBackfill(t, s, YTFieldsBackfillOptions{Limit: 2})
+	if r.Total != (YTFieldsBackfillCounts{Scanned: 1, Ops: 2, Moved: 1}) {
+		t.Fatalf("limit 2 did not resume the moved task: %+v", r.Total)
+	}
+}
+
+// A task whose ops do not fit what is left of --limit is skipped, not a stop
+// (PR #385 review): a one-op task behind a two-op moved one is still prepared
+// by a --limit 1 run, so that run cannot stall behind the moved task, and the
+// report says the moved task was left over.
+func TestYTFieldsBackfillLimitSkipsOverBudgetTask(t *testing.T) {
+	s, bound, unbound := ytmSetup(t, "ytfb_limit_skip")
+	ytmMapped(t, s)
+	// The moved task comes first by id and needs two ops; the later one needs one.
+	ytFeedExec(t, s, `UPDATE tasks SET project=$2 WHERE id=$1`, bound, ytmProject)
+	later := ytcTask(t, s, ytbProject)
+	ytfBind(t, s, later)
+	logs := ytbLog(t)
+	// enqueued counts the ytwrite.fields_enqueued lines logged for a task: one per
+	// snapshot op that was kept, none for a rolled-back or counted-only one.
+	enqueued := func(task int64) int {
+		n := 0
+		for _, line := range strings.Split(logs(), "\n") {
+			if strings.Contains(line, "ytwrite.fields_enqueued ") && strings.Contains(line, fmt.Sprintf(" task_id=%d ", task)) {
+				n++
+			}
+		}
+		return n
+	}
+
+	r := ytfBackfill(t, s, YTFieldsBackfillOptions{Limit: 1})
+	if want := (YTFieldsBackfillCounts{Scanned: 2, Ops: 1, Prepared: 1, Unbound: 1}); r.Total != want || r.OverLimit != 1 {
+		t.Fatalf("limit 1: total %+v over_limit %d, want %+v and 1 (the unbound task %d is read, the moved task %d is not)", r.Total, r.OverLimit, want, unbound, bound)
+	}
+	if moves, fields := ytmOps(t, s, bound), ytfOps(t, s, bound); len(moves) != 0 || len(fields) != 0 {
+		t.Fatalf("over-limit moved task was touched: moves %+v snapshots %+v", moves, fields)
+	}
+	if fields := ytfOps(t, s, later); len(fields) != 1 {
+		t.Fatalf("later one-op task snapshots %+v, want 1", fields)
+	}
+	if got, rolledBack := enqueued(later), enqueued(bound); got != 1 || rolledBack != 0 {
+		t.Fatalf("fields_enqueued lines: later %d (want 1), over-limit moved task %d (want 0, its ops were rolled back)", got, rolledBack)
+	}
+
+	// With room for the two ops the moved task is prepared; a dry run reports the
+	// same over-limit count as a real one.
+	if r := ytfBackfill(t, s, YTFieldsBackfillOptions{Limit: 1, DryRun: true}); r.OverLimit != 1 {
+		t.Fatalf("dry run over_limit %d, want 1", r.OverLimit)
+	}
+	if ytfBackfill(t, s, YTFieldsBackfillOptions{DryRun: true}); enqueued(bound) != 0 {
+		t.Fatal("a dry run logged an enqueued op it never made")
+	}
+	r = ytfBackfill(t, s, YTFieldsBackfillOptions{Limit: 2})
+	if r.Total != (YTFieldsBackfillCounts{Scanned: 1, Ops: 2, Moved: 1}) || r.OverLimit != 0 {
+		t.Fatalf("limit 2: total %+v over_limit %d", r.Total, r.OverLimit)
+	}
+	if got := enqueued(bound); got != 1 {
+		t.Fatalf("fields_enqueued lines for the moved task after it was prepared: %d, want 1", got)
 	}
 }

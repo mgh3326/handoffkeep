@@ -148,6 +148,11 @@ func normalizeTaskSourceEvent(in TaskSourceEvent) (TaskSourceEvent, error) {
 	if !taskEventPRRE.MatchString(in.SourceRef) {
 		return in, invalidChangeWrite("source_ref must be a PR URL")
 	}
+	// One PR is one spelling from here on: the event key, refs.pr and every
+	// comparison of them see /pull/0042 as /pull/42, as a manual move to merged
+	// already does (PR #385 review).
+	in.SourceRef, in.PR = canonicalPRURL(in.SourceRef), canonicalPRURL(in.PR)
+	in.RevertPR, in.RevertedPR = canonicalPRURL(in.RevertPR), canonicalPRURL(in.RevertedPR)
 	switch in.Source {
 	case SourceMergewakePR, SourceMergewakeReview, SourceMergewakeMerge:
 		if in.PR == "" {
@@ -196,6 +201,11 @@ type sourceEvent struct {
 	// gets the event in its own turn, so propagation and the rule 9 parent
 	// row skip them rather than take their (task, source, source_ref) key.
 	Named map[int64]bool
+	// Pending is the named tasks whose own turn has not run yet. A merge (or
+	// the deploy it fires) defers auto-closing a parent only while the
+	// parent's turn is still pending: once it ran — held or applied — the
+	// settling child's turn closes the parent itself.
+	Pending map[int64]bool
 }
 
 // ApplyTaskSourceEvent applies one mergewake event to a task in one
@@ -218,19 +228,27 @@ func (s *Store) ApplyTaskSourceEvent(ctx context.Context, in TaskSourceEvent) (T
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return TaskEventResult{}, err
 	}
-	res, found, err := s.applyTaskSourceEventTx(ctx, tx, in.TaskID, in, at, now)
-	if err != nil {
-		return TaskEventResult{}, err
-	}
-	if !found {
-		return TaskEventResult{}, ErrTaskNotFound
-	}
 	// The named tasks follow task_id, each under its own row lock; the
-	// level-2 lock held above serializes them with every other holder.
-	for _, id := range in.Tasks {
-		r, found, err := s.applyTaskSourceEventTx(ctx, tx, id, in, at, now)
+	// level-2 lock held above serializes them with every other holder. A
+	// turn's Pending is the named tasks still to come, so a child whose
+	// parent was already served closes the parent in its own turn.
+	var res TaskEventResult
+	order := append([]int64{in.TaskID}, in.Tasks...)
+	for i, id := range order {
+		pending := map[int64]bool{}
+		for _, later := range order[i+1:] {
+			pending[later] = true
+		}
+		r, found, err := s.applyTaskSourceEventTx(ctx, tx, id, in, at, now, pending)
 		if err != nil {
 			return TaskEventResult{}, err
+		}
+		if i == 0 {
+			if !found {
+				return TaskEventResult{}, ErrTaskNotFound
+			}
+			res = r
+			continue
 		}
 		if !found {
 			r = TaskEventResult{Reason: "task_not_found"}
@@ -248,7 +266,8 @@ func (s *Store) ApplyTaskSourceEvent(ctx context.Context, in TaskSourceEvent) (T
 // propagateRevertTx carries a revert to every other task that implements the
 // reverted PR and is closed on it: a task closed by naming the PR (hk 4322)
 // or a sibling the merge propagated to. The event names one task, so without
-// this those stay closed on undone work. Each goes through recordChangeTx and
+// this those stay closed on undone work. A task whose refs.pr is the PR is
+// reached too, linked or not. Each goes through recordChangeTx and
 // applySourceEventTx as a named task does, in ascending id, under the
 // task-mutation lock the caller holds.
 func (s *Store) propagateRevertTx(ctx context.Context, tx pgx.Tx, in TaskSourceEvent, at, now time.Time) error {
@@ -260,8 +279,12 @@ func (s *Store) propagateRevertTx(ctx context.Context, tx pgx.Tx, in TaskSourceE
 	for _, id := range in.Tasks {
 		named[id] = true
 	}
-	rows, err := tx.Query(ctx, `SELECT `+prefixedTaskColumns("t")+` FROM change_tasks ct JOIN changes c ON c.id=ct.change_id JOIN tasks t ON t.id=ct.task_id
-		WHERE c.repo=$1 AND c.pr_number=$2 AND ct.relation='implements' AND t.state IN ($3,$4) ORDER BY t.id FOR UPDATE OF t`, repo, n, StateMerged, StateDeployed)
+	// A task closed on the PR without a link (refs.pr set by a manual
+	// reviewing -> merged, or by a propagated merge before siblings were
+	// linked) is reached by its refs.pr, as a deploy reaches it.
+	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks t WHERE t.state IN ($3,$4) AND (t.refs->>'pr'=$5
+		OR EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=t.id AND c.repo=$1 AND c.pr_number=$2 AND ct.relation='implements'))
+		ORDER BY t.id FOR UPDATE`, repo, n, StateMerged, StateDeployed, in.PR)
 	if err != nil {
 		return err
 	}
@@ -299,7 +322,7 @@ func (s *Store) propagateRevertTx(ctx context.Context, tx pgx.Tx, in TaskSourceE
 // applyTaskSourceEventTx applies one event to task id: it locks the row,
 // writes the change rows, applies the event and propagates a merge. found is
 // false, with nothing written, when the task does not exist.
-func (s *Store) applyTaskSourceEventTx(ctx context.Context, tx pgx.Tx, id int64, in TaskSourceEvent, at, now time.Time) (TaskEventResult, bool, error) {
+func (s *Store) applyTaskSourceEventTx(ctx context.Context, tx pgx.Tx, id int64, in TaskSourceEvent, at, now time.Time, pending map[int64]bool) (TaskEventResult, bool, error) {
 	var x Task
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -316,7 +339,7 @@ func (s *Store) applyTaskSourceEventTx(ctx context.Context, tx pgx.Tx, id int64,
 	for _, n := range in.Tasks {
 		named[n] = true
 	}
-	ev := sourceEvent{Source: in.Source, SourceRef: in.SourceRef, PR: in.PR, RevertedPR: in.RevertedPR, RevertPR: in.RevertPR, At: at, Named: named}
+	ev := sourceEvent{Source: in.Source, SourceRef: in.SourceRef, PR: in.PR, RevertedPR: in.RevertedPR, RevertPR: in.RevertPR, At: at, Named: named, Pending: pending}
 	res, err := s.applySourceEventTx(ctx, tx, x, ev, now)
 	if err != nil {
 		return TaskEventResult{}, false, err
@@ -363,7 +386,7 @@ func (s *Store) propagateMergeTx(ctx context.Context, tx pgx.Tx, src int64, ev s
 		// The sibling implements the PR too: link it first, so a later revert
 		// of the PR holds the sibling's own close (unresolvedRevertSQL).
 		if changeID != 0 {
-			if err = linkChangeTaskTx(ctx, tx, changeID, x.ID, ChangeImplements, false, now); err != nil {
+			if err = linkChangeTaskTx(ctx, tx, changeID, x.ID, ChangeImplements, true, now); err != nil {
 				return err
 			}
 		}
@@ -394,18 +417,26 @@ func liveJobTx(ctx context.Context, q rowQuerier, x Task) (bool, error) {
 	return live, err
 }
 
+// sourceEventRecordedTx reports whether task taskID already has a row for
+// (source, sourceRef), applied or not: that event's turn on the task is over,
+// and applySourceEventTx answers a redelivery with no change.
+func sourceEventRecordedTx(ctx context.Context, q rowQuerier, taskID int64, source, sourceRef string) (bool, error) {
+	var recorded bool
+	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3)`, taskID, source, sourceRef).Scan(&recorded)
+	return recorded, err
+}
+
 // applySourceEventTx applies one event to x, which the caller has locked in
 // tx. A (task, source, source_ref) already recorded changes nothing. Every
 // other event is recorded: applied with the move, or with applied=false and
 // the reason in the note.
 func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev sourceEvent, now time.Time) (TaskEventResult, error) {
-	var recorded bool
-	err := tx.QueryRow(ctx, `SELECT applied FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3`, x.ID, ev.Source, ev.SourceRef).Scan(&recorded)
-	if err == nil {
-		return TaskEventResult{Redelivered: true, State: x.State, Task: x}, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	recorded, err := sourceEventRecordedTx(ctx, tx, x.ID, ev.Source, ev.SourceRef)
+	if err != nil {
 		return TaskEventResult{}, err
+	}
+	if recorded {
+		return TaskEventResult{Redelivered: true, State: x.State, Task: x}, nil
 	}
 	if x.State == StateMerged && x.Refs.PR == "" && ev.Source == SourceMergewakeMerge && ev.PR != "" {
 		// A parent that an automatic close moved to merged before its own PR was
@@ -503,7 +534,33 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, ev.Source, ev.Note, 0, now); err != nil {
 		return TaskEventResult{}, err
 	}
-	if err = s.afterSourceMoveTx(ctx, tx, x, from, ev.Source, now); err != nil {
+	deferNamedParentClose := x.ParentID != nil && ev.Pending[*x.ParentID] &&
+		(ev.Source == SourceMergewakeMerge || ev.Source == SourceDeploy)
+	if deferNamedParentClose {
+		// The parent's own turn moves it only while it is open, or merged
+		// with no PR to adopt (hk 4172). A parent already deployed — or
+		// merged with its PR — cannot move there; this turn must run the
+		// rollup close itself (autoCloseTx deploys a merged parent whose
+		// sub-tasks deployed).
+		var pstate, ppr string
+		if err = tx.QueryRow(ctx, `SELECT state,COALESCE(refs->>'pr','') FROM tasks WHERE id=$1`, *x.ParentID).Scan(&pstate, &ppr); err != nil {
+			return TaskEventResult{}, err
+		}
+		deferNamedParentClose = !IsSettledState(pstate) || (pstate == StateMerged && ppr == "")
+	}
+	if deferNamedParentClose {
+		// The parent's pending turn is the merge of ev.PR (a deploy applied in
+		// a merge's turn carries the PR of that merge). When the parent already
+		// has that row — a held merge the same event or its redelivery recorded
+		// earlier — its turn is a no-op redelivery that rolls nothing up, so
+		// this turn closes the parent itself (PR #385 review).
+		recorded, err := sourceEventRecordedTx(ctx, tx, *x.ParentID, SourceMergewakeMerge, ev.PR)
+		if err != nil {
+			return TaskEventResult{}, err
+		}
+		deferNamedParentClose = !recorded
+	}
+	if err = s.afterSourceMoveTx(ctx, tx, x, from, ev.Source, now, deferNamedParentClose); err != nil {
 		return TaskEventResult{}, err
 	}
 	if ev.Source == SourceMergewakeRevert && x.ParentID != nil && !ev.Named[*x.ParentID] {
@@ -524,7 +581,7 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 		}
 	}
 	if to == StateMerged {
-		if x, err = s.deployOnMergedTx(ctx, tx, x, now); err != nil {
+		if x, err = s.deployOnMergedTx(ctx, tx, x, now, ev.Named, ev.Pending); err != nil {
 			return TaskEventResult{}, err
 		}
 	}
@@ -574,7 +631,7 @@ func (s *Store) adoptMergedPRTx(ctx context.Context, tx pgx.Tx, x Task, ev sourc
 		return TaskEventResult{}, err
 	}
 	if roll.merged == 0 && holds.none() {
-		if x, err = s.deployOnMergedTx(ctx, tx, x, now); err != nil {
+		if x, err = s.deployOnMergedTx(ctx, tx, x, now, ev.Named, ev.Pending); err != nil {
 			return TaskEventResult{}, err
 		}
 	}
@@ -735,8 +792,13 @@ func joinNote(a, b string) string {
 }
 
 // afterSourceMoveTx runs what every state change runs after an automatic
-// move: the hierarchy rules.
-func (s *Store) afterSourceMoveTx(ctx context.Context, tx pgx.Tx, x Task, from, by string, now time.Time) error {
+// move: the hierarchy rules. A merge — and the deploy record it applies in
+// the same turn (rule 8) — defers auto-closing a parent whose own turn is
+// still pending in the same event, so the parent's turn does the close.
+func (s *Store) afterSourceMoveTx(ctx context.Context, tx pgx.Tx, x Task, from, by string, now time.Time, deferNamedParentClose bool) error {
+	if deferNamedParentClose {
+		return nil
+	}
 	return s.afterStateChangeTx(ctx, tx, x, from, by, now)
 }
 
@@ -750,7 +812,7 @@ func deployRef(key, pr string) string { return key + "|" + pr }
 // deployed. task_events is append-only, so the deploy event is recorded here
 // when it applies; applyDeployRecordTx addresses only merged tasks and never
 // leaves an earlier applied=false row to flip.
-func (s *Store) deployOnMergedTx(ctx context.Context, tx pgx.Tx, x Task, now time.Time) (Task, error) {
+func (s *Store) deployOnMergedTx(ctx context.Context, tx pgx.Tx, x Task, now time.Time, named, pending map[int64]bool) (Task, error) {
 	if x.State != StateMerged || !taskEventPRRE.MatchString(x.Refs.PR) {
 		return x, nil
 	}
@@ -758,7 +820,7 @@ func (s *Store) deployOnMergedTx(ctx context.Context, tx pgx.Tx, x Task, now tim
 	if err != nil || key == "" {
 		return x, err
 	}
-	ev := sourceEvent{Source: SourceDeploy, SourceRef: deployRef(key, x.Refs.PR), PR: x.Refs.PR, At: now, Note: "deploy record " + key + " lists the PR; applied when the task entered merged"}
+	ev := sourceEvent{Source: SourceDeploy, SourceRef: deployRef(key, x.Refs.PR), PR: x.Refs.PR, At: now, Named: named, Pending: pending, Note: "deploy record " + key + " lists the PR; applied when the task entered merged"}
 	res, err := s.applySourceEventTx(ctx, tx, x, ev, now)
 	if err != nil {
 		return x, err

@@ -165,6 +165,7 @@ func (issueMove) Evidence(ctx context.Context, remote Remote, op Op, _ string) (
 	return ev, nil
 }
 
-// MapRows: a move creates nothing to map. The task's map row is append-only
-// and keeps the project it was made with.
+// MapRows: a move creates nothing to map. The task's map row keeps the project
+// it was made with; only the unbind of the binding it anchors deletes it
+// (UnbindYTTaskBinding, hk 4536).
 func (issueMove) MapRows(Op, string) []MapRow { return nil }

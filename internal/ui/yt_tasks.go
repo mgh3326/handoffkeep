@@ -39,6 +39,9 @@ const (
 	// activities: past the movement window (8 KST days), far enough that most
 	// open tasks show when they entered their state.
 	stateHistoryLookback = 30 * 24 * time.Hour
+	// maxTaskIssues bounds one read; past it the read fails rather than
+	// showing a partial board as complete.
+	maxTaskIssues = 20000
 )
 
 // taskSourceYouTrack is the board's source field on the YouTrack-backed read.
@@ -159,14 +162,30 @@ func (s *ytTaskSource) fetch(ctx context.Context, now time.Time) (*ytSnapshot, e
 	}
 	query := youtrack.TaskIssuesQuery(names)
 	var issues []youtrack.Issue
+	seen := map[string]bool{}
 	for skip := 0; ; skip += youtrack.TaskIssuePageSize {
 		page, err := s.issues.ListTaskIssues(ctx, query, skip, youtrack.TaskIssuePageSize)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", errYouTrackRead, err)
 		}
 		issues = append(issues, page...)
+		if len(issues) > maxTaskIssues {
+			return nil, fmt.Errorf("%w: more than %d task issues", errYouTrackRead, maxTaskIssues)
+		}
 		if len(page) < youtrack.TaskIssuePageSize {
 			break
+		}
+		// A full page that adds no new issue ID means the server ignored
+		// $skip; without this the loop would page forever.
+		fresh := 0
+		for _, issue := range page {
+			if !seen[issue.ID] {
+				seen[issue.ID] = true
+				fresh++
+			}
+		}
+		if fresh == 0 {
+			return nil, fmt.Errorf("%w: task issue page at offset %d repeated earlier issues", errYouTrackRead, skip)
 		}
 	}
 	links, err := s.store.YTIssueTaskIDs(ctx, s.tenant)

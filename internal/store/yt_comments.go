@@ -228,7 +228,10 @@ func queueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op
 // reject is the reason Claim rejects the op with, in the same transaction,
 // instead of dispatching it: ytwrite.ReasonIssueNotBound when the task has no
 // such binding (the create was rejected, or applied with binding_conflict),
-// ytwrite.ReasonAmbiguousIssue when a source disagrees with it. A targetless
+// ytwrite.ReasonAmbiguousIssue when a source disagrees with it. The claim
+// never holds the op for a later op on its lane (hk 4569): an ambiguous_issue
+// op is copied again by RequeueYTMovedComments once the binding agrees, as a
+// new op at the lane's tail (yt_comment_requeue.go). A targetless
 // op is never dispatched, so it never reaches stale recovery or
 // remote_unknown. Any other op is returned unchanged.
 func claimYTCommentTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (target, sha, reject, detail string, err error) {

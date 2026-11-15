@@ -63,7 +63,7 @@ var ErrYTCommentUnsendable = errors.New("yt_comment_unsendable")
 // ytAuthorityPrincipals are the op principals whose writes belong to each
 // kind: the ops that must be resolved before the kind switches.
 var ytAuthorityPrincipals = map[YTAuthorityKind][]string{
-	YTAuthorityTasks:     {YTIssuePrincipal, YTFieldsPrincipal},
+	YTAuthorityTasks:     {YTIssuePrincipal, YTFieldsPrincipal, YTLinksPrincipal},
 	YTAuthorityComments:  {YTCommentPrincipal},
 	YTAuthorityDocuments: {ytDocCommentPrincipal, YTDocsPrincipal},
 	YTAuthorityDecisions: {YTDecisionsPrincipal},
@@ -76,7 +76,7 @@ var ytAuthorityFeeds = map[YTAuthorityKind][]struct {
 	consumer string
 	models   []string
 }{
-	YTAuthorityTasks:     {{ytFieldsConsumer, []string{"task"}}},
+	YTAuthorityTasks:     {{ytFieldsConsumer, []string{"task"}}, {ytLinksConsumer, []string{"task"}}},
 	YTAuthorityDocuments: {{ytDocCommentsConsumer, []string{"document"}}, {ytDocsConsumer, []string{"document"}}},
 	YTAuthorityDecisions: {{ytDecisionsConsumer, []string{"decision"}}},
 }
@@ -233,7 +233,7 @@ func (s *Store) YTAuthorityOf(ctx context.Context, kind YTAuthorityKind) (YTAuth
 }
 
 // ytAuthorityWriteModeOff explains why kind's write mode in this process is
-// not on, or returns "" when it is. Tasks need both the issue and the field
+// not on, or returns "" when it is. Tasks need the issue, the field and the link
 // copies.
 func (s *Store) ytAuthorityWriteModeOff(kind YTAuthorityKind) string {
 	switch kind {
@@ -243,6 +243,9 @@ func (s *Store) ytAuthorityWriteModeOff(kind YTAuthorityKind) string {
 		}
 		if m, _ := s.ytFieldsNow(); m != YTFieldsOn {
 			return "HANDOFFKEEP_YT_FIELDS_MODE is not on"
+		}
+		if m, _ := s.ytLinksNow(); m != YTLinksOn {
+			return "HANDOFFKEEP_YT_LINKS_MODE is not on"
 		}
 		return ""
 	case YTAuthorityComments:
@@ -341,6 +344,21 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 			}
 			if pending > 0 {
 				refusals = append(refusals, fmt.Sprintf("%s: %d ops are prepared, dispatched or remote_unknown (youtrack ops)", k, pending))
+			}
+			if k == YTAuthorityTasks {
+				// The links sweep (hk 3841, I15): a link change the feed
+				// consumed while the mode was off, or before its cursor
+				// existed, reaches YouTrack only through the sweep, and no
+				// feed cursor counts it. An incomplete sweep means such a
+				// change may still be unsent. A plain read, like the feed
+				// check below: the sweep row's writers hold no authority row.
+				sw, err := ytLinksSweepStateTx(ctx, tx)
+				if err != nil {
+					return nil, nil, err
+				}
+				if !sw.Complete() {
+					refusals = append(refusals, fmt.Sprintf("%s: the links sweep is incomplete (generation %d, complete through %d)", k, sw.Generation, sw.DoneGeneration))
+				}
 			}
 			if k == YTAuthorityDocuments {
 				// The document articles (hk 4206): no in-scope document may

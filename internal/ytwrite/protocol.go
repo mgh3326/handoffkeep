@@ -345,6 +345,9 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 		defer cancel()
 		return p.record(op, p.reject(sctx, op, ReasonUnsupportedKind, op.Kind))
 	}
+	if pk, ok := kind.(PlannedKind); ok {
+		return p.sendPlanned(ctx, op, pk)
+	}
 	text, err := kind.Render(op)
 	if err != nil {
 		sctx, cancel := p.settling(ctx)
@@ -357,7 +360,6 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 	ctx, cancel := p.settling(ctx)
 	defer cancel()
 	now := p.now()
-	var re *RemoteError
 	var refused *RefusedError
 	var notSent *NotSentError
 	var adopted *AdoptedError
@@ -365,6 +367,13 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 	case err == nil && resultIDRE.MatchString(id):
 		return p.record(op, p.apply(ctx, kind, op, id, false))
 	case errors.As(err, &adopted) && resultIDRE.MatchString(adopted.ID):
+		// The decision is recorded before it is applied, so an apply that
+		// is lost leaves reconcile the proof that nothing was sent (hk
+		// 4570). A record that fails leaves the operator's resolve, as
+		// before; the apply is still tried.
+		if rerr := p.Ledger.RecordAdoption(ctx, now, op.ID, op.Attempts, adopted.ID); rerr != nil {
+			log.Printf("ytwrite.adoption_record_failed op_id=%d yt_id=%q err=%q", op.ID, adopted.ID, rerr.Error())
+		}
 		return p.record(op, p.apply(ctx, kind, op, adopted.ID, true))
 	case adopted != nil:
 		// Nothing was written; an id the ledger cannot hold is no adoption.
@@ -376,7 +385,20 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 		// The kind refused before it wrote anything.
 		return p.record(op, p.reject(ctx, op, refused.Reason, refused.Detail))
 	case errors.As(err, &notSent):
-		return p.record(op, p.notSent(ctx, op, notSent))
+		return p.record(op, p.notSent(ctx, p, op, notSent))
+	default:
+		return p.record(op, p.writeFailed(ctx, p, op, err))
+	}
+}
+
+// writeFailed records a write request that failed before anything it sent is
+// known to have taken effect: 429 and 401 were not processed (prepared, after
+// the wait), another 4xx is final, and a 5xx, 408 or transport failure may
+// have taken effect (remote_unknown).
+func (p *Protocol) writeFailed(ctx context.Context, st settler, op Op, err error) settled {
+	now := p.now()
+	var re *RemoteError
+	switch {
 	case errors.As(err, &re):
 		switch {
 		case re.Status == http.StatusTooManyRequests:
@@ -385,19 +407,29 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 				wait = p.RateLimitWait
 			}
 			wait = min(wait, p.MaxRetryAfter)
-			return p.record(op, p.deferOp(ctx, op, now.Add(wait), ReasonRateLimited, re.Error()))
+			return st.deferOp(ctx, op, now.Add(wait), ReasonRateLimited, re.Error())
 		case re.Status == http.StatusUnauthorized:
-			return p.record(op, p.deferOp(ctx, op, now.Add(p.AuthWait), ReasonUnauthorized, re.Error()))
+			return st.deferOp(ctx, op, now.Add(p.AuthWait), ReasonUnauthorized, re.Error())
 		case re.Status >= 500 || re.Status == http.StatusRequestTimeout:
-			return p.record(op, p.markUnknown(ctx, op, ReasonServerError, re.Error()))
+			return st.markUnknown(ctx, op, ReasonServerError, re.Error())
 		case re.Status >= 400 && re.Status < 500:
-			return p.record(op, p.reject(ctx, op, "http_"+strconv.Itoa(re.Status), re.Error()))
+			return st.reject(ctx, op, "http_"+strconv.Itoa(re.Status), re.Error())
 		}
-		return p.record(op, p.markUnknown(ctx, op, ReasonTransport, re.Error()))
+		return st.markUnknown(ctx, op, ReasonTransport, re.Error())
 	default:
-		return p.record(op, p.markUnknown(ctx, op, ReasonTransport, err.Error()))
+		return st.markUnknown(ctx, op, ReasonTransport, err.Error())
 	}
 }
+
+// settler records one remote outcome: the Protocol itself through the
+// generic Ledger, or a planned kind's fenced settlement (linkSettler).
+type settler interface {
+	reject(ctx context.Context, op Op, reason, detail string) settled
+	deferOp(ctx context.Context, op Op, next time.Time, reason, detail string) settled
+	markUnknown(ctx context.Context, op Op, reason, detail string) settled
+}
+
+var _ settler = (*Protocol)(nil)
 
 // settled is the outcome of one ledger step after a remote answer: the op as
 // recorded, or the error that kept it from being recorded.
@@ -429,7 +461,7 @@ func logTransition(op Op) {
 // written, so the op is not uncertain. A 429 or 401 waits as a refused write
 // would, another 4xx is final, and anything else (5xx, transport) is tried
 // again after the capped dispatch retry backoff.
-func (p *Protocol) notSent(ctx context.Context, op Op, ns *NotSentError) settled {
+func (p *Protocol) notSent(ctx context.Context, st settler, op Op, ns *NotSentError) settled {
 	now := p.now()
 	var re *RemoteError
 	if errors.As(ns.Err, &re) {
@@ -439,14 +471,14 @@ func (p *Protocol) notSent(ctx context.Context, op Op, ns *NotSentError) settled
 			if wait <= 0 {
 				wait = p.RateLimitWait
 			}
-			return p.deferOp(ctx, op, now.Add(min(wait, p.MaxRetryAfter)), ReasonRateLimited, re.Error())
+			return st.deferOp(ctx, op, now.Add(min(wait, p.MaxRetryAfter)), ReasonRateLimited, re.Error())
 		case re.Status == http.StatusUnauthorized:
-			return p.deferOp(ctx, op, now.Add(p.AuthWait), ReasonUnauthorized, re.Error())
+			return st.deferOp(ctx, op, now.Add(p.AuthWait), ReasonUnauthorized, re.Error())
 		case re.Status >= 400 && re.Status < 500 && re.Status != http.StatusRequestTimeout:
-			return p.reject(ctx, op, "http_"+strconv.Itoa(re.Status), re.Error())
+			return st.reject(ctx, op, "http_"+strconv.Itoa(re.Status), re.Error())
 		}
 	}
-	return p.deferOp(ctx, op, now.Add(p.retryDelay(max(op.Attempts-1, 0))), ReasonNotSent, ns.Error())
+	return st.deferOp(ctx, op, now.Add(p.retryDelay(max(op.Attempts-1, 0))), ReasonNotSent, ns.Error())
 }
 
 func (p *Protocol) apply(ctx context.Context, kind Kind, op Op, ytID string, adopted bool) settled {
@@ -586,31 +618,27 @@ func (p *Protocol) Drive(ctx context.Context, limit int) (DriveStats, error) {
 // reconcile searches the op's target for its exact rendered text through the
 // op's kind. One exact match is positive evidence and applies the op; one
 // match the kind reports as the thing Send would have adopted
-// (Evidence.Adopted) is not applied: nothing bounds when a create the op's
-// dispatch may have sent lands, and an applied op is never searched again, so
-// a late create would be a second issue no one sees (review of PR #383). It
-// stays remote_unknown / adoption_unconfirmed, the candidate named in the
-// detail, for an operator's resolve --adopted. Anything else leaves it
+// (Evidence.Adopted) is applied as adopted only when the op's last dispatch
+// recorded that it adopted that same thing (Ledger.RecordAdoption, hk 4570):
+// then it sent nothing. Without that record nothing bounds when a create the
+// op's dispatch may have sent lands, and an applied op is never searched
+// again, so a late create would be a second issue no one sees (review of PR
+// #383). It stays remote_unknown / adoption_unconfirmed, the candidate named
+// in the detail, for an operator's resolve --adopted. Anything else leaves it
 // remote_unknown: no match is not proof
 // the write did not happen, so there is no automatic re-create. The decision
 // is the same for every kind; a kind only reports what it found (Evidence).
 func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err error) {
 	var wait time.Duration
 	touch := func(reason, detail string) (bool, error) {
-		now := p.now()
-		delay := max(p.reconcileDelay(op.Reconciles+1), min(wait, p.MaxRetryAfter))
-		if op.Reconciles >= 49 {
-			log.Printf("ytwrite.reconcile_warning op_id=%d reconciles=%d next_after=%q reason=%q", op.ID, op.Reconciles+1, delay, reason)
-		}
-		got, terr := p.Ledger.TouchUnknown(ctx, now, op.ID, now.Add(delay), reason, detail)
-		if terr == nil {
-			logTransition(got)
-		}
-		return false, terr
+		return false, p.touchUnknown(ctx, op, wait, reason, detail)
 	}
 	kind, ok := p.Kinds[op.Kind]
 	if !ok {
 		return touch(ReasonReconcileFailed, "unsupported kind "+op.Kind)
+	}
+	if pk, ok := kind.(PlannedKind); ok {
+		return p.reconcilePlanned(ctx, op, pk)
 	}
 	want, rerr := kind.Render(op)
 	if rerr != nil {
@@ -626,6 +654,19 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	switch {
 	case len(ev.Matches) == 1 && ev.Deleted == 0 && ev.Mismatched == 0 && resultIDRE.MatchString(ev.Matches[0]):
 		if ev.Adopted {
+			a, found, aerr := p.Ledger.Adoption(ctx, op.ID)
+			if aerr != nil {
+				return touch(ReasonReconcileFailed, aerr.Error())
+			}
+			if found && a.YTID == ev.Matches[0] && a.Attempts == op.Attempts {
+				// This op's last dispatch adopted this issue and sent
+				// nothing (RecordAdoption): no create of its can land.
+				s := p.apply(ctx, kind, op, a.YTID, true)
+				if s.err == nil {
+					logTransition(s.op)
+				}
+				return s.err == nil, s.err
+			}
 			return touch(ReasonAdoptionUnconfirmed, ev.Matches[0]+" is the task's unmarked issue, the one Send adopts; a create this op sent may still land, so an operator resolves it (--applied "+ev.Matches[0]+" --adopted)")
 		}
 		s := p.apply(ctx, kind, op, ev.Matches[0], false)
@@ -643,6 +684,22 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	return touch(ReasonNoEvidence, "no candidate carries the marker")
 }
 
+// touchUnknown records one evidence search (or recovery pass) of op that did
+// not resolve it: due again after the reconcile backoff, or after wait (a
+// 429's Retry-After, a 401's AuthWait) when that is longer.
+func (p *Protocol) touchUnknown(ctx context.Context, op Op, wait time.Duration, reason, detail string) error {
+	now := p.now()
+	delay := max(p.reconcileDelay(op.Reconciles+1), min(wait, p.MaxRetryAfter))
+	if op.Reconciles >= 49 {
+		log.Printf("ytwrite.reconcile_warning op_id=%d reconciles=%d next_after=%q reason=%q", op.ID, op.Reconciles+1, delay, reason)
+	}
+	got, err := p.Ledger.TouchUnknown(ctx, now, op.ID, now.Add(delay), reason, detail)
+	if err == nil {
+		logTransition(got)
+	}
+	return err
+}
+
 // Resolution is an operator's decision on a remote_unknown op after looking at
 // YouTrack themselves.
 type Resolution struct {
@@ -653,7 +710,9 @@ type Resolution struct {
 	// Adopted says whether YTID existed before the op (it adopted an issue
 	// made elsewhere: true) or was created by it (false); only with Applied.
 	// An adopted issue already holds the task's history, so its binding
-	// starts after the latest comment; a created one starts at 0. nil is "not
+	// starts after the comments the task had when the op was prepared (the
+	// store's yt_issue_comment_bounds, hk 4301); a created one starts at 0.
+	// nil is "not
 	// stated", which a kind whose binding depends on it refuses
 	// (issue_create), so an older client cannot pick a cutoff by omission.
 	Adopted *bool
@@ -676,6 +735,11 @@ func (p *Protocol) Resolve(ctx context.Context, id int64, r Resolution) (Result,
 	}
 	if r.Adopted != nil && !r.Applied {
 		return Result{}, fmt.Errorf("%w: adopted goes with applied only", ErrInvalid)
+	}
+	if kind, ok := p.kindFor(op.Kind); ok {
+		if _, planned := kind.(PlannedKind); planned {
+			return p.resolvePlanned(ctx, op, r)
+		}
 	}
 	var got Op
 	if r.Applied {

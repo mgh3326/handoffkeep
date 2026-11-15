@@ -99,3 +99,14 @@ func (c Client) SettleMerged(ctx context.Context, project string, dryRun bool) (
 	}
 	return out, nil
 }
+
+// TaskHygiene runs the daily hygiene sweep (POST /v1/tasks/hygiene).
+// dryRun true writes nothing and reports prospective moves and findings.
+func (c Client) TaskHygiene(ctx context.Context, project string, dryRun bool) (store.TaskHygieneReport, error) {
+	var out store.TaskHygieneReport
+	body := map[string]any{"project": project, "dry_run": dryRun}
+	if err := c.call(ctx, "POST", "/v1/tasks/hygiene", body, &out); err != nil {
+		return store.TaskHygieneReport{}, unsupportedRoute(err, "task_hygiene_unsupported", "the task hygiene sweep")
+	}
+	return out, nil
+}

@@ -42,6 +42,8 @@ func TestTransitionJudgesResponseInEitherVocabulary(t *testing.T) {
 		{"developing", "developing", store.Task{State: "developing", Category: "started", ClaimedBy: "w", Refs: linked}, true},
 		{"reviewing", "reviewing", store.Task{State: "reviewing", Category: "started"}, true},
 		{"icebox", "icebox", store.Task{State: "icebox", Category: "canceled"}, true},
+		{"merged response after deploy", store.StateMerged, store.Task{State: store.StateDeployed, Category: "completed"}, true},
+		{"merged response does not accept unrelated state", store.StateMerged, store.Task{State: store.StateDropped, Category: "completed"}, false},
 		{"wrong state", "reviewing", store.Task{State: "developing", Category: "started"}, false},
 		// old names answered by a current server
 		{"in_progress -> developing", "in_progress", store.Task{State: "developing", Category: "started", ClaimedBy: "w", Refs: linked}, true},

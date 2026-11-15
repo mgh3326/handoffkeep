@@ -72,6 +72,42 @@ jobs:
       suite: ${{ inputs.suite }}
       packages: ${{ inputs.packages }}
 
+  schema-compat:
+    name: previous release on target schema
+    needs: resolve
+    if: ${{ inputs.suite == 'deploy' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: handoffkeep
+          POSTGRES_PASSWORD: handoffkeep
+          POSTGRES_DB: handoffkeep
+        ports: ["127.0.0.1:5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+      TARGET_SHA: ${{ needs.resolve.outputs.sha }}
+    steps:
+      # This job runs code from TARGET_SHA. persist-credentials: false keeps the
+      # job token out of .git/config so that code cannot read it. The fetch below
+      # and the script need no token: the repo is public.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch the target commit
+        run: git fetch --no-tags origin "$TARGET_SHA"
+      - uses: ./.github/actions/setup-go-cached
+      - name: Previous release on the target schema
+        run: bash scripts/test-previous-release-schema.sh
+
   status:
     name: post ci-ok status
     # A completed dispatch posts a COMMIT STATUS named ci-ok on the target sha;
@@ -79,7 +115,7 @@ jobs:
     # the commit status on the exact head, which only exists for suite=all —
     # partial suites post ci-ok-<suite> and name their check ci-ok (<suite>).
     if: always() && needs.resolve.result == 'success'
-    needs: [resolve, ci]
+    needs: [resolve, ci, schema-compat]
     runs-on: ubuntu-latest
     concurrency:
       group: ci-any-ref-status-${{ needs.resolve.outputs.sha }}-${{ inputs.suite }}-${{ inputs.packages }}
@@ -87,7 +123,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       TARGET_SHA: ${{ needs.resolve.outputs.sha }}
-      RESULT: ${{ needs.ci.result }}
+      CI_RESULT: ${{ needs.ci.result }}
+      SCHEMA_COMPAT_RESULT: ${{ needs.schema-compat.result }}
       SUITE: ${{ inputs.suite }}
       PACKAGES: ${{ inputs.packages }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -97,10 +134,14 @@ jobs:
           # A cancelled or abandoned run says nothing about the sha: post no
           # status, so the gate reads unknown and holds rather than red
           # (hk 2924, hk 3155).
+          RESULT=$CI_RESULT
+          if [[ "$CI_RESULT" == success && "$SUITE" == deploy ]]; then
+            RESULT=$SCHEMA_COMPAT_RESULT
+          fi
           case "$RESULT" in
-            success)   STATE=success ;;
+            success) STATE=success ;;
             cancelled|abandoned) STATE= ;;
-            *)         STATE=failure ;;
+            *) STATE=failure ;;
           esac
           if [[ -z "$STATE" ]]; then
             echo "ci was cancelled; no status posted"

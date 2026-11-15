@@ -25,7 +25,8 @@ var ErrYTFieldsOff = errors.New("yt_fields_off")
 
 // YTFieldsBackfillOptions selects the tasks of one backfill run. Project and
 // TaskID narrow the walk ("" and 0 for every task); Limit caps the ops
-// prepared in this run (0 for no cap); DryRun counts without writing.
+// prepared in this run (0 for no cap; a moved task makes two ops, so a cap of
+// 1 cannot prepare one); DryRun counts without writing.
 type YTFieldsBackfillOptions struct {
 	Project string
 	TaskID  int64
@@ -78,7 +79,9 @@ type YTFieldsBackfillProject struct {
 }
 
 // YTFieldsBackfillReport is what `youtrack fields-backfill` did, per project
-// in order of each project's first task id, and in total.
+// in order of each project's first task id, and in total. OverLimit is the
+// tasks this run left for a later one because their ops did not fit what was
+// left of Limit; they are in no count.
 type YTFieldsBackfillReport struct {
 	Tenant   string                     `json:"tenant"`
 	Project  string                     `json:"project,omitempty"`
@@ -87,15 +90,21 @@ type YTFieldsBackfillReport struct {
 	DryRun   bool                       `json:"dry_run"`
 	Projects []*YTFieldsBackfillProject `json:"projects"`
 	Total    YTFieldsBackfillCounts     `json:"total"`
+	// OverLimit makes a run that prepared nothing explain itself: with Limit 1
+	// every moved task is over the limit.
+	OverLimit int `json:"over_limit,omitempty"`
 }
 
 // BackfillYTFieldsOps prepares the issue_fields snapshot of every task opt
 // selects, in id order, each in its own transaction under the task's lane
 // lock, by the consumer's rule and the consumer's gate (mode on and its
 // tenant; off is ErrYTFieldsOff). It stops once opt.Limit ops are prepared,
-// counting the issue_move ops with the issue_fields ones (hk 4112);
-// the next run starts again from the first task and passes the ones already
-// sent as unchanged. A dry run reads the same rows and writes nothing.
+// counting the issue_move ops with the issue_fields ones (hk 4112). A task
+// whose ops do not fit what is left of the limit is skipped for this run
+// (counted in OverLimit) and the walk goes on, so a task that fits still runs
+// behind it and a run may stop one op short of the limit. The next run starts
+// again from the first task and passes the ones already sent as unchanged. A
+// dry run reads the same rows and writes nothing.
 func (s *Store) BackfillYTFieldsOps(ctx context.Context, opt YTFieldsBackfillOptions) (YTFieldsBackfillReport, error) {
 	r := YTFieldsBackfillReport{Project: opt.Project, TaskID: opt.TaskID, Limit: opt.Limit, DryRun: opt.DryRun,
 		Projects: []*YTFieldsBackfillProject{}}
@@ -121,9 +130,19 @@ func (s *Store) BackfillYTFieldsOps(ctx context.Context, opt YTFieldsBackfillOpt
 		if opt.Limit > 0 && r.Total.Ops >= opt.Limit {
 			break
 		}
-		outcome, ops, project, err := s.backfillYTFields(ctx, tenant, id, opt.DryRun)
+		remaining := 0
+		if opt.Limit > 0 {
+			remaining = opt.Limit - r.Total.Ops
+		}
+		outcome, ops, project, overLimit, err := s.backfillYTFields(ctx, tenant, id, opt.DryRun, remaining)
 		if err != nil {
 			return r, fmt.Errorf("task %d: %w", id, err)
+		}
+		if overLimit {
+			// Not this run's: it needs more ops than are left. A later task that
+			// needs fewer still fits, so go on rather than stall behind it.
+			r.OverLimit++
+			continue
 		}
 		if outcome == ytFieldsDeleted {
 			continue
@@ -146,29 +165,38 @@ func (s *Store) BackfillYTFieldsOps(ctx context.Context, opt YTFieldsBackfillOpt
 // then the consumer's rule. A dry run applies the same rule
 // (ytSnapshotUnchanged: an unchanged sha whose op was rejected counts as prepared)
 // and rolls back.
-func (s *Store) backfillYTFields(ctx context.Context, tenant string, id int64, dryRun bool) (ytFieldsOutcome, int, string, error) {
+func (s *Store) backfillYTFields(ctx context.Context, tenant string, id int64, dryRun bool, remaining int) (ytFieldsOutcome, int, string, bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return "", 0, "", err
+		return "", 0, "", false, err
 	}
 	defer tx.Rollback(ctx)
 	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(id, 10)); err != nil {
-		return "", 0, "", err
+		return "", 0, "", false, err
 	}
 	now := time.Now().UTC()
 	tasks, err := readYTFieldsRows(ctx, tx, []int64{id}, now, s.StartedStalledHours())
 	if err != nil {
-		return "", 0, "", err
+		return "", 0, "", false, err
 	}
 	t, found := tasks[id]
 	project := t.fields.Project
 	// A dry run applies the consumer's rule as it would, and rolls back.
-	outcome, ops, err := prepareYTFieldsTx(ctx, tx, now, tenant, s.ytMovesNow() == YTMovesOn, id, t, found)
+	outcome, ops, opID, err := prepareYTFieldsTx(ctx, tx, now, tenant, s.ytMovesNow() == YTMovesOn, id, t, found)
 	if err != nil {
-		return "", 0, "", err
+		return "", 0, "", false, err
+	}
+	if remaining > 0 && ops > remaining {
+		// Roll back this task: its ops cannot fit within the run's remaining
+		// budget. A later run, with more budget, starts from this task again.
+		return "", 0, "", true, nil
 	}
 	if dryRun {
-		return outcome, ops, project, nil
+		return outcome, ops, project, false, nil
 	}
-	return outcome, ops, project, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return "", 0, "", false, err
+	}
+	logYTFieldsEnqueued(opID, id, t)
+	return outcome, ops, project, false, nil
 }

@@ -1,9 +1,10 @@
 // #529 DeployPanel — the mutant-facing render rules: a record-less service
 // reads "기록 없음" (never "최신"), the merged list heading is "마지막 배포
-// 이후 머지됨" (never "미배포"), a null deployed_at blocks the list with an
-// explicit boundary note, and a failed/rolled_back latest attempt shows next
+// 이후 머지됨" (never "미배포"), a null deployed_at measures the list from the
+// record key and says so, and a failed/rolled_back latest attempt shows next
 // to — never instead of — the last success.
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import { DeploysPage } from "./DeploysPage";
@@ -71,7 +72,7 @@ function fixture(over: Partial<DeployPendingResponse> = {}): DeployPendingRespon
           source: "backfill",
           included_prs: [],
         },
-        merged_boundary: "unrecorded",
+        merged_boundary: "deploy_record_key",
         recent: [],
         merged_since: [],
       },
@@ -114,7 +115,7 @@ describe("DeployPanel", () => {
 
   it("keeps the honest heading — '마지막 배포 이후 머지됨', never '미배포' (mutant: heading)", async () => {
     render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
-    await waitFor(() => expect(screen.getByText(/마지막 배포 이후 머지됨/)).toBeTruthy());
+    await waitFor(() => expect(screen.getAllByText(/마지막 배포 이후 머지됨/).length).toBeGreaterThan(0));
     expect(document.body.textContent).not.toContain("미배포");
   });
 
@@ -167,9 +168,18 @@ describe("DeployPanel", () => {
     expect(within(at).getAllByText("SHA 미기록").length).toBeGreaterThan(0);
   });
 
-  it("a null deployed_at shows the boundary note and no list (mutant: no fabricated boundary)", async () => {
-    render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
-    await waitFor(() => expect(screen.getByText(/배포 시각이 기록되지 않아 마지막 배포 이후 머지 목록을 계산할 수 없습니다/)).toBeTruthy());
+  it("a null deployed_at measures the merged list from the record key and says so", async () => {
+    const data = fixture();
+    const at = data.services[1];
+    at.state = "pending";
+    at.merged_since = [{ task_id: 77, title: "Merged after the record key", pr: "https://github.com/mgh3326/auto_trader/pull/7", merged_at: "2026-09-24T01:00:00Z" }];
+    render(<DeploysPage fetchStatus={fetcher(data)} pollMs={600_000} />);
+    const card = await screen.findByLabelText("auto_trader 배포");
+    expect(within(card).getByText(/배포 기록 키의 시각을 기준으로 합니다/)).toBeTruthy();
+    expect(within(card).getByText("마지막 배포 이후 머지됨 (1)")).toBeTruthy();
+    expect(within(card).getByText("Merged after the record key")).toBeTruthy();
+    // The list is real, so the old "cannot be computed" note is gone.
+    expect(within(card).queryByText(/머지 목록을 계산할 수 없습니다/)).toBeNull();
   });
 
   it("shows a failed latest attempt next to the last success, with the serving caveat", async () => {
@@ -479,5 +489,22 @@ describe("deploy helpers", () => {
     expect(deployStamp("junk")).toBeNull();
     expect(deployPRLabel("https://github.com/mgh3326/handoffkeep/pull/24")).toBe("#24");
     expect(deployPRLabel("handoffkeep#24")).toBe("handoffkeep#24");
+  });
+});
+
+describe("deploys.css", () => {
+  it("has a rule for every dp- class the panel renders, and lays the included PRs out with a gap", async () => {
+    render(<DeploysPage fetchStatus={fetcher(fixture())} pollMs={600_000} />);
+    await screen.findByLabelText("handoffkeep 배포");
+    const css = readFileSync("src/deploys/deploys.css", "utf8");
+    const used = new Set<string>();
+    for (const el of document.querySelectorAll('[class*="dp-"]')) {
+      for (const name of Array.from(el.classList)) if (name.startsWith("dp-")) used.add(name);
+    }
+    expect(used.has("dp-prs")).toBe(true);
+    const missing = [...used].filter((name) => !new RegExp(`\\.${name}(?![\\w-])`).test(css));
+    expect(missing).toEqual([]);
+    // Without the flex gap the label and links run together ("포함 PR#20#21").
+    expect(css).toMatch(/\.dp-prs\s*\{[^}]*display:\s*flex[^}]*gap:/);
   });
 });

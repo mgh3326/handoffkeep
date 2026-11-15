@@ -328,8 +328,8 @@ func TestYTFeedPrunedBeyondCursorReadsNothing(t *testing.T) {
 // document_articles consumer (hk 4206) and nothing else; with their modes off a pass creates their cursors and prepares
 // nothing.
 func TestRunYTFeedConsumersRegistered(t *testing.T) {
-	if len(ytFeedConsumers) != 4 || ytFeedConsumers[ytFieldsConsumer].build == nil || ytFeedConsumers[ytDocCommentsConsumer].build == nil ||
-		ytFeedConsumers[ytDecisionsConsumer].build == nil || ytFeedConsumers[ytDocsConsumer].build == nil {
+	if len(ytFeedConsumers) != 5 || ytFeedConsumers[ytFieldsConsumer].build == nil || ytFeedConsumers[ytDocCommentsConsumer].build == nil ||
+		ytFeedConsumers[ytDecisionsConsumer].build == nil || ytFeedConsumers[ytDocsConsumer].build == nil || ytFeedConsumers[ytLinksConsumer].build == nil {
 		t.Fatalf("production feed consumers: %v", ytFeedConsumers)
 	}
 	passOf := func(passes []YTFeedPass, name string) (YTFeedPass, bool) {
@@ -343,17 +343,17 @@ func TestRunYTFeedConsumersRegistered(t *testing.T) {
 	s := schemaStore(t, "yt_feed_registered")
 	task := ytFeedTask(t, s, "one")
 	passes, err := s.RunYTFeedConsumers(t.Context(), 100)
-	if err != nil || len(passes) != 4 {
+	if err != nil || len(passes) != 5 {
 		t.Fatalf("passes = %+v, %v", passes, err)
 	}
-	for _, name := range []string{ytFieldsConsumer, ytDocCommentsConsumer, ytDecisionsConsumer, ytDocsConsumer} {
+	for _, name := range []string{ytFieldsConsumer, ytDocCommentsConsumer, ytDecisionsConsumer, ytDocsConsumer, ytLinksConsumer} {
 		if p, ok := passOf(passes, name); !ok || !p.Created {
 			t.Fatalf("first pass of %s = %+v, %v", name, p, ok)
 		}
 	}
 	ytFeedExec(t, s, `UPDATE tasks SET title='two' WHERE id=$1`, task.ID)
 	passes, err = s.RunYTFeedConsumers(t.Context(), 100)
-	if err != nil || len(passes) != 4 {
+	if err != nil || len(passes) != 5 {
 		t.Fatalf("passes = %+v, %v", passes, err)
 	}
 	if p, ok := passOf(passes, ytFieldsConsumer); !ok || p.Handled != 1 {

@@ -87,7 +87,14 @@ func (s *Store) PutDeployService(ctx context.Context, x DeployService) (DeploySe
 }
 
 func (s *Store) ListDeployServices(ctx context.Context) ([]DeployService, error) {
-	rows, err := s.pool.Query(ctx, `SELECT `+deployServiceColumns+` FROM deploy_services ORDER BY name`)
+	return listDeployServices(ctx, s.pool)
+}
+
+// listDeployServices reads through db, the pool or an open transaction. A pass
+// that already holds a transaction reads through it, so it takes no second
+// pool connection while its locks are held.
+func listDeployServices(ctx context.Context, db rowsQuerier) ([]DeployService, error) {
+	rows, err := db.Query(ctx, `SELECT `+deployServiceColumns+` FROM deploy_services ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}

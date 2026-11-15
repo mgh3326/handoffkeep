@@ -381,6 +381,46 @@ func RunProtocol(t *testing.T, nl NewLedger) {
 		}
 	})
 
+	t.Run("a_later_write_waits_out_a_long_unknown_reconcile", func(t *testing.T) {
+		e := newEnv(t, nl)
+		e.yt.Queue(Fault{Kind: ServerError, Status: http.StatusServiceUnavailable})
+		a := e.append("ka", "first")
+		e.wantStatus(a, ytwrite.StatusPending, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+		// Evidence searches escalate to hourly after 50 and to daily after
+		// 74; run past both thresholds. Every search finds nothing, so the
+		// op stays remote_unknown in its daily-backoff regime.
+		for i := 0; i < 80; i++ {
+			e.clock.Advance(25 * time.Hour)
+			e.drive()
+		}
+		e.wantStatus(e.lookup(a), ytwrite.StatusPending, ytwrite.StateRemoteUnknown, ytwrite.ReasonNoEvidence)
+		// A later write on the same entity is admitted but stays queued
+		// behind the unresolved one, across the escalated waits: it is never
+		// dispatched and nothing reaches YouTrack.
+		b := e.append("kb", "second")
+		e.wantStatus(b, ytwrite.StatusPending, ytwrite.StatePrepared, ytwrite.ReasonWaitingForEarlier)
+		for i := 0; i < 3; i++ {
+			e.clock.Advance(25 * time.Hour)
+			e.drive()
+			if got := e.lookup(b); got.State != ytwrite.StatePrepared || got.Status != ytwrite.StatusPending {
+				t.Fatalf("queued op after drive %d = %s/%s, want still prepared", i, got.Status, got.State)
+			}
+		}
+		if e.yt.Commits() != 0 {
+			t.Fatalf("commits=%d while the earlier op is unresolved", e.yt.Commits())
+		}
+		// Only the earlier op's resolution releases the queued write.
+		if _, err := e.p.Resolve(context.Background(), a.OpID, ytwrite.Resolution{By: "operator", Note: "checked YouTrack"}); err != nil {
+			t.Fatal(err)
+		}
+		e.clock.Advance(time.Minute)
+		e.drive()
+		e.wantStatus(e.lookup(b), ytwrite.StatusApplied, ytwrite.StateApplied, "")
+		if e.yt.Commits() != 1 {
+			t.Fatalf("commits=%d, want only the second write's", e.yt.Commits())
+		}
+	})
+
 	t.Run("evidence_search_pages_and_demands_the_exact_body", func(t *testing.T) {
 		e := newEnv(t, nl)
 		e.page = 2

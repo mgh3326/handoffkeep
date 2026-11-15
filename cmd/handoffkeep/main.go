@@ -213,7 +213,7 @@ func tasksCmd(args []string, out io.Writer) error {
 
 func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|set-area|areas|set-priority|parent|relate|unrelate|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|drift|settle-merged|intake|triage")
+		return errors.New("usage: tasks add|list|export|claim|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|set-area|areas|set-priority|parent|relate|unrelate|backfill-hierarchy|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|drift|settle-merged|hygiene|intake|triage")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -235,6 +235,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if args[0] == "relate" || args[0] == "unrelate" {
 		return taskRelationCmd(args, out)
+	}
+	if args[0] == "backfill-hierarchy" {
+		return taskBackfillHierarchyCmd(args[1:], out)
 	}
 	if args[0] == "project" || args[0] == "projects" {
 		return taskProjectCmd(args, out)
@@ -265,6 +268,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if args[0] == "settle-merged" {
 		return taskSettleMergedCmd(args[1:], out)
+	}
+	if args[0] == "hygiene" {
+		return taskHygieneCmd(args[1:], out)
 	}
 	if args[0] == "intake" {
 		return taskIntakeCmd(args[1:], out)

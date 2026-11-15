@@ -147,6 +147,25 @@ func TestDeliveredCloseKeepsTheMergeRules(t *testing.T) {
 	if links := changeLinks(t, s, mustChange(t, s, "example/app", 4333).ID); links[y.ID] != "" {
 		t.Fatalf("a refused close left the link %v", links)
 	}
+
+	// A task already linked to the PR as references (an earlier revert event
+	// named it with this PR as the revert PR) implements it once it closes on
+	// it, so a later revert of the PR reaches it.
+	z := flowTask(t, s, pool, "fix", StateDeveloping, true)
+	change := mustChange(t, s, "example/app", 4333)
+	if _, err := pool.Exec(t.Context(), `INSERT INTO change_tasks(change_id,task_id,relation,created_at) VALUES($1,$2,'references',now())`, change.ID, z.ID); err != nil {
+		t.Fatal(err)
+	}
+	nonCanonical := "https://github.com/example/app/pull/+4333"
+	if _, err := s.TransitionTask(t.Context(), z.ID, StateMerged, "tester", "", &TaskRefs{PR: nonCanonical}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if links := changeLinks(t, s, change.ID); links[z.ID] != ChangeImplements {
+		t.Fatalf("links %v, want the references link reclassified as implements", links)
+	}
+	if got := stateOf(t, s, z.ID); got.Refs.PR != merged {
+		t.Fatalf("stored PR %q, want canonical %q", got.Refs.PR, merged)
+	}
 }
 
 // TestDeliveredCloseOfASetParent (PR #351 review, --set): a ticket set's

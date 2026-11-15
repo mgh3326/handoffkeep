@@ -125,16 +125,19 @@ func TestUIAttentionShape(t *testing.T) {
 	deploys := body["deploys"].(map[string]any)
 	wantKeys(t, "deploys", deploys, "count", "events_capped", "items")
 	deployItems := deploys["items"].([]any)
-	if deploys["count"] != float64(2) || deploys["events_capped"] != false || len(deployItems) != 2 {
+	// auto_trader's record has no deployed_at, so its merge counts from the
+	// record key: three merges wait, newest first.
+	if deploys["count"] != float64(3) || deploys["events_capped"] != false || len(deployItems) != 3 {
 		t.Fatalf("deploys=%v", deploys)
 	}
 	wantKeys(t, "deploy item", deployItems[0], "key", "service", "task_id", "title", "pr", "merged_at", "read", "woken")
-	newest, older := deployItems[0].(map[string]any), deployItems[1].(map[string]any)
+	newest, keyed, older := deployItems[0].(map[string]any), deployItems[1].(map[string]any), deployItems[2].(map[string]any)
 	if newest["title"] != "newer after the deploy" || newest["service"] != "handoffkeep" || newest["pr"] != "https://github.com/mgh3326/handoffkeep/pull/12" ||
+		keyed["title"] != "other service" || keyed["service"] != "auto_trader" ||
 		older["title"] != "after the deploy" {
 		t.Fatalf("deploy items=%v", deployItems)
 	}
-	for _, item := range []map[string]any{newest, older} {
+	for _, item := range []map[string]any{newest, keyed, older} {
 		if want := "deploy:" + item["service"].(string) + ":" + strconv.FormatInt(int64(item["task_id"].(float64)), 10); item["key"] != want {
 			t.Fatalf("deploy key=%v, want %q", item["key"], want)
 		}
