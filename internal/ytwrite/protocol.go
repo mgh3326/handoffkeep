@@ -528,7 +528,9 @@ func (p *Protocol) markUnknown(ctx context.Context, op Op, reason, detail string
 	return settled{got, err}
 }
 
-// reconcileDelay is the wait after the n-th evidence search of an op.
+// reconcileDelay is the wait after the n-th attempt of an op that has to be
+// tried again without having been resolved: the n-th evidence search of a
+// remote_unknown op, or the n-th failed read before a write (notSent, hk 4784).
 func (p *Protocol) reconcileDelay(n int) time.Duration {
 	if n >= 74 {
 		return 24 * time.Hour
@@ -539,8 +541,9 @@ func (p *Protocol) reconcileDelay(n int) time.Duration {
 	return p.retryDelay(n)
 }
 
-// retryDelay is the capped exponential wait used for dispatch retries and as
-// the initial wait before evidence-search thresholds take effect.
+// retryDelay is the capped doubling at the base of reconcileDelay: ReconcileBase
+// doubling until ReconcileMax, so a read or a search that keeps failing cannot
+// come back every pass.
 func (p *Protocol) retryDelay(n int) time.Duration {
 	d := p.ReconcileBase
 	for i := 0; i < n && d < p.ReconcileMax; i++ {
