@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -135,4 +136,63 @@ func (c Client) GetAttachment(ctx context.Context, sha string) (Attachment, io.R
 		}
 	}
 	return Attachment{SHA256: sha, MIME: resp.Header.Get("Content-Type")}, resp.Body, nil
+}
+
+// ArchiveCandidate is one attachment GET /v1/attachments/archive-candidates
+// offers for archiving: its sha, size, type and original name, the task that
+// stores it, and every task that refers to it.
+type ArchiveCandidate struct {
+	SHA256       string           `json:"sha256"`
+	SizeBytes    int64            `json:"size_bytes"`
+	MIME         string           `json:"mime"`
+	OriginalName string           `json:"original_name"`
+	TaskID       int64            `json:"task_id"`
+	Tasks        []ArchiveTaskRef `json:"tasks"`
+}
+
+// ArchiveTaskRef is a task that refers to an archive candidate, with the
+// state it closed in. ClosedAt is nil while the task has no close.
+type ArchiveTaskRef struct {
+	ID       int64      `json:"id"`
+	State    string     `json:"state"`
+	ClosedAt *time.Time `json:"closed_at"`
+}
+
+// ArchiveCandidatesPage is one page of GET /v1/attachments/archive-candidates:
+// candidates in sha order, and Next is the sha to continue after ("" on the
+// last page).
+type ArchiveCandidatesPage struct {
+	Candidates []ArchiveCandidate `json:"candidates"`
+	Next       string             `json:"next"`
+}
+
+// ArchiveCandidates reads the attachments whose every referring task is
+// closed, in sha order. after is the previous page's Next ("" to start).
+func (c Client) ArchiveCandidates(ctx context.Context, limit int, after string) (ArchiveCandidatesPage, error) {
+	q := url.Values{"limit": {strconv.Itoa(limit)}}
+	if after != "" {
+		q.Set("after", after)
+	}
+	var out ArchiveCandidatesPage
+	err := c.transport().Call(ctx, "GET", "/v1/attachments/archive-candidates?"+q.Encode(), nil, &out)
+	return out, err
+}
+
+// ArchiveRecord is what POST /v1/attachments/{sha}/archive answers: where the
+// archive copy is, when it was recorded, and whether the hot copy was deleted.
+// hot_deleted is false in record mode and true only once the delete ran.
+type ArchiveRecord struct {
+	ArchivedAt time.Time `json:"archived_at"`
+	Location   string    `json:"location"`
+	HotDeleted bool      `json:"hot_deleted"`
+}
+
+// RecordAttachmentArchive tells hk that sha is archived at location, relative
+// to the archive root, with the size the stored copy has. A repeat with the
+// same location answers the recorded result.
+func (c Client) RecordAttachmentArchive(ctx context.Context, sha, location string, size int64) (ArchiveRecord, error) {
+	var out ArchiveRecord
+	err := c.transport().Call(ctx, "POST", "/v1/attachments/"+url.PathEscape(sha)+"/archive",
+		map[string]any{"location": location, "size_bytes": size, "sha256": sha}, &out)
+	return out, err
 }

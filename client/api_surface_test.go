@@ -19,6 +19,7 @@ import (
 var exportedAPI = []string{
 	// The client and its fleet calls.
 	"Client",
+	"Client.ArchiveCandidates",
 	"Client.AttachmentURL",
 	"Client.BeginAttachmentUpload",
 	"Client.CompleteAttachmentUpload",
@@ -35,11 +36,16 @@ var exportedAPI = []string{
 	"Client.PutAttachment",
 	"Client.PutDocument",
 	"Client.RebindTaskJob",
+	"Client.RecordAttachmentArchive",
 	"Client.PutTaskSpawn",
 	"Client.ReopenTask",
 	"Client.TaskStates",
 	"Client.TaskStatesSnapshot",
 	// Wire types.
+	"ArchiveCandidate",
+	"ArchiveCandidatesPage",
+	"ArchiveRecord",
+	"ArchiveTaskRef",
 	"Attachment",
 	"AttachmentUploadTicket",
 	"DecisionAskInput",
