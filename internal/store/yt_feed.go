@@ -69,6 +69,11 @@ type ytFeedConsumer struct {
 	// build, when set, makes the pass's handler from the store and the
 	// pass's time (registerYTFeedStoreConsumer); handle is then unused.
 	build func(s *Store, now time.Time) FeedHandler
+	// created, when set, runs in the pass transaction that creates the
+	// consumer's cursor, after the cursor row and before the first read: a
+	// consumer whose history before the cursor is not the feed's to handle
+	// records that here (task_links moves its sweep generation, I13).
+	created func(ctx context.Context, tx pgx.Tx, now time.Time) error
 }
 
 // handler is c's handler for one pass of s at now.
@@ -234,6 +239,11 @@ func (s *Store) runYTFeedConsumer(ctx context.Context, c ytFeedConsumer, limit i
 	default:
 		if err := tx.QueryRow(ctx, `SELECT last_sync_id FROM yt_feed_cursors WHERE consumer=$1 FOR UPDATE`, c.name).Scan(&pass.Cursor); err != nil {
 			return pass, err
+		}
+	}
+	if pass.Created && c.created != nil {
+		if err := c.created(ctx, tx, now); err != nil {
+			return YTFeedPass{Consumer: c.name}, fmt.Errorf("yt feed consumer %s: created: %w", c.name, err)
 		}
 	}
 	// One statement, so pruned_through, max_sync_id and the rows come from

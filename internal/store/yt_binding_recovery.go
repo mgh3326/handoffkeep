@@ -84,7 +84,8 @@ func scanYTHeldOp(r ytOpScanner) (ytHeldOp, error) {
 // comment (the same kind, another principal) reads yt_article_bindings, and
 // the create kinds have their own gates; neither is this pass's.
 const ytHeldScopeSQL = `o.entity_kind = 'task' AND ((o.kind = '` + ytwrite.KindCommentAppend + `' AND o.principal = '` + YTCommentPrincipal + `')
-	OR o.kind IN ('` + ytwrite.KindIssueFields + `','` + ytwrite.KindIssueMove + `'))`
+	OR o.kind IN ('` + ytwrite.KindIssueFields + `','` + ytwrite.KindIssueMove + `')
+	OR (o.kind = '` + ytwrite.KindIssueLinks + `' AND o.principal = '` + YTLinksPrincipal + `'))`
 
 // ytHeldInScope is ytHeldScopeSQL for an op already read.
 func ytHeldInScope(op ytHeldOp) bool {
@@ -96,6 +97,8 @@ func ytHeldInScope(op ytHeldOp) bool {
 		return op.principal == YTCommentPrincipal
 	case ytwrite.KindIssueFields, ytwrite.KindIssueMove:
 		return true
+	case ytwrite.KindIssueLinks:
+		return op.principal == YTLinksPrincipal
 	}
 	return false
 }
@@ -111,6 +114,9 @@ func (s *Store) ytHeldKindModeOn(kind string) bool {
 		return m == YTFieldsOn
 	case ytwrite.KindIssueMove:
 		return s.ytMovesNow() == YTMovesOn
+	case ytwrite.KindIssueLinks:
+		m, _ := s.ytLinksNow()
+		return m == YTLinksOn
 	}
 	return false
 }
@@ -119,7 +125,7 @@ func (s *Store) ytHeldKindModeOn(kind string) bool {
 // candidate query: an op of a kind that is off is held_mode and is not read.
 func (s *Store) ytHeldKindsOn() []string {
 	var kinds []string
-	for _, k := range []string{ytwrite.KindCommentAppend, ytwrite.KindIssueFields, ytwrite.KindIssueMove} {
+	for _, k := range []string{ytwrite.KindCommentAppend, ytwrite.KindIssueFields, ytwrite.KindIssueMove, ytwrite.KindIssueLinks} {
 		if s.ytHeldKindModeOn(k) {
 			kinds = append(kinds, k)
 		}
@@ -275,7 +281,8 @@ func (s *Store) recoverHeldYTOps(ctx context.Context, tenant string, taskID int6
 var ytHeldKeptSQL = `NOT EXISTS (SELECT 1 FROM yt_task_bindings b WHERE b.task_id::text = o.entity_id AND b.tenant <> o.tenant)
 	AND NOT EXISTS (SELECT 1 FROM yt_authority a WHERE a.authority = '` + string(YTAuthorityYouTrack) + `' AND (
 		(o.principal = '` + YTCommentPrincipal + `' AND a.kind = '` + string(ytAuthorityKindOf(YTCommentPrincipal)) + `')
-		OR (o.principal = '` + YTFieldsPrincipal + `' AND a.kind = '` + string(ytAuthorityKindOf(YTFieldsPrincipal)) + `')))`
+		OR (o.principal = '` + YTFieldsPrincipal + `' AND a.kind = '` + string(ytAuthorityKindOf(YTFieldsPrincipal)) + `')
+		OR (o.principal = '` + YTLinksPrincipal + `' AND a.kind = '` + string(ytAuthorityKindOf(YTLinksPrincipal)) + `')))`
 
 // heldYTCandidates lists up to limit prepared ops of tenant and kinds created
 // at or before cutoff, after the (created_at, id) position, that the gate of

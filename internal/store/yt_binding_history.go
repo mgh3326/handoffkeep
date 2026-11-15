@@ -185,10 +185,12 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	rows, err := tx.Query(ctx, `UPDATE yt_write_ops SET state='rejected', reason=$2, last_error=$3, resolved_at=$4
 		WHERE entity_kind='task' AND entity_id=$1 AND state='prepared' AND tenant=$10
 			AND ((principal=$5 AND kind=$6 AND (yt_target_id=$11 OR yt_target_id=''))
-				OR (principal=$7 AND kind IN ($8,$9) AND yt_target_id=$11))
+				OR (principal=$7 AND kind IN ($8,$9) AND yt_target_id=$11)
+				OR (principal=$12 AND kind=$13 AND yt_target_id=$11))
 		RETURNING id, principal, kind`,
 		taskKey, reason, clipText(fmt.Sprintf("the binding to %s on %s was removed by %s", b.IssueID, b.Tenant, o.By), 2000), now,
-		YTCommentPrincipal, ytwrite.KindCommentAppend, YTFieldsPrincipal, ytwrite.KindIssueFields, ytwrite.KindIssueMove, b.Tenant, b.IssueID)
+		YTCommentPrincipal, ytwrite.KindCommentAppend, YTFieldsPrincipal, ytwrite.KindIssueFields, ytwrite.KindIssueMove, b.Tenant, b.IssueID,
+		YTLinksPrincipal, ytwrite.KindIssueLinks)
 	if err != nil {
 		return res, err
 	}
@@ -222,6 +224,17 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	if _, err := tx.Exec(ctx, `DELETE FROM yt_task_bindings WHERE task_id=$1`, taskID); err != nil {
 		return res, err
 	}
+	// Another task's links op that names this issue as a target and may be
+	// writing it now would add that link after the issue was taken away
+	// (hk 4711). Read after the DELETE: a claim that held the row FOR KEY
+	// SHARE has committed by now (claimYTLinksTargetsTx).
+	inflight, err := ytLinksInFlightToTx(ctx, tx, b.Tenant, taskID, b.IssueID)
+	if err != nil {
+		return res, err
+	}
+	if len(inflight) > 0 {
+		return res, refuse("links ops %s of other tasks may be writing a link to issue %s; resolve them first (yt ops resolve)", ytUnbindOpList(inflight), b.IssueID)
+	}
 	// The anchor's writers (the comment enqueue, the canary, the apply of an
 	// issue_create) all hold the task's lane lock, which this transaction
 	// holds, so the row cannot appear or change between the read of the
@@ -241,6 +254,11 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 		return res, err
 	}
 	if err := insertYTBindingHistoryTx(ctx, tx, b, ytBindingActionUnbound, o.By, o.Reason, now); err != nil {
+		return res, err
+	}
+	// The tasks whose links snapshots name this issue as a target are stale
+	// now; their next snapshot is requested in this transaction (hk 4711).
+	if err := ytLinksOnUnbindTx(ctx, tx, taskID); err != nil {
 		return res, err
 	}
 	res.Removed, res.Binding = true, &b

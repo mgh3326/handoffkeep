@@ -114,6 +114,21 @@ func ytFieldsModeFromEnv() (store.YTFieldsMode, error) {
 	}
 }
 
+// ytLinksModeFromEnv reads HANDOFFKEEP_YT_LINKS_MODE (hk 4639): unset or "off"
+// (the default) or "on", exactly like the fields mode. Any other value is an
+// error. On needs the write worker's credentials; the operator surface and the
+// canary that make it safe to turn on come with hk 4640.
+func ytLinksModeFromEnv() (store.YTLinksMode, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_LINKS_MODE")); raw {
+	case "", string(store.YTLinksOff):
+		return store.YTLinksOff, nil
+	case string(store.YTLinksOn):
+		return store.YTLinksOn, nil
+	default:
+		return "", fmt.Errorf("HANDOFFKEEP_YT_LINKS_MODE=%q: want off or on", raw)
+	}
+}
+
 // ytMovesModeFromEnv reads HANDOFFKEEP_YT_MOVES_MODE (hk 4111): unset or "off"
 // (the default) or "on", exactly like the fields mode. Any other value is an
 // error.
@@ -253,6 +268,10 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	if err != nil {
 		return nil, err
 	}
+	links, err := ytLinksModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
 	articles, err := ytDocsModeFromEnv()
 	if err != nil {
 		return nil, err
@@ -281,11 +300,12 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	if st != nil {
 		st.SetYTMovesMode(moves)
 	}
-	if mode == store.YTCommentsOff && issues == store.YTIssuesOff && fields == store.YTFieldsOff && docs == store.YTDocCommentsOff && decisions == store.YTDecisionsOff && articles == store.YTDocsOff {
+	if mode == store.YTCommentsOff && issues == store.YTIssuesOff && fields == store.YTFieldsOff && links == store.YTLinksOff && docs == store.YTDocCommentsOff && decisions == store.YTDecisionsOff && articles == store.YTDocsOff {
 		if st != nil {
 			st.SetYTCommentsMode(store.YTCommentsOff)
 			st.SetYTIssuesMode(store.YTIssuesOff, "")
 			st.SetYTFieldsMode(store.YTFieldsOff, "")
+			st.SetYTLinksMode(store.YTLinksOff, "")
 			st.SetYTDocCommentsMode(store.YTDocCommentsOff)
 			st.SetYTDecisionsMode(store.YTDecisionsOff, "", "", "")
 			st.SetYTDocsMode(store.YTDocsOff, "", nil)
@@ -300,6 +320,8 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 		which = "HANDOFFKEEP_YT_ISSUES_MODE=" + string(issues)
 	case fields != store.YTFieldsOff:
 		which = "HANDOFFKEEP_YT_FIELDS_MODE=" + string(fields)
+	case links != store.YTLinksOff:
+		which = "HANDOFFKEEP_YT_LINKS_MODE=" + string(links)
 	case docs != store.YTDocCommentsOff:
 		which = "HANDOFFKEEP_YT_DOC_COMMENTS_MODE=" + string(docs)
 	case decisions != store.YTDecisionsOff:
@@ -360,7 +382,7 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 		}
 	}
 	st.SetYTIssuesBucketProject(issueBucketID)
-	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, docs, dec, art, catchUp, bind, issueBucketID, nil)
+	w, err := newYTWriteWorker(st, remote, remote.Tenant(), mode, issues, fields, links, docs, dec, art, catchUp, bind, issueBucketID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -372,14 +394,16 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 // dispatcher for one tenant over remote. catchUp applies to the comments mode
 // only; bind (HANDOFFKEEP_YT_BIND) runs the automatic binder in that same
 // worker, verifying no-project tasks against bucketID.
-func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, comments store.YTCommentsMode, issues store.YTIssuesMode, fields store.YTFieldsMode, docs store.YTDocCommentsMode, decisions ytDecisionsSetting, articles ytDocsSetting, catchUp, bind bool, bucketID string, now func() time.Time) (ytCommentsWorker, error) {
-	if comments == store.YTCommentsOff && issues != store.YTIssuesOn && fields != store.YTFieldsOn && docs != store.YTDocCommentsOn && decisions.mode != store.YTDecisionsOn && articles.mode != store.YTDocsOn {
-		return ytCommentsWorker{}, errors.New("the write worker runs with the comments, issues, fields, document-comment, decisions or docs mode on")
+func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, comments store.YTCommentsMode, issues store.YTIssuesMode, fields store.YTFieldsMode, links store.YTLinksMode, docs store.YTDocCommentsMode, decisions ytDecisionsSetting, articles ytDocsSetting, catchUp, bind bool, bucketID string, now func() time.Time) (ytCommentsWorker, error) {
+	if comments == store.YTCommentsOff && issues != store.YTIssuesOn && fields != store.YTFieldsOn && links != store.YTLinksOn && docs != store.YTDocCommentsOn && decisions.mode != store.YTDecisionsOn && articles.mode != store.YTDocsOn {
+		return ytCommentsWorker{}, errors.New("the write worker runs with the comments, issues, fields, links, document-comment, decisions or docs mode on")
 	}
 	st.SetYTIssuesMode(issues, tenant)
 	log.Printf("ytwrite.issues_mode mode=%s tenant=%q", issues, tenant)
 	st.SetYTFieldsMode(fields, tenant)
 	log.Printf("ytwrite.fields_mode mode=%s tenant=%q", fields, tenant)
+	st.SetYTLinksMode(links, tenant)
+	log.Printf("ytwrite.links_mode mode=%s tenant=%q", links, tenant)
 	st.SetYTDocCommentsMode(docs)
 	log.Printf("ytwrite.doc_comments_mode mode=%s tenant=%q", docs, tenant)
 	st.SetYTDecisionsMode(decisions.mode, tenant, decisions.projectID, youtrack.DecisionProject)
@@ -387,8 +411,14 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 	st.SetYTDocsMode(articles.mode, tenant, articles.buckets)
 	log.Printf("ytwrite.docs_mode mode=%s tenant=%q shared=%q unassigned=%q", articles.mode, tenant,
 		articles.buckets[store.YTArticleBucketShared].ID, articles.buckets[store.YTArticleBucketUnassigned].ID)
+	var sweep ytLinksSweeper
+	if links == store.YTLinksOn {
+		sweep = st
+	}
 	if comments != store.YTCommentsOff {
-		return newYTCommentsWorker(st, remote, tenant, comments, catchUp, bind, bucketID, now)
+		w, err := newYTCommentsWorker(st, remote, tenant, comments, catchUp, bind, bucketID, now)
+		w.links = sweep
+		return w, err
 	}
 	p, err := ytwrite.New(st.YTCommentConfig(tenant, ytwrite.Config{
 		Remote:          remote,
@@ -400,7 +430,7 @@ func newYTWriteWorker(st *store.Store, remote ytwrite.Remote, tenant string, com
 		return ytCommentsWorker{}, err
 	}
 	st.SetYTCommentsMode(store.YTCommentsOff)
-	return ytCommentsWorker{protocol: p, feed: st, intents: st, recovery: st, tenant: tenant}, nil
+	return ytCommentsWorker{protocol: p, feed: st, intents: st, recovery: st, links: sweep, tenant: tenant}, nil
 }
 
 // newYTCommentsWorker sets the gate to mode (canary or on) and builds the
@@ -479,6 +509,12 @@ type ytFeedRunner interface {
 	RunYTFeedConsumers(ctx context.Context, limit int) ([]store.YTFeedPass, error)
 }
 
+// ytLinksSweeper runs one slice of the issue-link sweep
+// (store.RunYTLinksSweep, hk 4639); the worker has one only in links mode on.
+type ytLinksSweeper interface {
+	RunYTLinksSweep(ctx context.Context, now time.Time, limit int) (store.YTLinksSweepPass, error)
+}
+
 // ytIssueIntents prepares the issue ops of tasks whose project has been
 // mapped since they got their issue intent (store.PrepareMappedYTIssues,
 // hk 3942).
@@ -550,6 +586,10 @@ type ytCommentsWorker struct {
 	feed     ytFeedRunner
 	intents  ytIssueIntents
 	recovery ytHeldRecoverer
+	// links runs the issue-link sweep (HANDOFFKEEP_YT_LINKS_MODE=on, hk
+	// 4639), when set; it runs after the feed, so a change the consumer
+	// handles in the same pass is not walked twice.
+	links ytLinksSweeper
 	// requeue copies rejected queued comments again (mode on only).
 	requeue ytCommentRequeuer
 	// binder is the automatic binder (HANDOFFKEEP_YT_BIND=on, hk 4492), when
@@ -622,6 +662,22 @@ func (w ytCommentsWorker) bindPass(ctx context.Context, last *time.Time) {
 	}
 }
 
+// sweepLinks runs one slice of the issue-link sweep (store.RunYTLinksSweep);
+// a failed slice is logged and the next pass runs it again from the position
+// the sweep row holds.
+func (w ytCommentsWorker) sweepLinks(ctx context.Context) {
+	if w.links == nil {
+		return
+	}
+	now := time.Now().UTC()
+	if w.now != nil {
+		now = w.now().UTC()
+	}
+	if _, err := w.links.RunYTLinksSweep(ctx, now, store.YTLinksSweepPerPass); err != nil && ctx.Err() == nil {
+		log.Printf("ytwrite.links_sweep_failed err=%q", err.Error())
+	}
+}
+
 func (w ytCommentsWorker) Run(ctx context.Context) {
 	interval := w.interval
 	if interval <= 0 {
@@ -646,6 +702,7 @@ func (w ytCommentsWorker) Run(ctx context.Context) {
 			// Each failing consumer is logged by the store (ytwrite.feed_failed).
 			_, _ = w.feed.RunYTFeedConsumers(ctx, ytFeedPassLimit)
 		}
+		w.sweepLinks(ctx)
 		if w.intents != nil {
 			if _, err := w.intents.PrepareMappedYTIssues(ctx, ytCommentsCatchUpLimit); err != nil && ctx.Err() == nil {
 				log.Printf("ytwrite.issue_intents_failed err=%q", err.Error())

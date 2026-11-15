@@ -28,9 +28,9 @@ import (
 // MarkLinkStep takes only FOR UPDATE on the op row, then writes one
 // yt_link_steps row. None takes a task row.
 
-// The kind is registered so the store knows it, but no gate admits it until
-// its consumer and mode land (S4): the worker's ledger never claims one.
-func init() { registerYTKindGate(ytwrite.KindIssueLinks, func(*Store) string { return `FALSE` }) }
+// The kind's admission gate is ytLinksGateSQL (yt_links.go): the worker's
+// ledger claims an issue_links op only while the mode is on and the op's
+// target is its writer's binding.
 
 var _ ytwrite.LinksLedger = (*YTWriteLedger)(nil)
 

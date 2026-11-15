@@ -88,7 +88,12 @@ func bindYTIssueApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.Op,
 		return err
 	}
 	taskID, _ := strconv.ParseInt(op.EntityID, 10, 64)
-	return s.ytFieldsOnBindTx(ctx, tx, taskID, now)
+	if err := s.ytFieldsOnBindTx(ctx, tx, taskID, now); err != nil {
+		return err
+	}
+	// The new binding is also the target of the tasks that point at this one
+	// (hk 3841, I14).
+	return ytLinksOnBindTx(ctx, tx, taskID)
 }
 
 // ytIssueGateSQL is the issue_create gate (ytAdmitSQL): mode on, and o's task

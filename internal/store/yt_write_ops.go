@@ -321,6 +321,14 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 			return ytwrite.Op{}, "", err
 		}
 	}
+	if reject == "" && l.scoped {
+		// A links snapshot that names a target issue its task is no longer
+		// bound to is never written there (hk 4711). The unscoped ledger
+		// admits every op, as it does for the gates.
+		if reject, detail, err = claimYTLinksTargetsTx(ctx, tx, op); err != nil {
+			return ytwrite.Op{}, "", err
+		}
+	}
 	if reject != "" {
 		op, err = rejectYTOpTx(ctx, tx, now, id, reject, detail)
 		if err != nil {
