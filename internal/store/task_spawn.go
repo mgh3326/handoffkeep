@@ -39,7 +39,8 @@ const (
 // reason for an unknown state.
 var spawnStateList = []string{SpawnWaiting, SpawnPending, SpawnParked, SpawnBound, SpawnLaunching, SpawnReconciling, SpawnLanded, SpawnRefused, SpawnGivenUp, SpawnCancelled}
 
-// TaskStatesMax bounds one GET /v1/tasks/states query.
+// TaskStatesMax bounds one GET /v1/tasks/states query, and one
+// GET /v1/tasks/states/snapshot query.
 const TaskStatesMax = 200
 
 // spawnMaxClockSkew bounds how far ahead of this server's clock a record's
@@ -371,23 +372,44 @@ type TaskStateEntry struct {
 	ConditionMet *bool   `json:"condition_met,omitempty"`
 }
 
+// TaskStatesSnapshot is GET /v1/tasks/states/snapshot: the tasks asked for in
+// request order after de-duplication, the ids that name no task, and the
+// reading transaction's now(). Every requested id appears exactly once, in
+// Tasks or in Missing, so a caller can tell "missing" from "not asked".
+type TaskStatesSnapshot struct {
+	AsOf    time.Time        `json:"as_of"`
+	Tasks   []TaskStateEntry `json:"tasks"`
+	Missing []int64          `json:"missing"`
+}
+
 // TaskStates answers ids in the order given, after dropping repeats and ids
 // that name no task. until, when set, is the level condition_met is judged
 // against; when empty each task's own start condition level applies.
-// Blockers are the open tasks (not settled) with a blocks relation to the
-// task, plus the start-condition task while its condition is unmet.
+// TaskStatesSnapshot reads the same thing and names the ids this one drops.
 func (s *Store) TaskStates(ctx context.Context, ids []int64, until string) ([]TaskStateEntry, error) {
+	out, err := s.TaskStatesSnapshot(ctx, ids, until)
+	return out.Tasks, err
+}
+
+// TaskStatesSnapshot answers ids in the order given, after dropping repeats,
+// in one REPEATABLE READ READ ONLY transaction that also reads as_of.
+// until, when set, is the level condition_met is judged against; when empty
+// each task's own start condition level applies. Blockers are the open tasks
+// (not settled) with a blocks relation to the task, plus the start-condition
+// task while its condition is unmet; missing ids are ascending.
+func (s *Store) TaskStatesSnapshot(ctx context.Context, ids []int64, until string) (TaskStatesSnapshot, error) {
+	var out TaskStatesSnapshot
 	if len(ids) == 0 || len(ids) > TaskStatesMax {
-		return nil, spawnInvalid(fmt.Sprintf("ids must name 1 to %d tasks", TaskStatesMax))
+		return out, spawnInvalid(fmt.Sprintf("ids must name 1 to %d tasks", TaskStatesMax))
 	}
 	if until != "" && until != "merged" && until != "deployed" {
-		return nil, spawnInvalid("until must be merged or deployed")
+		return out, spawnInvalid("until must be merged or deployed")
 	}
 	seen := map[int64]bool{}
 	want := make([]int64, 0, len(ids))
 	for _, id := range ids {
 		if id < 1 {
-			return nil, spawnInvalid("ids must be task ids")
+			return out, spawnInvalid("ids must be task ids")
 		}
 		if !seen[id] {
 			seen[id] = true
@@ -396,38 +418,44 @@ func (s *Store) TaskStates(ctx context.Context, ids []int64, until string) ([]Ta
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return nil, err
+		return out, err
 	}
 	defer tx.Rollback(ctx)
+	// now() is the transaction's start time, so as_of and every row below
+	// come from one snapshot. pgx returns the value in the local zone.
+	if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&out.AsOf); err != nil {
+		return out, err
+	}
+	out.AsOf = out.AsOf.UTC()
 	states := map[int64]string{}
 	rows, err := tx.Query(ctx, `SELECT id,state FROM tasks WHERE id=ANY($1)`, want)
 	if err != nil {
-		return nil, err
+		return out, err
 	}
 	for rows.Next() {
 		var id int64
 		var state string
 		if err := rows.Scan(&id, &state); err != nil {
 			rows.Close()
-			return nil, err
+			return out, err
 		}
 		states[id] = state
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return out, err
 	}
 	blockers := map[int64][]int64{}
 	rows, err = tx.Query(ctx, `SELECT r.dst_id,b.id,b.state FROM task_relations r JOIN tasks b ON b.id=r.src_id WHERE r.kind='blocks' AND r.archived_at IS NULL AND r.dst_id=ANY($1) ORDER BY r.dst_id,b.id`, want)
 	if err != nil {
-		return nil, err
+		return out, err
 	}
 	for rows.Next() {
 		var dst, src int64
 		var state string
 		if err := rows.Scan(&dst, &src, &state); err != nil {
 			rows.Close()
-			return nil, err
+			return out, err
 		}
 		if !IsSettledState(state) {
 			blockers[dst] = append(blockers[dst], src)
@@ -435,18 +463,24 @@ func (s *Store) TaskStates(ctx context.Context, ids []int64, until string) ([]Ta
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return out, err
 	}
 	present := make([]Task, 0, len(want))
 	for _, id := range want {
 		if _, ok := states[id]; ok {
 			present = append(present, Task{ID: id})
+		} else {
+			out.Missing = append(out.Missing, id)
 		}
 	}
-	if err := attachTaskSpawns(ctx, tx, present); err != nil {
-		return nil, err
+	if out.Missing == nil {
+		out.Missing = []int64{}
 	}
-	out := make([]TaskStateEntry, 0, len(present))
+	sort.Slice(out.Missing, func(i, j int) bool { return out.Missing[i] < out.Missing[j] })
+	if err := attachTaskSpawns(ctx, tx, present); err != nil {
+		return out, err
+	}
+	out.Tasks = make([]TaskStateEntry, 0, len(present))
 	for _, x := range present {
 		state := states[x.ID]
 		e := TaskStateEntry{ID: x.ID, State: state, Category: TaskCategory(state), Blockers: []int64{}}
@@ -463,7 +497,7 @@ func (s *Store) TaskStates(ctx context.Context, ids []int64, until string) ([]Ta
 			}
 		}
 		sort.Slice(e.Blockers, func(i, j int) bool { return e.Blockers[i] < e.Blockers[j] })
-		out = append(out, e)
+		out.Tasks = append(out.Tasks, e)
 	}
 	return out, nil
 }

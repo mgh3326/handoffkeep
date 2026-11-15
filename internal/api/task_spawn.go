@@ -20,6 +20,11 @@ func (s Service) TaskStates(ctx context.Context, ids []int64, until string) ([]s
 	return s.Store.TaskStates(ctx, ids, until)
 }
 
+// TaskStatesSnapshot answers the states snapshot query for the service.
+func (s Service) TaskStatesSnapshot(ctx context.Context, ids []int64, until string) (store.TaskStatesSnapshot, error) {
+	return s.Store.TaskStatesSnapshot(ctx, ids, until)
+}
+
 // taskSpawnPut answers PUT /v1/tasks/{id}/spawn with the stored record. A write
 // not newer than the stored record applies nothing and still answers 200 with
 // that record, so a replay is harmless.
@@ -59,6 +64,27 @@ func (s Server) taskStates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out, err := s.Service.TaskStates(r.Context(), ids, r.URL.Query().Get("until"))
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, out)
+}
+
+// taskStatesSnapshot answers
+// GET /v1/tasks/states/snapshot?ids=1,2,3[&until=merged|deployed] with the
+// tasks that exist, the ids that name no task, and the reading transaction's
+// now(), all from one snapshot. Every requested id appears exactly once.
+func (s Server) taskStatesSnapshot(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.auth(w, r); !ok {
+		return
+	}
+	ids, err := parseTaskIDList(r.URL.Query().Get("ids"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	out, err := s.Service.TaskStatesSnapshot(r.Context(), ids, r.URL.Query().Get("until"))
 	if err != nil {
 		appErr(w, r, err)
 		return

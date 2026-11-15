@@ -33,6 +33,7 @@ var pairs = []struct {
 	{client.TaskSpawnInput{}, store.TaskSpawnInput{}},
 	{client.TaskSpawnStartInput{}, store.TaskSpawnStartInput{}},
 	{client.TaskStateEntry{}, store.TaskStateEntry{}},
+	{client.TaskStatesSnapshot{}, store.TaskStatesSnapshot{}},
 	{client.ProjectOwner{}, store.ProjectOwnerDetail{}},
 	{client.Document{}, store.Document{}},
 	{client.Attachment{}, store.Attachment{}},

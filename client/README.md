@@ -51,7 +51,7 @@ presign answer (`AttachmentURL`) is returned, never followed.
 `CommentTask`, `ProjectOwner`, `GetDocument`, `ListDocuments`,
 `PutDocument`, `PutAttachment`, `GetAttachment`, `AttachmentURL`,
 `RecordDecisionRequest`, `ListQuotaObservations`,
-`PutTaskSpawn` and `TaskStates`. Each uses
+`PutTaskSpawn`, `TaskStates` and `TaskStatesSnapshot`. Each uses
 its documented `/v1` route and JSON shape; `internal/clientparity` checks that
 the two list calls send the same query. `ListTasks` and `ListDocuments` take a
 limit from 1 to 1000 and return at most that many rows, with no sign that
