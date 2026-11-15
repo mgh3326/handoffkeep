@@ -1538,6 +1538,20 @@ open owned and unowned rows, and the held ops with a reason: `remote_unknown`,
 matching row; the lists stop at `--limit` (default 100). An unknown `--task`
 exits 7 (`not_found`).
 
+`handoffkeep youtrack links plan [--task N] [--project P] [--limit N]` (hk
+4731) is the read-only report of what the first sweep would write. It runs in
+the serving container like `fields-backfill`, opens the database read-only,
+walks the bound tasks in the sweep's order, and reads each bound issue's links
+with GET requests only. It prints the tenant, the bound tasks and GETs it read,
+the totals (`would_add`, `would_delete_owned`, `unowned_left`, `held`,
+`already_ok`) and one row per task with a link to add or delete. It uses the
+send path's own ownership rule (`PlanIssueLinks`), so it counts as
+`would_delete_owned` only a link an open `yt_link_owned` row names, and every
+other managed link, the import-era ones included, as `unowned_left`. It works
+with the mode off and writes nothing: no op, owned or unowned row, plan row,
+feed row, sweep change or YouTrack mutation. An unknown `--task` exits 7
+(`not_found`).
+
 **YouTrack facts relied on.** `Issue.links`, `parent` and `subtasks` are
 read-only; links change only through `POST /api/issues/{id}/links/{linkID}/issues`
 (body `{"id": <target db id>}`, `s` outward, `t` inward, bare for an undirected
@@ -1555,12 +1569,15 @@ that a `relates` POST is visible from both issues (the single-writer rule
 relies on it); (c) the status a DELETE of an absent link returns (the adapter
 re-reads on 404).
 
-### Canary runbook (hk 4640)
+### Canary runbook (hk 4640, hk 4731)
 
 Run once, by the operator, before `HANDOFFKEEP_YT_LINKS_MODE=on` is set for
-any production worker. It uses one YouTrack test project that no production
-task is bound to, and the write worker's mode stays `off` throughout. The bot
-account's credentials stay where they are; nothing here writes one down.
+any production worker. Steps 1 to 5 run with the write worker's mode `off`:
+steps 2 to 4 use one YouTrack test project that no production task is bound
+to, and step 5 only reads production. Step 6 is the production turn-on: the
+write worker runs inside the serving process, so there is no separate canary
+worker and the first sweep is production on. The bot account's credentials
+stay where they are; nothing here writes one down.
 
 1. **Preconditions.** `handoffkeep youtrack links status` shows `"mode":"off"`
    and no held ops for the test tasks. Two test tasks are bound to two issues
@@ -1575,19 +1592,32 @@ account's credentials stay where they are; nothing here writes one down.
 4. **Fact (c), DELETE of an absent link.** Delete a link that does not exist
    (a known link id already removed). Record the status code. If it is 404, the
    adapter's re-read path is the one that will run.
-5. **First sweep after on (measurement).** Set `HANDOFFKEEP_YT_LINKS_MODE=on`
-   on the canary worker only, let one full sweep finish, then run
+5. **Plan the first sweep (mode off).** Inside the serving container, where
+   `HANDOFFKEEP_DB_URL` and the YouTrack credentials are, run
+   `handoffkeep youtrack links plan [--task N] [--project P] [--limit N]` with
+   the mode still `off`. It writes nothing: it walks the bound tasks in the
+   sweep's order, reads each bound issue's links with GET requests only, and
+   prints the tenant, the bound tasks and GETs it read, the totals
+   (`would_add`, `would_delete_owned`, `unowned_left`, `held`, `already_ok`),
+   and one row per task with a link to add or delete. `would_delete_owned`
+   counts only links hk created; `unowned_left` counts every other managed
+   link, the import-era ones included, and the send never deletes those.
+   Record the totals in the canary document; the operator decides from them
+   whether the mode goes on.
+6. **First sweep after on (measurement). This step is production on.** The
+   write worker runs inside the serving process, so there is no canary worker
+   to measure on: setting `HANDOFFKEEP_YT_LINKS_MODE=on` on the production
+   write worker is the first sweep, and it is an operator action, not part of
+   any PR. Let one full sweep finish, then run
    `handoffkeep youtrack ops --kind issue_links --state all` and
    `handoffkeep youtrack links status`. Record the number of bound tasks, the
    `issue_links` ops prepared (one read-only op per bound task, #428 rollout
-   note), their states and reasons, and the requests made (reads only, unless a
-   link was really missing).
-6. **Record the results** as an hk document under `canary/<date>/yt-issue-links`
+   note), their states and reasons, the requests made (reads only, unless a
+   link was really missing), and how they compare with step 5's plan.
+7. **Record the results** as an hk document under `canary/<date>/yt-issue-links`
    (`handoffkeep doc put`): each fact with its observed status and body, the
-   measurement, and the decision the results support. Facts (a) to (c) stay
-   UNVERIFIED until this document exists.
-7. **Turn on.** Only then the operator sets `HANDOFFKEEP_YT_LINKS_MODE=on` on the
-   production write worker. That is an operator action, not part of any PR.
+   plan's totals, the measurement, and the decision the results support. Facts
+   (a) to (c) stay UNVERIFIED until this document exists.
 
 **Rollback.** Set `HANDOFFKEEP_YT_LINKS_MODE=off` and restart the worker. Nothing
 is deleted from YouTrack by the switch: the owned rows stay, the links stay, and

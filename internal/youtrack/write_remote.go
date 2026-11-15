@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
@@ -40,6 +41,10 @@ type WriteRemote struct {
 	// Now is the clock a Retry-After HTTP date is read against (nil: the
 	// wall clock).
 	Now func() time.Time
+	// gets counts the GET requests this remote made (one per page of a
+	// read), for a read-only command's report (youtrack links plan, hk 4731).
+	// Concurrent safe: the write worker may share the remote.
+	gets atomic.Int64
 }
 
 var (
@@ -63,6 +68,9 @@ func (r *WriteRemote) now() time.Time {
 
 // Tenant is the YouTrack host the client writes to.
 func (r *WriteRemote) Tenant() string { return tenantFromClient(r.c) }
+
+// Gets is the number of GET requests this remote made so far.
+func (r *WriteRemote) Gets() int { return int(r.gets.Load()) }
 
 // errNotFollowed is a 3xx answer: the request may have been processed.
 var errNotFollowed = errors.New("youtrack answered a redirect, not followed")
@@ -90,6 +98,9 @@ func (r *WriteRemote) send(ctx context.Context, method, path string, query url.V
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, payload)
 	if err != nil {
 		return nil, nil, fmt.Errorf("youtrack %s %s: %w", method, path, redact(err, r.c.token))
+	}
+	if method == http.MethodGet {
+		r.gets.Add(1)
 	}
 	req.Header.Set("Authorization", "Bearer "+r.c.token)
 	req.Header.Set("Accept", "application/json")
