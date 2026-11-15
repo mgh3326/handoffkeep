@@ -162,7 +162,8 @@ func TestTaskTransitionGraphAndRefsSnapshots(t *testing.T) {
 		t.Fatalf("needs_decision->claimed: %v", err)
 	}
 
-	refs := store.TaskRefs{PR: "4", HeadSHA: "abc123", ReportPath: "report.md", JobID: "job-4"}
+	// refs.pr is stored as a full PR URL; a bare number needs a project with one repo (hk 4844).
+	refs := store.TaskRefs{PR: "https://github.com/example/app/pull/4", HeadSHA: "abc123", ReportPath: "report.md", JobID: "job-4"}
 	task, err := s.CreateTask(t.Context(), store.Task{Lane: taskLane(t), Title: "preserve refs", Kind: "implement", Refs: refs, CreatedBy: "node", Project: projectRef("experiment")})
 	if err != nil {
 		t.Fatal(err)
@@ -170,11 +171,11 @@ func TestTaskTransitionGraphAndRefsSnapshots(t *testing.T) {
 	if _, err = s.ClaimTask(t.Context(), task.ID, "captain", "job-4", ""); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.TransitionTask(t.Context(), task.ID, "verifying", "node", "started", &store.TaskRefs{PR: "5"}, "")
+	got, err := s.TransitionTask(t.Context(), task.ID, "verifying", "node", "started", &store.TaskRefs{PR: "https://github.com/example/app/pull/5"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := store.TaskRefs{PR: "5", HeadSHA: "abc123", ReportPath: "report.md", JobID: "job-4"}
+	want := store.TaskRefs{PR: "https://github.com/example/app/pull/5", HeadSHA: "abc123", ReportPath: "report.md", JobID: "job-4"}
 	if !reflect.DeepEqual(got.Refs, want) {
 		t.Fatalf("refs=%+v want=%+v", got.Refs, want)
 	}
