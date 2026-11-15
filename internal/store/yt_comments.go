@@ -81,13 +81,12 @@ func (s *Store) insertSystemTaskCommentTx(ctx context.Context, tx pgx.Tx, taskID
 		}
 		return err
 	}
-	h := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%s", taskID, source, eventKey)))
-	key := "event:" + hex.EncodeToString(h[:])
+	key := systemTaskCommentKey(taskID, source, eventKey)
 	if _, err := tx.Exec(ctx, `SAVEPOINT system_task_comment`); err != nil {
 		return err
 	}
 	var c TaskComment
-	err := scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at,source_ref) VALUES($1,$2,$3,$4,$5) ON CONFLICT (task_id,source_ref) WHERE source_ref LIKE 'event:%' DO NOTHING RETURNING `+taskCommentColumns, taskID, body, YTCommentPrincipal, createdAt.UTC(), key), &c)
+	err := scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at,system_event_key) VALUES($1,$2,$3,$4,$5) ON CONFLICT (task_id,system_event_key) WHERE system_event_key IS NOT NULL DO NOTHING RETURNING `+taskCommentColumns, taskID, body, YTCommentPrincipal, createdAt.UTC(), key), &c)
 	if errors.Is(err, pgx.ErrNoRows) {
 		_, err = tx.Exec(ctx, `RELEASE SAVEPOINT system_task_comment`)
 		return err
@@ -107,6 +106,11 @@ func (s *Store) insertSystemTaskCommentTx(ctx context.Context, tx pgx.Tx, taskID
 	}
 	_, err = tx.Exec(ctx, `RELEASE SAVEPOINT system_task_comment`)
 	return err
+}
+
+func systemTaskCommentKey(taskID int64, source, eventKey string) string {
+	h := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%s", taskID, source, eventKey)))
+	return "event:" + hex.EncodeToString(h[:])
 }
 
 func init() { registerYTKindGate(ytwrite.KindCommentAppend, ytCommentGateSQL) }

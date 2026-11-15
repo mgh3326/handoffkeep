@@ -1,8 +1,12 @@
 package store
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func eventComments(t *testing.T, s *Store, task int64) []TaskComment {
@@ -71,16 +75,94 @@ func TestR12DeployEventCommentDeduplicatesByTaskAndSHA(t *testing.T) {
 	}
 }
 
+func TestR12DeployRecordedBeforeMergeCommentsWhenMergeArrives(t *testing.T) {
+	s, pool := searchTestStore(t)
+	task := flowTask(t, s, pool, "implement", StateDeveloping, true)
+	pr := testPR(4734)
+	sha := strings.Repeat("b", 40)
+	body := `{"schema":"deploy-record/v0","service":"api","target":"prod","result":"success","head_sha":"` + sha + `","deployed_ref":"release-2","included_prs":["` + pr + `"],"source":"test"}`
+	if _, _, err := s.PutDocument(t.Context(), Document{Key: "deploy/api/20261115T020000Z", Kind: "report", Session: "deploy-test", Body: body, CreatedBy: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	res := send(t, s, mergeEvent(task.ID, pr))
+	if res.State != StateDeployed {
+		t.Fatalf("merge with an earlier deploy record left state %s", res.State)
+	}
+	comments := eventComments(t, s, task.ID)
+	if len(comments) != 1 || comments[0].Body != "Deployed bbbbbbb (release-2) on api" {
+		t.Fatalf("deploy-before-merge comments: %+v", comments)
+	}
+}
+
 func TestTaskEventCommentRefusalDoesNotFailEvent(t *testing.T) {
 	s, pool := searchTestStore(t)
 	task := flowTask(t, s, pool, "implement", StateDeveloping, true)
 	ev := testEvent(SourceMergewakePR, 4732)
-	ev.CommentBody = "please include AKIAABCDEFGHIJKLMNOP"
+	ev.CommentBody = "please include " + "AKIA" + "ABCDEFGHIJKLMNOP"
 	res := applyEvent(t, s, task.ID, ev)
 	if !res.Applied || len(sourceRows(t, s, task.ID, SourceMergewakePR)) != 1 {
 		t.Fatalf("event failed with comment refusal: %+v", res)
 	}
 	if got := eventComments(t, s, task.ID); len(got) != 0 {
 		t.Fatalf("secret-like comment was stored: %+v", got)
+	}
+}
+
+func TestSystemEventCommentsHaveSeparateKeysAndDeduplicate(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ytbMapped(t, s)
+	taskID := ytcTask(t, s, ytbProject)
+	ytbBind(t, s, ytbBinding(taskID))
+	s.SetYTCommentsMode(YTCommentsOn)
+
+	const source, eventKey = "hk.deploy", "deploy-record-1"
+	h := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%s", taskID, source, eventKey)))
+	mcpKey := "event:" + hex.EncodeToString(h[:])
+	if _, _, err := s.CreateMCPTaskComment(t.Context(), taskID, "MCP note", MCPWrite{
+		Tool: "test-tool", Actor: "test-actor", Channel: "test", Author: "mcp", Key: mcpKey,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(t.Context())
+	if _, err = tx.Exec(t.Context(), `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for range 2 {
+		if err = s.insertSystemTaskCommentTx(t.Context(), tx, taskID, source, eventKey, "Deployed abc1234 on api", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	comments := eventComments(t, s, taskID)
+	if len(comments) != 2 {
+		t.Fatalf("got %d comments, want one MCP and one event comment: %+v", len(comments), comments)
+	}
+	var systemRows int
+	if err := s.pool.QueryRow(t.Context(), `SELECT count(*) FROM task_comments WHERE task_id=$1 AND system_event_key IS NOT NULL`, taskID).Scan(&systemRows); err != nil || systemRows != 1 {
+		t.Fatalf("system event rows=%d err=%v, want 1", systemRows, err)
+	}
+	for _, c := range comments {
+		if _, ok := ytcOpFor(t, s, c.ID); !ok {
+			t.Errorf("comment %d has no comments-kind operation", c.ID)
+		}
+	}
+}
+
+func TestNotAppliedTaskEventDoesNotCreateComment(t *testing.T) {
+	s, pool := searchTestStore(t)
+	task := flowTask(t, s, pool, "implement", StateCompleted, false)
+	res := send(t, s, mergeEvent(task.ID, testPR(4733)))
+	if res.Applied || len(sourceRows(t, s, task.ID, SourceMergewakeMerge)) != 1 {
+		t.Fatalf("expected recorded but unapplied merge event: %+v", res)
+	}
+	if got := eventComments(t, s, task.ID); len(got) != 0 {
+		t.Fatalf("unapplied event produced comments: %+v", got)
 	}
 }

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -543,7 +544,6 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx pgx.Tx, x Task, ev so
 		}); err != nil {
 			return TaskEventResult{}, err
 		}
-		writeEventComment()
 		return TaskEventResult{State: x.State, Reason: reason, Task: x, held: held}, nil
 	}
 
@@ -872,11 +872,12 @@ func (s *Store) deployOnMergedTx(ctx context.Context, tx pgx.Tx, x Task, now tim
 	if x.State != StateMerged || !taskEventPRRE.MatchString(x.Refs.PR) {
 		return x, nil
 	}
-	key, err := deployRecordKeyForPRTx(ctx, tx, x.Refs.PR)
-	if err != nil || key == "" {
+	record, found, err := deployRecordForPRTx(ctx, tx, x.Refs.PR)
+	if err != nil || !found {
 		return x, err
 	}
-	ev := sourceEvent{Source: SourceDeploy, SourceRef: deployRef(key, x.Refs.PR), PR: x.Refs.PR, At: now, Named: named, Pending: pending, Note: "deploy record " + key + " lists the PR; applied when the task entered merged"}
+	body, commentKey := deployCommentDetails(record)
+	ev := sourceEvent{Source: SourceDeploy, SourceRef: deployRef(record.Key, x.Refs.PR), PR: x.Refs.PR, CommentBody: body, CommentKey: commentKey, At: now, Named: named, Pending: pending, Note: "deploy record " + record.Key + " lists the PR; applied when the task entered merged"}
 	res, err := s.applySourceEventTx(ctx, tx, x, ev, now)
 	if err != nil {
 		return x, err
@@ -884,43 +885,84 @@ func (s *Store) deployOnMergedTx(ctx context.Context, tx pgx.Tx, x Task, now tim
 	return res.Task, nil
 }
 
-// deployRecordKeyForPRTx is the newest deploy record key whose successful
-// included_prs lists pr, or "" when none does. A record is matched through its
-// projection, or parsed from the document body when the projection is stale
-// (an older server wrote it, or a SHA mismatch). Shared by rule 8 and the
-// drift report.
-func deployRecordKeyForPRTx(ctx context.Context, tx pgx.Tx, pr string) (string, error) {
-	rows, err := tx.Query(ctx, `SELECT d.key,p.record,CASE WHEN p.key IS NULL THEN d.body ELSE NULL END FROM documents d LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256 WHERE strpos(d.key,'deploy/')=1 AND ((p.decoded AND strpos(convert_from(p.record,'UTF8'),$1)>0) OR (p.key IS NULL AND strpos(d.body,$1)>0)) ORDER BY d.key DESC`, pr)
+// deployRecordForPRTx is the newest successful record whose included_prs
+// lists pr. A record is matched through its projection, or parsed from the
+// document body when the projection is stale.
+func deployRecordForPRTx(ctx context.Context, tx pgx.Tx, pr string) (StoredDeployRecord, bool, error) {
+	rows, err := tx.Query(ctx, `SELECT d.key,d.sha256,d.created_at,p.record,p.decoded,CASE WHEN p.key IS NULL THEN d.body ELSE NULL END FROM documents d LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256 WHERE strpos(d.key,'deploy/')=1 AND ((p.decoded AND strpos(convert_from(p.record,'UTF8'),$1)>0) OR (p.key IS NULL AND strpos(d.body,$1)>0)) ORDER BY d.key DESC`, pr)
 	if err != nil {
-		return "", err
+		return StoredDeployRecord{}, false, err
 	}
-	key := ""
-	for key == "" && rows.Next() {
-		var k string
-		var raw []byte
-		var body *string
-		if err = rows.Scan(&k, &raw, &body); err != nil {
-			rows.Close()
-			return "", err
-		}
+	defer rows.Close()
+	for rows.Next() {
 		var record StoredDeployRecord
-		if body != nil {
-			record = parseStoredDeployRecord(k, "", *body, time.Time{})
-		} else {
-			record = parseStoredDeployRecord(k, "", string(raw), time.Time{})
+		var raw []byte
+		var decoded *bool
+		var body *string
+		if err = rows.Scan(&record.Key, &record.SHA256, &record.CreatedAt, &raw, &decoded, &body); err != nil {
+			return StoredDeployRecord{}, false, err
 		}
-		prs, _ := deployedPRs(record)
+		if body != nil {
+			record = parseStoredDeployRecord(record.Key, record.SHA256, *body, record.CreatedAt)
+		} else {
+			if err = json.Unmarshal(raw, &record.Record); err != nil {
+				return StoredDeployRecord{}, false, err
+			}
+			record.Decoded = *decoded
+		}
+		prs, ok := deployedPRs(record)
+		if !ok {
+			continue
+		}
 		for _, listed := range prs {
 			if listed == pr {
-				key = k
+				return record, true, nil
 			}
 		}
 	}
-	rows.Close()
 	if err = rows.Err(); err != nil {
+		return StoredDeployRecord{}, false, err
+	}
+	return StoredDeployRecord{}, false, nil
+}
+
+// deployRecordKeyForPRTx preserves callers that need only the record key.
+func deployRecordKeyForPRTx(ctx context.Context, tx pgx.Tx, pr string) (string, error) {
+	record, found, err := deployRecordForPRTx(ctx, tx, pr)
+	if err != nil || !found {
 		return "", err
 	}
-	return key, nil
+	return record.Key, nil
+}
+
+func deployCommentDetails(record StoredDeployRecord) (body, key string) {
+	sha := ""
+	if record.Record.HeadSHA != nil {
+		sha = *record.Record.HeadSHA
+	}
+	if sha == "" && record.Record.DeployedRef != nil && gitSHARE.MatchString(*record.Record.DeployedRef) {
+		sha = *record.Record.DeployedRef
+	}
+	shortSHA := sha
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+	if shortSHA == "" {
+		shortSHA = "unknown"
+	}
+	tag := ""
+	if record.Record.DeployedRef != nil && *record.Record.DeployedRef != sha {
+		tag = *record.Record.DeployedRef
+	}
+	body = fmt.Sprintf("Deployed %s on %s", shortSHA, record.Record.Service)
+	if tag != "" {
+		body = fmt.Sprintf("Deployed %s (%s) on %s", shortSHA, tag, record.Record.Service)
+	}
+	key = sha
+	if key == "" {
+		key = record.Key
+	}
+	return body, key
 }
 
 // applyDeployRecordTx is the hk.deploy event: a document stored under a
@@ -954,33 +996,8 @@ func (s *Store) applyDeployRecordTx(ctx context.Context, tx pgx.Tx, record Store
 		return err
 	}
 	for _, x := range tasks {
-		sha := ""
-		if record.Record.HeadSHA != nil {
-			sha = *record.Record.HeadSHA
-		}
-		if sha == "" && record.Record.DeployedRef != nil && gitSHARE.MatchString(*record.Record.DeployedRef) {
-			sha = *record.Record.DeployedRef
-		}
-		shortSHA := sha
-		if len(shortSHA) > 7 {
-			shortSHA = shortSHA[:7]
-		}
-		if shortSHA == "" {
-			shortSHA = "unknown"
-		}
-		tag := ""
-		if record.Record.DeployedRef != nil && *record.Record.DeployedRef != sha {
-			tag = *record.Record.DeployedRef
-		}
-		body := fmt.Sprintf("Deployed %s on %s", shortSHA, record.Record.Service)
-		if tag != "" {
-			body = fmt.Sprintf("Deployed %s (%s) on %s", shortSHA, tag, record.Record.Service)
-		}
-		commentKey := sha
-		if commentKey == "" {
-			commentKey = key
-		}
-		ev := sourceEvent{Source: SourceDeploy, SourceRef: deployRef(key, x.Refs.PR), PR: x.Refs.PR, MergeSHA: sha, CommentBody: body, CommentKey: commentKey, At: now, Note: "deploy record " + key + " lists the PR"}
+		body, commentKey := deployCommentDetails(record)
+		ev := sourceEvent{Source: SourceDeploy, SourceRef: deployRef(key, x.Refs.PR), PR: x.Refs.PR, CommentBody: body, CommentKey: commentKey, At: now, Note: "deploy record " + key + " lists the PR"}
 		if _, err = s.applySourceEventTx(ctx, tx, x, ev, now); err != nil {
 			return err
 		}
