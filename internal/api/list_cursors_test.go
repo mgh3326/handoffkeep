@@ -17,6 +17,13 @@ import (
 // touches the store.
 func TestListCursorsRejectBadAfterID(t *testing.T) {
 	h := Server{Tokens: Tokens{"op": "op-token"}}.Handler()
+	refused := func(path string) bool {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer op-token")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w.Code == http.StatusBadRequest && strings.Contains(w.Body.String(), `"invalid_context"`)
+	}
 	for _, path := range []string{
 		"/v1/placements?after_id=",
 		"/v1/bench/reps?after_id=",
@@ -24,13 +31,16 @@ func TestListCursorsRejectBadAfterID(t *testing.T) {
 		"/v1/changes?task=1&after_id=",
 	} {
 		for _, value := range []string{"x", "-1", "1.5"} {
-			req := httptest.NewRequest(http.MethodGet, path+value, nil)
-			req.Header.Set("Authorization", "Bearer op-token")
-			w := httptest.NewRecorder()
-			h.ServeHTTP(w, req)
-			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"invalid_context"`) {
-				t.Fatalf("%s%s: %d %s", path, value, w.Code, w.Body.String())
+			if !refused(path + value) {
+				t.Fatalf("%s%s accepted", path, value)
 			}
+		}
+	}
+	// A valid cursor with the pr selector is refused too: a PR answer is at
+	// most one row, so a cursor there would hide an existing change.
+	for _, value := range []string{"0", "7"} {
+		if !refused("/v1/changes?pr=https://github.com/example/app/pull/1&after_id=" + value) {
+			t.Fatalf("pr with after_id %s accepted", value)
 		}
 	}
 }

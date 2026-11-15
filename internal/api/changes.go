@@ -24,9 +24,15 @@ func (s Server) changesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// after_id keeps the id order and starts after that id; absent answers
-	// exactly as before.
+	// exactly as before. It pages the task's list only: a PR answer is at most
+	// one row, so a cursor there would filter that row away and answer an
+	// empty list for a change that exists.
 	var afterID *int64
 	if q.Has("after_id") {
+		if !q.Has("task") {
+			writeError(w, http.StatusBadRequest, "invalid_context")
+			return
+		}
 		id, parseErr := queryCursor(r, "after_id")
 		if parseErr != nil {
 			writeError(w, http.StatusBadRequest, "invalid_context")
