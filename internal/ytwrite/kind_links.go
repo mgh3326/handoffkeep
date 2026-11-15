@@ -226,14 +226,25 @@ func (s IssueLinksSnapshot) canonical() IssueLinksSnapshot {
 	return out
 }
 
+// IssueLinksSnapshotOf is the canonical snapshot a links request would store,
+// without an op: the same check and the same canonical form as IssueLinksOp,
+// for a caller that plans one desired set and stores nothing (youtrack links
+// plan, hk 4731).
+func IssueLinksSnapshotOf(req IssueLinksRequest) (IssueLinksSnapshot, error) {
+	if err := CheckIssueLinks(req); err != nil {
+		return IssueLinksSnapshot{}, err
+	}
+	return IssueLinksSnapshot{V: issueLinksPayloadVersion, Desired: req.Desired, Held: req.Held}.canonical(), nil
+}
+
 // IssueLinksOp is the op a links request stores, with no Key: the store's
 // snapshot helper sets it from PayloadSHA, which covers the kind, the task,
 // the issue, the tenant, the actor and the canonical payload.
 func IssueLinksOp(req IssueLinksRequest) (NewOp, error) {
-	if err := CheckIssueLinks(req); err != nil {
+	snap, err := IssueLinksSnapshotOf(req)
+	if err != nil {
 		return NewOp{}, err
 	}
-	snap := IssueLinksSnapshot{V: issueLinksPayloadVersion, Desired: req.Desired, Held: req.Held}.canonical()
 	payload, err := json.Marshal(snap)
 	if err != nil {
 		return NewOp{}, err
