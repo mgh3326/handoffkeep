@@ -719,10 +719,14 @@ t_outbox_failure_does_not_block_others() {
 	setup
 	local dir="$HK_FOLLOW_STATE_DIR/outbox"
 	mkdir -p "$dir"
+	# The record body comes from the shipped record(), so this fake is one the
+	# record parser accepts: TestHKFollowRecordsParse parses every record a
+	# successful put writes, and an empty stub body fails it. The outbox is
+	# empty here, so the move renames the entry record() queued.
+	record handoffkeep "$SHA_NEW" "$D1" "$SHA_OLD" success "" 20260101T000000Z
+	mv "$dir"/*.json "$dir/20260101T000001Z.000002.json"
 	printf '%s\n' "$(jq -cn --arg s "$SHA_OLD" '{kind:"status", sha:$s, context:"deploy-ok", state:"success", description:"older"}')" \
 		>"$dir/20260101T000000Z.000001.json"
-	printf '%s\n' '{"kind":"record", "key":"deploy/handoffkeep/20260101T000000Z", "record":{}}' \
-		>"$dir/20260101T000001Z.000002.json"
 	printf '%s\n' "$(jq -cn --arg s "$SHA_NEW" '{kind:"status", sha:$s, context:"deploy-ok", state:"success", description:"newer"}')" \
 		>"$dir/20260101T000002Z.000003.json"
 	printf '%s\n' '{"kind":"notify", "text":"alert"}' \
