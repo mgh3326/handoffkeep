@@ -403,3 +403,42 @@ func TestDotsChoiceWithdrawnIsNotAResult(t *testing.T) {
 		t.Fatalf("answer notices=%d err=%v", n, err)
 	}
 }
+
+// Invariant (hk 4789): dots may park a declaring request (BLOCKED) and then
+// post its RESULT; the RESULT still opens the decision. The answer resumes the
+// parked request and closes it, and the requester hears the result — a
+// completion the state graph would otherwise refuse must not roll the answer
+// back.
+func TestDotsChoiceAnswerClosesParkedRequest(t *testing.T) {
+	s := schemaStore(t, "dots_choice_parked")
+	ctx := context.Background()
+	task, started := dotsChoiceRequest(t, s, "Investigate")
+	blocked, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "BLOCKED", Body: "waiting on a tool", IdempotencyKey: "blocked", RunToken: started.RunToken})
+	if err != nil || blocked.State != StateIcebox {
+		t.Fatalf("blocked=%+v err=%v", blocked, err)
+	}
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{
+		TaskID: task.ID, Kind: "RESULT", Body: "두 시안 완성", IdempotencyKey: "result", RunToken: started.RunToken,
+		Recommended: "A",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	parked, _, err := s.GetTask(ctx, task.ID)
+	if err != nil || parked.State != StateIcebox || parked.Refs.DecisionRequest == nil {
+		t.Fatalf("task=%+v err=%v", parked, err)
+	}
+	out, err := s.ResolveDecision(ctx, ResolveDecisionInput{
+		RequestID: parked.Refs.DecisionRequest.ID, Kind: DecisionRequestAnswered, Option: "A", Text: "A로 갑시다",
+		Channel: DecisionChannelConsole, Actor: "operator:robin@example.com", Verified: true, EventKey: "console-parked",
+	})
+	if err != nil || out.Result != DecisionResultAnswered {
+		t.Fatalf("outcome=%+v err=%v", out, err)
+	}
+	done, _, err := s.GetTask(ctx, task.ID)
+	if err != nil || done.State != StateCompleted {
+		t.Fatalf("state=%s err=%v, want completed", done.State, err)
+	}
+	if n := notifyRows(t, s, "requester", OutboxKindDotsReport); n != 2 {
+		t.Fatalf("requester rows=%d, want the RESULT and the answer", n)
+	}
+}

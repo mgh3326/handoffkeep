@@ -171,16 +171,22 @@ func (s *Store) deliverDotsChoiceAnswerTx(ctx context.Context, tx pgx.Tx, x Task
 	if resolved.Status != DecisionRequestAnswered || IsSettledState(x.State) {
 		return x, nil
 	}
+	// The answer resumes a parked request: its decision is closed, so the
+	// request may close too. Without this an icebox task has no edge to
+	// completed and the answer would roll back.
+	if x.State == StateIcebox {
+		resumed, err := s.transitionTaskTx(ctx, tx, x.ID, TransitionInput{To: StateBacklog, By: actor, Note: "decision answered: resume to close"}, false)
+		if err != nil {
+			return Task{}, err
+		}
+		x = resumed
+	}
 	answer := choice
 	if resolved.Resolution != nil && resolved.Resolution.Text != "" && resolved.Resolution.Text != choice {
 		answer = choice + " — " + resolved.Resolution.Text
 	}
 	evidence := "decision " + resolved.ID + " " + resolved.Status + ": "
 	evidence += clipBytes(answer, closureEvidenceMaxBytes-len(evidence))
-	completed, err := s.transitionTaskTx(ctx, tx, x.ID, TransitionInput{To: StateCompleted, By: actor, Evidence: evidence}, false)
-	if err != nil {
-		return Task{}, err
-	}
 	lanes := []string{}
 	if x.ParentLane != "" {
 		lanes = append(lanes, x.ParentLane)
@@ -208,6 +214,16 @@ func (s *Store) deliverDotsChoiceAnswerTx(ctx context.Context, tx pgx.Tx, x Task
 		if _, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindDotsReport, lane, eventID, text, at); err != nil {
 			return Task{}, err
 		}
+	}
+	// A task still waiting on another blocking decision, or in a state whose
+	// edges do not reach completed, cannot close now: the answer is recorded
+	// and delivered, and the closure stays with whatever resolves that state.
+	if x.AwaitingDecision || !taskTransitionAllowed(x.State, StateCompleted) {
+		return x, nil
+	}
+	completed, err := s.transitionTaskTx(ctx, tx, x.ID, TransitionInput{To: StateCompleted, By: actor, Evidence: evidence}, false)
+	if err != nil {
+		return Task{}, err
 	}
 	return completed, nil
 }
