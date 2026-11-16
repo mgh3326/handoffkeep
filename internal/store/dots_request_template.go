@@ -26,9 +26,10 @@ var (
 	// hex characters, which dotsCommitTokenRE deliberately does not take.
 	dotsAttachmentSHA256RE = regexp.MustCompile(`\b[0-9a-fA-F]{64}\b`)
 	// dotsSourceMarkerRE matches the marker that starts a source-material
-	// description: "원본:" or "source:", or the bracketed [원본]/[source]. The
-	// marker must not be the tail of a longer word such as "resource:".
-	dotsSourceMarkerRE = regexp.MustCompile(`(?i)(?:\[(?:원본|source)\]|(?:^|[^\p{L}\p{N}_])(?:원본|source)\s*[:：])`)
+	// line: "원본:" or "source:", or the bracketed [원본]/[source], at the
+	// start of a line apart from leading spaces. Anchoring it to the line
+	// keeps a "source:" inside prose ("open source: ...") from counting.
+	dotsSourceMarkerRE = regexp.MustCompile(`(?im)^[ \t]*(?:\[(?:원본|source)\]|(?:원본|source)\s*[:：])`)
 	// dotsDocMentionRE matches an hk document reference in the "hk:doc <key>"
 	// notation the policy documents use, capturing the key.
 	dotsDocMentionRE = regexp.MustCompile(`(?i)\bhk:doc[ \t]+([A-Za-z0-9._/-]+)`)
@@ -51,9 +52,9 @@ const dotsSourceDescriptionRunes = 8
 //   - an hk attachment sha256: a 64-character hex token;
 //   - an hk document key in "hk:doc <key>" notation: at least two non-empty
 //     "/"-separated segments in the document-key alphabet;
-//   - a "원본:" or "source:" line (or [원본]/[source]) followed by a
-//     description of at least dotsSourceDescriptionRunes non-space characters,
-//     for a file or video that is not in hk yet.
+//   - a line that starts with "원본:" or "source:" (or [원본]/[source]) and
+//     describes the material in at least dotsSourceDescriptionRunes non-space
+//     characters on that line, for a file or video that is not in hk yet.
 //
 // The sha256 and the key are checked for shape, not for existence: this
 // function sees no store, so a well-formed hash or key that names nothing is a
@@ -109,7 +110,13 @@ func hasDotsSourceMaterial(s string) bool {
 		}
 	}
 	for _, marker := range dotsSourceMarkerRE.FindAllStringIndex(s, -1) {
-		if dotsNonSpaceRunes(s[marker[1]:]) >= dotsSourceDescriptionRunes {
+		// The description is the rest of the marker's own line; a later line
+		// is not part of it.
+		description := s[marker[1]:]
+		if newline := strings.IndexByte(description, '\n'); newline >= 0 {
+			description = description[:newline]
+		}
+		if dotsNonSpaceRunes(description) >= dotsSourceDescriptionRunes {
 			return true
 		}
 	}
