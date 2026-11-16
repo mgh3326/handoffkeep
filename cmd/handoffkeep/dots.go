@@ -25,7 +25,7 @@ func dotsRequestCmd(args []string, out io.Writer) error {
 	fs.StringVar(&in.RequesterLane, "requester-lane", "", "lane to notify")
 	fs.StringVar(&in.Project, "project", "", "task project")
 	fs.StringVar(&in.IdempotencyKey, "idempotency-key", "", "reuse to retry the same request")
-	fs.StringVar(&in.Type, "type", "", "CREATE_MOCKUP, CREATE_ASSET or REVIEW_IMPLEMENTATION; a typed body needs the policy template with [입력] naming the commit SHA and capture environment")
+	fs.StringVar(&in.Type, "type", "", "CREATE_MOCKUP, CREATE_ASSET or REVIEW_IMPLEMENTATION; a typed body needs the policy template whose [입력] names the commit SHA and capture environment, or for CREATE_ASSET the source material (an hk attachment sha256, an hk:doc key, or a 원본: description)")
 	var optionValues, attachmentValues stringSliceFlag
 	fs.Var(&optionValues, "option", "option A|label the request ends in the operator's choice between (repeatable, 1-6); dots names its recommendation on RESULT")
 	fs.Var(&attachmentValues, "option-attachment", "option A|sha256[|caption]: a picture or video shown with that option (repeatable, at most 8 per option)")

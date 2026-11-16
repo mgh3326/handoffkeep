@@ -18,11 +18,15 @@ document and its `parent_lane` identifies the requester.
 
 A design request is filed with `--type CREATE_MOCKUP`, `CREATE_ASSET` or
 `REVIEW_IMPLEMENTATION`. Its body must carry the policy template sections
-`[목적]`, `[유지할 것]`, `[범위]`, `[제약]`, `[산출물]`, `[완료 기준]` and `[입력]`,
-and `[입력]` must name a commit SHA and the capture environment; otherwise the
-request is refused. The stored body starts with a `[유형]` line. Requests with no
-type (research, for example) take no template. `dots adopt` may record the
-adopted Canva design with `--canva-url` (an https canva.com design link),
+`[목적]`, `[유지할 것]`, `[범위]`, `[제약]`, `[산출물]`, `[완료 기준]` and `[입력]`.
+`[입력]` must name a commit SHA and the capture environment. `CREATE_ASSET`
+may instead name the source material the asset is made from — an hk
+attachment sha256 (64 hex characters), an `hk:doc` document key, or a
+`원본:`/`source:` line that describes the material — and then needs neither.
+Otherwise the request is refused. The stored body starts with a `[유형]` line.
+Requests with no type (research, for example) take no template. `dots adopt`
+may record the adopted Canva design with `--canva-url` (an https canva.com
+design link),
 `--canva-page` and `--canva-version`, for `accepted` or `partially_used` results only. A repeat of such an adoption without the Canva flags keeps the recorded design.
 
 A request may declare that it ends in the operator's choice. Pass
