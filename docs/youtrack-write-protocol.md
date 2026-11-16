@@ -1722,7 +1722,13 @@ release rollback never meets an authority value it cannot parse (consult hk
   rejected `ambiguous_issue` with no target and no attempt, whose binding is
   the one the task's own applied `issue_create` published, is copied again;
   the rejected op itself never changes, and the rejected-op alert still
-  reports it. The copy lands after any comment already on the lane, so the
+  reports it. The candidate scan is served by the partial index
+  `yt_write_ops_comment_requeue` (migration `20261116-yt-write-path-indexes`),
+  whose predicate names the same kind, state, reason, empty target and zero
+  attempts; the query writes those as literals, not parameters, so a plan
+  (custom or generic) proves the index applies and reads the candidates alone
+  instead of every comment op (hk 4922).
+  The copy lands after any comment already on the lane, so the
   issue shows it after them. Logs: `ytwrite.comment_requeued`,
   `ytwrite.comment_requeue_skipped`. Migration `20261113-yt-comment-hold`
   stays registered and unused. A task with no
@@ -1937,6 +1943,16 @@ YouTrack credentials, reads the `/shared` and `/unassigned` bucket projects
 articles backfill does (none, two or a failed read stops the start), and
 makes the legacy `youtrack sync` (which also writes articles) and `adopt`
 refuse to run.
+
+**Admission, and what a pass costs.** Both gates read the binding of the
+op's document and compare `b.document_id::text = o.entity_id`, because the op
+log holds every entity id as text. The cast is on the indexed column, so the
+index that serves it is the expression index
+`yt_article_bindings_document_text` (migration
+`20261116-yt-write-path-indexes`); the `article_update` gate's tenant and
+article id also reach the unique key. Without the expression index the
+`article_create` gate, which names no other column, scanned all bindings on
+every evaluation (959,016 sequential scans in twelve days, hk 4922).
 
 **Scope.** Every document the import made an article for
 (`store.YTArticleExcluded` false) except the mergewake reviewer briefs
