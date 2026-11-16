@@ -146,6 +146,11 @@ func ytPlanSeed(t *testing.T, s *Store) {
 		 SELECT g, 1+(g%2000), 'comment '||g, 'operator', now()-(g||' seconds')::interval
 		 FROM generate_series(1,10000) g`,
 		`SELECT setval(pg_get_serial_sequence('task_comments','id'), 10000)`,
+		// 15,657 verified article bindings, one per document: the table the
+		// three article cases plan against.
+		`INSERT INTO yt_article_bindings (document_id, tenant, article_id, project_id, origin, bound_by, bound_at)
+		 SELECT g, '` + ytcTenant + `', 'art-'||g, 'PROJ', 'import_verified', 'test', now()
+		 FROM generate_series(1,15657) g`,
 		// 28,055 ops: even ids are the comment principal's, odd the issue
 		// principal's; all applied.
 		`INSERT INTO yt_write_ops (principal, kind, idem_key, payload_sha, payload, entity_kind, entity_id,
