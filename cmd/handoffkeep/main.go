@@ -1702,9 +1702,10 @@ func parseTaskThreadProjects(raw string) ([]string, error) {
 // console already uses. Turning it on never flushes the backlog: rows created
 // before HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE (RFC3339, required) are
 // settled as skipped instead of posted, and a restart with the same value
-// sends nothing twice (hk 4986). A missing or unparsable cutoff refuses to
-// start rather than guess one: defaulting to "now" would skip notices queued
-// while the forwarder was down.
+// sends nothing twice (hk 4986). A missing, unparsable or future cutoff
+// refuses to start rather than guess one: defaulting to "now" would skip
+// notices queued while the forwarder was down, and a future instant would
+// skip every notice created until then.
 func notificationForwarderFromEnv(st *store.Store) (backgroundWorker, error) {
 	if strings.TrimSpace(os.Getenv("HANDOFFKEEP_NOTIFICATION_FORWARD")) != "on" {
 		return nil, nil
@@ -1723,7 +1724,11 @@ func notificationForwarderFromEnv(st *store.Store) (backgroundWorker, error) {
 	if err != nil {
 		return nil, fmt.Errorf("HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE: %w", err)
 	}
-	return &hubforward.Forwarder{Store: st, URL: url, Token: token, Cutoff: cutoff.UTC()}, nil
+	cutoff = cutoff.UTC()
+	if cutoff.After(time.Now().UTC().Add(time.Minute)) {
+		return nil, fmt.Errorf("HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE %q is in the future: it must be the instant forwarding starts, because every notice created before it is settled as skipped", raw)
+	}
+	return &hubforward.Forwarder{Store: st, URL: url, Token: token, Cutoff: cutoff}, nil
 }
 
 func runMCP() error {

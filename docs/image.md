@@ -54,11 +54,26 @@ Optional server configuration:
   created at or after that instant; older unsent rows are settled as skipped
   (`skipped_at`/`skip_reason`, never `sent_at`) and the start log reports the
   cutoff and how many rows it skipped. A restart with the same value re-skips
-  and re-sends nothing. Missing or unparsable: the server refuses to start.
+  and re-sends nothing. Missing, unparsable or later than the server's clock
+  (beyond a one-minute allowance): the server refuses to start.
   In a blue-green rollout, turn forwarding off on the colour being replaced
   before the new colour settles the backlog: an older release reads every
   unsent row (it does not know `skipped_at`), so its forwarder would post the
   settled rows if it ran; the two colours share the `HubForwardWorkerLock`.
+  A rollback follows the same rule in reverse: unset
+  `HANDOFFKEEP_NOTIFICATION_FORWARD` in the previous release's configuration
+  before starting it, because that release cannot honour the cutoff and would
+  post every row carrying `skipped_at`.
+  Rows settled by mistake (a cutoff set too late) are recoverable: correcting
+  `HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE` does not un-skip them. For the
+  affected event ids:
+
+  ```sql
+  UPDATE notification_outbox SET skipped_at=NULL, skip_reason=NULL
+  WHERE event_id IN (...) AND skip_reason='before_forwarder_cutoff' AND sent_at IS NULL;
+  ```
+
+  The next pass sends them, because `sent_at` was never set.
 - Attachments / S3-compatible storage: `HK_S3_ENDPOINT`, `HK_S3_BUCKET`,
   `HK_S3_ACCESS_KEY_ID`, `HK_S3_SECRET_ACCESS_KEY`; optional connection settings:
   `HK_S3_REGION`, `HK_S3_BUCKET_LOOKUP`; limits:

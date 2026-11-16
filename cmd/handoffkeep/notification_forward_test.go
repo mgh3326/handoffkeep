@@ -25,7 +25,7 @@ func TestNotificationForwarderFromEnvRequiresSince(t *testing.T) {
 			t.Errorf("%q: err=%v", raw, err)
 		}
 	}
-	t.Setenv("HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE", "2026-11-17T00:00:00+09:00")
+	t.Setenv("HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE", "2026-01-02T03:04:05+09:00")
 	w, err := notificationForwarderFromEnv(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -34,8 +34,22 @@ func TestNotificationForwarderFromEnvRequiresSince(t *testing.T) {
 	if !ok {
 		t.Fatalf("worker=%T", w)
 	}
-	if want := time.Date(2026, 11, 16, 15, 0, 0, 0, time.UTC); !f.Cutoff.Equal(want) {
+	if want := time.Date(2026, 1, 1, 18, 4, 5, 0, time.UTC); !f.Cutoff.Equal(want) {
 		t.Fatalf("cutoff=%s, want %s", f.Cutoff, want)
+	}
+}
+
+// A cutoff later than the server's clock would settle every notice created
+// until then and never post it (hk 4986), so startup refuses it and names the
+// value.
+func TestNotificationForwarderFromEnvRejectsAFutureSince(t *testing.T) {
+	t.Setenv("HANDOFFKEEP_NOTIFICATION_FORWARD", "on")
+	t.Setenv("HANDOFFKEEP_HUB_URL", "https://hub.example")
+	t.Setenv("HANDOFFKEEP_HUB_TOKEN", "hub-test-token")
+	raw := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	t.Setenv("HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE", raw)
+	if _, err := notificationForwarderFromEnv(nil); err == nil || !strings.Contains(err.Error(), "future") || !strings.Contains(err.Error(), raw) {
+		t.Fatalf("future %q err=%v", raw, err)
 	}
 }
 
