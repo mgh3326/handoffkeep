@@ -275,10 +275,11 @@ func TestDeployLagCountsMergesBehindDeepFailureRun(t *testing.T) {
 		}
 	}
 
-	st, err := s.DeployLagStatus(ctx, svc)
+	statuses, err := s.DeployLagStatuses(ctx, []DeployService{svc})
 	if err != nil {
 		t.Fatal(err)
 	}
+	st := statuses[svc.Name]
 	if !st.HasDeployed || st.DeployedAt == nil || !st.DeployedAt.Equal(success) || st.LagCount != 3 || !st.Lagging {
 		t.Fatalf("lag status = %+v, want deployed at %s with 3 merges behind and lagging", st, success)
 	}

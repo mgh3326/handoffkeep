@@ -74,21 +74,72 @@ func deployLagStatusTx(ctx context.Context, q rowQuerier, svc DeployService, sin
 	return st, nil
 }
 
-// DeployLagStatus returns the lag of one active deploy service, measured the
-// same way EnqueueDeployLagNotices measures it. The console calls this so the
-// banner and the operator-desk notice cannot disagree.
-func (s *Store) DeployLagStatus(ctx context.Context, svc DeployService) (DeployLagServiceStatus, error) {
+// DeployLagStatuses returns the lag of each given service, measured the same
+// way EnqueueDeployLagNotices measures it, in one transaction and a bounded
+// number of statements whatever the service count: the last successful deploys
+// once, then one count that joins every service's boundary. Counting per
+// service instead ran a query (and a document scan) per service per poll
+// (HANDOFFKEEP-5, hk 4923). The console calls this so the banner and the
+// operator-desk notice cannot disagree.
+func (s *Store) DeployLagStatuses(ctx context.Context, svcs []DeployService) (map[string]DeployLagServiceStatus, error) {
+	out := make(map[string]DeployLagServiceStatus, len(svcs))
+	if len(svcs) == 0 {
+		return out, nil
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return DeployLagServiceStatus{}, err
+		return nil, err
 	}
 	defer tx.Rollback(ctx)
 	lastDeploys, err := readProjectLastSuccessfulDeploysTx(ctx, tx)
 	if err != nil {
-		return DeployLagServiceStatus{}, err
+		return nil, err
 	}
-	since, ok := lastDeploys[svc.Name]
-	return deployLagStatusTx(ctx, tx, svc, since, ok)
+	// A service with no successful deploy has no boundary: its lag is unknown,
+	// so it is answered here and left out of the count. Counting from time zero
+	// would report the whole merge history as lag.
+	var names, repos []string
+	var since []time.Time
+	for _, svc := range svcs {
+		if _, dup := out[svc.Name]; dup {
+			continue
+		}
+		at, ok := lastDeploys[svc.Name]
+		st := DeployLagServiceStatus{Service: svc.Name, Repo: svc.Repo, HasDeployed: ok}
+		if ok {
+			deployedAt := at
+			st.DeployedAt = &deployedAt
+			names = append(names, svc.Name)
+			repos = append(repos, svc.Repo)
+			since = append(since, at)
+		}
+		out[svc.Name] = st
+	}
+	if len(names) > 0 {
+		rows, err := tx.Query(ctx, `SELECT w.name, count(c.id)
+FROM unnest($1::text[],$2::text[],$3::timestamptz[]) AS w(name,repo,since)
+LEFT JOIN changes c ON c.repo=w.repo AND c.state='merged' AND c.merged_at > w.since
+GROUP BY w.name`, names, repos, since)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			var count int
+			if err = rows.Scan(&name, &count); err != nil {
+				return nil, err
+			}
+			st := out[name]
+			st.LagCount = count
+			st.Lagging = IsDeployLagging(count)
+			out[name] = st
+		}
+		if err = rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return out, tx.Commit(ctx)
 }
 
 // EnqueueDeployLagNotices checks each active deploy service for deploy lag against main.

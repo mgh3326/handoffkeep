@@ -155,36 +155,87 @@ func writeDeployProjection(ctx context.Context, tx pgx.Tx, x StoredDeployRecord)
 	return err
 }
 
-// ListDeployRecords pages projected deploy state. The fallback is deliberately
-// limited to projections that are missing, undecodable, stale or written
-// before DeployRecord.FailedStepName existed (the marshalled record then has
-// no such key): the previous release can still write the old shape during a
+// deployRecordBodyFallbackSQL selects the document body for a projection row
+// this reader cannot trust. The projection is json.Marshal output: compact,
+// flat, with known fields. A top-level key therefore sits right after '{' or
+// ',', and a string value cannot hold that byte sequence because its quotes are
+// escaped. That is how a projection written before DeployRecord.FailedStepName
+// existed is spotted without parsing the bytes: the JSON functions reject the
+// escaped NULs the column keeps, and those records must still read.
+const deployRecordBodyFallbackSQL = `CASE WHEN p.key IS NULL OR NOT p.decoded
+	OR (strpos(convert_from(p.record,'UTF8'), '{"failed_step_name":') = 0
+		AND strpos(convert_from(p.record,'UTF8'), ',"failed_step_name":') = 0)
+	THEN d.body ELSE NULL END`
+
+// maxDeployRecordsPerPrefix bounds one prefix's page in
+// ListDeployRecordsByPrefix: the console compares at most this many records
+// per deploy service before it reports a truncated scan.
+const maxDeployRecordsPerPrefix = 2000
+
+// DeployRecordPage is what one prefix's deploy-record read found: the newest
+// documents in key order, and whether the prefix holds more than were read.
+type DeployRecordPage struct {
+	Records []StoredDeployRecord
+	More    bool
+}
+
+// ListDeployRecordsByPrefix reads one page of projected deploy state per
+// prefix in a single statement, newest key first, and reports per prefix
+// whether more documents remain. The fallback is deliberately limited to
+// projections that are missing, undecodable, stale or written before
+// DeployRecord.FailedStepName existed (the marshalled record then has no such
+// key): the previous release can still write the old shape during a
 // blue-green rollout, so the document body is authoritative for those rows.
-func (s *Store) ListDeployRecords(ctx context.Context, prefix, before string, limit int) ([]StoredDeployRecord, error) {
-	if prefix == "" || !validText(prefix, maxDocumentPrefixBytes) || !validText(before, 512) {
-		return nil, errors.New("invalid deploy record prefix or cursor")
+//
+// One statement serves every prefix, and each prefix is the documents_key_c
+// range: the console reads one prefix per deploy service, and a query (and a
+// sequential scan of the whole table) per service per poll is the N+1 behind
+// HANDOFFKEEP-5 (hk 4923).
+func (s *Store) ListDeployRecordsByPrefix(ctx context.Context, prefixes []string, limit int) (map[string]DeployRecordPage, error) {
+	out := make(map[string]DeployRecordPage, len(prefixes))
+	if len(prefixes) == 0 {
+		return out, nil
 	}
 	if limit < 1 {
 		limit = 100
 	}
-	if limit > 1000 {
-		limit = 1000
+	if limit > maxDeployRecordsPerPrefix {
+		limit = maxDeployRecordsPerPrefix
 	}
-	rows, err := s.pool.Query(ctx, `SELECT d.key,d.sha256,d.created_at,p.record,p.decoded,
-CASE WHEN p.key IS NULL OR NOT p.decoded OR strpos(convert_from(p.record,'UTF8'), '"failed_step_name"') = 0 THEN d.body ELSE NULL END
-FROM documents d LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256
-WHERE strpos(d.key,$1)=1 AND ($2='' OR d.key<$2) ORDER BY d.key DESC LIMIT $3`, prefix, before, limit)
+	los := make([]string, 0, len(prefixes))
+	his := make([]string, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		if prefix == "" || !validText(prefix, maxDocumentPrefixBytes) {
+			return nil, errors.New("invalid deploy record prefix")
+		}
+		if _, dup := out[prefix]; dup {
+			continue
+		}
+		out[prefix] = DeployRecordPage{Records: []StoredDeployRecord{}}
+		lo, hi := keyPrefixBounds(prefix)
+		los = append(los, lo)
+		his = append(his, hi)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT w.lo,d.key,d.sha256,d.created_at,p.record,p.decoded,`+deployRecordBodyFallbackSQL+`
+FROM unnest($1::text[],$2::text[]) AS w(lo,hi)
+JOIN LATERAL (
+	SELECT d2.key,d2.sha256,d2.created_at,d2.body FROM documents d2
+	WHERE d2.key COLLATE "C" >= w.lo AND d2.key COLLATE "C" < w.hi
+	ORDER BY d2.key COLLATE "C" DESC LIMIT $3
+) d ON true
+LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256
+ORDER BY w.lo, d.key COLLATE "C" DESC`, los, his, limit+1)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []StoredDeployRecord{}
 	for rows.Next() {
+		var prefix string
 		var x StoredDeployRecord
 		var raw []byte
 		var decoded *bool
 		var body *string
-		if err = rows.Scan(&x.Key, &x.SHA256, &x.CreatedAt, &raw, &decoded, &body); err != nil {
+		if err = rows.Scan(&prefix, &x.Key, &x.SHA256, &x.CreatedAt, &raw, &decoded, &body); err != nil {
 			return nil, err
 		}
 		if body != nil {
@@ -195,7 +246,15 @@ WHERE strpos(d.key,$1)=1 AND ($2='' OR d.key<$2) ORDER BY d.key DESC LIMIT $3`, 
 			}
 			x.Decoded = *decoded
 		}
-		out = append(out, x)
+		page := out[prefix]
+		// The extra row only says the prefix holds more.
+		if len(page.Records) == limit {
+			page.More = true
+			out[prefix] = page
+			continue
+		}
+		page.Records = append(page.Records, x)
+		out[prefix] = page
 	}
 	return out, rows.Err()
 }

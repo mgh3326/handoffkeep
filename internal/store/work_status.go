@@ -579,8 +579,12 @@ func readProjectLastSuccessfulDeploys(ctx context.Context, tx pgx.Tx) (map[strin
 		serviceNames[svc.name] = true
 	}
 
+	// One statement reads the newest page under every configured prefix, and a
+	// prefix whose page held no success pages again from its own cursor; the
+	// old loop ran a statement (and a sequential scan of documents) per service
+	// per prefix per poll (HANDOFFKEEP-5/7, hk 4923).
+	var scans []lastSuccessPrefix
 	for _, svc := range services {
-		var newestSuccess *time.Time
 		for _, prefix := range svc.prefixes {
 			// A prefix may be legacy-named while the document uses the canonical
 			// configured service name (for example deploy/panewire/ for panewire-hub).
@@ -588,15 +592,22 @@ func readProjectLastSuccessfulDeploys(ctx context.Context, tx pgx.Tx) (map[strin
 			if i := strings.LastIndex(alias, "/"); i >= 0 {
 				alias = alias[i+1:]
 			}
-			services := []string{svc.name}
+			names := []string{svc.name}
 			if alias != svc.name {
-				services = append(services, alias)
+				names = append(names, alias)
 			}
-			t, err := scanPrefixLastSuccessDeployTx(ctx, tx, prefix, services)
-			if err != nil {
-				return nil, err
-			}
-			if t != nil && (newestSuccess == nil || t.After(*newestSuccess)) {
+			scans = append(scans, lastSuccessPrefix{prefix: prefix, services: names})
+		}
+	}
+	byPrefix, err := scanPrefixesLastSuccessDeployTx(ctx, tx, scans)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, svc := range services {
+		var newestSuccess *time.Time
+		for _, prefix := range svc.prefixes {
+			if t := byPrefix[prefix]; t != nil && (newestSuccess == nil || t.After(*newestSuccess)) {
 				newestSuccess = t
 			}
 		}
@@ -616,106 +627,153 @@ func readProjectLastSuccessfulDeploys(ctx context.Context, tx pgx.Tx) (map[strin
 }
 
 // lastSuccessPageSize is how many documents one page of the last-success scan
-// reads. It bounds one query, not the scan: scanPrefixLastSuccessDeployTx
-// keeps paging until it finds a success or runs out of documents.
+// reads per prefix. It bounds one statement, not the scan:
+// scanPrefixesLastSuccessDeployTx keeps paging a prefix until it finds a
+// success or runs out of documents.
 const lastSuccessPageSize = 200
 
-// scanPrefixLastSuccessDeployTx returns the newest successful deploy under one
-// record prefix. It reads newest-key-first pages and stops at the first page
-// that holds a success, so a long run of newer failed or invalid records
-// cannot hide the last success: a service is reported as never deployed only
-// when its whole prefix has no success.
-func scanPrefixLastSuccessDeployTx(ctx context.Context, tx pgx.Tx, prefix string, services []string) (*time.Time, error) {
-	after := ""
-	for {
-		newest, lastKey, n, err := scanPrefixLastSuccessPageTx(ctx, tx, prefix, services, after)
+// lastSuccessPrefix is one deploy-record prefix to scan and the service names a
+// record under it may carry: the configured name and, when the prefix is
+// legacy-named, its alias.
+type lastSuccessPrefix struct {
+	prefix   string
+	services []string
+}
+
+// scanPrefixesLastSuccessDeployTx returns the newest successful deploy under
+// each prefix, reading one page per prefix per statement. It reads
+// newest-key-first and stops at the first page that holds a success, so a long
+// run of newer failed or invalid records cannot hide the last success: a
+// service is reported as never deployed only when its whole prefix has no
+// success. Only a prefix whose page held no success and came back full costs
+// another statement, so a request reads every prefix in one statement.
+func scanPrefixesLastSuccessDeployTx(ctx context.Context, tx pgx.Tx, prefixes []lastSuccessPrefix) (map[string]*time.Time, error) {
+	found := make(map[string]*time.Time, len(prefixes))
+	services := make(map[string][]string, len(prefixes))
+	var order []string
+	for _, p := range prefixes {
+		if _, seen := services[p.prefix]; !seen {
+			order = append(order, p.prefix)
+		}
+		services[p.prefix] = p.services
+	}
+	after := make(map[string]string, len(order))
+	pending := order
+	for len(pending) > 0 {
+		docs, lastKey, err := scanPrefixesLastSuccessPageTx(ctx, tx, pending, after)
 		if err != nil {
 			return nil, err
 		}
-		if newest != nil || n < lastSuccessPageSize {
-			return newest, nil
+		var deeper []string
+		for _, prefix := range pending {
+			if newest := newestSuccessDeploy(docs[prefix], services[prefix]); newest != nil {
+				found[prefix] = newest
+				continue
+			}
+			// A page shorter than lastSuccessPageSize is the whole prefix.
+			if len(docs[prefix]) < lastSuccessPageSize {
+				continue
+			}
+			after[prefix] = lastKey[prefix]
+			deeper = append(deeper, prefix)
 		}
-		after = lastKey
+		pending = deeper
 	}
+	return found, nil
 }
 
-// scanPrefixLastSuccessPageTx reads one page of documents under prefix whose
-// key sorts before after (all of them when after is empty), newest key first.
-// It returns the newest success on the page, the last key read and the row
-// count; the keys are unique, so the last key is a stable cursor.
-func scanPrefixLastSuccessPageTx(ctx context.Context, tx pgx.Tx, prefix string, services []string, after string) (*time.Time, string, int, error) {
-	rows, err := tx.Query(ctx, `SELECT d.key, d.sha256, d.created_at, p.record, p.decoded,
+// scanPrefixesLastSuccessPageTx reads one page of documents under each prefix
+// whose key sorts before that prefix's cursor (all of them when it is empty),
+// newest key first, and returns the documents read per prefix and the last key
+// read per prefix. The keys are unique, so the last key is a stable cursor.
+//
+// Every prefix is the documents_key_c range and every prefix is served by one
+// statement (hk 4923).
+func scanPrefixesLastSuccessPageTx(ctx context.Context, tx pgx.Tx, prefixes []string, after map[string]string) (map[string][]StoredDeployRecord, map[string]string, error) {
+	los := make([]string, len(prefixes))
+	his := make([]string, len(prefixes))
+	cursors := make([]string, len(prefixes))
+	for i, prefix := range prefixes {
+		los[i], his[i] = keyPrefixBounds(prefix)
+		cursors[i] = after[prefix]
+	}
+	rows, err := tx.Query(ctx, `SELECT w.lo, d.key, d.sha256, d.created_at, p.record, p.decoded,
 		CASE WHEN p.key IS NULL THEN d.body ELSE NULL END
-		FROM documents d
+		FROM unnest($1::text[],$2::text[],$3::text[]) AS w(lo,hi,after)
+		JOIN LATERAL (
+			SELECT d2.key, d2.sha256, d2.created_at, d2.body
+			FROM documents d2
+			WHERE d2.key COLLATE "C" >= w.lo AND d2.key COLLATE "C" < w.hi
+			  AND (w.after = '' OR d2.key COLLATE "C" < w.after)
+			ORDER BY d2.key COLLATE "C" DESC
+			LIMIT $4
+		) d ON true
 		LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256
-		WHERE strpos(d.key, $1) = 1 AND ($2::text = '' OR d.key < $2::text)
-		ORDER BY d.key DESC
-		LIMIT $3`, prefix, after, lastSuccessPageSize)
+		ORDER BY w.lo, d.key COLLATE "C" DESC`, los, his, cursors, lastSuccessPageSize)
 	if err != nil {
-		return nil, "", 0, err
+		return nil, nil, err
 	}
 	defer rows.Close()
-
-	var newest *time.Time
-	var lastKey string
-	n := 0
+	docs := make(map[string][]StoredDeployRecord, len(prefixes))
+	lastKey := make(map[string]string, len(prefixes))
 	for rows.Next() {
-		var key, sha256 string
+		var prefix, key, sha256 string
 		var createdAt time.Time
 		var raw []byte
 		var decoded *bool
 		var body *string
-
-		if err := rows.Scan(&key, &sha256, &createdAt, &raw, &decoded, &body); err != nil {
-			return nil, "", 0, err
+		if err := rows.Scan(&prefix, &key, &sha256, &createdAt, &raw, &decoded, &body); err != nil {
+			return nil, nil, err
 		}
-		lastKey = key
-		n++
+		doc := StoredDeployRecord{Key: key, SHA256: sha256, CreatedAt: createdAt}
+		if body != nil {
+			doc = parseStoredDeployRecord(key, sha256, *body, createdAt)
+		} else if raw != nil && decoded != nil {
+			// A projection this binary cannot parse is left undecoded, so the
+			// record classifies as invalid and is skipped: one bad row must not
+			// fail the page, as before.
+			if json.Unmarshal(raw, &doc.Record) == nil {
+				doc.Decoded = *decoded
+			}
+		}
+		docs[prefix] = append(docs[prefix], doc)
+		lastKey[prefix] = key
+	}
+	return docs, lastKey, rows.Err()
+}
 
+// newestSuccessDeploy returns the newest deploy instant among the successes on
+// one page. A record is read with the first of the prefix's service names it
+// classifies cleanly under; one without a deployed_at is measured by its key
+// time, else its creation time.
+func newestSuccessDeploy(docs []StoredDeployRecord, services []string) *time.Time {
+	var newest *time.Time
+	for _, doc := range docs {
 		var rec *DeployRecord
 		var deployedAt *time.Time
 		var reasons []string
-
-		if body != nil {
-			for _, service := range services {
-				rec, deployedAt, reasons = ClassifyDeployRecord(key, service, *body)
-				if rec != nil && len(reasons) == 0 {
-					break
-				}
-			}
-		} else if raw != nil && decoded != nil && *decoded {
-			var parsed DeployRecord
-			if err := json.Unmarshal(raw, &parsed); err == nil {
-				for _, service := range services {
-					rec, deployedAt, reasons = classifyParsedDeployRecord(key, service, &parsed, true)
-					if rec != nil && len(reasons) == 0 {
-						break
-					}
-				}
+		for _, service := range services {
+			rec, deployedAt, reasons = doc.Classify(service)
+			if rec != nil && len(reasons) == 0 {
+				break
 			}
 		}
-
-		if len(reasons) > 0 || rec == nil {
+		if len(reasons) > 0 || rec == nil || rec.Result != "success" {
 			continue
 		}
-		if rec.Result != "success" {
-			continue
-		}
-
 		t := deployedAt
 		if t == nil {
-			kt, ok := DeployRecordKeyTime(key)
-			if ok {
+			if kt, ok := DeployRecordKeyTime(doc.Key); ok {
 				t = &kt
 			} else {
+				createdAt := doc.CreatedAt
 				t = &createdAt
 			}
 		}
-
 		if newest == nil || t.After(*newest) {
-			newest = t
+			at := *t
+			newest = &at
 		}
 	}
-
-	return newest, lastKey, n, rows.Err()
+	return newest
 }

@@ -3491,8 +3491,11 @@ func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEv
 	}
 	return out, nil
 }
+
+// validDocKey is the key contract: a non-empty path up to maxDocKeyBytes bytes,
+// not absolute, no "..", no NUL.
 func validDocKey(k string) bool {
-	return len(k) > 0 && len(k) <= 512 && !strings.HasPrefix(k, "/") && !strings.Contains(k, "..") && !strings.ContainsRune(k, 0)
+	return len(k) > 0 && len(k) <= maxDocKeyBytes && !strings.HasPrefix(k, "/") && !strings.Contains(k, "..") && !strings.ContainsRune(k, 0)
 }
 func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, error) {
 	if !validDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validDocumentText(x.Body) {
@@ -3618,17 +3621,7 @@ func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string,
 	if limit > 1000 {
 		limit = 1000
 	}
-	likePrefix := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
-	q := `SELECT id,key,kind,session,job,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE ($1='' OR key LIKE $2 || '%' ESCAPE '\') AND ($3='' OR kind=$3) AND ($4='' OR session=$4) AND ($5::bigint=0 OR task_id=$5::bigint)`
-	args := []any{prefix, likePrefix, kind, session, task}
-	order := ` ORDER BY key`
-	if afterID != nil {
-		args = append(args, *afterID)
-		q += fmt.Sprintf(` AND id>$%d`, len(args))
-		order = ` ORDER BY id ASC`
-	}
-	args = append(args, limit)
-	q += order + fmt.Sprintf(` LIMIT $%d`, len(args))
+	q, args := listDocumentsSQL(prefix, kind, session, task, afterID, limit)
 	rows, e := s.pool.Query(ctx, q, args...)
 	if e != nil {
 		return nil, e
@@ -3643,6 +3636,46 @@ func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string,
 		out = append(out, x)
 	}
 	return out, rows.Err()
+}
+
+// listDocumentsSQL builds the ListDocuments statement and its arguments. An
+// empty filter contributes no predicate, so the prefix-matching statement is a
+// plain range on documents_key_c and the planner can use the index
+// (hk 4923); the returned rows and their order are the ones a
+// `key LIKE prefix || '%'` filter returned. The result is key-ordered under
+// the database collation unless afterID pages by id.
+func listDocumentsSQL(prefix, kind, session string, task int64, afterID *int64, limit int) (string, []any) {
+	var conditions []string
+	var args []any
+	if prefix != "" {
+		lo, hi := keyPrefixBounds(prefix)
+		args = append(args, lo, hi)
+		conditions = append(conditions, fmt.Sprintf(`key COLLATE "C" >= $%d AND key COLLATE "C" < $%d`, len(args)-1, len(args)))
+	}
+	if kind != "" {
+		args = append(args, kind)
+		conditions = append(conditions, fmt.Sprintf(`kind=$%d`, len(args)))
+	}
+	if session != "" {
+		args = append(args, session)
+		conditions = append(conditions, fmt.Sprintf(`session=$%d`, len(args)))
+	}
+	if task > 0 {
+		args = append(args, task)
+		conditions = append(conditions, fmt.Sprintf(`task_id=$%d`, len(args)))
+	}
+	order := ` ORDER BY key`
+	if afterID != nil {
+		args = append(args, *afterID)
+		conditions = append(conditions, fmt.Sprintf(`id>$%d`, len(args)))
+		order = ` ORDER BY id ASC`
+	}
+	q := `SELECT id,key,kind,session,job,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents`
+	if len(conditions) > 0 {
+		q += ` WHERE ` + strings.Join(conditions, ` AND `)
+	}
+	args = append(args, limit)
+	return q + order + fmt.Sprintf(` LIMIT $%d`, len(args)), args
 }
 
 func validAttachmentRef(kind, id string) bool {
