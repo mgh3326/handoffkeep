@@ -129,3 +129,56 @@ func TestDotsRequestRefusalPrintsReason(t *testing.T) {
 		t.Fatalf("err = %v, want %q", err, want)
 	}
 }
+
+func TestDotsCancelCommand(t *testing.T) {
+	var seen []intakeRequest
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		x := intakeRequest{Method: r.Method, Path: r.URL.RequestURI()}
+		_ = json.NewDecoder(r.Body).Decode(&x.Body)
+		seen = append(seen, x)
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/dots/requests/4933/cancel" || string(x.Body["requester_lane"]) == `"other-lane"` {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"error":"task_conflict","reason":"only the request's requester lane may cancel it"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"task":{"id":4933,"state":"dropped","category":"canceled"}}`)
+	}))
+	t.Cleanup(h.Close)
+
+	out, err := runAgainst(h, "dots", "cancel", "4933", "--reason", "operator allowed real-model resemblance", "--requester-lane", "parkingarcade-design")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `"state":"dropped"`) || len(seen) != 1 {
+		t.Fatalf("out=%s requests=%v", out, seen)
+	}
+	if seen[0].Path != "/v1/dots/requests/4933/cancel" || string(seen[0].Body["requester_lane"]) != `"parkingarcade-design"` || string(seen[0].Body["reason"]) != `"operator allowed real-model resemblance"` {
+		t.Fatalf("request=%+v", seen[0])
+	}
+
+	t.Setenv("PANEWIRE_LANE", "desk")
+	if _, err := runAgainst(h, "dots", "cancel", "4933", "--reason", "not needed"); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 2 || string(seen[1].Body["requester_lane"]) != `"desk"` {
+		t.Fatalf("defaulted requester lane: %+v", seen)
+	}
+
+	_, err = runAgainst(h, "dots", "cancel", "4933", "--reason", "not needed", "--requester-lane", "other-lane")
+	want := "task_conflict: only the request's requester lane may cancel it"
+	if err == nil || err.Error() != want {
+		t.Fatalf("refusal err = %v, want %q", err, want)
+	}
+
+	if _, err := runAgainst(h, "dots", "cancel", "4933"); err == nil || !strings.Contains(err.Error(), "dots cancel requires --reason") {
+		t.Fatalf("missing reason error = %v", err)
+	}
+	t.Setenv("PANEWIRE_LANE", "")
+	if _, err := runAgainst(h, "dots", "cancel", "4933", "--reason", "not needed"); err == nil || !strings.Contains(err.Error(), "requester-lane or PANEWIRE_LANE") {
+		t.Fatalf("missing lane error = %v", err)
+	}
+	if _, err := runAgainst(h, "dots", "cancel"); err == nil || !strings.Contains(err.Error(), "dots cancel requires a task id") {
+		t.Fatalf("missing task id error = %v", err)
+	}
+}
