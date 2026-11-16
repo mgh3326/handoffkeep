@@ -212,7 +212,8 @@ JOIN LATERAL (
 	WHERE d2.key ~>=~ w.lo AND d2.key ~<~ w.hi
 	ORDER BY d2.key DESC LIMIT $3
 ) d ON true
-LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256`, los, his, limit+1)
+LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256
+ORDER BY w.lo, d.key DESC`, los, his, limit+1)
 	if err != nil {
 		return nil, err
 	}

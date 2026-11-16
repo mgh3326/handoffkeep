@@ -29,6 +29,23 @@ func TestKeyPrefixBounds(t *testing.T) {
 	}
 }
 
+// TestValidDocKeyRefusesUnboundableCodePoint pins the invariant every prefix
+// range depends on: U+10FFFF has no successor, so a key holding it could not be
+// reached by the upper bound of a prefix that ends before it.
+func TestValidDocKeyRefusesUnboundableCodePoint(t *testing.T) {
+	s := schemaStore(t, "documents_prefix_noncharacter")
+	ctx := t.Context()
+	if _, _, err := s.PutDocument(ctx, Document{Key: "policy/x\U0010FFFF", Kind: "note", Session: "s", Body: "b", CreatedBy: "tester"}); err == nil {
+		t.Fatal("a key holding U+10FFFF was accepted")
+	}
+	// A prefix ending in U+10FFFF therefore matches nothing, rather than
+	// matching a key its bound admits but the table cannot hold.
+	rows, err := s.ListDocuments(ctx, "policy/\U0010FFFF", "", "", 0, nil, 10)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("rows=%v err=%v, want none", rows, err)
+	}
+}
+
 // TestListDocumentsPrefixMatchesLike is the equivalence the rewrite owes: a
 // prefix read must return the rows, in the order, that the escaped LIKE filter
 // it replaced returned — including keys holding LIKE metacharacters.

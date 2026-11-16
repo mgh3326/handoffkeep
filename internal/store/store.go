@@ -3491,8 +3491,16 @@ func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEv
 	}
 	return out, nil
 }
+
+// validDocKey is the key contract: a non-empty path up to 512 bytes, not
+// absolute, no "..", no NUL. It also refuses U+10FFFF, the largest code point:
+// a prefix read is the byte range keyPrefixBounds returns, whose upper bound is
+// the successor of the prefix's last code point, and U+10FFFF has none. A key
+// holding it would need a range that cannot be closed, so the key space
+// excludes it and every prefix range is exact.
 func validDocKey(k string) bool {
-	return len(k) > 0 && len(k) <= 512 && !strings.HasPrefix(k, "/") && !strings.Contains(k, "..") && !strings.ContainsRune(k, 0)
+	return len(k) > 0 && len(k) <= 512 && !strings.HasPrefix(k, "/") && !strings.Contains(k, "..") &&
+		!strings.ContainsRune(k, 0) && !strings.Contains(k, keyPrefixSentinel)
 }
 func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, error) {
 	if !validDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validDocumentText(x.Body) {

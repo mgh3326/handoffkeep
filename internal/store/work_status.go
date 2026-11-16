@@ -708,7 +708,8 @@ func scanPrefixesLastSuccessPageTx(ctx context.Context, tx pgx.Tx, prefixes []st
 			ORDER BY d2.key DESC
 			LIMIT $4
 		) d ON true
-		LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256`, los, his, cursors, lastSuccessPageSize)
+		LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256
+		ORDER BY w.lo, d.key DESC`, los, his, cursors, lastSuccessPageSize)
 	if err != nil {
 		return nil, nil, err
 	}

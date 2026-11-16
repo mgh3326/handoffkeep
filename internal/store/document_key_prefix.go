@@ -35,11 +35,10 @@ const keyPrefixSentinel = "\U0010FFFF"
 // code point, followed by that code point's successor. Surrogates are not code
 // points, so the successor of U+D7FF is U+E000.
 //
-// A prefix ending in U+10FFFF has no successor; its bound is then the prefix
-// followed by U+10FFFF, which still admits every key it can be extended with
-// except one whose next code point is U+10FFFF itself. No document key holds
-// that character (keys are written as readable paths: deploy/, reports/,
-// brief/, policy/…), so the bound is exact for every key the table holds.
+// A prefix ending in U+10FFFF has no successor. validDocKey refuses that code
+// point in a key, so no key starts with such a prefix at all: the fallback
+// bound (the prefix followed by U+10FFFF) admits every key the table holds,
+// and a prefix that cannot be extended matches nothing.
 //
 // An empty prefix matches every key and never reaches this function: callers
 // drop the predicate instead.
