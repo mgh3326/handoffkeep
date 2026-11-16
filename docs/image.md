@@ -49,7 +49,12 @@ Optional server configuration:
 - Decision notices in Discord (see [decision-discord.md](decision-discord.md)):
   `HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL`
 - Outbox forwarding to the hub: `HANDOFFKEEP_NOTIFICATION_FORWARD=on`, with the
-  hub proxy variables above
+  hub proxy variables above, plus `HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE`
+  (RFC3339, required while forwarding is on). A first start sends only notices
+  created at or after that instant; older unsent rows are settled as skipped
+  (`skipped_at`/`skip_reason`, never `sent_at`) and the start log reports the
+  cutoff and how many rows it skipped. A restart with the same value re-skips
+  and re-sends nothing. Missing or unparsable: the server refuses to start.
 - Attachments / S3-compatible storage: `HK_S3_ENDPOINT`, `HK_S3_BUCKET`,
   `HK_S3_ACCESS_KEY_ID`, `HK_S3_SECRET_ACCESS_KEY`; optional connection settings:
   `HK_S3_REGION`, `HK_S3_BUCKET_LOOKUP`; limits:

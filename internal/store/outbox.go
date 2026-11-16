@@ -32,6 +32,10 @@ const (
 	OutboxKindDecisionDenied      = "decision_denied"
 	OutboxKindDispositionAnswered = "disposition_answered"
 	OutboxKindDeployResult        = "deploy_result"
+	// OutboxSkipBeforeForwarder is the skip_reason of a row queued before the
+	// forwarder's cutoff: it was settled visibly instead of delivered, because
+	// turning forwarding on must not flush the backlog (hk 4986).
+	OutboxSkipBeforeForwarder = "before_forwarder_cutoff"
 )
 
 var (
@@ -50,6 +54,9 @@ var (
 // receipt (201 or 409 with the existing row id) here: that is the received
 // receipt. AppliedAt and AppliedBy stay NULL until the receiving lane acks
 // the event: the applied receipt, which only follows a received one.
+// SkippedAt and SkipReason are set when forwarding starts with the row older
+// than the forwarder's cutoff: a skipped row is settled, never delivered, and
+// can never gain a receipt.
 type NotificationOutbox struct {
 	ID         int64      `json:"id"`
 	Kind       string     `json:"kind"`
@@ -61,12 +68,14 @@ type NotificationOutbox struct {
 	HubRowID   *int64     `json:"hub_row_id"`
 	AppliedAt  *time.Time `json:"applied_at"`
 	AppliedBy  *string    `json:"applied_by"`
+	SkippedAt  *time.Time `json:"skipped_at"`
+	SkipReason *string    `json:"skip_reason"`
 }
 
-const notificationOutboxColumns = `id,kind,target_lane,event_id,text,created_at,sent_at,hub_row_id,applied_at,applied_by`
+const notificationOutboxColumns = `id,kind,target_lane,event_id,text,created_at,sent_at,hub_row_id,applied_at,applied_by,skipped_at,skip_reason`
 
 func scanNotificationOutbox(row interface{ Scan(...any) error }, x *NotificationOutbox) error {
-	return row.Scan(&x.ID, &x.Kind, &x.TargetLane, &x.EventID, &x.Text, &x.CreatedAt, &x.SentAt, &x.HubRowID, &x.AppliedAt, &x.AppliedBy)
+	return row.Scan(&x.ID, &x.Kind, &x.TargetLane, &x.EventID, &x.Text, &x.CreatedAt, &x.SentAt, &x.HubRowID, &x.AppliedAt, &x.AppliedBy, &x.SkippedAt, &x.SkipReason)
 }
 
 // decisionAnsweredEventID is the deterministic outbox id for a resolution:
@@ -105,7 +114,9 @@ func insertNotificationOutboxOnce(ctx context.Context, tx pgx.Tx, kind, lane, ev
 }
 
 // ListUnsentNotifications returns outbox rows the drainer still owes the
-// hub, in durable insertion order.
+// hub, in durable insertion order. A skipped row is settled, not owed: it is
+// never listed, so nothing that counts unsent rows counts the backlog that
+// forwarding deliberately did not send (hk 4986).
 func (s *Store) ListUnsentNotifications(ctx context.Context, limit int) ([]NotificationOutbox, error) {
 	if limit < 1 {
 		limit = 200
@@ -113,7 +124,7 @@ func (s *Store) ListUnsentNotifications(ctx context.Context, limit int) ([]Notif
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+notificationOutboxColumns+` FROM notification_outbox WHERE sent_at IS NULL ORDER BY id ASC LIMIT $1`, limit)
+	rows, err := s.pool.Query(ctx, `SELECT `+notificationOutboxColumns+` FROM notification_outbox WHERE sent_at IS NULL AND skipped_at IS NULL ORDER BY id ASC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -129,17 +140,36 @@ func (s *Store) ListUnsentNotifications(ctx context.Context, limit int) ([]Notif
 	return out, rows.Err()
 }
 
+// SkipNotificationsBefore settles every row created before the forwarder's
+// cutoff as skipped: the first start of forwarding settles the backlog
+// visibly instead of posting weeks of stale notices (hk 4986). It touches
+// only rows still owed (sent_at and skipped_at NULL), so a restart re-skips
+// nothing, and it never writes sent_at or hub_row_id. It returns how many
+// rows this call settled.
+func (s *Store) SkipNotificationsBefore(ctx context.Context, before time.Time, reason string) (int64, error) {
+	if before.IsZero() || reason == "" || !validText(reason, 128) {
+		return 0, errors.New("invalid notification skip")
+	}
+	tag, err := s.pool.Exec(ctx, `UPDATE notification_outbox SET skipped_at=now(),skip_reason=$2 WHERE created_at < $1 AND sent_at IS NULL AND skipped_at IS NULL`, before, reason)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // MarkNotificationSent records the hub's receipt for one outbox row. It is
 // idempotent: a repeated mark with the same hub_row_id returns the stored
 // row; a different hub_row_id on an already-sent row is a conflict, never a
 // silent overwrite. hubRowID must be the real hub row id — a duplicate
-// answer carrying id 0 is not a receipt and cannot mark a row sent.
+// answer carrying id 0 is not a receipt and cannot mark a row sent. A
+// skipped row can never gain a receipt: sending is what skipping ruled out,
+// so it answers ErrOutboxConflict like any other disagreeing receipt.
 func (s *Store) MarkNotificationSent(ctx context.Context, eventID string, hubRowID int64) (NotificationOutbox, error) {
 	if eventID == "" || len(eventID) > 256 || !validText(eventID, 256) || hubRowID < 1 {
 		return NotificationOutbox{}, errors.New("invalid notification mark")
 	}
 	var x NotificationOutbox
-	err := scanNotificationOutbox(s.pool.QueryRow(ctx, `UPDATE notification_outbox SET sent_at=now(),hub_row_id=$2 WHERE event_id=$1 AND sent_at IS NULL RETURNING `+notificationOutboxColumns, eventID, hubRowID), &x)
+	err := scanNotificationOutbox(s.pool.QueryRow(ctx, `UPDATE notification_outbox SET sent_at=now(),hub_row_id=$2 WHERE event_id=$1 AND sent_at IS NULL AND skipped_at IS NULL RETURNING `+notificationOutboxColumns, eventID, hubRowID), &x)
 	if err == nil {
 		return x, nil
 	}
