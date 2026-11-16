@@ -895,7 +895,11 @@ func (s *Store) deployOnMergedTx(ctx context.Context, tx pgx.Tx, x Task, now tim
 // lists pr. A record is matched through its projection, or parsed from the
 // document body when the projection is stale.
 func deployRecordForPRTx(ctx context.Context, tx pgx.Tx, pr string) (StoredDeployRecord, bool, error) {
-	rows, err := tx.Query(ctx, `SELECT d.key,d.sha256,d.created_at,p.record,p.decoded,CASE WHEN p.key IS NULL THEN d.body ELSE NULL END FROM documents d LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256 WHERE strpos(d.key,'deploy/')=1 AND ((p.decoded AND strpos(convert_from(p.record,'UTF8'),$1)>0) OR (p.key IS NULL AND strpos(d.body,$1)>0)) ORDER BY d.key DESC`, pr)
+	// The record prefix is the documents_key_pattern range:
+	// strpos(key,'deploy/') = 1 scanned the whole table, and every task that
+	// enters merged calls this (hk 4923).
+	lo, hi := keyPrefixBounds("deploy/")
+	rows, err := tx.Query(ctx, `SELECT d.key,d.sha256,d.created_at,p.record,p.decoded,CASE WHEN p.key IS NULL THEN d.body ELSE NULL END FROM documents d LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256 WHERE d.key ~>=~ $2 AND d.key ~<~ $3 AND ((p.decoded AND strpos(convert_from(p.record,'UTF8'),$1)>0) OR (p.key IS NULL AND strpos(d.body,$1)>0)) ORDER BY d.key DESC`, pr, lo, hi)
 	if err != nil {
 		return StoredDeployRecord{}, false, err
 	}

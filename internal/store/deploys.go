@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -41,10 +43,13 @@ func (s *Store) listDocumentsByPrefix(ctx context.Context, prefix, before string
 	}
 	var rows pgx.Rows
 	var err error
+	// strpos(key, $1) = 1 could not use an index: the prefix read is the
+	// half-open range documents_key_pattern holds (hk 4923).
+	lo, hi := keyPrefixBounds(prefix)
 	if before == "" {
-		rows, err = s.pool.Query(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE strpos(key, $1) = 1 ORDER BY key DESC LIMIT $2`, prefix, limit)
+		rows, err = s.pool.Query(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE key ~>=~ $1 AND key ~<~ $2 ORDER BY key DESC LIMIT $3`, lo, hi, limit)
 	} else {
-		rows, err = s.pool.Query(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE strpos(key, $1) = 1 AND key < $2 ORDER BY key DESC LIMIT $3`, prefix, before, limit)
+		rows, err = s.pool.Query(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE key ~>=~ $1 AND key ~<~ $2 AND key < $3 ORDER BY key DESC LIMIT $4`, lo, hi, before, limit)
 	}
 	if err != nil {
 		return nil, err
@@ -103,7 +108,25 @@ func (s *Store) ListDocumentSummariesByPrefix(ctx context.Context, prefix, befor
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT key,kind,session,octet_length(body),substr(body,1,$4),updated_at FROM documents WHERE ($1='' OR strpos(key,$1)=1) AND ($2='' OR key<$2) ORDER BY key DESC LIMIT $3`, prefix, before, limit, documentSummaryHeadChars)
+	var conditions []string
+	var args []any
+	if prefix != "" {
+		lo, hi := keyPrefixBounds(prefix)
+		args = append(args, lo, hi)
+		conditions = append(conditions, fmt.Sprintf(`key ~>=~ $%d AND key ~<~ $%d`, len(args)-1, len(args)))
+	}
+	if before != "" {
+		args = append(args, before)
+		conditions = append(conditions, fmt.Sprintf(`key < $%d`, len(args)))
+	}
+	args = append(args, limit)
+	limitArg := len(args)
+	args = append(args, documentSummaryHeadChars)
+	q := fmt.Sprintf(`SELECT key,kind,session,octet_length(body),substr(body,1,$%d),updated_at FROM documents`, len(args))
+	if len(conditions) > 0 {
+		q += ` WHERE ` + strings.Join(conditions, ` AND `)
+	}
+	rows, err := s.pool.Query(ctx, q+fmt.Sprintf(` ORDER BY key DESC LIMIT $%d`, limitArg), args...)
 	if err != nil {
 		return nil, err
 	}

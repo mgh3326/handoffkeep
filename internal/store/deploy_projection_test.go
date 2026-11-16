@@ -37,9 +37,9 @@ func TestDeployProjectionBackfillAndPreviousWriter(t *testing.T) {
 	if _, err := s.pool.Exec(ctx, `UPDATE documents SET body=$2,sha256=$3 WHERE key=$1`, key, string(body), "old-writer-sha"); err != nil {
 		t.Fatal(err)
 	}
-	records, err := s.ListDeployRecords(ctx, "deploy/svc/", "", 10)
-	if err != nil || len(records) != 1 {
-		t.Fatalf("records=%+v err=%v", records, err)
+	records := deployRecordsOf(t, s, "deploy/svc/", 10)
+	if len(records) != 1 {
+		t.Fatalf("records=%+v", records)
 	}
 	rec, _, reasons := records[0].Classify("svc")
 	if len(reasons) != 0 || len(rec.IncludedPRs) != 1 || rec.IncludedPRs[0] != oldPR {
@@ -54,16 +54,16 @@ func TestDeployProjectionBackfillAndPreviousWriter(t *testing.T) {
 	nextKey := "deploy/svc/20261105T020000Z"
 	nextPR := testPR(9003)
 	body, _ = json.Marshal(DeployRecord{Schema: DeployRecordSchema, Service: "svc", Result: "success", IncludedPRs: []string{nextPR}})
-	if _, err = s.pool.Exec(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at) SELECT $2,kind,session,job,$3,$4,created_by,created_at,updated_at FROM documents WHERE key=$1`, key, nextKey, string(body), "previous-release"); err != nil {
+	if _, err := s.pool.Exec(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at) SELECT $2,kind,session,job,$3,$4,created_by,created_at,updated_at FROM documents WHERE key=$1`, key, nextKey, string(body), "previous-release"); err != nil {
 		t.Fatal(err)
 	}
 	z := flowTask(t, s, s.pool, "implement", StateReviewing, true)
 	if res := send(t, s, mergeEvent(z.ID, nextPR)); res.State != StateDeployed {
 		t.Fatalf("new old-writer record: %+v", res)
 	}
-	records, err = s.ListDeployRecords(ctx, "deploy/svc/", "", 10)
-	if err != nil || len(records) != 2 || records[0].Key != nextKey {
-		t.Fatalf("records=%+v err=%v", records, err)
+	records = deployRecordsOf(t, s, "deploy/svc/", 10)
+	if len(records) != 2 || records[0].Key != nextKey {
+		t.Fatalf("records=%+v", records)
 	}
 }
 
@@ -90,9 +90,9 @@ func TestDeployProjectionEscapedNULWriteAndBackfill(t *testing.T) {
 	}
 	check := func() {
 		t.Helper()
-		records, err := s.ListDeployRecords(ctx, "deploy/svc/", "", 10)
-		if err != nil || len(records) != 1 {
-			t.Fatalf("records=%+v err=%v", records, err)
+		records := deployRecordsOf(t, s, "deploy/svc/", 10)
+		if len(records) != 1 {
+			t.Fatalf("records=%+v", records)
 		}
 		rec, _, reasons := records[0].Classify("svc")
 		if len(reasons) != 0 || rec.Target != "a\x00b" {
@@ -133,9 +133,9 @@ func TestDeployProjectionRecoversFailedStepName(t *testing.T) {
 	if tag.RowsAffected() != 1 {
 		t.Fatal("projection row missing")
 	}
-	records, err := s.ListDeployRecords(ctx, "deploy/svc/", "", 10)
-	if err != nil || len(records) != 1 {
-		t.Fatalf("records=%+v err=%v", records, err)
+	records := deployRecordsOf(t, s, "deploy/svc/", 10)
+	if len(records) != 1 {
+		t.Fatalf("records=%+v", records)
 	}
 	rec, _, reasons := records[0].Classify("svc")
 	if len(reasons) != 0 || rec.FailedStepName == nil || *rec.FailedStepName != "interrupted" {

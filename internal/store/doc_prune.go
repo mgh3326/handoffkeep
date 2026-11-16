@@ -39,11 +39,12 @@ type DocPruneResult struct {
 }
 
 // docPruneCandidates lists unbound documents under the prefix older than the
-// cutoff, oldest key-order first by id, so each batch is deterministic.
+// cutoff, oldest key-order first by id, so each batch is deterministic. The
+// prefix is the byte-wise key range $1 <= key < $2 (documents_key_pattern).
 const docPruneCandidates = `SELECT d.id, d.key, octet_length(d.body) FROM documents d
-WHERE starts_with(d.key, $1) AND d.updated_at < $2
+WHERE d.key ~>=~ $1 AND d.key ~<~ $2 AND d.updated_at < $3
 AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id = d.id)
-ORDER BY d.id LIMIT $3`
+ORDER BY d.id LIMIT $4`
 
 // PruneDocuments deletes review/mwr-* documents last updated before olderThan.
 // It is a dry run unless apply is true: a dry run deletes nothing and reports
@@ -63,11 +64,12 @@ func (s *Store) PruneDocuments(ctx context.Context, prefix string, olderThan tim
 	if limit < 1 || limit > DocPruneMaxLimit {
 		return res, fmt.Errorf("%w: limit must be 1 to %d", ErrDocPruneInvalid, DocPruneMaxLimit)
 	}
-	if e := s.pool.QueryRow(ctx, `SELECT count(*), count(b.document_id) FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id = d.id WHERE starts_with(d.key, $1) AND d.updated_at < $2`, prefix, olderThan.UTC()).Scan(&res.Matched, &res.SkippedBound); e != nil {
+	lo, hi := keyPrefixBounds(prefix)
+	if e := s.pool.QueryRow(ctx, `SELECT count(*), count(b.document_id) FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id = d.id WHERE d.key ~>=~ $1 AND d.key ~<~ $2 AND d.updated_at < $3`, lo, hi, olderThan.UTC()).Scan(&res.Matched, &res.SkippedBound); e != nil {
 		return res, e
 	}
 	if !apply {
-		rows, e := s.pool.Query(ctx, docPruneCandidates, prefix, olderThan.UTC(), limit)
+		rows, e := s.pool.Query(ctx, docPruneCandidates, lo, hi, olderThan.UTC(), limit)
 		if e != nil {
 			return res, e
 		}
@@ -104,7 +106,8 @@ func (s *Store) pruneDocumentBatch(ctx context.Context, prefix string, olderThan
 		return 0, e
 	}
 	defer tx.Rollback(ctx)
-	rows, e := tx.Query(ctx, docPruneCandidates+` FOR UPDATE OF d`, prefix, olderThan, batch)
+	lo, hi := keyPrefixBounds(prefix)
+	rows, e := tx.Query(ctx, docPruneCandidates+` FOR UPDATE OF d`, lo, hi, olderThan, batch)
 	if e != nil {
 		return 0, e
 	}

@@ -17,10 +17,9 @@ import (
 // §배포 기록(hk). The heading must stay "마지막 배포 이후 머지됨" — never
 // "미배포 확정" (design/2026-09-21/deploy-pending-surface §2 advisory).
 const (
-	deployDocsPerSvc = 200
-	// deployDocsHardCap bounds the scan when the first window comes back
-	// full — deployed_at can reorder against record keys, so every document
-	// up to this bound is compared before current is asserted.
+	// deployDocsHardCap bounds how many records of one prefix are compared:
+	// deployed_at can reorder against record keys, so every document up to
+	// this bound is compared before current is asserted.
 	deployDocsHardCap = 2000
 	deployEventsLimit = 1000
 )
@@ -175,14 +174,28 @@ func (h *Handler) pendingDeploys(r *http.Request) (deployPendingResponse, error)
 	if err != nil {
 		return deployPendingResponse{}, err
 	}
+	// One statement reads every active service's record page and one more reads
+	// every service's lag: a query (and a whole-table scan) per service per
+	// poll was the N+1 behind HANDOFFKEEP-5 (hk 4923).
+	var active []store.DeployService
+	var prefixes []string
 	for _, svc := range services {
 		if !svc.Active {
 			continue
 		}
-		view, err := h.deployServiceView(r, svc, events)
-		if err != nil {
-			return deployPendingResponse{}, err
-		}
+		active = append(active, svc)
+		prefixes = append(prefixes, svc.RecordPrefixes...)
+	}
+	pages, err := h.store.ListDeployRecordsByPrefix(r.Context(), prefixes, deployDocsHardCap)
+	if err != nil {
+		return deployPendingResponse{}, err
+	}
+	lags, err := h.store.DeployLagStatuses(r.Context(), active)
+	if err != nil {
+		return deployPendingResponse{}, err
+	}
+	for _, svc := range active {
+		view := deployServiceBlock(svc, events, pages, lags[svc.Name])
 		// The DESC-ordered scan truncates this service's list only when its
 		// oldest scanned event is still after the boundary — a full cap with
 		// an older tail means the list is complete and must not warn.
@@ -204,12 +217,13 @@ type deployParsedDoc struct {
 	recordedAt time.Time
 }
 
-// deployServiceView assembles one service's block. Record selection follows
-// the contract: the current serving version is the newest result=success
-// record ordered by deployed_at (key time when a record did not measure one);
-// the newest record overall is surfaced separately so a failed attempt never
-// disappears behind it.
-func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, events []store.MergedTaskEvent) (deployServiceView, error) {
+// deployServiceBlock assembles one service's block from the record pages and
+// lag its caller read for every service in one statement each. Record
+// selection follows the contract: the current serving version is the newest
+// result=success record ordered by deployed_at (key time when a record did not
+// measure one); the newest record overall is surfaced separately so a failed
+// attempt never disappears behind it.
+func deployServiceBlock(svc store.DeployService, events []store.MergedTaskEvent, pages map[string]store.DeployRecordPage, lag store.DeployLagServiceStatus) deployServiceView {
 	service, repo := svc.Name, svc.Repo
 	view := deployServiceView{
 		Service:        service,
@@ -223,54 +237,34 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 	parsed := []deployParsedDoc{}
 	seen := map[string]bool{}
 	for _, prefix := range svc.RecordPrefixes {
-		cursor := ""
-		prefixCount := 0
-		for {
-			var docs []store.StoredDeployRecord
-			var err error
-			if cursor == "" {
-				docs, err = h.store.ListDeployRecords(r.Context(), prefix, "", deployDocsPerSvc+1)
-			} else {
-				docs, err = h.store.ListDeployRecords(r.Context(), prefix, cursor, deployDocsPerSvc+1)
+		page := pages[prefix]
+		// A prefix holding more records than were read may have its newest
+		// parseable record unscanned, so the block cannot claim it looked at
+		// all of them.
+		if page.More {
+			view.DocsCapped = true
+		}
+		for _, doc := range page.Records {
+			if seen[doc.Key] {
+				continue
 			}
-			if err != nil {
-				return view, err
-			}
-			more := len(docs) > deployDocsPerSvc
-			if more {
-				docs = docs[:deployDocsPerSvc]
-			}
-			for _, doc := range docs {
-				if seen[doc.Key] {
-					continue
+			seen[doc.Key] = true
+			view.RecordCount++
+			rec, deployedAt, reasons := doc.Classify(service)
+			if len(reasons) > 0 {
+				alias := strings.TrimSuffix(prefix, "/")
+				alias = alias[strings.LastIndex(alias, "/")+1:]
+				if alias != service {
+					rec, deployedAt, reasons = doc.Classify(alias)
 				}
-				seen[doc.Key] = true
-				view.RecordCount++
-				rec, deployedAt, reasons := doc.Classify(service)
-				if len(reasons) > 0 {
-					alias := strings.TrimSuffix(prefix, "/")
-					alias = alias[strings.LastIndex(alias, "/")+1:]
-					if alias != service {
-						rec, deployedAt, reasons = doc.Classify(alias)
-					}
-				}
-				if len(reasons) > 0 {
-					view.InvalidCount++
-					view.Invalid = append(view.Invalid, deployInvalidRecord{Key: doc.Key, Prefix: prefix, Reasons: reasons})
-					continue
-				}
-				keyTime, _ := store.DeployRecordKeyTime(doc.Key)
-				parsed = append(parsed, deployParsedDoc{key: doc.Key, rec: rec, deployedAt: deployedAt, keyTime: keyTime, recordedAt: doc.CreatedAt})
 			}
-			prefixCount += len(docs)
-			if !more || len(docs) == 0 {
-				break
+			if len(reasons) > 0 {
+				view.InvalidCount++
+				view.Invalid = append(view.Invalid, deployInvalidRecord{Key: doc.Key, Prefix: prefix, Reasons: reasons})
+				continue
 			}
-			if prefixCount >= deployDocsHardCap {
-				view.DocsCapped = true
-				break
-			}
-			cursor = docs[len(docs)-1].Key
+			keyTime, _ := store.DeployRecordKeyTime(doc.Key)
+			parsed = append(parsed, deployParsedDoc{key: doc.Key, rec: rec, deployedAt: deployedAt, keyTime: keyTime, recordedAt: doc.CreatedAt})
 		}
 	}
 	if len(parsed) == 0 {
@@ -280,7 +274,7 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 		if view.DocsCapped {
 			view.State = DeployStatePartial
 		}
-		return view, nil
+		return view
 	}
 	// Both selections are by contract time (deployed_at, key time fallback),
 	// not document order — a failed attempt whose deployed_at postdates the
@@ -342,12 +336,8 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 	// Lag and the merged-since list share one boundary (the last successful
 	// deploy), the same one the operator-desk notice uses. A service without
 	// one has unknown lag, not all-time lag.
-	st, err := h.store.DeployLagStatus(r.Context(), svc)
-	if err != nil {
-		return deployServiceView{}, err
-	}
-	view.LagCount = st.LagCount
-	view.Lagging = st.Lagging
+	view.LagCount = lag.LagCount
+	view.Lagging = lag.Lagging
 	sort.Slice(parsed, func(i, j int) bool { return deployRecordLess(parsed[j], parsed[i]) })
 	for _, p := range parsed {
 		if len(view.Recent) == 10 {
@@ -356,7 +346,7 @@ func (h *Handler) deployServiceView(r *http.Request, svc store.DeployService, ev
 		view.Recent = append(view.Recent, toView(p))
 	}
 	view.State = deployServiceState(view.DocsCapped, latest.rec, len(view.MergedSince))
-	return view, nil
+	return view
 }
 
 // deployServiceState names what the newest record and the merged-since list
