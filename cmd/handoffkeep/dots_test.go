@@ -109,3 +109,23 @@ func TestDotsAnswerCommand(t *testing.T) {
 		t.Fatalf("expected missing text error, got %v", err)
 	}
 }
+
+// Invariant (operator decision 346): a refused dots request prints the
+// server's reason, not a bare invalid_context.
+func TestDotsRequestRefusalPrintsReason(t *testing.T) {
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/tasks/projects/owners" {
+			_, _ = io.WriteString(w, `{"projects":[]}`)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"invalid_context","reason":"invalid dots request type: CREATE_MOCKUP, CREATE_ASSET or REVIEW_IMPLEMENTATION"}`)
+	}))
+	t.Cleanup(h.Close)
+	_, err := runAgainst(h, "dots", "request", "--requester-lane", "x", "--type", "NO_SUCH_TYPE", "--title", "x", "--body", "y")
+	want := "invalid_context: invalid dots request type: CREATE_MOCKUP, CREATE_ASSET or REVIEW_IMPLEMENTATION"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+}

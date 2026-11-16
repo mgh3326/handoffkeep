@@ -1,6 +1,12 @@
 package store
 
-import "testing"
+import (
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/mgh3326/handoffkeep/internal/guard"
+)
 
 func TestCreateDotsRequest(t *testing.T) {
 	s := schemaStore(t, "dots_request")
@@ -56,7 +62,50 @@ func TestCreateDotsRequestIdempotency(t *testing.T) {
 		t.Fatalf("first=%+v again=%+v err=%v", first, again, err)
 	}
 	in.Body = "Different"
-	if _, err := s.CreateDotsRequest(t.Context(), "caller", in); err == nil {
-		t.Fatal("different request with the same key was accepted")
+	if _, err := s.CreateDotsRequest(t.Context(), "caller", in); !errors.Is(err, ErrDotsRequestInvalid) || !strings.Contains(err.Error(), "already used with different input") {
+		t.Fatalf("reused key err=%v", err)
+	}
+}
+
+// Invariant (operator decision 346): every refusal of a dots request the
+// caller can fix wraps ErrDotsRequestInvalid with a store-authored reason that
+// names the failed rule, and never echoes the value it refused.
+func TestCreateDotsRequestRefusalsNameTheReason(t *testing.T) {
+	s := schemaStore(t, "dots_request_reason")
+	template := "[목적] 홈 화면\n[유지할 것] 색상\n[범위] 1화면\n[제약] 없음\n[산출물] PNG\n[완료 기준] 채택\n[입력] 커밋 9f14c82, 캡처 환경: 로컬 빌드"
+	for _, tc := range []struct {
+		name        string
+		in          DotsRequestInput
+		reason      string
+		notContains string
+	}{
+		{"unknown type", DotsRequestInput{Title: "x", Body: template, Type: "NO_SUCH_TYPE"}, "invalid dots request type: CREATE_MOCKUP, CREATE_ASSET or REVIEW_IMPLEMENTATION", "NO_SUCH_TYPE"},
+		{"missing template section", DotsRequestInput{Title: "x", Body: "just prose", Type: DotsRequestCreateMockup}, "invalid dots request: the body lacks a [목적] section with content", ""},
+		{"bad notify lane", DotsRequestInput{Title: "x", Body: "Investigate\n[알릴 레인] Not A Lane", RequesterLane: "requester"}, "the [알릴 레인] line names a lane that is not [A-Za-z0-9._-]{1,128}", "Not A Lane"},
+		{"bad option", DotsRequestInput{Title: "x", Body: "Investigate", Options: []DecisionOption{{Key: "Z", Label: "one"}}}, "option keys are single letters A-F", ""},
+		{"empty body", DotsRequestInput{Title: "x", Body: " "}, "body must not be empty", ""},
+		{"empty title", DotsRequestInput{Body: "Investigate"}, "title must be one non-empty line", ""},
+		{"bad lane", DotsRequestInput{Title: "x", Body: "Investigate", RequesterLane: "Not A Lane"}, "requester lane must match [A-Za-z0-9._-]{1,128}", "Not A Lane"},
+		{"bad idempotency key", DotsRequestInput{Title: "x", Body: "Investigate", IdempotencyKey: "bad\nkey"}, "idempotency key must be 1-512 bytes without control characters", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := s.CreateDotsRequest(t.Context(), "caller", tc.in)
+			if !errors.Is(err, ErrDotsRequestInvalid) {
+				t.Fatalf("err=%v, want ErrDotsRequestInvalid", err)
+			}
+			reason, ok := strings.CutPrefix(err.Error(), ErrDotsRequestInvalid.Error()+": ")
+			if !ok || reason != tc.reason {
+				t.Fatalf("err=%q, want reason %q", err, tc.reason)
+			}
+			if tc.notContains != "" && strings.Contains(reason, tc.notContains) {
+				t.Fatalf("reason echoes the refused input: %q", reason)
+			}
+		})
+	}
+	// A secret-like title keeps guard's own refusal, not the dots one.
+	if _, err := s.CreateDotsRequest(t.Context(), "caller", DotsRequestInput{Title: "AKIA" + "ABCDEFGHIJKLMNOP", Body: "Investigate"}); errors.Is(err, ErrDotsRequestInvalid) {
+		t.Fatalf("secret refusal became a dots refusal: %v", err)
+	} else if _, ok := guard.SecretPattern(err); !ok {
+		t.Fatalf("secret refusal lost its pattern: %v", err)
 	}
 }
