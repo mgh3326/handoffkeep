@@ -73,11 +73,55 @@ func TestDotsCancelAPI(t *testing.T) {
 	if got.Refs.Closure == nil || got.Refs.Closure.Type != "cancelled" || got.Refs.Closure.Evidence != why {
 		t.Fatalf("reason not recorded on the task: %+v", got.Refs.Closure)
 	}
+	// The authenticated client is the transition's actor; the requester lane
+	// stays self-asserted.
+	events, err := st.ListTaskEvents(ctx, task.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropped := 0
+	for _, e := range events {
+		if e.To != store.StateDropped {
+			continue
+		}
+		dropped++
+		if e.By != "cli" || e.Note != why {
+			t.Fatalf("cancel event by=%q note=%q", e.By, e.Note)
+		}
+	}
+	if dropped != 1 {
+		t.Fatalf("cancel events=%d, want 1", dropped)
+	}
 
-	// dots' later reply is refused as on any settled task.
+	// The cancel ends the run: its token is superseded and a later reply is
+	// refused.
+	if issued, err := st.DotsRunIssuedAt(ctx, task.ID); err != nil || issued != nil {
+		t.Fatalf("run token still active after cancel: issued=%v err=%v", issued, err)
+	}
 	_, err = st.ReplyDots(ctx, "operator:test@example.com", "chatgpt", store.DotsReplyInput{TaskID: task.ID, Kind: "RESULT", Body: "Done", IdempotencyKey: "result", RunToken: start.RunToken})
-	if !errors.Is(err, store.ErrTaskConflict) {
+	if !errors.Is(err, store.ErrDotsRunTokenMismatch) {
 		t.Fatalf("dots reply after cancel: %v", err)
+	}
+
+	// A retried cancel answers the settled request instead of a conflict.
+	code, out = projectRequest(t, h.URL, http.MethodPost, path, "test-token", map[string]any{"requester_lane": "requesting-lane", "reason": why})
+	if code != http.StatusOK {
+		t.Fatalf("retried cancel status=%d body=%v", code, out)
+	}
+	if got, _ := out["task"].(map[string]any); got["state"] != "dropped" {
+		t.Fatalf("retried cancel task=%v", got)
+	}
+	if events, err = st.ListTaskEvents(ctx, task.ID, 0, 100); err != nil {
+		t.Fatal(err)
+	}
+	again := 0
+	for _, e := range events {
+		if e.To == store.StateDropped {
+			again++
+		}
+	}
+	if again != 1 {
+		t.Fatalf("retried cancel wrote a second transition: %d", again)
 	}
 
 	// The request left dots_inbox.

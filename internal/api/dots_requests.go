@@ -26,9 +26,12 @@ func (s Server) dotsRequestCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // dotsRequestCancel is POST /v1/dots/requests/{id}/cancel: the request's
-// requester lane settles it as canceled with a reason (hk 4987).
+// requester lane settles it as canceled with a reason (hk 4987). The
+// authenticated client is the transition's actor; requester_lane is
+// self-asserted, as on create.
 func (s Server) dotsRequestCancel(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.auth(w, r); !ok {
+	client, ok := s.auth(w, r)
+	if !ok {
 		return
 	}
 	id, err := pathID(r, "id")
@@ -42,7 +45,7 @@ func (s Server) dotsRequestCancel(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
-	task, err := s.Service.Store.CancelDotsRequest(r.Context(), id, in)
+	task, err := s.Service.Store.CancelDotsRequest(r.Context(), id, client, in)
 	if err != nil {
 		appErr(w, r, err)
 		return

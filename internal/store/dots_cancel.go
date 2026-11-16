@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
@@ -32,12 +33,17 @@ type DotsCancelInput struct {
 }
 
 // CancelDotsRequest settles one dots request as canceled by its requester
-// lane, recording reason on the task.
-func (s *Store) CancelDotsRequest(ctx context.Context, taskID int64, in DotsCancelInput) (Task, error) {
+// lane, recording reason on the task. by is the authenticated caller: it is
+// the transition's actor, while the requester lane is self-asserted on this
+// route exactly as on create and must name the request's parent_lane.
+func (s *Store) CancelDotsRequest(ctx context.Context, taskID int64, by string, in DotsCancelInput) (Task, error) {
 	lane := strings.TrimSpace(in.RequesterLane)
 	reason := strings.TrimSpace(in.Reason)
 	if taskID < 1 {
 		return Task{}, ErrTaskNotFound
+	}
+	if by == "" || !validText(by, 128) {
+		return Task{}, errors.New("caller is required")
 	}
 	if !validName(lane) {
 		return Task{}, dotsRequestInvalid("requester lane must match [A-Za-z0-9._-]{1,128}")
@@ -79,7 +85,21 @@ func (s *Store) CancelDotsRequest(ctx context.Context, taskID int64, in DotsCanc
 	if x.ParentLane != lane {
 		return Task{}, fmt.Errorf("%w: only the request's requester lane may cancel it", ErrTaskConflict)
 	}
-	x, err = s.transitionTaskTx(ctx, tx, taskID, TransitionInput{To: StateDropped, By: lane, Note: reason}, false)
+	// A retried cancel — the first one committed and its response was lost —
+	// answers the settled request instead of a transition conflict, so the
+	// requester can tell that the cancel landed.
+	if x.State == StateDropped {
+		return x, nil
+	}
+	// The request's run ends with it: the active run token is superseded in
+	// this transaction, as a reopen does when it clears the claim
+	// (dots_run_token.go). The settled-state check in ReplyDots would refuse
+	// a later reply anyway; this ends the run itself.
+	now := time.Now().UTC()
+	if _, err := supersedeDotsRunTokensTx(ctx, tx, taskID, now); err != nil {
+		return Task{}, err
+	}
+	x, err = s.transitionTaskTx(ctx, tx, taskID, TransitionInput{To: StateDropped, By: by, Note: reason}, false)
 	if err != nil {
 		return Task{}, err
 	}
