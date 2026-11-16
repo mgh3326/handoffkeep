@@ -58,7 +58,7 @@ func TestYTWritePathPlanUsesIndexes(t *testing.T) {
 			// The moved-comment requeue's candidate scan.
 			name: "comment requeue candidates",
 			sql:  ytRequeueSelectSQL,
-			args: []any{YTCommentPrincipal, ytcTenant, "ambiguous_issue", YTIssuePrincipal, "issue_create", 200},
+			args: []any{YTCommentPrincipal, ytcTenant, YTIssuePrincipal, "issue_create", 200},
 			want: "yt_write_ops_comment_requeue",
 		},
 	} {
@@ -72,7 +72,7 @@ func TestYTWritePathPlanUsesIndexes(t *testing.T) {
 		}
 	}
 	// The article_update apply reads the binding by its primary key.
-	plan := ytPlanExplainOnly(t, s, `UPDATE yt_article_bindings SET content_sha=$4, needs_update=false
+	plan := ytPlanExplain(t, s, `UPDATE yt_article_bindings SET content_sha=$4, needs_update=false
 		WHERE document_id=$1 AND tenant=$2 AND article_id=$3`, int64(2), ytcTenant, "art-2", strings.Repeat("a", 64))
 	t.Logf("article_update apply:\n%s", plan)
 	if strings.Contains(plan, "Seq Scan on yt_article_bindings") {
@@ -80,22 +80,11 @@ func TestYTWritePathPlanUsesIndexes(t *testing.T) {
 	}
 }
 
-// ytPlanExplain returns the plan of sql with args, executed, as text.
+// ytPlanExplain returns the plan of sql with args as text. It plans only: the
+// statement under test is the worker's, and the test is about the plan.
 func ytPlanExplain(t *testing.T, s *Store, sql string, args ...any) string {
 	t.Helper()
-	return ytPlanText(t, s, "EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF) ", sql, args...)
-}
-
-// ytPlanExplainOnly is ytPlanExplain without executing sql: for a statement
-// whose plan is wanted but whose effect is not part of the test.
-func ytPlanExplainOnly(t *testing.T, s *Store, sql string, args ...any) string {
-	t.Helper()
-	return ytPlanText(t, s, "EXPLAIN (COSTS OFF, SUMMARY OFF, TIMING OFF) ", sql, args...)
-}
-
-func ytPlanText(t *testing.T, s *Store, prefix, sql string, args ...any) string {
-	t.Helper()
-	rows, err := s.pool.Query(t.Context(), prefix+sql, args...)
+	rows, err := s.pool.Query(t.Context(), "EXPLAIN (COSTS OFF, SUMMARY OFF, TIMING OFF) "+sql, args...)
 	if err != nil {
 		t.Fatalf("%s: %v", sql, err)
 	}

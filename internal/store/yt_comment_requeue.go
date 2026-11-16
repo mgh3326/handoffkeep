@@ -55,28 +55,33 @@ type YTRequeued struct {
 
 // ytRequeueSelectSQL lists the candidates of a requeue pass, oldest comment
 // first: a comment_append op of the comment principal ($1) on tenant $2,
-// rejected ambiguous_issue ($3) at its claim with no target and no attempt
-// (a queued comment that was never sent), that still owns its comment
+// rejected ambiguous_issue at its claim with no target and no attempt (a
+// queued comment that was never sent), that still owns its comment
 // (yt_comment_write_links; the comment exists on the op's task), on a task
 // whose binding is the one the task's own
-// applied issue_create op ($4 principal, $5 kind) published on the op's
+// applied issue_create op ($3 principal, $4 kind) published on the op's
 // tenant, above the binding's comments_from, with no issue_move on the
 // binding's issue still unresolved, and that every local source agrees with
 // now. The agreement is ytBindingSourcesSQL's, written over the
 // binding's columns so a binding that still disagrees is never listed: it
-// would otherwise stay at the head of the limit ($6) and starve the rest.
+// would otherwise stay at the head of the limit ($5) and starve the rest.
 // The pass checks all of it again under the lane lock (ytBindingDisagreement,
 // ytPendingMoveTx).
+//
+// The kind, state, reason, target and attempt count are literals, not
+// parameters, so the partial index yt_write_ops_comment_requeue (its
+// predicate names the same ones) is provably implied by this query and the
+// scan reads the candidates alone instead of every comment op (hk 4922).
 const ytRequeueSelectSQL = `SELECT o.id, w.comment_id, b.task_id
 	FROM yt_write_ops o
 	JOIN yt_comment_write_links w ON w.op_id = o.id
 	JOIN task_comments tc ON tc.id = w.comment_id AND tc.task_id::text = o.entity_id
 	JOIN yt_task_bindings b ON b.task_id::text = o.entity_id AND b.tenant = o.tenant
 	WHERE o.principal = $1 AND o.kind = '` + ytwrite.KindCommentAppend + `' AND o.tenant = $2 AND o.entity_kind = 'task'
-	  AND o.state = 'rejected' AND o.reason = $3 AND o.yt_target_id = '' AND o.attempts = 0
+	  AND o.state = 'rejected' AND o.reason = '` + ytwrite.ReasonAmbiguousIssue + `' AND o.yt_target_id = '' AND o.attempts = 0
 	  AND w.comment_id > b.comments_from
 	  AND b.origin = '` + YTBindingOpApplied + `'
-	  AND EXISTS (SELECT 1 FROM yt_write_ops i WHERE i.id = b.op_id AND i.principal = $4 AND i.kind = $5
+	  AND EXISTS (SELECT 1 FROM yt_write_ops i WHERE i.id = b.op_id AND i.principal = $3 AND i.kind = $4
 		AND i.state = 'applied' AND i.entity_kind = 'task' AND i.entity_id = o.entity_id)
 	  AND NOT EXISTS (SELECT 1 FROM task_origins x WHERE x.task_id = b.task_id AND x.provider = 'youtrack'
 		AND (coalesce(x.external_id,'') <> b.issue_id OR (coalesce(x.tenant,'') <> '' AND x.tenant <> b.tenant)))
@@ -91,7 +96,7 @@ const ytRequeueSelectSQL = `SELECT o.id, w.comment_id, b.task_id
 			AND NOT EXISTS (SELECT 1 FROM youtrack_projects p WHERE p.yt_project_id = b.project_id)))
 	  AND NOT EXISTS (SELECT 1 FROM yt_write_ops mv WHERE mv.kind = '` + ytwrite.KindIssueMove + `' AND mv.entity_kind = 'task'
 		AND mv.entity_id = o.entity_id AND mv.yt_target_id = b.issue_id AND mv.state NOT IN ('applied','rejected'))
-	ORDER BY w.comment_id, o.id LIMIT $6`
+	ORDER BY w.comment_id, o.id LIMIT $5`
 
 // RequeueYTMovedComments copies again, for the worker of tenant, each comment
 // whose queued op was rejected ambiguous_issue at its claim and whose task's
@@ -119,7 +124,7 @@ func (s *Store) RequeueYTMovedComments(ctx context.Context, tenant string, limit
 		limit = YTRequeueMax
 	}
 	type cand struct{ op, comment, task int64 }
-	rows, err := s.pool.Query(ctx, ytRequeueSelectSQL, YTCommentPrincipal, tenant, ytwrite.ReasonAmbiguousIssue,
+	rows, err := s.pool.Query(ctx, ytRequeueSelectSQL, YTCommentPrincipal, tenant,
 		YTIssuePrincipal, ytwrite.KindIssueCreate, limit)
 	if err != nil {
 		return out, err

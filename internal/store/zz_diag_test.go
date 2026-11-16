@@ -120,9 +120,9 @@ func diagRun(t *testing.T, prefix string, withIndexes bool) {
 	step("PrepareMappedYTIssues", func() error { _, err := s.PrepareMappedYTIssues(ctx, 200); return err })
 	step("YTWriteOutboxStatus", func() error { _, err := s.YTWriteOutboxStatus(ctx, now); return err })
 
-	explain := func(label, analyze, sql string, args ...any) {
+	explain := func(label, sql string, args ...any) {
 		t.Helper()
-		rows, err := s.pool.Query(ctx, "EXPLAIN "+analyze+" (COSTS OFF, SUMMARY OFF, TIMING OFF) "+sql, args...)
+		rows, err := s.pool.Query(ctx, "EXPLAIN (COSTS OFF, SUMMARY OFF, TIMING OFF) "+sql, args...)
 		if err != nil {
 			t.Logf("== [%s] EXPLAIN %s: %v", prefix, label, err)
 			return
@@ -143,18 +143,18 @@ func diagRun(t *testing.T, prefix string, withIndexes bool) {
 	if err := s.pool.QueryRow(ctx, `SELECT id FROM yt_write_ops WHERE kind='article_create'`).Scan(&articleOp); err != nil {
 		t.Fatal(err)
 	}
-	explain("Claim admission (article_create)", "ANALYZE",
+	explain("Claim admission (article_create)",
 		`SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id=$1 AND `+s.ytAdmitSQL("$2")+`)`, articleOp, ytcTenant)
-	explain("requeue select", "ANALYZE", ytRequeueSelectSQL,
-		YTCommentPrincipal, ytcTenant, "ambiguous_issue", YTIssuePrincipal, "issue_create", 200)
-	explain("catch-up select", "ANALYZE", ytCatchUpSelectSQL,
+	explain("requeue select", ytRequeueSelectSQL,
+		YTCommentPrincipal, ytcTenant, YTIssuePrincipal, "issue_create", 200)
+	explain("catch-up select", ytCatchUpSelectSQL,
 		YouTrackOwnedActor, YTCommentPrincipal, "comment_append", "comment:", []int64{}, 200, false)
-	explain("held candidates", "ANALYZE", `SELECT `+ytHeldOpColumns+` FROM yt_write_ops o
+	explain("held candidates", `SELECT `+ytHeldOpColumns+` FROM yt_write_ops o
 		WHERE o.state='prepared' AND o.tenant=$6 AND o.created_at <= $1 AND (o.created_at, o.id) > ($2, $3)
 		AND o.kind = ANY($4) AND ($7 = '' OR o.entity_id = $7) AND `+ytHeldScopeSQL+` AND NOT `+s.ytAdmitSQL("$6")+` AND `+ytHeldKeptSQL+`
 		ORDER BY o.created_at, o.id LIMIT $5`, now.Add(-YTHeldRecoveryGrace), time.Unix(0, 0).UTC(), int64(0),
 		[]string{"comment_append", "issue_fields", "issue_move", "issue_links"}, 200, ytcTenant, "")
-	explain("article binding update (pkey)", "",
+	explain("article binding update (pkey)",
 		`UPDATE yt_article_bindings SET content_sha=$4, needs_update=false
 		 WHERE document_id=$1 AND tenant=$2 AND article_id=$3`, int64(2), ytcTenant, "art-2", strings.Repeat("a", 64))
 }
