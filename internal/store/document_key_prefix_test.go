@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"regexp"
 	"strconv"
 	"strings"
@@ -261,19 +262,29 @@ func maxScanRows(t *testing.T, plan, scan string) int {
 // read: the bounds, the cursor and the ORDER BY share the index's collation,
 // so a page is an ordered index scan of one page instead of a sort of the whole
 // prefix range. Six hundred records under one prefix make the two plans differ
-// by the rows they touch.
+// by the rows they touch, and one prefix per statement keeps EXPLAIN's per-loop
+// counts unambiguous.
 func TestLastSuccessPageReadsOnePage(t *testing.T) {
 	s, counter := countingStore(t, "last_success_page_order")
 	ctx := t.Context()
 	for i := range 600 {
 		seedDeployRecord(t, s, "hk", "failed", time.Date(2026, 9, 1, 0, 0, i, 0, time.UTC))
 	}
-	svc := DeployService{Name: "hk", Repo: "mgh3326/handoffkeep", RecordPrefixes: []string{"deploy/hk/"}, Active: true}
-	if _, err := s.PutDeployService(ctx, svc); err != nil {
+	// Statistics for the planner: without them it estimates a handful of rows
+	// and a bitmap path looks as good as the ordered index scan.
+	if _, err := s.pool.Exec(ctx, `ANALYZE documents`); err != nil {
 		t.Fatal(err)
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background())
 	counter.Reset()
-	if _, err := s.DeployLagStatuses(ctx, []DeployService{svc}); err != nil {
+	if _, err := scanPrefixesLastSuccessDeployTx(ctx, tx, []lastSuccessPrefix{{prefix: "deploy/hk/", services: []string{"hk"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 	statements := counter.StatementsMatching("FROM documents")
