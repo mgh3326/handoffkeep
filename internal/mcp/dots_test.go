@@ -43,6 +43,18 @@ func TestDotsToolsRegistered(t *testing.T) {
 	if want := "attachments lists files on the request; read them before asking for a copy"; !strings.Contains(descriptions["dots_inbox"], want) {
 		t.Fatalf("dots_inbox description omits %q: %s", want, descriptions["dots_inbox"])
 	}
+	// A request that stops short is a result, not an open question: its RESULT
+	// says what is missing, and only a real obstacle or a real question uses
+	// BLOCKED or QUESTION (operator decision 360).
+	for _, want := range []string{
+		"When you stop without going on, send RESULT and say in its body what the request asked for that is missing, why, and who is next",
+		"a partial result is never QUESTION or PROGRESS",
+		"Send BLOCKED when someone else must clear something before you can go on, and QUESTION only when you need an answer to go on",
+	} {
+		if !strings.Contains(descriptions["dots_reply"], want) {
+			t.Fatalf("dots_reply description omits %q: %s", want, descriptions["dots_reply"])
+		}
+	}
 }
 
 func TestDotsReplyWritesSwitch(t *testing.T) {
