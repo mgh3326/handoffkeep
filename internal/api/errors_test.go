@@ -33,6 +33,7 @@ func TestAppErrMapping(t *testing.T) {
 		{"sentinel with reason", fmt.Errorf("%w: claimed by another job", store.ErrTaskConflict), http.StatusConflict, map[string]string{"error": "task_conflict", "reason": "claimed by another job"}},
 		{"YouTrack result conflict", ytwrite.ErrConflictingResult, http.StatusConflict, map[string]string{"error": "ytwrite_conflicting_result"}},
 		{"store validation", errors.New("invalid bench rep"), http.StatusBadRequest, map[string]string{"error": "invalid_context"}},
+		{"dots request refusal", fmt.Errorf("%w: requester lane must match [A-Za-z0-9._-]{1,128}", store.ErrDotsRequestInvalid), http.StatusBadRequest, map[string]string{"error": "invalid_context", "reason": "requester lane must match [A-Za-z0-9._-]{1,128}"}},
 		{"secret pattern", guard.Reject("AKIA" + "ABCDEFGHIJKLMNOP"), http.StatusBadRequest, map[string]string{"error": "secret_like_content", "pattern": "aws_access_key"}},
 		{"integrity violation", &pgconn.PgError{Code: "23505"}, http.StatusBadRequest, map[string]string{"error": "invalid_context"}},
 		{"data exception", &pgconn.PgError{Code: "22P02"}, http.StatusBadRequest, map[string]string{"error": "invalid_context"}},

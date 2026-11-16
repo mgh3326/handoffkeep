@@ -20,7 +20,9 @@ A design request is filed with `--type CREATE_MOCKUP`, `CREATE_ASSET` or
 `REVIEW_IMPLEMENTATION`. Its body must carry the policy template sections
 `[목적]`, `[유지할 것]`, `[범위]`, `[제약]`, `[산출물]`, `[완료 기준]` and `[입력]`,
 and `[입력]` must name a commit SHA and the capture environment; otherwise the
-request is refused. The stored body starts with a `[유형]` line. Requests with no
+request is refused. A refused request answers 400 `invalid_context` with a
+`reason` naming the rule that failed, and `handoffkeep dots request` prints it
+after the code. The stored body starts with a `[유형]` line. Requests with no
 type (research, for example) take no template. `dots adopt` may record the
 adopted Canva design with `--canva-url` (an https canva.com design link),
 `--canva-page` and `--canva-version`, for `accepted` or `partially_used` results only. A repeat of such an adoption without the Canva flags keeps the recorded design.

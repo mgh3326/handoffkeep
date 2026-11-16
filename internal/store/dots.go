@@ -75,26 +75,52 @@ type DotsRequestInput struct {
 	Options []DecisionOption `json:"options,omitempty"`
 }
 
+// ErrDotsRequestInvalid refuses a dots request the store cannot accept. Its
+// text is the wire code (TestErrorRuleCodesMatchSentinels); the reason after
+// "invalid_context: " is store-authored and is returned to the caller. A
+// reason names the rule that failed and never echoes the caller's input.
+var ErrDotsRequestInvalid = errors.New("invalid_context")
+
+func dotsRequestInvalid(reason string) error {
+	return fmt.Errorf("%w: %s", ErrDotsRequestInvalid, reason)
+}
+
 // CreateDotsRequest creates a standalone request and its body in one transaction.
 func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequestInput) (Task, error) {
 	lane := in.RequesterLane
 	if lane == "" {
 		lane = by
 	}
-	if !validName(lane) || by == "" || !validText(by, 128) || strings.TrimSpace(in.Body) == "" {
+	if by == "" || !validText(by, 128) {
 		return Task{}, errors.New("invalid dots request")
 	}
+	if !validName(lane) {
+		return Task{}, dotsRequestInvalid("requester lane must match [A-Za-z0-9._-]{1,128}")
+	}
+	if strings.TrimSpace(in.Body) == "" {
+		return Task{}, dotsRequestInvalid("body must not be empty")
+	}
 	if err := checkDotsRequestTemplate(in); err != nil {
-		return Task{}, err
+		// The template refuses with a plain, store-authored message. Wrapping
+		// here gives every rule the one reason-bearing path, so a rule added to
+		// the template carries its reason without touching this function.
+		return Task{}, dotsRequestInvalid(err.Error())
 	}
 	if err := CheckDotsChoice(in.Options); err != nil {
-		return Task{}, err
+		// The option rules are the decision request's, so their message carries
+		// its sentinel; the dots route answers invalid_context like the rest of
+		// this refusal path.
+		reason, ok := strings.CutPrefix(err.Error(), ErrInvalidDecisionRequest.Error()+": ")
+		if !ok {
+			reason = err.Error()
+		}
+		return Task{}, dotsRequestInvalid(reason)
 	}
 	if err := rejectDotsChoiceSecrets(in.Options); err != nil {
 		return Task{}, err
 	}
 	if _, invalid := dotsNotifyLanes(in.Body, lane); len(invalid) > 0 {
-		return Task{}, fmt.Errorf("invalid dots notify lane %q", invalid[0])
+		return Task{}, dotsRequestInvalid("the [알릴 레인] line names a lane that is not [A-Za-z0-9._-]{1,128}")
 	}
 	var project *string
 	if in.Project != "" {
@@ -102,7 +128,12 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 	}
 	item := triageItem{Title: in.Title, Body: dotsRequestBody(in), Kind: "verify", Project: project}
 	if err := checkTriageItem(item); err != nil {
-		return Task{}, err
+		// The bounds are the intake validator's; a secret-like title or body
+		// keeps guard's own refusal.
+		if _, secret := guard.SecretPattern(err); secret {
+			return Task{}, err
+		}
+		return Task{}, dotsRequestInvalid(strings.TrimPrefix(err.Error(), "invalid intake: "))
 	}
 	digestParts := []string{in.Title, in.Body, lane, in.Project}
 	if in.Type != "" {
@@ -120,7 +151,7 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 	var sourceRef string
 	if in.IdempotencyKey != "" {
 		if !validSourceRef(in.IdempotencyKey) {
-			return Task{}, errors.New("invalid dots request idempotency key")
+			return Task{}, dotsRequestInvalid("idempotency key must be 1-512 bytes without control characters")
 		}
 		if err := guard.Reject(in.IdempotencyKey); err != nil {
 			return Task{}, err
@@ -153,7 +184,7 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 				return Task{}, err
 			}
 			if original != requestDigest {
-				return Task{}, errors.New("dots request idempotency key reused with different input")
+				return Task{}, dotsRequestInvalid("idempotency key was already used with different input")
 			}
 			return existing, nil
 		}
