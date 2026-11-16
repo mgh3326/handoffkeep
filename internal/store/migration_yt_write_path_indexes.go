@@ -32,7 +32,8 @@ import (
 //     (ytwrite.KindCommentAppend, ytwrite.StateRejected,
 //     ytwrite.ReasonAmbiguousIssue).
 //
-// After both tables' migrations: the statements index the tables they add.
+// After 20261112-yt-article-bindings and 20261109-yt-comment-canary, which
+// adds yt_write_ops.tenant: the second index names it.
 //
 // Expand-only: two indexes, no column, table or constraint change, and the
 // previous release reads and writes both tables exactly as before. Locks:
@@ -42,7 +43,7 @@ import (
 // partial (an empty candidate set, a handful of rows at most), so both builds
 // are a short scan of a small table. The migration writes no row.
 func init() {
-	registerMigration(migration{ID: YTWritePathIndexesMigration, After: []string{YTArticleBindingsMigration, "20261109-yt-write-ops"}, Apply: func(ctx context.Context, tx pgx.Tx) error {
+	registerMigration(migration{ID: YTWritePathIndexesMigration, After: []string{YTArticleBindingsMigration, "20261109-yt-comment-canary"}, Apply: func(ctx context.Context, tx pgx.Tx) error {
 		return execAll(ctx, tx, ytWritePathIndexStatements)
 	}})
 }
