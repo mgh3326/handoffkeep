@@ -158,7 +158,7 @@ func TestReconciledChangeSettlesHeldTask(t *testing.T) {
 		t.Fatalf("before reconcile: %+v, want the task under no_merge_commit", before.Tasks)
 	}
 
-	open, err := f.s.ListUnreconciledChanges(t.Context(), 100)
+	open, err := f.s.ListUnreconciledChanges(t.Context(), nil, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestReconciledChangeSettlesHeldTask(t *testing.T) {
 	if _, err := f.s.ApplyChangeState(t.Context(), ChangeRef{Repo: f.repo, PR: 2}, ChangeStateWrite{HeadSHA: testSHA2, State: ChangeMerged, MergeSHA: testSHA2, ObservedAt: time.Now().UTC(), Source: "poll"}); err != nil {
 		t.Fatalf("reconcile PR 2 to merged: %v", err)
 	}
-	open, err = f.s.ListUnreconciledChanges(t.Context(), 100)
+	open, err = f.s.ListUnreconciledChanges(t.Context(), nil, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
