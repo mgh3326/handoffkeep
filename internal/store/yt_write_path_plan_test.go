@@ -130,11 +130,14 @@ func ytPlanMeasure(t *testing.T, s *Store) {
 
 // ytPlanSeed writes the rows production held when hk 4922 was written
 // (pg_stat_user_tables on 2026-11-16, twelve days after the instance start):
-// 15,657 article bindings, 7,416 comment write links and 28,055 write ops,
-// the three article ops a pass finds prepared, and the 7,416 comment ops the
-// links own. The supporting rows are production-shaped: 2,000 bound tasks
-// with 10,000 comments, five per task, so the requeue and the catch-up join
-// real rows instead of an empty database.
+// 15,657 article bindings, 7,416 comment write links and 28,055 write ops.
+// The supporting rows are production-shaped rather than empty, so the plans
+// are the ones the worker gets: 2,000 tasks in five mapped hk projects with
+// 10,000 comments, five per task; a binding per task with the applied
+// issue_create op that published it and a watermark the comments sit above;
+// a link per comment op; two comment ops rejected ambiguous_issue at their
+// claim, which is what the requeue's candidate scan looks for; and documents
+// 2..15658 bound to an article, so the create op's document is unbound.
 func ytPlanSeed(t *testing.T, s *Store) {
 	t.Helper()
 	seed := []string{
@@ -146,39 +149,47 @@ func ytPlanSeed(t *testing.T, s *Store) {
 		 SELECT g, 1+(g%2000), 'comment '||g, 'operator', now()-(g||' seconds')::interval
 		 FROM generate_series(1,10000) g`,
 		`SELECT setval(pg_get_serial_sequence('task_comments','id'), 10000)`,
-		// 15,657 verified article bindings, one per document: the table the
-		// three article cases plan against.
-		`INSERT INTO yt_article_bindings (document_id, tenant, article_id, project_id, origin, bound_by, bound_at)
-		 SELECT g, '` + ytcTenant + `', 'art-'||g, 'PROJ', 'import_verified', 'test', now()
-		 FROM generate_series(1,15657) g`,
-		// 28,055 ops: even ids are the comment principal's, odd the issue
-		// principal's; all applied.
-		`INSERT INTO yt_write_ops (principal, kind, idem_key, payload_sha, payload, entity_kind, entity_id,
+		`INSERT INTO youtrack_projects (hk_project, yt_project_id, short_name, created_at, updated_at)
+		 SELECT 'proj'||g, 'PROJ', 'PR'||g, now(), now() FROM generate_series(0,4) g`,
+		// 28,054 ops, all on the tenant: even ids are the comment
+		// principal's, odd the issue principal's, and each op's entity id is
+		// the task its comment (or issue) belongs to. Ids 2..40 are the
+		// comment ops the claim rejected ambiguous_issue, the requeue's
+		// candidates.
+		`INSERT INTO yt_write_ops (tenant, principal, kind, idem_key, payload_sha, payload, entity_kind, entity_id,
 			yt_target_id, actor, state, yt_result_id, reason, attempts, created_at, next_attempt_at, resolved_at, dispatched_at)
-		 SELECT CASE WHEN g%2=0 THEN 'hk:task-comments' ELSE 'hk:task-issues' END,
+		 SELECT '` + ytcTenant + `',
+			CASE WHEN g%2=0 THEN 'hk:task-comments' ELSE 'hk:task-issues' END,
 			CASE WHEN g%2=0 THEN 'comment_append' ELSE 'issue_create' END,
 			CASE WHEN g%2=0 THEN 'comment:'||g ELSE 'issue:'||g END,
-			repeat('a',64), '{}'::jsonb, 'task', (1+(g%2000))::text, '', 'operator',
-			'applied', 'PROJ-'||g, '', 1,
+			repeat('a',64), '{}'::jsonb, 'task', (1+((g/2)%2000))::text, '', 'operator',
+			CASE WHEN g%2=0 AND g <= 40 THEN 'rejected' ELSE 'applied' END,
+			CASE WHEN g%2=0 AND g <= 40 THEN '' ELSE 'PROJ-'||g END,
+			CASE WHEN g%2=0 AND g <= 40 THEN 'ambiguous_issue' ELSE '' END,
+			CASE WHEN g%2=0 AND g <= 40 THEN 0 ELSE 1 END,
 			now()-(g||' seconds')::interval, now(), now(), now()
-		 FROM generate_series(1,28055) g`,
-		// Three article ops due now: one bindingless document, two whose
+		 FROM generate_series(1,28054) g`,
+		// Three article ops due now: one on the unbound document 1, two whose
 		// binding names the op's target.
-		`INSERT INTO yt_write_ops (principal, kind, idem_key, payload_sha, payload, entity_kind, entity_id,
+		`INSERT INTO yt_write_ops (tenant, principal, kind, idem_key, payload_sha, payload, entity_kind, entity_id,
 			yt_target_id, actor, state, attempts, created_at, next_attempt_at)
-		 VALUES ('` + YTDocsPrincipal + `','article_create','document-article:1',repeat('a',64),'{}'::jsonb,'document','1','','operator','prepared',0, now()-interval '2 hours', now()-interval '1 minute'),
-			('` + YTDocsPrincipal + `','article_update','document-article:update:1',repeat('a',64),'{}'::jsonb,'document','2','art-2','operator','prepared',0, now()-interval '2 hours', now()-interval '1 minute'),
-			('` + YTDocsPrincipal + `','article_update','document-article:update:2',repeat('a',64),'{}'::jsonb,'document','3','art-3','operator','prepared',0, now()-interval '2 hours', now()-interval '1 minute')`,
+		 VALUES ('` + ytcTenant + `','` + YTDocsPrincipal + `','article_create','document-article:1',repeat('a',64),'{}'::jsonb,'document','1','','operator','prepared',0, now()-interval '2 hours', now()-interval '1 minute'),
+			('` + ytcTenant + `','` + YTDocsPrincipal + `','article_update','document-article:update:1',repeat('a',64),'{}'::jsonb,'document','2','art-2','operator','prepared',0, now()-interval '2 hours', now()-interval '1 minute'),
+			('` + ytcTenant + `','` + YTDocsPrincipal + `','article_update','document-article:update:2',repeat('a',64),'{}'::jsonb,'document','3','art-3','operator','prepared',0, now()-interval '2 hours', now()-interval '1 minute')`,
 		// The comment ops' ownership links, as mode on writes them.
 		`INSERT INTO yt_comment_write_links (comment_id, op_id, created_at)
 		 SELECT i, 2*i, now() FROM generate_series(1,7416) i`,
-		// The tasks' bindings, as the applied issue_create ops published them,
-		// with the comments above their watermark.
+		// The tasks' bindings, as the applied issue_create ops published them.
 		`INSERT INTO yt_task_bindings (task_id, tenant, issue_id, project_id, bound_by, bound_at, origin, op_id, comments_from)
 		 SELECT g, '` + ytcTenant + `', 'PROJ-'||g, 'PROJ', 'test', now(), 'op_applied',
 			(SELECT min(id) FROM yt_write_ops WHERE kind='issue_create' AND entity_kind='task'
 				AND entity_id = g::text AND state = 'applied'), 2
 		 FROM generate_series(1,2000) g`,
+		// 15,657 verified article bindings, one per document from 2: document
+		// 1 is the one the create op is for.
+		`INSERT INTO yt_article_bindings (document_id, tenant, article_id, project_id, origin, bound_by, bound_at)
+		 SELECT g, '` + ytcTenant + `', 'art-'||g, 'PROJ', 'import_verified', 'test', now()
+		 FROM generate_series(2,15658) g`,
 	}
 	for _, q := range seed {
 		if _, err := s.pool.Exec(t.Context(), q); err != nil {
