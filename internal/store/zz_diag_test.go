@@ -8,10 +8,13 @@ package store
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 type diagStat struct{ scans, tup int64 }
@@ -69,7 +72,19 @@ func diagDiff(before, after map[string]diagStat) string {
 func diagRun(t *testing.T, prefix string, withIndexes bool) {
 	t.Helper()
 	ctx := t.Context()
-	s := schemaStore(t, prefix)
+	_, dbURL := testdb.Schema(t, prefix)
+	u, err := url.Parse(dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	q.Set("options", "-c statement_timeout=60s")
+	u.RawQuery = q.Encode()
+	s, err := Open(t.Context(), u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
 	now := time.Now().UTC()
 
 	if !withIndexes {
@@ -106,10 +121,12 @@ func diagRun(t *testing.T, prefix string, withIndexes bool) {
 		t.Helper()
 		diagFlush(ctx, s)
 		bTab, bIdx := diagRead(ctx, s, "r"), diagRead(ctx, s, "i")
+		started := time.Now()
 		err := fn()
+		elapsed := time.Since(started)
 		diagFlush(ctx, s)
 		aTab, aIdx := diagRead(ctx, s, "r"), diagRead(ctx, s, "i")
-		t.Logf("== [%s] %s (err=%v)\n  tables:\n%s  indexes:\n%s", prefix, name, err, diagDiff(bTab, aTab), diagDiff(bIdx, aIdx))
+		t.Logf("== [%s] %s (err=%v, took %s)\n  tables:\n%s  indexes:\n%s", prefix, name, err, elapsed, diagDiff(bTab, aTab), diagDiff(bIdx, aIdx))
 	}
 
 	step("Due", func() error { _, err := s.YTWriteLedger().Due(ctx, now, 200); return err })
