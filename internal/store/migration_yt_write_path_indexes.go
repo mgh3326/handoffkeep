@@ -12,25 +12,27 @@ import (
 // reading 13.85 billion rows, 1,847,809 of yt_comment_write_links reading
 // 11.6 billion, and 11.68 billion index entries read from yt_write_ops):
 //
-//   - yt_article_bindings_document_text. The article kinds' admission gates
-//     (ytArticleCreateGateSQL, ytArticleUpdateGateSQL) compare the op's text
-//     entity id with the binding's bigint document id as
-//     `b.document_id::text = o.entity_id`. The cast is on the indexed column,
-//     so neither the primary key nor any index served it, and each gate
-//     evaluation scanned all 15,657 bindings. The gate is read for every
-//     prepared article op a pass lists (Due), claims (Claim) and examines
-//     (held catalogues), so the scan ran about once per pass per op. The
-//     expression index serves the comparison exactly as written.
+//   - yt_article_bindings_document_text. The article_create gate
+//     (ytArticleCreateGateSQL) compares the op's text entity id with the
+//     binding's bigint document id as `b.document_id::text = o.entity_id`.
+//     The cast is on the indexed column, and the gate names no other column
+//     of the table (the article_update gate's tenant and article id are the
+//     unique key, which serves it), so every evaluation scanned all 15,657
+//     bindings. The gate is read for every prepared article op a pass lists
+//     (Due), claims (Claim) and examines, so the scan ran about once per
+//     pass. The expression index serves the comparison exactly as written.
 //   - yt_write_ops_comment_requeue. The moved-comment requeue's candidate
 //     scan (ytRequeueSelectSQL) filters on kind, state, reason, yt_target_id
-//     and attempts, and on no indexed column but the (principal, kind) prefix
-//     of the unique key. Each pass therefore read its whole comment family of
-//     that index and hashed yt_comment_write_links under it. The partial
-//     index holds only the ops a pass can copy again, which is usually none,
-//     so the scan starts at an empty index instead. The state, reason and
-//     attempts values are the same constants the query names
+//     and attempts, none of which an index served, so a pass read its whole
+//     comment family (every comment_append op, 11.68 billion index entries
+//     over twelve days) and joined yt_comment_write_links under it. The
+//     partial index holds only the ops a pass can copy again, which is
+//     usually none, so the scan starts at an empty index and the joins under
+//     it are never entered. Its predicate names the same kind, state, reason,
+//     empty target and attempt count the query writes as literals
 //     (ytwrite.KindCommentAppend, ytwrite.StateRejected,
-//     ytwrite.ReasonAmbiguousIssue).
+//     ytwrite.ReasonAmbiguousIssue), so a plan of either kind proves it
+//     applies (hk 4922).
 //
 // After 20261112-yt-article-bindings and 20261109-yt-comment-canary, which
 // adds yt_write_ops.tenant: the second index names it.

@@ -1944,13 +1944,15 @@ articles backfill does (none, two or a failed read stops the start), and
 makes the legacy `youtrack sync` (which also writes articles) and `adopt`
 refuse to run.
 
-**Admission, and what a pass costs.** The article kinds' gates read the
-binding of the op's document: `b.document_id::text = o.entity_id`, because
-the op log holds every entity id as text. The cast is on the indexed column,
-so the expression index `yt_article_bindings_document_text` (migration
-`20261116-yt-write-path-indexes`) is what serves it; without one, every
-prepared article op a five-second pass listed, claimed or held scanned all
-bindings (959,016 sequential scans in twelve days, hk 4922).
+**Admission, and what a pass costs.** Both gates read the binding of the
+op's document and compare `b.document_id::text = o.entity_id`, because the op
+log holds every entity id as text. The cast is on the indexed column, so the
+index that serves it is the expression index
+`yt_article_bindings_document_text` (migration
+`20261116-yt-write-path-indexes`); the `article_update` gate's tenant and
+article id also reach the unique key. Without the expression index the
+`article_create` gate, which names no other column, scanned all bindings on
+every evaluation (959,016 sequential scans in twelve days, hk 4922).
 
 **Scope.** Every document the import made an article for
 (`store.YTArticleExcluded` false) except the mergewake reviewer briefs
