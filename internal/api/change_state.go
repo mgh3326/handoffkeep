@@ -102,10 +102,12 @@ func (s Server) changeBatch(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// changeUnreconciled is GET /v1/changes/unreconciled[?limit=N]: the PR rows that
-// still need GitHub's merge state (open, or merged with no merge commit), oldest
-// first. A PR-state sync compares them with GitHub and writes the merge commit
-// through PUT /v1/changes/state (hk 4844).
+// changeUnreconciled is GET /v1/changes/unreconciled[?limit=N][&after_id=N]: the
+// PR rows that still need GitHub's merge state (open, or merged with no merge
+// commit), oldest first. after_id pages them by id and adds next_after_id, the
+// way GET /v1/changes pages a task's list; without it the body is only rows. A
+// PR-state sync compares them with GitHub and writes the merge commit through
+// PUT /v1/changes/state (hk 4844).
 func (s Server) changeUnreconciled(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
@@ -115,12 +117,25 @@ func (s Server) changeUnreconciled(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
-	out, err := s.Service.Store.ListUnreconciledChanges(r.Context(), limit)
+	var afterID *int64
+	if r.URL.Query().Has("after_id") {
+		id, parseErr := queryCursor(r, "after_id")
+		if parseErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_context")
+			return
+		}
+		afterID = &id
+	}
+	out, err := s.Service.Store.ListUnreconciledChanges(r.Context(), afterID, limit)
 	if err != nil {
 		appErr(w, r, err)
 		return
 	}
-	jsonOut(w, http.StatusOK, map[string]any{"changes": out})
+	var last int64
+	if len(out) > 0 {
+		last = out[len(out)-1].ID
+	}
+	jsonOut(w, http.StatusOK, listBody("changes", out, afterID, nextAfterID(afterID, len(out), limit, last)))
 }
 
 // changeOne is GET /v1/changes/one?repo=owner/name&pr=N[&all_heads=1][&include=checks,threads,findings,gate,reviews]:

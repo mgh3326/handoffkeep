@@ -29,6 +29,7 @@ func TestListCursorsRejectBadAfterID(t *testing.T) {
 		"/v1/bench/reps?after_id=",
 		"/v1/documents?after_id=",
 		"/v1/changes?task=1&after_id=",
+		"/v1/changes/unreconciled?after_id=",
 	} {
 		for _, value := range []string{"x", "-1", "1.5"} {
 			if !refused(path + value) {
@@ -170,5 +171,33 @@ func TestChangesCursorsPageEveryRow(t *testing.T) {
 	}
 	if _, present := body["next_after_id"]; present {
 		t.Fatalf("changes without after_id returned next_after_id")
+	}
+}
+
+// TestUnreconciledCursorsPageEveryRow walks the unreconciled PR list: with a
+// small limit every row arrives once, and a request without after_id keeps the
+// body it had before the cursor.
+func TestUnreconciledCursorsPageEveryRow(t *testing.T) {
+	h, st := changesServer(t)
+	x := relaneAPITask(t, st, relaneLane(t, "unreconciled-cursor"), "cursor target")
+	repo := changeRepoName("unreconciled-cursor")
+	const seeded = 5
+	for i := 1; i <= seeded; i++ {
+		changeEvent(t, h, st, map[string]any{"source": "mergewake.pr", "source_ref": fmt.Sprintf("https://github.com/%s/pull/%d", repo, i), "task_id": x.ID})
+	}
+	ids, nexts := apiPage(t, h.URL+"/v1/changes/unreconciled", "peer-token", "changes", 2)
+	eachOnce(t, ids, seeded)
+	if nexts[len(nexts)-1] != nil {
+		t.Fatalf("last unreconciled page still offered a cursor: %v", nexts)
+	}
+	status, body := changesCall(t, h, http.MethodGet, "/v1/changes/unreconciled", "peer-token", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list without after_id: %d %v", status, body)
+	}
+	if _, present := body["next_after_id"]; present {
+		t.Fatalf("unreconciled without after_id returned next_after_id")
+	}
+	if rows, _ := body["changes"].([]any); len(rows) != seeded {
+		t.Fatalf("list without after_id returned %d rows, want %d", len(rows), seeded)
 	}
 }

@@ -631,7 +631,8 @@ its numeric id (`GET /v1/documents?id=<n>`, `404 not_found` when absent,
 metadata without bodies in key order; `after_id=N` pages by id instead
 (`id ASC`, `id > N`) and adds `next_after_id` (null at the end), which
 `doc list --after-id N` sends. `GET /v1/changes?task=N` pages the same way
-(`changes show --task N --after-id N`); `GET /v1/placements?after_id=N` and
+(`changes show --task N --after-id N`);
+`GET /v1/changes/unreconciled?after_id=N`, `GET /v1/placements?after_id=N` and
 `GET /v1/bench/reps?after_id=N` do too (`placements list --after-id N`). A
 request without `after_id` keeps the order and body it had before the cursor.
 A cursor walk sees the rows committed when each page is read: a row whose

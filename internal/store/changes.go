@@ -322,11 +322,13 @@ func scanChange(row pgx.Row, c *Change) error {
 
 // ListUnreconciledChanges lists the PR rows that still need GitHub's merge
 // state: rows hk holds open, and rows hk holds merged with no merge commit (a
-// deploy records its candidates as merged without one). Oldest first. A PR-state
+// deploy records its candidates as merged without one). Oldest first.
+// afterID, when set, starts the page after that change id in the same order, so
+// a reader pages the whole set with the last id it saw (hk 4876). A PR-state
 // sync checks them against GitHub and writes the merge commit through the state
 // write, which settle-merged then reads (hk 4844).
-func (s *Store) ListUnreconciledChanges(ctx context.Context, limit int) ([]Change, error) {
-	return s.listChangesWhere(ctx, s.pool, `(state=$1 OR (state=$2 AND merge_sha IS NULL))`, nil, limit, ChangeOpen, ChangeMerged)
+func (s *Store) ListUnreconciledChanges(ctx context.Context, afterID *int64, limit int) ([]Change, error) {
+	return s.listChangesWhere(ctx, s.pool, `(state=$1 OR (state=$2 AND merge_sha IS NULL))`, afterID, limit, ChangeOpen, ChangeMerged)
 }
 
 // ListChangesByTask lists the changes linked to a task, ordered by id.
