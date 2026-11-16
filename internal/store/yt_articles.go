@@ -777,6 +777,21 @@ func bindYTArticleUpdateApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytw
 // ytArticleCatchUpPage bounds the documents one catch-up query lists.
 const ytArticleCatchUpPage = 200
 
+// ytArticleCatchUpSelectSQL lists the next catch-up page. The lateral lookup
+// is fenced with OFFSET 0 so PostgreSQL keeps it as a per-document primary
+// key probe instead of hashing all yt_article_bindings for each page.
+func ytArticleCatchUpSelectSQL(held string) string {
+	return `SELECT d.id, d.key, coalesce(d.task_id,0) FROM documents d
+		LEFT JOIN LATERAL (SELECT document_id, tenant, needs_update, content_sha
+			FROM yt_article_bindings WHERE document_id = d.id OFFSET 0) b ON true
+		WHERE d.id > $1 AND (
+			(b.document_id IS NULL AND d.created_at >= $2 AND NOT ` + held + `)
+			OR (b.tenant = $5 AND (b.needs_update OR b.content_sha IS DISTINCT FROM d.sha256)
+				AND ($7 OR EXISTS (SELECT 1 FROM yt_snapshot_state st WHERE st.entity_kind = 'document'
+					AND st.entity_id = d.id::text AND st.kind = $8 AND st.last_sha = d.sha256))))
+		ORDER BY d.id LIMIT $6`
+}
+
 // catchUpYTArticles decides, through prepareYTArticleTx, every document the
 // feed may not have seen: the consumer's cursor starts at the feed's end on
 // its first pass, so a document created after the import ended, or a bound
@@ -806,14 +821,9 @@ func (s *Store) catchUpYTArticles(ctx context.Context, now time.Time, bound bool
 	}
 	var after int64
 	held, _ := ytArticleCreateSQL("$3", "$4", "$9", "$10")
+	query := ytArticleCatchUpSelectSQL(held)
 	for {
-		rows, err := s.pool.Query(ctx, `SELECT d.id, d.key, coalesce(d.task_id,0) FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id = d.id
-			WHERE d.id > $1 AND (
-				(b.document_id IS NULL AND d.created_at >= $2 AND NOT `+held+`)
-				OR (b.tenant = $5 AND (b.needs_update OR b.content_sha IS DISTINCT FROM d.sha256)
-					AND ($7 OR EXISTS (SELECT 1 FROM yt_snapshot_state st WHERE st.entity_kind = 'document'
-						AND st.entity_id = d.id::text AND st.kind = $8 AND st.last_sha = d.sha256))))
-			ORDER BY d.id LIMIT $6`, after, YTImportEndedAt, YTDocsPrincipal, ytwrite.KindArticleCreate, g.tenant, ytArticleCatchUpPage, bound, ytArticleBaselineKind, ytwrite.ReasonInvalidIssue, ytwrite.ReasonUnsupportedKind)
+		rows, err := s.pool.Query(ctx, query, after, YTImportEndedAt, YTDocsPrincipal, ytwrite.KindArticleCreate, g.tenant, ytArticleCatchUpPage, bound, ytArticleBaselineKind, ytwrite.ReasonInvalidIssue, ytwrite.ReasonUnsupportedKind)
 		if err != nil {
 			return counts, noProject, err
 		}

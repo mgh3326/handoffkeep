@@ -3,13 +3,15 @@ package store
 import (
 	"strings"
 	"testing"
+
+	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
-// TestYTWritePathPlanUsesIndexes is the regression test of hk 4922: on the
-// row counts production held then (yt_article_bindings 15,657,
+// TestYTWritePathPlanUsesIndexes is the regression test of hk 4922 and 4942:
+// on production row counts (documents 33,500, yt_article_bindings 15,657,
 // yt_comment_write_links 7,416, yt_write_ops 28,055), the statements the
-// YouTrack write worker runs every five seconds must read those tables
-// through an index. Without one a single pass scanned a whole table:
+// YouTrack worker runs must read hot tables through an index. Without one a
+// single pass scanned a whole table:
 // 959,016 sequential scans of yt_article_bindings read 13.85 billion rows in
 // twelve days, and the requeue's candidate scan read its whole comment family
 // of yt_write_ops (11.68 billion index entries) and joined
@@ -34,6 +36,7 @@ func TestYTWritePathPlanUsesIndexes(t *testing.T) {
 	if err := s.pool.QueryRow(ctx, `SELECT id FROM yt_write_ops WHERE kind='article_update' ORDER BY id LIMIT 1`).Scan(&update); err != nil {
 		t.Fatal(err)
 	}
+	catchUpHeld, _ := ytArticleCreateSQL("$3", "$4", "$9", "$10")
 
 	for _, tc := range []struct {
 		name   string
@@ -48,6 +51,15 @@ func TestYTWritePathPlanUsesIndexes(t *testing.T) {
 			sql:    `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id=$1 AND ` + s.ytAdmitSQL("$2") + `)`,
 			args:   []any{create, ytcTenant},
 			want:   "yt_article_bindings_document_text",
+			forbid: []string{"Seq Scan on yt_article_bindings"},
+		},
+		{
+			// The once-a-minute catch-up rescan: its binding lookup must stay
+			// a per-document primary-key probe at production row counts.
+			name:   "article catch-up rescan",
+			sql:    ytArticleCatchUpSelectSQL(catchUpHeld),
+			args:   []any{int64(0), YTImportEndedAt, YTDocsPrincipal, ytwrite.KindArticleCreate, ytcTenant, ytArticleCatchUpPage, false, ytArticleBaselineKind, ytwrite.ReasonInvalidIssue, ytwrite.ReasonUnsupportedKind},
+			want:   "yt_article_bindings_pkey",
 			forbid: []string{"Seq Scan on yt_article_bindings"},
 		},
 		{
@@ -130,7 +142,8 @@ func ytPlanMeasure(t *testing.T, s *Store) {
 
 // ytPlanSeed writes the rows production held when hk 4922 was written
 // (pg_stat_user_tables on 2026-11-16, twelve days after the instance start):
-// 15,657 article bindings, 7,416 comment write links and 28,055 write ops.
+// 33,500 documents, 15,657 article bindings, 7,416 comment write links and
+// 28,055 write ops.
 // The supporting rows are production-shaped rather than empty, so the plans
 // are the ones the worker gets: 2,000 tasks in five mapped hk projects with
 // 10,000 comments, five per task; a binding per task with the applied
@@ -190,6 +203,13 @@ func ytPlanSeed(t *testing.T, s *Store) {
 		`INSERT INTO yt_article_bindings (document_id, tenant, article_id, project_id, origin, bound_by, bound_at)
 		 SELECT g, '` + ytcTenant + `', 'art-'||g, 'PROJ', 'import_verified', 'test', now()
 		 FROM generate_series(2,15658) g`,
+		// The catch-up rescan reads documents about twice the size of the
+		// bindings table. Documents 2..15658 have stale bindings, making the
+		// binding lookup relevant to the planner.
+		`INSERT INTO documents (key, kind, session, job, body, sha256, created_by, created_at, updated_at)
+		 SELECT 'yt-plan/document/'||g, 'note', '', '', 'body', repeat('a',64), 'test', now(), now()
+		 FROM generate_series(1,33500) g`,
+		`SELECT setval(pg_get_serial_sequence('documents','id'), 33500)`,
 	}
 	for _, q := range seed {
 		if _, err := s.pool.Exec(t.Context(), q); err != nil {
