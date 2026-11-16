@@ -687,8 +687,8 @@ func scanPrefixesLastSuccessDeployTx(ctx context.Context, tx pgx.Tx, prefixes []
 // newest key first, and returns the documents read per prefix and the last key
 // read per prefix. The keys are unique, so the last key is a stable cursor.
 //
-// Every prefix is the documents_key_pattern range and every prefix is served by
-// one statement (hk 4923).
+// Every prefix is the documents_key_c range and every prefix is served by one
+// statement (hk 4923).
 func scanPrefixesLastSuccessPageTx(ctx context.Context, tx pgx.Tx, prefixes []string, after map[string]string) (map[string][]StoredDeployRecord, map[string]string, error) {
 	los := make([]string, len(prefixes))
 	his := make([]string, len(prefixes))
@@ -703,13 +703,13 @@ func scanPrefixesLastSuccessPageTx(ctx context.Context, tx pgx.Tx, prefixes []st
 		JOIN LATERAL (
 			SELECT d2.key, d2.sha256, d2.created_at, d2.body
 			FROM documents d2
-			WHERE d2.key ~>=~ w.lo AND d2.key ~<~ w.hi
-			  AND (w.after = '' OR d2.key < w.after)
-			ORDER BY d2.key DESC
+			WHERE d2.key COLLATE "C" >= w.lo AND d2.key COLLATE "C" < w.hi
+			  AND (w.after = '' OR d2.key COLLATE "C" < w.after)
+			ORDER BY d2.key COLLATE "C" DESC
 			LIMIT $4
 		) d ON true
 		LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256
-		ORDER BY w.lo, d.key DESC`, los, his, cursors, lastSuccessPageSize)
+		ORDER BY w.lo, d.key COLLATE "C" DESC`, los, his, cursors, lastSuccessPageSize)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -1,6 +1,8 @@
 package store
 
 import (
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,9 +19,10 @@ func TestKeyPrefixBounds(t *testing.T) {
 		{`back\`, `back]`},               // '\'(0x5c) → ']'(0x5d)
 		{"é", "ê"},                       // U+00e9 → U+00ea
 		{"\uD7FF", "\uE000"},             // the surrogate block holds no code point
-		{"x\U0010FFFF", "x\U0010FFFF" + keyPrefixSentinel},
-		{"", keyPrefixSentinel},
-		{"\xff", "\xff" + keyPrefixSentinel}, // not UTF-8: no narrower bound is provable
+		// A last code point with no successor is closed by the key length.
+		{"x" + keyPrefixSentinel, "x" + keyPrefixSentinel + strings.Repeat(keyPrefixSentinel, maxDocKeyBytes-len("x"+keyPrefixSentinel)+1)},
+		{"", strings.Repeat(keyPrefixSentinel, maxDocKeyBytes+1)},
+		{"\xff", "\xff" + strings.Repeat(keyPrefixSentinel, maxDocKeyBytes)}, // not UTF-8: matches no key
 	}
 	for _, tc := range cases {
 		lo, hi := keyPrefixBounds(tc.prefix)
@@ -29,20 +32,27 @@ func TestKeyPrefixBounds(t *testing.T) {
 	}
 }
 
-// TestValidDocKeyRefusesUnboundableCodePoint pins the invariant every prefix
-// range depends on: U+10FFFF has no successor, so a key holding it could not be
-// reached by the upper bound of a prefix that ends before it.
-func TestValidDocKeyRefusesUnboundableCodePoint(t *testing.T) {
+// TestListDocumentsPrefixReachesUnboundableKeys pins the case a bound cannot
+// express: a prefix whose last code point is U+10FFFF still reads the keys
+// that extend it, which the previous release can write during a rollout.
+func TestListDocumentsPrefixReachesUnboundableKeys(t *testing.T) {
 	s := schemaStore(t, "documents_prefix_noncharacter")
-	ctx := t.Context()
-	if _, _, err := s.PutDocument(ctx, Document{Key: "policy/x\U0010FFFF", Kind: "note", Session: "s", Body: "b", CreatedBy: "tester"}); err == nil {
-		t.Fatal("a key holding U+10FFFF was accepted")
+	keys := []string{"policy/" + keyPrefixSentinel, "policy/" + keyPrefixSentinel + keyPrefixSentinel, "policy/other"}
+	for _, key := range keys {
+		if _, _, err := s.PutDocument(t.Context(), Document{Key: key, Kind: "note", Session: "s", Body: "b", CreatedBy: "tester"}); err != nil {
+			t.Fatalf("put %q: %v", key, err)
+		}
 	}
-	// A prefix ending in U+10FFFF therefore matches nothing, rather than
-	// matching a key its bound admits but the table cannot hold.
-	rows, err := s.ListDocuments(ctx, "policy/\U0010FFFF", "", "", 0, nil, 10)
-	if err != nil || len(rows) != 0 {
-		t.Fatalf("rows=%v err=%v, want none", rows, err)
+	rows, err := s.ListDocuments(t.Context(), "policy/"+keyPrefixSentinel, "", "", 0, nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, doc := range rows {
+		got = append(got, doc.Key)
+	}
+	if want := []string{keys[0], keys[1]}; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("prefix read = %q, want %q", got, want)
 	}
 }
 
@@ -139,8 +149,8 @@ FROM generate_series(1,$2::int) g`, mwr, documentsSeedCount-mwr); err != nil {
 
 // TestConsolePrefixReadsUseIndex is the plan evidence for the fix: at
 // production row counts every statement one console-shaped read issues against
-// documents is an index range on documents_key_pattern, never a sequential
-// scan of the whole table.
+// documents is an index range on documents_key_c, never a sequential scan of
+// the whole table.
 func TestConsolePrefixReadsUseIndex(t *testing.T) {
 	s, counter := countingStore(t, "documents_prefix_plan")
 	ctx := t.Context()
@@ -178,8 +188,8 @@ func TestConsolePrefixReadsUseIndex(t *testing.T) {
 		if strings.Contains(plan, "Seq Scan on documents") {
 			t.Fatalf("statement scans the whole table:\n%s\nplan: %s", st.SQL, plan)
 		}
-		if !strings.Contains(plan, "documents_key_pattern") {
-			t.Fatalf("statement does not use documents_key_pattern:\n%s\nplan: %s", st.SQL, plan)
+		if !strings.Contains(plan, "documents_key_c") {
+			t.Fatalf("statement does not use documents_key_c:\n%s\nplan: %s", st.SQL, plan)
 		}
 	}
 }
@@ -189,7 +199,20 @@ func TestConsolePrefixReadsUseIndex(t *testing.T) {
 // documents") as FORMAT JSON would keep the two apart.
 func explainPlan(t *testing.T, s *Store, query string, args []any) string {
 	t.Helper()
-	rows, err := s.pool.Query(t.Context(), "EXPLAIN "+query, args...)
+	return explainWith(t, s, "EXPLAIN ", query, args)
+}
+
+// explainAnalyzedPlan is explainPlan with the row counts the plan actually
+// touched, which is how a test tells an ordered index scan of one page from a
+// sort of the whole prefix range.
+func explainAnalyzedPlan(t *testing.T, s *Store, query string, args []any) string {
+	t.Helper()
+	return explainWith(t, s, "EXPLAIN (ANALYZE, BUFFERS) ", query, args)
+}
+
+func explainWith(t *testing.T, s *Store, prefix, query string, args []any) string {
+	t.Helper()
+	rows, err := s.pool.Query(t.Context(), prefix+query, args...)
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}
@@ -206,6 +229,62 @@ func explainPlan(t *testing.T, s *Store, query string, args []any) string {
 		t.Fatalf("explain: %v", err)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// maxScanRows is the largest actual row count among the plan's nodes over the
+// named scan ("on documents d2"); the greedy match takes the actual count that
+// follows the estimate on the same line.
+func maxScanRows(t *testing.T, plan, scan string) int {
+	t.Helper()
+	re := regexp.MustCompile(regexp.QuoteMeta(scan) + ` .*rows=(\d+)`)
+	max := -1
+	for _, line := range strings.Split(plan, "\n") {
+		m := re.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			t.Fatalf("plan row count %q: %v", m[1], err)
+		}
+		if n > max {
+			max = n
+		}
+	}
+	if max < 0 {
+		t.Fatalf("no node over %q in the plan:\n%s", scan, plan)
+	}
+	return max
+}
+
+// TestLastSuccessPageReadsOnePage pins the plan of the paged deploy-record
+// read: the bounds, the cursor and the ORDER BY share the index's collation,
+// so a page is an ordered index scan of one page instead of a sort of the whole
+// prefix range. Six hundred records under one prefix make the two plans differ
+// by the rows they touch.
+func TestLastSuccessPageReadsOnePage(t *testing.T) {
+	s, counter := countingStore(t, "last_success_page_order")
+	ctx := t.Context()
+	for i := range 600 {
+		seedDeployRecord(t, s, "hk", "failed", time.Date(2026, 9, 1, 0, 0, i, 0, time.UTC))
+	}
+	svc := DeployService{Name: "hk", Repo: "mgh3326/handoffkeep", RecordPrefixes: []string{"deploy/hk/"}, Active: true}
+	if _, err := s.PutDeployService(ctx, svc); err != nil {
+		t.Fatal(err)
+	}
+	counter.Reset()
+	if _, err := s.DeployLagStatuses(ctx, []DeployService{svc}); err != nil {
+		t.Fatal(err)
+	}
+	statements := counter.StatementsMatching("FROM documents")
+	if len(statements) == 0 {
+		t.Fatal("no documents statement captured")
+	}
+	plan := explainAnalyzedPlan(t, s, statements[0].SQL, statements[0].Args)
+	t.Logf("last-success page plan:\n%s", plan)
+	if rows := maxScanRows(t, plan, "on documents d2"); rows > 2*lastSuccessPageSize {
+		t.Fatalf("a page read %d rows of documents, want about %d:\n%s", rows, lastSuccessPageSize, plan)
+	}
 }
 
 // TestDeployLagStatusesReadsAreBounded pins the batching: four services cost
@@ -233,8 +312,8 @@ func TestDeployLagStatusesReadsAreBounded(t *testing.T) {
 			t.Fatalf("statuses[%s] = %+v, want a deployed boundary", svc.Name, st)
 		}
 	}
-	if n := counter.Count(); n != 3 {
-		t.Fatalf("DeployLagStatuses issued %d statements for %d services, want 3", n, len(svcs))
+	if n := counter.QueryCount(); n != 3 {
+		t.Fatalf("DeployLagStatuses issued %d queries for %d services, want 3", n, len(svcs))
 	}
 }
 
@@ -258,8 +337,8 @@ func TestListDeployRecordsByPrefixReadsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := counter.Count(); n != 1 {
-		t.Fatalf("ListDeployRecordsByPrefix issued %d statements for 3 prefixes, want 1", n)
+	if n := counter.QueryCount(); n != 1 {
+		t.Fatalf("ListDeployRecordsByPrefix issued %d queries for 3 prefixes, want 1", n)
 	}
 	page := pages["deploy/a/"]
 	if !page.More || len(page.Records) != 2 || page.Records[0].Key != "deploy/a/20261103T000000Z" {

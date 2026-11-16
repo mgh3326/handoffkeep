@@ -40,9 +40,9 @@ type DocPruneResult struct {
 
 // docPruneCandidates lists unbound documents under the prefix older than the
 // cutoff, oldest key-order first by id, so each batch is deterministic. The
-// prefix is the byte-wise key range $1 <= key < $2 (documents_key_pattern).
+// prefix is the byte-wise key range $1 <= key < $2 (documents_key_c).
 const docPruneCandidates = `SELECT d.id, d.key, octet_length(d.body) FROM documents d
-WHERE d.key ~>=~ $1 AND d.key ~<~ $2 AND d.updated_at < $3
+WHERE d.key COLLATE "C" >= $1 AND d.key COLLATE "C" < $2 AND d.updated_at < $3
 AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id = d.id)
 ORDER BY d.id LIMIT $4`
 
@@ -65,7 +65,7 @@ func (s *Store) PruneDocuments(ctx context.Context, prefix string, olderThan tim
 		return res, fmt.Errorf("%w: limit must be 1 to %d", ErrDocPruneInvalid, DocPruneMaxLimit)
 	}
 	lo, hi := keyPrefixBounds(prefix)
-	if e := s.pool.QueryRow(ctx, `SELECT count(*), count(b.document_id) FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id = d.id WHERE d.key ~>=~ $1 AND d.key ~<~ $2 AND d.updated_at < $3`, lo, hi, olderThan.UTC()).Scan(&res.Matched, &res.SkippedBound); e != nil {
+	if e := s.pool.QueryRow(ctx, `SELECT count(*), count(b.document_id) FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id = d.id WHERE d.key COLLATE "C" >= $1 AND d.key COLLATE "C" < $2 AND d.updated_at < $3`, lo, hi, olderThan.UTC()).Scan(&res.Matched, &res.SkippedBound); e != nil {
 		return res, e
 	}
 	if !apply {

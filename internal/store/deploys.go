@@ -44,12 +44,13 @@ func (s *Store) listDocumentsByPrefix(ctx context.Context, prefix, before string
 	var rows pgx.Rows
 	var err error
 	// strpos(key, $1) = 1 could not use an index: the prefix read is the
-	// half-open range documents_key_pattern holds (hk 4923).
+	// half-open range documents_key_c holds, and the page order and the cursor
+	// below use the same collation so the index serves both (hk 4923).
 	lo, hi := keyPrefixBounds(prefix)
 	if before == "" {
-		rows, err = s.pool.Query(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE key ~>=~ $1 AND key ~<~ $2 ORDER BY key DESC LIMIT $3`, lo, hi, limit)
+		rows, err = s.pool.Query(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE key COLLATE "C" >= $1 AND key COLLATE "C" < $2 ORDER BY key COLLATE "C" DESC LIMIT $3`, lo, hi, limit)
 	} else {
-		rows, err = s.pool.Query(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE key ~>=~ $1 AND key ~<~ $2 AND key < $3 ORDER BY key DESC LIMIT $4`, lo, hi, before, limit)
+		rows, err = s.pool.Query(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at FROM documents WHERE key COLLATE "C" >= $1 AND key COLLATE "C" < $2 AND key COLLATE "C" < $3 ORDER BY key COLLATE "C" DESC LIMIT $4`, lo, hi, before, limit)
 	}
 	if err != nil {
 		return nil, err
@@ -113,11 +114,11 @@ func (s *Store) ListDocumentSummariesByPrefix(ctx context.Context, prefix, befor
 	if prefix != "" {
 		lo, hi := keyPrefixBounds(prefix)
 		args = append(args, lo, hi)
-		conditions = append(conditions, fmt.Sprintf(`key ~>=~ $%d AND key ~<~ $%d`, len(args)-1, len(args)))
+		conditions = append(conditions, fmt.Sprintf(`key COLLATE "C" >= $%d AND key COLLATE "C" < $%d`, len(args)-1, len(args)))
 	}
 	if before != "" {
 		args = append(args, before)
-		conditions = append(conditions, fmt.Sprintf(`key < $%d`, len(args)))
+		conditions = append(conditions, fmt.Sprintf(`key COLLATE "C" < $%d`, len(args)))
 	}
 	args = append(args, limit)
 	limitArg := len(args)
@@ -126,7 +127,7 @@ func (s *Store) ListDocumentSummariesByPrefix(ctx context.Context, prefix, befor
 	if len(conditions) > 0 {
 		q += ` WHERE ` + strings.Join(conditions, ` AND `)
 	}
-	rows, err := s.pool.Query(ctx, q+fmt.Sprintf(` ORDER BY key DESC LIMIT $%d`, limitArg), args...)
+	rows, err := s.pool.Query(ctx, q+fmt.Sprintf(` ORDER BY key COLLATE "C" DESC LIMIT $%d`, limitArg), args...)
 	if err != nil {
 		return nil, err
 	}

@@ -124,8 +124,10 @@ func TestDeployProjectionRecoversFailedStepName(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The previous binary's projection: the same record marshalled without the
-	// new field.
-	old := `{"schema":"deploy-record/v0","service":"svc","target":"ncp","head_sha":"1111111111111111111111111111111111111111","result":"failed","failed_step":6,"included_prs":[]}`
+	// new field. Its job_id carries the key's name as text, so a reader that
+	// searches the serialized bytes instead of the top-level keys would take
+	// this row for one that has the field and skip the body fallback.
+	old := `{"schema":"deploy-record/v0","service":"svc","target":"ncp","head_sha":"1111111111111111111111111111111111111111","result":"failed","failed_step":6,"job_id":"\"failed_step_name\"","included_prs":[]}`
 	tag, err := s.pool.Exec(ctx, `UPDATE deploy_record_projection SET record=$2 WHERE key=$1`, key, []byte(old))
 	if err != nil {
 		t.Fatal(err)

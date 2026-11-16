@@ -175,10 +175,10 @@ type DeployRecordPage struct {
 // key): the previous release can still write the old shape during a
 // blue-green rollout, so the document body is authoritative for those rows.
 //
-// One statement serves every prefix, and each prefix is the
-// documents_key_pattern range: the console reads one prefix per deploy service,
-// and a query (and a sequential scan of the whole table) per service per poll
-// is the N+1 behind HANDOFFKEEP-5 (hk 4923).
+// One statement serves every prefix, and each prefix is the documents_key_c
+// range: the console reads one prefix per deploy service, and a query (and a
+// sequential scan of the whole table) per service per poll is the N+1 behind
+// HANDOFFKEEP-5 (hk 4923).
 func (s *Store) ListDeployRecordsByPrefix(ctx context.Context, prefixes []string, limit int) (map[string]DeployRecordPage, error) {
 	out := make(map[string]DeployRecordPage, len(prefixes))
 	if len(prefixes) == 0 {
@@ -205,15 +205,15 @@ func (s *Store) ListDeployRecordsByPrefix(ctx context.Context, prefixes []string
 		his = append(his, hi)
 	}
 	rows, err := s.pool.Query(ctx, `SELECT w.lo,d.key,d.sha256,d.created_at,p.record,p.decoded,
-CASE WHEN p.key IS NULL OR NOT p.decoded OR strpos(convert_from(p.record,'UTF8'), '"failed_step_name"') = 0 THEN d.body ELSE NULL END
+CASE WHEN p.key IS NULL OR NOT p.decoded OR (convert_from(p.record,'UTF8')::json->'failed_step_name') IS NULL THEN d.body ELSE NULL END
 FROM unnest($1::text[],$2::text[]) AS w(lo,hi)
 JOIN LATERAL (
 	SELECT d2.key,d2.sha256,d2.created_at,d2.body FROM documents d2
-	WHERE d2.key ~>=~ w.lo AND d2.key ~<~ w.hi
-	ORDER BY d2.key DESC LIMIT $3
+	WHERE d2.key COLLATE "C" >= w.lo AND d2.key COLLATE "C" < w.hi
+	ORDER BY d2.key COLLATE "C" DESC LIMIT $3
 ) d ON true
 LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256
-ORDER BY w.lo, d.key DESC`, los, his, limit+1)
+ORDER BY w.lo, d.key COLLATE "C" DESC`, los, his, limit+1)
 	if err != nil {
 		return nil, err
 	}

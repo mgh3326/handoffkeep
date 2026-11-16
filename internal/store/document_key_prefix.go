@@ -1,6 +1,9 @@
 package store
 
-import "unicode/utf8"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // A read that keeps only the documents whose key starts with a prefix used to
 // say so as `strpos(key,$1)=1` or `key LIKE $2 || '%' ESCAPE '\'`. On the
@@ -9,52 +12,61 @@ import "unicode/utf8"
 // prefixes arrive as parameters. Every such read scanned the whole documents
 // table, 171,534 times in twelve days (hk 4923).
 //
-// The index that serves them is documents_key_pattern, a btree on the key with
-// the text_pattern_ops operator class: it compares bytes, so a prefix is the
-// half-open range keyPrefixBounds returns, and a plain range scan serves a
-// bound supplied as a parameter. The comparison operators of that opclass are
-// spelled key ~>=~ lo AND key ~<~ hi — the same pair the planner derives from
-// a prefix LIKE, written out because a parameterized pattern never becomes one.
+// The index that serves them is documents_key_c, a btree on the key under the
+// "C" collation, i.e. byte order: a prefix is the half-open range
+// keyPrefixBounds returns, and the planner serves a bound supplied as a
+// parameter with an index scan. The same collation serves the ORDER BY of the
+// cursor-paged reads, so one ordering covers the bounds, the cursor and the
+// sort, and a page costs a page of index rather than a sort of the whole
+// prefix range.
 //
 // A range under the database collation is not an option: en_US.UTF-8 orders
 // punctuation between letters and digits ("doc0" sorts after "doc/"), so the
 // same bounds would both admit keys that do not start with the prefix and miss
 // keys that do.
 
-// keyPrefixSentinel is the largest code point, U+10FFFF. It is used only by a
-// prefix whose own last code point is U+10FFFF, which has no successor.
+// keyPrefixSentinel is the largest code point, U+10FFFF.
 const keyPrefixSentinel = "\U0010FFFF"
+
+// maxDocKeyBytes is the key length limit validDocKey enforces. A prefix range
+// is closed with it when the prefix's own last code point has no successor.
+const maxDocKeyBytes = 512
 
 // keyPrefixBounds returns the bounds of the byte-wise range whose members are
 // exactly the keys that start with prefix:
 //
-//	key ~>=~ lo AND key ~<~ hi
+//	key COLLATE "C" >= lo AND key COLLATE "C" < hi
 //
 // Byte order for UTF-8 is code point order, so hi is the first string that
-// sorts after every key beginning with prefix: the prefix without its last
-// code point, followed by that code point's successor. Surrogates are not code
-// points, so the successor of U+D7FF is U+E000.
+// sorts after every key beginning with prefix. Usually that is the prefix
+// without its last code point, followed by that code point's successor;
+// surrogates are not code points, so the successor of U+D7FF is U+E000.
 //
-// A prefix ending in U+10FFFF has no successor. validDocKey refuses that code
-// point in a key, so no key starts with such a prefix at all: the fallback
-// bound (the prefix followed by U+10FFFF) admits every key the table holds,
-// and a prefix that cannot be extended matches nothing.
+// A last code point of U+10FFFF has no successor, and no byte string above it
+// is valid UTF-8. The bound is then built from the key length instead: no key
+// is longer than maxDocKeyBytes, so the longest key that can start with prefix
+// is the prefix followed by U+10FFFF up to that length, and one more U+10FFFF
+// sorts above it without being a key itself. That keeps the range exact across
+// a blue-green rollout too, while the previous release can still write a key
+// it would not validate.
 //
-// An empty prefix matches every key and never reaches this function: callers
-// drop the predicate instead.
+// A prefix that is not valid UTF-8 matches nothing (every key is valid UTF-8),
+// and the same length bound admits no key for it. An empty prefix matches every
+// key and never reaches this function: callers drop the predicate instead.
 func keyPrefixBounds(prefix string) (lo, hi string) {
 	r, size := utf8.DecodeLastRuneInString(prefix)
-	if size <= 1 && r == utf8.RuneError {
-		// Not valid UTF-8 (a Go caller's bug, or an empty prefix): no narrow
-		// range is provable, so keep the sentinel bound, which admits every key.
-		return prefix, prefix + keyPrefixSentinel
+	if r != utf8.MaxRune && !(size <= 1 && r == utf8.RuneError) {
+		next := r + 1
+		if next == 0xD800 { // the surrogate block holds no code point
+			next = 0xE000
+		}
+		return prefix, prefix[:len(prefix)-size] + string(next)
 	}
-	if r == utf8.MaxRune {
-		return prefix, prefix + keyPrefixSentinel
+	// One U+10FFFF past the longest key length: every key starting with prefix
+	// sorts below it, and no key can equal it.
+	run := maxDocKeyBytes - len(prefix) + 1
+	if run < 1 {
+		run = 1
 	}
-	next := r + 1
-	if next == 0xD800 { // the surrogate block holds no code point
-		next = 0xE000
-	}
-	return prefix, prefix[:len(prefix)-size] + string(next)
+	return prefix, prefix + strings.Repeat(keyPrefixSentinel, run)
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -47,18 +46,28 @@ type capturedStatement struct {
 // statements themselves, so a test can assert that a read is bounded and that
 // the SQL it did issue plans to an index scan.
 type queryCounter struct {
-	n  atomic.Int64
 	mu sync.Mutex
 	// statements is every statement issued since the last Reset.
 	statements []capturedStatement
 }
 
-// Count is the statements issued since the counter was created.
-func (c *queryCounter) Count() int64 { return c.n.Load() }
+// QueryCount is how many of the statements are queries. It leaves out the
+// begin and commit pgx sends through Exec around a transaction, so a count is
+// about a read's own statements.
+func (c *queryCounter) QueryCount() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var n int64
+	for _, st := range c.statements {
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(st.SQL)), "SELECT") {
+			n++
+		}
+	}
+	return n
+}
 
-// Reset drops the count and the statements.
+// Reset drops the statements seen so far.
 func (c *queryCounter) Reset() {
-	c.n.Store(0)
 	c.mu.Lock()
 	c.statements = nil
 	c.mu.Unlock()
@@ -78,7 +87,6 @@ func (c *queryCounter) StatementsMatching(substr string) []capturedStatement {
 }
 
 func (c *queryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	c.n.Add(1)
 	c.mu.Lock()
 	c.statements = append(c.statements, capturedStatement{SQL: data.SQL, Args: data.Args})
 	c.mu.Unlock()
