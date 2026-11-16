@@ -13,7 +13,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const dotsUsage = "usage: dots request --title TITLE --body BODY [--type CREATE_MOCKUP|CREATE_ASSET|REVIEW_IMPLEMENTATION] [--requester-lane L] [--project P] [--idempotency-key KEY] [--option 'A|label' ...] [--option-attachment 'A|sha256[|caption]' ...]\n       dots results [--task N] [--issue ID]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID] [--canva-url U --canva-page P --canva-version V]\n       dots answer <task> --text <answer>\n\nNote: A requester-lane comment alone does NOT resolve an open dots question (explicit beats implicit); use dots answer.\nNote: --option declares that the request ends in the operator's choice; its RESULT opens the decision."
+const dotsUsage = "usage: dots request --title TITLE --body BODY [--type CREATE_MOCKUP|CREATE_ASSET|REVIEW_IMPLEMENTATION] [--requester-lane L] [--project P] [--idempotency-key KEY] [--option 'A|label' ...] [--option-attachment 'A|sha256[|caption]' ...]\n       dots results [--task N] [--issue ID]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID] [--canva-url U --canva-page P --canva-version V]\n       dots answer <task> --text <answer>\n       dots cancel <task> --reason REASON [--requester-lane L]\n\nNote: A requester-lane comment alone does NOT resolve an open dots question (explicit beats implicit); use dots answer.\nNote: A requester-lane comment alone does NOT cancel a request; use dots cancel, which only the request's requester lane may run.\nNote: --option declares that the request ends in the operator's choice; its RESULT opens the decision."
 
 func dotsRequestCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("dots request", flag.ContinueOnError)
@@ -91,8 +91,9 @@ func dotsRequestCmd(args []string, out io.Writer) error {
 //	dots results --task N | --issue ROB-1
 //	dots adopt ID --state S [--ref R] [--superseded-by ID] [--canva-url U --canva-page P --canva-version V]
 //	dots answer TASK --text ANSWER
+//	dots cancel TASK --reason REASON [--requester-lane L]
 func dotsCmd(args []string, out io.Writer) error {
-	if len(args) == 0 || (args[0] != "request" && args[0] != "results" && args[0] != "adopt" && args[0] != "answer") {
+	if len(args) == 0 || (args[0] != "request" && args[0] != "results" && args[0] != "adopt" && args[0] != "answer" && args[0] != "cancel") {
 		return errors.New(dotsUsage)
 	}
 	if args[0] == "request" {
@@ -103,10 +104,11 @@ func dotsCmd(args []string, out io.Writer) error {
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
 	var (
-		taskID int64
-		issue  string
-		in     store.DotsAdoptionInput
-		text   string
+		taskID   int64
+		issue    string
+		in       store.DotsAdoptionInput
+		text     string
+		cancelIn store.DotsCancelInput
 	)
 	var valueFlags []string
 	switch sub {
@@ -125,6 +127,10 @@ func dotsCmd(args []string, out io.Writer) error {
 	case "answer":
 		fs.StringVar(&text, "text", "", "answer text")
 		valueFlags = []string{"text"}
+	case "cancel":
+		fs.StringVar(&cancelIn.Reason, "reason", "", "why the request is cancelled (recorded on the task)")
+		fs.StringVar(&cancelIn.RequesterLane, "requester-lane", "", "lane that filed the request; defaults to PANEWIRE_LANE, and must be that request's requester lane")
+		valueFlags = []string{"reason", "requester-lane"}
 	}
 	ordered, err := splitArgs(args[1:], valueFlags...)
 	if err != nil {
@@ -159,6 +165,22 @@ func dotsCmd(args []string, out io.Writer) error {
 		if text == "" {
 			return errors.New("dots answer requires --text")
 		}
+	case "cancel":
+		if fs.NArg() != 1 {
+			return errors.New("dots cancel requires a task id")
+		}
+		if id, err = strconv.ParseInt(fs.Arg(0), 10, 64); err != nil || id < 1 {
+			return errors.New("task id must be positive")
+		}
+		if strings.TrimSpace(cancelIn.Reason) == "" {
+			return errors.New("dots cancel requires --reason")
+		}
+		if cancelIn.RequesterLane == "" {
+			cancelIn.RequesterLane = os.Getenv("PANEWIRE_LANE")
+		}
+		if cancelIn.RequesterLane == "" {
+			return errors.New("dots cancel requires --requester-lane or PANEWIRE_LANE")
+		}
 	}
 	if err := mustClient(c); err != nil {
 		return err
@@ -184,6 +206,12 @@ func dotsCmd(args []string, out io.Writer) error {
 			return err
 		}
 		return printJSON(out, res)
+	case "cancel":
+		task, err := c.CancelDotsRequest(ctx, id, cancelIn)
+		if err != nil {
+			return err
+		}
+		return printJSON(out, map[string]any{"task": task})
 	default:
 		return errors.New(dotsUsage)
 	}
