@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -17,19 +19,57 @@ import (
 )
 
 type fakeOutbox struct {
-	rows     []store.NotificationOutbox
-	marks    map[string]int64
-	markErrs int
+	rows       []store.NotificationOutbox
+	marks      map[string]int64
+	markErrs   int
+	skipped    map[string]bool
+	skipCounts []int64
+	skipErr    error
+	listSince  []time.Time
 }
 
-func (f *fakeOutbox) ListUnsentNotifications(context.Context, int) ([]store.NotificationOutbox, error) {
+func (f *fakeOutbox) ListUnsentNotifications(_ context.Context, _ int, since time.Time) ([]store.NotificationOutbox, error) {
+	f.listSince = append(f.listSince, since)
 	out := []store.NotificationOutbox{}
 	for _, row := range f.rows {
-		if _, sent := f.marks[row.EventID]; !sent {
-			out = append(out, row)
+		// A zero CreatedAt keeps the older fixtures simple: it means "queued
+		// now", never "queued before the cutoff".
+		if !row.CreatedAt.IsZero() && row.CreatedAt.Before(since) {
+			continue
 		}
+		if _, sent := f.marks[row.EventID]; sent {
+			continue
+		}
+		if f.skipped[row.EventID] {
+			continue
+		}
+		out = append(out, row)
 	}
 	return out, nil
+}
+
+func (f *fakeOutbox) SkipNotificationsBefore(_ context.Context, before time.Time, _ string) (int64, error) {
+	if f.skipErr != nil {
+		return 0, f.skipErr
+	}
+	if f.skipped == nil {
+		f.skipped = map[string]bool{}
+	}
+	var n int64
+	for _, row := range f.rows {
+		// A zero CreatedAt keeps the older fixtures simple: it means "queued
+		// now", never "queued before the cutoff".
+		if row.CreatedAt.IsZero() || !row.CreatedAt.Before(before) || f.skipped[row.EventID] {
+			continue
+		}
+		if _, sent := f.marks[row.EventID]; sent {
+			continue
+		}
+		f.skipped[row.EventID] = true
+		n++
+	}
+	f.skipCounts = append(f.skipCounts, n)
+	return n, nil
 }
 
 func (f *fakeOutbox) MarkNotificationSent(_ context.Context, id string, hub int64) (store.NotificationOutbox, error) {
@@ -97,7 +137,7 @@ func forwarderFixture(t *testing.T, st Store) (*Forwarder, *fakeHub, *time.Time)
 	srv := httptest.NewServer(hub)
 	t.Cleanup(srv.Close)
 	now := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
-	return &Forwarder{Store: st, URL: srv.URL + "/", Token: "hub-fake", Now: func() time.Time { return now }}, hub, &now
+	return &Forwarder{Store: st, URL: srv.URL + "/", Token: "hub-fake", Now: func() time.Time { return now }, Cutoff: now.Add(-time.Hour)}, hub, &now
 }
 
 func TestForwardSendsOneEventAndRecordsTheReceipt(t *testing.T) {
@@ -140,6 +180,123 @@ func TestForwardSendsOneEventAndRecordsTheReceipt(t *testing.T) {
 	sent, failed, err = f.Once(t.Context())
 	if err != nil || sent != 0 || failed != 0 || len(hub.posts) != len(want) {
 		t.Fatalf("second pass sent=%d failed=%d posts=%d err=%v", sent, failed, len(hub.posts), err)
+	}
+}
+
+// The first start settles every row queued before the cutoff instead of
+// posting it; the rows at or after the cutoff go out. A second run with the
+// same cutoff skips and sends nothing: a restart neither re-skips nor
+// re-sends (hk 4986).
+func TestForwardSkipsRowsBeforeTheCutoff(t *testing.T) {
+	cutoff := time.Date(2026, 11, 1, 23, 0, 0, 0, time.UTC)
+	outbox := &fakeOutbox{rows: []store.NotificationOutbox{
+		{Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "backlog", Text: "old", CreatedAt: cutoff.Add(-time.Hour)},
+		{Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "at-cutoff", Text: "new", CreatedAt: cutoff},
+	}}
+	f, hub, _ := forwarderFixture(t, outbox)
+	if sent, failed, err := f.Once(t.Context()); err != nil || sent != 1 || failed != 0 {
+		t.Fatalf("sent=%d failed=%d err=%v", sent, failed, err)
+	}
+	if len(hub.posts) != 1 || hub.posts[0]["event"] != "at-cutoff" {
+		t.Fatalf("posts=%v, want only the row at the cutoff", hub.posts)
+	}
+	if len(outbox.listSince) != 1 || !outbox.listSince[0].Equal(f.Cutoff) {
+		t.Fatalf("list cutoff=%v, want %v (a row committed between settle and list must not be listed)", outbox.listSince, f.Cutoff)
+	}
+	if !outbox.skipped["backlog"] || outbox.skipped["at-cutoff"] {
+		t.Fatalf("skipped=%v", outbox.skipped)
+	}
+	if outbox.marks["backlog"] != 0 {
+		t.Fatalf("a skipped row recorded a receipt: %v", outbox.marks)
+	}
+	if sent, failed, err := f.Once(t.Context()); err != nil || sent != 0 || failed != 0 || len(hub.posts) != 1 {
+		t.Fatalf("restart sent=%d failed=%d posts=%d err=%v", sent, failed, len(hub.posts), err)
+	}
+	if len(outbox.skipCounts) != 2 || outbox.skipCounts[0] != 1 || outbox.skipCounts[1] != 0 {
+		t.Fatalf("skip counts=%v, want [1 0]", outbox.skipCounts)
+	}
+}
+
+// A store that cannot settle the backlog must not let an old row through:
+// the run fails instead of posting it (hk 4986).
+func TestForwardRefusesToPostWhenTheBacklogCannotBeSkipped(t *testing.T) {
+	outbox := &fakeOutbox{
+		skipErr: errors.New("skip failed"),
+		rows:    []store.NotificationOutbox{{Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "backlog", Text: "old", CreatedAt: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)}},
+	}
+	f, hub, _ := forwarderFixture(t, outbox)
+	if sent, failed, err := f.Once(t.Context()); err == nil || sent != 0 || failed != 0 || len(hub.posts) != 0 {
+		t.Fatalf("sent=%d failed=%d posts=%d err=%v", sent, failed, len(hub.posts), err)
+	}
+}
+
+// A forwarder with no cutoff refuses to run: a zero value must never mean
+// "send the whole backlog" (hk 4986).
+func TestForwardWithoutACutoffSendsNothing(t *testing.T) {
+	outbox := &fakeOutbox{rows: []store.NotificationOutbox{{Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "dots-1", Text: "t"}}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) }))
+	defer srv.Close()
+	f := &Forwarder{Store: outbox, URL: srv.URL, Token: "hub-fake"}
+	if sent, failed, err := f.Once(t.Context()); !errors.Is(err, errNoCutoff) || sent != 0 || failed != 0 || len(outbox.marks) != 0 {
+		t.Fatalf("sent=%d failed=%d marks=%v err=%v", sent, failed, outbox.marks, err)
+	}
+}
+
+// logSink collects log lines from the global logger and signals each one, so a
+// test can wait for the start line without polling.
+type logSink struct {
+	mu   sync.Mutex
+	line string
+	seen chan string
+}
+
+func (s *logSink) Write(p []byte) (int, error) {
+	line := strings.TrimSpace(string(p))
+	s.mu.Lock()
+	s.line = line
+	s.mu.Unlock()
+	select {
+	case s.seen <- line:
+	default:
+	}
+	return len(p), nil
+}
+
+// The start line reports that forwarding is on, the cutoff, and how many rows
+// the start settled; nothing older than the cutoff is posted (hk 4986).
+func TestRunLogsStartCutoffAndSkippedRows(t *testing.T) {
+	outbox := &fakeOutbox{rows: []store.NotificationOutbox{
+		{Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "backlog", Text: "old", CreatedAt: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)},
+	}}
+	f, hub, _ := forwarderFixture(t, outbox)
+	f.Interval = time.Hour
+	sink := &logSink{seen: make(chan string, 8)}
+	old := log.Writer()
+	log.SetOutput(sink)
+	t.Cleanup(func() { log.SetOutput(old) })
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); f.Run(ctx) }()
+	var start string
+	deadline := time.After(5 * time.Second)
+	for start == "" {
+		select {
+		case line := <-sink.seen:
+			if strings.Contains(line, "notification_forward.start ") {
+				start = line
+			}
+		case <-deadline:
+			t.Fatal("no notification_forward.start line")
+		}
+	}
+	cancel()
+	<-done
+	if !strings.Contains(start, "cutoff=2026-11-01T23:00:00Z") || !strings.Contains(start, "skipped=1") {
+		t.Fatalf("start line = %q", start)
+	}
+	if len(hub.posts) != 0 {
+		t.Fatalf("start posted the backlog: %v", hub.posts)
 	}
 }
 
@@ -230,7 +387,7 @@ func TestForwardDuplicateWithoutAnIDIsNotAReceipt(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"duplicate_event_id","id":0}`))
 	}))
 	defer srv.Close()
-	f := &Forwarder{Store: outbox, URL: srv.URL, Token: "hub-fake"}
+	f := &Forwarder{Store: outbox, URL: srv.URL, Token: "hub-fake", Cutoff: time.Now().UTC().Add(-time.Hour)}
 	if sent, failed, _ := f.Once(t.Context()); sent != 0 || failed != 1 || len(outbox.marks) != 0 {
 		t.Fatalf("sent=%d failed=%d marks=%v", sent, failed, outbox.marks)
 	}
@@ -240,7 +397,7 @@ func TestForwardErrorNeverCarriesTheToken(t *testing.T) {
 	outbox := &fakeOutbox{rows: []store.NotificationOutbox{{Kind: store.OutboxKindDotsReport, TargetLane: "l", EventID: "e", Text: "t"}}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
 	defer srv.Close()
-	f := &Forwarder{Store: outbox, URL: srv.URL, Token: "hub-fake"}
+	f := &Forwarder{Store: outbox, URL: srv.URL, Token: "hub-fake", Cutoff: time.Now().UTC().Add(-time.Hour)}
 	_, err := f.post(t.Context(), outbox.rows[0])
 	if err == nil || strings.Contains(err.Error(), "hub-fake") {
 		t.Fatalf("err=%v", err)
@@ -261,14 +418,14 @@ func TestForwardAgainstStore(t *testing.T) {
 	if _, failed, err := f.Once(t.Context()); err != nil || failed != 1 {
 		t.Fatalf("failed=%d err=%v", failed, err)
 	}
-	if rows, err := st.ListUnsentNotifications(t.Context(), 10); err != nil || len(rows) != 1 {
+	if rows, err := st.ListUnsentNotifications(t.Context(), 10, f.Cutoff); err != nil || len(rows) != 1 {
 		t.Fatalf("rows=%+v err=%v", rows, err)
 	}
 	*now = now.Add(baseBackoff)
 	if sent, _, err := f.Once(t.Context()); err != nil || sent != 1 {
 		t.Fatalf("sent=%d err=%v", sent, err)
 	}
-	rows, err := st.ListUnsentNotifications(t.Context(), 10)
+	rows, err := st.ListUnsentNotifications(t.Context(), 10, f.Cutoff)
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("rows=%+v err=%v", rows, err)
 	}
@@ -280,16 +437,72 @@ func TestForwardAgainstStore(t *testing.T) {
 	}
 }
 
+// The cutoff against a real outbox: an old row is settled as skipped and never
+// reaches the hub, the newer row goes out, and a second run posts nothing more
+// (hk 4986).
+func TestForwardSkipsBacklogAgainstStore(t *testing.T) {
+	_, url := testdb.Schema(t, "hkforwardskip")
+	st, err := store.Open(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	cutoff := time.Now().UTC().Add(-2 * time.Hour)
+	seedOutboxRowAt(t, url, "forward-skip-old", cutoff.Add(-time.Hour))
+	seedOutboxRowAt(t, url, "forward-skip-new", cutoff.Add(time.Minute))
+	f, hub, _ := forwarderFixture(t, st)
+	f.Cutoff = cutoff
+	if sent, failed, err := f.Once(t.Context()); err != nil || sent != 1 || failed != 0 {
+		t.Fatalf("sent=%d failed=%d err=%v", sent, failed, err)
+	}
+	if len(hub.posts) != 1 || hub.posts[0]["event"] != "forward-skip-new" {
+		t.Fatalf("posts=%v, want only the row after the cutoff", hub.posts)
+	}
+	conn, err := pgx.Connect(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(t.Context())
+	var skipped *time.Time
+	var reason *string
+	if err := conn.QueryRow(t.Context(), `SELECT skipped_at,skip_reason FROM notification_outbox WHERE event_id='forward-skip-old'`).Scan(&skipped, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if skipped == nil || reason == nil || *reason != store.OutboxSkipBeforeForwarder {
+		t.Fatalf("skipped=%v reason=%v", skipped, reason)
+	}
+	var sentAt *time.Time
+	if err := conn.QueryRow(t.Context(), `SELECT sent_at FROM notification_outbox WHERE event_id='forward-skip-old'`).Scan(&sentAt); err != nil {
+		t.Fatal(err)
+	}
+	if sentAt != nil {
+		t.Fatalf("a skipped row gained sent_at: %v", sentAt)
+	}
+	if rows, err := st.ListUnsentNotifications(t.Context(), 10, cutoff); err != nil || len(rows) != 0 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+	if sent, failed, err := f.Once(t.Context()); err != nil || sent != 0 || failed != 0 || len(hub.posts) != 1 {
+		t.Fatalf("restart sent=%d failed=%d posts=%d err=%v", sent, failed, len(hub.posts), err)
+	}
+}
+
 // seedOutboxRow queues one lane notification in the schema at url, the row
 // a dots follow-up writes.
 func seedOutboxRow(t *testing.T, url string) {
+	t.Helper()
+	seedOutboxRowAt(t, url, "forward-test-1", time.Now().UTC())
+}
+
+// seedOutboxRowAt queues one lane notification with an explicit creation time,
+// so a test can place it on either side of the forwarder's cutoff.
+func seedOutboxRowAt(t *testing.T, url, eventID string, at time.Time) {
 	t.Helper()
 	conn, err := pgx.Connect(t.Context(), url)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close(t.Context())
-	if _, err := conn.Exec(t.Context(), `INSERT INTO notification_outbox(kind,target_lane,event_id,text,created_at) VALUES('dots_followup','operator-desk','forward-test-1','[dots-watch] test',now())`); err != nil {
+	if _, err := conn.Exec(t.Context(), `INSERT INTO notification_outbox(kind,target_lane,event_id,text,created_at) VALUES('dots_followup','operator-desk',$1,'[dots-watch] test',$2)`, eventID, at); err != nil {
 		t.Fatal(err)
 	}
 }

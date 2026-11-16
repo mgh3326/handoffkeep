@@ -79,7 +79,7 @@ func TestSingletonServeWorkers(t *testing.T) {
 				}))
 				defer server.Close()
 				effect = func(ctx context.Context) error {
-					f := hubforward.Forwarder{Store: st, URL: server.URL, Token: "test"}
+					f := hubforward.Forwarder{Store: st, URL: server.URL, Token: "test", Cutoff: time.Now().UTC().Add(-time.Hour)}
 					_, failed, err := f.Once(ctx)
 					if err != nil {
 						return err

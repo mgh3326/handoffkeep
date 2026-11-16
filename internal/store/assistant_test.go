@@ -36,7 +36,7 @@ func assistantRecordWith(t *testing.T, s *Store, id int64, in DecisionRequestInp
 
 func outboxRows(t *testing.T, s *Store) []NotificationOutbox {
 	t.Helper()
-	rows, err := s.ListUnsentNotifications(context.Background(), 0)
+	rows, err := s.ListUnsentNotifications(context.Background(), 0, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

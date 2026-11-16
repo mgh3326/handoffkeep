@@ -49,7 +49,42 @@ Optional server configuration:
 - Decision notices in Discord (see [decision-discord.md](decision-discord.md)):
   `HANDOFFKEEP_DISCORD_DECISIONS_WEBHOOK_URL`
 - Outbox forwarding to the hub: `HANDOFFKEEP_NOTIFICATION_FORWARD=on`, with the
-  hub proxy variables above
+  hub proxy variables above, plus `HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE`
+  (RFC3339, required while forwarding is on). A first start sends only notices
+  created at or after that instant; older unsent rows are settled as skipped
+  (`skipped_at`/`skip_reason`, never `sent_at`) and the start log reports the
+  cutoff and how many rows it skipped. A restart with the same value re-skips
+  and re-sends nothing. Missing, unparsable or later than the server's clock
+  (beyond a one-minute allowance): the server refuses to start.
+  In a blue-green rollout, turn forwarding off on the colour being replaced
+  before the new colour settles the backlog: an older release reads every
+  unsent row (it does not know `skipped_at`), so its forwarder would post the
+  settled rows if it ran; the two colours share the `HubForwardWorkerLock`.
+  A rollback follows the same rule in reverse: unset
+  `HANDOFFKEEP_NOTIFICATION_FORWARD` in the previous release's configuration
+  before starting it, because that release cannot honour the cutoff and would
+  post every row carrying `skipped_at`.
+  Rows settled by mistake (a cutoff set too late) are recoverable, but the
+  configuration must be corrected before the rows. First set
+  `HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE` on every colour that runs the
+  forwarder (or turn forwarding off on the colour being replaced) to an instant
+  at or before the earliest `created_at` of the rows to recover and not in the
+  future, and restart with it. Lowering it alone sends nothing: rows already
+  skipped stay skipped and are never listed. Then run the UPDATE for the
+  affected event ids, scoped to the rows the corrected cutoff lists, so the
+  affected count is the number that will be sent:
+
+  ```sql
+  UPDATE notification_outbox SET skipped_at=NULL, skip_reason=NULL
+  WHERE event_id IN (...) AND skip_reason='before_forwarder_cutoff'
+    AND sent_at IS NULL AND created_at >= '<corrected SINCE>';
+  ```
+
+  The next pass sends them, because `sent_at` was never set. An equal
+  alternative is the reverse order: run the UPDATE while forwarding is off,
+  then start with the corrected SINCE. While the running cutoff is still later
+  than a row's `created_at`, an UPDATE has no effect: the next tick re-skips
+  the row and it is never listed.
 - Attachments / S3-compatible storage: `HK_S3_ENDPOINT`, `HK_S3_BUCKET`,
   `HK_S3_ACCESS_KEY_ID`, `HK_S3_SECRET_ACCESS_KEY`; optional connection settings:
   `HK_S3_REGION`, `HK_S3_BUCKET_LOOKUP`; limits:

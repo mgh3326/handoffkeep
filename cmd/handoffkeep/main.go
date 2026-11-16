@@ -1471,7 +1471,11 @@ func serve(args []string, errout io.Writer) error {
 	if am != nil && am.Enabled {
 		workers = append(workers, attachmentStagingSweepWorker{am: am})
 	}
-	if forwarder := notificationForwarderFromEnv(st); forwarder != nil {
+	forwarder, e := notificationForwarderFromEnv(st)
+	if e != nil {
+		return e
+	}
+	if forwarder != nil {
 		workers = append(workers, singletonWorker{store: st, id: store.HubForwardWorkerLock, worker: forwarder})
 	}
 	notifier, e := decisionNotifierFromEnv(st)
@@ -1695,18 +1699,36 @@ func parseTaskThreadProjects(raw string) ([]string, error) {
 }
 
 // notificationForwarderFromEnv is opt-in, separately from the hub settings the
-// console already uses: turning it on sends every row still unsent, however old.
-func notificationForwarderFromEnv(st *store.Store) backgroundWorker {
+// console already uses. Turning it on never flushes the backlog: rows created
+// before HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE (RFC3339, required) are
+// settled as skipped instead of posted, and a restart with the same value
+// sends nothing twice (hk 4986). A missing, unparsable or future cutoff
+// refuses to start rather than guess one: defaulting to "now" would skip
+// notices queued while the forwarder was down, and a future instant would
+// skip every notice created until then.
+func notificationForwarderFromEnv(st *store.Store) (backgroundWorker, error) {
 	if strings.TrimSpace(os.Getenv("HANDOFFKEEP_NOTIFICATION_FORWARD")) != "on" {
-		return nil
+		return nil, nil
 	}
 	url := strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_URL"))
 	token := strings.TrimSpace(os.Getenv("HANDOFFKEEP_HUB_TOKEN"))
 	if url == "" || token == "" {
 		log.Printf("notification_forward.disabled reason=no_hub")
-		return nil
+		return nil, nil
 	}
-	return &hubforward.Forwarder{Store: st, URL: url, Token: token}
+	raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE"))
+	if raw == "" {
+		return nil, errors.New("HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE must name the RFC3339 instant forwarding starts when HANDOFFKEEP_NOTIFICATION_FORWARD=on")
+	}
+	cutoff, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return nil, fmt.Errorf("HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE: %w", err)
+	}
+	cutoff = cutoff.UTC()
+	if cutoff.After(time.Now().UTC().Add(time.Minute)) {
+		return nil, fmt.Errorf("HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE %q is in the future: it must be the instant forwarding starts, because every notice created before it is settled as skipped", raw)
+	}
+	return &hubforward.Forwarder{Store: st, URL: url, Token: token, Cutoff: cutoff}, nil
 }
 
 func runMCP() error {

@@ -503,7 +503,7 @@ func TestOutboxReceiptsReceivedThenApplied(t *testing.T) {
 	if _, err := s.MarkNotificationApplied(ctx, "receipt-event-1", "other-lane"); !errors.Is(err, ErrOutboxConflict) {
 		t.Fatalf("ack by another identity err=%v", err)
 	}
-	if rows, err := s.ListUnsentNotifications(ctx, 0); err != nil {
+	if rows, err := s.ListUnsentNotifications(ctx, 0, time.Time{}); err != nil {
 		t.Fatal(err)
 	} else {
 		for _, r := range rows {

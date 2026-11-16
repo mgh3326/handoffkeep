@@ -34,8 +34,9 @@ const (
 
 // Store is the outbox surface the forwarder reads and marks.
 type Store interface {
-	ListUnsentNotifications(ctx context.Context, limit int) ([]store.NotificationOutbox, error)
+	ListUnsentNotifications(ctx context.Context, limit int, since time.Time) ([]store.NotificationOutbox, error)
 	MarkNotificationSent(ctx context.Context, eventID string, hubRowID int64) (store.NotificationOutbox, error)
+	SkipNotificationsBefore(ctx context.Context, before time.Time, reason string) (int64, error)
 }
 
 // notifyType is the lane-event type a row goes out with. A dots RESULT is
@@ -59,10 +60,17 @@ type retry struct {
 	delay time.Duration
 }
 
+// errNoCutoff refuses to run without the instant forwarding started. A zero
+// cutoff must not mean "send everything": that is exactly the backlog flush
+// the cutoff exists to prevent (hk 4986).
+var errNoCutoff = errors.New("notification forwarder has no cutoff")
+
 // Forwarder posts unsent rows to the hub's relay ingress. The hub dedupes on
 // lane and event id and returns the row id either way, so a retry after a lost
 // response, a second forwarder, or a poller that sent the same event all end in
 // one delivery and one receipt. One failing row does not hold up the others.
+// Cutoff is required: rows created before it are settled as skipped, not sent,
+// so the forwarder's first start never flushes the backlog (hk 4986).
 type Forwarder struct {
 	Store    Store
 	URL      string
@@ -70,11 +78,14 @@ type Forwarder struct {
 	HTTP     *http.Client
 	Interval time.Duration
 	Now      func() time.Time
+	Cutoff   time.Time
 
 	retries map[string]retry
 }
 
-// Run forwards due rows every interval until ctx ends.
+// Run forwards due rows every interval until ctx ends. It settles the backlog
+// before the cutoff once at start and logs what that start did; Once repeats
+// the idempotent skip so a failed first attempt cannot let an old row through.
 func (f *Forwarder) Run(ctx context.Context) {
 	interval := f.Interval
 	if interval <= 0 {
@@ -82,6 +93,15 @@ func (f *Forwarder) Run(ctx context.Context) {
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	if f.Cutoff.IsZero() {
+		log.Printf("notification_forward.disabled reason=no_cutoff")
+		return
+	}
+	if skipped, err := f.Store.SkipNotificationsBefore(ctx, f.Cutoff, store.OutboxSkipBeforeForwarder); err != nil {
+		log.Printf("notification_forward.skip_failed cutoff=%s err=%q", f.cutoffText(), err.Error())
+	} else {
+		log.Printf("notification_forward.start enabled=true cutoff=%s skipped=%d", f.cutoffText(), skipped)
+	}
 	for {
 		if _, _, err := f.Once(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("notification_forward.list_error err=%q", err.Error())
@@ -94,11 +114,19 @@ func (f *Forwarder) Run(ctx context.Context) {
 	}
 }
 
-// Once forwards every unsent row not waiting out a backoff. A row counts as sent
-// only once its receipt is stored; a failed mark goes round again and the hub's
-// duplicate answer supplies the same id.
+// Once forwards every unsent row not waiting out a backoff. The list carries
+// the cutoff, not only the settle, so a row that commits between the two reads
+// can never be posted as backlog. A row counts as sent only once its receipt
+// is stored; a failed mark goes round again and the hub's duplicate answer
+// supplies the same id.
 func (f *Forwarder) Once(ctx context.Context) (sent, failed int, err error) {
-	rows, err := f.Store.ListUnsentNotifications(ctx, batchSize)
+	if f.Cutoff.IsZero() {
+		return 0, 0, errNoCutoff
+	}
+	if _, err := f.Store.SkipNotificationsBefore(ctx, f.Cutoff, store.OutboxSkipBeforeForwarder); err != nil {
+		return 0, 0, fmt.Errorf("skip rows before cutoff: %w", err)
+	}
+	rows, err := f.Store.ListUnsentNotifications(ctx, batchSize, f.Cutoff)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -211,4 +239,10 @@ func (f *Forwarder) now() time.Time {
 		return f.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+// cutoffText is the start log's rendering of the cutoff: one RFC3339 instant,
+// as the operator set HANDOFFKEEP_NOTIFICATION_FORWARD_SINCE.
+func (f *Forwarder) cutoffText() string {
+	return f.Cutoff.UTC().Format(time.RFC3339)
 }

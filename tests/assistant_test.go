@@ -87,7 +87,7 @@ func TestAssistantChatAnswerConcurrentHTTP(t *testing.T) {
 	}
 	// The shared DB holds other tests' outbox rows; only this answer's
 	// deterministic event id may appear, exactly once.
-	unsent, err := s.ListUnsentNotifications(t.Context(), 0)
+	unsent, err := s.ListUnsentNotifications(t.Context(), 0, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestAssistantChatAnswerStaleHTTP(t *testing.T) {
 			t.Fatalf("refused answer %s left %d messages err=%v", ev, leftover, err)
 		}
 	}
-	unsent, err := s.ListUnsentNotifications(t.Context(), 0)
+	unsent, err := s.ListUnsentNotifications(t.Context(), 0, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestAssistantChatAnswerAfterRevisionHTTP(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("rev2 answer status=%d", status)
 	}
-	unsent, err := s.ListUnsentNotifications(t.Context(), 0)
+	unsent, err := s.ListUnsentNotifications(t.Context(), 0, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestAssistantOutboxAppliedAPI(t *testing.T) {
 	if _, err := s.ResolveDecisionRequestAssistant(t.Context(), task.ID, "berry-mcp", store.DecisionAssistantResolveInput{RequestID: req.ID, Option: "B"}); err != nil {
 		t.Fatal(err)
 	}
-	unsent, err := s.ListUnsentNotifications(t.Context(), 1000)
+	unsent, err := s.ListUnsentNotifications(t.Context(), 1000, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +307,7 @@ func TestAssistantOutboxAppliedNeedsReceived(t *testing.T) {
 	if _, err := s.ResolveDecisionRequestAssistant(t.Context(), task.ID, "berry-mcp", store.DecisionAssistantResolveInput{RequestID: req.ID, Option: "B"}); err != nil {
 		t.Fatal(err)
 	}
-	unsent, err := s.ListUnsentNotifications(t.Context(), 1000)
+	unsent, err := s.ListUnsentNotifications(t.Context(), 1000, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
