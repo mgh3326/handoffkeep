@@ -60,6 +60,11 @@
 .work-media-item[data-selected="true"] img, .work-media-item[data-selected="true"] video { border-color: var(--hk-accent); }
 .work-media-item figcaption { max-width: 100%; overflow: hidden; color: var(--hk-text-secondary); font-size: var(--hk-type-meta); text-overflow: ellipsis; white-space: nowrap; }
 .work-media-select[aria-pressed="true"] { background: var(--hk-action-bg); border-color: var(--hk-action-bg); color: var(--hk-action-fg); }
+/* The image thumbnail is itself the enlarge button; the video keeps its
+ * native controls and sits beside a visible button instead. */
+.work-media-open { box-sizing: border-box; display: block; width: 100%; max-width: 100%; padding: 0; border: 0; border-radius: var(--hk-radius-card); background: transparent; cursor: pointer; }
+.work-media-open:focus-visible { outline: var(--hk-focus-width) solid var(--hk-focus); outline-offset: var(--hk-focus-offset); }
+.work-media-actions { display: flex; flex-wrap: wrap; gap: var(--hk-space-1); }
 
 .work-compare { margin-top: var(--hk-space-3); padding: var(--hk-space-3); border: var(--hk-border-width) solid var(--hk-border-subtle); border-radius: var(--hk-radius-card); }
 .work-compare-head h3 { margin: 0 0 var(--hk-space-2); color: var(--hk-text-secondary); font-size: var(--hk-type-section); }
@@ -72,7 +77,10 @@
 .work-enlarge { position: fixed; inset: 0; z-index: var(--hk-z-modal); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--hk-space-3); padding: var(--hk-space-4); background: var(--hk-scrim); }
 .work-enlarge-bar { display: flex; align-items: center; gap: var(--hk-space-2); max-width: 100%; color: var(--hk-text-primary); font-size: var(--hk-type-meta); }
 .work-enlarge-bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.work-enlarge img, .work-enlarge video { max-width: 100%; max-height: 80vh; object-fit: contain; background: var(--hk-surface-1); border-radius: var(--hk-radius-card); }
+/* The media area takes the height the bar leaves, so the whole image shows
+ * without page scroll. */
+.work-enlarge-media { display: flex; flex: 1; align-items: center; justify-content: center; width: 100%; min-width: 0; min-height: 0; }
+.work-enlarge-media img, .work-enlarge-media video { display: block; max-width: 100%; max-height: 100%; object-fit: contain; background: var(--hk-surface-1); border-radius: var(--hk-radius-card); }
 
 /* A comment renders as markdown; its time and author sit above it. */
 .work-timeline-comment { margin: var(--hk-space-3) 0; }

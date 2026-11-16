@@ -79,24 +79,60 @@ describe("task attachments in place", () => {
     expect(within(compare).getAllByRole("img")).toHaveLength(2);
   });
 
-  it("enlarges one item, closes on Esc and steps with the arrow keys", async () => {
-    stubRecord([attachment("card-a.png", "image/png", 1200, "a"), attachment("card-b.png", "image/png", 1200, "b")]);
-    render(<TaskAttachments attachments={[attachment("card-a.png", "image/png", 1200, "a"), attachment("card-b.png", "image/png", 1200, "b")]} />);
-    for (const button of await screen.findAllByRole("button", { name: "비교 선택" })) fireEvent.click(button);
-    fireEvent.click(await screen.findByRole("button", { name: "card-b.png 크게 보기" }));
+  it("opens the enlarge view from a grid thumbnail and steps over every grid item", async () => {
+    const files = [attachment("card-a.png", "image/png", 1200, "a"), attachment("card-b.png", "image/png", 1200, "b"), attachment("card-c.png", "image/png", 1200, "c")];
+    render(<TaskAttachments attachments={files} />);
+    const grid = screen.getByRole("list", { name: "이미지·동영상 첨부" });
+    const thumbnail = within(grid).getByRole("button", { name: "card-b.png 크게 보기" });
+    fireEvent.click(thumbnail);
     const dialog = await screen.findByRole("dialog", { name: "card-b.png 크게 보기" });
-    expect(within(dialog).getByText(/card-b\.png · 2\/2/)).toBeTruthy();
+    expect(within(dialog).getByText(/card-b\.png · 2\/3/)).toBeTruthy();
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "card-c.png 크게 보기" })).toBeTruthy());
+    expect(within(screen.getByRole("dialog")).getByText(/card-c\.png · 3\/3/)).toBeTruthy();
     fireEvent.keyDown(window, { key: "ArrowRight" });
     await waitFor(() => expect(screen.getByRole("dialog", { name: "card-a.png 크게 보기" })).toBeTruthy());
+    expect(within(screen.getByRole("dialog")).getByText(/card-a\.png · 1\/3/)).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(thumbnail);
+  });
+
+  it("gives a video its native controls and a visible enlarge button", async () => {
+    render(<TaskAttachments attachments={[attachment("run.mp4", "video/mp4", 2400, "b")]} />);
+    const video = screen.getByLabelText("run.mp4");
+    expect(video.hasAttribute("controls")).toBe(true);
+    const grid = screen.getByRole("list", { name: "이미지·동영상 첨부" });
+    fireEvent.click(within(grid).getByRole("button", { name: "run.mp4 크게 보기" }));
+    const dialog = await screen.findByRole("dialog", { name: "run.mp4 크게 보기" });
+    expect(within(dialog).getByLabelText("run.mp4").tagName).toBe("VIDEO");
+  });
+
+  it("enlarges from the compare view and steps over the chosen items only", async () => {
+    const files = [attachment("card-a.png", "image/png", 1200, "a"), attachment("card-b.png", "image/png", 1200, "b"), attachment("card-c.png", "image/png", 1200, "c")];
+    render(<TaskAttachments attachments={files} />);
+    const picks = screen.getAllByRole("button", { name: "비교 선택" });
+    fireEvent.click(picks[0]);
+    fireEvent.click(picks[2]);
+    const compare = await screen.findByRole("region", { name: "첨부 비교" });
+    fireEvent.click(within(compare).getByRole("button", { name: "card-a.png 크게 보기" }));
+    const dialog = await screen.findByRole("dialog", { name: "card-a.png 크게 보기" });
+    expect(within(dialog).getByText(/card-a\.png · 1\/2/)).toBeTruthy();
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "card-c.png 크게 보기" })).toBeTruthy());
+    expect(within(screen.getByRole("dialog")).getByText(/card-c\.png · 2\/2/)).toBeTruthy();
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "card-a.png 크게 보기" })).toBeTruthy());
+    expect(within(screen.getByRole("dialog")).queryByText(/card-b\.png/)).toBeNull();
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   it("leaves typing targets alone while enlarged", async () => {
-    const files = [attachment("card-a.png", "image/png", 1200, "a"), attachment("card-b.png", "image/png", 1200, "b")];
-    render(<TaskAttachments attachments={files} />);
-    for (const button of await screen.findAllByRole("button", { name: "비교 선택" })) fireEvent.click(button);
-    fireEvent.click(await screen.findByRole("button", { name: "card-a.png 크게 보기" }));
+    render(<TaskAttachments attachments={[attachment("card-a.png", "image/png", 1200, "a")]} />);
+    const grid = screen.getByRole("list", { name: "이미지·동영상 첨부" });
+    fireEvent.click(within(grid).getByRole("button", { name: "card-a.png 크게 보기" }));
+    expect(await screen.findByRole("dialog")).toBeTruthy();
     const input = document.createElement("input");
     document.body.appendChild(input);
     fireEvent.keyDown(input, { key: "Escape" });
