@@ -155,6 +155,18 @@ func writeDeployProjection(ctx context.Context, tx pgx.Tx, x StoredDeployRecord)
 	return err
 }
 
+// deployRecordBodyFallbackSQL selects the document body for a projection row
+// this reader cannot trust. The projection is json.Marshal output: compact,
+// flat, with known fields. A top-level key therefore sits right after '{' or
+// ',', and a string value cannot hold that byte sequence because its quotes are
+// escaped. That is how a projection written before DeployRecord.FailedStepName
+// existed is spotted without parsing the bytes: the JSON functions reject the
+// escaped NULs the column keeps, and those records must still read.
+const deployRecordBodyFallbackSQL = `CASE WHEN p.key IS NULL OR NOT p.decoded
+	OR (strpos(convert_from(p.record,'UTF8'), '{"failed_step_name":') = 0
+		AND strpos(convert_from(p.record,'UTF8'), ',"failed_step_name":') = 0)
+	THEN d.body ELSE NULL END`
+
 // maxDeployRecordsPerPrefix bounds one prefix's page in
 // ListDeployRecordsByPrefix: the console compares at most this many records
 // per deploy service before it reports a truncated scan.
@@ -204,8 +216,7 @@ func (s *Store) ListDeployRecordsByPrefix(ctx context.Context, prefixes []string
 		los = append(los, lo)
 		his = append(his, hi)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT w.lo,d.key,d.sha256,d.created_at,p.record,p.decoded,
-CASE WHEN p.key IS NULL OR NOT p.decoded OR (convert_from(p.record,'UTF8')::json->'failed_step_name') IS NULL THEN d.body ELSE NULL END
+	rows, err := s.pool.Query(ctx, `SELECT w.lo,d.key,d.sha256,d.created_at,p.record,p.decoded,`+deployRecordBodyFallbackSQL+`
 FROM unnest($1::text[],$2::text[]) AS w(lo,hi)
 JOIN LATERAL (
 	SELECT d2.key,d2.sha256,d2.created_at,d2.body FROM documents d2
