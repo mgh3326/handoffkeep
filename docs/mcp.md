@@ -94,6 +94,20 @@ attributed to the authenticated operator.
 The result's `source` is `hk`, or `linear` for a row the retired Linear
 webhook recorded before hk 4425.
 
+The request's requester lane cancels its own request with `handoffkeep dots
+cancel TASK --reason REASON`, or `POST /v1/dots/requests/{id}/cancel` with
+`requester_lane` and `reason`. A comment does not cancel a request: the task
+settles as `dropped` (category `canceled`), the reason is recorded as its
+closure evidence, the request leaves `dots_inbox`, and later `dots_reply`
+calls on it are refused as on any settled task. `requester_lane` is
+self-asserted, exactly as on create: it must name the request's `parent_lane`,
+and the authenticated client is recorded as the transition's actor. Another
+lane answers 409 `task_conflict` with a `reason` naming the rule. A retried
+cancel of an already dropped request answers 200 with the request, and the
+cancel supersedes the request's run token. A cancel without a reason, or on a
+task that is not an hk dots request, answers 400 `invalid_context` with a
+`reason`.
+
 `HANDOFFKEEP_DOTS_REPLY_WRITES` controls replies. It defaults to `off`, which
 leaves `dots_inbox` available and makes `dots_reply` return
 `dots_reply_writes_disabled`. Set it to `on` to enable replies, or to `off`

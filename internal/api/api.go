@@ -659,6 +659,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/{id}/relations/remove", s.taskRelationRemove)
 	m.HandleFunc("GET /v1/dots/results", s.dotsResultsList)
 	m.HandleFunc("POST /v1/dots/requests", s.dotsRequestCreate)
+	m.HandleFunc("POST /v1/dots/requests/{id}/cancel", s.dotsRequestCancel)
 	m.HandleFunc("POST /v1/dots/results/{id}/adoption", s.dotsAdoption)
 	m.HandleFunc("POST /v1/dots/answer", s.dotsAnswer)
 	m.HandleFunc("POST /v1/tasks/{id}/reopen", s.taskReopen)

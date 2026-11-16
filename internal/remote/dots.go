@@ -21,6 +21,19 @@ func (c Client) CreateDotsRequest(ctx context.Context, in store.DotsRequestInput
 	return out.Task, nil
 }
 
+// CancelDotsRequest settles the caller lane's own dots request as canceled
+// with a reason (hk 4987).
+func (c Client) CancelDotsRequest(ctx context.Context, taskID int64, in store.DotsCancelInput) (store.Task, error) {
+	var out struct {
+		Task store.Task `json:"task"`
+	}
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/dots/requests/%d/cancel", taskID), in, &out)
+	if err != nil {
+		return store.Task{}, unsupportedRoute(err, "dots_cancel_unsupported", "the dots cancel route")
+	}
+	return out.Task, nil
+}
+
 // DotsAdoptionResult is the answer to SetDotsAdoption: the stored result and
 // whether this call changed it (false: the same change was already stored).
 type DotsAdoptionResult struct {
