@@ -62,7 +62,7 @@ func TestSkipNotificationsBeforeSettlesOnlyTheOldUnsentRows(t *testing.T) {
 	}
 
 	// A skipped row is settled, not owed: the unsent list no longer counts it.
-	unsent, err := s.ListUnsentNotifications(ctx, 100)
+	unsent, err := s.ListUnsentNotifications(ctx, 100, cutoff)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,8 @@ func TestSkipNotificationsBeforeSettlesOnlyTheOldUnsentRows(t *testing.T) {
 		t.Fatalf("unsent=%v, want only the row at the cutoff", live)
 	}
 
-	// Sending is what skipping ruled out: no receipt and no ack can follow.
+	// Sending is what skipping ruled out: this release's store refuses a
+	// receipt and an ack for a skipped row.
 	if _, err := s.MarkNotificationSent(ctx, "skip-test-old", 9); !errors.Is(err, ErrOutboxConflict) {
 		t.Fatalf("mark skipped row sent err=%v", err)
 	}
@@ -86,8 +87,25 @@ func TestSkipNotificationsBeforeSettlesOnlyTheOldUnsentRows(t *testing.T) {
 	if row := outboxByPrefix(t, s.pool, "skip-test-old")[0]; row.SentAt != nil || row.AppliedAt != nil || row.HubRowID != nil {
 		t.Fatalf("a refused receipt changed the row: %+v", row)
 	}
-	if _, err := s.pool.Exec(ctx, `UPDATE notification_outbox SET sent_at=now(),hub_row_id=9 WHERE event_id='skip-test-old'`); err == nil {
-		t.Fatal("the table accepted sent_at on a skipped row")
+
+	// A row that commits after the settle but carries a pre-cutoff created_at
+	// is still not listed: the cutoff is part of the read, so no backlog row
+	// can slip through between the settle and the list.
+	if _, err := s.pool.Exec(ctx, `INSERT INTO notification_outbox(kind,target_lane,event_id,text,created_at) VALUES('dots_report','skip-lane','skip-test-late','t',$1)`, cutoff.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	late, err := s.ListUnsentNotifications(ctx, 100, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range late {
+		if row.EventID == "skip-test-late" {
+			t.Fatalf("a pre-cutoff row that settled late was listed: %+v", row)
+		}
+	}
+	// The next settle picks it up, so it is skipped rather than owed.
+	if settled, err := s.SkipNotificationsBefore(ctx, cutoff, OutboxSkipBeforeForwarder); err != nil || settled != 1 {
+		t.Fatalf("late settle=%d err=%v", settled, err)
 	}
 	if _, err := s.pool.Exec(ctx, `UPDATE notification_outbox SET skipped_at=now() WHERE event_id='skip-test-edge'`); err == nil {
 		t.Fatal("the table accepted a skip without a reason")

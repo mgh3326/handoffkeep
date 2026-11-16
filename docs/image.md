@@ -55,6 +55,10 @@ Optional server configuration:
   (`skipped_at`/`skip_reason`, never `sent_at`) and the start log reports the
   cutoff and how many rows it skipped. A restart with the same value re-skips
   and re-sends nothing. Missing or unparsable: the server refuses to start.
+  In a blue-green rollout, turn forwarding off on the colour being replaced
+  before the new colour settles the backlog: an older release reads every
+  unsent row (it does not know `skipped_at`), so its forwarder would post the
+  settled rows if it ran; the two colours share the `HubForwardWorkerLock`.
 - Attachments / S3-compatible storage: `HK_S3_ENDPOINT`, `HK_S3_BUCKET`,
   `HK_S3_ACCESS_KEY_ID`, `HK_S3_SECRET_ACCESS_KEY`; optional connection settings:
   `HK_S3_REGION`, `HK_S3_BUCKET_LOOKUP`; limits:

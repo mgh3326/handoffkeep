@@ -34,7 +34,7 @@ const (
 
 // Store is the outbox surface the forwarder reads and marks.
 type Store interface {
-	ListUnsentNotifications(ctx context.Context, limit int) ([]store.NotificationOutbox, error)
+	ListUnsentNotifications(ctx context.Context, limit int, since time.Time) ([]store.NotificationOutbox, error)
 	MarkNotificationSent(ctx context.Context, eventID string, hubRowID int64) (store.NotificationOutbox, error)
 	SkipNotificationsBefore(ctx context.Context, before time.Time, reason string) (int64, error)
 }
@@ -114,9 +114,11 @@ func (f *Forwarder) Run(ctx context.Context) {
 	}
 }
 
-// Once forwards every unsent row not waiting out a backoff. A row counts as sent
-// only once its receipt is stored; a failed mark goes round again and the hub's
-// duplicate answer supplies the same id.
+// Once forwards every unsent row not waiting out a backoff. The list carries
+// the cutoff, not only the settle, so a row that commits between the two reads
+// can never be posted as backlog. A row counts as sent only once its receipt
+// is stored; a failed mark goes round again and the hub's duplicate answer
+// supplies the same id.
 func (f *Forwarder) Once(ctx context.Context) (sent, failed int, err error) {
 	if f.Cutoff.IsZero() {
 		return 0, 0, errNoCutoff
@@ -124,7 +126,7 @@ func (f *Forwarder) Once(ctx context.Context) (sent, failed int, err error) {
 	if _, err := f.Store.SkipNotificationsBefore(ctx, f.Cutoff, store.OutboxSkipBeforeForwarder); err != nil {
 		return 0, 0, fmt.Errorf("skip rows before cutoff: %w", err)
 	}
-	rows, err := f.Store.ListUnsentNotifications(ctx, batchSize)
+	rows, err := f.Store.ListUnsentNotifications(ctx, batchSize, f.Cutoff)
 	if err != nil {
 		return 0, 0, err
 	}

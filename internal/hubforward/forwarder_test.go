@@ -25,11 +25,18 @@ type fakeOutbox struct {
 	skipped    map[string]bool
 	skipCounts []int64
 	skipErr    error
+	listSince  []time.Time
 }
 
-func (f *fakeOutbox) ListUnsentNotifications(context.Context, int) ([]store.NotificationOutbox, error) {
+func (f *fakeOutbox) ListUnsentNotifications(_ context.Context, _ int, since time.Time) ([]store.NotificationOutbox, error) {
+	f.listSince = append(f.listSince, since)
 	out := []store.NotificationOutbox{}
 	for _, row := range f.rows {
+		// A zero CreatedAt keeps the older fixtures simple: it means "queued
+		// now", never "queued before the cutoff".
+		if !row.CreatedAt.IsZero() && row.CreatedAt.Before(since) {
+			continue
+		}
 		if _, sent := f.marks[row.EventID]; sent {
 			continue
 		}
@@ -192,6 +199,9 @@ func TestForwardSkipsRowsBeforeTheCutoff(t *testing.T) {
 	}
 	if len(hub.posts) != 1 || hub.posts[0]["event"] != "at-cutoff" {
 		t.Fatalf("posts=%v, want only the row at the cutoff", hub.posts)
+	}
+	if len(outbox.listSince) != 1 || !outbox.listSince[0].Equal(f.Cutoff) {
+		t.Fatalf("list cutoff=%v, want %v (a row committed between settle and list must not be listed)", outbox.listSince, f.Cutoff)
 	}
 	if !outbox.skipped["backlog"] || outbox.skipped["at-cutoff"] {
 		t.Fatalf("skipped=%v", outbox.skipped)
@@ -408,14 +418,14 @@ func TestForwardAgainstStore(t *testing.T) {
 	if _, failed, err := f.Once(t.Context()); err != nil || failed != 1 {
 		t.Fatalf("failed=%d err=%v", failed, err)
 	}
-	if rows, err := st.ListUnsentNotifications(t.Context(), 10); err != nil || len(rows) != 1 {
+	if rows, err := st.ListUnsentNotifications(t.Context(), 10, f.Cutoff); err != nil || len(rows) != 1 {
 		t.Fatalf("rows=%+v err=%v", rows, err)
 	}
 	*now = now.Add(baseBackoff)
 	if sent, _, err := f.Once(t.Context()); err != nil || sent != 1 {
 		t.Fatalf("sent=%d err=%v", sent, err)
 	}
-	rows, err := st.ListUnsentNotifications(t.Context(), 10)
+	rows, err := st.ListUnsentNotifications(t.Context(), 10, f.Cutoff)
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("rows=%+v err=%v", rows, err)
 	}
@@ -468,7 +478,7 @@ func TestForwardSkipsBacklogAgainstStore(t *testing.T) {
 	if sentAt != nil {
 		t.Fatalf("a skipped row gained sent_at: %v", sentAt)
 	}
-	if rows, err := st.ListUnsentNotifications(t.Context(), 10); err != nil || len(rows) != 0 {
+	if rows, err := st.ListUnsentNotifications(t.Context(), 10, cutoff); err != nil || len(rows) != 0 {
 		t.Fatalf("rows=%+v err=%v", rows, err)
 	}
 	if sent, failed, err := f.Once(t.Context()); err != nil || sent != 0 || failed != 0 || len(hub.posts) != 1 {

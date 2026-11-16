@@ -114,17 +114,20 @@ func insertNotificationOutboxOnce(ctx context.Context, tx pgx.Tx, kind, lane, ev
 }
 
 // ListUnsentNotifications returns outbox rows the drainer still owes the
-// hub, in durable insertion order. A skipped row is settled, not owed: it is
-// never listed, so nothing that counts unsent rows counts the backlog that
-// forwarding deliberately did not send (hk 4986).
-func (s *Store) ListUnsentNotifications(ctx context.Context, limit int) ([]NotificationOutbox, error) {
+// hub, in durable insertion order, created at or after since. A skipped row
+// is settled, not owed: it is never listed, so nothing that counts unsent
+// rows counts the backlog that forwarding deliberately did not send (hk 4986).
+// The cutoff is part of the read, not only of the settle, so a row that
+// commits between the two can never be listed as live. The zero time means no
+// lower bound; the forwarder always passes its required cutoff.
+func (s *Store) ListUnsentNotifications(ctx context.Context, limit int, since time.Time) ([]NotificationOutbox, error) {
 	if limit < 1 {
 		limit = 200
 	}
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+notificationOutboxColumns+` FROM notification_outbox WHERE sent_at IS NULL AND skipped_at IS NULL ORDER BY id ASC LIMIT $1`, limit)
+	rows, err := s.pool.Query(ctx, `SELECT `+notificationOutboxColumns+` FROM notification_outbox WHERE sent_at IS NULL AND skipped_at IS NULL AND created_at >= $2 ORDER BY id ASC LIMIT $1`, limit, since)
 	if err != nil {
 		return nil, err
 	}
