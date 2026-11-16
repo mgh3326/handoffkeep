@@ -747,18 +747,22 @@ func bindYTArticleUpdateApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytw
 	if err := json.Unmarshal(op.Payload, &p); err != nil {
 		return fmt.Errorf("payload of op %d: %w", op.ID, err)
 	}
+	// The op carries the document id as text; the binding is read by its
+	// primary key, since `document_id::text` would scan every binding
+	// (hk 4922). Every article_update op is prepared from a document id, so
+	// an id that is not one is the op's own fault and fails here.
+	id, err := strconv.ParseInt(op.EntityID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("article_update op %d is not on a document lane: %w", op.ID, err)
+	}
 	if _, err := tx.Exec(ctx, `UPDATE yt_article_bindings SET content_sha=$4, needs_update=false
-		WHERE document_id::text=$1 AND tenant=$2 AND article_id=$3`, op.EntityID, op.Tenant, op.YTTargetID, ytwrite.ContentSHA(p.Content)); err != nil {
+		WHERE document_id=$1 AND tenant=$2 AND article_id=$3`, id, op.Tenant, op.YTTargetID, ytwrite.ContentSHA(p.Content)); err != nil {
 		return err
 	}
 	// The article now holds an hk body: no post-switch baseline is left.
 	if _, err := tx.Exec(ctx, `DELETE FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3`,
 		ytwrite.ArticleEntity, op.EntityID, ytArticleBaselineKind); err != nil {
 		return err
-	}
-	id, err := strconv.ParseInt(op.EntityID, 10, 64)
-	if err != nil {
-		return fmt.Errorf("article_update op %d is not on a document lane: %w", op.ID, err)
 	}
 	outcome, err := s.ytArticleSnapshotTx(ctx, tx, id, now)
 	if err != nil {
