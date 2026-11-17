@@ -14,11 +14,10 @@ import (
 // clock, writeTaskTx, and the lifecycle and priority writes. They run on
 // PostgreSQL in TestTasksAreaPostgres and on MySQL in TestMySQLTasksArea.
 //
-// A step that reaches an area the MySQL port has not covered yet (a settled
-// state's decision mirror, a relane, a change link) answers
-// ErrDialectUnsupported there; flowSkipUnported turns exactly that answer into
-// a skip on MySQL, so the case runs in full once the area is ported. A method
-// of this file's own path never goes through it: flowMust fails the case.
+// A step that reaches an area the MySQL port has not covered yet (a relane or
+// a change link) answers ErrDialectUnsupported there; flowSkipUnported turns
+// exactly that answer into a skip on MySQL. A method of this file's own path
+// never goes through it: flowMust fails the case.
 
 func init() {
 	registerTaskAreaCase("flow/transitions", flowCaseTransitions)
@@ -430,15 +429,14 @@ func flowCaseClaim(t *testing.T, s *Store) {
 	}
 }
 
-// flowCaseSettled covers the writes that settle or reopen a task. Entering a
-// settled state mirrors decision records, which the decisions area owns, so
-// on MySQL it is skipped until that area is ported.
+// flowCaseSettled covers the writes that settle or reopen a task, including
+// superseding the decision rows in the transition transaction.
 func flowCaseSettled(t *testing.T, s *Store) {
 	ctx := t.Context()
 	x := flowCaseTask(t, s, "ops")
 
 	got, err := s.CloseTaskCompleted(ctx, x.ID, "hk:doc research/flow-case", "tester", "done", "close-1")
-	flowSkipUnported(t, s, err)
+	flowMust(t, err)
 	if got.State != StateCompleted || got.CompletedAt == nil || got.Refs.Closure == nil || got.Refs.Closure.Type != "resolved" {
 		t.Fatalf("completed task=%+v", got)
 	}
@@ -528,9 +526,8 @@ func flowCaseAwaiting(t *testing.T, s *Store) {
 	if _, err := s.TransitionTask(ctx, x.ID, "needs_decision", "tester", " ", nil, ""); err == nil {
 		t.Fatal("needs_decision without a question was accepted")
 	}
-	// Raising the flag mirrors a decision record, which MySQL does not have yet.
 	got, err := s.TransitionTask(ctx, x.ID, "needs_decision", "tester", "which way?", nil, "")
-	flowSkipUnported(t, s, err)
+	flowMust(t, err)
 	if !got.AwaitingDecision || got.State != StateBacklog {
 		t.Fatalf("flagged task state=%q awaiting=%t", got.State, got.AwaitingDecision)
 	}

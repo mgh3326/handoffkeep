@@ -36,10 +36,6 @@ type DotsCancelInput struct {
 // the transition's actor, while the requester lane is self-asserted on this
 // route exactly as on create and must name the request's parent_lane.
 func (s *Store) CancelDotsRequest(ctx context.Context, taskID int64, by string, in DotsCancelInput) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
-
 	lane := strings.TrimSpace(in.RequesterLane)
 	reason := strings.TrimSpace(in.Reason)
 	if taskID < 1 {
@@ -64,19 +60,20 @@ func (s *Store) CancelDotsRequest(ctx context.Context, taskID int64, by string, 
 		return Task{}, err
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return Task{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	// The lane rule is checked under the same locks the transition takes, so
 	// a relane or a concurrent transition cannot land between the check and
 	// the write.
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err := s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
 		return Task{}, err
 	}
 	var x Task
-	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, taskID), &x); err != nil {
+	if err := scanTask(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), taskID), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return Task{}, ErrTaskNotFound
 		}
@@ -102,7 +99,7 @@ func (s *Store) CancelDotsRequest(ctx context.Context, taskID int64, by string, 
 	if _, err := supersedeDotsRunTokensTx(ctx, tx, taskID, now); err != nil {
 		return Task{}, err
 	}
-	x, err = s.transitionTaskTx(ctx, pgTransaction{tx}, taskID, TransitionInput{To: StateDropped, By: by, Note: reason}, false)
+	x, err = s.transitionTaskTx(ctx, tx, taskID, TransitionInput{To: StateDropped, By: by, Note: reason}, false)
 	if err != nil {
 		return Task{}, err
 	}

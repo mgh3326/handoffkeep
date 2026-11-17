@@ -8,8 +8,6 @@ import (
 	"errors"
 	"regexp"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // A run token is the secret START returns to the dots conversation that
@@ -55,12 +53,14 @@ func validDotsRunToken(token string) bool {
 // job release) must end the run, and the check holds for all of them. The
 // caller holds the task row lock, so neither the claim nor the active token
 // can change during the check.
-func checkDotsRunTokenTx(ctx context.Context, tx pgx.Tx, task Task, token string) error {
+func checkDotsRunTokenTx(ctx context.Context, tx transaction, task Task, token string) error {
 	if !validDotsRunToken(token) || task.ClaimedBy == "" {
 		return ErrDotsRunTokenMismatch
 	}
 	var stored string
-	err := tx.QueryRow(ctx, `SELECT token FROM dots_run_tokens WHERE task_id=$1 AND superseded_at IS NULL`, task.ID).Scan(&stored)
+	err := tx.QueryRow(ctx, sqlFor(tx,
+		`SELECT token FROM dots_run_tokens WHERE task_id=$1 AND superseded_at IS NULL`,
+		`SELECT token FROM dots_run_tokens WHERE task_id=? AND superseded_at IS NULL`), task.ID).Scan(&stored)
 	if errors.Is(err, ErrNoRows) {
 		return ErrDotsRunTokenMismatch
 	}
@@ -78,12 +78,27 @@ func checkDotsRunTokenTx(ctx context.Context, tx pgx.Tx, task Task, token string
 // A reopen calls it in the same transaction that clears the claim, so the old
 // run cannot post after the claim is gone; issuance calls it so a new run
 // never meets a leftover active row.
-func supersedeDotsRunTokensTx(ctx context.Context, tx pgx.Tx, taskID int64, now time.Time) (string, error) {
+func supersedeDotsRunTokensTx(ctx context.Context, tx transaction, taskID int64, now time.Time) (string, error) {
 	var previous string
-	err := tx.QueryRow(ctx, `UPDATE dots_run_tokens SET superseded_at=$2 WHERE task_id=$1 AND superseded_at IS NULL RETURNING issue_key`, taskID, now).Scan(&previous)
+	if dialectFor(tx) != mysqlDialect {
+		err := tx.QueryRow(ctx, `UPDATE dots_run_tokens SET superseded_at=$2 WHERE task_id=$1 AND superseded_at IS NULL RETURNING issue_key`, taskID, now).Scan(&previous)
+		if errors.Is(err, ErrNoRows) {
+			return "", nil
+		}
+		return previous, err
+	}
+	err := tx.QueryRow(ctx, sqlFor(tx,
+		`SELECT issue_key FROM dots_run_tokens WHERE task_id=$1 AND superseded_at IS NULL FOR UPDATE`,
+		`SELECT issue_key FROM dots_run_tokens WHERE task_id=? AND superseded_at IS NULL FOR UPDATE`), taskID).Scan(&previous)
 	if errors.Is(err, ErrNoRows) {
 		return "", nil
 	}
+	if err != nil {
+		return "", err
+	}
+	_, err = tx.Exec(ctx, sqlFor(tx,
+		`UPDATE dots_run_tokens SET superseded_at=$2 WHERE task_id=$1 AND superseded_at IS NULL`,
+		`UPDATE dots_run_tokens SET superseded_at=? WHERE task_id=? AND superseded_at IS NULL`), now, taskID)
 	return previous, err
 }
 
@@ -92,7 +107,7 @@ func supersedeDotsRunTokensTx(ctx context.Context, tx pgx.Tx, taskID int64, now 
 // is what a replay of that START looks up. A takeover supersedes the active
 // token and records the handover in the request's history, naming the keys
 // of the superseded and the new token. The history holds no token value.
-func issueDotsRunTokenTx(ctx context.Context, tx pgx.Tx, taskID int64, issueKey, actor string, takeover bool, now time.Time) (string, error) {
+func issueDotsRunTokenTx(ctx context.Context, tx transaction, taskID int64, issueKey, actor string, takeover bool, now time.Time) (string, error) {
 	token, err := newDotsRunToken()
 	if err != nil {
 		return "", err
@@ -101,7 +116,9 @@ func issueDotsRunTokenTx(ctx context.Context, tx pgx.Tx, taskID int64, issueKey,
 	if err != nil {
 		return "", err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO dots_run_tokens(task_id,token,issue_key,takeover,issued_by,issued_at) VALUES($1,$2,$3,$4,$5,$6)`, taskID, token, issueKey, takeover, actor, now); err != nil {
+	if _, err := tx.Exec(ctx, sqlFor(tx,
+		`INSERT INTO dots_run_tokens(task_id,token,issue_key,takeover,issued_by,issued_at) VALUES($1,$2,$3,$4,$5,$6)`,
+		`INSERT INTO dots_run_tokens(task_id,token,issue_key,takeover,issued_by,issued_at) VALUES(?,?,?,?,?,?)`), taskID, token, issueKey, takeover, actor, now); err != nil {
 		return "", err
 	}
 	if takeover || previous != "" {
@@ -109,7 +126,7 @@ func issueDotsRunTokenTx(ctx context.Context, tx pgx.Tx, taskID int64, issueKey,
 		if !takeover {
 			note = "superseded by a new run"
 		}
-		if _, _, err := insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: taskID, Kind: "source_event", By: actor, Note: note, At: now, Source: "dots-run-token", SourceRef: issueKey, Field: "run_token", FromValue: previous, ToValue: issueKey}); err != nil {
+		if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: taskID, Kind: "source_event", By: actor, Note: note, At: now, Source: "dots-run-token", SourceRef: issueKey, Field: "run_token", FromValue: previous, ToValue: issueKey}); err != nil {
 			return "", err
 		}
 	}
@@ -120,9 +137,11 @@ func issueDotsRunTokenTx(ctx context.Context, tx pgx.Tx, taskID int64, issueKey,
 // reply key issued, for a replay. It is empty when that START issued none,
 // which only a request started before tokens existed can have. The token may
 // since have been superseded; a later reply carrying it is refused.
-func dotsRunTokenForIssueTx(ctx context.Context, tx pgx.Tx, taskID int64, issueKey string) (string, error) {
+func dotsRunTokenForIssueTx(ctx context.Context, tx transaction, taskID int64, issueKey string) (string, error) {
 	var token string
-	err := tx.QueryRow(ctx, `SELECT token FROM dots_run_tokens WHERE task_id=$1 AND issue_key=$2`, taskID, issueKey).Scan(&token)
+	err := tx.QueryRow(ctx, sqlFor(tx,
+		`SELECT token FROM dots_run_tokens WHERE task_id=$1 AND issue_key=$2`,
+		`SELECT token FROM dots_run_tokens WHERE task_id=? AND issue_key=?`), taskID, issueKey).Scan(&token)
 	if errors.Is(err, ErrNoRows) {
 		return "", nil
 	}
@@ -133,12 +152,10 @@ func dotsRunTokenForIssueTx(ctx context.Context, tx pgx.Tx, taskID int64, issueK
 // nil when it has none. The inbox reports this time; it never reports the
 // token.
 func (s *Store) DotsRunIssuedAt(ctx context.Context, taskID int64) (*time.Time, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	var at time.Time
-	err := s.pool.QueryRow(ctx, `SELECT issued_at FROM dots_run_tokens WHERE task_id=$1 AND superseded_at IS NULL`, taskID).Scan(&at)
+	err := s.db().QueryRow(ctx, s.q(
+		`SELECT issued_at FROM dots_run_tokens WHERE task_id=$1 AND superseded_at IS NULL`,
+		`SELECT issued_at FROM dots_run_tokens WHERE task_id=? AND superseded_at IS NULL`), taskID).Scan(&at)
 	if errors.Is(err, ErrNoRows) {
 		return nil, nil
 	}

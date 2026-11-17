@@ -9,13 +9,25 @@ import (
 // Dialect-neutral cases of the frontier, settle, sweep, drift and hygiene
 // reports and the last-activity repair (hk 5074, A3).
 
-// needTables skips a case on MySQL while the tables of another area (changes,
-// decisions, jobs: B5, B6, B7) are not in its schema. Remove the call when they
-// land.
+// needTables skips only when at least one table used by the case is absent
+// from the current MySQL schema; ported areas stop contributing to the skip.
 func needTables(t *testing.T, s *Store, area string) {
 	t.Helper()
-	if s.dialect == mysqlDialect {
-		t.Skipf("needs the %s tables, which the MySQL schema does not have yet", area)
+	if s.dialect != mysqlDialect {
+		return
+	}
+	tables := map[string][]string{
+		"changes and decisions":       {"changes", "decision_requests", "decision_deliveries"},
+		"changes, decisions and jobs": {"changes", "decision_requests", "decision_deliveries", "jobs"},
+	}
+	for _, table := range tables[area] {
+		var exists bool
+		if err := s.mysqlPool.QueryRowContext(t.Context(), `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?)`, table).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if !exists {
+			t.Skipf("needs %s, which is not ported to MySQL yet", table)
+		}
 	}
 }
 

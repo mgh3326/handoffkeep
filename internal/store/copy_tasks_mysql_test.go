@@ -44,6 +44,21 @@ func seedTasksAreaPostgres(t *testing.T, pool *pgxpool.Pool, when time.Time) {
 	exec(`INSERT INTO task_thread_cursors(destination,epoch_event_id,scan_event_id,updated_at) VALUES('discord',1,2,$1)`, when)
 	exec(`INSERT INTO checkpoints(id,session,kind,title,body,refs,created_by,created_at) VALUES(93001,'sess','checkpoint','t','body','{"k":"v"}','test',$1)`, when)
 	exec(`INSERT INTO memory(agent,name,description,memory_type,content,updated_by,updated_at) VALUES('agent','name','desc','user','content','test',$1)`, when)
+	exec(`INSERT INTO dots_results(id,document_key,comment_id,issue_uuid,issue_identifier,kind,artefact_sha256,task_id,routed_lane,created_at,updated_at) VALUES(93001,'copy/dots/result','copy-comment-1','issue-1','MGH-1','RESULT',repeat('a',64),93001,'dots',$1,$1)`, when)
+	exec(`INSERT INTO dots_run_tokens(id,task_id,token,issue_key,issued_by,issued_at) VALUES(93001,93001,repeat('a',64),repeat('b',64),'copy-test',$1)`, when)
+	exec(`INSERT INTO decision_requests(id,source,source_ref,task_id,lane,question,reading,grounds,options,created_at,updated_at) VALUES(93001,'task_flag','copy/decision-1',93001,'copy-lane','question','reading','["ground"]','{"options":[]}' ,$1,$1)`, when)
+	exec(`INSERT INTO decision_answer_attempts(id,channel,event_key,payload_hash,task_id,revision_request_id,actor,result,received_at) VALUES(93001,'mcp','copy-attempt-1',repeat('c',64),93001,'copy/decision-1','copy-test','answered',$1)`, when)
+	exec(`INSERT INTO decision_resolutions(resolution_id,request_id,question_revision,revision_request_id,task_id,kind,provenance,channel,decided_by,recorded_by,attempt_id,committed_at) VALUES(93001,'copy/decision-1',1,'copy/decision-1',93001,'answered','operator_direct','mcp','operator','copy-test',93001,$1)`, when)
+	exec(`INSERT INTO decision_deliveries(request_id,destination,state,next_attempt_at,created_at) VALUES(93001,'discord','pending',$1,$1)`, when)
+	exec(`INSERT INTO decision_notify_digest(day,state,next_attempt_at,created_at) VALUES('2026-11-18','pending',$1,$1)`, when)
+	exec(`INSERT INTO chat_questions(id,conversation_id,lane,body,state,created_at,updated_at) VALUES('Q-20261118-01','operator-desk','copy-lane','copy question','pending',$1,$1)`, when)
+	var messageID int64
+	if err := pool.QueryRow(t.Context(), `INSERT INTO chat_messages(author,body,relay_state,created_at,conversation_id,source_channel,origin_event_id,semantic_hash) VALUES('operator','copy message','stored',$1,'operator-desk','copy-test','copy-event-1',repeat('d',64)) RETURNING id`, when).Scan(&messageID); err != nil {
+		t.Fatalf("insert copy chat message: %v", err)
+	}
+	exec(`INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) VALUES($1,'Q-20261118-01','reply','copy question')`, messageID)
+	exec(`INSERT INTO operator_inbox_state(item_key,actor,updated_at) VALUES('decision:request:93001','copy-test',$1)`, when)
+	exec(`INSERT INTO operator_inbox_events(event_key,item_key,action,actor,at) VALUES('copy-inbox-event','decision:request:93001','read','copy-test',$1)`, when)
 }
 
 // The tasks area copies in both directions with parity, and neither target
