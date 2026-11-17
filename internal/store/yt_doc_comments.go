@@ -220,7 +220,7 @@ func ytDocCommentsHandler(s *Store, now time.Time) FeedHandler {
 				ids = append(ids, id)
 			}
 		}
-		docs, err := readYTDocRows(ctx, tx, ids)
+		docs, err := readYTDocRows(ctx, pgTransaction{tx}, ids)
 		if err != nil {
 			return err
 		}

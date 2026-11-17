@@ -179,7 +179,7 @@ func (s *Store) backfillYTFields(ctx context.Context, tenant string, id int64, d
 		return "", 0, "", false, err
 	}
 	now := time.Now().UTC()
-	tasks, err := readYTFieldsRows(ctx, tx, []int64{id}, now, s.StartedStalledHours())
+	tasks, err := readYTFieldsRows(ctx, pgTransaction{tx}, []int64{id}, now, s.StartedStalledHours())
 	if err != nil {
 		return "", 0, "", false, err
 	}

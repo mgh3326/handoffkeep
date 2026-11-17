@@ -109,7 +109,7 @@ func issueDotsRunTokenTx(ctx context.Context, tx pgx.Tx, taskID int64, issueKey,
 		if !takeover {
 			note = "superseded by a new run"
 		}
-		if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: taskID, Kind: "source_event", By: actor, Note: note, At: now, Source: "dots-run-token", SourceRef: issueKey, Field: "run_token", FromValue: previous, ToValue: issueKey}); err != nil {
+		if _, _, err := insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: taskID, Kind: "source_event", By: actor, Note: note, At: now, Source: "dots-run-token", SourceRef: issueKey, Field: "run_token", FromValue: previous, ToValue: issueKey}); err != nil {
 			return "", err
 		}
 	}

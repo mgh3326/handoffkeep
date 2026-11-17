@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 type Frontier struct {
@@ -64,31 +62,31 @@ type frontierRow struct {
 
 // ProjectFrontier derives the project view from one read-only snapshot.
 func (s *Store) ProjectFrontier(ctx context.Context, project string, since, now time.Time) (Frontier, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Frontier{}, ErrDialectUnsupported
-	}
-
 	now, since = now.UTC(), since.UTC()
 	out := Frontier{GeneratedAt: now, Project: project, Since: since, Changes: []FrontierChange{}, ChangedSince: FrontierChanged{Items: []FrontierChangedItem{}}}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := s.beginReportRead(ctx, true)
 	if err != nil {
 		return out, err
 	}
 	defer tx.Rollback(ctx)
 	var exists bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, project).Scan(&exists); err != nil {
+	if err = tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=?)`), project).Scan(&exists); err != nil {
 		return out, err
 	}
 	if !exists {
 		return out, ErrProjectNotFound
 	}
-	if err = tx.QueryRow(ctx, `SELECT count(*) FROM decision_requests WHERE `+decisionOpenSQL+` AND task_id IN (SELECT id FROM tasks WHERE project=$2)`, now, project).Scan(&out.Gates.DecisionsOpen); err != nil {
+	if err = tx.QueryRow(ctx, s.q(`SELECT count(*) FROM decision_requests WHERE `+decisionOpenSQL+` AND task_id IN (SELECT id FROM tasks WHERE project=$2)`,
+		`SELECT count(*) FROM decision_requests WHERE `+reportDecisionOpenSQL+` AND task_id IN (SELECT id FROM tasks WHERE project=?)`), pickArgs(s, []any{now, project}, []any{now, now, project})...).Scan(&out.Gates.DecisionsOpen); err != nil {
 		return out, err
 	}
-	rows, err := tx.Query(ctx, `SELECT c.id,c.repo,c.pr_number,c.state,c.head_sha,c.opened_at,c.merged_at,c.priority,c.hold_reason,c.depends_on_change_id,c.depends_on_state,c.updated_at
+	rows, err := tx.Query(ctx, s.q(`SELECT c.id,c.repo,c.pr_number,c.state,c.head_sha,c.opened_at,c.merged_at,c.priority,c.hold_reason,c.depends_on_change_id,c.depends_on_state,c.updated_at
  FROM changes c WHERE EXISTS (SELECT 1 FROM change_tasks ct JOIN tasks t ON t.id=ct.task_id WHERE ct.change_id=c.id AND ct.relation='implements' AND t.project=$1)
  AND (c.state='open' OR (c.state='merged' AND c.reverted_by_change_id IS NULL AND EXISTS (SELECT 1 FROM change_tasks ct JOIN tasks t ON t.id=ct.task_id WHERE ct.change_id=c.id AND ct.relation='implements' AND t.project=$1 AND t.state='merged')))
- ORDER BY c.priority DESC,c.opened_at ASC,c.id ASC LIMIT 501`, project)
+ ORDER BY c.priority DESC,c.opened_at ASC,c.id ASC LIMIT 501`, `SELECT c.id,c.repo,c.pr_number,c.state,c.head_sha,c.opened_at,c.merged_at,c.priority,c.hold_reason,c.depends_on_change_id,c.depends_on_state,c.updated_at
+ FROM changes c WHERE EXISTS (SELECT 1 FROM change_tasks ct JOIN tasks t ON t.id=ct.task_id WHERE ct.change_id=c.id AND ct.relation='implements' AND t.project=?)
+ AND (c.state='open' OR (c.state='merged' AND c.reverted_by_change_id IS NULL AND EXISTS (SELECT 1 FROM change_tasks ct JOIN tasks t ON t.id=ct.task_id WHERE ct.change_id=c.id AND ct.relation='implements' AND t.project=? AND t.state='merged')))
+ ORDER BY c.priority DESC,c.opened_at ASC,c.id ASC LIMIT 501`), pickArgs(s, []any{project}, []any{project, project})...)
 	if err != nil {
 		return out, err
 	}
@@ -118,7 +116,7 @@ func (s *Store) ProjectFrontier(ctx context.Context, project string, since, now 
 		if x.hold != nil && *x.hold != "" {
 			blocked = append(blocked, "hold:"+*x.hold)
 		}
-		taskRows, e := tx.Query(ctx, `SELECT t.id,t.state,t.awaiting_decision FROM change_tasks ct JOIN tasks t ON t.id=ct.task_id WHERE ct.change_id=$1 AND ct.relation='implements' ORDER BY t.id`, x.ChangeID)
+		taskRows, e := tx.Query(ctx, s.q(`SELECT t.id,t.state,t.awaiting_decision FROM change_tasks ct JOIN tasks t ON t.id=ct.task_id WHERE ct.change_id=$1 AND ct.relation='implements' ORDER BY t.id`, `SELECT t.id,t.state,t.awaiting_decision FROM change_tasks ct JOIN tasks t ON t.id=ct.task_id WHERE ct.change_id=? AND ct.relation='implements' ORDER BY t.id`), x.ChangeID)
 		if e != nil {
 			return out, e
 		}
@@ -146,7 +144,9 @@ func (s *Store) ProjectFrontier(ctx context.Context, project string, since, now 
 		var critical, high int
 		var unknown bool
 		var latest *time.Time
-		e = tx.QueryRow(ctx, `SELECT COALESCE(sum(critical),0),COALESCE(sum(high),0),COALESCE(bool_or(critical IS NULL OR high IS NULL),true) FROM (SELECT DISTINCT ON (lens) critical,high FROM reviews WHERE change_id=$1 AND reviewed_head=$2 ORDER BY lens,round DESC,pass DESC,id DESC) r`, x.ChangeID, x.HeadSHA).Scan(&critical, &high, &unknown)
+		// The newest review per lens (DISTINCT ON on PostgreSQL, ROW_NUMBER on MySQL).
+		e = tx.QueryRow(ctx, s.q(`SELECT COALESCE(sum(critical),0),COALESCE(sum(high),0),COALESCE(bool_or(critical IS NULL OR high IS NULL),true) FROM (SELECT DISTINCT ON (lens) critical,high FROM reviews WHERE change_id=$1 AND reviewed_head=$2 ORDER BY lens,round DESC,pass DESC,id DESC) r`,
+			"SELECT COALESCE(SUM(critical),0),COALESCE(SUM(high),0),COALESCE(MAX(critical IS NULL OR high IS NULL),1) FROM (SELECT critical,high,ROW_NUMBER() OVER (PARTITION BY lens ORDER BY `round` DESC,pass DESC,id DESC) AS rn FROM reviews WHERE change_id=? AND reviewed_head=?) r WHERE rn=1"), x.ChangeID, x.HeadSHA).Scan(&critical, &high, &unknown)
 		if e != nil {
 			return out, e
 		}
@@ -159,7 +159,9 @@ func (s *Store) ProjectFrontier(ctx context.Context, project string, since, now 
 		if x.depID != nil {
 			var satisfied bool
 			// Until deploy records land (hk 3036), deployed is derived from task state.
-			e = tx.QueryRow(ctx, `SELECT CASE WHEN $2='merged' THEN state='merged' ELSE EXISTS(SELECT 1 FROM change_tasks WHERE change_id=$1 AND relation='implements') AND NOT EXISTS(SELECT 1 FROM change_tasks ct JOIN tasks t ON t.id=ct.task_id WHERE ct.change_id=$1 AND ct.relation='implements' AND t.state<>'deployed') END FROM changes WHERE id=$1`, *x.depID, *x.depState).Scan(&satisfied)
+			e = tx.QueryRow(ctx, s.q(`SELECT CASE WHEN $2='merged' THEN state='merged' ELSE EXISTS(SELECT 1 FROM change_tasks WHERE change_id=$1 AND relation='implements') AND NOT EXISTS(SELECT 1 FROM change_tasks ct JOIN tasks t ON t.id=ct.task_id WHERE ct.change_id=$1 AND ct.relation='implements' AND t.state<>'deployed') END FROM changes WHERE id=$1`,
+				`SELECT CASE WHEN ?='merged' THEN state='merged' ELSE EXISTS(SELECT 1 FROM change_tasks WHERE change_id=? AND relation='implements') AND NOT EXISTS(SELECT 1 FROM change_tasks ct JOIN tasks t ON t.id=ct.task_id WHERE ct.change_id=? AND ct.relation='implements' AND t.state<>'deployed') END FROM changes WHERE id=?`),
+				pickArgs(s, []any{*x.depID, *x.depState}, []any{*x.depState, *x.depID, *x.depID, *x.depID})...).Scan(&satisfied)
 			if e != nil {
 				return out, e
 			}
@@ -167,7 +169,8 @@ func (s *Store) ProjectFrontier(ctx context.Context, project string, since, now 
 				waiting = append(waiting, fmt.Sprintf("change:%d:%s", *x.depID, *x.depState))
 			}
 		}
-		dr, e := tx.Query(ctx, `SELECT id FROM decision_requests WHERE `+decisionOpenSQL+` AND task_id IN (SELECT task_id FROM change_tasks WHERE change_id=$2) ORDER BY id`, now, x.ChangeID)
+		dr, e := tx.Query(ctx, s.q(`SELECT id FROM decision_requests WHERE `+decisionOpenSQL+` AND task_id IN (SELECT task_id FROM change_tasks WHERE change_id=$2) ORDER BY id`,
+			`SELECT id FROM decision_requests WHERE `+reportDecisionOpenSQL+` AND task_id IN (SELECT task_id FROM change_tasks WHERE change_id=?) ORDER BY id`), pickArgs(s, []any{now, x.ChangeID}, []any{now, now, x.ChangeID})...)
 		if e != nil {
 			return out, e
 		}
@@ -184,7 +187,7 @@ func (s *Store) ProjectFrontier(ctx context.Context, project string, since, now 
 		if e != nil {
 			return out, e
 		}
-		e = tx.QueryRow(ctx, `SELECT max(recorded_at) FROM reviews WHERE change_id=$1`, x.ChangeID).Scan(&latest)
+		e = tx.QueryRow(ctx, s.q(`SELECT max(recorded_at) FROM reviews WHERE change_id=$1`, `SELECT max(recorded_at) FROM reviews WHERE change_id=?`), x.ChangeID).Scan(&latest)
 		if e != nil {
 			return out, e
 		}

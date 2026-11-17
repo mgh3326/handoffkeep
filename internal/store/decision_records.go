@@ -524,7 +524,7 @@ func (s *Store) ListDecisionRecords(ctx context.Context, f DecisionRecordFilter,
 		return nil, ErrDialectUnsupported
 	}
 
-	return listDecisionRecords(ctx, s.pool, f, now)
+	return listDecisionRecords(ctx, s.db(), f, now)
 }
 
 // The open predicate of decision_requests, with the read time as $1: a row is

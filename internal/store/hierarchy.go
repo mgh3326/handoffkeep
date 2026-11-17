@@ -7,8 +7,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // Relation kinds. blocks and duplicate_of point from Src to Dst (Src blocks
@@ -68,6 +66,15 @@ func normalizeRelation(kind string, src, dst int64) (int64, int64) {
 // `from` to `to`.
 func relationReachesTx(ctx context.Context, q rowQuerier, kind string, from, to int64) (bool, error) {
 	var reaches bool
+	if dialectFor(q) == mysqlDialect {
+		// $1 is used twice: the MySQL argument list repeats it in order.
+		err := q.QueryRow(ctx, `WITH RECURSIVE reach(id) AS (
+			SELECT dst_id FROM task_relations WHERE kind=? AND src_id=? AND archived_at IS NULL
+			UNION
+			SELECT r.dst_id FROM task_relations r JOIN reach ON r.src_id=reach.id WHERE r.kind=? AND r.archived_at IS NULL
+		) SELECT EXISTS(SELECT 1 FROM reach WHERE id=?)`, kind, from, kind, to).Scan(&reaches)
+		return reaches, err
+	}
 	err := q.QueryRow(ctx, `WITH RECURSIVE reach(id) AS (
 		SELECT dst_id FROM task_relations WHERE kind=$1 AND src_id=$2 AND archived_at IS NULL
 		UNION
@@ -78,7 +85,7 @@ func relationReachesTx(ctx context.Context, q rowQuerier, kind string, from, to 
 
 func hasLiveRelationTx(ctx context.Context, q rowQuerier, src int64, kind string) (bool, error) {
 	var live bool
-	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_relations WHERE kind=$1 AND src_id=$2 AND archived_at IS NULL)`, kind, src).Scan(&live)
+	err := q.QueryRow(ctx, sqlFor(q, `SELECT EXISTS(SELECT 1 FROM task_relations WHERE kind=$1 AND src_id=$2 AND archived_at IS NULL)`, `SELECT EXISTS(SELECT 1 FROM task_relations WHERE kind=? AND src_id=? AND archived_at IS NULL)`), kind, src).Scan(&live)
 	return live, err
 }
 
@@ -86,7 +93,7 @@ func hasLiveRelationTx(ctx context.Context, q rowQuerier, src int64, kind string
 // task lock. A live edge is left alone (changed=false); an archived edge is
 // revived; otherwise a row is inserted. Self-links and blocks or duplicate_of
 // cycles are refused.
-func addRelationTx(ctx context.Context, tx pgx.Tx, src int64, kind string, dst int64, by string, now time.Time) (bool, error) {
+func addRelationTx(ctx context.Context, tx transaction, src int64, kind string, dst int64, by string, now time.Time) (bool, error) {
 	if !validRelationKind(kind) || src < 1 || dst < 1 || by == "" || !validText(by, 128) {
 		return false, errors.New("invalid relation")
 	}
@@ -95,14 +102,14 @@ func addRelationTx(ctx context.Context, tx pgx.Tx, src int64, kind string, dst i
 	}
 	src, dst = normalizeRelation(kind, src, dst)
 	var locked int64
-	if err := tx.QueryRow(ctx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, src).Scan(&locked); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT id FROM tasks WHERE id=? FOR UPDATE`), src).Scan(&locked); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return false, ErrTaskNotFound
 		}
 		return false, err
 	}
 	var found int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE id IN ($1,$2)`, src, dst).Scan(&found); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT count(*) FROM tasks WHERE id IN ($1,$2)`, `SELECT count(*) FROM tasks WHERE id IN (?,?)`), src, dst).Scan(&found); err != nil {
 		return false, err
 	}
 	if found != 2 {
@@ -110,7 +117,7 @@ func addRelationTx(ctx context.Context, tx pgx.Tx, src int64, kind string, dst i
 	}
 	var relID int64
 	var archived *time.Time
-	err := tx.QueryRow(ctx, `SELECT id, archived_at FROM task_relations WHERE kind=$1 AND src_id=$2 AND dst_id=$3 FOR UPDATE`, kind, src, dst).Scan(&relID, &archived)
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT id, archived_at FROM task_relations WHERE kind=$1 AND src_id=$2 AND dst_id=$3 FOR UPDATE`, `SELECT id, archived_at FROM task_relations WHERE kind=? AND src_id=? AND dst_id=? FOR UPDATE`), kind, src, dst).Scan(&relID, &archived)
 	exists := err == nil
 	if err != nil && !errors.Is(err, ErrNoRows) {
 		return false, err
@@ -128,10 +135,10 @@ func addRelationTx(ctx context.Context, tx pgx.Tx, src int64, kind string, dst i
 		}
 	}
 	if exists {
-		if _, err = tx.Exec(ctx, `UPDATE task_relations SET archived_at=NULL, archived_by='' WHERE id=$1`, relID); err != nil {
+		if _, err = tx.Exec(ctx, sqlFor(tx, `UPDATE task_relations SET archived_at=NULL, archived_by='' WHERE id=$1`, `UPDATE task_relations SET archived_at=NULL, archived_by='' WHERE id=?`), relID); err != nil {
 			return false, err
 		}
-	} else if _, err = tx.Exec(ctx, `INSERT INTO task_relations(kind,src_id,dst_id,created_by,created_at) VALUES($1,$2,$3,$4,$5)`, kind, src, dst, by, now); err != nil {
+	} else if _, err = tx.Exec(ctx, sqlFor(tx, `INSERT INTO task_relations(kind,src_id,dst_id,created_by,created_at) VALUES($1,$2,$3,$4,$5)`, `INSERT INTO task_relations(kind,src_id,dst_id,created_by,created_at) VALUES(?,?,?,?,?)`), kind, src, dst, by, now); err != nil {
 		return false, err
 	}
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: src, Kind: TaskEventRelation, From: "", To: "", By: by, At: now, Field: "relation", ToValue: fmt.Sprintf("%s:%d", kind, dst), Refs: TaskRefs{}}); err != nil {
@@ -150,32 +157,53 @@ func addRelationTx(ctx context.Context, tx pgx.Tx, src int64, kind string, dst i
 // lock cannot close a cycle with another task writer. updated_at never moves
 // backwards: callers read now under that lock, and GREATEST keeps a newer
 // revision if a clock step put one ahead of now.
-func bumpRelationEndpointsTx(ctx context.Context, tx pgx.Tx, now time.Time, src, dst int64) error {
+func bumpRelationEndpointsTx(ctx context.Context, tx transaction, now time.Time, src, dst int64) error {
 	ids := []int64{src, dst}
 	slices.Sort(ids)
+	if dialectFor(tx) == mysqlDialect {
+		// The IN list is ascending, so InnoDB locks the two rows in id order.
+		_, err := tx.Exec(ctx, `UPDATE tasks SET updated_at=GREATEST(updated_at, CAST(? AS DATETIME(6))) WHERE id IN (`+placeholders(len(ids))+`)`, now, ids[0], ids[1])
+		return err
+	}
 	_, err := tx.Exec(ctx, `UPDATE tasks SET updated_at=GREATEST(updated_at, $2) WHERE id = ANY($1)`, ids, now)
 	return err
 }
 
 // archiveLiveRelationsTx archives every live edge of kind that starts at src.
-func archiveLiveRelationsTx(ctx context.Context, tx pgx.Tx, src int64, kind, by string, now time.Time) error {
-	rows, err := tx.Query(ctx, `UPDATE task_relations SET archived_at=$4, archived_by=$3 WHERE kind=$1 AND src_id=$2 AND archived_at IS NULL RETURNING dst_id`, kind, src, by, now)
-	if err != nil {
-		return err
-	}
+func archiveLiveRelationsTx(ctx context.Context, tx transaction, src int64, kind, by string, now time.Time) error {
 	var dsts []int64
-	for rows.Next() {
-		var dst int64
-		if err = rows.Scan(&dst); err != nil {
-			rows.Close()
+	if dialectFor(tx) == mysqlDialect {
+		// No RETURNING: read the live edges under their row locks, then archive
+		// them. The caller holds the task-mutation lock, so no edge changes between.
+		rows, err := tx.Query(ctx, `SELECT dst_id FROM task_relations WHERE kind=? AND src_id=? AND archived_at IS NULL ORDER BY id FOR UPDATE`, kind, src)
+		if err != nil {
 			return err
 		}
-		dsts = append(dsts, dst)
+		if dsts, err = collectRows(rows, rowTo[int64]); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE task_relations SET archived_at=?, archived_by=? WHERE kind=? AND src_id=? AND archived_at IS NULL`, now, by, kind, src); err != nil {
+			return err
+		}
+	} else {
+		rows, err := tx.Query(ctx, `UPDATE task_relations SET archived_at=$4, archived_by=$3 WHERE kind=$1 AND src_id=$2 AND archived_at IS NULL RETURNING dst_id`, kind, src, by, now)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var dst int64
+			if err = rows.Scan(&dst); err != nil {
+				rows.Close()
+				return err
+			}
+			dsts = append(dsts, dst)
+		}
+		rows.Close()
+		if err = rows.Err(); err != nil {
+			return err
+		}
 	}
-	rows.Close()
-	if err = rows.Err(); err != nil {
-		return err
-	}
+	var err error
 	for _, dst := range dsts {
 		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: src, Kind: TaskEventRelation, By: by, At: now, Field: "relation", FromValue: fmt.Sprintf("%s:%d", kind, dst), Refs: TaskRefs{}}); err != nil {
 			return err
@@ -193,10 +221,6 @@ func archiveLiveRelationsTx(ctx context.Context, tx pgx.Tx, src int64, kind, by 
 // adding the edge moves the task to duplicate, and neither exists without the
 // other.
 func (s *Store) AddTaskRelation(ctx context.Context, src int64, kind string, dst int64, by string) (changed bool, err error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return false, ErrDialectUnsupported
-	}
-
 	if !validRelationKind(kind) || src < 1 || dst < 1 || by == "" || !validText(by, 128) {
 		return false, errors.New("invalid relation")
 	}
@@ -206,24 +230,30 @@ func (s *Store) AddTaskRelation(ctx context.Context, src int64, kind string, dst
 	if kind == RelationDuplicateOf {
 		return s.addDuplicateOf(ctx, src, dst, by)
 	}
-	tx, err := s.pool.Begin(ctx)
+	err = s.retryTx(ctx, func() error {
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		if err = s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
+			return err
+		}
+		if changed, err = addRelationTx(ctx, tx, src, kind, dst, by, time.Now().UTC()); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-		return false, err
-	}
-	changed, err = addRelationTx(ctx, tx, src, kind, dst, by, time.Now().UTC())
-	if err != nil {
-		return false, err
-	}
-	return changed, tx.Commit(ctx)
+	return changed, nil
 }
 
 func (s *Store) addDuplicateOf(ctx context.Context, src, dst int64, by string) (bool, error) {
 	var live bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_relations WHERE kind='duplicate_of' AND src_id=$1 AND dst_id=$2 AND archived_at IS NULL)`, src, dst).Scan(&live); err != nil {
+	if err := s.db().QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM task_relations WHERE kind='duplicate_of' AND src_id=$1 AND dst_id=$2 AND archived_at IS NULL)`, `SELECT EXISTS(SELECT 1 FROM task_relations WHERE kind='duplicate_of' AND src_id=? AND dst_id=? AND archived_at IS NULL)`), src, dst).Scan(&live); err != nil {
 		return false, err
 	}
 	if live {
@@ -237,61 +267,70 @@ func (s *Store) addDuplicateOf(ctx context.Context, src, dst int64, by string) (
 // edge changes nothing. A duplicate task keeps its duplicate_of edge: reopen
 // the task instead.
 func (s *Store) RemoveTaskRelation(ctx context.Context, src int64, kind string, dst int64, by string) (changed bool, err error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return false, ErrDialectUnsupported
-	}
-
 	if !validRelationKind(kind) || src < 1 || dst < 1 || by == "" || !validText(by, 128) {
 		return false, errors.New("invalid relation")
 	}
 	src, dst = normalizeRelation(kind, src, dst)
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-		return false, err
-	}
-	var state string
-	if err = tx.QueryRow(ctx, `SELECT state FROM tasks WHERE id=$1 FOR UPDATE`, src).Scan(&state); err != nil {
-		if errors.Is(err, ErrNoRows) {
-			if kind != RelationDuplicateOf {
-				return false, tx.Commit(ctx)
+	err = s.retryTx(ctx, func() error {
+		changed = false
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		if err = s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
+			return err
+		}
+		var state string
+		if err = tx.QueryRow(ctx, s.q(`SELECT state FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT state FROM tasks WHERE id=? FOR UPDATE`), src).Scan(&state); err != nil {
+			if errors.Is(err, ErrNoRows) {
+				if kind != RelationDuplicateOf {
+					return tx.Commit(ctx)
+				}
+				return ErrTaskNotFound
 			}
-			return false, ErrTaskNotFound
+			return err
 		}
-		return false, err
-	}
-	if kind == RelationDuplicateOf {
-		if state == StateDuplicate {
-			return false, fmt.Errorf("%w: a duplicate task keeps its duplicate_of relation; reopen it first", ErrTaskConflict)
+		if kind == RelationDuplicateOf {
+			if state == StateDuplicate {
+				return fmt.Errorf("%w: a duplicate task keeps its duplicate_of relation; reopen it first", ErrTaskConflict)
+			}
 		}
-	}
-	now := time.Now().UTC()
-	tag, err := tx.Exec(ctx, `UPDATE task_relations SET archived_at=$5, archived_by=$4 WHERE kind=$1 AND src_id=$2 AND dst_id=$3 AND archived_at IS NULL`, kind, src, dst, by, now)
+		now := time.Now().UTC()
+		archive, args := `UPDATE task_relations SET archived_at=$5, archived_by=$4 WHERE kind=$1 AND src_id=$2 AND dst_id=$3 AND archived_at IS NULL`, []any{kind, src, dst, by, now}
+		if s.dialect == mysqlDialect {
+			archive, args = `UPDATE task_relations SET archived_at=?, archived_by=? WHERE kind=? AND src_id=? AND dst_id=? AND archived_at IS NULL`, []any{now, by, kind, src, dst}
+		}
+		n, err := tx.Exec(ctx, archive, args...)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return tx.Commit(ctx)
+		}
+		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: src, Kind: TaskEventRelation, By: by, At: now, Field: "relation", FromValue: fmt.Sprintf("%s:%d", kind, dst), Refs: TaskRefs{}}); err != nil {
+			return err
+		}
+		if err = bumpRelationEndpointsTx(ctx, tx, now, src, dst); err != nil {
+			return err
+		}
+		changed = true
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return false, err
 	}
-	if tag.RowsAffected() == 0 {
-		return false, tx.Commit(ctx)
-	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: src, Kind: TaskEventRelation, By: by, At: now, Field: "relation", FromValue: fmt.Sprintf("%s:%d", kind, dst), Refs: TaskRefs{}}); err != nil {
-		return false, err
-	}
-	if err = bumpRelationEndpointsTx(ctx, tx, now, src, dst); err != nil {
-		return false, err
-	}
-	return true, tx.Commit(ctx)
+	return changed, nil
 }
 
 // ListTaskRelations returns the live edges that touch a task, oldest first.
 func (s *Store) ListTaskRelations(ctx context.Context, id int64) ([]TaskRelation, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
+	list, args := `SELECT id,kind,src_id,dst_id,created_by,created_at FROM task_relations WHERE (src_id=$1 OR dst_id=$1) AND archived_at IS NULL ORDER BY id`, []any{id}
+	if s.dialect == mysqlDialect {
+		list, args = `SELECT id,kind,src_id,dst_id,created_by,created_at FROM task_relations WHERE (src_id=? OR dst_id=?) AND archived_at IS NULL ORDER BY id`, []any{id, id}
 	}
-
-	rows, err := s.pool.Query(ctx, `SELECT id,kind,src_id,dst_id,created_by,created_at FROM task_relations WHERE (src_id=$1 OR dst_id=$1) AND archived_at IS NULL ORDER BY id`, id)
+	rows, err := s.db().Query(ctx, list, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -309,11 +348,7 @@ func (s *Store) ListTaskRelations(ctx context.Context, id int64) ([]TaskRelation
 
 // ListTaskChildren returns a task's sub-tasks by id.
 func (s *Store) ListTaskChildren(ctx context.Context, id int64) ([]TaskChild, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
-	rows, err := s.pool.Query(ctx, `SELECT id,title,state FROM tasks WHERE parent_id=$1 ORDER BY id`, id)
+	rows, err := s.db().Query(ctx, s.q(`SELECT id,title,state FROM tasks WHERE parent_id=$1 ORDER BY id`, `SELECT id,title,state FROM tasks WHERE parent_id=? ORDER BY id`), id)
 	if err != nil {
 		return nil, err
 	}
@@ -333,11 +368,15 @@ func (s *Store) ListTaskChildren(ctx context.Context, id int64) ([]TaskChild, er
 // parentReachesTx reports whether `ancestor` is `id` or lies above it.
 func parentChainContainsTx(ctx context.Context, q rowQuerier, start, target int64) (bool, error) {
 	var found bool
-	err := q.QueryRow(ctx, `WITH RECURSIVE up(id) AS (
+	err := q.QueryRow(ctx, sqlFor(q, `WITH RECURSIVE up(id) AS (
 		SELECT $1::bigint
 		UNION
 		SELECT t.parent_id FROM tasks t JOIN up ON t.id=up.id WHERE t.parent_id IS NOT NULL
-	) SELECT EXISTS(SELECT 1 FROM up WHERE id=$2)`, start, target).Scan(&found)
+	) SELECT EXISTS(SELECT 1 FROM up WHERE id=$2)`, `WITH RECURSIVE up(id) AS (
+		SELECT CAST(? AS SIGNED)
+		UNION
+		SELECT t.parent_id FROM tasks t JOIN up ON t.id=up.id WHERE t.parent_id IS NOT NULL
+	) SELECT EXISTS(SELECT 1 FROM up WHERE id=?)`), start, target).Scan(&found)
 	return found, err
 }
 
@@ -351,7 +390,7 @@ func checkParentTx(ctx context.Context, q rowQuerier, id, parent int64) error {
 		return fmt.Errorf("%w: a task cannot be its own parent", ErrTaskParentInvalid)
 	}
 	var exists bool
-	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, parent).Scan(&exists); err != nil {
+	if err := q.QueryRow(ctx, sqlFor(q, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?)`), parent).Scan(&exists); err != nil {
 		return err
 	}
 	if !exists {
@@ -373,57 +412,70 @@ func checkParentTx(ctx context.Context, q rowQuerier, id, parent int64) error {
 // is acyclic; a no-op change writes no event. It follows SetTaskProject's
 // shape: row lock, append-only event.
 func (s *Store) SetTaskParent(ctx context.Context, id int64, parent *int64, by string) (x Task, changed bool, err error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, false, ErrDialectUnsupported
-	}
-
 	if id < 1 || by == "" || !validText(by, 128) {
 		return Task{}, false, errors.New("invalid task parent change")
 	}
-	tx, err := s.pool.Begin(ctx)
+	err = s.retryTx(ctx, func() error {
+		x, changed = Task{}, false
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		if err = s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
+			return err
+		}
+		if err = scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
+			if errors.Is(err, ErrNoRows) {
+				return ErrTaskNotFound
+			}
+			return err
+		}
+		same := (x.ParentID == nil && parent == nil) || (x.ParentID != nil && parent != nil && *x.ParentID == *parent)
+		if same {
+			return tx.Commit(ctx)
+		}
+		if parent != nil {
+			if err = checkParentTx(ctx, tx, id, *parent); err != nil {
+				return err
+			}
+		}
+		from, to := "", ""
+		if x.ParentID != nil {
+			from = fmt.Sprint(*x.ParentID)
+		}
+		if parent != nil {
+			to = fmt.Sprint(*parent)
+		}
+		now := time.Now().UTC()
+		if s.dialect == mysqlDialect {
+			if _, err = tx.Exec(ctx, `UPDATE tasks SET parent_id=?,updated_at=? WHERE id=?`, parent, now, id); err != nil {
+				return err
+			}
+			err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=?`, id), &x)
+		} else {
+			err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET parent_id=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, parent, now), &x)
+		}
+		if err != nil {
+			return err
+		}
+		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: TaskEventParent, From: x.State, To: x.State, By: by, At: now, Refs: x.Refs, Into: &x, Field: "parent_id", FromValue: from, ToValue: to}); err != nil {
+			return err
+		}
+		changed = true
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return Task{}, false, err
 	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-		return Task{}, false, err
-	}
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, ErrNoRows) {
-			return Task{}, false, ErrTaskNotFound
-		}
-		return Task{}, false, err
-	}
-	same := (x.ParentID == nil && parent == nil) || (x.ParentID != nil && parent != nil && *x.ParentID == *parent)
-	if same {
-		return x, false, tx.Commit(ctx)
-	}
-	if parent != nil {
-		if err = checkParentTx(ctx, tx, id, *parent); err != nil {
-			return Task{}, false, err
-		}
-	}
-	from, to := "", ""
-	if x.ParentID != nil {
-		from = fmt.Sprint(*x.ParentID)
-	}
-	if parent != nil {
-		to = fmt.Sprint(*parent)
-	}
-	now := time.Now().UTC()
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET parent_id=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, parent, now), &x); err != nil {
-		return Task{}, false, err
-	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: TaskEventParent, From: x.State, To: x.State, By: by, At: now, Refs: x.Refs, Into: &x, Field: "parent_id", FromValue: from, ToValue: to}); err != nil {
-		return Task{}, false, err
-	}
-	return x, true, tx.Commit(ctx)
+	return x, changed, nil
 }
 
 // afterStateChangeTx runs the hierarchy rules after a task's state changed in
 // the caller's transaction: auto-close of the parent when this task settled,
 // and the record left on a completed parent when this task is reopened.
-func (s *Store) afterStateChangeTx(ctx context.Context, tx pgx.Tx, x Task, from, by string, now time.Time) error {
+func (s *Store) afterStateChangeTx(ctx context.Context, tx transaction, x Task, from, by string, now time.Time) error {
 	if x.ParentID == nil {
 		return nil
 	}
@@ -432,7 +484,7 @@ func (s *Store) afterStateChangeTx(ctx context.Context, tx pgx.Tx, x Task, from,
 	}
 	if IsSettledState(from) {
 		var parentState string
-		if err := tx.QueryRow(ctx, `SELECT state FROM tasks WHERE id=$1 FOR UPDATE`, *x.ParentID).Scan(&parentState); err != nil {
+		if err := tx.QueryRow(ctx, s.q(`SELECT state FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT state FROM tasks WHERE id=? FOR UPDATE`), *x.ParentID).Scan(&parentState); err != nil {
 			return err
 		}
 		if TaskCategory(parentState) == CategoryCompleted {
@@ -455,7 +507,7 @@ func (s *Store) afterStateChangeTx(ctx context.Context, tx pgx.Tx, x Task, from,
 // open or reverted and not relanded (pieceHoldTx, the last-piece rule of a
 // merge), while it is awaiting a decision, or while its decision request is
 // open.
-func (s *Store) closeGateTx(ctx context.Context, tx pgx.Tx, x Task) (string, error) {
+func (s *Store) closeGateTx(ctx context.Context, tx transaction, x Task) (string, error) {
 	if reason, err := pieceHoldTx(ctx, tx, x.ID, ""); err != nil || reason != "" {
 		return reason, err
 	}
@@ -529,12 +581,12 @@ func (r subTaskRollup) closeTarget() string {
 }
 
 // subTaskRollupTx reads the rollup of the sub-tasks of parentID.
-func subTaskRollupTx(ctx context.Context, tx pgx.Tx, parentID int64) (subTaskRollup, error) {
-	rows, err := tx.Query(ctx, `SELECT state FROM tasks WHERE parent_id=$1`, parentID)
+func subTaskRollupTx(ctx context.Context, tx transaction, parentID int64) (subTaskRollup, error) {
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT state FROM tasks WHERE parent_id=$1`, `SELECT state FROM tasks WHERE parent_id=?`), parentID)
 	if err != nil {
 		return subTaskRollup{}, err
 	}
-	sub, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	sub, err := collectRows(rows, rowTo[string])
 	if err != nil {
 		return subTaskRollup{}, err
 	}
@@ -559,13 +611,13 @@ func subTaskRollupTx(ctx context.Context, tx pgx.Tx, parentID int64) (subTaskRol
 // settled by its sub-tasks again until a sub-task deploys (hk 4172): then the
 // same rule is applied to it, and it deploys once no sub-task waits for its
 // deploy.
-func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by string, now time.Time) error {
+func (s *Store) autoCloseTx(ctx context.Context, tx transaction, child Task, by string, now time.Time) error {
 	if !s.AutoCloseParent() {
 		return nil
 	}
 	for child.ParentID != nil {
 		var p Task
-		if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, *child.ParentID), &p); err != nil {
+		if err := scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), *child.ParentID), &p); err != nil {
 			return err
 		}
 		closed, nextP, err := s.autoCloseOneParentTx(ctx, tx, p, child.ID, child.State, now)
@@ -579,7 +631,7 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 
 // autoCloseOneParentTx evaluates auto-close for parent p under its row lock.
 // It returns applied=true if the parent moved, along with the updated parent.
-func (s *Store) autoCloseOneParentTx(ctx context.Context, tx pgx.Tx, p Task, childID int64, childState string, now time.Time) (bool, Task, error) {
+func (s *Store) autoCloseOneParentTx(ctx context.Context, tx transaction, p Task, childID int64, childState string, now time.Time) (bool, Task, error) {
 	switch {
 	case p.State == StateMerged:
 		// A merged parent waits for its sub-tasks to deploy: only a
@@ -645,7 +697,7 @@ func (s *Store) autoCloseOneParentTx(ctx context.Context, tx pgx.Tx, p Task, chi
 	if p, err = writeTaskTx(ctx, tx, p); err != nil {
 		return false, p, err
 	}
-	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, p, "hk", "", 0, now); err != nil {
+	if err = s.mirrorTaskDecisionsFlowTx(ctx, tx, decisionBefore, p, "hk", "", 0, now); err != nil {
 		return false, p, err
 	}
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{

@@ -11,7 +11,7 @@ func TestParse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Net != "tcp" || cfg.Addr != "localhost:3306" || cfg.DBName != "testdb" || cfg.User != "test" || cfg.Passwd != "password" || !cfg.ParseTime || cfg.Loc != time.UTC || cfg.TLSConfig != "true" {
+	if cfg.Net != "tcp" || cfg.Addr != "localhost:3306" || cfg.DBName != "testdb" || cfg.User != "test" || cfg.Passwd != "password" || !cfg.ParseTime || !cfg.ClientFoundRows || cfg.Loc != time.UTC || cfg.TLSConfig != "true" {
 		t.Fatalf("unexpected config: %#v", cfg)
 	}
 	if cfg.Params["time_zone"] != "'+00:00'" || cfg.Params["transaction_isolation"] != "'READ-COMMITTED'" {

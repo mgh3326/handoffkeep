@@ -171,7 +171,7 @@ func (s *Store) EnqueueDeployLagNotices(ctx context.Context, now time.Time) (int
 		return 0, err
 	}
 
-	services, err := listDeployServices(ctx, tx)
+	services, err := listDeployServices(ctx, pgTransaction{tx})
 	if err != nil {
 		return 0, err
 	}
@@ -187,7 +187,7 @@ func (s *Store) EnqueueDeployLagNotices(ctx context.Context, now time.Time) (int
 			continue
 		}
 		since, ok := lastDeploys[svc.Name]
-		st, err := deployLagStatusTx(ctx, tx, svc, since, ok)
+		st, err := deployLagStatusTx(ctx, pgTransaction{tx}, svc, since, ok)
 		if err != nil {
 			return 0, err
 		}

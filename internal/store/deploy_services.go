@@ -95,7 +95,7 @@ func (s *Store) ListDeployServices(ctx context.Context) ([]DeployService, error)
 		return nil, ErrDialectUnsupported
 	}
 
-	return listDeployServices(ctx, s.pool)
+	return listDeployServices(ctx, s.db())
 }
 
 // listDeployServices reads through db, the pool or an open transaction. A pass
@@ -106,7 +106,7 @@ func listDeployServices(ctx context.Context, db rowsQuerier) ([]DeployService, e
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (DeployService, error) {
+	return collectRows(rows, func(row row) (DeployService, error) {
 		var x DeployService
 		err := scanDeployService(row, &x)
 		return x, err

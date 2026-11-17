@@ -178,7 +178,7 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 		return Task{}, err
 	}
 	if in.IdempotencyKey != "" {
-		existing, found, err := taskBySourceTx(ctx, tx, "dots", sourceRef)
+		existing, found, err := taskBySourceTx(ctx, pgTransaction{tx}, "dots", sourceRef)
 		if err != nil {
 			return Task{}, err
 		}
@@ -193,7 +193,7 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 			return existing, nil
 		}
 	}
-	x, err := insertTriageTaskTx(ctx, tx, item, "dots", sourceRef, "dots", nil, by, time.Now().UTC())
+	x, err := insertTriageTaskTx(ctx, pgTransaction{tx}, item, "dots", sourceRef, "dots", nil, by, time.Now().UTC())
 	if err != nil {
 		return Task{}, err
 	}
@@ -220,7 +220,7 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 		}
 	}
 	if in.IdempotencyKey != "" {
-		if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: "source_event", By: by, Note: requestDigest, At: x.CreatedAt, Source: "dots-request", SourceRef: sourceRef}); err != nil {
+		if _, _, err := insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: x.ID, Kind: "source_event", By: by, Note: requestDigest, At: x.CreatedAt, Source: "dots-request", SourceRef: sourceRef}); err != nil {
 			return Task{}, err
 		}
 	}
@@ -531,19 +531,19 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 			runToken, err = issueDotsRunTokenTx(ctx, tx, task.ID, commentID, actor, true, now)
 			break
 		}
-		task, err = s.claimTaskTx(ctx, tx, task.ID, "dots", "", "dots request")
+		task, err = s.claimTaskTx(ctx, pgTransaction{tx}, task.ID, "dots", "", "dots request")
 		if err == nil {
 			runToken, err = issueDotsRunTokenTx(ctx, tx, task.ID, commentID, actor, false, now)
 		}
 	case "BLOCKED":
-		task, err = s.transitionTaskTx(ctx, tx, task.ID, TransitionInput{To: "hold", By: actor, Note: in.Body}, false)
+		task, err = s.transitionTaskTx(ctx, pgTransaction{tx}, task.ID, TransitionInput{To: "hold", By: actor, Note: in.Body}, false)
 	case "RESULT":
 		if task.Refs.DotsChoice == nil {
 			if annotated {
 				err = errors.New("invalid dots reply: the request declares no options, so recommended, recommendation_reason, unverified and one_fix have no decision to carry")
 				break
 			}
-			task, err = s.transitionTaskTx(ctx, tx, task.ID, TransitionInput{To: StateCompleted, By: actor, Evidence: "hk:doc " + docKey}, false)
+			task, err = s.transitionTaskTx(ctx, pgTransaction{tx}, task.ID, TransitionInput{To: StateCompleted, By: actor, Evidence: "hk:doc " + docKey}, false)
 			break
 		}
 		// A declaring request ends in the operator's choice: the RESULT opens
@@ -571,7 +571,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	if err != nil {
 		return DotsReplyResult{}, err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: task.ID, Kind: "source_event", By: actor, Note: payload + " " + task.State + " " + docKey + dotsSkippedLanesNote(invalidLanes), At: now, Source: "dots-hk-chatgpt", SourceRef: commentID, Field: "dots_reply", FromValue: in.Kind, ToValue: strconv.FormatInt(commentRowID, 10)}); err != nil {
+	if _, _, err = insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: task.ID, Kind: "source_event", By: actor, Note: payload + " " + task.State + " " + docKey + dotsSkippedLanesNote(invalidLanes), At: now, Source: "dots-hk-chatgpt", SourceRef: commentID, Field: "dots_reply", FromValue: in.Kind, ToValue: strconv.FormatInt(commentRowID, 10)}); err != nil {
 		return DotsReplyResult{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -894,7 +894,7 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 		return DotsAnswerResult{}, err
 	}
 	if flagWas && !x.AwaitingDecision {
-		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: caller, Note: "decision-clear " + resolved.ID + " by " + caller, Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
+		if _, _, err = insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: caller, Note: "decision-clear " + resolved.ID + " by " + caller, Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
 			return DotsAnswerResult{}, err
 		}
 	}

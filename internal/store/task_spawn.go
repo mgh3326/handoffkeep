@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -182,10 +181,6 @@ func spawnKnown(state string) bool {
 // applied write into a terminal state writes one task comment in the same
 // transaction, keyed by task, request, attempt and state.
 func (s *Store) PutTaskSpawn(ctx context.Context, id int64, in TaskSpawnInput, author string) (TaskSpawn, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return TaskSpawn{}, false, ErrDialectUnsupported
-	}
-
 	if id < 1 {
 		return TaskSpawn{}, false, ErrTaskNotFound
 	}
@@ -196,16 +191,33 @@ func (s *Store) PutTaskSpawn(ctx context.Context, id int64, in TaskSpawnInput, a
 		return TaskSpawn{}, false, err
 	}
 	in.UpdatedAt = in.UpdatedAt.UTC()
-	tx, err := s.pool.Begin(ctx)
+	var out TaskSpawn
+	var applied bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, applied, err = s.putTaskSpawnOnce(ctx, id, in, author)
+		return err
+	})
 	if err != nil {
 		return TaskSpawn{}, false, err
 	}
+	return out, applied, nil
+}
+
+// putTaskSpawnOnce is one whole PutTaskSpawn transaction (PutTaskSpawn retries
+// it once on MySQL after a deadlock or lock-wait timeout).
+func (s *Store) putTaskSpawnOnce(ctx context.Context, id int64, in TaskSpawnInput, author string) (TaskSpawn, bool, error) {
+	tx, release, err := s.begin(ctx)
+	if err != nil {
+		return TaskSpawn{}, false, err
+	}
+	defer release()
 	defer tx.Rollback(ctx)
 	// A terminal write may comment, so it takes the comment insert lock before
 	// its task row, the order ReplyDots uses (see
 	// lockorder.go). Holding the task row first would cycle with them.
 	if spawnTerminal(in.State) {
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+		if err := s.lockTx(ctx, tx, taskCommentInsertLock); err != nil {
 			return TaskSpawn{}, false, err
 		}
 	}
@@ -213,7 +225,7 @@ func (s *Store) PutTaskSpawn(ctx context.Context, id int64, in TaskSpawnInput, a
 	// while its spawn record is written. Locking no second task row keeps this
 	// transaction below the task-mutation lock (lockorder.go level 2).
 	var taskState string
-	err = tx.QueryRow(ctx, `SELECT state FROM tasks WHERE id=$1 FOR KEY SHARE`, id).Scan(&taskState)
+	err = tx.QueryRow(ctx, s.q(`SELECT state FROM tasks WHERE id=$1 FOR KEY SHARE`, `SELECT state FROM tasks WHERE id=? FOR SHARE`), id).Scan(&taskState)
 	if errors.Is(err, ErrNoRows) {
 		return TaskSpawn{}, false, ErrTaskNotFound
 	}
@@ -228,7 +240,7 @@ func (s *Store) PutTaskSpawn(ctx context.Context, id int64, in TaskSpawnInput, a
 		}
 		// A plain read: the blocking task is not locked here.
 		var exists bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, c.TaskID).Scan(&exists); err != nil {
+		if err := tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?)`), c.TaskID).Scan(&exists); err != nil {
 			return TaskSpawn{}, false, err
 		}
 		if !exists {
@@ -237,15 +249,21 @@ func (s *Store) PutTaskSpawn(ctx context.Context, id int64, in TaskSpawnInput, a
 		startID = &c.TaskID
 		startUntil = &c.Until
 	}
-	tag, err := tx.Exec(ctx, `INSERT INTO task_spawn_records(task_id,request_id,job,role,state,reason,attempt,host,next_check_at,expires_at,updated_at,start_task_id,start_until)
+	var applied bool
+	if s.dialect == mysqlDialect {
+		applied, err = putTaskSpawnRecordMySQL(ctx, tx, id, in, startID, startUntil)
+	} else {
+		var tag int64
+		tag, err = tx.Exec(ctx, `INSERT INTO task_spawn_records(task_id,request_id,job,role,state,reason,attempt,host,next_check_at,expires_at,updated_at,start_task_id,start_until)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 ON CONFLICT(task_id) DO UPDATE SET request_id=EXCLUDED.request_id, job=EXCLUDED.job, role=EXCLUDED.role, state=EXCLUDED.state, reason=EXCLUDED.reason, attempt=EXCLUDED.attempt, host=EXCLUDED.host, next_check_at=EXCLUDED.next_check_at, expires_at=EXCLUDED.expires_at, updated_at=EXCLUDED.updated_at, start_task_id=EXCLUDED.start_task_id, start_until=EXCLUDED.start_until
 WHERE task_spawn_records.updated_at < EXCLUDED.updated_at`,
-		id, in.RequestID, in.Job, in.Role, in.State, in.Reason, in.Attempt, in.Host, in.NextCheckAt, in.ExpiresAt, in.UpdatedAt, startID, startUntil)
+			id, in.RequestID, in.Job, in.Role, in.State, in.Reason, in.Attempt, in.Host, in.NextCheckAt, in.ExpiresAt, in.UpdatedAt, startID, startUntil)
+		applied = tag == 1
+	}
 	if err != nil {
 		return TaskSpawn{}, false, err
 	}
-	applied := tag.RowsAffected() == 1
 	if applied && spawnTerminal(in.State) {
 		if err := s.spawnNoticeTx(ctx, tx, id, in, author); err != nil {
 			return TaskSpawn{}, false, err
@@ -264,6 +282,37 @@ WHERE task_spawn_records.updated_at < EXCLUDED.updated_at`,
 	return *stored, applied, nil
 }
 
+// putTaskSpawnRecordMySQL is PutTaskSpawn's upsert on MySQL: the write applies
+// only when updated_at is newer than the stored one. ON DUPLICATE KEY UPDATE
+// cannot say whether it applied (found-rows counts a matched row as 1, as an
+// insert), so the stored row is locked and compared first. A concurrent first
+// insert that wins the race makes ours fail as a duplicate: the loop reads the
+// committed row and decides again.
+func putTaskSpawnRecordMySQL(ctx context.Context, tx transaction, id int64, in TaskSpawnInput, startID *int64, startUntil *string) (bool, error) {
+	for attempt := 0; ; attempt++ {
+		var newer bool
+		err := tx.QueryRow(ctx, `SELECT updated_at < ? FROM task_spawn_records WHERE task_id=? FOR UPDATE`, in.UpdatedAt, id).Scan(&newer)
+		switch {
+		case err == nil:
+			if !newer {
+				return false, nil
+			}
+			_, err = tx.Exec(ctx, `UPDATE task_spawn_records SET request_id=?,job=?,role=?,state=?,reason=?,attempt=?,host=?,next_check_at=?,expires_at=?,updated_at=?,start_task_id=?,start_until=? WHERE task_id=?`,
+				in.RequestID, in.Job, in.Role, in.State, in.Reason, in.Attempt, in.Host, in.NextCheckAt, in.ExpiresAt, in.UpdatedAt, startID, startUntil, id)
+			return err == nil, err
+		case !errors.Is(err, ErrNoRows):
+			return false, err
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO task_spawn_records(task_id,request_id,job,role,state,reason,attempt,host,next_check_at,expires_at,updated_at,start_task_id,start_until)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			id, in.RequestID, in.Job, in.Role, in.State, in.Reason, in.Attempt, in.Host, in.NextCheckAt, in.ExpiresAt, in.UpdatedAt, startID, startUntil)
+		if errors.Is(err, errUniqueViolation) && attempt == 0 {
+			continue
+		}
+		return err == nil, err
+	}
+}
+
 // spawnNoticeTx writes the task comment for a terminal spawn state, once per
 // notice key. The caller holds the comment insert lock (PutTaskSpawn takes it
 // before the task row). The notice and comment run in a savepoint: when the
@@ -271,7 +320,7 @@ WHERE task_spawn_records.updated_at < EXCLUDED.updated_at`,
 // canonical in YouTrack) the savepoint is rolled back and the comment is
 // skipped, so the spawn record itself still applies. A later applied write for
 // the same key tries the comment again.
-func (s *Store) spawnNoticeTx(ctx context.Context, tx pgx.Tx, id int64, in TaskSpawnInput, author string) error {
+func (s *Store) spawnNoticeTx(ctx context.Context, tx transaction, id int64, in TaskSpawnInput, author string) error {
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		return err
@@ -286,19 +335,19 @@ func (s *Store) spawnNoticeTx(ctx context.Context, tx pgx.Tx, id int64, in TaskS
 	return sp.Commit(ctx)
 }
 
-func (s *Store) writeSpawnNoticeTx(ctx context.Context, tx pgx.Tx, id int64, in TaskSpawnInput, author string) error {
+func (s *Store) writeSpawnNoticeTx(ctx context.Context, tx transaction, id int64, in TaskSpawnInput, author string) error {
 	key := fmt.Sprintf("%d|%s|%d|%s", id, in.RequestID, in.Attempt, in.State)
-	tag, err := tx.Exec(ctx, `INSERT INTO task_spawn_notices(notice_key,task_id,created_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, key, id, time.Now().UTC())
+	if dialectFor(tx) == mysqlDialect {
+		return s.writeSpawnNoticeMySQL(ctx, tx, id, key, in, author)
+	}
+	n, err := tx.Exec(ctx, `INSERT INTO task_spawn_notices(notice_key,task_id,created_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, key, id, time.Now().UTC())
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() != 1 {
+	if n != 1 {
 		return nil
 	}
-	body := fmt.Sprintf("spawn %s request=%s attempt=%d job=%s", in.State, in.RequestID, in.Attempt, in.Job)
-	if in.Reason != "" {
-		body += " reason=" + in.Reason
-	}
+	body := spawnNoticeBody(in)
 	if err := CheckTaskCommentBody(body); err != nil {
 		return err
 	}
@@ -307,7 +356,42 @@ func (s *Store) writeSpawnNoticeTx(ctx context.Context, tx pgx.Tx, id int64, in 
 	if err != nil {
 		return err
 	}
-	_, _, err = s.enqueueYTCommentTx(ctx, tx, c)
+	_, _, err = s.enqueueYTCommentTx(ctx, pgxTx(tx), c)
+	return err
+}
+
+func spawnNoticeBody(in TaskSpawnInput) string {
+	body := fmt.Sprintf("spawn %s request=%s attempt=%d job=%s", in.State, in.RequestID, in.Attempt, in.Job)
+	if in.Reason != "" {
+		body += " reason=" + in.Reason
+	}
+	return body
+}
+
+// writeSpawnNoticeMySQL is writeSpawnNoticeTx on MySQL. The notice key is the
+// primary key, so "already written" is the duplicate-key error of a plain
+// INSERT (found-rows makes ON DUPLICATE KEY UPDATE report a matched row as 1,
+// like a new one). A failed statement leaves the savepoint usable on MySQL.
+func (s *Store) writeSpawnNoticeMySQL(ctx context.Context, tx transaction, id int64, key string, in TaskSpawnInput, author string) error {
+	// B4 dependency: enqueueYTCommentTx (YouTrack comment projection, reads
+	// yt_authority) is PostgreSQL-only until B4 ports it. It is a no-op while the
+	// comments mode is off and the authority is hk, which is all a MySQL store
+	// without the yt_* tables can be in; any other mode refuses.
+	if s.ytCommentsModeNow() != YTCommentsOff {
+		return ErrDialectUnsupported
+	}
+	now := time.Now().UTC()
+	if _, err := tx.Exec(ctx, `INSERT INTO task_spawn_notices(notice_key,task_id,created_at) VALUES(?,?,?)`, key, id, now); err != nil {
+		if errors.Is(err, errUniqueViolation) {
+			return nil
+		}
+		return err
+	}
+	body := spawnNoticeBody(in)
+	if err := CheckTaskCommentBody(body); err != nil {
+		return err
+	}
+	_, err := mysqlInsertTaskCommentTx(ctx, tx, id, author, body, now)
 	return err
 }
 
@@ -327,7 +411,15 @@ func attachTaskSpawns(ctx context.Context, q poolQuerier, xs []Task) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	rows, err := q.Query(ctx, `SELECT r.task_id,`+spawnRecordSelect+` FROM task_spawn_records r LEFT JOIN tasks b ON b.id=r.start_task_id WHERE r.task_id=ANY($1)`, ids)
+	query, args := `SELECT r.task_id,`+spawnRecordSelect+` FROM task_spawn_records r LEFT JOIN tasks b ON b.id=r.start_task_id WHERE r.task_id=ANY($1)`, []any{ids}
+	if dialectFor(q) == mysqlDialect {
+		query = `SELECT r.task_id,` + spawnRecordSelect + ` FROM task_spawn_records r LEFT JOIN tasks b ON b.id=r.start_task_id WHERE r.task_id IN (` + placeholders(len(ids)) + `)`
+		args = make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+	}
+	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -404,10 +496,6 @@ func (s *Store) TaskStates(ctx context.Context, ids []int64, until string) ([]Ta
 // (not settled) with a blocks relation to the task, plus the start-condition
 // task while its condition is unmet; missing ids are ascending.
 func (s *Store) TaskStatesSnapshot(ctx context.Context, ids []int64, until string) (TaskStatesSnapshot, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return TaskStatesSnapshot{}, ErrDialectUnsupported
-	}
-
 	var out TaskStatesSnapshot
 	if len(ids) == 0 || len(ids) > TaskStatesMax {
 		return out, spawnInvalid(fmt.Sprintf("ids must name 1 to %d tasks", TaskStatesMax))
@@ -426,7 +514,7 @@ func (s *Store) TaskStatesSnapshot(ctx context.Context, ids []int64, until strin
 			want = append(want, id)
 		}
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := s.beginSnapshotA5(ctx)
 	if err != nil {
 		return out, err
 	}
@@ -435,12 +523,12 @@ func (s *Store) TaskStatesSnapshot(ctx context.Context, ids []int64, until strin
 	// the MVCC snapshot belongs to the first statement after it. The snapshot
 	// is therefore at least as new as as_of, never older, and every row below
 	// comes from that one snapshot. pgx returns the value in the local zone.
-	if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&out.AsOf); err != nil {
+	if err := tx.QueryRow(ctx, s.q(`SELECT now()`, `SELECT UTC_TIMESTAMP(6)`)).Scan(&out.AsOf); err != nil {
 		return out, err
 	}
 	out.AsOf = out.AsOf.UTC()
 	states := map[int64]string{}
-	rows, err := tx.Query(ctx, `SELECT id,state FROM tasks WHERE id=ANY($1)`, want)
+	rows, err := tx.Query(ctx, s.q(`SELECT id,state FROM tasks WHERE id=ANY($1)`, `SELECT id,state FROM tasks WHERE id IN (`+placeholders(len(want))+`)`), a5Int64Args(s, want)...)
 	if err != nil {
 		return out, err
 	}
@@ -458,7 +546,7 @@ func (s *Store) TaskStatesSnapshot(ctx context.Context, ids []int64, until strin
 		return out, err
 	}
 	blockers := map[int64][]int64{}
-	rows, err = tx.Query(ctx, `SELECT r.dst_id,b.id,b.state FROM task_relations r JOIN tasks b ON b.id=r.src_id WHERE r.kind='blocks' AND r.archived_at IS NULL AND r.dst_id=ANY($1) ORDER BY r.dst_id,b.id`, want)
+	rows, err = tx.Query(ctx, s.q(`SELECT r.dst_id,b.id,b.state FROM task_relations r JOIN tasks b ON b.id=r.src_id WHERE r.kind='blocks' AND r.archived_at IS NULL AND r.dst_id=ANY($1) ORDER BY r.dst_id,b.id`, `SELECT r.dst_id,b.id,b.state FROM task_relations r JOIN tasks b ON b.id=r.src_id WHERE r.kind='blocks' AND r.archived_at IS NULL AND r.dst_id IN (`+placeholders(len(want))+`) ORDER BY r.dst_id,b.id`), a5Int64Args(s, want)...)
 	if err != nil {
 		return out, err
 	}
@@ -538,7 +626,7 @@ type WorkStatusQueuedTask struct {
 // the hk-only page's test. The YouTrack-backed page passes false, because
 // YouTrack, not hk's copy, says whether the task is open.
 func readQueuedSpawnsTx(ctx context.Context, q poolQuerier, hkOpenOnly bool) ([]WorkStatusQueuedTask, error) {
-	rows, err := q.Query(ctx, `SELECT t.id,t.title,t.project,t.state FROM task_spawn_records r JOIN tasks t ON t.id=r.task_id WHERE r.state NOT IN ('landed','refused','given_up','cancelled') AND (NOT $1 OR t.state NOT IN ('merged','deployed','completed','dropped','duplicate')) ORDER BY r.updated_at,t.id`, hkOpenOnly)
+	rows, err := q.Query(ctx, sqlFor(q, `SELECT t.id,t.title,t.project,t.state FROM task_spawn_records r JOIN tasks t ON t.id=r.task_id WHERE r.state NOT IN ('landed','refused','given_up','cancelled') AND (NOT $1 OR t.state NOT IN ('merged','deployed','completed','dropped','duplicate')) ORDER BY r.updated_at,t.id`, `SELECT t.id,t.title,t.project,t.state FROM task_spawn_records r JOIN tasks t ON t.id=r.task_id WHERE r.state NOT IN ('landed','refused','given_up','cancelled') AND (NOT ? OR t.state NOT IN ('merged','deployed','completed','dropped','duplicate')) ORDER BY r.updated_at,t.id`), hkOpenOnly)
 	if err != nil {
 		return nil, err
 	}

@@ -60,3 +60,34 @@ func TestOrderMySQLMigrations(t *testing.T) {
 		t.Fatal("cycle accepted")
 	}
 }
+
+func TestMySQLStepGuardRoundTrip(t *testing.T) {
+	for _, tc := range []struct{ step, kind, table, object, stmt string }{
+		{mysqlIfNoColumn("tasks", "lane", "ALTER TABLE tasks ADD COLUMN lane INT"), "column", "tasks", "lane", "ALTER TABLE tasks ADD COLUMN lane INT"},
+		{mysqlIfNoIndex("tasks", "tasks_parent", "CREATE INDEX tasks_parent ON tasks(parent_id)"), "index", "tasks", "tasks_parent", "CREATE INDEX tasks_parent ON tasks(parent_id)"},
+		{mysqlIfNoConstraint("tasks", "tasks_state_check", "ALTER TABLE tasks ADD CONSTRAINT tasks_state_check CHECK(state<>'')"), "constraint", "tasks", "tasks_state_check", "ALTER TABLE tasks ADD CONSTRAINT tasks_state_check CHECK(state<>'')"},
+	} {
+		kind, table, object, stmt, guarded := parseMySQLGuard(tc.step)
+		if !guarded || kind != tc.kind || table != tc.table || object != tc.object || stmt != tc.stmt {
+			t.Errorf("parse(%q) = %q %q %q %q %v", tc.step, kind, table, object, stmt, guarded)
+		}
+	}
+	if _, _, _, stmt, guarded := parseMySQLGuard("CREATE TABLE t (id INT)"); guarded || stmt != "CREATE TABLE t (id INT)" {
+		t.Errorf("an unguarded step was parsed as guarded: %q %v", stmt, guarded)
+	}
+}
+
+// Every MySQL migration step is either plain DDL/DML or one of the three
+// guards; a guard with a missing part would silently run nothing.
+func TestMySQLMigrationStepsAreWellFormed(t *testing.T) {
+	for _, m := range mysqlMigrations {
+		for i, step := range m.steps {
+			if strings.HasPrefix(step, mysqlGuardSep) {
+				kind, table, object, stmt, ok := parseMySQLGuard(step)
+				if !ok || kind == "" || table == "" || object == "" || strings.TrimSpace(stmt) == "" {
+					t.Errorf("%s step %d: malformed guard %q", m.id, i+1, step)
+				}
+			}
+		}
+	}
+}

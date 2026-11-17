@@ -244,7 +244,7 @@ func DispositionQuestion(refs TaskRefs, note string) string {
 const dispositionNoJobReason = "disposition item; no job link"
 
 func insertTaskEvent(ctx context.Context, tx pgx.Tx, id int64, from, to, by, note string, refs TaskRefs, at time.Time, noJob string, into *Task) (int64, error) {
-	eventID, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, From: from, To: to, By: by, Note: note, Refs: refs, Into: into, At: at, NoJob: noJob})
+	eventID, _, err := insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: id, From: from, To: to, By: by, Note: note, Refs: refs, Into: into, At: at, NoJob: noJob})
 	return eventID, err
 }
 
@@ -290,7 +290,7 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 	if in.Project != "" {
 		project = &in.Project
 	}
-	if err = requireTaskProject(ctx, tx, project); err != nil {
+	if err = requireTaskProject(ctx, pgTransaction{tx}, project); err != nil {
 		return Task{}, false, err
 	}
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "disposition:"+dispositionOriginKey(in.OriginPR, in.OriginTask)); err != nil {
@@ -330,7 +330,7 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 	}
 	// The awaiting event carries the question; its id is the item's
 	// generation, which an operator answer must quote.
-	gen, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: StateBacklog, To: StateBacklog, By: in.CreatedBy, Note: question, Refs: refs, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"})
+	gen, _, err := insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: StateBacklog, To: StateBacklog, By: in.CreatedBy, Note: question, Refs: refs, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"})
 	if err != nil {
 		return Task{}, false, err
 	}
@@ -445,7 +445,7 @@ func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in Dispositi
 	if err := applyLifecycle(&x, from, StateResearching, now, nil); err != nil {
 		return Task{}, "", err
 	}
-	if x, err = writeTaskTx(ctx, tx, x); err != nil {
+	if x, err = writeTaskTx(ctx, pgTransaction{tx}, x); err != nil {
 		return Task{}, "", err
 	}
 	note := fmt.Sprintf("disposition-answer %s: %s gen=%d", key, label, gen)
@@ -455,7 +455,7 @@ func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in Dispositi
 	if _, err = insertTaskEvent(ctx, tx, in.ID, from, StateResearching, "operator:"+in.OperatorEmail, note, x.Refs, now, dispositionNoJobReason, &x); err != nil {
 		return Task{}, "", err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: in.ID, Kind: TaskEventAwaiting, From: StateResearching, To: StateResearching, By: "operator:" + in.OperatorEmail, Note: note, Refs: x.Refs, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
+	if _, _, err = insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: in.ID, Kind: TaskEventAwaiting, From: StateResearching, To: StateResearching, By: "operator:" + in.OperatorEmail, Note: note, Refs: x.Refs, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
 		return Task{}, "", err
 	}
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, "operator:"+in.OperatorEmail, note, 0, now); err != nil {
@@ -644,7 +644,7 @@ func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string)
 		from = to
 	}
 	x.State, x.UpdatedAt = from, now
-	if x, err = writeTaskTx(ctx, tx, x); err != nil {
+	if x, err = writeTaskTx(ctx, pgTransaction{tx}, x); err != nil {
 		return Task{}, err
 	}
 	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, by, text, 0, now); err != nil {

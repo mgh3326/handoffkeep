@@ -189,7 +189,7 @@ func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxW
 	// write applied was moved later and is left alone.
 	for index := range restores {
 		r := restores[index]
-		current, found, err := inboxStateTx(ctx, tx, r.key, true)
+		current, found, err := inboxStateTx(ctx, pgTransaction{tx}, r.key, true)
 		if err != nil {
 			return nil, err
 		}
@@ -337,7 +337,7 @@ func (s *Store) applyInboxItem(ctx context.Context, key, action string, until *t
 	}
 	if replayed {
 		// The same click delivered twice: report what the operator sees now.
-		prev, _, err := inboxStateTx(ctx, tx, key, false)
+		prev, _, err := inboxStateTx(ctx, pgTransaction{tx}, key, false)
 		if err != nil {
 			return InboxState{}, err
 		}
@@ -352,7 +352,7 @@ func (s *Store) applyInboxItem(ctx context.Context, key, action string, until *t
 		VALUES($1,$2,$3) ON CONFLICT (item_key) DO NOTHING`, key, actor, now); err != nil {
 		return InboxState{}, err
 	}
-	prev, _, err := inboxStateTx(ctx, tx, key, true)
+	prev, _, err := inboxStateTx(ctx, pgTransaction{tx}, key, true)
 	if err != nil {
 		return InboxState{}, err
 	}

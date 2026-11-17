@@ -801,7 +801,7 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 	}
 	// A job that gains a role can move its task forward (panewire.job).
 	if u.Role != nil && *u.Role != "" && *u.Role != previousRole {
-		if err = s.applyJobRoleTx(ctx, tx, j, j.UpdatedAt); err != nil {
+		if err = s.applyJobRoleTx(ctx, pgTransaction{tx}, j, j.UpdatedAt); err != nil {
 			return j, err
 		}
 	}

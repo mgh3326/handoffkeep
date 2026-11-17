@@ -164,7 +164,7 @@ func TestWorkStatusRead(t *testing.T) {
 	setTask(inWork1.ID, StateDeveloping, now.Add(-10*time.Hour), "")
 	// Seed transition event for developing state entry
 	devSince := now.Add(-3 * time.Hour)
-	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
+	if _, _, err := insertEvent(ctx, pgQuerier{st.pool}, taskEventInput{
 		TaskID: inWork1.ID,
 		From:   StateBacklog,
 		To:     StateDeveloping,
@@ -199,7 +199,7 @@ func TestWorkStatusRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTask(inWorkLinked.ID, StateDeveloping, now.Add(-20*time.Hour), "")
-	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
+	if _, _, err := insertEvent(ctx, pgQuerier{st.pool}, taskEventInput{
 		TaskID: inWorkLinked.ID,
 		From:   StateBacklog,
 		To:     StateDeveloping,
@@ -245,7 +245,7 @@ func TestWorkStatusRead(t *testing.T) {
 	}
 	setTask(inWork2.ID, StateReviewing, now.Add(-8*time.Hour), "mac-reviewer")
 	revSince := now.Add(-1 * time.Hour)
-	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
+	if _, _, err := insertEvent(ctx, pgQuerier{st.pool}, taskEventInput{
 		TaskID: inWork2.ID,
 		From:   StateDeveloping,
 		To:     StateReviewing,
@@ -272,7 +272,7 @@ func TestWorkStatusRead(t *testing.T) {
 	}
 	setTask(mergedWaiting.ID, StateMerged, now.Add(-12*time.Hour), "")
 	mergeAfterTime := hkDeployTime.Add(1 * time.Hour)
-	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
+	if _, _, err := insertEvent(ctx, pgQuerier{st.pool}, taskEventInput{
 		TaskID: mergedWaiting.ID,
 		From:   StateReviewing,
 		To:     StateMerged,
@@ -298,7 +298,7 @@ func TestWorkStatusRead(t *testing.T) {
 	}
 	setTask(mergedBefore.ID, StateMerged, now.Add(-24*time.Hour), "")
 	mergeBeforeTime := hkDeployTime.Add(-2 * time.Hour)
-	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
+	if _, _, err := insertEvent(ctx, pgQuerier{st.pool}, taskEventInput{
 		TaskID: mergedBefore.ID,
 		From:   StateReviewing,
 		To:     StateMerged,
@@ -323,7 +323,7 @@ func TestWorkStatusRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTask(mergedNoRecord.ID, StateMerged, now.Add(-5*time.Hour), "")
-	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
+	if _, _, err := insertEvent(ctx, pgQuerier{st.pool}, taskEventInput{
 		TaskID: mergedNoRecord.ID,
 		From:   StateReviewing,
 		To:     StateMerged,
@@ -348,7 +348,7 @@ func TestWorkStatusRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTask(closedToday.ID, StateCompleted, now.Add(-6*time.Hour), "")
-	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
+	if _, _, err := insertEvent(ctx, pgQuerier{st.pool}, taskEventInput{
 		TaskID: closedToday.ID,
 		From:   StateDeveloping,
 		To:     StateCompleted,
@@ -372,7 +372,7 @@ func TestWorkStatusRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTask(closedYesterday.ID, StateDropped, now.Add(-30*time.Hour), "")
-	if _, _, err := insertEvent(ctx, st.pool, taskEventInput{
+	if _, _, err := insertEvent(ctx, pgQuerier{st.pool}, taskEventInput{
 		TaskID: closedYesterday.ID,
 		From:   StateBacklog,
 		To:     StateDropped,
