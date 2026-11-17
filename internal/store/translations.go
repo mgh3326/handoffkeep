@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -259,7 +260,9 @@ func (s *Store) PutTranslations(ctx context.Context, translations []Translation)
 	// transaction. The commit-time allocator gives it its sync_id.
 	if s.dialect == mysqlDialect {
 		seen := map[string]bool{}
-		for _, id := range translatedTaskTitles(translations) {
+		ids := translatedTaskTitles(translations)
+		sort.Strings(ids)
+		for _, id := range ids {
 			if seen[id] {
 				continue
 			}

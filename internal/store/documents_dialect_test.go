@@ -3,6 +3,7 @@ package store
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func init() {
@@ -61,6 +62,44 @@ func init() {
 		comments, err := s.ListTaskComments(ctx, task.ID, first.ID, 10)
 		if err != nil || len(comments) != 1 || comments[0].ID != second.ID {
 			t.Fatalf("list: %+v err=%v", comments, err)
+		}
+	})
+}
+
+func init() {
+	registerTaskAreaCase("documents/prune", func(t *testing.T, s *Store) {
+		if s.dialect == mysqlDialect {
+			t.Skip("prune requires the YouTrack binding and attachment areas")
+		}
+		ctx := t.Context()
+		doc, _, err := s.PutDocument(ctx, Document{Key: DocPrunePrefix + "test", Kind: "brief", Body: "prunable", CreatedBy: "tester"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = tx.Exec(ctx, s.q(`UPDATE documents SET updated_at=$1 WHERE id=$2`, `UPDATE documents SET updated_at=? WHERE id=?`), time.Now().UTC().Add(-48*time.Hour), doc.ID)
+		if err == nil {
+			err = tx.Commit(ctx)
+		}
+		_ = tx.Rollback(ctx)
+		release()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cutoff := time.Now().UTC().Add(-24 * time.Hour)
+		res, err := s.PruneDocuments(ctx, DocPrunePrefix, cutoff, 10, false)
+		if err != nil || res.Matched != 1 || res.Deleted != 0 || res.Bytes != int64(len("prunable")) {
+			t.Fatalf("dry run: %+v err=%v", res, err)
+		}
+		res, err = s.PruneDocuments(ctx, DocPrunePrefix, cutoff, 10, true)
+		if err != nil || res.Deleted != 1 {
+			t.Fatalf("apply: %+v err=%v", res, err)
+		}
+		if _, found, err := s.GetDocument(ctx, doc.Key); err != nil || found {
+			t.Fatalf("get after prune: found=%v err=%v", found, err)
 		}
 	})
 }
