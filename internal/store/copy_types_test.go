@@ -180,6 +180,15 @@ func TestSelectCopyTablesRejectsBlankSelection(t *testing.T) {
 	}
 }
 
+func TestSelectCopyTablesRequiresQuotaObservationParent(t *testing.T) {
+	if _, err := selectCopyTables([]string{"quota_latest"}); err == nil || !strings.Contains(err.Error(), `requires "quota_observations"`) {
+		t.Fatalf("quota_latest-only selection error=%v, want its parent requirement", err)
+	}
+	if _, err := selectCopyTables([]string{"quota_latest", "quota_observations"}); err != nil {
+		t.Fatalf("selection with quota_latest and its parent failed: %v", err)
+	}
+}
+
 type copyOrderConnector struct{ rows [][]driver.Value }
 
 func (c copyOrderConnector) Connect(context.Context) (driver.Conn, error) {

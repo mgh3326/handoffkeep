@@ -43,10 +43,15 @@ type CopyReport struct {
 }
 
 type copyTableSpec struct {
-	name    string
-	columns []string
-	order   []string
-	bounds  map[string]int
+	name     string
+	columns  []string
+	order    []string
+	requires []string
+	bounds   map[string]int
+}
+
+type copyQuerier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
 type copyValueKind uint8
@@ -70,7 +75,7 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "bench_reps", columns: strings.Fields("id origin_id profile model_id task_ref tier role rounds blockers_found completed input_tokens output_tokens notes recorded_at effort grade table_grade created_by created_at experiment_id arm first_ci_green critical_findings high_findings merged reverted_within_7d reviewer_profile reviewer_effort reasoning_tokens cache_read_tokens cache_write_tokens spawn_to_ready_s spawn_to_merge_s"), order: []string{"id"}, bounds: map[string]int{"created_by": 128}},
 	{name: "bench_scores", columns: strings.Fields("model_id effort harness source metric score rank captured_at time_per_task_min cost_per_task_usd provenance updated_by updated_at"), order: []string{"model_id", "effort", "harness", "source", "metric"}, bounds: map[string]int{"model_id": 128, "effort": 128, "harness": 128, "source": 128, "metric": 128}},
 	{name: "quota_observations", columns: strings.Fields("id account_key kind window_key measured_at value received_at"), order: []string{"id"}, bounds: map[string]int{"account_key": 64, "kind": 16, "window_key": 16}},
-	{name: "quota_latest", columns: strings.Fields("account_key kind window_key observation_id measured_at confirmed_at"), order: []string{"account_key", "kind", "window_key"}, bounds: map[string]int{"account_key": 64, "kind": 16, "window_key": 16}},
+	{name: "quota_latest", columns: strings.Fields("account_key kind window_key observation_id measured_at confirmed_at"), order: []string{"account_key", "kind", "window_key"}, requires: []string{"quota_observations"}, bounds: map[string]int{"account_key": 64, "kind": 16, "window_key": 16}},
 	{name: "quota_leases", columns: strings.Fields("account_key owner holder expires_at"), order: []string{"account_key"}, bounds: map[string]int{"account_key": 64}},
 	{name: "quota_presence", columns: strings.Fields("host_id account_key last_seen"), order: []string{"host_id", "account_key"}, bounds: map[string]int{"host_id": 64, "account_key": 64}},
 }
@@ -181,6 +186,11 @@ func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, ve
 	if from.mySQL == to.mySQL {
 		return report, errors.New("store-copy requires one PostgreSQL and one MySQL URL")
 	}
+	sourceSnapshot, err := beginCopySnapshot(ctx, from.db)
+	if err != nil {
+		return report, err
+	}
+	defer sourceSnapshot.Rollback()
 	if !verifyOnly {
 		cleanup, err := prepareCopySession(ctx, to)
 		if err != nil {
@@ -218,7 +228,7 @@ func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, ve
 		}
 		cols = spec.columns
 		var srcCount int64
-		srcHash, err := checksum(ctx, from.db, from.mySQL, spec, cols, sourceKinds, func(row []any) error {
+		srcHash, err := checksum(ctx, sourceSnapshot, from.mySQL, spec, cols, sourceKinds, func(row []any) error {
 			srcCount++
 			for i, col := range cols {
 				if max := spec.bounds[col]; max > 0 {
@@ -233,7 +243,7 @@ func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, ve
 			return report, fmt.Errorf("%s source read: %w", spec.name, err)
 		}
 		if !verifyOnly {
-			if err := copyRows(ctx, from.db, to, from.mySQL, spec, cols, sourceKinds); err != nil {
+			if err := copyRows(ctx, sourceSnapshot, to, from.mySQL, spec, cols, sourceKinds); err != nil {
 				return report, fmt.Errorf("%s copy: %w", spec.name, err)
 			}
 			if err := resetIdentity(ctx, to, spec.name); err != nil {
@@ -254,6 +264,14 @@ func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, ve
 		report.Match = report.Match && row.Match
 	}
 	return report, nil
+}
+
+func beginCopySnapshot(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("begin repeatable-read source snapshot: %w", err)
+	}
+	return tx, nil
 }
 
 func selectCopyTables(selected []string) (map[string]bool, error) {
@@ -277,6 +295,16 @@ func selectCopyTables(selected []string) (map[string]bool, error) {
 	}
 	if len(wanted) == 0 {
 		return nil, errors.New("no tables selected")
+	}
+	for _, spec := range copyTableRegistry {
+		if !wanted[spec.name] {
+			continue
+		}
+		for _, required := range spec.requires {
+			if !wanted[required] {
+				return nil, fmt.Errorf("selected table %q requires %q in the same copy", spec.name, required)
+			}
+		}
 	}
 	return wanted, nil
 }
@@ -414,7 +442,7 @@ func quoteCopyIdent(s string, mysqlDB bool) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
-func checksum(ctx context.Context, db *sql.DB, mysqlDB bool, spec copyTableSpec, cols []string, kinds map[string]copyValueKind, each func([]any) error) (string, error) {
+func checksum(ctx context.Context, db copyQuerier, mysqlDB bool, spec copyTableSpec, cols []string, kinds map[string]copyValueKind, each func([]any) error) (string, error) {
 	quoted := make([]string, len(cols))
 	for i, c := range cols {
 		quoted[i] = quoteCopyIdent(c, mysqlDB)
@@ -495,7 +523,7 @@ func canonicalCopyValue(v any, table, column string, kind copyValueKind, mysqlSo
 	return value, nil
 }
 
-func copyRows(ctx context.Context, src *sql.DB, dst *copyDB, sourceMySQL bool, spec copyTableSpec, cols []string, kinds map[string]copyValueKind) error {
+func copyRows(ctx context.Context, src copyQuerier, dst *copyDB, sourceMySQL bool, spec copyTableSpec, cols []string, kinds map[string]copyValueKind) error {
 	conn, err := dst.session(ctx)
 	if err != nil {
 		return err

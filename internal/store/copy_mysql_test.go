@@ -88,6 +88,39 @@ func TestCopyPostgresMySQLAndBackWithParity(t *testing.T) {
 	}
 }
 
+func TestCopySourceSnapshotIsRepeatableRead(t *testing.T) {
+	pg, pgURL := schemaStoreAt(t, "copy_source_snapshot")
+	defer pg.Close()
+	when := time.Date(2026, 11, 18, 4, 5, 6, 123456000, time.UTC)
+	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO quota_observations(id,account_key,kind,window_key,measured_at,value,received_at) VALUES(93001,'copy-snapshot','manual','day',$1,$2,$1)`, when, json.RawMessage(`{"revision":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	source, err := openCopyDB(t.Context(), pgURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.close()
+	snapshot, err := beginCopySnapshot(t.Context(), source.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshot.Rollback()
+	var before []byte
+	if err := snapshot.QueryRowContext(t.Context(), `SELECT value FROM quota_observations WHERE id=93001`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pg.pool.Exec(t.Context(), `UPDATE quota_observations SET value=$1 WHERE id=93001`, json.RawMessage(`{"revision":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	var after []byte
+	if err := snapshot.QueryRowContext(t.Context(), `SELECT value FROM quota_observations WHERE id=93001`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("source snapshot changed during copy: before=%s after=%s", before, after)
+	}
+}
+
 func TestCopyPostgresReplicaRolePreflightRefusesBeforeWrites(t *testing.T) {
 	myURL := testdb.MySQLDatabase(t)
 	my, err := Open(t.Context(), myURL)
