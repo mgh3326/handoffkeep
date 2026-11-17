@@ -731,13 +731,26 @@ func readFailure(ev Evidence, err error) (Evidence, error) {
 	return ev, err
 }
 
+// splitPartSummary constructs the summary for a split child part, ensuring the
+// " / part X of Y" suffix is always preserved within ArticleSummaryLimit even
+// if p.Summary uses all allowed runes.
+func splitPartSummary(summary string, part, total int) string {
+	suffix := fmt.Sprintf(" / part %d of %d", part, total)
+	maxPrefix := ArticleSummaryLimit - len([]rune(suffix))
+	if maxPrefix < 0 {
+		maxPrefix = 0
+	}
+	return truncateRunes(summary, maxPrefix) + suffix
+}
+
 // splitMissingParts checks that every child part 1..N of a split document
-// exists under indexID matching the rendered part content. It returns the 0-based indices
-// of missing pieces.
+// exists under indexID matching the rendered part content. Each expected part
+// must match a distinct child article. It returns the 0-based indices of missing pieces.
 func splitMissingParts(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreatePayload, indexID string, pieces []string) ([]int, error) {
 	var missing []int
+	used := make(map[string]bool)
 	for i := range pieces {
-		partSummary := truncateRunes(fmt.Sprintf("%s / part %d of %d", p.Summary, i+1, len(pieces)), ArticleSummaryLimit)
+		partSummary := splitPartSummary(p.Summary, i+1, len(pieces))
 		hits, err := ar.FindArticles(ctx, ArticleSearch{
 			ProjectShort: p.YTProjectShort,
 			ProjectID:    op.YTTargetID,
@@ -749,14 +762,16 @@ func splitMissingParts(ctx context.Context, ar ArticleRemote, op Op, p ArticleCr
 			return nil, err
 		}
 		expectedContent := RenderArticleCreate(op.Actor, op.CreatedAt.UTC().Truncate(time.Second), op.ID, pieces[i])
-		found := false
+		foundID := ""
 		for _, h := range hits {
-			if h.Content == expectedContent {
-				found = true
+			if !used[h.ID] && h.Content == expectedContent {
+				foundID = h.ID
 				break
 			}
 		}
-		if !found {
+		if foundID != "" {
+			used[foundID] = true
+		} else {
 			missing = append(missing, i)
 		}
 	}
@@ -858,11 +873,42 @@ func (a articleCreate) Send(ctx context.Context, remote Remote, op Op, text stri
 		return "", &NotSentError{Err: fmt.Errorf("split parts check: %w", err)}
 	}
 	for _, i := range missing {
-		partSummary := truncateRunes(fmt.Sprintf("%s / part %d of %d", p.Summary, i+1, len(pieces)), ArticleSummaryLimit)
+		partSummary := splitPartSummary(p.Summary, i+1, len(pieces))
 		partContent := RenderArticleCreate(op.Actor, op.CreatedAt.UTC().Truncate(time.Second), op.ID, pieces[i])
-		if _, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, ParentID: indexID, Summary: partSummary, Content: partContent}); err != nil {
+		childID, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, ParentID: indexID, Summary: partSummary, Content: partContent})
+		if err != nil {
 			return "", &NotSentError{Err: fmt.Errorf("split child part %d: %w", i+1, err)}
 		}
+		if childID == "" {
+			hits, findErr := ar.FindArticles(ctx, ArticleSearch{
+				ProjectShort: p.YTProjectShort,
+				ProjectID:    op.YTTargetID,
+				Query:        partSummary,
+				Summary:      partSummary,
+				ParentID:     indexID,
+			})
+			if findErr != nil {
+				return "", fmt.Errorf("child part %d verify lookup: %w", i+1, findErr)
+			}
+			found := false
+			for _, h := range hits {
+				if h.Content == partContent {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return "", fmt.Errorf("child part %d create returned empty ID and article not found", i+1)
+			}
+		}
+	}
+
+	finalMissing, err := splitMissingParts(ctx, ar, op, p, indexID, pieces)
+	if err != nil {
+		return "", fmt.Errorf("final split parts check: %w", err)
+	}
+	if len(finalMissing) > 0 {
+		return "", fmt.Errorf("split child parts incomplete (%d missing)", len(finalMissing))
 	}
 
 	if adopted {

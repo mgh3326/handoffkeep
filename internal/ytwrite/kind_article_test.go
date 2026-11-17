@@ -668,5 +668,81 @@ func TestArticleCreateSplitEmptyIndexIDLookupFailureStaysRemoteUnknown(t *testin
 	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
 }
 
+// When p.Summary uses all allowed runes and child pieces are identical,
+// each part still receives a distinct summary and must match a distinct article.
+func TestArticleCreateSplitLongSummaryUniquePartDiscriminator(t *testing.T) {
+	e := newArticleEnv(t)
+	req := articleReq()
+	req.Summary = strings.Repeat("A", ytwrite.ArticleSummaryLimit) // 250 chars
+	// Two identical large pieces
+	chunk := strings.Repeat("B", ytwrite.MaxArticleBytes-100) + "\n"
+	req.Body = chunk + chunk
+	op := prepareWith(t, e, req)
+
+	// Inject fault on part 2 create (index=1, part1=2, part2=3)
+	creates := 0
+	e.yt.BeforeArticleCreate = func(ctx context.Context, in ytwrite.ArticleCreate) {
+		creates++
+		if creates == 3 {
+			e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.ServerError, Status: http.StatusBadGateway})
+		}
+	}
+
+	e.drive()
+	e.want(op.ID, ytwrite.StatePrepared, ytwrite.ReasonNotSent)
+
+	// Next attempt: hook disabled, drive again. Part 1 must not satisfy part 2.
+	e.yt.BeforeArticleCreate = nil
+	e.clock.Advance(time.Hour)
+	e.drive()
+
+	applied := e.want(op.ID, ytwrite.StateApplied, "")
+	if applied.YTResultID == "" {
+		t.Fatal("expected non-empty YTResultID")
+	}
+
+	// Verify that 2 distinct child parts were created under applied.YTResultID
+	childParts := 0
+	distinctIDs := make(map[string]bool)
+	for _, a := range e.yt.Articles(artProject) {
+		if a.ParentID == applied.YTResultID {
+			childParts++
+			distinctIDs[a.ID] = true
+			if !strings.Contains(a.Summary, "part ") {
+				t.Fatalf("child article summary %q lost part discriminator", a.Summary)
+			}
+		}
+	}
+	if childParts != 2 || len(distinctIDs) != 2 {
+		t.Fatalf("expected 2 distinct child parts, got %d parts, %d distinct IDs", childParts, len(distinctIDs))
+	}
+}
+
+// When a child part CreateArticle returns an empty ID, Send verifies that the child
+// article exists before declaring success.
+func TestArticleCreateSplitChildEmptyIDVerification(t *testing.T) {
+	e := newArticleEnv(t)
+	req := articleReq()
+	req.Body = strings.Repeat("hello world line\n", 20000)
+	op := prepareWith(t, e, req)
+
+	// Queue NoID fault on part 1 create (call 2: index=1, part1=2)
+	creates := 0
+	e.yt.BeforeArticleCreate = func(ctx context.Context, in ytwrite.ArticleCreate) {
+		creates++
+		if creates == 2 {
+			e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.NoID})
+		}
+	}
+
+	e.drive()
+
+	applied := e.want(op.ID, ytwrite.StateApplied, "")
+	if applied.YTResultID == "" {
+		t.Fatal("expected non-empty YTResultID")
+	}
+}
+
+
 
 
