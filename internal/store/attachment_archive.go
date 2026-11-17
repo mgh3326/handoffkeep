@@ -134,7 +134,7 @@ func (s *Store) ListAttachmentArchiveCandidates(ctx context.Context, limit int, 
 	if limit > 1000 {
 		limit = 1000
 	}
-	return attachmentArchiveCandidates(ctx, s.pool, limit, after, "", now)
+	return attachmentArchiveCandidates(ctx, s.db(), limit, after, "", now)
 }
 
 // attachmentArchiveCandidates reads one page with limit+1 rows so it can tell
@@ -208,7 +208,7 @@ func (s *Store) RecordAttachmentArchive(ctx context.Context, sha, location strin
 		}
 		return AttachmentArchive{ArchivedAt: archivedAt.UTC(), Location: recorded, HotDeleted: hotDeletedAt != nil}, nil
 	}
-	candidates, _, err := attachmentArchiveCandidates(ctx, tx, 1, "", sha, now)
+	candidates, _, err := attachmentArchiveCandidates(ctx, pgTransaction{tx}, 1, "", sha, now)
 	if err != nil {
 		return AttachmentArchive{}, err
 	}

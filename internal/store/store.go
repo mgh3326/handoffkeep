@@ -23,7 +23,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
@@ -656,6 +655,8 @@ type Store struct {
 	mysqlPool *sql.DB
 	dialect   storeDialect
 	queries   querier
+	// tablesSeen caches the MySQL tables found in the schema (mysqlTableExists).
+	tablesSeen sync.Map
 	// registry replaces migrationRegistry when set; tests use it.
 	registry []migration
 	// autoCloseOff inverts the auto_close_parent setting so the zero Store has
@@ -948,7 +949,7 @@ func (s *Store) migrateIfBehind(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	current, err := migrateCurrent(ctx, s.pool, ordered)
+	current, err := migrateCurrent(ctx, s.db(), ordered)
 	if err != nil || current {
 		return err
 	}
@@ -2471,7 +2472,7 @@ const taskColumns = taskBaseColumns
 // the caller's transaction, so membership is judged in the same snapshot the
 // insert commits under.
 type taskProjectQuerier interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
+	QueryRow(context.Context, string, ...any) row
 }
 
 // requireTaskProject is the single create-time gate every new task row
@@ -2495,7 +2496,7 @@ func requireTaskProject(ctx context.Context, q taskProjectQuerier, project *stri
 		return err
 	}
 	var known bool
-	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, *project).Scan(&known); err != nil {
+	if err := q.QueryRow(ctx, sqlFor(q, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=?)`), *project).Scan(&known); err != nil {
 		return err
 	}
 	if !known {
@@ -2540,9 +2541,6 @@ func ValidExpected(value string) bool { _, ok := normalizeExpected(value); retur
 // CreateTask files a task in backlog without the duplicate check; tasks add
 // and POST /v1/tasks go through CreateTaskChecked.
 func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
 	return s.createTask(ctx, x, nil)
 }
 
@@ -2558,9 +2556,6 @@ type DuplicateCheck struct {
 // unstarted or backlog task has a similar title, the create is refused with a
 // *SimilarTasksError listing them, unless check carries Link or New.
 func (s *Store) CreateTaskChecked(ctx context.Context, x Task, check DuplicateCheck) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
 	if check.Link < 0 || (check.Link != 0 && check.New) {
 		return x, errors.New("invalid task: link and new are exclusive")
 	}
@@ -2610,92 +2605,120 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 		return x, errors.New("invalid task refs")
 	}
 	x.State, x.ClaimedBy = StateBacklog, ""
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return x, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-		return x, err
-	}
-	// Read the clock under the task-mutation lock: the link relation below
-	// writes this time to the linked task's updated_at, which a writer that
-	// held the lock before us may already have moved past (hk 4637).
-	x.CreatedAt = time.Now().UTC()
-	x.UpdatedAt = x.CreatedAt
+	// A retried attempt (MySQL deadlock) starts from the validated input again.
+	input, inputRefs := x, refs
+	err = s.retryTx(ctx, func() error {
+		x, refs = input, inputRefs
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		if err = s.lockTx(ctx, tx, coreTaskMutationLock); err != nil {
+			return err
+		}
+		// Read the clock under the task-mutation lock: the link relation below
+		// writes this time to the linked task's updated_at, which a writer that
+		// held the lock before us may already have moved past (hk 4637).
+		x.CreatedAt = time.Now().UTC()
+		x.UpdatedAt = x.CreatedAt
 
-	if err = requireTaskProject(ctx, tx, x.Project); err != nil {
-		return x, err
-	}
-	// refs.pr is one full PR URL on create too (hk 4844), so it is stored
-	// normalised; the refs JSON above is re-marshalled with it.
-	if x.Refs.PR != "" {
-		pr, err := normalisePRRefTx(ctx, tx, x.Project, x.Refs.PR)
-		if err != nil {
-			return x, err
+		if err = requireTaskProject(ctx, tx, x.Project); err != nil {
+			return err
 		}
-		x.Refs.PR = pr
-		if refs, err = json.Marshal(x.Refs); err != nil {
-			return x, errors.New("invalid task refs")
+		// refs.pr is one full PR URL on create too (hk 4844), so it is stored
+		// normalised; the refs JSON above is re-marshalled with it.
+		if x.Refs.PR != "" {
+			pr, err := normalisePRRefTx(ctx, tx, x.Project, x.Refs.PR)
+			if err != nil {
+				return err
+			}
+			x.Refs.PR = pr
+			if refs, err = json.Marshal(x.Refs); err != nil {
+				return errors.New("invalid task refs")
+			}
 		}
-	}
-	if x.ParentID != nil {
-		if err = checkParentTx(ctx, tx, 0, *x.ParentID); err != nil {
-			return x, err
+		if x.ParentID != nil {
+			if err = checkParentTx(ctx, tx, 0, *x.ParentID); err != nil {
+				return err
+			}
 		}
-	}
-	if check != nil && check.Link != 0 {
-		var exists bool
-		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, check.Link).Scan(&exists); err != nil {
-			return x, err
+		if check != nil && check.Link != 0 {
+			var exists bool
+			if err = tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?)`), check.Link).Scan(&exists); err != nil {
+				return err
+			}
+			if !exists {
+				return fmt.Errorf("invalid task: link %d does not exist", check.Link)
+			}
 		}
-		if !exists {
-			return x, fmt.Errorf("invalid task: link %d does not exist", check.Link)
+		if check != nil && check.Link == 0 && !check.New {
+			similar, err := s.similarOpenTasksFor(ctx, tx, []string{x.Title})
+			if err != nil {
+				return err
+			}
+			if len(similar) > 0 {
+				return &SimilarTasksError{Tasks: similar}
+			}
 		}
-	}
-	if check != nil && check.Link == 0 && !check.New {
-		similar, err := similarOpenTasks(ctx, tx, []string{x.Title})
-		if err != nil {
-			return x, err
+		parentID := x.ParentID
+		if s.dialect == mysqlDialect {
+			// No RETURNING: the id comes from the insert and the row is read back
+			// in the same transaction, which also yields the stored timestamps.
+			id, err := tx.InsertID(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,last_activity_at,body_doc,project,area,expected,parent_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.CreatedAt, x.BodyDoc, x.Project, x.Area, x.Expected, parentID)
+			if err != nil {
+				return err
+			}
+			if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=?`, id), &x); err != nil {
+				return err
+			}
+		} else if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,last_activity_at,body_doc,project,area,expected,parent_id) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$10,$12,$13,$14,$15,$16) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project, x.Area, x.Expected, parentID), &x); err != nil {
+			return err
 		}
-		if len(similar) > 0 {
-			return x, &SimilarTasksError{Tasks: similar}
+		if check != nil && check.Link != 0 {
+			if _, err = addRelationTx(ctx, tx, x.ID, RelationRelated, check.Link, x.CreatedBy, x.CreatedAt); err != nil {
+				return err
+			}
 		}
-	}
-	parentID := x.ParentID
-	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,last_activity_at,body_doc,project,area,expected,parent_id) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$10,$12,$13,$14,$15,$16) RETURNING `+taskColumns, x.Lane, x.ParentLane, x.Title, x.Kind, x.State, x.Priority, string(refs), x.ClaimedBy, x.CreatedBy, x.CreatedAt, x.UpdatedAt, x.BodyDoc, x.Project, x.Area, x.Expected, parentID), &x); err != nil {
-		return x, err
-	}
-	if check != nil && check.Link != 0 {
-		if _, err = addRelationTx(ctx, tx, x.ID, RelationRelated, check.Link, x.CreatedBy, x.CreatedAt); err != nil {
-			return x, err
+		if s.dialect == mysqlDialect {
+			// B4 dependency: enqueueYTIssueTx does nothing unless the YouTrack issue
+			// gate is on (ensureYTIssueTx returns first), and the yt_write_ops path
+			// is not ported yet, so a store with the gate on refuses here.
+			if mode, _ := s.ytIssuesNow(); mode == YTIssuesOn {
+				return ErrDialectUnsupported
+			}
+		} else if err = s.enqueueYTIssueTx(ctx, pgxTx(tx), x); err != nil {
+			return err
 		}
-	}
-	if err = s.enqueueYTIssueTx(ctx, tx, x); err != nil {
-		return x, err
-	}
-	return x, tx.Commit(ctx)
+		return tx.Commit(ctx)
+	})
+	return x, err
 }
 
 func (s *Store) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
+	var x Task
+	err := s.retryTx(ctx, func() error {
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		if err = s.lockTx(ctx, tx, coreTaskMutationLock); err != nil {
+			return err
+		}
 
-	tx, err := s.pool.Begin(ctx)
+		x, err = s.claimTaskTx(ctx, tx, id, by, jobID, noJob)
+		if err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return Task{}, err
 	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-		return Task{}, err
-	}
-
-	x, err := s.claimTaskTx(ctx, tx, id, by, jobID, noJob)
-	if err != nil {
-		return Task{}, err
-	}
-	return x, tx.Commit(ctx)
+	return x, nil
 }
 
 // RebindTaskJob atomically moves an active task's job link to a new job. The
@@ -2705,10 +2728,6 @@ func (s *Store) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string
 // keeps its PR, so a continuation worker takes over the same work unit.
 // Merged, deployed, dropped and held tasks are refused.
 func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by, reason string) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
-
 	reason = taskReasonText(reason)
 	if !validText(fromJob, 4096) || fromJob == "" || !validText(toJob, 4096) || toJob == "" || fromJob == toJob {
 		return Task{}, errors.New("invalid task rebind job ids")
@@ -2722,57 +2741,78 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		}
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Task{}, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-		return Task{}, err
-	}
-
 	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, ErrNoRows) {
-			return Task{}, ErrTaskNotFound
+	err := s.retryTx(ctx, func() error {
+		x = Task{}
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
 		}
-		return Task{}, err
-	}
+		defer release()
+		defer tx.Rollback(ctx)
+		if err = s.lockTx(ctx, tx, coreTaskMutationLock); err != nil {
+			return err
+		}
 
-	if rebindableState(x.State) && x.Refs.JobID == toJob && x.ClaimedBy == by {
-		var replay bool
-		err = tx.QueryRow(ctx, `SELECT EXISTS (
+		if err = scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
+			if errors.Is(err, ErrNoRows) {
+				return ErrTaskNotFound
+			}
+			return err
+		}
+
+		if rebindableState(x.State) && x.Refs.JobID == toJob && x.ClaimedBy == by {
+			var replay bool
+			if s.dialect == mysqlDialect {
+				// JSON values are compared as JSON strings, never unquoted, so the
+				// connection collation cannot make two job ids equal.
+				err = tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM task_events e
+			WHERE e.task_id=? AND JSON_EXTRACT(e.refs,'$.job_rebind.from_job')=CAST(? AS JSON)
+			  AND JSON_EXTRACT(e.refs,'$.job_rebind.to_job')=CAST(? AS JSON) AND JSON_EXTRACT(e.refs,'$.job_rebind.by')=CAST(? AS JSON)
+			  AND e.id=(SELECT MAX(e2.id) FROM task_events e2 WHERE e2.task_id=? AND JSON_CONTAINS_PATH(e2.refs,'one','$.job_rebind'))
+		)`, id, coreJSONString(fromJob), coreJSONString(toJob), coreJSONString(by), id).Scan(&replay)
+			} else {
+				err = tx.QueryRow(ctx, `SELECT EXISTS (
 			SELECT 1 FROM task_events e
 			WHERE e.task_id=$1 AND e.refs->'job_rebind'->>'from_job'=$2
 			  AND e.refs->'job_rebind'->>'to_job'=$3 AND e.refs->'job_rebind'->>'by'=$4
 			  AND e.id=(SELECT MAX(e2.id) FROM task_events e2 WHERE e2.task_id=$1 AND e2.refs ? 'job_rebind')
 		)`, id, fromJob, toJob, by).Scan(&replay)
-		if err != nil {
-			return Task{}, err
+			}
+			if err != nil {
+				return err
+			}
+			if replay {
+				return tx.Commit(ctx)
+			}
 		}
-		if replay {
-			return x, tx.Commit(ctx)
+		if !rebindableState(x.State) || x.Refs.JobID != fromJob {
+			current := x.Refs.JobID
+			if current == "" {
+				current = "(none)"
+			}
+			return fmt.Errorf("%w: cannot rebind from job %q to %q; current job_id is %q (state=%s)", ErrTaskConflict, fromJob, toJob, current, x.State)
 		}
-	}
-	if !rebindableState(x.State) || x.Refs.JobID != fromJob {
-		current := x.Refs.JobID
-		if current == "" {
-			current = "(none)"
-		}
-		return Task{}, fmt.Errorf("%w: cannot rebind from job %q to %q; current job_id is %q (state=%s)", ErrTaskConflict, fromJob, toJob, current, x.State)
-	}
 
-	now := time.Now().UTC()
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET refs=refs||jsonb_build_object('job_id',$2::text),claimed_by=$3,updated_at=$4 WHERE id=$1 RETURNING `+taskColumns, id, toJob, by, now), &x); err != nil {
+		now := time.Now().UTC()
+		if err = s.updateTaskReturningCore(ctx, tx, &x, id,
+			`UPDATE tasks SET refs=refs||jsonb_build_object('job_id',$2::text),claimed_by=$3,updated_at=$4 WHERE id=$1 RETURNING `, []any{id, toJob, by, now},
+			`UPDATE tasks SET refs=JSON_SET(refs,'$.job_id',?),claimed_by=?,updated_at=? WHERE id=?`, []any{toJob, by, now, id}); err != nil {
+			return err
+		}
+		rebind := &TaskJobRebind{FromJob: fromJob, ToJob: toJob, By: by, Reason: reason}
+		if _, moved, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, From: x.State, To: x.State, By: by, Note: reason, Refs: x.Refs, Rebind: rebind, At: now}); err != nil {
+			return err
+		} else if moved {
+			x.LastActivityAt = now.Truncate(time.Microsecond)
+		}
+		return tx.Commit(ctx)
+	})
+	if err != nil {
 		return Task{}, err
 	}
-	rebind := &TaskJobRebind{FromJob: fromJob, ToJob: toJob, By: by, Reason: reason}
-	if _, moved, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, From: x.State, To: x.State, By: by, Note: reason, Refs: x.Refs, Rebind: rebind, At: now}); err != nil {
-		return Task{}, err
-	} else if moved {
-		x.LastActivityAt = now.Truncate(time.Microsecond)
-	}
-	return x, tx.Commit(ctx)
+	return x, nil
 }
 
 // rebindableState reports whether a task in state may change its job link.
@@ -2787,8 +2827,11 @@ func rebindableState(state string) bool {
 // knownTaskLanesTx reports whether name is a lane some current row uses. hk
 // has no lane table, so the known set is the union of every column that
 // carries a live lane name.
-func knownTaskLanesTx(ctx context.Context, tx pgx.Tx, name string) (bool, error) {
+func knownTaskLanesTx(ctx context.Context, tx transaction, name string) (bool, error) {
 	var known bool
+	if dialectFor(tx) == mysqlDialect {
+		return knownTaskLanesMySQLTx(ctx, tx, name)
+	}
 	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE lane=$1)
 		OR EXISTS(SELECT 1 FROM tasks WHERE parent_lane=$1)
 		OR EXISTS(SELECT 1 FROM relay_events WHERE owner_lane=$1)
@@ -2810,36 +2853,39 @@ func knownTaskLanesTx(ctx context.Context, tx pgx.Tx, name string) (bool, error)
 // unless allowNewLane is set, so a typo cannot strand a task in a lane no
 // owner lists.
 func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, allowNewLane bool) (x Task, changed bool, err error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, false, ErrDialectUnsupported
-	}
-
-	tx, err := s.pool.Begin(ctx)
+	err = s.retryTx(ctx, func() error {
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		x, changed, err = s.relaneTaskTx(ctx, tx, id, to, by, note, allowNewLane, "", "")
+		if err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return Task{}, false, err
 	}
-	defer tx.Rollback(ctx)
-	x, changed, err = s.relaneTaskTx(ctx, tx, id, to, by, note, allowNewLane, "", "")
-	if err != nil {
-		return Task{}, false, err
-	}
-	return x, changed, tx.Commit(ctx)
+	return x, changed, nil
 }
 
 // relaneTaskTx is RelaneTask inside a caller's transaction. source and ref,
 // when set, name the idempotent operator write on the recorded event.
-func (s *Store) relaneTaskTx(ctx context.Context, tx pgx.Tx, id int64, to, by, note string, allowNewLane bool, source, ref string) (x Task, changed bool, err error) {
+func (s *Store) relaneTaskTx(ctx context.Context, tx transaction, id int64, to, by, note string, allowNewLane bool, source, ref string) (x Task, changed bool, err error) {
 	if !validName(to) || by == "" || !validText(by, 128) || strings.TrimSpace(note) == "" || !validText(note, MaxBytes) {
 		return Task{}, false, errors.New("invalid task relane")
 	}
 	if err := guard.Reject(note); err != nil {
 		return Task{}, false, err
 	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err = s.lockTx(ctx, tx, coreTaskMutationLock); err != nil {
 		return Task{}, false, err
 	}
 
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return Task{}, false, ErrTaskNotFound
 		}
@@ -2863,7 +2909,9 @@ func (s *Store) relaneTaskTx(ctx context.Context, tx pgx.Tx, id int64, to, by, n
 	}
 	from := x.Lane
 	x.UpdatedAt = time.Now().UTC()
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET lane=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, to, x.UpdatedAt), &x); err != nil {
+	if err = s.updateTaskReturningCore(ctx, tx, &x, id,
+		`UPDATE tasks SET lane=$2,updated_at=$3 WHERE id=$1 RETURNING `, []any{id, to, x.UpdatedAt},
+		`UPDATE tasks SET lane=?,updated_at=? WHERE id=?`, []any{to, x.UpdatedAt, id}); err != nil {
 		return Task{}, false, err
 	}
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "relane", From: from, To: to, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "lane", FromValue: from, ToValue: to, Source: source, SourceRef: ref}); err != nil {
@@ -2883,69 +2931,83 @@ func (s *Store) SetTaskProject(ctx context.Context, id int64, project, by, note 
 }
 
 func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, project, by, note string, patch *ProjectMetadataPatch) (x Task, changed bool, err error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, false, ErrDialectUnsupported
-	}
-
 	if !validName(project) || by == "" || !validText(by, 128) || !validText(note, MaxBytes) {
 		return Task{}, false, errors.New("invalid task project change")
 	}
 	if err := guard.Reject(note); err != nil {
 		return Task{}, false, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	err = s.retryTx(ctx, func() error {
+		x, changed = Task{}, false
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		if err = s.lockTx(ctx, tx, coreTaskMutationLock); err != nil {
+			return err
+		}
+
+		if err = scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
+			if errors.Is(err, ErrNoRows) {
+				return ErrTaskNotFound
+			}
+			return err
+		}
+
+		var known bool
+		if err = tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=?)`), project).Scan(&known); err != nil {
+			return err
+		}
+		if !known {
+			return fmt.Errorf("%w: %q is not in the server's project set (the allowed set is listed by tasks projects)", ErrTaskProjectUnknown, project)
+		}
+		from := ""
+		if x.Project != nil {
+			from = *x.Project
+		}
+		if from != project && x.MilestoneID != nil {
+			return ErrMilestoneProject
+		}
+		if patch != nil {
+			if _, err = patchProjectMetadataTx(ctx, tx, project, *patch); err != nil {
+				return err
+			}
+		}
+		if from == project {
+			changed = false
+			return tx.Commit(ctx)
+		}
+		x.UpdatedAt = time.Now().UTC()
+		if err = s.updateTaskReturningCore(ctx, tx, &x, id,
+			`UPDATE tasks SET project=$2,updated_at=$3 WHERE id=$1 RETURNING `, []any{id, project, x.UpdatedAt},
+			`UPDATE tasks SET project=?,updated_at=? WHERE id=?`, []any{project, x.UpdatedAt, id}); err != nil {
+			return err
+		}
+		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "project", From: from, To: project, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "project", FromValue: from, ToValue: project}); err != nil {
+			return err
+		}
+		// A task with no op gets its first, on its intent's tenant when it has
+		// one (hk 3942); an existing op is left as it is: its claim targets the
+		// task's project then (claimYTIssueTargetTx, hk 3909). Task row, then
+		// lane lock, as CreateTask (lockorder.go).
+		if s.dialect == mysqlDialect {
+			// B4 dependency: ensureYTIssueTx returns first unless the YouTrack issue
+			// gate is on, and the yt_write_ops path is not ported yet.
+			if mode, _ := s.ytIssuesNow(); mode == YTIssuesOn {
+				return ErrDialectUnsupported
+			}
+		} else if _, err := s.ensureYTIssueTx(ctx, pgxTx(tx), x, x.UpdatedAt, false); err != nil {
+			return err
+		}
+		changed = true
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return Task{}, false, err
 	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-		return Task{}, false, err
-	}
-
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, ErrNoRows) {
-			return Task{}, false, ErrTaskNotFound
-		}
-		return Task{}, false, err
-	}
-
-	var known bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, project).Scan(&known); err != nil {
-		return Task{}, false, err
-	}
-	if !known {
-		return Task{}, false, fmt.Errorf("%w: %q is not in the server's project set (the allowed set is listed by tasks projects)", ErrTaskProjectUnknown, project)
-	}
-	from := ""
-	if x.Project != nil {
-		from = *x.Project
-	}
-	if from != project && x.MilestoneID != nil {
-		return Task{}, false, ErrMilestoneProject
-	}
-	if patch != nil {
-		if _, err = patchProjectMetadataTx(ctx, tx, project, *patch); err != nil {
-			return Task{}, false, err
-		}
-	}
-	if from == project {
-		return x, false, tx.Commit(ctx)
-	}
-	x.UpdatedAt = time.Now().UTC()
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET project=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, project, x.UpdatedAt), &x); err != nil {
-		return Task{}, false, err
-	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "project", From: from, To: project, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "project", FromValue: from, ToValue: project}); err != nil {
-		return Task{}, false, err
-	}
-	// A task with no op gets its first, on its intent's tenant when it has
-	// one (hk 3942); an existing op is left as it is: its claim targets the
-	// task's project then (claimYTIssueTargetTx, hk 3909). Task row, then
-	// lane lock, as CreateTask (lockorder.go).
-	if _, err := s.ensureYTIssueTx(ctx, tx, x, x.UpdatedAt, false); err != nil {
-		return Task{}, false, err
-	}
-	return x, true, tx.Commit(ctx)
+	return x, changed, nil
 }
 
 // SetTaskArea tags one task from the TaskAreas vocabulary; a nil area clears
@@ -2954,10 +3016,6 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 // event when the value is unchanged. Like project it is allowed on terminal
 // rows: area is routing metadata, not lifecycle.
 func (s *Store) SetTaskArea(ctx context.Context, id int64, area *string, by, note string) (x Task, changed bool, err error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, false, ErrDialectUnsupported
-	}
-
 	if err := CheckTaskArea(area); err != nil {
 		return Task{}, false, err
 	}
@@ -2967,45 +3025,52 @@ func (s *Store) SetTaskArea(ctx context.Context, id int64, area *string, by, not
 	if err := guard.Reject(note); err != nil {
 		return Task{}, false, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	err = s.retryTx(ctx, func() error {
+		x, changed = Task{}, false
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		if err = scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
+			if errors.Is(err, ErrNoRows) {
+				return ErrTaskNotFound
+			}
+			return err
+		}
+		from, to := "", ""
+		if x.Area != nil {
+			from = *x.Area
+		}
+		if area != nil {
+			to = *area
+		}
+		if from == to {
+			return tx.Commit(ctx)
+		}
+		x.UpdatedAt = time.Now().UTC()
+		if err = s.updateTaskReturningCore(ctx, tx, &x, id,
+			`UPDATE tasks SET area=$2,updated_at=$3 WHERE id=$1 RETURNING `, []any{id, area, x.UpdatedAt},
+			`UPDATE tasks SET area=?,updated_at=? WHERE id=?`, []any{area, x.UpdatedAt, id}); err != nil {
+			return err
+		}
+		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "area", From: from, To: to, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "area", FromValue: from, ToValue: to}); err != nil {
+			return err
+		}
+		changed = true
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return Task{}, false, err
 	}
-	defer tx.Rollback(ctx)
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, ErrNoRows) {
-			return Task{}, false, ErrTaskNotFound
-		}
-		return Task{}, false, err
-	}
-	from, to := "", ""
-	if x.Area != nil {
-		from = *x.Area
-	}
-	if area != nil {
-		to = *area
-	}
-	if from == to {
-		return x, false, tx.Commit(ctx)
-	}
-	x.UpdatedAt = time.Now().UTC()
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET area=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, area, x.UpdatedAt), &x); err != nil {
-		return Task{}, false, err
-	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "area", From: from, To: to, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "area", FromValue: from, ToValue: to}); err != nil {
-		return Task{}, false, err
-	}
-	return x, true, tx.Commit(ctx)
+	return x, changed, nil
 }
 
 // ListTaskProjects returns the server-configured project vocabulary in
 // name order. This is the set tasks add --project accepts.
 func (s *Store) ListTaskProjects(ctx context.Context) ([]string, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
-	rows, err := s.pool.Query(ctx, `SELECT name FROM task_projects ORDER BY name`)
+	rows, err := s.db().Query(ctx, `SELECT name FROM task_projects ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -3024,18 +3089,25 @@ func (s *Store) ListTaskProjects(ctx context.Context) ([]string, error) {
 // AddTaskProject extends the server-configured project vocabulary. Names
 // share the lane alphabet; created=false when the name already exists.
 func (s *Store) AddTaskProject(ctx context.Context, name, by string) (bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return false, ErrDialectUnsupported
-	}
-
 	if !validName(name) || by == "" || !validText(by, 128) {
 		return false, errors.New("invalid task project")
 	}
-	tag, err := s.pool.Exec(ctx, `INSERT INTO task_projects(name,created_by,created_at) VALUES($1,$2,now()) ON CONFLICT (name) DO NOTHING`, name, by)
+	if s.dialect == mysqlDialect {
+		// ON DUPLICATE KEY UPDATE reports a matched row as one affected row here,
+		// so it cannot tell an insert from a no-op. The name is the only unique
+		// key and the table has no foreign keys, so a plain INSERT whose
+		// duplicate-key error means "already existed" decides it exactly.
+		_, err := s.db().Exec(ctx, `INSERT INTO task_projects(name,created_by,created_at) VALUES(?,?,UTC_TIMESTAMP(6))`, name, by)
+		if errors.Is(err, errUniqueViolation) {
+			return false, nil
+		}
+		return err == nil, err
+	}
+	n, err := s.db().Exec(ctx, `INSERT INTO task_projects(name,created_by,created_at) VALUES($1,$2,now()) ON CONFLICT (name) DO NOTHING`, name, by)
 	if err != nil {
 		return false, err
 	}
-	return tag.RowsAffected() == 1, nil
+	return n == 1, nil
 }
 
 func (s *Store) ListTasks(ctx context.Context, lane, state, parentLane string, project, area *string, limit int) ([]Task, error) {
@@ -3068,10 +3140,6 @@ type TaskQuery struct {
 
 // ListTasksFiltered lists tasks matching q and marks stalled rows.
 func (s *Store) ListTasksFiltered(ctx context.Context, tq TaskQuery) ([]Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if !validTaskQuery(tq.Lane, tq.State, tq.ParentLane, tq.Project) || (tq.AfterID != nil && *tq.AfterID < 0) {
 		return nil, errors.New("invalid task query")
 	}
@@ -3085,31 +3153,45 @@ func (s *Store) ListTasksFiltered(ctx context.Context, tq TaskQuery) ([]Task, er
 	if limit > 1000 {
 		limit = 1000
 	}
-	q, args := `SELECT `+taskColumns+` FROM tasks WHERE 1=1`, []any{}
+	// ph renders the placeholder of the argument just appended: $n on PostgreSQL,
+	// ? on MySQL. Every argument is used once and in order, so ? needs no repeats.
+	my := s.dialect == mysqlDialect
+	args := []any{}
+	ph := func() string {
+		if my {
+			return "?"
+		}
+		return fmt.Sprintf("$%d", len(args))
+	}
+	q := `SELECT ` + taskColumns + ` FROM tasks WHERE 1=1`
 	// An after-id cursor belongs to the id-ordered pages. The updated_at
 	// keyset carries its own AfterID inside the row comparison below; an
 	// id> filter here would drop rows with a newer updated_at but a lower id.
 	if tq.AfterID != nil && tq.AfterUpdatedAt == nil {
 		args = append(args, *tq.AfterID)
-		q += fmt.Sprintf(" AND id>$%d", len(args))
+		q += " AND id>" + ph()
 	}
 	if tq.Lane != "" {
 		args = append(args, tq.Lane)
-		q += fmt.Sprintf(" AND lane=$%d", len(args))
+		q += " AND lane=" + ph()
 	}
 	if tq.ParentLane != "" {
 		args = append(args, tq.ParentLane)
-		q += fmt.Sprintf(" AND parent_lane=$%d", len(args))
+		q += " AND parent_lane=" + ph()
 	}
 	if tq.State != "" {
-		q += stateClause(tq.State, &args)
+		if my {
+			q += stateClauseCore(tq.State, &args)
+		} else {
+			q += stateClause(tq.State, &args)
+		}
 	}
 	if tq.Project != nil {
 		if *tq.Project == "" {
 			q += " AND project IS NULL"
 		} else {
 			args = append(args, *tq.Project)
-			q += fmt.Sprintf(" AND project=$%d", len(args))
+			q += " AND project=" + ph()
 		}
 	}
 	if tq.Area != nil {
@@ -3117,40 +3199,46 @@ func (s *Store) ListTasksFiltered(ctx context.Context, tq TaskQuery) ([]Task, er
 			q += " AND area IS NULL"
 		} else {
 			args = append(args, *tq.Area)
-			q += fmt.Sprintf(" AND area=$%d", len(args))
+			q += " AND area=" + ph()
 		}
 	}
 	if tq.ChangeID != nil {
 		args = append(args, *tq.ChangeID)
-		q += fmt.Sprintf(" AND id IN (SELECT task_id FROM change_tasks WHERE change_id=$%d)", len(args))
+		q += " AND id IN (SELECT task_id FROM change_tasks WHERE change_id=" + ph() + ")"
 	}
 	if tq.UpdatedSince != nil {
 		args = append(args, tq.UpdatedSince.UTC())
-		q += fmt.Sprintf(" AND updated_at >= $%d", len(args))
+		q += " AND updated_at >= " + ph()
 	}
 	if tq.AfterUpdatedAt != nil {
 		afterID := int64(0)
 		if tq.AfterID != nil {
 			afterID = *tq.AfterID
 		}
-		args = append(args, tq.AfterUpdatedAt.UTC(), afterID)
-		q += fmt.Sprintf(" AND (updated_at,id) > ($%d,$%d)", len(args)-1, len(args))
+		args = append(args, tq.AfterUpdatedAt.UTC())
+		first := ph()
+		args = append(args, afterID)
+		q += " AND (updated_at,id) > (" + first + "," + ph() + ")"
 	}
 	now := time.Now().UTC()
 	if tq.Stalled {
 		args = append(args, now.Add(-s.StartedStalledHours()))
-		q += fmt.Sprintf(" AND state IN ("+startedStatesSQL+") AND NOT awaiting_decision AND "+taskActivitySQL+" < $%d", len(args))
+		activity := taskActivitySQL
+		if my {
+			activity = coreTaskActivitySQL
+		}
+		q += " AND state IN (" + startedStatesSQL + ") AND NOT awaiting_decision AND " + activity + " < " + ph()
 	}
 	args = append(args, limit)
 	switch {
 	case tq.UpdatedSince != nil || tq.AfterUpdatedAt != nil:
-		q += fmt.Sprintf(" ORDER BY updated_at ASC,id ASC LIMIT $%d", len(args))
+		q += " ORDER BY updated_at ASC,id ASC LIMIT " + ph()
 	case tq.AfterID != nil || tq.ChangeID != nil:
-		q += fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args))
+		q += " ORDER BY id ASC LIMIT " + ph()
 	default:
-		q += fmt.Sprintf(" ORDER BY priority DESC,created_at ASC,id ASC LIMIT $%d", len(args))
+		q += " ORDER BY priority DESC,created_at ASC,id ASC LIMIT " + ph()
 	}
-	rows, err := s.pool.Query(ctx, q, args...)
+	rows, err := s.db().Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -3167,22 +3255,18 @@ func (s *Store) ListTasksFiltered(ctx context.Context, tq TaskQuery) ([]Task, er
 		return nil, err
 	}
 	rows.Close()
-	if err := s.markStalled(ctx, s.pool, out, now); err != nil {
+	if err := s.markStalled(ctx, s.db(), out, now); err != nil {
 		return out, err
 	}
-	return out, attachTaskSpawns(ctx, s.pool, out)
+	return out, attachTaskSpawns(ctx, s.db(), out)
 }
 
 // GlanceTasks returns the counts and active task slice needed by the compact UI
 // API. Counts span every lane; active tasks have the API's stable newest-first
 // ordering rather than the queue's priority ordering.
 func (s *Store) GlanceTasks(ctx context.Context) (map[string]int, []Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, nil, ErrDialectUnsupported
-	}
-
 	counts := map[string]int{}
-	rows, err := s.pool.Query(ctx, `SELECT state,COUNT(*) FROM tasks GROUP BY state`)
+	rows, err := s.db().Query(ctx, `SELECT state,COUNT(*) FROM tasks GROUP BY state`)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -3202,11 +3286,11 @@ func (s *Store) GlanceTasks(ctx context.Context) (map[string]int, []Task, error)
 	// The flag that replaced needs_decision is not a state; it is reported
 	// beside the states under its own key.
 	var awaiting int
-	if err = s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE awaiting_decision`).Scan(&awaiting); err != nil {
+	if err = s.db().QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE awaiting_decision`).Scan(&awaiting); err != nil {
 		return nil, nil, err
 	}
 	counts[AwaitingDecisionKey] = awaiting
-	rows, err = s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks
+	rows, err = s.db().Query(ctx, `SELECT `+taskColumns+` FROM tasks
 		WHERE state IN ('researching','developing','reviewing')
 		ORDER BY updated_at DESC,id DESC LIMIT 20`)
 	if err != nil {
@@ -3228,26 +3312,22 @@ func (s *Store) GlanceTasks(ctx context.Context) (map[string]int, []Task, error)
 }
 
 func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, false, ErrDialectUnsupported
-	}
-
 	var x Task
-	if err := scanTask(s.pool.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, id), &x); err != nil {
+	if err := scanTask(s.db().QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1`, `SELECT `+taskColumns+` FROM tasks WHERE id=?`), id), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return Task{}, false, nil
 		}
 		return Task{}, false, err
 	}
 	one := []Task{x}
-	if err := s.markStalled(ctx, s.pool, one, time.Now().UTC()); err != nil {
+	if err := s.markStalled(ctx, s.db(), one, time.Now().UTC()); err != nil {
 		return Task{}, false, err
 	}
-	if err := attachTaskSpawns(ctx, s.pool, one); err != nil {
+	if err := attachTaskSpawns(ctx, s.db(), one); err != nil {
 		return Task{}, false, err
 	}
 	x = one[0]
-	rows, err := s.pool.Query(ctx, `SELECT `+taskEventColumns+` FROM task_events WHERE task_id=$1 ORDER BY at,id`, id)
+	rows, err := s.db().Query(ctx, s.q(`SELECT `+taskEventColumns+` FROM task_events WHERE task_id=$1 ORDER BY at,id`, `SELECT `+coreTaskEventColumnsMySQL()+` FROM task_events WHERE task_id=? ORDER BY at,id`), id)
 	if err != nil {
 		return Task{}, false, err
 	}
@@ -3750,7 +3830,7 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 		if e = writeDeployProjection(ctx, tx, projection); e != nil {
 			return x, true, e
 		}
-		if e = s.applyDeployRecordTx(ctx, tx, projection, now); e != nil {
+		if e = s.applyDeployRecordTx(ctx, pgTransaction{tx}, projection, now); e != nil {
 			return x, true, e
 		}
 		if e = queueDeployRecordNoticeTx(ctx, tx, projection, now); e != nil {

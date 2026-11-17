@@ -29,6 +29,9 @@ func Parse(raw string) (*mysql.Config, error) {
 	cfg.DBName = strings.TrimPrefix(u.Path, "/")
 	cfg.ParseTime = true
 	cfg.Loc = time.UTC
+	// An UPDATE reports the rows it matched, as PostgreSQL does, not only the
+	// rows whose values changed: store code decides "not found" from it.
+	cfg.ClientFoundRows = true
 	cfg.Params = make(map[string]string)
 	for key, values := range u.Query() {
 		if len(values) != 1 {

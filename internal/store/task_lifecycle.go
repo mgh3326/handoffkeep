@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -57,10 +56,6 @@ func validLifecycleKey(key string) bool {
 // transaction so no reader sees the half path. path is the states traversed,
 // starting at the state the task had before this call.
 func (s *Store) CloseTaskMerged(ctx context.Context, id int64, evidence, by, note, key string) (Task, []string, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, nil, ErrDialectUnsupported
-	}
-
 	evidence = strings.TrimSpace(evidence)
 	if !validLifecycleKey(key) || by == "" || !validText(by, 128) || !validText(note, MaxBytes) || !validText(evidence, 1024) {
 		return Task{}, nil, errors.New("invalid task lifecycle action")
@@ -68,19 +63,34 @@ func (s *Store) CloseTaskMerged(ctx context.Context, id int64, evidence, by, not
 	if err := guard.Reject(evidence); err != nil {
 		return Task{}, nil, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	var x Task
+	var path []string
+	err := s.retryTx(ctx, func() (err error) {
+		x, path, err = s.closeTaskMergedOnce(ctx, id, evidence, by, note, key)
+		return err
+	})
 	if err != nil {
 		return Task{}, nil, err
 	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	return x, path, nil
+}
+
+// closeTaskMergedOnce is one attempt of CloseTaskMerged, in its own transaction.
+func (s *Store) closeTaskMergedOnce(ctx context.Context, id int64, evidence, by, note, key string) (Task, []string, error) {
+	tx, release, err := s.begin(ctx)
+	if err != nil {
 		return Task{}, nil, err
 	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+	defer release()
+	defer tx.Rollback(ctx)
+	if err = s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
+		return Task{}, nil, err
+	}
+	if err = s.lockTx(ctx, tx, taskCommentInsertLock); err != nil {
 		return Task{}, nil, err
 	}
 	var x Task
-	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+	if err := scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return Task{}, nil, ErrTaskNotFound
 		}
@@ -126,8 +136,9 @@ func (s *Store) CloseTaskMerged(ctx context.Context, id int64, evidence, by, not
 
 // recordedLifecyclePath returns the states a recorded close-as-merged call
 // traversed: the from of its first event followed by every to.
-func recordedLifecyclePath(ctx context.Context, tx pgx.Tx, id int64, source, key string) ([]string, bool, error) {
-	rows, err := tx.Query(ctx, `SELECT "from","to" FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=ANY($3) ORDER BY id`, id, source, []string{key, key + ":" + StateReviewing})
+func recordedLifecyclePath(ctx context.Context, tx transaction, id int64, source, key string) ([]string, bool, error) {
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT "from","to" FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=ANY($3) ORDER BY id`,
+		"SELECT `from`,`to` FROM task_events WHERE task_id=? AND source=? AND source_ref IN (?,?) ORDER BY id"), recordedLifecycleArgs(tx, id, source, key)...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -152,9 +163,6 @@ func recordedLifecyclePath(ctx context.Context, tx pgx.Tx, id int64, source, key
 // CloseTaskCompleted closes a decide, ops, verify or research task with a result link,
 // document key, task reference, or written reason as evidence.
 func (s *Store) CloseTaskCompleted(ctx context.Context, id int64, evidence, by, note, key string) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
 	return s.operatorTransition(ctx, id, lifecycleSourceCloseCompleted, key, TransitionInput{
 		To: StateCompleted, Closure: "resolved", Evidence: strings.TrimSpace(evidence), By: by, Note: note,
 	}, false)
@@ -164,9 +172,6 @@ func (s *Store) CloseTaskCompleted(ctx context.Context, id int64, evidence, by, 
 // cancelled, obsolete or superseded. The reason is both the event note and
 // the closure evidence.
 func (s *Store) DropTask(ctx context.Context, id int64, closure, reason, by, key string) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
 	switch closure {
 	case "cancelled", "obsolete", "superseded":
 	default:
@@ -180,9 +185,6 @@ func (s *Store) DropTask(ctx context.Context, id int64, closure, reason, by, key
 // DuplicateTask closes a task as a duplicate of duplicateOf, which the store
 // writes as a duplicate_of relation and the closure evidence names.
 func (s *Store) DuplicateTask(ctx context.Context, id, duplicateOf int64, reason, by, key string) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
 	if duplicateOf < 0 {
 		return Task{}, errors.New("invalid task lifecycle action")
 	}
@@ -196,33 +198,43 @@ func (s *Store) DuplicateTask(ctx context.Context, id, duplicateOf int64, reason
 // there). The result names both states so the console's undo can restore the
 // exact previous one.
 func (s *Store) HoldTask(ctx context.Context, id int64, held bool, to, by, note, key string) (HoldResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return HoldResult{}, ErrDialectUnsupported
-	}
-
 	if !validLifecycleKey(key) || by == "" || !validText(by, 128) || !validText(note, MaxBytes) {
 		return HoldResult{}, errors.New("invalid task lifecycle action")
 	}
 	if err := guard.Reject(note); err != nil {
 		return HoldResult{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	var out HoldResult
+	err := s.retryTx(ctx, func() (err error) {
+		out, err = s.holdTaskOnce(ctx, id, held, to, by, note, key)
+		return err
+	})
 	if err != nil {
 		return HoldResult{}, err
 	}
+	return out, nil
+}
+
+// holdTaskOnce is one attempt of HoldTask, in its own transaction.
+func (s *Store) holdTaskOnce(ctx context.Context, id int64, held bool, to, by, note, key string) (HoldResult, error) {
+	tx, release, err := s.begin(ctx)
+	if err != nil {
+		return HoldResult{}, err
+	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err = s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
 		return HoldResult{}, err
 	}
 	var x Task
-	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+	if err := scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return HoldResult{}, ErrTaskNotFound
 		}
 		return HoldResult{}, err
 	}
 	var previous, state string
-	err = tx.QueryRow(ctx, `SELECT "from","to" FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3`, id, lifecycleSourceHold, key).Scan(&previous, &state)
+	err = tx.QueryRow(ctx, s.q(`SELECT "from","to" FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3`, "SELECT `from`,`to` FROM task_events WHERE task_id=? AND source=? AND source_ref=?"), id, lifecycleSourceHold, key).Scan(&previous, &state)
 	if err == nil {
 		return HoldResult{Previous: previous, State: state}, tx.Commit(ctx)
 	}
@@ -257,9 +269,6 @@ func (s *Store) HoldTask(ctx context.Context, id int64, held bool, to, by, note,
 // ReopenTaskBy reopens a settled or held task with a reason and an idempotency
 // key. It is ReopenTask with the operator replay marker on its event.
 func (s *Store) ReopenTaskBy(ctx context.Context, id int64, by, reason, key string) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
 	return s.operatorTransition(ctx, id, lifecycleSourceReopen, key, TransitionInput{
 		To: StateUnstarted, By: by, Note: reason,
 	}, true)
@@ -274,30 +283,40 @@ func (s *Store) ReopenTaskBy(ctx context.Context, id int64, by, reason, key stri
 // known-lane check cannot see after the forward move emptied it. Any other
 // unknown lane is still refused.
 func (s *Store) OperatorRelaneTask(ctx context.Context, id int64, to, by, note, key, restoreKey string) (RelaneResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return RelaneResult{}, ErrDialectUnsupported
-	}
-
 	if !validLifecycleKey(key) || by == "" || !validText(by, 128) {
 		return RelaneResult{}, errors.New("invalid task lifecycle action")
 	}
-	tx, err := s.pool.Begin(ctx)
+	var out RelaneResult
+	err := s.retryTx(ctx, func() (err error) {
+		out, err = s.operatorRelaneOnce(ctx, id, to, by, note, key, restoreKey)
+		return err
+	})
 	if err != nil {
 		return RelaneResult{}, err
 	}
+	return out, nil
+}
+
+// operatorRelaneOnce is one attempt of OperatorRelaneTask, in its own transaction.
+func (s *Store) operatorRelaneOnce(ctx context.Context, id int64, to, by, note, key, restoreKey string) (RelaneResult, error) {
+	tx, release, err := s.begin(ctx)
+	if err != nil {
+		return RelaneResult{}, err
+	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err = s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
 		return RelaneResult{}, err
 	}
 	var x Task
-	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+	if err := scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return RelaneResult{}, ErrTaskNotFound
 		}
 		return RelaneResult{}, err
 	}
 	var previous, recordedTo string
-	err = tx.QueryRow(ctx, `SELECT "from","to" FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3`, id, lifecycleSourceRelane, key).Scan(&previous, &recordedTo)
+	err = tx.QueryRow(ctx, s.q(`SELECT "from","to" FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3`, "SELECT `from`,`to` FROM task_events WHERE task_id=? AND source=? AND source_ref=?"), id, lifecycleSourceRelane, key).Scan(&previous, &recordedTo)
 	if err == nil {
 		return RelaneResult{Previous: previous, Lane: recordedTo, Title: x.Title, Changed: true}, tx.Commit(ctx)
 	}
@@ -307,7 +326,7 @@ func (s *Store) OperatorRelaneTask(ctx context.Context, id int64, to, by, note, 
 	allowNewLane := false
 	if restoreKey != "" {
 		var recordedFrom string
-		err := tx.QueryRow(ctx, `SELECT "from" FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3`, id, lifecycleSourceRelane, restoreKey).Scan(&recordedFrom)
+		err := tx.QueryRow(ctx, s.q(`SELECT "from" FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3`, "SELECT `from` FROM task_events WHERE task_id=? AND source=? AND source_ref=?"), id, lifecycleSourceRelane, restoreKey).Scan(&recordedFrom)
 		if errors.Is(err, ErrNoRows) || (err == nil && recordedFrom != to) {
 			return RelaneResult{}, ErrTaskLaneUnknown
 		}
@@ -331,23 +350,37 @@ func (s *Store) operatorTransition(ctx context.Context, id int64, source, key st
 	if !validLifecycleKey(key) || in.By == "" || !validText(in.By, 128) {
 		return Task{}, errors.New("invalid task lifecycle action")
 	}
-	tx, err := s.pool.Begin(ctx)
+	var out Task
+	err := s.retryTx(ctx, func() (err error) {
+		out, err = s.operatorTransitionOnce(ctx, id, source, key, in, reopen)
+		return err
+	})
 	if err != nil {
 		return Task{}, err
 	}
+	return out, nil
+}
+
+// operatorTransitionOnce is one attempt of operatorTransition, in its own transaction.
+func (s *Store) operatorTransitionOnce(ctx context.Context, id int64, source, key string, in TransitionInput, reopen bool) (Task, error) {
+	tx, release, err := s.begin(ctx)
+	if err != nil {
+		return Task{}, err
+	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err = s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
 		return Task{}, err
 	}
 	var x Task
-	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+	if err := scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return Task{}, ErrTaskNotFound
 		}
 		return Task{}, err
 	}
 	var recorded bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3)`, id, source, key).Scan(&recorded); err != nil {
+	if err := tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3)`, `SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=? AND source=? AND source_ref=?)`), id, source, key).Scan(&recorded); err != nil {
 		return Task{}, err
 	}
 	if recorded {
@@ -364,11 +397,9 @@ func (s *Store) operatorTransition(ctx context.Context, id int64, source, key st
 // ListKnownTaskLanes lists every lane a current row uses: the same union the
 // relane write trusts when allowNewLane is false.
 func (s *Store) ListKnownTaskLanes(ctx context.Context) ([]string, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
-	rows, err := s.pool.Query(ctx, `SELECT name FROM (
+	// relay_events (B7) and chat_questions (B6) belong to other areas; the
+	// statement has no dialect-specific syntax, so it is one text.
+	rows, err := s.db().Query(ctx, `SELECT name FROM (
 		SELECT lane AS name FROM tasks
 		UNION SELECT parent_lane AS name FROM tasks WHERE parent_lane <> ''
 		UNION SELECT owner_lane AS name FROM relay_events
@@ -387,4 +418,14 @@ func (s *Store) ListKnownTaskLanes(ctx context.Context) ([]string, error) {
 		lanes = append(lanes, name)
 	}
 	return lanes, rows.Err()
+}
+
+// recordedLifecycleArgs is recordedLifecyclePath's argument list: PostgreSQL
+// binds the two references as one array, MySQL as two placeholders.
+func recordedLifecycleArgs(tx transaction, id int64, source, key string) []any {
+	refs := []string{key, key + ":" + StateReviewing}
+	if dialectFor(tx) == mysqlDialect {
+		return []any{id, source, refs[0], refs[1]}
+	}
+	return []any{id, source, refs}
 }

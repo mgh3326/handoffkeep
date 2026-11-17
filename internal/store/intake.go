@@ -12,7 +12,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -72,12 +71,17 @@ func (e *SimilarTasksError) Error() string {
 }
 
 type rowsQuerier interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
+	Query(context.Context, string, ...any) (rows, error)
 }
 
 // similarOpenTasks lists started, unstarted and backlog tasks whose title is
 // similar to any of titles, most similar first.
 func similarOpenTasks(ctx context.Context, q rowsQuerier, titles []string) ([]SimilarTask, error) {
+	if dialectFor(q) == mysqlDialect {
+		// MySQL has no pg_trgm: the same trigram score is computed in Go over the
+		// open titles (design 11.7), see intake_similar_mysql.go.
+		return intakeSimilarOpenTasks(ctx, q, titles)
+	}
 	rows, err := q.Query(ctx, `SELECT t.id, t.title, t.state, t.lane, max(similarity(t.title, n.title))::float8 AS score
 		FROM tasks t CROSS JOIN unnest($1::text[]) AS n(title)
 		WHERE t.state IN ('backlog','unstarted',`+startedStatesSQL+`) AND similarity(t.title, n.title) >= $2
@@ -173,7 +177,7 @@ func checkIntakeHeader(source, sourceRef, lane, by string) error {
 // taskBySourceTx returns the task recorded for (source, source_ref).
 func taskBySourceTx(ctx context.Context, q rowQuerier, source, sourceRef string) (Task, bool, error) {
 	var x Task
-	err := scanTask(q.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE source=$1 AND source_ref=$2`, source, sourceRef), &x)
+	err := scanTask(q.QueryRow(ctx, sqlFor(q, `SELECT `+taskColumns+` FROM tasks WHERE source=$1 AND source_ref=$2`, `SELECT `+taskColumns+` FROM tasks WHERE source=? AND source_ref=?`), source, sourceRef), &x)
 	if errors.Is(err, ErrNoRows) {
 		return Task{}, false, nil
 	}
@@ -183,7 +187,7 @@ func taskBySourceTx(ctx context.Context, q rowQuerier, source, sourceRef string)
 // insertTriageTaskTx creates one task in triage and, when it has a body, the
 // hk document task-body/<id> that holds it, linked by body_doc. The key is
 // named after a task created in this transaction, so no other writer holds it.
-func insertTriageTaskTx(ctx context.Context, tx pgx.Tx, item triageItem, source, sourceRef, lane string, parent *int64, by string, now time.Time) (Task, error) {
+func insertTriageTaskTx(ctx context.Context, tx transaction, item triageItem, source, sourceRef, lane string, parent *int64, by string, now time.Time) (Task, error) {
 	if item.Project != nil {
 		if err := requireTaskProject(ctx, tx, item.Project); err != nil {
 			return Task{}, err
@@ -193,6 +197,20 @@ func insertTriageTaskTx(ctx context.Context, tx pgx.Tx, item triageItem, source,
 		lane = IntakeLane
 	}
 	var x Task
+	if dialectFor(tx) == mysqlDialect {
+		if item.Body != "" {
+			// B3 dependency: the body is the document task-body/<id>, which only
+			// the documents area writes on MySQL.
+			return Task{}, ErrDialectUnsupported
+		}
+		id, err := tx.InsertID(ctx, `INSERT INTO tasks(lane,title,kind,state,priority,created_by,created_at,updated_at,last_activity_at,started_triage_at,project,parent_id,source,source_ref) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			lane, item.Title, item.Kind, StateTriage, item.Priority, by, now, now, now, now, item.Project, parent, source, sourceRef)
+		if err != nil {
+			return Task{}, err
+		}
+		err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=?`, id), &x)
+		return x, err
+	}
 	if err := scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,title,kind,state,priority,created_by,created_at,updated_at,last_activity_at,started_triage_at,project,parent_id,source,source_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$7,$7,$7,$8,$9,$10,$11) RETURNING `+taskColumns,
 		lane, item.Title, item.Kind, StateTriage, item.Priority, by, now, item.Project, parent, source, sourceRef), &x); err != nil {
 		return Task{}, err
@@ -230,39 +248,47 @@ func CheckIntake(in IntakeInput) error {
 // returns the task already recorded for it with created=false and changes
 // nothing. Kind may be left unset; the triage gate requires it on the way out.
 func (s *Store) IntakeTask(ctx context.Context, in IntakeInput) (Task, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, false, ErrDialectUnsupported
-	}
-
 	if err := CheckIntake(in); err != nil {
 		return Task{}, false, err
 	}
 	item := triageItem{Title: in.Title, Body: in.Body, Kind: in.Kind, Project: in.Project, Priority: in.Priority}
-	tx, err := s.pool.Begin(ctx)
+	var out Task
+	var created bool
+	err := s.retryTx(ctx, func() error {
+		out, created = Task{}, false
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		// The same key is looked up and inserted under the task-mutation lock, so
+		// two deliveries of one item cannot both insert.
+		if err = s.lockTx(ctx, tx, 8241873001); err != nil {
+			return err
+		}
+		existing, found, err := taskBySourceTx(ctx, tx, in.Source, in.SourceRef)
+		if err != nil {
+			return err
+		}
+		if found {
+			out = existing
+			return tx.Commit(ctx)
+		}
+		x, err := insertTriageTaskTx(ctx, tx, item, in.Source, in.SourceRef, in.Lane, nil, in.CreatedBy, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if err := s.intakeEnqueueYTIssueTx(ctx, tx, x); err != nil {
+			return err
+		}
+		out, created = x, true
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return Task{}, false, err
 	}
-	defer tx.Rollback(ctx)
-	// The same key is looked up and inserted under the task-mutation lock, so
-	// two deliveries of one item cannot both insert.
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-		return Task{}, false, err
-	}
-	existing, found, err := taskBySourceTx(ctx, tx, in.Source, in.SourceRef)
-	if err != nil {
-		return Task{}, false, err
-	}
-	if found {
-		return existing, false, tx.Commit(ctx)
-	}
-	x, err := insertTriageTaskTx(ctx, tx, item, in.Source, in.SourceRef, in.Lane, nil, in.CreatedBy, time.Now().UTC())
-	if err != nil {
-		return Task{}, false, err
-	}
-	if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
-		return Task{}, false, err
-	}
-	return x, true, tx.Commit(ctx)
+	return out, created, nil
 }
 
 // TicketBlocker is one blocked_by entry: a ref in the same set (a JSON
@@ -491,10 +517,6 @@ func childSourceRef(setRef, ref string) string { return setRef + "/" + ref }
 // created=false; a changed payload for the same (source, source_ref) is
 // refused with ErrTicketSetConflict. Any refusal writes nothing.
 func (s *Store) EmitTicketSet(ctx context.Context, in TicketSetInput) (TicketSet, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return TicketSet{}, false, ErrDialectUnsupported
-	}
-
 	if err := checkTicketSet(in); err != nil {
 		return TicketSet{}, false, err
 	}
@@ -502,19 +524,35 @@ func (s *Store) EmitTicketSet(ctx context.Context, in TicketSetInput) (TicketSet
 	if err != nil {
 		return TicketSet{}, false, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	var out TicketSet
+	var created bool
+	err = s.retryTx(ctx, func() error {
+		var err error
+		out, created, err = s.emitTicketSetOnce(ctx, in, hash)
+		return err
+	})
 	if err != nil {
 		return TicketSet{}, false, err
 	}
+	return out, created, nil
+}
+
+// emitTicketSetOnce is one attempt of EmitTicketSet's transaction.
+func (s *Store) emitTicketSetOnce(ctx context.Context, in TicketSetInput, hash string) (TicketSet, bool, error) {
+	tx, release, err := s.begin(ctx)
+	if err != nil {
+		return TicketSet{}, false, err
+	}
+	defer release()
 	defer tx.Rollback(ctx)
 	// Several task rows and the blocks edges of existing tasks: the
 	// task-mutation lock comes first (lockorder.go).
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err = s.lockTx(ctx, tx, 8241873001); err != nil {
 		return TicketSet{}, false, err
 	}
 	out := TicketSet{Source: in.Source, SourceRef: in.SourceRef}
 	var recorded string
-	err = tx.QueryRow(ctx, `SELECT id,payload_sha256,parent_task_id,created_at FROM ticket_sets WHERE source=$1 AND source_ref=$2`, in.Source, in.SourceRef).Scan(&out.ID, &recorded, &out.ParentID, &out.CreatedAt)
+	err = tx.QueryRow(ctx, s.q(`SELECT id,payload_sha256,parent_task_id,created_at FROM ticket_sets WHERE source=$1 AND source_ref=$2`, `SELECT id,payload_sha256,parent_task_id,created_at FROM ticket_sets WHERE source=? AND source_ref=?`), in.Source, in.SourceRef).Scan(&out.ID, &recorded, &out.ParentID, &out.CreatedAt)
 	switch {
 	case err == nil:
 		if recorded != hash {
@@ -522,7 +560,7 @@ func (s *Store) EmitTicketSet(ctx context.Context, in TicketSetInput) (TicketSet
 		}
 		for _, c := range in.Children {
 			var id int64
-			if err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE source=$1 AND source_ref=$2`, in.Source, childSourceRef(in.SourceRef, c.Ref)).Scan(&id); err != nil {
+			if err = tx.QueryRow(ctx, s.q(`SELECT id FROM tasks WHERE source=$1 AND source_ref=$2`, `SELECT id FROM tasks WHERE source=? AND source_ref=?`), in.Source, childSourceRef(in.SourceRef, c.Ref)).Scan(&id); err != nil {
 				return TicketSet{}, false, err
 			}
 			out.Children = append(out.Children, TicketSetChild{Ref: c.Ref, ID: id})
@@ -536,7 +574,16 @@ func (s *Store) EmitTicketSet(ctx context.Context, in TicketSetInput) (TicketSet
 		keys = append(keys, childSourceRef(in.SourceRef, c.Ref))
 	}
 	var taken bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE source=$1 AND source_ref=ANY($2))`, in.Source, keys).Scan(&taken); err != nil {
+	if s.dialect == mysqlDialect {
+		args := []any{in.Source}
+		for _, k := range keys {
+			args = append(args, k)
+		}
+		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE source=? AND source_ref IN (`+placeholders(len(keys))+`))`, args...).Scan(&taken)
+	} else {
+		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE source=$1 AND source_ref=ANY($2))`, in.Source, keys).Scan(&taken)
+	}
+	if err != nil {
 		return TicketSet{}, false, err
 	}
 	if taken {
@@ -548,7 +595,7 @@ func (s *Store) EmitTicketSet(ctx context.Context, in TicketSetInput) (TicketSet
 				continue
 			}
 			var exists bool
-			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, b.TaskID).Scan(&exists); err != nil {
+			if err = tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?)`), b.TaskID).Scan(&exists); err != nil {
 				return TicketSet{}, false, err
 			}
 			if !exists {
@@ -561,7 +608,7 @@ func (s *Store) EmitTicketSet(ctx context.Context, in TicketSetInput) (TicketSet
 	if err != nil {
 		return TicketSet{}, false, err
 	}
-	if err := s.enqueueYTIssueTx(ctx, tx, parent); err != nil {
+	if err := s.intakeEnqueueYTIssueTx(ctx, tx, parent); err != nil {
 		return TicketSet{}, false, err
 	}
 	out.ParentID, out.CreatedAt = parent.ID, now
@@ -571,7 +618,7 @@ func (s *Store) EmitTicketSet(ctx context.Context, in TicketSetInput) (TicketSet
 		if err != nil {
 			return TicketSet{}, false, fmt.Errorf("child %s: %w", c.Ref, err)
 		}
-		if err := s.enqueueYTIssueTx(ctx, tx, child); err != nil {
+		if err := s.intakeEnqueueYTIssueTx(ctx, tx, child); err != nil {
 			return TicketSet{}, false, err
 		}
 		ids[c.Ref] = child.ID
@@ -588,7 +635,7 @@ func (s *Store) EmitTicketSet(ctx context.Context, in TicketSetInput) (TicketSet
 			}
 		}
 	}
-	if err = tx.QueryRow(ctx, `INSERT INTO ticket_sets(source,source_ref,payload_sha256,parent_task_id,created_at) VALUES($1,$2,$3,$4,$5) RETURNING id`, in.Source, in.SourceRef, hash, parent.ID, now).Scan(&out.ID); err != nil {
+	if out.ID, err = tx.InsertID(ctx, s.q(`INSERT INTO ticket_sets(source,source_ref,payload_sha256,parent_task_id,created_at) VALUES($1,$2,$3,$4,$5) RETURNING id`, `INSERT INTO ticket_sets(source,source_ref,payload_sha256,parent_task_id,created_at) VALUES(?,?,?,?,?)`), in.Source, in.SourceRef, hash, parent.ID, now); err != nil {
 		return TicketSet{}, false, err
 	}
 	return out, true, tx.Commit(ctx)
@@ -610,14 +657,10 @@ type TriageRow struct {
 // its children are not listed on their own while the set's parent is still
 // in triage.
 func (s *Store) ListTriage(ctx context.Context, limit int) ([]TriageRow, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if limit < 1 || limit > 1000 {
 		return nil, errors.New("invalid triage limit")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+prefixedTaskColumns("t")+`,
+	pg := `SELECT ` + prefixedTaskColumns("t") + `,
 			EXISTS(SELECT 1 FROM ticket_sets ts WHERE ts.parent_task_id=t.id),
 			(SELECT count(*) FROM tasks c WHERE c.parent_id=t.id),
 			(SELECT count(*) FROM tasks c WHERE c.parent_id=t.id AND c.state='triage')
@@ -625,7 +668,8 @@ func (s *Store) ListTriage(ctx context.Context, limit int) ([]TriageRow, error) 
 		WHERE t.state='triage'
 		  AND NOT EXISTS (SELECT 1 FROM ticket_sets ps JOIN tasks p ON p.id=ps.parent_task_id WHERE ps.parent_task_id=t.parent_id AND p.state='triage')
 		ORDER BY COALESCE(t.started_triage_at, t.created_at), t.id
-		LIMIT $1`, limit)
+		LIMIT $1`
+	rows, err := s.db().Query(ctx, s.q(pg, strings.Replace(pg, "LIMIT $1", "LIMIT ?", 1)), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -662,7 +706,7 @@ func (s *Store) ListTriage(ctx context.Context, limit int) ([]TriageRow, error) 
 				titles = append(titles, k.Title)
 			}
 		}
-		if r.Similar, err = similarOpenTasks(ctx, s.pool, titles); err != nil {
+		if r.Similar, err = similarOpenTasks(ctx, s.db(), titles); err != nil {
 			return nil, err
 		}
 	}

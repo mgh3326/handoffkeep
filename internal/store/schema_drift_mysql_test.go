@@ -14,9 +14,13 @@ import (
 
 // These are deliberately named, not a wildcard: an unexpected PostgreSQL
 // table must fail this check until its owner ports it or records an exception.
-var mysqlNotYetPorted = wordSet(`attachment_refs attachment_uploads attachment_usage attachments change_checks change_findings change_gate_events change_tasks change_threads changes chat_message_questions chat_messages chat_questions checkpoints decision_answer_attempts decision_deliveries decision_notify_digest decision_requests decision_resolutions deploy_record_projection deploy_services documents dots_results dots_run_tokens jobs ledger_cursors locks mcp_write_audit memory notification_outbox operator_inbox_events operator_inbox_state placement_decisions project_milestones project_owner_events relay_events reviews sync_decisions takes task_events task_origins task_projects task_relations task_spawn_notices task_spawn_records task_thread_cursors task_thread_deliveries tasks ticket_sets translations youtrack_projects yt_article_bindings yt_authority yt_binding_cursor yt_binding_history yt_binding_intents yt_comment_canary yt_comment_write_links yt_decision_bindings yt_entity_map yt_family_roots yt_feed_cursors yt_issue_comment_bounds yt_issue_intents yt_link_owned yt_link_plans yt_link_steps yt_link_unowned yt_links_sweep yt_snapshot_state yt_task_bindings yt_write_op_alerts yt_write_ops`)
+var mysqlNotYetPorted = wordSet(`attachment_refs attachment_uploads attachment_usage attachments change_checks change_findings change_gate_events change_tasks change_threads changes chat_message_questions chat_messages chat_questions decision_answer_attempts decision_deliveries decision_notify_digest decision_requests decision_resolutions deploy_record_projection deploy_services documents dots_results dots_run_tokens jobs ledger_cursors locks mcp_write_audit notification_outbox operator_inbox_events operator_inbox_state placement_decisions relay_events reviews takes translations youtrack_projects yt_article_bindings yt_authority yt_binding_cursor yt_binding_history yt_binding_intents yt_comment_canary yt_comment_write_links yt_decision_bindings yt_entity_map yt_family_roots yt_feed_cursors yt_issue_comment_bounds yt_issue_intents yt_link_owned yt_link_plans yt_link_steps yt_link_unowned yt_links_sweep yt_snapshot_state yt_task_bindings yt_write_op_alerts yt_write_ops`)
 var mysqlLeftOut = wordSet(`decision_notify deploy_changes deploys labels linear_board_owners linear_board_ownership_conflicts linear_board_tasks linear_capacity_state linear_create_admissions linear_decision_issues linear_decision_ops linear_issues linear_outbox schema_migrations schema_version services standing_orders status_updates task_labels task_state_migration task_subscribers verifications youtrack_attempts youtrack_comment_links youtrack_cursor youtrack_decision_mirrors youtrack_doc_articles youtrack_field_cache youtrack_outbox youtrack_processed_activities yt_write_op_adoptions`)
-var mysqlPorted = wordSet(`bench_area_exceptions bench_catalog bench_grades bench_reps bench_scores quota_latest quota_leases quota_observations quota_presence sync_log sync_state task_comments`)
+
+// Tables of other areas that exist on MySQL only as the stubs of
+// migration_mysql_tasks.go; their owners extend them when they port.
+var mysqlStubs = wordSet(`jobs relay_events chat_questions`)
+var mysqlPorted = wordSet(`bench_area_exceptions bench_catalog bench_grades bench_reps bench_scores checkpoints memory project_milestones project_owner_events quota_latest quota_leases quota_observations quota_presence sync_decisions sync_log sync_state task_comments task_events task_origins task_projects task_relations task_spawn_notices task_spawn_records task_thread_cursors task_thread_deliveries tasks ticket_sets`)
 
 func wordSet(s string) map[string]bool {
 	m := map[string]bool{}
@@ -29,6 +33,18 @@ func wordSet(s string) map[string]bool {
 type driftSchema struct {
 	columns map[string]map[string]string
 	unique  map[string][]string
+	// named is each unique key's column list by table and index name.
+	named map[string]map[string][]string
+}
+
+// PostgreSQL partial unique indexes whose MySQL counterpart is a functional
+// unique key of the same name (see migration_mysql_tasks.go). Their column
+// lists differ by construction (a WHERE clause against CASE expressions), so
+// the check pairs them by table and name instead.
+var mysqlFunctionalPartialKeys = map[string][]string{
+	"tasks":        {"tasks_source_ref"},
+	"task_events":  {"task_events_source_ref"},
+	"task_origins": {"task_origins_youtrack_task", "task_origins_youtrack_external"},
 }
 
 func inspectDriftSchema(t *testing.T, s *Store) driftSchema {
@@ -78,13 +94,28 @@ func inspectDriftSchema(t *testing.T, s *Store) driftSchema {
 		t.Fatal(err)
 	}
 	rows.Close()
+	d.named = constraints
 	for table, keys := range constraints {
-		for _, cols := range keys {
+		for name, cols := range keys {
+			if isFunctionalPartial(table, name) {
+				d.unique[table] = append(d.unique[table], "partial("+name+")")
+				continue
+			}
+			_ = name
 			d.unique[table] = append(d.unique[table], strings.Join(cols, ","))
 		}
 		sort.Strings(d.unique[table])
 	}
 	return d
+}
+
+func isFunctionalPartial(table, name string) bool {
+	for _, n := range mysqlFunctionalPartialKeys[table] {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 func TestMySQLSchemaDrift(t *testing.T) {
@@ -117,7 +148,7 @@ func TestMySQLSchemaDrift(t *testing.T) {
 		}
 	}
 	for table := range m.columns {
-		if !mysqlPorted[table] && table != "schema_migrations" && table != "hk_locks" && table != "tasks" {
+		if !mysqlPorted[table] && table != "schema_migrations" && table != "hk_locks" && !mysqlStubs[table] {
 			t.Errorf("unexpected MySQL table %s", table)
 		}
 	}

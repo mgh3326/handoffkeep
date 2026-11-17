@@ -18,9 +18,7 @@ func TestMySQLCommentGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
-	if _, err := s.mysqlPool.ExecContext(ctx, `INSERT INTO tasks(id) VALUES (1)`); err != nil {
-		t.Fatal(err)
-	}
+	insertMySQLTestTask(t, s)
 	var id int64
 	if err := s.mysqlWriteTransaction(ctx, func(tx transaction) error {
 		var err error
@@ -42,6 +40,10 @@ func TestMySQLCommentGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	var before int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sync_log`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := conn.ExecContext(ctx, `SET @hk_bulk_load=1`); err != nil {
 		t.Fatal(err)
 	}
@@ -55,8 +57,8 @@ func TestMySQLCommentGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	var count int
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sync_log`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("bulk load emitted sync rows: count=%d err=%v", count, err)
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sync_log`).Scan(&count); err != nil || count != before {
+		t.Fatalf("bulk load emitted sync rows: count=%d before=%d err=%v", count, before, err)
 	}
 }
 
@@ -101,9 +103,7 @@ func TestMySQLGuardMutants(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(s.Close)
-			if _, err := s.mysqlPool.ExecContext(ctx, `INSERT INTO tasks(id) VALUES (1)`); err != nil {
-				t.Fatal(err)
-			}
+			insertMySQLTestTask(t, s)
 			var commentID int64
 			if err := s.mysqlWriteTransaction(ctx, func(tx transaction) error {
 				var err error
@@ -182,4 +182,24 @@ func TestMySQLTransactionRetryOnce(t *testing.T) {
 			t.Errorf("error %d: calls=%d err=%v", code, calls, err)
 		}
 	}
+}
+
+// insertMySQLTestTask inserts task 1, the comment tests' foreign-key target,
+// through the write-transaction wrapper: the tasks emit trigger needs @hk_txn.
+// It returns the largest sync_id then assigned, so a test that follows the feed
+// starts after the task's own row.
+func insertMySQLTestTask(t *testing.T, s *Store) int64 {
+	t.Helper()
+	err := s.mysqlWriteTransaction(t.Context(), func(tx transaction) error {
+		_, err := tx.Exec(t.Context(), `INSERT INTO tasks(id,lane,title,kind,state,created_by,created_at,updated_at) VALUES (1,'lane','task','implement','backlog','test',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))`)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var max int64
+	if err := s.mysqlPool.QueryRowContext(t.Context(), `SELECT max_sync_id FROM sync_state WHERE singleton=1`).Scan(&max); err != nil {
+		t.Fatal(err)
+	}
+	return max
 }

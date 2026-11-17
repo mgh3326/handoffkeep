@@ -464,7 +464,7 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 			if err != nil {
 				return ResolveDecisionOutcome{}, err
 			}
-			resolutionID, err := decisionResolutionID(ctx, tx, root, current.Revision)
+			resolutionID, err := decisionResolutionID(ctx, pgTransaction{tx}, root, current.Revision)
 			if err != nil {
 				return ResolveDecisionOutcome{}, err
 			}
@@ -620,7 +620,7 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	}
 	if flagWas && !x.AwaitingDecision {
 		// The flag's own event: true to false, naming the request and who answered.
-		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: in.Actor, Note: "decision-clear " + resolved.ID + " by " + decidedBy(in, prov), Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
+		if _, _, err = insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: in.Actor, Note: "decision-clear " + resolved.ID + " by " + decidedBy(in, prov), Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
 			return ResolveDecisionOutcome{}, err
 		}
 	}
@@ -786,7 +786,7 @@ func replayDecisionAttempt(ctx context.Context, tx pgx.Tx, channel, eventKey, ha
 	if out.ResolutionID == 0 && result == DecisionResultAnswered && root != "" && revision > 0 {
 		// An identical answer to a closed request is its own attempt without
 		// a resolution row; it reports the one resolution of that revision.
-		if out.ResolutionID, err = decisionResolutionID(ctx, tx, root, revision); err != nil {
+		if out.ResolutionID, err = decisionResolutionID(ctx, pgTransaction{tx}, root, revision); err != nil {
 			return decisionReplay{}, false, err
 		}
 	}

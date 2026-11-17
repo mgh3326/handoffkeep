@@ -578,7 +578,7 @@ FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND
 			continue
 		}
 		ev := sourceEvent{Source: SourceDeploy, SourceRef: "deploy:" + attemptID, At: now, Note: "deploy attempt " + attemptID + " finished; every implements change is deployed"}
-		if _, err = s.applySourceEventTx(ctx, tx, x, ev, now); err != nil {
+		if _, err = s.applySourceEventTx(ctx, pgTransaction{tx}, x, ev, now); err != nil {
 			return err
 		}
 	}

@@ -21,9 +21,7 @@ func TestMySQLSyncCommitOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
-	if _, err := s.mysqlPool.ExecContext(ctx, `INSERT INTO tasks(id) VALUES (1)`); err != nil {
-		t.Fatal(err)
-	}
+	firstSync := insertMySQLTestTask(t, s)
 	const writers, perWriter = 10, 1000
 	var wg sync.WaitGroup
 	errs := make(chan error, writers)
@@ -47,7 +45,7 @@ func TestMySQLSyncCommitOrder(t *testing.T) {
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 	seen := make(map[string]bool, writers*perWriter)
-	var cursor, commentCursor int64
+	cursor, commentCursor := firstSync, int64(0)
 	comments := make(map[string]bool, writers*perWriter)
 	finished := false
 	for {

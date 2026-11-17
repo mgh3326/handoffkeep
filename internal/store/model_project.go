@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 var ErrProjectNotFound = errors.New("project_not_found")
@@ -20,33 +18,25 @@ type ProjectMetadata struct {
 }
 
 func (s *Store) SetProjectMetadata(ctx context.Context, p ProjectMetadata) (ProjectMetadata, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return ProjectMetadata{}, ErrDialectUnsupported
-	}
-
 	if !validName(p.Name) || !validText(p.Status, 128) || (p.StartAt != nil && p.TargetAt != nil && p.TargetAt.Before(*p.StartAt)) {
 		return ProjectMetadata{}, errors.New("invalid project metadata")
 	}
-	tag, err := s.pool.Exec(ctx, `UPDATE task_projects SET status=$2,start_at=$3,target_at=$4 WHERE name=$1`, p.Name, p.Status, p.StartAt, p.TargetAt)
+	n, err := s.db().Exec(ctx, s.q(`UPDATE task_projects SET status=$2,start_at=$3,target_at=$4 WHERE name=$1`, `UPDATE task_projects SET status=?,start_at=?,target_at=? WHERE name=?`), projectUpdateArgsCore(s.dialect, p.Name, p.Status, p.StartAt, p.TargetAt)...)
 	if err != nil {
 		return ProjectMetadata{}, err
 	}
-	if tag.RowsAffected() == 0 {
+	if n == 0 {
 		return ProjectMetadata{}, ErrProjectNotFound
 	}
 	return p, nil
 }
 
 func (s *Store) GetProjectMetadata(ctx context.Context, name string) (ProjectMetadata, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return ProjectMetadata{}, ErrDialectUnsupported
-	}
-
 	if !validName(name) {
 		return ProjectMetadata{}, errors.New("invalid project")
 	}
 	var p ProjectMetadata
-	err := s.pool.QueryRow(ctx, `SELECT name,status,start_at,target_at FROM task_projects WHERE name=$1`, name).Scan(&p.Name, &p.Status, &p.StartAt, &p.TargetAt)
+	err := s.db().QueryRow(ctx, s.q(`SELECT name,status,start_at,target_at FROM task_projects WHERE name=$1`, `SELECT name,status,start_at,target_at FROM task_projects WHERE name=?`), name).Scan(&p.Name, &p.Status, &p.StartAt, &p.TargetAt)
 	if errors.Is(err, ErrNoRows) {
 		return ProjectMetadata{}, ErrProjectNotFound
 	}
@@ -88,28 +78,35 @@ func (p *ProjectMetadataPatch) UnmarshalJSON(data []byte) error {
 }
 
 func (s *Store) PatchProjectMetadata(ctx context.Context, name string, patch ProjectMetadataPatch) (ProjectMetadata, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return ProjectMetadata{}, ErrDialectUnsupported
-	}
-
-	tx, err := s.pool.Begin(ctx)
+	var p ProjectMetadata
+	err := s.retryTx(ctx, func() error {
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		p, err = patchProjectMetadataTx(ctx, tx, name, patch)
+		if err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	})
 	if err != nil {
-		return ProjectMetadata{}, err
+		if p.Name == "" {
+			return ProjectMetadata{}, err
+		}
+		return p, err
 	}
-	defer tx.Rollback(ctx)
-	p, err := patchProjectMetadataTx(ctx, tx, name, patch)
-	if err != nil {
-		return ProjectMetadata{}, err
-	}
-	return p, tx.Commit(ctx)
+	return p, nil
 }
 
-func patchProjectMetadataTx(ctx context.Context, tx pgx.Tx, name string, patch ProjectMetadataPatch) (ProjectMetadata, error) {
+func patchProjectMetadataTx(ctx context.Context, tx transaction, name string, patch ProjectMetadataPatch) (ProjectMetadata, error) {
 	if !validName(name) || (patch.Status != nil && !validText(*patch.Status, 128)) || (!patch.SetStart && patch.StartAt != nil) || (!patch.SetTarget && patch.TargetAt != nil) {
 		return ProjectMetadata{}, errors.New("invalid project metadata")
 	}
 	var p ProjectMetadata
-	err := tx.QueryRow(ctx, `SELECT name,status,start_at,target_at FROM task_projects WHERE name=$1 FOR UPDATE`, name).Scan(&p.Name, &p.Status, &p.StartAt, &p.TargetAt)
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT name,status,start_at,target_at FROM task_projects WHERE name=$1 FOR UPDATE`, `SELECT name,status,start_at,target_at FROM task_projects WHERE name=? FOR UPDATE`), name).Scan(&p.Name, &p.Status, &p.StartAt, &p.TargetAt)
 	if errors.Is(err, ErrNoRows) {
 		return ProjectMetadata{}, ErrProjectNotFound
 	}
@@ -128,7 +125,7 @@ func patchProjectMetadataTx(ctx context.Context, tx pgx.Tx, name string, patch P
 	if p.StartAt != nil && p.TargetAt != nil && p.TargetAt.Before(*p.StartAt) {
 		return ProjectMetadata{}, errors.New("invalid project metadata")
 	}
-	if _, err = tx.Exec(ctx, `UPDATE task_projects SET status=$2,start_at=$3,target_at=$4 WHERE name=$1`, name, p.Status, p.StartAt, p.TargetAt); err != nil {
+	if _, err = tx.Exec(ctx, sqlFor(tx, `UPDATE task_projects SET status=$2,start_at=$3,target_at=$4 WHERE name=$1`, `UPDATE task_projects SET status=?,start_at=?,target_at=? WHERE name=?`), projectUpdateArgsCore(dialectFor(tx), name, p.Status, p.StartAt, p.TargetAt)...); err != nil {
 		return ProjectMetadata{}, err
 	}
 	return p, nil

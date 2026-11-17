@@ -122,7 +122,7 @@ func TestLastActivityMoves(t *testing.T) {
 		if err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, x.ID).Scan(&id); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: TaskEventAutoClose, By: "hk", At: time.Now().UTC(), Auto: true, Source: SourceAutoClose}); err != nil {
+		if _, _, err = insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: x.ID, Kind: TaskEventAutoClose, By: "hk", At: time.Now().UTC(), Auto: true, Source: SourceAutoClose}); err != nil {
 			t.Fatal(err)
 		}
 		if err = tx.Commit(ctx); err != nil {

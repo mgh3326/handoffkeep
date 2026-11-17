@@ -256,3 +256,23 @@ func (r *copyOrderRows) Next(dest []driver.Value) error {
 	r.index++
 	return nil
 }
+
+// A NULL JSON column (task_events.refs) must copy as NULL, not panic.
+func TestCopyInsertValueKeepsNullJSON(t *testing.T) {
+	for _, mysqlTarget := range []bool{false, true} {
+		got, err := copyInsertValue(nil, "task_events", "refs", copyJSON, !mysqlTarget, mysqlTarget)
+		if err != nil || got != nil {
+			t.Fatalf("mysqlTarget=%v: got %v, %v; want nil, nil", mysqlTarget, got, err)
+		}
+	}
+}
+
+func TestCopyUpsertClause(t *testing.T) {
+	spec := copyTableSpec{name: "task_projects", order: []string{"name"}}
+	if got, want := copyUpsertClause(spec, []string{`"name"`, `"status"`}, false), ` ON CONFLICT ("name") DO UPDATE SET "status"=EXCLUDED."status"`; got != want {
+		t.Errorf("postgres upsert = %q, want %q", got, want)
+	}
+	if got, want := copyUpsertClause(spec, []string{"`name`", "`status`"}, true), " ON DUPLICATE KEY UPDATE `status`=VALUES(`status`)"; got != want {
+		t.Errorf("mysql upsert = %q, want %q", got, want)
+	}
+}

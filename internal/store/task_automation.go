@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // Declarative automation (git show 1e3d2fa8:docs/linear-internalize.md): started_stalled_hours
@@ -87,7 +85,7 @@ func isStalled(state string, awaiting bool, activity, now time.Time, after time.
 }
 
 type poolQuerier interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
+	Query(context.Context, string, ...any) (rows, error)
 }
 
 // markStalled sets Stalled on the started rows of xs, reading their activity
@@ -104,7 +102,13 @@ func (s *Store) markStalled(ctx context.Context, q poolQuerier, xs []Task, now t
 	if len(ids) == 0 {
 		return nil
 	}
-	rows, err := q.Query(ctx, `SELECT id,`+taskActivitySQL+` FROM tasks WHERE id = ANY($1)`, ids)
+	var rows rows
+	var err error
+	if dialectFor(q) == mysqlDialect {
+		rows, err = q.Query(ctx, `SELECT id,`+taskActivitySQLMySQL+` FROM tasks WHERE id IN (`+placeholders(len(ids))+`)`, reportIDArgs(ids)...)
+	} else {
+		rows, err = q.Query(ctx, `SELECT id,`+taskActivitySQL+` FROM tasks WHERE id = ANY($1)`, ids)
+	}
 	if err != nil {
 		return err
 	}
@@ -139,16 +143,20 @@ const sweepSQL = `SELECT id,lane,title,` + taskActivitySQL + ` FROM tasks
 	AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id=tasks.id AND c.state IN (` + startedStatesSQL + `))
 	AND ` + taskActivitySQL + ` < $1`
 
+// sweepSQLMySQL is sweepSQL for MySQL. Its placeholders follow the text order:
+// the decision request status first, then the idle cutoff.
+var sweepSQLMySQL = `SELECT id,lane,title,` + taskActivitySQLMySQL + ` FROM tasks
+	WHERE state='backlog' AND NOT awaiting_decision
+	AND COALESCE(` + reportJSONText("refs", "$.decision_request.status") + `,'') <> ?
+	AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id=tasks.id AND c.state IN (` + startedStatesSQL + `))
+	AND ` + taskActivitySQLMySQL + ` < ?`
+
 // SweepBacklog parks backlog tasks idle for more than days in icebox,
 // recording hk.sweep on each, and returns what it moved. With dryRun it
 // returns what it would move and writes nothing. days 0 is the off setting
 // and moves nothing; days outside CheckBacklogIceboxDays is refused before
 // any read.
 func (s *Store) SweepBacklog(ctx context.Context, days int, dryRun bool) ([]SweepCandidate, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if err := CheckBacklogIceboxDays(days); err != nil {
 		return nil, err
 	}
@@ -158,11 +166,11 @@ func (s *Store) SweepBacklog(ctx context.Context, days int, dryRun bool) ([]Swee
 	}
 	now := time.Now().UTC()
 	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
-	rows, err := s.pool.Query(ctx, sweepSQL+` ORDER BY id LIMIT 1000`, cutoff, DecisionRequestOpen)
+	rows, err := s.db().Query(ctx, s.q(sweepSQL+` ORDER BY id LIMIT 1000`, sweepSQLMySQL+` ORDER BY id LIMIT 1000`), pickArgs(s, []any{cutoff, DecisionRequestOpen}, []any{DecisionRequestOpen, cutoff})...)
 	if err != nil {
 		return nil, err
 	}
-	candidates, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (SweepCandidate, error) {
+	candidates, err := collectRows(rows, func(row row) (SweepCandidate, error) {
 		var c SweepCandidate
 		err := row.Scan(&c.ID, &c.Lane, &c.Title, &c.IdleSince)
 		return c, err
@@ -187,23 +195,34 @@ func (s *Store) SweepBacklog(ctx context.Context, days int, dryRun bool) ([]Swee
 
 // sweepOne re-checks one candidate under its row lock and parks it.
 func (s *Store) sweepOne(ctx context.Context, id int64, days int, cutoff, now time.Time) (bool, error) {
-	tx, err := s.pool.Begin(ctx)
+	var applied bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		applied, err = s.sweepOneOnce(ctx, id, days, cutoff, now)
+		return err
+	})
+	return applied, err
+}
+
+func (s *Store) sweepOneOnce(ctx context.Context, id int64, days int, cutoff, now time.Time) (bool, error) {
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err = s.lockTx(ctx, tx, 8241873001); err != nil {
 		return false, err
 	}
 	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return false, nil
 		}
 		return false, err
 	}
 	var idleSince time.Time
-	err = tx.QueryRow(ctx, sweepSQL+` AND id=$3`, cutoff, DecisionRequestOpen, id).Scan(new(int64), new(string), new(string), &idleSince)
+	err = tx.QueryRow(ctx, s.q(sweepSQL+` AND id=$3`, sweepSQLMySQL+` AND id=?`), pickArgs(s, []any{cutoff, DecisionRequestOpen, id}, []any{DecisionRequestOpen, cutoff, id})...).Scan(new(int64), new(string), new(string), &idleSince)
 	if errors.Is(err, ErrNoRows) {
 		return false, nil
 	}

@@ -11,7 +11,10 @@ import (
 
 var (
 	mysqlBulkLoadSet = regexp.MustCompile(`(?i)@hk_bulk_load\s*:?=`)
-	goStringConcat   = regexp.MustCompile(`["'\x60]\s*\+\s*["'\x60]`)
+	// The PostgreSQL counterpart is a GUC (design §11.6); reading it with
+	// current_setting is the guard, only set_config / SET writes it.
+	pgBulkLoadSet  = regexp.MustCompile(`(?i)(set_config\s*\(\s*['"]handoffkeep\.bulk_load|\bset\s+(local\s+|session\s+)?"?handoffkeep\.bulk_load)`)
+	goStringConcat = regexp.MustCompile(`["'\x60]\s*\+\s*["'\x60]`)
 )
 
 // Join literal fragments before looking for assignments as well as direct SQL.
@@ -70,9 +73,28 @@ func TestMySQLBulkLoadSetterIsCopyToolOnly(t *testing.T) {
 		if setsMySQLBulkLoad(data) {
 			t.Errorf("%s sets @hk_bulk_load outside the copy tool", path)
 		}
+		if pgBulkLoadSet.Match(goStringConcat.ReplaceAll(data, nil)) {
+			t.Errorf("%s sets handoffkeep.bulk_load outside the copy tool", path)
+		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPostgresBulkLoadSetterSpellings(t *testing.T) {
+	for _, code := range []string{
+		`SELECT set_config('handoffkeep.bulk_load','on',true)`,
+		`SET LOCAL handoffkeep.bulk_load = 'on'`,
+		`set session handoffkeep.bulk_load to on`,
+		`"SELECT set_config('handoffkeep." + "bulk_load','on',true)"`,
+	} {
+		if !pgBulkLoadSet.Match(goStringConcat.ReplaceAll([]byte(code), nil)) {
+			t.Errorf("setter was not detected: %s", code)
+		}
+	}
+	if pgBulkLoadSet.MatchString(`IF current_setting('handoffkeep.bulk_load', true) = 'on' THEN`) {
+		t.Fatal("guard read was mistaken for a setter")
 	}
 }

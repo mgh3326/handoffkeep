@@ -396,7 +396,7 @@ func (s *Store) ReadWorkStatus(ctx context.Context, now time.Time) (*WorkStatus,
 		return nil, err
 	}
 	in.Movement = WorkStatusMovementDays(now, createdCounts, closedCounts)
-	if in.Queued, err = readQueuedSpawnsTx(ctx, tx, true); err != nil {
+	if in.Queued, err = readQueuedSpawnsTx(ctx, pgTransaction{tx}, true); err != nil {
 		return nil, err
 	}
 	return BuildWorkStatus(now, list, in), nil
@@ -495,7 +495,7 @@ func (s *Store) ReadWorkStatusOverlay(ctx context.Context, ids []int64) (WorkSta
 	if out.Inputs.Projects, err = readTaskProjectNamesTx(ctx, tx); err != nil {
 		return out, err
 	}
-	if out.Inputs.Queued, err = readQueuedSpawnsTx(ctx, tx, false); err != nil {
+	if out.Inputs.Queued, err = readQueuedSpawnsTx(ctx, pgTransaction{tx}, false); err != nil {
 		return out, err
 	}
 	if len(ids) > 0 {

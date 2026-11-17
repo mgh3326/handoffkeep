@@ -3,9 +3,8 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // The drift report (hk 3766) names tasks whose state disagrees with the
@@ -77,10 +76,16 @@ type TaskDriftTask struct {
 // decision request id, and the class's Since.
 const driftColumns = `id,lane,title,kind,state,COALESCE(refs->>'pr',''),COALESCE(refs->'decision_request'->>'id',''),`
 
+// driftColumnsMySQL is driftColumns for MySQL.
+var driftColumnsMySQL = `id,lane,title,kind,state,COALESCE(` + reportJSONText("refs", "$.pr") + `,''),COALESCE(` + reportJSONText("refs", "$.decision_request.id") + `,''),`
+
 // driftSettledOpenSQL is class (a): a settled task whose decision request is
 // still open. The task-side status is what the request reads (decision_notify).
 const driftSettledOpenSQL = `SELECT ` + driftColumns + `updated_at FROM tasks
 	WHERE state IN (` + settledStatesSQL + `) AND refs->'decision_request'->>'status'=$1 ORDER BY id`
+
+var driftSettledOpenSQLMySQL = `SELECT ` + driftColumnsMySQL + `updated_at FROM tasks
+	WHERE state IN (` + settledStatesSQL + `) AND ` + reportJSONText("refs", "$.decision_request.status") + `=? ORDER BY id`
 
 // driftMergedPRSQL is class (b): a non-settled task whose PR is merged, and no
 // unrelanded revert holds it (unresolvedRevertSQL). The PR is merged when one
@@ -98,6 +103,18 @@ var driftMergedPRSQL = `SELECT ` + driftColumns + `updated_at FROM tasks t
 	) AND NOT EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ` + unresolvedRevertSQL("t.id") + `)
 	ORDER BY t.id`
 
+// driftMergedPRSQLMySQL is driftMergedPRSQL for MySQL. unresolvedRevertSQL is
+// plain SQL and serves both dialects.
+var driftMergedPRSQLMySQL = `SELECT ` + driftColumnsMySQL + `updated_at FROM tasks t
+	WHERE t.state NOT IN (` + settledStatesSQL + `) AND (
+		EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
+			WHERE ct.task_id=t.id AND ct.relation='implements' AND c.state='merged' AND c.reverted_by_change_id IS NULL)
+		OR (COALESCE(` + reportJSONText("t.refs", "$.pr") + `,'')<>'' AND (
+			EXISTS (SELECT 1 FROM changes c WHERE c.state='merged' AND (` + reportPRURLSQL + `)=` + reportJSONText("t.refs", "$.pr") + `)
+			OR EXISTS (SELECT 1 FROM tasks m WHERE m.id<>t.id AND m.state IN ('merged','deployed') AND ` + reportJSONText("m.refs", "$.pr") + `=` + reportJSONText("t.refs", "$.pr") + `)))
+	) AND NOT EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ` + unresolvedRevertSQL("t.id") + `)
+	ORDER BY t.id`
+
 // driftAutoCloseHeldSQL is class (e): an unsettled parent in an auto-close
 // state whose sub-tasks are all settled, one of which did work, and whose
 // automatic close would move it to merged or deployed (or to completed, for a
@@ -110,12 +127,21 @@ var driftAutoCloseHeldSQL = `SELECT ` + driftColumns + `updated_at FROM tasks p
 	AND (p.kind IN ('decide','ops','verify','research') OR EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=p.id AND k.state IN ('merged','deployed')))
 	ORDER BY p.id`
 
+// driftAutoCloseHeldSQLMySQL is driftAutoCloseHeldSQL for MySQL: only the
+// selected columns differ.
+var driftAutoCloseHeldSQLMySQL = strings.Replace(driftAutoCloseHeldSQL, driftColumns, driftColumnsMySQL, 1)
+
 // driftMergedPageSQL is one page of class (c)'s candidates: merged for at least
 // the cutoff, after the (since, id) keyset cursor. Pages are read in order so
 // the deploy-record filter runs before the class's cap, not after it.
 const driftMergedPageSQL = `SELECT ` + driftColumns + `COALESCE(completed_at,updated_at) FROM tasks
 	WHERE state='merged' AND COALESCE(completed_at,updated_at)<$1 AND (COALESCE(completed_at,updated_at),id)>($2,$3)
 	ORDER BY COALESCE(completed_at,updated_at),id LIMIT $4`
+
+// driftMergedPageSQLMySQL is driftMergedPageSQL for MySQL.
+var driftMergedPageSQLMySQL = `SELECT ` + driftColumnsMySQL + `COALESCE(completed_at,updated_at) FROM tasks
+	WHERE state='merged' AND COALESCE(completed_at,updated_at)<? AND (COALESCE(completed_at,updated_at),id)>(?,?)
+	ORDER BY COALESCE(completed_at,updated_at),id LIMIT ?`
 
 // driftPageSize is how many candidates class (c) reads per page.
 const driftPageSize = 200
@@ -125,36 +151,35 @@ const driftPageSize = 200
 const driftIdleStartedSQL = `SELECT ` + driftColumns + taskActivitySQL + ` FROM tasks
 	WHERE state IN ('researching','developing') AND ` + taskActivitySQL + `<$1::timestamptz ORDER BY id`
 
+var driftIdleStartedSQLMySQL = `SELECT ` + driftColumnsMySQL + taskActivitySQLMySQL + ` FROM tasks
+	WHERE state IN ('researching','developing') AND ` + taskActivitySQLMySQL + `<? ORDER BY id`
+
 // TaskDrift reads the four drift classes at now in one read-only snapshot, so
 // the classes agree with each other. mergedDays is the merged age for class
 // (c); class (d) uses the server's started_stalled_hours.
 func (s *Store) TaskDrift(ctx context.Context, now time.Time, mergedDays int) (TaskDrift, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return TaskDrift{}, ErrDialectUnsupported
-	}
-
 	if err := CheckDriftMergedDays(mergedDays); err != nil {
 		return TaskDrift{}, err
 	}
 	now = now.UTC()
 	stalled := s.StartedStalledHours()
 	out := TaskDrift{AsOf: now, MergedDays: mergedDays, StartedStalledHours: int(stalled.Hours())}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := s.beginReportRead(ctx, true)
 	if err != nil {
 		return TaskDrift{}, err
 	}
 	defer tx.Rollback(ctx)
 
-	if out.SettledOpenDecision, err = driftList(ctx, tx, "state is settled and refs.decision_request is open", driftSettledOpenSQL, DecisionRequestOpen); err != nil {
+	if out.SettledOpenDecision, err = driftList(ctx, tx, "state is settled and refs.decision_request is open", sqlFor(tx, driftSettledOpenSQL, driftSettledOpenSQLMySQL), DecisionRequestOpen); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift settled_open_decision: %w", err)
 	}
-	if out.MergedPRNotMerged, err = driftList(ctx, tx, "not settled, with a merged PR: an implements change is merged and not reverted, or refs.pr is merged (a merged changes row names it, or a merged or deployed task does); no unrelanded revert", driftMergedPRSQL); err != nil {
+	if out.MergedPRNotMerged, err = driftList(ctx, tx, "not settled, with a merged PR: an implements change is merged and not reverted, or refs.pr is merged (a merged changes row names it, or a merged or deployed task does); no unrelanded revert", sqlFor(tx, driftMergedPRSQL, driftMergedPRSQLMySQL)); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_pr_not_merged: %w", err)
 	}
 	if err = s.annotateDriftHolds(ctx, tx, &out.MergedPRNotMerged, mergeAppliesFrom); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_pr_not_merged: %w", err)
 	}
-	if out.AutoCloseHeld, err = driftList(ctx, tx, "auto-close due and not made: an unsettled parent in an auto-close state, every sub-task settled and one did work, moving it to merged, deployed, or completed for decide, ops, verify and research", driftAutoCloseHeldSQL); err != nil {
+	if out.AutoCloseHeld, err = driftList(ctx, tx, "auto-close due and not made: an unsettled parent in an auto-close state, every sub-task settled and one did work, moving it to merged, deployed, or completed for decide, ops, verify and research", sqlFor(tx, driftAutoCloseHeldSQL, driftAutoCloseHeldSQLMySQL)); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift auto_close_held: %w", err)
 	}
 	if err = s.annotateDriftHolds(ctx, tx, &out.AutoCloseHeld, autoCloseAppliesFrom); err != nil {
@@ -163,7 +188,7 @@ func (s *Store) TaskDrift(ctx context.Context, now time.Time, mergedDays int) (T
 	if out.MergedWithoutDeploy, err = driftMergedWithoutDeploy(ctx, tx, now.Add(-time.Duration(mergedDays)*24*time.Hour), mergedDays); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_without_deploy: %w", err)
 	}
-	if out.IdleStarted, err = driftList(ctx, tx, fmt.Sprintf("researching or developing, with no activity for %d hours (started_stalled_hours)", out.StartedStalledHours), driftIdleStartedSQL, now.Add(-stalled)); err != nil {
+	if out.IdleStarted, err = driftList(ctx, tx, fmt.Sprintf("researching or developing, with no activity for %d hours (started_stalled_hours)", out.StartedStalledHours), sqlFor(tx, driftIdleStartedSQL, driftIdleStartedSQLMySQL), now.Add(-stalled)); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift idle_started: %w", err)
 	}
 	return out, tx.Commit(ctx)
@@ -172,7 +197,7 @@ func (s *Store) TaskDrift(ctx context.Context, now time.Time, mergedDays int) (T
 // driftMergedWithoutDeploy is class (c): merged candidates older than the
 // cutoff that no deploy record lists. A task with no PR cannot be listed by a
 // record, so it is reported.
-func driftMergedWithoutDeploy(ctx context.Context, tx pgx.Tx, cutoff time.Time, mergedDays int) (TaskDriftClass, error) {
+func driftMergedWithoutDeploy(ctx context.Context, tx transaction, cutoff time.Time, mergedDays int) (TaskDriftClass, error) {
 	out := TaskDriftClass{
 		Rule:  fmt.Sprintf("merged for at least %d days, and no deploy record lists refs.pr", mergedDays),
 		Tasks: []TaskDriftTask{},
@@ -183,11 +208,11 @@ func driftMergedWithoutDeploy(ctx context.Context, tx pgx.Tx, cutoff time.Time, 
 	after, afterID := time.Unix(0, 0).UTC(), int64(0)
 scan:
 	for {
-		rows, err := tx.Query(ctx, driftMergedPageSQL, cutoff, after, afterID, driftPageSize)
+		rows, err := tx.Query(ctx, sqlFor(tx, driftMergedPageSQL, driftMergedPageSQLMySQL), cutoff, after, afterID, driftPageSize)
 		if err != nil {
 			return TaskDriftClass{}, err
 		}
-		page, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (TaskDriftTask, error) {
+		page, err := collectRows(rows, func(row row) (TaskDriftTask, error) {
 			var x TaskDriftTask
 			err := row.Scan(&x.ID, &x.Lane, &x.Title, &x.Kind, &x.State, &x.PR, &x.DecisionRequest, &x.Since)
 			return x, err
@@ -237,11 +262,11 @@ func driftMechanical(h taskHolds, gate, state string, applies func(state string)
 // annotateDriftHolds fills, for each task a class names, what holds its close:
 // open_prs, reverted_prs, open_sub_tasks, and hold (the first reason). It sets
 // mechanical through driftMechanical. It only reads.
-func (s *Store) annotateDriftHolds(ctx context.Context, tx pgx.Tx, c *TaskDriftClass, applies func(state string) bool) error {
+func (s *Store) annotateDriftHolds(ctx context.Context, tx transaction, c *TaskDriftClass, applies func(state string) bool) error {
 	for i := range c.Tasks {
 		x := &c.Tasks[i]
 		var t Task
-		if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, x.ID), &t); err != nil {
+		if err := scanTask(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, `SELECT `+taskColumns+` FROM tasks WHERE id=?`), x.ID), &t); err != nil {
 			return err
 		}
 		h, err := taskHoldsTx(ctx, tx, x.ID, "")
@@ -265,13 +290,17 @@ func (s *Store) annotateDriftHolds(ctx context.Context, tx pgx.Tx, c *TaskDriftC
 // driftList runs one class query, which takes its args as $1.. and ends in an
 // ORDER BY on a unique key. It lists at most driftClassLimit tasks and reports
 // Truncated when there are more.
-func driftList(ctx context.Context, tx pgx.Tx, rule, sql string, args ...any) (TaskDriftClass, error) {
+func driftList(ctx context.Context, tx transaction, rule, sql string, args ...any) (TaskDriftClass, error) {
 	args = append(args, driftClassLimit+1)
-	rows, err := tx.Query(ctx, sql+fmt.Sprintf(" LIMIT $%d", len(args)), args...)
+	limit := fmt.Sprintf(" LIMIT $%d", len(args))
+	if dialectFor(tx) == mysqlDialect {
+		limit = " LIMIT ?"
+	}
+	rows, err := tx.Query(ctx, sql+limit, args...)
 	if err != nil {
 		return TaskDriftClass{}, err
 	}
-	xs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (TaskDriftTask, error) {
+	xs, err := collectRows(rows, func(row row) (TaskDriftTask, error) {
 		var x TaskDriftTask
 		err := row.Scan(&x.ID, &x.Lane, &x.Title, &x.Kind, &x.State, &x.PR, &x.DecisionRequest, &x.Since)
 		return x, err

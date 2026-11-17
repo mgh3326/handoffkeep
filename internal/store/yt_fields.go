@@ -298,7 +298,7 @@ func (s *Store) ytFieldsOnBindTx(ctx context.Context, tx pgx.Tx, taskID int64, n
 	if mode != YTFieldsOn {
 		return nil
 	}
-	tasks, err := readYTFieldsRows(ctx, tx, []int64{taskID}, now, s.StartedStalledHours())
+	tasks, err := readYTFieldsRows(ctx, pgTransaction{tx}, []int64{taskID}, now, s.StartedStalledHours())
 	if err != nil {
 		return err
 	}
@@ -328,7 +328,7 @@ func ytFieldsHandler(s *Store, now time.Time) FeedHandler {
 				ids = append(ids, id)
 			}
 		}
-		tasks, err := readYTFieldsRows(ctx, tx, ids, now, s.StartedStalledHours())
+		tasks, err := readYTFieldsRows(ctx, pgTransaction{tx}, ids, now, s.StartedStalledHours())
 		if err != nil {
 			return err
 		}

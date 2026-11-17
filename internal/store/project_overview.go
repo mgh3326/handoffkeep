@@ -3,8 +3,6 @@ package store
 import (
 	"context"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // Project health bounds: how many assignees and reason rows one project
@@ -82,11 +80,7 @@ const openBlockedSQL = `EXISTS (SELECT 1 FROM task_relations r JOIN tasks b ON b
 // owner, metadata, open task counts and health. now is the as-of instant for
 // overdue tasks. The reads share one snapshot.
 func (s *Store) ListProjectOverviews(ctx context.Context, now time.Time) ([]ProjectOverview, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := s.beginSnapshotA5(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -157,14 +151,20 @@ func (s *Store) ListProjectOverviews(ctx context.Context, now time.Time) ([]Proj
 	return out, nil
 }
 
-func projectHealthCounts(ctx context.Context, tx pgx.Tx, now time.Time, out []ProjectOverview, index map[string]int) error {
-	rows, err := tx.Query(ctx, `SELECT t.project,
+func projectHealthCounts(ctx context.Context, tx transaction, now time.Time, out []ProjectOverview, index map[string]int) error {
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT t.project,
 		COUNT(*) FILTER (WHERE t.state IN (`+startedStatesSQL+`)),
 		COUNT(*) FILTER (WHERE t.state IN ('triage','backlog','unstarted')),
 		COUNT(*) FILTER (WHERE t.state IN ('merged','deployed','completed')),
 		COUNT(*) FILTER (WHERE t.state NOT IN (`+settledStatesSQL+`) AND `+openBlockedSQL+`),
 		COUNT(*) FILTER (WHERE t.state NOT IN (`+settledStatesSQL+`) AND t.due_at IS NOT NULL AND t.due_at < $1)
-		FROM tasks t WHERE t.project IS NOT NULL GROUP BY t.project`, now)
+		FROM tasks t WHERE t.project IS NOT NULL GROUP BY t.project`, `SELECT t.project,
+		CAST(COALESCE(SUM(CASE WHEN t.state IN (`+startedStatesSQL+`) THEN 1 ELSE 0 END),0) AS SIGNED),
+		CAST(COALESCE(SUM(CASE WHEN t.state IN ('triage','backlog','unstarted') THEN 1 ELSE 0 END),0) AS SIGNED),
+		CAST(COALESCE(SUM(CASE WHEN t.state IN ('merged','deployed','completed') THEN 1 ELSE 0 END),0) AS SIGNED),
+		CAST(COALESCE(SUM(CASE WHEN t.state NOT IN (`+settledStatesSQL+`) AND `+openBlockedSQL+` THEN 1 ELSE 0 END),0) AS SIGNED),
+		CAST(COALESCE(SUM(CASE WHEN t.state NOT IN (`+settledStatesSQL+`) AND t.due_at IS NOT NULL AND t.due_at < ? THEN 1 ELSE 0 END),0) AS SIGNED)
+		FROM tasks t WHERE t.project IS NOT NULL GROUP BY t.project`), now)
 	if err != nil {
 		return err
 	}
@@ -186,7 +186,7 @@ func projectHealthCounts(ctx context.Context, tx pgx.Tx, now time.Time, out []Pr
 	return rows.Err()
 }
 
-func projectAssigneeRows(ctx context.Context, tx pgx.Tx, out []ProjectOverview, index map[string]int) error {
+func projectAssigneeRows(ctx context.Context, tx transaction, out []ProjectOverview, index map[string]int) error {
 	rows, err := tx.Query(ctx, `SELECT project,claimed_by,COUNT(*) FROM tasks
 		WHERE project IS NOT NULL AND claimed_by<>'' AND state NOT IN (`+settledStatesSQL+`)
 		GROUP BY project,claimed_by ORDER BY project,COUNT(*) DESC,claimed_by`)
@@ -214,7 +214,10 @@ func projectAssigneeRows(ctx context.Context, tx pgx.Tx, out []ProjectOverview, 
 	return rows.Err()
 }
 
-func projectBlockedRows(ctx context.Context, tx pgx.Tx, out []ProjectOverview, index map[string]int) error {
+func projectBlockedRows(ctx context.Context, tx transaction, out []ProjectOverview, index map[string]int) error {
+	if dialectFor(tx) == mysqlDialect {
+		return projectBlockedRowsMySQL(ctx, tx, out, index)
+	}
 	rows, err := tx.Query(ctx, `SELECT project,id,title,priority,blocked_by FROM (
 		SELECT t.project,t.id,t.title,t.priority,
 		  (SELECT ARRAY_AGG(b.id ORDER BY b.id) FROM task_relations r JOIN tasks b ON b.id=r.src_id
@@ -239,13 +242,77 @@ func projectBlockedRows(ctx context.Context, tx pgx.Tx, out []ProjectOverview, i
 	return rows.Err()
 }
 
-func projectOverdueRows(ctx context.Context, tx pgx.Tx, now time.Time, out []ProjectOverview, index map[string]int) error {
-	rows, err := tx.Query(ctx, `SELECT project,id,title,priority,due_at FROM (
+// projectBlockedRowsMySQL is projectBlockedRows without ARRAY_AGG: JSON_ARRAYAGG
+// takes no ORDER BY and GROUP_CONCAT cuts at group_concat_max_len, so the top
+// blocked tasks are read first and their open blockers second, in id order, in
+// the same snapshot.
+func projectBlockedRowsMySQL(ctx context.Context, tx transaction, out []ProjectOverview, index map[string]int) error {
+	rows, err := tx.Query(ctx, `SELECT project,id,title,priority FROM (
+		SELECT t.project,t.id,t.title,t.priority,
+		  ROW_NUMBER() OVER (PARTITION BY t.project ORDER BY t.priority DESC,t.id) AS rn
+		FROM tasks t WHERE t.project IS NOT NULL AND t.state NOT IN (`+settledStatesSQL+`) AND `+openBlockedSQL+`
+		) x WHERE rn <= ? ORDER BY project,rn`, projectReasonLimit)
+	if err != nil {
+		return err
+	}
+	type top struct {
+		project string
+		b       ProjectBlockedTask
+	}
+	tops, err := collectRows(rows, func(r row) (top, error) {
+		var x top
+		err := r.Scan(&x.project, &x.b.TaskID, &x.b.Title, &x.b.Priority)
+		return x, err
+	})
+	if err != nil {
+		return err
+	}
+	if len(tops) == 0 {
+		return nil
+	}
+	blockedBy := map[int64][]int64{}
+	args := make([]any, len(tops))
+	for i, x := range tops {
+		args[i] = x.b.TaskID
+	}
+	rows, err = tx.Query(ctx, `SELECT r.dst_id,b.id FROM task_relations r JOIN tasks b ON b.id=r.src_id
+		WHERE r.kind='blocks' AND r.archived_at IS NULL AND b.state NOT IN (`+settledStatesSQL+`) AND r.dst_id IN (`+placeholders(len(args))+`)
+		ORDER BY r.dst_id,b.id`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var dst, src int64
+		if err := rows.Scan(&dst, &src); err != nil {
+			return err
+		}
+		blockedBy[dst] = append(blockedBy[dst], src)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, x := range tops {
+		if i, ok := index[x.project]; ok {
+			x.b.BlockedBy = blockedBy[x.b.TaskID]
+			out[i].Health.TopBlocked = append(out[i].Health.TopBlocked, x.b)
+		}
+	}
+	return nil
+}
+
+func projectOverdueRows(ctx context.Context, tx transaction, now time.Time, out []ProjectOverview, index map[string]int) error {
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT project,id,title,priority,due_at FROM (
 		SELECT t.project,t.id,t.title,t.priority,t.due_at,
 		  ROW_NUMBER() OVER (PARTITION BY t.project ORDER BY t.due_at,t.id) AS rn
 		FROM tasks t WHERE t.project IS NOT NULL AND t.state NOT IN (`+settledStatesSQL+`)
 		  AND t.due_at IS NOT NULL AND t.due_at < $1
-		) x WHERE rn <= $2 ORDER BY project,rn`, now, projectReasonLimit)
+		) x WHERE rn <= $2 ORDER BY project,rn`, `SELECT project,id,title,priority,due_at FROM (
+		SELECT t.project,t.id,t.title,t.priority,t.due_at,
+		  ROW_NUMBER() OVER (PARTITION BY t.project ORDER BY t.due_at,t.id) AS rn
+		FROM tasks t WHERE t.project IS NOT NULL AND t.state NOT IN (`+settledStatesSQL+`)
+		  AND t.due_at IS NOT NULL AND t.due_at < ?
+		) x WHERE rn <= ? ORDER BY project,rn`), now, projectReasonLimit)
 	if err != nil {
 		return err
 	}
