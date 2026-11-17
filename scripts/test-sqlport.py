@@ -18,6 +18,14 @@ class RewriteTests(unittest.TestCase):
     def test_concat(self):
         self.assertEqual(sqlport.rewrite("SELECT host_id || ':' || account_key")[0], "SELECT CONCAT(host_id, ':', account_key)")
 
+    def test_concat_with_placeholder_operand(self):
+        self.assertEqual(sqlport.rewrite("SELECT name LIKE $1 || '%'")[:2], ("SELECT name LIKE CONCAT(?, '%')", [1]))
+
+    def test_nested_concat_is_refused_when_inner_operator_remains(self):
+        mysql, _, constructs, _ = sqlport.rewrite("SELECT (host_id || ':') || account_key")
+        self.assertIsNone(mysql)
+        self.assertIn("unsupported || expression", constructs)
+
     def test_cast(self):
         self.assertEqual(sqlport.rewrite("SELECT $1::jsonb"), ("SELECT CAST(? AS JSON)", [1], ["$n → ?", "::type → CAST"], False))
         self.assertEqual(sqlport.rewrite("SELECT value::text")[0], "SELECT CAST(value AS CHAR)")
@@ -26,6 +34,8 @@ class RewriteTests(unittest.TestCase):
     def test_distinct_predicate(self):
         self.assertEqual(sqlport.rewrite("a IS DISTINCT FROM b")[0], "NOT (a <=> b)")
         self.assertEqual(sqlport.rewrite("a IS NOT DISTINCT FROM b")[0], "(a <=> b)")
+    def test_distinct_predicate_with_placeholder_operand(self):
+        self.assertEqual(sqlport.rewrite("$1 IS DISTINCT FROM col")[:2], ("NOT (? <=> col)", [1]))
 
     def test_filter(self):
         self.assertEqual(sqlport.rewrite("COUNT(*) FILTER (WHERE ok)")[0], "SUM(CASE WHEN ok THEN 1 ELSE 0 END)")

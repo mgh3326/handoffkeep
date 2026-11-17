@@ -54,7 +54,7 @@ def _replace_concat(sql: str) -> tuple[str, int]:
     # Operands are intentionally limited to identifiers, parameters, SQL
     # literals, and parenthesized expressions. Anything more complex remains
     # visible for hand review instead of being parsed with a risky guess.
-    atom = r"(?:\$\d+|[A-Za-z_][\w.]*|'(?:''|[^'])*'|\((?:[^()]|\([^()]*\))*\))"
+    atom = r"(?:\?|\$\d+|[A-Za-z_][\w.]*|'(?:''|[^'])*'|\((?:[^()]|\([^()]*\))*\))"
     pat = re.compile(rf"({atom})(?:\s*\|\|\s*({atom}))+", re.I)
     def sub(match: re.Match[str]) -> str:
         # Capture chain operands without interpreting SQL nested in parentheses.
@@ -96,6 +96,8 @@ def rewrite(sql: str) -> tuple[str | None, list[int], list[str], bool]:
     sql, n = _replace_concat(sql)
     if n:
         constructs.append("|| → CONCAT")
+    if "||" in sql:
+        return None, order, constructs + ["unsupported || expression"], bool(re.search(r"\bnow\s*\(\s*\)", sql, re.I))
 
     cast_type_map = {"jsonb": "JSON", "json": "JSON", "text": "CHAR", "int8": "SIGNED", "int4": "SIGNED", "bigint": "SIGNED", "integer": "SIGNED", "boolean": "SIGNED", "numeric": "DECIMAL", "timestamptz": "DATETIME(6)", "timestamp": "DATETIME(6)", "date": "DATE", "uuid": "CHAR(36)"}
     cast_atom = r"(?:\?|\$\d+|[A-Za-z_][\w.]*|'(?:''|[^'])*'|\([^()]*\))"
@@ -107,10 +109,13 @@ def rewrite(sql: str) -> tuple[str | None, list[int], list[str], bool]:
     if n:
         constructs.append("::type → CAST")
 
-    distinct = re.compile(r"([\w.]+)\s+IS\s+(NOT\s+)?DISTINCT\s+FROM\s+([\w.]+)", re.I)
+    distinct_operand = r"(?:\?|\$\d+|[\w.]+|\([^()]*\))"
+    distinct = re.compile(rf"({distinct_operand})\s+IS\s+(NOT\s+)?DISTINCT\s+FROM\s+({distinct_operand})", re.I)
     sql, n = distinct.subn(lambda m: f"{' ' if m.group(2) else 'NOT '}({m.group(1)} <=> {m.group(3)})".strip(), sql)
     if n:
         constructs.append("IS [NOT] DISTINCT FROM → <=>")
+    if re.search(r"\bIS\s+(?:NOT\s+)?DISTINCT\s+FROM\b", sql, re.I):
+        return None, order, constructs + ["unsupported IS [NOT] DISTINCT FROM expression"], bool(re.search(r"\bnow\s*\(\s*\)", sql, re.I))
 
     sql, n = _rewrite_filter(sql)
     if n:
