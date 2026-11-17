@@ -47,6 +47,18 @@ func MySQLDatabase(t testing.TB) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		var exists bool
+		err := db.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema=? AND table_name='sync_log')`, name).Scan(&exists)
+		if err != nil {
+			t.Errorf("check sync_log existence: %v", err)
+		} else if exists {
+			var pending int64
+			if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM `"+name+"`.sync_log WHERE sync_id IS NULL").Scan(&pending); err != nil {
+				t.Errorf("check pending sync rows: %v", err)
+			} else if pending != 0 {
+				t.Errorf("%d sync_log rows have no sync_id", pending)
+			}
+		}
 		if _, err := db.ExecContext(context.Background(), "DROP DATABASE `"+name+"`"); err != nil {
 			t.Errorf("drop test database: %v", err)
 		}
