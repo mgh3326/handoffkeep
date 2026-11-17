@@ -106,11 +106,17 @@ func insertNotificationOutbox(ctx context.Context, tx pgx.Tx, kind, lane, eventI
 // insertNotificationOutboxOnce is insertNotificationOutbox reporting whether
 // this call wrote the row.
 func insertNotificationOutboxOnce(ctx context.Context, tx pgx.Tx, kind, lane, eventID, text string, at time.Time) (bool, error) {
-	tag, err := tx.Exec(ctx, `INSERT INTO notification_outbox(kind,target_lane,event_id,text,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT (event_id) DO NOTHING`, kind, lane, eventID, text, at)
+	return insertNotificationOutboxTx(ctx, pgTransaction{tx}, kind, lane, eventID, text, at)
+}
+
+func insertNotificationOutboxTx(ctx context.Context, tx transaction, kind, lane, eventID, text string, at time.Time) (bool, error) {
+	tag, err := tx.Exec(ctx, sqlFor(tx,
+		`INSERT INTO notification_outbox(kind,target_lane,event_id,text,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT (event_id) DO NOTHING`,
+		`INSERT INTO notification_outbox(kind,target_lane,event_id,text,created_at) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE id=id`), kind, lane, eventID, text, at)
 	if err != nil {
 		return false, err
 	}
-	return tag.RowsAffected() == 1, nil
+	return tag == 1, nil
 }
 
 // ListUnsentNotifications returns outbox rows the drainer still owes the
@@ -187,7 +193,7 @@ func (s *Store) MarkNotificationSent(ctx context.Context, eventID string, hubRow
 	}
 	var x NotificationOutbox
 	if s.dialect == mysqlDialect {
-		return s.markNotificationReceiptMySQL(ctx, eventID, hubRowID, "sent")
+		return s.markNotificationReceiptMySQL(ctx, eventID, hubRowID, "", false)
 	}
 	err := scanNotificationOutbox(s.pool.QueryRow(ctx, `UPDATE notification_outbox SET sent_at=now(),hub_row_id=$2 WHERE event_id=$1 AND sent_at IS NULL AND skipped_at IS NULL RETURNING `+notificationOutboxColumns, eventID, hubRowID), &x)
 	if err == nil {
@@ -219,7 +225,7 @@ func (s *Store) MarkNotificationApplied(ctx context.Context, eventID, by string)
 	}
 	var x NotificationOutbox
 	if s.dialect == mysqlDialect {
-		return s.markNotificationReceiptMySQL(ctx, eventID, 0, by)
+		return s.markNotificationReceiptMySQL(ctx, eventID, 0, by, true)
 	}
 	err := scanNotificationOutbox(s.pool.QueryRow(ctx, `UPDATE notification_outbox SET applied_at=now(),applied_by=$2 WHERE event_id=$1 AND sent_at IS NOT NULL AND applied_at IS NULL RETURNING `+notificationOutboxColumns, eventID, by), &x)
 	if err == nil {
@@ -245,7 +251,7 @@ func (s *Store) MarkNotificationApplied(ctx context.Context, eventID, by string)
 
 // markNotificationReceiptMySQL keeps the read, state check and write under one
 // row lock because MySQL has no UPDATE ... RETURNING.
-func (s *Store) markNotificationReceiptMySQL(ctx context.Context, eventID string, hubRowID int64, by string) (NotificationOutbox, error) {
+func (s *Store) markNotificationReceiptMySQL(ctx context.Context, eventID string, hubRowID int64, by string, applied bool) (NotificationOutbox, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return NotificationOutbox{}, err
@@ -259,7 +265,7 @@ func (s *Store) markNotificationReceiptMySQL(ctx context.Context, eventID string
 		}
 		return NotificationOutbox{}, err
 	}
-	if by == "sent" {
+	if !applied {
 		if x.SkippedAt != nil {
 			return NotificationOutbox{}, ErrOutboxConflict
 		}

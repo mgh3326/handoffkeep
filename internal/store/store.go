@@ -3770,14 +3770,10 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 
 // ListOpenEscalations implements the decision inbox job escalation definition.
 func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEvent, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if limit < 1 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+relayEventColumns+` FROM relay_events e
+	query := `SELECT ` + relayEventColumns + ` FROM relay_events e
 		WHERE e.kind='job.escalate' AND NOT EXISTS (
 			SELECT 1 FROM relay_events resolved WHERE resolved.job_id=e.job_id
 			AND resolved.kind IN ('job.joined','job.completed','job.lost','job.revoked') AND resolved.id>e.id
@@ -3785,7 +3781,19 @@ func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEven
 			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event'
 			AND resolved.owner_lane=e.owner_lane AND resolved.id>e.id
 			AND resolved.event_id LIKE '%decision-escalation-' || e.id::text || '-%'
-		) ORDER BY e.id DESC LIMIT $1`, limit)
+		) ORDER BY e.id DESC LIMIT $1`
+	if s.dialect == mysqlDialect {
+		query = `SELECT ` + relayEventColumns + ` FROM relay_events e
+			WHERE e.kind='job.escalate' AND NOT EXISTS (
+				SELECT 1 FROM relay_events resolved WHERE resolved.job_id=e.job_id
+				AND resolved.kind IN ('job.joined','job.completed','job.lost','job.revoked') AND resolved.id>e.id
+			) AND NOT EXISTS (
+				SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event'
+				AND resolved.owner_lane=e.owner_lane AND resolved.id>e.id
+				AND resolved.event_id LIKE CONCAT('%decision-escalation-',e.id,'-%')
+			) ORDER BY e.id DESC LIMIT ?`
+	}
+	rows, err := s.db().Query(ctx, query, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -3808,15 +3816,20 @@ func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEven
 
 // ListOpenLaneDecisions implements the decision inbox lane.event definition.
 func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEvent, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if limit < 1 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+relayEventColumns+` FROM relay_events e
-		WHERE `+openLaneDecisionSQL+` ORDER BY e.id DESC LIMIT $1`, limit)
+	openSQL := openLaneDecisionSQL
+	limitSQL := `$1`
+	if s.dialect == mysqlDialect {
+		openSQL = `e.kind='lane.event' AND e.text LIKE '[decision-needed]%' AND NOT EXISTS (
+			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event' AND resolved.owner_lane=e.owner_lane
+			AND resolved.text LIKE CONCAT('[decision-answered] #',e.id,':%') AND resolved.id>e.id
+		)`
+		limitSQL = `?`
+	}
+	rows, err := s.db().Query(ctx, `SELECT `+relayEventColumns+` FROM relay_events e
+		WHERE `+openSQL+` ORDER BY e.id DESC LIMIT `+limitSQL, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -4429,6 +4442,7 @@ func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limi
 		args = []any{refKind, refID, limit}
 	} else {
 		q += ` ORDER BY a.created_at DESC,a.sha256,r.ref_kind,r.ref_id LIMIT $1`
+		mysqlQ += ` ORDER BY a.created_at DESC,a.sha256,r.ref_kind,r.ref_id LIMIT ?`
 	}
 	rows, e := s.db().Query(ctx, s.q(q, mysqlQ), args...)
 	if e != nil {

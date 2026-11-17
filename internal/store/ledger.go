@@ -608,10 +608,17 @@ func (s *Store) ackLedgerMySQL(ctx context.Context, consumer string, syncID int6
 	if errors.Is(err, ErrNoRows) {
 		// The first ack creates a cursor at the current watermark. A no-op
 		// upsert serializes simultaneous first acks without changing a winner.
-		if _, err = tx.Exec(ctx, `INSERT INTO ledger_cursors(consumer,acked_sync_id,acked_at,updated_by) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE consumer=consumer`, consumer, maxID, now, by); err != nil {
-			return LedgerCursor{}, err
+		inserted, insertErr := tx.Exec(ctx, `INSERT INTO ledger_cursors(consumer,acked_sync_id,acked_at,updated_by) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE consumer=consumer`, consumer, maxID, now, by)
+		if insertErr != nil {
+			return LedgerCursor{}, insertErr
 		}
 		err = tx.QueryRow(ctx, `SELECT `+cols+` FROM ledger_cursors WHERE consumer=? FOR UPDATE`, consumer).Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy)
+		if err != nil {
+			return LedgerCursor{}, err
+		}
+		if inserted == 1 {
+			return c, tx.Commit(ctx)
+		}
 	}
 	if err != nil {
 		return LedgerCursor{}, err

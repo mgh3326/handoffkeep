@@ -1,9 +1,10 @@
 package store
 
 // 20261118-mysql-relay-jobs expands the B2 jobs and relay_events stubs and
-// creates this area's remaining tables. The new tables only take catalog
-// locks; guarded column and index steps take brief metadata locks on the two
-// existing stub tables. The generated nullable relay keys preserve the
+// creates this area's remaining tables. Guarded ALTER and index steps lock
+// the existing stubs; the relay_events index builds scan the table and hold
+// a metadata lock, pausing writes until each build completes. Keep that table
+// small during this expand step. Generated nullable relay keys preserve the
 // PostgreSQL partial unique indexes without constraining unrelated events.
 func init() {
 	registerMySQLMigration(mysqlMigration{id: "20261118-mysql-relay-jobs", after: []string{"20261118-mysql-tasks"}, steps: mysqlRelayJobsSteps})
@@ -57,6 +58,17 @@ var mysqlRelayJobsSteps = []string{
 	mysqlIfNoColumn("jobs", "role", `ALTER TABLE jobs ADD COLUMN role LONGTEXT NOT NULL DEFAULT ('')`),
 	mysqlIfColumnNotNull("jobs", "task_id", `ALTER TABLE jobs MODIFY COLUMN task_id BIGINT NULL`),
 	mysqlIfNoIndex("jobs", "jobs_task", `CREATE INDEX jobs_task ON jobs(task_id, created_at, job_id)`),
+	mysqlIfNoConstraint("jobs", "jobs_report_sha256_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_report_sha256_check CHECK(report_sha256 IS NULL OR report_sha256 REGEXP '^[0-9a-f]{64}$')`),
+	mysqlIfNoConstraint("jobs", "jobs_report_version_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_report_version_check CHECK(report_version IS NULL OR report_version>=1)`),
+	mysqlIfNoConstraint("jobs", "jobs_skills_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_skills_check CHECK(skills IS NULL OR JSON_TYPE(skills)='ARRAY')`),
+	mysqlIfNoConstraint("jobs", "jobs_diff_files_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_diff_files_check CHECK(diff_files IS NULL OR diff_files>=0)`),
+	mysqlIfNoConstraint("jobs", "jobs_diff_insertions_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_diff_insertions_check CHECK(diff_insertions IS NULL OR diff_insertions>=0)`),
+	mysqlIfNoConstraint("jobs", "jobs_diff_deletions_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_diff_deletions_check CHECK(diff_deletions IS NULL OR diff_deletions>=0)`),
+	mysqlIfNoConstraint("jobs", "jobs_input_tokens_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_input_tokens_check CHECK(input_tokens IS NULL OR input_tokens>=0)`),
+	mysqlIfNoConstraint("jobs", "jobs_output_tokens_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_output_tokens_check CHECK(output_tokens IS NULL OR output_tokens>=0)`),
+	mysqlIfNoConstraint("jobs", "jobs_reasoning_tokens_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_reasoning_tokens_check CHECK(reasoning_tokens IS NULL OR reasoning_tokens>=0)`),
+	mysqlIfNoConstraint("jobs", "jobs_cache_read_tokens_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_cache_read_tokens_check CHECK(cache_read_tokens IS NULL OR cache_read_tokens>=0)`),
+	mysqlIfNoConstraint("jobs", "jobs_cache_write_tokens_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_cache_write_tokens_check CHECK(cache_write_tokens IS NULL OR cache_write_tokens>=0)`),
 
 	// Expand the relay_events stub. Prefixes preserve the old owner_lane index.
 	mysqlIfNoColumn("relay_events", "kind", `ALTER TABLE relay_events ADD COLUMN kind VARCHAR(32) NOT NULL DEFAULT ('job.completed')`),

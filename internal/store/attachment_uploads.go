@@ -223,7 +223,7 @@ func (s *Store) ReserveAttachmentUpload(ctx context.Context, u AttachmentUpload,
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes), 0) FROM attachments`).Scan(&committed); err != nil {
 		return err
 	}
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes), 0)::BIGINT FROM attachment_uploads WHERE staging_deleted_at IS NULL`).Scan(&used); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes), 0) FROM attachment_uploads WHERE staging_deleted_at IS NULL`).Scan(&used); err != nil {
 		return err
 	}
 	if err := tx.QueryRow(ctx, s.q(`SELECT COALESCE(SUM(size_bytes), 0) FROM attachment_uploads WHERE staging_deleted_at IS NULL AND created_by=$1`, `SELECT COALESCE(SUM(size_bytes), 0) FROM attachment_uploads WHERE staging_deleted_at IS NULL AND created_by=?`), u.CreatedBy).Scan(&usedByClient); err != nil {
