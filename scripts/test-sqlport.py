@@ -4,7 +4,6 @@ import sys
 import unittest
 from pathlib import Path
 
-
 spec = importlib.util.spec_from_file_location("sqlport", Path(__file__).with_name("sqlport.py"))
 sqlport = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = sqlport
@@ -15,77 +14,77 @@ class RewriteTests(unittest.TestCase):
     def test_placeholders_expand_reused_arguments_in_occurrence_order(self):
         self.assertEqual(sqlport.rewrite("SELECT $2,$1,$2"), ("SELECT ?,?,?", [2, 1, 2], ["$n → ?"], False))
 
-    def test_concat(self):
-        self.assertEqual(sqlport.rewrite("SELECT host_id || ':' || account_key")[0], "SELECT CONCAT(host_id, ':', account_key)")
-
-    def test_concat_with_placeholder_operand(self):
-        self.assertEqual(sqlport.rewrite("SELECT name LIKE $1 || '%'")[:2], ("SELECT name LIKE CONCAT(?, '%')", [1]))
-
-    def test_nested_concat_is_refused_when_inner_operator_remains(self):
-        mysql, _, constructs, _ = sqlport.rewrite("SELECT (host_id || ':') || account_key")
-        self.assertIsNone(mysql)
-        self.assertIn("unsupported || expression", constructs)
-
-    def test_concat_after_keyword_and_parenthesized_operand(self):
-        self.assertEqual(sqlport.rewrite("SELECT x = $1 AND (a) || b = 'c'")[0], "SELECT x = ? AND CONCAT((a), b) = 'c'")
-
-    def test_concat_function_operands(self):
-        self.assertEqual(sqlport.rewrite("SELECT lower(name) || '%'")[0], "SELECT CONCAT(lower(name), '%')")
-        self.assertEqual(sqlport.rewrite("SELECT x || lower(y)")[0], "SELECT CONCAT(x, lower(y))")
-
-    def test_concat_refuses_operator_precedence_ambiguity(self):
-        for sql in ("SELECT doc ->> 'x' || 'y'", "SELECT a || b + c", "SELECT a + b || c"):
-            with self.subTest(sql=sql):
-                mysql, _, constructs, _ = sqlport.rewrite(sql)
-                self.assertIsNone(mysql)
-                self.assertIn("unsupported || expression", constructs)
-
-    def test_cast(self):
-        self.assertEqual(sqlport.rewrite("SELECT $1::jsonb"), ("SELECT CAST(? AS JSON)", [1], ["$n → ?", "::type → CAST"], False))
-        self.assertEqual(sqlport.rewrite("SELECT value::text")[0], "SELECT CAST(value AS CHAR)")
-        self.assertIn("unsupported ::regclass cast", sqlport.rewrite("SELECT 't'::regclass")[2])
-
-    def test_casts_are_rewritten_before_concat(self):
-        self.assertEqual(sqlport.rewrite("SELECT $1::text || '%'")[:2], ("SELECT CONCAT(CAST(? AS CHAR), '%')", [1]))
-        self.assertEqual(sqlport.rewrite("SELECT '%decision-escalation-' || e.id::text || '-%'")[0], "SELECT CONCAT('%decision-escalation-', CAST(e.id AS CHAR), '-%')")
+    def test_cast_map_is_strict_and_handles_function_operands(self):
+        self.assertEqual(sqlport.rewrite("SELECT $1::jsonb")[:2], ("SELECT CAST(? AS JSON)", [1]))
         self.assertEqual(sqlport.rewrite("SELECT count(*)::int FROM t")[0], "SELECT CAST(count(*) AS SIGNED) FROM t")
         self.assertEqual(sqlport.rewrite("SELECT lower(name)::text FROM t")[0], "SELECT CAST(lower(name) AS CHAR) FROM t")
+        self.assertEqual(sqlport.rewrite("SELECT lower(name)::text || '%' FROM t")[0], "SELECT CONCAT(CAST(lower(name) AS CHAR), '%') FROM t")
+        self.assertEqual(sqlport.rewrite("SELECT x::double precision")[0], "SELECT CAST(x AS DOUBLE)")
+        self.assertEqual(sqlport.rewrite("SELECT x::timestamp with time zone")[0], "SELECT CAST(x AS DATETIME(6))")
+        self.assertTrue(any("unsupported ::regclass cast" in item for item in sqlport.rewrite("SELECT 't'::regclass")[2]))
+        self.assertTrue(any("unsupported ::numeric cast modifier" in item for item in sqlport.rewrite("SELECT x::numeric(8,2)")[2]))
+        self.assertTrue(any("unsupported ::text cast modifier" in item for item in sqlport.rewrite("SELECT x::text[]")[2]))
 
-    def test_distinct_predicate(self):
+    def test_text_concat_requires_text_evidence_and_preserves_calls(self):
+        self.assertEqual(sqlport.rewrite("SELECT host_id || ':' || account_key")[0], "SELECT CONCAT(host_id, ':', account_key)")
+        self.assertEqual(sqlport.rewrite("SELECT name LIKE $1 || '%' ")[:2], ("SELECT name LIKE CONCAT(?, '%') ", [1]))
+        self.assertIsNone(sqlport.rewrite("SELECT x || lower(y) || '%' ")[0])
+        self.assertEqual(sqlport.rewrite("SELECT CAST(x AS CHAR) || lower(y) || '%' ")[0], "SELECT CONCAT(CAST(x AS CHAR), lower(y), '%') ")
+        self.assertTrue(any("non-text" in item for item in sqlport.rewrite("SELECT x || lower(y)")[2]))
+        self.assertIsNone(sqlport.rewrite("SELECT lower (name) || '%'")[0])
+
+    def test_concat_boundaries_are_allow_listed(self):
+        for sql in ("SELECT a || b + c", "SELECT a + b || c", "SELECT (host_id || ':') || account_key"):
+            with self.subTest(sql=sql):
+                self.assertIsNone(sqlport.rewrite(sql)[0])
+        self.assertIsNone(sqlport.rewrite("SELECT 1 FROM t WHERE x = $1 AND (a) || b = 'c'")[0])
+        self.assertEqual(sqlport.rewrite("SELECT 1 FROM t WHERE x = $1 AND (a) IS DISTINCT FROM b")[0], "SELECT 1 FROM t WHERE x = ? AND NOT ((a) <=> b)")
+
+    def test_distinct_predicate_and_function_operands(self):
         self.assertEqual(sqlport.rewrite("a IS DISTINCT FROM b")[0], "NOT (a <=> b)")
         self.assertEqual(sqlport.rewrite("a IS NOT DISTINCT FROM b")[0], "(a <=> b)")
-    def test_distinct_predicate_with_placeholder_operand(self):
-        self.assertEqual(sqlport.rewrite("$1 IS DISTINCT FROM col")[:2], ("NOT (? <=> col)", [1]))
-
-    def test_distinct_predicate_function_operand(self):
         self.assertEqual(sqlport.rewrite("lower(a) IS DISTINCT FROM b")[0], "NOT (lower(a) <=> b)")
-
-    def test_distinct_after_keyword_and_parenthesized_operand(self):
-        self.assertEqual(sqlport.rewrite("SELECT x = $1 OR (a) IS DISTINCT FROM b")[0], "SELECT x = ? OR NOT ((a) <=> b)")
-
-    def test_distinct_predicate_refuses_unparenthesized_expressions(self):
-        for sql in ("a = b IS DISTINCT FROM c", "x + 1 IS DISTINCT FROM y", "a IS DISTINCT FROM b + 1"):
+        self.assertIsNone(sqlport.rewrite("lower (a) IS DISTINCT FROM b")[0])
+        for sql in ("a = b IS DISTINCT FROM c", "x + 1 IS DISTINCT FROM y", "a IS DISTINCT FROM b + 1", "x LIKE a IS DISTINCT FROM b", "a IS DISTINCT FROM b LIKE c"):
             with self.subTest(sql=sql):
-                mysql, _, constructs, _ = sqlport.rewrite(sql)
-                self.assertIsNone(mysql)
-                self.assertIn("unsupported IS [NOT] DISTINCT FROM expression", constructs)
+                self.assertIsNone(sqlport.rewrite(sql)[0])
 
-    def test_count_filter_returns_zero_on_empty_input(self):
-        # COUNT over no rows returns 0; SUM over no rows would return NULL.
+    def test_count_filter_preserves_zero_for_empty_input(self):
         self.assertEqual(sqlport.rewrite("COUNT(*) FILTER (WHERE ok)")[0], "COUNT(CASE WHEN ok THEN 1 END)")
+        self.assertEqual(sqlport.rewrite("COUNT(value) FILTER (WHERE ok)")[0], "COUNT(CASE WHEN ok THEN value END)")
+        self.assertIsNone(sqlport.rewrite("COUNT(DISTINCT value) FILTER (WHERE ok)")[0])
 
-    def test_filter(self):
-        self.assertEqual(sqlport.rewrite("COUNT(value) FILTER (WHERE ok)")[0], "COUNT(CASE WHEN ok THEN value ELSE NULL END)")
+    def test_json_arrows_map_to_mysql_and_chains_refuse(self):
+        self.assertEqual(sqlport.rewrite("doc -> 'x', doc ->> 'x'")[0], "JSON_EXTRACT(doc, '$.x'), JSON_UNQUOTE(JSON_EXTRACT(doc, '$.x'))")
+        self.assertEqual(sqlport.rewrite("doc -> 0")[0], "JSON_EXTRACT(doc, '$[0]')")
+        for sql in ("refs->'disposition'->'answer'->>'event_id'", "CAST(? AS JSON) -> 'x'", "doc -> 'has.dot'"):
+            with self.subTest(sql=sql):
+                self.assertIsNone(sqlport.rewrite(sql)[0])
 
-    def test_json_ops_are_preserved_and_key_exists_is_rewritten(self):
-        self.assertEqual(sqlport.rewrite("doc -> 'x', doc ->> 'x', doc ? 'x'")[0], "doc -> '$.x', doc ->> '$.x', JSON_CONTAINS_PATH(doc, 'one', '$.x')")
-        self.assertIn("unsupported ? key-exists key", sqlport.rewrite("doc ? 'has.dot'")[2])
-        self.assertIn("unsupported JSON arrow path", sqlport.rewrite("doc -> 'has.dot'")[2])
+    def test_key_exists_after_single_arrow_is_rewritten(self):
+        self.assertEqual(sqlport.rewrite("doc ? 'x'")[0], "JSON_CONTAINS_PATH(doc, 'one', '$.x')")
+        self.assertEqual(sqlport.rewrite("doc->'a' ? 'b'")[0], "JSON_CONTAINS_PATH(JSON_EXTRACT(doc, '$.a'), 'one', '$.b')")
+        self.assertIsNone(sqlport.rewrite("doc ? 'has.dot'")[0])
+        self.assertIsNone(sqlport.rewrite("doc->'a'->'b' ? 'c'")[0])
 
-    def test_now_is_flagged(self):
+    def test_now_is_flagged_even_when_other_construct_is_todo(self):
         self.assertTrue(sqlport.rewrite("SELECT now()")[3])
+        self.assertTrue(sqlport.rewrite("SELECT now() - interval '1 day'")[3])
 
-    def test_refusals(self):
+    def test_reviewer_regressions_fail_closed(self):
+        samples = (
+            "SELECT substring(t.refs->>'pr' FROM '^https://example.invalid')",
+            "SELECT lower (name) || '%'",
+            "SELECT lower (a) IS DISTINCT FROM b",
+            "SELECT refs->'disposition'->'answer'->>'event_id'",
+            "SELECT CAST(? AS JSON) -> 'x'",
+        )
+        for sql in samples:
+            with self.subTest(sql=sql):
+                self.assertIsNone(sqlport.rewrite(sql)[0])
+        self.assertEqual(sqlport.rewrite("SELECT t.refs->'disposition' ? 'answer'")[0], "SELECT JSON_CONTAINS_PATH(JSON_EXTRACT(t.refs, '$.disposition'), 'one', '$.answer')")
+
+    def test_construct_table_refusals(self):
         samples = {
             "RETURNING": "INSERT INTO t VALUES(1) RETURNING id",
             "ON CONFLICT": "INSERT INTO t VALUES(1) ON CONFLICT DO NOTHING",
@@ -96,37 +95,43 @@ class RewriteTests(unittest.TestCase):
             "xmax": "SELECT xmax FROM t",
             "advisory locks": "SELECT pg_advisory_xact_lock(1)",
             "plpgsql": "CREATE FUNCTION f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN END $$",
+            "ILIKE": "SELECT x ILIKE '%x%'",
+            "regex match operators": "SELECT x ~ '^x'",
+            "NULLS FIRST/LAST": "SELECT x ORDER BY x NULLS LAST",
+            "interval literal": "SELECT now() - interval '1 day'",
+            "clock_timestamp()": "SELECT clock_timestamp()",
+            "generate_series/jsonb_* and other PostgreSQL functions": "SELECT jsonb_set(x, '{}', '1')",
+            "EXTRACT(EPOCH)": "SELECT EXTRACT(EPOCH FROM now())",
+            "IS TRUE/IS FALSE": "SELECT x IS TRUE",
+            "SIMILAR TO": "SELECT x SIMILAR TO '%x%'",
+            "substring FROM regex": "SELECT substring(x FROM '^x')",
+            "DO block": "DO $$ BEGIN END $$",
+            "PostgreSQL-only type spelling": "CREATE TABLE x (data JSONB)",
+            "CREATE INDEX IF NOT EXISTS": "CREATE INDEX IF NOT EXISTS idx_x ON x(id)",
         }
         for expected, sql in samples.items():
             with self.subTest(expected=expected):
-                self.assertIn(expected, sqlport.rewrite(sql)[2])
-                self.assertIsNone(sqlport.rewrite(sql)[0])
+                result = sqlport.rewrite(sql)
+                self.assertIsNone(result[0])
+                self.assertIn(expected, result[2])
 
-    def test_hk5059_quota_literal_matches_the_hand_port(self):
-        # From PR #470's quota.go:187. This is a direct mechanical port.
-        pg = "SELECT o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 ORDER BY l.kind,l.window_key"
-        mysql_hand = "SELECT o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=? ORDER BY l.kind,l.window_key"
-        self.assertEqual(sqlport.rewrite(pg)[0], mysql_hand)
+    def test_postgres_only_constructs_are_discovered_without_other_hints(self):
+        source = 'var q = "SELECT name ILIKE \'%x%\'"'
+        literals = sqlport.go_literals(source)
+        self.assertEqual(len(literals), 1)
+        self.assertIsNone(sqlport.rewrite(literals[0].text)[0])
 
-    def test_hk5059_reused_quota_placeholders_match_the_hand_port(self):
-        # From PR #470's quota.go:523. The caller expands arguments to match.
-        pg = "SELECT host_id,account_key,last_seen FROM quota_presence WHERE ($1='' OR host_id=$1) AND ($2='' OR account_key=$2) AND last_seen >= clock_timestamp()-$4*interval '1 second' ORDER BY last_seen DESC,host_id,account_key LIMIT $3"
-        mysql_hand = "SELECT host_id,account_key,last_seen FROM quota_presence WHERE (?='' OR host_id=?) AND (?='' OR account_key=?) AND last_seen >= DATE_SUB(UTC_TIMESTAMP(6), INTERVAL ? SECOND) ORDER BY last_seen DESC,host_id,account_key LIMIT ?"
-        mysql, order, _, _ = sqlport.rewrite(pg)
-        self.assertEqual(order, [1, 1, 2, 2, 4, 3])
-        self.assertEqual(mysql.replace("clock_timestamp()-?*interval '1 second'", "DATE_SUB(UTC_TIMESTAMP(6), INTERVAL ? SECOND)"), mysql_hand)
+    def test_hk5059_quota_comparisons(self):
+        quota = "SELECT o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 ORDER BY l.kind,l.window_key"
+        self.assertEqual(sqlport.rewrite(quota)[0], "SELECT o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=? ORDER BY l.kind,l.window_key")
+        presence = "SELECT host_id,account_key,last_seen FROM quota_presence WHERE ($1='' OR host_id=$1) AND ($2='' OR account_key=$2) AND last_seen >= clock_timestamp()-$4*interval '1 second' ORDER BY last_seen DESC,host_id,account_key LIMIT $3"
+        self.assertIsNone(sqlport.rewrite(presence)[0])
+        self.assertEqual(sqlport.rewrite(" FROM bench_reps WHERE id=$1 FOR UPDATE")[0], " FROM bench_reps WHERE id=? FOR UPDATE")
+        self.assertIsNone(sqlport.rewrite("INSERT INTO quota_observations(account_key) VALUES($1) RETURNING id")[0])
 
-    def test_hk5059_quota_semantic_port_is_refused_and_needs_hand_work(self):
-        # PR #470's RETURNING/upsert rewrites are deliberately outside this tool.
-        pg = "INSERT INTO quota_observations(account_key) VALUES($1) RETURNING id"
-        self.assertIsNone(sqlport.rewrite(pg)[0])
-        self.assertIn("RETURNING", sqlport.rewrite(pg)[2])
-
-    def test_hk5059_bench_literal_matches_the_hand_port(self):
-        # From PR #470's bench_outcomes.go:148; the SQL prefix is shared.
-        pg = " FROM bench_reps WHERE id=$1 FOR UPDATE"
-        mysql_hand = " FROM bench_reps WHERE id=? FOR UPDATE"
-        self.assertEqual(sqlport.rewrite(pg)[0], mysql_hand)
+    def test_corpus_invariant_for_internal_store(self):
+        violations = sqlport._corpus_auto_violations(Path(__file__).resolve().parents[1])
+        self.assertEqual(violations, [])
 
 
 if __name__ == "__main__":
