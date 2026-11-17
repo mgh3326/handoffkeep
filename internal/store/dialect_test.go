@@ -98,6 +98,14 @@ func TestUnportedMethodsReturnDialectUnsupportedOnMySQL(t *testing.T) {
 	}
 }
 
+func TestPatchBenchRepOutcomeKeepsMySQLPortedPath(t *testing.T) {
+	mysqlStore := &Store{dialect: mysqlDialect}
+	_, err := mysqlStore.PatchBenchRepOutcome(context.Background(), 0, BenchRepOutcomePatch{})
+	if err == nil || err.Error() != "invalid bench rep id" {
+		t.Fatalf("PatchBenchRepOutcome error = %v, want MySQL validation error", err)
+	}
+}
+
 func TestBeginNamedTransactionDiscardsConnectionOnNullLockResult(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
