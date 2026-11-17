@@ -214,7 +214,7 @@ func prepareYTOpTx(ctx context.Context, tx transaction, now time.Time, n ytwrite
 		_, ierr := tx.Exec(ctx, `INSERT INTO yt_write_ops(principal, kind, idem_key, payload_sha, payload, entity_kind, entity_id,
 				yt_target_id, actor, parent_id, child_seq, state, created_at, next_attempt_at, tenant)
 			VALUES (?,?,?,?,?,?,?,?,?,?,?,'prepared',?,?,?)`,
-			n.Principal, n.Kind, n.Key, n.PayloadSHA, string(n.Payload), n.EntityKind, n.EntityID, n.YTTargetID, n.Actor, parent, n.ChildSeq, now.UTC(), n.Tenant)
+			n.Principal, n.Kind, n.Key, n.PayloadSHA, string(n.Payload), n.EntityKind, n.EntityID, n.YTTargetID, n.Actor, parent, n.ChildSeq, now.UTC(), now.UTC(), n.Tenant)
 		if ierr == nil {
 			op, err = scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE principal=? AND kind=? AND idem_key=?`,
 				n.Principal, n.Kind, n.Key))
