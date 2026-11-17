@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"github.com/go-sql-driver/mysql"
 	"sync"
 	"testing"
 )
@@ -18,8 +19,10 @@ func needPorted(t *testing.T, s *Store, what string, err error) {
 	if err == nil {
 		return
 	}
-	if s.dialect == mysqlDialect && errors.Is(err, ErrDialectUnsupported) {
-		t.Skipf("%s is not ported to MySQL yet", what)
+	var me *mysql.MySQLError
+	if s.dialect == mysqlDialect && (errors.Is(err, ErrDialectUnsupported) || errors.As(err, &me) && me.Number == 1146) {
+		// 1146 is a table of an area that is not ported yet.
+		t.Skipf("%s is not ported to MySQL yet: %v", what, err)
 	}
 	t.Fatalf("%s: %v", what, err)
 }

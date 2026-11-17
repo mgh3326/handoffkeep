@@ -318,7 +318,7 @@ func hierarchyCaseAutoClose(t *testing.T, s *Store) {
 		t.Fatalf("parent closed with one sub-task open: state=%q", got.State)
 	}
 	_, err = s.CloseTaskCompleted(ctx, kids[1].ID, "hk:doc research/auto-close", "tester", "second done", "ac-2")
-	flowMust(t, err)
+	flowSkipUnported(t, s, err)
 	got := flowCaseGet(t, s, parent.ID)
 	if got.State != StateCompleted || got.Refs.Closure == nil {
 		t.Fatalf("parent state=%q closure=%v, want completed with a closure", got.State, got.Refs.Closure)

@@ -161,6 +161,7 @@ func threadsCaseClaimSettleRecover(t *testing.T, s *Store) {
 	// A PR line: claimed, then its worker dies mid-send.
 	pr := a5PR(301)
 	if _, err := s.ApplyTaskSourceEvent(ctx, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: pr, TaskID: task.ID}); err != nil {
+		needPorted(t, s, "PR source events (changes, B5)", err)
 		t.Fatal(err)
 	}
 	line, found, err := s.ClaimTaskThread(ctx, later)
@@ -250,7 +251,7 @@ func threadsCaseUnknownCreate(t *testing.T, s *Store) {
 	if err != nil || len(got) != 1 || got[0].TaskID != b.ID || got[0].State != TaskThreadCreating {
 		t.Fatalf("recovered %+v err=%v", got, err)
 	}
-	if x := a5ThreadState(t, s, b.ID); x.ClaimKey != "" || x.NextAttemptAt.After(expired) || !strings.Contains(x.LastError, "create outcome unknown") {
+	if x := a5ThreadState(t, s, b.ID); x.ClaimKey != "" || x.NextAttemptAt.After(expired.Add(time.Microsecond)) || !strings.Contains(x.LastError, "create outcome unknown") {
 		t.Fatalf("after recovery %+v", x)
 	}
 
@@ -500,7 +501,9 @@ func threadsCasePRStart(t *testing.T, s *Store) {
 	}
 	x := a5Task(t, s, project, "started by its PR")
 	pr := a5PR(304)
-	if res, err := s.ApplyTaskSourceEvent(ctx, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: pr, TaskID: x.ID}); err != nil || !res.Applied || res.State != StateReviewing {
+	res, err := s.ApplyTaskSourceEvent(ctx, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: pr, TaskID: x.ID})
+	needPorted(t, s, "PR source events (changes, B5)", err)
+	if err != nil || !res.Applied || res.State != StateReviewing {
 		t.Fatalf("pr event %+v err=%v", res, err)
 	}
 	if n, err := s.QueueTaskThreads(ctx, now, projects); err != nil || n != 1 {

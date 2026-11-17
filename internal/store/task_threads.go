@@ -535,15 +535,19 @@ func (s *Store) claimTaskThreadOnce(ctx context.Context, now time.Time) (TaskThr
 	defer release()
 	defer tx.Rollback(ctx)
 	x := TaskThreadItem{Destination: dest, Type: TaskThreadCreate, Key: TaskThreadCreate}
-	err = tx.QueryRow(ctx, s.q(`SELECT n.task_id,n.thread_name,n.attempts,n.state='`+TaskThreadCreating+`',coalesce(t.project,''),t.kind,coalesce(nullif(t.refs->>'grade',''),t.refs->'linear'->>'grade',''),coalesce(nullif(t.refs->>'tier',''),t.refs->'linear'->>'tier','')
+	createQuery := s.q(`SELECT n.task_id,n.thread_name,n.attempts,n.state='`+TaskThreadCreating+`',coalesce(t.project,''),t.kind,coalesce(nullif(t.refs->>'grade',''),t.refs->'linear'->>'grade',''),coalesce(nullif(t.refs->>'tier',''),t.refs->'linear'->>'tier','')
 		FROM task_thread_deliveries n JOIN tasks t ON t.id=n.task_id
 		WHERE n.destination=$1 AND n.state IN ('`+TaskThreadPending+`','`+TaskThreadCreating+`') AND n.claim_key='' AND n.next_attempt_at<=$2::timestamptz
 		ORDER BY n.next_attempt_at,n.start_event_id LIMIT 1 FOR UPDATE OF n SKIP LOCKED`,
 		`SELECT n.task_id,n.thread_name,n.attempts,n.state='`+TaskThreadCreating+`',COALESCE(t.project,''),t.kind,COALESCE(NULLIF(`+taskThreadRefText("$.grade")+`,''),`+taskThreadRefText("$.linear.grade")+`,''),COALESCE(NULLIF(`+taskThreadRefText("$.tier")+`,''),`+taskThreadRefText("$.linear.tier")+`,'')
 		FROM task_thread_deliveries n JOIN tasks t ON t.id=n.task_id
 		WHERE n.destination=? AND n.state IN ('`+TaskThreadPending+`','`+TaskThreadCreating+`') AND n.claim_key='' AND n.next_attempt_at<=?
-		ORDER BY n.next_attempt_at,n.start_event_id LIMIT 1 FOR UPDATE OF n SKIP LOCKED`), dest, now).
-		Scan(&x.TaskID, &x.ThreadName, &x.Attempts, &x.Lookup, &x.Project, &x.Kind, &x.Grade, &x.Tier)
+		ORDER BY n.next_attempt_at,n.start_event_id LIMIT 1 FOR UPDATE OF n SKIP LOCKED`)
+	if mysql {
+		err = claimThreadCreateMySQL(ctx, tx, createQuery, dest, now, &x)
+	} else {
+		err = tx.QueryRow(ctx, createQuery, dest, now).Scan(&x.TaskID, &x.ThreadName, &x.Attempts, &x.Lookup, &x.Project, &x.Kind, &x.Grade, &x.Tier)
+	}
 	switch {
 	case err == nil:
 		claim := []any{x.TaskID, dest, x.Key, now}
@@ -866,4 +870,33 @@ func (s *Store) GetTaskThread(ctx context.Context, taskID int64) (TaskThreadStat
 		_, err = scanJSONB(postedJSON, &x.Posted)
 	}
 	return x, err == nil, err
+}
+
+// claimThreadCreateMySQL claims the first due create the way PostgreSQL's
+// "ORDER BY ... LIMIT 1 FOR UPDATE SKIP LOCKED" does. On MySQL that statement
+// sorts with a filesort, which locks every due row it examines before it
+// returns the first, so one claimer would lock them all and the others would
+// find nothing. Instead: read the candidate keys in order without a lock, then
+// lock one row at a time by its key, skipping a row another claimer holds.
+func claimThreadCreateMySQL(ctx context.Context, tx transaction, orderedQuery, dest string, now time.Time, x *TaskThreadItem) error {
+	rows, err := tx.Query(ctx, `SELECT n.task_id FROM task_thread_deliveries n
+		WHERE n.destination=? AND n.state IN ('`+TaskThreadPending+`','`+TaskThreadCreating+`') AND n.claim_key='' AND n.next_attempt_at<=?
+		ORDER BY n.next_attempt_at,n.start_event_id LIMIT 64`, dest, now)
+	if err != nil {
+		return err
+	}
+	ids, err := collectRows(rows, rowTo[int64])
+	if err != nil {
+		return err
+	}
+	// The ordered statement with its ORDER BY and LIMIT replaced by a key lookup.
+	byKey := strings.Replace(orderedQuery, "ORDER BY n.next_attempt_at,n.start_event_id LIMIT 1 FOR UPDATE OF n SKIP LOCKED", "AND n.task_id=? FOR UPDATE OF n SKIP LOCKED", 1)
+	for _, id := range ids {
+		err := tx.QueryRow(ctx, byKey, dest, now, id).Scan(&x.TaskID, &x.ThreadName, &x.Attempts, &x.Lookup, &x.Project, &x.Kind, &x.Grade, &x.Tier)
+		if errors.Is(err, ErrNoRows) {
+			continue
+		}
+		return err
+	}
+	return ErrNoRows
 }
