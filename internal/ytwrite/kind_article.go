@@ -870,7 +870,7 @@ func (a articleCreate) Send(ctx context.Context, remote Remote, op Op, text stri
 
 	missing, err := splitMissingParts(ctx, ar, op, p, indexID, pieces)
 	if err != nil {
-		return "", &NotSentError{Err: fmt.Errorf("split parts check: %w", err)}
+		return "", fmt.Errorf("split parts check: %w", err)
 	}
 	for _, i := range missing {
 		partSummary := splitPartSummary(p.Summary, i+1, len(pieces))

@@ -653,6 +653,48 @@ func TestArticleCreateSplitEmptyIndexIDLookupFailureStaysRemoteUnknown(t *testin
 	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
 }
 
+// When checking child parts under an index article fails transiently,
+// the op transitions to remote_unknown (not prepared/not_sent) because the index
+// article was already created, preventing duplicate index creates on retry.
+func TestArticleCreateSplitPartsCheckFailureStaysRemoteUnknown(t *testing.T) {
+	e := newArticleEnv(t)
+	req := articleReq()
+	req.Body = strings.Repeat("hello world line\n", 20000) // ~340KB -> 2 parts
+	op := prepareWith(t, e, req)
+
+	// After index article is created, fail the subsequent FindArticles in splitMissingParts
+	creates := 0
+	e.yt.BeforeArticleCreate = func(ctx context.Context, in ytwrite.ArticleCreate) {
+		creates++
+		if creates == 1 {
+			e.yt.QueueFind(&ytwrite.RemoteError{Status: http.StatusBadGateway, Message: "gateway timeout"})
+		}
+	}
+
+	e.drive()
+	// Must stay in remote_unknown, NOT prepared / not_sent!
+	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+
+	// Advance clock and drive again: Evidence finds index but missing parts, keeping it in remote_unknown
+	e.yt.BeforeArticleCreate = nil
+	e.clock.Advance(time.Hour)
+	e.drive()
+
+	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonMarkerMismatch)
+
+	writes := e.yt.ArticleWrites()
+	// Exactly 1 index article create (never 2 index creates!)
+	indexCreates := 0
+	for _, w := range writes {
+		if w.ArticleCreate.ParentID == "" {
+			indexCreates++
+		}
+	}
+	if indexCreates != 1 {
+		t.Fatalf("expected exactly 1 index article create, got %d", indexCreates)
+	}
+}
+
 // When p.Summary uses all allowed runes and child pieces are identical,
 // each part still receives a distinct summary and must match a distinct article.
 func TestArticleCreateSplitLongSummaryUniquePartDiscriminator(t *testing.T) {
