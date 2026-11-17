@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -89,14 +90,10 @@ func SourceSHA256(original string) string {
 // PutTranslation stores the digest supplied by the translator, not a digest of
 // the current original, so a concurrent edit cannot make an old translation fresh.
 func (s *Store) PutTranslation(ctx context.Context, t Translation) error {
-	if s != nil && s.dialect == mysqlDialect {
-		return ErrDialectUnsupported
-	}
-
 	if err := checkTranslation(t); err != nil {
 		return err
 	}
-	_, err := s.pool.Exec(ctx, `INSERT INTO translations(entity,entity_id,field,lang,source_sha256,text,translator,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(entity,entity_id,field,lang) DO UPDATE SET source_sha256=EXCLUDED.source_sha256,text=EXCLUDED.text,translator=EXCLUDED.translator,updated_at=EXCLUDED.updated_at`, t.Entity, t.EntityID, t.Field, t.Lang, t.SourceSHA256, t.Text, t.Translator, time.Now().UTC())
+	_, err := s.db().Exec(ctx, s.q(`INSERT INTO translations(entity,entity_id,field,lang,source_sha256,text,translator,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(entity,entity_id,field,lang) DO UPDATE SET source_sha256=EXCLUDED.source_sha256,text=EXCLUDED.text,translator=EXCLUDED.translator,updated_at=EXCLUDED.updated_at`, `INSERT INTO translations(entity,entity_id,field,lang,source_sha256,text,translator,updated_at) VALUES(?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE source_sha256=VALUES(source_sha256),text=VALUES(text),translator=VALUES(translator),updated_at=VALUES(updated_at)`), t.Entity, t.EntityID, t.Field, t.Lang, t.SourceSHA256, t.Text, t.Translator, time.Now().UTC())
 	return err
 }
 
@@ -109,10 +106,6 @@ type TranslationSource struct {
 // ListTranslations loads one page's translations and compares each with the
 // original supplied by its reader. Missing rows are omitted.
 func (s *Store) ListTranslations(ctx context.Context, entity string, sources []TranslationSource) ([]Translation, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	ids := make([]string, 0, len(sources))
 	originals := make(map[string]map[string]string, len(sources))
 	for _, source := range sources {
@@ -125,7 +118,16 @@ func (s *Store) ListTranslations(ctx context.Context, entity string, sources []T
 	if len(ids) == 0 {
 		return []Translation{}, nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT entity,entity_id,field,lang,source_sha256,text,translator,updated_at FROM translations WHERE entity=$1 AND entity_id=ANY($2) AND lang='ko' ORDER BY entity_id,field`, entity, ids)
+	query := `SELECT entity,entity_id,field,lang,source_sha256,text,translator,updated_at FROM translations WHERE entity=$1 AND entity_id=ANY($2) AND lang='ko' ORDER BY entity_id,field`
+	args := []any{entity, ids}
+	if s.dialect == mysqlDialect {
+		query = `SELECT entity,entity_id,field,lang,source_sha256,text,translator,updated_at FROM translations WHERE entity=? AND entity_id IN (` + placeholders(len(ids)) + `) AND lang='ko' ORDER BY entity_id,field`
+		args = []any{entity}
+		for _, id := range ids {
+			args = append(args, id)
+		}
+	}
+	rows, err := s.db().Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +161,16 @@ func (s *Store) ListTranslations(ctx context.Context, entity string, sources []T
 	if len(taskIDs) == 0 {
 		return out, nil
 	}
-	taskRows, err := s.pool.Query(ctx, `SELECT refs FROM tasks WHERE id=ANY($1)`, taskIDs)
+	taskQuery := `SELECT refs FROM tasks WHERE id=ANY($1)`
+	taskArgs := []any{taskIDs}
+	if s.dialect == mysqlDialect {
+		taskQuery = `SELECT refs FROM tasks WHERE id IN (` + placeholders(len(taskIDs)) + `)`
+		taskArgs = nil
+		for _, id := range taskIDs {
+			taskArgs = append(taskArgs, id)
+		}
+	}
+	taskRows, err := s.db().Query(ctx, taskQuery, taskArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -222,10 +233,6 @@ func (s *Store) ListTranslations(ctx context.Context, entity string, sources []T
 
 // PutTranslations validates the whole batch before writing it atomically.
 func (s *Store) PutTranslations(ctx context.Context, translations []Translation) error {
-	if s != nil && s.dialect == mysqlDialect {
-		return ErrDialectUnsupported
-	}
-
 	if len(translations) == 0 || len(translations) > 100 {
 		return fmt.Errorf("invalid translation batch size")
 	}
@@ -234,14 +241,19 @@ func (s *Store) PutTranslations(ctx context.Context, translations []Translation)
 			return err
 		}
 	}
-	tx, err := s.pool.Begin(ctx)
+	return s.retryTx(ctx, func() error { return s.putTranslationsOnce(ctx, translations) })
+}
+
+func (s *Store) putTranslationsOnce(ctx context.Context, translations []Translation) error {
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	now := time.Now().UTC()
 	for _, t := range translations {
-		_, err = tx.Exec(ctx, `INSERT INTO translations(entity,entity_id,field,lang,source_sha256,text,translator,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(entity,entity_id,field,lang) DO UPDATE SET source_sha256=EXCLUDED.source_sha256,text=EXCLUDED.text,translator=EXCLUDED.translator,updated_at=EXCLUDED.updated_at`, t.Entity, t.EntityID, t.Field, t.Lang, t.SourceSHA256, t.Text, t.Translator, now)
+		_, err = tx.Exec(ctx, s.q(`INSERT INTO translations(entity,entity_id,field,lang,source_sha256,text,translator,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(entity,entity_id,field,lang) DO UPDATE SET source_sha256=EXCLUDED.source_sha256,text=EXCLUDED.text,translator=EXCLUDED.translator,updated_at=EXCLUDED.updated_at`, `INSERT INTO translations(entity,entity_id,field,lang,source_sha256,text,translator,updated_at) VALUES(?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE source_sha256=VALUES(source_sha256),text=VALUES(text),translator=VALUES(translator),updated_at=VALUES(updated_at)`), t.Entity, t.EntityID, t.Field, t.Lang, t.SourceSHA256, t.Text, t.Translator, now)
 		if err != nil {
 			return err
 		}
@@ -250,7 +262,20 @@ func (s *Store) PutTranslations(ctx context.Context, translations []Translation)
 	// carries its Korean title (D5), so a title written after the task must
 	// reach the feed (hk 3997): one task 'U' row per task, in this
 	// transaction. The commit-time allocator gives it its sync_id.
-	if _, err = tx.Exec(ctx, `INSERT INTO sync_log(model,model_id,action,at)
+	if s.dialect == mysqlDialect {
+		seen := map[string]bool{}
+		ids := translatedTaskTitles(translations)
+		sort.Strings(ids)
+		for _, id := range ids {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			if _, err = tx.Exec(ctx, `INSERT INTO sync_log(txn,model,model_id,action,at) VALUES(@hk_txn,'task',?,'U',?)`, id, now); err != nil {
+				return err
+			}
+		}
+	} else if _, err = tx.Exec(ctx, `INSERT INTO sync_log(model,model_id,action,at)
 		SELECT 'task', id, 'U', clock_timestamp() FROM (SELECT DISTINCT unnest($1::text[]) AS id) titled ORDER BY id`,
 		translatedTaskTitles(translations)); err != nil {
 		return err
@@ -281,14 +306,10 @@ type MissingTranslation struct {
 
 // MissingTaskTranslations returns missing and stale fields in task ID order.
 func (s *Store) MissingTaskTranslations(ctx context.Context, limit int) ([]MissingTranslation, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("invalid translation limit")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT t.id, t.title, coalesce(d.body,''), coalesce(tt.source_sha256,''), coalesce(tb.source_sha256,'') FROM tasks t LEFT JOIN documents d ON d.key=split_part(t.body_doc,'#',1) LEFT JOIN translations tt ON tt.entity='task' AND tt.entity_id=t.id::text AND tt.field='title' AND tt.lang='ko' LEFT JOIN translations tb ON tb.entity='task' AND tb.entity_id=t.id::text AND tb.field='body' AND tb.lang='ko' WHERE t.state NOT IN (`+settledStatesSQL+`) ORDER BY t.id`)
+	rows, err := s.db().Query(ctx, s.q(`SELECT t.id, t.title, coalesce(d.body,''), coalesce(tt.source_sha256,''), coalesce(tb.source_sha256,'') FROM tasks t LEFT JOIN documents d ON d.key=split_part(t.body_doc,'#',1) LEFT JOIN translations tt ON tt.entity='task' AND tt.entity_id=t.id::text AND tt.field='title' AND tt.lang='ko' LEFT JOIN translations tb ON tb.entity='task' AND tb.entity_id=t.id::text AND tb.field='body' AND tb.lang='ko' WHERE t.state NOT IN (`+settledStatesSQL+`) ORDER BY t.id`, "SELECT t.id,t.title,coalesce(d.body,''),coalesce(tt.source_sha256,''),coalesce(tb.source_sha256,'') FROM tasks t LEFT JOIN documents d ON d.`key`=SUBSTRING_INDEX(t.body_doc,'#',1) LEFT JOIN translations tt ON tt.entity='task' AND tt.entity_id=CAST(t.id AS CHAR) AND tt.field='title' AND tt.lang='ko' LEFT JOIN translations tb ON tb.entity='task' AND tb.entity_id=CAST(t.id AS CHAR) AND tb.field='body' AND tb.lang='ko' WHERE t.state NOT IN ("+settledStatesSQL+") ORDER BY t.id"))
 	if err != nil {
 		return nil, err
 	}
@@ -324,14 +345,19 @@ func (s *Store) MissingTaskTranslations(ctx context.Context, limit int) ([]Missi
 
 // MissingDecisionTranslations enumerates each structured decision revision.
 func (s *Store) MissingDecisionTranslations(ctx context.Context, limit int) ([]MissingTranslation, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
+	if s.dialect == mysqlDialect {
+		has, err := s.mysqlTableExists(ctx, s.db(), "decision_requests")
+		if err != nil {
+			return nil, err
+		}
+		if !has {
+			return nil, ErrDialectUnsupported
+		}
 	}
-
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("invalid translation limit")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT d.source_ref,d.question,d.options,coalesce(q.source_sha256,''),coalesce(o.source_sha256,''),t.refs FROM decision_requests d LEFT JOIN tasks t ON t.id=d.task_id LEFT JOIN translations q ON q.entity='decision_request' AND q.entity_id=d.source_ref AND q.field='question' AND q.lang='ko' LEFT JOIN translations o ON o.entity='decision_request' AND o.entity_id=d.source_ref AND o.field='options' AND o.lang='ko' WHERE d.status='open' AND d.source IN ('task_request','linear') ORDER BY d.id`)
+	rows, err := s.db().Query(ctx, `SELECT d.source_ref,d.question,d.options,coalesce(q.source_sha256,''),coalesce(o.source_sha256,''),t.refs FROM decision_requests d LEFT JOIN tasks t ON t.id=d.task_id LEFT JOIN translations q ON q.entity='decision_request' AND q.entity_id=d.source_ref AND q.field='question' AND q.lang='ko' LEFT JOIN translations o ON o.entity='decision_request' AND o.entity_id=d.source_ref AND o.field='options' AND o.lang='ko' WHERE d.status='open' AND d.source IN ('task_request','linear') ORDER BY d.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -382,14 +408,10 @@ func (s *Store) MissingDecisionTranslations(ctx context.Context, limit int) ([]M
 
 // MissingCommentTranslations enumerates comments belonging to unsettled tasks.
 func (s *Store) MissingCommentTranslations(ctx context.Context, limit int) ([]MissingTranslation, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("invalid translation limit")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT c.id,c.body,coalesce(tr.source_sha256,'') FROM task_comments c JOIN tasks t ON t.id=c.task_id LEFT JOIN translations tr ON tr.entity='task_comment' AND tr.entity_id=c.id::text AND tr.field='body' AND tr.lang='ko' WHERE t.state NOT IN (`+settledStatesSQL+`) ORDER BY c.id`)
+	rows, err := s.db().Query(ctx, s.q(`SELECT c.id,c.body,coalesce(tr.source_sha256,'') FROM task_comments c JOIN tasks t ON t.id=c.task_id LEFT JOIN translations tr ON tr.entity='task_comment' AND tr.entity_id=c.id::text AND tr.field='body' AND tr.lang='ko' WHERE t.state NOT IN (`+settledStatesSQL+`) ORDER BY c.id`, `SELECT c.id,c.body,coalesce(tr.source_sha256,'') FROM task_comments c JOIN tasks t ON t.id=c.task_id LEFT JOIN translations tr ON tr.entity='task_comment' AND tr.entity_id=CAST(c.id AS CHAR) AND tr.field='body' AND tr.lang='ko' WHERE t.state NOT IN (`+settledStatesSQL+`) ORDER BY c.id`))
 	if err != nil {
 		return nil, err
 	}

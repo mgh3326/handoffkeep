@@ -95,39 +95,27 @@ func (s *Store) CreateTaskCommentProjected(ctx context.Context, taskID int64, au
 	if err := CheckTaskCommentBody(body); err != nil {
 		return CreatedTaskComment{}, err
 	}
-	tx, release, err := s.begin(ctx)
+	if s.dialect == mysqlDialect {
+		x, _, err := s.mysqlCreateComment(ctx, taskID, author, body, nil)
+		return x, err
+	}
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return CreatedTaskComment{}, err
 	}
-	defer release()
 	defer tx.Rollback(ctx)
-	if err := s.lockTx(ctx, tx, taskCommentInsertLock); err != nil {
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
 		return CreatedTaskComment{}, err
 	}
 	var x TaskComment
-	if dialectFor(tx) == mysqlDialect {
-		var exists bool
-		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?)`, taskID).Scan(&exists); err != nil {
-			return CreatedTaskComment{}, err
-		}
-		if !exists {
-			return CreatedTaskComment{}, ErrTaskNotFound
-		}
-		var id int64
-		id, err = tx.InsertID(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES(?,?,?,?)`, taskID, body, author, time.Now().UTC())
-		if err == nil {
-			err = scanTaskComment(tx.QueryRow(ctx, `SELECT `+taskCommentColumns+` FROM task_comments WHERE id=?`, id), &x)
-		}
-	} else {
-		err = scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) SELECT $1,$2,$3,$4 WHERE EXISTS(SELECT 1 FROM tasks WHERE id=$1) RETURNING `+taskCommentColumns, taskID, body, author, time.Now().UTC()), &x)
-		if errors.Is(err, ErrNoRows) {
-			return CreatedTaskComment{}, ErrTaskNotFound
-		}
+	err = scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) SELECT $1,$2,$3,$4 WHERE EXISTS(SELECT 1 FROM tasks WHERE id=$1) RETURNING `+taskCommentColumns, taskID, body, author, time.Now().UTC()), &x)
+	if errors.Is(err, ErrNoRows) {
+		return CreatedTaskComment{}, ErrTaskNotFound
 	}
 	if err != nil {
 		return CreatedTaskComment{}, err
 	}
-	op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, x)
+	op, enqueued, err := s.enqueueYTCommentTx(ctx, pgTransaction{tx}, x)
 	if err != nil {
 		return CreatedTaskComment{}, err
 	}
@@ -152,10 +140,6 @@ func (s *Store) CreateMCPTaskComment(ctx context.Context, taskID int64, body str
 // comment's YouTrack projection too; a replay reports the projection of the
 // original comment's op, which a replay never creates a second time.
 func (s *Store) CreateMCPTaskCommentProjected(ctx context.Context, taskID int64, body string, w MCPWrite) (CreatedTaskComment, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return CreatedTaskComment{}, false, ErrDialectUnsupported
-	}
-
 	if taskID < 1 || w.Tool == "" {
 		return CreatedTaskComment{}, false, ErrTaskCommentInvalid
 	}
@@ -164,6 +148,9 @@ func (s *Store) CreateMCPTaskCommentProjected(ctx context.Context, taskID int64,
 	}
 	if err := CheckTaskCommentBody(body); err != nil {
 		return CreatedTaskComment{}, false, err
+	}
+	if s.dialect == mysqlDialect {
+		return s.mysqlCreateComment(ctx, taskID, w.Author, body, &w)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -217,16 +204,29 @@ func (s *Store) ListTaskComments(ctx context.Context, taskID, afterID int64, lim
 	if taskID < 1 || afterID < 0 || limit < 1 || limit > TaskCommentListMax {
 		return nil, ErrTaskCommentInvalid
 	}
-	var exists bool
+	var tx transaction
 	var err error
-	if err = s.db().QueryRow(ctx, sqlFor(s, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?)`), taskID).Scan(&exists); err != nil {
+	if s.dialect == mysqlDialect {
+		tx, err = s.db().Begin(ctx)
+	} else {
+		var pgTx pgx.Tx
+		pgTx, err = s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+		if err == nil {
+			tx = pgTransaction{pgTx}
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	var exists bool
+	if err = tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?)`), taskID).Scan(&exists); err != nil {
 		return nil, err
 	}
 	if !exists {
 		return nil, ErrTaskNotFound
 	}
-	rows, err := s.db().Query(ctx, sqlFor(s, `SELECT `+taskCommentColumns+` FROM task_comments WHERE task_id=$1 AND id>$2 ORDER BY id ASC LIMIT $3`,
-		`SELECT `+taskCommentColumns+` FROM task_comments WHERE task_id=? AND id>? ORDER BY id ASC LIMIT ?`), taskID, afterID, limit)
+	rows, err := tx.Query(ctx, s.q(`SELECT `+taskCommentColumns+` FROM task_comments WHERE task_id=$1 AND id>$2 ORDER BY id ASC LIMIT $3`, `SELECT `+taskCommentColumns+` FROM task_comments WHERE task_id=? AND id>? ORDER BY id ASC LIMIT ?`), taskID, afterID, limit)
 	if err != nil {
 		return nil, err
 	}
