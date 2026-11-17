@@ -61,6 +61,9 @@ const relayJobIndexPredicate = "kind IN ('job.completed','job.escalate','job.joi
 const relayJobConflictPredicate = "kind IN ('job.completed','job.escalate','job.joined','job.lost','job.revoked')"
 
 var (
+	// ErrDialectUnsupported is returned when a store method has not yet been
+	// ported to the configured SQL dialect.
+	ErrDialectUnsupported   = errors.New("dialect_unsupported")
 	ErrTaskConflict         = errors.New("task_conflict")
 	ErrTaskNotFound         = errors.New("task_not_found")
 	ErrRelayEventNotFound   = errors.New("relay_event_not_found")
@@ -924,6 +927,10 @@ func OpenReadOnly(ctx context.Context, url string) (*Store, error) {
 // current schema's table only, and a schema from before version 53 (no
 // schema_migrations) has applied none.
 func (s *Store) MigrationApplied(ctx context.Context, id string) (bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, ErrDialectUnsupported
+	}
+
 	var applied bool
 	err := s.pool.QueryRow(ctx, `SELECT current_schema() IS NOT NULL AND to_regclass(format('%I.schema_migrations', current_schema())) IS NOT NULL`).Scan(&applied)
 	if err != nil || !applied {
@@ -2533,6 +2540,9 @@ func ValidExpected(value string) bool { _, ok := normalizeExpected(value); retur
 // CreateTask files a task in backlog without the duplicate check; tasks add
 // and POST /v1/tasks go through CreateTaskChecked.
 func (s *Store) CreateTask(ctx context.Context, x Task) (Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, ErrDialectUnsupported
+	}
 	return s.createTask(ctx, x, nil)
 }
 
@@ -2548,6 +2558,9 @@ type DuplicateCheck struct {
 // unstarted or backlog task has a similar title, the create is refused with a
 // *SimilarTasksError listing them, unless check carries Link or New.
 func (s *Store) CreateTaskChecked(ctx context.Context, x Task, check DuplicateCheck) (Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, ErrDialectUnsupported
+	}
 	if check.Link < 0 || (check.Link != 0 && check.New) {
 		return x, errors.New("invalid task: link and new are exclusive")
 	}
@@ -2665,6 +2678,10 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 }
 
 func (s *Store) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string) (Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, ErrDialectUnsupported
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Task{}, err
@@ -2688,6 +2705,10 @@ func (s *Store) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string
 // keeps its PR, so a continuation worker takes over the same work unit.
 // Merged, deployed, dropped and held tasks are refused.
 func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by, reason string) (Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, ErrDialectUnsupported
+	}
+
 	reason = taskReasonText(reason)
 	if !validText(fromJob, 4096) || fromJob == "" || !validText(toJob, 4096) || toJob == "" || fromJob == toJob {
 		return Task{}, errors.New("invalid task rebind job ids")
@@ -2789,6 +2810,10 @@ func knownTaskLanesTx(ctx context.Context, tx pgx.Tx, name string) (bool, error)
 // unless allowNewLane is set, so a typo cannot strand a task in a lane no
 // owner lists.
 func (s *Store) RelaneTask(ctx context.Context, id int64, to, by, note string, allowNewLane bool) (x Task, changed bool, err error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, false, ErrDialectUnsupported
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Task{}, false, err
@@ -2858,6 +2883,10 @@ func (s *Store) SetTaskProject(ctx context.Context, id int64, project, by, note 
 }
 
 func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, project, by, note string, patch *ProjectMetadataPatch) (x Task, changed bool, err error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, false, ErrDialectUnsupported
+	}
+
 	if !validName(project) || by == "" || !validText(by, 128) || !validText(note, MaxBytes) {
 		return Task{}, false, errors.New("invalid task project change")
 	}
@@ -2925,6 +2954,10 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 // event when the value is unchanged. Like project it is allowed on terminal
 // rows: area is routing metadata, not lifecycle.
 func (s *Store) SetTaskArea(ctx context.Context, id int64, area *string, by, note string) (x Task, changed bool, err error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, false, ErrDialectUnsupported
+	}
+
 	if err := CheckTaskArea(area); err != nil {
 		return Task{}, false, err
 	}
@@ -2968,6 +3001,10 @@ func (s *Store) SetTaskArea(ctx context.Context, id int64, area *string, by, not
 // ListTaskProjects returns the server-configured project vocabulary in
 // name order. This is the set tasks add --project accepts.
 func (s *Store) ListTaskProjects(ctx context.Context) ([]string, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT name FROM task_projects ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -2987,6 +3024,10 @@ func (s *Store) ListTaskProjects(ctx context.Context) ([]string, error) {
 // AddTaskProject extends the server-configured project vocabulary. Names
 // share the lane alphabet; created=false when the name already exists.
 func (s *Store) AddTaskProject(ctx context.Context, name, by string) (bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, ErrDialectUnsupported
+	}
+
 	if !validName(name) || by == "" || !validText(by, 128) {
 		return false, errors.New("invalid task project")
 	}
@@ -3027,6 +3068,10 @@ type TaskQuery struct {
 
 // ListTasksFiltered lists tasks matching q and marks stalled rows.
 func (s *Store) ListTasksFiltered(ctx context.Context, tq TaskQuery) ([]Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if !validTaskQuery(tq.Lane, tq.State, tq.ParentLane, tq.Project) || (tq.AfterID != nil && *tq.AfterID < 0) {
 		return nil, errors.New("invalid task query")
 	}
@@ -3132,6 +3177,10 @@ func (s *Store) ListTasksFiltered(ctx context.Context, tq TaskQuery) ([]Task, er
 // API. Counts span every lane; active tasks have the API's stable newest-first
 // ordering rather than the queue's priority ordering.
 func (s *Store) GlanceTasks(ctx context.Context) (map[string]int, []Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, nil, ErrDialectUnsupported
+	}
+
 	counts := map[string]int{}
 	rows, err := s.pool.Query(ctx, `SELECT state,COUNT(*) FROM tasks GROUP BY state`)
 	if err != nil {
@@ -3179,6 +3228,10 @@ func (s *Store) GlanceTasks(ctx context.Context) (map[string]int, []Task, error)
 }
 
 func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, false, ErrDialectUnsupported
+	}
+
 	var x Task
 	if err := scanTask(s.pool.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, id), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
@@ -3277,6 +3330,10 @@ func validLaneEventText(value string) bool {
 // AppendRelayEvent inserts a durable relay event. Its conflict update is part
 // of the same statement so concurrent duplicate submissions share one row.
 func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return RelayEvent{}, false, ErrDialectUnsupported
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return x, false, err
@@ -3324,6 +3381,10 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 // MarkRelayEventDelivered records the first successful delivery. Subsequent
 // calls are intentionally idempotent and return the original delivery time.
 func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, pane string) (RelayEvent, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return RelayEvent{}, ErrDialectUnsupported
+	}
+
 	if id < 1 || !validText(machine, MaxBytes) || !validText(pane, MaxBytes) {
 		return RelayEvent{}, errors.New("invalid relay event delivery")
 	}
@@ -3352,6 +3413,10 @@ func (s *Store) ListRelayEvents(ctx context.Context, lane string, undelivered bo
 // ListRelayEventsPage is the additive cursor form of ListRelayEvents. afterID
 // is exclusive so a caller can safely advance using the last row it observed.
 func (s *Store) ListRelayEventsPage(ctx context.Context, lane, kind string, undelivered bool, afterID int64, limit int) ([]RelayEvent, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if !validText(lane, MaxBytes) || (kind != "" && !relayEventKinds[kind]) || afterID < 0 {
 		return nil, errors.New("invalid relay event query")
 	}
@@ -3403,6 +3468,10 @@ func (s *Store) ListRelayEventsPage(ctx context.Context, lane, kind string, unde
 // ListRelayEventsTimeline returns newest relay events first. beforeID is an
 // exclusive descending cursor; dates are supplied as UTC bounds by the UI.
 func (s *Store) ListRelayEventsTimeline(ctx context.Context, lane, kind string, since, until *time.Time, beforeID int64, limit int) ([]RelayEvent, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if !validText(lane, MaxBytes) || (kind != "" && !relayEventKinds[kind]) || beforeID < 0 {
 		return nil, errors.New("invalid relay timeline query")
 	}
@@ -3468,6 +3537,10 @@ type EventWatermarks struct {
 
 // EventWatermarks reads the current watermarks in one snapshot.
 func (s *Store) EventWatermarks(ctx context.Context) (EventWatermarks, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return EventWatermarks{}, ErrDialectUnsupported
+	}
+
 	var w EventWatermarks
 	err := s.pool.QueryRow(ctx, `SELECT COALESCE((SELECT MAX(id) FROM relay_events),0),COALESCE((SELECT MAX(id) FROM task_events),0),COALESCE((SELECT max_sync_id FROM sync_state WHERE singleton),0)`).Scan(&w.RelayMaxID, &w.TaskEventMaxID, &w.SyncMaxID)
 	return w, err
@@ -3504,6 +3577,10 @@ const openLaneDecisionSQL = `e.kind='lane.event' AND e.text LIKE '[decision-need
 // structured request is open are listed by ListOpenDecisionRequests instead,
 // so one question never appears twice (or with two answer paths).
 func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDecision, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if limit < 1 {
 		limit = 1000
 	}
@@ -3527,6 +3604,10 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 
 // ListOpenEscalations implements the decision inbox job escalation definition.
 func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEvent, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if limit < 1 {
 		limit = 1000
 	}
@@ -3561,6 +3642,10 @@ func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEven
 
 // ListOpenLaneDecisions implements the decision inbox lane.event definition.
 func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEvent, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if limit < 1 {
 		limit = 1000
 	}
@@ -3592,6 +3677,10 @@ func validDocKey(k string) bool {
 	return len(k) > 0 && len(k) <= maxDocKeyBytes && !strings.HasPrefix(k, "/") && !strings.Contains(k, "..") && !strings.ContainsRune(k, 0)
 }
 func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Document{}, false, ErrDialectUnsupported
+	}
+
 	if !validDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validDocumentText(x.Body) {
 		return x, false, errors.New("invalid document")
 	}
@@ -3671,6 +3760,10 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 	return x, true, tx.Commit(ctx)
 }
 func (s *Store) GetDocument(ctx context.Context, key string) (Document, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Document{}, false, ErrDialectUnsupported
+	}
+
 	if !validDocKey(key) {
 		return Document{}, false, errors.New("invalid document key")
 	}
@@ -3685,6 +3778,10 @@ func (s *Store) GetDocument(ctx context.Context, key string) (Document, bool, er
 	return x, true, nil
 }
 func (s *Store) GetDocumentByID(ctx context.Context, id int64) (Document, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Document{}, false, ErrDialectUnsupported
+	}
+
 	if id < 1 {
 		return Document{}, false, errors.New("invalid document id")
 	}
@@ -3706,6 +3803,10 @@ func (s *Store) GetDocumentByID(ctx context.Context, id int64) (Document, bool, 
 // reader that must catch one pages again from 0. A nil afterID keeps the
 // key-ordered answer.
 func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string, task int64, afterID *int64, limit int) ([]Document, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if !validText(prefix, 512) || !validText(session, 128) || (kind != "" && !documentKinds[kind]) || task < 0 || (afterID != nil && *afterID < 0) {
 		return nil, errors.New("invalid document query")
 	}
@@ -3818,6 +3919,10 @@ func ValidTaskRefID(id string) bool {
 }
 func monthNow() string { return time.Now().UTC().Format("2006-01") }
 func (s *Store) GetAttachment(ctx context.Context, sha string) (Attachment, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Attachment{}, false, ErrDialectUnsupported
+	}
+
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(sha) {
 		return Attachment{}, false, errors.New("invalid attachment sha")
 	}
@@ -3835,6 +3940,10 @@ func (s *Store) GetAttachment(ctx context.Context, sha string) (Attachment, bool
 // ListAttachmentObjects returns each stored object once, without multiplying
 // rows by attachment_refs; migration uses this complete inventory.
 func (s *Store) ListAttachmentObjects(ctx context.Context) ([]Attachment, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments ORDER BY sha256`)
 	if err != nil {
 		return nil, err
@@ -3852,6 +3961,10 @@ func (s *Store) ListAttachmentObjects(ctx context.Context) ([]Attachment, error)
 }
 
 func (s *Store) SetAttachmentObjectLocation(ctx context.Context, sha, location string) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(sha) || location == "" || !validText(location, 2048) {
 		return errors.New("invalid attachment object location")
 	}
@@ -3879,6 +3992,10 @@ const attachmentChargedBytes = `SELECT (SELECT COALESCE(SUM(size_bytes),0) FROM 
 // PutAttachment records an immutable object and its reference after S3 PUT has
 // succeeded. It serializes quota accounting with a locked monthly usage row.
 func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, putCap int64) (Attachment, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Attachment{}, false, ErrDialectUnsupported
+	}
+
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(x.SHA256) || x.SizeBytes < 0 || x.MIME == "" || !validText(x.OriginalName, 512) || !validAttachmentRef(x.RefKind, x.RefID) {
 		return x, false, errors.New("invalid attachment")
 	}
@@ -3957,6 +4074,10 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 // caller is about to finalize, so its own reservation is not counted twice;
 // every other caller passes ”.
 func (s *Store) CheckAttachmentCapacity(ctx context.Context, size, storageCap, putCap int64, exceptUpload string) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	tx, e := s.pool.Begin(ctx)
 	if e != nil {
 		return e
@@ -3998,6 +4119,10 @@ var ErrUploadClaimLost = errors.New("upload_claim_lost")
 // order follows ReserveAttachmentUpload and the capacity checks: the
 // staging-budget advisory lock, then the upload row, then the usage row.
 func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, x Attachment, storageCap, putCap int64) (Attachment, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Attachment{}, false, ErrDialectUnsupported
+	}
+
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(x.SHA256) || x.SizeBytes < 0 || x.MIME == "" || !validText(x.OriginalName, 512) || !validAttachmentRef(x.RefKind, x.RefID) {
 		return x, false, errors.New("invalid attachment")
 	}
@@ -4092,6 +4217,10 @@ var ErrAttachmentArchived = errors.New("attachment_archived")
 var ErrAttachmentPutCap = errors.New("attachment_put_cap")
 
 func (s *Store) RecordAttachmentGet(ctx context.Context, sha string, getCap int64) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	tx, e := s.pool.Begin(ctx)
 	if e != nil {
 		return e
@@ -4118,6 +4247,10 @@ func (s *Store) RecordAttachmentGet(ctx context.Context, sha string, getCap int6
 	return tx.Commit(ctx)
 }
 func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limit int) ([]Attachment, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if refKind != "" && !validAttachmentListRef(refKind, refID) {
 		return nil, errors.New("invalid attachment ref")
 	}
@@ -4156,6 +4289,10 @@ func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limi
 // callers that render an option's pictures read MIME and original name here
 // rather than storing a copy that could drift from the object it names.
 func (s *Store) AttachmentsBySHA(ctx context.Context, shas []string) (map[string]Attachment, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	out := map[string]Attachment{}
 	valid := make([]string, 0, len(shas))
 	for _, sha := range shas {
@@ -4188,6 +4325,10 @@ func (s *Store) AttachmentsBySHA(ctx context.Context, shas []string) (map[string
 // query that page makes. Rows carry RefKind "task" and RefID as the canonical
 // task id.
 func (s *Store) ListTaskAttachmentsByRefs(ctx context.Context, ids []int64, perRef int) ([]Attachment, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	out := []Attachment{}
 	if len(ids) == 0 {
 		return out, nil
@@ -4219,6 +4360,10 @@ func (s *Store) ListTaskAttachmentsByRefs(ctx context.Context, ids []int64, perR
 	return out, rows.Err()
 }
 func (s *Store) AttachmentUsage(ctx context.Context) (AttachmentUsage, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return AttachmentUsage{}, ErrDialectUnsupported
+	}
+
 	x := AttachmentUsage{Month: monthNow()}
 	e := s.pool.QueryRow(ctx, `SELECT puts,gets,bytes_added FROM attachment_usage WHERE month=$1`, x.Month).Scan(&x.Puts, &x.Gets, &x.BytesAdded)
 	if e != nil && errors.Is(e, ErrNoRows) {
@@ -4231,6 +4376,10 @@ func (s *Store) AttachmentUsage(ctx context.Context) (AttachmentUsage, error) {
 	return x, e
 }
 func (s *Store) AttachmentObjectCount(ctx context.Context) (int64, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, ErrDialectUnsupported
+	}
+
 	var n int64
 	return n, s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM attachments`).Scan(&n)
 }
@@ -4536,7 +4685,7 @@ func benchCatalogArgs(d storeDialect, pool string, includeRetired bool) []any {
 }
 
 func (s *Store) beginBenchWrite(ctx context.Context) (transaction, func(), error) {
-	if s.dialect == mysqlDialect {
+	if s != nil && s.dialect == mysqlDialect {
 		return s.beginNamedTransaction(ctx, "bench-grade-mirror")
 	}
 	tx, err := s.db().Begin(ctx)

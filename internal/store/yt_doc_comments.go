@@ -251,6 +251,10 @@ func ytDocCommentsHandler(s *Store, now time.Time) FeedHandler {
 // principal (hk:doc-comments). The comment audit reads it to tell a bot comment
 // that is a document copy from any other bot comment (hk 4245). Read-only.
 func (s *Store) YTDocCommentOpIDs(ctx context.Context, tenant, issueID string, ids []int64) (map[int64]bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	out := map[int64]bool{}
 	if len(ids) == 0 {
 		return out, nil

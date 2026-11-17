@@ -65,6 +65,10 @@ func (s *Store) ListLatestQuota(ctx context.Context, limit int) ([]QuotaAccountL
 // task that carries refs.pr. Newest update first, bounded by limit; truncated
 // reports that more rows exist.
 func (s *Store) ListDashboardTasks(ctx context.Context, limit int) ([]Task, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, false, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks
 		WHERE state IN (`+startedStatesSQL+`)
 		   OR (state NOT IN (`+settledStatesSQL+`) AND COALESCE(refs->>'pr','') <> '')

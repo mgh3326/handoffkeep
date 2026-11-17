@@ -319,6 +319,9 @@ type TransitionInput struct {
 
 // TransitionTask is TransitionTaskWith without a duplicate_of target.
 func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note string, refs *TaskRefs, noJob string) (Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, ErrDialectUnsupported
+	}
 	return s.TransitionTaskWith(ctx, id, TransitionInput{To: to, By: by, Note: note, Refs: refs, NoJob: noJob})
 }
 
@@ -328,6 +331,9 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 // resolved first, and only the operator's web answer resolves a disposition
 // item.
 func (s *Store) ClearAwaitingDecision(ctx context.Context, id int64, by, note string) (Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, ErrDialectUnsupported
+	}
 	return s.transitionTask(ctx, id, TransitionInput{To: legacyClaimed, By: by, Note: note, ClearOnly: true}, false)
 }
 
@@ -336,6 +342,9 @@ func (s *Store) ClearAwaitingDecision(ctx context.Context, id int64, by, note st
 // persisted as the note of an append-only transition event in the same
 // transaction.
 func (s *Store) ReopenTask(ctx context.Context, id int64, by, reason string) (Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, ErrDialectUnsupported
+	}
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		return Task{}, errors.New("reopen requires a non-empty reason")
@@ -346,6 +355,9 @@ func (s *Store) ReopenTask(ctx context.Context, id int64, by, reason string) (Ta
 // TransitionTaskWith applies one manual transition. A settled task leaves
 // only through ReopenTask.
 func (s *Store) TransitionTaskWith(ctx context.Context, id int64, in TransitionInput) (Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, ErrDialectUnsupported
+	}
 	if in.To == legacyReopened {
 		return s.ReopenTask(ctx, id, in.By, in.Note)
 	}

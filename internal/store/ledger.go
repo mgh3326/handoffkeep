@@ -305,6 +305,10 @@ func ledgerTaskDest(x *LedgerTask) []any {
 // Ledger reads the desk ledger for consumer at now. It writes nothing; a
 // cursor older than the feed's reset boundary returns *SyncReset.
 func (s *Store) Ledger(ctx context.Context, consumer string, now time.Time) (Ledger, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Ledger{}, ErrDialectUnsupported
+	}
+
 	if !validName(consumer) {
 		return Ledger{}, errors.New("invalid ledger consumer")
 	}
@@ -523,6 +527,10 @@ func ledgerChangesTx(ctx context.Context, tx pgx.Tx, consumer string) (LedgerCha
 // Lock order (lockorder.go): the transaction locks one ledger_cursors row and
 // reads sync_state without a lock.
 func (s *Store) AckLedger(ctx context.Context, consumer string, syncID int64, by string, now time.Time) (LedgerCursor, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return LedgerCursor{}, ErrDialectUnsupported
+	}
+
 	if !validName(consumer) || syncID < 0 || by == "" || !validText(by, 128) {
 		return LedgerCursor{}, errors.New("invalid ledger ack")
 	}

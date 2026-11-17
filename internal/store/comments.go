@@ -89,6 +89,10 @@ func (s *Store) CreateTaskComment(ctx context.Context, taskID int64, author, bod
 // CreateTaskCommentProjected is CreateTaskComment answering with the
 // comment's YouTrack projection too (REST and the CLI show it).
 func (s *Store) CreateTaskCommentProjected(ctx context.Context, taskID int64, author, body string) (CreatedTaskComment, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return CreatedTaskComment{}, ErrDialectUnsupported
+	}
+
 	if taskID < 1 || author == "" || !validText(author, 128) {
 		return CreatedTaskComment{}, ErrTaskCommentInvalid
 	}
@@ -136,6 +140,10 @@ func (s *Store) CreateMCPTaskComment(ctx context.Context, taskID int64, body str
 // comment's YouTrack projection too; a replay reports the projection of the
 // original comment's op, which a replay never creates a second time.
 func (s *Store) CreateMCPTaskCommentProjected(ctx context.Context, taskID int64, body string, w MCPWrite) (CreatedTaskComment, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return CreatedTaskComment{}, false, ErrDialectUnsupported
+	}
+
 	if taskID < 1 || w.Tool == "" {
 		return CreatedTaskComment{}, false, ErrTaskCommentInvalid
 	}
@@ -194,6 +202,10 @@ func (s *Store) CreateMCPTaskCommentProjected(ctx context.Context, taskID int64,
 // ListTaskComments returns comments in id order after afterID. A missing task
 // is ErrTaskNotFound so callers never confuse it with a task without comments.
 func (s *Store) ListTaskComments(ctx context.Context, taskID, afterID int64, limit int) ([]TaskComment, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if taskID < 1 || afterID < 0 || limit < 1 || limit > TaskCommentListMax {
 		return nil, ErrTaskCommentInvalid
 	}

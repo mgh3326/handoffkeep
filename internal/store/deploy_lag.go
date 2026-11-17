@@ -42,6 +42,10 @@ func DeployLagNoticeText(service string, lagCount int) string {
 // merge timestamp is strictly after since (or all merged changes if since is zero).
 // hk records merged changes in the changes table (repo, state='merged', merged_at).
 func (s *Store) CountMergedChangesSince(ctx context.Context, repo string, since time.Time) (int, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, ErrDialectUnsupported
+	}
+
 	var count int
 	var err error
 	if since.IsZero() {
@@ -82,6 +86,10 @@ func deployLagStatusTx(ctx context.Context, q rowQuerier, svc DeployService, sin
 // (HANDOFFKEEP-5, hk 4923). The console calls this so the banner and the
 // operator-desk notice cannot disagree.
 func (s *Store) DeployLagStatuses(ctx context.Context, svcs []DeployService) (map[string]DeployLagServiceStatus, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	out := make(map[string]DeployLagServiceStatus, len(svcs))
 	if len(svcs) == 0 {
 		return out, nil
@@ -147,6 +155,10 @@ GROUP BY w.name`, names, repos, since)
 // to operator-desk with event_id "deploy-lag-<service>-<YYYY-MM-DD>" (idempotent ON CONFLICT).
 // Returns the number of new notifications enqueued.
 func (s *Store) EnqueueDeployLagNotices(ctx context.Context, now time.Time) (int, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, ErrDialectUnsupported
+	}
+
 	now = now.UTC()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

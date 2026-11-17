@@ -57,6 +57,10 @@ func validLifecycleKey(key string) bool {
 // transaction so no reader sees the half path. path is the states traversed,
 // starting at the state the task had before this call.
 func (s *Store) CloseTaskMerged(ctx context.Context, id int64, evidence, by, note, key string) (Task, []string, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, nil, ErrDialectUnsupported
+	}
+
 	evidence = strings.TrimSpace(evidence)
 	if !validLifecycleKey(key) || by == "" || !validText(by, 128) || !validText(note, MaxBytes) || !validText(evidence, 1024) {
 		return Task{}, nil, errors.New("invalid task lifecycle action")
@@ -148,6 +152,9 @@ func recordedLifecyclePath(ctx context.Context, tx pgx.Tx, id int64, source, key
 // CloseTaskCompleted closes a decide, ops, verify or research task with a result link,
 // document key, task reference, or written reason as evidence.
 func (s *Store) CloseTaskCompleted(ctx context.Context, id int64, evidence, by, note, key string) (Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, ErrDialectUnsupported
+	}
 	return s.operatorTransition(ctx, id, lifecycleSourceCloseCompleted, key, TransitionInput{
 		To: StateCompleted, Closure: "resolved", Evidence: strings.TrimSpace(evidence), By: by, Note: note,
 	}, false)
@@ -157,6 +164,9 @@ func (s *Store) CloseTaskCompleted(ctx context.Context, id int64, evidence, by, 
 // cancelled, obsolete or superseded. The reason is both the event note and
 // the closure evidence.
 func (s *Store) DropTask(ctx context.Context, id int64, closure, reason, by, key string) (Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, ErrDialectUnsupported
+	}
 	switch closure {
 	case "cancelled", "obsolete", "superseded":
 	default:
@@ -170,6 +180,9 @@ func (s *Store) DropTask(ctx context.Context, id int64, closure, reason, by, key
 // DuplicateTask closes a task as a duplicate of duplicateOf, which the store
 // writes as a duplicate_of relation and the closure evidence names.
 func (s *Store) DuplicateTask(ctx context.Context, id, duplicateOf int64, reason, by, key string) (Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, ErrDialectUnsupported
+	}
 	if duplicateOf < 0 {
 		return Task{}, errors.New("invalid task lifecycle action")
 	}
@@ -183,6 +196,10 @@ func (s *Store) DuplicateTask(ctx context.Context, id, duplicateOf int64, reason
 // there). The result names both states so the console's undo can restore the
 // exact previous one.
 func (s *Store) HoldTask(ctx context.Context, id int64, held bool, to, by, note, key string) (HoldResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return HoldResult{}, ErrDialectUnsupported
+	}
+
 	if !validLifecycleKey(key) || by == "" || !validText(by, 128) || !validText(note, MaxBytes) {
 		return HoldResult{}, errors.New("invalid task lifecycle action")
 	}
@@ -240,6 +257,9 @@ func (s *Store) HoldTask(ctx context.Context, id int64, held bool, to, by, note,
 // ReopenTaskBy reopens a settled or held task with a reason and an idempotency
 // key. It is ReopenTask with the operator replay marker on its event.
 func (s *Store) ReopenTaskBy(ctx context.Context, id int64, by, reason, key string) (Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, ErrDialectUnsupported
+	}
 	return s.operatorTransition(ctx, id, lifecycleSourceReopen, key, TransitionInput{
 		To: StateUnstarted, By: by, Note: reason,
 	}, true)
@@ -254,6 +274,10 @@ func (s *Store) ReopenTaskBy(ctx context.Context, id int64, by, reason, key stri
 // known-lane check cannot see after the forward move emptied it. Any other
 // unknown lane is still refused.
 func (s *Store) OperatorRelaneTask(ctx context.Context, id int64, to, by, note, key, restoreKey string) (RelaneResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return RelaneResult{}, ErrDialectUnsupported
+	}
+
 	if !validLifecycleKey(key) || by == "" || !validText(by, 128) {
 		return RelaneResult{}, errors.New("invalid task lifecycle action")
 	}
@@ -340,6 +364,10 @@ func (s *Store) operatorTransition(ctx context.Context, id int64, source, key st
 // ListKnownTaskLanes lists every lane a current row uses: the same union the
 // relane write trusts when allowNewLane is false.
 func (s *Store) ListKnownTaskLanes(ctx context.Context) ([]string, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT name FROM (
 		SELECT lane AS name FROM tasks
 		UNION SELECT parent_lane AS name FROM tasks WHERE parent_lane <> ''

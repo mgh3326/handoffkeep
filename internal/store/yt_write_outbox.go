@@ -33,6 +33,10 @@ type YTWriteOutbox struct {
 // predicate, so it still uses its partial index (yt_write_ops_due,
 // yt_write_ops_dispatched) rather than scanning the applied history.
 func (s *Store) YTWriteOutboxStatus(ctx context.Context, now time.Time) (YTWriteOutbox, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTWriteOutbox{}, ErrDialectUnsupported
+	}
+
 	branches := make([]string, 0, len(YTWriteOutboxStates))
 	for _, st := range YTWriteOutboxStates {
 		branches = append(branches, `SELECT '`+string(st)+`'::text, count(*),

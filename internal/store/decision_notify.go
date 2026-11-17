@@ -183,6 +183,10 @@ func decisionErrorCode(err error) string {
 // the attempts run out, then the row stays failed. found is false when
 // nothing is due.
 func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, send func(context.Context, DecisionNotice) (string, error)) (found bool, sendErr error, err error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, nil, ErrDialectUnsupported
+	}
+
 	now = now.UTC()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -264,6 +268,10 @@ type DecisionNoticeState struct {
 
 // GetDecisionNotice reads the Discord delivery of one request.
 func (s *Store) GetDecisionNotice(ctx context.Context, requestID int64) (DecisionNoticeState, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DecisionNoticeState{}, false, ErrDialectUnsupported
+	}
+
 	var x DecisionNoticeState
 	err := s.pool.QueryRow(ctx, `SELECT request_id,destination,message_id,desired_version,applied_version,state,attempts,last_error_code,next_attempt_at,posted_at,edited_at
 		FROM decision_deliveries WHERE request_id=$1 AND destination=$2`, requestID, DecisionDestinationDiscord).
@@ -292,6 +300,10 @@ type DecisionDeliveryHygiene struct {
 // DecisionDeliveryHygiene counts decision_deliveries rows per destination.
 // Every known destination is present, zero when it has no row.
 func (s *Store) DecisionDeliveryHygiene(ctx context.Context, now time.Time) (DecisionDeliveryHygiene, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DecisionDeliveryHygiene{}, ErrDialectUnsupported
+	}
+
 	now = now.UTC()
 	out := DecisionDeliveryHygiene{Destinations: map[string]DecisionDeliveryCounts{DecisionDestinationDiscord: {}}}
 	rows, err := s.pool.Query(ctx, `SELECT n.destination,
@@ -322,6 +334,10 @@ func (s *Store) DecisionDeliveryHygiene(ctx context.Context, now time.Time) (Dec
 // open longer than DecisionDigestAge sends nothing. found is false when there
 // was nothing to do.
 func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send func(context.Context, DecisionDigest) (string, error)) (found bool, sendErr error, err error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, nil, ErrDialectUnsupported
+	}
+
 	now = now.UTC()
 	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	tx, err := s.pool.Begin(ctx)
@@ -414,6 +430,10 @@ type DecisionDigestState struct {
 
 // GetDecisionDigest reads the digest row of one UTC day.
 func (s *Store) GetDecisionDigest(ctx context.Context, day time.Time) (DecisionDigestState, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DecisionDigestState{}, false, ErrDialectUnsupported
+	}
+
 	var x DecisionDigestState
 	day = day.UTC()
 	day = time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC)

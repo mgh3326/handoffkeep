@@ -50,6 +50,7 @@ type errorRule struct {
 // errorRules is the one table from sentinel to response. Order matters only
 // where one error could match two rules; the first match wins.
 var errorRules = []errorRule{
+	{store.ErrDialectUnsupported, http.StatusNotImplemented, "dialect_unsupported", false},
 	{ytwrite.ErrNotFound, http.StatusNotFound, "ytwrite_not_found", false},
 	{ytwrite.ErrState, http.StatusConflict, "ytwrite_state", false},
 	{ytwrite.ErrInvalid, http.StatusBadRequest, "ytwrite_invalid", false},

@@ -192,6 +192,10 @@ type DeployRecordPage struct {
 // sequential scan of the whole table) per service per poll is the N+1 behind
 // HANDOFFKEEP-5 (hk 4923).
 func (s *Store) ListDeployRecordsByPrefix(ctx context.Context, prefixes []string, limit int) (map[string]DeployRecordPage, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	out := make(map[string]DeployRecordPage, len(prefixes))
 	if len(prefixes) == 0 {
 		return out, nil

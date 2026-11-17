@@ -105,6 +105,10 @@ func (s *Store) ytLinksSetting() (YTLinksMode, string) {
 // YTLinksStatusOf reads the link projection's state for tenant (the gate's)
 // and, when task > 0, for that task alone. An unknown task is ErrTaskNotFound.
 func (s *Store) YTLinksStatusOf(ctx context.Context, task int64, limit int) (YTLinksStatus, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTLinksStatus{}, ErrDialectUnsupported
+	}
+
 	mode, tenant := s.ytLinksSetting()
 	out := YTLinksStatus{
 		Mode: mode, Tenant: tenant, Open: mode == YTLinksOn && tenant != "",

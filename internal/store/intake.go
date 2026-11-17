@@ -230,6 +230,10 @@ func CheckIntake(in IntakeInput) error {
 // returns the task already recorded for it with created=false and changes
 // nothing. Kind may be left unset; the triage gate requires it on the way out.
 func (s *Store) IntakeTask(ctx context.Context, in IntakeInput) (Task, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, false, ErrDialectUnsupported
+	}
+
 	if err := CheckIntake(in); err != nil {
 		return Task{}, false, err
 	}
@@ -487,6 +491,10 @@ func childSourceRef(setRef, ref string) string { return setRef + "/" + ref }
 // created=false; a changed payload for the same (source, source_ref) is
 // refused with ErrTicketSetConflict. Any refusal writes nothing.
 func (s *Store) EmitTicketSet(ctx context.Context, in TicketSetInput) (TicketSet, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return TicketSet{}, false, ErrDialectUnsupported
+	}
+
 	if err := checkTicketSet(in); err != nil {
 		return TicketSet{}, false, err
 	}
@@ -602,6 +610,10 @@ type TriageRow struct {
 // its children are not listed on their own while the set's parent is still
 // in triage.
 func (s *Store) ListTriage(ctx context.Context, limit int) ([]TriageRow, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if limit < 1 || limit > 1000 {
 		return nil, errors.New("invalid triage limit")
 	}

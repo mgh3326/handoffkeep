@@ -99,6 +99,10 @@ type YTLinksSweepPass struct {
 // transaction holding only the sweep row. No transaction holds the row and a
 // lane lock together.
 func (s *Store) RunYTLinksSweep(ctx context.Context, now time.Time, limit int) (YTLinksSweepPass, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTLinksSweepPass{}, ErrDialectUnsupported
+	}
+
 	pass := YTLinksSweepPass{Idle: true}
 	mode, tenant := s.ytLinksNow()
 	if mode != YTLinksOn || limit < 1 {

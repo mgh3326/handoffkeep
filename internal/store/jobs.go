@@ -506,6 +506,10 @@ func scanJob(row pgx.Row) (Job, error) {
 // and host) returns the stored row with created=false; a different claim on
 // a taken id is ErrJobIDTaken.
 func (s *Store) ClaimJob(ctx context.Context, j Job) (Job, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Job{}, false, ErrDialectUnsupported
+	}
+
 	if !ValidJobID(j.JobID) || !ValidJobHost(j.Host) || (j.TaskID != nil && *j.TaskID < 1) || j.CreatedBy == "" || !validJobField(j.CreatedBy) {
 		return j, false, errors.New("invalid job claim")
 	}
@@ -555,6 +559,10 @@ func sameTaskID(a, b *int64) bool { return a == nil && b == nil || a != nil && b
 
 // GetJob returns one job record by id.
 func (s *Store) GetJob(ctx context.Context, id string) (Job, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Job{}, false, ErrDialectUnsupported
+	}
+
 	j, err := scanJob(s.pool.QueryRow(ctx, `SELECT `+jobColumns+` FROM jobs WHERE job_id=$1`, id))
 	if errors.Is(err, ErrNoRows) {
 		return j, false, nil
@@ -567,6 +575,10 @@ func (s *Store) GetJob(ctx context.Context, id string) (Job, bool, error) {
 
 // ListJobsByTask returns every job claimed for a task, oldest claim first.
 func (s *Store) ListJobsByTask(ctx context.Context, taskID int64, limit int) ([]Job, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	out := []Job{}
 	rows, err := s.pool.Query(ctx, `SELECT `+jobColumns+` FROM jobs WHERE task_id=$1 ORDER BY created_at ASC, job_id ASC LIMIT $2`, taskID, limit)
 	if err != nil {
@@ -588,6 +600,10 @@ func (s *Store) ListJobsByTask(ctx context.Context, taskID int64, limit int) ([]
 // skills and the once-only report pair), and result is write-once together
 // with state=completed — violations are ErrJobStateConflict.
 func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Job{}, ErrDialectUnsupported
+	}
+
 	var j Job
 	if !ValidJobID(id) {
 		return j, errors.New("invalid job id")

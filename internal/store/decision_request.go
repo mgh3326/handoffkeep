@@ -749,6 +749,10 @@ func isTerminalTaskState(state string) bool {
 // Supersedes names the open request; the new one gets the next revision and
 // no resolution. New requests are refused on merged/dropped tasks.
 func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by string, in DecisionRequestInput) (DecisionRequestResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DecisionRequestResult{}, ErrDialectUnsupported
+	}
+
 	if err := checkDecisionRequestWrite(taskID, by, &in); err != nil {
 		return DecisionRequestResult{}, err
 	}
@@ -943,6 +947,9 @@ func sameResolution(r DecisionResolution, in DecisionResolveInput, prov *assista
 // and decides nothing. Its caller is not a verified operator path, so a
 // human_only answer waits for confirmation (ErrDecisionPendingConfirmation).
 func (s *Store) ResolveDecisionRequest(ctx context.Context, taskID int64, by string, in DecisionResolveInput) (DecisionRequestResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DecisionRequestResult{}, ErrDialectUnsupported
+	}
 	if taskID < 1 {
 		return DecisionRequestResult{}, invalidDecisionRequest("task id must be positive")
 	}
@@ -958,6 +965,9 @@ func (s *Store) ResolveDecisionRequest(ctx context.Context, taskID int64, by str
 // over ResolveDecision: the kind is fixed to answered, and Responder and
 // DecidedBy are fixed by the answer's provenance inside ResolveDecision.
 func (s *Store) ResolveDecisionRequestAssistant(ctx context.Context, taskID int64, by string, in DecisionAssistantResolveInput) (DecisionRequestResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DecisionRequestResult{}, ErrDialectUnsupported
+	}
 	if taskID < 1 {
 		return DecisionRequestResult{}, invalidDecisionRequest("task id must be positive")
 	}
@@ -1071,6 +1081,10 @@ func DecisionRequestHistory(task Task) []DecisionRequestEntry {
 // whatever the task state: backlog and in_progress requests are listed, and
 // merged/dropped ones are listed so the reader can show them as uncleaned.
 func (s *Store) ListOpenDecisionRequests(ctx context.Context, limit int) ([]Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if limit < 1 || limit > 1000 {
 		limit = 1000
 	}
@@ -1102,6 +1116,10 @@ type DecisionListPosition struct {
 // before, when set, reads strictly after that position in that order; the
 // MCP decisions_history tool is its reader.
 func (s *Store) ListClosedDecisionRequests(ctx context.Context, before *DecisionListPosition, limit int) ([]Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if limit < 1 || limit > 1000 {
 		limit = 1000
 	}

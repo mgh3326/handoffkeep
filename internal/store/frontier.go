@@ -64,6 +64,10 @@ type frontierRow struct {
 
 // ProjectFrontier derives the project view from one read-only snapshot.
 func (s *Store) ProjectFrontier(ctx context.Context, project string, since, now time.Time) (Frontier, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Frontier{}, ErrDialectUnsupported
+	}
+
 	now, since = now.UTC(), since.UTC()
 	out := Frontier{GeneratedAt: now, Project: project, Since: since, Changes: []FrontierChange{}, ChangedSince: FrontierChanged{Items: []FrontierChangedItem{}}}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})

@@ -224,11 +224,19 @@ func ytAuthorityShareTx(ctx context.Context, tx pgx.Tx, kind YTAuthorityKind) (Y
 
 // YTAuthorities reads every kind's row.
 func (s *Store) YTAuthorities(ctx context.Context) ([]YTAuthority, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	return ytAuthoritiesTx(ctx, s.pool, "")
 }
 
 // YTAuthorityOf reads one kind's side; an unknown kind is hk.
 func (s *Store) YTAuthorityOf(ctx context.Context, kind YTAuthorityKind) (YTAuthoritySide, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return "", ErrDialectUnsupported
+	}
+
 	return ytAuthorityTx(ctx, s.pool, kind)
 }
 
@@ -291,6 +299,10 @@ const YTAuthoritySetMax = 2000
 // (they hold the row FOR SHARE); then plain reads of yt_write_ops,
 // yt_feed_cursors and sync_log.
 func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, side YTAuthoritySide, by, note string) (before, after []YTAuthority, err error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, nil, ErrDialectUnsupported
+	}
+
 	if len(kinds) == 0 || !validYTAuthoritySide(side) || strings.TrimSpace(by) == "" || !ValidActor(by) ||
 		strings.TrimSpace(note) == "" || !validText(note, YTAuthoritySetMax) {
 		return nil, nil, errors.New("invalid authority set: want kinds, hk or youtrack, --by and --note")
