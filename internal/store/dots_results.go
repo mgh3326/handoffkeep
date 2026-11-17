@@ -69,8 +69,11 @@ type DotsResult struct {
 	AnsweredAt      *time.Time `json:"answered_at,omitempty"`
 	AnsweredBy      string     `json:"answered_by,omitempty"`
 	AnswerCommentID *int64     `json:"answer_comment_id,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	// AnswerText is the answer recorded when no task comment holds it (an
+	// operator's console or MCP decision close).
+	AnswerText string    `json:"answer_text,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // DotsAdoptionInput is the body of POST /v1/dots/results/{id}/adoption.
@@ -83,10 +86,10 @@ type DotsAdoptionInput struct {
 	CanvaVersion string `json:"canva_version,omitempty"`
 }
 
-const dotsResultColumns = `id,document_key,comment_id,issue_uuid,issue_identifier,kind,COALESCE(verdict,''),artefact_sha256,task_id,routed_lane,adoption_state,COALESCE(adopted_ref,''),COALESCE(adopted_by,''),COALESCE(canva_url,''),COALESCE(canva_page,''),COALESCE(canva_version,''),adopted_at,superseded_by,answered_at,COALESCE(answered_by,''),answer_comment_id,created_at,updated_at`
+const dotsResultColumns = `id,document_key,comment_id,issue_uuid,issue_identifier,kind,COALESCE(verdict,''),artefact_sha256,task_id,routed_lane,adoption_state,COALESCE(adopted_ref,''),COALESCE(adopted_by,''),COALESCE(canva_url,''),COALESCE(canva_page,''),COALESCE(canva_version,''),adopted_at,superseded_by,answered_at,COALESCE(answered_by,''),answer_comment_id,COALESCE(answer_text,''),created_at,updated_at`
 
 func scanDotsResult(row pgx.Row, x *DotsResult) error {
-	if err := row.Scan(&x.ID, &x.DocumentKey, &x.CommentID, &x.IssueUUID, &x.IssueIdentifier, &x.Kind, &x.Verdict, &x.ArtefactSHA256, &x.TaskID, &x.RoutedLane, &x.AdoptionState, &x.AdoptedRef, &x.AdoptedBy, &x.CanvaURL, &x.CanvaPage, &x.CanvaVersion, &x.AdoptedAt, &x.SupersededBy, &x.AnsweredAt, &x.AnsweredBy, &x.AnswerCommentID, &x.CreatedAt, &x.UpdatedAt); err != nil {
+	if err := row.Scan(&x.ID, &x.DocumentKey, &x.CommentID, &x.IssueUUID, &x.IssueIdentifier, &x.Kind, &x.Verdict, &x.ArtefactSHA256, &x.TaskID, &x.RoutedLane, &x.AdoptionState, &x.AdoptedRef, &x.AdoptedBy, &x.CanvaURL, &x.CanvaPage, &x.CanvaVersion, &x.AdoptedAt, &x.SupersededBy, &x.AnsweredAt, &x.AnsweredBy, &x.AnswerCommentID, &x.AnswerText, &x.CreatedAt, &x.UpdatedAt); err != nil {
 		return err
 	}
 	x.Source = "linear"

@@ -314,7 +314,7 @@ type DotsReply struct {
 // carrying its answer when it has one.
 func (s *Store) ListDotsReplies(ctx context.Context, taskID int64) ([]DotsReply, error) {
 	rows, err := s.pool.Query(ctx, `SELECT c.id,c.task_id,c.body,c.author,c.created_at,e.from_value,
-			dr.answered_at,COALESCE(dr.answered_by,''),COALESCE(dr.answer_comment_id,0),COALESCE(ac.body,'')
+			dr.answered_at,COALESCE(dr.answered_by,''),COALESCE(dr.answer_comment_id,0),COALESCE(ac.body,dr.answer_text,'')
 		FROM task_comments c
 		JOIN task_events e ON e.task_id=c.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.to_value=c.id::text
 		LEFT JOIN dots_results dr ON dr.task_id=c.task_id AND dr.comment_id=e.source_ref AND dr.kind='QUESTION'
@@ -543,7 +543,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	case "QUESTION":
 		if in.AskOperator {
 			var decision DecisionRequestResult
-			decision, err = s.recordDecisionRequestTx(ctx, tx, task.ID, actor, DecisionRequestInput{Question: in.Body, Options: DecisionOptions{Options: []DecisionOption{{Key: "A", Label: "Provide an answer"}}, AllowFree: true}, DefaultAction: "Wait for an answer", Block: true})
+			decision, err = s.recordDecisionRequestTx(ctx, tx, task.ID, actor, DecisionRequestInput{Question: in.Body, Options: DecisionOptions{Options: []DecisionOption{{Key: "A", Label: "Provide an answer"}}, AllowFree: true}, DefaultAction: "Wait for an answer", Block: true, DotsQuestionCommentID: commentRowID})
 			task = decision.Task
 		}
 	}
@@ -589,6 +589,11 @@ func dotsSkippedLanesFromNote(field string) []string {
 // missing (hk 5000).
 var ErrNoOpenDotsQuestion = errors.New("no_open_dots_question")
 
+// ErrDotsQuestionAmbiguous refuses an answer when more than one QUESTION reply
+// is open and the caller named none: answering one silently would leave the
+// other open with no answer (hk 5000).
+var ErrDotsQuestionAmbiguous = errors.New("dots_question_ambiguous")
+
 // DotsAnswerInput carries the text answering a task's open dots question.
 type DotsAnswerInput struct {
 	Text string `json:"text"`
@@ -596,6 +601,9 @@ type DotsAnswerInput struct {
 	// closes a plain QUESTION, exactly as a cancel does. An open decision
 	// request keeps its own responder rule and ignores it.
 	RequesterLane string `json:"requester_lane,omitempty"`
+	// QuestionID names the QUESTION reply to close when more than one is
+	// open: the reply's id in dots_inbox (its task comment id).
+	QuestionID int64 `json:"question_id,omitempty"`
 }
 
 // DotsAnsweredQuestion is the plain QUESTION reply an answer closed.
@@ -671,18 +679,52 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 
 	current := x.Refs.DecisionRequest
 	if current == nil || current.Status != DecisionRequestOpen {
-		question, found, err := dotsOpenQuestionTx(ctx, tx, taskID)
+		questions, err := dotsOpenQuestionsTx(ctx, tx, taskID)
 		if err != nil {
 			return DotsAnswerResult{}, err
 		}
-		if !found {
-			// A resolved decision request keeps today's refusal for a second
-			// answer; with no decision request at all, the refusal names what
-			// is missing instead of answering a code the caller cannot fix.
-			if current != nil {
+		var question dotsQuestion
+		if in.QuestionID > 0 {
+			for _, q := range questions {
+				if q.CommentID == in.QuestionID {
+					question = q
+					break
+				}
+			}
+			if question.ResultID == 0 {
+				return DotsAnswerResult{}, fmt.Errorf("%w: no open dots question has the given question_id", ErrNoOpenDotsQuestion)
+			}
+		} else {
+			switch len(questions) {
+			case 0:
+				// A resolved decision request keeps today's refusal for a
+				// second answer; with no decision request at all, the refusal
+				// names what is missing instead of a code the caller cannot fix.
+				if current != nil {
+					return DotsAnswerResult{}, ErrDecisionRequestResolved
+				}
+				return DotsAnswerResult{}, fmt.Errorf("%w: this request has no open dots question or decision request to answer", ErrNoOpenDotsQuestion)
+			case 1:
+				question = questions[0]
+			default:
+				return DotsAnswerResult{}, fmt.Errorf("%w: more than one dots question is open; name the one to answer with question_id", ErrDotsQuestionAmbiguous)
+			}
+		}
+		// A closed decision request already answered the question it came
+		// from, even when an older row was not backfilled (hk 5000). The
+		// recorded comment id names it exactly; a pre-link request falls back
+		// to the reply body, which is also what tells an identical later
+		// question apart.
+		if current != nil {
+			same := false
+			if current.DotsQuestionCommentID > 0 {
+				same = question.CommentID == current.DotsQuestionCommentID
+			} else {
+				same = question.Body == current.Question
+			}
+			if same {
 				return DotsAnswerResult{}, ErrDecisionRequestResolved
 			}
-			return DotsAnswerResult{}, fmt.Errorf("%w: this request has no open dots question or decision request to answer", ErrNoOpenDotsQuestion)
 		}
 		lane := strings.TrimSpace(in.RequesterLane)
 		if lane == "" || !validName(lane) {
@@ -736,7 +778,7 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 	}
 	// The QUESTION this decision came from is answered with it; a decision
 	// request from another source matches no reply body and closes nothing.
-	if _, err = markDotsQuestionAnsweredByBodyTx(ctx, tx, taskID, current.Question, caller, comment.ID, now); err != nil {
+	if _, err = markDotsQuestionFromDecisionTx(ctx, tx, taskID, current.DotsQuestionCommentID, current.Question, caller, in.Text, comment.ID, now); err != nil {
 		return DotsAnswerResult{}, err
 	}
 

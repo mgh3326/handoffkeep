@@ -2,10 +2,10 @@ package store
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // A dots QUESTION reply is open until the request's requester lane answers it
@@ -14,31 +14,37 @@ import (
 // results can tell an open question from an answered one. Callers hold the
 // level-2 task lock and the task row; the row update adds no lock of its own.
 
-// dotsQuestion is one unanswered QUESTION reply: its dots_results row and the
-// task comment that holds the question.
+// dotsQuestion is one unanswered QUESTION reply: its dots_results row, the
+// task comment that holds the question, and that comment's body.
 type dotsQuestion struct {
 	ResultID  int64
 	CommentID int64
+	Body      string
 }
 
-// dotsOpenQuestionTx returns the request's latest QUESTION reply that has no
-// answer. The dots_results row is matched to its task comment through the
-// reply event RecordDotsResultTx wrote: both carry the dots comment hash.
-func dotsOpenQuestionTx(ctx context.Context, tx pgx.Tx, taskID int64) (dotsQuestion, bool, error) {
-	var q dotsQuestion
-	err := tx.QueryRow(ctx, `SELECT dr.id,c.id
+// dotsOpenQuestionsTx returns the request's unanswered QUESTION replies,
+// oldest first. The dots_results row is matched to its task comment through
+// the reply event RecordDotsResultTx wrote: both carry the dots comment hash.
+func dotsOpenQuestionsTx(ctx context.Context, tx pgx.Tx, taskID int64) ([]dotsQuestion, error) {
+	rows, err := tx.Query(ctx, `SELECT dr.id,c.id,c.body
 		FROM dots_results dr
 		JOIN task_events e ON e.task_id=dr.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.source_ref=dr.comment_id AND e.from_value='QUESTION'
 		JOIN task_comments c ON c.task_id=dr.task_id AND c.id::text=e.to_value
 		WHERE dr.task_id=$1 AND dr.kind='QUESTION' AND dr.answered_at IS NULL
-		ORDER BY dr.id DESC LIMIT 1`, taskID).Scan(&q.ResultID, &q.CommentID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return dotsQuestion{}, false, nil
-	}
+		ORDER BY dr.id`, taskID)
 	if err != nil {
-		return dotsQuestion{}, false, err
+		return nil, err
 	}
-	return q, true, nil
+	defer rows.Close()
+	var out []dotsQuestion
+	for rows.Next() {
+		var q dotsQuestion
+		if err := rows.Scan(&q.ResultID, &q.CommentID, &q.Body); err != nil {
+			return nil, err
+		}
+		out = append(out, q)
+	}
+	return out, rows.Err()
 }
 
 // markDotsQuestionAnsweredTx closes one open QUESTION row. It refuses when the
@@ -54,21 +60,35 @@ func markDotsQuestionAnsweredTx(ctx context.Context, tx pgx.Tx, resultID int64, 
 	return nil
 }
 
-// markDotsQuestionAnsweredByBodyTx closes the open QUESTION row whose reply
-// body is question. A decision request may be answered outside dots answer
-// (the operator's console or MCP path), and the QUESTION it came from must not
-// stay open; matching the body keeps an unrelated question untouched. It
-// reports whether a row was closed.
-func markDotsQuestionAnsweredByBodyTx(ctx context.Context, tx pgx.Tx, taskID int64, question, answeredBy string, answerCommentID int64, at time.Time) (bool, error) {
-	tag, err := tx.Exec(ctx, `UPDATE dots_results SET answered_at=$2,answered_by=$3,answer_comment_id=NULLIF($5,0)
-		WHERE id=(
-			SELECT dr.id
-			FROM dots_results dr
-			JOIN task_events e ON e.task_id=dr.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.source_ref=dr.comment_id AND e.from_value='QUESTION'
-			JOIN task_comments c ON c.task_id=dr.task_id AND c.id::text=e.to_value
-			WHERE dr.task_id=$1 AND dr.kind='QUESTION' AND dr.answered_at IS NULL AND c.body=$4
-			ORDER BY dr.id DESC LIMIT 1)
-		AND answered_at IS NULL`, taskID, at, answeredBy, question, answerCommentID)
+// markDotsQuestionFromDecisionTx closes the QUESTION a decision request came
+// from. The comment id recorded at ask_operator time names the exact row; a
+// request recorded before that link existed falls back to the reply body.
+// answeredBy is the decision's decider and answerCommentID the answer comment
+// when this is dots answer's own path (0 on the console/MCP path). It reports
+// whether a row was closed.
+func markDotsQuestionFromDecisionTx(ctx context.Context, tx pgx.Tx, taskID, questionCommentID int64, question, answeredBy, answerText string, answerCommentID int64, at time.Time) (bool, error) {
+	var tag pgconn.CommandTag
+	var err error
+	if questionCommentID > 0 {
+		tag, err = tx.Exec(ctx, `UPDATE dots_results SET answered_at=$3,answered_by=$4,answer_comment_id=NULLIF($5,0),answer_text=NULLIF($6,'')
+			WHERE id=(
+				SELECT dr.id
+				FROM dots_results dr
+				JOIN task_events e ON e.task_id=dr.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.source_ref=dr.comment_id AND e.from_value='QUESTION'
+				WHERE dr.task_id=$1 AND dr.kind='QUESTION' AND dr.answered_at IS NULL AND e.to_value=$2::text
+				LIMIT 1)
+			AND answered_at IS NULL`, taskID, questionCommentID, at, answeredBy, answerCommentID, answerText)
+	} else {
+		tag, err = tx.Exec(ctx, `UPDATE dots_results SET answered_at=$2,answered_by=$3,answer_comment_id=NULLIF($5,0),answer_text=NULLIF($6,'')
+			WHERE id=(
+				SELECT dr.id
+				FROM dots_results dr
+				JOIN task_events e ON e.task_id=dr.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.source_ref=dr.comment_id AND e.from_value='QUESTION'
+				JOIN task_comments c ON c.task_id=dr.task_id AND c.id::text=e.to_value
+				WHERE dr.task_id=$1 AND dr.kind='QUESTION' AND dr.answered_at IS NULL AND c.body=$4
+				ORDER BY dr.id DESC LIMIT 1)
+			AND answered_at IS NULL`, taskID, at, answeredBy, question, answerCommentID, answerText)
+	}
 	if err != nil {
 		return false, err
 	}

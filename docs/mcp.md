@@ -90,8 +90,11 @@ request's requester lane with `handoffkeep dots answer TASK --text ...`
 (`--requester-lane` defaults to `PANEWIRE_LANE`), or by
 `POST /v1/dots/answer` with `requester_lane`. Answering closes the question
 once: a second answer is refused with `no_open_dots_question`, and another
-lane is refused with `task_conflict`. `dots_inbox` shows the answer on the
-question it closed. RESULT, BLOCKED, and QUESTION also create
+lane is refused with `task_conflict`. With more than one question open the
+answer must name its target with `question_id` (`--question-id`, the reply's
+`id` in `dots_inbox`); without one it is refused with
+`dots_question_ambiguous`. `dots_inbox` shows the answer on the question it
+closed. RESULT, BLOCKED, and QUESTION also create
 a result document, result record, and lane notification. START creates only a
 comment and the claim. PROGRESS creates a document, comment, and notification,
 but no `dots_results` row, which records RESULT, BLOCKED and QUESTION only. Replies are

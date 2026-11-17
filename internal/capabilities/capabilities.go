@@ -17,6 +17,9 @@ const (
 	FeatureTransitionNoJob    = "transition_no_job"
 	FeatureResolveNoJob       = "resolve_no_job"
 	FeatureDispositionProject = "disposition_project"
+	// FeatureDotsAnswerQuestion is the dots answer body's requester_lane and
+	// question_id fields: a plain QUESTION answer and its target (hk 5000).
+	FeatureDotsAnswerQuestion = "dots_answer_question"
 )
 
 // Features lists every feature this build accepts. Every Feature constant above
@@ -27,4 +30,5 @@ var Features = []string{
 	FeatureTransitionNoJob,
 	FeatureResolveNoJob,
 	FeatureDispositionProject,
+	FeatureDotsAnswerQuestion,
 }

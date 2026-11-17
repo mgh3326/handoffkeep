@@ -13,7 +13,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const dotsUsage = "usage: dots request --title TITLE --body BODY [--type CREATE_MOCKUP|CREATE_ASSET|REVIEW_IMPLEMENTATION] [--requester-lane L] [--project P] [--idempotency-key KEY] [--option 'A|label' ...] [--option-attachment 'A|sha256[|caption]' ...]\n       dots results [--task N] [--issue ID]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID] [--canva-url U --canva-page P --canva-version V]\n       dots answer <task> --text <answer> [--requester-lane L]\n       dots cancel <task> --reason REASON [--requester-lane L]\n\nNote: dots answer answers an open decision request, or a plain dots QUESTION with the request's requester lane (--requester-lane defaults to PANEWIRE_LANE); a question is answered once.\nNote: A requester-lane comment alone does NOT resolve an open dots question (explicit beats implicit); use dots answer.\nNote: A requester-lane comment alone does NOT cancel a request; use dots cancel, which only the request's requester lane may run.\nNote: --option declares that the request ends in the operator's choice; its RESULT opens the decision."
+const dotsUsage = "usage: dots request --title TITLE --body BODY [--type CREATE_MOCKUP|CREATE_ASSET|REVIEW_IMPLEMENTATION] [--requester-lane L] [--project P] [--idempotency-key KEY] [--option 'A|label' ...] [--option-attachment 'A|sha256[|caption]' ...]\n       dots results [--task N] [--issue ID]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID] [--canva-url U --canva-page P --canva-version V]\n       dots answer <task> --text <answer> [--requester-lane L] [--question-id N]\n       dots cancel <task> --reason REASON [--requester-lane L]\n\nNote: dots answer answers an open decision request, or a plain dots QUESTION with the request's requester lane (--requester-lane defaults to PANEWIRE_LANE); a question is answered once. With several questions open, --question-id names the reply (its id in dots_inbox).\nNote: A requester-lane comment alone does NOT resolve an open dots question (explicit beats implicit); use dots answer.\nNote: A requester-lane comment alone does NOT cancel a request; use dots cancel, which only the request's requester lane may run.\nNote: --option declares that the request ends in the operator's choice; its RESULT opens the decision."
 
 func dotsRequestCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("dots request", flag.ContinueOnError)
@@ -127,7 +127,8 @@ func dotsCmd(args []string, out io.Writer) error {
 	case "answer":
 		fs.StringVar(&answerIn.Text, "text", "", "answer text")
 		fs.StringVar(&answerIn.RequesterLane, "requester-lane", "", "the request's requester lane when answering a plain QUESTION; defaults to PANEWIRE_LANE")
-		valueFlags = []string{"text", "requester-lane"}
+		fs.Int64Var(&answerIn.QuestionID, "question-id", 0, "the dots QUESTION reply id to answer when more than one is open (the reply's id in dots_inbox)")
+		valueFlags = []string{"text", "requester-lane", "question-id"}
 	case "cancel":
 		fs.StringVar(&cancelIn.Reason, "reason", "", "why the request is cancelled (recorded on the task)")
 		fs.StringVar(&cancelIn.RequesterLane, "requester-lane", "", "lane that filed the request; defaults to PANEWIRE_LANE, and must be that request's requester lane")
@@ -205,7 +206,7 @@ func dotsCmd(args []string, out io.Writer) error {
 		if answerIn.RequesterLane == "" {
 			answerIn.RequesterLane = os.Getenv("PANEWIRE_LANE")
 		}
-		res, err := c.AnswerDots(ctx, id, answerIn.Text, answerIn.RequesterLane)
+		res, err := c.AnswerDots(ctx, id, answerIn.Text, answerIn.RequesterLane, answerIn.QuestionID)
 		if err != nil {
 			return err
 		}

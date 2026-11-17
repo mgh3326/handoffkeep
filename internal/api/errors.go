@@ -144,6 +144,7 @@ var errorRules = []errorRule{
 	{store.ErrDotsResultNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrDotsAdoptionFinal, http.StatusConflict, "dots_adoption_final", false},
 	{store.ErrNoOpenDotsQuestion, http.StatusConflict, "no_open_dots_question", true},
+	{store.ErrDotsQuestionAmbiguous, http.StatusConflict, "dots_question_ambiguous", true},
 	{store.ErrInvalidDeployService, http.StatusBadRequest, "invalid_deploy_service", true},
 	{store.ErrServiceNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrDeployNotFound, http.StatusNotFound, "not_found", false},

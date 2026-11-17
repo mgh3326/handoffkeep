@@ -164,6 +164,10 @@ type DecisionRequest struct {
 	Root     string `json:"root,omitempty"`
 	Status   string `json:"status"`
 	Question string `json:"question"`
+	// DotsQuestionCommentID names the dots QUESTION reply (its task comment)
+	// this request was opened from. Closing the request closes that exact
+	// row, even when another reply repeats the same text (hk 5000).
+	DotsQuestionCommentID int64 `json:"dots_question_comment_id,omitempty"`
 	// Reason explains the recommendation; the recommended key itself is the
 	// existing DecisionOption.Recommended flag.
 	Reason string `json:"reason,omitempty"`
@@ -286,6 +290,10 @@ type DecisionRequestInput struct {
 	// AnswerPolicy is operator_direct or operator_relay_allowed; empty means
 	// operator_relay_allowed. human_only allows only operator_direct.
 	AnswerPolicy string `json:"answer_policy,omitempty"`
+	// DotsQuestionCommentID links the request to the dots QUESTION it came
+	// from. hk writes it only from ReplyDots; it is never decoded from a
+	// request body.
+	DotsQuestionCommentID int64 `json:"-"`
 }
 
 type DecisionResolveInput struct {
@@ -835,26 +843,27 @@ func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID i
 		return DecisionRequestResult{}, err
 	}
 	request := DecisionRequest{
-		ID:                   decisionRequestID(taskID, revision),
-		Revision:             revision,
-		Supersedes:           in.Supersedes,
-		Root:                 decisionRequestID(taskID, revision),
-		Status:               DecisionRequestOpen,
-		Question:             in.Question,
-		Reason:               in.Reason,
-		RecommendationReason: in.RecommendationReason,
-		Unverified:           in.Unverified,
-		OneFix:               in.OneFix,
-		DefaultAction:        in.DefaultAction,
-		DefaultOption:        in.DefaultOption,
-		DefaultTrigger:       in.DefaultTrigger,
-		DueAt:                in.DueAt,
-		Doc:                  in.Doc,
-		Refs:                 in.Refs,
-		HumanOnly:            in.HumanOnly,
-		AnswerPolicy:         in.AnswerPolicy,
-		RequestedBy:          by,
-		RequestedAt:          now,
+		ID:                    decisionRequestID(taskID, revision),
+		Revision:              revision,
+		Supersedes:            in.Supersedes,
+		Root:                  decisionRequestID(taskID, revision),
+		Status:                DecisionRequestOpen,
+		Question:              in.Question,
+		Reason:                in.Reason,
+		RecommendationReason:  in.RecommendationReason,
+		Unverified:            in.Unverified,
+		OneFix:                in.OneFix,
+		DefaultAction:         in.DefaultAction,
+		DefaultOption:         in.DefaultOption,
+		DefaultTrigger:        in.DefaultTrigger,
+		DueAt:                 in.DueAt,
+		Doc:                   in.Doc,
+		Refs:                  in.Refs,
+		HumanOnly:             in.HumanOnly,
+		AnswerPolicy:          in.AnswerPolicy,
+		RequestedBy:           by,
+		RequestedAt:           now,
+		DotsQuestionCommentID: in.DotsQuestionCommentID,
 	}
 	if current != nil && in.Supersedes != "" {
 		request.Root = current.RootID()

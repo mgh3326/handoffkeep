@@ -230,6 +230,10 @@ func TestGatedCallsRefuseUnlistedShapesWithoutSending(t *testing.T) {
 			_, err := c.ResolveDecision(context.Background(), "decision", 1, "by", "answer", "", false, "no job")
 			return err
 		}},
+		{"dots answer question", capabilities.FeatureDotsAnswerQuestion, func(c Client) error {
+			_, err := c.AnswerDots(context.Background(), 7, "answer", "lane", 42)
+			return err
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

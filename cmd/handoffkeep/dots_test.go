@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/mgh3326/handoffkeep/internal/capabilities"
 )
 
 func TestDotsRequestCommand(t *testing.T) {
@@ -94,12 +96,20 @@ func TestDotsAnswerCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, `"dr-4304-1"`) || len(seen) != 1 {
+	var req intakeRequest
+	for _, x := range seen {
+		if x.Path == "/v1/dots/answer" {
+			req = x
+		}
+	}
+	if !strings.Contains(out, `"dr-4304-1"`) || req.Path == "" {
 		t.Fatalf("out=%s requests=%v", out, seen)
 	}
-	req := seen[0]
-	if req.Path != "/v1/dots/answer" || string(req.Body["text"]) != `"use option B"` {
+	if string(req.Body["text"]) != `"use option B"` {
 		t.Fatalf("unexpected request: %+v", req)
+	}
+	if _, ok := req.Body["requester_lane"]; ok {
+		t.Fatalf("a legacy server was sent requester_lane: %+v", req.Body)
 	}
 
 	if _, err := runAgainst(h, "dots", "answer"); err == nil || !strings.Contains(err.Error(), "dots answer requires a task id") {
@@ -107,6 +117,29 @@ func TestDotsAnswerCommand(t *testing.T) {
 	}
 	if _, err := runAgainst(h, "dots", "answer", "4304"); err == nil || !strings.Contains(err.Error(), "dots answer requires --text") {
 		t.Fatalf("expected missing text error, got %v", err)
+	}
+}
+
+// A server that lists the plain-question shape gets the lane and the target.
+func TestDotsAnswerCommandSendsQuestionFields(t *testing.T) {
+	t.Setenv("PANEWIRE_LANE", "requester")
+	var body map[string]any
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/capabilities" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"protocol_version": capabilities.ProtocolVersion, "features": capabilities.Features})
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = io.WriteString(w, `{"task_id":4304,"comment_id":12,"task":{"id":4304}}`)
+	}))
+	t.Cleanup(h.Close)
+
+	if _, err := runAgainst(h, "dots", "answer", "4304", "--text", "the van", "--question-id", "77"); err != nil {
+		t.Fatal(err)
+	}
+	if body["requester_lane"] != "requester" || body["question_id"] != float64(77) {
+		t.Fatalf("answer body=%v", body)
 	}
 }
 

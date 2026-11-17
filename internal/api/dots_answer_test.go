@@ -97,12 +97,19 @@ func TestDotsAnswerPlainQuestionAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start=%+v err=%v", start, err)
 	}
-	if _, err := st.ReplyDots(ctx, "operator:test@example.com", "chatgpt", store.DotsReplyInput{TaskID: task.ID, Kind: "QUESTION", Body: "Which first?", IdempotencyKey: "question", RunToken: start.RunToken}); err != nil {
-		t.Fatal(err)
+	for _, q := range []struct{ key, body string }{{"question-1", "Which first?"}, {"question-2", "Which second?"}} {
+		if _, err := st.ReplyDots(ctx, "operator:test@example.com", "chatgpt", store.DotsReplyInput{TaskID: task.ID, Kind: "QUESTION", Body: q.body, IdempotencyKey: q.key, RunToken: start.RunToken}); err != nil {
+			t.Fatal(err)
+		}
 	}
+	replies, err := st.ListDotsReplies(ctx, task.ID)
+	if err != nil || len(replies) != 3 {
+		t.Fatalf("replies=%+v err=%v", replies, err)
+	}
+	firstID := replies[1].ID
 
 	// Another lane is refused with the rule, not with its own input.
-	code, out := projectRequest(t, h.URL, http.MethodPost, "/v1/dots/answer", "test-token", map[string]any{"task": task.ID, "text": "the van", "requester_lane": "intruder-lane"})
+	code, out := projectRequest(t, h.URL, http.MethodPost, "/v1/dots/answer", "test-token", map[string]any{"task": task.ID, "text": "the van", "requester_lane": "intruder-lane", "question_id": firstID})
 	if code != http.StatusConflict || out["error"] != "task_conflict" {
 		t.Fatalf("intruder status=%d body=%v", code, out)
 	}
@@ -110,8 +117,14 @@ func TestDotsAnswerPlainQuestionAPI(t *testing.T) {
 		t.Fatalf("intruder reason=%q (body=%v)", reason, out)
 	}
 
-	// The requester answers the plain question.
+	// Two questions are open, so the answer must name the one it closes.
 	code, out = projectRequest(t, h.URL, http.MethodPost, "/v1/dots/answer", "test-token", map[string]any{"task": task.ID, "text": "the van", "requester_lane": "requesting-lane"})
+	if code != http.StatusConflict || out["error"] != "dots_question_ambiguous" || out["reason"] != "more than one dots question is open; name the one to answer with question_id" {
+		t.Fatalf("untargeted answer status=%d body=%v", code, out)
+	}
+
+	// The requester answers the first question by id.
+	code, out = projectRequest(t, h.URL, http.MethodPost, "/v1/dots/answer", "test-token", map[string]any{"task": task.ID, "text": "the van", "requester_lane": "requesting-lane", "question_id": firstID})
 	if code != http.StatusOK {
 		t.Fatalf("answer status=%d body=%v", code, out)
 	}
@@ -119,13 +132,18 @@ func TestDotsAnswerPlainQuestionAPI(t *testing.T) {
 		t.Fatalf("plain answer carried a decision request: %v", out)
 	}
 	question, _ := out["question"].(map[string]any)
-	if question == nil || question["comment_id"] == nil {
+	if question == nil || question["comment_id"] != float64(firstID) {
 		t.Fatalf("plain answer did not name the question: %v", out)
 	}
 
-	// Answered once: a second answer names what is missing.
-	code, out = projectRequest(t, h.URL, http.MethodPost, "/v1/dots/answer", "test-token", map[string]any{"task": task.ID, "text": "again", "requester_lane": "requesting-lane"})
-	if code != http.StatusConflict || out["error"] != "no_open_dots_question" || out["reason"] != "this request has no open dots question or decision request to answer" {
+	// Answering the same question again finds nothing open under that id.
+	code, out = projectRequest(t, h.URL, http.MethodPost, "/v1/dots/answer", "test-token", map[string]any{"task": task.ID, "text": "again", "requester_lane": "requesting-lane", "question_id": firstID})
+	if code != http.StatusConflict || out["error"] != "no_open_dots_question" {
 		t.Fatalf("second answer status=%d body=%v", code, out)
+	}
+	// The other question is still open and is answerable without a target.
+	code, out = projectRequest(t, h.URL, http.MethodPost, "/v1/dots/answer", "test-token", map[string]any{"task": task.ID, "text": "the truck", "requester_lane": "requesting-lane"})
+	if code != http.StatusOK {
+		t.Fatalf("remaining answer status=%d body=%v", code, out)
 	}
 }

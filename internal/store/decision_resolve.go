@@ -578,11 +578,12 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 		return ResolveDecisionOutcome{}, err
 	}
 	// A dots QUESTION that asked for the operator opens this decision request;
-	// answering the request answers the question too, so the request's reply
-	// list stops reporting it as open (hk 5000). The body match leaves a
-	// decision request from another source, or a later question, untouched.
-	if effective.Kind == DecisionRequestAnswered && x.Lane == "dots" && IsHKDotsRequest(x) {
-		if _, err = markDotsQuestionAnsweredByBodyTx(ctx, tx, x.ID, current.Question, decidedBy(in, prov), 0, now); err != nil {
+	// closing the request (answered, default_applied or withdrawn) closes the
+	// question too, so the request's reply list stops reporting it as open
+	// (hk 5000). The comment id recorded at ask_operator time names the exact
+	// row; an older request falls back to its reply body.
+	if x.Lane == "dots" && IsHKDotsRequest(x) {
+		if _, err = markDotsQuestionFromDecisionTx(ctx, tx, x.ID, current.DotsQuestionCommentID, current.Question, decidedBy(in, prov), in.Text, 0, now); err != nil {
 			return ResolveDecisionOutcome{}, err
 		}
 	}

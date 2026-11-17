@@ -143,3 +143,13 @@ func (c Client) requireFeatureWhen(ctx context.Context, carried bool, feature st
 	}
 	return c.requireFeature(ctx, feature)
 }
+
+// supportsFeature reports whether the server lists feature. A legacy server
+// (no /v1/capabilities) lists nothing, so it reports false with no error.
+func (c Client) supportsFeature(ctx context.Context, feature string) (bool, error) {
+	caps, err := c.capabilitiesOf(ctx)
+	if err != nil {
+		return false, err
+	}
+	return caps.features[feature], nil
+}
