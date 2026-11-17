@@ -189,10 +189,6 @@ func insertMCPWriteAuditTx(ctx context.Context, tx pgx.Tx, w MCPWrite, taskID in
 // keeps the first row. The write is idempotent by its own key, so a retry
 // after a crash here writes the row on the next call.
 func (s *Store) RecordMCPWrite(ctx context.Context, w MCPWrite, taskID int64, result any) error {
-	if s != nil && s.dialect == mysqlDialect {
-		return ErrDialectUnsupported
-	}
-
 	if err := w.validate(); err != nil {
 		return err
 	}
@@ -200,8 +196,10 @@ func (s *Store) RecordMCPWrite(ctx context.Context, w MCPWrite, taskID int64, re
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO mcp_write_audit(tool,actor,channel,author,task_id,idempotency_key,result,at) VALUES($1,$2,$3,$4,NULLIF($5::bigint,0),$6,$7::jsonb,$8) ON CONFLICT (tool, actor, idempotency_key) WHERE idempotency_key <> '' DO NOTHING`,
-		w.Tool, w.Actor, w.Channel, w.Author, taskID, w.Key, string(raw), time.Now().UTC())
+	query := s.q(
+		`INSERT INTO mcp_write_audit(tool,actor,channel,author,task_id,idempotency_key,result,at) VALUES($1,$2,$3,$4,NULLIF($5::bigint,0),$6,$7::jsonb,$8) ON CONFLICT (tool, actor, idempotency_key) WHERE idempotency_key <> '' DO NOTHING`,
+		`INSERT INTO mcp_write_audit(tool,actor,channel,author,task_id,idempotency_key,result,at) VALUES(?,?,?, ?,NULLIF(?,0),?,?,?) ON DUPLICATE KEY UPDATE id=id`)
+	_, err = s.db().Exec(ctx, query, w.Tool, w.Actor, w.Channel, w.Author, taskID, w.Key, string(raw), time.Now().UTC())
 	return err
 }
 

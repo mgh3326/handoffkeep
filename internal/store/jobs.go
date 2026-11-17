@@ -11,7 +11,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -442,7 +441,7 @@ func checkJobUpdate(u JobUpdate) error {
 
 const jobColumns = `job_id,task_id,host,state,role,label,family,profile,model,pool,owner_lane,parent_lane,parent_job,pane_id,worktree,report_doc,result,created_by,created_at,updated_at,input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,usage_source,usage_recorded_at,harness,effort,claimed_at,spawned_at,spawned_received_at,ready_at,ready_received_at,ended_at,ended_received_at,report_sha256,report_version,skills,skills_supported,end_reason,diff_files,diff_insertions,diff_deletions,selection`
 
-func scanJob(row pgx.Row) (Job, error) {
+func scanJob(row interface{ Scan(...any) error }) (Job, error) {
 	var j Job
 	var worktree, result, skills, selection []byte
 	var files, insertions, deletions *int
@@ -506,10 +505,6 @@ func scanJob(row pgx.Row) (Job, error) {
 // and host) returns the stored row with created=false; a different claim on
 // a taken id is ErrJobIDTaken.
 func (s *Store) ClaimJob(ctx context.Context, j Job) (Job, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Job{}, false, ErrDialectUnsupported
-	}
-
 	if !ValidJobID(j.JobID) || !ValidJobHost(j.Host) || (j.TaskID != nil && *j.TaskID < 1) || j.CreatedBy == "" || !validJobField(j.CreatedBy) {
 		return j, false, errors.New("invalid job claim")
 	}
@@ -532,6 +527,27 @@ func (s *Store) ClaimJob(ctx context.Context, j Job) (Job, bool, error) {
 		return j, false, errors.New("claim time is in the future")
 	}
 	j.CreatedAt, j.UpdatedAt = now, now
+	if s.dialect == mysqlDialect {
+		_, err := s.db().Exec(ctx, `INSERT INTO jobs(job_id,task_id,host,state,role,label,family,profile,model,pool,owner_lane,parent_lane,parent_job,pane_id,worktree,report_doc,result,created_by,created_at,updated_at,claimed_at) VALUES(?,?,?, 'claimed','','','','','','','','','','',NULL,'',NULL,?,?,?,?)`, j.JobID, j.TaskID, j.Host, j.CreatedBy, now, now, j.ClaimedAt)
+		if err == nil {
+			stored, found, e := s.GetJob(ctx, j.JobID)
+			return stored, found, e
+		}
+		if !errors.Is(err, errUniqueViolation) {
+			return j, false, err
+		}
+		existing, found, err := s.GetJob(ctx, j.JobID)
+		if err != nil {
+			return j, false, err
+		}
+		if !found {
+			return j, false, errors.New("job claim raced")
+		}
+		if !sameTaskID(existing.TaskID, j.TaskID) || existing.Host != j.Host {
+			return existing, false, ErrJobIDTaken
+		}
+		return existing, false, nil
+	}
 	stored, err := scanJob(s.pool.QueryRow(ctx,
 		`INSERT INTO jobs(job_id,task_id,host,state,role,label,family,profile,model,pool,owner_lane,parent_lane,parent_job,pane_id,worktree,report_doc,result,created_by,created_at,updated_at,claimed_at) VALUES($1,$2,$3,'claimed','','','','','','','','','','',NULL,'',NULL,$4,$5,$5,$6)
 		 ON CONFLICT (job_id) DO NOTHING RETURNING `+jobColumns,
@@ -559,11 +575,7 @@ func sameTaskID(a, b *int64) bool { return a == nil && b == nil || a != nil && b
 
 // GetJob returns one job record by id.
 func (s *Store) GetJob(ctx context.Context, id string) (Job, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Job{}, false, ErrDialectUnsupported
-	}
-
-	j, err := scanJob(s.pool.QueryRow(ctx, `SELECT `+jobColumns+` FROM jobs WHERE job_id=$1`, id))
+	j, err := scanJob(s.db().QueryRow(ctx, s.q(`SELECT `+jobColumns+` FROM jobs WHERE job_id=$1`, `SELECT `+jobColumns+` FROM jobs WHERE job_id=?`), id))
 	if errors.Is(err, ErrNoRows) {
 		return j, false, nil
 	}
@@ -575,12 +587,8 @@ func (s *Store) GetJob(ctx context.Context, id string) (Job, bool, error) {
 
 // ListJobsByTask returns every job claimed for a task, oldest claim first.
 func (s *Store) ListJobsByTask(ctx context.Context, taskID int64, limit int) ([]Job, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	out := []Job{}
-	rows, err := s.pool.Query(ctx, `SELECT `+jobColumns+` FROM jobs WHERE task_id=$1 ORDER BY created_at ASC, job_id ASC LIMIT $2`, taskID, limit)
+	rows, err := s.db().Query(ctx, s.q(`SELECT `+jobColumns+` FROM jobs WHERE task_id=$1 ORDER BY created_at ASC, job_id ASC LIMIT $2`, `SELECT `+jobColumns+` FROM jobs WHERE task_id=? ORDER BY created_at ASC, job_id ASC LIMIT ?`), taskID, limit)
 	if err != nil {
 		return out, err
 	}
@@ -600,10 +608,6 @@ func (s *Store) ListJobsByTask(ctx context.Context, taskID int64, limit int) ([]
 // skills and the once-only report pair), and result is write-once together
 // with state=completed — violations are ErrJobStateConflict.
 func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Job{}, ErrDialectUnsupported
-	}
-
 	var j Job
 	if !ValidJobID(id) {
 		return j, errors.New("invalid job id")
@@ -611,18 +615,19 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 	if err := checkJobUpdate(u); err != nil {
 		return j, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return j, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	// A new role (applyJobRoleTx) locks the job's task row below: the
 	// task-mutation lock comes first, before the job row (lock order,
 	// lockorder.go).
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err = s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
 		return j, err
 	}
-	j, err = scanJob(tx.QueryRow(ctx, `SELECT `+jobColumns+` FROM jobs WHERE job_id=$1 FOR UPDATE`, id))
+	j, err = scanJob(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+jobColumns+` FROM jobs WHERE job_id=$1 FOR UPDATE`, `SELECT `+jobColumns+` FROM jobs WHERE job_id=? FOR UPDATE`), id))
 	if errors.Is(err, ErrNoRows) {
 		return j, ErrJobNotFound
 	}
@@ -781,27 +786,38 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 	if j.Selection != nil {
 		selectionArg = string(j.Selection)
 	}
-	j, err = scanJob(tx.QueryRow(ctx,
+	updateSQL := sqlFor(tx,
 		`UPDATE jobs SET state=$2,role=$3,label=$4,family=$5,profile=$6,model=$7,pool=$8,owner_lane=$9,parent_lane=$10,parent_job=$11,pane_id=$12,worktree=$13::jsonb,report_doc=$14,result=$15::jsonb,updated_at=$16,
 		 input_tokens=$17,output_tokens=$18,reasoning_tokens=$19,cache_read_tokens=$20,cache_write_tokens=$21,usage_source=$22,usage_recorded_at=$23, harness=$24,effort=$25,spawned_at=$26,spawned_received_at=$27,ready_at=$28,ready_received_at=$29,ended_at=$30,ended_received_at=$31,report_sha256=$32,report_version=$33,skills=$34::jsonb,skills_supported=$35,end_reason=$36,diff_files=$37,diff_insertions=$38,diff_deletions=$39,selection=$40::jsonb
 		 WHERE job_id=$1 RETURNING `+jobColumns,
+		`UPDATE jobs SET state=?,role=?,label=?,family=?,profile=?,model=?,pool=?,owner_lane=?,parent_lane=?,parent_job=?,pane_id=?,worktree=?,report_doc=?,result=?,updated_at=?,
+		 input_tokens=?,output_tokens=?,reasoning_tokens=?,cache_read_tokens=?,cache_write_tokens=?,usage_source=?,usage_recorded_at=?,harness=?,effort=?,spawned_at=?,spawned_received_at=?,ready_at=?,ready_received_at=?,ended_at=?,ended_received_at=?,report_sha256=?,report_version=?,skills=?,skills_supported=?,end_reason=?,diff_files=?,diff_insertions=?,diff_deletions=?,selection=? WHERE job_id=?`)
+	args := []any{
 		j.JobID, j.State, j.Role, j.Label, j.Family, j.Profile, j.Model, j.Pool,
 		j.OwnerLane, j.ParentLane, j.ParentJob, j.PaneID, worktreeArg, j.ReportDoc,
 		resultArg, j.UpdatedAt,
-		usage.InputTokens, usage.OutputTokens, usage.ReasoningTokens, usage.CacheReadTokens, usage.CacheWriteTokens, usageSource, usage.RecordedAt, j.Harness, j.Effort, j.SpawnedAt, j.SpawnedReceivedAt, j.ReadyAt, j.ReadyReceivedAt, j.EndedAt, j.EndedReceivedAt, j.ReportSHA256, j.ReportVersion, skillsArg, j.SkillsSupported, j.EndReason, diffFiles, diffInsertions, diffDeletions, selectionArg))
+		usage.InputTokens, usage.OutputTokens, usage.ReasoningTokens, usage.CacheReadTokens, usage.CacheWriteTokens, usageSource, usage.RecordedAt, j.Harness, j.Effort, j.SpawnedAt, j.SpawnedReceivedAt, j.ReadyAt, j.ReadyReceivedAt, j.EndedAt, j.EndedReceivedAt, j.ReportSHA256, j.ReportVersion, skillsArg, j.SkillsSupported, j.EndReason, diffFiles, diffInsertions, diffDeletions, selectionArg}
+	if s.dialect == mysqlDialect {
+		args = append(args[1:], args[0])
+		if _, err = tx.Exec(ctx, updateSQL, args...); err == nil {
+			j, err = scanJob(tx.QueryRow(ctx, `SELECT `+jobColumns+` FROM jobs WHERE job_id=?`, id))
+		}
+	} else {
+		j, err = scanJob(tx.QueryRow(ctx, updateSQL, args...))
+	}
 	if err != nil {
 		return j, err
 	}
 	// A job that ends supersedes its open decision records; the
 	// task-mutation lock above covers them (decision_records.go).
-	if j.State != previousState && DecisionEndsJob(j.State) {
-		if err = supersedeJobDecisionsTx(ctx, tx, j.JobID, j.State, j.UpdatedAt); err != nil {
+	if s.dialect != mysqlDialect && j.State != previousState && DecisionEndsJob(j.State) {
+		if err = supersedeJobDecisionsTx(ctx, pgxTx(tx), j.JobID, j.State, j.UpdatedAt); err != nil {
 			return j, err
 		}
 	}
 	// A job that gains a role can move its task forward (panewire.job).
 	if u.Role != nil && *u.Role != "" && *u.Role != previousRole {
-		if err = s.applyJobRoleTx(ctx, pgTransaction{tx}, j, j.UpdatedAt); err != nil {
+		if err = s.applyJobRoleTx(ctx, tx, j, j.UpdatedAt); err != nil {
 			return j, err
 		}
 	}

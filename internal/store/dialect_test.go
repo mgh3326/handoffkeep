@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
@@ -65,29 +64,6 @@ func TestRetryTransactionOnlyOnceOnMySQLConflict(t *testing.T) {
 	}
 	if mysqlStore.retryTransaction(context.Background(), 0, errors.New("ordinary error")) {
 		t.Fatal("ordinary error was retried")
-	}
-}
-
-func TestUnportedMethodsReturnDialectUnsupportedOnMySQL(t *testing.T) {
-	mysqlStore := &Store{dialect: mysqlDialect}
-	for _, tc := range []struct {
-		name string
-		call func() error
-	}{
-		{name: "attachment", call: func() error {
-			_, _, err := mysqlStore.GetAttachment(context.Background(), strings.Repeat("a", 64))
-			return err
-		}},
-		{name: "relay", call: func() error {
-			_, err := mysqlStore.ListRelayEventsPage(context.Background(), "lane", "", false, 0, 10)
-			return err
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := tc.call(); !errors.Is(err, ErrDialectUnsupported) {
-				t.Fatalf("error = %v, want ErrDialectUnsupported", err)
-			}
-		})
 	}
 }
 
