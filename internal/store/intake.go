@@ -29,7 +29,7 @@ var (
 	ErrTicketSetInvalid = errors.New("ticket_set_invalid")
 )
 
-// SimilarTaskThreshold is the pg_trgm similarity of two titles at or above
+// SimilarTaskThreshold is the token similarity of two titles at or above
 // which the duplicate check calls them similar.
 const SimilarTaskThreshold = 0.5
 
@@ -74,33 +74,15 @@ type rowsQuerier interface {
 	Query(context.Context, string, ...any) (rows, error)
 }
 
+// TokenSimilarity computes Jaccard trigram similarity between two titles in Go (design 11.7).
+func TokenSimilarity(a, b string) float64 {
+	return float64(intakeSimilarity(intakeTrigrams(a), intakeTrigrams(b)))
+}
+
 // similarOpenTasks lists started, unstarted and backlog tasks whose title is
-// similar to any of titles, most similar first.
+// similar to any of titles, most similar first, computed in Go over open titles (design 11.7).
 func similarOpenTasks(ctx context.Context, q rowsQuerier, titles []string) ([]SimilarTask, error) {
-	if dialectFor(q) == mysqlDialect {
-		// MySQL has no pg_trgm: the same trigram score is computed in Go over the
-		// open titles (design 11.7), see intake_similar_mysql.go.
-		return intakeSimilarOpenTasks(ctx, q, titles)
-	}
-	rows, err := q.Query(ctx, `SELECT t.id, t.title, t.state, t.lane, max(similarity(t.title, n.title))::float8 AS score
-		FROM tasks t CROSS JOIN unnest($1::text[]) AS n(title)
-		WHERE t.state IN ('backlog','unstarted',`+startedStatesSQL+`) AND similarity(t.title, n.title) >= $2
-		GROUP BY t.id
-		ORDER BY score DESC, t.id
-		LIMIT $3`, titles, SimilarTaskThreshold, SimilarTaskLimit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []SimilarTask{}
-	for rows.Next() {
-		var x SimilarTask
-		if err := rows.Scan(&x.ID, &x.Title, &x.State, &x.Lane, &x.Similarity); err != nil {
-			return nil, err
-		}
-		out = append(out, x)
-	}
-	return out, rows.Err()
+	return intakeSimilarOpenTasks(ctx, q, titles)
 }
 
 // IntakeInput is one item put into triage by an integration.
