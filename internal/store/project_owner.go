@@ -74,10 +74,6 @@ func scanProjectOwner(row row) (ProjectOwner, error) {
 // ListProjectOwners returns every configured project with its owner, in name
 // order. A project nobody has claimed still appears, owned by operator-desk.
 func (s *Store) ListProjectOwners(ctx context.Context) ([]ProjectOwner, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	rows, err := s.db().Query(ctx, projectOwnerSelect+` ORDER BY p.name`)
 	if err != nil {
 		return nil, err
@@ -98,14 +94,10 @@ func (s *Store) ListProjectOwners(ctx context.Context) ([]ProjectOwner, error) {
 // is a validation error like GetProjectMetadata's; only a well-formed name the
 // vocabulary does not hold is ErrProjectNotFound.
 func (s *Store) GetProjectOwner(ctx context.Context, project string) (ProjectOwner, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return ProjectOwner{}, ErrDialectUnsupported
-	}
-
 	if !validName(project) {
 		return ProjectOwner{}, errors.New("invalid project")
 	}
-	return scanProjectOwner(s.db().QueryRow(ctx, projectOwnerSelect+` WHERE p.name=$1`, project))
+	return scanProjectOwner(s.db().QueryRow(ctx, s.q(projectOwnerSelect+` WHERE p.name=$1`, projectOwnerSelect+` WHERE p.name=?`), project))
 }
 
 // SetProjectDesignLane records which design session owns a project. It locks
@@ -114,16 +106,26 @@ func (s *Store) GetProjectOwner(ctx context.Context, project string) (ProjectOwn
 // is a no-op and writes no event. An unknown project is ErrProjectNotFound; a
 // malformed lane is a validation error.
 func (s *Store) SetProjectDesignLane(ctx context.Context, project, lane, actor, note string) (ProjectOwner, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return ProjectOwner{}, ErrDialectUnsupported
-	}
-
 	if !validName(project) || (lane != "" && !validName(lane)) || actor == "" || !validText(actor, 128) || !validText(note, MaxBytes) {
 		return ProjectOwner{}, errors.New("invalid project design lane change")
 	}
 	if err := guard.Reject(note); err != nil {
 		return ProjectOwner{}, err
 	}
+	var owner ProjectOwner
+	err := s.retryTx(ctx, func() error {
+		var err error
+		owner, err = s.setProjectDesignLaneOnce(ctx, project, lane, actor, note)
+		return err
+	})
+	if err != nil {
+		return ProjectOwner{}, err
+	}
+	return owner, nil
+}
+
+// setProjectDesignLaneOnce is one whole SetProjectDesignLane transaction.
+func (s *Store) setProjectDesignLaneOnce(ctx context.Context, project, lane, actor, note string) (ProjectOwner, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return ProjectOwner{}, err
@@ -134,25 +136,30 @@ func (s *Store) SetProjectDesignLane(ctx context.Context, project, lane, actor, 
 	// FOR NO KEY UPDATE is the task_projects row lock the project writers
 	// share: it serializes the project writers without
 	// conflicting with the KEY SHARE a task or milestone insert takes through
-	// the foreign key (lockorder.go, exceptions).
-	if err = tx.QueryRow(ctx, `SELECT design_lane FROM task_projects WHERE name=$1 FOR NO KEY UPDATE`, project).Scan(&previous); err != nil {
+	// the foreign key (lockorder.go, exceptions). MySQL has no weaker row lock
+	// than FOR UPDATE, which does make a task insert wait for this transaction.
+	if err = tx.QueryRow(ctx, s.q(`SELECT design_lane FROM task_projects WHERE name=$1 FOR NO KEY UPDATE`, `SELECT design_lane FROM task_projects WHERE name=? FOR UPDATE`), project).Scan(&previous); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return ProjectOwner{}, ErrProjectNotFound
 		}
 		return ProjectOwner{}, err
 	}
 	if previous == lane {
-		owner, err := scanProjectOwner(tx.QueryRow(ctx, projectOwnerSelect+` WHERE p.name=$1`, project))
+		owner, err := scanProjectOwner(tx.QueryRow(ctx, s.q(projectOwnerSelect+` WHERE p.name=$1`, projectOwnerSelect+` WHERE p.name=?`), project))
 		if err != nil {
 			return ProjectOwner{}, err
 		}
 		return owner, tx.Commit(ctx)
 	}
 	now := time.Now().UTC()
-	if _, err = tx.Exec(ctx, `UPDATE task_projects SET design_lane=$2 WHERE name=$1`, project, lane); err != nil {
+	update := []any{project, lane}
+	if s.dialect == mysqlDialect {
+		update = []any{lane, project}
+	}
+	if _, err = tx.Exec(ctx, s.q(`UPDATE task_projects SET design_lane=$2 WHERE name=$1`, `UPDATE task_projects SET design_lane=? WHERE name=?`), update...); err != nil {
 		return ProjectOwner{}, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO project_owner_events(project,previous_lane,design_lane,actor,note,created_at) VALUES($1,$2,$3,$4,$5,$6)`, project, previous, lane, actor, note, now); err != nil {
+	if _, err = tx.Exec(ctx, s.q(`INSERT INTO project_owner_events(project,previous_lane,design_lane,actor,note,created_at) VALUES($1,$2,$3,$4,$5,$6)`, `INSERT INTO project_owner_events(project,previous_lane,design_lane,actor,note,created_at) VALUES(?,?,?,?,?,?)`), project, previous, lane, actor, note, now); err != nil {
 		return ProjectOwner{}, err
 	}
 	owner := ProjectOwner{Name: project, DesignLane: lane, EffectiveOwner: effectiveProjectOwner(lane), UpdatedAt: &now}
@@ -162,10 +169,6 @@ func (s *Store) SetProjectDesignLane(ctx context.Context, project, lane, actor, 
 // ProjectOwnerHistory returns a project's most recent ownership events,
 // newest first. Its ORDER BY ends in id so pages are deterministic.
 func (s *Store) ProjectOwnerHistory(ctx context.Context, project string, limit int) ([]ProjectOwnerEvent, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if !validName(project) {
 		return nil, errors.New("invalid project")
 	}
@@ -175,7 +178,7 @@ func (s *Store) ProjectOwnerHistory(ctx context.Context, project string, limit i
 	if limit > ProjectOwnerHistoryMax {
 		limit = ProjectOwnerHistoryMax
 	}
-	rows, err := s.db().Query(ctx, `SELECT id,project,previous_lane,design_lane,actor,note,created_at FROM project_owner_events WHERE project=$1 ORDER BY id DESC LIMIT $2`, project, limit)
+	rows, err := s.db().Query(ctx, s.q(`SELECT id,project,previous_lane,design_lane,actor,note,created_at FROM project_owner_events WHERE project=$1 ORDER BY id DESC LIMIT $2`, `SELECT id,project,previous_lane,design_lane,actor,note,created_at FROM project_owner_events WHERE project=? ORDER BY id DESC LIMIT ?`), project, limit)
 	if err != nil {
 		return nil, err
 	}
