@@ -143,3 +143,26 @@ func (c Client) requireFeatureWhen(ctx context.Context, carried bool, feature st
 	}
 	return c.requireFeature(ctx, feature)
 }
+
+// supportsFeature reports whether the server lists feature. A legacy server
+// (no /v1/capabilities) lists nothing, so it reports false with no error.
+func (c Client) supportsFeature(ctx context.Context, feature string) (bool, error) {
+	caps, err := c.capabilitiesOf(ctx)
+	if err != nil {
+		return false, err
+	}
+	return caps.features[feature], nil
+}
+
+// requireListedFeature refuses locally when the server does not list feature,
+// including a legacy server that answers 404 on /v1/capabilities.
+func (c Client) requireListedFeature(ctx context.Context, feature string) error {
+	ok, err := c.supportsFeature(ctx, feature)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+	return fmt.Errorf("server_lacks_feature:%s: the server's /v1/capabilities does not list it, so nothing was sent; the server predates it", feature)
+}

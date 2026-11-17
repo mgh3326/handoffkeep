@@ -85,7 +85,16 @@ completes it with the result document as evidence — or, on a declaring request
 opens the operator's decision and leaves the task waiting on it (above). A
 `QUESTION` is delivered
 to the requester; set `ask_operator` when it needs an hk decision request and
-the task should await that decision. RESULT, BLOCKED, and QUESTION also create
+the task should await that decision. A plain `QUESTION` is answered by the
+request's requester lane with `handoffkeep dots answer TASK --text ...`
+(`--requester-lane` defaults to `PANEWIRE_LANE`), or by
+`POST /v1/dots/answer` with `requester_lane`. Answering closes the question
+once: a second answer is refused with `no_open_dots_question`, and another
+lane is refused with `task_conflict`. With more than one question open the
+answer must name its target with `question_id` (`--question-id`, the reply's
+`id` in `dots_inbox`); without one it is refused with
+`dots_question_ambiguous`. `dots_inbox` shows the answer on the question it
+closed. RESULT, BLOCKED, and QUESTION also create
 a result document, result record, and lane notification. START creates only a
 comment and the claim. PROGRESS creates a document, comment, and notification,
 but no `dots_results` row, which records RESULT, BLOCKED and QUESTION only. Replies are

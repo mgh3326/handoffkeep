@@ -372,6 +372,14 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	if found {
 		return replay.out, replay.err
 	}
+	// A previous release may write a QUESTION row during blue-green with no
+	// owner column; classify this task's rows before closing its request
+	// (hk 5000).
+	if x.Lane == "dots" && IsHKDotsRequest(x) {
+		if err = classifyDotsQuestionsTx(ctx, tx, x.ID); err != nil {
+			return ResolveDecisionOutcome{}, err
+		}
+	}
 
 	decisionBefore := decisionBeforeOf(x)
 	current := x.Refs.DecisionRequest
@@ -576,6 +584,14 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 		decidedBy(in, prov), in.Actor, attemptID, now).Scan(&resolutionID)
 	if err != nil {
 		return ResolveDecisionOutcome{}, err
+	}
+	// A dots QUESTION that asked for the operator belongs to this request;
+	// closing the request (answered, default_applied or withdrawn) closes those
+	// rows for display, while the plain path never selects them (hk 5000).
+	if x.Lane == "dots" && IsHKDotsRequest(x) {
+		if err = closeDotsAskOperatorQuestionsTx(ctx, tx, x.ID, decidedBy(in, prov), in.Text, 0, now); err != nil {
+			return ResolveDecisionOutcome{}, err
+		}
 	}
 	note := "decision-" + effective.Kind + " " + resolved.ID
 	if in.Option != "" {

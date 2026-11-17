@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 
+	"github.com/mgh3326/handoffkeep/internal/capabilities"
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
@@ -71,10 +72,37 @@ func (c Client) SetDotsAdoption(ctx context.Context, id int64, in store.DotsAdop
 	return out, nil
 }
 
-// AnswerDots resolves a task's open dots decision request and records the comment.
-func (c Client) AnswerDots(ctx context.Context, taskID int64, text string) (store.DotsAnswerResult, error) {
+// AnswerDots answers a task's open dots question and records the comment.
+// RequesterLane is required when the answer closes a plain QUESTION, and
+// QuestionID names the QUESTION reply to close when more than one is open.
+// Both fields ride only a server whose /v1/capabilities lists
+// FeatureDotsAnswerQuestion; the lane is omitted on an older server so a
+// decision-path answer still works there, and a target is refused locally
+// because an older server cannot honour it.
+func (c Client) AnswerDots(ctx context.Context, taskID int64, text, requesterLane string, questionID int64) (store.DotsAnswerResult, error) {
 	var out store.DotsAnswerResult
 	payload := map[string]any{"task": taskID, "text": text}
+	listed := false
+	if questionID > 0 {
+		if err := c.requireListedFeature(ctx, capabilities.FeatureDotsAnswerQuestion); err != nil {
+			return out, err
+		}
+		listed = true
+		payload["question_id"] = questionID
+	}
+	if requesterLane != "" {
+		if !listed {
+			// A failed capabilities read must not fail an answer the decision
+			// path can still take: the lane is optional there, and omitting it
+			// leaves a plain answer to the server's own refusal.
+			if ok, err := c.supportsFeature(ctx, capabilities.FeatureDotsAnswerQuestion); err == nil {
+				listed = ok
+			}
+		}
+		if listed {
+			payload["requester_lane"] = requesterLane
+		}
+	}
 	err := c.call(ctx, "POST", "/v1/dots/answer", payload, &out)
 	if err != nil {
 		return out, unsupportedRoute(err, "dots_answer_unsupported", "the dots answer route")

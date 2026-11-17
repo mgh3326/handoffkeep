@@ -124,7 +124,7 @@ func seedDotsResult(t *testing.T, s *Store, kind string, issue DotsIssue, c Dots
 		t.Fatal(err)
 	}
 	defer tx.Rollback(t.Context())
-	if _, _, err := recordDotsResultTx(t.Context(), tx, kind, issue, c, nil, DotsLane, "linear-webhook"); err != nil {
+	if _, _, err := recordDotsResultTx(t.Context(), tx, kind, issue, c, nil, DotsLane, "linear-webhook", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(t.Context()); err != nil {

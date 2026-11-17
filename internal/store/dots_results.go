@@ -62,8 +62,21 @@ type DotsResult struct {
 	CanvaVersion    string     `json:"canva_version,omitempty"`
 	AdoptedAt       *time.Time `json:"adopted_at,omitempty"`
 	SupersededBy    *int64     `json:"superseded_by,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	// AnsweredAt and AnsweredBy mark a QUESTION reply that has been answered:
+	// an open question is a QUESTION row with no AnsweredAt (hk 5000).
+	// AnswerCommentID names the task comment holding the answer; it is absent
+	// when an operator closed the decision request in the console or MCP.
+	AnsweredAt      *time.Time `json:"answered_at,omitempty"`
+	AnsweredBy      string     `json:"answered_by,omitempty"`
+	AnswerCommentID *int64     `json:"answer_comment_id,omitempty"`
+	// AnswerText is the answer recorded when no task comment holds it (an
+	// operator's console or MCP decision close).
+	AnswerText string `json:"answer_text,omitempty"`
+	// AskOperator is the owner of a QUESTION row: true when it opened a
+	// decision request, false when the requester lane answers it directly.
+	AskOperator *bool     `json:"ask_operator,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // DotsAdoptionInput is the body of POST /v1/dots/results/{id}/adoption.
@@ -76,10 +89,10 @@ type DotsAdoptionInput struct {
 	CanvaVersion string `json:"canva_version,omitempty"`
 }
 
-const dotsResultColumns = `id,document_key,comment_id,issue_uuid,issue_identifier,kind,COALESCE(verdict,''),artefact_sha256,task_id,routed_lane,adoption_state,COALESCE(adopted_ref,''),COALESCE(adopted_by,''),COALESCE(canva_url,''),COALESCE(canva_page,''),COALESCE(canva_version,''),adopted_at,superseded_by,created_at,updated_at`
+const dotsResultColumns = `id,document_key,comment_id,issue_uuid,issue_identifier,kind,COALESCE(verdict,''),artefact_sha256,task_id,routed_lane,adoption_state,COALESCE(adopted_ref,''),COALESCE(adopted_by,''),COALESCE(canva_url,''),COALESCE(canva_page,''),COALESCE(canva_version,''),adopted_at,superseded_by,answered_at,COALESCE(answered_by,''),answer_comment_id,COALESCE(answer_text,''),ask_operator,created_at,updated_at`
 
 func scanDotsResult(row pgx.Row, x *DotsResult) error {
-	if err := row.Scan(&x.ID, &x.DocumentKey, &x.CommentID, &x.IssueUUID, &x.IssueIdentifier, &x.Kind, &x.Verdict, &x.ArtefactSHA256, &x.TaskID, &x.RoutedLane, &x.AdoptionState, &x.AdoptedRef, &x.AdoptedBy, &x.CanvaURL, &x.CanvaPage, &x.CanvaVersion, &x.AdoptedAt, &x.SupersededBy, &x.CreatedAt, &x.UpdatedAt); err != nil {
+	if err := row.Scan(&x.ID, &x.DocumentKey, &x.CommentID, &x.IssueUUID, &x.IssueIdentifier, &x.Kind, &x.Verdict, &x.ArtefactSHA256, &x.TaskID, &x.RoutedLane, &x.AdoptionState, &x.AdoptedRef, &x.AdoptedBy, &x.CanvaURL, &x.CanvaPage, &x.CanvaVersion, &x.AdoptedAt, &x.SupersededBy, &x.AnsweredAt, &x.AnsweredBy, &x.AnswerCommentID, &x.AnswerText, &x.AskOperator, &x.CreatedAt, &x.UpdatedAt); err != nil {
 		return err
 	}
 	x.Source = "linear"

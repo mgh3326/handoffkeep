@@ -83,8 +83,6 @@ var (
 	ErrDecisionRequestStale = errors.New("decision_request_stale")
 	// ErrDecisionRequestResolved refuses a second, different resolution.
 	ErrDecisionRequestResolved = errors.New("decision_request_resolved")
-	// ErrNoOpenDecisionRequest refuses an answer when the task has no open decision request.
-	ErrNoOpenDecisionRequest = errors.New("no_open_decision_request")
 	// ErrDecisionAssistantKind refuses any resolution kind but answered on
 	// the assistant path: default_applied needs a real application receipt
 	// and withdrawn is the requester's own close, so neither may come back
@@ -166,6 +164,10 @@ type DecisionRequest struct {
 	Root     string `json:"root,omitempty"`
 	Status   string `json:"status"`
 	Question string `json:"question"`
+	// DotsQuestionCommentID names the dots QUESTION reply (its task comment)
+	// this request was opened from. Closing the request closes that exact
+	// row, even when another reply repeats the same text (hk 5000).
+	DotsQuestionCommentID int64 `json:"dots_question_comment_id,omitempty"`
 	// Reason explains the recommendation; the recommended key itself is the
 	// existing DecisionOption.Recommended flag.
 	Reason string `json:"reason,omitempty"`
@@ -288,6 +290,10 @@ type DecisionRequestInput struct {
 	// AnswerPolicy is operator_direct or operator_relay_allowed; empty means
 	// operator_relay_allowed. human_only allows only operator_direct.
 	AnswerPolicy string `json:"answer_policy,omitempty"`
+	// DotsQuestionCommentID links the request to the dots QUESTION it came
+	// from. hk writes it only from ReplyDots; it is never decoded from a
+	// request body.
+	DotsQuestionCommentID int64 `json:"-"`
 }
 
 type DecisionResolveInput struct {
@@ -828,6 +834,14 @@ func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID i
 		revision = current.Revision + 1
 	}
 	now := time.Now().UTC()
+	// A superseding request replaces the open one. Its ask_operator QUESTION
+	// rows must not stay open, or a targeted answer could resolve the new
+	// request with text meant for the old question (hk 5000).
+	if current != nil && in.Supersedes != "" && x.Lane == "dots" && IsHKDotsRequest(x) {
+		if err = closeDotsAskOperatorQuestionsTx(ctx, tx, taskID, by, "", 0, now); err != nil {
+			return DecisionRequestResult{}, err
+		}
+	}
 	options := in.Options
 	// An option's pictures and videos must name attachments this database
 	// holds: the operator's page would otherwise show a choice it cannot look
@@ -837,26 +851,27 @@ func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID i
 		return DecisionRequestResult{}, err
 	}
 	request := DecisionRequest{
-		ID:                   decisionRequestID(taskID, revision),
-		Revision:             revision,
-		Supersedes:           in.Supersedes,
-		Root:                 decisionRequestID(taskID, revision),
-		Status:               DecisionRequestOpen,
-		Question:             in.Question,
-		Reason:               in.Reason,
-		RecommendationReason: in.RecommendationReason,
-		Unverified:           in.Unverified,
-		OneFix:               in.OneFix,
-		DefaultAction:        in.DefaultAction,
-		DefaultOption:        in.DefaultOption,
-		DefaultTrigger:       in.DefaultTrigger,
-		DueAt:                in.DueAt,
-		Doc:                  in.Doc,
-		Refs:                 in.Refs,
-		HumanOnly:            in.HumanOnly,
-		AnswerPolicy:         in.AnswerPolicy,
-		RequestedBy:          by,
-		RequestedAt:          now,
+		ID:                    decisionRequestID(taskID, revision),
+		Revision:              revision,
+		Supersedes:            in.Supersedes,
+		Root:                  decisionRequestID(taskID, revision),
+		Status:                DecisionRequestOpen,
+		Question:              in.Question,
+		Reason:                in.Reason,
+		RecommendationReason:  in.RecommendationReason,
+		Unverified:            in.Unverified,
+		OneFix:                in.OneFix,
+		DefaultAction:         in.DefaultAction,
+		DefaultOption:         in.DefaultOption,
+		DefaultTrigger:        in.DefaultTrigger,
+		DueAt:                 in.DueAt,
+		Doc:                   in.Doc,
+		Refs:                  in.Refs,
+		HumanOnly:             in.HumanOnly,
+		AnswerPolicy:          in.AnswerPolicy,
+		RequestedBy:           by,
+		RequestedAt:           now,
+		DotsQuestionCommentID: in.DotsQuestionCommentID,
 	}
 	if current != nil && in.Supersedes != "" {
 		request.Root = current.RootID()
