@@ -51,7 +51,7 @@ type copyTableSpec struct {
 	// PostgreSQL (yt_write_ops): a PostgreSQL target must take the explicit id
 	// with OVERRIDING SYSTEM VALUE.
 	pgIdentity bool
-	// serial marks a table whose id is generated (BIGSERIAL, AUTO_INCREMENT):
+	// serial marks a table with a generated key (BIGSERIAL, AUTO_INCREMENT):
 	// after the load the target's generator is moved past the largest id.
 	serial bool
 	// identity is the generated column name when it differs from id.
@@ -136,6 +136,18 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "change_gate_events", serial: true, columns: strings.Fields("id change_id head_sha state changed reasons policy_revision decided_at source recorded_at"), order: []string{"id"}, bounds: map[string]int{"head_sha": 64, "state": 16, "source": 16}},
 	{name: "deploy_record_projection", columns: strings.Fields("key sha256 record decoded"), order: []string{"key"}, bounds: map[string]int{"key": 767, "sha256": 64}},
 	{name: "deploy_services", upsert: true, columns: strings.Fields("name repo record_prefixes active created_at updated_at"), order: []string{"name"}, bounds: map[string]int{"name": 128}},
+	{name: "dots_results", serial: true, parentColumn: "superseded_by", columns: strings.Fields("id document_key comment_id issue_uuid issue_identifier kind verdict artefact_sha256 task_id routed_lane adoption_state adopted_ref adopted_by adopted_at superseded_by answered_at answered_by answer_comment_id answer_text ask_operator canva_url canva_page canva_version created_at updated_at"), order: []string{"id"}, bounds: map[string]int{"document_key": 512, "comment_id": 255, "issue_uuid": 255, "issue_identifier": 255, "kind": 16, "artefact_sha256": 64, "routed_lane": 255, "adoption_state": 32}},
+	{name: "dots_run_tokens", serial: true, columns: strings.Fields("id task_id token issue_key takeover issued_by issued_at superseded_at"), order: []string{"id"}, bounds: map[string]int{"token": 64, "issue_key": 64}},
+	{name: "decision_requests", serial: true, columns: strings.Fields("id source source_ref task_id job_id lane question reading grounds options recommended default_action due_at snoozed_until expires_at status answer answered_by answered_at superseded_by created_at updated_at"), order: []string{"id"}, bounds: map[string]int{"source": 32, "source_ref": 512, "job_id": 255, "lane": 255, "status": 16}},
+	{name: "decision_answer_attempts", serial: true, columns: strings.Fields("id channel event_key payload_hash task_id request_id revision_request_id question_revision provenance actor result event_at received_at option_id text operator_quote denies_attempt_id receipt"), order: []string{"id"}, bounds: map[string]int{"channel": 16, "event_key": 512, "payload_hash": 64, "request_id": 512, "revision_request_id": 512, "provenance": 32, "result": 32}},
+	{name: "decision_resolutions", serial: true, identity: "resolution_id", columns: strings.Fields("resolution_id request_id question_revision revision_request_id task_id kind option_id text receipt provenance channel decided_by recorded_by attempt_id committed_at"), order: []string{"resolution_id"}, bounds: map[string]int{"request_id": 512, "revision_request_id": 512, "kind": 24, "provenance": 32}},
+	{name: "decision_deliveries", columns: strings.Fields("request_id destination message_id desired_version applied_version state attempts next_attempt_at last_error_code posted_at edited_at created_at"), order: []string{"request_id", "destination"}, bounds: map[string]int{"destination": 16, "message_id": 255, "desired_version": 16, "applied_version": 16, "state": 16}},
+	{name: "decision_notify_digest", columns: strings.Fields("day state listed message_id attempts next_attempt_at last_error sent_at created_at"), order: []string{"day"}, bounds: map[string]int{"state": 16, "message_id": 255}},
+	{name: "chat_questions", columns: strings.Fields("id conversation_id lane body state created_at updated_at resolved_at revision answer_message_id"), order: []string{"id"}, bounds: map[string]int{"id": 64, "conversation_id": 255, "lane": 255, "state": 16}},
+	{name: "chat_messages", serial: true, columns: strings.Fields("id conversation_id author body source_channel origin_event_id origin_timestamp semantic_hash relay_state created_at delivered_at"), order: []string{"id"}, bounds: map[string]int{"conversation_id": 255, "author": 16, "source_channel": 64, "origin_event_id": 255, "semantic_hash": 64, "relay_state": 16}},
+	{name: "chat_message_questions", columns: strings.Fields("message_id question_id relation_kind question_text"), order: []string{"message_id", "question_id", "relation_kind"}, bounds: map[string]int{"question_id": 64, "relation_kind": 16}},
+	{name: "operator_inbox_state", columns: strings.Fields("item_key read_at done_at snoozed_until actor updated_at"), order: []string{"item_key"}, bounds: map[string]int{"item_key": 192, "actor": 320}},
+	{name: "operator_inbox_events", columns: strings.Fields("event_key item_key action previous_read_at previous_done_at previous_snoozed_until previous_request_id previous_request_snoozed_until applied_read_at applied_done_at applied_snoozed_until undone_at actor at"), order: []string{"event_key", "item_key"}, bounds: map[string]int{"event_key": 128, "item_key": 192, "action": 16, "actor": 320}},
 	{name: "sync_state", upsert: true, columns: strings.Fields("singleton max_sync_id pruned_through"), order: []string{"singleton"}},
 	{name: "sync_log", serial: true, identity: "entry_id", columns: strings.Fields("entry_id sync_id model model_id action at"), order: []string{"entry_id"}, bounds: map[string]int{"model": 32, "model_id": 512}},
 	{name: "checkpoints", serial: true, columns: strings.Fields("id session kind title body refs created_by created_at"), order: []string{"id"}, bounds: map[string]int{"session": 255, "kind": 16}},
@@ -163,7 +175,7 @@ func StoreCopyTables() []string {
 	return out
 }
 
-var copyLeftOutTables = strings.Fields(`chat_message_questions chat_messages chat_questions decision_answer_attempts decision_deliveries decision_notify_digest decision_requests decision_resolutions deploy_changes deploys dots_results dots_run_tokens labels linear_board_owners linear_board_ownership_conflicts linear_board_tasks linear_capacity_state linear_create_admissions linear_decision_issues linear_decision_ops linear_issues linear_outbox locks operator_inbox_events operator_inbox_state relay_events_retired_20260918 schema_migrations schema_version services standing_orders status_updates takes task_labels task_state_migration task_subscribers verifications youtrack_attempts youtrack_comment_links youtrack_cursor youtrack_decision_mirrors youtrack_doc_articles youtrack_field_cache youtrack_outbox youtrack_processed_activities yt_article_bindings yt_binding_cursor yt_binding_history yt_binding_intents yt_decision_bindings yt_family_roots yt_feed_cursors yt_issue_comment_bounds yt_issue_intents yt_link_owned yt_link_plans yt_link_steps yt_link_unowned yt_links_sweep yt_snapshot_state`)
+var copyLeftOutTables = strings.Fields(`deploy_changes deploys labels linear_board_owners linear_board_ownership_conflicts linear_board_tasks linear_capacity_state linear_create_admissions linear_decision_issues linear_decision_ops linear_issues linear_outbox locks relay_events_retired_20260918 schema_migrations schema_version services standing_orders status_updates takes task_labels task_state_migration task_subscribers verifications youtrack_attempts youtrack_cursor youtrack_decision_mirrors youtrack_doc_articles youtrack_field_cache youtrack_outbox youtrack_processed_activities yt_article_bindings yt_binding_cursor yt_binding_intents yt_decision_bindings yt_family_roots yt_feed_cursors yt_link_owned yt_link_plans yt_link_steps yt_link_unowned yt_links_sweep yt_snapshot_state`)
 
 type copyDB struct {
 	db    *sql.DB
@@ -1045,9 +1057,13 @@ func resetIdentity(ctx context.Context, dst *copyDB, spec copyTableSpec) error {
 	if !spec.serial {
 		return nil
 	}
+	column := spec.identity
+	if column == "" {
+		column = "id"
+	}
 	if dst.mySQL {
 		var max sql.NullInt64
-		if err := conn.QueryRowContext(ctx, `SELECT MAX(`+quoteCopyIdent(identity, true)+`) FROM `+quoteCopyIdent(table, true)).Scan(&max); err != nil {
+		if err := conn.QueryRowContext(ctx, `SELECT MAX(`+quoteCopyIdent(column, true)+`) FROM `+quoteCopyIdent(table, true)).Scan(&max); err != nil {
 			return err
 		}
 		if max.Valid {
@@ -1056,13 +1072,13 @@ func resetIdentity(ctx context.Context, dst *copyDB, spec copyTableSpec) error {
 		return err
 	}
 	var seq sql.NullString
-	if err := conn.QueryRowContext(ctx, `SELECT pg_get_serial_sequence($1,$2)`, table, identity).Scan(&seq); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT pg_get_serial_sequence($1,$2)`, table, column).Scan(&seq); err != nil {
 		return err
 	}
 	if !seq.Valid || seq.String == "" {
 		return nil
 	}
-	quotedIdentity := quoteCopyIdent(identity, false)
+	quotedIdentity := quoteCopyIdent(column, false)
 	if _, err = conn.ExecContext(ctx, `SELECT setval($1, COALESCE((SELECT MAX(`+quotedIdentity+`) FROM `+quoteCopyIdent(table, false)+`), 1), EXISTS(SELECT 1 FROM `+quoteCopyIdent(table, false)+`))`, seq.String); err != nil {
 		return err
 	}

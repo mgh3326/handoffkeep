@@ -14,11 +14,10 @@ import (
 // clock, writeTaskTx, and the lifecycle and priority writes. They run on
 // PostgreSQL in TestTasksAreaPostgres and on MySQL in TestMySQLTasksArea.
 //
-// A step that reaches an area the MySQL port has not covered yet (a settled
-// state's decision mirror, a relane, a change link) answers
-// ErrDialectUnsupported there; flowSkipUnported turns exactly that answer into
-// a skip on MySQL, so the case runs in full once the area is ported. A method
-// of this file's own path never goes through it: flowMust fails the case.
+// A step that reaches an area the MySQL port has not covered yet (a relane or
+// a change link) answers ErrDialectUnsupported there; flowSkipUnported turns
+// exactly that answer into a skip on MySQL. A method of this file's own path
+// never goes through it: flowMust fails the case.
 
 func init() {
 	registerTaskAreaCase("flow/transitions", flowCaseTransitions)
@@ -30,6 +29,7 @@ func init() {
 	registerTaskAreaCase("flow/claim", flowCaseClaim)
 	registerTaskAreaCase("flow/settled-transitions", flowCaseSettled)
 	registerTaskAreaCase("flow/awaiting-decision", flowCaseAwaiting)
+	registerTaskAreaCase("flow/withdrawn-request-keeps-flag-projection", flowCaseWithdrawnRequestKeepsFlagProjection)
 	registerTaskAreaCase("flow/relane-and-lanes", flowCaseRelane)
 }
 
@@ -430,15 +430,14 @@ func flowCaseClaim(t *testing.T, s *Store) {
 	}
 }
 
-// flowCaseSettled covers the writes that settle or reopen a task. Entering a
-// settled state mirrors decision records, which the decisions area owns, so
-// on MySQL it is skipped until that area is ported.
+// flowCaseSettled covers the writes that settle or reopen a task, including
+// superseding the decision rows in the transition transaction.
 func flowCaseSettled(t *testing.T, s *Store) {
 	ctx := t.Context()
 	x := flowCaseTask(t, s, "ops")
 
 	got, err := s.CloseTaskCompleted(ctx, x.ID, "hk:doc research/flow-case", "tester", "done", "close-1")
-	flowSkipUnported(t, s, err)
+	flowMust(t, err)
 	if got.State != StateCompleted || got.CompletedAt == nil || got.Refs.Closure == nil || got.Refs.Closure.Type != "resolved" {
 		t.Fatalf("completed task=%+v", got)
 	}
@@ -528,9 +527,8 @@ func flowCaseAwaiting(t *testing.T, s *Store) {
 	if _, err := s.TransitionTask(ctx, x.ID, "needs_decision", "tester", " ", nil, ""); err == nil {
 		t.Fatal("needs_decision without a question was accepted")
 	}
-	// Raising the flag mirrors a decision record, which MySQL does not have yet.
 	got, err := s.TransitionTask(ctx, x.ID, "needs_decision", "tester", "which way?", nil, "")
-	flowSkipUnported(t, s, err)
+	flowMust(t, err)
 	if !got.AwaitingDecision || got.State != StateBacklog {
 		t.Fatalf("flagged task state=%q awaiting=%t", got.State, got.AwaitingDecision)
 	}
@@ -550,6 +548,34 @@ func flowCaseAwaiting(t *testing.T, s *Store) {
 	}
 	if flags != 2 {
 		t.Fatalf("%d awaiting_decision events, want 2 (raise and clear)", flags)
+	}
+}
+
+func flowCaseWithdrawnRequestKeepsFlagProjection(t *testing.T, s *Store) {
+	ctx := t.Context()
+	x := flowCaseTask(t, s, "implement")
+	requestID := decisionRequestID(x.ID, 1)
+	before := taskDecisionBefore{request: &DecisionRequest{ID: requestID, Status: DecisionRequestOpen}}
+	after := x
+	after.AwaitingDecision = true
+	after.Refs.DecisionRequest = &DecisionRequest{ID: requestID, Status: DecisionRequestWithdrawn}
+	tx, release, err := s.begin(ctx)
+	flowMust(t, err)
+	defer release()
+	defer tx.Rollback(ctx)
+	at := time.Now().UTC()
+	if err := s.mirrorTaskDecisionsFlowTx(ctx, tx, before, after, "flow-case", "request withdrawn", 41, at); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.db().QueryRow(ctx, s.q(`SELECT count(*) FROM decision_requests WHERE task_id=$1 AND source='task_flag' AND source_ref=$2 AND status='open'`, `SELECT count(*) FROM decision_requests WHERE task_id=? AND source='task_flag' AND source_ref=? AND status='open'`), x.ID, fmt.Sprintf("%d/41", x.ID)).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("open task_flag projection count=%d, want 1", count)
 	}
 }
 

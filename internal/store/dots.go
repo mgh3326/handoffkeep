@@ -234,14 +234,10 @@ func IsHKDotsRequest(task Task) bool {
 
 // DotsInbox lists open hk requests in creation order after a task cursor.
 func (s *Store) DotsInbox(ctx context.Context, after int64, limit int) ([]Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if after < 0 || limit < 1 || limit > 100 {
 		return nil, errors.New("invalid dots inbox cursor or limit")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE lane='dots' AND source='dots' AND source_ref LIKE 'hk-%' AND state NOT IN (`+settledStatesSQL+`) AND ($1::bigint=0 OR (created_at,id) > (SELECT created_at,id FROM tasks WHERE id=$1)) ORDER BY created_at,id LIMIT $2`, after, limit)
+	rows, err := s.db().Query(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE lane='dots' AND source='dots' AND source_ref LIKE 'hk-%' AND state NOT IN (`+settledStatesSQL+`) AND ($1::bigint=0 OR (created_at,id) > (SELECT created_at,id FROM tasks WHERE id=$2)) ORDER BY created_at,id LIMIT $3`, `SELECT `+taskColumns+` FROM tasks WHERE lane='dots' AND source='dots' AND source_ref LIKE 'hk-%' AND state NOT IN (`+settledStatesSQL+`) AND (?=0 OR (created_at,id) > (SELECT created_at,id FROM tasks WHERE id=?)) ORDER BY created_at,id LIMIT ?`), after, after, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -435,7 +431,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	// The token is checked before the replay lookup: a replay returns the first
 	// result, so a caller without the run must not learn it.
 	if in.Kind != "START" {
-		if err = checkDotsRunTokenTx(ctx, tx, task, in.RunToken); err != nil {
+		if err = checkDotsRunTokenTx(ctx, pgTransaction{tx}, task, in.RunToken); err != nil {
 			return DotsReplyResult{}, err
 		}
 	}
@@ -453,7 +449,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 		}
 		replayToken := ""
 		if in.Kind == "START" {
-			if replayToken, err = dotsRunTokenForIssueTx(ctx, tx, task.ID, commentID); err != nil {
+			if replayToken, err = dotsRunTokenForIssueTx(ctx, pgTransaction{tx}, task.ID, commentID); err != nil {
 				return DotsReplyResult{}, err
 			}
 		}
@@ -528,12 +524,12 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	switch in.Kind {
 	case "START":
 		if in.Takeover {
-			runToken, err = issueDotsRunTokenTx(ctx, tx, task.ID, commentID, actor, true, now)
+			runToken, err = issueDotsRunTokenTx(ctx, pgTransaction{tx}, task.ID, commentID, actor, true, now)
 			break
 		}
 		task, err = s.claimTaskTx(ctx, pgTransaction{tx}, task.ID, "dots", "", "dots request")
 		if err == nil {
-			runToken, err = issueDotsRunTokenTx(ctx, tx, task.ID, commentID, actor, false, now)
+			runToken, err = issueDotsRunTokenTx(ctx, pgTransaction{tx}, task.ID, commentID, actor, false, now)
 		}
 	case "BLOCKED":
 		task, err = s.transitionTaskTx(ctx, pgTransaction{tx}, task.ID, TransitionInput{To: "hold", By: actor, Note: in.Body}, false)

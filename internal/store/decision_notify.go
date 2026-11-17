@@ -139,7 +139,7 @@ const decisionMentionSQL = `coalesce(n.applied_version='' AND (coalesce(t.awaiti
 
 var decisionRecordColumnsD = "d." + strings.ReplaceAll(decisionRecordColumns, ",", ",d.")
 
-func scanDecisionNoticeRow(row pgx.Row, x *DecisionNotice, now time.Time, extra ...any) error {
+func scanDecisionNoticeRow(row row, x *DecisionNotice, now time.Time, extra ...any) error {
 	var options, grounds, refsRaw []byte
 	r := &x.Record
 	dest := []any{&r.ID, &r.Source, &r.SourceRef, &r.TaskID, &r.JobID, &r.Lane, &r.Question, &r.Reading, &grounds, &options, &r.Recommended, &r.DefaultAction,
@@ -183,22 +183,31 @@ func decisionErrorCode(err error) string {
 // the attempts run out, then the row stays failed. found is false when
 // nothing is due.
 func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, send func(context.Context, DecisionNotice) (string, error)) (found bool, sendErr error, err error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return false, nil, ErrDialectUnsupported
-	}
-
 	now = now.UTC()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db().Begin(ctx)
 	if err != nil {
 		return false, nil, err
 	}
 	defer tx.Rollback(ctx)
 	var x DecisionNotice
-	err = scanDecisionNoticeRow(tx.QueryRow(ctx, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs,n.message_id,n.applied_version,n.attempts,`+decisionMentionSQL+`
+	query := sqlFor(tx, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs,n.message_id,n.applied_version,n.attempts,`+decisionMentionSQL+`
 		FROM decision_deliveries n JOIN decision_requests d ON d.id=n.request_id LEFT JOIN tasks t ON t.id=d.task_id
 		WHERE n.destination='`+DecisionDestinationDiscord+`' AND n.state='pending' AND n.next_attempt_at<=$1::timestamptz
 		AND n.applied_version<>`+decisionEffectiveStatusSQL+`
-		ORDER BY n.next_attempt_at ASC,n.request_id ASC LIMIT 1 FOR UPDATE OF n SKIP LOCKED`, now, now.Add(DecisionNoticeNearDue)),
+		ORDER BY n.next_attempt_at ASC,n.request_id ASC LIMIT 1 FOR UPDATE OF n SKIP LOCKED`,
+		`SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs,n.message_id,n.applied_version,n.attempts,
+		(coalesce(n.applied_version='' AND (coalesce(t.awaiting_decision,false)
+		OR (d.source='`+DecisionSourceTaskRequest+`' AND JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.decision_request.id'))=d.source_ref AND JSON_EXTRACT(t.refs,'$.decision_request.human_only')=true)
+		OR d.due_at<=?),false))
+		FROM decision_deliveries n JOIN decision_requests d ON d.id=n.request_id LEFT JOIN tasks t ON t.id=d.task_id
+		WHERE n.destination='`+DecisionDestinationDiscord+`' AND n.state='pending' AND n.next_attempt_at<=?
+		AND n.applied_version<>CASE WHEN d.status='open' AND d.expires_at<=? THEN 'expired' ELSE d.status END
+		ORDER BY n.next_attempt_at ASC,n.request_id ASC LIMIT 1 FOR UPDATE SKIP LOCKED`)
+	args := []any{now, now.Add(DecisionNoticeNearDue)}
+	if dialectFor(tx) == mysqlDialect {
+		args = []any{now.Add(DecisionNoticeNearDue), now, now}
+	}
+	err = scanDecisionNoticeRow(tx.QueryRow(ctx, query, args...),
 		&x, now, &x.MessageID, &x.AppliedVersion, &x.Attempts, &x.Mention)
 	if errors.Is(err, ErrNoRows) {
 		return false, nil, nil
@@ -207,16 +216,25 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 		return false, nil, err
 	}
 	want := x.Record.Status
-	const key = `WHERE request_id=$1 AND destination='` + DecisionDestinationDiscord + `'`
+	key := `WHERE request_id=$1 AND destination='` + DecisionDestinationDiscord + `'`
+	if dialectFor(tx) == mysqlDialect {
+		key = `WHERE request_id=? AND destination='` + DecisionDestinationDiscord + `'`
+	}
+	update := func(execCtx context.Context, pgQuery, mysqlQuery string, pgArgs, mysqlArgs []any) (int64, error) {
+		if dialectFor(tx) == mysqlDialect {
+			return tx.Exec(execCtx, mysqlQuery, mysqlArgs...)
+		}
+		return tx.Exec(execCtx, pgQuery, pgArgs...)
+	}
 	// A request that closed before its first post is never posted, and one
 	// that was never posted has no message to edit.
 	if (x.Post() && want != DecisionStatusOpen) || (!x.Post() && x.MessageID == "") {
-		if _, err = tx.Exec(ctx, `UPDATE decision_deliveries SET desired_version=$2,applied_version=$2 `+key, x.Record.ID, want); err != nil {
+		if _, err = update(ctx, `UPDATE decision_deliveries SET desired_version=$2,applied_version=$2 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET desired_version=?,applied_version=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, want}, []any{want, want, x.Record.ID}); err != nil {
 			return true, nil, err
 		}
 		return true, nil, tx.Commit(ctx)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE decision_deliveries SET desired_version=$2 `+key, x.Record.ID, want); err != nil {
+	if _, err = update(ctx, `UPDATE decision_deliveries SET desired_version=$2 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET desired_version=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, want}, []any{want, x.Record.ID}); err != nil {
 		return true, nil, err
 	}
 	messageID, sendErr := send(ctx, x)
@@ -229,20 +247,17 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 		sendErr = nil
 		_, err = tx.Exec(settle, `UPDATE decision_deliveries SET state='unsent',last_error_code='' `+key, x.Record.ID)
 	case sendErr == nil && x.Post():
-		_, err = tx.Exec(settle, `UPDATE decision_deliveries SET applied_version=desired_version,message_id=$2,posted_at=$3,attempts=0,last_error_code='',next_attempt_at=$3 `+key,
-			x.Record.ID, messageID, now)
+		_, err = update(settle, `UPDATE decision_deliveries SET applied_version=desired_version,message_id=$2,posted_at=$3,attempts=0,last_error_code='',next_attempt_at=$3 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET applied_version=desired_version,message_id=?,posted_at=?,attempts=0,last_error_code='',next_attempt_at=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, messageID, now}, []any{messageID, now, now, x.Record.ID})
 	case sendErr == nil:
-		_, err = tx.Exec(settle, `UPDATE decision_deliveries SET applied_version=desired_version,edited_at=$2,attempts=0,last_error_code='',next_attempt_at=$2 `+key,
-			x.Record.ID, now)
+		_, err = update(settle, `UPDATE decision_deliveries SET applied_version=desired_version,edited_at=$2,attempts=0,last_error_code='',next_attempt_at=$2 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET applied_version=desired_version,edited_at=?,attempts=0,last_error_code='',next_attempt_at=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, now}, []any{now, now, x.Record.ID})
 	default:
 		attempts := x.Attempts + 1
 		code := decisionErrorCode(sendErr)
 		if attempts >= decisionNoticeMaxAttempts || errors.Is(sendErr, ErrDecisionNoticeRejected) {
 			sendErr = fmt.Errorf("%w: request %d: %w", ErrDecisionNoticeGaveUp, x.Record.ID, sendErr)
-			_, err = tx.Exec(settle, `UPDATE decision_deliveries SET state='failed',attempts=$2,last_error_code=$3 `+key, x.Record.ID, attempts, code)
+			_, err = update(settle, `UPDATE decision_deliveries SET state='failed',attempts=$2,last_error_code=$3 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET state='failed',attempts=?,last_error_code=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, attempts, code}, []any{attempts, code, x.Record.ID})
 		} else {
-			_, err = tx.Exec(settle, `UPDATE decision_deliveries SET attempts=$2,last_error_code=$3,next_attempt_at=$4 `+key,
-				x.Record.ID, attempts, code, now.Add(deliveryBackoff(x.Attempts)))
+			_, err = update(settle, `UPDATE decision_deliveries SET attempts=$2,last_error_code=$3,next_attempt_at=$4 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET attempts=?,last_error_code=?,next_attempt_at=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, attempts, code, now.Add(deliveryBackoff(x.Attempts))}, []any{attempts, code, now.Add(deliveryBackoff(x.Attempts)), x.Record.ID})
 		}
 	}
 	if err != nil {
@@ -268,13 +283,10 @@ type DecisionNoticeState struct {
 
 // GetDecisionNotice reads the Discord delivery of one request.
 func (s *Store) GetDecisionNotice(ctx context.Context, requestID int64) (DecisionNoticeState, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return DecisionNoticeState{}, false, ErrDialectUnsupported
-	}
-
 	var x DecisionNoticeState
-	err := s.pool.QueryRow(ctx, `SELECT request_id,destination,message_id,desired_version,applied_version,state,attempts,last_error_code,next_attempt_at,posted_at,edited_at
-		FROM decision_deliveries WHERE request_id=$1 AND destination=$2`, requestID, DecisionDestinationDiscord).
+	err := s.db().QueryRow(ctx, s.q(`SELECT request_id,destination,message_id,desired_version,applied_version,state,attempts,last_error_code,next_attempt_at,posted_at,edited_at
+		FROM decision_deliveries WHERE request_id=$1 AND destination=$2`, `SELECT request_id,destination,message_id,desired_version,applied_version,state,attempts,last_error_code,next_attempt_at,posted_at,edited_at
+		FROM decision_deliveries WHERE request_id=? AND destination=?`), requestID, DecisionDestinationDiscord).
 		Scan(&x.RequestID, &x.Destination, &x.MessageID, &x.DesiredVersion, &x.AppliedVersion, &x.State, &x.Attempts, &x.LastErrorCode, &x.NextAttemptAt, &x.PostedAt, &x.EditedAt)
 	if errors.Is(err, ErrNoRows) {
 		return DecisionNoticeState{}, false, nil
@@ -300,19 +312,27 @@ type DecisionDeliveryHygiene struct {
 // DecisionDeliveryHygiene counts decision_deliveries rows per destination.
 // Every known destination is present, zero when it has no row.
 func (s *Store) DecisionDeliveryHygiene(ctx context.Context, now time.Time) (DecisionDeliveryHygiene, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return DecisionDeliveryHygiene{}, ErrDialectUnsupported
-	}
-
 	now = now.UTC()
 	out := DecisionDeliveryHygiene{Destinations: map[string]DecisionDeliveryCounts{DecisionDestinationDiscord: {}}}
-	rows, err := s.pool.Query(ctx, `SELECT n.destination,
+	query := s.q(`SELECT n.destination,
 		count(*) FILTER (WHERE n.state='pending'),
 		count(*) FILTER (WHERE n.state='pending' AND n.applied_version<>`+decisionEffectiveStatusSQL+` AND n.next_attempt_at<$2::timestamptz),
 		count(*) FILTER (WHERE n.state='unsent'),
 		count(*) FILTER (WHERE n.state='failed')
 		FROM decision_deliveries n LEFT JOIN decision_requests d ON d.id=n.request_id
-		GROUP BY n.destination ORDER BY n.destination`, now, now.Add(-DecisionDeliveryLagAge))
+		GROUP BY n.destination ORDER BY n.destination`,
+		`SELECT n.destination,
+		SUM(n.state='pending'),
+		SUM(n.state='pending' AND n.applied_version<>CASE WHEN d.status='open' AND d.expires_at<=? THEN 'expired' ELSE d.status END AND n.next_attempt_at<?),
+		SUM(n.state='unsent'),
+		SUM(n.state='failed')
+		FROM decision_deliveries n LEFT JOIN decision_requests d ON d.id=n.request_id
+		GROUP BY n.destination ORDER BY n.destination`)
+	args := []any{now, now.Add(-DecisionDeliveryLagAge)}
+	if s.dialect == mysqlDialect {
+		args = []any{now, now.Add(-DecisionDeliveryLagAge)}
+	}
+	rows, err := s.db().Query(ctx, query, args...)
 	if err != nil {
 		return DecisionDeliveryHygiene{}, err
 	}
@@ -334,24 +354,30 @@ func (s *Store) DecisionDeliveryHygiene(ctx context.Context, now time.Time) (Dec
 // open longer than DecisionDigestAge sends nothing. found is false when there
 // was nothing to do.
 func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send func(context.Context, DecisionDigest) (string, error)) (found bool, sendErr error, err error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return false, nil, ErrDialectUnsupported
-	}
-
 	now = now.UTC()
 	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db().Begin(ctx)
 	if err != nil {
 		return false, nil, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `INSERT INTO decision_notify_digest(day,state,next_attempt_at,created_at) VALUES($1::date,'pending',$2,$2) ON CONFLICT(day) DO NOTHING`, day, now); err != nil {
+	updateDigest := func(execCtx context.Context, pgQuery, mysqlQuery string, pgArgs, mysqlArgs []any) (int64, error) {
+		if dialectFor(tx) == mysqlDialect {
+			return tx.Exec(execCtx, mysqlQuery, mysqlArgs...)
+		}
+		return tx.Exec(execCtx, pgQuery, pgArgs...)
+	}
+	insertArgs := []any{day, now}
+	if dialectFor(tx) == mysqlDialect {
+		insertArgs = []any{day, now, now}
+	}
+	if _, err = tx.Exec(ctx, sqlFor(tx, `INSERT INTO decision_notify_digest(day,state,next_attempt_at,created_at) VALUES($1::date,'pending',$2,$2) ON CONFLICT(day) DO NOTHING`, `INSERT IGNORE INTO decision_notify_digest(day,state,next_attempt_at,created_at) VALUES(?,'pending',?,?)`), insertArgs...); err != nil {
 		return false, nil, err
 	}
 	var state string
 	var attempts int
 	var next time.Time
-	err = tx.QueryRow(ctx, `SELECT state,attempts,next_attempt_at FROM decision_notify_digest WHERE day=$1::date FOR UPDATE SKIP LOCKED`, day).Scan(&state, &attempts, &next)
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT state,attempts,next_attempt_at FROM decision_notify_digest WHERE day=$1::date FOR UPDATE SKIP LOCKED`, `SELECT state,attempts,next_attempt_at FROM decision_notify_digest WHERE day=? FOR UPDATE SKIP LOCKED`), day).Scan(&state, &attempts, &next)
 	if errors.Is(err, ErrNoRows) {
 		return false, nil, nil
 	}
@@ -365,11 +391,17 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 	const stale = `d.status='open' AND (d.expires_at IS NULL OR d.expires_at>$1::timestamptz)
 		AND (d.snoozed_until IS NULL OR d.snoozed_until<=$1::timestamptz) AND d.created_at<$2::timestamptz`
 	cutoff := now.Add(-DecisionDigestAge)
-	if err = tx.QueryRow(ctx, `SELECT count(*) FROM decision_requests d WHERE `+stale, now, cutoff).Scan(&digest.Total); err != nil {
+	staleQuery := sqlFor(tx, stale, `d.status='open' AND (d.expires_at IS NULL OR d.expires_at>?) AND (d.snoozed_until IS NULL OR d.snoozed_until<=?) AND d.created_at<?`)
+	staleArgs := []any{now, cutoff}
+	if dialectFor(tx) == mysqlDialect {
+		staleArgs = []any{now, now, cutoff}
+	}
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM decision_requests d WHERE `+staleQuery, staleArgs...).Scan(&digest.Total); err != nil {
 		return false, nil, err
 	}
-	rows, err := tx.Query(ctx, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs FROM decision_requests d LEFT JOIN tasks t ON t.id=d.task_id
-		WHERE `+stale+` ORDER BY d.created_at ASC,d.id ASC LIMIT $3`, now, cutoff, DecisionDigestMaxItems)
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs FROM decision_requests d LEFT JOIN tasks t ON t.id=d.task_id
+		WHERE `+stale+` ORDER BY d.created_at ASC,d.id ASC LIMIT $3`, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs FROM decision_requests d LEFT JOIN tasks t ON t.id=d.task_id
+		WHERE `+staleQuery+` ORDER BY d.created_at ASC,d.id ASC LIMIT ?`), append(staleArgs, DecisionDigestMaxItems)...)
 	if err != nil {
 		return false, nil, err
 	}
@@ -386,7 +418,7 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 		return false, nil, err
 	}
 	if digest.Total == 0 {
-		if _, err = tx.Exec(ctx, `UPDATE decision_notify_digest SET state='empty',sent_at=$2 WHERE day=$1::date`, day, now); err != nil {
+		if _, err = updateDigest(ctx, `UPDATE decision_notify_digest SET state='empty',sent_at=$2 WHERE day=$1::date`, `UPDATE decision_notify_digest SET state='empty',sent_at=? WHERE day=?`, []any{day, now}, []any{now, day}); err != nil {
 			return true, nil, err
 		}
 		return true, nil, tx.Commit(ctx)
@@ -399,18 +431,18 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 	switch {
 	case errors.Is(sendErr, ErrDecisionNoticeSkipped):
 		sendErr = nil
-		_, err = tx.Exec(settle, `UPDATE decision_notify_digest SET state='unsent',listed=$2 WHERE day=$1::date`, day, digest.Total)
+		_, err = updateDigest(settle, `UPDATE decision_notify_digest SET state='unsent',listed=$2 WHERE day=$1::date`, `UPDATE decision_notify_digest SET state='unsent',listed=? WHERE day=?`, []any{day, digest.Total}, []any{digest.Total, day})
 	case sendErr == nil:
-		_, err = tx.Exec(settle, `UPDATE decision_notify_digest SET state='sent',listed=$2,message_id=$3,sent_at=$4,attempts=$5,last_error='' WHERE day=$1::date`,
-			day, digest.Total, messageID, now, attempts+1)
+		_, err = updateDigest(settle, `UPDATE decision_notify_digest SET state='sent',listed=$2,message_id=$3,sent_at=$4,attempts=$5,last_error='' WHERE day=$1::date`, `UPDATE decision_notify_digest SET state='sent',listed=?,message_id=?,sent_at=?,attempts=?,last_error='' WHERE day=?`,
+			[]any{day, digest.Total, messageID, now, attempts + 1}, []any{digest.Total, messageID, now, attempts + 1, day})
 	default:
 		lastError := firstBytes(sendErr.Error(), deliveryErrorMaxBytes)
 		if attempts+1 >= decisionNoticeMaxAttempts || errors.Is(sendErr, ErrDecisionNoticeRejected) {
 			sendErr = fmt.Errorf("%w: digest %s: %w", ErrDecisionNoticeGaveUp, day.Format(time.DateOnly), sendErr)
-			_, err = tx.Exec(settle, `UPDATE decision_notify_digest SET state='failed',attempts=$2,last_error=$3 WHERE day=$1::date`, day, attempts+1, lastError)
+			_, err = updateDigest(settle, `UPDATE decision_notify_digest SET state='failed',attempts=$2,last_error=$3 WHERE day=$1::date`, `UPDATE decision_notify_digest SET state='failed',attempts=?,last_error=? WHERE day=?`, []any{day, attempts + 1, lastError}, []any{attempts + 1, lastError, day})
 		} else {
-			_, err = tx.Exec(settle, `UPDATE decision_notify_digest SET attempts=$2,last_error=$3,next_attempt_at=$4 WHERE day=$1::date`,
-				day, attempts+1, lastError, now.Add(deliveryBackoff(attempts)))
+			_, err = updateDigest(settle, `UPDATE decision_notify_digest SET attempts=$2,last_error=$3,next_attempt_at=$4 WHERE day=$1::date`, `UPDATE decision_notify_digest SET attempts=?,last_error=?,next_attempt_at=? WHERE day=?`,
+				[]any{day, attempts + 1, lastError, now.Add(deliveryBackoff(attempts))}, []any{attempts + 1, lastError, now.Add(deliveryBackoff(attempts)), day})
 		}
 	}
 	if err != nil {
@@ -430,14 +462,10 @@ type DecisionDigestState struct {
 
 // GetDecisionDigest reads the digest row of one UTC day.
 func (s *Store) GetDecisionDigest(ctx context.Context, day time.Time) (DecisionDigestState, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return DecisionDigestState{}, false, ErrDialectUnsupported
-	}
-
 	var x DecisionDigestState
 	day = day.UTC()
 	day = time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC)
-	err := s.pool.QueryRow(ctx, `SELECT state,listed,message_id,attempts,last_error FROM decision_notify_digest WHERE day=$1::date`, day).
+	err := s.db().QueryRow(ctx, s.q(`SELECT state,listed,message_id,attempts,last_error FROM decision_notify_digest WHERE day=$1::date`, `SELECT state,listed,message_id,attempts,last_error FROM decision_notify_digest WHERE day=?`), day).
 		Scan(&x.State, &x.Listed, &x.MessageID, &x.Attempts, &x.LastError)
 	if errors.Is(err, ErrNoRows) {
 		return DecisionDigestState{}, false, nil

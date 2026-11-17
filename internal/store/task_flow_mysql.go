@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -96,22 +98,7 @@ func mysqlWriteTask(ctx context.Context, q rowQuerier, x Task, refs string) (Tas
 // does not end the task. Any other write is refused before the call.
 func (s *Store) mirrorTaskDecisionsFlowTx(ctx context.Context, tx transaction, before taskDecisionBefore, after Task, by, note string, flagEvent int64, at time.Time) error {
 	if s.dialect == mysqlDialect {
-		if before.flagged || before.request != nil || after.AwaitingDecision || after.Refs.DecisionRequest != nil {
-			// B6 dependency: mirrorTaskDecisionsTx needs the decisions area on MySQL.
-			return ErrDialectUnsupported
-		}
-		if DecisionEndsTask(after.State) {
-			// Ending a task supersedes its decision records. Until B6 creates
-			// decision_requests there can be none; once it exists the helper is needed.
-			has, err := s.mysqlTableExists(ctx, tx, "decision_requests")
-			if err != nil {
-				return err
-			}
-			if has {
-				return ErrDialectUnsupported
-			}
-		}
-		return nil
+		return mysqlMirrorTaskDecisionsTx(ctx, tx, before, after, by, note, flagEvent, at)
 	}
 	return mirrorTaskDecisionsTx(ctx, pgxTx(tx), before, after, by, note, flagEvent, at)
 }
@@ -123,11 +110,121 @@ func (s *Store) mirrorTaskDecisionsFlowTx(ctx context.Context, tx transaction, b
 func (s *Store) supersedeDotsRunTokensFlowTx(ctx context.Context, tx transaction, x Task, now time.Time) error {
 	if s.dialect == mysqlDialect {
 		if IsHKDotsRequest(x) {
-			// B6 dependency: supersedeDotsRunTokensTx needs the dots area on MySQL.
-			return ErrDialectUnsupported
+			_, err := supersedeDotsRunTokensTx(ctx, tx, x.ID, now)
+			return err
 		}
 		return nil
 	}
-	_, err := supersedeDotsRunTokensTx(ctx, pgxTx(tx), x.ID, now)
+	_, err := supersedeDotsRunTokensTx(ctx, tx, x.ID, now)
 	return err
+}
+
+func mysqlOpenDecisionTx(ctx context.Context, tx transaction, d decisionOpen) (int64, bool, error) {
+	var options any
+	if d.Options != nil {
+		b, err := json.Marshal(d.Options)
+		if err != nil {
+			return 0, false, err
+		}
+		options = string(b)
+	}
+	var taskID any
+	if d.TaskID > 0 {
+		taskID = d.TaskID
+	}
+	id, err := tx.InsertID(ctx, `INSERT INTO decision_requests(source,source_ref,task_id,job_id,lane,question,options,recommended,default_action,due_at,status,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,'open',?,?)`, d.Source, d.SourceRef, taskID, d.JobID, d.Lane, d.Question, options, d.Recommended, d.DefaultAction, d.DueAt, d.At, d.At)
+	if errors.Is(err, errUniqueViolation) {
+		var existing int64
+		err = tx.QueryRow(ctx, `SELECT id FROM decision_requests WHERE source=? AND source_ref=?`, d.Source, d.SourceRef).Scan(&existing)
+		if err != nil {
+			return 0, false, err
+		}
+		return existing, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO decision_deliveries(request_id,destination,state,next_attempt_at,created_at) VALUES(?,'discord','pending',?,?)`,
+		id, d.At.Add(DecisionNoticePostDelay), d.At)
+	return id, true, err
+}
+
+func mysqlSupersedeDecisionTx(ctx context.Context, tx transaction, sources []string, ref, by string, at time.Time) error {
+	if len(sources) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(sources)+3)
+	args = append(args, by, at)
+	for _, source := range sources {
+		args = append(args, source)
+	}
+	args = append(args, ref)
+	_, err := tx.Exec(ctx, `UPDATE decision_requests SET status='superseded',superseded_by=?,updated_at=?
+		WHERE source IN (`+placeholders(len(sources))+`) AND source_ref=? AND status='open'`, args...)
+	return err
+}
+
+// mysqlMirrorTaskDecisionsTx keeps the decision projection beside the locked
+// task row. The caller holds the task mutation lock, so these row updates and
+// the task transition commit or roll back together.
+func mysqlMirrorTaskDecisionsTx(ctx context.Context, tx transaction, before taskDecisionBefore, after Task, by, note string, flagEvent int64, at time.Time) error {
+	if DecisionEndsTask(after.State) {
+		_, err := tx.Exec(ctx, `UPDATE decision_requests SET status='superseded',superseded_by=?,updated_at=? WHERE task_id=? AND status='open'`,
+			fmt.Sprintf("task:%d:%s", after.ID, after.State), at, after.ID)
+		return err
+	}
+	prev, cur := before.request, after.Refs.DecisionRequest
+	switch {
+	case cur != nil && (prev == nil || prev.ID != cur.ID):
+		if cur.Status == DecisionRequestOpen {
+			d := decisionOpen{Source: DecisionSourceTaskRequest, SourceRef: cur.ID, TaskID: after.ID, Lane: after.Lane, Question: cur.Question,
+				Options: after.Refs.DecisionOptions, DefaultAction: cur.DefaultAction, DueAt: cur.DueAt, At: at}
+			if after.Refs.DecisionOptions != nil {
+				d.Recommended = recommendedOption(*after.Refs.DecisionOptions)
+			}
+			if _, _, err := mysqlOpenDecisionTx(ctx, tx, d); err != nil {
+				return err
+			}
+		}
+		replacedBy := DecisionSourceTaskRequest + ":" + cur.ID
+		if prev != nil {
+			if err := mysqlSupersedeDecisionTx(ctx, tx, requestSources, prev.ID, replacedBy, at); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE decision_requests SET status='superseded',superseded_by=?,updated_at=? WHERE task_id=? AND source='task_flag' AND status='open'`, replacedBy, at, after.ID); err != nil {
+			return err
+		}
+	case cur != nil && prev != nil && prev.Status == DecisionRequestOpen && cur.Status != DecisionRequestOpen:
+		if cur.Status == DecisionRequestWithdrawn {
+			if err := mysqlSupersedeDecisionTx(ctx, tx, requestSources, cur.ID, "withdrawn", at); err != nil {
+				return err
+			}
+		} else {
+			answer, who := requestAnswer(*cur)
+			if who == "" {
+				who = by
+			}
+			if _, err := tx.Exec(ctx, `UPDATE decision_requests SET status='answered',answer=?,answered_by=?,answered_at=?,updated_at=? WHERE source IN (?,?) AND source_ref=? AND status='open'`,
+				answer, who, at, at, DecisionSourceTaskRequest, DecisionSourceLinear, cur.ID); err != nil {
+				return err
+			}
+		}
+	}
+	if !before.flagged && after.AwaitingDecision && flagEvent > 0 && (cur == nil || cur.Status != DecisionRequestOpen) {
+		d := decisionOpen{Source: DecisionSourceTaskFlag, SourceRef: fmt.Sprintf("%d/%d", after.ID, flagEvent), TaskID: after.ID, Lane: after.Lane, Question: note, Options: after.Refs.DecisionOptions, At: at}
+		if after.Refs.DecisionOptions != nil {
+			d.Recommended = recommendedOption(*after.Refs.DecisionOptions)
+		}
+		if _, _, err := mysqlOpenDecisionTx(ctx, tx, d); err != nil {
+			return err
+		}
+	}
+	if before.flagged && !after.AwaitingDecision {
+		_, err := tx.Exec(ctx, `UPDATE decision_requests SET status='answered',answer=?,answered_by=?,answered_at=?,updated_at=? WHERE task_id=? AND source='task_flag' AND status='open'`,
+			note, by, at, at, after.ID)
+		return err
+	}
+	return nil
 }
