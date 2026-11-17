@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // TaskHygieneReport is the result of the daily hygiene sweep (hk 3292). It
@@ -96,6 +94,20 @@ var hygieneParentPredicate = `state IN (` + autoCloseStatesSQL + `)
    OR EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=tasks.id
      AND k.state IN ('merged','deployed')))`
 
+// hygieneMergedPredicateMySQL is hygieneMergedPredicate for MySQL.
+var hygieneMergedPredicateMySQL = `state NOT IN (` + settledStatesSQL + `)
+ AND (
+   EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
+     WHERE ct.task_id=tasks.id AND ct.relation='implements'
+       AND c.state='merged' AND c.reverted_by_change_id IS NULL)
+   OR (COALESCE(` + reportJSONText("refs", "$.pr") + `,'')<>'' AND (
+     EXISTS (SELECT 1 FROM changes c WHERE c.state='merged'
+       AND (` + reportPRURLSQL + `)=` + reportJSONText("tasks.refs", "$.pr") + `)
+     OR EXISTS (SELECT 1 FROM tasks m WHERE m.id<>tasks.id
+       AND m.state IN ('merged','deployed') AND ` + reportJSONText("m.refs", "$.pr") + `=` + reportJSONText("tasks.refs", "$.pr") + `)))
+ ) AND NOT EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
+   WHERE ` + unresolvedRevertSQL("tasks.id") + `)`
+
 // $1 now, $2 cutoff, $3 project, ($4,$5) full primary-key cursor, $6 limit.
 const hygieneLaggingDecisionsSQL = `SELECT n.request_id,n.destination,
  COALESCE(t.title,''),n.desired_version,n.applied_version,n.attempts,
@@ -107,6 +119,25 @@ const hygieneLaggingDecisionsSQL = `SELECT n.request_id,n.destination,
  AND ($3::text IS NULL OR t.project=$3)
  AND (n.request_id,n.destination)>($4::bigint,$5::text)
  ORDER BY n.request_id,n.destination LIMIT $6`
+
+// hygieneLaggingDecisionsSQLMySQL is hygieneLaggingDecisionsSQL for MySQL. Its
+// placeholders, in order: now, cutoff, project, project, request id, destination,
+// limit.
+const hygieneLaggingDecisionsSQLMySQL = `SELECT n.request_id,n.destination,
+ COALESCE(t.title,''),n.desired_version,n.applied_version,n.attempts,
+ n.next_attempt_at,n.last_error_code
+ FROM decision_deliveries n JOIN decision_requests d ON d.id=n.request_id
+ LEFT JOIN tasks t ON t.id=d.task_id
+ WHERE n.state='pending' AND n.applied_version<>` + reportDecisionEffectiveSQL + `
+ AND n.next_attempt_at<?
+ AND (? IS NULL OR t.project=?)
+ AND (n.request_id,n.destination)>(?,?)
+ ORDER BY n.request_id,n.destination LIMIT ?`
+
+// hygieneText is one SQL fragment in both dialects' spelling.
+type hygieneText struct{ pg, my string }
+
+func (t hygieneText) of(x any) string { return sqlFor(x, t.pg, t.my) }
 
 type hygieneRule uint8
 
@@ -122,9 +153,9 @@ func (r hygieneRule) name() string {
 	return "auto_close_parent"
 }
 
-func (r hygieneRule) predicate() string {
+func (r hygieneRule) predicate(x any) string {
 	if r == hygieneMergedRule {
-		return hygieneMergedPredicate
+		return sqlFor(x, hygieneMergedPredicate, hygieneMergedPredicateMySQL)
 	}
 	return hygieneParentPredicate
 }
@@ -177,10 +208,6 @@ func hygieneAddFinding(rep *TaskHygieneReport, rule hygieneRule, x TaskDriftTask
 // Project scopes candidate roots; existing hierarchy rules may close ancestors
 // in other projects, and those effects are included in the apply report.
 func (s *Store) TaskHygiene(ctx context.Context, now time.Time, project string, dryRun bool) (TaskHygieneReport, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return TaskHygieneReport{}, ErrDialectUnsupported
-	}
-
 	if project != "" && !validName(project) {
 		return TaskHygieneReport{}, errors.New("invalid task hygiene: project must be a project name")
 	}
@@ -198,12 +225,12 @@ func (s *Store) TaskHygiene(ctx context.Context, now time.Time, project string, 
 	if project != "" {
 		projectArg = &project
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := s.beginReportRead(ctx, true)
 	if err != nil {
 		return rep, err
 	}
 	defer tx.Rollback(ctx)
-	candidates, err := s.hygieneDiscoverTx(ctx, pgTransaction{tx}, now, projectArg, &rep)
+	candidates, err := s.hygieneDiscoverTx(ctx, tx, now, projectArg, &rep)
 	if err != nil {
 		return rep, fmt.Errorf("task hygiene discover: %w", err)
 	}
@@ -215,7 +242,7 @@ func (s *Store) TaskHygiene(ctx context.Context, now time.Time, project string, 
 			if seen[candidate.id] {
 				continue
 			}
-			d, err := s.hygieneDecideTx(ctx, pgTransaction{tx}, candidate, project, false)
+			d, err := s.hygieneDecideTx(ctx, tx, candidate, project, false)
 			if err != nil {
 				return rep, fmt.Errorf("task hygiene preview task %d: %w", candidate.id, err)
 			}
@@ -256,14 +283,22 @@ func (s *Store) TaskHygiene(ctx context.Context, now time.Time, project string, 
 
 // hygieneWalkTasksTx applies project filtering before pagination. Discovery
 // has no report cap. A visitor may stop after observing the first omitted
-// qualifying finding. Extra SQL arguments start at $4.
-func hygieneWalkTasksTx(ctx context.Context, tx transaction, project *string, predicate, since string, visit func(TaskDriftTask) (bool, error), extra ...any) error {
-	sql := `SELECT ` + driftColumns + since + ` FROM tasks WHERE (` + predicate + `)
+// qualifying finding. Extra SQL arguments start at $4 on PostgreSQL; on MySQL
+// they sit inside the predicate, so they come first in the argument list.
+func hygieneWalkTasksTx(ctx context.Context, tx transaction, project *string, predicate, since hygieneText, visit func(TaskDriftTask) (bool, error), extra ...any) error {
+	sql := `SELECT ` + driftColumns + since.pg + ` FROM tasks WHERE (` + predicate.pg + `)
    AND id>$1 AND ($2::text IS NULL OR project=$2) ORDER BY id LIMIT $3`
+	if dialectFor(tx) == mysqlDialect {
+		sql = `SELECT ` + driftColumnsMySQL + since.my + ` FROM tasks WHERE (` + predicate.my + `)
+   AND id>? AND (? IS NULL OR project=?) ORDER BY id LIMIT ?`
+	}
 	var after int64
 	for {
 		args := []any{after, project, hygienePageSize}
 		args = append(args, extra...)
+		if dialectFor(tx) == mysqlDialect {
+			args = append(append([]any{}, extra...), after, project, project, hygienePageSize)
+		}
 		rows, err := tx.Query(ctx, sql, args...)
 		if err != nil {
 			return err
@@ -291,7 +326,8 @@ func hygieneWalkTasksTx(ctx context.Context, tx transaction, project *string, pr
 func (s *Store) hygieneDiscoverTx(ctx context.Context, tx transaction, now time.Time, project *string, rep *TaskHygieneReport) ([]hygieneCandidate, error) {
 	var candidates []hygieneCandidate
 	for _, rule := range []hygieneRule{hygieneMergedRule, hygieneParentRule} {
-		err := hygieneWalkTasksTx(ctx, tx, project, rule.predicate(), "updated_at", func(x TaskDriftTask) (bool, error) {
+		pred := hygieneText{rule.predicate(nil), rule.predicate(tx)}
+		err := hygieneWalkTasksTx(ctx, tx, project, pred, hygieneText{"updated_at", "updated_at"}, func(x TaskDriftTask) (bool, error) {
 			candidates = append(candidates, hygieneCandidate{rule: rule, id: x.ID})
 			return false, nil
 		})
@@ -299,14 +335,20 @@ func (s *Store) hygieneDiscoverTx(ctx context.Context, tx transaction, now time.
 			return nil, err
 		}
 	}
-	err := hygieneWalkTasksTx(ctx, tx, project, `state IN (`+settledStatesSQL+`) AND refs->'decision_request'->>'status'=$4`, "updated_at", func(x TaskDriftTask) (bool, error) {
+	err := hygieneWalkTasksTx(ctx, tx, project, hygieneText{
+		`state IN (` + settledStatesSQL + `) AND refs->'decision_request'->>'status'=$4`,
+		`state IN (` + settledStatesSQL + `) AND ` + reportJSONText("refs", "$.decision_request.status") + `=?`,
+	}, hygieneText{"updated_at", "updated_at"}, func(x TaskDriftTask) (bool, error) {
 		hygieneAppend(&rep.Findings.SettledOpenDecisions, &rep.Findings.SettledOpenDecisionsTruncated, x)
 		return rep.Findings.SettledOpenDecisionsTruncated, nil
 	}, DecisionRequestOpen)
 	if err != nil {
 		return nil, err
 	}
-	err = hygieneWalkTasksTx(ctx, tx, project, `state IN ('researching','developing') AND `+taskActivitySQL+`<$4::timestamptz`, taskActivitySQL, func(x TaskDriftTask) (bool, error) {
+	err = hygieneWalkTasksTx(ctx, tx, project, hygieneText{
+		`state IN ('researching','developing') AND ` + taskActivitySQL + `<$4::timestamptz`,
+		`state IN ('researching','developing') AND ` + taskActivitySQLMySQL + `<?`,
+	}, hygieneText{taskActivitySQL, taskActivitySQLMySQL}, func(x TaskDriftTask) (bool, error) {
 		hygieneAppend(&rep.Findings.LiveAttemptsWithoutLease, &rep.Findings.LiveAttemptsWithoutLeaseTruncated, x)
 		return rep.Findings.LiveAttemptsWithoutLeaseTruncated, nil
 	}, now.Add(-s.StartedStalledHours()))
@@ -316,7 +358,10 @@ func (s *Store) hygieneDiscoverTx(ctx context.Context, tx transaction, now time.
 	if err = hygieneReadLaggingTx(ctx, tx, now, project, rep); err != nil {
 		return nil, err
 	}
-	err = hygieneWalkTasksTx(ctx, tx, project, `state='merged' AND COALESCE(completed_at,updated_at)<$4::timestamptz`, "COALESCE(completed_at,updated_at)", func(x TaskDriftTask) (bool, error) {
+	err = hygieneWalkTasksTx(ctx, tx, project, hygieneText{
+		`state='merged' AND COALESCE(completed_at,updated_at)<$4::timestamptz`,
+		`state='merged' AND COALESCE(completed_at,updated_at)<?`,
+	}, hygieneText{"COALESCE(completed_at,updated_at)", "COALESCE(completed_at,updated_at)"}, func(x TaskDriftTask) (bool, error) {
 		if x.PR != "" {
 			key, err := deployRecordKeyForPRTx(ctx, tx, x.PR)
 			if err != nil {
@@ -339,7 +384,13 @@ func hygieneReadLaggingTx(ctx context.Context, tx transaction, now time.Time, pr
 	var afterID int64
 	afterDestination := ""
 	for {
-		rows, err := tx.Query(ctx, hygieneLaggingDecisionsSQL, now, now.Add(-DecisionDeliveryLagAge), project, afterID, afterDestination, hygienePageSize)
+		var rows rows
+		var err error
+		if dialectFor(tx) == mysqlDialect {
+			rows, err = tx.Query(ctx, hygieneLaggingDecisionsSQLMySQL, now, now.Add(-DecisionDeliveryLagAge), project, project, afterID, afterDestination, hygienePageSize)
+		} else {
+			rows, err = tx.Query(ctx, hygieneLaggingDecisionsSQL, now, now.Add(-DecisionDeliveryLagAge), project, afterID, afterDestination, hygienePageSize)
+		}
 		if err != nil {
 			return err
 		}
@@ -380,7 +431,20 @@ func scanDriftTasks(rows rows) ([]TaskDriftTask, error) {
 // linked implements change or a recorded held merge of this task.
 func hygieneVerifiedPRTx(ctx context.Context, tx transaction, t Task) (string, error) {
 	var pr string
-	err := tx.QueryRow(ctx, `SELECT `+prURLSQL+` FROM changes c
+	var err error
+	if dialectFor(tx) == mysqlDialect {
+		// Placeholders in text order: the PR, the task twice, source, field, the PR.
+		err = tx.QueryRow(ctx, `SELECT `+reportPRURLSQL+` FROM changes c
+   WHERE c.state='merged' AND c.reverted_by_change_id IS NULL
+   AND ((`+reportPRURLSQL+`)=?
+     OR EXISTS(SELECT 1 FROM change_tasks ct WHERE ct.change_id=c.id
+       AND ct.task_id=? AND ct.relation='implements')
+     OR EXISTS(SELECT 1 FROM task_events e WHERE e.task_id=?
+       AND e.source=? AND e.field=? AND NOT e.applied
+       AND e.source_ref=(`+reportPRURLSQL+`)))
+   ORDER BY ((`+reportPRURLSQL+`)=?) DESC,c.id DESC LIMIT 1`, t.Refs.PR, t.ID, t.ID, SourceMergewakeMerge, heldMergeField, t.Refs.PR).Scan(&pr)
+	} else {
+		err = tx.QueryRow(ctx, `SELECT `+prURLSQL+` FROM changes c
    WHERE c.state='merged' AND c.reverted_by_change_id IS NULL
    AND ((`+prURLSQL+`)=$2
      OR EXISTS(SELECT 1 FROM change_tasks ct WHERE ct.change_id=c.id
@@ -389,6 +453,7 @@ func hygieneVerifiedPRTx(ctx context.Context, tx transaction, t Task) (string, e
        AND e.source=$3 AND e.field=$4 AND NOT e.applied
        AND e.source_ref=(`+prURLSQL+`)))
    ORDER BY ((`+prURLSQL+`)=$2) DESC,c.id DESC LIMIT 1`, t.ID, t.Refs.PR, SourceMergewakeMerge, heldMergeField).Scan(&pr)
+	}
 	if errors.Is(err, ErrNoRows) {
 		return "", nil
 	}
@@ -397,7 +462,7 @@ func hygieneVerifiedPRTx(ctx context.Context, tx transaction, t Task) (string, e
 
 func (s *Store) hygieneDecideTx(ctx context.Context, tx transaction, c hygieneCandidate, project string, lock bool) (hygieneDecision, error) {
 	var d hygieneDecision
-	sql := `SELECT ` + taskColumns + ` FROM tasks WHERE id=$1`
+	sql := sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, `SELECT `+taskColumns+` FROM tasks WHERE id=?`)
 	if lock {
 		sql += ` FOR UPDATE`
 	}
@@ -413,7 +478,7 @@ func (s *Store) hygieneDecideTx(ctx context.Context, tx transaction, c hygieneCa
 	}
 	// Recheck the discrepancy, not only its holds. A PR can have been reverted
 	// or a parent can have acquired an unsettled child since discovery.
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND (`+c.rule.predicate()+`))`, t.ID).Scan(&d.present); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND (`+c.rule.predicate(tx)+`))`, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=? AND (`+c.rule.predicate(tx)+`))`), t.ID).Scan(&d.present); err != nil {
 		return d, err
 	}
 	if !d.present {
@@ -460,9 +525,11 @@ func (s *Store) hygieneDecideTx(ctx context.Context, tx transaction, c hygieneCa
 			d.finding.Hold = "sub-task rollup does not permit this parent to close"
 			return d, nil
 		}
-		err = tx.QueryRow(ctx, `SELECT id,state FROM tasks WHERE parent_id=$1
+		err = tx.QueryRow(ctx, sqlFor(tx, `SELECT id,state FROM tasks WHERE parent_id=$1
      AND state IN ('completed','merged','deployed')
-     ORDER BY updated_at DESC,id DESC LIMIT 1`, t.ID).Scan(&d.childID, &d.childState)
+     ORDER BY updated_at DESC,id DESC LIMIT 1`, `SELECT id,state FROM tasks WHERE parent_id=?
+     AND state IN ('completed','merged','deployed')
+     ORDER BY updated_at DESC,id DESC LIMIT 1`), t.ID).Scan(&d.childID, &d.childState)
 		if errors.Is(err, ErrNoRows) {
 			d.finding.Hold = "no settled child with work remains"
 			return d, nil
@@ -504,17 +571,31 @@ func (s *Store) hygieneDecideTx(ctx context.Context, tx transaction, c hygieneCa
 // back even if PostgreSQL is still usable: transitionTaskTx may have inserted
 // an implements link before returning ErrTaskConflict.
 func (s *Store) hygieneExecute(ctx context.Context, c hygieneCandidate, project string, now time.Time) ([]TaskHygieneClose, *TaskDriftTask, error) {
+	var effects []TaskHygieneClose
+	var finding *TaskDriftTask
+	err := s.retryTx(ctx, func() error {
+		var err error
+		effects, finding, err = s.hygieneExecuteOnce(ctx, c, project, now)
+		return err
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return effects, finding, nil
+}
+
+func (s *Store) hygieneExecuteOnce(ctx context.Context, c hygieneCandidate, project string, now time.Time) ([]TaskHygieneClose, *TaskDriftTask, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer release()
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err = s.lockTx(ctx, tx, 8241873001); err != nil {
 		return nil, nil, err
 	}
 	if c.rule == hygieneMergedRule {
-		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+		if err = s.lockTx(ctx, tx, taskCommentInsertLock); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -584,7 +665,7 @@ func hygieneAncestorTasksTx(ctx context.Context, tx transaction, root Task) ([]T
 	child := root
 	for child.ParentID != nil {
 		var p Task
-		if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, *child.ParentID), &p); err != nil {
+		if err := scanTask(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), *child.ParentID), &p); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -597,7 +678,7 @@ func hygieneNetEffectsTx(ctx context.Context, tx transaction, before []Task, c h
 	effects := []TaskHygieneClose{}
 	for _, old := range before {
 		var current Task
-		if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, old.ID), &current); err != nil {
+		if err := scanTask(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, `SELECT `+taskColumns+` FROM tasks WHERE id=?`), old.ID), &current); err != nil {
 			return nil, err
 		}
 		if old.State == current.State {

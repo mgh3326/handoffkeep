@@ -45,13 +45,23 @@ type SettleMergedReport struct {
 // merged and is counted under its reason. dryRun decides and writes nothing.
 // A re-run finds nothing new to move, so it changes nothing.
 func (s *Store) SettleMerged(ctx context.Context, project string, dryRun bool) (SettleMergedReport, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return SettleMergedReport{}, ErrDialectUnsupported
-	}
-
 	if project != "" && !validName(project) {
 		return SettleMergedReport{}, errors.New("invalid settle-merged: project must be a project name")
 	}
+	var rep SettleMergedReport
+	err := s.retryTx(ctx, func() error {
+		var err error
+		rep, err = s.settleMergedOnce(ctx, project, dryRun)
+		return err
+	})
+	if err != nil {
+		return SettleMergedReport{}, err
+	}
+	return rep, nil
+}
+
+// settleMergedOnce is one attempt of SettleMerged's transaction.
+func (s *Store) settleMergedOnce(ctx context.Context, project string, dryRun bool) (SettleMergedReport, error) {
 	rep := SettleMergedReport{DryRun: dryRun, Project: project, Counts: map[string]int{}, Tasks: map[string][]int64{}}
 	for _, r := range settleReasons {
 		rep.Counts[r] = 0
@@ -64,14 +74,16 @@ func (s *Store) SettleMerged(ctx context.Context, project string, dryRun bool) (
 	defer release()
 	defer tx.Rollback(ctx)
 	// Level 2 before the task rows (lockorder.go), as FinishDeploy takes it.
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err = s.lockTx(ctx, tx, 8241873001); err != nil {
 		return SettleMergedReport{}, err
 	}
 	var projectArg *string
 	if project != "" {
 		projectArg = &project
 	}
-	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE state=$1 AND ($2::text IS NULL OR project=$2) ORDER BY id FOR UPDATE`, StateMerged, projectArg)
+	rows, err := tx.Query(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE state=$1 AND ($2::text IS NULL OR project=$2) ORDER BY id FOR UPDATE`,
+		`SELECT `+taskColumns+` FROM tasks WHERE state=? AND (? IS NULL OR project=?) ORDER BY id FOR UPDATE`),
+		pickArgs(s, []any{StateMerged, projectArg}, []any{StateMerged, projectArg, projectArg})...)
 	if err != nil {
 		return SettleMergedReport{}, err
 	}
@@ -110,24 +122,34 @@ func (s *Store) SettleMerged(ctx context.Context, project string, dryRun bool) (
 // containment, and an included successful deploy for the evidence.
 func (s *Store) settleReasonTx(ctx context.Context, tx transaction, taskID int64) (string, string, error) {
 	var linked, noSHA int
-	if err := tx.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE c.merge_sha IS NULL)
+	if err := tx.QueryRow(ctx, s.q(`SELECT count(*), count(*) FILTER (WHERE c.merge_sha IS NULL)
 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
-WHERE ct.task_id=$1 AND ct.relation=$2 AND c.reverted_by_change_id IS NULL`, taskID, ChangeImplements).Scan(&linked, &noSHA); err != nil {
+WHERE ct.task_id=$1 AND ct.relation=$2 AND c.reverted_by_change_id IS NULL`, `SELECT count(*), COALESCE(SUM(CASE WHEN c.merge_sha IS NULL THEN 1 ELSE 0 END),0)
+FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
+WHERE ct.task_id=? AND ct.relation=? AND c.reverted_by_change_id IS NULL`), taskID, ChangeImplements).Scan(&linked, &noSHA); err != nil {
 		return "", "", err
 	}
 	if linked == 0 || noSHA > 0 {
 		return SettleNoMergeCommit, "", nil
 	}
 	var stage bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM change_tasks ct
+	if err := tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM change_tasks ct
 JOIN changes c ON c.id=ct.change_id JOIN services s ON s.repo=c.repo
-WHERE ct.task_id=$1 AND ct.relation=$2 AND c.reverted_by_change_id IS NULL AND s.deploy_mode<>'none')`, taskID, ChangeImplements).Scan(&stage); err != nil {
+WHERE ct.task_id=$1 AND ct.relation=$2 AND c.reverted_by_change_id IS NULL AND s.deploy_mode<>'none')`, `SELECT EXISTS(SELECT 1 FROM change_tasks ct
+JOIN changes c ON c.id=ct.change_id JOIN services s ON s.repo=c.repo
+WHERE ct.task_id=? AND ct.relation=? AND c.reverted_by_change_id IS NULL AND s.deploy_mode<>'none')`), taskID, ChangeImplements).Scan(&stage); err != nil {
 		return "", "", err
 	}
 	if !stage {
 		return SettleNoDeployStage, "", nil
 	}
 	var contained bool
+	if s.dialect == mysqlDialect {
+		// B5 dependency: containment is changeDeployedSQL, which reads the
+		// deploys and services tables (services.targets is an array) and has no
+		// MySQL text yet.
+		return "", "", ErrDialectUnsupported
+	}
 	if err := tx.QueryRow(ctx, `SELECT bool_and(`+changeDeployedSQL()+`) IS TRUE
 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND ct.relation=$2 AND c.reverted_by_change_id IS NULL`, taskID, ChangeImplements).Scan(&contained); err != nil {
 		return "", "", err
@@ -136,12 +158,17 @@ FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND
 		return SettleNotYetDeployed, "", nil
 	}
 	var attempt string
-	err := tx.QueryRow(ctx, `SELECT d.attempt_id FROM change_tasks ct
+	err := tx.QueryRow(ctx, s.q(`SELECT d.attempt_id FROM change_tasks ct
 JOIN changes c ON c.id=ct.change_id
 JOIN deploy_changes dc ON dc.change_id=c.id AND dc.included
 JOIN deploys d ON d.id=dc.deploy_id
 WHERE ct.task_id=$1 AND ct.relation=$2 AND c.reverted_by_change_id IS NULL AND d.state='success'
-ORDER BY d.finished_at DESC, d.id DESC LIMIT 1`, taskID, ChangeImplements).Scan(&attempt)
+ORDER BY d.finished_at DESC, d.id DESC LIMIT 1`, `SELECT d.attempt_id FROM change_tasks ct
+JOIN changes c ON c.id=ct.change_id
+JOIN deploy_changes dc ON dc.change_id=c.id AND dc.included
+JOIN deploys d ON d.id=dc.deploy_id
+WHERE ct.task_id=? AND ct.relation=? AND c.reverted_by_change_id IS NULL AND d.state='success'
+ORDER BY d.finished_at DESC, d.id DESC LIMIT 1`), taskID, ChangeImplements).Scan(&attempt)
 	if errors.Is(err, ErrNoRows) {
 		return SettleNotYetDeployed, "", nil
 	}
@@ -149,7 +176,7 @@ ORDER BY d.finished_at DESC, d.id DESC LIMIT 1`, taskID, ChangeImplements).Scan(
 		return "", "", err
 	}
 	var recorded bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3)`, taskID, SourceDeploy, "deploy:"+attempt).Scan(&recorded); err != nil {
+	if err = tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3)`, `SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=? AND source=? AND source_ref=?)`), taskID, SourceDeploy, "deploy:"+attempt).Scan(&recorded); err != nil {
 		return "", "", err
 	}
 	if recorded {

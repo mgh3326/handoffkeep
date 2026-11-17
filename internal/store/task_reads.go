@@ -4,9 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // TaskEventListMax bounds one page of task events. It matches the comment
@@ -14,6 +13,15 @@ import (
 const TaskEventListMax = 500
 
 const taskEventColumns = `id,task_id,"from","to","by",note,refs,at,kind,no_job,source,source_ref,field,from_value,to_value,auto,applied`
+
+// taskEventColumnsMySQL is taskEventColumns for MySQL, which quotes with backticks.
+const taskEventColumnsMySQL = "id,task_id,`from`,`to`,`by`,note,refs,at,kind,no_job,source,source_ref,field,from_value,to_value,auto,applied"
+
+// taskEventColumnsFor is the task_events column list for the dialect of x, a
+// querier or transaction.
+func taskEventColumnsFor(x any) string {
+	return sqlFor(x, taskEventColumns, taskEventColumnsMySQL)
+}
 
 // scanTaskEvent reads one task_events row. refs is the event's refs snapshot,
 // which may also carry a job_rebind payload (TaskEvent.Rebind).
@@ -41,26 +49,23 @@ func scanTaskEvent(row interface{ Scan(...any) error }, e *TaskEvent) error {
 // append-only, so id order is the order the watchers see them; it is also the
 // cursor the MCP task_events tool pages on. A missing task is ErrTaskNotFound.
 func (s *Store) ListTaskEvents(ctx context.Context, taskID, afterID int64, limit int) ([]TaskEvent, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if taskID < 1 || afterID < 0 || limit < 1 || limit > TaskEventListMax {
 		return nil, errors.New("invalid task event query")
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	tx, err := s.beginReportRead(ctx, false)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
 	var exists bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, taskID).Scan(&exists); err != nil {
+	if err = tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?)`), taskID).Scan(&exists); err != nil {
 		return nil, err
 	}
 	if !exists {
 		return nil, ErrTaskNotFound
 	}
-	rows, err := tx.Query(ctx, `SELECT `+taskEventColumns+` FROM task_events WHERE task_id=$1 AND id>$2 ORDER BY id ASC LIMIT $3`, taskID, afterID, limit)
+	rows, err := tx.Query(ctx, s.q(`SELECT `+taskEventColumns+` FROM task_events WHERE task_id=$1 AND id>$2 ORDER BY id ASC LIMIT $3`,
+		`SELECT `+taskEventColumnsMySQL+` FROM task_events WHERE task_id=? AND id>? ORDER BY id ASC LIMIT ?`), taskID, afterID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -80,16 +85,14 @@ func (s *Store) ListTaskEvents(ctx context.Context, taskID, afterID int64, limit
 // the returned slice first. It reads only the tail; the MCP task_get preview
 // must not walk every page of a long comment thread.
 func (s *Store) RecentTaskComments(ctx context.Context, taskID int64, limit int) ([]TaskComment, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if taskID < 1 || limit < 1 || limit > TaskCommentListMax {
 		return nil, ErrTaskCommentInvalid
 	}
-	rows, err := s.db().Query(ctx, `SELECT `+taskCommentColumns+` FROM (
+	rows, err := s.db().Query(ctx, s.q(`SELECT `+taskCommentColumns+` FROM (
 SELECT `+taskCommentColumns+` FROM task_comments WHERE task_id=$1 ORDER BY id DESC LIMIT $2
-) recent ORDER BY id ASC`, taskID, limit)
+) recent ORDER BY id ASC`, `SELECT `+taskCommentColumns+` FROM (
+SELECT `+taskCommentColumns+` FROM task_comments WHERE task_id=? ORDER BY id DESC LIMIT ?
+) recent ORDER BY id ASC`), taskID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -109,10 +112,6 @@ SELECT `+taskCommentColumns+` FROM task_comments WHERE task_id=$1 ORDER BY id DE
 // the parent and blocker lookup task_get uses, so a detail read never walks a
 // related task's full history.
 func (s *Store) TaskBriefs(ctx context.Context, ids []int64) (map[int64]TaskChild, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	out := map[int64]TaskChild{}
 	if len(ids) == 0 {
 		return out, nil
@@ -120,7 +119,7 @@ func (s *Store) TaskBriefs(ctx context.Context, ids []int64) (map[int64]TaskChil
 	if len(ids) > 1000 {
 		return nil, errors.New("invalid task brief query")
 	}
-	rows, err := s.db().Query(ctx, `SELECT id,title,state FROM tasks WHERE id=ANY($1) ORDER BY id`, ids)
+	rows, err := s.queryByIDs(ctx, `SELECT id,title,state FROM tasks WHERE id=ANY($1) ORDER BY id`, `SELECT id,title,state FROM tasks WHERE id IN (%s) ORDER BY id`, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -139,17 +138,13 @@ func (s *Store) TaskBriefs(ctx context.Context, ids []int64) (map[int64]TaskChil
 // TasksByIDs reads the named tasks in id order. The changes feed uses it to
 // attach a summary to each task row without one query per item.
 func (s *Store) TasksByIDs(ctx context.Context, ids []int64) ([]Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if len(ids) == 0 {
 		return []Task{}, nil
 	}
 	if len(ids) > 1000 {
 		return nil, errors.New("invalid task id batch")
 	}
-	rows, err := s.db().Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=ANY($1) ORDER BY id`, ids)
+	rows, err := s.queryByIDs(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=ANY($1) ORDER BY id`, `SELECT `+taskColumns+` FROM tasks WHERE id IN (%s) ORDER BY id`, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -169,10 +164,6 @@ func (s *Store) TasksByIDs(ctx context.Context, ids []int64) ([]Task, error) {
 // reads it so a comment item can name its task even after the comment row is
 // gone.
 func (s *Store) TaskIDsForComments(ctx context.Context, ids []int64) (map[int64]int64, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	out := map[int64]int64{}
 	if len(ids) == 0 {
 		return out, nil
@@ -180,7 +171,7 @@ func (s *Store) TaskIDsForComments(ctx context.Context, ids []int64) (map[int64]
 	if len(ids) > 1000 {
 		return nil, errors.New("invalid comment id batch")
 	}
-	rows, err := s.db().Query(ctx, `SELECT id,task_id FROM task_comments WHERE id=ANY($1)`, ids)
+	rows, err := s.queryByIDs(ctx, `SELECT id,task_id FROM task_comments WHERE id=ANY($1)`, `SELECT id,task_id FROM task_comments WHERE id IN (%s)`, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -200,11 +191,17 @@ func (s *Store) TaskIDsForComments(ctx context.Context, ids []int64) (map[int64]
 // the cursor the feed pages on, so a caller that starts from a time still
 // receives every row recorded after that position exactly once.
 func (s *Store) SyncIDAt(ctx context.Context, t time.Time) (int64, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return 0, ErrDialectUnsupported
-	}
-
 	var id int64
-	err := s.db().QueryRow(ctx, `SELECT COALESCE(max(sync_id),0) FROM sync_log WHERE sync_id IS NOT NULL AND at <= $1`, t.UTC()).Scan(&id)
+	err := s.db().QueryRow(ctx, s.q(`SELECT COALESCE(max(sync_id),0) FROM sync_log WHERE sync_id IS NOT NULL AND at <= $1`, `SELECT COALESCE(max(sync_id),0) FROM sync_log WHERE sync_id IS NOT NULL AND at <= ?`), t.UTC()).Scan(&id)
 	return id, err
+}
+
+// queryByIDs runs a statement over a list of ids: the PostgreSQL text takes the
+// slice as $1 (= ANY), the MySQL text carries one placeholder per id, in the
+// %s of its format.
+func (s *Store) queryByIDs(ctx context.Context, pg, mysqlFormat string, ids []int64) (rows, error) {
+	if s.dialect == mysqlDialect {
+		return s.db().Query(ctx, fmt.Sprintf(mysqlFormat, placeholders(len(ids))), reportIDArgs(ids)...)
+	}
+	return s.db().Query(ctx, pg, ids)
 }
