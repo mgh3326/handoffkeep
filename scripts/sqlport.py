@@ -72,7 +72,7 @@ def _rewrite_filter(sql: str) -> tuple[str, int]:
         fn, value, cond = m.group(1).upper(), m.group(2).strip(), m.group(3).strip()
         if fn == "COUNT":
             if value == "*":
-                return f"SUM(CASE WHEN {cond} THEN 1 ELSE 0 END)"
+                return f"COUNT(CASE WHEN {cond} THEN 1 END)"
             return f"COUNT(CASE WHEN {cond} THEN {value} ELSE NULL END)"
         return f"{fn}(CASE WHEN {cond} THEN {value} ELSE NULL END)"
     return pat.subn(sub, sql)[0], len(pat.findall(sql))

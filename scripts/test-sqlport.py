@@ -55,8 +55,11 @@ class RewriteTests(unittest.TestCase):
                 self.assertIsNone(mysql)
                 self.assertIn("unsupported IS [NOT] DISTINCT FROM expression", constructs)
 
+    def test_count_filter_returns_zero_on_empty_input(self):
+        # COUNT over no rows returns 0; SUM over no rows would return NULL.
+        self.assertEqual(sqlport.rewrite("COUNT(*) FILTER (WHERE ok)")[0], "COUNT(CASE WHEN ok THEN 1 END)")
+
     def test_filter(self):
-        self.assertEqual(sqlport.rewrite("COUNT(*) FILTER (WHERE ok)")[0], "SUM(CASE WHEN ok THEN 1 ELSE 0 END)")
         self.assertEqual(sqlport.rewrite("COUNT(value) FILTER (WHERE ok)")[0], "COUNT(CASE WHEN ok THEN value ELSE NULL END)")
 
     def test_json_ops_are_preserved_and_key_exists_is_rewritten(self):
