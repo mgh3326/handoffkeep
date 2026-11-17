@@ -372,6 +372,14 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	if found {
 		return replay.out, replay.err
 	}
+	// A previous release may write a QUESTION row during blue-green with no
+	// owner column; classify this task's rows before closing its request
+	// (hk 5000).
+	if x.Lane == "dots" && IsHKDotsRequest(x) {
+		if err = classifyDotsQuestionsTx(ctx, tx, x.ID); err != nil {
+			return ResolveDecisionOutcome{}, err
+		}
+	}
 
 	decisionBefore := decisionBeforeOf(x)
 	current := x.Refs.DecisionRequest

@@ -681,6 +681,11 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 	if isTerminalTaskState(x.State) {
 		return DotsAnswerResult{}, ErrTaskTerminal
 	}
+	// A previous release may write a QUESTION row during blue-green with no
+	// owner column; classify this task's rows before selecting one (hk 5000).
+	if err = classifyDotsQuestionsTx(ctx, tx, taskID); err != nil {
+		return DotsAnswerResult{}, err
+	}
 
 	current := x.Refs.DecisionRequest
 	decisionOpen := current != nil && current.Status == DecisionRequestOpen

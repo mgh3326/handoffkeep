@@ -36,7 +36,7 @@ func applyDotsQuestionAnswerMigration(ctx context.Context, tx pgx.Tx) error {
 	if err := execAll(ctx, tx, dotsQuestionAnswerMigration); err != nil {
 		return err
 	}
-	if err := classifyLegacyDotsQuestionsTx(ctx, tx); err != nil {
+	if err := classifyDotsQuestionsTx(ctx, tx, 0); err != nil {
 		return err
 	}
 	return execAll(ctx, tx, dotsQuestionAnswerInvariant)
@@ -50,18 +50,22 @@ var dotsQuestionAnswerMigration = []string{
 	`ALTER TABLE dots_results ADD COLUMN IF NOT EXISTS ask_operator BOOLEAN`,
 }
 
-// classifyLegacyDotsQuestionsTx sets ask_operator on QUESTION rows recorded
-// before the column existed. The dots_reply event's first note field is the
-// payload hash ReplyDots writes: sha256 of
-// "QUESTION\x00<body>\x00<ask_operator>\x00<author>\x00chatgpt\x00". A row that
-// matches neither variant (no event, an older format, an unknown channel) is
-// asked by the operator: the plain path refuses it, which is the safe side.
-func classifyLegacyDotsQuestionsTx(ctx context.Context, tx pgx.Tx) error {
+// classifyDotsQuestionsTx sets ask_operator on QUESTION rows that have none:
+// rows recorded before the column existed, and rows the previous release
+// writes during blue-green while this binary serves. taskID 0 classifies every
+// task; the migration uses that, and the answer and resolve paths classify
+// their own task so a row written after the migration still gets an owner.
+// The dots_reply event's first note field is the payload hash ReplyDots writes:
+// sha256 of "QUESTION\x00<body>\x00<ask_operator>\x00<author>\x00chatgpt\x00". A
+// row that matches neither variant (no event, an older format, an unknown
+// channel) is asked by the operator: the plain path refuses it, which is the
+// safe side.
+func classifyDotsQuestionsTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
 	rows, err := tx.Query(ctx, `SELECT dr.id,COALESCE(c.body,''),COALESCE(c.author,''),COALESCE(e.note,'')
 		FROM dots_results dr
 		LEFT JOIN task_events e ON e.task_id=dr.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.source_ref=dr.comment_id AND e.from_value='QUESTION'
 		LEFT JOIN task_comments c ON c.task_id=dr.task_id AND c.id::text=e.to_value
-		WHERE dr.kind='QUESTION' AND dr.ask_operator IS NULL`)
+		WHERE dr.kind='QUESTION' AND dr.ask_operator IS NULL AND ($1=0 OR dr.task_id=$1)`, taskID)
 	if err != nil {
 		return err
 	}

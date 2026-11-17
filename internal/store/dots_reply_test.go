@@ -912,3 +912,72 @@ func TestDotsSupersedeClosesTheOldQuestion(t *testing.T) {
 		t.Fatalf("untargeted answer=%+v err=%v", res, err)
 	}
 }
+
+// Invariant (hk 5000): a QUESTION row written by the previous release during
+// blue-green has no owner column. The answer and resolve paths classify the
+// task's rows with the payload-hash rule before using them.
+func TestDotsQuestionClassifiedAtAnswerTime(t *testing.T) {
+	s := schemaStore(t, "dots_answer_bluegreen")
+	ctx := t.Context()
+
+	// A plain question written without the owner column stays answerable.
+	plainTask, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainStart, _ := startDotsRun(t, s, plainTask.ID, "start")
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: plainTask.ID, Kind: "QUESTION", Body: "Which first?", IdempotencyKey: "plain", RunToken: plainStart.RunToken}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE dots_results SET ask_operator=NULL WHERE task_id=$1 AND kind='QUESTION'`, plainTask.ID); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.AnswerDotsQuestion(ctx, plainTask.ID, "caller", DotsAnswerInput{Text: "the van", RequesterLane: "requester"})
+	if err != nil || res.Question == nil || res.Question.CommentID == 0 {
+		t.Fatalf("blue-green plain answer=%+v err=%v", res, err)
+	}
+
+	// A decision question written without the owner column still resolves its
+	// decision through an untargeted answer.
+	askTask, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	askStart, _ := startDotsRun(t, s, askTask.ID, "start")
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: askTask.ID, Kind: "QUESTION", Body: "Needs the operator?", AskOperator: true, IdempotencyKey: "asked", RunToken: askStart.RunToken}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE dots_results SET ask_operator=NULL WHERE task_id=$1 AND kind='QUESTION'`, askTask.ID); err != nil {
+		t.Fatal(err)
+	}
+	res, err = s.AnswerDotsQuestion(ctx, askTask.ID, "caller", DotsAnswerInput{Text: "operator answer"})
+	if err != nil || res.Request == nil || res.Request.Status != DecisionRequestAnswered {
+		t.Fatalf("blue-green decision answer=%+v err=%v", res, err)
+	}
+	replies, err := s.ListDotsReplies(ctx, askTask.ID)
+	if err != nil || replies[1].Answer == nil {
+		t.Fatalf("blue-green decision question=%+v err=%v", replies, err)
+	}
+
+	// The console/MCP resolve path classifies too, so its question closes.
+	resolveTask, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveStart, _ := startDotsRun(t, s, resolveTask.ID, "start")
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: resolveTask.ID, Kind: "QUESTION", Body: "Needs the operator?", AskOperator: true, IdempotencyKey: "asked", RunToken: resolveStart.RunToken}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE dots_results SET ask_operator=NULL WHERE task_id=$1 AND kind='QUESTION'`, resolveTask.ID); err != nil {
+		t.Fatal(err)
+	}
+	current, _, _ := s.GetTask(ctx, resolveTask.ID)
+	request := current.Refs.DecisionRequest
+	if _, err := s.ResolveDecisionRequest(ctx, resolveTask.ID, "operator:test@example.com", DecisionResolveInput{RequestID: request.ID, Kind: DecisionRequestAnswered, Option: "A", Text: "go ahead", Responder: "operator"}); err != nil {
+		t.Fatal(err)
+	}
+	replies, err = s.ListDotsReplies(ctx, resolveTask.ID)
+	if err != nil || replies[1].Answer == nil || replies[1].Answer.Text != "go ahead" {
+		t.Fatalf("blue-green resolved question=%+v err=%v", replies, err)
+	}
+}
