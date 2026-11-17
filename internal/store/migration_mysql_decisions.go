@@ -88,14 +88,14 @@ var mysqlDecisionsSteps = []string{
 		request_id BIGINT NOT NULL, destination VARCHAR(16) NOT NULL CHECK(destination IN ('discord')),
 		message_id VARCHAR(255) NOT NULL DEFAULT '', desired_version VARCHAR(16) NOT NULL DEFAULT '',
 		applied_version VARCHAR(16) NOT NULL DEFAULT '', state VARCHAR(16) NOT NULL CHECK(state IN ('pending','unsent','failed')),
-		attempts INT NOT NULL DEFAULT 0, next_attempt_at DATETIME(6) NOT NULL, last_error_code LONGTEXT NOT NULL DEFAULT '',
+		attempts INT NOT NULL DEFAULT 0, next_attempt_at DATETIME(6) NOT NULL, last_error_code LONGTEXT NOT NULL DEFAULT (''),
 		posted_at DATETIME(6), edited_at DATETIME(6), created_at DATETIME(6) NOT NULL,
 		PRIMARY KEY(request_id,destination), KEY decision_deliveries_due(state,next_attempt_at,request_id)
 	)` + mysqlTableOptions,
 	`CREATE TABLE IF NOT EXISTS decision_notify_digest (
 		day DATE NOT NULL PRIMARY KEY, state VARCHAR(16) NOT NULL CHECK(state IN ('pending','sent','empty','unsent','failed')),
 		listed INT NOT NULL DEFAULT 0, message_id VARCHAR(255) NOT NULL DEFAULT '', attempts INT NOT NULL DEFAULT 0,
-		next_attempt_at DATETIME(6) NOT NULL, last_error LONGTEXT NOT NULL DEFAULT '', sent_at DATETIME(6), created_at DATETIME(6) NOT NULL
+		next_attempt_at DATETIME(6) NOT NULL, last_error LONGTEXT NOT NULL DEFAULT (''), sent_at DATETIME(6), created_at DATETIME(6) NOT NULL
 	)` + mysqlTableOptions,
 	`CREATE TABLE IF NOT EXISTS operator_inbox_state (
 		item_key VARCHAR(192) NOT NULL PRIMARY KEY, read_at DATETIME(6), done_at DATETIME(6), snoozed_until DATETIME(6),
