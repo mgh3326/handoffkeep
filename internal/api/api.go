@@ -222,14 +222,10 @@ func (s Service) ListDocuments(ctx context.Context, prefix, kind, session string
 	return xs, nextAfterID(afterID, len(xs), limit, last), nil
 }
 func (s Service) Search(ctx context.Context, q, scope, session string, limit int) ([]store.SearchResult, error) {
-	if s.SearchBackend == youtrackSearchBackend {
-		if s.YouTrack == nil {
-			log.Printf("search.youtrack_fallback reason=config_missing scope=%q", scope)
-			return s.Store.Search(ctx, q, scope, session, limit)
-		}
-		return s.YouTrack.Search(ctx, s.Store.Search, q, scope, session, limit)
+	if s.YouTrack == nil {
+		return nil, store.ErrSearchUnavailable
 	}
-	return s.Store.Search(ctx, q, scope, session, limit)
+	return s.YouTrack.Search(ctx, q, scope, session, limit)
 }
 
 // youtrackSearchBackend is the HANDOFFKEEP_SEARCH_BACKEND value that selects

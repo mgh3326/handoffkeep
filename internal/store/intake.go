@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -30,7 +31,7 @@ var (
 	ErrTicketSetInvalid = errors.New("ticket_set_invalid")
 )
 
-// SimilarTaskThreshold is the pg_trgm similarity of two titles at or above
+// SimilarTaskThreshold is the token similarity of two titles at or above
 // which the duplicate check calls them similar.
 const SimilarTaskThreshold = 0.5
 
@@ -75,28 +76,97 @@ type rowsQuerier interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
+// titleTokens decomposes a title into lowercase word tokens and character 3-grams
+// for token-based Jaccard similarity.
+func titleTokens(s string) map[string]struct{} {
+	tokens := make(map[string]struct{})
+	words := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	})
+	for _, w := range words {
+		tokens[w] = struct{}{}
+		runes := []rune(w)
+		if len(runes) >= 3 {
+			for i := 0; i <= len(runes)-3; i++ {
+				tokens[string(runes[i:i+3])] = struct{}{}
+			}
+		}
+	}
+	return tokens
+}
+
+// TokenSimilarity computes Jaccard similarity between two titles using their tokens.
+func TokenSimilarity(a, b string) float64 {
+	ta := titleTokens(a)
+	tb := titleTokens(b)
+	if len(ta) == 0 || len(tb) == 0 {
+		return 0
+	}
+	intersect := 0
+	for t := range ta {
+		if _, ok := tb[t]; ok {
+			intersect++
+		}
+	}
+	union := len(ta) + len(tb) - intersect
+	if union == 0 {
+		return 0
+	}
+	return float64(intersect) / float64(union)
+}
+
 // similarOpenTasks lists started, unstarted and backlog tasks whose title is
-// similar to any of titles, most similar first.
+// similar to any of titles, most similar first, computed via Go-side token similarity.
 func similarOpenTasks(ctx context.Context, q rowsQuerier, titles []string) ([]SimilarTask, error) {
-	rows, err := q.Query(ctx, `SELECT t.id, t.title, t.state, t.lane, max(similarity(t.title, n.title))::float8 AS score
-		FROM tasks t CROSS JOIN unnest($1::text[]) AS n(title)
-		WHERE t.state IN ('backlog','unstarted',`+startedStatesSQL+`) AND similarity(t.title, n.title) >= $2
-		GROUP BY t.id
-		ORDER BY score DESC, t.id
-		LIMIT $3`, titles, SimilarTaskThreshold, SimilarTaskLimit)
+	if len(titles) == 0 {
+		return nil, nil
+	}
+	rows, err := q.Query(ctx, `SELECT t.id, t.title, t.state, t.lane
+		FROM tasks t
+		WHERE t.state IN ('backlog','unstarted',`+startedStatesSQL+`)
+		ORDER BY t.id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []SimilarTask{}
+	type match struct {
+		x     SimilarTask
+		score float64
+	}
+	var matches []match
 	for rows.Next() {
 		var x SimilarTask
-		if err := rows.Scan(&x.ID, &x.Title, &x.State, &x.Lane, &x.Similarity); err != nil {
+		if err := rows.Scan(&x.ID, &x.Title, &x.State, &x.Lane); err != nil {
 			return nil, err
 		}
-		out = append(out, x)
+		var maxScore float64
+		for _, target := range titles {
+			if s := TokenSimilarity(x.Title, target); s > maxScore {
+				maxScore = s
+			}
+		}
+		if maxScore >= SimilarTaskThreshold {
+			x.Similarity = maxScore
+			matches = append(matches, match{x: x, score: maxScore})
+		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].score != matches[j].score {
+			return matches[i].score > matches[j].score
+		}
+		return matches[i].x.ID < matches[j].x.ID
+	})
+	if len(matches) > SimilarTaskLimit {
+		matches = matches[:SimilarTaskLimit]
+	}
+	out := make([]SimilarTask, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, m.x)
+	}
+	return out, nil
 }
 
 // IntakeInput is one item put into triage by an integration.

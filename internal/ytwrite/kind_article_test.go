@@ -150,7 +150,6 @@ func TestCheckArticle(t *testing.T) {
 	}
 	for name, edit := range map[string]func(*ytwrite.ArticleRequest){
 		"nul":            func(r *ytwrite.ArticleRequest) { r.Body = "a\x00b" },
-		"oversize":       func(r *ytwrite.ArticleRequest) { r.Body = strings.Repeat("a", ytwrite.MaxArticleBytes+1) },
 		"empty_summary":  func(r *ytwrite.ArticleRequest) { r.Summary = "" },
 		"long_summary":   func(r *ytwrite.ArticleRequest) { r.Summary = strings.Repeat("가", ytwrite.ArticleSummaryLimit+1) },
 		"no_project":     func(r *ytwrite.ArticleRequest) { r.YTProjectID = "" },
@@ -162,6 +161,11 @@ func TestCheckArticle(t *testing.T) {
 		if err := ytwrite.CheckArticle(r); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+	oversize := articleReq()
+	oversize.Body = strings.Repeat("a", ytwrite.MaxArticleBytes+1)
+	if err := ytwrite.CheckArticle(oversize); err != nil {
+		t.Fatalf("oversize document was refused by CheckArticle: %v", err)
 	}
 	at := strings.Repeat("a", ytwrite.MaxArticleBytes)
 	full := articleReq()
@@ -455,5 +459,37 @@ func TestArticleCreateIncompleteFamilySearchSendsNothing(t *testing.T) {
 	}
 	if arts := e.yt.Articles(artProject); len(arts) != 0 || e.yt.Calls() != 0 {
 		t.Fatalf("articles %+v writes %d, want none", arts, e.yt.Calls())
+	}
+}
+
+// A document over MaxArticleBytes is split into an index article and child part articles (D4).
+func TestArticleCreateSplitLongDocument(t *testing.T) {
+	e := newArticleEnv(t)
+	req := articleReq()
+	req.Body = strings.Repeat("hello world line\n", 20000) // ~340KB
+	op := prepareWith(t, e, req)
+	e.drive()
+	got := e.want(op.ID, ytwrite.StateApplied, "")
+	if got.YTResultID == "" {
+		t.Fatal("expected non-empty YTResultID for index article")
+	}
+	indexArt, ok := e.yt.Article(got.YTResultID)
+	if !ok {
+		t.Fatalf("index article %s not found", got.YTResultID)
+	}
+	if !strings.Contains(indexArt.Summary, "(분할 문서)") {
+		t.Fatalf("index article summary %q missing (분할 문서)", indexArt.Summary)
+	}
+	writes := e.yt.ArticleWrites()
+	if len(writes) < 2 {
+		t.Fatalf("expected at least 2 article creates (index + parts), got %d", len(writes))
+	}
+	for i, w := range writes[1:] {
+		if w.ArticleCreate.ParentID != got.YTResultID {
+			t.Errorf("part %d parent is %q, want %q", i+1, w.ArticleCreate.ParentID, got.YTResultID)
+		}
+		if !strings.Contains(w.ArticleCreate.Summary, "part") {
+			t.Errorf("part %d summary is %q, want containing 'part'", i+1, w.ArticleCreate.Summary)
+		}
 	}
 }

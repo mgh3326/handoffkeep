@@ -24,7 +24,7 @@ import (
 // created after the import, at most once per document (key ArticleKey), or
 // adopts the one article that already carries the op's marker. Both ride the
 // document's lane ("document", decimal documents id). A document whose body
-// is over MaxArticleBytes (the import would split it) is not written (D4).
+// is over MaxArticleBytes is split into child articles under an index article (D4).
 
 func init() {
 	registerKind(KindArticleCreate, func(cfg Config) Kind { return articleCreate{ledger: cfg.Ledger} })
@@ -114,14 +114,21 @@ func ContentSHA(content string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func checkSummary(summary string) error {
+	if summary == "" || strings.ContainsAny(summary, "\r\n") || !utf8.ValidString(summary) || strings.ContainsRune(summary, 0) ||
+		utf8.RuneCountInString(summary) > ArticleSummaryLimit {
+		return fmt.Errorf("%w: article summary must be one line of 1-%d code points", ErrInvalid, ArticleSummaryLimit)
+	}
+	return nil
+}
+
 // checkArticleText explains why a summary and body cannot be written: a
 // summary of 1 to ArticleSummaryLimit code points on one line, and a body of
 // valid UTF-8 without NUL (jsonb cannot hold it) within MaxArticleBytes. An
 // empty body is an empty article, as the import wrote it.
 func checkArticleText(summary, body string) error {
-	if summary == "" || strings.ContainsAny(summary, "\r\n") || !utf8.ValidString(summary) || strings.ContainsRune(summary, 0) ||
-		utf8.RuneCountInString(summary) > ArticleSummaryLimit {
-		return fmt.Errorf("%w: article summary must be one line of 1-%d code points", ErrInvalid, ArticleSummaryLimit)
+	if err := checkSummary(summary); err != nil {
+		return err
 	}
 	if !utf8.ValidString(body) || strings.ContainsRune(body, 0) {
 		return fmt.Errorf("%w: document body is not valid UTF-8 text without NUL", ErrInvalid)
@@ -218,7 +225,13 @@ func CheckArticle(req ArticleRequest) error {
 	if req.ParentFamily != "" && req.ParentArticleID != "" {
 		return fmt.Errorf("%w: an article has one parent: a family or an article, not both", ErrInvalid)
 	}
-	return checkArticleText(req.Summary, req.Body)
+	if err := checkSummary(req.Summary); err != nil {
+		return err
+	}
+	if !utf8.ValidString(req.Body) || strings.ContainsRune(req.Body, 0) {
+		return fmt.Errorf("%w: document body is not valid UTF-8 text without NUL", ErrInvalid)
+	}
+	return nil
 }
 
 // ArticleOp is the op an article request stores. Like DecisionOp it does not
@@ -443,8 +456,19 @@ func (articleCreate) Render(op Op) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := checkArticleText(p.Summary, p.Body); err != nil {
+	if err := checkSummary(p.Summary); err != nil {
 		return "", err
+	}
+	if !utf8.ValidString(p.Body) || strings.ContainsRune(p.Body, 0) {
+		return "", fmt.Errorf("%w: document body is not valid UTF-8 text without NUL", ErrInvalid)
+	}
+	if len(p.Body) > MaxArticleBytes {
+		pieces := splitDocBody(p.Body, MaxArticleBytes)
+		indexContent := "# " + p.Summary + "\n\n원문이 크기 제한 때문에 " + strconv.Itoa(len(pieces)) + "개 문서로 나뉘었습니다.\n"
+		for i := range pieces {
+			indexContent += fmt.Sprintf("- Part %d/%d — %s (part %d)\n", i+1, len(pieces), p.Summary, i+1)
+		}
+		return RenderArticleCreate(op.Actor, op.CreatedAt.UTC().Truncate(time.Second), op.ID, indexContent), nil
 	}
 	return RenderArticleCreate(op.Actor, op.CreatedAt.UTC().Truncate(time.Second), op.ID, p.Body), nil
 }
@@ -739,9 +763,14 @@ func (a articleCreate) Send(ctx context.Context, remote Remote, op Op, text stri
 	if err != nil {
 		return "", err
 	}
-	hits, err := ar.FindArticles(ctx, ArticleSearch{ProjectShort: p.YTProjectShort, ProjectID: op.YTTargetID, Query: p.Summary, Summary: p.Summary, ParentID: parent})
+	summary := p.Summary
+	isSplit := len(p.Body) > MaxArticleBytes
+	if isSplit {
+		summary = truncateRunes(p.Summary+" (분할 문서)", ArticleSummaryLimit)
+	}
+	hits, err := ar.FindArticles(ctx, ArticleSearch{ProjectShort: p.YTProjectShort, ProjectID: op.YTTargetID, Query: summary, Summary: summary, ParentID: parent})
 	if err != nil {
-		return "", &NotSentError{Err: fmt.Errorf("articles of %q: %w", p.Summary, err)}
+		return "", &NotSentError{Err: fmt.Errorf("articles of %q: %w", summary, err)}
 	}
 	switch marked := markedArticles(hits, op.ID); {
 	case len(marked) == 1:
@@ -753,7 +782,22 @@ func (a articleCreate) Send(ctx context.Context, remote Remote, op Op, text stri
 		}
 		return "", &RefusedError{Reason: ReasonAmbiguousIssue, Detail: fmt.Sprintf("project %s has %d articles carrying op %d's marker: %s", op.YTTargetID, len(marked), op.ID, strings.Join(ids, ","))}
 	}
-	return ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, ParentID: parent, Summary: p.Summary, Content: text})
+	if !isSplit {
+		return ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, ParentID: parent, Summary: summary, Content: text})
+	}
+	indexID, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, ParentID: parent, Summary: summary, Content: text})
+	if err != nil {
+		return "", err
+	}
+	pieces := splitDocBody(p.Body, MaxArticleBytes)
+	for i, piece := range pieces {
+		partSummary := truncateRunes(fmt.Sprintf("%s / part %d of %d", p.Summary, i+1, len(pieces)), ArticleSummaryLimit)
+		partContent := RenderArticleCreate(op.Actor, op.CreatedAt.UTC().Truncate(time.Second), op.ID, piece)
+		if _, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, ParentID: indexID, Summary: partSummary, Content: partContent}); err != nil {
+			return indexID, fmt.Errorf("split child part %d: %w", i+1, err)
+		}
+	}
+	return indexID, nil
 }
 
 // sendParent is the parent Send puts the document's article under, classified
@@ -825,9 +869,13 @@ func (a articleCreate) Evidence(ctx context.Context, remote Remote, op Op, text 
 	if !found {
 		return ev, nil
 	}
-	hits, err := ar.FindArticles(ctx, ArticleSearch{ProjectShort: p.YTProjectShort, ProjectID: op.YTTargetID, Query: p.Summary, Summary: p.Summary, ParentID: parent})
+	summary := p.Summary
+	if len(p.Body) > MaxArticleBytes {
+		summary = truncateRunes(p.Summary+" (분할 문서)", ArticleSummaryLimit)
+	}
+	hits, err := ar.FindArticles(ctx, ArticleSearch{ProjectShort: p.YTProjectShort, ProjectID: op.YTTargetID, Query: summary, Summary: summary, ParentID: parent})
 	if err != nil {
-		return readFailure(ev, fmt.Errorf("articles of %q: %w", p.Summary, err))
+		return readFailure(ev, fmt.Errorf("articles of %q: %w", summary, err))
 	}
 	for _, h := range markedArticles(hits, op.ID) {
 		if h.Content == text {
