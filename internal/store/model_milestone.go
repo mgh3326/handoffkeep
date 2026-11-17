@@ -26,104 +26,115 @@ type ProjectMilestone struct {
 
 // SaveMilestone creates or updates a milestone. Project is immutable after creation.
 func (s *Store) SaveMilestone(ctx context.Context, m ProjectMilestone) (ProjectMilestone, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return ProjectMilestone{}, ErrDialectUnsupported
-	}
-
 	if m.ID < 0 || !validName(m.Project) || m.Name == "" || !validText(m.Name, 256) || !validText(m.Description, MaxBytes) || !validText(m.Status, 128) {
 		return ProjectMilestone{}, errors.New("invalid milestone")
 	}
-	tx, release, err := s.begin(ctx)
-	if err != nil {
-		return ProjectMilestone{}, err
-	}
-	defer release()
-	defer tx.Rollback(ctx)
-	var known bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, m.Project).Scan(&known); err != nil {
-		return ProjectMilestone{}, err
-	}
-	if !known {
-		return ProjectMilestone{}, ErrProjectNotFound
-	}
-	if m.ID == 0 {
-		err = tx.QueryRow(ctx, `INSERT INTO project_milestones(project,name,description,target_at,status,sort_order) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, m.Project, m.Name, m.Description, m.TargetAt, m.Status, m.SortOrder).Scan(&m.ID)
-	} else {
-		n, e := tx.Exec(ctx, `UPDATE project_milestones SET name=$3,description=$4,target_at=$5,status=$6,sort_order=$7 WHERE id=$1 AND project=$2`, m.ID, m.Project, m.Name, m.Description, m.TargetAt, m.Status, m.SortOrder)
-		err = e
-		if err == nil && n == 0 {
-			return ProjectMilestone{}, ErrMilestoneNotFound
+	in := m
+	err := s.retryTx(ctx, func() error {
+		m = in
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
 		}
-	}
+		defer release()
+		defer tx.Rollback(ctx)
+		var known bool
+		if err = tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=?)`), m.Project).Scan(&known); err != nil {
+			return err
+		}
+		if !known {
+			return ErrProjectNotFound
+		}
+		if m.ID == 0 {
+			m.ID, err = tx.InsertID(ctx, s.q(`INSERT INTO project_milestones(project,name,description,target_at,status,sort_order) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, `INSERT INTO project_milestones(project,name,description,target_at,status,sort_order) VALUES(?,?,?,?,?,?)`), m.Project, m.Name, m.Description, m.TargetAt, m.Status, m.SortOrder)
+		} else {
+			var n int64
+			if s.dialect == mysqlDialect {
+				n, err = tx.Exec(ctx, `UPDATE project_milestones SET name=?,description=?,target_at=?,status=?,sort_order=? WHERE id=? AND project=?`, m.Name, m.Description, m.TargetAt, m.Status, m.SortOrder, m.ID, m.Project)
+			} else {
+				n, err = tx.Exec(ctx, `UPDATE project_milestones SET name=$3,description=$4,target_at=$5,status=$6,sort_order=$7 WHERE id=$1 AND project=$2`, m.ID, m.Project, m.Name, m.Description, m.TargetAt, m.Status, m.SortOrder)
+			}
+			if err == nil && n == 0 {
+				return ErrMilestoneNotFound
+			}
+		}
+		if err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return ProjectMilestone{}, err
 	}
-	return m, tx.Commit(ctx)
+	return m, nil
 }
 
 func (s *Store) SetTaskMilestone(ctx context.Context, id int64, milestone *int64, by string) (Task, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, false, ErrDialectUnsupported
-	}
-
 	if id < 1 || (milestone != nil && *milestone < 1) || by == "" || !validText(by, 128) {
 		return Task{}, false, errors.New("invalid task milestone")
 	}
-	tx, release, err := s.begin(ctx)
+	var x Task
+	changed := false
+	err := s.retryTx(ctx, func() error {
+		x, changed = Task{}, false
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		if err = scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
+			if errors.Is(err, ErrNoRows) {
+				return ErrTaskNotFound
+			}
+			return err
+		}
+		if milestone != nil {
+			var project string
+			if err = tx.QueryRow(ctx, s.q(`SELECT project FROM project_milestones WHERE id=$1`, `SELECT project FROM project_milestones WHERE id=?`), *milestone).Scan(&project); err != nil {
+				if errors.Is(err, ErrNoRows) {
+					return ErrMilestoneNotFound
+				}
+				return err
+			}
+			if x.Project == nil || *x.Project != project {
+				return ErrMilestoneProject
+			}
+		}
+		from, to := "", ""
+		if x.MilestoneID != nil {
+			from = fmt.Sprint(*x.MilestoneID)
+		}
+		if milestone != nil {
+			to = fmt.Sprint(*milestone)
+		}
+		if from == to {
+			return tx.Commit(ctx)
+		}
+		now := time.Now().UTC()
+		if err = s.updateTaskReturningCore(ctx, tx, &x, id,
+			`UPDATE tasks SET milestone_id=$2,updated_at=$3 WHERE id=$1 RETURNING `, []any{id, milestone, now},
+			`UPDATE tasks SET milestone_id=?,updated_at=? WHERE id=?`, []any{milestone, now, id}); err != nil {
+			return err
+		}
+		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "metadata", From: x.State, To: x.State, By: by, Refs: x.Refs, Into: &x, At: now, Field: "milestone_id", FromValue: from, ToValue: to}); err != nil {
+			return err
+		}
+		changed = true
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return Task{}, false, err
 	}
-	defer release()
-	defer tx.Rollback(ctx)
-	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, ErrNoRows) {
-			return Task{}, false, ErrTaskNotFound
-		}
-		return Task{}, false, err
-	}
-	if milestone != nil {
-		var project string
-		if err = tx.QueryRow(ctx, `SELECT project FROM project_milestones WHERE id=$1`, *milestone).Scan(&project); err != nil {
-			if errors.Is(err, ErrNoRows) {
-				return Task{}, false, ErrMilestoneNotFound
-			}
-			return Task{}, false, err
-		}
-		if x.Project == nil || *x.Project != project {
-			return Task{}, false, ErrMilestoneProject
-		}
-	}
-	from, to := "", ""
-	if x.MilestoneID != nil {
-		from = fmt.Sprint(*x.MilestoneID)
-	}
-	if milestone != nil {
-		to = fmt.Sprint(*milestone)
-	}
-	if from == to {
-		return x, false, tx.Commit(ctx)
-	}
-	now := time.Now().UTC()
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET milestone_id=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, milestone, now), &x); err != nil {
-		return Task{}, false, err
-	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "metadata", From: x.State, To: x.State, By: by, Refs: x.Refs, Into: &x, At: now, Field: "milestone_id", FromValue: from, ToValue: to}); err != nil {
-		return Task{}, false, err
-	}
-	return x, true, tx.Commit(ctx)
+	return x, changed, nil
 }
 
 func (s *Store) GetMilestone(ctx context.Context, id int64) (ProjectMilestone, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return ProjectMilestone{}, ErrDialectUnsupported
-	}
-
 	if id < 1 {
 		return ProjectMilestone{}, errors.New("invalid milestone")
 	}
 	var m ProjectMilestone
-	err := s.db().QueryRow(ctx, `SELECT id,project,name,description,target_at,status,sort_order FROM project_milestones WHERE id=$1`, id).Scan(&m.ID, &m.Project, &m.Name, &m.Description, &m.TargetAt, &m.Status, &m.SortOrder)
+	err := s.db().QueryRow(ctx, s.q(`SELECT id,project,name,description,target_at,status,sort_order FROM project_milestones WHERE id=$1`, `SELECT id,project,name,description,target_at,status,sort_order FROM project_milestones WHERE id=?`), id).Scan(&m.ID, &m.Project, &m.Name, &m.Description, &m.TargetAt, &m.Status, &m.SortOrder)
 	if errors.Is(err, ErrNoRows) {
 		return ProjectMilestone{}, ErrMilestoneNotFound
 	}
@@ -192,47 +203,59 @@ func (p MilestonePatch) MarshalJSON() ([]byte, error) {
 }
 
 func (s *Store) PatchMilestone(ctx context.Context, id int64, p MilestonePatch) (ProjectMilestone, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return ProjectMilestone{}, ErrDialectUnsupported
-	}
-
 	if id < 1 || (!p.SetTarget && p.TargetAt != nil) || (p.Project != nil && !validName(*p.Project)) || (p.Name != nil && (*p.Name == "" || !validText(*p.Name, 256))) || (p.Description != nil && !validText(*p.Description, MaxBytes)) || (p.Status != nil && !validText(*p.Status, 128)) {
 		return ProjectMilestone{}, errors.New("invalid milestone")
 	}
-	tx, release, err := s.begin(ctx)
-	if err != nil {
-		return ProjectMilestone{}, err
-	}
-	defer release()
-	defer tx.Rollback(ctx)
 	var m ProjectMilestone
-	err = tx.QueryRow(ctx, `SELECT id,project,name,description,target_at,status,sort_order FROM project_milestones WHERE id=$1 FOR UPDATE`, id).Scan(&m.ID, &m.Project, &m.Name, &m.Description, &m.TargetAt, &m.Status, &m.SortOrder)
-	if errors.Is(err, ErrNoRows) {
-		return ProjectMilestone{}, ErrMilestoneNotFound
-	}
+	err := s.retryTx(ctx, func() error {
+		m = ProjectMilestone{}
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		err = tx.QueryRow(ctx, s.q(`SELECT id,project,name,description,target_at,status,sort_order FROM project_milestones WHERE id=$1 FOR UPDATE`, `SELECT id,project,name,description,target_at,status,sort_order FROM project_milestones WHERE id=? FOR UPDATE`), id).Scan(&m.ID, &m.Project, &m.Name, &m.Description, &m.TargetAt, &m.Status, &m.SortOrder)
+		if errors.Is(err, ErrNoRows) {
+			return ErrMilestoneNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if p.Project != nil && *p.Project != m.Project {
+			return ErrMilestoneProject
+		}
+		if p.Name != nil {
+			m.Name = *p.Name
+		}
+		if p.Description != nil {
+			m.Description = *p.Description
+		}
+		if p.Status != nil {
+			m.Status = *p.Status
+		}
+		if p.SortOrder != nil {
+			m.SortOrder = *p.SortOrder
+		}
+		if p.SetTarget {
+			m.TargetAt = p.TargetAt
+		}
+		if _, err = tx.Exec(ctx, s.q(`UPDATE project_milestones SET name=$2,description=$3,target_at=$4,status=$5,sort_order=$6 WHERE id=$1`, `UPDATE project_milestones SET name=?,description=?,target_at=?,status=?,sort_order=? WHERE id=?`), milestoneUpdateArgsCore(s.dialect, id, m)...); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return ProjectMilestone{}, err
 	}
-	if p.Project != nil && *p.Project != m.Project {
-		return ProjectMilestone{}, ErrMilestoneProject
+	return m, nil
+}
+
+// milestoneUpdateArgsCore orders the arguments of PatchMilestone's UPDATE: the
+// id is $1 on PostgreSQL and the last placeholder on MySQL.
+func milestoneUpdateArgsCore(d storeDialect, id int64, m ProjectMilestone) []any {
+	if d == mysqlDialect {
+		return []any{m.Name, m.Description, m.TargetAt, m.Status, m.SortOrder, id}
 	}
-	if p.Name != nil {
-		m.Name = *p.Name
-	}
-	if p.Description != nil {
-		m.Description = *p.Description
-	}
-	if p.Status != nil {
-		m.Status = *p.Status
-	}
-	if p.SortOrder != nil {
-		m.SortOrder = *p.SortOrder
-	}
-	if p.SetTarget {
-		m.TargetAt = p.TargetAt
-	}
-	if _, err = tx.Exec(ctx, `UPDATE project_milestones SET name=$2,description=$3,target_at=$4,status=$5,sort_order=$6 WHERE id=$1`, id, m.Name, m.Description, m.TargetAt, m.Status, m.SortOrder); err != nil {
-		return ProjectMilestone{}, err
-	}
-	return m, tx.Commit(ctx)
+	return []any{id, m.Name, m.Description, m.TargetAt, m.Status, m.SortOrder}
 }
