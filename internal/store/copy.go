@@ -55,6 +55,9 @@ type copyTableSpec struct {
 	// on both targets while the table loads. Rows no root reaches (a cycle)
 	// are not selected, and the row-count parity then fails the table.
 	parentColumn string
+	// deferredColumns names nullable self-references filled in after every row
+	// has been inserted. This supports tables with multiple independent self-FKs.
+	deferredColumns []string
 	// upsert marks a table that a fresh schema already seeds (task_projects):
 	// the load overwrites a row with the same key instead of failing on it.
 	upsert bool
@@ -94,6 +97,10 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "project_milestones", serial: true, columns: strings.Fields("id project name description target_at status sort_order"), order: []string{"id"}, bounds: map[string]int{"project": 128}},
 	{name: "project_owner_events", serial: true, columns: strings.Fields("id project previous_lane design_lane actor note created_at"), order: []string{"id"}, bounds: map[string]int{"project": 128}},
 	{name: "tasks", serial: true, parentColumn: "parent_id", columns: strings.Fields("id lane parent_lane title kind state priority refs claimed_by created_by created_at updated_at body_doc project area expected source source_ref last_activity_at awaiting_decision parent_id started_at completed_at canceled_at triaged_at started_triage_at milestone_id due_at sla_started_at sla_medium_risk_at sla_high_risk_at sla_breaches_at"), order: []string{"id"}, bounds: map[string]int{"lane": 255, "parent_lane": 255, "kind": 16, "state": 16, "project": 128, "source": 128, "source_ref": 512}},
+	{name: "documents", serial: true, columns: strings.Fields("id key kind session job body sha256 created_by created_at updated_at task_id origin_class"), order: []string{"id"}, bounds: map[string]int{"key": 512, "kind": 32, "session": 128, "job": 128, "sha256": 64, "origin_class": 16}},
+	{name: "task_comments", serial: true, columns: strings.Fields("id task_id body author created_at source_ref system_event_key"), order: []string{"id"}, bounds: map[string]int{"source_ref": 128, "system_event_key": 255}},
+	{name: "mcp_write_audit", serial: true, columns: strings.Fields("id tool actor channel author task_id idempotency_key result at"), order: []string{"id"}, bounds: map[string]int{"tool": 64, "actor": 320, "channel": 32, "author": 128, "idempotency_key": 128}},
+	{name: "translations", columns: strings.Fields("entity entity_id field lang source_sha256 text translator updated_at"), order: []string{"entity", "entity_id", "field", "lang"}, bounds: map[string]int{"entity": 32, "entity_id": 128, "field": 32, "lang": 8, "source_sha256": 64}},
 	{name: "task_events", serial: true, columns: strings.Fields("id task_id from to by note at refs kind no_job source source_ref field from_value to_value auto applied"), order: []string{"id"}, bounds: map[string]int{"kind": 32, "source": 128, "source_ref": 512}},
 	{name: "task_relations", serial: true, columns: strings.Fields("id kind src_id dst_id created_by created_at archived_at archived_by"), order: []string{"id"}, bounds: map[string]int{"kind": 16}},
 	{name: "task_origins", serial: true, columns: strings.Fields("id task_id provider namespace external_id display_ref url title_snapshot snapshot_at created_by created_at tenant role synced_at"), order: []string{"id"}, bounds: map[string]int{"provider": 16, "namespace": 255, "external_id": 255, "role": 16}},
@@ -105,7 +112,7 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "sync_decisions", columns: strings.Fields("id task_id updated_at"), order: []string{"id"}, bounds: map[string]int{"id": 512}},
 	// The changes/deploy area (hk 5078). Parent rows precede their dependents;
 	// all generated ids are preserved and reset past the copied maximum.
-	{name: "changes", serial: true, columns: strings.Fields("id repo pr_number state head_sha base_sha merge_sha opened_at merged_at reverted_by_change_id priority hold_reason depends_on_change_id depends_on_state created_at updated_at draft base_ref title author state_observed_at state_source state_delivery_id checks_observed_at checks_source threads_observed_at threads_source findings_observed_at findings_source gate_state gate_head gate_reasons gate_decided_at gate_policy_revision gate_source"), order: []string{"id"}, bounds: map[string]int{"repo": 766, "state": 16, "head_sha": 64, "base_sha": 64, "merge_sha": 64, "state_delivery_id": 255, "gate_head": 64}},
+	{name: "changes", serial: true, deferredColumns: []string{"reverted_by_change_id", "depends_on_change_id"}, columns: strings.Fields("id repo pr_number state head_sha base_sha merge_sha opened_at merged_at reverted_by_change_id priority hold_reason depends_on_change_id depends_on_state created_at updated_at draft base_ref title author state_observed_at state_source state_delivery_id checks_observed_at checks_source threads_observed_at threads_source findings_observed_at findings_source gate_state gate_head gate_reasons gate_decided_at gate_policy_revision gate_source"), order: []string{"id"}, bounds: map[string]int{"repo": 766, "state": 16, "head_sha": 64, "base_sha": 64, "merge_sha": 64, "state_delivery_id": 255, "gate_head": 64}},
 	{name: "change_tasks", columns: strings.Fields("change_id task_id relation created_at"), order: []string{"change_id", "task_id"}, bounds: map[string]int{"relation": 16}},
 	{name: "reviews", serial: true, columns: strings.Fields("id change_id reviewed_head reviewed_base patch_id round pass lens reviewer_job_id family profile model harness effort executor fallback policy_revision contract_source verdict critical high medium low started_at finished_at recorded_at reviewer same_family delta quiet outside_diff_blocking patch_digest"), order: []string{"id"}, bounds: map[string]int{"reviewed_head": 64, "reviewed_base": 64, "lens": 64, "reviewer_job_id": 255, "family": 64, "effort": 32, "verdict": 32, "patch_digest": 128}},
 	{name: "change_checks", columns: strings.Fields("change_id head_sha name state conclusion url required started_at completed_at observed_at source gone delivery_id"), order: []string{"change_id", "head_sha", "name"}, bounds: map[string]int{"head_sha": 64, "name": 512, "source": 16, "delivery_id": 255}},
@@ -127,7 +134,7 @@ func StoreCopyTables() []string {
 	return out
 }
 
-var copyLeftOutTables = strings.Fields(`attachment_refs attachment_uploads attachment_usage attachments chat_message_questions chat_messages chat_questions decision_answer_attempts decision_deliveries decision_notify decision_notify_digest decision_requests decision_resolutions deploy_changes deploys documents dots_results dots_run_tokens jobs labels ledger_cursors linear_board_owners linear_board_ownership_conflicts linear_board_tasks linear_capacity_state linear_create_admissions linear_decision_issues linear_decision_ops linear_issues linear_outbox locks mcp_write_audit notification_outbox operator_inbox_events operator_inbox_state placement_decisions relay_events relay_events_retired_20260918 schema_migrations schema_version services standing_orders status_updates sync_log sync_state takes task_comments task_labels task_state_migration task_subscribers translations verifications youtrack_attempts youtrack_comment_links youtrack_cursor youtrack_decision_mirrors youtrack_doc_articles youtrack_field_cache youtrack_outbox youtrack_processed_activities yt_article_bindings yt_authority yt_binding_cursor yt_binding_history yt_binding_intents yt_comment_canary yt_comment_write_links yt_decision_bindings yt_entity_map yt_family_roots yt_feed_cursors yt_issue_comment_bounds yt_issue_intents yt_link_owned yt_link_plans yt_link_steps yt_link_unowned yt_links_sweep yt_snapshot_state yt_task_bindings yt_write_op_adoptions yt_write_op_alerts yt_write_ops`)
+var copyLeftOutTables = strings.Fields(`attachment_refs attachment_uploads attachment_usage attachments chat_message_questions chat_messages chat_questions decision_answer_attempts decision_deliveries decision_notify decision_requests decision_resolutions deploy_changes deploys dots_results dots_run_tokens jobs labels ledger_cursors linear_board_owners linear_board_ownership_conflicts linear_board_tasks linear_capacity_state linear_create_admissions linear_decision_issues linear_decision_ops linear_issues linear_outbox locks notification_outbox operator_inbox_events operator_inbox_state placement_decisions relay_events relay_events_retired_20260918 schema_migrations schema_version services standing_orders status_updates sync_log sync_state takes task_labels task_state_migration task_subscribers verifications youtrack_attempts youtrack_comment_links youtrack_cursor youtrack_decision_mirrors youtrack_doc_articles youtrack_field_cache youtrack_outbox youtrack_processed_activities yt_article_bindings yt_authority yt_binding_cursor yt_binding_history yt_binding_intents yt_comment_canary yt_comment_write_links yt_decision_bindings yt_entity_map yt_family_roots yt_feed_cursors yt_issue_intents yt_link_owned yt_link_plans yt_link_steps yt_link_unowned yt_links_sweep yt_snapshot_state yt_task_bindings yt_write_op_adoptions yt_write_op_alerts yt_write_ops`)
 
 type copyDB struct {
 	db    *sql.DB
@@ -627,6 +634,10 @@ func copyRows(ctx context.Context, src copyQuerier, dst *copyDB, sourceMySQL boo
 			return err
 		}
 		for i, value := range values {
+			if isCopyDeferredColumn(spec, cols[i]) {
+				values[i] = nil
+				continue
+			}
 			values[i], err = copyInsertValue(value, spec.name, cols[i], kinds[cols[i]], sourceMySQL, dst.mySQL)
 			if err != nil {
 				return fmt.Errorf("convert %s.%s: %w", spec.name, cols[i], err)
@@ -639,7 +650,77 @@ func copyRows(ctx context.Context, src copyQuerier, dst *copyDB, sourceMySQL boo
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(spec.deferredColumns) > 0 {
+		if err := copyDeferredSelfRefs(ctx, src, tx, dst.mySQL, sourceMySQL, spec, kinds); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
+}
+
+func isCopyDeferredColumn(spec copyTableSpec, column string) bool {
+	for _, deferred := range spec.deferredColumns {
+		if deferred == column {
+			return true
+		}
+	}
+	return false
+}
+
+func copyDeferredSelfRefs(ctx context.Context, src copyQuerier, tx *sql.Tx, targetMySQL, sourceMySQL bool, spec copyTableSpec, kinds map[string]copyValueKind) error {
+	columns := append([]string{"id"}, spec.deferredColumns...)
+	quoted := make([]string, len(columns))
+	for i, column := range columns {
+		quoted[i] = quoteCopyIdent(column, sourceMySQL)
+	}
+	query := `SELECT ` + strings.Join(quoted, ",") + ` FROM ` + quoteCopyIdent(spec.name, sourceMySQL) + ` ORDER BY ` + quoted[0]
+	rows, err := src.QueryContext(ctx, query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	sets := make([]string, len(spec.deferredColumns))
+	for i, column := range spec.deferredColumns {
+		sets[i] = quoteCopyIdent(column, targetMySQL) + "=?"
+		if !targetMySQL {
+			sets[i] = quoteCopyIdent(column, targetMySQL) + fmt.Sprintf("=$%d", i+1)
+		}
+	}
+	whereID := "?"
+	if !targetMySQL {
+		whereID = fmt.Sprintf("$%d", len(spec.deferredColumns)+1)
+	}
+	update := `UPDATE ` + quoteCopyIdent(spec.name, targetMySQL) + ` SET ` + strings.Join(sets, ",") + ` WHERE ` + quoteCopyIdent("id", targetMySQL) + `=` + whereID
+	for rows.Next() {
+		values := make([]any, len(columns))
+		dests := make([]any, len(columns))
+		for i := range values {
+			dests[i] = &values[i]
+		}
+		if err := rows.Scan(dests...); err != nil {
+			return err
+		}
+		args := make([]any, len(spec.deferredColumns)+1)
+		for i, column := range spec.deferredColumns {
+			value, err := copyInsertValue(values[i+1], spec.name, column, kinds[column], sourceMySQL, targetMySQL)
+			if err != nil {
+				return fmt.Errorf("convert %s.%s: %w", spec.name, column, err)
+			}
+			args[i] = value
+		}
+		id, err := copyInsertValue(values[0], spec.name, "id", kinds["id"], sourceMySQL, targetMySQL)
+		if err != nil {
+			return fmt.Errorf("convert %s.id: %w", spec.name, err)
+		}
+		args[len(args)-1] = id
+		if _, err = tx.ExecContext(ctx, update, args...); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 func copyInsertValue(v any, table, column string, kind copyValueKind, sourceMySQL, targetMySQL bool) (any, error) {

@@ -89,15 +89,15 @@ func (s *Store) CreateTaskComment(ctx context.Context, taskID int64, author, bod
 // CreateTaskCommentProjected is CreateTaskComment answering with the
 // comment's YouTrack projection too (REST and the CLI show it).
 func (s *Store) CreateTaskCommentProjected(ctx context.Context, taskID int64, author, body string) (CreatedTaskComment, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return CreatedTaskComment{}, ErrDialectUnsupported
-	}
-
 	if taskID < 1 || author == "" || !validText(author, 128) {
 		return CreatedTaskComment{}, ErrTaskCommentInvalid
 	}
 	if err := CheckTaskCommentBody(body); err != nil {
 		return CreatedTaskComment{}, err
+	}
+	if s.dialect == mysqlDialect {
+		x, _, err := s.mysqlCreateComment(ctx, taskID, author, body, nil)
+		return x, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -140,10 +140,6 @@ func (s *Store) CreateMCPTaskComment(ctx context.Context, taskID int64, body str
 // comment's YouTrack projection too; a replay reports the projection of the
 // original comment's op, which a replay never creates a second time.
 func (s *Store) CreateMCPTaskCommentProjected(ctx context.Context, taskID int64, body string, w MCPWrite) (CreatedTaskComment, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return CreatedTaskComment{}, false, ErrDialectUnsupported
-	}
-
 	if taskID < 1 || w.Tool == "" {
 		return CreatedTaskComment{}, false, ErrTaskCommentInvalid
 	}
@@ -152,6 +148,9 @@ func (s *Store) CreateMCPTaskCommentProjected(ctx context.Context, taskID int64,
 	}
 	if err := CheckTaskCommentBody(body); err != nil {
 		return CreatedTaskComment{}, false, err
+	}
+	if s.dialect == mysqlDialect {
+		return s.mysqlCreateComment(ctx, taskID, w.Author, body, &w)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -202,26 +201,32 @@ func (s *Store) CreateMCPTaskCommentProjected(ctx context.Context, taskID int64,
 // ListTaskComments returns comments in id order after afterID. A missing task
 // is ErrTaskNotFound so callers never confuse it with a task without comments.
 func (s *Store) ListTaskComments(ctx context.Context, taskID, afterID int64, limit int) ([]TaskComment, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if taskID < 1 || afterID < 0 || limit < 1 || limit > TaskCommentListMax {
 		return nil, ErrTaskCommentInvalid
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	var tx transaction
+	var err error
+	if s.dialect == mysqlDialect {
+		tx, err = s.db().Begin(ctx)
+	} else {
+		var pgTx pgx.Tx
+		pgTx, err = s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+		if err == nil {
+			tx = pgTransaction{pgTx}
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
 	var exists bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, taskID).Scan(&exists); err != nil {
+	if err = tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?)`), taskID).Scan(&exists); err != nil {
 		return nil, err
 	}
 	if !exists {
 		return nil, ErrTaskNotFound
 	}
-	rows, err := tx.Query(ctx, `SELECT `+taskCommentColumns+` FROM task_comments WHERE task_id=$1 AND id>$2 ORDER BY id ASC LIMIT $3`, taskID, afterID, limit)
+	rows, err := tx.Query(ctx, s.q(`SELECT `+taskCommentColumns+` FROM task_comments WHERE task_id=$1 AND id>$2 ORDER BY id ASC LIMIT $3`, `SELECT `+taskCommentColumns+` FROM task_comments WHERE task_id=? AND id>? ORDER BY id ASC LIMIT ?`), taskID, afterID, limit)
 	if err != nil {
 		return nil, err
 	}

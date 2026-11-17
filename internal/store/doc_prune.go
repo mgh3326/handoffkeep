@@ -54,10 +54,6 @@ ORDER BY d.id LIMIT $4`
 // deletes. The cutoff comes from the caller's clock, so the table uses no
 // database now().
 func (s *Store) PruneDocuments(ctx context.Context, prefix string, olderThan time.Time, limit int, apply bool) (DocPruneResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return DocPruneResult{}, ErrDialectUnsupported
-	}
-
 	res := DocPruneResult{Prefix: prefix, OlderThan: olderThan.UTC(), Limit: limit, Applied: apply}
 	if prefix != DocPrunePrefix {
 		return res, fmt.Errorf("%w: prefix must be %s", ErrDocPruneInvalid, DocPrunePrefix)
@@ -67,6 +63,9 @@ func (s *Store) PruneDocuments(ctx context.Context, prefix string, olderThan tim
 	}
 	if limit < 1 || limit > DocPruneMaxLimit {
 		return res, fmt.Errorf("%w: limit must be 1 to %d", ErrDocPruneInvalid, DocPruneMaxLimit)
+	}
+	if s.dialect == mysqlDialect {
+		return s.mysqlPruneDocuments(ctx, res, olderThan)
 	}
 	lo, hi := keyPrefixBounds(prefix)
 	if e := s.pool.QueryRow(ctx, `SELECT count(*), count(b.document_id) FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id = d.id WHERE d.key COLLATE "C" >= $1 AND d.key COLLATE "C" < $2 AND d.updated_at < $3`, lo, hi, olderThan.UTC()).Scan(&res.Matched, &res.SkippedBound); e != nil {

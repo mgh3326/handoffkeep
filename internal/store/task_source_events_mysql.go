@@ -85,10 +85,10 @@ func recordChangeTxMySQL(ctx context.Context, tx transaction, x Task, in TaskSou
 	upsert := func(repo string, n int, state string, head, base, mergeSHA *string, mergedAt *time.Time, shaFromMerge bool) (int64, error) {
 		_, err := tx.Exec(ctx, `INSERT INTO changes(repo,pr_number,state,head_sha,base_sha,merge_sha,opened_at,merged_at,created_at,updated_at)
 VALUES(?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE
-	state=IF(VALUES(state)='merged','merged',state), merged_at=IF(VALUES(state)='merged',COALESCE(merged_at,VALUES(merged_at)),merged_at),
-	merge_sha=COALESCE(VALUES(merge_sha),merge_sha),
 	head_sha=IF(state='merged' AND ?=FALSE,head_sha,COALESCE(VALUES(head_sha),head_sha)),
-	base_sha=IF(state='merged' AND ?=FALSE,base_sha,COALESCE(VALUES(base_sha),base_sha)),updated_at=VALUES(updated_at)`,
+	base_sha=IF(state='merged' AND ?=FALSE,base_sha,COALESCE(VALUES(base_sha),base_sha)),
+	state=IF(VALUES(state)='merged','merged',state), merged_at=IF(VALUES(state)='merged',COALESCE(merged_at,VALUES(merged_at)),merged_at),
+	merge_sha=COALESCE(VALUES(merge_sha),merge_sha),updated_at=VALUES(updated_at)`,
 			repo, n, state, head, base, mergeSHA, at, mergedAt, now, now, shaFromMerge, shaFromMerge)
 		if err != nil {
 			return 0, err

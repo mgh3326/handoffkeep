@@ -897,10 +897,12 @@ func taskHoldsTx(ctx context.Context, tx transaction, taskID int64, pr string) (
 	}
 	repo, n, _ := parsePRURL(pr)
 	openQuery := openImplementsSQL
-	revertedQuery := `SELECT ` + prURLSQL + ` FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ` + unresolvedRevertSQL("?") + ` ORDER BY c.id`
+	revertedQuery := `SELECT ` + prURLSQL + ` FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ` + unresolvedRevertSQL("$1") + ` ORDER BY c.id`
+	revertedArgs := []any{taskID}
 	if dialectFor(tx) == mysqlDialect {
 		openQuery = `SELECT CONCAT('https://github.com/',c.repo,'/pull/',c.pr_number) FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=? AND ct.relation='implements' AND c.state='open' AND NOT (c.repo=? AND c.pr_number=?) ORDER BY c.id`
 		revertedQuery = `SELECT CONCAT('https://github.com/',c.repo,'/pull/',c.pr_number) FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ` + unresolvedRevertMySQL("?") + ` ORDER BY c.id`
+		revertedArgs = append(revertedArgs, taskID)
 	}
 	rows, err := tx.Query(ctx, openQuery, taskID, repo, n)
 	if err != nil {
@@ -909,7 +911,7 @@ func taskHoldsTx(ctx context.Context, tx transaction, taskID int64, pr string) (
 	if h.OpenPRs, err = collectRows(rows, rowTo[string]); err != nil {
 		return h, err
 	}
-	rows, err = tx.Query(ctx, revertedQuery, taskID)
+	rows, err = tx.Query(ctx, revertedQuery, revertedArgs...)
 	if err != nil {
 		return h, err
 	}

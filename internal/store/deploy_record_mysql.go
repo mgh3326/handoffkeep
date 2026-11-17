@@ -64,25 +64,37 @@ func (s *Store) listDeployRecordsByPrefixMySQL(ctx context.Context, prefixes []s
 const deployServiceProjectionColumns = "`key`,sha256,record,decoded"
 
 func deployRecordForPRMySQL(ctx context.Context, tx transaction, pr string) (StoredDeployRecord, bool, error) {
-	var x StoredDeployRecord
-	var raw []byte
-	err := tx.QueryRow(ctx, `SELECT `+deployServiceProjectionColumns+` FROM deploy_record_projection
+	rows, err := tx.Query(ctx, `SELECT `+deployServiceProjectionColumns+` FROM deploy_record_projection
 		WHERE `+"`key`"+` LIKE 'deploy/%' AND decoded=TRUE AND JSON_CONTAINS(CAST(record AS JSON),JSON_QUOTE(?),'$.included_prs')
-		ORDER BY `+"`key`"+` DESC LIMIT 1`, pr).Scan(&x.Key, &x.SHA256, &raw, &x.Decoded)
-	if errors.Is(err, ErrNoRows) {
-		return StoredDeployRecord{}, false, nil
-	}
+		ORDER BY `+"`key`"+` DESC`, pr)
 	if err != nil {
 		return StoredDeployRecord{}, false, err
 	}
-	if err = json.Unmarshal(raw, &x.Record); err != nil {
-		return StoredDeployRecord{}, false, fmt.Errorf("decode deploy record projection: %w", err)
+	defer rows.Close()
+	for rows.Next() {
+		var x StoredDeployRecord
+		var raw []byte
+		if err = rows.Scan(&x.Key, &x.SHA256, &raw, &x.Decoded); err != nil {
+			return StoredDeployRecord{}, false, err
+		}
+		if err = json.Unmarshal(raw, &x.Record); err != nil {
+			return StoredDeployRecord{}, false, fmt.Errorf("decode deploy record projection: %w", err)
+		}
+		if keyAt, ok := DeployRecordKeyTime(x.Key); ok {
+			x.CreatedAt = keyAt
+		}
+		prs, ok := deployedPRs(x)
+		if !ok {
+			continue
+		}
+		for _, listed := range prs {
+			if listed == pr {
+				return x, true, nil
+			}
+		}
 	}
-	if keyAt, ok := DeployRecordKeyTime(x.Key); ok {
-		x.CreatedAt = keyAt
+	if err = rows.Err(); err != nil {
+		return StoredDeployRecord{}, false, err
 	}
-	if !IsDeployRecordKey(x.Key) {
-		return StoredDeployRecord{}, false, nil
-	}
-	return x, true, nil
+	return StoredDeployRecord{}, false, nil
 }
