@@ -814,7 +814,7 @@ func applyGateTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeGateWrite
 // takes no task row.
 func (s *Store) ApplyChangeBatch(ctx context.Context, b ChangeBatch) (ChangeWriteResult, error) {
 	if s != nil && s.dialect == mysqlDialect {
-		return ChangeWriteResult{}, ErrDialectUnsupported
+		return s.applyChangeBatchMySQL(ctx, b)
 	}
 
 	now := time.Now().UTC()

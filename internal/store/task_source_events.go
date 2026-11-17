@@ -431,7 +431,7 @@ func (s *Store) propagateMergeTx(ctx context.Context, tx transaction, src int64,
 	}
 	var changeID int64
 	if repo, n, ok := parsePRURL(ev.PR); ok {
-		if err := tx.QueryRow(ctx, `SELECT id FROM changes WHERE repo=$1 AND pr_number=$2`, repo, n).Scan(&changeID); err != nil && !errors.Is(err, ErrNoRows) {
+		if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT id FROM changes WHERE repo=$1 AND pr_number=$2`, `SELECT id FROM changes WHERE repo=? AND pr_number=?`), repo, n).Scan(&changeID); err != nil && !errors.Is(err, ErrNoRows) {
 			return err
 		}
 	}
@@ -443,7 +443,7 @@ func (s *Store) propagateMergeTx(ctx context.Context, tx transaction, src int64,
 		// of the PR holds the sibling's own close (unresolvedRevertSQL).
 		if changeID != 0 {
 			// changeID is 0 on MySQL: srcEvChangesGate refused above.
-			if err := linkChangeTaskTx(ctx, pgxTx(tx), changeID, x.ID, ChangeImplements, true, now); err != nil {
+			if err := linkChangeTask(ctx, tx, changeID, x.ID, ChangeImplements, true, now); err != nil {
 				return err
 			}
 		}
@@ -781,9 +781,15 @@ func heldMergePRTx(ctx context.Context, tx transaction, taskID int64) (string, e
 		return "", err
 	}
 	var pr string
-	err := tx.QueryRow(ctx, `SELECT e.source_ref FROM task_events e JOIN changes c ON (`+prURLSQL+`)=e.source_ref
+	query := `SELECT e.source_ref FROM task_events e JOIN changes c ON (` + prURLSQL + `)=e.source_ref
 		WHERE e.task_id=$1 AND e.source=$2 AND e.field=$3 AND NOT e.applied AND c.state='merged' AND c.reverted_by_change_id IS NULL
-		ORDER BY e.id DESC LIMIT 1`, taskID, SourceMergewakeMerge, heldMergeField).Scan(&pr)
+		ORDER BY e.id DESC LIMIT 1`
+	if dialectFor(tx) == mysqlDialect {
+		query = `SELECT e.source_ref FROM task_events e JOIN changes c ON CONCAT('https://github.com/',c.repo,'/pull/',c.pr_number)=e.source_ref
+		WHERE e.task_id=? AND e.source=? AND e.field=? AND NOT e.applied AND c.state='merged' AND c.reverted_by_change_id IS NULL
+		ORDER BY e.id DESC LIMIT 1`
+	}
+	err := tx.QueryRow(ctx, query, taskID, SourceMergewakeMerge, heldMergeField).Scan(&pr)
 	if errors.Is(err, ErrNoRows) {
 		return "", nil
 	}
@@ -809,6 +815,12 @@ const openImplementsSQL = `SELECT ` + prURLSQL + ` FROM change_tasks ct JOIN cha
 // mergewake.pr event, else its merge); the revert's merged_at is the revert
 // event's time.
 func unresolvedRevertSQL(task string) string {
+	return `ct.task_id=` + task + ` AND ct.relation='implements' AND c.reverted_by_change_id IS NOT NULL
+	AND NOT EXISTS (SELECT 1 FROM change_tasks rt JOIN changes r ON r.id=rt.change_id JOIN changes rv ON rv.id=c.reverted_by_change_id
+		WHERE rt.task_id=` + task + ` AND rt.relation='implements' AND r.state='merged' AND r.reverted_by_change_id IS NULL AND r.opened_at>COALESCE(rv.merged_at,rv.created_at))`
+}
+
+func unresolvedRevertMySQL(task string) string {
 	return `ct.task_id=` + task + ` AND ct.relation='implements' AND c.reverted_by_change_id IS NOT NULL
 	AND NOT EXISTS (SELECT 1 FROM change_tasks rt JOIN changes r ON r.id=rt.change_id JOIN changes rv ON rv.id=c.reverted_by_change_id
 		WHERE rt.task_id=` + task + ` AND rt.relation='implements' AND r.state='merged' AND r.reverted_by_change_id IS NULL AND r.opened_at>COALESCE(rv.merged_at,rv.created_at))`
@@ -884,21 +896,31 @@ func taskHoldsTx(ctx context.Context, tx transaction, taskID int64, pr string) (
 		return h, err
 	}
 	repo, n, _ := parsePRURL(pr)
-	rows, err := tx.Query(ctx, openImplementsSQL, taskID, repo, n)
+	openQuery := openImplementsSQL
+	revertedQuery := `SELECT ` + prURLSQL + ` FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ` + unresolvedRevertSQL("$1") + ` ORDER BY c.id`
+	subTaskQuery := openSubTasksSQL
+	revertedArgs := []any{taskID}
+	if dialectFor(tx) == mysqlDialect {
+		openQuery = `SELECT CONCAT('https://github.com/',c.repo,'/pull/',c.pr_number) FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=? AND ct.relation='implements' AND c.state='open' AND NOT (c.repo=? AND c.pr_number=?) ORDER BY c.id`
+		revertedQuery = `SELECT CONCAT('https://github.com/',c.repo,'/pull/',c.pr_number) FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ` + unresolvedRevertMySQL("?") + ` ORDER BY c.id`
+		subTaskQuery = `SELECT id FROM tasks WHERE parent_id=? AND state NOT IN (` + settledStatesSQL + `) ORDER BY id`
+		revertedArgs = append(revertedArgs, taskID)
+	}
+	rows, err := tx.Query(ctx, openQuery, taskID, repo, n)
 	if err != nil {
 		return h, err
 	}
 	if h.OpenPRs, err = collectRows(rows, rowTo[string]); err != nil {
 		return h, err
 	}
-	rows, err = tx.Query(ctx, `SELECT `+prURLSQL+` FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE `+unresolvedRevertSQL("$1")+` ORDER BY c.id`, taskID)
+	rows, err = tx.Query(ctx, revertedQuery, revertedArgs...)
 	if err != nil {
 		return h, err
 	}
 	if h.RevertedPRs, err = collectRows(rows, rowTo[string]); err != nil {
 		return h, err
 	}
-	rows, err = tx.Query(ctx, openSubTasksSQL, taskID)
+	rows, err = tx.Query(ctx, subTaskQuery, taskID)
 	if err != nil {
 		return h, err
 	}
@@ -973,9 +995,7 @@ func (s *Store) deployOnMergedTx(ctx context.Context, tx transaction, x Task, no
 // document body when the projection is stale.
 func deployRecordForPRTx(ctx context.Context, tx transaction, pr string) (StoredDeployRecord, bool, error) {
 	if dialectFor(tx) == mysqlDialect {
-		// B3/B5 dependency: documents and deploy_record_projection are not in
-		// the MySQL schema.
-		return StoredDeployRecord{}, false, ErrDialectUnsupported
+		return deployRecordForPRMySQL(ctx, tx, pr)
 	}
 	// The record prefix is the documents_key_c range:
 	// strpos(key,'deploy/') = 1 scanned the whole table, and every task that

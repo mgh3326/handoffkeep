@@ -9,9 +9,7 @@ import (
 // Dialect-neutral cases of the frontier, settle, sweep, drift and hygiene
 // reports and the last-activity repair (hk 5074, A3).
 
-// needTables skips a case on MySQL while the tables of another area (changes,
-// decisions, jobs: B5, B6, B7) are not in its schema. Remove the call when they
-// land.
+// needTables skips a case on MySQL while tables owned by other areas are absent.
 func needTables(t *testing.T, s *Store, area string) {
 	t.Helper()
 	if s.dialect == mysqlDialect {
@@ -91,7 +89,7 @@ func init() {
 		if _, err := s.ProjectFrontier(ctx, "no-such-project", now.Add(-time.Hour), now); !errors.Is(err, ErrProjectNotFound) {
 			t.Fatalf("frontier of an unknown project err = %v, want ErrProjectNotFound", err)
 		}
-		needTables(t, s, "changes and decisions")
+		needTables(t, s, "decision_requests")
 		project := "hygiene-frontier"
 		_, err := s.AddTaskProject(ctx, project, "tester")
 		needPorted(t, s, "AddTaskProject", err)
@@ -112,7 +110,7 @@ func init() {
 				t.Fatalf("TaskDrift accepted merged_days %d", days)
 			}
 		}
-		needTables(t, s, "changes, decisions and jobs")
+		needTables(t, s, "decision_requests and jobs")
 		d, err := s.TaskDrift(ctx, now, DriftDefaultMergedDays)
 		if err != nil {
 			t.Fatal(err)
@@ -136,7 +134,7 @@ func init() {
 		if _, err := s.TaskHygiene(ctx, now, "bad project!", true); err == nil {
 			t.Fatal("TaskHygiene accepted an invalid project name")
 		}
-		needTables(t, s, "changes, decisions and jobs")
+		needTables(t, s, "decision_requests and jobs")
 		for _, dry := range []bool{true, false} {
 			rep, err := s.TaskHygiene(ctx, now, "", dry)
 			if err != nil {
