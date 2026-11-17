@@ -357,7 +357,7 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	}
 	var x Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, taskID), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return ResolveDecisionOutcome{}, ErrTaskNotFound
 		}
 		return ResolveDecisionOutcome{}, err
@@ -669,7 +669,7 @@ func (s *Store) denyDecisionAttempt(ctx context.Context, tx pgx.Tx, in ResolveDe
 	var taskID int64
 	var result, revisionRequestID string
 	err := tx.QueryRow(ctx, `SELECT task_id,result,revision_request_id FROM decision_answer_attempts WHERE id=$1 FOR SHARE`, in.DeniesAttemptID).Scan(&taskID, &result, &revisionRequestID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ResolveDecisionOutcome{}, ErrDecisionAttemptNotFound
 	}
 	if err != nil {
@@ -717,7 +717,7 @@ func (s *Store) denyDecisionAttempt(ctx context.Context, tx pgx.Tx, in ResolveDe
 func decisionResolutionID(ctx context.Context, q rowQuerier, root string, revision int) (int64, error) {
 	var id int64
 	err := q.QueryRow(ctx, `SELECT resolution_id FROM decision_resolutions WHERE request_id=$1 AND question_revision=$2`, root, revision).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return 0, nil
 	}
 	return id, err
@@ -744,7 +744,7 @@ func replayDecisionAttempt(ctx context.Context, tx pgx.Tx, channel, eventKey, ha
 	var storedHash, result, revisionRequestID, root string
 	err := tx.QueryRow(ctx, `SELECT id,payload_hash,result,revision_request_id,COALESCE(request_id,''),COALESCE(question_revision,0) FROM decision_answer_attempts WHERE channel=$1 AND event_key=$2`, channel, eventKey).
 		Scan(&attemptID, &storedHash, &result, &revisionRequestID, &root, &revision)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return decisionReplay{}, false, nil
 	}
 	if err != nil {
@@ -767,7 +767,7 @@ func replayDecisionAttempt(ctx context.Context, tx pgx.Tx, channel, eventKey, ha
 		// The revision moved on or was closed; report the request as it was.
 		var snapshot []byte
 		err = tx.QueryRow(ctx, `SELECT refs->'decision_request' FROM task_events WHERE task_id=$1 AND kind='decision' AND refs->'decision_request'->>'id'=$2 AND ($3::text='' OR refs->'decision_request'->>'status'=$3::text) ORDER BY id DESC LIMIT 1`, x.ID, revisionRequestID, wantStatus).Scan(&snapshot)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		if err != nil && !errors.Is(err, ErrNoRows) {
 			return decisionReplay{}, false, err
 		}
 		var request DecisionRequest
@@ -778,7 +778,7 @@ func replayDecisionAttempt(ctx context.Context, tx pgx.Tx, channel, eventKey, ha
 		}
 	}
 	err = tx.QueryRow(ctx, `SELECT resolution_id FROM decision_resolutions WHERE attempt_id=$1`, attemptID).Scan(&out.ResolutionID)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if err != nil && !errors.Is(err, ErrNoRows) {
 		return decisionReplay{}, false, err
 	}
 	if out.ResolutionID == 0 && result == DecisionResultAnswered && root != "" && revision > 0 {

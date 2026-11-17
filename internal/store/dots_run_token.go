@@ -61,7 +61,7 @@ func checkDotsRunTokenTx(ctx context.Context, tx pgx.Tx, task Task, token string
 	}
 	var stored string
 	err := tx.QueryRow(ctx, `SELECT token FROM dots_run_tokens WHERE task_id=$1 AND superseded_at IS NULL`, task.ID).Scan(&stored)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ErrDotsRunTokenMismatch
 	}
 	if err != nil {
@@ -81,7 +81,7 @@ func checkDotsRunTokenTx(ctx context.Context, tx pgx.Tx, task Task, token string
 func supersedeDotsRunTokensTx(ctx context.Context, tx pgx.Tx, taskID int64, now time.Time) (string, error) {
 	var previous string
 	err := tx.QueryRow(ctx, `UPDATE dots_run_tokens SET superseded_at=$2 WHERE task_id=$1 AND superseded_at IS NULL RETURNING issue_key`, taskID, now).Scan(&previous)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return "", nil
 	}
 	return previous, err
@@ -123,7 +123,7 @@ func issueDotsRunTokenTx(ctx context.Context, tx pgx.Tx, taskID int64, issueKey,
 func dotsRunTokenForIssueTx(ctx context.Context, tx pgx.Tx, taskID int64, issueKey string) (string, error) {
 	var token string
 	err := tx.QueryRow(ctx, `SELECT token FROM dots_run_tokens WHERE task_id=$1 AND issue_key=$2`, taskID, issueKey).Scan(&token)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return "", nil
 	}
 	return token, err
@@ -135,7 +135,7 @@ func dotsRunTokenForIssueTx(ctx context.Context, tx pgx.Tx, taskID int64, issueK
 func (s *Store) DotsRunIssuedAt(ctx context.Context, taskID int64) (*time.Time, error) {
 	var at time.Time
 	err := s.pool.QueryRow(ctx, `SELECT issued_at FROM dots_run_tokens WHERE task_id=$1 AND superseded_at IS NULL`, taskID).Scan(&at)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

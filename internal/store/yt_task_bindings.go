@@ -86,7 +86,7 @@ func lockYTIssueOwnershipTx(ctx context.Context, tx pgx.Tx, taskID int64) error 
 	}
 	var id int64
 	err := tx.QueryRow(ctx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, taskID).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ErrTaskNotFound
 	}
 	return err
@@ -163,7 +163,7 @@ func scanYTBinding(row interface{ Scan(...any) error }, b *YTTaskBinding) error 
 func readYTBinding(ctx context.Context, q ytRowQuerier, taskID int64) (YTTaskBinding, bool, error) {
 	var b YTTaskBinding
 	err := scanYTBinding(q.QueryRow(ctx, `SELECT `+ytBindingColumns+` FROM yt_task_bindings WHERE task_id=$1`, taskID), &b)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return YTTaskBinding{}, false, nil
 	}
 	if err != nil {
@@ -334,7 +334,7 @@ func (s *Store) YTCommentCandidates(ctx context.Context, since time.Time, projec
 func (s *Store) YTCommentCandidateOf(ctx context.Context, taskID int64) (YTCommentCandidate, bool, error) {
 	var c YTCommentCandidate
 	err := s.pool.QueryRow(ctx, `SELECT id, coalesce(project,'') FROM tasks WHERE id=$1`, taskID).Scan(&c.TaskID, &c.Project)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return YTCommentCandidate{}, false, nil
 	}
 	return c, err == nil, err

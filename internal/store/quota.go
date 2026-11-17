@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"math"
@@ -183,7 +184,7 @@ func migrateQuota(ctx context.Context, tx pgx.Tx) error {
 }
 func (s *Store) LatestQuota(ctx context.Context, key string) (QuotaLatest, error) {
 	out := QuotaLatest{Manual: []QuotaObservation{}}
-	rows, err := s.pool.Query(ctx, `SELECT o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 ORDER BY l.kind,l.window_key`, key)
+	rows, err := s.db().Query(ctx, s.q(`SELECT o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 ORDER BY l.kind,l.window_key`, `SELECT o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=? ORDER BY l.kind,l.window_key`), key)
 	if err != nil {
 		return out, err
 	}
@@ -215,13 +216,13 @@ func (s *Store) LatestQuota(ctx context.Context, key string) (QuotaLatest, error
 // matching rows from a key that has never had an observation.
 func (s *Store) QuotaObservationHistory(ctx context.Context, key string, since, until time.Time, limit int) ([]QuotaObservation, bool, error) {
 	var found bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quota_observations WHERE account_key=$1)`, key).Scan(&found); err != nil {
+	if err := s.db().QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM quota_observations WHERE account_key=$1)`, `SELECT EXISTS(SELECT 1 FROM quota_observations WHERE account_key=?)`), key).Scan(&found); err != nil {
 		return nil, false, err
 	}
 	if !found {
 		return []QuotaObservation{}, false, nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id,value FROM quota_observations WHERE account_key=$1 AND measured_at >= $2 AND measured_at <= $3 ORDER BY measured_at,id LIMIT $4`, key, since, until, limit)
+	rows, err := s.db().Query(ctx, s.q(`SELECT id,value FROM quota_observations WHERE account_key=$1 AND measured_at >= $2 AND measured_at <= $3 ORDER BY measured_at,id LIMIT $4`, `SELECT id,value FROM quota_observations WHERE account_key=? AND measured_at >= ? AND measured_at <= ? ORDER BY measured_at,id LIMIT ?`), key, since, until, limit)
 	if err != nil {
 		return nil, true, err
 	}
@@ -247,7 +248,7 @@ func (s *Store) QuotaObservationHistory(ctx context.Context, key string, since, 
 // QuotaAccountKeys returns the opaque account keys that currently have a
 // latest observation. Account keys are hashes/aliases and never credentials.
 func (s *Store) QuotaAccountKeys(ctx context.Context) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT account_key FROM quota_latest ORDER BY account_key`)
+	rows, err := s.db().Query(ctx, `SELECT DISTINCT account_key FROM quota_latest ORDER BY account_key`)
 	if err != nil {
 		return nil, err
 	}
@@ -264,14 +265,39 @@ func (s *Store) QuotaAccountKeys(ctx context.Context) ([]string, error) {
 }
 func (s *Store) LeaseQuota(ctx context.Context, key, owner, holder string, ttl int) (QuotaLease, error) {
 	var x QuotaLease
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db().Begin(ctx)
 	if err != nil {
 		return x, err
 	}
 	defer tx.Rollback(ctx)
+	if s.dialect == mysqlDialect {
+		// The duplicate-key no-op locks the account row even when it already
+		// exists. Reading and updating under that lock gives one winner.
+		_, err = tx.Exec(ctx, `INSERT INTO quota_leases(account_key,owner,holder,expires_at) VALUES(?,?,?,DATE_ADD(UTC_TIMESTAMP(6), INTERVAL ? SECOND)) ON DUPLICATE KEY UPDATE account_key=quota_leases.account_key`, key, owner, holder, ttl)
+		if err != nil {
+			return x, err
+		}
+		var canAcquire bool
+		err = tx.QueryRow(ctx, `SELECT holder,expires_at,(expires_at<=UTC_TIMESTAMP(6) OR (owner=? AND holder=?)) FROM quota_leases WHERE account_key=? FOR UPDATE`, owner, holder, key).Scan(&x.Holder, &x.ExpiresAt, &canAcquire)
+		if err != nil {
+			return x, err
+		}
+		if canAcquire {
+			_, err = tx.Exec(ctx, `UPDATE quota_leases SET owner=?,holder=?,expires_at=DATE_ADD(UTC_TIMESTAMP(6), INTERVAL ? SECOND) WHERE account_key=?`, owner, holder, ttl, key)
+			if err != nil {
+				return x, err
+			}
+			err = tx.QueryRow(ctx, `SELECT holder,expires_at FROM quota_leases WHERE account_key=?`, key).Scan(&x.Holder, &x.ExpiresAt)
+			if err != nil {
+				return x, err
+			}
+			x.Acquired = true
+		}
+		return x, tx.Commit(ctx)
+	}
 	// The conditional UPSERT serializes contenders and uses the database clock.
 	err = tx.QueryRow(ctx, `INSERT INTO quota_leases(account_key,owner,holder,expires_at) VALUES($1,$2,$3,clock_timestamp()+$4*interval '1 second') ON CONFLICT(account_key) DO UPDATE SET owner=EXCLUDED.owner,holder=EXCLUDED.holder,expires_at=clock_timestamp()+$4*interval '1 second' WHERE quota_leases.expires_at<=clock_timestamp() OR (quota_leases.owner=$2 AND quota_leases.holder=$3) RETURNING holder,expires_at`, key, owner, holder, ttl).Scan(&x.Holder, &x.ExpiresAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		err = tx.QueryRow(ctx, `SELECT holder,expires_at FROM quota_leases WHERE account_key=$1`, key).Scan(&x.Holder, &x.ExpiresAt)
 	} else if err == nil {
 		x.Acquired = true
@@ -286,12 +312,46 @@ func (s *Store) LeaseQuota(ctx context.Context, key, owner, holder string, ttl i
 // only path allowed to delete quota_observations rows; cadence is a separate
 // operator decision, so nothing here schedules it.
 func (s *Store) PruneQuotaHistory(ctx context.Context) (int64, error) {
+	if s.dialect == mysqlDialect {
+		conn, err := s.db().(sqlQuerier).db.Conn(ctx)
+		if err != nil {
+			return 0, err
+		}
+		defer conn.Close()
+		// The guard variable is session scoped, so clear it before returning the
+		// pinned connection to the pool, even after rollback or cancellation.
+		defer func() {
+			if _, err := conn.ExecContext(context.Background(), `SET @hk_quota_prune = NULL`); err != nil {
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			}
+		}()
+		tx, err := conn.BeginTx(ctx, nil)
+		if err != nil {
+			return 0, err
+		}
+		defer tx.Rollback()
+		if _, err = tx.ExecContext(ctx, `SET @hk_quota_prune = 1`); err != nil {
+			return 0, err
+		}
+		result, err := tx.ExecContext(ctx, `DELETE FROM quota_observations WHERE received_at < DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 90 DAY) AND id NOT IN (SELECT observation_id FROM quota_latest)`)
+		if err != nil {
+			return 0, err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		if err = tx.Commit(); err != nil {
+			return 0, err
+		}
+		return n, nil
+	}
 	var n int64
 	err := s.pool.QueryRow(ctx, `SELECT quota_prune_history()`).Scan(&n)
 	return n, err
 }
 func (s *Store) ReleaseQuota(ctx context.Context, key, owner, holder string) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM quota_leases WHERE account_key=$1 AND owner=$2 AND holder=$3`, key, owner, holder)
+	_, err := s.db().Exec(ctx, s.q(`DELETE FROM quota_leases WHERE account_key=$1 AND owner=$2 AND holder=$3`, `DELETE FROM quota_leases WHERE account_key=? AND owner=? AND holder=?`), key, owner, holder)
 	return err
 }
 
@@ -302,7 +362,7 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 	if !ValidQuotaKey(key) || !ValidQuotaHolder(holder) || !ValidQuotaObservationFor(key, x, time.Now()) {
 		return x, false, errors.New("invalid quota observation")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db().Begin(ctx)
 	if err != nil {
 		return x, false, err
 	}
@@ -310,8 +370,8 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 	var valid bool
 	// Hold the lease row until the append and pointer update commit. An expired
 	// probe cannot publish after another holder has taken over, even with one token.
-	err = tx.QueryRow(ctx, `SELECT owner=$2 AND holder=$3 AND expires_at>clock_timestamp() FROM quota_leases WHERE account_key=$1 FOR UPDATE`, key, owner, holder).Scan(&valid)
-	if errors.Is(err, pgx.ErrNoRows) || err == nil && !valid {
+	err = tx.QueryRow(ctx, s.q(`SELECT owner=$2 AND holder=$3 AND expires_at>clock_timestamp() FROM quota_leases WHERE account_key=$1 FOR UPDATE`, `SELECT owner=? AND holder=? AND expires_at>UTC_TIMESTAMP(6) FROM quota_leases WHERE account_key=? FOR UPDATE`), quotaLeaseArgs(s.dialect, key, owner, holder)...).Scan(&valid)
+	if errors.Is(err, ErrNoRows) || err == nil && !valid {
 		return x, false, ErrQuotaLease
 	}
 	if err != nil {
@@ -336,26 +396,34 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 	// own measured_at is the floor: GREATEST ignores a NULL (legacy) confirmed_at.
 	var dupID int64
 	var dupValue []byte
-	err = tx.QueryRow(ctx, `SELECT o.id,o.value FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 AND l.kind=$2 AND l.window_key=$3 AND (o.value - 'measured_at') = ($4::jsonb - 'measured_at')`, key, x.Kind, x.Window, data).Scan(&dupID, &dupValue)
+	err = tx.QueryRow(ctx, s.q(`SELECT o.id,o.value FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 AND l.kind=$2 AND l.window_key=$3 AND (o.value - 'measured_at') = ($4::jsonb - 'measured_at')`, `SELECT o.id,o.value FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=? AND l.kind=? AND l.window_key=? AND JSON_REMOVE(o.value, '$.measured_at') = JSON_REMOVE(CAST(? AS JSON), '$.measured_at')`), key, x.Kind, x.Window, data).Scan(&dupID, &dupValue)
 	if err == nil {
 		var existing QuotaObservation
 		if err = json.Unmarshal(dupValue, &existing); err != nil {
 			return x, false, err
 		}
 		existing.ID = dupID
-		if err = tx.QueryRow(ctx, `UPDATE quota_latest SET confirmed_at=GREATEST(confirmed_at,measured_at,$4) WHERE account_key=$1 AND kind=$2 AND window_key=$3 RETURNING confirmed_at`, key, x.Kind, x.Window, x.MeasuredAt).Scan(&existing.ConfirmedAt); err != nil {
+		if s.dialect == mysqlDialect {
+			_, err = tx.Exec(ctx, `UPDATE quota_latest SET confirmed_at=GREATEST(COALESCE(confirmed_at, measured_at), measured_at, ?) WHERE account_key=? AND kind=? AND window_key=?`, x.MeasuredAt, key, x.Kind, x.Window)
+			if err == nil {
+				err = tx.QueryRow(ctx, `SELECT confirmed_at FROM quota_latest WHERE account_key=? AND kind=? AND window_key=?`, key, x.Kind, x.Window).Scan(&existing.ConfirmedAt)
+			}
+		} else {
+			err = tx.QueryRow(ctx, `UPDATE quota_latest SET confirmed_at=GREATEST(confirmed_at,measured_at,$4) WHERE account_key=$1 AND kind=$2 AND window_key=$3 RETURNING confirmed_at`, key, x.Kind, x.Window, x.MeasuredAt).Scan(&existing.ConfirmedAt)
+		}
+		if err != nil {
 			return x, false, err
 		}
 		return existing, true, tx.Commit(ctx)
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return x, false, err
 	}
-	err = tx.QueryRow(ctx, `INSERT INTO quota_observations(account_key,kind,window_key,measured_at,value) VALUES($1,$2,$3,$4,$5) RETURNING id`, key, x.Kind, x.Window, x.MeasuredAt, data).Scan(&x.ID)
+	x.ID, err = tx.InsertID(ctx, s.q(`INSERT INTO quota_observations(account_key,kind,window_key,measured_at,value) VALUES($1,$2,$3,$4,$5) RETURNING id`, `INSERT INTO quota_observations(account_key,kind,window_key,measured_at,value) VALUES(?,?,?,?,?)`), key, x.Kind, x.Window, x.MeasuredAt, data)
 	if err != nil {
 		return x, false, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO quota_latest(account_key,kind,window_key,observation_id,measured_at,confirmed_at) VALUES($1,$2,$3,$4,$5,$5) ON CONFLICT(account_key,kind,window_key) DO UPDATE SET observation_id=EXCLUDED.observation_id,measured_at=EXCLUDED.measured_at,confirmed_at=EXCLUDED.measured_at WHERE quota_latest.measured_at<=EXCLUDED.measured_at`, key, x.Kind, x.Window, x.ID, x.MeasuredAt)
+	_, err = tx.Exec(ctx, s.q(`INSERT INTO quota_latest(account_key,kind,window_key,observation_id,measured_at,confirmed_at) VALUES($1,$2,$3,$4,$5,$5) ON CONFLICT(account_key,kind,window_key) DO UPDATE SET observation_id=EXCLUDED.observation_id,measured_at=EXCLUDED.measured_at,confirmed_at=EXCLUDED.measured_at WHERE quota_latest.measured_at<=EXCLUDED.measured_at`, `INSERT INTO quota_latest(account_key,kind,window_key,observation_id,measured_at,confirmed_at) VALUES(?,?,?,?,?,?) ON DUPLICATE KEY UPDATE observation_id=IF(measured_at<=VALUES(measured_at),VALUES(observation_id),observation_id), confirmed_at=IF(measured_at<=VALUES(measured_at),VALUES(measured_at),confirmed_at), measured_at=IF(measured_at<=VALUES(measured_at),VALUES(measured_at),measured_at)`), quotaLatestArgs(s.dialect, key, x.Kind, x.Window, x.ID, x.MeasuredAt)...)
 	if err != nil {
 		return x, false, err
 	}
@@ -373,31 +441,36 @@ func (s *Store) PutQuotaPresence(ctx context.Context, x QuotaPresence) (QuotaPre
 	if !ValidQuotaPresence(x, time.Now()) {
 		return x, errors.New("invalid quota presence")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.beginQuotaPresence(ctx, x.AccountKey)
 	if err != nil {
 		return x, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	// The per-account transaction lock makes the count and insert atomic
 	// against concurrent new hosts for the same account.
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('quota_presence:'||$1, 0))`, x.AccountKey); err != nil {
-		return x, err
-	}
-	if _, err = tx.Exec(ctx, `DELETE FROM quota_presence WHERE account_key=$1 AND last_seen < clock_timestamp()-$2*interval '1 second'`, x.AccountKey, int64(QuotaPresenceRetention/time.Second)); err != nil {
+	if _, err = tx.Exec(ctx, s.q(`DELETE FROM quota_presence WHERE account_key=$1 AND last_seen < clock_timestamp()-$2*interval '1 second'`, `DELETE FROM quota_presence WHERE account_key=? AND last_seen < DATE_SUB(UTC_TIMESTAMP(6), INTERVAL ? SECOND)`), x.AccountKey, int64(QuotaPresenceRetention/time.Second)); err != nil {
 		return x, err
 	}
 	var exists bool
 	var hosts int
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quota_presence WHERE host_id=$1 AND account_key=$2), (SELECT count(*) FROM quota_presence WHERE account_key=$2)`, x.HostID, x.AccountKey).Scan(&exists, &hosts); err != nil {
+	if err = tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM quota_presence WHERE host_id=$1 AND account_key=$2), (SELECT count(*) FROM quota_presence WHERE account_key=$2)`, `SELECT EXISTS(SELECT 1 FROM quota_presence WHERE host_id=? AND account_key=?), (SELECT count(*) FROM quota_presence WHERE account_key=?)`), quotaPresenceCountArgs(s.dialect, x.HostID, x.AccountKey)...).Scan(&exists, &hosts); err != nil {
 		return x, err
 	}
 	if !exists && hosts >= QuotaPresenceHosts {
 		return x, ErrQuotaPresenceFull
 	}
-	err = tx.QueryRow(ctx, `INSERT INTO quota_presence(host_id,account_key,last_seen) VALUES($1,$2,LEAST($3::timestamptz,clock_timestamp())) ON CONFLICT(host_id,account_key) DO UPDATE SET last_seen=EXCLUDED.last_seen WHERE quota_presence.last_seen<EXCLUDED.last_seen RETURNING last_seen`, x.HostID, x.AccountKey, x.LastSeen).Scan(&x.LastSeen)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// The stored row is newer; the account lock keeps it in place.
-		err = tx.QueryRow(ctx, `SELECT last_seen FROM quota_presence WHERE host_id=$1 AND account_key=$2`, x.HostID, x.AccountKey).Scan(&x.LastSeen)
+	if s.dialect == mysqlDialect {
+		_, err = tx.Exec(ctx, `INSERT INTO quota_presence(host_id,account_key,last_seen) VALUES(?,?,LEAST(?,UTC_TIMESTAMP(6))) ON DUPLICATE KEY UPDATE last_seen=GREATEST(last_seen,VALUES(last_seen))`, x.HostID, x.AccountKey, x.LastSeen)
+		if err == nil {
+			err = tx.QueryRow(ctx, `SELECT last_seen FROM quota_presence WHERE host_id=? AND account_key=?`, x.HostID, x.AccountKey).Scan(&x.LastSeen)
+		}
+	} else {
+		err = tx.QueryRow(ctx, `INSERT INTO quota_presence(host_id,account_key,last_seen) VALUES($1,$2,LEAST($3::timestamptz,clock_timestamp())) ON CONFLICT(host_id,account_key) DO UPDATE SET last_seen=EXCLUDED.last_seen WHERE quota_presence.last_seen<EXCLUDED.last_seen RETURNING last_seen`, x.HostID, x.AccountKey, x.LastSeen).Scan(&x.LastSeen)
+		if errors.Is(err, ErrNoRows) {
+			// The stored row is newer; the account lock keeps it in place.
+			err = tx.QueryRow(ctx, `SELECT last_seen FROM quota_presence WHERE host_id=$1 AND account_key=$2`, x.HostID, x.AccountKey).Scan(&x.LastSeen)
+		}
 	}
 	if err != nil {
 		return x, err
@@ -411,7 +484,7 @@ func (s *Store) PutQuotaPresence(ctx context.Context, x QuotaPresence) (QuotaPre
 // once past retention, even before a write prunes them.
 func (s *Store) QuotaPresence(ctx context.Context, host, key string, limit int) ([]QuotaPresence, bool, error) {
 	out := []QuotaPresence{}
-	rows, err := s.pool.Query(ctx, `SELECT host_id,account_key,last_seen FROM quota_presence WHERE ($1='' OR host_id=$1) AND ($2='' OR account_key=$2) AND last_seen >= clock_timestamp()-$4*interval '1 second' ORDER BY last_seen DESC,host_id,account_key LIMIT $3`, host, key, limit+1, int64(QuotaPresenceRetention/time.Second))
+	rows, err := s.db().Query(ctx, s.q(`SELECT host_id,account_key,last_seen FROM quota_presence WHERE ($1='' OR host_id=$1) AND ($2='' OR account_key=$2) AND last_seen >= clock_timestamp()-$4*interval '1 second' ORDER BY last_seen DESC,host_id,account_key LIMIT $3`, `SELECT host_id,account_key,last_seen FROM quota_presence WHERE (?='' OR host_id=?) AND (?='' OR account_key=?) AND last_seen >= DATE_SUB(UTC_TIMESTAMP(6), INTERVAL ? SECOND) ORDER BY last_seen DESC,host_id,account_key LIMIT ?`), quotaPresenceListArgs(s.dialect, host, key, limit+1)...)
 	if err != nil {
 		return out, false, err
 	}
@@ -430,4 +503,47 @@ func (s *Store) QuotaPresence(ctx context.Context, host, key string, limit int) 
 		return out[:limit], true, nil
 	}
 	return out, false, nil
+}
+
+func quotaLeaseArgs(d storeDialect, key, owner, holder string) []any {
+	if d == mysqlDialect {
+		return []any{owner, holder, key}
+	}
+	return []any{key, owner, holder}
+}
+
+func quotaLatestArgs(d storeDialect, key, kind, window string, id int64, measured time.Time) []any {
+	args := []any{key, kind, window, id, measured}
+	if d == mysqlDialect {
+		args = append(args, measured)
+	}
+	return args
+}
+
+func (s *Store) beginQuotaPresence(ctx context.Context, key string) (transaction, func(), error) {
+	if s.dialect == mysqlDialect {
+		return s.beginNamedTransaction(ctx, "quota-presence:"+key)
+	}
+	tx, err := s.db().Begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('quota_presence:'||$1, 0))`, key); err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, nil, err
+	}
+	return tx, func() {}, nil
+}
+func quotaPresenceCountArgs(d storeDialect, host, key string) []any {
+	if d == mysqlDialect {
+		return []any{host, key, key}
+	}
+	return []any{host, key}
+}
+func quotaPresenceListArgs(d storeDialect, host, key string, limit int) []any {
+	retention := int64(QuotaPresenceRetention / time.Second)
+	if d == mysqlDialect {
+		return []any{host, host, key, key, retention, limit}
+	}
+	return []any{host, key, limit, retention}
 }

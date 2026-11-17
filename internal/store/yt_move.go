@@ -182,7 +182,7 @@ func claimYTFieldsProjectTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (reje
 	var bound string
 	err = tx.QueryRow(ctx, `SELECT project_id FROM yt_task_bindings WHERE task_id::text=$1 AND tenant=$2 AND issue_id=$3`,
 		op.EntityID, op.Tenant, op.YTTargetID).Scan(&bound)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return "", "", nil
 	}
 	if err != nil {
@@ -205,7 +205,7 @@ type ytBinding struct {
 func ytBindingNowTx(ctx context.Context, tx pgx.Tx, taskID int64) (b ytBinding, found bool, err error) {
 	err = tx.QueryRow(ctx, `SELECT tenant, issue_id, project_id FROM yt_task_bindings WHERE task_id=$1`, taskID).
 		Scan(&b.tenant, &b.issueID, &b.projectID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ytBinding{}, false, nil
 	}
 	if err != nil {

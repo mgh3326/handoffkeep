@@ -535,7 +535,7 @@ func (s *Store) ClaimJob(ctx context.Context, j Job) (Job, bool, error) {
 	if err == nil {
 		return stored, true, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return j, false, err
 	}
 	existing, found, err := s.GetJob(ctx, j.JobID)
@@ -556,7 +556,7 @@ func sameTaskID(a, b *int64) bool { return a == nil && b == nil || a != nil && b
 // GetJob returns one job record by id.
 func (s *Store) GetJob(ctx context.Context, id string) (Job, bool, error) {
 	j, err := scanJob(s.pool.QueryRow(ctx, `SELECT `+jobColumns+` FROM jobs WHERE job_id=$1`, id))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return j, false, nil
 	}
 	if err != nil {
@@ -607,7 +607,7 @@ func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, err
 		return j, err
 	}
 	j, err = scanJob(tx.QueryRow(ctx, `SELECT `+jobColumns+` FROM jobs WHERE job_id=$1 FOR UPDATE`, id))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return j, ErrJobNotFound
 	}
 	if err != nil {

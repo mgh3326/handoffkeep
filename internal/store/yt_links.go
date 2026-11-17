@@ -260,7 +260,7 @@ func ytLinksDesiredTx(ctx context.Context, q pgx.Tx, tenant string, id int64) (y
 	err := q.QueryRow(ctx, `SELECT t.parent_id, b.issue_id FROM tasks t
 		LEFT JOIN yt_task_bindings b ON b.task_id = t.parent_id AND b.tenant = $2
 		WHERE t.id = $1`, id, tenant).Scan(&parentID, &parentIssue)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ytLinksDesired{}, false, nil
 	}
 	if err != nil {

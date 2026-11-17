@@ -237,7 +237,7 @@ func scanYTArticleBinding(row interface{ Scan(...any) error }, b *YTArticleBindi
 func readYTArticleBinding(ctx context.Context, q ytRowQuerier, documentID int64) (YTArticleBinding, bool, error) {
 	var b YTArticleBinding
 	err := scanYTArticleBinding(q.QueryRow(ctx, `SELECT `+ytArticleBindingColumns+` FROM yt_article_bindings WHERE document_id=$1`, documentID), &b)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return YTArticleBinding{}, false, nil
 	}
 	if err != nil {
@@ -262,7 +262,7 @@ func (s *Store) YTArticleBinding(ctx context.Context, documentID int64) (YTArtic
 func lockYTArticleSourcesTx(ctx context.Context, tx pgx.Tx, documentID int64) error {
 	var taskID *int64
 	err := tx.QueryRow(ctx, `SELECT task_id FROM documents WHERE id=$1 FOR SHARE`, documentID).Scan(&taskID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return fmt.Errorf("%w: document %d no longer exists", ErrYTArticleBindingConflict, documentID)
 	}
 	if err != nil || taskID == nil {
@@ -270,7 +270,7 @@ func lockYTArticleSourcesTx(ctx context.Context, tx pgx.Tx, documentID int64) er
 	}
 	var project *string
 	err = tx.QueryRow(ctx, `SELECT project FROM tasks WHERE id=$1 FOR SHARE`, *taskID).Scan(&project)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && project == nil) {
+	if errors.Is(err, ErrNoRows) || (err == nil && project == nil) {
 		return nil
 	}
 	if err != nil {
@@ -349,7 +349,7 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 	}
 	var current YTArticleCandidate
 	err = scanYTArticleCandidate(tx.QueryRow(ctx, ytArticleCandidateSQL+ytArticleCandidateFrom+` WHERE d.id = $1`, b.DocumentID), &current)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return YTArticleBinding{}, fmt.Errorf("%w: document %d no longer exists", ErrYTArticleBindingConflict, b.DocumentID)
 	}
 	if err != nil {
@@ -368,7 +368,7 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 		// unbound exception for the operator.
 		var after bool
 		if err := tx.QueryRow(ctx, `SELECT d.updated_at > a.switched_at FROM documents d, yt_authority a
-			WHERE d.id=$1 AND a.kind='documents' AND a.switched_at IS NOT NULL`, b.DocumentID).Scan(&after); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			WHERE d.id=$1 AND a.kind='documents' AND a.switched_at IS NOT NULL`, b.DocumentID).Scan(&after); err != nil && !errors.Is(err, ErrNoRows) {
 			return YTArticleBinding{}, err
 		}
 		if after {
@@ -405,7 +405,7 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 		}
 		return got, tx.Commit(ctx)
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return YTArticleBinding{}, err
 	}
 	have, found, err := readYTArticleBinding(ctx, tx, b.DocumentID)

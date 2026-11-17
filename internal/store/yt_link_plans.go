@@ -74,7 +74,7 @@ func scanYTLinkUnowned(r pgx.Row) (ytwrite.UnownedLink, error) {
 func lockYTOpTx(ctx context.Context, tx pgx.Tx, id int64) (ytwrite.Op, error) {
 	var kind, entity string
 	err := tx.QueryRow(ctx, `SELECT entity_kind, entity_id FROM yt_write_ops WHERE id=$1`, id).Scan(&kind, &entity)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ytwrite.Op{}, ytwrite.ErrNotFound
 	}
 	if err != nil {
@@ -99,7 +99,7 @@ func latestYTLinkPlan(ctx context.Context, q interface {
 				ORDER BY s.step DESC LIMIT 1), '')
 		FROM yt_link_plans p WHERE p.op_id=$1 ORDER BY p.id DESC LIMIT 1`, id).
 		Scan(&rec.Attempt, &rec.Recover, &raw, &rec.CreatedAt, &rec.Marked, &outcome)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ytwrite.LinkPlanRecord{}, false, nil
 	}
 	if err != nil {
@@ -293,7 +293,7 @@ func (l *YTWriteLedger) MarkLinkStep(ctx context.Context, now time.Time, id int6
 	}
 	defer tx.Rollback(ctx)
 	op, err := scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1 FOR UPDATE`, id))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ytwrite.ErrNotFound
 	}
 	if err != nil {
@@ -395,7 +395,7 @@ func (l *YTWriteLedger) LeaseLinkRecovery(ctx context.Context, now time.Time, id
 	err := l.s.pool.QueryRow(ctx, `UPDATE yt_write_ops SET next_attempt_at=$4, reconciles=reconciles+1, reason=$5
 		WHERE id=$1 AND state='remote_unknown' AND next_attempt_at <= $2 AND reconciles=$3 RETURNING reconciles`,
 		id, now.UTC(), reconciles, until.UTC(), ytwrite.ReasonLinkRecovery).Scan(&epoch)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return 0, false, nil
 	}
 	if err != nil {

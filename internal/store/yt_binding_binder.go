@@ -5,8 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -225,7 +223,7 @@ func (s *Store) DropYTBindingIntent(ctx context.Context, taskID int64) error {
 func ytBindingLatestActionTx(ctx context.Context, q ytRowQuerier, taskID int64) (string, error) {
 	var action string
 	err := q.QueryRow(ctx, `SELECT action FROM yt_binding_history WHERE task_id=$1 ORDER BY id DESC LIMIT 1`, taskID).Scan(&action)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return "", nil
 	}
 	return action, err

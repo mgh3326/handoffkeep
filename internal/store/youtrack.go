@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -81,7 +80,7 @@ func scanYouTrackMirror(row interface{ Scan(...any) error }, x *YouTrackMirror) 
 func (s *Store) GetYouTrackMirror(ctx context.Context, taskID int64) (YouTrackMirror, bool, error) {
 	var x YouTrackMirror
 	err := scanYouTrackMirror(s.pool.QueryRow(ctx, `SELECT `+youtrackMirrorColumns+` FROM task_origins WHERE provider='youtrack' AND task_id=$1`, taskID), &x)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return YouTrackMirror{}, false, nil
 	}
 	return x, err == nil, err
@@ -92,7 +91,7 @@ func (s *Store) GetYouTrackMirror(ctx context.Context, taskID int64) (YouTrackMi
 func (s *Store) FindYouTrackMirrorByIssueID(ctx context.Context, issueID string) (YouTrackMirror, bool, error) {
 	var x YouTrackMirror
 	err := scanYouTrackMirror(s.pool.QueryRow(ctx, `SELECT `+youtrackMirrorColumns+` FROM task_origins WHERE provider='youtrack' AND external_id=$1`, issueID), &x)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return YouTrackMirror{}, false, nil
 	}
 	return x, err == nil, err
@@ -194,9 +193,9 @@ func (s *Store) ListYouTrackProjects(ctx context.Context) ([]YouTrackProject, er
 func (s *Store) YouTrackProjectFor(ctx context.Context, hkProject string) (YouTrackProject, bool, error) {
 	var x YouTrackProject
 	err := s.pool.QueryRow(ctx, `SELECT hk_project,yt_project_id,short_name FROM youtrack_projects WHERE hk_project=$1`, hkProject).Scan(&x.HKProject, &x.ProjectID, &x.ShortName)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		err = s.pool.QueryRow(ctx, `SELECT hk_project,yt_project_id,short_name FROM youtrack_projects WHERE hk_project='other'`).Scan(&x.HKProject, &x.ProjectID, &x.ShortName)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return YouTrackProject{}, false, nil
 		}
 	}
@@ -207,7 +206,7 @@ func (s *Store) YouTrackProjectFor(ctx context.Context, hkProject string) (YouTr
 func (s *Store) YouTrackProjectByShortName(ctx context.Context, shortName string) (YouTrackProject, bool, error) {
 	var x YouTrackProject
 	err := s.pool.QueryRow(ctx, `SELECT hk_project,yt_project_id,short_name FROM youtrack_projects WHERE lower(short_name)=lower($1)`, shortName).Scan(&x.HKProject, &x.ProjectID, &x.ShortName)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return YouTrackProject{}, false, nil
 	}
 	return x, err == nil, err

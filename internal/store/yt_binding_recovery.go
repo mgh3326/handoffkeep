@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -329,7 +327,7 @@ func (s *Store) recoverHeldYTOp(ctx context.Context, now time.Time, c ytHeldOp) 
 		return false, err
 	}
 	op, err := scanYTHeldOp(tx.QueryRow(ctx, `SELECT `+ytHeldOpColumns+` FROM yt_write_ops o WHERE o.id=$1 AND o.state='prepared' FOR UPDATE`, c.id))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {

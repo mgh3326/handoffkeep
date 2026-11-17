@@ -44,7 +44,7 @@ func ytLinksSweepStateTx(ctx context.Context, q ytRowQuerier) (YTLinksSweepState
 	var st YTLinksSweepState
 	err := q.QueryRow(ctx, `SELECT generation, done_generation, after_task_id FROM yt_links_sweep WHERE singleton`).
 		Scan(&st.Generation, &st.DoneGeneration, &st.AfterTaskID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return YTLinksSweepState{}, nil
 	}
 	return st, err

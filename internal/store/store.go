@@ -4,6 +4,7 @@ package store
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,7 +24,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
@@ -649,7 +649,10 @@ type RelayEvent struct {
 }
 
 type Store struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	mysqlPool *sql.DB
+	dialect   storeDialect
+	queries   querier
 	// registry replaces migrationRegistry when set; tests use it.
 	registry []migration
 	// autoCloseOff inverts the auto_close_parent setting so the zero Store has
@@ -873,6 +876,9 @@ func OpenWithoutMigration(ctx context.Context, url string) (*Store, error) {
 
 // open is Open with an explicit migration registry; nil means the real one.
 func open(ctx context.Context, url string, registry []migration) (*Store, error) {
+	if strings.HasPrefix(url, "mysql://") {
+		return openMySQL(ctx, url)
+	}
 	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
 		return nil, errors.New("HANDOFFKEEP_DB_URL must be a PostgreSQL URL")
 	}
@@ -955,15 +961,20 @@ const migrateAttempts = 3
 func retryDeadlock(ctx context.Context, attempts int, f func(context.Context) error) error {
 	var err error
 	for i := 0; i < attempts; i++ {
-		var pgErr *pgconn.PgError
-		if err = f(ctx); !errors.As(err, &pgErr) || pgErr.Code != "40P01" {
+		if err = f(ctx); !errors.Is(mapDriverError(err), errDeadlock) {
 			return err
 		}
 		log.Printf("store.deadlock_retry attempt=%d err=%q", i+1, err.Error())
 	}
 	return err
 }
-func (s *Store) Close() { s.pool.Close() }
+func (s *Store) Close() {
+	if s.mysqlPool != nil {
+		_ = s.mysqlPool.Close()
+		return
+	}
+	s.pool.Close()
+}
 
 // migrations is the registry this store migrates with.
 func (s *Store) migrations() []migration {
@@ -1574,7 +1585,7 @@ func benchGradeOrderSQL() string {
 
 // lockBenchGradeTables serializes the grade mirror writers against schema
 // changes and acquires both table locks in their shared order.
-func lockBenchGradeTables(ctx context.Context, tx pgx.Tx) error {
+func lockBenchGradeTables(ctx context.Context, tx transaction) error {
 	if _, err := tx.Exec(ctx, `LOCK TABLE bench_grades IN ROW EXCLUSIVE MODE`); err != nil {
 		return err
 	}
@@ -1695,8 +1706,7 @@ type benchRepKey struct {
 // transaction without writing anything into ErrBenchRepsRetryable so the
 // API can answer 503 instead of a 400 that wrongly blames the rows.
 func benchRepsBatchErr(err error) error {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && (pgErr.Code == "40P01" || pgErr.Code == "40001") {
+	if errors.Is(mapDriverError(err), errSerializationFailure) {
 		return fmt.Errorf("%w: %w", ErrBenchRepsRetryable, err)
 	}
 	return err
@@ -1756,6 +1766,11 @@ var upsertBenchRepInsert = func() string {
 	return `INSERT INTO bench_reps(` + strings.Join(cols, ",") + `) VALUES(` + strings.Join(params, ",") + `) ON CONFLICT (created_by,origin_id) DO UPDATE SET origin_id=EXCLUDED.origin_id WHERE ` + strings.Join(same, " AND ") + ` RETURNING id`
 }()
 
+var mysqlUpsertBenchRepInsert = func() string {
+	cols := append([]string{"origin_id", "profile", "model_id", "task_ref", "tier", "role", "rounds", "blockers_found", "completed", "input_tokens", "output_tokens", "notes", "recorded_at", "effort", "grade", "table_grade", "created_by", "created_at"}, benchOutcomeColumns...)
+	return `INSERT INTO bench_reps(` + strings.Join(cols, ",") + `) VALUES(` + placeholders(len(cols)) + `) ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)`
+}()
+
 // UpsertBenchReps inserts one row per input rep and returns the server ids in
 // input order. A rep whose (created_by, origin_id) key is already taken is an
 // idempotent resend only when its content is field-for-field identical to the
@@ -1798,7 +1813,7 @@ func (s *Store) UpsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, er
 		}
 		seen[k] = i
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db().Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1809,12 +1824,31 @@ func (s *Store) UpsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, er
 	for i, x := range xs {
 		var id int64
 		args := append([]any{x.OriginID, x.Profile, x.ModelID, x.TaskRef, x.Tier, x.Role, x.Rounds, x.BlockersFound, x.Completed, x.InputTokens, x.OutputTokens, x.Notes, x.RecordedAt, x.Effort, x.Grade, x.TableGrade, x.CreatedBy, now}, x.BenchOutcome.values()...)
+		if s.dialect == mysqlDialect {
+			// MySQL's duplicate-key update takes the row lock and returns its id;
+			// compare the locked row before accepting the resend.
+			args[12] = x.RecordedAt.Truncate(time.Microsecond)
+			id, err = tx.InsertID(ctx, mysqlUpsertBenchRepInsert, args...)
+			if err != nil {
+				return nil, benchRepsBatchErr(err)
+			}
+			existing, scanErr := scanBenchRep(tx.QueryRow(ctx, `SELECT `+benchRepColumns+` FROM bench_reps WHERE id=? FOR UPDATE`, id))
+			if scanErr != nil {
+				return nil, benchRepsBatchErr(scanErr)
+			}
+			if !sameBenchRepInput(existing, x) {
+				conflicts = append(conflicts, BenchRepConflict{Index: i, OriginID: x.OriginID, ServerID: id})
+			} else {
+				ids = append(ids, id)
+			}
+			continue
+		}
 		err = tx.QueryRow(ctx, upsertBenchRepInsert, args...).Scan(&id)
 		if err == nil {
 			ids = append(ids, id)
 			continue
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
+		if !errors.Is(err, ErrNoRows) {
 			return nil, benchRepsBatchErr(err)
 		}
 		var existing int64
@@ -1847,17 +1881,28 @@ func (s *Store) ListBenchReps(ctx context.Context, profile, grade, effort string
 	if limit > 5000 {
 		limit = 5000
 	}
-	q := `SELECT ` + benchRepColumns + ` FROM bench_reps WHERE ($1='' OR profile=$1) AND ($2='' OR grade=$2) AND ($3='' OR effort=$3)`
+	q := `SELECT ` + benchRepColumns + s.q(` FROM bench_reps WHERE ($1='' OR profile=$1) AND ($2='' OR grade=$2) AND ($3='' OR effort=$3)`, ` FROM bench_reps WHERE (?='' OR profile=?) AND (?='' OR grade=?) AND (?='' OR effort=?)`)
 	args := []any{profile, grade, effort}
+	if s.dialect == mysqlDialect {
+		args = []any{profile, profile, grade, grade, effort, effort}
+	}
 	order := ` ORDER BY id DESC`
 	if afterID != nil {
 		args = append(args, *afterID)
-		q += fmt.Sprintf(` AND id>$%d`, len(args))
+		if s.dialect == mysqlDialect {
+			q += ` AND id>?`
+		} else {
+			q += fmt.Sprintf(` AND id>$%d`, len(args))
+		}
 		order = ` ORDER BY id ASC`
 	}
 	args = append(args, limit)
-	q += order + fmt.Sprintf(` LIMIT $%d`, len(args))
-	rows, err := s.pool.Query(ctx, q, args...)
+	if s.dialect == mysqlDialect {
+		q += order + ` LIMIT ?`
+	} else {
+		q += order + fmt.Sprintf(` LIMIT $%d`, len(args))
+	}
+	rows, err := s.db().Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1886,7 +1931,7 @@ func (s *Store) ListBenchRepsByTaskRef(ctx context.Context, taskRef string, limi
 	if limit > 5000 {
 		limit = 5000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+benchRepColumns+` FROM bench_reps WHERE task_ref=$1 ORDER BY id ASC LIMIT $2`, taskRef, limit)
+	rows, err := s.db().Query(ctx, `SELECT `+benchRepColumns+s.q(` FROM bench_reps WHERE task_ref=$1 ORDER BY id ASC LIMIT $2`, ` FROM bench_reps WHERE task_ref=? ORDER BY id ASC LIMIT ?`), taskRef, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1906,14 +1951,12 @@ func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, er
 	if len(xs) < 1 || len(xs) > benchBatchMax {
 		return 0, errors.New("invalid bench grades")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.beginBenchWrite(ctx)
 	if err != nil {
 		return 0, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if err := lockBenchGradeTables(ctx, tx); err != nil {
-		return 0, err
-	}
 	now := time.Now().UTC()
 	for _, x := range xs {
 		if strings.TrimSpace(x.DeviationRef) == "" {
@@ -1935,7 +1978,7 @@ func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, er
 		if x.DecidedAt.IsZero() {
 			x.DecidedAt = now
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO bench_grades(profile,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (profile) DO UPDATE SET grade=EXCLUDED.grade,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by`, x.Profile, x.Grade, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy)
+		_, err = tx.Exec(ctx, s.q(`INSERT INTO bench_grades(profile,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (profile) DO UPDATE SET grade=EXCLUDED.grade,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by`, `INSERT INTO bench_grades(profile,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES(?,?,?,?,?,?) ON DUPLICATE KEY UPDATE grade=VALUES(grade),boundary_version=VALUES(boundary_version),deviation_ref=VALUES(deviation_ref),decided_at=VALUES(decided_at),decided_by=VALUES(decided_by)`), x.Profile, x.Grade, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy)
 		if err != nil {
 			return 0, err
 		}
@@ -1944,12 +1987,29 @@ func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, er
 		// are preserved on conflict. A legacy grade write un-retires the row.
 		// Refuse a scored Sol transition atomically, including when a catalog
 		// writer created the default row after this transaction began.
-		tag, err := tx.Exec(ctx, `INSERT INTO bench_catalog(profile,effort,model_id,pool,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES($1,'','','',$2,$3,$4,$5,$6) ON CONFLICT (profile,effort) DO UPDATE SET grade=EXCLUDED.grade,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by,retired_at=NULL WHERE NOT ($7 AND EXCLUDED.grade='unrated' AND bench_catalog.score IS NOT NULL)`, x.Profile, x.Grade, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy, benchSolProfiles[x.Profile])
-		if err != nil {
-			return 0, err
-		}
-		if tag.RowsAffected() == 0 {
-			return 0, ErrBenchCatalogScoredSolUnrated
+		if s.dialect == mysqlDialect {
+			if benchSolProfiles[x.Profile] && x.Grade == "unrated" {
+				var score *float64
+				err := tx.QueryRow(ctx, `SELECT score FROM bench_catalog WHERE profile=? AND effort='' FOR UPDATE`, x.Profile).Scan(&score)
+				if err != nil && !errors.Is(err, ErrNoRows) {
+					return 0, err
+				}
+				if err == nil && score != nil {
+					return 0, ErrBenchCatalogScoredSolUnrated
+				}
+			}
+			_, err := tx.Exec(ctx, `INSERT INTO bench_catalog(profile,effort,model_id,pool,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES(?,'','','',?,?,?,?,?) ON DUPLICATE KEY UPDATE grade=VALUES(grade),boundary_version=VALUES(boundary_version),deviation_ref=VALUES(deviation_ref),decided_at=VALUES(decided_at),decided_by=VALUES(decided_by),retired_at=NULL`, x.Profile, x.Grade, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy)
+			if err != nil {
+				return 0, err
+			}
+		} else {
+			tag, err := tx.Exec(ctx, `INSERT INTO bench_catalog(profile,effort,model_id,pool,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES($1,'','','',$2,$3,$4,$5,$6) ON CONFLICT (profile,effort) DO UPDATE SET grade=EXCLUDED.grade,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by,retired_at=NULL WHERE NOT ($7 AND EXCLUDED.grade='unrated' AND bench_catalog.score IS NOT NULL)`, x.Profile, x.Grade, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy, benchSolProfiles[x.Profile])
+			if err != nil {
+				return 0, err
+			}
+			if tag == 0 {
+				return 0, ErrBenchCatalogScoredSolUnrated
+			}
 		}
 	}
 	return len(xs), tx.Commit(ctx)
@@ -1961,7 +2021,7 @@ func (s *Store) ListBenchGrades(ctx context.Context) ([]BenchGrade, error) {
 	// yet (for example a write from a pre-migration binary during a rollback
 	// skew window). Once any catalog effort='' row exists — even a retired one —
 	// it alone speaks for the profile.
-	rows, err := s.pool.Query(ctx, `SELECT profile,grade,boundary_version,deviation_ref,decided_at,decided_by FROM bench_catalog WHERE effort='' AND retired_at IS NULL UNION ALL SELECT g.profile,g.grade,g.boundary_version,g.deviation_ref,g.decided_at,g.decided_by FROM bench_grades g WHERE NOT EXISTS (SELECT 1 FROM bench_catalog c WHERE c.profile=g.profile AND c.effort='') ORDER BY profile`)
+	rows, err := s.db().Query(ctx, `SELECT profile,grade,boundary_version,deviation_ref,decided_at,decided_by FROM bench_catalog WHERE effort='' AND retired_at IS NULL UNION ALL SELECT g.profile,g.grade,g.boundary_version,g.deviation_ref,g.decided_at,g.decided_by FROM bench_grades g WHERE NOT EXISTS (SELECT 1 FROM bench_catalog c WHERE c.profile=g.profile AND c.effort='') ORDER BY profile`)
 	if err != nil {
 		return nil, err
 	}
@@ -1987,14 +2047,12 @@ func (s *Store) UpsertBenchCatalog(ctx context.Context, xs []BenchCatalogEntry) 
 	if len(xs) < 1 || len(xs) > benchBatchMax {
 		return 0, errors.New("invalid bench catalog")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.beginBenchWrite(ctx)
 	if err != nil {
 		return 0, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if err := lockBenchGradeTables(ctx, tx); err != nil {
-		return 0, err
-	}
 	now := time.Now().UTC()
 	profiles := map[string]bool{}
 	for _, x := range xs {
@@ -2031,15 +2089,15 @@ func (s *Store) UpsertBenchCatalog(ctx context.Context, xs []BenchCatalogEntry) 
 		if x.DecidedAt.IsZero() {
 			x.DecidedAt = now
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO bench_catalog(profile,effort,model_id,pool,grade,score,gate,gate_reason,benchmark_source,benchmark_annotation,boundary_version,deviation_ref,decided_at,decided_by,retired_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (profile,effort) DO UPDATE SET model_id=EXCLUDED.model_id,pool=EXCLUDED.pool,grade=EXCLUDED.grade,score=EXCLUDED.score,gate=EXCLUDED.gate,gate_reason=EXCLUDED.gate_reason,benchmark_source=EXCLUDED.benchmark_source,benchmark_annotation=EXCLUDED.benchmark_annotation,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by,retired_at=EXCLUDED.retired_at`, x.Profile, x.Effort, x.ModelID, x.Pool, x.Grade, x.Score, x.Gate, x.GateReason, x.BenchmarkSource, x.BenchmarkAnnotation, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy, x.RetiredAt)
+		_, err = tx.Exec(ctx, s.q(`INSERT INTO bench_catalog(profile,effort,model_id,pool,grade,score,gate,gate_reason,benchmark_source,benchmark_annotation,boundary_version,deviation_ref,decided_at,decided_by,retired_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (profile,effort) DO UPDATE SET model_id=EXCLUDED.model_id,pool=EXCLUDED.pool,grade=EXCLUDED.grade,score=EXCLUDED.score,gate=EXCLUDED.gate,gate_reason=EXCLUDED.gate_reason,benchmark_source=EXCLUDED.benchmark_source,benchmark_annotation=EXCLUDED.benchmark_annotation,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by,retired_at=EXCLUDED.retired_at`, `INSERT INTO bench_catalog(profile,effort,model_id,pool,grade,score,gate,gate_reason,benchmark_source,benchmark_annotation,boundary_version,deviation_ref,decided_at,decided_by,retired_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE model_id=VALUES(model_id),pool=VALUES(pool),grade=VALUES(grade),score=VALUES(score),gate=VALUES(gate),gate_reason=VALUES(gate_reason),benchmark_source=VALUES(benchmark_source),benchmark_annotation=VALUES(benchmark_annotation),boundary_version=VALUES(boundary_version),deviation_ref=VALUES(deviation_ref),decided_at=VALUES(decided_at),decided_by=VALUES(decided_by),retired_at=VALUES(retired_at)`), x.Profile, x.Effort, x.ModelID, x.Pool, x.Grade, x.Score, x.Gate, x.GateReason, x.BenchmarkSource, x.BenchmarkAnnotation, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy, x.RetiredAt)
 		if err != nil {
 			return 0, err
 		}
 		if x.Effort == "" {
 			if x.RetiredAt == nil {
-				_, err = tx.Exec(ctx, `INSERT INTO bench_grades(profile,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (profile) DO UPDATE SET grade=EXCLUDED.grade,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by`, x.Profile, x.Grade, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy)
+				_, err = tx.Exec(ctx, s.q(`INSERT INTO bench_grades(profile,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (profile) DO UPDATE SET grade=EXCLUDED.grade,boundary_version=EXCLUDED.boundary_version,deviation_ref=EXCLUDED.deviation_ref,decided_at=EXCLUDED.decided_at,decided_by=EXCLUDED.decided_by`, `INSERT INTO bench_grades(profile,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES(?,?,?,?,?,?) ON DUPLICATE KEY UPDATE grade=VALUES(grade),boundary_version=VALUES(boundary_version),deviation_ref=VALUES(deviation_ref),decided_at=VALUES(decided_at),decided_by=VALUES(decided_by)`), x.Profile, x.Grade, x.BoundaryVersion, x.DeviationRef, x.DecidedAt, x.DecidedBy)
 			} else {
-				_, err = tx.Exec(ctx, `DELETE FROM bench_grades WHERE profile=$1`, x.Profile)
+				_, err = tx.Exec(ctx, s.q(`DELETE FROM bench_grades WHERE profile=$1`, `DELETE FROM bench_grades WHERE profile=?`), x.Profile)
 			}
 			if err != nil {
 				return 0, err
@@ -2047,7 +2105,7 @@ func (s *Store) UpsertBenchCatalog(ctx context.Context, xs []BenchCatalogEntry) 
 		}
 		profiles[x.Profile] = true
 	}
-	if err := checkBenchCatalogMonotonicity(ctx, tx, profiles); err != nil {
+	if err := checkBenchCatalogMonotonicity(ctx, tx, s.dialect, profiles); err != nil {
 		return 0, err
 	}
 	return len(xs), tx.Commit(ctx)
@@ -2057,12 +2115,21 @@ func (s *Store) UpsertBenchCatalog(ctx context.Context, xs []BenchCatalogEntry) 
 // higher-effort rung carries a worse grade than a lower rung of the same
 // profile. Retired rows, the profile-default row (effort=”) and unknown
 // effort strings and unrated rows do not participate.
-func checkBenchCatalogMonotonicity(ctx context.Context, tx pgx.Tx, profiles map[string]bool) error {
+func checkBenchCatalogMonotonicity(ctx context.Context, tx transaction, dialect storeDialect, profiles map[string]bool) error {
 	list := make([]string, 0, len(profiles))
 	for p := range profiles {
 		list = append(list, p)
 	}
-	rows, err := tx.Query(ctx, `SELECT profile,effort,grade FROM bench_catalog WHERE profile = ANY($1) AND retired_at IS NULL AND effort <> ''`, list)
+	query := `SELECT profile,effort,grade FROM bench_catalog WHERE profile = ANY($1) AND retired_at IS NULL AND effort <> ''`
+	args := []any{list}
+	if dialect == mysqlDialect {
+		query = `SELECT profile,effort,grade FROM bench_catalog WHERE profile IN (` + placeholders(len(list)) + `) AND retired_at IS NULL AND effort <> ''`
+		args = make([]any, len(list))
+		for i, p := range list {
+			args[i] = p
+		}
+	}
+	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -2104,7 +2171,7 @@ func (s *Store) ListBenchCatalog(ctx context.Context, pool string, includeRetire
 	if !validText(pool, 200) {
 		return nil, errors.New("invalid bench catalog query")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT profile,effort,model_id,pool,grade,score,gate,gate_reason,benchmark_source,benchmark_annotation,boundary_version,deviation_ref,decided_at,decided_by,retired_at FROM bench_catalog WHERE ($1='' OR pool=$1) AND ($1='' OR gate<>'consult_only') AND ($2 OR retired_at IS NULL) ORDER BY pool, `+benchGradeOrderSQL()+`, profile, CASE effort WHEN '' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2 WHEN 'high' THEN 3 WHEN 'xhigh' THEN 4 WHEN 'max' THEN 5 ELSE 6 END, effort`, pool, includeRetired)
+	rows, err := s.db().Query(ctx, `SELECT profile,effort,model_id,pool,grade,score,gate,gate_reason,benchmark_source,benchmark_annotation,boundary_version,deviation_ref,decided_at,decided_by,retired_at FROM bench_catalog `+s.q(`WHERE ($1='' OR pool=$1) AND ($1='' OR gate<>'consult_only') AND ($2 OR retired_at IS NULL)`, `WHERE (?='' OR pool=?) AND (?='' OR gate<>'consult_only') AND (? OR retired_at IS NULL)`)+` ORDER BY pool, `+benchGradeOrderSQL()+`, profile, CASE effort WHEN '' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2 WHEN 'high' THEN 3 WHEN 'xhigh' THEN 4 WHEN 'max' THEN 5 ELSE 6 END, effort`, benchCatalogArgs(s.dialect, pool, includeRetired)...)
 	if err != nil {
 		return nil, err
 	}
@@ -2618,7 +2685,7 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 
 	var x Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return Task{}, ErrTaskNotFound
 		}
 		return Task{}, err
@@ -2721,7 +2788,7 @@ func (s *Store) relaneTaskTx(ctx context.Context, tx pgx.Tx, id int64, to, by, n
 	}
 
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return Task{}, false, ErrTaskNotFound
 		}
 		return Task{}, false, err
@@ -2780,7 +2847,7 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 	}
 
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return Task{}, false, ErrTaskNotFound
 		}
 		return Task{}, false, err
@@ -2846,7 +2913,7 @@ func (s *Store) SetTaskArea(ctx context.Context, id int64, area *string, by, not
 	}
 	defer tx.Rollback(ctx)
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return Task{}, false, ErrTaskNotFound
 		}
 		return Task{}, false, err
@@ -3087,7 +3154,7 @@ func (s *Store) GlanceTasks(ctx context.Context) (map[string]int, []Task, error)
 func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 	var x Task
 	if err := scanTask(s.pool.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return Task{}, false, nil
 		}
 		return Task{}, false, err
@@ -3238,11 +3305,11 @@ func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, 
 	if err == nil {
 		return x, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return RelayEvent{}, err
 	}
 	if err = scanRelayEvent(s.pool.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=$1`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return RelayEvent{}, ErrRelayEventNotFound
 		}
 		return RelayEvent{}, err
@@ -3530,7 +3597,7 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 		}
 		return x, false, nil
 	}
-	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
+	if e != nil && !errors.Is(e, ErrNoRows) {
 		return x, false, e
 	}
 	// A deploy record moves the merged tasks it lists in the same transaction
@@ -3583,7 +3650,7 @@ func (s *Store) GetDocument(ctx context.Context, key string) (Document, bool, er
 	var x Document
 	e := s.pool.QueryRow(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE key=$1`, key).Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.Body, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.TaskID, &x.OriginClass)
 	if e != nil {
-		if errors.Is(e, pgx.ErrNoRows) {
+		if errors.Is(e, ErrNoRows) {
 			return x, false, nil
 		}
 		return x, false, e
@@ -3597,7 +3664,7 @@ func (s *Store) GetDocumentByID(ctx context.Context, id int64) (Document, bool, 
 	var x Document
 	e := s.pool.QueryRow(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE id=$1`, id).Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.Body, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.TaskID, &x.OriginClass)
 	if e != nil {
-		if errors.Is(e, pgx.ErrNoRows) {
+		if errors.Is(e, ErrNoRows) {
 			return x, false, nil
 		}
 		return x, false, e
@@ -3730,7 +3797,7 @@ func (s *Store) GetAttachment(ctx context.Context, sha string) (Attachment, bool
 	var x Attachment
 	e := s.pool.QueryRow(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments WHERE sha256=$1`, sha).Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation, &x.ArchivedAt, &x.ArchiveLocation, &x.HotDeletedAt)
 	if e != nil {
-		if errors.Is(e, pgx.ErrNoRows) {
+		if errors.Is(e, ErrNoRows) {
 			return x, false, nil
 		}
 		return x, false, e
@@ -3820,7 +3887,7 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 	var present bool
 	var archivedAt *time.Time
 	e = tx.QueryRow(ctx, `SELECT archived_at FROM attachments WHERE sha256=$1 FOR UPDATE`, x.SHA256).Scan(&archivedAt)
-	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
+	if e != nil && !errors.Is(e, ErrNoRows) {
 		return x, false, e
 	}
 	present = e == nil
@@ -3925,7 +3992,7 @@ func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, 
 	var rowSize int64
 	e = tx.QueryRow(ctx, `SELECT status, COALESCE(claim_nonce,''), sha256, size_bytes FROM attachment_uploads WHERE id=$1 FOR UPDATE`, id).Scan(&status, &claimNonce, &rowSHA, &rowSize)
 	if e != nil {
-		if errors.Is(e, pgx.ErrNoRows) {
+		if errors.Is(e, ErrNoRows) {
 			return x, false, ErrUploadClaimLost
 		}
 		return x, false, e
@@ -3947,7 +4014,7 @@ func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, 
 	var present bool
 	var archivedAt *time.Time
 	e = tx.QueryRow(ctx, `SELECT archived_at FROM attachments WHERE sha256=$1 FOR UPDATE`, x.SHA256).Scan(&archivedAt)
-	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
+	if e != nil && !errors.Is(e, ErrNoRows) {
 		return x, false, e
 	}
 	present = e == nil
@@ -4127,7 +4194,7 @@ func (s *Store) ListTaskAttachmentsByRefs(ctx context.Context, ids []int64, perR
 func (s *Store) AttachmentUsage(ctx context.Context) (AttachmentUsage, error) {
 	x := AttachmentUsage{Month: monthNow()}
 	e := s.pool.QueryRow(ctx, `SELECT puts,gets,bytes_added FROM attachment_usage WHERE month=$1`, x.Month).Scan(&x.Puts, &x.Gets, &x.BytesAdded)
-	if e != nil && errors.Is(e, pgx.ErrNoRows) {
+	if e != nil && errors.Is(e, ErrNoRows) {
 		e = nil
 	}
 	if e != nil {
@@ -4219,7 +4286,7 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 				x.Scope, x.Title = "docs", x.Key
 				out = append(out, x)
 				exactDocKey = x.Key
-			case errors.Is(e, pgx.ErrNoRows):
+			case errors.Is(e, ErrNoRows):
 				return out, nil
 			default:
 				return nil, fmt.Errorf("search docs exact: %w", e)
@@ -4369,7 +4436,7 @@ func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]S
 			}
 			x.Scope, x.Snippet = "tasks", x.Title
 			out = append(out, x)
-		case errors.Is(e, pgx.ErrNoRows):
+		case errors.Is(e, ErrNoRows):
 			return out, nil
 		default:
 			return nil, fmt.Errorf("search tasks exact: %w", e)
@@ -4432,4 +4499,26 @@ func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]S
 		}
 	}
 	return out, nil
+}
+
+func benchCatalogArgs(d storeDialect, pool string, includeRetired bool) []any {
+	if d == mysqlDialect {
+		return []any{pool, pool, pool, includeRetired}
+	}
+	return []any{pool, includeRetired}
+}
+
+func (s *Store) beginBenchWrite(ctx context.Context) (transaction, func(), error) {
+	if s.dialect == mysqlDialect {
+		return s.beginNamedTransaction(ctx, "bench-grade-mirror")
+	}
+	tx, err := s.db().Begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err = lockBenchGradeTables(ctx, tx); err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, nil, err
+	}
+	return tx, func() {}, nil
 }

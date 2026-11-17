@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -189,7 +187,7 @@ func (s *Store) requeueYTComment(ctx context.Context, fromOp, commentID, taskID 
 	}
 	var linked int64
 	err = tx.QueryRow(ctx, `SELECT op_id FROM yt_comment_write_links WHERE comment_id=$1`, commentID).Scan(&linked)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return YTRequeued{}, false, nil
 	}
 	if err != nil {
@@ -214,7 +212,7 @@ func (s *Store) requeueYTComment(ctx context.Context, fromOp, commentID, taskID 
 	var createID int64
 	err = tx.QueryRow(ctx, `SELECT id FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3 AND state='applied'`,
 		YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(taskID)).Scan(&createID)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if err != nil && !errors.Is(err, ErrNoRows) {
 		return YTRequeued{}, false, err
 	}
 	if b.Origin != YTBindingOpApplied || b.OpID == 0 || b.OpID != createID || b.Tenant != from.Tenant || commentID <= b.CommentsFrom {

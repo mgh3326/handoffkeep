@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // AttachmentArchiveGrace is how long every referring task must have been
@@ -187,7 +185,7 @@ func (s *Store) RecordAttachmentArchive(ctx context.Context, sha, location strin
 	var sizeBytes int64
 	err = tx.QueryRow(ctx, `SELECT archived_at, archive_location, hot_deleted_at, size_bytes FROM attachments WHERE sha256=$1 FOR UPDATE`, sha).
 		Scan(&archivedAt, &recorded, &hotDeletedAt, &sizeBytes)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return AttachmentArchive{}, ErrAttachmentNotFound
 	}
 	if err != nil {

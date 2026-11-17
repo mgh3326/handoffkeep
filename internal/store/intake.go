@@ -174,7 +174,7 @@ func checkIntakeHeader(source, sourceRef, lane, by string) error {
 func taskBySourceTx(ctx context.Context, q rowQuerier, source, sourceRef string) (Task, bool, error) {
 	var x Task
 	err := scanTask(q.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE source=$1 AND source_ref=$2`, source, sourceRef), &x)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return Task{}, false, nil
 	}
 	return x, err == nil, err
@@ -520,7 +520,7 @@ func (s *Store) EmitTicketSet(ctx context.Context, in TicketSetInput) (TicketSet
 			out.Children = append(out.Children, TicketSetChild{Ref: c.Ref, ID: id})
 		}
 		return out, false, tx.Commit(ctx)
-	case !errors.Is(err, pgx.ErrNoRows):
+	case !errors.Is(err, ErrNoRows):
 		return TicketSet{}, false, err
 	}
 	keys := []string{in.SourceRef}

@@ -234,7 +234,7 @@ func (s *Store) runYTFeedConsumer(ctx context.Context, c ytFeedConsumer, limit i
 		pass.Created = true
 		// History before the cursor is the backfill's (Y3), not the feed's.
 		log.Printf("ytwrite.feed_cursor_created consumer=%q last_sync_id=%d", c.name, pass.Cursor)
-	case !errors.Is(err, pgx.ErrNoRows):
+	case !errors.Is(err, ErrNoRows):
 		return pass, err
 	default:
 		if err := tx.QueryRow(ctx, `SELECT last_sync_id FROM yt_feed_cursors WHERE consumer=$1 FOR UPDATE`, c.name).Scan(&pass.Cursor); err != nil {
@@ -393,7 +393,7 @@ func prepareYTSnapshotRuleTx(ctx context.Context, tx pgx.Tx, now time.Time, n yt
 	var seq, lastOpID int64
 	err := tx.QueryRow(ctx, `SELECT seq,last_sha,last_op_id FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3 FOR UPDATE`,
 		n.EntityKind, n.EntityID, n.Kind).Scan(&seq, &lastSHA, &lastOpID)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if err != nil && !errors.Is(err, ErrNoRows) {
 		return ytwrite.Op{}, false, err
 	}
 	if err == nil {
@@ -430,7 +430,7 @@ func ytSnapshotCancelledByUnbind(ctx context.Context, tx pgx.Tx, opID int64) (bo
 	var state, reason string
 	err := tx.QueryRow(ctx, `SELECT state, reason FROM yt_write_ops WHERE id=$1`, opID).Scan(&state, &reason)
 	switch {
-	case errors.Is(err, pgx.ErrNoRows):
+	case errors.Is(err, ErrNoRows):
 		return false, nil
 	case err != nil:
 		return false, err
@@ -452,7 +452,7 @@ func ytSnapshotUnchanged(ctx context.Context, tx pgx.Tx, lastSHA string, lastOpI
 	var state string
 	err := tx.QueryRow(ctx, `SELECT state FROM yt_write_ops WHERE id=$1`, lastOpID).Scan(&state)
 	switch {
-	case errors.Is(err, pgx.ErrNoRows):
+	case errors.Is(err, ErrNoRows):
 		return true, nil
 	case err != nil:
 		return false, err

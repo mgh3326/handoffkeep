@@ -192,7 +192,7 @@ func ytAuthoritiesTx(ctx context.Context, q interface {
 func ytAuthorityTx(ctx context.Context, q ytRowQuerier, kind YTAuthorityKind) (YTAuthoritySide, error) {
 	var side YTAuthoritySide
 	err := q.QueryRow(ctx, `SELECT authority FROM yt_authority WHERE kind=$1`, string(kind)).Scan(&side)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !validYTAuthoritySide(side)) {
+	if errors.Is(err, ErrNoRows) || (err == nil && !validYTAuthoritySide(side)) {
 		return YTAuthorityHK, nil
 	}
 	return side, err
@@ -207,7 +207,7 @@ func ytAuthorityTx(ctx context.Context, q ytRowQuerier, kind YTAuthorityKind) (Y
 func ytAuthorityShareTx(ctx context.Context, tx pgx.Tx, kind YTAuthorityKind) (YTAuthoritySide, error) {
 	var side YTAuthoritySide
 	err := tx.QueryRow(ctx, `SELECT authority FROM yt_authority WHERE kind=$1 FOR SHARE`, string(kind)).Scan(&side)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		if _, err := tx.Exec(ctx, `INSERT INTO yt_authority(kind) VALUES ($1) ON CONFLICT DO NOTHING`, string(kind)); err != nil {
 			return "", err
 		}

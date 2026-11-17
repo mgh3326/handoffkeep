@@ -105,7 +105,7 @@ func (s *Store) CreateTaskCommentProjected(ctx context.Context, taskID int64, au
 	}
 	var x TaskComment
 	err = scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) SELECT $1,$2,$3,$4 WHERE EXISTS(SELECT 1 FROM tasks WHERE id=$1) RETURNING `+taskCommentColumns, taskID, body, author, time.Now().UTC()), &x)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return CreatedTaskComment{}, ErrTaskNotFound
 	}
 	if err != nil {
@@ -170,7 +170,7 @@ func (s *Store) CreateMCPTaskCommentProjected(ctx context.Context, taskID int64,
 	}
 	now := time.Now().UTC()
 	err = scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at,source_ref) SELECT $1,$2,$3,$4,$5 WHERE EXISTS(SELECT 1 FROM tasks WHERE id=$1) RETURNING `+taskCommentColumns, taskID, body, w.Author, now, w.Key), &x)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return CreatedTaskComment{}, false, ErrTaskNotFound
 	}
 	if err != nil {

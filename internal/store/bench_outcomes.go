@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -85,7 +83,7 @@ func (o BenchOutcome) valid() error {
 // reads them in this order.
 var benchRepColumns = `id,origin_id,profile,model_id,task_ref,tier,role,rounds,blockers_found,completed,input_tokens,output_tokens,notes,recorded_at,effort,grade,table_grade,created_by,created_at,` + strings.Join(benchOutcomeColumns, ",")
 
-func scanBenchRep(row pgx.Row) (BenchRep, error) {
+func scanBenchRep(row row) (BenchRep, error) {
 	var x BenchRep
 	dst := append([]any{&x.ID, &x.OriginID, &x.Profile, &x.ModelID, &x.TaskRef, &x.Tier, &x.Role, &x.Rounds, &x.BlockersFound, &x.Completed, &x.InputTokens, &x.OutputTokens, &x.Notes, &x.RecordedAt, &x.Effort, &x.Grade, &x.TableGrade, &x.CreatedBy, &x.CreatedAt}, x.BenchOutcome.fields()...)
 	if err := row.Scan(dst...); err != nil {
@@ -133,13 +131,13 @@ func (s *Store) PatchBenchRepOutcome(ctx context.Context, id int64, p BenchRepOu
 			return x, errors.New("invalid bench rep: token counts must be >= 0")
 		}
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db().Begin(ctx)
 	if err != nil {
 		return x, err
 	}
 	defer tx.Rollback(ctx)
-	x, err = scanBenchRep(tx.QueryRow(ctx, `SELECT `+benchRepColumns+` FROM bench_reps WHERE id=$1 FOR UPDATE`, id))
-	if errors.Is(err, pgx.ErrNoRows) {
+	x, err = scanBenchRep(tx.QueryRow(ctx, `SELECT `+benchRepColumns+s.q(` FROM bench_reps WHERE id=$1 FOR UPDATE`, ` FROM bench_reps WHERE id=? FOR UPDATE`), id))
+	if errors.Is(err, ErrNoRows) {
 		return x, ErrBenchRepNotFound
 	}
 	if err != nil {
@@ -161,7 +159,11 @@ func (s *Store) PatchBenchRepOutcome(ctx context.Context, id int64, p BenchRepOu
 		}
 		if changed {
 			args = append(args, patchValue(patch[i]))
-			sets = append(sets, fmt.Sprintf("%s=$%d", names[i], len(args)+1))
+			if s.dialect == mysqlDialect {
+				sets = append(sets, names[i]+"=?")
+			} else {
+				sets = append(sets, fmt.Sprintf("%s=$%d", names[i], len(args)+1))
+			}
 		}
 	}
 	if given == 0 {
@@ -170,7 +172,14 @@ func (s *Store) PatchBenchRepOutcome(ctx context.Context, id int64, p BenchRepOu
 	if len(sets) == 0 {
 		return x, nil
 	}
-	x, err = scanBenchRep(tx.QueryRow(ctx, `UPDATE bench_reps SET `+strings.Join(sets, ",")+` WHERE id=$1 RETURNING `+benchRepColumns, append([]any{id}, args...)...))
+	if s.dialect == mysqlDialect {
+		_, err = tx.Exec(ctx, `UPDATE bench_reps SET `+strings.Join(sets, ",")+` WHERE id=?`, append(args, id)...)
+		if err == nil {
+			x, err = scanBenchRep(tx.QueryRow(ctx, `SELECT `+benchRepColumns+` FROM bench_reps WHERE id=?`, id))
+		}
+	} else {
+		x, err = scanBenchRep(tx.QueryRow(ctx, `UPDATE bench_reps SET `+strings.Join(sets, ",")+` WHERE id=$1 RETURNING `+benchRepColumns, append([]any{id}, args...)...))
+	}
 	if err != nil {
 		return x, err
 	}

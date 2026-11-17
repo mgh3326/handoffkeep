@@ -176,11 +176,11 @@ func (s *Store) MarkNotificationSent(ctx context.Context, eventID string, hubRow
 	if err == nil {
 		return x, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return NotificationOutbox{}, err
 	}
 	if err = scanNotificationOutbox(s.pool.QueryRow(ctx, `SELECT `+notificationOutboxColumns+` FROM notification_outbox WHERE event_id=$1`, eventID), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return NotificationOutbox{}, ErrOutboxEventNotFound
 		}
 		return NotificationOutbox{}, err
@@ -205,11 +205,11 @@ func (s *Store) MarkNotificationApplied(ctx context.Context, eventID, by string)
 	if err == nil {
 		return x, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return NotificationOutbox{}, err
 	}
 	if err = scanNotificationOutbox(s.pool.QueryRow(ctx, `SELECT `+notificationOutboxColumns+` FROM notification_outbox WHERE event_id=$1`, eventID), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return NotificationOutbox{}, ErrOutboxEventNotFound
 		}
 		return NotificationOutbox{}, err

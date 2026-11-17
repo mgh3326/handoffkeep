@@ -87,7 +87,7 @@ func (s *Store) insertSystemTaskCommentTx(ctx context.Context, tx pgx.Tx, taskID
 	}
 	var c TaskComment
 	err := scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at,system_event_key) VALUES($1,$2,$3,$4,$5) ON CONFLICT (task_id,system_event_key) WHERE system_event_key IS NOT NULL DO NOTHING RETURNING `+taskCommentColumns, taskID, body, YTCommentPrincipal, createdAt.UTC(), key), &c)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		_, err = tx.Exec(ctx, `RELEASE SAVEPOINT system_task_comment`)
 		return err
 	}
@@ -240,7 +240,7 @@ func queueYTCommentTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op
 	err := tx.QueryRow(ctx, `SELECT id, tenant FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3
 		AND entity_kind='task' AND entity_id=$4 AND state IN ('prepared','dispatched','remote_unknown')`,
 		YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(c.TaskID), taskKey).Scan(&createID, &tenant)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && tenant == "") {
+	if errors.Is(err, ErrNoRows) || (err == nil && tenant == "") {
 		return ytwrite.Op{}, false, nil
 	}
 	if err != nil {
@@ -297,7 +297,7 @@ func claimYTCommentTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (targ
 	if found {
 		err = tx.QueryRow(ctx, `SELECT id FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3 AND state='applied'`,
 			YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(taskID)).Scan(&createID)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		if err != nil && !errors.Is(err, ErrNoRows) {
 			return "", "", "", "", err
 		}
 	}
@@ -348,7 +348,7 @@ func (s *Store) enqueueYTCommentModeTx(ctx context.Context, tx pgx.Tx, c TaskCom
 	}
 	var issueID, projectID, tenant string
 	err := tx.QueryRow(ctx, `SELECT issue_id, project_id, tenant FROM yt_comment_canary WHERE task_id=$1`, c.TaskID).Scan(&issueID, &projectID, &tenant)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ytwrite.Op{}, false, nil
 	}
 	if err != nil {
@@ -387,7 +387,7 @@ func (s *Store) enqueueYTCommentModeTx(ctx context.Context, tx pgx.Tx, c TaskCom
 			var have string
 			err := tx.QueryRow(ctx, `SELECT yt_id FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$1`, taskKey).Scan(&have)
 			switch {
-			case errors.Is(err, pgx.ErrNoRows):
+			case errors.Is(err, ErrNoRows):
 				reason, detail = ytwrite.ReasonAmbiguousIssue, "issue "+issueID+" is mapped to another task"
 			case err != nil:
 				return ytwrite.Op{}, false, err
@@ -447,7 +447,7 @@ func ytProjectionOf(op ytwrite.Op, enqueued bool) YTProjection {
 func ytCommentProjectionTx(ctx context.Context, tx pgx.Tx, commentID int64) (YTProjection, error) {
 	op, err := scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops
 		WHERE id = (SELECT op_id FROM yt_comment_write_links WHERE comment_id=$1)`, commentID))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ytProjectionOf(ytwrite.Op{}, false), nil
 	}
 	if err != nil {
@@ -507,13 +507,13 @@ type ytRowQuerier interface {
 func readYTCanaryCandidate(ctx context.Context, q ytRowQuerier, taskID int64, lock string) (YTCanaryCandidate, error) {
 	c := YTCanaryCandidate{TaskID: taskID}
 	optional := func(err error) error {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return nil
 		}
 		return err
 	}
 	err := q.QueryRow(ctx, `SELECT coalesce(project,'') FROM tasks WHERE id=$1`, taskID).Scan(&c.Project)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return YTCanaryCandidate{}, ErrTaskNotFound
 	}
 	if err != nil {
@@ -618,9 +618,9 @@ func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verif
 	err = scanYTCanary(tx.QueryRow(ctx, `INSERT INTO yt_comment_canary(`+ytCanaryColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7)
 		ON CONFLICT DO NOTHING RETURNING `+ytCanaryColumns,
 		c.TaskID, c.Tenant, c.IssueID, c.IssueReadable, c.ProjectID, c.AddedBy, time.Now().UTC()), &got)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		err = scanYTCanary(tx.QueryRow(ctx, `SELECT `+ytCanaryColumns+` FROM yt_comment_canary WHERE task_id=$1`, c.TaskID), &got)
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && (got.Tenant != c.Tenant || got.IssueID != c.IssueID)) {
+		if errors.Is(err, ErrNoRows) || (err == nil && (got.Tenant != c.Tenant || got.IssueID != c.IssueID)) {
 			return YTCommentCanary{}, fmt.Errorf("%w: task %d or issue %s is already enrolled with another binding", ErrYTCanaryConflict, c.TaskID, c.IssueID)
 		}
 	}

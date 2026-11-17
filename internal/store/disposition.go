@@ -295,7 +295,7 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 	if in.OriginTask != 0 {
 		var parentState string
 		if err = tx.QueryRow(ctx, `SELECT state FROM tasks WHERE id=$1`, in.OriginTask).Scan(&parentState); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
+			if errors.Is(err, ErrNoRows) {
 				return Task{}, false, ErrTaskNotFound
 			}
 			return Task{}, false, err
@@ -310,7 +310,7 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 	if err == nil {
 		return existing, false, tx.Commit(ctx)
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return Task{}, false, err
 	}
 	encoded, err := json.Marshal(refs)
@@ -343,7 +343,7 @@ func dispositionGen(ctx context.Context, q interface {
 }, id int64) (int64, error) {
 	var gen int64
 	err := q.QueryRow(ctx, `SELECT id FROM task_events WHERE task_id=$1 AND `+awaitingEventSQL+` ORDER BY at DESC,id DESC LIMIT 1`, id).Scan(&gen)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return 0, nil
 	}
 	return gen, err
@@ -405,7 +405,7 @@ func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in Dispositi
 	}
 	var x Task
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, in.ID), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return Task{}, "not_found", nil
 		}
 		return Task{}, "", err
@@ -531,7 +531,7 @@ func (s *Store) AnswerDispositionBatch(ctx context.Context, refs []DispositionRe
 	for _, ref := range ordered {
 		var lane string
 		if err := tx.QueryRow(ctx, `SELECT lane FROM tasks WHERE id=$1`, ref.ID).Scan(&lane); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
+			if errors.Is(err, ErrNoRows) {
 				skipped = append(skipped, DispositionSkip{ID: ref.ID, Reason: "not_found"})
 				continue
 			}
@@ -586,7 +586,7 @@ func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string)
 	}
 	var x Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return Task{}, ErrTaskNotFound
 		}
 		return Task{}, err

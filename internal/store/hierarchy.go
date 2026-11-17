@@ -96,7 +96,7 @@ func addRelationTx(ctx context.Context, tx pgx.Tx, src int64, kind string, dst i
 	src, dst = normalizeRelation(kind, src, dst)
 	var locked int64
 	if err := tx.QueryRow(ctx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, src).Scan(&locked); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return false, ErrTaskNotFound
 		}
 		return false, err
@@ -112,7 +112,7 @@ func addRelationTx(ctx context.Context, tx pgx.Tx, src int64, kind string, dst i
 	var archived *time.Time
 	err := tx.QueryRow(ctx, `SELECT id, archived_at FROM task_relations WHERE kind=$1 AND src_id=$2 AND dst_id=$3 FOR UPDATE`, kind, src, dst).Scan(&relID, &archived)
 	exists := err == nil
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if err != nil && !errors.Is(err, ErrNoRows) {
 		return false, err
 	}
 	if exists && archived == nil {
@@ -247,7 +247,7 @@ func (s *Store) RemoveTaskRelation(ctx context.Context, src int64, kind string, 
 	}
 	var state string
 	if err = tx.QueryRow(ctx, `SELECT state FROM tasks WHERE id=$1 FOR UPDATE`, src).Scan(&state); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			if kind != RelationDuplicateOf {
 				return false, tx.Commit(ctx)
 			}
@@ -369,7 +369,7 @@ func (s *Store) SetTaskParent(ctx context.Context, id int64, parent *int64, by s
 		return Task{}, false, err
 	}
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return Task{}, false, ErrTaskNotFound
 		}
 		return Task{}, false, err

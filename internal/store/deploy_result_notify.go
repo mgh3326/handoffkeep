@@ -60,7 +60,7 @@ func deployAskerLane(ctx context.Context, tx pgx.Tx, jobID string) (string, erro
 	}
 	var parent, owner string
 	err := tx.QueryRow(ctx, `SELECT parent_lane,owner_lane FROM jobs WHERE job_id=$1`, jobID).Scan(&parent, &owner)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {

@@ -354,7 +354,7 @@ func (s *Store) ClaimTaskThread(ctx context.Context, now time.Time) (TaskThreadI
 			return TaskThreadItem{}, false, err
 		}
 		return x, true, tx.Commit(ctx)
-	case !errors.Is(err, pgx.ErrNoRows):
+	case !errors.Is(err, ErrNoRows):
 		return TaskThreadItem{}, false, err
 	}
 
@@ -362,7 +362,7 @@ func (s *Store) ClaimTaskThread(ctx context.Context, now time.Time) (TaskThreadI
 	var src int
 	var ref int64
 	err = tx.QueryRow(ctx, taskThreadItemsSQL, dest, now, now.Add(-TaskThreadIdleAge), now.Add(-DecisionNoticePostDelay)).Scan(&x.TaskID, &x.Key, &src, &ref, &x.At)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return TaskThreadItem{}, false, nil
 	}
 	if err != nil {
@@ -371,7 +371,7 @@ func (s *Store) ClaimTaskThread(ctx context.Context, now time.Time) (TaskThreadI
 	err = tx.QueryRow(ctx, `SELECT thread_id,thread_name,attempts FROM task_thread_deliveries
 		WHERE task_id=$1 AND destination=$2 AND state='`+TaskThreadActive+`' AND claim_key='' FOR UPDATE SKIP LOCKED`, x.TaskID, dest).
 		Scan(&x.ThreadID, &x.ThreadName, &x.Attempts)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return TaskThreadItem{}, false, nil
 	}
 	if err != nil {
@@ -594,7 +594,7 @@ func (s *Store) GetTaskThread(ctx context.Context, taskID int64) (TaskThreadStat
 	err := s.pool.QueryRow(ctx, `SELECT task_id,destination,thread_id,thread_name,start_event_id,last_event_id,posted,state,claim_key,attempts,next_attempt_at,last_error
 		FROM task_thread_deliveries WHERE task_id=$1 AND destination=$2`, taskID, TaskThreadDestinationDiscord).
 		Scan(&x.TaskID, &x.Destination, &x.ThreadID, &x.ThreadName, &x.StartEventID, &x.LastEventID, &x.Posted, &x.State, &x.ClaimKey, &x.Attempts, &x.NextAttemptAt, &x.LastError)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return TaskThreadState{}, false, nil
 	}
 	return x, err == nil, err

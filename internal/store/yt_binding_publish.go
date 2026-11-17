@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -207,7 +205,7 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 			CASE WHEN $9 < 0 THEN (SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$1) ELSE $9 END)
 		ON CONFLICT DO NOTHING RETURNING `+ytBindingColumns,
 		b.TaskID, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, now, p.origin, commentsFrom), &got)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return YTTaskBinding{}, 0, 0, fmt.Errorf("%w: issue %s on %s is bound to another task", ErrYTBindingConflict, b.IssueID, b.Tenant)
 	}
 	if err != nil {
@@ -245,7 +243,7 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 		for _, id := range p.evidence.Missing {
 			var c TaskComment
 			err := scanTaskComment(tx.QueryRow(ctx, `SELECT `+taskCommentColumns+` FROM task_comments WHERE id=$1`, id), &c)
-			if errors.Is(err, pgx.ErrNoRows) {
+			if errors.Is(err, ErrNoRows) {
 				return YTTaskBinding{}, 0, 0, fmt.Errorf("evidence comment %d does not exist", id)
 			}
 			if err != nil {
@@ -260,7 +258,7 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 			case err == nil:
 				linked++
 				continue
-			case !errors.Is(err, pgx.ErrNoRows):
+			case !errors.Is(err, ErrNoRows):
 				return YTTaskBinding{}, 0, 0, err
 			}
 			// The binding inserted above and every source checked above are

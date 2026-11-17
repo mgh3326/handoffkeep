@@ -1,0 +1,48 @@
+// Package mysqlurl converts a mysql URL to a driver configuration.
+package mysqlurl
+
+import (
+	"fmt"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/go-sql-driver/mysql"
+)
+
+// Parse requires a TCP URL and configures every connection for UTC and the
+// store's READ COMMITTED isolation level.
+func Parse(raw string) (*mysql.Config, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	if u.Scheme != "mysql" || u.Host == "" || u.User == nil || strings.TrimPrefix(u.Path, "/") == "" || strings.Contains(strings.TrimPrefix(u.Path, "/"), "/") {
+		return nil, fmt.Errorf("invalid mysql URL")
+	}
+	cfg := mysql.NewConfig()
+	cfg.Net = "tcp"
+	cfg.Addr = u.Host
+	cfg.User = u.User.Username()
+	cfg.Passwd, _ = u.User.Password()
+	cfg.DBName = strings.TrimPrefix(u.Path, "/")
+	cfg.ParseTime = true
+	cfg.Loc = time.UTC
+	cfg.Params = make(map[string]string)
+	for key, values := range u.Query() {
+		if len(values) != 1 {
+			return nil, fmt.Errorf("mysql URL parameter %q must occur once", key)
+		}
+		switch key {
+		case "time_zone", "transaction_isolation", "parseTime", "loc":
+			return nil, fmt.Errorf("mysql URL parameter %q is controlled by the store", key)
+		case "tls":
+			cfg.TLSConfig = values[0]
+		default:
+			cfg.Params[key] = values[0]
+		}
+	}
+	cfg.Params["time_zone"] = "'+00:00'"
+	cfg.Params["transaction_isolation"] = "'READ-COMMITTED'"
+	return cfg, nil
+}

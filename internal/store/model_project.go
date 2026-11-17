@@ -39,7 +39,7 @@ func (s *Store) GetProjectMetadata(ctx context.Context, name string) (ProjectMet
 	}
 	var p ProjectMetadata
 	err := s.pool.QueryRow(ctx, `SELECT name,status,start_at,target_at FROM task_projects WHERE name=$1`, name).Scan(&p.Name, &p.Status, &p.StartAt, &p.TargetAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ProjectMetadata{}, ErrProjectNotFound
 	}
 	if err != nil {
@@ -98,7 +98,7 @@ func patchProjectMetadataTx(ctx context.Context, tx pgx.Tx, name string, patch P
 	}
 	var p ProjectMetadata
 	err := tx.QueryRow(ctx, `SELECT name,status,start_at,target_at FROM task_projects WHERE name=$1 FOR UPDATE`, name).Scan(&p.Name, &p.Status, &p.StartAt, &p.TargetAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ProjectMetadata{}, ErrProjectNotFound
 	}
 	if err != nil {

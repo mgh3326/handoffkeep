@@ -61,7 +61,7 @@ func dotsQuestionTargetTx(ctx context.Context, tx pgx.Tx, taskID, commentID int6
 		JOIN task_comments c ON c.task_id=dr.task_id AND c.id::text=e.to_value
 		WHERE dr.task_id=$1 AND dr.kind='QUESTION' AND dr.answered_at IS NULL AND c.id=$2
 		LIMIT 1`, taskID, commentID).Scan(&q.ResultID, &q.CommentID, &q.Body, &q.CreatedAt, &q.AskOperator)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return dotsQuestion{}, false, nil
 	}
 	if err != nil {
@@ -76,7 +76,7 @@ func dotsQuestionTargetTx(ctx context.Context, tx pgx.Tx, taskID, commentID int6
 // decision_request_resolved, a plain question means nothing is open.
 func dotsLatestQuestionAskOperatorTx(ctx context.Context, tx pgx.Tx, taskID int64) (ask bool, found bool, err error) {
 	err = tx.QueryRow(ctx, `SELECT COALESCE(ask_operator,true) FROM dots_results WHERE task_id=$1 AND kind='QUESTION' ORDER BY id DESC LIMIT 1`, taskID).Scan(&ask)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return false, false, nil
 	}
 	if err != nil {

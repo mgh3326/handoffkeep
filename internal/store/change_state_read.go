@@ -228,7 +228,7 @@ func (s *Store) GetChangeState(ctx context.Context, ref ChangeRef, opt ChangeRea
 FROM changes WHERE repo=$1 AND pr_number=$2`, ref.Repo, ref.PR).Scan(&c.ID, &c.Repo, &c.PRNumber, &c.State, &c.Draft, &c.Title, &c.Author, &c.BaseRef, &c.HeadSHA, &c.BaseSHA, &c.MergeSHA,
 		&c.OpenedAt, &c.MergedAt, &c.ObservedAt, &c.Source, &c.UpdatedAt, &checksAt, &checksSrc, &threadsAt, &threadsSrc, &findingsAt, &findingsSrc, &gateAt, &gateSrc,
 		&gateState, &gateHead, &gateRaw, &gatePolicy)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ChangeView{}, false, nil
 	}
 	if err != nil {

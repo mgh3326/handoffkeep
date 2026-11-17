@@ -337,7 +337,7 @@ func (s *Store) propagateRevertTx(ctx context.Context, tx pgx.Tx, in TaskSourceE
 func (s *Store) applyTaskSourceEventTx(ctx context.Context, tx pgx.Tx, id int64, in TaskSourceEvent, at, now time.Time, pending map[int64]bool) (TaskEventResult, bool, error) {
 	var x Task
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return TaskEventResult{}, false, nil
 		}
 		return TaskEventResult{}, false, err
@@ -387,7 +387,7 @@ func (s *Store) propagateMergeTx(ctx context.Context, tx pgx.Tx, src int64, ev s
 	}
 	var changeID int64
 	if repo, n, ok := parsePRURL(ev.PR); ok {
-		if err = tx.QueryRow(ctx, `SELECT id FROM changes WHERE repo=$1 AND pr_number=$2`, repo, n).Scan(&changeID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		if err = tx.QueryRow(ctx, `SELECT id FROM changes WHERE repo=$1 AND pr_number=$2`, repo, n).Scan(&changeID); err != nil && !errors.Is(err, ErrNoRows) {
 			return err
 		}
 	}
@@ -711,7 +711,7 @@ func heldMergePRTx(ctx context.Context, tx pgx.Tx, taskID int64) (string, error)
 	err := tx.QueryRow(ctx, `SELECT e.source_ref FROM task_events e JOIN changes c ON (`+prURLSQL+`)=e.source_ref
 		WHERE e.task_id=$1 AND e.source=$2 AND e.field=$3 AND NOT e.applied AND c.state='merged' AND c.reverted_by_change_id IS NULL
 		ORDER BY e.id DESC LIMIT 1`, taskID, SourceMergewakeMerge, heldMergeField).Scan(&pr)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return "", nil
 	}
 	return pr, err
@@ -1037,7 +1037,7 @@ func (s *Store) applyJobRoleTx(ctx context.Context, tx pgx.Tx, j Job, now time.T
 	}
 	var x Task
 	err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 AND refs->>'job_id'=$2 FOR UPDATE`, j.TaskID, j.JobID), &x)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return nil
 	}
 	if err != nil {

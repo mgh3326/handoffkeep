@@ -64,7 +64,7 @@ LEFT JOIN LATERAL (SELECT created_at FROM project_owner_events WHERE project = p
 func scanProjectOwner(row pgx.Row) (ProjectOwner, error) {
 	var owner ProjectOwner
 	if err := row.Scan(&owner.Name, &owner.DesignLane, &owner.UpdatedAt); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return ProjectOwner{}, ErrProjectNotFound
 		}
 		return ProjectOwner{}, err
@@ -125,7 +125,7 @@ func (s *Store) SetProjectDesignLane(ctx context.Context, project, lane, actor, 
 	// conflicting with the KEY SHARE a task or milestone insert takes through
 	// the foreign key (lockorder.go, exceptions).
 	if err = tx.QueryRow(ctx, `SELECT design_lane FROM task_projects WHERE name=$1 FOR NO KEY UPDATE`, project).Scan(&previous); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return ProjectOwner{}, ErrProjectNotFound
 		}
 		return ProjectOwner{}, err

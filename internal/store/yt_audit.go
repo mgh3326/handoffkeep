@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -137,7 +135,7 @@ func (s *Store) EnqueueYTAuditComment(ctx context.Context, commentID int64) (str
 	defer tx.Rollback(ctx)
 	var c TaskComment
 	err = scanTaskComment(tx.QueryRow(ctx, `SELECT `+taskCommentColumns+` FROM task_comments WHERE id=$1`, commentID), &c)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return "", ytwrite.Op{}, fmt.Errorf("comment %d does not exist", commentID)
 	}
 	if err != nil {
@@ -168,7 +166,7 @@ func (s *Store) EnqueueYTAuditComment(ctx context.Context, commentID int64) (str
 	switch {
 	case err == nil:
 		return YTAuditLinked, op, nil
-	case !errors.Is(err, pgx.ErrNoRows):
+	case !errors.Is(err, ErrNoRows):
 		return "", ytwrite.Op{}, err
 	}
 	op, enqueued, err := enqueueYTCommentOnTx(ctx, tx, c)

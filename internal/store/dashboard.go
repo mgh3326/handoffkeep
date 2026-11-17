@@ -20,7 +20,7 @@ type QuotaAccountLatest struct {
 // account in quota_latest, ordered by account key. limit bounds the pointer
 // rows read; truncated reports that more rows exist.
 func (s *Store) ListLatestQuota(ctx context.Context, limit int) ([]QuotaAccountLatest, bool, error) {
-	rows, err := s.pool.Query(ctx, `SELECT l.account_key,o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id ORDER BY l.account_key,l.kind,l.window_key LIMIT $1`, limit+1)
+	rows, err := s.db().Query(ctx, s.q(`SELECT l.account_key,o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id ORDER BY l.account_key,l.kind,l.window_key LIMIT $1`, `SELECT l.account_key,o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id ORDER BY l.account_key,l.kind,l.window_key LIMIT ?`), limit+1)
 	if err != nil {
 		return nil, false, err
 	}
