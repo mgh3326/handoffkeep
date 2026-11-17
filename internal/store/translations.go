@@ -241,6 +241,10 @@ func (s *Store) PutTranslations(ctx context.Context, translations []Translation)
 			return err
 		}
 	}
+	return s.retryTx(ctx, func() error { return s.putTranslationsOnce(ctx, translations) })
+}
+
+func (s *Store) putTranslationsOnce(ctx context.Context, translations []Translation) error {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return err

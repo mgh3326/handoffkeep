@@ -49,54 +49,59 @@ func (s *Store) mysqlPruneDocuments(ctx context.Context, res DocPruneResult, old
 		return res, rows.Err()
 	}
 	for res.Deleted < int64(res.Limit) {
-		tx, release, e := s.begin(ctx)
-		if e != nil {
-			return res, e
-		}
-		n, e := func() (int, error) {
-			defer release()
-			defer tx.Rollback(ctx)
-			rows, e := tx.Query(ctx, candidate+" FOR UPDATE", lo, hi, older.UTC(), min(DocPruneBatch, res.Limit-int(res.Deleted)))
-			if e != nil {
-				return 0, e
-			}
-			var ids, keys []any
-			var size int64
-			for rows.Next() {
-				var id, n int64
-				var key string
-				if e = rows.Scan(&id, &key, &n); e != nil {
-					rows.Close()
+		var n int
+		e := s.retryTx(ctx, func() error {
+			var err error
+			n, err = func() (int, error) {
+				tx, release, e := s.begin(ctx)
+				if e != nil {
 					return 0, e
 				}
-				ids = append(ids, id)
-				keys = append(keys, key)
-				size += n
-			}
-			e = rows.Err()
-			rows.Close()
-			if e != nil {
-				return 0, e
-			}
-			if len(ids) == 0 {
-				return 0, nil
-			}
-			if refs {
-				if _, e = tx.Exec(ctx, "DELETE FROM attachment_refs WHERE ref_kind='document' AND ref_id IN ("+placeholders(len(keys))+")", keys...); e != nil {
+				defer release()
+				defer tx.Rollback(ctx)
+				rows, e := tx.Query(ctx, candidate+" FOR UPDATE", lo, hi, older.UTC(), min(DocPruneBatch, res.Limit-int(res.Deleted)))
+				if e != nil {
 					return 0, e
 				}
-			}
-			deleted, e := tx.Exec(ctx, "DELETE FROM documents WHERE id IN ("+placeholders(len(ids))+")", ids...)
-			if e != nil {
-				return 0, e
-			}
-			if e = tx.Commit(ctx); e != nil {
-				return 0, e
-			}
-			res.Deleted += deleted
-			res.Bytes += size
-			return len(ids), nil
-		}()
+				var ids, keys []any
+				var size int64
+				for rows.Next() {
+					var id, n int64
+					var key string
+					if e = rows.Scan(&id, &key, &n); e != nil {
+						rows.Close()
+						return 0, e
+					}
+					ids = append(ids, id)
+					keys = append(keys, key)
+					size += n
+				}
+				e = rows.Err()
+				rows.Close()
+				if e != nil {
+					return 0, e
+				}
+				if len(ids) == 0 {
+					return 0, nil
+				}
+				if refs {
+					if _, e = tx.Exec(ctx, "DELETE FROM attachment_refs WHERE ref_kind='document' AND ref_id IN ("+placeholders(len(keys))+")", keys...); e != nil {
+						return 0, e
+					}
+				}
+				deleted, e := tx.Exec(ctx, "DELETE FROM documents WHERE id IN ("+placeholders(len(ids))+")", ids...)
+				if e != nil {
+					return 0, e
+				}
+				if e = tx.Commit(ctx); e != nil {
+					return 0, e
+				}
+				res.Deleted += deleted
+				res.Bytes += size
+				return len(ids), nil
+			}()
+			return err
+		})
 		if e != nil {
 			return res, e
 		}
