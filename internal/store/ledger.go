@@ -590,54 +590,60 @@ func (s *Store) AckLedger(ctx context.Context, consumer string, syncID int64, by
 
 func (s *Store) ackLedgerMySQL(ctx context.Context, consumer string, syncID int64, by string, now time.Time) (LedgerCursor, error) {
 	var c LedgerCursor
-	tx, release, err := s.begin(ctx)
-	if err != nil {
-		return c, err
-	}
-	defer release()
-	defer tx.Rollback(ctx)
-	var maxID, floor int64
-	if err := tx.QueryRow(ctx, `SELECT max_sync_id,pruned_through FROM sync_state WHERE singleton`).Scan(&maxID, &floor); err != nil {
-		return c, err
-	}
-	if syncID > maxID {
-		return c, ErrInvalidSync
-	}
-	const cols = `consumer,acked_sync_id,acked_at,updated_by`
-	err = tx.QueryRow(ctx, `SELECT `+cols+` FROM ledger_cursors WHERE consumer=? FOR UPDATE`, consumer).Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy)
-	if errors.Is(err, ErrNoRows) {
-		// The first ack creates a cursor at the current watermark. A no-op
-		// upsert serializes simultaneous first acks without changing a winner.
-		inserted, insertErr := tx.Exec(ctx, `INSERT INTO ledger_cursors(consumer,acked_sync_id,acked_at,updated_by) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE consumer=consumer`, consumer, maxID, now, by)
-		if insertErr != nil {
-			return LedgerCursor{}, insertErr
-		}
-		err = tx.QueryRow(ctx, `SELECT `+cols+` FROM ledger_cursors WHERE consumer=? FOR UPDATE`, consumer).Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy)
+	err := s.retryTx(ctx, func() (err error) {
+		tx, release, err := s.begin(ctx)
 		if err != nil {
-			return LedgerCursor{}, err
+			return err
 		}
-		if inserted == 1 {
-			return c, tx.Commit(ctx)
+		defer release()
+		defer tx.Rollback(ctx)
+		var maxID, floor int64
+		if err := tx.QueryRow(ctx, `SELECT max_sync_id,pruned_through FROM sync_state WHERE singleton`).Scan(&maxID, &floor); err != nil {
+			return err
 		}
-	}
+		if syncID > maxID {
+			return ErrInvalidSync
+		}
+		const cols = `consumer,acked_sync_id,acked_at,updated_by`
+		err = tx.QueryRow(ctx, `SELECT `+cols+` FROM ledger_cursors WHERE consumer=? FOR UPDATE`, consumer).Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy)
+		if errors.Is(err, ErrNoRows) {
+			// A successful insert is the new-cursor case. A duplicate means a
+			// concurrent acknowledgement won, so load and validate its cursor.
+			_, insertErr := tx.Exec(ctx, `INSERT INTO ledger_cursors(consumer,acked_sync_id,acked_at,updated_by) VALUES(?,?,?,?)`, consumer, maxID, now, by)
+			if insertErr == nil {
+				if err = tx.QueryRow(ctx, `SELECT `+cols+` FROM ledger_cursors WHERE consumer=? FOR UPDATE`, consumer).Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy); err != nil {
+					return err
+				}
+				return tx.Commit(ctx)
+			}
+			if !errors.Is(insertErr, errUniqueViolation) {
+				return insertErr
+			}
+			err = tx.QueryRow(ctx, `SELECT `+cols+` FROM ledger_cursors WHERE consumer=? FOR UPDATE`, consumer).Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy)
+		}
+		if err != nil {
+			return err
+		}
+		if syncID < c.AckedSyncID {
+			return fmt.Errorf("%w: the cursor is at %d", ErrLedgerAckBackward, c.AckedSyncID)
+		}
+		if syncID < floor {
+			minID := maxID + 1
+			if err := tx.QueryRow(ctx, `SELECT COALESCE(min(sync_id),?) FROM sync_log`, minID).Scan(&minID); err != nil {
+				return err
+			}
+			return &SyncReset{MinSyncID: minID}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE ledger_cursors SET acked_sync_id=?,acked_at=?,updated_by=? WHERE consumer=?`, syncID, now, by, consumer); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT `+cols+` FROM ledger_cursors WHERE consumer=?`, consumer).Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return LedgerCursor{}, err
 	}
-	if syncID < c.AckedSyncID {
-		return LedgerCursor{}, fmt.Errorf("%w: the cursor is at %d", ErrLedgerAckBackward, c.AckedSyncID)
-	}
-	if syncID < floor {
-		minID := maxID + 1
-		if err := tx.QueryRow(ctx, `SELECT COALESCE(min(sync_id),?) FROM sync_log`, minID).Scan(&minID); err != nil {
-			return LedgerCursor{}, err
-		}
-		return LedgerCursor{}, &SyncReset{MinSyncID: minID}
-	}
-	if _, err := tx.Exec(ctx, `UPDATE ledger_cursors SET acked_sync_id=?,acked_at=?,updated_by=? WHERE consumer=?`, syncID, now, by, consumer); err != nil {
-		return LedgerCursor{}, err
-	}
-	if err := tx.QueryRow(ctx, `SELECT `+cols+` FROM ledger_cursors WHERE consumer=?`, consumer).Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy); err != nil {
-		return LedgerCursor{}, err
-	}
-	return c, tx.Commit(ctx)
+	return c, nil
 }

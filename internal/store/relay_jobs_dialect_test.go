@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -59,7 +60,7 @@ func init() {
 			t.Fatalf("empty-window JobSkillsReport() = (%+v, %v)", emptyReport, err)
 		}
 		active, err = s.ReadActiveJobs(t.Context(), []int64{task.ID})
-		if err != nil || active[task.ID].Role == "" {
+		if err != nil || active[task.ID].Host != "test-host" {
 			t.Fatalf("ReadActiveJobs() = (%+v, %v)", active, err)
 		}
 	})
@@ -165,6 +166,40 @@ func init() {
 		cursor, err := s.AckLedger(t.Context(), "first-ack", 5, "dialect-test", now)
 		if err != nil || cursor.AckedSyncID != 9 {
 			t.Fatalf("first AckLedger below watermark = (%+v, %v)", cursor, err)
+		}
+		if _, err = s.AckLedger(t.Context(), "first-ack", 5, "dialect-test", now.Add(time.Second)); !errors.Is(err, ErrLedgerAckBackward) {
+			t.Fatalf("backward existing AckLedger = %v", err)
+		}
+		cursor, err = s.AckLedger(t.Context(), "first-ack", 9, "dialect-test", now.Add(2*time.Second))
+		if err != nil || cursor.AckedSyncID != 9 {
+			t.Fatalf("same-position AckLedger = (%+v, %v)", cursor, err)
+		}
+		start := make(chan struct{})
+		errs := make([]error, 2)
+		var wg sync.WaitGroup
+		for i := range errs {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				_, errs[i] = s.AckLedger(t.Context(), "parallel-first-ack", 5, "dialect-test", now.Add(time.Duration(i+3)*time.Second))
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+		created, refused := 0, 0
+		for _, err := range errs {
+			switch {
+			case err == nil:
+				created++
+			case errors.Is(err, ErrLedgerAckBackward):
+				refused++
+			default:
+				t.Fatalf("concurrent first AckLedger() = %v, want one success and one backward refusal", err)
+			}
+		}
+		if created != 1 || refused != 1 {
+			t.Fatalf("concurrent first AckLedger outcomes = %d successes, %d refusals, want 1 and 1", created, refused)
 		}
 	})
 }
