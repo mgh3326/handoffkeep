@@ -708,6 +708,7 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 		}
 	case decisionOpen:
 		// The untargeted answer resolves the decision, as before.
+		routeDecision = true
 	default:
 		questions, qerr := dotsPlainQuestionsTx(ctx, tx, taskID)
 		if qerr != nil {
