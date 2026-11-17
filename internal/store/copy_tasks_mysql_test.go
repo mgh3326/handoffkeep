@@ -102,8 +102,8 @@ func TestCopyTasksAreaRoundTripWithParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	var feed, decisions int
-	var nextTask int64
-	if err := my.mysqlPool.QueryRowContext(t.Context(), `SELECT (SELECT COUNT(*) FROM sync_log), (SELECT COUNT(*) FROM sync_decisions), (SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='tasks')`).Scan(&feed, &decisions, &nextTask); err != nil {
+	var nextTask, nextResolution int64
+	if err := my.mysqlPool.QueryRowContext(t.Context(), `SELECT (SELECT COUNT(*) FROM sync_log), (SELECT COUNT(*) FROM sync_decisions), (SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='tasks'), (SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='decision_resolutions')`).Scan(&feed, &decisions, &nextTask, &nextResolution); err != nil {
 		t.Fatal(err)
 	}
 	var supersededBy int64
@@ -111,8 +111,8 @@ func TestCopyTasksAreaRoundTripWithParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	my.Close()
-	if feed != 0 || decisions != 1 || nextTask <= 93003 {
-		t.Fatalf("MySQL target: sync_log=%d sync_decisions=%d next task id=%d, want 0, 1, >93003", feed, decisions, nextTask)
+	if feed != 0 || decisions != 1 || nextTask <= 93003 || nextResolution <= 93001 {
+		t.Fatalf("MySQL target: sync_log=%d sync_decisions=%d next task id=%d next decision resolution id=%d, want 0, 1, >93003, >93001", feed, decisions, nextTask, nextResolution)
 	}
 	if supersededBy != 93003 {
 		t.Fatalf("copied dots_results.superseded_by=%d, want 93003", supersededBy)
@@ -127,12 +127,12 @@ func TestCopyTasksAreaRoundTripWithParity(t *testing.T) {
 		t.Fatalf("MySQL to PostgreSQL parity mismatch: %+v", reverse)
 	}
 	var backFeed, backDecisions int
-	var nextID int64
-	if err := back.pool.QueryRow(t.Context(), `SELECT (SELECT count(*) FROM sync_log), (SELECT count(*) FROM sync_decisions), nextval(pg_get_serial_sequence('tasks','id'))`).Scan(&backFeed, &backDecisions, &nextID); err != nil {
+	var nextID, nextResolutionID int64
+	if err := back.pool.QueryRow(t.Context(), `SELECT (SELECT count(*) FROM sync_log), (SELECT count(*) FROM sync_decisions), nextval(pg_get_serial_sequence('tasks','id')), nextval(pg_get_serial_sequence('decision_resolutions','resolution_id'))`).Scan(&backFeed, &backDecisions, &nextID, &nextResolutionID); err != nil {
 		t.Fatal(err)
 	}
-	if backFeed != 0 || backDecisions != 1 || nextID <= 93003 {
-		t.Fatalf("PostgreSQL target: sync_log=%d sync_decisions=%d next task id=%d, want 0, 1, >93003", backFeed, backDecisions, nextID)
+	if backFeed != 0 || backDecisions != 1 || nextID <= 93003 || nextResolutionID <= 93001 {
+		t.Fatalf("PostgreSQL target: sync_log=%d sync_decisions=%d next task id=%d next decision resolution id=%d, want 0, 1, >93003, >93001", backFeed, backDecisions, nextID, nextResolutionID)
 	}
 	// The copied tables stay writable and journaled once the load is over.
 	if _, err := back.pool.Exec(t.Context(), `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at) VALUES('lane-a','after','implement','backlog','test',now(),now())`); err != nil {

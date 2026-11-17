@@ -47,9 +47,11 @@ type copyTableSpec struct {
 	columns []string
 	order   []string
 	bounds  map[string]int
-	// serial marks a table whose id is generated (BIGSERIAL, AUTO_INCREMENT):
+	// serial marks a table with a generated key (BIGSERIAL, AUTO_INCREMENT):
 	// after the load the target's generator is moved past the largest id.
 	serial bool
+	// serialColumn overrides the generated column name when it is not "id".
+	serialColumn string
 	// parentColumn names a self-referencing foreign key. Rows are inserted
 	// parents first (by depth, then order), because the foreign key is enforced
 	// on both targets while the table loads. Rows no root reaches (a cycle)
@@ -111,7 +113,7 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "dots_run_tokens", serial: true, columns: strings.Fields("id task_id token issue_key takeover issued_by issued_at superseded_at"), order: []string{"id"}, bounds: map[string]int{"token": 64, "issue_key": 64}},
 	{name: "decision_requests", serial: true, columns: strings.Fields("id source source_ref task_id job_id lane question reading grounds options recommended default_action due_at snoozed_until expires_at status answer answered_by answered_at superseded_by created_at updated_at"), order: []string{"id"}, bounds: map[string]int{"source": 32, "source_ref": 512, "job_id": 255, "lane": 255, "status": 16}},
 	{name: "decision_answer_attempts", serial: true, columns: strings.Fields("id channel event_key payload_hash task_id request_id revision_request_id question_revision provenance actor result event_at received_at option_id text operator_quote denies_attempt_id receipt"), order: []string{"id"}, bounds: map[string]int{"channel": 16, "event_key": 512, "payload_hash": 64, "request_id": 512, "revision_request_id": 512, "provenance": 32, "result": 32}},
-	{name: "decision_resolutions", serial: true, columns: strings.Fields("resolution_id request_id question_revision revision_request_id task_id kind option_id text receipt provenance channel decided_by recorded_by attempt_id committed_at"), order: []string{"resolution_id"}, bounds: map[string]int{"request_id": 512, "revision_request_id": 512, "kind": 24, "provenance": 32, "channel": 32}},
+	{name: "decision_resolutions", serial: true, serialColumn: "resolution_id", columns: strings.Fields("resolution_id request_id question_revision revision_request_id task_id kind option_id text receipt provenance channel decided_by recorded_by attempt_id committed_at"), order: []string{"resolution_id"}, bounds: map[string]int{"request_id": 512, "revision_request_id": 512, "kind": 24, "provenance": 32, "channel": 32}},
 	{name: "decision_deliveries", columns: strings.Fields("request_id destination message_id desired_version applied_version state attempts next_attempt_at last_error_code posted_at edited_at created_at"), order: []string{"request_id", "destination"}, bounds: map[string]int{"destination": 16, "message_id": 255, "desired_version": 16, "applied_version": 16, "state": 16}},
 	{name: "decision_notify_digest", columns: strings.Fields("day state listed message_id attempts next_attempt_at last_error sent_at created_at"), order: []string{"day"}, bounds: map[string]int{"state": 16, "message_id": 255}},
 	{name: "chat_questions", columns: strings.Fields("id conversation_id lane body state created_at updated_at resolved_at revision answer_message_id"), order: []string{"id"}, bounds: map[string]int{"id": 64, "conversation_id": 255, "lane": 255, "state": 16}},
@@ -899,9 +901,13 @@ func resetIdentity(ctx context.Context, dst *copyDB, spec copyTableSpec) error {
 	if !spec.serial {
 		return nil
 	}
+	column := spec.serialColumn
+	if column == "" {
+		column = "id"
+	}
 	if dst.mySQL {
 		var max sql.NullInt64
-		if err := conn.QueryRowContext(ctx, `SELECT MAX(id) FROM `+quoteCopyIdent(table, true)).Scan(&max); err != nil {
+		if err := conn.QueryRowContext(ctx, `SELECT MAX(`+quoteCopyIdent(column, true)+`) FROM `+quoteCopyIdent(table, true)).Scan(&max); err != nil {
 			return err
 		}
 		if max.Valid {
@@ -910,12 +916,13 @@ func resetIdentity(ctx context.Context, dst *copyDB, spec copyTableSpec) error {
 		return err
 	}
 	var seq sql.NullString
-	if err := conn.QueryRowContext(ctx, `SELECT pg_get_serial_sequence($1,'id')`, table).Scan(&seq); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT pg_get_serial_sequence($1,$2)`, table, column).Scan(&seq); err != nil {
 		return err
 	}
 	if !seq.Valid || seq.String == "" {
 		return nil
 	}
-	_, err = conn.ExecContext(ctx, `SELECT setval($1, COALESCE((SELECT MAX(id) FROM `+quoteCopyIdent(table, false)+`), 1), EXISTS(SELECT 1 FROM `+quoteCopyIdent(table, false)+`))`, seq.String)
+	quotedColumn := quoteCopyIdent(column, false)
+	_, err = conn.ExecContext(ctx, `SELECT setval($1, COALESCE((SELECT MAX(`+quotedColumn+`) FROM `+quoteCopyIdent(table, false)+`), 1), EXISTS(SELECT 1 FROM `+quoteCopyIdent(table, false)+`))`, seq.String)
 	return err
 }

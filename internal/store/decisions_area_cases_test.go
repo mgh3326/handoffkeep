@@ -27,7 +27,7 @@ func init() {
 			t.Fatalf("ListChatQuestions = %+v err=%v", questions, err)
 		}
 
-		post := ChatMessagePost{Message: ChatMessage{ConversationID: "operator-desk", Author: "operator", Body: "Use the north route.", SourceChannel: "test"}, Questions: []ChatQuestion{q}}
+		post := ChatMessagePost{Message: ChatMessage{ConversationID: "operator-desk", Author: "desk", Body: "Question for the operator.", SourceChannel: "legacy"}, Questions: []ChatQuestion{q}}
 		post.Message.OriginEventID = "decisions-area-case"
 		message, created, err := s.PostChatMessage(ctx, post)
 		if err != nil || !created || message.ID < 1 || len(message.QuestionRelations) != 1 || message.QuestionRelations[0].RelationKind != "posted" {
@@ -37,11 +37,16 @@ func init() {
 		if err != nil || created || replay.ID != message.ID {
 			t.Fatalf("replayed PostChatMessage = %+v created=%v err=%v", replay, created, err)
 		}
-		if _, err := s.MarkChatMessageDelivered(ctx, message.ID); err != nil {
+		replyPost := ChatMessagePost{Message: ChatMessage{ConversationID: "operator-desk", Author: "operator", Body: "Use the north route.", SourceChannel: "web", OriginEventID: "decisions-area-reply"}}
+		reply, created, err := s.PostChatMessage(ctx, replyPost)
+		if err != nil || !created {
+			t.Fatalf("operator PostChatMessage = %+v created=%v err=%v", reply, created, err)
+		}
+		if _, err := s.MarkChatMessageDelivered(ctx, reply.ID); err != nil {
 			t.Fatalf("MarkChatMessageDelivered: %v", err)
 		}
 		messages, err := s.ListChatMessages(ctx, "operator", false, 0, 10)
-		if err != nil || len(messages) != 1 || messages[0].ID != message.ID || messages[0].RelayState != "delivered" {
+		if err != nil || len(messages) != 1 || messages[0].ID != reply.ID || messages[0].RelayState != "delivered" {
 			t.Fatalf("ListChatMessages = %+v err=%v", messages, err)
 		}
 
