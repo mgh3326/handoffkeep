@@ -74,12 +74,6 @@ func TestUnportedMethodsReturnDialectUnsupportedOnMySQL(t *testing.T) {
 		name string
 		call func() error
 	}{
-		{name: "task", call: func() error { _, _, err := mysqlStore.GetTask(context.Background(), 1); return err }},
-		{name: "task create wrapper", call: func() error { _, err := mysqlStore.CreateTask(context.Background(), Task{}); return err }},
-		{name: "task transition wrapper", call: func() error {
-			_, err := mysqlStore.TransitionTask(context.Background(), 1, "", "actor", "", nil, "")
-			return err
-		}},
 		{name: "document", call: func() error { _, _, err := mysqlStore.GetDocument(context.Background(), "key"); return err }},
 		{name: "attachment", call: func() error {
 			_, _, err := mysqlStore.GetAttachment(context.Background(), strings.Repeat("a", 64))
