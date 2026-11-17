@@ -189,7 +189,7 @@ func ytAuthoritiesTx(ctx context.Context, q querier, lock string) ([]YTAuthority
 // ytAuthorityTx reads one kind's side without a lock; no row is hk.
 func ytAuthorityTx(ctx context.Context, q querier, kind YTAuthorityKind) (YTAuthoritySide, error) {
 	var side YTAuthoritySide
-	err := q.QueryRow(ctx, `SELECT authority FROM yt_authority WHERE kind=$1`, string(kind)).Scan(&side)
+	err := q.QueryRow(ctx, sqlFor(q, `SELECT authority FROM yt_authority WHERE kind=$1`, `SELECT authority FROM yt_authority WHERE kind=?`), string(kind)).Scan(&side)
 	if errors.Is(err, ErrNoRows) || (err == nil && !validYTAuthoritySide(side)) {
 		return YTAuthorityHK, nil
 	}
@@ -448,7 +448,12 @@ func (s *Store) setYTAuthorityTx(ctx context.Context, tx transaction, seen map[Y
 				var prunedThrough int64
 				var cursor *int64
 				var behind int
-				feedArgs := append([]any{f.consumer}, ytInArgs(s, f.models)...)
+				var feedArgs []any
+				if s.dialect == mysqlDialect {
+					feedArgs = append(ytInArgs(s, f.models), f.consumer)
+				} else {
+					feedArgs = append([]any{f.consumer}, ytInArgs(s, f.models)...)
+				}
 				if err := tx.QueryRow(ctx, s.q(`SELECT st.pruned_through, c.last_sync_id,
 					(SELECT count(*) FROM sync_log l WHERE l.sync_id > coalesce(c.last_sync_id, 0) AND l.model = ANY($2::text[]))
 					FROM sync_state st LEFT JOIN yt_feed_cursors c ON c.consumer = $1

@@ -653,7 +653,12 @@ func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verif
 			c.TaskID, c.Tenant, c.IssueID, c.IssueReadable, c.ProjectID, c.AddedBy, time.Now().UTC())
 		if err == nil {
 			err = scanYTCanary(tx.QueryRow(ctx, `SELECT `+ytCanaryColumns+` FROM yt_comment_canary WHERE task_id=?`, c.TaskID), &got)
-			if err == nil && n == 0 && (got.Tenant != c.Tenant || got.IssueID != c.IssueID) {
+			switch {
+			case errors.Is(err, ErrNoRows) && n == 0:
+				// The (tenant, issue_id) unique key is held by another task:
+				// the ignore left nothing and this task has no canary row.
+				return YTCommentCanary{}, fmt.Errorf("%w: task %d or issue %s is already enrolled with another binding", ErrYTCanaryConflict, c.TaskID, c.IssueID)
+			case err == nil && n == 0 && (got.Tenant != c.Tenant || got.IssueID != c.IssueID):
 				return YTCommentCanary{}, fmt.Errorf("%w: task %d or issue %s is already enrolled with another binding", ErrYTCanaryConflict, c.TaskID, c.IssueID)
 			}
 		}

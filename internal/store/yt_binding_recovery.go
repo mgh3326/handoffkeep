@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
@@ -282,7 +283,7 @@ func (s *Store) recoverHeldYTOps(ctx context.Context, tenant string, taskID int6
 // decision keeps for a standing reason: the task is bound on another tenant,
 // or the op's content kind is canonical in YouTrack. It is a prefilter only;
 // recoverHeldYTOp decides from the rows under the lane lock.
-var ytHeldKeptSQL = `NOT EXISTS (SELECT 1 FROM yt_task_bindings b WHERE CAST(b.task_id AS CHAR) = o.entity_id AND b.tenant <> o.tenant)
+var ytHeldKeptSQL = `NOT EXISTS (SELECT 1 FROM yt_task_bindings b WHERE b.task_id::text = o.entity_id AND b.tenant <> o.tenant)
 	AND NOT EXISTS (SELECT 1 FROM yt_authority a WHERE a.authority = '` + string(YTAuthorityYouTrack) + `' AND (
 		(o.principal = '` + YTCommentPrincipal + `' AND a.kind = '` + string(ytAuthorityKindOf(YTCommentPrincipal)) + `')
 		OR (o.principal = '` + YTFieldsPrincipal + `' AND a.kind = '` + string(ytAuthorityKindOf(YTFieldsPrincipal)) + `')
@@ -377,7 +378,7 @@ func (s *Store) heldYTCandidatesQ(kinds []string) string {
 	if s.dialect == mysqlDialect {
 		return `SELECT ` + ytHeldOpColumns + ` FROM yt_write_ops o
 			WHERE o.state='prepared' AND o.tenant=? AND o.created_at <= ? AND (o.created_at, o.id) > (?, ?)
-			AND o.kind IN (` + ytKindPlaceholders(kinds) + `) AND (? = '' OR o.entity_id = ?) AND ` + ytHeldScopeSQL + ` AND NOT ` + s.ytAdmitSQL("?") + ` AND ` + ytHeldKeptSQL + `
+			AND o.kind IN (` + ytKindPlaceholders(kinds) + `) AND (? = '' OR o.entity_id = ?) AND ` + ytHeldScopeSQL + ` AND NOT ` + s.ytAdmitSQL("?") + ` AND ` + s.ytHeldKept() + `
 			ORDER BY o.created_at, o.id LIMIT ?`
 	}
 	return `SELECT ` + ytHeldOpColumns + ` FROM yt_write_ops o
@@ -404,4 +405,9 @@ func (s *Store) heldYTCandidatesArgs(kinds []string, task string, cutoff, afterA
 // be empty in practice).
 func ytKindPlaceholders(kinds []string) string {
 	return placeholders(len(kinds))
+}
+
+// ytHeldKept is ytHeldKeptSQL in this store's dialect.
+func (s *Store) ytHeldKept() string {
+	return s.q(ytHeldKeptSQL, strings.Replace(ytHeldKeptSQL, `b.task_id::text`, `CAST(b.task_id AS CHAR)`, 1))
 }
