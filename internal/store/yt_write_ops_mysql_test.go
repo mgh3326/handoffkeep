@@ -130,19 +130,20 @@ func TestMySQLYTWriteLedgerRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	l := &YTWriteLedger{s: s}
-	op, prepared, err := l.Prepare(ctx, n)
+	now := time.Now().UTC()
+	op, prepared, err := l.Prepare(ctx, now, n)
 	if err != nil || !prepared {
 		t.Fatalf("prepare: prepared=%t err=%v", prepared, err)
 	}
-	again, prepared, err := l.Prepare(ctx, n)
+	again, prepared, err := l.Prepare(ctx, now, n)
 	if err != nil || prepared || again.ID != op.ID {
 		t.Fatalf("idempotent prepare: %+v prepared=%t err=%v", again, prepared, err)
 	}
-	got, err := l.Get(ctx, n.Principal, n.Kind, n.Key)
+	got, err := l.Get(ctx, n.Principal, op.ID)
 	if err != nil || got.ID != op.ID {
 		t.Fatalf("get: %+v err=%v", got, err)
 	}
-	if err := l.Reject(ctx, op.ID, "test", "detail", time.Now().UTC()); err != nil {
+	if _, err := l.Reject(ctx, now, op.ID, "test", "detail"); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
 }

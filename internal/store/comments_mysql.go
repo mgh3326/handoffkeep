@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
-
 )
 
 // mysqlCreateComment holds the same comment lock across the insert, the
