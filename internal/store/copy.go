@@ -942,6 +942,13 @@ func resetIdentity(ctx context.Context, dst *copyDB, spec copyTableSpec) error {
 		return nil
 	}
 	quotedIdentity := quoteCopyIdent(identity, false)
-	_, err = conn.ExecContext(ctx, `SELECT setval($1, COALESCE((SELECT MAX(`+quotedIdentity+`) FROM `+quoteCopyIdent(table, false)+`), 1), EXISTS(SELECT 1 FROM `+quoteCopyIdent(table, false)+`))`, seq.String)
+	if _, err = conn.ExecContext(ctx, `SELECT setval($1, COALESCE((SELECT MAX(`+quotedIdentity+`) FROM `+quoteCopyIdent(table, false)+`), 1), EXISTS(SELECT 1 FROM `+quoteCopyIdent(table, false)+`))`, seq.String); err != nil {
+		return err
+	}
+	if table == "sync_log" {
+		// sync_id has its own allocator sequence, separate from the entry_id
+		// identity sequence. Keep post-copy journal writes past copied feed IDs.
+		_, err = conn.ExecContext(ctx, `SELECT setval('sync_log_sync_id_seq', COALESCE((SELECT MAX(sync_id) FROM sync_log), 1), EXISTS(SELECT 1 FROM sync_log WHERE sync_id IS NOT NULL))`)
+	}
 	return err
 }
