@@ -67,27 +67,6 @@ type NotSentError struct {
 func (e *NotSentError) Error() string { return "not sent: " + e.Err.Error() }
 func (e *NotSentError) Unwrap() error { return e.Err }
 
-// RemoteUnknownError is returned by Kind.Send when an operation failed after
-// one or more writes succeeded or may have succeeded, so the op must be recorded
-// remote_unknown rather than prepared/not_sent or rejected.
-type RemoteUnknownError struct {
-	Reason string
-	Detail string
-	Err    error
-}
-
-func (e *RemoteUnknownError) Error() string {
-	if e.Detail != "" {
-		return e.Detail
-	}
-	if e.Err != nil {
-		return e.Err.Error()
-	}
-	return "remote unknown"
-}
-
-func (e *RemoteUnknownError) Unwrap() error { return e.Err }
-
 // Evidence is what one search of an op's target found: the candidates that
 // carry the op's marker, by how they compare with the rendered text.
 type Evidence struct {

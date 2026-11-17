@@ -393,8 +393,8 @@ func TestSearchRawTextQueries(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		`/api/issues?(project: {HK}) and (project OTHER x for me)`,
-		`/api/articles?project OTHER x for me`,
+		`/api/issues?(project: {HK}) and (project\: OTHER \"x\" \\ for\: me)`,
+		`/api/articles?project\: OTHER \"x\" \\ for\: me`,
 	}
 	got := yt.recorded()
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
@@ -515,16 +515,41 @@ func TestSearchHelpers(t *testing.T) {
 	if q := issueSearchQuery([]string{"HK", "BIG"}, "x"); q != "(project: {HK} or project: {BIG}) and (x)" {
 		t.Fatalf("issueSearchQuery = %s", q)
 	}
-	if q := issueSearchQuery([]string{"HK"}, "좌회"); q != "(project: {HK}) and (좌회)" {
-		t.Fatalf("issueSearchQuery Korean = %s", q)
+	// Korean partial words: matches individually, not wrapped in one phrase
+	for _, kw := range []string{"좌회", "택배", "배달 루프", "그랜저"} {
+		if q := issueSearchQuery([]string{"HK"}, kw); q != "(project: {HK}) and ("+kw+")" {
+			t.Fatalf("issueSearchQuery Korean %q = %s", kw, q)
+		}
 	}
-	if q := issueSearchQuery([]string{"HK"}, "for: me"); q != "(project: {HK}) and (for me)" {
+	// Each special character escaped literally
+	escapeCases := []struct {
+		in   string
+		want string
+	}{
+		{"project: HK", `project\: HK`},
+		{"for: me", `for\: me`},
+		{"#123", `\#123`},
+		{"#tag", `\#tag`},
+		{"unclosed { brace", `unclosed \{ brace`},
+		{"closed { brace }", `closed \{ brace \}`},
+		{"back\\slash", `back\\slash`},
+		{`"quoted text"`, `\"quoted text\"`},
+		{"parens (test)", `parens \(test\)`},
+		{"project: HK #bug {test} \"phrase\" \\path 좌회", `project\: HK \#bug \{test\} \"phrase\" \\path 좌회`},
+		{"or project: X", `project\: X`},
+	}
+	for _, c := range escapeCases {
+		if got := escapeYouTrackQuery(c.in); got != c.want {
+			t.Errorf("escapeYouTrackQuery(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	if q := issueSearchQuery([]string{"HK"}, "for: me"); q != `(project: {HK}) and (for\: me)` {
 		t.Fatalf("issueSearchQuery for: me = %s", q)
 	}
-	if q := issueSearchQuery([]string{"HK"}, "unclosed { brace"); q != "(project: {HK}) and (unclosed brace)" {
+	if q := issueSearchQuery([]string{"HK"}, "unclosed { brace"); q != `(project: {HK}) and (unclosed \{ brace)` {
 		t.Fatalf("issueSearchQuery brace = %s", q)
 	}
-	if q := issueSearchQuery([]string{"HK"}, "or project: X"); q != "(project: {HK}) and (project X)" {
+	if q := issueSearchQuery([]string{"HK"}, "or project: X"); q != `(project: {HK}) and (project\: X)` {
 		t.Fatalf("issueSearchQuery leading conjunction = %s", q)
 	}
 }

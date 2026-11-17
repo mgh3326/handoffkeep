@@ -252,15 +252,36 @@ func mirroredShortNames(projects []store.YouTrackProject) []string {
 	return names
 }
 
-var youtrackSyntaxCleanRE = regexp.MustCompile(`[{}\(\)\\\":]+`)
 var leadingConjunctionRE = regexp.MustCompile(`^(?i)(?:or|and)\s+`)
 
-// cleanSearchText strips YouTrack query syntax characters (braces, parens,
-// quotes, colons, backslashes) and leading conjunctions so user text matches
-// as words/tokens without triggering YouTrack syntax errors or filter injections.
+var querySyntaxReplacer = strings.NewReplacer(
+	`\`, `\\`,
+	`"`, `\"`,
+	`{`, `\{`,
+	`}`, `\}`,
+	`(`, `\(`,
+	`)`, `\)`,
+	`#`, `\#`,
+	`:`, `\:`,
+)
+
+// escapeYouTrackQuery escapes YouTrack query syntax characters (backslash, quotes,
+// braces, parentheses, hash, colons) so user text matches literally while words
+// still match individually, preventing query syntax errors and filter injections.
+func escapeYouTrackQuery(text string) string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return ""
+	}
+	s := strings.Join(words, " ")
+	escaped := querySyntaxReplacer.Replace(s)
+	return strings.TrimSpace(leadingConjunctionRE.ReplaceAllString(escaped, ""))
+}
+
+// cleanSearchText escapes YouTrack query syntax characters so user text matches
+// literally while words still match individually.
 func cleanSearchText(text string) string {
-	s := strings.Join(strings.Fields(youtrackSyntaxCleanRE.ReplaceAllString(text, " ")), " ")
-	return strings.TrimSpace(leadingConjunctionRE.ReplaceAllString(s, ""))
+	return escapeYouTrackQuery(text)
 }
 
 // issueSearchQuery restricts the issue search to the mirrored projects using
