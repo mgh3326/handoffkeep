@@ -15,43 +15,13 @@ class RewriteTests(unittest.TestCase):
     def test_placeholders_expand_reused_arguments_in_occurrence_order(self):
         self.assertEqual(sqlport.rewrite("SELECT $2,$1,$2"), ("SELECT ?,?,?", [2, 1, 2], ["$n → ?"], False))
 
-    def test_simple_casts_only_use_the_strict_type_map(self):
-        self.assertEqual(sqlport.rewrite("SELECT $1::text")[:2], ("SELECT CAST(? AS CHAR)", [1]))
-        self.assertEqual(sqlport.rewrite("SELECT item_id::text")[0], "SELECT CAST(item_id AS CHAR)")
-        self.assertEqual(sqlport.rewrite("SELECT '17'::int")[0], "SELECT CAST('17' AS SIGNED)")
-        self.assertEqual(sqlport.rewrite("SELECT item_id::integer")[0], "SELECT CAST(item_id AS SIGNED)")
-        self.assertEqual(sqlport.rewrite("SELECT item_id::bigint")[0], "SELECT CAST(item_id AS SIGNED)")
-
-    def test_casts_outside_a_single_primary_or_without_a_strict_type_are_todo(self):
+    def test_all_constructs_outside_placeholders_are_todo(self):
         samples = (
-            "SELECT count(*)::int",
-            "SELECT lower(name)::text",
-            "SELECT (item_id)::text",
-            'SELECT "item"::varchar',
-            "SELECT item_id::text::jsonb",
-            "SELECT value::text(20)",
-            "SELECT value::text[]",
-            "SELECT value::char",
-            "SELECT 'abc'::char",
-            "SELECT value::varchar",
-            "SELECT value::numeric",
-            "SELECT 1.25::numeric",
-            "SELECT value::decimal",
-            "SELECT value::boolean",
-            "SELECT value::bool",
-            "SELECT 'true'::boolean",
-            "SELECT value::json",
-            "SELECT value::jsonb",
-            "SELECT value::timestamp",
-            "SELECT value::double precision",
-            "SELECT value::regclass",
-        )
-        for sql in samples:
-            with self.subTest(sql=sql):
-                self.assertIsNone(sqlport.rewrite(sql)[0])
-
-    def test_all_constructs_outside_placeholders_and_simple_casts_are_todo(self):
-        samples = (
+            "SELECT $1::text",
+            "SELECT t.done::text FROM tasks t WHERE t.id = $1",
+            "SELECT $1 / 2",
+            "SELECT count(*) / 2 FROM t WHERE id = $1",
+            "SELECT id FROM t WHERE a = $1 ORDER BY last_seen DESC",
             "SELECT host_id || ':' || account_key",
             "SELECT a IS DISTINCT FROM b",
             "SELECT a IS NOT DISTINCT FROM b",
@@ -98,6 +68,8 @@ class RewriteTests(unittest.TestCase):
 
     def test_construct_table_refusals(self):
         samples = {
+            "::type cast": "SELECT $1::text",
+            "ORDER BY": "SELECT id FROM t ORDER BY last_seen DESC",
             "RETURNING": "INSERT INTO t VALUES(1) RETURNING id",
             "ON CONFLICT": "INSERT INTO t VALUES(1) ON CONFLICT DO NOTHING",
             "= ANY / arrays / unnest": "SELECT 1 WHERE id = ANY($1)",
@@ -139,9 +111,29 @@ class RewriteTests(unittest.TestCase):
         literals = sqlport.go_literals(source)
         self.assertEqual([literal.text for literal in literals], ["SELECT $3"])
 
+    def test_unlexable_sql_literal_is_counted_as_todo(self):
+        source = "var q = `SELECT 'unterminated`\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "broken.go"
+            path.write_text(source)
+            rows, counts = sqlport.analyze(path)
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["mysql"])
+        self.assertIn("TODO unlexable SQL: unterminated string literal", rows[0]["constructs"])
+        self.assertEqual(counts[("TODO", "TODO unlexable SQL: unterminated string literal")], 1)
+
+    def test_postgres_escape_string_literal_is_discovered_and_refused(self):
+        source = r"var q = `SELECT id FROM t WHERE name ILIKE $1 ESCAPE '\'`"
+        literals = sqlport.go_literals(source)
+        self.assertEqual(len(literals), 1)
+        result = sqlport.rewrite(literals[0].text)
+        self.assertIsNone(result[0])
+        self.assertIn("backslash in string literal", result[2])
+
     def test_hk5059_quota_and_bench_comparisons(self):
         quota = "SELECT o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 ORDER BY l.kind,l.window_key"
-        self.assertEqual(sqlport.rewrite(quota)[0], "SELECT o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=? ORDER BY l.kind,l.window_key")
+        self.assertIsNone(sqlport.rewrite(quota)[0])
+        self.assertIn("ORDER BY", sqlport.rewrite(quota)[2])
         presence = "SELECT host_id,account_key,last_seen FROM quota_presence WHERE ($1='' OR host_id=$1) AND ($2='' OR account_key=$2) AND last_seen >= clock_timestamp()-$4*interval '1 second' ORDER BY last_seen DESC,host_id,account_key LIMIT $3"
         self.assertIsNone(sqlport.rewrite(presence)[0])
         self.assertEqual(sqlport.rewrite(" FROM bench_reps WHERE id=$1 FOR UPDATE")[0], " FROM bench_reps WHERE id=? FOR UPDATE")
@@ -151,10 +143,10 @@ class RewriteTests(unittest.TestCase):
         violations = sqlport._corpus_auto_violations(Path(__file__).resolve().parents[1])
         self.assertEqual(violations, [])
 
-    def test_only_placeholders_and_simple_casts_are_auto_rewrites(self):
+    def test_only_placeholders_are_auto_rewrites(self):
         self.assertEqual(
             {c.name for c in sqlport.CONSTRUCTS if c.disposition == "rewrite"},
-            {"$n → ?", "::type → CAST"},
+            {"$n → ?"},
         )
 
 

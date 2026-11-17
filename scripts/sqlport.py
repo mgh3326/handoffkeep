@@ -61,14 +61,6 @@ SQL_WORDS = {
     "HAVING", "LIMIT", "OFFSET", "UNION", "ALL", "EXISTS", "NULL",
     "TRUE", "FALSE", "ESCAPE", "FILTER", "OVER", "PARTITION", "WINDOW",
 }
-CAST_TYPE_MAP = {
-    "text": "CHAR",
-    "int": "SIGNED",
-    "integer": "SIGNED",
-    "bigint": "SIGNED",
-}
-
-
 def lex(sql: str) -> list[Token]:
     """Tokenize SQL while preserving spans; strings/comments are opaque tokens."""
     out: list[Token] = []
@@ -104,10 +96,7 @@ def lex(sql: str) -> list[Token]:
                         continue
                     i += 1
                     break
-                if sql[i] == "\\" and i + 1 < len(sql):
-                    i += 2
-                else:
-                    i += 1
+                i += 1
             else:
                 raise SQLTokenError("unterminated string literal")
             out.append(Token("string", sql[start:i], start, i))
@@ -369,7 +358,7 @@ def _has_question_key(tokens: list[Token]) -> bool:
 
 
 def _has_nonportable_operator(tokens: list[Token]) -> bool:
-    safe = {"=", "<>", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "%", "::", "||", "->", "->>", "?"}
+    safe = {"=", "<>", "!=", "<", ">", "<=", ">=", "+", "-", "*", "%", "::", "||", "->", "->>", "?"}
     return any(t.kind == "operator" and t.value not in safe for t in tokens)
 
 
@@ -413,6 +402,10 @@ def _has_regex_operator(tokens: list[Token]) -> bool:
 
 def _has_nulls_order(tokens: list[Token]) -> bool:
     return has_sequence(tokens, ("NULLS", "FIRST")) or has_sequence(tokens, ("NULLS", "LAST"))
+
+
+def _has_order_by(tokens: list[Token]) -> bool:
+    return has_sequence(tokens, ("ORDER", "BY"))
 
 
 def _has_extract_epoch(tokens: list[Token]) -> bool:
@@ -513,28 +506,9 @@ def _has_collate(tokens: list[Token]) -> bool:
     return has_word(tokens, "COLLATE")
 
 
-def _has_unverified_cast_type(tokens: list[Token]) -> bool:
-    for i, token in enumerate(tokens):
-        if token.kind != "operator" or token.value != "::":
-            continue
-        if i + 1 >= len(tokens) or tokens[i + 1].kind != "word":
-            return True
-        if tokens[i + 1].value.lower() not in CAST_TYPE_MAP:
-            return True
-        after_type = i + 2
-        if after_type < len(tokens) and (
-            (tokens[after_type].kind == "punct" and tokens[after_type].value == "(")
-            or (tokens[after_type].kind == "other" and tokens[after_type].value == "[")
-            or (tokens[after_type].kind == "operator" and tokens[after_type].value == "::")
-        ):
-            return True
-    return False
-
-
 CONSTRUCTS = [
     Construct("$n → ?", lambda ts: any(t.kind == "parameter" for t in ts), "rewrite"),
-    Construct("::type → CAST", _has_type_cast, "rewrite"),
-    Construct("unverified ::type or cast modifier", _has_unverified_cast_type, "refuse"),
+    Construct("::type cast", _has_type_cast, "refuse"),
     Construct("|| concat or JSON merge", lambda ts: _has_operator_sequence(ts, "||"), "refuse"),
     Construct("IS [NOT] DISTINCT FROM", _has_distinct, "refuse"),
     Construct("FILTER", _has_filter, "refuse"),
@@ -554,6 +528,7 @@ CONSTRUCTS = [
     Construct("ILIKE", _has_ilike, "refuse"),
     Construct("regex match operators", _has_regex_operator, "refuse"),
     Construct("NULLS FIRST/LAST", _has_nulls_order, "refuse"),
+    Construct("ORDER BY", _has_order_by, "refuse"),
     Construct("interval literal", _has_interval_literal, "refuse"),
     Construct("clock_timestamp()", _has_clock_timestamp, "refuse"),
     Construct("generate_series/jsonb_* and other PostgreSQL functions", _has_mig_function, "refuse"),
@@ -574,46 +549,6 @@ def present(tokens: list[Token]) -> list[Construct]:
     return [construct for construct in CONSTRUCTS if construct.detect(tokens)]
 
 
-def _rewrite_casts(sql: str) -> tuple[str, str | None, int]:
-    count = 0
-    for _ in range(100):
-        tokens = significant(lex(sql))
-        opens, closes = matching_parens(tokens)
-        for i, token in enumerate(tokens):
-            if token.kind != "operator" or token.value != "::":
-                continue
-            operand = primary_before(tokens, i, opens, closes)
-            if operand is None:
-                return sql, "unsupported ::type operand", count
-            if operand.kind not in {"identifier", "parameter", "string", "number"}:
-                return sql, "unsupported ::type primary", count
-            cursor = i
-            expr = sql[operand.start:operand.end]
-            while cursor < len(tokens) and tokens[cursor].kind == "operator" and tokens[cursor].value == "::":
-                if cursor + 1 >= len(tokens) or tokens[cursor + 1].kind != "word":
-                    return sql, "unsupported ::type cast", count
-                type_name = tokens[cursor + 1].value.lower()
-                after_type = cursor + 2
-                target = CAST_TYPE_MAP.get(type_name)
-                if after_type < len(tokens) and (
-                    (tokens[after_type].kind == "punct" and tokens[after_type].value == "(")
-                    or (tokens[after_type].kind == "other" and tokens[after_type].value == "[")
-                ):
-                    return sql, f"unsupported ::{type_name} cast modifier", count
-                if target is None:
-                    return sql, f"unsupported ::{type_name} cast", count
-                if after_type < len(tokens) and tokens[after_type].kind == "operator" and tokens[after_type].value == "::":
-                    return sql, "unsupported multiple ::type casts", count
-                expr = f"CAST({expr} AS {target})"
-                cursor = after_type
-            sql = sql[:operand.start] + expr + sql[tokens[cursor - 1].end:]
-            count += 1
-            break
-        else:
-            return sql, None, count
-    return sql, "unsupported nested ::type casts", count
-
-
 def _replace_parameters(sql: str) -> tuple[str, list[int]]:
     tokens = significant(lex(sql))
     edits: list[tuple[int, int, str]] = []
@@ -628,9 +563,10 @@ def _replace_parameters(sql: str) -> tuple[str, list[int]]:
 def _rewrite(sql: str) -> tuple[str | None, list[int], list[str], bool]:
     try:
         original_tokens = significant(lex(sql))
+        matching_parens(original_tokens)
+        detected = present(original_tokens)
     except SQLTokenError as exc:
         return None, [], [f"TODO unlexable SQL: {exc}"], False
-    detected = present(original_tokens)
     if not detected:
         return sql, [], [], False
     now_flag = any(c.name == "now() [manual time audit]" for c in detected)
@@ -638,15 +574,14 @@ def _rewrite(sql: str) -> tuple[str | None, list[int], list[str], bool]:
     if refusal:
         return None, [], refusal, now_flag
     try:
-        sql, error, _ = _rewrite_casts(sql)
-        if error:
-            return None, [], ["::type → CAST", f"TODO: {error}"], now_flag
         sql, order = _replace_parameters(sql)
         final_tokens = significant(lex(sql))
+        matching_parens(final_tokens)
+        final_constructs = present(final_tokens)
     except SQLTokenError as exc:
         return None, [], [f"TODO unlexable SQL: {exc}"], now_flag
     remaining = [
-        c.name for c in present(final_tokens)
+        c.name for c in final_constructs
         if c.disposition == "refuse" or (c.residual and c.residual(final_tokens))
     ]
     if remaining:
@@ -709,8 +644,13 @@ def go_literals(source: str) -> list[Literal]:
     for start, raw in go_string_literals(source):
         try:
             value = raw[1:-1] if raw.startswith("`") else ast.literal_eval(raw)
+        except (SyntaxError, ValueError):
+            continue
+        try:
             tokens = significant(lex(value))
-        except (SyntaxError, ValueError, SQLTokenError):
+        except SQLTokenError:
+            if re.search(r"\b(?:SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|WITH|FROM|WHERE)\b", value, re.I):
+                out.append(Literal(source.count("\n", 0, start) + 1, value))
             continue
         if _is_sql(tokens) and present(tokens):
             out.append(Literal(source.count("\n", 0, start) + 1, value))
