@@ -251,7 +251,12 @@ func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxW
 		}
 		out = append(out, InboxWrite{ItemKey: r.key, State: InboxState{ItemKey: r.key, ReadAt: r.read, DoneAt: r.done, SnoozedUntil: r.snooze, Actor: actor, UpdatedAt: now}})
 	}
-	if _, err := tx.Exec(ctx, sqlFor(tx, `UPDATE operator_inbox_events SET undone_at=$2 WHERE event_key=$1 AND undone_at IS NULL`, `UPDATE operator_inbox_events SET undone_at=? WHERE event_key=? AND undone_at IS NULL`), now, eventKey); err != nil {
+	undoQuery := sqlFor(tx, `UPDATE operator_inbox_events SET undone_at=$2 WHERE event_key=$1 AND undone_at IS NULL`, `UPDATE operator_inbox_events SET undone_at=? WHERE event_key=? AND undone_at IS NULL`)
+	undoArgs := []any{eventKey, now}
+	if dialectFor(tx) == mysqlDialect {
+		undoArgs = []any{now, eventKey}
+	}
+	if _, err := tx.Exec(ctx, undoQuery, undoArgs...); err != nil {
 		return nil, err
 	}
 	return out, tx.Commit(ctx)
@@ -410,9 +415,21 @@ func (s *Store) applyInboxItem(ctx context.Context, key, action string, until *t
 			// Snoozing a decision request from the inbox also snoozes the
 			// request itself, in this same transaction (hk 3343 §2).
 			var before *time.Time
-			err := tx.QueryRow(ctx, sqlFor(tx, `SELECT snoozed_until FROM decision_requests WHERE id=$1 FOR UPDATE`, `SELECT snoozed_until FROM decision_requests WHERE id=? FOR UPDATE`), id).Scan(&before)
-			if err == nil {
-				_, err = tx.Exec(ctx, sqlFor(tx, `UPDATE decision_requests SET snoozed_until=$1,updated_at=$2 WHERE id=$3 AND status='open'`, `UPDATE decision_requests SET snoozed_until=?,updated_at=? WHERE id=? AND status='open'`), *until, now, id)
+			var err error
+			if dialectFor(tx) != mysqlDialect {
+				before, err = snoozeDecisionRecordTx(ctx, pgxTx(tx), id, *until, now)
+			} else {
+				err = tx.QueryRow(ctx, `SELECT snoozed_until FROM decision_requests WHERE id=? FOR UPDATE`, id).Scan(&before)
+				if errors.Is(err, ErrNoRows) {
+					err = ErrDecisionRecordNotFound
+				}
+				if err == nil {
+					var affected int64
+					affected, err = tx.Exec(ctx, `UPDATE decision_requests SET snoozed_until=?,updated_at=? WHERE id=? AND status='open'`, *until, now, id)
+					if err == nil && affected == 0 {
+						err = ErrDecisionRecordNotOpen
+					}
+				}
 			}
 			if err != nil {
 				return InboxState{}, err

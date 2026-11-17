@@ -48,6 +48,8 @@ func seedTasksAreaPostgres(t *testing.T, pool *pgxpool.Pool, when time.Time) {
 	exec(`INSERT INTO task_thread_cursors(destination,epoch_event_id,scan_event_id,updated_at) VALUES('discord',1,2,$1)`, when)
 	exec(`INSERT INTO checkpoints(id,session,kind,title,body,refs,created_by,created_at) VALUES(93001,'sess','checkpoint','t','body','{"k":"v"}','test',$1)`, when)
 	exec(`INSERT INTO memory(agent,name,description,memory_type,content,updated_by,updated_at) VALUES('agent','name','desc','user','content','test',$1)`, when)
+	exec(`INSERT INTO dots_results(id,document_key,comment_id,issue_uuid,issue_identifier,kind,artefact_sha256,task_id,routed_lane,created_at,updated_at) VALUES(93003,'copy/dots/superseder','copy-comment-3','issue-1','MGH-1','RESULT',repeat('c',64),93001,'dots',$1,$1)`, when)
+	exec(`INSERT INTO dots_results(id,document_key,comment_id,issue_uuid,issue_identifier,kind,artefact_sha256,task_id,routed_lane,adoption_state,superseded_by,created_at,updated_at) VALUES(93002,'copy/dots/superseded','copy-comment-2','issue-1','MGH-1','RESULT',repeat('b',64),93001,'dots','superseded',93003,$1,$1)`, when)
 	exec(`INSERT INTO dots_results(id,document_key,comment_id,issue_uuid,issue_identifier,kind,artefact_sha256,task_id,routed_lane,created_at,updated_at) VALUES(93001,'copy/dots/result','copy-comment-1','issue-1','MGH-1','RESULT',repeat('a',64),93001,'dots',$1,$1)`, when)
 	exec(`INSERT INTO dots_run_tokens(id,task_id,token,issue_key,issued_by,issued_at) VALUES(93001,93001,repeat('a',64),repeat('b',64),'copy-test',$1)`, when)
 	exec(`INSERT INTO decision_requests(id,source,source_ref,task_id,lane,question,reading,grounds,options,created_at,updated_at) VALUES(93001,'task_flag','copy/decision-1',93001,'copy-lane','question','reading','["ground"]','{"options":[]}' ,$1,$1)`, when)
@@ -104,9 +106,16 @@ func TestCopyTasksAreaRoundTripWithParity(t *testing.T) {
 	if err := my.mysqlPool.QueryRowContext(t.Context(), `SELECT (SELECT COUNT(*) FROM sync_log), (SELECT COUNT(*) FROM sync_decisions), (SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='tasks')`).Scan(&feed, &decisions, &nextTask); err != nil {
 		t.Fatal(err)
 	}
+	var supersededBy int64
+	if err := my.mysqlPool.QueryRowContext(t.Context(), `SELECT superseded_by FROM dots_results WHERE id=93002`).Scan(&supersededBy); err != nil {
+		t.Fatal(err)
+	}
 	my.Close()
 	if feed != 0 || decisions != 1 || nextTask <= 93003 {
 		t.Fatalf("MySQL target: sync_log=%d sync_decisions=%d next task id=%d, want 0, 1, >93003", feed, decisions, nextTask)
+	}
+	if supersededBy != 93003 {
+		t.Fatalf("copied dots_results.superseded_by=%d, want 93003", supersededBy)
 	}
 
 	back, backURL := schemaStoreAt(t, "copy_tasks_back")

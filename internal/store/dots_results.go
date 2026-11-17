@@ -245,10 +245,14 @@ func (s *Store) SetDotsAdoption(ctx context.Context, id int64, by string, in Dot
 		supersededBy = &in.SupersededBy
 	}
 	at := time.Now().UTC()
-	_, err = tx.Exec(ctx, sqlFor(tx,
+	query := sqlFor(tx,
 		`UPDATE dots_results SET adoption_state=$2, adopted_ref=$3, adopted_by=$4, adopted_at=$5, superseded_by=$6, updated_at=$5, canva_url=$7, canva_page=$8, canva_version=$9 WHERE id=$1`,
-		`UPDATE dots_results SET adoption_state=?, adopted_ref=?, adopted_by=?, adopted_at=?, superseded_by=?, updated_at=?, canva_url=?, canva_page=?, canva_version=? WHERE id=?`),
-		id, in.State, nullIfEmpty(in.Ref), by, at, supersededBy, nullIfEmpty(in.CanvaURL), nullIfEmpty(in.CanvaPage), nullIfEmpty(in.CanvaVersion))
+		`UPDATE dots_results SET adoption_state=?, adopted_ref=?, adopted_by=?, adopted_at=?, superseded_by=?, updated_at=?, canva_url=?, canva_page=?, canva_version=? WHERE id=?`)
+	args := []any{id, in.State, nullIfEmpty(in.Ref), by, at, supersededBy, nullIfEmpty(in.CanvaURL), nullIfEmpty(in.CanvaPage), nullIfEmpty(in.CanvaVersion)}
+	if s.dialect == mysqlDialect {
+		args = []any{in.State, nullIfEmpty(in.Ref), by, at, supersededBy, at, nullIfEmpty(in.CanvaURL), nullIfEmpty(in.CanvaPage), nullIfEmpty(in.CanvaVersion), id}
+	}
+	_, err = tx.Exec(ctx, query, args...)
 	if err != nil {
 		return DotsResult{}, false, err
 	}

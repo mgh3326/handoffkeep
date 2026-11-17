@@ -27,7 +27,7 @@ func init() {
 			t.Fatalf("ListChatQuestions = %+v err=%v", questions, err)
 		}
 
-		post := ChatMessagePost{Message: ChatMessage{Author: "operator", Body: "Use the north route.", SourceChannel: "test"}, Questions: []ChatQuestion{q}}
+		post := ChatMessagePost{Message: ChatMessage{ConversationID: "operator-desk", Author: "operator", Body: "Use the north route.", SourceChannel: "test"}, Questions: []ChatQuestion{q}}
 		post.Message.OriginEventID = "decisions-area-case"
 		message, created, err := s.PostChatMessage(ctx, post)
 		if err != nil || !created || message.ID < 1 || len(message.QuestionRelations) != 1 || message.QuestionRelations[0].RelationKind != "posted" {
@@ -85,11 +85,46 @@ func init() {
 		if state, ok := states["decision:request:"+itoa(requestID)]; ok && state.SnoozedUntil != nil {
 			t.Fatalf("undo left inbox snoozed: %+v", state)
 		}
+		requestKey := "decision:request:" + itoa(requestID)
+		if _, err := s.db().Exec(ctx, s.q(`UPDATE decision_requests SET status=$1,updated_at=$2 WHERE id=$3`, `UPDATE decision_requests SET status=?,updated_at=? WHERE id=?`), DecisionStatusAnswered, time.Now().UTC(), requestID); err != nil {
+			t.Fatal(err)
+		}
+		closed, err := s.ApplyInbox(ctx, []string{requestKey}, InboxActionSnooze, &until, "area-case", "closed-request-snooze")
+		if err != nil || len(closed.Items) != 1 || !errors.Is(closed.Items[0].Err, ErrDecisionRecordNotOpen) {
+			t.Fatalf("closed request snooze = %+v err=%v, want decision_record_not_open", closed, err)
+		}
+		states, err = s.InboxStates(ctx, []string{requestKey})
+		if err != nil || len(states) != 0 {
+			t.Fatalf("closed request snooze left inbox state %+v err=%v", states, err)
+		}
+		missingKey := "decision:request:" + itoa(1<<60)
+		missing, err := s.ApplyInbox(ctx, []string{missingKey}, InboxActionSnooze, &until, "area-case", "missing-request-snooze")
+		if err != nil || len(missing.Items) != 1 || !errors.Is(missing.Items[0].Err, ErrDecisionRecordNotFound) {
+			t.Fatalf("missing request snooze = %+v err=%v, want decision_record_not_found", missing, err)
+		}
 		if _, err := s.TransitionChatQuestion(ctx, id, "resolved", "area-case"); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.TransitionChatQuestion(ctx, id, "withdrawn", "area-case"); !errors.Is(err, ErrChatQuestionConflict) {
 			t.Fatalf("second transition err=%v, want ErrChatQuestionConflict", err)
+		}
+
+		now := time.Now().UTC()
+		tx, err := s.db().Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dotsID, err := tx.InsertID(ctx, s.q(`INSERT INTO dots_results(document_key,comment_id,issue_uuid,issue_identifier,kind,artefact_sha256,routed_lane,created_at,updated_at) VALUES('area/dots/result','area-dots-comment','area-issue','AREA-1','RESULT',repeat('a',64),'decision-area-case',$1,$2) RETURNING id`, `INSERT INTO dots_results(document_key,comment_id,issue_uuid,issue_identifier,kind,artefact_sha256,routed_lane,created_at,updated_at) VALUES('area/dots/result','area-dots-comment','area-issue','AREA-1','RESULT',repeat('a',64),'decision-area-case',?,?)`), now, now)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		adopted, changed, err := s.SetDotsAdoption(ctx, dotsID, "area-case", DotsAdoptionInput{State: DotsAdoptionRejected})
+		if err != nil || !changed || adopted.AdoptionState != DotsAdoptionRejected {
+			t.Fatalf("SetDotsAdoption = %+v changed=%v err=%v", adopted, changed, err)
 		}
 	})
 }

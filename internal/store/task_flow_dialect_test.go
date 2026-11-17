@@ -29,6 +29,7 @@ func init() {
 	registerTaskAreaCase("flow/claim", flowCaseClaim)
 	registerTaskAreaCase("flow/settled-transitions", flowCaseSettled)
 	registerTaskAreaCase("flow/awaiting-decision", flowCaseAwaiting)
+	registerTaskAreaCase("flow/withdrawn-request-keeps-flag-projection", flowCaseWithdrawnRequestKeepsFlagProjection)
 	registerTaskAreaCase("flow/relane-and-lanes", flowCaseRelane)
 }
 
@@ -547,6 +548,34 @@ func flowCaseAwaiting(t *testing.T, s *Store) {
 	}
 	if flags != 2 {
 		t.Fatalf("%d awaiting_decision events, want 2 (raise and clear)", flags)
+	}
+}
+
+func flowCaseWithdrawnRequestKeepsFlagProjection(t *testing.T, s *Store) {
+	ctx := t.Context()
+	x := flowCaseTask(t, s, "implement")
+	requestID := decisionRequestID(x.ID, 1)
+	before := taskDecisionBefore{request: &DecisionRequest{ID: requestID, Status: DecisionRequestOpen}}
+	after := x
+	after.AwaitingDecision = true
+	after.Refs.DecisionRequest = &DecisionRequest{ID: requestID, Status: DecisionRequestWithdrawn}
+	tx, release, err := s.begin(ctx)
+	flowMust(t, err)
+	defer release()
+	defer tx.Rollback(ctx)
+	at := time.Now().UTC()
+	if err := s.mirrorTaskDecisionsFlowTx(ctx, tx, before, after, "flow-case", "request withdrawn", 41, at); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.db().QueryRow(ctx, s.q(`SELECT count(*) FROM decision_requests WHERE task_id=$1 AND source='task_flag' AND source_ref=$2 AND status='open'`, `SELECT count(*) FROM decision_requests WHERE task_id=? AND source='task_flag' AND source_ref=? AND status='open'`), x.ID, fmt.Sprintf("%d/41", x.ID)).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("open task_flag projection count=%d, want 1", count)
 	}
 }
 

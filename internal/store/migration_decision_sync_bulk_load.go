@@ -9,8 +9,8 @@ import (
 // The store-copy tool loads decision_requests and sync_decisions themselves,
 // so a copied decision request must not emit a second feed row. Only the
 // copier sets the transaction-local GUC; an unset GUC preserves normal writes.
-// Lock: replacing the trigger function takes no table lock; recreating its
-// trigger briefly takes SHARE ROW EXCLUSIVE on decision_requests.
+// Lock: replacing the trigger function takes no table lock. The existing
+// trigger resolves its function by name, so it immediately uses the new body.
 func init() {
 	registerMigration(migration{ID: "20261118-decision-sync-bulk-load", Apply: func(ctx context.Context, tx pgx.Tx) error {
 		return execAll(ctx, tx, []string{
@@ -22,8 +22,6 @@ BEGIN
   INSERT INTO sync_log(model,model_id,action,at) VALUES('decision','record:'||row_id,substr(TG_OP,1,1),clock_timestamp());
   RETURN NULL;
 END $$`,
-			`DROP TRIGGER IF EXISTS sync_decision_records ON decision_requests`,
-			`CREATE TRIGGER sync_decision_records AFTER INSERT OR UPDATE OR DELETE ON decision_requests FOR EACH ROW EXECUTE FUNCTION handoffkeep_sync_emit_decision_record()`,
 		})
 	}})
 }

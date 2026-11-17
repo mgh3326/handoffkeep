@@ -198,15 +198,18 @@ func mysqlMirrorTaskDecisionsTx(ctx context.Context, tx transaction, before task
 		}
 	case cur != nil && prev != nil && prev.Status == DecisionRequestOpen && cur.Status != DecisionRequestOpen:
 		if cur.Status == DecisionRequestWithdrawn {
-			return mysqlSupersedeDecisionTx(ctx, tx, requestSources, cur.ID, "withdrawn", at)
-		}
-		answer, who := requestAnswer(*cur)
-		if who == "" {
-			who = by
-		}
-		if _, err := tx.Exec(ctx, `UPDATE decision_requests SET status='answered',answer=?,answered_by=?,answered_at=?,updated_at=? WHERE source IN (?,?) AND source_ref=? AND status='open'`,
-			answer, who, at, at, DecisionSourceTaskRequest, DecisionSourceLinear, cur.ID); err != nil {
-			return err
+			if err := mysqlSupersedeDecisionTx(ctx, tx, requestSources, cur.ID, "withdrawn", at); err != nil {
+				return err
+			}
+		} else {
+			answer, who := requestAnswer(*cur)
+			if who == "" {
+				who = by
+			}
+			if _, err := tx.Exec(ctx, `UPDATE decision_requests SET status='answered',answer=?,answered_by=?,answered_at=?,updated_at=? WHERE source IN (?,?) AND source_ref=? AND status='open'`,
+				answer, who, at, at, DecisionSourceTaskRequest, DecisionSourceLinear, cur.ID); err != nil {
+				return err
+			}
 		}
 	}
 	if !before.flagged && after.AwaitingDecision && flagEvent > 0 && (cur == nil || cur.Status != DecisionRequestOpen) {

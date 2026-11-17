@@ -541,7 +541,12 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		if err != nil {
 			return ChatMessage{}, false, err
 		}
-		if err := mirrorChatQuestionTx(ctx, pgxTx(tx), stored, created, now); err != nil {
+		if s.dialect == mysqlDialect {
+			err = mirrorChatQuestionMySQLTx(ctx, tx, stored, created, now)
+		} else {
+			err = mirrorChatQuestionTx(ctx, pgxTx(tx), stored, created, now)
+		}
+		if err != nil {
 			return ChatMessage{}, false, err
 		}
 	}
