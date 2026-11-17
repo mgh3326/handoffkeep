@@ -9,8 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -82,8 +80,8 @@ var ytKindNameRE = regexp.MustCompile(`^[a-z][a-z_]{0,63}$`)
 // publishes the entity's binding after the map rows (and may prepare the
 // entity's first snapshot behind the op).
 type ytApplyHook struct {
-	conflict func(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string) (string, error)
-	bind     func(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string, now time.Time, adopted bool) error
+	conflict func(ctx context.Context, tx transaction, op ytwrite.Op, ytID string) (string, error)
+	bind     func(s *Store, ctx context.Context, tx transaction, op ytwrite.Op, ytID string, now time.Time, adopted bool) error
 }
 
 // ytApplyHooks are the create kinds' apply hooks, by kind. Each kind adds its
@@ -104,6 +102,12 @@ func registerYTApplyHook(kind string, h ytApplyHook) {
 func (s *Store) ytAdmitSQL(tenant string) string {
 	kinds := make([]string, 0, len(ytKindGates))
 	for k := range ytKindGates {
+		if s.dialect == mysqlDialect && ytB4bKinds[k] {
+			// B4b kinds keep refusing on MySQL; their gates may read
+			// tables MySQL does not have yet, so the admit clause
+			// cannot reference them at all.
+			continue
+		}
 		kinds = append(kinds, k)
 	}
 	sort.Strings(kinds)
@@ -149,7 +153,14 @@ func scanYTOp(r ytOpScanner) (ytwrite.Op, error) {
 // lockYTEntity serialises the writers of one entity's lane: the insert of a new
 // op and the check that decides whether an op may be dispatched. Without it an
 // op committed after a later op's check could be dispatched behind it.
-func lockYTEntity(ctx context.Context, tx pgx.Tx, kind, id string) error {
+func lockYTEntity(ctx context.Context, tx transaction, kind, id string) error {
+	if dialectFor(tx) == mysqlDialect {
+		// MySQL has no advisory xact locks: the entity lane is an hk_locks
+		// row under the value PostgreSQL's hashtextextended call stands for
+		// (design §11.1).
+		_, err := mysqlTransactionLock(ctx, tx, mysqlLockKey("yt_write_entity", kind+"\x00"+id), false)
+		return err
+	}
 	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('yt_write_entity:' || $1 || ':' || $2, 0))`, kind, id)
 	return err
 }
@@ -166,10 +177,11 @@ func clipText(s string, n int) string {
 }
 
 func (l *YTWriteLedger) Prepare(ctx context.Context, now time.Time, n ytwrite.NewOp) (ytwrite.Op, bool, error) {
-	tx, err := l.s.pool.Begin(ctx)
+	tx, release, err := l.s.begin(ctx)
 	if err != nil {
 		return ytwrite.Op{}, false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	op, created, err := prepareYTOpTx(ctx, tx, now, n)
 	if err != nil {
@@ -181,7 +193,7 @@ func (l *YTWriteLedger) Prepare(ctx context.Context, now time.Time, n ytwrite.Ne
 // prepareYTOpTx is Prepare inside the caller's transaction: the comment path
 // stores its op in the comment's own transaction (yt_comments.go), so the
 // comment and the op commit or roll back together.
-func prepareYTOpTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrite.NewOp) (ytwrite.Op, bool, error) {
+func prepareYTOpTx(ctx context.Context, tx transaction, now time.Time, n ytwrite.NewOp) (ytwrite.Op, bool, error) {
 	if err := lockYTEntity(ctx, tx, n.EntityKind, n.EntityID); err != nil {
 		return ytwrite.Op{}, false, err
 	}
@@ -193,20 +205,42 @@ func prepareYTOpTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrite.NewO
 	if n.ParentID > 0 {
 		parent = n.ParentID
 	}
-	row := tx.QueryRow(ctx, `INSERT INTO yt_write_ops(principal, kind, idem_key, payload_sha, payload, entity_kind, entity_id,
-			yt_target_id, actor, parent_id, child_seq, state, created_at, next_attempt_at, tenant)
-		VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,'prepared',$12,$12,$13)
-		ON CONFLICT (principal, kind, idem_key) DO NOTHING
-		RETURNING `+ytOpColumns,
-		n.Principal, n.Kind, n.Key, n.PayloadSHA, string(n.Payload), n.EntityKind, n.EntityID, n.YTTargetID, n.Actor, parent, n.ChildSeq, now.UTC(), n.Tenant)
-	op, err := scanYTOp(row)
-	if err == nil {
-		return op, true, nil
+	var op ytwrite.Op
+	var err error
+	if dialectFor(tx) == mysqlDialect {
+		// ON DUPLICATE KEY UPDATE would fire the append-only guard, so the
+		// idem_key conflict is a plain INSERT whose unique violation the
+		// read-back below turns into the shared op.
+		_, ierr := tx.Exec(ctx, `INSERT INTO yt_write_ops(principal, kind, idem_key, payload_sha, payload, entity_kind, entity_id,
+				yt_target_id, actor, parent_id, child_seq, state, created_at, next_attempt_at, tenant)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,'prepared',?,?,?)`,
+			n.Principal, n.Kind, n.Key, n.PayloadSHA, string(n.Payload), n.EntityKind, n.EntityID, n.YTTargetID, n.Actor, parent, n.ChildSeq, now.UTC(), now.UTC(), n.Tenant)
+		if ierr == nil {
+			op, err = scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE principal=? AND kind=? AND idem_key=?`,
+				n.Principal, n.Kind, n.Key))
+			return op, err == nil, err
+		}
+		if !errors.Is(ierr, errUniqueViolation) {
+			return ytwrite.Op{}, false, ierr
+		}
+	} else {
+		row := tx.QueryRow(ctx, `INSERT INTO yt_write_ops(principal, kind, idem_key, payload_sha, payload, entity_kind, entity_id,
+				yt_target_id, actor, parent_id, child_seq, state, created_at, next_attempt_at, tenant)
+			VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,'prepared',$12,$12,$13)
+			ON CONFLICT (principal, kind, idem_key) DO NOTHING
+			RETURNING `+ytOpColumns,
+			n.Principal, n.Kind, n.Key, n.PayloadSHA, string(n.Payload), n.EntityKind, n.EntityID, n.YTTargetID, n.Actor, parent, n.ChildSeq, now.UTC(), n.Tenant)
+		op, err = scanYTOp(row)
+		if err == nil {
+			return op, true, nil
+		}
+		if !errors.Is(err, ErrNoRows) {
+			return ytwrite.Op{}, false, err
+		}
 	}
-	if !errors.Is(err, ErrNoRows) {
-		return ytwrite.Op{}, false, err
-	}
-	op, err = scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3`,
+	op, err = scanYTOp(tx.QueryRow(ctx, sqlFor(tx,
+		`SELECT `+ytOpColumns+` FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3`,
+		`SELECT `+ytOpColumns+` FROM yt_write_ops WHERE principal=? AND kind=? AND idem_key=?`),
 		n.Principal, n.Kind, n.Key))
 	if err != nil {
 		return ytwrite.Op{}, false, err
@@ -219,13 +253,21 @@ func prepareYTOpTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrite.NewO
 
 // rejectYTOpTx is Reject inside the caller's transaction, for an op refused
 // before it was ever sent.
-func rejectYTOpTx(ctx context.Context, tx pgx.Tx, now time.Time, id int64, reason, detail string) (ytwrite.Op, error) {
+func rejectYTOpTx(ctx context.Context, tx transaction, now time.Time, id int64, reason, detail string) (ytwrite.Op, error) {
+	if dialectFor(tx) == mysqlDialect {
+		_, err := tx.Exec(ctx, `UPDATE yt_write_ops SET state='rejected', reason=?, last_error=?, resolved_at=?
+			WHERE id=? AND state='prepared'`, clipText(reason, 200), clipText(detail, 2000), now.UTC(), id)
+		if err != nil {
+			return ytwrite.Op{}, err
+		}
+		return scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=?`, id))
+	}
 	return scanYTOp(tx.QueryRow(ctx, `UPDATE yt_write_ops SET state='rejected', reason=$2, last_error=$3, resolved_at=$4
 		WHERE id=$1 AND state='prepared' RETURNING `+ytOpColumns, id, clipText(reason, 200), clipText(detail, 2000), now.UTC()))
 }
 
 func (l *YTWriteLedger) Get(ctx context.Context, principal string, id int64) (ytwrite.Op, error) {
-	op, err := scanYTOp(l.s.pool.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1 AND principal=$2`, id, principal))
+	op, err := scanYTOp(l.s.db().QueryRow(ctx, sqlFor(l.s, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1 AND principal=$2`, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=? AND principal=?`), id, principal))
 	if errors.Is(err, ErrNoRows) {
 		return ytwrite.Op{}, ytwrite.ErrNotFound
 	}
@@ -233,7 +275,7 @@ func (l *YTWriteLedger) Get(ctx context.Context, principal string, id int64) (yt
 }
 
 func (l *YTWriteLedger) ByID(ctx context.Context, id int64) (ytwrite.Op, error) {
-	op, err := scanYTOp(l.s.pool.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1`, id))
+	op, err := scanYTOp(l.s.db().QueryRow(ctx, sqlFor(l.s, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1`, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=?`), id))
 	if errors.Is(err, ErrNoRows) {
 		return ytwrite.Op{}, ytwrite.ErrNotFound
 	}
@@ -241,15 +283,16 @@ func (l *YTWriteLedger) ByID(ctx context.Context, id int64) (ytwrite.Op, error) 
 }
 
 func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytwrite.Op, ytwrite.ClaimOutcome, error) {
-	tx, err := l.s.pool.Begin(ctx)
+	tx, release, err := l.s.begin(ctx)
 	if err != nil {
 		return ytwrite.Op{}, "", err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	// The lane is named by an immutable pair of columns, so it can be read
 	// before it is locked.
 	var kind, entity string
-	if err := tx.QueryRow(ctx, `SELECT entity_kind, entity_id FROM yt_write_ops WHERE id=$1`, id).Scan(&kind, &entity); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT entity_kind, entity_id FROM yt_write_ops WHERE id=$1`, `SELECT entity_kind, entity_id FROM yt_write_ops WHERE id=?`), id).Scan(&kind, &entity); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return ytwrite.Op{}, "", ytwrite.ErrNotFound
 		}
@@ -258,7 +301,7 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	if err := lockYTEntity(ctx, tx, kind, entity); err != nil {
 		return ytwrite.Op{}, "", err
 	}
-	op, err := scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1 FOR UPDATE`, id))
+	op, err := scanYTOp(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1 FOR UPDATE`, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=? FOR UPDATE`), id))
 	if err != nil {
 		return ytwrite.Op{}, "", err
 	}
@@ -275,7 +318,7 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 		// commits before this read and holds the op, or waits for this claim
 		// to commit.
 		var admitted bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id=$1 AND `+l.s.ytAdmitSQL("$2")+`)`, id, l.tenant).Scan(&admitted); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id=`+sqlFor(tx, `$1`, `?`)+` AND `+l.s.ytAdmitSQL(sqlFor(tx, "$2", "?"))+`)`, id, l.tenant).Scan(&admitted); err != nil {
 			return ytwrite.Op{}, "", err
 		}
 		if !admitted {
@@ -283,8 +326,10 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 		}
 	}
 	var blocked bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops
-		WHERE entity_kind=$1 AND entity_id=$2 AND id < $3 AND state NOT IN ('applied','rejected'))`, kind, entity, id).Scan(&blocked); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops
+		WHERE entity_kind=$1 AND entity_id=$2 AND id < $3 AND state NOT IN ('applied','rejected'))`,
+		`SELECT EXISTS (SELECT 1 FROM yt_write_ops
+		WHERE entity_kind=? AND entity_id=? AND id < ? AND state NOT IN ('applied','rejected'))`), kind, entity, id).Scan(&blocked); err != nil {
 		return ytwrite.Op{}, "", err
 	}
 	if blocked {
@@ -340,6 +385,18 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 		p := string(payload)
 		newPayload = &p
 	}
+	if dialectFor(tx) == mysqlDialect {
+		if _, err = tx.Exec(ctx, `UPDATE yt_write_ops SET state='dispatched', attempts=attempts+1, dispatched_at=?,
+			yt_target_id=?, payload_sha=?, payload=coalesce(?, payload)
+			WHERE id=?`, now.UTC(), target, sha, newPayload, id); err != nil {
+			return ytwrite.Op{}, "", err
+		}
+		op, err = scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=?`, id))
+		if err != nil {
+			return ytwrite.Op{}, "", err
+		}
+		return op, ytwrite.ClaimClaimed, tx.Commit(ctx)
+	}
 	op, err = scanYTOp(tx.QueryRow(ctx, `UPDATE yt_write_ops SET state='dispatched', attempts=attempts+1, dispatched_at=$2,
 		yt_target_id=$3, payload_sha=$4, payload=coalesce($5::jsonb, payload)
 		WHERE id=$1 RETURNING `+ytOpColumns, id, now.UTC(), target, sha, newPayload))
@@ -349,19 +406,31 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	return op, ytwrite.ClaimClaimed, tx.Commit(ctx)
 }
 
-// moveYTOp runs one compare-and-set UPDATE (it must end with RETURNING
-// ytOpColumns and constrain the current state). When it matches no row, the op
-// is either missing or in a state the move does not allow; same, if set,
-// accepts the op as it is when it already is the move's target.
-func (l *YTWriteLedger) moveYTOp(ctx context.Context, what string, same ytwrite.State, query string, args ...any) (ytwrite.Op, error) {
-	op, err := scanYTOp(l.s.pool.QueryRow(ctx, query, args...))
-	if err == nil {
-		return op, nil
+// moveYTOp runs one compare-and-set UPDATE (query must end with RETURNING
+// ytOpColumns and constrain the current state; mysqlQuery is the same update
+// without RETURNING, and myArgs are its arguments in statement order, the SET
+// columns first). When it matches no row, the op is either missing or in a
+// state the move does not allow; same, if set, accepts the op as it is when it
+// already is the move's target.
+func (l *YTWriteLedger) moveYTOp(ctx context.Context, what string, same ytwrite.State, id int64, query, mysqlQuery string, pgArgs, myArgs []any) (ytwrite.Op, error) {
+	if l.s.dialect == mysqlDialect {
+		n, err := l.s.db().Exec(ctx, mysqlQuery, myArgs...)
+		if err != nil {
+			return ytwrite.Op{}, err
+		}
+		if n == 1 {
+			return l.ByID(ctx, id)
+		}
+	} else {
+		op, err := scanYTOp(l.s.db().QueryRow(ctx, query, pgArgs...))
+		if err == nil {
+			return op, nil
+		}
+		if !errors.Is(err, ErrNoRows) {
+			return ytwrite.Op{}, err
+		}
 	}
-	if !errors.Is(err, ErrNoRows) {
-		return ytwrite.Op{}, err
-	}
-	cur, gerr := l.ByID(ctx, args[0].(int64))
+	cur, gerr := l.ByID(ctx, id)
 	if gerr != nil {
 		return ytwrite.Op{}, gerr
 	}
@@ -372,10 +441,11 @@ func (l *YTWriteLedger) moveYTOp(ctx context.Context, what string, same ytwrite.
 }
 
 func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID string, maps []ytwrite.MapRow) (ytwrite.Op, error) {
-	tx, err := l.s.pool.Begin(ctx)
+	tx, release, err := l.s.begin(ctx)
 	if err != nil {
 		return ytwrite.Op{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	// A create kind's op (issue_create, decision_create) publishes its
 	// entity's map row and binding, and an issue_move op its binding's
@@ -383,7 +453,7 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 	// lane lock: take that lock first, as Claim does, before the op row. Kind
 	// and lane are immutable, so they are read before the lock.
 	var kind, entityKind, entityID string
-	err = tx.QueryRow(ctx, `SELECT kind, entity_kind, entity_id FROM yt_write_ops WHERE id=$1`, id).Scan(&kind, &entityKind, &entityID)
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT kind, entity_kind, entity_id FROM yt_write_ops WHERE id=$1`, `SELECT kind, entity_kind, entity_id FROM yt_write_ops WHERE id=?`), id).Scan(&kind, &entityKind, &entityID)
 	if errors.Is(err, ErrNoRows) {
 		return ytwrite.Op{}, ytwrite.ErrNotFound
 	}
@@ -396,7 +466,7 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 			return ytwrite.Op{}, err
 		}
 	}
-	op, err := scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1 FOR UPDATE`, id))
+	op, err := scanYTOp(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1 FOR UPDATE`, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=? FOR UPDATE`), id))
 	if err != nil {
 		return ytwrite.Op{}, err
 	}
@@ -431,18 +501,46 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 		// The tenant is part of the issue's identity: the same YouTrack id on
 		// another tenant is another issue (hk 3912, migration
 		// 20261113-yt-entity-map-tenant).
-		tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (entity_kind, hk_key) DO NOTHING`,
-			m.EntityKind, op.Tenant, m.HKKey, m.YTID, m.YTParentID, id, now.UTC())
-		if errors.Is(mapDriverError(err), errUniqueViolation) {
-			return ytwrite.Op{}, ytwrite.ErrConflictingResult // the yt id already maps to another hk key
+		var wrote bool
+		if dialectFor(tx) == mysqlDialect {
+			// INSERT IGNORE loses the difference between written and
+			// duplicate; the read-back below settles it. The (entity_kind,
+			// tenant, yt_id) unique key's violation is a real conflict, not a
+			// no-op, so IGNORE cannot be used for it: the plain INSERT's
+			// violation is it.
+			_, ierr := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
+				VALUES (?,?,?,?,?,?,?)`,
+				m.EntityKind, op.Tenant, m.HKKey, m.YTID, m.YTParentID, id, now.UTC())
+			if ierr != nil && !errors.Is(ierr, errUniqueViolation) {
+				return ytwrite.Op{}, ierr
+			}
+			if ierr != nil {
+				var have string
+				if err := tx.QueryRow(ctx, `SELECT hk_key FROM yt_entity_map WHERE entity_kind=? AND tenant=? AND yt_id=?`,
+					m.EntityKind, op.Tenant, m.YTID).Scan(&have); err != nil || have != m.HKKey {
+					if err != nil && !errors.Is(err, ErrNoRows) {
+						return ytwrite.Op{}, err
+					}
+					return ytwrite.Op{}, ytwrite.ErrConflictingResult // the yt id already maps to another hk key
+				}
+			}
+			wrote = ierr == nil
+		} else {
+			tag, ierr := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
+				VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (entity_kind, hk_key) DO NOTHING`,
+				m.EntityKind, op.Tenant, m.HKKey, m.YTID, m.YTParentID, id, now.UTC())
+			if errors.Is(mapDriverError(ierr), errUniqueViolation) {
+				return ytwrite.Op{}, ytwrite.ErrConflictingResult // the yt id already maps to another hk key
+			}
+			if ierr != nil {
+				return ytwrite.Op{}, ierr
+			}
+			wrote = tag != 0
 		}
-		if err != nil {
-			return ytwrite.Op{}, err
-		}
-		if tag.RowsAffected() == 0 {
+		if !wrote {
 			var have string
-			if err := tx.QueryRow(ctx, `SELECT yt_id FROM yt_entity_map WHERE entity_kind=$1 AND hk_key=$2`, m.EntityKind, m.HKKey).Scan(&have); err != nil {
+			if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT yt_id FROM yt_entity_map WHERE entity_kind=$1 AND hk_key=$2`,
+				`SELECT yt_id FROM yt_entity_map WHERE entity_kind=? AND hk_key=?`), m.EntityKind, m.HKKey).Scan(&have); err != nil {
 				return ytwrite.Op{}, err
 			}
 			if have != m.YTID {
@@ -460,6 +558,17 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 			return ytwrite.Op{}, err
 		}
 	}
+	if dialectFor(tx) == mysqlDialect {
+		if _, err = tx.Exec(ctx, `UPDATE yt_write_ops SET state='applied', yt_result_id=?, reason=?, last_error=?, resolved_at=?
+			WHERE id=?`, ytID, reason, clipText(detail, 2000), now.UTC(), id); err != nil {
+			return ytwrite.Op{}, err
+		}
+		op, err = scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=?`, id))
+		if err != nil {
+			return ytwrite.Op{}, err
+		}
+		return op, tx.Commit(ctx)
+	}
 	op, err = scanYTOp(tx.QueryRow(ctx, `UPDATE yt_write_ops SET state='applied', yt_result_id=$2, reason=$4, last_error=$5, resolved_at=$3
 		WHERE id=$1 RETURNING `+ytOpColumns, id, ytID, now.UTC(), reason, clipText(detail, 2000)))
 	if err != nil {
@@ -469,38 +578,60 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 }
 
 func (l *YTWriteLedger) Reject(ctx context.Context, now time.Time, id int64, reason, detail string) (ytwrite.Op, error) {
-	return l.moveYTOp(ctx, "reject", "", `UPDATE yt_write_ops SET state='rejected', reason=$2, last_error=$3, resolved_at=$4
+	return l.moveYTOp(ctx, "reject", "", id, `UPDATE yt_write_ops SET state='rejected', reason=$2, last_error=$3, resolved_at=$4
 		WHERE id=$1 AND state IN ('prepared','dispatched','remote_unknown') RETURNING `+ytOpColumns,
-		id, clipText(reason, 200), clipText(detail, 2000), now.UTC())
+		`UPDATE yt_write_ops SET state='rejected', reason=?, last_error=?, resolved_at=?
+		WHERE id=? AND state IN ('prepared','dispatched','remote_unknown')`,
+		[]any{id, clipText(reason, 200), clipText(detail, 2000), now.UTC()},
+		[]any{clipText(reason, 200), clipText(detail, 2000), now.UTC(), id})
 }
 
 func (l *YTWriteLedger) Defer(ctx context.Context, _ time.Time, id int64, next time.Time, reason, detail string) (ytwrite.Op, error) {
-	return l.moveYTOp(ctx, "defer", "", `UPDATE yt_write_ops SET state='prepared', next_attempt_at=$2, reason=$3, last_error=$4
+	return l.moveYTOp(ctx, "defer", "", id, `UPDATE yt_write_ops SET state='prepared', next_attempt_at=$2, reason=$3, last_error=$4
 		WHERE id=$1 AND state='dispatched' RETURNING `+ytOpColumns,
-		id, next.UTC(), clipText(reason, 200), clipText(detail, 2000))
+		`UPDATE yt_write_ops SET state='prepared', next_attempt_at=?, reason=?, last_error=?
+		WHERE id=? AND state='dispatched'`,
+		[]any{id, next.UTC(), clipText(reason, 200), clipText(detail, 2000)},
+		[]any{next.UTC(), clipText(reason, 200), clipText(detail, 2000), id})
 }
 
 func (l *YTWriteLedger) MarkUnknown(ctx context.Context, _ time.Time, id int64, next time.Time, reason, detail string) (ytwrite.Op, error) {
-	return l.moveYTOp(ctx, "mark unknown", ytwrite.StateRemoteUnknown, `UPDATE yt_write_ops SET state='remote_unknown', next_attempt_at=$2, reason=$3, last_error=$4
+	return l.moveYTOp(ctx, "mark unknown", ytwrite.StateRemoteUnknown, id, `UPDATE yt_write_ops SET state='remote_unknown', next_attempt_at=$2, reason=$3, last_error=$4
 		WHERE id=$1 AND state='dispatched' RETURNING `+ytOpColumns,
-		id, next.UTC(), clipText(reason, 200), clipText(detail, 2000))
+		`UPDATE yt_write_ops SET state='remote_unknown', next_attempt_at=?, reason=?, last_error=?
+		WHERE id=? AND state='dispatched'`,
+		[]any{id, next.UTC(), clipText(reason, 200), clipText(detail, 2000)},
+		[]any{next.UTC(), clipText(reason, 200), clipText(detail, 2000), id})
 }
 
 func (l *YTWriteLedger) RecoverStale(ctx context.Context, id int64, attempts int, cutoff, next time.Time, detail string) (bool, error) {
-	tag, err := l.s.pool.Exec(ctx, `UPDATE yt_write_ops SET state='remote_unknown', next_attempt_at=$4, reason=$5, last_error=$6
+	n, err := l.s.db().Exec(ctx, sqlFor(l.s, `UPDATE yt_write_ops SET state='remote_unknown', next_attempt_at=$4, reason=$5, last_error=$6
  WHERE id=$1 AND state='dispatched' AND attempts=$2 AND dispatched_at <= $3`,
-		id, attempts, cutoff.UTC(), next.UTC(), ytwrite.ReasonDispatcherLost, clipText(detail, 2000))
-	return tag.RowsAffected() == 1, err
+		`UPDATE yt_write_ops SET state='remote_unknown', next_attempt_at=?, reason=?, last_error=?
+ WHERE id=? AND state='dispatched' AND attempts=? AND dispatched_at <= ?`),
+		recoverStaleArgs(l.s, id, attempts, cutoff, next, detail)...)
+	return n == 1, err
 }
 
 func (l *YTWriteLedger) TouchUnknown(ctx context.Context, _ time.Time, id int64, next time.Time, reason, detail string) (ytwrite.Op, error) {
-	return l.moveYTOp(ctx, "touch unknown", "", `UPDATE yt_write_ops SET reconciles=reconciles+1, next_attempt_at=$2, reason=$3, last_error=$4
+	return l.moveYTOp(ctx, "touch unknown", "", id, `UPDATE yt_write_ops SET reconciles=reconciles+1, next_attempt_at=$2, reason=$3, last_error=$4
 		WHERE id=$1 AND state='remote_unknown' RETURNING `+ytOpColumns,
-		id, next.UTC(), clipText(reason, 200), clipText(detail, 2000))
+		`UPDATE yt_write_ops SET reconciles=reconciles+1, next_attempt_at=?, reason=?, last_error=?
+		WHERE id=? AND state='remote_unknown'`,
+		[]any{id, next.UTC(), clipText(reason, 200), clipText(detail, 2000)},
+		[]any{next.UTC(), clipText(reason, 200), clipText(detail, 2000), id})
+}
+
+// recoverStaleArgs orders RecoverStale's arguments for each dialect.
+func recoverStaleArgs(s *Store, id int64, attempts int, cutoff, next time.Time, detail string) []any {
+	if s.dialect == mysqlDialect {
+		return []any{next.UTC(), ytwrite.ReasonDispatcherLost, clipText(detail, 2000), id, attempts, cutoff.UTC()}
+	}
+	return []any{id, attempts, cutoff.UTC(), next.UTC(), ytwrite.ReasonDispatcherLost, clipText(detail, 2000)}
 }
 
 func (l *YTWriteLedger) list(ctx context.Context, query string, args ...any) ([]ytwrite.Op, error) {
-	rows, err := l.s.pool.Query(ctx, query, args...)
+	rows, err := l.s.db().Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -535,6 +666,15 @@ func (l *YTWriteLedger) Due(ctx context.Context, now time.Time, limit int) ([]yt
 		// before the limit, so a long held queue cannot fill every pass;
 		// uncertain ops of this tenant are always listed for their evidence
 		// search.
+		if l.s.dialect == mysqlDialect {
+			return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops o
+				WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= ?
+				AND ((o.state = 'remote_unknown' AND o.tenant = ?)
+					OR (o.state = 'prepared' AND `+l.s.ytAdmitSQL("?")+`
+						AND NOT EXISTS (SELECT 1 FROM yt_write_ops e
+							WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected'))))
+				ORDER BY o.next_attempt_at, o.id LIMIT ?`, now.UTC(), l.tenant, l.tenant, ytLimit(limit))
+		}
 		return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops o
 			WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= $1
 			AND ((o.state = 'remote_unknown' AND o.tenant = $3)
@@ -543,31 +683,51 @@ func (l *YTWriteLedger) Due(ctx context.Context, now time.Time, limit int) ([]yt
 						WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected'))))
 			ORDER BY o.next_attempt_at, o.id LIMIT $2`, now.UTC(), ytLimit(limit), l.tenant)
 	}
-	return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops o
+	return l.list(ctx, sqlFor(l.s, `SELECT `+ytOpColumns+` FROM yt_write_ops o
 		WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= $1
 		AND (o.state = 'remote_unknown' OR NOT EXISTS (SELECT 1 FROM yt_write_ops e
 			WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected')))
-		ORDER BY o.next_attempt_at, o.id LIMIT $2`, now.UTC(), ytLimit(limit))
+		ORDER BY o.next_attempt_at, o.id LIMIT $2`,
+		`SELECT `+ytOpColumns+` FROM yt_write_ops o
+		WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= ?
+		AND (o.state = 'remote_unknown' OR NOT EXISTS (SELECT 1 FROM yt_write_ops e
+			WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected')))
+		ORDER BY o.next_attempt_at, o.id LIMIT ?`), now.UTC(), ytLimit(limit))
 }
 
 func (l *YTWriteLedger) Stale(ctx context.Context, cutoff time.Time, limit int) ([]ytwrite.Op, error) {
-	return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops
-		WHERE state='dispatched' AND dispatched_at <= $1 ORDER BY id LIMIT $2`, cutoff.UTC(), ytLimit(limit))
+	return l.list(ctx, sqlFor(l.s, `SELECT `+ytOpColumns+` FROM yt_write_ops
+		WHERE state='dispatched' AND dispatched_at <= $1 ORDER BY id LIMIT $2`,
+		`SELECT `+ytOpColumns+` FROM yt_write_ops
+		WHERE state='dispatched' AND dispatched_at <= ? ORDER BY id LIMIT ?`), cutoff.UTC(), ytLimit(limit))
 }
 
 func (l *YTWriteLedger) ListState(ctx context.Context, state ytwrite.State, limit int) ([]ytwrite.Op, error) {
 	if !state.Valid() {
 		return nil, fmt.Errorf("%w: unknown state %q", ytwrite.ErrInvalid, state)
 	}
-	return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE state=$1 ORDER BY id LIMIT $2`, string(state), ytLimit(limit))
+	return l.list(ctx, sqlFor(l.s, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE state=$1 ORDER BY id LIMIT $2`,
+		`SELECT `+ytOpColumns+` FROM yt_write_ops WHERE state=? ORDER BY id LIMIT ?`), string(state), ytLimit(limit))
 }
 
 func (l *YTWriteLedger) MapGet(ctx context.Context, entityKind, hkKey string) (ytwrite.MapRow, bool, error) {
 	m := ytwrite.MapRow{EntityKind: entityKind, HKKey: hkKey}
-	err := l.s.pool.QueryRow(ctx, `SELECT yt_id, yt_parent_id, op_id FROM yt_entity_map WHERE entity_kind=$1 AND hk_key=$2`,
+	err := l.s.db().QueryRow(ctx, sqlFor(l.s, `SELECT yt_id, yt_parent_id, op_id FROM yt_entity_map WHERE entity_kind=$1 AND hk_key=$2`,
+		`SELECT yt_id, yt_parent_id, op_id FROM yt_entity_map WHERE entity_kind=? AND hk_key=?`),
 		entityKind, hkKey).Scan(&m.YTID, &m.YTParentID, &m.OpID)
 	if errors.Is(err, ErrNoRows) {
 		return ytwrite.MapRow{}, false, nil
 	}
 	return m, err == nil, err
+}
+
+// ytB4bKinds are the write kinds whose apply, schema and payload walk stay
+// PostgreSQL-only in B4a (hk 5077).
+var ytB4bKinds = map[string]bool{
+	ytwrite.KindIssueFields:    true,
+	ytwrite.KindIssueLinks:     true,
+	ytwrite.KindDecisionCreate: true,
+	ytwrite.KindDecisionFields: true,
+	ytwrite.KindArticleCreate:  true,
+	ytwrite.KindArticleUpdate:  true,
 }

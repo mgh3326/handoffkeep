@@ -61,6 +61,17 @@ func TestCopyPostgresMySQLAndBackWithParity(t *testing.T) {
 		{`UPDATE sync_state SET max_sync_id=94001,pruned_through=0 WHERE singleton`, nil},
 		{`INSERT INTO quota_leases(account_key,owner,holder,expires_at) VALUES('copy-account','copy-owner','copy-holder',$1)`, []any{when}},
 		{`INSERT INTO quota_presence(host_id,account_key,last_seen) VALUES('copy-host','copy-account',$1)`, []any{when}},
+		// A nonempty op ledger exercises the GENERATED ALWAYS identity insert
+		// (OVERRIDING SYSTEM VALUE) on the MySQL to PostgreSQL leg, and the
+		// seeded yt_authority rows exercise the upsert.
+		{`INSERT INTO yt_write_ops(id,principal,kind,idem_key,payload_sha,payload,entity_kind,entity_id,actor,state,created_at,next_attempt_at,tenant)
+			OVERRIDING SYSTEM VALUE VALUES(93001,'hk:task-comments','comment_append','task-comment:93001','sha-93001','{}','task','1','copy-test','prepared',$1,$1,'copy-tenant')`, []any{when}},
+		{`INSERT INTO yt_write_op_alerts(op_id,alert_class,created_at) VALUES(93001,'stuck',$1)`, []any{when}},
+		{`INSERT INTO yt_issue_intents(task_id,tenant,recorded_at) VALUES(1,'copy-tenant',$1)`, []any{when}},
+		{`INSERT INTO yt_issue_comment_bounds(op_id,task_id,comments_from,recorded_at) VALUES(93001,1,7,$1)`, []any{when}},
+		{`INSERT INTO yt_write_op_adoptions(op_id,attempts,yt_id,recorded_at) VALUES(93001,1,'CPY-1',$1)`, []any{when}},
+		{`INSERT INTO yt_binding_history(id,task_id,tenant,issue_id,origin,action,actor,reason,at) VALUES(93001,1,'copy-tenant','CPY-1','import_verified','bound','copy-test','',$1)`, []any{when}},
+		{`INSERT INTO yt_authority(kind,authority,switched_by,note) VALUES('comments','youtrack','copy-test','copy') ON CONFLICT (kind) DO NOTHING`, nil},
 	} {
 		if _, err := pg.pool.Exec(t.Context(), stmt.query, stmt.args...); err != nil {
 			t.Fatalf("seed B7 copy row: %s: %v", stmt.query, err)
@@ -121,6 +132,12 @@ func TestCopyPostgresMySQLAndBackWithParity(t *testing.T) {
 	}
 	if nextPostgresID <= 94001 {
 		t.Fatalf("PostgreSQL sync_log sequence=%d, want past copied entry_id 94001", nextPostgresID)
+	}
+	if err := back.pool.QueryRow(t.Context(), `SELECT nextval(pg_get_serial_sequence('yt_write_ops','id'))`).Scan(&nextPostgresID); err != nil {
+		t.Fatal(err)
+	}
+	if nextPostgresID <= 93001 {
+		t.Fatalf("PostgreSQL yt_write_ops sequence=%d, want past copied id 93001", nextPostgresID)
 	}
 }
 

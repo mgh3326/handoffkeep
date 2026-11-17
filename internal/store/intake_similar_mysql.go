@@ -23,7 +23,7 @@ func (s *Store) intakeEnqueueYTIssueTx(ctx context.Context, tx transaction, t Ta
 		// B4 dependency: enqueueYTIssueTx writes yt_write_ops and takes pgx.Tx.
 		return ErrDialectUnsupported
 	}
-	return s.enqueueYTIssueTx(ctx, pgxTx(tx), t)
+	return s.enqueueYTIssueTx(ctx, tx, t)
 }
 
 // intakeTrigrams is pg_trgm's trigram set of text: lower-cased, split into words

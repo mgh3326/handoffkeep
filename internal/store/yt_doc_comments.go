@@ -68,11 +68,12 @@ func init() {
 // o is a document copy whose target is the issue its task is bound to on o's
 // tenant now. Mode off admits nothing.
 func ytDocCommentGateSQL(s *Store) string {
-	if s.ytDocCommentsNow() != YTDocCommentsOn {
+	if s.ytDocCommentsNow() != YTDocCommentsOn || s.dialect == mysqlDialect {
+		// B5: document comments are not ported.
 		return `FALSE`
 	}
 	return `o.principal = '` + ytDocCommentPrincipal + `' AND o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
-		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
+		WHERE ` + s.q(`b.task_id::text = o.entity_id`, `CAST(b.task_id AS CHAR) = o.entity_id`) + ` AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
 }
 
 // ytDocRow is one document as the copy reads it. taskID is 0 for a document
@@ -155,14 +156,14 @@ func prepareYTDocTx(ctx context.Context, tx pgx.Tx, now time.Time, d ytDocRow, f
 	if !ok {
 		return ytDocResult{reason: ytDocNotTask}, nil
 	}
-	b, bound, err := readYTBinding(ctx, tx, d.taskID)
+	b, bound, err := readYTBinding(ctx, pgTransaction{tx}, d.taskID)
 	if err != nil {
 		return ytDocResult{}, err
 	}
 	if !bound {
 		return ytDocResult{reason: ytDocUnbound}, nil
 	}
-	source, err := ytBindingDisagreement(ctx, tx, b)
+	source, err := ytBindingDisagreement(ctx, pgTransaction{tx}, b)
 	if err != nil {
 		return ytDocResult{}, err
 	}
@@ -182,7 +183,7 @@ func prepareYTDocTx(ctx context.Context, tx pgx.Tx, now time.Time, d ytDocRow, f
 		if err != nil {
 			return res, err
 		}
-		op, made, err := prepareYTOpTx(ctx, tx, now.UTC(), n)
+		op, made, err := prepareYTOpTx(ctx, pgTransaction{tx}, now.UTC(), n)
 		if errors.Is(err, ytwrite.ErrKeyConflict) {
 			res.conflicts++
 			log.Printf("ytwrite.doc_comment_key_conflict doc_id=%d task_id=%d key=%q", d.id, d.taskID, n.Key)
@@ -196,7 +197,7 @@ func prepareYTDocTx(ctx context.Context, tx pgx.Tx, now time.Time, d ytDocRow, f
 			continue
 		}
 		if reason != "" {
-			if _, err := rejectYTOpTx(ctx, tx, now.UTC(), op.ID, reason, detail); err != nil {
+			if _, err := rejectYTOpTx(ctx, pgTransaction{tx}, now.UTC(), op.ID, reason, detail); err != nil {
 				return res, err
 			}
 		}

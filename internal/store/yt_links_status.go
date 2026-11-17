@@ -129,7 +129,7 @@ func (s *Store) YTLinksStatusOf(ctx context.Context, task int64, limit int) (YTL
 			return out, ErrTaskNotFound
 		}
 	}
-	st, err := ytLinksSweepStateTx(ctx, tx)
+	st, err := ytLinksSweepStateTx(ctx, pgTransaction{tx})
 	if err != nil {
 		return out, err
 	}

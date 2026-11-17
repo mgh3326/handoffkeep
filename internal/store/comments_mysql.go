@@ -5,13 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
-
-	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
-// mysqlCreateComment holds the same comment lock across the insert and commit.
-// Until the YouTrack area is ported, an enabled projection or authority table
-// is refused before a write, so a comment cannot escape without its mirror.
+// mysqlCreateComment holds the same comment lock across the insert, the
+// YouTrack enqueue and the commit, so a comment never escapes without its
+// mirror (B4a, hk 5076).
 func (s *Store) mysqlCreateComment(ctx context.Context, taskID int64, author, body string, w *MCPWrite) (CreatedTaskComment, bool, error) {
 	var out CreatedTaskComment
 	var replayed bool
@@ -33,13 +31,6 @@ func (s *Store) mysqlCreateCommentOnce(ctx context.Context, taskID int64, author
 	if err = s.lockTx(ctx, tx, taskCommentInsertLock); err != nil {
 		return CreatedTaskComment{}, false, err
 	}
-	hasAuthority, err := s.mysqlTableExists(ctx, tx, "yt_authority")
-	if err != nil {
-		return CreatedTaskComment{}, false, err
-	}
-	if hasAuthority || s.ytCommentsModeNow() != YTCommentsOff {
-		return CreatedTaskComment{}, false, ErrDialectUnsupported
-	}
 	var c TaskComment
 	if w != nil && w.Key != "" {
 		var raw []byte
@@ -51,7 +42,10 @@ func (s *Store) mysqlCreateCommentOnce(ctx context.Context, taskID int64, author
 			if c.TaskID != taskID {
 				return CreatedTaskComment{}, false, ErrIdempotencyKeyReused
 			}
-			projection := ytProjectionOf(ytwrite.Op{}, false)
+			projection, err := ytCommentProjectionTx(ctx, tx, c.ID)
+			if err != nil {
+				return CreatedTaskComment{}, false, err
+			}
 			return CreatedTaskComment{TaskComment: c, YouTrackProjection: &projection}, true, tx.Commit(ctx)
 		}
 		if !errors.Is(err, ErrNoRows) {
@@ -87,9 +81,14 @@ func (s *Store) mysqlCreateCommentOnce(ctx context.Context, taskID int64, author
 			return CreatedTaskComment{}, false, err
 		}
 	}
+	op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, c)
+	if err != nil {
+		return CreatedTaskComment{}, false, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return CreatedTaskComment{}, false, err
 	}
-	projection := ytProjectionOf(ytwrite.Op{}, false)
+	logYTCommentEnqueued(c, op, enqueued)
+	projection := ytProjectionOf(op, enqueued)
 	return CreatedTaskComment{TaskComment: c, YouTrackProjection: &projection}, false, nil
 }

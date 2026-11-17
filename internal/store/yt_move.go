@@ -57,7 +57,7 @@ func ytMoveGateSQL(s *Store) string {
 		return `FALSE`
 	}
 	return `o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
-		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
+		WHERE ` + s.q(`b.task_id::text = o.entity_id`, `CAST(b.task_id AS CHAR) = o.entity_id`) + ` AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
 }
 
 // ytFieldsMoveSkipped is a task whose issue must move but cannot: its hk
@@ -106,7 +106,7 @@ type ytMoveDecision struct {
 // caller skips the task and logs it. The caller holds nothing but the feed
 // lock: this takes the task's lane lock, the lock every op of the task takes.
 func ytMoveForTx(ctx context.Context, tx pgx.Tx, now time.Time, id int64, t ytFieldsRow) (d ytMoveDecision, err error) {
-	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(id, 10)); err != nil {
+	if err := lockYTEntity(ctx, pgTransaction{tx}, "task", strconv.FormatInt(id, 10)); err != nil {
 		return ytMoveDecision{}, err
 	}
 	bound, found, err := ytBindingNowTx(ctx, tx, id)
@@ -117,7 +117,7 @@ func ytMoveForTx(ctx context.Context, tx pgx.Tx, now time.Time, id int64, t ytFi
 		log.Printf("ytwrite.move_skipped_rebound task_id=%d issue_id=%q", id, t.issueID)
 		return ytMoveDecision{}, nil
 	}
-	pending, err := ytPendingMoveTx(ctx, tx, id, t.issueID)
+	pending, err := ytPendingMoveTx(ctx, pgTransaction{tx}, id, t.issueID)
 	if err != nil {
 		return ytMoveDecision{}, err
 	}
@@ -171,7 +171,7 @@ func ytMoveForTx(ctx context.Context, tx pgx.Tx, now time.Time, id int64, t ytFi
 // in (ytMoveForTx). Any other op, or an op whose binding moved to another
 // issue or tenant (the gate holds those), passes. The caller holds the task's
 // lane lock (Claim).
-func claimYTFieldsProjectTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (reject, detail string, err error) {
+func claimYTFieldsProjectTx(ctx context.Context, tx transaction, op ytwrite.Op) (reject, detail string, err error) {
 	if op.Kind != ytwrite.KindIssueFields || op.EntityKind != "task" {
 		return "", "", nil
 	}
@@ -179,8 +179,12 @@ func claimYTFieldsProjectTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (reje
 	if err != nil {
 		return ytwrite.ReasonInvalidIssue, err.Error(), nil
 	}
+	if dialectFor(tx) == mysqlDialect {
+		// B4b: a fields snapshot behind a move is not ported.
+		return "", "", ErrDialectUnsupported
+	}
 	var bound string
-	err = tx.QueryRow(ctx, `SELECT project_id FROM yt_task_bindings WHERE task_id::text=$1 AND tenant=$2 AND issue_id=$3`,
+	err = pgxTx(tx).QueryRow(ctx, `SELECT project_id FROM yt_task_bindings WHERE task_id::text=$1 AND tenant=$2 AND issue_id=$3`,
 		op.EntityID, op.Tenant, op.YTTargetID).Scan(&bound)
 	if errors.Is(err, ErrNoRows) {
 		return "", "", nil
@@ -218,11 +222,14 @@ func ytBindingNowTx(ctx context.Context, tx pgx.Tx, taskID int64) (b ytBinding, 
 // the task's latest issue_move op on issueID that is not yet applied or
 // rejected, or "" when none is pending. The caller holds the task's lane lock,
 // so the answer is the one the lane's next op sees.
-func ytPendingMoveTx(ctx context.Context, tx pgx.Tx, taskID int64, issueID string) (string, error) {
+func ytPendingMoveTx(ctx context.Context, tx transaction, taskID int64, issueID string) (string, error) {
 	var project string
-	err := tx.QueryRow(ctx, `SELECT coalesce((SELECT payload->>'project_id' FROM yt_write_ops
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT coalesce((SELECT payload->>'project_id' FROM yt_write_ops
 		WHERE kind=$1 AND entity_kind='task' AND entity_id=$2 AND yt_target_id=$3 AND state NOT IN ('applied','rejected')
-		ORDER BY id DESC LIMIT 1),'')`, ytwrite.KindIssueMove, strconv.FormatInt(taskID, 10), issueID).Scan(&project)
+		ORDER BY id DESC LIMIT 1),'')`,
+		`SELECT coalesce((SELECT JSON_UNQUOTE(JSON_EXTRACT(payload,'$.project_id')) FROM yt_write_ops
+		WHERE kind=? AND entity_kind='task' AND entity_id=? AND yt_target_id=? AND state NOT IN ('applied','rejected')
+		ORDER BY id DESC LIMIT 1),'')`), ytwrite.KindIssueMove, strconv.FormatInt(taskID, 10), issueID).Scan(&project)
 	return project, err
 }
 
@@ -233,7 +240,7 @@ func ytPendingMoveTx(ctx context.Context, tx pgx.Tx, taskID int64, issueID strin
 // is not known here, and an issue_create binding leaves it empty too. A
 // binding that no longer names the op's issue (rebound since the op was
 // prepared) is ErrConflictingResult, and the apply rolls back.
-func bindYTMoveTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) error {
+func bindYTMoveTx(ctx context.Context, tx transaction, op ytwrite.Op) error {
 	taskID, err := strconv.ParseInt(op.EntityID, 10, 64)
 	if err != nil || taskID < 1 || op.EntityKind != "task" {
 		return fmt.Errorf("issue_move op %d is not on a task lane (%s:%s)", op.ID, op.EntityKind, op.EntityID)
@@ -242,14 +249,25 @@ func bindYTMoveTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) error {
 	if err != nil {
 		return err
 	}
-	tag, err := tx.Exec(ctx, `UPDATE yt_task_bindings SET project_id=$3, issue_readable=''
-		WHERE task_id=$1 AND tenant=$2 AND issue_id=$4`, taskID, op.Tenant, project, op.YTTargetID)
+	n, err := tx.Exec(ctx, sqlFor(tx, `UPDATE yt_task_bindings SET project_id=$3, issue_readable=''
+		WHERE task_id=$1 AND tenant=$2 AND issue_id=$4`,
+		`UPDATE yt_task_bindings SET project_id=?, issue_readable=''
+		WHERE task_id=? AND tenant=? AND issue_id=?`), ytBindMoveArgs(tx, taskID, op.Tenant, project, op.YTTargetID)...)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() != 1 {
+	if n != 1 {
 		return fmt.Errorf("%w: issue %s on %s is not bound to task %d any more (move op %d)", ytwrite.ErrConflictingResult, op.YTTargetID, op.Tenant, taskID, op.ID)
 	}
 	log.Printf("ytwrite.move_applied op_id=%d task_id=%d issue_id=%q project_id=%q", op.ID, taskID, op.YTTargetID, project)
 	return nil
+}
+
+// ytBindMoveArgs orders bindYTMoveTx's update arguments: the SET column comes
+// first on MySQL.
+func ytBindMoveArgs(tx transaction, taskID int64, tenant, project, ytTargetID string) []any {
+	if dialectFor(tx) == mysqlDialect {
+		return []any{project, taskID, tenant, ytTargetID}
+	}
+	return []any{taskID, tenant, project, ytTargetID}
 }

@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -80,12 +78,12 @@ const ytIssueOwnershipLock = 8241873810
 // foreign key's KEY SHARE, which FOR SHARE allows and FOR UPDATE blocks, and
 // with no origin row there is nothing else to lock. A missing task is
 // ErrTaskNotFound.
-func lockYTIssueOwnershipTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, ytIssueOwnershipLock); err != nil {
+func lockYTIssueOwnershipTx(ctx context.Context, s *Store, tx transaction, taskID int64) error {
+	if err := s.lockTx(ctx, tx, ytIssueOwnershipLock); err != nil {
 		return err
 	}
 	var id int64
-	err := tx.QueryRow(ctx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, taskID).Scan(&id)
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT id FROM tasks WHERE id=? FOR UPDATE`), taskID).Scan(&id)
 	if errors.Is(err, ErrNoRows) {
 		return ErrTaskNotFound
 	}
@@ -110,6 +108,34 @@ const (
 // id on another tenant is another issue (hk 3912). A row a release that
 // predates the tenant column wrote (tenant ”) is read as this tenant's, the
 // safe direction for a check that refuses.
+const ytBindingSourcesSQLMySQL = `SELECT
+	EXISTS(SELECT 1 FROM task_origins WHERE task_id=? AND provider='youtrack'
+		AND (coalesce(external_id,'') <> ? OR (coalesce(tenant,'') <> '' AND tenant <> ?))),
+	EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND hk_key=? AND yt_id <> ?),
+	EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND (tenant=? OR tenant='') AND yt_id=? AND hk_key <> ?),
+	EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=? AND (tenant <> ? OR issue_id <> ?)),
+	EXISTS(SELECT 1 FROM yt_comment_canary WHERE tenant=? AND issue_id=? AND task_id <> ?),
+	EXISTS(SELECT 1 FROM yt_task_bindings WHERE tenant=? AND issue_id=? AND task_id <> ?),
+	NOT (EXISTS(SELECT 1 FROM tasks t JOIN youtrack_projects p ON p.hk_project = t.project WHERE t.id=? AND p.yt_project_id=?)
+		OR (EXISTS(SELECT 1 FROM tasks WHERE id=? AND coalesce(project,'') = '')
+			AND NOT EXISTS(SELECT 1 FROM youtrack_projects WHERE yt_project_id=?)))`
+
+// ytBindingSourceArgs orders ytBindingDisagreement's arguments: five shared
+// placeholders on PostgreSQL, twenty `?` in statement order on MySQL.
+func ytBindingSourceArgs(q ytRowQuerier, b YTTaskBinding) []any {
+	key := strconv.FormatInt(b.TaskID, 10)
+	if dialectFor(q) == mysqlDialect {
+		return []any{b.TaskID, b.IssueID, b.Tenant,
+			key, b.IssueID,
+			b.Tenant, b.IssueID, key,
+			b.TaskID, b.Tenant, b.IssueID,
+			b.Tenant, b.IssueID, b.TaskID,
+			b.Tenant, b.IssueID, b.TaskID,
+			b.TaskID, b.ProjectID, b.TaskID, b.ProjectID}
+	}
+	return []any{b.TaskID, b.Tenant, b.IssueID, key, b.ProjectID}
+}
+
 const ytBindingSourcesSQL = `SELECT
 	EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack'
 		AND (coalesce(external_id,'') <> $3 OR (coalesce(tenant,'') <> '' AND tenant <> $2))),
@@ -134,7 +160,7 @@ const ytBindingSourcesSQL = `SELECT
 // preflight share it.
 func ytBindingDisagreement(ctx context.Context, q ytRowQuerier, b YTTaskBinding) (string, error) {
 	var flags [7]bool
-	if err := q.QueryRow(ctx, ytBindingSourcesSQL, b.TaskID, b.Tenant, b.IssueID, strconv.FormatInt(b.TaskID, 10), b.ProjectID).Scan(
+	if err := q.QueryRow(ctx, sqlFor(q, ytBindingSourcesSQL, ytBindingSourcesSQLMySQL), ytBindingSourceArgs(q, b)...).Scan(
 		&flags[0], &flags[1], &flags[2], &flags[3], &flags[4], &flags[5], &flags[6]); err != nil {
 		return "", err
 	}
@@ -149,11 +175,7 @@ func ytBindingDisagreement(ctx context.Context, q ytRowQuerier, b YTTaskBinding)
 // YTBindingDisagreement is ytBindingDisagreement on the pool: read-only, for
 // the preflight, against a stored binding or one about to be published.
 func (s *Store) YTBindingDisagreement(ctx context.Context, b YTTaskBinding) (string, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return "", ErrDialectUnsupported
-	}
-
-	return ytBindingDisagreement(ctx, s.pool, b)
+	return ytBindingDisagreement(ctx, s.db(), b)
 }
 
 const ytBindingColumns = `task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, comments_from, origin, coalesce(op_id, 0)`
@@ -166,7 +188,7 @@ func scanYTBinding(row interface{ Scan(...any) error }, b *YTTaskBinding) error 
 
 func readYTBinding(ctx context.Context, q ytRowQuerier, taskID int64) (YTTaskBinding, bool, error) {
 	var b YTTaskBinding
-	err := scanYTBinding(q.QueryRow(ctx, `SELECT `+ytBindingColumns+` FROM yt_task_bindings WHERE task_id=$1`, taskID), &b)
+	err := scanYTBinding(q.QueryRow(ctx, sqlFor(q, `SELECT `+ytBindingColumns+` FROM yt_task_bindings WHERE task_id=$1`, `SELECT `+ytBindingColumns+` FROM yt_task_bindings WHERE task_id=?`), taskID), &b)
 	if errors.Is(err, ErrNoRows) {
 		return YTTaskBinding{}, false, nil
 	}
@@ -178,11 +200,7 @@ func readYTBinding(ctx context.Context, q ytRowQuerier, taskID int64) (YTTaskBin
 
 // YTTaskBinding reads a task's binding; found is false when it has none.
 func (s *Store) YTTaskBinding(ctx context.Context, taskID int64) (YTTaskBinding, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTTaskBinding{}, false, ErrDialectUnsupported
-	}
-
-	return readYTBinding(ctx, s.pool, taskID)
+	return readYTBinding(ctx, s.db(), taskID)
 }
 
 // enqueueYTCommentOnTx is enqueueYTCommentTx in mode on. A task with no
@@ -194,7 +212,7 @@ func (s *Store) YTTaskBinding(ctx context.Context, taskID int64) (YTTaskBinding,
 //
 // Locks, after the comment insert lock and the comment's KEY SHARE on its
 // task: those of ytCommentOnOpTx (lockorder.go).
-func enqueueYTCommentOnTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrite.Op, bool, error) {
+func enqueueYTCommentOnTx(ctx context.Context, tx transaction, c TaskComment) (ytwrite.Op, bool, error) {
 	op, enqueued, source, err := ytCommentOnOpTx(ctx, tx, c, c.CreatedAt.UTC())
 	if source != "" {
 		log.Printf("ytwrite.comment_skipped_ambiguous task_id=%d comment_id=%d source=%s", c.TaskID, c.ID, source)
@@ -217,7 +235,7 @@ func enqueueYTCommentOnTx(ctx context.Context, tx pgx.Tx, c TaskComment) (ytwrit
 // yt_entity_map (lockorder.go). The lane lock is the one AddYTTaskBinding
 // takes before it reads and inserts, so a binding is either seen whole or not
 // at all.
-func ytCommentOnOpTx(ctx context.Context, tx pgx.Tx, c TaskComment, now time.Time) (op ytwrite.Op, enqueued bool, source string, err error) {
+func ytCommentOnOpTx(ctx context.Context, tx transaction, c TaskComment, now time.Time) (op ytwrite.Op, enqueued bool, source string, err error) {
 	taskKey := strconv.FormatInt(c.TaskID, 10)
 	if err := lockYTEntity(ctx, tx, "task", taskKey); err != nil {
 		return ytwrite.Op{}, false, "", err
@@ -243,7 +261,8 @@ func ytCommentOnOpTx(ctx context.Context, tx pgx.Tx, c TaskComment, now time.Tim
 	if err != nil {
 		return ytwrite.Op{}, false, "", err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO yt_comment_write_links(comment_id, op_id, created_at) VALUES ($1,$2,$3)`, c.ID, op.ID, now); err != nil {
+	if _, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO yt_comment_write_links(comment_id, op_id, created_at) VALUES ($1,$2,$3)`,
+		`INSERT INTO yt_comment_write_links(comment_id, op_id, created_at) VALUES (?,?,?)`), c.ID, op.ID, now); err != nil {
 		return ytwrite.Op{}, false, "", err
 	}
 	if reason != "" {
@@ -253,19 +272,21 @@ func ytCommentOnOpTx(ctx context.Context, tx pgx.Tx, c TaskComment, now time.Tim
 		}
 		return op, true, "", nil
 	}
-	tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
-		VALUES ('task',$1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, b.Tenant, taskKey, b.IssueID, b.ProjectID, op.ID, now)
+	mapN, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
+		VALUES ('task',$1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
+		`INSERT IGNORE INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
+		VALUES ('task',?,?,?,?,?,?)`), b.Tenant, taskKey, b.IssueID, b.ProjectID, op.ID, now)
 	if err != nil {
 		return ytwrite.Op{}, false, "", err
 	}
-	if tag.RowsAffected() == 0 {
+	if mapN == 0 {
 		// The sources were read under the lane lock and agreed, and every
 		// writer of the task's map row takes that lock, so only an anchor
 		// already naming this issue can be here. Anything else is a broken
 		// invariant: fail the comment rather than link it to an op that
 		// cannot be sent.
 		var have string
-		err := tx.QueryRow(ctx, `SELECT yt_id FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$1`, taskKey).Scan(&have)
+		err := tx.QueryRow(ctx, sqlFor(tx, `SELECT yt_id FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$1`, `SELECT yt_id FROM yt_entity_map WHERE entity_kind='task' AND hk_key=?`), taskKey).Scan(&have)
 		if err != nil || have != b.IssueID {
 			return ytwrite.Op{}, false, "", fmt.Errorf("yt_entity_map conflicts with task %d's checked binding to %s (have %q): %v", c.TaskID, b.IssueID, have, err)
 		}
@@ -316,18 +337,22 @@ type YTCommentCandidate struct {
 // (bind-all, hk 3897). project, when not "", keeps only that hk project's
 // tasks.
 func (s *Store) YTCommentCandidates(ctx context.Context, since time.Time, project string, all bool) ([]YTCommentCandidate, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
-	rows, err := s.pool.Query(ctx, `WITH ids AS (
+	rows, err := s.db().Query(ctx, sqlFor(s, `WITH ids AS (
 			SELECT task_id FROM task_comments WHERE created_at >= $1
 			UNION SELECT task_id FROM yt_comment_canary
 			UNION SELECT CASE WHEN entity_id ~ '^[0-9]{1,18}$' THEN entity_id::bigint END FROM yt_write_ops
 				WHERE principal=$3 AND kind=$4 AND entity_kind='task' AND state NOT IN ('applied','rejected')
 			UNION SELECT id FROM tasks WHERE $5)
 		SELECT t.id, coalesce(t.project,'') FROM tasks t JOIN ids ON ids.task_id = t.id
-		WHERE $2 = '' OR t.project = $2 ORDER BY t.id`, since.UTC(), project, YTCommentPrincipal, ytwrite.KindCommentAppend, all)
+		WHERE $2 = '' OR t.project = $2 ORDER BY t.id`,
+		`WITH ids AS (
+			SELECT task_id FROM task_comments WHERE created_at >= ?
+			UNION SELECT task_id FROM yt_comment_canary
+			UNION SELECT CASE WHEN entity_id REGEXP '^[0-9]{1,18}$' THEN CAST(entity_id AS UNSIGNED) END FROM yt_write_ops
+				WHERE principal=? AND kind=? AND entity_kind='task' AND state NOT IN ('applied','rejected')
+			UNION SELECT id FROM tasks WHERE ?)
+		SELECT t.id, coalesce(t.project,'') FROM tasks t JOIN ids ON ids.task_id = t.id
+		WHERE ? = '' OR t.project = ? ORDER BY t.id`), candidateArgs(s, since, project, all)...)
 	if err != nil {
 		return nil, err
 	}
@@ -347,12 +372,8 @@ func (s *Store) YTCommentCandidates(ctx context.Context, since time.Time, projec
 // comments preflight and backfill); found is false for a task that does not
 // exist.
 func (s *Store) YTCommentCandidateOf(ctx context.Context, taskID int64) (YTCommentCandidate, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTCommentCandidate{}, false, ErrDialectUnsupported
-	}
-
 	var c YTCommentCandidate
-	err := s.pool.QueryRow(ctx, `SELECT id, coalesce(project,'') FROM tasks WHERE id=$1`, taskID).Scan(&c.TaskID, &c.Project)
+	err := s.db().QueryRow(ctx, sqlFor(s, `SELECT id, coalesce(project,'') FROM tasks WHERE id=$1`, `SELECT id, coalesce(project,'') FROM tasks WHERE id=?`), taskID).Scan(&c.TaskID, &c.Project)
 	if errors.Is(err, ErrNoRows) {
 		return YTCommentCandidate{}, false, nil
 	}
@@ -364,14 +385,14 @@ func (s *Store) YTCommentCandidateOf(ctx context.Context, taskID int64) (YTComme
 // never copied), in all and in the busiest clock hour (UTC); project, when not
 // "", keeps only that hk project's tasks.
 func (s *Store) YTCommentVolume(ctx context.Context, since time.Time, project string) (total, maxPerHour int, err error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return 0, 0, ErrDialectUnsupported
-	}
-
-	err = s.pool.QueryRow(ctx, `SELECT coalesce(sum(n),0), coalesce(max(n),0) FROM (
+	err = s.db().QueryRow(ctx, sqlFor(s, `SELECT coalesce(sum(n),0), coalesce(max(n),0) FROM (
 			SELECT count(*) AS n FROM task_comments c JOIN tasks t ON t.id = c.task_id
 			WHERE c.created_at >= $1 AND c.author <> $3 AND ($2 = '' OR t.project = $2)
-			GROUP BY date_trunc('hour', c.created_at AT TIME ZONE 'UTC')) h`, since.UTC(), project, YouTrackOwnedActor).Scan(&total, &maxPerHour)
+			GROUP BY date_trunc('hour', c.created_at AT TIME ZONE 'UTC')) h`,
+		`SELECT coalesce(sum(n),0), coalesce(max(n),0) FROM (
+			SELECT count(*) AS n FROM task_comments c JOIN tasks t ON t.id = c.task_id
+			WHERE c.created_at >= ? AND c.author <> ? AND (? = '' OR t.project = ?)
+			GROUP BY DATE_FORMAT(c.created_at, '%Y-%m-%d %H:00:00')) h`), volumeArgs(s, since, project)...).Scan(&total, &maxPerHour)
 	return total, maxPerHour, err
 }
 
@@ -386,12 +407,10 @@ type YTUnresolvedCommentOp struct {
 // YTUnresolvedCommentOps lists the comment ops not yet applied or rejected,
 // in id order.
 func (s *Store) YTUnresolvedCommentOps(ctx context.Context) ([]YTUnresolvedCommentOp, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
-	rows, err := s.pool.Query(ctx, `SELECT id, entity_id, tenant, yt_target_id FROM yt_write_ops
+	rows, err := s.db().Query(ctx, sqlFor(s, `SELECT id, entity_id, tenant, yt_target_id FROM yt_write_ops
 		WHERE principal=$1 AND kind=$2 AND entity_kind='task' AND state NOT IN ('applied','rejected') ORDER BY id`,
+		`SELECT id, entity_id, tenant, yt_target_id FROM yt_write_ops
+		WHERE principal=? AND kind=? AND entity_kind='task' AND state NOT IN ('applied','rejected') ORDER BY id`),
 		YTCommentPrincipal, ytwrite.KindCommentAppend)
 	if err != nil {
 		return nil, err
@@ -410,4 +429,21 @@ func (s *Store) YTUnresolvedCommentOps(ctx context.Context) ([]YTUnresolvedComme
 		out = append(out, op)
 	}
 	return out, rows.Err()
+}
+
+// candidateArgs orders YTCommentCandidates's arguments: five shared
+// placeholders on PostgreSQL; on MySQL the project predicate repeats it.
+func candidateArgs(s *Store, since time.Time, project string, all bool) []any {
+	if s.dialect == mysqlDialect {
+		return []any{since.UTC(), YTCommentPrincipal, ytwrite.KindCommentAppend, all, project, project}
+	}
+	return []any{since.UTC(), project, YTCommentPrincipal, ytwrite.KindCommentAppend, all}
+}
+
+// volumeArgs orders YTCommentVolume's arguments for each dialect.
+func volumeArgs(s *Store, since time.Time, project string) []any {
+	if s.dialect == mysqlDialect {
+		return []any{since.UTC(), YouTrackOwnedActor, project, project}
+	}
+	return []any{since.UTC(), project, YouTrackOwnedActor}
 }

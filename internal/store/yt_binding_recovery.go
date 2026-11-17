@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
@@ -171,7 +172,13 @@ func (s *Store) classifyHeldYTOpTx(ctx context.Context, q ytRowQuerier, op ytHel
 		return ytHeldMode, nil
 	}
 	var admitted bool
-	if err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id=$1 AND `+s.ytAdmitSQL("$2")+`)`, op.id, op.tenant).Scan(&admitted); err != nil {
+	admit := s.ytAdmitSQL("$2")
+	sel := `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id=$1 AND ` + admit + `)`
+	if s.dialect == mysqlDialect {
+		admit = s.ytAdmitSQL("?")
+		sel = `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id=? AND ` + admit + `)`
+	}
+	if err := q.QueryRow(ctx, sel, op.id, op.tenant).Scan(&admitted); err != nil {
 		return "", err
 	}
 	if admitted {
@@ -225,9 +232,6 @@ type YTRecovery struct {
 // UPDATE, then the authority row FOR SHARE, as op preparation does
 // (lockorder.go). It reads no clock: time is passed in.
 func (s *Store) RecoverHeldYTOps(ctx context.Context, tenant string, now time.Time, grace time.Duration) (YTRecovery, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTRecovery{}, ErrDialectUnsupported
-	}
 	return s.recoverHeldYTOps(ctx, tenant, 0, now, grace)
 }
 
@@ -235,9 +239,6 @@ func (s *Store) RecoverHeldYTOps(ctx context.Context, tenant string, now time.Ti
 // used by comments-drain --task so a scoped command cannot reject another
 // task's held ops.
 func (s *Store) RecoverHeldYTOpsForTask(ctx context.Context, tenant string, taskID int64, now time.Time, grace time.Duration) (YTRecovery, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTRecovery{}, ErrDialectUnsupported
-	}
 	if taskID < 1 {
 		return YTRecovery{}, errors.New("invalid task id")
 	}
@@ -300,10 +301,7 @@ func (s *Store) heldYTCandidatesForTask(ctx context.Context, tenant string, task
 	if taskID > 0 {
 		task = strconv.FormatInt(taskID, 10)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+ytHeldOpColumns+` FROM yt_write_ops o
-		WHERE o.state='prepared' AND o.tenant=$6 AND o.created_at <= $1 AND (o.created_at, o.id) > ($2, $3)
-		AND o.kind = ANY($4) AND ($7 = '' OR o.entity_id = $7) AND `+ytHeldScopeSQL+` AND NOT `+s.ytAdmitSQL("$6")+` AND `+ytHeldKeptSQL+`
-		ORDER BY o.created_at, o.id LIMIT $5`, cutoff.UTC(), afterAt.UTC(), afterID, kinds, limit, tenant, task)
+	rows, err := s.db().Query(ctx, s.heldYTCandidatesQ(kinds), s.heldYTCandidatesArgs(kinds, task, cutoff, afterAt, afterID, limit, tenant)...)
 	if err != nil {
 		return nil, err
 	}
@@ -324,15 +322,18 @@ func (s *Store) heldYTCandidatesForTask(ctx context.Context, tenant string, task
 // read again under the lane lock, and an op that was dispatched, resolved or
 // admitted in between is left alone.
 func (s *Store) recoverHeldYTOp(ctx context.Context, now time.Time, c ytHeldOp) (bool, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if err := lockYTEntity(ctx, tx, c.entityKind, c.entityID); err != nil {
 		return false, err
 	}
-	op, err := scanYTHeldOp(tx.QueryRow(ctx, `SELECT `+ytHeldOpColumns+` FROM yt_write_ops o WHERE o.id=$1 AND o.state='prepared' FOR UPDATE`, c.id))
+	op, err := scanYTHeldOp(tx.QueryRow(ctx, sqlFor(tx,
+		`SELECT `+ytHeldOpColumns+` FROM yt_write_ops o WHERE o.id=$1 AND o.state='prepared' FOR UPDATE`,
+		`SELECT `+ytHeldOpColumns+` FROM yt_write_ops o WHERE o.id=? AND o.state='prepared' FOR UPDATE`), c.id))
 	if errors.Is(err, ErrNoRows) {
 		return false, nil
 	}
@@ -370,4 +371,43 @@ func (s *Store) recoverHeldYTOp(ctx context.Context, now time.Time, c ytHeldOp) 
 	}
 	log.Printf("ytwrite.held_op_rejected op_id=%d task_id=%s kind=%s reason=%s", op.id, op.entityID, op.kind, reason)
 	return true, nil
+}
+
+// heldYTCandidatesQ is the held-op page's select in this store's dialect.
+func (s *Store) heldYTCandidatesQ(kinds []string) string {
+	if s.dialect == mysqlDialect {
+		return `SELECT ` + ytHeldOpColumns + ` FROM yt_write_ops o
+			WHERE o.state='prepared' AND o.tenant=? AND o.created_at <= ? AND (o.created_at, o.id) > (?, ?)
+			AND o.kind IN (` + ytKindPlaceholders(kinds) + `) AND (? = '' OR o.entity_id = ?) AND ` + ytHeldScopeSQL + ` AND NOT ` + s.ytAdmitSQL("?") + ` AND ` + s.ytHeldKept() + `
+			ORDER BY o.created_at, o.id LIMIT ?`
+	}
+	return `SELECT ` + ytHeldOpColumns + ` FROM yt_write_ops o
+		WHERE o.state='prepared' AND o.tenant=$6 AND o.created_at <= $1 AND (o.created_at, o.id) > ($2, $3)
+		AND o.kind = ANY($4) AND ($7 = '' OR o.entity_id = $7) AND ` + ytHeldScopeSQL + ` AND NOT ` + s.ytAdmitSQL("$6") + ` AND ` + ytHeldKeptSQL + `
+		ORDER BY o.created_at, o.id LIMIT $5`
+}
+
+// heldYTCandidatesArgs orders the held-op page's arguments and expands the
+// kind list for MySQL's positional placeholders.
+func (s *Store) heldYTCandidatesArgs(kinds []string, task string, cutoff, afterAt time.Time, afterID int64, limit int, tenant string) []any {
+	if s.dialect == mysqlDialect {
+		args := []any{tenant, cutoff.UTC(), afterAt.UTC(), afterID}
+		for _, k := range kinds {
+			args = append(args, k)
+		}
+		return append(args, task, task, tenant, limit)
+	}
+	return []any{cutoff.UTC(), afterAt.UTC(), afterID, kinds, limit, tenant, task}
+}
+
+// ytKindPlaceholders is the MySQL IN list for the held kinds. An empty list
+// matches nothing (the caller returns early when no kind is on, so it cannot
+// be empty in practice).
+func ytKindPlaceholders(kinds []string) string {
+	return placeholders(len(kinds))
+}
+
+// ytHeldKept is ytHeldKeptSQL in this store's dialect.
+func (s *Store) ytHeldKept() string {
+	return s.q(ytHeldKeptSQL, strings.Replace(ytHeldKeptSQL, `b.task_id::text`, `CAST(b.task_id AS CHAR)`, 1))
 }

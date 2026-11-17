@@ -279,7 +279,7 @@ func TestYTAuthoritySwitchWaitsForOpInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	if _, _, err := prepareYTOpTx(ctx, tx, time.Now().UTC(), ytwrite.NewOp{Principal: YTCommentPrincipal, Kind: ytwrite.KindCommentAppend, Key: "in-flight",
+	if _, _, err := prepareYTOpTx(ctx, pgTransaction{tx}, time.Now().UTC(), ytwrite.NewOp{Principal: YTCommentPrincipal, Kind: ytwrite.KindCommentAppend, Key: "in-flight",
 		PayloadSHA: "x", Payload: []byte(`{"body":"x"}`), EntityKind: "task", EntityID: "999998", YTTargetID: "2-1", Actor: "a"}); err != nil {
 		t.Fatal(err)
 	}

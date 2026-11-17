@@ -260,7 +260,7 @@ func (s *Store) YTBindingExcluded(ctx context.Context, taskID int64) (bool, erro
 	if taskID < 1 {
 		return false, errors.New("invalid binding history task")
 	}
-	action, err := ytBindingLatestActionTx(ctx, s.pool, taskID)
+	action, err := ytBindingLatestActionTx(ctx, pgQuerier{pool: s.pool}, taskID)
 	return action == ytBindingActionUnbound, err
 }
 

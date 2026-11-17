@@ -174,14 +174,14 @@ func (s *Store) planYTLinksTask(ctx context.Context, tenant string, id int64, re
 		return YTLinkPlanRow{}, false, err
 	}
 	defer tx.Rollback(ctx)
-	b, found, err := readYTBinding(ctx, tx, id)
+	b, found, err := readYTBinding(ctx, pgTransaction{tx}, id)
 	if err != nil {
 		return YTLinkPlanRow{}, false, err
 	}
 	if !found || b.Tenant != tenant {
 		return YTLinkPlanRow{}, false, nil
 	}
-	source, err := ytBindingDisagreement(ctx, tx, b)
+	source, err := ytBindingDisagreement(ctx, pgTransaction{tx}, b)
 	if err != nil {
 		return YTLinkPlanRow{}, false, err
 	}

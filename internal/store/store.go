@@ -2691,7 +2691,7 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 			if mode, _ := s.ytIssuesNow(); mode == YTIssuesOn {
 				return ErrDialectUnsupported
 			}
-		} else if err = s.enqueueYTIssueTx(ctx, pgxTx(tx), x); err != nil {
+		} else if err = s.enqueueYTIssueTx(ctx, tx, x); err != nil {
 			return err
 		}
 		return tx.Commit(ctx)
@@ -3001,7 +3001,7 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 			if mode, _ := s.ytIssuesNow(); mode == YTIssuesOn {
 				return ErrDialectUnsupported
 			}
-		} else if _, err := s.ensureYTIssueTx(ctx, pgxTx(tx), x, x.UpdatedAt, false); err != nil {
+		} else if _, err := s.ensureYTIssueTx(ctx, tx, x, x.UpdatedAt, false); err != nil {
 			return err
 		}
 		changed = true

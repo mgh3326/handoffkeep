@@ -133,13 +133,13 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 		return YTTaskBinding{}, 0, 0, err
 	}
 	defer tx.Rollback(ctx)
-	if err := lockYTIssueOwnershipTx(ctx, tx, b.TaskID); err != nil {
+	if err := lockYTIssueOwnershipTx(ctx, s, pgTransaction{tx}, b.TaskID); err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	}
-	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(b.TaskID, 10)); err != nil {
+	if err := lockYTEntity(ctx, pgTransaction{tx}, "task", strconv.FormatInt(b.TaskID, 10)); err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	}
-	current, err := readYTCanaryCandidate(ctx, tx, b.TaskID, " FOR SHARE")
+	current, err := readYTCanaryCandidate(ctx, pgTransaction{tx}, b.TaskID, " FOR SHARE")
 	if err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	}
@@ -147,11 +147,11 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 		return YTTaskBinding{}, 0, 0, fmt.Errorf("%w: task %d's YouTrack mappings changed after verification (verified %+v, now %+v); verify again",
 			ErrYTBindingConflict, b.TaskID, verified, current)
 	}
-	have, found, err := readYTBinding(ctx, tx, b.TaskID)
+	have, found, err := readYTBinding(ctx, pgTransaction{tx}, b.TaskID)
 	if err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	}
-	latest, err := ytBindingLatestActionTx(ctx, tx, b.TaskID)
+	latest, err := ytBindingLatestActionTx(ctx, pgTransaction{tx}, b.TaskID)
 	if err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	}
@@ -174,7 +174,7 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 	}
 	// hk is creating (or adopting) the task's issue itself (hk 3898): that op
 	// publishes the binding when it is applied.
-	if pending, err := ytIssueOpPendingTx(ctx, tx, b.TaskID); err != nil {
+	if pending, err := ytIssueOpPendingTx(ctx, pgTransaction{tx}, b.TaskID); err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	} else if pending {
 		return YTTaskBinding{}, 0, 0, fmt.Errorf("%w: task %d has an unresolved issue_create op", ErrYTBindingConflict, b.TaskID)
@@ -183,7 +183,7 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 	// a switch commits before this read (refusing) or after this transaction,
 	// never between the listing and the copies.
 	if p.auto {
-		side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments)
+		side, err := ytAuthorityShareTx(ctx, pgTransaction{tx}, YTAuthorityComments)
 		if err != nil {
 			return YTTaskBinding{}, 0, 0, err
 		}
@@ -191,7 +191,7 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 			return YTTaskBinding{}, 0, 0, fmt.Errorf("%w: comments authority changed since the listing", ErrYTBindingConflict)
 		}
 	}
-	source, err := ytBindingDisagreement(ctx, tx, b)
+	source, err := ytBindingDisagreement(ctx, pgTransaction{tx}, b)
 	if err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	}
@@ -268,7 +268,7 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 			// held by this transaction's locks, so the enqueue cannot refuse
 			// for a missing binding or a disagreement: a false here is a
 			// broken invariant and rolls the publication back.
-			op, ok, err := enqueueYTCommentOnTx(ctx, tx, c)
+			op, ok, err := enqueueYTCommentOnTx(ctx, pgTransaction{tx}, c)
 			if err != nil {
 				return YTTaskBinding{}, 0, 0, err
 			}

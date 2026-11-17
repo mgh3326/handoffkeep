@@ -115,7 +115,7 @@ func (s *Store) CreateTaskCommentProjected(ctx context.Context, taskID int64, au
 	if err != nil {
 		return CreatedTaskComment{}, err
 	}
-	op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, x)
+	op, enqueued, err := s.enqueueYTCommentTx(ctx, pgTransaction{tx}, x)
 	if err != nil {
 		return CreatedTaskComment{}, err
 	}
@@ -169,7 +169,7 @@ func (s *Store) CreateMCPTaskCommentProjected(ctx context.Context, taskID int64,
 		if x.TaskID != taskID {
 			return CreatedTaskComment{}, false, ErrIdempotencyKeyReused
 		}
-		projection, err := ytCommentProjectionTx(ctx, tx, x.ID)
+		projection, err := ytCommentProjectionTx(ctx, pgTransaction{tx}, x.ID)
 		if err != nil {
 			return CreatedTaskComment{}, false, err
 		}
@@ -186,7 +186,7 @@ func (s *Store) CreateMCPTaskCommentProjected(ctx context.Context, taskID int64,
 	if err := insertMCPWriteAuditTx(ctx, tx, w, taskID, x, now); err != nil {
 		return CreatedTaskComment{}, false, err
 	}
-	op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, x)
+	op, enqueued, err := s.enqueueYTCommentTx(ctx, pgTransaction{tx}, x)
 	if err != nil {
 		return CreatedTaskComment{}, false, err
 	}

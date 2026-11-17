@@ -203,7 +203,7 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 	if err := checkDecisionAttachmentsExist(ctx, tx, DecisionOptions{Options: in.Options}); err != nil {
 		return Task{}, err
 	}
-	if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
+	if err := s.enqueueYTIssueTx(ctx, pgTransaction{tx}, x); err != nil {
 		return Task{}, err
 	}
 	err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,parent_lane=$3,started_triage_at=NULL WHERE id=$1 RETURNING `+taskColumns, x.ID, StateBacklog, lane), &x)
@@ -488,7 +488,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	// While comments are canonical in YouTrack (hk 4122) the reply gets its
 	// op in this transaction, or is refused; under hk nothing changes.
 	reply := TaskComment{ID: commentRowID, TaskID: in.TaskID, Body: in.Body, Author: actor, CreatedAt: now}
-	replyOp, replyEnqueued, err := s.enqueueYTCommentIfCanonicalTx(ctx, tx, reply)
+	replyOp, replyEnqueued, err := s.enqueueYTCommentIfCanonicalTx(ctx, pgTransaction{tx}, reply)
 	if err != nil {
 		return DotsReplyResult{}, err
 	}
@@ -775,7 +775,7 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 		if err != nil {
 			return DotsAnswerResult{}, err
 		}
-		op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, comment)
+		op, enqueued, err := s.enqueueYTCommentTx(ctx, pgTransaction{tx}, comment)
 		if err != nil {
 			return DotsAnswerResult{}, err
 		}
@@ -807,7 +807,7 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 	if err != nil {
 		return DotsAnswerResult{}, err
 	}
-	op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, comment)
+	op, enqueued, err := s.enqueueYTCommentTx(ctx, pgTransaction{tx}, comment)
 	if err != nil {
 		return DotsAnswerResult{}, err
 	}
