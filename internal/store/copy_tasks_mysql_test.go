@@ -116,6 +116,50 @@ func TestCopyTasksAreaRoundTripWithParity(t *testing.T) {
 	if err := back.pool.QueryRow(t.Context(), `SELECT count(*) FROM sync_log`).Scan(&backFeed); err != nil || backFeed != sourceFeed+1 {
 		t.Fatalf("sync_log after a normal insert = %d (%v), want %d", backFeed, err, sourceFeed+1)
 	}
+
+	// A pruned feed may be empty while sync_state retains the high watermark.
+	// Copying it must not rewind the separate sync_id sequence on the target.
+	const prunedWatermark = int64(12345)
+	my, err = Open(t.Context(), myURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := my.mysqlPool.ExecContext(t.Context(), `DELETE FROM sync_log`); err != nil {
+		my.Close()
+		t.Fatal(err)
+	}
+	if _, err := my.mysqlPool.ExecContext(t.Context(), `UPDATE sync_state SET max_sync_id=?,pruned_through=? WHERE singleton=1`, prunedWatermark, prunedWatermark); err != nil {
+		my.Close()
+		t.Fatal(err)
+	}
+	my.Close()
+
+	prunedBack, prunedBackURL := schemaStoreAt(t, "copy_tasks_pruned_back")
+	prunedCopy, err := CopyStore(t.Context(), myURL, prunedBackURL, tables, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prunedCopy.Match || len(prunedCopy.Tables) != len(tables) {
+		t.Fatalf("pruned-feed MySQL to PostgreSQL parity mismatch: %+v", prunedCopy)
+	}
+	var emptyFeed int
+	var copiedWatermark int64
+	if err := prunedBack.pool.QueryRow(t.Context(), `SELECT (SELECT count(*) FROM sync_log),(SELECT max_sync_id FROM sync_state WHERE singleton)`).Scan(&emptyFeed, &copiedWatermark); err != nil {
+		t.Fatal(err)
+	}
+	if emptyFeed != 0 || copiedWatermark != prunedWatermark {
+		t.Fatalf("copied pruned feed = (rows %d, watermark %d), want (0, %d)", emptyFeed, copiedWatermark, prunedWatermark)
+	}
+	if _, err := prunedBack.pool.Exec(t.Context(), `INSERT INTO tasks(lane,title,kind,state,project,created_by,created_at,updated_at) VALUES('lane-a','after-prune','implement','backlog','handoffkeep','test',now(),now())`); err != nil {
+		t.Fatal(err)
+	}
+	var nextSyncID, nextWatermark int64
+	if err := prunedBack.pool.QueryRow(t.Context(), `SELECT (SELECT MAX(sync_id) FROM sync_log),(SELECT max_sync_id FROM sync_state WHERE singleton)`).Scan(&nextSyncID, &nextWatermark); err != nil {
+		t.Fatal(err)
+	}
+	if nextSyncID != prunedWatermark+1 || nextWatermark != prunedWatermark+1 {
+		t.Fatalf("journal after pruned-feed copy = (sync_id %d, watermark %d), want %d", nextSyncID, nextWatermark, prunedWatermark+1)
+	}
 }
 
 func tasksAreaCopyTables() []string {

@@ -329,7 +329,7 @@ func scanChange(row pgx.Row, c *Change) error {
 // write, which settle-merged then reads (hk 4844).
 func (s *Store) ListUnreconciledChanges(ctx context.Context, afterID *int64, limit int) ([]Change, error) {
 	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
+		return s.listChangesWhereMySQL(ctx, `state IN (?,?) AND (state<>? OR merge_sha IS NULL)`, afterID, limit, ChangeOpen, ChangeMerged, ChangeMerged)
 	}
 
 	return s.listChangesWhere(ctx, s.pool, `(state=$1 OR (state=$2 AND merge_sha IS NULL))`, afterID, limit, ChangeOpen, ChangeMerged)
@@ -342,7 +342,7 @@ func (s *Store) ListUnreconciledChanges(ctx context.Context, afterID *int64, lim
 // reader that must catch one pages again from 0.
 func (s *Store) ListChangesByTask(ctx context.Context, taskID int64, afterID *int64, limit int) ([]Change, error) {
 	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
+		return s.listChangesWhereMySQL(ctx, `id IN (SELECT change_id FROM change_tasks WHERE task_id=?)`, afterID, limit, taskID)
 	}
 
 	return s.listChangesWhere(ctx, s.pool, `id IN (SELECT change_id FROM change_tasks WHERE task_id=$1)`, afterID, limit, taskID)
@@ -351,7 +351,11 @@ func (s *Store) ListChangesByTask(ctx context.Context, taskID int64, afterID *in
 // ListChangesByPR lists the change for a PR URL: none or one row.
 func (s *Store) ListChangesByPR(ctx context.Context, pr string, afterID *int64, limit int) ([]Change, error) {
 	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
+		repo, n, ok := parsePRURL(pr)
+		if !ok || !taskEventPRRE.MatchString(pr) {
+			return nil, errors.New("invalid change query: pr must be a PR URL")
+		}
+		return s.listChangesWhereMySQL(ctx, `repo=? AND pr_number=?`, afterID, limit, repo, n)
 	}
 
 	repo, n, ok := parsePRURL(pr)
@@ -490,7 +494,7 @@ func checkChangeMergeFlow(in ChangeMergeFlow) error {
 // changes row (lockorder.go).
 func (s *Store) SetChangeMergeFlow(ctx context.Context, id int64, in ChangeMergeFlow) (Change, error) {
 	if s != nil && s.dialect == mysqlDialect {
-		return Change{}, ErrDialectUnsupported
+		return s.setChangeMergeFlowMySQL(ctx, id, in)
 	}
 
 	if err := checkChangeMergeFlow(in); err != nil {

@@ -161,7 +161,6 @@ func threadsCaseClaimSettleRecover(t *testing.T, s *Store) {
 	// A PR line: claimed, then its worker dies mid-send.
 	pr := a5PR(301)
 	if _, err := s.ApplyTaskSourceEvent(ctx, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: pr, TaskID: task.ID}); err != nil {
-		needPorted(t, s, "PR source events (changes, B5)", err)
 		t.Fatal(err)
 	}
 	line, found, err := s.ClaimTaskThread(ctx, later)
@@ -190,6 +189,9 @@ func threadsCaseClaimSettleRecover(t *testing.T, s *Store) {
 
 	// A line that is sent moves the cursor; a refused one stops the row.
 	if _, err := s.ApplyTaskSourceEvent(ctx, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: task.ID}); err != nil {
+		if s.dialect == mysqlDialect && errors.Is(err, ErrDialectUnsupported) {
+			t.Skip("settled decision projection (B6)")
+		}
 		t.Fatal(err)
 	}
 	line, found, err = s.ClaimTaskThread(ctx, later.Add(time.Hour))
@@ -306,7 +308,6 @@ func threadsCaseUnknownCreate(t *testing.T, s *Store) {
 	}
 	// The needs_operator row is never created again and gets no line.
 	if _, err := s.ApplyTaskSourceEvent(ctx, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: a5PR(302), TaskID: a.ID}); err != nil {
-		needPorted(t, s, "PR source events (changes, B5)", err)
 		t.Fatal(err)
 	}
 	for {
@@ -503,7 +504,6 @@ func threadsCasePRStart(t *testing.T, s *Store) {
 	x := a5Task(t, s, project, "started by its PR")
 	pr := a5PR(304)
 	res, err := s.ApplyTaskSourceEvent(ctx, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: pr, TaskID: x.ID})
-	needPorted(t, s, "PR source events (changes, B5)", err)
 	if err != nil || !res.Applied || res.State != StateReviewing {
 		t.Fatalf("pr event %+v err=%v", res, err)
 	}
