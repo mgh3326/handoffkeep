@@ -198,15 +198,20 @@ func insertTriageTaskTx(ctx context.Context, tx transaction, item triageItem, so
 	}
 	var x Task
 	if dialectFor(tx) == mysqlDialect {
-		if item.Body != "" {
-			// B3 dependency: the body is the document task-body/<id>, which only
-			// the documents area writes on MySQL.
-			return Task{}, ErrDialectUnsupported
-		}
 		id, err := tx.InsertID(ctx, `INSERT INTO tasks(lane,title,kind,state,priority,created_by,created_at,updated_at,last_activity_at,started_triage_at,project,parent_id,source,source_ref) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			lane, item.Title, item.Kind, StateTriage, item.Priority, by, now, now, now, now, item.Project, parent, source, sourceRef)
 		if err != nil {
 			return Task{}, err
+		}
+		if item.Body != "" {
+			key := fmt.Sprintf("task-body/%d", id)
+			sum := sha256.Sum256([]byte(item.Body))
+			if _, err = tx.Exec(ctx, "INSERT INTO documents(`key`,kind,session,job,body,sha256,created_by,created_at,updated_at) VALUES(?,'brief','','',?,?,?,?,?)", key, item.Body, hex.EncodeToString(sum[:]), by, now, now); err != nil {
+				return Task{}, err
+			}
+			if _, err = tx.Exec(ctx, `UPDATE tasks SET body_doc=? WHERE id=?`, key, id); err != nil {
+				return Task{}, err
+			}
 		}
 		err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=?`, id), &x)
 		return x, err
