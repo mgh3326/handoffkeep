@@ -210,7 +210,7 @@ RETURNING `+serviceColumns, x.Name, x.Repo, x.PathPatterns, x.DeployMode, x.Targ
 func (s *Store) GetService(ctx context.Context, name string) (Service, bool, error) {
 	var out Service
 	err := scanService(s.pool.QueryRow(ctx, `SELECT `+serviceColumns+` FROM services WHERE name=$1`, name), &out)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return Service{}, false, nil
 	}
 	return out, err == nil, err
@@ -318,7 +318,7 @@ func (s *Store) StartDeploy(ctx context.Context, in DeployStart) (Deploy, bool, 
 	}
 	defer tx.Rollback(ctx)
 	var svc Service
-	if err = scanService(tx.QueryRow(ctx, `SELECT `+serviceColumns+` FROM services WHERE name=$1`, in.Service), &svc); errors.Is(err, pgx.ErrNoRows) {
+	if err = scanService(tx.QueryRow(ctx, `SELECT `+serviceColumns+` FROM services WHERE name=$1`, in.Service), &svc); errors.Is(err, ErrNoRows) {
 		return Deploy{}, false, ErrServiceNotFound
 	} else if err != nil {
 		return Deploy{}, false, err
@@ -332,7 +332,7 @@ func (s *Store) StartDeploy(ctx context.Context, in DeployStart) (Deploy, bool, 
 	err = tx.QueryRow(ctx, `INSERT INTO deploys(attempt_id,service,targets,action,previous_ref,deployed_ref,state,started_at,job_id,approval_ref,source,payload_hash)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(attempt_id) DO NOTHING RETURNING id`,
 		in.AttemptID, in.Service, in.Targets, in.Action, nullStr(in.PreviousRef), in.DeployedRef, in.State, started, nullStr(in.JobID), nullStr(in.ApprovalRef), in.Source, hash).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		var stored string
 		if err = tx.QueryRow(ctx, `SELECT payload_hash FROM deploys WHERE attempt_id=$1`, in.AttemptID).Scan(&stored); err != nil {
 			return Deploy{}, false, err
@@ -374,7 +374,7 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(attempt_id) DO NOTHIN
 	for _, c := range cands {
 		var changeID int64
 		err = tx.QueryRow(ctx, `SELECT id FROM changes WHERE repo=$1 AND pr_number=$2`, c.repo, c.number).Scan(&changeID)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			changeID, err = upsertChangeTx(ctx, tx, changeWrite{repo: c.repo, number: c.number, state: ChangeMerged, mergedAt: &now}, now, now)
 		}
 		if err != nil {
@@ -423,7 +423,7 @@ func readDeployTx(ctx context.Context, q pgx.Tx, attemptID string) (Deploy, erro
 	var d Deploy
 	err := q.QueryRow(ctx, `SELECT `+deployColumns+` FROM deploys WHERE attempt_id=$1`, attemptID).Scan(
 		&d.ID, &d.AttemptID, &d.Service, &d.Targets, &d.Action, &d.PreviousRef, &d.DeployedRef, &d.State, &d.StartedAt, &d.FinishedAt, &d.FailedStep, &d.JobID, &d.ApprovalRef, &d.Source, &d.PayloadHash)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return Deploy{}, ErrDeployNotFound
 	}
 	if err != nil {
@@ -475,7 +475,7 @@ func (s *Store) FinishDeploy(ctx context.Context, attemptID string, in DeployFin
 	var id int64
 	var state string
 	err = tx.QueryRow(ctx, `SELECT id,state FROM deploys WHERE attempt_id=$1 FOR UPDATE`, attemptID).Scan(&id, &state)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return Deploy{}, ErrDeployNotFound
 	}
 	if err != nil {

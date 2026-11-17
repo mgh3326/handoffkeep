@@ -126,7 +126,7 @@ func decisionReplacement(ctx context.Context, q interface {
 	}
 	var id int64
 	err := q.QueryRow(ctx, `SELECT id FROM decision_requests WHERE source=$1 AND source_ref=$2`, source, key).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -142,7 +142,7 @@ func (s *Store) DecisionReplacement(ctx context.Context, ref string) (*int64, er
 func decisionViewTask(ctx context.Context, tx pgx.Tx, id int64) (Task, bool, error) {
 	var task Task
 	err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, id), &task)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return Task{}, false, nil
 	}
 	if err != nil {

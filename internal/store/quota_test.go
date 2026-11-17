@@ -197,7 +197,12 @@ func TestQuotaPostgres(t *testing.T) {
 	}
 }
 func TestQuotaDedupePostgres(t *testing.T) {
-	s, pool := searchTestStore(t)
+	s, _ := searchTestStore(t)
+	testQuotaDedupe(t, s)
+}
+
+func testQuotaDedupe(t *testing.T, s *Store) {
+	t.Helper()
 	ctx := context.Background()
 	const key = "claude:fedcba9876543210"
 	if _, err := s.LeaseQuota(ctx, key, "client", holderA, 120); err != nil {
@@ -236,14 +241,14 @@ func TestQuotaDedupePostgres(t *testing.T) {
 	}
 	// A legacy pointer (confirmed_at NULL) never confirms below its own
 	// measured_at, even when the identical republish is older.
-	if _, err = pool.Exec(ctx, `UPDATE quota_latest SET confirmed_at=NULL WHERE account_key=$1`, key); err != nil {
+	if _, err = s.db().Exec(ctx, s.q(`UPDATE quota_latest SET confirmed_at=NULL WHERE account_key=$1`, `UPDATE quota_latest SET confirmed_at=NULL WHERE account_key=?`), key); err != nil {
 		t.Fatal(err)
 	}
 	if got, deduped, err := s.PutQuota(ctx, key, "client", holderA, older); err != nil || !deduped || got.ConfirmedAt == nil || !got.ConfirmedAt.Equal(x.MeasuredAt) {
 		t.Fatalf("dedupe legacy floor: confirmed_at=%v want=%v deduped=%v %v", got.ConfirmedAt, x.MeasuredAt, deduped, err)
 	}
 	var count int
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_observations`).Scan(&count); err != nil || count != 1 {
+	if err = s.db().QueryRow(ctx, `SELECT count(*) FROM quota_observations`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("dedupe history=%d %v", count, err)
 	}
 	changed := x
@@ -258,14 +263,14 @@ func TestQuotaDedupePostgres(t *testing.T) {
 		t.Fatalf("dedupe change: %+v deduped=%v %v", next, deduped, err)
 	}
 	var storedCA *string
-	if err = pool.QueryRow(ctx, `SELECT value->>'confirmed_at' FROM quota_observations WHERE id=$1`, next.ID).Scan(&storedCA); err != nil || storedCA != nil {
+	if err = s.db().QueryRow(ctx, s.q(`SELECT value->>'confirmed_at' FROM quota_observations WHERE id=$1`, `SELECT JSON_UNQUOTE(JSON_EXTRACT(value,'$.confirmed_at')) FROM quota_observations WHERE id=?`), next.ID).Scan(&storedCA); err != nil || storedCA != nil {
 		t.Fatalf("confirmed_at stored: %v %v", storedCA, err)
 	}
 	latestQ, err = s.LatestQuota(ctx, key)
 	if err != nil || latestQ.Observation.ConfirmedAt == nil || !latestQ.Observation.ConfirmedAt.Equal(changed.MeasuredAt) {
 		t.Fatalf("confirmed_at not server-owned: %+v %v", latestQ.Observation, err)
 	}
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_observations`).Scan(&count); err != nil || count != 2 {
+	if err = s.db().QueryRow(ctx, `SELECT count(*) FROM quota_observations`).Scan(&count); err != nil || count != 2 {
 		t.Fatalf("dedupe history=%d %v", count, err)
 	}
 	// Concurrent identical publishes under one holder must not double-append.
@@ -292,13 +297,18 @@ func TestQuotaDedupePostgres(t *testing.T) {
 	if len(ids) != 2 || ids[0] != ids[1] {
 		t.Fatalf("dedupe concurrent ids=%v", ids)
 	}
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_observations`).Scan(&count); err != nil || count != 2 {
+	if err = s.db().QueryRow(ctx, `SELECT count(*) FROM quota_observations`).Scan(&count); err != nil || count != 2 {
 		t.Fatalf("dedupe concurrent history=%d %v", count, err)
 	}
 }
 
 func TestQuotaObservationHistoryPostgres(t *testing.T) {
-	s, pool := searchTestStore(t)
+	s, _ := searchTestStore(t)
+	testQuotaObservationHistory(t, s)
+}
+
+func testQuotaObservationHistory(t *testing.T, s *Store) {
+	t.Helper()
 	ctx := context.Background()
 	key := quotaTestKey
 	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
@@ -308,7 +318,7 @@ func TestQuotaObservationHistoryPostgres(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := pool.Exec(ctx, `INSERT INTO quota_observations(account_key,kind,window_key,measured_at,value) VALUES($1,'auto','',$2,$3)`, key, at, value); err != nil {
+		if _, err := s.db().Exec(ctx, s.q(`INSERT INTO quota_observations(account_key,kind,window_key,measured_at,value) VALUES($1,'auto','',$2,$3)`, `INSERT INTO quota_observations(account_key,kind,window_key,measured_at,value) VALUES(?,'auto','',?,?)`), key, at, value); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -433,6 +443,40 @@ func TestQuotaPresencePostgres(t *testing.T) {
 	if err := s.migrate(ctx); err != nil {
 		t.Fatal("idempotent migration", err)
 	}
+	a := testQuotaPresence(t, s)
+	var count int
+	var err error
+	var v24 bool
+	if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=24)`).Scan(&v24); err != nil || !v24 {
+		t.Fatalf("presence schema_version row missing: %v", err)
+	}
+	// Replay a v23 database: no presence table, no v24 row. Restart restores
+	// both, and a second restart over existing rows keeps them.
+	for _, q := range []string{`DROP TABLE quota_presence`, `DELETE FROM schema_version WHERE version=24`} {
+		if _, err = pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal("migrate on v23 state", err)
+	}
+	if _, err = s.PutQuotaPresence(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal("re-migrate with presence rows", err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_presence`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("presence rows after re-migrate=%d %v", count, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=24`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("v24 rows after re-migrate=%d %v", count, err)
+	}
+}
+
+func testQuotaPresence(t *testing.T, s *Store) QuotaPresence {
+	t.Helper()
+	ctx := context.Background()
 	empty, truncated, err := s.QuotaPresence(ctx, "", "", 10)
 	if err != nil || empty == nil || len(empty) != 0 || truncated {
 		t.Fatalf("empty presence=%v truncated=%v %v", empty, truncated, err)
@@ -471,7 +515,7 @@ func TestQuotaPresencePostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	var count int
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_presence`).Scan(&count); err != nil || count != 3 {
+	if err = s.db().QueryRow(ctx, `SELECT count(*) FROM quota_presence`).Scan(&count); err != nil || count != 3 {
 		t.Fatalf("presence rows=%d %v", count, err)
 	}
 	all, truncated, err := s.QuotaPresence(ctx, "", "", 10)
@@ -512,38 +556,18 @@ func TestQuotaPresencePostgres(t *testing.T) {
 	if err != nil || len(byKey) != 1 || !byKey[0].LastSeen.Equal(newer.LastSeen.Add(8*time.Second)) {
 		t.Fatalf("concurrent newest=%+v %v", byKey, err)
 	}
-	var v24 bool
-	if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=24)`).Scan(&v24); err != nil || !v24 {
-		t.Fatalf("presence schema_version row missing: %v", err)
-	}
-	// Replay a v23 database: no presence table, no v24 row. Restart restores
-	// both, and a second restart over existing rows keeps them.
-	for _, q := range []string{`DROP TABLE quota_presence`, `DELETE FROM schema_version WHERE version=24`} {
-		if _, err = pool.Exec(ctx, q); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err = s.migrate(ctx); err != nil {
-		t.Fatal("migrate on v23 state", err)
-	}
-	if _, err = s.PutQuotaPresence(ctx, a); err != nil {
-		t.Fatal(err)
-	}
-	if err = s.migrate(ctx); err != nil {
-		t.Fatal("re-migrate with presence rows", err)
-	}
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_presence`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("presence rows after re-migrate=%d %v", count, err)
-	}
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=24`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("v24 rows after re-migrate=%d %v", count, err)
-	}
+	return a
 }
 
 // A granted client inventing host ids cannot grow an account past the cap or
 // evict hosts already present; rows past retention are hidden and pruned.
 func TestQuotaPresenceBoundsPostgres(t *testing.T) {
-	s, pool := searchTestStore(t)
+	s, _ := searchTestStore(t)
+	testQuotaPresenceBounds(t, s)
+}
+
+func testQuotaPresenceBounds(t *testing.T, s *Store) {
+	t.Helper()
 	ctx := context.Background()
 	seen := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
 	for i := 0; i < QuotaPresenceHosts; i++ {
@@ -577,12 +601,12 @@ func TestQuotaPresenceBoundsPostgres(t *testing.T) {
 	}
 	wg.Wait()
 	var count int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM quota_presence WHERE account_key=$1`, quotaTestKey).Scan(&count); err != nil || count != QuotaPresenceHosts {
+	if err := s.db().QueryRow(ctx, s.q(`SELECT count(*) FROM quota_presence WHERE account_key=$1`, `SELECT count(*) FROM quota_presence WHERE account_key=?`), quotaTestKey).Scan(&count); err != nil || count != QuotaPresenceHosts {
 		t.Fatalf("rows at cap=%d %v", count, err)
 	}
 	// Age one row past retention: listings hide it at once, and the next
 	// write for the account prunes it, freeing the slot for a new host.
-	if _, err := pool.Exec(ctx, `UPDATE quota_presence SET last_seen=clock_timestamp()-interval '31 days' WHERE host_id='host-63' AND account_key=$1`, quotaTestKey); err != nil {
+	if _, err := s.db().Exec(ctx, s.q(`UPDATE quota_presence SET last_seen=clock_timestamp()-interval '31 days' WHERE host_id='host-63' AND account_key=$1`, `UPDATE quota_presence SET last_seen=DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 31 DAY) WHERE host_id='host-63' AND account_key=?`), quotaTestKey); err != nil {
 		t.Fatal(err)
 	}
 	rows, _, err := s.QuotaPresence(ctx, "host-63", "", 10)
@@ -593,10 +617,10 @@ func TestQuotaPresenceBoundsPostgres(t *testing.T) {
 		t.Fatalf("slot after prune: %v", err)
 	}
 	var stale bool
-	if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quota_presence WHERE host_id='host-63')`).Scan(&stale); err != nil || stale {
+	if err = s.db().QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quota_presence WHERE host_id='host-63')`).Scan(&stale); err != nil || stale {
 		t.Fatalf("stale row not pruned %v %v", stale, err)
 	}
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_presence WHERE account_key=$1`, quotaTestKey).Scan(&count); err != nil || count != QuotaPresenceHosts {
+	if err = s.db().QueryRow(ctx, s.q(`SELECT count(*) FROM quota_presence WHERE account_key=$1`, `SELECT count(*) FROM quota_presence WHERE account_key=?`), quotaTestKey).Scan(&count); err != nil || count != QuotaPresenceHosts {
 		t.Fatalf("rows after prune=%d %v", count, err)
 	}
 }

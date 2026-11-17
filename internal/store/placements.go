@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -228,7 +227,7 @@ func (s *Store) RecordPlacement(ctx context.Context, d PlacementDecision) (Place
 	defer tx.Rollback(ctx)
 	if d.TaskID != nil {
 		var id int64
-		if err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, *d.TaskID).Scan(&id); errors.Is(err, pgx.ErrNoRows) {
+		if err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, *d.TaskID).Scan(&id); errors.Is(err, ErrNoRows) {
 			return d, false, ErrTaskNotFound
 		} else if err != nil {
 			return d, false, err
@@ -241,7 +240,7 @@ func (s *Store) RecordPlacement(ctx context.Context, d PlacementDecision) (Place
 	stored, err := scanPlacement(tx.QueryRow(ctx, `INSERT INTO placement_decisions(job_id,attempt,task_id,decided_at,decided_on,tool_version,source,ranking,state_source,chosen_host,outcome,reason,profile,pool,account_key,family,model,role,pane_id,repo,candidates) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb) ON CONFLICT(job_id,attempt) DO NOTHING RETURNING `+placementColumns,
 		d.JobID, d.Attempt, d.TaskID, d.DecidedAt, d.DecidedOn, d.ToolVersion, d.Source, d.Ranking, d.StateSource, d.ChosenHost, d.Outcome, d.Reason, d.Profile, d.Pool, d.AccountKey, d.Family, d.Model, d.Role, d.PaneID, d.Repo, string(raw)))
 	created := err == nil
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		stored, err = scanPlacement(tx.QueryRow(ctx, `SELECT `+placementColumns+` FROM placement_decisions WHERE job_id=$1 AND attempt=$2`, d.JobID, d.Attempt))
 		if err == nil {
 			d.ID = stored.ID

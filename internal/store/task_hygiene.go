@@ -385,7 +385,7 @@ func hygieneVerifiedPRTx(ctx context.Context, tx pgx.Tx, t Task) (string, error)
        AND e.source=$3 AND e.field=$4 AND NOT e.applied
        AND e.source_ref=(`+prURLSQL+`)))
    ORDER BY ((`+prURLSQL+`)=$2) DESC,c.id DESC LIMIT 1`, t.ID, t.Refs.PR, SourceMergewakeMerge, heldMergeField).Scan(&pr)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return "", nil
 	}
 	return pr, err
@@ -398,7 +398,7 @@ func (s *Store) hygieneDecideTx(ctx context.Context, tx pgx.Tx, c hygieneCandida
 		sql += ` FOR UPDATE`
 	}
 	if err := scanTask(tx.QueryRow(ctx, sql, c.id), &d.task); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return d, nil
 		}
 		return d, err
@@ -459,7 +459,7 @@ func (s *Store) hygieneDecideTx(ctx context.Context, tx pgx.Tx, c hygieneCandida
 		err = tx.QueryRow(ctx, `SELECT id,state FROM tasks WHERE parent_id=$1
      AND state IN ('completed','merged','deployed')
      ORDER BY updated_at DESC,id DESC LIMIT 1`, t.ID).Scan(&d.childID, &d.childState)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			d.finding.Hold = "no settled child with work remains"
 			return d, nil
 		}

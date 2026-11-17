@@ -76,7 +76,7 @@ func insertEvent(ctx context.Context, q rowQuerier, e taskEventInput) (id int64,
 		VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 		ON CONFLICT (task_id,source,source_ref) WHERE source<>'' AND source_ref<>'' DO NOTHING RETURNING id`,
 		e.TaskID, e.From, e.To, e.By, e.Note, string(encoded), e.At, e.Kind, e.NoJob, e.Source, e.SourceRef, e.Field, e.FromValue, e.ToValue, e.Auto, !e.NotApplied).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return 0, false, nil
 	}
 	if err != nil || !isActivityEvent(e.Auto, e.Source) {
@@ -84,7 +84,7 @@ func insertEvent(ctx context.Context, q rowQuerier, e taskEventInput) (id int64,
 	}
 	var taskID int64
 	err = q.QueryRow(ctx, `UPDATE tasks SET last_activity_at = GREATEST(last_activity_at, $2) WHERE id = $1 AND last_activity_at < $2 RETURNING id`, e.TaskID, e.At).Scan(&taskID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return id, false, nil
 	}
 	if err == nil && e.Into != nil {
@@ -198,7 +198,7 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 	var x Task
 	var hasDisposition bool
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+`,refs ? 'disposition' FROM tasks WHERE id=$1 FOR UPDATE`, id), &x, &hasDisposition); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return Task{}, ErrTaskConflict
 		}
 		return Task{}, err
@@ -234,7 +234,7 @@ func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID,
 	// refines the spawn rule; a job not yet registered leaves the kind alone.
 	var jobRole string
 	if jobID != "" {
-		if err := tx.QueryRow(ctx, `SELECT role FROM jobs WHERE job_id=$1 AND task_id=$2`, jobID, id).Scan(&jobRole); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.QueryRow(ctx, `SELECT role FROM jobs WHERE job_id=$1 AND task_id=$2`, jobID, id).Scan(&jobRole); err != nil && !errors.Is(err, ErrNoRows) {
 			return Task{}, err
 		}
 	}
@@ -455,7 +455,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 	var x Task
 	var hasDisposition bool
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+`,refs ? 'disposition' FROM tasks WHERE id=$1 FOR UPDATE`, id), &x, &hasDisposition); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return Task{}, ErrTaskNotFound
 		}
 		return Task{}, err
@@ -853,7 +853,7 @@ func mergedChangeTx(ctx context.Context, tx pgx.Tx, pr string) (int64, error) {
 	var state string
 	var reverted bool
 	err := tx.QueryRow(ctx, `SELECT id,state,reverted_by_change_id IS NOT NULL FROM changes WHERE repo=$1 AND pr_number=$2`, repo, n).Scan(&id, &state, &reverted)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return 0, fmt.Errorf("%w: hk has no change record of %s, so it cannot verify the merge; the merge event records it", ErrTaskConflict, pr)
 	}
 	if err != nil {

@@ -197,7 +197,7 @@ func openDecisionTx(ctx context.Context, tx pgx.Tx, d decisionOpen) error {
 	err := tx.QueryRow(ctx, `INSERT INTO decision_requests(source,source_ref,task_id,job_id,lane,question,options,recommended,default_action,due_at,status,created_at,updated_at)
 		VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,'open',$11,$11) ON CONFLICT (source,source_ref) DO NOTHING RETURNING id`,
 		d.Source, d.SourceRef, taskID, d.JobID, d.Lane, d.Question, options, d.Recommended, d.DefaultAction, d.DueAt, d.At).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return nil
 	}
 	if err != nil {
@@ -398,7 +398,7 @@ func jobTaskTx(ctx context.Context, tx pgx.Tx, jobID string) (int64, error) {
 	}
 	var id int64
 	err := tx.QueryRow(ctx, `SELECT COALESCE(task_id,0) FROM jobs WHERE job_id=$1`, jobID).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return 0, nil
 	}
 	return id, err
@@ -617,7 +617,7 @@ func listDecisionRecords(ctx context.Context, pq poolQuerier, f DecisionRecordFi
 func (s *Store) GetDecisionRecord(ctx context.Context, id int64, now time.Time) (DecisionRecord, bool, error) {
 	var x DecisionRecord
 	err := scanDecisionRecord(s.pool.QueryRow(ctx, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id=$1`, id), &x, now)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return DecisionRecord{}, false, nil
 	}
 	return x, err == nil, err
@@ -698,7 +698,7 @@ func (s *Store) RecordSessionDecision(ctx context.Context, in SessionDecisionInp
 		VALUES($1,$2,$3,$4,$5,$6::jsonb,'answered',$7,$8,$9,$10,$10)
 		ON CONFLICT(source,source_ref) DO NOTHING RETURNING id`,
 		DecisionSourceSessionChat, ref, in.Lane, in.Reading, in.Reading, string(b), in.Quote, in.By, decidedAt, now).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		var existing DecisionRecord
 		if err := scanDecisionRecord(tx.QueryRow(ctx, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE source=$1 AND source_ref=$2`, DecisionSourceSessionChat, ref), &existing, now); err != nil {
 			return SessionDecisionResult{}, err
@@ -780,7 +780,7 @@ func (s *Store) SnoozeDecisionRecord(ctx context.Context, id int64, until, now t
 func snoozeDecisionRecordTx(ctx context.Context, tx pgx.Tx, id int64, until, now time.Time) (*time.Time, error) {
 	var previous *time.Time
 	if err := tx.QueryRow(ctx, `SELECT snoozed_until FROM decision_requests WHERE id=$1 FOR UPDATE`, id).Scan(&previous); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return nil, ErrDecisionRecordNotFound
 		}
 		return nil, err

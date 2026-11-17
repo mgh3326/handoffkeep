@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -24,7 +22,7 @@ func (l *YTWriteLedger) RecordAdoption(ctx context.Context, now time.Time, id in
 	var state string
 	var have int
 	err = tx.QueryRow(ctx, `SELECT state, attempts FROM yt_write_ops WHERE id=$1 FOR SHARE`, id).Scan(&state, &have)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ytwrite.ErrNotFound
 	}
 	if err != nil {
@@ -56,7 +54,7 @@ func (l *YTWriteLedger) Adoption(ctx context.Context, id int64) (ytwrite.Adoptio
 func readYTAdoption(ctx context.Context, q ytRowQuerier, id int64) (ytwrite.Adoption, bool, error) {
 	var a ytwrite.Adoption
 	err := q.QueryRow(ctx, `SELECT attempts, yt_id FROM yt_write_op_adoptions WHERE op_id=$1`, id).Scan(&a.Attempts, &a.YTID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ytwrite.Adoption{}, false, nil
 	}
 	return a, err == nil, err

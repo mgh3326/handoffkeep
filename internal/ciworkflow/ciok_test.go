@@ -26,12 +26,15 @@ type ciOkCase struct {
 func greenEnv(suite string, overrides ...string) map[string]string {
 	env := map[string]string{
 		"EVENT": "workflow_dispatch", "SUITE": suite,
-		"TEST": "success", "PR_STORE_DB": "success", "VITEST": "skipped", "BUILD": "skipped",
+		"TEST": "success", "PR_STORE_DB": "success", "MYSQL_STORE": "success", "VITEST": "skipped", "BUILD": "skipped",
 		"AUTO_TAG":     "success",
 		"MAIN_STORE_1": "success", "MAIN_STORE_2": "success", "MAIN_PACKAGES": "success",
 		"MAIN_MIGRATION": "success", "MAIN_REOPEN_MUTANTS": "success", "MAIN_QUOTA_MUTANTS": "success",
 		"MAIN_RELEASE_DRYRUN": "success",
 		"DEPLOY_LINUX":        "skipped", "DEPLOY_MACOS": "skipped", "DEPLOY_RELEASE": "skipped",
+	}
+	if suite != "all" && suite != "test" {
+		env["MYSQL_STORE"] = "skipped"
 	}
 	if suite == "all" {
 		env["VITEST"], env["BUILD"] = "success", "success"
@@ -71,6 +74,8 @@ var ciOkCases = []ciOkCase{
 	{name: "failure-with-abandoned-fails", env: greenEnv("test", "TEST", "failure", "MAIN_STORE_1", "abandoned"), exit: 1, output: "test did not succeed: failure"},
 	// pr-store-db always reports: success on every event that runs the test suite.
 	{name: "pull-request-green-passes", env: greenEnv("all", "EVENT", "pull_request", "MAIN_STORE_1", "skipped", "MAIN_STORE_2", "skipped", "MAIN_PACKAGES", "skipped", "MAIN_MIGRATION", "skipped", "MAIN_REOPEN_MUTANTS", "skipped", "MAIN_QUOTA_MUTANTS", "skipped", "MAIN_RELEASE_DRYRUN", "skipped")},
+	{name: "mysql-store-failure-fails", env: greenEnv("test", "MYSQL_STORE", "failure"), exit: 1, output: "mysql-store did not succeed: failure"},
+	{name: "mysql-store-skipped-in-test-suite-fails", env: greenEnv("test", "MYSQL_STORE", "skipped"), exit: 1, output: "mysql-store did not succeed: skipped"},
 	{name: "pr-store-db-failure-fails", env: greenEnv("test", "PR_STORE_DB", "failure"), exit: 1, output: "pr-store-db did not succeed: failure"},
 	{name: "pr-store-db-skipped-in-test-suite-fails", env: greenEnv("test", "PR_STORE_DB", "skipped"), exit: 1, output: "pr-store-db did not succeed: skipped"},
 	{name: "pr-store-db-ran-outside-suite-fails", env: greenEnv("vitest", "VITEST", "success", "TEST", "skipped", "PR_STORE_DB", "success", "MAIN_STORE_1", "skipped", "MAIN_STORE_2", "skipped", "MAIN_PACKAGES", "skipped", "MAIN_MIGRATION", "skipped", "MAIN_REOPEN_MUTANTS", "skipped", "MAIN_QUOTA_MUTANTS", "skipped", "MAIN_RELEASE_DRYRUN", "skipped"), exit: 1, output: "pr-store-db ran outside its suite or tier: success"},
@@ -78,7 +83,7 @@ var ciOkCases = []ciOkCase{
 }
 
 var ciOkNeeds = []string{
-	"TEST", "PR_STORE_DB", "VITEST", "BUILD", "AUTO_TAG",
+	"TEST", "PR_STORE_DB", "MYSQL_STORE", "VITEST", "BUILD", "AUTO_TAG",
 	"MAIN_STORE_1", "MAIN_STORE_2", "MAIN_PACKAGES", "MAIN_MIGRATION", "MAIN_REOPEN_MUTANTS", "MAIN_QUOTA_MUTANTS", "MAIN_RELEASE_DRYRUN",
 	"DEPLOY_LINUX", "DEPLOY_MACOS", "DEPLOY_RELEASE",
 }

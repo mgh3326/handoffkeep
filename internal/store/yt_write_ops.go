@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
@@ -204,7 +203,7 @@ func prepareYTOpTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrite.NewO
 	if err == nil {
 		return op, true, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return ytwrite.Op{}, false, err
 	}
 	op, err = scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3`,
@@ -227,7 +226,7 @@ func rejectYTOpTx(ctx context.Context, tx pgx.Tx, now time.Time, id int64, reaso
 
 func (l *YTWriteLedger) Get(ctx context.Context, principal string, id int64) (ytwrite.Op, error) {
 	op, err := scanYTOp(l.s.pool.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1 AND principal=$2`, id, principal))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ytwrite.Op{}, ytwrite.ErrNotFound
 	}
 	return op, err
@@ -235,7 +234,7 @@ func (l *YTWriteLedger) Get(ctx context.Context, principal string, id int64) (yt
 
 func (l *YTWriteLedger) ByID(ctx context.Context, id int64) (ytwrite.Op, error) {
 	op, err := scanYTOp(l.s.pool.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1`, id))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ytwrite.Op{}, ytwrite.ErrNotFound
 	}
 	return op, err
@@ -251,7 +250,7 @@ func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytw
 	// before it is locked.
 	var kind, entity string
 	if err := tx.QueryRow(ctx, `SELECT entity_kind, entity_id FROM yt_write_ops WHERE id=$1`, id).Scan(&kind, &entity); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return ytwrite.Op{}, "", ytwrite.ErrNotFound
 		}
 		return ytwrite.Op{}, "", err
@@ -359,7 +358,7 @@ func (l *YTWriteLedger) moveYTOp(ctx context.Context, what string, same ytwrite.
 	if err == nil {
 		return op, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return ytwrite.Op{}, err
 	}
 	cur, gerr := l.ByID(ctx, args[0].(int64))
@@ -385,7 +384,7 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 	// and lane are immutable, so they are read before the lock.
 	var kind, entityKind, entityID string
 	err = tx.QueryRow(ctx, `SELECT kind, entity_kind, entity_id FROM yt_write_ops WHERE id=$1`, id).Scan(&kind, &entityKind, &entityID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ytwrite.Op{}, ytwrite.ErrNotFound
 	}
 	if err != nil {
@@ -435,8 +434,7 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 		tag, err := tx.Exec(ctx, `INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
 			VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (entity_kind, hk_key) DO NOTHING`,
 			m.EntityKind, op.Tenant, m.HKKey, m.YTID, m.YTParentID, id, now.UTC())
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		if errors.Is(mapDriverError(err), errUniqueViolation) {
 			return ytwrite.Op{}, ytwrite.ErrConflictingResult // the yt id already maps to another hk key
 		}
 		if err != nil {
@@ -568,7 +566,7 @@ func (l *YTWriteLedger) MapGet(ctx context.Context, entityKind, hkKey string) (y
 	m := ytwrite.MapRow{EntityKind: entityKind, HKKey: hkKey}
 	err := l.s.pool.QueryRow(ctx, `SELECT yt_id, yt_parent_id, op_id FROM yt_entity_map WHERE entity_kind=$1 AND hk_key=$2`,
 		entityKind, hkKey).Scan(&m.YTID, &m.YTParentID, &m.OpID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ytwrite.MapRow{}, false, nil
 	}
 	return m, err == nil, err

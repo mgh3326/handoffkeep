@@ -612,18 +612,22 @@ func updateChangeCols(ctx context.Context, tx pgx.Tx, id int64, touch *time.Time
 	return err
 }
 
-func execBatch(ctx context.Context, tx pgx.Tx, b *pgx.Batch) error {
-	if b.Len() == 0 {
-		return nil
-	}
-	br := tx.SendBatch(ctx, b)
-	for i := 0; i < b.Len(); i++ {
-		if _, err := br.Exec(); err != nil {
-			br.Close()
+type queuedStatement struct {
+	sql  string
+	args []any
+}
+type statementBatch []queuedStatement
+
+func (b *statementBatch) Queue(query string, args ...any) {
+	*b = append(*b, queuedStatement{query, args})
+}
+func execBatch(ctx context.Context, tx pgx.Tx, b *statementBatch) error {
+	for _, stmt := range *b {
+		if _, err := tx.Exec(ctx, stmt.sql, stmt.args...); err != nil {
 			return err
 		}
 	}
-	return br.Close()
+	return nil
 }
 
 func applyStateTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeStateWrite, now time.Time) (ChangeSectionResult, error) {
@@ -681,7 +685,7 @@ func applyChecksTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeChecksW
 	if olderThan(c.checksObserved, w.ObservedAt) {
 		return staleResult, nil
 	}
-	b := &pgx.Batch{}
+	b := &statementBatch{}
 	names := make([]string, 0, len(w.Checks))
 	for _, k := range w.Checks {
 		names = append(names, k.Name)
@@ -710,7 +714,7 @@ func applyThreadsTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeThread
 	if olderThan(c.threadsObserved, w.ObservedAt) {
 		return staleResult, nil
 	}
-	b := &pgx.Batch{}
+	b := &statementBatch{}
 	ids := make([]string, 0, len(w.Threads))
 	redactedAny := false
 	for _, t := range w.Threads {
@@ -762,7 +766,7 @@ SELECT id FROM ins UNION ALL SELECT id FROM reviews WHERE change_id=$1 AND revie
 		append([]any{c.id, w.ReviewedHead, w.Round, w.Pass, w.Lens, now}, w.ReviewHistory.args()...)...).Scan(&reviewID); err != nil {
 		return ChangeSectionResult{}, err
 	}
-	b := &pgx.Batch{}
+	b := &statementBatch{}
 	redactedAny := false
 	for i, f := range w.Findings {
 		summary, sr := screened(f.Summary, func(s string) string { return capRunes(s, MaxFindingSummary) })

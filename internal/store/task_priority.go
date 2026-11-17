@@ -39,7 +39,7 @@ func (s *Store) SetTaskPriority(ctx context.Context, id int64, priority int, by,
 	defer tx.Rollback(ctx)
 	var x Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return out, ErrTaskNotFound
 		}
 		return out, err
@@ -49,7 +49,7 @@ func (s *Store) SetTaskPriority(ctx context.Context, id int64, priority int, by,
 		out.Replayed = true
 		return out, tx.Commit(ctx)
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return out, err
 	}
 	out = PriorityResult{Previous: x.Priority, Priority: priority}
@@ -80,7 +80,7 @@ func (s *Store) SetTaskPriorityDirect(ctx context.Context, id int64, priority in
 	}
 	var x Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return Task{}, false, ErrTaskNotFound
 		}
 		return Task{}, false, err

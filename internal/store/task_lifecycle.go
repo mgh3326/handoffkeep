@@ -77,7 +77,7 @@ func (s *Store) CloseTaskMerged(ctx context.Context, id int64, evidence, by, not
 	}
 	var x Task
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return Task{}, nil, ErrTaskNotFound
 		}
 		return Task{}, nil, err
@@ -199,7 +199,7 @@ func (s *Store) HoldTask(ctx context.Context, id int64, held bool, to, by, note,
 	}
 	var x Task
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return HoldResult{}, ErrTaskNotFound
 		}
 		return HoldResult{}, err
@@ -209,7 +209,7 @@ func (s *Store) HoldTask(ctx context.Context, id int64, held bool, to, by, note,
 	if err == nil {
 		return HoldResult{Previous: previous, State: state}, tx.Commit(ctx)
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return HoldResult{}, err
 	}
 	target := to
@@ -267,7 +267,7 @@ func (s *Store) OperatorRelaneTask(ctx context.Context, id int64, to, by, note, 
 	}
 	var x Task
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return RelaneResult{}, ErrTaskNotFound
 		}
 		return RelaneResult{}, err
@@ -277,14 +277,14 @@ func (s *Store) OperatorRelaneTask(ctx context.Context, id int64, to, by, note, 
 	if err == nil {
 		return RelaneResult{Previous: previous, Lane: recordedTo, Title: x.Title, Changed: true}, tx.Commit(ctx)
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return RelaneResult{}, err
 	}
 	allowNewLane := false
 	if restoreKey != "" {
 		var recordedFrom string
 		err := tx.QueryRow(ctx, `SELECT "from" FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3`, id, lifecycleSourceRelane, restoreKey).Scan(&recordedFrom)
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && recordedFrom != to) {
+		if errors.Is(err, ErrNoRows) || (err == nil && recordedFrom != to) {
 			return RelaneResult{}, ErrTaskLaneUnknown
 		}
 		if err != nil {
@@ -317,7 +317,7 @@ func (s *Store) operatorTransition(ctx context.Context, id int64, source, key st
 	}
 	var x Task
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return Task{}, ErrTaskNotFound
 		}
 		return Task{}, err

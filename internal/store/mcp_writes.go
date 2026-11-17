@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -108,7 +107,7 @@ func replayMCPWriteTx(ctx context.Context, tx pgx.Tx, w MCPWrite, out any) (bool
 	}
 	var raw []byte
 	err := tx.QueryRow(ctx, `SELECT result FROM mcp_write_audit WHERE tool=$1 AND actor=$2 AND idempotency_key=$3`, w.Tool, w.Actor, w.Key).Scan(&raw)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
@@ -175,8 +174,7 @@ func insertMCPWriteAuditTx(ctx context.Context, tx pgx.Tx, w MCPWrite, taskID in
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO mcp_write_audit(tool,actor,channel,author,task_id,idempotency_key,result,at) VALUES($1,$2,$3,$4,NULLIF($5::bigint,0),$6,$7::jsonb,$8)`,
 		w.Tool, w.Actor, w.Channel, w.Author, taskID, w.Key, string(raw), at)
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+	if errors.Is(mapDriverError(err), errUniqueViolation) {
 		return ErrIdempotencyKeyReused
 	}
 	return err
@@ -255,7 +253,7 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w 
 	}
 	var x Task
 	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return out, ErrTaskNotFound
 		}
 		return out, err

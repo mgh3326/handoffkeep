@@ -190,6 +190,46 @@ jobs:
       # git history and a stubbed registry read, so it needs no database.
       - run: bash scripts/test-previous-release-base.sh
 
+  mysql-store:
+    if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    name: 'store: mysql and schema drift'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+      HANDOFFKEEP_TEST_MYSQL_URL: mysql://root:handoffkeep@localhost:3306/handoffkeep
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: handoffkeep
+          POSTGRES_PASSWORD: handoffkeep
+          POSTGRES_DB: handoffkeep
+        ports: ["127.0.0.1:5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U handoffkeep" --health-interval 10s --health-timeout 5s --health-retries 5
+      mysql:
+        image: mysql:26.10.0@sha256:3819b2b23835c4a73c8b022fafc33c8095c0f81c929a8b7a84613d2fba6c52f5
+        env:
+          MYSQL_ROOT_PASSWORD: handoffkeep
+          MYSQL_ROOT_HOST: "%"
+          MYSQL_DATABASE: handoffkeep
+        ports: ["127.0.0.1:3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -u root -phandoffkeep" --health-interval 10s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          sparse-checkout: .github/actions/setup-go-cached
+      - uses: ./workflow/.github/actions/setup-go-cached
+      - name: Test MySQL store and schema parity
+        run: go test -p 2 -tags=mysql -timeout 15m ./internal/store -run '^(TestMySQL|TestBenchKeysKeepTrailingSpaces)'
+
   pr-store-db:
     # Runs on every event, so it always reports a conclusion and can be a
     # required check. On a pull request it runs PostgreSQL tests for every
@@ -723,7 +763,7 @@ jobs:
     # the needs context although the jobs API says cancelled (run
     # 42061203904: a deploy job abandoned, hk 3155).
     name: ${{ inputs.packages != '' && 'ci-ok (test, packages)' || ((inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite)) }}
-    needs: [test, pr-store-db, vitest, build, auto-tag-test, main-store-1, main-store-2, main-packages, main-migration, main-reopen-mutants, main-quota-mutants, main-release-dryrun, deploy-linux, deploy-macos, deploy-release]
+    needs: [test, pr-store-db, mysql-store, vitest, build, auto-tag-test, main-store-1, main-store-2, main-packages, main-migration, main-reopen-mutants, main-quota-mutants, main-release-dryrun, deploy-linux, deploy-macos, deploy-release]
     if: ${{ always() && (contains(needs.*.result, 'failure') || !(contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'abandoned'))) }}
     runs-on: ubuntu-latest
     steps:
@@ -734,6 +774,7 @@ jobs:
           PACKAGES: ${{ inputs.packages }}
           TEST: ${{ needs.test.result }}
           PR_STORE_DB: ${{ needs.pr-store-db.result }}
+          MYSQL_STORE: ${{ needs.mysql-store.result }}
           VITEST: ${{ needs.vitest.result }}
           BUILD: ${{ needs.build.result }}
           AUTO_TAG: ${{ needs.auto-tag-test.result }}
@@ -774,6 +815,7 @@ jobs:
           require "$at" auto-tag-test "$AUTO_TAG"
           require "$(in_suite test)" test "$TEST"
           require "$(in_suite test)" pr-store-db "$PR_STORE_DB"
+          require "$(in_suite test)" mysql-store "$MYSQL_STORE"
           require "$(in_suite vitest)" vitest "$VITEST"
           require "$(in_suite build)" build "$BUILD"
           main_test=no; [ "$main" = yes ] && main_test=$(in_suite test)

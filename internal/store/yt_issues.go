@@ -124,7 +124,7 @@ func readYTIssueProject(ctx context.Context, q ytRowQuerier, project string) (yt
 		return p, false, nil
 	}
 	err := q.QueryRow(ctx, `SELECT coalesce(short_name,''), coalesce(yt_project_id,'') FROM youtrack_projects WHERE hk_project=$1`, project).Scan(&p.shortName, &p.projectID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return p, false, nil
 	}
 	if err != nil {
@@ -284,7 +284,7 @@ func (s *Store) claimYTIssueTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.
 	}
 	var project *string
 	err = tx.QueryRow(ctx, `SELECT project FROM tasks WHERE id=$1`, taskID).Scan(&project)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return target, sha, nil, nil
 	}
 	if err != nil {
@@ -368,7 +368,7 @@ func (s *Store) prepareYTIssueIntent(ctx context.Context, tenant string, taskID 
 		return false, err
 	}
 	var have string
-	if err := tx.QueryRow(ctx, `SELECT tenant FROM yt_issue_intents WHERE task_id=$1`, taskID).Scan(&have); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT tenant FROM yt_issue_intents WHERE task_id=$1`, taskID).Scan(&have); errors.Is(err, ErrNoRows) {
 		return false, nil
 	} else if err != nil {
 		return false, err

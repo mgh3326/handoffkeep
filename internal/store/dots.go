@@ -411,7 +411,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	}
 	var task Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, in.TaskID), &task); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return DotsReplyResult{}, ErrTaskNotFound
 		}
 		return DotsReplyResult{}, err
@@ -447,7 +447,7 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 		}
 		return DotsReplyResult{TaskID: task.ID, State: parts[1], DocumentKey: parts[2], Duplicate: true, RunToken: replayToken, InvalidNotifyLanes: skipped}, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return DotsReplyResult{}, err
 	}
 	if task.Lane != "dots" || !IsHKDotsRequest(task) {
@@ -666,7 +666,7 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 
 	var x Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, taskID), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return DotsAnswerResult{}, ErrTaskNotFound
 		}
 		return DotsAnswerResult{}, err
@@ -1057,7 +1057,7 @@ func dotsNotifyLanesTx(ctx context.Context, tx pgx.Tx, task Task) (lanes, invali
 	key, _, _ := strings.Cut(task.BodyDoc, "#")
 	var body string
 	if err := tx.QueryRow(ctx, `SELECT body FROM documents WHERE key=$1`, key).Scan(&body); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return nil, nil, nil
 		}
 		return nil, nil, err

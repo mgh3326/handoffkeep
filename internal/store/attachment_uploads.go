@@ -80,7 +80,7 @@ func (s *Store) GetAttachmentUpload(ctx context.Context, id string) (AttachmentU
 		return AttachmentUpload{}, false, nil
 	}
 	u, e := scanUpload(s.pool.QueryRow(ctx, `SELECT `+uploadColumns+` FROM attachment_uploads WHERE id=$1`, id))
-	if errors.Is(e, pgx.ErrNoRows) {
+	if errors.Is(e, ErrNoRows) {
 		return AttachmentUpload{}, false, nil
 	}
 	if e != nil {

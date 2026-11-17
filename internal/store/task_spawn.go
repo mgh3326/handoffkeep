@@ -210,7 +210,7 @@ func (s *Store) PutTaskSpawn(ctx context.Context, id int64, in TaskSpawnInput, a
 	// transaction below the task-mutation lock (lockorder.go level 2).
 	var taskState string
 	err = tx.QueryRow(ctx, `SELECT state FROM tasks WHERE id=$1 FOR KEY SHARE`, id).Scan(&taskState)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return TaskSpawn{}, false, ErrTaskNotFound
 	}
 	if err != nil {

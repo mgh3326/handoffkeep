@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // RepairLastActivity raises tasks.last_activity_at to the newest activity
@@ -40,7 +38,7 @@ func (s *Store) RepairLastActivity(ctx context.Context, limit int) (int, error) 
 	for _, c := range todo {
 		var id int64
 		err := s.pool.QueryRow(ctx, `UPDATE tasks SET last_activity_at = GREATEST(last_activity_at, $2) WHERE id = $1 AND last_activity_at < $2 RETURNING id`, c.id, c.at).Scan(&id)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			continue
 		}
 		if err != nil {

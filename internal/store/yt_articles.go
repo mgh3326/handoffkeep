@@ -146,7 +146,7 @@ func claimYTArticleCreateTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (reje
 	var key string
 	var taskID *int64
 	err = tx.QueryRow(ctx, `SELECT key, task_id FROM documents WHERE id=$1 FOR SHARE`, id).Scan(&key, &taskID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ytwrite.ReasonOutOfScope, "document was deleted before article_create dispatch", nil
 	}
 	if err != nil {
@@ -291,7 +291,7 @@ func readYTArticleRow(ctx context.Context, tx pgx.Tx, id int64) (*ytArticleRow, 
 			coalesce((SELECT l.part_count FROM youtrack_doc_articles l WHERE l.doc_key = d.key), 0),
 			coalesce((SELECT lp.yt_project_id FROM youtrack_doc_articles l JOIN youtrack_projects lp ON lp.hk_project = l.hk_project WHERE l.doc_key = d.key), '')`+ytArticleCandidateFrom+` WHERE d.id = $1`,
 		id, YTDocsPrincipal, ytwrite.KindArticleCreate, ytwrite.ReasonInvalidIssue, ytwrite.ReasonUnsupportedKind), &r.doc, &r.body, &r.createdAt, &r.created, &r.retryOf, &r.legacyArticle, &r.legacyParts, &r.legacyProject)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -357,7 +357,7 @@ func ytArticleParentTx(ctx context.Context, tx pgx.Tx, tenant string, id int64, 
 	}
 	var bt, article string
 	err = tx.QueryRow(ctx, `SELECT b.tenant, b.article_id FROM documents d JOIN yt_article_bindings b ON b.document_id = d.id WHERE d.key = $1`, policy).Scan(&bt, &article)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		err = nil
 	}
 	if err != nil {
@@ -708,7 +708,7 @@ func ytArticleSupersededTx(ctx context.Context, tx pgx.Tx, id int64, sha string)
 	var baseline string
 	err := tx.QueryRow(ctx, `SELECT last_sha FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3`,
 		ytwrite.ArticleEntity, strconv.FormatInt(id, 10), ytArticleBaselineKind).Scan(&baseline)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && baseline != sha) {
+	if errors.Is(err, ErrNoRows) || (err == nil && baseline != sha) {
 		return false, nil
 	}
 	if err != nil {

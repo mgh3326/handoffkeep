@@ -174,13 +174,13 @@ RETURNING `+taskOriginColumns+`, (xmax = 0)`,
 	if err == nil {
 		return x, created, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return TaskOrigin{}, false, err
 	}
 	// No row came back: the origin exists and nothing differed (the conflict
 	// update was skipped), or the task does not exist.
 	err = scanTaskOrigin(s.pool.QueryRow(ctx, `SELECT `+taskOriginColumns+` FROM task_origins WHERE provider=$1 AND namespace=$2 AND external_id=$3 AND task_id=$4`, in.Provider, in.Namespace, in.ExternalID, taskID), &x)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return TaskOrigin{}, false, ErrTaskNotFound
 	}
 	if err != nil {

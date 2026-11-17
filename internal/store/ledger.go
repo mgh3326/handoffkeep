@@ -477,7 +477,7 @@ func ledgerChangesTx(ctx context.Context, tx pgx.Tx, consumer string) (LedgerCha
 	out := LedgerChanges{Summary: []LedgerChangeCount{}, Rows: []SyncChange{}}
 	var c LedgerCursor
 	err := tx.QueryRow(ctx, `SELECT consumer,acked_sync_id,acked_at,updated_by FROM ledger_cursors WHERE consumer=$1`, consumer).Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		out.NoCursor = true
 		return out, tx.QueryRow(ctx, `SELECT max_sync_id FROM sync_state WHERE singleton`).Scan(&out.MaxSyncID)
 	}
@@ -547,13 +547,13 @@ func (s *Store) AckLedger(ctx context.Context, consumer string, syncID int64, by
 		return c, err
 	}
 	c, err := scan(tx.QueryRow(ctx, `SELECT `+cursorColumns+` FROM ledger_cursors WHERE consumer=$1 FOR UPDATE`, consumer))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		c, err = scan(tx.QueryRow(ctx, `INSERT INTO ledger_cursors(consumer,acked_sync_id,acked_at,updated_by) VALUES($1,$2,$3,$4)
 			ON CONFLICT (consumer) DO NOTHING RETURNING `+cursorColumns, consumer, maxID, now, by))
 		if err == nil {
 			return c, tx.Commit(ctx)
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
+		if !errors.Is(err, ErrNoRows) {
 			return LedgerCursor{}, err
 		}
 		// A concurrent first ack created the row; this ack applies to it.

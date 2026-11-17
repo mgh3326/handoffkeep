@@ -5,8 +5,6 @@ import (
 	"errors"
 	"log"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // Family roots (hk 4797, yt_family_roots): the article_create kind records,
@@ -82,7 +80,7 @@ func (l *YTWriteLedger) FamilyRoot(ctx context.Context, tenant, projectID, famil
 	var id string
 	err := l.s.pool.QueryRow(ctx, `SELECT article_id FROM yt_family_roots WHERE tenant=$1 AND project_id=$2 AND family=$3`,
 		tenant, projectID, family).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return "", false, nil
 	}
 	return id, err == nil, err

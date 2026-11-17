@@ -139,7 +139,7 @@ JOIN deploy_changes dc ON dc.change_id=c.id AND dc.included
 JOIN deploys d ON d.id=dc.deploy_id
 WHERE ct.task_id=$1 AND ct.relation=$2 AND c.reverted_by_change_id IS NULL AND d.state='success'
 ORDER BY d.finished_at DESC, d.id DESC LIMIT 1`, taskID, ChangeImplements).Scan(&attempt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return SettleNotYetDeployed, "", nil
 	}
 	if err != nil {

@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // YouTrackDecisionMirror links one decision request to its YouTrack DEC issue.
@@ -23,7 +21,7 @@ func (s *Store) GetYouTrackDecisionMirror(ctx context.Context, decisionID int64)
 	var x YouTrackDecisionMirror
 	err := s.pool.QueryRow(ctx, `SELECT decision_id,issue_id,display_ref,stamp FROM youtrack_decision_mirrors WHERE decision_id=$1`, decisionID).
 		Scan(&x.DecisionID, &x.IssueID, &x.DisplayRef, &x.Stamp)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return YouTrackDecisionMirror{}, false, nil
 	}
 	return x, err == nil, err

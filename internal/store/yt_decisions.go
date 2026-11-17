@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
@@ -131,7 +130,7 @@ func readYTDecisionBinding(ctx context.Context, q ytRowQuerier, decisionID int64
 	var b YTDecisionBinding
 	err := scanYTDecisionBinding(q.QueryRow(ctx, `SELECT `+ytDecisionBindingColumns+` FROM yt_decision_bindings WHERE decision_id=$1`,
 		strconv.FormatInt(decisionID, 10)), &b)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return YTDecisionBinding{}, false, nil
 	}
 	if err != nil {
@@ -595,8 +594,7 @@ func (s *Store) BindYTDecision(ctx context.Context, b YTDecisionBinding, now tim
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO yt_decision_bindings(decision_id, tenant, issue_id, issue_readable, project_id, origin, op_id, bound_by, bound_at)
 		VALUES ($1,$2,$3,$4,$5,'import_verified',NULL,$6,$7)`, key, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, now.UTC())
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+	if errors.Is(mapDriverError(err), errUniqueViolation) {
 		return false, fmt.Errorf("%w: issue %s on %s is bound to another decision", ErrYTDecisionBindingConflict, b.IssueID, b.Tenant)
 	}
 	if err != nil {

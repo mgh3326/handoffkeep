@@ -491,7 +491,7 @@ func (s *Store) SetChangeMergeFlow(ctx context.Context, id int64, in ChangeMerge
 	}
 	var locked int64
 	if err = tx.QueryRow(ctx, `SELECT id FROM changes WHERE id=$1 FOR NO KEY UPDATE`, id).Scan(&locked); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return Change{}, ErrChangeNotFound
 		}
 		return Change{}, err

@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // The operator's inbox triage state (hk 3343): which attention item the
@@ -213,7 +211,7 @@ func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxW
 		var current *time.Time
 		err := tx.QueryRow(ctx, `SELECT snoozed_until FROM decision_requests WHERE id=$1 FOR UPDATE`, id).Scan(&current)
 		switch {
-		case errors.Is(err, pgx.ErrNoRows):
+		case errors.Is(err, ErrNoRows):
 			requestGone[id] = true
 		case err != nil:
 			return nil, err
@@ -419,7 +417,7 @@ func inboxStateTx(ctx context.Context, q rowQuerier, key string, lock bool) (Inb
 	}
 	var x InboxState
 	err := q.QueryRow(ctx, query, key).Scan(&x.ItemKey, &x.ReadAt, &x.DoneAt, &x.SnoozedUntil, &x.Actor, &x.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return InboxState{ItemKey: key}, false, nil
 	}
 	if err != nil {

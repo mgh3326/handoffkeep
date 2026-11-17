@@ -193,14 +193,14 @@ func (s *Store) sweepOne(ctx context.Context, id int64, days int, cutoff, now ti
 	}
 	var x Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return false, nil
 		}
 		return false, err
 	}
 	var idleSince time.Time
 	err = tx.QueryRow(ctx, sweepSQL+` AND id=$3`, cutoff, DecisionRequestOpen, id).Scan(new(int64), new(string), new(string), &idleSince)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {

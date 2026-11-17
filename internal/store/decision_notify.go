@@ -196,7 +196,7 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 		AND n.applied_version<>`+decisionEffectiveStatusSQL+`
 		ORDER BY n.next_attempt_at ASC,n.request_id ASC LIMIT 1 FOR UPDATE OF n SKIP LOCKED`, now, now.Add(DecisionNoticeNearDue)),
 		&x, now, &x.MessageID, &x.AppliedVersion, &x.Attempts, &x.Mention)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return false, nil, nil
 	}
 	if err != nil {
@@ -268,7 +268,7 @@ func (s *Store) GetDecisionNotice(ctx context.Context, requestID int64) (Decisio
 	err := s.pool.QueryRow(ctx, `SELECT request_id,destination,message_id,desired_version,applied_version,state,attempts,last_error_code,next_attempt_at,posted_at,edited_at
 		FROM decision_deliveries WHERE request_id=$1 AND destination=$2`, requestID, DecisionDestinationDiscord).
 		Scan(&x.RequestID, &x.Destination, &x.MessageID, &x.DesiredVersion, &x.AppliedVersion, &x.State, &x.Attempts, &x.LastErrorCode, &x.NextAttemptAt, &x.PostedAt, &x.EditedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return DecisionNoticeState{}, false, nil
 	}
 	return x, err == nil, err
@@ -336,7 +336,7 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 	var attempts int
 	var next time.Time
 	err = tx.QueryRow(ctx, `SELECT state,attempts,next_attempt_at FROM decision_notify_digest WHERE day=$1::date FOR UPDATE SKIP LOCKED`, day).Scan(&state, &attempts, &next)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return false, nil, nil
 	}
 	if err != nil {
@@ -419,7 +419,7 @@ func (s *Store) GetDecisionDigest(ctx context.Context, day time.Time) (DecisionD
 	day = time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC)
 	err := s.pool.QueryRow(ctx, `SELECT state,listed,message_id,attempts,last_error FROM decision_notify_digest WHERE day=$1::date`, day).
 		Scan(&x.State, &x.Listed, &x.MessageID, &x.Attempts, &x.LastError)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return DecisionDigestState{}, false, nil
 	}
 	return x, err == nil, err

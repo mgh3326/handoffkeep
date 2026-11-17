@@ -217,7 +217,7 @@ func (s *Store) SetDotsAdoption(ctx context.Context, id int64, by string, in Dot
 	defer tx.Rollback(ctx)
 	var cur DotsResult
 	if err := scanDotsResult(tx.QueryRow(ctx, `SELECT `+dotsResultColumns+` FROM dots_results WHERE id=$1 FOR UPDATE`, id), &cur); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return DotsResult{}, false, ErrDotsResultNotFound
 		}
 		return DotsResult{}, false, err

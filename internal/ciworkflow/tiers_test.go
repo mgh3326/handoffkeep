@@ -745,7 +745,7 @@ func tierProblems(ci, anyRef, deploy, policy []byte) []string {
 		if hasRace(j) {
 			add("job %s: pull requests reach it and it runs -race", name)
 		}
-		if len(j.Services) > 0 && name != prStoreDB {
+		if len(j.Services) > 0 && name != prStoreDB && name != "mysql-store" {
 			add("job %s: pull requests reach it and it starts service containers", name)
 		}
 		if ro := runsOnText(j.RunsOn); ro != "ubuntu-latest" {
@@ -876,9 +876,9 @@ func TestCITierMatrix(t *testing.T) {
 	if err := yaml.Unmarshal(allWorkflows(t), &wf); err != nil {
 		t.Fatal(err)
 	}
-	light := []string{"auto-tag-test", "build", "pr-store-db", "test", "vitest"}
+	light := []string{"auto-tag-test", "build", "mysql-store", "pr-store-db", "test", "vitest"}
 	// suite=test drops the vitest and build jobs (their own suite selectors).
-	testOnly := []string{"auto-tag-test", "pr-store-db", "test"}
+	testOnly := []string{"auto-tag-test", "mysql-store", "pr-store-db", "test"}
 	mainJobsList := []string{"main-migration", "main-packages", "main-quota-mutants", "main-release-dryrun", "main-reopen-mutants", "main-store-1", "main-store-2"}
 	mainTier := append(append([]string{}, light...), mainJobsList...)
 	mainTest := append(append([]string{}, testOnly...), mainJobsList...)
@@ -1098,7 +1098,7 @@ func TestCITierJobInventory(t *testing.T) {
 		file string
 		want []string
 	}{
-		{"ci.yml", []string{"auto-tag-test", "build", "ci-ok", "deploy-linux", "deploy-macos", "deploy-release", "main-migration", "main-packages", "main-quota-mutants", "main-release-dryrun", "main-reopen-mutants", "main-store-1", "main-store-2", "pr-store-db", "test", "vitest"}},
+		{"ci.yml", []string{"auto-tag-test", "build", "ci-ok", "deploy-linux", "deploy-macos", "deploy-release", "main-migration", "main-packages", "main-quota-mutants", "main-release-dryrun", "main-reopen-mutants", "main-store-1", "main-store-2", "mysql-store", "pr-store-db", "test", "vitest"}},
 		{"deploy.yml", []string{"ci", "promote", "schema-compat", "status", "target"}},
 	} {
 		var wf tierWorkflow
@@ -1180,7 +1180,7 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"pr-store-db-expr-in-run", `go test -timeout 20m -count=1 -v "${pkgs[@]}"`, `go test -timeout 20m -count=1 -v "${pkgs[@]}" -run '${{ github.head_ref }}'`},
 		{"pr-store-db-ignores-selection", `go test -timeout 20m -count=1 -v "${pkgs[@]}"`, `go test -timeout 20m -count=1 -v ./internal/store/...`},
 		{"pr-store-db-packages-not-from-decision", "          PACKAGES: ${{ steps.decide.outputs.packages }}\n", "          PACKAGES: ./internal/store/...\n"},
-		{"pr-store-db-not-in-ci-ok", "needs: [test, pr-store-db, vitest,", "needs: [test, vitest,"},
+		{"pr-store-db-not-in-ci-ok", "needs: [test, pr-store-db, mysql-store, vitest,", "needs: [test, mysql-store, vitest,"},
 		// hk 4342: a job-level service or an ungated docker step boots
 		// PostgreSQL even when the decision selects nothing.
 		{"pr-store-db-service-back", "    timeout-minutes: 25\n    steps:", "    timeout-minutes: 25\n    services:\n      postgres:\n        image: postgres:17\n    steps:"},
@@ -1328,5 +1328,30 @@ func TestImageCancelsSupersededMainRuns(t *testing.T) {
 	}
 	if len(check([]byte(mutant))) == 0 {
 		t.Fatal("image-keeps-running mutant stayed green")
+	}
+}
+
+func TestMySQLStoreJobRunsPortAndDriftChecks(t *testing.T) {
+	var wf tierWorkflow
+	if err := yaml.Unmarshal(readWorkflow(t, "ci.yml"), &wf); err != nil {
+		t.Fatal(err)
+	}
+	job, ok := wf.Jobs["mysql-store"]
+	if !ok {
+		t.Fatal("missing mysql-store job")
+	}
+	mysql, ok := job.Services["mysql"].(map[string]any)
+	if !ok || !strings.HasPrefix(fmt.Sprint(mysql["image"]), "mysql:26.10.0@sha256:") {
+		t.Fatalf("MySQL service must pin 26.10.0 by digest: %v", job.Services["mysql"])
+	}
+	if _, ok := job.Services["postgres"]; !ok {
+		t.Fatal("schema drift check requires PostgreSQL")
+	}
+	if job.Env["HANDOFFKEEP_TEST_MYSQL_URL"] == nil || job.Env["HANDOFFKEEP_TEST_DB_URL"] == nil {
+		t.Fatal("both database URLs are required")
+	}
+	run := stepRuns(job)
+	if !strings.Contains(run, "-tags=mysql") || !strings.Contains(run, "TestMySQL") || !strings.Contains(run, "./internal/store") {
+		t.Fatalf("MySQL store tests not selected: %s", run)
 	}
 }

@@ -111,7 +111,7 @@ func (s *Store) DeactivateDeployService(ctx context.Context, name string) (Deplo
 	}
 	var out DeployService
 	err := scanDeployService(s.pool.QueryRow(ctx, `UPDATE deploy_services SET active=false,updated_at=now() WHERE name=$1 RETURNING `+deployServiceColumns, name), &out)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return DeployService{}, ErrServiceNotFound
 	}
 	return out, err

@@ -186,7 +186,7 @@ VALUES($1,$2,'open',$3,$4,$4,$4) ON CONFLICT(repo,pr_number) DO NOTHING`, repo, 
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 ON CONFLICT(change_id,head_sha) DO NOTHING
 RETURNING `+verificationColumns, args...), &v)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		created = false
 		if err = scanVerification(tx.QueryRow(ctx, `SELECT `+verificationColumns+` FROM verifications WHERE change_id=$1 AND head_sha=$2 FOR UPDATE`, changeID, in.HeadSHA), &v); err != nil {
 			return Verification{}, false, err

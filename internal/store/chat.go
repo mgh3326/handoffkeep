@@ -180,7 +180,7 @@ func (s *Store) UpsertChatQuestion(ctx context.Context, x ChatQuestion) (ChatQue
 	defer tx.Rollback(ctx)
 	var created bool
 	err = scanChatQuestionCreated(tx.QueryRow(ctx, chatQuestionUpsert+`,(xmax=0) AS created`, x.ID, x.ConversationID, x.Lane, x.Body, now), &x, &created)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return x, false, ErrChatConversation
 	}
 	if err != nil {
@@ -218,7 +218,7 @@ func (s *Store) GetChatQuestion(ctx context.Context, id string) (ChatQuestion, b
 	}
 	var x ChatQuestion
 	err := scanChatQuestion(s.pool.QueryRow(ctx, `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=$1`, id), &x)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ChatQuestion{}, false, nil
 	}
 	if err != nil {
@@ -248,11 +248,11 @@ func (s *Store) TransitionChatQuestion(ctx context.Context, id, to, by string) (
 		}
 		return x, tx.Commit(ctx)
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return ChatQuestion{}, err
 	}
 	if err = scanChatQuestion(s.pool.QueryRow(ctx, `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=$1`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return ChatQuestion{}, ErrChatQuestionNotFound
 		}
 		return ChatQuestion{}, err
@@ -420,7 +420,7 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 			}
 			return old, false, nil
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
+		if !errors.Is(err, ErrNoRows) {
 			return ChatMessage{}, false, err
 		}
 	}
@@ -438,7 +438,7 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		var stored ChatQuestion
 		var created bool
 		err := scanChatQuestionCreated(tx.QueryRow(ctx, chatQuestionUpsert+`,(xmax=0) AS created`, q.ID, m.ConversationID, q.Lane, q.Body, now), &stored, &created)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return ChatMessage{}, false, ErrChatConversation
 		}
 		if err != nil {
@@ -451,7 +451,7 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 	addRelation := func(id, kind string) error {
 		var conversation, body string
 		err := tx.QueryRow(ctx, `SELECT conversation_id,body FROM chat_questions WHERE id=$1 FOR SHARE`, id).Scan(&conversation, &body)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return ErrChatQuestionNotFound
 		}
 		if err != nil {
@@ -501,7 +501,7 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		var qRevision int
 		var qAnswered *int64
 		err := tx.QueryRow(ctx, `SELECT lane,conversation_id,state,revision,answer_message_id,body FROM chat_questions WHERE id=$1 FOR UPDATE`, a.QuestionID).Scan(&qLane, &qConversation, &qState, &qRevision, &qAnswered, &qBody)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return ChatMessage{}, false, ErrChatQuestionNotFound
 		}
 		if err != nil {
@@ -600,11 +600,11 @@ func (s *Store) MarkChatMessageDelivered(ctx context.Context, id int64) (ChatMes
 		}
 		return x, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return ChatMessage{}, err
 	}
 	if err = scanChatMessage(s.pool.QueryRow(ctx, `SELECT `+chatMessageColumns+` FROM chat_messages WHERE id=$1`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return ChatMessage{}, ErrChatMessageNotFound
 		}
 		return ChatMessage{}, err
@@ -632,11 +632,11 @@ func (s *Store) MarkChatMessageFailed(ctx context.Context, id int64) (ChatMessag
 		}
 		return x, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, ErrNoRows) {
 		return ChatMessage{}, err
 	}
 	if err = scanChatMessage(s.pool.QueryRow(ctx, `SELECT `+chatMessageColumns+` FROM chat_messages WHERE id=$1`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return ChatMessage{}, ErrChatMessageNotFound
 		}
 		return ChatMessage{}, err

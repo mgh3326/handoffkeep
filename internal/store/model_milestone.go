@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 var (
@@ -69,7 +67,7 @@ func (s *Store) SetTaskMilestone(ctx context.Context, id int64, milestone *int64
 	defer tx.Rollback(ctx)
 	var x Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrNoRows) {
 			return Task{}, false, ErrTaskNotFound
 		}
 		return Task{}, false, err
@@ -77,7 +75,7 @@ func (s *Store) SetTaskMilestone(ctx context.Context, id int64, milestone *int64
 	if milestone != nil {
 		var project string
 		if err = tx.QueryRow(ctx, `SELECT project FROM project_milestones WHERE id=$1`, *milestone).Scan(&project); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
+			if errors.Is(err, ErrNoRows) {
 				return Task{}, false, ErrMilestoneNotFound
 			}
 			return Task{}, false, err
@@ -112,7 +110,7 @@ func (s *Store) GetMilestone(ctx context.Context, id int64) (ProjectMilestone, e
 	}
 	var m ProjectMilestone
 	err := s.pool.QueryRow(ctx, `SELECT id,project,name,description,target_at,status,sort_order FROM project_milestones WHERE id=$1`, id).Scan(&m.ID, &m.Project, &m.Name, &m.Description, &m.TargetAt, &m.Status, &m.SortOrder)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ProjectMilestone{}, ErrMilestoneNotFound
 	}
 	return m, err
@@ -190,7 +188,7 @@ func (s *Store) PatchMilestone(ctx context.Context, id int64, p MilestonePatch) 
 	defer tx.Rollback(ctx)
 	var m ProjectMilestone
 	err = tx.QueryRow(ctx, `SELECT id,project,name,description,target_at,status,sort_order FROM project_milestones WHERE id=$1 FOR UPDATE`, id).Scan(&m.ID, &m.Project, &m.Name, &m.Description, &m.TargetAt, &m.Status, &m.SortOrder)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, ErrNoRows) {
 		return ProjectMilestone{}, ErrMilestoneNotFound
 	}
 	if err != nil {
