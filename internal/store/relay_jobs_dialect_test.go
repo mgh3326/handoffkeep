@@ -11,7 +11,8 @@ import (
 
 func init() {
 	registerTaskAreaCase("relay-jobs/claim-and-update", func(t *testing.T, s *Store) {
-		task, err := s.CreateTask(t.Context(), Task{Lane: "relay-jobs", Title: "Dialect job fixture", Kind: "implement", Priority: 5, CreatedBy: "dialect-test"})
+		project := coreProject(t, s, "relay-jobs")
+		task, err := s.CreateTask(t.Context(), Task{Lane: "relay-jobs", Title: "Dialect job fixture", Kind: "implement", Priority: 5, CreatedBy: "dialect-test", Project: project})
 		if err != nil {
 			t.Fatalf("CreateTask() = %v", err)
 		}

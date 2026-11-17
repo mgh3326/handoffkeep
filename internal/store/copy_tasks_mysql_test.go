@@ -50,10 +50,9 @@ func seedTasksAreaPostgres(t *testing.T, pool *pgxpool.Pool, when time.Time) {
 	exec(`INSERT INTO memory(agent,name,description,memory_type,content,updated_by,updated_at) VALUES('agent','name','desc','user','content','test',$1)`, when)
 }
 
-// The tasks area copies in both directions with parity, and neither target
-// journals the load: the PostgreSQL emit triggers skip on the bulk-load GUC and
-// the MySQL ones on @hk_bulk_load, so sync_log stays empty while sync_decisions,
-// which is copied itself, arrives intact.
+// The tasks area copies in both directions with parity. The bulk load itself
+// does not add journal rows; the rows already in sync_log are copied intact.
+// sync_decisions is copied independently too.
 func TestCopyTasksAreaRoundTripWithParity(t *testing.T) {
 	src, srcURL := schemaStoreAt(t, "copy_tasks_src")
 	when := time.Date(2026, 11, 18, 3, 4, 5, 123456000, time.UTC)
@@ -90,8 +89,8 @@ func TestCopyTasksAreaRoundTripWithParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	my.Close()
-	if feed != 0 || decisions != 1 || nextTask <= 93003 {
-		t.Fatalf("MySQL target: sync_log=%d sync_decisions=%d next task id=%d, want 0, 1, >93003", feed, decisions, nextTask)
+	if feed != sourceFeed || decisions != 1 || nextTask <= 93003 {
+		t.Fatalf("MySQL target: sync_log=%d sync_decisions=%d next task id=%d, want %d, 1, >93003", feed, decisions, nextTask, sourceFeed)
 	}
 
 	back, backURL := schemaStoreAt(t, "copy_tasks_back")
@@ -107,15 +106,15 @@ func TestCopyTasksAreaRoundTripWithParity(t *testing.T) {
 	if err := back.pool.QueryRow(t.Context(), `SELECT (SELECT count(*) FROM sync_log), (SELECT count(*) FROM sync_decisions), nextval(pg_get_serial_sequence('tasks','id'))`).Scan(&backFeed, &backDecisions, &nextID); err != nil {
 		t.Fatal(err)
 	}
-	if backFeed != 0 || backDecisions != 1 || nextID <= 93003 {
-		t.Fatalf("PostgreSQL target: sync_log=%d sync_decisions=%d next task id=%d, want 0, 1, >93003", backFeed, backDecisions, nextID)
+	if backFeed != sourceFeed || backDecisions != 1 || nextID <= 93003 {
+		t.Fatalf("PostgreSQL target: sync_log=%d sync_decisions=%d next task id=%d, want %d, 1, >93003", backFeed, backDecisions, nextID, sourceFeed)
 	}
 	// The copied tables stay writable and journaled once the load is over.
 	if _, err := back.pool.Exec(t.Context(), `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at) VALUES('lane-a','after','implement','backlog','test',now(),now())`); err != nil {
 		t.Fatal(err)
 	}
-	if err := back.pool.QueryRow(t.Context(), `SELECT count(*) FROM sync_log`).Scan(&backFeed); err != nil || backFeed != 1 {
-		t.Fatalf("sync_log after a normal insert = %d (%v), want 1", backFeed, err)
+	if err := back.pool.QueryRow(t.Context(), `SELECT count(*) FROM sync_log`).Scan(&backFeed); err != nil || backFeed != sourceFeed+1 {
+		t.Fatalf("sync_log after a normal insert = %d (%v), want %d", backFeed, err, sourceFeed+1)
 	}
 }
 
