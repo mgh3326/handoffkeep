@@ -78,6 +78,18 @@ func TestMySQLStepGuardRoundTrip(t *testing.T) {
 	}
 }
 
+func TestMySQLGuardExecutionForNullability(t *testing.T) {
+	if !shouldRunMySQLGuard("not_null", true) {
+		t.Fatal("NOT NULL column skipped the nullable conversion")
+	}
+	if shouldRunMySQLGuard("not_null", false) {
+		t.Fatal("already nullable column reran the nullable conversion")
+	}
+	if shouldRunMySQLGuard("column", true) || !shouldRunMySQLGuard("column", false) {
+		t.Fatal("column guard did not skip existing columns and run missing columns")
+	}
+}
+
 // Every MySQL migration step is either plain DDL/DML or one of the four
 // guards; a guard with a missing part would silently run nothing.
 func TestMySQLMigrationStepsAreWellFormed(t *testing.T) {

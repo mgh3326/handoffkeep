@@ -10,12 +10,22 @@ import (
 
 func init() {
 	registerTaskAreaCase("relay-jobs/claim-and-update", func(t *testing.T, s *Store) {
-		job, created, err := s.ClaimJob(t.Context(), Job{JobID: "dialect-job", Host: "test-host", CreatedBy: "dialect-test"})
+		task, err := s.CreateTask(t.Context(), Task{Lane: "relay-jobs", Title: "Dialect job fixture", Kind: "implement", Priority: 5, CreatedBy: "dialect-test"})
+		if err != nil {
+			t.Fatalf("CreateTask() = %v", err)
+		}
+		job, created, err := s.ClaimJob(t.Context(), Job{JobID: "dialect-job", TaskID: &task.ID, Host: "test-host", CreatedBy: "dialect-test"})
 		if err != nil || !created {
 			t.Fatalf("ClaimJob() = (%+v, %t, %v)", job, created, err)
 		}
-		state := "completed"
-		job, err = s.UpdateJob(t.Context(), job.JobID, JobUpdate{State: &state})
+		state := "spawned"
+		now := time.Now().UTC()
+		job, err = s.UpdateJob(t.Context(), job.JobID, JobUpdate{State: &state, At: &now})
+		if err != nil || job.State != state {
+			t.Fatalf("UpdateJob(spawned) = (%+v, %v)", job, err)
+		}
+		state = "completed"
+		job, err = s.UpdateJob(t.Context(), job.JobID, JobUpdate{State: &state, At: &now})
 		if err != nil || job.State != state || job.EndedAt == nil {
 			t.Fatalf("UpdateJob() = (%+v, %v)", job, err)
 		}
@@ -23,15 +33,15 @@ func init() {
 		if err != nil || !found || got.State != state {
 			t.Fatalf("GetJob() = (%+v, %t, %v)", got, found, err)
 		}
-		jobs, err := s.ListJobsByTask(t.Context(), 1, 10)
-		if err != nil || jobs == nil {
+		jobs, err := s.ListJobsByTask(t.Context(), task.ID, 10)
+		if err != nil || len(jobs) != 1 {
 			t.Fatalf("ListJobsByTask() = (%+v, %v)", jobs, err)
 		}
 		active, err := s.ReadActiveJobs(t.Context(), nil)
 		if err != nil || active == nil {
 			t.Fatalf("empty ReadActiveJobs() = (%+v, %v)", active, err)
 		}
-		job, _, err = s.ClaimJob(t.Context(), Job{JobID: "dialect-job-skills", Host: "test-host", CreatedBy: "dialect-test"})
+		job, _, err = s.ClaimJob(t.Context(), Job{JobID: "dialect-job-skills", TaskID: &task.ID, Host: "test-host", CreatedBy: "dialect-test"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -43,6 +53,10 @@ func init() {
 		report, err := s.JobSkillsReport(t.Context(), time.Now().UTC().Add(-time.Hour), 10)
 		if err != nil || report.JobsTotal != 2 || report.JobsSkillsSupported != 1 || len(report.ByHarnessModel) != 1 || len(report.ByHarnessModel[0].Skills) != 1 || report.ByHarnessModel[0].Skills[0].Calls != "2" {
 			t.Fatalf("JobSkillsReport() = (%+v, %v)", report, err)
+		}
+		active, err = s.ReadActiveJobs(t.Context(), []int64{task.ID})
+		if err != nil || active[task.ID].Role == "" {
+			t.Fatalf("ReadActiveJobs() = (%+v, %v)", active, err)
 		}
 	})
 
@@ -65,7 +79,7 @@ func init() {
 			t.Fatalf("MarkRelayEventDelivered() = (%+v, %v)", delivered, err)
 		}
 
-		placement := PlacementDecision{JobID: "dialect-job", Attempt: 1, DecidedAt: time.Now().UTC(), DecidedOn: "test-host", Source: "auto", Ranking: "[]", StateSource: "test", Outcome: "failed", Candidates: []PlacementCandidate{}}
+		placement := PlacementDecision{JobID: "dialect-job", Attempt: 1, DecidedAt: time.Now().UTC(), DecidedOn: "test-host", Source: "auto", Ranking: "[]", StateSource: "test", Outcome: "failed", Candidates: []PlacementCandidate{{Host: "candidate-host", Outcome: "refused", Reason: "busy"}}}
 		first, created, err := s.RecordPlacement(t.Context(), placement)
 		if err != nil || !created {
 			t.Fatalf("RecordPlacement() = (%+v, %t, %v)", first, created, err)
@@ -73,6 +87,10 @@ func init() {
 		second, created, err := s.RecordPlacement(t.Context(), placement)
 		if err != nil || created || second.ID != first.ID {
 			t.Fatalf("duplicate RecordPlacement() = (%+v, %t, %v)", second, created, err)
+		}
+		fleet, err := s.ListFleetCapacityPlacements(t.Context(), "", "candidate-host", time.Now().UTC().Add(-time.Hour), 10)
+		if err != nil || len(fleet) != 1 || fleet[0].ID != first.ID {
+			t.Fatalf("candidate-only ListFleetCapacityPlacements() = (%+v, %v)", fleet, err)
 		}
 
 		open, created, err := s.AppendRelayEvent(t.Context(), RelayEvent{Kind: "lane.event", OwnerLane: "decision-lane", EventID: "decision-event", Text: "[decision-needed] question"})

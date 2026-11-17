@@ -162,7 +162,9 @@ func spawnCaseTerminalNotice(t *testing.T, s *Store) {
 	comments := func() int {
 		t.Helper()
 		xs, err := s.ListTaskComments(ctx, x.ID, 0, 100)
-		needPorted(t, s, "ListTaskComments (comments, B3)", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -348,7 +350,9 @@ func spawnCaseConcurrentWrites(t *testing.T, s *Store) {
 		t.Fatalf("stored updated_at %s, want the newest write %s", stored.UpdatedAt, want)
 	}
 	xs, err := s.ListTaskComments(ctx, landing.ID, 0, 100)
-	needPorted(t, s, "ListTaskComments (comments, B3)", err)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err != nil || len(xs) != 1 {
 		t.Fatalf("landing notices %d err=%v, want 1", len(xs), err)
 	}

@@ -72,18 +72,6 @@ func init() {
 	registerTaskAreaCase("intake/task-body", func(t *testing.T, s *Store) {
 		in := IntakeInput{Source: "intake-test", SourceRef: "body/1", Title: "Intake with a body", Body: "details", CreatedBy: "tester"}
 		x, created, err := s.IntakeTask(t.Context(), in)
-		if s.dialect == mysqlDialect {
-			// B3 dependency: the body is the document task-body/<id>. The refusal
-			// writes no task, so the same item can be filed without a body.
-			if !errors.Is(err, ErrDialectUnsupported) {
-				t.Fatalf("MySQL intake with a body err = %v, want ErrDialectUnsupported", err)
-			}
-			in.Body = ""
-			if _, created, err := s.IntakeTask(t.Context(), in); err != nil || !created {
-				t.Fatalf("intake without the body created=%v err=%v", created, err)
-			}
-			return
-		}
 		if err != nil || !created || x.BodyDoc != fmt.Sprintf("task-body/%d", x.ID) {
 			t.Fatalf("intake with a body = %+v created=%v err=%v", x, created, err)
 		}
@@ -193,17 +181,6 @@ func init() {
 		}
 
 		got, created, err := s.EmitTicketSet(ctx, set)
-		if s.dialect == mysqlDialect {
-			// B3 dependency: every ticket body is the document task-body/<id>.
-			// The refusal rolls everything back, so the refs are free again.
-			if !errors.Is(err, ErrDialectUnsupported) {
-				t.Fatalf("MySQL ticket set err = %v, want ErrDialectUnsupported", err)
-			}
-			if _, created, err := s.IntakeTask(ctx, IntakeInput{Source: "intake-test", SourceRef: "set/1", Title: "Parent ref is free", CreatedBy: "tester"}); err != nil || !created {
-				t.Fatalf("parent ref after the refused set created=%v err=%v", created, err)
-			}
-			return
-		}
 		if err != nil || !created || got.ID == 0 || got.ParentID == 0 || len(got.Children) != 2 || got.Children[0].Ref != "a" || got.Children[1].Ref != "b" {
 			t.Fatalf("emit = %+v created=%v err=%v", got, created, err)
 		}

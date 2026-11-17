@@ -67,22 +67,6 @@ func TestRetryTransactionOnlyOnceOnMySQLConflict(t *testing.T) {
 	}
 }
 
-func TestUnportedMethodsReturnDialectUnsupportedOnMySQL(t *testing.T) {
-	mysqlStore := &Store{dialect: mysqlDialect}
-	for _, tc := range []struct {
-		name string
-		call func() error
-	}{
-		{name: "document", call: func() error { _, _, err := mysqlStore.GetDocument(context.Background(), "key"); return err }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := tc.call(); !errors.Is(err, ErrDialectUnsupported) {
-				t.Fatalf("error = %v, want ErrDialectUnsupported", err)
-			}
-		})
-	}
-}
-
 func TestPatchBenchRepOutcomeKeepsMySQLPortedPath(t *testing.T) {
 	mysqlStore := &Store{dialect: mysqlDialect}
 	_, err := mysqlStore.PatchBenchRepOutcome(context.Background(), 0, BenchRepOutcomePatch{})

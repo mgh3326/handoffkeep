@@ -116,7 +116,9 @@ func init() {
 		var ids []int64
 		for _, body := range []string{"first", "second", "third"} {
 			c, err := s.CreateTaskComment(ctx, x.ID, "tester", body)
-			needPorted(t, s, "CreateTaskComment", err)
+			if err != nil {
+				t.Fatal(err)
+			}
 			ids = append(ids, c.ID)
 		}
 

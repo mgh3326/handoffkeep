@@ -17,6 +17,7 @@ var mysqlRelayJobsSteps = []string{
 	mysqlIfColumnNotNull("sync_log", "txn", `ALTER TABLE sync_log MODIFY COLUMN txn BINARY(8) NULL`),
 	// Expand the jobs stub created by the tasks area. Existing rows retain the
 	// exact defaults used by the PostgreSQL schema.
+	mysqlIfNoColumn("jobs", "host", `ALTER TABLE jobs ADD COLUMN host VARCHAR(32) NOT NULL DEFAULT ('')`),
 	mysqlIfNoColumn("jobs", "label", `ALTER TABLE jobs ADD COLUMN label LONGTEXT NOT NULL DEFAULT ('')`),
 	mysqlIfNoColumn("jobs", "family", `ALTER TABLE jobs ADD COLUMN family LONGTEXT NOT NULL DEFAULT ('')`),
 	mysqlIfNoColumn("jobs", "profile", `ALTER TABLE jobs ADD COLUMN profile LONGTEXT NOT NULL DEFAULT ('')`),

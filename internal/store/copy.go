@@ -50,6 +50,8 @@ type copyTableSpec struct {
 	// serial marks a table whose id is generated (BIGSERIAL, AUTO_INCREMENT):
 	// after the load the target's generator is moved past the largest id.
 	serial bool
+	// identity is the generated column name when it differs from id.
+	identity string
 	// parentColumn names a self-referencing foreign key. Rows are inserted
 	// parents first (by depth, then order), because the foreign key is enforced
 	// on both targets while the table loads. Rows no root reaches (a cycle)
@@ -104,6 +106,9 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "project_owner_events", serial: true, columns: strings.Fields("id project previous_lane design_lane actor note created_at"), order: []string{"id"}, bounds: map[string]int{"project": 128}},
 	{name: "relay_events", serial: true, columns: strings.Fields("id kind job_id epoch owner_lane machine pane_id report_path report_last_line question pr head reason event_id text event_time received_at delivered_at delivered_to attempts"), order: []string{"id"}, bounds: map[string]int{"kind": 32, "job_id": 128, "owner_lane": 255, "event_id": 256}},
 	{name: "tasks", serial: true, parentColumn: "parent_id", columns: strings.Fields("id lane parent_lane title kind state priority refs claimed_by created_by created_at updated_at body_doc project area expected source source_ref last_activity_at awaiting_decision parent_id started_at completed_at canceled_at triaged_at started_triage_at milestone_id due_at sla_started_at sla_medium_risk_at sla_high_risk_at sla_breaches_at"), order: []string{"id"}, bounds: map[string]int{"lane": 255, "parent_lane": 255, "kind": 16, "state": 16, "project": 128, "source": 128, "source_ref": 512}},
+	{name: "documents", serial: true, columns: strings.Fields("id key kind session job body sha256 created_by created_at updated_at task_id origin_class"), order: []string{"id"}, bounds: map[string]int{"key": 512, "kind": 32, "session": 128, "job": 128, "sha256": 64, "origin_class": 16}},
+	{name: "task_comments", serial: true, columns: strings.Fields("id task_id body author created_at source_ref system_event_key"), order: []string{"id"}, bounds: map[string]int{"source_ref": 128, "system_event_key": 255}},
+	{name: "translations", columns: strings.Fields("entity entity_id field lang source_sha256 text translator updated_at"), order: []string{"entity", "entity_id", "field", "lang"}, bounds: map[string]int{"entity": 32, "entity_id": 128, "field": 32, "lang": 8, "source_sha256": 64}},
 	{name: "task_events", serial: true, columns: strings.Fields("id task_id from to by note at refs kind no_job source source_ref field from_value to_value auto applied"), order: []string{"id"}, bounds: map[string]int{"kind": 32, "source": 128, "source_ref": 512}},
 	{name: "task_relations", serial: true, columns: strings.Fields("id kind src_id dst_id created_by created_at archived_at archived_by"), order: []string{"id"}, bounds: map[string]int{"kind": 16}},
 	{name: "task_origins", serial: true, columns: strings.Fields("id task_id provider namespace external_id display_ref url title_snapshot snapshot_at created_by created_at tenant role synced_at"), order: []string{"id"}, bounds: map[string]int{"provider": 16, "namespace": 255, "external_id": 255, "role": 16}},
@@ -114,7 +119,7 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "task_thread_cursors", columns: strings.Fields("destination epoch_event_id scan_event_id updated_at"), order: []string{"destination"}, bounds: map[string]int{"destination": 16}},
 	{name: "sync_decisions", columns: strings.Fields("id task_id updated_at"), order: []string{"id"}, bounds: map[string]int{"id": 512}},
 	{name: "sync_state", upsert: true, columns: strings.Fields("singleton max_sync_id pruned_through"), order: []string{"singleton"}},
-	{name: "sync_log", serial: true, columns: strings.Fields("entry_id sync_id model model_id action at"), order: []string{"entry_id"}, bounds: map[string]int{"model": 32, "model_id": 512}},
+	{name: "sync_log", serial: true, identity: "entry_id", columns: strings.Fields("entry_id sync_id model model_id action at"), order: []string{"entry_id"}, bounds: map[string]int{"model": 32, "model_id": 512}},
 	{name: "checkpoints", serial: true, columns: strings.Fields("id session kind title body refs created_by created_at"), order: []string{"id"}, bounds: map[string]int{"session": 255, "kind": 16}},
 	{name: "memory", columns: strings.Fields("agent name description memory_type content updated_by updated_at"), order: []string{"agent", "name"}, bounds: map[string]int{"agent": 255, "name": 255, "memory_type": 16}},
 }
@@ -128,7 +133,7 @@ func StoreCopyTables() []string {
 	return out
 }
 
-var copyLeftOutTables = strings.Fields(`change_checks change_findings change_gate_events change_tasks change_threads changes chat_message_questions chat_messages chat_questions decision_answer_attempts decision_deliveries decision_notify decision_notify_digest decision_requests decision_resolutions deploy_changes deploy_record_projection deploy_services deploys documents dots_results dots_run_tokens labels linear_board_owners linear_board_ownership_conflicts linear_board_tasks linear_capacity_state linear_create_admissions linear_decision_issues linear_decision_ops linear_issues linear_outbox locks operator_inbox_events operator_inbox_state relay_events_retired_20260918 reviews schema_migrations schema_version services standing_orders status_updates takes task_comments task_labels task_state_migration task_subscribers translations verifications youtrack_attempts youtrack_comment_links youtrack_cursor youtrack_decision_mirrors youtrack_doc_articles youtrack_field_cache youtrack_outbox youtrack_processed_activities yt_article_bindings yt_authority yt_binding_cursor yt_binding_history yt_binding_intents yt_comment_canary yt_comment_write_links yt_decision_bindings yt_entity_map yt_family_roots yt_feed_cursors yt_issue_comment_bounds yt_issue_intents yt_link_owned yt_link_plans yt_link_steps yt_link_unowned yt_links_sweep yt_snapshot_state yt_task_bindings yt_write_op_adoptions yt_write_op_alerts yt_write_ops`)
+var copyLeftOutTables = strings.Fields(`change_checks change_findings change_gate_events change_tasks change_threads changes chat_message_questions chat_messages chat_questions decision_answer_attempts decision_deliveries decision_notify decision_notify_digest decision_requests decision_resolutions deploy_changes deploy_record_projection deploy_services deploys dots_results dots_run_tokens labels linear_board_owners linear_board_ownership_conflicts linear_board_tasks linear_capacity_state linear_create_admissions linear_decision_issues linear_decision_ops linear_issues linear_outbox locks operator_inbox_events operator_inbox_state relay_events_retired_20260918 reviews schema_migrations schema_version services standing_orders status_updates task_labels task_state_migration task_subscribers verifications youtrack_attempts youtrack_comment_links youtrack_cursor youtrack_decision_mirrors youtrack_doc_articles youtrack_field_cache youtrack_outbox youtrack_processed_activities yt_article_bindings yt_authority yt_binding_cursor yt_binding_history yt_binding_intents yt_comment_canary yt_comment_write_links yt_decision_bindings yt_entity_map yt_family_roots yt_feed_cursors yt_issue_comment_bounds yt_issue_intents yt_link_owned yt_link_plans yt_link_steps yt_link_unowned yt_links_sweep yt_snapshot_state yt_task_bindings yt_write_op_adoptions yt_write_op_alerts yt_write_ops`)
 
 type copyDB struct {
 	db    *sql.DB
@@ -249,11 +254,11 @@ func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, ve
 		if !copySchemaMatches(spec.name, cols, spec.columns) || !copySchemaMatches(spec.name, targetCols, spec.columns) {
 			return report, fmt.Errorf("%s schema columns differ: source=%v target=%v", spec.name, cols, targetCols)
 		}
-		sourceKinds, err := copyColumnKinds(ctx, from.db, from.mySQL, spec.name)
+		sourceKinds, err := copyColumnKinds(ctx, from.db, from.mySQL, spec.name, spec.columns)
 		if err != nil {
 			return report, fmt.Errorf("%s source column types: %w", spec.name, err)
 		}
-		targetKinds, err := copyColumnKinds(ctx, to.db, to.mySQL, spec.name)
+		targetKinds, err := copyColumnKinds(ctx, to.db, to.mySQL, spec.name, spec.columns)
 		if err != nil {
 			return report, fmt.Errorf("%s target column types: %w", spec.name, err)
 		}
@@ -287,7 +292,7 @@ func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, ve
 			}
 		}
 		tgtCount := int64(0)
-		tgtKinds, err := copyColumnKinds(ctx, to.db, to.mySQL, spec.name)
+		tgtKinds, err := copyColumnKinds(ctx, to.db, to.mySQL, spec.name, spec.columns)
 		if err != nil {
 			return report, fmt.Errorf("%s target column types: %w", spec.name, err)
 		}
@@ -393,7 +398,7 @@ func copyColumns(ctx context.Context, db *sql.DB, mysqlDB bool, table string) ([
 	return cols, nil
 }
 
-func copyColumnKinds(ctx context.Context, db *sql.DB, mysqlDB bool, table string) (map[string]copyValueKind, error) {
+func copyColumnKinds(ctx context.Context, db *sql.DB, mysqlDB bool, table string, copiedColumns []string) (map[string]copyValueKind, error) {
 	q := `SELECT column_name,data_type,udt_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1`
 	if mysqlDB {
 		q = `SELECT column_name,data_type,column_type FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=?`
@@ -403,11 +408,18 @@ func copyColumnKinds(ctx context.Context, db *sql.DB, mysqlDB bool, table string
 		return nil, err
 	}
 	defer rows.Close()
+	wanted := make(map[string]bool, len(copiedColumns))
+	for _, column := range copiedColumns {
+		wanted[column] = true
+	}
 	kinds := map[string]copyValueKind{}
 	for rows.Next() {
 		var name, dataType, detail string
 		if err := rows.Scan(&name, &dataType, &detail); err != nil {
 			return nil, err
+		}
+		if !wanted[name] {
+			continue
 		}
 		kind, err := classifyCopyColumn(mysqlDB, dataType, detail)
 		if err != nil {
@@ -905,12 +917,16 @@ func resetIdentity(ctx context.Context, dst *copyDB, spec copyTableSpec) error {
 		return err
 	}
 	table := spec.name
+	identity := spec.identity
+	if identity == "" {
+		identity = "id"
+	}
 	if !spec.serial {
 		return nil
 	}
 	if dst.mySQL {
 		var max sql.NullInt64
-		if err := conn.QueryRowContext(ctx, `SELECT MAX(id) FROM `+quoteCopyIdent(table, true)).Scan(&max); err != nil {
+		if err := conn.QueryRowContext(ctx, `SELECT MAX(`+quoteCopyIdent(identity, true)+`) FROM `+quoteCopyIdent(table, true)).Scan(&max); err != nil {
 			return err
 		}
 		if max.Valid {
@@ -919,12 +935,13 @@ func resetIdentity(ctx context.Context, dst *copyDB, spec copyTableSpec) error {
 		return err
 	}
 	var seq sql.NullString
-	if err := conn.QueryRowContext(ctx, `SELECT pg_get_serial_sequence($1,'id')`, table).Scan(&seq); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT pg_get_serial_sequence($1,$2)`, table, identity).Scan(&seq); err != nil {
 		return err
 	}
 	if !seq.Valid || seq.String == "" {
 		return nil
 	}
-	_, err = conn.ExecContext(ctx, `SELECT setval($1, COALESCE((SELECT MAX(id) FROM `+quoteCopyIdent(table, false)+`), 1), EXISTS(SELECT 1 FROM `+quoteCopyIdent(table, false)+`))`, seq.String)
+	quotedIdentity := quoteCopyIdent(identity, false)
+	_, err = conn.ExecContext(ctx, `SELECT setval($1, COALESCE((SELECT MAX(`+quotedIdentity+`) FROM `+quoteCopyIdent(table, false)+`), 1), EXISTS(SELECT 1 FROM `+quoteCopyIdent(table, false)+`))`, seq.String)
 	return err
 }
