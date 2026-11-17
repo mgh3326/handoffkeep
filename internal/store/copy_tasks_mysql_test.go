@@ -48,6 +48,23 @@ func seedTasksAreaPostgres(t *testing.T, pool *pgxpool.Pool, when time.Time) {
 	exec(`INSERT INTO task_thread_cursors(destination,epoch_event_id,scan_event_id,updated_at) VALUES('discord',1,2,$1)`, when)
 	exec(`INSERT INTO checkpoints(id,session,kind,title,body,refs,created_by,created_at) VALUES(93001,'sess','checkpoint','t','body','{"k":"v"}','test',$1)`, when)
 	exec(`INSERT INTO memory(agent,name,description,memory_type,content,updated_by,updated_at) VALUES('agent','name','desc','user','content','test',$1)`, when)
+	exec(`INSERT INTO dots_results(id,document_key,comment_id,issue_uuid,issue_identifier,kind,artefact_sha256,task_id,routed_lane,created_at,updated_at) VALUES(93003,'copy/dots/superseder','copy-comment-3','issue-1','MGH-1','RESULT',repeat('c',64),93001,'dots',$1,$1)`, when)
+	exec(`INSERT INTO dots_results(id,document_key,comment_id,issue_uuid,issue_identifier,kind,artefact_sha256,task_id,routed_lane,adoption_state,superseded_by,created_at,updated_at) VALUES(93002,'copy/dots/superseded','copy-comment-2','issue-1','MGH-1','RESULT',repeat('b',64),93001,'dots','superseded',93003,$1,$1)`, when)
+	exec(`INSERT INTO dots_results(id,document_key,comment_id,issue_uuid,issue_identifier,kind,artefact_sha256,task_id,routed_lane,created_at,updated_at) VALUES(93001,'copy/dots/result','copy-comment-1','issue-1','MGH-1','RESULT',repeat('a',64),93001,'dots',$1,$1)`, when)
+	exec(`INSERT INTO dots_run_tokens(id,task_id,token,issue_key,issued_by,issued_at) VALUES(93001,93001,repeat('a',64),repeat('b',64),'copy-test',$1)`, when)
+	exec(`INSERT INTO decision_requests(id,source,source_ref,task_id,lane,question,reading,grounds,options,created_at,updated_at) VALUES(93001,'task_flag','copy/decision-1',93001,'copy-lane','question','reading','["ground"]','{"options":[]}' ,$1,$1)`, when)
+	exec(`INSERT INTO decision_answer_attempts(id,channel,event_key,payload_hash,task_id,revision_request_id,actor,result,received_at) VALUES(93001,'mcp','copy-attempt-1',repeat('c',64),93001,'copy/decision-1','copy-test','answered',$1)`, when)
+	exec(`INSERT INTO decision_resolutions(resolution_id,request_id,question_revision,revision_request_id,task_id,kind,provenance,channel,decided_by,recorded_by,attempt_id,committed_at) VALUES(93001,'copy/decision-1',1,'copy/decision-1',93001,'answered','operator_direct','mcp','operator','copy-test',93001,$1)`, when)
+	exec(`INSERT INTO decision_deliveries(request_id,destination,state,next_attempt_at,created_at) VALUES(93001,'discord','pending',$1,$1)`, when)
+	exec(`INSERT INTO decision_notify_digest(day,state,next_attempt_at,created_at) VALUES('2026-11-18','pending',$1,$1)`, when)
+	exec(`INSERT INTO chat_questions(id,conversation_id,lane,body,state,created_at,updated_at) VALUES('Q-20261118-01','operator-desk','copy-lane','copy question','pending',$1,$1)`, when)
+	var messageID int64
+	if err := pool.QueryRow(t.Context(), `INSERT INTO chat_messages(author,body,relay_state,created_at,conversation_id,source_channel,origin_event_id,semantic_hash) VALUES('operator','copy message','stored',$1,'operator-desk','copy-test','copy-event-1',repeat('d',64)) RETURNING id`, when).Scan(&messageID); err != nil {
+		t.Fatalf("insert copy chat message: %v", err)
+	}
+	exec(`INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) VALUES($1,'Q-20261118-01','reply','copy question')`, messageID)
+	exec(`INSERT INTO operator_inbox_state(item_key,actor,updated_at) VALUES('decision:request:93001','copy-test',$1)`, when)
+	exec(`INSERT INTO operator_inbox_events(event_key,item_key,action,actor,at) VALUES('copy-inbox-event','decision:request:93001','read','copy-test',$1)`, when)
 }
 
 // The tasks area copies in both directions with parity. The bulk load itself
@@ -84,13 +101,20 @@ func TestCopyTasksAreaRoundTripWithParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	var feed, decisions int
-	var nextTask int64
-	if err := my.mysqlPool.QueryRowContext(t.Context(), `SELECT (SELECT COUNT(*) FROM sync_log), (SELECT COUNT(*) FROM sync_decisions), (SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='tasks')`).Scan(&feed, &decisions, &nextTask); err != nil {
+	var nextTask, nextResolution int64
+	if err := my.mysqlPool.QueryRowContext(t.Context(), `SELECT (SELECT COUNT(*) FROM sync_log), (SELECT COUNT(*) FROM sync_decisions), (SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='tasks'), (SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='decision_resolutions')`).Scan(&feed, &decisions, &nextTask, &nextResolution); err != nil {
+		t.Fatal(err)
+	}
+	var supersededBy int64
+	if err := my.mysqlPool.QueryRowContext(t.Context(), `SELECT superseded_by FROM dots_results WHERE id=93002`).Scan(&supersededBy); err != nil {
 		t.Fatal(err)
 	}
 	my.Close()
-	if feed != sourceFeed || decisions != 1 || nextTask <= 93003 {
-		t.Fatalf("MySQL target: sync_log=%d sync_decisions=%d next task id=%d, want %d, 1, >93003", feed, decisions, nextTask, sourceFeed)
+	if feed != sourceFeed || decisions != 1 || nextTask <= 93003 || nextResolution <= 93001 {
+		t.Fatalf("MySQL target: sync_log=%d sync_decisions=%d next task id=%d next decision resolution id=%d, want %d, 1, >93003, >93001", feed, decisions, nextTask, nextResolution, sourceFeed)
+	}
+	if supersededBy != 93003 {
+		t.Fatalf("copied dots_results.superseded_by=%d, want 93003", supersededBy)
 	}
 
 	back, backURL := schemaStoreAt(t, "copy_tasks_back")
@@ -102,12 +126,12 @@ func TestCopyTasksAreaRoundTripWithParity(t *testing.T) {
 		t.Fatalf("MySQL to PostgreSQL parity mismatch: %+v", reverse)
 	}
 	var backFeed, backDecisions int
-	var nextID int64
-	if err := back.pool.QueryRow(t.Context(), `SELECT (SELECT count(*) FROM sync_log), (SELECT count(*) FROM sync_decisions), nextval(pg_get_serial_sequence('tasks','id'))`).Scan(&backFeed, &backDecisions, &nextID); err != nil {
+	var nextID, nextResolutionID int64
+	if err := back.pool.QueryRow(t.Context(), `SELECT (SELECT count(*) FROM sync_log), (SELECT count(*) FROM sync_decisions), nextval(pg_get_serial_sequence('tasks','id')), nextval(pg_get_serial_sequence('decision_resolutions','resolution_id'))`).Scan(&backFeed, &backDecisions, &nextID, &nextResolutionID); err != nil {
 		t.Fatal(err)
 	}
-	if backFeed != sourceFeed || backDecisions != 1 || nextID <= 93003 {
-		t.Fatalf("PostgreSQL target: sync_log=%d sync_decisions=%d next task id=%d, want %d, 1, >93003", backFeed, backDecisions, nextID, sourceFeed)
+	if backFeed != sourceFeed || backDecisions != 1 || nextID <= 93003 || nextResolutionID <= 93001 {
+		t.Fatalf("PostgreSQL target: sync_log=%d sync_decisions=%d next task id=%d next decision resolution id=%d, want %d, 1, >93003, >93001", backFeed, backDecisions, nextID, nextResolutionID, sourceFeed)
 	}
 	// The copied tables stay writable and journaled once the load is over.
 	if _, err := back.pool.Exec(t.Context(), `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at) VALUES('lane-a','after','implement','backlog','test',now(),now())`); err != nil {

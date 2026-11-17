@@ -7,8 +7,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // A dots_results row is written by RecordDotsResult for each recorded dots
@@ -91,7 +89,7 @@ type DotsAdoptionInput struct {
 
 const dotsResultColumns = `id,document_key,comment_id,issue_uuid,issue_identifier,kind,COALESCE(verdict,''),artefact_sha256,task_id,routed_lane,adoption_state,COALESCE(adopted_ref,''),COALESCE(adopted_by,''),COALESCE(canva_url,''),COALESCE(canva_page,''),COALESCE(canva_version,''),adopted_at,superseded_by,answered_at,COALESCE(answered_by,''),answer_comment_id,COALESCE(answer_text,''),ask_operator,created_at,updated_at`
 
-func scanDotsResult(row pgx.Row, x *DotsResult) error {
+func scanDotsResult(row row, x *DotsResult) error {
 	if err := row.Scan(&x.ID, &x.DocumentKey, &x.CommentID, &x.IssueUUID, &x.IssueIdentifier, &x.Kind, &x.Verdict, &x.ArtefactSHA256, &x.TaskID, &x.RoutedLane, &x.AdoptionState, &x.AdoptedRef, &x.AdoptedBy, &x.CanvaURL, &x.CanvaPage, &x.CanvaVersion, &x.AdoptedAt, &x.SupersededBy, &x.AnsweredAt, &x.AnsweredBy, &x.AnswerCommentID, &x.AnswerText, &x.AskOperator, &x.CreatedAt, &x.UpdatedAt); err != nil {
 		return err
 	}
@@ -105,10 +103,6 @@ func scanDotsResult(row pgx.Row, x *DotsResult) error {
 // ListDotsResults lists the results of one task (taskID > 0) or of one Linear
 // issue by identifier, newest first.
 func (s *Store) ListDotsResults(ctx context.Context, taskID int64, issue string, limit int) ([]DotsResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if (taskID > 0) == (issue != "") || taskID < 0 || (issue != "" && !dotsIdentifierRE.MatchString(issue)) {
 		return nil, errors.New("invalid dots results query: give a task id or an issue identifier")
 	}
@@ -120,7 +114,7 @@ func (s *Store) ListDotsResults(ctx context.Context, taskID int64, issue string,
 	if issue != "" {
 		where, arg = `issue_identifier=$1`, issue
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+dotsResultColumns+` FROM dots_results WHERE `+where+` ORDER BY id DESC LIMIT $2`, arg, limit)
+	rows, err := s.db().Query(ctx, s.q(`SELECT `+dotsResultColumns+` FROM dots_results WHERE `+where+` ORDER BY id DESC LIMIT $2`, `SELECT `+dotsResultColumns+` FROM dots_results WHERE `+strings.ReplaceAll(where, "$1", "?")+` ORDER BY id DESC LIMIT ?`), arg, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -208,23 +202,20 @@ func keepDotsAdoptionCanva(cur DotsResult, in DotsAdoptionInput) DotsAdoptionInp
 // An accepted or partially_used change that names no Canva design keeps the
 // one already recorded.
 func (s *Store) SetDotsAdoption(ctx context.Context, id int64, by string, in DotsAdoptionInput) (DotsResult, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return DotsResult{}, false, ErrDialectUnsupported
-	}
-
 	if id < 1 || by == "" || !validText(by, 128) {
 		return DotsResult{}, false, errors.New("invalid dots adoption")
 	}
 	if err := checkDotsAdoption(id, in); err != nil {
 		return DotsResult{}, false, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return DotsResult{}, false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	var cur DotsResult
-	if err := scanDotsResult(tx.QueryRow(ctx, `SELECT `+dotsResultColumns+` FROM dots_results WHERE id=$1 FOR UPDATE`, id), &cur); err != nil {
+	if err := scanDotsResult(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+dotsResultColumns+` FROM dots_results WHERE id=$1 FOR UPDATE`, `SELECT `+dotsResultColumns+` FROM dots_results WHERE id=? FOR UPDATE`), id), &cur); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return DotsResult{}, false, ErrDotsResultNotFound
 		}
@@ -245,7 +236,7 @@ func (s *Store) SetDotsAdoption(ctx context.Context, id int64, by string, in Dot
 	var supersededBy *int64
 	if in.SupersededBy != 0 {
 		var exists bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dots_results WHERE id=$1)`, in.SupersededBy).Scan(&exists); err != nil {
+		if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS(SELECT 1 FROM dots_results WHERE id=$1)`, `SELECT EXISTS(SELECT 1 FROM dots_results WHERE id=?)`), in.SupersededBy).Scan(&exists); err != nil {
 			return DotsResult{}, false, err
 		}
 		if !exists {
@@ -253,10 +244,20 @@ func (s *Store) SetDotsAdoption(ctx context.Context, id int64, by string, in Dot
 		}
 		supersededBy = &in.SupersededBy
 	}
-	var out DotsResult
-	err = scanDotsResult(tx.QueryRow(ctx, `UPDATE dots_results SET adoption_state=$2, adopted_ref=$3, adopted_by=$4, adopted_at=$5, superseded_by=$6, updated_at=$5, canva_url=$7, canva_page=$8, canva_version=$9 WHERE id=$1 RETURNING `+dotsResultColumns,
-		id, in.State, nullIfEmpty(in.Ref), by, time.Now().UTC(), supersededBy, nullIfEmpty(in.CanvaURL), nullIfEmpty(in.CanvaPage), nullIfEmpty(in.CanvaVersion)), &out)
+	at := time.Now().UTC()
+	query := sqlFor(tx,
+		`UPDATE dots_results SET adoption_state=$2, adopted_ref=$3, adopted_by=$4, adopted_at=$5, superseded_by=$6, updated_at=$5, canva_url=$7, canva_page=$8, canva_version=$9 WHERE id=$1`,
+		`UPDATE dots_results SET adoption_state=?, adopted_ref=?, adopted_by=?, adopted_at=?, superseded_by=?, updated_at=?, canva_url=?, canva_page=?, canva_version=? WHERE id=?`)
+	args := []any{id, in.State, nullIfEmpty(in.Ref), by, at, supersededBy, nullIfEmpty(in.CanvaURL), nullIfEmpty(in.CanvaPage), nullIfEmpty(in.CanvaVersion)}
+	if s.dialect == mysqlDialect {
+		args = []any{in.State, nullIfEmpty(in.Ref), by, at, supersededBy, at, nullIfEmpty(in.CanvaURL), nullIfEmpty(in.CanvaPage), nullIfEmpty(in.CanvaVersion), id}
+	}
+	_, err = tx.Exec(ctx, query, args...)
 	if err != nil {
+		return DotsResult{}, false, err
+	}
+	var out DotsResult
+	if err := scanDotsResult(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+dotsResultColumns+` FROM dots_results WHERE id=$1`, `SELECT `+dotsResultColumns+` FROM dots_results WHERE id=?`), id), &out); err != nil {
 		return DotsResult{}, false, err
 	}
 	return out, true, tx.Commit(ctx)

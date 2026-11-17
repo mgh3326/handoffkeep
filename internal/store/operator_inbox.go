@@ -99,9 +99,6 @@ type InboxWriteResult struct {
 // event key is the idempotency key: applying it again returns the current
 // state and writes nothing.
 func (s *Store) ApplyInbox(ctx context.Context, keys []string, action string, until *time.Time, actor, eventKey string) (InboxWriteResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return InboxWriteResult{}, ErrDialectUnsupported
-	}
 	out := InboxWriteResult{Items: []InboxWrite{}}
 	if !validInboxAction(action) || strings.TrimSpace(actor) == "" || !validText(actor, 320) || strings.TrimSpace(eventKey) == "" || !validText(eventKey, 128) {
 		return out, ErrInvalidInboxWrite
@@ -145,21 +142,19 @@ func (s *Store) ApplyInbox(ctx context.Context, keys []string, action string, un
 // ErrInboxUndoConflict, so two tabs cannot undo each other's work. A second
 // undo of the same key is a no-op.
 func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxWrite, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if strings.TrimSpace(eventKey) == "" || !validText(eventKey, 128) || strings.TrimSpace(actor) == "" || !validText(actor, 320) {
 		return nil, ErrInvalidInboxWrite
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT item_key,previous_read_at,previous_done_at,previous_snoozed_until,previous_request_id,previous_request_snoozed_until,applied_read_at,applied_done_at,applied_snoozed_until
-		FROM operator_inbox_events WHERE event_key=$1 AND undone_at IS NULL ORDER BY item_key`, eventKey)
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT item_key,previous_read_at,previous_done_at,previous_snoozed_until,previous_request_id,previous_request_snoozed_until,applied_read_at,applied_done_at,applied_snoozed_until
+		FROM operator_inbox_events WHERE event_key=$1 AND undone_at IS NULL ORDER BY item_key`, `SELECT item_key,previous_read_at,previous_done_at,previous_snoozed_until,previous_request_id,previous_request_snoozed_until,applied_read_at,applied_done_at,applied_snoozed_until
+		FROM operator_inbox_events WHERE event_key=? AND undone_at IS NULL ORDER BY item_key`), eventKey)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +184,7 @@ func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxW
 	// write applied was moved later and is left alone.
 	for index := range restores {
 		r := restores[index]
-		current, found, err := inboxStateTx(ctx, pgTransaction{tx}, r.key, true)
+		current, found, err := inboxStateTx(ctx, tx, r.key, true)
 		if err != nil {
 			return nil, err
 		}
@@ -216,7 +211,7 @@ func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxW
 	requestGone := map[int64]bool{}
 	for _, id := range requestIDs {
 		var current *time.Time
-		err := tx.QueryRow(ctx, `SELECT snoozed_until FROM decision_requests WHERE id=$1 FOR UPDATE`, id).Scan(&current)
+		err := tx.QueryRow(ctx, sqlFor(tx, `SELECT snoozed_until FROM decision_requests WHERE id=$1 FOR UPDATE`, `SELECT snoozed_until FROM decision_requests WHERE id=? FOR UPDATE`), id).Scan(&current)
 		switch {
 		case errors.Is(err, ErrNoRows):
 			requestGone[id] = true
@@ -238,23 +233,30 @@ func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxW
 			continue
 		}
 		if r.read == nil && r.done == nil && r.snooze == nil {
-			if _, err := tx.Exec(ctx, `DELETE FROM operator_inbox_state WHERE item_key=$1`, r.key); err != nil {
+			if _, err := tx.Exec(ctx, sqlFor(tx, `DELETE FROM operator_inbox_state WHERE item_key=$1`, `DELETE FROM operator_inbox_state WHERE item_key=?`), r.key); err != nil {
 				return nil, err
 			}
-		} else if _, err := tx.Exec(ctx, `INSERT INTO operator_inbox_state(item_key,read_at,done_at,snoozed_until,actor,updated_at)
+		} else if _, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO operator_inbox_state(item_key,read_at,done_at,snoozed_until,actor,updated_at)
 			VALUES($1,$2,$3,$4,$5,$6)
 			ON CONFLICT (item_key) DO UPDATE SET read_at=EXCLUDED.read_at,done_at=EXCLUDED.done_at,snoozed_until=EXCLUDED.snoozed_until,actor=EXCLUDED.actor,updated_at=EXCLUDED.updated_at`,
+			`INSERT INTO operator_inbox_state(item_key,read_at,done_at,snoozed_until,actor,updated_at) VALUES(?,?,?,?,?,?)
+			ON DUPLICATE KEY UPDATE read_at=VALUES(read_at),done_at=VALUES(done_at),snoozed_until=VALUES(snoozed_until),actor=VALUES(actor),updated_at=VALUES(updated_at)`),
 			r.key, r.read, r.done, r.snooze, actor, now); err != nil {
 			return nil, err
 		}
 		if r.requestID != nil && !requestGone[*r.requestID] {
-			if _, err := tx.Exec(ctx, `UPDATE decision_requests SET snoozed_until=$2,updated_at=$3 WHERE id=$1`, *r.requestID, r.request, now); err != nil {
+			if _, err := tx.Exec(ctx, sqlFor(tx, `UPDATE decision_requests SET snoozed_until=$1,updated_at=$2 WHERE id=$3`, `UPDATE decision_requests SET snoozed_until=?,updated_at=? WHERE id=?`), r.request, now, *r.requestID); err != nil {
 				return nil, err
 			}
 		}
 		out = append(out, InboxWrite{ItemKey: r.key, State: InboxState{ItemKey: r.key, ReadAt: r.read, DoneAt: r.done, SnoozedUntil: r.snooze, Actor: actor, UpdatedAt: now}})
 	}
-	if _, err := tx.Exec(ctx, `UPDATE operator_inbox_events SET undone_at=$2 WHERE event_key=$1 AND undone_at IS NULL`, eventKey, now); err != nil {
+	undoQuery := sqlFor(tx, `UPDATE operator_inbox_events SET undone_at=$2 WHERE event_key=$1 AND undone_at IS NULL`, `UPDATE operator_inbox_events SET undone_at=? WHERE event_key=? AND undone_at IS NULL`)
+	undoArgs := []any{eventKey, now}
+	if dialectFor(tx) == mysqlDialect {
+		undoArgs = []any{now, eventKey}
+	}
+	if _, err := tx.Exec(ctx, undoQuery, undoArgs...); err != nil {
 		return nil, err
 	}
 	return out, tx.Commit(ctx)
@@ -272,17 +274,23 @@ func sameInboxTime(a, b *time.Time) bool {
 // InboxStates reads the stored triage state of keys, in batches of 500.
 // Items with no row are absent from the map.
 func (s *Store) InboxStates(ctx context.Context, keys []string) (map[string]InboxState, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	out := make(map[string]InboxState, len(keys))
 	for start := 0; start < len(keys); start += 500 {
 		end := start + 500
 		if end > len(keys) {
 			end = len(keys)
 		}
-		rows, err := s.pool.Query(ctx, `SELECT item_key,read_at,done_at,snoozed_until,actor,updated_at FROM operator_inbox_state WHERE item_key=ANY($1)`, keys[start:end])
+		list := keys[start:end]
+		query := `SELECT item_key,read_at,done_at,snoozed_until,actor,updated_at FROM operator_inbox_state WHERE item_key=ANY($1)`
+		args := []any{list}
+		if s.dialect == mysqlDialect {
+			query = `SELECT item_key,read_at,done_at,snoozed_until,actor,updated_at FROM operator_inbox_state WHERE item_key IN (` + placeholders(len(list)) + `)`
+			args = make([]any, len(list))
+			for i, key := range list {
+				args[i] = key
+			}
+		}
+		rows, err := s.db().Query(ctx, query, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -325,19 +333,20 @@ func inboxRequestID(key string) (int64, bool) {
 // Only this writer takes inbox state rows, so the pair cannot close a cycle
 // with a decision writer that locks only its request.
 func (s *Store) applyInboxItem(ctx context.Context, key, action string, until *time.Time, actor, eventKey string, now time.Time) (InboxState, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return InboxState{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 
 	var replayed bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM operator_inbox_events WHERE event_key=$1 AND item_key=$2)`, eventKey, key).Scan(&replayed); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS(SELECT 1 FROM operator_inbox_events WHERE event_key=$1 AND item_key=$2)`, `SELECT EXISTS(SELECT 1 FROM operator_inbox_events WHERE event_key=? AND item_key=?)`), eventKey, key).Scan(&replayed); err != nil {
 		return InboxState{}, err
 	}
 	if replayed {
 		// The same click delivered twice: report what the operator sees now.
-		prev, _, err := inboxStateTx(ctx, pgTransaction{tx}, key, false)
+		prev, _, err := inboxStateTx(ctx, tx, key, false)
 		if err != nil {
 			return InboxState{}, err
 		}
@@ -348,11 +357,11 @@ func (s *Store) applyInboxItem(ctx context.Context, key, action string, until *t
 	// when no row exists, so two first writes on one item would both read an
 	// empty state and the later upsert would drop the earlier one. An
 	// all-null row means "no triage".
-	if _, err := tx.Exec(ctx, `INSERT INTO operator_inbox_state(item_key,actor,updated_at)
-		VALUES($1,$2,$3) ON CONFLICT (item_key) DO NOTHING`, key, actor, now); err != nil {
+	if _, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO operator_inbox_state(item_key,actor,updated_at)
+		VALUES($1,$2,$3) ON CONFLICT (item_key) DO NOTHING`, `INSERT INTO operator_inbox_state(item_key,actor,updated_at) VALUES(?,?,?) ON DUPLICATE KEY UPDATE item_key=item_key`), key, actor, now); err != nil {
 		return InboxState{}, err
 	}
-	prev, _, err := inboxStateTx(ctx, pgTransaction{tx}, key, true)
+	prev, _, err := inboxStateTx(ctx, tx, key, true)
 	if err != nil {
 		return InboxState{}, err
 	}
@@ -360,7 +369,7 @@ func (s *Store) applyInboxItem(ctx context.Context, key, action string, until *t
 	// waited above for the first writer to commit, so its event row is
 	// visible here even though the unlocked check missed it; the delivery is
 	// a replay, not a duplicate insert.
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM operator_inbox_events WHERE event_key=$1 AND item_key=$2)`, eventKey, key).Scan(&replayed); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS(SELECT 1 FROM operator_inbox_events WHERE event_key=$1 AND item_key=$2)`, `SELECT EXISTS(SELECT 1 FROM operator_inbox_events WHERE event_key=? AND item_key=?)`), eventKey, key).Scan(&replayed); err != nil {
 		return InboxState{}, err
 	}
 	if replayed {
@@ -390,9 +399,11 @@ func (s *Store) applyInboxItem(ctx context.Context, key, action string, until *t
 	}
 	next.Actor = actor
 	next.UpdatedAt = now
-	if _, err := tx.Exec(ctx, `INSERT INTO operator_inbox_state(item_key,read_at,done_at,snoozed_until,actor,updated_at)
+	if _, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO operator_inbox_state(item_key,read_at,done_at,snoozed_until,actor,updated_at)
 		VALUES($1,$2,$3,$4,$5,$6)
 		ON CONFLICT (item_key) DO UPDATE SET read_at=EXCLUDED.read_at,done_at=EXCLUDED.done_at,snoozed_until=EXCLUDED.snoozed_until,actor=EXCLUDED.actor,updated_at=EXCLUDED.updated_at`,
+		`INSERT INTO operator_inbox_state(item_key,read_at,done_at,snoozed_until,actor,updated_at) VALUES(?,?,?,?,?,?)
+		ON DUPLICATE KEY UPDATE read_at=VALUES(read_at),done_at=VALUES(done_at),snoozed_until=VALUES(snoozed_until),actor=VALUES(actor),updated_at=VALUES(updated_at)`),
 		key, next.ReadAt, next.DoneAt, next.SnoozedUntil, actor, now); err != nil {
 		return InboxState{}, err
 	}
@@ -403,7 +414,23 @@ func (s *Store) applyInboxItem(ctx context.Context, key, action string, until *t
 		if id, ok := inboxRequestID(key); ok {
 			// Snoozing a decision request from the inbox also snoozes the
 			// request itself, in this same transaction (hk 3343 §2).
-			before, err := snoozeDecisionRecordTx(ctx, tx, id, *until, now)
+			var before *time.Time
+			var err error
+			if dialectFor(tx) != mysqlDialect {
+				before, err = snoozeDecisionRecordTx(ctx, pgxTx(tx), id, *until, now)
+			} else {
+				err = tx.QueryRow(ctx, `SELECT snoozed_until FROM decision_requests WHERE id=? FOR UPDATE`, id).Scan(&before)
+				if errors.Is(err, ErrNoRows) {
+					err = ErrDecisionRecordNotFound
+				}
+				if err == nil {
+					var affected int64
+					affected, err = tx.Exec(ctx, `UPDATE decision_requests SET snoozed_until=?,updated_at=? WHERE id=? AND status='open'`, *until, now, id)
+					if err == nil && affected == 0 {
+						err = ErrDecisionRecordNotOpen
+					}
+				}
+			}
 			if err != nil {
 				return InboxState{}, err
 			}
@@ -411,8 +438,9 @@ func (s *Store) applyInboxItem(ctx context.Context, key, action string, until *t
 			previousRequestSnooze = before
 		}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO operator_inbox_events(event_key,item_key,action,previous_read_at,previous_done_at,previous_snoozed_until,previous_request_id,previous_request_snoozed_until,applied_read_at,applied_done_at,applied_snoozed_until,actor,at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+	if _, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO operator_inbox_events(event_key,item_key,action,previous_read_at,previous_done_at,previous_snoozed_until,previous_request_id,previous_request_snoozed_until,applied_read_at,applied_done_at,applied_snoozed_until,actor,at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, `INSERT INTO operator_inbox_events(event_key,item_key,action,previous_read_at,previous_done_at,previous_snoozed_until,previous_request_id,previous_request_snoozed_until,applied_read_at,applied_done_at,applied_snoozed_until,actor,at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`),
 		eventKey, key, action, prev.ReadAt, prev.DoneAt, prev.SnoozedUntil, requestID, previousRequestSnooze, next.ReadAt, next.DoneAt, next.SnoozedUntil, actor, now); err != nil {
 		return InboxState{}, err
 	}
@@ -423,11 +451,13 @@ func (s *Store) applyInboxItem(ctx context.Context, key, action string, until *t
 // found false with the key set so callers never build a keyless state.
 func inboxStateTx(ctx context.Context, q rowQuerier, key string, lock bool) (InboxState, bool, error) {
 	query := `SELECT item_key,read_at,done_at,snoozed_until,actor,updated_at FROM operator_inbox_state WHERE item_key=$1`
+	mysql := `SELECT item_key,read_at,done_at,snoozed_until,actor,updated_at FROM operator_inbox_state WHERE item_key=?`
 	if lock {
 		query += ` FOR UPDATE`
+		mysql += ` FOR UPDATE`
 	}
 	var x InboxState
-	err := q.QueryRow(ctx, query, key).Scan(&x.ItemKey, &x.ReadAt, &x.DoneAt, &x.SnoozedUntil, &x.Actor, &x.UpdatedAt)
+	err := q.QueryRow(ctx, sqlFor(q, query, mysql), key).Scan(&x.ItemKey, &x.ReadAt, &x.DoneAt, &x.SnoozedUntil, &x.Actor, &x.UpdatedAt)
 	if errors.Is(err, ErrNoRows) {
 		return InboxState{ItemKey: key}, false, nil
 	}

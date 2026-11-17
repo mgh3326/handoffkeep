@@ -165,10 +165,6 @@ func validChatQuestion(x ChatQuestion) bool {
 // same producer id. State and resolution time are owned by the transition
 // path, so a repeated upsert never reopens or duplicates a row.
 func (s *Store) UpsertChatQuestion(ctx context.Context, x ChatQuestion) (ChatQuestion, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return ChatQuestion{}, false, ErrDialectUnsupported
-	}
-
 	if !validChatQuestion(x) {
 		return x, false, errors.New("invalid chat question")
 	}
@@ -177,20 +173,51 @@ func (s *Store) UpsertChatQuestion(ctx context.Context, x ChatQuestion) (ChatQue
 	}
 	x.ConversationID = ChatConversationID
 	now := time.Now().UTC()
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return x, false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	var created bool
-	err = scanChatQuestionCreated(tx.QueryRow(ctx, chatQuestionUpsert+`,(xmax=0) AS created`, x.ID, x.ConversationID, x.Lane, x.Body, now), &x, &created)
+	if s.dialect == mysqlDialect {
+		_, err = tx.Exec(ctx, `INSERT INTO chat_questions(id,conversation_id,lane,body,state,created_at,updated_at) VALUES(?,?,?,?, 'pending',?,?)`,
+			x.ID, x.ConversationID, x.Lane, x.Body, now, now)
+		if errors.Is(err, errUniqueViolation) {
+			err = nil
+			_, err = tx.Exec(ctx, `UPDATE chat_questions SET
+				revision=revision+IF(body<>? OR lane<>?,1,0),
+				answer_message_id=IF(body<>? OR lane<>?,NULL,answer_message_id),
+				lane=?,body=?,updated_at=? WHERE id=? AND conversation_id=?`,
+				x.Body, x.Lane, x.Body, x.Lane, x.Lane, x.Body, now, x.ID, x.ConversationID)
+			if err == nil {
+				var exists bool
+				err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chat_questions WHERE id=? AND conversation_id=?)`, x.ID, x.ConversationID).Scan(&exists)
+				if err == nil && !exists {
+					return x, false, ErrChatConversation
+				}
+			}
+		} else if err == nil {
+			created = true
+		}
+		if err == nil {
+			err = scanChatQuestion(tx.QueryRow(ctx, `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=?`, x.ID), &x)
+		}
+	} else {
+		err = scanChatQuestionCreated(tx.QueryRow(ctx, chatQuestionUpsert+`,(xmax=0) AS created`, x.ID, x.ConversationID, x.Lane, x.Body, now), &x, &created)
+	}
 	if errors.Is(err, ErrNoRows) {
 		return x, false, ErrChatConversation
 	}
 	if err != nil {
 		return x, false, err
 	}
-	if err = mirrorChatQuestionTx(ctx, tx, x, created, now); err != nil {
+	if s.dialect == mysqlDialect {
+		err = mirrorChatQuestionMySQLTx(ctx, tx, x, created, now)
+	} else {
+		err = mirrorChatQuestionTx(ctx, pgxTx(tx), x, created, now)
+	}
+	if err != nil {
 		return x, false, err
 	}
 	return x, created, tx.Commit(ctx)
@@ -207,6 +234,16 @@ func mirrorChatQuestionTx(ctx context.Context, tx pgx.Tx, q ChatQuestion, create
 	return err
 }
 
+func mirrorChatQuestionMySQLTx(ctx context.Context, tx transaction, q ChatQuestion, created bool, at time.Time) error {
+	if created {
+		_, _, err := mysqlOpenDecisionTx(ctx, tx, decisionOpen{Source: DecisionSourceChat, SourceRef: q.ID, Lane: q.Lane, Question: q.Body, At: at})
+		return err
+	}
+	_, err := tx.Exec(ctx, `UPDATE decision_requests SET question=?,lane=?,updated_at=? WHERE source='chat' AND source_ref=? AND status='open' AND (question<>? OR lane<>?)`,
+		q.Body, q.Lane, at, q.ID, q.Body, q.Lane)
+	return err
+}
+
 // closeChatDecisionTx mirrors a pending question leaving pending: resolved
 // is an answer, withdrawn supersedes the row.
 func closeChatDecisionTx(ctx context.Context, tx pgx.Tx, id, to, answer, by string, at time.Time) error {
@@ -217,15 +254,11 @@ func closeChatDecisionTx(ctx context.Context, tx pgx.Tx, id, to, answer, by stri
 }
 
 func (s *Store) GetChatQuestion(ctx context.Context, id string) (ChatQuestion, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return ChatQuestion{}, false, ErrDialectUnsupported
-	}
-
 	if !chatQuestionIDRE.MatchString(id) {
 		return ChatQuestion{}, false, errors.New("invalid chat question id")
 	}
 	var x ChatQuestion
-	err := scanChatQuestion(s.pool.QueryRow(ctx, `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=$1`, id), &x)
+	err := scanChatQuestion(s.db().QueryRow(ctx, s.q(`SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=$1`, `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=?`), id), &x)
 	if errors.Is(err, ErrNoRows) {
 		return ChatQuestion{}, false, nil
 	}
@@ -239,23 +272,39 @@ func (s *Store) GetChatQuestion(ctx context.Context, id string) (ChatQuestion, b
 // resolved_at records only an actual resolution; withdrawal leaves it NULL.
 // by is the authenticated caller, recorded as the decision record's answerer.
 func (s *Store) TransitionChatQuestion(ctx context.Context, id, to, by string) (ChatQuestion, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return ChatQuestion{}, ErrDialectUnsupported
-	}
-
 	if !chatQuestionIDRE.MatchString(id) || (to != "resolved" && to != "withdrawn") {
 		return ChatQuestion{}, errors.New("invalid chat question transition")
 	}
 	now := time.Now().UTC()
 	var x ChatQuestion
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return ChatQuestion{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	err = scanChatQuestion(tx.QueryRow(ctx, `UPDATE chat_questions SET state=$2,resolved_at=CASE WHEN $2='resolved' THEN $3 ELSE resolved_at END,updated_at=$3 WHERE id=$1 AND state='pending' RETURNING `+chatQuestionColumns, id, to, now), &x)
+	if s.dialect == mysqlDialect {
+		var affected int64
+		affected, err = tx.Exec(ctx, `UPDATE chat_questions SET state=?,resolved_at=CASE WHEN ?='resolved' THEN ? ELSE resolved_at END,updated_at=? WHERE id=? AND state='pending'`, to, to, now, now, id)
+		if err == nil && affected == 0 {
+			err = ErrNoRows
+		} else if err == nil {
+			err = scanChatQuestion(tx.QueryRow(ctx, `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=? AND state=?`, id, to), &x)
+		}
+	} else {
+		err = scanChatQuestion(tx.QueryRow(ctx, `UPDATE chat_questions SET state=$2,resolved_at=CASE WHEN $2='resolved' THEN $3 ELSE resolved_at END,updated_at=$3 WHERE id=$1 AND state='pending' RETURNING `+chatQuestionColumns, id, to, now), &x)
+	}
 	if err == nil {
-		if err = closeChatDecisionTx(ctx, tx, id, to, "", by, now); err != nil {
+		if s.dialect == mysqlDialect {
+			if to == "withdrawn" {
+				err = mysqlSupersedeDecisionTx(ctx, tx, []string{DecisionSourceChat}, id, "withdrawn", now)
+			} else {
+				_, err = tx.Exec(ctx, `UPDATE decision_requests SET status='answered',answer='',answered_by=?,answered_at=?,updated_at=? WHERE source='chat' AND source_ref=? AND status='open'`, by, now, now, id)
+			}
+		} else {
+			err = closeChatDecisionTx(ctx, pgxTx(tx), id, to, "", by, now)
+		}
+		if err != nil {
 			return ChatQuestion{}, err
 		}
 		return x, tx.Commit(ctx)
@@ -263,7 +312,7 @@ func (s *Store) TransitionChatQuestion(ctx context.Context, id, to, by string) (
 	if !errors.Is(err, ErrNoRows) {
 		return ChatQuestion{}, err
 	}
-	if err = scanChatQuestion(s.pool.QueryRow(ctx, `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=$1`, id), &x); err != nil {
+	if err = scanChatQuestion(s.db().QueryRow(ctx, s.q(`SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=$1`, `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=?`), id), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return ChatQuestion{}, ErrChatQuestionNotFound
 		}
@@ -275,10 +324,6 @@ func (s *Store) TransitionChatQuestion(ctx context.Context, id, to, by string) (
 // ListChatQuestions returns questions in id order, which matches creation
 // order for the Q-YYYYMMDD-NN format. afterID is an exclusive cursor.
 func (s *Store) ListChatQuestions(ctx context.Context, lane, state, afterID string, limit int) ([]ChatQuestion, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if (lane != "" && !validName(lane)) || (state != "" && !chatQuestionStates[state]) || (afterID != "" && !chatQuestionIDRE.MatchString(afterID)) {
 		return nil, errors.New("invalid chat question query")
 	}
@@ -291,19 +336,19 @@ func (s *Store) ListChatQuestions(ctx context.Context, lane, state, afterID stri
 	q, args := `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE 1=1`, []any{}
 	if lane != "" {
 		args = append(args, lane)
-		q += fmt.Sprintf(" AND lane=$%d", len(args))
+		q += s.q(fmt.Sprintf(" AND lane=$%d", len(args)), " AND lane=?")
 	}
 	if state != "" {
 		args = append(args, state)
-		q += fmt.Sprintf(" AND state=$%d", len(args))
+		q += s.q(fmt.Sprintf(" AND state=$%d", len(args)), " AND state=?")
 	}
 	if afterID != "" {
 		args = append(args, afterID)
-		q += fmt.Sprintf(" AND id>$%d", len(args))
+		q += s.q(fmt.Sprintf(" AND id>$%d", len(args)), " AND id>?")
 	}
 	args = append(args, limit)
-	q += fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args))
-	rows, err := s.pool.Query(ctx, q, args...)
+	q += s.q(fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args)), " ORDER BY id ASC LIMIT ?")
+	rows, err := s.db().Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -329,10 +374,6 @@ func (s *Store) CreateChatMessage(ctx context.Context, x ChatMessage) (ChatMessa
 // PostChatMessage commits the body, Q changes and relation snapshots together.
 // The event-key lookup happens before any Q mutation, including on replay.
 func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (ChatMessage, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return ChatMessage{}, false, ErrDialectUnsupported
-	}
-
 	m := post.Message
 	var err error
 	m.ConversationID, err = chatConversation(m.ConversationID)
@@ -357,6 +398,10 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 	}
 	if err := guard.Reject(m.Body); err != nil {
 		return ChatMessage{}, false, err
+	}
+	if s.dialect == mysqlDialect && len(post.Answers) != 0 {
+		// Assistant answer delivery writes notification_outbox, which B7 owns.
+		return ChatMessage{}, false, ErrDialectUnsupported
 	}
 	for i := range post.Questions {
 		if post.Questions[i].ConversationID != "" && post.Questions[i].ConversationID != m.ConversationID {
@@ -415,19 +460,24 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		Answers                           []ChatAnswerInput `json:",omitempty"`
 	}{m.Author, m.Body, qs, post.QuestionIDs, post.ProcessedQuestionIDs, post.Answers})
 	hash := fmt.Sprintf("%x", sha256.Sum256(payload))
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return ChatMessage{}, false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if m.OriginEventID != "" {
 		key := strings.Join([]string{m.ConversationID, m.SourceChannel, m.OriginEventID}, "\x1f")
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, key); err != nil {
+		if s.dialect == mysqlDialect {
+			if _, err := mysqlTransactionLock(ctx, tx, mysqlLockKey("text", key), false); err != nil {
+				return ChatMessage{}, false, err
+			}
+		} else if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, key); err != nil {
 			return ChatMessage{}, false, err
 		}
 		var old ChatMessage
 		var oldHash string
-		err = scanChatMessageWithHash(tx.QueryRow(ctx, `SELECT `+chatMessageColumns+`,semantic_hash FROM chat_messages WHERE conversation_id=$1 AND source_channel=$2 AND origin_event_id=$3`, m.ConversationID, m.SourceChannel, m.OriginEventID), &old, &oldHash)
+		err = scanChatMessageWithHash(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+chatMessageColumns+`,semantic_hash FROM chat_messages WHERE conversation_id=$1 AND source_channel=$2 AND origin_event_id=$3`, `SELECT `+chatMessageColumns+`,semantic_hash FROM chat_messages WHERE conversation_id=? AND source_channel=? AND origin_event_id=?`), m.ConversationID, m.SourceChannel, m.OriginEventID), &old, &oldHash)
 		if err == nil {
 			if oldHash != hash {
 				return ChatMessage{}, false, ErrChatMessageConflict
@@ -451,26 +501,58 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		m.RelayState = "stored"
 	}
 	m.ID, m.CreatedAt, m.DeliveredAt = 0, now, nil
-	if err := scanChatMessage(tx.QueryRow(ctx, `INSERT INTO chat_messages(conversation_id,author,body,source_channel,origin_event_id,origin_timestamp,semantic_hash,relay_state,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING `+chatMessageColumns, m.ConversationID, m.Author, m.Body, m.SourceChannel, m.OriginEventID, m.OriginTimestamp, hash, m.RelayState, now), &m); err != nil {
+	if s.dialect == mysqlDialect {
+		id, err := tx.InsertID(ctx, `INSERT INTO chat_messages(conversation_id,author,body,source_channel,origin_event_id,origin_timestamp,semantic_hash,relay_state,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+			m.ConversationID, m.Author, m.Body, m.SourceChannel, m.OriginEventID, m.OriginTimestamp, hash, m.RelayState, now)
+		if err != nil {
+			return ChatMessage{}, false, err
+		}
+		if err := scanChatMessage(tx.QueryRow(ctx, `SELECT `+chatMessageColumns+` FROM chat_messages WHERE id=?`, id), &m); err != nil {
+			return ChatMessage{}, false, err
+		}
+	} else if err := scanChatMessage(tx.QueryRow(ctx, `INSERT INTO chat_messages(conversation_id,author,body,source_channel,origin_event_id,origin_timestamp,semantic_hash,relay_state,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING `+chatMessageColumns, m.ConversationID, m.Author, m.Body, m.SourceChannel, m.OriginEventID, m.OriginTimestamp, hash, m.RelayState, now), &m); err != nil {
 		return ChatMessage{}, false, err
 	}
 	for _, q := range post.Questions {
 		var stored ChatQuestion
 		var created bool
-		err := scanChatQuestionCreated(tx.QueryRow(ctx, chatQuestionUpsert+`,(xmax=0) AS created`, q.ID, m.ConversationID, q.Lane, q.Body, now), &stored, &created)
+		var err error
+		if s.dialect == mysqlDialect {
+			_, err = tx.Exec(ctx, `INSERT INTO chat_questions(id,conversation_id,lane,body,state,created_at,updated_at) VALUES(?,?,?,?, 'pending',?,?)`, q.ID, m.ConversationID, q.Lane, q.Body, now, now)
+			if errors.Is(err, errUniqueViolation) {
+				err = nil
+				_, err = tx.Exec(ctx, `UPDATE chat_questions SET revision=revision+IF(body<>? OR lane<>?,1,0),answer_message_id=IF(body<>? OR lane<>?,NULL,answer_message_id),lane=?,body=?,updated_at=? WHERE id=? AND conversation_id=?`,
+					q.Body, q.Lane, q.Body, q.Lane, q.Lane, q.Body, now, q.ID, m.ConversationID)
+			} else if err == nil {
+				created = true
+			}
+			if err == nil {
+				err = scanChatQuestion(tx.QueryRow(ctx, `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=? AND conversation_id=?`, q.ID, m.ConversationID), &stored)
+			}
+			if errors.Is(err, ErrNoRows) {
+				return ChatMessage{}, false, ErrChatConversation
+			}
+		} else {
+			err = scanChatQuestionCreated(tx.QueryRow(ctx, chatQuestionUpsert+`,(xmax=0) AS created`, q.ID, m.ConversationID, q.Lane, q.Body, now), &stored, &created)
+		}
 		if errors.Is(err, ErrNoRows) {
 			return ChatMessage{}, false, ErrChatConversation
 		}
 		if err != nil {
 			return ChatMessage{}, false, err
 		}
-		if err := mirrorChatQuestionTx(ctx, tx, stored, created, now); err != nil {
+		if s.dialect == mysqlDialect {
+			err = mirrorChatQuestionMySQLTx(ctx, tx, stored, created, now)
+		} else {
+			err = mirrorChatQuestionTx(ctx, pgxTx(tx), stored, created, now)
+		}
+		if err != nil {
 			return ChatMessage{}, false, err
 		}
 	}
 	addRelation := func(id, kind string) error {
 		var conversation, body string
-		err := tx.QueryRow(ctx, `SELECT conversation_id,body FROM chat_questions WHERE id=$1 FOR SHARE`, id).Scan(&conversation, &body)
+		err := tx.QueryRow(ctx, sqlFor(tx, `SELECT conversation_id,body FROM chat_questions WHERE id=$1 FOR SHARE`, `SELECT conversation_id,body FROM chat_questions WHERE id=? FOR SHARE`), id).Scan(&conversation, &body)
 		if errors.Is(err, ErrNoRows) {
 			return ErrChatQuestionNotFound
 		}
@@ -480,7 +562,7 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		if conversation != m.ConversationID {
 			return ErrChatConversation
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) VALUES($1,$2,$3,$4)`, m.ID, id, kind, body)
+		_, err = tx.Exec(ctx, sqlFor(tx, `INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) VALUES($1,$2,$3,$4)`, `INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) VALUES(?,?,?,?)`), m.ID, id, kind, body)
 		return err
 	}
 	for _, q := range post.Questions {
@@ -498,16 +580,29 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 			return ChatMessage{}, false, err
 		}
 		var state string
-		if err := tx.QueryRow(ctx, `SELECT state FROM chat_questions WHERE id=$1`, id).Scan(&state); err != nil {
+		if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT state FROM chat_questions WHERE id=$1`, `SELECT state FROM chat_questions WHERE id=?`), id).Scan(&state); err != nil {
 			return ChatMessage{}, false, err
 		}
 		if state == "withdrawn" {
 			return ChatMessage{}, false, ErrChatQuestionConflict
 		}
-		if tag, err := tx.Exec(ctx, `UPDATE chat_questions SET state='resolved',resolved_at=COALESCE(resolved_at,$2),updated_at=$2 WHERE id=$1 AND state='pending'`, id, now); err != nil {
+		var tag int64
+		var err error
+		if s.dialect == mysqlDialect {
+			tag, err = tx.Exec(ctx, `UPDATE chat_questions SET state='resolved',resolved_at=COALESCE(resolved_at,?),updated_at=? WHERE id=? AND state='pending'`, now, now, id)
+		} else {
+			tag, err = tx.Exec(ctx, `UPDATE chat_questions SET state='resolved',resolved_at=COALESCE(resolved_at,$2),updated_at=$2 WHERE id=$1 AND state='pending'`, id, now)
+		}
+		if err != nil {
 			return ChatMessage{}, false, err
-		} else if tag.RowsAffected() == 1 {
-			if err := closeChatDecisionTx(ctx, tx, id, "resolved", m.Body, m.Author, now); err != nil {
+		} else if tag != 0 {
+			var err error
+			if s.dialect == mysqlDialect {
+				_, err = tx.Exec(ctx, `UPDATE decision_requests SET status='answered',answer=?,answered_by=?,answered_at=?,updated_at=? WHERE source='chat' AND source_ref=? AND status='open'`, m.Body, m.Author, now, now, id)
+			} else {
+				err = closeChatDecisionTx(ctx, pgxTx(tx), id, "resolved", m.Body, m.Author, now)
+			}
+			if err != nil {
 				return ChatMessage{}, false, err
 			}
 		}
@@ -535,7 +630,7 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		}
 		if tag, err := tx.Exec(ctx, `UPDATE chat_questions SET answer_message_id=$2,updated_at=$3 WHERE id=$1 AND state='pending' AND revision=$4 AND answer_message_id IS NULL`, a.QuestionID, m.ID, now, a.Revision); err != nil {
 			return ChatMessage{}, false, err
-		} else if tag.RowsAffected() != 1 {
+		} else if tag != 1 {
 			return ChatMessage{}, false, ErrChatQuestionStale
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) VALUES($1,$2,'reply',$3)`, m.ID, a.QuestionID, qBody); err != nil {
@@ -543,7 +638,7 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		}
 		eventID := chatAnsweredEventID(a.QuestionID, a.Revision)
 		text := assistantLaneText("[via berry] "+a.QuestionID+" answered: ", m.Body)
-		if err := insertNotificationOutbox(ctx, tx, OutboxKindChatAnswer, qLane, eventID, text, now); err != nil {
+		if err := insertNotificationOutbox(ctx, pgxTx(tx), OutboxKindChatAnswer, qLane, eventID, text, now); err != nil {
 			return ChatMessage{}, false, err
 		}
 	}
@@ -590,7 +685,15 @@ func (s *Store) loadChatRelations(ctx context.Context, messages []*ChatMessage) 
 		byID[m.ID] = m
 		m.QuestionRelations = []ChatQuestionRelation{}
 	}
-	rows, err := s.pool.Query(ctx, `SELECT message_id,question_id,relation_kind,question_text FROM chat_message_questions WHERE message_id=ANY($1) ORDER BY message_id,relation_kind,question_id`, ids)
+	query, args := `SELECT message_id,question_id,relation_kind,question_text FROM chat_message_questions WHERE message_id=ANY($1) ORDER BY message_id,relation_kind,question_id`, []any{ids}
+	if s.dialect == mysqlDialect {
+		query = `SELECT message_id,question_id,relation_kind,question_text FROM chat_message_questions WHERE message_id IN (` + placeholders(len(ids)) + `) ORDER BY message_id,relation_kind,question_id`
+		args = make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+	}
+	rows, err := s.db().Query(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -609,15 +712,19 @@ func (s *Store) loadChatRelations(ctx context.Context, messages []*ChatMessage) 
 // MarkChatMessageDelivered records the first successful relay. Subsequent
 // calls are intentionally idempotent and return the original delivery time.
 func (s *Store) MarkChatMessageDelivered(ctx context.Context, id int64) (ChatMessage, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return ChatMessage{}, ErrDialectUnsupported
-	}
-
 	if id < 1 {
 		return ChatMessage{}, errors.New("invalid chat message delivery")
 	}
 	var x ChatMessage
-	err := scanChatMessage(s.pool.QueryRow(ctx, `UPDATE chat_messages SET relay_state='delivered',delivered_at=now() WHERE id=$1 AND author='operator' AND relay_state='stored' RETURNING `+chatMessageColumns, id), &x)
+	var err error
+	if s.dialect == mysqlDialect {
+		_, err = s.db().Exec(ctx, `UPDATE chat_messages SET relay_state='delivered',delivered_at=UTC_TIMESTAMP(6) WHERE id=? AND author='operator' AND relay_state='stored'`, id)
+		if err == nil {
+			err = scanChatMessage(s.db().QueryRow(ctx, `SELECT `+chatMessageColumns+` FROM chat_messages WHERE id=? AND author='operator' AND relay_state='delivered'`, id), &x)
+		}
+	} else {
+		err = scanChatMessage(s.db().QueryRow(ctx, `UPDATE chat_messages SET relay_state='delivered',delivered_at=now() WHERE id=$1 AND author='operator' AND relay_state='stored' RETURNING `+chatMessageColumns, id), &x)
+	}
 	if err == nil {
 		if err := s.loadChatRelations(ctx, []*ChatMessage{&x}); err != nil {
 			return ChatMessage{}, err
@@ -627,7 +734,7 @@ func (s *Store) MarkChatMessageDelivered(ctx context.Context, id int64) (ChatMes
 	if !errors.Is(err, ErrNoRows) {
 		return ChatMessage{}, err
 	}
-	if err = scanChatMessage(s.pool.QueryRow(ctx, `SELECT `+chatMessageColumns+` FROM chat_messages WHERE id=$1`, id), &x); err != nil {
+	if err = scanChatMessage(s.db().QueryRow(ctx, s.q(`SELECT `+chatMessageColumns+` FROM chat_messages WHERE id=$1`, `SELECT `+chatMessageColumns+` FROM chat_messages WHERE id=?`), id), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return ChatMessage{}, ErrChatMessageNotFound
 		}
@@ -645,15 +752,19 @@ func (s *Store) MarkChatMessageDelivered(ctx context.Context, id int64) (ChatMes
 // MarkChatMessageFailed records a relay failure. Only stored rows can fail;
 // delivered history is terminal.
 func (s *Store) MarkChatMessageFailed(ctx context.Context, id int64) (ChatMessage, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return ChatMessage{}, ErrDialectUnsupported
-	}
-
 	if id < 1 {
 		return ChatMessage{}, errors.New("invalid chat message failure")
 	}
 	var x ChatMessage
-	err := scanChatMessage(s.pool.QueryRow(ctx, `UPDATE chat_messages SET relay_state='failed' WHERE id=$1 AND author='operator' AND relay_state='stored' RETURNING `+chatMessageColumns, id), &x)
+	var err error
+	if s.dialect == mysqlDialect {
+		_, err = s.db().Exec(ctx, `UPDATE chat_messages SET relay_state='failed' WHERE id=? AND author='operator' AND relay_state='stored'`, id)
+		if err == nil {
+			err = scanChatMessage(s.db().QueryRow(ctx, `SELECT `+chatMessageColumns+` FROM chat_messages WHERE id=? AND author='operator' AND relay_state='failed'`, id), &x)
+		}
+	} else {
+		err = scanChatMessage(s.db().QueryRow(ctx, `UPDATE chat_messages SET relay_state='failed' WHERE id=$1 AND author='operator' AND relay_state='stored' RETURNING `+chatMessageColumns, id), &x)
+	}
 	if err == nil {
 		if err := s.loadChatRelations(ctx, []*ChatMessage{&x}); err != nil {
 			return ChatMessage{}, err
@@ -663,7 +774,7 @@ func (s *Store) MarkChatMessageFailed(ctx context.Context, id int64) (ChatMessag
 	if !errors.Is(err, ErrNoRows) {
 		return ChatMessage{}, err
 	}
-	if err = scanChatMessage(s.pool.QueryRow(ctx, `SELECT `+chatMessageColumns+` FROM chat_messages WHERE id=$1`, id), &x); err != nil {
+	if err = scanChatMessage(s.db().QueryRow(ctx, s.q(`SELECT `+chatMessageColumns+` FROM chat_messages WHERE id=$1`, `SELECT `+chatMessageColumns+` FROM chat_messages WHERE id=?`), id), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return ChatMessage{}, ErrChatMessageNotFound
 		}
@@ -675,10 +786,6 @@ func (s *Store) MarkChatMessageFailed(ctx context.Context, id int64) (ChatMessag
 // ListChatMessages returns messages in durable insertion order. afterID is an
 // exclusive cursor; undelivered restricts to rows still awaiting relay.
 func (s *Store) ListChatMessages(ctx context.Context, author string, undelivered bool, afterID int64, limit int) ([]ChatMessage, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if (author != "" && !chatAuthors[author]) || afterID < 0 {
 		return nil, errors.New("invalid chat message query")
 	}
@@ -691,18 +798,18 @@ func (s *Store) ListChatMessages(ctx context.Context, author string, undelivered
 	q, args := `SELECT `+chatMessageColumns+` FROM chat_messages WHERE 1=1`, []any{}
 	if author != "" {
 		args = append(args, author)
-		q += fmt.Sprintf(" AND author=$%d", len(args))
+		q += s.q(fmt.Sprintf(" AND author=$%d", len(args)), " AND author=?")
 	}
 	if undelivered {
 		q += " AND author='operator' AND relay_state='stored'"
 	}
 	if afterID > 0 {
 		args = append(args, afterID)
-		q += fmt.Sprintf(" AND id>$%d", len(args))
+		q += s.q(fmt.Sprintf(" AND id>$%d", len(args)), " AND id>?")
 	}
 	args = append(args, limit)
-	q += fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args))
-	rows, err := s.pool.Query(ctx, q, args...)
+	q += s.q(fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args)), " ORDER BY id ASC LIMIT ?")
+	rows, err := s.db().Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -736,32 +843,92 @@ func (s *Store) ListChatMessages(ctx context.Context, author string, undelivered
 // run can never empty a table at once; remaining expired rows are removed by
 // subsequent runs.
 func (s *Store) PruneChat(ctx context.Context, limit int) (int64, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return 0, ErrDialectUnsupported
-	}
-
 	if limit < 1 || limit > ChatPruneMaxDelete {
 		limit = ChatPruneMaxDelete
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return 0, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	var total int64
 	for _, t := range chatPruneTables {
-		tag, err := tx.Exec(ctx, `DELETE FROM `+t.table+` WHERE id IN (SELECT id FROM `+t.table+` WHERE created_at < now() - interval '1 year' AND `+t.stateColumn+` = ANY($1) ORDER BY created_at ASC, id ASC LIMIT $2)`, sortedStateKeys(t.terminal), limit)
+		var tag int64
+		var err error
+		if s.dialect == mysqlDialect {
+			states := sortedStateKeys(t.terminal)
+			query := `SELECT id FROM ` + t.table + ` WHERE created_at<DATE_SUB(UTC_TIMESTAMP(6),INTERVAL 1 YEAR) AND ` + t.stateColumn + ` IN (` + placeholders(len(states)) + `) ORDER BY created_at ASC,id ASC LIMIT ? FOR UPDATE`
+			args := make([]any, 0, len(states)+1)
+			for _, state := range states {
+				args = append(args, state)
+			}
+			args = append(args, limit)
+			rows, e := tx.Query(ctx, query, args...)
+			if e != nil {
+				return 0, e
+			}
+			var ids []any
+			for rows.Next() {
+				var id string
+				if e := rows.Scan(&id); e != nil {
+					rows.Close()
+					return 0, e
+				}
+				ids = append(ids, id)
+			}
+			rows.Close()
+			if e := rows.Err(); e != nil {
+				return 0, e
+			}
+			if len(ids) > 0 {
+				delArgs := append([]any{}, ids...)
+				tag, err = tx.Exec(ctx, `DELETE FROM `+t.table+` WHERE id IN (`+placeholders(len(ids))+`)`, delArgs...)
+			}
+		} else {
+			tag, err = tx.Exec(ctx, `DELETE FROM `+t.table+` WHERE id IN (SELECT id FROM `+t.table+` WHERE created_at < now() - interval '1 year' AND `+t.stateColumn+` = ANY($1) ORDER BY created_at ASC, id ASC LIMIT $2)`, sortedStateKeys(t.terminal), limit)
+		}
 		if err != nil {
 			return 0, err
 		}
-		total += tag.RowsAffected()
+		total += tag
 	}
 	// Desk rows are conversation history, not operator directives. The
 	// directive retention rule only applies to delivered operator messages.
-	tag, err := tx.Exec(ctx, `DELETE FROM chat_messages WHERE id IN (SELECT id FROM chat_messages WHERE author='operator' AND relay_state='delivered' AND created_at < now() - interval '1 year' ORDER BY created_at,id LIMIT $1)`, limit)
+	var tag int64
+	if s.dialect == mysqlDialect {
+		rows, err := tx.Query(ctx, `SELECT id FROM chat_messages WHERE author='operator' AND relay_state='delivered' AND created_at<DATE_SUB(UTC_TIMESTAMP(6),INTERVAL 1 YEAR) ORDER BY created_at,id LIMIT ? FOR UPDATE`, limit)
+		if err != nil {
+			return 0, err
+		}
+		var ids []any
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return 0, err
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return 0, err
+		}
+		if len(ids) > 0 {
+			if _, err := tx.Exec(ctx, `DELETE FROM chat_message_questions WHERE message_id IN (`+placeholders(len(ids))+`)`, ids...); err != nil {
+				return 0, err
+			}
+			tag, err = tx.Exec(ctx, `DELETE FROM chat_messages WHERE id IN (`+placeholders(len(ids))+`)`, ids...)
+			if err != nil {
+				return 0, err
+			}
+		}
+	} else {
+		tag, err = tx.Exec(ctx, `DELETE FROM chat_messages WHERE id IN (SELECT id FROM chat_messages WHERE author='operator' AND relay_state='delivered' AND created_at < now() - interval '1 year' ORDER BY created_at,id LIMIT $1)`, limit)
+	}
 	if err != nil {
 		return 0, err
 	}
-	total += tag.RowsAffected()
+	total += tag
 	return total, tx.Commit(ctx)
 }

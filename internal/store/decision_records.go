@@ -129,7 +129,7 @@ type DecisionRecord struct {
 
 const decisionRecordColumns = `id,source,source_ref,task_id,job_id,lane,question,reading,grounds,options,recommended,default_action,due_at,snoozed_until,expires_at,status,answer,answered_by,answered_at,superseded_by,created_at,updated_at`
 
-func scanDecisionRecord(row pgx.Row, x *DecisionRecord, now time.Time) error {
+func scanDecisionRecord(row row, x *DecisionRecord, now time.Time) error {
 	var options, grounds []byte
 	if err := row.Scan(&x.ID, &x.Source, &x.SourceRef, &x.TaskID, &x.JobID, &x.Lane, &x.Question, &x.Reading, &grounds, &options, &x.Recommended, &x.DefaultAction,
 		&x.DueAt, &x.SnoozedUntil, &x.ExpiresAt, &x.Status, &x.Answer, &x.AnsweredBy, &x.AnsweredAt, &x.SupersededBy, &x.CreatedAt, &x.UpdatedAt); err != nil {
@@ -520,10 +520,6 @@ type DecisionRecordFilter struct {
 // ListDecisionRecords returns rows oldest first (created_at, then id). now is
 // the clock snooze, expiry and due dates are judged against.
 func (s *Store) ListDecisionRecords(ctx context.Context, f DecisionRecordFilter, now time.Time) ([]DecisionRecord, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	return listDecisionRecords(ctx, s.db(), f, now)
 }
 
@@ -601,6 +597,9 @@ func listDecisionRecords(ctx context.Context, pq poolQuerier, f DecisionRecordFi
 		args = append(args, f.Limit)
 		q += fmt.Sprintf(` LIMIT $%d`, len(args))
 	}
+	if dialectFor(pq) == mysqlDialect {
+		q, args = mysqlDecisionBinds(q, args)
+	}
 	rows, err := pq.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -617,14 +616,45 @@ func listDecisionRecords(ctx context.Context, pq poolQuerier, f DecisionRecordFi
 	return out, rows.Err()
 }
 
+// mysqlDecisionBinds converts dynamic PostgreSQL bind references to MySQL's
+// positional binds, expanding repeated references and dropping PostgreSQL type
+// casts. The decision-list builder owns the SQL this small adapter receives.
+func mysqlDecisionBinds(query string, args []any) (string, []any) {
+	var out strings.Builder
+	bound := make([]any, 0, len(args))
+	for i := 0; i < len(query); {
+		if query[i] != '$' || i+1 >= len(query) || query[i+1] < '0' || query[i+1] > '9' {
+			out.WriteByte(query[i])
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(query) && query[j] >= '0' && query[j] <= '9' {
+			j++
+		}
+		index, err := strconv.Atoi(query[i+1 : j])
+		if err != nil || index < 1 || index > len(args) {
+			out.WriteString(query[i:j])
+			i = j
+			continue
+		}
+		out.WriteByte('?')
+		bound = append(bound, args[index-1])
+		i = j
+		if i+1 < len(query) && query[i:i+2] == "::" {
+			i += 2
+			for i < len(query) && ((query[i] >= 'a' && query[i] <= 'z') || query[i] == '_') {
+				i++
+			}
+		}
+	}
+	return out.String(), bound
+}
+
 // GetDecisionRecord reads one row.
 func (s *Store) GetDecisionRecord(ctx context.Context, id int64, now time.Time) (DecisionRecord, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return DecisionRecord{}, false, ErrDialectUnsupported
-	}
-
 	var x DecisionRecord
-	err := scanDecisionRecord(s.pool.QueryRow(ctx, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id=$1`, id), &x, now)
+	err := scanDecisionRecord(s.db().QueryRow(ctx, s.q(`SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id=$1`, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id=?`), id), &x, now)
 	if errors.Is(err, ErrNoRows) {
 		return DecisionRecord{}, false, nil
 	}
@@ -767,24 +797,36 @@ func sameStrings(a, b []string) bool {
 // It writes the row only, never its source. A time not after now ends a
 // snooze.
 func (s *Store) SnoozeDecisionRecord(ctx context.Context, id int64, until, now time.Time) (DecisionRecord, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return DecisionRecord{}, ErrDialectUnsupported
-	}
-
 	if id < 1 || until.IsZero() {
 		return DecisionRecord{}, errors.New("invalid decision request snooze")
 	}
 	now = now.UTC()
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return DecisionRecord{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if _, err := snoozeDecisionRecordTx(ctx, tx, id, until, now); err != nil {
+	if s.dialect == mysqlDialect {
+		var previous *time.Time
+		if err := tx.QueryRow(ctx, `SELECT snoozed_until FROM decision_requests WHERE id=? FOR UPDATE`, id).Scan(&previous); err != nil {
+			if errors.Is(err, ErrNoRows) {
+				return DecisionRecord{}, ErrDecisionRecordNotFound
+			}
+			return DecisionRecord{}, err
+		}
+		affected, err := tx.Exec(ctx, `UPDATE decision_requests SET snoozed_until=?,updated_at=? WHERE id=? AND status='open'`, until.UTC(), now.UTC(), id)
+		if err != nil {
+			return DecisionRecord{}, err
+		}
+		if affected == 0 {
+			return DecisionRecord{}, ErrDecisionRecordNotOpen
+		}
+	} else if _, err := snoozeDecisionRecordTx(ctx, pgxTx(tx), id, until, now); err != nil {
 		return DecisionRecord{}, err
 	}
 	var x DecisionRecord
-	if err := scanDecisionRecord(tx.QueryRow(ctx, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id=$1`, id), &x, now); err != nil {
+	if err := scanDecisionRecord(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id=$1`, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id=?`), id), &x, now); err != nil {
 		return DecisionRecord{}, err
 	}
 	return x, tx.Commit(ctx)
