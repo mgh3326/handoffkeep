@@ -54,6 +54,10 @@ func init() {
 		if err != nil || report.JobsTotal != 2 || report.JobsSkillsSupported != 1 || len(report.ByHarnessModel) != 1 || len(report.ByHarnessModel[0].Skills) != 1 || report.ByHarnessModel[0].Skills[0].Calls != "2" {
 			t.Fatalf("JobSkillsReport() = (%+v, %v)", report, err)
 		}
+		emptyReport, err := s.JobSkillsReport(t.Context(), time.Now().UTC().Add(24*time.Hour), 10)
+		if err != nil || emptyReport.JobsTotal != 0 || emptyReport.JobsSkillsSupported != 0 || emptyReport.JobsSkillsUnsupported != 0 || emptyReport.JobsSkillsUnknown != 0 {
+			t.Fatalf("empty-window JobSkillsReport() = (%+v, %v)", emptyReport, err)
+		}
 		active, err = s.ReadActiveJobs(t.Context(), []int64{task.ID})
 		if err != nil || active[task.ID].Role == "" {
 			t.Fatalf("ReadActiveJobs() = (%+v, %v)", active, err)

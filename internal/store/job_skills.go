@@ -56,7 +56,7 @@ func (s *Store) JobSkillsReport(ctx context.Context, since time.Time, limit int)
 	defer tx.Rollback(ctx)
 	countsSQL := `SELECT count(*), count(*) FILTER (WHERE skills_supported IS TRUE), count(*) FILTER (WHERE skills_supported IS FALSE), count(*) FILTER (WHERE skills_supported IS NULL) FROM jobs WHERE created_at >= $1`
 	if s.dialect == mysqlDialect {
-		countsSQL = `SELECT count(*), SUM(skills_supported IS TRUE), SUM(skills_supported IS FALSE), SUM(skills_supported IS NULL) FROM jobs WHERE created_at >= ?`
+		countsSQL = `SELECT count(*), COALESCE(SUM(skills_supported IS TRUE),0), COALESCE(SUM(skills_supported IS FALSE),0), COALESCE(SUM(skills_supported IS NULL),0) FROM jobs WHERE created_at >= ?`
 	}
 	err = tx.QueryRow(ctx, countsSQL, since).Scan(&out.JobsTotal, &out.JobsSkillsSupported, &out.JobsSkillsUnsupported, &out.JobsSkillsUnknown)
 	if err != nil {
