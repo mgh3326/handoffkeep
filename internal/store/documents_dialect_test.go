@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,10 @@ func init() {
 		got, err := s.ListTranslations(ctx, "task", []TranslationSource{{EntityID: "1", Field: "title", Original: "title"}})
 		if err != nil || len(got) != 1 || got[0].Stale || got[0].Text != tr.Text {
 			t.Fatalf("translations: %+v err=%v", got, err)
+		}
+		got, err = s.ListTranslations(ctx, "task", []TranslationSource{{EntityID: "1", Field: "title", Original: "changed"}})
+		if err != nil || len(got) != 1 || !got[0].Stale {
+			t.Fatalf("stale: %+v err=%v", got, err)
 		}
 	})
 }
@@ -100,6 +105,36 @@ func init() {
 		}
 		if _, found, err := s.GetDocument(ctx, doc.Key); err != nil || found {
 			t.Fatalf("get after prune: found=%v err=%v", found, err)
+		}
+	})
+}
+
+func init() {
+	registerTaskAreaCase("translations/missing-fields", func(t *testing.T, s *Store) {
+		ctx := t.Context()
+		task, _, err := s.IntakeTask(ctx, IntakeInput{Source: "translation-test", SourceRef: "missing", Title: "title", Body: "body", CreatedBy: "tester"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		comment, err := s.CreateTaskComment(ctx, task.ID, "tester", "comment")
+		if err != nil {
+			t.Fatal(err)
+		}
+		tasks, err := s.MissingTaskTranslations(ctx, 10)
+		if err != nil || len(tasks) != 2 || tasks[0].Field != "title" || tasks[1].Field != "body" {
+			t.Fatalf("missing tasks: %+v err=%v", tasks, err)
+		}
+		comments, err := s.MissingCommentTranslations(ctx, 10)
+		if err != nil || len(comments) != 1 || comments[0].EntityID != strconv.FormatInt(comment.ID, 10) {
+			t.Fatalf("missing comments: %+v err=%v", comments, err)
+		}
+		tr := Translation{Entity: "task_comment", EntityID: strconv.FormatInt(comment.ID, 10), Field: "body", Lang: "ko", SourceSHA256: SourceSHA256("comment"), Text: "댓글", Translator: "tester"}
+		if err = s.PutTranslation(ctx, tr); err != nil {
+			t.Fatal(err)
+		}
+		comments, err = s.MissingCommentTranslations(ctx, 10)
+		if err != nil || len(comments) != 0 {
+			t.Fatalf("translated comments: %+v err=%v", comments, err)
 		}
 	})
 }
