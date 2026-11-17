@@ -102,7 +102,10 @@ func init() {
 		if err != nil || len(states) != 0 {
 			t.Fatalf("closed request snooze left inbox state %+v err=%v", states, err)
 		}
-		missingKey := "decision:request:" + itoa(1<<60)
+		missingKey := "decision:request:" + itoa(1<<40)
+		if !ValidInboxItemKey(missingKey) {
+			t.Fatalf("missing request probe key is malformed: %q", missingKey)
+		}
 		missing, err := s.ApplyInbox(ctx, []string{missingKey}, InboxActionSnooze, &until, "area-case", "missing-request-snooze")
 		if err != nil || len(missing.Items) != 1 || !errors.Is(missing.Items[0].Err, ErrDecisionRecordNotFound) {
 			t.Fatalf("missing request snooze = %+v err=%v, want decision_record_not_found", missing, err)
