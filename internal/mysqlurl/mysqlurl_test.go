@@ -1,6 +1,7 @@
 package mysqlurl
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,6 +16,17 @@ func TestParse(t *testing.T) {
 	}
 	if cfg.Params["time_zone"] != "'+00:00'" || cfg.Params["transaction_isolation"] != "'READ-COMMITTED'" {
 		t.Fatalf("incorrect session settings: %v", cfg.Params)
+	}
+}
+
+func TestParseMalformedURLDoesNotEchoCredentials(t *testing.T) {
+	const raw = "mysql://copy-user:secret%zz@localhost:3306/handoffkeep"
+	_, err := Parse(raw)
+	if err == nil {
+		t.Fatal("Parse accepted malformed URL")
+	}
+	if got := err.Error(); got != "malformed database URL" || strings.Contains(got, "secret") || strings.Contains(got, raw) {
+		t.Fatalf("malformed URL error=%q, want a fixed message with no credentials", got)
 	}
 }
 
