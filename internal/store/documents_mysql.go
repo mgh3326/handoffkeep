@@ -21,6 +21,12 @@ func (s *Store) mysqlPutDocument(ctx context.Context, x Document, now time.Time)
 
 func (s *Store) mysqlPutDocumentOnce(ctx context.Context, x Document, now time.Time) (Document, bool, error) {
 	isDeployRecord := strings.HasPrefix(x.Key, "deploy/")
+	if isDeployRecord && deployRecordNeedsNotice(parseStoredDeployRecord(x.Key, x.SHA256, x.Body, now)) {
+		// MySQL cannot atomically enqueue the deploy-result notice yet. Refuse
+		// before checking or writing the document so retries cannot report a
+		// successful no-op for a notice that was never queued.
+		return x, false, ErrDialectUnsupported
+	}
 	var hash string
 	var task *int64
 	var class *string

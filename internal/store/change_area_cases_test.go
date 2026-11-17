@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -146,5 +147,27 @@ func deployProjectionAndServicesCase(t *testing.T, s *Store) {
 	pages, err := s.ListDeployRecordsByPrefix(ctx, []string{"deploy/mysql-area/"}, 5)
 	if err != nil || len(pages["deploy/mysql-area/"].Records) != 3 || pages["deploy/mysql-area/"].Records[0].Key != newerInvalid || pages["deploy/mysql-area/"].Records[1].Record.Result != "failed" || pages["deploy/mysql-area/"].Records[2].Key != key || pages["deploy/mysql-area/"].Records[2].Record.Result != "success" {
 		t.Fatalf("deploy record pages=%+v err=%v", pages, err)
+	}
+	jobRecordKey := "deploy/mysql-area/20261117T150000Z"
+	jobRecordBody := []byte(`{"schema":"deploy-record/v0","service":"mysql-area","target":"main","result":"success","included_prs":[],"job_id":"job-5078","source":"test"}`)
+	_, _, jobRecordErr := s.PutDocument(ctx, Document{Key: jobRecordKey, Kind: "note", Body: string(jobRecordBody), CreatedBy: "test"})
+	if s.dialect == mysqlDialect {
+		if !errors.Is(jobRecordErr, ErrDialectUnsupported) {
+			t.Fatalf("job-linked deploy document err=%v, want ErrDialectUnsupported until the notice outbox is ported", jobRecordErr)
+		}
+		docsQuery := s.q(`SELECT COUNT(*) FROM documents WHERE key=$1`, `SELECT COUNT(*) FROM documents WHERE `+"`key`"+`=?`)
+		projectionQuery := s.q(`SELECT COUNT(*) FROM deploy_record_projection WHERE key=$1`, `SELECT COUNT(*) FROM deploy_record_projection WHERE `+"`key`"+`=?`)
+		var docs, projections int
+		if err = s.db().QueryRow(ctx, docsQuery, jobRecordKey).Scan(&docs); err != nil {
+			t.Fatal(err)
+		}
+		if err = s.db().QueryRow(ctx, projectionQuery, jobRecordKey).Scan(&projections); err != nil {
+			t.Fatal(err)
+		}
+		if docs != 0 || projections != 0 {
+			t.Fatalf("refused job deploy document wrote docs=%d projections=%d", docs, projections)
+		}
+	} else if jobRecordErr != nil {
+		t.Fatalf("PostgreSQL job-linked deploy document: %v", jobRecordErr)
 	}
 }
