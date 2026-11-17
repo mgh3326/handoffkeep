@@ -75,6 +75,12 @@ class RewriteTests(unittest.TestCase):
         self.assertIsNone(sqlport.rewrite(pg)[0])
         self.assertIn("RETURNING", sqlport.rewrite(pg)[2])
 
+    def test_hk5059_bench_literal_matches_the_hand_port(self):
+        # From PR #470's bench_outcomes.go:148; the SQL prefix is shared.
+        pg = " FROM bench_reps WHERE id=$1 FOR UPDATE"
+        mysql_hand = " FROM bench_reps WHERE id=? FOR UPDATE"
+        self.assertEqual(sqlport.rewrite(pg)[0], mysql_hand)
+
 
 if __name__ == "__main__":
     unittest.main()
