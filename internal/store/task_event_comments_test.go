@@ -193,7 +193,7 @@ func TestSystemEventCommentsHaveSeparateKeysAndDeduplicate(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	for range 2 {
-		if err = s.insertSystemTaskCommentTx(t.Context(), tx, taskID, source, eventKey, "Deployed abc1234 on api", now); err != nil {
+		if err = s.insertSystemTaskCommentTx(t.Context(), pgTransaction{tx}, taskID, source, eventKey, "Deployed abc1234 on api", now); err != nil {
 			t.Fatal(err)
 		}
 	}

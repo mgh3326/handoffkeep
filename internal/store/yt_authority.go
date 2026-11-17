@@ -97,7 +97,7 @@ func ytAuthorityKindOf(principal string) YTAuthorityKind {
 // (prepareYTOpTx). A switch (SetYTAuthority, FOR UPDATE) therefore waits for
 // every op preparation in flight and counts it once committed, and a
 // preparation that starts during a switch waits for it.
-func lockYTAuthorityForOpTx(ctx context.Context, tx pgx.Tx, principal string) error {
+func lockYTAuthorityForOpTx(ctx context.Context, tx transaction, principal string) error {
 	kind := ytAuthorityKindOf(principal)
 	if kind == "" {
 		return nil
@@ -158,9 +158,7 @@ func scanYTAuthority(row interface{ Scan(...any) error }, a *YTAuthority) error 
 
 // ytAuthoritiesTx reads every kind's row, in YTAuthorityKinds order; a kind
 // with no row is hk. lock is "" or a row-lock clause.
-func ytAuthoritiesTx(ctx context.Context, q interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}, lock string) ([]YTAuthority, error) {
+func ytAuthoritiesTx(ctx context.Context, q querier, lock string) ([]YTAuthority, error) {
 	rows, err := q.Query(ctx, `SELECT `+ytAuthorityColumns+` FROM yt_authority ORDER BY kind`+lock)
 	if err != nil {
 		return nil, err
@@ -189,7 +187,7 @@ func ytAuthoritiesTx(ctx context.Context, q interface {
 }
 
 // ytAuthorityTx reads one kind's side without a lock; no row is hk.
-func ytAuthorityTx(ctx context.Context, q ytRowQuerier, kind YTAuthorityKind) (YTAuthoritySide, error) {
+func ytAuthorityTx(ctx context.Context, q querier, kind YTAuthorityKind) (YTAuthoritySide, error) {
 	var side YTAuthoritySide
 	err := q.QueryRow(ctx, `SELECT authority FROM yt_authority WHERE kind=$1`, string(kind)).Scan(&side)
 	if errors.Is(err, ErrNoRows) || (err == nil && !validYTAuthoritySide(side)) {
@@ -204,14 +202,16 @@ func ytAuthorityTx(ctx context.Context, q ytRowQuerier, kind YTAuthorityKind) (Y
 // a switch that committed first. A missing row is created first (as hk, ON
 // CONFLICT DO NOTHING), so there is always a row to lock: a switch that
 // creates the same row waits for this insert, or this insert for the switch's.
-func ytAuthorityShareTx(ctx context.Context, tx pgx.Tx, kind YTAuthorityKind) (YTAuthoritySide, error) {
+func ytAuthorityShareTx(ctx context.Context, tx transaction, kind YTAuthorityKind) (YTAuthoritySide, error) {
 	var side YTAuthoritySide
-	err := tx.QueryRow(ctx, `SELECT authority FROM yt_authority WHERE kind=$1 FOR SHARE`, string(kind)).Scan(&side)
+	err := tx.QueryRow(ctx, `SELECT authority FROM yt_authority WHERE kind=`+sqlFor(tx, `$1`, `?`)+` FOR SHARE`, string(kind)).Scan(&side)
 	if errors.Is(err, ErrNoRows) {
-		if _, err := tx.Exec(ctx, `INSERT INTO yt_authority(kind) VALUES ($1) ON CONFLICT DO NOTHING`, string(kind)); err != nil {
+		if _, err := tx.Exec(ctx, sqlFor(tx,
+			`INSERT INTO yt_authority(kind) VALUES ($1) ON CONFLICT DO NOTHING`,
+			`INSERT IGNORE INTO yt_authority(kind) VALUES (?)`), string(kind)); err != nil {
 			return "", err
 		}
-		err = tx.QueryRow(ctx, `SELECT authority FROM yt_authority WHERE kind=$1 FOR SHARE`, string(kind)).Scan(&side)
+		err = tx.QueryRow(ctx, `SELECT authority FROM yt_authority WHERE kind=`+sqlFor(tx, `$1`, `?`)+` FOR SHARE`, string(kind)).Scan(&side)
 	}
 	if err != nil {
 		return "", err
@@ -224,20 +224,12 @@ func ytAuthorityShareTx(ctx context.Context, tx pgx.Tx, kind YTAuthorityKind) (Y
 
 // YTAuthorities reads every kind's row.
 func (s *Store) YTAuthorities(ctx context.Context) ([]YTAuthority, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
-	return ytAuthoritiesTx(ctx, s.pool, "")
+	return ytAuthoritiesTx(ctx, s.db(), "")
 }
 
 // YTAuthorityOf reads one kind's side; an unknown kind is hk.
 func (s *Store) YTAuthorityOf(ctx context.Context, kind YTAuthorityKind) (YTAuthoritySide, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return "", ErrDialectUnsupported
-	}
-
-	return ytAuthorityTx(ctx, s.pool, kind)
+	return ytAuthorityTx(ctx, s.db(), kind)
 }
 
 // ytAuthorityWriteModeOff explains why kind's write mode in this process is
@@ -299,10 +291,6 @@ const YTAuthoritySetMax = 2000
 // (they hold the row FOR SHARE); then plain reads of yt_write_ops,
 // yt_feed_cursors and sync_log.
 func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, side YTAuthoritySide, by, note string) (before, after []YTAuthority, err error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, nil, ErrDialectUnsupported
-	}
-
 	if len(kinds) == 0 || !validYTAuthoritySide(side) || strings.TrimSpace(by) == "" || !ValidActor(by) ||
 		strings.TrimSpace(note) == "" || !validText(note, YTAuthoritySetMax) {
 		return nil, nil, errors.New("invalid authority set: want kinds, hk or youtrack, --by and --note")
@@ -314,13 +302,39 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 		}
 		seen[k] = true
 	}
-	tx, err := s.pool.Begin(ctx)
+	if s.dialect == mysqlDialect {
+		// MySQL has no transaction-scoped advisory try-lock: the whole switch
+		// runs under the named sync lock on one connection (design §11.1),
+		// retried like tryYTSyncLockTx before it refuses.
+		for attempt := 1; ; attempt++ {
+			held, err := s.mysqlWriteTransactionWithLock(ctx, mysqlYTSyncLock, func(tx transaction) error {
+				var e error
+				before, after, e = s.setYTAuthorityTx(ctx, tx, seen, side, by, note)
+				return e
+			})
+			if err != nil || held {
+				return before, after, err
+			}
+			if attempt >= ytAuthoritySyncLockAttempts {
+				return nil, nil, fmt.Errorf("%w: a youtrack sync, adopt or comment catch-up holds the sync lock; try again when it ends", ErrYTAuthorityRefused)
+			}
+			t := time.NewTimer(ytAuthoritySyncLockWait)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return nil, nil, ctx.Err()
+			case <-t.C:
+			}
+		}
+	}
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if side == YTAuthorityYouTrack {
-		held, err := tryYTSyncLockTx(ctx, tx)
+		held, err := tryYTSyncLockTx(ctx, pgxTx(tx))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -328,15 +342,49 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 			return nil, nil, fmt.Errorf("%w: a youtrack sync, adopt or comment catch-up holds the sync lock; try again when it ends", ErrYTAuthorityRefused)
 		}
 	}
-	// A row a database lost (or never seeded) is hk; give it a row to lock.
-	if _, err := tx.Exec(ctx, `INSERT INTO yt_authority(kind) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING`, ytAuthorityKindStrings(YTAuthorityKinds)); err != nil {
+	before, after, err = s.setYTAuthorityTx(ctx, tx, seen, side, by, note)
+	if err != nil {
 		return nil, nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+	for _, k := range YTAuthorityKinds {
+		if seen[k] {
+			var changed bool
+			for _, a := range before {
+				if a.Kind == k && a.Authority != side {
+					changed = true
+				}
+			}
+			if changed {
+				log.Printf("ytwrite.authority_set kind=%s authority=%s switched_by=%q note=%q", k, side, by, note)
+			}
+		}
+	}
+	return before, after, nil
+}
+
+// setYTAuthorityTx is the body of a switch in one transaction (see
+// SetYTAuthority for the contract and the lock order). On MySQL a switch that
+// would change tasks or documents refuses: their preconditions read tables B4b
+// and B5 do not port yet.
+func (s *Store) setYTAuthorityTx(ctx context.Context, tx transaction, seen map[YTAuthorityKind]bool, side YTAuthoritySide, by, note string) (before, after []YTAuthority, err error) {
+	var change []YTAuthorityKind
+	// A row a database lost (or never seeded) is hk; give it a row to lock.
+	if dialectFor(tx) == mysqlDialect {
+		if _, err := tx.Exec(ctx, `INSERT IGNORE INTO yt_authority(kind) VALUES ('tasks'),('comments'),('documents'),('decisions')`); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		if _, err := tx.Exec(ctx, `INSERT INTO yt_authority(kind) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING`, ytAuthorityKindStrings(YTAuthorityKinds)); err != nil {
+			return nil, nil, err
+		}
 	}
 	before, err = ytAuthoritiesTx(ctx, tx, " FOR UPDATE")
 	if err != nil {
 		return nil, nil, err
 	}
-	var change []YTAuthorityKind
 	for _, a := range before {
 		if seen[a.Kind] && a.Authority != side {
 			change = append(change, a.Kind)
@@ -345,13 +393,19 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 	if side == YTAuthorityYouTrack {
 		var refusals []string
 		for _, k := range change {
+			if dialectFor(tx) == mysqlDialect && (k == YTAuthorityTasks || k == YTAuthorityDocuments) {
+				refusals = append(refusals, string(k)+": the "+string(k)+" switch reads areas MySQL does not port yet")
+				continue
+			}
 			if off := s.ytAuthorityWriteModeOff(k); off != "" {
 				refusals = append(refusals, string(k)+": "+off)
 				continue
 			}
 			var pending int
-			if err := tx.QueryRow(ctx, `SELECT count(*) FROM yt_write_ops WHERE principal = ANY($1)
-				AND state IN ('prepared','dispatched','remote_unknown')`, ytAuthorityPrincipals[k]).Scan(&pending); err != nil {
+			if err := tx.QueryRow(ctx, s.q(`SELECT count(*) FROM yt_write_ops WHERE principal = ANY($1)
+				AND state IN ('prepared','dispatched','remote_unknown')`,
+				`SELECT count(*) FROM yt_write_ops WHERE principal IN (`+placeholders(len(ytAuthorityPrincipals[k]))+`)
+				AND state IN ('prepared','dispatched','remote_unknown')`), ytInArgs(s, ytAuthorityPrincipals[k])...).Scan(&pending); err != nil {
 				return nil, nil, err
 			}
 			if pending > 0 {
@@ -378,7 +432,7 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 				// covers what a feed cursor cannot (changes before it, a
 				// binding published since, a create that was refused).
 				g, _ := s.ytDocsNow()
-				n, ids, err := ytArticlesUnwrittenTx(ctx, tx, g.tenant)
+				n, ids, err := ytArticlesUnwrittenTx(ctx, pgxTx(tx), g.tenant)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -394,10 +448,15 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 				var prunedThrough int64
 				var cursor *int64
 				var behind int
-				if err := tx.QueryRow(ctx, `SELECT st.pruned_through, c.last_sync_id,
+				feedArgs := append([]any{f.consumer}, ytInArgs(s, f.models)...)
+				if err := tx.QueryRow(ctx, s.q(`SELECT st.pruned_through, c.last_sync_id,
 					(SELECT count(*) FROM sync_log l WHERE l.sync_id > coalesce(c.last_sync_id, 0) AND l.model = ANY($2::text[]))
 					FROM sync_state st LEFT JOIN yt_feed_cursors c ON c.consumer = $1
-					WHERE st.singleton`, f.consumer, f.models).Scan(&prunedThrough, &cursor, &behind); err != nil {
+					WHERE st.singleton`,
+					`SELECT st.pruned_through, c.last_sync_id,
+					(SELECT count(*) FROM sync_log l WHERE l.sync_id > coalesce(c.last_sync_id, 0) AND l.model IN (`+placeholders(len(f.models))+`))
+					FROM sync_state st LEFT JOIN yt_feed_cursors c ON c.consumer = ?
+					WHERE st.singleton`), feedArgs...).Scan(&prunedThrough, &cursor, &behind); err != nil {
 					return nil, nil, err
 				}
 				if cursor == nil {
@@ -420,22 +479,34 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 		}
 	}
 	if len(change) > 0 {
-		if _, err := tx.Exec(ctx, `UPDATE yt_authority SET authority=$2, switched_at=$3, switched_by=$4, note=$5 WHERE kind = ANY($1)`,
-			ytAuthorityKindStrings(change), string(side), time.Now().UTC(), by, note); err != nil {
+		var updArgs []any
+		var updSQL string
+		if s.dialect == mysqlDialect {
+			updSQL = `UPDATE yt_authority SET authority=?, switched_at=?, switched_by=?, note=? WHERE kind IN (` + placeholders(len(change)) + `)`
+			updArgs = append([]any{string(side), time.Now().UTC(), by, note}, ytInArgs(s, ytAuthorityKindStrings(change))...)
+		} else {
+			updSQL = `UPDATE yt_authority SET authority=$2, switched_at=$3, switched_by=$4, note=$5 WHERE kind = ANY($1)`
+			updArgs = []any{ytAuthorityKindStrings(change), string(side), time.Now().UTC(), by, note}
+		}
+		if _, err := tx.Exec(ctx, updSQL, updArgs...); err != nil {
 			return nil, nil, err
 		}
 	}
 	after, err = ytAuthoritiesTx(ctx, tx, "")
-	if err != nil {
-		return nil, nil, err
+	return before, after, err
+}
+
+// ytInArgs is a5Int64Args for string slices: one slice on PostgreSQL (=
+// ANY($n)), one value each on MySQL (IN (...)).
+func ytInArgs(s *Store, in []string) []any {
+	if s.dialect != mysqlDialect {
+		return []any{in}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, nil, err
+	out := make([]any, len(in))
+	for i, v := range in {
+		out[i] = v
 	}
-	for _, k := range change {
-		log.Printf("ytwrite.authority_set kind=%s authority=%s switched_by=%q note=%q", k, side, by, note)
-	}
-	return before, after, nil
+	return out
 }
 
 func ytAuthorityKindStrings(kinds []YTAuthorityKind) []string {

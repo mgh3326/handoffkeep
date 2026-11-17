@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -56,6 +54,30 @@ const ytCatchUpSelectSQL = `SELECT c.id, c.task_id, c.body, c.author, c.created_
 	  AND NOT (c.id = ANY($5::bigint[]))
 	ORDER BY c.id LIMIT $6`
 
+// ytCatchUpSelectMySQL is ytCatchUpSelectSQL on MySQL. youtrack_comment_links
+// is an empty table the port leaves out (see migration
+// 20261118-mysql-yt-write-ops), so its clause goes too.
+const ytCatchUpSelectMySQLHead = `SELECT c.id, c.task_id, c.body, c.author, c.created_at
+	FROM yt_task_bindings b JOIN task_comments c ON c.task_id = b.task_id AND c.id > b.comments_from
+	WHERE c.author <> ? AND (NOT ? OR b.origin IN ('op_applied','auto_verified'))
+	  AND NOT EXISTS (SELECT 1 FROM yt_comment_write_links w WHERE w.comment_id = c.id)
+	  AND NOT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.principal = ? AND o.kind = ? AND o.idem_key = CONCAT(?, CAST(c.id AS CHAR)))
+	  AND NOT (c.id IN (`
+const ytCatchUpSelectMySQLTail = `)))
+	ORDER BY c.id LIMIT ?`
+
+// ytCatchUpArgs orders the candidate scan's arguments for each dialect.
+func ytCatchUpArgs(s *Store, skip []int64, limit int, issueOnly bool) []any {
+	if s.dialect == mysqlDialect {
+		args := []any{YouTrackOwnedActor, issueOnly, YTCommentPrincipal, ytwrite.KindCommentAppend, ytCommentKeyPrefix}
+		for _, id := range skip {
+			args = append(args, id)
+		}
+		return append(args, limit)
+	}
+	return []any{YouTrackOwnedActor, YTCommentPrincipal, ytwrite.KindCommentAppend, ytCommentKeyPrefix, skip, limit, issueOnly}
+}
+
 // CatchUpYTComments prepares, in mode on, the op of each comment that the
 // enqueue would have copied but that has none: up to limit comments, oldest
 // first, each in its own transaction. skip lists comment ids to leave out
@@ -80,9 +102,6 @@ const ytCatchUpSelectSQL = `SELECT c.id, c.task_id, c.body, c.author, c.created_
 // task's lane lock, and what ytCommentOnOpTx reads and writes. It never takes
 // taskCommentInsertLock or a task row.
 func (s *Store) CatchUpYTComments(ctx context.Context, limit int, skip []int64) (YTCatchUp, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTCatchUp{}, ErrDialectUnsupported
-	}
 	return s.catchUpYTComments(ctx, limit, skip, false)
 }
 
@@ -96,9 +115,6 @@ func (s *Store) CatchUpYTComments(ctx context.Context, limit int, skip []int64) 
 // says which of them the issue still lacks. The write worker runs it in mode
 // on even when the general catch-up (HANDOFFKEEP_YT_COMMENTS_CATCHUP) is off.
 func (s *Store) CatchUpYTIssueComments(ctx context.Context, limit int, skip []int64) (YTCatchUp, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTCatchUp{}, ErrDialectUnsupported
-	}
 	return s.catchUpYTComments(ctx, limit, skip, true)
 }
 
@@ -124,7 +140,11 @@ func (s *Store) catchUpYTComments(ctx context.Context, limit int, skip []int64, 
 	if side == YTAuthorityYouTrack {
 		return out, nil
 	}
-	rows, err := s.pool.Query(ctx, ytCatchUpSelectSQL, YouTrackOwnedActor, YTCommentPrincipal, ytwrite.KindCommentAppend, ytCommentKeyPrefix, skip, limit, issueOnly)
+	selectSQL := ytCatchUpSelectSQL
+	if s.dialect == mysqlDialect {
+		selectSQL = ytCatchUpSelectMySQLHead + placeholders(len(skip)) + ytCatchUpSelectMySQLTail
+	}
+	rows, err := s.db().Query(ctx, selectSQL, ytCatchUpArgs(s, skip, limit, issueOnly)...)
 	if err != nil {
 		return out, err
 	}
@@ -162,7 +182,7 @@ func (s *Store) catchUpYTComments(ctx context.Context, limit int, skip []int64, 
 	// needs no second pool connection, so it cannot wait on itself in a
 	// pool of one.
 	for _, c := range comments {
-		op, prepared, source, err := catchUpYTComment(ctx, lock.conn, c)
+		op, prepared, source, err := s.catchUpYTComment(ctx, lock, c)
 		if err != nil {
 			return out, err
 		}
@@ -178,22 +198,36 @@ func (s *Store) catchUpYTComments(ctx context.Context, limit int, skip []int64, 
 	return out, nil
 }
 
-// ytTxBeginner is a pool or one of its connections.
-type ytTxBeginner interface {
-	Begin(ctx context.Context) (pgx.Tx, error)
-}
-
-// catchUpYTComment prepares comment c's op in its own transaction on db.
-// prepared is false when comments are canonical in YouTrack, when another
-// writer linked the comment first (an op link or a youtrack_comment_links
-// row) or the task has no binding; source is the
-// disagreeing source when the binding is ambiguous.
-func catchUpYTComment(ctx context.Context, db ytTxBeginner, c TaskComment) (ytwrite.Op, bool, string, error) {
-	tx, err := db.Begin(ctx)
+// catchUpYTComment is one comment of a catch-up pass, in its own transaction
+// on the lock's own connection (the pass holds the sync lock: MySQL's is a
+// session lock, so the transaction must run on that session).
+func (s *Store) catchUpYTComment(ctx context.Context, lock *YouTrackSyncLock, c TaskComment) (op ytwrite.Op, prepared bool, source string, err error) {
+	if lock.mysqlConn != nil {
+		err = mysqlWriteTransactionOnce(ctx, lock.mysqlConn, func(tx transaction) error {
+			var e error
+			op, prepared, source, e = catchUpYTCommentTx(ctx, tx, c)
+			return e
+		})
+		return op, prepared, source, err
+	}
+	tx, err := lock.conn.Begin(ctx)
 	if err != nil {
 		return ytwrite.Op{}, false, "", err
 	}
 	defer tx.Rollback(ctx)
+	op, prepared, source, err = catchUpYTCommentTx(ctx, pgTransaction{tx}, c)
+	if err != nil {
+		return ytwrite.Op{}, false, "", err
+	}
+	return op, prepared, source, tx.Commit(ctx)
+}
+
+// catchUpYTCommentTx prepares comment c's op in the caller's transaction.
+// prepared is false when comments are canonical in YouTrack, when another
+// writer linked the comment first (an op link or a youtrack_comment_links
+// row) or the task has no binding; source is the
+// disagreeing source when the binding is ambiguous.
+func catchUpYTCommentTx(ctx context.Context, tx transaction, c TaskComment) (ytwrite.Op, bool, string, error) {
 	// FOR SHARE on the comments authority row, as the audit enqueue reads it
 	// (EnqueueYTAuditComment): a switch to youtrack commits before this read
 	// or after this transaction, never inside it.
@@ -211,9 +245,11 @@ func catchUpYTComment(ctx context.Context, db ytTxBeginner, c TaskComment) (ytwr
 	// worker's op and link, and a youtrack_comment_links row another writer
 	// left after the scan.
 	var owned bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_write_links WHERE comment_id=$1)
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS(SELECT 1 FROM yt_comment_write_links WHERE comment_id=$1)
 		OR EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$2 AND kind=$3 AND idem_key=$4)
 		OR EXISTS(SELECT 1 FROM youtrack_comment_links WHERE hk_comment_id=$1)`,
+		`SELECT EXISTS(SELECT 1 FROM yt_comment_write_links WHERE comment_id=?)
+		OR EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=? AND kind=? AND idem_key=?)`),
 		c.ID, YTCommentPrincipal, ytwrite.KindCommentAppend, YTCommentKey(c.ID)).Scan(&owned); err != nil {
 		return ytwrite.Op{}, false, "", err
 	}
@@ -221,8 +257,5 @@ func catchUpYTComment(ctx context.Context, db ytTxBeginner, c TaskComment) (ytwr
 		return ytwrite.Op{}, false, "", nil
 	}
 	op, prepared, source, err := ytCommentOnOpTx(ctx, tx, c, time.Now().UTC())
-	if err != nil || !prepared {
-		return ytwrite.Op{}, false, source, err
-	}
-	return op, true, "", tx.Commit(ctx)
+	return op, prepared, source, err
 }

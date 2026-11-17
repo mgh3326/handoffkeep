@@ -80,7 +80,7 @@ func lockYTOpTx(ctx context.Context, tx pgx.Tx, id int64) (ytwrite.Op, error) {
 	if err != nil {
 		return ytwrite.Op{}, err
 	}
-	if err := lockYTEntity(ctx, tx, kind, entity); err != nil {
+	if err := lockYTEntity(ctx, pgTransaction{tx}, kind, entity); err != nil {
 		return ytwrite.Op{}, err
 	}
 	return scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1 FOR UPDATE`, id))

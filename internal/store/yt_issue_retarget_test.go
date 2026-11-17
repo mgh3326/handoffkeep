@@ -353,7 +353,7 @@ func TestYTIssueBackfillReadsTheTaskUnderTheLaneLock(t *testing.T) {
 	if _, err := tx.Exec(ctx, `UPDATE tasks SET project='ytr-unmapped' WHERE id=$1`, x.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(x.ID, 10)); err != nil {
+	if err := lockYTEntity(ctx, pgTransaction{tx}, "task", strconv.FormatInt(x.ID, 10)); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)

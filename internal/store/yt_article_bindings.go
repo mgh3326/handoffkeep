@@ -257,7 +257,7 @@ func (s *Store) YTArticleBinding(ctx context.Context, documentID int64) (YTArtic
 		return YTArticleBinding{}, false, ErrDialectUnsupported
 	}
 
-	return readYTArticleBinding(ctx, s.pool, documentID)
+	return readYTArticleBinding(ctx, pgQuerier{pool: s.pool}, documentID)
 }
 
 // lockYTArticleSourcesTx takes FOR SHARE, to commit, on what a candidate is
@@ -337,14 +337,14 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 		return YTArticleBinding{}, err
 	}
 	defer tx.Rollback(ctx)
-	if err := lockYTEntity(ctx, tx, ytwrite.ArticleEntity, strconv.FormatInt(b.DocumentID, 10)); err != nil {
+	if err := lockYTEntity(ctx, pgTransaction{tx}, ytwrite.ArticleEntity, strconv.FormatInt(b.DocumentID, 10)); err != nil {
 		return YTArticleBinding{}, err
 	}
 	// FOR SHARE on the documents authority row before the binding exists
 	// (r4547807096): a switch (FOR UPDATE) either commits first, and this
 	// transaction then sees documents canonical in YouTrack and queues no
 	// update, or waits for the binding and its update and counts them.
-	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityDocuments)
+	side, err := ytAuthorityShareTx(ctx, pgTransaction{tx}, YTAuthorityDocuments)
 	if err != nil {
 		return YTArticleBinding{}, err
 	}
@@ -420,7 +420,7 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 	if !errors.Is(err, ErrNoRows) {
 		return YTArticleBinding{}, err
 	}
-	have, found, err := readYTArticleBinding(ctx, tx, b.DocumentID)
+	have, found, err := readYTArticleBinding(ctx, pgTransaction{tx}, b.DocumentID)
 	switch {
 	case err != nil:
 		return YTArticleBinding{}, err

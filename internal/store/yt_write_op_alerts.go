@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -51,16 +49,17 @@ var ytWriteOpAlertPointer = map[string]string{
 // both read an op as unmarked and announce it in two windows.
 func (s *Store) EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int, error) {
 	if s != nil && s.dialect == mysqlDialect {
+		// The notice lands in notification_outbox, which is not ported.
 		return 0, ErrDialectUnsupported
 	}
-
 	now = now.UTC()
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return 0, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('yt_write_op_alerts', 0))`); err != nil {
+	if err := s.ytAlertPassLock(ctx, tx); err != nil {
 		return 0, err
 	}
 
@@ -75,7 +74,7 @@ func (s *Store) EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int,
 			continue
 		}
 		eventID := fmt.Sprintf("yt-ops-%s-%d", class, window.Unix())
-		inserted, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindYTWriteOp, "handoffkeep-design", eventID, ytWriteOpAlertText(class, cands), now)
+		inserted, err := insertNotificationOutboxOnce(ctx, pgxTx(tx), OutboxKindYTWriteOp, "handoffkeep-design", eventID, ytWriteOpAlertText(class, cands), now)
 		if err != nil {
 			return 0, err
 		}
@@ -86,8 +85,7 @@ func (s *Store) EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int,
 		for i, c := range cands {
 			ids[i] = c.id
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO yt_write_op_alerts(op_id, alert_class, created_at)
-			SELECT x, $2::text, $3::timestamptz FROM unnest($1::bigint[]) AS x ON CONFLICT DO NOTHING`, ids, class, now); err != nil {
+		if _, err := tx.Exec(ctx, s.ytAlertMarkQ(len(ids)), s.ytAlertMarkArgs(ids, class, now)...); err != nil {
 			return 0, err
 		}
 		created++
@@ -118,24 +116,31 @@ type ytWriteOpAlertCandidate struct {
 // (ytHeldClass: held_binding, held_authority_youtrack, held_mode, ...), not
 // under "prepared", so one notice tells the operator which command applies;
 // an op its gate admits, and any other kind, stays "prepared".
-func (s *Store) ytWriteOpAlertCandidates(ctx context.Context, tx pgx.Tx, class string, cutoff time.Time) ([]ytWriteOpAlertCandidate, error) {
+func (s *Store) ytWriteOpAlertCandidates(ctx context.Context, tx transaction, class string, cutoff time.Time) ([]ytWriteOpAlertCandidate, error) {
 	// The binding-conflict reason is a literal, not a parameter, so a cached
 	// generic plan can still use the partial index yt_write_ops_alert_scan.
 	var q string
 	var args []any
 	switch class {
 	case ytWriteOpAlertStuck:
-		q = `SELECT o.state, o.reason, ` + ytHeldOpColumns + ` FROM yt_write_ops o
+		q = sqlFor(tx, `SELECT o.state, o.reason, `+ytHeldOpColumns+` FROM yt_write_ops o
 			WHERE ((o.state='prepared' AND o.created_at <= $1) OR (o.state='dispatched' AND o.dispatched_at <= $1)
 				OR (o.state='remote_unknown' AND o.created_at <= $1))
 			AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='stuck')
-			ORDER BY o.id LIMIT $2 FOR SHARE OF o`
+			ORDER BY o.id LIMIT $2 FOR SHARE OF o`, `SELECT o.state, o.reason, `+ytHeldOpColumns+` FROM yt_write_ops o
+			WHERE ((o.state='prepared' AND o.created_at <= ?) OR (o.state='dispatched' AND o.dispatched_at <= ?)
+				OR (o.state='remote_unknown' AND o.created_at <= ?))
+			AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='stuck')
+			ORDER BY o.id LIMIT ? FOR SHARE`)
 		args = []any{cutoff.UTC(), ytWriteOpAlertBatchMax}
 	case ytWriteOpAlertRejected:
-		q = `SELECT o.state, o.reason, ` + ytHeldOpColumns + ` FROM yt_write_ops o
-			WHERE (o.state='rejected' OR (o.state='applied' AND o.reason='` + ytwrite.ReasonBindingConflict + `'))
+		q = sqlFor(tx, `SELECT o.state, o.reason, `+ytHeldOpColumns+` FROM yt_write_ops o
+			WHERE (o.state='rejected' OR (o.state='applied' AND o.reason='`+ytwrite.ReasonBindingConflict+`'))
 			AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='rejected')
-			ORDER BY o.id LIMIT $1 FOR SHARE OF o`
+			ORDER BY o.id LIMIT $1 FOR SHARE OF o`, `SELECT o.state, o.reason, `+ytHeldOpColumns+` FROM yt_write_ops o
+			WHERE (o.state='rejected' OR (o.state='applied' AND o.reason='`+ytwrite.ReasonBindingConflict+`'))
+			AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='rejected')
+			ORDER BY o.id LIMIT ? FOR SHARE`)
 		// Only the limit: this class has no time condition, so a cutoff
 		// argument would have no placeholder to bind.
 		args = []any{ytWriteOpAlertBatchMax}
@@ -223,4 +228,38 @@ func ytWriteOpAlertText(class string, cands []ytWriteOpAlertCandidate) string {
 	}
 	text := fmt.Sprintf("[ytwrite] %d %s (%s) op ids %s%s | %s", len(cands), class, strings.Join(parts, ", "), strings.Join(ids, ", "), more, ytWriteOpAlertPointer[class])
 	return text
+}
+
+// ytAlertPassLock serialises alert passes: a transaction-scoped advisory lock
+// on PostgreSQL, a transaction-held session lock on MySQL.
+func (s *Store) ytAlertPassLock(ctx context.Context, tx transaction) error {
+	if dialectFor(tx) == mysqlDialect {
+		_, err := mysqlTransactionLock(ctx, tx, mysqlLockKey("ns", "yt-op-alerts"), false)
+		return err
+	}
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('yt_write_op_alerts', 0))`)
+	return err
+}
+
+// ytAlertMarkQ is the "mark these ops announced" insert in this store's
+// dialect.
+func (s *Store) ytAlertMarkQ(n int) string {
+	if s.dialect == mysqlDialect {
+		return `INSERT IGNORE INTO yt_write_op_alerts(op_id, alert_class, created_at) VALUES ` +
+			strings.TrimSuffix(strings.Repeat(`(?,?,?),`, n), `,`)
+	}
+	return `INSERT INTO yt_write_op_alerts(op_id, alert_class, created_at)
+		SELECT x, $2::text, $3::timestamptz FROM unnest($1::bigint[]) AS x ON CONFLICT DO NOTHING`
+}
+
+// ytAlertMarkArgs lays out the mark insert's arguments per dialect.
+func (s *Store) ytAlertMarkArgs(ids []int64, class string, now time.Time) []any {
+	if s.dialect == mysqlDialect {
+		args := make([]any, 0, 3*len(ids))
+		for _, id := range ids {
+			args = append(args, id, class, now)
+		}
+		return args
+	}
+	return []any{ids, class, now}
 }

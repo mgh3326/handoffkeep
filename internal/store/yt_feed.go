@@ -389,7 +389,7 @@ func prepareYTSnapshotRuleTx(ctx context.Context, tx pgx.Tx, now time.Time, n yt
 	if sha == "" || n.Kind == "" || n.EntityKind == "" || n.EntityID == "" {
 		return ytwrite.Op{}, false, errors.New("snapshot op needs a kind, an entity and a sha")
 	}
-	if err := lockYTEntity(ctx, tx, n.EntityKind, n.EntityID); err != nil {
+	if err := lockYTEntity(ctx, pgTransaction{tx}, n.EntityKind, n.EntityID); err != nil {
 		return ytwrite.Op{}, false, err
 	}
 	var lastSHA string
@@ -413,7 +413,7 @@ func prepareYTSnapshotRuleTx(ctx context.Context, tx pgx.Tx, now time.Time, n yt
 	}
 	seq++
 	n.Key = SnapshotKey(n.Kind, n.EntityID, seq, sha)
-	op, _, err := prepareYTOpTx(ctx, tx, now, n)
+	op, _, err := prepareYTOpTx(ctx, pgTransaction{tx}, now, n)
 	if err != nil {
 		return ytwrite.Op{}, false, err
 	}

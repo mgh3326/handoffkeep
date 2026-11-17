@@ -28,7 +28,7 @@ func (l *YTWriteLedger) RecordAdoption(ctx context.Context, now time.Time, id in
 	if err != nil {
 		return err
 	}
-	if a, found, err := readYTAdoption(ctx, tx, id); err != nil {
+	if a, found, err := readYTAdoption(ctx, pgTransaction{tx}, id); err != nil {
 		return err
 	} else if found {
 		if a.Attempts != attempts || a.YTID != ytID {
@@ -48,7 +48,7 @@ func (l *YTWriteLedger) RecordAdoption(ctx context.Context, now time.Time, id in
 
 // Adoption reads op id's adoption record.
 func (l *YTWriteLedger) Adoption(ctx context.Context, id int64) (ytwrite.Adoption, bool, error) {
-	return readYTAdoption(ctx, l.s.pool, id)
+	return readYTAdoption(ctx, pgQuerier{pool: l.s.pool}, id)
 }
 
 func readYTAdoption(ctx context.Context, q ytRowQuerier, id int64) (ytwrite.Adoption, bool, error) {

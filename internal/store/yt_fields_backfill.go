@@ -175,7 +175,7 @@ func (s *Store) backfillYTFields(ctx context.Context, tenant string, id int64, d
 		return "", 0, "", false, err
 	}
 	defer tx.Rollback(ctx)
-	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(id, 10)); err != nil {
+	if err := lockYTEntity(ctx, pgTransaction{tx}, "task", strconv.FormatInt(id, 10)); err != nil {
 		return "", 0, "", false, err
 	}
 	now := time.Now().UTC()

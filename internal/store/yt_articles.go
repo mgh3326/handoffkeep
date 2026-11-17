@@ -116,9 +116,36 @@ func (s *Store) ytDocsNow() (ytDocsGate, bool) {
 func init() {
 	registerYTKindGate(ytwrite.KindArticleCreate, ytArticleCreateGateSQL)
 	registerYTKindGate(ytwrite.KindArticleUpdate, ytArticleUpdateGateSQL)
-	registerYTApplyHook(ytwrite.KindArticleCreate, ytApplyHook{conflict: ytArticleConflictTx, bind: bindYTArticleApplyTx})
-	registerYTApplyHook(ytwrite.KindArticleUpdate, ytApplyHook{conflict: noYTConflict, bind: bindYTArticleUpdateApplyTx})
+	registerYTApplyHook(ytwrite.KindArticleCreate, ytApplyHook{conflict: ytArticleConflictTxQ, bind: bindYTArticleApplyTxQ})
+	registerYTApplyHook(ytwrite.KindArticleUpdate, ytApplyHook{conflict: noYTConflictQ, bind: bindYTArticleUpdateApplyTxQ})
 	registerYTFeedStoreConsumer(ytDocsConsumer, []string{"document"}, ytDocsHandler)
+}
+
+// The article hooks stay on pgx.Tx: their tables are B5. The adapters refuse
+// a MySQL store before unwrapping, never silently.
+func ytArticleConflictTxQ(ctx context.Context, tx transaction, op ytwrite.Op, ytID string) (string, error) {
+	if dialectFor(tx) == mysqlDialect {
+		return "", ErrDialectUnsupported
+	}
+	return ytArticleConflictTx(ctx, pgxTx(tx), op, ytID)
+}
+func bindYTArticleApplyTxQ(s *Store, ctx context.Context, tx transaction, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
+	if dialectFor(tx) == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+	return bindYTArticleApplyTx(s, ctx, pgxTx(tx), op, ytID, now, adopted)
+}
+func noYTConflictQ(ctx context.Context, tx transaction, op ytwrite.Op, ytID string) (string, error) {
+	if dialectFor(tx) == mysqlDialect {
+		return "", ErrDialectUnsupported
+	}
+	return noYTConflict(ctx, pgxTx(tx), op, ytID)
+}
+func bindYTArticleUpdateApplyTxQ(s *Store, ctx context.Context, tx transaction, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
+	if dialectFor(tx) == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+	return bindYTArticleUpdateApplyTx(s, ctx, pgxTx(tx), op, ytID, now, adopted)
 }
 
 // ytArticleCreateGateSQL is the article_create gate (ytAdmitSQL): mode on,
@@ -135,7 +162,7 @@ func ytArticleCreateGateSQL(s *Store) string {
 // claimYTArticleCreateTx re-checks the source document while Claim holds its
 // document lane lock. A prepared create is rejected before dispatch if its
 // document was deleted or moved out of the article scope in the meantime.
-func claimYTArticleCreateTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (reject, detail string, err error) {
+func claimYTArticleCreateTx(ctx context.Context, tx transaction, op ytwrite.Op) (reject, detail string, err error) {
 	if op.Kind != ytwrite.KindArticleCreate || op.Principal != YTDocsPrincipal {
 		return "", "", nil
 	}
@@ -143,9 +170,13 @@ func claimYTArticleCreateTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (reje
 	if parseErr != nil || id < 1 || op.EntityKind != ytwrite.ArticleEntity {
 		return ytwrite.ReasonOutOfScope, "article_create is not on a document lane", nil
 	}
+	if dialectFor(tx) == mysqlDialect {
+		// B5: documents are not ported.
+		return "", "", ErrDialectUnsupported
+	}
 	var key string
 	var taskID *int64
-	err = tx.QueryRow(ctx, `SELECT key, task_id FROM documents WHERE id=$1 FOR SHARE`, id).Scan(&key, &taskID)
+	err = pgxTx(tx).QueryRow(ctx, `SELECT key, task_id FROM documents WHERE id=$1 FOR SHARE`, id).Scan(&key, &taskID)
 	if errors.Is(err, ErrNoRows) {
 		return ytwrite.ReasonOutOfScope, "document was deleted before article_create dispatch", nil
 	}
@@ -303,7 +334,7 @@ func readYTArticleRow(ctx context.Context, tx pgx.Tx, id int64) (*ytArticleRow, 
 			return nil, err
 		}
 	}
-	r.binding, r.bound, err = readYTArticleBinding(ctx, tx, id)
+	r.binding, r.bound, err = readYTArticleBinding(ctx, pgTransaction{tx}, id)
 	if err != nil {
 		return nil, err
 	}
@@ -503,7 +534,7 @@ func prepareYTArticleTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDocsG
 	if err != nil {
 		return "", err
 	}
-	op, created, err := prepareYTOpTx(ctx, tx, now, n)
+	op, created, err := prepareYTOpTx(ctx, pgTransaction{tx}, now, n)
 	if err != nil {
 		return "", err
 	}
@@ -515,14 +546,14 @@ func prepareYTArticleTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDocsG
 		if r.legacyParts <= 1 {
 			detail = fmt.Sprintf("the legacy article %s's project has no YouTrack id in youtrack_projects", r.legacyArticle)
 		}
-		if _, err := rejectYTOpTx(ctx, tx, now, op.ID, ytwrite.ReasonLegacySyncedUnverified, detail); err != nil {
+		if _, err := rejectYTOpTx(ctx, pgTransaction{tx}, now, op.ID, ytwrite.ReasonLegacySyncedUnverified, detail); err != nil {
 			return "", err
 		}
 		log.Printf("ytwrite.article_create_rejected op_id=%d document_id=%d reason=%s err=%q", op.ID, id, ytwrite.ReasonLegacySyncedUnverified, detail)
 		return ytArticleLegacyUnverified, nil
 	}
 	if cerr := ytwrite.CheckArticle(req); cerr != nil {
-		if _, err := rejectYTOpTx(ctx, tx, now, op.ID, ytwrite.ReasonInvalidIssue, cerr.Error()); err != nil {
+		if _, err := rejectYTOpTx(ctx, pgTransaction{tx}, now, op.ID, ytwrite.ReasonInvalidIssue, cerr.Error()); err != nil {
 			return "", err
 		}
 		log.Printf("ytwrite.article_create_rejected op_id=%d document_id=%d err=%q", op.ID, id, cerr.Error())
@@ -565,7 +596,7 @@ func ytDocsHandler(s *Store, now time.Time) FeedHandler {
 			// Read under the lane lock a create's Apply publishes the
 			// binding under: a binding committed before this read is seen,
 			// and one after it waits for this pass.
-			if err := lockYTEntity(ctx, tx, ytwrite.ArticleEntity, strconv.FormatInt(id, 10)); err != nil {
+			if err := lockYTEntity(ctx, pgTransaction{tx}, ytwrite.ArticleEntity, strconv.FormatInt(id, 10)); err != nil {
 				return err
 			}
 			r, err := readYTArticleRow(ctx, tx, id)
@@ -648,7 +679,7 @@ func bindYTArticleApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.O
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		have, found, err := readYTArticleBinding(ctx, tx, id)
+		have, found, err := readYTArticleBinding(ctx, pgTransaction{tx}, id)
 		if err != nil {
 			return err
 		}
@@ -714,7 +745,7 @@ func ytArticleSupersededTx(ctx context.Context, tx pgx.Tx, id int64, sha string)
 	if err != nil {
 		return false, err
 	}
-	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityDocuments)
+	side, err := ytAuthorityShareTx(ctx, pgTransaction{tx}, YTAuthorityDocuments)
 	if err != nil || side == YTAuthorityYouTrack {
 		return side == YTAuthorityYouTrack, err
 	}
@@ -871,7 +902,7 @@ func (s *Store) catchUpYTArticle(ctx context.Context, now time.Time, g ytDocsGat
 		return "", err
 	}
 	defer tx.Rollback(ctx)
-	if err := lockYTEntity(ctx, tx, ytwrite.ArticleEntity, strconv.FormatInt(id, 10)); err != nil {
+	if err := lockYTEntity(ctx, pgTransaction{tx}, ytwrite.ArticleEntity, strconv.FormatInt(id, 10)); err != nil {
 		return "", err
 	}
 	r, err := readYTArticleRow(ctx, tx, id)

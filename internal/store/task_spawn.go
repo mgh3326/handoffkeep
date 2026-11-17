@@ -356,7 +356,7 @@ func (s *Store) writeSpawnNoticeTx(ctx context.Context, tx transaction, id int64
 	if err != nil {
 		return err
 	}
-	_, _, err = s.enqueueYTCommentTx(ctx, pgxTx(tx), c)
+	_, _, err = s.enqueueYTCommentTx(ctx, tx, c)
 	return err
 }
 

@@ -96,6 +96,34 @@ const ytRequeueSelectSQL = `SELECT o.id, w.comment_id, b.task_id
 		AND mv.entity_id = o.entity_id AND mv.yt_target_id = b.issue_id AND mv.state NOT IN ('applied','rejected'))
 	ORDER BY w.comment_id, o.id LIMIT $5`
 
+// ytRequeueSelectMySQL is ytRequeueSelectSQL on MySQL: the same predicates
+// with CAST in place of ::text and ? placeholders in the same order.
+const ytRequeueSelectMySQL = `SELECT o.id, w.comment_id, b.task_id
+	FROM yt_write_ops o
+	JOIN yt_comment_write_links w ON w.op_id = o.id
+	JOIN task_comments tc ON tc.id = w.comment_id AND CAST(tc.task_id AS CHAR) = o.entity_id
+	JOIN yt_task_bindings b ON CAST(b.task_id AS CHAR) = o.entity_id AND b.tenant = o.tenant
+	WHERE o.principal = ? AND o.kind = '` + ytwrite.KindCommentAppend + `' AND o.tenant = ? AND o.entity_kind = 'task'
+	  AND o.state = 'rejected' AND o.reason = '` + ytwrite.ReasonAmbiguousIssue + `' AND o.yt_target_id = '' AND o.attempts = 0
+	  AND w.comment_id > b.comments_from
+	  AND b.origin = '` + YTBindingOpApplied + `'
+	  AND EXISTS (SELECT 1 FROM yt_write_ops i WHERE i.id = b.op_id AND i.principal = ? AND i.kind = ?
+		AND i.state = 'applied' AND i.entity_kind = 'task' AND i.entity_id = o.entity_id)
+	  AND NOT EXISTS (SELECT 1 FROM task_origins x WHERE x.task_id = b.task_id AND x.provider = 'youtrack'
+		AND (coalesce(x.external_id,'') <> b.issue_id OR (coalesce(x.tenant,'') <> '' AND x.tenant <> b.tenant)))
+	  AND NOT EXISTS (SELECT 1 FROM yt_entity_map m WHERE m.entity_kind = 'task' AND m.hk_key = o.entity_id AND m.yt_id <> b.issue_id)
+	  AND NOT EXISTS (SELECT 1 FROM yt_entity_map m WHERE m.entity_kind = 'task' AND (m.tenant = b.tenant OR m.tenant = '')
+		AND m.yt_id = b.issue_id AND m.hk_key <> o.entity_id)
+	  AND NOT EXISTS (SELECT 1 FROM yt_comment_canary c WHERE c.task_id = b.task_id AND (c.tenant <> b.tenant OR c.issue_id <> b.issue_id))
+	  AND NOT EXISTS (SELECT 1 FROM yt_comment_canary c WHERE c.tenant = b.tenant AND c.issue_id = b.issue_id AND c.task_id <> b.task_id)
+	  AND NOT EXISTS (SELECT 1 FROM yt_task_bindings ob WHERE ob.tenant = b.tenant AND ob.issue_id = b.issue_id AND ob.task_id <> b.task_id)
+	  AND (EXISTS (SELECT 1 FROM tasks t JOIN youtrack_projects p ON p.hk_project = t.project WHERE t.id = b.task_id AND p.yt_project_id = b.project_id)
+		OR (EXISTS (SELECT 1 FROM tasks t WHERE t.id = b.task_id AND coalesce(t.project,'') = '')
+			AND NOT EXISTS (SELECT 1 FROM youtrack_projects p WHERE p.yt_project_id = b.project_id)))
+	  AND NOT EXISTS (SELECT 1 FROM yt_write_ops mv WHERE mv.kind = '` + ytwrite.KindIssueMove + `' AND mv.entity_kind = 'task'
+		AND mv.entity_id = o.entity_id AND mv.yt_target_id = b.issue_id AND mv.state NOT IN ('applied','rejected'))
+	ORDER BY w.comment_id, o.id LIMIT ?`
+
 // RequeueYTMovedComments copies again, for the worker of tenant, each comment
 // whose queued op was rejected ambiguous_issue at its claim and whose task's
 // binding every local source agrees with now: up to limit comments, oldest
@@ -114,10 +142,6 @@ const ytRequeueSelectSQL = `SELECT o.id, w.comment_id, b.task_id
 // sources, the lane's pending moves and the comment, then a new yt_write_ops row (prepareYTOpTx) and an
 // UPDATE of the comment's yt_comment_write_links row.
 func (s *Store) RequeueYTMovedComments(ctx context.Context, tenant string, limit int) ([]YTRequeued, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	out := []YTRequeued{}
 	if s.ytCommentsModeNow() != YTCommentsOn || tenant == "" || limit < 1 {
 		return out, nil
@@ -126,7 +150,7 @@ func (s *Store) RequeueYTMovedComments(ctx context.Context, tenant string, limit
 		limit = YTRequeueMax
 	}
 	type cand struct{ op, comment, task int64 }
-	rows, err := s.pool.Query(ctx, ytRequeueSelectSQL, YTCommentPrincipal, tenant,
+	rows, err := s.db().Query(ctx, s.q(ytRequeueSelectSQL, ytRequeueSelectMySQL), YTCommentPrincipal, tenant,
 		YTIssuePrincipal, ytwrite.KindIssueCreate, limit)
 	if err != nil {
 		return out, err
@@ -172,10 +196,11 @@ func (s *Store) RequeueYTMovedComments(ctx context.Context, tenant string, limit
 // longer names fromOp (another worker moved it), or the binding is not the
 // create's or a source disagrees with it now.
 func (s *Store) requeueYTComment(ctx context.Context, fromOp, commentID, taskID int64) (YTRequeued, bool, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return YTRequeued{}, false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	// The authority row first, as the catch-up takes it: a switch commits
 	// before this read or after this transaction. Unlike the catch-up, the
@@ -190,7 +215,7 @@ func (s *Store) requeueYTComment(ctx context.Context, fromOp, commentID, taskID 
 		return YTRequeued{}, false, err
 	}
 	var linked int64
-	err = tx.QueryRow(ctx, `SELECT op_id FROM yt_comment_write_links WHERE comment_id=$1`, commentID).Scan(&linked)
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT op_id FROM yt_comment_write_links WHERE comment_id=$1`, `SELECT op_id FROM yt_comment_write_links WHERE comment_id=?`), commentID).Scan(&linked)
 	if errors.Is(err, ErrNoRows) {
 		return YTRequeued{}, false, nil
 	}
@@ -200,7 +225,7 @@ func (s *Store) requeueYTComment(ctx context.Context, fromOp, commentID, taskID 
 	if linked != fromOp {
 		return YTRequeued{}, false, nil
 	}
-	from, err := scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1`, fromOp))
+	from, err := scanYTOp(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=$1`, `SELECT `+ytOpColumns+` FROM yt_write_ops WHERE id=?`), fromOp))
 	if err != nil {
 		return YTRequeued{}, false, err
 	}
@@ -214,7 +239,8 @@ func (s *Store) requeueYTComment(ctx context.Context, fromOp, commentID, taskID 
 		return YTRequeued{}, false, err
 	}
 	var createID int64
-	err = tx.QueryRow(ctx, `SELECT id FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3 AND state='applied'`,
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT id FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3 AND state='applied'`,
+		`SELECT id FROM yt_write_ops WHERE principal=? AND kind=? AND idem_key=? AND state='applied'`),
 		YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(taskID)).Scan(&createID)
 	if err != nil && !errors.Is(err, ErrNoRows) {
 		return YTRequeued{}, false, err
@@ -245,7 +271,7 @@ func (s *Store) requeueYTComment(ctx context.Context, fromOp, commentID, taskID 
 		return YTRequeued{}, false, nil
 	}
 	var c TaskComment
-	if err := scanTaskComment(tx.QueryRow(ctx, `SELECT `+taskCommentColumns+` FROM task_comments WHERE id=$1`, commentID), &c); err != nil {
+	if err := scanTaskComment(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskCommentColumns+` FROM task_comments WHERE id=$1`, `SELECT `+taskCommentColumns+` FROM task_comments WHERE id=?`), commentID), &c); err != nil {
 		return YTRequeued{}, false, err
 	}
 	n, err := ytwrite.CommentOp(ytwrite.CommentRequest{Principal: YTCommentPrincipal, Key: ytRequeueKey(commentID, fromOp),
@@ -257,11 +283,12 @@ func (s *Store) requeueYTComment(ctx context.Context, fromOp, commentID, taskID 
 	if err != nil {
 		return YTRequeued{}, false, err
 	}
-	tag, err := tx.Exec(ctx, `UPDATE yt_comment_write_links SET op_id=$3 WHERE comment_id=$1 AND op_id=$2`, commentID, fromOp, op.ID)
+	linkN, err := tx.Exec(ctx, sqlFor(tx, `UPDATE yt_comment_write_links SET op_id=$3 WHERE comment_id=$1 AND op_id=$2`,
+		`UPDATE yt_comment_write_links SET op_id=? WHERE comment_id=? AND op_id=?`), ytRequeueLinkArgs(tx, commentID, fromOp, op.ID)...)
 	if err != nil {
 		return YTRequeued{}, false, err
 	}
-	if tag.RowsAffected() != 1 {
+	if linkN != 1 {
 		return YTRequeued{}, false, nil
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -269,4 +296,13 @@ func (s *Store) requeueYTComment(ctx context.Context, fromOp, commentID, taskID 
 	}
 	log.Printf("ytwrite.comment_requeued op_id=%d from_op_id=%d task_id=%d comment_id=%d issue_id=%q", op.ID, fromOp, taskID, commentID, b.IssueID)
 	return YTRequeued{CommentID: commentID, From: fromOp, Op: op}, true, nil
+}
+
+// ytRequeueLinkArgs orders the link move's update arguments: the SET column
+// comes first on MySQL.
+func ytRequeueLinkArgs(tx transaction, commentID, fromOp, opID int64) []any {
+	if dialectFor(tx) == mysqlDialect {
+		return []any{opID, commentID, fromOp}
+	}
+	return []any{commentID, fromOp, opID}
 }

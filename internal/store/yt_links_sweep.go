@@ -108,7 +108,7 @@ func (s *Store) RunYTLinksSweep(ctx context.Context, now time.Time, limit int) (
 	if mode != YTLinksOn || limit < 1 {
 		return pass, nil
 	}
-	st, err := ytLinksSweepStateTx(ctx, s.pool)
+	st, err := ytLinksSweepStateTx(ctx, pgQuerier{pool: s.pool})
 	if err != nil {
 		return pass, err
 	}

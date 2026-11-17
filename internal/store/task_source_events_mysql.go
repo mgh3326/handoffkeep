@@ -109,7 +109,7 @@ func srcEvDecisionGate(tx transaction, to string) error {
 // absorb this.
 func (s *Store) srcEvSystemCommentTx(ctx context.Context, tx transaction, taskID int64, source, eventKey, body string, createdAt time.Time) error {
 	if dialectFor(tx) != mysqlDialect {
-		return s.insertSystemTaskCommentTx(ctx, pgxTx(tx), taskID, source, eventKey, body, createdAt)
+		return s.insertSystemTaskCommentTx(ctx, tx, taskID, source, eventKey, body, createdAt)
 	}
 	if err := CheckTaskCommentBody(body); err != nil {
 		return err

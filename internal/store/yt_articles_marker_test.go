@@ -37,11 +37,11 @@ func ytartRejectedCreate(t *testing.T, s *Store, id int64, key, body, reason str
 	}
 	defer tx.Rollback(ctx)
 	now := time.Now().UTC()
-	op, created, err := prepareYTOpTx(ctx, tx, now, n)
+	op, created, err := prepareYTOpTx(ctx, pgTransaction{tx}, now, n)
 	if err != nil || !created {
 		t.Fatalf("prepare: %v %v", created, err)
 	}
-	if op, err = rejectYTOpTx(ctx, tx, now, op.ID, reason, "ytwrite_invalid: document body contains the reserved hk op marker"); err != nil {
+	if op, err = rejectYTOpTx(ctx, pgTransaction{tx}, now, op.ID, reason, "ytwrite_invalid: document body contains the reserved hk op marker"); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {

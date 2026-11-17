@@ -9,8 +9,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -83,17 +81,29 @@ func init() {
 // binding, then its first field snapshot, which the new binding (no task
 // change) would not otherwise reach: prepared here, behind the op on the
 // task's lane (hk 4003).
-func bindYTIssueApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
+func bindYTIssueApplyTx(s *Store, ctx context.Context, tx transaction, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
 	if err := bindYTIssueTx(ctx, tx, op, ytID, now, adopted); err != nil {
 		return err
 	}
 	taskID, _ := strconv.ParseInt(op.EntityID, 10, 64)
-	if err := s.ytFieldsOnBindTx(ctx, tx, taskID, now); err != nil {
+	// The field snapshot and the links retarget are B4b: on MySQL they run
+	// only when their mode is on, which cannot happen before those areas
+	// port.
+	if dialectFor(tx) == mysqlDialect {
+		if m, _ := s.ytFieldsNow(); m == YTFieldsOn {
+			return ErrDialectUnsupported
+		}
+		if m, _ := s.ytLinksNow(); m == YTLinksOn {
+			return ErrDialectUnsupported
+		}
+		return nil
+	}
+	if err := s.ytFieldsOnBindTx(ctx, pgxTx(tx), taskID, now); err != nil {
 		return err
 	}
 	// The new binding is also the target of the tasks that point at this one
 	// (hk 3841, I14).
-	return ytLinksOnBindTx(ctx, tx, taskID)
+	return ytLinksOnBindTx(ctx, pgxTx(tx), taskID)
 }
 
 // ytIssueGateSQL is the issue_create gate (ytAdmitSQL): mode on, and o's task
@@ -107,7 +117,7 @@ func ytIssueGateSQL(s *Store) string {
 		return `FALSE`
 	}
 	return `o.entity_kind = 'task' AND NOT EXISTS (SELECT 1 FROM yt_task_bindings b
-		WHERE b.task_id::text = o.entity_id AND b.op_id IS DISTINCT FROM o.id)`
+		WHERE ` + s.q(`b.task_id::text = o.entity_id`, `CAST(b.task_id AS CHAR) = o.entity_id`) + ` AND ` + s.q(`b.op_id IS DISTINCT FROM o.id`, `NOT (b.op_id <=> o.id)`) + `)`
 }
 
 // ytIssueProject is a task's hk project and the YouTrack project it maps to.
@@ -123,7 +133,7 @@ func readYTIssueProject(ctx context.Context, q ytRowQuerier, project string) (yt
 	if project == "" {
 		return p, false, nil
 	}
-	err := q.QueryRow(ctx, `SELECT coalesce(short_name,''), coalesce(yt_project_id,'') FROM youtrack_projects WHERE hk_project=$1`, project).Scan(&p.shortName, &p.projectID)
+	err := q.QueryRow(ctx, sqlFor(q, `SELECT coalesce(short_name,''), coalesce(yt_project_id,'') FROM youtrack_projects WHERE hk_project=$1`, `SELECT coalesce(short_name,''), coalesce(yt_project_id,'') FROM youtrack_projects WHERE hk_project=?`), project).Scan(&p.shortName, &p.projectID)
 	if errors.Is(err, ErrNoRows) {
 		return p, false, nil
 	}
@@ -148,7 +158,7 @@ func (s *Store) ytIssueProject(ctx context.Context, q ytRowQuerier, project stri
 // now. A task the protocol cannot render gets a rejected op (invalid_issue)
 // and nothing is ever sent. created is false when the task already had its op
 // (the key replays). The caller has read p.
-func prepareYTIssueTx(ctx context.Context, tx pgx.Tx, now time.Time, t Task, p ytIssueProject, tenant string) (ytwrite.Op, bool, error) {
+func prepareYTIssueTx(ctx context.Context, tx transaction, now time.Time, t Task, p ytIssueProject, tenant string) (ytwrite.Op, bool, error) {
 	req := ytwrite.IssueRequest{Principal: YTIssuePrincipal, Actor: t.CreatedBy, TaskID: t.ID, Title: t.Title,
 		Project: p.project, YTProjectID: p.projectID, YTProjectShort: p.shortName, Tenant: tenant}
 	n, err := ytwrite.IssueOp(req)
@@ -164,8 +174,10 @@ func prepareYTIssueTx(ctx context.Context, tx pgx.Tx, now time.Time, t Task, p y
 	// boundary is exact: comment inserts hold taskCommentInsertLock until
 	// they commit, so ids commit in order and no comment at or below the
 	// highest committed id can commit after this read.
-	if _, err := tx.Exec(ctx, `INSERT INTO yt_issue_comment_bounds(op_id, task_id, comments_from, recorded_at)
+	if _, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO yt_issue_comment_bounds(op_id, task_id, comments_from, recorded_at)
 		VALUES ($1,$2,(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$2),$3) ON CONFLICT (op_id) DO NOTHING`,
+		`INSERT IGNORE INTO yt_issue_comment_bounds(op_id, task_id, comments_from, recorded_at)
+		VALUES (?,?,(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=?),?)`),
 		op.ID, t.ID, now.UTC()); err != nil {
 		return op, true, err
 	}
@@ -180,7 +192,7 @@ func prepareYTIssueTx(ctx context.Context, tx pgx.Tx, now time.Time, t Task, p y
 // its commit: the task's issue_create op, or, when its project maps to no
 // YouTrack project, an issue intent on the gate's tenant (hk 3942). Any
 // database error fails the whole create.
-func (s *Store) enqueueYTIssueTx(ctx context.Context, tx pgx.Tx, t Task) error {
+func (s *Store) enqueueYTIssueTx(ctx context.Context, tx transaction, t Task) error {
 	_, err := s.ensureYTIssueTx(ctx, tx, t, t.CreatedAt.UTC(), true)
 	return err
 }
@@ -202,7 +214,7 @@ func (s *Store) enqueueYTIssueTx(ctx context.Context, tx pgx.Tx, t Task) error {
 // reads of its yt_issue_intents row, the ownership rows and
 // youtrack_projects, then its new yt_write_ops row (prepareYTOpTx) and its
 // yt_issue_intents row.
-func (s *Store) ensureYTIssueTx(ctx context.Context, tx pgx.Tx, t Task, now time.Time, atCreate bool) (created bool, err error) {
+func (s *Store) ensureYTIssueTx(ctx context.Context, tx transaction, t Task, now time.Time, atCreate bool) (created bool, err error) {
 	mode, tenant := s.ytIssuesNow()
 	if mode != YTIssuesOn {
 		return false, nil
@@ -211,7 +223,8 @@ func (s *Store) ensureYTIssueTx(ctx context.Context, tx pgx.Tx, t Task, now time
 		return false, err
 	}
 	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3)`,
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3)`,
+		`SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=? AND kind=? AND idem_key=?)`),
 		YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(t.ID)).Scan(&exists); err != nil {
 		return false, err
 	}
@@ -219,7 +232,8 @@ func (s *Store) ensureYTIssueTx(ctx context.Context, tx pgx.Tx, t Task, now time
 		return false, dropYTIssueIntentTx(ctx, tx, t.ID)
 	}
 	var intent string
-	if err := tx.QueryRow(ctx, `SELECT coalesce((SELECT tenant FROM yt_issue_intents WHERE task_id=$1),'')`, t.ID).Scan(&intent); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT coalesce((SELECT tenant FROM yt_issue_intents WHERE task_id=$1),'')`,
+		`SELECT coalesce((SELECT tenant FROM yt_issue_intents WHERE task_id=?),'')`), t.ID).Scan(&intent); err != nil {
 		return false, err
 	}
 	if intent != "" {
@@ -242,8 +256,9 @@ func (s *Store) ensureYTIssueTx(ctx context.Context, tx pgx.Tx, t Task, now time
 		if !atCreate {
 			return false, nil
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO yt_issue_intents(task_id, tenant, recorded_at) VALUES ($1,$2,$3)
-			ON CONFLICT (task_id) DO NOTHING`, t.ID, tenant, now.UTC())
+		_, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO yt_issue_intents(task_id, tenant, recorded_at) VALUES ($1,$2,$3)
+			ON CONFLICT (task_id) DO NOTHING`,
+			`INSERT IGNORE INTO yt_issue_intents(task_id, tenant, recorded_at) VALUES (?,?,?)`), t.ID, tenant, now.UTC())
 		return false, err
 	}
 	op, created, err := prepareYTIssueTx(ctx, tx, now, t, p, tenant)
@@ -254,8 +269,8 @@ func (s *Store) ensureYTIssueTx(ctx context.Context, tx pgx.Tx, t Task, now time
 	return created, dropYTIssueIntentTx(ctx, tx, t.ID)
 }
 
-func dropYTIssueIntentTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
-	_, err := tx.Exec(ctx, `DELETE FROM yt_issue_intents WHERE task_id=$1`, taskID)
+func dropYTIssueIntentTx(ctx context.Context, tx transaction, taskID int64) error {
+	_, err := tx.Exec(ctx, sqlFor(tx, `DELETE FROM yt_issue_intents WHERE task_id=$1`, `DELETE FROM yt_issue_intents WHERE task_id=?`), taskID)
 	return err
 }
 
@@ -273,7 +288,7 @@ func dropYTIssueIntentTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
 // is gone. The task row is read without a lock (no lane holder locks a task
 // row): a move that commits after this read finds the op dispatched, and the
 // issue follows the task as any bound task's does (issue_move, yt_move.go).
-func (s *Store) claimYTIssueTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (target, sha string, payload []byte, err error) {
+func (s *Store) claimYTIssueTargetTx(ctx context.Context, tx transaction, op ytwrite.Op) (target, sha string, payload []byte, err error) {
 	target, sha = op.YTTargetID, op.PayloadSHA
 	if op.Kind != ytwrite.KindIssueCreate || op.Principal != YTIssuePrincipal || op.EntityKind != "task" {
 		return target, sha, nil, nil
@@ -283,7 +298,7 @@ func (s *Store) claimYTIssueTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.
 		return target, sha, nil, nil
 	}
 	var project *string
-	err = tx.QueryRow(ctx, `SELECT project FROM tasks WHERE id=$1`, taskID).Scan(&project)
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT project FROM tasks WHERE id=$1`, `SELECT project FROM tasks WHERE id=?`), taskID).Scan(&project)
 	if errors.Is(err, ErrNoRows) {
 		return target, sha, nil, nil
 	}
@@ -318,10 +333,6 @@ func (s *Store) claimYTIssueTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.
 // before each Drive pass in issue mode on, so the op goes out in that pass;
 // an intent of another tenant is never consumed here.
 func (s *Store) PrepareMappedYTIssues(ctx context.Context, limit int) (int, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return 0, ErrDialectUnsupported
-	}
-
 	mode, tenant := s.ytIssuesNow()
 	if mode != YTIssuesOn {
 		return 0, nil
@@ -330,16 +341,22 @@ func (s *Store) PrepareMappedYTIssues(ctx context.Context, limit int) (int, erro
 	if g := s.ytIssues.Load(); g != nil {
 		bucket = g.bucketID
 	}
-	rows, err := s.pool.Query(ctx, `SELECT i.task_id FROM yt_issue_intents i JOIN tasks t ON t.id = i.task_id
+	rows, err := s.db().Query(ctx, sqlFor(s, `SELECT i.task_id FROM yt_issue_intents i JOIN tasks t ON t.id = i.task_id
 		WHERE i.tenant = $1 AND (
 			(coalesce(t.project,'') = '' AND $2 <> '')
 			OR EXISTS (SELECT 1 FROM youtrack_projects yp WHERE yp.hk_project = t.project
 				AND coalesce(yp.yt_project_id,'') <> '' AND coalesce(yp.short_name,'') <> ''))
-		ORDER BY i.task_id LIMIT $3`, tenant, bucket, ytLimit(limit))
+		ORDER BY i.task_id LIMIT $3`,
+		`SELECT i.task_id FROM yt_issue_intents i JOIN tasks t ON t.id = i.task_id
+		WHERE i.tenant = ? AND (
+			(coalesce(t.project,'') = '' AND ? <> '')
+			OR EXISTS (SELECT 1 FROM youtrack_projects yp WHERE yp.hk_project = t.project
+				AND coalesce(yp.yt_project_id,'') <> '' AND coalesce(yp.short_name,'') <> ''))
+		ORDER BY i.task_id LIMIT ?`), tenant, bucket, ytLimit(limit))
 	if err != nil {
 		return 0, err
 	}
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	ids, err := collectRows(rows, rowTo[int64])
 	if err != nil {
 		return 0, err
 	}
@@ -363,16 +380,17 @@ func (s *Store) PrepareMappedYTIssues(ctx context.Context, limit int) (int, erro
 // ensureYTIssueTx. An intent that moved to another tenant meanwhile is left
 // alone. prepared reports a new op.
 func (s *Store) prepareYTIssueIntent(ctx context.Context, tenant string, taskID int64) (bool, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(taskID, 10)); err != nil {
 		return false, err
 	}
 	var have string
-	if err := tx.QueryRow(ctx, `SELECT tenant FROM yt_issue_intents WHERE task_id=$1`, taskID).Scan(&have); errors.Is(err, ErrNoRows) {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT tenant FROM yt_issue_intents WHERE task_id=$1`, `SELECT tenant FROM yt_issue_intents WHERE task_id=?`), taskID).Scan(&have); errors.Is(err, ErrNoRows) {
 		return false, nil
 	} else if err != nil {
 		return false, err
@@ -380,7 +398,7 @@ func (s *Store) prepareYTIssueIntent(ctx context.Context, tenant string, taskID 
 		return false, nil
 	}
 	var t Task
-	if err := tx.QueryRow(ctx, `SELECT id, title, created_by, project FROM tasks WHERE id=$1`, taskID).Scan(&t.ID, &t.Title, &t.CreatedBy, &t.Project); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT id, title, created_by, project FROM tasks WHERE id=$1`, `SELECT id, title, created_by, project FROM tasks WHERE id=?`), taskID).Scan(&t.ID, &t.Title, &t.CreatedBy, &t.Project); err != nil {
 		return false, err
 	}
 	created, err := s.ensureYTIssueTx(ctx, tx, t, time.Now().UTC(), false)
@@ -400,13 +418,29 @@ func (s *Store) prepareYTIssueIntent(ctx context.Context, tenant string, taskID 
 // it appends that row.
 func ytTaskHasIssueOwnershipTx(ctx context.Context, q ytRowQuerier, taskID int64) (bool, error) {
 	var owned bool
-	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1)
+	err := q.QueryRow(ctx, sqlFor(q, `SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1)
 		OR EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$2)
 		OR EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=$1)
 		OR EXISTS(SELECT 1 FROM task_origins WHERE task_id=$1 AND provider='youtrack')
 		OR coalesce((SELECT action FROM yt_binding_history WHERE task_id=$1 ORDER BY id DESC LIMIT 1), '') = '`+ytBindingActionUnbound+`'`,
-		taskID, strconv.FormatInt(taskID, 10)).Scan(&owned)
+		`SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=?)
+		OR EXISTS(SELECT 1 FROM yt_entity_map WHERE entity_kind='task' AND hk_key=?)
+		OR EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=?)
+		OR EXISTS(SELECT 1 FROM task_origins WHERE task_id=? AND provider='youtrack')
+		OR coalesce((SELECT action FROM yt_binding_history WHERE task_id=? ORDER BY id DESC LIMIT 1), '') = '`+ytBindingActionUnbound+`'`),
+		ytOwnershipArgs(q, taskID)...).Scan(&owned)
 	return owned, err
+}
+
+// ytOwnershipArgs orders ytTaskHasIssueOwnershipTx's arguments: the task id
+// once for each clause on PostgreSQL (the two first ones), and once per
+// placeholder on MySQL.
+func ytOwnershipArgs(q ytRowQuerier, taskID int64) []any {
+	if dialectFor(q) == mysqlDialect {
+		key := strconv.FormatInt(taskID, 10)
+		return []any{taskID, key, taskID, taskID, taskID}
+	}
+	return []any{taskID, strconv.FormatInt(taskID, 10)}
 }
 
 // ytIssueConflictTx reads, in Apply's transaction (which holds the task's
@@ -420,13 +454,13 @@ func ytTaskHasIssueOwnershipTx(ctx context.Context, q ytRowQuerier, taskID int64
 // YouTrack id is the tenant's (hk 3912), and a row with no tenant (one a
 // release that predates the column wrote) counts as this one's. Nothing is
 // written.
-func ytIssueConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string) (string, error) {
+func ytIssueConflictTx(ctx context.Context, tx transaction, op ytwrite.Op, ytID string) (string, error) {
 	taskID, err := strconv.ParseInt(op.EntityID, 10, 64)
 	if err != nil || taskID < 1 || op.EntityKind != "task" {
 		return "", fmt.Errorf("issue_create op %d is not on a task lane (%s:%s)", op.ID, op.EntityKind, op.EntityID)
 	}
 	var detail string
-	err = tx.QueryRow(ctx, `SELECT coalesce(
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT coalesce(
 		(SELECT 'task is bound to issue '||issue_id||' on '||tenant||' ('||origin||')' FROM yt_task_bindings
 			WHERE task_id=$1 AND (tenant<>$2 OR issue_id<>$3)),
 		(SELECT 'issue is bound to task '||task_id FROM yt_task_bindings
@@ -437,7 +471,19 @@ func ytIssueConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID strin
 			WHERE entity_kind='task' AND (tenant=$2 OR tenant='') AND yt_id=$3 AND hk_key<>$4),
 		(SELECT 'task''s YouTrack origin names issue '||coalesce(external_id,'')||' on '||coalesce(tenant,'') FROM task_origins
 			WHERE task_id=$1 AND provider='youtrack' AND (coalesce(external_id,'')<>$3 OR (coalesce(tenant,'')<>'' AND tenant<>$2))),
-		'')`, taskID, op.Tenant, ytID, op.EntityID).Scan(&detail)
+		'')`,
+		`SELECT coalesce(
+		(SELECT CONCAT('task is bound to issue ', issue_id, ' on ', tenant, ' (', origin, ')') FROM yt_task_bindings
+			WHERE task_id=? AND (tenant<>? OR issue_id<>?)),
+		(SELECT CONCAT('issue is bound to task ', task_id) FROM yt_task_bindings
+			WHERE tenant=? AND issue_id=? AND task_id<>? LIMIT 1),
+		(SELECT CONCAT('task is mapped to issue ', yt_id) FROM yt_entity_map
+			WHERE entity_kind='task' AND hk_key=? AND yt_id<>?),
+		(SELECT CONCAT('issue is mapped to task ', hk_key) FROM yt_entity_map
+			WHERE entity_kind='task' AND (tenant=? OR tenant='') AND yt_id=? AND hk_key<>?),
+		(SELECT CONCAT('task''s YouTrack origin names issue ', coalesce(external_id,''), ' on ', coalesce(tenant,'')) FROM task_origins
+			WHERE task_id=? AND provider='youtrack' AND (coalesce(external_id,'')<>? OR (coalesce(tenant,'')<>'' AND tenant<>?))),
+		'')`), ytIssueConflictArgs(tx, taskID, op.Tenant, ytID, op.EntityID)...).Scan(&detail)
 	if err != nil {
 		return "", err
 	}
@@ -445,6 +491,19 @@ func ytIssueConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID strin
 		log.Printf("ytwrite.binding_conflict task_id=%d op_id=%d issue_id=%q detail=%q", taskID, op.ID, ytID, detail)
 	}
 	return detail, nil
+}
+
+// ytIssueConflictArgs orders the conflict query's arguments: four shared
+// placeholders on PostgreSQL, one per `?` in statement order on MySQL.
+func ytIssueConflictArgs(tx transaction, taskID int64, tenant, ytID, entityID string) []any {
+	if dialectFor(tx) == mysqlDialect {
+		return []any{taskID, tenant, ytID,
+			tenant, ytID, taskID,
+			entityID, ytID,
+			tenant, ytID, entityID,
+			taskID, ytID, tenant}
+	}
+	return []any{taskID, tenant, ytID, entityID}
 }
 
 // bindYTIssueTx publishes the binding of an issue_create op applied with
@@ -462,15 +521,19 @@ func ytIssueConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID strin
 // comments authority it got no op), so the catch-up copies those. An op
 // prepared by a release before that table has no row and gets the task's
 // highest comment id now, as a verified binding gets it.
-func bindYTIssueTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
+func bindYTIssueTx(ctx context.Context, tx transaction, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
 	taskID, _ := strconv.ParseInt(op.EntityID, 10, 64)
-	tag, err := tx.Exec(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, op_id, comments_from)
+	n, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, op_id, comments_from)
 		VALUES ($1,$2,$3,'',$4,$5,$6,'op_applied',$7,
 			CASE WHEN $8 THEN coalesce((SELECT comments_from FROM yt_issue_comment_bounds WHERE op_id=$7),
 				(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$1)) ELSE 0 END)
 		ON CONFLICT DO NOTHING`,
-		taskID, op.Tenant, ytID, op.YTTargetID, op.Principal, now.UTC(), op.ID, adopted)
-	if err != nil || tag.RowsAffected() == 1 {
+		`INSERT IGNORE INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, op_id, comments_from)
+		VALUES (?,?,?,'',?,?,?,'op_applied',?,
+			CASE WHEN ? THEN coalesce((SELECT comments_from FROM yt_issue_comment_bounds WHERE op_id=?),
+				(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=?)) ELSE 0 END)`),
+		ytBindIssueArgs(tx, taskID, op, ytID, now, adopted)...)
+	if err != nil || n == 1 {
 		return err
 	}
 	have, found, err := readYTBinding(ctx, tx, taskID)
@@ -486,14 +549,26 @@ func bindYTIssueTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string, n
 	return fmt.Errorf("%w: issue %s on %s was bound to another task during the apply of op %d", ytwrite.ErrConflictingResult, ytID, op.Tenant, op.ID)
 }
 
+// ytBindIssueArgs orders bindYTIssueTx's insert arguments: eight shared
+// placeholders on PostgreSQL, ten `?` in statement order on MySQL (the CASE
+// repeats op_id and task_id).
+func ytBindIssueArgs(tx transaction, taskID int64, op ytwrite.Op, ytID string, now time.Time, adopted bool) []any {
+	base := []any{taskID, op.Tenant, ytID, op.YTTargetID, op.Principal, now.UTC(), op.ID, adopted}
+	if dialectFor(tx) == mysqlDialect {
+		return append(base, op.ID, taskID)
+	}
+	return base
+}
+
 // ytIssueOpPendingTx reports whether task has an issue_create op that is not
 // yet applied or rejected: the writers that give the task an issue another
 // way (AddYTTaskBinding, AddYTCommentCanary) refuse while it does, so the op
 // never races them to a second issue. The caller holds the task's lane lock.
 func ytIssueOpPendingTx(ctx context.Context, q ytRowQuerier, taskID int64) (bool, error) {
 	var pending bool
-	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$1 AND entity_kind='task' AND entity_id=$2
-		AND state NOT IN ('applied','rejected'))`, ytwrite.KindIssueCreate, strconv.FormatInt(taskID, 10)).Scan(&pending)
+	err := q.QueryRow(ctx, sqlFor(q, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$1 AND entity_kind='task' AND entity_id=$2
+		AND state NOT IN ('applied','rejected'))`, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=? AND entity_kind='task' AND entity_id=?
+		AND state NOT IN ('applied','rejected'))`), ytwrite.KindIssueCreate, strconv.FormatInt(taskID, 10)).Scan(&pending)
 	return pending, err
 }
 
@@ -534,22 +609,22 @@ type YTIssueBackfillReport struct {
 // prepares nothing. Each task is its own transaction; a dry run writes
 // nothing.
 func (s *Store) BackfillYTIssueOps(ctx context.Context, tenant, project string, dryRun bool) (YTIssueBackfillReport, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTIssueBackfillReport{}, ErrDialectUnsupported
-	}
-
 	r := YTIssueBackfillReport{Tenant: tenant, Project: project, DryRun: dryRun, Projects: []*YTIssueBackfillProject{}}
 	if tenant == "" {
 		return r, errors.New("backfill needs the YouTrack tenant")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT t.id FROM tasks t
+	rows, err := s.db().Query(ctx, sqlFor(s, `SELECT t.id FROM tasks t
 		WHERE ($1 = '' OR t.project = $1)
 		AND NOT EXISTS (SELECT 1 FROM yt_task_bindings b WHERE b.task_id = t.id)
-		ORDER BY t.id`, project)
+		ORDER BY t.id`,
+		`SELECT t.id FROM tasks t
+		WHERE (? = '' OR t.project = ?)
+		AND NOT EXISTS (SELECT 1 FROM yt_task_bindings b WHERE b.task_id = t.id)
+		ORDER BY t.id`), backfillProjectArgs(s, project)...)
 	if err != nil {
 		return r, err
 	}
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	ids, err := collectRows(rows, rowTo[int64])
 	if err != nil {
 		return r, err
 	}
@@ -590,10 +665,11 @@ func (s *Store) BackfillYTIssueOps(ctx context.Context, tenant, project string, 
 // comment path take before they give the task an issue, so an "owned" check
 // and the op it allows cannot interleave with them.
 func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64, dryRun bool) (string, string, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return "", "", err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(taskID, 10)); err != nil {
 		return "", "", err
@@ -602,12 +678,13 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 	// held it has committed, so the op and the intent it drops follow the
 	// task's current project (PR #357 review).
 	var t Task
-	if err := tx.QueryRow(ctx, `SELECT id, title, created_by, project FROM tasks WHERE id=$1`, taskID).Scan(&t.ID, &t.Title, &t.CreatedBy, &t.Project); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT id, title, created_by, project FROM tasks WHERE id=$1`, `SELECT id, title, created_by, project FROM tasks WHERE id=?`), taskID).Scan(&t.ID, &t.Title, &t.CreatedBy, &t.Project); err != nil {
 		return "", "", err
 	}
 	name := deref(t.Project)
 	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3)`,
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3)`,
+		`SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=? AND kind=? AND idem_key=?)`),
 		YTIssuePrincipal, ytwrite.KindIssueCreate, ytwrite.IssueKey(taskID)).Scan(&exists); err != nil {
 		return "", "", err
 	}
@@ -624,7 +701,8 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 	// A task waiting on an issue intent belongs to the intent's tenant
 	// (hk 3942): only that tenant's op may be prepared for it here.
 	var intent string
-	if err := tx.QueryRow(ctx, `SELECT coalesce((SELECT tenant FROM yt_issue_intents WHERE task_id=$1),'')`, taskID).Scan(&intent); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT coalesce((SELECT tenant FROM yt_issue_intents WHERE task_id=$1),'')`,
+		`SELECT coalesce((SELECT tenant FROM yt_issue_intents WHERE task_id=?),'')`), taskID).Scan(&intent); err != nil {
 		return "", "", err
 	}
 	if intent != "" && intent != tenant {
@@ -655,4 +733,14 @@ func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64
 		outcome = "rejected"
 	}
 	return outcome, name, tx.Commit(ctx)
+}
+
+// backfillProjectArgs orders BackfillYTIssueOps's task listing arguments: the
+// project once on PostgreSQL, twice (the `? = ”` check and the compare) on
+// MySQL.
+func backfillProjectArgs(s *Store, project string) []any {
+	if s.dialect == mysqlDialect {
+		return []any{project, project}
+	}
+	return []any{project}
 }

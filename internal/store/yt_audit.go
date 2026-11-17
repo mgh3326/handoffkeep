@@ -133,20 +133,17 @@ const (
 // row, the task's lane lock, then the new rows
 // of yt_write_ops, yt_comment_write_links and yt_entity_map.
 func (s *Store) EnqueueYTAuditComment(ctx context.Context, commentID int64) (string, ytwrite.Op, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return "", ytwrite.Op{}, ErrDialectUnsupported
-	}
-
 	if commentID < 1 {
 		return "", ytwrite.Op{}, ErrTaskCommentInvalid
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return "", ytwrite.Op{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	var c TaskComment
-	err = scanTaskComment(tx.QueryRow(ctx, `SELECT `+taskCommentColumns+` FROM task_comments WHERE id=$1`, commentID), &c)
+	err = scanTaskComment(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskCommentColumns+` FROM task_comments WHERE id=$1`, `SELECT `+taskCommentColumns+` FROM task_comments WHERE id=?`), commentID), &c)
 	if errors.Is(err, ErrNoRows) {
 		return "", ytwrite.Op{}, fmt.Errorf("comment %d does not exist", commentID)
 	}
@@ -156,7 +153,9 @@ func (s *Store) EnqueueYTAuditComment(ctx context.Context, commentID int64) (str
 	if c.Author == YouTrackOwnedActor {
 		return "", ytwrite.Op{}, fmt.Errorf("%w: comment %d came from YouTrack", ErrTaskCommentInvalid, commentID)
 	}
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM tasks WHERE id=$1 FOR KEY SHARE`, c.TaskID); err != nil {
+	// FOR KEY SHARE has no MySQL equivalent; FOR SHARE is the design's
+	// mapping (§11.1).
+	if _, err := tx.Exec(ctx, sqlFor(tx, `SELECT 1 FROM tasks WHERE id=$1 FOR KEY SHARE`, `SELECT 1 FROM tasks WHERE id=? FOR SHARE`), c.TaskID); err != nil {
 		return "", ytwrite.Op{}, err
 	}
 	// Read in this transaction and held FOR SHARE until its commit, so an
@@ -173,8 +172,10 @@ func (s *Store) EnqueueYTAuditComment(ctx context.Context, commentID int64) (str
 	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(c.TaskID, 10)); err != nil {
 		return "", ytwrite.Op{}, err
 	}
-	op, err := scanYTOp(tx.QueryRow(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops
-		WHERE id = (SELECT op_id FROM yt_comment_write_links WHERE comment_id=$1)`, commentID))
+	op, err := scanYTOp(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+ytOpColumns+` FROM yt_write_ops
+		WHERE id = (SELECT op_id FROM yt_comment_write_links WHERE comment_id=$1)`,
+		`SELECT `+ytOpColumns+` FROM yt_write_ops
+		WHERE id = (SELECT op_id FROM yt_comment_write_links WHERE comment_id=?)`), commentID))
 	switch {
 	case err == nil:
 		return YTAuditLinked, op, nil

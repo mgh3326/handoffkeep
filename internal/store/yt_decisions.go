@@ -72,8 +72,23 @@ func (s *Store) ytDecisionsNow() (ytDecisionsGate, bool) {
 func init() {
 	registerYTKindGate(ytwrite.KindDecisionCreate, ytDecisionCreateGateSQL)
 	registerYTKindGate(ytwrite.KindDecisionFields, ytDecisionFieldsGateSQL)
-	registerYTApplyHook(ytwrite.KindDecisionCreate, ytApplyHook{conflict: ytDecisionConflictTx, bind: bindYTDecisionApplyTx})
+	registerYTApplyHook(ytwrite.KindDecisionCreate, ytApplyHook{conflict: ytDecisionConflictTxQ, bind: bindYTDecisionApplyTxQ})
 	registerYTFeedStoreConsumer(ytDecisionsConsumer, []string{"decision"}, ytDecisionsHandler)
+}
+
+// The decision hooks stay on pgx.Tx: decision bindings are B6. The adapters
+// refuse a MySQL store before unwrapping.
+func ytDecisionConflictTxQ(ctx context.Context, tx transaction, op ytwrite.Op, ytID string) (string, error) {
+	if dialectFor(tx) == mysqlDialect {
+		return "", ErrDialectUnsupported
+	}
+	return ytDecisionConflictTx(ctx, pgxTx(tx), op, ytID)
+}
+func bindYTDecisionApplyTxQ(s *Store, ctx context.Context, tx transaction, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
+	if dialectFor(tx) == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+	return bindYTDecisionApplyTx(s, ctx, pgxTx(tx), op, ytID, now, adopted)
 }
 
 // ytDecisionCreateGateSQL is the decision_create gate (ytAdmitSQL): mode on,
@@ -127,7 +142,7 @@ func (s *Store) YTDecisionBinding(ctx context.Context, decisionID int64) (YTDeci
 		return YTDecisionBinding{}, false, ErrDialectUnsupported
 	}
 
-	return readYTDecisionBinding(ctx, s.pool, decisionID)
+	return readYTDecisionBinding(ctx, pgQuerier{pool: s.pool}, decisionID)
 }
 
 func readYTDecisionBinding(ctx context.Context, q ytRowQuerier, decisionID int64) (YTDecisionBinding, bool, error) {
@@ -291,7 +306,7 @@ func prepareYTDecisionTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDeci
 		if err != nil {
 			return "", err
 		}
-		op, created, err := prepareYTOpTx(ctx, tx, now, n)
+		op, created, err := prepareYTOpTx(ctx, pgTransaction{tx}, now, n)
 		if err != nil {
 			return "", err
 		}
@@ -299,7 +314,7 @@ func prepareYTDecisionTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDeci
 			return ytDecisionCreatePending, nil
 		}
 		if cerr := ytwrite.CheckDecision(req); cerr != nil {
-			if _, err := rejectYTOpTx(ctx, tx, now, op.ID, ytwrite.ReasonInvalidIssue, cerr.Error()); err != nil {
+			if _, err := rejectYTOpTx(ctx, pgTransaction{tx}, now, op.ID, ytwrite.ReasonInvalidIssue, cerr.Error()); err != nil {
 				return "", err
 			}
 			log.Printf("ytwrite.decision_create_rejected op_id=%d decision_id=%d err=%q", op.ID, id, cerr.Error())
@@ -375,7 +390,7 @@ func ytDecisionsHandler(s *Store, now time.Time) FeedHandler {
 			// a binding committed before this read is seen, and one after
 			// it waits for this pass, whose create op it then refuses to
 			// race (ErrYTDecisionOpPending).
-			if err := lockYTEntity(ctx, tx, ytwrite.DecisionEntity, strconv.FormatInt(id, 10)); err != nil {
+			if err := lockYTEntity(ctx, pgTransaction{tx}, ytwrite.DecisionEntity, strconv.FormatInt(id, 10)); err != nil {
 				return err
 			}
 			decisions, err := readYTDecisionRows(ctx, tx, []int64{id}, now)
@@ -528,7 +543,7 @@ func bindYTDecisionApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		have, found, err := readYTDecisionBinding(ctx, tx, id)
+		have, found, err := readYTDecisionBinding(ctx, pgTransaction{tx}, id)
 		if err != nil {
 			return err
 		}
@@ -579,7 +594,7 @@ func (s *Store) BindYTDecision(ctx context.Context, b YTDecisionBinding, now tim
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	if err := lockYTEntity(ctx, tx, ytwrite.DecisionEntity, key); err != nil {
+	if err := lockYTEntity(ctx, pgTransaction{tx}, ytwrite.DecisionEntity, key); err != nil {
 		return false, err
 	}
 	var pending bool
@@ -590,7 +605,7 @@ func (s *Store) BindYTDecision(ctx context.Context, b YTDecisionBinding, now tim
 	if pending {
 		return false, fmt.Errorf("%w: decision %d", ErrYTDecisionOpPending, b.DecisionID)
 	}
-	have, found, err := readYTDecisionBinding(ctx, tx, b.DecisionID)
+	have, found, err := readYTDecisionBinding(ctx, pgTransaction{tx}, b.DecisionID)
 	if err != nil {
 		return false, err
 	}
@@ -673,7 +688,7 @@ func (s *Store) PrepareYTDecision(ctx context.Context, id int64, now time.Time) 
 		return "", err
 	}
 	defer tx.Rollback(ctx)
-	if err := lockYTEntity(ctx, tx, ytwrite.DecisionEntity, strconv.FormatInt(id, 10)); err != nil {
+	if err := lockYTEntity(ctx, pgTransaction{tx}, ytwrite.DecisionEntity, strconv.FormatInt(id, 10)); err != nil {
 		return "", err
 	}
 	decisions, err := readYTDecisionRows(ctx, tx, []int64{id}, now)

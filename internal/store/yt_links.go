@@ -126,18 +126,23 @@ const ytLinksStaleSQL = `EXISTS (SELECT 1 FROM ` + ytLinksTargetsSQL + ` n
 // snapshot is prepared from the current bindings: without it, a stale op
 // whose writer nothing else changes would leave its other link changes
 // unsent. The claim holds the writer's lane lock and the op row.
-func claimYTLinksTargetsTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op) (reject, detail string, err error) {
+func claimYTLinksTargetsTx(ctx context.Context, tx transaction, op ytwrite.Op) (reject, detail string, err error) {
 	if op.Kind != ytwrite.KindIssueLinks {
 		return "", "", nil
 	}
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM yt_task_bindings b WHERE b.task_id IN (
+	if dialectFor(tx) == mysqlDialect {
+		// B4b: the links payload walk is not ported.
+		return "", "", ErrDialectUnsupported
+	}
+	ptx := pgxTx(tx)
+	if _, err := ptx.Exec(ctx, `SELECT 1 FROM yt_task_bindings b WHERE b.task_id IN (
 			SELECT (n.t->>'task_id')::bigint FROM yt_write_ops o, LATERAL `+ytLinksTargetsSQL+` n
 			WHERE o.id = $1 AND jsonb_typeof(n.t) = 'object' AND n.t->>'task_id' ~ '^[0-9]{1,18}$')
 		ORDER BY b.task_id FOR KEY SHARE OF b`, op.ID); err != nil {
 		return "", "", err
 	}
 	var stale bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id = $1 AND `+ytLinksStaleSQL+`)`, op.ID).Scan(&stale); err != nil {
+	if err := ptx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id = $1 AND `+ytLinksStaleSQL+`)`, op.ID).Scan(&stale); err != nil {
 		return "", "", err
 	}
 	if !stale {
@@ -374,10 +379,10 @@ func ytLinksRequest(tenant, issue string, id int64, d ytLinksDesired) ytwrite.Is
 // other task prepares through prepareYTSnapshotTx, which makes no op when the
 // desired set is the one last prepared and that op was not rejected.
 func prepareYTLinksTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant string, id int64) (ytLinksOutcome, error) {
-	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(id, 10)); err != nil {
+	if err := lockYTEntity(ctx, pgTransaction{tx}, "task", strconv.FormatInt(id, 10)); err != nil {
 		return "", err
 	}
-	b, found, err := readYTBinding(ctx, tx, id)
+	b, found, err := readYTBinding(ctx, pgTransaction{tx}, id)
 	if err != nil {
 		return "", err
 	}
@@ -387,7 +392,7 @@ func prepareYTLinksTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant stri
 	case b.Tenant != tenant:
 		return ytLinksOtherTenant, nil
 	}
-	if source, err := ytBindingDisagreement(ctx, tx, b); err != nil {
+	if source, err := ytBindingDisagreement(ctx, pgTransaction{tx}, b); err != nil {
 		return "", err
 	} else if source != "" {
 		log.Printf("ytwrite.links_skipped task_id=%d reason=binding_disagreement source=%q", id, source)

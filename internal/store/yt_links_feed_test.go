@@ -76,7 +76,7 @@ func ytlfTargets(ids ...int64) []ytwrite.IssueLinkTarget {
 
 func ytlfSweepState(t *testing.T, s *Store) YTLinksSweepState {
 	t.Helper()
-	st, err := ytLinksSweepStateTx(t.Context(), s.pool)
+	st, err := ytLinksSweepStateTx(t.Context(), pgQuerier{pool: s.pool})
 	if err != nil {
 		t.Fatal(err)
 	}

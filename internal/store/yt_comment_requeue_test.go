@@ -426,7 +426,7 @@ func TestYTCommentRequeueScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rejectYTOpTx(t.Context(), tx, time.Now().UTC(), top.ID, ytwrite.ReasonAmbiguousIssue, "test"); err != nil {
+	if _, err := rejectYTOpTx(t.Context(), pgTransaction{tx}, time.Now().UTC(), top.ID, ytwrite.ReasonAmbiguousIssue, "test"); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(t.Context()); err != nil {

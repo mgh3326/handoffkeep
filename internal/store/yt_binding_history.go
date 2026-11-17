@@ -126,13 +126,13 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	}
 	defer tx.Rollback(ctx)
 	taskKey := strconv.FormatInt(taskID, 10)
-	if err := lockYTIssueOwnershipTx(ctx, tx, taskID); err != nil {
+	if err := lockYTIssueOwnershipTx(ctx, s, pgTransaction{tx}, taskID); err != nil {
 		return res, err
 	}
-	if err := lockYTEntity(ctx, tx, "task", taskKey); err != nil {
+	if err := lockYTEntity(ctx, pgTransaction{tx}, "task", taskKey); err != nil {
 		return res, err
 	}
-	b, found, err := readYTBinding(ctx, tx, taskID)
+	b, found, err := readYTBinding(ctx, pgTransaction{tx}, taskID)
 	if err != nil || !found {
 		return res, err
 	}
@@ -146,7 +146,7 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	if len(uncertain) > 0 {
 		return res, refuse("ops %s may have reached issue %s; resolve them first (yt ops resolve)", ytUnbindOpList(uncertain), b.IssueID)
 	}
-	pending, err := ytIssueOpPendingTx(ctx, tx, taskID)
+	pending, err := ytIssueOpPendingTx(ctx, pgTransaction{tx}, taskID)
 	if err != nil {
 		return res, err
 	}
@@ -163,7 +163,7 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	if enrolled {
 		return res, refuse("the task is enrolled in the comment canary, which routes its comments without the binding; run youtrack canary remove %d first", taskID)
 	}
-	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments)
+	side, err := ytAuthorityShareTx(ctx, pgTransaction{tx}, YTAuthorityComments)
 	if err != nil {
 		return res, err
 	}
@@ -254,7 +254,7 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	// binding again, undoing the unbind. The operator took over the task's
 	// issue; dropYTIssueIntentTx is what ensureYTIssueTx does for a task that
 	// has one.
-	if err := dropYTIssueIntentTx(ctx, tx, taskID); err != nil {
+	if err := dropYTIssueIntentTx(ctx, pgTransaction{tx}, taskID); err != nil {
 		return res, err
 	}
 	if err := insertYTBindingHistoryTx(ctx, tx, b, ytBindingActionUnbound, o.By, o.Reason, now); err != nil {
