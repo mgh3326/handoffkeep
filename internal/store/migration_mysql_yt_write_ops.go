@@ -191,6 +191,17 @@ var mysqlYTOpsSteps = []string{
 		CONSTRAINT yt_write_op_adoptions_attempts_check CHECK(attempts > 0),
 		CONSTRAINT yt_write_op_adoptions_yt_id_check CHECK(yt_id <> '' AND CHAR_LENGTH(yt_id) <= 64))` + mysqlTableOptions,
 
+	// The frozen legacy push's link table: its rows still count as evidence a
+	// comment was mirrored (catch-up's NOT EXISTS), so the copy carries it.
+	`CREATE TABLE IF NOT EXISTS youtrack_comment_links (
+		hk_comment_id BIGINT NOT NULL PRIMARY KEY,
+		task_id BIGINT NOT NULL,
+		youtrack_comment_id VARCHAR(512) NOT NULL,
+		created_at DATETIME(6) NOT NULL,
+		UNIQUE KEY youtrack_comment_links_youtrack_comment_id_key(youtrack_comment_id),
+		KEY youtrack_comment_links_task(task_id),
+		CONSTRAINT youtrack_comment_links_task_id_fkey FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE)` + mysqlTableOptions,
+
 	// The issue_create lane: an intent to create a task's issue once its
 	// project maps, and the comment watermark an adopted issue's binding
 	// starts from.

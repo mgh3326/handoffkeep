@@ -54,12 +54,12 @@ const ytCatchUpSelectSQL = `SELECT c.id, c.task_id, c.body, c.author, c.created_
 	  AND NOT (c.id = ANY($5::bigint[]))
 	ORDER BY c.id LIMIT $6`
 
-// ytCatchUpSelectMySQL is ytCatchUpSelectSQL on MySQL. youtrack_comment_links
-// is an empty table the port leaves out (see migration
-// 20261118-mysql-yt-write-ops), so its clause goes too.
+// ytCatchUpSelectMySQL is ytCatchUpSelectSQL on MySQL: the same predicates,
+// including the frozen legacy link table's exclusion (its rows still count).
 const ytCatchUpSelectMySQLHead = `SELECT c.id, c.task_id, c.body, c.author, c.created_at
 	FROM yt_task_bindings b JOIN task_comments c ON c.task_id = b.task_id AND c.id > b.comments_from
 	WHERE c.author <> ? AND (NOT ? OR b.origin IN ('op_applied','auto_verified'))
+	  AND NOT EXISTS (SELECT 1 FROM youtrack_comment_links l WHERE l.hk_comment_id = c.id)
 	  AND NOT EXISTS (SELECT 1 FROM yt_comment_write_links w WHERE w.comment_id = c.id)
 	  AND NOT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.principal = ? AND o.kind = ? AND o.idem_key = CONCAT(?, CAST(c.id AS CHAR)))
 	  AND NOT (c.id IN (`
@@ -249,7 +249,8 @@ func catchUpYTCommentTx(ctx context.Context, tx transaction, c TaskComment) (ytw
 		OR EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$2 AND kind=$3 AND idem_key=$4)
 		OR EXISTS(SELECT 1 FROM youtrack_comment_links WHERE hk_comment_id=$1)`,
 		`SELECT EXISTS(SELECT 1 FROM yt_comment_write_links WHERE comment_id=?)
-		OR EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=? AND kind=? AND idem_key=?)`),
+		OR EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=? AND kind=? AND idem_key=?)
+		OR EXISTS(SELECT 1 FROM youtrack_comment_links WHERE hk_comment_id=?)`),
 		c.ID, YTCommentPrincipal, ytwrite.KindCommentAppend, YTCommentKey(c.ID)).Scan(&owned); err != nil {
 		return ytwrite.Op{}, false, "", err
 	}

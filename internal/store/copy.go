@@ -47,6 +47,10 @@ type copyTableSpec struct {
 	columns []string
 	order   []string
 	bounds  map[string]int
+	// pgIdentity marks a table whose id is GENERATED ALWAYS AS IDENTITY on
+	// PostgreSQL (yt_write_ops): a PostgreSQL target must take the explicit id
+	// with OVERRIDING SYSTEM VALUE.
+	pgIdentity bool
 	// serial marks a table whose id is generated (BIGSERIAL, AUTO_INCREMENT):
 	// after the load the target's generator is moved past the largest id.
 	serial bool
@@ -136,7 +140,7 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "sync_log", serial: true, identity: "entry_id", columns: strings.Fields("entry_id sync_id model model_id action at"), order: []string{"entry_id"}, bounds: map[string]int{"model": 32, "model_id": 512}},
 	{name: "checkpoints", serial: true, columns: strings.Fields("id session kind title body refs created_by created_at"), order: []string{"id"}, bounds: map[string]int{"session": 255, "kind": 16}},
 	{name: "memory", columns: strings.Fields("agent name description memory_type content updated_by updated_at"), order: []string{"agent", "name"}, bounds: map[string]int{"agent": 255, "name": 255, "memory_type": 16}},
-	{name: "yt_write_ops", serial: true, columns: strings.Fields("id principal kind idem_key payload_sha payload entity_kind entity_id yt_target_id actor parent_id child_seq state yt_result_id reason last_error attempts reconciles created_at dispatched_at next_attempt_at resolved_at tenant"), order: []string{"id"}, bounds: map[string]int{"principal": 200, "kind": 64, "idem_key": 200, "payload_sha": 128, "entity_kind": 64, "entity_id": 200, "yt_target_id": 64, "actor": 200, "state": 16, "yt_result_id": 64, "reason": 200, "last_error": 2000, "tenant": 255}, parentColumn: "parent_id"},
+	{name: "yt_write_ops", serial: true, pgIdentity: true, columns: strings.Fields("id principal kind idem_key payload_sha payload entity_kind entity_id yt_target_id actor parent_id child_seq state yt_result_id reason last_error attempts reconciles created_at dispatched_at next_attempt_at resolved_at tenant"), order: []string{"id"}, bounds: map[string]int{"principal": 200, "kind": 64, "idem_key": 200, "payload_sha": 128, "entity_kind": 64, "entity_id": 200, "yt_target_id": 64, "actor": 200, "state": 16, "yt_result_id": 64, "reason": 200, "last_error": 2000, "tenant": 255}, parentColumn: "parent_id"},
 	{name: "yt_entity_map", columns: strings.Fields("entity_kind hk_key yt_id yt_parent_id op_id created_at tenant"), order: []string{"entity_kind", "hk_key"}, bounds: map[string]int{"entity_kind": 64, "hk_key": 200, "yt_id": 64, "yt_parent_id": 64, "tenant": 255}},
 	{name: "yt_task_bindings", columns: strings.Fields("task_id tenant issue_id issue_readable project_id bound_by bound_at comments_from origin op_id"), order: []string{"task_id"}, bounds: map[string]int{"tenant": 255, "issue_id": 64, "issue_readable": 64, "project_id": 64, "bound_by": 200, "origin": 32}},
 	{name: "yt_comment_canary", columns: strings.Fields("task_id tenant issue_id issue_readable project_id added_by added_at"), order: []string{"task_id"}, bounds: map[string]int{"tenant": 255, "issue_id": 64, "issue_readable": 64, "project_id": 64, "added_by": 200}},
@@ -144,6 +148,10 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "yt_authority", upsert: true, columns: strings.Fields("kind authority switched_at switched_by note"), order: []string{"kind"}, bounds: map[string]int{"kind": 16, "authority": 16, "switched_by": 200, "note": 2000}},
 	{name: "yt_write_op_alerts", columns: strings.Fields("op_id alert_class created_at"), order: []string{"op_id", "alert_class"}, bounds: map[string]int{"alert_class": 16}},
 	{name: "yt_write_op_adoptions", columns: strings.Fields("op_id attempts yt_id recorded_at"), order: []string{"op_id"}, bounds: map[string]int{"yt_id": 64}},
+	{name: "yt_issue_comment_bounds", columns: strings.Fields("op_id task_id comments_from recorded_at"), order: []string{"op_id"}},
+	{name: "yt_issue_intents", columns: strings.Fields("task_id tenant recorded_at"), order: []string{"task_id"}, bounds: map[string]int{"tenant": 255}},
+	{name: "yt_binding_history", serial: true, columns: strings.Fields("id task_id tenant issue_id origin action actor reason at"), order: []string{"id"}, bounds: map[string]int{"tenant": 255, "issue_id": 64, "origin": 32, "action": 16, "actor": 200, "reason": 2000}},
+	{name: "youtrack_comment_links", columns: strings.Fields("hk_comment_id task_id youtrack_comment_id created_at"), order: []string{"hk_comment_id"}, bounds: map[string]int{"youtrack_comment_id": 512}},
 }
 
 // StoreCopyTables returns the currently ported tables in dependency order.
@@ -649,7 +657,11 @@ func copyRows(ctx context.Context, src copyQuerier, dst *copyDB, sourceMySQL boo
 	for i, c := range cols {
 		dqcols[i] = quoteCopyIdent(c, dst.mySQL)
 	}
-	insert := `INSERT INTO ` + quoteCopyIdent(spec.name, dst.mySQL) + ` (` + strings.Join(dqcols, ",") + `) VALUES (` + strings.Join(placeholders, ",") + `)`
+	insert := `INSERT INTO ` + quoteCopyIdent(spec.name, dst.mySQL) + ` (` + strings.Join(dqcols, ",") + `)`
+	if !dst.mySQL && spec.pgIdentity {
+		insert += ` OVERRIDING SYSTEM VALUE`
+	}
+	insert += ` VALUES (` + strings.Join(placeholders, ",") + `)`
 	if spec.upsert {
 		insert += copyUpsertClause(spec, dqcols, dst.mySQL)
 	}
