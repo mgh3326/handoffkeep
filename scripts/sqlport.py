@@ -66,7 +66,6 @@ CAST_TYPE_MAP = {
     "json": "JSON", "jsonb": "JSON",
     "int": "SIGNED", "int2": "SIGNED", "int4": "SIGNED", "int8": "SIGNED",
     "smallint": "SIGNED", "integer": "SIGNED", "bigint": "SIGNED",
-    "bool": "SIGNED", "boolean": "SIGNED",
     "float4": "DOUBLE", "float8": "DOUBLE", "real": "DOUBLE", "double": "DOUBLE",
     "date": "DATE", "timestamp": "DATETIME(6)", "timestamptz": "DATETIME(6)",
     "uuid": "CHAR(36)",
@@ -168,7 +167,7 @@ def lex(sql: str) -> list[Token]:
             continue
         if ch in OPERATORS or ch == "?":
             i += 1
-            while i < len(sql) and (sql[i] in OPERATORS or sql[i] == "?"):
+            while i < len(sql) and sql[i] in OPERATORS:
                 # A second dash starts a comment, not an operator run.
                 if sql.startswith("--", i):
                     break
@@ -298,44 +297,6 @@ def apply_edits(sql: str, edits: list[tuple[int, int, str]]) -> str:
     return sql
 
 
-def _contains_string_or_text_cast(tokens: list[Token], operand: Operand) -> tuple[bool, bool]:
-    inner = tokens[operand.first:operand.after]
-    has_json_cast = False
-    has_text = operand.kind == "string"
-    for i, token in enumerate(inner[:-1]):
-        if word(token, "AS") and inner[i + 1].kind == "word":
-            cast_type = inner[i + 1].value.lower()
-            if cast_type == "json":
-                has_json_cast = True
-            if cast_type in {"char", "varchar"}:
-                has_text = True
-    if operand.kind == "function" and operand.name.lower() == "json_extract":
-        has_json_cast = True
-    if operand.kind == "function" and operand.name.lower() in {"concat", "json_unquote"}:
-        has_text = True
-    if operand.kind == "group" and any(t.kind == "string" for t in inner):
-        has_text = True
-    return has_text, has_json_cast
-
-
-def _allowed_neighbor(token: Token | None, *, concat: bool) -> bool:
-    if token is None:
-        return True
-    if token.kind == "punct" and token.value in {"(", ")", ","}:
-        return True
-    if token.kind == "word":
-        allowed = {
-            "SELECT", "FROM", "WHERE", "ON", "WHEN", "THEN", "ELSE", "AS", "SET",
-            "AND", "OR", "NOT", "LIKE", "ILIKE", "IN", "BETWEEN", "IS",
-            "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "UNION",
-        }
-        return token.value.upper() in allowed
-    if token.kind == "operator":
-        comparisons = {"=", "<>", "!=", "<", ">", "<=", ">="}
-        return concat and token.value in comparisons
-    return False
-
-
 def _has_words(tokens: list[Token], words: tuple[str, ...]) -> bool:
     return has_sequence(tokens, words)
 
@@ -395,10 +356,30 @@ def _has_invalid_arrow(tokens: list[Token]) -> bool:
 
 
 def _has_question_key(tokens: list[Token]) -> bool:
+    if not any(t.kind == "operator" and t.value in {"?", "?|", "?&"} for t in tokens):
+        return False
+    try:
+        opens, closes = matching_parens(tokens)
+    except SQLTokenError:
+        return any(
+            t.kind == "operator" and t.value == "?" and i > 0 and i + 1 < len(tokens)
+            and tokens[i - 1].kind in {"word", "quoted_identifier"}
+            and tokens[i + 1].kind in {"string", "parameter", "word", "quoted_identifier"}
+            for i, t in enumerate(tokens)
+        )
     for i, token in enumerate(tokens[:-1]):
-        if token.kind == "operator" and token.value == "?" and tokens[i + 1].kind == "string":
+        if token.kind != "operator" or token.value != "?":
+            continue
+        left = primary_before(tokens, i, opens, closes)
+        right = tokens[i + 1]
+        if left is not None and left.kind in {"identifier", "quoted_identifier", "group", "function"} and right.kind in {"string", "parameter", "word", "quoted_identifier"}:
             return True
     return False
+
+
+def _has_nonportable_operator(tokens: list[Token]) -> bool:
+    safe = {"=", "<>", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "%", "::", "||", "->", "->>", "?"}
+    return any(t.kind == "operator" and t.value not in safe for t in tokens)
 
 
 def _has_distinct(tokens: list[Token]) -> bool:
@@ -532,12 +513,13 @@ def _has_create_index_if_not_exists(tokens: list[Token]) -> bool:
 CONSTRUCTS = [
     Construct("$n → ?", lambda ts: any(t.kind == "parameter" for t in ts), "rewrite"),
     Construct("::type → CAST", _has_type_cast, "rewrite"),
-    Construct("|| → CONCAT", lambda ts: _has_operator_sequence(ts, "||"), "rewrite"),
-    Construct("IS [NOT] DISTINCT FROM → <=>", _has_distinct, "rewrite"),
-    Construct("FILTER → CASE", _has_filter, "rewrite"),
-    Construct("? key-exists → JSON_CONTAINS_PATH", _has_question_key, "rewrite"),
-    Construct("jsonb ->/->> → JSON path", _has_arrow, "rewrite", _has_invalid_arrow),
-    Construct("now() [manual time audit]", _has_now, "flag", lambda ts: False),
+    Construct("|| concat or JSON merge", lambda ts: _has_operator_sequence(ts, "||"), "refuse"),
+    Construct("IS [NOT] DISTINCT FROM", _has_distinct, "refuse"),
+    Construct("FILTER", _has_filter, "refuse"),
+    Construct("? JSON key/array operator", _has_question_key, "refuse"),
+    Construct("nonportable PostgreSQL operator", _has_nonportable_operator, "refuse"),
+    Construct("JSON ->/->> arrows", _has_arrow, "refuse", _has_invalid_arrow),
+    Construct("now() [manual time audit]", _has_now, "refuse", lambda ts: False),
     Construct("RETURNING", _has_returning, "refuse"),
     Construct("ON CONFLICT", _has_on_conflict, "refuse"),
     Construct("= ANY / arrays / unnest", _has_array_construct, "refuse"),
@@ -578,6 +560,8 @@ def _rewrite_casts(sql: str) -> tuple[str, str | None, int]:
             operand = primary_before(tokens, i, opens, closes)
             if operand is None:
                 return sql, "unsupported ::type operand", count
+            if operand.kind not in {"identifier", "quoted_identifier", "parameter", "string", "number"}:
+                return sql, "unsupported ::type primary", count
             cursor = i
             expr = sql[operand.start:operand.end]
             while cursor < len(tokens) and tokens[cursor].kind == "operator" and tokens[cursor].value == "::":
@@ -606,6 +590,8 @@ def _rewrite_casts(sql: str) -> tuple[str, str | None, int]:
                     return sql, f"unsupported ::{type_name} cast modifier", count
                 if target is None:
                     return sql, f"unsupported ::{type_name} cast", count
+                if after_type < len(tokens) and tokens[after_type].kind == "operator" and tokens[after_type].value == "::":
+                    return sql, "unsupported multiple ::type casts", count
                 expr = f"CAST({expr} AS {target})"
                 cursor = after_type
             sql = sql[:operand.start] + expr + sql[tokens[cursor - 1].end:]
@@ -614,184 +600,6 @@ def _rewrite_casts(sql: str) -> tuple[str, str | None, int]:
         else:
             return sql, None, count
     return sql, "unsupported nested ::type casts", count
-
-
-def _rewrite_json_arrows(sql: str) -> tuple[str, str | None, int]:
-    tokens = significant(lex(sql))
-    opens, closes = matching_parens(tokens)
-    edits: list[tuple[int, int, str]] = []
-    for i, token in enumerate(tokens):
-        if token.kind != "operator" or token.value not in {"->", "->>"}:
-            continue
-        left = primary_before(tokens, i, opens, closes)
-        right = tokens[i + 1] if i + 1 < len(tokens) else None
-        if left is None or left.kind != "identifier" or right is None:
-            return sql, "unsupported JSON arrow operand", 0
-        if right.kind == "string":
-            key = right.value[1:-1].replace("''", "'")
-            if not re.fullmatch(r"\$(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\])*", key):
-                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-                    return sql, "unsupported JSON arrow key", 0
-                key = f"$.{key}"
-            path = key
-        elif right.kind == "number" and re.fullmatch(r"[0-9]+", right.value):
-            path = f"$[{right.value}]"
-        else:
-            return sql, "unsupported JSON arrow path", 0
-        extractor = f"JSON_EXTRACT({sql[left.start:left.end]}, '{path}')"
-        if token.value == "->>":
-            extractor = f"JSON_UNQUOTE({extractor})"
-        edits.append((left.start, right.end, extractor))
-    return apply_edits(sql, edits), None, len(edits)
-
-
-def _rewrite_key_exists(sql: str) -> tuple[str, str | None, int]:
-    tokens = significant(lex(sql))
-    opens, closes = matching_parens(tokens)
-    edits: list[tuple[int, int, str]] = []
-    for i, token in enumerate(tokens):
-        if token.kind != "operator" or token.value != "?":
-            continue
-        left = primary_before(tokens, i, opens, closes)
-        if left is None or left.kind not in {"identifier", "group", "function"} or (left.kind == "function" and left.name.upper() != "JSON_EXTRACT") or i + 1 >= len(tokens) or tokens[i + 1].kind != "string":
-            return sql, "unsupported ? key-exists expression", 0
-        key = tokens[i + 1].value[1:-1].replace("''", "'")
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-            return sql, "unsupported ? key-exists key", 0
-        replacement = f"JSON_CONTAINS_PATH({sql[left.start:left.end]}, 'one', '$.{key}')"
-        edits.append((left.start, tokens[i + 1].end, replacement))
-    return apply_edits(sql, edits), None, len(edits)
-
-
-def _rewrite_concat(sql: str) -> tuple[str, str | None, int]:
-    total = 0
-    for _ in range(100):
-        tokens = significant(lex(sql))
-        opens, closes = matching_parens(tokens)
-        for op_i, op in enumerate(tokens):
-            if op.kind != "operator" or op.value != "||":
-                continue
-            for opening, closing in opens.items():
-                if opening < op_i < closing:
-                    before = opening - 1
-                    after = closing + 1
-                    if ((before >= 0 and tokens[before].kind == "operator" and tokens[before].value == "||") or
-                            (after < len(tokens) and tokens[after].kind == "operator" and tokens[after].value == "||")):
-                        return sql, "unsupported nested || boundary", total
-        replaced = False
-        for i, token in enumerate(tokens):
-            if token.kind != "operator" or token.value != "||":
-                continue
-            left = primary_before(tokens, i, opens, closes)
-            if left is None:
-                return sql, "unsupported || operand", total
-            operands = [left]
-            last = i
-            cursor = i
-            while True:
-                right = primary_at(tokens, cursor + 1, opens)
-                if right is None:
-                    return sql, "unsupported || operand", total
-                operands.append(right)
-                last = right.after - 1
-                next_op = right.after
-                if next_op >= len(tokens) or tokens[next_op].kind != "operator" or tokens[next_op].value != "||":
-                    break
-                cursor = next_op
-            first = left.first
-            before = tokens[first - 1] if first > 0 else None
-            after = tokens[last + 1] if last + 1 < len(tokens) else None
-            if not _allowed_neighbor(before, concat=True) or not _allowed_neighbor(after, concat=True):
-                return sql, "unsupported || precedence boundary", total
-            text_flags, json_flags = zip(*(_contains_string_or_text_cast(tokens, operand) for operand in operands))
-            if any(json_flags) or not any(text_flags[:2]):
-                return sql, "|| on non-text operands (jsonb merge?)", total
-            replacement = "CONCAT(" + ", ".join(sql[o.start:o.end] for o in operands) + ")"
-            sql = sql[:left.start] + replacement + sql[tokens[last].end:]
-            total += 1
-            replaced = True
-            break
-        if not replaced:
-            return sql, None, total
-    return sql, "unsupported nested || chain", total
-
-
-def _rewrite_distinct(sql: str) -> tuple[str, str | None, int]:
-    tokens = significant(lex(sql))
-    opens, closes = matching_parens(tokens)
-    edits: list[tuple[int, int, str]] = []
-    i = 0
-    while i < len(tokens):
-        if not word(tokens[i], "IS"):
-            i += 1
-            continue
-        start = i
-        cursor = i + 1
-        is_not = False
-        if cursor < len(tokens) and word(tokens[cursor], "NOT"):
-            is_not = True
-            cursor += 1
-        if cursor + 1 >= len(tokens) or not word(tokens[cursor], "DISTINCT") or not word(tokens[cursor + 1], "FROM"):
-            i += 1
-            continue
-        left = primary_before(tokens, start, opens, closes)
-        right = primary_at(tokens, cursor + 2, opens)
-        if left is None or right is None:
-            return sql, "unsupported IS [NOT] DISTINCT FROM operand", 0
-        before = tokens[left.first - 1] if left.first > 0 else None
-        after = tokens[right.after] if right.after < len(tokens) else None
-        tighter_words = {"LIKE", "ILIKE", "SIMILAR", "IN", "BETWEEN"}
-        tighter_ops = {"~", "~*", "!~", "!~*", "@", "#", "^"}
-        if (
-            not _allowed_neighbor(before, concat=False)
-            or not _allowed_neighbor(after, concat=False)
-            or (before is not None and (before.value.upper() in tighter_words if before.kind == "word" else before.value in tighter_ops))
-            or (after is not None and (after.value.upper() in tighter_words if after.kind == "word" else after.value in tighter_ops))
-        ):
-            return sql, "unsupported IS [NOT] DISTINCT FROM boundary", 0
-        expr = f"({sql[left.start:left.end]} <=> {sql[right.start:right.end]})"
-        if not is_not:
-            expr = "NOT " + expr
-        edits.append((left.start, right.end, expr))
-        i = right.after
-    return apply_edits(sql, edits), None, len(edits)
-
-
-def _rewrite_filter(sql: str) -> tuple[str, str | None, int]:
-    tokens = significant(lex(sql))
-    opens, closes = matching_parens(tokens)
-    edits: list[tuple[int, int, str]] = []
-    for i, token in enumerate(tokens):
-        if not word(token, "FILTER"):
-            continue
-        if i == 0 or tokens[i - 1].kind != "punct" or tokens[i - 1].value != ")":
-            return sql, "unsupported FILTER expression", 0
-        aggregate_close = i - 1
-        aggregate_open = closes.get(aggregate_close)
-        if aggregate_open is None or aggregate_open == 0 or tokens[aggregate_open - 1].kind != "word":
-            return sql, "unsupported FILTER aggregate", 0
-        fn = tokens[aggregate_open - 1].value.upper()
-        if fn not in {"COUNT", "SUM", "AVG", "MIN", "MAX"}:
-            return sql, "unsupported FILTER aggregate", 0
-        filter_open = i + 1
-        if filter_open >= len(tokens) or tokens[filter_open].kind != "punct" or tokens[filter_open].value != "(":
-            return sql, "unsupported FILTER expression", 0
-        filter_close = opens.get(filter_open)
-        if filter_close is None or filter_open + 1 >= filter_close or not word(tokens[filter_open + 1], "WHERE"):
-            return sql, "unsupported FILTER expression", 0
-        arg_tokens = tokens[aggregate_open + 1:aggregate_close]
-        if arg_tokens and word(arg_tokens[0], "DISTINCT"):
-            return sql, "unsupported DISTINCT FILTER aggregate", 0
-        argument = sql[tokens[aggregate_open].end:tokens[aggregate_close].start].strip()
-        condition = sql[tokens[filter_open + 1].end:tokens[filter_close].start].strip()
-        if not condition:
-            return sql, "unsupported empty FILTER condition", 0
-        if fn == "COUNT" and argument == "*":
-            case = f"COUNT(CASE WHEN {condition} THEN 1 END)"
-        else:
-            case = f"{fn}(CASE WHEN {condition} THEN {argument} END)"
-        edits.append((tokens[aggregate_open - 1].start, tokens[filter_close].end, case))
-    return apply_edits(sql, edits), None, len(edits)
 
 
 def _replace_parameters(sql: str) -> tuple[str, list[int]]:
@@ -817,38 +625,20 @@ def _rewrite(sql: str) -> tuple[str | None, list[int], list[str], bool]:
     refusal = [c.name for c in detected if c.disposition == "refuse"]
     if refusal:
         return None, [], refusal, now_flag
-    applied: list[str] = []
-    transforms = [
-        (_rewrite_casts, "::type → CAST"),
-        (_rewrite_json_arrows, "jsonb ->/->> → JSON path"),
-        (_rewrite_key_exists, "? key-exists → JSON_CONTAINS_PATH"),
-        (_rewrite_concat, "|| → CONCAT"),
-        (_rewrite_distinct, "IS [NOT] DISTINCT FROM → <=>"),
-        (_rewrite_filter, "FILTER → CASE"),
-    ]
-    for transform, label in transforms:
-        try:
-            result = transform(sql)
-        except SQLTokenError as exc:
-            return None, [], [f"TODO unlexable SQL: {exc}"], now_flag
-        sql, error, count = result
-        if error:
-            related = [c.name for c in detected if c.disposition == "rewrite"]
-            return None, [], [*related, f"TODO: {error}"], now_flag
-        if count:
-            applied.append(label)
     try:
+        sql, error, _ = _rewrite_casts(sql)
+        if error:
+            return None, [], ["::type → CAST", f"TODO: {error}"], now_flag
         sql, order = _replace_parameters(sql)
         final_tokens = significant(lex(sql))
     except SQLTokenError as exc:
         return None, [], [f"TODO unlexable SQL: {exc}"], now_flag
-    remaining = [c.name for c in CONSTRUCTS if c.residual and c.residual(final_tokens)]
+    remaining = [
+        c.name for c in present(final_tokens)
+        if c.disposition == "refuse" or (c.residual and c.residual(final_tokens))
+    ]
     if remaining:
         return None, order, remaining, now_flag
-    if now_flag:
-        applied.append("now() [manual time audit]")
-    # Report constructs from the same registry that drives refusal and residual
-    # checks, including successful rewrites whose spelling did not need edits.
     applied = [c.name for c in detected if c.disposition in {"rewrite", "flag"}]
     return sql, order, applied, now_flag
 

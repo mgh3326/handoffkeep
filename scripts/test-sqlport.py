@@ -15,66 +15,58 @@ class RewriteTests(unittest.TestCase):
     def test_placeholders_expand_reused_arguments_in_occurrence_order(self):
         self.assertEqual(sqlport.rewrite("SELECT $2,$1,$2"), ("SELECT ?,?,?", [2, 1, 2], ["$n → ?"], False))
 
-    def test_cast_map_is_strict_and_handles_function_operands(self):
+    def test_simple_casts_only_use_the_strict_type_map(self):
         self.assertEqual(sqlport.rewrite("SELECT $1::jsonb")[:2], ("SELECT CAST(? AS JSON)", [1]))
-        self.assertEqual(sqlport.rewrite("SELECT count(*)::int FROM t")[0], "SELECT CAST(count(*) AS SIGNED) FROM t")
-        self.assertEqual(sqlport.rewrite("SELECT lower(name)::text FROM t")[0], "SELECT CAST(lower(name) AS CHAR) FROM t")
-        self.assertEqual(sqlport.rewrite("SELECT lower(name)::text || '%' FROM t")[0], "SELECT CONCAT(CAST(lower(name) AS CHAR), '%') FROM t")
-        self.assertEqual(sqlport.rewrite("SELECT x::double precision")[0], "SELECT CAST(x AS DOUBLE)")
-        self.assertEqual(sqlport.rewrite("SELECT x::timestamp with time zone")[0], "SELECT CAST(x AS DATETIME(6))")
-        self.assertTrue(any("unsupported ::regclass cast" in item for item in sqlport.rewrite("SELECT 't'::regclass")[2]))
-        self.assertTrue(any("unsupported ::numeric cast modifier" in item for item in sqlport.rewrite("SELECT x::numeric(8,2)")[2]))
-        self.assertTrue(any("unsupported ::numeric cast" in item for item in sqlport.rewrite("SELECT x::numeric")[2]))
-        self.assertTrue(any("unsupported ::decimal cast" in item for item in sqlport.rewrite("SELECT x::decimal")[2]))
-        self.assertTrue(any("unsupported ::text cast modifier" in item for item in sqlport.rewrite("SELECT x::text[]")[2]))
+        self.assertEqual(sqlport.rewrite("SELECT item_id::text")[0], "SELECT CAST(item_id AS CHAR)")
+        self.assertEqual(sqlport.rewrite("SELECT '17'::int")[0], "SELECT CAST('17' AS SIGNED)")
+        self.assertEqual(sqlport.rewrite('SELECT "item"::varchar')[0], "SELECT CAST(\"item\" AS CHAR)")
+        self.assertEqual(sqlport.rewrite("SELECT value::double precision")[0], "SELECT CAST(value AS DOUBLE)")
 
-    def test_text_concat_requires_text_evidence_and_preserves_calls(self):
-        self.assertEqual(sqlport.rewrite("SELECT host_id || ':' || account_key")[0], "SELECT CONCAT(host_id, ':', account_key)")
-        self.assertEqual(sqlport.rewrite("SELECT name LIKE $1 || '%' ")[:2], ("SELECT name LIKE CONCAT(?, '%') ", [1]))
-        self.assertIsNone(sqlport.rewrite("SELECT x || lower(y) || '%' ")[0])
-        self.assertEqual(sqlport.rewrite("SELECT CAST(x AS CHAR) || lower(y) || '%' ")[0], "SELECT CONCAT(CAST(x AS CHAR), lower(y), '%') ")
-        self.assertTrue(any("non-text" in item for item in sqlport.rewrite("SELECT x || lower(y)")[2]))
-        self.assertIsNone(sqlport.rewrite("SELECT lower (name) || '%'")[0])
-        self.assertIsNone(sqlport.rewrite("SELECT 'x' || lower (y) FROM t")[0])
-
-    def test_concat_boundaries_are_allow_listed(self):
-        for sql in ("SELECT a || b + c", "SELECT a + b || c", "SELECT (host_id || ':') || account_key"):
-            with self.subTest(sql=sql):
-                self.assertIsNone(sqlport.rewrite(sql)[0])
-        self.assertIsNone(sqlport.rewrite("SELECT 1 FROM t WHERE x = $1 AND (a) || b = 'c'")[0])
-        self.assertEqual(sqlport.rewrite("SELECT 1 FROM t WHERE x = $1 AND (a) IS DISTINCT FROM b")[0], "SELECT 1 FROM t WHERE x = ? AND NOT ((a) <=> b)")
-        self.assertEqual(sqlport.rewrite("SELECT doc->>'x' || 'y'")[0], "SELECT CONCAT(JSON_UNQUOTE(JSON_EXTRACT(doc, '$.x')), 'y')")
-        self.assertIsNone(sqlport.rewrite("SELECT doc->'x' || 'y'")[0])
-
-    def test_distinct_predicate_and_function_operands(self):
-        self.assertEqual(sqlport.rewrite("a IS DISTINCT FROM b")[0], "NOT (a <=> b)")
-        self.assertEqual(sqlport.rewrite("a IS NOT DISTINCT FROM b")[0], "(a <=> b)")
-        self.assertEqual(sqlport.rewrite("lower(a) IS DISTINCT FROM b")[0], "NOT (lower(a) <=> b)")
-        self.assertIsNone(sqlport.rewrite("lower (a) IS DISTINCT FROM b")[0])
-        self.assertIsNone(sqlport.rewrite("a IS DISTINCT FROM lower (b)")[0])
-        for sql in ("a = b IS DISTINCT FROM c", "x + 1 IS DISTINCT FROM y", "a IS DISTINCT FROM b + 1", "x LIKE a IS DISTINCT FROM b", "a IS DISTINCT FROM b LIKE c"):
+    def test_casts_outside_a_single_primary_or_without_a_strict_type_are_todo(self):
+        samples = (
+            "SELECT count(*)::int",
+            "SELECT lower(name)::text",
+            "SELECT (item_id)::text",
+            "SELECT item_id::text::jsonb",
+            "SELECT value::text(20)",
+            "SELECT value::text[]",
+            "SELECT value::numeric",
+            "SELECT 1.25::numeric",
+            "SELECT value::decimal",
+            "SELECT value::boolean",
+            "SELECT value::bool",
+            "SELECT 'true'::boolean",
+            "SELECT value::regclass",
+        )
+        for sql in samples:
             with self.subTest(sql=sql):
                 self.assertIsNone(sqlport.rewrite(sql)[0])
 
-    def test_count_filter_preserves_zero_for_empty_input(self):
-        self.assertEqual(sqlport.rewrite("COUNT(*) FILTER (WHERE ok)")[0], "COUNT(CASE WHEN ok THEN 1 END)")
-        self.assertEqual(sqlport.rewrite("COUNT(value) FILTER (WHERE ok)")[0], "COUNT(CASE WHEN ok THEN value END)")
-        self.assertIsNone(sqlport.rewrite("COUNT(DISTINCT value) FILTER (WHERE ok)")[0])
-
-    def test_json_arrows_map_to_mysql_and_chains_refuse(self):
-        self.assertEqual(sqlport.rewrite("doc -> 'x', doc ->> 'x'")[0], "JSON_EXTRACT(doc, '$.x'), JSON_UNQUOTE(JSON_EXTRACT(doc, '$.x'))")
-        self.assertEqual(sqlport.rewrite("doc -> 0")[0], "JSON_EXTRACT(doc, '$[0]')")
-        for sql in ("refs->'disposition'->'answer'->>'event_id'", "CAST(? AS JSON) -> 'x'", "doc -> 'has.dot'"):
+    def test_all_constructs_outside_placeholders_and_simple_casts_are_todo(self):
+        samples = (
+            "SELECT host_id || ':' || account_key",
+            "SELECT a IS DISTINCT FROM b",
+            "SELECT a IS NOT DISTINCT FROM b",
+            "SELECT COUNT(*) FILTER (WHERE ok)",
+            "SELECT COUNT(DISTINCT id) FILTER (WHERE ok)",
+            "SELECT doc ? 'x'",
+            "SELECT doc->'x'",
+            "SELECT doc->>'x'",
+            "SELECT doc || '{}'",
+            "SELECT (doc->'a') || '{}'",
+            "SELECT a || b->>'k'",
+            "SELECT doc->'$.x'",
+            "SELECT doc->>'$'",
+            "SELECT doc ? $1",
+            "SELECT doc @> '{}'",
+            "SELECT a && ARRAY[1]",
+        )
+        for sql in samples:
             with self.subTest(sql=sql):
                 self.assertIsNone(sqlport.rewrite(sql)[0])
-
-    def test_key_exists_after_single_arrow_is_rewritten(self):
-        self.assertEqual(sqlport.rewrite("doc ? 'x'")[0], "JSON_CONTAINS_PATH(doc, 'one', '$.x')")
-        self.assertEqual(sqlport.rewrite("doc->'a' ? 'b'")[0], "JSON_CONTAINS_PATH(JSON_EXTRACT(doc, '$.a'), 'one', '$.b')")
-        self.assertIsNone(sqlport.rewrite("doc ? 'has.dot'")[0])
-        self.assertIsNone(sqlport.rewrite("doc->'a'->'b' ? 'c'")[0])
 
     def test_now_is_flagged_even_when_other_construct_is_todo(self):
+        self.assertIsNone(sqlport.rewrite("SELECT now()")[0])
         self.assertTrue(sqlport.rewrite("SELECT now()")[3])
         self.assertTrue(sqlport.rewrite("SELECT now() - interval '1 day'")[3])
         with tempfile.TemporaryDirectory() as tmp:
@@ -84,19 +76,6 @@ class RewriteTests(unittest.TestCase):
         self.assertTrue(rows[0]["now"])
         self.assertIn("now() [manual time audit]", rows[0]["constructs"])
         self.assertEqual(counts[("TODO", "now() [manual time audit]")], 1)
-
-    def test_reviewer_regressions_fail_closed(self):
-        samples = (
-            "SELECT substring(t.refs->>'pr' FROM '^https://example.invalid')",
-            "SELECT lower (name) || '%'",
-            "SELECT lower (a) IS DISTINCT FROM b",
-            "SELECT refs->'disposition'->'answer'->>'event_id'",
-            "SELECT CAST(? AS JSON) -> 'x'",
-        )
-        for sql in samples:
-            with self.subTest(sql=sql):
-                self.assertIsNone(sqlport.rewrite(sql)[0])
-        self.assertEqual(sqlport.rewrite("SELECT t.refs->'disposition' ? 'answer'")[0], "SELECT JSON_CONTAINS_PATH(JSON_EXTRACT(t.refs, '$.disposition'), 'one', '$.answer')")
 
     def test_construct_table_refusals(self):
         samples = {
@@ -122,6 +101,7 @@ class RewriteTests(unittest.TestCase):
             "DO block": "DO $$ BEGIN END $$",
             "PostgreSQL-only type spelling": "CREATE TABLE x (data JSONB)",
             "CREATE INDEX IF NOT EXISTS": "CREATE INDEX IF NOT EXISTS idx_x ON x(id)",
+            "nonportable PostgreSQL operator": "SELECT a @> b",
         }
         for expected, sql in samples.items():
             with self.subTest(expected=expected):
@@ -135,7 +115,7 @@ class RewriteTests(unittest.TestCase):
         self.assertEqual(len(literals), 1)
         self.assertIsNone(sqlport.rewrite(literals[0].text)[0])
 
-    def test_hk5059_quota_comparisons(self):
+    def test_hk5059_quota_and_bench_comparisons(self):
         quota = "SELECT o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 ORDER BY l.kind,l.window_key"
         self.assertEqual(sqlport.rewrite(quota)[0], "SELECT o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=? ORDER BY l.kind,l.window_key")
         presence = "SELECT host_id,account_key,last_seen FROM quota_presence WHERE ($1='' OR host_id=$1) AND ($2='' OR account_key=$2) AND last_seen >= clock_timestamp()-$4*interval '1 second' ORDER BY last_seen DESC,host_id,account_key LIMIT $3"
@@ -146,6 +126,12 @@ class RewriteTests(unittest.TestCase):
     def test_corpus_invariant_for_internal_store(self):
         violations = sqlport._corpus_auto_violations(Path(__file__).resolve().parents[1])
         self.assertEqual(violations, [])
+
+    def test_only_placeholders_and_simple_casts_are_auto_rewrites(self):
+        self.assertEqual(
+            {c.name for c in sqlport.CONSTRUCTS if c.disposition == "rewrite"},
+            {"$n → ?", "::type → CAST"},
+        )
 
 
 if __name__ == "__main__":
