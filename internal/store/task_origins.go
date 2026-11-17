@@ -150,10 +150,6 @@ func scanTaskOrigin(row row, x *TaskOrigin) error {
 // The insert takes KEY SHARE on one task row through the foreign key and
 // locks no other task (lockorder.go, level 4).
 func (s *Store) AddTaskOrigin(ctx context.Context, taskID int64, by string, in TaskOriginInput) (TaskOrigin, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return TaskOrigin{}, false, ErrDialectUnsupported
-	}
-
 	if taskID < 1 || by == "" || !validText(by, 128) {
 		return TaskOrigin{}, false, errors.New("invalid origin")
 	}
@@ -161,6 +157,9 @@ func (s *Store) AddTaskOrigin(ctx context.Context, taskID int64, by string, in T
 		return TaskOrigin{}, false, err
 	}
 	now := time.Now().UTC()
+	if s.dialect == mysqlDialect {
+		return s.addTaskOriginMySQL(ctx, taskID, by, in, now)
+	}
 	var x TaskOrigin
 	var created bool
 	err := s.db().QueryRow(ctx, `INSERT INTO task_origins(task_id,provider,namespace,external_id,display_ref,url,title_snapshot,snapshot_at,created_by,created_at)
@@ -224,22 +223,34 @@ func (s *Store) listTaskOrigins(ctx context.Context, taskID int64, limit int) ([
 	if taskID < 1 {
 		return nil, errors.New("invalid origin query")
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return nil, err
+	var tx transaction
+	if s.dialect == mysqlDialect {
+		// A plain transaction at the session's READ COMMITTED: the two reads
+		// below need no snapshot, as on PostgreSQL's default isolation.
+		mtx, err := s.db().Begin(ctx)
+		if err != nil {
+			return nil, err
+		}
+		tx = mtx
+	} else {
+		ptx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+		if err != nil {
+			return nil, err
+		}
+		tx = pgTransaction{ptx}
 	}
 	defer tx.Rollback(ctx)
 	var exists bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, taskID).Scan(&exists); err != nil {
+	if err := tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?)`), taskID).Scan(&exists); err != nil {
 		return nil, err
 	}
 	if !exists {
 		return nil, ErrTaskNotFound
 	}
-	query := `SELECT ` + taskOriginColumns + ` FROM task_origins WHERE task_id=$1 ORDER BY id`
+	query := s.q(`SELECT `+taskOriginColumns+` FROM task_origins WHERE task_id=$1 ORDER BY id`, `SELECT `+taskOriginColumns+` FROM task_origins WHERE task_id=? ORDER BY id`)
 	args := []any{taskID}
 	if limit > 0 {
-		query += ` LIMIT $2`
+		query += s.q(` LIMIT $2`, ` LIMIT ?`)
 		args = append(args, limit)
 	}
 	rows, err := tx.Query(ctx, query, args...)
@@ -253,10 +264,6 @@ func (s *Store) listTaskOrigins(ctx context.Context, taskID int64, limit int) ([
 // namespaces and tasks, in (task_id, id) order. The display number plays no
 // part: a moved issue is found by its UUID.
 func (s *Store) FindTaskOrigins(ctx context.Context, provider, externalID string, limit int) ([]TaskOrigin, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if !validOriginProvider(provider) {
 		return nil, errors.New("invalid origin query: provider is linear, github or sentry")
 	}
@@ -269,7 +276,7 @@ func (s *Store) FindTaskOrigins(ctx context.Context, provider, externalID string
 	if limit > OriginListMax {
 		limit = OriginListMax
 	}
-	rows, err := s.db().Query(ctx, `SELECT `+taskOriginColumns+` FROM task_origins WHERE provider=$1 AND external_id=$2 ORDER BY task_id,id LIMIT $3`, provider, externalID, limit)
+	rows, err := s.db().Query(ctx, s.q(`SELECT `+taskOriginColumns+` FROM task_origins WHERE provider=$1 AND external_id=$2 ORDER BY task_id,id LIMIT $3`, `SELECT `+taskOriginColumns+` FROM task_origins WHERE provider=? AND external_id=? ORDER BY task_id,id LIMIT ?`), provider, externalID, limit)
 	if err != nil {
 		return nil, err
 	}

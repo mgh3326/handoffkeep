@@ -214,10 +214,6 @@ type sourceEvent struct {
 // ApplyTaskSourceEvent applies one mergewake event to a task in one
 // transaction and records it, applied or not.
 func (s *Store) ApplyTaskSourceEvent(ctx context.Context, in TaskSourceEvent) (TaskEventResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return TaskEventResult{}, ErrDialectUnsupported
-	}
-
 	in, err := normalizeTaskSourceEvent(in)
 	if err != nil {
 		return TaskEventResult{}, err
@@ -227,17 +223,31 @@ func (s *Store) ApplyTaskSourceEvent(ctx context.Context, in TaskSourceEvent) (T
 	if in.At != nil && in.At.Before(now) {
 		at = in.At.UTC()
 	}
+	var res TaskEventResult
+	err = s.retryTx(ctx, func() error {
+		var err error
+		res, err = s.applyTaskSourceEventOnce(ctx, in, at, now)
+		return err
+	})
+	if err != nil {
+		return TaskEventResult{}, err
+	}
+	return res, nil
+}
+
+// applyTaskSourceEventOnce is one attempt of ApplyTaskSourceEvent's transaction.
+func (s *Store) applyTaskSourceEventOnce(ctx context.Context, in TaskSourceEvent, at, now time.Time) (TaskEventResult, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return TaskEventResult{}, err
 	}
 	defer release()
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err = s.lockTx(ctx, tx, 8241873001); err != nil {
 		return TaskEventResult{}, err
 	}
 	if in.Source == SourceMergewakePR || in.Source == SourceMergewakeMerge || in.Source == SourceMergewakeRevert {
-		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+		if err = s.lockTx(ctx, tx, taskCommentInsertLock); err != nil {
 			return TaskEventResult{}, err
 		}
 	}
@@ -288,6 +298,10 @@ func (s *Store) propagateRevertTx(ctx context.Context, tx transaction, in TaskSo
 	if !ok {
 		return nil
 	}
+	if err := srcEvChangesGate(tx); err != nil {
+		// B5 dependency: the lookup below reads change_tasks and changes.
+		return err
+	}
 	named := map[int64]bool{in.TaskID: true}
 	for _, id := range in.Tasks {
 		named[id] = true
@@ -297,18 +311,30 @@ func (s *Store) propagateRevertTx(ctx context.Context, tx transaction, in TaskSo
 	// linked) is reached by its refs.pr, as a deploy reaches it. A bundle child
 	// with no PR of its own is reached by the bundle parent's PR that delivered
 	// it (taskDeliveredPRSQL, hk 4844).
-	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks t WHERE t.state IN ($3,$4) AND ((`+taskDeliveredPRSQL+`)=$5
+	var linked []Task
+	if dialectFor(tx) == mysqlDialect {
+		// Unreachable until B5 removes srcEvChangesGate; the text is ready.
+		var err error
+		linked, err = srcEvLockedTasksMySQL(ctx, tx, `SELECT t.id FROM tasks t WHERE t.state IN (?,?) AND ((`+srcEvDeliveredPRMySQL+`)=?
+		OR EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=t.id AND c.repo=? AND c.pr_number=? AND ct.relation='implements'))
+		ORDER BY t.id`, StateMerged, StateDeployed, in.PR, repo, n)
+		if err != nil {
+			return err
+		}
+	} else {
+		rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks t WHERE t.state IN ($3,$4) AND ((`+taskDeliveredPRSQL+`)=$5
 		OR EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=t.id AND c.repo=$1 AND c.pr_number=$2 AND ct.relation='implements'))
 		ORDER BY t.id FOR UPDATE`, repo, n, StateMerged, StateDeployed, in.PR)
-	if err != nil {
-		return err
-	}
-	linked, err := collectRows(rows, func(row row) (Task, error) {
-		var x Task
-		return x, scanTask(row, &x)
-	})
-	if err != nil {
-		return err
+		if err != nil {
+			return err
+		}
+		linked, err = collectRows(rows, func(row row) (Task, error) {
+			var x Task
+			return x, scanTask(row, &x)
+		})
+		if err != nil {
+			return err
+		}
 	}
 	// Each linked task gets the revert in its own turn, so rule 9 skips a
 	// linked parent rather than take its event key (as for a named one).
@@ -322,12 +348,12 @@ func (s *Store) propagateRevertTx(ctx context.Context, tx transaction, in TaskSo
 		named[x.ID] = true
 	}
 	for _, x := range todo {
-		if err = recordChangeTx(ctx, pgxTx(tx), x, in, at, now); err != nil {
+		if err := srcEvRecordChangeTx(ctx, tx, x, in, at, now); err != nil {
 			return err
 		}
 		ev := sourceEvent{Source: in.Source, SourceRef: in.SourceRef, PR: in.PR, MergeSHA: in.MergeSHA, RevertedPR: in.RevertedPR, RevertPR: in.RevertPR, At: at, Named: named,
 			Note: fmt.Sprintf("the reverted PR also delivered this task; reverted with task #%d", in.TaskID)}
-		if _, err = s.applySourceEventTx(ctx, tx, x, ev, now); err != nil {
+		if _, err := s.applySourceEventTx(ctx, tx, x, ev, now); err != nil {
 			return err
 		}
 	}
@@ -339,7 +365,7 @@ func (s *Store) propagateRevertTx(ctx context.Context, tx transaction, in TaskSo
 // false, with nothing written, when the task does not exist.
 func (s *Store) applyTaskSourceEventTx(ctx context.Context, tx transaction, id int64, in TaskSourceEvent, at, now time.Time, pending map[int64]bool) (TaskEventResult, bool, error) {
 	var x Task
-	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+	if err := scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return TaskEventResult{}, false, nil
 		}
@@ -347,7 +373,7 @@ func (s *Store) applyTaskSourceEventTx(ctx context.Context, tx transaction, id i
 	}
 	// The change rows describe the PR, so they are written for a redelivered
 	// or not-applied event too.
-	if err := recordChangeTx(ctx, pgxTx(tx), x, in, at, now); err != nil {
+	if err := srcEvRecordChangeTx(ctx, tx, x, in, at, now); err != nil {
 		return TaskEventResult{}, false, err
 	}
 	named := map[int64]bool{in.TaskID: true}
@@ -376,21 +402,36 @@ func (s *Store) applyTaskSourceEventTx(ctx context.Context, tx transaction, id i
 // record lookup hold for it. Settled tasks are not touched. The caller holds
 // the task-mutation lock (level 2), which serializes the sibling row locks.
 func (s *Store) propagateMergeTx(ctx context.Context, tx transaction, src int64, ev sourceEvent, now time.Time) error {
-	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs->>'pr'=$1 AND id<>$2 AND state NOT IN (`+settledStatesSQL+`) ORDER BY id FOR UPDATE`, ev.PR, src)
-	if err != nil {
-		return err
+	if _, _, ok := parsePRURL(ev.PR); ok {
+		if err := srcEvChangesGate(tx); err != nil {
+			// B5 dependency: the change lookup and linkChangeTaskTx below.
+			return err
+		}
 	}
-	siblings, err := collectRows(rows, func(row row) (Task, error) {
-		var x Task
-		err := scanTask(row, &x)
-		return x, err
-	})
-	if err != nil {
-		return err
+	var siblings []Task
+	if dialectFor(tx) == mysqlDialect {
+		var err error
+		siblings, err = srcEvLockedTasksMySQL(ctx, tx, `SELECT id FROM tasks WHERE `+srcEvRefsPRMySQL+`=? AND id<>? AND state NOT IN (`+settledStatesSQL+`) ORDER BY id`, ev.PR, src)
+		if err != nil {
+			return err
+		}
+	} else {
+		rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs->>'pr'=$1 AND id<>$2 AND state NOT IN (`+settledStatesSQL+`) ORDER BY id FOR UPDATE`, ev.PR, src)
+		if err != nil {
+			return err
+		}
+		siblings, err = collectRows(rows, func(row row) (Task, error) {
+			var x Task
+			err := scanTask(row, &x)
+			return x, err
+		})
+		if err != nil {
+			return err
+		}
 	}
 	var changeID int64
 	if repo, n, ok := parsePRURL(ev.PR); ok {
-		if err = tx.QueryRow(ctx, `SELECT id FROM changes WHERE repo=$1 AND pr_number=$2`, repo, n).Scan(&changeID); err != nil && !errors.Is(err, ErrNoRows) {
+		if err := tx.QueryRow(ctx, `SELECT id FROM changes WHERE repo=$1 AND pr_number=$2`, repo, n).Scan(&changeID); err != nil && !errors.Is(err, ErrNoRows) {
 			return err
 		}
 	}
@@ -401,13 +442,14 @@ func (s *Store) propagateMergeTx(ctx context.Context, tx transaction, src int64,
 		// The sibling implements the PR too: link it first, so a later revert
 		// of the PR holds the sibling's own close (unresolvedRevertSQL).
 		if changeID != 0 {
-			if err = linkChangeTaskTx(ctx, pgxTx(tx), changeID, x.ID, ChangeImplements, true, now); err != nil {
+			// changeID is 0 on MySQL: srcEvChangesGate refused above.
+			if err := linkChangeTaskTx(ctx, pgxTx(tx), changeID, x.ID, ChangeImplements, true, now); err != nil {
 				return err
 			}
 		}
 		sib := ev
 		sib.Note = fmt.Sprintf("the PR is also task #%d's; applied with it", src)
-		if _, err = s.applySourceEventTx(ctx, tx, x, sib, now); err != nil {
+		if _, err := s.applySourceEventTx(ctx, tx, x, sib, now); err != nil {
 			return err
 		}
 	}
@@ -418,7 +460,7 @@ func (s *Store) propagateMergeTx(ctx context.Context, tx transaction, src int64,
 // as the reverted PR, applied or not (rules 9 and 10).
 func revertNamesPRTx(ctx context.Context, q rowQuerier, taskID int64, pr string) (bool, error) {
 	var found bool
-	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=$1 AND source=$2 AND field=$3 AND to_value=$4)`, taskID, SourceMergewakeRevert, revertedPRField, pr).Scan(&found)
+	err := q.QueryRow(ctx, sqlFor(q, `SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=$1 AND source=$2 AND field=$3 AND to_value=$4)`, `SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=? AND source=? AND field=? AND to_value=?)`), taskID, SourceMergewakeRevert, revertedPRField, pr).Scan(&found)
 	return found, err
 }
 
@@ -426,6 +468,11 @@ func revertNamesPRTx(ctx context.Context, q rowQuerier, taskID int64, pr string)
 func liveJobTx(ctx context.Context, q rowQuerier, x Task) (bool, error) {
 	if x.Refs.JobID == "" {
 		return false, nil
+	}
+	if dialectFor(q) == mysqlDialect {
+		// B7 dependency: the jobs table is not in the MySQL schema. Reached
+		// only for a task bound to a job (an empty job id answered above).
+		return false, ErrDialectUnsupported
 	}
 	var live bool
 	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM jobs WHERE job_id=$1 AND task_id=$2 AND state IN ('claimed','spawned'))`, x.Refs.JobID, x.ID).Scan(&live)
@@ -437,7 +484,7 @@ func liveJobTx(ctx context.Context, q rowQuerier, x Task) (bool, error) {
 // and applySourceEventTx answers a redelivery with no change.
 func sourceEventRecordedTx(ctx context.Context, q rowQuerier, taskID int64, source, sourceRef string) (bool, error) {
 	var recorded bool
-	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3)`, taskID, source, sourceRef).Scan(&recorded)
+	err := q.QueryRow(ctx, sqlFor(q, `SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=$3)`, `SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id=? AND source=? AND source_ref=?)`), taskID, source, sourceRef).Scan(&recorded)
 	return recorded, err
 }
 
@@ -486,13 +533,18 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 		case SourceDeploy:
 		}
 	}
-	writeEventComment := func() {
+	writeEventComment := func() error {
 		if commentBody == "" {
-			return
+			return nil
 		}
-		if err := s.insertSystemTaskCommentTx(ctx, pgxTx(tx), x.ID, ev.Source, commentKey, commentBody, now); err != nil {
+		if err := s.srcEvSystemCommentTx(ctx, tx, x.ID, ev.Source, commentKey, commentBody, now); err != nil {
+			if errors.Is(err, ErrDialectUnsupported) {
+				// MySQL only: a comment whose projection is not ported refuses.
+				return err
+			}
 			log.Printf("task_event_comment_failed task_id=%d source=%q err=%q", x.ID, ev.Source, err)
 		}
+		return nil
 	}
 	if x.State == StateMerged && x.Refs.PR == "" && ev.Source == SourceMergewakeMerge && ev.PR != "" {
 		// A parent that an automatic close moved to merged before its own PR was
@@ -573,6 +625,11 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 	case SourceMergewakeRevert:
 		x.Refs.RevertPR = ev.RevertPR
 	}
+	// B6 dependency: mirrorTaskDecisionsTx below supersedes the task's open
+	// decision rows when it ends; refuse before anything is written.
+	if err = srcEvDecisionGate(tx, to); err != nil {
+		return TaskEventResult{}, err
+	}
 	decisionBefore := decisionBeforeOf(x)
 	x.State, x.UpdatedAt = to, now
 	if err := applyLifecycle(&x, from, to, now, &TaskClosure{Type: "resolved", Evidence: ev.SourceRef}); err != nil {
@@ -587,9 +644,16 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 	}); err != nil {
 		return TaskEventResult{}, err
 	}
-	writeEventComment()
-	if err = mirrorTaskDecisionsTx(ctx, pgxTx(tx), decisionBefore, x, ev.Source, ev.Note, 0, now); err != nil {
+	if err = writeEventComment(); err != nil {
 		return TaskEventResult{}, err
+	}
+	// On MySQL the mirror acts only when the task ends (srcEvDecisionGate
+	// refused that before the write) and does nothing else here: the event
+	// changes neither the decision request nor the awaiting flag.
+	if dialectFor(tx) != mysqlDialect {
+		if err = mirrorTaskDecisionsTx(ctx, pgxTx(tx), decisionBefore, x, ev.Source, ev.Note, 0, now); err != nil {
+			return TaskEventResult{}, err
+		}
 	}
 	deferNamedParentClose := x.ParentID != nil && ev.Pending[*x.ParentID] &&
 		(ev.Source == SourceMergewakeMerge || ev.Source == SourceDeploy)
@@ -600,7 +664,7 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 		// rollup close itself (autoCloseTx deploys a merged parent whose
 		// sub-tasks deployed).
 		var pstate, ppr string
-		if err = tx.QueryRow(ctx, `SELECT state,COALESCE(refs->>'pr','') FROM tasks WHERE id=$1`, *x.ParentID).Scan(&pstate, &ppr); err != nil {
+		if err = tx.QueryRow(ctx, s.q(`SELECT state,COALESCE(refs->>'pr','') FROM tasks WHERE id=$1`, `SELECT state,COALESCE(`+srcEvRefsPRMySQL+`,'') FROM tasks WHERE id=?`), *x.ParentID).Scan(&pstate, &ppr); err != nil {
 			return TaskEventResult{}, err
 		}
 		deferNamedParentClose = !IsSettledState(pstate) || (pstate == StateMerged && ppr == "")
@@ -624,7 +688,7 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 		// Rule 9: a parent that auto-closed stays closed; the revert is
 		// recorded on it.
 		var p Task
-		if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, *x.ParentID), &p); err != nil {
+		if err = scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), *x.ParentID), &p); err != nil {
 			return TaskEventResult{}, err
 		}
 		if TaskCategory(p.State) == CategoryCompleted {
@@ -650,7 +714,7 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 // merge was held on an open sub-task, or came after the close). The task
 // adopts the PR, so a deploy record that lists it can apply. Adoption does not
 // deploy the task past a sub-task that is merged and not yet deployed.
-func (s *Store) adoptMergedPRTx(ctx context.Context, tx transaction, x Task, ev sourceEvent, now time.Time, writeComment func()) (TaskEventResult, error) {
+func (s *Store) adoptMergedPRTx(ctx context.Context, tx transaction, x Task, ev sourceEvent, now time.Time, writeComment func() error) (TaskEventResult, error) {
 	reverted, err := revertNamesPRTx(ctx, tx, x.ID, ev.PR)
 	if err != nil {
 		return TaskEventResult{}, err
@@ -679,7 +743,9 @@ func (s *Store) adoptMergedPRTx(ctx context.Context, tx transaction, x Task, ev 
 	}
 	// The merge comment precedes the rule-8 deploy comment, as on the
 	// ordinary merge path.
-	writeComment()
+	if err = writeComment(); err != nil {
+		return TaskEventResult{}, err
+	}
 	roll, err := subTaskRollupTx(ctx, tx, x.ID)
 	if err != nil {
 		return TaskEventResult{}, err
@@ -701,7 +767,7 @@ func (s *Store) adoptMergedPRTx(ctx context.Context, tx transaction, x Task, ev 
 // hasSubTasksTx reports whether task taskID has any sub-task.
 func hasSubTasksTx(ctx context.Context, tx transaction, taskID int64) (bool, error) {
 	var has bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_id=$1)`, taskID).Scan(&has)
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_id=$1)`, `SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_id=?)`), taskID).Scan(&has)
 	return has, err
 }
 
@@ -710,6 +776,10 @@ func hasSubTasksTx(ctx context.Context, tx transaction, taskID int64) (bool, err
 // mergeHoldTx records no PR on the task; an automatic close to merged adopts it
 // (hk 4172), so the task does not stay merged with no PR of its own.
 func heldMergePRTx(ctx context.Context, tx transaction, taskID int64) (string, error) {
+	if err := srcEvChangesGate(tx); err != nil {
+		// B5 dependency: the join below reads changes.
+		return "", err
+	}
 	var pr string
 	err := tx.QueryRow(ctx, `SELECT e.source_ref FROM task_events e JOIN changes c ON (`+prURLSQL+`)=e.source_ref
 		WHERE e.task_id=$1 AND e.source=$2 AND e.field=$3 AND NOT e.applied AND c.state='merged' AND c.reverted_by_change_id IS NULL
@@ -809,6 +879,10 @@ func (h taskHolds) mergeReason() string {
 // caller is merging: it is not an open hold on the task.
 func taskHoldsTx(ctx context.Context, tx transaction, taskID int64, pr string) (taskHolds, error) {
 	var h taskHolds
+	if err := srcEvChangesGate(tx); err != nil {
+		// B5 dependency: the first two holds read change_tasks and changes.
+		return h, err
+	}
 	repo, n, _ := parsePRURL(pr)
 	rows, err := tx.Query(ctx, openImplementsSQL, taskID, repo, n)
 	if err != nil {
@@ -898,6 +972,11 @@ func (s *Store) deployOnMergedTx(ctx context.Context, tx transaction, x Task, no
 // lists pr. A record is matched through its projection, or parsed from the
 // document body when the projection is stale.
 func deployRecordForPRTx(ctx context.Context, tx transaction, pr string) (StoredDeployRecord, bool, error) {
+	if dialectFor(tx) == mysqlDialect {
+		// B3/B5 dependency: documents and deploy_record_projection are not in
+		// the MySQL schema.
+		return StoredDeployRecord{}, false, ErrDialectUnsupported
+	}
 	// The record prefix is the documents_key_c range:
 	// strpos(key,'deploy/') = 1 scanned the whole table, and every task that
 	// enters merged calls this (hk 4923).
@@ -996,23 +1075,36 @@ func (s *Store) applyDeployRecordTx(ctx context.Context, tx transaction, record 
 	if !ok || len(prs) == 0 {
 		return nil
 	}
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err := s.lockTx(ctx, tx, 8241873001); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+	if err := s.lockTx(ctx, tx, taskCommentInsertLock); err != nil {
 		return err
 	}
-	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks t WHERE t.state=$2 AND `+taskDeliveredPRSQL+` = ANY($1) ORDER BY t.id FOR UPDATE`, prs, StateMerged)
-	if err != nil {
-		return err
-	}
-	tasks, err := collectRows(rows, func(row row) (Task, error) {
-		var x Task
-		err := scanTask(row, &x)
-		return x, err
-	})
-	if err != nil {
-		return err
+	var tasks []Task
+	if dialectFor(tx) == mysqlDialect {
+		args := []any{StateMerged}
+		for _, pr := range prs {
+			args = append(args, pr)
+		}
+		var err error
+		tasks, err = srcEvLockedTasksMySQL(ctx, tx, `SELECT t.id FROM tasks t WHERE t.state=? AND (`+srcEvDeliveredPRMySQL+`) IN (`+placeholders(len(prs))+`) ORDER BY t.id`, args...)
+		if err != nil {
+			return err
+		}
+	} else {
+		rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks t WHERE t.state=$2 AND `+taskDeliveredPRSQL+` = ANY($1) ORDER BY t.id FOR UPDATE`, prs, StateMerged)
+		if err != nil {
+			return err
+		}
+		tasks, err = collectRows(rows, func(row row) (Task, error) {
+			var x Task
+			err := scanTask(row, &x)
+			return x, err
+		})
+		if err != nil {
+			return err
+		}
 	}
 	for _, x := range tasks {
 		pr, err := deliveredPRTx(ctx, tx, x.ID)
@@ -1035,11 +1127,11 @@ func (s *Store) applyJobRoleTx(ctx context.Context, tx transaction, j Job, now t
 	if j.TaskID == nil || j.Role == "" {
 		return nil
 	}
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err := s.lockTx(ctx, tx, 8241873001); err != nil {
 		return err
 	}
 	var x Task
-	err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 AND refs->>'job_id'=$2 FOR UPDATE`, j.TaskID, j.JobID), &x)
+	err := scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 AND refs->>'job_id'=$2 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? AND `+srcEvRefsJobIDMySQL+`=? FOR UPDATE`), j.TaskID, j.JobID), &x)
 	if errors.Is(err, ErrNoRows) {
 		return nil
 	}
