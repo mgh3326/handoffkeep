@@ -26,9 +26,19 @@ class RewriteTests(unittest.TestCase):
         self.assertIsNone(mysql)
         self.assertIn("unsupported || expression", constructs)
 
+    def test_concat_after_keyword_and_parenthesized_operand(self):
+        self.assertEqual(sqlport.rewrite("SELECT x = $1 AND (a) || b = 'c'")[0], "SELECT x = ? AND CONCAT((a), b) = 'c'")
+
     def test_concat_function_operands(self):
         self.assertEqual(sqlport.rewrite("SELECT lower(name) || '%'")[0], "SELECT CONCAT(lower(name), '%')")
         self.assertEqual(sqlport.rewrite("SELECT x || lower(y)")[0], "SELECT CONCAT(x, lower(y))")
+
+    def test_concat_refuses_operator_precedence_ambiguity(self):
+        for sql in ("SELECT doc ->> 'x' || 'y'", "SELECT a || b + c", "SELECT a + b || c"):
+            with self.subTest(sql=sql):
+                mysql, _, constructs, _ = sqlport.rewrite(sql)
+                self.assertIsNone(mysql)
+                self.assertIn("unsupported || expression", constructs)
 
     def test_cast(self):
         self.assertEqual(sqlport.rewrite("SELECT $1::jsonb"), ("SELECT CAST(? AS JSON)", [1], ["$n → ?", "::type → CAST"], False))
@@ -38,6 +48,8 @@ class RewriteTests(unittest.TestCase):
     def test_casts_are_rewritten_before_concat(self):
         self.assertEqual(sqlport.rewrite("SELECT $1::text || '%'")[:2], ("SELECT CONCAT(CAST(? AS CHAR), '%')", [1]))
         self.assertEqual(sqlport.rewrite("SELECT '%decision-escalation-' || e.id::text || '-%'")[0], "SELECT CONCAT('%decision-escalation-', CAST(e.id AS CHAR), '-%')")
+        self.assertEqual(sqlport.rewrite("SELECT count(*)::int FROM t")[0], "SELECT CAST(count(*) AS SIGNED) FROM t")
+        self.assertEqual(sqlport.rewrite("SELECT lower(name)::text FROM t")[0], "SELECT CAST(lower(name) AS CHAR) FROM t")
 
     def test_distinct_predicate(self):
         self.assertEqual(sqlport.rewrite("a IS DISTINCT FROM b")[0], "NOT (a <=> b)")
@@ -47,6 +59,9 @@ class RewriteTests(unittest.TestCase):
 
     def test_distinct_predicate_function_operand(self):
         self.assertEqual(sqlport.rewrite("lower(a) IS DISTINCT FROM b")[0], "NOT (lower(a) <=> b)")
+
+    def test_distinct_after_keyword_and_parenthesized_operand(self):
+        self.assertEqual(sqlport.rewrite("SELECT x = $1 OR (a) IS DISTINCT FROM b")[0], "SELECT x = ? OR NOT ((a) <=> b)")
 
     def test_distinct_predicate_refuses_unparenthesized_expressions(self):
         for sql in ("a = b IS DISTINCT FROM c", "x + 1 IS DISTINCT FROM y", "a IS DISTINCT FROM b + 1"):
@@ -63,8 +78,9 @@ class RewriteTests(unittest.TestCase):
         self.assertEqual(sqlport.rewrite("COUNT(value) FILTER (WHERE ok)")[0], "COUNT(CASE WHEN ok THEN value ELSE NULL END)")
 
     def test_json_ops_are_preserved_and_key_exists_is_rewritten(self):
-        self.assertEqual(sqlport.rewrite("doc -> 'x', doc ->> 'x', doc ? 'x'")[0], "doc -> 'x', doc ->> 'x', JSON_CONTAINS_PATH(doc, 'one', '$.x')")
+        self.assertEqual(sqlport.rewrite("doc -> 'x', doc ->> 'x', doc ? 'x'")[0], "doc -> '$.x', doc ->> '$.x', JSON_CONTAINS_PATH(doc, 'one', '$.x')")
         self.assertIn("unsupported ? key-exists key", sqlport.rewrite("doc ? 'has.dot'")[2])
+        self.assertIn("unsupported JSON arrow path", sqlport.rewrite("doc -> 'has.dot'")[2])
 
     def test_now_is_flagged(self):
         self.assertTrue(sqlport.rewrite("SELECT now()")[3])

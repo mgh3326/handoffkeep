@@ -50,18 +50,26 @@ def go_literals(source: str) -> list[Literal]:
     return out
 
 
-def _replace_concat(sql: str) -> tuple[str, int]:
+def _replace_concat(sql: str) -> tuple[str, int, bool]:
     # Operands are intentionally limited to identifiers, parameters, SQL
     # literals, and parenthesized expressions. Anything more complex remains
     # visible for hand review instead of being parsed with a risky guess.
-    function = r"[A-Za-z_][\w.]*\s*\([^()]*\)"
+    function_name = r"(?!(?i:AND|OR|NOT|WHERE|ON|WHEN|THEN|ELSE|IN|LIKE|SELECT|FROM|JOIN)\b)[A-Za-z_][\w.]*"
+    function = rf"{function_name}\([^()]*\)"
     atom = rf"(?:\?|\$\d+|'(?:''|[^'])*'|{function}|[A-Za-z_][\w.]*|\((?:[^()]|\([^()]*\))*\))"
     pat = re.compile(rf"({atom})(?:\s*\|\|\s*({atom}))+", re.I)
+    unsafe = False
     def sub(match: re.Match[str]) -> str:
+        nonlocal unsafe
+        before = sql[:match.start()].rstrip()
+        after = sql[match.end():].lstrip()
+        if re.search(r"(?:->>|->|[+*/%\-])$", before) or re.match(r"(?:->>|->|[+*/%\-])", after):
+            unsafe = True
         # Capture chain operands without interpreting SQL nested in parentheses.
         chain = re.compile(rf"({atom})").findall(match.group())
         return "CONCAT(" + ", ".join(chain) + ")"
-    return pat.subn(sub, sql)
+    rewritten, count = pat.subn(sub, sql)
+    return rewritten, count, unsafe
 
 
 def _rewrite_filter(sql: str) -> tuple[str, int]:
@@ -94,23 +102,29 @@ def rewrite(sql: str) -> tuple[str | None, list[int], list[str], bool]:
     if n:
         constructs.append("$n → ?")
 
-    cast_type_map = {"jsonb": "JSON", "json": "JSON", "text": "CHAR", "int8": "SIGNED", "int4": "SIGNED", "bigint": "SIGNED", "integer": "SIGNED", "boolean": "SIGNED", "numeric": "DECIMAL", "timestamptz": "DATETIME(6)", "timestamp": "DATETIME(6)", "date": "DATE", "uuid": "CHAR(36)"}
-    cast_atom = r"(?:\?|\$\d+|[A-Za-z_][\w.]*|'(?:''|[^'])*'|\([^()]*\))"
+    cast_type_map = {"jsonb": "JSON", "json": "JSON", "text": "CHAR", "int": "SIGNED", "int8": "SIGNED", "int4": "SIGNED", "bigint": "SIGNED", "integer": "SIGNED", "boolean": "SIGNED", "numeric": "DECIMAL", "timestamptz": "DATETIME(6)", "timestamp": "DATETIME(6)", "date": "DATE", "uuid": "CHAR(36)"}
+    function_name = r"(?!(?i:AND|OR|NOT|WHERE|ON|WHEN|THEN|ELSE|IN|LIKE|SELECT|FROM|JOIN)\b)[A-Za-z_][\w.]*"
+    cast_function = rf"{function_name}\([^()]*\)"
+    cast_group = r"(?<![\w.)])\([^()]*\)"
+    cast_atom = rf"(?:\?|\$\d+|'(?:''|[^'])*'|{cast_function}|[A-Za-z_][\w.]*|{cast_group})"
     cast = re.compile(rf"({cast_atom})\s*::\s*([A-Za-z_]\w*)", re.I)
     unsupported_cast = re.compile(r"::\s*(regclass|regtype|regproc|oid|interval)\b", re.I)
     if unsupported_cast.search(sql):
         return None, order, constructs + [f"unsupported ::{unsupported_cast.search(sql).group(1)} cast"], bool(re.search(r"\bnow\s*\(\s*\)", sql, re.I))
+    for match in cast.finditer(sql):
+        if match.group(1).startswith("(") and re.search(r"[A-Za-z_][\w.]*\s+$", sql[:match.start(1)]):
+            return None, order, constructs + ["unsupported ::type function operand"], bool(re.search(r"\bnow\s*\(\s*\)", sql, re.I))
     sql, n = cast.subn(lambda m: f"CAST({m.group(1)} AS {cast_type_map.get(m.group(2).lower(), m.group(2))})", sql)
     if n:
         constructs.append("::type → CAST")
 
-    sql, n = _replace_concat(sql)
+    sql, n, unsafe_concat_precedence = _replace_concat(sql)
     if n:
         constructs.append("|| → CONCAT")
-    if "||" in sql:
+    if "||" in sql or unsafe_concat_precedence:
         return None, order, constructs + ["unsupported || expression"], bool(re.search(r"\bnow\s*\(\s*\)", sql, re.I))
 
-    distinct_function = r"[A-Za-z_][\w.]*\s*\([^()]*\)"
+    distinct_function = rf"{function_name}\([^()]*\)"
     distinct_group = r"(?<![\w.)])\([^()]*\)"
     distinct_operand = rf"(?:\?|\$\d+|{distinct_function}|[\w.]+|{distinct_group})"
     distinct = re.compile(rf"({distinct_operand})\s+IS\s+(NOT\s+)?DISTINCT\s+FROM\s+({distinct_operand})", re.I)
@@ -132,17 +146,20 @@ def rewrite(sql: str) -> tuple[str | None, list[int], list[str], bool]:
         constructs.append("unsupported FILTER expression")
         return None, order, constructs, bool(re.search(r"\bnow\s*\(\s*\)", sql, re.I))
 
-    # MySQL supports JSON -> and ->>; preserve them. PostgreSQL's ? key
-    # existence operator is distinct from placeholders because $n is handled
-    # above and this only matches an identifier/expression followed by '?'.
+    # PostgreSQL uses object keys and array indexes; MySQL requires JSON paths.
+    # Convert only simple keys and numeric indexes, refusing ambiguous paths.
     key_exists = re.compile(r"(\b[\w.]+)\s*\?\s*'([A-Za-z_][A-Za-z0-9_]*)'")
     sql, n = key_exists.subn(lambda m: f"JSON_CONTAINS_PATH({m.group(1)}, 'one', '$.{m.group(2)}')", sql)
     if n:
         constructs.append("? key-exists → JSON_CONTAINS_PATH")
     if re.search(r"\b[\w.]+\s*\?\s*'", sql):
         return None, order, constructs + ["unsupported ? key-exists key"], bool(re.search(r"\bnow\s*\(\s*\)", sql, re.I))
-    if re.search(r"\s->>?\s*", sql):
-        constructs.append("jsonb ->/->> kept")
+    arrow = re.compile(r"(\b[\w.]+)\s*(->>|->)\s*(?:'([A-Za-z_][A-Za-z0-9_]*)'|(\d+))")
+    sql, n = arrow.subn(lambda m: f"{m.group(1)} {m.group(2)} '{'$.%s' % m.group(3) if m.group(3) else '$[%s]' % m.group(4)}'", sql)
+    if n:
+        constructs.append("jsonb ->/->> → JSON path")
+    if re.search(r"\b[\w.]+\s*(?:->>|->(?!>))(?!\s*'\$(?:\.|\[))", sql):
+        return None, order, constructs + ["unsupported JSON arrow path"], bool(re.search(r"\bnow\s*\(\s*\)", sql, re.I))
     flagged_now = bool(re.search(r"\bnow\s*\(\s*\)", sql, re.I))
     if flagged_now:
         constructs.append("now() [manual time audit]")
