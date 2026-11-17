@@ -146,9 +146,9 @@ func (c Client) RecordAttachmentArchive(ctx context.Context, sha, location strin
 func attachmentHTTPError(resp *http.Response) error {
 	var x struct {
 		Error, Pattern, Reason, Field string
-		SimilarTasks           []SimilarTask `json:"similar_tasks"`
-		Reset                  bool
-		MinSyncID              int64 `json:"min_sync_id"`
+		SimilarTasks                  []SimilarTask `json:"similar_tasks"`
+		Reset                         bool
+		MinSyncID                     int64 `json:"min_sync_id"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&x)
 	return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern, Reason: x.Reason, Field: x.Field, SimilarTasks: x.SimilarTasks, Reset: x.Reset, MinSyncID: x.MinSyncID}

@@ -2119,6 +2119,9 @@ func decodeError(err error) error {
 		var typeErr *json.UnmarshalTypeError
 		if errors.As(err, &typeErr) {
 			field = typeErr.Field
+			if idx := strings.LastIndex(field, "."); idx >= 0 {
+				field = field[idx+1:]
+			}
 		}
 	}
 	if decodeFieldRE.MatchString(field) {

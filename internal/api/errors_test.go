@@ -298,4 +298,11 @@ func TestDecodeRefusalNamesUnknownField(t *testing.T) {
 	if status != http.StatusBadRequest || body["error"] != "invalid_context" || body["field"] != "priority" {
 		t.Fatalf("tasks with type mismatch: %d %v, want 400 invalid_context field=priority", status, body)
 	}
+
+	// 5. Nested JSON type mismatch names its leaf field.
+	nestedTypePayload := `{"source":"mergewake.review","source_ref":"https://github.com/org/repo/pull/1","task_id":1,"reviews":[{"round":"not_an_int"}]}`
+	status, body = post("/v1/task-events", nestedTypePayload)
+	if status != http.StatusBadRequest || body["error"] != "invalid_context" || body["field"] != "round" {
+		t.Fatalf("task-events with nested type mismatch: %d %v, want 400 invalid_context field=round", status, body)
+	}
 }

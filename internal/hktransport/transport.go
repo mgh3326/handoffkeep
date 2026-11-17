@@ -541,9 +541,9 @@ func (c Client) Call(ctx context.Context, method, path string, input, output any
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var x struct {
 			Error, Pattern, Reason, Field string
-			SimilarTasks           []SimilarTask `json:"similar_tasks"`
-			Reset                  bool
-			MinSyncID              int64 `json:"min_sync_id"`
+			SimilarTasks                  []SimilarTask `json:"similar_tasks"`
+			Reset                         bool
+			MinSyncID                     int64 `json:"min_sync_id"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&x)
 		return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern, Reason: x.Reason, Field: x.Field, SimilarTasks: x.SimilarTasks, Reset: x.Reset, MinSyncID: x.MinSyncID}
