@@ -193,7 +193,7 @@ type DeployRecordPage struct {
 // HANDOFFKEEP-5 (hk 4923).
 func (s *Store) ListDeployRecordsByPrefix(ctx context.Context, prefixes []string, limit int) (map[string]DeployRecordPage, error) {
 	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
+		return s.listDeployRecordsByPrefixMySQL(ctx, prefixes, limit)
 	}
 
 	out := make(map[string]DeployRecordPage, len(prefixes))

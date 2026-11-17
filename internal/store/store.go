@@ -36,6 +36,9 @@ var ErrTrigramUnavailable = errors.New("PostgreSQL pg_trgm extension unavailable
 // ErrSearchTimeout is returned when one Search call does not finish within its
 // deadline (searchTimeout). The statement is cancelled on the server as well.
 var ErrSearchTimeout = errors.New("search_timeout")
+
+// ErrSearchUnavailable is returned when the search service is unavailable.
+var ErrSearchUnavailable = errors.New("search_unavailable")
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 var documentKinds = map[string]bool{"brief": true, "report": true, "answer": true, "handoff": true, "note": true, "other": true, "decision": true, "research": true, "design": true, "policy": true, "evidence": true}
 var documentOriginClasses = map[string]bool{"authored": true, "job": true, "import": true}
@@ -4494,7 +4497,7 @@ func (s *Store) Search(ctx context.Context, q, scope, session string, limit int)
 // YouTrack backend calls it before asking YouTrack, so both backends refuse
 // the same inputs.
 func CheckSearch(q, scope, session string) error {
-	if strings.TrimSpace(q) == "" || !validText(q, 512) || !validText(session, 128) || (scope != "all" && scope != "docs" && scope != "tasks") {
+	if strings.TrimSpace(q) == "" || !validText(q, 512) || !validText(session, 128) || (scope != "all" && scope != "docs" && scope != "tasks" && scope != "ctx") {
 		return errors.New("invalid search")
 	}
 	return nil
@@ -4504,14 +4507,17 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 	if err := CheckSearch(q, scope, session); err != nil {
 		return nil, err
 	}
-	if scope == "tasks" {
-		return s.searchTasks(ctx, q, session, limit)
-	}
 	if limit < 1 {
 		limit = 20
 	}
 	if limit > 100 {
 		limit = 100
+	}
+	if scope == "ctx" {
+		return s.searchCtx(ctx, q, session, limit)
+	}
+	if scope == "tasks" {
+		return s.searchTasks(ctx, q, session, limit)
 	}
 	out := []SearchResult{}
 	// "#<n>" and bare-number queries are document-id lookups in the scopes
@@ -4520,7 +4526,8 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 	// an empty result set rather than rows that merely mention the digits.
 	exactDocKey := ""
 	if scope == "all" || scope == "docs" {
-		if m := numericIDQuery.FindStringSubmatch(strings.TrimSpace(q)); m != nil {
+		if NumericIDQuery(q) {
+			m := numericIDQuery.FindStringSubmatch(strings.TrimSpace(q))
 			id, e := strconv.ParseInt(m[1], 10, 64)
 			if e != nil {
 				return out, nil

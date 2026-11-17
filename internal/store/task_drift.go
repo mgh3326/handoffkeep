@@ -103,8 +103,7 @@ var driftMergedPRSQL = `SELECT ` + driftColumns + `updated_at FROM tasks t
 	) AND NOT EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ` + unresolvedRevertSQL("t.id") + `)
 	ORDER BY t.id`
 
-// driftMergedPRSQLMySQL is driftMergedPRSQL for MySQL. unresolvedRevertSQL is
-// plain SQL and serves both dialects.
+// driftMergedPRSQLMySQL is driftMergedPRSQL for MySQL.
 var driftMergedPRSQLMySQL = `SELECT ` + driftColumnsMySQL + `updated_at FROM tasks t
 	WHERE t.state NOT IN (` + settledStatesSQL + `) AND (
 		EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
@@ -112,7 +111,7 @@ var driftMergedPRSQLMySQL = `SELECT ` + driftColumnsMySQL + `updated_at FROM tas
 		OR (COALESCE(` + reportJSONText("t.refs", "$.pr") + `,'')<>'' AND (
 			EXISTS (SELECT 1 FROM changes c WHERE c.state='merged' AND (` + reportPRURLSQL + `)=` + reportJSONText("t.refs", "$.pr") + `)
 			OR EXISTS (SELECT 1 FROM tasks m WHERE m.id<>t.id AND m.state IN ('merged','deployed') AND ` + reportJSONText("m.refs", "$.pr") + `=` + reportJSONText("t.refs", "$.pr") + `)))
-	) AND NOT EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ` + unresolvedRevertSQL("t.id") + `)
+	) AND NOT EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ` + unresolvedRevertMySQL("t.id") + `)
 	ORDER BY t.id`
 
 // driftAutoCloseHeldSQL is class (e): an unsettled parent in an auto-close

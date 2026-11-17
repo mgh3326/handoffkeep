@@ -112,3 +112,12 @@ func queueDeployRecordNoticeTx(ctx context.Context, tx pgx.Tx, x StoredDeployRec
 	eventID := deployResultRecordEventID(x.Key, x.SHA256)
 	return queueDeployResultNoticeTx(ctx, tx, eventID, rec.Service, *rec.JobID, ref, rec.Result, rec.FailedStep, "", at)
 }
+
+func deployRecordNeedsNotice(x StoredDeployRecord) bool {
+	m := deployRecordKeyRE.FindStringSubmatch(x.Key)
+	if m == nil {
+		return false
+	}
+	rec, _, reasons := x.Classify(m[1])
+	return len(reasons) == 0 && rec.JobID != nil && x.SHA256 != ""
+}

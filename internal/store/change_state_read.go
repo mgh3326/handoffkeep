@@ -208,7 +208,7 @@ func freshness(at *time.Time, source *string) *SectionFreshness {
 // hk has never seen. The reads share one snapshot.
 func (s *Store) GetChangeState(ctx context.Context, ref ChangeRef, opt ChangeReadOptions) (ChangeView, bool, error) {
 	if s != nil && s.dialect == mysqlDialect {
-		return ChangeView{}, false, ErrDialectUnsupported
+		return s.getChangeStateMySQL(ctx, ref, opt)
 	}
 
 	if err := checkChangeRef(ref); err != nil {

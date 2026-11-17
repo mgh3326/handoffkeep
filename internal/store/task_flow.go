@@ -517,11 +517,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx transaction, id int64, 
 		// names, so the PR's deploy and revert reach it (deployedTasksTx,
 		// propagateRevertTx). It is linked before the hold below so a reland
 		// PR counts as one; a refusal rolls the link back.
-		if s.dialect == mysqlDialect {
-			// B5 dependency: linkChangeTaskTx still takes pgx.Tx (changes area).
-			return Task{}, ErrDialectUnsupported
-		}
-		if err = linkChangeTaskTx(ctx, pgxTx(tx), deliveredBy, id, ChangeImplements, true, now); err != nil {
+		if err = linkChangeTask(ctx, tx, deliveredBy, id, ChangeImplements, true, now); err != nil {
 			return Task{}, err
 		}
 		// The close-on-merge rule a merge event applies (hk 3294) holds here
