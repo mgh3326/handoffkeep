@@ -71,6 +71,9 @@ func insertEvent(ctx context.Context, q rowQuerier, e taskEventInput) (id int64,
 	if err != nil {
 		return 0, false, err
 	}
+	if dialectFor(q) == mysqlDialect {
+		return mysqlInsertEvent(ctx, q, e, string(encoded))
+	}
 	err = q.QueryRow(ctx, `INSERT INTO task_events(task_id,"from","to","by",note,refs,at,kind,no_job,source,source_ref,field,from_value,to_value,auto,applied)
 		VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 		ON CONFLICT (task_id,source,source_ref) WHERE source<>'' AND source_ref<>'' DO NOTHING RETURNING id`,
@@ -164,6 +167,9 @@ func writeTaskTx(ctx context.Context, q rowQuerier, x Task) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
+	if dialectFor(q) == mysqlDialect {
+		return mysqlWriteTask(ctx, q, x, string(encoded))
+	}
 	var out Task
 	err = scanTask(q.QueryRow(ctx, `UPDATE tasks SET state=$2,refs=$3::jsonb,updated_at=$4,claimed_by=$5,awaiting_decision=$6,started_at=$7,completed_at=$8,canceled_at=$9,triaged_at=$10,started_triage_at=$11 WHERE id=$1 RETURNING `+taskColumns,
 		x.ID, x.State, string(encoded), x.UpdatedAt, x.ClaimedBy, x.AwaitingDecision, x.StartedAt, x.CompletedAt, x.CanceledAt, x.TriagedAt, x.StartedTriageAt), &out)
@@ -196,7 +202,8 @@ func (s *Store) claimTaskTx(ctx context.Context, tx transaction, id int64, by, j
 	}
 	var x Task
 	var hasDisposition bool
-	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+`,refs ? 'disposition' FROM tasks WHERE id=$1 FOR UPDATE`, id), &x, &hasDisposition); err != nil {
+	if err := scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+`,refs ? 'disposition' FROM tasks WHERE id=$1 FOR UPDATE`,
+		`SELECT `+taskColumns+`,JSON_CONTAINS_PATH(refs,'one','$.disposition') FROM tasks WHERE id=? FOR UPDATE`), id), &x, &hasDisposition); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return Task{}, ErrTaskConflict
 		}
@@ -233,7 +240,7 @@ func (s *Store) claimTaskTx(ctx context.Context, tx transaction, id int64, by, j
 	// refines the spawn rule; a job not yet registered leaves the kind alone.
 	var jobRole string
 	if jobID != "" {
-		if err := tx.QueryRow(ctx, `SELECT role FROM jobs WHERE job_id=$1 AND task_id=$2`, jobID, id).Scan(&jobRole); err != nil && !errors.Is(err, ErrNoRows) {
+		if err := tx.QueryRow(ctx, s.q(`SELECT role FROM jobs WHERE job_id=$1 AND task_id=$2`, `SELECT role FROM jobs WHERE job_id=? AND task_id=?`), jobID, id).Scan(&jobRole); err != nil && !errors.Is(err, ErrNoRows) {
 			return Task{}, err
 		}
 	}
@@ -318,9 +325,6 @@ type TransitionInput struct {
 
 // TransitionTask is TransitionTaskWith without a duplicate_of target.
 func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note string, refs *TaskRefs, noJob string) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
 	return s.TransitionTaskWith(ctx, id, TransitionInput{To: to, By: by, Note: note, Refs: refs, NoJob: noJob})
 }
 
@@ -330,9 +334,6 @@ func (s *Store) TransitionTask(ctx context.Context, id int64, to, by, note strin
 // resolved first, and only the operator's web answer resolves a disposition
 // item.
 func (s *Store) ClearAwaitingDecision(ctx context.Context, id int64, by, note string) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
 	return s.transitionTask(ctx, id, TransitionInput{To: legacyClaimed, By: by, Note: note, ClearOnly: true}, false)
 }
 
@@ -341,9 +342,6 @@ func (s *Store) ClearAwaitingDecision(ctx context.Context, id int64, by, note st
 // persisted as the note of an append-only transition event in the same
 // transaction.
 func (s *Store) ReopenTask(ctx context.Context, id int64, by, reason string) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		return Task{}, errors.New("reopen requires a non-empty reason")
@@ -354,9 +352,6 @@ func (s *Store) ReopenTask(ctx context.Context, id int64, by, reason string) (Ta
 // TransitionTaskWith applies one manual transition. A settled task leaves
 // only through ReopenTask.
 func (s *Store) TransitionTaskWith(ctx context.Context, id int64, in TransitionInput) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
 	if in.To == legacyReopened {
 		return s.ReopenTask(ctx, id, in.By, in.Note)
 	}
@@ -399,18 +394,23 @@ func resolveTransitionTarget(x Task, to string) (transitionAction, string, error
 	return actMove, to, nil
 }
 
-func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput, reopen bool) (Task, error) {
-	tx, release, err := s.begin(ctx)
+func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput, reopen bool) (x Task, err error) {
+	err = s.retryTx(ctx, func() error {
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		if x, err = s.transitionTaskTx(ctx, tx, id, in, reopen); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return Task{}, err
 	}
-	defer release()
-	defer tx.Rollback(ctx)
-	x, err := s.transitionTaskTx(ctx, tx, id, in, reopen)
-	if err != nil {
-		return Task{}, err
-	}
-	return x, tx.Commit(ctx)
+	return x, nil
 }
 
 // transitionTaskTx is transitionTask inside a caller's transaction: an
@@ -453,20 +453,21 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx transaction, id int64, 
 			return Task{}, errors.New("invalid task transition: dots_choice is written by dots request creation only")
 		}
 	}
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err := s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
 		return Task{}, err
 	}
 	if !reopen && in.To == StateMerged {
 		// rule 8 may write a task comment after this row lock; keep comment ids
 		// in commit order by taking their allocator lock before the task row.
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+		if err := s.lockTx(ctx, tx, taskCommentInsertLock); err != nil {
 			return Task{}, err
 		}
 	}
 
 	var x Task
 	var hasDisposition bool
-	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+`,refs ? 'disposition' FROM tasks WHERE id=$1 FOR UPDATE`, id), &x, &hasDisposition); err != nil {
+	if err := scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+`,refs ? 'disposition' FROM tasks WHERE id=$1 FOR UPDATE`,
+		`SELECT `+taskColumns+`,JSON_CONTAINS_PATH(refs,'one','$.disposition') FROM tasks WHERE id=? FOR UPDATE`), id), &x, &hasDisposition); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return Task{}, ErrTaskNotFound
 		}
@@ -516,6 +517,10 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx transaction, id int64, 
 		// names, so the PR's deploy and revert reach it (deployedTasksTx,
 		// propagateRevertTx). It is linked before the hold below so a reland
 		// PR counts as one; a refusal rolls the link back.
+		if s.dialect == mysqlDialect {
+			// B5 dependency: linkChangeTaskTx still takes pgx.Tx (changes area).
+			return Task{}, ErrDialectUnsupported
+		}
 		if err = linkChangeTaskTx(ctx, pgxTx(tx), deliveredBy, id, ChangeImplements, true, now); err != nil {
 			return Task{}, err
 		}
@@ -718,7 +723,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx transaction, id int64, 
 		x.Refs.ReportPath = ""
 		// A reopen ends any dots run on the request: its run token is revoked
 		// in this transaction, with the claim it belonged to (dots_run_token.go).
-		if _, err := supersedeDotsRunTokensTx(ctx, pgxTx(tx), id, now); err != nil {
+		if err := s.supersedeDotsRunTokensFlowTx(ctx, tx, x, now); err != nil {
 			return Task{}, err
 		}
 	}
@@ -762,7 +767,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx transaction, id int64, 
 				}
 			case StateDuplicate:
 				var dst int64
-				if err := tx.QueryRow(ctx, `SELECT dst_id FROM task_relations WHERE src_id=$1 AND kind=$2 AND archived_at IS NULL ORDER BY id LIMIT 1`, id, RelationDuplicateOf).Scan(&dst); err != nil {
+				if err := tx.QueryRow(ctx, s.q(`SELECT dst_id FROM task_relations WHERE src_id=$1 AND kind=$2 AND archived_at IS NULL ORDER BY id LIMIT 1`, `SELECT dst_id FROM task_relations WHERE src_id=? AND kind=? AND archived_at IS NULL ORDER BY id LIMIT 1`), id, RelationDuplicateOf).Scan(&dst); err != nil {
 					return Task{}, err
 				}
 				evidence = fmt.Sprintf("duplicate of #%d", dst)
@@ -803,7 +808,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx transaction, id int64, 
 			x.LastActivityAt = now.Truncate(time.Microsecond)
 		}
 	}
-	if err = mirrorTaskDecisionsTx(ctx, pgxTx(tx), decisionBefore, x, by, note, flagEvent, now); err != nil {
+	if err = s.mirrorTaskDecisionsFlowTx(ctx, tx, decisionBefore, x, by, note, flagEvent, now); err != nil {
 		return Task{}, err
 	}
 	if action == actMove && from == StateDuplicate {
@@ -823,7 +828,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx transaction, id int64, 
 		// own state, with --set too.
 		cascade := in.Set && deliveredBy == 0
 		if !accepting && !cascade && deliveredBy == 0 {
-			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM ticket_sets WHERE parent_task_id=$1)`, id).Scan(&cascade); err != nil {
+			if err = tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM ticket_sets WHERE parent_task_id=$1)`, `SELECT EXISTS(SELECT 1 FROM ticket_sets WHERE parent_task_id=?)`), id).Scan(&cascade); err != nil {
 				return Task{}, err
 			}
 		}
@@ -864,7 +869,7 @@ func mergedChangeTx(ctx context.Context, tx transaction, pr string) (int64, erro
 	var id int64
 	var state string
 	var reverted bool
-	err := tx.QueryRow(ctx, `SELECT id,state,reverted_by_change_id IS NOT NULL FROM changes WHERE repo=$1 AND pr_number=$2`, repo, n).Scan(&id, &state, &reverted)
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT id,state,reverted_by_change_id IS NOT NULL FROM changes WHERE repo=$1 AND pr_number=$2`, `SELECT id,state,reverted_by_change_id IS NOT NULL FROM changes WHERE repo=? AND pr_number=?`), repo, n).Scan(&id, &state, &reverted)
 	if errors.Is(err, ErrNoRows) {
 		return 0, fmt.Errorf("%w: hk has no change record of %s, so it cannot verify the merge; the merge event records it", ErrTaskConflict, pr)
 	}
@@ -897,7 +902,8 @@ func allowedNextStates(from string) string {
 // not yet completed or canceled. It returns "" when nothing blocks it.
 func implementCompletionBlockers(ctx context.Context, tx transaction, taskID int64) (string, error) {
 	var parts []string
-	rows, err := tx.Query(ctx, `SELECT c.repo,c.pr_number,c.state FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND ct.relation=$2 AND c.state<>$3 ORDER BY c.repo,c.pr_number`, taskID, ChangeImplements, ChangeMerged)
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT c.repo,c.pr_number,c.state FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND ct.relation=$2 AND c.state<>$3 ORDER BY c.repo,c.pr_number`,
+		`SELECT c.repo,c.pr_number,c.state FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=? AND ct.relation=? AND c.state<>? ORDER BY c.repo,c.pr_number`), taskID, ChangeImplements, ChangeMerged)
 	if err != nil {
 		return "", err
 	}
@@ -914,7 +920,7 @@ func implementCompletionBlockers(ctx context.Context, tx transaction, taskID int
 	if err := rows.Err(); err != nil {
 		return "", err
 	}
-	rows, err = tx.Query(ctx, `SELECT id,state FROM tasks WHERE parent_id=$1 ORDER BY id`, taskID)
+	rows, err = tx.Query(ctx, sqlFor(tx, `SELECT id,state FROM tasks WHERE parent_id=$1 ORDER BY id`, `SELECT id,state FROM tasks WHERE parent_id=? ORDER BY id`), taskID)
 	if err != nil {
 		return "", err
 	}
@@ -993,7 +999,11 @@ func applyTriageFieldsTx(ctx context.Context, tx transaction, x *Task, priority 
 // before, with one event per changed field: a project event as
 // SetTaskProject writes, a metadata event for priority and kind.
 func writeTriageFieldsTx(ctx context.Context, tx transaction, before, x Task, by string, now time.Time) error {
-	if _, err := tx.Exec(ctx, `UPDATE tasks SET priority=$2,kind=$3,project=$4 WHERE id=$1`, x.ID, x.Priority, x.Kind, x.Project); err != nil {
+	update, args := `UPDATE tasks SET priority=$2,kind=$3,project=$4 WHERE id=$1`, []any{x.ID, x.Priority, x.Kind, x.Project}
+	if dialectFor(tx) == mysqlDialect {
+		update, args = `UPDATE tasks SET priority=?,kind=?,project=? WHERE id=?`, []any{x.Priority, x.Kind, x.Project, x.ID}
+	}
+	if _, err := tx.Exec(ctx, update, args...); err != nil {
 		return err
 	}
 	if before.Priority != x.Priority {
@@ -1027,7 +1037,7 @@ func writeTriageFieldsTx(ctx context.Context, tx transaction, before, x Task, by
 // has none; every child then passes the same gate. A decline drops each
 // child: a duplicate parent does not make its children duplicates of anything.
 func (s *Store) cascadeTriageTx(ctx context.Context, tx transaction, parent Task, accepting bool, by, note string, now time.Time) error {
-	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE parent_id=$1 AND state=$2 ORDER BY id FOR UPDATE`, parent.ID, StateTriage)
+	rows, err := tx.Query(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE parent_id=$1 AND state=$2 ORDER BY id FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE parent_id=? AND state=? ORDER BY id FOR UPDATE`), parent.ID, StateTriage)
 	if err != nil {
 		return err
 	}
@@ -1081,7 +1091,7 @@ func (s *Store) cascadeTriageTx(ctx context.Context, tx transaction, parent Task
 		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: c.ID, From: StateTriage, To: to, By: by, Note: childNote, Refs: c.Refs, At: now}); err != nil {
 			return err
 		}
-		if err = mirrorTaskDecisionsTx(ctx, pgxTx(tx), decisionBefore, c, by, childNote, 0, now); err != nil {
+		if err = s.mirrorTaskDecisionsFlowTx(ctx, tx, decisionBefore, c, by, childNote, 0, now); err != nil {
 			return err
 		}
 		if err = s.afterStateChangeTx(ctx, tx, c, StateTriage, by, now); err != nil {
