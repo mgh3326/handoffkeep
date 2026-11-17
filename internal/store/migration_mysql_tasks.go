@@ -85,7 +85,6 @@ var mysqlTasksSteps = []string{
 	mysqlIfNoConstraint("tasks", "tasks_state_check", `ALTER TABLE tasks ADD CONSTRAINT tasks_state_check CHECK(`+mysqlTaskStateCheck+`)`),
 	mysqlIfNoConstraint("tasks", "tasks_kind_check", `ALTER TABLE tasks ADD CONSTRAINT tasks_kind_check CHECK(`+mysqlTaskKindCheck+`)`),
 	mysqlIfNoConstraint("tasks", "tasks_closure_check", `ALTER TABLE tasks ADD CONSTRAINT tasks_closure_check CHECK(JSON_EXTRACT(refs,'$.closure') IS NULL OR (JSON_UNQUOTE(JSON_EXTRACT(refs,'$.closure.type')) IN ('resolved','cancelled','obsolete','superseded') AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(refs,'$.closure.evidence')),'') <> ''))`),
-	mysqlIfNoConstraint("tasks", "tasks_parent_check", `ALTER TABLE tasks ADD CONSTRAINT tasks_parent_check CHECK(parent_id IS NULL OR parent_id <> id)`),
 	mysqlIfNoConstraint("tasks", "tasks_parent_fk", `ALTER TABLE tasks ADD CONSTRAINT tasks_parent_fk FOREIGN KEY(parent_id) REFERENCES tasks(id) ON DELETE RESTRICT`),
 	mysqlIfNoConstraint("tasks", "tasks_milestone_fk", `ALTER TABLE tasks ADD CONSTRAINT tasks_milestone_fk FOREIGN KEY(milestone_id) REFERENCES project_milestones(id) ON DELETE RESTRICT`),
 	mysqlIfNoIndex("tasks", "tasks_lane_state_priority", `CREATE INDEX tasks_lane_state_priority ON tasks(lane, state, priority DESC, created_at ASC, id ASC)`),
@@ -144,6 +143,11 @@ var mysqlTasksSteps = []string{
 // The triggers come last: they name sync_log, sync_decisions and tasks columns.
 // Each is guarded by @hk_bulk_load like the guards of 20261117-mysql-comments.
 var mysqlTasksTriggers = []string{
+	// PostgreSQL: CHECK(parent_id IS NULL OR parent_id<>id). MySQL refuses a CHECK
+	// that names the AUTO_INCREMENT column (error 3818), so a task that is its own
+	// parent is refused by triggers, with the check-violation error number.
+	`CREATE TRIGGER IF NOT EXISTS tasks_parent_check_insert BEFORE INSERT ON tasks FOR EACH ROW BEGIN IF NEW.parent_id IS NOT NULL AND NEW.parent_id = NEW.id THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'tasks_parent_check'; END IF; END`,
+	`CREATE TRIGGER IF NOT EXISTS tasks_parent_check_update BEFORE UPDATE ON tasks FOR EACH ROW BEGIN IF NEW.parent_id IS NOT NULL AND NEW.parent_id = NEW.id THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'tasks_parent_check'; END IF; END`,
 	mysqlSyncEmit("sync_tasks_insert", "tasks", "INSERT", "task", "NEW", "I"),
 	mysqlSyncEmit("sync_tasks_update", "tasks", "UPDATE", "task", "NEW", "U"),
 	mysqlSyncEmit("sync_tasks_delete", "tasks", "DELETE", "task", "OLD", "D"),
