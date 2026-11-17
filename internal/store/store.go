@@ -3757,10 +3757,6 @@ func validDocKey(k string) bool {
 	return len(k) > 0 && len(k) <= maxDocKeyBytes && !strings.HasPrefix(k, "/") && !strings.Contains(k, "..") && !strings.ContainsRune(k, 0)
 }
 func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Document{}, false, ErrDialectUnsupported
-	}
-
 	if !validDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validDocumentText(x.Body) {
 		return x, false, errors.New("invalid document")
 	}
@@ -3776,6 +3772,9 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 	sum := sha256.Sum256([]byte(x.Body))
 	x.SHA256 = hex.EncodeToString(sum[:])
 	now := time.Now().UTC()
+	if s.dialect == mysqlDialect {
+		return s.mysqlPutDocument(ctx, x, now)
+	}
 	var existing string
 	var existingTask *int64
 	var existingClass *string
@@ -3840,15 +3839,11 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 	return x, true, tx.Commit(ctx)
 }
 func (s *Store) GetDocument(ctx context.Context, key string) (Document, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Document{}, false, ErrDialectUnsupported
-	}
-
 	if !validDocKey(key) {
 		return Document{}, false, errors.New("invalid document key")
 	}
 	var x Document
-	e := s.pool.QueryRow(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE key=$1`, key).Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.Body, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.TaskID, &x.OriginClass)
+	e := s.db().QueryRow(ctx, s.q(`SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE key=$1`, "SELECT id,`key`,kind,session,job,body,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE `key`=?"), key).Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.Body, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.TaskID, &x.OriginClass)
 	if e != nil {
 		if errors.Is(e, ErrNoRows) {
 			return x, false, nil
@@ -3858,15 +3853,11 @@ func (s *Store) GetDocument(ctx context.Context, key string) (Document, bool, er
 	return x, true, nil
 }
 func (s *Store) GetDocumentByID(ctx context.Context, id int64) (Document, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Document{}, false, ErrDialectUnsupported
-	}
-
 	if id < 1 {
 		return Document{}, false, errors.New("invalid document id")
 	}
 	var x Document
-	e := s.pool.QueryRow(ctx, `SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE id=$1`, id).Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.Body, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.TaskID, &x.OriginClass)
+	e := s.db().QueryRow(ctx, s.q(`SELECT id,key,kind,session,job,body,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE id=$1`, "SELECT id,`key`,kind,session,job,body,sha256,created_by,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE id=?"), id).Scan(&x.ID, &x.Key, &x.Kind, &x.Session, &x.Job, &x.Body, &x.SHA256, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.TaskID, &x.OriginClass)
 	if e != nil {
 		if errors.Is(e, ErrNoRows) {
 			return x, false, nil
@@ -3883,10 +3874,6 @@ func (s *Store) GetDocumentByID(ctx context.Context, id int64) (Document, bool, 
 // reader that must catch one pages again from 0. A nil afterID keeps the
 // key-ordered answer.
 func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string, task int64, afterID *int64, limit int) ([]Document, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if !validText(prefix, 512) || !validText(session, 128) || (kind != "" && !documentKinds[kind]) || task < 0 || (afterID != nil && *afterID < 0) {
 		return nil, errors.New("invalid document query")
 	}
@@ -3897,7 +3884,10 @@ func (s *Store) ListDocuments(ctx context.Context, prefix, kind, session string,
 		limit = 1000
 	}
 	q, args := listDocumentsSQL(prefix, kind, session, task, afterID, limit)
-	rows, e := s.pool.Query(ctx, q, args...)
+	if s.dialect == mysqlDialect {
+		q, args = mysqlListDocumentsSQL(prefix, kind, session, task, afterID, limit)
+	}
+	rows, e := s.db().Query(ctx, q, args...)
 	if e != nil {
 		return nil, e
 	}
