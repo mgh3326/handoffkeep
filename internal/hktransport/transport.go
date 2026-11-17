@@ -540,13 +540,13 @@ func (c Client) Call(ctx context.Context, method, path string, input, output any
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var x struct {
-			Error, Pattern, Reason string
+			Error, Pattern, Reason, Field string
 			SimilarTasks           []SimilarTask `json:"similar_tasks"`
 			Reset                  bool
 			MinSyncID              int64 `json:"min_sync_id"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&x)
-		return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern, Reason: x.Reason, SimilarTasks: x.SimilarTasks, Reset: x.Reset, MinSyncID: x.MinSyncID}
+		return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern, Reason: x.Reason, Field: x.Field, SimilarTasks: x.SimilarTasks, Reset: x.Reset, MinSyncID: x.MinSyncID}
 	}
 	if e := HTMLBodyError(resp); e != nil {
 		return e
@@ -568,6 +568,7 @@ type HTTPError struct {
 	Code    string
 	Pattern string
 	Reason  string
+	Field   string
 	// SimilarTasks lists the open tasks a 409 similar_tasks found.
 	SimilarTasks []SimilarTask
 	// Reset and MinSyncID carry a change-feed reader's expired-cursor answer
@@ -597,6 +598,9 @@ func (e *HTTPError) Error() string {
 	if e.Pattern != "" {
 		return fmt.Sprintf("%s:%s", e.Code, e.Pattern)
 	}
+	if e.Field != "" {
+		return fmt.Sprintf("%s: %s", e.Code, e.Field)
+	}
 	if e.Reason != "" {
 		return fmt.Sprintf("%s: %s", e.Code, e.Reason)
 	}
@@ -613,6 +617,15 @@ func ErrorCode(err error) string {
 	var h *HTTPError
 	if errors.As(err, &h) {
 		return h.Code
+	}
+	return ""
+}
+
+// ErrorField reports the field the server named when it refused a request.
+func ErrorField(err error) string {
+	var h *HTTPError
+	if errors.As(err, &h) {
+		return h.Field
 	}
 	return ""
 }

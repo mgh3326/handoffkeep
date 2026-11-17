@@ -199,6 +199,11 @@ func appErr(w http.ResponseWriter, r *http.Request, e error) {
 		writeInternal(w, r, "internal_error", e)
 		return
 	}
+	var decodeField *DecodeFieldError
+	if errors.As(e, &decodeField) && decodeField.Field != "" {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_context", "field": decodeField.Field})
+		return
+	}
 	writeError(w, http.StatusBadRequest, "invalid_context")
 }
 

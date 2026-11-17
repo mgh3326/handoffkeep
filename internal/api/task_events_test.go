@@ -57,15 +57,24 @@ func TestTaskEventsAPI(t *testing.T) {
 		body   any
 		status int
 		code   string
+		field  string
 	}{
-		{"unknown source", map[string]any{"source": "mergewake.closed", "source_ref": pr, "task_id": x.ID}, http.StatusBadRequest, "invalid_context"},
-		{"bad url", map[string]any{"source": "mergewake.merge", "source_ref": "not-a-url", "task_id": x.ID}, http.StatusBadRequest, "invalid_context"},
-		{"unknown field", map[string]any{"source": "mergewake.merge", "source_ref": pr, "task_id": x.ID, "extra": 1}, http.StatusBadRequest, "invalid_context"},
-		{"missing task", map[string]any{"source": "mergewake.merge", "source_ref": pr, "task_id": 999999999}, http.StatusNotFound, "not_found"},
+		{"unknown source", map[string]any{"source": "mergewake.closed", "source_ref": pr, "task_id": x.ID}, http.StatusBadRequest, "invalid_context", ""},
+		{"bad url", map[string]any{"source": "mergewake.merge", "source_ref": "not-a-url", "task_id": x.ID}, http.StatusBadRequest, "invalid_context", ""},
+		{"unknown field", map[string]any{"source": "mergewake.merge", "source_ref": pr, "task_id": x.ID, "extra": 1}, http.StatusBadRequest, "invalid_context", "extra"},
+		{"review unknown field", map[string]any{"source": "mergewake.review", "source_ref": pr, "task_id": x.ID, "reviews": []any{map[string]any{"round": 1, "pass": 1, "lens": "correctness", "finding_facts": []any{}}}}, http.StatusBadRequest, "invalid_context", "finding_facts"},
+		{"review bad filter field", map[string]any{"source": "mergewake.review", "source_ref": pr, "task_id": x.ID, "reviews": []any{map[string]any{"round": 1, "pass": 1, "lens": "correctness", "bad-key!": 1}}}, http.StatusBadRequest, "invalid_context", ""},
+		{"missing task", map[string]any{"source": "mergewake.merge", "source_ref": pr, "task_id": 999999999}, http.StatusNotFound, "not_found", ""},
 	} {
 		status, body := taskEventPost(t, h, tc.body)
 		if status != tc.status || body["error"] != tc.code {
 			t.Fatalf("%s: %d %v, want %d %s", tc.name, status, body, tc.status, tc.code)
+		}
+		if tc.field != "" && body["field"] != tc.field {
+			t.Fatalf("%s: field=%v, want %s", tc.name, body["field"], tc.field)
+		}
+		if tc.field == "" && body["field"] != nil {
+			t.Fatalf("%s: field=%v, want omitted", tc.name, body["field"])
 		}
 	}
 

@@ -54,3 +54,6 @@ func ErrorCode(err error) string { return hktransport.ErrorCode(err) }
 // SecretPattern reports the pattern the server named when it refused a write
 // as secret_like_content.
 func SecretPattern(err error) (string, bool) { return hktransport.SecretPattern(err) }
+
+// ErrorField reports the field the server named when it refused a request.
+func ErrorField(err error) string { return hktransport.ErrorField(err) }

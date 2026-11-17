@@ -37,6 +37,8 @@ func TestAppErrMapping(t *testing.T) {
 		{"secret pattern", guard.Reject("AKIA" + "ABCDEFGHIJKLMNOP"), http.StatusBadRequest, map[string]string{"error": "secret_like_content", "pattern": "aws_access_key"}},
 		{"integrity violation", &pgconn.PgError{Code: "23505"}, http.StatusBadRequest, map[string]string{"error": "invalid_context"}},
 		{"data exception", &pgconn.PgError{Code: "22P02"}, http.StatusBadRequest, map[string]string{"error": "invalid_context"}},
+		{"decode unknown field", &DecodeFieldError{Field: "finding_facts", Err: errors.New("json: unknown field \"finding_facts\"")}, http.StatusBadRequest, map[string]string{"error": "invalid_context", "field": "finding_facts"}},
+		{"decode empty field", &DecodeFieldError{Field: "", Err: errors.New("something")}, http.StatusBadRequest, map[string]string{"error": "invalid_context"}},
 		{"undefined column", &pgconn.PgError{Code: "42703"}, http.StatusInternalServerError, map[string]string{"error": "internal_error"}},
 		{"deadline", fmt.Errorf("query: %w", context.DeadlineExceeded), http.StatusInternalServerError, map[string]string{"error": "internal_error"}},
 	} {
@@ -238,5 +240,62 @@ func TestErrorRuleCodesMatchSentinels(t *testing.T) {
 		default:
 			t.Errorf("sentinel %q answers %q; make the wire code the sentinel's text", text, rule.code)
 		}
+	}
+}
+
+func TestDecodeRefusalNamesUnknownField(t *testing.T) {
+	s := Server{Tokens: Tokens{"tester": "tok"}}
+	h := httptest.NewServer(s.Handler())
+	t.Cleanup(h.Close)
+
+	post := func(path, body string) (int, map[string]any) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, h.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer tok")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		out := map[string]any{}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+
+	// 1. POST /v1/task-events with a review carrying an unknown key answers 400 with field.
+	reviewPayload := `{"source":"mergewake.review","source_ref":"https://github.com/org/repo/pull/1","task_id":1,"reviews":[{"round":1,"pass":1,"lens":"correctness","finding_facts":[]}]}`
+	status, body := post("/v1/task-events", reviewPayload)
+	if status != http.StatusBadRequest || body["error"] != "invalid_context" || body["field"] != "finding_facts" {
+		t.Fatalf("task-events with unknown key: %d %v, want 400 invalid_context field=finding_facts", status, body)
+	}
+
+	// 2. Key that fails the filter answers 400 without field.
+	badFilterPayload := `{"source":"mergewake.review","source_ref":"https://github.com/org/repo/pull/1","task_id":1,"reviews":[{"round":1,"pass":1,"lens":"correctness","bad-key!":1}]}`
+	status, body = post("/v1/task-events", badFilterPayload)
+	if status != http.StatusBadRequest || body["error"] != "invalid_context" || body["field"] != nil {
+		t.Fatalf("task-events with bad filter key: %d %v, want 400 invalid_context without field", status, body)
+	}
+
+	longKey := strings.Repeat("a", 65)
+	longKeyPayload := `{"source":"mergewake.review","source_ref":"https://github.com/org/repo/pull/1","task_id":1,"reviews":[{"round":1,"pass":1,"lens":"correctness","` + longKey + `":1}]}`
+	status, body = post("/v1/task-events", longKeyPayload)
+	if status != http.StatusBadRequest || body["error"] != "invalid_context" || body["field"] != nil {
+		t.Fatalf("task-events with 65-char key: %d %v, want 400 invalid_context without field", status, body)
+	}
+
+	// 3. One other route (POST /v1/tasks) names the field too.
+	status, body = post("/v1/tasks", `{"title":"test task","extra_field":1}`)
+	if status != http.StatusBadRequest || body["error"] != "invalid_context" || body["field"] != "extra_field" {
+		t.Fatalf("tasks with unknown field: %d %v, want 400 invalid_context field=extra_field", status, body)
+	}
+
+	// 4. JSON type mismatch names its field when it passes the filter.
+	status, body = post("/v1/tasks", `{"priority":"not_an_int"}`)
+	if status != http.StatusBadRequest || body["error"] != "invalid_context" || body["field"] != "priority" {
+		t.Fatalf("tasks with type mismatch: %d %v, want 400 invalid_context field=priority", status, body)
 	}
 }

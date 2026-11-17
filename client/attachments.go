@@ -145,13 +145,13 @@ func (c Client) RecordAttachmentArchive(ctx context.Context, sha, location strin
 // the server's {"error": "<code>"} envelope with no secret in it.
 func attachmentHTTPError(resp *http.Response) error {
 	var x struct {
-		Error, Pattern, Reason string
+		Error, Pattern, Reason, Field string
 		SimilarTasks           []SimilarTask `json:"similar_tasks"`
 		Reset                  bool
 		MinSyncID              int64 `json:"min_sync_id"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&x)
-	return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern, Reason: x.Reason, SimilarTasks: x.SimilarTasks, Reset: x.Reset, MinSyncID: x.MinSyncID}
+	return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern, Reason: x.Reason, Field: x.Field, SimilarTasks: x.SimilarTasks, Reset: x.Reset, MinSyncID: x.MinSyncID}
 }
 
 // PutAttachment uploads body under name with its MIME type and ref

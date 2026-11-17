@@ -129,3 +129,29 @@ func TestSearchExtraRowProbe(t *testing.T) {
 		t.Fatalf("wire limit=%s want 101", wireLimit)
 	}
 }
+
+func TestErrorFieldCarriedOnHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "invalid_context",
+			"field": "finding_facts",
+		})
+	}))
+	defer server.Close()
+	c := Client{URL: server.URL, Token: "t"}
+	_, err := c.ApplyTaskEvent(context.Background(), store.TaskSourceEvent{Source: "mergewake.review"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if ErrorCode(err) != "invalid_context" {
+		t.Fatalf("ErrorCode = %q, want invalid_context", ErrorCode(err))
+	}
+	if ErrorField(err) != "finding_facts" {
+		t.Fatalf("ErrorField = %q, want finding_facts", ErrorField(err))
+	}
+	if got := err.Error(); got != "invalid_context: finding_facts" {
+		t.Fatalf("err.Error() = %q, want invalid_context: finding_facts", got)
+	}
+}
