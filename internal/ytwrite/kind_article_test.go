@@ -742,7 +742,3 @@ func TestArticleCreateSplitChildEmptyIDVerification(t *testing.T) {
 		t.Fatal("expected non-empty YTResultID")
 	}
 }
-
-
-
-
