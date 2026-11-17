@@ -586,3 +586,63 @@ func TestArticleCreateSplitEmptyIndexIDReconcile(t *testing.T) {
 	}
 }
 
+// A split document whose child part carries the marker but corrupted content
+// is treated as missing by splitMissingParts and rejected by Evidence.
+func TestArticleCreateSplitChildPartContentValidation(t *testing.T) {
+	e := newArticleEnv(t)
+	req := articleReq()
+	req.Body = strings.Repeat("hello world line\n", 20000)
+	op := prepareWith(t, e, req)
+
+	// First drive with CommitDropReply on part 2 so the op enters remote_unknown
+	creates := 0
+	e.yt.BeforeArticleCreate = func(ctx context.Context, in ytwrite.ArticleCreate) {
+		creates++
+		if creates == 3 {
+			e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.CommitDropReply})
+		}
+	}
+	e.drive()
+	e.want(op.ID, ytwrite.StatePrepared, ytwrite.ReasonNotSent)
+
+	// Now corrupt part 1 in the fake: keep marker but truncate body
+	marker := ytwrite.OpMarker(op.ID)
+	corrupted := false
+	for _, a := range e.yt.Articles(artProject) {
+		if strings.Contains(a.Summary, "part 1 of") {
+			_, err := e.yt.UpdateArticle(context.Background(), a.ID, a.Summary, marker+" corrupted truncated body")
+			if err != nil {
+				t.Fatal(err)
+			}
+			corrupted = true
+			break
+		}
+	}
+	if !corrupted {
+		t.Fatal("failed to find part 1 article to corrupt")
+	}
+
+	// Disable hook, advance clock and drive: retry detects part 1 is missing (corrupted)
+	// and creates it with valid content along with part 2
+	e.yt.BeforeArticleCreate = nil
+	e.clock.Advance(time.Hour)
+	e.drive()
+	applied := e.want(op.ID, ytwrite.StateApplied, "")
+	if applied.YTResultID == "" {
+		t.Fatal("expected non-empty YTResultID")
+	}
+
+	// Check that part 1 now has valid content in fake
+	part1Fixed := false
+	for _, a := range e.yt.Articles(artProject) {
+		if strings.Contains(a.Summary, "part 1 of") && !strings.Contains(a.Content, "corrupted truncated body") {
+			part1Fixed = true
+			break
+		}
+	}
+	if !part1Fixed {
+		t.Fatal("part 1 was not recreated with valid content")
+	}
+}
+
+

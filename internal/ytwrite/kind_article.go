@@ -732,10 +732,9 @@ func readFailure(ev Evidence, err error) (Evidence, error) {
 }
 
 // splitMissingParts checks that every child part 1..N of a split document
-// exists under indexID carrying opID's marker. It returns the 0-based indices
+// exists under indexID matching the rendered part content. It returns the 0-based indices
 // of missing pieces.
 func splitMissingParts(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreatePayload, indexID string, pieces []string) ([]int, error) {
-	marker := OpMarker(op.ID)
 	var missing []int
 	for i := range pieces {
 		partSummary := truncateRunes(fmt.Sprintf("%s / part %d of %d", p.Summary, i+1, len(pieces)), ArticleSummaryLimit)
@@ -749,9 +748,10 @@ func splitMissingParts(ctx context.Context, ar ArticleRemote, op Op, p ArticleCr
 		if err != nil {
 			return nil, err
 		}
+		expectedContent := RenderArticleCreate(op.Actor, op.CreatedAt.UTC().Truncate(time.Second), op.ID, pieces[i])
 		found := false
 		for _, h := range hits {
-			if strings.Contains(h.Content, marker) {
+			if h.Content == expectedContent {
 				found = true
 				break
 			}
