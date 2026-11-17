@@ -26,16 +26,34 @@ class RewriteTests(unittest.TestCase):
         self.assertIsNone(mysql)
         self.assertIn("unsupported || expression", constructs)
 
+    def test_concat_function_operands(self):
+        self.assertEqual(sqlport.rewrite("SELECT lower(name) || '%'")[0], "SELECT CONCAT(lower(name), '%')")
+        self.assertEqual(sqlport.rewrite("SELECT x || lower(y)")[0], "SELECT CONCAT(x, lower(y))")
+
     def test_cast(self):
         self.assertEqual(sqlport.rewrite("SELECT $1::jsonb"), ("SELECT CAST(? AS JSON)", [1], ["$n → ?", "::type → CAST"], False))
         self.assertEqual(sqlport.rewrite("SELECT value::text")[0], "SELECT CAST(value AS CHAR)")
         self.assertIn("unsupported ::regclass cast", sqlport.rewrite("SELECT 't'::regclass")[2])
+
+    def test_casts_are_rewritten_before_concat(self):
+        self.assertEqual(sqlport.rewrite("SELECT $1::text || '%'")[:2], ("SELECT CONCAT(CAST(? AS CHAR), '%')", [1]))
+        self.assertEqual(sqlport.rewrite("SELECT '%decision-escalation-' || e.id::text || '-%'")[0], "SELECT CONCAT('%decision-escalation-', CAST(e.id AS CHAR), '-%')")
 
     def test_distinct_predicate(self):
         self.assertEqual(sqlport.rewrite("a IS DISTINCT FROM b")[0], "NOT (a <=> b)")
         self.assertEqual(sqlport.rewrite("a IS NOT DISTINCT FROM b")[0], "(a <=> b)")
     def test_distinct_predicate_with_placeholder_operand(self):
         self.assertEqual(sqlport.rewrite("$1 IS DISTINCT FROM col")[:2], ("NOT (? <=> col)", [1]))
+
+    def test_distinct_predicate_function_operand(self):
+        self.assertEqual(sqlport.rewrite("lower(a) IS DISTINCT FROM b")[0], "NOT (lower(a) <=> b)")
+
+    def test_distinct_predicate_refuses_unparenthesized_expressions(self):
+        for sql in ("a = b IS DISTINCT FROM c", "x + 1 IS DISTINCT FROM y", "a IS DISTINCT FROM b + 1"):
+            with self.subTest(sql=sql):
+                mysql, _, constructs, _ = sqlport.rewrite(sql)
+                self.assertIsNone(mysql)
+                self.assertIn("unsupported IS [NOT] DISTINCT FROM expression", constructs)
 
     def test_filter(self):
         self.assertEqual(sqlport.rewrite("COUNT(*) FILTER (WHERE ok)")[0], "SUM(CASE WHEN ok THEN 1 ELSE 0 END)")
