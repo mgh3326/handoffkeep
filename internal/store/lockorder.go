@@ -76,7 +76,10 @@ package store
 //     taking KEY SHARE on the one linked task row; SetDotsAdoption locks one
 //     dots_results row and no task. ReplyDots reads and writes dots_run_tokens
 //     rows only after it locks the request's task row (FOR UPDATE), so the
-//     active run token cannot change under a reply's check. decision_requests rows that name a
+//     active run token cannot change under a reply's check. AnswerDotsQuestion
+//     closes one dots_results row under that same level-2 lock and task row;
+//     it waits on at most one SetDotsAdoption row, which never waits on a task.
+//     decision_requests rows that name a
 //     task or a job are updated only under the level-2 lock, several at a
 //     time in id order (decision_records.go); the table has no foreign key.
 //     FinishDeploy with state success takes the level-2 lock first, then its

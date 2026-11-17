@@ -346,13 +346,13 @@ func TestAnswerDotsQuestion(t *testing.T) {
 	s := schemaStore(t, "dots_answer_q")
 	ctx := t.Context()
 
-	// 1. Task with no open decision request -> ErrNoOpenDecisionRequest
+	// 1. Task with no open question and no open decision request -> ErrNoOpenDotsQuestion
 	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "answer"}); !errors.Is(err, ErrNoOpenDecisionRequest) {
-		t.Fatalf("expected ErrNoOpenDecisionRequest, got %v", err)
+	if _, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "answer"}); !errors.Is(err, ErrNoOpenDotsQuestion) || !strings.Contains(err.Error(), "no open dots question or decision request") {
+		t.Fatalf("expected ErrNoOpenDotsQuestion with its reason, got %v", err)
 	}
 
 	// 2. Open dots QUESTION
@@ -408,6 +408,12 @@ func TestAnswerDotsQuestion(t *testing.T) {
 	if answeredTask.AwaitingDecision {
 		t.Fatalf("answered task awaiting_decision should be false, got true")
 	}
+	// The QUESTION the decision came from is answered with it, so the request
+	// no longer reports an open question (hk 5000).
+	replies, err := s.ListDotsReplies(ctx, task.ID)
+	if err != nil || len(replies) != 2 || replies[1].Kind != "QUESTION" || replies[1].Answer == nil || replies[1].Answer.Text != "proceed with option B" {
+		t.Fatalf("decision answer did not close the question: replies=%+v err=%v", replies, err)
+	}
 
 	// 5. A second answer is refused with a clear code (ErrDecisionRequestResolved)
 	if _, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "another answer"}); !errors.Is(err, ErrDecisionRequestResolved) {
@@ -445,5 +451,75 @@ func TestAnswerDotsQuestion(t *testing.T) {
 	}
 	if _, err := s.AnswerDotsQuestion(ctx, plainTask.ID, "caller", DotsAnswerInput{Text: "answer"}); err == nil || !strings.Contains(err.Error(), "invalid dots request task") {
 		t.Fatalf("expected invalid dots request task error, got %v", err)
+	}
+}
+
+// Invariant (operator decision 364, hk 5000): a plain dots QUESTION — one sent
+// without ask_operator, so no decision request opens — is answered by the
+// request's requester lane with dots answer. The answer is the task comment,
+// its dots_results row marks the question answered, and a question is answered
+// once.
+func TestAnswerDotsPlainQuestion(t *testing.T) {
+	s := schemaStore(t, "dots_answer_plain")
+	ctx := t.Context()
+	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, _ := startDotsRun(t, s, task.ID, "start")
+	const question = "Which of the three should I make first?"
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "QUESTION", Body: question, IdempotencyKey: "question", RunToken: started.RunToken}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only the request's requester lane may answer, and the refusal names the
+	// rule rather than echoing the lane.
+	if _, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "the first", RequesterLane: "intruder-lane"}); !errors.Is(err, ErrTaskConflict) || !strings.Contains(err.Error(), "only the request's requester lane may answer its question") {
+		t.Fatalf("another lane: %v", err)
+	}
+	if _, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "the first"}); !errors.Is(err, ErrDotsRequestInvalid) {
+		t.Fatalf("missing requester lane: %v", err)
+	}
+	// A refused answer records nothing.
+	replies, err := s.ListDotsReplies(ctx, task.ID)
+	if err != nil || len(replies) != 2 || replies[1].Answer != nil {
+		t.Fatalf("refused answers changed the question: replies=%+v err=%v", replies, err)
+	}
+
+	const answer = "Make the van first; the other two follow the same body."
+	res, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: answer, RequesterLane: "requester"})
+	if err != nil {
+		t.Fatalf("AnswerDotsQuestion: %v", err)
+	}
+	if res.Request != nil || res.Question == nil || res.Question.ResultID == 0 || res.Question.CommentID == 0 || res.CommentID == 0 {
+		t.Fatalf("result=%+v", res)
+	}
+	if res.Task.State != StateResearching || res.Task.AwaitingDecision {
+		t.Fatalf("answering must not move the request: %+v", res.Task)
+	}
+	if res.Comment.Author != "caller" || res.Comment.Body != answer {
+		t.Fatalf("answer comment=%+v", res.Comment)
+	}
+
+	// dots reads the answer on the question it closed.
+	replies, err = s.ListDotsReplies(ctx, task.ID)
+	if err != nil || len(replies) != 2 || replies[1].Kind != "QUESTION" || replies[1].Answer == nil {
+		t.Fatalf("replies=%+v err=%v", replies, err)
+	}
+	got := replies[1].Answer
+	if got.CommentID != res.CommentID || got.Text != answer || got.By != "caller" || got.At.IsZero() {
+		t.Fatalf("answer=%+v", got)
+	}
+	results, err := s.ListDotsResults(ctx, task.ID, "", 10)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("results=%+v err=%v", results, err)
+	}
+	if results[0].Kind != "QUESTION" || results[0].AnsweredAt == nil || results[0].AnsweredBy != "caller" || results[0].AnswerCommentID == nil || *results[0].AnswerCommentID != res.CommentID {
+		t.Fatalf("question row=%+v", results[0])
+	}
+
+	// Answered once: a second answer finds no open question.
+	if _, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "again", RequesterLane: "requester"}); !errors.Is(err, ErrNoOpenDotsQuestion) || !strings.Contains(err.Error(), "no open dots question or decision request") {
+		t.Fatalf("second answer: %v", err)
 	}
 }

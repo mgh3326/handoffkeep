@@ -71,10 +71,14 @@ func (c Client) SetDotsAdoption(ctx context.Context, id int64, in store.DotsAdop
 	return out, nil
 }
 
-// AnswerDots resolves a task's open dots decision request and records the comment.
-func (c Client) AnswerDots(ctx context.Context, taskID int64, text string) (store.DotsAnswerResult, error) {
+// AnswerDots answers a task's open dots question and records the comment.
+// RequesterLane is required when the answer closes a plain QUESTION.
+func (c Client) AnswerDots(ctx context.Context, taskID int64, text, requesterLane string) (store.DotsAnswerResult, error) {
 	var out store.DotsAnswerResult
 	payload := map[string]any{"task": taskID, "text": text}
+	if requesterLane != "" {
+		payload["requester_lane"] = requesterLane
+	}
 	err := c.call(ctx, "POST", "/v1/dots/answer", payload, &out)
 	if err != nil {
 		return out, unsupportedRoute(err, "dots_answer_unsupported", "the dots answer route")

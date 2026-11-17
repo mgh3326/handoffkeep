@@ -290,16 +290,36 @@ type DotsReplyResult struct {
 // ErrDotsReplyKeyConflict rejects an idempotency key used for another reply.
 var ErrDotsReplyKeyConflict = errors.New("dots_reply_key_conflict")
 
+// DotsReplyAnswer is the requester lane's answer to a dots QUESTION.
+type DotsReplyAnswer struct {
+	// CommentID is the task comment holding the answer. It is 0 when an
+	// operator closed the decision request instead.
+	CommentID int64     `json:"comment_id,omitempty"`
+	Text      string    `json:"text,omitempty"`
+	By        string    `json:"by"`
+	At        time.Time `json:"at"`
+}
+
 // DotsReply is an attributed reply with its structured kind.
 type DotsReply struct {
 	TaskComment
 	Kind    string `json:"kind"`
 	Channel string `json:"channel"`
+	// Answer is set on a QUESTION that has been answered; a QUESTION without
+	// it is still open.
+	Answer *DotsReplyAnswer `json:"answer,omitempty"`
 }
 
-// ListDotsReplies returns recorded replies in comment order.
+// ListDotsReplies returns recorded replies in comment order, each QUESTION
+// carrying its answer when it has one.
 func (s *Store) ListDotsReplies(ctx context.Context, taskID int64) ([]DotsReply, error) {
-	rows, err := s.pool.Query(ctx, `SELECT c.id,c.task_id,c.body,c.author,c.created_at,e.from_value FROM task_comments c JOIN task_events e ON e.task_id=c.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.to_value=c.id::text WHERE c.task_id=$1 ORDER BY c.id`, taskID)
+	rows, err := s.pool.Query(ctx, `SELECT c.id,c.task_id,c.body,c.author,c.created_at,e.from_value,
+			dr.answered_at,COALESCE(dr.answered_by,''),COALESCE(dr.answer_comment_id,0),COALESCE(ac.body,'')
+		FROM task_comments c
+		JOIN task_events e ON e.task_id=c.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.to_value=c.id::text
+		LEFT JOIN dots_results dr ON dr.task_id=c.task_id AND dr.comment_id=e.source_ref AND dr.kind='QUESTION'
+		LEFT JOIN task_comments ac ON ac.id=dr.answer_comment_id
+		WHERE c.task_id=$1 ORDER BY c.id`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -307,10 +327,17 @@ func (s *Store) ListDotsReplies(ctx context.Context, taskID int64) ([]DotsReply,
 	replies := []DotsReply{}
 	for rows.Next() {
 		var reply DotsReply
-		if err := rows.Scan(&reply.ID, &reply.TaskID, &reply.Body, &reply.Author, &reply.CreatedAt, &reply.Kind); err != nil {
+		var answeredAt *time.Time
+		var answeredBy string
+		var answerCommentID int64
+		var answerText string
+		if err := rows.Scan(&reply.ID, &reply.TaskID, &reply.Body, &reply.Author, &reply.CreatedAt, &reply.Kind, &answeredAt, &answeredBy, &answerCommentID, &answerText); err != nil {
 			return nil, err
 		}
 		reply.Channel = "chatgpt"
+		if answeredAt != nil {
+			reply.Answer = &DotsReplyAnswer{CommentID: answerCommentID, Text: answerText, By: answeredBy, At: *answeredAt}
+		}
 		replies = append(replies, reply)
 	}
 	return replies, rows.Err()
@@ -557,24 +584,44 @@ func dotsSkippedLanesFromNote(field string) []string {
 	return lanes
 }
 
+// ErrNoOpenDotsQuestion refuses an answer when the request has neither an open
+// decision request nor an open QUESTION reply. Its reason names what is
+// missing (hk 5000).
+var ErrNoOpenDotsQuestion = errors.New("no_open_dots_question")
+
 // DotsAnswerInput carries the text answering a task's open dots question.
 type DotsAnswerInput struct {
 	Text string `json:"text"`
+	// RequesterLane must name the request's requester lane when the answer
+	// closes a plain QUESTION, exactly as a cancel does. An open decision
+	// request keeps its own responder rule and ignores it.
+	RequesterLane string `json:"requester_lane,omitempty"`
+}
+
+// DotsAnsweredQuestion is the plain QUESTION reply an answer closed.
+type DotsAnsweredQuestion struct {
+	ResultID  int64 `json:"result_id"`
+	CommentID int64 `json:"comment_id"`
 }
 
 // DotsAnswerResult is the outcome of answering a task's open dots question.
 type DotsAnswerResult struct {
-	TaskID    int64              `json:"task_id"`
-	RequestID string             `json:"request_id"`
-	CommentID int64              `json:"comment_id"`
-	Task      Task               `json:"task"`
-	Request   DecisionRequest    `json:"request"`
-	Comment   CreatedTaskComment `json:"comment"`
+	TaskID    int64                 `json:"task_id"`
+	RequestID string                `json:"request_id,omitempty"`
+	CommentID int64                 `json:"comment_id"`
+	Task      Task                  `json:"task"`
+	Request   *DecisionRequest      `json:"request,omitempty"`
+	Question  *DotsAnsweredQuestion `json:"question,omitempty"`
+	Comment   CreatedTaskComment    `json:"comment"`
 }
 
-// AnswerDotsQuestion resolves a task's open dots decision request (kind answered,
-// responder = caller) and records the answer text as a task comment, in one
-// transaction. A requester-lane comment alone does not resolve it.
+// AnswerDotsQuestion answers a task's open dots question and records the text
+// as a task comment, in one transaction. An open decision request is resolved
+// exactly as before, its responder rule unchanged. Otherwise the latest
+// QUESTION reply is closed, and only the request's requester lane (parent_lane,
+// as CancelDotsRequest decides it) may answer it. A QUESTION is answered once:
+// the answer marks its dots_results row, so a second answer finds nothing open.
+// A requester-lane comment alone answers nothing.
 func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller string, in DotsAnswerInput) (DotsAnswerResult, error) {
 	if taskID < 1 {
 		return DotsAnswerResult{}, ErrTaskNotFound
@@ -623,11 +670,53 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 	}
 
 	current := x.Refs.DecisionRequest
-	if current == nil {
-		return DotsAnswerResult{}, ErrNoOpenDecisionRequest
-	}
-	if current.Status != DecisionRequestOpen {
-		return DotsAnswerResult{}, ErrDecisionRequestResolved
+	if current == nil || current.Status != DecisionRequestOpen {
+		question, found, err := dotsOpenQuestionTx(ctx, tx, taskID)
+		if err != nil {
+			return DotsAnswerResult{}, err
+		}
+		if !found {
+			// A resolved decision request keeps today's refusal for a second
+			// answer; with no decision request at all, the refusal names what
+			// is missing instead of answering a code the caller cannot fix.
+			if current != nil {
+				return DotsAnswerResult{}, ErrDecisionRequestResolved
+			}
+			return DotsAnswerResult{}, fmt.Errorf("%w: this request has no open dots question or decision request to answer", ErrNoOpenDotsQuestion)
+		}
+		lane := strings.TrimSpace(in.RequesterLane)
+		if lane == "" || !validName(lane) {
+			return DotsAnswerResult{}, dotsRequestInvalid("answering a plain dots question requires the requester lane")
+		}
+		if x.ParentLane != lane {
+			return DotsAnswerResult{}, fmt.Errorf("%w: only the request's requester lane may answer its question", ErrTaskConflict)
+		}
+
+		now := time.Now().UTC()
+		var comment TaskComment
+		err = scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,$2,$3,$4) RETURNING `+taskCommentColumns, taskID, in.Text, caller, now), &comment)
+		if err != nil {
+			return DotsAnswerResult{}, err
+		}
+		op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, comment)
+		if err != nil {
+			return DotsAnswerResult{}, err
+		}
+		if err = markDotsQuestionAnsweredTx(ctx, tx, question.ResultID, caller, comment.ID, now); err != nil {
+			return DotsAnswerResult{}, err
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return DotsAnswerResult{}, err
+		}
+		logYTCommentEnqueued(comment, op, enqueued)
+		projection := ytProjectionOf(op, enqueued)
+		return DotsAnswerResult{
+			TaskID:    taskID,
+			CommentID: comment.ID,
+			Task:      x,
+			Question:  &DotsAnsweredQuestion{ResultID: question.ResultID, CommentID: question.CommentID},
+			Comment:   CreatedTaskComment{TaskComment: comment, YouTrackProjection: &projection},
+		}, nil
 	}
 	if current.EffectivePolicy(false) == DecisionPolicyOperatorDirect {
 		return DotsAnswerResult{}, ErrDecisionRequestHumanOnly
@@ -643,6 +732,11 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 	}
 	op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, comment)
 	if err != nil {
+		return DotsAnswerResult{}, err
+	}
+	// The QUESTION this decision came from is answered with it; a decision
+	// request from another source matches no reply body and closes nothing.
+	if _, err = markDotsQuestionAnsweredByBodyTx(ctx, tx, taskID, current.Question, caller, comment.ID, now); err != nil {
 		return DotsAnswerResult{}, err
 	}
 
@@ -746,7 +840,7 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 		RequestID: resolved.ID,
 		CommentID: comment.ID,
 		Task:      x,
-		Request:   resolved,
+		Request:   &resolved,
 		Comment:   CreatedTaskComment{TaskComment: comment, YouTrackProjection: &projection},
 	}, nil
 }

@@ -7,8 +7,9 @@ import (
 )
 
 type dotsAnswerPayload struct {
-	Task int64  `json:"task"`
-	Text string `json:"text"`
+	Task          int64  `json:"task"`
+	Text          string `json:"text"`
+	RequesterLane string `json:"requester_lane,omitempty"`
 }
 
 func (s Server) dotsAnswer(w http.ResponseWriter, r *http.Request) {
@@ -26,7 +27,7 @@ func (s Server) dotsAnswer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_context")
 		return
 	}
-	res, err := s.Service.Store.AnswerDotsQuestion(r.Context(), in.Task, client, store.DotsAnswerInput{Text: in.Text})
+	res, err := s.Service.Store.AnswerDotsQuestion(r.Context(), in.Task, client, store.DotsAnswerInput{Text: in.Text, RequesterLane: in.RequesterLane})
 	if err != nil {
 		appErr(w, r, err)
 		return
