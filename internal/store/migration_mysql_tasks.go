@@ -52,6 +52,11 @@ var mysqlTasksSteps = []string{
 	`CREATE TABLE IF NOT EXISTS project_owner_events (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, project VARCHAR(128) NOT NULL, previous_lane LONGTEXT NOT NULL DEFAULT (''), design_lane LONGTEXT NOT NULL DEFAULT (''), actor LONGTEXT NOT NULL, note LONGTEXT NOT NULL DEFAULT (''), created_at DATETIME(6) NOT NULL, KEY project_owner_events_project_id(project, id DESC), CONSTRAINT project_owner_events_project_fk FOREIGN KEY(project) REFERENCES task_projects(name) ON DELETE RESTRICT)` + mysqlTableOptions,
 
 	// tasks: the stub from 20261117-mysql-comments has only id.
+	// The stub was created without a collation, so it took the database default;
+	// on a case-insensitive default, lane/source/source_ref comparisons and the
+	// unique keys would ignore case. Convert it (empty: nothing but id) before any
+	// text column is added; the step repeats harmlessly if a restart reruns it.
+	mysqlIfNoColumn("tasks", "lane", `ALTER TABLE tasks CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin`),
 	mysqlIfNoColumn("tasks", "lane", `ALTER TABLE tasks
 		ADD COLUMN lane VARCHAR(255) NOT NULL,
 		ADD COLUMN parent_lane VARCHAR(255) NOT NULL DEFAULT '',
