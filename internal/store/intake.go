@@ -12,7 +12,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -72,7 +71,7 @@ func (e *SimilarTasksError) Error() string {
 }
 
 type rowsQuerier interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
+	Query(context.Context, string, ...any) (rows, error)
 }
 
 // similarOpenTasks lists started, unstarted and backlog tasks whose title is
@@ -183,7 +182,7 @@ func taskBySourceTx(ctx context.Context, q rowQuerier, source, sourceRef string)
 // insertTriageTaskTx creates one task in triage and, when it has a body, the
 // hk document task-body/<id> that holds it, linked by body_doc. The key is
 // named after a task created in this transaction, so no other writer holds it.
-func insertTriageTaskTx(ctx context.Context, tx pgx.Tx, item triageItem, source, sourceRef, lane string, parent *int64, by string, now time.Time) (Task, error) {
+func insertTriageTaskTx(ctx context.Context, tx transaction, item triageItem, source, sourceRef, lane string, parent *int64, by string, now time.Time) (Task, error) {
 	if item.Project != nil {
 		if err := requireTaskProject(ctx, tx, item.Project); err != nil {
 			return Task{}, err
@@ -238,10 +237,11 @@ func (s *Store) IntakeTask(ctx context.Context, in IntakeInput) (Task, bool, err
 		return Task{}, false, err
 	}
 	item := triageItem{Title: in.Title, Body: in.Body, Kind: in.Kind, Project: in.Project, Priority: in.Priority}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return Task{}, false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	// The same key is looked up and inserted under the task-mutation lock, so
 	// two deliveries of one item cannot both insert.
@@ -259,7 +259,7 @@ func (s *Store) IntakeTask(ctx context.Context, in IntakeInput) (Task, bool, err
 	if err != nil {
 		return Task{}, false, err
 	}
-	if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
+	if err := s.enqueueYTIssueTx(ctx, pgxTx(tx), x); err != nil {
 		return Task{}, false, err
 	}
 	return x, true, tx.Commit(ctx)
@@ -502,10 +502,11 @@ func (s *Store) EmitTicketSet(ctx context.Context, in TicketSetInput) (TicketSet
 	if err != nil {
 		return TicketSet{}, false, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return TicketSet{}, false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	// Several task rows and the blocks edges of existing tasks: the
 	// task-mutation lock comes first (lockorder.go).
@@ -561,7 +562,7 @@ func (s *Store) EmitTicketSet(ctx context.Context, in TicketSetInput) (TicketSet
 	if err != nil {
 		return TicketSet{}, false, err
 	}
-	if err := s.enqueueYTIssueTx(ctx, tx, parent); err != nil {
+	if err := s.enqueueYTIssueTx(ctx, pgxTx(tx), parent); err != nil {
 		return TicketSet{}, false, err
 	}
 	out.ParentID, out.CreatedAt = parent.ID, now
@@ -571,7 +572,7 @@ func (s *Store) EmitTicketSet(ctx context.Context, in TicketSetInput) (TicketSet
 		if err != nil {
 			return TicketSet{}, false, fmt.Errorf("child %s: %w", c.Ref, err)
 		}
-		if err := s.enqueueYTIssueTx(ctx, tx, child); err != nil {
+		if err := s.enqueueYTIssueTx(ctx, pgxTx(tx), child); err != nil {
 			return TicketSet{}, false, err
 		}
 		ids[c.Ref] = child.ID
@@ -617,7 +618,7 @@ func (s *Store) ListTriage(ctx context.Context, limit int) ([]TriageRow, error) 
 	if limit < 1 || limit > 1000 {
 		return nil, errors.New("invalid triage limit")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+prefixedTaskColumns("t")+`,
+	rows, err := s.db().Query(ctx, `SELECT `+prefixedTaskColumns("t")+`,
 			EXISTS(SELECT 1 FROM ticket_sets ts WHERE ts.parent_task_id=t.id),
 			(SELECT count(*) FROM tasks c WHERE c.parent_id=t.id),
 			(SELECT count(*) FROM tasks c WHERE c.parent_id=t.id AND c.state='triage')
@@ -662,7 +663,7 @@ func (s *Store) ListTriage(ctx context.Context, limit int) ([]TriageRow, error) 
 				titles = append(titles, k.Title)
 			}
 		}
-		if r.Similar, err = similarOpenTasks(ctx, s.pool, titles); err != nil {
+		if r.Similar, err = similarOpenTasks(ctx, s.db(), titles); err != nil {
 			return nil, err
 		}
 	}

@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 var ErrProjectNotFound = errors.New("project_not_found")
@@ -27,11 +25,11 @@ func (s *Store) SetProjectMetadata(ctx context.Context, p ProjectMetadata) (Proj
 	if !validName(p.Name) || !validText(p.Status, 128) || (p.StartAt != nil && p.TargetAt != nil && p.TargetAt.Before(*p.StartAt)) {
 		return ProjectMetadata{}, errors.New("invalid project metadata")
 	}
-	tag, err := s.pool.Exec(ctx, `UPDATE task_projects SET status=$2,start_at=$3,target_at=$4 WHERE name=$1`, p.Name, p.Status, p.StartAt, p.TargetAt)
+	n, err := s.db().Exec(ctx, `UPDATE task_projects SET status=$2,start_at=$3,target_at=$4 WHERE name=$1`, p.Name, p.Status, p.StartAt, p.TargetAt)
 	if err != nil {
 		return ProjectMetadata{}, err
 	}
-	if tag.RowsAffected() == 0 {
+	if n == 0 {
 		return ProjectMetadata{}, ErrProjectNotFound
 	}
 	return p, nil
@@ -46,7 +44,7 @@ func (s *Store) GetProjectMetadata(ctx context.Context, name string) (ProjectMet
 		return ProjectMetadata{}, errors.New("invalid project")
 	}
 	var p ProjectMetadata
-	err := s.pool.QueryRow(ctx, `SELECT name,status,start_at,target_at FROM task_projects WHERE name=$1`, name).Scan(&p.Name, &p.Status, &p.StartAt, &p.TargetAt)
+	err := s.db().QueryRow(ctx, `SELECT name,status,start_at,target_at FROM task_projects WHERE name=$1`, name).Scan(&p.Name, &p.Status, &p.StartAt, &p.TargetAt)
 	if errors.Is(err, ErrNoRows) {
 		return ProjectMetadata{}, ErrProjectNotFound
 	}
@@ -92,10 +90,11 @@ func (s *Store) PatchProjectMetadata(ctx context.Context, name string, patch Pro
 		return ProjectMetadata{}, ErrDialectUnsupported
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return ProjectMetadata{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	p, err := patchProjectMetadataTx(ctx, tx, name, patch)
 	if err != nil {
@@ -104,7 +103,7 @@ func (s *Store) PatchProjectMetadata(ctx context.Context, name string, patch Pro
 	return p, tx.Commit(ctx)
 }
 
-func patchProjectMetadataTx(ctx context.Context, tx pgx.Tx, name string, patch ProjectMetadataPatch) (ProjectMetadata, error) {
+func patchProjectMetadataTx(ctx context.Context, tx transaction, name string, patch ProjectMetadataPatch) (ProjectMetadata, error) {
 	if !validName(name) || (patch.Status != nil && !validText(*patch.Status, 128)) || (!patch.SetStart && patch.StartAt != nil) || (!patch.SetTarget && patch.TargetAt != nil) {
 		return ProjectMetadata{}, errors.New("invalid project metadata")
 	}

@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // mysqlMigration steps must be restartable: MySQL DDL commits independently,
@@ -161,7 +162,7 @@ func migrateMySQL(ctx context.Context, db *sql.DB, migrations []mysqlMigration) 
 			continue
 		}
 		for i, step := range m.steps {
-			if _, err := conn.ExecContext(ctx, step); err != nil {
+			if err := execMySQLStep(ctx, conn, step); err != nil {
 				return fmt.Errorf("mysql migration %s step %d: %w", m.id, i+1, err)
 			}
 		}
@@ -170,4 +171,61 @@ func migrateMySQL(ctx context.Context, db *sql.DB, migrations []mysqlMigration) 
 		}
 	}
 	return nil
+}
+
+// MySQL has no ADD COLUMN, CREATE INDEX or ADD CONSTRAINT IF NOT EXISTS, and a
+// migration's DDL commits step by step, so a step that adds one of them must
+// check the catalog itself to be restartable. These constructors wrap a step
+// with the object it creates; the runner skips the step when the object is
+// already there. The guard checks one object, so a guarded ALTER that adds
+// several columns is guarded by its first.
+const mysqlGuardSep = "\x00"
+
+func mysqlIfNoColumn(table, column, stmt string) string {
+	return strings.Join([]string{"", "column", table, column, stmt}, mysqlGuardSep)
+}
+func mysqlIfNoIndex(table, index, stmt string) string {
+	return strings.Join([]string{"", "index", table, index, stmt}, mysqlGuardSep)
+}
+func mysqlIfNoConstraint(table, name, stmt string) string {
+	return strings.Join([]string{"", "constraint", table, name, stmt}, mysqlGuardSep)
+}
+
+func parseMySQLGuard(step string) (kind, table, object, stmt string, ok bool) {
+	if !strings.HasPrefix(step, mysqlGuardSep) {
+		return "", "", "", step, false
+	}
+	parts := strings.SplitN(step, mysqlGuardSep, 5)
+	if len(parts) != 5 {
+		return "", "", "", step, false
+	}
+	return parts[1], parts[2], parts[3], parts[4], true
+}
+
+func execMySQLStep(ctx context.Context, conn *sql.Conn, step string) error {
+	kind, table, object, stmt, guarded := parseMySQLGuard(step)
+	if !guarded {
+		_, err := conn.ExecContext(ctx, stmt)
+		return err
+	}
+	var query string
+	switch kind {
+	case "column":
+		query = `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=?)`
+	case "index":
+		query = `SELECT EXISTS(SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name=? AND index_name=?)`
+	case "constraint":
+		query = `SELECT EXISTS(SELECT 1 FROM information_schema.table_constraints WHERE table_schema=DATABASE() AND table_name=? AND constraint_name=?)`
+	default:
+		return fmt.Errorf("unknown mysql step guard %q", kind)
+	}
+	var exists bool
+	if err := conn.QueryRowContext(ctx, query, table, object).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	_, err := conn.ExecContext(ctx, stmt)
+	return err
 }

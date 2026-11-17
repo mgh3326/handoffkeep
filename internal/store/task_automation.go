@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // Declarative automation (git show 1e3d2fa8:docs/linear-internalize.md): started_stalled_hours
@@ -87,7 +85,7 @@ func isStalled(state string, awaiting bool, activity, now time.Time, after time.
 }
 
 type poolQuerier interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
+	Query(context.Context, string, ...any) (rows, error)
 }
 
 // markStalled sets Stalled on the started rows of xs, reading their activity
@@ -158,11 +156,11 @@ func (s *Store) SweepBacklog(ctx context.Context, days int, dryRun bool) ([]Swee
 	}
 	now := time.Now().UTC()
 	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
-	rows, err := s.pool.Query(ctx, sweepSQL+` ORDER BY id LIMIT 1000`, cutoff, DecisionRequestOpen)
+	rows, err := s.db().Query(ctx, sweepSQL+` ORDER BY id LIMIT 1000`, cutoff, DecisionRequestOpen)
 	if err != nil {
 		return nil, err
 	}
-	candidates, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (SweepCandidate, error) {
+	candidates, err := collectRows(rows, func(row row) (SweepCandidate, error) {
 		var c SweepCandidate
 		err := row.Scan(&c.ID, &c.Lane, &c.Title, &c.IdleSince)
 		return c, err
@@ -187,10 +185,11 @@ func (s *Store) SweepBacklog(ctx context.Context, days int, dryRun bool) ([]Swee
 
 // sweepOne re-checks one candidate under its row lock and parks it.
 func (s *Store) sweepOne(ctx context.Context, id int64, days int, cutoff, now time.Time) (bool, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return false, err

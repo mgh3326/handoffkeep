@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // The settle-merged reasons. Every merged task in scope gets exactly one.
@@ -59,10 +57,11 @@ func (s *Store) SettleMerged(ctx context.Context, project string, dryRun bool) (
 		rep.Counts[r] = 0
 		rep.Tasks[r] = []int64{}
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return SettleMergedReport{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	// Level 2 before the task rows (lockorder.go), as FinishDeploy takes it.
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
@@ -76,7 +75,7 @@ func (s *Store) SettleMerged(ctx context.Context, project string, dryRun bool) (
 	if err != nil {
 		return SettleMergedReport{}, err
 	}
-	tasks, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Task, error) {
+	tasks, err := collectRows(rows, func(row row) (Task, error) {
 		var x Task
 		return x, scanTask(row, &x)
 	})
@@ -109,7 +108,7 @@ func (s *Store) SettleMerged(ctx context.Context, project string, dryRun bool) (
 // attempt id that carries the task, or the reason it stays merged. The rules
 // are the ones deployedTasksTx and PendingChanges use: changeDeployedSQL for
 // containment, and an included successful deploy for the evidence.
-func (s *Store) settleReasonTx(ctx context.Context, tx pgx.Tx, taskID int64) (string, string, error) {
+func (s *Store) settleReasonTx(ctx context.Context, tx transaction, taskID int64) (string, string, error) {
 	var linked, noSHA int
 	if err := tx.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE c.merge_sha IS NULL)
 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id

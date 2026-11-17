@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5"
@@ -35,6 +36,9 @@ type transaction interface {
 	Exec(context.Context, string, ...any) (int64, error)
 	Query(context.Context, string, ...any) (rows, error)
 	QueryRow(context.Context, string, ...any) row
+	// Begin opens a savepoint inside the transaction: Commit releases it and
+	// Rollback undoes only the work since it, leaving the outer transaction open.
+	Begin(context.Context) (transaction, error)
 	Commit(context.Context) error
 	Rollback(context.Context) error
 }
@@ -164,6 +168,13 @@ func (p pgTransaction) Query(ctx context.Context, q string, args ...any) (rows, 
 func (p pgTransaction) QueryRow(ctx context.Context, q string, args ...any) row {
 	return mappedRow{p.tx.QueryRow(ctx, q, args...)}
 }
+func (p pgTransaction) Begin(ctx context.Context) (transaction, error) {
+	sp, err := p.tx.Begin(ctx)
+	if err != nil {
+		return nil, mapDriverError(err)
+	}
+	return pgTransaction{sp}, nil
+}
 func (p pgTransaction) Commit(ctx context.Context) error   { return mapDriverError(p.tx.Commit(ctx)) }
 func (p pgTransaction) Rollback(ctx context.Context) error { return mapDriverError(p.tx.Rollback(ctx)) }
 
@@ -219,6 +230,47 @@ func (s sqlTransaction) Query(ctx context.Context, q string, args ...any) (rows,
 func (s sqlTransaction) QueryRow(ctx context.Context, q string, args ...any) row {
 	return mappedRow{s.tx.QueryRowContext(ctx, q, args...)}
 }
+
+// savepointSeq names MySQL savepoints; a name only has to be unique within the
+// connection's transaction, and a process-wide counter is.
+var savepointSeq atomic.Int64
+
+// Begin opens a savepoint on the same transaction connection.
+func (s sqlTransaction) Begin(ctx context.Context) (transaction, error) {
+	name := fmt.Sprintf("hk_sp_%d", savepointSeq.Add(1))
+	if _, err := s.tx.ExecContext(ctx, "SAVEPOINT "+name); err != nil {
+		return nil, mapDriverError(err)
+	}
+	return &sqlSavepoint{sqlTransaction: s, name: name}, nil
+}
+
+// sqlSavepoint keeps the outer transaction's methods for statements; only its
+// Commit and Rollback differ.
+type sqlSavepoint struct {
+	sqlTransaction
+	name string
+	done bool
+}
+
+func (p *sqlSavepoint) Commit(ctx context.Context) error {
+	p.done = true
+	_, err := p.tx.ExecContext(ctx, "RELEASE SAVEPOINT "+p.name)
+	return mapDriverError(err)
+}
+
+// Rollback after Commit is a no-op, as for a database transaction.
+func (p *sqlSavepoint) Rollback(ctx context.Context) error {
+	if p.done {
+		return nil
+	}
+	p.done = true
+	if _, err := p.tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+p.name); err != nil {
+		return mapDriverError(err)
+	}
+	_, err := p.tx.ExecContext(ctx, "RELEASE SAVEPOINT "+p.name)
+	return mapDriverError(err)
+}
+
 func (s sqlTransaction) Commit(context.Context) error   { return mapDriverError(s.tx.Commit()) }
 func (s sqlTransaction) Rollback(context.Context) error { return mapDriverError(s.tx.Rollback()) }
 func sqlResult(r sql.Result, err error) (int64, error) {
@@ -302,4 +354,34 @@ func (s *Store) beginNamedTransaction(ctx context.Context, key string) (transact
 // Its deferred rollback and session cleanup finish before the next attempt.
 func (s *Store) retryTransaction(ctx context.Context, attempt int, err error) bool {
 	return s.dialect == mysqlDialect && attempt == 0 && ctx.Err() == nil && errors.Is(mapDriverError(err), errSerializationFailure)
+}
+
+// dialected is implemented by every querier and transaction adapter, so a
+// helper that only receives its transaction (insertEvent, writeTaskTx, ...)
+// can still choose its SQL text: sqlFor(tx, pgText, mysqlText).
+type dialected interface{ dialectOf() storeDialect }
+
+func (pgQuerier) dialectOf() storeDialect     { return postgresDialect }
+func (pgTransaction) dialectOf() storeDialect { return postgresDialect }
+func (sqlQuerier) dialectOf() storeDialect    { return mysqlDialect }
+func (sqlTransaction) dialectOf() storeDialect {
+	return mysqlDialect
+}
+
+// dialectFor reports the dialect of a querier or transaction. Anything that is
+// not one of the store's adapters is PostgreSQL, like the zero Store.
+func dialectFor(x any) storeDialect {
+	if d, ok := x.(dialected); ok {
+		return d.dialectOf()
+	}
+	return postgresDialect
+}
+
+// sqlFor picks the statement text for the dialect of the querier or transaction
+// the statement will run on.
+func sqlFor(x any, postgres, mysql string) string {
+	if dialectFor(x) == mysqlDialect {
+		return mysql
+	}
+	return postgres
 }

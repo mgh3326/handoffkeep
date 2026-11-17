@@ -202,7 +202,7 @@ func TestIntegerFiftyTwoDatabaseGainsTableAndIDs(t *testing.T) {
 	if _, err := old.pool.Exec(ctx, `INSERT INTO memory(agent,name,description,memory_type,content,updated_by,updated_at) VALUES('a','kept','d','user','c','t',now())`); err != nil {
 		t.Fatal(err)
 	}
-	if cur, err := migrateCurrent(ctx, old.pool, nil); err != nil || cur {
+	if cur, err := migrateCurrent(ctx, pgQuerier{old.pool}, nil); err != nil || cur {
 		t.Fatalf("schema at 52 current=%v err=%v", cur, err)
 	}
 	s := openRegistry(t, url, []migration{tableMig("20261106-first", "ids_first")})
@@ -357,7 +357,7 @@ func TestPreviousBinaryMigrateCurrentStaysCurrent(t *testing.T) {
 	if err := s.pool.QueryRow(t.Context(), `SELECT count(*) FROM schema_migrations`).Scan(&rows); err != nil || rows != 1 {
 		t.Fatalf("schema_migrations rows=%d err=%v", rows, err)
 	}
-	cur, err := previousBinaryMigrateCurrent(t.Context(), s.pool)
+	cur, err := previousBinaryMigrateCurrent(t.Context(), pgQuerier{s.pool})
 	if err != nil || !cur {
 		t.Fatalf("previous binary sees the database current=%v err=%v", cur, err)
 	}
@@ -365,7 +365,7 @@ func TestPreviousBinaryMigrateCurrentStaysCurrent(t *testing.T) {
 	if _, err = s.pool.Exec(t.Context(), `DELETE FROM schema_version WHERE version=52`); err != nil {
 		t.Fatal(err)
 	}
-	if cur, err = previousBinaryMigrateCurrent(t.Context(), s.pool); err != nil || cur {
+	if cur, err = previousBinaryMigrateCurrent(t.Context(), pgQuerier{s.pool}); err != nil || cur {
 		t.Fatalf("control current=%v err=%v", cur, err)
 	}
 }

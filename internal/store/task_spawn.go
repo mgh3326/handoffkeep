@@ -196,10 +196,11 @@ func (s *Store) PutTaskSpawn(ctx context.Context, id int64, in TaskSpawnInput, a
 		return TaskSpawn{}, false, err
 	}
 	in.UpdatedAt = in.UpdatedAt.UTC()
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return TaskSpawn{}, false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	// A terminal write may comment, so it takes the comment insert lock before
 	// its task row, the order ReplyDots uses (see
@@ -245,7 +246,7 @@ WHERE task_spawn_records.updated_at < EXCLUDED.updated_at`,
 	if err != nil {
 		return TaskSpawn{}, false, err
 	}
-	applied := tag.RowsAffected() == 1
+	applied := tag == 1
 	if applied && spawnTerminal(in.State) {
 		if err := s.spawnNoticeTx(ctx, tx, id, in, author); err != nil {
 			return TaskSpawn{}, false, err
@@ -271,7 +272,7 @@ WHERE task_spawn_records.updated_at < EXCLUDED.updated_at`,
 // canonical in YouTrack) the savepoint is rolled back and the comment is
 // skipped, so the spawn record itself still applies. A later applied write for
 // the same key tries the comment again.
-func (s *Store) spawnNoticeTx(ctx context.Context, tx pgx.Tx, id int64, in TaskSpawnInput, author string) error {
+func (s *Store) spawnNoticeTx(ctx context.Context, tx transaction, id int64, in TaskSpawnInput, author string) error {
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		return err
@@ -286,13 +287,13 @@ func (s *Store) spawnNoticeTx(ctx context.Context, tx pgx.Tx, id int64, in TaskS
 	return sp.Commit(ctx)
 }
 
-func (s *Store) writeSpawnNoticeTx(ctx context.Context, tx pgx.Tx, id int64, in TaskSpawnInput, author string) error {
+func (s *Store) writeSpawnNoticeTx(ctx context.Context, tx transaction, id int64, in TaskSpawnInput, author string) error {
 	key := fmt.Sprintf("%d|%s|%d|%s", id, in.RequestID, in.Attempt, in.State)
-	tag, err := tx.Exec(ctx, `INSERT INTO task_spawn_notices(notice_key,task_id,created_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, key, id, time.Now().UTC())
+	n, err := tx.Exec(ctx, `INSERT INTO task_spawn_notices(notice_key,task_id,created_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, key, id, time.Now().UTC())
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() != 1 {
+	if n != 1 {
 		return nil
 	}
 	body := fmt.Sprintf("spawn %s request=%s attempt=%d job=%s", in.State, in.RequestID, in.Attempt, in.Job)
@@ -307,7 +308,7 @@ func (s *Store) writeSpawnNoticeTx(ctx context.Context, tx pgx.Tx, id int64, in 
 	if err != nil {
 		return err
 	}
-	_, _, err = s.enqueueYTCommentTx(ctx, tx, c)
+	_, _, err = s.enqueueYTCommentTx(ctx, pgxTx(tx), c)
 	return err
 }
 
@@ -489,7 +490,7 @@ func (s *Store) TaskStatesSnapshot(ctx context.Context, ids []int64, until strin
 		out.Missing = []int64{}
 	}
 	sort.Slice(out.Missing, func(i, j int) bool { return out.Missing[i] < out.Missing[j] })
-	if err := attachTaskSpawns(ctx, tx, present); err != nil {
+	if err := attachTaskSpawns(ctx, pgTransaction{tx}, present); err != nil {
 		return out, err
 	}
 	out.Tasks = make([]TaskStateEntry, 0, len(present))

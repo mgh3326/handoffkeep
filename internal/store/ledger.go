@@ -332,7 +332,7 @@ func (s *Store) Ledger(ctx context.Context, consumer string, now time.Time) (Led
 	}
 	// Every open request, not the API's first 1000: a task tied only to an
 	// omitted request would be in no section.
-	records, err := listDecisionRecords(ctx, tx, DecisionRecordFilter{Status: DecisionStatusOpen, unbounded: true}, now)
+	records, err := listDecisionRecords(ctx, pgTransaction{tx}, DecisionRecordFilter{Status: DecisionStatusOpen, unbounded: true}, now)
 	if err != nil {
 		return Ledger{}, err
 	}

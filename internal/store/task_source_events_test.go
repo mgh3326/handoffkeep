@@ -41,7 +41,7 @@ func applyEvent(t *testing.T, s *Store, id int64, ev sourceEvent) TaskEventResul
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
 		t.Fatal(err)
 	}
-	res, err := s.applySourceEventTx(ctx, tx, x, ev, time.Now().UTC())
+	res, err := s.applySourceEventTx(ctx, pgTransaction{tx}, x, ev, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}

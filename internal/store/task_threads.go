@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // Discord task threads (hk 3990; hk:doc design/2026-11-11/operator-surfaces
@@ -197,10 +195,11 @@ func (s *Store) QueueTaskThreads(ctx context.Context, now time.Time, projects []
 
 	now = now.UTC()
 	dest := TaskThreadDestinationDiscord
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return 0, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `INSERT INTO task_thread_cursors(destination,epoch_event_id,scan_event_id,updated_at)
 		SELECT $1::text,coalesce(max(id),0),coalesce(max(id),0),$2::timestamptz FROM task_events ON CONFLICT(destination) DO NOTHING`, dest, now); err != nil {
@@ -228,7 +227,7 @@ func (s *Store) QueueTaskThreads(ctx context.Context, now time.Time, projects []
 		at              time.Time
 		title           string
 	}
-	starts, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (start, error) {
+	starts, err := collectRows(rows, func(r row) (start, error) {
 		var x start
 		err := r.Scan(&x.taskID, &x.eventID, &x.at, &x.title)
 		return x, err
@@ -244,7 +243,7 @@ func (s *Store) QueueTaskThreads(ctx context.Context, now time.Time, projects []
 		if err != nil {
 			return 0, err
 		}
-		queued += int(tag.RowsAffected())
+		queued += int(tag)
 	}
 	if upper > cursor {
 		if _, err = tx.Exec(ctx, `UPDATE task_thread_cursors SET scan_event_id=$2,updated_at=$3 WHERE destination=$1`, dest, upper, now); err != nil {
@@ -274,7 +273,7 @@ func (s *Store) RecoverTaskThreadClaims(ctx context.Context, now time.Time) ([]T
 	}
 
 	now = now.UTC()
-	rows, err := s.pool.Query(ctx, `WITH old AS (
+	rows, err := s.db().Query(ctx, `WITH old AS (
 			SELECT task_id,destination,claim_key FROM task_thread_deliveries
 			WHERE destination=$1 AND claim_key<>'' AND claimed_at<$2 FOR UPDATE SKIP LOCKED)
 		UPDATE task_thread_deliveries n SET
@@ -288,7 +287,7 @@ func (s *Store) RecoverTaskThreadClaims(ctx context.Context, now time.Time) ([]T
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (TaskThreadRecovery, error) {
+	return collectRows(rows, func(r row) (TaskThreadRecovery, error) {
 		var x TaskThreadRecovery
 		err := r.Scan(&x.TaskID, &x.Key, &x.State)
 		return x, err
@@ -348,10 +347,11 @@ func (s *Store) ClaimTaskThread(ctx context.Context, now time.Time) (TaskThreadI
 
 	now = now.UTC()
 	dest := TaskThreadDestinationDiscord
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return TaskThreadItem{}, false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	x := TaskThreadItem{Destination: dest, Type: TaskThreadCreate, Key: TaskThreadCreate}
 	err = tx.QueryRow(ctx, `SELECT n.task_id,n.thread_name,n.attempts,n.state='`+TaskThreadCreating+`',coalesce(t.project,''),t.kind,coalesce(nullif(t.refs->>'grade',''),t.refs->'linear'->>'grade',''),coalesce(nullif(t.refs->>'tier',''),t.refs->'linear'->>'tier','')
@@ -401,7 +401,7 @@ func (s *Store) ClaimTaskThread(ctx context.Context, now time.Time) (TaskThreadI
 // loadTaskThreadLine fills a line's type and fields from its record. Only
 // structured fields and links are read, never a comment, report or question
 // body.
-func loadTaskThreadLine(ctx context.Context, tx pgx.Tx, x *TaskThreadItem, src int, ref int64) error {
+func loadTaskThreadLine(ctx context.Context, tx transaction, x *TaskThreadItem, src int, ref int64) error {
 	switch src {
 	case 1:
 		var source, to, sourceRef, pr string
@@ -565,16 +565,17 @@ func (s *Store) SettleTaskThread(ctx context.Context, now time.Time, x TaskThrea
 	default:
 		return false, fmt.Errorf("unknown task thread outcome %d", res.Outcome)
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	tag, err := tx.Exec(ctx, `UPDATE task_thread_deliveries SET `+set+`,claim_key='',claimed_at=NULL,updated_at=$4`+key, args...)
 	if err != nil {
 		return false, err
 	}
-	if tag.RowsAffected() == 0 {
+	if tag == 0 {
 		return false, fmt.Errorf("task thread claim %s on task %d is no longer held", x.Key, x.TaskID)
 	}
 	return gaveUp, tx.Commit(ctx)
@@ -611,7 +612,7 @@ func (s *Store) GetTaskThread(ctx context.Context, taskID int64) (TaskThreadStat
 	}
 
 	var x TaskThreadState
-	err := s.pool.QueryRow(ctx, `SELECT task_id,destination,thread_id,thread_name,start_event_id,last_event_id,posted,state,claim_key,attempts,next_attempt_at,last_error
+	err := s.db().QueryRow(ctx, `SELECT task_id,destination,thread_id,thread_name,start_event_id,last_event_id,posted,state,claim_key,attempts,next_attempt_at,last_error
 		FROM task_thread_deliveries WHERE task_id=$1 AND destination=$2`, taskID, TaskThreadDestinationDiscord).
 		Scan(&x.TaskID, &x.Destination, &x.ThreadID, &x.ThreadName, &x.StartEventID, &x.LastEventID, &x.Posted, &x.State, &x.ClaimKey, &x.Attempts, &x.NextAttemptAt, &x.LastError)
 	if errors.Is(err, ErrNoRows) {

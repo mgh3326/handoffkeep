@@ -87,7 +87,7 @@ func (s *Store) RecentTaskComments(ctx context.Context, taskID int64, limit int)
 	if taskID < 1 || limit < 1 || limit > TaskCommentListMax {
 		return nil, ErrTaskCommentInvalid
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+taskCommentColumns+` FROM (
+	rows, err := s.db().Query(ctx, `SELECT `+taskCommentColumns+` FROM (
 SELECT `+taskCommentColumns+` FROM task_comments WHERE task_id=$1 ORDER BY id DESC LIMIT $2
 ) recent ORDER BY id ASC`, taskID, limit)
 	if err != nil {
@@ -120,7 +120,7 @@ func (s *Store) TaskBriefs(ctx context.Context, ids []int64) (map[int64]TaskChil
 	if len(ids) > 1000 {
 		return nil, errors.New("invalid task brief query")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id,title,state FROM tasks WHERE id=ANY($1) ORDER BY id`, ids)
+	rows, err := s.db().Query(ctx, `SELECT id,title,state FROM tasks WHERE id=ANY($1) ORDER BY id`, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +149,7 @@ func (s *Store) TasksByIDs(ctx context.Context, ids []int64) ([]Task, error) {
 	if len(ids) > 1000 {
 		return nil, errors.New("invalid task id batch")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=ANY($1) ORDER BY id`, ids)
+	rows, err := s.db().Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=ANY($1) ORDER BY id`, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +180,7 @@ func (s *Store) TaskIDsForComments(ctx context.Context, ids []int64) (map[int64]
 	if len(ids) > 1000 {
 		return nil, errors.New("invalid comment id batch")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id,task_id FROM task_comments WHERE id=ANY($1)`, ids)
+	rows, err := s.db().Query(ctx, `SELECT id,task_id FROM task_comments WHERE id=ANY($1)`, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -205,6 +205,6 @@ func (s *Store) SyncIDAt(ctx context.Context, t time.Time) (int64, error) {
 	}
 
 	var id int64
-	err := s.pool.QueryRow(ctx, `SELECT COALESCE(max(sync_id),0) FROM sync_log WHERE sync_id IS NOT NULL AND at <= $1`, t.UTC()).Scan(&id)
+	err := s.db().QueryRow(ctx, `SELECT COALESCE(max(sync_id),0) FROM sync_log WHERE sync_id IS NOT NULL AND at <= $1`, t.UTC()).Scan(&id)
 	return id, err
 }

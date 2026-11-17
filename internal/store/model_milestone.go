@@ -33,10 +33,11 @@ func (s *Store) SaveMilestone(ctx context.Context, m ProjectMilestone) (ProjectM
 	if m.ID < 0 || !validName(m.Project) || m.Name == "" || !validText(m.Name, 256) || !validText(m.Description, MaxBytes) || !validText(m.Status, 128) {
 		return ProjectMilestone{}, errors.New("invalid milestone")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return ProjectMilestone{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	var known bool
 	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, m.Project).Scan(&known); err != nil {
@@ -48,9 +49,9 @@ func (s *Store) SaveMilestone(ctx context.Context, m ProjectMilestone) (ProjectM
 	if m.ID == 0 {
 		err = tx.QueryRow(ctx, `INSERT INTO project_milestones(project,name,description,target_at,status,sort_order) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, m.Project, m.Name, m.Description, m.TargetAt, m.Status, m.SortOrder).Scan(&m.ID)
 	} else {
-		tag, e := tx.Exec(ctx, `UPDATE project_milestones SET name=$3,description=$4,target_at=$5,status=$6,sort_order=$7 WHERE id=$1 AND project=$2`, m.ID, m.Project, m.Name, m.Description, m.TargetAt, m.Status, m.SortOrder)
+		n, e := tx.Exec(ctx, `UPDATE project_milestones SET name=$3,description=$4,target_at=$5,status=$6,sort_order=$7 WHERE id=$1 AND project=$2`, m.ID, m.Project, m.Name, m.Description, m.TargetAt, m.Status, m.SortOrder)
 		err = e
-		if err == nil && tag.RowsAffected() == 0 {
+		if err == nil && n == 0 {
 			return ProjectMilestone{}, ErrMilestoneNotFound
 		}
 	}
@@ -68,10 +69,11 @@ func (s *Store) SetTaskMilestone(ctx context.Context, id int64, milestone *int64
 	if id < 1 || (milestone != nil && *milestone < 1) || by == "" || !validText(by, 128) {
 		return Task{}, false, errors.New("invalid task milestone")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return Task{}, false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	var x Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
@@ -121,7 +123,7 @@ func (s *Store) GetMilestone(ctx context.Context, id int64) (ProjectMilestone, e
 		return ProjectMilestone{}, errors.New("invalid milestone")
 	}
 	var m ProjectMilestone
-	err := s.pool.QueryRow(ctx, `SELECT id,project,name,description,target_at,status,sort_order FROM project_milestones WHERE id=$1`, id).Scan(&m.ID, &m.Project, &m.Name, &m.Description, &m.TargetAt, &m.Status, &m.SortOrder)
+	err := s.db().QueryRow(ctx, `SELECT id,project,name,description,target_at,status,sort_order FROM project_milestones WHERE id=$1`, id).Scan(&m.ID, &m.Project, &m.Name, &m.Description, &m.TargetAt, &m.Status, &m.SortOrder)
 	if errors.Is(err, ErrNoRows) {
 		return ProjectMilestone{}, ErrMilestoneNotFound
 	}
@@ -197,10 +199,11 @@ func (s *Store) PatchMilestone(ctx context.Context, id int64, p MilestonePatch) 
 	if id < 1 || (!p.SetTarget && p.TargetAt != nil) || (p.Project != nil && !validName(*p.Project)) || (p.Name != nil && (*p.Name == "" || !validText(*p.Name, 256))) || (p.Description != nil && !validText(*p.Description, MaxBytes)) || (p.Status != nil && !validText(*p.Status, 128)) {
 		return ProjectMilestone{}, errors.New("invalid milestone")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return ProjectMilestone{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	var m ProjectMilestone
 	err = tx.QueryRow(ctx, `SELECT id,project,name,description,target_at,status,sort_order FROM project_milestones WHERE id=$1 FOR UPDATE`, id).Scan(&m.ID, &m.Project, &m.Name, &m.Description, &m.TargetAt, &m.Status, &m.SortOrder)

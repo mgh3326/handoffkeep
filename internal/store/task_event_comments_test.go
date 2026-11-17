@@ -237,7 +237,7 @@ func TestRevertedPRAdoptionDoesNotCreateComment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = insertEvent(t.Context(), tx, taskEventInput{
+	_, _, err = insertEvent(t.Context(), pgTransaction{tx}, taskEventInput{
 		TaskID: parent.ID, Kind: TaskEventSource, From: StateMerged, To: StateMerged, By: SourceMergewakeRevert,
 		At: time.Now().UTC(), Source: SourceMergewakeRevert, SourceRef: revertPR,
 		Field: revertedPRField, ToValue: pr, Auto: true, NotApplied: true,

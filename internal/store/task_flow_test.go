@@ -129,7 +129,7 @@ func TestReopenReturnsToUnstarted(t *testing.T) {
 	if _, err := s.ReopenTask(ctx, dup.ID, "tester", "not a duplicate after all"); err != nil {
 		t.Fatal(err)
 	}
-	if live, err := hasLiveRelationTx(ctx, pool, dup.ID, RelationDuplicateOf); err != nil || live {
+	if live, err := hasLiveRelationTx(ctx, pgQuerier{pool}, dup.ID, RelationDuplicateOf); err != nil || live {
 		t.Fatalf("duplicate_of still live after reopen: live=%t err=%v", live, err)
 	}
 }

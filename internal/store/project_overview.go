@@ -142,22 +142,22 @@ func (s *Store) ListProjectOverviews(ctx context.Context, now time.Time) ([]Proj
 		return nil, err
 	}
 
-	if err := projectHealthCounts(ctx, tx, now, out, index); err != nil {
+	if err := projectHealthCounts(ctx, pgTransaction{tx}, now, out, index); err != nil {
 		return nil, err
 	}
-	if err := projectAssigneeRows(ctx, tx, out, index); err != nil {
+	if err := projectAssigneeRows(ctx, pgTransaction{tx}, out, index); err != nil {
 		return nil, err
 	}
-	if err := projectBlockedRows(ctx, tx, out, index); err != nil {
+	if err := projectBlockedRows(ctx, pgTransaction{tx}, out, index); err != nil {
 		return nil, err
 	}
-	if err := projectOverdueRows(ctx, tx, now, out, index); err != nil {
+	if err := projectOverdueRows(ctx, pgTransaction{tx}, now, out, index); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func projectHealthCounts(ctx context.Context, tx pgx.Tx, now time.Time, out []ProjectOverview, index map[string]int) error {
+func projectHealthCounts(ctx context.Context, tx transaction, now time.Time, out []ProjectOverview, index map[string]int) error {
 	rows, err := tx.Query(ctx, `SELECT t.project,
 		COUNT(*) FILTER (WHERE t.state IN (`+startedStatesSQL+`)),
 		COUNT(*) FILTER (WHERE t.state IN ('triage','backlog','unstarted')),
@@ -186,7 +186,7 @@ func projectHealthCounts(ctx context.Context, tx pgx.Tx, now time.Time, out []Pr
 	return rows.Err()
 }
 
-func projectAssigneeRows(ctx context.Context, tx pgx.Tx, out []ProjectOverview, index map[string]int) error {
+func projectAssigneeRows(ctx context.Context, tx transaction, out []ProjectOverview, index map[string]int) error {
 	rows, err := tx.Query(ctx, `SELECT project,claimed_by,COUNT(*) FROM tasks
 		WHERE project IS NOT NULL AND claimed_by<>'' AND state NOT IN (`+settledStatesSQL+`)
 		GROUP BY project,claimed_by ORDER BY project,COUNT(*) DESC,claimed_by`)
@@ -214,7 +214,7 @@ func projectAssigneeRows(ctx context.Context, tx pgx.Tx, out []ProjectOverview, 
 	return rows.Err()
 }
 
-func projectBlockedRows(ctx context.Context, tx pgx.Tx, out []ProjectOverview, index map[string]int) error {
+func projectBlockedRows(ctx context.Context, tx transaction, out []ProjectOverview, index map[string]int) error {
 	rows, err := tx.Query(ctx, `SELECT project,id,title,priority,blocked_by FROM (
 		SELECT t.project,t.id,t.title,t.priority,
 		  (SELECT ARRAY_AGG(b.id ORDER BY b.id) FROM task_relations r JOIN tasks b ON b.id=r.src_id
@@ -239,7 +239,7 @@ func projectBlockedRows(ctx context.Context, tx pgx.Tx, out []ProjectOverview, i
 	return rows.Err()
 }
 
-func projectOverdueRows(ctx context.Context, tx pgx.Tx, now time.Time, out []ProjectOverview, index map[string]int) error {
+func projectOverdueRows(ctx context.Context, tx transaction, now time.Time, out []ProjectOverview, index map[string]int) error {
 	rows, err := tx.Query(ctx, `SELECT project,id,title,priority,due_at FROM (
 		SELECT t.project,t.id,t.title,t.priority,t.due_at,
 		  ROW_NUMBER() OVER (PARTITION BY t.project ORDER BY t.due_at,t.id) AS rn

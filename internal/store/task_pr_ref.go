@@ -4,8 +4,6 @@ import (
 	"context"
 	"regexp"
 	"strconv"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // The PR a task is delivered by is one full PR URL, so the deploy rule can
@@ -22,7 +20,7 @@ var barePRDigitsRE = regexp.MustCompile(`^[0-9]+$`)
 // project's PRs live in: the repos of its tasks' change records and of the PR
 // URLs its tasks name. Zero repos, or more than one, refuses the write, since
 // a number alone would name the wrong PR. A task with no project has none.
-func normalisePRRefTx(ctx context.Context, tx pgx.Tx, project *string, pr string) (string, error) {
+func normalisePRRefTx(ctx context.Context, tx transaction, project *string, pr string) (string, error) {
 	if !barePRDigitsRE.MatchString(pr) {
 		return canonicalPRURL(pr), nil
 	}
@@ -38,7 +36,7 @@ func normalisePRRefTx(ctx context.Context, tx pgx.Tx, project *string, pr string
 	if err != nil {
 		return "", err
 	}
-	repos, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	repos, err := collectRows(rows, rowTo[string])
 	if err != nil {
 		return "", err
 	}
@@ -56,7 +54,7 @@ func normalisePRRefTx(ctx context.Context, tx pgx.Tx, project *string, pr string
 const taskDeliveredPRSQL = `COALESCE(NULLIF(t.refs->>'pr',''), (SELECT p.refs->>'pr' FROM tasks p WHERE p.id=t.parent_id AND p.title LIKE '[bundle %'), '')`
 
 // deliveredPRTx is taskDeliveredPRSQL for one task.
-func deliveredPRTx(ctx context.Context, tx pgx.Tx, taskID int64) (string, error) {
+func deliveredPRTx(ctx context.Context, tx transaction, taskID int64) (string, error) {
 	var pr string
 	err := tx.QueryRow(ctx, `SELECT `+taskDeliveredPRSQL+` FROM tasks t WHERE t.id=$1`, taskID).Scan(&pr)
 	return pr, err

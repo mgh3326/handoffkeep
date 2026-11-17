@@ -179,7 +179,7 @@ func (s *Store) reconcileDotsChoiceTx(ctx context.Context, tx pgx.Tx, x Task, at
 	// recorder of the resolution is this task's actor.
 	by := request.Resolution.By
 	if x.State == StateIcebox {
-		resumed, err := s.transitionTaskTx(ctx, tx, x.ID, TransitionInput{To: StateBacklog, By: by, Note: "decision answered: resume to close"}, false)
+		resumed, err := s.transitionTaskTx(ctx, pgTransaction{tx}, x.ID, TransitionInput{To: StateBacklog, By: by, Note: "decision answered: resume to close"}, false)
 		if err != nil {
 			return Task{}, err
 		}
@@ -221,7 +221,7 @@ func (s *Store) reconcileDotsChoiceTx(ctx context.Context, tx pgx.Tx, x Task, at
 	if !taskTransitionAllowed(x.State, StateCompleted) {
 		return x, nil
 	}
-	completed, err := s.transitionTaskTx(ctx, tx, x.ID, TransitionInput{To: StateCompleted, By: by, Evidence: evidence}, false)
+	completed, err := s.transitionTaskTx(ctx, pgTransaction{tx}, x.ID, TransitionInput{To: StateCompleted, By: by, Evidence: evidence}, false)
 	if err != nil {
 		return Task{}, err
 	}

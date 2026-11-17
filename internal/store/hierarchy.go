@@ -7,8 +7,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // Relation kinds. blocks and duplicate_of point from Src to Dst (Src blocks
@@ -86,7 +84,7 @@ func hasLiveRelationTx(ctx context.Context, q rowQuerier, src int64, kind string
 // task lock. A live edge is left alone (changed=false); an archived edge is
 // revived; otherwise a row is inserted. Self-links and blocks or duplicate_of
 // cycles are refused.
-func addRelationTx(ctx context.Context, tx pgx.Tx, src int64, kind string, dst int64, by string, now time.Time) (bool, error) {
+func addRelationTx(ctx context.Context, tx transaction, src int64, kind string, dst int64, by string, now time.Time) (bool, error) {
 	if !validRelationKind(kind) || src < 1 || dst < 1 || by == "" || !validText(by, 128) {
 		return false, errors.New("invalid relation")
 	}
@@ -150,7 +148,7 @@ func addRelationTx(ctx context.Context, tx pgx.Tx, src int64, kind string, dst i
 // lock cannot close a cycle with another task writer. updated_at never moves
 // backwards: callers read now under that lock, and GREATEST keeps a newer
 // revision if a clock step put one ahead of now.
-func bumpRelationEndpointsTx(ctx context.Context, tx pgx.Tx, now time.Time, src, dst int64) error {
+func bumpRelationEndpointsTx(ctx context.Context, tx transaction, now time.Time, src, dst int64) error {
 	ids := []int64{src, dst}
 	slices.Sort(ids)
 	_, err := tx.Exec(ctx, `UPDATE tasks SET updated_at=GREATEST(updated_at, $2) WHERE id = ANY($1)`, ids, now)
@@ -158,7 +156,7 @@ func bumpRelationEndpointsTx(ctx context.Context, tx pgx.Tx, now time.Time, src,
 }
 
 // archiveLiveRelationsTx archives every live edge of kind that starts at src.
-func archiveLiveRelationsTx(ctx context.Context, tx pgx.Tx, src int64, kind, by string, now time.Time) error {
+func archiveLiveRelationsTx(ctx context.Context, tx transaction, src int64, kind, by string, now time.Time) error {
 	rows, err := tx.Query(ctx, `UPDATE task_relations SET archived_at=$4, archived_by=$3 WHERE kind=$1 AND src_id=$2 AND archived_at IS NULL RETURNING dst_id`, kind, src, by, now)
 	if err != nil {
 		return err
@@ -206,10 +204,11 @@ func (s *Store) AddTaskRelation(ctx context.Context, src int64, kind string, dst
 	if kind == RelationDuplicateOf {
 		return s.addDuplicateOf(ctx, src, dst, by)
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return false, err
@@ -223,7 +222,7 @@ func (s *Store) AddTaskRelation(ctx context.Context, src int64, kind string, dst
 
 func (s *Store) addDuplicateOf(ctx context.Context, src, dst int64, by string) (bool, error) {
 	var live bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_relations WHERE kind='duplicate_of' AND src_id=$1 AND dst_id=$2 AND archived_at IS NULL)`, src, dst).Scan(&live); err != nil {
+	if err := s.db().QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_relations WHERE kind='duplicate_of' AND src_id=$1 AND dst_id=$2 AND archived_at IS NULL)`, src, dst).Scan(&live); err != nil {
 		return false, err
 	}
 	if live {
@@ -245,10 +244,11 @@ func (s *Store) RemoveTaskRelation(ctx context.Context, src int64, kind string, 
 		return false, errors.New("invalid relation")
 	}
 	src, dst = normalizeRelation(kind, src, dst)
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return false, err
@@ -269,11 +269,11 @@ func (s *Store) RemoveTaskRelation(ctx context.Context, src int64, kind string, 
 		}
 	}
 	now := time.Now().UTC()
-	tag, err := tx.Exec(ctx, `UPDATE task_relations SET archived_at=$5, archived_by=$4 WHERE kind=$1 AND src_id=$2 AND dst_id=$3 AND archived_at IS NULL`, kind, src, dst, by, now)
+	n, err := tx.Exec(ctx, `UPDATE task_relations SET archived_at=$5, archived_by=$4 WHERE kind=$1 AND src_id=$2 AND dst_id=$3 AND archived_at IS NULL`, kind, src, dst, by, now)
 	if err != nil {
 		return false, err
 	}
-	if tag.RowsAffected() == 0 {
+	if n == 0 {
 		return false, tx.Commit(ctx)
 	}
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: src, Kind: TaskEventRelation, By: by, At: now, Field: "relation", FromValue: fmt.Sprintf("%s:%d", kind, dst), Refs: TaskRefs{}}); err != nil {
@@ -291,7 +291,7 @@ func (s *Store) ListTaskRelations(ctx context.Context, id int64) ([]TaskRelation
 		return nil, ErrDialectUnsupported
 	}
 
-	rows, err := s.pool.Query(ctx, `SELECT id,kind,src_id,dst_id,created_by,created_at FROM task_relations WHERE (src_id=$1 OR dst_id=$1) AND archived_at IS NULL ORDER BY id`, id)
+	rows, err := s.db().Query(ctx, `SELECT id,kind,src_id,dst_id,created_by,created_at FROM task_relations WHERE (src_id=$1 OR dst_id=$1) AND archived_at IS NULL ORDER BY id`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +313,7 @@ func (s *Store) ListTaskChildren(ctx context.Context, id int64) ([]TaskChild, er
 		return nil, ErrDialectUnsupported
 	}
 
-	rows, err := s.pool.Query(ctx, `SELECT id,title,state FROM tasks WHERE parent_id=$1 ORDER BY id`, id)
+	rows, err := s.db().Query(ctx, `SELECT id,title,state FROM tasks WHERE parent_id=$1 ORDER BY id`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -380,10 +380,11 @@ func (s *Store) SetTaskParent(ctx context.Context, id int64, parent *int64, by s
 	if id < 1 || by == "" || !validText(by, 128) {
 		return Task{}, false, errors.New("invalid task parent change")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return Task{}, false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return Task{}, false, err
@@ -423,7 +424,7 @@ func (s *Store) SetTaskParent(ctx context.Context, id int64, parent *int64, by s
 // afterStateChangeTx runs the hierarchy rules after a task's state changed in
 // the caller's transaction: auto-close of the parent when this task settled,
 // and the record left on a completed parent when this task is reopened.
-func (s *Store) afterStateChangeTx(ctx context.Context, tx pgx.Tx, x Task, from, by string, now time.Time) error {
+func (s *Store) afterStateChangeTx(ctx context.Context, tx transaction, x Task, from, by string, now time.Time) error {
 	if x.ParentID == nil {
 		return nil
 	}
@@ -455,7 +456,7 @@ func (s *Store) afterStateChangeTx(ctx context.Context, tx pgx.Tx, x Task, from,
 // open or reverted and not relanded (pieceHoldTx, the last-piece rule of a
 // merge), while it is awaiting a decision, or while its decision request is
 // open.
-func (s *Store) closeGateTx(ctx context.Context, tx pgx.Tx, x Task) (string, error) {
+func (s *Store) closeGateTx(ctx context.Context, tx transaction, x Task) (string, error) {
 	if reason, err := pieceHoldTx(ctx, tx, x.ID, ""); err != nil || reason != "" {
 		return reason, err
 	}
@@ -529,12 +530,12 @@ func (r subTaskRollup) closeTarget() string {
 }
 
 // subTaskRollupTx reads the rollup of the sub-tasks of parentID.
-func subTaskRollupTx(ctx context.Context, tx pgx.Tx, parentID int64) (subTaskRollup, error) {
+func subTaskRollupTx(ctx context.Context, tx transaction, parentID int64) (subTaskRollup, error) {
 	rows, err := tx.Query(ctx, `SELECT state FROM tasks WHERE parent_id=$1`, parentID)
 	if err != nil {
 		return subTaskRollup{}, err
 	}
-	sub, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	sub, err := collectRows(rows, rowTo[string])
 	if err != nil {
 		return subTaskRollup{}, err
 	}
@@ -559,7 +560,7 @@ func subTaskRollupTx(ctx context.Context, tx pgx.Tx, parentID int64) (subTaskRol
 // settled by its sub-tasks again until a sub-task deploys (hk 4172): then the
 // same rule is applied to it, and it deploys once no sub-task waits for its
 // deploy.
-func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by string, now time.Time) error {
+func (s *Store) autoCloseTx(ctx context.Context, tx transaction, child Task, by string, now time.Time) error {
 	if !s.AutoCloseParent() {
 		return nil
 	}
@@ -579,7 +580,7 @@ func (s *Store) autoCloseTx(ctx context.Context, tx pgx.Tx, child Task, by strin
 
 // autoCloseOneParentTx evaluates auto-close for parent p under its row lock.
 // It returns applied=true if the parent moved, along with the updated parent.
-func (s *Store) autoCloseOneParentTx(ctx context.Context, tx pgx.Tx, p Task, childID int64, childState string, now time.Time) (bool, Task, error) {
+func (s *Store) autoCloseOneParentTx(ctx context.Context, tx transaction, p Task, childID int64, childState string, now time.Time) (bool, Task, error) {
 	switch {
 	case p.State == StateMerged:
 		// A merged parent waits for its sub-tasks to deploy: only a
@@ -645,7 +646,7 @@ func (s *Store) autoCloseOneParentTx(ctx context.Context, tx pgx.Tx, p Task, chi
 	if p, err = writeTaskTx(ctx, tx, p); err != nil {
 		return false, p, err
 	}
-	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, p, "hk", "", 0, now); err != nil {
+	if err = mirrorTaskDecisionsTx(ctx, pgxTx(tx), decisionBefore, p, "hk", "", 0, now); err != nil {
 		return false, p, err
 	}
 	if _, _, err = insertEvent(ctx, tx, taskEventInput{

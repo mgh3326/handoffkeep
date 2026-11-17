@@ -734,7 +734,7 @@ func checkDecisionAttachmentsExist(ctx context.Context, tx pgx.Tx, options Decis
 }
 
 func insertDecisionEvent(ctx context.Context, tx pgx.Tx, x *Task, by, note string, at time.Time) error {
-	_, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: "decision", From: x.State, To: x.State, By: by, Note: note, Refs: x.Refs, Into: x, At: at})
+	_, _, err := insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: x.ID, Kind: "decision", From: x.State, To: x.State, By: by, Note: note, Refs: x.Refs, Into: x, At: at})
 	return err
 }
 
@@ -889,7 +889,7 @@ func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID i
 		x.AwaitingDecision = true
 	}
 	x.UpdatedAt = now
-	if x, err = writeTaskTx(ctx, tx, x); err != nil {
+	if x, err = writeTaskTx(ctx, pgTransaction{tx}, x); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	note := "decision-request " + request.ID
@@ -899,7 +899,7 @@ func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID i
 	note += ": " + request.Question
 	if setFlag {
 		// The event's note keeps the question readers of the flag expect.
-		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: taskID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: by, Note: request.Question, Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"}); err != nil {
+		if _, _, err = insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: taskID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: by, Note: request.Question, Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"}); err != nil {
 			return DecisionRequestResult{}, err
 		}
 	} else if err = insertDecisionEvent(ctx, tx, &x, by, note, now); err != nil {

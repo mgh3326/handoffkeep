@@ -39,7 +39,7 @@ func TestProjectDesignLaneMigrationAppliesOnce(t *testing.T) {
 	if defaultLane != "" {
 		t.Fatalf("fresh design_lane=%q, want empty", defaultLane)
 	}
-	if current, err := migrateCurrent(ctx, s.pool, migrationRegistry); err != nil || !current {
+	if current, err := migrateCurrent(ctx, pgQuerier{s.pool}, migrationRegistry); err != nil || !current {
 		t.Fatalf("schema not current after migrate: current=%v err=%v", current, err)
 	}
 	// A second Open on the migrated schema must not re-run the migration.

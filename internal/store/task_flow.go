@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -55,7 +54,7 @@ type taskEventInput struct {
 }
 
 type rowQuerier interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
+	QueryRow(context.Context, string, ...any) row
 }
 
 // insertEvent appends a task event. A row with a source and source_ref that
@@ -175,7 +174,7 @@ func writeTaskTx(ctx context.Context, q rowQuerier, x Task) (Task, error) {
 // the task kind (the spawn rule); a job record can move it later. The guard
 // for entering started holds as before: a claim carries job_id or a recorded
 // no-job reason.
-func (s *Store) claimTaskTx(ctx context.Context, tx pgx.Tx, id int64, by, jobID, noJob string) (Task, error) {
+func (s *Store) claimTaskTx(ctx context.Context, tx transaction, id int64, by, jobID, noJob string) (Task, error) {
 	if !validText(by, 128) || by == "" {
 		return Task{}, errors.New("invalid task claimant")
 	}
@@ -401,10 +400,11 @@ func resolveTransitionTarget(x Task, to string) (transitionAction, string, error
 }
 
 func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput, reopen bool) (Task, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return Task{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	x, err := s.transitionTaskTx(ctx, tx, id, in, reopen)
 	if err != nil {
@@ -416,7 +416,7 @@ func (s *Store) transitionTask(ctx context.Context, id int64, in TransitionInput
 // transitionTaskTx is transitionTask inside a caller's transaction: an
 // operator action that needs an intermediate step (close-as-merged) records
 // both events under one commit. The caller holds tx open and commits.
-func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in TransitionInput, reopen bool) (Task, error) {
+func (s *Store) transitionTaskTx(ctx context.Context, tx transaction, id int64, in TransitionInput, reopen bool) (Task, error) {
 	noJob := taskReasonText(in.NoJob)
 	by, note, refs := in.By, in.Note, in.Refs
 	if in.To == "" || !validText(by, 128) || by == "" || !validText(note, MaxBytes) || !validText(noJob, MaxBytes) || (refs != nil && !validTaskRefs(*refs)) || in.DuplicateOf < 0 {
@@ -516,7 +516,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		// names, so the PR's deploy and revert reach it (deployedTasksTx,
 		// propagateRevertTx). It is linked before the hold below so a reland
 		// PR counts as one; a refusal rolls the link back.
-		if err = linkChangeTaskTx(ctx, tx, deliveredBy, id, ChangeImplements, true, now); err != nil {
+		if err = linkChangeTaskTx(ctx, pgxTx(tx), deliveredBy, id, ChangeImplements, true, now); err != nil {
 			return Task{}, err
 		}
 		// The close-on-merge rule a merge event applies (hk 3294) holds here
@@ -718,7 +718,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 		x.Refs.ReportPath = ""
 		// A reopen ends any dots run on the request: its run token is revoked
 		// in this transaction, with the claim it belonged to (dots_run_token.go).
-		if _, err := supersedeDotsRunTokensTx(ctx, tx, id, now); err != nil {
+		if _, err := supersedeDotsRunTokensTx(ctx, pgxTx(tx), id, now); err != nil {
 			return Task{}, err
 		}
 	}
@@ -803,7 +803,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx pgx.Tx, id int64, in Tr
 			x.LastActivityAt = now.Truncate(time.Microsecond)
 		}
 	}
-	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, by, note, flagEvent, now); err != nil {
+	if err = mirrorTaskDecisionsTx(ctx, pgxTx(tx), decisionBefore, x, by, note, flagEvent, now); err != nil {
 		return Task{}, err
 	}
 	if action == actMove && from == StateDuplicate {
@@ -856,7 +856,7 @@ var deliveredOpenStates = map[string]bool{
 // PR merged. hk holds no GitHub credential, so the change record (written by
 // mergewake's PR and merge events) is the evidence it can check; a PR without
 // one, or not merged, is refused.
-func mergedChangeTx(ctx context.Context, tx pgx.Tx, pr string) (int64, error) {
+func mergedChangeTx(ctx context.Context, tx transaction, pr string) (int64, error) {
 	repo, n, ok := parsePRURL(pr)
 	if !ok {
 		return 0, errors.New("invalid task transition: --pr must be a GitHub pull request URL to close a task as merged")
@@ -895,7 +895,7 @@ func allowedNextStates(from string) string {
 // implementCompletionBlockers names what keeps an implement task from
 // completing: each change it implements that is not merged, and each sub-task
 // not yet completed or canceled. It returns "" when nothing blocks it.
-func implementCompletionBlockers(ctx context.Context, tx pgx.Tx, taskID int64) (string, error) {
+func implementCompletionBlockers(ctx context.Context, tx transaction, taskID int64) (string, error) {
 	var parts []string
 	rows, err := tx.Query(ctx, `SELECT c.repo,c.pr_number,c.state FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND ct.relation=$2 AND c.state<>$3 ORDER BY c.repo,c.pr_number`, taskID, ChangeImplements, ChangeMerged)
 	if err != nil {
@@ -969,7 +969,7 @@ func triageGate(x Task, to, note string) error {
 // applyTriageFieldsTx sets the values a task leaves triage with on x; a nil
 // or empty field keeps the task's own. A project must be in the vocabulary
 // and agree with the task's milestone.
-func applyTriageFieldsTx(ctx context.Context, tx pgx.Tx, x *Task, priority *int, kind string, project *string) error {
+func applyTriageFieldsTx(ctx context.Context, tx transaction, x *Task, priority *int, kind string, project *string) error {
 	if priority != nil {
 		x.Priority = *priority
 	}
@@ -992,7 +992,7 @@ func applyTriageFieldsTx(ctx context.Context, tx pgx.Tx, x *Task, priority *int,
 // writeTriageFieldsTx stores priority, kind and project where x differs from
 // before, with one event per changed field: a project event as
 // SetTaskProject writes, a metadata event for priority and kind.
-func writeTriageFieldsTx(ctx context.Context, tx pgx.Tx, before, x Task, by string, now time.Time) error {
+func writeTriageFieldsTx(ctx context.Context, tx transaction, before, x Task, by string, now time.Time) error {
 	if _, err := tx.Exec(ctx, `UPDATE tasks SET priority=$2,kind=$3,project=$4 WHERE id=$1`, x.ID, x.Priority, x.Kind, x.Project); err != nil {
 		return err
 	}
@@ -1026,7 +1026,7 @@ func writeTriageFieldsTx(ctx context.Context, tx pgx.Tx, before, x Task, by stri
 // the parent's state, inheriting priority, kind and project where the child
 // has none; every child then passes the same gate. A decline drops each
 // child: a duplicate parent does not make its children duplicates of anything.
-func (s *Store) cascadeTriageTx(ctx context.Context, tx pgx.Tx, parent Task, accepting bool, by, note string, now time.Time) error {
+func (s *Store) cascadeTriageTx(ctx context.Context, tx transaction, parent Task, accepting bool, by, note string, now time.Time) error {
 	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE parent_id=$1 AND state=$2 ORDER BY id FOR UPDATE`, parent.ID, StateTriage)
 	if err != nil {
 		return err
@@ -1081,7 +1081,7 @@ func (s *Store) cascadeTriageTx(ctx context.Context, tx pgx.Tx, parent Task, acc
 		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: c.ID, From: StateTriage, To: to, By: by, Note: childNote, Refs: c.Refs, At: now}); err != nil {
 			return err
 		}
-		if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, c, by, childNote, 0, now); err != nil {
+		if err = mirrorTaskDecisionsTx(ctx, pgxTx(tx), decisionBefore, c, by, childNote, 0, now); err != nil {
 			return err
 		}
 		if err = s.afterStateChangeTx(ctx, tx, c, StateTriage, by, now); err != nil {

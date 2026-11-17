@@ -164,7 +164,7 @@ func TestDropAndDuplicateTask(t *testing.T) {
 	if duplicate.Refs.Closure.Evidence != "duplicate of #"+strconv.FormatInt(target.ID, 10) {
 		t.Fatalf("evidence=%q", duplicate.Refs.Closure.Evidence)
 	}
-	if live, err := hasLiveRelationTx(ctx, pool, dup.ID, RelationDuplicateOf); err != nil || !live {
+	if live, err := hasLiveRelationTx(ctx, pgQuerier{pool}, dup.ID, RelationDuplicateOf); err != nil || !live {
 		t.Fatalf("duplicate_of live=%t err=%v", live, err)
 	}
 	if _, err := s.DuplicateTask(ctx, dup.ID+999, target.ID, "missing", "tester", "duplicate-missing"); !errors.Is(err, ErrTaskNotFound) {

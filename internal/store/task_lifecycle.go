@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -68,10 +67,11 @@ func (s *Store) CloseTaskMerged(ctx context.Context, id int64, evidence, by, not
 	if err := guard.Reject(evidence); err != nil {
 		return Task{}, nil, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return Task{}, nil, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return Task{}, nil, err
@@ -126,7 +126,7 @@ func (s *Store) CloseTaskMerged(ctx context.Context, id int64, evidence, by, not
 
 // recordedLifecyclePath returns the states a recorded close-as-merged call
 // traversed: the from of its first event followed by every to.
-func recordedLifecyclePath(ctx context.Context, tx pgx.Tx, id int64, source, key string) ([]string, bool, error) {
+func recordedLifecyclePath(ctx context.Context, tx transaction, id int64, source, key string) ([]string, bool, error) {
 	rows, err := tx.Query(ctx, `SELECT "from","to" FROM task_events WHERE task_id=$1 AND source=$2 AND source_ref=ANY($3) ORDER BY id`, id, source, []string{key, key + ":" + StateReviewing})
 	if err != nil {
 		return nil, false, err
@@ -206,10 +206,11 @@ func (s *Store) HoldTask(ctx context.Context, id int64, held bool, to, by, note,
 	if err := guard.Reject(note); err != nil {
 		return HoldResult{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return HoldResult{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return HoldResult{}, err
@@ -281,10 +282,11 @@ func (s *Store) OperatorRelaneTask(ctx context.Context, id int64, to, by, note, 
 	if !validLifecycleKey(key) || by == "" || !validText(by, 128) {
 		return RelaneResult{}, errors.New("invalid task lifecycle action")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return RelaneResult{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return RelaneResult{}, err
@@ -317,7 +319,7 @@ func (s *Store) OperatorRelaneTask(ctx context.Context, id int64, to, by, note, 
 		allowNewLane = true
 	}
 	before := x.Lane
-	x, changed, err := s.relaneTaskTx(ctx, tx, id, to, by, note, allowNewLane, lifecycleSourceRelane, key)
+	x, changed, err := s.relaneTaskTx(ctx, pgxTx(tx), id, to, by, note, allowNewLane, lifecycleSourceRelane, key)
 	if err != nil {
 		return RelaneResult{}, err
 	}
@@ -331,10 +333,11 @@ func (s *Store) operatorTransition(ctx context.Context, id int64, source, key st
 	if !validLifecycleKey(key) || in.By == "" || !validText(in.By, 128) {
 		return Task{}, errors.New("invalid task lifecycle action")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return Task{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return Task{}, err
@@ -368,7 +371,7 @@ func (s *Store) ListKnownTaskLanes(ctx context.Context) ([]string, error) {
 		return nil, ErrDialectUnsupported
 	}
 
-	rows, err := s.pool.Query(ctx, `SELECT name FROM (
+	rows, err := s.db().Query(ctx, `SELECT name FROM (
 		SELECT lane AS name FROM tasks
 		UNION SELECT parent_lane AS name FROM tasks WHERE parent_lane <> ''
 		UNION SELECT owner_lane AS name FROM relay_events

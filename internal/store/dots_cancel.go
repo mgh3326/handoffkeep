@@ -102,7 +102,7 @@ func (s *Store) CancelDotsRequest(ctx context.Context, taskID int64, by string, 
 	if _, err := supersedeDotsRunTokensTx(ctx, tx, taskID, now); err != nil {
 		return Task{}, err
 	}
-	x, err = s.transitionTaskTx(ctx, tx, taskID, TransitionInput{To: StateDropped, By: by, Note: reason}, false)
+	x, err = s.transitionTaskTx(ctx, pgTransaction{tx}, taskID, TransitionInput{To: StateDropped, By: by, Note: reason}, false)
 	if err != nil {
 		return Task{}, err
 	}

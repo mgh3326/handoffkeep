@@ -145,25 +145,25 @@ func (s *Store) TaskDrift(ctx context.Context, now time.Time, mergedDays int) (T
 	}
 	defer tx.Rollback(ctx)
 
-	if out.SettledOpenDecision, err = driftList(ctx, tx, "state is settled and refs.decision_request is open", driftSettledOpenSQL, DecisionRequestOpen); err != nil {
+	if out.SettledOpenDecision, err = driftList(ctx, pgTransaction{tx}, "state is settled and refs.decision_request is open", driftSettledOpenSQL, DecisionRequestOpen); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift settled_open_decision: %w", err)
 	}
-	if out.MergedPRNotMerged, err = driftList(ctx, tx, "not settled, with a merged PR: an implements change is merged and not reverted, or refs.pr is merged (a merged changes row names it, or a merged or deployed task does); no unrelanded revert", driftMergedPRSQL); err != nil {
+	if out.MergedPRNotMerged, err = driftList(ctx, pgTransaction{tx}, "not settled, with a merged PR: an implements change is merged and not reverted, or refs.pr is merged (a merged changes row names it, or a merged or deployed task does); no unrelanded revert", driftMergedPRSQL); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_pr_not_merged: %w", err)
 	}
-	if err = s.annotateDriftHolds(ctx, tx, &out.MergedPRNotMerged, mergeAppliesFrom); err != nil {
+	if err = s.annotateDriftHolds(ctx, pgTransaction{tx}, &out.MergedPRNotMerged, mergeAppliesFrom); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_pr_not_merged: %w", err)
 	}
-	if out.AutoCloseHeld, err = driftList(ctx, tx, "auto-close due and not made: an unsettled parent in an auto-close state, every sub-task settled and one did work, moving it to merged, deployed, or completed for decide, ops, verify and research", driftAutoCloseHeldSQL); err != nil {
+	if out.AutoCloseHeld, err = driftList(ctx, pgTransaction{tx}, "auto-close due and not made: an unsettled parent in an auto-close state, every sub-task settled and one did work, moving it to merged, deployed, or completed for decide, ops, verify and research", driftAutoCloseHeldSQL); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift auto_close_held: %w", err)
 	}
-	if err = s.annotateDriftHolds(ctx, tx, &out.AutoCloseHeld, autoCloseAppliesFrom); err != nil {
+	if err = s.annotateDriftHolds(ctx, pgTransaction{tx}, &out.AutoCloseHeld, autoCloseAppliesFrom); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift auto_close_held: %w", err)
 	}
-	if out.MergedWithoutDeploy, err = driftMergedWithoutDeploy(ctx, tx, now.Add(-time.Duration(mergedDays)*24*time.Hour), mergedDays); err != nil {
+	if out.MergedWithoutDeploy, err = driftMergedWithoutDeploy(ctx, pgTransaction{tx}, now.Add(-time.Duration(mergedDays)*24*time.Hour), mergedDays); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_without_deploy: %w", err)
 	}
-	if out.IdleStarted, err = driftList(ctx, tx, fmt.Sprintf("researching or developing, with no activity for %d hours (started_stalled_hours)", out.StartedStalledHours), driftIdleStartedSQL, now.Add(-stalled)); err != nil {
+	if out.IdleStarted, err = driftList(ctx, pgTransaction{tx}, fmt.Sprintf("researching or developing, with no activity for %d hours (started_stalled_hours)", out.StartedStalledHours), driftIdleStartedSQL, now.Add(-stalled)); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift idle_started: %w", err)
 	}
 	return out, tx.Commit(ctx)
@@ -172,7 +172,7 @@ func (s *Store) TaskDrift(ctx context.Context, now time.Time, mergedDays int) (T
 // driftMergedWithoutDeploy is class (c): merged candidates older than the
 // cutoff that no deploy record lists. A task with no PR cannot be listed by a
 // record, so it is reported.
-func driftMergedWithoutDeploy(ctx context.Context, tx pgx.Tx, cutoff time.Time, mergedDays int) (TaskDriftClass, error) {
+func driftMergedWithoutDeploy(ctx context.Context, tx transaction, cutoff time.Time, mergedDays int) (TaskDriftClass, error) {
 	out := TaskDriftClass{
 		Rule:  fmt.Sprintf("merged for at least %d days, and no deploy record lists refs.pr", mergedDays),
 		Tasks: []TaskDriftTask{},
@@ -187,7 +187,7 @@ scan:
 		if err != nil {
 			return TaskDriftClass{}, err
 		}
-		page, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (TaskDriftTask, error) {
+		page, err := collectRows(rows, func(row row) (TaskDriftTask, error) {
 			var x TaskDriftTask
 			err := row.Scan(&x.ID, &x.Lane, &x.Title, &x.Kind, &x.State, &x.PR, &x.DecisionRequest, &x.Since)
 			return x, err
@@ -237,7 +237,7 @@ func driftMechanical(h taskHolds, gate, state string, applies func(state string)
 // annotateDriftHolds fills, for each task a class names, what holds its close:
 // open_prs, reverted_prs, open_sub_tasks, and hold (the first reason). It sets
 // mechanical through driftMechanical. It only reads.
-func (s *Store) annotateDriftHolds(ctx context.Context, tx pgx.Tx, c *TaskDriftClass, applies func(state string) bool) error {
+func (s *Store) annotateDriftHolds(ctx context.Context, tx transaction, c *TaskDriftClass, applies func(state string) bool) error {
 	for i := range c.Tasks {
 		x := &c.Tasks[i]
 		var t Task
@@ -265,13 +265,13 @@ func (s *Store) annotateDriftHolds(ctx context.Context, tx pgx.Tx, c *TaskDriftC
 // driftList runs one class query, which takes its args as $1.. and ends in an
 // ORDER BY on a unique key. It lists at most driftClassLimit tasks and reports
 // Truncated when there are more.
-func driftList(ctx context.Context, tx pgx.Tx, rule, sql string, args ...any) (TaskDriftClass, error) {
+func driftList(ctx context.Context, tx transaction, rule, sql string, args ...any) (TaskDriftClass, error) {
 	args = append(args, driftClassLimit+1)
 	rows, err := tx.Query(ctx, sql+fmt.Sprintf(" LIMIT $%d", len(args)), args...)
 	if err != nil {
 		return TaskDriftClass{}, err
 	}
-	xs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (TaskDriftTask, error) {
+	xs, err := collectRows(rows, func(row row) (TaskDriftTask, error) {
 		var x TaskDriftTask
 		err := row.Scan(&x.ID, &x.Lane, &x.Title, &x.Kind, &x.State, &x.PR, &x.DecisionRequest, &x.Since)
 		return x, err

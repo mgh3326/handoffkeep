@@ -137,7 +137,7 @@ func nullIfEmpty(s string) *string {
 
 const taskOriginColumns = `id,task_id,provider,namespace,external_id,COALESCE(display_ref,''),COALESCE(url,''),COALESCE(title_snapshot,''),snapshot_at,created_by,created_at`
 
-func scanTaskOrigin(row pgx.Row, x *TaskOrigin) error {
+func scanTaskOrigin(row row, x *TaskOrigin) error {
 	return row.Scan(&x.ID, &x.TaskID, &x.Provider, &x.Namespace, &x.ExternalID, &x.DisplayRef, &x.URL, &x.TitleSnapshot, &x.SnapshotAt, &x.CreatedBy, &x.CreatedAt)
 }
 
@@ -163,7 +163,7 @@ func (s *Store) AddTaskOrigin(ctx context.Context, taskID int64, by string, in T
 	now := time.Now().UTC()
 	var x TaskOrigin
 	var created bool
-	err := s.pool.QueryRow(ctx, `INSERT INTO task_origins(task_id,provider,namespace,external_id,display_ref,url,title_snapshot,snapshot_at,created_by,created_at)
+	err := s.db().QueryRow(ctx, `INSERT INTO task_origins(task_id,provider,namespace,external_id,display_ref,url,title_snapshot,snapshot_at,created_by,created_at)
 SELECT t.id,$2,$3,$4,$5,$6,$7,$8,$9,$8 FROM tasks t WHERE t.id=$1
 ON CONFLICT(provider,namespace,external_id,task_id) DO UPDATE SET
   display_ref=COALESCE(EXCLUDED.display_ref,task_origins.display_ref),
@@ -183,7 +183,7 @@ RETURNING `+taskOriginColumns+`, (xmax = 0)`,
 	}
 	// No row came back: the origin exists and nothing differed (the conflict
 	// update was skipped), or the task does not exist.
-	err = scanTaskOrigin(s.pool.QueryRow(ctx, `SELECT `+taskOriginColumns+` FROM task_origins WHERE provider=$1 AND namespace=$2 AND external_id=$3 AND task_id=$4`, in.Provider, in.Namespace, in.ExternalID, taskID), &x)
+	err = scanTaskOrigin(s.db().QueryRow(ctx, `SELECT `+taskOriginColumns+` FROM task_origins WHERE provider=$1 AND namespace=$2 AND external_id=$3 AND task_id=$4`, in.Provider, in.Namespace, in.ExternalID, taskID), &x)
 	if errors.Is(err, ErrNoRows) {
 		return TaskOrigin{}, false, ErrTaskNotFound
 	}
@@ -193,7 +193,7 @@ RETURNING `+taskOriginColumns+`, (xmax = 0)`,
 	return x, false, nil
 }
 
-func scanTaskOrigins(rows pgx.Rows) ([]TaskOrigin, error) {
+func scanTaskOrigins(rows rows) ([]TaskOrigin, error) {
 	defer rows.Close()
 	out := []TaskOrigin{}
 	for rows.Next() {
@@ -269,7 +269,7 @@ func (s *Store) FindTaskOrigins(ctx context.Context, provider, externalID string
 	if limit > OriginListMax {
 		limit = OriginListMax
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+taskOriginColumns+` FROM task_origins WHERE provider=$1 AND external_id=$2 ORDER BY task_id,id LIMIT $3`, provider, externalID, limit)
+	rows, err := s.db().Query(ctx, `SELECT `+taskOriginColumns+` FROM task_origins WHERE provider=$1 AND external_id=$2 ORDER BY task_id,id LIMIT $3`, provider, externalID, limit)
 	if err != nil {
 		return nil, err
 	}

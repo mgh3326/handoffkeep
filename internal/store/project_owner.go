@@ -5,8 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -61,7 +59,7 @@ const projectOwnerSelect = `SELECT p.name, p.design_lane, e.created_at
 FROM task_projects p
 LEFT JOIN LATERAL (SELECT created_at FROM project_owner_events WHERE project = p.name ORDER BY id DESC LIMIT 1) e ON true`
 
-func scanProjectOwner(row pgx.Row) (ProjectOwner, error) {
+func scanProjectOwner(row row) (ProjectOwner, error) {
 	var owner ProjectOwner
 	if err := row.Scan(&owner.Name, &owner.DesignLane, &owner.UpdatedAt); err != nil {
 		if errors.Is(err, ErrNoRows) {
@@ -80,7 +78,7 @@ func (s *Store) ListProjectOwners(ctx context.Context) ([]ProjectOwner, error) {
 		return nil, ErrDialectUnsupported
 	}
 
-	rows, err := s.pool.Query(ctx, projectOwnerSelect+` ORDER BY p.name`)
+	rows, err := s.db().Query(ctx, projectOwnerSelect+` ORDER BY p.name`)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +105,7 @@ func (s *Store) GetProjectOwner(ctx context.Context, project string) (ProjectOwn
 	if !validName(project) {
 		return ProjectOwner{}, errors.New("invalid project")
 	}
-	return scanProjectOwner(s.pool.QueryRow(ctx, projectOwnerSelect+` WHERE p.name=$1`, project))
+	return scanProjectOwner(s.db().QueryRow(ctx, projectOwnerSelect+` WHERE p.name=$1`, project))
 }
 
 // SetProjectDesignLane records which design session owns a project. It locks
@@ -126,10 +124,11 @@ func (s *Store) SetProjectDesignLane(ctx context.Context, project, lane, actor, 
 	if err := guard.Reject(note); err != nil {
 		return ProjectOwner{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return ProjectOwner{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	var previous string
 	// FOR NO KEY UPDATE is the task_projects row lock the project writers
@@ -176,7 +175,7 @@ func (s *Store) ProjectOwnerHistory(ctx context.Context, project string, limit i
 	if limit > ProjectOwnerHistoryMax {
 		limit = ProjectOwnerHistoryMax
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id,project,previous_lane,design_lane,actor,note,created_at FROM project_owner_events WHERE project=$1 ORDER BY id DESC LIMIT $2`, project, limit)
+	rows, err := s.db().Query(ctx, `SELECT id,project,previous_lane,design_lane,actor,note,created_at FROM project_owner_events WHERE project=$1 ORDER BY id DESC LIMIT $2`, project, limit)
 	if err != nil {
 		return nil, err
 	}

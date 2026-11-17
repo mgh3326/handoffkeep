@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -36,10 +35,11 @@ func (s *Store) SetTaskPriority(ctx context.Context, id int64, priority int, by,
 	if err := guard.Reject(reason); err != nil {
 		return out, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return out, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	var x Task
 	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
@@ -78,10 +78,11 @@ func (s *Store) SetTaskPriorityDirect(ctx context.Context, id int64, priority in
 	if err := guard.Reject(reason); err != nil {
 		return Task{}, false, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return Task{}, false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return Task{}, false, err
@@ -108,7 +109,7 @@ func (s *Store) SetTaskPriorityDirect(ctx context.Context, id int64, priority in
 // setTaskPriorityTx writes a priority change and its event inside the caller's
 // transaction. The caller has locked the task row and loaded it into x; on
 // return x carries the new priority and updated_at.
-func setTaskPriorityTx(ctx context.Context, tx pgx.Tx, x *Task, priority int, by, reason, source, key string) error {
+func setTaskPriorityTx(ctx context.Context, tx transaction, x *Task, priority int, by, reason, source, key string) error {
 	if IsSettledState(x.State) {
 		return ErrTaskTerminal
 	}

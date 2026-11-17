@@ -203,7 +203,7 @@ func (s *Store) TaskHygiene(ctx context.Context, now time.Time, project string, 
 		return rep, err
 	}
 	defer tx.Rollback(ctx)
-	candidates, err := s.hygieneDiscoverTx(ctx, tx, now, projectArg, &rep)
+	candidates, err := s.hygieneDiscoverTx(ctx, pgTransaction{tx}, now, projectArg, &rep)
 	if err != nil {
 		return rep, fmt.Errorf("task hygiene discover: %w", err)
 	}
@@ -215,7 +215,7 @@ func (s *Store) TaskHygiene(ctx context.Context, now time.Time, project string, 
 			if seen[candidate.id] {
 				continue
 			}
-			d, err := s.hygieneDecideTx(ctx, tx, candidate, project, false)
+			d, err := s.hygieneDecideTx(ctx, pgTransaction{tx}, candidate, project, false)
 			if err != nil {
 				return rep, fmt.Errorf("task hygiene preview task %d: %w", candidate.id, err)
 			}
@@ -257,7 +257,7 @@ func (s *Store) TaskHygiene(ctx context.Context, now time.Time, project string, 
 // hygieneWalkTasksTx applies project filtering before pagination. Discovery
 // has no report cap. A visitor may stop after observing the first omitted
 // qualifying finding. Extra SQL arguments start at $4.
-func hygieneWalkTasksTx(ctx context.Context, tx pgx.Tx, project *string, predicate, since string, visit func(TaskDriftTask) (bool, error), extra ...any) error {
+func hygieneWalkTasksTx(ctx context.Context, tx transaction, project *string, predicate, since string, visit func(TaskDriftTask) (bool, error), extra ...any) error {
 	sql := `SELECT ` + driftColumns + since + ` FROM tasks WHERE (` + predicate + `)
    AND id>$1 AND ($2::text IS NULL OR project=$2) ORDER BY id LIMIT $3`
 	var after int64
@@ -288,7 +288,7 @@ func hygieneWalkTasksTx(ctx context.Context, tx pgx.Tx, project *string, predica
 	}
 }
 
-func (s *Store) hygieneDiscoverTx(ctx context.Context, tx pgx.Tx, now time.Time, project *string, rep *TaskHygieneReport) ([]hygieneCandidate, error) {
+func (s *Store) hygieneDiscoverTx(ctx context.Context, tx transaction, now time.Time, project *string, rep *TaskHygieneReport) ([]hygieneCandidate, error) {
 	var candidates []hygieneCandidate
 	for _, rule := range []hygieneRule{hygieneMergedRule, hygieneParentRule} {
 		err := hygieneWalkTasksTx(ctx, tx, project, rule.predicate(), "updated_at", func(x TaskDriftTask) (bool, error) {
@@ -335,7 +335,7 @@ func (s *Store) hygieneDiscoverTx(ctx context.Context, tx pgx.Tx, now time.Time,
 	return candidates, nil
 }
 
-func hygieneReadLaggingTx(ctx context.Context, tx pgx.Tx, now time.Time, project *string, rep *TaskHygieneReport) error {
+func hygieneReadLaggingTx(ctx context.Context, tx transaction, now time.Time, project *string, rep *TaskHygieneReport) error {
 	var afterID int64
 	afterDestination := ""
 	for {
@@ -343,7 +343,7 @@ func hygieneReadLaggingTx(ctx context.Context, tx pgx.Tx, now time.Time, project
 		if err != nil {
 			return err
 		}
-		page, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (TaskHygieneLaggingDecision, error) {
+		page, err := collectRows(rows, func(row row) (TaskHygieneLaggingDecision, error) {
 			var x TaskHygieneLaggingDecision
 			err := row.Scan(&x.RequestID, &x.Destination, &x.TaskTitle, &x.DesiredVersion, &x.AppliedVersion, &x.Attempts, &x.NextAttemptAt, &x.LastErrorCode)
 			x.NextAttemptAt = x.NextAttemptAt.UTC()
@@ -366,8 +366,8 @@ func hygieneReadLaggingTx(ctx context.Context, tx pgx.Tx, now time.Time, project
 	}
 }
 
-func scanDriftTasks(rows pgx.Rows) ([]TaskDriftTask, error) {
-	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (TaskDriftTask, error) {
+func scanDriftTasks(rows rows) ([]TaskDriftTask, error) {
+	return collectRows(rows, func(row row) (TaskDriftTask, error) {
 		var x TaskDriftTask
 		err := row.Scan(&x.ID, &x.Lane, &x.Title, &x.Kind, &x.State, &x.PR, &x.DecisionRequest, &x.Since)
 		x.Since = x.Since.UTC()
@@ -378,7 +378,7 @@ func scanDriftTasks(rows pgx.Rows) ([]TaskDriftTask, error) {
 // hygieneVerifiedPRTx trusts merged, unreverted changes only. An old refs.pr
 // is preferred only if it passes that test. Other eligible evidence is a
 // linked implements change or a recorded held merge of this task.
-func hygieneVerifiedPRTx(ctx context.Context, tx pgx.Tx, t Task) (string, error) {
+func hygieneVerifiedPRTx(ctx context.Context, tx transaction, t Task) (string, error) {
 	var pr string
 	err := tx.QueryRow(ctx, `SELECT `+prURLSQL+` FROM changes c
    WHERE c.state='merged' AND c.reverted_by_change_id IS NULL
@@ -395,7 +395,7 @@ func hygieneVerifiedPRTx(ctx context.Context, tx pgx.Tx, t Task) (string, error)
 	return pr, err
 }
 
-func (s *Store) hygieneDecideTx(ctx context.Context, tx pgx.Tx, c hygieneCandidate, project string, lock bool) (hygieneDecision, error) {
+func (s *Store) hygieneDecideTx(ctx context.Context, tx transaction, c hygieneCandidate, project string, lock bool) (hygieneDecision, error) {
 	var d hygieneDecision
 	sql := `SELECT ` + taskColumns + ` FROM tasks WHERE id=$1`
 	if lock {
@@ -504,10 +504,11 @@ func (s *Store) hygieneDecideTx(ctx context.Context, tx pgx.Tx, c hygieneCandida
 // back even if PostgreSQL is still usable: transitionTaskTx may have inserted
 // an implements link before returning ErrTaskConflict.
 func (s *Store) hygieneExecute(ctx context.Context, c hygieneCandidate, project string, now time.Time) ([]TaskHygieneClose, *TaskDriftTask, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
 		return nil, nil, err
@@ -578,7 +579,7 @@ func (s *Store) hygieneExecute(ctx context.Context, c hygieneCandidate, project 
 // protect the snapshots against the permitted single-row task editors.
 // Current transitionTaskTx cannot change any other task for these non-triage
 // close inputs. If that helper's effect scope grows, change this contract too.
-func hygieneAncestorTasksTx(ctx context.Context, tx pgx.Tx, root Task) ([]Task, error) {
+func hygieneAncestorTasksTx(ctx context.Context, tx transaction, root Task) ([]Task, error) {
 	out := []Task{root}
 	child := root
 	for child.ParentID != nil {
@@ -592,7 +593,7 @@ func hygieneAncestorTasksTx(ctx context.Context, tx pgx.Tx, root Task) ([]Task, 
 	return out, nil
 }
 
-func hygieneNetEffectsTx(ctx context.Context, tx pgx.Tx, before []Task, c hygieneCandidate) ([]TaskHygieneClose, error) {
+func hygieneNetEffectsTx(ctx context.Context, tx transaction, before []Task, c hygieneCandidate) ([]TaskHygieneClose, error) {
 	effects := []TaskHygieneClose{}
 	for _, old := range before {
 		var current Task

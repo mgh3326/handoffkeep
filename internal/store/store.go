@@ -948,7 +948,7 @@ func (s *Store) migrateIfBehind(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	current, err := migrateCurrent(ctx, s.pool, ordered)
+	current, err := migrateCurrent(ctx, s.db(), ordered)
 	if err != nil || current {
 		return err
 	}
@@ -2471,7 +2471,7 @@ const taskColumns = taskBaseColumns
 // the caller's transaction, so membership is judged in the same snapshot the
 // insert commits under.
 type taskProjectQuerier interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
+	QueryRow(context.Context, string, ...any) row
 }
 
 // requireTaskProject is the single create-time gate every new task row
@@ -2624,13 +2624,13 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 	x.CreatedAt = time.Now().UTC()
 	x.UpdatedAt = x.CreatedAt
 
-	if err = requireTaskProject(ctx, tx, x.Project); err != nil {
+	if err = requireTaskProject(ctx, pgTransaction{tx}, x.Project); err != nil {
 		return x, err
 	}
 	// refs.pr is one full PR URL on create too (hk 4844), so it is stored
 	// normalised; the refs JSON above is re-marshalled with it.
 	if x.Refs.PR != "" {
-		pr, err := normalisePRRefTx(ctx, tx, x.Project, x.Refs.PR)
+		pr, err := normalisePRRefTx(ctx, pgTransaction{tx}, x.Project, x.Refs.PR)
 		if err != nil {
 			return x, err
 		}
@@ -2640,7 +2640,7 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 		}
 	}
 	if x.ParentID != nil {
-		if err = checkParentTx(ctx, tx, 0, *x.ParentID); err != nil {
+		if err = checkParentTx(ctx, pgTransaction{tx}, 0, *x.ParentID); err != nil {
 			return x, err
 		}
 	}
@@ -2654,7 +2654,7 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 		}
 	}
 	if check != nil && check.Link == 0 && !check.New {
-		similar, err := similarOpenTasks(ctx, tx, []string{x.Title})
+		similar, err := similarOpenTasks(ctx, pgTransaction{tx}, []string{x.Title})
 		if err != nil {
 			return x, err
 		}
@@ -2667,7 +2667,7 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 		return x, err
 	}
 	if check != nil && check.Link != 0 {
-		if _, err = addRelationTx(ctx, tx, x.ID, RelationRelated, check.Link, x.CreatedBy, x.CreatedAt); err != nil {
+		if _, err = addRelationTx(ctx, pgTransaction{tx}, x.ID, RelationRelated, check.Link, x.CreatedBy, x.CreatedAt); err != nil {
 			return x, err
 		}
 	}
@@ -2691,7 +2691,7 @@ func (s *Store) ClaimTask(ctx context.Context, id int64, by, jobID, noJob string
 		return Task{}, err
 	}
 
-	x, err := s.claimTaskTx(ctx, tx, id, by, jobID, noJob)
+	x, err := s.claimTaskTx(ctx, pgTransaction{tx}, id, by, jobID, noJob)
 	if err != nil {
 		return Task{}, err
 	}
@@ -2767,7 +2767,7 @@ func (s *Store) RebindTaskJob(ctx context.Context, id int64, fromJob, toJob, by,
 		return Task{}, err
 	}
 	rebind := &TaskJobRebind{FromJob: fromJob, ToJob: toJob, By: by, Reason: reason}
-	if _, moved, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, From: x.State, To: x.State, By: by, Note: reason, Refs: x.Refs, Rebind: rebind, At: now}); err != nil {
+	if _, moved, err := insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: id, From: x.State, To: x.State, By: by, Note: reason, Refs: x.Refs, Rebind: rebind, At: now}); err != nil {
 		return Task{}, err
 	} else if moved {
 		x.LastActivityAt = now.Truncate(time.Microsecond)
@@ -2866,7 +2866,7 @@ func (s *Store) relaneTaskTx(ctx context.Context, tx pgx.Tx, id int64, to, by, n
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET lane=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, to, x.UpdatedAt), &x); err != nil {
 		return Task{}, false, err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "relane", From: from, To: to, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "lane", FromValue: from, ToValue: to, Source: source, SourceRef: ref}); err != nil {
+	if _, _, err = insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: id, Kind: "relane", From: from, To: to, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "lane", FromValue: from, ToValue: to, Source: source, SourceRef: ref}); err != nil {
 		return Task{}, false, err
 	}
 	return x, true, nil
@@ -2924,7 +2924,7 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 		return Task{}, false, ErrMilestoneProject
 	}
 	if patch != nil {
-		if _, err = patchProjectMetadataTx(ctx, tx, project, *patch); err != nil {
+		if _, err = patchProjectMetadataTx(ctx, pgTransaction{tx}, project, *patch); err != nil {
 			return Task{}, false, err
 		}
 	}
@@ -2935,7 +2935,7 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET project=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, project, x.UpdatedAt), &x); err != nil {
 		return Task{}, false, err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "project", From: from, To: project, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "project", FromValue: from, ToValue: project}); err != nil {
+	if _, _, err = insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: id, Kind: "project", From: from, To: project, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "project", FromValue: from, ToValue: project}); err != nil {
 		return Task{}, false, err
 	}
 	// A task with no op gets its first, on its intent's tenant when it has
@@ -2992,7 +2992,7 @@ func (s *Store) SetTaskArea(ctx context.Context, id int64, area *string, by, not
 	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET area=$2,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, id, area, x.UpdatedAt), &x); err != nil {
 		return Task{}, false, err
 	}
-	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: id, Kind: "area", From: from, To: to, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "area", FromValue: from, ToValue: to}); err != nil {
+	if _, _, err = insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: id, Kind: "area", From: from, To: to, By: by, Note: note, Refs: x.Refs, Into: &x, At: x.UpdatedAt, Field: "area", FromValue: from, ToValue: to}); err != nil {
 		return Task{}, false, err
 	}
 	return x, true, tx.Commit(ctx)
@@ -3167,10 +3167,10 @@ func (s *Store) ListTasksFiltered(ctx context.Context, tq TaskQuery) ([]Task, er
 		return nil, err
 	}
 	rows.Close()
-	if err := s.markStalled(ctx, s.pool, out, now); err != nil {
+	if err := s.markStalled(ctx, s.db(), out, now); err != nil {
 		return out, err
 	}
-	return out, attachTaskSpawns(ctx, s.pool, out)
+	return out, attachTaskSpawns(ctx, s.db(), out)
 }
 
 // GlanceTasks returns the counts and active task slice needed by the compact UI
@@ -3240,10 +3240,10 @@ func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
 		return Task{}, false, err
 	}
 	one := []Task{x}
-	if err := s.markStalled(ctx, s.pool, one, time.Now().UTC()); err != nil {
+	if err := s.markStalled(ctx, s.db(), one, time.Now().UTC()); err != nil {
 		return Task{}, false, err
 	}
-	if err := attachTaskSpawns(ctx, s.pool, one); err != nil {
+	if err := attachTaskSpawns(ctx, s.db(), one); err != nil {
 		return Task{}, false, err
 	}
 	x = one[0]
@@ -3750,7 +3750,7 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 		if e = writeDeployProjection(ctx, tx, projection); e != nil {
 			return x, true, e
 		}
-		if e = s.applyDeployRecordTx(ctx, tx, projection, now); e != nil {
+		if e = s.applyDeployRecordTx(ctx, pgTransaction{tx}, projection, now); e != nil {
 			return x, true, e
 		}
 		if e = queueDeployRecordNoticeTx(ctx, tx, projection, now); e != nil {
