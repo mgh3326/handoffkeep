@@ -3,6 +3,7 @@ package ytwrite_test
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -693,6 +694,92 @@ func TestArticleCreateSplitPartsCheckFailureStaysRemoteUnknown(t *testing.T) {
 	if indexCreates != 1 {
 		t.Fatalf("expected exactly 1 index article create, got %d", indexCreates)
 	}
+}
+
+// When checking child parts under an index article encounters a dial/DNS error,
+// the op transitions to remote_unknown (not prepared/not_sent) because the index
+// article was already created, preventing duplicate index creates on retry.
+func TestArticleCreateSplitPartsCheckDialErrorStaysRemoteUnknown(t *testing.T) {
+	e := newArticleEnv(t)
+	req := articleReq()
+	req.Body = strings.Repeat("hello world line\n", 20000) // ~340KB -> 2 parts
+	op := prepareWith(t, e, req)
+
+	// After index article is created, fail the subsequent FindArticles in splitMissingParts with dial error
+	creates := 0
+	e.yt.BeforeArticleCreate = func(ctx context.Context, in ytwrite.ArticleCreate) {
+		creates++
+		if creates == 1 {
+			e.yt.QueueFind(&net.OpError{Op: "dial", Err: errors.New("connection refused")})
+		}
+	}
+
+	e.drive()
+	// Must stay in remote_unknown with ReasonTransport, NOT prepared / not_sent!
+	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
+}
+
+// When an adopted index article has missing child parts and the split parts check
+// fails before any child POST is attempted, the op transitions to prepared/not_sent
+// so that subsequent retry can adopt the index again and create missing parts.
+func TestArticleCreateSplitAdoptedIndexPartCheckFailureRetriesPrepared(t *testing.T) {
+	e := newArticleEnv(t)
+	req := articleReq()
+	req.Body = strings.Repeat("hello world line\n", 20000) // ~340KB -> 2 parts
+	op := prepareWith(t, e, req)
+
+	// Pre-create the index article in the fake so Send adopts it without creating it
+	indexSummary := req.Summary + " (분할 문서)"
+	indexContent := ytwrite.RenderArticleCreate(op.Actor, op.CreatedAt.UTC().Truncate(time.Second), op.ID, "")
+	e.yt.InjectArticle(artProject, indexSummary, indexContent)
+
+	// Fail FindArticles during splitMissingParts with a 502 error
+	e.yt.QueueFind(&ytwrite.RemoteError{Status: http.StatusBadGateway, Message: "gateway timeout"})
+
+	e.drive()
+	// Nothing was written by this attempt, so it safely goes to prepared/not_sent!
+	e.want(op.ID, ytwrite.StatePrepared, ytwrite.ReasonNotSent)
+
+	// Next attempt: advance clock and drive. Should adopt index and create the missing parts!
+	e.clock.Advance(time.Hour)
+	e.drive()
+
+	applied := e.want(op.ID, ytwrite.StateApplied, "")
+	if applied.YTResultID == "" {
+		t.Fatal("expected non-empty YTResultID")
+	}
+	writes := e.yt.ArticleWrites()
+	if len(writes) < 2 {
+		t.Fatalf("expected child part creates, got %d writes", len(writes))
+	}
+	for _, w := range writes {
+		if w.ArticleCreate.ParentID != applied.YTResultID {
+			t.Errorf("part create ParentID = %q, want %q", w.ArticleCreate.ParentID, applied.YTResultID)
+		}
+	}
+}
+
+// When a child part create returns a 4xx error after index creation,
+// the op transitions to remote_unknown (not rejected) so it does not leave
+// behind orphaned articles that would be duplicated on a new op retry.
+func TestArticleCreateSplitChildPart4xxStaysRemoteUnknown(t *testing.T) {
+	e := newArticleEnv(t)
+	req := articleReq()
+	req.Body = strings.Repeat("hello world line\n", 20000) // ~340KB -> 2 parts
+	op := prepareWith(t, e, req)
+
+	// Inject 400 on child part 2 create: index=1, part1=2, part2=3
+	creates := 0
+	e.yt.BeforeArticleCreate = func(ctx context.Context, in ytwrite.ArticleCreate) {
+		creates++
+		if creates == 3 {
+			e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.Refuse, Status: http.StatusBadRequest})
+		}
+	}
+
+	e.drive()
+	// Must be remote_unknown, NOT rejected!
+	e.want(op.ID, ytwrite.StateRemoteUnknown, "http_400")
 }
 
 // When p.Summary uses all allowed runes and child pieces are identical,

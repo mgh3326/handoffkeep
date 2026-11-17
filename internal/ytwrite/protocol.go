@@ -362,6 +362,7 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 	now := p.now()
 	var refused *RefusedError
 	var notSent *NotSentError
+	var unknown *RemoteUnknownError
 	var adopted *AdoptedError
 	switch {
 	case err == nil && resultIDRE.MatchString(id):
@@ -386,6 +387,25 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 		return p.record(op, p.reject(ctx, op, refused.Reason, refused.Detail))
 	case errors.As(err, &notSent):
 		return p.record(op, p.notSent(ctx, p, op, notSent))
+	case errors.As(err, &unknown):
+		reason := unknown.Reason
+		if reason == "" {
+			var re *RemoteError
+			if errors.As(unknown.Err, &re) {
+				if re.Status >= 500 || re.Status == http.StatusRequestTimeout {
+					reason = ReasonServerError
+				} else {
+					reason = "http_" + strconv.Itoa(re.Status)
+				}
+			} else {
+				reason = ReasonTransport
+			}
+		}
+		detail := unknown.Detail
+		if detail == "" && unknown.Err != nil {
+			detail = unknown.Err.Error()
+		}
+		return p.record(op, p.markUnknown(ctx, op, reason, detail))
 	default:
 		return p.record(op, p.writeFailed(ctx, p, op, err))
 	}

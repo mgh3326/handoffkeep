@@ -731,6 +731,31 @@ func readFailure(ev Evidence, err error) (Evidence, error) {
 	return ev, err
 }
 
+// markUnknown wraps an error that occurred after one or more writes succeeded
+// (such as an index article create or a child part create) so the protocol records
+// the op as remote_unknown rather than prepared/not_sent (from beforeSend) or
+// rejected (from a 4xx).
+func markUnknown(err error, format string, args ...any) error {
+	detail := fmt.Sprintf(format, args...)
+	if err != nil {
+		detail = fmt.Sprintf("%s: %v", detail, err)
+	}
+	var re *RemoteError
+	reason := ReasonTransport
+	if errors.As(err, &re) {
+		if re.Status >= 500 || re.Status == http.StatusRequestTimeout {
+			reason = ReasonServerError
+		} else {
+			reason = "http_" + strconv.Itoa(re.Status)
+		}
+	}
+	return &RemoteUnknownError{
+		Reason: reason,
+		Detail: detail,
+		Err:    err,
+	}
+}
+
 // splitPartSummary constructs the summary for a split child part, ensuring the
 // " / part X of Y" suffix is always preserved within ArticleSummaryLimit even
 // if p.Summary uses all allowed runes.
@@ -849,14 +874,14 @@ func (a articleCreate) Send(ctx context.Context, remote Remote, op Op, text stri
 		if id == "" {
 			hits, findErr := ar.FindArticles(ctx, ArticleSearch{ProjectShort: p.YTProjectShort, ProjectID: op.YTTargetID, Query: summary, Summary: summary, ParentID: parent})
 			if findErr != nil {
-				return "", fmt.Errorf("empty index ID returned, reconcile lookup failed: %w", findErr)
+				return "", markUnknown(findErr, "empty index ID returned, reconcile lookup failed")
 			}
 			reconciled := markedArticles(hits, op.ID)
 			switch len(reconciled) {
 			case 1:
 				id = reconciled[0].ID
 			case 0:
-				return "", errors.New("empty index article ID returned and not found in reconcile")
+				return "", markUnknown(nil, "empty index article ID returned and not found in reconcile")
 			default:
 				ids := make([]string, 0, len(reconciled))
 				for _, h := range reconciled {
@@ -870,14 +895,17 @@ func (a articleCreate) Send(ctx context.Context, remote Remote, op Op, text stri
 
 	missing, err := splitMissingParts(ctx, ar, op, p, indexID, pieces)
 	if err != nil {
-		return "", fmt.Errorf("split parts check: %w", err)
+		if adopted {
+			return "", &NotSentError{Err: fmt.Errorf("split parts check: %w", err)}
+		}
+		return "", markUnknown(err, "split parts check")
 	}
 	for _, i := range missing {
 		partSummary := splitPartSummary(p.Summary, i+1, len(pieces))
 		partContent := RenderArticleCreate(op.Actor, op.CreatedAt.UTC().Truncate(time.Second), op.ID, pieces[i])
 		childID, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, ParentID: indexID, Summary: partSummary, Content: partContent})
 		if err != nil {
-			return "", fmt.Errorf("split child part %d: %w", i+1, err)
+			return "", markUnknown(err, "split child part %d", i+1)
 		}
 		if childID == "" {
 			hits, findErr := ar.FindArticles(ctx, ArticleSearch{
@@ -888,7 +916,7 @@ func (a articleCreate) Send(ctx context.Context, remote Remote, op Op, text stri
 				ParentID:     indexID,
 			})
 			if findErr != nil {
-				return "", fmt.Errorf("child part %d verify lookup: %w", i+1, findErr)
+				return "", markUnknown(findErr, "child part %d verify lookup", i+1)
 			}
 			found := false
 			for _, h := range hits {
@@ -898,17 +926,17 @@ func (a articleCreate) Send(ctx context.Context, remote Remote, op Op, text stri
 				}
 			}
 			if !found {
-				return "", fmt.Errorf("child part %d create returned empty ID and article not found", i+1)
+				return "", markUnknown(nil, "child part %d create returned empty ID and article not found", i+1)
 			}
 		}
 	}
 
 	finalMissing, err := splitMissingParts(ctx, ar, op, p, indexID, pieces)
 	if err != nil {
-		return "", fmt.Errorf("final split parts check: %w", err)
+		return "", markUnknown(err, "final split parts check")
 	}
 	if len(finalMissing) > 0 {
-		return "", fmt.Errorf("split child parts incomplete (%d missing)", len(finalMissing))
+		return "", markUnknown(nil, "split child parts incomplete (%d missing)", len(finalMissing))
 	}
 
 	if adopted {
