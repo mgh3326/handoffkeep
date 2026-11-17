@@ -24,10 +24,6 @@ type PriorityResult struct {
 
 // SetTaskPriority records an operator's priority change and replays its first result.
 func (s *Store) SetTaskPriority(ctx context.Context, id int64, priority int, by, reason, key string) (PriorityResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return PriorityResult{}, ErrDialectUnsupported
-	}
-
 	var out PriorityResult
 	if id < 1 || priority < 0 || priority > math.MaxInt32 || by == "" || !validText(by, 128) || !validText(reason, MaxBytes) || strings.TrimSpace(key) == "" || !validText(key, 128) {
 		return out, ErrInvalidTaskPriority
@@ -35,6 +31,18 @@ func (s *Store) SetTaskPriority(ctx context.Context, id int64, priority int, by,
 	if err := guard.Reject(reason); err != nil {
 		return out, err
 	}
+	err := s.retryTx(ctx, func() (err error) {
+		out, err = s.setTaskPriorityOnce(ctx, id, priority, by, reason, key)
+		return err
+	})
+	if err != nil {
+		return PriorityResult{}, err
+	}
+	return out, nil
+}
+
+// setTaskPriorityOnce is one attempt of SetTaskPriority, in its own transaction.
+func (s *Store) setTaskPriorityOnce(ctx context.Context, id int64, priority int, by, reason, key string) (out PriorityResult, err error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return out, err
@@ -42,13 +50,14 @@ func (s *Store) SetTaskPriority(ctx context.Context, id int64, priority int, by,
 	defer release()
 	defer tx.Rollback(ctx)
 	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return out, ErrTaskNotFound
 		}
 		return out, err
 	}
-	err = tx.QueryRow(ctx, `SELECT from_value::int,to_value::int FROM task_events WHERE task_id=$1 AND source='ui-priority' AND source_ref=$2`, id, key).Scan(&out.Previous, &out.Priority)
+	err = tx.QueryRow(ctx, s.q(`SELECT from_value::int,to_value::int FROM task_events WHERE task_id=$1 AND source='ui-priority' AND source_ref=$2`,
+		`SELECT CAST(from_value AS SIGNED),CAST(to_value AS SIGNED) FROM task_events WHERE task_id=? AND source='ui-priority' AND source_ref=?`), id, key).Scan(&out.Previous, &out.Priority)
 	if err == nil {
 		out.Replayed = true
 		return out, tx.Commit(ctx)
@@ -68,27 +77,37 @@ func (s *Store) SetTaskPriority(ctx context.Context, id int64, priority int, by,
 // ErrTaskTerminal, whatever priority is sent. A task with an active worker claim is refused by
 // the wrk fence (Binding), so priority cannot change through this path while a claim is held.
 func (s *Store) SetTaskPriorityDirect(ctx context.Context, id int64, priority int, by, reason string) (Task, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, false, ErrDialectUnsupported
-	}
-
 	if id < 1 || priority < 0 || priority > math.MaxInt32 || by == "" || !validText(by, 128) || !validText(reason, MaxBytes) {
 		return Task{}, false, ErrInvalidTaskPriority
 	}
 	if err := guard.Reject(reason); err != nil {
 		return Task{}, false, err
 	}
+	var out Task
+	var changed bool
+	err := s.retryTx(ctx, func() (err error) {
+		out, changed, err = s.setTaskPriorityDirectOnce(ctx, id, priority, by, reason)
+		return err
+	})
+	if err != nil {
+		return Task{}, false, err
+	}
+	return out, changed, nil
+}
+
+// setTaskPriorityDirectOnce is one attempt of SetTaskPriorityDirect, in its own transaction.
+func (s *Store) setTaskPriorityDirectOnce(ctx context.Context, id int64, priority int, by, reason string) (Task, bool, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return Task{}, false, err
 	}
 	defer release()
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err = s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
 		return Task{}, false, err
 	}
 	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return Task{}, false, ErrTaskNotFound
 		}
@@ -114,7 +133,11 @@ func setTaskPriorityTx(ctx context.Context, tx transaction, x *Task, priority in
 		return ErrTaskTerminal
 	}
 	now := time.Now().UTC()
-	if _, err := tx.Exec(ctx, `UPDATE tasks SET priority=$2,updated_at=$3 WHERE id=$1`, x.ID, priority, now); err != nil {
+	update, args := `UPDATE tasks SET priority=$2,updated_at=$3 WHERE id=$1`, []any{x.ID, priority, now}
+	if dialectFor(tx) == mysqlDialect {
+		update, args = `UPDATE tasks SET priority=?,updated_at=? WHERE id=?`, []any{priority, now, x.ID}
+	}
+	if _, err := tx.Exec(ctx, update, args...); err != nil {
 		return err
 	}
 	note := fmt.Sprintf("priority %d → %d", x.Priority, priority)
