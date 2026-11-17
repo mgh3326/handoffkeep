@@ -361,6 +361,10 @@ func (s *Store) retryTransaction(ctx context.Context, attempt int, err error) bo
 // can still choose its SQL text: sqlFor(tx, pgText, mysqlText).
 type dialected interface{ dialectOf() storeDialect }
 
+// *Store answers its own dialect, so sqlFor(s, …) picks the MySQL text on a
+// MySQL store. Without it sqlFor fell back to PostgreSQL for every call that
+// passes the store itself (main red at 66d8fa2, hk 5076).
+func (s *Store) dialectOf() storeDialect      { return s.dialect }
 func (pgQuerier) dialectOf() storeDialect     { return postgresDialect }
 func (pgTransaction) dialectOf() storeDialect { return postgresDialect }
 func (sqlQuerier) dialectOf() storeDialect    { return mysqlDialect }
