@@ -645,4 +645,28 @@ func TestArticleCreateSplitChildPartContentValidation(t *testing.T) {
 	}
 }
 
+// When CreateArticle returns an empty ID and the immediate reconcile lookup fails,
+// Send leaves the op remote_unknown (never prepared), preventing duplicate index creation.
+func TestArticleCreateSplitEmptyIndexIDLookupFailureStaysRemoteUnknown(t *testing.T) {
+	e := newArticleEnv(t)
+	req := articleReq()
+	req.Body = strings.Repeat("hello world line\n", 20000)
+	op := prepareWith(t, e, req)
+
+	// Queue NoID fault for CreateArticle on index and a Find failure
+	creates := 0
+	e.yt.BeforeArticleCreate = func(ctx context.Context, in ytwrite.ArticleCreate) {
+		creates++
+		if creates == 1 {
+			e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.NoID})
+			e.yt.QueueFind(&ytwrite.RemoteError{Status: http.StatusBadGateway, Message: "gateway timeout"})
+		}
+	}
+
+	e.drive()
+	// Must be remote_unknown, NOT prepared / not_sent!
+	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+}
+
+
 

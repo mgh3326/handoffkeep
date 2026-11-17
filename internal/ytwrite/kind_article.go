@@ -834,13 +834,20 @@ func (a articleCreate) Send(ctx context.Context, remote Remote, op Op, text stri
 		if id == "" {
 			hits, findErr := ar.FindArticles(ctx, ArticleSearch{ProjectShort: p.YTProjectShort, ProjectID: op.YTTargetID, Query: summary, Summary: summary, ParentID: parent})
 			if findErr != nil {
-				return "", &NotSentError{Err: fmt.Errorf("empty index ID returned, reconcile failed: %w", findErr)}
+				return "", fmt.Errorf("empty index ID returned, reconcile lookup failed: %w", findErr)
 			}
 			reconciled := markedArticles(hits, op.ID)
-			if len(reconciled) == 1 {
+			switch len(reconciled) {
+			case 1:
 				id = reconciled[0].ID
-			} else {
-				return "", &NotSentError{Err: errors.New("empty index article ID returned and not found in reconcile")}
+			case 0:
+				return "", errors.New("empty index article ID returned and not found in reconcile")
+			default:
+				ids := make([]string, 0, len(reconciled))
+				for _, h := range reconciled {
+					ids = append(ids, h.ID)
+				}
+				return "", &RefusedError{Reason: ReasonAmbiguousIssue, Detail: fmt.Sprintf("project %s has %d articles carrying op %d's marker: %s", op.YTTargetID, len(reconciled), op.ID, strings.Join(ids, ","))}
 			}
 		}
 		indexID = id
