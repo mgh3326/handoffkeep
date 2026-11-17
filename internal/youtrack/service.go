@@ -15,6 +15,9 @@ type Store interface {
 	DocumentKeyExists(ctx context.Context, key string) (bool, error)
 	YouTrackTaskHits(ctx context.Context, tenant string, issueIDs []string, lane string) (map[string]store.SearchResult, error)
 	YouTrackDocHits(ctx context.Context, articleIDs []string, session string) (map[string]store.SearchResult, error)
+	ExactNumericHit(ctx context.Context, q, scope, session string) ([]store.SearchResult, bool, error)
+	ExactDocHit(ctx context.Context, key, session string) ([]store.SearchResult, bool, error)
+	SearchCtx(ctx context.Context, q, session string, limit int) ([]store.SearchResult, error)
 }
 
 // Options tune the service. Zero values get the documented defaults.
