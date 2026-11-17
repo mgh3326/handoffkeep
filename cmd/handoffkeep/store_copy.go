@@ -22,7 +22,7 @@ func storeCopyCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("store-copy", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	from := fs.String("from", "", "source database URL (postgres:// or mysql://)")
-	to := fs.String("to", "", "destination URL; MySQL requires the copy admin account, PostgreSQL requires replica-role permission")
+	to := fs.String("to", "", "destination URL; MySQL sets @hk_bulk_load on the copy session")
 	tablesArg := fs.String("tables", "", "comma-separated registered tables; default is all ported tables")
 	verifyOnly := fs.Bool("verify-only", false, "compare parity without copying")
 	if err := fs.Parse(args); err != nil {
@@ -42,7 +42,7 @@ func storeCopyCmd(args []string, out io.Writer) error {
 	defer cancel()
 	report, err := store.CopyStore(ctx, *from, *to, tables, *verifyOnly)
 	if err != nil {
-		return err
+		return storeCopyFailure(out, report, err)
 	}
 	if err := printJSON(out, report); err != nil {
 		return err
@@ -51,4 +51,14 @@ func storeCopyCmd(args []string, out io.Writer) error {
 		return exitCodeError{code: storeCopyExitMismatch, err: errors.New("store-copy parity mismatch; see per-table row counts and checksums")}
 	}
 	return nil
+}
+
+func storeCopyFailure(out io.Writer, report store.CopyReport, err error) error {
+	if len(report.Tables) == 0 {
+		return err
+	}
+	if printErr := printJSON(out, report); printErr != nil {
+		return errors.Join(err, fmt.Errorf("print partial store-copy report: %w", printErr))
+	}
+	return err
 }

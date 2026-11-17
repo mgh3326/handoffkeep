@@ -3,12 +3,8 @@
 package store
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +30,9 @@ func TestCopyPostgresMySQLAndBackWithParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO bench_area_exceptions(profile,effort,area,action,evidence_refs,decision_ref,decided_by,decided_at,expires_with_model_id) VALUES('copy-test','','docs','exclude',ARRAY['ref:a','ref,b','quoted"ref'],'hk:task/1','test',$1,'model')`, when); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO bench_area_exceptions(profile,effort,area,action,evidence_refs,decision_ref,decided_by,decided_at,expires_with_model_id) VALUES('copy-test-empty','','docs','prefer',ARRAY[]::TEXT[],'hk:task/2','test',$1,'model')`, when); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO bench_reps(id,origin_id,profile,created_by,recorded_at,created_at,first_ci_green,completed,merged,reverted_within_7d) VALUES(92001,92001,'copy-test','copy-test',$1,$1,TRUE,17,FALSE,TRUE)`, when); err != nil {
@@ -92,7 +91,7 @@ func TestCopySourceSnapshotIsRepeatableRead(t *testing.T) {
 	pg, pgURL := schemaStoreAt(t, "copy_source_snapshot")
 	defer pg.Close()
 	when := time.Date(2026, 11, 18, 4, 5, 6, 123456000, time.UTC)
-	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO quota_observations(id,account_key,kind,window_key,measured_at,value,received_at) VALUES(93001,'copy-snapshot','manual','day',$1,$2,$1)`, when, json.RawMessage(`{"revision":1}`)); err != nil {
+	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO bench_grades(profile,grade,boundary_version,deviation_ref,decided_at,decided_by) VALUES('copy-snapshot','A','','',$1,'test')`, when); err != nil {
 		t.Fatal(err)
 	}
 	source, err := openCopyDB(t.Context(), pgURL)
@@ -106,14 +105,14 @@ func TestCopySourceSnapshotIsRepeatableRead(t *testing.T) {
 	}
 	defer snapshot.Rollback()
 	var before []byte
-	if err := snapshot.QueryRowContext(t.Context(), `SELECT value FROM quota_observations WHERE id=93001`).Scan(&before); err != nil {
+	if err := snapshot.QueryRowContext(t.Context(), `SELECT grade FROM bench_grades WHERE profile='copy-snapshot'`).Scan(&before); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pg.pool.Exec(t.Context(), `UPDATE quota_observations SET value=$1 WHERE id=93001`, json.RawMessage(`{"revision":2}`)); err != nil {
+	if _, err := pg.pool.Exec(t.Context(), `UPDATE bench_grades SET grade='S' WHERE profile='copy-snapshot'`); err != nil {
 		t.Fatal(err)
 	}
 	var after []byte
-	if err := snapshot.QueryRowContext(t.Context(), `SELECT value FROM quota_observations WHERE id=93001`).Scan(&after); err != nil {
+	if err := snapshot.QueryRowContext(t.Context(), `SELECT grade FROM bench_grades WHERE profile='copy-snapshot'`).Scan(&after); err != nil {
 		t.Fatal(err)
 	}
 	if string(before) != string(after) {
@@ -121,40 +120,38 @@ func TestCopySourceSnapshotIsRepeatableRead(t *testing.T) {
 	}
 }
 
-func TestCopyPostgresReplicaRolePreflightRefusesBeforeWrites(t *testing.T) {
+func TestCopyPostgresTargetKeepsQuotaForeignKeysEnforced(t *testing.T) {
 	myURL := testdb.MySQLDatabase(t)
 	my, err := Open(t.Context(), myURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	my.Close()
-	target, pgURL := schemaStoreAt(t, "copy_role_preflight")
-	var random [8]byte
-	if _, err := rand.Read(random[:]); err != nil {
-		t.Fatal(err)
-	}
-	role := "hk_copy_reader_" + hex.EncodeToString(random[:])
-	password := hex.EncodeToString(random[:])
-	admin := testdb.Conn(t)
-	if _, err := admin.Exec(t.Context(), fmt.Sprintf(`CREATE ROLE %q LOGIN PASSWORD '%s'`, role, password)); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), fmt.Sprintf(`DROP ROLE IF EXISTS %q`, role)) })
-	u, err := url.Parse(pgURL)
+	defer my.Close()
+	key := fmt.Sprintf("copy_fk_%d", time.Now().UnixNano())
+	when := time.Date(2026, 11, 18, 5, 6, 7, 123456000, time.UTC)
+	result, err := my.mysqlPool.ExecContext(t.Context(), `INSERT INTO quota_observations(account_key,kind,window_key,measured_at,value) VALUES(?,?,?,?,?)`, key, "manual", "day", when, json.RawMessage(`{"revision":1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	u.User = url.UserPassword(role, password)
-	_, err = CopyStore(t.Context(), myURL, u.String(), []string{"quota_observations"}, false)
-	if err == nil || !strings.Contains(err.Error(), "must allow SET session_replication_role = replica") {
-		t.Fatalf("non-superuser target was not refused by preflight: %v", err)
+	observationID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := my.mysqlPool.ExecContext(t.Context(), `INSERT INTO quota_latest(account_key,kind,window_key,observation_id,measured_at,confirmed_at) VALUES(?,?,?,?,?,?)`, key, "manual", "day", observationID, when, when); err != nil {
+		t.Fatal(err)
+	}
+	target, pgURL := schemaStoreAt(t, "copy_fk_enforced")
+	defer target.Close()
+	_, err = CopyStore(t.Context(), myURL, pgURL, []string{"quota_latest"}, false)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "foreign key") {
+		t.Fatalf("PostgreSQL target did not enforce quota_latest foreign key: %v", err)
 	}
 	var rows int
-	if err := target.pool.QueryRow(t.Context(), `SELECT count(*) FROM quota_observations`).Scan(&rows); err != nil {
+	if err := target.pool.QueryRow(t.Context(), `SELECT count(*) FROM quota_latest`).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
 	if rows != 0 {
-		t.Fatalf("target has %d quota observations after privilege refusal", rows)
+		t.Fatalf("target has %d quota_latest rows after foreign key refusal", rows)
 	}
 }
 

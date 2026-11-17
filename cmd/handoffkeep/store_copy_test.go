@@ -2,8 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
 func TestStoreCopyRejectsBlankTableSelection(t *testing.T) {
@@ -21,17 +25,18 @@ func TestStoreCopyRejectsBlankTableSelection(t *testing.T) {
 	}
 }
 
-func TestStoreCopyRejectsQuotaLatestWithoutParent(t *testing.T) {
+func TestStoreCopyFailurePrintsPartialReport(t *testing.T) {
+	wantErr := errors.New("later table failed")
+	report := store.CopyReport{Tables: []store.CopyTable{{Name: "quota_observations", SourceRows: 1, TargetRows: 1}}}
 	var out bytes.Buffer
-	err := storeCopyCmd([]string{
-		"--from", "postgres://copy@localhost/handoffkeep",
-		"--to", "mysql://copy@localhost/handoffkeep",
-		"--tables", "quota_latest",
-	}, &out)
-	if err == nil || !strings.Contains(err.Error(), `requires "quota_observations"`) {
-		t.Fatalf("storeCopyCmd error=%v, want quota_latest parent requirement", err)
+	if gotErr := storeCopyFailure(&out, report, wantErr); gotErr != wantErr {
+		t.Fatalf("storeCopyFailure error=%v, want original error %v", gotErr, wantErr)
 	}
-	if out.Len() != 0 {
-		t.Fatalf("storeCopyCmd wrote success output for an incomplete FK selection: %q", out.String())
+	var got store.CopyReport
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("partial report is not JSON: %v", err)
+	}
+	if len(got.Tables) != 1 || got.Tables[0].Name != "quota_observations" {
+		t.Fatalf("partial report tables=%+v, want committed quota_observations table", got.Tables)
 	}
 }

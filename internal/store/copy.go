@@ -43,11 +43,10 @@ type CopyReport struct {
 }
 
 type copyTableSpec struct {
-	name     string
-	columns  []string
-	order    []string
-	requires []string
-	bounds   map[string]int
+	name    string
+	columns []string
+	order   []string
+	bounds  map[string]int
 }
 
 type copyQuerier interface {
@@ -75,7 +74,7 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "bench_reps", columns: strings.Fields("id origin_id profile model_id task_ref tier role rounds blockers_found completed input_tokens output_tokens notes recorded_at effort grade table_grade created_by created_at experiment_id arm first_ci_green critical_findings high_findings merged reverted_within_7d reviewer_profile reviewer_effort reasoning_tokens cache_read_tokens cache_write_tokens spawn_to_ready_s spawn_to_merge_s"), order: []string{"id"}, bounds: map[string]int{"created_by": 128}},
 	{name: "bench_scores", columns: strings.Fields("model_id effort harness source metric score rank captured_at time_per_task_min cost_per_task_usd provenance updated_by updated_at"), order: []string{"model_id", "effort", "harness", "source", "metric"}, bounds: map[string]int{"model_id": 128, "effort": 128, "harness": 128, "source": 128, "metric": 128}},
 	{name: "quota_observations", columns: strings.Fields("id account_key kind window_key measured_at value received_at"), order: []string{"id"}, bounds: map[string]int{"account_key": 64, "kind": 16, "window_key": 16}},
-	{name: "quota_latest", columns: strings.Fields("account_key kind window_key observation_id measured_at confirmed_at"), order: []string{"account_key", "kind", "window_key"}, requires: []string{"quota_observations"}, bounds: map[string]int{"account_key": 64, "kind": 16, "window_key": 16}},
+	{name: "quota_latest", columns: strings.Fields("account_key kind window_key observation_id measured_at confirmed_at"), order: []string{"account_key", "kind", "window_key"}, bounds: map[string]int{"account_key": 64, "kind": 16, "window_key": 16}},
 	{name: "quota_leases", columns: strings.Fields("account_key owner holder expires_at"), order: []string{"account_key"}, bounds: map[string]int{"account_key": 64}},
 	{name: "quota_presence", columns: strings.Fields("host_id account_key last_seen"), order: []string{"host_id", "account_key"}, bounds: map[string]int{"host_id": 64, "account_key": 64}},
 }
@@ -148,20 +147,17 @@ func (d *copyDB) session(ctx context.Context) (*sql.Conn, error) {
 }
 
 func prepareCopySession(ctx context.Context, dst *copyDB) (func(), error) {
+	if !dst.mySQL {
+		return func() {}, nil
+	}
 	conn, err := dst.session(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if dst.mySQL {
-		if _, err := conn.ExecContext(ctx, `SET @hk_bulk_load = 1`); err != nil {
-			return nil, fmt.Errorf("MySQL copy destination must use the copy admin account: %w", err)
-		}
-		return func() { _, _ = conn.ExecContext(context.Background(), `SET @hk_bulk_load = NULL`) }, nil
+	if _, err := conn.ExecContext(ctx, `SET @hk_bulk_load = 1`); err != nil {
+		return nil, fmt.Errorf("set MySQL copy bulk-load flag: %w", err)
 	}
-	if _, err := conn.ExecContext(ctx, `SET session_replication_role = replica`); err != nil {
-		return nil, fmt.Errorf("PostgreSQL copy destination must allow SET session_replication_role = replica (use a superuser such as postgres): %w", err)
-	}
-	return func() { _, _ = conn.ExecContext(context.Background(), `SET session_replication_role = DEFAULT`) }, nil
+	return func() { _, _ = conn.ExecContext(context.Background(), `SET @hk_bulk_load = NULL`) }, nil
 }
 
 // CopyStore copies the currently ported tables in either direction. It does
@@ -295,16 +291,6 @@ func selectCopyTables(selected []string) (map[string]bool, error) {
 	}
 	if len(wanted) == 0 {
 		return nil, errors.New("no tables selected")
-	}
-	for _, spec := range copyTableRegistry {
-		if !wanted[spec.name] {
-			continue
-		}
-		for _, required := range spec.requires {
-			if !wanted[required] {
-				return nil, fmt.Errorf("selected table %q requires %q in the same copy", spec.name, required)
-			}
-		}
 	}
 	return wanted, nil
 }
@@ -735,9 +721,16 @@ func parseCopyBool(s string) (bool, error) {
 func parsePostgresTextArray(v any) ([]string, error) {
 	switch x := v.(type) {
 	case []string:
+		if x == nil {
+			return []string{}, nil
+		}
 		return x, nil
 	case pgtype.FlatArray[string]:
-		return []string(x), nil
+		refs := []string(x)
+		if refs == nil {
+			return []string{}, nil
+		}
+		return refs, nil
 	case string:
 		return decodePostgresTextArray([]byte(x))
 	case []byte:
@@ -756,6 +749,9 @@ func decodePostgresTextArray(data []byte) ([]string, error) {
 	if err := plan.Scan(data, &values); err != nil {
 		return nil, err
 	}
+	if values == nil {
+		return []string{}, nil
+	}
 	return []string(values), nil
 }
 
@@ -768,6 +764,10 @@ func parseJSONTextArray(v any) ([]string, error) {
 		data = []byte(x)
 	default:
 		return nil, fmt.Errorf("cannot decode MySQL JSON array from %T", v)
+	}
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, errors.New("MySQL JSON text array must be a JSON array")
 	}
 	var values []string
 	if err := json.Unmarshal(data, &values); err != nil {

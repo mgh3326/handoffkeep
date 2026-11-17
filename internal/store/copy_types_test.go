@@ -180,12 +180,43 @@ func TestSelectCopyTablesRejectsBlankSelection(t *testing.T) {
 	}
 }
 
-func TestSelectCopyTablesRequiresQuotaObservationParent(t *testing.T) {
-	if _, err := selectCopyTables([]string{"quota_latest"}); err == nil || !strings.Contains(err.Error(), `requires "quota_observations"`) {
-		t.Fatalf("quota_latest-only selection error=%v, want its parent requirement", err)
+func TestCopyEmptyEvidenceRefsPreservesEmptyArray(t *testing.T) {
+	mysqlValue, err := copyInsertValue([]string(nil), "bench_area_exceptions", "evidence_refs", copyTextArray, false, true)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := selectCopyTables([]string{"quota_latest", "quota_observations"}); err != nil {
-		t.Fatalf("selection with quota_latest and its parent failed: %v", err)
+	if got, ok := mysqlValue.(string); !ok || got != "[]" {
+		t.Fatalf("empty PostgreSQL array encoded as MySQL JSON %T(%v), want []", mysqlValue, mysqlValue)
+	}
+	postgresValue, err := copyInsertValue([]byte("[]"), "bench_area_exceptions", "evidence_refs", copyJSON, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, ok := postgresValue.(pgtype.FlatArray[string])
+	if !ok || refs == nil || len(refs) != 0 {
+		t.Fatalf("empty MySQL JSON array converted to PostgreSQL value %T(%v), want non-nil empty array", postgresValue, postgresValue)
+	}
+	pgCanonical, err := canonicalCopyValue([]string(nil), "bench_area_exceptions", "evidence_refs", copyTextArray, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	myCanonical, err := canonicalCopyValue([]byte("[]"), "bench_area_exceptions", "evidence_refs", copyJSON, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgRow, err := json.Marshal([]any{pgCanonical})
+	if err != nil {
+		t.Fatal(err)
+	}
+	myRow, err := json.Marshal([]any{myCanonical})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(pgRow) != string(myRow) || string(pgRow) != `[[]]` {
+		t.Fatalf("empty array checksum rows differ: PostgreSQL=%s MySQL=%s", pgRow, myRow)
+	}
+	if _, err := parseJSONTextArray([]byte("null")); err == nil {
+		t.Fatal("JSON null was accepted as an evidence_refs array")
 	}
 }
 
