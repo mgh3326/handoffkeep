@@ -306,6 +306,7 @@ func threadsCaseUnknownCreate(t *testing.T, s *Store) {
 	}
 	// The needs_operator row is never created again and gets no line.
 	if _, err := s.ApplyTaskSourceEvent(ctx, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: a5PR(302), TaskID: a.ID}); err != nil {
+		needPorted(t, s, "PR source events (changes, B5)", err)
 		t.Fatal(err)
 	}
 	for {
