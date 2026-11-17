@@ -81,10 +81,16 @@ func TestCopyPostgresMySQLAndBackWithParity(t *testing.T) {
 	if err := my.mysqlPool.QueryRowContext(t.Context(), `SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='quota_observations'`).Scan(&nextMySQLID); err != nil {
 		t.Fatal(err)
 	}
-	my.Close()
 	if nextMySQLID <= 91001 {
 		t.Fatalf("MySQL AUTO_INCREMENT=%d, want past copied id 91001", nextMySQLID)
 	}
+	if err := my.mysqlPool.QueryRowContext(t.Context(), `SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='sync_log'`).Scan(&nextMySQLID); err != nil {
+		t.Fatal(err)
+	}
+	if nextMySQLID <= 94001 {
+		t.Fatalf("MySQL sync_log AUTO_INCREMENT=%d, want past copied entry_id 94001", nextMySQLID)
+	}
+	my.Close()
 	_, backURL := schemaStoreAt(t, "copy_reverse")
 	back, err := Open(t.Context(), backURL)
 	if err != nil {
@@ -109,6 +115,12 @@ func TestCopyPostgresMySQLAndBackWithParity(t *testing.T) {
 	}
 	if nextPostgresID <= 91001 {
 		t.Fatalf("PostgreSQL sequence=%d, want past copied id 91001", nextPostgresID)
+	}
+	if err := back.pool.QueryRow(t.Context(), `SELECT nextval(pg_get_serial_sequence('sync_log','entry_id'))`).Scan(&nextPostgresID); err != nil {
+		t.Fatal(err)
+	}
+	if nextPostgresID <= 94001 {
+		t.Fatalf("PostgreSQL sync_log sequence=%d, want past copied entry_id 94001", nextPostgresID)
 	}
 }
 
