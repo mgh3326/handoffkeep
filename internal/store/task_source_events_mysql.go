@@ -51,16 +51,9 @@ func srcEvLockedTasksMySQL(ctx context.Context, tx transaction, idQuery string, 
 	})
 }
 
-// srcEvChangesGate refuses a MySQL transaction before a read of the changes
-// or change_tasks tables. B5 dependency: those tables are not in the MySQL
-// schema yet. Make it return nil with B5, and add the MySQL texts beside the
-// PostgreSQL ones it guards (taskHoldsTx, heldMergePRTx, propagateMergeTx;
-// prURLSQL, openImplementsSQL and unresolvedRevertSQL have no MySQL spelling
-// yet).
+// srcEvChangesGate remains as a named seam for call sites shared with other
+// unported tables. The changes tables are part of the MySQL baseline now.
 func srcEvChangesGate(tx transaction) error {
-	if dialectFor(tx) == mysqlDialect {
-		return ErrDialectUnsupported
-	}
 	return nil
 }
 
@@ -70,13 +63,111 @@ func srcEvChangesGate(tx transaction) error {
 // every other event refuses before the call.
 func srcEvRecordChangeTx(ctx context.Context, tx transaction, x Task, in TaskSourceEvent, at, now time.Time) error {
 	if dialectFor(tx) == mysqlDialect {
-		if _, _, ok := parsePRURL(in.PR); ok {
-			return ErrDialectUnsupported
-		}
-		return nil
+		return recordChangeTxMySQL(ctx, tx, x, in, at, now)
 	}
 	return recordChangeTx(ctx, pgxTx(tx), x, in, at, now)
 }
+
+func recordChangeTxMySQL(ctx context.Context, tx transaction, x Task, in TaskSourceEvent, at, now time.Time) error {
+	repo, n, ok := parsePRURL(in.PR)
+	if !ok {
+		return nil
+	}
+	state, head, base, mergeSHA := ChangeOpen, nullStr(in.HeadSHA), nullStr(in.BaseSHA), nullStr(in.MergeSHA)
+	var mergedAt *time.Time
+	shaFromMerge := false
+	switch in.Source {
+	case SourceMergewakeMerge:
+		state, mergedAt, shaFromMerge = ChangeMerged, &at, true
+	case SourceMergewakeRevert:
+		state, head, base = ChangeMerged, nil, nil
+	}
+	upsert := func(repo string, n int, state string, head, base, mergeSHA *string, mergedAt *time.Time, shaFromMerge bool) (int64, error) {
+		_, err := tx.Exec(ctx, `INSERT INTO changes(repo,pr_number,state,head_sha,base_sha,merge_sha,opened_at,merged_at,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE
+	state=IF(VALUES(state)='merged','merged',state), merged_at=IF(VALUES(state)='merged',COALESCE(merged_at,VALUES(merged_at)),merged_at),
+	merge_sha=COALESCE(VALUES(merge_sha),merge_sha),
+	head_sha=IF(state='merged' AND ?=FALSE,head_sha,COALESCE(VALUES(head_sha),head_sha)),
+	base_sha=IF(state='merged' AND ?=FALSE,base_sha,COALESCE(VALUES(base_sha),base_sha)),updated_at=VALUES(updated_at)`,
+			repo, n, state, head, base, mergeSHA, at, mergedAt, now, now, shaFromMerge, shaFromMerge)
+		if err != nil {
+			return 0, err
+		}
+		var id int64
+		err = tx.QueryRow(ctx, `SELECT id FROM changes WHERE repo=? AND pr_number=?`, repo, n).Scan(&id)
+		return id, err
+	}
+	id, err := upsert(repo, n, state, head, base, mergeSHA, mergedAt, shaFromMerge)
+	if err != nil {
+		return err
+	}
+	if err = linkChangeTaskMySQL(ctx, tx, id, x.ID, ChangeImplements, false, now); err != nil {
+		return err
+	}
+	if in.Source == SourceMergewakeReview {
+		for _, rv := range in.Reviews {
+			if err = insertReviewTxMySQL(ctx, tx, id, rv, now); err != nil {
+				return err
+			}
+		}
+	}
+	if in.Source == SourceMergewakeRevert {
+		revRepo, revN, ok := parsePRURL(in.RevertPR)
+		if !ok {
+			return nil
+		}
+		revID, e := upsert(revRepo, revN, ChangeMerged, nullStr(in.HeadSHA), nullStr(in.BaseSHA), nil, &at, false)
+		if e != nil {
+			return e
+		}
+		if revID != id {
+			if e = linkChangeTaskMySQL(ctx, tx, revID, x.ID, ChangeReferences, true, now); e != nil {
+				return e
+			}
+			if _, e = tx.Exec(ctx, `UPDATE changes SET reverted_by_change_id=?,updated_at=? WHERE id=? AND reverted_by_change_id IS NULL`, revID, now, id); e != nil {
+				return e
+			}
+		}
+	}
+	return nil
+}
+
+func linkChangeTaskMySQL(ctx context.Context, tx transaction, changeID, taskID int64, relation string, reclassify bool, now time.Time) error {
+	query := `INSERT INTO change_tasks(change_id,task_id,relation,created_at) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE task_id=task_id`
+	if reclassify {
+		query = `INSERT INTO change_tasks(change_id,task_id,relation,created_at) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE relation=VALUES(relation)`
+	}
+	_, err := tx.Exec(ctx, query, changeID, taskID, relation, now)
+	return err
+}
+
+func linkChangeTask(ctx context.Context, tx transaction, changeID, taskID int64, relation string, reclassify bool, now time.Time) error {
+	if dialectFor(tx) == mysqlDialect {
+		return linkChangeTaskMySQL(ctx, tx, changeID, taskID, relation, reclassify, now)
+	}
+	return linkChangeTaskTx(ctx, pgxTx(tx), changeID, taskID, relation, reclassify, now)
+}
+
+func insertReviewTxMySQL(ctx context.Context, tx transaction, changeID int64, rv TaskEventReview, now time.Time) error {
+	_, err := tx.Exec(ctx, `INSERT INTO reviews(change_id,reviewed_head,reviewed_base,patch_id,round,pass,lens,reviewer_job_id,family,profile,model,harness,effort,executor,fallback,policy_revision,contract_source,verdict,critical,high,medium,low,started_at,finished_at,recorded_at,reviewer,same_family,delta,quiet,outside_diff_blocking,patch_digest)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE id=id`,
+		changeID, rv.ReviewedHead, nullStr(rv.ReviewedBase), nullStr(rv.PatchID), rv.Round, rv.Pass, rv.Lens, nullStr(rv.ReviewerJobID), nullStr(rv.Family), nullStr(rv.Profile), nullStr(rv.Model), nullStr(rv.Harness), nullStr(rv.Effort), nullStr(rv.Executor), rv.Fallback, nullStr(rv.PolicyRevision), nullStr(rv.ContractSource), nullStr(rv.Verdict), rv.Critical, rv.High, rv.Medium, rv.Low, rv.StartedAt, rv.FinishedAt, now, rv.Reviewer, rv.SameFamily, rv.Delta, rv.Quiet, rv.OutsideDiffBlocking, rv.PatchDigest)
+	if err != nil {
+		return err
+	}
+	var id int64
+	var bare bool
+	err = tx.QueryRow(ctx, `SELECT id,`+reviewBareMySQL+` FROM reviews WHERE change_id=? AND reviewed_head=? AND lens=? AND round=? AND pass=? FOR UPDATE`, changeID, rv.ReviewedHead, rv.Lens, rv.Round, rv.Pass).Scan(&id, &bare)
+	if err != nil || !bare {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE reviews SET reviewed_base=?,patch_id=?,reviewer_job_id=?,family=?,profile=?,model=?,harness=?,effort=?,executor=?,fallback=?,policy_revision=?,contract_source=?,verdict=?,critical=?,high=?,medium=?,low=?,started_at=?,finished_at=?,
+		reviewer=COALESCE(reviewer,?),same_family=COALESCE(same_family,?),delta=COALESCE(delta,?),quiet=COALESCE(quiet,?),outside_diff_blocking=COALESCE(outside_diff_blocking,?),patch_digest=COALESCE(patch_digest,?) WHERE id=? AND `+reviewBareMySQL,
+		nullStr(rv.ReviewedBase), nullStr(rv.PatchID), nullStr(rv.ReviewerJobID), nullStr(rv.Family), nullStr(rv.Profile), nullStr(rv.Model), nullStr(rv.Harness), nullStr(rv.Effort), nullStr(rv.Executor), rv.Fallback, nullStr(rv.PolicyRevision), nullStr(rv.ContractSource), nullStr(rv.Verdict), rv.Critical, rv.High, rv.Medium, rv.Low, rv.StartedAt, rv.FinishedAt, rv.Reviewer, rv.SameFamily, rv.Delta, rv.Quiet, rv.OutsideDiffBlocking, rv.PatchDigest, id)
+	return err
+}
+
+const reviewBareMySQL = `reviewed_base IS NULL AND patch_id IS NULL AND reviewer_job_id IS NULL AND family IS NULL AND profile IS NULL AND model IS NULL AND harness IS NULL AND effort IS NULL AND executor IS NULL AND fallback IS NULL AND policy_revision IS NULL AND contract_source IS NULL AND verdict IS NULL AND critical IS NULL AND high IS NULL AND medium IS NULL AND low IS NULL AND started_at IS NULL AND finished_at IS NULL`
 
 // srcEvDecisionGate is the B6 dependency of applySourceEventTx.
 // mirrorTaskDecisionsTx supersedes every open decision row of a task that

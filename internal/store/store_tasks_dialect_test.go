@@ -569,7 +569,6 @@ func caseCoreListFilters(t *testing.T, s *Store) {
 	}
 	changeID := int64(1)
 	linked, err := s.ListTasksFiltered(ctx, TaskQuery{ChangeID: &changeID})
-	needPorted(t, s, "the change filter (changes, B5)", err)
 	if err != nil || len(linked) != 0 {
 		t.Fatalf("linked = %v, %v", ids(linked), err)
 	}

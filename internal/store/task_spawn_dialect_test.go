@@ -61,7 +61,9 @@ func a5Merge(t *testing.T, s *Store, id int64, pr int) {
 		{Source: SourceMergewakeMerge, SourceRef: a5PR(pr), TaskID: id},
 	} {
 		if _, err := s.ApplyTaskSourceEvent(ctx, ev); err != nil {
-			needPorted(t, s, "PR source events (changes, B5)", err)
+			if ev.Source == SourceMergewakeMerge {
+				needPorted(t, s, "settled decision projection (B6)", err)
+			}
 			t.Fatalf("event %+v: %v", ev, err)
 		}
 	}
