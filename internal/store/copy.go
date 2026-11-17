@@ -55,6 +55,9 @@ type copyTableSpec struct {
 	// on both targets while the table loads. Rows no root reaches (a cycle)
 	// are not selected, and the row-count parity then fails the table.
 	parentColumn string
+	// upsert marks a table that a fresh schema already seeds (task_projects):
+	// the load overwrites a row with the same key instead of failing on it.
+	upsert bool
 }
 
 type copyQuerier interface {
@@ -87,7 +90,7 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "quota_presence", columns: strings.Fields("host_id account_key last_seen"), order: []string{"host_id", "account_key"}, bounds: map[string]int{"host_id": 64, "account_key": 64}},
 	// The tasks area (hk 5074). Parents before children: foreign keys stay
 	// enforced on both targets. tasks refers to itself and to project_milestones.
-	{name: "task_projects", columns: strings.Fields("name created_by created_at status start_at target_at design_lane"), order: []string{"name"}, bounds: map[string]int{"name": 128}},
+	{name: "task_projects", upsert: true, columns: strings.Fields("name created_by created_at status start_at target_at design_lane"), order: []string{"name"}, bounds: map[string]int{"name": 128}},
 	{name: "project_milestones", serial: true, columns: strings.Fields("id project name description target_at status sort_order"), order: []string{"id"}, bounds: map[string]int{"project": 128}},
 	{name: "project_owner_events", serial: true, columns: strings.Fields("id project previous_lane design_lane actor note created_at"), order: []string{"id"}, bounds: map[string]int{"project": 128}},
 	{name: "tasks", serial: true, parentColumn: "parent_id", columns: strings.Fields("id lane parent_lane title kind state priority refs claimed_by created_by created_at updated_at body_doc project area expected source source_ref last_activity_at awaiting_decision parent_id started_at completed_at canceled_at triaged_at started_triage_at milestone_id due_at sla_started_at sla_medium_risk_at sla_high_risk_at sla_breaches_at"), order: []string{"id"}, bounds: map[string]int{"lane": 255, "parent_lane": 255, "kind": 16, "state": 16, "project": 128, "source": 128, "source_ref": 512}},
@@ -578,6 +581,9 @@ func copyRows(ctx context.Context, src copyQuerier, dst *copyDB, sourceMySQL boo
 		dqcols[i] = quoteCopyIdent(c, dst.mySQL)
 	}
 	insert := `INSERT INTO ` + quoteCopyIdent(spec.name, dst.mySQL) + ` (` + strings.Join(dqcols, ",") + `) VALUES (` + strings.Join(placeholders, ",") + `)`
+	if spec.upsert {
+		insert += copyUpsertClause(spec, dqcols, dst.mySQL)
+	}
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -638,7 +644,7 @@ func copyInsertValue(v any, table, column string, kind copyValueKind, sourceMySQ
 	if err != nil {
 		return nil, err
 	}
-	if kind == copyJSON {
+	if kind == copyJSON && value != nil {
 		return string(value.(json.RawMessage)), nil
 	}
 	return value, nil
@@ -820,6 +826,34 @@ func parseJSONTextArray(v any) ([]string, error) {
 		return nil, err
 	}
 	return values, nil
+}
+
+// copyUpsertClause makes the insert overwrite a row with the same key. The key
+// columns are the table's order columns.
+func copyUpsertClause(spec copyTableSpec, quoted []string, mysqlDB bool) string {
+	key := map[string]bool{}
+	for _, c := range spec.order {
+		key[quoteCopyIdent(c, mysqlDB)] = true
+	}
+	var set []string
+	for _, c := range quoted {
+		if key[c] {
+			continue
+		}
+		if mysqlDB {
+			set = append(set, c+"=VALUES("+c+")")
+		} else {
+			set = append(set, c+"=EXCLUDED."+c)
+		}
+	}
+	if mysqlDB {
+		return " ON DUPLICATE KEY UPDATE " + strings.Join(set, ",")
+	}
+	keys := make([]string, len(spec.order))
+	for i, c := range spec.order {
+		keys[i] = quoteCopyIdent(c, false)
+	}
+	return " ON CONFLICT (" + strings.Join(keys, ",") + ") DO UPDATE SET " + strings.Join(set, ",")
 }
 
 // parentsFirstQuery selects a self-referencing table roots first, then each
