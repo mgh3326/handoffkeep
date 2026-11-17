@@ -75,11 +75,51 @@ func orderMySQLMigrations(migrations []mysqlMigration) ([]mysqlMigration, error)
 	return out, nil
 }
 
+type mysqlSchemaReader interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// A current schema requires only reads: opening another process takes no DDL
+// or migration lock when all this binary's migration IDs are already present.
+func mysqlMigrationsCurrent(ctx context.Context, db mysqlSchemaReader, migrations []mysqlMigration) (bool, error) {
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='schema_migrations')`).Scan(&exists); err != nil || !exists {
+		return false, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT id FROM schema_migrations`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	applied := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return false, err
+		}
+		applied[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	for _, m := range migrations {
+		if !applied[m.id] {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // migrateMySQL serializes schema changes on one pinned connection. An aborted
 // run leaves its marker absent, and its idempotent steps run again on restart.
 func migrateMySQL(ctx context.Context, db *sql.DB, migrations []mysqlMigration) error {
 	ordered, err := orderMySQLMigrations(migrations)
 	if err != nil {
+		return err
+	}
+	current, err := mysqlMigrationsCurrent(ctx, db, ordered)
+	if err != nil || current {
 		return err
 	}
 	conn, err := db.Conn(ctx)
@@ -105,6 +145,10 @@ func migrateMySQL(ctx context.Context, db *sql.DB, migrations []mysqlMigration) 
 			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 		}
 	}()
+	current, err = mysqlMigrationsCurrent(ctx, conn, ordered)
+	if err != nil || current {
+		return err
+	}
 	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (id VARCHAR(64) NOT NULL PRIMARY KEY) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin`); err != nil {
 		return err
 	}

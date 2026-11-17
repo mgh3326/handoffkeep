@@ -3,7 +3,9 @@
 package store
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
@@ -35,4 +37,30 @@ func TestMySQLMigrationResumesAfterPartialDDL(t *testing.T) {
 	if err := s.mysqlPool.QueryRowContext(t.Context(), `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id=?)`, migration.id).Scan(&recorded); err != nil || !recorded {
 		t.Fatalf("completed migration recorded=%v err=%v", recorded, err)
 	}
+}
+
+func TestMySQLOpenCurrentSchemaDoesNotTakeMigrationLock(t *testing.T) {
+	dbURL := testdb.MySQLDatabase(t)
+	s, err := Open(t.Context(), dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	conn, err := s.mysqlPool.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var acquired int
+	if err := conn.QueryRowContext(t.Context(), `SELECT GET_LOCK(CONCAT('hk:migrate:', LEFT(SHA2(DATABASE(), 256), 48)), 1)`).Scan(&acquired); err != nil || acquired != 1 {
+		t.Fatalf("hold migration lock: acquired=%d err=%v", acquired, err)
+	}
+	defer conn.ExecContext(context.Background(), `SELECT RELEASE_LOCK(CONCAT('hk:migrate:', LEFT(SHA2(DATABASE(), 256), 48)))`)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	another, err := Open(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("open current schema while migration lock is held: %v", err)
+	}
+	another.Close()
 }

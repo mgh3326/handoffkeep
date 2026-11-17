@@ -92,7 +92,27 @@ func TestMySQLQuota(t *testing.T) {
 	if _, err := s.PruneQuotaHistory(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReleaseQuota(ctx, quotaTestKey, "client", winner); err != nil {
+	if err := s.ReleaseQuota(ctx, quotaTestKey, "client", loser); err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := s.LeaseQuota(ctx, quotaTestKey, "client", loser, 120)
+	if err != nil || blocked.Acquired || blocked.Holder != winner {
+		t.Fatalf("wrong release: %+v %v", blocked, err)
+	}
+	if _, err := s.mysqlPool.ExecContext(ctx, `UPDATE quota_leases SET expires_at=DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 1 SECOND) WHERE account_key=?`, quotaTestKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.PutQuota(ctx, quotaTestKey, "client", winner, obs); !errors.Is(err, ErrQuotaLease) {
+		t.Fatalf("expired publisher: %v", err)
+	}
+	takeover, err := s.LeaseQuota(ctx, quotaTestKey, "client", loser, 120)
+	if err != nil || !takeover.Acquired {
+		t.Fatalf("takeover: %+v %v", takeover, err)
+	}
+	if _, _, err := s.PutQuota(ctx, quotaTestKey, "client", winner, obs); !errors.Is(err, ErrQuotaLease) {
+		t.Fatalf("old holder published: %v", err)
+	}
+	if err := s.ReleaseQuota(ctx, quotaTestKey, "client", loser); err != nil {
 		t.Fatal(err)
 	}
 }
