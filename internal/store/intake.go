@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -84,9 +83,6 @@ func TokenSimilarity(a, b string) float64 {
 // similar to any of titles, most similar first, computed in Go over open titles (design 11.7).
 func similarOpenTasks(ctx context.Context, q rowsQuerier, titles []string) ([]SimilarTask, error) {
 	return intakeSimilarOpenTasks(ctx, q, titles)
-}
-	}
-	return out, nil
 }
 
 // IntakeInput is one item put into triage by an integration.
