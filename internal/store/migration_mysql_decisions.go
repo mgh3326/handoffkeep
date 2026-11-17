@@ -49,7 +49,7 @@ var mysqlDecisionsSteps = []string{
 		due_at DATETIME(6), snoozed_until DATETIME(6), expires_at DATETIME(6),
 		status VARCHAR(16) NOT NULL DEFAULT 'open' CHECK(status IN ('open','answered','superseded','expired')),
 		answer LONGTEXT NOT NULL DEFAULT (''), answered_by LONGTEXT NOT NULL DEFAULT (''), answered_at DATETIME(6),
-		superseded_by LONGTEXT NOT NULL DEFAULT '', created_at DATETIME(6) NOT NULL, updated_at DATETIME(6) NOT NULL,
+		superseded_by LONGTEXT NOT NULL DEFAULT (''), created_at DATETIME(6) NOT NULL, updated_at DATETIME(6) NOT NULL,
 		UNIQUE KEY decision_requests_source_ref(source,source_ref),
 		KEY decision_requests_task_open(task_id,status,id), KEY decision_requests_job_open(job_id,status,id),
 		KEY decision_requests_status_created(status,created_at,id)
