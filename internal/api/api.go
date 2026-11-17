@@ -34,11 +34,12 @@ type Service struct {
 	// Dots backs the /v1/dots/results routes; nil uses Store.
 	Dots DotsResultStore
 	// YouTrack answers /v1/search from YouTrack when SearchBackend is
-	// "youtrack". Nil disables it; every other route is unaffected.
+	// "youtrack". Nil returns ErrSearchUnavailable when SearchBackend is "youtrack".
 	YouTrack *youtrack.Service
-	// SearchBackend is "youtrack" to answer /v1/search from YouTrack, with
-	// PostgreSQL as the fallback; it takes effect only with YouTrack set.
-	// Anything else, including "", is PostgreSQL.
+	// SearchBackend is "youtrack" to answer /v1/search from YouTrack exclusively
+	// (no PostgreSQL fallback; returns ErrSearchUnavailable if YouTrack is nil).
+	// When unset or "postgres", /v1/search uses Store.Search.
+	// Scope "ctx" always searches Store.SearchCtx.
 	SearchBackend string
 }
 
@@ -222,10 +223,16 @@ func (s Service) ListDocuments(ctx context.Context, prefix, kind, session string
 	return xs, nextAfterID(afterID, len(xs), limit, last), nil
 }
 func (s Service) Search(ctx context.Context, q, scope, session string, limit int) ([]store.SearchResult, error) {
-	if s.YouTrack == nil {
-		return nil, store.ErrSearchUnavailable
+	if scope == "ctx" {
+		return s.Store.SearchCtx(ctx, q, session, limit)
 	}
-	return s.YouTrack.Search(ctx, q, scope, session, limit)
+	if s.SearchBackend == youtrackSearchBackend || s.YouTrack != nil {
+		if s.YouTrack == nil {
+			return nil, store.ErrSearchUnavailable
+		}
+		return s.YouTrack.Search(ctx, q, scope, session, limit)
+	}
+	return s.Store.Search(ctx, q, scope, session, limit)
 }
 
 // youtrackSearchBackend is the HANDOFFKEEP_SEARCH_BACKEND value that selects

@@ -393,8 +393,8 @@ func TestSearchRawTextQueries(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		`/api/issues?project: {HK} project: OTHER "x" \ for: me`,
-		`/api/articles?project: OTHER "x" \ for: me`,
+		`/api/issues?(project: {HK}) and (project OTHER x for me)`,
+		`/api/articles?project OTHER x for me`,
 	}
 	got := yt.recorded()
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
@@ -512,7 +512,19 @@ func TestSearchHelpers(t *testing.T) {
 	if got := searchLimit("tasks", 80); got != 50 {
 		t.Fatalf("searchLimit(tasks, 80) = %d, want 50", got)
 	}
-	if q := issueSearchQuery([]string{"HK", "BIG"}, "x"); q != "project: {HK}, {BIG} x" {
+	if q := issueSearchQuery([]string{"HK", "BIG"}, "x"); q != "(project: {HK} or project: {BIG}) and (x)" {
 		t.Fatalf("issueSearchQuery = %s", q)
+	}
+	if q := issueSearchQuery([]string{"HK"}, "좌회"); q != "(project: {HK}) and (좌회)" {
+		t.Fatalf("issueSearchQuery Korean = %s", q)
+	}
+	if q := issueSearchQuery([]string{"HK"}, "for: me"); q != "(project: {HK}) and (for me)" {
+		t.Fatalf("issueSearchQuery for: me = %s", q)
+	}
+	if q := issueSearchQuery([]string{"HK"}, "unclosed { brace"); q != "(project: {HK}) and (unclosed brace)" {
+		t.Fatalf("issueSearchQuery brace = %s", q)
+	}
+	if q := issueSearchQuery([]string{"HK"}, "or project: X"); q != "(project: {HK}) and (project X)" {
+		t.Fatalf("issueSearchQuery leading conjunction = %s", q)
 	}
 }

@@ -493,3 +493,50 @@ func TestArticleCreateSplitLongDocument(t *testing.T) {
 		}
 	}
 }
+
+// A split document that fails midway through child creation is not marked applied
+// by Evidence, and a subsequent attempt creates missing parts under the adopted index.
+func TestArticleCreateSplitPartialFailureAndRetryRecovery(t *testing.T) {
+	e := newArticleEnv(t)
+	req := articleReq()
+	req.Body = strings.Repeat("hello world line\n", 20000) // ~340KB -> 2 parts
+	op := prepareWith(t, e, req)
+
+	// Inject fault on part 2: index succeeds (1), part 1 succeeds (2), part 2 fails (3)
+	creates := 0
+	e.yt.BeforeArticleCreate = func(ctx context.Context, in ytwrite.ArticleCreate) {
+		creates++
+		if creates == 3 {
+			e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.ServerError, Status: http.StatusBadGateway})
+		}
+	}
+
+	e.drive()
+	got, err := e.ledger.ByID(context.Background(), op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State == ytwrite.StateApplied {
+		t.Fatalf("op was marked applied despite missing part 2")
+	}
+
+	// Disable hook, advance clock and drive again: should adopt index and create missing part 2
+	e.yt.BeforeArticleCreate = nil
+	e.clock.Advance(time.Hour)
+	e.drive()
+
+	applied := e.want(op.ID, ytwrite.StateApplied, "")
+	if applied.YTResultID == "" {
+		t.Fatal("expected non-empty YTResultID")
+	}
+	writes := e.yt.ArticleWrites()
+	partCreates := 0
+	for _, w := range writes {
+		if w.ArticleCreate.ParentID == applied.YTResultID {
+			partCreates++
+		}
+	}
+	if partCreates < 2 {
+		t.Fatalf("expected at least 2 child parts under %s, got %d", applied.YTResultID, partCreates)
+	}
+}

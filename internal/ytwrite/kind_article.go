@@ -731,6 +731,38 @@ func readFailure(ev Evidence, err error) (Evidence, error) {
 	return ev, err
 }
 
+// splitMissingParts checks that every child part 1..N of a split document
+// exists under indexID carrying opID's marker. It returns the 0-based indices
+// of missing pieces.
+func splitMissingParts(ctx context.Context, ar ArticleRemote, op Op, p ArticleCreatePayload, indexID string, pieces []string) ([]int, error) {
+	marker := OpMarker(op.ID)
+	var missing []int
+	for i := range pieces {
+		partSummary := truncateRunes(fmt.Sprintf("%s / part %d of %d", p.Summary, i+1, len(pieces)), ArticleSummaryLimit)
+		hits, err := ar.FindArticles(ctx, ArticleSearch{
+			ProjectShort: p.YTProjectShort,
+			ProjectID:    op.YTTargetID,
+			Query:        partSummary,
+			Summary:      partSummary,
+			ParentID:     indexID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		found := false
+		for _, h := range hits {
+			if strings.Contains(h.Content, marker) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, i)
+		}
+	}
+	return missing, nil
+}
+
 // Send looks for the document's article under its parent and writes only
 // when there is none. A document the legacy sync wrote (LegacyArticleID) is
 // never created: its article is read and adopted (no POST) when it is that
@@ -772,30 +804,50 @@ func (a articleCreate) Send(ctx context.Context, remote Remote, op Op, text stri
 	if err != nil {
 		return "", &NotSentError{Err: fmt.Errorf("articles of %q: %w", summary, err)}
 	}
-	switch marked := markedArticles(hits, op.ID); {
-	case len(marked) == 1:
-		return "", &AdoptedError{ID: marked[0].ID}
-	case len(marked) > 1:
+	marked := markedArticles(hits, op.ID)
+	if len(marked) > 1 {
 		ids := make([]string, 0, len(marked))
 		for _, h := range marked {
 			ids = append(ids, h.ID)
 		}
 		return "", &RefusedError{Reason: ReasonAmbiguousIssue, Detail: fmt.Sprintf("project %s has %d articles carrying op %d's marker: %s", op.YTTargetID, len(marked), op.ID, strings.Join(ids, ","))}
 	}
+
 	if !isSplit {
+		if len(marked) == 1 {
+			return "", &AdoptedError{ID: marked[0].ID}
+		}
 		return ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, ParentID: parent, Summary: summary, Content: text})
 	}
-	indexID, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, ParentID: parent, Summary: summary, Content: text})
-	if err != nil {
-		return "", err
-	}
+
 	pieces := splitDocBody(p.Body, MaxArticleBytes)
-	for i, piece := range pieces {
-		partSummary := truncateRunes(fmt.Sprintf("%s / part %d of %d", p.Summary, i+1, len(pieces)), ArticleSummaryLimit)
-		partContent := RenderArticleCreate(op.Actor, op.CreatedAt.UTC().Truncate(time.Second), op.ID, piece)
-		if _, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, ParentID: indexID, Summary: partSummary, Content: partContent}); err != nil {
-			return indexID, fmt.Errorf("split child part %d: %w", i+1, err)
+	var indexID string
+	adopted := false
+	if len(marked) == 1 {
+		indexID = marked[0].ID
+		adopted = true
+	} else {
+		id, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, ParentID: parent, Summary: summary, Content: text})
+		if err != nil {
+			return "", err
 		}
+		indexID = id
+	}
+
+	missing, err := splitMissingParts(ctx, ar, op, p, indexID, pieces)
+	if err != nil {
+		return "", &NotSentError{Err: fmt.Errorf("split parts check: %w", err)}
+	}
+	for _, i := range missing {
+		partSummary := truncateRunes(fmt.Sprintf("%s / part %d of %d", p.Summary, i+1, len(pieces)), ArticleSummaryLimit)
+		partContent := RenderArticleCreate(op.Actor, op.CreatedAt.UTC().Truncate(time.Second), op.ID, pieces[i])
+		if _, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, ParentID: indexID, Summary: partSummary, Content: partContent}); err != nil {
+			return "", &NotSentError{Err: fmt.Errorf("split child part %d: %w", i+1, err)}
+		}
+	}
+
+	if adopted {
+		return "", &AdoptedError{ID: indexID}
 	}
 	return indexID, nil
 }
@@ -870,8 +922,11 @@ func (a articleCreate) Evidence(ctx context.Context, remote Remote, op Op, text 
 		return ev, nil
 	}
 	summary := p.Summary
-	if len(p.Body) > MaxArticleBytes {
+	isSplit := len(p.Body) > MaxArticleBytes
+	var pieces []string
+	if isSplit {
 		summary = truncateRunes(p.Summary+" (분할 문서)", ArticleSummaryLimit)
+		pieces = splitDocBody(p.Body, MaxArticleBytes)
 	}
 	hits, err := ar.FindArticles(ctx, ArticleSearch{ProjectShort: p.YTProjectShort, ProjectID: op.YTTargetID, Query: summary, Summary: summary, ParentID: parent})
 	if err != nil {
@@ -879,6 +934,13 @@ func (a articleCreate) Evidence(ctx context.Context, remote Remote, op Op, text 
 	}
 	for _, h := range markedArticles(hits, op.ID) {
 		if h.Content == text {
+			if isSplit {
+				missing, err := splitMissingParts(ctx, ar, op, p, h.ID, pieces)
+				if err != nil || len(missing) > 0 {
+					ev.Mismatched++
+					continue
+				}
+			}
 			ev.Matches = append(ev.Matches, h.ID)
 		} else {
 			ev.Mismatched++

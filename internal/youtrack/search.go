@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -130,7 +131,10 @@ func (s *Service) Search(ctx context.Context, q, scope, session string, limit in
 		issues, err = s.client.SearchIssues(yctx, issueSearchQuery(names, text), limit+1)
 	}
 	if err == nil && wantDocs {
-		articles, err = s.client.SearchArticleText(yctx, text, limit+1)
+		clean := cleanSearchText(text)
+		if clean != "" {
+			articles, err = s.client.SearchArticleText(yctx, clean, limit+1)
+		}
 	}
 	if err != nil {
 		log.Printf("search.youtrack_error reason=%s scope=%q err=%v", searchFailureReason(yctx, err), scope, err)
@@ -248,14 +252,33 @@ func mirroredShortNames(projects []store.YouTrackProject) []string {
 	return names
 }
 
+var youtrackSyntaxCleanRE = regexp.MustCompile(`[{}\(\)\\\":]+`)
+var leadingConjunctionRE = regexp.MustCompile(`^(?i)(?:or|and)\s+`)
+
+// cleanSearchText strips YouTrack query syntax characters (braces, parens,
+// quotes, colons, backslashes) and leading conjunctions so user text matches
+// as words/tokens without triggering YouTrack syntax errors or filter injections.
+func cleanSearchText(text string) string {
+	s := strings.Join(strings.Fields(youtrackSyntaxCleanRE.ReplaceAllString(text, " ")), " ")
+	return strings.TrimSpace(leadingConjunctionRE.ReplaceAllString(s, ""))
+}
+
 // issueSearchQuery restricts the issue search to the mirrored projects using
-// project: {A}, {B} <text> syntax with raw user text.
+// an isolated project clause, combined with the cleaned user text tokens.
 func issueSearchQuery(names []string, text string) string {
 	parts := make([]string, 0, len(names))
 	for _, name := range names {
-		parts = append(parts, "{"+name+"}")
+		parts = append(parts, "project: {"+name+"}")
 	}
-	return "project: " + strings.Join(parts, ", ") + " " + text
+	clean := cleanSearchText(text)
+	if len(parts) == 0 {
+		return clean
+	}
+	projClause := strings.Join(parts, " or ")
+	if clean == "" {
+		return "(" + projClause + ")"
+	}
+	return "(" + projClause + ") and (" + clean + ")"
 }
 
 // excerpt is the first searchExcerptRunes runes of the body with whitespace

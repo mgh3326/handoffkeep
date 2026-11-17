@@ -4446,37 +4446,89 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 	if scope == "ctx" {
 		return s.SearchCtx(ctx, q, session, limit)
 	}
-	if NumericIDQuery(q) {
-		hits, ok, err := s.ExactNumericHit(ctx, q, scope, session)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			if len(hits) > limit {
-				hits = hits[:limit]
-				for i := range hits {
-					hits[i].Truncated = true
-				}
+	if scope == "tasks" {
+		return s.searchTasks(ctx, q, session, limit)
+	}
+	out := []SearchResult{}
+	// "#<n>" and bare-number queries are document-id lookups in the scopes
+	// that contain documents (all, docs), the same way scope "tasks" resolves
+	// task ids. The exact match always leads the page and a missing id yields
+	// an empty result set rather than rows that merely mention the digits.
+	exactDocKey := ""
+	if scope == "all" || scope == "docs" {
+		if NumericIDQuery(q) {
+			m := numericIDQuery.FindStringSubmatch(strings.TrimSpace(q))
+			id, e := strconv.ParseInt(m[1], 10, 64)
+			if e != nil {
+				return out, nil
 			}
-			return hits, nil
+			row := s.pool.QueryRow(ctx, `SELECT key,session,kind,left(body,160),created_at FROM documents WHERE id=$2 AND ($1='' OR session=$1)`, session, id)
+			var x SearchResult
+			switch e := row.Scan(&x.Key, &x.Session, &x.Kind, &x.Snippet, &x.CreatedAt); {
+			case e == nil:
+				x.Scope, x.Title = "docs", x.Key
+				out = append(out, x)
+				exactDocKey = x.Key
+			case errors.Is(e, ErrNoRows):
+				return out, nil
+			default:
+				return nil, fmt.Errorf("search docs exact: %w", e)
+			}
 		}
 	}
-	if scope == "docs" || scope == "all" {
-		hits, ok, err := s.ExactDocHit(ctx, strings.TrimSpace(q), session)
-		if err != nil {
-			return nil, err
+	parts := []string{}
+	if scope == "all" || scope == "docs" {
+		parts = append(parts, `(SELECT 'docs' scope,key,session,key title,created_at,id row_id FROM documents WHERE ($1='' OR session=$1) AND (to_tsvector('simple',key || ' ' || body) @@ plainto_tsquery('simple',$2) OR key || ' ' || body ILIKE '%' || $2 || '%') ORDER BY created_at DESC,key,session,title LIMIT $3)`)
+	}
+	mainSQL := `WITH candidates AS (` + strings.Join(parts, " UNION ALL ") + `), page AS MATERIALIZED (
+		SELECT scope,key,session,title,created_at,row_id FROM candidates
+		ORDER BY created_at DESC,scope,key,session,title LIMIT $3
+	)
+	SELECT p.scope,p.key,p.session,
+		d.kind kind,
+		p.title,
+		ts_headline('simple',d.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8') snippet,
+		'{}'::jsonb refs,p.created_at
+	FROM page p
+	LEFT JOIN documents d ON p.scope='docs' AND d.id=p.row_id
+	ORDER BY p.created_at DESC,p.scope,p.key,p.session,p.title`
+	if capture, ok := ctx.Value(searchCaptureKey{}).(searchCapture); ok {
+		capture(mainSQL, []any{session, q, limit + 1})
+	}
+	rows, e := s.pool.Query(ctx, mainSQL, session, q, limit+1)
+	if e != nil {
+		return nil, fmt.Errorf("search: %w", e)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var x SearchResult
+		var refs []byte
+		if e = rows.Scan(&x.Scope, &x.Key, &x.Session, &x.Kind, &x.Title, &x.Snippet, &refs, &x.CreatedAt); e != nil {
+			return nil, e
 		}
-		if ok {
-			if len(hits) > limit {
-				hits = hits[:limit]
-				for i := range hits {
-					hits[i].Truncated = true
-				}
-			}
-			return hits, nil
+		if e = json.Unmarshal(refs, &x.Refs); e != nil {
+			return nil, e
+		}
+		if x.Scope == "docs" && x.Key == exactDocKey {
+			continue
+		}
+		out = append(out, x)
+	}
+	if e = rows.Err(); e != nil {
+		return nil, e
+	}
+	if len(out) > limit {
+		out = out[:limit]
+		for i := range out {
+			out[i].Truncated = true
 		}
 	}
-	return []SearchResult{}, nil
+	if scope == "all" || scope == "docs" {
+		if e = s.linkTaskDocs(ctx, out); e != nil {
+			return nil, e
+		}
+	}
+	return out, nil
 }
 
 // linkTaskDocs annotates docs-scope hits with the ids of tasks whose body_doc
@@ -4530,6 +4582,107 @@ func (s *Store) linkTaskDocs(ctx context.Context, out []SearchResult) error {
 }
 
 var numericIDQuery = regexp.MustCompile(`^#?([0-9]+)$`)
+
+// searchTasks implements scope "tasks": title FTS/ILIKE over the tasks table
+// (all states, merged and dropped included) plus task_comments bodies when
+// that table exists.  "#<n>" and bare-number queries are answered by exact id
+// lookup first; the exact match always leads the page and a missing id yields
+// an empty result set.  Default page is 20, hard cap 50; a truncated page sets
+// Truncated on every returned row.  The session argument filters on lane.
+func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]SearchResult, error) {
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	like := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
+	var exactID int64 = -1
+	if m := numericIDQuery.FindStringSubmatch(strings.TrimSpace(q)); m != nil {
+		id, e := strconv.ParseInt(m[1], 10, 64)
+		if e != nil {
+			return []SearchResult{}, nil
+		}
+		exactID = id
+	}
+	refsExpr := taskRefsExpr
+	titleMatch := `(to_tsvector('simple',t.title) @@ plainto_tsquery('simple',$2) OR t.title ILIKE '%'||$4||'%' ESCAPE '\' OR EXISTS (SELECT 1 FROM translations tr WHERE tr.entity='task' AND tr.entity_id=t.id::text AND tr.field='title' AND tr.lang='ko' AND tr.source_sha256=encode(sha256(convert_to(t.title,'UTF8')),'hex') AND tr.text ILIKE '%'||$4||'%' ESCAPE '\'))`
+	out := []SearchResult{}
+	if exactID >= 0 {
+		row := s.pool.QueryRow(ctx, `SELECT t.id::text,t.lane,t.kind,t.title,`+refsExpr+`,t.created_at FROM tasks t WHERE t.id=$2 AND ($1='' OR t.lane=$1)`, lane, exactID)
+		var x SearchResult
+		var refs []byte
+		switch e := row.Scan(&x.Key, &x.Session, &x.Kind, &x.Title, &refs, &x.CreatedAt); {
+		case e == nil:
+			if e = json.Unmarshal(refs, &x.Refs); e != nil {
+				return nil, e
+			}
+			x.Scope, x.Snippet = "tasks", x.Title
+			out = append(out, x)
+		case errors.Is(e, ErrNoRows):
+			return out, nil
+		default:
+			return nil, fmt.Errorf("search tasks exact: %w", e)
+		}
+	}
+	var comments bool
+	if e := s.pool.QueryRow(ctx, `SELECT to_regclass('task_comments') IS NOT NULL`).Scan(&comments); e != nil {
+		return nil, fmt.Errorf("search tasks probe: %w", e)
+	}
+	parts := []string{`SELECT 'tasks' scope,t.id::text key,t.lane session,t.kind,t.title,` +
+		`COALESCE((SELECT substr(tr.text,GREATEST(1,position(lower($2) in lower(tr.text))-40),160) FROM translations tr WHERE tr.entity='task' AND tr.entity_id=t.id::text AND tr.field='title' AND tr.lang='ko' AND tr.source_sha256=encode(sha256(convert_to(t.title,'UTF8')),'hex') AND tr.text ILIKE '%'||$4||'%' ESCAPE '\'),NULLIF(ts_headline('simple',t.title,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8'),''),left(t.title,160)) snippet,` +
+		refsExpr + ` refs,t.created_at,0 match_rank FROM tasks t WHERE ($1='' OR t.lane=$1) AND ` + titleMatch}
+	// A translated body is a task hit, but ranks below a title hit.
+	parts = append(parts, `SELECT 'tasks' scope,t.id::text key,t.lane session,t.kind,t.title,`+
+		`substr(tr.text,GREATEST(1,position(lower($2) in lower(tr.text))-40),160) snippet,`+
+		refsExpr+` refs,t.created_at,1 match_rank FROM tasks t JOIN documents d ON d.key=split_part(t.body_doc,'#',1) JOIN translations tr ON tr.entity='task' AND tr.entity_id=t.id::text AND tr.field='body' AND tr.lang='ko' AND tr.source_sha256=encode(sha256(convert_to(d.body,'UTF8')),'hex') WHERE ($1='' OR t.lane=$1) AND tr.text ILIKE '%'||$4||'%' ESCAPE '\' AND NOT `+titleMatch)
+	if comments {
+		// DISTINCT ON keeps one row per task no matter how many comments match —
+		// otherwise a comment-heavy task would consume the LIMIT+1 window and the
+		// page could report "complete" while other tasks went unfetched.
+		parts = append(parts, `(SELECT DISTINCT ON (t.id) 'tasks' scope,t.id::text key,t.lane session,t.kind,t.title,`+
+			`COALESCE((SELECT substr(tr.text,GREATEST(1,position(lower($2) in lower(tr.text))-40),160) FROM translations tr WHERE tr.entity='task_comment' AND tr.entity_id=c.id::text AND tr.field='body' AND tr.lang='ko' AND tr.source_sha256=encode(sha256(convert_to(c.body,'UTF8')),'hex') AND tr.text ILIKE '%'||$4||'%' ESCAPE '\'),NULLIF(ts_headline('simple',c.body,plainto_tsquery('simple',$2),'MaxWords=24,MinWords=8'),''),left(c.body,160)) snippet,`+
+			refsExpr+` refs,t.created_at,2 match_rank FROM task_comments c JOIN tasks t ON t.id=c.task_id WHERE ($1='' OR t.lane=$1) AND (to_tsvector('simple',c.body) @@ plainto_tsquery('simple',$2) OR c.body ILIKE '%'||$4||'%' ESCAPE '\' OR EXISTS (SELECT 1 FROM translations tr WHERE tr.entity='task_comment' AND tr.entity_id=c.id::text AND tr.field='body' AND tr.lang='ko' AND tr.source_sha256=encode(sha256(convert_to(c.body,'UTF8')),'hex') AND tr.text ILIKE '%'||$4||'%' ESCAPE '\')) AND NOT `+titleMatch+` ORDER BY t.id, c.created_at DESC, c.id DESC)`)
+	}
+	mainSQL := `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (SELECT DISTINCT ON (key) * FROM (` + strings.Join(parts, " UNION ALL ") + ") candidates ORDER BY key,match_rank,created_at DESC) r ORDER BY r.match_rank,r.created_at DESC,r.key DESC LIMIT $3"
+	if capture, ok := ctx.Value(searchCaptureKey{}).(searchCapture); ok {
+		capture(mainSQL, []any{lane, q, limit + 1, like})
+	}
+	rows, e := s.pool.Query(ctx, mainSQL, lane, q, limit+1, like)
+	if e != nil {
+		return nil, fmt.Errorf("search tasks: %w", e)
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	for _, x := range out {
+		seen[x.Key] = true
+	}
+	for rows.Next() {
+		var x SearchResult
+		var refs []byte
+		if e = rows.Scan(&x.Scope, &x.Key, &x.Session, &x.Kind, &x.Title, &x.Snippet, &refs, &x.CreatedAt); e != nil {
+			return nil, e
+		}
+		if e = json.Unmarshal(refs, &x.Refs); e != nil {
+			return nil, e
+		}
+		if seen[x.Key] {
+			continue
+		}
+		seen[x.Key] = true
+		out = append(out, x)
+	}
+	if e = rows.Err(); e != nil {
+		return nil, e
+	}
+	if len(out) > limit {
+		out = out[:limit]
+		for i := range out {
+			out[i].Truncated = true
+		}
+	}
+	return out, nil
+}
 
 func benchCatalogArgs(d storeDialect, pool string, includeRetired bool) []any {
 	if d == mysqlDialect {
