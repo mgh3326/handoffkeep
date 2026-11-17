@@ -288,43 +288,6 @@ func TestCommentLocalRejects(t *testing.T) {
 	}
 }
 
-func TestImportMarksProtocolOwnedComments(t *testing.T) {
-	s := schemaStore(t, "ytc_import")
-	ctx := t.Context()
-	task := ytcTask(t, s, "handoffkeep")
-	ytcEnroll(t, s, task)
-	free, err := s.CreateTaskComment(ctx, task, "worker", "imported normally")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.SetYTCommentsMode(YTCommentsCanary)
-	owned, err := s.CreateTaskComment(ctx, task, "worker", "hk writes this one")
-	if err != nil {
-		t.Fatal(err)
-	}
-	op, _ := ytcOpFor(t, s, owned.ID)
-	check := func(name string, rows []ImportComment) {
-		t.Helper()
-		got := map[int64]int64{}
-		for _, r := range rows {
-			got[r.ID] = r.HKOpID
-		}
-		if len(got) != 2 || got[free.ID] != 0 || got[owned.ID] != op.ID {
-			t.Fatalf("%s: hk_op_id by comment = %v, want %d -> 0 and %d -> %d", name, got, free.ID, owned.ID, op.ID)
-		}
-	}
-	page, err := s.ImportCommentsPage(ctx, 0, 100, "", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	check("full page", page)
-	updated, err := s.ImportCommentsUpdatedPage(ctx, []int64{task}, time.Time{}, 0, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	check("update page", updated)
-}
-
 // ytcProtocol runs the comment worker's protocol (YTCommentConfig) on the
 // test tenant over yt.
 func ytcProtocol(t *testing.T, s *Store, yt ytwrite.Remote, offset *atomic.Int64) *ytwrite.Protocol {

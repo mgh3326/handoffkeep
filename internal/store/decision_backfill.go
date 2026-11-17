@@ -154,33 +154,6 @@ func (s *Store) ListOpenDecisionSources(ctx context.Context) (OpenDecisionSource
 	}
 	add(DecisionSourceChat, len(items), items)
 
-	// linear: an issue not superseded whose request is still the task's open
-	// one. The retired Linear decision flow (hk 4425) wrote these rows; no
-	// new ones are made.
-	rows, err = s.pool.Query(ctx, `SELECT l.request_id,l.created_at,t.id,t.lane,t.state,COALESCE(t.refs->'decision_request'->>'question','')
-		FROM linear_decision_issues l JOIN tasks t ON t.id=l.task_id
-		WHERE l.superseded_by='' AND t.refs->'decision_request'->>'id'=l.request_id AND t.refs->'decision_request'->>'status'='open'
-		ORDER BY l.request_id LIMIT $1`, openDecisionSourceLimit)
-	if err != nil {
-		return out, err
-	}
-	items = []OpenDecisionItem{}
-	for rows.Next() {
-		var id int64
-		x := OpenDecisionItem{Source: DecisionSourceLinear}
-		if err := rows.Scan(&x.SourceRef, &x.CreatedAt, &id, &x.Lane, &x.TaskState, &x.Question); err != nil {
-			rows.Close()
-			return out, err
-		}
-		x.TaskID = &id
-		items = append(items, x)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return out, err
-	}
-	add(DecisionSourceLinear, len(items), items)
-
 	if err := s.linkOpenDecisionItems(ctx, out.Items); err != nil {
 		return out, err
 	}

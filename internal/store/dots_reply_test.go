@@ -35,9 +35,9 @@ func TestDotsReplyAtomicAndIdempotent(t *testing.T) {
 	if err != nil || len(results) != 0 {
 		t.Fatalf("results=%v err=%v", results, err)
 	}
-	docs, err := s.ListDocumentsByPrefix(ctx, "dots/results/", 10)
-	if err != nil || len(docs) != 0 {
-		t.Fatalf("documents=%v err=%v", docs, err)
+	var documents int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM documents WHERE key LIKE 'dots/results/%'`).Scan(&documents); err != nil || documents != 0 {
+		t.Fatalf("documents=%d err=%v", documents, err)
 	}
 	var notifications int
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE target_lane='requester'`).Scan(&notifications); err != nil || notifications != 0 {
@@ -190,9 +190,9 @@ func TestDotsOperatorQuestionRollsBackAndRetries(t *testing.T) {
 	if err != nil || len(results) != 0 {
 		t.Fatalf("results=%v err=%v", results, err)
 	}
-	docs, err := s.ListDocumentsByPrefix(ctx, "dots/results/", 10)
-	if err != nil || len(docs) != 0 {
-		t.Fatalf("documents=%v err=%v", docs, err)
+	var documents int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM documents WHERE key LIKE 'dots/results/%'`).Scan(&documents); err != nil || documents != 0 {
+		t.Fatalf("documents=%d err=%v", documents, err)
 	}
 	var notifications int
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox`).Scan(&notifications); err != nil || notifications != 0 {
