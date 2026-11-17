@@ -877,7 +877,7 @@ func (a articleCreate) Send(ctx context.Context, remote Remote, op Op, text stri
 		partContent := RenderArticleCreate(op.Actor, op.CreatedAt.UTC().Truncate(time.Second), op.ID, pieces[i])
 		childID, err := ar.CreateArticle(ctx, ArticleCreate{ProjectID: op.YTTargetID, ParentID: indexID, Summary: partSummary, Content: partContent})
 		if err != nil {
-			return "", &NotSentError{Err: fmt.Errorf("split child part %d: %w", i+1, err)}
+			return "", fmt.Errorf("split child part %d: %w", i+1, err)
 		}
 		if childID == "" {
 			hits, findErr := ar.FindArticles(ctx, ArticleSearch{

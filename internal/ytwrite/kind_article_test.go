@@ -495,19 +495,19 @@ func TestArticleCreateSplitLongDocument(t *testing.T) {
 }
 
 // A split document that fails midway through child creation is not marked applied
-// by Evidence, and a subsequent attempt creates missing parts under the adopted index.
+// by Evidence, and on reconcile after the dropped reply, Evidence verifies all parts.
 func TestArticleCreateSplitPartialFailureAndRetryRecovery(t *testing.T) {
 	e := newArticleEnv(t)
 	req := articleReq()
 	req.Body = strings.Repeat("hello world line\n", 20000) // ~340KB -> 2 parts
 	op := prepareWith(t, e, req)
 
-	// Inject fault on part 2: index succeeds (1), part 1 succeeds (2), part 2 fails (3)
+	// Inject fault on part 2: index succeeds (1), part 1 succeeds (2), part 2 commits but reply is dropped (3)
 	creates := 0
 	e.yt.BeforeArticleCreate = func(ctx context.Context, in ytwrite.ArticleCreate) {
 		creates++
 		if creates == 3 {
-			e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.ServerError, Status: http.StatusBadGateway})
+			e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.CommitDropReply})
 		}
 	}
 
@@ -517,10 +517,11 @@ func TestArticleCreateSplitPartialFailureAndRetryRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.State == ytwrite.StateApplied {
-		t.Fatalf("op was marked applied despite missing part 2")
+		t.Fatalf("op was marked applied despite dropped reply on part 2")
 	}
+	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
 
-	// Disable hook, advance clock and drive again: should adopt index and create missing part 2
+	// Disable hook, advance clock and drive again: Evidence finds all parts and applies
 	e.yt.BeforeArticleCreate = nil
 	e.clock.Advance(time.Hour)
 	e.drive()
@@ -603,7 +604,7 @@ func TestArticleCreateSplitChildPartContentValidation(t *testing.T) {
 		}
 	}
 	e.drive()
-	e.want(op.ID, ytwrite.StatePrepared, ytwrite.ReasonNotSent)
+	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
 
 	// Now corrupt part 1 in the fake: keep marker but truncate body
 	marker := ytwrite.OpMarker(op.ID)
@@ -622,27 +623,11 @@ func TestArticleCreateSplitChildPartContentValidation(t *testing.T) {
 		t.Fatal("failed to find part 1 article to corrupt")
 	}
 
-	// Disable hook, advance clock and drive: retry detects part 1 is missing (corrupted)
-	// and creates it with valid content along with part 2
+	// Advance clock and drive: Evidence should reject the split document because part 1 content is corrupted
 	e.yt.BeforeArticleCreate = nil
 	e.clock.Advance(time.Hour)
 	e.drive()
-	applied := e.want(op.ID, ytwrite.StateApplied, "")
-	if applied.YTResultID == "" {
-		t.Fatal("expected non-empty YTResultID")
-	}
-
-	// Check that part 1 now has valid content in fake
-	part1Fixed := false
-	for _, a := range e.yt.Articles(artProject) {
-		if strings.Contains(a.Summary, "part 1 of") && !strings.Contains(a.Content, "corrupted truncated body") {
-			part1Fixed = true
-			break
-		}
-	}
-	if !part1Fixed {
-		t.Fatal("part 1 was not recreated with valid content")
-	}
+	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonMarkerMismatch)
 }
 
 // When CreateArticle returns an empty ID and the immediate reconcile lookup fails,
@@ -679,17 +664,17 @@ func TestArticleCreateSplitLongSummaryUniquePartDiscriminator(t *testing.T) {
 	req.Body = chunk + chunk
 	op := prepareWith(t, e, req)
 
-	// Inject fault on part 2 create (index=1, part1=2, part2=3)
+	// Inject fault on part 2 create (index=1, part1=2, part2 commits but reply dropped=3)
 	creates := 0
 	e.yt.BeforeArticleCreate = func(ctx context.Context, in ytwrite.ArticleCreate) {
 		creates++
 		if creates == 3 {
-			e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.ServerError, Status: http.StatusBadGateway})
+			e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.CommitDropReply})
 		}
 	}
 
 	e.drive()
-	e.want(op.ID, ytwrite.StatePrepared, ytwrite.ReasonNotSent)
+	e.want(op.ID, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
 
 	// Next attempt: hook disabled, drive again. Part 1 must not satisfy part 2.
 	e.yt.BeforeArticleCreate = nil
