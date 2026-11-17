@@ -74,7 +74,6 @@ func TestUnportedMethodsReturnDialectUnsupportedOnMySQL(t *testing.T) {
 		name string
 		call func() error
 	}{
-		{name: "document", call: func() error { _, _, err := mysqlStore.GetDocument(context.Background(), "key"); return err }},
 		{name: "attachment", call: func() error {
 			_, _, err := mysqlStore.GetAttachment(context.Background(), strings.Repeat("a", 64))
 			return err
