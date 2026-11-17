@@ -50,7 +50,12 @@ func TestMySQLBulkLoadSetterIsCopyToolOnly(t *testing.T) {
 			}
 			return nil
 		}
-		if strings.HasSuffix(path, "_test.go") || strings.Contains(filepath.ToSlash(path), "/cmd/store-copy/") {
+		normalizedPath := filepath.ToSlash(path)
+		// The single binary dispatches store-copy through cmd/handoffkeep;
+		// the store package owns its SQL implementation and session setting.
+		if strings.HasSuffix(path, "_test.go") ||
+			strings.Contains(normalizedPath, "/cmd/store-copy/") ||
+			strings.HasSuffix(normalizedPath, "/internal/store/copy.go") {
 			return nil
 		}
 		switch filepath.Ext(path) {
