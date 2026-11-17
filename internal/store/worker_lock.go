@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,18 +23,26 @@ const (
 )
 
 // WorkerLease holds the connection for a session lock.
-type WorkerLease struct{ conn *pgxpool.Conn }
+type WorkerLease struct {
+	conn      *pgxpool.Conn
+	mysqlConn *sql.Conn
+	mysqlName string
+}
 
 // TryWorkerLock reserves a connection for the lifetime of a worker. An
 // uncertain acquisition discards the connection so a locked session cannot
 // return to the pool.
 func (s *Store) TryWorkerLock(ctx context.Context, id WorkerLock) (*WorkerLease, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, false, ErrDialectUnsupported
-	}
-
 	if id != HubForwardWorkerLock && id != TaskThreadWorkerLock {
 		return nil, false, errors.New("unknown worker lock")
+	}
+	if s.dialect == mysqlDialect {
+		name := mysqlSessionLockName("id", strconv.FormatInt(int64(id), 10))
+		conn, held, err := mysqlTrySessionLock(ctx, s.mysqlPool, name)
+		if err != nil || !held {
+			return nil, held, err
+		}
+		return &WorkerLease{mysqlConn: conn, mysqlName: name}, true, nil
 	}
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
@@ -62,7 +72,12 @@ func (l *WorkerLease) Watch(ctx context.Context) error {
 		case <-ticker.C:
 			probe, cancel := context.WithTimeout(ctx, workerLockProbeTimeout)
 			var one int
-			err := l.conn.QueryRow(probe, `SELECT 1`).Scan(&one)
+			var err error
+			if l.mysqlConn != nil {
+				err = l.mysqlConn.QueryRowContext(probe, `SELECT 1`).Scan(&one)
+			} else {
+				err = l.conn.QueryRow(probe, `SELECT 1`).Scan(&one)
+			}
 			cancel()
 			if err != nil {
 				return err
@@ -72,7 +87,14 @@ func (l *WorkerLease) Watch(ctx context.Context) error {
 }
 
 // Release closes the dedicated connection, dropping its session lock.
-func (l *WorkerLease) Release() { discardWorkerConnection(l.conn) }
+func (l *WorkerLease) Release() {
+	if l.mysqlConn != nil {
+		_ = mysqlReleaseSessionLock(l.mysqlConn, l.mysqlName)
+		l.mysqlConn = nil
+		return
+	}
+	discardWorkerConnection(l.conn)
+}
 
 func discardWorkerConnection(conn *pgxpool.Conn) {
 	ctx, cancel := context.WithTimeout(context.Background(), workerLockProbeTimeout)
