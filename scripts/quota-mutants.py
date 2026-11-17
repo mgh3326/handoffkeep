@@ -18,28 +18,8 @@ SCOPE = 'if !ok || !s.quotaScope(w, client, r.PathValue("key")) {'
 MUTANTS = [
     (
         "dedupe-removed", "store/quota.go", True,
-        '\t// The lease row lock above serializes publishers for this account, so a\n'
-        '\t// concurrent identical publish observes the committed row here instead of\n'
-        '\t// double-appending. The comparison ignores measured_at: republishing the\n'
-        '\t// same value only advances freshness on the latest pointer. The pointer\'s\n'
-        '\t// own measured_at is the floor: GREATEST ignores a NULL (legacy) confirmed_at.\n'
-        '\tvar dupID int64\n'
-        '\tvar dupValue []byte\n'
-        '\terr = tx.QueryRow(ctx, `SELECT o.id,o.value FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 AND l.kind=$2 AND l.window_key=$3 AND (o.value - \'measured_at\') = ($4::jsonb - \'measured_at\')`, key, x.Kind, x.Window, data).Scan(&dupID, &dupValue)\n'
-        '\tif err == nil {\n'
-        '\t\tvar existing QuotaObservation\n'
-        '\t\tif err = json.Unmarshal(dupValue, &existing); err != nil {\n'
-        '\t\t\treturn x, false, err\n'
-        '\t\t}\n'
-        '\t\texisting.ID = dupID\n'
-        '\t\tif err = tx.QueryRow(ctx, `UPDATE quota_latest SET confirmed_at=GREATEST(confirmed_at,measured_at,$4) WHERE account_key=$1 AND kind=$2 AND window_key=$3 RETURNING confirmed_at`, key, x.Kind, x.Window, x.MeasuredAt).Scan(&existing.ConfirmedAt); err != nil {\n'
-        '\t\t\treturn x, false, err\n'
-        '\t\t}\n'
-        '\t\treturn existing, true, tx.Commit(ctx)\n'
-        '\t}\n'
-        '\tif !errors.Is(err, pgx.ErrNoRows) {\n'
-        '\t\treturn x, false, err\n'
-        '\t}\n', "",
+        "\tif err == nil {\n\t\tvar existing QuotaObservation\n",
+        "\terr = ErrNoRows // mutant: the duplicate lookup always misses\n\tif err == nil {\n\t\tvar existing QuotaObservation\n",
         "TestQuotaDedupePostgres", "dedupe",
     ),
     (
@@ -100,7 +80,7 @@ MUTANTS = [
     ),
     (
         "retention-deletes-referenced", "store/quota.go", True,
-        "AND id NOT IN (SELECT observation_id FROM quota_latest)", "",
+        "interval '90 days' AND id NOT IN (SELECT observation_id FROM quota_latest)", "interval '90 days'",
         "TestQuotaRetentionPostgres", "retention",
     ),
     (
