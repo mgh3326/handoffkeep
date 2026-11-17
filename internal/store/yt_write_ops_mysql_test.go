@@ -13,7 +13,7 @@ import (
 // insertMySQLYTOp prepares one op directly, so the guard tests have a row to
 // mutate. It bypasses the ledger only for the INSERT: the row is exactly the
 // shape Prepare writes.
-func insertMySQLYTOp(t *testing.T, s *Store, kind string) int64 {
+func insertMySQLYTOp(t *testing.T, s *Store, kind, key, target string) int64 {
 	t.Helper()
 	var id int64
 	err := s.mysqlWriteTransaction(t.Context(), func(tx transaction) error {
@@ -21,8 +21,8 @@ func insertMySQLYTOp(t *testing.T, s *Store, kind string) int64 {
 		id, err = tx.InsertID(t.Context(), `INSERT INTO yt_write_ops(principal, kind, idem_key, payload_sha, payload, entity_kind, entity_id,
 			yt_target_id, actor, parent_id, child_seq, state, yt_result_id, reason, last_error, attempts, reconciles,
 			created_at, next_attempt_at, tenant)
-			VALUES (?,?,?,?,CAST(? AS JSON),?,?,?,?,0,0,'prepared','','','',0,0,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),?)`,
-			"hk:test", kind, "key-"+kind, "sha", `{}`, "task", "1", "", "actor", "")
+			VALUES (?,?,?,?,CAST(? AS JSON),?,?,?,NULL,0,'prepared','','','',0,0,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),?)`,
+			"hk:test", kind, key, "sha", `{}`, "task", "1", target, "actor", "")
 		return err
 	})
 	if err != nil {
@@ -39,7 +39,7 @@ func TestMySQLYTWriteOpsGuards(t *testing.T) {
 	}
 	t.Cleanup(s.Close)
 
-	id := insertMySQLYTOp(t, s, "comment_append")
+	id := insertMySQLYTOp(t, s, "comment_append", "key-c1", "")
 
 	// Identity and payload are immutable.
 	if _, err := s.mysqlPool.ExecContext(ctx, `UPDATE yt_write_ops SET payload_sha='other' WHERE id=?`, id); err == nil {
@@ -68,13 +68,13 @@ func TestMySQLYTWriteOpsGuards(t *testing.T) {
 		t.Errorf("retarget rejected: %v", err)
 	}
 	// The comment hold (hk 4457): a queued op stays prepared.
-	id2 := insertMySQLYTOp(t, s, "comment_append")
+	id2 := insertMySQLYTOp(t, s, "comment_append", "key-c2", "")
 	if _, err := s.mysqlPool.ExecContext(ctx, `UPDATE yt_write_ops SET attempts=attempts+1, next_attempt_at=UTC_TIMESTAMP(6) WHERE id=?`, id2); err != nil {
 		t.Errorf("comment hold rejected: %v", err)
 	}
 
 	// issue_create apply without its binding and map is refused.
-	id3 := insertMySQLYTOp(t, s, "issue_create")
+	id3 := insertMySQLYTOp(t, s, "issue_create", "key-i1", "")
 	if _, err := s.mysqlPool.ExecContext(ctx, `UPDATE yt_write_ops SET state='dispatched', attempts=1, dispatched_at=UTC_TIMESTAMP(6), yt_target_id='HK-9', payload_sha='r' WHERE id=?`, id3); err != nil {
 		t.Fatalf("issue dispatch rejected: %v", err)
 	}
@@ -82,8 +82,8 @@ func TestMySQLYTWriteOpsGuards(t *testing.T) {
 		t.Error("issue apply without binding accepted")
 	}
 	// decision_create apply without its binding is refused.
-	id4 := insertMySQLYTOp(t, s, "decision_create")
-	if _, err := s.mysqlPool.ExecContext(ctx, `UPDATE yt_write_ops SET state='dispatched', attempts=1, dispatched_at=UTC_TIMESTAMP(6), yt_target_id='HK-9' WHERE id=?`, id4); err != nil {
+	id4 := insertMySQLYTOp(t, s, "decision_create", "key-d1", "HK-9")
+	if _, err := s.mysqlPool.ExecContext(ctx, `UPDATE yt_write_ops SET state='dispatched', attempts=1, dispatched_at=UTC_TIMESTAMP(6) WHERE id=?`, id4); err != nil {
 		t.Fatalf("decision dispatch rejected: %v", err)
 	}
 	if _, err := s.mysqlPool.ExecContext(ctx, `UPDATE yt_write_ops SET state='applied', yt_result_id='HK-9', resolved_at=UTC_TIMESTAMP(6) WHERE id=?`, id4); err == nil {
