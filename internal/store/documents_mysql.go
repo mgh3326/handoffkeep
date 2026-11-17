@@ -8,7 +8,6 @@ import (
 )
 
 // mysqlPutDocument runs after the common validation and hash computation.
-// Deploy projections belong to the changes area and remain gated until ported.
 func (s *Store) mysqlPutDocument(ctx context.Context, x Document, now time.Time) (Document, bool, error) {
 	var out Document
 	var changed bool
@@ -21,9 +20,7 @@ func (s *Store) mysqlPutDocument(ctx context.Context, x Document, now time.Time)
 }
 
 func (s *Store) mysqlPutDocumentOnce(ctx context.Context, x Document, now time.Time) (Document, bool, error) {
-	if strings.HasPrefix(x.Key, "deploy/") {
-		return x, false, ErrDialectUnsupported
-	}
+	isDeployRecord := strings.HasPrefix(x.Key, "deploy/")
 	var hash string
 	var task *int64
 	var class *string
@@ -45,6 +42,11 @@ func (s *Store) mysqlPutDocumentOnce(ctx context.Context, x Document, now time.T
 	}
 	defer release()
 	defer tx.Rollback(ctx)
+	if isDeployRecord {
+		if err = s.lockTx(ctx, tx, 8241873001); err != nil {
+			return x, true, err
+		}
+	}
 	if x.TaskID != nil {
 		var exists bool
 		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?)`, *x.TaskID).Scan(&exists); err != nil {
@@ -61,6 +63,15 @@ func (s *Store) mysqlPutDocumentOnce(ctx context.Context, x Document, now time.T
 	err = tx.QueryRow(ctx, "SELECT id,created_at,updated_at,task_id,COALESCE(origin_class,'') FROM documents WHERE `key`=?", x.Key).Scan(&x.ID, &x.CreatedAt, &x.UpdatedAt, &x.TaskID, &x.OriginClass)
 	if err != nil {
 		return x, true, err
+	}
+	if isDeployRecord {
+		record := parseStoredDeployRecord(x.Key, x.SHA256, x.Body, x.CreatedAt)
+		if err = writeDeployProjectionMySQL(ctx, tx, record); err != nil {
+			return x, true, err
+		}
+		if err = s.applyDeployRecordTx(ctx, tx, record, now); err != nil {
+			return x, true, err
+		}
 	}
 	return x, true, tx.Commit(ctx)
 }

@@ -71,6 +71,16 @@ const deployServiceProjectionColumns = "`key`,sha256,record,decoded"
 
 const deployRecordBodyFallbackMySQL = "CASE WHEN p.`key` IS NULL OR NOT p.decoded\n\tOR NOT JSON_CONTAINS_PATH(p.record,'one','$.failed_step_name') THEN d.body ELSE NULL END"
 
+func writeDeployProjectionMySQL(ctx context.Context, tx transaction, x StoredDeployRecord) error {
+	data, err := json.Marshal(x.Record)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO deploy_record_projection(`+"`key`"+`,sha256,record,decoded) VALUES(?,?,?,?)
+		ON DUPLICATE KEY UPDATE sha256=VALUES(sha256),record=VALUES(record),decoded=VALUES(decoded)`, x.Key, x.SHA256, string(data), x.Decoded)
+	return err
+}
+
 func deployRecordForPRMySQL(ctx context.Context, tx transaction, pr string) (StoredDeployRecord, bool, error) {
 	lo, hi := keyPrefixBounds("deploy/")
 	rows, err := tx.Query(ctx, `SELECT d.`+"`key`"+`,d.sha256,d.created_at,p.record,p.decoded,`+deployRecordBodyFallbackMySQL+
