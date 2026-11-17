@@ -41,6 +41,31 @@ func TestCopyPostgresMySQLAndBackWithParity(t *testing.T) {
 	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO bench_scores(model_id,effort,harness,source,metric,score,captured_at,cost_per_task_usd,updated_by,updated_at) VALUES('copy-model','','','copy-test','metric',1.25,$1,2.5,'test',$1)`, when); err != nil {
 		t.Fatal(err)
 	}
+	// B7 tables are seeded on the PostgreSQL side and copied in both directions
+	// below. Keep values representative of their nullable and JSON columns.
+	for _, stmt := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO jobs(job_id,task_id,host,state,role,created_by,created_at,updated_at) VALUES('copy-job',NULL,'copy-host','claimed','worker','copy-test',$1,$1)`, []any{when}},
+		{`INSERT INTO relay_events(id,kind,job_id,epoch,owner_lane,machine,pane_id,report_path,report_last_line,question,pr,head,reason,event_id,text,event_time,received_at,attempts) VALUES(94001,'lane.event','',0,'copy-lane','','','','','','','','','copy-event','ready',NULL,$1,1)`, []any{when}},
+		{`INSERT INTO notification_outbox(id,kind,target_lane,event_id,text,created_at) VALUES(94001,'dots_report','copy-lane','copy-outbox','ready',$1)`, []any{when}},
+		{`INSERT INTO mcp_write_audit(id,tool,actor,channel,author,task_id,idempotency_key,result,at) VALUES(94001,'task_update','copy-actor','dots','dots',NULL,'copy-key','{"ok":true}'::jsonb,$1)`, []any{when}},
+		{`INSERT INTO placement_decisions(id,job_id,attempt,task_id,decided_at,decided_on,tool_version,source,ranking,state_source,chosen_host,outcome,reason,profile,pool,account_key,family,model,role,pane_id,repo,candidates) VALUES(94001,'copy-job',1,NULL,$1,'copy-host','','auto','[]','copy',NULL,'failed','','','','','','','','','','[]'::jsonb)`, []any{when}},
+		{`INSERT INTO attachments(sha256,size_bytes,mime,original_name,created_by,created_at) VALUES(repeat('b',64),3,'text/plain','copy.txt','copy-test',$1)`, []any{when}},
+		{`INSERT INTO attachment_refs(sha256,ref_kind,ref_id) VALUES(repeat('b',64),'task','94001')`, nil},
+		{`INSERT INTO attachment_uploads(id,staging_key,name,mime,size_bytes,sha256,ref_kind,ref_id,created_by,status,reason,created_at,expires_at,updated_at) VALUES('94000000000000000000000000000001','stage/copy','copy.txt','text/plain',3,repeat('b',64),'task','94001','copy-test','pending','',$1,$1,$1)`, []any{when}},
+		{`INSERT INTO attachment_usage(month,puts,gets,bytes_added) VALUES('2026-11',1,2,3)`, nil},
+		{`INSERT INTO ledger_cursors(consumer,acked_sync_id,acked_at,updated_by) VALUES('copy-consumer',0,$1,'copy-test')`, []any{when}},
+		{`INSERT INTO sync_log(entry_id,sync_id,model,model_id,action,at) VALUES(94001,94001,'task','copy-task','U',$1)`, []any{when}},
+		{`UPDATE sync_state SET max_sync_id=94001,pruned_through=0 WHERE singleton`, nil},
+		{`INSERT INTO quota_leases(account_key,owner,holder,expires_at) VALUES('copy-account','copy-owner','copy-holder',$1)`, []any{when}},
+		{`INSERT INTO quota_presence(host_id,account_key,last_seen) VALUES('copy-host','copy-account',$1)`, []any{when}},
+	} {
+		if _, err := pg.pool.Exec(t.Context(), stmt.query, stmt.args...); err != nil {
+			t.Fatalf("seed B7 copy row: %s: %v", stmt.query, err)
+		}
+	}
 	forward, err := CopyStore(t.Context(), pgURL, myURL, nil, false)
 	if err != nil {
 		t.Fatal(err)
@@ -56,10 +81,16 @@ func TestCopyPostgresMySQLAndBackWithParity(t *testing.T) {
 	if err := my.mysqlPool.QueryRowContext(t.Context(), `SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='quota_observations'`).Scan(&nextMySQLID); err != nil {
 		t.Fatal(err)
 	}
-	my.Close()
 	if nextMySQLID <= 91001 {
 		t.Fatalf("MySQL AUTO_INCREMENT=%d, want past copied id 91001", nextMySQLID)
 	}
+	if err := my.mysqlPool.QueryRowContext(t.Context(), `SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='sync_log'`).Scan(&nextMySQLID); err != nil {
+		t.Fatal(err)
+	}
+	if nextMySQLID <= 94001 {
+		t.Fatalf("MySQL sync_log AUTO_INCREMENT=%d, want past copied entry_id 94001", nextMySQLID)
+	}
+	my.Close()
 	_, backURL := schemaStoreAt(t, "copy_reverse")
 	back, err := Open(t.Context(), backURL)
 	if err != nil {
@@ -84,6 +115,12 @@ func TestCopyPostgresMySQLAndBackWithParity(t *testing.T) {
 	}
 	if nextPostgresID <= 91001 {
 		t.Fatalf("PostgreSQL sequence=%d, want past copied id 91001", nextPostgresID)
+	}
+	if err := back.pool.QueryRow(t.Context(), `SELECT nextval(pg_get_serial_sequence('sync_log','entry_id'))`).Scan(&nextPostgresID); err != nil {
+		t.Fatal(err)
+	}
+	if nextPostgresID <= 94001 {
+		t.Fatalf("PostgreSQL sync_log sequence=%d, want past copied entry_id 94001", nextPostgresID)
 	}
 }
 

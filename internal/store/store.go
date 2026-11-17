@@ -3413,20 +3413,17 @@ func validLaneEventText(value string) bool {
 // AppendRelayEvent inserts a durable relay event. Its conflict update is part
 // of the same statement so concurrent duplicate submissions share one row.
 func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return RelayEvent{}, false, ErrDialectUnsupported
-	}
-
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return x, false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	// Mirroring an answer or a job's end updates decision records that name a
 	// task or a job, which needs the task-mutation lock, taken before the job
 	// lock (lock order, lockorder.go; decision_records.go).
 	if relayTouchesDecisions(x) {
-		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+		if err = s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
 			return x, false, err
 		}
 	}
@@ -3443,6 +3440,47 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 	// request fields to the non-NULL defaults required by the idempotency key.
 	x.ID, x.ReceivedAt, x.DeliveredAt, x.DeliveredTo, x.Attempts = 0, time.Time{}, nil, "", 0
 	var created bool
+	if s.dialect == mysqlDialect {
+		// Serialize relay-key lookup and insertion on MySQL. The unique indexes
+		// remain the final guard, while this lock lets the method report created
+		// accurately and increment duplicate attempts once.
+		lockValue := x.OwnerLane + "\x00" + x.EventID
+		if x.Kind != "lane.event" {
+			lockValue = fmt.Sprintf("%s\x00%s\x00%d\x00%s\x00%s", x.Kind, x.JobID, x.Epoch, x.ReportPath, x.Reason)
+		}
+		if _, err := mysqlTransactionLock(ctx, tx, mysqlLockKey("relay_event", lockValue), false); err != nil {
+			return x, false, err
+		}
+		keyQuery := `SELECT ` + relayEventColumns + ` FROM relay_events WHERE owner_lane=? AND event_id=? AND kind='lane.event' FOR UPDATE`
+		keyArgs := []any{x.OwnerLane, x.EventID}
+		if x.Kind != "lane.event" {
+			keyQuery = `SELECT ` + relayEventColumns + ` FROM relay_events WHERE kind=? AND job_id=? AND epoch=? AND report_path=? AND reason=? FOR UPDATE`
+			keyArgs = []any{x.Kind, x.JobID, x.Epoch, x.ReportPath, x.Reason}
+		}
+		var existing RelayEvent
+		lookupErr := scanRelayEvent(tx.QueryRow(ctx, keyQuery, keyArgs...), &existing)
+		if lookupErr == nil {
+			if _, err = tx.Exec(ctx, `UPDATE relay_events SET attempts=attempts+1 WHERE id=?`, existing.ID); err != nil {
+				return x, false, err
+			}
+			if err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=?`, existing.ID), &x); err != nil {
+				return x, false, err
+			}
+			return x, false, tx.Commit(ctx)
+		}
+		if !errors.Is(lookupErr, ErrNoRows) {
+			return x, false, lookupErr
+		}
+		insert := `INSERT INTO relay_events(kind,job_id,epoch,owner_lane,machine,pane_id,report_path,report_last_line,question,pr,head,reason,event_id,text,event_time,received_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,UTC_TIMESTAMP(6))`
+		id, insertErr := tx.InsertID(ctx, insert, x.Kind, x.JobID, x.Epoch, x.OwnerLane, x.Machine, x.PaneID, x.ReportPath, x.ReportLastLine, x.Question, x.PR, x.Head, x.Reason, x.EventID, x.Text, x.EventTime)
+		if insertErr != nil {
+			return x, false, insertErr
+		}
+		if err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=?`, id), &x); err != nil {
+			return x, false, err
+		}
+		return x, true, tx.Commit(ctx)
+	}
 	query := `INSERT INTO relay_events(kind,job_id,epoch,owner_lane,machine,pane_id,report_path,report_last_line,question,pr,head,reason,event_id,text,event_time,received_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())`
 	if x.Kind == "lane.event" {
 		query += ` ON CONFLICT (owner_lane,event_id) WHERE kind='lane.event' DO UPDATE SET attempts=relay_events.attempts+1`
@@ -3454,7 +3492,7 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 		return x, false, err
 	}
 	if created {
-		if err = mirrorRelayDecisionsTx(ctx, tx, x); err != nil {
+		if err = mirrorRelayDecisionsTx(ctx, tx.(pgTransaction).tx, x); err != nil {
 			return x, false, err
 		}
 	}
@@ -3464,14 +3502,34 @@ func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent,
 // MarkRelayEventDelivered records the first successful delivery. Subsequent
 // calls are intentionally idempotent and return the original delivery time.
 func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, pane string) (RelayEvent, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return RelayEvent{}, ErrDialectUnsupported
-	}
-
 	if id < 1 || !validText(machine, MaxBytes) || !validText(pane, MaxBytes) {
 		return RelayEvent{}, errors.New("invalid relay event delivery")
 	}
 	var x RelayEvent
+	if s.dialect == mysqlDialect {
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return RelayEvent{}, err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		if err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=? FOR UPDATE`, id), &x); err != nil {
+			if errors.Is(err, ErrNoRows) {
+				return RelayEvent{}, ErrRelayEventNotFound
+			}
+			return RelayEvent{}, err
+		}
+		if x.DeliveredAt == nil {
+			if _, err = tx.Exec(ctx, `UPDATE relay_events SET delivered_at=UTC_TIMESTAMP(6),delivered_to=? WHERE id=?`, machine+"/"+pane, id); err != nil {
+				return RelayEvent{}, err
+			}
+			if err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=?`, id), &x); err != nil {
+				return RelayEvent{}, err
+			}
+			return x, tx.Commit(ctx)
+		}
+		return x, nil
+	}
 	err := scanRelayEvent(s.pool.QueryRow(ctx, `UPDATE relay_events SET delivered_at=now(),delivered_to=$2 WHERE id=$1 AND delivered_at IS NULL RETURNING `+relayEventColumns, id, machine+"/"+pane), &x)
 	if err == nil {
 		return x, nil
@@ -3496,10 +3554,6 @@ func (s *Store) ListRelayEvents(ctx context.Context, lane string, undelivered bo
 // ListRelayEventsPage is the additive cursor form of ListRelayEvents. afterID
 // is exclusive so a caller can safely advance using the last row it observed.
 func (s *Store) ListRelayEventsPage(ctx context.Context, lane, kind string, undelivered bool, afterID int64, limit int) ([]RelayEvent, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if !validText(lane, MaxBytes) || (kind != "" && !relayEventKinds[kind]) || afterID < 0 {
 		return nil, errors.New("invalid relay event query")
 	}
@@ -3512,22 +3566,38 @@ func (s *Store) ListRelayEventsPage(ctx context.Context, lane, kind string, unde
 	q, args := `SELECT `+relayEventColumns+` FROM relay_events WHERE 1=1`, []any{}
 	if lane != "" {
 		args = append(args, lane)
-		q += fmt.Sprintf(" AND owner_lane=$%d", len(args))
+		if s.dialect == mysqlDialect {
+			q += ` AND owner_lane=?`
+		} else {
+			q += fmt.Sprintf(" AND owner_lane=$%d", len(args))
+		}
 	}
 	if kind != "" {
 		args = append(args, kind)
-		q += fmt.Sprintf(" AND kind=$%d", len(args))
+		if s.dialect == mysqlDialect {
+			q += ` AND kind=?`
+		} else {
+			q += fmt.Sprintf(" AND kind=$%d", len(args))
+		}
 	}
 	if undelivered {
 		q += " AND delivered_at IS NULL"
 	}
 	if afterID > 0 {
 		args = append(args, afterID)
-		q += fmt.Sprintf(" AND id>$%d", len(args))
+		if s.dialect == mysqlDialect {
+			q += ` AND id>?`
+		} else {
+			q += fmt.Sprintf(" AND id>$%d", len(args))
+		}
 	}
 	args = append(args, limit)
-	q += fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args))
-	rows, err := s.pool.Query(ctx, q, args...)
+	if s.dialect == mysqlDialect {
+		q += ` ORDER BY id ASC LIMIT ?`
+	} else {
+		q += fmt.Sprintf(" ORDER BY id ASC LIMIT $%d", len(args))
+	}
+	rows, err := s.db().Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -3551,10 +3621,6 @@ func (s *Store) ListRelayEventsPage(ctx context.Context, lane, kind string, unde
 // ListRelayEventsTimeline returns newest relay events first. beforeID is an
 // exclusive descending cursor; dates are supplied as UTC bounds by the UI.
 func (s *Store) ListRelayEventsTimeline(ctx context.Context, lane, kind string, since, until *time.Time, beforeID int64, limit int) ([]RelayEvent, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if !validText(lane, MaxBytes) || (kind != "" && !relayEventKinds[kind]) || beforeID < 0 {
 		return nil, errors.New("invalid relay timeline query")
 	}
@@ -3567,27 +3633,51 @@ func (s *Store) ListRelayEventsTimeline(ctx context.Context, lane, kind string, 
 	q, args := `SELECT `+relayEventColumns+` FROM relay_events WHERE 1=1`, []any{}
 	if lane != "" {
 		args = append(args, lane)
-		q += fmt.Sprintf(" AND owner_lane=$%d", len(args))
+		if s.dialect == mysqlDialect {
+			q += ` AND owner_lane=?`
+		} else {
+			q += fmt.Sprintf(" AND owner_lane=$%d", len(args))
+		}
 	}
 	if kind != "" {
 		args = append(args, kind)
-		q += fmt.Sprintf(" AND kind=$%d", len(args))
+		if s.dialect == mysqlDialect {
+			q += ` AND kind=?`
+		} else {
+			q += fmt.Sprintf(" AND kind=$%d", len(args))
+		}
 	}
 	if since != nil {
 		args = append(args, *since)
-		q += fmt.Sprintf(" AND received_at >= $%d", len(args))
+		if s.dialect == mysqlDialect {
+			q += ` AND received_at>=?`
+		} else {
+			q += fmt.Sprintf(" AND received_at >= $%d", len(args))
+		}
 	}
 	if until != nil {
 		args = append(args, *until)
-		q += fmt.Sprintf(" AND received_at < $%d", len(args))
+		if s.dialect == mysqlDialect {
+			q += ` AND received_at<?`
+		} else {
+			q += fmt.Sprintf(" AND received_at < $%d", len(args))
+		}
 	}
 	if beforeID > 0 {
 		args = append(args, beforeID)
-		q += fmt.Sprintf(" AND id < $%d", len(args))
+		if s.dialect == mysqlDialect {
+			q += ` AND id<?`
+		} else {
+			q += fmt.Sprintf(" AND id < $%d", len(args))
+		}
 	}
 	args = append(args, limit)
-	q += fmt.Sprintf(" ORDER BY id DESC LIMIT $%d", len(args))
-	rows, err := s.pool.Query(ctx, q, args...)
+	if s.dialect == mysqlDialect {
+		q += ` ORDER BY id DESC LIMIT ?`
+	} else {
+		q += fmt.Sprintf(" ORDER BY id DESC LIMIT $%d", len(args))
+	}
+	rows, err := s.db().Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -3620,12 +3710,8 @@ type EventWatermarks struct {
 
 // EventWatermarks reads the current watermarks in one snapshot.
 func (s *Store) EventWatermarks(ctx context.Context) (EventWatermarks, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return EventWatermarks{}, ErrDialectUnsupported
-	}
-
 	var w EventWatermarks
-	err := s.pool.QueryRow(ctx, `SELECT COALESCE((SELECT MAX(id) FROM relay_events),0),COALESCE((SELECT MAX(id) FROM task_events),0),COALESCE((SELECT max_sync_id FROM sync_state WHERE singleton),0)`).Scan(&w.RelayMaxID, &w.TaskEventMaxID, &w.SyncMaxID)
+	err := s.db().QueryRow(ctx, `SELECT COALESCE((SELECT MAX(id) FROM relay_events),0),COALESCE((SELECT MAX(id) FROM task_events),0),COALESCE((SELECT max_sync_id FROM sync_state WHERE singleton),0)`).Scan(&w.RelayMaxID, &w.TaskEventMaxID, &w.SyncMaxID)
 	return w, err
 }
 
@@ -3687,14 +3773,10 @@ func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDec
 
 // ListOpenEscalations implements the decision inbox job escalation definition.
 func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEvent, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if limit < 1 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+relayEventColumns+` FROM relay_events e
+	query := `SELECT ` + relayEventColumns + ` FROM relay_events e
 		WHERE e.kind='job.escalate' AND NOT EXISTS (
 			SELECT 1 FROM relay_events resolved WHERE resolved.job_id=e.job_id
 			AND resolved.kind IN ('job.joined','job.completed','job.lost','job.revoked') AND resolved.id>e.id
@@ -3702,7 +3784,19 @@ func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEven
 			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event'
 			AND resolved.owner_lane=e.owner_lane AND resolved.id>e.id
 			AND resolved.event_id LIKE '%decision-escalation-' || e.id::text || '-%'
-		) ORDER BY e.id DESC LIMIT $1`, limit)
+		) ORDER BY e.id DESC LIMIT $1`
+	if s.dialect == mysqlDialect {
+		query = `SELECT ` + relayEventColumns + ` FROM relay_events e
+			WHERE e.kind='job.escalate' AND NOT EXISTS (
+				SELECT 1 FROM relay_events resolved WHERE resolved.job_id=e.job_id
+				AND resolved.kind IN ('job.joined','job.completed','job.lost','job.revoked') AND resolved.id>e.id
+			) AND NOT EXISTS (
+				SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event'
+				AND resolved.owner_lane=e.owner_lane AND resolved.id>e.id
+				AND resolved.event_id LIKE CONCAT('%decision-escalation-',e.id,'-%')
+			) ORDER BY e.id DESC LIMIT ?`
+	}
+	rows, err := s.db().Query(ctx, query, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -3725,15 +3819,20 @@ func (s *Store) ListOpenEscalations(ctx context.Context, limit int) ([]RelayEven
 
 // ListOpenLaneDecisions implements the decision inbox lane.event definition.
 func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEvent, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if limit < 1 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+relayEventColumns+` FROM relay_events e
-		WHERE `+openLaneDecisionSQL+` ORDER BY e.id DESC LIMIT $1`, limit)
+	openSQL := openLaneDecisionSQL
+	limitSQL := `$1`
+	if s.dialect == mysqlDialect {
+		openSQL = `e.kind='lane.event' AND e.text LIKE '[decision-needed]%' AND NOT EXISTS (
+			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event' AND resolved.owner_lane=e.owner_lane
+			AND resolved.text LIKE CONCAT('[decision-answered] #',e.id,':%') AND resolved.id>e.id
+		)`
+		limitSQL = `?`
+	}
+	rows, err := s.db().Query(ctx, `SELECT `+relayEventColumns+` FROM relay_events e
+		WHERE `+openSQL+` ORDER BY e.id DESC LIMIT `+limitSQL, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -3992,15 +4091,11 @@ func ValidTaskRefID(id string) bool {
 }
 func monthNow() string { return time.Now().UTC().Format("2006-01") }
 func (s *Store) GetAttachment(ctx context.Context, sha string) (Attachment, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Attachment{}, false, ErrDialectUnsupported
-	}
-
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(sha) {
 		return Attachment{}, false, errors.New("invalid attachment sha")
 	}
 	var x Attachment
-	e := s.pool.QueryRow(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments WHERE sha256=$1`, sha).Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation, &x.ArchivedAt, &x.ArchiveLocation, &x.HotDeletedAt)
+	e := s.db().QueryRow(ctx, s.q(`SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments WHERE sha256=$1`, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments WHERE sha256=?`), sha).Scan(&x.SHA256, &x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation, &x.ArchivedAt, &x.ArchiveLocation, &x.HotDeletedAt)
 	if e != nil {
 		if errors.Is(e, ErrNoRows) {
 			return x, false, nil
@@ -4013,11 +4108,7 @@ func (s *Store) GetAttachment(ctx context.Context, sha string) (Attachment, bool
 // ListAttachmentObjects returns each stored object once, without multiplying
 // rows by attachment_refs; migration uses this complete inventory.
 func (s *Store) ListAttachmentObjects(ctx context.Context) ([]Attachment, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
-	rows, err := s.pool.Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments ORDER BY sha256`)
+	rows, err := s.db().Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments ORDER BY sha256`)
 	if err != nil {
 		return nil, err
 	}
@@ -4034,21 +4125,24 @@ func (s *Store) ListAttachmentObjects(ctx context.Context) ([]Attachment, error)
 }
 
 func (s *Store) SetAttachmentObjectLocation(ctx context.Context, sha, location string) error {
-	if s != nil && s.dialect == mysqlDialect {
-		return ErrDialectUnsupported
-	}
-
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(sha) || location == "" || !validText(location, 2048) {
 		return errors.New("invalid attachment object location")
 	}
-	result, err := s.pool.Exec(ctx, `UPDATE attachments SET object_location=$2 WHERE sha256=$1`, sha, location)
+	result, err := s.db().Exec(ctx, s.q(`UPDATE attachments SET object_location=$2 WHERE sha256=$1`, `UPDATE attachments SET object_location=? WHERE sha256=?`), attachmentLocationArgs(s.dialect, sha, location)...)
 	if err != nil {
 		return err
 	}
-	if result.RowsAffected() != 1 {
+	if result != 1 {
 		return errors.New("attachment not found")
 	}
 	return nil
+}
+
+func attachmentLocationArgs(d storeDialect, sha, location string) []any {
+	if d == mysqlDialect {
+		return []any{location, sha}
+	}
+	return []any{sha, location}
 }
 
 // attachmentChargedBytes is the storage-fuse total for a new attachment
@@ -4061,14 +4155,11 @@ func (s *Store) SetAttachmentObjectLocation(ctx context.Context, sha, location s
 // unreleased row, resolved ones included — because at begin time nothing is
 // mid-commit and a stricter admission only refuses earlier.
 const attachmentChargedBytes = `SELECT (SELECT COALESCE(SUM(size_bytes),0) FROM attachments) + (SELECT COALESCE(SUM(size_bytes),0) FROM attachment_uploads WHERE staging_deleted_at IS NULL AND status IN ('pending','completing') AND ($1='' OR id<>$1))`
+const attachmentChargedBytesMySQL = `SELECT (SELECT COALESCE(SUM(size_bytes),0) FROM attachments) + (SELECT COALESCE(SUM(size_bytes),0) FROM attachment_uploads WHERE staging_deleted_at IS NULL AND status IN ('pending','completing') AND (?='' OR id<>?))`
 
 // PutAttachment records an immutable object and its reference after S3 PUT has
 // succeeded. It serializes quota accounting with a locked monthly usage row.
 func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, putCap int64) (Attachment, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Attachment{}, false, ErrDialectUnsupported
-	}
-
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(x.SHA256) || x.SizeBytes < 0 || x.MIME == "" || !validText(x.OriginalName, 512) || !validAttachmentRef(x.RefKind, x.RefID) {
 		return x, false, errors.New("invalid attachment")
 	}
@@ -4078,32 +4169,33 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 	if x.RefKind == "" {
 		x.RefKind = "none"
 	}
-	tx, e := s.pool.Begin(ctx)
+	tx, release, e := s.begin(ctx)
 	if e != nil {
 		return x, false, e
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	// Serialize with ReserveAttachmentUpload under the staging-budget lock so
 	// a buffered write and a direct-upload reservation cannot both pass the
 	// same storage fuse. Taken before the usage-row lock; Reserve takes no
 	// row lock, so no cycle is possible (lockorder.go).
-	if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('attachment_staging_budget', 0))`); e != nil {
+	if e = lockAttachmentStagingBudget(ctx, s, tx); e != nil {
 		return x, false, e
 	}
 	month := monthNow()
-	if _, e = tx.Exec(ctx, `INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, month); e != nil {
+	if _, e = tx.Exec(ctx, s.q(`INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, `INSERT INTO attachment_usage(month) VALUES(?) ON DUPLICATE KEY UPDATE month=month`), month); e != nil {
 		return x, false, e
 	}
 	var puts, total int64
-	if e = tx.QueryRow(ctx, `SELECT puts FROM attachment_usage WHERE month=$1 FOR UPDATE`, month).Scan(&puts); e != nil {
+	if e = tx.QueryRow(ctx, s.q(`SELECT puts FROM attachment_usage WHERE month=$1 FOR UPDATE`, `SELECT puts FROM attachment_usage WHERE month=? FOR UPDATE`), month).Scan(&puts); e != nil {
 		return x, false, e
 	}
-	if e = tx.QueryRow(ctx, attachmentChargedBytes, "").Scan(&total); e != nil {
+	if e = tx.QueryRow(ctx, s.q(attachmentChargedBytes, attachmentChargedBytesMySQL), emptyExceptUploadArgs(s.dialect, "")...).Scan(&total); e != nil {
 		return x, false, e
 	}
 	var present bool
 	var archivedAt *time.Time
-	e = tx.QueryRow(ctx, `SELECT archived_at FROM attachments WHERE sha256=$1 FOR UPDATE`, x.SHA256).Scan(&archivedAt)
+	e = tx.QueryRow(ctx, s.q(`SELECT archived_at FROM attachments WHERE sha256=$1 FOR UPDATE`, `SELECT archived_at FROM attachments WHERE sha256=? FOR UPDATE`), x.SHA256).Scan(&archivedAt)
 	if e != nil && !errors.Is(e, ErrNoRows) {
 		return x, false, e
 	}
@@ -4116,10 +4208,10 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 			return x, false, ErrAttachmentPutCap
 		}
 		x.CreatedAt = time.Now().UTC()
-		if _, e = tx.Exec(ctx, `INSERT INTO attachments(sha256,size_bytes,mime,original_name,created_by,created_at,object_location) VALUES($1,$2,$3,$4,$5,$6,$7)`, x.SHA256, x.SizeBytes, x.MIME, x.OriginalName, x.CreatedBy, x.CreatedAt, x.ObjectLocation); e != nil {
+		if _, e = tx.Exec(ctx, s.q(`INSERT INTO attachments(sha256,size_bytes,mime,original_name,created_by,created_at,object_location) VALUES($1,$2,$3,$4,$5,$6,$7)`, `INSERT INTO attachments(sha256,size_bytes,mime,original_name,created_by,created_at,object_location) VALUES(?,?,?,?,?,?,?)`), x.SHA256, x.SizeBytes, x.MIME, x.OriginalName, x.CreatedBy, x.CreatedAt, x.ObjectLocation); e != nil {
 			return x, false, e
 		}
-		if _, e = tx.Exec(ctx, `UPDATE attachment_usage SET puts=puts+1,bytes_added=bytes_added+$2 WHERE month=$1`, month, x.SizeBytes); e != nil {
+		if _, e = tx.Exec(ctx, s.q(`UPDATE attachment_usage SET puts=puts+1,bytes_added=bytes_added+$2 WHERE month=$1`, `UPDATE attachment_usage SET puts=puts+1,bytes_added=bytes_added+? WHERE month=?`), attachmentUsageArgs(s.dialect, month, x.SizeBytes)...); e != nil {
 			return x, false, e
 		}
 	} else {
@@ -4131,14 +4223,28 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 		if archivedAt != nil {
 			return x, false, ErrAttachmentArchived
 		}
-		if e = tx.QueryRow(ctx, `SELECT size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); e != nil {
+		if e = tx.QueryRow(ctx, s.q(`SELECT size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256=$1`, `SELECT size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256=?`), x.SHA256).Scan(&x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); e != nil {
 			return x, false, e
 		}
 	}
-	if _, e = tx.Exec(ctx, `INSERT INTO attachment_refs(sha256,ref_kind,ref_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, x.SHA256, x.RefKind, x.RefID); e != nil {
+	if _, e = tx.Exec(ctx, s.q(`INSERT INTO attachment_refs(sha256,ref_kind,ref_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, `INSERT INTO attachment_refs(sha256,ref_kind,ref_id) VALUES(?,?,?) ON DUPLICATE KEY UPDATE sha256=sha256`), x.SHA256, x.RefKind, x.RefID); e != nil {
 		return x, false, e
 	}
 	return x, !present, tx.Commit(ctx)
+}
+
+func emptyExceptUploadArgs(d storeDialect, id string) []any {
+	if d == mysqlDialect {
+		return []any{id, id}
+	}
+	return []any{id}
+}
+
+func attachmentUsageArgs(d storeDialect, month string, bytes int64) []any {
+	if d == mysqlDialect {
+		return []any{bytes, month}
+	}
+	return []any{month, bytes}
 }
 
 // CheckAttachmentCapacity is the preflight fuse before an S3 PUT. PutAttachment
@@ -4147,27 +4253,24 @@ func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, put
 // caller is about to finalize, so its own reservation is not counted twice;
 // every other caller passes ”.
 func (s *Store) CheckAttachmentCapacity(ctx context.Context, size, storageCap, putCap int64, exceptUpload string) error {
-	if s != nil && s.dialect == mysqlDialect {
-		return ErrDialectUnsupported
-	}
-
-	tx, e := s.pool.Begin(ctx)
+	tx, release, e := s.begin(ctx)
 	if e != nil {
 		return e
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('attachment_staging_budget', 0))`); e != nil {
+	if e = lockAttachmentStagingBudget(ctx, s, tx); e != nil {
 		return e
 	}
 	m := monthNow()
-	if _, e = tx.Exec(ctx, `INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, m); e != nil {
+	if _, e = tx.Exec(ctx, s.q(`INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, `INSERT INTO attachment_usage(month) VALUES(?) ON DUPLICATE KEY UPDATE month=month`), m); e != nil {
 		return e
 	}
 	var puts, total int64
-	if e = tx.QueryRow(ctx, `SELECT puts FROM attachment_usage WHERE month=$1 FOR UPDATE`, m).Scan(&puts); e != nil {
+	if e = tx.QueryRow(ctx, s.q(`SELECT puts FROM attachment_usage WHERE month=$1 FOR UPDATE`, `SELECT puts FROM attachment_usage WHERE month=? FOR UPDATE`), m).Scan(&puts); e != nil {
 		return e
 	}
-	if e = tx.QueryRow(ctx, attachmentChargedBytes, exceptUpload).Scan(&total); e != nil {
+	if e = tx.QueryRow(ctx, s.q(attachmentChargedBytes, attachmentChargedBytesMySQL), emptyExceptUploadArgs(s.dialect, exceptUpload)...).Scan(&total); e != nil {
 		return e
 	}
 	if total+size > storageCap {
@@ -4192,10 +4295,6 @@ var ErrUploadClaimLost = errors.New("upload_claim_lost")
 // order follows ReserveAttachmentUpload and the capacity checks: the
 // staging-budget advisory lock, then the upload row, then the usage row.
 func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, x Attachment, storageCap, putCap int64) (Attachment, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Attachment{}, false, ErrDialectUnsupported
-	}
-
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(x.SHA256) || x.SizeBytes < 0 || x.MIME == "" || !validText(x.OriginalName, 512) || !validAttachmentRef(x.RefKind, x.RefID) {
 		return x, false, errors.New("invalid attachment")
 	}
@@ -4205,17 +4304,18 @@ func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, 
 	if x.RefKind == "" {
 		x.RefKind = "none"
 	}
-	tx, e := s.pool.Begin(ctx)
+	tx, release, e := s.begin(ctx)
 	if e != nil {
 		return x, false, e
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('attachment_staging_budget', 0))`); e != nil {
+	if e = lockAttachmentStagingBudget(ctx, s, tx); e != nil {
 		return x, false, e
 	}
 	var status, claimNonce, rowSHA string
 	var rowSize int64
-	e = tx.QueryRow(ctx, `SELECT status, COALESCE(claim_nonce,''), sha256, size_bytes FROM attachment_uploads WHERE id=$1 FOR UPDATE`, id).Scan(&status, &claimNonce, &rowSHA, &rowSize)
+	e = tx.QueryRow(ctx, s.q(`SELECT status, COALESCE(claim_nonce,''), sha256, size_bytes FROM attachment_uploads WHERE id=$1 FOR UPDATE`, `SELECT status, COALESCE(claim_nonce,''), sha256, size_bytes FROM attachment_uploads WHERE id=? FOR UPDATE`), id).Scan(&status, &claimNonce, &rowSHA, &rowSize)
 	if e != nil {
 		if errors.Is(e, ErrNoRows) {
 			return x, false, ErrUploadClaimLost
@@ -4226,19 +4326,19 @@ func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, 
 		return x, false, ErrUploadClaimLost
 	}
 	month := monthNow()
-	if _, e = tx.Exec(ctx, `INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, month); e != nil {
+	if _, e = tx.Exec(ctx, s.q(`INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, `INSERT INTO attachment_usage(month) VALUES(?) ON DUPLICATE KEY UPDATE month=month`), month); e != nil {
 		return x, false, e
 	}
 	var puts, total int64
-	if e = tx.QueryRow(ctx, `SELECT puts FROM attachment_usage WHERE month=$1 FOR UPDATE`, month).Scan(&puts); e != nil {
+	if e = tx.QueryRow(ctx, s.q(`SELECT puts FROM attachment_usage WHERE month=$1 FOR UPDATE`, `SELECT puts FROM attachment_usage WHERE month=? FOR UPDATE`), month).Scan(&puts); e != nil {
 		return x, false, e
 	}
-	if e = tx.QueryRow(ctx, attachmentChargedBytes, id).Scan(&total); e != nil {
+	if e = tx.QueryRow(ctx, s.q(attachmentChargedBytes, attachmentChargedBytesMySQL), emptyExceptUploadArgs(s.dialect, id)...).Scan(&total); e != nil {
 		return x, false, e
 	}
 	var present bool
 	var archivedAt *time.Time
-	e = tx.QueryRow(ctx, `SELECT archived_at FROM attachments WHERE sha256=$1 FOR UPDATE`, x.SHA256).Scan(&archivedAt)
+	e = tx.QueryRow(ctx, s.q(`SELECT archived_at FROM attachments WHERE sha256=$1 FOR UPDATE`, `SELECT archived_at FROM attachments WHERE sha256=? FOR UPDATE`), x.SHA256).Scan(&archivedAt)
 	if e != nil && !errors.Is(e, ErrNoRows) {
 		return x, false, e
 	}
@@ -4251,10 +4351,10 @@ func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, 
 			return x, false, ErrAttachmentPutCap
 		}
 		x.CreatedAt = time.Now().UTC()
-		if _, e = tx.Exec(ctx, `INSERT INTO attachments(sha256,size_bytes,mime,original_name,created_by,created_at,object_location) VALUES($1,$2,$3,$4,$5,$6,$7)`, x.SHA256, x.SizeBytes, x.MIME, x.OriginalName, x.CreatedBy, x.CreatedAt, x.ObjectLocation); e != nil {
+		if _, e = tx.Exec(ctx, s.q(`INSERT INTO attachments(sha256,size_bytes,mime,original_name,created_by,created_at,object_location) VALUES($1,$2,$3,$4,$5,$6,$7)`, `INSERT INTO attachments(sha256,size_bytes,mime,original_name,created_by,created_at,object_location) VALUES(?,?,?,?,?,?,?)`), x.SHA256, x.SizeBytes, x.MIME, x.OriginalName, x.CreatedBy, x.CreatedAt, x.ObjectLocation); e != nil {
 			return x, false, e
 		}
-		if _, e = tx.Exec(ctx, `UPDATE attachment_usage SET puts=puts+1,bytes_added=bytes_added+$2 WHERE month=$1`, month, x.SizeBytes); e != nil {
+		if _, e = tx.Exec(ctx, s.q(`UPDATE attachment_usage SET puts=puts+1,bytes_added=bytes_added+$2 WHERE month=$1`, `UPDATE attachment_usage SET puts=puts+1,bytes_added=bytes_added+? WHERE month=?`), attachmentUsageArgs(s.dialect, month, x.SizeBytes)...); e != nil {
 			return x, false, e
 		}
 	} else {
@@ -4266,16 +4366,16 @@ func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, 
 		if archivedAt != nil {
 			return x, false, ErrAttachmentArchived
 		}
-		if e = tx.QueryRow(ctx, `SELECT size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256=$1`, x.SHA256).Scan(&x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); e != nil {
+		if e = tx.QueryRow(ctx, s.q(`SELECT size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256=$1`, `SELECT size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,'') FROM attachments WHERE sha256=?`), x.SHA256).Scan(&x.SizeBytes, &x.MIME, &x.OriginalName, &x.CreatedBy, &x.CreatedAt, &x.ObjectLocation); e != nil {
 			return x, false, e
 		}
 	}
-	if _, e = tx.Exec(ctx, `INSERT INTO attachment_refs(sha256,ref_kind,ref_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, x.SHA256, x.RefKind, x.RefID); e != nil {
+	if _, e = tx.Exec(ctx, s.q(`INSERT INTO attachment_refs(sha256,ref_kind,ref_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, `INSERT INTO attachment_refs(sha256,ref_kind,ref_id) VALUES(?,?,?) ON DUPLICATE KEY UPDATE sha256=sha256`), x.SHA256, x.RefKind, x.RefID); e != nil {
 		return x, false, e
 	}
 	// The status flip consumes the reservation: a done row leaves the
 	// pending/completing sum, so committed and reserved bytes never overlap.
-	if _, e = tx.Exec(ctx, `UPDATE attachment_uploads SET status='done', reason='', updated_at=$3, claim_nonce=NULL WHERE id=$1 AND status='completing' AND claim_nonce=$2`, id, nonce, time.Now().UTC()); e != nil {
+	if _, e = tx.Exec(ctx, s.q(`UPDATE attachment_uploads SET status='done', reason='', updated_at=$3, claim_nonce=NULL WHERE id=$1 AND status='completing' AND claim_nonce=$2`, `UPDATE attachment_uploads SET status='done',reason='',updated_at=?,claim_nonce=NULL WHERE id=? AND status='completing' AND claim_nonce=?`), uploadTouchArgs(s.dialect, id, nonce, time.Now().UTC())...); e != nil {
 		return x, false, e
 	}
 	return x, !present, tx.Commit(ctx)
@@ -4290,40 +4390,33 @@ var ErrAttachmentArchived = errors.New("attachment_archived")
 var ErrAttachmentPutCap = errors.New("attachment_put_cap")
 
 func (s *Store) RecordAttachmentGet(ctx context.Context, sha string, getCap int64) error {
-	if s != nil && s.dialect == mysqlDialect {
-		return ErrDialectUnsupported
-	}
-
-	tx, e := s.pool.Begin(ctx)
+	tx, release, e := s.begin(ctx)
 	if e != nil {
 		return e
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	var exists bool
-	if e = tx.QueryRow(ctx, `SELECT true FROM attachments WHERE sha256=$1`, sha).Scan(&exists); e != nil {
+	if e = tx.QueryRow(ctx, s.q(`SELECT true FROM attachments WHERE sha256=$1`, `SELECT true FROM attachments WHERE sha256=?`), sha).Scan(&exists); e != nil {
 		return e
 	}
 	m := monthNow()
-	if _, e = tx.Exec(ctx, `INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, m); e != nil {
+	if _, e = tx.Exec(ctx, s.q(`INSERT INTO attachment_usage(month) VALUES($1) ON CONFLICT DO NOTHING`, `INSERT INTO attachment_usage(month) VALUES(?) ON DUPLICATE KEY UPDATE month=month`), m); e != nil {
 		return e
 	}
 	var gets int64
-	if e = tx.QueryRow(ctx, `SELECT gets FROM attachment_usage WHERE month=$1 FOR UPDATE`, m).Scan(&gets); e != nil {
+	if e = tx.QueryRow(ctx, s.q(`SELECT gets FROM attachment_usage WHERE month=$1 FOR UPDATE`, `SELECT gets FROM attachment_usage WHERE month=? FOR UPDATE`), m).Scan(&gets); e != nil {
 		return e
 	}
 	// Reads deliberately remain available above the free-tier cap. The value is
 	// still exposed so operators can see that the fuse threshold was crossed.
 	_ = getCap
-	if _, e = tx.Exec(ctx, `UPDATE attachment_usage SET gets=gets+1 WHERE month=$1`, m); e != nil {
+	if _, e = tx.Exec(ctx, s.q(`UPDATE attachment_usage SET gets=gets+1 WHERE month=$1`, `UPDATE attachment_usage SET gets=gets+1 WHERE month=?`), m); e != nil {
 		return e
 	}
 	return tx.Commit(ctx)
 }
 func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limit int) ([]Attachment, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if refKind != "" && !validAttachmentListRef(refKind, refID) {
 		return nil, errors.New("invalid attachment ref")
 	}
@@ -4335,13 +4428,16 @@ func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limi
 	}
 	q := `SELECT a.sha256,a.size_bytes,a.mime,a.original_name,a.created_by,a.created_at,r.ref_kind,r.ref_id,COALESCE(a.object_location,''),a.archived_at,a.archive_location,a.hot_deleted_at FROM attachments a JOIN attachment_refs r ON r.sha256=a.sha256`
 	args := []any{limit}
+	mysqlQ := `SELECT a.sha256,a.size_bytes,a.mime,a.original_name,a.created_by,a.created_at,r.ref_kind,r.ref_id,COALESCE(a.object_location,''),a.archived_at,a.archive_location,a.hot_deleted_at FROM attachments a JOIN attachment_refs r ON r.sha256=a.sha256`
 	if refKind != "" {
 		q += ` WHERE r.ref_kind=$1 AND r.ref_id=$2 ORDER BY a.created_at DESC,a.sha256,r.ref_kind,r.ref_id LIMIT $3`
+		mysqlQ += ` WHERE r.ref_kind=? AND r.ref_id=? ORDER BY a.created_at DESC,a.sha256,r.ref_kind,r.ref_id LIMIT ?`
 		args = []any{refKind, refID, limit}
 	} else {
 		q += ` ORDER BY a.created_at DESC,a.sha256,r.ref_kind,r.ref_id LIMIT $1`
+		mysqlQ += ` ORDER BY a.created_at DESC,a.sha256,r.ref_kind,r.ref_id LIMIT ?`
 	}
-	rows, e := s.pool.Query(ctx, q, args...)
+	rows, e := s.db().Query(ctx, s.q(q, mysqlQ), args...)
 	if e != nil {
 		return nil, e
 	}
@@ -4362,10 +4458,6 @@ func (s *Store) ListAttachments(ctx context.Context, refKind, refID string, limi
 // callers that render an option's pictures read MIME and original name here
 // rather than storing a copy that could drift from the object it names.
 func (s *Store) AttachmentsBySHA(ctx context.Context, shas []string) (map[string]Attachment, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	out := map[string]Attachment{}
 	valid := make([]string, 0, len(shas))
 	for _, sha := range shas {
@@ -4376,7 +4468,16 @@ func (s *Store) AttachmentsBySHA(ctx context.Context, shas []string) (map[string
 	if len(valid) == 0 {
 		return out, nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments WHERE sha256 = ANY($1)`, valid)
+	query := `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments WHERE sha256 = ANY($1)`
+	args := []any{valid}
+	if s.dialect == mysqlDialect {
+		query = `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,COALESCE(object_location,''),archived_at,archive_location,hot_deleted_at FROM attachments WHERE sha256 IN (` + placeholders(len(valid)) + `)`
+		args = make([]any, len(valid))
+		for i := range valid {
+			args[i] = valid[i]
+		}
+	}
+	rows, err := s.db().Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -4398,10 +4499,6 @@ func (s *Store) AttachmentsBySHA(ctx context.Context, shas []string) (map[string
 // query that page makes. Rows carry RefKind "task" and RefID as the canonical
 // task id.
 func (s *Store) ListTaskAttachmentsByRefs(ctx context.Context, ids []int64, perRef int) ([]Attachment, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	out := []Attachment{}
 	if len(ids) == 0 {
 		return out, nil
@@ -4418,7 +4515,17 @@ func (s *Store) ListTaskAttachmentsByRefs(ctx context.Context, ids []int64, perR
 	}
 	// ref_id is a canonical decimal of a requested id, so the bigint sort key
 	// is always valid; the rank bounds the rows one task can contribute.
-	rows, e := s.pool.Query(ctx, `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,ref_id FROM (SELECT a.sha256,a.size_bytes,a.mime,a.original_name,a.created_by,a.created_at,r.ref_id,ROW_NUMBER() OVER (PARTITION BY r.ref_id ORDER BY a.created_at,a.sha256) AS rn FROM attachments a JOIN attachment_refs r ON r.sha256=a.sha256 WHERE r.ref_kind='task' AND r.ref_id = ANY($1::text[])) ranked WHERE rn <= $2 ORDER BY created_at,ref_id::bigint,sha256`, refs, perRef)
+	query := `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,ref_id FROM (SELECT a.sha256,a.size_bytes,a.mime,a.original_name,a.created_by,a.created_at,r.ref_id,ROW_NUMBER() OVER (PARTITION BY r.ref_id ORDER BY a.created_at,a.sha256) AS rn FROM attachments a JOIN attachment_refs r ON r.sha256=a.sha256 WHERE r.ref_kind='task' AND r.ref_id = ANY($1::text[])) ranked WHERE rn <= $2 ORDER BY created_at,ref_id::bigint,sha256`
+	args := []any{refs, perRef}
+	if s.dialect == mysqlDialect {
+		query = `SELECT sha256,size_bytes,mime,original_name,created_by,created_at,ref_id FROM (SELECT a.sha256,a.size_bytes,a.mime,a.original_name,a.created_by,a.created_at,r.ref_id,ROW_NUMBER() OVER (PARTITION BY r.ref_id ORDER BY a.created_at,a.sha256) AS rn FROM attachments a JOIN attachment_refs r ON r.sha256=a.sha256 WHERE r.ref_kind='task' AND r.ref_id IN (` + placeholders(len(refs)) + `)) ranked WHERE rn <= ? ORDER BY created_at,CAST(ref_id AS UNSIGNED),sha256`
+		args = make([]any, 0, len(refs)+1)
+		for _, ref := range refs {
+			args = append(args, ref)
+		}
+		args = append(args, perRef)
+	}
+	rows, e := s.db().Query(ctx, query, args...)
 	if e != nil {
 		return nil, e
 	}
@@ -4433,28 +4540,20 @@ func (s *Store) ListTaskAttachmentsByRefs(ctx context.Context, ids []int64, perR
 	return out, rows.Err()
 }
 func (s *Store) AttachmentUsage(ctx context.Context) (AttachmentUsage, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return AttachmentUsage{}, ErrDialectUnsupported
-	}
-
 	x := AttachmentUsage{Month: monthNow()}
-	e := s.pool.QueryRow(ctx, `SELECT puts,gets,bytes_added FROM attachment_usage WHERE month=$1`, x.Month).Scan(&x.Puts, &x.Gets, &x.BytesAdded)
+	e := s.db().QueryRow(ctx, s.q(`SELECT puts,gets,bytes_added FROM attachment_usage WHERE month=$1`, `SELECT puts,gets,bytes_added FROM attachment_usage WHERE month=?`), x.Month).Scan(&x.Puts, &x.Gets, &x.BytesAdded)
 	if e != nil && errors.Is(e, ErrNoRows) {
 		e = nil
 	}
 	if e != nil {
 		return x, e
 	}
-	e = s.pool.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes),0) FROM attachments`).Scan(&x.TotalBytes)
+	e = s.db().QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes),0) FROM attachments`).Scan(&x.TotalBytes)
 	return x, e
 }
 func (s *Store) AttachmentObjectCount(ctx context.Context) (int64, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return 0, ErrDialectUnsupported
-	}
-
 	var n int64
-	return n, s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM attachments`).Scan(&n)
+	return n, s.db().QueryRow(ctx, `SELECT COUNT(*) FROM attachments`).Scan(&n)
 }
 
 // searchCapture receives the main search statement and its arguments. The

@@ -323,7 +323,7 @@ func (s *Store) Ledger(ctx context.Context, consumer string, now time.Time) (Led
 
 	// Section 5 first: a cursor past the reset boundary answers before any
 	// other read.
-	if out.ChangedSinceAck, err = ledgerChangesTx(ctx, tx, consumer); err != nil {
+	if out.ChangedSinceAck, err = ledgerChangesTx(ctx, pgTransaction{tx}, consumer); err != nil {
 		return Ledger{}, err
 	}
 	started, err := ledgerStartedTx(ctx, tx, now)
@@ -477,10 +477,10 @@ func ledgerTriageTx(ctx context.Context, tx pgx.Tx, now time.Time) (LedgerTriage
 }
 
 // ledgerChangesTx reads section 5 from the consumer's cursor.
-func ledgerChangesTx(ctx context.Context, tx pgx.Tx, consumer string) (LedgerChanges, error) {
+func ledgerChangesTx(ctx context.Context, tx transaction, consumer string) (LedgerChanges, error) {
 	out := LedgerChanges{Summary: []LedgerChangeCount{}, Rows: []SyncChange{}}
 	var c LedgerCursor
-	err := tx.QueryRow(ctx, `SELECT consumer,acked_sync_id,acked_at,updated_by FROM ledger_cursors WHERE consumer=$1`, consumer).Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy)
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT consumer,acked_sync_id,acked_at,updated_by FROM ledger_cursors WHERE consumer=$1`, `SELECT consumer,acked_sync_id,acked_at,updated_by FROM ledger_cursors WHERE consumer=?`), consumer).Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy)
 	if errors.Is(err, ErrNoRows) {
 		out.NoCursor = true
 		return out, tx.QueryRow(ctx, `SELECT max_sync_id FROM sync_state WHERE singleton`).Scan(&out.MaxSyncID)
@@ -495,9 +495,11 @@ func ledgerChangesTx(ctx context.Context, tx pgx.Tx, consumer string) (LedgerCha
 		return out, err
 	}
 	out.Rows, out.MaxSyncID, out.LastSyncID = rows, meta.MaxSyncID, meta.LastSyncID
-	summary, err := tx.Query(ctx, `SELECT model,action,count(*) FROM sync_log
+	summary, err := tx.Query(ctx, sqlFor(tx, `SELECT model,action,count(*) FROM sync_log
 		WHERE sync_id IS NOT NULL AND sync_id>$1 AND sync_id<=$2
-		GROUP BY model,action ORDER BY model,action`, c.AckedSyncID, meta.MaxSyncID)
+		GROUP BY model,action ORDER BY model,action`, `SELECT model,action,count(*) FROM sync_log
+		WHERE sync_id IS NOT NULL AND sync_id>? AND sync_id<=?
+		GROUP BY model,action ORDER BY model,action`), c.AckedSyncID, meta.MaxSyncID)
 	if err != nil {
 		return out, err
 	}
@@ -527,14 +529,13 @@ func ledgerChangesTx(ctx context.Context, tx pgx.Tx, consumer string) (LedgerCha
 // Lock order (lockorder.go): the transaction locks one ledger_cursors row and
 // reads sync_state without a lock.
 func (s *Store) AckLedger(ctx context.Context, consumer string, syncID int64, by string, now time.Time) (LedgerCursor, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return LedgerCursor{}, ErrDialectUnsupported
-	}
-
 	if !validName(consumer) || syncID < 0 || by == "" || !validText(by, 128) {
 		return LedgerCursor{}, errors.New("invalid ledger ack")
 	}
 	now = now.UTC()
+	if s.dialect == mysqlDialect {
+		return s.ackLedgerMySQL(ctx, consumer, syncID, by, now)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return LedgerCursor{}, err
@@ -585,4 +586,64 @@ func (s *Store) AckLedger(ctx context.Context, consumer string, syncID int64, by
 		return LedgerCursor{}, err
 	}
 	return c, tx.Commit(ctx)
+}
+
+func (s *Store) ackLedgerMySQL(ctx context.Context, consumer string, syncID int64, by string, now time.Time) (LedgerCursor, error) {
+	var c LedgerCursor
+	err := s.retryTx(ctx, func() (err error) {
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		var maxID, floor int64
+		if err := tx.QueryRow(ctx, `SELECT max_sync_id,pruned_through FROM sync_state WHERE singleton`).Scan(&maxID, &floor); err != nil {
+			return err
+		}
+		if syncID > maxID {
+			return ErrInvalidSync
+		}
+		const cols = `consumer,acked_sync_id,acked_at,updated_by`
+		err = tx.QueryRow(ctx, `SELECT `+cols+` FROM ledger_cursors WHERE consumer=? FOR UPDATE`, consumer).Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy)
+		if errors.Is(err, ErrNoRows) {
+			// A successful insert is the new-cursor case. A duplicate means a
+			// concurrent acknowledgement won, so load and validate its cursor.
+			_, insertErr := tx.Exec(ctx, `INSERT INTO ledger_cursors(consumer,acked_sync_id,acked_at,updated_by) VALUES(?,?,?,?)`, consumer, maxID, now, by)
+			if insertErr == nil {
+				if err = tx.QueryRow(ctx, `SELECT `+cols+` FROM ledger_cursors WHERE consumer=? FOR UPDATE`, consumer).Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy); err != nil {
+					return err
+				}
+				return tx.Commit(ctx)
+			}
+			if !errors.Is(insertErr, errUniqueViolation) {
+				return insertErr
+			}
+			err = tx.QueryRow(ctx, `SELECT `+cols+` FROM ledger_cursors WHERE consumer=? FOR UPDATE`, consumer).Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy)
+		}
+		if err != nil {
+			return err
+		}
+		if syncID < c.AckedSyncID {
+			return fmt.Errorf("%w: the cursor is at %d", ErrLedgerAckBackward, c.AckedSyncID)
+		}
+		if syncID < floor {
+			minID := maxID + 1
+			if err := tx.QueryRow(ctx, `SELECT COALESCE(min(sync_id),?) FROM sync_log`, minID).Scan(&minID); err != nil {
+				return err
+			}
+			return &SyncReset{MinSyncID: minID}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE ledger_cursors SET acked_sync_id=?,acked_at=?,updated_by=? WHERE consumer=?`, syncID, now, by, consumer); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT `+cols+` FROM ledger_cursors WHERE consumer=?`, consumer).Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	})
+	if err != nil {
+		return LedgerCursor{}, err
+	}
+	return c, nil
 }
