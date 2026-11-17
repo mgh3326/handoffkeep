@@ -91,7 +91,16 @@ func init() {
 			t.Fatalf("undo left inbox snoozed: %+v", state)
 		}
 		requestKey := "decision:request:" + itoa(requestID)
-		if _, err := s.db().Exec(ctx, s.q(`UPDATE decision_requests SET status=$1,updated_at=$2 WHERE id=$3`, `UPDATE decision_requests SET status=?,updated_at=? WHERE id=?`), DecisionStatusAnswered, time.Now().UTC(), requestID); err != nil {
+		statusTx, release, err := s.begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
+		defer statusTx.Rollback(ctx)
+		if _, err := statusTx.Exec(ctx, s.q(`UPDATE decision_requests SET status=$1,updated_at=$2 WHERE id=$3`, `UPDATE decision_requests SET status=?,updated_at=? WHERE id=?`), DecisionStatusAnswered, time.Now().UTC(), requestID); err != nil {
+			t.Fatal(err)
+		}
+		if err := statusTx.Commit(ctx); err != nil {
 			t.Fatal(err)
 		}
 		closed, err := s.ApplyInbox(ctx, []string{requestKey}, InboxActionSnooze, &until, "area-case", "closed-request-snooze")
