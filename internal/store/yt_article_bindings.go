@@ -183,7 +183,7 @@ type YTArticleDoc struct {
 }
 
 // ytArticleCandidateSQL reads candidates. The bucket is the import's
-// document filter (ImportDocumentsPage): no task is /shared, a task with no
+// document filter: no task is /shared, a task with no
 // project is /unassigned, otherwise the task's project.
 const ytArticleBucketSQL = `CASE WHEN d.task_id IS NULL THEN '/shared' WHEN t.project IS NULL THEN '/unassigned' ELSE t.project END`
 
