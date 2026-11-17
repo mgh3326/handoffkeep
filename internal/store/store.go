@@ -655,6 +655,8 @@ type Store struct {
 	mysqlPool *sql.DB
 	dialect   storeDialect
 	queries   querier
+	// tablesSeen caches the MySQL tables found in the schema (mysqlTableExists).
+	tablesSeen sync.Map
 	// registry replaces migrationRegistry when set; tests use it.
 	registry []migration
 	// autoCloseOff inverts the auto_close_parent setting so the zero Store has

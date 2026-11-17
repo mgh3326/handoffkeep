@@ -61,7 +61,13 @@ func caseCoreProjectVocabulary(t *testing.T, s *Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(names) != 2 || names[0] != "core-alpha" || names[1] != "core-beta" {
+	// A fresh schema seeds the fleet's projects on both dialects, so the two
+	// added names are checked as members, once each.
+	count := map[string]int{}
+	for _, n := range names {
+		count[n]++
+	}
+	if count["core-alpha"] != 1 || count["core-beta"] != 1 || count["handoffkeep"] != 1 {
 		t.Fatalf("projects = %v", names)
 	}
 	for _, bad := range []string{"", "has space", "bad/slash"} {

@@ -96,9 +96,20 @@ func mysqlWriteTask(ctx context.Context, q rowQuerier, x Task, refs string) (Tas
 // does not end the task. Any other write is refused before the call.
 func (s *Store) mirrorTaskDecisionsFlowTx(ctx context.Context, tx transaction, before taskDecisionBefore, after Task, by, note string, flagEvent int64, at time.Time) error {
 	if s.dialect == mysqlDialect {
-		if DecisionEndsTask(after.State) || before.flagged || before.request != nil || after.AwaitingDecision || after.Refs.DecisionRequest != nil {
+		if before.flagged || before.request != nil || after.AwaitingDecision || after.Refs.DecisionRequest != nil {
 			// B6 dependency: mirrorTaskDecisionsTx needs the decisions area on MySQL.
 			return ErrDialectUnsupported
+		}
+		if DecisionEndsTask(after.State) {
+			// Ending a task supersedes its decision records. Until B6 creates
+			// decision_requests there can be none; once it exists the helper is needed.
+			has, err := s.mysqlTableExists(ctx, tx, "decision_requests")
+			if err != nil {
+				return err
+			}
+			if has {
+				return ErrDialectUnsupported
+			}
 		}
 		return nil
 	}

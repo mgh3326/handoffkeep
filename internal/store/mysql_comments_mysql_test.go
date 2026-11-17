@@ -40,6 +40,10 @@ func TestMySQLCommentGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	var before int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sync_log`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := conn.ExecContext(ctx, `SET @hk_bulk_load=1`); err != nil {
 		t.Fatal(err)
 	}
@@ -53,8 +57,8 @@ func TestMySQLCommentGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	var count int
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sync_log`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("bulk load emitted sync rows: count=%d err=%v", count, err)
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sync_log`).Scan(&count); err != nil || count != before {
+		t.Fatalf("bulk load emitted sync rows: count=%d before=%d err=%v", count, before, err)
 	}
 }
 

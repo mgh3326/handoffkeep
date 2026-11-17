@@ -136,6 +136,16 @@ var mysqlTasksSteps = []string{
 	// The decision projection the tasks trigger maintains, and its feed emit.
 	`CREATE TABLE IF NOT EXISTS sync_decisions (id VARCHAR(512) NOT NULL PRIMARY KEY, task_id BIGINT NOT NULL, updated_at DATETIME(6) NOT NULL, UNIQUE KEY sync_decisions_task_id_key(task_id))` + mysqlTableOptions,
 
+	// Stubs for tables of areas not ported yet that the tasks area reads: the
+	// task activity expression reads jobs, claim reads a job's role, and the lane
+	// vocabulary reads relay_events and chat_questions. They carry only the columns
+	// the tasks area names; B7 (jobs, relay_events) and B6 (chat_questions) extend
+	// them with guarded ALTERs, as B1b did for `tasks`. IF NOT EXISTS in their own
+	// migrations would skip these silently, so the drift check lists them as stubs.
+	`CREATE TABLE IF NOT EXISTS jobs (job_id VARCHAR(128) NOT NULL PRIMARY KEY, task_id BIGINT NOT NULL, state VARCHAR(16) NOT NULL, role LONGTEXT NOT NULL DEFAULT (''), created_at DATETIME(6) NOT NULL, updated_at DATETIME(6) NOT NULL, KEY jobs_task(task_id, created_at, job_id))` + mysqlTableOptions,
+	`CREATE TABLE IF NOT EXISTS relay_events (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, owner_lane VARCHAR(255) NOT NULL, KEY relay_events_owner_lane(owner_lane))` + mysqlTableOptions,
+	`CREATE TABLE IF NOT EXISTS chat_questions (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, lane VARCHAR(255) NOT NULL, KEY chat_questions_lane(lane))` + mysqlTableOptions,
+
 	`CREATE TABLE IF NOT EXISTS checkpoints (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, session VARCHAR(255) NOT NULL, kind VARCHAR(16) NOT NULL, title LONGTEXT NOT NULL, body LONGTEXT NOT NULL, refs JSON NOT NULL DEFAULT (JSON_OBJECT()), created_by LONGTEXT NOT NULL, created_at DATETIME(6) NOT NULL, ` +
 		`CONSTRAINT checkpoints_kind_check CHECK(kind IN ('checkpoint','handoff','decision','open_question','next_action')), KEY checkpoints_session_created(session, created_at DESC, id DESC))` + mysqlTableOptions,
 	`CREATE TABLE IF NOT EXISTS memory (agent VARCHAR(255) NOT NULL, name VARCHAR(255) NOT NULL, description LONGTEXT NOT NULL, memory_type VARCHAR(16) NOT NULL, content LONGTEXT NOT NULL, updated_by LONGTEXT NOT NULL, updated_at DATETIME(6) NOT NULL, ` +
