@@ -63,7 +63,7 @@ const ytCatchUpSelectMySQLHead = `SELECT c.id, c.task_id, c.body, c.author, c.cr
 	  AND NOT EXISTS (SELECT 1 FROM yt_comment_write_links w WHERE w.comment_id = c.id)
 	  AND NOT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.principal = ? AND o.kind = ? AND o.idem_key = CONCAT(?, CAST(c.id AS CHAR)))
 	  AND NOT (c.id IN (`
-const ytCatchUpSelectMySQLTail = `)))
+const ytCatchUpSelectMySQLTail = `))
 	ORDER BY c.id LIMIT ?`
 
 // ytCatchUpArgs orders the candidate scan's arguments for each dialect.

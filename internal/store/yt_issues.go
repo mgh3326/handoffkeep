@@ -178,7 +178,7 @@ func prepareYTIssueTx(ctx context.Context, tx transaction, now time.Time, t Task
 		VALUES ($1,$2,(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$2),$3) ON CONFLICT (op_id) DO NOTHING`,
 		`INSERT IGNORE INTO yt_issue_comment_bounds(op_id, task_id, comments_from, recorded_at)
 		VALUES (?,?,(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=?),?)`),
-		op.ID, t.ID, now.UTC()); err != nil {
+		ytCommentBoundArgs(tx, op.ID, t.ID, now.UTC())...); err != nil {
 		return op, true, err
 	}
 	if cerr := ytwrite.CheckIssue(req); cerr != nil {
@@ -743,4 +743,13 @@ func backfillProjectArgs(s *Store, project string) []any {
 		return []any{project, project}
 	}
 	return []any{project}
+}
+
+// ytCommentBoundArgs binds the boundary insert's arguments: the comment
+// watermark's task id repeats on MySQL, where placeholders cannot.
+func ytCommentBoundArgs(tx transaction, opID, taskID int64, at time.Time) []any {
+	if dialectFor(tx) == mysqlDialect {
+		return []any{opID, taskID, taskID, at}
+	}
+	return []any{opID, taskID, at}
 }

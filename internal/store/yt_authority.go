@@ -302,10 +302,11 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 		}
 		seen[k] = true
 	}
-	if s.dialect == mysqlDialect {
-		// MySQL has no transaction-scoped advisory try-lock: the whole switch
-		// runs under the named sync lock on one connection (design §11.1),
-		// retried like tryYTSyncLockTx before it refuses.
+	if s.dialect == mysqlDialect && side == YTAuthorityYouTrack {
+		// MySQL has no transaction-scoped advisory try-lock: the switch to
+		// youtrack runs under the named sync lock on one connection (design
+		// §11.1), retried like tryYTSyncLockTx before it refuses. A rollback
+		// to hk takes no sync lock on either dialect.
 		for attempt := 1; ; attempt++ {
 			held, err := s.mysqlWriteTransactionWithLock(ctx, mysqlYTSyncLock, func(tx transaction) error {
 				var e error
@@ -327,6 +328,8 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 			}
 		}
 	}
+	// A rollback to hk reaches here on either dialect and takes no sync lock,
+	// as on PostgreSQL.
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return nil, nil, err

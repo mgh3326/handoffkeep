@@ -14,21 +14,23 @@ import (
 // state move commits between the check and the insert), then the new row.
 // It takes no lane lock and no other lock (lockorder.go).
 func (l *YTWriteLedger) RecordAdoption(ctx context.Context, now time.Time, id int64, attempts int, ytID string) error {
-	tx, err := l.s.pool.Begin(ctx)
+	tx, release, err := l.s.begin(ctx)
 	if err != nil {
 		return err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	var state string
 	var have int
-	err = tx.QueryRow(ctx, `SELECT state, attempts FROM yt_write_ops WHERE id=$1 FOR SHARE`, id).Scan(&state, &have)
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT state, attempts FROM yt_write_ops WHERE id=$1 FOR SHARE`,
+		`SELECT state, attempts FROM yt_write_ops WHERE id=? FOR SHARE`), id).Scan(&state, &have)
 	if errors.Is(err, ErrNoRows) {
 		return ytwrite.ErrNotFound
 	}
 	if err != nil {
 		return err
 	}
-	if a, found, err := readYTAdoption(ctx, pgTransaction{tx}, id); err != nil {
+	if a, found, err := readYTAdoption(ctx, tx, id); err != nil {
 		return err
 	} else if found {
 		if a.Attempts != attempts || a.YTID != ytID {
@@ -39,7 +41,8 @@ func (l *YTWriteLedger) RecordAdoption(ctx context.Context, now time.Time, id in
 	if ytwrite.State(state) != ytwrite.StateDispatched || have != attempts {
 		return fmt.Errorf("%w: record adoption of attempt %d from %s attempt %d", ytwrite.ErrState, attempts, state, have)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO yt_write_op_adoptions(op_id, attempts, yt_id, recorded_at) VALUES ($1,$2,$3,$4)`,
+	if _, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO yt_write_op_adoptions(op_id, attempts, yt_id, recorded_at) VALUES ($1,$2,$3,$4)`,
+		`INSERT INTO yt_write_op_adoptions(op_id, attempts, yt_id, recorded_at) VALUES (?,?,?,?)`),
 		id, attempts, ytID, now.UTC()); err != nil {
 		return err
 	}
@@ -48,12 +51,13 @@ func (l *YTWriteLedger) RecordAdoption(ctx context.Context, now time.Time, id in
 
 // Adoption reads op id's adoption record.
 func (l *YTWriteLedger) Adoption(ctx context.Context, id int64) (ytwrite.Adoption, bool, error) {
-	return readYTAdoption(ctx, pgQuerier{pool: l.s.pool}, id)
+	return readYTAdoption(ctx, l.s.db(), id)
 }
 
 func readYTAdoption(ctx context.Context, q ytRowQuerier, id int64) (ytwrite.Adoption, bool, error) {
 	var a ytwrite.Adoption
-	err := q.QueryRow(ctx, `SELECT attempts, yt_id FROM yt_write_op_adoptions WHERE op_id=$1`, id).Scan(&a.Attempts, &a.YTID)
+	err := q.QueryRow(ctx, sqlFor(q, `SELECT attempts, yt_id FROM yt_write_op_adoptions WHERE op_id=$1`,
+		`SELECT attempts, yt_id FROM yt_write_op_adoptions WHERE op_id=?`), id).Scan(&a.Attempts, &a.YTID)
 	if errors.Is(err, ErrNoRows) {
 		return ytwrite.Adoption{}, false, nil
 	}

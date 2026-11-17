@@ -74,12 +74,12 @@ var mysqlYTOpsSteps = []string{
 		CONSTRAINT yt_write_ops_resolved_check CHECK((state IN ('applied','rejected')) = (resolved_at IS NOT NULL)),
 		CONSTRAINT yt_write_ops_applied_check CHECK(state <> 'applied' OR yt_result_id <> ''),
 		UNIQUE KEY yt_write_ops_principal_kind_idem_key_key(principal, kind, idem_key),
-		KEY yt_write_ops_entity_open((CASE WHEN state NOT IN ('applied','rejected') THEN entity_kind END),(CASE WHEN state NOT IN ('applied','rejected') THEN entity_id END),(CASE WHEN state NOT IN ('applied','rejected') THEN id END)),
-		KEY yt_write_ops_due((CASE WHEN state IN ('prepared','remote_unknown') THEN next_attempt_at END),(CASE WHEN state IN ('prepared','remote_unknown') THEN id END)),
-		KEY yt_write_ops_dispatched((CASE WHEN state = 'dispatched' THEN dispatched_at END),(CASE WHEN state = 'dispatched' THEN id END)),
-		KEY yt_write_ops_alert_scan((CASE WHEN state IN ('prepared','dispatched','remote_unknown','rejected') THEN created_at END),(CASE WHEN state IN ('prepared','dispatched','remote_unknown','rejected') THEN id END)),
-		KEY yt_write_ops_binding_conflict((CASE WHEN reason = 'binding_conflict' THEN id END)),
-		KEY yt_write_ops_comment_requeue((CASE WHEN kind = 'comment_append' AND state = 'rejected' AND reason = 'ambiguous_issue' AND yt_target_id = '' AND attempts = 0 THEN tenant END),(CASE WHEN kind = 'comment_append' AND state = 'rejected' AND reason = 'ambiguous_issue' AND yt_target_id = '' AND attempts = 0 THEN id END)),
+		KEY yt_write_ops_entity_open(entity_kind, entity_id, id),
+		KEY yt_write_ops_due(next_attempt_at, id),
+		KEY yt_write_ops_dispatched(dispatched_at, id),
+		KEY yt_write_ops_alert_scan(created_at, id),
+		KEY yt_write_ops_binding_conflict(reason, id),
+		KEY yt_write_ops_comment_requeue(kind, state, reason, tenant, id),
 		CONSTRAINT yt_write_ops_parent_id_fkey FOREIGN KEY(parent_id) REFERENCES yt_write_ops(id) ON DELETE RESTRICT)` + mysqlTableOptions,
 
 	`CREATE TABLE IF NOT EXISTS yt_entity_map (
@@ -181,6 +181,15 @@ var mysqlYTOpsSteps = []string{
 		CONSTRAINT yt_decision_bindings_origin_check CHECK(origin IN ('import_verified','op_applied')),
 		CONSTRAINT yt_decision_bindings_bound_by_check CHECK(bound_by <> '' AND CHAR_LENGTH(bound_by) <= 200),
 		UNIQUE KEY yt_decision_bindings_tenant_issue_id_key(tenant, issue_id))` + mysqlTableOptions,
+
+	`CREATE TABLE IF NOT EXISTS yt_write_op_adoptions (
+		op_id BIGINT NOT NULL PRIMARY KEY,
+		attempts INT NOT NULL,
+		yt_id VARCHAR(64) NOT NULL,
+		recorded_at DATETIME(6) NOT NULL,
+		CONSTRAINT yt_write_op_adoptions_op_id_check CHECK(op_id > 0),
+		CONSTRAINT yt_write_op_adoptions_attempts_check CHECK(attempts > 0),
+		CONSTRAINT yt_write_op_adoptions_yt_id_check CHECK(yt_id <> '' AND CHAR_LENGTH(yt_id) <= 64))` + mysqlTableOptions,
 
 	// The issue_create lane: an intent to create a task's issue once its
 	// project maps, and the comment watermark an adopted issue's binding
