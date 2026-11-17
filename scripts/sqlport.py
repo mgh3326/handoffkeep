@@ -67,7 +67,6 @@ CAST_TYPE_MAP = {
     "int": "SIGNED", "int2": "SIGNED", "int4": "SIGNED", "int8": "SIGNED",
     "smallint": "SIGNED", "integer": "SIGNED", "bigint": "SIGNED",
     "bool": "SIGNED", "boolean": "SIGNED",
-    "numeric": "DECIMAL", "decimal": "DECIMAL",
     "float4": "DOUBLE", "float8": "DOUBLE", "real": "DOUBLE", "double": "DOUBLE",
     "date": "DATE", "timestamp": "DATETIME(6)", "timestamptz": "DATETIME(6)",
     "uuid": "CHAR(36)",
@@ -249,6 +248,8 @@ def primary_at(tokens: list[Token], i: int, opens: dict[int, int], *, allow_grou
                 close = opens.get(after_ident)
                 if close is not None:
                     return Operand(i, close + 1, t.start, tokens[close].end, "function", name)
+            else:
+                return None
         last = tokens[after_ident - 1]
         return Operand(i, after_ident, t.start, last.end, "identifier", name)
     if allow_group and t.kind == "punct" and t.value == "(":
@@ -920,7 +921,7 @@ def _corpus_auto_violations(root: Path) -> list[str]:
                 violations.append(f"{path}:{row['line']}: residual {', '.join(residual)}")
             if not _balanced(tokens):
                 violations.append(f"{path}:{row['line']}: unbalanced parentheses")
-            if re.search(r"[A-Za-z_](?:CONCAT|CAST)\(|\)\(", row["mysql"]):
+            if re.search(r"[A-Za-z_](?:CONCAT|CAST)\(|\)\s*\(", row["mysql"]):
                 violations.append(f"{path}:{row['line']}: mangled call boundary")
     return violations
 

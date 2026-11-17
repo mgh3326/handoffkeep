@@ -24,6 +24,8 @@ class RewriteTests(unittest.TestCase):
         self.assertEqual(sqlport.rewrite("SELECT x::timestamp with time zone")[0], "SELECT CAST(x AS DATETIME(6))")
         self.assertTrue(any("unsupported ::regclass cast" in item for item in sqlport.rewrite("SELECT 't'::regclass")[2]))
         self.assertTrue(any("unsupported ::numeric cast modifier" in item for item in sqlport.rewrite("SELECT x::numeric(8,2)")[2]))
+        self.assertTrue(any("unsupported ::numeric cast" in item for item in sqlport.rewrite("SELECT x::numeric")[2]))
+        self.assertTrue(any("unsupported ::decimal cast" in item for item in sqlport.rewrite("SELECT x::decimal")[2]))
         self.assertTrue(any("unsupported ::text cast modifier" in item for item in sqlport.rewrite("SELECT x::text[]")[2]))
 
     def test_text_concat_requires_text_evidence_and_preserves_calls(self):
@@ -33,6 +35,7 @@ class RewriteTests(unittest.TestCase):
         self.assertEqual(sqlport.rewrite("SELECT CAST(x AS CHAR) || lower(y) || '%' ")[0], "SELECT CONCAT(CAST(x AS CHAR), lower(y), '%') ")
         self.assertTrue(any("non-text" in item for item in sqlport.rewrite("SELECT x || lower(y)")[2]))
         self.assertIsNone(sqlport.rewrite("SELECT lower (name) || '%'")[0])
+        self.assertIsNone(sqlport.rewrite("SELECT 'x' || lower (y) FROM t")[0])
 
     def test_concat_boundaries_are_allow_listed(self):
         for sql in ("SELECT a || b + c", "SELECT a + b || c", "SELECT (host_id || ':') || account_key"):
@@ -48,6 +51,7 @@ class RewriteTests(unittest.TestCase):
         self.assertEqual(sqlport.rewrite("a IS NOT DISTINCT FROM b")[0], "(a <=> b)")
         self.assertEqual(sqlport.rewrite("lower(a) IS DISTINCT FROM b")[0], "NOT (lower(a) <=> b)")
         self.assertIsNone(sqlport.rewrite("lower (a) IS DISTINCT FROM b")[0])
+        self.assertIsNone(sqlport.rewrite("a IS DISTINCT FROM lower (b)")[0])
         for sql in ("a = b IS DISTINCT FROM c", "x + 1 IS DISTINCT FROM y", "a IS DISTINCT FROM b + 1", "x LIKE a IS DISTINCT FROM b", "a IS DISTINCT FROM b LIKE c"):
             with self.subTest(sql=sql):
                 self.assertIsNone(sqlport.rewrite(sql)[0])
