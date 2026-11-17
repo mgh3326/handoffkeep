@@ -309,7 +309,7 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w 
 		if strings.TrimSpace(laneNote) == "" {
 			laneNote = "lane changed by task_update"
 		}
-		_, laneChanged, err := s.relaneTaskTx(ctx, tx, id, in.Lane, w.Author, laneNote, false, mcpTaskUpdateSource, ref+":lane")
+		_, laneChanged, err := s.relaneTaskTx(ctx, pgTransaction{tx}, id, in.Lane, w.Author, laneNote, false, mcpTaskUpdateSource, ref+":lane")
 		if err != nil {
 			return out, err
 		}

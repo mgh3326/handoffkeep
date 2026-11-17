@@ -319,7 +319,7 @@ func (s *Store) OperatorRelaneTask(ctx context.Context, id int64, to, by, note, 
 		allowNewLane = true
 	}
 	before := x.Lane
-	x, changed, err := s.relaneTaskTx(ctx, pgxTx(tx), id, to, by, note, allowNewLane, lifecycleSourceRelane, key)
+	x, changed, err := s.relaneTaskTx(ctx, tx, id, to, by, note, allowNewLane, lifecycleSourceRelane, key)
 	if err != nil {
 		return RelaneResult{}, err
 	}
