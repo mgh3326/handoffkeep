@@ -293,6 +293,10 @@ func BuildWorkStatus(now time.Time, rows []WorkStatusRow, in WorkStatusInputs) *
 // in-progress work, backlog list with bundles, movement over today and
 // the past 7 days, and honest deploy-waiting tasks in one consistent read.
 func (s *Store) ReadWorkStatus(ctx context.Context, now time.Time) (*WorkStatus, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return nil, err
@@ -475,6 +479,10 @@ type WorkStatusOverlay struct {
 // ReadWorkStatusOverlay reads the hk side of the work status for ids in one
 // consistent read. A task id hk does not know has no overlay row.
 func (s *Store) ReadWorkStatusOverlay(ctx context.Context, ids []int64) (WorkStatusOverlay, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return WorkStatusOverlay{}, ErrDialectUnsupported
+	}
+
 	out := WorkStatusOverlay{Tasks: map[int64]WorkStatusTaskOverlay{}}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {

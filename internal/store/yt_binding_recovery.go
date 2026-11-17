@@ -225,6 +225,9 @@ type YTRecovery struct {
 // UPDATE, then the authority row FOR SHARE, as op preparation does
 // (lockorder.go). It reads no clock: time is passed in.
 func (s *Store) RecoverHeldYTOps(ctx context.Context, tenant string, now time.Time, grace time.Duration) (YTRecovery, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTRecovery{}, ErrDialectUnsupported
+	}
 	return s.recoverHeldYTOps(ctx, tenant, 0, now, grace)
 }
 
@@ -232,6 +235,9 @@ func (s *Store) RecoverHeldYTOps(ctx context.Context, tenant string, now time.Ti
 // used by comments-drain --task so a scoped command cannot reject another
 // task's held ops.
 func (s *Store) RecoverHeldYTOpsForTask(ctx context.Context, tenant string, taskID int64, now time.Time, grace time.Duration) (YTRecovery, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTRecovery{}, ErrDialectUnsupported
+	}
 	if taskID < 1 {
 		return YTRecovery{}, errors.New("invalid task id")
 	}

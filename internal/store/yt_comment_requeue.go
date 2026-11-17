@@ -114,6 +114,10 @@ const ytRequeueSelectSQL = `SELECT o.id, w.comment_id, b.task_id
 // sources, the lane's pending moves and the comment, then a new yt_write_ops row (prepareYTOpTx) and an
 // UPDATE of the comment's yt_comment_write_links row.
 func (s *Store) RequeueYTMovedComments(ctx context.Context, tenant string, limit int) ([]YTRequeued, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	out := []YTRequeued{}
 	if s.ytCommentsModeNow() != YTCommentsOn || tenant == "" || limit < 1 {
 		return out, nil

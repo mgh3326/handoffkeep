@@ -207,6 +207,10 @@ func freshness(at *time.Time, source *string) *SectionFreshness {
 // findings open first, with per-section freshness. found is false for a PR
 // hk has never seen. The reads share one snapshot.
 func (s *Store) GetChangeState(ctx context.Context, ref ChangeRef, opt ChangeReadOptions) (ChangeView, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ChangeView{}, false, ErrDialectUnsupported
+	}
+
 	if err := checkChangeRef(ref); err != nil {
 		return ChangeView{}, false, err
 	}

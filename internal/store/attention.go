@@ -123,6 +123,10 @@ const attentionStalledSQL = `state IN (` + startedStatesSQL + `) AND NOT awaitin
 
 // Attention reads what is waiting on the operator at now.
 func (s *Store) Attention(ctx context.Context, now time.Time) (Attention, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Attention{}, ErrDialectUnsupported
+	}
+
 	now = now.UTC()
 	var out Attention
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
@@ -302,6 +306,10 @@ func attentionTasksTx(ctx context.Context, tx pgx.Tx, stalledBefore, now time.Ti
 // started-state test of a stall is YouTrack's, so the caller names the tasks
 // YouTrack shows started; hk's own state is not consulted for a stall.
 func (s *Store) AttentionTaskCandidates(ctx context.Context, now time.Time, startedIDs []int64) ([]AttentionTask, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	now = now.UTC()
 	if startedIDs == nil {
 		startedIDs = []int64{}

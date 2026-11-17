@@ -86,6 +86,10 @@ func ytBindingIntentBackoff(attempts int) time.Duration {
 // task_comments, yt_task_bindings and yt_issue_intents, then new rows of
 // yt_binding_intents. It takes no lane lock and no task row.
 func (s *Store) ScanYTBindingCandidates(ctx context.Context, tenant string, limit int, now time.Time) (YTBindingScan, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTBindingScan{}, ErrDialectUnsupported
+	}
+
 	var out YTBindingScan
 	if tenant == "" || len(tenant) > 255 || limit < 1 {
 		return out, errors.New("invalid binding scan")
@@ -152,6 +156,10 @@ func (s *Store) ScanYTBindingCandidates(ctx context.Context, tenant string, limi
 // YTBindingIntentsDue lists, in due order, the tenant's intents whose next
 // attempt has come, at most limit of them.
 func (s *Store) YTBindingIntentsDue(ctx context.Context, tenant string, now time.Time, limit int) ([]YTBindingIntent, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if tenant == "" || limit < 1 {
 		return nil, errors.New("invalid binding intents read")
 	}
@@ -180,6 +188,10 @@ func (s *Store) YTBindingIntentsDue(ctx context.Context, tenant string, now time
 // the detail, one more attempt (clamped at 8) and the next attempt after that
 // attempt's backoff. A terminal (excluded) or absent row is left alone.
 func (s *Store) RetryYTBindingIntent(ctx context.Context, taskID int64, state YTBindingIntentState, reason, detail string, now time.Time) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	if taskID < 1 || (state != YTBindingIntentRefused && state != YTBindingIntentError) {
 		return errors.New("invalid binding intent outcome")
 	}
@@ -200,6 +212,10 @@ func (s *Store) RetryYTBindingIntent(ctx context.Context, taskID int64, state YT
 // ExcludeYTBindingIntent makes the task's intent terminal: the operator
 // unbound it, so no automatic binding may undo that (I7, design §6.1).
 func (s *Store) ExcludeYTBindingIntent(ctx context.Context, taskID int64, reason string, now time.Time) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	if taskID < 1 {
 		return errors.New("invalid binding intent task")
 	}
@@ -211,6 +227,10 @@ func (s *Store) ExcludeYTBindingIntent(ctx context.Context, taskID int64, reason
 // DropYTBindingIntent deletes the task's intent: it is bound, or nothing is
 // left to do.
 func (s *Store) DropYTBindingIntent(ctx context.Context, taskID int64) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	if taskID < 1 {
 		return errors.New("invalid binding intent task")
 	}
@@ -233,6 +253,10 @@ func ytBindingLatestActionTx(ctx context.Context, q ytRowQuerier, taskID int64) 
 // bound it since: the latest yt_binding_history row's action is 'unbound'.
 // Counted in, the binder must not bind it again (I7).
 func (s *Store) YTBindingExcluded(ctx context.Context, taskID int64) (bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, ErrDialectUnsupported
+	}
+
 	if taskID < 1 {
 		return false, errors.New("invalid binding history task")
 	}
@@ -244,6 +268,10 @@ func (s *Store) YTBindingExcluded(ctx context.Context, taskID int64) (bool, erro
 // none). The publication's max-id watermark uses the same rule in its own
 // transaction; this read is for the read-only commands and tests.
 func (s *Store) YTHighestCommentID(ctx context.Context, taskID int64) (int64, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, ErrDialectUnsupported
+	}
+
 	if taskID < 1 {
 		return 0, errors.New("invalid comment task")
 	}

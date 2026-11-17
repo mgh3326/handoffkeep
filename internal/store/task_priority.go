@@ -25,6 +25,10 @@ type PriorityResult struct {
 
 // SetTaskPriority records an operator's priority change and replays its first result.
 func (s *Store) SetTaskPriority(ctx context.Context, id int64, priority int, by, reason, key string) (PriorityResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return PriorityResult{}, ErrDialectUnsupported
+	}
+
 	var out PriorityResult
 	if id < 1 || priority < 0 || priority > math.MaxInt32 || by == "" || !validText(by, 128) || !validText(reason, MaxBytes) || strings.TrimSpace(key) == "" || !validText(key, 128) {
 		return out, ErrInvalidTaskPriority
@@ -64,6 +68,10 @@ func (s *Store) SetTaskPriority(ctx context.Context, id int64, priority int, by,
 // ErrTaskTerminal, whatever priority is sent. A task with an active worker claim is refused by
 // the wrk fence (Binding), so priority cannot change through this path while a claim is held.
 func (s *Store) SetTaskPriorityDirect(ctx context.Context, id int64, priority int, by, reason string) (Task, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, false, ErrDialectUnsupported
+	}
+
 	if id < 1 || priority < 0 || priority > math.MaxInt32 || by == "" || !validText(by, 128) || !validText(reason, MaxBytes) {
 		return Task{}, false, ErrInvalidTaskPriority
 	}

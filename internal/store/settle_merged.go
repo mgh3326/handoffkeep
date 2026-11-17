@@ -47,6 +47,10 @@ type SettleMergedReport struct {
 // merged and is counted under its reason. dryRun decides and writes nothing.
 // A re-run finds nothing new to move, so it changes nothing.
 func (s *Store) SettleMerged(ctx context.Context, project string, dryRun bool) (SettleMergedReport, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return SettleMergedReport{}, ErrDialectUnsupported
+	}
+
 	if project != "" && !validName(project) {
 		return SettleMergedReport{}, errors.New("invalid settle-merged: project must be a project name")
 	}

@@ -216,6 +216,10 @@ type sourceEvent struct {
 // ApplyTaskSourceEvent applies one mergewake event to a task in one
 // transaction and records it, applied or not.
 func (s *Store) ApplyTaskSourceEvent(ctx context.Context, in TaskSourceEvent) (TaskEventResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return TaskEventResult{}, ErrDialectUnsupported
+	}
+
 	in, err := normalizeTaskSourceEvent(in)
 	if err != nil {
 		return TaskEventResult{}, err

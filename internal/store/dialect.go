@@ -273,7 +273,7 @@ func (s *Store) beginNamedTransaction(ctx context.Context, key string) (transact
 	var acquired sql.NullInt64
 	err = conn.QueryRowContext(ctx, `SELECT GET_LOCK(?, 30)`, name).Scan(&acquired)
 	if err != nil || !acquired.Valid || acquired.Int64 != 1 {
-		if err != nil {
+		if err != nil || !acquired.Valid {
 			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 		}
 		_ = conn.Close()

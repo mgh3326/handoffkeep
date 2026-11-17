@@ -130,6 +130,10 @@ func (b TaskWorkBoard) PrimaryJob() string {
 // claim/rebind to another job. An unbound placement stays visible while it is
 // a pending replacement.
 func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64]TaskWorkBoard, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	boards := make(map[int64]TaskWorkBoard, len(tasks))
 	if len(tasks) == 0 {
 		return boards, nil

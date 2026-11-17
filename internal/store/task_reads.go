@@ -41,6 +41,10 @@ func scanTaskEvent(row interface{ Scan(...any) error }, e *TaskEvent) error {
 // append-only, so id order is the order the watchers see them; it is also the
 // cursor the MCP task_events tool pages on. A missing task is ErrTaskNotFound.
 func (s *Store) ListTaskEvents(ctx context.Context, taskID, afterID int64, limit int) ([]TaskEvent, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if taskID < 1 || afterID < 0 || limit < 1 || limit > TaskEventListMax {
 		return nil, errors.New("invalid task event query")
 	}
@@ -76,6 +80,10 @@ func (s *Store) ListTaskEvents(ctx context.Context, taskID, afterID int64, limit
 // the returned slice first. It reads only the tail; the MCP task_get preview
 // must not walk every page of a long comment thread.
 func (s *Store) RecentTaskComments(ctx context.Context, taskID int64, limit int) ([]TaskComment, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if taskID < 1 || limit < 1 || limit > TaskCommentListMax {
 		return nil, ErrTaskCommentInvalid
 	}
@@ -101,6 +109,10 @@ SELECT `+taskCommentColumns+` FROM task_comments WHERE task_id=$1 ORDER BY id DE
 // the parent and blocker lookup task_get uses, so a detail read never walks a
 // related task's full history.
 func (s *Store) TaskBriefs(ctx context.Context, ids []int64) (map[int64]TaskChild, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	out := map[int64]TaskChild{}
 	if len(ids) == 0 {
 		return out, nil
@@ -127,6 +139,10 @@ func (s *Store) TaskBriefs(ctx context.Context, ids []int64) (map[int64]TaskChil
 // TasksByIDs reads the named tasks in id order. The changes feed uses it to
 // attach a summary to each task row without one query per item.
 func (s *Store) TasksByIDs(ctx context.Context, ids []int64) ([]Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if len(ids) == 0 {
 		return []Task{}, nil
 	}
@@ -153,6 +169,10 @@ func (s *Store) TasksByIDs(ctx context.Context, ids []int64) ([]Task, error) {
 // reads it so a comment item can name its task even after the comment row is
 // gone.
 func (s *Store) TaskIDsForComments(ctx context.Context, ids []int64) (map[int64]int64, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	out := map[int64]int64{}
 	if len(ids) == 0 {
 		return out, nil
@@ -180,6 +200,10 @@ func (s *Store) TaskIDsForComments(ctx context.Context, ids []int64) (map[int64]
 // the cursor the feed pages on, so a caller that starts from a time still
 // receives every row recorded after that position exactly once.
 func (s *Store) SyncIDAt(ctx context.Context, t time.Time) (int64, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, ErrDialectUnsupported
+	}
+
 	var id int64
 	err := s.pool.QueryRow(ctx, `SELECT COALESCE(max(sync_id),0) FROM sync_log WHERE sync_id IS NOT NULL AND at <= $1`, t.UTC()).Scan(&id)
 	return id, err

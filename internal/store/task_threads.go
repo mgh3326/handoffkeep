@@ -191,6 +191,10 @@ type TaskThreadResult struct {
 // started before the poster ran get nothing. A task gets at most one row per
 // destination, so a later restart of the same task changes nothing.
 func (s *Store) QueueTaskThreads(ctx context.Context, now time.Time, projects []string) (int, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, ErrDialectUnsupported
+	}
+
 	now = now.UTC()
 	dest := TaskThreadDestinationDiscord
 	tx, err := s.pool.Begin(ctx)
@@ -265,6 +269,10 @@ type TaskThreadRecovery struct {
 // claim is already older than TaskThreadLookupDelay); a line is counted as
 // posted (no second line).
 func (s *Store) RecoverTaskThreadClaims(ctx context.Context, now time.Time) ([]TaskThreadRecovery, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	now = now.UTC()
 	rows, err := s.pool.Query(ctx, `WITH old AS (
 			SELECT task_id,destination,claim_key FROM task_thread_deliveries
@@ -334,6 +342,10 @@ SELECT task_id,key,src,ref,at FROM items ORDER BY at,task_id,src,key LIMIT 1`
 // row due for its lookup), else the oldest line owed to any active thread.
 // found is false when nothing is due.
 func (s *Store) ClaimTaskThread(ctx context.Context, now time.Time) (TaskThreadItem, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return TaskThreadItem{}, false, ErrDialectUnsupported
+	}
+
 	now = now.UTC()
 	dest := TaskThreadDestinationDiscord
 	tx, err := s.pool.Begin(ctx)
@@ -474,6 +486,10 @@ func loadTaskThreadLine(ctx context.Context, tx pgx.Tx, x *TaskThreadItem, src i
 // unclaimed and due for its lookup TaskThreadLookupDelay from now; after
 // taskThreadMaxAttempts of them it stops needs_operator.
 func (s *Store) SettleTaskThread(ctx context.Context, now time.Time, x TaskThreadItem, res TaskThreadResult) (gaveUp bool, err error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, ErrDialectUnsupported
+	}
+
 	now = now.UTC()
 	// The send may have created something: record it even if ctx is canceled
 	// now (shutdown), or the next start would not know.
@@ -590,6 +606,10 @@ type TaskThreadState struct {
 
 // GetTaskThread reads the delivery of one task's thread.
 func (s *Store) GetTaskThread(ctx context.Context, taskID int64) (TaskThreadState, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return TaskThreadState{}, false, ErrDialectUnsupported
+	}
+
 	var x TaskThreadState
 	err := s.pool.QueryRow(ctx, `SELECT task_id,destination,thread_id,thread_name,start_event_id,last_event_id,posted,state,claim_key,attempts,next_attempt_at,last_error
 		FROM task_thread_deliveries WHERE task_id=$1 AND destination=$2`, taskID, TaskThreadDestinationDiscord).

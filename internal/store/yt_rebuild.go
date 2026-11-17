@@ -35,6 +35,10 @@ type YTRebuildTask struct {
 // most limit. The caller pages with the last id until a page comes back
 // short.
 func (s *Store) YTRebuildTasks(ctx context.Context, tenant, project string, afterID int64, limit int) ([]YTRebuildTask, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if tenant == "" || afterID < 0 || limit < 1 || limit > YTRebuildTaskPageMax {
 		return nil, errors.New("invalid rebuild task filter")
 	}
@@ -75,6 +79,10 @@ type YTRebuildSample struct {
 // data, and the run that printed a seed can be repeated. Result in task id
 // order.
 func (s *Store) YTRebuildSampleTasks(ctx context.Context, tenant, project string, seed int64, n, top int) ([]YTRebuildSample, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if tenant == "" || n < 0 || top < 0 || n > YTRebuildSampleMax || top > YTRebuildSampleMax {
 		return nil, errors.New("invalid rebuild sample")
 	}
@@ -153,6 +161,10 @@ type YTRebuildComments struct {
 // YTRebuildTaskComments reads task taskID's comments for the drill against
 // issue issueID.
 func (s *Store) YTRebuildTaskComments(ctx context.Context, taskID int64, issueID string) (YTRebuildComments, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTRebuildComments{}, ErrDialectUnsupported
+	}
+
 	out := YTRebuildComments{Comments: []YTRebuildComment{}, PulledYTIDs: map[string]bool{}, IssueOps: map[int64]bool{}, Docs: []YTRebuildTaskDoc{}}
 	rows, err := s.pool.Query(ctx, `SELECT c.id, c.author, c.body, c.created_at, coalesce(o.id, 0), coalesce(o.created_at, c.created_at),
 			coalesce((SELECT l.youtrack_comment_id FROM youtrack_comment_links l WHERE l.hk_comment_id = c.id), '')
@@ -245,6 +257,10 @@ type YTRebuildDocument struct {
 // comes with migration 20261112-yt-article-bindings (hk 4053); the caller
 // checks it is applied first.
 func (s *Store) YTRebuildDocuments(ctx context.Context, tenant, project string, afterID int64, limit int) ([]YTRebuildDocument, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if tenant == "" || afterID < 0 || limit < 1 || limit > YTRebuildTaskPageMax {
 		return nil, errors.New("invalid rebuild document filter")
 	}
@@ -276,6 +292,10 @@ func (s *Store) YTRebuildDocuments(ctx context.Context, tenant, project string, 
 // "documents" (every document; only those of project's tasks when project
 // is not "") or "decisions" (every decision request, whatever project).
 func (s *Store) YTRebuildCount(ctx context.Context, what, project string) (int, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, ErrDialectUnsupported
+	}
+
 	var n int
 	var err error
 	switch what {
@@ -312,6 +332,10 @@ var ytRebuildDecisionsSeam func(ctx context.Context)
 // repeatable-read transaction, so a page's bindings and decisions are read
 // at one snapshot (the same options ListDecisionTab uses).
 func (s *Store) YTRebuildDecisions(ctx context.Context, tenant string, afterID int64, limit int) ([]YTRebuildDecision, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if tenant == "" || afterID < 0 || limit < 1 || limit > YTRebuildTaskPageMax {
 		return nil, errors.New("invalid rebuild decision filter")
 	}

@@ -45,6 +45,10 @@ const decisionQuestionPreview = 200
 // ListOpenDecisionSources reads the open questions of every source. It runs
 // SELECTs only.
 func (s *Store) ListOpenDecisionSources(ctx context.Context) (OpenDecisionSources, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return OpenDecisionSources{}, ErrDialectUnsupported
+	}
+
 	out := OpenDecisionSources{Items: []OpenDecisionItem{}, Truncated: []string{}}
 	if err := s.pool.QueryRow(ctx, `SELECT now()`).Scan(&out.ServerTime); err != nil {
 		return out, err

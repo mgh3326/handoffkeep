@@ -121,6 +121,10 @@ func insertNotificationOutboxOnce(ctx context.Context, tx pgx.Tx, kind, lane, ev
 // commits between the two can never be listed as live. The zero time means no
 // lower bound; the forwarder always passes its required cutoff.
 func (s *Store) ListUnsentNotifications(ctx context.Context, limit int, since time.Time) ([]NotificationOutbox, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if limit < 1 {
 		limit = 200
 	}
@@ -150,6 +154,10 @@ func (s *Store) ListUnsentNotifications(ctx context.Context, limit int, since ti
 // nothing, and it never writes sent_at or hub_row_id. It returns how many
 // rows this call settled.
 func (s *Store) SkipNotificationsBefore(ctx context.Context, before time.Time, reason string) (int64, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, ErrDialectUnsupported
+	}
+
 	if before.IsZero() || reason == "" || !validText(reason, 128) {
 		return 0, errors.New("invalid notification skip")
 	}
@@ -168,6 +176,10 @@ func (s *Store) SkipNotificationsBefore(ctx context.Context, before time.Time, r
 // skipped row can never gain a receipt: sending is what skipping ruled out,
 // so it answers ErrOutboxConflict like any other disagreeing receipt.
 func (s *Store) MarkNotificationSent(ctx context.Context, eventID string, hubRowID int64) (NotificationOutbox, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return NotificationOutbox{}, ErrDialectUnsupported
+	}
+
 	if eventID == "" || len(eventID) > 256 || !validText(eventID, 256) || hubRowID < 1 {
 		return NotificationOutbox{}, errors.New("invalid notification mark")
 	}
@@ -197,6 +209,10 @@ func (s *Store) MarkNotificationSent(ctx context.Context, eventID string, hubRow
 // applied row is a conflict. An ack for a row the hub has not accepted yet is
 // ErrOutboxNotReceived: applied never precedes received.
 func (s *Store) MarkNotificationApplied(ctx context.Context, eventID, by string) (NotificationOutbox, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return NotificationOutbox{}, ErrDialectUnsupported
+	}
+
 	if eventID == "" || !validText(eventID, 256) || by == "" || !validText(by, 128) {
 		return NotificationOutbox{}, errors.New("invalid notification ack")
 	}

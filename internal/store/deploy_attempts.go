@@ -191,6 +191,10 @@ func scanService(row pgx.Row, x *Service) error {
 // PutService creates or replaces a service. Past attempts keep the targets
 // and the frozen changes they recorded.
 func (s *Store) PutService(ctx context.Context, x Service) (Service, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Service{}, ErrDialectUnsupported
+	}
+
 	if x.Targets == nil {
 		x.Targets = []string{}
 	}
@@ -208,6 +212,10 @@ RETURNING `+serviceColumns, x.Name, x.Repo, x.PathPatterns, x.DeployMode, x.Targ
 
 // GetService reads one service.
 func (s *Store) GetService(ctx context.Context, name string) (Service, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Service{}, false, ErrDialectUnsupported
+	}
+
 	var out Service
 	err := scanService(s.pool.QueryRow(ctx, `SELECT `+serviceColumns+` FROM services WHERE name=$1`, name), &out)
 	if errors.Is(err, ErrNoRows) {
@@ -218,6 +226,10 @@ func (s *Store) GetService(ctx context.Context, name string) (Service, bool, err
 
 // ListServices reads every service by name.
 func (s *Store) ListServices(ctx context.Context) ([]Service, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT `+serviceColumns+` FROM services ORDER BY name LIMIT $1`, maxServiceList)
 	if err != nil {
 		return nil, err
@@ -293,6 +305,10 @@ func deployPayloadHash(in DeployStart) (string, error) {
 // inserts only new changes keys and reads existing ones without a lock
 // (lockorder.go).
 func (s *Store) StartDeploy(ctx context.Context, in DeployStart) (Deploy, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Deploy{}, false, ErrDialectUnsupported
+	}
+
 	if in.State == "" {
 		in.State = DeployRequested
 	}
@@ -453,6 +469,10 @@ func readDeployTx(ctx context.Context, q pgx.Tx, attemptID string) (Deploy, erro
 // task rule (deployedTasksTx) in the same transaction, and a finish with a job
 // queues one result notice for the lane that asked (deploy_result_notify.go).
 func (s *Store) FinishDeploy(ctx context.Context, attemptID string, in DeployFinish) (Deploy, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Deploy{}, ErrDialectUnsupported
+	}
+
 	switch {
 	case !attemptIDRE.MatchString(attemptID):
 		return Deploy{}, errors.New("invalid deploy: attempt_id must match [A-Za-z0-9][A-Za-z0-9._:-]{0,199}")
@@ -570,6 +590,10 @@ FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND
 // A change an attempt of the service recorded as left out by the path filter
 // is not the service's and is never pending.
 func (s *Store) PendingChanges(ctx context.Context, service string, limit int) ([]Change, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if limit < 1 || limit > 1000 {
 		limit = 100
 	}

@@ -66,6 +66,10 @@ func scanUpload(row pgx.Row) (AttachmentUpload, error) {
 // CreateAttachmentUpload records a begun upload in the pending state without
 // the staging budget check. Direct uploads use ReserveAttachmentUpload.
 func (s *Store) CreateAttachmentUpload(ctx context.Context, u AttachmentUpload) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	if !attachmentUploadIDPattern.MatchString(u.ID) {
 		return errors.New("invalid attachment upload id")
 	}
@@ -76,6 +80,10 @@ func (s *Store) CreateAttachmentUpload(ctx context.Context, u AttachmentUpload) 
 
 // GetAttachmentUpload reads one upload by id; found is false when none exists.
 func (s *Store) GetAttachmentUpload(ctx context.Context, id string) (AttachmentUpload, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return AttachmentUpload{}, false, ErrDialectUnsupported
+	}
+
 	if !attachmentUploadIDPattern.MatchString(id) {
 		return AttachmentUpload{}, false, nil
 	}
@@ -97,6 +105,10 @@ func (s *Store) GetAttachmentUpload(ctx context.Context, id string) (AttachmentU
 // the lease reclaim and the pre-claim expiry refusal use it; every transition
 // out of completing goes through the claim-scoped variants below.
 func (s *Store) TransitionAttachmentUpload(ctx context.Context, id, from, to, reason string, now time.Time) (bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, ErrDialectUnsupported
+	}
+
 	tag, e := s.pool.Exec(ctx, `UPDATE attachment_uploads SET status=$3, reason=$4, updated_at=$5 WHERE id=$1 AND status=$2`, id, from, to, reason, now)
 	if e != nil {
 		return false, e
@@ -108,6 +120,10 @@ func (s *Store) TransitionAttachmentUpload(ctx context.Context, id, from, to, re
 // caller's nonce as its claim. Only one caller can win because the update is
 // conditional on status='pending'.
 func (s *Store) ClaimAttachmentUpload(ctx context.Context, id, nonce string, now time.Time) (bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, ErrDialectUnsupported
+	}
+
 	tag, e := s.pool.Exec(ctx, `UPDATE attachment_uploads SET status='completing', claim_nonce=$2, reason='', updated_at=$3 WHERE id=$1 AND status='pending'`, id, nonce, now)
 	if e != nil {
 		return false, e
@@ -120,6 +136,10 @@ func (s *Store) ClaimAttachmentUpload(ctx context.Context, id, nonce string, now
 // whose lease was reclaimed finds its nonce replaced (or the row already
 // final) and cannot move the row.
 func (s *Store) TransitionAttachmentUploadClaim(ctx context.Context, id, nonce, to, reason string, now time.Time) (bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, ErrDialectUnsupported
+	}
+
 	tag, e := s.pool.Exec(ctx, `UPDATE attachment_uploads SET status=$3, reason=$4, updated_at=$5, claim_nonce=NULL WHERE id=$1 AND status='completing' AND claim_nonce=$2`, id, nonce, to, reason, now)
 	if e != nil {
 		return false, e
@@ -131,6 +151,10 @@ func (s *Store) TransitionAttachmentUploadClaim(ctx context.Context, id, nonce, 
 // caller still holds, so a live completion that streams longer than the lease
 // is not reclaimed. It reports whether the claim is still held.
 func (s *Store) TouchAttachmentUploadClaim(ctx context.Context, id, nonce string, now time.Time) (bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, ErrDialectUnsupported
+	}
+
 	tag, e := s.pool.Exec(ctx, `UPDATE attachment_uploads SET updated_at=$3 WHERE id=$1 AND status='completing' AND claim_nonce=$2`, id, nonce, now)
 	if e != nil {
 		return false, e
@@ -142,6 +166,10 @@ func (s *Store) TouchAttachmentUploadClaim(ctx context.Context, id, nonce string
 // caller must have confirmed the staging object is absent and that no presigned
 // PUT for it can still succeed.
 func (s *Store) MarkAttachmentUploadStagingDeleted(ctx context.Context, id string, now time.Time) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	_, e := s.pool.Exec(ctx, `UPDATE attachment_uploads SET staging_deleted_at=$2 WHERE id=$1 AND staging_deleted_at IS NULL`, id, now)
 	return e
 }
@@ -150,6 +178,10 @@ func (s *Store) MarkAttachmentUploadStagingDeleted(ctx context.Context, id strin
 // the budget whose creation is before createdBefore, oldest first. The sweep
 // reconciles them against the object store.
 func (s *Store) ListUnreleasedAttachmentUploads(ctx context.Context, createdBefore time.Time, limit int) ([]AttachmentUpload, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT `+uploadColumns+` FROM attachment_uploads WHERE staging_deleted_at IS NULL AND created_at < $1 ORDER BY created_at, id LIMIT $2`, createdBefore, limit)
 	if err != nil {
 		return nil, err
@@ -181,6 +213,10 @@ var ErrAttachmentStagingCap = errors.New("attachment_staging_cap")
 // both pass it, and pending reservations count against the storage fuse so
 // transient staging spend is bounded by what could ever commit.
 func (s *Store) ReserveAttachmentUpload(ctx context.Context, u AttachmentUpload, stagingCap, clientCap, storageCap int64) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	if !attachmentUploadIDPattern.MatchString(u.ID) {
 		return errors.New("invalid attachment upload id")
 	}

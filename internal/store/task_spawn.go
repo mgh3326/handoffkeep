@@ -182,6 +182,10 @@ func spawnKnown(state string) bool {
 // applied write into a terminal state writes one task comment in the same
 // transaction, keyed by task, request, attempt and state.
 func (s *Store) PutTaskSpawn(ctx context.Context, id int64, in TaskSpawnInput, author string) (TaskSpawn, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return TaskSpawn{}, false, ErrDialectUnsupported
+	}
+
 	if id < 1 {
 		return TaskSpawn{}, false, ErrTaskNotFound
 	}
@@ -400,6 +404,10 @@ func (s *Store) TaskStates(ctx context.Context, ids []int64, until string) ([]Ta
 // (not settled) with a blocks relation to the task, plus the start-condition
 // task while its condition is unmet; missing ids are ascending.
 func (s *Store) TaskStatesSnapshot(ctx context.Context, ids []int64, until string) (TaskStatesSnapshot, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return TaskStatesSnapshot{}, ErrDialectUnsupported
+	}
+
 	var out TaskStatesSnapshot
 	if len(ids) == 0 || len(ids) > TaskStatesMax {
 		return out, spawnInvalid(fmt.Sprintf("ids must name 1 to %d tasks", TaskStatesMax))

@@ -20,6 +20,10 @@ func NumericIDQuery(q string) bool {
 // DocumentKeyExists reports whether a document has exactly this key. The
 // YouTrack search backend uses it to keep an exact key lookup on PostgreSQL.
 func (s *Store) DocumentKeyExists(ctx context.Context, key string) (bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, ErrDialectUnsupported
+	}
+
 	var ok bool
 	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM documents WHERE key=$1)`, key).Scan(&ok); err != nil {
 		return false, fmt.Errorf("document key exists: %w", err)
@@ -35,6 +39,10 @@ func (s *Store) DocumentKeyExists(ctx context.Context, key string) (bool, error)
 // session filter). Title and Snippet are left empty: YouTrack's own text fills
 // them. When two tasks mirror one issue in this tenant the lower task id wins.
 func (s *Store) YouTrackTaskHits(ctx context.Context, tenant string, issueIDs []string, lane string) (map[string]SearchResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	out := map[string]SearchResult{}
 	if len(issueIDs) == 0 {
 		return out, nil
@@ -75,6 +83,10 @@ func (s *Store) YouTrackTaskHits(ctx context.Context, tenant string, issueIDs []
 // non-empty session keeps only documents in that session. Title is the
 // document key, as in the PostgreSQL search; Refs carries the linked tasks.
 func (s *Store) YouTrackDocHits(ctx context.Context, articleIDs []string, session string) (map[string]SearchResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	out := map[string]SearchResult{}
 	if len(articleIDs) == 0 {
 		return out, nil

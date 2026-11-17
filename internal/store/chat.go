@@ -165,6 +165,10 @@ func validChatQuestion(x ChatQuestion) bool {
 // same producer id. State and resolution time are owned by the transition
 // path, so a repeated upsert never reopens or duplicates a row.
 func (s *Store) UpsertChatQuestion(ctx context.Context, x ChatQuestion) (ChatQuestion, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ChatQuestion{}, false, ErrDialectUnsupported
+	}
+
 	if !validChatQuestion(x) {
 		return x, false, errors.New("invalid chat question")
 	}
@@ -213,6 +217,10 @@ func closeChatDecisionTx(ctx context.Context, tx pgx.Tx, id, to, answer, by stri
 }
 
 func (s *Store) GetChatQuestion(ctx context.Context, id string) (ChatQuestion, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ChatQuestion{}, false, ErrDialectUnsupported
+	}
+
 	if !chatQuestionIDRE.MatchString(id) {
 		return ChatQuestion{}, false, errors.New("invalid chat question id")
 	}
@@ -231,6 +239,10 @@ func (s *Store) GetChatQuestion(ctx context.Context, id string) (ChatQuestion, b
 // resolved_at records only an actual resolution; withdrawal leaves it NULL.
 // by is the authenticated caller, recorded as the decision record's answerer.
 func (s *Store) TransitionChatQuestion(ctx context.Context, id, to, by string) (ChatQuestion, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ChatQuestion{}, ErrDialectUnsupported
+	}
+
 	if !chatQuestionIDRE.MatchString(id) || (to != "resolved" && to != "withdrawn") {
 		return ChatQuestion{}, errors.New("invalid chat question transition")
 	}
@@ -263,6 +275,10 @@ func (s *Store) TransitionChatQuestion(ctx context.Context, id, to, by string) (
 // ListChatQuestions returns questions in id order, which matches creation
 // order for the Q-YYYYMMDD-NN format. afterID is an exclusive cursor.
 func (s *Store) ListChatQuestions(ctx context.Context, lane, state, afterID string, limit int) ([]ChatQuestion, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if (lane != "" && !validName(lane)) || (state != "" && !chatQuestionStates[state]) || (afterID != "" && !chatQuestionIDRE.MatchString(afterID)) {
 		return nil, errors.New("invalid chat question query")
 	}
@@ -313,6 +329,10 @@ func (s *Store) CreateChatMessage(ctx context.Context, x ChatMessage) (ChatMessa
 // PostChatMessage commits the body, Q changes and relation snapshots together.
 // The event-key lookup happens before any Q mutation, including on replay.
 func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (ChatMessage, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ChatMessage{}, false, ErrDialectUnsupported
+	}
+
 	m := post.Message
 	var err error
 	m.ConversationID, err = chatConversation(m.ConversationID)
@@ -589,6 +609,10 @@ func (s *Store) loadChatRelations(ctx context.Context, messages []*ChatMessage) 
 // MarkChatMessageDelivered records the first successful relay. Subsequent
 // calls are intentionally idempotent and return the original delivery time.
 func (s *Store) MarkChatMessageDelivered(ctx context.Context, id int64) (ChatMessage, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ChatMessage{}, ErrDialectUnsupported
+	}
+
 	if id < 1 {
 		return ChatMessage{}, errors.New("invalid chat message delivery")
 	}
@@ -621,6 +645,10 @@ func (s *Store) MarkChatMessageDelivered(ctx context.Context, id int64) (ChatMes
 // MarkChatMessageFailed records a relay failure. Only stored rows can fail;
 // delivered history is terminal.
 func (s *Store) MarkChatMessageFailed(ctx context.Context, id int64) (ChatMessage, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ChatMessage{}, ErrDialectUnsupported
+	}
+
 	if id < 1 {
 		return ChatMessage{}, errors.New("invalid chat message failure")
 	}
@@ -647,6 +675,10 @@ func (s *Store) MarkChatMessageFailed(ctx context.Context, id int64) (ChatMessag
 // ListChatMessages returns messages in durable insertion order. afterID is an
 // exclusive cursor; undelivered restricts to rows still awaiting relay.
 func (s *Store) ListChatMessages(ctx context.Context, author string, undelivered bool, afterID int64, limit int) ([]ChatMessage, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if (author != "" && !chatAuthors[author]) || afterID < 0 {
 		return nil, errors.New("invalid chat message query")
 	}
@@ -704,6 +736,10 @@ func (s *Store) ListChatMessages(ctx context.Context, author string, undelivered
 // run can never empty a table at once; remaining expired rows are removed by
 // subsequent runs.
 func (s *Store) PruneChat(ctx context.Context, limit int) (int64, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, ErrDialectUnsupported
+	}
+
 	if limit < 1 || limit > ChatPruneMaxDelete {
 		limit = ChatPruneMaxDelete
 	}
