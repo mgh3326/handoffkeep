@@ -67,10 +67,9 @@ func seedTasksAreaPostgres(t *testing.T, pool *pgxpool.Pool, when time.Time) {
 	exec(`INSERT INTO operator_inbox_events(event_key,item_key,action,actor,at) VALUES('copy-inbox-event','decision:request:93001','read','copy-test',$1)`, when)
 }
 
-// The tasks area copies in both directions with parity, and neither target
-// journals the load: the PostgreSQL emit triggers skip on the bulk-load GUC and
-// the MySQL ones on @hk_bulk_load, so sync_log stays empty while sync_decisions,
-// which is copied itself, arrives intact.
+// The tasks area copies in both directions with parity. The bulk load itself
+// does not add journal rows; the rows already in sync_log are copied intact.
+// sync_decisions is copied independently too.
 func TestCopyTasksAreaRoundTripWithParity(t *testing.T) {
 	src, srcURL := schemaStoreAt(t, "copy_tasks_src")
 	when := time.Date(2026, 11, 18, 3, 4, 5, 123456000, time.UTC)
@@ -111,8 +110,8 @@ func TestCopyTasksAreaRoundTripWithParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	my.Close()
-	if feed != 0 || decisions != 1 || nextTask <= 93003 || nextResolution <= 93001 {
-		t.Fatalf("MySQL target: sync_log=%d sync_decisions=%d next task id=%d next decision resolution id=%d, want 0, 1, >93003, >93001", feed, decisions, nextTask, nextResolution)
+	if feed != sourceFeed || decisions != 1 || nextTask <= 93003 || nextResolution <= 93001 {
+		t.Fatalf("MySQL target: sync_log=%d sync_decisions=%d next task id=%d next decision resolution id=%d, want %d, 1, >93003, >93001", feed, decisions, nextTask, nextResolution, sourceFeed)
 	}
 	if supersededBy != 93003 {
 		t.Fatalf("copied dots_results.superseded_by=%d, want 93003", supersededBy)
@@ -131,15 +130,59 @@ func TestCopyTasksAreaRoundTripWithParity(t *testing.T) {
 	if err := back.pool.QueryRow(t.Context(), `SELECT (SELECT count(*) FROM sync_log), (SELECT count(*) FROM sync_decisions), nextval(pg_get_serial_sequence('tasks','id')), nextval(pg_get_serial_sequence('decision_resolutions','resolution_id'))`).Scan(&backFeed, &backDecisions, &nextID, &nextResolutionID); err != nil {
 		t.Fatal(err)
 	}
-	if backFeed != 0 || backDecisions != 1 || nextID <= 93003 || nextResolutionID <= 93001 {
-		t.Fatalf("PostgreSQL target: sync_log=%d sync_decisions=%d next task id=%d next decision resolution id=%d, want 0, 1, >93003, >93001", backFeed, backDecisions, nextID, nextResolutionID)
+	if backFeed != sourceFeed || backDecisions != 1 || nextID <= 93003 || nextResolutionID <= 93001 {
+		t.Fatalf("PostgreSQL target: sync_log=%d sync_decisions=%d next task id=%d next decision resolution id=%d, want %d, 1, >93003, >93001", backFeed, backDecisions, nextID, nextResolutionID, sourceFeed)
 	}
 	// The copied tables stay writable and journaled once the load is over.
 	if _, err := back.pool.Exec(t.Context(), `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at) VALUES('lane-a','after','implement','backlog','test',now(),now())`); err != nil {
 		t.Fatal(err)
 	}
-	if err := back.pool.QueryRow(t.Context(), `SELECT count(*) FROM sync_log`).Scan(&backFeed); err != nil || backFeed != 1 {
-		t.Fatalf("sync_log after a normal insert = %d (%v), want 1", backFeed, err)
+	if err := back.pool.QueryRow(t.Context(), `SELECT count(*) FROM sync_log`).Scan(&backFeed); err != nil || backFeed != sourceFeed+1 {
+		t.Fatalf("sync_log after a normal insert = %d (%v), want %d", backFeed, err, sourceFeed+1)
+	}
+
+	// A pruned feed may be empty while sync_state retains the high watermark.
+	// Copying it must not rewind the separate sync_id sequence on the target.
+	const prunedWatermark = int64(12345)
+	my, err = Open(t.Context(), myURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := my.mysqlPool.ExecContext(t.Context(), `DELETE FROM sync_log`); err != nil {
+		my.Close()
+		t.Fatal(err)
+	}
+	if _, err := my.mysqlPool.ExecContext(t.Context(), `UPDATE sync_state SET max_sync_id=?,pruned_through=? WHERE singleton=1`, prunedWatermark, prunedWatermark); err != nil {
+		my.Close()
+		t.Fatal(err)
+	}
+	my.Close()
+
+	prunedBack, prunedBackURL := schemaStoreAt(t, "copy_tasks_pruned_back")
+	prunedCopy, err := CopyStore(t.Context(), myURL, prunedBackURL, tables, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prunedCopy.Match || len(prunedCopy.Tables) != len(tables) {
+		t.Fatalf("pruned-feed MySQL to PostgreSQL parity mismatch: %+v", prunedCopy)
+	}
+	var emptyFeed int
+	var copiedWatermark int64
+	if err := prunedBack.pool.QueryRow(t.Context(), `SELECT (SELECT count(*) FROM sync_log),(SELECT max_sync_id FROM sync_state WHERE singleton)`).Scan(&emptyFeed, &copiedWatermark); err != nil {
+		t.Fatal(err)
+	}
+	if emptyFeed != 0 || copiedWatermark != prunedWatermark {
+		t.Fatalf("copied pruned feed = (rows %d, watermark %d), want (0, %d)", emptyFeed, copiedWatermark, prunedWatermark)
+	}
+	if _, err := prunedBack.pool.Exec(t.Context(), `INSERT INTO tasks(lane,title,kind,state,project,created_by,created_at,updated_at) VALUES('lane-a','after-prune','implement','backlog','handoffkeep','test',now(),now())`); err != nil {
+		t.Fatal(err)
+	}
+	var nextSyncID, nextWatermark int64
+	if err := prunedBack.pool.QueryRow(t.Context(), `SELECT (SELECT MAX(sync_id) FROM sync_log),(SELECT max_sync_id FROM sync_state WHERE singleton)`).Scan(&nextSyncID, &nextWatermark); err != nil {
+		t.Fatal(err)
+	}
+	if nextSyncID != prunedWatermark+1 || nextWatermark != prunedWatermark+1 {
+		t.Fatalf("journal after pruned-feed copy = (sync_id %d, watermark %d), want %d", nextSyncID, nextWatermark, prunedWatermark+1)
 	}
 }
 

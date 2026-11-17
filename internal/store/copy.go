@@ -50,8 +50,8 @@ type copyTableSpec struct {
 	// serial marks a table with a generated key (BIGSERIAL, AUTO_INCREMENT):
 	// after the load the target's generator is moved past the largest id.
 	serial bool
-	// serialColumn overrides the generated column name when it is not "id".
-	serialColumn string
+	// identity is the generated column name when it differs from id.
+	identity string
 	// parentColumn names a self-referencing foreign key. Rows are inserted
 	// parents first (by depth, then order), because the foreign key is enforced
 	// on both targets while the table loads. Rows no root reaches (a cycle)
@@ -84,6 +84,10 @@ const (
 // Ported copy registry. Keep quota_observations before quota_latest because
 // quota_latest references it; areas add their tables here when they port.
 var copyTableRegistry = []copyTableSpec{
+	{name: "attachments", columns: strings.Fields("sha256 size_bytes mime original_name created_by created_at object_location archived_at archive_location hot_deleted_at"), order: []string{"sha256"}, bounds: map[string]int{"sha256": 64}},
+	{name: "attachment_refs", columns: strings.Fields("sha256 ref_kind ref_id"), order: []string{"sha256", "ref_kind", "ref_id"}, bounds: map[string]int{"sha256": 64, "ref_kind": 16, "ref_id": 512}},
+	{name: "attachment_uploads", columns: strings.Fields("id staging_key name mime size_bytes sha256 ref_kind ref_id created_by status reason created_at expires_at updated_at staging_deleted_at claim_nonce"), order: []string{"id"}, bounds: map[string]int{"id": 32, "sha256": 64, "ref_kind": 16}},
+	{name: "attachment_usage", columns: strings.Fields("month puts gets bytes_added"), order: []string{"month"}, bounds: map[string]int{"month": 7}},
 	{name: "bench_area_exceptions", columns: strings.Fields("profile effort area action evidence_refs decision_ref decided_by decided_at expires_with_model_id retired_at"), order: []string{"profile", "effort", "area"}, bounds: map[string]int{"profile": 200, "effort": 200, "area": 200, "action": 16}},
 	{name: "bench_catalog", columns: strings.Fields("profile effort model_id pool grade score gate gate_reason benchmark_source benchmark_annotation boundary_version deviation_ref decided_at decided_by retired_at"), order: []string{"profile", "effort"}, bounds: map[string]int{"profile": 200, "effort": 200, "grade": 16, "gate": 32}},
 	{name: "bench_grades", columns: strings.Fields("profile grade boundary_version deviation_ref decided_at decided_by"), order: []string{"profile"}, bounds: map[string]int{"profile": 200, "grade": 16}},
@@ -93,15 +97,20 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "quota_latest", columns: strings.Fields("account_key kind window_key observation_id measured_at confirmed_at"), order: []string{"account_key", "kind", "window_key"}, bounds: map[string]int{"account_key": 64, "kind": 16, "window_key": 16}},
 	{name: "quota_leases", columns: strings.Fields("account_key owner holder expires_at"), order: []string{"account_key"}, bounds: map[string]int{"account_key": 64}},
 	{name: "quota_presence", columns: strings.Fields("host_id account_key last_seen"), order: []string{"host_id", "account_key"}, bounds: map[string]int{"host_id": 64, "account_key": 64}},
+	{name: "jobs", columns: strings.Fields("job_id task_id host state role label family profile model pool owner_lane parent_lane parent_job pane_id worktree report_doc result created_by created_at updated_at input_tokens output_tokens reasoning_tokens cache_read_tokens cache_write_tokens usage_source usage_recorded_at harness effort claimed_at spawned_at spawned_received_at ready_at ready_received_at ended_at ended_received_at report_sha256 report_version skills skills_supported end_reason diff_files diff_insertions diff_deletions selection"), order: []string{"job_id"}, bounds: map[string]int{"job_id": 128, "host": 32, "report_sha256": 64}},
+	{name: "ledger_cursors", columns: strings.Fields("consumer acked_sync_id acked_at updated_by"), order: []string{"consumer"}, bounds: map[string]int{"consumer": 128}},
+	{name: "mcp_write_audit", serial: true, columns: strings.Fields("id tool actor channel author task_id idempotency_key result at"), order: []string{"id"}, bounds: map[string]int{"tool": 64, "actor": 320, "channel": 32, "author": 128, "idempotency_key": 128}},
+	{name: "notification_outbox", serial: true, columns: strings.Fields("id kind target_lane event_id text created_at sent_at hub_row_id applied_at applied_by skipped_at skip_reason"), order: []string{"id"}, bounds: map[string]int{"kind": 32, "target_lane": 255, "event_id": 256, "applied_by": 128, "skip_reason": 128}},
+	{name: "placement_decisions", serial: true, columns: strings.Fields("id job_id attempt task_id decided_at decided_on tool_version source ranking state_source chosen_host outcome reason profile pool account_key family model role pane_id repo candidates"), order: []string{"id"}, bounds: map[string]int{"job_id": 128, "decided_on": 128}},
 	// The tasks area (hk 5074). Parents before children: foreign keys stay
 	// enforced on both targets. tasks refers to itself and to project_milestones.
 	{name: "task_projects", upsert: true, columns: strings.Fields("name created_by created_at status start_at target_at design_lane"), order: []string{"name"}, bounds: map[string]int{"name": 128}},
 	{name: "project_milestones", serial: true, columns: strings.Fields("id project name description target_at status sort_order"), order: []string{"id"}, bounds: map[string]int{"project": 128}},
 	{name: "project_owner_events", serial: true, columns: strings.Fields("id project previous_lane design_lane actor note created_at"), order: []string{"id"}, bounds: map[string]int{"project": 128}},
+	{name: "relay_events", serial: true, columns: strings.Fields("id kind job_id epoch owner_lane machine pane_id report_path report_last_line question pr head reason event_id text event_time received_at delivered_at delivered_to attempts"), order: []string{"id"}, bounds: map[string]int{"kind": 32, "job_id": 128, "owner_lane": 255, "event_id": 256}},
 	{name: "tasks", serial: true, parentColumn: "parent_id", columns: strings.Fields("id lane parent_lane title kind state priority refs claimed_by created_by created_at updated_at body_doc project area expected source source_ref last_activity_at awaiting_decision parent_id started_at completed_at canceled_at triaged_at started_triage_at milestone_id due_at sla_started_at sla_medium_risk_at sla_high_risk_at sla_breaches_at"), order: []string{"id"}, bounds: map[string]int{"lane": 255, "parent_lane": 255, "kind": 16, "state": 16, "project": 128, "source": 128, "source_ref": 512}},
 	{name: "documents", serial: true, columns: strings.Fields("id key kind session job body sha256 created_by created_at updated_at task_id origin_class"), order: []string{"id"}, bounds: map[string]int{"key": 512, "kind": 32, "session": 128, "job": 128, "sha256": 64, "origin_class": 16}},
 	{name: "task_comments", serial: true, columns: strings.Fields("id task_id body author created_at source_ref system_event_key"), order: []string{"id"}, bounds: map[string]int{"source_ref": 128, "system_event_key": 255}},
-	{name: "mcp_write_audit", serial: true, columns: strings.Fields("id tool actor channel author task_id idempotency_key result at"), order: []string{"id"}, bounds: map[string]int{"tool": 64, "actor": 320, "channel": 32, "author": 128, "idempotency_key": 128}},
 	{name: "translations", columns: strings.Fields("entity entity_id field lang source_sha256 text translator updated_at"), order: []string{"entity", "entity_id", "field", "lang"}, bounds: map[string]int{"entity": 32, "entity_id": 128, "field": 32, "lang": 8, "source_sha256": 64}},
 	{name: "task_events", serial: true, columns: strings.Fields("id task_id from to by note at refs kind no_job source source_ref field from_value to_value auto applied"), order: []string{"id"}, bounds: map[string]int{"kind": 32, "source": 128, "source_ref": 512}},
 	{name: "task_relations", serial: true, columns: strings.Fields("id kind src_id dst_id created_by created_at archived_at archived_by"), order: []string{"id"}, bounds: map[string]int{"kind": 16}},
@@ -127,7 +136,7 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "dots_run_tokens", serial: true, columns: strings.Fields("id task_id token issue_key takeover issued_by issued_at superseded_at"), order: []string{"id"}, bounds: map[string]int{"token": 64, "issue_key": 64}},
 	{name: "decision_requests", serial: true, columns: strings.Fields("id source source_ref task_id job_id lane question reading grounds options recommended default_action due_at snoozed_until expires_at status answer answered_by answered_at superseded_by created_at updated_at"), order: []string{"id"}, bounds: map[string]int{"source": 32, "source_ref": 512, "job_id": 255, "lane": 255, "status": 16}},
 	{name: "decision_answer_attempts", serial: true, columns: strings.Fields("id channel event_key payload_hash task_id request_id revision_request_id question_revision provenance actor result event_at received_at option_id text operator_quote denies_attempt_id receipt"), order: []string{"id"}, bounds: map[string]int{"channel": 16, "event_key": 512, "payload_hash": 64, "request_id": 512, "revision_request_id": 512, "provenance": 32, "result": 32}},
-	{name: "decision_resolutions", serial: true, serialColumn: "resolution_id", columns: strings.Fields("resolution_id request_id question_revision revision_request_id task_id kind option_id text receipt provenance channel decided_by recorded_by attempt_id committed_at"), order: []string{"resolution_id"}, bounds: map[string]int{"request_id": 512, "revision_request_id": 512, "kind": 24, "provenance": 32, "channel": 32}},
+	{name: "decision_resolutions", serial: true, identity: "resolution_id", columns: strings.Fields("resolution_id request_id question_revision revision_request_id task_id kind option_id text receipt provenance channel decided_by recorded_by attempt_id committed_at"), order: []string{"resolution_id"}, bounds: map[string]int{"request_id": 512, "revision_request_id": 512, "kind": 24, "provenance": 32}},
 	{name: "decision_deliveries", columns: strings.Fields("request_id destination message_id desired_version applied_version state attempts next_attempt_at last_error_code posted_at edited_at created_at"), order: []string{"request_id", "destination"}, bounds: map[string]int{"destination": 16, "message_id": 255, "desired_version": 16, "applied_version": 16, "state": 16}},
 	{name: "decision_notify_digest", columns: strings.Fields("day state listed message_id attempts next_attempt_at last_error sent_at created_at"), order: []string{"day"}, bounds: map[string]int{"state": 16, "message_id": 255}},
 	{name: "chat_questions", columns: strings.Fields("id conversation_id lane body state created_at updated_at resolved_at revision answer_message_id"), order: []string{"id"}, bounds: map[string]int{"id": 64, "conversation_id": 255, "lane": 255, "state": 16}},
@@ -135,6 +144,8 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "chat_message_questions", columns: strings.Fields("message_id question_id relation_kind question_text"), order: []string{"message_id", "question_id", "relation_kind"}, bounds: map[string]int{"question_id": 64, "relation_kind": 16}},
 	{name: "operator_inbox_state", columns: strings.Fields("item_key read_at done_at snoozed_until actor updated_at"), order: []string{"item_key"}, bounds: map[string]int{"item_key": 192, "actor": 320}},
 	{name: "operator_inbox_events", columns: strings.Fields("event_key item_key action previous_read_at previous_done_at previous_snoozed_until previous_request_id previous_request_snoozed_until applied_read_at applied_done_at applied_snoozed_until undone_at actor at"), order: []string{"event_key", "item_key"}, bounds: map[string]int{"event_key": 128, "item_key": 192, "action": 16, "actor": 320}},
+	{name: "sync_state", upsert: true, columns: strings.Fields("singleton max_sync_id pruned_through"), order: []string{"singleton"}},
+	{name: "sync_log", serial: true, identity: "entry_id", columns: strings.Fields("entry_id sync_id model model_id action at"), order: []string{"entry_id"}, bounds: map[string]int{"model": 32, "model_id": 512}},
 	{name: "checkpoints", serial: true, columns: strings.Fields("id session kind title body refs created_by created_at"), order: []string{"id"}, bounds: map[string]int{"session": 255, "kind": 16}},
 	{name: "memory", columns: strings.Fields("agent name description memory_type content updated_by updated_at"), order: []string{"agent", "name"}, bounds: map[string]int{"agent": 255, "name": 255, "memory_type": 16}},
 }
@@ -148,7 +159,7 @@ func StoreCopyTables() []string {
 	return out
 }
 
-var copyLeftOutTables = strings.Fields(`attachment_refs attachment_uploads attachment_usage attachments decision_notify deploy_changes deploys jobs labels ledger_cursors linear_board_owners linear_board_ownership_conflicts linear_board_tasks linear_capacity_state linear_create_admissions linear_decision_issues linear_decision_ops linear_issues linear_outbox locks notification_outbox placement_decisions relay_events relay_events_retired_20260918 schema_migrations schema_version services standing_orders status_updates sync_log sync_state takes task_labels task_state_migration task_subscribers verifications youtrack_attempts youtrack_comment_links youtrack_cursor youtrack_decision_mirrors youtrack_doc_articles youtrack_field_cache youtrack_outbox youtrack_processed_activities yt_article_bindings yt_authority yt_binding_cursor yt_binding_history yt_binding_intents yt_comment_canary yt_comment_write_links yt_decision_bindings yt_entity_map yt_family_roots yt_feed_cursors yt_issue_comment_bounds yt_issue_intents yt_link_owned yt_link_plans yt_link_steps yt_link_unowned yt_links_sweep yt_snapshot_state yt_task_bindings yt_write_op_adoptions yt_write_op_alerts yt_write_ops`)
+var copyLeftOutTables = strings.Fields(`deploy_changes deploys labels linear_board_owners linear_board_ownership_conflicts linear_board_tasks linear_capacity_state linear_create_admissions linear_decision_issues linear_decision_ops linear_issues linear_outbox locks relay_events_retired_20260918 schema_migrations schema_version services standing_orders status_updates takes task_labels task_state_migration task_subscribers verifications youtrack_attempts youtrack_comment_links youtrack_cursor youtrack_decision_mirrors youtrack_doc_articles youtrack_field_cache youtrack_outbox youtrack_processed_activities yt_article_bindings yt_authority yt_binding_cursor yt_binding_history yt_binding_intents yt_comment_canary yt_comment_write_links yt_decision_bindings yt_entity_map yt_family_roots yt_feed_cursors yt_issue_comment_bounds yt_issue_intents yt_link_owned yt_link_plans yt_link_steps yt_link_unowned yt_links_sweep yt_snapshot_state yt_task_bindings yt_write_op_adoptions yt_write_op_alerts yt_write_ops`)
 
 type copyDB struct {
 	db    *sql.DB
@@ -266,14 +277,14 @@ func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, ve
 		if err != nil {
 			return report, fmt.Errorf("%s target schema: %w", spec.name, err)
 		}
-		if !sameCopyColumns(cols, spec.columns) || !sameCopyColumns(targetCols, spec.columns) {
+		if !copySchemaMatches(spec.name, cols, spec.columns) || !copySchemaMatches(spec.name, targetCols, spec.columns) {
 			return report, fmt.Errorf("%s schema columns differ: source=%v target=%v", spec.name, cols, targetCols)
 		}
-		sourceKinds, err := copyColumnKinds(ctx, from.db, from.mySQL, spec.name)
+		sourceKinds, err := copyColumnKinds(ctx, from.db, from.mySQL, spec.name, spec.columns)
 		if err != nil {
 			return report, fmt.Errorf("%s source column types: %w", spec.name, err)
 		}
-		targetKinds, err := copyColumnKinds(ctx, to.db, to.mySQL, spec.name)
+		targetKinds, err := copyColumnKinds(ctx, to.db, to.mySQL, spec.name, spec.columns)
 		if err != nil {
 			return report, fmt.Errorf("%s target column types: %w", spec.name, err)
 		}
@@ -307,7 +318,7 @@ func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, ve
 			}
 		}
 		tgtCount := int64(0)
-		tgtKinds, err := copyColumnKinds(ctx, to.db, to.mySQL, spec.name)
+		tgtKinds, err := copyColumnKinds(ctx, to.db, to.mySQL, spec.name, spec.columns)
 		if err != nil {
 			return report, fmt.Errorf("%s target column types: %w", spec.name, err)
 		}
@@ -320,6 +331,19 @@ func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, ve
 		report.Match = report.Match && row.Match
 	}
 	return report, nil
+}
+
+func copySchemaMatches(table string, actual, expected []string) bool {
+	if table == "sync_log" {
+		filtered := make([]string, 0, len(actual))
+		for _, col := range actual {
+			if col != "txid" && col != "txn" {
+				filtered = append(filtered, col)
+			}
+		}
+		actual = filtered
+	}
+	return sameCopyColumns(actual, expected)
 }
 
 func beginCopySnapshot(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
@@ -400,7 +424,7 @@ func copyColumns(ctx context.Context, db *sql.DB, mysqlDB bool, table string) ([
 	return cols, nil
 }
 
-func copyColumnKinds(ctx context.Context, db *sql.DB, mysqlDB bool, table string) (map[string]copyValueKind, error) {
+func copyColumnKinds(ctx context.Context, db *sql.DB, mysqlDB bool, table string, copiedColumns []string) (map[string]copyValueKind, error) {
 	q := `SELECT column_name,data_type,udt_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1`
 	if mysqlDB {
 		q = `SELECT column_name,data_type,column_type FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=?`
@@ -410,11 +434,18 @@ func copyColumnKinds(ctx context.Context, db *sql.DB, mysqlDB bool, table string
 		return nil, err
 	}
 	defer rows.Close()
+	wanted := make(map[string]bool, len(copiedColumns))
+	for _, column := range copiedColumns {
+		wanted[column] = true
+	}
 	kinds := map[string]copyValueKind{}
 	for rows.Next() {
 		var name, dataType, detail string
 		if err := rows.Scan(&name, &dataType, &detail); err != nil {
 			return nil, err
+		}
+		if !wanted[name] {
+			continue
 		}
 		if !mysqlDB && table == "deploy_record_projection" && name == "record" && dataType == "bytea" {
 			// The PostgreSQL projection deliberately stores JSON bytes, not jsonb,
@@ -999,10 +1030,14 @@ func resetIdentity(ctx context.Context, dst *copyDB, spec copyTableSpec) error {
 		return err
 	}
 	table := spec.name
+	identity := spec.identity
+	if identity == "" {
+		identity = "id"
+	}
 	if !spec.serial {
 		return nil
 	}
-	column := spec.serialColumn
+	column := spec.identity
 	if column == "" {
 		column = "id"
 	}
@@ -1023,7 +1058,27 @@ func resetIdentity(ctx context.Context, dst *copyDB, spec copyTableSpec) error {
 	if !seq.Valid || seq.String == "" {
 		return nil
 	}
-	quotedColumn := quoteCopyIdent(column, false)
-	_, err = conn.ExecContext(ctx, `SELECT setval($1, COALESCE((SELECT MAX(`+quotedColumn+`) FROM `+quoteCopyIdent(table, false)+`), 1), EXISTS(SELECT 1 FROM `+quoteCopyIdent(table, false)+`))`, seq.String)
+	quotedIdentity := quoteCopyIdent(column, false)
+	if _, err = conn.ExecContext(ctx, `SELECT setval($1, COALESCE((SELECT MAX(`+quotedIdentity+`) FROM `+quoteCopyIdent(table, false)+`), 1), EXISTS(SELECT 1 FROM `+quoteCopyIdent(table, false)+`))`, seq.String); err != nil {
+		return err
+	}
+	if table == "sync_log" {
+		// sync_id has its own allocator sequence, separate from the entry_id
+		// identity sequence. A fully pruned feed can be empty while sync_state
+		// retains a higher watermark, so keep writes past both copied values.
+		var last int64
+		if err = conn.QueryRowContext(ctx, `SELECT GREATEST(COALESCE((SELECT MAX(sync_id) FROM sync_log),0),COALESCE((SELECT max_sync_id FROM sync_state WHERE singleton),0))`).Scan(&last); err != nil {
+			return err
+		}
+		called := last > 0
+		if !called {
+			last = 1
+		}
+		var syncIDSequence string
+		if err = conn.QueryRowContext(ctx, `SELECT format('%I.%I',current_schema(),'sync_log_sync_id_seq')`).Scan(&syncIDSequence); err != nil {
+			return err
+		}
+		_, err = conn.ExecContext(ctx, `SELECT setval($1::regclass,$2,$3)`, syncIDSequence, last, called)
+	}
 	return err
 }
