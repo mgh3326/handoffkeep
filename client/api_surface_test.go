@@ -76,6 +76,7 @@ var exportedAPI = []string{
 	// Error helpers and the User-Agent.
 	"ErrTooManyRedirects",
 	"ErrorCode",
+	"ErrorField",
 	"HTTPError",
 	"SecretPattern",
 	"UserAgent",

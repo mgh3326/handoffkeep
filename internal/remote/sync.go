@@ -37,15 +37,15 @@ func (c Client) SyncDelta(ctx context.Context, after int64, limit int) ([]store.
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var body struct {
-			Error     string
-			Reset     bool
-			MinSyncID int64 `json:"min_sync_id"`
+			Error, Field string
+			Reset        bool
+			MinSyncID    int64 `json:"min_sync_id"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&body)
 		if resp.StatusCode == http.StatusGone && body.Reset {
 			return nil, meta, &store.SyncReset{MinSyncID: body.MinSyncID}
 		}
-		return nil, meta, &HTTPError{Status: resp.StatusCode, Code: body.Error}
+		return nil, meta, &HTTPError{Status: resp.StatusCode, Code: body.Error, Field: body.Field}
 	}
 	if err = hktransport.HTMLBodyError(resp); err != nil {
 		return nil, meta, err

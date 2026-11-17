@@ -56,6 +56,7 @@ func (s Service) dotsResults() DotsResultStore {
 }
 
 var decisionResolverRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+var decodeFieldRE = regexp.MustCompile(`^[A-Za-z0-9_]{1,64}$`)
 
 // attachmentPathSHARE is a content address in a URL path.
 var attachmentPathSHARE = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -2072,6 +2073,16 @@ const (
 	bodyPRState = 2 << 20  // one PR-state write: ~200 checks, 100 threads and a pass of findings (hk 3198)
 )
 
+// DecodeFieldError carries the validated field name when a JSON request body
+// is refused for an unknown field or a type mismatch.
+type DecodeFieldError struct {
+	Field string
+	Err   error
+}
+
+func (e *DecodeFieldError) Error() string { return e.Err.Error() }
+func (e *DecodeFieldError) Unwrap() error { return e.Err }
+
 // decode reads one JSON request body into v. max is the payload's own byte
 // cap; 4 KiB of slack covers the envelope keys around it.
 func decode(r *http.Request, v any, max int) error {
@@ -2086,12 +2097,37 @@ func decodeLimited(body io.ReadCloser, v any, limit int64) error {
 	de := json.NewDecoder(http.MaxBytesReader(nil, body, limit))
 	de.DisallowUnknownFields()
 	if err := de.Decode(v); err != nil {
-		return err
+		return decodeError(err)
 	}
 	if de.Decode(new(json.RawMessage)) != io.EOF {
 		return errors.New("trailing data after JSON body")
 	}
 	return nil
+}
+
+func decodeError(err error) error {
+	var field string
+	const prefix = "json: unknown field "
+	if strings.HasPrefix(err.Error(), prefix) {
+		raw := strings.TrimPrefix(err.Error(), prefix)
+		if unquoted, uerr := strconv.Unquote(raw); uerr == nil {
+			field = unquoted
+		} else {
+			field = strings.Trim(raw, `"`)
+		}
+	} else {
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) {
+			field = typeErr.Field
+			if idx := strings.LastIndex(field, "."); idx >= 0 {
+				field = field[idx+1:]
+			}
+		}
+	}
+	if decodeFieldRE.MatchString(field) {
+		return &DecodeFieldError{Field: field, Err: err}
+	}
+	return err
 }
 func queryLimit(r *http.Request, def, max int) (int, error) {
 	x := def

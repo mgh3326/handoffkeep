@@ -63,6 +63,9 @@ func ErrorCode(err error) string { return hktransport.ErrorCode(err) }
 // as secret_like_content.
 func SecretPattern(err error) (string, bool) { return hktransport.SecretPattern(err) }
 
+// ErrorField reports the field the server named when it refused a request.
+func ErrorField(err error) string { return hktransport.ErrorField(err) }
+
 // call is hktransport.Client.Call, except that a change-feed reader's expired
 // cursor (410 {"reset":true,"min_sync_id":N}) surfaces as *store.SyncReset,
 // as the store's own feed reports it.
@@ -840,10 +843,10 @@ func (c Client) ExportTasks(ctx context.Context, lane, state, parentLane string,
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var x struct {
-			Error string `json:"error"`
+			Error, Field string
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&x)
-		return nil, &HTTPError{Status: resp.StatusCode, Code: x.Error}
+		return nil, &HTTPError{Status: resp.StatusCode, Code: x.Error, Field: x.Field}
 	}
 	if e := hktransport.HTMLBodyError(resp); e != nil {
 		return nil, e

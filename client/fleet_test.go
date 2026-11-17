@@ -579,6 +579,7 @@ func TestFleetCallErrorDecode(t *testing.T) {
 	hk := newFakeHK(t)
 	hk.on("POST", "/v1/tasks/42/claim", http.StatusConflict, `{"error":"task_claimed","reason":"claimed by worker-9"}`, nil)
 	hk.on("PUT", "/v1/documents/note", http.StatusBadRequest, `{"error":"secret_like_content","pattern":"aws_key"}`, nil)
+	hk.on("POST", "/v1/tasks/42/reopen", http.StatusBadRequest, `{"error":"invalid_context","field":"finding_facts"}`, nil)
 	c := client.Client{URL: hk.URL, Token: fixtureToken}
 	_, err := c.ClaimTask(context.Background(), 42, "worker-1", "job-7", "")
 	var he *client.HTTPError
@@ -591,6 +592,10 @@ func TestFleetCallErrorDecode(t *testing.T) {
 	_, _, err = c.PutDocument(context.Background(), client.Document{Key: "note", Kind: "note", Body: "x"})
 	if p, ok := client.SecretPattern(err); !ok || p != "aws_key" {
 		t.Fatalf("SecretPattern=%q,%t err=%v", p, ok, err)
+	}
+	_, err = c.ReopenTask(context.Background(), 42, "test reason")
+	if client.ErrorCode(err) != "invalid_context" || client.ErrorField(err) != "finding_facts" || err.Error() != "invalid_context: finding_facts" {
+		t.Fatalf("ErrorCode=%q ErrorField=%q text=%q", client.ErrorCode(err), client.ErrorField(err), err.Error())
 	}
 }
 
