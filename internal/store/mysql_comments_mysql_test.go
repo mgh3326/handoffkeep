@@ -91,8 +91,8 @@ func TestMySQLGuardMutants(t *testing.T) {
 	for _, tc := range []struct{ trigger, mutation string }{
 		{"task_comments_guard_update", `UPDATE task_comments SET body='mutant' WHERE id=?`},
 		{"task_comments_guard_delete", `DELETE FROM task_comments WHERE id=?`},
-		{"quota_history_immutable_update", `UPDATE quota_observations SET window_key='7d' WHERE id=?`},
-		{"quota_history_immutable_delete", `DELETE FROM quota_observations WHERE id=?`},
+		{"quota_history_bulk_update", `UPDATE quota_observations SET window_key='7d' WHERE id=?`},
+		{"quota_history_bulk_delete", `DELETE FROM quota_observations WHERE id=?`},
 	} {
 		t.Run(tc.trigger, func(t *testing.T) {
 			ctx := t.Context()
