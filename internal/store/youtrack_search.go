@@ -3,8 +3,12 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // taskRefsExpr is the refs object a task search hit carries. searchTasks and
@@ -15,6 +19,80 @@ const taskRefsExpr = `jsonb_strip_nulls(jsonb_build_object('id',t.id::text,'stat
 // search backend answers those by exact lookup in PostgreSQL.
 func NumericIDQuery(q string) bool {
 	return numericIDQuery.MatchString(strings.TrimSpace(q))
+}
+
+// ExactNumericHit performs an exact numeric ID lookup for tasks and documents.
+// The boolean reports whether the query was a numeric ID query.
+func (s *Store) ExactNumericHit(ctx context.Context, q, scope, session string) ([]SearchResult, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, false, ErrDialectUnsupported
+	}
+	m := numericIDQuery.FindStringSubmatch(strings.TrimSpace(q))
+	if m == nil {
+		return nil, false, nil
+	}
+	id, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return nil, true, nil
+	}
+	var out []SearchResult
+	if scope == "tasks" || scope == "all" {
+		row := s.pool.QueryRow(ctx, `SELECT t.id::text,t.lane,t.kind,t.title,`+taskRefsExpr+`,t.created_at FROM tasks t WHERE t.id=$2 AND ($1='' OR t.lane=$1)`, session, id)
+		var x SearchResult
+		var refs []byte
+		switch err := row.Scan(&x.Key, &x.Session, &x.Kind, &x.Title, &refs, &x.CreatedAt); {
+		case err == nil:
+			if err := json.Unmarshal(refs, &x.Refs); err != nil {
+				return nil, true, err
+			}
+			x.Scope, x.Snippet = "tasks", x.Title
+			out = append(out, x)
+		case errors.Is(err, pgx.ErrNoRows):
+		default:
+			return nil, true, fmt.Errorf("exact numeric hit task: %w", err)
+		}
+	}
+	if scope == "docs" || scope == "all" {
+		row := s.pool.QueryRow(ctx, `SELECT key,session,kind,left(body,160),created_at FROM documents WHERE id=$2 AND ($1='' OR session=$1)`, session, id)
+		var x SearchResult
+		switch err := row.Scan(&x.Key, &x.Session, &x.Kind, &x.Snippet, &x.CreatedAt); {
+		case err == nil:
+			x.Scope, x.Title = "docs", x.Key
+			out = append(out, x)
+		case errors.Is(err, pgx.ErrNoRows):
+		default:
+			return nil, true, fmt.Errorf("exact numeric hit doc: %w", err)
+		}
+	}
+	if len(out) > 0 && (scope == "docs" || scope == "all") {
+		if err := s.linkTaskDocs(ctx, out); err != nil {
+			return nil, true, err
+		}
+	}
+	return out, true, nil
+}
+
+// ExactDocHit looks up a document by exact key.
+// The boolean reports whether an exact document match was found.
+func (s *Store) ExactDocHit(ctx context.Context, key, session string) ([]SearchResult, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, false, ErrDialectUnsupported
+	}
+	row := s.pool.QueryRow(ctx, `SELECT key,session,kind,left(body,160),created_at FROM documents WHERE key=$2 AND ($1='' OR session=$1)`, session, key)
+	var x SearchResult
+	switch err := row.Scan(&x.Key, &x.Session, &x.Kind, &x.Snippet, &x.CreatedAt); {
+	case err == nil:
+		x.Scope, x.Title = "docs", x.Key
+		out := []SearchResult{x}
+		if err := s.linkTaskDocs(ctx, out); err != nil {
+			return nil, true, err
+		}
+		return out, true, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, false, nil
+	default:
+		return nil, false, fmt.Errorf("exact doc hit: %w", err)
+	}
 }
 
 // DocumentKeyExists reports whether a document has exactly this key. The
@@ -94,7 +172,11 @@ func (s *Store) YouTrackDocHits(ctx context.Context, articleIDs []string, sessio
 	rows, err := s.pool.Query(ctx, `SELECT a.article_id,d.key,d.session,d.kind,d.created_at
 		FROM youtrack_doc_articles a JOIN documents d ON d.key=COALESCE(NULLIF(a.document_key,''),a.doc_key)
 		WHERE a.article_id=ANY($1) AND ($2='' OR d.session=$2)
-		ORDER BY a.article_id,d.key`, articleIDs, session)
+		UNION ALL
+		SELECT b.article_id,d.key,d.session,d.kind,d.created_at
+		FROM yt_article_bindings b JOIN documents d ON d.id=b.document_id
+		WHERE b.article_id=ANY($1) AND ($2='' OR d.session=$2)
+		ORDER BY 1,2`, articleIDs, session)
 	if err != nil {
 		return nil, fmt.Errorf("youtrack doc hits: %w", err)
 	}

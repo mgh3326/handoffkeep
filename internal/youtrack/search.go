@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,19 +20,12 @@ const DefaultSearchTimeout = 3 * time.Second
 
 const (
 	searchIssueFields   = "id,idReadable,summary,description"
-	searchArticleFields = "id,idReadable,summary,content"
+	searchArticleFields = "id,idReadable,summary,content,parentArticle(id)"
 	searchExcerptRunes  = 160
 	searchDefaultLimit  = 20
 	searchMaxLimit      = 100
 	searchMaxTaskLimit  = 50
 )
-
-// searchQuoteEscaper keeps user text inside one YouTrack quoted phrase: a
-// backslash or a quote the user typed cannot end the phrase early.
-var searchQuoteEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
-
-// SearchFallback answers a search from PostgreSQL. The api passes Store.Search.
-type SearchFallback func(ctx context.Context, q, scope, session string, limit int) ([]store.SearchResult, error)
 
 // SearchIssues returns up to top issues matching a YouTrack query. A 5xx is not
 // retried: a search answers within its own deadline, and PostgreSQL answers
@@ -59,15 +53,13 @@ func (c *Client) SearchArticleText(ctx context.Context, query string, top int) (
 	return out, err
 }
 
-// Search answers one /v1/search call. Scope tasks and docs ask YouTrack, and
-// scope all asks it for both. Every other request goes to fallback: a bare id
-// or "#<id>",
-// an exact document key, and any YouTrack failure (timeout, HTTP error,
-// oversize answer). A YouTrack failure is logged once as
-// search.youtrack_fallback with its reason.
+// Search answers one /v1/search call from YouTrack exclusively.
+// Exact document keys and numeric ID lookups (#<id> or <id>) are answered
+// directly by exact store lookups without querying YouTrack.
+// Scope "ctx" searches checkpoints and memory via SearchCtx.
 //
 // Scope all merges three lanes round-robin, one hit from each non-empty lane in
-// turn: YouTrack issues (tasks), YouTrack articles (docs), and PostgreSQL ctx
+// turn: YouTrack issues (tasks), YouTrack articles (docs), and hk ctx
 // newest first. Each lane keeps its own order, so the YouTrack lanes
 // keep YouTrack's relevance order. Scopes tasks and docs keep YouTrack's order.
 //
@@ -75,26 +67,51 @@ func (c *Client) SearchArticleText(ctx context.Context, query string, top int) (
 // lane returned more than limit, even if some of those hits had no hk mapping,
 // or when the merged list is longer than limit. A truncated page sets Truncated
 // on every row.
-func (s *Service) Search(ctx context.Context, fallback SearchFallback, q, scope, session string, limit int) ([]store.SearchResult, error) {
+func (s *Service) Search(ctx context.Context, q, scope, session string, limit int) ([]store.SearchResult, error) {
 	if err := store.CheckSearch(q, scope, session); err != nil {
 		return nil, err
 	}
 	text := strings.TrimSpace(q)
-	wantTasks := scope == "tasks" || scope == "all"
-	wantDocs := scope == "docs" || scope == "all"
-	if (!wantTasks && !wantDocs) || text == "" || store.NumericIDQuery(text) {
-		return fallback(ctx, q, scope, session, limit)
+	limit = searchLimit(scope, limit)
+
+	if scope == "ctx" {
+		return s.store.SearchCtx(ctx, text, session, limit)
 	}
-	if wantDocs {
-		exact, err := s.store.DocumentKeyExists(ctx, text)
+
+	if store.NumericIDQuery(text) {
+		hits, ok, err := s.store.ExactNumericHit(ctx, text, scope, session)
 		if err != nil {
 			return nil, err
 		}
-		if exact {
-			return fallback(ctx, q, scope, session, limit)
+		if ok {
+			if len(hits) > limit {
+				hits = hits[:limit]
+				for i := range hits {
+					hits[i].Truncated = true
+				}
+			}
+			return hits, nil
 		}
 	}
-	limit = searchLimit(scope, limit)
+
+	wantTasks := scope == "tasks" || scope == "all"
+	wantDocs := scope == "docs" || scope == "all"
+
+	if wantDocs {
+		hits, ok, err := s.store.ExactDocHit(ctx, text, session)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			if len(hits) > limit {
+				hits = hits[:limit]
+				for i := range hits {
+					hits[i].Truncated = true
+				}
+			}
+			return hits, nil
+		}
+	}
 
 	var names []string
 	if wantTasks {
@@ -114,11 +131,17 @@ func (s *Service) Search(ctx context.Context, fallback SearchFallback, q, scope,
 		issues, err = s.client.SearchIssues(yctx, issueSearchQuery(names, text), limit+1)
 	}
 	if err == nil && wantDocs {
-		articles, err = s.client.SearchArticleText(yctx, quoteSearchText(text), limit+1)
+		clean := cleanSearchText(text)
+		if clean != "" {
+			articles, err = s.client.SearchArticleText(yctx, clean, limit+1)
+		}
 	}
 	if err != nil {
-		log.Printf("search.youtrack_fallback reason=%s scope=%q", searchFailureReason(yctx, err), scope)
-		return fallback(ctx, q, scope, session, limit)
+		log.Printf("search.youtrack_error reason=%s scope=%q err=%v", searchFailureReason(yctx, err), scope, err)
+		if errors.Is(yctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, store.ErrSearchTimeout
+		}
+		return nil, store.ErrSearchUnavailable
 	}
 
 	var lanes [][]store.SearchResult
@@ -143,13 +166,22 @@ func (s *Service) Search(ctx context.Context, fallback SearchFallback, q, scope,
 	}
 	if wantDocs {
 		overflow = overflow || len(articles) > limit
-		hits, err := s.store.YouTrackDocHits(ctx, articleIDs(articles), session)
+		allArticleIDs := articleIDs(articles)
+		for _, a := range articles {
+			if a.HasParent() {
+				allArticleIDs = append(allArticleIDs, a.ParentArticle.ID)
+			}
+		}
+		hits, err := s.store.YouTrackDocHits(ctx, allArticleIDs, session)
 		if err != nil {
 			return nil, err
 		}
 		lane := []store.SearchResult{}
 		for _, article := range articles {
 			x, ok := hits[article.ID]
+			if !ok && article.HasParent() {
+				x, ok = hits[article.ParentArticle.ID]
+			}
 			if !ok {
 				continue
 			}
@@ -157,6 +189,14 @@ func (s *Service) Search(ctx context.Context, fallback SearchFallback, q, scope,
 			lane = append(lane, x)
 		}
 		lanes = append(lanes, lane)
+	}
+	if scope == "all" {
+		ctxHits, err := s.store.SearchCtx(ctx, text, session, limit+1)
+		if err != nil {
+			return nil, err
+		}
+		overflow = overflow || len(ctxHits) > limit
+		lanes = append(lanes, ctxHits)
 	}
 	merged := interleave(lanes)
 	truncated := overflow || len(merged) > limit
@@ -212,20 +252,54 @@ func mirroredShortNames(projects []store.YouTrackProject) []string {
 	return names
 }
 
-// issueSearchQuery restricts the issue search to the mirrored projects, then
-// adds the user's text as one quoted phrase.
+var leadingConjunctionRE = regexp.MustCompile(`^(?i)(?:or|and)\s+`)
+
+var querySyntaxReplacer = strings.NewReplacer(
+	`\`, `\\`,
+	`"`, `\"`,
+	`{`, `\{`,
+	`}`, `\}`,
+	`(`, `\(`,
+	`)`, `\)`,
+	`#`, `\#`,
+	`:`, `\:`,
+)
+
+// escapeYouTrackQuery escapes YouTrack query syntax characters (backslash, quotes,
+// braces, parentheses, hash, colons) so user text matches literally while words
+// still match individually, preventing query syntax errors and filter injections.
+func escapeYouTrackQuery(text string) string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return ""
+	}
+	s := strings.Join(words, " ")
+	escaped := querySyntaxReplacer.Replace(s)
+	return strings.TrimSpace(leadingConjunctionRE.ReplaceAllString(escaped, ""))
+}
+
+// cleanSearchText escapes YouTrack query syntax characters so user text matches
+// literally while words still match individually.
+func cleanSearchText(text string) string {
+	return escapeYouTrackQuery(text)
+}
+
+// issueSearchQuery restricts the issue search to the mirrored projects using
+// an isolated project clause, combined with the cleaned user text tokens.
 func issueSearchQuery(names []string, text string) string {
 	parts := make([]string, 0, len(names))
 	for _, name := range names {
 		parts = append(parts, "project: {"+name+"}")
 	}
-	return "(" + strings.Join(parts, " or ") + ") " + quoteSearchText(text)
-}
-
-// quoteSearchText wraps user text in one YouTrack quoted phrase, so project:,
-// for:, # or braces the user typed match as words, not as filters.
-func quoteSearchText(text string) string {
-	return `"` + searchQuoteEscaper.Replace(text) + `"`
+	clean := cleanSearchText(text)
+	if len(parts) == 0 {
+		return clean
+	}
+	projClause := strings.Join(parts, " or ")
+	if clean == "" {
+		return "(" + projClause + ")"
+	}
+	return "(" + projClause + ") and (" + clean + ")"
 }
 
 // excerpt is the first searchExcerptRunes runes of the body with whitespace

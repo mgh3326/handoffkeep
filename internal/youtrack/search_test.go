@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -72,6 +73,39 @@ func (f *fakeStore) YouTrackDocHits(_ context.Context, articleIDs []string, sess
 		}
 	}
 	return out, nil
+}
+
+func (f *fakeStore) ExactNumericHit(_ context.Context, q, scope, session string) ([]store.SearchResult, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !store.NumericIDQuery(q) {
+		return nil, false, nil
+	}
+	idStr := strings.TrimPrefix(strings.TrimSpace(q), "#")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		return nil, true, nil
+	}
+	var out []store.SearchResult
+	if (scope == "tasks" || scope == "all") && f.tasks != nil {
+		if t, ok := f.tasks[id]; ok && (session == "" || t.Lane == session) {
+			out = append(out, store.SearchResult{Scope: "tasks", Key: strconv.FormatInt(t.ID, 10), Title: t.Title, Snippet: t.Title, Session: t.Lane, Kind: t.Kind, CreatedAt: t.CreatedAt})
+		}
+	}
+	return out, true, nil
+}
+
+func (f *fakeStore) ExactDocHit(_ context.Context, key, session string) ([]store.SearchResult, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if d, ok := f.docs[key]; ok && (session == "" || d.Session == session) {
+		return []store.SearchResult{{Scope: "docs", Key: key, Title: key, Session: d.Session, Kind: d.Kind, Snippet: d.Body, CreatedAt: d.CreatedAt}}, true, nil
+	}
+	return nil, false, nil
+}
+
+func (f *fakeStore) SearchCtx(_ context.Context, q, session string, limit int) ([]store.SearchResult, error) {
+	return []store.SearchResult{}, nil
 }
 
 // fakeSearchYT answers /api/issues and /api/articles, honouring $top, and
@@ -192,8 +226,7 @@ func TestSearchTasksMapsIssuesDropsUnmappedAndFiltersSession(t *testing.T) {
 	fs.mirror(t7.ID, "2-7", "HK-7")
 	fs.mirror(t9.ID, "2-9", "HK-9")
 
-	fb := &fallbackRecorder{}
-	got, err := svc.Search(ctx, fb.search, "alpha", "tasks", "", 20)
+	got, err := svc.Search(ctx, "alpha", "tasks", "", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,11 +237,8 @@ func TestSearchTasksMapsIssuesDropsUnmappedAndFiltersSession(t *testing.T) {
 	if got[0].Title != "summary seven" || got[0].Snippet != "alpha beta gamma" {
 		t.Fatalf("first hit title/snippet = %q / %q", got[0].Title, got[0].Snippet)
 	}
-	if len(fb.calls) != 0 {
-		t.Fatalf("fallback called %v on a healthy YouTrack answer", fb.calls)
-	}
 
-	got, err = svc.Search(ctx, fb.search, "alpha", "tasks", "operator-desk", 20)
+	got, err = svc.Search(ctx, "alpha", "tasks", "operator-desk", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +263,7 @@ func TestSearchIgnoresMappingsFromAnotherTenant(t *testing.T) {
 	cur := fs.addTask("handoffkeep", "operator-desk", "current tenant", "open", 1)
 	fs.mirror(cur.ID, "2-7", "HK-7")
 
-	got, err := svc.Search(ctx, (&fallbackRecorder{}).search, "seven", "tasks", "", 20)
+	got, err := svc.Search(ctx, "seven", "tasks", "", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,8 +289,7 @@ func TestSearchDocsMapsArticlesAndDropsIndexArticles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fb := &fallbackRecorder{}
-	got, err := svc.Search(ctx, fb.search, "heading", "docs", "", 20)
+	got, err := svc.Search(ctx, "heading", "docs", "", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,56 +299,69 @@ func TestSearchDocsMapsArticlesAndDropsIndexArticles(t *testing.T) {
 	if got[0].Title != "design/alpha-notes" || got[0].Snippet != "# Heading The body text" || got[0].Session != "sess-a" {
 		t.Fatalf("doc hit = %+v", got[0])
 	}
-	if got, err = svc.Search(ctx, fb.search, "heading", "docs", "other-session", 20); err != nil || len(got) != 0 {
+	if got, err = svc.Search(ctx, "heading", "docs", "other-session", 20); err != nil || len(got) != 0 {
 		t.Fatalf("session filter = %+v, %v; want no hits", got, err)
-	}
-	if len(fb.calls) != 0 {
-		t.Fatalf("fallback called %v on a healthy YouTrack answer", fb.calls)
 	}
 }
 
-func TestSearchExactLookupsStayOnPostgres(t *testing.T) {
+func TestSearchExactLookupsUseExactStore(t *testing.T) {
 	yt := &fakeSearchYT{}
 	fs, svc := newSearchTest(t, yt, time.Second)
 	ctx := context.Background()
 	fs.mu.Lock()
-	fs.docs["design/exact-key"] = store.Document{Key: "design/exact-key", Kind: "design"}
+	fs.docs["design/exact-key"] = store.Document{Key: "design/exact-key", Kind: "design", Body: "design body"}
 	fs.mu.Unlock()
+	task := fs.addTask("handoffkeep", "lane-a", "task 42", "open", 1)
 
-	cases := []struct{ q, scope string }{
-		{"design/exact-key", "all"},
-		{"design/exact-key", "docs"},
-		{"#42", "all"},
-		{"42", "tasks"},
+	// Exact doc key in docs and all
+	got, err := svc.Search(ctx, "design/exact-key", "docs", "", 20)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, c := range cases {
-		fb := &fallbackRecorder{rows: map[string][]store.SearchResult{c.scope: {{Scope: c.scope, Key: "pg"}}}}
-		got, err := svc.Search(ctx, fb.search, c.q, c.scope, "", 20)
-		if err != nil {
-			t.Fatalf("%q %s: %v", c.q, c.scope, err)
-		}
-		if len(fb.calls) == 0 || len(got) != 1 || got[0].Key != "pg" {
-			t.Fatalf("%q %s: fallback calls %v, got %+v; want PostgreSQL to answer", c.q, c.scope, fb.calls, got)
-		}
+	if len(got) != 1 || got[0].Key != "design/exact-key" {
+		t.Fatalf("exact doc hit: %+v", got)
 	}
+	got, err = svc.Search(ctx, "design/exact-key", "all", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Key != "design/exact-key" {
+		t.Fatalf("exact doc hit in all: %+v", got)
+	}
+
+	// Exact numeric id in tasks and all
+	got, err = svc.Search(ctx, "#"+strconv.FormatInt(task.ID, 10), "tasks", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Key != strconv.FormatInt(task.ID, 10) {
+		t.Fatalf("exact numeric hit: %+v", got)
+	}
+	got, err = svc.Search(ctx, strconv.FormatInt(task.ID, 10), "all", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Key != strconv.FormatInt(task.ID, 10) {
+		t.Fatalf("exact numeric hit in all: %+v", got)
+	}
+
 	if q := yt.recorded(); len(q) != 0 {
-		t.Fatalf("YouTrack was asked %v for exact or PostgreSQL-only lookups", q)
+		t.Fatalf("YouTrack was asked %v for exact lookups", q)
 	}
 }
 
-func TestSearchFallsBackWithReasonOnYouTrackFailure(t *testing.T) {
+func TestSearchErrorsImmediatelyOnYouTrackFailure(t *testing.T) {
 	cases := []struct {
 		name     string
 		status   int
 		delay    time.Duration
 		oversize bool
 		timeout  time.Duration
-		reason   string
+		wantErr  error
 	}{
-		{"server error", http.StatusInternalServerError, 0, false, time.Second, "http_500"},
-		{"unavailable", http.StatusServiceUnavailable, 0, false, time.Second, "http_503"},
-		{"timeout", 0, 2 * time.Second, false, 50 * time.Millisecond, "timeout"},
-		{"oversize answer", 0, 0, true, time.Second, "oversize"},
+		{"server error", http.StatusInternalServerError, 0, false, time.Second, store.ErrSearchUnavailable},
+		{"unavailable", http.StatusServiceUnavailable, 0, false, time.Second, store.ErrSearchUnavailable},
+		{"timeout", 0, 2 * time.Second, false, 50 * time.Millisecond, store.ErrSearchTimeout},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -328,40 +370,31 @@ func TestSearchFallsBackWithReasonOnYouTrackFailure(t *testing.T) {
 			if err := fs.PutYouTrackProject(context.Background(), store.YouTrackProject{HKProject: "handoffkeep", ShortName: "HK"}); err != nil {
 				t.Fatal(err)
 			}
-			logs := captureLog(t)
-			fb := &fallbackRecorder{rows: map[string][]store.SearchResult{"tasks": {{Scope: "tasks", Key: "pg"}}}}
-			got, err := svc.Search(context.Background(), fb.search, "anything", "tasks", "", 20)
-			if err != nil {
-				t.Fatalf("search failed instead of falling back: %v", err)
-			}
-			if len(got) != 1 || got[0].Key != "pg" {
-				t.Fatalf("got %+v, want the PostgreSQL answer", got)
-			}
-			if want := `search.youtrack_fallback reason=` + c.reason + ` scope="tasks"`; !strings.Contains(logs.String(), want) {
-				t.Fatalf("log = %q, want %q", logs.String(), want)
+			_, err := svc.Search(context.Background(), "anything", "tasks", "", 20)
+			if !errors.Is(err, c.wantErr) {
+				t.Fatalf("got err %v, want %v", err, c.wantErr)
 			}
 		})
 	}
 }
 
-func TestSearchEscapesUserTextAsOneQuotedPhrase(t *testing.T) {
+func TestSearchRawTextQueries(t *testing.T) {
 	yt := &fakeSearchYT{}
 	fs, svc := newSearchTest(t, yt, time.Second)
 	ctx := context.Background()
 	if err := fs.PutYouTrackProject(ctx, store.YouTrackProject{HKProject: "handoffkeep", ShortName: "HK"}); err != nil {
 		t.Fatal(err)
 	}
-	fb := &fallbackRecorder{}
 	input := `project: OTHER "x" \ for: me`
-	if _, err := svc.Search(ctx, fb.search, input, "tasks", "", 20); err != nil {
+	if _, err := svc.Search(ctx, input, "tasks", "", 20); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Search(ctx, fb.search, input, "docs", "", 20); err != nil {
+	if _, err := svc.Search(ctx, input, "docs", "", 20); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
-		`/api/issues?(project: {HK}) "project: OTHER \"x\" \\ for: me"`,
-		`/api/articles?"project: OTHER \"x\" \\ for: me"`,
+		`/api/issues?(project: {HK}) and (project\: OTHER \"x\" \\ for\: me)`,
+		`/api/articles?project\: OTHER \"x\" \\ for\: me`,
 	}
 	got := yt.recorded()
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
@@ -382,9 +415,8 @@ func TestSearchLimitAndTruncatedMarkEveryRow(t *testing.T) {
 		task := fs.addTask("handoffkeep", "operator-desk", issue.Summary, "open", 1)
 		fs.mirror(task.ID, issue.ID, "HK-"+strconv.Itoa(i+1))
 	}
-	fb := &fallbackRecorder{}
 
-	got, err := svc.Search(ctx, fb.search, "x", "tasks", "", 2)
+	got, err := svc.Search(ctx, "x", "tasks", "", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +429,7 @@ func TestSearchLimitAndTruncatedMarkEveryRow(t *testing.T) {
 		}
 	}
 
-	got, err = svc.Search(ctx, fb.search, "x", "tasks", "", 5)
+	got, err = svc.Search(ctx, "x", "tasks", "", 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,8 +464,7 @@ func TestSearchAllInterleavesLanesAndKeepsPostgresHits(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fb := &fallbackRecorder{}
-	got, err := svc.Search(ctx, fb.search, "one", "all", "", 20)
+	got, err := svc.Search(ctx, "one", "all", "", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,17 +476,13 @@ func TestSearchAllInterleavesLanesAndKeepsPostgresHits(t *testing.T) {
 	if keys := searchKeys(got); strings.Join(keys, ",") != strings.Join(want, ",") {
 		t.Fatalf("keys = %v, want round-robin %v", keys, want)
 	}
-	if len(fb.calls) != 0 {
-		t.Fatalf("PostgreSQL asked for %v, want nothing: scope all no longer reads PostgreSQL rows", fb.calls)
-	}
 }
 
 func TestSearchTasksWithoutMirroredProjectsAsksNothing(t *testing.T) {
 	yt := &fakeSearchYT{issues: []Issue{{ID: "2-1", Summary: "task one"}}}
 	fs, svc := newSearchTest(t, yt, time.Second)
 	fs.addTask("handoffkeep", "operator-desk", "task one", "open", 1)
-	fb := &fallbackRecorder{}
-	got, err := svc.Search(context.Background(), fb.search, "one", "tasks", "", 20)
+	got, err := svc.Search(context.Background(), "one", "tasks", "", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,9 +492,6 @@ func TestSearchTasksWithoutMirroredProjectsAsksNothing(t *testing.T) {
 }
 
 func TestSearchHelpers(t *testing.T) {
-	if got := quoteSearchText(`a"b\c`); got != `"a\"b\\c"` {
-		t.Fatalf("quoteSearchText = %s", got)
-	}
 	if got := excerpt("  alpha\n\n beta  ", "fallback"); got != "alpha beta" {
 		t.Fatalf("excerpt = %q", got)
 	}
@@ -488,7 +512,44 @@ func TestSearchHelpers(t *testing.T) {
 	if got := searchLimit("tasks", 80); got != 50 {
 		t.Fatalf("searchLimit(tasks, 80) = %d, want 50", got)
 	}
-	if q := issueSearchQuery([]string{"HK", "BIG"}, "x"); q != `(project: {HK} or project: {BIG}) "x"` {
+	if q := issueSearchQuery([]string{"HK", "BIG"}, "x"); q != "(project: {HK} or project: {BIG}) and (x)" {
 		t.Fatalf("issueSearchQuery = %s", q)
+	}
+	// Korean partial words: matches individually, not wrapped in one phrase
+	for _, kw := range []string{"좌회", "택배", "배달 루프", "그랜저"} {
+		if q := issueSearchQuery([]string{"HK"}, kw); q != "(project: {HK}) and ("+kw+")" {
+			t.Fatalf("issueSearchQuery Korean %q = %s", kw, q)
+		}
+	}
+	// Each special character escaped literally
+	escapeCases := []struct {
+		in   string
+		want string
+	}{
+		{"project: HK", `project\: HK`},
+		{"for: me", `for\: me`},
+		{"#123", `\#123`},
+		{"#tag", `\#tag`},
+		{"unclosed { brace", `unclosed \{ brace`},
+		{"closed { brace }", `closed \{ brace \}`},
+		{"back\\slash", `back\\slash`},
+		{`"quoted text"`, `\"quoted text\"`},
+		{"parens (test)", `parens \(test\)`},
+		{"project: HK #bug {test} \"phrase\" \\path 좌회", `project\: HK \#bug \{test\} \"phrase\" \\path 좌회`},
+		{"or project: X", `project\: X`},
+	}
+	for _, c := range escapeCases {
+		if got := escapeYouTrackQuery(c.in); got != c.want {
+			t.Errorf("escapeYouTrackQuery(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	if q := issueSearchQuery([]string{"HK"}, "for: me"); q != `(project: {HK}) and (for\: me)` {
+		t.Fatalf("issueSearchQuery for: me = %s", q)
+	}
+	if q := issueSearchQuery([]string{"HK"}, "unclosed { brace"); q != `(project: {HK}) and (unclosed \{ brace)` {
+		t.Fatalf("issueSearchQuery brace = %s", q)
+	}
+	if q := issueSearchQuery([]string{"HK"}, "or project: X"); q != `(project: {HK}) and (project\: X)` {
+		t.Fatalf("issueSearchQuery leading conjunction = %s", q)
 	}
 }
