@@ -21,7 +21,7 @@ func insertMySQLYTOp(t *testing.T, s *Store, kind, key, target string) int64 {
 		id, err = tx.InsertID(t.Context(), `INSERT INTO yt_write_ops(principal, kind, idem_key, payload_sha, payload, entity_kind, entity_id,
 			yt_target_id, actor, parent_id, child_seq, state, yt_result_id, reason, last_error, attempts, reconciles,
 			created_at, next_attempt_at, tenant)
-			VALUES (?,?,?,?,CAST(? AS JSON),?,?,?,NULL,0,'prepared','','','',0,0,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),?)`,
+			VALUES (?,?,?,?,CAST(? AS JSON),?,?,?,?,NULL,0,'prepared','','','',0,0,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),?)`,
 			"hk:test", kind, key, "sha", `{}`, "task", "1", target, "actor", "")
 		return err
 	})
