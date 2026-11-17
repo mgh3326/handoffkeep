@@ -214,24 +214,21 @@ func scanPlacement(row interface{ Scan(...any) error }) (PlacementDecision, erro
 }
 
 func (s *Store) RecordPlacement(ctx context.Context, d PlacementDecision) (PlacementDecision, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return PlacementDecision{}, false, ErrDialectUnsupported
-	}
-
 	if err := checkPlacement(d); err != nil {
 		return d, false, err
 	}
 	d.ID = 0
 	// Postgres stores microseconds; normalize before comparing a retry.
 	d.DecidedAt = d.DecidedAt.UTC().Truncate(time.Microsecond)
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return d, false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	if d.TaskID != nil {
 		var id int64
-		if err = tx.QueryRow(ctx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, *d.TaskID).Scan(&id); errors.Is(err, ErrNoRows) {
+		if err = tx.QueryRow(ctx, sqlFor(tx, `SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT id FROM tasks WHERE id=? FOR UPDATE`), *d.TaskID).Scan(&id); errors.Is(err, ErrNoRows) {
 			return d, false, ErrTaskNotFound
 		} else if err != nil {
 			return d, false, err
@@ -241,17 +238,32 @@ func (s *Store) RecordPlacement(ctx context.Context, d PlacementDecision) (Place
 	if err != nil {
 		return d, false, err
 	}
-	stored, err := scanPlacement(tx.QueryRow(ctx, `INSERT INTO placement_decisions(job_id,attempt,task_id,decided_at,decided_on,tool_version,source,ranking,state_source,chosen_host,outcome,reason,profile,pool,account_key,family,model,role,pane_id,repo,candidates) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb) ON CONFLICT(job_id,attempt) DO NOTHING RETURNING `+placementColumns,
-		d.JobID, d.Attempt, d.TaskID, d.DecidedAt, d.DecidedOn, d.ToolVersion, d.Source, d.Ranking, d.StateSource, d.ChosenHost, d.Outcome, d.Reason, d.Profile, d.Pool, d.AccountKey, d.Family, d.Model, d.Role, d.PaneID, d.Repo, string(raw)))
-	created := err == nil
-	if errors.Is(err, ErrNoRows) {
-		stored, err = scanPlacement(tx.QueryRow(ctx, `SELECT `+placementColumns+` FROM placement_decisions WHERE job_id=$1 AND attempt=$2`, d.JobID, d.Attempt))
+	insertSQL := sqlFor(tx,
+		`INSERT INTO placement_decisions(job_id,attempt,task_id,decided_at,decided_on,tool_version,source,ranking,state_source,chosen_host,outcome,reason,profile,pool,account_key,family,model,role,pane_id,repo,candidates) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb) ON CONFLICT(job_id,attempt) DO NOTHING RETURNING `+placementColumns,
+		`INSERT INTO placement_decisions(job_id,attempt,task_id,decided_at,decided_on,tool_version,source,ranking,state_source,chosen_host,outcome,reason,profile,pool,account_key,family,model,role,pane_id,repo,candidates) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	args := []any{d.JobID, d.Attempt, d.TaskID, d.DecidedAt, d.DecidedOn, d.ToolVersion, d.Source, d.Ranking, d.StateSource, d.ChosenHost, d.Outcome, d.Reason, d.Profile, d.Pool, d.AccountKey, d.Family, d.Model, d.Role, d.PaneID, d.Repo, string(raw)}
+	var stored PlacementDecision
+	created := false
+	if s.dialect == mysqlDialect {
+		_, err = tx.InsertID(ctx, insertSQL, args...)
 		if err == nil {
-			d.ID = stored.ID
-			stored.DecidedAt = stored.DecidedAt.UTC()
-			if !reflect.DeepEqual(d, stored) {
-				return stored, false, ErrPlacementConflict
-			}
+			created = true
+			stored, err = scanPlacement(tx.QueryRow(ctx, `SELECT `+placementColumns+` FROM placement_decisions WHERE job_id=? AND attempt=?`, d.JobID, d.Attempt))
+		} else if errors.Is(mapDriverError(err), errUniqueViolation) {
+			stored, err = scanPlacement(tx.QueryRow(ctx, `SELECT `+placementColumns+` FROM placement_decisions WHERE job_id=? AND attempt=?`, d.JobID, d.Attempt))
+		}
+	} else {
+		stored, err = scanPlacement(tx.QueryRow(ctx, insertSQL, args...))
+		created = err == nil
+		if errors.Is(err, ErrNoRows) {
+			stored, err = scanPlacement(tx.QueryRow(ctx, `SELECT `+placementColumns+` FROM placement_decisions WHERE job_id=$1 AND attempt=$2`, d.JobID, d.Attempt))
+		}
+	}
+	if !created && err == nil {
+		d.ID = stored.ID
+		stored.DecidedAt = stored.DecidedAt.UTC()
+		if !reflect.DeepEqual(d, stored) {
+			return stored, false, ErrPlacementConflict
 		}
 	}
 	if err != nil {
@@ -267,24 +279,33 @@ func (s *Store) RecordPlacement(ctx context.Context, d PlacementDecision) (Place
 // not revisited; a reader that must catch one pages again from 0. A nil afterID
 // keeps the newest-first answer.
 func (s *Store) ListPlacements(ctx context.Context, job, host string, since time.Time, afterID *int64, limit int) ([]PlacementDecision, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if (job != "" && !ValidJobID(job)) || (host != "" && !ValidJobHost(host)) || (afterID != nil && *afterID < 0) || limit < 1 || limit > 1000 {
 		return nil, errors.New("invalid placement filter")
 	}
 	q := `SELECT ` + placementColumns + ` FROM placement_decisions WHERE ($1='' OR job_id=$1) AND ($2='' OR chosen_host=$2) AND decided_at >= $3`
 	args := []any{job, host, since}
+	if s.dialect == mysqlDialect {
+		q = `SELECT ` + placementColumns + ` FROM placement_decisions WHERE (?='' OR job_id=?) AND (?='' OR chosen_host=?) AND decided_at>=?`
+		args = []any{job, job, host, host, since}
+	}
 	order := ` ORDER BY decided_at DESC,id DESC`
 	if afterID != nil {
 		args = append(args, *afterID)
-		q += fmt.Sprintf(` AND id>$%d`, len(args))
+		if s.dialect == mysqlDialect {
+			q += ` AND id>?`
+		} else {
+			q += fmt.Sprintf(` AND id>$%d`, len(args))
+		}
 		order = ` ORDER BY id ASC`
 	}
 	args = append(args, limit)
-	q += order + fmt.Sprintf(` LIMIT $%d`, len(args))
-	rows, err := s.pool.Query(ctx, q, args...)
+	q += order
+	if s.dialect == mysqlDialect {
+		q += ` LIMIT ?`
+	} else {
+		q += fmt.Sprintf(` LIMIT $%d`, len(args))
+	}
+	rows, err := s.db().Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -304,18 +325,20 @@ func (s *Store) ListPlacements(ctx context.Context, job, host string, since time
 // or evaluated as a candidate. The MCP projection applies its smaller limit
 // and omits placement fields that are not part of the diagnostic contract.
 func (s *Store) ListFleetCapacityPlacements(ctx context.Context, job, host string, since time.Time, limit int) ([]PlacementDecision, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if (job != "" && !ValidJobID(job)) || (host != "" && !ValidJobHost(host)) || limit < 1 || limit > 100 {
 		return nil, errors.New("invalid placement filter")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+placementColumns+` FROM placement_decisions
+	query := `SELECT ` + placementColumns + ` FROM placement_decisions
 		WHERE ($1='' OR job_id=$1)
 		AND ($2='' OR chosen_host=$2 OR EXISTS (SELECT 1 FROM jsonb_array_elements(candidates) c WHERE c->>'host'=$2))
 		AND decided_at >= $3
-		ORDER BY decided_at DESC,id DESC LIMIT $4`, job, host, since, limit)
+		ORDER BY decided_at DESC,id DESC LIMIT $4`
+	args := []any{job, host, since, limit}
+	if s.dialect == mysqlDialect {
+		query = `SELECT ` + placementColumns + ` FROM placement_decisions WHERE (?='' OR job_id=?) AND (?='' OR chosen_host=? OR JSON_SEARCH(candidates,'one',?,'$[*].host') IS NOT NULL) AND decided_at>=? ORDER BY decided_at DESC,id DESC LIMIT ?`
+		args = []any{job, job, host, host, host, since, limit}
+	}
+	rows, err := s.db().Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -332,10 +355,10 @@ func (s *Store) ListFleetCapacityPlacements(ctx context.Context, job, host strin
 }
 
 func (s *Store) PrunePlacements(ctx context.Context) (int64, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return 0, ErrDialectUnsupported
+	query := `DELETE FROM placement_decisions WHERE id IN (SELECT id FROM placement_decisions WHERE decided_at < $1 ORDER BY decided_at,id LIMIT 1000)`
+	if s.dialect == mysqlDialect {
+		query = `DELETE FROM placement_decisions WHERE id IN (SELECT id FROM (SELECT id FROM placement_decisions WHERE decided_at<? ORDER BY decided_at,id LIMIT 1000) old)`
 	}
-
-	tag, err := s.pool.Exec(ctx, `DELETE FROM placement_decisions WHERE id IN (SELECT id FROM placement_decisions WHERE decided_at < $1 ORDER BY decided_at,id LIMIT 1000)`, time.Now().UTC().Add(-PlacementRetention))
-	return tag.RowsAffected(), err
+	n, err := s.db().Exec(ctx, query, time.Now().UTC().Add(-PlacementRetention))
+	return n, err
 }

@@ -121,17 +121,13 @@ func insertNotificationOutboxOnce(ctx context.Context, tx pgx.Tx, kind, lane, ev
 // commits between the two can never be listed as live. The zero time means no
 // lower bound; the forwarder always passes its required cutoff.
 func (s *Store) ListUnsentNotifications(ctx context.Context, limit int, since time.Time) ([]NotificationOutbox, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if limit < 1 {
 		limit = 200
 	}
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+notificationOutboxColumns+` FROM notification_outbox WHERE sent_at IS NULL AND skipped_at IS NULL AND created_at >= $2 ORDER BY id ASC LIMIT $1`, limit, since)
+	rows, err := s.db().Query(ctx, s.q(`SELECT `+notificationOutboxColumns+` FROM notification_outbox WHERE sent_at IS NULL AND skipped_at IS NULL AND created_at >= $2 ORDER BY id ASC LIMIT $1`, `SELECT `+notificationOutboxColumns+` FROM notification_outbox WHERE sent_at IS NULL AND skipped_at IS NULL AND created_at >= ? ORDER BY id ASC LIMIT ?`), notificationSinceArgs(s.dialect, limit, since)...)
 	if err != nil {
 		return nil, err
 	}
@@ -147,6 +143,13 @@ func (s *Store) ListUnsentNotifications(ctx context.Context, limit int, since ti
 	return out, rows.Err()
 }
 
+func notificationSinceArgs(d storeDialect, limit int, since time.Time) []any {
+	if d == mysqlDialect {
+		return []any{since, limit}
+	}
+	return []any{limit, since}
+}
+
 // SkipNotificationsBefore settles every row created before the forwarder's
 // cutoff as skipped: the first start of forwarding settles the backlog
 // visibly instead of posting weeks of stale notices (hk 4986). It touches
@@ -154,18 +157,21 @@ func (s *Store) ListUnsentNotifications(ctx context.Context, limit int, since ti
 // nothing, and it never writes sent_at or hub_row_id. It returns how many
 // rows this call settled.
 func (s *Store) SkipNotificationsBefore(ctx context.Context, before time.Time, reason string) (int64, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return 0, ErrDialectUnsupported
-	}
-
 	if before.IsZero() || reason == "" || !validText(reason, 128) {
 		return 0, errors.New("invalid notification skip")
 	}
-	tag, err := s.pool.Exec(ctx, `UPDATE notification_outbox SET skipped_at=now(),skip_reason=$2 WHERE created_at < $1 AND sent_at IS NULL AND skipped_at IS NULL`, before, reason)
+	tag, err := s.db().Exec(ctx, s.q(`UPDATE notification_outbox SET skipped_at=now(),skip_reason=$2 WHERE created_at < $1 AND sent_at IS NULL AND skipped_at IS NULL`, `UPDATE notification_outbox SET skipped_at=UTC_TIMESTAMP(6),skip_reason=? WHERE created_at < ? AND sent_at IS NULL AND skipped_at IS NULL`), skipNotificationArgs(s.dialect, before, reason)...)
 	if err != nil {
 		return 0, err
 	}
-	return tag.RowsAffected(), nil
+	return tag, nil
+}
+
+func skipNotificationArgs(d storeDialect, before time.Time, reason string) []any {
+	if d == mysqlDialect {
+		return []any{reason, before}
+	}
+	return []any{before, reason}
 }
 
 // MarkNotificationSent records the hub's receipt for one outbox row. It is
@@ -176,14 +182,13 @@ func (s *Store) SkipNotificationsBefore(ctx context.Context, before time.Time, r
 // skipped row can never gain a receipt: sending is what skipping ruled out,
 // so it answers ErrOutboxConflict like any other disagreeing receipt.
 func (s *Store) MarkNotificationSent(ctx context.Context, eventID string, hubRowID int64) (NotificationOutbox, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return NotificationOutbox{}, ErrDialectUnsupported
-	}
-
 	if eventID == "" || len(eventID) > 256 || !validText(eventID, 256) || hubRowID < 1 {
 		return NotificationOutbox{}, errors.New("invalid notification mark")
 	}
 	var x NotificationOutbox
+	if s.dialect == mysqlDialect {
+		return s.markNotificationReceiptMySQL(ctx, eventID, hubRowID, "sent")
+	}
 	err := scanNotificationOutbox(s.pool.QueryRow(ctx, `UPDATE notification_outbox SET sent_at=now(),hub_row_id=$2 WHERE event_id=$1 AND sent_at IS NULL AND skipped_at IS NULL RETURNING `+notificationOutboxColumns, eventID, hubRowID), &x)
 	if err == nil {
 		return x, nil
@@ -209,14 +214,13 @@ func (s *Store) MarkNotificationSent(ctx context.Context, eventID string, hubRow
 // applied row is a conflict. An ack for a row the hub has not accepted yet is
 // ErrOutboxNotReceived: applied never precedes received.
 func (s *Store) MarkNotificationApplied(ctx context.Context, eventID, by string) (NotificationOutbox, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return NotificationOutbox{}, ErrDialectUnsupported
-	}
-
 	if eventID == "" || !validText(eventID, 256) || by == "" || !validText(by, 128) {
 		return NotificationOutbox{}, errors.New("invalid notification ack")
 	}
 	var x NotificationOutbox
+	if s.dialect == mysqlDialect {
+		return s.markNotificationReceiptMySQL(ctx, eventID, 0, by)
+	}
 	err := scanNotificationOutbox(s.pool.QueryRow(ctx, `UPDATE notification_outbox SET applied_at=now(),applied_by=$2 WHERE event_id=$1 AND sent_at IS NOT NULL AND applied_at IS NULL RETURNING `+notificationOutboxColumns, eventID, by), &x)
 	if err == nil {
 		return x, nil
@@ -237,4 +241,53 @@ func (s *Store) MarkNotificationApplied(ctx context.Context, eventID, by string)
 		return NotificationOutbox{}, ErrOutboxConflict
 	}
 	return x, nil
+}
+
+// markNotificationReceiptMySQL keeps the read, state check and write under one
+// row lock because MySQL has no UPDATE ... RETURNING.
+func (s *Store) markNotificationReceiptMySQL(ctx context.Context, eventID string, hubRowID int64, by string) (NotificationOutbox, error) {
+	tx, release, err := s.begin(ctx)
+	if err != nil {
+		return NotificationOutbox{}, err
+	}
+	defer release()
+	defer tx.Rollback(ctx)
+	var x NotificationOutbox
+	if err := scanNotificationOutbox(tx.QueryRow(ctx, `SELECT `+notificationOutboxColumns+` FROM notification_outbox WHERE event_id=? FOR UPDATE`, eventID), &x); err != nil {
+		if errors.Is(err, ErrNoRows) {
+			return NotificationOutbox{}, ErrOutboxEventNotFound
+		}
+		return NotificationOutbox{}, err
+	}
+	if by == "sent" {
+		if x.SkippedAt != nil {
+			return NotificationOutbox{}, ErrOutboxConflict
+		}
+		if x.SentAt != nil {
+			if x.HubRowID == nil || *x.HubRowID != hubRowID {
+				return NotificationOutbox{}, ErrOutboxConflict
+			}
+			return x, nil
+		}
+		if _, err := tx.Exec(ctx, `UPDATE notification_outbox SET sent_at=UTC_TIMESTAMP(6),hub_row_id=? WHERE event_id=?`, hubRowID, eventID); err != nil {
+			return NotificationOutbox{}, err
+		}
+	} else {
+		if x.SentAt == nil {
+			return NotificationOutbox{}, ErrOutboxNotReceived
+		}
+		if x.AppliedAt != nil {
+			if x.AppliedBy == nil || *x.AppliedBy != by {
+				return NotificationOutbox{}, ErrOutboxConflict
+			}
+			return x, nil
+		}
+		if _, err := tx.Exec(ctx, `UPDATE notification_outbox SET applied_at=UTC_TIMESTAMP(6),applied_by=? WHERE event_id=?`, by, eventID); err != nil {
+			return NotificationOutbox{}, err
+		}
+	}
+	if err := scanNotificationOutbox(tx.QueryRow(ctx, `SELECT `+notificationOutboxColumns+` FROM notification_outbox WHERE event_id=?`, eventID), &x); err != nil {
+		return NotificationOutbox{}, err
+	}
+	return x, tx.Commit(ctx)
 }

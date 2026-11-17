@@ -184,6 +184,9 @@ const mysqlGuardSep = "\x00"
 func mysqlIfNoColumn(table, column, stmt string) string {
 	return strings.Join([]string{"", "column", table, column, stmt}, mysqlGuardSep)
 }
+func mysqlIfColumnNotNull(table, column, stmt string) string {
+	return strings.Join([]string{"", "not_null", table, column, stmt}, mysqlGuardSep)
+}
 func mysqlIfNoIndex(table, index, stmt string) string {
 	return strings.Join([]string{"", "index", table, index, stmt}, mysqlGuardSep)
 }
@@ -212,6 +215,8 @@ func execMySQLStep(ctx context.Context, conn *sql.Conn, step string) error {
 	switch kind {
 	case "column":
 		query = `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=?)`
+	case "not_null":
+		query = `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=? AND is_nullable='NO')`
 	case "index":
 		query = `SELECT EXISTS(SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name=? AND index_name=?)`
 	case "constraint":

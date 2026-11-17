@@ -64,6 +64,7 @@ func TestOrderMySQLMigrations(t *testing.T) {
 func TestMySQLStepGuardRoundTrip(t *testing.T) {
 	for _, tc := range []struct{ step, kind, table, object, stmt string }{
 		{mysqlIfNoColumn("tasks", "lane", "ALTER TABLE tasks ADD COLUMN lane INT"), "column", "tasks", "lane", "ALTER TABLE tasks ADD COLUMN lane INT"},
+		{mysqlIfColumnNotNull("jobs", "task_id", "ALTER TABLE jobs MODIFY task_id BIGINT NULL"), "not_null", "jobs", "task_id", "ALTER TABLE jobs MODIFY task_id BIGINT NULL"},
 		{mysqlIfNoIndex("tasks", "tasks_parent", "CREATE INDEX tasks_parent ON tasks(parent_id)"), "index", "tasks", "tasks_parent", "CREATE INDEX tasks_parent ON tasks(parent_id)"},
 		{mysqlIfNoConstraint("tasks", "tasks_state_check", "ALTER TABLE tasks ADD CONSTRAINT tasks_state_check CHECK(state<>'')"), "constraint", "tasks", "tasks_state_check", "ALTER TABLE tasks ADD CONSTRAINT tasks_state_check CHECK(state<>'')"},
 	} {
@@ -77,7 +78,7 @@ func TestMySQLStepGuardRoundTrip(t *testing.T) {
 	}
 }
 
-// Every MySQL migration step is either plain DDL/DML or one of the three
+// Every MySQL migration step is either plain DDL/DML or one of the four
 // guards; a guard with a missing part would silently run nothing.
 func TestMySQLMigrationStepsAreWellFormed(t *testing.T) {
 	for _, m := range mysqlMigrations {

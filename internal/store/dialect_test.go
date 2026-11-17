@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
@@ -75,14 +74,6 @@ func TestUnportedMethodsReturnDialectUnsupportedOnMySQL(t *testing.T) {
 		call func() error
 	}{
 		{name: "document", call: func() error { _, _, err := mysqlStore.GetDocument(context.Background(), "key"); return err }},
-		{name: "attachment", call: func() error {
-			_, _, err := mysqlStore.GetAttachment(context.Background(), strings.Repeat("a", 64))
-			return err
-		}},
-		{name: "relay", call: func() error {
-			_, err := mysqlStore.ListRelayEventsPage(context.Background(), "lane", "", false, 0, 10)
-			return err
-		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.call(); !errors.Is(err, ErrDialectUnsupported) {
