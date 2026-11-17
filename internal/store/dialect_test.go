@@ -64,3 +64,15 @@ func TestRetryTransactionOnlyOnceOnMySQLConflict(t *testing.T) {
 		t.Fatal("ordinary error was retried")
 	}
 }
+
+func TestMapDecisionConstraintPreservesSpecificRefusal(t *testing.T) {
+	err := &pgconn.PgError{Code: "23505", ConstraintName: "decision_answer_attempts_one_deny"}
+	mapped := mapDriverError(err)
+	if !errors.Is(mapped, ErrDecisionAttemptDenied) || !errors.Is(mapped, errUniqueViolation) {
+		t.Fatalf("constraint mapping lost its meaning: %v", mapped)
+	}
+	other := mapDriverError(&pgconn.PgError{Code: "23505", ConstraintName: "another_unique_key"})
+	if errors.Is(other, ErrDecisionAttemptDenied) {
+		t.Fatalf("unrelated unique key mapped to a deny: %v", other)
+	}
+}

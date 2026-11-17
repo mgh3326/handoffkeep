@@ -105,6 +105,7 @@ func TestMySQLQuotaSharedBehaviors(t *testing.T) {
 		{"dedupe", testQuotaDedupe},
 		{"history", testQuotaObservationHistory},
 		{"presence-bounds", testQuotaPresenceBounds},
+		{"presence", func(t *testing.T, s *Store) { _ = testQuotaPresence(t, s) }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -115,5 +116,50 @@ func TestMySQLQuotaSharedBehaviors(t *testing.T) {
 			t.Cleanup(s.Close)
 			tc.run(t, s)
 		})
+	}
+}
+
+func TestMySQLQuotaRetention(t *testing.T) {
+	s, err := Open(t.Context(), testdb.MySQLDatabase(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	s.mysqlPool.SetMaxOpenConns(1)
+	ctx := t.Context()
+	insert := func(old bool) int64 {
+		t.Helper()
+		received := time.Now().UTC()
+		if old {
+			received = received.Add(-100 * 24 * time.Hour)
+		}
+		result, err := s.mysqlPool.ExecContext(ctx, `INSERT INTO quota_observations(account_key,kind,window_key,measured_at,value,received_at) VALUES(?,'auto','',?,'{}',?)`, quotaTestKey, time.Now().UTC(), received)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	referenced, oldFree, fresh := insert(true), insert(true), insert(false)
+	if _, err := s.mysqlPool.ExecContext(ctx, `INSERT INTO quota_latest(account_key,kind,window_key,observation_id,measured_at) VALUES(?,'auto','',?,?)`, quotaTestKey, referenced, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.PruneQuotaHistory(ctx); err != nil || n != 1 {
+		t.Fatalf("prune=%d err=%v", n, err)
+	}
+	for id, want := range map[int64]bool{referenced: true, oldFree: false, fresh: true} {
+		var exists bool
+		if err := s.mysqlPool.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM quota_observations WHERE id=?)`, id).Scan(&exists); err != nil || exists != want {
+			t.Fatalf("id=%d exists=%v want=%v err=%v", id, exists, want, err)
+		}
+	}
+	if n, err := s.PruneQuotaHistory(ctx); err != nil || n != 0 {
+		t.Fatalf("second prune=%d err=%v", n, err)
+	}
+	if _, err := s.mysqlPool.ExecContext(ctx, `DELETE FROM quota_observations WHERE id=?`, fresh); err == nil {
+		t.Fatal("prune session flag leaked into the pool")
 	}
 }

@@ -443,6 +443,40 @@ func TestQuotaPresencePostgres(t *testing.T) {
 	if err := s.migrate(ctx); err != nil {
 		t.Fatal("idempotent migration", err)
 	}
+	a := testQuotaPresence(t, s)
+	var count int
+	var err error
+	var v24 bool
+	if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=24)`).Scan(&v24); err != nil || !v24 {
+		t.Fatalf("presence schema_version row missing: %v", err)
+	}
+	// Replay a v23 database: no presence table, no v24 row. Restart restores
+	// both, and a second restart over existing rows keeps them.
+	for _, q := range []string{`DROP TABLE quota_presence`, `DELETE FROM schema_version WHERE version=24`} {
+		if _, err = pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal("migrate on v23 state", err)
+	}
+	if _, err = s.PutQuotaPresence(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.migrate(ctx); err != nil {
+		t.Fatal("re-migrate with presence rows", err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_presence`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("presence rows after re-migrate=%d %v", count, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=24`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("v24 rows after re-migrate=%d %v", count, err)
+	}
+}
+
+func testQuotaPresence(t *testing.T, s *Store) QuotaPresence {
+	t.Helper()
+	ctx := context.Background()
 	empty, truncated, err := s.QuotaPresence(ctx, "", "", 10)
 	if err != nil || empty == nil || len(empty) != 0 || truncated {
 		t.Fatalf("empty presence=%v truncated=%v %v", empty, truncated, err)
@@ -481,7 +515,7 @@ func TestQuotaPresencePostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	var count int
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_presence`).Scan(&count); err != nil || count != 3 {
+	if err = s.db().QueryRow(ctx, `SELECT count(*) FROM quota_presence`).Scan(&count); err != nil || count != 3 {
 		t.Fatalf("presence rows=%d %v", count, err)
 	}
 	all, truncated, err := s.QuotaPresence(ctx, "", "", 10)
@@ -522,32 +556,7 @@ func TestQuotaPresencePostgres(t *testing.T) {
 	if err != nil || len(byKey) != 1 || !byKey[0].LastSeen.Equal(newer.LastSeen.Add(8*time.Second)) {
 		t.Fatalf("concurrent newest=%+v %v", byKey, err)
 	}
-	var v24 bool
-	if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_version WHERE version=24)`).Scan(&v24); err != nil || !v24 {
-		t.Fatalf("presence schema_version row missing: %v", err)
-	}
-	// Replay a v23 database: no presence table, no v24 row. Restart restores
-	// both, and a second restart over existing rows keeps them.
-	for _, q := range []string{`DROP TABLE quota_presence`, `DELETE FROM schema_version WHERE version=24`} {
-		if _, err = pool.Exec(ctx, q); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err = s.migrate(ctx); err != nil {
-		t.Fatal("migrate on v23 state", err)
-	}
-	if _, err = s.PutQuotaPresence(ctx, a); err != nil {
-		t.Fatal(err)
-	}
-	if err = s.migrate(ctx); err != nil {
-		t.Fatal("re-migrate with presence rows", err)
-	}
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM quota_presence`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("presence rows after re-migrate=%d %v", count, err)
-	}
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=24`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("v24 rows after re-migrate=%d %v", count, err)
-	}
+	return a
 }
 
 // A granted client inventing host ids cannot grow an account past the cap or

@@ -13,7 +13,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -689,8 +688,7 @@ func (s *Store) denyDecisionAttempt(ctx context.Context, tx pgx.Tx, in ResolveDe
 	attempt.deniesAttemptID = in.DeniesAttemptID
 	attempt.receipt = in.Receipt
 	id, err := insertDecisionAttempt(ctx, tx, attempt)
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.ConstraintName == "decision_answer_attempts_one_deny" {
+	if errors.Is(mapDriverError(err), ErrDecisionAttemptDenied) {
 		return ResolveDecisionOutcome{}, ErrDecisionAttemptDenied
 	}
 	if err != nil {

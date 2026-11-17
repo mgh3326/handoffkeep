@@ -55,7 +55,9 @@ func inspectDriftSchema(t *testing.T, s *Store) driftSchema {
 		t.Fatal(err)
 	}
 	rows.Close()
-	rows, err = s.db().Query(t.Context(), `SELECT tc.table_name,tc.constraint_name,kcu.column_name FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON kcu.constraint_schema=tc.constraint_schema AND kcu.table_name=tc.table_name AND kcu.constraint_name=tc.constraint_name WHERE tc.table_schema=`+schema+` AND tc.constraint_type IN ('PRIMARY KEY','UNIQUE') ORDER BY tc.table_name,tc.constraint_name,kcu.ordinal_position`)
+	rows, err = s.db().Query(t.Context(), s.q(
+		`SELECT tbl.relname,idx.relname,pg_get_indexdef(i.indexrelid,k.n,true) || CASE WHEN i.indpred IS NULL THEN '' ELSE ' WHERE ' || pg_get_expr(i.indpred,i.indrelid) END FROM pg_index i JOIN pg_class tbl ON tbl.oid=i.indrelid JOIN pg_class idx ON idx.oid=i.indexrelid JOIN pg_namespace ns ON ns.oid=tbl.relnamespace CROSS JOIN LATERAL generate_series(1,i.indnkeyatts) AS k(n) WHERE ns.nspname=current_schema() AND i.indisunique ORDER BY tbl.relname,idx.relname,k.n`,
+		`SELECT table_name,index_name,COALESCE(column_name,CONCAT('EXPRESSION:',expression)) FROM information_schema.statistics WHERE table_schema=DATABASE() AND non_unique=0 ORDER BY table_name,index_name,seq_in_index`))
 	if err != nil {
 		t.Fatal(err)
 	}

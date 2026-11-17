@@ -73,6 +73,11 @@ func mapDriverError(err error) error {
 		case "40P01":
 			sentinel = errDeadlock
 		}
+		// This PostgreSQL path distinguishes one named unique constraint.
+		// The decisions area must supply the MySQL equivalent when ported.
+		if pe.ConstraintName == "decision_answer_attempts_one_deny" {
+			sentinel = errors.Join(sentinel, ErrDecisionAttemptDenied)
+		}
 	} else if errors.As(err, &me) {
 		switch me.Number {
 		case 1062:
