@@ -62,19 +62,10 @@ SQL_WORDS = {
     "TRUE", "FALSE", "ESCAPE", "FILTER", "OVER", "PARTITION", "WINDOW",
 }
 CAST_TYPE_MAP = {
-    "text": "CHAR", "varchar": "CHAR", "char": "CHAR",
-    "json": "JSON", "jsonb": "JSON",
-    "int": "SIGNED", "int2": "SIGNED", "int4": "SIGNED", "int8": "SIGNED",
-    "smallint": "SIGNED", "integer": "SIGNED", "bigint": "SIGNED",
-    "float4": "DOUBLE", "float8": "DOUBLE", "real": "DOUBLE", "double": "DOUBLE",
-    "date": "DATE", "timestamp": "DATETIME(6)", "timestamptz": "DATETIME(6)",
-    "uuid": "CHAR(36)",
-}
-CAST_MULTI_TYPE_MAP = {
-    ("double", "precision"): "DOUBLE",
-    ("character", "varying"): "CHAR",
-    ("timestamp", "with", "time", "zone"): "DATETIME(6)",
-    ("timestamp", "without", "time", "zone"): "DATETIME(6)",
+    "text": "CHAR",
+    "int": "SIGNED",
+    "integer": "SIGNED",
+    "bigint": "SIGNED",
 }
 
 
@@ -510,9 +501,40 @@ def _has_create_index_if_not_exists(tokens: list[Token]) -> bool:
     return _has_words(tokens, ("CREATE", "INDEX", "IF", "NOT", "EXISTS"))
 
 
+def _has_quoted_identifier(tokens: list[Token]) -> bool:
+    return any(token.kind == "quoted_identifier" for token in tokens)
+
+
+def _has_backslash_string(tokens: list[Token]) -> bool:
+    return any(token.kind == "string" and "\\" in token.value for token in tokens)
+
+
+def _has_collate(tokens: list[Token]) -> bool:
+    return has_word(tokens, "COLLATE")
+
+
+def _has_unverified_cast_type(tokens: list[Token]) -> bool:
+    for i, token in enumerate(tokens):
+        if token.kind != "operator" or token.value != "::":
+            continue
+        if i + 1 >= len(tokens) or tokens[i + 1].kind != "word":
+            return True
+        if tokens[i + 1].value.lower() not in CAST_TYPE_MAP:
+            return True
+        after_type = i + 2
+        if after_type < len(tokens) and (
+            (tokens[after_type].kind == "punct" and tokens[after_type].value == "(")
+            or (tokens[after_type].kind == "other" and tokens[after_type].value == "[")
+            or (tokens[after_type].kind == "operator" and tokens[after_type].value == "::")
+        ):
+            return True
+    return False
+
+
 CONSTRUCTS = [
     Construct("$n → ?", lambda ts: any(t.kind == "parameter" for t in ts), "rewrite"),
     Construct("::type → CAST", _has_type_cast, "rewrite"),
+    Construct("unverified ::type or cast modifier", _has_unverified_cast_type, "refuse"),
     Construct("|| concat or JSON merge", lambda ts: _has_operator_sequence(ts, "||"), "refuse"),
     Construct("IS [NOT] DISTINCT FROM", _has_distinct, "refuse"),
     Construct("FILTER", _has_filter, "refuse"),
@@ -542,6 +564,9 @@ CONSTRUCTS = [
     Construct("DO block", _has_do_block, "refuse"),
     Construct("PostgreSQL-only type spelling", _has_pg_type, "refuse"),
     Construct("CREATE INDEX IF NOT EXISTS", _has_create_index_if_not_exists, "refuse"),
+    Construct("double-quoted identifier", _has_quoted_identifier, "refuse"),
+    Construct("backslash in string literal", _has_backslash_string, "refuse"),
+    Construct("COLLATE", _has_collate, "refuse"),
 ]
 
 
@@ -569,20 +594,7 @@ def _rewrite_casts(sql: str) -> tuple[str, str | None, int]:
                     return sql, "unsupported ::type cast", count
                 type_name = tokens[cursor + 1].value.lower()
                 after_type = cursor + 2
-                multi = next((
-                    (spellings, mapped)
-                    for spellings, mapped in CAST_MULTI_TYPE_MAP.items()
-                    if spellings[0] == type_name
-                    and all(cursor + 1 + offset < len(tokens)
-                            and tokens[cursor + 1 + offset].kind == "word"
-                            and tokens[cursor + 1 + offset].value.lower() == part
-                            for offset, part in enumerate(spellings))
-                ), None)
-                if multi:
-                    spellings, target = multi
-                    after_type = cursor + 1 + len(spellings)
-                else:
-                    target = CAST_TYPE_MAP.get(type_name)
+                target = CAST_TYPE_MAP.get(type_name)
                 if after_type < len(tokens) and (
                     (tokens[after_type].kind == "punct" and tokens[after_type].value == "(")
                     or (tokens[after_type].kind == "other" and tokens[after_type].value == "[")
@@ -651,17 +663,57 @@ def _is_sql(tokens: list[Token]) -> bool:
     return any(word(t, w) for t in tokens for w in ("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "WITH", "FROM", "WHERE"))
 
 
+def go_string_literals(source: str) -> list[tuple[int, str]]:
+    """Return real Go string literals, skipping comments and rune literals."""
+    out: list[tuple[int, str]] = []
+    i = 0
+    while i < len(source):
+        if source.startswith("//", i):
+            newline = source.find("\n", i + 2)
+            i = len(source) if newline < 0 else newline + 1
+            continue
+        if source.startswith("/*", i):
+            close = source.find("*/", i + 2)
+            i = len(source) if close < 0 else close + 2
+            continue
+        quote = source[i]
+        if quote == "`":
+            end = source.find("`", i + 1)
+            if end < 0:
+                break
+            out.append((i, source[i:end + 1]))
+            i = end + 1
+            continue
+        if quote in {"\"", "'"}:
+            start = i
+            i += 1
+            while i < len(source):
+                if source[i] == "\\":
+                    i += 2
+                    continue
+                if source[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            else:
+                break
+            if quote == "\"":
+                out.append((start, source[start:i]))
+            continue
+        i += 1
+    return out
+
+
 def go_literals(source: str) -> list[Literal]:
     out: list[Literal] = []
-    for match in re.finditer(r"`[^`]*`|\"(?:\\[^\n]|[^\"\\\n])*\"", source, re.S):
-        raw = match.group()
+    for start, raw in go_string_literals(source):
         try:
             value = raw[1:-1] if raw.startswith("`") else ast.literal_eval(raw)
             tokens = significant(lex(value))
         except (SyntaxError, ValueError, SQLTokenError):
             continue
         if _is_sql(tokens) and present(tokens):
-            out.append(Literal(source.count("\n", 0, match.start()) + 1, value))
+            out.append(Literal(source.count("\n", 0, start) + 1, value))
     return out
 
 

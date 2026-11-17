@@ -16,11 +16,11 @@ class RewriteTests(unittest.TestCase):
         self.assertEqual(sqlport.rewrite("SELECT $2,$1,$2"), ("SELECT ?,?,?", [2, 1, 2], ["$n → ?"], False))
 
     def test_simple_casts_only_use_the_strict_type_map(self):
-        self.assertEqual(sqlport.rewrite("SELECT $1::jsonb")[:2], ("SELECT CAST(? AS JSON)", [1]))
+        self.assertEqual(sqlport.rewrite("SELECT $1::text")[:2], ("SELECT CAST(? AS CHAR)", [1]))
         self.assertEqual(sqlport.rewrite("SELECT item_id::text")[0], "SELECT CAST(item_id AS CHAR)")
         self.assertEqual(sqlport.rewrite("SELECT '17'::int")[0], "SELECT CAST('17' AS SIGNED)")
-        self.assertIsNone(sqlport.rewrite('SELECT "item"::varchar')[0])
-        self.assertEqual(sqlport.rewrite("SELECT value::double precision")[0], "SELECT CAST(value AS DOUBLE)")
+        self.assertEqual(sqlport.rewrite("SELECT item_id::integer")[0], "SELECT CAST(item_id AS SIGNED)")
+        self.assertEqual(sqlport.rewrite("SELECT item_id::bigint")[0], "SELECT CAST(item_id AS SIGNED)")
 
     def test_casts_outside_a_single_primary_or_without_a_strict_type_are_todo(self):
         samples = (
@@ -31,12 +31,19 @@ class RewriteTests(unittest.TestCase):
             "SELECT item_id::text::jsonb",
             "SELECT value::text(20)",
             "SELECT value::text[]",
+            "SELECT value::char",
+            "SELECT 'abc'::char",
+            "SELECT value::varchar",
             "SELECT value::numeric",
             "SELECT 1.25::numeric",
             "SELECT value::decimal",
             "SELECT value::boolean",
             "SELECT value::bool",
             "SELECT 'true'::boolean",
+            "SELECT value::json",
+            "SELECT value::jsonb",
+            "SELECT value::timestamp",
+            "SELECT value::double precision",
             "SELECT value::regclass",
         )
         for sql in samples:
@@ -61,10 +68,21 @@ class RewriteTests(unittest.TestCase):
             "SELECT doc ? $1",
             "SELECT doc @> '{}'",
             "SELECT a && ARRAY[1]",
+            'SELECT id FROM t WHERE "to" = $1',
+            "SELECT id FROM t WHERE dir = 'C:\\temp' AND id = $1",
+            "SELECT name COLLATE C = $1",
+            'SELECT d.key COLLATE "C" >= $1',
         )
         for sql in samples:
             with self.subTest(sql=sql):
                 self.assertIsNone(sqlport.rewrite(sql)[0])
+
+    def test_double_quoted_identifiers_and_collations_are_todo(self):
+        self.assertIsNone(sqlport.rewrite('SELECT id FROM t WHERE "to" = $1')[0])
+        self.assertIsNone(sqlport.rewrite('SELECT d.key COLLATE "C" >= $1')[0])
+
+    def test_backslash_in_string_literal_is_todo(self):
+        self.assertIsNone(sqlport.rewrite("SELECT id FROM t WHERE dir = 'C:\\temp' AND id = $1")[0])
 
     def test_now_is_flagged_even_when_other_construct_is_todo(self):
         self.assertIsNone(sqlport.rewrite("SELECT now()")[0])
@@ -115,6 +133,11 @@ class RewriteTests(unittest.TestCase):
         literals = sqlport.go_literals(source)
         self.assertEqual(len(literals), 1)
         self.assertIsNone(sqlport.rewrite(literals[0].text)[0])
+
+    def test_go_literal_discovery_skips_comments_and_rune_literals(self):
+        source = '// old query: "SELECT $1"\n/* old query: `SELECT $2` */\nvar rune = \'x\'\nvar q = `SELECT $3`\n'
+        literals = sqlport.go_literals(source)
+        self.assertEqual([literal.text for literal in literals], ["SELECT $3"])
 
     def test_hk5059_quota_and_bench_comparisons(self):
         quota = "SELECT o.id,o.value,l.confirmed_at FROM quota_latest l JOIN quota_observations o ON o.id=l.observation_id WHERE l.account_key=$1 ORDER BY l.kind,l.window_key"
