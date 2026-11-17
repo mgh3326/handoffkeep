@@ -33,7 +33,7 @@ func TestCopyPostgresMySQLAndBackWithParity(t *testing.T) {
 	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO quota_observations(id,account_key,kind,window_key,measured_at,value,received_at) VALUES(91001,'copy-test','manual','day', $1, $2, $1)`, when, json.RawMessage(`{"b":2,"a":1}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO bench_area_exceptions(profile,effort,area,action,evidence_refs,decision_ref,decided_by,decided_at,expires_with_model_id) VALUES('copy-test','','docs','require',ARRAY['ref:a','ref,b','quoted"ref'],'hk:task/1','test',$1,'model')`, when); err != nil {
+	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO bench_area_exceptions(profile,effort,area,action,evidence_refs,decision_ref,decided_by,decided_at,expires_with_model_id) VALUES('copy-test','','docs','exclude',ARRAY['ref:a','ref,b','quoted"ref'],'hk:task/1','test',$1,'model')`, when); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO bench_reps(id,origin_id,profile,created_by,recorded_at,created_at,first_ci_green,completed,merged,reverted_within_7d) VALUES(92001,92001,'copy-test','copy-test',$1,$1,TRUE,17,FALSE,TRUE)`, when); err != nil {

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -8,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash"
 	"net/url"
 	"sort"
 	"strconv"
@@ -408,17 +408,13 @@ func checksum(ctx context.Context, db *sql.DB, mysqlDB bool, spec copyTableSpec,
 	for i, c := range cols {
 		quoted[i] = quoteCopyIdent(c, mysqlDB)
 	}
-	order := make([]string, len(spec.order))
-	for i, c := range spec.order {
-		order[i] = quoteCopyIdent(c, mysqlDB)
-	}
-	q := `SELECT ` + strings.Join(quoted, ",") + ` FROM ` + quoteCopyIdent(spec.name, mysqlDB) + ` ORDER BY ` + strings.Join(order, ",")
+	q := `SELECT ` + strings.Join(quoted, ",") + ` FROM ` + quoteCopyIdent(spec.name, mysqlDB)
 	rows, err := db.QueryContext(ctx, q)
 	if err != nil {
 		return "", err
 	}
 	defer rows.Close()
-	h := sha256.New()
+	rowHashes := make([][sha256.Size]byte, 0)
 	for rows.Next() {
 		vals := make([]any, len(cols))
 		dest := make([]any, len(cols))
@@ -439,8 +435,7 @@ func checksum(ctx context.Context, db *sql.DB, mysqlDB bool, spec copyTableSpec,
 		if err != nil {
 			return "", err
 		}
-		_, _ = h.Write(b)
-		_, _ = h.Write([]byte{'\n'})
+		rowHashes = append(rowHashes, sha256.Sum256(b))
 		if err := each(vals); err != nil {
 			return "", err
 		}
@@ -448,7 +443,18 @@ func checksum(ctx context.Context, db *sql.DB, mysqlDB bool, spec copyTableSpec,
 	if err := rows.Err(); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return checksumRowHashes(rowHashes), nil
+}
+
+func checksumRowHashes(rowHashes [][sha256.Size]byte) string {
+	sort.Slice(rowHashes, func(i, j int) bool {
+		return bytes.Compare(rowHashes[i][:], rowHashes[j][:]) < 0
+	})
+	h := sha256.New()
+	for _, rowHash := range rowHashes {
+		_, _ = h.Write(rowHash[:])
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func canonicalCopyValue(v any, table, column string, kind copyValueKind, mysqlSource bool) (any, error) {
@@ -759,5 +765,3 @@ func resetIdentity(ctx context.Context, dst *copyDB, table string) error {
 	_, err = conn.ExecContext(ctx, `SELECT setval($1, COALESCE((SELECT MAX(id) FROM `+quoteCopyIdent(table, false)+`), 1), EXISTS(SELECT 1 FROM `+quoteCopyIdent(table, false)+`))`, seq.String)
 	return err
 }
-
-var _ hash.Hash = sha256.New()

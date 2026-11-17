@@ -1,7 +1,11 @@
 package store
 
 import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
+	"io"
 	"reflect"
 	"testing"
 
@@ -133,4 +137,63 @@ func TestCopyClassifiesCrossDialectScalarTypes(t *testing.T) {
 			t.Errorf("classify %q = %v, want %v", tc.data, got, tc.want)
 		}
 	}
+}
+
+func TestCopyChecksumIgnoresTextRowOrder(t *testing.T) {
+	// These keys sort in opposite orders under common en_US and binary
+	// collations. Identical rows must still produce identical checksums.
+	spec := copyTableSpec{name: "bench_grades", columns: []string{"profile"}, order: []string{"profile"}}
+	kinds := map[string]copyValueKind{"profile": copyText}
+	postgresDB := sql.OpenDB(copyOrderConnector{rows: [][]driver.Value{{"haiku"}, {"Opus"}}})
+	defer postgresDB.Close()
+	postgres, err := checksum(context.Background(), postgresDB, false, spec, spec.columns, kinds, func([]any) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	mysqlDB := sql.OpenDB(copyOrderConnector{rows: [][]driver.Value{{"Opus"}, {"haiku"}}})
+	defer mysqlDB.Close()
+	mysql, err := checksum(context.Background(), mysqlDB, true, spec, spec.columns, kinds, func([]any) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if postgres != mysql {
+		t.Fatalf("same rows in different collation orders have different checksums: PostgreSQL=%s MySQL=%s", postgres, mysql)
+	}
+}
+
+type copyOrderConnector struct{ rows [][]driver.Value }
+
+func (c copyOrderConnector) Connect(context.Context) (driver.Conn, error) {
+	return copyOrderConn{rows: c.rows}, nil
+}
+
+func (copyOrderConnector) Driver() driver.Driver { return copyOrderDriver{} }
+
+type copyOrderDriver struct{}
+
+func (copyOrderDriver) Open(string) (driver.Conn, error) { return nil, driver.ErrSkip }
+
+type copyOrderConn struct{ rows [][]driver.Value }
+
+func (copyOrderConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+func (copyOrderConn) Close() error                        { return nil }
+func (copyOrderConn) Begin() (driver.Tx, error)           { return nil, driver.ErrSkip }
+func (c copyOrderConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+	return &copyOrderRows{rows: c.rows}, nil
+}
+
+type copyOrderRows struct {
+	rows  [][]driver.Value
+	index int
+}
+
+func (*copyOrderRows) Columns() []string { return []string{"profile"} }
+func (*copyOrderRows) Close() error      { return nil }
+func (r *copyOrderRows) Next(dest []driver.Value) error {
+	if r.index == len(r.rows) {
+		return io.EOF
+	}
+	copy(dest, r.rows[r.index])
+	r.index++
+	return nil
 }
