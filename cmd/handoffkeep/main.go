@@ -44,7 +44,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|doc|attach|tasks|tickets|decisions|placements|dots|services|deploys|changes|youtrack|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|doc|attach|store-copy|tasks|tickets|decisions|placements|dots|services|deploys|changes|youtrack|version")
 	}
 	switch args[0] {
 	case "sync":
@@ -57,6 +57,8 @@ func run(args []string, out, errout io.Writer) error {
 		return statusCmd(args[1:], out)
 	case "serve":
 		return serve(args[1:], errout)
+	case "store-copy":
+		return storeCopyCmd(args[1:], out)
 	case "mcp":
 		return runMCP()
 	case "doc":
@@ -88,7 +90,7 @@ func run(args []string, out, errout io.Writer) error {
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|doc|attach|tasks|tickets|decisions|placements|dots|services|deploys|changes|youtrack|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|doc|attach|store-copy|tasks|tickets|decisions|placements|dots|services|deploys|changes|youtrack|version")
 	}
 }
 

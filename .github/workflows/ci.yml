@@ -228,7 +228,7 @@ jobs:
           sparse-checkout: .github/actions/setup-go-cached
       - uses: ./workflow/.github/actions/setup-go-cached
       - name: Test MySQL store and schema parity
-        run: go test -p 2 -tags=mysql -timeout 15m ./internal/store -run '^(TestMySQL|TestBenchKeysKeepTrailingSpaces)'
+        run: go test -p 2 -tags=mysql -timeout 15m ./internal/store -run '^(TestMySQL|TestBenchKeysKeepTrailingSpaces|TestCopy)'
 
   pr-store-db:
     # Runs on every event, so it always reports a conclusion and can be a
