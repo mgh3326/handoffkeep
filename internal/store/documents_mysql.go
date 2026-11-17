@@ -10,6 +10,17 @@ import (
 // mysqlPutDocument runs after the common validation and hash computation.
 // Deploy projections belong to the changes area and remain gated until ported.
 func (s *Store) mysqlPutDocument(ctx context.Context, x Document, now time.Time) (Document, bool, error) {
+	var out Document
+	var changed bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, changed, err = s.mysqlPutDocumentOnce(ctx, x, now)
+		return err
+	})
+	return out, changed, err
+}
+
+func (s *Store) mysqlPutDocumentOnce(ctx context.Context, x Document, now time.Time) (Document, bool, error) {
 	if strings.HasPrefix(x.Key, "deploy/") {
 		return x, false, ErrDialectUnsupported
 	}

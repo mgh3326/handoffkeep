@@ -13,6 +13,17 @@ import (
 // Until the YouTrack area is ported, an enabled projection or authority table
 // is refused before a write, so a comment cannot escape without its mirror.
 func (s *Store) mysqlCreateComment(ctx context.Context, taskID int64, author, body string, w *MCPWrite) (CreatedTaskComment, bool, error) {
+	var out CreatedTaskComment
+	var replayed bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, replayed, err = s.mysqlCreateCommentOnce(ctx, taskID, author, body, w)
+		return err
+	})
+	return out, replayed, err
+}
+
+func (s *Store) mysqlCreateCommentOnce(ctx context.Context, taskID int64, author, body string, w *MCPWrite) (CreatedTaskComment, bool, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return CreatedTaskComment{}, false, err
