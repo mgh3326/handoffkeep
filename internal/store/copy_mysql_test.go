@@ -65,7 +65,7 @@ func TestCopyPostgresMySQLAndBackWithParity(t *testing.T) {
 		// (OVERRIDING SYSTEM VALUE) on the MySQL to PostgreSQL leg, and the
 		// seeded yt_authority rows exercise the upsert.
 		{`INSERT INTO yt_write_ops(id,principal,kind,idem_key,payload_sha,payload,entity_kind,entity_id,actor,state,created_at,next_attempt_at,tenant)
-			VALUES(93001,'hk:task-comments','comment_append','task-comment:93001','sha-93001','{}','task','1','copy-test','prepared',$1,$1,'copy-tenant')`, []any{when}},
+			OVERRIDING SYSTEM VALUE VALUES(93001,'hk:task-comments','comment_append','task-comment:93001','sha-93001','{}','task','1','copy-test','prepared',$1,$1,'copy-tenant')`, []any{when}},
 		{`INSERT INTO yt_write_op_alerts(op_id,alert_class,created_at) VALUES(93001,'stuck',$1)`, []any{when}},
 		{`INSERT INTO yt_issue_intents(task_id,tenant,recorded_at) VALUES(1,'copy-tenant',$1)`, []any{when}},
 		{`INSERT INTO yt_issue_comment_bounds(op_id,task_id,comments_from,recorded_at) VALUES(93001,1,7,$1)`, []any{when}},
