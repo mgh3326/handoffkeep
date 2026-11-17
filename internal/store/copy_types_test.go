@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -158,6 +159,24 @@ func TestCopyChecksumIgnoresTextRowOrder(t *testing.T) {
 	}
 	if postgres != mysql {
 		t.Fatalf("same rows in different collation orders have different checksums: PostgreSQL=%s MySQL=%s", postgres, mysql)
+	}
+}
+
+func TestOpenCopyDBMalformedURLDoesNotEchoCredentials(t *testing.T) {
+	const raw = "postgres://copy-user:secret%zz@localhost/handoffkeep"
+	_, err := openCopyDB(context.Background(), raw)
+	if err == nil {
+		t.Fatal("openCopyDB accepted malformed URL")
+	}
+	if got := err.Error(); got != "malformed database URL" || strings.Contains(got, "secret") || strings.Contains(got, raw) {
+		t.Fatalf("malformed URL error=%q, want a fixed message with no credentials", got)
+	}
+}
+
+func TestSelectCopyTablesRejectsBlankSelection(t *testing.T) {
+	_, err := selectCopyTables([]string{"", " \t", ""})
+	if err == nil || err.Error() != "no tables selected" {
+		t.Fatalf("selectCopyTables error=%v, want no tables selected", err)
 	}
 }
 

@@ -2,6 +2,7 @@
 package mysqlurl
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -15,7 +16,7 @@ import (
 func Parse(raw string) (*mysql.Config, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("malformed database URL")
 	}
 	if u.Scheme != "mysql" || u.Host == "" || u.User == nil || strings.TrimPrefix(u.Path, "/") == "" || strings.Contains(strings.TrimPrefix(u.Path, "/"), "/") {
 		return nil, fmt.Errorf("invalid mysql URL")

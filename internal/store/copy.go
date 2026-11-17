@@ -95,7 +95,7 @@ type copyDB struct {
 func openCopyDB(ctx context.Context, raw string) (*copyDB, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("parse database URL: %w", err)
+		return nil, errors.New("malformed database URL")
 	}
 	var driver, dsn string
 	my := u.Scheme == "mysql"
@@ -164,6 +164,10 @@ func prepareCopySession(ctx context.Context, dst *copyDB) (func(), error) {
 func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, verifyOnly bool) (CopyReport, error) {
 	report := CopyReport{From: schemeOf(fromURL), To: schemeOf(toURL), Match: true, Skipped: append([]string(nil), copyLeftOutTables...)}
 	sort.Strings(report.Skipped)
+	wanted, err := selectCopyTables(selected)
+	if err != nil {
+		return report, err
+	}
 	from, err := openCopyDB(ctx, fromURL)
 	if err != nil {
 		return report, err
@@ -177,25 +181,7 @@ func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, ve
 	if from.mySQL == to.mySQL {
 		return report, errors.New("store-copy requires one PostgreSQL and one MySQL URL")
 	}
-	allowed := map[string]bool{}
-	for _, name := range StoreCopyTables() {
-		allowed[name] = true
-	}
-	if len(selected) == 0 {
-		selected = StoreCopyTables()
-	}
-	wanted := map[string]bool{}
-	for _, name := range selected {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		if !allowed[name] {
-			return report, fmt.Errorf("table %q is not in the ported copy registry", name)
-		}
-		wanted[name] = true
-	}
-	if !verifyOnly && len(wanted) > 0 {
+	if !verifyOnly {
 		cleanup, err := prepareCopySession(ctx, to)
 		if err != nil {
 			return report, err
@@ -268,6 +254,31 @@ func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, ve
 		report.Match = report.Match && row.Match
 	}
 	return report, nil
+}
+
+func selectCopyTables(selected []string) (map[string]bool, error) {
+	allowed := map[string]bool{}
+	for _, name := range StoreCopyTables() {
+		allowed[name] = true
+	}
+	if len(selected) == 0 {
+		selected = StoreCopyTables()
+	}
+	wanted := map[string]bool{}
+	for _, name := range selected {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if !allowed[name] {
+			return nil, fmt.Errorf("table %q is not in the ported copy registry", name)
+		}
+		wanted[name] = true
+	}
+	if len(wanted) == 0 {
+		return nil, errors.New("no tables selected")
+	}
+	return wanted, nil
 }
 
 func sameCopyColumns(actual, expected []string) bool {
