@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -70,6 +71,13 @@ class RewriteTests(unittest.TestCase):
     def test_now_is_flagged_even_when_other_construct_is_todo(self):
         self.assertTrue(sqlport.rewrite("SELECT now()")[3])
         self.assertTrue(sqlport.rewrite("SELECT now() - interval '1 day'")[3])
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "now.go"
+            source.write_text("var q = `SELECT now() - interval '1 day'`\n")
+            rows, counts = sqlport.analyze(source)
+        self.assertTrue(rows[0]["now"])
+        self.assertIn("now() [manual time audit]", rows[0]["constructs"])
+        self.assertEqual(counts[("TODO", "now() [manual time audit]")], 1)
 
     def test_reviewer_regressions_fail_closed(self):
         samples = (
