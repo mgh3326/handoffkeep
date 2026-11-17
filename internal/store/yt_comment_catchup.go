@@ -251,7 +251,7 @@ func catchUpYTCommentTx(ctx context.Context, tx transaction, c TaskComment) (ytw
 		`SELECT EXISTS(SELECT 1 FROM yt_comment_write_links WHERE comment_id=?)
 		OR EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=? AND kind=? AND idem_key=?)
 		OR EXISTS(SELECT 1 FROM youtrack_comment_links WHERE hk_comment_id=?)`),
-		c.ID, YTCommentPrincipal, ytwrite.KindCommentAppend, YTCommentKey(c.ID)).Scan(&owned); err != nil {
+		recheckArgs(tx, c.ID, YTCommentPrincipal, ytwrite.KindCommentAppend, YTCommentKey(c.ID))...).Scan(&owned); err != nil {
 		return ytwrite.Op{}, false, "", err
 	}
 	if owned {
@@ -259,4 +259,13 @@ func catchUpYTCommentTx(ctx context.Context, tx transaction, c TaskComment) (ytw
 	}
 	op, prepared, source, err := ytCommentOnOpTx(ctx, tx, c, time.Now().UTC())
 	return op, prepared, source, err
+}
+
+// recheckArgs repeats c.ID where a MySQL ? cannot reuse PostgreSQL's $n.
+func recheckArgs(x transaction, id int64, rest ...any) []any {
+	args := append([]any{id}, rest...)
+	if dialectFor(x) == mysqlDialect {
+		args = append(args, id)
+	}
+	return args
 }
