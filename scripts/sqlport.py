@@ -560,7 +560,7 @@ def _rewrite_casts(sql: str) -> tuple[str, str | None, int]:
             operand = primary_before(tokens, i, opens, closes)
             if operand is None:
                 return sql, "unsupported ::type operand", count
-            if operand.kind not in {"identifier", "quoted_identifier", "parameter", "string", "number"}:
+            if operand.kind not in {"identifier", "parameter", "string", "number"}:
                 return sql, "unsupported ::type primary", count
             cursor = i
             expr = sql[operand.start:operand.end]

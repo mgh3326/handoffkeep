@@ -19,7 +19,7 @@ class RewriteTests(unittest.TestCase):
         self.assertEqual(sqlport.rewrite("SELECT $1::jsonb")[:2], ("SELECT CAST(? AS JSON)", [1]))
         self.assertEqual(sqlport.rewrite("SELECT item_id::text")[0], "SELECT CAST(item_id AS CHAR)")
         self.assertEqual(sqlport.rewrite("SELECT '17'::int")[0], "SELECT CAST('17' AS SIGNED)")
-        self.assertEqual(sqlport.rewrite('SELECT "item"::varchar')[0], "SELECT CAST(\"item\" AS CHAR)")
+        self.assertIsNone(sqlport.rewrite('SELECT "item"::varchar')[0])
         self.assertEqual(sqlport.rewrite("SELECT value::double precision")[0], "SELECT CAST(value AS DOUBLE)")
 
     def test_casts_outside_a_single_primary_or_without_a_strict_type_are_todo(self):
@@ -27,6 +27,7 @@ class RewriteTests(unittest.TestCase):
             "SELECT count(*)::int",
             "SELECT lower(name)::text",
             "SELECT (item_id)::text",
+            'SELECT "item"::varchar',
             "SELECT item_id::text::jsonb",
             "SELECT value::text(20)",
             "SELECT value::text[]",
