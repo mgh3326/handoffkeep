@@ -831,6 +831,18 @@ func (a articleCreate) Send(ctx context.Context, remote Remote, op Op, text stri
 		if err != nil {
 			return "", err
 		}
+		if id == "" {
+			hits, findErr := ar.FindArticles(ctx, ArticleSearch{ProjectShort: p.YTProjectShort, ProjectID: op.YTTargetID, Query: summary, Summary: summary, ParentID: parent})
+			if findErr != nil {
+				return "", &NotSentError{Err: fmt.Errorf("empty index ID returned, reconcile failed: %w", findErr)}
+			}
+			reconciled := markedArticles(hits, op.ID)
+			if len(reconciled) == 1 {
+				id = reconciled[0].ID
+			} else {
+				return "", &NotSentError{Err: errors.New("empty index article ID returned and not found in reconcile")}
+			}
+		}
 		indexID = id
 	}
 

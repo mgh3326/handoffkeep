@@ -3,13 +3,25 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
 
 // SearchCtx implements scope "ctx": dialect-neutral LIKE search over the small
-// checkpoints and memory tables.
+// checkpoints and memory tables, bounded by searchTimeout.
 func (s *Store) SearchCtx(ctx context.Context, q, session string, limit int) ([]SearchResult, error) {
+	deadline := searchTimeout()
+	sctx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+	out, err := s.searchCtx(sctx, q, session, limit)
+	if err != nil && ctx.Err() == nil && errors.Is(sctx.Err(), context.DeadlineExceeded) {
+		return nil, fmt.Errorf("%w: no result within %s", ErrSearchTimeout, deadline)
+	}
+	return out, err
+}
+
+func (s *Store) searchCtx(ctx context.Context, q, session string, limit int) ([]SearchResult, error) {
 	if s != nil && s.dialect == mysqlDialect {
 		return nil, ErrDialectUnsupported
 	}

@@ -540,3 +540,49 @@ func TestArticleCreateSplitPartialFailureAndRetryRecovery(t *testing.T) {
 		t.Fatalf("expected at least 2 child parts under %s, got %d", applied.YTResultID, partCreates)
 	}
 }
+
+// When CreateArticle returns an empty ID with no error on the index article,
+// Send reconciles the existing index ID so child parts are created with ParentID: indexID
+// and never as top-level articles with ParentID: "".
+func TestArticleCreateSplitEmptyIndexIDReconcile(t *testing.T) {
+	e := newArticleEnv(t)
+	req := articleReq()
+	req.Body = strings.Repeat("hello world line\n", 20000)
+	op := prepareWith(t, e, req)
+
+	// Inject NoID fault on 1st create (index article)
+	creates := 0
+	e.yt.BeforeArticleCreate = func(ctx context.Context, in ytwrite.ArticleCreate) {
+		creates++
+		if creates == 1 {
+			e.yt.Queue(ytwritetest.Fault{Kind: ytwritetest.NoID})
+		}
+	}
+
+	e.drive()
+
+	applied := e.want(op.ID, ytwrite.StateApplied, "")
+	if applied.YTResultID == "" {
+		t.Fatal("expected non-empty YTResultID")
+	}
+
+	writes := e.yt.ArticleWrites()
+	if len(writes) < 3 {
+		t.Fatalf("expected at least 3 article writes (index + 2 parts), got %d", len(writes))
+	}
+
+	// Verify all child parts were created with ParentID == indexID, never ""
+	for i, w := range writes {
+		if i == 0 {
+			// index article
+			continue
+		}
+		if w.ArticleCreate.ParentID == "" {
+			t.Fatalf("child part write %d was created with empty ParentID", i)
+		}
+		if w.ArticleCreate.ParentID != applied.YTResultID {
+			t.Fatalf("child part write %d ParentID = %q, want %q", i, w.ArticleCreate.ParentID, applied.YTResultID)
+		}
+	}
+}
+

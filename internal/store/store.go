@@ -4524,7 +4524,7 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 		limit = 100
 	}
 	if scope == "ctx" {
-		return s.SearchCtx(ctx, q, session, limit)
+		return s.searchCtx(ctx, q, session, limit)
 	}
 	if scope == "tasks" {
 		return s.searchTasks(ctx, q, session, limit)
