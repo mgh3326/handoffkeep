@@ -22,7 +22,7 @@ func storeCopyCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("store-copy", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	from := fs.String("from", "", "source database URL (postgres:// or mysql://)")
-	to := fs.String("to", "", "destination database URL (postgres:// or mysql://); MySQL loads use this connection for @hk_bulk_load")
+	to := fs.String("to", "", "destination URL; MySQL requires the copy admin account, PostgreSQL requires replica-role permission")
 	tablesArg := fs.String("tables", "", "comma-separated registered tables; default is all ported tables")
 	verifyOnly := fs.Bool("verify-only", false, "compare parity without copying")
 	if err := fs.Parse(args); err != nil {

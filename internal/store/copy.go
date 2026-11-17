@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/pgtype"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/mgh3326/handoffkeep/internal/mysqlurl"
 )
@@ -47,6 +48,18 @@ type copyTableSpec struct {
 	order   []string
 	bounds  map[string]int
 }
+
+type copyValueKind uint8
+
+const (
+	copyText copyValueKind = iota
+	copyInteger
+	copyFloat
+	copyBoolean
+	copyTime
+	copyJSON
+	copyTextArray
+)
 
 // Ported copy registry. Keep quota_observations before quota_latest because
 // quota_latest references it; areas add their tables here when they port.
@@ -129,6 +142,23 @@ func (d *copyDB) session(ctx context.Context) (*sql.Conn, error) {
 	return c, nil
 }
 
+func prepareCopySession(ctx context.Context, dst *copyDB) (func(), error) {
+	conn, err := dst.session(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if dst.mySQL {
+		if _, err := conn.ExecContext(ctx, `SET @hk_bulk_load = 1`); err != nil {
+			return nil, fmt.Errorf("MySQL copy destination must use the copy admin account: %w", err)
+		}
+		return func() { _, _ = conn.ExecContext(context.Background(), `SET @hk_bulk_load = NULL`) }, nil
+	}
+	if _, err := conn.ExecContext(ctx, `SET session_replication_role = replica`); err != nil {
+		return nil, fmt.Errorf("PostgreSQL copy destination must allow SET session_replication_role = replica (use a superuser such as postgres): %w", err)
+	}
+	return func() { _, _ = conn.ExecContext(context.Background(), `SET session_replication_role = DEFAULT`) }, nil
+}
+
 // CopyStore copies the currently ported tables in either direction. It does
 // not migrate schemas or truncate destination tables. Table writes are atomic.
 func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, verifyOnly bool) (CopyReport, error) {
@@ -165,6 +195,13 @@ func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, ve
 		}
 		wanted[name] = true
 	}
+	if !verifyOnly && len(wanted) > 0 {
+		cleanup, err := prepareCopySession(ctx, to)
+		if err != nil {
+			return report, err
+		}
+		defer cleanup()
+	}
 	for _, spec := range copyTableRegistry {
 		if !wanted[spec.name] {
 			continue
@@ -180,9 +217,22 @@ func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, ve
 		if !sameCopyColumns(cols, spec.columns) || !sameCopyColumns(targetCols, spec.columns) {
 			return report, fmt.Errorf("%s schema columns differ: source=%v target=%v", spec.name, cols, targetCols)
 		}
+		sourceKinds, err := copyColumnKinds(ctx, from.db, from.mySQL, spec.name)
+		if err != nil {
+			return report, fmt.Errorf("%s source column types: %w", spec.name, err)
+		}
+		targetKinds, err := copyColumnKinds(ctx, to.db, to.mySQL, spec.name)
+		if err != nil {
+			return report, fmt.Errorf("%s target column types: %w", spec.name, err)
+		}
+		for _, col := range spec.columns {
+			if !compatibleCopyKind(spec.name, col, sourceKinds[col], targetKinds[col]) {
+				return report, fmt.Errorf("%s.%s incompatible source and target column types", spec.name, col)
+			}
+		}
 		cols = spec.columns
 		var srcCount int64
-		srcHash, err := checksum(ctx, from.db, from.mySQL, spec, cols, func(row []any) error {
+		srcHash, err := checksum(ctx, from.db, from.mySQL, spec, cols, sourceKinds, func(row []any) error {
 			srcCount++
 			for i, col := range cols {
 				if max := spec.bounds[col]; max > 0 {
@@ -197,7 +247,7 @@ func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, ve
 			return report, fmt.Errorf("%s source read: %w", spec.name, err)
 		}
 		if !verifyOnly {
-			if err := copyRows(ctx, from.db, to, from.mySQL, spec, cols); err != nil {
+			if err := copyRows(ctx, from.db, to, from.mySQL, spec, cols, sourceKinds); err != nil {
 				return report, fmt.Errorf("%s copy: %w", spec.name, err)
 			}
 			if err := resetIdentity(ctx, to, spec.name); err != nil {
@@ -205,7 +255,11 @@ func CopyStore(ctx context.Context, fromURL, toURL string, selected []string, ve
 			}
 		}
 		tgtCount := int64(0)
-		tgtHash, err := checksum(ctx, to.db, to.mySQL, spec, cols, func([]any) error { tgtCount++; return nil })
+		tgtKinds, err := copyColumnKinds(ctx, to.db, to.mySQL, spec.name)
+		if err != nil {
+			return report, fmt.Errorf("%s target column types: %w", spec.name, err)
+		}
+		tgtHash, err := checksum(ctx, to.db, to.mySQL, spec, cols, tgtKinds, func([]any) error { tgtCount++; return nil })
 		if err != nil {
 			return report, fmt.Errorf("%s target read: %w", spec.name, err)
 		}
@@ -261,6 +315,87 @@ func copyColumns(ctx context.Context, db *sql.DB, mysqlDB bool, table string) ([
 	return cols, nil
 }
 
+func copyColumnKinds(ctx context.Context, db *sql.DB, mysqlDB bool, table string) (map[string]copyValueKind, error) {
+	q := `SELECT column_name,data_type,udt_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1`
+	if mysqlDB {
+		q = `SELECT column_name,data_type,column_type FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=?`
+	}
+	rows, err := db.QueryContext(ctx, q, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	kinds := map[string]copyValueKind{}
+	for rows.Next() {
+		var name, dataType, detail string
+		if err := rows.Scan(&name, &dataType, &detail); err != nil {
+			return nil, err
+		}
+		kind, err := classifyCopyColumn(mysqlDB, dataType, detail)
+		if err != nil {
+			return nil, fmt.Errorf("column %s: %w", name, err)
+		}
+		kinds[name] = kind
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return kinds, nil
+}
+
+func classifyCopyColumn(mysqlDB bool, dataType, detail string) (copyValueKind, error) {
+	if mysqlDB {
+		switch strings.ToLower(dataType) {
+		case "json":
+			return copyJSON, nil
+		case "datetime", "timestamp", "date":
+			return copyTime, nil
+		case "tinyint":
+			if strings.EqualFold(detail, "tinyint(1)") {
+				return copyBoolean, nil
+			}
+			return copyInteger, nil
+		case "smallint", "mediumint", "int", "integer", "bigint":
+			return copyInteger, nil
+		case "float", "double", "real", "decimal":
+			return copyFloat, nil
+		case "char", "varchar", "tinytext", "text", "mediumtext", "longtext", "enum", "set":
+			return copyText, nil
+		default:
+			return 0, fmt.Errorf("unsupported MySQL type %q", dataType)
+		}
+	}
+	switch strings.ToLower(dataType) {
+	case "boolean":
+		return copyBoolean, nil
+	case "smallint", "integer", "bigint":
+		return copyInteger, nil
+	case "real", "double precision", "numeric":
+		return copyFloat, nil
+	case "timestamp with time zone", "timestamp without time zone", "date", "time without time zone", "time with time zone":
+		return copyTime, nil
+	case "json", "jsonb":
+		return copyJSON, nil
+	case "array":
+		if detail == "_text" {
+			return copyTextArray, nil
+		}
+		return 0, fmt.Errorf("unsupported PostgreSQL array type %q", detail)
+	case "character", "character varying", "text", "USER-DEFINED":
+		return copyText, nil
+	default:
+		return 0, fmt.Errorf("unsupported PostgreSQL type %q", dataType)
+	}
+}
+
+func compatibleCopyKind(table, column string, source, target copyValueKind) bool {
+	if source == target {
+		return true
+	}
+	return table == "bench_area_exceptions" && column == "evidence_refs" &&
+		(source == copyTextArray && target == copyJSON || source == copyJSON && target == copyTextArray)
+}
+
 func quoteCopyIdent(s string, mysqlDB bool) string {
 	if mysqlDB {
 		return "`" + strings.ReplaceAll(s, "`", "``") + "`"
@@ -268,7 +403,7 @@ func quoteCopyIdent(s string, mysqlDB bool) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
-func checksum(ctx context.Context, db *sql.DB, mysqlDB bool, spec copyTableSpec, cols []string, each func([]any) error) (string, error) {
+func checksum(ctx context.Context, db *sql.DB, mysqlDB bool, spec copyTableSpec, cols []string, kinds map[string]copyValueKind, each func([]any) error) (string, error) {
 	quoted := make([]string, len(cols))
 	for i, c := range cols {
 		quoted[i] = quoteCopyIdent(c, mysqlDB)
@@ -294,7 +429,11 @@ func checksum(ctx context.Context, db *sql.DB, mysqlDB bool, spec copyTableSpec,
 			return "", err
 		}
 		for i := range vals {
-			vals[i] = canonicalCopyValue(vals[i], cols[i] == "value" || cols[i] == "evidence_refs")
+			value, err := canonicalCopyValue(vals[i], spec.name, cols[i], kinds[cols[i]], mysqlDB)
+			if err != nil {
+				return "", fmt.Errorf("normalize %s.%s: %w", spec.name, cols[i], err)
+			}
+			vals[i] = value
 		}
 		b, err := json.Marshal(vals)
 		if err != nil {
@@ -312,47 +451,38 @@ func checksum(ctx context.Context, db *sql.DB, mysqlDB bool, spec copyTableSpec,
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func canonicalCopyValue(v any, isJSON bool) any {
-	switch x := v.(type) {
-	case []byte:
-		if !isJSON {
-			return string(x)
+func canonicalCopyValue(v any, table, column string, kind copyValueKind, mysqlSource bool) (any, error) {
+	if table == "bench_area_exceptions" && column == "evidence_refs" {
+		var refs []string
+		var err error
+		if mysqlSource {
+			refs, err = parseJSONTextArray(v)
+		} else {
+			refs, err = parsePostgresTextArray(v)
 		}
-		var value any
-		dec := json.NewDecoder(strings.NewReader(string(x)))
-		dec.UseNumber()
-		if dec.Decode(&value) == nil {
-			if b, err := json.Marshal(value); err == nil {
-				return json.RawMessage(b)
-			}
+		if err != nil {
+			return nil, err
 		}
-		return string(x)
-	case time.Time:
-		return x.UTC().Format(time.RFC3339Nano)
-	default:
-		return v
+		b, err := json.Marshal(refs)
+		return json.RawMessage(b), err
 	}
+	value, err := normalizeCopyValue(v, kind)
+	if err != nil {
+		return nil, err
+	}
+	if kind == copyTime {
+		if t, ok := value.(time.Time); ok {
+			return t.UTC().Format(time.RFC3339Nano), nil
+		}
+	}
+	return value, nil
 }
 
-func copyRows(ctx context.Context, src *sql.DB, dst *copyDB, sourceMySQL bool, spec copyTableSpec, cols []string) error {
+func copyRows(ctx context.Context, src *sql.DB, dst *copyDB, sourceMySQL bool, spec copyTableSpec, cols []string, kinds map[string]copyValueKind) error {
 	conn, err := dst.session(ctx)
 	if err != nil {
 		return err
 	}
-	if dst.mySQL {
-		if _, err := conn.ExecContext(ctx, `SET @hk_bulk_load = 1`); err != nil {
-			return fmt.Errorf("set MySQL bulk-load session flag: %w", err)
-		}
-	} else if _, err := conn.ExecContext(ctx, `SET session_replication_role = replica`); err != nil {
-		return fmt.Errorf("set PostgreSQL replication role: %w", err)
-	}
-	defer func() {
-		if dst.mySQL {
-			_, _ = conn.ExecContext(context.Background(), `SET @hk_bulk_load = NULL`)
-		} else {
-			_, _ = conn.ExecContext(context.Background(), `SET session_replication_role = DEFAULT`)
-		}
-	}()
 	qt := quoteCopyIdent(spec.name, sourceMySQL)
 	qcols := make([]string, len(cols))
 	for i, c := range cols {
@@ -394,7 +524,10 @@ func copyRows(ctx context.Context, src *sql.DB, dst *copyDB, sourceMySQL bool, s
 			return err
 		}
 		for i, value := range values {
-			values[i] = copyInsertValue(value, cols[i] == "value" || cols[i] == "evidence_refs")
+			values[i], err = copyInsertValue(value, spec.name, cols[i], kinds[cols[i]], sourceMySQL, dst.mySQL)
+			if err != nil {
+				return fmt.Errorf("convert %s.%s: %w", spec.name, cols[i], err)
+			}
 		}
 		if _, err := tx.ExecContext(ctx, insert, values...); err != nil {
 			return err
@@ -406,25 +539,196 @@ func copyRows(ctx context.Context, src *sql.DB, dst *copyDB, sourceMySQL bool, s
 	return tx.Commit()
 }
 
-func copyInsertValue(v any, isJSON bool) any {
-	if b, ok := v.([]byte); ok {
-		if !isJSON {
-			return string(b)
+func copyInsertValue(v any, table, column string, kind copyValueKind, sourceMySQL, targetMySQL bool) (any, error) {
+	if table == "bench_area_exceptions" && column == "evidence_refs" {
+		var refs []string
+		var err error
+		if sourceMySQL {
+			refs, err = parseJSONTextArray(v)
+		} else {
+			refs, err = parsePostgresTextArray(v)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if targetMySQL {
+			b, err := json.Marshal(refs)
+			return string(b), err
+		}
+		return pgtype.FlatArray[string](refs), nil
+	}
+	value, err := normalizeCopyValue(v, kind)
+	if err != nil {
+		return nil, err
+	}
+	if kind == copyJSON {
+		return string(value.(json.RawMessage)), nil
+	}
+	return value, nil
+}
+
+func normalizeCopyValue(v any, kind copyValueKind) (any, error) {
+	if v == nil {
+		return nil, nil
+	}
+	switch kind {
+	case copyText:
+		if b, ok := v.([]byte); ok {
+			return string(b), nil
+		}
+		return v, nil
+	case copyInteger:
+		switch x := v.(type) {
+		case int:
+			return int64(x), nil
+		case int16:
+			return int64(x), nil
+		case int32:
+			return int64(x), nil
+		case int64:
+			return x, nil
+		case uint64:
+			return int64(x), nil
+		case []byte:
+			return parseCopyInt(string(x))
+		case string:
+			return parseCopyInt(x)
+		default:
+			return nil, fmt.Errorf("cannot normalize %T as integer", v)
+		}
+	case copyFloat:
+		switch x := v.(type) {
+		case float32:
+			return float64(x), nil
+		case float64:
+			return x, nil
+		case int64:
+			return float64(x), nil
+		case []byte:
+			return parseCopyFloat(string(x))
+		case string:
+			return parseCopyFloat(x)
+		default:
+			return nil, fmt.Errorf("cannot normalize %T as float", v)
+		}
+	case copyBoolean:
+		switch x := v.(type) {
+		case bool:
+			return x, nil
+		case int64:
+			if x == 0 {
+				return false, nil
+			}
+			if x == 1 {
+				return true, nil
+			}
+		case []byte:
+			return parseCopyBool(string(x))
+		case string:
+			return parseCopyBool(x)
+		}
+		return nil, fmt.Errorf("cannot normalize %T as boolean", v)
+	case copyTime:
+		if t, ok := v.(time.Time); ok {
+			return t.UTC(), nil
+		}
+		return nil, fmt.Errorf("cannot normalize %T as time", v)
+	case copyJSON:
+		var data []byte
+		switch x := v.(type) {
+		case []byte:
+			data = x
+		case string:
+			data = []byte(x)
+		case json.RawMessage:
+			data = x
+		default:
+			return nil, fmt.Errorf("cannot normalize %T as JSON", v)
 		}
 		var value any
-		dec := json.NewDecoder(strings.NewReader(string(b)))
+		dec := json.NewDecoder(strings.NewReader(string(data)))
 		dec.UseNumber()
-		if dec.Decode(&value) == nil {
-			if encoded, err := json.Marshal(value); err == nil {
-				return string(encoded)
-			}
+		if err := dec.Decode(&value); err != nil {
+			return nil, err
 		}
-		return string(b)
+		b, err := json.Marshal(value)
+		return json.RawMessage(b), err
+	case copyTextArray:
+		return parsePostgresTextArray(v)
+	default:
+		return nil, fmt.Errorf("unknown copy value kind %d", kind)
 	}
-	if t, ok := v.(time.Time); ok {
-		return t.UTC()
+}
+
+func parseCopyInt(s string) (int64, error) {
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0, err
 	}
-	return v
+	return n, nil
+}
+
+func parseCopyFloat(s string) (float64, error) {
+	n, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func parseCopyBool(s string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "true":
+		return true, nil
+	case "0", "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid boolean value %q", s)
+	}
+}
+
+func parsePostgresTextArray(v any) ([]string, error) {
+	switch x := v.(type) {
+	case []string:
+		return x, nil
+	case pgtype.FlatArray[string]:
+		return []string(x), nil
+	case string:
+		return decodePostgresTextArray([]byte(x))
+	case []byte:
+		return decodePostgresTextArray(x)
+	default:
+		return nil, fmt.Errorf("cannot decode PostgreSQL text array from %T", v)
+	}
+}
+
+func decodePostgresTextArray(data []byte) ([]string, error) {
+	var values pgtype.FlatArray[string]
+	plan := pgtype.NewMap().PlanScan(pgtype.TextArrayOID, pgtype.TextFormatCode, &values)
+	if plan == nil {
+		return nil, errors.New("PostgreSQL text array decoder unavailable")
+	}
+	if err := plan.Scan(data, &values); err != nil {
+		return nil, err
+	}
+	return []string(values), nil
+}
+
+func parseJSONTextArray(v any) ([]string, error) {
+	var data []byte
+	switch x := v.(type) {
+	case []byte:
+		data = x
+	case string:
+		data = []byte(x)
+	default:
+		return nil, fmt.Errorf("cannot decode MySQL JSON array from %T", v)
+	}
+	var values []string
+	if err := json.Unmarshal(data, &values); err != nil {
+		return nil, err
+	}
+	return values, nil
 }
 
 func resetIdentity(ctx context.Context, dst *copyDB, table string) error {
