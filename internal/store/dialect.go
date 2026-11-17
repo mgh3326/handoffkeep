@@ -292,3 +292,9 @@ func (s *Store) beginNamedTransaction(ctx context.Context, key string) (transact
 	}
 	return sqlTransaction{tx}, release, nil
 }
+
+// Retry only a complete MySQL transaction after a deadlock or lock timeout.
+// Its deferred rollback and session cleanup finish before the next attempt.
+func (s *Store) retryTransaction(ctx context.Context, attempt int, err error) bool {
+	return s.dialect == mysqlDialect && attempt == 0 && ctx.Err() == nil && errors.Is(mapDriverError(err), errSerializationFailure)
+}

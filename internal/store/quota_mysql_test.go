@@ -96,3 +96,24 @@ func TestMySQLQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMySQLQuotaSharedBehaviors(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T, *Store)
+	}{
+		{"dedupe", testQuotaDedupe},
+		{"history", testQuotaObservationHistory},
+		{"presence-bounds", testQuotaPresenceBounds},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := Open(t.Context(), testdb.MySQLDatabase(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(s.Close)
+			tc.run(t, s)
+		})
+	}
+}

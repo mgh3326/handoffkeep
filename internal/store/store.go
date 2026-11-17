@@ -880,7 +880,7 @@ func open(ctx context.Context, url string, registry []migration) (*Store, error)
 		return openMySQL(ctx, url)
 	}
 	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
-		return nil, errors.New("HANDOFFKEEP_DB_URL must be a PostgreSQL URL")
+		return nil, errors.New("HANDOFFKEEP_DB_URL must be a PostgreSQL or MySQL URL")
 	}
 	p, err := newPool(ctx, url)
 	if err != nil {
@@ -1781,6 +1781,15 @@ var mysqlUpsertBenchRepInsert = func() string {
 // (Every attempted insert still consumes one BIGSERIAL candidate, conflict or
 // not, so rejected collisions remain visible as id gaps.)
 func (s *Store) UpsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, error) {
+	for attempt := 0; ; attempt++ {
+		result, err := s.upsertBenchReps(ctx, xs)
+		if !s.retryTransaction(ctx, attempt, err) {
+			return result, err
+		}
+	}
+}
+
+func (s *Store) upsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, error) {
 	if len(xs) < 1 || len(xs) > benchBatchMax {
 		return nil, errors.New("invalid bench reps")
 	}
@@ -1948,6 +1957,15 @@ func (s *Store) ListBenchRepsByTaskRef(ctx context.Context, taskRef string, limi
 }
 
 func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, error) {
+	for attempt := 0; ; attempt++ {
+		result, err := s.upsertBenchGrades(ctx, xs)
+		if !s.retryTransaction(ctx, attempt, err) {
+			return result, err
+		}
+	}
+}
+
+func (s *Store) upsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, error) {
 	if len(xs) < 1 || len(xs) > benchBatchMax {
 		return 0, errors.New("invalid bench grades")
 	}
@@ -2044,6 +2062,15 @@ func (s *Store) ListBenchGrades(ctx context.Context) ([]BenchGrade, error) {
 // and the merged post-write state must satisfy the per-profile effort
 // monotonicity rule or the whole batch rolls back.
 func (s *Store) UpsertBenchCatalog(ctx context.Context, xs []BenchCatalogEntry) (int, error) {
+	for attempt := 0; ; attempt++ {
+		result, err := s.upsertBenchCatalog(ctx, xs)
+		if !s.retryTransaction(ctx, attempt, err) {
+			return result, err
+		}
+	}
+}
+
+func (s *Store) upsertBenchCatalog(ctx context.Context, xs []BenchCatalogEntry) (int, error) {
 	if len(xs) < 1 || len(xs) > benchBatchMax {
 		return 0, errors.New("invalid bench catalog")
 	}

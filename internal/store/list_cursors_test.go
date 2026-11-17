@@ -93,6 +93,11 @@ func idsOfPlacements(xs []PlacementDecision) []int64 {
 // newest-first answer is unchanged, and the cursor visits each row once.
 func TestListBenchRepsPagesByID(t *testing.T) {
 	s := schemaStore(t, "list_cursors_bench")
+	testListBenchRepsPagesByID(t, s)
+}
+
+func testListBenchRepsPagesByID(t *testing.T, s *Store) {
+	t.Helper()
 	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
 	var seeded []int64
 	for i := range 5 {

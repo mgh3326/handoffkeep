@@ -119,6 +119,15 @@ var ErrBenchRepNotFound = errors.New("bench_rep_not_found")
 // holds a different value rejects the whole patch with
 // *BenchRepOutcomeConflictError, writing nothing. An empty patch is invalid.
 func (s *Store) PatchBenchRepOutcome(ctx context.Context, id int64, p BenchRepOutcomePatch) (BenchRep, error) {
+	for attempt := 0; ; attempt++ {
+		result, err := s.patchBenchRepOutcome(ctx, id, p)
+		if !s.retryTransaction(ctx, attempt, err) {
+			return result, err
+		}
+	}
+}
+
+func (s *Store) patchBenchRepOutcome(ctx context.Context, id int64, p BenchRepOutcomePatch) (BenchRep, error) {
 	var x BenchRep
 	if id < 1 {
 		return x, errors.New("invalid bench rep id")

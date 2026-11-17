@@ -59,3 +59,26 @@ func TestMySQLBench(t *testing.T) {
 		t.Fatalf("monotonicity: %v", err)
 	}
 }
+
+func TestMySQLBenchSharedBehaviors(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T, *Store)
+	}{
+		{"ladder", testBenchSolGradeLadder},
+		{"unrated", testBenchUnratedStore},
+		{"cursor", testListBenchRepsPagesByID},
+		{"scored-sol", func(t *testing.T, s *Store) { testBenchUnratedSolGradeMirrorPreservesScore(t, s, "codex-sol") }},
+		{"scored-kiro", func(t *testing.T, s *Store) { testBenchUnratedSolGradeMirrorPreservesScore(t, s, "kiro-sol") }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := Open(t.Context(), testdb.MySQLDatabase(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(s.Close)
+			tc.run(t, s)
+		})
+	}
+}

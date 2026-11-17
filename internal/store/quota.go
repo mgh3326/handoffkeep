@@ -264,6 +264,15 @@ func (s *Store) QuotaAccountKeys(ctx context.Context) ([]string, error) {
 	return keys, rows.Err()
 }
 func (s *Store) LeaseQuota(ctx context.Context, key, owner, holder string, ttl int) (QuotaLease, error) {
+	for attempt := 0; ; attempt++ {
+		result, err := s.leaseQuota(ctx, key, owner, holder, ttl)
+		if !s.retryTransaction(ctx, attempt, err) {
+			return result, err
+		}
+	}
+}
+
+func (s *Store) leaseQuota(ctx context.Context, key, owner, holder string, ttl int) (QuotaLease, error) {
 	var x QuotaLease
 	tx, err := s.db().Begin(ctx)
 	if err != nil {
@@ -312,6 +321,15 @@ func (s *Store) LeaseQuota(ctx context.Context, key, owner, holder string, ttl i
 // only path allowed to delete quota_observations rows; cadence is a separate
 // operator decision, so nothing here schedules it.
 func (s *Store) PruneQuotaHistory(ctx context.Context) (int64, error) {
+	for attempt := 0; ; attempt++ {
+		result, err := s.pruneQuotaHistory(ctx)
+		if !s.retryTransaction(ctx, attempt, err) {
+			return result, err
+		}
+	}
+}
+
+func (s *Store) pruneQuotaHistory(ctx context.Context) (int64, error) {
 	if s.dialect == mysqlDialect {
 		conn, err := s.db().(sqlQuerier).db.Conn(ctx)
 		if err != nil {
@@ -359,6 +377,15 @@ func (s *Store) ReleaseQuota(ctx context.Context, key, owner, holder string) err
 // value is identical to the current latest for (key, kind, window) it appends
 // nothing and returns the existing row with deduped=true.
 func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x QuotaObservation) (QuotaObservation, bool, error) {
+	for attempt := 0; ; attempt++ {
+		result, deduped, err := s.putQuota(ctx, key, owner, holder, x)
+		if !s.retryTransaction(ctx, attempt, err) {
+			return result, deduped, err
+		}
+	}
+}
+
+func (s *Store) putQuota(ctx context.Context, key, owner, holder string, x QuotaObservation) (QuotaObservation, bool, error) {
 	if !ValidQuotaKey(key) || !ValidQuotaHolder(holder) || !ValidQuotaObservationFor(key, x, time.Now()) {
 		return x, false, errors.New("invalid quota observation")
 	}
@@ -438,6 +465,15 @@ func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x Quota
 // ErrQuotaPresenceFull: hosts already present keep updating, so a flood of
 // invented host ids cannot evict them.
 func (s *Store) PutQuotaPresence(ctx context.Context, x QuotaPresence) (QuotaPresence, error) {
+	for attempt := 0; ; attempt++ {
+		result, err := s.putQuotaPresence(ctx, x)
+		if !s.retryTransaction(ctx, attempt, err) {
+			return result, err
+		}
+	}
+}
+
+func (s *Store) putQuotaPresence(ctx context.Context, x QuotaPresence) (QuotaPresence, error) {
 	if !ValidQuotaPresence(x, time.Now()) {
 		return x, errors.New("invalid quota presence")
 	}

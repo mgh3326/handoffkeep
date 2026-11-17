@@ -42,3 +42,21 @@ func TestMySQLMigrationRegistryCoversNewPostgresMigrations(t *testing.T) {
 		}
 	}
 }
+
+func TestOrderMySQLMigrations(t *testing.T) {
+	a := mysqlMigration{id: "20261117-a", steps: []string{"SELECT 1"}}
+	b := mysqlMigration{id: "20261117-b", after: []string{a.id}, steps: []string{"SELECT 2"}}
+	ordered, err := orderMySQLMigrations([]mysqlMigration{b, a})
+	if err != nil || len(ordered) != 2 || ordered[0].id != a.id || ordered[1].id != b.id {
+		t.Fatalf("order: %+v %v", ordered, err)
+	}
+	b.after = []string{"20261117-missing"}
+	if _, err := orderMySQLMigrations([]mysqlMigration{a, b}); err == nil {
+		t.Fatal("missing dependency accepted")
+	}
+	b.after = []string{a.id}
+	a.after = []string{b.id}
+	if _, err := orderMySQLMigrations([]mysqlMigration{a, b}); err == nil {
+		t.Fatal("cycle accepted")
+	}
+}

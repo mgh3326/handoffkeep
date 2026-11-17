@@ -98,6 +98,12 @@ func TestBenchSolGradeLadder(t *testing.T) {
 	if err := s.migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
+	testBenchSolGradeLadder(t, s)
+}
+
+func testBenchSolGradeLadder(t *testing.T, s *Store) {
+	t.Helper()
+	ctx := t.Context()
 	row := func(effort, grade string) BenchCatalogEntry {
 		return BenchCatalogEntry{Profile: "codex-sol", Effort: effort, ModelID: "sol-model", Pool: "codex", Grade: grade, Gate: "default", DeviationRef: "hk:task/3920", DecidedBy: "operator", DecidedAt: time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)}
 	}
@@ -117,6 +123,12 @@ func TestBenchUnratedStore(t *testing.T) {
 	if err := s.migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
+	testBenchUnratedStore(t, s)
+}
+
+func testBenchUnratedStore(t *testing.T, s *Store) {
+	t.Helper()
+	ctx := t.Context()
 	row := func(profile, effort, grade string) BenchCatalogEntry {
 		return BenchCatalogEntry{Profile: profile, Effort: effort, ModelID: "example-model", Pool: "codex", Grade: grade, Gate: "default", DeviationRef: "hk:task/2639", DecidedBy: "operator", DecidedAt: time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)}
 	}
@@ -168,51 +180,57 @@ func TestBenchUnratedSolGradeMirrorPreservesScore(t *testing.T) {
 			if err := s.migrate(ctx); err != nil {
 				t.Fatal(err)
 			}
-			score, source := 67.0, "measured-source"
-			row := BenchCatalogEntry{Profile: profile, ModelID: "sol-model", Pool: "codex", Grade: "S+", Score: &score, BenchmarkSource: &source, Gate: "default", DeviationRef: "measured-decision", DecidedBy: "operator"}
-			if _, err := s.UpsertBenchCatalog(ctx, []BenchCatalogEntry{row}); err != nil {
-				t.Fatal(err)
-			}
-			beforeCatalog, err := s.ListBenchCatalog(ctx, "", false)
-			if err != nil {
-				t.Fatal(err)
-			}
-			beforeGrades, err := s.ListBenchGrades(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			grade := BenchGrade{Profile: profile, Grade: "unrated", DeviationRef: "hk:task/2639", DecidedBy: "operator"}
-			_, err = s.UpsertBenchGrades(ctx, []BenchGrade{
-				{Profile: "earlier-in-batch", Grade: "unrated", DeviationRef: "hk:task/2639", DecidedBy: "operator"},
-				grade,
-			})
-			if !errors.Is(err, ErrBenchCatalogScoredSolUnrated) {
-				t.Fatalf("scored Sol became unrated through the grade mirror: %v", err)
-			}
-			afterCatalog, err := s.ListBenchCatalog(ctx, "", false)
-			if err != nil || !reflect.DeepEqual(afterCatalog, beforeCatalog) {
-				t.Fatalf("rejected grade batch changed catalog: before=%+v after=%+v err=%v", beforeCatalog, afterCatalog, err)
-			}
-			afterGrades, err := s.ListBenchGrades(ctx)
-			if err != nil || !reflect.DeepEqual(afterGrades, beforeGrades) {
-				t.Fatalf("rejected grade batch changed grade projection: before=%+v after=%+v err=%v", beforeGrades, afterGrades, err)
-			}
-			var storedGrade string
-			if err := pool.QueryRow(ctx, `SELECT grade FROM bench_grades WHERE profile=$1`, profile).Scan(&storedGrade); err != nil || storedGrade != "S+" {
-				t.Fatalf("rejected grade batch changed legacy grade: grade=%s err=%v", storedGrade, err)
-			}
-			row.Score = nil
-			if _, err := s.UpsertBenchCatalog(ctx, []BenchCatalogEntry{row}); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := s.UpsertBenchGrades(ctx, []BenchGrade{grade}); err != nil {
-				t.Fatalf("unscored Sol rejected after explicit score removal: %v", err)
-			}
-			rows, err := s.ListBenchCatalog(ctx, "", false)
-			if err != nil || len(rows) != 1 || rows[0].Grade != "unrated" || rows[0].Score != nil || rows[0].ModelID != row.ModelID || rows[0].BenchmarkSource == nil || *rows[0].BenchmarkSource != source {
-				t.Fatalf("unscored Sol grade mirror: rows=%+v err=%v", rows, err)
-			}
+			testBenchUnratedSolGradeMirrorPreservesScore(t, s, profile)
 		})
+	}
+}
+
+func testBenchUnratedSolGradeMirrorPreservesScore(t *testing.T, s *Store, profile string) {
+	t.Helper()
+	ctx := t.Context()
+	score, source := 67.0, "measured-source"
+	row := BenchCatalogEntry{Profile: profile, ModelID: "sol-model", Pool: "codex", Grade: "S+", Score: &score, BenchmarkSource: &source, Gate: "default", DeviationRef: "measured-decision", DecidedBy: "operator"}
+	if _, err := s.UpsertBenchCatalog(ctx, []BenchCatalogEntry{row}); err != nil {
+		t.Fatal(err)
+	}
+	beforeCatalog, err := s.ListBenchCatalog(ctx, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeGrades, err := s.ListBenchGrades(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grade := BenchGrade{Profile: profile, Grade: "unrated", DeviationRef: "hk:task/2639", DecidedBy: "operator"}
+	_, err = s.UpsertBenchGrades(ctx, []BenchGrade{
+		{Profile: "earlier-in-batch", Grade: "unrated", DeviationRef: "hk:task/2639", DecidedBy: "operator"},
+		grade,
+	})
+	if !errors.Is(err, ErrBenchCatalogScoredSolUnrated) {
+		t.Fatalf("scored Sol became unrated through the grade mirror: %v", err)
+	}
+	afterCatalog, err := s.ListBenchCatalog(ctx, "", false)
+	if err != nil || !reflect.DeepEqual(afterCatalog, beforeCatalog) {
+		t.Fatalf("rejected grade batch changed catalog: before=%+v after=%+v err=%v", beforeCatalog, afterCatalog, err)
+	}
+	afterGrades, err := s.ListBenchGrades(ctx)
+	if err != nil || !reflect.DeepEqual(afterGrades, beforeGrades) {
+		t.Fatalf("rejected grade batch changed grade projection: before=%+v after=%+v err=%v", beforeGrades, afterGrades, err)
+	}
+	var storedGrade string
+	if err := s.db().QueryRow(ctx, s.q(`SELECT grade FROM bench_grades WHERE profile=$1`, `SELECT grade FROM bench_grades WHERE profile=?`), profile).Scan(&storedGrade); err != nil || storedGrade != "S+" {
+		t.Fatalf("rejected grade batch changed legacy grade: grade=%s err=%v", storedGrade, err)
+	}
+	row.Score = nil
+	if _, err := s.UpsertBenchCatalog(ctx, []BenchCatalogEntry{row}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertBenchGrades(ctx, []BenchGrade{grade}); err != nil {
+		t.Fatalf("unscored Sol rejected after explicit score removal: %v", err)
+	}
+	rows, err := s.ListBenchCatalog(ctx, "", false)
+	if err != nil || len(rows) != 1 || rows[0].Grade != "unrated" || rows[0].Score != nil || rows[0].ModelID != row.ModelID || rows[0].BenchmarkSource == nil || *rows[0].BenchmarkSource != source {
+		t.Fatalf("unscored Sol grade mirror: rows=%+v err=%v", rows, err)
 	}
 }
 
