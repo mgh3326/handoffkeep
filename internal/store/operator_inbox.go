@@ -99,6 +99,9 @@ type InboxWriteResult struct {
 // event key is the idempotency key: applying it again returns the current
 // state and writes nothing.
 func (s *Store) ApplyInbox(ctx context.Context, keys []string, action string, until *time.Time, actor, eventKey string) (InboxWriteResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return InboxWriteResult{}, ErrDialectUnsupported
+	}
 	out := InboxWriteResult{Items: []InboxWrite{}}
 	if !validInboxAction(action) || strings.TrimSpace(actor) == "" || !validText(actor, 320) || strings.TrimSpace(eventKey) == "" || !validText(eventKey, 128) {
 		return out, ErrInvalidInboxWrite
@@ -142,6 +145,10 @@ func (s *Store) ApplyInbox(ctx context.Context, keys []string, action string, un
 // ErrInboxUndoConflict, so two tabs cannot undo each other's work. A second
 // undo of the same key is a no-op.
 func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxWrite, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if strings.TrimSpace(eventKey) == "" || !validText(eventKey, 128) || strings.TrimSpace(actor) == "" || !validText(actor, 320) {
 		return nil, ErrInvalidInboxWrite
 	}
@@ -265,6 +272,10 @@ func sameInboxTime(a, b *time.Time) bool {
 // InboxStates reads the stored triage state of keys, in batches of 500.
 // Items with no row are absent from the map.
 func (s *Store) InboxStates(ctx context.Context, keys []string) (map[string]InboxState, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	out := make(map[string]InboxState, len(keys))
 	for start := 0; start < len(keys); start += 500 {
 		end := start + 500

@@ -14,6 +14,10 @@ import (
 // (a single-task UPDATE, lock level 4), so no row lock spans tasks. Each
 // repaired task writes one sync_log row through sync_tasks.
 func (s *Store) RepairLastActivity(ctx context.Context, limit int) (int, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT t.id, a.at FROM tasks t JOIN (SELECT task_id, max(at) AS at FROM task_events WHERE `+activityEventSQL+` GROUP BY task_id) a ON a.task_id = t.id WHERE a.at > t.last_activity_at ORDER BY t.id LIMIT $1`, limit)
 	if err != nil {
 		return 0, err

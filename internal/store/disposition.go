@@ -253,6 +253,10 @@ func insertTaskEvent(ctx context.Context, tx pgx.Tx, id int64, from, to, by, not
 // it is never observable unflagged and no claim can take it.
 // created=false returns the already open item for the same origin.
 func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Task, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, false, ErrDialectUnsupported
+	}
+
 	if !validName(in.Lane) || strings.TrimSpace(in.Title) == "" || !validText(in.Title, MaxBytes) || in.CreatedBy == "" || !validText(in.CreatedBy, 128) || !validText(in.Note, 512) {
 		return Task{}, false, errors.New("invalid disposition")
 	}
@@ -467,6 +471,10 @@ func validAnswerIdentity(email, eventID, batchID string) bool {
 // AnswerDisposition records one operator answer. It is the only single-item
 // path out of the awaiting_decision flag for a disposition item.
 func (s *Store) AnswerDisposition(ctx context.Context, in DispositionAnswerInput) (Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, ErrDialectUnsupported
+	}
+
 	if in.ID < 1 || in.Gen < 1 || !validAnswerIdentity(in.OperatorEmail, in.EventID, in.BatchID) {
 		return Task{}, errors.New("invalid disposition answer")
 	}
@@ -512,6 +520,10 @@ type DispositionSkip struct {
 // after the snapshot are not in refs and therefore cannot be touched; items
 // whose question generation changed are skipped, never answered.
 func (s *Store) AnswerDispositionBatch(ctx context.Context, refs []DispositionRef, email, batchID string, eventIDForLane func(lane string) string) ([]Task, []DispositionSkip, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, nil, ErrDialectUnsupported
+	}
+
 	if len(refs) == 0 || len(refs) > DispositionBatchLimit || batchID == "" || !validAnswerIdentity(email, "-", batchID) || eventIDForLane == nil {
 		return nil, nil, errors.New("invalid disposition batch")
 	}
@@ -570,6 +582,10 @@ func (s *Store) AnswerDispositionBatch(ctx context.Context, refs []DispositionRe
 // A/B/C researching->reviewing->merged, D researching->icebox, E
 // researching->dropped.
 func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string) (Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, ErrDialectUnsupported
+	}
+
 	if id < 1 || by == "" || !validText(by, 128) || !validText(note, 512) {
 		return Task{}, errors.New("invalid disposition apply")
 	}
@@ -661,6 +677,10 @@ type OpenDisposition struct {
 
 // ListOpenDispositions returns open items oldest first (the batch order).
 func (s *Store) ListOpenDispositions(ctx context.Context, limit int) ([]OpenDisposition, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if limit < 1 || limit > 1000 {
 		limit = 1000
 	}
@@ -699,6 +719,10 @@ func prefixedTaskColumns(alias string) string {
 // pending figure the queue shows. Uncleaned requests on merged/dropped tasks
 // are not pending decisions and are not counted here.
 func (s *Store) CountNeedsDecision(ctx context.Context) (decisions, dispositions int, err error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, 0, ErrDialectUnsupported
+	}
+
 	err = s.pool.QueryRow(ctx, `SELECT
 		COUNT(*) FILTER (WHERE awaiting_decision AND NOT (refs ? 'disposition') AND COALESCE(refs->'decision_request'->>'status','')<>'open')
 		+ COUNT(*) FILTER (WHERE refs->'decision_request'->>'status'='open' AND state NOT IN (`+settledStatesSQL+`)),
@@ -711,6 +735,10 @@ func (s *Store) CountNeedsDecision(ctx context.Context) (decisions, dispositions
 // reached relay_events, newest first so a bounded list never hides the latest. The answer is the durable record; the lane event is a
 // notification that can be re-sent with the same event ID.
 func (s *Store) ListUnnotifiedDispositions(ctx context.Context, limit int) ([]Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if limit < 1 || limit > 1000 {
 		limit = 1000
 	}
@@ -736,6 +764,10 @@ func (s *Store) ListUnnotifiedDispositions(ctx context.Context, limit int) ([]Ta
 // ListDispositionsByAnswerEvent returns the answered items that share one
 // answer event ID (one item, or one lane of one batch), in id order.
 func (s *Store) ListDispositionsByAnswerEvent(ctx context.Context, eventID string) ([]Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs ? 'disposition' AND refs->'disposition'->'answer'->>'event_id'=$1 ORDER BY id ASC LIMIT $2`, eventID, DispositionBatchLimit)
 	if err != nil {
 		return nil, err
@@ -776,6 +808,10 @@ type DispositionSummary struct {
 }
 
 func (s *Store) DispositionSummary(ctx context.Context, asOf time.Time) (DispositionSummary, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DispositionSummary{}, ErrDialectUnsupported
+	}
+
 	asOf = asOf.UTC()
 	out := DispositionSummary{AsOf: asOf, OldestOpenDays: -1, OldestPendingApplyDay: -1}
 	rows, err := s.pool.Query(ctx, `SELECT t.id, t.created_at, t.refs,

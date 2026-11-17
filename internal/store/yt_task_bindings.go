@@ -149,6 +149,10 @@ func ytBindingDisagreement(ctx context.Context, q ytRowQuerier, b YTTaskBinding)
 // YTBindingDisagreement is ytBindingDisagreement on the pool: read-only, for
 // the preflight, against a stored binding or one about to be published.
 func (s *Store) YTBindingDisagreement(ctx context.Context, b YTTaskBinding) (string, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return "", ErrDialectUnsupported
+	}
+
 	return ytBindingDisagreement(ctx, s.pool, b)
 }
 
@@ -174,6 +178,10 @@ func readYTBinding(ctx context.Context, q ytRowQuerier, taskID int64) (YTTaskBin
 
 // YTTaskBinding reads a task's binding; found is false when it has none.
 func (s *Store) YTTaskBinding(ctx context.Context, taskID int64) (YTTaskBinding, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTTaskBinding{}, false, ErrDialectUnsupported
+	}
+
 	return readYTBinding(ctx, s.pool, taskID)
 }
 
@@ -289,6 +297,9 @@ func ytCommentOnOpTx(ctx context.Context, tx pgx.Tx, c TaskComment, now time.Tim
 // after an unbind, its sync_log row (taking the commit-time allocator lock
 // every task write takes, sync_migration.go).
 func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified YTCanaryCandidate) (YTTaskBinding, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTTaskBinding{}, ErrDialectUnsupported
+	}
 	got, _, _, err := s.publishYTBinding(ctx, b, verified, ytBindingPublication{origin: YTBindingImportVerified})
 	return got, err
 }
@@ -305,6 +316,10 @@ type YTCommentCandidate struct {
 // (bind-all, hk 3897). project, when not "", keeps only that hk project's
 // tasks.
 func (s *Store) YTCommentCandidates(ctx context.Context, since time.Time, project string, all bool) ([]YTCommentCandidate, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `WITH ids AS (
 			SELECT task_id FROM task_comments WHERE created_at >= $1
 			UNION SELECT task_id FROM yt_comment_canary
@@ -332,6 +347,10 @@ func (s *Store) YTCommentCandidates(ctx context.Context, since time.Time, projec
 // comments preflight and backfill); found is false for a task that does not
 // exist.
 func (s *Store) YTCommentCandidateOf(ctx context.Context, taskID int64) (YTCommentCandidate, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTCommentCandidate{}, false, ErrDialectUnsupported
+	}
+
 	var c YTCommentCandidate
 	err := s.pool.QueryRow(ctx, `SELECT id, coalesce(project,'') FROM tasks WHERE id=$1`, taskID).Scan(&c.TaskID, &c.Project)
 	if errors.Is(err, ErrNoRows) {
@@ -345,6 +364,10 @@ func (s *Store) YTCommentCandidateOf(ctx context.Context, taskID int64) (YTComme
 // never copied), in all and in the busiest clock hour (UTC); project, when not
 // "", keeps only that hk project's tasks.
 func (s *Store) YTCommentVolume(ctx context.Context, since time.Time, project string) (total, maxPerHour int, err error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, 0, ErrDialectUnsupported
+	}
+
 	err = s.pool.QueryRow(ctx, `SELECT coalesce(sum(n),0), coalesce(max(n),0) FROM (
 			SELECT count(*) AS n FROM task_comments c JOIN tasks t ON t.id = c.task_id
 			WHERE c.created_at >= $1 AND c.author <> $3 AND ($2 = '' OR t.project = $2)
@@ -363,6 +386,10 @@ type YTUnresolvedCommentOp struct {
 // YTUnresolvedCommentOps lists the comment ops not yet applied or rejected,
 // in id order.
 func (s *Store) YTUnresolvedCommentOps(ctx context.Context) ([]YTUnresolvedCommentOp, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT id, entity_id, tenant, yt_target_id FROM yt_write_ops
 		WHERE principal=$1 AND kind=$2 AND entity_kind='task' AND state NOT IN ('applied','rejected') ORDER BY id`,
 		YTCommentPrincipal, ytwrite.KindCommentAppend)

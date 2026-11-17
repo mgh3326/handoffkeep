@@ -50,6 +50,10 @@ var ytWriteOpAlertPointer = map[string]string{
 // candidate read. Two passes that straddle a window boundary would otherwise
 // both read an op as unmarked and announce it in two windows.
 func (s *Store) EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, ErrDialectUnsupported
+	}
+
 	now = now.UTC()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

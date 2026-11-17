@@ -30,6 +30,10 @@ type SyncReset struct{ MinSyncID int64 }
 func (e *SyncReset) Error() string { return "sync reset required" }
 
 func (s *Store) SyncDelta(ctx context.Context, after int64, limit int) ([]SyncChange, SyncMetadata, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, SyncMetadata{}, ErrDialectUnsupported
+	}
+
 	meta := SyncMetadata{LastSyncID: after, SchemaVersion: SchemaVersion}
 	if after < 0 || limit < 1 || limit > SyncLimit {
 		return nil, meta, ErrInvalidSync
@@ -89,6 +93,10 @@ func syncDeltaTx(ctx context.Context, tx pgx.Tx, after int64, limit int) ([]Sync
 // when the log becomes empty. Pending rows have no assigned ID and are never
 // eligible for pruning.
 func (s *Store) PruneSync(ctx context.Context, retention time.Duration) (int64, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, ErrDialectUnsupported
+	}
+
 	if retention <= 0 {
 		return 0, fmt.Errorf("%w: retention must be positive", ErrInvalidSync)
 	}

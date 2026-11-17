@@ -103,6 +103,10 @@ type YTLinksPlanReport struct {
 // reads its issue's links through remote. An unknown opt.TaskID is
 // ErrTaskNotFound. Nothing is written.
 func (s *Store) PlanYTLinks(ctx context.Context, opt YTLinksPlanOptions, remote ytwrite.IssueLinksRemote) (YTLinksPlanReport, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTLinksPlanReport{}, ErrDialectUnsupported
+	}
+
 	mode, tenant := s.ytLinksSetting()
 	r := YTLinksPlanReport{Mode: mode, Tenant: tenant, TaskID: opt.TaskID, Project: opt.Project, Limit: opt.Limit,
 		Rows: []YTLinkPlanRow{}}

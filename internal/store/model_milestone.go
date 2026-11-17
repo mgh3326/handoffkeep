@@ -26,6 +26,10 @@ type ProjectMilestone struct {
 
 // SaveMilestone creates or updates a milestone. Project is immutable after creation.
 func (s *Store) SaveMilestone(ctx context.Context, m ProjectMilestone) (ProjectMilestone, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ProjectMilestone{}, ErrDialectUnsupported
+	}
+
 	if m.ID < 0 || !validName(m.Project) || m.Name == "" || !validText(m.Name, 256) || !validText(m.Description, MaxBytes) || !validText(m.Status, 128) {
 		return ProjectMilestone{}, errors.New("invalid milestone")
 	}
@@ -57,6 +61,10 @@ func (s *Store) SaveMilestone(ctx context.Context, m ProjectMilestone) (ProjectM
 }
 
 func (s *Store) SetTaskMilestone(ctx context.Context, id int64, milestone *int64, by string) (Task, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, false, ErrDialectUnsupported
+	}
+
 	if id < 1 || (milestone != nil && *milestone < 1) || by == "" || !validText(by, 128) {
 		return Task{}, false, errors.New("invalid task milestone")
 	}
@@ -105,6 +113,10 @@ func (s *Store) SetTaskMilestone(ctx context.Context, id int64, milestone *int64
 }
 
 func (s *Store) GetMilestone(ctx context.Context, id int64) (ProjectMilestone, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ProjectMilestone{}, ErrDialectUnsupported
+	}
+
 	if id < 1 {
 		return ProjectMilestone{}, errors.New("invalid milestone")
 	}
@@ -178,6 +190,10 @@ func (p MilestonePatch) MarshalJSON() ([]byte, error) {
 }
 
 func (s *Store) PatchMilestone(ctx context.Context, id int64, p MilestonePatch) (ProjectMilestone, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ProjectMilestone{}, ErrDialectUnsupported
+	}
+
 	if id < 1 || (!p.SetTarget && p.TargetAt != nil) || (p.Project != nil && !validName(*p.Project)) || (p.Name != nil && (*p.Name == "" || !validText(*p.Name, 256))) || (p.Description != nil && !validText(*p.Description, MaxBytes)) || (p.Status != nil && !validText(*p.Status, 128)) {
 		return ProjectMilestone{}, errors.New("invalid milestone")
 	}

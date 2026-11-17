@@ -54,6 +54,10 @@ ORDER BY d.id LIMIT $4`
 // deletes. The cutoff comes from the caller's clock, so the table uses no
 // database now().
 func (s *Store) PruneDocuments(ctx context.Context, prefix string, olderThan time.Time, limit int, apply bool) (DocPruneResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DocPruneResult{}, ErrDialectUnsupported
+	}
+
 	res := DocPruneResult{Prefix: prefix, OlderThan: olderThan.UTC(), Limit: limit, Applied: apply}
 	if prefix != DocPrunePrefix {
 		return res, fmt.Errorf("%w: prefix must be %s", ErrDocPruneInvalid, DocPrunePrefix)

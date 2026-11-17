@@ -112,6 +112,10 @@ func insertYTBindingHistoryTx(ctx context.Context, tx pgx.Tx, b YTTaskBinding, a
 // authority row FOR SHARE (the order prepareYTOpTx has), then the task's
 // yt_write_ops rows, its binding row and its yt_entity_map row.
 func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbindOptions) (YTUnbindResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTUnbindResult{}, ErrDialectUnsupported
+	}
+
 	res := YTUnbindResult{TaskID: taskID, Rejected: []YTUnbindOp{}, Released: []int64{}, Stranded: []int64{}}
 	if taskID < 1 || o.By == "" || !validText(o.By, 200) || !validText(o.Reason, 2000) {
 		return res, errors.New("invalid task unbind")

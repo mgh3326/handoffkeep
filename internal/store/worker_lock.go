@@ -27,6 +27,10 @@ type WorkerLease struct{ conn *pgxpool.Conn }
 // uncertain acquisition discards the connection so a locked session cannot
 // return to the pool.
 func (s *Store) TryWorkerLock(ctx context.Context, id WorkerLock) (*WorkerLease, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, false, ErrDialectUnsupported
+	}
+
 	if id != HubForwardWorkerLock && id != TaskThreadWorkerLock {
 		return nil, false, errors.New("unknown worker lock")
 	}

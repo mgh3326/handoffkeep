@@ -23,6 +23,10 @@ const YTAuditTaskPageMax = 1000
 // when it is not 0; those with id greater than afterID, at most limit. The
 // caller pages with the last id until a page comes back short.
 func (s *Store) YTAuditTasks(ctx context.Context, project string, taskID, afterID int64, limit int) ([]YTCommentCandidate, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if taskID < 0 || afterID < 0 || limit < 1 || limit > YTAuditTaskPageMax {
 		return nil, errors.New("invalid audit task filter")
 	}
@@ -64,6 +68,10 @@ type YTAuditComments struct {
 // YTAuditTaskComments reads task taskID's comments for the audit against
 // issue issueID.
 func (s *Store) YTAuditTaskComments(ctx context.Context, taskID int64, issueID string) (YTAuditComments, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTAuditComments{}, ErrDialectUnsupported
+	}
+
 	out := YTAuditComments{Comments: []ytwrite.AuditComment{}, Links: map[int64]string{}, PulledYTIDs: map[string]bool{}}
 	rows, err := s.pool.Query(ctx, `SELECT c.id, c.body, c.author,
 			coalesce((SELECT o.id FROM yt_comment_write_links w JOIN yt_write_ops o ON o.id = w.op_id
@@ -125,6 +133,10 @@ const (
 // row, the task's lane lock, then the new rows
 // of yt_write_ops, yt_comment_write_links and yt_entity_map.
 func (s *Store) EnqueueYTAuditComment(ctx context.Context, commentID int64) (string, ytwrite.Op, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return "", ytwrite.Op{}, ErrDialectUnsupported
+	}
+
 	if commentID < 1 {
 		return "", ytwrite.Op{}, ErrTaskCommentInvalid
 	}

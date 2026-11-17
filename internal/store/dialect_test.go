@@ -3,8 +3,11 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
@@ -63,6 +66,115 @@ func TestRetryTransactionOnlyOnceOnMySQLConflict(t *testing.T) {
 	if mysqlStore.retryTransaction(context.Background(), 0, errors.New("ordinary error")) {
 		t.Fatal("ordinary error was retried")
 	}
+}
+
+func TestUnportedMethodsReturnDialectUnsupportedOnMySQL(t *testing.T) {
+	mysqlStore := &Store{dialect: mysqlDialect}
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{name: "task", call: func() error { _, _, err := mysqlStore.GetTask(context.Background(), 1); return err }},
+		{name: "task create wrapper", call: func() error { _, err := mysqlStore.CreateTask(context.Background(), Task{}); return err }},
+		{name: "task transition wrapper", call: func() error {
+			_, err := mysqlStore.TransitionTask(context.Background(), 1, "", "actor", "", nil, "")
+			return err
+		}},
+		{name: "document", call: func() error { _, _, err := mysqlStore.GetDocument(context.Background(), "key"); return err }},
+		{name: "attachment", call: func() error {
+			_, _, err := mysqlStore.GetAttachment(context.Background(), strings.Repeat("a", 64))
+			return err
+		}},
+		{name: "relay", call: func() error {
+			_, err := mysqlStore.ListRelayEventsPage(context.Background(), "lane", "", false, 0, 10)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.call(); !errors.Is(err, ErrDialectUnsupported) {
+				t.Fatalf("error = %v, want ErrDialectUnsupported", err)
+			}
+		})
+	}
+}
+
+func TestBeginNamedTransactionDiscardsConnectionOnNullLockResult(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		value      driver.Value
+		wantClosed bool
+	}{
+		{name: "NULL", value: nil, wantClosed: true},
+		{name: "timeout", value: int64(0), wantClosed: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			closed := make(chan struct{}, 1)
+			db := sql.OpenDB(lockResultConnector{value: tc.value, closed: closed})
+			defer db.Close()
+			store := &Store{mysqlPool: db, dialect: mysqlDialect, queries: sqlQuerier{db}}
+
+			tx, release, err := store.beginNamedTransaction(context.Background(), "test-lock")
+			if err == nil || tx != nil || release != nil {
+				t.Fatalf("beginNamedTransaction() = (tx nil: %t, release nil: %t, err: %v), want lock refusal", tx == nil, release == nil, err)
+			}
+			if tc.wantClosed {
+				select {
+				case <-closed:
+				default:
+					t.Fatal("connection with ambiguous lock result was returned to the pool")
+				}
+			} else if got := db.Stats().Idle; got != 1 {
+				t.Fatalf("idle connections after unambiguous timeout = %d, want 1", got)
+			}
+		})
+	}
+}
+
+type lockResultConnector struct {
+	value  driver.Value
+	closed chan struct{}
+}
+
+func (c lockResultConnector) Connect(context.Context) (driver.Conn, error) {
+	return lockResultConn{value: c.value, closed: c.closed}, nil
+}
+func (c lockResultConnector) Driver() driver.Driver { return lockResultDriver{} }
+
+type lockResultDriver struct{}
+
+func (lockResultDriver) Open(string) (driver.Conn, error) {
+	return nil, errors.New("unexpected Driver.Open")
+}
+
+type lockResultConn struct {
+	value  driver.Value
+	closed chan struct{}
+}
+
+func (c lockResultConn) Prepare(string) (driver.Stmt, error) { return nil, errors.New("unsupported") }
+func (c lockResultConn) Close() error {
+	c.closed <- struct{}{}
+	return nil
+}
+func (c lockResultConn) Begin() (driver.Tx, error) { return nil, errors.New("unsupported") }
+func (c lockResultConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+	return &lockResultRows{value: c.value}, nil
+}
+
+type lockResultRows struct {
+	value driver.Value
+	read  bool
+}
+
+func (*lockResultRows) Columns() []string { return []string{"GET_LOCK"} }
+func (*lockResultRows) Close() error      { return nil }
+func (r *lockResultRows) Next(dest []driver.Value) error {
+	if r.read {
+		return io.EOF
+	}
+	r.read = true
+	dest[0] = r.value
+	return nil
 }
 
 func TestMapDecisionConstraintPreservesSpecificRefusal(t *testing.T) {

@@ -50,6 +50,10 @@ type JobNoSkillList struct {
 }
 
 func (s *Store) JobSkillsReport(ctx context.Context, since time.Time, limit int) (JobSkillsReport, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return JobSkillsReport{}, ErrDialectUnsupported
+	}
+
 	out := JobSkillsReport{Since: since, ByHarnessModel: []JobSkillsGroup{}, NeverUsed: []JobSkillCount{}, JobsNoSkill: JobNoSkillList{Jobs: []JobNoSkill{}}}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {

@@ -129,6 +129,10 @@ const driftIdleStartedSQL = `SELECT ` + driftColumns + taskActivitySQL + ` FROM 
 // the classes agree with each other. mergedDays is the merged age for class
 // (c); class (d) uses the server's started_stalled_hours.
 func (s *Store) TaskDrift(ctx context.Context, now time.Time, mergedDays int) (TaskDrift, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return TaskDrift{}, ErrDialectUnsupported
+	}
+
 	if err := CheckDriftMergedDays(mergedDays); err != nil {
 		return TaskDrift{}, err
 	}

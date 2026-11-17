@@ -19,6 +19,10 @@ type MergedTaskEvent struct {
 }
 
 func (s *Store) ListMergedTaskEvents(ctx context.Context, limit int) ([]MergedTaskEvent, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if limit < 1 {
 		limit = 200
 	}

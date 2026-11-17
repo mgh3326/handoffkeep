@@ -82,6 +82,10 @@ const openBlockedSQL = `EXISTS (SELECT 1 FROM task_relations r JOIN tasks b ON b
 // owner, metadata, open task counts and health. now is the as-of instant for
 // overdue tasks. The reads share one snapshot.
 func (s *Store) ListProjectOverviews(ctx context.Context, now time.Time) ([]ProjectOverview, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return nil, err

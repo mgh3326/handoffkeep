@@ -123,6 +123,10 @@ func scanYTDecisionBinding(row pgx.Row, b *YTDecisionBinding) error {
 // YTDecisionBinding reads a decision's binding; found is false when it has
 // none.
 func (s *Store) YTDecisionBinding(ctx context.Context, decisionID int64) (YTDecisionBinding, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTDecisionBinding{}, false, ErrDialectUnsupported
+	}
+
 	return readYTDecisionBinding(ctx, s.pool, decisionID)
 }
 
@@ -562,6 +566,10 @@ var (
 // In mode on, the decision's first snapshot is prepared in the same
 // transaction, behind any op on its lane.
 func (s *Store) BindYTDecision(ctx context.Context, b YTDecisionBinding, now time.Time) (created bool, err error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, ErrDialectUnsupported
+	}
+
 	if b.DecisionID <= 0 || b.Tenant == "" || b.IssueID == "" || b.BoundBy == "" {
 		return false, errors.New("a decision binding needs the decision, the tenant, the issue and who bound it")
 	}
@@ -620,6 +628,10 @@ const YTDecisionCandidatesMax = 1000
 // UnboundYTDecisions lists the decisions with no binding and an id above
 // afterID, ascending, at most limit (1..YTDecisionCandidatesMax).
 func (s *Store) UnboundYTDecisions(ctx context.Context, afterID int64, limit int) ([]YTDecisionCandidate, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if afterID < 0 || limit < 1 || limit > YTDecisionCandidatesMax {
 		return nil, errors.New("invalid decision candidate page")
 	}
@@ -648,6 +660,10 @@ func (s *Store) UnboundYTDecisions(ctx context.Context, afterID int64, limit int
 // decision_fields snapshot op when bound (and its snapshot sha differs).
 // Mode off or other tenant returns ("", nil).
 func (s *Store) PrepareYTDecision(ctx context.Context, id int64, now time.Time) (YTDecisionOutcome, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return "", ErrDialectUnsupported
+	}
+
 	g, on := s.ytDecisionsNow()
 	if !on {
 		return "", nil
@@ -677,6 +693,10 @@ func (s *Store) PrepareYTDecision(ctx context.Context, id int64, now time.Time) 
 // BoundYTDecisions lists, in decision id order, the ids of decisions bound on
 // tenant with an id greater than afterID, at most limit (1..YTDecisionCandidatesMax).
 func (s *Store) BoundYTDecisions(ctx context.Context, tenant string, afterID int64, limit int) ([]int64, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if tenant == "" || afterID < 0 || limit < 1 || limit > YTDecisionCandidatesMax {
 		return nil, errors.New("invalid bound decision page")
 	}

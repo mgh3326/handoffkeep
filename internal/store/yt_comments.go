@@ -495,6 +495,10 @@ type YTCanaryCandidate struct {
 
 // YTCanaryCandidate reads a task's mappings. A missing task is ErrTaskNotFound.
 func (s *Store) YTCanaryCandidate(ctx context.Context, taskID int64) (YTCanaryCandidate, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTCanaryCandidate{}, ErrDialectUnsupported
+	}
+
 	return readYTCanaryCandidate(ctx, s.pool, taskID, "")
 }
 
@@ -567,6 +571,10 @@ func scanYTCanary(row interface{ Scan(...any) error }, c *YTCommentCanary) error
 // change under it), then FOR SHARE on the task's youtrack_projects and
 // task_origins rows, then the new canary row.
 func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verified YTCanaryCandidate) (YTCommentCanary, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTCommentCanary{}, ErrDialectUnsupported
+	}
+
 	if c.TaskID < 1 || c.Tenant == "" || len(c.Tenant) > 255 || c.IssueID == "" || len(c.IssueID) > 64 ||
 		len(c.IssueReadable) > 64 || len(c.ProjectID) > 64 || c.AddedBy == "" || !validText(c.AddedBy, 200) || verified.TaskID != c.TaskID {
 		return YTCommentCanary{}, errors.New("invalid canary binding")
@@ -637,6 +645,10 @@ func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verif
 // while it reads the admission: a removal that commits first holds every
 // later claim, and one that waits behind a claim follows that claim.
 func (s *Store) RemoveYTCommentCanary(ctx context.Context, taskID int64) (bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, ErrDialectUnsupported
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -654,6 +666,10 @@ func (s *Store) RemoveYTCommentCanary(ctx context.Context, taskID int64) (bool, 
 
 // ListYTCommentCanary lists the canary set by task id.
 func (s *Store) ListYTCommentCanary(ctx context.Context) ([]YTCommentCanary, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT `+ytCanaryColumns+` FROM yt_comment_canary ORDER BY task_id`)
 	if err != nil {
 		return nil, err
@@ -685,6 +701,10 @@ func (s *Store) YTCommentConfig(tenant string, cfg ytwrite.Config) ytwrite.Confi
 // the activity pull needs before it drops a comment as hk's own echo. Issue
 // ids are only unique per YouTrack instance, so the tenant is part of the match.
 func (s *Store) YTCommentEchoOp(ctx context.Context, opID int64, tenant, issueID string) (bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, ErrDialectUnsupported
+	}
+
 	var ok bool
 	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops o JOIN yt_comment_write_links w ON w.op_id = o.id
 		WHERE o.id=$1 AND o.kind=$2 AND o.yt_target_id=$3 AND o.tenant=$4)`, opID, ytwrite.KindCommentAppend, issueID, tenant).Scan(&ok)

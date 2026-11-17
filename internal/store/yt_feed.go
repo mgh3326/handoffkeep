@@ -163,6 +163,9 @@ type YTFeedPass struct {
 // is returned with every pass that ran. With no consumer registered it does
 // nothing.
 func (s *Store) RunYTFeedConsumers(ctx context.Context, limit int) ([]YTFeedPass, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
 	names := make([]string, 0, len(ytFeedConsumers))
 	for name := range ytFeedConsumers {
 		names = append(names, name)

@@ -80,6 +80,9 @@ const ytCatchUpSelectSQL = `SELECT c.id, c.task_id, c.body, c.author, c.created_
 // task's lane lock, and what ytCommentOnOpTx reads and writes. It never takes
 // taskCommentInsertLock or a task row.
 func (s *Store) CatchUpYTComments(ctx context.Context, limit int, skip []int64) (YTCatchUp, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTCatchUp{}, ErrDialectUnsupported
+	}
 	return s.catchUpYTComments(ctx, limit, skip, false)
 }
 
@@ -93,6 +96,9 @@ func (s *Store) CatchUpYTComments(ctx context.Context, limit int, skip []int64) 
 // says which of them the issue still lacks. The write worker runs it in mode
 // on even when the general catch-up (HANDOFFKEEP_YT_COMMENTS_CATCHUP) is off.
 func (s *Store) CatchUpYTIssueComments(ctx context.Context, limit int, skip []int64) (YTCatchUp, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTCatchUp{}, ErrDialectUnsupported
+	}
 	return s.catchUpYTComments(ctx, limit, skip, true)
 }
 

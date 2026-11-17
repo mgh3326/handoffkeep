@@ -193,6 +193,10 @@ func archiveLiveRelationsTx(ctx context.Context, tx pgx.Tx, src int64, kind, by 
 // adding the edge moves the task to duplicate, and neither exists without the
 // other.
 func (s *Store) AddTaskRelation(ctx context.Context, src int64, kind string, dst int64, by string) (changed bool, err error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, ErrDialectUnsupported
+	}
+
 	if !validRelationKind(kind) || src < 1 || dst < 1 || by == "" || !validText(by, 128) {
 		return false, errors.New("invalid relation")
 	}
@@ -233,6 +237,10 @@ func (s *Store) addDuplicateOf(ctx context.Context, src, dst int64, by string) (
 // edge changes nothing. A duplicate task keeps its duplicate_of edge: reopen
 // the task instead.
 func (s *Store) RemoveTaskRelation(ctx context.Context, src int64, kind string, dst int64, by string) (changed bool, err error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, ErrDialectUnsupported
+	}
+
 	if !validRelationKind(kind) || src < 1 || dst < 1 || by == "" || !validText(by, 128) {
 		return false, errors.New("invalid relation")
 	}
@@ -279,6 +287,10 @@ func (s *Store) RemoveTaskRelation(ctx context.Context, src int64, kind string, 
 
 // ListTaskRelations returns the live edges that touch a task, oldest first.
 func (s *Store) ListTaskRelations(ctx context.Context, id int64) ([]TaskRelation, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT id,kind,src_id,dst_id,created_by,created_at FROM task_relations WHERE (src_id=$1 OR dst_id=$1) AND archived_at IS NULL ORDER BY id`, id)
 	if err != nil {
 		return nil, err
@@ -297,6 +309,10 @@ func (s *Store) ListTaskRelations(ctx context.Context, id int64) ([]TaskRelation
 
 // ListTaskChildren returns a task's sub-tasks by id.
 func (s *Store) ListTaskChildren(ctx context.Context, id int64) ([]TaskChild, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT id,title,state FROM tasks WHERE parent_id=$1 ORDER BY id`, id)
 	if err != nil {
 		return nil, err
@@ -357,6 +373,10 @@ func checkParentTx(ctx context.Context, q rowQuerier, id, parent int64) error {
 // is acyclic; a no-op change writes no event. It follows SetTaskProject's
 // shape: row lock, append-only event.
 func (s *Store) SetTaskParent(ctx context.Context, id int64, parent *int64, by string) (x Task, changed bool, err error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, false, ErrDialectUnsupported
+	}
+
 	if id < 1 || by == "" || !validText(by, 128) {
 		return Task{}, false, errors.New("invalid task parent change")
 	}

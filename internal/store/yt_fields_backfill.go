@@ -106,6 +106,10 @@ type YTFieldsBackfillReport struct {
 // again from the first task and passes the ones already sent as unchanged. A
 // dry run reads the same rows and writes nothing.
 func (s *Store) BackfillYTFieldsOps(ctx context.Context, opt YTFieldsBackfillOptions) (YTFieldsBackfillReport, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTFieldsBackfillReport{}, ErrDialectUnsupported
+	}
+
 	r := YTFieldsBackfillReport{Project: opt.Project, TaskID: opt.TaskID, Limit: opt.Limit, DryRun: opt.DryRun,
 		Projects: []*YTFieldsBackfillProject{}}
 	mode, tenant := s.ytFieldsNow()

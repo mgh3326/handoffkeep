@@ -214,6 +214,10 @@ func scanPlacement(row interface{ Scan(...any) error }) (PlacementDecision, erro
 }
 
 func (s *Store) RecordPlacement(ctx context.Context, d PlacementDecision) (PlacementDecision, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return PlacementDecision{}, false, ErrDialectUnsupported
+	}
+
 	if err := checkPlacement(d); err != nil {
 		return d, false, err
 	}
@@ -263,6 +267,10 @@ func (s *Store) RecordPlacement(ctx context.Context, d PlacementDecision) (Place
 // not revisited; a reader that must catch one pages again from 0. A nil afterID
 // keeps the newest-first answer.
 func (s *Store) ListPlacements(ctx context.Context, job, host string, since time.Time, afterID *int64, limit int) ([]PlacementDecision, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if (job != "" && !ValidJobID(job)) || (host != "" && !ValidJobHost(host)) || (afterID != nil && *afterID < 0) || limit < 1 || limit > 1000 {
 		return nil, errors.New("invalid placement filter")
 	}
@@ -296,6 +304,10 @@ func (s *Store) ListPlacements(ctx context.Context, job, host string, since time
 // or evaluated as a candidate. The MCP projection applies its smaller limit
 // and omits placement fields that are not part of the diagnostic contract.
 func (s *Store) ListFleetCapacityPlacements(ctx context.Context, job, host string, since time.Time, limit int) ([]PlacementDecision, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if (job != "" && !ValidJobID(job)) || (host != "" && !ValidJobHost(host)) || limit < 1 || limit > 100 {
 		return nil, errors.New("invalid placement filter")
 	}
@@ -320,6 +332,10 @@ func (s *Store) ListFleetCapacityPlacements(ctx context.Context, job, host strin
 }
 
 func (s *Store) PrunePlacements(ctx context.Context) (int64, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, ErrDialectUnsupported
+	}
+
 	tag, err := s.pool.Exec(ctx, `DELETE FROM placement_decisions WHERE id IN (SELECT id FROM placement_decisions WHERE decided_at < $1 ORDER BY decided_at,id LIMIT 1000)`, time.Now().UTC().Add(-PlacementRetention))
 	return tag.RowsAffected(), err
 }

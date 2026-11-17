@@ -119,6 +119,9 @@ var ErrBenchRepNotFound = errors.New("bench_rep_not_found")
 // holds a different value rejects the whole patch with
 // *BenchRepOutcomeConflictError, writing nothing. An empty patch is invalid.
 func (s *Store) PatchBenchRepOutcome(ctx context.Context, id int64, p BenchRepOutcomePatch) (BenchRep, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return BenchRep{}, ErrDialectUnsupported
+	}
 	for attempt := 0; ; attempt++ {
 		result, err := s.patchBenchRepOutcome(ctx, id, p)
 		if !s.retryTransaction(ctx, attempt, err) {

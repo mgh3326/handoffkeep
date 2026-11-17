@@ -28,6 +28,10 @@ type DecisionTab struct {
 }
 
 func (s *Store) ListDecisionTab(ctx context.Context, tab string, now time.Time, limit int) (DecisionTab, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DecisionTab{}, ErrDialectUnsupported
+	}
+
 	var out DecisionTab
 	var predicate, order string
 	switch tab {
@@ -136,6 +140,10 @@ func decisionReplacement(ctx context.Context, q interface {
 }
 
 func (s *Store) DecisionReplacement(ctx context.Context, ref string) (*int64, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	return decisionReplacement(ctx, s.pool, ref)
 }
 
@@ -181,6 +189,10 @@ type DecisionAttempt struct {
 }
 
 func (s *Store) ListDecisionAttempts(ctx context.Context, taskID int64, limit int) ([]DecisionAttempt, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if limit < 1 || limit > 1000 {
 		limit = 1000
 	}
