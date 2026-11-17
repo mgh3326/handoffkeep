@@ -498,7 +498,12 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 				return DotsReplyResult{}, err
 			}
 		}
-		docKey, _, err = recordDotsResultTx(ctx, tx, in.Kind, issue, comment, &task, task.ParentLane, "hk-mcp", notifyLanes...)
+		var askOperator *bool
+		if in.Kind == "QUESTION" {
+			ask := in.AskOperator
+			askOperator = &ask
+		}
+		docKey, _, err = recordDotsResultTx(ctx, tx, in.Kind, issue, comment, &task, task.ParentLane, "hk-mcp", askOperator, notifyLanes...)
 		if err != nil {
 			return DotsReplyResult{}, err
 		}
@@ -679,41 +684,45 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 
 	current := x.Refs.DecisionRequest
 	decisionOpen := current != nil && current.Status == DecisionRequestOpen
-	var questions []dotsQuestion
-	if !decisionOpen || in.QuestionID > 0 {
-		questions, err = dotsOpenQuestionsTx(ctx, tx, taskID)
-		if err != nil {
-			return DotsAnswerResult{}, err
-		}
-	}
 	// routeDecision is true when this answer resolves the open decision request:
-	// an untargeted answer, or a target that names the question the decision
-	// came from. A target that names another open question closes that question
-	// instead, leaving the decision open (hk 5000).
+	// an untargeted answer, or a target that is an ask_operator question. A
+	// target that is a plain question closes that question and leaves the
+	// decision open (hk 5000).
 	var question dotsQuestion
-	routeDecision := decisionOpen
+	routeDecision := false
 	switch {
 	case in.QuestionID > 0:
-		found := false
-		for _, q := range questions {
-			if q.CommentID == in.QuestionID {
-				question, found = q, true
-				break
-			}
+		q, found, qerr := dotsQuestionTargetTx(ctx, tx, taskID, in.QuestionID)
+		if qerr != nil {
+			return DotsAnswerResult{}, qerr
 		}
 		if !found {
 			return DotsAnswerResult{}, fmt.Errorf("%w: no open dots question has the given question_id", ErrNoOpenDotsQuestion)
 		}
-		routeDecision = decisionOpen && dotsQuestionIsDecision(question, current)
+		question = q
+		if q.AskOperator {
+			if !decisionOpen {
+				return DotsAnswerResult{}, ErrDecisionRequestResolved
+			}
+			routeDecision = true
+		}
 	case decisionOpen:
 		// The untargeted answer resolves the decision, as before.
 	default:
+		questions, qerr := dotsPlainQuestionsTx(ctx, tx, taskID)
+		if qerr != nil {
+			return DotsAnswerResult{}, qerr
+		}
 		switch len(questions) {
 		case 0:
-			// A resolved decision request keeps today's refusal for a second
-			// answer; with no decision request at all, the refusal names what is
-			// missing instead of a code the caller cannot fix.
-			if current != nil {
+			// What was last asked tells the refusal apart: a decision question
+			// (already closed) means this is a second answer, otherwise nothing
+			// is open and the reason says so.
+			ask, found, qerr := dotsLatestQuestionAskOperatorTx(ctx, tx, taskID)
+			if qerr != nil {
+				return DotsAnswerResult{}, qerr
+			}
+			if found && ask {
 				return DotsAnswerResult{}, ErrDecisionRequestResolved
 			}
 			return DotsAnswerResult{}, fmt.Errorf("%w: this request has no open dots question or decision request to answer", ErrNoOpenDotsQuestion)
@@ -724,13 +733,6 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 		}
 	}
 	if !routeDecision {
-		// A closed decision request already answered its question, even when an
-		// older row was not backfilled. The comment id (or, for a pre-link
-		// request, the body and the request time) names it exactly, so a later
-		// question repeating the text is still answerable (hk 5000).
-		if current != nil && dotsQuestionIsDecision(question, current) {
-			return DotsAnswerResult{}, ErrDecisionRequestResolved
-		}
 		lane := strings.TrimSpace(in.RequesterLane)
 		if lane == "" || !validName(lane) {
 			return DotsAnswerResult{}, dotsRequestInvalid("answering a plain dots question requires the requester lane")
@@ -781,9 +783,8 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 	if err != nil {
 		return DotsAnswerResult{}, err
 	}
-	// The QUESTION this decision came from is answered with it; a decision
-	// request from another source matches no reply body and closes nothing.
-	if _, err = markDotsQuestionFromDecisionTx(ctx, tx, taskID, current.DotsQuestionCommentID, current.Question, caller, in.Text, comment.ID, now); err != nil {
+	// Closing the decision closes its ask_operator questions (display only).
+	if err = closeDotsAskOperatorQuestionsTx(ctx, tx, taskID, caller, in.Text, comment.ID, now); err != nil {
 		return DotsAnswerResult{}, err
 	}
 
@@ -1057,7 +1058,7 @@ func dotsNotifyLanesTx(ctx context.Context, tx pgx.Tx, task Task) (lanes, invali
 // or a QUESTION or BLOCKED reaches an outbox row (lane event); PROGRESS is
 // kept as a document and sends nothing. notifyLanes add one lane event each,
 // beside the requester lane, for a RESULT.
-func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsIssue, c DotsComment, task *Task, lane, createdBy string, notifyLanes ...string) (key string, created bool, err error) {
+func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsIssue, c DotsComment, task *Task, lane, createdBy string, askOperator *bool, notifyLanes ...string) (key string, created bool, err error) {
 	progress := kind == "PROGRESS" && createdBy == "hk-mcp"
 	if err := checkDotsResult(kind, issue, c, progress); err != nil {
 		return "", false, err
@@ -1090,11 +1091,11 @@ func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsI
 		}
 	}
 	if !progress {
-		if _, err := tx.Exec(ctx, `INSERT INTO dots_results(document_key,comment_id,issue_uuid,issue_identifier,kind,verdict,artefact_sha256,task_id,routed_lane,created_at,updated_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
+		if _, err := tx.Exec(ctx, `INSERT INTO dots_results(document_key,comment_id,issue_uuid,issue_identifier,kind,verdict,artefact_sha256,task_id,routed_lane,ask_operator,created_at,updated_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
 		ON CONFLICT(comment_id) DO UPDATE SET task_id=EXCLUDED.task_id, updated_at=EXCLUDED.updated_at
 		WHERE dots_results.task_id IS NULL AND EXCLUDED.task_id IS NOT NULL`,
-			key, c.ID, issue.IssueUUID, issue.Identifier, kind, verdict, hex.EncodeToString(artefact[:]), taskID, lane, now); err != nil {
+			key, c.ID, issue.IssueUUID, issue.Identifier, kind, verdict, hex.EncodeToString(artefact[:]), taskID, lane, askOperator, now); err != nil {
 			return "", false, err
 		}
 	}

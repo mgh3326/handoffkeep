@@ -577,13 +577,11 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	if err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
-	// A dots QUESTION that asked for the operator opens this decision request;
-	// closing the request (answered, default_applied or withdrawn) closes the
-	// question too, so the request's reply list stops reporting it as open
-	// (hk 5000). The comment id recorded at ask_operator time names the exact
-	// row; an older request falls back to its reply body.
+	// A dots QUESTION that asked for the operator belongs to this request;
+	// closing the request (answered, default_applied or withdrawn) closes those
+	// rows for display, while the plain path never selects them (hk 5000).
 	if x.Lane == "dots" && IsHKDotsRequest(x) {
-		if _, err = markDotsQuestionFromDecisionTx(ctx, tx, x.ID, current.DotsQuestionCommentID, current.Question, decidedBy(in, prov), in.Text, 0, now); err != nil {
+		if err = closeDotsAskOperatorQuestionsTx(ctx, tx, x.ID, decidedBy(in, prov), in.Text, 0, now); err != nil {
 			return ResolveDecisionOutcome{}, err
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -94,5 +95,27 @@ func TestAnswerDotsSurvivesCapabilitiesFailure(t *testing.T) {
 	}
 	if _, ok := got["requester_lane"]; ok {
 		t.Fatalf("requester_lane sent after a failed read: %v", got)
+	}
+}
+
+// A legacy server (404 capabilities) cannot honour a target, so the client
+// refuses locally instead of sending the field to a strict decoder (hk 5000).
+func TestAnswerDotsRefusesTargetOnLegacyServer(t *testing.T) {
+	resetCapabilitiesCache()
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/capabilities" {
+			posts.Add(1)
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	_, err := (Client{URL: server.URL, Token: "t"}).AnswerDots(context.Background(), 7, "answer", "a-lane", 42)
+	if err == nil || !strings.HasPrefix(err.Error(), "server_lacks_feature:dots_answer_question") {
+		t.Fatalf("err=%v, want server_lacks_feature:dots_answer_question", err)
+	}
+	if posts.Load() != 0 {
+		t.Fatalf("posts=%d, want 0", posts.Load())
 	}
 }

@@ -84,7 +84,7 @@ func (c Client) AnswerDots(ctx context.Context, taskID int64, text, requesterLan
 	payload := map[string]any{"task": taskID, "text": text}
 	listed := false
 	if questionID > 0 {
-		if err := c.requireFeature(ctx, capabilities.FeatureDotsAnswerQuestion); err != nil {
+		if err := c.requireListedFeature(ctx, capabilities.FeatureDotsAnswerQuestion); err != nil {
 			return out, err
 		}
 		listed = true

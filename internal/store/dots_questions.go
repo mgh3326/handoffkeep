@@ -2,38 +2,39 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// A dots QUESTION reply is open until the request's requester lane answers it
-// (hk 5000, operator decision 364). The answer is the task comment recorded by
-// AnswerDotsQuestion; dots_results carries the mark so dots_inbox and dots
-// results can tell an open question from an answered one. Callers hold the
-// level-2 task lock and the task row; the row update adds no lock of its own.
+// A dots QUESTION reply has one owner, recorded when it is asked (hk 5000,
+// operator decision 364): ask_operator rows are answered through their decision
+// request, plain rows by the request's requester lane. The plain path selects
+// only ask_operator = false, so it can never close a question the decision path
+// owns, whatever its answered_at says. dots_results also carries the answer for
+// display. Callers hold the level-2 task lock and the task row.
 
-// dotsQuestion is one unanswered QUESTION reply: its dots_results row, the
-// task comment that holds the question, that comment's body and its creation
-// time (the decision's request time tells the question it came from apart from
-// a later reply with the same text).
+// dotsQuestion is one open QUESTION reply: its dots_results row, the task
+// comment that holds the question, that comment's body and creation time, and
+// its owner.
 type dotsQuestion struct {
-	ResultID  int64
-	CommentID int64
-	Body      string
-	CreatedAt time.Time
+	ResultID    int64
+	CommentID   int64
+	Body        string
+	CreatedAt   time.Time
+	AskOperator bool
 }
 
-// dotsOpenQuestionsTx returns the request's unanswered QUESTION replies,
-// oldest first. The dots_results row is matched to its task comment through
-// the reply event RecordDotsResultTx wrote: both carry the dots comment hash.
-func dotsOpenQuestionsTx(ctx context.Context, tx pgx.Tx, taskID int64) ([]dotsQuestion, error) {
+// dotsPlainQuestionsTx returns the request's open plain QUESTION replies,
+// oldest first. The dots_results row is matched to its task comment through the
+// reply event RecordDotsResultTx wrote: both carry the dots comment hash.
+func dotsPlainQuestionsTx(ctx context.Context, tx pgx.Tx, taskID int64) ([]dotsQuestion, error) {
 	rows, err := tx.Query(ctx, `SELECT dr.id,c.id,c.body,c.created_at
 		FROM dots_results dr
 		JOIN task_events e ON e.task_id=dr.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.source_ref=dr.comment_id AND e.from_value='QUESTION'
 		JOIN task_comments c ON c.task_id=dr.task_id AND c.id::text=e.to_value
-		WHERE dr.task_id=$1 AND dr.kind='QUESTION' AND dr.answered_at IS NULL
+		WHERE dr.task_id=$1 AND dr.kind='QUESTION' AND dr.ask_operator=false AND dr.answered_at IS NULL
 		ORDER BY dr.id`, taskID)
 	if err != nil {
 		return nil, err
@@ -50,23 +51,42 @@ func dotsOpenQuestionsTx(ctx context.Context, tx pgx.Tx, taskID int64) ([]dotsQu
 	return out, rows.Err()
 }
 
-// dotsQuestionIsDecision reports whether q is the QUESTION a decision request
-// came from. The comment id recorded at ask_operator time names it exactly; a
-// request recorded before that link existed uses the reply body, but only for
-// a question created no later than the request, so a later reply repeating the
-// same text is never taken for it.
-func dotsQuestionIsDecision(q dotsQuestion, request *DecisionRequest) bool {
-	if request == nil {
-		return false
+// dotsQuestionTargetTx returns one open QUESTION reply by its comment id (the
+// reply id dots_inbox shows). Its owner decides which path answers it.
+func dotsQuestionTargetTx(ctx context.Context, tx pgx.Tx, taskID, commentID int64) (dotsQuestion, bool, error) {
+	var q dotsQuestion
+	err := tx.QueryRow(ctx, `SELECT dr.id,c.id,c.body,c.created_at,COALESCE(dr.ask_operator,true)
+		FROM dots_results dr
+		JOIN task_events e ON e.task_id=dr.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.source_ref=dr.comment_id AND e.from_value='QUESTION'
+		JOIN task_comments c ON c.task_id=dr.task_id AND c.id::text=e.to_value
+		WHERE dr.task_id=$1 AND dr.kind='QUESTION' AND dr.answered_at IS NULL AND c.id=$2
+		LIMIT 1`, taskID, commentID).Scan(&q.ResultID, &q.CommentID, &q.Body, &q.CreatedAt, &q.AskOperator)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return dotsQuestion{}, false, nil
 	}
-	if request.DotsQuestionCommentID > 0 {
-		return q.CommentID == request.DotsQuestionCommentID
+	if err != nil {
+		return dotsQuestion{}, false, err
 	}
-	return q.Body == request.Question && !q.CreatedAt.After(request.RequestedAt)
+	return q, true, nil
 }
 
-// markDotsQuestionAnsweredTx closes one open QUESTION row. It refuses when the
-// row is already answered, so two answers can never both land.
+// dotsLatestQuestionAskOperatorTx reports the owner of the task's latest
+// QUESTION reply (answered or not), which is what was last asked. It tells a
+// zero-open refusal apart: a decision question already closed means
+// decision_request_resolved, a plain question means nothing is open.
+func dotsLatestQuestionAskOperatorTx(ctx context.Context, tx pgx.Tx, taskID int64) (ask bool, found bool, err error) {
+	err = tx.QueryRow(ctx, `SELECT COALESCE(ask_operator,true) FROM dots_results WHERE task_id=$1 AND kind='QUESTION' ORDER BY id DESC LIMIT 1`, taskID).Scan(&ask)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return ask, true, nil
+}
+
+// markDotsQuestionAnsweredTx closes one open plain QUESTION row. It refuses
+// when the row is already answered, so two answers can never both land.
 func markDotsQuestionAnsweredTx(ctx context.Context, tx pgx.Tx, resultID int64, answeredBy string, answerCommentID int64, at time.Time) error {
 	tag, err := tx.Exec(ctx, `UPDATE dots_results SET answered_at=$2,answered_by=$3,answer_comment_id=NULLIF($4,0) WHERE id=$1 AND answered_at IS NULL`, resultID, at, answeredBy, answerCommentID)
 	if err != nil {
@@ -78,37 +98,13 @@ func markDotsQuestionAnsweredTx(ctx context.Context, tx pgx.Tx, resultID int64, 
 	return nil
 }
 
-// markDotsQuestionFromDecisionTx closes the QUESTION a decision request came
-// from. The comment id recorded at ask_operator time names the exact row; a
-// request recorded before that link existed falls back to the reply body.
-// answeredBy is the decision's decider and answerCommentID the answer comment
-// when this is dots answer's own path (0 on the console/MCP path). It reports
-// whether a row was closed.
-func markDotsQuestionFromDecisionTx(ctx context.Context, tx pgx.Tx, taskID, questionCommentID int64, question, answeredBy, answerText string, answerCommentID int64, at time.Time) (bool, error) {
-	var tag pgconn.CommandTag
-	var err error
-	if questionCommentID > 0 {
-		tag, err = tx.Exec(ctx, `UPDATE dots_results SET answered_at=$3,answered_by=$4,answer_comment_id=NULLIF($5,0),answer_text=NULLIF($6,'')
-			WHERE id=(
-				SELECT dr.id
-				FROM dots_results dr
-				JOIN task_events e ON e.task_id=dr.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.source_ref=dr.comment_id AND e.from_value='QUESTION'
-				WHERE dr.task_id=$1 AND dr.kind='QUESTION' AND dr.answered_at IS NULL AND e.to_value=$2::text
-				LIMIT 1)
-			AND answered_at IS NULL`, taskID, questionCommentID, at, answeredBy, answerCommentID, answerText)
-	} else {
-		tag, err = tx.Exec(ctx, `UPDATE dots_results SET answered_at=$2,answered_by=$3,answer_comment_id=NULLIF($5,0),answer_text=NULLIF($6,'')
-			WHERE id=(
-				SELECT dr.id
-				FROM dots_results dr
-				JOIN task_events e ON e.task_id=dr.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.source_ref=dr.comment_id AND e.from_value='QUESTION'
-				JOIN task_comments c ON c.task_id=dr.task_id AND c.id::text=e.to_value
-				WHERE dr.task_id=$1 AND dr.kind='QUESTION' AND dr.answered_at IS NULL AND c.body=$4
-				ORDER BY dr.id DESC LIMIT 1)
-			AND answered_at IS NULL`, taskID, at, answeredBy, question, answerCommentID, answerText)
-	}
-	if err != nil {
-		return false, err
-	}
-	return tag.RowsAffected() == 1, nil
+// closeDotsAskOperatorQuestionsTx closes every open ask_operator QUESTION of
+// the task with the decision's answer. recordDecisionRequestTx refuses a new
+// request while one is open, so all open ask_operator rows belong to the
+// request being closed: the one that opened it and any duplicate re-send. The
+// update is display only; the plain path never selects these rows.
+func closeDotsAskOperatorQuestionsTx(ctx context.Context, tx pgx.Tx, taskID int64, answeredBy, answerText string, answerCommentID int64, at time.Time) error {
+	_, err := tx.Exec(ctx, `UPDATE dots_results SET answered_at=$2,answered_by=$3,answer_comment_id=NULLIF($4,0),answer_text=NULLIF($5,'')
+		WHERE task_id=$1 AND kind='QUESTION' AND ask_operator AND answered_at IS NULL`, taskID, at, answeredBy, answerCommentID, answerText)
+	return err
 }
