@@ -495,3 +495,28 @@ func TestDuplicateCheckAtCreate(t *testing.T) {
 		t.Fatal("link and new together succeeded")
 	}
 }
+
+func TestTokenSimilarity(t *testing.T) {
+	cases := []struct {
+		a, b    string
+		minSim  float64
+		maxSim  float64
+		similar bool
+	}{
+		{"fix the login redirect loop", "Fix login redirect loop", 0.5, 1.0, true},
+		{"add a metrics endpoint for quota", "Fix login redirect loop", 0.0, 0.2, false},
+		{"배달 루프 수정", "배달 루프", 0.5, 1.0, true},
+		{"완전 다른 제목", "전혀 일치하지 않음", 0.0, 0.1, false},
+		{"동일한 제목", "동일한 제목", 1.0, 1.0, true},
+		{"", "anything", 0.0, 0.0, false},
+	}
+	for _, c := range cases {
+		s := TokenSimilarity(c.a, c.b)
+		if s < c.minSim || s > c.maxSim {
+			t.Errorf("TokenSimilarity(%q, %q) = %f, want between %f and %f", c.a, c.b, s, c.minSim, c.maxSim)
+		}
+		if (s >= SimilarTaskThreshold) != c.similar {
+			t.Errorf("TokenSimilarity(%q, %q) >= threshold: got %t, want %t", c.a, c.b, s >= SimilarTaskThreshold, c.similar)
+		}
+	}
+}
