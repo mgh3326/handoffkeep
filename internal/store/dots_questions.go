@@ -100,7 +100,8 @@ func markDotsQuestionAnsweredTx(ctx context.Context, tx pgx.Tx, resultID int64, 
 
 // closeDotsAskOperatorQuestionsTx closes every open ask_operator QUESTION of
 // the task with the decision's answer. recordDecisionRequestTx refuses a new
-// request while one is open, so all open ask_operator rows belong to the
+// request while one is open, and a superseding request closes the old request's
+// rows in the same transaction, so all open ask_operator rows belong to the
 // request being closed: the one that opened it and any duplicate re-send. The
 // update is display only; the plain path never selects these rows.
 func closeDotsAskOperatorQuestionsTx(ctx context.Context, tx pgx.Tx, taskID int64, answeredBy, answerText string, answerCommentID int64, at time.Time) error {

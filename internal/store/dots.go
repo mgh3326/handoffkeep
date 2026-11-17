@@ -704,6 +704,12 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 			if !decisionOpen {
 				return DotsAnswerResult{}, ErrDecisionRequestResolved
 			}
+			// The target must be the open request's own question. A
+			// superseded request's rows are closed, and anything else is
+			// refused rather than resolving the wrong decision (hk 5000).
+			if current.DotsQuestionCommentID == 0 || q.CommentID != current.DotsQuestionCommentID {
+				return DotsAnswerResult{}, fmt.Errorf("%w: the given question is not the open decision request's question", ErrNoOpenDotsQuestion)
+			}
 			routeDecision = true
 		}
 	case decisionOpen:

@@ -869,3 +869,46 @@ func TestDotsQuestionAnswerBackfillClassifiesOwners(t *testing.T) {
 		t.Fatalf("decision closed by a plain answer: %+v", still.Refs.DecisionRequest)
 	}
 }
+
+// Invariant (hk 5000): a superseding decision request closes the old request's
+// ask_operator QUESTION, so a targeted answer can never resolve the new
+// request with text meant for the old question.
+func TestDotsSupersedeClosesTheOldQuestion(t *testing.T) {
+	s := schemaStore(t, "dots_answer_supersede")
+	ctx := t.Context()
+	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester", Options: []DecisionOption{{Key: "A", Label: "first"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, _ := startDotsRun(t, s, task.ID, "start")
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "QUESTION", Body: "Which first?", AskOperator: true, IdempotencyKey: "asked", RunToken: started.RunToken}); err != nil {
+		t.Fatal(err)
+	}
+	asked, _, _ := s.GetTask(ctx, task.ID)
+	old := asked.Refs.DecisionRequest
+	if old == nil || old.DotsQuestionCommentID == 0 {
+		t.Fatalf("old request=%+v", old)
+	}
+	// The declaring RESULT supersedes the open question with the operator's
+	// choice request.
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "RESULT", Body: "Use the first option", Recommended: "A", IdempotencyKey: "result", RunToken: started.RunToken}); err != nil {
+		t.Fatal(err)
+	}
+	replies, err := s.ListDotsReplies(ctx, task.ID)
+	if err != nil || len(replies) != 3 || replies[1].Answer == nil {
+		t.Fatalf("superseded question stayed open: replies=%+v err=%v", replies, err)
+	}
+	current, _, _ := s.GetTask(ctx, task.ID)
+	if current.Refs.DecisionRequest == nil || current.Refs.DecisionRequest.Status != DecisionRequestOpen || current.Refs.DecisionRequest.ID == old.ID {
+		t.Fatalf("new request=%+v", current.Refs.DecisionRequest)
+	}
+	// Its question is no longer a target; the untargeted answer resolves the
+	// new request.
+	if _, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "wrong target", RequesterLane: "requester", QuestionID: replies[1].ID}); !errors.Is(err, ErrNoOpenDotsQuestion) {
+		t.Fatalf("targeted old question: %v", err)
+	}
+	res, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "choose first", RequesterLane: "requester"})
+	if err != nil || res.Request == nil || res.Request.Status != DecisionRequestAnswered {
+		t.Fatalf("untargeted answer=%+v err=%v", res, err)
+	}
+}

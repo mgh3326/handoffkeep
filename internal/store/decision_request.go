@@ -834,6 +834,14 @@ func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID i
 		revision = current.Revision + 1
 	}
 	now := time.Now().UTC()
+	// A superseding request replaces the open one. Its ask_operator QUESTION
+	// rows must not stay open, or a targeted answer could resolve the new
+	// request with text meant for the old question (hk 5000).
+	if current != nil && in.Supersedes != "" && x.Lane == "dots" && IsHKDotsRequest(x) {
+		if err = closeDotsAskOperatorQuestionsTx(ctx, tx, taskID, by, "", 0, now); err != nil {
+			return DecisionRequestResult{}, err
+		}
+	}
 	options := in.Options
 	// An option's pictures and videos must name attachments this database
 	// holds: the operator's page would otherwise show a choice it cannot look
