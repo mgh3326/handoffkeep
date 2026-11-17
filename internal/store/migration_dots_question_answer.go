@@ -36,8 +36,11 @@ var dotsQuestionAnswerMigration = []string{
 	`ALTER TABLE dots_results ADD COLUMN IF NOT EXISTS answer_text TEXT`,
 	// Questions that an already-closed decision request answered before this
 	// release carry no link to the request, so the reply body is the only
-	// match. Without this backfill their rows would stay open and a second
-	// answer would be accepted (operator decision 364, hk 5000).
+	// match. One closed request closes at most one row: the latest question
+	// with that body created no later than the request, so a later repeat of
+	// the same text stays open for the requester (operator decision 364,
+	// hk 5000). Without this backfill the answered question would stay open
+	// and a second answer would be accepted.
 	`UPDATE dots_results AS dr
 	SET answered_at = COALESCE(NULLIF(t.refs->'decision_request'->'resolution'->>'at','')::timestamptz, dr.created_at),
 	    answered_by = COALESCE(t.refs->'decision_request'->'resolution'->>'by',''),
@@ -47,14 +50,16 @@ var dotsQuestionAnswerMigration = []string{
 	  AND dr.kind = 'QUESTION'
 	  AND dr.answered_at IS NULL
 	  AND COALESCE(t.refs->'decision_request'->>'status','') IN ('answered','default_applied','withdrawn')
-	  AND EXISTS (
-		SELECT 1
-		FROM task_events e
-		JOIN task_comments c ON c.task_id = e.task_id AND c.id::text = e.to_value
-		WHERE e.task_id = dr.task_id
-		  AND e.source = 'dots-hk-chatgpt'
-		  AND e.field = 'dots_reply'
-		  AND e.source_ref = dr.comment_id
-		  AND e.from_value = 'QUESTION'
-		  AND c.body = t.refs->'decision_request'->>'question')`,
+	  AND dr.id = (
+		SELECT dr2.id
+		FROM dots_results dr2
+		JOIN task_events e ON e.task_id = dr2.task_id AND e.source = 'dots-hk-chatgpt' AND e.field = 'dots_reply' AND e.source_ref = dr2.comment_id AND e.from_value = 'QUESTION'
+		JOIN task_comments c ON c.task_id = dr2.task_id AND c.id::text = e.to_value
+		WHERE dr2.task_id = t.id
+		  AND dr2.kind = 'QUESTION'
+		  AND dr2.answered_at IS NULL
+		  AND c.body = t.refs->'decision_request'->>'question'
+		  AND c.created_at <= COALESCE(NULLIF(t.refs->'decision_request'->>'requested_at','')::timestamptz, dr2.created_at)
+		ORDER BY c.created_at DESC, dr2.id DESC
+		LIMIT 1)`,
 }

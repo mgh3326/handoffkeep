@@ -661,3 +661,108 @@ func TestDotsDecisionClosesItsExactQuestion(t *testing.T) {
 		t.Fatalf("plain answer=%+v err=%v", res, err)
 	}
 }
+
+// Invariant (hk 5000): a targeted answer closes the plain question it names
+// even while a decision request is open; the decision is not resolved by it.
+func TestAnswerDotsTargetsPlainQuestionBesideDecision(t *testing.T) {
+	s := schemaStore(t, "dots_answer_beside")
+	ctx := t.Context()
+	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, _ := startDotsRun(t, s, task.ID, "start")
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "QUESTION", Body: "Decision question?", AskOperator: true, IdempotencyKey: "asked", RunToken: started.RunToken}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "QUESTION", Body: "Plain question?", IdempotencyKey: "plain", RunToken: started.RunToken}); err != nil {
+		t.Fatal(err)
+	}
+	replies, err := s.ListDotsReplies(ctx, task.ID)
+	if err != nil || len(replies) != 3 {
+		t.Fatalf("replies=%+v err=%v", replies, err)
+	}
+
+	// The target names the plain question, not the decision's.
+	res, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "the plain one", RequesterLane: "requester", QuestionID: replies[2].ID})
+	if err != nil || res.Question == nil || res.Question.CommentID != replies[2].ID {
+		t.Fatalf("targeted plain answer=%+v err=%v", res, err)
+	}
+	still, _, _ := s.GetTask(ctx, task.ID)
+	if still.Refs.DecisionRequest == nil || still.Refs.DecisionRequest.Status != DecisionRequestOpen || !still.AwaitingDecision {
+		t.Fatalf("the decision must stay open: %+v", still.Refs.DecisionRequest)
+	}
+	replies, err = s.ListDotsReplies(ctx, task.ID)
+	if err != nil || replies[1].Answer != nil || replies[2].Answer == nil {
+		t.Fatalf("wrong question closed: replies=%+v err=%v", replies, err)
+	}
+
+	// An untargeted answer still resolves the decision.
+	res, err = s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "the decision one"})
+	if err != nil || res.Request == nil || res.Request.Status != DecisionRequestAnswered {
+		t.Fatalf("decision answer=%+v err=%v", res, err)
+	}
+	replies, err = s.ListDotsReplies(ctx, task.ID)
+	if err != nil || replies[1].Answer == nil || replies[2].Answer == nil {
+		t.Fatalf("decision question stayed open: replies=%+v err=%v", replies, err)
+	}
+}
+
+// Invariant (hk 5000): the migration's body fallback closes the question the
+// closed decision came from, never a later repeat of the same text.
+func TestDotsQuestionAnswerBackfillKeepsLaterRepeat(t *testing.T) {
+	s := schemaStore(t, "dots_answer_backfill_repeat")
+	ctx := t.Context()
+	task, err := s.CreateDotsRequest(ctx, "caller", DotsRequestInput{Title: "Research", Body: "Investigate", RequesterLane: "requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, _ := startDotsRun(t, s, task.ID, "start")
+	const body = "Same question?"
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "QUESTION", Body: body, AskOperator: true, IdempotencyKey: "asked", RunToken: started.RunToken}); err != nil {
+		t.Fatal(err)
+	}
+	asked, _, _ := s.GetTask(ctx, task.ID)
+	request := asked.Refs.DecisionRequest
+	if _, err := s.ResolveDecisionRequest(ctx, task.ID, "operator:test@example.com", DecisionResolveInput{RequestID: request.ID, Kind: DecisionRequestAnswered, Option: "A", Text: "option B", Responder: "operator"}); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the previous release: no mark and no link on the answered question.
+	if _, err := s.pool.Exec(ctx, `UPDATE dots_results SET answered_at=NULL,answered_by=NULL,answer_comment_id=NULL,answer_text=NULL WHERE task_id=$1 AND kind='QUESTION'`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET refs=refs #- '{decision_request,dots_question_comment_id}' WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	// A later plain question repeats the text after the decision was requested.
+	if _, err := s.ReplyDots(ctx, "operator:test@example.com", "chatgpt", DotsReplyInput{TaskID: task.ID, Kind: "QUESTION", Body: body, IdempotencyKey: "repeat", RunToken: started.RunToken}); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyDotsQuestionAnswerMigration(ctx, tx); err != nil {
+		tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	replies, err := s.ListDotsReplies(ctx, task.ID)
+	if err != nil || len(replies) != 3 {
+		t.Fatalf("replies=%+v err=%v", replies, err)
+	}
+	if replies[1].Answer == nil || replies[1].Answer.Text != "option B" {
+		t.Fatalf("the decision's question was not backfilled: %+v", replies[1])
+	}
+	if replies[2].Answer != nil {
+		t.Fatalf("the later repeat was closed by the backfill: %+v", replies[2])
+	}
+	// The later repeat is still answerable.
+	res, err := s.AnswerDotsQuestion(ctx, task.ID, "caller", DotsAnswerInput{Text: "the repeat", RequesterLane: "requester"})
+	if err != nil || res.Question == nil || res.Question.CommentID != replies[2].ID {
+		t.Fatalf("later repeat answer=%+v err=%v", res, err)
+	}
+}

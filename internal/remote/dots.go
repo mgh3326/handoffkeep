@@ -82,18 +82,24 @@ func (c Client) SetDotsAdoption(ctx context.Context, id int64, in store.DotsAdop
 func (c Client) AnswerDots(ctx context.Context, taskID int64, text, requesterLane string, questionID int64) (store.DotsAnswerResult, error) {
 	var out store.DotsAnswerResult
 	payload := map[string]any{"task": taskID, "text": text}
+	listed := false
 	if questionID > 0 {
 		if err := c.requireFeature(ctx, capabilities.FeatureDotsAnswerQuestion); err != nil {
 			return out, err
 		}
+		listed = true
 		payload["question_id"] = questionID
 	}
 	if requesterLane != "" {
-		ok, err := c.supportsFeature(ctx, capabilities.FeatureDotsAnswerQuestion)
-		if err != nil {
-			return out, err
+		if !listed {
+			// A failed capabilities read must not fail an answer the decision
+			// path can still take: the lane is optional there, and omitting it
+			// leaves a plain answer to the server's own refusal.
+			if ok, err := c.supportsFeature(ctx, capabilities.FeatureDotsAnswerQuestion); err == nil {
+				listed = ok
+			}
 		}
-		if ok {
+		if listed {
 			payload["requester_lane"] = requesterLane
 		}
 	}

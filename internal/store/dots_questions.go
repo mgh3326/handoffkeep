@@ -15,18 +15,21 @@ import (
 // level-2 task lock and the task row; the row update adds no lock of its own.
 
 // dotsQuestion is one unanswered QUESTION reply: its dots_results row, the
-// task comment that holds the question, and that comment's body.
+// task comment that holds the question, that comment's body and its creation
+// time (the decision's request time tells the question it came from apart from
+// a later reply with the same text).
 type dotsQuestion struct {
 	ResultID  int64
 	CommentID int64
 	Body      string
+	CreatedAt time.Time
 }
 
 // dotsOpenQuestionsTx returns the request's unanswered QUESTION replies,
 // oldest first. The dots_results row is matched to its task comment through
 // the reply event RecordDotsResultTx wrote: both carry the dots comment hash.
 func dotsOpenQuestionsTx(ctx context.Context, tx pgx.Tx, taskID int64) ([]dotsQuestion, error) {
-	rows, err := tx.Query(ctx, `SELECT dr.id,c.id,c.body
+	rows, err := tx.Query(ctx, `SELECT dr.id,c.id,c.body,c.created_at
 		FROM dots_results dr
 		JOIN task_events e ON e.task_id=dr.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.source_ref=dr.comment_id AND e.from_value='QUESTION'
 		JOIN task_comments c ON c.task_id=dr.task_id AND c.id::text=e.to_value
@@ -39,12 +42,27 @@ func dotsOpenQuestionsTx(ctx context.Context, tx pgx.Tx, taskID int64) ([]dotsQu
 	var out []dotsQuestion
 	for rows.Next() {
 		var q dotsQuestion
-		if err := rows.Scan(&q.ResultID, &q.CommentID, &q.Body); err != nil {
+		if err := rows.Scan(&q.ResultID, &q.CommentID, &q.Body, &q.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, q)
 	}
 	return out, rows.Err()
+}
+
+// dotsQuestionIsDecision reports whether q is the QUESTION a decision request
+// came from. The comment id recorded at ask_operator time names it exactly; a
+// request recorded before that link existed uses the reply body, but only for
+// a question created no later than the request, so a later reply repeating the
+// same text is never taken for it.
+func dotsQuestionIsDecision(q dotsQuestion, request *DecisionRequest) bool {
+	if request == nil {
+		return false
+	}
+	if request.DotsQuestionCommentID > 0 {
+		return q.CommentID == request.DotsQuestionCommentID
+	}
+	return q.Body == request.Question && !q.CreatedAt.After(request.RequestedAt)
 }
 
 // markDotsQuestionAnsweredTx closes one open QUESTION row. It refuses when the

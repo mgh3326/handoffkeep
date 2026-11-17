@@ -678,53 +678,58 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 	}
 
 	current := x.Refs.DecisionRequest
-	if current == nil || current.Status != DecisionRequestOpen {
-		questions, err := dotsOpenQuestionsTx(ctx, tx, taskID)
+	decisionOpen := current != nil && current.Status == DecisionRequestOpen
+	var questions []dotsQuestion
+	if !decisionOpen || in.QuestionID > 0 {
+		questions, err = dotsOpenQuestionsTx(ctx, tx, taskID)
 		if err != nil {
 			return DotsAnswerResult{}, err
 		}
-		var question dotsQuestion
-		if in.QuestionID > 0 {
-			for _, q := range questions {
-				if q.CommentID == in.QuestionID {
-					question = q
-					break
-				}
-			}
-			if question.ResultID == 0 {
-				return DotsAnswerResult{}, fmt.Errorf("%w: no open dots question has the given question_id", ErrNoOpenDotsQuestion)
-			}
-		} else {
-			switch len(questions) {
-			case 0:
-				// A resolved decision request keeps today's refusal for a
-				// second answer; with no decision request at all, the refusal
-				// names what is missing instead of a code the caller cannot fix.
-				if current != nil {
-					return DotsAnswerResult{}, ErrDecisionRequestResolved
-				}
-				return DotsAnswerResult{}, fmt.Errorf("%w: this request has no open dots question or decision request to answer", ErrNoOpenDotsQuestion)
-			case 1:
-				question = questions[0]
-			default:
-				return DotsAnswerResult{}, fmt.Errorf("%w: more than one dots question is open; name the one to answer with question_id", ErrDotsQuestionAmbiguous)
+	}
+	// routeDecision is true when this answer resolves the open decision request:
+	// an untargeted answer, or a target that names the question the decision
+	// came from. A target that names another open question closes that question
+	// instead, leaving the decision open (hk 5000).
+	var question dotsQuestion
+	routeDecision := decisionOpen
+	switch {
+	case in.QuestionID > 0:
+		found := false
+		for _, q := range questions {
+			if q.CommentID == in.QuestionID {
+				question, found = q, true
+				break
 			}
 		}
-		// A closed decision request already answered the question it came
-		// from, even when an older row was not backfilled (hk 5000). The
-		// recorded comment id names it exactly; a pre-link request falls back
-		// to the reply body, which is also what tells an identical later
-		// question apart.
-		if current != nil {
-			same := false
-			if current.DotsQuestionCommentID > 0 {
-				same = question.CommentID == current.DotsQuestionCommentID
-			} else {
-				same = question.Body == current.Question
-			}
-			if same {
+		if !found {
+			return DotsAnswerResult{}, fmt.Errorf("%w: no open dots question has the given question_id", ErrNoOpenDotsQuestion)
+		}
+		routeDecision = decisionOpen && dotsQuestionIsDecision(question, current)
+	case decisionOpen:
+		// The untargeted answer resolves the decision, as before.
+	default:
+		switch len(questions) {
+		case 0:
+			// A resolved decision request keeps today's refusal for a second
+			// answer; with no decision request at all, the refusal names what is
+			// missing instead of a code the caller cannot fix.
+			if current != nil {
 				return DotsAnswerResult{}, ErrDecisionRequestResolved
 			}
+			return DotsAnswerResult{}, fmt.Errorf("%w: this request has no open dots question or decision request to answer", ErrNoOpenDotsQuestion)
+		case 1:
+			question = questions[0]
+		default:
+			return DotsAnswerResult{}, fmt.Errorf("%w: more than one dots question is open; name the one to answer with question_id", ErrDotsQuestionAmbiguous)
+		}
+	}
+	if !routeDecision {
+		// A closed decision request already answered its question, even when an
+		// older row was not backfilled. The comment id (or, for a pre-link
+		// request, the body and the request time) names it exactly, so a later
+		// question repeating the text is still answerable (hk 5000).
+		if current != nil && dotsQuestionIsDecision(question, current) {
+			return DotsAnswerResult{}, ErrDecisionRequestResolved
 		}
 		lane := strings.TrimSpace(in.RequesterLane)
 		if lane == "" || !validName(lane) {
