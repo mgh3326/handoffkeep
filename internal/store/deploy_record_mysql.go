@@ -26,15 +26,19 @@ func (s *Store) listDeployRecordsByPrefixMySQL(ctx context.Context, prefixes []s
 			continue
 		}
 		page := DeployRecordPage{Records: []StoredDeployRecord{}}
-		rows, err := s.db().Query(ctx, `SELECT `+deployServiceProjectionColumns+` FROM deploy_record_projection WHERE `+
-			`LEFT(`+"`key`"+`,CHAR_LENGTH(?))=? ORDER BY `+"`key`"+` DESC LIMIT ?`, prefix, prefix, limit+1)
+		lo, hi := keyPrefixBounds(prefix)
+		rows, err := s.db().Query(ctx, `SELECT d.`+"`key`"+`,d.sha256,d.created_at,p.record,p.decoded,`+deployRecordBodyFallbackMySQL+
+			` FROM documents d LEFT JOIN deploy_record_projection p ON p.`+"`key`"+`=d.`+"`key`"+` AND p.sha256=d.sha256
+			WHERE d.`+"`key`"+`>=? AND d.`+"`key`"+`<? ORDER BY d.`+"`key`"+` DESC LIMIT ?`, lo, hi, limit+1)
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
 			var x StoredDeployRecord
 			var raw []byte
-			if err = rows.Scan(&x.Key, &x.SHA256, &raw, &x.Decoded); err != nil {
+			var decoded *bool
+			var body *string
+			if err = rows.Scan(&x.Key, &x.SHA256, &x.CreatedAt, &raw, &decoded, &body); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -42,12 +46,14 @@ func (s *Store) listDeployRecordsByPrefixMySQL(ctx context.Context, prefixes []s
 				page.More = true
 				continue
 			}
-			if err = json.Unmarshal(raw, &x.Record); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			if keyAt, ok := DeployRecordKeyTime(x.Key); ok {
-				x.CreatedAt = keyAt
+			if body != nil {
+				x = parseStoredDeployRecord(x.Key, x.SHA256, *body, x.CreatedAt)
+			} else {
+				if err = json.Unmarshal(raw, &x.Record); err != nil {
+					rows.Close()
+					return nil, err
+				}
+				x.Decoded = *decoded
 			}
 			page.Records = append(page.Records, x)
 		}
@@ -63,10 +69,14 @@ func (s *Store) listDeployRecordsByPrefixMySQL(ctx context.Context, prefixes []s
 
 const deployServiceProjectionColumns = "`key`,sha256,record,decoded"
 
+const deployRecordBodyFallbackMySQL = "CASE WHEN p.`key` IS NULL OR NOT p.decoded\n\tOR NOT JSON_CONTAINS_PATH(p.record,'one','$.failed_step_name') THEN d.body ELSE NULL END"
+
 func deployRecordForPRMySQL(ctx context.Context, tx transaction, pr string) (StoredDeployRecord, bool, error) {
-	rows, err := tx.Query(ctx, `SELECT `+deployServiceProjectionColumns+` FROM deploy_record_projection
-		WHERE `+"`key`"+` LIKE 'deploy/%' AND decoded=TRUE AND JSON_CONTAINS(CAST(record AS JSON),JSON_QUOTE(?),'$.included_prs')
-		ORDER BY `+"`key`"+` DESC`, pr)
+	lo, hi := keyPrefixBounds("deploy/")
+	rows, err := tx.Query(ctx, `SELECT d.`+"`key`"+`,d.sha256,d.created_at,p.record,p.decoded,`+deployRecordBodyFallbackMySQL+
+		` FROM documents d LEFT JOIN deploy_record_projection p ON p.`+"`key`"+`=d.`+"`key`"+` AND p.sha256=d.sha256
+		WHERE d.`+"`key`"+`>=? AND d.`+"`key`"+`<? AND (LOCATE(?,d.body)>0 OR (p.decoded=TRUE AND JSON_CONTAINS(CAST(p.record AS JSON),JSON_QUOTE(?),'$.included_prs')))
+		ORDER BY d.`+"`key`"+` DESC`, lo, hi, pr, pr)
 	if err != nil {
 		return StoredDeployRecord{}, false, err
 	}
@@ -74,14 +84,18 @@ func deployRecordForPRMySQL(ctx context.Context, tx transaction, pr string) (Sto
 	for rows.Next() {
 		var x StoredDeployRecord
 		var raw []byte
-		if err = rows.Scan(&x.Key, &x.SHA256, &raw, &x.Decoded); err != nil {
+		var decoded *bool
+		var body *string
+		if err = rows.Scan(&x.Key, &x.SHA256, &x.CreatedAt, &raw, &decoded, &body); err != nil {
 			return StoredDeployRecord{}, false, err
 		}
-		if err = json.Unmarshal(raw, &x.Record); err != nil {
-			return StoredDeployRecord{}, false, fmt.Errorf("decode deploy record projection: %w", err)
-		}
-		if keyAt, ok := DeployRecordKeyTime(x.Key); ok {
-			x.CreatedAt = keyAt
+		if body != nil {
+			x = parseStoredDeployRecord(x.Key, x.SHA256, *body, x.CreatedAt)
+		} else {
+			if err = json.Unmarshal(raw, &x.Record); err != nil {
+				return StoredDeployRecord{}, false, fmt.Errorf("decode deploy record projection: %w", err)
+			}
+			x.Decoded = *decoded
 		}
 		prs, ok := deployedPRs(x)
 		if !ok {

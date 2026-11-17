@@ -31,8 +31,6 @@ func seedChangesAreaPostgres(t *testing.T, pool *pgxpool.Pool, at time.Time) {
 	exec(`INSERT INTO change_threads(change_id,thread_id,author_kind,resolved,observed_at,source) VALUES(92001,'NODE-1','human',false,$1,'review')`, at)
 	exec(`INSERT INTO change_findings(change_id,reviewed_head,round,pass,lens,ordinal,review_id,ext_id,severity,blocking,observed_at,source)
 		VALUES(92001,repeat('a',40),1,1,'correctness',0,92001,'NODE-1','high',true,$1,'review')`, at)
-	exec(`INSERT INTO change_gate_events(id,change_id,head_sha,state,changed,reasons,decided_at,source,recorded_at)
-		VALUES(92001,92001,repeat('a',40),'ready',true,'["ci_passed"]',$1,'review',$1)`, at)
 	exec(`INSERT INTO deploy_record_projection(key,sha256,record,decoded) VALUES('deploy/copy/20261117T120000Z',repeat('b',64),$1,true)`, []byte(`{"result":"success","included_prs":[]}`))
 }
 

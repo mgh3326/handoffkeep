@@ -48,7 +48,7 @@ func changesBatchAndReadCase(t *testing.T, s *Store) {
 
 func changesSourceEventCase(t *testing.T, s *Store) {
 	ctx := t.Context()
-	task, err := s.CreateTask(ctx, Task{Lane: "change-area", Title: "source event fixture", Kind: "implement", State: StateDeveloping, CreatedBy: "test"})
+	task, err := s.CreateTask(ctx, Task{Lane: "change-area", Project: projectPtr("handoffkeep"), Title: "source event fixture", Kind: "implement", State: StateDeveloping, CreatedBy: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,17 +118,20 @@ func deployProjectionAndServicesCase(t *testing.T, s *Store) {
 	pr := "https://github.com/example/app/pull/4203"
 	body := []byte(`{"schema":"deploy-record/v0","service":"mysql-area","target":"main","result":"success","included_prs":["https://github.com/example/app/pull/4203"],"source":"test"}`)
 	key := "deploy/mysql-area/20261117T120000Z"
-	sha := strings.Repeat("a", 64)
-	query := s.q(`INSERT INTO deploy_record_projection(key,sha256,record,decoded) VALUES($1,$2,$3,true)`, `INSERT INTO deploy_record_projection(key,sha256,record,decoded) VALUES(?,?,?,TRUE)`)
-	if _, err = s.db().Exec(ctx, query, key, sha, body); err != nil {
-		t.Fatal(err)
-	}
 	newerFailed := []byte(`{"schema":"deploy-record/v0","service":"mysql-area","target":"main","result":"failed","included_prs":["https://github.com/example/app/pull/4203"],"source":"test"}`)
-	if _, err = s.db().Exec(ctx, query, "deploy/mysql-area/20261117T130000Z", strings.Repeat("b", 64), newerFailed); err != nil {
-		t.Fatal(err)
+	newerInvalid := "deploy/mysql-area/20261117T140000Z.invalid"
+	for _, doc := range []struct {
+		key  string
+		body []byte
+	}{{key, body}, {"deploy/mysql-area/20261117T130000Z", newerFailed}, {newerInvalid, body}} {
+		if _, _, err = s.PutDocument(ctx, Document{Key: doc.key, Kind: "note", Body: string(doc.body), CreatedBy: "test"}); err != nil {
+			t.Fatalf("seed deploy document %q: %v", doc.key, err)
+		}
 	}
-	if _, err = s.db().Exec(ctx, query, "deploy/mysql-area/20261117T140000Z.invalid", strings.Repeat("c", 64), body); err != nil {
-		t.Fatal(err)
+	staleProjection := []byte(`{"schema":"deploy-record/v0","service":"mysql-area","target":"main","result":"failed","included_prs":[],"source":"stale"}`)
+	staleUpsert := s.q(`INSERT INTO deploy_record_projection("key",sha256,record,decoded) VALUES($1,$2,$3,true) ON CONFLICT("key") DO UPDATE SET sha256=EXCLUDED.sha256,record=EXCLUDED.record,decoded=EXCLUDED.decoded`, `INSERT INTO deploy_record_projection(`+"`key`"+`,sha256,record,decoded) VALUES(?,?,?,TRUE) ON DUPLICATE KEY UPDATE sha256=VALUES(sha256),record=VALUES(record),decoded=VALUES(decoded)`)
+	if _, err = s.db().Exec(ctx, staleUpsert, key, strings.Repeat("d", 64), staleProjection); err != nil {
+		t.Fatalf("seed stale deploy projection: %v", err)
 	}
 	tx, release, err := s.begin(ctx)
 	if err != nil {
@@ -141,7 +144,7 @@ func deployProjectionAndServicesCase(t *testing.T, s *Store) {
 		t.Fatalf("deploy record selected=%q found=%v err=%v, want older successful %q", record.Key, found, err, key)
 	}
 	pages, err := s.ListDeployRecordsByPrefix(ctx, []string{"deploy/mysql-area/"}, 5)
-	if err != nil || len(pages["deploy/mysql-area/"].Records) != 1 || pages["deploy/mysql-area/"].Records[0].Key != key || pages["deploy/mysql-area/"].Records[0].Record.Result != "success" {
+	if err != nil || len(pages["deploy/mysql-area/"].Records) != 3 || pages["deploy/mysql-area/"].Records[0].Key != newerInvalid || pages["deploy/mysql-area/"].Records[1].Record.Result != "failed" || pages["deploy/mysql-area/"].Records[2].Key != key || pages["deploy/mysql-area/"].Records[2].Record.Result != "success" {
 		t.Fatalf("deploy record pages=%+v err=%v", pages, err)
 	}
 }

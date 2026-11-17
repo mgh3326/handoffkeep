@@ -8,7 +8,7 @@ import (
 )
 
 const changeColumnsMySQL = `id,repo,pr_number,state,head_sha,base_sha,merge_sha,opened_at,merged_at,reverted_by_change_id,priority,hold_reason,depends_on_change_id,depends_on_state,created_at,updated_at,
-	draft,gate_state,NULLIF(LEAST(COALESCE(state_observed_at,'9999-12-31 23:59:59.999999'),COALESCE(checks_observed_at,'9999-12-31 23:59:59.999999'),COALESCE(threads_observed_at,'9999-12-31 23:59:59.999999'),COALESCE(findings_observed_at,'9999-12-31 23:59:59.999999'),COALESCE(gate_decided_at,'9999-12-31 23:59:59.999999')),'9999-12-31 23:59:59.999999'),
+	draft,gate_state,CAST(NULLIF(LEAST(COALESCE(state_observed_at,'9999-12-31 23:59:59.999999'),COALESCE(checks_observed_at,'9999-12-31 23:59:59.999999'),COALESCE(threads_observed_at,'9999-12-31 23:59:59.999999'),COALESCE(findings_observed_at,'9999-12-31 23:59:59.999999'),COALESCE(gate_decided_at,'9999-12-31 23:59:59.999999')),'9999-12-31 23:59:59.999999') AS DATETIME(6)),
 	(SELECT COUNT(*) FROM change_threads t WHERE t.change_id=changes.id AND NOT t.resolved AND NOT t.gone),
 	(SELECT COUNT(*) FROM change_findings f LEFT JOIN change_threads t ON t.change_id=f.change_id AND t.thread_id=COALESCE(f.thread_id,f.ext_id)
 	 WHERE f.change_id=changes.id AND (CASE WHEN t.thread_id IS NOT NULL THEN IF(t.resolved OR t.gone,'resolved','open') WHEN f.reviewed_head=changes.head_sha THEN 'open' ELSE 'superseded' END)='open')`

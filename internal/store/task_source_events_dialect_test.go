@@ -157,17 +157,6 @@ func srcEvCasePublicApply(t *testing.T, s *Store) {
 	pr := srcEvPR(srcEvUnique())
 	in := TaskSourceEvent{Source: SourceMergewakePR, SourceRef: pr, TaskID: x.ID}
 	res, err := s.ApplyTaskSourceEvent(ctx, in)
-	if s.dialect == mysqlDialect {
-		// B5 dependency: recordChangeTx. The refusal writes nothing.
-		if !errors.Is(err, ErrDialectUnsupported) {
-			t.Fatalf("err=%v, want ErrDialectUnsupported", err)
-		}
-		after := srcEvGet(t, s, x.ID)
-		if after.State != x.State || len(srcEvEventsOf(after, SourceMergewakePR)) != 0 {
-			t.Fatalf("a refused event changed the task: state %s -> %s, events %v", x.State, after.State, after.Events)
-		}
-		return
-	}
 	if err != nil || !res.Applied || res.State != StateReviewing {
 		t.Fatalf("pr event: res=%+v err=%v", res, err)
 	}
