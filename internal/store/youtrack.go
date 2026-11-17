@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"time"
@@ -250,10 +251,18 @@ func (s *Store) LinkYouTrackComment(ctx context.Context, taskID, hkCommentID int
 // YouTrackSyncLock is the single-run guard. pg_try_advisory_lock is session
 // scoped, so the caller must hold its connection until Release.
 type YouTrackSyncLock struct {
-	conn *pgxpool.Conn
+	conn      *pgxpool.Conn
+	mysqlConn *sql.Conn
 }
 
 func (s *Store) TryYouTrackSyncLock(ctx context.Context) (*YouTrackSyncLock, bool, error) {
+	if s.dialect == mysqlDialect {
+		conn, held, err := mysqlTrySessionLock(ctx, s.mysqlPool, mysqlYTSyncLock)
+		if err != nil || !held {
+			return nil, held, err
+		}
+		return &YouTrackSyncLock{mysqlConn: conn}, true, nil
+	}
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
 		return nil, false, err
@@ -271,7 +280,15 @@ func (s *Store) TryYouTrackSyncLock(ctx context.Context) (*YouTrackSyncLock, boo
 }
 
 func (l *YouTrackSyncLock) Release(ctx context.Context) error {
-	if l == nil || l.conn == nil {
+	if l == nil {
+		return nil
+	}
+	if l.mysqlConn != nil {
+		err := mysqlReleaseSessionLock(l.mysqlConn, mysqlYTSyncLock)
+		l.mysqlConn = nil
+		return err
+	}
+	if l.conn == nil {
 		return nil
 	}
 	_, err := l.conn.Exec(ctx, `SELECT pg_advisory_unlock(8241873404)`)
