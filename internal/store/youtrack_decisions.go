@@ -18,6 +18,10 @@ type YouTrackDecisionMirror struct {
 
 // GetYouTrackDecisionMirror returns the mirror row of one decision, if any.
 func (s *Store) GetYouTrackDecisionMirror(ctx context.Context, decisionID int64) (YouTrackDecisionMirror, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YouTrackDecisionMirror{}, false, ErrDialectUnsupported
+	}
+
 	var x YouTrackDecisionMirror
 	err := s.pool.QueryRow(ctx, `SELECT decision_id,issue_id,display_ref,stamp FROM youtrack_decision_mirrors WHERE decision_id=$1`, decisionID).
 		Scan(&x.DecisionID, &x.IssueID, &x.DisplayRef, &x.Stamp)
@@ -30,6 +34,10 @@ func (s *Store) GetYouTrackDecisionMirror(ctx context.Context, decisionID int64)
 // ListYouTrackDecisionMirrors returns the mirror rows for the given decisions,
 // keyed by decision id.
 func (s *Store) ListYouTrackDecisionMirrors(ctx context.Context, decisionIDs []int64) (map[int64]YouTrackDecisionMirror, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	out := map[int64]YouTrackDecisionMirror{}
 	if len(decisionIDs) == 0 {
 		return out, nil
@@ -52,6 +60,10 @@ func (s *Store) ListYouTrackDecisionMirrors(ctx context.Context, decisionIDs []i
 // PutYouTrackDecisionMirror records the issue a decision maps to. It replaces
 // the row for the same decision.
 func (s *Store) PutYouTrackDecisionMirror(ctx context.Context, x YouTrackDecisionMirror) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	if x.DecisionID < 1 || strings.TrimSpace(x.IssueID) == "" {
 		return ErrYouTrackMirrorConflict
 	}

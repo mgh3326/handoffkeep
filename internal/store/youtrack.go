@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"time"
@@ -78,6 +79,10 @@ func scanYouTrackMirror(row interface{ Scan(...any) error }, x *YouTrackMirror) 
 }
 
 func (s *Store) GetYouTrackMirror(ctx context.Context, taskID int64) (YouTrackMirror, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YouTrackMirror{}, false, ErrDialectUnsupported
+	}
+
 	var x YouTrackMirror
 	err := scanYouTrackMirror(s.pool.QueryRow(ctx, `SELECT `+youtrackMirrorColumns+` FROM task_origins WHERE provider='youtrack' AND task_id=$1`, taskID), &x)
 	if errors.Is(err, ErrNoRows) {
@@ -89,6 +94,10 @@ func (s *Store) GetYouTrackMirror(ctx context.Context, taskID int64) (YouTrackMi
 // FindYouTrackMirrorByIssueID finds a task by the issue's stable internal id.
 // The display number is deliberately not a key.
 func (s *Store) FindYouTrackMirrorByIssueID(ctx context.Context, issueID string) (YouTrackMirror, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YouTrackMirror{}, false, ErrDialectUnsupported
+	}
+
 	var x YouTrackMirror
 	err := scanYouTrackMirror(s.pool.QueryRow(ctx, `SELECT `+youtrackMirrorColumns+` FROM task_origins WHERE provider='youtrack' AND external_id=$1`, issueID), &x)
 	if errors.Is(err, ErrNoRows) {
@@ -98,6 +107,10 @@ func (s *Store) FindYouTrackMirrorByIssueID(ctx context.Context, issueID string)
 }
 
 func (s *Store) ListYouTrackMirrors(ctx context.Context, taskIDs []int64) (map[int64]YouTrackMirror, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	out := map[int64]YouTrackMirror{}
 	if len(taskIDs) == 0 {
 		return out, nil
@@ -121,6 +134,10 @@ func (s *Store) ListYouTrackMirrors(ctx context.Context, taskIDs []int64) (map[i
 // existing row is updated in place; an issue already linked to a different
 // task is a conflict.
 func (s *Store) UpsertYouTrackMirror(ctx context.Context, in YouTrackMirrorInput) (YouTrackMirror, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YouTrackMirror{}, ErrDialectUnsupported
+	}
+
 	if in.TaskID < 1 || strings.TrimSpace(in.IssueID) == "" || strings.TrimSpace(in.Tenant) == "" {
 		return YouTrackMirror{}, ErrYouTrackMirrorConflict
 	}
@@ -166,12 +183,20 @@ func ValidTaskLane(name string) bool { return validName(name) }
 // TaskProjectExists reports whether name is in the server's project
 // vocabulary.
 func (s *Store) TaskProjectExists(ctx context.Context, name string) (bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return false, ErrDialectUnsupported
+	}
+
 	var known bool
 	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, name).Scan(&known)
 	return known, err
 }
 
 func (s *Store) ListYouTrackProjects(ctx context.Context) ([]YouTrackProject, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT hk_project,yt_project_id,short_name FROM youtrack_projects ORDER BY hk_project`)
 	if err != nil {
 		return nil, err
@@ -191,6 +216,10 @@ func (s *Store) ListYouTrackProjects(ctx context.Context) ([]YouTrackProject, er
 // YouTrackProjectFor returns the mapping for an hk project, falling back to
 // the OTHER row. found is false only when even OTHER is missing.
 func (s *Store) YouTrackProjectFor(ctx context.Context, hkProject string) (YouTrackProject, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YouTrackProject{}, false, ErrDialectUnsupported
+	}
+
 	var x YouTrackProject
 	err := s.pool.QueryRow(ctx, `SELECT hk_project,yt_project_id,short_name FROM youtrack_projects WHERE hk_project=$1`, hkProject).Scan(&x.HKProject, &x.ProjectID, &x.ShortName)
 	if errors.Is(err, ErrNoRows) {
@@ -204,6 +233,10 @@ func (s *Store) YouTrackProjectFor(ctx context.Context, hkProject string) (YouTr
 
 // YouTrackProjectByShortName maps an issue's project back to an hk project.
 func (s *Store) YouTrackProjectByShortName(ctx context.Context, shortName string) (YouTrackProject, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YouTrackProject{}, false, ErrDialectUnsupported
+	}
+
 	var x YouTrackProject
 	err := s.pool.QueryRow(ctx, `SELECT hk_project,yt_project_id,short_name FROM youtrack_projects WHERE lower(short_name)=lower($1)`, shortName).Scan(&x.HKProject, &x.ProjectID, &x.ShortName)
 	if errors.Is(err, ErrNoRows) {
@@ -214,6 +247,10 @@ func (s *Store) YouTrackProjectByShortName(ctx context.Context, shortName string
 
 // PutYouTrackProject writes one mapping.
 func (s *Store) PutYouTrackProject(ctx context.Context, p YouTrackProject) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	if strings.TrimSpace(p.HKProject) == "" || strings.TrimSpace(p.ShortName) == "" {
 		return ErrYouTrackProjectUnknown
 	}
@@ -230,6 +267,10 @@ func (s *Store) PutYouTrackProject(ctx context.Context, p YouTrackProject) error
 // let unrelated skipped items back into every batch. Writing the mapping
 // (PutYouTrackProject) is what clears skips.
 func (s *Store) SetYouTrackProjectID(ctx context.Context, hkProject, projectID string) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	_, err := s.pool.Exec(ctx, `UPDATE youtrack_projects SET yt_project_id=$2,updated_at=$3 WHERE hk_project=$1`, hkProject, projectID, time.Now().UTC())
 	return err
 }
@@ -237,6 +278,10 @@ func (s *Store) SetYouTrackProjectID(ctx context.Context, hkProject, projectID s
 // LinkYouTrackComment records a mirrored comment. It is idempotent for the
 // same pair.
 func (s *Store) LinkYouTrackComment(ctx context.Context, taskID, hkCommentID int64, youtrackCommentID string, at time.Time) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	if taskID < 1 || hkCommentID < 1 || strings.TrimSpace(youtrackCommentID) == "" {
 		return ErrYouTrackActivityInput
 	}
@@ -250,10 +295,18 @@ func (s *Store) LinkYouTrackComment(ctx context.Context, taskID, hkCommentID int
 // YouTrackSyncLock is the single-run guard. pg_try_advisory_lock is session
 // scoped, so the caller must hold its connection until Release.
 type YouTrackSyncLock struct {
-	conn *pgxpool.Conn
+	conn      *pgxpool.Conn
+	mysqlConn *sql.Conn
 }
 
 func (s *Store) TryYouTrackSyncLock(ctx context.Context) (*YouTrackSyncLock, bool, error) {
+	if s.dialect == mysqlDialect {
+		conn, held, err := mysqlTrySessionLock(ctx, s.mysqlPool, mysqlYTSyncLock)
+		if err != nil || !held {
+			return nil, held, err
+		}
+		return &YouTrackSyncLock{mysqlConn: conn}, true, nil
+	}
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
 		return nil, false, err
@@ -271,7 +324,15 @@ func (s *Store) TryYouTrackSyncLock(ctx context.Context) (*YouTrackSyncLock, boo
 }
 
 func (l *YouTrackSyncLock) Release(ctx context.Context) error {
-	if l == nil || l.conn == nil {
+	if l == nil {
+		return nil
+	}
+	if l.mysqlConn != nil {
+		err := mysqlReleaseSessionLock(l.mysqlConn, mysqlYTSyncLock)
+		l.mysqlConn = nil
+		return err
+	}
+	if l.conn == nil {
 		return nil
 	}
 	_, err := l.conn.Exec(ctx, `SELECT pg_advisory_unlock(8241873404)`)
@@ -285,6 +346,10 @@ func (l *YouTrackSyncLock) Release(ctx context.Context) error {
 // schema run adds each project's lanes to that project's 레인 enum, so a
 // project's list holds only the lanes its own tasks used.
 func (s *Store) ListTaskLanes(ctx context.Context) (map[string][]string, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT DISTINCT COALESCE(project,''),lane FROM tasks WHERE lane <> '' ORDER BY 1,2`)
 	if err != nil {
 		return nil, err

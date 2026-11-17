@@ -272,6 +272,10 @@ func decidedBy(in ResolveDecisionInput, prov *assistantProvenance) string {
 // effective policy is operator_direct is refused: the attempt is recorded and
 // the error returned.
 func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (ResolveDecisionOutcome, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ResolveDecisionOutcome{}, ErrDialectUnsupported
+	}
+
 	assistant := in.Channel == DecisionChannelAssistant
 	// relayed is a channel that carries the assistant claim: the assistant
 	// and an operator session. Only the [via berry] note is assistant-only.

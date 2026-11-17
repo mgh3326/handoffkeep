@@ -155,6 +155,10 @@ func scanVerification(row pgx.Row, v *Verification) error {
 // It locks at most one changes row (the stub insert) and one verifications
 // row, and no task row (lockorder.go).
 func (s *Store) RecordVerification(ctx context.Context, in VerificationInput, recordedBy string) (Verification, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Verification{}, false, ErrDialectUnsupported
+	}
+
 	if err := checkVerification(in); err != nil {
 		return Verification{}, false, err
 	}

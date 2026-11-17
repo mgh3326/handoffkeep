@@ -20,6 +20,10 @@ type ProjectMetadata struct {
 }
 
 func (s *Store) SetProjectMetadata(ctx context.Context, p ProjectMetadata) (ProjectMetadata, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ProjectMetadata{}, ErrDialectUnsupported
+	}
+
 	if !validName(p.Name) || !validText(p.Status, 128) || (p.StartAt != nil && p.TargetAt != nil && p.TargetAt.Before(*p.StartAt)) {
 		return ProjectMetadata{}, errors.New("invalid project metadata")
 	}
@@ -34,6 +38,10 @@ func (s *Store) SetProjectMetadata(ctx context.Context, p ProjectMetadata) (Proj
 }
 
 func (s *Store) GetProjectMetadata(ctx context.Context, name string) (ProjectMetadata, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ProjectMetadata{}, ErrDialectUnsupported
+	}
+
 	if !validName(name) {
 		return ProjectMetadata{}, errors.New("invalid project")
 	}
@@ -80,6 +88,10 @@ func (p *ProjectMetadataPatch) UnmarshalJSON(data []byte) error {
 }
 
 func (s *Store) PatchProjectMetadata(ctx context.Context, name string, patch ProjectMetadataPatch) (ProjectMetadata, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ProjectMetadata{}, ErrDialectUnsupported
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return ProjectMetadata{}, err

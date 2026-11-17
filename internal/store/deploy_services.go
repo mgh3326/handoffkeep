@@ -58,6 +58,10 @@ func scanDeployService(row pgx.Row, x *DeployService) error {
 }
 
 func (s *Store) PutDeployService(ctx context.Context, x DeployService) (DeployService, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DeployService{}, ErrDialectUnsupported
+	}
+
 	if err := checkDeployService(x); err != nil {
 		return DeployService{}, err
 	}
@@ -87,6 +91,10 @@ func (s *Store) PutDeployService(ctx context.Context, x DeployService) (DeploySe
 }
 
 func (s *Store) ListDeployServices(ctx context.Context) ([]DeployService, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	return listDeployServices(ctx, s.pool)
 }
 
@@ -106,6 +114,10 @@ func listDeployServices(ctx context.Context, db rowsQuerier) ([]DeployService, e
 }
 
 func (s *Store) DeactivateDeployService(ctx context.Context, name string) (DeployService, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DeployService{}, ErrDialectUnsupported
+	}
+
 	if !validName(name) {
 		return DeployService{}, fmt.Errorf("%w: name must match [A-Za-z0-9._-]{1,128}", ErrInvalidDeployService)
 	}

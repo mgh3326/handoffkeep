@@ -318,6 +318,10 @@ func (s *Store) claimYTIssueTargetTx(ctx context.Context, tx pgx.Tx, op ytwrite.
 // before each Drive pass in issue mode on, so the op goes out in that pass;
 // an intent of another tenant is never consumed here.
 func (s *Store) PrepareMappedYTIssues(ctx context.Context, limit int) (int, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return 0, ErrDialectUnsupported
+	}
+
 	mode, tenant := s.ytIssuesNow()
 	if mode != YTIssuesOn {
 		return 0, nil
@@ -530,6 +534,10 @@ type YTIssueBackfillReport struct {
 // prepares nothing. Each task is its own transaction; a dry run writes
 // nothing.
 func (s *Store) BackfillYTIssueOps(ctx context.Context, tenant, project string, dryRun bool) (YTIssueBackfillReport, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTIssueBackfillReport{}, ErrDialectUnsupported
+	}
+
 	r := YTIssueBackfillReport{Tenant: tenant, Project: project, DryRun: dryRun, Projects: []*YTIssueBackfillProject{}}
 	if tenant == "" {
 		return r, errors.New("backfill needs the YouTrack tenant")

@@ -145,6 +145,10 @@ const sweepSQL = `SELECT id,lane,title,` + taskActivitySQL + ` FROM tasks
 // and moves nothing; days outside CheckBacklogIceboxDays is refused before
 // any read.
 func (s *Store) SweepBacklog(ctx context.Context, days int, dryRun bool) ([]SweepCandidate, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if err := CheckBacklogIceboxDays(days); err != nil {
 		return nil, err
 	}

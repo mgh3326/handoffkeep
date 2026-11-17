@@ -150,6 +150,10 @@ func scanTaskOrigin(row pgx.Row, x *TaskOrigin) error {
 // The insert takes KEY SHARE on one task row through the foreign key and
 // locks no other task (lockorder.go, level 4).
 func (s *Store) AddTaskOrigin(ctx context.Context, taskID int64, by string, in TaskOriginInput) (TaskOrigin, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return TaskOrigin{}, false, ErrDialectUnsupported
+	}
+
 	if taskID < 1 || by == "" || !validText(by, 128) {
 		return TaskOrigin{}, false, errors.New("invalid origin")
 	}
@@ -249,6 +253,10 @@ func (s *Store) listTaskOrigins(ctx context.Context, taskID int64, limit int) ([
 // namespaces and tasks, in (task_id, id) order. The display number plays no
 // part: a moved issue is found by its UUID.
 func (s *Store) FindTaskOrigins(ctx context.Context, provider, externalID string, limit int) ([]TaskOrigin, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if !validOriginProvider(provider) {
 		return nil, errors.New("invalid origin query: provider is linear, github or sentry")
 	}

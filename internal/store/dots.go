@@ -87,6 +87,10 @@ func dotsRequestInvalid(reason string) error {
 
 // CreateDotsRequest creates a standalone request and its body in one transaction.
 func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequestInput) (Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return Task{}, ErrDialectUnsupported
+	}
+
 	lane := in.RequesterLane
 	if lane == "" {
 		lane = by
@@ -230,6 +234,10 @@ func IsHKDotsRequest(task Task) bool {
 
 // DotsInbox lists open hk requests in creation order after a task cursor.
 func (s *Store) DotsInbox(ctx context.Context, after int64, limit int) ([]Task, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if after < 0 || limit < 1 || limit > 100 {
 		return nil, errors.New("invalid dots inbox cursor or limit")
 	}
@@ -313,6 +321,10 @@ type DotsReply struct {
 // ListDotsReplies returns recorded replies in comment order, each QUESTION
 // carrying its answer when it has one.
 func (s *Store) ListDotsReplies(ctx context.Context, taskID int64) ([]DotsReply, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT c.id,c.task_id,c.body,c.author,c.created_at,e.from_value,
 			dr.answered_at,COALESCE(dr.answered_by,''),COALESCE(dr.answer_comment_id,0),COALESCE(ac.body,dr.answer_text,'')
 		FROM task_comments c
@@ -346,6 +358,10 @@ func (s *Store) ListDotsReplies(ctx context.Context, taskID int64) ([]DotsReply,
 // ReplyDots writes the reply, its state change, and its recorded outputs together.
 // Every reply but START must carry the run token START issued (dots_run_token.go).
 func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsReplyInput) (DotsReplyResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DotsReplyResult{}, ErrDialectUnsupported
+	}
+
 	if in.TaskID < 1 || !validText(actor, 128) || actor == "" || channel != "chatgpt" || !validSourceRef(in.IdempotencyKey) || (in.AskOperator && in.Kind != "QUESTION") || (in.Takeover && in.Kind != "START") {
 		return DotsReplyResult{}, errors.New("invalid dots reply")
 	}
@@ -636,6 +652,10 @@ type DotsAnswerResult struct {
 // the answer marks its dots_results row, so a second answer finds nothing open.
 // A requester-lane comment alone answers nothing.
 func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller string, in DotsAnswerInput) (DotsAnswerResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DotsAnswerResult{}, ErrDialectUnsupported
+	}
+
 	if taskID < 1 {
 		return DotsAnswerResult{}, ErrTaskNotFound
 	}

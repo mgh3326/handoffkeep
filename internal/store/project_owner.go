@@ -76,6 +76,10 @@ func scanProjectOwner(row pgx.Row) (ProjectOwner, error) {
 // ListProjectOwners returns every configured project with its owner, in name
 // order. A project nobody has claimed still appears, owned by operator-desk.
 func (s *Store) ListProjectOwners(ctx context.Context) ([]ProjectOwner, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, projectOwnerSelect+` ORDER BY p.name`)
 	if err != nil {
 		return nil, err
@@ -96,6 +100,10 @@ func (s *Store) ListProjectOwners(ctx context.Context) ([]ProjectOwner, error) {
 // is a validation error like GetProjectMetadata's; only a well-formed name the
 // vocabulary does not hold is ErrProjectNotFound.
 func (s *Store) GetProjectOwner(ctx context.Context, project string) (ProjectOwner, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ProjectOwner{}, ErrDialectUnsupported
+	}
+
 	if !validName(project) {
 		return ProjectOwner{}, errors.New("invalid project")
 	}
@@ -108,6 +116,10 @@ func (s *Store) GetProjectOwner(ctx context.Context, project string) (ProjectOwn
 // is a no-op and writes no event. An unknown project is ErrProjectNotFound; a
 // malformed lane is a validation error.
 func (s *Store) SetProjectDesignLane(ctx context.Context, project, lane, actor, note string) (ProjectOwner, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ProjectOwner{}, ErrDialectUnsupported
+	}
+
 	if !validName(project) || (lane != "" && !validName(lane)) || actor == "" || !validText(actor, 128) || !validText(note, MaxBytes) {
 		return ProjectOwner{}, errors.New("invalid project design lane change")
 	}
@@ -151,6 +163,10 @@ func (s *Store) SetProjectDesignLane(ctx context.Context, project, lane, actor, 
 // ProjectOwnerHistory returns a project's most recent ownership events,
 // newest first. Its ORDER BY ends in id so pages are deterministic.
 func (s *Store) ProjectOwnerHistory(ctx context.Context, project string, limit int) ([]ProjectOwnerEvent, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if !validName(project) {
 		return nil, errors.New("invalid project")
 	}

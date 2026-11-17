@@ -204,6 +204,10 @@ const YTArticleDocPageMax = 1000
 // not "", keeps one bucket's (an hk project, /shared or /unassigned).
 // Excluded documents are listed too: the caller counts them. Plain reads.
 func (s *Store) YTArticleDocs(ctx context.Context, bucket string, afterID int64, limit int) ([]YTArticleDoc, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if afterID < 0 || limit < 1 || limit > YTArticleDocPageMax {
 		return nil, errors.New("invalid article document filter")
 	}
@@ -249,6 +253,10 @@ func readYTArticleBinding(ctx context.Context, q ytRowQuerier, documentID int64)
 // YTArticleBinding reads a document's binding; found is false when it has
 // none.
 func (s *Store) YTArticleBinding(ctx context.Context, documentID int64) (YTArticleBinding, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTArticleBinding{}, false, ErrDialectUnsupported
+	}
+
 	return readYTArticleBinding(ctx, s.pool, documentID)
 }
 
@@ -312,6 +320,10 @@ var ytSHA256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // can change between the comparison and the insert; then the new binding
 // row (a concurrent insert of the same key waits on the unique index).
 func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, verified YTArticleCandidate) (YTArticleBinding, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTArticleBinding{}, ErrDialectUnsupported
+	}
+
 	if b.DocumentID < 1 || verified.DocumentID != b.DocumentID || b.Tenant == "" || len(b.Tenant) > 255 || b.ArticleID == "" || len(b.ArticleID) > 64 ||
 		len(b.ArticleReadable) > 64 || b.ProjectID == "" || len(b.ProjectID) > 64 || b.Part < 0 || b.Generation != 0 ||
 		(b.ContentSHA != "" && !ytSHA256Hex.MatchString(b.ContentSHA)) || b.BoundBy == "" || !validText(b.BoundBy, 200) {

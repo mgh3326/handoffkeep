@@ -158,6 +158,10 @@ type TaskExport struct {
 // at most limit rows. Truncated is exactly Counts.Total > limit; Complete is
 // its inverse, so a complete export always returns every counted row.
 func (s *Store) ExportTasks(ctx context.Context, lane, state, parentLane string, project *string, limit int) (TaskExport, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return TaskExport{}, ErrDialectUnsupported
+	}
+
 	if !validTaskQuery(lane, state, parentLane, project) || limit < 1 || limit > ExportLimitMax {
 		return TaskExport{}, ErrInvalidExportQuery
 	}

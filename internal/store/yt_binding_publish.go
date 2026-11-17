@@ -82,6 +82,9 @@ type ytBindingPublication struct {
 // SHARE (as UnbindYTTaskBinding reads it), then the new binding, history and
 // op/link/map rows.
 func (s *Store) PublishYTAutoBinding(ctx context.Context, b YTTaskBinding, verified YTCanaryCandidate, ev YTAutoBindEvidence, actor string) (YTAutoBinding, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return YTAutoBinding{}, ErrDialectUnsupported
+	}
 	if actor == "" || ev.CommentsFrom < 0 || (ev.Authority != YTAuthorityHK && ev.Authority != YTAuthorityYouTrack) {
 		return YTAutoBinding{}, errors.New("invalid automatic task binding publication")
 	}

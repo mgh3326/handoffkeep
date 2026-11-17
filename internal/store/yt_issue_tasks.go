@@ -29,6 +29,10 @@ const (
 // on it. One plain read, no lock: the console joins it to a YouTrack read that
 // is not transactional.
 func (s *Store) YTIssueTaskIDs(ctx context.Context, tenant string) (map[string]YTIssueTask, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	rows, err := s.pool.Query(ctx, `SELECT issue_id, task_id::text, 1 FROM yt_task_bindings WHERE tenant=$1
 		UNION ALL
 		SELECT external_id, task_id::text, 2 FROM task_origins WHERE provider='youtrack' AND (coalesce(tenant,'')='' OR tenant=$1)

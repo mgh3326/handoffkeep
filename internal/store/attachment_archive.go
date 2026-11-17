@@ -121,6 +121,10 @@ LIMIT $5`
 // the sha to pass as after for the following page, or "" when this page is
 // the last.
 func (s *Store) ListAttachmentArchiveCandidates(ctx context.Context, limit int, after string, now time.Time) ([]AttachmentArchiveCandidate, string, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, "", ErrDialectUnsupported
+	}
+
 	if after != "" && !attachmentSHARE.MatchString(after) {
 		return nil, "", errors.New("invalid attachment archive cursor")
 	}
@@ -171,6 +175,10 @@ func attachmentArchiveCandidates(ctx context.Context, q poolQuerier, limit int, 
 // (idempotent); a different location is a mismatch. The hot copy is not
 // touched here: the caller deletes it after this commits.
 func (s *Store) RecordAttachmentArchive(ctx context.Context, sha, location string, size int64, now time.Time) (AttachmentArchive, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return AttachmentArchive{}, ErrDialectUnsupported
+	}
+
 	if !attachmentSHARE.MatchString(sha) || location == "" || !validText(location, 2048) || size < 0 {
 		return AttachmentArchive{}, errors.New("invalid attachment archive")
 	}
@@ -219,6 +227,10 @@ func (s *Store) RecordAttachmentArchive(ctx context.Context, sha, location strin
 // MarkAttachmentHotDeleted records that the object store copy of sha is gone.
 // It is idempotent: a row already marked stays on its first timestamp.
 func (s *Store) MarkAttachmentHotDeleted(ctx context.Context, sha string, now time.Time) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	if !attachmentSHARE.MatchString(sha) {
 		return errors.New("invalid attachment sha")
 	}

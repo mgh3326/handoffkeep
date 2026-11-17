@@ -520,6 +520,10 @@ type DecisionRecordFilter struct {
 // ListDecisionRecords returns rows oldest first (created_at, then id). now is
 // the clock snooze, expiry and due dates are judged against.
 func (s *Store) ListDecisionRecords(ctx context.Context, f DecisionRecordFilter, now time.Time) ([]DecisionRecord, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	return listDecisionRecords(ctx, s.pool, f, now)
 }
 
@@ -615,6 +619,10 @@ func listDecisionRecords(ctx context.Context, pq poolQuerier, f DecisionRecordFi
 
 // GetDecisionRecord reads one row.
 func (s *Store) GetDecisionRecord(ctx context.Context, id int64, now time.Time) (DecisionRecord, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DecisionRecord{}, false, ErrDialectUnsupported
+	}
+
 	var x DecisionRecord
 	err := scanDecisionRecord(s.pool.QueryRow(ctx, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id=$1`, id), &x, now)
 	if errors.Is(err, ErrNoRows) {
@@ -627,6 +635,10 @@ func (s *Store) GetDecisionRecord(ctx context.Context, id int64, now time.Time) 
 // a session chat. It does not backfill decision documents. The request row is
 // the canonical record; its source_ref is stable within the settling lane.
 func (s *Store) RecordSessionDecision(ctx context.Context, in SessionDecisionInput, now time.Time, audit *MCPWrite) (SessionDecisionResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return SessionDecisionResult{}, ErrDialectUnsupported
+	}
+
 	if strings.TrimSpace(in.Key) == "" || len(in.Key) > 128 || strings.ContainsRune(in.Key, '\x00') ||
 		!validName(in.Lane) || !validText(in.By, 256) || strings.TrimSpace(in.By) == "" || strings.TrimSpace(in.Reading) == "" || len(in.Reading) > 2000 ||
 		strings.TrimSpace(in.Quote) == "" || len(in.Quote) > DecisionRequestTextMaxBytes || in.DecidedAt.IsZero() ||
@@ -755,6 +767,10 @@ func sameStrings(a, b []string) bool {
 // It writes the row only, never its source. A time not after now ends a
 // snooze.
 func (s *Store) SnoozeDecisionRecord(ctx context.Context, id int64, until, now time.Time) (DecisionRecord, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DecisionRecord{}, ErrDialectUnsupported
+	}
+
 	if id < 1 || until.IsZero() {
 		return DecisionRecord{}, errors.New("invalid decision request snooze")
 	}

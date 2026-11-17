@@ -3,6 +3,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -181,5 +182,43 @@ func TestMySQLQuotaRetention(t *testing.T) {
 	}
 	if _, err := s.mysqlPool.ExecContext(ctx, `DELETE FROM quota_observations WHERE id=?`, fresh); err == nil {
 		t.Fatal("prune session flag leaked into the pool")
+	}
+}
+
+func TestMySQLQuotaGuardBulkLoad(t *testing.T) {
+	ctx := t.Context()
+	s, err := Open(ctx, testdb.MySQLDatabase(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	conn, err := s.mysqlPool.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	result, err := conn.ExecContext(ctx, `INSERT INTO quota_observations(account_key,kind,window_key,measured_at,value) VALUES('test','auto','5h',?,JSON_OBJECT())`, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, `UPDATE quota_observations SET window_key='7d' WHERE id=?`, id); err == nil {
+		t.Fatal("ordinary update passed the guard")
+	}
+	if _, err := conn.ExecContext(ctx, `DELETE FROM quota_observations WHERE id=?`, id); err == nil {
+		t.Fatal("ordinary delete passed the guard")
+	}
+	if _, err := conn.ExecContext(ctx, `SET @hk_bulk_load=1`); err != nil {
+		t.Fatal(err)
+	}
+	defer conn.ExecContext(context.Background(), `SET @hk_bulk_load=NULL`)
+	if _, err := conn.ExecContext(ctx, `UPDATE quota_observations SET window_key='7d' WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, `DELETE FROM quota_observations WHERE id=?`, id); err != nil {
+		t.Fatal(err)
 	}
 }

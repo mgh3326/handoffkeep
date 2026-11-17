@@ -133,6 +133,10 @@ func dotsRunTokenForIssueTx(ctx context.Context, tx pgx.Tx, taskID int64, issueK
 // nil when it has none. The inbox reports this time; it never reports the
 // token.
 func (s *Store) DotsRunIssuedAt(ctx context.Context, taskID int64) (*time.Time, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	var at time.Time
 	err := s.pool.QueryRow(ctx, `SELECT issued_at FROM dots_run_tokens WHERE task_id=$1 AND superseded_at IS NULL`, taskID).Scan(&at)
 	if errors.Is(err, ErrNoRows) {

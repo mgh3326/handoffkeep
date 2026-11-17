@@ -89,6 +89,10 @@ func SourceSHA256(original string) string {
 // PutTranslation stores the digest supplied by the translator, not a digest of
 // the current original, so a concurrent edit cannot make an old translation fresh.
 func (s *Store) PutTranslation(ctx context.Context, t Translation) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	if err := checkTranslation(t); err != nil {
 		return err
 	}
@@ -105,6 +109,10 @@ type TranslationSource struct {
 // ListTranslations loads one page's translations and compares each with the
 // original supplied by its reader. Missing rows are omitted.
 func (s *Store) ListTranslations(ctx context.Context, entity string, sources []TranslationSource) ([]Translation, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	ids := make([]string, 0, len(sources))
 	originals := make(map[string]map[string]string, len(sources))
 	for _, source := range sources {
@@ -214,6 +222,10 @@ func (s *Store) ListTranslations(ctx context.Context, entity string, sources []T
 
 // PutTranslations validates the whole batch before writing it atomically.
 func (s *Store) PutTranslations(ctx context.Context, translations []Translation) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	if len(translations) == 0 || len(translations) > 100 {
 		return fmt.Errorf("invalid translation batch size")
 	}
@@ -269,6 +281,10 @@ type MissingTranslation struct {
 
 // MissingTaskTranslations returns missing and stale fields in task ID order.
 func (s *Store) MissingTaskTranslations(ctx context.Context, limit int) ([]MissingTranslation, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("invalid translation limit")
 	}
@@ -308,6 +324,10 @@ func (s *Store) MissingTaskTranslations(ctx context.Context, limit int) ([]Missi
 
 // MissingDecisionTranslations enumerates each structured decision revision.
 func (s *Store) MissingDecisionTranslations(ctx context.Context, limit int) ([]MissingTranslation, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("invalid translation limit")
 	}
@@ -362,6 +382,10 @@ func (s *Store) MissingDecisionTranslations(ctx context.Context, limit int) ([]M
 
 // MissingCommentTranslations enumerates comments belonging to unsettled tasks.
 func (s *Store) MissingCommentTranslations(ctx context.Context, limit int) ([]MissingTranslation, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("invalid translation limit")
 	}

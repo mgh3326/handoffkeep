@@ -813,6 +813,10 @@ func applyGateTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeGateWrite
 // the PR's changes row and then only that PR's child rows (lockorder.go) and
 // takes no task row.
 func (s *Store) ApplyChangeBatch(ctx context.Context, b ChangeBatch) (ChangeWriteResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return ChangeWriteResult{}, ErrDialectUnsupported
+	}
+
 	now := time.Now().UTC()
 	if err := checkChangeBatch(b, now); err != nil {
 		return ChangeWriteResult{}, err

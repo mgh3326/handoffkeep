@@ -123,6 +123,10 @@ func replayMCPWriteTx(ctx context.Context, tx pgx.Tx, w MCPWrite, out any) (bool
 // replayed reports that the key was already used; the returned result is then
 // the first call's.
 func (s *Store) RecordMCPDecisionRequest(ctx context.Context, taskID int64, in DecisionRequestInput, w MCPWrite) (DecisionRequestResult, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DecisionRequestResult{}, false, ErrDialectUnsupported
+	}
+
 	if err := w.validate(); err != nil {
 		return DecisionRequestResult{}, false, err
 	}
@@ -185,6 +189,10 @@ func insertMCPWriteAuditTx(ctx context.Context, tx pgx.Tx, w MCPWrite, taskID in
 // keeps the first row. The write is idempotent by its own key, so a retry
 // after a crash here writes the row on the next call.
 func (s *Store) RecordMCPWrite(ctx context.Context, w MCPWrite, taskID int64, result any) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	if err := w.validate(); err != nil {
 		return err
 	}
@@ -225,6 +233,10 @@ type TaskUpdateResult struct {
 // apply priority, state and lane through the same paths the console uses, then
 // record the audit row. Any refusal leaves the task and the ledger untouched.
 func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w MCPWrite) (TaskUpdateResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return TaskUpdateResult{}, ErrDialectUnsupported
+	}
+
 	var out TaskUpdateResult
 	if w.Tool != mcpTaskUpdateTool || id < 1 || in.ExpectedUpdatedAt.IsZero() || w.Key == "" || !validLifecycleKey(w.Key) ||
 		(in.State == "" && in.Lane == "" && in.Priority == nil) ||

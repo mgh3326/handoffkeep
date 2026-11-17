@@ -177,6 +177,10 @@ func hygieneAddFinding(rep *TaskHygieneReport, rule hygieneRule, x TaskDriftTask
 // Project scopes candidate roots; existing hierarchy rules may close ancestors
 // in other projects, and those effects are included in the apply report.
 func (s *Store) TaskHygiene(ctx context.Context, now time.Time, project string, dryRun bool) (TaskHygieneReport, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return TaskHygieneReport{}, ErrDialectUnsupported
+	}
+
 	if project != "" && !validName(project) {
 		return TaskHygieneReport{}, errors.New("invalid task hygiene: project must be a project name")
 	}

@@ -24,6 +24,10 @@ type YouTrackDocArticle struct {
 // UpsertYouTrackDocArticle records the article written for a document. The
 // caller supplies synced_at from its own clock.
 func (s *Store) UpsertYouTrackDocArticle(ctx context.Context, x YouTrackDocArticle) error {
+	if s != nil && s.dialect == mysqlDialect {
+		return ErrDialectUnsupported
+	}
+
 	if x.DocKey == "" || x.HKProject == "" || x.ArticleID == "" || x.Bytes < 0 {
 		return errors.New("invalid youtrack doc article")
 	}

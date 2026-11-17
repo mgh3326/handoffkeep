@@ -105,6 +105,10 @@ func scanDotsResult(row pgx.Row, x *DotsResult) error {
 // ListDotsResults lists the results of one task (taskID > 0) or of one Linear
 // issue by identifier, newest first.
 func (s *Store) ListDotsResults(ctx context.Context, taskID int64, issue string, limit int) ([]DotsResult, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return nil, ErrDialectUnsupported
+	}
+
 	if (taskID > 0) == (issue != "") || taskID < 0 || (issue != "" && !dotsIdentifierRE.MatchString(issue)) {
 		return nil, errors.New("invalid dots results query: give a task id or an issue identifier")
 	}
@@ -204,6 +208,10 @@ func keepDotsAdoptionCanva(cur DotsResult, in DotsAdoptionInput) DotsAdoptionInp
 // An accepted or partially_used change that names no Canva design keeps the
 // one already recorded.
 func (s *Store) SetDotsAdoption(ctx context.Context, id int64, by string, in DotsAdoptionInput) (DotsResult, bool, error) {
+	if s != nil && s.dialect == mysqlDialect {
+		return DotsResult{}, false, ErrDialectUnsupported
+	}
+
 	if id < 1 || by == "" || !validText(by, 128) {
 		return DotsResult{}, false, errors.New("invalid dots adoption")
 	}
