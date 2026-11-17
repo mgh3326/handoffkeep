@@ -40,6 +40,8 @@ class RewriteTests(unittest.TestCase):
                 self.assertIsNone(sqlport.rewrite(sql)[0])
         self.assertIsNone(sqlport.rewrite("SELECT 1 FROM t WHERE x = $1 AND (a) || b = 'c'")[0])
         self.assertEqual(sqlport.rewrite("SELECT 1 FROM t WHERE x = $1 AND (a) IS DISTINCT FROM b")[0], "SELECT 1 FROM t WHERE x = ? AND NOT ((a) <=> b)")
+        self.assertEqual(sqlport.rewrite("SELECT doc->>'x' || 'y'")[0], "SELECT CONCAT(JSON_UNQUOTE(JSON_EXTRACT(doc, '$.x')), 'y')")
+        self.assertIsNone(sqlport.rewrite("SELECT doc->'x' || 'y'")[0])
 
     def test_distinct_predicate_and_function_operands(self):
         self.assertEqual(sqlport.rewrite("a IS DISTINCT FROM b")[0], "NOT (a <=> b)")

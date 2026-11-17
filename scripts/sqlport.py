@@ -308,6 +308,8 @@ def _contains_string_or_text_cast(tokens: list[Token], operand: Operand) -> tupl
                 has_json_cast = True
             if cast_type in {"char", "varchar"}:
                 has_text = True
+    if operand.kind == "function" and operand.name.lower() == "json_extract":
+        has_json_cast = True
     if operand.kind == "function" and operand.name.lower() in {"concat", "json_unquote"}:
         has_text = True
     if operand.kind == "group" and any(t.kind == "string" for t in inner):
