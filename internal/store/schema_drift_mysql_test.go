@@ -99,7 +99,11 @@ func TestMySQLSchemaDrift(t *testing.T) {
 	// MySQL's unique key admits multiple NULL system_event_key values,
 	// equivalent to PostgreSQL's partial index.
 	for i, key := range p.unique["task_comments"] {
-		if strings.HasPrefix(key, "task_id,system_event_key WHERE ") {
+		parts := strings.Split(key, ",")
+		for j, part := range parts {
+			parts[j], _, _ = strings.Cut(part, " WHERE ")
+		}
+		if strings.Join(parts, ",") == "task_id,system_event_key" {
 			p.unique["task_comments"][i] = "task_id,system_event_key"
 		}
 	}

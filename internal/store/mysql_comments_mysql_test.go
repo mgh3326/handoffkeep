@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
+
 	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
@@ -138,5 +140,46 @@ func TestMySQLGuardMutants(t *testing.T) {
 				t.Fatalf("mutant still refused change: %v", err)
 			}
 		})
+	}
+}
+
+func TestMySQLWorkerSessionLock(t *testing.T) {
+	ctx := t.Context()
+	s, err := Open(ctx, testdb.MySQLDatabase(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	lease, held, err := s.TryWorkerLock(ctx, HubForwardWorkerLock)
+	if err != nil || !held {
+		t.Fatalf("first worker: held=%t err=%v", held, err)
+	}
+	if _, held, err := s.TryWorkerLock(ctx, HubForwardWorkerLock); err != nil || held {
+		t.Fatalf("second worker: held=%t err=%v", held, err)
+	}
+	lease.Release()
+	again, held, err := s.TryWorkerLock(ctx, HubForwardWorkerLock)
+	if err != nil || !held {
+		t.Fatalf("after release: held=%t err=%v", held, err)
+	}
+	again.Release()
+}
+
+func TestMySQLTransactionRetryOnce(t *testing.T) {
+	ctx := t.Context()
+	s, err := Open(ctx, testdb.MySQLDatabase(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	for _, code := range []uint16{1205, 1213} {
+		calls := 0
+		err := s.mysqlWriteTransaction(ctx, func(transaction) error {
+			calls++
+			return &mysql.MySQLError{Number: code, Message: "test retry"}
+		})
+		if err == nil || calls != 2 {
+			t.Errorf("error %d: calls=%d err=%v", code, calls, err)
+		}
 	}
 }
