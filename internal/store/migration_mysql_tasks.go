@@ -17,6 +17,8 @@ package store
 //   - Foreign keys on task_events and task_relations are RESTRICT, not CASCADE:
 //     MySQL fires no triggers for cascade actions, so a cascade could bypass the
 //     append-only guard (design §11.2). Nothing deletes tasks.
+//   - Free-form text is LONGTEXT, not TEXT: a task title may be up to ytwrite.TextMaxChars
+//     (20M characters), far past TEXT's 64 KB.
 //   - Text columns that sit in a key or index are bounded VARCHARs. Each limit is
 //     the length the store validates, or a bound that fits InnoDB's 3,072-byte key
 //     limit at 4 bytes per character.
@@ -43,27 +45,27 @@ func mysqlSyncEmit(name, table, event, model, row, action string) string {
 }
 
 var mysqlTasksSteps = []string{
-	`CREATE TABLE IF NOT EXISTS task_projects (name VARCHAR(128) NOT NULL PRIMARY KEY, created_by TEXT NOT NULL, created_at DATETIME(6) NOT NULL, status TEXT NOT NULL DEFAULT (''), start_at DATETIME(6), target_at DATETIME(6), design_lane TEXT NOT NULL DEFAULT (''), CONSTRAINT task_projects_name_check CHECK(name REGEXP '^[A-Za-z0-9._-]{1,128}$'))` + mysqlTableOptions,
-	`CREATE TABLE IF NOT EXISTS project_milestones (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, project VARCHAR(128) NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT (''), target_at DATETIME(6), status TEXT NOT NULL DEFAULT (''), sort_order INT NOT NULL DEFAULT 0, CONSTRAINT project_milestones_project_fk FOREIGN KEY(project) REFERENCES task_projects(name) ON DELETE RESTRICT)` + mysqlTableOptions,
-	`CREATE TABLE IF NOT EXISTS project_owner_events (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, project VARCHAR(128) NOT NULL, previous_lane TEXT NOT NULL DEFAULT (''), design_lane TEXT NOT NULL DEFAULT (''), actor TEXT NOT NULL, note TEXT NOT NULL DEFAULT (''), created_at DATETIME(6) NOT NULL, KEY project_owner_events_project_id(project, id DESC), CONSTRAINT project_owner_events_project_fk FOREIGN KEY(project) REFERENCES task_projects(name) ON DELETE RESTRICT)` + mysqlTableOptions,
+	`CREATE TABLE IF NOT EXISTS task_projects (name VARCHAR(128) NOT NULL PRIMARY KEY, created_by LONGTEXT NOT NULL, created_at DATETIME(6) NOT NULL, status LONGTEXT NOT NULL DEFAULT (''), start_at DATETIME(6), target_at DATETIME(6), design_lane LONGTEXT NOT NULL DEFAULT (''), CONSTRAINT task_projects_name_check CHECK(name REGEXP '^[A-Za-z0-9._-]{1,128}$'))` + mysqlTableOptions,
+	`CREATE TABLE IF NOT EXISTS project_milestones (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, project VARCHAR(128) NOT NULL, name LONGTEXT NOT NULL, description LONGTEXT NOT NULL DEFAULT (''), target_at DATETIME(6), status LONGTEXT NOT NULL DEFAULT (''), sort_order INT NOT NULL DEFAULT 0, CONSTRAINT project_milestones_project_fk FOREIGN KEY(project) REFERENCES task_projects(name) ON DELETE RESTRICT)` + mysqlTableOptions,
+	`CREATE TABLE IF NOT EXISTS project_owner_events (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, project VARCHAR(128) NOT NULL, previous_lane LONGTEXT NOT NULL DEFAULT (''), design_lane LONGTEXT NOT NULL DEFAULT (''), actor LONGTEXT NOT NULL, note LONGTEXT NOT NULL DEFAULT (''), created_at DATETIME(6) NOT NULL, KEY project_owner_events_project_id(project, id DESC), CONSTRAINT project_owner_events_project_fk FOREIGN KEY(project) REFERENCES task_projects(name) ON DELETE RESTRICT)` + mysqlTableOptions,
 
 	// tasks: the stub from 20261117-mysql-comments has only id.
 	mysqlIfNoColumn("tasks", "lane", `ALTER TABLE tasks
 		ADD COLUMN lane VARCHAR(255) NOT NULL,
 		ADD COLUMN parent_lane VARCHAR(255) NOT NULL DEFAULT '',
-		ADD COLUMN title TEXT NOT NULL,
+		ADD COLUMN title LONGTEXT NOT NULL,
 		ADD COLUMN kind VARCHAR(16) NOT NULL,
 		ADD COLUMN state VARCHAR(16) NOT NULL,
 		ADD COLUMN priority INT NOT NULL DEFAULT 0,
 		ADD COLUMN refs JSON NOT NULL DEFAULT (JSON_OBJECT()),
-		ADD COLUMN claimed_by TEXT NOT NULL DEFAULT (''),
-		ADD COLUMN created_by TEXT NOT NULL,
+		ADD COLUMN claimed_by LONGTEXT NOT NULL DEFAULT (''),
+		ADD COLUMN created_by LONGTEXT NOT NULL,
 		ADD COLUMN created_at DATETIME(6) NOT NULL,
 		ADD COLUMN updated_at DATETIME(6) NOT NULL,
-		ADD COLUMN body_doc TEXT NOT NULL DEFAULT (''),
+		ADD COLUMN body_doc LONGTEXT NOT NULL DEFAULT (''),
 		ADD COLUMN project VARCHAR(128),
-		ADD COLUMN area TEXT,
-		ADD COLUMN expected TEXT,
+		ADD COLUMN area LONGTEXT,
+		ADD COLUMN expected LONGTEXT,
 		ADD COLUMN source VARCHAR(128) NOT NULL DEFAULT '',
 		ADD COLUMN source_ref VARCHAR(512) NOT NULL DEFAULT '',
 		ADD COLUMN last_activity_at DATETIME(6) NOT NULL DEFAULT (UTC_TIMESTAMP(6)),
@@ -92,7 +94,7 @@ var mysqlTasksSteps = []string{
 	// PostgreSQL: UNIQUE (source, source_ref) WHERE source<>'' AND source_ref<>''.
 	mysqlIfNoIndex("tasks", "tasks_source_ref", `CREATE UNIQUE INDEX tasks_source_ref ON tasks((CASE WHEN source<>'' AND source_ref<>'' THEN source END),(CASE WHEN source<>'' AND source_ref<>'' THEN source_ref END))`),
 
-	`CREATE TABLE IF NOT EXISTS task_events (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, task_id BIGINT NOT NULL, ` + "`from`" + ` TEXT NOT NULL, ` + "`to`" + ` TEXT NOT NULL, ` + "`by`" + ` TEXT NOT NULL, note TEXT NOT NULL DEFAULT (''), at DATETIME(6) NOT NULL, refs JSON, kind VARCHAR(32) NOT NULL DEFAULT 'transition', no_job TEXT NOT NULL DEFAULT (''), source VARCHAR(128) NOT NULL DEFAULT '', source_ref VARCHAR(512) NOT NULL DEFAULT '', field TEXT NOT NULL DEFAULT (''), from_value TEXT NOT NULL DEFAULT (''), to_value TEXT NOT NULL DEFAULT (''), auto BOOLEAN NOT NULL DEFAULT FALSE, applied BOOLEAN NOT NULL DEFAULT TRUE, ` +
+	`CREATE TABLE IF NOT EXISTS task_events (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, task_id BIGINT NOT NULL, ` + "`from`" + ` LONGTEXT NOT NULL, ` + "`to`" + ` LONGTEXT NOT NULL, ` + "`by`" + ` LONGTEXT NOT NULL, note LONGTEXT NOT NULL DEFAULT (''), at DATETIME(6) NOT NULL, refs JSON, kind VARCHAR(32) NOT NULL DEFAULT 'transition', no_job LONGTEXT NOT NULL DEFAULT (''), source VARCHAR(128) NOT NULL DEFAULT '', source_ref VARCHAR(512) NOT NULL DEFAULT '', field LONGTEXT NOT NULL DEFAULT (''), from_value LONGTEXT NOT NULL DEFAULT (''), to_value LONGTEXT NOT NULL DEFAULT (''), auto BOOLEAN NOT NULL DEFAULT FALSE, applied BOOLEAN NOT NULL DEFAULT TRUE, ` +
 		`CONSTRAINT task_events_kind_check CHECK(kind IN (` + mysqlEventKinds + `)), ` +
 		`KEY task_events_task_at(task_id, at ASC, id ASC), ` +
 		// PostgreSQL: UNIQUE (task_id, source, source_ref) WHERE source<>'' AND source_ref<>''.
@@ -101,12 +103,12 @@ var mysqlTasksSteps = []string{
 	`CREATE TRIGGER IF NOT EXISTS task_events_guard_update BEFORE UPDATE ON task_events FOR EACH ROW BEGIN IF COALESCE(@hk_bulk_load,0) <> 1 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='task_events is append-only'; END IF; END`,
 	`CREATE TRIGGER IF NOT EXISTS task_events_guard_delete BEFORE DELETE ON task_events FOR EACH ROW BEGIN IF COALESCE(@hk_bulk_load,0) <> 1 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='task_events is append-only'; END IF; END`,
 
-	`CREATE TABLE IF NOT EXISTS task_relations (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, kind VARCHAR(16) NOT NULL, src_id BIGINT NOT NULL, dst_id BIGINT NOT NULL, created_by TEXT NOT NULL, created_at DATETIME(6) NOT NULL, archived_at DATETIME(6), archived_by TEXT NOT NULL DEFAULT (''), ` +
+	`CREATE TABLE IF NOT EXISTS task_relations (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, kind VARCHAR(16) NOT NULL, src_id BIGINT NOT NULL, dst_id BIGINT NOT NULL, created_by LONGTEXT NOT NULL, created_at DATETIME(6) NOT NULL, archived_at DATETIME(6), archived_by LONGTEXT NOT NULL DEFAULT (''), ` +
 		`CONSTRAINT task_relations_kind_check CHECK(kind IN ('blocks','duplicate_of','related')), CONSTRAINT task_relations_ends_check CHECK(src_id<>dst_id), CONSTRAINT task_relations_related_check CHECK(kind<>'related' OR src_id<dst_id), ` +
 		`UNIQUE KEY task_relations_identity(kind, src_id, dst_id), KEY task_relations_dst(dst_id, kind), ` +
 		`CONSTRAINT task_relations_src_fk FOREIGN KEY(src_id) REFERENCES tasks(id) ON DELETE RESTRICT, CONSTRAINT task_relations_dst_fk FOREIGN KEY(dst_id) REFERENCES tasks(id) ON DELETE RESTRICT)` + mysqlTableOptions,
 
-	`CREATE TABLE IF NOT EXISTS task_origins (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, task_id BIGINT NOT NULL, provider VARCHAR(16) NOT NULL, namespace VARCHAR(255) NOT NULL, external_id VARCHAR(255) NOT NULL, display_ref TEXT, url TEXT, title_snapshot TEXT, snapshot_at DATETIME(6) NOT NULL, created_by TEXT NOT NULL, created_at DATETIME(6) NOT NULL, tenant TEXT NOT NULL DEFAULT (''), role VARCHAR(16) NOT NULL DEFAULT 'origin', synced_at DATETIME(6), ` +
+	`CREATE TABLE IF NOT EXISTS task_origins (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, task_id BIGINT NOT NULL, provider VARCHAR(16) NOT NULL, namespace VARCHAR(255) NOT NULL, external_id VARCHAR(255) NOT NULL, display_ref LONGTEXT, url LONGTEXT, title_snapshot LONGTEXT, snapshot_at DATETIME(6) NOT NULL, created_by LONGTEXT NOT NULL, created_at DATETIME(6) NOT NULL, tenant LONGTEXT NOT NULL DEFAULT (''), role VARCHAR(16) NOT NULL DEFAULT 'origin', synced_at DATETIME(6), ` +
 		`CONSTRAINT task_origins_provider_check CHECK(provider IN ('linear','github','sentry','youtrack')), CONSTRAINT task_origins_role_check CHECK(role IN ('origin','mirror')), ` +
 		`UNIQUE KEY task_origins_identity(provider, namespace, external_id, task_id), KEY task_origins_external(provider, external_id), ` +
 		// PostgreSQL: UNIQUE (task_id) WHERE provider='youtrack', and UNIQUE (namespace, external_id) WHERE provider='youtrack'.
@@ -119,12 +121,12 @@ var mysqlTasksSteps = []string{
 		`UNIQUE KEY ticket_sets_parent_task_id_key(parent_task_id), UNIQUE KEY ticket_sets_identity(source, source_ref), ` +
 		`CONSTRAINT ticket_sets_parent_fk FOREIGN KEY(parent_task_id) REFERENCES tasks(id) ON DELETE RESTRICT)` + mysqlTableOptions,
 
-	`CREATE TABLE IF NOT EXISTS task_spawn_records (task_id BIGINT NOT NULL PRIMARY KEY, request_id TEXT NOT NULL, job TEXT NOT NULL, role TEXT NOT NULL DEFAULT (''), state VARCHAR(16) NOT NULL, reason TEXT NOT NULL DEFAULT (''), attempt INT NOT NULL, host TEXT NOT NULL DEFAULT (''), next_check_at DATETIME(6), expires_at DATETIME(6), updated_at DATETIME(6) NOT NULL, start_task_id BIGINT, start_until VARCHAR(16), ` +
+	`CREATE TABLE IF NOT EXISTS task_spawn_records (task_id BIGINT NOT NULL PRIMARY KEY, request_id LONGTEXT NOT NULL, job LONGTEXT NOT NULL, role LONGTEXT NOT NULL DEFAULT (''), state VARCHAR(16) NOT NULL, reason LONGTEXT NOT NULL DEFAULT (''), attempt INT NOT NULL, host LONGTEXT NOT NULL DEFAULT (''), next_check_at DATETIME(6), expires_at DATETIME(6), updated_at DATETIME(6) NOT NULL, start_task_id BIGINT, start_until VARCHAR(16), ` +
 		`CONSTRAINT task_spawn_records_state_check CHECK(state IN ('waiting','pending','parked','bound','launching','reconciling','landed','refused','given_up','cancelled')), CONSTRAINT task_spawn_records_attempt_check CHECK(attempt >= 1), CONSTRAINT task_spawn_records_start_until_check CHECK(start_until IN ('merged','deployed')), CONSTRAINT task_spawn_records_start_pair_check CHECK((start_task_id IS NULL) = (start_until IS NULL)), ` +
 		`CONSTRAINT task_spawn_records_task_fk FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE RESTRICT)` + mysqlTableOptions,
 	`CREATE TABLE IF NOT EXISTS task_spawn_notices (notice_key VARCHAR(255) NOT NULL PRIMARY KEY, task_id BIGINT NOT NULL, created_at DATETIME(6) NOT NULL, CONSTRAINT task_spawn_notices_task_fk FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE RESTRICT)` + mysqlTableOptions,
 
-	`CREATE TABLE IF NOT EXISTS task_thread_deliveries (task_id BIGINT NOT NULL, destination VARCHAR(16) NOT NULL, thread_id VARCHAR(32), thread_name TEXT NOT NULL, start_event_id BIGINT NOT NULL, since DATETIME(6) NOT NULL, last_event_id BIGINT NOT NULL, posted JSON NOT NULL DEFAULT (JSON_ARRAY()), state VARCHAR(16) NOT NULL, claim_key TEXT NOT NULL DEFAULT (''), claimed_at DATETIME(6), next_attempt_at DATETIME(6) NOT NULL, attempts INT NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT (''), created_at DATETIME(6) NOT NULL, updated_at DATETIME(6) NOT NULL, ` +
+	`CREATE TABLE IF NOT EXISTS task_thread_deliveries (task_id BIGINT NOT NULL, destination VARCHAR(16) NOT NULL, thread_id VARCHAR(32), thread_name LONGTEXT NOT NULL, start_event_id BIGINT NOT NULL, since DATETIME(6) NOT NULL, last_event_id BIGINT NOT NULL, posted JSON NOT NULL DEFAULT (JSON_ARRAY()), state VARCHAR(16) NOT NULL, claim_key LONGTEXT NOT NULL DEFAULT (''), claimed_at DATETIME(6), next_attempt_at DATETIME(6) NOT NULL, attempts INT NOT NULL DEFAULT 0, last_error LONGTEXT NOT NULL DEFAULT (''), created_at DATETIME(6) NOT NULL, updated_at DATETIME(6) NOT NULL, ` +
 		`PRIMARY KEY(task_id, destination), KEY task_thread_deliveries_due(destination, state, next_attempt_at), ` +
 		`CONSTRAINT task_thread_deliveries_destination_check CHECK(destination IN ('discord')), CONSTRAINT task_thread_deliveries_thread_check CHECK(thread_id REGEXP '^[0-9]{1,32}$'), CONSTRAINT task_thread_deliveries_state_check CHECK(state IN ('pending','creating','active','needs_operator','failed')), ` +
 		`CONSTRAINT task_thread_deliveries_active_check CHECK((state = 'active') = (thread_id IS NOT NULL) OR state IN ('needs_operator','failed')), CONSTRAINT task_thread_deliveries_claim_check CHECK((claim_key = '') = (claimed_at IS NULL)))` + mysqlTableOptions,
@@ -133,9 +135,9 @@ var mysqlTasksSteps = []string{
 	// The decision projection the tasks trigger maintains, and its feed emit.
 	`CREATE TABLE IF NOT EXISTS sync_decisions (id VARCHAR(512) NOT NULL PRIMARY KEY, task_id BIGINT NOT NULL, updated_at DATETIME(6) NOT NULL, UNIQUE KEY sync_decisions_task_id_key(task_id))` + mysqlTableOptions,
 
-	`CREATE TABLE IF NOT EXISTS checkpoints (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, session VARCHAR(255) NOT NULL, kind VARCHAR(16) NOT NULL, title TEXT NOT NULL, body LONGTEXT NOT NULL, refs JSON NOT NULL DEFAULT (JSON_OBJECT()), created_by TEXT NOT NULL, created_at DATETIME(6) NOT NULL, ` +
+	`CREATE TABLE IF NOT EXISTS checkpoints (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, session VARCHAR(255) NOT NULL, kind VARCHAR(16) NOT NULL, title LONGTEXT NOT NULL, body LONGTEXT NOT NULL, refs JSON NOT NULL DEFAULT (JSON_OBJECT()), created_by LONGTEXT NOT NULL, created_at DATETIME(6) NOT NULL, ` +
 		`CONSTRAINT checkpoints_kind_check CHECK(kind IN ('checkpoint','handoff','decision','open_question','next_action')), KEY checkpoints_session_created(session, created_at DESC, id DESC))` + mysqlTableOptions,
-	`CREATE TABLE IF NOT EXISTS memory (agent VARCHAR(255) NOT NULL, name VARCHAR(255) NOT NULL, description TEXT NOT NULL, memory_type VARCHAR(16) NOT NULL, content LONGTEXT NOT NULL, updated_by TEXT NOT NULL, updated_at DATETIME(6) NOT NULL, ` +
+	`CREATE TABLE IF NOT EXISTS memory (agent VARCHAR(255) NOT NULL, name VARCHAR(255) NOT NULL, description LONGTEXT NOT NULL, memory_type VARCHAR(16) NOT NULL, content LONGTEXT NOT NULL, updated_by LONGTEXT NOT NULL, updated_at DATETIME(6) NOT NULL, ` +
 		`CONSTRAINT memory_type_check CHECK(memory_type IN ('user','feedback','project','reference')), UNIQUE KEY memory_identity(agent, name), KEY memory_agent_updated(agent, updated_at DESC, name DESC))` + mysqlTableOptions,
 }
 
@@ -166,7 +168,7 @@ func mysqlTaskDecision(name, event string, update bool) string {
 		guard = `IF NOT (JSON_EXTRACT(OLD.refs,'$.decision_request') <=> JSON_EXTRACT(NEW.refs,'$.decision_request')) THEN `
 		end = ` END IF;`
 	}
-	return `CREATE TRIGGER IF NOT EXISTS ` + name + ` AFTER ` + event + ` ON tasks FOR EACH ROW BEGIN DECLARE request_id TEXT; IF COALESCE(@hk_bulk_load,0) <> 1 THEN ` + guard +
+	return `CREATE TRIGGER IF NOT EXISTS ` + name + ` AFTER ` + event + ` ON tasks FOR EACH ROW BEGIN DECLARE request_id LONGTEXT; IF COALESCE(@hk_bulk_load,0) <> 1 THEN ` + guard +
 		`SET request_id = IF(JSON_TYPE(JSON_EXTRACT(NEW.refs,'$.decision_request.id'))='STRING', JSON_UNQUOTE(JSON_EXTRACT(NEW.refs,'$.decision_request.id')), NULL); ` +
 		`DELETE FROM sync_decisions WHERE task_id=NEW.id AND NOT (id <=> request_id); ` +
 		`IF COALESCE(request_id,'') <> '' THEN INSERT INTO sync_decisions(id,task_id,updated_at) VALUES(request_id,NEW.id,NEW.updated_at) ON DUPLICATE KEY UPDATE task_id=VALUES(task_id), updated_at=VALUES(updated_at); END IF;` + end + ` END IF; END`
