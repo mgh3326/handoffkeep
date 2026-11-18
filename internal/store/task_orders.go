@@ -6,6 +6,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -372,14 +373,21 @@ func (s *Store) AckTaskOrder(ctx context.Context, orderID, actor, comment string
 		if o.AckedAt == nil {
 			now := time.Now().UTC().Truncate(time.Microsecond)
 			body := "[hk] 진행 지시 " + orderID + " 확인 by " + actor + ": " + comment
-			if err = s.srcEvSystemCommentTx(ctx, tx, x.ID, taskOrderAckSource, orderID, body, now); err != nil {
-				return err
+			// The comment is a savepoint: when it cannot be written (MySQL
+			// refuses while the YouTrack comment gate is on, a YouTrack
+			// enqueue fails) the ack still clears the lane wait, and the task
+			// event below carries the lane's comment.
+			var commentID *int64
+			if cerr := s.srcEvSystemCommentTx(ctx, tx, x.ID, taskOrderAckSource, orderID, body, now); cerr != nil {
+				log.Printf("task_order.ack_comment_failed order_id=%q task_id=%d err=%q", orderID, x.ID, cerr.Error())
+			} else {
+				var id int64
+				if err = tx.QueryRow(ctx, s.orderSQL(`SELECT id FROM task_comments WHERE task_id=$1 AND system_event_key=$2`), x.ID, systemTaskCommentKey(x.ID, taskOrderAckSource, orderID)).Scan(&id); err != nil {
+					return err
+				}
+				commentID = &id
 			}
-			var commentID int64
-			if err = tx.QueryRow(ctx, s.orderSQL(`SELECT id FROM task_comments WHERE task_id=$1 AND system_event_key=$2`), x.ID, systemTaskCommentKey(x.ID, taskOrderAckSource, orderID)).Scan(&commentID); err != nil {
-				return err
-			}
-			if _, err = tx.Exec(ctx, s.orderSQL(`UPDATE task_orders SET acked_at=$2,acked_by=$3,ack_comment_id=$4 WHERE id=$1`), orderID, now, actor, commentID); err != nil {
+			if _, err = tx.Exec(ctx, s.orderSQL(`UPDATE task_orders SET acked_at=$1,acked_by=$2,ack_comment_id=$3 WHERE id=$4`), now, actor, commentID, orderID); err != nil {
 				return err
 			}
 			if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: "metadata", From: x.State, To: x.State, By: actor,
@@ -432,7 +440,7 @@ func (s *Store) WithdrawTaskOrder(ctx context.Context, orderID, actor, reason st
 		}
 		if o.WithdrawnAt == nil {
 			now := time.Now().UTC().Truncate(time.Microsecond)
-			if _, err = tx.Exec(ctx, s.orderSQL(`UPDATE task_orders SET withdrawn_at=$2,withdrawn_by=$3,withdraw_reason=$4 WHERE id=$1`), orderID, now, actor, reason); err != nil {
+			if _, err = tx.Exec(ctx, s.orderSQL(`UPDATE task_orders SET withdrawn_at=$1,withdrawn_by=$2,withdraw_reason=$3 WHERE id=$4`), now, actor, reason, orderID); err != nil {
 				return err
 			}
 			if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: "metadata", From: x.State, To: x.State, By: actor,

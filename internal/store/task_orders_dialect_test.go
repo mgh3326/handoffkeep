@@ -427,7 +427,7 @@ func ordersCaseExclusiveClose(t *testing.T, s *Store) {
 		t.Fatalf("withdraw of an acked order: err=%v, want ErrOrderNotOpen", err)
 	}
 	// The database refuses both closes on one row, whatever the writer does.
-	if _, err := s.db().Exec(ctx, s.orderSQL(`UPDATE task_orders SET withdrawn_at=$2,withdrawn_by=$3 WHERE id=$1`), created.Order.ID, time.Now().UTC(), "operator"); err == nil {
+	if _, err := s.db().Exec(ctx, s.orderSQL(`UPDATE task_orders SET withdrawn_at=$1,withdrawn_by=$2 WHERE id=$3`), time.Now().UTC(), "operator", created.Order.ID); err == nil {
 		t.Fatal("the database accepted an order that is both acked and withdrawn")
 	}
 	got, ok, err := s.GetTaskOrder(ctx, created.Order.ID)
