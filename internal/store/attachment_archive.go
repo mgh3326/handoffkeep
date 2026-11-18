@@ -118,15 +118,20 @@ WHERE e.last_close IS NOT NULL AND e.last_close <= $2
 ORDER BY e.sha256
 LIMIT $5`
 
+// mysqlTaskRefIDOK admits a task ref whose id is a positive signed BIGINT: up
+// to 18 digits, or 19 digits no larger than 9223372036854775807. Equal-length
+// digit strings compare in numeric order under the binary collation.
+const mysqlTaskRefIDOK = `r.ref_kind='task' AND r.ref_id REGEXP '^[1-9][0-9]*$' AND (CHAR_LENGTH(r.ref_id)<=18 OR (CHAR_LENGTH(r.ref_id)=19 AND r.ref_id<='9223372036854775807'))`
+
 // attachmentArchiveCandidatesMySQL is attachmentArchiveCandidatesSQL for MySQL:
 // the same rule, with the task list built as JSON (closed_at as RFC 3339, in
 // no order: the reader sorts by id).
 const attachmentArchiveCandidatesMySQL = `
 WITH ref_rows AS (
 	SELECT a.sha256, a.size_bytes, a.mime, a.original_name,
-	       CASE WHEN r.ref_kind='task' AND r.ref_id REGEXP '^[1-9][0-9]*$' AND CHAR_LENGTH(r.ref_id)<=18 THEN CAST(r.ref_id AS SIGNED)
+	       CASE WHEN ` + mysqlTaskRefIDOK + ` THEN CAST(r.ref_id AS SIGNED)
 	            WHEN r.ref_kind='document' THEN d.task_id END AS task_id,
-	       (r.ref_kind='task' AND r.ref_id REGEXP '^[1-9][0-9]*$' AND CHAR_LENGTH(r.ref_id)<=18)
+	       (` + mysqlTaskRefIDOK + `)
 	        OR (r.ref_kind='document' AND d.task_id IS NOT NULL) AS task_ref
 	FROM attachments a
 	JOIN attachment_refs r ON r.sha256=a.sha256
@@ -270,7 +275,13 @@ func (s *Store) RecordAttachmentArchive(ctx context.Context, sha, location strin
 	if len(candidates) == 0 {
 		return AttachmentArchive{}, ErrAttachmentNotArchivable
 	}
-	if _, err = tx.Exec(ctx, s.q(`UPDATE attachments SET archived_at=$2, archive_location=$3 WHERE sha256=$1`, `UPDATE attachments SET archived_at=?, archive_location=? WHERE sha256=?`), sha, now, location); err != nil {
+	// The PostgreSQL text numbers its parameters; MySQL binds ? in the order
+	// they appear, so the SET values come before the WHERE key there.
+	query, args := `UPDATE attachments SET archived_at=$2, archive_location=$3 WHERE sha256=$1`, []any{sha, now, location}
+	if s.dialect == mysqlDialect {
+		query, args = `UPDATE attachments SET archived_at=?, archive_location=? WHERE sha256=?`, []any{now, location, sha}
+	}
+	if _, err = tx.Exec(ctx, query, args...); err != nil {
 		return AttachmentArchive{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -285,6 +296,10 @@ func (s *Store) MarkAttachmentHotDeleted(ctx context.Context, sha string, now ti
 	if !attachmentSHARE.MatchString(sha) {
 		return errors.New("invalid attachment sha")
 	}
-	_, err := s.db().Exec(ctx, s.q(`UPDATE attachments SET hot_deleted_at=$2 WHERE sha256=$1 AND hot_deleted_at IS NULL`, `UPDATE attachments SET hot_deleted_at=? WHERE sha256=? AND hot_deleted_at IS NULL`), sha, now.UTC())
+	query, args := `UPDATE attachments SET hot_deleted_at=$2 WHERE sha256=$1 AND hot_deleted_at IS NULL`, []any{sha, now.UTC()}
+	if s.dialect == mysqlDialect {
+		query, args = `UPDATE attachments SET hot_deleted_at=? WHERE sha256=? AND hot_deleted_at IS NULL`, []any{now.UTC(), sha}
+	}
+	_, err := s.db().Exec(ctx, query, args...)
 	return err
 }
