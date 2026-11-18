@@ -19,6 +19,23 @@ func TestMySQLCollationRecreationCoversTriggers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("full MySQL registry does not order: %v", err)
 	}
+	// Every CREATE TRIGGER or DROP TRIGGER step in the registry must be recognized
+	// by the parsers so no trigger can be missed by the derivation (hk 5192).
+	for _, m := range mysqlMigrations {
+		for _, step := range m.steps {
+			if strings.Contains(step, "CREATE TRIGGER") {
+				if _, _, ok := mysqlBareCreateTrigger(step); !ok {
+					t.Fatalf("migration %s has unrecognized CREATE TRIGGER step: %s", m.id, step)
+				}
+			}
+			if strings.Contains(step, "DROP TRIGGER") {
+				if _, ok := mysqlCollationDropName(step); !ok {
+					t.Fatalf("migration %s has unrecognized DROP TRIGGER step: %s", m.id, step)
+				}
+			}
+		}
+	}
+
 	liveMap, _, err := mysqlLiveTriggers(mysqlMigrations)
 	if err != nil {
 		t.Fatalf("derive live triggers: %v", err)

@@ -152,21 +152,12 @@ func resolveMySQLCollationMigration(migrations []mysqlMigration) ([]mysqlMigrati
 		)
 	}
 
-	present := map[string]bool{}
-	for _, m := range migrations {
-		present[m.id] = true
-	}
-	afterMap := map[string]bool{}
-	if present["20261118-mysql-tasks"] {
-		afterMap["20261118-mysql-tasks"] = true
-	}
-	if present["20261118-mysql-relay-jobs"] {
-		afterMap["20261118-mysql-relay-jobs"] = true
+	afterMap := map[string]bool{
+		"20261118-mysql-tasks":      true, // tasks_closure_check
+		"20261118-mysql-relay-jobs": true, // jobs_skills_check
 	}
 	for _, migID := range owners {
-		if present[migID] {
-			afterMap[migID] = true
-		}
+		afterMap[migID] = true
 	}
 	after := make([]string, 0, len(afterMap))
 	for id := range afterMap {
