@@ -25,6 +25,12 @@ type DecisionTab struct {
 	Items     []DecisionTabItem
 }
 
+// decisionTabSeam is a test-only barrier invoked inside the decision-tab
+// snapshot after the count read and before the item list read. Production
+// code leaves it nil; it is unexported and unreachable from any network
+// surface.
+var decisionTabSeam func(ctx context.Context)
+
 func (s *Store) ListDecisionTab(ctx context.Context, tab string, now time.Time, limit int) (DecisionTab, error) {
 	var out DecisionTab
 	var predicate, order string
@@ -66,6 +72,9 @@ func (s *Store) ListDecisionTab(ctx context.Context, tab string, now time.Time, 
 	err = tx.QueryRow(ctx, countSQL, countArgs...).Scan(&out.Open, &out.Overdue)
 	if err != nil {
 		return out, err
+	}
+	if decisionTabSeam != nil {
+		decisionTabSeam(ctx)
 	}
 	rows, err := tx.Query(ctx, listSQL, listArgs...)
 	if err != nil {

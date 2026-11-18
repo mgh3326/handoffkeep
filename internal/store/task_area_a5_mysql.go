@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"strings"
 	"sync"
@@ -18,17 +19,49 @@ import (
 // store write transaction (no @hk_txn, no sync allocation).
 func (s *Store) beginSnapshotA5(ctx context.Context) (transaction, error) {
 	if s.dialect == mysqlDialect {
-		tx, err := s.mysqlPool.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
-		if err != nil {
-			return nil, mapDriverError(err)
-		}
-		return sqlTransaction{tx}, nil
+		return s.beginMySQLSnapshot(ctx)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return nil, mapDriverError(err)
 	}
 	return pgTransaction{tx}, nil
+}
+
+// beginMySQLSnapshotSeam is a test-only barrier invoked after the isolation
+// is set and before START TRANSACTION. Production code leaves it nil; it is
+// unexported and unreachable from any network surface.
+var beginMySQLSnapshotSeam func(ctx context.Context)
+
+// beginMySQLSnapshot opens the design §11.1 snapshot on MySQL: REPEATABLE READ
+// READ ONLY with the consistent snapshot established at START, so a commit
+// that lands between START and the first statement is already invisible. The
+// driver's BeginTx only issues START TRANSACTION READ ONLY (its snapshot
+// starts at the first read), so the statements run here on a pinned
+// connection. SET TRANSACTION sets the isolation for the next transaction
+// only, so the pooled connection keeps its READ-COMMITTED session default.
+func (s *Store) beginMySQLSnapshot(ctx context.Context) (transaction, error) {
+	conn, err := s.mysqlPool.Conn(ctx)
+	if err != nil {
+		return nil, mapDriverError(err)
+	}
+	if _, err := conn.ExecContext(ctx, `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`); err != nil {
+		_ = conn.Close()
+		return nil, mapDriverError(err)
+	}
+	if beginMySQLSnapshotSeam != nil {
+		beginMySQLSnapshotSeam(ctx)
+	}
+	if _, err := conn.ExecContext(ctx, `START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY`); err != nil {
+		// The SET above is scoped to this connection's next transaction: a
+		// failed START must not return the connection to the pool with it
+		// pending, or the next transaction on it would run at REPEATABLE
+		// READ instead of the pool's READ COMMITTED default. Discard it.
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		_ = conn.Close()
+		return nil, mapDriverError(err)
+	}
+	return &sqlSnapshot{conn: conn}, nil
 }
 
 // a5Int64Args is the argument list of a `= ANY($n)` (one slice on PostgreSQL)
