@@ -608,7 +608,7 @@ func (s *Store) AckLedger(ctx context.Context, consumer string, syncID int64, by
 			}
 			return &SyncReset{MinSyncID: minID}
 		}
-		c, err = scan(tx.QueryRow(ctx, `UPDATE ledger_cursors SET acked_sync_id=$2,acked_at=$3,updated_at=$4 WHERE consumer=$1 RETURNING `+cursorColumns, consumer, syncID, now, by))
+		c, err = scan(tx.QueryRow(ctx, `UPDATE ledger_cursors SET acked_sync_id=$2,acked_at=$3,updated_by=$4 WHERE consumer=$1 RETURNING `+cursorColumns, consumer, syncID, now, by))
 		if err != nil {
 			return err
 		}
