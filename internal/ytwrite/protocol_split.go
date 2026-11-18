@@ -292,13 +292,20 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 	if read.complete() {
 		return apply(read.index)
 	}
-	if found && latest.Lost() && !read.has(latest.InFlight()) {
-		log.Printf("ytwrite.split_outcome_lost op_id=%d attempt=%d recover=%d step=%d", op.ID, latest.Attempt, latest.Recover, latest.Marked-1)
-		return pass(0, ReasonOutcomeLost, fmt.Sprintf("plan %d.%d sent the create of %s and its outcome was never recorded; an operator resolves it",
-			latest.Attempt, latest.Recover, splitStepName(latest.InFlight(), d.parts)))
-	}
 	if read.index == "" && IndexMaybeSent(history) {
 		return pass(0, ReasonIndexNotFound, "an index create of this op may have been sent and no read finds the index")
+	}
+	if found && latest.Uncertain() && !read.has(latest.InFlight()) {
+		// The create may still land: absence in this read is not proof it
+		// failed, so nothing is created beside it until the read shows it or
+		// an operator resolves the op (S7; review of PR #511).
+		reason, what := ReasonOutcomeLost, "its outcome was never recorded"
+		if latest.Outcome == StepAmbiguous {
+			reason, what = ReasonOutcomeAmbiguous, "its outcome was ambiguous"
+		}
+		log.Printf("ytwrite.split_outcome_uncertain op_id=%d attempt=%d recover=%d step=%d reason=%s", op.ID, latest.Attempt, latest.Recover, latest.Marked-1, reason)
+		return pass(0, reason, fmt.Sprintf("plan %d.%d sent the create of %s and %s; the read does not show it, so nothing is created beside it until it appears or an operator resolves it",
+			latest.Attempt, latest.Recover, splitStepName(latest.InFlight(), d.parts), what))
 	}
 	if recovers >= LinkRecoverMax {
 		log.Printf("ytwrite.split_recover_exhausted op_id=%d recovers=%d", op.ID, recovers)

@@ -50,8 +50,8 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 	}{
 		// 4603394669, 4603444899: a part's create fails after the index;
 		// 4603875797, 4603875859: a 5xx or timeout on a part is
-		// remote_unknown, never not_sent.
-		{name: "5xx_on_part", faults: []Fault{{}, {}, {Kind: ServerError}}, state: ytwrite.StateRemoteUnknown, reason: ytwrite.ReasonServerError},
+		// remote_unknown, never not_sent. (A 5xx whose part never lands is
+		// held: ambiguous_part_absent_is_held_not_created_again.)
 		{name: "5xx_committed_on_part", faults: []Fault{{}, {}, {Kind: ServerError, Commit: true}}, state: ytwrite.StateRemoteUnknown, reason: ytwrite.ReasonServerError},
 		// 4603906451: the part committed and its reply was lost: remote_unknown, never prepared.
 		{name: "lost_reply_on_part", faults: []Fault{{}, {}, {Kind: CommitDropReply}}, state: ytwrite.StateRemoteUnknown, reason: ytwrite.ReasonTransport},
@@ -117,6 +117,32 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		}
 	})
 
+	// S7 for an ambiguous outcome (review of PR #511, r4615478669,
+	// r4615478680): a part create answered 5xx may still land, so a read
+	// that does not show it is no proof it failed. Recovery creates nothing
+	// beside it; when it lands, the next pass finds it and applies.
+	t.Run("ambiguous_part_absent_is_held_not_created_again", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 3)
+		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: DelayCommit})
+		op := e.prepare()
+		e.drive()
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
+		writes := len(e.yt.ArticleWrites())
+		for i := 0; i < 3; i++ {
+			e.clock.Advance(time.Hour)
+			e.drive()
+		}
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonOutcomeAmbiguous)
+		if w := len(e.yt.ArticleWrites()); w != writes {
+			t.Fatalf("%d creates beside an ambiguous part", w-writes)
+		}
+		e.yt.ReleaseDelayed() // the first POST lands late
+		e.clock.Advance(time.Hour)
+		e.drive()
+		got := e.wantState(op, ytwrite.StateApplied, "")
+		e.wantOneFamily(op, got.YTResultID)
+	})
+
 	// S2 (4604032030, 4603875797, 4603875859): a dial error on part k ≥ 1 after the
 	// index exists is remote_unknown, never prepared/not_sent.
 	t.Run("dial_error_on_part_2_is_remote_unknown", func(t *testing.T) {
@@ -150,10 +176,10 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		if e.parts != 2 {
 			t.Fatalf("%d parts, want 2", e.parts)
 		}
-		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: ServerError})
+		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: RateLimit, RetryAfter: time.Minute})
 		op := e.prepare()
 		e.drive()
-		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+		e.wantState(op, ytwrite.StatePrepared, ytwrite.ReasonRateLimited)
 		e.clock.Advance(time.Hour)
 		e.drive()
 		got := e.wantState(op, ytwrite.StateApplied, "")
@@ -267,10 +293,10 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 	// applied; the missing part is created under the same index.
 	t.Run("index_with_parts_missing_is_not_applied", func(t *testing.T) {
 		e := newSplitEnv(t, nl, 3)
-		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: Refuse, Status: http.StatusBadGateway})
+		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: DialFail})
 		op := e.prepare()
 		e.drive()
-		got := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+		got := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
 		if got.YTResultID == "" || e.part(op, 2) != 0 {
 			t.Fatalf("op %+v, part 2 made %d times", got, e.part(op, 2))
 		}
@@ -284,10 +310,10 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 	// later pass, never stuck on marker_mismatch.
 	t.Run("502_on_the_family_read_converges", func(t *testing.T) {
 		e := newSplitEnv(t, nl, 3)
-		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: ServerError})
+		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: DialFail})
 		op := e.prepare()
 		e.drive()
-		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
 		e.queueReads(errBadGateway)
 		e.clock.Advance(time.Hour)
 		e.drive()
@@ -302,10 +328,10 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 	// next pass completes the family.
 	t.Run("429_on_a_part_in_recovery_converges", func(t *testing.T) {
 		e := newSplitEnv(t, nl, 3)
-		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: ServerError}, Fault{Kind: RateLimit, RetryAfter: time.Minute})
+		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: DialFail}, Fault{Kind: RateLimit, RetryAfter: time.Minute})
 		op := e.prepare()
 		e.drive()
-		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
 		e.clock.Advance(time.Hour)
 		e.drive()
 		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonRateLimited)

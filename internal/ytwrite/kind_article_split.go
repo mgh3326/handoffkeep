@@ -234,6 +234,10 @@ const (
 	ReasonIndexNotFound = "index_not_found"
 	// ReasonIndexGone: the recorded index article is gone (404).
 	ReasonIndexGone = "index_gone"
+	// ReasonOutcomeAmbiguous: the latest plan's in-flight create answered
+	// ambiguously (5xx, 408, timeout) and no read shows it yet; it may still
+	// land, so nothing is created beside it.
+	ReasonOutcomeAmbiguous = "outcome_ambiguous"
 	// ReasonDuplicatePart: two children of the index hold one part.
 	ReasonDuplicatePart = "duplicate_part"
 )

@@ -68,6 +68,16 @@ func (r SplitPlanRecord) Lost() bool {
 	return r.Outcome == "" && r.Marked > 0 && r.Marked <= len(r.Plan.Steps)
 }
 
+// Uncertain reports a plan whose in-flight create may have been made and may
+// still land: its outcome is ambiguous (a 5xx, 408, timeout or transport
+// failure after the request left) or was never recorded (Lost). A read that
+// does not show it is not proof it failed: an article create is not
+// deduplicated, so a later commit beside a second create is a duplicate part
+// (review of PR #511).
+func (r SplitPlanRecord) Uncertain() bool {
+	return r.Marked > 0 && r.Marked <= len(r.Plan.Steps) && (r.Outcome == "" || r.Outcome == StepAmbiguous)
+}
+
 // InFlight is the create of the plan's in-flight step (0: the index).
 func (r SplitPlanRecord) InFlight() int { return r.Plan.Steps[r.Marked-1] }
 
