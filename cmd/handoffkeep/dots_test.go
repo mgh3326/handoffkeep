@@ -163,6 +163,47 @@ func TestDotsRequestRefusalPrintsReason(t *testing.T) {
 	}
 }
 
+func TestDotsReadsCommand(t *testing.T) {
+	var path string
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.RequestURI()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"reads":[
+			{"id":2,"read_at":"2026-11-18T10:10:00Z","principal":"operator:a@example.com","listed":3,"result":"ok"},
+			{"id":1,"read_at":"2026-11-18T10:00:00Z","principal":"operator:a@example.com","listed":3,"result":"ok"}
+		]}`)
+	}))
+	t.Cleanup(h.Close)
+
+	out, err := runAgainst(h, "dots", "reads", "--since", "2026-11-18T09:00:00Z", "--limit", "5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(path, "/v1/dots/inbox-reads?") || !strings.Contains(path, "since=2026-11-18T09%3A00%3A00Z") || !strings.Contains(path, "limit=5") {
+		t.Fatalf("request path = %s", path)
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(out), &body); err != nil {
+		t.Fatalf("out is not JSON: %v: %s", err, out)
+	}
+	if body["last_read_at"] != "2026-11-18T10:10:00Z" || body["gap_seconds"] != float64(600) {
+		t.Fatalf("summary = %v", body)
+	}
+	if reads, _ := body["reads"].([]any); len(reads) != 2 {
+		t.Fatalf("reads = %v", body["reads"])
+	}
+
+	if _, err := runAgainst(h, "dots", "reads", "--since", "yesterday"); err == nil || !strings.Contains(err.Error(), "RFC3339") {
+		t.Fatalf("bad since err = %v", err)
+	}
+	if _, err := runAgainst(h, "dots", "reads", "--limit", "-1"); err == nil || !strings.Contains(err.Error(), "--limit") {
+		t.Fatalf("bad limit err = %v", err)
+	}
+	if _, err := runAgainst(h, "dots", "reads", "extra"); err == nil || !strings.Contains(err.Error(), "takes no arguments") {
+		t.Fatalf("positional err = %v", err)
+	}
+}
+
 func TestDotsCancelCommand(t *testing.T) {
 	var seen []intakeRequest
 	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

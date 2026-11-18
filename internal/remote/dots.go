@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/capabilities"
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -70,6 +71,26 @@ func (c Client) SetDotsAdoption(ctx context.Context, id int64, in store.DotsAdop
 		return out, unsupportedRoute(err, "dots_results_unsupported", "the dots results route")
 	}
 	return out, nil
+}
+
+// ListDotsInboxReads lists the recorded dots_inbox MCP calls, newest first.
+// A zero since lists every retained read; limit <= 0 takes the server default.
+func (c Client) ListDotsInboxReads(ctx context.Context, since time.Time, limit int) ([]store.DotsInboxRead, error) {
+	var out struct {
+		Reads []store.DotsInboxRead `json:"reads"`
+	}
+	p := url.Values{}
+	if !since.IsZero() {
+		p.Set("since", since.UTC().Format(time.RFC3339))
+	}
+	if limit > 0 {
+		p.Set("limit", strconv.Itoa(limit))
+	}
+	err := c.call(ctx, "GET", "/v1/dots/inbox-reads?"+p.Encode(), nil, &out)
+	if err != nil {
+		return nil, unsupportedRoute(err, "dots_inbox_reads_unsupported", "the dots inbox reads route")
+	}
+	return out.Reads, nil
 }
 
 // AnswerDots answers a task's open dots question and records the comment.
