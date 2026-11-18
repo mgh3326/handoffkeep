@@ -2,10 +2,12 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/mgh3326/handoffkeep/internal/api"
@@ -87,5 +89,18 @@ func TestDotsInboxAccessRecordsOperatorPrincipal(t *testing.T) {
 	}
 	if len(reads) != 1 || reads[0].Principal != "operator:operator@example.com" || reads[0].Result != "ok" {
 		t.Fatalf("reads = %+v", reads)
+	}
+}
+
+// A multi-byte error text longer than the 256-byte bound is truncated on a
+// rune boundary, so the stored TEXT stays valid UTF-8.
+func TestDotsInboxReadResultTruncatesOnRuneBoundary(t *testing.T) {
+	// 255 ASCII bytes then a 3-byte rune straddling byte 256.
+	got := dotsInboxReadResult(errors.New(strings.Repeat("a", 255) + "한" + strings.Repeat("b", 10)))
+	if !utf8.ValidString(got) {
+		t.Fatalf("result is not valid UTF-8: %q", got)
+	}
+	if len(got) != 255 || got != strings.Repeat("a", 255) {
+		t.Fatalf("result = %d bytes %q", len(got), got)
 	}
 }

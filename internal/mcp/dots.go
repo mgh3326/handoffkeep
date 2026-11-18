@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -194,22 +195,33 @@ func (o operatorTools) recordDotsInboxRead(ctx context.Context, listed int, call
 		result = dotsInboxReadResult(callErr)
 	}
 	if o.service.Store != nil && o.principal.Actor != "" {
-		if err := o.service.Store.RecordDotsInboxRead(context.WithoutCancel(ctx), o.principal.Actor, listed, result); err != nil {
+		recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dotsInboxReadRecordTimeout)
+		defer cancel()
+		if err := o.service.Store.RecordDotsInboxRead(recCtx, o.principal.Actor, listed, result); err != nil {
 			log.Printf("mcp.dots_inbox_read_record_failed err=%q", err)
 		}
 	}
 	log.Printf("mcp.dots_inbox_read principal=%q listed=%d", o.principal.Actor, listed)
 }
 
+// dotsInboxReadRecordTimeout bounds the detached record write so a stalled
+// store cannot hang the dots_inbox reply that already succeeded.
+const dotsInboxReadRecordTimeout = 5 * time.Second
+
 // dotsInboxReadResult is the stored result of a failed read: the error text
-// the caller saw, first line only, bounded for the column.
+// the caller saw, first line only, bounded for the column and cut on a rune
+// boundary so the stored TEXT is always valid UTF-8.
 func dotsInboxReadResult(err error) string {
 	s := err.Error()
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
 	if len(s) > 256 {
-		s = s[:256]
+		cut := 256
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut]
 	}
 	return s
 }
