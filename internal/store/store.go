@@ -161,6 +161,12 @@ type TaskRefs struct {
 	// RevertPR is the PR that reverted this task's merge. Only a
 	// mergewake.revert event writes it (rule 9).
 	RevertPR string `json:"revert_pr,omitempty"`
+	// QuestionTask marks a kind=decide task filed only to carry a decision
+	// request: `decisions ask --new-task` sets it, and answering, withdrawing
+	// or default-applying the request closes the task to completed with the
+	// request id as evidence (operator decision 417, hk 5201). A decide task
+	// that also carries work does not have it and is left open.
+	QuestionTask bool `json:"question_task,omitempty"`
 }
 
 // GradeTier returns the task's grade and tier: refs.grade and refs.tier,
@@ -2412,6 +2418,11 @@ func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
 	}
 	if patch.Tier != "" {
 		old.Tier = patch.Tier
+	}
+	// question_task is a one-way marker: a patch sets it, and no transition
+	// clears it (hk 5201).
+	if patch.QuestionTask {
+		old.QuestionTask = true
 	}
 	if patch.Linear != nil {
 		// A previous-release client still sends grade and tier under

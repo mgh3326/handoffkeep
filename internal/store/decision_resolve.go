@@ -710,6 +710,11 @@ func (s *Store) resolveDecisionOnce(ctx context.Context, in ResolveDecisionInput
 	if x, err = s.reconcileDotsChoiceTx(ctx, tx, x, now); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
+	// A kind=decide task filed only to carry this request closes with it
+	// (operator decision 417, hk 5201).
+	if err = s.closeQuestionTaskTx(ctx, tx, &x, resolved.ID, in.Actor, now); err != nil {
+		return ResolveDecisionOutcome{}, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
