@@ -186,11 +186,14 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 	now = now.UTC()
 	// A deadlock after send must not post twice: the first attempt's send
 	// already happened, so a retry reuses its outcome and only re-runs the
-	// database settle. A failure before send leaves sent false and the retry
-	// sends normally.
+	// database settle, for the same row only. A retry that selects another row
+	// sends that row afresh. A failure before send leaves sent false and the
+	// retry sends normally.
 	var messageID string
-	var sent bool
+	var sent, skipped bool
+	var sentID int64
 	err = s.retryTx(ctx, func() error {
+		found = false
 		tx, err := s.db().Begin(ctx)
 		if err != nil {
 			return err
@@ -217,10 +220,21 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 		err = scanDecisionNoticeRow(tx.QueryRow(ctx, query, args...),
 			&x, now, &x.MessageID, &x.AppliedVersion, &x.Attempts, &x.Mention)
 		if errors.Is(err, ErrNoRows) {
+			if sent {
+				// The send ran, but its row left the due set before the retry
+				// could settle it: report the send as unsettled, not as nothing.
+				found = true
+				sendErr = fmt.Errorf("decision notice %d sent but not settled: its delivery row left the due set", sentID)
+			}
 			return nil
 		}
 		if err != nil {
 			return err
+		}
+		if sent && x.Record.ID != sentID {
+			// The retry selected another row: the send outcome belongs to sentID,
+			// so this row is sent afresh instead of settled with that message id.
+			sent, skipped, messageID, sendErr = false, false, "", nil
 		}
 		want := x.Record.Status
 		key := `WHERE request_id=$1 AND destination='` + DecisionDestinationDiscord + `'`
@@ -249,15 +263,17 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 		}
 		if !sent {
 			messageID, sendErr = send(ctx, x)
-			sent = true
+			sent, sentID = true, x.Record.ID
 		}
 		// send may have created the message: record the outcome even if ctx is
 		// canceled now (shutdown), or the next start would post it again.
 		settle, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), decisionSettleTimeout)
 		defer cancelSettle()
 		switch {
-		case errors.Is(sendErr, ErrDecisionNoticeSkipped):
-			sendErr = nil
+		case skipped || errors.Is(sendErr, ErrDecisionNoticeSkipped):
+			// A retry sees sendErr already cleared, so the skip is remembered:
+			// it must not settle as a post.
+			skipped, sendErr = true, nil
 			_, err = tx.Exec(settle, `UPDATE decision_deliveries SET state='unsent',last_error_code='' `+key, x.Record.ID)
 		case sendErr == nil && x.Post():
 			_, err = update(settle, `UPDATE decision_deliveries SET applied_version=desired_version,message_id=$2,posted_at=$3,attempts=0,last_error_code='',next_attempt_at=$3 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET applied_version=desired_version,message_id=?,posted_at=?,attempts=0,last_error_code='',next_attempt_at=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, messageID, now}, []any{messageID, now, now, x.Record.ID})
@@ -376,8 +392,9 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 	// As in ProcessNextDecisionNotice: a retry after send reuses the first
 	// attempt's outcome instead of posting twice.
 	var messageID string
-	var sent bool
+	var sent, skipped bool
 	err = s.retryTx(ctx, func() error {
+		found = false
 		tx, err := s.db().Begin(ctx)
 		if err != nil {
 			return err
@@ -456,8 +473,9 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 		settle, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), decisionSettleTimeout)
 		defer cancelSettle()
 		switch {
-		case errors.Is(sendErr, ErrDecisionNoticeSkipped):
-			sendErr = nil
+		case skipped || errors.Is(sendErr, ErrDecisionNoticeSkipped):
+			// As in the notice path: the skip survives a retry, which sees sendErr cleared.
+			skipped, sendErr = true, nil
 			_, err = updateDigest(settle, `UPDATE decision_notify_digest SET state='unsent',listed=$2 WHERE day=$1::date`, `UPDATE decision_notify_digest SET state='unsent',listed=? WHERE day=?`, []any{day, digest.Total}, []any{digest.Total, day})
 		case sendErr == nil:
 			_, err = updateDigest(settle, `UPDATE decision_notify_digest SET state='sent',listed=$2,message_id=$3,sent_at=$4,attempts=$5,last_error='' WHERE day=$1::date`, `UPDATE decision_notify_digest SET state='sent',listed=?,message_id=?,sent_at=?,attempts=?,last_error='' WHERE day=?`,

@@ -176,6 +176,9 @@ func (s *Store) UpsertChatQuestion(ctx context.Context, x ChatQuestion) (ChatQue
 	var out ChatQuestion
 	var created bool
 	err := s.retryTx(ctx, func() error {
+		// created says what this attempt did: a retry that takes the update
+		// path must not inherit the insert of an attempt that rolled back.
+		created = false
 		tx, release, err := s.begin(ctx)
 		if err != nil {
 			return err

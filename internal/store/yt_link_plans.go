@@ -555,6 +555,9 @@ func (l *YTWriteLedger) LeaseLinkRecovery(ctx context.Context, now time.Time, id
 	var epoch int
 	var leased bool
 	err := l.s.retryTx(ctx, func() error {
+		// A retry must not inherit the lease of an attempt whose commit failed:
+		// only the attempt that commits reports a lease.
+		epoch, leased = 0, false
 		if l.s.dialect == mysqlDialect {
 			// No RETURNING: the increment and the read of its value share one
 			// transaction, so they see the same row (hk 5077).
