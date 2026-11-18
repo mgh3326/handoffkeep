@@ -87,15 +87,16 @@ func (s *Store) insertSystemTaskCommentTx(ctx context.Context, tx transaction, t
 	var c TaskComment
 	var have bool
 	if dialectFor(tx) == mysqlDialect {
-		var n int64
-		n, err = sp.Exec(ctx, `INSERT IGNORE INTO task_comments(task_id,body,author,created_at,system_event_key) VALUES(?,?,?,?,?)`,
+		// A plain INSERT: a duplicate system_event_key is the only unique
+		// conflict and means the comment is already here. A missing task
+		// (foreign key) or a bad value must surface, not read as "present".
+		_, err = sp.Exec(ctx, `INSERT INTO task_comments(task_id,body,author,created_at,system_event_key) VALUES(?,?,?,?,?)`,
 			taskID, body, YTCommentPrincipal, createdAt.UTC(), key)
-		if err == nil {
-			if n == 0 {
-				have = true
-			} else {
-				err = scanTaskComment(sp.QueryRow(ctx, `SELECT `+taskCommentColumns+` FROM task_comments WHERE task_id=? AND system_event_key=?`, taskID, key), &c)
-			}
+		switch {
+		case errors.Is(err, errUniqueViolation):
+			have, err = true, nil
+		case err == nil:
+			err = scanTaskComment(sp.QueryRow(ctx, `SELECT `+taskCommentColumns+` FROM task_comments WHERE task_id=? AND system_event_key=?`, taskID, key), &c)
 		}
 	} else {
 		err = scanTaskComment(sp.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at,system_event_key) VALUES($1,$2,$3,$4,$5) ON CONFLICT (task_id,system_event_key) WHERE system_event_key IS NOT NULL DO NOTHING RETURNING `+taskCommentColumns, taskID, body, YTCommentPrincipal, createdAt.UTC(), key), &c)
@@ -400,8 +401,14 @@ func (s *Store) enqueueYTCommentModeTx(ctx context.Context, tx transaction, c Ta
 		taskKey := strconv.FormatInt(c.TaskID, 10)
 		mapN, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
 			VALUES ('task',$1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
-			`INSERT IGNORE INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
+			`INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
 			VALUES ('task',?,?,?,?,?,?)`), tenant, taskKey, issueID, projectID, op.ID, now)
+		// A duplicate on either unique key (hk_key or yt_id) is "no row
+		// written", as PostgreSQL's ON CONFLICT DO NOTHING reports it; a
+		// foreign-key or check error is not swallowed.
+		if errors.Is(err, errUniqueViolation) {
+			mapN, err = 0, nil
+		}
 		if err != nil {
 			return ytwrite.Op{}, false, err
 		}
@@ -649,8 +656,13 @@ func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verif
 	var got YTCommentCanary
 	if dialectFor(tx) == mysqlDialect {
 		var n int64
-		n, err = tx.Exec(ctx, `INSERT IGNORE INTO yt_comment_canary(`+ytCanaryColumns+`) VALUES (?,?,?,?,?,?,?)`,
+		n, err = tx.Exec(ctx, `INSERT INTO yt_comment_canary(`+ytCanaryColumns+`) VALUES (?,?,?,?,?,?,?)`,
 			c.TaskID, c.Tenant, c.IssueID, c.IssueReadable, c.ProjectID, c.AddedBy, time.Now().UTC())
+		// A duplicate (this task or the issue already enrolled) writes
+		// nothing; the checks below read the row that holds the key.
+		if errors.Is(err, errUniqueViolation) {
+			n, err = 0, nil
+		}
 		if err == nil {
 			err = scanYTCanary(tx.QueryRow(ctx, `SELECT `+ytCanaryColumns+` FROM yt_comment_canary WHERE task_id=?`, c.TaskID), &got)
 			switch {

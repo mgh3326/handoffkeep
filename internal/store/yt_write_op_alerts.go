@@ -241,8 +241,8 @@ func (s *Store) ytAlertPassLock(ctx context.Context, tx transaction) error {
 // dialect.
 func (s *Store) ytAlertMarkQ(n int) string {
 	if s.dialect == mysqlDialect {
-		return `INSERT IGNORE INTO yt_write_op_alerts(op_id, alert_class, created_at) VALUES ` +
-			strings.TrimSuffix(strings.Repeat(`(?,?,?),`, n), `,`)
+		return `INSERT INTO yt_write_op_alerts(op_id, alert_class, created_at) VALUES` +
+			strings.TrimSuffix(strings.Repeat(`(?,?,?),`, n), `,`) + ` ON DUPLICATE KEY UPDATE op_id=op_id`
 	}
 	return `INSERT INTO yt_write_op_alerts(op_id, alert_class, created_at)
 		SELECT x, $2::text, $3::timestamptz FROM unnest($1::bigint[]) AS x ON CONFLICT DO NOTHING`

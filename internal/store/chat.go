@@ -843,6 +843,10 @@ func (s *Store) ListChatMessages(ctx context.Context, author string, undelivered
 // run can never empty a table at once; remaining expired rows are removed by
 // subsequent runs.
 func (s *Store) PruneChat(ctx context.Context, limit int) (int64, error) {
+	// One retention cutoff for every table in this transaction. PostgreSQL's
+	// now() is the transaction's time; MySQL's UTC_TIMESTAMP is per statement,
+	// so the MySQL statements take this Go time instead (design §11.4).
+	cutoff := time.Now().UTC().AddDate(-1, 0, 0)
 	if limit < 1 || limit > ChatPruneMaxDelete {
 		limit = ChatPruneMaxDelete
 	}
@@ -858,8 +862,8 @@ func (s *Store) PruneChat(ctx context.Context, limit int) (int64, error) {
 		var err error
 		if s.dialect == mysqlDialect {
 			states := sortedStateKeys(t.terminal)
-			query := `SELECT id FROM ` + t.table + ` WHERE created_at<DATE_SUB(UTC_TIMESTAMP(6),INTERVAL 1 YEAR) AND ` + t.stateColumn + ` IN (` + placeholders(len(states)) + `) ORDER BY created_at ASC,id ASC LIMIT ? FOR UPDATE`
-			args := make([]any, 0, len(states)+1)
+			query := `SELECT id FROM ` + t.table + ` WHERE created_at<? AND ` + t.stateColumn + ` IN (` + placeholders(len(states)) + `) ORDER BY created_at ASC,id ASC LIMIT ? FOR UPDATE`
+			args := append(make([]any, 0, len(states)+2), cutoff)
 			for _, state := range states {
 				args = append(args, state)
 			}
@@ -897,7 +901,7 @@ func (s *Store) PruneChat(ctx context.Context, limit int) (int64, error) {
 	// directive retention rule only applies to delivered operator messages.
 	var tag int64
 	if s.dialect == mysqlDialect {
-		rows, err := tx.Query(ctx, `SELECT id FROM chat_messages WHERE author='operator' AND relay_state='delivered' AND created_at<DATE_SUB(UTC_TIMESTAMP(6),INTERVAL 1 YEAR) ORDER BY created_at,id LIMIT ? FOR UPDATE`, limit)
+		rows, err := tx.Query(ctx, `SELECT id FROM chat_messages WHERE author='operator' AND relay_state='delivered' AND created_at<? ORDER BY created_at,id LIMIT ? FOR UPDATE`, cutoff, limit)
 		if err != nil {
 			return 0, err
 		}

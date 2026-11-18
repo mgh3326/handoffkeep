@@ -110,7 +110,13 @@ func insertNotificationOutboxOnce(ctx context.Context, tx transaction, kind, lan
 func insertNotificationOutboxTx(ctx context.Context, tx transaction, kind, lane, eventID, text string, at time.Time) (bool, error) {
 	tag, err := tx.Exec(ctx, sqlFor(tx,
 		`INSERT INTO notification_outbox(kind,target_lane,event_id,text,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT (event_id) DO NOTHING`,
-		`INSERT INTO notification_outbox(kind,target_lane,event_id,text,created_at) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE id=id`), kind, lane, eventID, text, at)
+		`INSERT INTO notification_outbox(kind,target_lane,event_id,text,created_at) VALUES(?,?,?,?,?)`), kind, lane, eventID, text, at)
+	// A repeat of event_id (the only unique key besides the auto id) wrote
+	// nothing: report false, as PostgreSQL's ON CONFLICT DO NOTHING does. An
+	// ON DUPLICATE KEY no-op would report one affected row and read as a write.
+	if errors.Is(err, errUniqueViolation) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
