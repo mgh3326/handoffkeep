@@ -117,6 +117,7 @@ type decisionRequestView struct {
 	RecommendationReason string                    `json:"recommendation_reason,omitempty"`
 	Unverified           []string                  `json:"unverified,omitempty"`
 	OneFix               string                    `json:"one_fix,omitempty"`
+	Grounds              []string                  `json:"grounds,omitempty"`
 	DefaultAction        string                    `json:"default_action"`
 	DefaultOption        string                    `json:"default_option,omitempty"`
 	DefaultTrigger       string                    `json:"default_trigger,omitempty"`
@@ -154,7 +155,7 @@ func projectDecisionRequest(entry store.DecisionRequestEntry, taskState string, 
 		ID: request.ID, Revision: request.Revision, Supersedes: request.Supersedes, SupersededBy: strings.TrimPrefix(entry.SupersededBy, "?"),
 		Current: entry.Current, State: state, StateLabel: decisionStateLabels[state],
 		Question: request.Question, Options: []decisionOptionView{}, Reason: request.Reason,
-		RecommendationReason: request.RecommendationReason, Unverified: request.Unverified, OneFix: request.OneFix,
+		RecommendationReason: request.RecommendationReason, Unverified: request.Unverified, OneFix: request.OneFix, Grounds: request.Grounds,
 		DefaultAction: request.DefaultAction, DefaultOption: request.DefaultOption, DefaultTrigger: request.DefaultTrigger,
 		DueAt: request.DueAt, Doc: request.Doc, Refs: request.Refs, RequestedBy: request.RequestedBy, RequestedAt: request.RequestedAt.UTC(),
 		Resolution: request.Resolution,

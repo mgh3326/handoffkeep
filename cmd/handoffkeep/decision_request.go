@@ -16,9 +16,9 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const decisionRequestUsage = "usage: tasks decision-request <id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] [--recommendation-reason <text>] [--unverified <text> ...] [--one-fix <text>] [--option-attachment 'A|sha256[|caption]' ...] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only] [--answer-policy operator_direct|operator_relay_allowed]"
+const decisionRequestUsage = "usage: tasks decision-request <id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] [--recommendation-reason <text>] [--unverified <text> ...] [--one-fix <text>] [--option-attachment 'A|sha256[|caption]' ...] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--grounds <text> ...] [--lane <lane>] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only] [--answer-policy operator_direct|operator_relay_allowed]"
 
-const decisionAskUsage = "usage: decisions ask <task-id> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] [--recommendation-reason <text>] [--unverified <text> ...] [--one-fix <text>] [--option-attachment 'A|sha256[|caption]' ...] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only] [--answer-policy operator_direct|operator_relay_allowed]"
+const decisionAskUsage = "usage: decisions ask <task-id> | decisions ask --new-task --project <project> --lane <lane> --question <text> --option 'A|label' [--option ...] [--recommended A] [--reason <text>] [--recommendation-reason <text>] [--unverified <text> ...] [--one-fix <text>] [--option-attachment 'A|sha256[|caption]' ...] --default-action <text> [--default-option B] [--default-trigger <text>] [--due <RFC3339>] [--doc <key>] [--ref <text> ...] [--grounds <text> ...] [--lane <lane>] [--supersedes dr-<id>-<rev>] [--block] [--no-free-answer] [--human-only] [--answer-policy operator_direct|operator_relay_allowed]"
 
 const decisionResolveRequestUsage = "usage: decisions resolve request <dr-id> --channel cli|session [--option A] [--text <text>] [--quote '<operator words>'] [--event-key <key>]"
 
@@ -161,16 +161,27 @@ func decisionRequestFlags(fs *flag.FlagSet, usage string, args []string) (*remot
 	noFreeAnswer := fs.Bool("no-free-answer", false, "disallow a free-form answer")
 	humanOnly := fs.Bool("human-only", false, "reserve the request for the human operator; the assistant path refuses it")
 	answerPolicy := fs.String("answer-policy", "", "operator_direct (a relayed answer waits for the operator) or operator_relay_allowed (default)")
-	parseArgs, err := splitArgs(args, "question", "question-ko", "option", "option-ko", "option-attachment", "ref", "recommended", "reason", "recommendation-reason", "unverified", "one-fix", "default-action", "default-option", "default-trigger", "due", "doc", "supersedes", "answer-policy")
+	var groundValues refFlags
+	fs.Var(&groundValues, "grounds", "a fact the recommendation rests on, one line (repeatable, at most 10)")
+	requestLane := fs.String("lane", "", "the lane that asks; its answer notice also goes there when it differs from the task's lane")
+	parseArgs, err := splitArgs(args, "question", "question-ko", "option", "option-ko", "option-attachment", "ref", "grounds", "lane", "project", "recommended", "reason", "recommendation-reason", "unverified", "one-fix", "default-action", "default-option", "default-trigger", "due", "doc", "supersedes", "answer-policy")
 	if err != nil {
 		return nil, 0, store.DecisionRequestInput{}, err
 	}
 	if err := fs.Parse(parseArgs); err != nil {
 		return nil, 0, store.DecisionRequestInput{}, err
 	}
-	id, err := parseSubcommandTaskID(fs, usage)
-	if err != nil {
-		return nil, 0, store.DecisionRequestInput{}, err
+	var id int64
+	if f := fs.Lookup("new-task"); f != nil && f.Value.String() == "true" {
+		// decisions ask --new-task files its task itself: no task id.
+		if fs.NArg() != 0 {
+			return nil, 0, store.DecisionRequestInput{}, errors.New("--new-task takes no task id: " + usage)
+		}
+	} else {
+		id, err = parseSubcommandTaskID(fs, usage)
+		if err != nil {
+			return nil, 0, store.DecisionRequestInput{}, err
+		}
 	}
 	input := store.DecisionRequestInput{
 		Question:             strings.TrimSpace(*question),
@@ -183,6 +194,8 @@ func decisionRequestFlags(fs *flag.FlagSet, usage string, args []string) (*remot
 		DefaultTrigger:       strings.TrimSpace(*defaultTrigger),
 		Doc:                  strings.TrimSpace(*doc),
 		Refs:                 refValues,
+		Grounds:              groundValues,
+		RequestLane:          strings.TrimSpace(*requestLane),
 		Supersedes:           strings.TrimSpace(*supersedes),
 		Block:                *block,
 		HumanOnly:            *humanOnly,
@@ -270,12 +283,24 @@ func decisionRequestCmd(args []string, out io.Writer) error {
 	return printJSON(out, output)
 }
 
+// newTaskWriteFailed is writeFailed for --new-task, which has no task id yet.
+// A refusal before any write is NOT recorded; anything else is UNKNOWN. A
+// re-send that finds the task already filed is refused as a similar open task.
+func newTaskWriteFailed(err error) error {
+	if serverRefused(err) {
+		return fmt.Errorf("decision ask --new-task NOT recorded: %v — do not notify that it is visible in the console", err)
+	}
+	return exitCodeError{code: exitWriteUnknown, err: fmt.Errorf("decision ask --new-task outcome UNKNOWN: %v — check `handoffkeep tasks list --project <project>` for the filed task before notifying; a re-send is refused as a similar open task rather than filing a second one", err)}
+}
+
 // decisionAskCmd records a decision request for the operator through the
 // record-only route. Re-sending the same command after any failure creates
 // nothing twice.
 func decisionAskCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("decisions ask", flag.ContinueOnError)
 	ko := addDecisionTranslationFlags(fs)
+	newTask := fs.Bool("new-task", false, "file a decide task in --project on --lane, titled with the question, then record the request on it (no task id)")
+	project := fs.String("project", "", "project the --new-task is filed in")
 	c, id, input, err := decisionRequestFlags(fs, decisionAskUsage, args)
 	if err != nil {
 		return notRecorded(err)
@@ -286,9 +311,20 @@ func decisionAskCmd(args []string, out io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	recorded, err := c.RecordDecisionRequest(ctx, id, input)
-	if err != nil {
-		return writeFailed("decision ask", id, err)
+	var recorded store.DecisionRequestResult
+	if *newTask {
+		if strings.TrimSpace(*project) == "" || input.RequestLane == "" {
+			return notRecorded(errors.New("decisions ask --new-task needs --project and --lane"))
+		}
+		recorded, err = c.RecordDecisionRequestNewTask(ctx, store.NewTaskDecisionInput{Project: strings.TrimSpace(*project), Lane: input.RequestLane, Request: input})
+		if err != nil {
+			return newTaskWriteFailed(err)
+		}
+	} else {
+		recorded, err = c.RecordDecisionRequest(ctx, id, input)
+		if err != nil {
+			return writeFailed("decision ask", id, err)
+		}
 	}
 	var options store.DecisionOptions
 	if recorded.Task.Refs.DecisionOptions != nil {
