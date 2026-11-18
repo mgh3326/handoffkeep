@@ -227,7 +227,7 @@ func (s *Store) YTRebuildTaskComments(ctx context.Context, taskID int64, issueID
 		out.Docs = append(out.Docs, d)
 		return err
 	}, sqlFor(s, `SELECT key, kind, body, created_by, created_at FROM documents WHERE task_id = $1 ORDER BY id`,
-		`SELECT key, kind, body, created_by, created_at FROM documents WHERE task_id = ? ORDER BY id`), taskID); err != nil {
+		"SELECT `key`, kind, body, created_by, created_at FROM documents WHERE task_id = ? ORDER BY id"), taskID); err != nil {
 		return YTRebuildComments{}, err
 	}
 	return out, nil
@@ -360,21 +360,16 @@ func (s *Store) YTRebuildDecisions(ctx context.Context, tenant string, afterID i
 	if tenant == "" || afterID < 0 || limit < 1 || limit > YTRebuildTaskPageMax {
 		return nil, errors.New("invalid rebuild decision filter")
 	}
-	// One transaction for the page's bindings and its decision rows, so both
-	// are read at one snapshot. MySQL's InnoDB runs REPEATABLE READ and fixes
-	// the snapshot at the first read, the bindings page; PostgreSQL is raised
-	// to the read-only repeatable-read options the drill always used.
-	tx, release, err := s.begin(ctx)
+	// One read-only repeatable-read transaction for the page's bindings and
+	// its decision rows, so both are read at one snapshot (the helper the
+	// other snapshot readers use): MySQL sessions run READ COMMITTED (design
+	// §11.1) and would otherwise mix snapshots, and PostgreSQL gets the same
+	// options the drill always used.
+	tx, err := s.beginSnapshotA5(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer release()
 	defer tx.Rollback(ctx)
-	if dialectFor(tx) == postgresDialect {
-		if _, err := tx.Exec(ctx, `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY`); err != nil {
-			return nil, err
-		}
-	}
 	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT decision_id::bigint, issue_id FROM yt_decision_bindings
 		WHERE tenant = $1 AND decision_id::bigint > $2 ORDER BY decision_id::bigint LIMIT $3`,
 		`SELECT CAST(decision_id AS UNSIGNED), issue_id FROM yt_decision_bindings

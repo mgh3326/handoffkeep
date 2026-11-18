@@ -62,7 +62,7 @@ func (s *Store) ExactNumericHit(ctx context.Context, q, scope, session string) (
 	}
 	if scope == "docs" || scope == "all" {
 		row := s.db().QueryRow(ctx, sqlFor(s, `SELECT key,session,kind,left(body,160),created_at FROM documents WHERE id=$2 AND ($1='' OR session=$1)`,
-			`SELECT key,session,kind,LEFT(body,160),created_at FROM documents WHERE id=? AND (?='' OR session=?)`), args...)
+			"SELECT `key`,session,kind,LEFT(body,160),created_at FROM documents WHERE id=? AND (?='' OR session=?)"), args...)
 		var x SearchResult
 		switch err := row.Scan(&x.Key, &x.Session, &x.Kind, &x.Snippet, &x.CreatedAt); {
 		case err == nil:
@@ -89,7 +89,7 @@ func (s *Store) ExactDocHit(ctx context.Context, key, session string) ([]SearchR
 		args = []any{key, session, session}
 	}
 	row := s.db().QueryRow(ctx, sqlFor(s, `SELECT key,session,kind,left(body,160),created_at FROM documents WHERE key=$2 AND ($1='' OR session=$1)`,
-		`SELECT key,session,kind,LEFT(body,160),created_at FROM documents WHERE key=? AND (?='' OR session=?)`), args...)
+		"SELECT `key`,session,kind,LEFT(body,160),created_at FROM documents WHERE `key`=? AND (?='' OR session=?)"), args...)
 	var x SearchResult
 	switch err := row.Scan(&x.Key, &x.Session, &x.Kind, &x.Snippet, &x.CreatedAt); {
 	case err == nil:
@@ -112,7 +112,7 @@ func (s *Store) ExactDocHit(ctx context.Context, key, session string) ([]SearchR
 func (s *Store) DocumentKeyExists(ctx context.Context, key string) (bool, error) {
 	var ok bool
 	if err := s.db().QueryRow(ctx, sqlFor(s, `SELECT EXISTS (SELECT 1 FROM documents WHERE key=$1)`,
-		`SELECT EXISTS (SELECT 1 FROM documents WHERE key=?)`), key).Scan(&ok); err != nil {
+		"SELECT EXISTS (SELECT 1 FROM documents WHERE `key`=?)"), key).Scan(&ok); err != nil {
 		return false, fmt.Errorf("document key exists: %w", err)
 	}
 	return ok, nil

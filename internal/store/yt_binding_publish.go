@@ -212,10 +212,10 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 		// only count MySQL gives (CLIENT_FOUND_ROWS makes an upsert report 1
 		// for a no-op too, B2's finding 5).
 		_, ierr := tx.Exec(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, comments_from)
-			SELECT ?,?,?,?,?,?,?,
+			SELECT ?,?,?,?,?,?,?,?,
 				CASE WHEN ? < 0 THEN (SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=?) ELSE ? END
 			FROM DUAL`,
-			b.TaskID, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, now, commentsFrom, b.TaskID, commentsFrom)
+			b.TaskID, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, now, p.origin, commentsFrom, b.TaskID, commentsFrom)
 		if ierr != nil {
 			return YTTaskBinding{}, 0, 0, fmt.Errorf("%w: issue %s on %s is bound to another task", ErrYTBindingConflict, b.IssueID, b.Tenant)
 		}

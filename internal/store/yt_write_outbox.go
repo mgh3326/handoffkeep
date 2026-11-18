@@ -41,11 +41,12 @@ func (s *Store) YTWriteOutboxStatus(ctx context.Context, now time.Time) (YTWrite
 			count(*) FILTER (WHERE attempts >= 2), count(*) FILTER (WHERE reconciles >= 1)
 			FROM yt_write_ops WHERE state='` + string(st) + `'`
 		if s.dialect == mysqlDialect {
-			// No ::text cast and no FILTER on MySQL: SUM over a 0/1 CASE
-			// counts the same rows.
+			// No ::text cast and no FILTER on MySQL: COUNT over a CASE
+			// counts the same rows and returns 0, not NULL, for a state with
+			// no open op (which the caller scans into int64).
 			branch = `SELECT '` + string(st) + `', count(*),
 			min(CASE WHEN state='dispatched' THEN dispatched_at ELSE created_at END),
-			SUM(CASE WHEN attempts >= 2 THEN 1 ELSE 0 END), SUM(CASE WHEN reconciles >= 1 THEN 1 ELSE 0 END)
+			COUNT(CASE WHEN attempts >= 2 THEN 1 END), COUNT(CASE WHEN reconciles >= 1 THEN 1 END)
 			FROM yt_write_ops WHERE state='` + string(st) + `'`
 		}
 		branches = append(branches, branch)
