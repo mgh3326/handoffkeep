@@ -190,6 +190,21 @@ func taskSummaryOf(task store.Task, mirror store.YouTrackMirror, mirrored bool) 
 	return out
 }
 
+// tasksByID reads the named tasks in one batch, keyed by id; an id with no
+// task is absent from the map. A search's hits go through it, so a result list
+// costs the same statements at any length.
+func (o operatorTools) tasksByID(ctx context.Context, ids []int64) (map[int64]store.Task, error) {
+	tasks, err := o.service.Store.TasksWithSpawns(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64]store.Task, len(tasks))
+	for _, task := range tasks {
+		out[task.ID] = task
+	}
+	return out, nil
+}
+
 func (o operatorTools) summaries(ctx context.Context, tasks []store.Task) ([]taskSummary, error) {
 	ids := make([]int64, 0, len(tasks))
 	for _, task := range tasks {
@@ -262,7 +277,10 @@ func (o operatorTools) taskSearch(ctx context.Context, _ *gmcp.CallToolRequest, 
 		task    store.Task
 		snippet string
 	}
-	hits := make([]hit, 0, len(results))
+	// The hits are read in one batch, in search order (hk 5058): a GetTask per
+	// hit ran about six statements for each of up to 50 hits.
+	ids := make([]int64, 0, len(results))
+	snippets := make([]string, 0, len(results))
 	searchTruncated := false
 	for _, result := range results {
 		if result.Truncated {
@@ -272,17 +290,23 @@ func (o operatorTools) taskSearch(ctx context.Context, _ *gmcp.CallToolRequest, 
 		if err != nil {
 			continue
 		}
-		task, found, err := o.service.GetTask(ctx, id)
-		if err != nil {
-			return nil, nil, err
-		}
+		ids = append(ids, id)
+		snippets = append(snippets, result.Snippet)
+	}
+	byID, err := o.tasksByID(ctx, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	hits := make([]hit, 0, len(ids))
+	for i, id := range ids {
+		task, found := byID[id]
 		if !found || !stateMatches(task, stateFilter) {
 			continue
 		}
 		if in.Project != "" && (task.Project == nil || *task.Project != in.Project) {
 			continue
 		}
-		hits = append(hits, hit{task: task, snippet: result.Snippet})
+		hits = append(hits, hit{task: task, snippet: snippets[i]})
 	}
 	// A cut search window stays truncated even when the filtered page is
 	// full: matches may exist beyond the window, so a full filtered page is
@@ -988,19 +1012,24 @@ func (o operatorTools) duplicateCandidates(ctx context.Context, title, lane stri
 		if err != nil {
 			return nil, err
 		}
+		ids := make([]int64, 0, len(results))
 		for _, result := range results {
-			if len(tasks) == duplicateCandidateLimit {
-				break
-			}
 			id, err := strconv.ParseInt(result.Key, 10, 64)
 			if err != nil || seen[id] {
 				continue
 			}
 			seen[id] = true
-			task, found, err := o.service.GetTask(ctx, id)
-			if err != nil {
-				return nil, err
+			ids = append(ids, id)
+		}
+		byID, err := o.tasksByID(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			if len(tasks) == duplicateCandidateLimit {
+				break
 			}
+			task, found := byID[id]
 			if !found || !duplicateCandidateState(task.State) {
 				continue
 			}
