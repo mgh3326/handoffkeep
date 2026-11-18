@@ -210,7 +210,7 @@ func TestCopyRefusesOverlongTaskSourceRef(t *testing.T) {
 		t.Fatal(err)
 	}
 	my.Close()
-	_, err = CopyStore(t.Context(), srcURL, myURL, []string{"tasks"}, false)
+	_, err = CopyStore(t.Context(), srcURL, myURL, []string{"tasks", "sync_decisions"}, false)
 	if err == nil || !strings.Contains(err.Error(), "refusing tasks.source_ref") {
 		t.Fatalf("expected overlong-value refusal, got %v", err)
 	}
