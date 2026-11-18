@@ -201,7 +201,9 @@ type Op struct {
 	PayloadSHA string
 	// Payload is the immutable outbound payload (JSON); the exact text sent is
 	// a pure function of it and the op, so a resend or a reconciliation
-	// renders the same bytes.
+	// renders the same bytes. It is NULL on an applied or rejected op
+	// redacted more than 30 days after it resolved (hk 5056); PayloadSHA is
+	// kept as the receipt, and no reader of a resolved op unmarshals it.
 	Payload []byte
 	// EntityKind and EntityID name the hk entity whose writes are ordered
 	// (task, 3697). YTTargetID is the YouTrack id of the thing written to.
