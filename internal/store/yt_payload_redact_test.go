@@ -78,11 +78,13 @@ func TestYTWriteOpPayloadRedactGuard(t *testing.T) {
 	// worker only selects rows with a payload.
 	wantRedactErr(t, redactExec(t, s, `UPDATE yt_write_ops SET payload=NULL WHERE id=$1`, applied.ID), "cannot change")
 
-	// Rows younger than 30 days are never touched.
+	// Rows younger than 30 days are never touched. The identity arm refuses
+	// first: a payload change with no valid exception never reaches the
+	// frozen-row check.
 	young := redactSeed(t, s, "applied-now", "2-1", "", now, now)
-	wantRedactErr(t, redactExec(t, s, `UPDATE yt_write_ops SET payload=NULL WHERE id=$1`, young.ID), "cannot change")
+	wantRedactErr(t, redactExec(t, s, `UPDATE yt_write_ops SET payload=NULL WHERE id=$1`, young.ID), "immutable")
 	almost := redactSeed(t, s, "rejected-29d", "", "gone", now.Add(-29*24*time.Hour), now.Add(-29*24*time.Hour))
-	wantRedactErr(t, redactExec(t, s, `UPDATE yt_write_ops SET payload=NULL WHERE id=$1`, almost.ID), "cannot change")
+	wantRedactErr(t, redactExec(t, s, `UPDATE yt_write_ops SET payload=NULL WHERE id=$1`, almost.ID), "immutable")
 
 	// Unresolved rows are never touched.
 	prepared, _, err := s.YTWriteLedger().Prepare(ctx, now, ytwrite.NewOp{Principal: "p", Kind: ytwrite.KindCommentAppend,
@@ -106,7 +108,7 @@ func TestYTWriteOpPayloadRedactGuard(t *testing.T) {
 	if _, err := s.YTWriteLedger().MarkUnknown(ctx, now, unknown.ID, now.Add(time.Hour), "lost", "test"); err != nil {
 		t.Fatal(err)
 	}
-	wantRedactErr(t, redactExec(t, s, `UPDATE yt_write_ops SET payload=NULL WHERE id=$1`, unknown.ID), "cannot change")
+	wantRedactErr(t, redactExec(t, s, `UPDATE yt_write_ops SET payload=NULL WHERE id=$1`, unknown.ID), "immutable")
 
 	// The redaction is exactly payload to NULL: any companion change is refused.
 	other := redactSeed(t, s, "applied-other", "2-1", "", old, old)
