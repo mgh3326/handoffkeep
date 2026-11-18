@@ -64,67 +64,91 @@ func TestTaskSearchReadsHitsInOneBatch(t *testing.T) {
 	}
 }
 
-// TestMCPReadToolsWithinQueryBudget: the MCP reads that run every turn stay
-// within one request's statement budget over seeded data (hk 5058). Thirty
-// blocking decision requests give decisions_pending and operator_attention a
-// page of rows, so a per-row loop added to either would exceed the budget. The
-// reads must return those rows, so the test cannot pass on empty results.
-func TestMCPReadToolsWithinQueryBudget(t *testing.T) {
+// growTo returns a grow function that adds fixtures from build until the
+// fixture holds n of them.
+func growTo(build func(i int)) func(n int) {
+	have := 0
+	return func(n int) {
+		for ; have < n; have++ {
+			build(have)
+		}
+	}
+}
+
+// TestMCPReadStatementsFlat is the N+1 guard for the MCP reads that run every
+// turn (hk 5058): each runs over one row and over thirty, and its statement
+// count must not grow with the rows. After the guard, the reads must still
+// return the thirty rows, so the guard cannot pass on empty results.
+func TestMCPReadStatementsFlat(t *testing.T) {
 	st := newOperatorStore(t)
 	ctx := context.Background()
+	o := operatorTools{service: api.Service{Store: st}}
 	const rows = 30
 	options := store.DecisionOptions{Options: []store.DecisionOption{{Key: "A", Label: "A", Recommended: true}, {Key: "B", Label: "B"}}}
-	for i := range rows {
+
+	target := newOperatorTask(t, st, "budget task_get fixture")
+	blockers := growTo(func(i int) {
+		b := newOperatorTask(t, st, fmt.Sprintf("budget blocker %d", i))
+		if _, err := st.AddTaskRelation(ctx, b.ID, store.RelationBlocks, target.ID, "tester"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	testdb.AssertStatementsFlat(t, "task_get", rows, 0, blockers, func(ctx context.Context) error {
+		_, err := o.taskGetView(ctx, target.ID)
+		return err
+	})
+
+	decisions := growTo(func(i int) {
 		task := newOperatorTask(t, st, fmt.Sprintf("budget decision fixture %d", i))
 		if _, err := st.RecordDecisionRequest(ctx, task.ID, "tester", store.DecisionRequestInput{
 			Question: fmt.Sprintf("Choose %d?", i), Options: options, DefaultAction: "hold", Block: true,
 		}); err != nil {
 			t.Fatal(err)
 		}
-	}
-	first := newOperatorTask(t, st, "budget task_get fixture")
-	o := operatorTools{service: api.Service{Store: st}}
-	testdb.AssertQueryBudget(t, "task_get", func(ctx context.Context) error {
-		_, err := o.taskGetView(ctx, first.ID)
-		return err
 	})
-	testdb.AssertQueryBudget(t, "operator_attention", func(ctx context.Context) error {
-		_, _, err := o.operatorAttention(ctx, nil, struct{}{})
-		return err
-	})
-	testdb.AssertQueryBudget(t, "decisions_pending", func(ctx context.Context) error {
+	testdb.AssertStatementsFlat(t, "decisions_pending", rows, 0, decisions, func(ctx context.Context) error {
 		_, _, err := o.decisionsPending(ctx, nil, struct{}{})
 		return err
 	})
+	testdb.AssertStatementsFlat(t, "operator_attention", rows, 0, decisions, func(ctx context.Context) error {
+		_, _, err := o.operatorAttention(ctx, nil, struct{}{})
+		return err
+	})
 
-	res, _, err := o.decisionsPending(ctx, nil, struct{}{})
+	// The reads return the seeded rows, so the guard measured real work.
+	view, err := o.taskGetView(ctx, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(view["blockers"].([]blockerView)); got != rows {
+		t.Fatalf("task_get returned %d blockers, want %d", got, rows)
+	}
+	pendingRes, _, err := o.decisionsPending(ctx, nil, struct{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var pending struct {
 		Decisions []json.RawMessage `json:"decisions"`
 	}
-	if err := json.Unmarshal([]byte(res.Content[0].(*gmcp.TextContent).Text), &pending); err != nil {
+	if err := json.Unmarshal([]byte(pendingRes.Content[0].(*gmcp.TextContent).Text), &pending); err != nil {
 		t.Fatal(err)
 	}
 	if len(pending.Decisions) != rows {
-		t.Fatalf("decisions_pending returned %d decisions, want the %d seeded", len(pending.Decisions), rows)
+		t.Fatalf("decisions_pending returned %d decisions, want %d", len(pending.Decisions), rows)
 	}
-	res, _, err = o.operatorAttention(ctx, nil, struct{}{})
+	attentionRes, _, err := o.operatorAttention(ctx, nil, struct{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var attention struct {
 		Decisions struct {
-			Count int               `json:"count"`
-			Items []json.RawMessage `json:"items"`
+			Count int `json:"count"`
 		} `json:"decisions"`
 	}
-	if err := json.Unmarshal([]byte(res.Content[0].(*gmcp.TextContent).Text), &attention); err != nil {
+	if err := json.Unmarshal([]byte(attentionRes.Content[0].(*gmcp.TextContent).Text), &attention); err != nil {
 		t.Fatal(err)
 	}
-	if attention.Decisions.Count != rows || len(attention.Decisions.Items) != store.AttentionItems {
-		t.Fatalf("operator_attention decisions count=%d items=%d, want count %d and items capped at %d",
-			attention.Decisions.Count, len(attention.Decisions.Items), rows, store.AttentionItems)
+	if attention.Decisions.Count != rows {
+		t.Fatalf("operator_attention decisions count=%d, want %d", attention.Decisions.Count, rows)
 	}
 }

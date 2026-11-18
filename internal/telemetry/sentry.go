@@ -170,10 +170,12 @@ func (m *Monitor) Handler(next http.Handler) http.Handler {
 	return withRequestID(queryBudgetLine(routes, next))
 }
 
-// QueryBudget is the number of database statements one request may run before
-// queryBudgetLine logs it. Every route shares it: the log line names the route,
-// so a route that needs more is seen in the logs before it is tuned.
-const QueryBudget = 50
+// QueryBudget is the coarse per-request alarm: the number of database
+// statements one request may run before queryBudgetLine logs it. It is set
+// generously, because the N+1 guard is the size-independence check in testdb
+// (AssertStatementsFlat); this line only catches a request that runs far more
+// statements than any batched read does.
+const QueryBudget = 200
 
 // queryBudgetLine counts the statements a request runs and logs one line when
 // the count is over QueryBudget. The count belongs to this request's context

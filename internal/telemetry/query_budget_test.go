@@ -3,6 +3,7 @@ package telemetry
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -44,7 +45,7 @@ func TestQueryBudgetLogsRouteOverBudget(t *testing.T) {
 	logs := captureLog(t)
 	h := (&Monitor{}).Handler(budgetMux(QueryBudget + 1))
 	serve(h, httptest.NewRequest(http.MethodGet, "/v1/tasks/7/many", nil))
-	want := `db.query_budget_exceeded route="/v1/tasks/{id}/many" count=51 budget=50`
+	want := fmt.Sprintf(`db.query_budget_exceeded route="/v1/tasks/{id}/many" count=%d budget=%d`, QueryBudget+1, QueryBudget)
 	if got := logs.String(); !strings.Contains(got, want) {
 		t.Fatalf("log %q, want a line with %q", got, want)
 	}
