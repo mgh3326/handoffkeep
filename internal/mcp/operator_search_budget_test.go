@@ -110,8 +110,22 @@ func TestMCPReadStatementsFlat(t *testing.T) {
 		_, _, err := o.decisionsPending(ctx, nil, struct{}{})
 		return err
 	})
-	testdb.AssertStatementsFlat(t, "operator_attention", rows, 0, decisions, func(ctx context.Context) error {
-		_, _, err := o.operatorAttention(ctx, nil, struct{}{})
+
+	// operator_attention gets its own store and grow: the decisions above
+	// already hold rows in st, so a shared grow would start at thirty and both
+	// runs would measure the same fixture.
+	attentionStore := newOperatorStore(t)
+	attentionTools := operatorTools{service: api.Service{Store: attentionStore}}
+	attentionDecisions := growTo(func(i int) {
+		task := newOperatorTask(t, attentionStore, fmt.Sprintf("budget attention fixture %d", i))
+		if _, err := attentionStore.RecordDecisionRequest(ctx, task.ID, "tester", store.DecisionRequestInput{
+			Question: fmt.Sprintf("Attend %d?", i), Options: options, DefaultAction: "hold", Block: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	testdb.AssertStatementsFlat(t, "operator_attention", rows, 0, attentionDecisions, func(ctx context.Context) error {
+		_, _, err := attentionTools.operatorAttention(ctx, nil, struct{}{})
 		return err
 	})
 
@@ -136,7 +150,7 @@ func TestMCPReadStatementsFlat(t *testing.T) {
 	if len(pending.Decisions) != rows {
 		t.Fatalf("decisions_pending returned %d decisions, want %d", len(pending.Decisions), rows)
 	}
-	attentionRes, _, err := o.operatorAttention(ctx, nil, struct{}{})
+	attentionRes, _, err := attentionTools.operatorAttention(ctx, nil, struct{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
