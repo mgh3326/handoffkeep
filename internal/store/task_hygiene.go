@@ -72,7 +72,9 @@ const (
 
 // All predicates below are composed with FROM tasks, without an alias.
 // In particular taskActivitySQL requires the relation name tasks.
-var hygieneMergedPredicate = `state NOT IN (` + settledStatesSQL + `)
+// Explicit tasks (hk 5112) are outside both predicates: nothing closes them, so
+// neither a finding nor the apply names them.
+var hygieneMergedPredicate = `state NOT IN (` + settledStatesSQL + `) AND close_rule<>'explicit'
  AND (
    EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
      WHERE ct.task_id=tasks.id AND ct.relation='implements'
@@ -85,7 +87,7 @@ var hygieneMergedPredicate = `state NOT IN (` + settledStatesSQL + `)
  ) AND NOT EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
    WHERE ` + unresolvedRevertSQL("tasks.id") + `)`
 
-var hygieneParentPredicate = `state IN (` + autoCloseStatesSQL + `)
+var hygieneParentPredicate = `state IN (` + autoCloseStatesSQL + `) AND close_rule<>'explicit'
  AND EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=tasks.id
    AND k.state IN ('completed','merged','deployed'))
  AND NOT EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=tasks.id
@@ -95,7 +97,7 @@ var hygieneParentPredicate = `state IN (` + autoCloseStatesSQL + `)
      AND k.state IN ('merged','deployed')))`
 
 // hygieneMergedPredicateMySQL is hygieneMergedPredicate for MySQL.
-var hygieneMergedPredicateMySQL = `state NOT IN (` + settledStatesSQL + `)
+var hygieneMergedPredicateMySQL = `state NOT IN (` + settledStatesSQL + `) AND close_rule<>'explicit'
  AND (
    EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
      WHERE ct.task_id=tasks.id AND ct.relation='implements'

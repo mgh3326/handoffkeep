@@ -40,6 +40,9 @@ type TaskDrift struct {
 	AutoCloseHeld       TaskDriftClass `json:"auto_close_held"`
 	MergedWithoutDeploy TaskDriftClass `json:"merged_without_deploy"`
 	IdleStarted         TaskDriftClass `json:"idle_started"`
+	// ExplicitAllSettled is hk 5112's class: an explicit task whose pieces are
+	// all settled but which is still open. Hygiene never applies it.
+	ExplicitAllSettled TaskDriftClass `json:"explicit_all_settled"`
 }
 
 // TaskDriftClass is one drift class: the rule it applies, the tasks it names,
@@ -94,7 +97,7 @@ var driftSettledOpenSQLMySQL = `SELECT ` + driftColumnsMySQL + `updated_at FROM 
 // says so for the PR the task names (a merged changes row, or a merged or
 // deployed task that names it): the merge did not propagate to this task.
 var driftMergedPRSQL = `SELECT ` + driftColumns + `updated_at FROM tasks t
-	WHERE t.state NOT IN (` + settledStatesSQL + `) AND (
+	WHERE t.state NOT IN (` + settledStatesSQL + `) AND t.close_rule<>'explicit' AND (
 		EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
 			WHERE ct.task_id=t.id AND ct.relation='implements' AND c.state='merged' AND c.reverted_by_change_id IS NULL)
 		OR (COALESCE(t.refs->>'pr','')<>'' AND (
@@ -105,7 +108,7 @@ var driftMergedPRSQL = `SELECT ` + driftColumns + `updated_at FROM tasks t
 
 // driftMergedPRSQLMySQL is driftMergedPRSQL for MySQL.
 var driftMergedPRSQLMySQL = `SELECT ` + driftColumnsMySQL + `updated_at FROM tasks t
-	WHERE t.state NOT IN (` + settledStatesSQL + `) AND (
+	WHERE t.state NOT IN (` + settledStatesSQL + `) AND t.close_rule<>'explicit' AND (
 		EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
 			WHERE ct.task_id=t.id AND ct.relation='implements' AND c.state='merged' AND c.reverted_by_change_id IS NULL)
 		OR (COALESCE(` + reportJSONText("t.refs", "$.pr") + `,'')<>'' AND (
@@ -118,9 +121,10 @@ var driftMergedPRSQLMySQL = `SELECT ` + driftColumnsMySQL + `updated_at FROM tas
 // state whose sub-tasks are all settled, one of which did work, and whose
 // automatic close would move it to merged or deployed (or to completed, for a
 // decide, ops, verify or research parent, the kinds canCompleteKind names). The close is
-// due and was not made: it is held, or was held and nothing re-ran it.
+// due and was not made: it is held, or was held and nothing re-ran it. An
+// explicit parent is not in the class: its close is by hand (driftExplicitSettledSQL).
 var driftAutoCloseHeldSQL = `SELECT ` + driftColumns + `updated_at FROM tasks p
-	WHERE p.state IN (` + autoCloseStatesSQL + `)
+	WHERE p.state IN (` + autoCloseStatesSQL + `) AND p.close_rule<>'explicit'
 	AND EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=p.id AND k.state IN ('completed','merged','deployed'))
 	AND NOT EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=p.id AND k.state NOT IN (` + settledStatesSQL + `))
 	AND (p.kind IN ('decide','ops','verify','research') OR EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=p.id AND k.state IN ('merged','deployed')))
@@ -129,6 +133,26 @@ var driftAutoCloseHeldSQL = `SELECT ` + driftColumns + `updated_at FROM tasks p
 // driftAutoCloseHeldSQLMySQL is driftAutoCloseHeldSQL for MySQL: only the
 // selected columns differ.
 var driftAutoCloseHeldSQLMySQL = strings.Replace(driftAutoCloseHeldSQL, driftColumns, driftColumnsMySQL, 1)
+
+// driftExplicitSettledSQL is class (f), explicit_all_settled: an explicit task
+// in an auto-close state (the states an automatic close applies from, so
+// triage and icebox are out, as no close is due there) that is still open
+// although every change it implements has merged (and is not reverted) and
+// every sub-task is settled. It needs at least one piece, a change or a
+// sub-task, so an empty explicit task is not listed. Each row is a reminder for
+// the task's owner, who closes it by hand; nothing applies it.
+var driftExplicitSettledSQL = `SELECT ` + driftColumns + `updated_at FROM tasks t
+	WHERE t.close_rule='explicit' AND t.state IN (` + autoCloseStatesSQL + `) AND (
+		EXISTS (SELECT 1 FROM change_tasks ct WHERE ct.task_id=t.id AND ct.relation='implements')
+		OR EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=t.id)
+	) AND NOT EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
+		WHERE ct.task_id=t.id AND ct.relation='implements' AND NOT (c.state='merged' AND c.reverted_by_change_id IS NULL))
+	AND NOT EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=t.id AND k.state NOT IN (` + settledStatesSQL + `))
+	ORDER BY t.id`
+
+// driftExplicitSettledSQLMySQL is driftExplicitSettledSQL for MySQL: only the
+// selected columns differ.
+var driftExplicitSettledSQLMySQL = strings.Replace(driftExplicitSettledSQL, driftColumns, driftColumnsMySQL, 1)
 
 // driftMergedPageSQL is one page of class (c)'s candidates: merged for at least
 // the cutoff, after the (since, id) keyset cursor. Pages are read in order so
@@ -189,6 +213,9 @@ func (s *Store) TaskDrift(ctx context.Context, now time.Time, mergedDays int) (T
 	}
 	if out.IdleStarted, err = driftList(ctx, tx, fmt.Sprintf("researching or developing, with no activity for %d hours (started_stalled_hours)", out.StartedStalledHours), sqlFor(tx, driftIdleStartedSQL, driftIdleStartedSQLMySQL), now.Add(-stalled)); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift idle_started: %w", err)
+	}
+	if out.ExplicitAllSettled, err = driftList(ctx, tx, "explicit (close_rule): every implements change merged and not reverted, every sub-task settled, and the task still open; a person closes it", sqlFor(tx, driftExplicitSettledSQL, driftExplicitSettledSQLMySQL)); err != nil {
+		return TaskDrift{}, fmt.Errorf("drift explicit_all_settled: %w", err)
 	}
 	return out, tx.Commit(ctx)
 }
