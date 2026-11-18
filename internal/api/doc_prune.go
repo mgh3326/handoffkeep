@@ -3,6 +3,8 @@ package api
 import (
 	"net/http"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
 // docPruneMaxDays bounds older_than_days so the cutoff duration cannot
@@ -10,12 +12,17 @@ import (
 const docPruneMaxDays = 36500
 
 // docPruneRequest is the body of POST /v1/documents/prune. Apply false is a
-// dry run; the store checks the prefix and the limit.
+// dry run; the store checks the prefix and the limit. Retention true selects
+// document retention (hk 5057): review/mwr-* by merged change and screens/*
+// by ended job, both DocRetentionDays old. Prefix and older_than_days are
+// ignored in retention mode; the cutoff is always the server clock minus
+// DocRetentionDays.
 type docPruneRequest struct {
 	Prefix        string `json:"prefix"`
 	OlderThanDays int    `json:"older_than_days"`
 	Limit         int    `json:"limit"`
 	Apply         bool   `json:"apply"`
+	Retention     bool   `json:"retention"`
 }
 
 // docPruneWriter reports whether client may prune documents: the operator,
@@ -40,6 +47,16 @@ func (s Server) docPrune(w http.ResponseWriter, r *http.Request) {
 	var in docPruneRequest
 	if e := decode(r, &in, bodySmall); e != nil {
 		appErr(w, r, e)
+		return
+	}
+	if in.Retention {
+		cutoff := time.Now().UTC().Add(-time.Duration(store.DocRetentionDays) * 24 * time.Hour)
+		res, e := s.Service.Store.PruneRetention(r.Context(), cutoff, in.Limit, in.Apply, client)
+		if e != nil {
+			appErr(w, r, e)
+			return
+		}
+		jsonOut(w, http.StatusOK, res)
 		return
 	}
 	if in.OlderThanDays < 1 || in.OlderThanDays > docPruneMaxDays {

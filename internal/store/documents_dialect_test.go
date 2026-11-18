@@ -135,3 +135,79 @@ func init() {
 		}
 	})
 }
+
+func init() {
+	registerTaskAreaCase("documents/retention", func(t *testing.T, s *Store) {
+		ctx := t.Context()
+		now := time.Now().UTC()
+		old := now.Add(-40 * 24 * time.Hour)
+		fresh := now.Add(-5 * 24 * time.Hour)
+		cutoff := now.Add(-30 * 24 * time.Hour)
+		exec := func(pg, my string, args ...any) {
+			t.Helper()
+			if _, err := s.db().Exec(ctx, s.q(pg, my), args...); err != nil {
+				t.Fatal(err)
+			}
+		}
+		exec(`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES($1,$2,'merged','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',$3,$4,$5,$6)`,
+			`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES(?,?,'merged','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',?,?,?,?)`,
+			"example/app", 201, now, old, now, now)
+		var changeOld int64
+		if err := s.db().QueryRow(ctx, s.q(`SELECT id FROM changes WHERE repo=$1 AND pr_number=$2`, `SELECT id FROM changes WHERE repo=? AND pr_number=?`), "example/app", 201).Scan(&changeOld); err != nil {
+			t.Fatal(err)
+		}
+		exec(`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES($1,$2,'merged','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',$3,$4,$5,$6)`,
+			`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES(?,?,'merged','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',?,?,?,?)`,
+			"example/app", 202, now, fresh, now, now)
+		exec(`INSERT INTO reviews(change_id, reviewed_head, round, pass, lens, reviewer_job_id, recorded_at) VALUES($1,$2,1,1,'correctness',$3,$4)`,
+			`INSERT INTO reviews(change_id, reviewed_head, round, pass, lens, reviewer_job_id, recorded_at) VALUES(?,?,1,1,'correctness',?,?)`,
+			changeOld, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mwr-201-aaa-p1-1", now)
+		exec(`INSERT INTO jobs(job_id, task_id, host, state, created_by, created_at, updated_at, ended_at) VALUES($1,0,'test-host','completed','tester',$2,$3,$4)`,
+			`INSERT INTO jobs(job_id, task_id, host, state, created_by, created_at, updated_at, ended_at) VALUES(?,0,'test-host','completed','tester',?,?,?)`,
+			"job-ret-old", now, now, old)
+		exec(`INSERT INTO jobs(job_id, task_id, host, state, created_by, created_at, updated_at, ended_at) VALUES($1,0,'test-host','completed','tester',$2,$3,$4)`,
+			`INSERT INTO jobs(job_id, task_id, host, state, created_by, created_at, updated_at, ended_at) VALUES(?,0,'test-host','completed','tester',?,?,?)`,
+			"job-ret-fresh", now, now, fresh)
+		put := func(key, kind, job string) {
+			t.Helper()
+			if _, _, err := s.PutDocument(ctx, Document{Key: key, Kind: kind, Body: "body of " + key, CreatedBy: "tester", Job: job}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		put("review/mwr-201-aaa-p1-1", "brief", "mwr-201-aaa-p1-1")
+		put("review/mwr-202-bbb-p1-2", "brief", "mwr-202-bbb-p1-2")
+		put("screens/job-ret-old/pane.txt", "evidence", "job-ret-old")
+		put("screens/job-ret-fresh/pane.txt", "evidence", "job-ret-fresh")
+		dry, err := s.PruneRetention(ctx, cutoff, 10, false, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dry.Deleted != 0 || dry.Matched != 2 || dry.SkippedBound != 0 || dry.KeptActive != 2 || dry.Bytes == 0 {
+			t.Fatalf("dry run: %+v, want matched 2 kept 2 bytes > 0", dry)
+		}
+		res, err := s.PruneRetention(ctx, cutoff, 10, true, "test")
+		if err != nil || res.Deleted != 2 || res.ReviewDeleted != 1 || res.ScreensDeleted != 1 {
+			t.Fatalf("apply: %+v err=%v", res, err)
+		}
+		if _, found, err := s.GetDocument(ctx, "review/mwr-201-aaa-p1-1"); err != nil || found {
+			t.Fatalf("review old still present: found=%v err=%v", found, err)
+		}
+		if _, found, err := s.GetDocument(ctx, "screens/job-ret-old/pane.txt"); err != nil || found {
+			t.Fatalf("screens old still present: found=%v err=%v", found, err)
+		}
+		if _, found, err := s.GetDocument(ctx, "review/mwr-202-bbb-p1-2"); err != nil || !found {
+			t.Fatalf("review fresh missing: found=%v err=%v", found, err)
+		}
+		var logs int64
+		if err := s.db().QueryRow(ctx, s.q(`SELECT count(*) FROM doc_prune_log WHERE pruned_by=$1`, `SELECT COUNT(*) FROM doc_prune_log WHERE pruned_by=?`), "test").Scan(&logs); err != nil {
+			t.Fatal(err)
+		}
+		if logs != 2 {
+			t.Fatalf("audit log rows = %d, want 2", logs)
+		}
+		again, err := s.PruneRetention(ctx, cutoff, 10, true, "test")
+		if err != nil || again.Deleted != 0 {
+			t.Fatalf("second run: %+v err=%v", again, err)
+		}
+	})
+}
