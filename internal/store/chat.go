@@ -386,6 +386,8 @@ func (s *Store) CreateChatMessage(ctx context.Context, x ChatMessage) (ChatMessa
 
 // PostChatMessage commits the body, Q changes and relation snapshots together.
 // The event-key lookup happens before any Q mutation, including on replay.
+// Relations are read after the write retry has returned: a read that fails
+// after a legacy commit must not be retried as a second insert.
 func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (ChatMessage, bool, error) {
 	var out ChatMessage
 	var created bool
@@ -394,7 +396,13 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		out, created, err = s.postChatMessageOnce(ctx, post)
 		return err
 	})
-	return out, created, err
+	if err != nil {
+		return ChatMessage{}, false, err
+	}
+	if err := s.loadChatRelations(ctx, []*ChatMessage{&out}); err != nil {
+		return ChatMessage{}, false, err
+	}
+	return out, created, nil
 }
 
 // postChatMessageOnce is one attempt of PostChatMessage's transaction.
@@ -504,9 +512,6 @@ func (s *Store) postChatMessageOnce(ctx context.Context, post ChatMessagePost) (
 				return ChatMessage{}, false, ErrChatMessageConflict
 			}
 			if err := tx.Commit(ctx); err != nil {
-				return ChatMessage{}, false, err
-			}
-			if err := s.loadChatRelations(ctx, []*ChatMessage{&old}); err != nil {
 				return ChatMessage{}, false, err
 			}
 			return old, false, nil
@@ -668,9 +673,6 @@ func (s *Store) postChatMessageOnce(ctx context.Context, post ChatMessagePost) (
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return ChatMessage{}, false, err
-	}
-	if err := s.loadChatRelations(ctx, []*ChatMessage{&m}); err != nil {
 		return ChatMessage{}, false, err
 	}
 	return m, true, nil

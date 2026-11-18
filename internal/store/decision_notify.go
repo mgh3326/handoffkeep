@@ -185,10 +185,10 @@ func decisionErrorCode(err error) string {
 func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, send func(context.Context, DecisionNotice) (string, error)) (found bool, sendErr error, err error) {
 	now = now.UTC()
 	// A deadlock after send must not post twice: the first attempt's send
-	// already happened, so a retry reuses its outcome and only re-runs the
-	// database settle, for the same row only. A retry that selects another row
-	// sends that row afresh. A failure before send leaves sent false and the
-	// retry sends normally.
+	// already happened, so a retry re-runs only the settle of that same row.
+	// Once a send has run, the retry selects that row by id and no other; if
+	// the row is no longer due, the send is reported as unsettled. A failure
+	// before send leaves sent false and the retry selects and sends normally.
 	var messageID string
 	var sent, skipped bool
 	var sentID int64
@@ -200,10 +200,14 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 		}
 		defer tx.Rollback(ctx)
 		var x DecisionNotice
+		pinPG, pinMySQL := "", ""
+		if sent {
+			pinPG, pinMySQL = " AND n.request_id=$3", " AND n.request_id=?"
+		}
 		query := sqlFor(tx, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs,n.message_id,n.applied_version,n.attempts,`+decisionMentionSQL+`
 			FROM decision_deliveries n JOIN decision_requests d ON d.id=n.request_id LEFT JOIN tasks t ON t.id=d.task_id
 			WHERE n.destination='`+DecisionDestinationDiscord+`' AND n.state='pending' AND n.next_attempt_at<=$1::timestamptz
-			AND n.applied_version<>`+decisionEffectiveStatusSQL+`
+			AND n.applied_version<>`+decisionEffectiveStatusSQL+pinPG+`
 			ORDER BY n.next_attempt_at ASC,n.request_id ASC LIMIT 1 FOR UPDATE OF n SKIP LOCKED`,
 			`SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs,n.message_id,n.applied_version,n.attempts,
 			(coalesce(n.applied_version='' AND (coalesce(t.awaiting_decision,false)
@@ -211,11 +215,14 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 			OR d.due_at<=?),false))
 			FROM decision_deliveries n JOIN decision_requests d ON d.id=n.request_id LEFT JOIN tasks t ON t.id=d.task_id
 			WHERE n.destination='`+DecisionDestinationDiscord+`' AND n.state='pending' AND n.next_attempt_at<=?
-			AND n.applied_version<>CASE WHEN d.status='open' AND d.expires_at<=? THEN 'expired' ELSE d.status END
+			AND n.applied_version<>CASE WHEN d.status='open' AND d.expires_at<=? THEN 'expired' ELSE d.status END`+pinMySQL+`
 			ORDER BY n.next_attempt_at ASC,n.request_id ASC LIMIT 1 FOR UPDATE SKIP LOCKED`)
 		args := []any{now, now.Add(DecisionNoticeNearDue)}
 		if dialectFor(tx) == mysqlDialect {
 			args = []any{now.Add(DecisionNoticeNearDue), now, now}
+		}
+		if sent {
+			args = append(args, sentID)
 		}
 		err = scanDecisionNoticeRow(tx.QueryRow(ctx, query, args...),
 			&x, now, &x.MessageID, &x.AppliedVersion, &x.Attempts, &x.Mention)
@@ -224,17 +231,14 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 				// The send ran, but its row left the due set before the retry
 				// could settle it: report the send as unsettled, not as nothing.
 				found = true
-				sendErr = fmt.Errorf("decision notice %d sent but not settled: its delivery row left the due set", sentID)
+				if sendErr == nil {
+					sendErr = fmt.Errorf("decision notice %d sent but not settled: its delivery row left the due set", sentID)
+				}
 			}
 			return nil
 		}
 		if err != nil {
 			return err
-		}
-		if sent && x.Record.ID != sentID {
-			// The retry selected another row: the send outcome belongs to sentID,
-			// so this row is sent afresh instead of settled with that message id.
-			sent, skipped, messageID, sendErr = false, false, "", nil
 		}
 		want := x.Record.Status
 		key := `WHERE request_id=$1 AND destination='` + DecisionDestinationDiscord + `'`
@@ -250,6 +254,14 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 		// A request that closed before its first post is never posted, and one
 		// that was never posted has no message to edit.
 		if (x.Post() && want != DecisionStatusOpen) || (!x.Post() && x.MessageID == "") {
+			// A send this invocation made before the request closed: keep the
+			// message id it returned, or the next drain posts the notice again.
+			if sent && sendErr == nil && messageID != "" {
+				if _, err = update(context.WithoutCancel(ctx), `UPDATE decision_deliveries SET message_id=$2,posted_at=$3 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET message_id=?,posted_at=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, messageID, now}, []any{messageID, now, x.Record.ID}); err != nil {
+					found = true
+					return err
+				}
+			}
 			if _, err = update(ctx, `UPDATE decision_deliveries SET desired_version=$2,applied_version=$2 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET desired_version=?,applied_version=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, want}, []any{want, want, x.Record.ID}); err != nil {
 				found = true
 				return err
@@ -393,6 +405,7 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 	// attempt's outcome instead of posting twice.
 	var messageID string
 	var sent, skipped bool
+	var sentTotal int
 	err = s.retryTx(ctx, func() error {
 		found = false
 		tx, err := s.db().Begin(ctx)
@@ -424,6 +437,12 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 			return err
 		}
 		if state != "pending" || next.After(now) {
+			if sent {
+				found = true
+				if sendErr == nil {
+					sendErr = fmt.Errorf("decision digest %s sent but not settled: its row is no longer pending", day.Format(time.DateOnly))
+				}
+			}
 			return nil
 		}
 		digest := DecisionDigest{Day: day}
@@ -456,7 +475,10 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 		if err = rows.Err(); err != nil {
 			return err
 		}
-		if digest.Total == 0 {
+		if sent {
+			digest.Total = sentTotal
+		}
+		if !sent && digest.Total == 0 {
 			if _, err = updateDigest(ctx, `UPDATE decision_notify_digest SET state='empty',sent_at=$2 WHERE day=$1::date`, `UPDATE decision_notify_digest SET state='empty',sent_at=? WHERE day=?`, []any{day, now}, []any{now, day}); err != nil {
 				found = true
 				return err
@@ -466,6 +488,7 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 		}
 		if !sent {
 			messageID, sendErr = send(ctx, digest)
+			sentTotal = digest.Total
 			sent = true
 		}
 		// send may have created the message: record the outcome even if ctx is
