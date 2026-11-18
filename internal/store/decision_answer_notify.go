@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -45,7 +46,7 @@ func (s *Store) queueDecisionAnswerNotice(ctx context.Context, tx pgx.Tx, x Task
 	lane := x.Lane
 	taskID := strconv.FormatInt(x.ID, 10)
 	prefix := "[hk] 결정 답변 " + resolved.ID + " task " + taskID + ": "
-	choice := decisionAnswerChoice(x.Refs.DecisionOptions, in, resolved.Status)
+	choice := decisionAnswerNoticeChoice(x.Refs.DecisionOptions, in, resolved.Status)
 	if resolved.Status != DecisionRequestAnswered && choice != resolved.Status {
 		// The pointer carries the state: a withdrawn or default_applied
 		// request says so, whatever its text.
@@ -119,4 +120,41 @@ func decisionAnswerChoice(options *DecisionOptions, in ResolveDecisionInput, kin
 		}
 	}
 	return in.Option
+}
+
+// decisionAnswerNoticeTextMaxRunes bounds the free text quoted in an answer
+// notice; the full text stays in the resolution record behind the link.
+const decisionAnswerNoticeTextMaxRunes = 200
+
+// decisionAnswerNoticeFullTextNote marks a clipped quote: the notice keeps
+// the link to the task, and the record behind it keeps the full text.
+const decisionAnswerNoticeFullTextNote = " (full text in record)"
+
+// decisionAnswerNoticeChoice names what was chosen for the lane notice: the
+// option choice, plus the free text when the answer carries any, after the
+// option. A clipped text carries "…" and the full-text note. An option-only
+// answer is just the choice.
+func decisionAnswerNoticeChoice(options *DecisionOptions, in ResolveDecisionInput, kind string) string {
+	choice := decisionAnswerChoice(options, in, kind)
+	if in.Text == "" {
+		return choice
+	}
+	clipped, wasClipped := clipAnswerNoticeText(in.Text)
+	note := ""
+	if wasClipped {
+		note = decisionAnswerNoticeFullTextNote
+	}
+	if in.Option == "" {
+		return clipped + note
+	}
+	return choice + " — " + clipped + note
+}
+
+// clipAnswerNoticeText cuts s to decisionAnswerNoticeTextMaxRunes code
+// points, marking the cut with "…", and reports whether it cut.
+func clipAnswerNoticeText(s string) (string, bool) {
+	if utf8.RuneCountInString(s) <= decisionAnswerNoticeTextMaxRunes {
+		return s, false
+	}
+	return string([]rune(s)[:decisionAnswerNoticeTextMaxRunes]) + "…", true
 }
