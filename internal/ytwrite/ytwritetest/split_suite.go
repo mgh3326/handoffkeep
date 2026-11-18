@@ -48,7 +48,9 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		state  ytwrite.State
 		reason string
 	}{
-		// 4603394669, 4603444899: a part's create fails after the index.
+		// 4603394669, 4603444899: a part's create fails after the index;
+		// 4603875797, 4603875859: a 5xx or timeout on a part is
+		// remote_unknown, never not_sent.
 		{name: "5xx_on_part", faults: []Fault{{}, {}, {Kind: ServerError}}, state: ytwrite.StateRemoteUnknown, reason: ytwrite.ReasonServerError},
 		{name: "5xx_committed_on_part", faults: []Fault{{}, {}, {Kind: ServerError, Commit: true}}, state: ytwrite.StateRemoteUnknown, reason: ytwrite.ReasonServerError},
 		// 4603906451: the part committed and its reply was lost: remote_unknown, never prepared.
@@ -115,7 +117,7 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		}
 	})
 
-	// S2 (4604032030, 4603875797/859): a dial error on part k ≥ 1 after the
+	// S2 (4604032030, 4603875797, 4603875859): a dial error on part k ≥ 1 after the
 	// index exists is remote_unknown, never prepared/not_sent.
 	t.Run("dial_error_on_part_2_is_remote_unknown", func(t *testing.T) {
 		e := newSplitEnv(t, nl, 3)

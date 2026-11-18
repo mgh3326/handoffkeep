@@ -319,6 +319,11 @@ package store
 //     lock; they take no task row. MarkLinkStep takes only FOR UPDATE on the
 //     op row, then inserts one yt_link_steps row; LeaseLinkRecovery is one
 //     UPDATE of the op row.
+//     PlanSplit and SettleSplit of an article_split op (yt_article_split.go,
+//     hk 5085) take the op's lane lock first, then FOR UPDATE on its op row,
+//     then write a yt_link_plans or yt_link_steps row and the op row;
+//     MarkSplitStep takes only FOR UPDATE on the op row, then inserts one
+//     yt_link_steps row and may set the op row's yt_result_id.
 //     PrepareMappedYTIssues takes the lane lock as the first lock of each
 //     task's transaction (as backfillYTIssue), then reads the task row
 //     without a lock. Claim of an issue_create op, under the lane lock and
