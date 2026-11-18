@@ -711,6 +711,10 @@ type Store struct {
 	// projects (SetYTDocsMode); nil is off. On prepares document ops from
 	// the change feed (hk 4206).
 	ytDocs atomic.Pointer[ytDocsGate]
+	// ytArticleSplit is HANDOFFKEEP_YT_ARTICLE_SPLIT (SetYTArticleSplit, hk
+	// 5085): on splits a long new document into an index and parts; off (the
+	// default) leaves it exception_not_updated.
+	ytArticleSplit atomic.Bool
 	// ytDocsCaughtUp is set once the document-article catch-up has run in
 	// this process (catchUpYTArticlesOnce).
 	ytDocsCaughtUp atomic.Bool

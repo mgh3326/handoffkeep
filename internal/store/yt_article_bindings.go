@@ -176,7 +176,8 @@ type YTArticleCandidate struct {
 
 // YTArticleDoc is a listed document, when it was created, the tenant of its
 // binding ("" when it has none) and whether that binding is a split
-// document's index (no content_sha).
+// document's index (no content_sha, or published by an article_split op, hk
+// 5085).
 type YTArticleDoc struct {
 	YTArticleCandidate
 	CreatedAt       time.Time
@@ -220,7 +221,8 @@ func (s *Store) YTArticleDocs(ctx context.Context, bucket string, afterID int64,
 	if afterID < 0 || limit < 1 || limit > YTArticleDocPageMax {
 		return nil, errors.New("invalid article document filter")
 	}
-	query := ytArticleCandidateSQLFor(s.db()) + `, d.created_at, coalesce(b.tenant, ''), b.document_id IS NOT NULL AND b.content_sha IS NULL` + ytArticleCandidateFrom + `
+	query := ytArticleCandidateSQLFor(s.db()) + `, d.created_at, coalesce(b.tenant, ''), b.document_id IS NOT NULL AND (b.content_sha IS NULL
+			OR EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id = b.op_id AND o.kind = '` + ytwrite.KindArticleSplit + `'))` + ytArticleCandidateFrom + `
 			LEFT JOIN yt_article_bindings b ON b.document_id = d.id
 			WHERE d.id > $2 AND ($1 = '' OR ` + ytArticleBucketSQL + ` = $1) ORDER BY d.id LIMIT $3`
 	args := []any{bucket, afterID, limit}
@@ -379,13 +381,16 @@ func (s *Store) addYTArticleBindingOnce(ctx context.Context, b YTArticleBinding,
 		return YTArticleBinding{}, err
 	}
 	var pending bool
-	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$1 AND entity_kind=$2 AND entity_id=$3
-		AND state NOT IN ('applied','rejected'))`, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=? AND entity_kind=? AND entity_id=?
-		AND state NOT IN ('applied','rejected'))`), ytwrite.KindArticleCreate, ytwrite.ArticleEntity, strconv.FormatInt(b.DocumentID, 10)).Scan(&pending); err != nil {
+	// An article_split op (hk 5085) is the document's create too, and one
+	// that ended rejected may have left its index: a backfill never binds
+	// beside it.
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE entity_kind=$2 AND entity_id=$3
+		AND ((kind=$1 AND state NOT IN ('applied','rejected')) OR kind=$4))`, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE entity_kind=? AND entity_id=?
+		AND ((kind=? AND state NOT IN ('applied','rejected')) OR kind=?))`), ytBindingPendingArgs(tx, b.DocumentID)...).Scan(&pending); err != nil {
 		return YTArticleBinding{}, err
 	}
 	if pending {
-		return YTArticleBinding{}, fmt.Errorf("%w: document %d has an unresolved article_create op", ErrYTArticleBindingConflict, b.DocumentID)
+		return YTArticleBinding{}, fmt.Errorf("%w: document %d has an unresolved article_create or an article_split op", ErrYTArticleBindingConflict, b.DocumentID)
 	}
 	var current YTArticleCandidate
 	err = scanYTArticleCandidate(tx.QueryRow(ctx, ytArticleCandidateSQLFor(tx)+ytArticleCandidateFrom+` WHERE d.id = `+sqlFor(tx, `$1`, `?`), b.DocumentID), &current)
@@ -491,4 +496,14 @@ func (s *Store) addYTArticleBindingOnce(ctx context.Context, b YTArticleBinding,
 		return YTArticleBinding{}, fmt.Errorf("%w: document %d is bound to article %s on %s", ErrYTArticleBindingConflict, b.DocumentID, have.ArticleID, have.Tenant)
 	}
 	return have, tx.Commit(ctx)
+}
+
+// ytBindingPendingArgs orders the pending-create check's arguments: MySQL
+// binds them in the order they appear.
+func ytBindingPendingArgs(q any, documentID int64) []any {
+	entity := strconv.FormatInt(documentID, 10)
+	if dialectFor(q) == mysqlDialect {
+		return []any{ytwrite.ArticleEntity, entity, ytwrite.KindArticleCreate, ytwrite.KindArticleSplit}
+	}
+	return []any{ytwrite.KindArticleCreate, ytwrite.ArticleEntity, entity, ytwrite.KindArticleSplit}
 }
