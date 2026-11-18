@@ -22,6 +22,9 @@ var mysqlMigrations []mysqlMigration
 func registerMySQLMigration(m mysqlMigration) { mysqlMigrations = append(mysqlMigrations, m) }
 
 func orderMySQLMigrations(migrations []mysqlMigration) ([]mysqlMigration, error) {
+	if err := resolveMySQLCollationMigration(migrations); err != nil {
+		return nil, err
+	}
 	byID := make(map[string]mysqlMigration, len(migrations))
 	for _, m := range migrations {
 		if err := checkMigrationID(m.id); err != nil {

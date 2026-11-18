@@ -17,26 +17,13 @@ func TestMySQLCollationRecreationCoversTriggers(t *testing.T) {
 	if _, err := orderMySQLMigrations(mysqlMigrations); err != nil {
 		t.Fatalf("full MySQL registry does not order: %v", err)
 	}
-	created := map[string]bool{}
-	dropped := map[string]bool{}
-	for _, m := range mysqlMigrations {
-		if m.id == collationID {
-			continue
-		}
-		for _, step := range m.steps {
-			if name, ok := mysqlCollationTriggerName(step); ok {
-				created[name] = true
-			}
-			if name, ok := mysqlCollationDropName(step); ok {
-				dropped[name] = true
-			}
-		}
+	liveMap, _, err := mysqlLiveTriggers(mysqlMigrations)
+	if err != nil {
+		t.Fatalf("derive live triggers: %v", err)
 	}
 	var live []string
-	for name := range created {
-		if !dropped[name] {
-			live = append(live, name)
-		}
+	for name := range liveMap {
+		live = append(live, name)
 	}
 	var myDrops, myCreates []string
 	for _, m := range mysqlMigrations {
@@ -58,6 +45,9 @@ func TestMySQLCollationRecreationCoversTriggers(t *testing.T) {
 			}
 			name, _, _ := strings.Cut(rest, " ")
 			myCreates = append(myCreates, name)
+			if wantBody, exists := liveMap[name]; exists && step != wantBody {
+				t.Errorf("collation migration recreated trigger %s has body:\n%s\nwant:\n%s", name, step, wantBody)
+			}
 		}
 	}
 	sort.Strings(live)
