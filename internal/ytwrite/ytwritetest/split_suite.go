@@ -581,6 +581,10 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		if got.State != ytwrite.StateRemoteUnknown || got.YTResultID != before.YTResultID {
 			t.Fatalf("op %s/%q index %q", got.State, got.Reason, got.YTResultID)
 		}
+		if got.Reconciles != before.Reconciles+1 {
+			t.Fatalf("reconciles %d, want the pass's epoch %d", got.Reconciles, before.Reconciles+1)
+		}
+		e.wantAmbiguousLatest(op)
 		if m, ok, _ := e.ledger.MapGet(context.Background(), ytwrite.ArticleEntity, op.EntityID); ok {
 			t.Fatalf("document mapped to %s", m.YTID)
 		}
@@ -590,6 +594,65 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 			t.Fatal(err)
 		}
 		e.wantState(op, ytwrite.StateApplied, "")
+	})
+
+	// The operator's first read is refused while a recovery pass holds the
+	// lease (hk 5304): that pass already moved the epoch, so an observation
+	// made during it carries the pass's own epoch. Were it accepted, the pass
+	// could mark a part, get an ambiguous answer and settle back to
+	// remote_unknown before the plan read, and the decision would then match
+	// the locked row's epoch, index and plan though the part may still land.
+	t.Run("operator_read_while_recovery_holds_the_lease_is_refused", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 3)
+		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: DialFail})
+		op := e.prepare()
+		e.drive()
+		before := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
+		e.clock.Advance(time.Hour)
+		ctx := context.Background()
+		sl := e.ledger.(ytwrite.SplitLedger)
+		// A recovery pass leases the op, plans the missing part 2 and
+		// marks its create; its request is in flight at the operator's read.
+		epoch, ok, err := sl.LeaseLinkRecovery(ctx, e.clock.Now(), op.ID, before.Reconciles, e.clock.Now().Add(time.Minute))
+		if err != nil || !ok {
+			t.Fatalf("lease %v %v", ok, err)
+		}
+		f := ytwrite.LinkFence{Attempt: before.Attempts, Recover: 1, Epoch: epoch}
+		if err := sl.PlanSplit(ctx, e.clock.Now(), op.ID, f, ytwrite.SplitPlan{Kind: ytwrite.SplitPlanTag, Index: before.YTResultID, Parts: 3, Steps: []int{2}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := sl.MarkSplitStep(ctx, e.clock.Now(), op.ID, f, 0, before.YTResultID); err != nil {
+			t.Fatal(err)
+		}
+		// Between the operator's read and its plan read, the pass's create
+		// answers ambiguously and the pass settles back to remote_unknown at
+		// the same epoch: lease released, same index, a plan the decision
+		// reads as latest. Only the read made under the lease can refuse.
+		writes := len(e.yt.ArticleWrites())
+		race := &racingLedger{splitLedger: e.ledger.(splitLedger), afterByID: func() {
+			if _, err := sl.SettleSplit(ctx, e.clock.Now(), op.ID, f, ytwrite.LinkSettlement{
+				To: ytwrite.StateRemoteUnknown, Outcome: ytwrite.StepAmbiguous, Next: e.clock.Now().Add(time.Hour),
+				Reason: ytwrite.ReasonServerError, Detail: "part 2 of 3: 502",
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}}
+		e.restart(race)
+		_, err = e.p.Resolve(ctx, op.ID, ytwrite.Resolution{Applied: true, YTID: before.YTResultID, By: "operator", Note: "looked"})
+		if !errors.Is(err, ytwrite.ErrState) {
+			t.Fatalf("the operator's apply from a read under a recovery lease: %v", err)
+		}
+		got := e.op(op)
+		if got.State != ytwrite.StateRemoteUnknown || got.YTResultID != before.YTResultID || got.Reconciles != epoch {
+			t.Fatalf("op %s/%q index %q reconciles %d", got.State, got.Reason, got.YTResultID, got.Reconciles)
+		}
+		e.wantAmbiguousLatest(op)
+		if m, ok, _ := e.ledger.MapGet(ctx, ytwrite.ArticleEntity, op.EntityID); ok {
+			t.Fatalf("document mapped to %s", m.YTID)
+		}
+		if w := len(e.yt.ArticleWrites()); w != writes {
+			t.Fatalf("the refused decision made %d requests", w-writes)
+		}
 	})
 
 	// The operator's word on a held op: not applied rejects it and leaves
@@ -715,6 +778,21 @@ func (e *splitEnv) wantState(op ytwrite.Op, state ytwrite.State, reason string) 
 		e.t.Fatalf("op %d = %s/%q (%q), want %s/%q", op.ID, got.State, got.Reason, got.LastError, state, reason)
 	}
 	return got
+}
+
+// wantAmbiguousLatest checks that op's latest plan still records its marked
+// create as ambiguous: a refused operator decision left recovery's record of
+// the in-flight part as it was.
+func (e *splitEnv) wantAmbiguousLatest(op ytwrite.Op) {
+	e.t.Helper()
+	history, err := e.ledger.(ytwrite.SplitLedger).SplitPlans(context.Background(), op.ID)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	latest, found := ytwrite.LatestSplitPlan(history)
+	if !found || latest.Marked == 0 || latest.Outcome != ytwrite.StepAmbiguous {
+		e.t.Fatalf("latest plan %d.%d marked %d outcome %q (found %v), want an ambiguous marked create", latest.Attempt, latest.Recover, latest.Marked, latest.Outcome, found)
+	}
 }
 
 // indexes counts the articles carrying the op's index marker.
