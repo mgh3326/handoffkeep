@@ -218,12 +218,14 @@ func (s *Store) RecordMCPWrite(ctx context.Context, w MCPWrite, taskID int64, re
 
 // TaskUpdateInput is one task_update call. ExpectedUpdatedAt is the revision
 // the caller read; a task that moved since is a conflict. At least one change
-// is set: State, Lane or Priority. Note becomes the event note of each change.
+// is set: State, Lane, Priority or CloseRule. Note becomes the event note of
+// each change.
 type TaskUpdateInput struct {
 	ExpectedUpdatedAt time.Time
 	State             string
 	Lane              string
 	Priority          *int
+	CloseRule         string
 	Note              string
 }
 
@@ -246,8 +248,9 @@ type TaskUpdateResult struct {
 func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w MCPWrite) (TaskUpdateResult, error) {
 	var out TaskUpdateResult
 	if w.Tool != mcpTaskUpdateTool || id < 1 || in.ExpectedUpdatedAt.IsZero() || w.Key == "" || !validLifecycleKey(w.Key) ||
-		(in.State == "" && in.Lane == "" && in.Priority == nil) ||
+		(in.State == "" && in.Lane == "" && in.Priority == nil && in.CloseRule == "") ||
 		(in.Priority != nil && (*in.Priority < 0 || *in.Priority > math.MaxInt32)) ||
+		(in.CloseRule != "" && !validCloseRule(in.CloseRule)) ||
 		!validText(in.Note, MaxBytes) || !validText(in.State, 64) || !validText(in.Lane, 128) {
 		return out, ErrInvalidTaskUpdate
 	}
@@ -323,6 +326,12 @@ func (s *Store) updateTaskTx(ctx context.Context, tx transaction, id int64, in T
 			return out, err
 		}
 		changed = append(changed, "priority")
+	}
+	if in.CloseRule != "" && in.CloseRule != x.CloseRule {
+		if err := setTaskCloseRuleTx(ctx, pgTransaction{tx}, &x, in.CloseRule, w.Author, in.Note, mcpTaskUpdateSource, ref+":close_rule"); err != nil {
+			return out, err
+		}
+		changed = append(changed, "close_rule")
 	}
 	if in.State != "" && in.State != x.State {
 		if _, err := s.transitionTaskTx(ctx, tx, id, TransitionInput{To: in.State, By: w.Author, Note: in.Note, Source: mcpTaskUpdateSource, SourceRef: ref + ":state"}, false); err != nil {

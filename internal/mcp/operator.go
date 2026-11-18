@@ -108,12 +108,12 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.taskIntake)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "task_update",
-		Description: "Change one hk task's state, lane or priority in one call (any of them). expected_updated_at is the updated_at you read from task_show or task_get; a task that changed since answers revision_conflict and nothing is written. idempotency_key is required; a repeat returns the first call's result. Returns the changed fields, the new revision, console_url and youtrack_sync (sync_pending for a mirrored task).",
+		Description: "Change one hk task's state, lane, priority or close_rule (auto or explicit) in one call (any of them). expected_updated_at is the updated_at you read from task_show or task_get; a task that changed since answers revision_conflict and nothing is written. idempotency_key is required; a repeat returns the first call's result. Returns the changed fields, the new revision, console_url and youtrack_sync (sync_pending for a mirrored task).",
 		Annotations: writeAnnotations(),
 	}, o.taskUpdate)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "decision_ask",
-		Description: "Ask the operator a structured decision on one hk task, recorded the same way as tasks decision-request. idempotency_key is required; a repeat returns the first result. The operator answers with decision_answer; a request marked operator-only (answer_policy operator_direct) closes only on the operator's own words.",
+		Description: "Ask the operator a structured decision on one hk task, recorded the same way as tasks decision-request. grounds is a list of one-line facts the recommendation rests on; lane names the asking lane (its answer notice also goes there when it differs from the task's lane). new_task true files a kind=decide task in project on lane, titled with the question, and records the request on it (no task_id); such a call is not replayed, so a retry is refused as a similar open task. idempotency_key is required; a repeat returns the first result. The operator answers with decision_answer; a request marked operator-only (answer_policy operator_direct) closes only on the operator's own words.",
 		Annotations: writeAnnotations(),
 	}, o.decisionAsk)
 	gmcp.AddTool(s, &gmcp.Tool{

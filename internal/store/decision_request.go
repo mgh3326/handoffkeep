@@ -55,6 +55,8 @@ const (
 	DecisionRequestTextMaxBytes    = 1000
 	DecisionOptionLabelMaxBytes    = 120
 	DecisionRequestMaxRefs         = 10
+	DecisionRequestMaxGrounds      = 10
+	DecisionRequestGroundMaxBytes  = 300
 	// The operator's decision page compares options by their pictures and
 	// videos (hk 4788): at most eight per option, each with a one-line caption.
 	DecisionOptionMaxAttachments      = 8
@@ -185,7 +187,14 @@ type DecisionRequest struct {
 	DueAt          *time.Time `json:"due_at,omitempty"`
 	Doc            string     `json:"doc,omitempty"`
 	// Refs are short pointers the question depends on. They count toward ver.
-	Refs        []string  `json:"refs,omitempty"`
+	Refs []string `json:"refs,omitempty"`
+	// Grounds are the facts the recommendation rests on, one line each. The
+	// request row keeps them in decision_requests.grounds (a JSON array, the
+	// column decision records already use).
+	Grounds []string `json:"grounds,omitempty"`
+	// RequestLane is the lane that asked. The answer notice also goes there
+	// when it differs from the task's lane (decision_answer_notify.go).
+	RequestLane string    `json:"request_lane,omitempty"`
 	RequestedBy string    `json:"requested_by"`
 	RequestedAt time.Time `json:"requested_at"`
 	// HumanOnly marks a request the assistant path must not answer — the
@@ -279,7 +288,10 @@ type DecisionRequestInput struct {
 	DueAt                *time.Time `json:"due_at,omitempty"`
 	Doc                  string     `json:"doc,omitempty"`
 	Refs                 []string   `json:"refs,omitempty"`
-	Supersedes           string     `json:"supersedes,omitempty"`
+	// Grounds and RequestLane: see DecisionRequest.
+	Grounds     []string `json:"grounds,omitempty"`
+	RequestLane string   `json:"request_lane,omitempty"`
+	Supersedes  string   `json:"supersedes,omitempty"`
 	// Block also sets the task's awaiting_decision flag in the same
 	// transaction (a request that stops the work). Without it the state is unchanged.
 	Block bool `json:"block,omitempty"`
@@ -585,6 +597,17 @@ func CheckDecisionRequestInput(in DecisionRequestInput) error {
 			return invalidDecisionRequest(fmt.Sprintf("each ref must be one line of at most %d bytes", DecisionRequestActionMaxBytes))
 		}
 	}
+	if len(in.Grounds) > DecisionRequestMaxGrounds {
+		return invalidDecisionRequest(fmt.Sprintf("at most %d grounds are allowed", DecisionRequestMaxGrounds))
+	}
+	for _, ground := range in.Grounds {
+		if !validDecisionLine(ground, DecisionRequestGroundMaxBytes) {
+			return invalidDecisionRequest(fmt.Sprintf("each ground must be one line of at most %d bytes", DecisionRequestGroundMaxBytes))
+		}
+	}
+	if in.RequestLane != "" && !validName(in.RequestLane) {
+		return invalidDecisionRequest("request_lane must be a lane name")
+	}
 	if in.Supersedes != "" && !strings.HasPrefix(in.Supersedes, "dr-") {
 		return invalidDecisionRequest("supersedes must be a request id (dr-<task>-<revision>)")
 	}
@@ -675,7 +698,7 @@ func sameDecisionRequest(current DecisionRequest, currentOptions *DecisionOption
 		current.OneFix == in.OneFix &&
 		current.DefaultAction == in.DefaultAction && current.DefaultOption == in.DefaultOption &&
 		current.DefaultTrigger == in.DefaultTrigger && sameDue(current.DueAt, in.DueAt) && current.Doc == in.Doc &&
-		slices.Equal(current.Refs, in.Refs) && current.HumanOnly == in.HumanOnly &&
+		slices.Equal(current.Refs, in.Refs) && slices.Equal(current.Grounds, in.Grounds) && current.RequestLane == in.RequestLane && current.HumanOnly == in.HumanOnly &&
 		normalAnswerPolicy(current.AnswerPolicy) == normalAnswerPolicy(in.AnswerPolicy)
 }
 
@@ -683,6 +706,7 @@ func rejectDecisionRequestSecrets(in DecisionRequestInput) error {
 	values := []string{in.Question, in.Reason, in.RecommendationReason, in.OneFix, in.DefaultAction, in.DefaultTrigger, in.Doc}
 	values = append(values, in.Refs...)
 	values = append(values, in.Unverified...)
+	values = append(values, in.Grounds...)
 	for _, option := range in.Options.Options {
 		values = append(values, option.Label)
 		for _, attachment := range option.Attachments {
@@ -895,6 +919,8 @@ func (s *Store) recordDecisionRequestFlowTx(ctx context.Context, tx transaction,
 		DueAt:                 in.DueAt,
 		Doc:                   in.Doc,
 		Refs:                  in.Refs,
+		Grounds:               in.Grounds,
+		RequestLane:           in.RequestLane,
 		HumanOnly:             in.HumanOnly,
 		AnswerPolicy:          in.AnswerPolicy,
 		RequestedBy:           by,

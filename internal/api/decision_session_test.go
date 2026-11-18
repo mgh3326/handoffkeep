@@ -83,11 +83,33 @@ func TestDecisionResolveSessionHTTP(t *testing.T) {
 			t.Fatalf("resolution=%v", resolution)
 		}
 	})
-	t.Run("session on a direct policy waits", func(t *testing.T) {
-		// Even the operator token: the session channel is never verified.
+	t.Run("session quote closes a direct policy", func(t *testing.T) {
+		// Even the operator token: the session channel is never verified, and
+		// the operator's words are what close it (operator decision 400).
 		x, request := seed(t, store.DecisionPolicyOperatorDirect, false)
 		status, body := post(t, "op-tok", x.ID, session(request))
-		if status != http.StatusAccepted || body["result"] != store.DecisionResultPendingConfirmation {
+		if status != http.StatusOK || body["result"] != store.DecisionResultAnswered {
+			t.Fatalf("status=%d body=%v", status, body)
+		}
+		resolution := body["request"].(map[string]any)["resolution"].(map[string]any)
+		if resolution["operator_quote"] != "A로 가자" || resolution["decision_ref"] != request.ID || resolution["provenance"] != store.DecisionProvenanceOperatorDecided {
+			t.Fatalf("resolution=%v", resolution)
+		}
+	})
+	t.Run("session without the words is refused on a direct policy", func(t *testing.T) {
+		x, request := seed(t, store.DecisionPolicyOperatorDirect, true)
+		judgement := session(request)
+		delete(judgement, "operator_quote")
+		judgement["provenance"] = store.DecisionProvenanceAssistantJudgement
+		delete(judgement, "decision_ref")
+		status, body := post(t, "desk-tok", x.ID, judgement)
+		if status != http.StatusConflict || body["error"] != "decision_request_human_only" {
+			t.Fatalf("status=%d body=%v", status, body)
+		}
+		wrong := session(request)
+		wrong["decision_ref"] = "dr-999999-1"
+		status, body = post(t, "desk-tok", x.ID, wrong)
+		if status != http.StatusConflict || body["error"] != "provenance_ref_mismatch" {
 			t.Fatalf("status=%d body=%v", status, body)
 		}
 	})

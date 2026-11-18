@@ -426,6 +426,12 @@ export function DecisionPage({ id }: { id: string }) {
               <p>{req.one_fix}</p>
             </section>
           )}
+          {req.grounds && req.grounds.length > 0 && (
+            <section className="decision-grounds">
+              <h2>근거</h2>
+              <ul>{req.grounds.map((item) => <li key={item}>{item}</li>)}</ul>
+            </section>
+          )}
           {detail.answerable && req.allow_free && <label className="decision-memo">메모 · 한 가지 고칠 점<textarea className="hk-input" value={text} disabled={!editable} onChange={(e) => { setText(e.target.value); setStale(false); }} /></label>}
           {!detail.answerable && req.resolution?.text && <p>메모: {req.resolution.text}</p>}
           <div className="decision-meta">
