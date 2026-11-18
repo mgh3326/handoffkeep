@@ -60,7 +60,9 @@ func (l *MemLedger) MarkSplitStep(_ context.Context, now time.Time, id int64, f 
 		return err
 	}
 	ps[len(ps)-1].Marked++
-	if index != "" {
+	if index != "" && op.State == ytwrite.StateRemoteUnknown {
+		// As the store: a dispatched op's index is recorded by its
+		// settlement (the store's guard refuses dispatched -> dispatched).
 		op.YTResultID = index
 	}
 	return nil

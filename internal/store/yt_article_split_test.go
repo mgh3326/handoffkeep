@@ -23,7 +23,7 @@ func TestYTArticleSplitProtocolOverPostgres(t *testing.T) {
 	n := 0
 	ytwritetest.RunSplitProtocol(t, func(t *testing.T) (ytwrite.Ledger, int64) {
 		t.Helper()
-		if _, err := s.pool.Exec(t.Context(), `TRUNCATE yt_link_steps, yt_entity_map, yt_article_bindings, yt_family_roots, yt_write_ops, yt_write_op_adoptions`); err != nil {
+		if _, err := s.pool.Exec(t.Context(), `TRUNCATE yt_link_owned, yt_link_unowned, yt_link_steps, yt_comment_write_links, yt_entity_map, yt_family_roots, yt_article_bindings, yt_write_ops, yt_write_op_adoptions, yt_issue_comment_bounds`); err != nil {
 			t.Fatal(err)
 		}
 		n++
@@ -164,9 +164,15 @@ func TestYTArticleSplitGateAdmitsDispatchedOpsWhenOff(t *testing.T) {
 	if _, outcome, err := l.Claim(t.Context(), time.Now().UTC(), ops[0].ID); err != nil || outcome != ytwrite.ClaimHeld {
 		t.Fatalf("a never-dispatched split op with the flag off: %v %v", outcome, err)
 	}
-	if _, err := s.pool.Exec(t.Context(), `UPDATE yt_write_ops SET attempts=1, reason=$2 WHERE id=$1`, ops[0].ID, ytwrite.ReasonRateLimited); err != nil {
+	// Dispatched once with the flag on, then deferred (a 429).
+	s.SetYTArticleSplit(true)
+	if _, outcome, err := l.Claim(t.Context(), time.Now().UTC(), ops[0].ID); err != nil || outcome != ytwrite.ClaimClaimed {
+		t.Fatalf("claim with the flag on: %v %v", outcome, err)
+	}
+	if _, err := l.Defer(t.Context(), time.Now().UTC(), ops[0].ID, time.Now().UTC().Add(-time.Second), ytwrite.ReasonRateLimited, "429"); err != nil {
 		t.Fatal(err)
 	}
+	s.SetYTArticleSplit(false)
 	if _, outcome, err := l.Claim(t.Context(), time.Now().UTC(), ops[0].ID); err != nil || outcome != ytwrite.ClaimClaimed {
 		t.Fatalf("a deferred split op with the flag off: %v %v", outcome, err)
 	}

@@ -241,8 +241,9 @@ type SplitLedger interface {
 	// record.
 	SplitPlans(ctx context.Context, id int64) ([]SplitPlanRecord, error)
 	// MarkSplitStep records that f's executor is about to send step of its
-	// plan and, when index is set, records it as the op's index (YTResultID),
-	// in one transaction: CheckLinkFence and CheckSplitMark, else ErrState
+	// plan and, when index is set on a remote_unknown op, records it as the
+	// op's index (YTResultID; a dispatched op's settlement records it), in
+	// one transaction: CheckLinkFence and CheckSplitMark, else ErrState
 	// (ErrConflictingResult for another index) and nothing changes.
 	MarkSplitStep(ctx context.Context, now time.Time, id int64, f LinkFence, step int, index string) error
 	// SettleSplit settles op id for the executor f in one transaction: the

@@ -26,7 +26,7 @@ import (
 // lock, then FOR UPDATE on the op row, then write yt_link_plans or
 // yt_link_steps rows and the op row, as PlanLinks and SettleLinks do.
 // MarkSplitStep takes only FOR UPDATE on the op row, then inserts one
-// yt_link_steps row and may set the op row's yt_result_id, as MarkLinkStep.
+// yt_link_steps row and, for a remote_unknown op, may set its yt_result_id.
 
 var _ ytwrite.SplitLedger = (*YTWriteLedger)(nil)
 
@@ -143,9 +143,12 @@ func (l *YTWriteLedger) markSplitStepOnce(ctx context.Context, now time.Time, id
 		id, f.Attempt, f.Recover, step, now.UTC()); err != nil {
 		return err
 	}
-	if index != "" && op.YTResultID == "" {
-		// The index id is durable before the request that depends on it, so
-		// recovery reads the family by id, never by search (S1, S6).
+	if index != "" && op.YTResultID == "" && op.State == ytwrite.StateRemoteUnknown {
+		// A recovery pass records the index it found before the request
+		// that depends on it. A dispatched op cannot change in place (the
+		// yt_write_ops guard refuses dispatched -> dispatched): its
+		// settlement records the index, and an executor that dies before it
+		// leaves recovery the marker search, or the hold (S6, S7).
 		if _, err := tx.Exec(ctx, sqlFor(tx, `UPDATE yt_write_ops SET yt_result_id=$2 WHERE id=$1`,
 			`UPDATE yt_write_ops SET yt_result_id=? WHERE id=?`), ytSplitIndexArgs(tx, id, index)...); err != nil {
 			return err
