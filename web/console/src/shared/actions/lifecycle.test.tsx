@@ -246,3 +246,44 @@ it("writes the timeline row in Korean for transitions, relane and closure", () =
   expect(eventText({ id: 4, kind: "transition", from: "backlog", to: "icebox", by: "operator", note: "보류", at: "" })).toBe("상태 변경 · 대기 → 보류(보관) · 보류");
   expect(eventText({ id: 5, from: "developing", to: "developing", by: "operator", field: "priority", from_value: "2", to_value: "3", note: "priority 2 → 3: 이유", at: "" })).toBe("우선순위 P2 → P3 · 이유");
 });
+
+it("offers 진행시키기 only on a task that has not started", () => {
+  for (const state of ["backlog", "unstarted", "triage"]) expect(byID["order"].disabledReason({ ...base, state })).toBeNull();
+  expect(byID["order"].disabledReason({ ...base, state: "developing" })).toContain("착수 전");
+  expect(byID["order"].disabledReason({ ...base, state: "merged" })).toBe("종결된 작업은 변경할 수 없습니다");
+});
+
+it("sends the operator's words verbatim in one order call", async () => {
+  const applied = vi.fn();
+  const fetcher = mockWrites(new Response(JSON.stringify({ order: { id: "ord-aaaaaaaaaa", target_lane: "handoffkeep-design", channel: "console", verified: true }, duplicate: false }), { status: 200 }));
+  render(<div data-action-task="7"><TaskActions compact target={{ ...base, state: "backlog" }} onPriority={() => {}} onApplied={applied} /></div>);
+  openMenu();
+  fireEvent.click(screen.getByRole("menuitem", { name: "진행시키기" }));
+  const dialog = screen.getByRole("dialog", { name: "진행시키기" });
+  expect(dialog.textContent).toContain("승인이 포함되지 않으며");
+  expect((screen.getByLabelText("지시") as HTMLTextAreaElement).value).toBe("진행시켜");
+  fireEvent.change(screen.getByLabelText("지시"), { target: { value: "이거 먼저 진행해줘" } });
+  fireEvent.click(screen.getByRole("button", { name: "진행 지시 보내기" }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+  expect(String(fetcher.mock.calls[0][0])).toBe("/ui/api/tasks/7/order");
+  expect(writeBody(fetcher, 0)).toMatchObject({ words: "이거 먼저 진행해줘" });
+  expect(typeof writeBody(fetcher, 0).event_key).toBe("string");
+  await waitFor(() => expect(applied).toHaveBeenCalled());
+});
+
+it("keeps the dialog and its key when an order is refused, and blocks empty words", async () => {
+  const fetcher = mockWrites(new Response(JSON.stringify({ error: "order_task_started" }), { status: 409 }));
+  render(<><ActionNotices /><div data-action-task="7"><TaskActions compact target={{ ...base, state: "backlog" }} onPriority={() => {}} /></div></>);
+  openMenu();
+  fireEvent.click(screen.getByRole("menuitem", { name: "진행시키기" }));
+  const send = screen.getByRole("button", { name: "진행 지시 보내기" });
+  fireEvent.change(screen.getByLabelText("지시"), { target: { value: "   " } });
+  expect(send.hasAttribute("disabled")).toBe(true);
+  fireEvent.change(screen.getByLabelText("지시"), { target: { value: "진행시켜" } });
+  fireEvent.click(send);
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("이미 시작된 작업은 진행시킬 수 없습니다"));
+  const firstKey = writeBody(fetcher, 0).event_key;
+  fireEvent.click(screen.getByRole("button", { name: "진행 지시 보내기" }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+  expect(writeBody(fetcher, 1).event_key).toBe(firstKey);
+});

@@ -321,6 +321,9 @@ const TASK_ACTION_MESSAGES: Record<string, string> = {
   disposition_operator_only: "처분 항목은 콘솔에서 직접 변경할 수 없습니다.",
   decision_request_open: "열린 결정 요청을 먼저 해결하세요.",
   task_job_required: "작업 연결이 없어 실행할 수 없습니다.",
+  order_task_started: "이미 시작된 작업은 진행시킬 수 없습니다.",
+  order_no_lane: "지시를 보낼 레인이 없습니다. 작업의 레인이나 프로젝트 담당 레인을 먼저 정하세요.",
+  order_key_conflict: "같은 요청 키로 다른 지시가 이미 기록되어 있습니다. 새로고침한 뒤 다시 시도하세요.",
   secret_like_content: "비밀 정보로 보이는 내용은 저장할 수 없습니다.",
   not_found: "작업을 찾을 수 없습니다.",
   relay_failed: "레인은 옮겼지만 레인 알림을 보내지 못했습니다.",
@@ -386,6 +389,13 @@ export function holdTask(id: number, held: boolean, to: string, eventKey: string
 }
 export function reopenTask(id: number, reason: string, eventKey: string): Promise<{ state: string }> {
   return postTaskAction<{ state: string }>(id, "reopen", { reason }, eventKey);
+}
+export type OrderResult = { order: { id: string; target_lane: string; channel: string; verified: boolean }; duplicate: boolean };
+/** The operator's "set going" for a task that has not started. words is the
+ * operator's own text, recorded verbatim; the order approves nothing and
+ * starts no worker (docs/task-orders.md). */
+export function orderTask(id: number, words: string, eventKey: string): Promise<OrderResult> {
+  return postTaskAction<OrderResult>(id, "order", { words }, eventKey);
 }
 export type RelaneOutcome = { previous: string; lane: string; changed: boolean; relay: "sent" | "duplicate" | "unconfigured" | "failed" | "none" };
 /** fromKey names the relane this write undoes; the store lets that undo
