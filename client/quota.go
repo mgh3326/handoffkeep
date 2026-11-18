@@ -16,6 +16,7 @@ type QuotaObservation struct {
 	ConfirmedAt *time.Time       `json:"confirmed_at,omitempty"`
 	ExpiresAt   *time.Time       `json:"expires_at,omitempty"`
 	Plan        string           `json:"plan,omitempty"`
+	Balance     *float64         `json:"balance,omitempty"`
 	Buckets     []QuotaBucket    `json:"buckets"`
 	FreeBucket  *QuotaFreeBucket `json:"free_bucket,omitempty"`
 }

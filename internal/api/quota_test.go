@@ -52,6 +52,98 @@ func TestQuotaFreeBucketRejections(t *testing.T) {
 	}
 }
 
+func TestQuotaBalanceRejections(t *testing.T) {
+	const key = "codex:0123456789abcdef"
+	h := Server{Tokens: Tokens{"client": "test-token"}, QuotaAccounts: QuotaAccounts{"client": {key: true}}}.Handler()
+	const holder = `"holder":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`
+	obs := func(rest string) string {
+		return `{` + holder + `,"observation":{"kind":"auto","measured_at":"2026-10-30T00:00:00Z","buckets":[{"window":"5h","used_pct":10,"scope":"account"}],` + rest + `}}`
+	}
+	for _, tc := range []struct{ name, body string }{
+		{"negative balance", obs(`"balance":-1`)},
+		{"string balance", obs(`"balance":"5"`)},
+		{"bool balance", obs(`"balance":true`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest("PUT", "/v1/quota/accounts/"+key+"/observation", strings.NewReader(tc.body))
+			r.Header.Set("Authorization", "Bearer test-token")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("%d %s", w.Code, w.Body)
+			}
+			var got map[string]string
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got["error"] != "invalid_context" || got["field"] != "balance" {
+				t.Fatalf("body=%s err=%v", w.Body, err)
+			}
+		})
+	}
+}
+
+func TestQuotaBalanceAPIPostgres(t *testing.T) {
+	_, st := relaneAPIServer(t)
+	ctx := context.Background()
+	const key = "codex:dddddddddddddddd"
+	const holder = "dddddddddddddddddddddddddddddddd"
+	if _, err := st.LeaseQuota(ctx, key, "publisher", holder, 120); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(Server{
+		Service:       Service{Store: st},
+		Tokens:        Tokens{"writer": "token-w", "reader": "token-r"},
+		QuotaAccounts: QuotaAccounts{"writer": {key: true}},
+	}.Handler())
+	t.Cleanup(srv.Close)
+	call := func(method, path, token, body string) (int, []byte) {
+		t.Helper()
+		var rdr *strings.Reader
+		if body == "" {
+			rdr = strings.NewReader("")
+		} else {
+			rdr = strings.NewReader(body)
+		}
+		req, err := http.NewRequest(method, srv.URL+path, rdr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		out, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, out
+	}
+	at := time.Now().UTC().Add(-time.Minute).Truncate(time.Second).Format(time.RFC3339)
+	put := `{"holder":"` + holder + `","observation":{"kind":"auto","measured_at":"` + at + `","buckets":[{"window":"5h","used_pct":10,"scope":"account"}],"balance":7.25}}`
+	code, out := call(http.MethodPut, "/v1/quota/accounts/"+key+"/observation", "token-w", put)
+	var created store.QuotaObservation
+	if code != http.StatusCreated || json.Unmarshal(out, &created) != nil || created.Balance == nil || *created.Balance != 7.25 {
+		t.Fatalf("put balance %d %s", code, out)
+	}
+	code, out = call(http.MethodGet, "/v1/quota/accounts/"+key+"/latest", "token-r", "")
+	var latest store.QuotaLatest
+	if code != http.StatusOK || json.Unmarshal(out, &latest) != nil || latest.Observation == nil || latest.Observation.Balance == nil || *latest.Observation.Balance != 7.25 {
+		t.Fatalf("latest balance %d %s", code, out)
+	}
+	since := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	code, out = call(http.MethodGet, "/v1/quota/accounts/"+key+"/observations?since="+since, "token-r", "")
+	var rows []store.QuotaObservation
+	if code != http.StatusOK || json.Unmarshal(out, &rows) != nil || len(rows) != 1 || rows[0].Balance == nil || *rows[0].Balance != 7.25 {
+		t.Fatalf("history balance %d %s", code, out)
+	}
+	bad := `{"holder":"` + holder + `","observation":{"kind":"auto","measured_at":"` + at + `","buckets":[{"window":"5h","used_pct":10,"scope":"account"}],"balance":-1}}`
+	code, out = call(http.MethodPut, "/v1/quota/accounts/"+key+"/observation", "token-w", bad)
+	var got map[string]string
+	if code != http.StatusBadRequest || json.Unmarshal(out, &got) != nil || got["error"] != "invalid_context" || got["field"] != "balance" {
+		t.Fatalf("negative balance %d %s", code, out)
+	}
+}
+
 func TestQuotaRequestGuards(t *testing.T) {
 	h := Server{Tokens: Tokens{"client": "test-token"}, QuotaAccounts: QuotaAccounts{"client": {"codex:0123456789abcdef": true}}}.Handler()
 	for _, tc := range []struct {
