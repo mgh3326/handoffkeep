@@ -177,35 +177,35 @@ stateDiagram-v2
     backlog --> icebox
     backlog --> dropped
     backlog --> duplicate: requires a duplicate_of relation
-    backlog --> completed: decide, ops, verify, research; result link required
+    backlog --> completed: decide, fix, ops, verify, research; result link required
     unstarted --> backlog
     unstarted --> researching: claim / next (verify, research, decide)
     unstarted --> developing: claim / next (implement, fix, ops)
     unstarted --> icebox
     unstarted --> dropped
     unstarted --> duplicate
-    unstarted --> completed: decide, ops, verify, research; result link required
+    unstarted --> completed: decide, fix, ops, verify, research; result link required
     researching --> developing
     researching --> reviewing
     researching --> unstarted
     researching --> icebox
     researching --> dropped
     researching --> duplicate
-    researching --> completed: decide, ops, verify, implement; closure evidence required
+    researching --> completed: decide, fix, ops, verify, implement; closure evidence required
     developing --> researching
     developing --> reviewing
     developing --> unstarted
     developing --> icebox
     developing --> dropped
     developing --> duplicate
-    developing --> completed: decide, ops, verify, implement; closure evidence required
+    developing --> completed: decide, fix, ops, verify, implement; closure evidence required
     reviewing --> developing: fix needed
     reviewing --> merged: reference flag stores refs.pr
     reviewing --> unstarted
     reviewing --> icebox
     reviewing --> dropped
     reviewing --> duplicate
-    reviewing --> completed: decide, ops, verify, implement; closure evidence required
+    reviewing --> completed: decide, fix, ops, verify, implement; closure evidence required
     merged --> unstarted: reopen (reason required)
     merged --> completed: closure evidence (result link or hk:doc)
     deployed --> unstarted: reopen (reason required)
@@ -256,6 +256,14 @@ An `implement` task closes as `completed` only when no change it implements is
 unmerged and no sub-task is open (a sub-task whose state is not in the completed or canceled category; merged and deployed count as completed).
 A refusal answers `task_conflict` and names the unmerged PR (`repo#number`, with its state) or the
 open sub-task. A closed-without-merge PR counts as unmerged.
+
+A `fix` task resolved by other work — an operator action or an unrelated
+change — closes as `completed` on closure evidence when no change it
+implements is open or merged. A fix whose own PR is in flight or already
+merged closes through the `merged`/`deployed` path instead; a refusal answers
+`task_conflict` naming the PR. A reverted change still counts as merged —
+relanding takes a new PR — while a closed-without-merge change delivered
+nothing and does not block.
 
 Old state names still work as input and in `--state` filters (`in_progress` →
 the claim's sub-state, `verifying` and `join` → `reviewing`, `hold` →

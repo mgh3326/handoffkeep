@@ -102,7 +102,8 @@ function ConfirmAction({ action, target, eventKey, close, onApplied }: { action:
         return "완료로 닫았습니다.";
       })}
     >
-      <p>decide·ops·verify 작업만 완료로 닫을 수 있습니다.</p>
+      <p>decide·fix·ops·verify 작업만 완료로 닫을 수 있습니다.</p>
+      {target.kind === "fix" && <p>자체 PR이 진행 중이거나 머지된 fix 작업은 머지됨/배포됨 경로로 닫아야 합니다.</p>}
       <label>결과 링크 <input value={evidence} onChange={e => edit(() => setEvidence(e.target.value))} placeholder="결과 링크 또는 hk:doc 키" /></label>
       <label>메모 (선택) <textarea value={reason} onChange={e => edit(() => setReason(e.target.value))} /></label>
     </ActionDialog>;

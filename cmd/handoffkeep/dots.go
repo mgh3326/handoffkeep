@@ -13,7 +13,7 @@ import (
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
-const dotsUsage = "usage: dots request --title TITLE --body BODY [--type CREATE_MOCKUP|CREATE_ASSET|REVIEW_IMPLEMENTATION] [--requester-lane L] [--project P] [--idempotency-key KEY] [--option 'A|label' ...] [--option-attachment 'A|sha256[|caption]' ...]\n       dots results [--task N] [--issue ID]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID] [--canva-url U --canva-page P --canva-version V]\n       dots answer <task> --text <answer> [--requester-lane L] [--question-id N]\n       dots cancel <task> --reason REASON [--requester-lane L]\n\nNote: dots answer answers an open decision request, or a plain dots QUESTION with the request's requester lane (--requester-lane defaults to PANEWIRE_LANE); a question is answered once. With several questions open, --question-id names the reply (its id in dots_inbox).\nNote: A requester-lane comment alone does NOT resolve an open dots question (explicit beats implicit); use dots answer.\nNote: A requester-lane comment alone does NOT cancel a request; use dots cancel, which only the request's requester lane may run.\nNote: --option declares that the request ends in the operator's choice; its RESULT opens the decision."
+const dotsUsage = "usage: dots request --title TITLE --body BODY [--type CREATE_MOCKUP|CREATE_ASSET|REVIEW_IMPLEMENTATION] [--requester-lane L] [--project P] [--idempotency-key KEY] [--option 'A|label' ...] [--option-attachment 'A|sha256[|caption]' ...]\n       dots results [--task N] [--issue ID]\n       dots reads [--since RFC3339] [--limit N]\n       dots adopt <id> --state accepted|partially_used|rejected|superseded [--ref R] [--superseded-by ID] [--canva-url U --canva-page P --canva-version V]\n       dots answer <task> --text <answer> [--requester-lane L] [--question-id N]\n       dots cancel <task> --reason REASON [--requester-lane L]\n\nNote: dots answer answers an open decision request, or a plain dots QUESTION with the request's requester lane (--requester-lane defaults to PANEWIRE_LANE); a question is answered once. With several questions open, --question-id names the reply (its id in dots_inbox).\nNote: A requester-lane comment alone does NOT resolve an open dots question (explicit beats implicit); use dots answer.\nNote: A requester-lane comment alone does NOT cancel a request; use dots cancel, which only the request's requester lane may run.\nNote: --option declares that the request ends in the operator's choice; its RESULT opens the decision."
 
 func dotsRequestCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("dots request", flag.ContinueOnError)
@@ -89,11 +89,12 @@ func dotsRequestCmd(args []string, out io.Writer) error {
 // dotsCmd lists recorded dots answers and records what became of them.
 //
 //	dots results --task N | --issue ROB-1
+//	dots reads [--since RFC3339] [--limit N]
 //	dots adopt ID --state S [--ref R] [--superseded-by ID] [--canva-url U --canva-page P --canva-version V]
 //	dots answer TASK --text ANSWER [--requester-lane L]
 //	dots cancel TASK --reason REASON [--requester-lane L]
 func dotsCmd(args []string, out io.Writer) error {
-	if len(args) == 0 || (args[0] != "request" && args[0] != "results" && args[0] != "adopt" && args[0] != "answer" && args[0] != "cancel") {
+	if len(args) == 0 || (args[0] != "request" && args[0] != "results" && args[0] != "reads" && args[0] != "adopt" && args[0] != "answer" && args[0] != "cancel") {
 		return errors.New(dotsUsage)
 	}
 	if args[0] == "request" {
@@ -104,11 +105,13 @@ func dotsCmd(args []string, out io.Writer) error {
 	fs.SetOutput(io.Discard)
 	c := remoteClient(fs)
 	var (
-		taskID   int64
-		issue    string
-		in       store.DotsAdoptionInput
-		answerIn store.DotsAnswerInput
-		cancelIn store.DotsCancelInput
+		taskID     int64
+		issue      string
+		in         store.DotsAdoptionInput
+		answerIn   store.DotsAnswerInput
+		cancelIn   store.DotsCancelInput
+		readsSince string
+		readsLimit int
 	)
 	var valueFlags []string
 	switch sub {
@@ -116,6 +119,10 @@ func dotsCmd(args []string, out io.Writer) error {
 		fs.Int64Var(&taskID, "task", 0, "hk task id")
 		fs.StringVar(&issue, "issue", "", "Linear issue identifier, such as ROB-1")
 		valueFlags = []string{"task", "issue"}
+	case "reads":
+		fs.StringVar(&readsSince, "since", "", "RFC3339; only reads at or after this time")
+		fs.IntVar(&readsLimit, "limit", 0, "at most N reads; the server default applies when unset")
+		valueFlags = []string{"since", "limit"}
 	case "adopt":
 		fs.StringVar(&in.State, "state", "", "accepted, partially_used, rejected or superseded")
 		fs.StringVar(&in.Ref, "ref", "", "what adopted it: a GitHub PR URL, hk:task/<id> or hk:doc <key>")
@@ -146,6 +153,18 @@ func dotsCmd(args []string, out io.Writer) error {
 	case "results":
 		if fs.NArg() != 0 || (taskID > 0) == (issue != "") || taskID < 0 {
 			return errors.New("dots results takes exactly one of --task N or --issue ID")
+		}
+	case "reads":
+		if fs.NArg() != 0 {
+			return errors.New("dots reads takes no arguments")
+		}
+		if readsLimit < 0 {
+			return errors.New("dots reads --limit must be positive")
+		}
+		if readsSince != "" {
+			if _, err := time.Parse(time.RFC3339, readsSince); err != nil {
+				return errors.New("dots reads --since must be an RFC3339 time")
+			}
 		}
 	case "adopt":
 		if fs.NArg() != 1 {
@@ -196,6 +215,23 @@ func dotsCmd(args []string, out io.Writer) error {
 			return err
 		}
 		return printJSON(out, map[string]any{"results": xs})
+	case "reads":
+		var since time.Time
+		if readsSince != "" {
+			since, _ = time.Parse(time.RFC3339, readsSince)
+		}
+		xs, err := c.ListDotsInboxReads(ctx, since, readsLimit)
+		if err != nil {
+			return err
+		}
+		answer := map[string]any{"reads": xs}
+		if len(xs) > 0 {
+			answer["last_read_at"] = xs[0].ReadAt
+			if len(xs) > 1 {
+				answer["gap_seconds"] = xs[0].ReadAt.Sub(xs[1].ReadAt).Seconds()
+			}
+		}
+		return printJSON(out, answer)
 	case "adopt":
 		res, err := c.SetDotsAdoption(ctx, id, in)
 		if err != nil {
