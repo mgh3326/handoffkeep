@@ -57,6 +57,9 @@ func SplitArticleBody(body string) []string {
 		for cut > 0 && !utf8.RuneStart(s[cut]) {
 			cut--
 		}
+		if cut == 0 { // not valid UTF-8 (CheckArticleSplit refuses it): never loop
+			cut = SplitChunkMaxBytes
+		}
 		if nl := strings.LastIndexByte(s[:cut], '\n'); nl >= cut/2 {
 			cut = nl + 1
 		}
