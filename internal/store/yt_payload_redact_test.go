@@ -120,8 +120,12 @@ func TestYTWriteOpPayloadRedactGuard(t *testing.T) {
 	} {
 		wantRedactErr(t, redactExec(t, s, `UPDATE yt_write_ops SET `+q+` WHERE id=$1`, other.ID), "immutable")
 	}
-	// Companion changes that pass the identity check still hit the frozen row.
-	wantRedactErr(t, redactExec(t, s, `UPDATE yt_write_ops SET payload=NULL, reason='late' WHERE id=$1`, other.ID), "cannot change")
+	// A companion change fails the identity arm: redact needs every other
+	// column unchanged, so the payload change has no valid exception.
+	wantRedactErr(t, redactExec(t, s, `UPDATE yt_write_ops SET payload=NULL, reason='late' WHERE id=$1`, other.ID), "immutable")
+	// A change that leaves the payload alone passes identity and still hits
+	// the frozen row.
+	wantRedactErr(t, redactExec(t, s, `UPDATE yt_write_ops SET next_attempt_at=now() WHERE id=$1`, other.ID), "cannot change")
 	// The log stays append-only.
 	wantRedactErr(t, redactExec(t, s, `DELETE FROM yt_write_ops WHERE id=$1`, other.ID), "append-only")
 	// A NULL payload reads back as nil with the receipt kept.
