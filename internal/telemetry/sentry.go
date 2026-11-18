@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"os"
@@ -166,7 +167,34 @@ func (m *Monitor) Handler(next http.Handler) http.Handler {
 	if m.otlp != nil {
 		next = m.otlp.trace(routes, next)
 	}
-	return withRequestID(next)
+	return withRequestID(queryBudgetLine(routes, next))
+}
+
+// QueryBudget is the coarse per-request alarm: the number of database
+// statements one request may run before queryBudgetLine logs it. It is set
+// generously, because the N+1 guard is the size-independence check in testdb
+// (AssertStatementsFlat); this line only catches a request that runs far more
+// statements than any batched read does.
+const QueryBudget = 200
+
+// queryBudgetLine counts the statements a request runs and logs one line when
+// the count is over QueryBudget. The count belongs to this request's context
+// only, so a concurrent request never adds to it. routes resolves the route
+// template before the request is served, as the tracers do.
+func queryBudgetLine(routes, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, count := WithQueryCount(r.Context())
+		route := routeTemplate(routePattern(routes, r))
+		if route == "" {
+			route = "<unmatched>"
+		}
+		defer func() {
+			if n := count.Count(); n > QueryBudget {
+				log.Printf("db.query_budget_exceeded route=%q count=%d budget=%d", route, n, QueryBudget)
+			}
+		}()
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 func (m *Monitor) trace(next http.Handler) http.Handler {

@@ -165,7 +165,9 @@ func TestRequestTransactionAndQuerySpans(t *testing.T) {
 		t.Fatalf("got %d DB spans", len(event.Spans))
 	}
 	for _, span := range event.Spans {
-		if span.Op != "db.sql.query" || span.Description != "SELECT ?::text, ?, ?" {
+		// The description is the query label (verb and table; none here). The
+		// statement text does not leave the process (hk 5058).
+		if span.Op != "db.sql.query" || span.Description != "select" {
 			t.Fatalf("bad query span: %+v", span)
 		}
 		if span.Data["db.system"] != "postgresql" || span.Data["db.rows_affected"] != int64(1) {

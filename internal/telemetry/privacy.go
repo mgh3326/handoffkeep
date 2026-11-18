@@ -1,10 +1,15 @@
 package telemetry
 
 import (
+	"regexp"
 	"strconv"
 
 	"github.com/getsentry/sentry-go"
 )
+
+// spanLabelPattern admits the query labels a DB span can carry (Label and
+// shapeLabel): lower-case words, digits, underscores, dots and spaces.
+var spanLabelPattern = regexp.MustCompile(`^[a-z][a-z0-9_. ]{0,127}$`)
 
 // Scrub list for both errors and transactions: request (all headers, cookies,
 // URL/query, body), user, breadcrumbs, hostname, arbitrary messages, extras,
@@ -63,7 +68,11 @@ func scrubEvent(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 			span.Description, span.Data = "", nil
 			continue
 		}
-		span.Description = normalizeSQL(span.Description)
+		// A DB span's description is its query label, never the statement:
+		// a label that is not a plain name is dropped (hk 5058).
+		if !spanLabelPattern.MatchString(span.Description) {
+			span.Description = ""
+		}
 		span.Data = onlyKeys(span.Data, "db.system", "db.rows_affected")
 	}
 	return event

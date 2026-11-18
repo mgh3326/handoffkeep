@@ -38,9 +38,17 @@ const (
 
 // otlpRouteGroups names the route sets that OTLP tracing can cover. Matching
 // is on the static route template ("/v1/tasks/{id}"), never on the URL.
+//
+// "reads" is the default: the task routes, search, the console (its requests
+// share the "/ui/" template, since the console dispatches by hand) and MCP,
+// the read paths whose query counts the budget guards (hk 5058).
 var otlpRouteGroups = map[string]func(template string) bool{
 	"tasks": func(template string) bool {
 		return template == "/v1/tasks" || strings.HasPrefix(template, "/v1/tasks/")
+	},
+	"reads": func(template string) bool {
+		return template == "/v1/tasks" || strings.HasPrefix(template, "/v1/tasks/") ||
+			template == "/v1/search" || template == "/mcp" || strings.HasPrefix(template, "/ui/")
 	},
 }
 
@@ -88,7 +96,7 @@ func otlpSettingsFromEnv(environment, release string) (*otlpSettings, error) {
 	}
 	group := strings.TrimSpace(os.Getenv("HANDOFFKEEP_OTLP_ROUTES"))
 	if group == "" {
-		group = "tasks"
+		group = "reads"
 	}
 	routes, ok := otlpRouteGroups[group]
 	if !ok {
