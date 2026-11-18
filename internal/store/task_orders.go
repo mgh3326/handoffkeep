@@ -118,8 +118,15 @@ FROM task_orders o LEFT JOIN notification_outbox n ON n.event_id = CONCAT('task-
 var placeholderRE = regexp.MustCompile(`\$[0-9]+`)
 
 // orderSQL answers a PostgreSQL statement whose $n parameters appear once each
-// and in order, as the same statement for the store's dialect.
+// and in order, as the same statement for the store's dialect. MySQL binds
+// positionally, so a statement that uses them out of order would bind the wrong
+// values there; orderSQL refuses such a statement on both dialects.
 func (s *Store) orderSQL(postgres string) string {
+	for i, p := range placeholderRE.FindAllString(postgres, -1) {
+		if p != "$"+strconv.Itoa(i+1) {
+			panic("store: orderSQL placeholders must be $1, $2, ... in order: " + postgres)
+		}
+	}
 	return s.q(postgres, placeholderRE.ReplaceAllString(postgres, "?"))
 }
 
