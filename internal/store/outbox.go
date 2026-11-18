@@ -33,6 +33,10 @@ const (
 	// OutboxKindTaskOrder is the operator's order to a lane (hk 5125): a new
 	// order, or its withdrawal. It goes out as hub type "order".
 	OutboxKindTaskOrder = "task_order"
+	// OutboxKindTaskDrift is the daily drift and hygiene delivery (hk 5112
+	// track B-3): one row per lane per day, plus one operator-desk summary.
+	// It goes out as hub type "info".
+	OutboxKindTaskDrift = "task_drift"
 	// OutboxSkipBeforeForwarder is the skip_reason of a row queued before the
 	// forwarder's cutoff: it was settled visibly instead of delivered, because
 	// turning forwarding on must not flush the backlog (hk 4986).

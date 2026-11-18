@@ -17,7 +17,11 @@ const (
 	HubForwardWorkerLock WorkerLock = 8241873510
 	// 8241873511 was the retired Linear board worker's lock (hk 4425); do
 	// not reuse it while a previous release may still hold it.
-	TaskThreadWorkerLock    WorkerLock = 8241873512
+	TaskThreadWorkerLock WorkerLock = 8241873512
+	// DriftWorkerLock is the daily drift and hygiene worker's lock (hk 5112
+	// track B-3): it ticks every 5 minutes and delivers once on the first
+	// tick at or after 09:00 KST.
+	DriftWorkerLock         WorkerLock = 8241873520
 	workerLockProbeInterval            = time.Second
 	workerLockProbeTimeout             = 2 * time.Second
 )
@@ -33,7 +37,7 @@ type WorkerLease struct {
 // uncertain acquisition discards the connection so a locked session cannot
 // return to the pool.
 func (s *Store) TryWorkerLock(ctx context.Context, id WorkerLock) (*WorkerLease, bool, error) {
-	if id != HubForwardWorkerLock && id != TaskThreadWorkerLock {
+	if id != HubForwardWorkerLock && id != TaskThreadWorkerLock && id != DriftWorkerLock {
 		return nil, false, errors.New("unknown worker lock")
 	}
 	if s.dialect == mysqlDialect {

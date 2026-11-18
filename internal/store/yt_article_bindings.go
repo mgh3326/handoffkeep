@@ -128,12 +128,16 @@ func YTArticleSplit(bodyBytes int) bool { return bodyBytes > YTArticleSafePartBy
 
 // YTArticleExcluded reports whether the import made no article for the
 // document (client.js excludedDoc): a key under screens/, a review/mwr-*
-// prompt, or a task's report (reports/mwr-*/..., reports/<job>/report.md),
-// which became an issue comment instead. taskID 0 is no task.
+// prompt, the daily metrics/ prefix (hk 5112 track B-3, metrics/waits/* are
+// counted, not mirrored), or a task's report (reports/mwr-*/...,
+// reports/<job>/report.md), which became an issue comment instead. taskID 0
+// is no task.
 func YTArticleExcluded(key string, taskID int64) bool {
 	path := strings.Split(key, "/")
 	switch {
 	case path[0] == "screens":
+		return true
+	case path[0] == "metrics":
 		return true
 	case path[0] == "review" && len(path) > 1 && strings.HasPrefix(path[1], "mwr-"):
 		return true
