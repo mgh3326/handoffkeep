@@ -21,6 +21,7 @@ func init() {
 	registerTaskAreaCase("waits/derived-spawn-start", waitsCaseDerivedSpawnStart)
 	registerTaskAreaCase("waits/derived-review", waitsCaseDerivedReview)
 	registerTaskAreaCase("waits/failed-start-section", waitsCaseFailedStartSection)
+	registerTaskAreaCase("waits/spawn-failure-comment", waitsCaseSpawnFailureComment)
 	registerTaskAreaCase("waits/idle-started", waitsCaseIdleStarted)
 	registerTaskAreaCase("waits/backlog-apart-and-filter", waitsCaseBacklogApartAndFilter)
 }
@@ -278,5 +279,40 @@ func waitsCaseBacklogApartAndFilter(t *testing.T, s *Store) {
 	}
 	if _, err := s.ListWaits(t.Context(), time.Now().UTC(), "nope"); !errors.Is(err, ErrTaskWaitInvalid) {
 		t.Fatalf("an unknown section is accepted: %v", err)
+	}
+}
+
+// A spawn failure comment (panewire's, or a session's by hand) is a derived
+// failed start until the task is started again; the session's external:spawn
+// hand wait on the same failure stays alongside it.
+func waitsCaseSpawnFailureComment(t *testing.T, s *Store) {
+	ctx := t.Context()
+	task := flowCaseTask(t, s, "implement")
+	_, err := s.CreateTaskComment(ctx, task.ID, "panewire", "spawn failed request=req-9 rc=1 stage=hub-accept reason=502 at hub-accept")
+	flowMust(t, err)
+	row, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionFailedStart, task.ID)
+	if !ok || row.Source != "derived:spawn_failed_comment" || row.OnKind != WaitOnExternal || row.OnRef != WaitRefSpawn || row.NextAction != "retry_spawn" || !strings.HasPrefix(row.Reason, "spawn failed request=req-9") {
+		t.Fatalf("spawn failure row=%+v found=%t", row, ok)
+	}
+	if _, err := s.AddTaskWait(ctx, task.ID, TaskWaitInput{OnKind: WaitOnExternal, OnRef: WaitRefSpawn, Reason: "502 at hub-accept"}, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	both := 0
+	for _, r := range waitsSection(t, waitsRead(t, s, ""), WaitSectionFailedStart).Rows {
+		if r.TaskID == task.ID {
+			both++
+		}
+	}
+	if both != 2 {
+		t.Fatalf("failed_start rows for the task=%d, want the derived failure and the hand wait", both)
+	}
+	// A transition into a started state after the comment ends the failed start.
+	if _, err := s.TransitionTask(ctx, task.ID, StateDeveloping, "tester", "", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range waitsSection(t, waitsRead(t, s, ""), WaitSectionFailedStart).Rows {
+		if r.Source == "derived:spawn_failed_comment" && r.TaskID == task.ID {
+			t.Fatal("a started task still shows a derived failed start")
+		}
 	}
 }

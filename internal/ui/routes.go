@@ -20,6 +20,8 @@ func routePattern(path string) string {
 	switch {
 	case taskPriorityPathRE.MatchString(path):
 		return "/ui/api/tasks/{id}/priority"
+	case taskOrderPathRE.MatchString(path):
+		return "/ui/api/tasks/{id}/order"
 	case taskLifecyclePathRE.MatchString(path):
 		return lifecycleRouteName(path)
 	case taskCommentsPathRE.MatchString(path):

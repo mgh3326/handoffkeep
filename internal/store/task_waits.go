@@ -414,6 +414,7 @@ func (s *Store) readWaitRows(ctx context.Context, tx transaction, now time.Time)
 		{"blocks", readBlockWaits},
 		{"spawn start", readSpawnStartWaits},
 		{"reviews", readReviewWaits},
+		{"spawn failure comments", readSpawnFailureWaits},
 		{"hand", readHandWaits},
 	} {
 		got, err := read.fn(ctx, tx)
@@ -729,4 +730,50 @@ func waitAgeSeconds(now, since time.Time) int64 {
 		return int64(d / time.Second)
 	}
 	return 0
+}
+
+// spawnFailedPrefix opens a spawn failure comment. panewire posts it for a spawn
+// that ends failed, refused or deadline_exceeded; a session may write the same
+// form by hand.
+const spawnFailedPrefix = "spawn failed request="
+
+// spawnFailureSQL reads each task whose latest spawn failure comment is not
+// followed by a start: a transition into a started state after the comment ends
+// the failed start. toCol is the dialect's quoted "to" column of task_events.
+func spawnFailureSQL(toCol string) string {
+	return `SELECT c.id, c.task_id, c.body, c.created_at, t.lane, t.title, t.state, COALESCE(t.project,'')
+		FROM task_comments c JOIN tasks t ON t.id=c.task_id
+		WHERE c.body LIKE '` + spawnFailedPrefix + `%' AND t.state NOT IN (` + settledStatesSQL + `)
+		AND c.id = (SELECT max(c2.id) FROM task_comments c2 WHERE c2.task_id=c.task_id AND c2.body LIKE '` + spawnFailedPrefix + `%')
+		AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=c.task_id AND e.kind='transition' AND e.at > c.created_at AND ` + toCol + ` IN (` + startedStatesSQL + `))
+		ORDER BY c.created_at, c.id`
+}
+
+// readSpawnFailureWaits reads a failed start from its latest "spawn failed"
+// comment. It is an external:spawn wait in failed_start, the same section as a
+// session's hand wait on that failure; the hand wait stays as it is.
+func readSpawnFailureWaits(ctx context.Context, tx transaction) ([]WaitRow, error) {
+	rows, err := tx.Query(ctx, sqlFor(tx, spawnFailureSQL(`e."to"`), spawnFailureSQL("e.`to`")))
+	if err != nil {
+		return nil, err
+	}
+	return collectRows(rows, func(r row) (WaitRow, error) {
+		var w WaitRow
+		var commentID int64
+		var body string
+		if err := r.Scan(&commentID, &w.TaskID, &body, &w.Since, &w.Lane, &w.Title, &w.State, &w.Project); err != nil {
+			return WaitRow{}, err
+		}
+		line, _, _ := strings.Cut(body, "\n")
+		w.Key = fmt.Sprintf("spawn-failed:%d", commentID)
+		w.Section = WaitSectionFailedStart
+		w.Source = "derived:spawn_failed_comment"
+		w.OnKind = WaitOnExternal
+		w.OnRef = WaitRefSpawn
+		w.Reason = line
+		w.Since = w.Since.UTC()
+		w.NextAction = "retry_spawn"
+		w.GroundsLink = taskGroundsLink(w.TaskID)
+		return w, nil
+	})
 }
