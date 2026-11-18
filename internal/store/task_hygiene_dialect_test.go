@@ -132,6 +132,7 @@ func init() {
 		for name, c := range map[string]TaskDriftClass{
 			"settled_open_decision": d.SettledOpenDecision, "merged_pr_not_merged": d.MergedPRNotMerged,
 			"auto_close_held": d.AutoCloseHeld, "merged_without_deploy": d.MergedWithoutDeploy, "idle_started": d.IdleStarted,
+			"explicit_all_settled": d.ExplicitAllSettled,
 		} {
 			if c.Rule == "" || c.Count != 0 || c.Truncated || c.Tasks == nil || len(c.Tasks) != 0 {
 				t.Fatalf("drift class %s on an empty store = %+v", name, c)

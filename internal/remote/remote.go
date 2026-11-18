@@ -795,6 +795,20 @@ func (c Client) SetTaskArea(ctx context.Context, id int64, area *string, note st
 	return out, nil
 }
 
+// SetTaskCloseRule sets a task's close rule, "auto" or "explicit", and returns
+// the updated row (hk 5112).
+func (c Client) SetTaskCloseRule(ctx context.Context, id int64, rule, note string) (store.Task, error) {
+	var out store.Task
+	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/close-rule", id), map[string]any{"close_rule": rule, "note": note}, &out)
+	if err != nil {
+		return out, unsupportedRoute(err, "task_close_rule_unsupported", "the task close-rule route")
+	}
+	if out.CloseRule != rule {
+		return out, fmt.Errorf("close_rule_not_applied: server response has close_rule %q, want %q", out.CloseRule, rule)
+	}
+	return out, nil
+}
+
 // SetTaskPriority changes a task's priority and returns the updated row (hk 3219).
 func (c Client) SetTaskPriority(ctx context.Context, id int64, priority int, note string) (store.Task, error) {
 	var out store.Task
