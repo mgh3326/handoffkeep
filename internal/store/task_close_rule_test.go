@@ -104,3 +104,42 @@ func TestTaskUpdateSetsCloseRule(t *testing.T) {
 		t.Fatalf("unknown close_rule: err=%v, want ErrInvalidTaskUpdate", err)
 	}
 }
+
+// TestExplicitAdoptionDoesNotDeploy: an explicit parent that a rollup or a hand
+// move left merged, with no PR of its own, does not adopt a merge's PR: the
+// merge is recorded as a held merge, and a deploy record that lists the PR does
+// not move the task to deployed. An auto parent in the same shape adopts the PR.
+func TestExplicitAdoptionDoesNotDeploy(t *testing.T) {
+	s, pool := searchTestStore(t)
+	ctx := t.Context()
+	parent := flowTask(t, s, pool, "implement", StateMerged, false)
+	if _, _, err := s.SetTaskCloseRule(ctx, parent.ID, CloseRuleExplicit, "tester", "programme parent"); err != nil {
+		t.Fatal(err)
+	}
+	child := flowTask(t, s, pool, "implement", StateBacklog, false)
+	setParent(t, s, child, parent)
+	pr := testPR(5112301)
+	putDeploy(t, s, "deploy/svc/20261118T010000Z", "svc", "success", []string{pr})
+
+	res := send(t, s, mergeEvent(parent.ID, pr))
+	if res.Applied || res.State != StateMerged || !strings.Contains(res.Reason, "by hand") {
+		t.Fatalf("explicit adoption: %+v, want held by hand, still merged", res)
+	}
+	got := stateOf(t, s, parent.ID)
+	if got.State != StateMerged || got.Refs.PR != "" {
+		t.Fatalf("explicit parent state=%s refs.pr=%q, want merged with no PR adopted", got.State, got.Refs.PR)
+	}
+	rows := sourceRows(t, s, parent.ID, SourceMergewakeMerge)
+	if len(rows) != 1 || rows[0].Applied || rows[0].Field != heldMergeField {
+		t.Fatalf("merge rows %+v, want one held, not-applied row", rows)
+	}
+
+	auto := flowTask(t, s, pool, "implement", StateMerged, false)
+	autoChild := flowTask(t, s, pool, "implement", StateBacklog, false)
+	setParent(t, s, autoChild, auto)
+	autoPR := testPR(5112302)
+	putDeploy(t, s, "deploy/svc/20261118T020000Z", "svc", "success", []string{autoPR})
+	if res := send(t, s, mergeEvent(auto.ID, autoPR)); !res.Applied {
+		t.Fatalf("auto adoption: %+v, want applied", res)
+	}
+}
