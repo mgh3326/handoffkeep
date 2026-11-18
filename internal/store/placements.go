@@ -214,6 +214,18 @@ func scanPlacement(row interface{ Scan(...any) error }) (PlacementDecision, erro
 }
 
 func (s *Store) RecordPlacement(ctx context.Context, d PlacementDecision) (PlacementDecision, bool, error) {
+	var out PlacementDecision
+	var created bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, created, err = s.recordPlacementOnce(ctx, d)
+		return err
+	})
+	return out, created, err
+}
+
+// recordPlacementOnce is one attempt of RecordPlacement's transaction.
+func (s *Store) recordPlacementOnce(ctx context.Context, d PlacementDecision) (PlacementDecision, bool, error) {
 	if err := checkPlacement(d); err != nil {
 		return d, false, err
 	}

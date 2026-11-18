@@ -5,11 +5,8 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"database/sql/driver"
-	"errors"
 	"fmt"
 	"time"
-
-	"github.com/go-sql-driver/mysql"
 )
 
 // mysqlWriteTransaction retries a whole transaction, never a statement. A
@@ -57,11 +54,18 @@ func (s *Store) mysqlWriteTransactionWithLock(ctx context.Context, name string, 
 			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 		}
 	}()
+	return true, s.retryPinnedTransaction(ctx, conn, work)
+}
+
+// retryPinnedTransaction runs work in one transaction on the caller's pinned
+// connection — the session lock stays held across the retry — and runs it
+// once more after a deadlock or lock-wait timeout (design §11.1), through the
+// one retry decision point (retryTransaction).
+func (s *Store) retryPinnedTransaction(ctx context.Context, conn *sql.Conn, work func(transaction) error) error {
 	for attempt := 0; ; attempt++ {
 		err := mysqlWriteTransactionOnce(ctx, conn, work)
-		var e *mysql.MySQLError
-		if attempt != 0 || !errors.As(err, &e) || (e.Number != 1213 && e.Number != 1205) {
-			return true, err
+		if !s.retryTransaction(ctx, attempt, err) {
+			return err
 		}
 	}
 }

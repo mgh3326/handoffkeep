@@ -116,6 +116,18 @@ type ytEnqueuedCopy struct {
 // copied; for the binder it is the evidence, checked again under the locks,
 // and the missing comments are copied here.
 func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified YTCanaryCandidate, p ytBindingPublication) (YTTaskBinding, int, int, error) {
+	var out YTTaskBinding
+	var prepared, linked int
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, prepared, linked, err = s.publishYTBindingOnce(ctx, b, verified, p)
+		return err
+	})
+	return out, prepared, linked, err
+}
+
+// publishYTBindingOnce is one attempt of publishYTBinding's transaction.
+func (s *Store) publishYTBindingOnce(ctx context.Context, b YTTaskBinding, verified YTCanaryCandidate, p ytBindingPublication) (YTTaskBinding, int, int, error) {
 	if b.TaskID < 1 || b.Tenant == "" || len(b.Tenant) > 255 || b.IssueID == "" || len(b.IssueID) > 64 ||
 		len(b.IssueReadable) > 64 || b.ProjectID == "" || len(b.ProjectID) > 64 || b.BoundBy == "" || !validText(b.BoundBy, 200) || verified.TaskID != b.TaskID ||
 		(p.actor != "" && !validText(p.actor, 200)) {

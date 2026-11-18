@@ -104,48 +104,53 @@ func (s *Store) PruneDocuments(ctx context.Context, prefix string, olderThan tim
 // adds the deleted count and body bytes to res. It returns how many documents
 // it found; zero means the candidates are exhausted.
 func (s *Store) pruneDocumentBatch(ctx context.Context, prefix string, olderThan time.Time, batch int, res *DocPruneResult) (int, error) {
-	tx, e := s.pool.Begin(ctx)
-	if e != nil {
-		return 0, e
-	}
-	defer tx.Rollback(ctx)
-	lo, hi := keyPrefixBounds(prefix)
-	rows, e := tx.Query(ctx, docPruneCandidates+` FOR UPDATE OF d`, lo, hi, olderThan, batch)
-	if e != nil {
-		return 0, e
-	}
-	var ids []int64
-	var keys []string
-	var bytes int64
-	for rows.Next() {
-		var id, size int64
-		var key string
-		if e = rows.Scan(&id, &key, &size); e != nil {
-			rows.Close()
-			return 0, e
+	var out int
+	rerr := s.retryTx(ctx, func() error {
+		tx, e := s.pool.Begin(ctx)
+		if e != nil {
+			return e
 		}
-		ids = append(ids, id)
-		keys = append(keys, key)
-		bytes += size
-	}
-	rows.Close()
-	if e = rows.Err(); e != nil {
-		return 0, e
-	}
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	if _, e = tx.Exec(ctx, `DELETE FROM attachment_refs WHERE ref_kind='document' AND ref_id = ANY($1)`, keys); e != nil {
-		return 0, e
-	}
-	tag, e := tx.Exec(ctx, `DELETE FROM documents WHERE id = ANY($1)`, ids)
-	if e != nil {
-		return 0, e
-	}
-	if e = tx.Commit(ctx); e != nil {
-		return 0, e
-	}
-	res.Deleted += tag.RowsAffected()
-	res.Bytes += bytes
-	return len(ids), nil
+		defer tx.Rollback(ctx)
+		lo, hi := keyPrefixBounds(prefix)
+		rows, e := tx.Query(ctx, docPruneCandidates+` FOR UPDATE OF d`, lo, hi, olderThan, batch)
+		if e != nil {
+			return e
+		}
+		var ids []int64
+		var keys []string
+		var bytes int64
+		for rows.Next() {
+			var id, size int64
+			var key string
+			if e = rows.Scan(&id, &key, &size); e != nil {
+				rows.Close()
+				return e
+			}
+			ids = append(ids, id)
+			keys = append(keys, key)
+			bytes += size
+		}
+		rows.Close()
+		if e = rows.Err(); e != nil {
+			return e
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		if _, e = tx.Exec(ctx, `DELETE FROM attachment_refs WHERE ref_kind='document' AND ref_id = ANY($1)`, keys); e != nil {
+			return e
+		}
+		tag, e := tx.Exec(ctx, `DELETE FROM documents WHERE id = ANY($1)`, ids)
+		if e != nil {
+			return e
+		}
+		if e = tx.Commit(ctx); e != nil {
+			return e
+		}
+		res.Deleted += tag.RowsAffected()
+		res.Bytes += bytes
+		out = len(ids)
+		return nil
+	})
+	return out, rerr
 }

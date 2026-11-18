@@ -196,6 +196,18 @@ func (s *Store) RequeueYTMovedComments(ctx context.Context, tenant string, limit
 // longer names fromOp (another worker moved it), or the binding is not the
 // create's or a source disagrees with it now.
 func (s *Store) requeueYTComment(ctx context.Context, fromOp, commentID, taskID int64) (YTRequeued, bool, error) {
+	var out YTRequeued
+	var requeued bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, requeued, err = s.requeueYTCommentOnce(ctx, fromOp, commentID, taskID)
+		return err
+	})
+	return out, requeued, err
+}
+
+// requeueYTCommentOnce is one attempt of requeueYTComment's transaction.
+func (s *Store) requeueYTCommentOnce(ctx context.Context, fromOp, commentID, taskID int64) (YTRequeued, bool, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return YTRequeued{}, false, err

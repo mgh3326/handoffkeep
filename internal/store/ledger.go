@@ -560,56 +560,62 @@ func (s *Store) AckLedger(ctx context.Context, consumer string, syncID int64, by
 	if s.dialect == mysqlDialect {
 		return s.ackLedgerMySQL(ctx, consumer, syncID, by, now)
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return LedgerCursor{}, err
-	}
-	defer tx.Rollback(ctx)
-	var maxID, floor int64
-	if err := tx.QueryRow(ctx, `SELECT max_sync_id,pruned_through FROM sync_state WHERE singleton`).Scan(&maxID, &floor); err != nil {
-		return LedgerCursor{}, err
-	}
-	if syncID > maxID {
-		return LedgerCursor{}, ErrInvalidSync
-	}
-	const cursorColumns = `consumer,acked_sync_id,acked_at,updated_by`
-	scan := func(row pgx.Row) (LedgerCursor, error) {
-		var c LedgerCursor
-		err := row.Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy)
-		c.AckedAt = c.AckedAt.UTC()
-		return c, err
-	}
-	c, err := scan(tx.QueryRow(ctx, `SELECT `+cursorColumns+` FROM ledger_cursors WHERE consumer=$1 FOR UPDATE`, consumer))
-	if errors.Is(err, ErrNoRows) {
-		c, err = scan(tx.QueryRow(ctx, `INSERT INTO ledger_cursors(consumer,acked_sync_id,acked_at,updated_by) VALUES($1,$2,$3,$4)
-			ON CONFLICT (consumer) DO NOTHING RETURNING `+cursorColumns, consumer, maxID, now, by))
-		if err == nil {
-			return c, tx.Commit(ctx)
+	var out LedgerCursor
+	rerr := s.retryTx(ctx, func() error {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return err
 		}
-		if !errors.Is(err, ErrNoRows) {
-			return LedgerCursor{}, err
+		defer tx.Rollback(ctx)
+		var maxID, floor int64
+		if err := tx.QueryRow(ctx, `SELECT max_sync_id,pruned_through FROM sync_state WHERE singleton`).Scan(&maxID, &floor); err != nil {
+			return err
 		}
-		// A concurrent first ack created the row; this ack applies to it.
-		c, err = scan(tx.QueryRow(ctx, `SELECT `+cursorColumns+` FROM ledger_cursors WHERE consumer=$1 FOR UPDATE`, consumer))
-	}
-	if err != nil {
-		return LedgerCursor{}, err
-	}
-	if syncID < c.AckedSyncID {
-		return LedgerCursor{}, fmt.Errorf("%w: the cursor is at %d", ErrLedgerAckBackward, c.AckedSyncID)
-	}
-	if syncID < floor {
-		minID := maxID + 1
-		if err := tx.QueryRow(ctx, `SELECT COALESCE(min(sync_id),$1) FROM sync_log`, minID).Scan(&minID); err != nil {
-			return LedgerCursor{}, err
+		if syncID > maxID {
+			return ErrInvalidSync
 		}
-		return LedgerCursor{}, &SyncReset{MinSyncID: minID}
-	}
-	c, err = scan(tx.QueryRow(ctx, `UPDATE ledger_cursors SET acked_sync_id=$2,acked_at=$3,updated_by=$4 WHERE consumer=$1 RETURNING `+cursorColumns, consumer, syncID, now, by))
-	if err != nil {
-		return LedgerCursor{}, err
-	}
-	return c, tx.Commit(ctx)
+		const cursorColumns = `consumer,acked_sync_id,acked_at,updated_by`
+		scan := func(row pgx.Row) (LedgerCursor, error) {
+			var c LedgerCursor
+			err := row.Scan(&c.Consumer, &c.AckedSyncID, &c.AckedAt, &c.UpdatedBy)
+			c.AckedAt = c.AckedAt.UTC()
+			return c, err
+		}
+		c, err := scan(tx.QueryRow(ctx, `SELECT `+cursorColumns+` FROM ledger_cursors WHERE consumer=$1 FOR UPDATE`, consumer))
+		if errors.Is(err, ErrNoRows) {
+			c, err = scan(tx.QueryRow(ctx, `INSERT INTO ledger_cursors(consumer,acked_sync_id,acked_at,updated_by) VALUES($1,$2,$3,$4)
+				ON CONFLICT (consumer) DO NOTHING RETURNING `+cursorColumns, consumer, maxID, now, by))
+			if err == nil {
+				out = c
+				return tx.Commit(ctx)
+			}
+			if !errors.Is(err, ErrNoRows) {
+				return err
+			}
+			// A concurrent first ack created the row; this ack applies to it.
+			c, err = scan(tx.QueryRow(ctx, `SELECT `+cursorColumns+` FROM ledger_cursors WHERE consumer=$1 FOR UPDATE`, consumer))
+		}
+		if err != nil {
+			return err
+		}
+		if syncID < c.AckedSyncID {
+			return fmt.Errorf("%w: the cursor is at %d", ErrLedgerAckBackward, c.AckedSyncID)
+		}
+		if syncID < floor {
+			minID := maxID + 1
+			if err := tx.QueryRow(ctx, `SELECT COALESCE(min(sync_id),$1) FROM sync_log`, minID).Scan(&minID); err != nil {
+				return err
+			}
+			return &SyncReset{MinSyncID: minID}
+		}
+		c, err = scan(tx.QueryRow(ctx, `UPDATE ledger_cursors SET acked_sync_id=$2,acked_at=$3,updated_at=$4 WHERE consumer=$1 RETURNING `+cursorColumns, consumer, syncID, now, by))
+		if err != nil {
+			return err
+		}
+		out = c
+		return tx.Commit(ctx)
+	})
+	return out, rerr
 }
 
 func (s *Store) ackLedgerMySQL(ctx context.Context, consumer string, syncID int64, by string, now time.Time) (LedgerCursor, error) {

@@ -370,6 +370,17 @@ func (s *Store) PrepareMappedYTIssues(ctx context.Context, limit int) (int, erro
 // ensureYTIssueTx. An intent that moved to another tenant meanwhile is left
 // alone. prepared reports a new op.
 func (s *Store) prepareYTIssueIntent(ctx context.Context, tenant string, taskID int64) (bool, error) {
+	var out bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.prepareYTIssueIntentOnce(ctx, tenant, taskID)
+		return err
+	})
+	return out, err
+}
+
+// prepareYTIssueIntentOnce is one attempt of prepareYTIssueIntent's transaction.
+func (s *Store) prepareYTIssueIntentOnce(ctx context.Context, tenant string, taskID int64) (bool, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return false, err
@@ -661,6 +672,17 @@ func (s *Store) BackfillYTIssueOps(ctx context.Context, tenant, project string, 
 // comment path take before they give the task an issue, so an "owned" check
 // and the op it allows cannot interleave with them.
 func (s *Store) backfillYTIssue(ctx context.Context, tenant string, taskID int64, dryRun bool) (string, string, error) {
+	var out, name string
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, name, err = s.backfillYTIssueOnce(ctx, tenant, taskID, dryRun)
+		return err
+	})
+	return out, name, err
+}
+
+// backfillYTIssueOnce is one attempt of backfillYTIssue's transaction.
+func (s *Store) backfillYTIssueOnce(ctx context.Context, tenant string, taskID int64, dryRun bool) (string, string, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return "", "", err

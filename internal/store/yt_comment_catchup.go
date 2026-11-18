@@ -203,7 +203,9 @@ func (s *Store) catchUpYTComments(ctx context.Context, limit int, skip []int64, 
 // session lock, so the transaction must run on that session).
 func (s *Store) catchUpYTComment(ctx context.Context, lock *YouTrackSyncLock, c TaskComment) (op ytwrite.Op, prepared bool, source string, err error) {
 	if lock.mysqlConn != nil {
-		err = mysqlWriteTransactionOnce(ctx, lock.mysqlConn, func(tx transaction) error {
+		// The pass holds the session lock, so the retry re-runs on the same
+		// connection through the one retry decision point (retryTransaction).
+		err = s.retryPinnedTransaction(ctx, lock.mysqlConn, func(tx transaction) error {
 			var e error
 			op, prepared, source, e = catchUpYTCommentTx(ctx, tx, c)
 			return e

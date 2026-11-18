@@ -143,36 +143,50 @@ func (s *Store) RecordMCPDecisionRequest(ctx context.Context, taskID int64, in D
 	if s != nil && s.dialect == mysqlDialect {
 		return s.recordMCPDecisionRequestMySQL(ctx, taskID, in, w)
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return DecisionRequestResult{}, false, err
-	}
-	defer tx.Rollback(ctx)
-	// The key lock is taken before any task row, and no path takes a task row
-	// and then this key, so it cannot close a cycle.
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, mcpWriteLock(w)); err != nil {
-		return DecisionRequestResult{}, false, err
-	}
-	var recorded DecisionRequestResult
-	replayed, err := replayMCPWriteTx(ctx, tx, w, &recorded)
-	if err != nil {
-		return DecisionRequestResult{}, false, err
-	}
-	if replayed {
-		if recorded.Task.ID != taskID {
-			return DecisionRequestResult{}, false, ErrIdempotencyKeyReused
+	var out DecisionRequestResult
+	var outReplayed bool
+	rerr := s.retryTx(ctx, func() error {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return err
 		}
-		recorded.Duplicate = true
-		return recorded, true, tx.Commit(ctx)
-	}
-	result, err := s.recordDecisionRequestTx(ctx, tx, taskID, w.Author, in)
-	if err != nil {
-		return DecisionRequestResult{}, false, err
-	}
-	if err := insertMCPWriteAuditTx(ctx, tx, w, taskID, result, time.Now().UTC()); err != nil {
-		return DecisionRequestResult{}, false, err
-	}
-	return result, false, tx.Commit(ctx)
+		defer tx.Rollback(ctx)
+		// The key lock is taken before any task row, and no path takes a task row
+		// and then this key, so it cannot close a cycle.
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, mcpWriteLock(w)); err != nil {
+			return err
+		}
+		var recorded DecisionRequestResult
+		rp, err := replayMCPWriteTx(ctx, tx, w, &recorded)
+		if err != nil {
+			return err
+		}
+		if rp {
+			if recorded.Task.ID != taskID {
+				return ErrIdempotencyKeyReused
+			}
+			recorded.Duplicate = true
+			if err := tx.Commit(ctx); err != nil {
+				return err
+			}
+			out = recorded
+			outReplayed = true
+			return nil
+		}
+		result, err := s.recordDecisionRequestTx(ctx, tx, taskID, w.Author, in)
+		if err != nil {
+			return err
+		}
+		if err := insertMCPWriteAuditTx(ctx, tx, w, taskID, result, time.Now().UTC()); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		out = result
+		return nil
+	})
+	return out, outReplayed, rerr
 }
 
 // insertMCPWriteAuditTx writes the audit row inside the write's transaction, so

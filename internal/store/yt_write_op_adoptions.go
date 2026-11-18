@@ -14,6 +14,13 @@ import (
 // state move commits between the check and the insert), then the new row.
 // It takes no lane lock and no other lock (lockorder.go).
 func (l *YTWriteLedger) RecordAdoption(ctx context.Context, now time.Time, id int64, attempts int, ytID string) error {
+	return l.s.retryTx(ctx, func() error {
+		return l.recordAdoptionOnce(ctx, now, id, attempts, ytID)
+	})
+}
+
+// recordAdoptionOnce is one attempt of RecordAdoption's transaction.
+func (l *YTWriteLedger) recordAdoptionOnce(ctx context.Context, now time.Time, id int64, attempts int, ytID string) error {
 	tx, release, err := l.s.begin(ctx)
 	if err != nil {
 		return err

@@ -202,6 +202,18 @@ func keepDotsAdoptionCanva(cur DotsResult, in DotsAdoptionInput) DotsAdoptionInp
 // An accepted or partially_used change that names no Canva design keeps the
 // one already recorded.
 func (s *Store) SetDotsAdoption(ctx context.Context, id int64, by string, in DotsAdoptionInput) (DotsResult, bool, error) {
+	var out DotsResult
+	var adopted bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, adopted, err = s.setDotsAdoptionOnce(ctx, id, by, in)
+		return err
+	})
+	return out, adopted, err
+}
+
+// setDotsAdoptionOnce is one attempt of SetDotsAdoption's transaction.
+func (s *Store) setDotsAdoptionOnce(ctx context.Context, id int64, by string, in DotsAdoptionInput) (DotsResult, bool, error) {
 	if id < 1 || by == "" || !validText(by, 128) {
 		return DotsResult{}, false, errors.New("invalid dots adoption")
 	}

@@ -599,6 +599,17 @@ func scanYTCanary(row interface{ Scan(...any) error }, c *YTCommentCanary) error
 // change under it), then FOR SHARE on the task's youtrack_projects and
 // task_origins rows, then the new canary row.
 func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verified YTCanaryCandidate) (YTCommentCanary, error) {
+	var out YTCommentCanary
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.addYTCommentCanaryOnce(ctx, c, verified)
+		return err
+	})
+	return out, err
+}
+
+// addYTCommentCanaryOnce is one attempt of AddYTCommentCanary's transaction.
+func (s *Store) addYTCommentCanaryOnce(ctx context.Context, c YTCommentCanary, verified YTCanaryCandidate) (YTCommentCanary, error) {
 	if c.TaskID < 1 || c.Tenant == "" || len(c.Tenant) > 255 || c.IssueID == "" || len(c.IssueID) > 64 ||
 		len(c.IssueReadable) > 64 || len(c.ProjectID) > 64 || c.AddedBy == "" || !validText(c.AddedBy, 200) || verified.TaskID != c.TaskID {
 		return YTCommentCanary{}, errors.New("invalid canary binding")
@@ -698,6 +709,17 @@ func (s *Store) AddYTCommentCanary(ctx context.Context, c YTCommentCanary, verif
 // while it reads the admission: a removal that commits first holds every
 // later claim, and one that waits behind a claim follows that claim.
 func (s *Store) RemoveYTCommentCanary(ctx context.Context, taskID int64) (bool, error) {
+	var out bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.removeYTCommentCanaryOnce(ctx, taskID)
+		return err
+	})
+	return out, err
+}
+
+// removeYTCommentCanaryOnce is one attempt of RemoveYTCommentCanary's transaction.
+func (s *Store) removeYTCommentCanaryOnce(ctx context.Context, taskID int64) (bool, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return false, err

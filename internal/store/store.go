@@ -1839,12 +1839,13 @@ var mysqlUpsertBenchRepInsert = func() string {
 // (Every attempted insert still consumes one BIGSERIAL candidate, conflict or
 // not, so rejected collisions remain visible as id gaps.)
 func (s *Store) UpsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, error) {
-	for attempt := 0; ; attempt++ {
-		result, err := s.upsertBenchReps(ctx, xs)
-		if !s.retryTransaction(ctx, attempt, err) {
-			return result, err
-		}
-	}
+	var out []int64
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.upsertBenchReps(ctx, xs)
+		return err
+	})
+	return out, err
 }
 
 func (s *Store) upsertBenchReps(ctx context.Context, xs []BenchRep) ([]int64, error) {
@@ -2015,12 +2016,13 @@ func (s *Store) ListBenchRepsByTaskRef(ctx context.Context, taskRef string, limi
 }
 
 func (s *Store) UpsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, error) {
-	for attempt := 0; ; attempt++ {
-		result, err := s.upsertBenchGrades(ctx, xs)
-		if !s.retryTransaction(ctx, attempt, err) {
-			return result, err
-		}
-	}
+	var out int
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.upsertBenchGrades(ctx, xs)
+		return err
+	})
+	return out, err
 }
 
 func (s *Store) upsertBenchGrades(ctx context.Context, xs []BenchGrade) (int, error) {
@@ -2120,12 +2122,13 @@ func (s *Store) ListBenchGrades(ctx context.Context) ([]BenchGrade, error) {
 // and the merged post-write state must satisfy the per-profile effort
 // monotonicity rule or the whole batch rolls back.
 func (s *Store) UpsertBenchCatalog(ctx context.Context, xs []BenchCatalogEntry) (int, error) {
-	for attempt := 0; ; attempt++ {
-		result, err := s.upsertBenchCatalog(ctx, xs)
-		if !s.retryTransaction(ctx, attempt, err) {
-			return result, err
-		}
-	}
+	var out int
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.upsertBenchCatalog(ctx, xs)
+		return err
+	})
+	return out, err
 }
 
 func (s *Store) upsertBenchCatalog(ctx context.Context, xs []BenchCatalogEntry) (int, error) {
@@ -3447,6 +3450,18 @@ func validLaneEventText(value string) bool {
 // AppendRelayEvent inserts a durable relay event. Its conflict update is part
 // of the same statement so concurrent duplicate submissions share one row.
 func (s *Store) AppendRelayEvent(ctx context.Context, x RelayEvent) (RelayEvent, bool, error) {
+	var out RelayEvent
+	var created bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, created, err = s.appendRelayEventOnce(ctx, x)
+		return err
+	})
+	return out, created, err
+}
+
+// appendRelayEventOnce is one attempt of AppendRelayEvent's transaction.
+func (s *Store) appendRelayEventOnce(ctx context.Context, x RelayEvent) (RelayEvent, bool, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return x, false, err
@@ -3539,45 +3554,48 @@ func (s *Store) MarkRelayEventDelivered(ctx context.Context, id int64, machine, 
 	if id < 1 || !validText(machine, MaxBytes) || !validText(pane, MaxBytes) {
 		return RelayEvent{}, errors.New("invalid relay event delivery")
 	}
-	var x RelayEvent
-	if s.dialect == mysqlDialect {
-		tx, release, err := s.begin(ctx)
-		if err != nil {
-			return RelayEvent{}, err
+	var out RelayEvent
+	rerr := s.retryTx(ctx, func() error {
+		if s.dialect == mysqlDialect {
+			tx, release, err := s.begin(ctx)
+			if err != nil {
+				return err
+			}
+			defer release()
+			defer tx.Rollback(ctx)
+			if err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=? FOR UPDATE`, id), &out); err != nil {
+				if errors.Is(err, ErrNoRows) {
+					return ErrRelayEventNotFound
+				}
+				return err
+			}
+			if out.DeliveredAt == nil {
+				if _, err = tx.Exec(ctx, `UPDATE relay_events SET delivered_at=UTC_TIMESTAMP(6),delivered_to=? WHERE id=?`, machine+"/"+pane, id); err != nil {
+					return err
+				}
+				if err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=?`, id), &out); err != nil {
+					return err
+				}
+				return tx.Commit(ctx)
+			}
+			return nil
 		}
-		defer release()
-		defer tx.Rollback(ctx)
-		if err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=? FOR UPDATE`, id), &x); err != nil {
+		err := scanRelayEvent(s.pool.QueryRow(ctx, `UPDATE relay_events SET delivered_at=now(),delivered_to=$2 WHERE id=$1 AND delivered_at IS NULL RETURNING `+relayEventColumns, id, machine+"/"+pane), &out)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, ErrNoRows) {
+			return err
+		}
+		if err = scanRelayEvent(s.pool.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=$1`, id), &out); err != nil {
 			if errors.Is(err, ErrNoRows) {
-				return RelayEvent{}, ErrRelayEventNotFound
+				return ErrRelayEventNotFound
 			}
-			return RelayEvent{}, err
+			return err
 		}
-		if x.DeliveredAt == nil {
-			if _, err = tx.Exec(ctx, `UPDATE relay_events SET delivered_at=UTC_TIMESTAMP(6),delivered_to=? WHERE id=?`, machine+"/"+pane, id); err != nil {
-				return RelayEvent{}, err
-			}
-			if err = scanRelayEvent(tx.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=?`, id), &x); err != nil {
-				return RelayEvent{}, err
-			}
-			return x, tx.Commit(ctx)
-		}
-		return x, nil
-	}
-	err := scanRelayEvent(s.pool.QueryRow(ctx, `UPDATE relay_events SET delivered_at=now(),delivered_to=$2 WHERE id=$1 AND delivered_at IS NULL RETURNING `+relayEventColumns, id, machine+"/"+pane), &x)
-	if err == nil {
-		return x, nil
-	}
-	if !errors.Is(err, ErrNoRows) {
-		return RelayEvent{}, err
-	}
-	if err = scanRelayEvent(s.pool.QueryRow(ctx, `SELECT `+relayEventColumns+` FROM relay_events WHERE id=$1`, id), &x); err != nil {
-		if errors.Is(err, ErrNoRows) {
-			return RelayEvent{}, ErrRelayEventNotFound
-		}
-		return RelayEvent{}, err
-	}
-	return x, nil
+		return nil
+	})
+	return out, rerr
 }
 
 // ListRelayEvents returns relay records in durable insertion order.
@@ -3935,46 +3953,61 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 	}
 	// A deploy record moves the merged tasks it lists in the same transaction
 	// (hk.deploy); any other document is a plain upsert.
-	tx, e := s.pool.Begin(ctx)
-	if e != nil {
-		return x, false, e
-	}
-	defer tx.Rollback(ctx)
-	// applyDeployRecordTx locks the listed tasks: the task-mutation lock comes
-	// before the document row (lock order, lockorder.go).
-	if strings.HasPrefix(x.Key, "deploy/") {
-		if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); e != nil {
-			return x, false, e
+	var out Document
+	var created bool
+	rerr := s.retryTx(ctx, func() error {
+		tx, e := s.pool.Begin(ctx)
+		if e != nil {
+			return e
 		}
-	}
-	if x.TaskID != nil {
-		var taskExists bool
-		if e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, *x.TaskID).Scan(&taskExists); e != nil {
-			return x, false, e
+		defer tx.Rollback(ctx)
+		// applyDeployRecordTx locks the listed tasks: the task-mutation lock comes
+		// before the document row (lock order, lockorder.go).
+		if strings.HasPrefix(x.Key, "deploy/") {
+			if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); e != nil {
+				return e
+			}
 		}
-		if !taskExists {
-			return x, false, ErrTaskNotFound
+		if x.TaskID != nil {
+			var taskExists bool
+			if e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`, *x.TaskID).Scan(&taskExists); e != nil {
+				return e
+			}
+			if !taskExists {
+				return ErrTaskNotFound
+			}
 		}
-	}
-	// task_id and origin_class keep the stored value when the caller omits
-	// them; the foreign key takes KEY SHARE on one task row (lockorder.go).
-	e = tx.QueryRow(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at,task_id,origin_class) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8,$9,$10) ON CONFLICT(key) DO UPDATE SET kind=EXCLUDED.kind,session=EXCLUDED.session,job=EXCLUDED.job,body=EXCLUDED.body,sha256=EXCLUDED.sha256,created_by=EXCLUDED.created_by,updated_at=EXCLUDED.updated_at,task_id=COALESCE(EXCLUDED.task_id,documents.task_id),origin_class=COALESCE(EXCLUDED.origin_class,documents.origin_class) RETURNING id,created_at,updated_at,task_id,COALESCE(origin_class,'')`, x.Key, x.Kind, x.Session, x.Job, x.Body, x.SHA256, x.CreatedBy, now, x.TaskID, nullIfEmpty(x.OriginClass)).Scan(&x.ID, &x.CreatedAt, &x.UpdatedAt, &x.TaskID, &x.OriginClass)
-	if e != nil {
-		return x, true, e
-	}
-	if strings.HasPrefix(x.Key, "deploy/") {
-		projection := parseStoredDeployRecord(x.Key, x.SHA256, x.Body, x.CreatedAt)
-		if e = writeDeployProjection(ctx, tx, projection); e != nil {
-			return x, true, e
+		// task_id and origin_class keep the stored value when the caller omits
+		// them; the foreign key takes KEY SHARE on one task row (lockorder.go).
+		e = tx.QueryRow(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at,task_id,origin_class) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8,$9,$10) ON CONFLICT(key) DO UPDATE SET kind=EXCLUDED.kind,session=EXCLUDED.session,job=EXCLUDED.job,body=EXCLUDED.body,sha256=EXCLUDED.sha256,created_by=EXCLUDED.created_by,updated_at=EXCLUDED.updated_at,task_id=COALESCE(EXCLUDED.task_id,documents.task_id),origin_class=COALESCE(EXCLUDED.origin_class,documents.origin_class) RETURNING id,created_at,updated_at,task_id,COALESCE(origin_class,'')`, x.Key, x.Kind, x.Session, x.Job, x.Body, x.SHA256, x.CreatedBy, now, x.TaskID, nullIfEmpty(x.OriginClass)).Scan(&x.ID, &x.CreatedAt, &x.UpdatedAt, &x.TaskID, &x.OriginClass)
+		if e != nil {
+			out = x
+			created = true
+			return e
 		}
-		if e = s.applyDeployRecordTx(ctx, pgTransaction{tx}, projection, now); e != nil {
-			return x, true, e
+		if strings.HasPrefix(x.Key, "deploy/") {
+			projection := parseStoredDeployRecord(x.Key, x.SHA256, x.Body, x.CreatedAt)
+			if e = writeDeployProjection(ctx, tx, projection); e != nil {
+				out = x
+				created = true
+				return e
+			}
+			if e = s.applyDeployRecordTx(ctx, pgTransaction{tx}, projection, now); e != nil {
+				out = x
+				created = true
+				return e
+			}
+			if e = queueDeployRecordNoticeTx(ctx, tx, projection, now); e != nil {
+				out = x
+				created = true
+				return e
+			}
 		}
-		if e = queueDeployRecordNoticeTx(ctx, tx, projection, now); e != nil {
-			return x, true, e
-		}
-	}
-	return x, true, tx.Commit(ctx)
+		out = x
+		created = true
+		return tx.Commit(ctx)
+	})
+	return out, created, rerr
 }
 func (s *Store) GetDocument(ctx context.Context, key string) (Document, bool, error) {
 	if !validDocKey(key) {
@@ -4196,6 +4229,18 @@ const attachmentChargedBytesMySQL = `SELECT (SELECT COALESCE(SUM(size_bytes),0) 
 // PutAttachment records an immutable object and its reference after S3 PUT has
 // succeeded. It serializes quota accounting with a locked monthly usage row.
 func (s *Store) PutAttachment(ctx context.Context, x Attachment, storageCap, putCap int64) (Attachment, bool, error) {
+	var out Attachment
+	var created bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, created, err = s.putAttachmentOnce(ctx, x, storageCap, putCap)
+		return err
+	})
+	return out, created, err
+}
+
+// putAttachmentOnce is one attempt of PutAttachment's transaction.
+func (s *Store) putAttachmentOnce(ctx context.Context, x Attachment, storageCap, putCap int64) (Attachment, bool, error) {
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(x.SHA256) || x.SizeBytes < 0 || x.MIME == "" || !validText(x.OriginalName, 512) || !validAttachmentRef(x.RefKind, x.RefID) {
 		return x, false, errors.New("invalid attachment")
 	}
@@ -4289,6 +4334,13 @@ func attachmentUsageArgs(d storeDialect, month string, bytes int64) []any {
 // caller is about to finalize, so its own reservation is not counted twice;
 // every other caller passes ”.
 func (s *Store) CheckAttachmentCapacity(ctx context.Context, size, storageCap, putCap int64, exceptUpload string) error {
+	return s.retryTx(ctx, func() error {
+		return s.checkAttachmentCapacityOnce(ctx, size, storageCap, putCap, exceptUpload)
+	})
+}
+
+// checkAttachmentCapacityOnce is one attempt of CheckAttachmentCapacity's transaction.
+func (s *Store) checkAttachmentCapacityOnce(ctx context.Context, size, storageCap, putCap int64, exceptUpload string) error {
 	tx, release, e := s.begin(ctx)
 	if e != nil {
 		return e
@@ -4331,6 +4383,18 @@ var ErrUploadClaimLost = errors.New("upload_claim_lost")
 // order follows ReserveAttachmentUpload and the capacity checks: the
 // staging-budget advisory lock, then the upload row, then the usage row.
 func (s *Store) FinalizeAttachmentUpload(ctx context.Context, id, nonce string, x Attachment, storageCap, putCap int64) (Attachment, bool, error) {
+	var out Attachment
+	var created bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, created, err = s.finalizeAttachmentUploadOnce(ctx, id, nonce, x, storageCap, putCap)
+		return err
+	})
+	return out, created, err
+}
+
+// finalizeAttachmentUploadOnce is one attempt of FinalizeAttachmentUpload's transaction.
+func (s *Store) finalizeAttachmentUploadOnce(ctx context.Context, id, nonce string, x Attachment, storageCap, putCap int64) (Attachment, bool, error) {
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(x.SHA256) || x.SizeBytes < 0 || x.MIME == "" || !validText(x.OriginalName, 512) || !validAttachmentRef(x.RefKind, x.RefID) {
 		return x, false, errors.New("invalid attachment")
 	}
@@ -4426,6 +4490,13 @@ var ErrAttachmentArchived = errors.New("attachment_archived")
 var ErrAttachmentPutCap = errors.New("attachment_put_cap")
 
 func (s *Store) RecordAttachmentGet(ctx context.Context, sha string, getCap int64) error {
+	return s.retryTx(ctx, func() error {
+		return s.recordAttachmentGetOnce(ctx, sha, getCap)
+	})
+}
+
+// recordAttachmentGetOnce is one attempt of RecordAttachmentGet's transaction.
+func (s *Store) recordAttachmentGetOnce(ctx context.Context, sha string, getCap int64) error {
 	tx, release, e := s.begin(ctx)
 	if e != nil {
 		return e

@@ -36,6 +36,17 @@ type DotsCancelInput struct {
 // the transition's actor, while the requester lane is self-asserted on this
 // route exactly as on create and must name the request's parent_lane.
 func (s *Store) CancelDotsRequest(ctx context.Context, taskID int64, by string, in DotsCancelInput) (Task, error) {
+	var out Task
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.cancelDotsRequestOnce(ctx, taskID, by, in)
+		return err
+	})
+	return out, err
+}
+
+// cancelDotsRequestOnce is one attempt of CancelDotsRequest's transaction.
+func (s *Store) cancelDotsRequestOnce(ctx context.Context, taskID int64, by string, in DotsCancelInput) (Task, error) {
 	lane := strings.TrimSpace(in.RequesterLane)
 	reason := strings.TrimSpace(in.Reason)
 	if taskID < 1 {

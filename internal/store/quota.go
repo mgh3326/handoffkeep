@@ -264,12 +264,13 @@ func (s *Store) QuotaAccountKeys(ctx context.Context) ([]string, error) {
 	return keys, rows.Err()
 }
 func (s *Store) LeaseQuota(ctx context.Context, key, owner, holder string, ttl int) (QuotaLease, error) {
-	for attempt := 0; ; attempt++ {
-		result, err := s.leaseQuota(ctx, key, owner, holder, ttl)
-		if !s.retryTransaction(ctx, attempt, err) {
-			return result, err
-		}
-	}
+	var out QuotaLease
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.leaseQuota(ctx, key, owner, holder, ttl)
+		return err
+	})
+	return out, err
 }
 
 func (s *Store) leaseQuota(ctx context.Context, key, owner, holder string, ttl int) (QuotaLease, error) {
@@ -321,12 +322,13 @@ func (s *Store) leaseQuota(ctx context.Context, key, owner, holder string, ttl i
 // only path allowed to delete quota_observations rows; cadence is a separate
 // operator decision, so nothing here schedules it.
 func (s *Store) PruneQuotaHistory(ctx context.Context) (int64, error) {
-	for attempt := 0; ; attempt++ {
-		result, err := s.pruneQuotaHistory(ctx)
-		if !s.retryTransaction(ctx, attempt, err) {
-			return result, err
-		}
-	}
+	var out int64
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.pruneQuotaHistory(ctx)
+		return err
+	})
+	return out, err
 }
 
 func (s *Store) pruneQuotaHistory(ctx context.Context) (int64, error) {
@@ -377,12 +379,14 @@ func (s *Store) ReleaseQuota(ctx context.Context, key, owner, holder string) err
 // value is identical to the current latest for (key, kind, window) it appends
 // nothing and returns the existing row with deduped=true.
 func (s *Store) PutQuota(ctx context.Context, key, owner, holder string, x QuotaObservation) (QuotaObservation, bool, error) {
-	for attempt := 0; ; attempt++ {
-		result, deduped, err := s.putQuota(ctx, key, owner, holder, x)
-		if !s.retryTransaction(ctx, attempt, err) {
-			return result, deduped, err
-		}
-	}
+	var out QuotaObservation
+	var deduped bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, deduped, err = s.putQuota(ctx, key, owner, holder, x)
+		return err
+	})
+	return out, deduped, err
 }
 
 func (s *Store) putQuota(ctx context.Context, key, owner, holder string, x QuotaObservation) (QuotaObservation, bool, error) {
@@ -465,12 +469,13 @@ func (s *Store) putQuota(ctx context.Context, key, owner, holder string, x Quota
 // ErrQuotaPresenceFull: hosts already present keep updating, so a flood of
 // invented host ids cannot evict them.
 func (s *Store) PutQuotaPresence(ctx context.Context, x QuotaPresence) (QuotaPresence, error) {
-	for attempt := 0; ; attempt++ {
-		result, err := s.putQuotaPresence(ctx, x)
-		if !s.retryTransaction(ctx, attempt, err) {
-			return result, err
-		}
-	}
+	var out QuotaPresence
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.putQuotaPresence(ctx, x)
+		return err
+	})
+	return out, err
 }
 
 func (s *Store) putQuotaPresence(ctx context.Context, x QuotaPresence) (QuotaPresence, error) {
