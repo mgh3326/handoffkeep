@@ -37,18 +37,23 @@ func init() {
 		if len(batches) != 0 {
 			t.Fatalf("first pass batches: %+v", batches)
 		}
-		for i := 1; i < len(batches[0]); i++ {
-			if batches[0][i].SyncID <= batches[0][i-1].SyncID {
-				t.Fatalf("rows not in sync_id order: %+v", batches[0])
-			}
-		}
 		// A task change commits a new sync_log row the next pass reads.
-		if _, err := s.TransitionTask(ctx, task.ID, "backlog", "tester", "", nil, ""); err != nil {
+		priority := 5
+		if _, err := s.TransitionTaskWith(ctx, task.ID, TransitionInput{To: StateBacklog, By: "tester",
+			Priority: &priority, Kind: "implement", Project: projectPtr("handoffkeep")}); err != nil {
 			t.Fatal(err)
 		}
 		second, err := s.runYTFeedConsumer(ctx, c, 100, time.Now().UTC())
 		if err != nil || second.Created || second.Read == 0 || second.Cursor <= first.Cursor {
 			t.Fatalf("second pass: %+v err=%v", second, err)
+		}
+		if len(batches) != 1 || len(batches[0]) == 0 {
+			t.Fatalf("second pass batches: %+v", batches)
+		}
+		for i := 1; i < len(batches[0]); i++ {
+			if batches[0][i].SyncID <= batches[0][i-1].SyncID {
+				t.Fatalf("rows not in sync_id order: %+v", batches[0])
+			}
 		}
 	})
 

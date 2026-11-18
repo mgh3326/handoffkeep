@@ -67,7 +67,7 @@ func init() {
 		}
 
 		// A task change (a new state) is a new snapshot sha: one more op.
-		if _, err := s.TransitionTaskWith(ctx, task.ID, TransitionInput{To: StateDeveloping, By: "tester"}); err != nil {
+		if _, err := s.TransitionTaskWith(ctx, task.ID, TransitionInput{To: StateDeveloping, By: "tester", NoJob: "fields case"}); err != nil {
 			t.Fatal(err)
 		}
 		third, err := s.BackfillYTFieldsOps(ctx, YTFieldsBackfillOptions{TaskID: task.ID})

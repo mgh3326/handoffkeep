@@ -50,7 +50,7 @@ func init() {
 			t.Fatal(err)
 		}
 		s.SetYTLinksMode(YTLinksOn, "yt.example")
-		if _, err := s.TransitionTask(ctx, child.ID, "developing", "tester", "", nil, ""); err != nil {
+		if _, err := s.TransitionTaskWith(ctx, child.ID, TransitionInput{To: StateDeveloping, By: "tester", NoJob: "links case"}); err != nil {
 			t.Fatal(err)
 		}
 		passes, err := s.RunYTFeedConsumers(ctx, 100)
