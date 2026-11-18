@@ -616,6 +616,10 @@ type Task struct {
 	// filed with tasks add leave both empty.
 	Source    string `json:"source,omitempty"`
 	SourceRef string `json:"source_ref,omitempty"`
+	// CloseRule is how the task closes: CloseRuleAuto (a merge or the last
+	// child's settle may close it) or CloseRuleExplicit (only a person closes
+	// it; see task_close_rule.go). Always emitted.
+	CloseRule string `json:"close_rule"`
 	// Stalled is computed at read time: a started task with no
 	// awaiting_decision and no activity within started_stalled_hours.
 	Stalled   bool           `json:"stalled"`
@@ -2502,7 +2506,7 @@ func ValidBodyDoc(v string) bool {
 
 func scanTask(row interface{ Scan(...any) error }, x *Task, extra ...any) error {
 	var refs []byte
-	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.LastActivityAt, &x.BodyDoc, &x.Project, &x.Area, &x.Expected, &x.AwaitingDecision, &x.ParentID, &x.StartedAt, &x.CompletedAt, &x.CanceledAt, &x.TriagedAt, &x.StartedTriageAt, &x.MilestoneID, &x.DueAt, &x.SLAStartedAt, &x.SLAMediumRiskAt, &x.SLAHighRiskAt, &x.SLABreachesAt, &x.Source, &x.SourceRef}
+	dest := []any{&x.ID, &x.Lane, &x.ParentLane, &x.Title, &x.Kind, &x.State, &x.Priority, &refs, &x.ClaimedBy, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &x.LastActivityAt, &x.BodyDoc, &x.Project, &x.Area, &x.Expected, &x.AwaitingDecision, &x.ParentID, &x.StartedAt, &x.CompletedAt, &x.CanceledAt, &x.TriagedAt, &x.StartedTriageAt, &x.MilestoneID, &x.DueAt, &x.SLAStartedAt, &x.SLAMediumRiskAt, &x.SLAHighRiskAt, &x.SLABreachesAt, &x.Source, &x.SourceRef, &x.CloseRule}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return err
 	}
@@ -2511,7 +2515,7 @@ func scanTask(row interface{ Scan(...any) error }, x *Task, extra ...any) error 
 	return json.Unmarshal(refs, &x.Refs)
 }
 
-const taskBaseColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,last_activity_at,body_doc,project,area,expected,awaiting_decision,parent_id,started_at,completed_at,canceled_at,triaged_at,started_triage_at,milestone_id,due_at,sla_started_at,sla_medium_risk_at,sla_high_risk_at,sla_breaches_at,source,source_ref`
+const taskBaseColumns = `id,lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,last_activity_at,body_doc,project,area,expected,awaiting_decision,parent_id,started_at,completed_at,canceled_at,triaged_at,started_triage_at,milestone_id,due_at,sla_started_at,sla_medium_risk_at,sla_high_risk_at,sla_breaches_at,source,source_ref,close_rule`
 const taskColumns = taskBaseColumns
 
 // taskProjectQuerier is the row-query seam requireTaskProject runs against:

@@ -361,6 +361,11 @@ func (s Service) SetTaskArea(ctx context.Context, id int64, area *string, client
 func (s Service) SetTaskPriority(ctx context.Context, id int64, priority int, client, note string) (store.Task, bool, error) {
 	return s.Store.SetTaskPriorityDirect(ctx, id, priority, client, note)
 }
+
+// SetTaskCloseRule sets a task's close rule, auto or explicit (hk 5112).
+func (s Service) SetTaskCloseRule(ctx context.Context, id int64, rule, client, note string) (store.Task, bool, error) {
+	return s.Store.SetTaskCloseRule(ctx, id, rule, client, note)
+}
 func (s Service) ListTaskProjects(ctx context.Context) ([]string, error) {
 	return s.Store.ListTaskProjects(ctx)
 }
@@ -673,6 +678,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/{id}/project", s.taskProject)
 	m.HandleFunc("POST /v1/tasks/{id}/area", s.taskArea)
 	m.HandleFunc("POST /v1/tasks/{id}/priority", s.taskPriority)
+	m.HandleFunc("POST /v1/tasks/{id}/close-rule", s.taskCloseRule)
 	m.HandleFunc("POST /v1/tasks/{id}/milestone", s.taskMilestone)
 	m.HandleFunc("GET /v1/task-areas", s.taskAreasList)
 	m.HandleFunc("POST /v1/tasks/relane", s.tasksRelane)
@@ -1162,6 +1168,35 @@ func (s Server) taskPriority(w http.ResponseWriter, r *http.Request) {
 		note = input.Reason
 	}
 	x, _, err := s.Service.SetTaskPriority(r.Context(), id, *input.Priority, client, note)
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, x)
+}
+
+// taskCloseRule sets a task's close rule, auto or explicit (hk 5112). The
+// store refuses any other value with invalid_close_rule.
+func (s Server) taskCloseRule(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	id, err := pathID(r, "id")
+	if err != nil || id < 1 {
+		writeError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	defer r.Body.Close()
+	var input struct {
+		CloseRule string `json:"close_rule"`
+		Note      string `json:"note"`
+	}
+	if err := decode(r, &input, bodySmall); err != nil {
+		appErr(w, r, err)
+		return
+	}
+	x, _, err := s.Service.SetTaskCloseRule(r.Context(), id, input.CloseRule, client, input.Note)
 	if err != nil {
 		appErr(w, r, err)
 		return

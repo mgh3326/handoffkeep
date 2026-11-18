@@ -554,6 +554,13 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 			return TaskEventResult{}, err
 		}
 		if hasSub {
+			// hk 5112: an explicit task is closed by hand, so adoption (which
+			// records the PR and then deploys it) does not run. The merge is
+			// recorded as held: the task stays merged, and a later automatic close
+			// can still adopt the PR (heldMergePRTx).
+			if x.CloseRule == CloseRuleExplicit {
+				return s.recordExplicitHeldMergeTx(ctx, tx, x, ev)
+			}
 			return s.adoptMergedPRTx(ctx, tx, x, ev, now, writeEventComment)
 		}
 	}
@@ -568,6 +575,17 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 		// (the closure below takes ev.SourceRef as the evidence).
 		to = StateCompleted
 	}
+	// hk 5112 (close_rule explicit): a close the event would make is recorded,
+	// not applied. It is checked before any change or decision read, so an
+	// explicit task never reaches the parts of the close that are not ported.
+	// A merge held this way still landed its PR, so it is recorded as a held
+	// merge (merge_held): siblings on the PR propagate, and a later automatic
+	// close can adopt the PR (heldMergePRTx).
+	held := false
+	if reason == "" && explicitHoldsClose(x, to) {
+		reason = explicitCloseReason
+		held = ev.Source == SourceMergewakeMerge
+	}
 	if reason == "" && ev.PR != "" && (ev.Source == SourceMergewakeMerge || ev.Source == SourceDeploy) {
 		reverted, err := revertNamesPRTx(ctx, tx, x.ID, ev.PR)
 		if err != nil {
@@ -579,7 +597,6 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 			reason = "the deploy lists only the reverted PR"
 		}
 	}
-	held := false
 	if reason == "" && ev.Source == SourceMergewakeMerge {
 		if reason, err = mergeHoldTx(ctx, tx, x.ID, ev.PR); err != nil {
 			return TaskEventResult{}, err
@@ -707,6 +724,19 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 		}
 	}
 	return TaskEventResult{Applied: true, State: x.State, Task: x}, nil
+}
+
+// recordExplicitHeldMergeTx records a merge that an explicit task (hk 5112)
+// may not adopt: the row is not applied and marked as a held merge, and neither
+// refs.pr nor the state changes.
+func (s *Store) recordExplicitHeldMergeTx(ctx context.Context, tx transaction, x Task, ev sourceEvent) (TaskEventResult, error) {
+	if _, _, err := insertEvent(ctx, tx, taskEventInput{
+		TaskID: x.ID, Kind: TaskEventSource, From: x.State, To: x.State, By: ev.Source, Note: joinNote(ev.Note, "not applied: "+explicitCloseReason), Refs: x.Refs, At: ev.At,
+		Source: ev.Source, SourceRef: ev.SourceRef, Field: heldMergeField, Auto: true, NotApplied: true,
+	}); err != nil {
+		return TaskEventResult{}, err
+	}
+	return TaskEventResult{State: x.State, Reason: explicitCloseReason, Task: x, held: true}, nil
 }
 
 // adoptMergedPRTx is named-parent PR adoption (hk 4172): a merge names a task
