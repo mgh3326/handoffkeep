@@ -134,6 +134,7 @@ var errorRules = []errorRule{
 	{store.ErrBenchRepNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrJobIDTaken, http.StatusConflict, "job_id_taken", false},
 	{store.ErrJobStateConflict, http.StatusConflict, "job_state_conflict", true},
+	{store.ErrJobOwnerMismatch, http.StatusConflict, "job_owner_mismatch", false},
 	{store.ErrOutboxEventNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrOutboxConflict, http.StatusConflict, "notification_outbox_conflict", false},
 	{store.ErrOutboxNotReceived, http.StatusConflict, "notification_outbox_not_received", false},
@@ -189,6 +190,13 @@ func appErr(w http.ResponseWriter, r *http.Request, e error) {
 	var similar *store.SimilarTasksError
 	if errors.As(e, &similar) {
 		jsonOut(w, http.StatusConflict, map[string]any{"error": "similar_tasks", "similar_tasks": similar.Tasks})
+		return
+	}
+	// The 409 names the record's current owner, so a stale writer can see who
+	// holds the job (hk 5276).
+	var ownerMismatch *store.JobOwnerMismatchError
+	if errors.As(e, &ownerMismatch) {
+		jsonOut(w, http.StatusConflict, map[string]any{"error": "job_owner_mismatch", "owner_node": ownerMismatch.Owner.Node, "owner_epoch": ownerMismatch.Owner.Epoch})
 		return
 	}
 	for _, rule := range errorRules {

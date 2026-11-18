@@ -446,3 +446,43 @@ func TestJobsSelection(t *testing.T) {
 		t.Fatalf("a refused write changed the selection: %v", got["selection"])
 	}
 }
+
+// The owner fence on PUT /v1/jobs/{job} (hk 5276): a stale expected_owner is
+// a 409 that names the current owner and applies nothing; a matching one
+// applies; an update without expected_owner is unfenced.
+func TestJobsOwnerFence(t *testing.T) {
+	srv := jobsAPIServer(t)
+	id := fmt.Sprintf("5276-builder-%d", time.Now().UnixNano())
+	if code, _ := jobsClaim(t, srv, "tok-a", id, "host-a", 5); code != http.StatusCreated {
+		t.Fatalf("claim: %d", code)
+	}
+	url := srv.URL + "/v1/jobs/" + id
+
+	code, body := jobsRequest(t, "PUT", url, "tok-a", `{"owner":{"node":"node-a","epoch":1},"expected_owner":{"node":"","epoch":0}}`)
+	if code != http.StatusOK || body["owner_node"] != "node-a" || body["owner_epoch"] != float64(1) {
+		t.Fatalf("transfer: %d %v", code, body)
+	}
+
+	code, body = jobsRequest(t, "PUT", url, "tok-a", `{"label":"stale","expected_owner":{"node":"node-b","epoch":1}}`)
+	if code != http.StatusConflict || body["error"] != "job_owner_mismatch" || body["owner_node"] != "node-a" || body["owner_epoch"] != float64(1) {
+		t.Fatalf("stale expected owner: %d %v", code, body)
+	}
+	if _, body = jobsRequest(t, "GET", url, "tok-a", ""); body["label"] != nil {
+		t.Fatalf("refused update applied: %v", body)
+	}
+
+	code, body = jobsRequest(t, "PUT", url, "tok-a", `{"owner":{"node":"node-b","epoch":1}}`)
+	if code != http.StatusConflict || body["error"] != "job_owner_mismatch" {
+		t.Fatalf("epoch must move forward: %d %v", code, body)
+	}
+
+	code, body = jobsRequest(t, "PUT", url, "tok-a", `{"state":"spawned","expected_owner":{"node":"node-a","epoch":1}}`)
+	if code != http.StatusOK || body["state"] != "spawned" {
+		t.Fatalf("matching expected owner: %d %v", code, body)
+	}
+
+	code, body = jobsRequest(t, "PUT", url, "tok-a", `{"label":"unfenced"}`)
+	if code != http.StatusOK || body["owner_node"] != "node-a" || body["label"] != "unfenced" {
+		t.Fatalf("unconditioned update: %d %v", code, body)
+	}
+}

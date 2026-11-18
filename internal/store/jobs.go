@@ -27,7 +27,26 @@ var (
 	ErrJobNotFound      = errors.New("job_not_found")
 	ErrJobIDTaken       = errors.New("job_id_taken")
 	ErrJobStateConflict = errors.New("job_state_conflict")
+	// ErrJobOwnerMismatch refuses an update whose expected_owner is not the
+	// record's owner, or whose owner epoch does not move forward (hk 5276).
+	ErrJobOwnerMismatch = errors.New("job_owner_mismatch")
 )
+
+// JobOwner is the job's fence: the node that may write it and the epoch of
+// that grant. Epoch 0 with an empty node means no owner (unfenced).
+type JobOwner struct {
+	Node  string `json:"node"`
+	Epoch int64  `json:"epoch"`
+}
+
+// JobOwnerMismatchError is ErrJobOwnerMismatch carrying the record's current
+// owner, so the 409 can name it. errors.Is matches the sentinel.
+type JobOwnerMismatchError struct {
+	Owner JobOwner
+}
+
+func (e *JobOwnerMismatchError) Error() string { return ErrJobOwnerMismatch.Error() }
+func (e *JobOwnerMismatchError) Unwrap() error { return ErrJobOwnerMismatch }
 
 // jobIDRE is runtug's validID alphabet: <task>-<role>-<suffix> and
 // mergewake's mwr-<pr>-<sha7>-p<n>-<unix> both fit it.
@@ -105,6 +124,10 @@ type Job struct {
 	EndReason         *string         `json:"end_reason,omitempty"`
 	DiffStat          *JobDiffStat    `json:"diff_stat,omitempty"`
 	Summary           *JobSummary     `json:"summary,omitempty"`
+	// OwnerNode and OwnerEpoch are the fence (hk 5276). Always present on a
+	// read: "" and 0 mean no owner.
+	OwnerNode  string `json:"owner_node"`
+	OwnerEpoch int64  `json:"owner_epoch"`
 }
 
 type JobSkill struct {
@@ -190,12 +213,35 @@ type JobUpdate struct {
 	SkillsSupported *bool        `json:"skills_supported"`
 	EndReason       *string      `json:"end_reason"`
 	DiffStat        *JobDiffStat `json:"diff_stat"`
+	// Owner sets the fence to {node, epoch}; its epoch must be greater than the
+	// stored one. ExpectedOwner conditions the whole update: when present it
+	// must equal the stored owner, else nothing is applied (hk 5276). Both in
+	// one update is the atomic transfer. Without ExpectedOwner the update is
+	// unfenced, as before.
+	Owner         *JobOwner `json:"owner"`
+	ExpectedOwner *JobOwner `json:"expected_owner"`
 }
 
 // terminalOnly reports an update containing only the terminal late-write
-// set: usage, skills and the once-only report pair.
+// set: usage, skills and the once-only report pair. ExpectedOwner is a
+// condition, not a write, so it does not end the set; Owner does.
 func (u JobUpdate) terminalOnly() bool {
-	return (u.Usage != nil || u.Skills != nil || u.SkillsSupported != nil || u.ReportDoc != nil || u.ReportSHA256 != nil) && u.State == nil && u.Role == nil && u.Label == nil && u.Family == nil && u.Profile == nil && u.Model == nil && u.Harness == nil && u.Effort == nil && u.Pool == nil && u.OwnerLane == nil && u.ParentLane == nil && u.ParentJob == nil && u.PaneID == nil && u.Worktree == nil && u.Result == nil && u.Selection == nil && u.At == nil && u.ReadyAt == nil && u.ReportVersion == nil && u.EndReason == nil && u.DiffStat == nil
+	return (u.Usage != nil || u.Skills != nil || u.SkillsSupported != nil || u.ReportDoc != nil || u.ReportSHA256 != nil) && u.State == nil && u.Role == nil && u.Label == nil && u.Family == nil && u.Profile == nil && u.Model == nil && u.Harness == nil && u.Effort == nil && u.Pool == nil && u.OwnerLane == nil && u.ParentLane == nil && u.ParentJob == nil && u.PaneID == nil && u.Worktree == nil && u.Result == nil && u.Selection == nil && u.At == nil && u.ReadyAt == nil && u.ReportVersion == nil && u.EndReason == nil && u.DiffStat == nil && u.Owner == nil
+}
+
+// checkJobOwner validates one owner pair. An owner that is set needs a node;
+// a negative epoch is refused for either side.
+func checkJobOwner(o *JobOwner, setting bool) error {
+	if o.Epoch < 0 {
+		return errors.New("invalid job owner epoch")
+	}
+	if err := checkJobField(o.Node); err != nil {
+		return err
+	}
+	if setting && o.Node == "" {
+		return errors.New("invalid job owner")
+	}
+	return nil
 }
 
 func validJobField(s string) bool { return len(s) <= jobFieldMax && !stringContainsNUL(s) }
@@ -387,6 +433,16 @@ func checkJobUpdate(u JobUpdate) error {
 			seen[key] = true
 		}
 	}
+	if u.Owner != nil {
+		if err := checkJobOwner(u.Owner, true); err != nil {
+			return err
+		}
+	}
+	if u.ExpectedOwner != nil {
+		if err := checkJobOwner(u.ExpectedOwner, false); err != nil {
+			return err
+		}
+	}
 	if u.ParentJob != nil && *u.ParentJob != "" {
 		if !ValidJobID(*u.ParentJob) {
 			return fmt.Errorf("invalid parent_job")
@@ -439,7 +495,7 @@ func checkJobUpdate(u JobUpdate) error {
 	return nil
 }
 
-const jobColumns = `job_id,task_id,host,state,role,label,family,profile,model,pool,owner_lane,parent_lane,parent_job,pane_id,worktree,report_doc,result,created_by,created_at,updated_at,input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,usage_source,usage_recorded_at,harness,effort,claimed_at,spawned_at,spawned_received_at,ready_at,ready_received_at,ended_at,ended_received_at,report_sha256,report_version,skills,skills_supported,end_reason,diff_files,diff_insertions,diff_deletions,selection`
+const jobColumns = `job_id,task_id,host,state,role,label,family,profile,model,pool,owner_lane,parent_lane,parent_job,pane_id,worktree,report_doc,result,created_by,created_at,updated_at,input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,usage_source,usage_recorded_at,harness,effort,claimed_at,spawned_at,spawned_received_at,ready_at,ready_received_at,ended_at,ended_received_at,report_sha256,report_version,skills,skills_supported,end_reason,diff_files,diff_insertions,diff_deletions,selection,owner_node,owner_epoch`
 
 func scanJob(row interface{ Scan(...any) error }) (Job, error) {
 	var j Job
@@ -452,7 +508,7 @@ func scanJob(row interface{ Scan(...any) error }) (Job, error) {
 		&j.ParentJob, &j.PaneID, &worktree, &j.ReportDoc, &result,
 		&j.CreatedBy, &j.CreatedAt, &j.UpdatedAt,
 		&usage.InputTokens, &usage.OutputTokens, &usage.ReasoningTokens,
-		&usage.CacheReadTokens, &usage.CacheWriteTokens, &source, &usage.RecordedAt, &j.Harness, &j.Effort, &j.ClaimedAt, &j.SpawnedAt, &j.SpawnedReceivedAt, &j.ReadyAt, &j.ReadyReceivedAt, &j.EndedAt, &j.EndedReceivedAt, &j.ReportSHA256, &j.ReportVersion, &skills, &j.SkillsSupported, &j.EndReason, &files, &insertions, &deletions, &selection)
+		&usage.CacheReadTokens, &usage.CacheWriteTokens, &source, &usage.RecordedAt, &j.Harness, &j.Effort, &j.ClaimedAt, &j.SpawnedAt, &j.SpawnedReceivedAt, &j.ReadyAt, &j.ReadyReceivedAt, &j.EndedAt, &j.EndedReceivedAt, &j.ReportSHA256, &j.ReportVersion, &skills, &j.SkillsSupported, &j.EndReason, &files, &insertions, &deletions, &selection, &j.OwnerNode, &j.OwnerEpoch)
 	if err != nil {
 		return j, err
 	}
@@ -645,6 +701,17 @@ func (s *Store) updateJobOnce(ctx context.Context, id string, u JobUpdate) (Job,
 	if err != nil {
 		return j, err
 	}
+	// The fence is checked under the row lock, before any state rule, so a
+	// stale owner is told who owns the job even when the record is terminal.
+	// A refused fence applies none of the update.
+	if u.ExpectedOwner != nil && (j.OwnerNode != u.ExpectedOwner.Node || j.OwnerEpoch != u.ExpectedOwner.Epoch) {
+		return j, &JobOwnerMismatchError{Owner: JobOwner{Node: j.OwnerNode, Epoch: j.OwnerEpoch}}
+	}
+	// A reassign must move the epoch forward, so an old grant cannot be
+	// replayed over a newer one.
+	if u.Owner != nil && u.Owner.Epoch <= j.OwnerEpoch {
+		return j, &JobOwnerMismatchError{Owner: JobOwner{Node: j.OwnerNode, Epoch: j.OwnerEpoch}}
+	}
 	if jobTerminal[j.State] && !u.terminalOnly() {
 		return j, fmt.Errorf("%w: state %s is terminal", ErrJobStateConflict, j.State)
 	}
@@ -758,6 +825,10 @@ func (s *Store) updateJobOnce(ctx context.Context, id string, u JobUpdate) (Job,
 	if u.Selection != nil {
 		j.Selection = u.Selection
 	}
+	if u.Owner != nil {
+		j.OwnerNode = u.Owner.Node
+		j.OwnerEpoch = u.Owner.Epoch
+	}
 	j.UpdatedAt = time.Now().UTC()
 	if u.Usage != nil {
 		usage := *u.Usage
@@ -799,15 +870,15 @@ func (s *Store) updateJobOnce(ctx context.Context, id string, u JobUpdate) (Job,
 	}
 	updateSQL := sqlFor(tx,
 		`UPDATE jobs SET state=$2,role=$3,label=$4,family=$5,profile=$6,model=$7,pool=$8,owner_lane=$9,parent_lane=$10,parent_job=$11,pane_id=$12,worktree=$13::jsonb,report_doc=$14,result=$15::jsonb,updated_at=$16,
-		 input_tokens=$17,output_tokens=$18,reasoning_tokens=$19,cache_read_tokens=$20,cache_write_tokens=$21,usage_source=$22,usage_recorded_at=$23, harness=$24,effort=$25,spawned_at=$26,spawned_received_at=$27,ready_at=$28,ready_received_at=$29,ended_at=$30,ended_received_at=$31,report_sha256=$32,report_version=$33,skills=$34::jsonb,skills_supported=$35,end_reason=$36,diff_files=$37,diff_insertions=$38,diff_deletions=$39,selection=$40::jsonb
+		 input_tokens=$17,output_tokens=$18,reasoning_tokens=$19,cache_read_tokens=$20,cache_write_tokens=$21,usage_source=$22,usage_recorded_at=$23, harness=$24,effort=$25,spawned_at=$26,spawned_received_at=$27,ready_at=$28,ready_received_at=$29,ended_at=$30,ended_received_at=$31,report_sha256=$32,report_version=$33,skills=$34::jsonb,skills_supported=$35,end_reason=$36,diff_files=$37,diff_insertions=$38,diff_deletions=$39,selection=$40::jsonb, owner_node=$41, owner_epoch=$42
 		 WHERE job_id=$1 RETURNING `+jobColumns,
 		`UPDATE jobs SET state=?,role=?,label=?,family=?,profile=?,model=?,pool=?,owner_lane=?,parent_lane=?,parent_job=?,pane_id=?,worktree=?,report_doc=?,result=?,updated_at=?,
-		 input_tokens=?,output_tokens=?,reasoning_tokens=?,cache_read_tokens=?,cache_write_tokens=?,usage_source=?,usage_recorded_at=?,harness=?,effort=?,spawned_at=?,spawned_received_at=?,ready_at=?,ready_received_at=?,ended_at=?,ended_received_at=?,report_sha256=?,report_version=?,skills=?,skills_supported=?,end_reason=?,diff_files=?,diff_insertions=?,diff_deletions=?,selection=? WHERE job_id=?`)
+		 input_tokens=?,output_tokens=?,reasoning_tokens=?,cache_read_tokens=?,cache_write_tokens=?,usage_source=?,usage_recorded_at=?,harness=?,effort=?,spawned_at=?,spawned_received_at=?,ready_at=?,ready_received_at=?,ended_at=?,ended_received_at=?,report_sha256=?,report_version=?,skills=?,skills_supported=?,end_reason=?,diff_files=?,diff_insertions=?,diff_deletions=?,selection=?,owner_node=?,owner_epoch=? WHERE job_id=?`)
 	args := []any{
 		j.JobID, j.State, j.Role, j.Label, j.Family, j.Profile, j.Model, j.Pool,
 		j.OwnerLane, j.ParentLane, j.ParentJob, j.PaneID, worktreeArg, j.ReportDoc,
 		resultArg, j.UpdatedAt,
-		usage.InputTokens, usage.OutputTokens, usage.ReasoningTokens, usage.CacheReadTokens, usage.CacheWriteTokens, usageSource, usage.RecordedAt, j.Harness, j.Effort, j.SpawnedAt, j.SpawnedReceivedAt, j.ReadyAt, j.ReadyReceivedAt, j.EndedAt, j.EndedReceivedAt, j.ReportSHA256, j.ReportVersion, skillsArg, j.SkillsSupported, j.EndReason, diffFiles, diffInsertions, diffDeletions, selectionArg}
+		usage.InputTokens, usage.OutputTokens, usage.ReasoningTokens, usage.CacheReadTokens, usage.CacheWriteTokens, usageSource, usage.RecordedAt, j.Harness, j.Effort, j.SpawnedAt, j.SpawnedReceivedAt, j.ReadyAt, j.ReadyReceivedAt, j.EndedAt, j.EndedReceivedAt, j.ReportSHA256, j.ReportVersion, skillsArg, j.SkillsSupported, j.EndReason, diffFiles, diffInsertions, diffDeletions, selectionArg, j.OwnerNode, j.OwnerEpoch}
 	if s.dialect == mysqlDialect {
 		args = append(args[1:], args[0])
 		if _, err = tx.Exec(ctx, updateSQL, args...); err == nil {

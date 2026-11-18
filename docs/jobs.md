@@ -30,14 +30,28 @@ Reads are open to every authenticated client.
   fields include `state`, `role`, `label`, `family`, `profile`, `model`,
   `pool`, `owner_lane`, `parent_lane`, `parent_job`, `pane_id`,
   `worktree` (`{origin, branch, head}`; `branch` is `null` on a detached
-  worktree), `report_doc`, `result`, `usage`, `selection` and the context fields below. Any other field returns 400.
+  worktree), `report_doc`, `result`, `usage`, `selection`, the owner fence
+  (`owner`, `expected_owner`, below) and the context fields below. Any other
+  field returns 400.
   Brief text, command lines, pane output and absolute local paths are
   never stored.
-- `GET /v1/jobs/{job}` — returns the record, or 404 `not_found`.
+- `GET /v1/jobs/{job}` — returns the record, or 404 `not_found`. Every read
+  carries `owner_node` (`""` = no owner) and `owner_epoch` (`0` = unfenced).
 - `GET /v1/jobs?task=N` — returns `{"jobs": [...]}`, oldest claim first.
 
 ## Write rules
 
+- Owner fence. `owner` `{node, epoch}` sets the job's owner; its `epoch`
+  must be greater than the stored `owner_epoch`, or the write returns 409
+  `job_owner_mismatch`. `expected_owner` `{node, epoch}` makes the whole
+  update conditional: when it differs from the stored `owner_node` and
+  `owner_epoch`, the server refuses it with 409 `job_owner_mismatch` and
+  applies none of the update, terminal late writes included. The 409 body
+  names the current owner as `owner_node` and `owner_epoch`. Sending `owner`
+  and `expected_owner` together is an atomic transfer. An update without
+  `expected_owner` is unfenced and behaves as before, so the fence is opt-in
+  per write. An `owner` with a greater epoch on a terminal record returns
+  `job_state_conflict`, because the owner is not a late-write field.
 - States only move forward: `claimed → spawned → completed | escalated |
   lost`. `completed` needs a recorded `spawned`; `escalated` and `lost` may
   end a claim that never spawned. A backward move, a skip to `completed`, or
@@ -75,6 +89,7 @@ Reads are open to every authenticated client.
 | 404 | `not_found` | unknown job id |
 | 409 | `job_id_taken` | a different claim on a taken id |
 | 409 | `job_state_conflict` | backward move or write to a terminal record |
+| 409 | `job_owner_mismatch` | `expected_owner` differs from the stored owner, or `owner.epoch` does not exceed the stored epoch; body carries `owner_node`, `owner_epoch` |
 
 ## Selection: why this model and host
 
