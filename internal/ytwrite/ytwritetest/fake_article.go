@@ -181,11 +181,41 @@ func (f *FakeYouTrack) ReadArticle(ctx context.Context, articleID string) (ytwri
 	if len(f.readFaults) > 0 {
 		err := f.readFaults[0]
 		f.readFaults = f.readFaults[1:]
-		return ytwrite.RemoteArticle{}, err
+		if err != nil { // a nil entry lets one read through
+			return ytwrite.RemoteArticle{}, err
+		}
 	}
 	a := f.articleLocked(articleID)
 	if a == nil {
 		return ytwrite.RemoteArticle{}, &ytwrite.RemoteError{Status: http.StatusNotFound, Message: "article not found"}
 	}
-	return *a, nil
+	out := *a
+	out.ChildIDs = nil
+	for _, c := range f.articles {
+		if c.ParentID == a.ID {
+			out.ChildIDs = append(out.ChildIDs, c.ID)
+		}
+	}
+	return out, nil
+}
+
+// EditArticle sets an article's content as a person would, outside hk.
+func (f *FakeYouTrack) EditArticle(id, content string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if a := f.articleLocked(id); a != nil {
+		a.Content = content
+	}
+}
+
+// DeleteArticle removes an article as a person would.
+func (f *FakeYouTrack) DeleteArticle(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, a := range f.articles {
+		if a.ID == id {
+			f.articles = append(f.articles[:i], f.articles[i+1:]...)
+			return
+		}
+	}
 }

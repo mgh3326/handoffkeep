@@ -348,6 +348,9 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 	if pk, ok := kind.(PlannedKind); ok {
 		return p.sendPlanned(ctx, op, pk)
 	}
+	if sk, ok := kind.(articleSplit); ok {
+		return p.sendSplit(ctx, op, sk)
+	}
 	text, err := kind.Render(op)
 	if err != nil {
 		sctx, cancel := p.settling(ctx)
@@ -663,6 +666,9 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	if pk, ok := kind.(PlannedKind); ok {
 		return p.reconcilePlanned(ctx, op, pk)
 	}
+	if sk, ok := kind.(articleSplit); ok {
+		return p.reconcileSplit(ctx, op, sk)
+	}
 	want, rerr := kind.Render(op)
 	if rerr != nil {
 		return touch(ReasonReconcileFailed, rerr.Error())
@@ -762,6 +768,9 @@ func (p *Protocol) Resolve(ctx context.Context, id int64, r Resolution) (Result,
 	if kind, ok := p.kindFor(op.Kind); ok {
 		if _, planned := kind.(PlannedKind); planned {
 			return p.resolvePlanned(ctx, op, r)
+		}
+		if _, split := kind.(articleSplit); split {
+			return p.resolveSplit(ctx, op, r)
 		}
 	}
 	var got Op

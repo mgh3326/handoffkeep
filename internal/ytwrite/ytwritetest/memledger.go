@@ -37,6 +37,8 @@ type MemLedger struct {
 	familyLanes map[string]bool
 	// links is the issue_links record (memledger_links.go).
 	links memLinks
+	// splits are the article_split plans, by op (memledger_split.go).
+	splits map[int64][]ytwrite.SplitPlanRecord
 }
 
 // NewMemLedger returns an empty ledger.

@@ -334,6 +334,10 @@ type RemoteArticle struct {
 	// CreatedAt is when the article was created, zero when the remote did not
 	// say. A family with several roots uses its oldest by this (hk 4797).
 	CreatedAt time.Time
+	// ChildIDs are the article's sub-articles, as ReadArticle reads them
+	// directly (childArticles), never by search; nil from FindArticles. A
+	// split document's parts are found here (hk 5085).
+	ChildIDs []string
 }
 
 // ArticleCreate is one article create: the project and the text.
@@ -360,8 +364,9 @@ type ArticleRemote interface {
 	// UpdateArticle sets the article's summary and content in exactly one
 	// POST and returns its id. Its errors follow CreateComment's.
 	UpdateArticle(ctx context.Context, articleID, summary, content string) (id string, err error)
-	// ReadArticle reads one article by id, with its content. A 429 is a
-	// *RemoteError with the server's RetryAfter.
+	// ReadArticle reads one article by id, with its content, its parent and
+	// its children's ids (ChildIDs). A 429 is a *RemoteError with the
+	// server's RetryAfter.
 	ReadArticle(ctx context.Context, articleID string) (RemoteArticle, error)
 }
 

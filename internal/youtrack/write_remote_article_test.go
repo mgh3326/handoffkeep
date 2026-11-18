@@ -3,6 +3,7 @@ package youtrack
 import (
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -48,7 +49,7 @@ func TestWriteRemoteFindArticles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0] != (ytwrite.RemoteArticle{ID: "3-1", ProjectID: "0-30", Summary: summary, Content: "body <!-- hk-op:9 -->"}) {
+	if len(got) != 1 || !reflect.DeepEqual(got[0], ytwrite.RemoteArticle{ID: "3-1", ProjectID: "0-30", Summary: summary, Content: "body <!-- hk-op:9 -->"}) {
 		t.Fatalf("hits %+v", got)
 	}
 	if query != `project: SHRDOC "[design] design/\"q\".md [note]"` || y.count() != 2 {
@@ -94,7 +95,7 @@ func TestWriteRemoteFindArticlesScopedToParent(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := ytwrite.RemoteArticle{ID: "3-4", ProjectID: "0-30", Summary: summary, Content: "body", ParentID: "3-1"}
-	if len(got) != 1 || got[0] != want || y.count() != 2 {
+	if len(got) != 1 || !reflect.DeepEqual(got[0], want) || y.count() != 2 {
 		t.Fatalf("hits %+v requests %v", got, y.requests)
 	}
 }
@@ -217,5 +218,27 @@ func TestWriteRemoteFindArticlesFamilyRootIsNarrow(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != "3-1" || got[0].Content != rootContent {
 		t.Fatalf("hits %+v, want the family root only", got)
+	}
+}
+
+// ReadArticle reads the article's children by a direct GET of the article
+// (childArticles), the read a split document's parts are found by (hk 5085).
+func TestWriteRemoteReadArticleChildren(t *testing.T) {
+	var fields string
+	y := &recordedYouTrack{answer: func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/articles/3-1" {
+			t.Errorf("unexpected %s", r.URL.Path)
+		}
+		fields = r.URL.Query().Get("fields")
+		a := articleHit("3-1", "0-30", "index", "3-0", "content")
+		a["childArticles"] = []any{map[string]any{"id": "3-2"}, map[string]any{"id": "3-3"}}
+		_ = json.NewEncoder(w).Encode(a)
+	}}
+	got, err := y.serve(t).ReadArticle(t.Context(), "3-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fields, "childArticles(id)") || !reflect.DeepEqual(got.ChildIDs, []string{"3-2", "3-3"}) || got.ParentID != "3-0" {
+		t.Fatalf("fields %q read %+v", fields, got)
 	}
 }

@@ -76,3 +76,7 @@ func TestRenderCommentIsDeterministic(t *testing.T) {
 		t.Fatal("marker is not the exact op marker")
 	}
 }
+
+func TestSplitProtocolOverMemoryLedger(t *testing.T) {
+	ytwritetest.RunSplitProtocol(t, func(*testing.T) (ytwrite.Ledger, int64) { return ytwritetest.NewMemLedger(), 5085 })
+}
