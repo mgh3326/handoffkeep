@@ -138,6 +138,12 @@ func (s *Store) Attention(ctx context.Context, now time.Time) (Attention, error)
 	return out, tx.Commit(ctx)
 }
 
+// attentionDecisionsSeam is a test-only barrier invoked inside the attention
+// snapshot after the decision count read and before the item reads.
+// Production code leaves it nil; it is unexported and unreachable from any
+// network surface.
+var attentionDecisionsSeam func(ctx context.Context)
+
 func attentionDecisionsTx(ctx context.Context, tx transaction, now time.Time) (AttentionDecisions, error) {
 	out := AttentionDecisions{Items: []AttentionDecision{}}
 	var requests, lanes int
@@ -153,6 +159,9 @@ func attentionDecisionsTx(ctx context.Context, tx transaction, now time.Time) (A
 		return out, err
 	}
 	out.Count = requests + lanes
+	if attentionDecisionsSeam != nil {
+		attentionDecisionsSeam(ctx)
+	}
 
 	items, err := attentionRequestItems(ctx, tx, now)
 	if err != nil {

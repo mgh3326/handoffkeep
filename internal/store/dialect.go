@@ -271,6 +271,101 @@ func (p *sqlSavepoint) Rollback(ctx context.Context) error {
 	return mapDriverError(err)
 }
 
+// sqlSnapshot is a MySQL read-only snapshot transaction (design §11.1): its
+// connection already runs START TRANSACTION WITH CONSISTENT SNAPSHOT, READ
+// ONLY at REPEATABLE READ, so every statement reads one fixed snapshot. It
+// writes nothing, so like the snapshot helper it never takes @hk_txn. Commit
+// and Rollback both release the pinned connection; Rollback after Commit is a
+// no-op, as for a database transaction.
+type sqlSnapshot struct {
+	conn *sql.Conn
+	done bool
+}
+
+func (s *sqlSnapshot) dialectOf() storeDialect { return mysqlDialect }
+
+func (s *sqlSnapshot) InsertID(ctx context.Context, q string, args ...any) (int64, error) {
+	result, err := s.conn.ExecContext(ctx, q, args...)
+	if err != nil {
+		return 0, mapDriverError(err)
+	}
+	id, err := result.LastInsertId()
+	return id, mapDriverError(err)
+}
+
+func (s *sqlSnapshot) Exec(ctx context.Context, q string, args ...any) (int64, error) {
+	r, e := s.conn.ExecContext(ctx, q, args...)
+	return sqlResult(r, e)
+}
+
+func (s *sqlSnapshot) Query(ctx context.Context, q string, args ...any) (rows, error) {
+	r, e := s.conn.QueryContext(ctx, q, args...)
+	if e != nil {
+		return nil, mapDriverError(e)
+	}
+	return mappedRows{sqlRows{r}}, nil
+}
+
+func (s *sqlSnapshot) QueryRow(ctx context.Context, q string, args ...any) row {
+	return mappedRow{s.conn.QueryRowContext(ctx, q, args...)}
+}
+
+// Begin opens a savepoint on the snapshot's connection.
+func (s *sqlSnapshot) Begin(ctx context.Context) (transaction, error) {
+	name := fmt.Sprintf("hk_sp_%d", savepointSeq.Add(1))
+	if _, err := s.conn.ExecContext(ctx, "SAVEPOINT "+name); err != nil {
+		return nil, mapDriverError(err)
+	}
+	return &sqlSnapshotSavepoint{sqlSnapshot: s, name: name}, nil
+}
+
+func (s *sqlSnapshot) Commit(ctx context.Context) error {
+	if s.done {
+		return mapDriverError(sql.ErrTxDone)
+	}
+	s.done = true
+	_, err := s.conn.ExecContext(ctx, `COMMIT`)
+	_ = s.conn.Close()
+	return mapDriverError(err)
+}
+
+func (s *sqlSnapshot) Rollback(ctx context.Context) error {
+	if s.done {
+		return nil
+	}
+	s.done = true
+	_, err := s.conn.ExecContext(ctx, `ROLLBACK`)
+	_ = s.conn.Close()
+	return mapDriverError(err)
+}
+
+// sqlSnapshotSavepoint keeps the snapshot's methods for statements; only its
+// Commit and Rollback differ.
+type sqlSnapshotSavepoint struct {
+	*sqlSnapshot
+	name string
+	done bool
+}
+
+func (p *sqlSnapshotSavepoint) Commit(ctx context.Context) error {
+	p.done = true
+	_, err := p.conn.ExecContext(ctx, "RELEASE SAVEPOINT "+p.name)
+	return mapDriverError(err)
+}
+
+// Rollback after Commit is a no-op, as for a database transaction.
+func (p *sqlSnapshotSavepoint) Rollback(ctx context.Context) error {
+	if p.done {
+		return nil
+	}
+	p.done = true
+	if _, err := p.conn.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+p.name); err != nil {
+		return mapDriverError(err)
+	}
+	_, err := p.conn.ExecContext(ctx, "RELEASE SAVEPOINT "+p.name)
+	return mapDriverError(err)
+}
+
 func (s sqlTransaction) Commit(context.Context) error   { return mapDriverError(s.tx.Commit()) }
 func (s sqlTransaction) Rollback(context.Context) error { return mapDriverError(s.tx.Rollback()) }
 func sqlResult(r sql.Result, err error) (int64, error) {
