@@ -408,6 +408,34 @@ t_gate_not_migrations() {
 		want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
 	done
 }
+t_gate_mysql_migrations() {
+	# hk 5072: migration_mysql_*.go feeds the MySQL registry production
+	# PostgreSQL never runs, so it does not hold the promote.
+	setup; setup_tick
+	local f
+	for f in \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"added","patch":"+registerMySQLMigration("}]' \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"modified","patch":"@@ -1 +1 @@\n-old\n+new"}]' \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"renamed","patch":"+x"}]' \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"copied","patch":"+x"}]'; do
+		compare "$SHA_OLD" "$SHA_NEW" ahead "$f"
+		want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	done
+	# The exclusion is by name AND content: a PostgreSQL registration inside
+	# a MySQL-named file still holds, a name without the migration_mysql_
+	# prefix is not the MySQL registry, and a MySQL file whose patch GitHub
+	# omitted cannot be checked for registerMigration(.
+	for f in \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"added","patch":"+func init() { registerMigration(migration{ID: \"x\"}) }"}]' \
+		'[{"filename":"internal/store/migration_mysqlfoo.go","status":"added","patch":"+x"}]' \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"modified"}]'; do
+		compare "$SHA_OLD" "$SHA_NEW" ahead "$f"
+		want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	done
+	# A PostgreSQL migration next to MySQL files still holds.
+	compare "$SHA_OLD" "$SHA_NEW" ahead '[{"filename":"internal/store/migration_mysql_tasks.go","status":"added","patch":"+x"},{"filename":"internal/store/migration_pg.go","status":"added","patch":"+x"}]'
+	want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
 
 # --- tick ------------------------------------------------------------------
 
