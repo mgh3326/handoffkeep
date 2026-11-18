@@ -17,6 +17,12 @@ ROOT = Path(__file__).resolve().parent.parent
 SCOPE = 'if !ok || !s.quotaScope(w, client, r.PathValue("key")) {'
 MUTANTS = [
     (
+        "balance-negative-accepted", "store/quota.go", False,
+        "\tif x.Balance != nil && (math.IsNaN(*x.Balance) || math.IsInf(*x.Balance, 0) || *x.Balance < 0) {\n\t\treturn false\n\t}\n",
+        "",
+        "TestQuotaBalanceValidation", "balance",
+    ),
+    (
         "dedupe-removed", "store/quota.go", True,
         "\tif err == nil {\n\t\tvar existing QuotaObservation\n",
         "\terr = ErrNoRows // mutant: the duplicate lookup always misses\n\tif err == nil {\n\t\tvar existing QuotaObservation\n",
