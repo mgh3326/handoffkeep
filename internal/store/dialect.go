@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5"
@@ -327,11 +328,26 @@ func (s *sqlSnapshot) Commit(ctx context.Context) error {
 	// A cancelled caller still needs its snapshot closed: without a live
 	// context no COMMIT is sent and Close returns the connection to the pool
 	// inside its read-only transaction, where later pool statements would
-	// join it. Detach the cleanup from cancellation; a failed COMMIT
-	// discards the connection instead of returning it to the pool.
-	_, err := s.conn.ExecContext(context.WithoutCancel(ctx), `COMMIT`)
+	// join it. Detach the cleanup from cancellation and bound it; a failed
+	// COMMIT discards the connection instead of returning it to the pool.
+	settle, cancel := snapshotCleanupContext(ctx)
+	defer cancel()
+	_, err := s.conn.ExecContext(settle, `COMMIT`)
 	s.closeSnapshotConn(err == nil)
 	return mapDriverError(err)
+}
+
+// snapshotCleanupTimeout bounds the detached COMMIT/ROLLBACK: once the caller
+// is cancelled nothing else caps the cleanup (the MySQL DSN sets no read or
+// write timeout), and an unanswered server would otherwise hold the request
+// goroutine and the pinned connection indefinitely. A timeout here is safe:
+// closeSnapshotConn discards the connection on failure.
+const snapshotCleanupTimeout = 5 * time.Second
+
+// snapshotCleanupContext detaches the snapshot cleanup from cancellation and
+// bounds it, the same shape as the settle paths elsewhere in the store.
+func snapshotCleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), snapshotCleanupTimeout)
 }
 
 func (s *sqlSnapshot) Rollback(ctx context.Context) error {
@@ -339,7 +355,9 @@ func (s *sqlSnapshot) Rollback(ctx context.Context) error {
 		return nil
 	}
 	s.done = true
-	_, err := s.conn.ExecContext(context.WithoutCancel(ctx), `ROLLBACK`)
+	settle, cancel := snapshotCleanupContext(ctx)
+	defer cancel()
+	_, err := s.conn.ExecContext(settle, `ROLLBACK`)
 	s.closeSnapshotConn(err == nil)
 	return mapDriverError(err)
 }
