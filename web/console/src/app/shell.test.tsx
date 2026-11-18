@@ -3,12 +3,13 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { destinations, Shell } from "./Shell";
 import { STORAGE_KEYS } from "../shared/storage";
 
-// 홈 · 결정 · 작업 · 작업 현황 · 배포 · 플릿 현황: a pending decision outranks work, so 결정 is second.
+// 홈 · 결정 · 작업 · 작업 현황 · 대기 · 배포 · 플릿 현황: a pending decision outranks work, so 결정 is second.
 const EXPECTED = [
   ["홈", "/ui"],
   ["결정", "/ui/decisions"],
   ["작업", "/ui/work"],
   ["작업 현황", "/ui/work-status"],
+  ["대기", "/ui/waits"],
   ["배포", "/ui/deploys"],
   ["플릿 현황", "/ui/fleet-status"],
 ];
@@ -39,11 +40,11 @@ afterEach(() => {
 });
 
 describe("Shell navigation", () => {
-  it("destinations has exactly the six rows, in order", () => {
+  it("destinations has exactly the seven rows, in order", () => {
     expect(destinations.map((d) => [d.label, d.href])).toEqual(EXPECTED);
   });
 
-  it.each([390, 1440])("renders 홈·결정·작업·작업 현황·배포·플릿 현황 in order with their hrefs at %i px", (width) => {
+  it.each([390, 1440])("renders 홈·결정·작업·작업 현황·대기·배포·플릿 현황 in order with their hrefs at %i px", (width) => {
     setWidth(width);
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 503 })));
     render(
@@ -56,7 +57,7 @@ describe("Shell navigation", () => {
     expect(links.find((a) => a.getAttribute("aria-current") === "page")?.textContent).toBe("작업");
   });
 
-  it("marks nothing current for a page outside the six destinations", () => {
+  it("marks nothing current for a page outside the seven destinations", () => {
     render(
       <Shell current={null}>
         <p>page</p>

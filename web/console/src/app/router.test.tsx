@@ -44,6 +44,13 @@ describe("shell router", () => {
     expect(window.location.pathname).toBe("/ui/work-status");
   });
 
+  it("/ui/waits renders WaitsPage and keeps the URL", () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+    visit("/ui/waits");
+    expect(screen.getByRole("heading", { name: "운영자와 대기 상태" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/ui/waits");
+  });
+
   it("/ui/queue renders Work and replaces the URL with /ui/work", () => {
     const length = window.history.length;
     visit("/ui/queue?view=all");
