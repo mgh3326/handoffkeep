@@ -116,23 +116,26 @@ func mysqlLiveTriggers(migrations []mysqlMigration) (live map[string]string, own
 	return live, owners, nil
 }
 
-// resolveMySQLCollationMigration derives the collation migration's recreate
-// steps and after dependencies from the live triggers across all other
-// migrations in migrations.
-func resolveMySQLCollationMigration(migrations []mysqlMigration) error {
-	var target *mysqlMigration
+// resolveMySQLCollationMigration returns a caller-owned copy of migrations where
+// the collation migration's recreate steps and after dependencies are derived
+// from the live triggers across all other migrations. It never mutates the
+// input slice or the global mysqlMigrations registry.
+func resolveMySQLCollationMigration(migrations []mysqlMigration) ([]mysqlMigration, error) {
+	targetIdx := -1
 	for i := range migrations {
 		if migrations[i].id == mysqlCollationMigrationID {
-			target = &migrations[i]
+			targetIdx = i
 			break
 		}
 	}
-	if target == nil {
-		return nil
+	if targetIdx == -1 {
+		out := make([]mysqlMigration, len(migrations))
+		copy(out, migrations)
+		return out, nil
 	}
 	live, owners, err := mysqlLiveTriggers(migrations)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	names := make([]string, 0, len(live))
 	for name := range live {
@@ -149,12 +152,21 @@ func resolveMySQLCollationMigration(migrations []mysqlMigration) error {
 		)
 	}
 
-	afterMap := map[string]bool{
-		"20261118-mysql-tasks":      true, // tasks_closure_check
-		"20261118-mysql-relay-jobs": true, // jobs_skills_check
+	present := map[string]bool{}
+	for _, m := range migrations {
+		present[m.id] = true
+	}
+	afterMap := map[string]bool{}
+	if present["20261118-mysql-tasks"] {
+		afterMap["20261118-mysql-tasks"] = true
+	}
+	if present["20261118-mysql-relay-jobs"] {
+		afterMap["20261118-mysql-relay-jobs"] = true
 	}
 	for _, migID := range owners {
-		afterMap[migID] = true
+		if present[migID] {
+			afterMap[migID] = true
+		}
 	}
 	after := make([]string, 0, len(afterMap))
 	for id := range afterMap {
@@ -162,18 +174,11 @@ func resolveMySQLCollationMigration(migrations []mysqlMigration) error {
 	}
 	sort.Strings(after)
 
-	target.steps = steps
-	target.after = after
-
-	// Keep global mysqlMigrations in sync if target was in a copy.
-	for i := range mysqlMigrations {
-		if mysqlMigrations[i].id == mysqlCollationMigrationID {
-			mysqlMigrations[i].steps = steps
-			mysqlMigrations[i].after = after
-			break
-		}
-	}
-	return nil
+	out := make([]mysqlMigration, len(migrations))
+	copy(out, migrations)
+	out[targetIdx].steps = steps
+	out[targetIdx].after = after
+	return out, nil
 }
 
 // mysqlCollationCheckSteps rebuilds the two JSON CHECK constraints from the

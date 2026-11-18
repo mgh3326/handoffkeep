@@ -22,11 +22,12 @@ var mysqlMigrations []mysqlMigration
 func registerMySQLMigration(m mysqlMigration) { mysqlMigrations = append(mysqlMigrations, m) }
 
 func orderMySQLMigrations(migrations []mysqlMigration) ([]mysqlMigration, error) {
-	if err := resolveMySQLCollationMigration(migrations); err != nil {
+	resolved, err := resolveMySQLCollationMigration(migrations)
+	if err != nil {
 		return nil, err
 	}
-	byID := make(map[string]mysqlMigration, len(migrations))
-	for _, m := range migrations {
+	byID := make(map[string]mysqlMigration, len(resolved))
+	for _, m := range resolved {
 		if err := checkMigrationID(m.id); err != nil {
 			return nil, err
 		}
@@ -38,7 +39,7 @@ func orderMySQLMigrations(migrations []mysqlMigration) ([]mysqlMigration, error)
 		}
 		byID[m.id] = m
 	}
-	for _, m := range migrations {
+	for _, m := range resolved {
 		for _, dep := range m.after {
 			if _, ok := byID[dep]; !ok {
 				return nil, fmt.Errorf("mysql migration %s has unknown dependency %s", m.id, dep)

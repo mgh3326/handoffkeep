@@ -3,6 +3,7 @@ package store
 import (
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -14,7 +15,8 @@ func TestMySQLCollationRecreationCoversTriggers(t *testing.T) {
 	const collationID = "20261118-mysql-collation"
 	// The collation migration names other migrations in after: an unknown ID
 	// fails every MySQL open at startup, so the full registry must order.
-	if _, err := orderMySQLMigrations(mysqlMigrations); err != nil {
+	ordered, err := orderMySQLMigrations(mysqlMigrations)
+	if err != nil {
 		t.Fatalf("full MySQL registry does not order: %v", err)
 	}
 	liveMap, _, err := mysqlLiveTriggers(mysqlMigrations)
@@ -26,7 +28,7 @@ func TestMySQLCollationRecreationCoversTriggers(t *testing.T) {
 		live = append(live, name)
 	}
 	var myDrops, myCreates []string
-	for _, m := range mysqlMigrations {
+	for _, m := range ordered {
 		if m.id != collationID {
 			continue
 		}
@@ -65,8 +67,12 @@ func TestMySQLCollationRecreationCoversTriggers(t *testing.T) {
 // shared predicate consts (hk 5169).
 func TestMySQLCollationRecreationCoversChecks(t *testing.T) {
 	const collationID = "20261118-mysql-collation"
+	ordered, err := orderMySQLMigrations(mysqlMigrations)
+	if err != nil {
+		t.Fatalf("order MySQL migrations: %v", err)
+	}
 	seen := map[string]bool{}
-	for _, m := range mysqlMigrations {
+	for _, m := range ordered {
 		if m.id != collationID {
 			continue
 		}
@@ -93,5 +99,86 @@ func TestMySQLCollationRecreationCoversChecks(t *testing.T) {
 		if !seen[want] {
 			t.Errorf("collation migration is missing %s", want)
 		}
+	}
+}
+
+// orderMySQLMigrations must return a caller-owned ordered plan and must not mutate
+// the input slice or the global mysqlMigrations registry (hk 5192).
+func TestOrderMySQLMigrationsLeavesSharedRegistryUntouched(t *testing.T) {
+	clone := make([]mysqlMigration, len(mysqlMigrations))
+	copy(clone, mysqlMigrations)
+
+	collationIdx := -1
+	for i, m := range clone {
+		if m.id == mysqlCollationMigrationID {
+			collationIdx = i
+			break
+		}
+	}
+	if collationIdx == -1 {
+		t.Fatalf("missing %s in mysqlMigrations", mysqlCollationMigrationID)
+	}
+	beforeSteps := clone[collationIdx].steps
+	beforeAfter := clone[collationIdx].after
+
+	ordered, err := orderMySQLMigrations(clone)
+	if err != nil {
+		t.Fatalf("orderMySQLMigrations: %v", err)
+	}
+
+	// 1. clone must not have had its element mutated in place.
+	if len(clone[collationIdx].steps) != len(beforeSteps) || (len(beforeSteps) > 0 && &clone[collationIdx].steps[0] != &beforeSteps[0]) {
+		t.Fatalf("orderMySQLMigrations mutated input slice in place: steps count %d != %d", len(clone[collationIdx].steps), len(beforeSteps))
+	}
+	if len(clone[collationIdx].after) != len(beforeAfter) || (len(beforeAfter) > 0 && &clone[collationIdx].after[0] != &beforeAfter[0]) {
+		t.Fatalf("orderMySQLMigrations mutated input slice in place: after count %d != %d", len(clone[collationIdx].after), len(beforeAfter))
+	}
+
+	// 2. global mysqlMigrations must not have had its element mutated in place either.
+	for _, m := range mysqlMigrations {
+		if m.id == mysqlCollationMigrationID {
+			if len(m.steps) != len(beforeSteps) {
+				t.Fatalf("orderMySQLMigrations wrote back to global mysqlMigrations: steps=%d, want %d", len(m.steps), len(beforeSteps))
+			}
+			if len(m.after) != len(beforeAfter) {
+				t.Fatalf("orderMySQLMigrations wrote back to global mysqlMigrations: after=%d, want %d", len(m.after), len(beforeAfter))
+			}
+			break
+		}
+	}
+
+	// 3. returned ordered plan must have the resolved, expanded steps.
+	var found bool
+	for _, m := range ordered {
+		if m.id == mysqlCollationMigrationID {
+			found = true
+			if len(m.steps) <= len(beforeSteps) {
+				t.Fatalf("ordered plan steps not expanded: got %d <= %d", len(m.steps), len(beforeSteps))
+			}
+		}
+	}
+	if !found {
+		t.Fatal("ordered plan missing collation migration")
+	}
+}
+
+func TestOrderMySQLMigrationsConcurrent(t *testing.T) {
+	const routines = 16
+	var wg sync.WaitGroup
+	errCh := make(chan error, routines)
+	for i := 0; i < routines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := orderMySQLMigrations(mysqlMigrations)
+			if err != nil {
+				errCh <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent orderMySQLMigrations: %v", err)
 	}
 }
