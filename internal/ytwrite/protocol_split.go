@@ -96,19 +96,14 @@ func (p *Protocol) sendSplit(ctx context.Context, op Op, k articleSplit) Result 
 	}
 	parent := ""
 	if read.index == "" {
-		// The index's parent; a family root is created when the family has
-		// none (under the family lane). A root create that may have landed
-		// is the root's own uncertainty: the op waits in remote_unknown, and
-		// recovery finds the root before it creates anything.
-		parent, err = k.create.sendParent(rctx, ar, op, d.p)
+		// The index's parent, read only: a split never creates a family
+		// root. A root POST whose outcome is unknown could land after a
+		// later search and leave the family with two roots (review of PR
+		// #511), so the split waits, not sent, until the family has one
+		// (article_create makes it).
+		parent, err = k.splitParent(rctx, ar, op, d)
 		if err != nil {
-			var ns *NotSentError
-			if errors.As(err, &ns) {
-				return early(err)
-			}
-			return settle(func(c context.Context) settled {
-				return st.markUnknown(c, op, ReasonUnverified, "family root: "+err.Error())
-			})
+			return early(err)
 		}
 	}
 
@@ -313,9 +308,13 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 	}
 	parent := ""
 	if read.index == "" {
-		parent, err = k.create.sendParent(rctx, ar, op, d.p)
+		parent, err = k.splitParent(rctx, ar, op, d)
+		var ns *NotSentError
+		if errors.As(err, &ns) {
+			return pass(0, ReasonParentNotFound, err.Error())
+		}
 		if err != nil {
-			return pass(0, ReasonReconcileFailed, "family root: "+err.Error())
+			return failed(err)
 		}
 	}
 	st.f.Recover = recovers + 1

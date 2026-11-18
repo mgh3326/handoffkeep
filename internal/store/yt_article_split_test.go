@@ -23,7 +23,7 @@ func TestYTArticleSplitProtocolOverPostgres(t *testing.T) {
 	n := 0
 	ytwritetest.RunSplitProtocol(t, func(t *testing.T) (ytwrite.Ledger, int64) {
 		t.Helper()
-		if _, err := s.pool.Exec(t.Context(), `TRUNCATE yt_link_steps, yt_entity_map, yt_article_bindings, yt_write_ops, yt_write_op_adoptions`); err != nil {
+		if _, err := s.pool.Exec(t.Context(), `TRUNCATE yt_link_steps, yt_entity_map, yt_article_bindings, yt_family_roots, yt_write_ops, yt_write_op_adoptions`); err != nil {
 			t.Fatal(err)
 		}
 		n++
@@ -63,6 +63,8 @@ func TestYTArticleSplitOnPreparesOneOpAndBindsTheIndex(t *testing.T) {
 	yt := ytwritetest.NewFake()
 	var offset atomic.Int64
 	body := ytsplitBody("a")
+	// A split creates no family root: the family already has one.
+	yt.InjectArticle(ytartShared, "note", ytwrite.FamilyRootContent("note"))
 	id := ytartPut(t, s, "note/ytsplit/on", body, nil)
 	ytartPass(t, s)
 	ops := ytartOps(t, s, id)

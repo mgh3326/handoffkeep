@@ -172,6 +172,9 @@ func (f *FakeYouTrack) UpdateArticle(ctx context.Context, articleID, summary, co
 // ReadArticle returns the article as it is now, failing as QueueRead says;
 // an unknown article is a 404.
 func (f *FakeYouTrack) ReadArticle(ctx context.Context, articleID string) (ytwrite.RemoteArticle, error) {
+	if h := f.BeforeReadArticle; h != nil {
+		h(articleID)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads++
@@ -205,6 +208,31 @@ func (f *FakeYouTrack) EditArticle(id, content string) {
 	defer f.mu.Unlock()
 	if a := f.articleLocked(id); a != nil {
 		a.Content = content
+	}
+}
+
+// SetArticleSummary renames an article as a person would.
+func (f *FakeYouTrack) SetArticleSummary(id, summary string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if a := f.articleLocked(id); a != nil {
+		a.Summary = summary
+	}
+}
+
+// MoveArticle moves an article and its descendants to another project, as
+// YouTrack moves a sub-tree.
+func (f *FakeYouTrack) MoveArticle(id, projectID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	moved := map[string]bool{id: true}
+	for changed := true; changed; {
+		changed = false
+		for _, a := range f.articles {
+			if (moved[a.ID] || moved[a.ParentID]) && a.ProjectID != projectID {
+				a.ProjectID, moved[a.ID], changed = projectID, true, true
+			}
+		}
 	}
 }
 

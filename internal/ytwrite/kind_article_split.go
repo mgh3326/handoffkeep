@@ -238,6 +238,9 @@ const (
 	// ambiguously (5xx, 408, timeout) and no read shows it yet; it may still
 	// land, so nothing is created beside it.
 	ReasonOutcomeAmbiguous = "outcome_ambiguous"
+	// ReasonParentNotFound: the index's parent (the family root) does not
+	// exist yet; a split never creates one.
+	ReasonParentNotFound = "parent_not_found"
 	// ReasonDuplicatePart: two children of the index hold one part.
 	ReasonDuplicatePart = "duplicate_part"
 )
@@ -291,7 +294,7 @@ func (k articleSplit) readFamily(ctx context.Context, ar ArticleRemote, op Op, d
 		if err != nil {
 			return r, fmt.Errorf("index %s: %w", known, err)
 		}
-		if got.ID != known || got.Summary != d.p.Summary || got.Content != d.index {
+		if got.ID != known || got.Summary != d.p.Summary || got.Content != d.index || (got.ProjectID != "" && got.ProjectID != op.YTTargetID) {
 			return r, &HoldError{Reason: ReasonMarkerMismatch, Detail: "index article " + known + " does not hold the op's rendered index"}
 		}
 		index = got
@@ -325,7 +328,7 @@ func (k articleSplit) readFamily(ctx context.Context, ar ArticleRemote, op Op, d
 		if err != nil {
 			return r, fmt.Errorf("index %s: %w", exact[0], err)
 		}
-		if got.ID != exact[0] || got.Content != d.index {
+		if got.ID != exact[0] || got.Summary != d.p.Summary || got.Content != d.index || (got.ProjectID != "" && got.ProjectID != op.YTTargetID) {
 			return r, &HoldError{Reason: ReasonMarkerMismatch, Detail: "index article " + exact[0] + " does not hold the op's rendered index"}
 		}
 		index = got
@@ -362,6 +365,21 @@ func (k articleSplit) readFamily(ctx context.Context, ar ArticleRemote, op Op, d
 		}
 	}
 	return r, nil
+}
+
+// splitParent is the parent the index goes under, read only: the amended
+// policy article, the family's recorded or oldest root, or "" for none. A
+// family with no root is a *NotSentError: the split creates no root (review
+// of PR #511), and waits until the family has one.
+func (k articleSplit) splitParent(ctx context.Context, ar ArticleRemote, op Op, d splitDoc) (string, error) {
+	parent, found, err := k.create.evidenceParent(ctx, ar, op, d.p)
+	if err != nil {
+		return "", fmt.Errorf("parent of the index: %w", err)
+	}
+	if !found {
+		return "", &NotSentError{Err: fmt.Errorf("%s: family %q has no root article yet; a split creates none", ReasonParentNotFound, d.p.ParentFamily)}
+	}
+	return parent, nil
 }
 
 // errSplitNoID is a create that answered 2xx without a usable id: it may

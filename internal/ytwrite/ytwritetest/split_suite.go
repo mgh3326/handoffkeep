@@ -143,6 +143,79 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		e.wantOneFamily(op, got.YTResultID)
 	})
 
+	// A split never creates a family root (review of PR #511, r4615894731,
+	// r4615902725, r4615892450, r4615892462): a root POST whose outcome is
+	// unknown could land after a later search and leave two roots. With no
+	// root the op waits, not sent and with no request; once the family has
+	// its root the family goes under it.
+	t.Run("family_without_root_waits_and_creates_no_root", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 2)
+		e.family = "note"
+		op := e.prepare()
+		for i := 0; i < 3; i++ {
+			e.drive()
+			e.clock.Advance(time.Hour)
+		}
+		if w := len(e.yt.ArticleWrites()); w != 0 {
+			t.Fatalf("%d creates (%+v) with no family root", w, e.yt.ArticleWrites())
+		}
+		e.wantState(op, ytwrite.StatePrepared, ytwrite.ReasonNotSent)
+		root := e.yt.InjectArticle(splitProject, "note", ytwrite.FamilyRootContent("note"))
+		e.clock.Advance(48 * time.Hour)
+		e.drive()
+		got := e.wantState(op, ytwrite.StateApplied, "")
+		e.wantOneFamily(op, got.YTResultID)
+		roots := 0
+		for _, a := range e.yt.Articles(splitProject) {
+			if a.Summary == "note" {
+				roots++
+			}
+		}
+		if ix, _ := e.yt.Article(got.YTResultID); ix.ParentID != root || roots != 1 {
+			t.Fatalf("index under %q, %d roots; want one root %s", ix.ParentID, roots, root)
+		}
+	})
+
+	// An index moved to another project is not the op's target: recovery
+	// holds and creates nothing under it (review of PR #511, r4615892366).
+	t.Run("index_moved_to_another_project_is_held", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 3)
+		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: DialFail})
+		op := e.prepare()
+		e.drive()
+		got := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
+		e.yt.MoveArticle(got.YTResultID, "0-99")
+		writes := len(e.yt.ArticleWrites())
+		e.clock.Advance(time.Hour)
+		e.drive()
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonMarkerMismatch)
+		if w := len(e.yt.ArticleWrites()); w != writes {
+			t.Fatalf("%d creates under a moved index", w-writes)
+		}
+	})
+
+	// An unrecorded index renamed between the search that found it and its
+	// direct read is not the op's index: recovery holds before any part
+	// request (review of PR #511, r4615892376).
+	t.Run("index_renamed_after_its_search_is_held", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 2)
+		e.yt.Queue(Fault{Kind: NoID})
+		op := e.prepare()
+		e.drive()
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonNoID)
+		e.yt.BeforeReadArticle = func(id string) {
+			e.yt.BeforeReadArticle = nil
+			e.yt.SetArticleSummary(id, "renamed by a person")
+		}
+		writes := len(e.yt.ArticleWrites())
+		e.clock.Advance(time.Hour)
+		e.drive()
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonMarkerMismatch)
+		if w := len(e.yt.ArticleWrites()); w != writes {
+			t.Fatalf("%d part creates under a renamed index", w-writes)
+		}
+	})
+
 	// S2 (4604032030, 4603875797, 4603875859): a dial error on part k ≥ 1 after the
 	// index exists is remote_unknown, never prepared/not_sent.
 	t.Run("dial_error_on_part_2_is_remote_unknown", func(t *testing.T) {
@@ -549,6 +622,8 @@ type splitEnv struct {
 	doc    int64
 	body   string
 	parts  int
+	// family is the document's family (its parent root), "" for none.
+	family string
 }
 
 const (
@@ -599,7 +674,7 @@ func (e *splitEnv) restart(l ytwrite.Ledger) {
 func (e *splitEnv) prepare() ytwrite.Op {
 	e.t.Helper()
 	n, err := ytwrite.ArticleSplitOp(ytwrite.ArticleRequest{Principal: splitActor, Actor: splitActor, YTProjectID: splitProject, YTProjectShort: "SHRDOC",
-		Tenant: "tenant.youtrack.cloud", DocumentID: e.doc, Summary: splitSummary, Body: e.body})
+		Tenant: "tenant.youtrack.cloud", DocumentID: e.doc, Summary: splitSummary, Body: e.body, ParentFamily: e.family})
 	if err != nil {
 		e.t.Fatal(err)
 	}
