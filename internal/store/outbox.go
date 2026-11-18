@@ -37,6 +37,10 @@ const (
 	// track B-3): one row per lane per day, plus one operator-desk summary.
 	// It goes out as hub type "info".
 	OutboxKindTaskDrift = "task_drift"
+	// OutboxKindLaneCheck is the per-lane wake check (operator decision 418,
+	// hk 5201): one row per lane whose findings need a look, deduplicated by
+	// a 6-hour bucket in its event id. It goes out as hub type "info".
+	OutboxKindLaneCheck = "lane_check"
 	// OutboxSkipBeforeForwarder is the skip_reason of a row queued before the
 	// forwarder's cutoff: it was settled visibly instead of delivered, because
 	// turning forwarding on must not flush the backlog (hk 4986).

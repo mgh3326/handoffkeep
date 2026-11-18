@@ -21,10 +21,38 @@ const (
 	// DriftWorkerLock is the daily drift and hygiene worker's lock (hk 5112
 	// track B-3): it ticks every 5 minutes and delivers once on the first
 	// tick at or after 09:00 KST.
-	DriftWorkerLock         WorkerLock = 8241873520
+	DriftWorkerLock WorkerLock = 8241873520
+	// LaneCheckWorkerLock is the per-lane wake check's lock (operator
+	// decision 418, hk 5201): it ticks every 15 minutes and queues one
+	// lane_check notice per lane whose findings need a look.
+	LaneCheckWorkerLock     WorkerLock = 8241873521
 	workerLockProbeInterval            = time.Second
 	workerLockProbeTimeout             = 2 * time.Second
 )
+
+// sessionWorkerLocks is every lock a serve worker may hold for its lifetime.
+// Each one keeps a pooled connection checked out, so the pool serve opens must
+// be at least this many connections plus query headroom.
+var sessionWorkerLocks = []WorkerLock{
+	HubForwardWorkerLock, TaskThreadWorkerLock, DriftWorkerLock, LaneCheckWorkerLock,
+}
+
+// workerPoolHeadroom is what is left for store queries and API requests after
+// every session lock is held.
+const workerPoolHeadroom = 4
+
+// workerPoolFloor is the smallest pool serve may open: one connection per
+// session-lock worker plus headroom.
+var workerPoolFloor = int32(len(sessionWorkerLocks) + workerPoolHeadroom)
+
+func knownWorkerLock(id WorkerLock) bool {
+	for _, lock := range sessionWorkerLocks {
+		if id == lock {
+			return true
+		}
+	}
+	return false
+}
 
 // WorkerLease holds the connection for a session lock.
 type WorkerLease struct {
@@ -37,7 +65,7 @@ type WorkerLease struct {
 // uncertain acquisition discards the connection so a locked session cannot
 // return to the pool.
 func (s *Store) TryWorkerLock(ctx context.Context, id WorkerLock) (*WorkerLease, bool, error) {
-	if id != HubForwardWorkerLock && id != TaskThreadWorkerLock && id != DriftWorkerLock {
+	if !knownWorkerLock(id) {
 		return nil, false, errors.New("unknown worker lock")
 	}
 	if s.dialect == mysqlDialect {
