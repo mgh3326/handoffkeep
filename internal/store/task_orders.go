@@ -54,6 +54,9 @@ var (
 	ErrOrderNotOpen = errors.New("order_not_open")
 	// ErrOrderNotFound is an ack or withdraw of an order that does not exist.
 	ErrOrderNotFound = errors.New("order_not_found")
+	// ErrOrderInvalid is a malformed order write: words, key, actor, channel,
+	// id or reason the store refuses before it opens a transaction.
+	ErrOrderInvalid = errors.New("order_invalid")
 )
 
 var taskOrderIDRE = regexp.MustCompile(`^ord-[a-z2-7]{10}$`)
@@ -172,25 +175,25 @@ func taskOrderWithdrawnNoticeEventID(orderID string) string {
 func (c CreateTaskOrderInput) check() error {
 	switch {
 	case c.TaskID < 1:
-		return errors.New("invalid task order: task id")
+		return fmt.Errorf("%w: task id", ErrOrderInvalid)
 	case strings.TrimSpace(c.Words) == "" || !validText(c.Words, MaxTaskOrderWordsBytes):
-		return fmt.Errorf("invalid task order: words must be 1..%d bytes", MaxTaskOrderWordsBytes)
+		return fmt.Errorf("%w: words must be 1..%d bytes", ErrOrderInvalid, MaxTaskOrderWordsBytes)
 	case !ValidActor(c.Actor):
-		return errors.New("invalid task order: actor")
+		return fmt.Errorf("%w: actor", ErrOrderInvalid)
 	case c.Key == "" || !validText(c.Key, maxIdempotencyKeyBytes):
-		return fmt.Errorf("invalid task order: idempotency_key is required, at most %d bytes", maxIdempotencyKeyBytes)
+		return fmt.Errorf("%w: idempotency_key is required, at most %d bytes", ErrOrderInvalid, maxIdempotencyKeyBytes)
 	}
 	switch c.Channel {
 	case TaskOrderChannelConsole, TaskOrderChannelCLI:
 		if !c.Verified {
-			return errors.New("invalid task order: a console or cli order is verified")
+			return fmt.Errorf("%w: a console or cli order is verified", ErrOrderInvalid)
 		}
 	case TaskOrderChannelDots:
 		if c.Verified {
-			return errors.New("invalid task order: a dots order relays the operator's words and is not verified")
+			return fmt.Errorf("%w: a dots order relays the operator's words and is not verified", ErrOrderInvalid)
 		}
 	default:
-		return errors.New("invalid task order: channel")
+		return fmt.Errorf("%w: channel", ErrOrderInvalid)
 	}
 	return guard.Reject(c.Words)
 }
@@ -345,7 +348,7 @@ func (s *Store) lockTaskOrderTx(ctx context.Context, tx transaction, orderID str
 // answers Duplicate and writes nothing; a withdrawn one is ErrOrderNotOpen.
 func (s *Store) AckTaskOrder(ctx context.Context, orderID, actor, comment string) (TaskOrderResult, error) {
 	if !ValidTaskOrderID(orderID) || !ValidActor(actor) || strings.TrimSpace(comment) == "" {
-		return TaskOrderResult{}, errors.New("invalid task order ack")
+		return TaskOrderResult{}, fmt.Errorf("%w: ack needs an order id, an actor and a comment", ErrOrderInvalid)
 	}
 	if err := CheckTaskCommentBody(comment); err != nil {
 		return TaskOrderResult{}, err
@@ -406,7 +409,7 @@ func (s *Store) AckTaskOrder(ctx context.Context, orderID, actor, comment string
 func (s *Store) WithdrawTaskOrder(ctx context.Context, orderID, actor, reason string) (TaskOrderResult, error) {
 	reason = strings.TrimSpace(reason)
 	if !ValidTaskOrderID(orderID) || !ValidActor(actor) || reason == "" || !validText(reason, DecisionRequestReasonMaxBytes) {
-		return TaskOrderResult{}, errors.New("invalid task order withdraw")
+		return TaskOrderResult{}, fmt.Errorf("%w: withdraw needs an order id, an actor and a reason", ErrOrderInvalid)
 	}
 	if err := guard.Reject(reason); err != nil {
 		return TaskOrderResult{}, err
@@ -478,7 +481,7 @@ const TaskOrderListMax = 100
 // still waiting on their lane. A missing task is ErrTaskNotFound.
 func (s *Store) ListTaskOrders(ctx context.Context, taskID int64, openOnly bool) ([]TaskOrder, error) {
 	if taskID < 1 {
-		return nil, errors.New("invalid task order list")
+		return nil, fmt.Errorf("%w: task id", ErrOrderInvalid)
 	}
 	var exists bool
 	if err := s.db().QueryRow(ctx, s.orderSQL(`SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1)`), taskID).Scan(&exists); err != nil {

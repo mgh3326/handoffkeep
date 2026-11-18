@@ -36,6 +36,11 @@ var ConsoleWrites = []ConsoleWrite{
 		Except: "follow-up: hk 3465 — state and lane writes are planned through TransitionTask with an expected version and an idempotency key; decision_answer only closes a task while answering its request.",
 	},
 	{
+		Route:  "/ui/api/tasks/{id}/order",
+		Source: "taskOrderPathRE",
+		MCP:    []string{"task_order"},
+	},
+	{
 		Route:  "/ui/api/decision-requests/resolve",
 		Source: "/ui/api/decision-requests/resolve",
 		MCP:    []string{"decision_answer"},

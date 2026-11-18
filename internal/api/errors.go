@@ -157,6 +157,7 @@ var errorRules = []errorRule{
 	{store.ErrOrderKeyConflict, http.StatusConflict, "order_key_conflict", false},
 	{store.ErrOrderNotOpen, http.StatusConflict, "order_not_open", false},
 	{store.ErrOrderNotFound, http.StatusNotFound, "not_found", false},
+	{store.ErrOrderInvalid, http.StatusBadRequest, "order_invalid", true},
 }
 
 // appErr writes the response for an error returned by the store or a

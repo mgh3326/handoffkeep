@@ -423,3 +423,71 @@ func TestMCPWritesRefuseNULIdempotencyKey(t *testing.T) {
 		t.Errorf("refused writes changed the task: before=%v/%d after=%v/%d", task.UpdatedAt, task.Priority, after.UpdatedAt, after.Priority)
 	}
 }
+
+type mcpTaskOrderOut struct {
+	Order     store.TaskOrder `json:"order"`
+	Duplicate bool            `json:"duplicate"`
+}
+
+// TestTaskOrderMCP: an Access operator (dots) orders with the operator's
+// words and the order is recorded as relayed, an unrelated bearer is refused,
+// the operator bearer is the verified path, and a lane acknowledges.
+func TestTaskOrderMCP(t *testing.T) {
+	st := newOperatorStore(t)
+	ctx := context.Background()
+	task := newOperatorTask(t, st, "order over mcp")
+	fixture := newAccessFixture(t)
+	srv := httptest.NewServer(HTTPHandler(api.Service{Store: st}, api.Tokens{"lane-session": "lane-secret", "operator": "operator-secret"}, fixture.verifier))
+	t.Cleanup(srv.Close)
+	dots := connectMCP(t, srv.URL, map[string]string{"Cf-Access-Jwt-Assertion": fixture.token(t, jwt.MapClaims{"email": "operator@example.com"})})
+	lane := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer lane-secret"})
+	bearerOperator := connectMCP(t, srv.URL, map[string]string{"Authorization": "Bearer operator-secret"})
+
+	args := map[string]any{"task_id": task.ID, "words": "진행시켜", "idempotency_key": "mcp-order-1"}
+	first := callTool[mcpTaskOrderOut](t, dots, "task_order", args)
+	o := first.Order
+	if first.Duplicate || o.Channel != store.TaskOrderChannelDots || o.Verified || o.Actor != "operator:operator@example.com" || o.Words != "진행시켜" || !o.Open {
+		t.Fatalf("dots order: %+v", first)
+	}
+	if again := callTool[mcpTaskOrderOut](t, dots, "task_order", args); !again.Duplicate || again.Order.ID != o.ID {
+		t.Fatalf("replay: %+v", again)
+	}
+	args["words"] = "다른 말"
+	if text, isError := toolText(t, dots, "task_order", args); !isError || !strings.Contains(text, "order_key_conflict") {
+		t.Fatalf("other words: isError=%v text=%q", isError, text)
+	}
+	// A lane's own token is no operator principal.
+	if text, isError := toolText(t, lane, "task_order", map[string]any{"task_id": task.ID, "words": "go", "idempotency_key": "mcp-lane"}); !isError || !strings.Contains(text, "operator_required") {
+		t.Fatalf("lane order: isError=%v text=%q", isError, text)
+	}
+	if orders, err := st.ListTaskOrders(ctx, task.ID, false); err != nil || len(orders) != 1 {
+		t.Fatalf("orders after a refused caller: %+v err=%v", orders, err)
+	}
+	// The operator bearer is the verified path.
+	other := newOperatorTask(t, st, "order by the operator bearer")
+	bearer := callTool[mcpTaskOrderOut](t, bearerOperator, "task_order", map[string]any{"task_id": other.ID, "words": "go", "idempotency_key": "mcp-bearer"})
+	if !bearer.Order.Verified || bearer.Order.Channel != store.TaskOrderChannelCLI {
+		t.Fatalf("bearer order: %+v", bearer)
+	}
+
+	// task_get lists the open order; the lane acknowledges it and it closes.
+	view := callTool[struct {
+		OpenOrders []store.TaskOrder `json:"open_orders"`
+	}](t, lane, "task_get", map[string]any{"id": task.ID})
+	if len(view.OpenOrders) != 1 || view.OpenOrders[0].ID != o.ID || view.OpenOrders[0].WaitsOnLane == "" {
+		t.Fatalf("task_get open_orders: %+v", view.OpenOrders)
+	}
+	acked := callTool[mcpTaskOrderOut](t, lane, "task_order_ack", map[string]any{"order_id": o.ID, "comment": "읽었음"})
+	if acked.Order.AckedBy == nil || *acked.Order.AckedBy != "lane-session" || acked.Order.Open {
+		t.Fatalf("ack: %+v", acked)
+	}
+	if text, isError := toolText(t, lane, "task_order_ack", map[string]any{"order_id": o.ID, "comment": ""}); !isError {
+		t.Fatalf("ack without a comment: %q", text)
+	}
+	view = callTool[struct {
+		OpenOrders []store.TaskOrder `json:"open_orders"`
+	}](t, lane, "task_get", map[string]any{"id": task.ID})
+	if len(view.OpenOrders) != 0 {
+		t.Fatalf("open_orders after ack: %+v", view.OpenOrders)
+	}
+}
