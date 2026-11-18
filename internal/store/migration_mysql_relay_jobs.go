@@ -6,9 +6,13 @@ package store
 // a metadata lock, pausing writes until each build completes. Keep that table
 // small during this expand step. Generated nullable relay keys preserve the
 // PostgreSQL partial unique indexes without constraining unrelated events.
-func init() {
-	registerMySQLMigration(mysqlMigration{id: "20261118-mysql-relay-jobs", after: []string{"20261118-mysql-tasks"}, steps: mysqlRelayJobsSteps})
-}
+
+// mysqlJobsSkillsCheckBody is the jobs.skills CHECK predicate. JSON_TYPE
+// carries utf8mb4_bin, which no longer mixes with the connection's
+// utf8mb4_0900_bin, so the call is pinned to the table collation
+// (design §11.4, hk 5169). Shared with the collation migration, which
+// rebuilds the constraint on databases migrated before the pin.
+const mysqlJobsSkillsCheckBody = `skills IS NULL OR JSON_TYPE(skills) COLLATE utf8mb4_0900_bin='ARRAY'`
 
 var mysqlRelayJobsSteps = []string{
 	// The sync transaction token only groups pending rows before allocation.
@@ -61,7 +65,7 @@ var mysqlRelayJobsSteps = []string{
 	mysqlIfNoIndex("jobs", "jobs_task", `CREATE INDEX jobs_task ON jobs(task_id, created_at, job_id)`),
 	mysqlIfNoConstraint("jobs", "jobs_report_sha256_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_report_sha256_check CHECK(report_sha256 IS NULL OR report_sha256 REGEXP '^[0-9a-f]{64}$')`),
 	mysqlIfNoConstraint("jobs", "jobs_report_version_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_report_version_check CHECK(report_version IS NULL OR report_version>=1)`),
-	mysqlIfNoConstraint("jobs", "jobs_skills_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_skills_check CHECK(skills IS NULL OR JSON_TYPE(skills)='ARRAY')`),
+	mysqlIfNoConstraint("jobs", "jobs_skills_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_skills_check CHECK(`+mysqlJobsSkillsCheckBody+`)`),
 	mysqlIfNoConstraint("jobs", "jobs_diff_files_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_diff_files_check CHECK(diff_files IS NULL OR diff_files>=0)`),
 	mysqlIfNoConstraint("jobs", "jobs_diff_insertions_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_diff_insertions_check CHECK(diff_insertions IS NULL OR diff_insertions>=0)`),
 	mysqlIfNoConstraint("jobs", "jobs_diff_deletions_check", `ALTER TABLE jobs ADD CONSTRAINT jobs_diff_deletions_check CHECK(diff_deletions IS NULL OR diff_deletions>=0)`),

@@ -322,7 +322,7 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 		err = scanTask(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE awaiting_decision AND refs ? 'disposition'
 			AND (($1 <> '' AND refs->>'origin_pr' = $1) OR ($2 > 0 AND refs->>'origin_task' = $2::text)) ORDER BY id LIMIT 1`,
 			`SELECT `+taskColumns+` FROM tasks WHERE awaiting_decision AND JSON_CONTAINS_PATH(refs,'one','$.disposition')
-			AND ((? <> '' AND JSON_UNQUOTE(JSON_EXTRACT(refs,'$.origin_pr')) = ?) OR (? > 0 AND JSON_UNQUOTE(JSON_EXTRACT(refs,'$.origin_task')) = ?)) ORDER BY id LIMIT 1`),
+		AND ((? <> '' AND JSON_UNQUOTE(JSON_EXTRACT(refs,'$.origin_pr')) COLLATE utf8mb4_0900_bin = ?) OR (? > 0 AND JSON_UNQUOTE(JSON_EXTRACT(refs,'$.origin_task')) COLLATE utf8mb4_0900_bin = ?)) ORDER BY id LIMIT 1`),
 			dispositionLookupArgs(s.dialect, in.OriginPR, in.OriginTask)...), &existing)
 		if err == nil {
 			out = existing
@@ -792,10 +792,10 @@ func (s *Store) CountNeedsDecision(ctx context.Context) (decisions, dispositions
 		COUNT(*) FILTER (WHERE awaiting_decision AND refs ? 'disposition')
 		FROM tasks WHERE awaiting_decision OR refs->'decision_request'->>'status'='open'`,
 		`SELECT
-		CAST(COALESCE(SUM(CASE WHEN awaiting_decision AND NOT JSON_CONTAINS_PATH(refs,'one','$.disposition') AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(refs,'$.decision_request.status')),'')<>'open' THEN 1 ELSE 0 END)
-		+ SUM(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(refs,'$.decision_request.status'))='open' AND state NOT IN (`+settledStatesSQL+`) THEN 1 ELSE 0 END),0) AS SIGNED),
+		CAST(COALESCE(SUM(CASE WHEN awaiting_decision AND NOT JSON_CONTAINS_PATH(refs,'one','$.disposition') AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(refs,'$.decision_request.status')) COLLATE utf8mb4_0900_bin,'')<>'open' THEN 1 ELSE 0 END)
+		+ SUM(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(refs,'$.decision_request.status')) COLLATE utf8mb4_0900_bin='open' AND state NOT IN (`+settledStatesSQL+`) THEN 1 ELSE 0 END),0) AS SIGNED),
 		CAST(COALESCE(SUM(CASE WHEN awaiting_decision AND JSON_CONTAINS_PATH(refs,'one','$.disposition') THEN 1 ELSE 0 END),0) AS SIGNED)
-		FROM tasks WHERE awaiting_decision OR JSON_UNQUOTE(JSON_EXTRACT(refs,'$.decision_request.status'))='open'`)).Scan(&decisions, &dispositions)
+		FROM tasks WHERE awaiting_decision OR JSON_UNQUOTE(JSON_EXTRACT(refs,'$.decision_request.status')) COLLATE utf8mb4_0900_bin='open'`)).Scan(&decisions, &dispositions)
 	return decisions, dispositions, err
 }
 
@@ -833,7 +833,7 @@ func (s *Store) ListUnnotifiedDispositions(ctx context.Context, limit int) ([]Ta
 // answer event ID (one item, or one lane of one batch), in id order.
 func (s *Store) ListDispositionsByAnswerEvent(ctx context.Context, eventID string) ([]Task, error) {
 	rows, err := s.db().Query(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE refs ? 'disposition' AND refs->'disposition'->'answer'->>'event_id'=$1 ORDER BY id ASC LIMIT $2`,
-		`SELECT `+taskColumns+` FROM tasks WHERE JSON_CONTAINS_PATH(refs,'one','$.disposition') AND JSON_UNQUOTE(JSON_EXTRACT(refs,'$.disposition.answer.event_id'))=? ORDER BY id ASC LIMIT ?`), eventID, DispositionBatchLimit)
+		`SELECT `+taskColumns+` FROM tasks WHERE JSON_CONTAINS_PATH(refs,'one','$.disposition') AND JSON_UNQUOTE(JSON_EXTRACT(refs,'$.disposition.answer.event_id')) COLLATE utf8mb4_0900_bin=? ORDER BY id ASC LIMIT ?`), eventID, DispositionBatchLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -968,7 +968,7 @@ func (s *Store) DispositionSummary(ctx context.Context, asOf time.Time) (Disposi
 			AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=t.id AND e.kind='transition' AND e."to"='merged' AND e.at >= $1 AND e.at <= $2)
 			AND NOT EXISTS (SELECT 1 FROM tasks d WHERE d.refs ? 'disposition' AND d.refs->>'origin_pr' = t.refs->>'pr' AND d.created_at <= $2)`,
 			`SELECT COUNT(DISTINCT JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.pr'))) FROM tasks t
-			WHERE COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.pr')),'') <> '' AND NOT JSON_CONTAINS_PATH(t.refs,'one','$.disposition')
+		WHERE COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.pr')) COLLATE utf8mb4_0900_bin,'') <> '' AND NOT JSON_CONTAINS_PATH(t.refs,'one','$.disposition')
 			AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=t.id AND e.kind='transition' AND e.`+"`to`"+`='merged' AND e.at >= ? AND e.at <= ?)
 			AND NOT EXISTS (SELECT 1 FROM tasks d WHERE JSON_CONTAINS_PATH(d.refs,'one','$.disposition') AND JSON_UNQUOTE(JSON_EXTRACT(d.refs,'$.origin_pr')) = JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.pr')) AND d.created_at <= ?)`),
 			coverageArgs...).Scan(&out.MergedWithoutItem); err != nil {

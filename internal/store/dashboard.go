@@ -70,7 +70,7 @@ func (s *Store) ListDashboardTasks(ctx context.Context, limit int) ([]Task, bool
 		   OR (state NOT IN (`+settledStatesSQL+`) AND COALESCE(refs->>'pr','') <> '')
 		ORDER BY updated_at DESC,id DESC LIMIT $1`, `SELECT `+taskColumns+` FROM tasks
 		WHERE state IN (`+startedStatesSQL+`)
-		   OR (state NOT IN (`+settledStatesSQL+`) AND COALESCE(refs->>'$.pr','') <> '')
+		   OR (state NOT IN (`+settledStatesSQL+`) AND COALESCE(CAST(refs->>'$.pr' AS CHAR),'') <> '')
 		ORDER BY updated_at DESC,id DESC LIMIT ?`), limit+1)
 	if err != nil {
 		return nil, false, err
