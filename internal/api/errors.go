@@ -152,6 +152,11 @@ var errorRules = []errorRule{
 	{store.ErrDeployNotFound, http.StatusNotFound, "not_found", false},
 	{store.ErrDeployAttemptConflict, http.StatusConflict, "deploy_attempt_conflict", false},
 	{store.ErrDeployAttemptFinished, http.StatusConflict, "deploy_attempt_finished", false},
+	{store.ErrOrderTaskStarted, http.StatusConflict, "order_task_started", true},
+	{store.ErrOrderNoLane, http.StatusConflict, "order_no_lane", false},
+	{store.ErrOrderKeyConflict, http.StatusConflict, "order_key_conflict", false},
+	{store.ErrOrderNotOpen, http.StatusConflict, "order_not_open", false},
+	{store.ErrOrderNotFound, http.StatusNotFound, "not_found", false},
 }
 
 // appErr writes the response for an error returned by the store or a
