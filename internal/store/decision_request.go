@@ -706,6 +706,7 @@ func rejectDecisionRequestSecrets(in DecisionRequestInput) error {
 	values := []string{in.Question, in.Reason, in.RecommendationReason, in.OneFix, in.DefaultAction, in.DefaultTrigger, in.Doc}
 	values = append(values, in.Refs...)
 	values = append(values, in.Unverified...)
+	values = append(values, in.Grounds...)
 	for _, option := range in.Options.Options {
 		values = append(values, option.Label)
 		for _, attachment := range option.Attachments {
