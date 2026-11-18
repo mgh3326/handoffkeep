@@ -135,12 +135,14 @@ var driftAutoCloseHeldSQL = `SELECT ` + driftColumns + `updated_at FROM tasks p
 var driftAutoCloseHeldSQLMySQL = strings.Replace(driftAutoCloseHeldSQL, driftColumns, driftColumnsMySQL, 1)
 
 // driftExplicitSettledSQL is class (f), explicit_all_settled: an explicit task
-// that is still open although every change it implements has merged (and is
-// not reverted) and every sub-task is settled. It needs at least one piece, a
-// change or a sub-task, so an empty explicit task is not listed. Each row is a
-// reminder for the task's owner, who closes it by hand; nothing applies it.
+// in an auto-close state (the states an automatic close applies from, so
+// triage and icebox are out, as no close is due there) that is still open
+// although every change it implements has merged (and is not reverted) and
+// every sub-task is settled. It needs at least one piece, a change or a
+// sub-task, so an empty explicit task is not listed. Each row is a reminder for
+// the task's owner, who closes it by hand; nothing applies it.
 var driftExplicitSettledSQL = `SELECT ` + driftColumns + `updated_at FROM tasks t
-	WHERE t.close_rule='explicit' AND t.state NOT IN (` + settledStatesSQL + `) AND (
+	WHERE t.close_rule='explicit' AND t.state IN (` + autoCloseStatesSQL + `) AND (
 		EXISTS (SELECT 1 FROM change_tasks ct WHERE ct.task_id=t.id AND ct.relation='implements')
 		OR EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id=t.id)
 	) AND NOT EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id

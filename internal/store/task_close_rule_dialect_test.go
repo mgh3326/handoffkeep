@@ -78,8 +78,8 @@ func ctrCaseHoldsMerge(t *testing.T, s *Store) {
 		t.Fatalf("explicit task closed by a merge: state=%q completed_at=%v", after.State, after.CompletedAt)
 	}
 	rows := srcEvEventsOf(after, SourceMergewakeMerge)
-	if len(rows) != 1 || rows[0].Applied || !strings.Contains(rows[0].Note, "by hand") {
-		t.Fatalf("merge rows %+v, want one not-applied row naming the hold", rows)
+	if len(rows) != 1 || rows[0].Applied || !strings.Contains(rows[0].Note, "by hand") || rows[0].Field != heldMergeField {
+		t.Fatalf("merge rows %+v, want one not-applied held-merge row naming the hold", rows)
 	}
 	again, err := srcEvApplyTx(s, t, after, merge)
 	if err != nil || !again.Redelivered || again.Applied {

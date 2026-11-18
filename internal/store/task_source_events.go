@@ -571,8 +571,13 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 	// hk 5112 (close_rule explicit): a close the event would make is recorded,
 	// not applied. It is checked before any change or decision read, so an
 	// explicit task never reaches the parts of the close that are not ported.
+	// A merge held this way still landed its PR, so it is recorded as a held
+	// merge (merge_held): siblings on the PR propagate, and a later automatic
+	// close can adopt the PR (heldMergePRTx).
+	held := false
 	if reason == "" && explicitHoldsClose(x, to) {
 		reason = explicitCloseReason
+		held = ev.Source == SourceMergewakeMerge
 	}
 	if reason == "" && ev.PR != "" && (ev.Source == SourceMergewakeMerge || ev.Source == SourceDeploy) {
 		reverted, err := revertNamesPRTx(ctx, tx, x.ID, ev.PR)
@@ -585,7 +590,6 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 			reason = "the deploy lists only the reverted PR"
 		}
 	}
-	held := false
 	if reason == "" && ev.Source == SourceMergewakeMerge {
 		if reason, err = mergeHoldTx(ctx, tx, x.ID, ev.PR); err != nil {
 			return TaskEventResult{}, err

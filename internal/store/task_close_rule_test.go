@@ -52,19 +52,31 @@ func TestDriftSeparatesExplicitFromMergedPRNotMerged(t *testing.T) {
 	ctx := t.Context()
 	explicit := flowTask(t, s, pool, "implement", StateDeveloping, true)
 	auto := flowTask(t, s, pool, "implement", StateDeveloping, true)
-	if _, _, err := s.SetTaskCloseRule(ctx, explicit.ID, CloseRuleExplicit, "tester", "programme task"); err != nil {
-		t.Fatal(err)
+	parked := flowTask(t, s, pool, "implement", StateIcebox, true)
+	for _, x := range []Task{explicit, parked} {
+		if _, _, err := s.SetTaskCloseRule(ctx, x.ID, CloseRuleExplicit, "tester", "programme task"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: testPR(5112201), TaskID: explicit.ID})
 	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: testPR(5112202), TaskID: auto.ID})
-	if _, err := pool.Exec(ctx, `UPDATE changes SET state='merged' WHERE repo='example/app' AND pr_number IN (5112201,5112202)`); err != nil {
+	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: testPR(5112203), TaskID: parked.ID})
+	if _, err := pool.Exec(ctx, `UPDATE changes SET state='merged' WHERE repo='example/app' AND pr_number IN (5112201,5112202,5112203)`); err != nil {
 		t.Fatal(err)
+	}
+	// The icebox task must really implement its merged change, or the check
+	// below would pass without testing the state filter.
+	if links := changeLinks(t, s, mustChange(t, s, "example/app", 5112203).ID); links[parked.ID] != ChangeImplements {
+		t.Fatalf("setup: the icebox task is not linked to its change: %v", links)
 	}
 
 	d := driftAt(t, s, time.Now().UTC(), DriftDefaultMergedDays)
 	settled, lagging := driftIDs(d.ExplicitAllSettled), driftIDs(d.MergedPRNotMerged)
 	if !settled[explicit.ID] || settled[auto.ID] {
 		t.Fatalf("explicit_all_settled ids %v, want the explicit task only", settled)
+	}
+	if settled[parked.ID] {
+		t.Fatalf("explicit_all_settled lists an icebox task %d, where no close is due", parked.ID)
 	}
 	if lagging[explicit.ID] || !lagging[auto.ID] {
 		t.Fatalf("merged_pr_not_merged ids %v, want the auto task only", lagging)
