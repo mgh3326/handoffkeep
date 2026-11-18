@@ -662,6 +662,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/{id}/waits", s.taskWaitAdd)
 	m.HandleFunc("POST /v1/tasks/{id}/waits/{wait}/clear", s.taskWaitClear)
 	m.HandleFunc("GET /v1/waits", s.waitsList)
+	m.HandleFunc("POST /v1/lanes/{lane}/looks", s.laneLook)
 	m.HandleFunc("GET /v1/tasks/{id}", s.task)
 	m.HandleFunc("POST /v1/tasks/{id}/claim", s.taskClaim)
 	m.HandleFunc("POST /v1/tasks/{id}/rebind", s.taskRebind)

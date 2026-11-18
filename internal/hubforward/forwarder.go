@@ -60,6 +60,10 @@ func notifyType(kind string) string {
 		// The daily drift and hygiene delivery (hk 5112 track B-3) is a
 		// digest, never an interrupt.
 		return "info"
+	case store.OutboxKindLaneCheck:
+		// The per-lane wake check (operator decision 418, hk 5201) is a wake,
+		// not an interrupt: the design session judges what to do on it.
+		return "info"
 	default:
 		return "info"
 	}

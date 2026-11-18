@@ -10,8 +10,10 @@ import (
 
 // The daily metrics document (hk 5112 track B-3, design §6) counts, per day,
 // the operator waits and their ages, the waits opened and cleared, the orders
-// created and acknowledged with the time to acknowledgement, and the decision
-// answers by channel (console, dots, session, cli).
+// created and acknowledged with the time to acknowledgement, the decision
+// answers by channel (console, dots, session, cli), and the per-lane wake
+// check's notices, looks and time from notice to look (operator decision 418,
+// hk 5201, design §10).
 //
 // The waits come from hk 5128: until it lands this worker writes what exists
 // today and leaves the wait fields null.
@@ -38,6 +40,14 @@ type DriftMetrics struct {
 	OrderAckP90S         *int64         `json:"order_ack_p90s"`
 	OrderAckMaxS         *int64         `json:"order_ack_maxs"`
 	DecisionAnswers      map[string]int `json:"decision_answers"`
+	// LaneCheckNotices is the lane_check notices queued on the day, LaneLooks
+	// the looks recorded on it, and the three look fields the time from the
+	// notice to its look (operator decision 418, hk 5201).
+	LaneCheckNotices int    `json:"lane_check_notices"`
+	LaneLooks        int    `json:"lane_looks"`
+	LaneLookP50S     *int64 `json:"lane_look_p50s"`
+	LaneLookP90S     *int64 `json:"lane_look_p90s"`
+	LaneLookMaxS     *int64 `json:"lane_look_maxs"`
 }
 
 // driftMetricsDayRange returns the UTC instants of the KST calendar day's
@@ -106,6 +116,46 @@ func (s *Store) driftDecisionAnswers(ctx context.Context, start, end time.Time) 
 	return out, nil
 }
 
+// driftLaneCheckStats counts the lane_check notices queued on the day and the
+// looks recorded on it, with the delay from each notice to its look. A look
+// whose notice row is missing still counts, but contributes no delay.
+func (s *Store) driftLaneCheckStats(ctx context.Context, start, end time.Time) (notices int, looks int, delays []int64, err error) {
+	q := s.q(`SELECT count(*) FROM notification_outbox WHERE kind='lane_check' AND created_at>=$1 AND created_at<$2`,
+		`SELECT count(*) FROM notification_outbox WHERE kind='lane_check' AND created_at>=? AND created_at<?`)
+	if err = s.db().QueryRow(ctx, q, start, end).Scan(&notices); err != nil {
+		return 0, 0, nil, err
+	}
+	// The clearing row the check writes for an empty lane is the store's
+	// record, not a lane's look, so it is not counted as one.
+	q = s.q(`SELECT count(*) FROM lane_looks WHERE created_at>=$1 AND created_at<$2 AND actor<>$3`,
+		`SELECT count(*) FROM lane_looks WHERE created_at>=? AND created_at<? AND actor<>?`)
+	if err = s.db().QueryRow(ctx, q, start, end, laneLookStoreActor).Scan(&looks); err != nil {
+		return 0, 0, nil, err
+	}
+	q = s.q(`SELECT l.created_at,n.created_at FROM lane_looks l JOIN notification_outbox n ON n.event_id=l.notice_event_id
+		WHERE l.created_at>=$1 AND l.created_at<$2 AND l.actor<>$3 AND n.kind='lane_check'`,
+		`SELECT l.created_at,n.created_at FROM lane_looks l JOIN notification_outbox n ON n.event_id=l.notice_event_id
+		WHERE l.created_at>=? AND l.created_at<? AND l.actor<>? AND n.kind='lane_check'`)
+	rows, err := s.db().Query(ctx, q, start, end, laneLookStoreActor)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var lookAt, noticeAt time.Time
+		if err = rows.Scan(&lookAt, &noticeAt); err != nil {
+			return 0, 0, nil, err
+		}
+		if d := int64(lookAt.Sub(noticeAt) / time.Second); d >= 0 {
+			delays = append(delays, d)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return 0, 0, nil, err
+	}
+	return notices, looks, delays, nil
+}
+
 // percentile picks the nearest-rank value at p (0..1) of sorted values, or
 // nil when empty.
 func percentile(sorted []int64, p float64) *int64 {
@@ -139,7 +189,12 @@ func (s *Store) BuildDriftMetrics(ctx context.Context, day string, drift TaskDri
 	if err != nil {
 		return DriftMetrics{}, fmt.Errorf("drift metrics answers: %w", err)
 	}
+	laneNotices, laneLooks, lookDelays, err := s.driftLaneCheckStats(ctx, start, end)
+	if err != nil {
+		return DriftMetrics{}, fmt.Errorf("drift metrics lane check: %w", err)
+	}
 	sort.Slice(ackDelays, func(i, j int) bool { return ackDelays[i] < ackDelays[j] })
+	sort.Slice(lookDelays, func(i, j int) bool { return lookDelays[i] < lookDelays[j] })
 	return DriftMetrics{
 		Date: day,
 		Drift: map[string]int{
@@ -159,12 +214,17 @@ func (s *Store) BuildDriftMetrics(ctx context.Context, day string, drift TaskDri
 			"answered_not_delivered":      len(hygiene.Findings.AnsweredDecisionsNotDelivered),
 			"merged_without_deploy":       len(hygiene.Findings.MergedWithoutDeploy),
 		},
-		OrdersCreated:   created,
-		OrdersAcked:     len(ackDelays),
-		OrderAckP50S:    percentile(ackDelays, 0.5),
-		OrderAckP90S:    percentile(ackDelays, 0.9),
-		OrderAckMaxS:    percentile(ackDelays, 1),
-		DecisionAnswers: answers,
+		OrdersCreated:    created,
+		OrdersAcked:      len(ackDelays),
+		OrderAckP50S:     percentile(ackDelays, 0.5),
+		OrderAckP90S:     percentile(ackDelays, 0.9),
+		OrderAckMaxS:     percentile(ackDelays, 1),
+		DecisionAnswers:  answers,
+		LaneCheckNotices: laneNotices,
+		LaneLooks:        laneLooks,
+		LaneLookP50S:     percentile(lookDelays, 0.5),
+		LaneLookP90S:     percentile(lookDelays, 0.9),
+		LaneLookMaxS:     percentile(lookDelays, 1),
 	}, nil
 }
 

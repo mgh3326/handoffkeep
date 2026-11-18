@@ -54,6 +54,10 @@ func (s *Store) RecordDecisionRequestNewTask(ctx context.Context, by string, in 
 		Kind:      "decide",
 		Project:   &project,
 		CreatedBy: by,
+		// The task exists only to carry this question: when the request is
+		// answered, withdrawn or default-applied it closes to completed
+		// (operator decision 417, hk 5201).
+		Refs: TaskRefs{QuestionTask: true},
 	}, DuplicateCheck{})
 	if err != nil {
 		return DecisionRequestResult{}, err
