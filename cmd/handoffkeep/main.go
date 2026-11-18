@@ -44,7 +44,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|doc|attach|store-copy|tasks|tickets|decisions|placements|waits|dots|services|deploys|changes|youtrack|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|doc|attach|store-copy|tasks|tickets|decisions|placements|waits|lanes|dots|services|deploys|changes|youtrack|version")
 	}
 	switch args[0] {
 	case "sync":
@@ -75,6 +75,8 @@ func run(args []string, out, errout io.Writer) error {
 		return decisionsCmd(args[1:], out)
 	case "waits":
 		return waitsCmd(args[1:], out)
+	case "lanes":
+		return lanesCmd(args[1:], out)
 	case "placements":
 		return placementsCmd(args[1:], out)
 	case "dots":
@@ -92,7 +94,7 @@ func run(args []string, out, errout io.Writer) error {
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|doc|attach|store-copy|tasks|tickets|decisions|placements|waits|dots|services|deploys|changes|youtrack|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|doc|attach|store-copy|tasks|tickets|decisions|placements|waits|lanes|dots|services|deploys|changes|youtrack|version")
 	}
 }
 
@@ -1517,6 +1519,7 @@ func serve(args []string, errout io.Writer) error {
 		workers = append(workers, singletonWorker{store: st, id: store.TaskThreadWorkerLock, worker: threads})
 	}
 	workers = append(workers, singletonWorker{store: st, id: store.DriftWorkerLock, worker: &driftWorker{store: st}})
+	workers = append(workers, singletonWorker{store: st, id: store.LaneCheckWorkerLock, worker: &laneCheckWorker{store: st}})
 	uiHandler, e := uiFromEnv(st, am)
 	if e != nil {
 		return e

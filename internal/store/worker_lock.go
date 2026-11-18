@@ -21,7 +21,11 @@ const (
 	// DriftWorkerLock is the daily drift and hygiene worker's lock (hk 5112
 	// track B-3): it ticks every 5 minutes and delivers once on the first
 	// tick at or after 09:00 KST.
-	DriftWorkerLock         WorkerLock = 8241873520
+	DriftWorkerLock WorkerLock = 8241873520
+	// LaneCheckWorkerLock is the per-lane wake check's lock (operator
+	// decision 418, hk 5201): it ticks every 15 minutes and queues one
+	// lane_check notice per lane whose findings need a look.
+	LaneCheckWorkerLock     WorkerLock = 8241873521
 	workerLockProbeInterval            = time.Second
 	workerLockProbeTimeout             = 2 * time.Second
 )
@@ -37,7 +41,7 @@ type WorkerLease struct {
 // uncertain acquisition discards the connection so a locked session cannot
 // return to the pool.
 func (s *Store) TryWorkerLock(ctx context.Context, id WorkerLock) (*WorkerLease, bool, error) {
-	if id != HubForwardWorkerLock && id != TaskThreadWorkerLock && id != DriftWorkerLock {
+	if id != HubForwardWorkerLock && id != TaskThreadWorkerLock && id != DriftWorkerLock && id != LaneCheckWorkerLock {
 		return nil, false, errors.New("unknown worker lock")
 	}
 	if s.dialect == mysqlDialect {
