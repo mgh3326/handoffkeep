@@ -836,12 +836,6 @@ func (s *Store) ListChatMessages(ctx context.Context, author string, undelivered
 	return out, nil
 }
 
-// PruneChat deletes terminal-state chat rows older than one year — resolved
-// and withdrawn questions, delivered messages. Non-terminal rows (pending
-// questions, stored or failed messages) are live operations data and are
-// preserved regardless of age. Each table's delete is bounded by limit so one
-// run can never empty a table at once; remaining expired rows are removed by
-// subsequent runs.
 // chatPruneCutoff is one year before now, in UTC. A Feb 29 run gives Feb 28:
 // MySQL's DATE_SUB and PostgreSQL's now() - interval '1 year' both clamp to the
 // end of February, where Go's AddDate would roll over to Mar 1 and prune a
@@ -854,6 +848,12 @@ func chatPruneCutoff(now time.Time) time.Time {
 	return now.AddDate(-1, 0, 0)
 }
 
+// PruneChat deletes terminal-state chat rows older than one year — resolved
+// and withdrawn questions, delivered messages. Non-terminal rows (pending
+// questions, stored or failed messages) are live operations data and are
+// preserved regardless of age. Each table's delete is bounded by limit so one
+// run can never empty a table at once; remaining expired rows are removed by
+// subsequent runs.
 func (s *Store) PruneChat(ctx context.Context, limit int) (int64, error) {
 	// One retention cutoff for every table in this transaction. PostgreSQL's
 	// now() is the transaction's time; MySQL's UTC_TIMESTAMP is per statement,
