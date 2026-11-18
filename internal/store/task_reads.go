@@ -160,6 +160,21 @@ func (s *Store) TasksByIDs(ctx context.Context, ids []int64) ([]Task, error) {
 	return out, rows.Err()
 }
 
+// TasksWithSpawns reads the named tasks in id order, with the spawn record
+// each summary shows, in a fixed number of statements. GetTask reads a task's
+// events, children and relations as well, about six statements per task; a
+// search that needs only the summary fields reads them through this (hk 5058).
+func (s *Store) TasksWithSpawns(ctx context.Context, ids []int64) ([]Task, error) {
+	tasks, err := s.TasksByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	if err := attachTaskSpawns(ctx, s.db(), tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
 // TaskIDsForComments maps comment ids to their task ids. The changes feed
 // reads it so a comment item can name its task even after the comment row is
 // gone.

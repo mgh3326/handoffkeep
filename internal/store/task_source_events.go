@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/telemetry"
 )
 
 // Event sources (git show 1e3d2fa8:docs/linear-internalize.md, "Event-driven transitions").
@@ -1075,6 +1077,94 @@ func deployRecordKeyForPRTx(ctx context.Context, tx transaction, pr string) (str
 		return "", err
 	}
 	return record.Key, nil
+}
+
+// deployRecordedPRsTx answers which of prs some deploy record lists, in one
+// statement for the whole set. It is deployRecordKeyForPRTx batched: the same
+// predicate per PR (the body, or the projection's record), the same membership
+// test (deployedPRs), so a page of PRs costs one read instead of one scan per
+// PR (hk 5058). The result holds the listed PRs only.
+func deployRecordedPRsTx(ctx context.Context, tx transaction, prs []string) (map[string]bool, error) {
+	listed := map[string]bool{}
+	if len(prs) == 0 {
+		return listed, nil
+	}
+	wanted := make(map[string]bool, len(prs))
+	for _, pr := range prs {
+		wanted[pr] = true
+	}
+	lo, hi := keyPrefixBounds("deploy/")
+	var query string
+	var args []any
+	if dialectFor(tx) == mysqlDialect {
+		query, args = deployRecordsForPRsMySQL(lo, hi, prs)
+	} else {
+		query, args = deployRecordsForPRsPG(lo, hi, prs)
+	}
+	rows, err := tx.Query(telemetry.Label(ctx, "deploy_record.listed_prs"), query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var record StoredDeployRecord
+		var raw []byte
+		var decoded *bool
+		var body *string
+		if err = rows.Scan(&record.Key, &record.SHA256, &record.CreatedAt, &raw, &decoded, &body); err != nil {
+			return nil, err
+		}
+		if body != nil {
+			record = parseStoredDeployRecord(record.Key, record.SHA256, *body, record.CreatedAt)
+		} else {
+			if err = json.Unmarshal(raw, &record.Record); err != nil {
+				return nil, fmt.Errorf("decode deploy record projection: %w", err)
+			}
+			record.Decoded = *decoded
+		}
+		recordPRs, ok := deployedPRs(record)
+		if !ok {
+			continue
+		}
+		for _, pr := range recordPRs {
+			if wanted[pr] {
+				listed[pr] = true
+			}
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return listed, nil
+}
+
+// deployRecordsForPRsPG is the PostgreSQL statement behind deployRecordedPRsTx:
+// deployRecordForPRTx's predicate, once per PR, joined by OR. $1 and $2 bound
+// the deploy/ key range; each PR is bound once and used in both of its
+// predicates.
+func deployRecordsForPRsPG(lo, hi string, prs []string) (string, []any) {
+	args := []any{lo, hi}
+	preds := make([]string, 0, len(prs))
+	for _, pr := range prs {
+		args = append(args, pr)
+		n := len(args)
+		preds = append(preds, fmt.Sprintf(`((p.decoded AND strpos(convert_from(p.record,'UTF8'),$%d)>0) OR (p.key IS NULL AND strpos(d.body,$%d)>0))`, n, n))
+	}
+	return `SELECT d.key,d.sha256,d.created_at,p.record,p.decoded,CASE WHEN p.key IS NULL THEN d.body ELSE NULL END FROM documents d LEFT JOIN deploy_record_projection p ON p.key=d.key AND p.sha256=d.sha256 WHERE d.key COLLATE "C" >= $1 AND d.key COLLATE "C" < $2 AND (` + strings.Join(preds, " OR ") + `)`, args
+}
+
+// deployRecordsForPRsMySQL is the MySQL statement behind deployRecordedPRsTx,
+// with deployRecordForPRMySQL's predicate once per PR.
+func deployRecordsForPRsMySQL(lo, hi string, prs []string) (string, []any) {
+	args := []any{lo, hi}
+	preds := make([]string, 0, len(prs))
+	for _, pr := range prs {
+		preds = append(preds, "(LOCATE(?,d.body)>0 OR (p.decoded=TRUE AND JSON_CONTAINS(CAST(p.record AS JSON),JSON_QUOTE(?),'$.included_prs')))")
+		args = append(args, pr, pr)
+	}
+	return "SELECT d.`key`,d.sha256,d.created_at,p.record,p.decoded," + deployRecordBodyFallbackMySQL +
+		" FROM documents d LEFT JOIN deploy_record_projection p ON p.`key`=d.`key` AND p.sha256=d.sha256" +
+		" WHERE d.`key`>=? AND d.`key`<? AND (" + strings.Join(preds, " OR ") + ")", args
 }
 
 func deployCommentDetails(record StoredDeployRecord) (body, key string) {

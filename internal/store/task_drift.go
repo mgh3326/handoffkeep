@@ -246,15 +246,15 @@ scan:
 		if err != nil {
 			return TaskDriftClass{}, err
 		}
+		// One read answers every PR of the page (hk 5058): a per-row lookup
+		// ran one deploy-record scan per PR, 114 per request in production.
+		listed, err := deployRecordedPRsTx(ctx, tx, pagePRs(page))
+		if err != nil {
+			return TaskDriftClass{}, err
+		}
 		for _, x := range page {
-			if x.PR != "" {
-				key, err := deployRecordKeyForPRTx(ctx, tx, x.PR)
-				if err != nil {
-					return TaskDriftClass{}, err
-				}
-				if key != "" {
-					continue
-				}
+			if x.PR != "" && listed[x.PR] {
+				continue
 			}
 			if len(out.Tasks) == driftClassLimit {
 				out.Truncated = true
@@ -270,6 +270,20 @@ scan:
 	}
 	out.Count = len(out.Tasks)
 	return out, nil
+}
+
+// pagePRs lists the distinct PRs of a page, in page order, for one batched
+// deploy-record read.
+func pagePRs(page []TaskDriftTask) []string {
+	seen := map[string]bool{}
+	var prs []string
+	for _, x := range page {
+		if x.PR != "" && !seen[x.PR] {
+			seen[x.PR] = true
+			prs = append(prs, x.PR)
+		}
+	}
+	return prs
 }
 
 // mergeAppliesFrom reports whether a merge event moves a task in state (the

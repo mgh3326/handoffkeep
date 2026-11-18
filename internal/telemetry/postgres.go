@@ -4,6 +4,7 @@ import (
 	"context"
 	"regexp"
 	"strings"
+	"sync/atomic"
 
 	"github.com/getsentry/sentry-go"
 	"github.com/jackc/pgx/v5"
@@ -15,7 +16,11 @@ import (
 // QueryTracer traces Query, QueryRow and Exec, including calls on transactions.
 // A query becomes a Sentry span under a sampled Sentry transaction and an OTLP
 // span under a recording OTLP server span. It never reads Args, connection
-// configuration, returned rows, or error text.
+// configuration, returned rows, or error text. Every statement that runs under
+// a context from WithQueryCount is counted, sampled or not.
+//
+// Each span carries a query label (Label, or the verb and first table of the
+// statement). The label is what names a span when its text is filtered out.
 type QueryTracer struct{}
 
 // querySpans carries the spans started by TraceQueryStart to TraceQueryEnd.
@@ -27,9 +32,44 @@ type querySpans struct {
 
 type querySpanKey struct{}
 
+type queryCountKey struct{}
+
+type queryLabelKey struct{}
+
 var _ pgx.QueryTracer = QueryTracer{}
 
+// QueryCount counts the statements that ran under one request context.
+type QueryCount struct{ n atomic.Int64 }
+
+// WithQueryCount returns ctx with a fresh QueryCount. Statements run with the
+// returned context, or with any context derived from it, add to the count.
+func WithQueryCount(ctx context.Context) (context.Context, *QueryCount) {
+	count := &QueryCount{}
+	return context.WithValue(ctx, queryCountKey{}, count), count
+}
+
+// Count reports how many statements have run so far.
+func (c *QueryCount) Count() int { return int(c.n.Load()) }
+
+// labelPattern is the only shape a Label name may take: lower-case words,
+// digits, underscores and dots, so a name cannot carry request content.
+var labelPattern = regexp.MustCompile(`^[a-z][a-z0-9_.]{0,63}$`)
+
+// Label returns ctx naming the next statement run with it, for example
+// tx.Query(telemetry.Label(ctx, "task_drift.deploy_records"), sql). A name that
+// does not match labelPattern is ignored, so an unlabelled statement keeps its
+// shape label.
+func Label(ctx context.Context, name string) context.Context {
+	if !labelPattern.MatchString(name) {
+		return ctx
+	}
+	return context.WithValue(ctx, queryLabelKey{}, name)
+}
+
 func (QueryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if count, ok := ctx.Value(queryCountKey{}).(*QueryCount); ok {
+		count.n.Add(1)
+	}
 	sentryParent := sentry.SpanFromContext(ctx)
 	otelParent := trace.SpanFromContext(ctx)
 	sentryOn := sentryParent != nil && sentryParent.Sampled == sentry.SampledTrue
@@ -38,9 +78,10 @@ func (QueryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.Tr
 		return ctx
 	}
 	statement := normalizeSQL(data.SQL)
+	label := queryLabel(ctx, data.SQL)
 	var spans querySpans
 	if sentryOn {
-		span := sentry.StartSpan(ctx, "db.sql.query", sentry.WithDescription(statement))
+		span := sentry.StartSpan(ctx, "db.sql.query", sentry.WithDescription(label))
 		span.SetData("db.system", "postgresql")
 		spans.sentry = span
 		ctx = span.Context()
@@ -49,11 +90,44 @@ func (QueryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.Tr
 		var span trace.Span
 		ctx, span = otelParent.TracerProvider().Tracer(otlpTracerName).Start(ctx, "db.sql.query",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithAttributes(attribute.String("db.system", "postgresql"), attribute.String("db.query.text", statement)),
+			trace.WithAttributes(
+				attribute.String("db.system", "postgresql"),
+				attribute.String("db.query.label", label),
+				attribute.String("db.query.text", statement),
+			),
 		)
 		spans.otel = span
 	}
 	return context.WithValue(ctx, querySpanKey{}, spans)
+}
+
+// queryLabel is the explicit Label when one is set, else the shape label.
+func queryLabel(ctx context.Context, sql string) string {
+	if name, ok := ctx.Value(queryLabelKey{}).(string); ok {
+		return name
+	}
+	return shapeLabel(sql)
+}
+
+var (
+	leadingVerb   = regexp.MustCompile(`^\s*([A-Za-z]+)`)
+	firstRelation = regexp.MustCompile(`(?i)\b(?:from|into|update|join)\s+"?([a-z_][a-z0-9_]*)"?(?:[\s(),;]|$)`)
+)
+
+// shapeLabel names a statement by its verb and first table, such as "select
+// tasks". Only a plain identifier that ends at a delimiter after FROM, INTO,
+// UPDATE or JOIN is kept: a quoted identifier that holds more than that (a
+// hyphen, a space) yields no table, so no part of it reaches a label. A
+// statement without a table yields its verb alone, or "statement".
+func shapeLabel(sql string) string {
+	verb := "statement"
+	if m := leadingVerb.FindStringSubmatch(sql); m != nil {
+		verb = strings.ToLower(m[1])
+	}
+	if m := firstRelation.FindStringSubmatch(sql); m != nil {
+		return verb + " " + strings.ToLower(m[1])
+	}
+	return verb
 }
 
 func (QueryTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
