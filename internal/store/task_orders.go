@@ -380,12 +380,11 @@ func (s *Store) AckTaskOrder(ctx context.Context, orderID, actor, comment string
 		if o.AckedAt == nil {
 			now := time.Now().UTC().Truncate(time.Microsecond)
 			body := "[hk] 진행 지시 " + orderID + " 확인 by " + actor + ": " + comment
-			// The comment is a savepoint: when it cannot be written (MySQL
-			// refuses while the YouTrack comment gate is on, a YouTrack
-			// enqueue fails) the ack still clears the lane wait, and the task
-			// event below carries the lane's comment.
+			// The comment is a savepoint: when it cannot be written (a
+			// YouTrack enqueue fails) the ack still clears the lane wait, and
+			// the task event below carries the lane's comment.
 			var commentID *int64
-			if cerr := s.srcEvSystemCommentTx(ctx, tx, x.ID, taskOrderAckSource, orderID, body, now); cerr != nil {
+			if cerr := s.insertSystemTaskCommentTx(ctx, tx, x.ID, taskOrderAckSource, orderID, body, now); cerr != nil {
 				log.Printf("task_order.ack_comment_failed order_id=%q task_id=%d err=%q", orderID, x.ID, cerr.Error())
 			} else {
 				var id int64

@@ -298,6 +298,16 @@ func ledgerTaskColumns(alias string) string {
 	return fmt.Sprintf(`%[1]s.id,%[1]s.lane,%[1]s.title,%[1]s.kind,%[1]s.state,%[1]s.priority,%[1]s.project,%[1]s.claimed_by,COALESCE(%[1]s.refs->>'pr',''),COALESCE(%[1]s.refs->>'job_id','')`, alias)
 }
 
+// ledgerTaskColumnsFor is ledgerTaskColumns for the dialect of x: MySQL reads
+// the string refs without JSON_UNQUOTE's 'null' text for a JSON null.
+func ledgerTaskColumnsFor(x any, alias string) string {
+	if dialectFor(x) != mysqlDialect {
+		return ledgerTaskColumns(alias)
+	}
+	return fmt.Sprintf(`%[1]s.id,%[1]s.lane,%[1]s.title,%[1]s.kind,%[1]s.state,%[1]s.priority,%[1]s.project,%[1]s.claimed_by,COALESCE(%[2]s,''),COALESCE(%[3]s,'')`,
+		alias, reportJSONText(alias+".refs", "$.pr"), reportJSONText(alias+".refs", "$.job_id"))
+}
+
 func ledgerTaskDest(x *LedgerTask) []any {
 	return []any{&x.ID, &x.Lane, &x.Title, &x.Kind, &x.State, &x.Priority, &x.Project, &x.ClaimedBy, &x.PR, &x.JobID}
 }
@@ -305,17 +315,15 @@ func ledgerTaskDest(x *LedgerTask) []any {
 // Ledger reads the desk ledger for consumer at now. It writes nothing; a
 // cursor older than the feed's reset boundary returns *SyncReset.
 func (s *Store) Ledger(ctx context.Context, consumer string, now time.Time) (Ledger, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Ledger{}, ErrDialectUnsupported
-	}
-
 	if !validName(consumer) {
 		return Ledger{}, errors.New("invalid ledger consumer")
 	}
 	now = now.UTC()
 	after := s.StartedStalledHours()
 	out := Ledger{Consumer: consumer, At: now, StalledAfterHours: int64(after / time.Hour)}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	// One REPEATABLE READ READ ONLY snapshot on either dialect (on MySQL the
+	// read view starts at the first read, section 5's cursor lookup).
+	tx, err := s.beginSnapshotA5(ctx)
 	if err != nil {
 		return Ledger{}, err
 	}
@@ -323,7 +331,7 @@ func (s *Store) Ledger(ctx context.Context, consumer string, now time.Time) (Led
 
 	// Section 5 first: a cursor past the reset boundary answers before any
 	// other read.
-	if out.ChangedSinceAck, err = ledgerChangesTx(ctx, pgTransaction{tx}, consumer); err != nil {
+	if out.ChangedSinceAck, err = ledgerChangesTx(ctx, tx, consumer); err != nil {
 		return Ledger{}, err
 	}
 	started, err := ledgerStartedTx(ctx, tx, now)
@@ -332,7 +340,7 @@ func (s *Store) Ledger(ctx context.Context, consumer string, now time.Time) (Led
 	}
 	// Every open request, not the API's first 1000: a task tied only to an
 	// omitted request would be in no section.
-	records, err := listDecisionRecords(ctx, pgTransaction{tx}, DecisionRecordFilter{Status: DecisionStatusOpen, unbounded: true}, now)
+	records, err := listDecisionRecords(ctx, tx, DecisionRecordFilter{Status: DecisionStatusOpen, unbounded: true}, now)
 	if err != nil {
 		return Ledger{}, err
 	}
@@ -364,15 +372,22 @@ func (s *Store) Ledger(ctx context.Context, consumer string, now time.Time) (Led
 // event and whether it waits on a decision at now. A request counts while it
 // is open and not expired, the cutoff the Waiting list uses; snoozed requests
 // count too.
-func ledgerStartedTx(ctx context.Context, tx pgx.Tx, now time.Time) ([]ledgerStartedRow, error) {
-	rows, err := tx.Query(ctx, `SELECT `+ledgerTaskColumns("tasks")+`,
+func ledgerStartedTx(ctx context.Context, tx transaction, now time.Time) ([]ledgerStartedRow, error) {
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT `+ledgerTaskColumns("tasks")+`,
 		tasks.awaiting_decision OR EXISTS(SELECT 1 FROM decision_requests d WHERE d.task_id=tasks.id AND d.status='open'
 			AND (d.expires_at IS NULL OR d.expires_at>$1::timestamptz)),
 		`+taskActivitySQL+`,
 		le.kind,le.source,le.at
 		FROM tasks LEFT JOIN LATERAL (SELECT e.kind,e.source,e.at FROM task_events e WHERE e.task_id=tasks.id ORDER BY e.at DESC,e.id DESC LIMIT 1) le ON true
 		WHERE tasks.state IN (`+startedStatesSQL+`)
-		ORDER BY tasks.id`, now)
+		ORDER BY tasks.id`, `SELECT `+ledgerTaskColumnsFor(tx, "tasks")+`,
+		tasks.awaiting_decision OR EXISTS(SELECT 1 FROM decision_requests d WHERE d.task_id=tasks.id AND d.status='open'
+			AND (d.expires_at IS NULL OR d.expires_at>?)),
+		`+taskActivitySQLMySQL+`,
+		le.kind,le.source,le.at
+		FROM tasks LEFT JOIN LATERAL (SELECT e.kind,e.source,e.at FROM task_events e WHERE e.task_id=tasks.id ORDER BY e.at DESC,e.id DESC LIMIT 1) le ON true
+		WHERE tasks.state IN (`+startedStatesSQL+`)
+		ORDER BY tasks.id`), now)
 	if err != nil {
 		return nil, err
 	}
@@ -399,12 +414,16 @@ func ledgerStartedTx(ctx context.Context, tx pgx.Tx, now time.Time) ([]ledgerSta
 }
 
 // ledgerTasksTx reads the tasks named by ids.
-func ledgerTasksTx(ctx context.Context, tx pgx.Tx, ids []int64) (map[int64]LedgerTask, error) {
+func ledgerTasksTx(ctx context.Context, tx transaction, ids []int64) (map[int64]LedgerTask, error) {
 	out := map[int64]LedgerTask{}
 	if len(ids) == 0 {
 		return out, nil
 	}
-	rows, err := tx.Query(ctx, `SELECT `+ledgerTaskColumns("t")+` FROM tasks t WHERE t.id = ANY($1)`, ids)
+	query, args := `SELECT `+ledgerTaskColumns("t")+` FROM tasks t WHERE t.id = ANY($1)`, []any{ids}
+	if dialectFor(tx) == mysqlDialect {
+		query, args = `SELECT `+ledgerTaskColumnsFor(tx, "t")+` FROM tasks t WHERE t.id IN (`+placeholders(len(ids))+`)`, reportIDArgs(ids)
+	}
+	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -422,12 +441,16 @@ func ledgerTasksTx(ctx context.Context, tx pgx.Tx, ids []int64) (map[int64]Ledge
 // ledgerFlaggedEventsTx reads rule 4's events since since: a merge event
 // recorded with applied=false because its task was canceled, for a task that
 // is still canceled. Oldest first.
-func ledgerFlaggedEventsTx(ctx context.Context, tx pgx.Tx, since time.Time) ([]LedgerFlaggedEvent, error) {
-	rows, err := tx.Query(ctx, `SELECT e.id,e.source,e.source_ref,e.note,e.at,`+ledgerTaskColumns("t")+`
+func ledgerFlaggedEventsTx(ctx context.Context, tx transaction, since time.Time) ([]LedgerFlaggedEvent, error) {
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT e.id,e.source,e.source_ref,e.note,e.at,`+ledgerTaskColumns("t")+`
 		FROM task_events e JOIN tasks t ON t.id=e.task_id
 		WHERE e.kind=$1 AND NOT e.applied AND e.source=$2 AND e.at>=$3
 		AND e."from" IN ('dropped','duplicate','icebox') AND t.state IN ('dropped','duplicate','icebox')
-		ORDER BY e.at,e.id LIMIT $4`, TaskEventSource, SourceMergewakeMerge, since, ledgerListLimit)
+		ORDER BY e.at,e.id LIMIT $4`, `SELECT e.id,e.source,e.source_ref,e.note,e.at,`+ledgerTaskColumnsFor(tx, "t")+`
+		FROM task_events e JOIN tasks t ON t.id=e.task_id
+		WHERE e.kind=? AND NOT e.applied AND e.source=? AND e.at>=?
+		AND e.`+"`from`"+` IN ('dropped','duplicate','icebox') AND t.state IN ('dropped','duplicate','icebox')
+		ORDER BY e.at,e.id LIMIT ?`), TaskEventSource, SourceMergewakeMerge, since, ledgerListLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -446,13 +469,14 @@ func ledgerFlaggedEventsTx(ctx context.Context, tx pgx.Tx, since time.Time) ([]L
 }
 
 // ledgerTriageTx reads the triage queue, oldest first.
-func ledgerTriageTx(ctx context.Context, tx pgx.Tx, now time.Time) (LedgerTriage, error) {
+func ledgerTriageTx(ctx context.Context, tx transaction, now time.Time) (LedgerTriage, error) {
 	out := LedgerTriage{Tasks: []LedgerTriageTask{}}
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE state=$1`, StateTriage).Scan(&out.Count); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT count(*) FROM tasks WHERE state=$1`, `SELECT count(*) FROM tasks WHERE state=?`), StateTriage).Scan(&out.Count); err != nil {
 		return out, err
 	}
-	rows, err := tx.Query(ctx, `SELECT `+ledgerTaskColumns("t")+`,COALESCE(t.started_triage_at,t.created_at) AS since
-		FROM tasks t WHERE t.state=$1 ORDER BY since,t.id LIMIT $2`, StateTriage, ledgerListLimit)
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT `+ledgerTaskColumns("t")+`,COALESCE(t.started_triage_at,t.created_at) AS since
+		FROM tasks t WHERE t.state=$1 ORDER BY since,t.id LIMIT $2`, `SELECT `+ledgerTaskColumnsFor(tx, "t")+`,COALESCE(t.started_triage_at,t.created_at) AS since
+		FROM tasks t WHERE t.state=? ORDER BY since,t.id LIMIT ?`), StateTriage, ledgerListLimit)
 	if err != nil {
 		return out, err
 	}

@@ -498,7 +498,7 @@ func TestDotsChoiceAnswerWaitsForAnotherDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	done, err := s.reconcileDotsChoiceTx(ctx, tx, closed, time.Now().UTC())
+	done, err := s.reconcileDotsChoiceTx(ctx, pgTransaction{tx}, closed, time.Now().UTC())
 	if err != nil {
 		tx.Rollback(ctx)
 		t.Fatal(err)
@@ -518,7 +518,7 @@ func TestDotsChoiceAnswerWaitsForAnotherDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.reconcileDotsChoiceTx(ctx, tx, done, time.Now().UTC()); err != nil {
+	if _, err := s.reconcileDotsChoiceTx(ctx, pgTransaction{tx}, done, time.Now().UTC()); err != nil {
 		tx.Rollback(ctx)
 		t.Fatal(err)
 	}

@@ -371,7 +371,7 @@ func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send f
 	if dialectFor(tx) == mysqlDialect {
 		insertArgs = []any{day, now, now}
 	}
-	if _, err = tx.Exec(ctx, sqlFor(tx, `INSERT INTO decision_notify_digest(day,state,next_attempt_at,created_at) VALUES($1::date,'pending',$2,$2) ON CONFLICT(day) DO NOTHING`, `INSERT IGNORE INTO decision_notify_digest(day,state,next_attempt_at,created_at) VALUES(?,'pending',?,?)`), insertArgs...); err != nil {
+	if _, err = tx.Exec(ctx, sqlFor(tx, `INSERT INTO decision_notify_digest(day,state,next_attempt_at,created_at) VALUES($1::date,'pending',$2,$2) ON CONFLICT(day) DO NOTHING`, `INSERT INTO decision_notify_digest(day,state,next_attempt_at,created_at) VALUES(?,'pending',?,?) ON DUPLICATE KEY UPDATE day=day`), insertArgs...); err != nil {
 		return false, nil, err
 	}
 	var state string

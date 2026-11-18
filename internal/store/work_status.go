@@ -293,25 +293,21 @@ func BuildWorkStatus(now time.Time, rows []WorkStatusRow, in WorkStatusInputs) *
 // in-progress work, backlog list with bundles, movement over today and
 // the past 7 days, and honest deploy-waiting tasks in one consistent read.
 func (s *Store) ReadWorkStatus(ctx context.Context, now time.Time) (*WorkStatus, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := s.beginSnapshotA5(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
 
 	var in WorkStatusInputs
-	if in.LastDeploy, err = readProjectLastSuccessfulDeploysTx(ctx, tx); err != nil {
+	if in.LastDeploy, err = s.readLastDeploysSnapshot(ctx, tx); err != nil {
 		return nil, err
 	}
 	if in.Projects, err = readTaskProjectNamesTx(ctx, tx); err != nil {
 		return nil, err
 	}
 
-	rows, err := tx.Query(ctx, `SELECT t.id, t.title, t.project, t.state, t.priority, t.refs, t.claimed_by,
+	rows, err := tx.Query(ctx, s.q(`SELECT t.id, t.title, t.project, t.state, t.priority, t.refs, t.claimed_by,
 		t.created_at, t.updated_at, t.parent_id,
 		p.id AS bundle_id, COALESCE(p.title, '') AS bundle_title,
 		COALESCE(j.job_id, '') AS job_id, COALESCE(j.host, '') AS host, COALESCE(j.state, '') AS job_state,
@@ -346,7 +342,7 @@ func (s *Store) ReadWorkStatus(ctx context.Context, now time.Time) (*WorkStatus,
 			LIMIT 1
 		) cp ON true
 		WHERE t.state = ANY($1)
-		ORDER BY t.priority DESC, t.created_at ASC, t.id ASC`, WorkStatusStates)
+		ORDER BY t.priority DESC, t.created_at ASC, t.id ASC`, workStatusRowsSQLMySQL), workStatusStateArgs(s)...)
 	if err != nil {
 		return nil, err
 	}
@@ -376,30 +372,67 @@ func (s *Store) ReadWorkStatus(ctx context.Context, now time.Time) (*WorkStatus,
 
 	// Movement: closed and created per day, today and the last 7 days (8 KST days total).
 	_, startUTC := WorkStatusMovementStart(now)
-	closedCounts, err := countByKSTDayTx(ctx, tx, `SELECT (e.at AT TIME ZONE 'Asia/Seoul')::date::text AS day, COUNT(DISTINCT e.task_id)
+	closedQuery, closedArgs := `SELECT (e.at AT TIME ZONE 'Asia/Seoul')::date::text AS day, COUNT(DISTINCT e.task_id)
 		FROM task_events e
 		JOIN tasks t ON t.id = e.task_id
 		WHERE e.kind = 'transition'
 		  AND e."to" = ANY($2)
 		  AND e.at >= $1
 		  AND NOT (t.title LIKE '[bundle %')
-		GROUP BY day`, startUTC, WorkStatusClosedStates)
-	if err != nil {
-		return nil, err
-	}
-	createdCounts, err := countByKSTDayTx(ctx, tx, `SELECT (t.created_at AT TIME ZONE 'Asia/Seoul')::date::text AS day, COUNT(*)
+		GROUP BY day`, []any{startUTC, WorkStatusClosedStates}
+	createdQuery, createdArgs := `SELECT (t.created_at AT TIME ZONE 'Asia/Seoul')::date::text AS day, COUNT(*)
 		FROM tasks t
 		WHERE t.created_at >= $1
 		  AND NOT (t.title LIKE '[bundle %')
-		GROUP BY day`, startUTC)
+		GROUP BY day`, []any{startUTC}
+	if s.dialect == mysqlDialect {
+		// Asia/Seoul is a fixed +09:00, so no time zone tables are needed.
+		closedQuery = "SELECT DATE_FORMAT(CONVERT_TZ(e.at,'+00:00','+09:00'),'%Y-%m-%d') AS day, COUNT(DISTINCT e.task_id) FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE e.kind = 'transition' AND e.`to` IN (" +
+			placeholders(len(WorkStatusClosedStates)) + ") AND e.at >= ? AND NOT (t.title LIKE '[bundle %') GROUP BY day"
+		closedArgs = nil
+		for _, st := range WorkStatusClosedStates {
+			closedArgs = append(closedArgs, st)
+		}
+		closedArgs = append(closedArgs, startUTC.UTC())
+		createdQuery = "SELECT DATE_FORMAT(CONVERT_TZ(t.created_at,'+00:00','+09:00'),'%Y-%m-%d') AS day, COUNT(*) FROM tasks t WHERE t.created_at >= ? AND NOT (t.title LIKE '[bundle %') GROUP BY day"
+		createdArgs = []any{startUTC.UTC()}
+	}
+	closedCounts, err := countByKSTDayTx(ctx, tx, closedQuery, closedArgs...)
+	if err != nil {
+		return nil, err
+	}
+	createdCounts, err := countByKSTDayTx(ctx, tx, createdQuery, createdArgs...)
 	if err != nil {
 		return nil, err
 	}
 	in.Movement = WorkStatusMovementDays(now, createdCounts, closedCounts)
-	if in.Queued, err = readQueuedSpawnsTx(ctx, pgTransaction{tx}, true); err != nil {
+	if in.Queued, err = readQueuedSpawnsTx(ctx, tx, true); err != nil {
 		return nil, err
 	}
 	return BuildWorkStatus(now, list, in), nil
+}
+
+// readLastDeploysSnapshot is the deploy-record read of the work status
+// snapshots on either dialect; the PostgreSQL helper takes the pgx transaction
+// the snapshot wraps.
+func (s *Store) readLastDeploysSnapshot(ctx context.Context, tx transaction) (map[string]time.Time, error) {
+	if s.dialect == mysqlDialect {
+		return readLastSuccessfulDeploysMySQL(ctx, tx)
+	}
+	return readProjectLastSuccessfulDeploysTx(ctx, tx.(pgTransaction).tx)
+}
+
+// workStatusStateArgs is the argument list of the `t.state IN/ANY` condition of
+// the work status rows.
+func workStatusStateArgs(s *Store) []any {
+	if s.dialect != mysqlDialect {
+		return []any{WorkStatusStates}
+	}
+	out := make([]any, len(WorkStatusStates))
+	for i, st := range WorkStatusStates {
+		out[i] = st
+	}
+	return out
 }
 
 // effectiveWorkRefs picks the job, host and PR a work row shows: the job
@@ -419,7 +452,7 @@ func effectiveWorkRefs(jobID, host string, refs TaskRefs, claimedBy, changeRepo 
 	return jobID, host, pr
 }
 
-func readTaskProjectNamesTx(ctx context.Context, tx pgx.Tx) ([]string, error) {
+func readTaskProjectNamesTx(ctx context.Context, tx rowsQuerier) ([]string, error) {
 	rows, err := tx.Query(ctx, `SELECT name FROM task_projects ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -436,7 +469,7 @@ func readTaskProjectNamesTx(ctx context.Context, tx pgx.Tx) ([]string, error) {
 	return names, rows.Err()
 }
 
-func countByKSTDayTx(ctx context.Context, tx pgx.Tx, sql string, args ...any) (map[string]int, error) {
+func countByKSTDayTx(ctx context.Context, tx rowsQuerier, sql string, args ...any) (map[string]int, error) {
 	rows, err := tx.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
@@ -479,27 +512,23 @@ type WorkStatusOverlay struct {
 // ReadWorkStatusOverlay reads the hk side of the work status for ids in one
 // consistent read. A task id hk does not know has no overlay row.
 func (s *Store) ReadWorkStatusOverlay(ctx context.Context, ids []int64) (WorkStatusOverlay, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return WorkStatusOverlay{}, ErrDialectUnsupported
-	}
-
 	out := WorkStatusOverlay{Tasks: map[int64]WorkStatusTaskOverlay{}}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := s.beginSnapshotA5(ctx)
 	if err != nil {
 		return out, err
 	}
 	defer tx.Rollback(ctx)
-	if out.Inputs.LastDeploy, err = readProjectLastSuccessfulDeploysTx(ctx, tx); err != nil {
+	if out.Inputs.LastDeploy, err = s.readLastDeploysSnapshot(ctx, tx); err != nil {
 		return out, err
 	}
 	if out.Inputs.Projects, err = readTaskProjectNamesTx(ctx, tx); err != nil {
 		return out, err
 	}
-	if out.Inputs.Queued, err = readQueuedSpawnsTx(ctx, pgTransaction{tx}, false); err != nil {
+	if out.Inputs.Queued, err = readQueuedSpawnsTx(ctx, tx, false); err != nil {
 		return out, err
 	}
 	if len(ids) > 0 {
-		rows, err := tx.Query(ctx, `SELECT t.id, t.refs, t.claimed_by, t.parent_id, COALESCE(p.title, ''),
+		rows, err := tx.Query(ctx, s.q(`SELECT t.id, t.refs, t.claimed_by, t.parent_id, COALESCE(p.title, ''),
 			COALESCE(j.job_id, ''), COALESCE(j.host, ''), COALESCE(j.state, ''),
 			COALESCE(cp.repo, ''), COALESCE(cp.pr_number, 0)
 			FROM tasks t
@@ -517,7 +546,7 @@ func (s *Store) ReadWorkStatusOverlay(ctx context.Context, ids []int64) (WorkSta
 				ORDER BY (ct.relation = 'implements') DESC, (c.state = 'open') DESC, c.id DESC
 				LIMIT 1
 			) cp ON true
-			WHERE t.id = ANY($1)`, ids)
+			WHERE t.id = ANY($1)`, workStatusOverlaySQLMySQL(len(ids))), a5Int64Args(s, ids)...)
 		if err != nil {
 			return out, err
 		}
@@ -784,4 +813,67 @@ func newestSuccessDeploy(docs []StoredDeployRecord, services []string) *time.Tim
 		}
 	}
 	return newest
+}
+
+// workStatusRowsSQLMySQL is the work status row query for MySQL: `to` is
+// backticked and the state filter is an IN list.
+var workStatusRowsSQLMySQL = "SELECT t.id, t.title, t.project, t.state, t.priority, t.refs, t.claimed_by," + `
+		t.created_at, t.updated_at, t.parent_id,
+		p.id AS bundle_id, COALESCE(p.title, '') AS bundle_title,
+		COALESCE(j.job_id, '') AS job_id, COALESCE(j.host, '') AS host, COALESCE(j.state, '') AS job_state,
+		se.at AS in_state_since,
+		me.at AS merged_at,
+		COALESCE(cp.repo, '') AS change_repo, COALESCE(cp.pr_number, 0) AS change_pr
+		FROM tasks t
+		LEFT JOIN tasks p ON p.id = t.parent_id
+		LEFT JOIN LATERAL (
+			SELECT job_id, host, state FROM jobs
+			WHERE task_id = t.id
+			ORDER BY (state IN ('claimed', 'spawned')) DESC, created_at DESC, job_id DESC
+			LIMIT 1
+		) j ON true
+		LEFT JOIN LATERAL (
+			SELECT at FROM task_events
+			WHERE task_id = t.id AND kind = 'transition' AND ` + "`to`" + ` = t.state
+			ORDER BY at DESC, id DESC
+			LIMIT 1
+		) se ON true
+		LEFT JOIN LATERAL (
+			SELECT at FROM task_events
+			WHERE task_id = t.id AND kind = 'transition' AND ` + "`to`" + ` = 'merged'
+			ORDER BY at DESC, id DESC
+			LIMIT 1
+		) me ON true
+		LEFT JOIN LATERAL (
+			SELECT c.repo, c.pr_number FROM change_tasks ct
+			JOIN changes c ON c.id = ct.change_id
+			WHERE ct.task_id = t.id
+			ORDER BY (ct.relation = 'implements') DESC, (c.state = 'open') DESC, c.id DESC
+			LIMIT 1
+		) cp ON true
+		WHERE t.state IN (` + placeholders(len(WorkStatusStates)) + `)
+		ORDER BY t.priority DESC, t.created_at ASC, t.id ASC`
+
+// workStatusOverlaySQLMySQL is the work status overlay query for MySQL with an
+// IN list of n task ids.
+func workStatusOverlaySQLMySQL(n int) string {
+	return `SELECT t.id, t.refs, t.claimed_by, t.parent_id, COALESCE(p.title, ''),
+			COALESCE(j.job_id, ''), COALESCE(j.host, ''), COALESCE(j.state, ''),
+			COALESCE(cp.repo, ''), COALESCE(cp.pr_number, 0)
+			FROM tasks t
+			LEFT JOIN tasks p ON p.id = t.parent_id
+			LEFT JOIN LATERAL (
+				SELECT job_id, host, state FROM jobs
+				WHERE task_id = t.id
+				ORDER BY (state IN ('claimed', 'spawned')) DESC, created_at DESC, job_id DESC
+				LIMIT 1
+			) j ON true
+			LEFT JOIN LATERAL (
+				SELECT c.repo, c.pr_number FROM change_tasks ct
+				JOIN changes c ON c.id = ct.change_id
+				WHERE ct.task_id = t.id
+				ORDER BY (ct.relation = 'implements') DESC, (c.state = 'open') DESC, c.id DESC
+				LIMIT 1
+			) cp ON true
+			WHERE t.id IN (` + placeholders(n) + `)`
 }

@@ -11,8 +11,10 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-// Parse requires a TCP URL and configures every connection for UTC and the
-// store's READ COMMITTED isolation level.
+// Parse requires a TCP URL and configures every connection for UTC, the
+// store's READ COMMITTED isolation level and the binary text collation the
+// schema uses (design §11.4), so a literal compared on a connection cannot pick
+// the server's case-insensitive default.
 func Parse(raw string) (*mysql.Config, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -45,7 +47,7 @@ func Parse(raw string) (*mysql.Config, error) {
 			return nil, fmt.Errorf("mysql URL parameter %q must occur once", key)
 		}
 		switch key {
-		case "time_zone", "transaction_isolation", "parseTime", "loc", "timeTruncate":
+		case "time_zone", "transaction_isolation", "collation_connection", "parseTime", "loc", "timeTruncate":
 			return nil, fmt.Errorf("mysql URL parameter %q is controlled by the store", key)
 		case "tls":
 			cfg.TLSConfig = values[0]
@@ -55,5 +57,6 @@ func Parse(raw string) (*mysql.Config, error) {
 	}
 	cfg.Params["time_zone"] = "'+00:00'"
 	cfg.Params["transaction_isolation"] = "'READ-COMMITTED'"
+	cfg.Params["collation_connection"] = "'utf8mb4_0900_bin'"
 	return cfg, nil
 }

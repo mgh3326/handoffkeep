@@ -373,13 +373,6 @@ func spawnNoticeBody(in TaskSpawnInput) string {
 // INSERT (found-rows makes ON DUPLICATE KEY UPDATE report a matched row as 1,
 // like a new one). A failed statement leaves the savepoint usable on MySQL.
 func (s *Store) writeSpawnNoticeMySQL(ctx context.Context, tx transaction, id int64, key string, in TaskSpawnInput, author string) error {
-	// B4 dependency: enqueueYTCommentTx (YouTrack comment projection, reads
-	// yt_authority) is PostgreSQL-only until B4 ports it. It is a no-op while the
-	// comments mode is off and the authority is hk, which is all a MySQL store
-	// without the yt_* tables can be in; any other mode refuses.
-	if s.ytCommentsModeNow() != YTCommentsOff {
-		return ErrDialectUnsupported
-	}
 	now := time.Now().UTC()
 	if _, err := tx.Exec(ctx, `INSERT INTO task_spawn_notices(notice_key,task_id,created_at) VALUES(?,?,?)`, key, id, now); err != nil {
 		if errors.Is(err, errUniqueViolation) {
@@ -391,7 +384,11 @@ func (s *Store) writeSpawnNoticeMySQL(ctx context.Context, tx transaction, id in
 	if err := CheckTaskCommentBody(body); err != nil {
 		return err
 	}
-	_, err := mysqlInsertTaskCommentTx(ctx, tx, id, author, body, now)
+	commentID, err := mysqlInsertTaskCommentTx(ctx, tx, id, author, body, now)
+	if err != nil {
+		return err
+	}
+	_, _, err = s.enqueueYTCommentTx(ctx, tx, TaskComment{ID: commentID, TaskID: id, Body: body, Author: author, CreatedAt: now})
 	return err
 }
 

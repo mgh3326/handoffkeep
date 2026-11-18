@@ -93,6 +93,33 @@ func taskFilter(lane, state, parentLane string, project *string) (string, []any)
 	return where, args
 }
 
+// taskFilterMySQL is taskFilter with `?` placeholders and an IN list for the
+// state clause.
+func taskFilterMySQL(lane, state, parentLane string, project *string) (string, []any) {
+	where := ""
+	args := []any{}
+	if lane != "" {
+		args = append(args, lane)
+		where += " AND lane=?"
+	}
+	if parentLane != "" {
+		args = append(args, parentLane)
+		where += " AND parent_lane=?"
+	}
+	if state != "" {
+		where += stateClauseCore(state, &args)
+	}
+	if project != nil {
+		if *project == "" {
+			where += " AND project IS NULL"
+		} else {
+			args = append(args, *project)
+			where += " AND project=?"
+		}
+	}
+	return where, args
+}
+
 // TaskExportSource reports the serving build. VCSRevision is the embedded
 // vcs.revision stamp, or "unknown" when the binary was built without VCS
 // stamping; a revision is never invented.
@@ -158,14 +185,10 @@ type TaskExport struct {
 // at most limit rows. Truncated is exactly Counts.Total > limit; Complete is
 // its inverse, so a complete export always returns every counted row.
 func (s *Store) ExportTasks(ctx context.Context, lane, state, parentLane string, project *string, limit int) (TaskExport, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return TaskExport{}, ErrDialectUnsupported
-	}
-
 	if !validTaskQuery(lane, state, parentLane, project) || limit < 1 || limit > ExportLimitMax {
 		return TaskExport{}, ErrInvalidExportQuery
 	}
-	tx, err := s.pool.BeginTx(ctx, exportTxOptions)
+	tx, err := s.beginSnapshotA5(ctx)
 	if err != nil {
 		return TaskExport{}, err
 	}
@@ -185,7 +208,8 @@ func (s *Store) ExportTasks(ctx context.Context, lane, state, parentLane string,
 
 	// The first statement fixes the repeatable-read snapshot; every value
 	// below is read from that one snapshot.
-	if err = tx.QueryRow(ctx, `SELECT pg_current_snapshot()::text, now()`).Scan(&out.SnapshotID, &out.DBTime); err != nil {
+	if err = tx.QueryRow(ctx, sqlFor(tx, `SELECT pg_current_snapshot()::text, now()`,
+		`SELECT CONCAT('mysql:', COALESCE((SELECT max_sync_id FROM sync_state WHERE singleton=1),0)), UTC_TIMESTAMP(6)`)).Scan(&out.SnapshotID, &out.DBTime); err != nil {
 		return TaskExport{}, err
 	}
 	out.DBTime = out.DBTime.UTC()
@@ -195,6 +219,9 @@ func (s *Store) ExportTasks(ctx context.Context, lane, state, parentLane string,
 	}
 
 	where, args := taskFilter(lane, state, parentLane, project)
+	if s.dialect == mysqlDialect {
+		where, args = taskFilterMySQL(lane, state, parentLane, project)
+	}
 	if err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE 1=1`+where, args...).Scan(&out.Counts.Total); err != nil {
 		return TaskExport{}, err
 	}
@@ -241,7 +268,11 @@ func (s *Store) ExportTasks(ctx context.Context, lane, state, parentLane string,
 	}
 
 	rowArgs := append(append([]any{}, args...), limit)
-	rows, err = tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE 1=1`+where+fmt.Sprintf(` ORDER BY id ASC LIMIT $%d`, len(rowArgs)), rowArgs...)
+	limitClause := fmt.Sprintf(` ORDER BY id ASC LIMIT $%d`, len(rowArgs))
+	if s.dialect == mysqlDialect {
+		limitClause = ` ORDER BY id ASC LIMIT ?`
+	}
+	rows, err = tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE 1=1`+where+limitClause, rowArgs...)
 	if err != nil {
 		return TaskExport{}, err
 	}
@@ -260,7 +291,7 @@ func (s *Store) ExportTasks(ctx context.Context, lane, state, parentLane string,
 		return TaskExport{}, err
 	}
 
-	if err = s.markStalled(ctx, pgTransaction{tx}, out.Tasks, out.DBTime); err != nil {
+	if err = s.markStalled(ctx, tx, out.Tasks, out.DBTime); err != nil {
 		return TaskExport{}, err
 	}
 

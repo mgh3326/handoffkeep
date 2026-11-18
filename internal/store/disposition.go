@@ -243,8 +243,8 @@ func DispositionQuestion(refs TaskRefs, note string) string {
 // job, so the recorded reason is fixed to the path itself.
 const dispositionNoJobReason = "disposition item; no job link"
 
-func insertTaskEvent(ctx context.Context, tx pgx.Tx, id int64, from, to, by, note string, refs TaskRefs, at time.Time, noJob string, into *Task) (int64, error) {
-	eventID, _, err := insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: id, From: from, To: to, By: by, Note: note, Refs: refs, Into: into, At: at, NoJob: noJob})
+func insertTaskEvent(ctx context.Context, tx transaction, id int64, from, to, by, note string, refs TaskRefs, at time.Time, noJob string, into *Task) (int64, error) {
+	eventID, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: id, From: from, To: to, By: by, Note: note, Refs: refs, Into: into, At: at, NoJob: noJob})
 	return eventID, err
 }
 
@@ -253,18 +253,14 @@ func insertTaskEvent(ctx context.Context, tx pgx.Tx, id int64, from, to, by, not
 // it is never observable unflagged and no claim can take it.
 // created=false returns the already open item for the same origin.
 func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Task, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, false, ErrDialectUnsupported
-	}
-
 	if !validName(in.Lane) || strings.TrimSpace(in.Title) == "" || !validText(in.Title, MaxBytes) || in.CreatedBy == "" || !validText(in.CreatedBy, 128) || !validText(in.Note, 512) {
 		return Task{}, false, errors.New("invalid disposition")
 	}
 	if err := guard.Reject(in.Title + "\n" + in.Note); err != nil {
 		return Task{}, false, err
 	}
-	now := time.Now().UTC()
 	refs := TaskRefs{OriginPR: in.OriginPR, OriginTask: in.OriginTask}
+	now := time.Now().UTC()
 	facts := DispositionFacts{FactsAsOf: now, Install: in.Install, ResidualN: in.ResidualN, ResidualDoc: in.ResidualDoc}
 	if in.OriginPR != "" {
 		facts.FactsSource, facts.MergeSHA, facts.MergedAt = "gh-pr-view", in.MergeSHA, in.MergedAt
@@ -281,65 +277,104 @@ func (s *Store) CreateDisposition(ctx context.Context, in DispositionInput) (Tas
 		return Task{}, false, err
 	}
 	question := DispositionQuestion(refs, in.Note)
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Task{}, false, err
-	}
-	defer tx.Rollback(ctx)
-	var project *string
-	if in.Project != "" {
-		project = &in.Project
-	}
-	if err = requireTaskProject(ctx, pgTransaction{tx}, project); err != nil {
-		return Task{}, false, err
-	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "disposition:"+dispositionOriginKey(in.OriginPR, in.OriginTask)); err != nil {
-		return Task{}, false, err
-	}
-	if in.OriginTask != 0 {
-		var parentState string
-		if err = tx.QueryRow(ctx, `SELECT state FROM tasks WHERE id=$1`, in.OriginTask).Scan(&parentState); err != nil {
-			if errors.Is(err, ErrNoRows) {
-				return Task{}, false, ErrTaskNotFound
-			}
-			return Task{}, false, err
-		}
-		if !IsSettledState(parentState) {
-			return Task{}, false, errors.New("invalid disposition: origin task is not terminal")
-		}
-	}
-	var existing Task
-	err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE awaiting_decision AND refs ? 'disposition'
-		AND (($1 <> '' AND refs->>'origin_pr' = $1) OR ($2 > 0 AND refs->>'origin_task' = $2::text)) ORDER BY id LIMIT 1`, in.OriginPR, in.OriginTask), &existing)
-	if err == nil {
-		return existing, false, tx.Commit(ctx)
-	}
-	if !errors.Is(err, ErrNoRows) {
-		return Task{}, false, err
-	}
 	encoded, err := json.Marshal(refs)
 	if err != nil {
 		return Task{}, false, err
 	}
-	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,last_activity_at,project,awaiting_decision) VALUES($1,'',$2,'decide','backlog',0,$3::jsonb,$4,$4,$5,$5,$5,$6,true) RETURNING `+taskColumns, in.Lane, in.Title, string(encoded), in.CreatedBy, now, in.Project), &x); err != nil {
-		return Task{}, false, err
-	}
-	if err := s.enqueueYTIssueTx(ctx, pgTransaction{tx}, x); err != nil {
-		return Task{}, false, err
-	}
-	// The awaiting event carries the question; its id is the item's
-	// generation, which an operator answer must quote.
-	gen, _, err := insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: StateBacklog, To: StateBacklog, By: in.CreatedBy, Note: question, Refs: refs, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"})
+	var out Task
+	var created bool
+	err = s.retryTx(ctx, func() error {
+		out, created = Task{}, false
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		var project *string
+		if in.Project != "" {
+			project = &in.Project
+		}
+		if err = requireTaskProject(ctx, tx, project); err != nil {
+			return err
+		}
+		if s.dialect == mysqlDialect {
+			_, err = mysqlTransactionLock(ctx, tx, mysqlLockKey("text", "disposition:"+dispositionOriginKey(in.OriginPR, in.OriginTask)), false)
+		} else {
+			_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "disposition:"+dispositionOriginKey(in.OriginPR, in.OriginTask))
+		}
+		if err != nil {
+			return err
+		}
+		if in.OriginTask != 0 {
+			var parentState string
+			if err = tx.QueryRow(ctx, sqlFor(tx, `SELECT state FROM tasks WHERE id=$1`, `SELECT state FROM tasks WHERE id=?`), in.OriginTask).Scan(&parentState); err != nil {
+				if errors.Is(err, ErrNoRows) {
+					return ErrTaskNotFound
+				}
+				return err
+			}
+			if !IsSettledState(parentState) {
+				return errors.New("invalid disposition: origin task is not terminal")
+			}
+		}
+		var existing Task
+		err = scanTask(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE awaiting_decision AND refs ? 'disposition'
+			AND (($1 <> '' AND refs->>'origin_pr' = $1) OR ($2 > 0 AND refs->>'origin_task' = $2::text)) ORDER BY id LIMIT 1`,
+			`SELECT `+taskColumns+` FROM tasks WHERE awaiting_decision AND JSON_CONTAINS_PATH(refs,'one','$.disposition')
+			AND ((? <> '' AND JSON_UNQUOTE(JSON_EXTRACT(refs,'$.origin_pr')) = ?) OR (? > 0 AND JSON_UNQUOTE(JSON_EXTRACT(refs,'$.origin_task')) = ?)) ORDER BY id LIMIT 1`),
+			dispositionLookupArgs(s.dialect, in.OriginPR, in.OriginTask)...), &existing)
+		if err == nil {
+			out = existing
+			return tx.Commit(ctx)
+		}
+		if !errors.Is(err, ErrNoRows) {
+			return err
+		}
+		var x Task
+		if s.dialect == mysqlDialect {
+			id, err := tx.InsertID(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,last_activity_at,project,awaiting_decision) VALUES(?,'',?,'decide','backlog',0,?,?,?,?,?,?,?,true)`,
+				in.Lane, in.Title, string(encoded), in.CreatedBy, in.CreatedBy, now, now, now, in.Project)
+			if err != nil {
+				return err
+			}
+			if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=?`, id), &x); err != nil {
+				return err
+			}
+		} else if err = scanTask(tx.QueryRow(ctx, `INSERT INTO tasks(lane,parent_lane,title,kind,state,priority,refs,claimed_by,created_by,created_at,updated_at,last_activity_at,project,awaiting_decision) VALUES($1,'',$2,'decide','backlog',0,$3::jsonb,$4,$4,$5,$5,$5,$6,true) RETURNING `+taskColumns, in.Lane, in.Title, string(encoded), in.CreatedBy, now, in.Project), &x); err != nil {
+			return err
+		}
+		if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
+			return err
+		}
+		// The awaiting event carries the question; its id is the item's
+		// generation, which an operator answer must quote.
+		gen, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: StateBacklog, To: StateBacklog, By: in.CreatedBy, Note: question, Refs: refs, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"})
+		if err != nil {
+			return err
+		}
+		// The new row's decision record is an insert of a new key: it needs no
+		// task-mutation lock (decision_records.go).
+		if err = s.mirrorTaskDecisionsFlowTx(ctx, tx, taskDecisionBefore{}, x, in.CreatedBy, question, gen, now); err != nil {
+			return err
+		}
+		out, created = x, true
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return Task{}, false, err
 	}
-	// The new row's decision record is an insert of a new key: it needs no
-	// task-mutation lock (decision_records.go).
-	if err = mirrorTaskDecisionsTx(ctx, tx, taskDecisionBefore{}, x, in.CreatedBy, question, gen, now); err != nil {
-		return Task{}, false, err
+	return out, created, nil
+}
+
+// dispositionLookupArgs are the arguments of the open-item lookup: the same
+// two values, once for PostgreSQL's numbered placeholders and twice each for
+// MySQL's positional ones.
+func dispositionLookupArgs(d storeDialect, originPR string, originTask int64) []any {
+	if d == mysqlDialect {
+		return []any{originPR, originPR, originTask, strconv.FormatInt(originTask, 10)}
 	}
-	return x, true, tx.Commit(ctx)
+	return []any{originPR, originTask}
 }
 
 func dispositionGen(ctx context.Context, q interface {
@@ -352,6 +387,21 @@ func dispositionGen(ctx context.Context, q interface {
 	}
 	return gen, err
 }
+
+// dispositionGenTx is dispositionGen inside a write transaction on either
+// dialect.
+func dispositionGenTx(ctx context.Context, tx transaction, id int64) (int64, error) {
+	var gen int64
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT id FROM task_events WHERE task_id=$1 AND `+awaitingEventSQL+` ORDER BY at DESC,id DESC LIMIT 1`,
+		`SELECT id FROM task_events WHERE task_id=? AND `+awaitingEventSQLMySQL+` ORDER BY at DESC,id DESC LIMIT 1`), id).Scan(&gen)
+	if errors.Is(err, ErrNoRows) {
+		return 0, nil
+	}
+	return gen, err
+}
+
+// awaitingEventSQLMySQL is awaitingEventSQL with MySQL's identifier quoting.
+var awaitingEventSQLMySQL = strings.ReplaceAll(awaitingEventSQL, `"to"`, "`to`")
 
 // DispositionAnswerInput identifies one operator answer. OperatorEmail must be
 // the Cloudflare Access email identity; the caller (internal/ui) refuses
@@ -392,23 +442,23 @@ func DispositionEventText(tasks []Task) (string, error) {
 // transaction: a rollback takes the answer and the notice together, and the
 // event id makes a second write a no-op. The console's direct emit uses the
 // same lane and event id, so the hub dedupes the two paths into one event.
-func queueDispositionAnswerNotice(ctx context.Context, tx pgx.Tx, lane, eventID string, tasks []Task, at time.Time) error {
+func queueDispositionAnswerNotice(ctx context.Context, tx transaction, lane, eventID string, tasks []Task, at time.Time) error {
 	text, err := DispositionEventText(tasks)
 	if err != nil {
 		return err
 	}
-	_, err = insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDispositionAnswered, lane, eventID, assistantLaneText("", text), at)
+	_, err = insertNotificationOutboxOnce(ctx, tx, OutboxKindDispositionAnswered, lane, eventID, assistantLaneText("", text), at)
 	return err
 }
 
 // answerDispositionTx returns (task, skipReason, error). A non-empty skip
 // reason means nothing was written for this item.
-func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in DispositionAnswerInput, useRecommended bool) (Task, string, error) {
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+func (s *Store) answerDispositionTx(ctx context.Context, tx transaction, in DispositionAnswerInput, useRecommended bool) (Task, string, error) {
+	if err := s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
 		return Task{}, "", err
 	}
 	var x Task
-	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, in.ID), &x); err != nil {
+	if err := scanTask(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), in.ID), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return Task{}, "not_found", nil
 		}
@@ -421,7 +471,7 @@ func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in Dispositi
 		return x, "already_answered", nil
 	}
 	decisionBefore := decisionBeforeOf(x)
-	gen, err := dispositionGen(ctx, tx, in.ID)
+	gen, err := dispositionGenTx(ctx, tx, in.ID)
 	if err != nil {
 		return Task{}, "", err
 	}
@@ -445,7 +495,7 @@ func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in Dispositi
 	if err := applyLifecycle(&x, from, StateResearching, now, nil); err != nil {
 		return Task{}, "", err
 	}
-	if x, err = writeTaskTx(ctx, pgTransaction{tx}, x); err != nil {
+	if x, err = writeTaskTx(ctx, tx, x); err != nil {
 		return Task{}, "", err
 	}
 	note := fmt.Sprintf("disposition-answer %s: %s gen=%d", key, label, gen)
@@ -455,10 +505,10 @@ func (s *Store) answerDispositionTx(ctx context.Context, tx pgx.Tx, in Dispositi
 	if _, err = insertTaskEvent(ctx, tx, in.ID, from, StateResearching, "operator:"+in.OperatorEmail, note, x.Refs, now, dispositionNoJobReason, &x); err != nil {
 		return Task{}, "", err
 	}
-	if _, _, err = insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: in.ID, Kind: TaskEventAwaiting, From: StateResearching, To: StateResearching, By: "operator:" + in.OperatorEmail, Note: note, Refs: x.Refs, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: in.ID, Kind: TaskEventAwaiting, From: StateResearching, To: StateResearching, By: "operator:" + in.OperatorEmail, Note: note, Refs: x.Refs, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
 		return Task{}, "", err
 	}
-	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, "operator:"+in.OperatorEmail, note, 0, now); err != nil {
+	if err = s.mirrorTaskDecisionsFlowTx(ctx, tx, decisionBefore, x, "operator:"+in.OperatorEmail, note, 0, now); err != nil {
 		return Task{}, "", err
 	}
 	return x, "", nil
@@ -471,38 +521,44 @@ func validAnswerIdentity(email, eventID, batchID string) bool {
 // AnswerDisposition records one operator answer. It is the only single-item
 // path out of the awaiting_decision flag for a disposition item.
 func (s *Store) AnswerDisposition(ctx context.Context, in DispositionAnswerInput) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
-
 	if in.ID < 1 || in.Gen < 1 || !validAnswerIdentity(in.OperatorEmail, in.EventID, in.BatchID) {
 		return Task{}, errors.New("invalid disposition answer")
 	}
 	if _, ok := DispositionOptionLabel(in.Key); !ok {
 		return Task{}, errors.New("invalid disposition answer")
 	}
-	tx, err := s.pool.Begin(ctx)
+	var out Task
+	err := s.retryTx(ctx, func() error {
+		out = Task{}
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		x, skip, err := s.answerDispositionTx(ctx, tx, in, false)
+		if err != nil {
+			return err
+		}
+		switch skip {
+		case "":
+		case "not_found":
+			return ErrTaskNotFound
+		case "stale":
+			return ErrDispositionStale
+		default:
+			return ErrTaskConflict
+		}
+		if err = queueDispositionAnswerNotice(ctx, tx, x.Lane, in.EventID, []Task{x}, x.Refs.Disposition.Answer.At); err != nil {
+			return err
+		}
+		out = x
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return Task{}, err
 	}
-	defer tx.Rollback(ctx)
-	x, skip, err := s.answerDispositionTx(ctx, tx, in, false)
-	if err != nil {
-		return Task{}, err
-	}
-	switch skip {
-	case "":
-	case "not_found":
-		return Task{}, ErrTaskNotFound
-	case "stale":
-		return Task{}, ErrDispositionStale
-	default:
-		return Task{}, ErrTaskConflict
-	}
-	if err = queueDispositionAnswerNotice(ctx, tx, x.Lane, in.EventID, []Task{x}, x.Refs.Disposition.Answer.At); err != nil {
-		return Task{}, err
-	}
-	return x, tx.Commit(ctx)
+	return out, nil
 }
 
 type DispositionRef struct {
@@ -520,10 +576,6 @@ type DispositionSkip struct {
 // after the snapshot are not in refs and therefore cannot be touched; items
 // whose question generation changed are skipped, never answered.
 func (s *Store) AnswerDispositionBatch(ctx context.Context, refs []DispositionRef, email, batchID string, eventIDForLane func(lane string) string) ([]Task, []DispositionSkip, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, nil, ErrDialectUnsupported
-	}
-
 	if len(refs) == 0 || len(refs) > DispositionBatchLimit || batchID == "" || !validAnswerIdentity(email, "-", batchID) || eventIDForLane == nil {
 		return nil, nil, errors.New("invalid disposition batch")
 	}
@@ -534,47 +586,56 @@ func (s *Store) AnswerDispositionBatch(ctx context.Context, refs []DispositionRe
 			return nil, nil, errors.New("invalid disposition batch")
 		}
 	}
-	tx, err := s.pool.Begin(ctx)
+	var answered []Task
+	var skipped []DispositionSkip
+	err := s.retryTx(ctx, func() error {
+		answered, skipped = []Task{}, []DispositionSkip{}
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		for _, ref := range ordered {
+			var lane string
+			if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT lane FROM tasks WHERE id=$1`, `SELECT lane FROM tasks WHERE id=?`), ref.ID).Scan(&lane); err != nil {
+				if errors.Is(err, ErrNoRows) {
+					skipped = append(skipped, DispositionSkip{ID: ref.ID, Reason: "not_found"})
+					continue
+				}
+				return err
+			}
+			x, skip, err := s.answerDispositionTx(ctx, tx, DispositionAnswerInput{ID: ref.ID, Gen: ref.Gen, OperatorEmail: email, EventID: eventIDForLane(lane), BatchID: batchID}, true)
+			if err != nil {
+				return err
+			}
+			if skip != "" {
+				skipped = append(skipped, DispositionSkip{ID: ref.ID, Reason: skip})
+				continue
+			}
+			answered = append(answered, x)
+		}
+		// One notice per lane, under the lane's batch event id: the answered
+		// items of a lane share one lane event.
+		byLane, lanes := map[string][]Task{}, []string{}
+		for _, x := range answered {
+			if _, seen := byLane[x.Lane]; !seen {
+				lanes = append(lanes, x.Lane)
+			}
+			byLane[x.Lane] = append(byLane[x.Lane], x)
+		}
+		for _, lane := range lanes {
+			tasks := byLane[lane]
+			if err := queueDispositionAnswerNotice(ctx, tx, lane, tasks[0].Refs.Disposition.Answer.EventID, tasks, tasks[0].Refs.Disposition.Answer.At); err != nil {
+				return err
+			}
+		}
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return nil, nil, err
 	}
-	defer tx.Rollback(ctx)
-	answered, skipped := []Task{}, []DispositionSkip{}
-	for _, ref := range ordered {
-		var lane string
-		if err := tx.QueryRow(ctx, `SELECT lane FROM tasks WHERE id=$1`, ref.ID).Scan(&lane); err != nil {
-			if errors.Is(err, ErrNoRows) {
-				skipped = append(skipped, DispositionSkip{ID: ref.ID, Reason: "not_found"})
-				continue
-			}
-			return nil, nil, err
-		}
-		x, skip, err := s.answerDispositionTx(ctx, tx, DispositionAnswerInput{ID: ref.ID, Gen: ref.Gen, OperatorEmail: email, EventID: eventIDForLane(lane), BatchID: batchID}, true)
-		if err != nil {
-			return nil, nil, err
-		}
-		if skip != "" {
-			skipped = append(skipped, DispositionSkip{ID: ref.ID, Reason: skip})
-			continue
-		}
-		answered = append(answered, x)
-	}
-	// One notice per lane, under the lane's batch event id: the answered
-	// items of a lane share one lane event.
-	byLane, lanes := map[string][]Task{}, []string{}
-	for _, x := range answered {
-		if _, seen := byLane[x.Lane]; !seen {
-			lanes = append(lanes, x.Lane)
-		}
-		byLane[x.Lane] = append(byLane[x.Lane], x)
-	}
-	for _, lane := range lanes {
-		tasks := byLane[lane]
-		if err := queueDispositionAnswerNotice(ctx, tx, lane, tasks[0].Refs.Disposition.Answer.EventID, tasks, tasks[0].Refs.Disposition.Answer.At); err != nil {
-			return nil, nil, err
-		}
-	}
-	return answered, skipped, tx.Commit(ctx)
+	return answered, skipped, nil
 }
 
 // ApplyDisposition records that the director applied the operator's answer.
@@ -582,75 +643,81 @@ func (s *Store) AnswerDispositionBatch(ctx context.Context, refs []DispositionRe
 // A/B/C researching->reviewing->merged, D researching->icebox, E
 // researching->dropped.
 func (s *Store) ApplyDisposition(ctx context.Context, id int64, by, note string) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
-
 	if id < 1 || by == "" || !validText(by, 128) || !validText(note, 512) {
 		return Task{}, errors.New("invalid disposition apply")
 	}
 	if err := guard.Reject(note); err != nil {
 		return Task{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	var out Task
+	err := s.retryTx(ctx, func() error {
+		out = Task{}
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		if err = s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
+			return err
+		}
+		var x Task
+		if err = scanTask(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
+			if errors.Is(err, ErrNoRows) {
+				return ErrTaskNotFound
+			}
+			return err
+		}
+
+		if x.Refs.Disposition == nil || x.Refs.Disposition.Answer == nil || x.State != StateResearching || x.AwaitingDecision {
+			return ErrTaskConflict
+		}
+		var hops []string
+		switch x.Refs.Disposition.Answer.Key {
+		case "A", "B", "C":
+			hops = []string{StateReviewing, StateMerged}
+		case "D":
+			hops = []string{StateIcebox}
+		default:
+			hops = []string{StateDropped}
+		}
+		text := "disposition:apply " + x.Refs.Disposition.Answer.Key
+		if strings.TrimSpace(note) != "" {
+			text += " — " + note
+		}
+		now := time.Now().UTC()
+		from := x.State
+		decisionBefore := decisionBeforeOf(x)
+		for _, to := range hops {
+			if !taskTransitionAllowed(from, to) {
+				return ErrTaskConflict
+			}
+			typ := "resolved"
+			if to == StateDropped {
+				typ = "cancelled"
+			}
+			if err := applyLifecycle(&x, from, to, now, &TaskClosure{Type: typ, Evidence: "disposition:apply " + x.Refs.Disposition.Answer.Key}); err != nil {
+				return err
+			}
+			if _, err = insertTaskEvent(ctx, tx, id, from, to, by, text, x.Refs, now, "", &x); err != nil {
+				return err
+			}
+			from = to
+		}
+		x.State, x.UpdatedAt = from, now
+		if x, err = writeTaskTx(ctx, tx, x); err != nil {
+			return err
+		}
+		if err = s.mirrorTaskDecisionsFlowTx(ctx, tx, decisionBefore, x, by, text, 0, now); err != nil {
+			return err
+		}
+		out = x
+		return tx.Commit(ctx)
+	})
 	if err != nil {
 		return Task{}, err
 	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-		return Task{}, err
-	}
-	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
-		if errors.Is(err, ErrNoRows) {
-			return Task{}, ErrTaskNotFound
-		}
-		return Task{}, err
-	}
-
-	if x.Refs.Disposition == nil || x.Refs.Disposition.Answer == nil || x.State != StateResearching || x.AwaitingDecision {
-		return Task{}, ErrTaskConflict
-	}
-	var hops []string
-	switch x.Refs.Disposition.Answer.Key {
-	case "A", "B", "C":
-		hops = []string{StateReviewing, StateMerged}
-	case "D":
-		hops = []string{StateIcebox}
-	default:
-		hops = []string{StateDropped}
-	}
-	text := "disposition:apply " + x.Refs.Disposition.Answer.Key
-	if strings.TrimSpace(note) != "" {
-		text += " — " + note
-	}
-	now := time.Now().UTC()
-	from := x.State
-	decisionBefore := decisionBeforeOf(x)
-	for _, to := range hops {
-		if !taskTransitionAllowed(from, to) {
-			return Task{}, ErrTaskConflict
-		}
-		typ := "resolved"
-		if to == StateDropped {
-			typ = "cancelled"
-		}
-		if err := applyLifecycle(&x, from, to, now, &TaskClosure{Type: typ, Evidence: "disposition:apply " + x.Refs.Disposition.Answer.Key}); err != nil {
-			return Task{}, err
-		}
-		if _, err = insertTaskEvent(ctx, tx, id, from, to, by, text, x.Refs, now, "", &x); err != nil {
-			return Task{}, err
-		}
-		from = to
-	}
-	x.State, x.UpdatedAt = from, now
-	if x, err = writeTaskTx(ctx, pgTransaction{tx}, x); err != nil {
-		return Task{}, err
-	}
-	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, by, text, 0, now); err != nil {
-		return Task{}, err
-	}
-	return x, tx.Commit(ctx)
+	return out, nil
 }
 
 // DispositionTarget is the actual final state of the chosen action. Receipt
@@ -677,17 +744,17 @@ type OpenDisposition struct {
 
 // ListOpenDispositions returns open items oldest first (the batch order).
 func (s *Store) ListOpenDispositions(ctx context.Context, limit int) ([]OpenDisposition, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if limit < 1 || limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+prefixedTaskColumns("t")+`,
+	rows, err := s.db().Query(ctx, s.q(`SELECT `+prefixedTaskColumns("t")+`,
 		COALESCE((SELECT id FROM task_events WHERE task_id=t.id AND `+awaitingEventSQL+` ORDER BY at DESC,id DESC LIMIT 1),0),
 		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND `+awaitingEventSQL+` ORDER BY at DESC,id DESC LIMIT 1),'')
-		FROM tasks t WHERE t.awaiting_decision AND t.refs ? 'disposition' ORDER BY t.created_at ASC,t.id ASC LIMIT $1`, limit)
+		FROM tasks t WHERE t.awaiting_decision AND t.refs ? 'disposition' ORDER BY t.created_at ASC,t.id ASC LIMIT $1`,
+		`SELECT `+prefixedTaskColumns("t")+`,
+		COALESCE((SELECT id FROM task_events WHERE task_id=t.id AND `+awaitingEventSQLMySQL+` ORDER BY at DESC,id DESC LIMIT 1),0),
+		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND `+awaitingEventSQLMySQL+` ORDER BY at DESC,id DESC LIMIT 1),'')
+		FROM tasks t WHERE t.awaiting_decision AND JSON_CONTAINS_PATH(t.refs,'one','$.disposition') ORDER BY t.created_at ASC,t.id ASC LIMIT ?`), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -719,15 +786,16 @@ func prefixedTaskColumns(alias string) string {
 // pending figure the queue shows. Uncleaned requests on merged/dropped tasks
 // are not pending decisions and are not counted here.
 func (s *Store) CountNeedsDecision(ctx context.Context) (decisions, dispositions int, err error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return 0, 0, ErrDialectUnsupported
-	}
-
-	err = s.pool.QueryRow(ctx, `SELECT
+	err = s.db().QueryRow(ctx, s.q(`SELECT
 		COUNT(*) FILTER (WHERE awaiting_decision AND NOT (refs ? 'disposition') AND COALESCE(refs->'decision_request'->>'status','')<>'open')
 		+ COUNT(*) FILTER (WHERE refs->'decision_request'->>'status'='open' AND state NOT IN (`+settledStatesSQL+`)),
 		COUNT(*) FILTER (WHERE awaiting_decision AND refs ? 'disposition')
-		FROM tasks WHERE awaiting_decision OR refs->'decision_request'->>'status'='open'`).Scan(&decisions, &dispositions)
+		FROM tasks WHERE awaiting_decision OR refs->'decision_request'->>'status'='open'`,
+		`SELECT
+		CAST(COALESCE(SUM(CASE WHEN awaiting_decision AND NOT JSON_CONTAINS_PATH(refs,'one','$.disposition') AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(refs,'$.decision_request.status')),'')<>'open' THEN 1 ELSE 0 END)
+		+ SUM(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(refs,'$.decision_request.status'))='open' AND state NOT IN (`+settledStatesSQL+`) THEN 1 ELSE 0 END),0) AS SIGNED),
+		CAST(COALESCE(SUM(CASE WHEN awaiting_decision AND JSON_CONTAINS_PATH(refs,'one','$.disposition') THEN 1 ELSE 0 END),0) AS SIGNED)
+		FROM tasks WHERE awaiting_decision OR JSON_UNQUOTE(JSON_EXTRACT(refs,'$.decision_request.status'))='open'`)).Scan(&decisions, &dispositions)
 	return decisions, dispositions, err
 }
 
@@ -735,17 +803,17 @@ func (s *Store) CountNeedsDecision(ctx context.Context) (decisions, dispositions
 // reached relay_events, newest first so a bounded list never hides the latest. The answer is the durable record; the lane event is a
 // notification that can be re-sent with the same event ID.
 func (s *Store) ListUnnotifiedDispositions(ctx context.Context, limit int) ([]Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if limit < 1 || limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+prefixedTaskColumns("t")+` FROM tasks t
+	rows, err := s.db().Query(ctx, s.q(`SELECT `+prefixedTaskColumns("t")+` FROM tasks t
 		WHERE t.refs ? 'disposition' AND t.refs->'disposition' ? 'answer'
 		AND NOT EXISTS (SELECT 1 FROM relay_events r WHERE r.kind='lane.event' AND r.owner_lane=t.lane AND r.event_id=t.refs->'disposition'->'answer'->>'event_id')
-		ORDER BY t.id DESC LIMIT $1`, limit)
+		ORDER BY t.id DESC LIMIT $1`,
+		`SELECT `+prefixedTaskColumns("t")+` FROM tasks t
+		WHERE JSON_CONTAINS_PATH(t.refs,'one','$.disposition.answer')
+		AND NOT EXISTS (SELECT 1 FROM relay_events r WHERE r.kind='lane.event' AND r.owner_lane=t.lane AND r.event_id=JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.disposition.answer.event_id')))
+		ORDER BY t.id DESC LIMIT ?`), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -764,11 +832,8 @@ func (s *Store) ListUnnotifiedDispositions(ctx context.Context, limit int) ([]Ta
 // ListDispositionsByAnswerEvent returns the answered items that share one
 // answer event ID (one item, or one lane of one batch), in id order.
 func (s *Store) ListDispositionsByAnswerEvent(ctx context.Context, eventID string) ([]Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
-	rows, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs ? 'disposition' AND refs->'disposition'->'answer'->>'event_id'=$1 ORDER BY id ASC LIMIT $2`, eventID, DispositionBatchLimit)
+	rows, err := s.db().Query(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE refs ? 'disposition' AND refs->'disposition'->'answer'->>'event_id'=$1 ORDER BY id ASC LIMIT $2`,
+		`SELECT `+taskColumns+` FROM tasks WHERE JSON_CONTAINS_PATH(refs,'one','$.disposition') AND JSON_UNQUOTE(JSON_EXTRACT(refs,'$.disposition.answer.event_id'))=? ORDER BY id ASC LIMIT ?`), eventID, DispositionBatchLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -808,17 +873,18 @@ type DispositionSummary struct {
 }
 
 func (s *Store) DispositionSummary(ctx context.Context, asOf time.Time) (DispositionSummary, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return DispositionSummary{}, ErrDialectUnsupported
-	}
-
 	asOf = asOf.UTC()
 	out := DispositionSummary{AsOf: asOf, OldestOpenDays: -1, OldestPendingApplyDay: -1}
-	rows, err := s.pool.Query(ctx, `SELECT t.id, t.created_at, t.refs,
+	rows, err := s.db().Query(ctx, s.q(`SELECT t.id, t.created_at, t.refs,
 		(SELECT e."to" FROM task_events e WHERE e.task_id=t.id AND e.kind='transition' AND e.at<=$1 ORDER BY e.at DESC, e.id DESC LIMIT 1),
 		(SELECT e.at FROM task_events e WHERE e.task_id=t.id AND e.kind='transition' AND e.at<=$1 ORDER BY e.at DESC, e.id DESC LIMIT 1),
 		(SELECT e.to_value FROM task_events e WHERE e.task_id=t.id AND e.kind='awaiting_decision' AND e.at<=$1 ORDER BY e.at DESC, e.id DESC LIMIT 1)
-		FROM tasks t WHERE t.refs ? 'disposition' AND t.created_at<=$1 ORDER BY t.created_at ASC, t.id ASC`, asOf)
+		FROM tasks t WHERE t.refs ? 'disposition' AND t.created_at<=$1 ORDER BY t.created_at ASC, t.id ASC`,
+		`SELECT t.id, t.created_at, t.refs,
+		(SELECT e.`+"`to`"+` FROM task_events e WHERE e.task_id=t.id AND e.kind='transition' AND e.at<=? ORDER BY e.at DESC, e.id DESC LIMIT 1),
+		(SELECT e.at FROM task_events e WHERE e.task_id=t.id AND e.kind='transition' AND e.at<=? ORDER BY e.at DESC, e.id DESC LIMIT 1),
+		(SELECT e.to_value FROM task_events e WHERE e.task_id=t.id AND e.kind='awaiting_decision' AND e.at<=? ORDER BY e.at DESC, e.id DESC LIMIT 1)
+		FROM tasks t WHERE JSON_CONTAINS_PATH(t.refs,'one','$.disposition') AND t.created_at<=? ORDER BY t.created_at ASC, t.id ASC`), summaryArgs(s.dialect, asOf)...)
 	if err != nil {
 		return out, err
 	}
@@ -893,11 +959,19 @@ func (s *Store) DispositionSummary(ctx context.Context, asOf time.Time) (Disposi
 		// A merged PR since the contract epoch with no item naming it as
 		// origin_pr. refs.pr still mixes origin and closing PRs (#494), so this
 		// is a candidate count, not a verdict.
-		if err := s.pool.QueryRow(ctx, `SELECT COUNT(DISTINCT t.refs->>'pr') FROM tasks t
+		coverageArgs := []any{*out.CoverageEpoch, asOf}
+		if s.dialect == mysqlDialect {
+			coverageArgs = []any{*out.CoverageEpoch, asOf, asOf}
+		}
+		if err := s.db().QueryRow(ctx, s.q(`SELECT COUNT(DISTINCT t.refs->>'pr') FROM tasks t
 			WHERE COALESCE(t.refs->>'pr','') <> '' AND NOT (t.refs ? 'disposition')
 			AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=t.id AND e.kind='transition' AND e."to"='merged' AND e.at >= $1 AND e.at <= $2)
 			AND NOT EXISTS (SELECT 1 FROM tasks d WHERE d.refs ? 'disposition' AND d.refs->>'origin_pr' = t.refs->>'pr' AND d.created_at <= $2)`,
-			*out.CoverageEpoch, asOf).Scan(&out.MergedWithoutItem); err != nil {
+			`SELECT COUNT(DISTINCT JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.pr'))) FROM tasks t
+			WHERE COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.pr')),'') <> '' AND NOT JSON_CONTAINS_PATH(t.refs,'one','$.disposition')
+			AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=t.id AND e.kind='transition' AND e.`+"`to`"+`='merged' AND e.at >= ? AND e.at <= ?)
+			AND NOT EXISTS (SELECT 1 FROM tasks d WHERE JSON_CONTAINS_PATH(d.refs,'one','$.disposition') AND JSON_UNQUOTE(JSON_EXTRACT(d.refs,'$.origin_pr')) = JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.pr')) AND d.created_at <= ?)`),
+			coverageArgs...).Scan(&out.MergedWithoutItem); err != nil {
 			return out, err
 		}
 	}
@@ -910,6 +984,15 @@ func dayText(days int) string {
 		return "—"
 	}
 	return strconv.Itoa(days) + "일"
+}
+
+// summaryArgs binds the as-of time once for PostgreSQL's $1 and once per
+// placeholder for MySQL's four.
+func summaryArgs(d storeDialect, asOf time.Time) []any {
+	if d == mysqlDialect {
+		return []any{asOf, asOf, asOf, asOf}
+	}
+	return []any{asOf}
 }
 
 func dispositionSummaryText(x DispositionSummary) (string, string) {

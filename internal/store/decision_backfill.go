@@ -45,12 +45,8 @@ const decisionQuestionPreview = 200
 // ListOpenDecisionSources reads the open questions of every source. It runs
 // SELECTs only.
 func (s *Store) ListOpenDecisionSources(ctx context.Context) (OpenDecisionSources, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return OpenDecisionSources{}, ErrDialectUnsupported
-	}
-
 	out := OpenDecisionSources{Items: []OpenDecisionItem{}, Truncated: []string{}}
-	if err := s.pool.QueryRow(ctx, `SELECT now()`).Scan(&out.ServerTime); err != nil {
+	if err := s.db().QueryRow(ctx, s.q(`SELECT now()`, `SELECT UTC_TIMESTAMP(6)`)).Scan(&out.ServerTime); err != nil {
 		return out, err
 	}
 	add := func(source string, n int, items []OpenDecisionItem) {
@@ -64,10 +60,13 @@ func (s *Store) ListOpenDecisionSources(ctx context.Context) (OpenDecisionSource
 	// (ListOpenTaskDecisions), disposition items included
 	// (ListOpenDispositions; they never carry a request). The ref is the
 	// latest awaiting event, the one the flag's mirror row is keyed by.
-	rows, err := s.pool.Query(ctx, `SELECT t.id,t.lane,t.state,COALESCE(ev.id,0),COALESCE(ev.at,t.updated_at),COALESCE(ev.note,'')
+	rows, err := s.db().Query(ctx, s.q(`SELECT t.id,t.lane,t.state,COALESCE(ev.id,0),COALESCE(ev.at,t.updated_at),COALESCE(ev.note,'')
 		FROM tasks t LEFT JOIN LATERAL (SELECT id,at,note FROM task_events WHERE task_id=t.id AND `+awaitingEventSQL+` ORDER BY at DESC,id DESC LIMIT 1) ev ON true
 		WHERE t.awaiting_decision AND COALESCE(t.refs->'decision_request'->>'status','')<>'open'
-		ORDER BY t.id LIMIT $1`, openDecisionSourceLimit)
+		ORDER BY t.id LIMIT $1`, `SELECT t.id,t.lane,t.state,COALESCE(ev.id,0),COALESCE(ev.at,t.updated_at),COALESCE(ev.note,'')
+		FROM tasks t LEFT JOIN LATERAL (SELECT id,at,note FROM task_events WHERE task_id=t.id AND `+awaitingEventSQLMySQL+` ORDER BY at DESC,id DESC LIMIT 1) ev ON true
+		WHERE t.awaiting_decision AND COALESCE(`+reportJSONText("t.refs", "$.decision_request.status")+`,'')<>'open'
+		ORDER BY t.id LIMIT ?`), openDecisionSourceLimit)
 	if err != nil {
 		return out, err
 	}
@@ -90,7 +89,8 @@ func (s *Store) ListOpenDecisionSources(ctx context.Context) (OpenDecisionSource
 
 	// task_request: the task's current request is open, whatever the task
 	// state (ListOpenDecisionRequests).
-	rows, err = s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs->'decision_request'->>'status'='open' ORDER BY id LIMIT $1`, openDecisionSourceLimit)
+	rows, err = s.db().Query(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE refs->'decision_request'->>'status'='open' ORDER BY id LIMIT $1`,
+		`SELECT `+taskColumns+` FROM tasks WHERE `+reportJSONText("refs", "$.decision_request.status")+`='open' ORDER BY id LIMIT ?`), openDecisionSourceLimit)
 	if err != nil {
 		return out, err
 	}
@@ -139,7 +139,7 @@ func (s *Store) ListOpenDecisionSources(ctx context.Context) (OpenDecisionSource
 	add(DecisionSourceLaneEvent, len(lanes), items)
 
 	// chat: pending questions.
-	rows, err = s.pool.Query(ctx, `SELECT id,lane,body,created_at FROM chat_questions WHERE state='pending' ORDER BY id LIMIT $1`, openDecisionSourceLimit)
+	rows, err = s.db().Query(ctx, s.q(`SELECT id,lane,body,created_at FROM chat_questions WHERE state='pending' ORDER BY id LIMIT $1`, `SELECT id,lane,body,created_at FROM chat_questions WHERE state='pending' ORDER BY id LIMIT ?`), openDecisionSourceLimit)
 	if err != nil {
 		return out, err
 	}
@@ -183,7 +183,15 @@ func (s *Store) linkOpenDecisionItems(ctx context.Context, items []OpenDecisionI
 	}
 	jobs := map[string]jobLink{}
 	if len(jobIDs) > 0 {
-		rows, err := s.pool.Query(ctx, `SELECT job_id,COALESCE(task_id,0),state FROM jobs WHERE job_id=ANY($1)`, jobIDs)
+		query, args := `SELECT job_id,COALESCE(task_id,0),state FROM jobs WHERE job_id=ANY($1)`, []any{jobIDs}
+		if s.dialect == mysqlDialect {
+			args = make([]any, len(jobIDs))
+			for i, id := range jobIDs {
+				args[i] = id
+			}
+			query = `SELECT job_id,COALESCE(task_id,0),state FROM jobs WHERE job_id IN (` + placeholders(len(jobIDs)) + `)`
+		}
+		rows, err := s.db().Query(ctx, query, args...)
 		if err != nil {
 			return err
 		}
@@ -219,7 +227,11 @@ func (s *Store) linkOpenDecisionItems(ctx context.Context, items []OpenDecisionI
 		return nil
 	}
 	states := map[int64]string{}
-	rows, err := s.pool.Query(ctx, `SELECT id,state FROM tasks WHERE id=ANY($1)`, taskIDs)
+	query, args := `SELECT id,state FROM tasks WHERE id=ANY($1)`, []any{taskIDs}
+	if s.dialect == mysqlDialect {
+		query, args = `SELECT id,state FROM tasks WHERE id IN (`+placeholders(len(taskIDs))+`)`, reportIDArgs(taskIDs)
+	}
+	rows, err := s.db().Query(ctx, query, args...)
 	if err != nil {
 		return err
 	}

@@ -208,7 +208,7 @@ func ytAuthorityShareTx(ctx context.Context, tx transaction, kind YTAuthorityKin
 	if errors.Is(err, ErrNoRows) {
 		if _, err := tx.Exec(ctx, sqlFor(tx,
 			`INSERT INTO yt_authority(kind) VALUES ($1) ON CONFLICT DO NOTHING`,
-			`INSERT IGNORE INTO yt_authority(kind) VALUES (?)`), string(kind)); err != nil {
+			`INSERT INTO yt_authority(kind) VALUES (?) ON DUPLICATE KEY UPDATE kind=kind`), string(kind)); err != nil {
 			return "", err
 		}
 		err = tx.QueryRow(ctx, `SELECT authority FROM yt_authority WHERE kind=`+sqlFor(tx, `$1`, `?`)+` FOR SHARE`, string(kind)).Scan(&side)
@@ -376,7 +376,7 @@ func (s *Store) setYTAuthorityTx(ctx context.Context, tx transaction, seen map[Y
 	var change []YTAuthorityKind
 	// A row a database lost (or never seeded) is hk; give it a row to lock.
 	if dialectFor(tx) == mysqlDialect {
-		if _, err := tx.Exec(ctx, `INSERT IGNORE INTO yt_authority(kind) VALUES ('tasks'),('comments'),('documents'),('decisions')`); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO yt_authority(kind) VALUES ('tasks'),('comments'),('documents'),('decisions') ON DUPLICATE KEY UPDATE kind=kind`); err != nil {
 			return nil, nil, err
 		}
 	} else {

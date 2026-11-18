@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 var ErrInvalidDecisionTab = errors.New("invalid decision tab")
@@ -28,10 +26,6 @@ type DecisionTab struct {
 }
 
 func (s *Store) ListDecisionTab(ctx context.Context, tab string, now time.Time, limit int) (DecisionTab, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return DecisionTab{}, ErrDialectUnsupported
-	}
-
 	var out DecisionTab
 	var predicate, order string
 	switch tab {
@@ -54,16 +48,26 @@ func (s *Store) ListDecisionTab(ctx context.Context, tab string, now time.Time, 
 		limit = 200
 	}
 	now = now.UTC()
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := s.beginSnapshotA5(ctx)
 	if err != nil {
 		return out, err
 	}
 	defer tx.Rollback(ctx)
-	err = tx.QueryRow(ctx, `SELECT COUNT(*),COUNT(*) FILTER (WHERE due_at<=$1::timestamptz) FROM decision_requests WHERE `+decisionOpenSQL, now).Scan(&out.Open, &out.Overdue)
+	countSQL := `SELECT COUNT(*),COUNT(*) FILTER (WHERE due_at<=$1::timestamptz) FROM decision_requests WHERE ` + decisionOpenSQL
+	listSQL := `SELECT ` + decisionRecordColumns + ` FROM decision_requests WHERE ` + predicate + ` ORDER BY ` + order + ` LIMIT $2`
+	countArgs, listArgs := []any{now}, []any{now, limit + 1}
+	if s.dialect == mysqlDialect {
+		// MySQL sorts NULL first ascending and last descending, so the
+		// PostgreSQL NULLS LAST terms are spelled out or dropped.
+		order = strings.NewReplacer(`due_at ASC NULLS LAST`, `due_at IS NULL,due_at ASC`, `answered_at DESC NULLS LAST`, `answered_at DESC`).Replace(order)
+		countSQL, countArgs = mysqlDecisionBinds(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN due_at<=$1::timestamptz THEN 1 ELSE 0 END),0) FROM decision_requests WHERE `+decisionOpenSQL, countArgs)
+		listSQL, listArgs = mysqlDecisionBinds(`SELECT `+decisionRecordColumns+` FROM decision_requests WHERE `+predicate+` ORDER BY `+order+` LIMIT $2`, listArgs)
+	}
+	err = tx.QueryRow(ctx, countSQL, countArgs...).Scan(&out.Open, &out.Overdue)
 	if err != nil {
 		return out, err
 	}
-	rows, err := tx.Query(ctx, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE `+predicate+` ORDER BY `+order+` LIMIT $2`, now, limit+1)
+	rows, err := tx.Query(ctx, listSQL, listArgs...)
 	if err != nil {
 		return out, err
 	}
@@ -122,14 +126,14 @@ func (s *Store) ListDecisionTab(ctx context.Context, tab string, now time.Time, 
 }
 
 func decisionReplacement(ctx context.Context, q interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
+	QueryRow(context.Context, string, ...any) row
 }, ref string) (*int64, error) {
 	source, key, ok := strings.Cut(ref, ":")
 	if !ok || source != DecisionSourceTaskRequest {
 		return nil, nil
 	}
 	var id int64
-	err := q.QueryRow(ctx, `SELECT id FROM decision_requests WHERE source=$1 AND source_ref=$2`, source, key).Scan(&id)
+	err := q.QueryRow(ctx, sqlFor(q, `SELECT id FROM decision_requests WHERE source=$1 AND source_ref=$2`, `SELECT id FROM decision_requests WHERE source=? AND source_ref=?`), source, key).Scan(&id)
 	if errors.Is(err, ErrNoRows) {
 		return nil, nil
 	}
@@ -140,23 +144,19 @@ func decisionReplacement(ctx context.Context, q interface {
 }
 
 func (s *Store) DecisionReplacement(ctx context.Context, ref string) (*int64, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
-	return decisionReplacement(ctx, s.pool, ref)
+	return decisionReplacement(ctx, s.db(), ref)
 }
 
-func decisionViewTask(ctx context.Context, tx pgx.Tx, id int64) (Task, bool, error) {
+func decisionViewTask(ctx context.Context, tx transaction, id int64) (Task, bool, error) {
 	var task Task
-	err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, id), &task)
+	err := scanTask(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, `SELECT `+taskColumns+` FROM tasks WHERE id=?`), id), &task)
 	if errors.Is(err, ErrNoRows) {
 		return Task{}, false, nil
 	}
 	if err != nil {
 		return Task{}, false, err
 	}
-	rows, err := tx.Query(ctx, `SELECT refs FROM task_events WHERE task_id=$1 ORDER BY at,id`, id)
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT refs FROM task_events WHERE task_id=$1 ORDER BY at,id`, `SELECT refs FROM task_events WHERE task_id=? ORDER BY at,id`), id)
 	if err != nil {
 		return Task{}, false, err
 	}
@@ -189,14 +189,10 @@ type DecisionAttempt struct {
 }
 
 func (s *Store) ListDecisionAttempts(ctx context.Context, taskID int64, limit int) ([]DecisionAttempt, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if limit < 1 || limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id,channel,COALESCE(provenance,''),actor,result,revision_request_id,COALESCE(question_revision,0),received_at FROM decision_answer_attempts WHERE task_id=$1 ORDER BY id DESC LIMIT $2`, taskID, limit)
+	rows, err := s.db().Query(ctx, s.q(`SELECT id,channel,COALESCE(provenance,''),actor,result,revision_request_id,COALESCE(question_revision,0),received_at FROM decision_answer_attempts WHERE task_id=$1 ORDER BY id DESC LIMIT $2`, `SELECT id,channel,COALESCE(provenance,''),actor,result,revision_request_id,COALESCE(question_revision,0),received_at FROM decision_answer_attempts WHERE task_id=? ORDER BY id DESC LIMIT ?`), taskID, limit)
 	if err != nil {
 		return nil, err
 	}

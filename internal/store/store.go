@@ -2731,14 +2731,7 @@ func (s *Store) createTask(ctx context.Context, x Task, check *DuplicateCheck) (
 				return err
 			}
 		}
-		if s.dialect == mysqlDialect {
-			// B4 dependency: enqueueYTIssueTx does nothing unless the YouTrack issue
-			// gate is on (ensureYTIssueTx returns first), and the yt_write_ops path
-			// is not ported yet, so a store with the gate on refuses here.
-			if mode, _ := s.ytIssuesNow(); mode == YTIssuesOn {
-				return ErrDialectUnsupported
-			}
-		} else if err = s.enqueueYTIssueTx(ctx, tx, x); err != nil {
+		if err = s.enqueueYTIssueTx(ctx, tx, x); err != nil {
 			return err
 		}
 		return tx.Commit(ctx)
@@ -3042,13 +3035,7 @@ func (s *Store) SetTaskProjectWithMetadata(ctx context.Context, id int64, projec
 		// one (hk 3942); an existing op is left as it is: its claim targets the
 		// task's project then (claimYTIssueTargetTx, hk 3909). Task row, then
 		// lane lock, as CreateTask (lockorder.go).
-		if s.dialect == mysqlDialect {
-			// B4 dependency: ensureYTIssueTx returns first unless the YouTrack issue
-			// gate is on, and the yt_write_ops path is not ported yet.
-			if mode, _ := s.ytIssuesNow(); mode == YTIssuesOn {
-				return ErrDialectUnsupported
-			}
-		} else if _, err := s.ensureYTIssueTx(ctx, tx, x, x.UpdatedAt, false); err != nil {
+		if _, err := s.ensureYTIssueTx(ctx, tx, x, x.UpdatedAt, false); err != nil {
 			return err
 		}
 		changed = true
@@ -3767,6 +3754,10 @@ func (s *Store) EventWatermarks(ctx context.Context) (EventWatermarks, error) {
 // old needs_decision state. History keeps the old vocabulary as written.
 const awaitingEventSQL = `((kind='awaiting_decision' AND to_value='true') OR (kind='transition' AND "to"='needs_decision'))`
 
+// awaitingTaskDecisionSQLMySQL is awaitingTaskDecisionSQL for MySQL: the `?`
+// key-exists test is JSON_CONTAINS_PATH and `->>` takes a JSON path.
+const awaitingTaskDecisionSQLMySQL = `awaiting_decision AND NOT JSON_CONTAINS_PATH(refs,'one','$.disposition') AND COALESCE(refs->>'$.decision_request.status','')<>'open'`
+
 // TaskDecision is an unresolved task together with the original question
 // recorded when the task last began waiting on a decision.
 type TaskDecision struct {
@@ -3793,16 +3784,14 @@ const openLaneDecisionSQL = `e.kind='lane.event' AND e.text LIKE '[decision-need
 // structured request is open are listed by ListOpenDecisionRequests instead,
 // so one question never appears twice (or with two answer paths).
 func (s *Store) ListOpenTaskDecisions(ctx context.Context, limit int) ([]TaskDecision, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if limit < 1 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+prefixedTaskColumns("t")+`,
+	rows, err := s.db().Query(ctx, s.q(`SELECT `+prefixedTaskColumns("t")+`,
 		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND `+awaitingEventSQL+` ORDER BY at DESC,id DESC LIMIT 1),'')
-		FROM tasks t WHERE `+awaitingTaskDecisionSQL+` ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, limit)
+		FROM tasks t WHERE `+awaitingTaskDecisionSQL+` ORDER BY t.updated_at DESC,t.id DESC LIMIT $1`, `SELECT `+prefixedTaskColumns("t")+`,
+		COALESCE((SELECT note FROM task_events WHERE task_id=t.id AND `+awaitingEventSQLMySQL+` ORDER BY at DESC,id DESC LIMIT 1),'')
+		FROM tasks t WHERE `+awaitingTaskDecisionSQLMySQL+` ORDER BY t.updated_at DESC,t.id DESC LIMIT ?`), limit)
 	if err != nil {
 		return nil, err
 	}

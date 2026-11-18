@@ -166,8 +166,8 @@ func prepareYTIssueTx(ctx context.Context, tx transaction, now time.Time, t Task
 	// highest committed id can commit after this read.
 	if _, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO yt_issue_comment_bounds(op_id, task_id, comments_from, recorded_at)
 		VALUES ($1,$2,(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$2),$3) ON CONFLICT (op_id) DO NOTHING`,
-		`INSERT IGNORE INTO yt_issue_comment_bounds(op_id, task_id, comments_from, recorded_at)
-		VALUES (?,?,(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=?),?)`),
+		`INSERT INTO yt_issue_comment_bounds(op_id, task_id, comments_from, recorded_at)
+		VALUES (?,?,(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=?),?) ON DUPLICATE KEY UPDATE op_id=op_id`),
 		ytCommentBoundArgs(tx, op.ID, t.ID, now.UTC())...); err != nil {
 		return op, true, err
 	}
@@ -248,7 +248,7 @@ func (s *Store) ensureYTIssueTx(ctx context.Context, tx transaction, t Task, now
 		}
 		_, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO yt_issue_intents(task_id, tenant, recorded_at) VALUES ($1,$2,$3)
 			ON CONFLICT (task_id) DO NOTHING`,
-			`INSERT IGNORE INTO yt_issue_intents(task_id, tenant, recorded_at) VALUES (?,?,?)`), t.ID, tenant, now.UTC())
+			`INSERT INTO yt_issue_intents(task_id, tenant, recorded_at) VALUES (?,?,?) ON DUPLICATE KEY UPDATE task_id=task_id`), t.ID, tenant, now.UTC())
 		return false, err
 	}
 	op, created, err := prepareYTIssueTx(ctx, tx, now, t, p, tenant)
@@ -518,11 +518,17 @@ func bindYTIssueTx(ctx context.Context, tx transaction, op ytwrite.Op, ytID stri
 			CASE WHEN $8 THEN coalesce((SELECT comments_from FROM yt_issue_comment_bounds WHERE op_id=$7),
 				(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$1)) ELSE 0 END)
 		ON CONFLICT DO NOTHING`,
-		`INSERT IGNORE INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, op_id, comments_from)
+		`INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, op_id, comments_from)
 		VALUES (?,?,?,'',?,?,?,'op_applied',?,
 			CASE WHEN ? THEN coalesce((SELECT comments_from FROM yt_issue_comment_bounds WHERE op_id=?),
 				(SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=?)) ELSE 0 END)`),
 		ytBindIssueArgs(tx, taskID, op, ytID, now, adopted)...)
+	// A duplicate on either unique key (task_id, or the issue already bound
+	// elsewhere) writes nothing, as PostgreSQL's ON CONFLICT DO NOTHING does;
+	// the read-back below decides which it was.
+	if errors.Is(err, errUniqueViolation) {
+		n, err = 0, nil
+	}
 	if err != nil || n == 1 {
 		return err
 	}

@@ -55,12 +55,18 @@ func init() {
 		ctx := t.Context()
 		project := "reads-events"
 		_, err := s.AddTaskProject(ctx, project, "tester")
-		needPorted(t, s, "AddTaskProject", err)
+		if err != nil {
+			t.Fatalf("AddTaskProject: %v", err)
+		}
 		x, err := s.CreateTask(ctx, Task{Lane: "reads-events", Title: "Task with events", Kind: "implement", CreatedBy: "tester", Project: &project})
-		needPorted(t, s, "CreateTask", err)
+		if err != nil {
+			t.Fatalf("CreateTask: %v", err)
+		}
 		for _, to := range []string{StateUnstarted, StateBacklog} {
 			_, err = s.TransitionTask(ctx, x.ID, to, "tester", "move to "+to, nil, "")
-			needPorted(t, s, "TransitionTask", err)
+			if err != nil {
+				t.Fatalf("TransitionTask: %v", err)
+			}
 		}
 
 		all, err := s.ListTaskEvents(ctx, x.ID, 0, TaskEventListMax)
@@ -110,9 +116,13 @@ func init() {
 		ctx := t.Context()
 		project := "reads-comments"
 		_, err := s.AddTaskProject(ctx, project, "tester")
-		needPorted(t, s, "AddTaskProject", err)
+		if err != nil {
+			t.Fatalf("AddTaskProject: %v", err)
+		}
 		x, err := s.CreateTask(ctx, Task{Lane: "reads-comments", Title: "Task with comments", Kind: "implement", CreatedBy: "tester", Project: &project})
-		needPorted(t, s, "CreateTask", err)
+		if err != nil {
+			t.Fatalf("CreateTask: %v", err)
+		}
 		var ids []int64
 		for _, body := range []string{"first", "second", "third"} {
 			c, err := s.CreateTaskComment(ctx, x.ID, "tester", body)

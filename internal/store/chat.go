@@ -399,10 +399,6 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 	if err := guard.Reject(m.Body); err != nil {
 		return ChatMessage{}, false, err
 	}
-	if s.dialect == mysqlDialect && len(post.Answers) != 0 {
-		// Assistant answer delivery writes notification_outbox, which B7 owns.
-		return ChatMessage{}, false, ErrDialectUnsupported
-	}
 	for i := range post.Questions {
 		if post.Questions[i].ConversationID != "" && post.Questions[i].ConversationID != m.ConversationID {
 			return ChatMessage{}, false, ErrChatConversation
@@ -615,7 +611,7 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		var qLane, qConversation, qState, qBody string
 		var qRevision int
 		var qAnswered *int64
-		err := tx.QueryRow(ctx, `SELECT lane,conversation_id,state,revision,answer_message_id,body FROM chat_questions WHERE id=$1 FOR UPDATE`, a.QuestionID).Scan(&qLane, &qConversation, &qState, &qRevision, &qAnswered, &qBody)
+		err := tx.QueryRow(ctx, sqlFor(tx, `SELECT lane,conversation_id,state,revision,answer_message_id,body FROM chat_questions WHERE id=$1 FOR UPDATE`, `SELECT lane,conversation_id,state,revision,answer_message_id,body FROM chat_questions WHERE id=? FOR UPDATE`), a.QuestionID).Scan(&qLane, &qConversation, &qState, &qRevision, &qAnswered, &qBody)
 		if errors.Is(err, ErrNoRows) {
 			return ChatMessage{}, false, ErrChatQuestionNotFound
 		}
@@ -628,12 +624,16 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		if qState != "pending" || qRevision != a.Revision || qAnswered != nil {
 			return ChatMessage{}, false, ErrChatQuestionStale
 		}
-		if tag, err := tx.Exec(ctx, `UPDATE chat_questions SET answer_message_id=$2,updated_at=$3 WHERE id=$1 AND state='pending' AND revision=$4 AND answer_message_id IS NULL`, a.QuestionID, m.ID, now, a.Revision); err != nil {
+		answerArgs := []any{a.QuestionID, m.ID, now, a.Revision}
+		if s.dialect == mysqlDialect {
+			answerArgs = []any{m.ID, now, a.QuestionID, a.Revision}
+		}
+		if tag, err := tx.Exec(ctx, sqlFor(tx, `UPDATE chat_questions SET answer_message_id=$2,updated_at=$3 WHERE id=$1 AND state='pending' AND revision=$4 AND answer_message_id IS NULL`, `UPDATE chat_questions SET answer_message_id=?,updated_at=? WHERE id=? AND state='pending' AND revision=? AND answer_message_id IS NULL`), answerArgs...); err != nil {
 			return ChatMessage{}, false, err
 		} else if tag != 1 {
 			return ChatMessage{}, false, ErrChatQuestionStale
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) VALUES($1,$2,'reply',$3)`, m.ID, a.QuestionID, qBody); err != nil {
+		if _, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) VALUES($1,$2,'reply',$3)`, `INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) VALUES(?,?,'reply',?)`), m.ID, a.QuestionID, qBody); err != nil {
 			return ChatMessage{}, false, err
 		}
 		eventID := chatAnsweredEventID(a.QuestionID, a.Revision)
@@ -836,6 +836,18 @@ func (s *Store) ListChatMessages(ctx context.Context, author string, undelivered
 	return out, nil
 }
 
+// chatPruneCutoff is one year before now, in UTC. A Feb 29 run gives Feb 28:
+// MySQL's DATE_SUB and PostgreSQL's now() - interval '1 year' both clamp to the
+// end of February, where Go's AddDate would roll over to Mar 1 and prune a
+// day of retained operator messages early.
+func chatPruneCutoff(now time.Time) time.Time {
+	now = now.UTC()
+	if now.Month() == time.February && now.Day() == 29 {
+		return time.Date(now.Year()-1, time.February, 28, now.Hour(), now.Minute(), now.Second(), now.Nanosecond(), time.UTC)
+	}
+	return now.AddDate(-1, 0, 0)
+}
+
 // PruneChat deletes terminal-state chat rows older than one year — resolved
 // and withdrawn questions, delivered messages. Non-terminal rows (pending
 // questions, stored or failed messages) are live operations data and are
@@ -843,6 +855,10 @@ func (s *Store) ListChatMessages(ctx context.Context, author string, undelivered
 // run can never empty a table at once; remaining expired rows are removed by
 // subsequent runs.
 func (s *Store) PruneChat(ctx context.Context, limit int) (int64, error) {
+	// One retention cutoff for every table in this transaction. PostgreSQL's
+	// now() is the transaction's time; MySQL's UTC_TIMESTAMP is per statement,
+	// so the MySQL statements take this Go time instead (design §11.4).
+	cutoff := chatPruneCutoff(time.Now())
 	if limit < 1 || limit > ChatPruneMaxDelete {
 		limit = ChatPruneMaxDelete
 	}
@@ -858,8 +874,8 @@ func (s *Store) PruneChat(ctx context.Context, limit int) (int64, error) {
 		var err error
 		if s.dialect == mysqlDialect {
 			states := sortedStateKeys(t.terminal)
-			query := `SELECT id FROM ` + t.table + ` WHERE created_at<DATE_SUB(UTC_TIMESTAMP(6),INTERVAL 1 YEAR) AND ` + t.stateColumn + ` IN (` + placeholders(len(states)) + `) ORDER BY created_at ASC,id ASC LIMIT ? FOR UPDATE`
-			args := make([]any, 0, len(states)+1)
+			query := `SELECT id FROM ` + t.table + ` WHERE created_at<? AND ` + t.stateColumn + ` IN (` + placeholders(len(states)) + `) ORDER BY created_at ASC,id ASC LIMIT ? FOR UPDATE`
+			args := append(make([]any, 0, len(states)+2), cutoff)
 			for _, state := range states {
 				args = append(args, state)
 			}
@@ -897,7 +913,7 @@ func (s *Store) PruneChat(ctx context.Context, limit int) (int64, error) {
 	// directive retention rule only applies to delivered operator messages.
 	var tag int64
 	if s.dialect == mysqlDialect {
-		rows, err := tx.Query(ctx, `SELECT id FROM chat_messages WHERE author='operator' AND relay_state='delivered' AND created_at<DATE_SUB(UTC_TIMESTAMP(6),INTERVAL 1 YEAR) ORDER BY created_at,id LIMIT ? FOR UPDATE`, limit)
+		rows, err := tx.Query(ctx, `SELECT id FROM chat_messages WHERE author='operator' AND relay_state='delivered' AND created_at<? ORDER BY created_at,id LIMIT ? FOR UPDATE`, cutoff, limit)
 		if err != nil {
 			return 0, err
 		}

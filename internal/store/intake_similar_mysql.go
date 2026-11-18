@@ -11,18 +11,9 @@ import (
 // YouTrack issue enqueue step, which intake shares with no other file.
 
 // intakeEnqueueYTIssueTx is intake's and ticket sets' step after a task insert.
-// PostgreSQL always enqueues (the gate is inside enqueueYTIssueTx). On MySQL the
-// enqueue is a documented no-op while the YouTrack issue gate is off, exactly
-// the gate ensureYTIssueTx tests first; with the gate on it needs the yt_*
-// tables of B4 and refuses.
+// enqueueYTIssueTx runs on both dialects (B4a) and gates itself on the YouTrack
+// issue mode, so MySQL and PostgreSQL take the same path.
 func (s *Store) intakeEnqueueYTIssueTx(ctx context.Context, tx transaction, t Task) error {
-	if s.dialect == mysqlDialect {
-		if mode, _ := s.ytIssuesNow(); mode != YTIssuesOn {
-			return nil
-		}
-		// B4 dependency: enqueueYTIssueTx writes yt_write_ops and takes pgx.Tx.
-		return ErrDialectUnsupported
-	}
 	return s.enqueueYTIssueTx(ctx, tx, t)
 }
 

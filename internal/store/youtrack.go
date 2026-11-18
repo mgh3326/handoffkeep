@@ -359,8 +359,22 @@ func (s *Store) LinkYouTrackComment(ctx context.Context, taskID, hkCommentID int
 		VALUES($1,$2,$3,$4)
 		ON CONFLICT(hk_comment_id) DO NOTHING`, `
 		INSERT INTO youtrack_comment_links(hk_comment_id,task_id,youtrack_comment_id,created_at)
-		VALUES(?,?,?,?)
-		ON DUPLICATE KEY UPDATE hk_comment_id=hk_comment_id`), hkCommentID, taskID, youtrackCommentID, at.UTC())
+		VALUES(?,?,?,?)`), hkCommentID, taskID, youtrackCommentID, at.UTC())
+	// PostgreSQL's ON CONFLICT(hk_comment_id) DO NOTHING ignores a repeat of
+	// hk_comment_id and raises on a repeat of youtrack_comment_id. MySQL
+	// reports both as a duplicate, so on a duplicate check which one it was:
+	// a row already holding hk_comment_id is the no-op; otherwise the YouTrack
+	// id belongs to another comment and the error must surface, not be
+	// dropped.
+	if s.dialect == mysqlDialect && errors.Is(err, errUniqueViolation) {
+		var held int64
+		if qerr := s.db().QueryRow(ctx, `SELECT COUNT(*) FROM youtrack_comment_links WHERE hk_comment_id=?`, hkCommentID).Scan(&held); qerr != nil {
+			return qerr
+		}
+		if held > 0 {
+			return nil
+		}
+	}
 	return err
 }
 
