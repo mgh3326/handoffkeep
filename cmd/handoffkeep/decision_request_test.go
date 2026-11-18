@@ -456,3 +456,41 @@ func TestDecisionsResolveLegacyFormUnchanged(t *testing.T) {
 		t.Fatalf("request=%+v", req)
 	}
 }
+
+// Grounds are repeatable, one string each, and --lane names the asker; both
+// reach the request body as a list and a string.
+func TestDecisionAskGroundsAndLaneCLI(t *testing.T) {
+	h, seen := relaneServer(t, 201, decisionRequestOKBody)
+	args := []string{"decisions", "ask", "618", "--question", "ship?", "--option", "A|ship", "--default-action", "보류",
+		"--grounds", "CI green on head abc", "--grounds", "reviewer approved", "--lane", "mac-lane", "--url", h.URL, "--token", "tok"}
+	if err := run(args, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	body := (*seen)[0].Body
+	if fmt.Sprint(body["grounds"]) != "[CI green on head abc reviewer approved]" || body["request_lane"] != "mac-lane" {
+		t.Fatalf("body=%v", body)
+	}
+}
+
+// decisions ask --new-task posts to the new-task route with the project, the
+// asking lane and the request; a missing --lane sends nothing.
+func TestDecisionAskNewTaskCLI(t *testing.T) {
+	h, seen := relaneServer(t, 201, decisionRequestOKBody)
+	args := []string{"decisions", "ask", "--new-task", "--project", "handoffkeep", "--lane", "mac-lane", "--question", "ship?",
+		"--option", "A|ship", "--default-action", "보류", "--grounds", "CI green", "--url", h.URL, "--token", "tok"}
+	if err := run(args, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	req := (*seen)[0]
+	request, _ := req.Body["request"].(map[string]any)
+	if req.Path != "/v1/decision-requests/new-task" || req.Body["project"] != "handoffkeep" || req.Body["lane"] != "mac-lane" ||
+		request["question"] != "ship?" || request["request_lane"] != "mac-lane" || fmt.Sprint(request["grounds"]) != "[CI green]" {
+		t.Fatalf("request=%+v", req)
+	}
+	h, seen = relaneServer(t, 201, decisionRequestOKBody)
+	err := run([]string{"decisions", "ask", "--new-task", "--project", "handoffkeep", "--question", "q", "--option", "A|x",
+		"--default-action", "보류", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard)
+	if err == nil || len(*seen) != 0 {
+		t.Fatalf("err=%v seen=%d", err, len(*seen))
+	}
+}

@@ -15,15 +15,19 @@ type DecisionAskInput struct {
 	// RecommendationReason is the longer account of why an option is
 	// recommended; Unverified lists what the requester could not check;
 	// OneFix is its one suggested fix. All optional.
-	RecommendationReason string     `json:"recommendation_reason,omitempty"`
-	Unverified           []string   `json:"unverified,omitempty"`
-	OneFix               string     `json:"one_fix,omitempty"`
-	DefaultAction        string     `json:"default_action"`
-	DefaultOption        string     `json:"default_option,omitempty"`
-	DefaultTrigger       string     `json:"default_trigger,omitempty"`
-	DueAt                *time.Time `json:"due_at,omitempty"`
-	Doc                  string     `json:"doc,omitempty"`
-	Refs                 []string   `json:"refs,omitempty"`
+	RecommendationReason string   `json:"recommendation_reason,omitempty"`
+	Unverified           []string `json:"unverified,omitempty"`
+	OneFix               string   `json:"one_fix,omitempty"`
+	// Grounds are the facts the recommendation rests on, one line each;
+	// RequestLane names the asking lane. Both optional.
+	Grounds        []string   `json:"grounds,omitempty"`
+	RequestLane    string     `json:"request_lane,omitempty"`
+	DefaultAction  string     `json:"default_action"`
+	DefaultOption  string     `json:"default_option,omitempty"`
+	DefaultTrigger string     `json:"default_trigger,omitempty"`
+	DueAt          *time.Time `json:"due_at,omitempty"`
+	Doc            string     `json:"doc,omitempty"`
+	Refs           []string   `json:"refs,omitempty"`
 	// Supersedes is the ID of the open request this one replaces.
 	Supersedes string `json:"supersedes,omitempty"`
 	// Block also sets the task's awaiting_decision flag.
