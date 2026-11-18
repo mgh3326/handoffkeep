@@ -71,7 +71,7 @@ func laneCheckOutbox(t *testing.T, s *Store, lane string) int {
 // its acknowledgement clears it.
 func TestLaneCheckFindsOrderUnacked(t *testing.T) {
 	ctx := context.Background()
-	s := schemaStore(t, "lane-order")
+	s := schemaStore(t, "lane_order")
 	laneCheckFixture(t, s, "order-project", "order-lane")
 	task := laneCheckTask(t, s, "order-project", "order-lane", "ordered work", 1)
 	order, err := s.CreateTaskOrder(ctx, CreateTaskOrderInput{TaskID: task.ID, Words: "start it", Actor: "operator", Channel: TaskOrderChannelCLI, Verified: true, Key: "order-key-1"})
@@ -96,7 +96,7 @@ func TestLaneCheckFindsOrderUnacked(t *testing.T) {
 // after the task last moved is a finding, as ids only.
 func TestLaneCheckFindsBlockerLanded(t *testing.T) {
 	ctx := context.Background()
-	s := schemaStore(t, "lane-blocker")
+	s := schemaStore(t, "lane_blocker")
 	laneCheckFixture(t, s, "blocker-project", "blocker-lane")
 	blocker := laneCheckTask(t, s, "blocker-project", "blocker-lane", "the blocker", 1)
 	blocked := laneCheckTask(t, s, "blocker-project", "blocker-lane", "blocked work", 1)
@@ -121,7 +121,7 @@ func TestLaneCheckFindsBlockerLanded(t *testing.T) {
 // has room_to_run naming it.
 func TestLaneCheckFindsKeptBacklogAndRoomToRun(t *testing.T) {
 	ctx := context.Background()
-	s := schemaStore(t, "lane-kept")
+	s := schemaStore(t, "lane_kept")
 	laneCheckFixture(t, s, "kept-project", "kept-lane")
 	task := laneCheckTask(t, s, "kept-project", "kept-lane", "kept work", 2)
 	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET created_at=$2 WHERE id=$1`, task.ID, time.Now().UTC().Add(-48*time.Hour)); err != nil {
@@ -154,7 +154,7 @@ func TestLaneCheckFindsKeptBacklogAndRoomToRun(t *testing.T) {
 // look is a finding, and the lane's baseline is the look it recorded.
 func TestLaneCheckFindsWaitCleared(t *testing.T) {
 	ctx := context.Background()
-	s := schemaStore(t, "lane-wait")
+	s := schemaStore(t, "lane_wait")
 	laneCheckFixture(t, s, "wait-project", "wait-lane")
 	kept := laneCheckTask(t, s, "wait-project", "wait-lane", "kept work for a baseline", 2)
 	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET created_at=$2 WHERE id=$1`, kept.ID, time.Now().UTC().Add(-48*time.Hour)); err != nil {
@@ -188,7 +188,7 @@ func TestLaneCheckFindsWaitCleared(t *testing.T) {
 // state change re-noticing after the look.
 func TestLaneCheckDedupeBucketLookAndStateChange(t *testing.T) {
 	ctx := context.Background()
-	s := schemaStore(t, "lane-dedupe")
+	s := schemaStore(t, "lane_dedupe")
 	laneCheckFixture(t, s, "dedupe-project", "dedupe-lane")
 	task := laneCheckTask(t, s, "dedupe-project", "dedupe-lane", "dedupe work", 2)
 	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET created_at=$2 WHERE id=$1`, task.ID, time.Now().UTC().Add(-48*time.Hour)); err != nil {
@@ -246,7 +246,7 @@ func TestLaneCheckDedupeBucketLookAndStateChange(t *testing.T) {
 // baseline that removed the finding.
 func TestLaneCheckLookDoesNotRenotifyItsOwnWaitCleared(t *testing.T) {
 	ctx := context.Background()
-	s := schemaStore(t, "lane-waitlook")
+	s := schemaStore(t, "lane_waitlook")
 	laneCheckFixture(t, s, "waitlook-project", "waitlook-lane")
 	kept := laneCheckTask(t, s, "waitlook-project", "waitlook-lane", "standing kept work", 2)
 	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET created_at=$2 WHERE id=$1`, kept.ID, time.Now().UTC().Add(-48*time.Hour)); err != nil {
@@ -293,7 +293,7 @@ func TestLaneCheckLookDoesNotRenotifyItsOwnWaitCleared(t *testing.T) {
 // so it gets no notice however much its backlog holds.
 func TestLaneCheckNeverNoticesOperatorDesk(t *testing.T) {
 	ctx := context.Background()
-	s := schemaStore(t, "lane-desk")
+	s := schemaStore(t, "lane_desk")
 	laneCheckFixture(t, s, "desk-project", "operator-desk")
 	task := laneCheckTask(t, s, "desk-project", "operator-desk", "desk work", 2)
 	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET created_at=$2 WHERE id=$1`, task.ID, time.Now().UTC().Add(-48*time.Hour)); err != nil {
@@ -312,7 +312,7 @@ func TestLaneCheckNeverNoticesOperatorDesk(t *testing.T) {
 // findings is refused, and a repeat changes nothing.
 func TestRecordLaneLookBindsNoticeToLane(t *testing.T) {
 	ctx := context.Background()
-	s := schemaStore(t, "lane-look")
+	s := schemaStore(t, "lane_look")
 	laneCheckFixture(t, s, "look-project", "look-lane")
 	now := time.Now().UTC()
 	cur := laneCheckFindings(t, s, "look-lane", now)
@@ -341,7 +341,7 @@ func TestRecordLaneLookBindsNoticeToLane(t *testing.T) {
 // appeared between the notice and the look must not be silenced by it.
 func TestRecordLaneLookRefusesStateItDidNotSee(t *testing.T) {
 	ctx := context.Background()
-	s := schemaStore(t, "lane-lookstale")
+	s := schemaStore(t, "lane_lookstale")
 	laneCheckFixture(t, s, "lookstale-project", "lookstale-lane")
 	first := laneCheckTask(t, s, "lookstale-project", "lookstale-lane", "first kept work", 2)
 	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET created_at=$2 WHERE id=$1`, first.ID, time.Now().UTC().Add(-48*time.Hour)); err != nil {
@@ -370,7 +370,7 @@ func TestRecordLaneLookRefusesStateItDidNotSee(t *testing.T) {
 // that returns with the same ids is new state and is noticed again.
 func TestLaneCheckReclearsAfterAQuietPeriod(t *testing.T) {
 	ctx := context.Background()
-	s := schemaStore(t, "lane-reclear")
+	s := schemaStore(t, "lane_reclear")
 	laneCheckFixture(t, s, "reclear-project", "reclear-lane")
 	task := laneCheckTask(t, s, "reclear-project", "reclear-lane", "recurring kept work", 2)
 	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET created_at=$2 WHERE id=$1`, task.ID, time.Now().UTC().Add(-48*time.Hour)); err != nil {

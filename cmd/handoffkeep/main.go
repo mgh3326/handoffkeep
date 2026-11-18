@@ -1454,7 +1454,7 @@ func serve(args []string, errout io.Writer) error {
 		return err
 	}
 	defer monitor.Close()
-	st, e := store.Open(ctx, dbURL)
+	st, e := store.OpenServing(ctx, dbURL)
 	if e != nil {
 		return e
 	}

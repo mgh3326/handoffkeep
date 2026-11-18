@@ -30,6 +30,30 @@ const (
 	workerLockProbeTimeout             = 2 * time.Second
 )
 
+// sessionWorkerLocks is every lock a serve worker may hold for its lifetime.
+// Each one keeps a pooled connection checked out, so the pool serve opens must
+// be at least this many connections plus query headroom.
+var sessionWorkerLocks = []WorkerLock{
+	HubForwardWorkerLock, TaskThreadWorkerLock, DriftWorkerLock, LaneCheckWorkerLock,
+}
+
+// workerPoolHeadroom is what is left for store queries and API requests after
+// every session lock is held.
+const workerPoolHeadroom = 4
+
+// workerPoolFloor is the smallest pool serve may open: one connection per
+// session-lock worker plus headroom.
+var workerPoolFloor = int32(len(sessionWorkerLocks) + workerPoolHeadroom)
+
+func knownWorkerLock(id WorkerLock) bool {
+	for _, lock := range sessionWorkerLocks {
+		if id == lock {
+			return true
+		}
+	}
+	return false
+}
+
 // WorkerLease holds the connection for a session lock.
 type WorkerLease struct {
 	conn      *pgxpool.Conn
@@ -41,7 +65,7 @@ type WorkerLease struct {
 // uncertain acquisition discards the connection so a locked session cannot
 // return to the pool.
 func (s *Store) TryWorkerLock(ctx context.Context, id WorkerLock) (*WorkerLease, bool, error) {
-	if id != HubForwardWorkerLock && id != TaskThreadWorkerLock && id != DriftWorkerLock && id != LaneCheckWorkerLock {
+	if !knownWorkerLock(id) {
 		return nil, false, errors.New("unknown worker lock")
 	}
 	if s.dialect == mysqlDialect {

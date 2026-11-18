@@ -47,7 +47,7 @@ func answerDecision(t *testing.T, s *Store, taskID int64, requestID, kind, optio
 func testQuestionTaskCloses(t *testing.T, kind, option, receipt string) {
 	t.Helper()
 	ctx := context.Background()
-	s := schemaStore(t, "qtask-"+kind)
+	s := schemaStore(t, "qtask_"+kind)
 	res := newQuestionTask(t, s, "question-project-"+kind, "qlane-"+kind)
 	answerDecision(t, s, res.Task.ID, res.Request.ID, kind, option, receipt)
 	got, found, err := s.GetTask(ctx, res.Task.ID)
@@ -84,7 +84,7 @@ func TestQuestionTaskClosesWithDefaultApplied(t *testing.T) {
 // task the session filed itself (no question_task marker) keeps its state.
 func TestDecideTaskThatCarriesWorkStaysOpen(t *testing.T) {
 	ctx := context.Background()
-	s := schemaStore(t, "qtask-plain")
+	s := schemaStore(t, "qtask_plain")
 	if _, err := s.AddTaskProject(ctx, "plain-project", "tester"); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestDecideTaskThatCarriesWorkStaysOpen(t *testing.T) {
 // request arrives; a legacy linear row is the state the guard defends.
 func TestQuestionTaskWithAnotherOpenDecisionStaysOpen(t *testing.T) {
 	ctx := context.Background()
-	s := schemaStore(t, "qtask-other")
+	s := schemaStore(t, "qtask_other")
 	res := newQuestionTask(t, s, "other-project", "other-lane")
 	if _, err := s.pool.Exec(ctx, `INSERT INTO decision_requests(source,source_ref,task_id,lane,question,status,created_at,updated_at)
 		VALUES('task_flag','review-fixture',$1,$2,'a second open question','open',now(),now())`, res.Task.ID, "other-lane"); err != nil {
@@ -145,7 +145,7 @@ func TestQuestionTaskWithAnotherOpenDecisionStaysOpen(t *testing.T) {
 // that somehow has a child is carrying work and stays open.
 func TestQuestionTaskWithChildStaysOpen(t *testing.T) {
 	ctx := context.Background()
-	s := schemaStore(t, "qtask-child")
+	s := schemaStore(t, "qtask_child")
 	res := newQuestionTask(t, s, "child-project", "child-lane")
 	project := "child-project"
 	child, err := s.CreateTask(ctx, Task{Lane: "child-lane", Title: "child of a question", Kind: "ops", Project: &project, ParentID: &res.Task.ID, CreatedBy: "tester"})

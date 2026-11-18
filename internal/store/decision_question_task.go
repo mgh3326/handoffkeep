@@ -25,9 +25,20 @@ func (s *Store) closeQuestionTaskTx(ctx context.Context, tx transaction, x *Task
 		// until the last request is answered (mergewake review of #504).
 		return nil
 	}
+	// The resolved request is excluded, so this counts only another question
+	// still open on the task. It is the same check the resolve path used to
+	// keep the flag; asking again here covers a task whose flag was already
+	// clear but which still carries an open row from another source.
+	others, err := otherBlockingDecisionsFlowTx(ctx, tx, x.ID, requestID)
+	if err != nil {
+		return err
+	}
+	if others > 0 {
+		return nil
+	}
 	var carriesWork bool
 	if err := tx.QueryRow(ctx, s.q(
-		`SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_id=$1) OR EXISTS(SELECT 1 FROM change_tasks WHERE task_id=$1)`,
+		`SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_id=$1) OR EXISTS(SELECT 1 FROM change_tasks WHERE task_id=$2)`,
 		`SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_id=?) OR EXISTS(SELECT 1 FROM change_tasks WHERE task_id=?)`),
 		x.ID, x.ID).Scan(&carriesWork); err != nil {
 		return err

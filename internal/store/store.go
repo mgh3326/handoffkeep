@@ -873,6 +873,13 @@ type SearchResult struct {
 
 func Open(ctx context.Context, url string) (*Store, error) { return open(ctx, url, nil) }
 
+// OpenServing is Open for the serve process, with a pool floor that leaves
+// query headroom after every session-lock worker has taken its connection.
+// The tools and tests use Open and keep the pool their URL asks for.
+func OpenServing(ctx context.Context, url string) (*Store, error) {
+	return openFloored(ctx, url, nil, workerPoolFloor)
+}
+
 // OpenWithoutMigration connects without inspecting or changing the schema, so
 // a dry run never executes DDL. Callers learn whether their tables exist from
 // their own query.
@@ -893,13 +900,19 @@ func OpenWithoutMigration(ctx context.Context, url string) (*Store, error) {
 
 // open is Open with an explicit migration registry; nil means the real one.
 func open(ctx context.Context, url string, registry []migration) (*Store, error) {
+	return openFloored(ctx, url, registry, 0)
+}
+
+func openFloored(ctx context.Context, url string, registry []migration, floor int32) (*Store, error) {
 	if strings.HasPrefix(url, "mysql://") {
+		// database/sql has no default connection cap, so the lease count alone
+		// cannot exhaust it.
 		return openMySQL(ctx, url)
 	}
 	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
 		return nil, errors.New("HANDOFFKEEP_DB_URL must be a PostgreSQL or MySQL URL")
 	}
-	p, err := newPool(ctx, url)
+	p, err := newPoolFloored(ctx, url, nil, floor)
 	if err != nil {
 		return nil, err
 	}
