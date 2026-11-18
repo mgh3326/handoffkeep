@@ -116,12 +116,14 @@ const ytFieldsSelectSQL = `SELECT tasks.id, tasks.title, tasks.state, tasks.prio
 // ytFieldsActivityMySQL is taskActivitySQL for MySQL. The job link is
 // tasks.refs->>'job_id' as MySQL's JSON_UNQUOTE, matched to jobs.job_id: MySQL's
 // jobs table has no refs column, and a JSON null becomes SQL NULL here, as
-// ->> gives it (the rule task_core_mysql.go uses). Everything else is the same
-// text.
+// ->> gives it (the rule task_core_mysql.go uses). MySQL's GREATEST returns
+// NULL when any argument is NULL, where PostgreSQL's ignores NULLs, so each
+// subquery is coalesced to the task's own created_at: the result is the latest
+// of the values that exist, never NULL.
 const ytFieldsActivityMySQL = `GREATEST(tasks.created_at,
-	(SELECT max(e.at) FROM task_events e WHERE e.task_id=tasks.id),
-	(SELECT max(c.created_at) FROM task_comments c WHERE c.task_id=tasks.id),
-	(SELECT max(j.updated_at) FROM jobs j WHERE j.job_id=IF(JSON_TYPE(JSON_EXTRACT(tasks.refs,'$.job_id'))='STRING',JSON_UNQUOTE(JSON_EXTRACT(tasks.refs,'$.job_id')),NULL) AND j.task_id=tasks.id))`
+	COALESCE((SELECT max(e.at) FROM task_events e WHERE e.task_id=tasks.id), tasks.created_at),
+	COALESCE((SELECT max(c.created_at) FROM task_comments c WHERE c.task_id=tasks.id), tasks.created_at),
+	COALESCE((SELECT max(j.updated_at) FROM jobs j WHERE j.job_id=IF(JSON_TYPE(JSON_EXTRACT(tasks.refs,'$.job_id'))='STRING',JSON_UNQUOTE(JSON_EXTRACT(tasks.refs,'$.job_id')),NULL) AND j.task_id=tasks.id), tasks.created_at))`
 
 // ytFieldsSelectSQLMySQL is the MySQL twin of ytFieldsSelectSQL for n ids in
 // an IN list (the ids are the query's arguments in order, one per

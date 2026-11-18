@@ -47,7 +47,7 @@ func seedYTAreaPostgres(t *testing.T, pool *pgxpool.Pool, when time.Time) {
 	exec(`INSERT INTO yt_comment_canary(task_id,tenant,issue_id,issue_readable,project_id,added_by,added_at) VALUES(95001,'yt.example','2-95001','HK-95001','0-30','test',$1)`, when)
 	exec(`INSERT INTO yt_comment_write_links(comment_id,op_id,created_at) VALUES(95001,95001,$1)`, when)
 	exec(`INSERT INTO yt_article_bindings(document_id,tenant,article_id,article_readable,project_id,part,generation,content_sha,origin,op_id,needs_update,bound_by,bound_at) VALUES(95001,'yt.example','3-95','HK-A-95','0-30',0,1,repeat('b',64),'op_applied',95001,TRUE,'test',$1)`, when)
-	exec(`INSERT INTO yt_snapshot_state(entity_kind,entity_id,kind,seq,last_sha,last_op_id) VALUES('document','95001','article_update',2,repeat('c',64),95001)`, when)
+	exec(`INSERT INTO yt_snapshot_state(entity_kind,entity_id,kind,seq,last_sha,last_op_id) VALUES('document','95001','article_update',2,repeat('c',64),95001)`)
 	exec(`INSERT INTO yt_family_roots(tenant,project_id,family,article_id,op_id,created_at) VALUES('yt.example','0-30','briefs','3-1',95001,$1)`, when)
 	exec(`INSERT INTO yt_feed_cursors(consumer,last_sync_id,updated_at) VALUES('document_articles',77,$1)`, when)
 	exec(`INSERT INTO yt_binding_intents(task_id,tenant,state,reason,attempts,last_error,next_attempt_at,recorded_at) VALUES(95001,'yt.example','refused','ambiguous',2,'detail',$1,$1)`, when)

@@ -18,7 +18,7 @@ func init() {
 	ytDecisionFixture := func(t *testing.T, s *Store) int64 {
 		t.Helper()
 		ctx := t.Context()
-		task, err := s.CreateTask(ctx, Task{Lane: "yt-decisions-case", Title: "a decision",
+		task, err := s.CreateTask(ctx, Task{Lane: "yt-decisions-case", Project: projectPtr("handoffkeep"), Title: "a decision",
 			Kind: "implement", State: StateBacklog, CreatedBy: "tester"})
 		if err != nil {
 			t.Fatal(err)

@@ -14,7 +14,7 @@ import (
 func init() {
 	registerYTAreaCase("feed/cursor-and-sync-id-order", func(t *testing.T, s *Store) {
 		ctx := t.Context()
-		task, _, err := s.IntakeTask(ctx, IntakeInput{Source: "yt-feed-case", SourceRef: "one", Title: "feed task", CreatedBy: "tester"})
+		task, _, err := s.IntakeTask(ctx, IntakeInput{Source: "yt-feed-case", SourceRef: "one", Title: "feed task", Project: projectPtr("handoffkeep"), CreatedBy: "tester"})
 		if err != nil {
 			t.Fatal(err)
 		}

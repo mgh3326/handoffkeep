@@ -34,7 +34,7 @@ func init() {
 
 	registerYTAreaCase("rebuild/task-comments-and-docs", func(t *testing.T, s *Store) {
 		ctx := t.Context()
-		task, _, err := s.IntakeTask(ctx, IntakeInput{Source: "yt-rebuild-case", SourceRef: "one", Title: "rebuild task", CreatedBy: "ytcase"})
+		task, _, err := s.IntakeTask(ctx, IntakeInput{Source: "yt-rebuild-case", SourceRef: "one", Title: "rebuild task", Project: projectPtr("handoffkeep"), CreatedBy: "ytcase"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -63,8 +63,18 @@ func init() {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if out.Retrying != 0 || out.Reconciling != 0 || len(out.Open) != 0 {
-			t.Fatalf("empty outbox status: %+v", out)
+		// One UNION ALL branch per open state returns a zero count for each,
+		// so every state is present with 0 and no age.
+		for _, st := range YTWriteOutboxStates {
+			if n, ok := out.Open[st]; !ok || n != 0 {
+				t.Fatalf("empty outbox status: state %s = %d (present %v)", st, n, ok)
+			}
+			if _, ok := out.OldestAge[st]; ok {
+				t.Fatalf("empty outbox status: state %s has an age", st)
+			}
+		}
+		if out.Retrying != 0 || out.Reconciling != 0 {
+			t.Fatalf("empty outbox status: retrying=%d reconciling=%d", out.Retrying, out.Reconciling)
 		}
 	})
 }

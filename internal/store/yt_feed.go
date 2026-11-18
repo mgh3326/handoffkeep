@@ -292,10 +292,18 @@ func (s *Store) runYTFeedConsumer(ctx context.Context, c ytFeedConsumer, limit i
 	// one snapshot: a prune that commits later cannot have removed a row this
 	// read skipped, and one that committed earlier shows in pruned_through,
 	// which stops the read.
-	models := make([]any, len(c.models))
-	for i, m := range c.models {
-		models[i] = m
+	var feedArgs []any
+	if s.dialect == mysqlDialect {
+		// The MySQL twin repeats the cursor placeholder (two comparisons) and
+		// lists the models.
+		feedArgs = append(feedArgs, pass.Cursor, pass.Cursor)
+		for _, m := range c.models {
+			feedArgs = append(feedArgs, m)
+		}
+	} else {
+		feedArgs = append(feedArgs, pass.Cursor, c.models)
 	}
+	feedArgs = append(feedArgs, limit)
 	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT st.pruned_through, st.max_sync_id, l.sync_id, l.model, l.model_id, l.action, l.at
 		FROM sync_state st
 		LEFT JOIN LATERAL (SELECT sync_id, model, model_id, action, at FROM sync_log
@@ -306,10 +314,10 @@ func (s *Store) runYTFeedConsumer(ctx context.Context, c ytFeedConsumer, limit i
 		`SELECT st.pruned_through, st.max_sync_id, l.sync_id, l.model, l.model_id, l.action, l.at
 		FROM sync_state st
 		LEFT JOIN LATERAL (SELECT sync_id, model, model_id, action, at FROM sync_log
-			WHERE st.pruned_through <= ? AND sync_id > ? AND model IN (`+placeholders(len(models))+`)
+			WHERE st.pruned_through <= ? AND sync_id > ? AND model IN (`+placeholders(len(c.models))+`)
 			ORDER BY sync_id LIMIT ?) l ON true
 		WHERE st.singleton
-		ORDER BY l.sync_id`), append(append([]any{pass.Cursor}, models...), limit)...)
+		ORDER BY l.sync_id`), feedArgs...)
 	if err != nil {
 		return pass, err
 	}

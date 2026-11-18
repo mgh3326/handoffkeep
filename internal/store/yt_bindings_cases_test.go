@@ -12,13 +12,16 @@ import (
 // methods, so PostgreSQL (TestYTAreaPostgres) and MySQL (TestMySQLYTArea) run
 // the same fixtures.
 func init() {
-	// ytBindingsTask files a task with no project: such a task agrees with
-	// any YouTrack project that no youtrack_projects row maps (the import's
-	// HK bucket), so a binding can be published against it without a project
-	// mapping.
+	// ytBindingsTask files a task in project "handoffkeep", mapped to YouTrack
+	// project 0-30: a published binding to 0-30 agrees with it (the publish
+	// checks the task's project mapping).
 	ytBindingsTask := func(t *testing.T, s *Store, title string) Task {
 		t.Helper()
-		task, err := s.CreateTask(t.Context(), Task{Lane: "yt-bindings-case", Title: title, Kind: "implement", CreatedBy: "tester"})
+		ctx := t.Context()
+		if err := s.PutYouTrackProject(ctx, YouTrackProject{HKProject: "handoffkeep", ProjectID: "0-30", ShortName: "HK"}); err != nil {
+			t.Fatal(err)
+		}
+		task, err := s.CreateTask(ctx, Task{Lane: "yt-bindings-case", Project: projectPtr("handoffkeep"), Title: title, Kind: "implement", CreatedBy: "tester"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -119,7 +122,7 @@ func init() {
 			t.Fatal(err)
 		}
 		b, err := s.AddYTTaskBinding(ctx, YTTaskBinding{TaskID: task.ID, Tenant: "yt.example", IssueID: "3-201",
-			IssueReadable: "HK-201", ProjectID: "0-0", BoundBy: "tester"}, verified)
+			IssueReadable: "HK-201", ProjectID: "0-30", BoundBy: "tester"}, verified)
 		if err != nil {
 			t.Fatal(err)
 		}

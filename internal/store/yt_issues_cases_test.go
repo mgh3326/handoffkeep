@@ -54,7 +54,7 @@ func init() {
 
 	registerYTAreaCase("issues/mirror-write-then-read", func(t *testing.T, s *Store) {
 		ctx := t.Context()
-		task, _, err := s.IntakeTask(ctx, IntakeInput{Source: "yt-issues-case", SourceRef: "mirror", Title: "mirror task", CreatedBy: "tester"})
+		task, _, err := s.IntakeTask(ctx, IntakeInput{Source: "yt-issues-case", SourceRef: "mirror", Title: "mirror task", Project: projectPtr("handoffkeep"), CreatedBy: "tester"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -102,11 +102,11 @@ func init() {
 
 	registerYTAreaCase("issues/mirror-conflict-guard", func(t *testing.T, s *Store) {
 		ctx := t.Context()
-		first, _, err := s.IntakeTask(ctx, IntakeInput{Source: "yt-issues-case", SourceRef: "conflict-a", Title: "a", CreatedBy: "tester"})
+		first, _, err := s.IntakeTask(ctx, IntakeInput{Source: "yt-issues-case", SourceRef: "conflict-a", Title: "a", Project: projectPtr("handoffkeep"), CreatedBy: "tester"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		second, _, err := s.IntakeTask(ctx, IntakeInput{Source: "yt-issues-case", SourceRef: "conflict-b", Title: "b", CreatedBy: "tester"})
+		second, _, err := s.IntakeTask(ctx, IntakeInput{Source: "yt-issues-case", SourceRef: "conflict-b", Title: "b", Project: projectPtr("handoffkeep"), CreatedBy: "tester"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -137,7 +137,7 @@ func init() {
 
 	registerYTAreaCase("issues/audit-of-empty-task", func(t *testing.T, s *Store) {
 		ctx := t.Context()
-		task, _, err := s.IntakeTask(ctx, IntakeInput{Source: "yt-issues-case", SourceRef: "audit", Title: "audit task", CreatedBy: "tester"})
+		task, _, err := s.IntakeTask(ctx, IntakeInput{Source: "yt-issues-case", SourceRef: "audit", Title: "audit task", Project: projectPtr("handoffkeep"), CreatedBy: "tester"})
 		if err != nil {
 			t.Fatal(err)
 		}

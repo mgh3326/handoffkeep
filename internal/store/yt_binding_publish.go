@@ -216,8 +216,11 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 				CASE WHEN ? < 0 THEN (SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=?) ELSE ? END
 			FROM DUAL`,
 			b.TaskID, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, now, p.origin, commentsFrom, b.TaskID, commentsFrom)
-		if ierr != nil {
+		if errors.Is(ierr, errUniqueViolation) {
 			return YTTaskBinding{}, 0, 0, fmt.Errorf("%w: issue %s on %s is bound to another task", ErrYTBindingConflict, b.IssueID, b.Tenant)
+		}
+		if ierr != nil {
+			return YTTaskBinding{}, 0, 0, ierr
 		}
 		stored, ok, err := readYTBinding(ctx, tx, b.TaskID)
 		if err != nil {
