@@ -428,7 +428,7 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 	// it, so it is not lost and recovery applies.
 	t.Run("lost_outcome_with_part_present_continues", func(t *testing.T) {
 		e := newSplitEnv(t, nl, 3)
-		crash := &CrashLedger{Ledger: e.ledger, Method: "Apply"}
+		crash := &CrashLedger{Ledger: e.ledger, Method: "ApplySplit"}
 		e.restart(crash)
 		op := e.prepare()
 		_, _ = e.p.Drive(context.Background(), 10)
@@ -440,6 +440,46 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		e.drive()
 		got := e.wantState(op, ytwrite.StateApplied, "")
 		e.wantOneFamily(op, got.YTResultID)
+	})
+
+	// The operator's applied is fenced in the ledger, not checked on a
+	// snapshot (review of PR #511, r4615543229): a recovery pass that leased
+	// the op, recorded its index and marked a create after the operator's
+	// read makes the apply fail, and nothing is bound to the operator's id.
+	t.Run("operator_apply_after_recovery_took_the_op_is_refused", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 2)
+		e.yt.Queue(Fault{Kind: ServerError})
+		op := e.prepare()
+		e.drive()
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError)
+		e.clock.Advance(time.Hour)
+		cur := e.op(op)
+		sl := e.ledger.(ytwrite.SplitLedger)
+		race := &racingLedger{splitLedger: e.ledger.(splitLedger), afterByID: func() {
+			ctx := context.Background()
+			epoch, ok, err := sl.LeaseLinkRecovery(ctx, e.clock.Now(), op.ID, cur.Reconciles, e.clock.Now().Add(time.Minute))
+			if err != nil || !ok {
+				t.Fatalf("lease %v %v", ok, err)
+			}
+			f := ytwrite.LinkFence{Attempt: cur.Attempts, Recover: 1, Epoch: epoch}
+			if err := sl.PlanSplit(ctx, e.clock.Now(), op.ID, f, ytwrite.SplitPlan{Kind: ytwrite.SplitPlanTag, Index: "3-77", Parts: 2, Steps: []int{1, 2}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := sl.MarkSplitStep(ctx, e.clock.Now(), op.ID, f, 0, "3-77"); err != nil {
+				t.Fatal(err)
+			}
+		}}
+		e.restart(race)
+		if _, err := e.p.Resolve(context.Background(), op.ID, ytwrite.Resolution{Applied: true, YTID: "3-99", By: "operator", Note: "looked"}); err == nil {
+			t.Fatal("the operator's apply went through while a recovery pass held the op")
+		}
+		got := e.op(op)
+		if got.State == ytwrite.StateApplied || got.YTResultID != "3-77" {
+			t.Fatalf("op %s with index %q", got.State, got.YTResultID)
+		}
+		if m, ok, _ := e.ledger.MapGet(context.Background(), ytwrite.ArticleEntity, op.EntityID); ok {
+			t.Fatalf("document mapped to %s", m.YTID)
+		}
 	})
 
 	// The operator's word on a held op: not applied rejects it and leaves
@@ -616,4 +656,26 @@ func (e *splitEnv) wantOneFamily(op ytwrite.Op, index string) {
 	if strings.Join(chunks, "") != ytwrite.EscapeArticleBody(e.body) {
 		e.t.Fatal("the parts do not hold the body")
 	}
+}
+
+// splitLedger is a ledger with the split side.
+type splitLedger interface {
+	ytwrite.Ledger
+	ytwrite.SplitLedger
+}
+
+// racingLedger runs afterByID once, right after the first ByID returns: a
+// writer that acts between an operator's read and its decision.
+type racingLedger struct {
+	splitLedger
+	afterByID func()
+}
+
+func (r *racingLedger) ByID(ctx context.Context, id int64) (ytwrite.Op, error) {
+	op, err := r.splitLedger.ByID(ctx, id)
+	if f := r.afterByID; f != nil {
+		r.afterByID = nil
+		f()
+	}
+	return op, err
 }

@@ -92,7 +92,7 @@ func (p *Protocol) sendSplit(ctx context.Context, op Op, k articleSplit) Result 
 		return early(&HoldError{Reason: ReasonIndexNotFound, Detail: "an index create of this op may have been sent and no read finds the index"})
 	}
 	if read.complete() {
-		return settle(func(c context.Context) settled { return p.apply(c, k, op, read.index, false) })
+		return settle(func(c context.Context) settled { return st.apply(c, op, read.index) })
 	}
 	parent := ""
 	if read.index == "" {
@@ -165,7 +165,7 @@ func (p *Protocol) sendSplit(ctx context.Context, op Op, k articleSplit) Result 
 		case !final.complete():
 			return st.markUnknown(c, op, ReasonPartialWrite, "the read after the plan does not show every part")
 		}
-		return p.apply(c, k, op, final.index, false)
+		return st.apply(c, op, final.index)
 	})
 }
 
@@ -234,7 +234,7 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 		return end(st.pass(ctx, op, wait, reason, detail))
 	}
 	apply := func(index string) (bool, error) {
-		s := p.apply(ctx, k, op, index, false)
+		s := st.apply(ctx, op, index)
 		if errors.Is(s.err, ErrState) {
 			return false, nil
 		}
@@ -375,23 +375,8 @@ func (p *Protocol) resolveSplit(ctx context.Context, op Op, r Resolution) (Resul
 	if r.Adopted != nil && *r.Adopted {
 		return Result{}, fmt.Errorf("%w: %s creates its family; it adopts nothing", ErrInvalid, op.Kind)
 	}
-	now := p.now()
-	if op.Reason == ReasonLinkRecovery && op.NextAttemptAt.After(now) {
-		return Result{}, fmt.Errorf("%w: a recovery pass holds op %d until %s", ErrState, op.ID, op.NextAttemptAt.Format(time.RFC3339))
-	}
-	if r.Applied {
-		if !resultIDRE.MatchString(r.YTID) {
-			return Result{}, fmt.Errorf("%w: youtrack id is empty or malformed", ErrInvalid)
-		}
-		if op.YTResultID != "" && op.YTResultID != r.YTID {
-			return Result{}, fmt.Errorf("%w: op %d recorded index %s", ErrInvalid, op.ID, op.YTResultID)
-		}
-		got, err := p.Ledger.Apply(ctx, now, op.ID, r.YTID, articleSplit{}.MapRows(op, r.YTID))
-		if err != nil {
-			return Result{}, err
-		}
-		logTransition(got)
-		return p.result(got, false), nil
+	if r.Applied && !resultIDRE.MatchString(r.YTID) {
+		return Result{}, fmt.Errorf("%w: youtrack id is empty or malformed", ErrInvalid)
 	}
 	history, err := sl.SplitPlans(ctx, op.ID)
 	if err != nil {
@@ -402,8 +387,22 @@ func (p *Protocol) resolveSplit(ctx context.Context, op Op, r Resolution) (Resul
 	if found && latest.Attempt == op.Attempts {
 		st.f.Recover = latest.Recover
 	}
-	s := st.settle(ctx, op, LinkSettlement{To: StateRejected, Reason: ReasonOperatorNotDone, Detail: "by " + r.By + ": " + r.Note,
-		SawPlan: found, SawAttempt: latest.Attempt, SawRec: latest.Recover, SawMarked: latest.Marked, SawOutcome: latest.Outcome})
+	saw := LinkSettlement{SawPlan: found, SawAttempt: latest.Attempt, SawRec: latest.Recover, SawMarked: latest.Marked, SawOutcome: latest.Outcome}
+	if r.Applied {
+		// Fenced like the rejection: the ledger refuses it under the op's
+		// lock if a recovery pass holds the lease, the op recorded another
+		// index, or a plan was made or a create marked after this read.
+		saw.YTID = r.YTID
+		got, err := sl.ApplySplit(ctx, p.now(), op.ID, st.f, saw, articleSplit{}.MapRows(op, r.YTID))
+		if err != nil {
+			return Result{}, err
+		}
+		logTransition(got)
+		return p.result(got, false), nil
+	}
+	ls := saw
+	ls.To, ls.Reason, ls.Detail = StateRejected, ReasonOperatorNotDone, "by "+r.By+": "+r.Note
+	s := st.settle(ctx, op, ls)
 	if s.err != nil {
 		return Result{}, s.err
 	}
@@ -439,6 +438,16 @@ func (s *splitSettler) settle(ctx context.Context, op Op, ls LinkSettlement) set
 		ls.YTID = s.index
 	}
 	got, err := s.sl.SettleSplit(ctx, s.p.now(), op.ID, s.f, ls)
+	return settled{got, err}
+}
+
+// apply applies the op with index through the fenced ApplySplit, which
+// publishes the binding (S10).
+func (s *splitSettler) apply(ctx context.Context, op Op, index string) settled {
+	got, err := s.sl.ApplySplit(ctx, s.p.now(), op.ID, s.f, LinkSettlement{YTID: index}, articleSplit{}.MapRows(op, index))
+	if errors.Is(err, ErrConflictingResult) {
+		log.Printf("ytwrite.apply_conflict_failed op_id=%d yt_id=%q", op.ID, index)
+	}
 	return settled{got, err}
 }
 

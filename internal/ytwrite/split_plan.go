@@ -194,6 +194,26 @@ func CheckSplitSettlement(op Op, s LinkSettlement) error {
 	return nil
 }
 
+// CheckSplitApply is ApplySplit's check under the op's lock: f is still the
+// op's executor (CheckLinkFence: for an operator, no recovery pass holds the
+// lease), the index is the one the op recorded if it recorded one, and an
+// operator's apply was made from the latest plan as it is now
+// (CheckOperatorSaw), so no create began after the operator looked (review
+// of PR #511).
+func CheckSplitApply(op Op, history []SplitPlanRecord, f LinkFence, s LinkSettlement, now time.Time) error {
+	if err := CheckLinkFence(op, f, now); err != nil {
+		return err
+	}
+	if err := CheckSplitIndex(op, s.YTID); err != nil {
+		return err
+	}
+	if f.Epoch == EpochOperator {
+		latest, found := LatestSplitPlan(history)
+		return CheckOperatorSaw(s, latest.linkRecord(), found)
+	}
+	return nil
+}
+
 // SplitLedger is the ledger side of article_split. A Ledger that does not
 // implement it cannot send one (the op is rejected unsupported_kind before
 // anything is read).
@@ -218,6 +238,12 @@ type SplitLedger interface {
 	// refused when the latest plan is no longer the one it saw
 	// (CheckOperatorSaw). f must pass CheckLinkFence, else ErrState.
 	SettleSplit(ctx context.Context, now time.Time, id int64, f LinkFence, s LinkSettlement) (Op, error)
+	// ApplySplit applies op id with index s.YTID and its map rows as
+	// Ledger.Apply does (binding included), in one transaction that first
+	// checks, under the op's lock, CheckSplitApply for the executor f. An op
+	// already applied with s.YTID is returned as it is. Else ErrState,
+	// ErrConflictingResult, and nothing changes.
+	ApplySplit(ctx context.Context, now time.Time, id int64, f LinkFence, s LinkSettlement, maps []MapRow) (Op, error)
 	// LeaseLinkRecovery is the recovery lease issue_links uses.
 	LeaseLinkRecovery(ctx context.Context, now time.Time, id int64, reconciles int, until time.Time) (epoch int, ok bool, err error)
 }

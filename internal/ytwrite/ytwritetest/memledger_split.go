@@ -108,6 +108,14 @@ func (l *MemLedger) SettleSplit(_ context.Context, now time.Time, id int64, f yt
 	return *op, nil
 }
 
+func (l *MemLedger) ApplySplit(_ context.Context, now time.Time, id int64, f ytwrite.LinkFence, s ytwrite.LinkSettlement, maps []ytwrite.MapRow) (ytwrite.Op, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.applyLocked(now, id, s.YTID, maps, func(op ytwrite.Op) error {
+		return ytwrite.CheckSplitApply(op, l.splits[id], f, s, now)
+	})
+}
+
 // The CrashLedger forwards the split methods of a ledger that has them.
 
 func (c *CrashLedger) split() (ytwrite.SplitLedger, error) {
@@ -161,6 +169,21 @@ func (c *CrashLedger) SettleSplit(ctx context.Context, now time.Time, id int64, 
 	}
 	op, err := sl.SettleSplit(ctx, now, id, f, s)
 	if err := c.leave("SettleSplit", err); err != nil {
+		return ytwrite.Op{}, err
+	}
+	return op, nil
+}
+
+func (c *CrashLedger) ApplySplit(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, s ytwrite.LinkSettlement, maps []ytwrite.MapRow) (ytwrite.Op, error) {
+	if err := c.enter("ApplySplit"); err != nil {
+		return ytwrite.Op{}, err
+	}
+	sl, err := c.split()
+	if err != nil {
+		return ytwrite.Op{}, err
+	}
+	op, err := sl.ApplySplit(ctx, now, id, f, s, maps)
+	if err := c.leave("ApplySplit", err); err != nil {
 		return ytwrite.Op{}, err
 	}
 	return op, nil

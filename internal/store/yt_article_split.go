@@ -154,6 +154,22 @@ func (l *YTWriteLedger) markSplitStepOnce(ctx context.Context, now time.Time, id
 	return tx.Commit(ctx)
 }
 
+func (l *YTWriteLedger) ApplySplit(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, st ytwrite.LinkSettlement, maps []ytwrite.MapRow) (ytwrite.Op, error) {
+	var out ytwrite.Op
+	err := l.s.retryTx(ctx, func() error {
+		var err error
+		out, err = l.applyOnce(ctx, now, id, st.YTID, maps, func(tx transaction, op ytwrite.Op) error {
+			history, err := ytSplitPlansTx(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			return ytwrite.CheckSplitApply(op, history, f, st, now.UTC())
+		})
+		return err
+	})
+	return out, err
+}
+
 // ytSplitIndexArgs orders the index UPDATE's arguments: MySQL binds the SET
 // value first.
 func ytSplitIndexArgs(q any, id int64, index string) []any {

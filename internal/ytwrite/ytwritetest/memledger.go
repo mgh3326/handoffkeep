@@ -136,6 +136,12 @@ func (l *MemLedger) Claim(_ context.Context, now time.Time, id int64) (ytwrite.O
 func (l *MemLedger) Apply(_ context.Context, now time.Time, id int64, ytID string, maps []ytwrite.MapRow) (ytwrite.Op, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.applyLocked(now, id, ytID, maps, nil)
+}
+
+// applyLocked is Apply under the ledger's lock; guard, when set, checks an
+// op that is not yet applied before anything is written.
+func (l *MemLedger) applyLocked(now time.Time, id int64, ytID string, maps []ytwrite.MapRow, guard func(ytwrite.Op) error) (ytwrite.Op, error) {
 	op, err := l.get(id)
 	if err != nil {
 		return ytwrite.Op{}, err
@@ -149,6 +155,11 @@ func (l *MemLedger) Apply(_ context.Context, now time.Time, id int64, ytID strin
 	case ytwrite.StateDispatched, ytwrite.StateRemoteUnknown:
 	default:
 		return ytwrite.Op{}, fmt.Errorf("%w: apply from %s", ytwrite.ErrState, op.State)
+	}
+	if guard != nil {
+		if err := guard(*op); err != nil {
+			return ytwrite.Op{}, err
+		}
 	}
 	// Check every map row before writing any, so a conflict commits nothing.
 	for _, m := range maps {
