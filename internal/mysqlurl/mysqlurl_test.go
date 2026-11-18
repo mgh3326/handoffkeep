@@ -17,6 +17,9 @@ func TestParse(t *testing.T) {
 	if cfg.Params["time_zone"] != "'+00:00'" || cfg.Params["transaction_isolation"] != "'READ-COMMITTED'" {
 		t.Fatalf("incorrect session settings: %v", cfg.Params)
 	}
+	if cfg.Params["collation_connection"] != "'utf8mb4_0900_bin'" {
+		t.Fatalf("connection collation is %q, want utf8mb4_0900_bin", cfg.Params["collation_connection"])
+	}
 }
 
 func TestParseMalformedURLDoesNotEchoCredentials(t *testing.T) {
@@ -31,7 +34,7 @@ func TestParseMalformedURLDoesNotEchoCredentials(t *testing.T) {
 }
 
 func TestParseRejectsSessionOverrides(t *testing.T) {
-	for _, raw := range []string{"postgres://a@localhost/db", "mysql://a@localhost/db?time_zone=UTC", "mysql://a@localhost/db?parseTime=false", "mysql://a@localhost/db?transaction_isolation=SERIALIZABLE", "mysql://a@localhost/db?loc=Local"} {
+	for _, raw := range []string{"postgres://a@localhost/db", "mysql://a@localhost/db?time_zone=UTC", "mysql://a@localhost/db?parseTime=false", "mysql://a@localhost/db?transaction_isolation=SERIALIZABLE", "mysql://a@localhost/db?loc=Local", "mysql://a@localhost/db?collation_connection=utf8mb4_0900_ai_ci"} {
 		if _, err := Parse(raw); err == nil {
 			t.Errorf("Parse(%q) accepted invalid URL", raw)
 		}

@@ -274,8 +274,13 @@ func ytCommentOnOpTx(ctx context.Context, tx transaction, c TaskComment, now tim
 	}
 	mapN, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
 		VALUES ('task',$1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
-		`INSERT IGNORE INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
+		`INSERT INTO yt_entity_map(entity_kind, tenant, hk_key, yt_id, yt_parent_id, op_id, created_at)
 		VALUES ('task',?,?,?,?,?,?)`), b.Tenant, taskKey, b.IssueID, b.ProjectID, op.ID, now)
+	// A duplicate on either unique key is "no row written" (PostgreSQL's
+	// ON CONFLICT DO NOTHING); foreign-key and check errors still surface.
+	if errors.Is(err, errUniqueViolation) {
+		mapN, err = 0, nil
+	}
 	if err != nil {
 		return ytwrite.Op{}, false, "", err
 	}
