@@ -23,6 +23,7 @@ func init() {
 	registerTaskAreaCase("waits/failed-start-section", waitsCaseFailedStartSection)
 	registerTaskAreaCase("waits/spawn-failure-comment", waitsCaseSpawnFailureComment)
 	registerTaskAreaCase("waits/unacknowledged-order", waitsCaseUnacknowledgedOrder)
+	registerTaskAreaCase("waits/backlog-count-exact", waitsCaseBacklogCountExact)
 	registerTaskAreaCase("waits/idle-started", waitsCaseIdleStarted)
 	registerTaskAreaCase("waits/backlog-apart-and-filter", waitsCaseBacklogApartAndFilter)
 }
@@ -343,5 +344,32 @@ func waitsCaseUnacknowledgedOrder(t *testing.T, s *Store) {
 	}
 	if _, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionWaitingOn, task.ID); ok {
 		t.Fatal("an acknowledged order still waits on its lane")
+	}
+}
+
+// The ordinary backlog count is exact and the listed rows are capped: with more
+// than waitBacklogRows ordinary backlog tasks and one waiting backlog task, the
+// count leaves the waiting task out and Truncated says the rows are not all of it.
+func waitsCaseBacklogCountExact(t *testing.T, s *Store) {
+	ctx := t.Context()
+	const plain = waitBacklogRows + 2
+	waited := flowCaseTask(t, s, "implement")
+	if _, err := s.AddTaskWait(ctx, waited.ID, TaskWaitInput{OnKind: WaitOnOperator, Reason: "the operator step"}, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < plain; i++ {
+		flowCaseTask(t, s, "implement")
+	}
+	view := waitsRead(t, s, "")
+	if view.Backlog.Count != plain {
+		t.Fatalf("backlog count=%d, want %d (the waiting task excluded)", view.Backlog.Count, plain)
+	}
+	if len(view.Backlog.Rows) != waitBacklogRows || !view.Backlog.Truncated {
+		t.Fatalf("backlog rows=%d truncated=%t, want %d rows and truncated", len(view.Backlog.Rows), view.Backlog.Truncated, waitBacklogRows)
+	}
+	for _, b := range view.Backlog.Rows {
+		if b.TaskID == waited.ID {
+			t.Fatal("the waiting task is listed as ordinary backlog")
+		}
 	}
 }

@@ -351,10 +351,12 @@ type WaitBacklogRow struct {
 }
 
 // WaitBacklog is the ordinary backlog, listed apart from the sections: Count is
-// every backlog task no section names, Rows the first of them.
+// every backlog task no section names, Rows the first of them, and Truncated
+// says Rows is not all of them.
 type WaitBacklog struct {
-	Count int              `json:"count"`
-	Rows  []WaitBacklogRow `json:"rows"`
+	Count     int              `json:"count"`
+	Truncated bool             `json:"truncated,omitempty"`
+	Rows      []WaitBacklogRow `json:"rows"`
 }
 
 // WaitsView is the waits read at AsOf: the four sections and the backlog.
@@ -658,43 +660,58 @@ func readHandWaits(ctx context.Context, tx transaction) ([]WaitRow, error) {
 	})
 }
 
+// waitBacklogPage is how many backlog tasks one read of the backlog pages over.
+const waitBacklogPage = 200
+
 // readWaitBacklog counts the ordinary backlog exactly and lists its first
-// waitBacklogRows: backlog tasks that no section row names. The exclusion is in
-// SQL, before the count and the limit, so a backlog of any size is counted in
-// full.
+// waitBacklogRows: backlog tasks that no section row names. The count is the
+// whole backlog less the section tasks that are in backlog (each row carries its
+// task's state, from the same snapshot). The listed rows page through the backlog
+// in created order and skip section tasks in Go, so the query binds no parameter
+// per task and a backlog of any size is read.
 func readWaitBacklog(ctx context.Context, tx transaction, rows []WaitRow) (WaitBacklog, error) {
-	var ids []any
-	seen := map[int64]bool{}
+	inSection := map[int64]bool{}
+	sectionBacklog := 0
 	for _, r := range rows {
-		if r.TaskID > 0 && !seen[r.TaskID] {
-			seen[r.TaskID] = true
-			ids = append(ids, r.TaskID)
+		if r.TaskID > 0 && !inSection[r.TaskID] {
+			inSection[r.TaskID] = true
+			if r.State == StateBacklog {
+				sectionBacklog++
+			}
 		}
 	}
-	notIn := ""
-	if len(ids) > 0 {
-		notIn = " AND id NOT IN (" + inPlaceholders(tx, len(ids)) + ")"
-	}
-	var count int
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE state='backlog'`+notIn, ids...).Scan(&count); err != nil {
+	var total int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE state='backlog'`).Scan(&total); err != nil {
 		return WaitBacklog{}, err
 	}
-	found, err := tx.Query(ctx, `SELECT id, lane, title, COALESCE(project,''), created_at FROM tasks WHERE state='backlog'`+notIn+` ORDER BY created_at, id LIMIT `+strconv.Itoa(waitBacklogRows), ids...)
-	if err != nil {
-		return WaitBacklog{}, err
-	}
-	listed, err := collectRows(found, func(r row) (WaitBacklogRow, error) {
-		var b WaitBacklogRow
-		if err := r.Scan(&b.TaskID, &b.Lane, &b.Title, &b.Project, &b.CreatedAt); err != nil {
-			return WaitBacklogRow{}, err
+	out := WaitBacklog{Count: total - sectionBacklog, Rows: []WaitBacklogRow{}}
+	for offset := 0; len(out.Rows) < waitBacklogRows; offset += waitBacklogPage {
+		page, err := tx.Query(ctx, `SELECT id, lane, title, COALESCE(project,''), created_at FROM tasks WHERE state='backlog' ORDER BY created_at, id LIMIT `+strconv.Itoa(waitBacklogPage)+` OFFSET `+strconv.Itoa(offset))
+		if err != nil {
+			return WaitBacklog{}, err
 		}
-		b.CreatedAt = b.CreatedAt.UTC()
-		return b, nil
-	})
-	if err != nil {
-		return WaitBacklog{}, err
+		listed, err := collectRows(page, func(r row) (WaitBacklogRow, error) {
+			var b WaitBacklogRow
+			if err := r.Scan(&b.TaskID, &b.Lane, &b.Title, &b.Project, &b.CreatedAt); err != nil {
+				return WaitBacklogRow{}, err
+			}
+			b.CreatedAt = b.CreatedAt.UTC()
+			return b, nil
+		})
+		if err != nil {
+			return WaitBacklog{}, err
+		}
+		for _, b := range listed {
+			if !inSection[b.TaskID] && len(out.Rows) < waitBacklogRows {
+				out.Rows = append(out.Rows, b)
+			}
+		}
+		if len(listed) < waitBacklogPage {
+			break
+		}
 	}
-	return WaitBacklog{Count: count, Rows: listed}, nil
+	out.Truncated = out.Count > len(out.Rows)
+	return out, nil
 }
 
 // buildWaitsView sorts the rows into the four sections, oldest first, and sets
