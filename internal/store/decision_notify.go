@@ -197,7 +197,7 @@ func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, se
 		ORDER BY n.next_attempt_at ASC,n.request_id ASC LIMIT 1 FOR UPDATE OF n SKIP LOCKED`,
 		`SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs,n.message_id,n.applied_version,n.attempts,
 		(coalesce(n.applied_version='' AND (coalesce(t.awaiting_decision,false)
-		OR (d.source='`+DecisionSourceTaskRequest+`' AND JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.decision_request.id'))=d.source_ref AND JSON_EXTRACT(t.refs,'$.decision_request.human_only')=true)
+		OR (d.source='`+DecisionSourceTaskRequest+`' AND JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.decision_request.id')) COLLATE utf8mb4_0900_bin=d.source_ref AND JSON_EXTRACT(t.refs,'$.decision_request.human_only')=true)
 		OR d.due_at<=?),false))
 		FROM decision_deliveries n JOIN decision_requests d ON d.id=n.request_id LEFT JOIN tasks t ON t.id=d.task_id
 		WHERE n.destination='`+DecisionDestinationDiscord+`' AND n.state='pending' AND n.next_attempt_at<=?

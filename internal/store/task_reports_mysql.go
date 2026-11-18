@@ -41,7 +41,7 @@ const reportDecisionEffectiveSQL = `CASE WHEN d.status='open' AND d.expires_at<=
 const taskActivitySQLMySQL = `GREATEST(tasks.created_at,
 	COALESCE((SELECT max(e.at) FROM task_events e WHERE e.task_id=tasks.id), tasks.created_at),
 	COALESCE((SELECT max(c.created_at) FROM task_comments c WHERE c.task_id=tasks.id), tasks.created_at),
-	COALESCE((SELECT max(j.updated_at) FROM jobs j WHERE j.job_id=JSON_UNQUOTE(JSON_EXTRACT(tasks.refs,'$.job_id')) AND j.task_id=tasks.id), tasks.created_at))`
+	COALESCE((SELECT max(j.updated_at) FROM jobs j WHERE j.job_id=JSON_UNQUOTE(JSON_EXTRACT(tasks.refs,'$.job_id')) COLLATE utf8mb4_0900_bin AND j.task_id=tasks.id), tasks.created_at))`
 
 // activitySQLFor is the task activity expression for the dialect of x, a
 // querier or transaction (it reads the row as "tasks").

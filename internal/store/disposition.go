@@ -812,7 +812,7 @@ func (s *Store) ListUnnotifiedDispositions(ctx context.Context, limit int) ([]Ta
 		ORDER BY t.id DESC LIMIT $1`,
 		`SELECT `+prefixedTaskColumns("t")+` FROM tasks t
 		WHERE JSON_CONTAINS_PATH(t.refs,'one','$.disposition.answer')
-		AND NOT EXISTS (SELECT 1 FROM relay_events r WHERE r.kind='lane.event' AND r.owner_lane=t.lane AND r.event_id=JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.disposition.answer.event_id')))
+		AND NOT EXISTS (SELECT 1 FROM relay_events r WHERE r.kind='lane.event' AND r.owner_lane=t.lane AND r.event_id=JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.disposition.answer.event_id')) COLLATE utf8mb4_0900_bin)
 		ORDER BY t.id DESC LIMIT ?`), limit)
 	if err != nil {
 		return nil, err
