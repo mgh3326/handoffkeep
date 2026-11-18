@@ -127,6 +127,7 @@ func TestMySQLQuotaSharedBehaviors(t *testing.T) {
 		{"history", testQuotaObservationHistory},
 		{"presence-bounds", testQuotaPresenceBounds},
 		{"presence", func(t *testing.T, s *Store) { _ = testQuotaPresence(t, s) }},
+		{"balance", testQuotaBalance},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
