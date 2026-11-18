@@ -136,10 +136,16 @@ type decisionAskInput struct {
 	DueAt          string                 `json:"due_at,omitempty"`
 	Doc            string                 `json:"doc,omitempty"`
 	Refs           []string               `json:"refs,omitempty"`
-	Supersedes     string                 `json:"supersedes,omitempty"`
-	Block          bool                   `json:"block,omitempty"`
-	HumanOnly      bool                   `json:"human_only,omitempty"`
-	AnswerPolicy   string                 `json:"answer_policy,omitempty"`
+	Grounds        []string               `json:"grounds,omitempty"`
+	Lane           string                 `json:"lane,omitempty"`
+	// NewTask files a kind=decide task in Project on Lane and records the
+	// request on it; TaskID is then not used.
+	NewTask      bool   `json:"new_task,omitempty"`
+	Project      string `json:"project,omitempty"`
+	Supersedes   string `json:"supersedes,omitempty"`
+	Block        bool   `json:"block,omitempty"`
+	HumanOnly    bool   `json:"human_only,omitempty"`
+	AnswerPolicy string `json:"answer_policy,omitempty"`
 }
 
 type decisionRecordInput struct {
@@ -176,7 +182,7 @@ func (o operatorTools) decisionRecord(ctx context.Context, _ *gmcp.CallToolReque
 // key returns the first call's request with replayed set; the request and its
 // audit row commit together.
 func (o operatorTools) decisionAsk(ctx context.Context, _ *gmcp.CallToolRequest, in decisionAskInput) (*gmcp.CallToolResult, any, error) {
-	if in.TaskID < 1 {
+	if !in.NewTask && in.TaskID < 1 {
 		return nil, nil, errors.New("task_id must be positive")
 	}
 	key := strings.TrimSpace(in.IdempotencyKey)
@@ -191,7 +197,7 @@ func (o operatorTools) decisionAsk(ctx context.Context, _ *gmcp.CallToolRequest,
 		Question: strings.TrimSpace(in.Question), Reason: strings.TrimSpace(in.Reason),
 		DefaultAction: strings.TrimSpace(in.DefaultAction), DefaultOption: strings.TrimSpace(in.DefaultOption),
 		DefaultTrigger: strings.TrimSpace(in.DefaultTrigger), Doc: strings.TrimSpace(in.Doc),
-		Refs: in.Refs, Supersedes: strings.TrimSpace(in.Supersedes), Block: in.Block,
+		Refs: in.Refs, Grounds: in.Grounds, RequestLane: strings.TrimSpace(in.Lane), Supersedes: strings.TrimSpace(in.Supersedes), Block: in.Block,
 		HumanOnly: in.HumanOnly, AnswerPolicy: strings.TrimSpace(in.AnswerPolicy),
 		Options: store.DecisionOptions{Options: in.Options, AllowFree: !in.NoFreeAnswer},
 	}
@@ -202,7 +208,17 @@ func (o operatorTools) decisionAsk(ctx context.Context, _ *gmcp.CallToolRequest,
 		}
 		input.DueAt = &at
 	}
-	recorded, replayed, err := o.service.Store.RecordMCPDecisionRequest(ctx, in.TaskID, input, write)
+	var recorded store.DecisionRequestResult
+	var replayed bool
+	if in.NewTask {
+		// A new task has no id yet to key the audit row on, so this path is not
+		// replayed: a retry is refused as a similar open task (see the store).
+		recorded, err = o.service.Store.RecordDecisionRequestNewTask(ctx, write.Author, store.NewTaskDecisionInput{
+			Project: strings.TrimSpace(in.Project), Lane: strings.TrimSpace(in.Lane), Request: input,
+		})
+	} else {
+		recorded, replayed, err = o.service.Store.RecordMCPDecisionRequest(ctx, in.TaskID, input, write)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
