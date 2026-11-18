@@ -1,0 +1,261 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+)
+
+// Document retention (hk 5057, hk 4899 A3, operator answer dr-5057-2 A).
+//
+// Which documents qualify: review/mwr-* whose change merged and screens/*
+// whose job ended, both at least DocRetentionDays ago. 'Merged or ended' is
+// read from the change row (state='merged' and merged_at) for review/mwr-*
+// through the reviewer's job id (documents.job = reviews.reviewer_job_id),
+// and from the job row (ended_at) for screens/* through documents.job or the
+// key's second segment (screens/<job>/...). A document with no linked merged
+// change or ended job is kept: only positive evidence of merge/end plus age
+// deletes.
+//
+// Nothing else is deleted: only the two prefixes below, and never a document
+// a yt_article_bindings row still points to. attachment_refs rows filed
+// against a deleted document (ref_kind='document') are removed with it, so no
+// dangling ref survives; the attachment blobs stay.
+//
+// A deletion is recorded in doc_prune_log (who, what, when, a sha list) in
+// the same transaction that deletes the document. Dry runs write no log row.
+//
+// It is idempotent (a second run finds no row to delete and logs nothing)
+// and bounded per run (limit, in DocRetentionBatch-sized transactions).
+//
+// The existing doc_prune (review/mwr-* by updated_at, hk 3639) is the base:
+// this extends it with a second pruner for retention rather than replacing
+// it, so the old prefix/older-than path keeps working unchanged.
+const (
+	// DocRetentionMwrPrefix holds mergewake reviewer prompts.
+	DocRetentionMwrPrefix = "review/mwr-"
+	// DocRetentionScreensPrefix holds pane screens filed per job.
+	DocRetentionScreensPrefix = "screens/"
+	// DocRetentionDays is the age after merge/end a body is deleted.
+	DocRetentionDays = 30
+)
+
+// DocRetentionBatch bounds one transaction; DocRetentionMaxLimit bounds one run.
+const (
+	DocRetentionBatch    = DocPruneBatch
+	DocRetentionMaxLimit = DocPruneMaxLimit
+)
+
+// DocRetentionResult counts one retention run over both prefixes. Matched is
+// every retention-eligible document including bound ones; SkippedBound of
+// them have a YouTrack article binding and are kept. KeptActive is every
+// document under either prefix that is not retention-eligible (too fresh or
+// unlinked) and is kept. Deleted is zero on a dry run, where Bytes is the
+// body size the run would delete, capped by limit.
+type DocRetentionResult struct {
+	OlderThan      time.Time `json:"older_than"`
+	Limit          int       `json:"limit"`
+	Applied        bool      `json:"applied"`
+	PrunedBy       string    `json:"pruned_by"`
+	Matched        int64     `json:"matched"`
+	Deleted        int64     `json:"deleted"`
+	SkippedBound   int64     `json:"skipped_bound"`
+	KeptActive     int64     `json:"kept_active"`
+	Bytes          int64     `json:"bytes"`
+	ReviewDeleted  int64     `json:"review_deleted"`
+	ScreensDeleted int64     `json:"screens_deleted"`
+}
+
+// docRetentionReviewEligible is the merge predicate for a documents row
+// aliased d with the cutoff in $3: a merged change at or before the cutoff,
+// linked through the reviewer's job id (documents.job =
+// reviews.reviewer_job_id). Only the job leg is used: a task leg (ANY change
+// linked to d.task_id merged) would delete an open PR's prompt when its task
+// also implements an older merged PR, so it is kept, never deleted, without
+// its own merged change.
+const docRetentionReviewEligible = `AND EXISTS (SELECT 1 FROM reviews r JOIN changes c ON c.id = r.change_id
+  WHERE r.reviewer_job_id = d.job AND d.job <> ''
+  AND c.state = 'merged' AND c.merged_at IS NOT NULL AND c.merged_at <= $3)`
+
+// docRetentionScreensEligible is the job-end predicate for a documents row
+// aliased d with the cutoff in $3: an ended job at or before the cutoff,
+// linked through documents.job or the key's second segment.
+const docRetentionScreensEligible = `AND EXISTS (SELECT 1 FROM jobs j
+  WHERE (j.job_id = d.job OR j.job_id = split_part(d.key, '/', 2))
+  AND j.ended_at IS NOT NULL AND j.ended_at <= $3)`
+
+// docRetentionCandidates lists unbound retention-eligible documents under one
+// prefix, oldest id first, so each batch is deterministic.
+const docRetentionCandidatesPG = `SELECT d.id, d.key, d.sha256, octet_length(d.body) FROM documents d
+WHERE d.key COLLATE "C" >= $1 AND d.key COLLATE "C" < $2
+AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id = d.id)
+%s
+ORDER BY d.id LIMIT $4`
+
+// PruneRetention deletes retention-eligible review/mwr-* and screens/*
+// documents whose change merged or whose job ended at or before cutoff. It
+// is a dry run unless apply is true. prunedBy names who runs it (the API
+// client id or "retention") and is recorded on every deleted document; it is
+// required even for a dry run so the caller is always identified.
+func (s *Store) PruneRetention(ctx context.Context, cutoff time.Time, limit int, apply bool, prunedBy string) (DocRetentionResult, error) {
+	res := DocRetentionResult{OlderThan: cutoff.UTC(), Limit: limit, Applied: apply, PrunedBy: prunedBy}
+	if cutoff.IsZero() || cutoff.After(time.Now()) {
+		return res, fmt.Errorf("%w: older_than must be a time in the past", ErrDocPruneInvalid)
+	}
+	if limit < 1 || limit > DocRetentionMaxLimit {
+		return res, fmt.Errorf("%w: limit must be 1 to %d", ErrDocPruneInvalid, DocRetentionMaxLimit)
+	}
+	if prunedBy == "" {
+		return res, fmt.Errorf("%w: pruned_by is required", ErrDocPruneInvalid)
+	}
+	if s.dialect == mysqlDialect {
+		return s.mysqlPruneRetention(ctx, res, cutoff)
+	}
+	mwrLo, mwrHi := keyPrefixBounds(DocRetentionMwrPrefix)
+	scrLo, scrHi := keyPrefixBounds(DocRetentionScreensPrefix)
+	countEligible := `SELECT count(*), count(b.document_id) FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id = d.id WHERE d.key COLLATE "C" >= $1 AND d.key COLLATE "C" < $2 %s`
+	var mwrMatched, mwrBound, scrMatched, scrBound int64
+	if e := s.pool.QueryRow(ctx, fmt.Sprintf(countEligible, docRetentionReviewEligible), mwrLo, mwrHi, cutoff.UTC()).Scan(&mwrMatched, &mwrBound); e != nil {
+		return res, e
+	}
+	if e := s.pool.QueryRow(ctx, fmt.Sprintf(countEligible, docRetentionScreensEligible), scrLo, scrHi, cutoff.UTC()).Scan(&scrMatched, &scrBound); e != nil {
+		return res, e
+	}
+	res.Matched = mwrMatched + scrMatched
+	res.SkippedBound = mwrBound + scrBound
+	var mwrTotal, scrTotal int64
+	if e := s.pool.QueryRow(ctx, `SELECT count(*) FROM documents d WHERE d.key COLLATE "C" >= $1 AND d.key COLLATE "C" < $2`, mwrLo, mwrHi).Scan(&mwrTotal); e != nil {
+		return res, e
+	}
+	if e := s.pool.QueryRow(ctx, `SELECT count(*) FROM documents d WHERE d.key COLLATE "C" >= $1 AND d.key COLLATE "C" < $2`, scrLo, scrHi).Scan(&scrTotal); e != nil {
+		return res, e
+	}
+	res.KeptActive = mwrTotal + scrTotal - res.Matched
+	if !apply {
+		// Bytes is the body size apply would delete: review/mwr-* rows first
+		// in id order, then screens/* rows, capped at limit — the same
+		// selection order as pruneRetentionBatch, so the preview and the
+		// apply agree on the row set.
+		drySizes := func(lo, hi, eligible string, want int) (int, error) {
+			if want <= 0 {
+				return 0, nil
+			}
+			rows, e := s.pool.Query(ctx, fmt.Sprintf(`SELECT octet_length(d.body) FROM documents d
+WHERE d.key COLLATE "C" >= $1 AND d.key COLLATE "C" < $2
+AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id = d.id)
+%s
+ORDER BY d.id LIMIT $4`, eligible), lo, hi, cutoff.UTC(), want)
+			if e != nil {
+				return 0, e
+			}
+			defer rows.Close()
+			n := 0
+			for rows.Next() {
+				var size int64
+				if e = rows.Scan(&size); e != nil {
+					return 0, e
+				}
+				res.Bytes += size
+				n++
+			}
+			return n, rows.Err()
+		}
+		nReview, e := drySizes(mwrLo, mwrHi, docRetentionReviewEligible, limit)
+		if e != nil {
+			return res, e
+		}
+		if _, e = drySizes(scrLo, scrHi, docRetentionScreensEligible, limit-nReview); e != nil {
+			return res, e
+		}
+		return res, nil
+	}
+	for res.Deleted < int64(limit) {
+		batch := min(DocRetentionBatch, limit-int(res.Deleted))
+		n, e := s.pruneRetentionBatch(ctx, cutoff.UTC(), batch, prunedBy, &res)
+		if e != nil {
+			return res, e
+		}
+		if n == 0 {
+			break
+		}
+	}
+	return res, nil
+}
+
+// pruneRetentionBatch deletes up to batch retention-eligible documents (review
+// first, then screens) in one transaction, records each deletion in
+// doc_prune_log, and adds the counts to res. It returns how many documents it
+// deleted; zero means the candidates are exhausted.
+func (s *Store) pruneRetentionBatch(ctx context.Context, cutoff time.Time, batch int, prunedBy string, res *DocRetentionResult) (int, error) {
+	tx, e := s.pool.Begin(ctx)
+	if e != nil {
+		return 0, e
+	}
+	defer tx.Rollback(ctx)
+	mwrLo, mwrHi := keyPrefixBounds(DocRetentionMwrPrefix)
+	scrLo, scrHi := keyPrefixBounds(DocRetentionScreensPrefix)
+	var ids []int64
+	var keys, shas []string
+	var bytes int64
+	var nReview, nScreens int
+	collect := func(lo, hi, eligible string, want int) error {
+		if want <= 0 {
+			return nil
+		}
+		rows, e := tx.Query(ctx, fmt.Sprintf(docRetentionCandidatesPG+` FOR UPDATE OF d`, eligible), lo, hi, cutoff, want)
+		if e != nil {
+			return e
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, size int64
+			var key, sha string
+			if e = rows.Scan(&id, &key, &sha, &size); e != nil {
+				return e
+			}
+			ids = append(ids, id)
+			keys = append(keys, key)
+			shas = append(shas, sha)
+			bytes += size
+		}
+		return rows.Err()
+	}
+	if e = collect(mwrLo, mwrHi, docRetentionReviewEligible, batch); e != nil {
+		return 0, e
+	}
+	nReview = len(ids)
+	if len(ids) < batch {
+		before := len(ids)
+		if e = collect(scrLo, scrHi, docRetentionScreensEligible, batch-len(ids)); e != nil {
+			return 0, e
+		}
+		nScreens = len(ids) - before
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if _, e = tx.Exec(ctx, `DELETE FROM attachment_refs WHERE ref_kind='document' AND ref_id = ANY($1)`, keys); e != nil {
+		return 0, e
+	}
+	now := time.Now().UTC()
+	if _, e = tx.Exec(ctx, `INSERT INTO doc_prune_log(document_key, sha256, pruned_at, pruned_by)
+SELECT k, h, $3, $4 FROM unnest($1::text[], $2::text[]) AS t(k, h)`, keys, shas, now, prunedBy); e != nil {
+		return 0, e
+	}
+	tag, e := tx.Exec(ctx, `DELETE FROM documents WHERE id = ANY($1)`, ids)
+	if e != nil {
+		return 0, e
+	}
+	if e = tx.Commit(ctx); e != nil {
+		return 0, e
+	}
+	if tag.RowsAffected() != int64(len(ids)) {
+		return 0, errors.New("retention prune deleted an unexpected row count")
+	}
+	res.Deleted += int64(len(ids))
+	res.Bytes += bytes
+	res.ReviewDeleted += int64(nReview)
+	res.ScreensDeleted += int64(nScreens)
+	return len(ids), nil
+}
