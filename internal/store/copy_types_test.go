@@ -180,6 +180,31 @@ func TestSelectCopyTablesRejectsBlankSelection(t *testing.T) {
 	}
 }
 
+func TestSelectCopyTablesTasksRequiresSyncDecisions(t *testing.T) {
+	_, err := selectCopyTables([]string{"tasks"})
+	if err == nil || !strings.Contains(err.Error(), `"tasks"`) || !strings.Contains(err.Error(), `"sync_decisions"`) {
+		t.Fatalf("selectCopyTables(tasks) error=%v, want tasks requires sync_decisions", err)
+	}
+	if _, err := selectCopyTables([]string{"tasks", "sync_decisions"}); err != nil {
+		t.Fatalf("selectCopyTables(tasks, sync_decisions)=%v, want no error", err)
+	}
+	if wanted, err := selectCopyTables([]string{"sync_decisions"}); err != nil || !wanted["sync_decisions"] {
+		t.Fatalf("selectCopyTables(sync_decisions)=%v, %v, want the projection alone accepted", wanted, err)
+	}
+	if wanted, err := selectCopyTables(nil); err != nil || !wanted["tasks"] || !wanted["sync_decisions"] {
+		t.Fatalf("selectCopyTables(nil)=%v, %v, want the default to keep the companions together", wanted, err)
+	}
+}
+
+// The companion refusal must fire before any database is opened: even with
+// unreachable URLs the error names the missing table, not the connection.
+func TestCopyStoreTasksWithoutSyncDecisionsRefusesBeforeOpen(t *testing.T) {
+	_, err := CopyStore(t.Context(), "postgres://invalid.invalid/db", "mysql://invalid.invalid/db", []string{"tasks"}, false)
+	if err == nil || !strings.Contains(err.Error(), `"sync_decisions"`) {
+		t.Fatalf("CopyStore(tasks) error=%v, want the sync_decisions refusal before any open", err)
+	}
+}
+
 func TestCopyEmptyEvidenceRefsPreservesEmptyArray(t *testing.T) {
 	mysqlValue, err := copyInsertValue([]string(nil), "bench_area_exceptions", "evidence_refs", copyTextArray, false, true)
 	if err != nil {
