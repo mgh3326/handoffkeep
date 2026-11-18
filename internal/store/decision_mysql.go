@@ -196,7 +196,7 @@ func (s *Store) queueDecisionAnswerNoticeFlow(ctx context.Context, tx transactio
 	}
 	taskID := strconv.FormatInt(x.ID, 10)
 	prefix := "[hk] 결정 답변 " + resolved.ID + " task " + taskID + ": "
-	choice := decisionAnswerChoice(x.Refs.DecisionOptions, in, resolved.Status)
+	choice := decisionAnswerNoticeChoice(x.Refs.DecisionOptions, in, resolved.Status)
 	if resolved.Status != DecisionRequestAnswered && choice != resolved.Status {
 		choice = resolved.Status + ": " + choice
 	}

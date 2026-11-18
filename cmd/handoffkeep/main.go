@@ -1585,6 +1585,7 @@ func serve(args []string, errout io.Writer) error {
 	if threads != nil {
 		workers = append(workers, singletonWorker{store: st, id: store.TaskThreadWorkerLock, worker: threads})
 	}
+	workers = append(workers, singletonWorker{store: st, id: store.DriftWorkerLock, worker: &driftWorker{store: st}})
 	uiHandler, e := uiFromEnv(st, am)
 	if e != nil {
 		return e

@@ -150,10 +150,11 @@ func TestForwardSendsOneEventAndRecordsTheReceipt(t *testing.T) {
 		{Kind: store.OutboxKindDotsBlocked, TargetLane: "operator-desk", EventID: "dots-4", Text: "b"},
 		{Kind: store.OutboxKindTaskOrder, TargetLane: "design-lane", EventID: "task-order-ord-aaaaaaaaaa", Text: "o"},
 		{Kind: store.OutboxKindTaskOrder, TargetLane: "design-lane", EventID: "task-order-withdrawn-ord-aaaaaaaaaa", Text: "w"},
+		{Kind: store.OutboxKindTaskDrift, TargetLane: "lane-a", EventID: "drift-lane-a-2026-11-18", Text: "d"},
 	}}
 	f, hub, _ := forwarderFixture(t, outbox)
 	sent, failed, err := f.Once(t.Context())
-	if err != nil || sent != 8 || failed != 0 {
+	if err != nil || sent != 9 || failed != 0 {
 		t.Fatalf("sent=%d failed=%d err=%v", sent, failed, err)
 	}
 	want := []struct{ lane, event, typ string }{
@@ -165,6 +166,7 @@ func TestForwardSendsOneEventAndRecordsTheReceipt(t *testing.T) {
 		{"operator-desk", "dots-4", "blocked"},
 		{"design-lane", "task-order-ord-aaaaaaaaaa", "order"},
 		{"design-lane", "task-order-withdrawn-ord-aaaaaaaaaa", "order"},
+		{"lane-a", "drift-lane-a-2026-11-18", "info"},
 	}
 	if len(hub.posts) != len(want) {
 		t.Fatalf("posts=%v", hub.posts)
