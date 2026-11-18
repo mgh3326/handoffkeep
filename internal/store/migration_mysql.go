@@ -194,6 +194,12 @@ func mysqlIfNoConstraint(table, name, stmt string) string {
 	return strings.Join([]string{"", "constraint", table, name, stmt}, mysqlGuardSep)
 }
 
+// mysqlIfConstraint runs the step only while the named constraint exists, so a
+// DROP is restartable.
+func mysqlIfConstraint(table, name, stmt string) string {
+	return strings.Join([]string{"", "has_constraint", table, name, stmt}, mysqlGuardSep)
+}
+
 func parseMySQLGuard(step string) (kind, table, object, stmt string, ok bool) {
 	if !strings.HasPrefix(step, mysqlGuardSep) {
 		return "", "", "", step, false
@@ -219,7 +225,7 @@ func execMySQLStep(ctx context.Context, conn *sql.Conn, step string) error {
 		query = `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=? AND is_nullable='NO')`
 	case "index":
 		query = `SELECT EXISTS(SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name=? AND index_name=?)`
-	case "constraint":
+	case "constraint", "has_constraint":
 		query = `SELECT EXISTS(SELECT 1 FROM information_schema.table_constraints WHERE table_schema=DATABASE() AND table_name=? AND constraint_name=?)`
 	default:
 		return fmt.Errorf("unknown mysql step guard %q", kind)
@@ -236,10 +242,10 @@ func execMySQLStep(ctx context.Context, conn *sql.Conn, step string) error {
 }
 
 // shouldRunMySQLGuard interprets the catalog predicate for a guarded step.
-// not_null is the one inverted predicate: it reports true when a nullable
-// conversion still needs to run.
+// not_null reports true when a nullable conversion still needs to run;
+// has_constraint runs while the constraint is still there.
 func shouldRunMySQLGuard(kind string, exists bool) bool {
-	if kind == "not_null" {
+	if kind == "not_null" || kind == "has_constraint" {
 		return exists
 	}
 	return !exists

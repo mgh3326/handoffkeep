@@ -25,7 +25,9 @@ var (
 	// the task's updated_at. Nothing is applied; the caller re-reads the task.
 	ErrRevisionConflict = errors.New("revision_conflict")
 	// ErrOperatorOnlyDecision refuses a dots answer to a request whose effective
-	// policy is operator_direct. Only the verified operator path answers it.
+	// policy is operator_direct unless the answer carries the operator's own
+	// words bound to this request (operator decision 399, hk 5132). The refused
+	// attempt is kept.
 	ErrOperatorOnlyDecision = errors.New("operator_only_decision")
 	// ErrInvalidTaskUpdate refuses a task_update call with no field, a missing
 	// key or expected revision, or an out-of-range priority.

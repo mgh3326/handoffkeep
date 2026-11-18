@@ -68,6 +68,7 @@ var taskFieldSources = map[string]string{
 	"events_preview":   "hk",
 	"console_url":      "hk",
 	"jobs":             "hk",
+	"open_orders":      "hk",
 	"attachments":      "hk",
 	"external_links":   "hk",
 	"field_sync":       "hk",
@@ -516,6 +517,11 @@ func (o operatorTools) taskGetView(ctx context.Context, id int64) (map[string]an
 		})
 	}
 
+	openOrders, err := o.service.Store.ListTaskOrders(ctx, task.ID, true)
+	if err != nil {
+		return nil, err
+	}
+
 	attachmentRows := []store.Attachment{}
 	if bodyKey != "" {
 		attachmentRows, err = o.service.Store.ListAttachments(ctx, "document", bodyKey, taskGetAttachmentsLimit+1)
@@ -575,6 +581,7 @@ func (o operatorTools) taskGetView(ctx context.Context, id int64) (map[string]an
 		"events_more":      eventsMore,
 		"jobs":             jobs,
 		"jobs_more":        jobsMore,
+		"open_orders":      openOrders,
 		"attachments":      attachments,
 		"attachments_more": attachmentsMore,
 		"external_links":   externalLinksOf(task, mirror, mirrored),

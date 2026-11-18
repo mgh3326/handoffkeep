@@ -50,7 +50,10 @@ package store
 //  5. Rows that belong to a locked task: task_events (its foreign key takes
 //     KEY SHARE on the task row), task_relations, task_origins,
 //     linear_board_tasks, linear_outbox,
-//     sync_decisions, ticket_sets, decision_answer_attempts and
+//     sync_decisions, ticket_sets, task_orders (CreateTaskOrder, AckTaskOrder and
+//     WithdrawTaskOrder lock the level-2 lock, the task row, then the one order
+//     row; an ack also takes taskCommentInsertLock after level 2, as
+//     CloseTaskMerged does), decision_answer_attempts and
 //     decision_resolutions (inserted by ResolveDecision after its task row,
 //     under the level-2 lock; append-only and never locked by a reader), and
 //     task_spawn_records and task_spawn_notices (PutTaskSpawn: one task row
