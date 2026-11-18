@@ -345,15 +345,6 @@ func (s *Store) MissingTaskTranslations(ctx context.Context, limit int) ([]Missi
 
 // MissingDecisionTranslations enumerates each structured decision revision.
 func (s *Store) MissingDecisionTranslations(ctx context.Context, limit int) ([]MissingTranslation, error) {
-	if s.dialect == mysqlDialect {
-		has, err := s.mysqlTableExists(ctx, s.db(), "decision_requests")
-		if err != nil {
-			return nil, err
-		}
-		if !has {
-			return nil, ErrDialectUnsupported
-		}
-	}
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("invalid translation limit")
 	}

@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // TaskWorkSession is one job that worked on a task: its placement (host,
@@ -130,10 +128,6 @@ func (b TaskWorkBoard) PrimaryJob() string {
 // claim/rebind to another job. An unbound placement stays visible while it is
 // a pending replacement.
 func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64]TaskWorkBoard, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	boards := make(map[int64]TaskWorkBoard, len(tasks))
 	if len(tasks) == 0 {
 		return boards, nil
@@ -144,12 +138,15 @@ func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64
 		boards[task.ID] = TaskWorkBoard{JobID: task.Refs.JobID, PR: task.Refs.PR, HeadSHA: task.Refs.HeadSHA}
 	}
 	// One read snapshot keeps placement and terminal-job observations consistent.
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := s.beginSnapshotA5(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT `+placementColumns+` FROM placement_decisions WHERE task_id=ANY($1) AND outcome='placed' ORDER BY decided_at,id`, ids)
+	// = ANY($1) on PostgreSQL, an IN list on MySQL.
+	idArgs := a5Int64Args(s, ids)
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT `+placementColumns+` FROM placement_decisions WHERE task_id=ANY($1) AND outcome='placed' ORDER BY decided_at,id`,
+		`SELECT `+placementColumns+` FROM placement_decisions WHERE task_id IN (`+placeholders(len(ids))+`) AND outcome='placed' ORDER BY decided_at,id`), idArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +180,15 @@ func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64
 		}
 	}
 	if len(jobIDs) > 0 {
-		rows, err = tx.Query(ctx, `SELECT `+jobColumns+` FROM jobs WHERE job_id=ANY($1) ORDER BY job_id`, jobIDs)
+		jobArgs := []any{jobIDs}
+		if s.dialect == mysqlDialect {
+			jobArgs = make([]any, len(jobIDs))
+			for i, id := range jobIDs {
+				jobArgs[i] = id
+			}
+		}
+		rows, err = tx.Query(ctx, sqlFor(tx, `SELECT `+jobColumns+` FROM jobs WHERE job_id=ANY($1) ORDER BY job_id`,
+			`SELECT `+jobColumns+` FROM jobs WHERE job_id IN (`+placeholders(len(jobIDs))+`) ORDER BY job_id`), jobArgs...)
 		if err != nil {
 			return nil, err
 		}
@@ -205,8 +210,10 @@ func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64
 			return nil, err
 		}
 	}
-	rows, err = tx.Query(ctx, `SELECT task_id,at,COALESCE(refs->>'job_id',''),COALESCE(refs->'job_rebind'->>'from_job','')
-		FROM task_events WHERE task_id=ANY($1) AND refs IS NOT NULL ORDER BY id`, ids)
+	rows, err = tx.Query(ctx, sqlFor(tx, `SELECT task_id,at,COALESCE(refs->>'job_id',''),COALESCE(refs->'job_rebind'->>'from_job','')
+		FROM task_events WHERE task_id=ANY($1) AND refs IS NOT NULL ORDER BY id`,
+		`SELECT task_id,at,COALESCE(refs->>'$.job_id',''),COALESCE(refs->>'$.job_rebind.from_job','')
+		FROM task_events WHERE task_id IN (`+placeholders(len(ids))+`) AND refs IS NOT NULL ORDER BY id`), idArgs...)
 	if err != nil {
 		return nil, err
 	}

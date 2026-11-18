@@ -25,6 +25,7 @@ type YouTrackDocArticle struct {
 // caller supplies synced_at from its own clock.
 func (s *Store) UpsertYouTrackDocArticle(ctx context.Context, x YouTrackDocArticle) error {
 	if s != nil && s.dialect == mysqlDialect {
+		// Not ported to MySQL: youtrack_doc_articles is left out of MySQL (design §2) (hk 5088).
 		return ErrDialectUnsupported
 	}
 

@@ -43,7 +43,7 @@ func DeployLagNoticeText(service string, lagCount int) string {
 // hk records merged changes in the changes table (repo, state='merged', merged_at).
 func (s *Store) CountMergedChangesSince(ctx context.Context, repo string, since time.Time) (int, error) {
 	if s != nil && s.dialect == mysqlDialect {
-		return 0, ErrDialectUnsupported
+		return s.countMergedChangesSinceMySQL(ctx, repo, since)
 	}
 
 	var count int
@@ -87,7 +87,7 @@ func deployLagStatusTx(ctx context.Context, q rowQuerier, svc DeployService, sin
 // operator-desk notice cannot disagree.
 func (s *Store) DeployLagStatuses(ctx context.Context, svcs []DeployService) (map[string]DeployLagServiceStatus, error) {
 	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
+		return s.deployLagStatusesMySQL(ctx, svcs)
 	}
 
 	out := make(map[string]DeployLagServiceStatus, len(svcs))
@@ -156,7 +156,7 @@ GROUP BY w.name`, names, repos, since)
 // Returns the number of new notifications enqueued.
 func (s *Store) EnqueueDeployLagNotices(ctx context.Context, now time.Time) (int, error) {
 	if s != nil && s.dialect == mysqlDialect {
-		return 0, ErrDialectUnsupported
+		return s.enqueueDeployLagNoticesMySQL(ctx, now)
 	}
 
 	now = now.UTC()

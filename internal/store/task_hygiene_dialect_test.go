@@ -9,28 +9,6 @@ import (
 // Dialect-neutral cases of the frontier, settle, sweep, drift and hygiene
 // reports and the last-activity repair (hk 5074, A3).
 
-// needTables skips only when at least one table used by the case is absent
-// from the current MySQL schema; ported areas stop contributing to the skip.
-func needTables(t *testing.T, s *Store, area string) {
-	t.Helper()
-	if s.dialect != mysqlDialect {
-		return
-	}
-	tables := map[string][]string{
-		"changes and decisions":       {"changes", "decision_requests", "decision_deliveries"},
-		"changes, decisions and jobs": {"changes", "decision_requests", "decision_deliveries", "jobs"},
-	}
-	for _, table := range tables[area] {
-		var exists bool
-		if err := s.mysqlPool.QueryRowContext(t.Context(), `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?)`, table).Scan(&exists); err != nil {
-			t.Fatal(err)
-		}
-		if !exists {
-			t.Skipf("needs %s, which is not ported to MySQL yet", table)
-		}
-	}
-}
-
 func init() {
 	registerTaskAreaCase("hygiene/settle-merged", func(t *testing.T, s *Store) {
 		ctx := t.Context()
@@ -69,15 +47,15 @@ func init() {
 		if _, created, err := s.IntakeTask(ctx, IntakeInput{Source: "hygiene-test", SourceRef: "sweep/1", Title: "Triage is never swept", CreatedBy: "tester"}); err != nil || !created {
 			t.Fatalf("intake created=%v err=%v", created, err)
 		}
-		if s.dialect == mysqlDialect {
-			// The activity expression reads the jobs table (B7).
-			t.Skip("needs the jobs table, which the MySQL schema does not have yet")
-		}
 		project := "hygiene-sweep"
 		_, err = s.AddTaskProject(ctx, project, "tester")
-		needPorted(t, s, "AddTaskProject", err)
+		if err != nil {
+			t.Fatalf("AddTaskProject: %v", err)
+		}
 		_, err = s.CreateTask(ctx, Task{Lane: "hygiene-sweep", Title: "Fresh backlog task", Kind: "implement", CreatedBy: "tester", Project: &project})
-		needPorted(t, s, "CreateTask", err)
+		if err != nil {
+			t.Fatalf("CreateTask: %v", err)
+		}
 		for _, dry := range []bool{true, false} {
 			moved, err := s.SweepBacklog(ctx, 1, dry)
 			if err != nil || len(moved) != 0 {
@@ -103,10 +81,11 @@ func init() {
 		if _, err := s.ProjectFrontier(ctx, "no-such-project", now.Add(-time.Hour), now); !errors.Is(err, ErrProjectNotFound) {
 			t.Fatalf("frontier of an unknown project err = %v, want ErrProjectNotFound", err)
 		}
-		needTables(t, s, "decision_requests")
 		project := "hygiene-frontier"
 		_, err := s.AddTaskProject(ctx, project, "tester")
-		needPorted(t, s, "AddTaskProject", err)
+		if err != nil {
+			t.Fatalf("AddTaskProject: %v", err)
+		}
 		f, err := s.ProjectFrontier(ctx, project, now.Add(-time.Hour), now)
 		if err != nil {
 			t.Fatal(err)
@@ -124,7 +103,6 @@ func init() {
 				t.Fatalf("TaskDrift accepted merged_days %d", days)
 			}
 		}
-		needTables(t, s, "decision_requests and jobs")
 		d, err := s.TaskDrift(ctx, now, DriftDefaultMergedDays)
 		if err != nil {
 			t.Fatal(err)
@@ -148,7 +126,6 @@ func init() {
 		if _, err := s.TaskHygiene(ctx, now, "bad project!", true); err == nil {
 			t.Fatal("TaskHygiene accepted an invalid project name")
 		}
-		needTables(t, s, "decision_requests and jobs")
 		for _, dry := range []bool{true, false} {
 			rep, err := s.TaskHygiene(ctx, now, "", dry)
 			if err != nil {

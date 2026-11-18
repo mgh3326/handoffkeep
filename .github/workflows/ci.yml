@@ -194,7 +194,7 @@ jobs:
     if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     name: 'store: mysql and schema drift'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
       HANDOFFKEEP_TEST_MYSQL_URL: mysql://root:handoffkeep@localhost:3306/handoffkeep
@@ -227,8 +227,11 @@ jobs:
           path: workflow
           sparse-checkout: .github/actions/setup-go-cached
       - uses: ./workflow/.github/actions/setup-go-cached
-      - name: Test MySQL store and schema parity
-        run: go test -p 2 -tags=mysql -timeout 15m ./internal/store -run '^(TestMySQL|TestBenchKeysKeepTrailingSpaces|TestCopy)'
+      # The whole store package with the mysql tag, both URLs set: every
+      # dialect-neutral case runs on PostgreSQL and on MySQL, and each
+      # MySQL-only case runs on MySQL. Skips are listed in the log (hk 5088).
+      - name: Test store suite on MySQL and PostgreSQL
+        run: go test -p 2 -tags=mysql -v -timeout 30m ./internal/store 2>&1 | tee store-mysql-suite.log; exit "${PIPESTATUS[0]}"
 
   pr-store-db:
     # Runs on every event, so it always reports a conclusion and can be a

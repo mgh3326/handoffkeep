@@ -132,6 +132,13 @@ WHERE ct.task_id=? AND ct.relation=? AND c.reverted_by_change_id IS NULL`), task
 	if linked == 0 || noSHA > 0 {
 		return SettleNoMergeCommit, "", nil
 	}
+	if s.dialect == mysqlDialect {
+		// The services, deploys and deploy_changes tables are not carried to
+		// MySQL (design hk 4899 §2: empty, no reader), so no repo has a deploy
+		// stage there: this is exactly what the stage query below answers on
+		// an empty services table.
+		return SettleNoDeployStage, "", nil
+	}
 	var stage bool
 	if err := tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM change_tasks ct
 JOIN changes c ON c.id=ct.change_id JOIN services s ON s.repo=c.repo
@@ -144,12 +151,6 @@ WHERE ct.task_id=? AND ct.relation=? AND c.reverted_by_change_id IS NULL AND s.d
 		return SettleNoDeployStage, "", nil
 	}
 	var contained bool
-	if s.dialect == mysqlDialect {
-		// B5 dependency: containment is changeDeployedSQL, which reads the
-		// deploys and services tables (services.targets is an array) and has no
-		// MySQL text yet.
-		return "", "", ErrDialectUnsupported
-	}
 	if err := tx.QueryRow(ctx, `SELECT bool_and(`+changeDeployedSQL()+`) IS TRUE
 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND ct.relation=$2 AND c.reverted_by_change_id IS NULL`, taskID, ChangeImplements).Scan(&contained); err != nil {
 		return "", "", err

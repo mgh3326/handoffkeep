@@ -189,9 +189,6 @@ func threadsCaseClaimSettleRecover(t *testing.T, s *Store) {
 
 	// A line that is sent moves the cursor; a refused one stops the row.
 	if _, err := s.ApplyTaskSourceEvent(ctx, TaskSourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, TaskID: task.ID}); err != nil {
-		if s.dialect == mysqlDialect && errors.Is(err, ErrDialectUnsupported) {
-			t.Skip("settled decision projection (B6)")
-		}
 		t.Fatal(err)
 	}
 	line, found, err = s.ClaimTaskThread(ctx, later.Add(time.Hour))

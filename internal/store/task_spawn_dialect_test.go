@@ -62,7 +62,9 @@ func a5Merge(t *testing.T, s *Store, id int64, pr int) {
 	} {
 		if _, err := s.ApplyTaskSourceEvent(ctx, ev); err != nil {
 			if ev.Source == SourceMergewakeMerge {
-				needPorted(t, s, "settled decision projection (B6)", err)
+				if err != nil {
+					t.Fatalf("settled decision projection (B6): %v", err)
+				}
 			}
 			t.Fatalf("event %+v: %v", ev, err)
 		}

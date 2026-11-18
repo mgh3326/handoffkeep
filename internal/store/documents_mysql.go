@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // mysqlPutDocument runs after the common validation and hash computation.
@@ -21,12 +23,6 @@ func (s *Store) mysqlPutDocument(ctx context.Context, x Document, now time.Time)
 
 func (s *Store) mysqlPutDocumentOnce(ctx context.Context, x Document, now time.Time) (Document, bool, error) {
 	isDeployRecord := strings.HasPrefix(x.Key, "deploy/")
-	if isDeployRecord && deployRecordNeedsNotice(parseStoredDeployRecord(x.Key, x.SHA256, x.Body, now)) {
-		// MySQL cannot atomically enqueue the deploy-result notice yet. Refuse
-		// before checking or writing the document so retries cannot report a
-		// successful no-op for a notice that was never queued.
-		return x, false, ErrDialectUnsupported
-	}
 	var hash string
 	var task *int64
 	var class *string
@@ -78,8 +74,51 @@ func (s *Store) mysqlPutDocumentOnce(ctx context.Context, x Document, now time.T
 		if err = s.applyDeployRecordTx(ctx, tx, record, now); err != nil {
 			return x, true, err
 		}
+		if err = queueDeployRecordNoticeMySQL(ctx, tx, record, now); err != nil {
+			return x, true, err
+		}
 	}
 	return x, true, tx.Commit(ctx)
+}
+
+// queueDeployRecordNoticeMySQL is queueDeployRecordNoticeTx on a MySQL
+// transaction: the same event id, the same text, one notification_outbox row
+// that a repeat leaves alone. The asker is the job's parent_lane, else its
+// owner_lane; a record that names no job, or a job with no lane, writes nothing.
+func queueDeployRecordNoticeMySQL(ctx context.Context, tx transaction, x StoredDeployRecord, at time.Time) error {
+	if !deployRecordNeedsNotice(x) {
+		return nil
+	}
+	rec, _, _ := x.Classify(deployRecordKeyRE.FindStringSubmatch(x.Key)[1])
+	jobID := *rec.JobID
+	if !validText(jobID, 256) || !utf8.ValidString(jobID) {
+		return nil
+	}
+	var parent, owner string
+	err := tx.QueryRow(ctx, `SELECT parent_lane,owner_lane FROM jobs WHERE job_id=?`, jobID).Scan(&parent, &owner)
+	if errors.Is(err, ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	lane := parent
+	if lane == "" {
+		lane = owner
+	}
+	if lane == "" {
+		return nil
+	}
+	ref := "(no ref)"
+	if rec.DeployedRef != nil {
+		ref = *rec.DeployedRef
+	}
+	body := laneSafeText(rec.Service + " " + ref + " job " + jobID + ": " + rec.Result)
+	if rec.FailedStep != nil {
+		body += " at step " + strconv.Itoa(*rec.FailedStep)
+	}
+	_, err = insertNotificationOutboxOnce(ctx, tx, OutboxKindDeployResult, lane, deployResultRecordEventID(x.Key, x.SHA256), assistantLaneText("[hk] deploy ", body), at)
+	return err
 }
 
 func mysqlListDocumentsSQL(prefix, kind, session string, task int64, afterID *int64, limit int) (string, []any) {

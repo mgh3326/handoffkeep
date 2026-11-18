@@ -3,7 +3,6 @@ package store
 import (
 	"errors"
 	"fmt"
-	"github.com/go-sql-driver/mysql"
 	"sync"
 	"testing"
 )
@@ -11,21 +10,6 @@ import (
 // Dialect-neutral cases of the intake area (hk 5074, A3): IntakeTask,
 // EmitTicketSet and ListTriage on PostgreSQL and MySQL. They run from
 // tasks_area_cases_test.go.
-
-// needPorted fails the test on err, except that a method another area has not
-// ported to MySQL yet (ErrDialectUnsupported on a MySQL store) skips it.
-func needPorted(t *testing.T, s *Store, what string, err error) {
-	t.Helper()
-	if err == nil {
-		return
-	}
-	var me *mysql.MySQLError
-	if s.dialect == mysqlDialect && (errors.Is(err, ErrDialectUnsupported) || errors.As(err, &me) && me.Number == 1146) {
-		// 1146 is a table of an area that is not ported yet.
-		t.Skipf("%s is not ported to MySQL yet: %v", what, err)
-	}
-	t.Fatalf("%s: %v", what, err)
-}
 
 const intakeTestBody = "## Current\nx\n## Desired\ny\n## Key interfaces\nz\n## Out of scope\nw\n## Acceptance\nok\n"
 
@@ -237,10 +221,14 @@ func init() {
 		ctx := t.Context()
 		project := "intake-similar"
 		_, err := s.AddTaskProject(ctx, project, "tester")
-		needPorted(t, s, "AddTaskProject", err)
+		if err != nil {
+			t.Fatalf("AddTaskProject: %v", err)
+		}
 		title := "Rewrite the intake duplicate detection for similar titles"
 		open, err := s.CreateTask(ctx, Task{Lane: "intake-similar", Title: title, Kind: "implement", CreatedBy: "tester", Project: &project})
-		needPorted(t, s, "CreateTask", err)
+		if err != nil {
+			t.Fatalf("CreateTask: %v", err)
+		}
 		near, created, err := s.IntakeTask(ctx, IntakeInput{Source: "intake-test", SourceRef: "similar/1", Title: "Rewrite the intake duplicate detection for similar title", CreatedBy: "tester"})
 		if err != nil || !created {
 			t.Fatalf("intake created=%v err=%v", created, err)

@@ -19,6 +19,7 @@ type YouTrackDecisionMirror struct {
 // GetYouTrackDecisionMirror returns the mirror row of one decision, if any.
 func (s *Store) GetYouTrackDecisionMirror(ctx context.Context, decisionID int64) (YouTrackDecisionMirror, bool, error) {
 	if s != nil && s.dialect == mysqlDialect {
+		// Not ported to MySQL: youtrack_decision_mirrors is left out of MySQL (design §2) (hk 5088).
 		return YouTrackDecisionMirror{}, false, ErrDialectUnsupported
 	}
 
@@ -35,6 +36,7 @@ func (s *Store) GetYouTrackDecisionMirror(ctx context.Context, decisionID int64)
 // keyed by decision id.
 func (s *Store) ListYouTrackDecisionMirrors(ctx context.Context, decisionIDs []int64) (map[int64]YouTrackDecisionMirror, error) {
 	if s != nil && s.dialect == mysqlDialect {
+		// Not ported to MySQL: youtrack_decision_mirrors is left out of MySQL (design §2) (hk 5088).
 		return nil, ErrDialectUnsupported
 	}
 
@@ -61,6 +63,7 @@ func (s *Store) ListYouTrackDecisionMirrors(ctx context.Context, decisionIDs []i
 // the row for the same decision.
 func (s *Store) PutYouTrackDecisionMirror(ctx context.Context, x YouTrackDecisionMirror) error {
 	if s != nil && s.dialect == mysqlDialect {
+		// Not ported to MySQL: youtrack_decision_mirrors is left out of MySQL (design §2) (hk 5088).
 		return ErrDialectUnsupported
 	}
 

@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // What is waiting on the operator, as the console Home shows it: open
@@ -123,13 +121,9 @@ const attentionStalledSQL = `state IN (` + startedStatesSQL + `) AND NOT awaitin
 
 // Attention reads what is waiting on the operator at now.
 func (s *Store) Attention(ctx context.Context, now time.Time) (Attention, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Attention{}, ErrDialectUnsupported
-	}
-
 	now = now.UTC()
 	var out Attention
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := s.beginSnapshotA5(ctx)
 	if err != nil {
 		return Attention{}, err
 	}
@@ -144,18 +138,18 @@ func (s *Store) Attention(ctx context.Context, now time.Time) (Attention, error)
 	return out, tx.Commit(ctx)
 }
 
-func attentionDecisionsTx(ctx context.Context, tx pgx.Tx, now time.Time) (AttentionDecisions, error) {
+func attentionDecisionsTx(ctx context.Context, tx transaction, now time.Time) (AttentionDecisions, error) {
 	out := AttentionDecisions{Items: []AttentionDecision{}}
 	var requests, lanes int
 	// Each count is the same LEFT JOIN as its item query, so a count never
 	// covers an item its list hides.
-	if err := tx.QueryRow(ctx, `SELECT
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT
 		(SELECT COUNT(*) FROM (SELECT id FROM decision_requests WHERE `+decisionOpenSQL+`) d
 			LEFT JOIN operator_inbox_state s ON s.item_key='decision:request:'||d.id WHERE `+attentionInboxVisible("$1")+`),
 		(SELECT COUNT(*) FROM (SELECT e.id FROM `+attentionLaneSQL+`) lane
 			LEFT JOIN operator_inbox_state s ON s.item_key='decision:lane_event:'||lane.id WHERE `+attentionInboxVisible("$1")+`),
 		(SELECT COUNT(*) FROM (SELECT id,due_at FROM decision_requests WHERE `+decisionOpenSQL+`) d
-			LEFT JOIN operator_inbox_state s ON s.item_key='decision:request:'||d.id WHERE `+attentionInboxVisible("$1")+` AND d.due_at<=$1::timestamptz)`, now).Scan(&requests, &lanes, &out.Overdue); err != nil {
+			LEFT JOIN operator_inbox_state s ON s.item_key='decision:request:'||d.id WHERE `+attentionInboxVisible("$1")+` AND d.due_at<=$1::timestamptz)`, attentionDecisionCountsMySQL), attentionNowArgs(tx, now, 1, 9)...).Scan(&requests, &lanes, &out.Overdue); err != nil {
 		return out, err
 	}
 	out.Count = requests + lanes
@@ -198,12 +192,12 @@ func attentionDecisionLess(a, b AttentionDecision) bool {
 	return a.ID > b.ID
 }
 
-func attentionRequestItems(ctx context.Context, tx pgx.Tx, now time.Time) ([]AttentionDecision, error) {
-	rows, err := tx.Query(ctx, `SELECT d.id,d.source_ref,d.lane,d.question,d.created_at,d.due_at,s.read_at,s.done_at,s.snoozed_until
+func attentionRequestItems(ctx context.Context, tx transaction, now time.Time) ([]AttentionDecision, error) {
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT d.id,d.source_ref,d.lane,d.question,d.created_at,d.due_at,s.read_at,s.done_at,s.snoozed_until
 		FROM (SELECT id,source_ref,lane,question,created_at,due_at FROM decision_requests WHERE `+decisionOpenSQL+`) d
 		LEFT JOIN operator_inbox_state s ON s.item_key='decision:request:'||d.id
 		WHERE `+attentionInboxVisible("$1")+`
-		ORDER BY (d.due_at IS NOT NULL AND d.due_at<=$1::timestamptz) DESC, d.due_at ASC NULLS LAST, d.created_at DESC, d.id DESC LIMIT $2`, now, AttentionItems)
+		ORDER BY (d.due_at IS NOT NULL AND d.due_at<=$1::timestamptz) DESC, d.due_at ASC NULLS LAST, d.created_at DESC, d.id DESC LIMIT $2`, attentionRequestItemsMySQL), attentionItemArgs(tx, now, 4, AttentionItems)...)
 	if err != nil {
 		return nil, err
 	}
@@ -229,12 +223,12 @@ func attentionRequestItems(ctx context.Context, tx pgx.Tx, now time.Time) ([]Att
 	return out, rows.Err()
 }
 
-func attentionLaneItems(ctx context.Context, tx pgx.Tx, now time.Time) ([]AttentionDecision, error) {
-	rows, err := tx.Query(ctx, `SELECT lane.id,lane.owner_lane,lane.text,lane.received_at,s.read_at,s.done_at,s.snoozed_until
+func attentionLaneItems(ctx context.Context, tx transaction, now time.Time) ([]AttentionDecision, error) {
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT lane.id,lane.owner_lane,lane.text,lane.received_at,s.read_at,s.done_at,s.snoozed_until
 		FROM (SELECT e.id,e.owner_lane,e.text,e.received_at FROM `+attentionLaneSQL+`) lane
 		LEFT JOIN operator_inbox_state s ON s.item_key='decision:lane_event:'||lane.id
 		WHERE `+attentionInboxVisible("$1")+`
-		ORDER BY lane.received_at DESC, lane.id DESC LIMIT $2`, now, AttentionItems)
+		ORDER BY lane.received_at DESC, lane.id DESC LIMIT $2`, attentionLaneItemsMySQL), attentionItemArgs(tx, now, 2, AttentionItems)...)
 	if err != nil {
 		return nil, err
 	}
@@ -260,22 +254,22 @@ func attentionLaneItems(ctx context.Context, tx pgx.Tx, now time.Time) ([]Attent
 // attentionTasksTx reads the waiting tasks. stalledBefore is the activity time
 // a started task must be older than to count as stalled; now is the read time
 // the inbox triage state is judged against.
-func attentionTasksTx(ctx context.Context, tx pgx.Tx, stalledBefore, now time.Time) (AttentionTasks, error) {
+func attentionTasksTx(ctx context.Context, tx transaction, stalledBefore, now time.Time) (AttentionTasks, error) {
 	out := AttentionTasks{Items: []AttentionTask{}}
 	// Only awaiting and started rows can qualify, so the activity subqueries
 	// run for those alone.
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FILTER (WHERE `+awaitingTaskDecisionSQL+`),
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT COUNT(*) FILTER (WHERE `+awaitingTaskDecisionSQL+`),
 		COUNT(*) FILTER (WHERE `+attentionStalledSQL+`)
 		FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key='task:'||tasks.id
-		WHERE ((`+awaitingTaskDecisionSQL+`) OR (`+attentionStalledSQL+`)) AND `+attentionTaskVisible("$2"), stalledBefore, now).Scan(&out.AwaitingDecision, &out.Stalled); err != nil {
+		WHERE ((`+awaitingTaskDecisionSQL+`) OR (`+attentionStalledSQL+`)) AND `+attentionTaskVisible("$2"), attentionTaskCountsMySQL), attentionTaskArgs(tx, stalledBefore, now, true, 0)...).Scan(&out.AwaitingDecision, &out.Stalled); err != nil {
 		return out, err
 	}
 	out.Count = out.AwaitingDecision + out.Stalled
 
-	rows, err := tx.Query(ctx, `SELECT tasks.id,title,lane,state,priority,(`+awaitingTaskDecisionSQL+`) AS awaiting,`+taskActivitySQL+` AS since,s.read_at,s.done_at,s.snoozed_until
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT tasks.id,title,lane,state,priority,(`+awaitingTaskDecisionSQL+`) AS awaiting,`+taskActivitySQL+` AS since,s.read_at,s.done_at,s.snoozed_until
 		FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key='task:'||tasks.id
 		WHERE ((`+awaitingTaskDecisionSQL+`) OR (`+attentionStalledSQL+`)) AND `+attentionTaskVisible("$2")+`
-		ORDER BY since DESC, tasks.id DESC LIMIT $3`, stalledBefore, now, AttentionItems)
+		ORDER BY since DESC, tasks.id DESC LIMIT $3`, attentionTaskItemsMySQL), attentionTaskArgs(tx, stalledBefore, now, false, AttentionItems)...)
 	if err != nil {
 		return out, err
 	}
@@ -306,13 +300,12 @@ func attentionTasksTx(ctx context.Context, tx pgx.Tx, stalledBefore, now time.Ti
 // started-state test of a stall is YouTrack's, so the caller names the tasks
 // YouTrack shows started; hk's own state is not consulted for a stall.
 func (s *Store) AttentionTaskCandidates(ctx context.Context, now time.Time, startedIDs []int64) ([]AttentionTask, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	now = now.UTC()
 	if startedIDs == nil {
 		startedIDs = []int64{}
+	}
+	if s.dialect == mysqlDialect {
+		return s.attentionTaskCandidatesMySQL(ctx, now, startedIDs)
 	}
 	rows, err := s.pool.Query(ctx, `SELECT tasks.id,title,lane,state,priority,(`+awaitingTaskDecisionSQL+`) AS awaiting,`+taskActivitySQL+` AS since,s.read_at,s.done_at,s.snoozed_until
 		FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key='task:'||tasks.id

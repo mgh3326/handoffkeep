@@ -102,11 +102,17 @@ func MCPDecisionEventKey(actor, key string) string {
 // replayMCPWriteTx loads the first result a keyed write recorded. It reports
 // false when the key was never used.
 func replayMCPWriteTx(ctx context.Context, tx pgx.Tx, w MCPWrite, out any) (bool, error) {
+	return replayMCPWrite(ctx, pgTransaction{tx}, w, out)
+}
+
+// replayMCPWrite is replayMCPWriteTx on either dialect's transaction.
+func replayMCPWrite(ctx context.Context, tx transaction, w MCPWrite, out any) (bool, error) {
 	if w.Key == "" {
 		return false, nil
 	}
 	var raw []byte
-	err := tx.QueryRow(ctx, `SELECT result FROM mcp_write_audit WHERE tool=$1 AND actor=$2 AND idempotency_key=$3`, w.Tool, w.Actor, w.Key).Scan(&raw)
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT result FROM mcp_write_audit WHERE tool=$1 AND actor=$2 AND idempotency_key=$3`,
+		`SELECT result FROM mcp_write_audit WHERE tool=? AND actor=? AND idempotency_key=?`), w.Tool, w.Actor, w.Key).Scan(&raw)
 	if errors.Is(err, ErrNoRows) {
 		return false, nil
 	}
@@ -123,10 +129,6 @@ func replayMCPWriteTx(ctx context.Context, tx pgx.Tx, w MCPWrite, out any) (bool
 // replayed reports that the key was already used; the returned result is then
 // the first call's.
 func (s *Store) RecordMCPDecisionRequest(ctx context.Context, taskID int64, in DecisionRequestInput, w MCPWrite) (DecisionRequestResult, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return DecisionRequestResult{}, false, ErrDialectUnsupported
-	}
-
 	if err := w.validate(); err != nil {
 		return DecisionRequestResult{}, false, err
 	}
@@ -135,6 +137,9 @@ func (s *Store) RecordMCPDecisionRequest(ctx context.Context, taskID int64, in D
 	}
 	if err := checkDecisionRequestWrite(taskID, w.Author, &in); err != nil {
 		return DecisionRequestResult{}, false, err
+	}
+	if s != nil && s.dialect == mysqlDialect {
+		return s.recordMCPDecisionRequestMySQL(ctx, taskID, in, w)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -172,11 +177,17 @@ func (s *Store) RecordMCPDecisionRequest(ctx context.Context, taskID int64, in D
 // a write and its record commit together. A second use of one key by the same
 // actor and tool is ErrIdempotencyKeyReused.
 func insertMCPWriteAuditTx(ctx context.Context, tx pgx.Tx, w MCPWrite, taskID int64, result any, at time.Time) error {
+	return insertMCPWriteAudit(ctx, pgTransaction{tx}, w, taskID, result, at)
+}
+
+// insertMCPWriteAudit is insertMCPWriteAuditTx on either dialect's transaction.
+func insertMCPWriteAudit(ctx context.Context, tx transaction, w MCPWrite, taskID int64, result any, at time.Time) error {
 	raw, err := json.Marshal(result)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO mcp_write_audit(tool,actor,channel,author,task_id,idempotency_key,result,at) VALUES($1,$2,$3,$4,NULLIF($5::bigint,0),$6,$7::jsonb,$8)`,
+	_, err = tx.Exec(ctx, sqlFor(tx, `INSERT INTO mcp_write_audit(tool,actor,channel,author,task_id,idempotency_key,result,at) VALUES($1,$2,$3,$4,NULLIF($5::bigint,0),$6,$7::jsonb,$8)`,
+		`INSERT INTO mcp_write_audit(tool,actor,channel,author,task_id,idempotency_key,result,at) VALUES(?,?,?,?,NULLIF(?,0),?,?,?)`),
 		w.Tool, w.Actor, w.Channel, w.Author, taskID, w.Key, string(raw), at)
 	if errors.Is(mapDriverError(err), errUniqueViolation) {
 		return ErrIdempotencyKeyReused
@@ -231,10 +242,6 @@ type TaskUpdateResult struct {
 // apply priority, state and lane through the same paths the console uses, then
 // record the audit row. Any refusal leaves the task and the ledger untouched.
 func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w MCPWrite) (TaskUpdateResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return TaskUpdateResult{}, ErrDialectUnsupported
-	}
-
 	var out TaskUpdateResult
 	if w.Tool != mcpTaskUpdateTool || id < 1 || in.ExpectedUpdatedAt.IsZero() || w.Key == "" || !validLifecycleKey(w.Key) ||
 		(in.State == "" && in.Lane == "" && in.Priority == nil) ||
@@ -248,28 +255,48 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w 
 	if err := guard.Reject(in.Note); err != nil {
 		return out, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	err := s.retryTx(ctx, func() error {
+		out = TaskUpdateResult{}
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		res, err := s.updateTaskTx(ctx, tx, id, in, w)
+		if err != nil {
+			return err
+		}
+		out = res
+		return tx.Commit(ctx)
+	})
 	if err != nil {
-		return out, err
+		return TaskUpdateResult{}, err
 	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	return out, nil
+}
+
+// updateTaskTx is UpdateTask's body inside the caller's transaction; the caller commits.
+func (s *Store) updateTaskTx(ctx context.Context, tx transaction, id int64, in TaskUpdateInput, w MCPWrite) (TaskUpdateResult, error) {
+	var out TaskUpdateResult
+	var err error
+	if err = s.lockTx(ctx, tx, 8241873001); err != nil {
 		return out, err
 	}
 	if in.State == StateMerged {
-		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
+		if err = s.lockTx(ctx, tx, taskCommentInsertLock); err != nil {
 			return out, err
 		}
 	}
 	var x Task
-	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, id), &x); err != nil {
+	if err := scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), id), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return out, ErrTaskNotFound
 		}
 		return out, err
 	}
 	var recorded TaskUpdateResult
-	replayed, err := replayMCPWriteTx(ctx, tx, w, &recorded)
+	replayed, err := replayMCPWrite(ctx, tx, w, &recorded)
 	if err != nil {
 		return out, err
 	}
@@ -279,7 +306,7 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w 
 		}
 		recorded.Replayed = true
 		recorded.Task = x
-		return recorded, tx.Commit(ctx)
+		return recorded, nil
 	}
 	if !x.UpdatedAt.Equal(in.ExpectedUpdatedAt.UTC()) {
 		return out, ErrRevisionConflict
@@ -290,13 +317,13 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w 
 	ref := mcpWriteRef(w.Actor, w.Key)
 	changed := []string{}
 	if in.Priority != nil && *in.Priority != x.Priority {
-		if err := setTaskPriorityTx(ctx, pgTransaction{tx}, &x, *in.Priority, w.Author, in.Note, mcpTaskUpdateSource, ref+":priority"); err != nil {
+		if err := setTaskPriorityTx(ctx, tx, &x, *in.Priority, w.Author, in.Note, mcpTaskUpdateSource, ref+":priority"); err != nil {
 			return out, err
 		}
 		changed = append(changed, "priority")
 	}
 	if in.State != "" && in.State != x.State {
-		if _, err := s.transitionTaskTx(ctx, pgTransaction{tx}, id, TransitionInput{To: in.State, By: w.Author, Note: in.Note, Source: mcpTaskUpdateSource, SourceRef: ref + ":state"}, false); err != nil {
+		if _, err := s.transitionTaskTx(ctx, tx, id, TransitionInput{To: in.State, By: w.Author, Note: in.Note, Source: mcpTaskUpdateSource, SourceRef: ref + ":state"}, false); err != nil {
 			return out, err
 		}
 		changed = append(changed, "state")
@@ -307,7 +334,7 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w 
 		if strings.TrimSpace(laneNote) == "" {
 			laneNote = "lane changed by task_update"
 		}
-		_, laneChanged, err := s.relaneTaskTx(ctx, pgTransaction{tx}, id, in.Lane, w.Author, laneNote, false, mcpTaskUpdateSource, ref+":lane")
+		_, laneChanged, err := s.relaneTaskTx(ctx, tx, id, in.Lane, w.Author, laneNote, false, mcpTaskUpdateSource, ref+":lane")
 		if err != nil {
 			return out, err
 		}
@@ -316,12 +343,12 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, in TaskUpdateInput, w 
 		}
 	}
 	var final Task
-	if err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, id), &final); err != nil {
+	if err := scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1`, `SELECT `+taskColumns+` FROM tasks WHERE id=?`), id), &final); err != nil {
 		return out, err
 	}
 	out = TaskUpdateResult{TaskID: id, Changed: changed, Revision: final.UpdatedAt, Task: final}
-	if err := insertMCPWriteAuditTx(ctx, tx, w, id, out, time.Now().UTC()); err != nil {
+	if err := insertMCPWriteAudit(ctx, tx, w, id, out, time.Now().UTC()); err != nil {
 		return TaskUpdateResult{}, err
 	}
-	return out, tx.Commit(ctx)
+	return out, nil
 }
