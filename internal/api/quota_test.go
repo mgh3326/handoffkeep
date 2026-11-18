@@ -85,7 +85,7 @@ func TestQuotaBalanceAPIPostgres(t *testing.T) {
 	ctx := context.Background()
 	const key = "codex:dddddddddddddddd"
 	const holder = "dddddddddddddddddddddddddddddddd"
-	if _, err := st.LeaseQuota(ctx, key, "publisher", holder, 120); err != nil {
+	if _, err := st.LeaseQuota(ctx, key, "writer", holder, 120); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(Server{
