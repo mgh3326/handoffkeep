@@ -10,8 +10,22 @@ func init() {
 	registerMySQLMigration(mysqlMigration{
 		id:    "20261117-mysql-changes",
 		after: []string{"20261118-mysql-tasks"},
-		steps: mysqlChangesSteps,
+		steps: append(append([]string{}, mysqlChangesSteps...), mysqlChangesTriggers...),
 	})
+}
+
+// The change gate trigger is hoisted so the collation migration can rebuild
+// it under the pinned connection collation (design §11.4, hk 5169).
+var mysqlChangesTriggers = []string{
+	`CREATE TRIGGER IF NOT EXISTS change_gate_events_record AFTER UPDATE ON changes FOR EACH ROW
+		BEGIN
+			IF COALESCE(@hk_bulk_load,0) <> 1 AND NEW.gate_state IS NOT NULL AND NEW.gate_head IS NOT NULL AND NEW.gate_decided_at IS NOT NULL
+			AND (NOT (OLD.gate_state <=> NEW.gate_state) OR NOT (OLD.gate_head <=> NEW.gate_head) OR NOT (OLD.gate_decided_at <=> NEW.gate_decided_at)) THEN
+				INSERT INTO change_gate_events(change_id,head_sha,state,changed,reasons,policy_revision,decided_at,source)
+				VALUES(NEW.id,NEW.gate_head,NEW.gate_state,NOT (OLD.gate_state <=> NEW.gate_state) OR NOT (OLD.gate_head <=> NEW.gate_head),COALESCE(NEW.gate_reasons,JSON_ARRAY()),NEW.gate_policy_revision,NEW.gate_decided_at,COALESCE(NEW.gate_source,'review'))
+				ON DUPLICATE KEY UPDATE id=id;
+			END IF;
+		END`,
 }
 
 var mysqlChangesSteps = []string{
@@ -120,13 +134,4 @@ var mysqlChangesSteps = []string{
 		('mergewake','mgh3326/mergewake',JSON_ARRAY('deploy/mergewake/'),TRUE,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)),
 		('pacelever','mgh3326/pacelever',JSON_ARRAY('deploy/pacelever/'),TRUE,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))
 		ON DUPLICATE KEY UPDATE name=name`,
-	`CREATE TRIGGER IF NOT EXISTS change_gate_events_record AFTER UPDATE ON changes FOR EACH ROW
-		BEGIN
-			IF COALESCE(@hk_bulk_load,0) <> 1 AND NEW.gate_state IS NOT NULL AND NEW.gate_head IS NOT NULL AND NEW.gate_decided_at IS NOT NULL
-			AND (NOT (OLD.gate_state <=> NEW.gate_state) OR NOT (OLD.gate_head <=> NEW.gate_head) OR NOT (OLD.gate_decided_at <=> NEW.gate_decided_at)) THEN
-				INSERT INTO change_gate_events(change_id,head_sha,state,changed,reasons,policy_revision,decided_at,source)
-				VALUES(NEW.id,NEW.gate_head,NEW.gate_state,NOT (OLD.gate_state <=> NEW.gate_state) OR NOT (OLD.gate_head <=> NEW.gate_head),COALESCE(NEW.gate_reasons,JSON_ARRAY()),NEW.gate_policy_revision,NEW.gate_decided_at,COALESCE(NEW.gate_source,'review'))
-				ON DUPLICATE KEY UPDATE id=id;
-			END IF;
-		END`,
 }

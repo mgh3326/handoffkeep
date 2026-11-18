@@ -3,6 +3,7 @@ package store
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
@@ -83,6 +84,20 @@ func TestYTWritePathPlanUsesIndexes(t *testing.T) {
 				"Seq Scan on yt_comment_write_links",
 				"Seq Scan on yt_write_ops",
 				"yt_write_ops_principal_kind_idem_key_key",
+			},
+		},
+		{
+			// The alert tick's payload redaction batch: the partial index
+			// serves it, so the every-tick scan never reads the op log whole.
+			name: "payload redaction candidates",
+			sql: `UPDATE yt_write_ops SET payload = NULL WHERE id IN (
+				SELECT id FROM yt_write_ops
+				WHERE state IN ('applied','rejected') AND payload IS NOT NULL AND resolved_at <= $1
+				ORDER BY id LIMIT $2)`,
+			args: []any{time.Now().UTC().Add(-31 * 24 * time.Hour), 500},
+			want: "yt_write_ops_payload_redact",
+			forbid: []string{
+				"Seq Scan on yt_write_ops",
 			},
 		},
 	} {

@@ -67,11 +67,13 @@ func normalisePRRefTx(ctx context.Context, tx transaction, project *string, pr s
 const taskDeliveredPRSQL = `COALESCE(NULLIF(t.refs->>'pr',''), (SELECT p.refs->>'pr' FROM tasks p WHERE p.id=t.parent_id AND p.title LIKE '[bundle %'), '')`
 
 // mysqlRefsPRSQL reads refs.pr of the task aliased t as a string; a missing
-// key and a JSON null are both SQL NULL, as PostgreSQL's ->> gives.
-const mysqlRefsPRSQL = `IF(JSON_TYPE(JSON_EXTRACT(t.refs,'$.pr'))='STRING', JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.pr')), NULL)`
+// key and a JSON null are both SQL NULL, as PostgreSQL's ->> gives. The JSON
+// calls are pinned to utf8mb4_0900_bin: JSON strings carry utf8mb4_bin, which
+// no longer mixes with the connection collation (design §11.4, hk 5169).
+const mysqlRefsPRSQL = `IF(JSON_TYPE(JSON_EXTRACT(t.refs,'$.pr')) COLLATE utf8mb4_0900_bin='STRING', JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.pr')) COLLATE utf8mb4_0900_bin, NULL)`
 
 // taskDeliveredPRMySQLSQL is taskDeliveredPRSQL for MySQL.
-const taskDeliveredPRMySQLSQL = `COALESCE(NULLIF(` + mysqlRefsPRSQL + `,''), (SELECT IF(JSON_TYPE(JSON_EXTRACT(p.refs,'$.pr'))='STRING', JSON_UNQUOTE(JSON_EXTRACT(p.refs,'$.pr')), NULL) FROM tasks p WHERE p.id=t.parent_id AND p.title LIKE '[bundle %'), '')`
+const taskDeliveredPRMySQLSQL = `COALESCE(NULLIF(` + mysqlRefsPRSQL + `,''), (SELECT IF(JSON_TYPE(JSON_EXTRACT(p.refs,'$.pr')) COLLATE utf8mb4_0900_bin='STRING', JSON_UNQUOTE(JSON_EXTRACT(p.refs,'$.pr')) COLLATE utf8mb4_0900_bin, NULL) FROM tasks p WHERE p.id=t.parent_id AND p.title LIKE '[bundle %'), '')`
 
 // deliveredPRTx is taskDeliveredPRSQL for one task.
 func deliveredPRTx(ctx context.Context, tx transaction, taskID int64) (string, error) {
