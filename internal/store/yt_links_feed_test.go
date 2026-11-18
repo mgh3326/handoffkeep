@@ -320,7 +320,7 @@ func TestYTLinksSweepRestartsWhenGenerationMovesMidWalk(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer tx.Rollback(ctx)
-		if err := bumpYTLinksSweepTx(ctx, tx, time.Now().UTC()); err != nil {
+		if err := bumpYTLinksSweepTx(ctx, pgTransaction{tx}, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -375,7 +375,7 @@ func TestYTLinksSweepLastSliceFencedByGeneration(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer tx.Rollback(ctx)
-			if err := bumpYTLinksSweepTx(ctx, tx, time.Now().UTC()); err != nil {
+			if err := bumpYTLinksSweepTx(ctx, pgTransaction{tx}, time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			if err := tx.Commit(ctx); err != nil {
@@ -409,7 +409,7 @@ func TestYTLinksSweepIsIdempotent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := bumpYTLinksSweepTx(ctx, tx, time.Now().UTC()); err != nil {
+		if err := bumpYTLinksSweepTx(ctx, pgTransaction{tx}, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 		if err := tx.Commit(ctx); err != nil {

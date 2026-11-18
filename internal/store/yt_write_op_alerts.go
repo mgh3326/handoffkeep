@@ -48,10 +48,6 @@ var ytWriteOpAlertPointer = map[string]string{
 // candidate read. Two passes that straddle a window boundary would otherwise
 // both read an op as unmarked and announce it in two windows.
 func (s *Store) EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		// The notice lands in notification_outbox, which is not ported.
-		return 0, ErrDialectUnsupported
-	}
 	now = now.UTC()
 	tx, release, err := s.begin(ctx)
 	if err != nil {
@@ -74,7 +70,7 @@ func (s *Store) EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int,
 			continue
 		}
 		eventID := fmt.Sprintf("yt-ops-%s-%d", class, window.Unix())
-		inserted, err := insertNotificationOutboxOnce(ctx, pgxTx(tx), OutboxKindYTWriteOp, "handoffkeep-design", eventID, ytWriteOpAlertText(class, cands), now)
+		inserted, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindYTWriteOp, "handoffkeep-design", eventID, ytWriteOpAlertText(class, cands), now)
 		if err != nil {
 			return 0, err
 		}

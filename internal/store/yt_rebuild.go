@@ -6,14 +6,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
 // The restore drill (hk 4121, `handoffkeep youtrack audit --rebuild`,
 // docs/youtrack-write-protocol.md §Rebuild audit) rebuilds from YouTrack
-// what hk needs and diffs it against these reads. The reads give the PG side
+// what hk needs and diffs it against these reads. The reads give hk's side
 // and the id maps (bindings, op links); nothing here reads YouTrack. Every
 // read is a plain read, so a read-only store (OpenReadOnly) runs the drill.
 
@@ -35,16 +33,19 @@ type YTRebuildTask struct {
 // most limit. The caller pages with the last id until a page comes back
 // short.
 func (s *Store) YTRebuildTasks(ctx context.Context, tenant, project string, afterID int64, limit int) ([]YTRebuildTask, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if tenant == "" || afterID < 0 || limit < 1 || limit > YTRebuildTaskPageMax {
 		return nil, errors.New("invalid rebuild task filter")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT t.id, t.title, coalesce(t.project,''), b.issue_id, b.issue_readable
+	args := []any{tenant, project, afterID, limit}
+	if s.dialect == mysqlDialect {
+		// The MySQL twin repeats the project for its second placeholder.
+		args = []any{tenant, project, project, afterID, limit}
+	}
+	rows, err := s.db().Query(ctx, sqlFor(s, `SELECT t.id, t.title, coalesce(t.project,''), b.issue_id, b.issue_readable
 		FROM yt_task_bindings b JOIN tasks t ON t.id = b.task_id
-		WHERE b.tenant = $1 AND ($2 = '' OR t.project = $2) AND t.id > $3 ORDER BY t.id LIMIT $4`, tenant, project, afterID, limit)
+		WHERE b.tenant = $1 AND ($2 = '' OR t.project = $2) AND t.id > $3 ORDER BY t.id LIMIT $4`, `SELECT t.id, t.title, coalesce(t.project,''), b.issue_id, b.issue_readable
+		FROM yt_task_bindings b JOIN tasks t ON t.id = b.task_id
+		WHERE b.tenant = ? AND (? = '' OR t.project = ?) AND t.id > ? ORDER BY t.id LIMIT ?`), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -79,14 +80,15 @@ type YTRebuildSample struct {
 // data, and the run that printed a seed can be repeated. Result in task id
 // order.
 func (s *Store) YTRebuildSampleTasks(ctx context.Context, tenant, project string, seed int64, n, top int) ([]YTRebuildSample, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if tenant == "" || n < 0 || top < 0 || n > YTRebuildSampleMax || top > YTRebuildSampleMax {
 		return nil, errors.New("invalid rebuild sample")
 	}
-	rows, err := s.pool.Query(ctx, `WITH bound AS (
+	seedText := strconv.FormatInt(seed, 10)
+	args := []any{tenant, project, seedText, YouTrackOwnedActor, top, n}
+	if s.dialect == mysqlDialect {
+		args = []any{YouTrackOwnedActor, tenant, project, project, top, seedText, n}
+	}
+	rows, err := s.db().Query(ctx, sqlFor(s, `WITH bound AS (
 			SELECT t.id, t.title, coalesce(t.project,'') AS project, b.issue_id, b.issue_readable,
 				(SELECT count(*) FROM task_comments c WHERE c.task_id = t.id AND c.author <> $4) AS n
 			FROM yt_task_bindings b JOIN tasks t ON t.id = b.task_id
@@ -96,7 +98,16 @@ func (s *Store) YTRebuildSampleTasks(ctx context.Context, tenant, project string
 			ORDER BY md5($3::text || ':' || id::text), id LIMIT $6)
 		SELECT b.id, b.title, b.project, b.issue_id, b.issue_readable, b.id IN (SELECT id FROM top)
 		FROM bound b WHERE b.id IN (SELECT id FROM top) OR b.id IN (SELECT id FROM rnd) ORDER BY b.id`,
-		tenant, project, strconv.FormatInt(seed, 10), YouTrackOwnedActor, top, n)
+		`WITH bound AS (
+			SELECT t.id, t.title, coalesce(t.project,'') AS project, b.issue_id, b.issue_readable,
+				(SELECT count(*) FROM task_comments c WHERE c.task_id = t.id AND c.author <> ?) AS n
+			FROM yt_task_bindings b JOIN tasks t ON t.id = b.task_id
+			WHERE b.tenant = ? AND (? = '' OR t.project = ?)),
+		top AS (SELECT id FROM bound WHERE n > 0 ORDER BY n DESC, id LIMIT ?),
+		rnd AS (SELECT id FROM bound WHERE id NOT IN (SELECT id FROM top)
+			ORDER BY MD5(CONCAT(?, ':', id)), id LIMIT ?)
+		SELECT b.id, b.title, b.project, b.issue_id, b.issue_readable, b.id IN (SELECT id FROM top)
+		FROM bound b WHERE b.id IN (SELECT id FROM top) OR b.id IN (SELECT id FROM rnd) ORDER BY b.id`), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -161,24 +172,30 @@ type YTRebuildComments struct {
 // YTRebuildTaskComments reads task taskID's comments for the drill against
 // issue issueID.
 func (s *Store) YTRebuildTaskComments(ctx context.Context, taskID int64, issueID string) (YTRebuildComments, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTRebuildComments{}, ErrDialectUnsupported
-	}
-
 	out := YTRebuildComments{Comments: []YTRebuildComment{}, PulledYTIDs: map[string]bool{}, IssueOps: map[int64]bool{}, Docs: []YTRebuildTaskDoc{}}
-	rows, err := s.pool.Query(ctx, `SELECT c.id, c.author, c.body, c.created_at, coalesce(o.id, 0), coalesce(o.created_at, c.created_at),
+	args := []any{taskID, ytwrite.KindCommentAppend, issueID}
+	if s.dialect == mysqlDialect {
+		// The MySQL twin numbers its placeholders in statement order.
+		args = []any{ytwrite.KindCommentAppend, issueID, taskID}
+	}
+	rs, err := s.db().Query(ctx, sqlFor(s, `SELECT c.id, c.author, c.body, c.created_at, coalesce(o.id, 0), coalesce(o.created_at, c.created_at),
 			coalesce((SELECT l.youtrack_comment_id FROM youtrack_comment_links l WHERE l.hk_comment_id = c.id), '')
 		FROM task_comments c
 		LEFT JOIN LATERAL (SELECT o.id, o.created_at FROM yt_comment_write_links w JOIN yt_write_ops o ON o.id = w.op_id
 			WHERE w.comment_id = c.id AND o.kind = $2 AND o.yt_target_id = $3 ORDER BY o.id LIMIT 1) o ON true
-		WHERE c.task_id = $1 ORDER BY c.id`, taskID, ytwrite.KindCommentAppend, issueID)
+		WHERE c.task_id = $1 ORDER BY c.id`, `SELECT c.id, c.author, c.body, c.created_at, coalesce(lop.id, 0), coalesce(lop.created_at, c.created_at),
+			coalesce((SELECT l.youtrack_comment_id FROM youtrack_comment_links l WHERE l.hk_comment_id = c.id), '')
+		FROM task_comments c
+		LEFT JOIN LATERAL (SELECT o.id, o.created_at FROM yt_comment_write_links w JOIN yt_write_ops o ON o.id = w.op_id
+			WHERE w.comment_id = c.id AND o.kind = ? AND o.yt_target_id = ? ORDER BY o.id LIMIT 1) lop ON true
+		WHERE c.task_id = ? ORDER BY c.id`), args...)
 	if err != nil {
 		return YTRebuildComments{}, err
 	}
-	defer rows.Close()
-	for rows.Next() {
+	defer rs.Close()
+	for rs.Next() {
 		var c YTRebuildComment
-		if err := rows.Scan(&c.ID, &c.Author, &c.Body, &c.CreatedAt, &c.OpID, &c.OpCreatedAt, &c.LegacyYTID); err != nil {
+		if err := rs.Scan(&c.ID, &c.Author, &c.Body, &c.CreatedAt, &c.OpID, &c.OpCreatedAt, &c.LegacyYTID); err != nil {
 			return YTRebuildComments{}, err
 		}
 		c.CreatedAt, c.OpCreatedAt = c.CreatedAt.UTC(), c.OpCreatedAt.UTC()
@@ -190,43 +207,45 @@ func (s *Store) YTRebuildTaskComments(ctx context.Context, taskID int64, issueID
 		}
 		out.Comments = append(out.Comments, c)
 	}
-	if err := rows.Err(); err != nil {
+	if err := rs.Err(); err != nil {
 		return YTRebuildComments{}, err
 	}
-	rows.Close()
-	if err := s.ytRebuildEach(ctx, func(rows pgx.Rows) error {
+	rs.Close()
+	if err := s.ytRebuildEach(ctx, func(r rows) error {
 		var id int64
-		err := rows.Scan(&id)
+		err := r.Scan(&id)
 		out.IssueOps[id] = true
 		return err
-	}, `SELECT id FROM yt_write_ops WHERE kind = $1 AND yt_target_id = $2`, ytwrite.KindCommentAppend, issueID); err != nil {
+	}, sqlFor(s, `SELECT id FROM yt_write_ops WHERE kind = $1 AND yt_target_id = $2`,
+		`SELECT id FROM yt_write_ops WHERE kind = ? AND yt_target_id = ?`), ytwrite.KindCommentAppend, issueID); err != nil {
 		return YTRebuildComments{}, err
 	}
-	if err := s.ytRebuildEach(ctx, func(rows pgx.Rows) error {
+	if err := s.ytRebuildEach(ctx, func(r rows) error {
 		var d YTRebuildTaskDoc
-		err := rows.Scan(&d.Key, &d.Kind, &d.Body, &d.CreatedBy, &d.CreatedAt)
+		err := r.Scan(&d.Key, &d.Kind, &d.Body, &d.CreatedBy, &d.CreatedAt)
 		d.CreatedAt = d.CreatedAt.UTC()
 		out.Docs = append(out.Docs, d)
 		return err
-	}, `SELECT key, kind, body, created_by, created_at FROM documents WHERE task_id = $1 ORDER BY id`, taskID); err != nil {
+	}, sqlFor(s, `SELECT key, kind, body, created_by, created_at FROM documents WHERE task_id = $1 ORDER BY id`,
+		`SELECT key, kind, body, created_by, created_at FROM documents WHERE task_id = ? ORDER BY id`), taskID); err != nil {
 		return YTRebuildComments{}, err
 	}
 	return out, nil
 }
 
 // ytRebuildEach runs q and calls scan for each row.
-func (s *Store) ytRebuildEach(ctx context.Context, scan func(pgx.Rows) error, q string, args ...any) error {
-	rows, err := s.pool.Query(ctx, q, args...)
+func (s *Store) ytRebuildEach(ctx context.Context, scan func(r rows) error, q string, args ...any) error {
+	rs, err := s.db().Query(ctx, q, args...)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		if err := scan(rows); err != nil {
+	defer rs.Close()
+	for rs.Next() {
+		if err := scan(rs); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	return rs.Err()
 }
 
 // YTRebuildDocument is one document bound to an article on the drill's
@@ -257,18 +276,23 @@ type YTRebuildDocument struct {
 // comes with migration 20261112-yt-article-bindings (hk 4053); the caller
 // checks it is applied first.
 func (s *Store) YTRebuildDocuments(ctx context.Context, tenant, project string, afterID int64, limit int) ([]YTRebuildDocument, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if tenant == "" || afterID < 0 || limit < 1 || limit > YTRebuildTaskPageMax {
 		return nil, errors.New("invalid rebuild document filter")
 	}
-	// Only a body quoting the marker is read, to escape it.
-	rows, err := s.pool.Query(ctx, `SELECT d.id, d.key, d.sha256, octet_length(d.body), b.article_id, b.content_sha IS NULL, b.origin,
+	// Only a body quoting the marker is read, to escape it. MySQL has no
+	// octet_length or strpos: LENGTH is the byte count and LOCATE the
+	// position, both 0 when absent.
+	args := []any{tenant, project, afterID, limit, ytwrite.OpMarkerPrefix}
+	if s.dialect == mysqlDialect {
+		args = []any{ytwrite.OpMarkerPrefix, tenant, project, project, afterID, limit}
+	}
+	rows, err := s.db().Query(ctx, sqlFor(s, `SELECT d.id, d.key, d.sha256, octet_length(d.body), b.article_id, b.content_sha IS NULL, b.origin,
 			CASE WHEN strpos(d.body, $5) > 0 THEN d.body END
 		FROM yt_article_bindings b JOIN documents d ON d.id = b.document_id LEFT JOIN tasks t ON t.id = d.task_id
-		WHERE b.tenant = $1 AND ($2 = '' OR t.project = $2) AND d.id > $3 ORDER BY d.id LIMIT $4`, tenant, project, afterID, limit, ytwrite.OpMarkerPrefix)
+		WHERE b.tenant = $1 AND ($2 = '' OR t.project = $2) AND d.id > $3 ORDER BY d.id LIMIT $4`, `SELECT d.id, d.key, d.sha256, LENGTH(d.body), b.article_id, b.content_sha IS NULL, b.origin,
+			CASE WHEN LOCATE(?, d.body) > 0 THEN d.body END
+		FROM yt_article_bindings b JOIN documents d ON d.id = b.document_id LEFT JOIN tasks t ON t.id = d.task_id
+		WHERE b.tenant = ? AND (? = '' OR t.project = ?) AND d.id > ? ORDER BY d.id LIMIT ?`), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -292,17 +316,18 @@ func (s *Store) YTRebuildDocuments(ctx context.Context, tenant, project string, 
 // "documents" (every document; only those of project's tasks when project
 // is not "") or "decisions" (every decision request, whatever project).
 func (s *Store) YTRebuildCount(ctx context.Context, what, project string) (int, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return 0, ErrDialectUnsupported
-	}
-
 	var n int
 	var err error
 	switch what {
 	case "documents":
-		err = s.pool.QueryRow(ctx, `SELECT count(*) FROM documents d LEFT JOIN tasks t ON t.id = d.task_id WHERE $1 = '' OR t.project = $1`, project).Scan(&n)
+		args := []any{project}
+		if s.dialect == mysqlDialect {
+			args = []any{project, project}
+		}
+		err = s.db().QueryRow(ctx, sqlFor(s, `SELECT count(*) FROM documents d LEFT JOIN tasks t ON t.id = d.task_id WHERE $1 = '' OR t.project = $1`,
+			`SELECT count(*) FROM documents d LEFT JOIN tasks t ON t.id = d.task_id WHERE ? = '' OR t.project = ?`), args...).Scan(&n)
 	case "decisions":
-		err = s.pool.QueryRow(ctx, `SELECT count(*) FROM decision_requests`).Scan(&n)
+		err = s.db().QueryRow(ctx, `SELECT count(*) FROM decision_requests`).Scan(&n)
 	default:
 		err = errors.New("invalid rebuild count")
 	}
@@ -332,20 +357,28 @@ var ytRebuildDecisionsSeam func(ctx context.Context)
 // repeatable-read transaction, so a page's bindings and decisions are read
 // at one snapshot (the same options ListDecisionTab uses).
 func (s *Store) YTRebuildDecisions(ctx context.Context, tenant string, afterID int64, limit int) ([]YTRebuildDecision, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if tenant == "" || afterID < 0 || limit < 1 || limit > YTRebuildTaskPageMax {
 		return nil, errors.New("invalid rebuild decision filter")
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	// One transaction for the page's bindings and its decision rows, so both
+	// are read at one snapshot. MySQL's InnoDB runs REPEATABLE READ and fixes
+	// the snapshot at the first read, the bindings page; PostgreSQL is raised
+	// to the read-only repeatable-read options the drill always used.
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT decision_id::bigint, issue_id FROM yt_decision_bindings
-		WHERE tenant = $1 AND decision_id::bigint > $2 ORDER BY decision_id::bigint LIMIT $3`, tenant, afterID, limit)
+	if dialectFor(tx) == postgresDialect {
+		if _, err := tx.Exec(ctx, `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY`); err != nil {
+			return nil, err
+		}
+	}
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT decision_id::bigint, issue_id FROM yt_decision_bindings
+		WHERE tenant = $1 AND decision_id::bigint > $2 ORDER BY decision_id::bigint LIMIT $3`,
+		`SELECT CAST(decision_id AS UNSIGNED), issue_id FROM yt_decision_bindings
+		WHERE tenant = ? AND CAST(decision_id AS UNSIGNED) > ? ORDER BY CAST(decision_id AS UNSIGNED) LIMIT ?`), tenant, afterID, limit)
 	if err != nil {
 		return nil, err
 	}

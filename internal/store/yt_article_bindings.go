@@ -10,8 +10,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -190,6 +188,17 @@ const ytArticleBucketSQL = `CASE WHEN d.task_id IS NULL THEN '/shared' WHEN t.pr
 const ytArticleCandidateSQL = `SELECT d.id, d.key, d.kind, d.sha256, octet_length(d.body), coalesce(d.task_id, 0), ` + ytArticleBucketSQL + `,
 		coalesce(p.short_name, ''), coalesce(p.yt_project_id, '')`
 
+// ytArticleCandidateSQLMySQL is ytArticleCandidateSQL's MySQL twin (hk 5077):
+// LENGTH is octet_length and `key` is quoted because MySQL reserves it.
+const ytArticleCandidateSQLMySQL = "SELECT d.id, d.`key`, d.kind, d.sha256, LENGTH(d.body), coalesce(d.task_id, 0), " + ytArticleBucketSQL + `,
+		coalesce(p.short_name, ''), coalesce(p.yt_project_id, '')`
+
+// ytArticleCandidateSQLFor picks the candidate text for the querier's
+// dialect.
+func ytArticleCandidateSQLFor(q any) string {
+	return sqlFor(q, ytArticleCandidateSQL, ytArticleCandidateSQLMySQL)
+}
+
 const ytArticleCandidateFrom = ` FROM documents d LEFT JOIN tasks t ON t.id = d.task_id LEFT JOIN youtrack_projects p ON p.hk_project = t.project`
 
 func scanYTArticleCandidate(row interface{ Scan(...any) error }, c *YTArticleCandidate, extra ...any) error {
@@ -204,16 +213,18 @@ const YTArticleDocPageMax = 1000
 // not "", keeps one bucket's (an hk project, /shared or /unassigned).
 // Excluded documents are listed too: the caller counts them. Plain reads.
 func (s *Store) YTArticleDocs(ctx context.Context, bucket string, afterID int64, limit int) ([]YTArticleDoc, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if afterID < 0 || limit < 1 || limit > YTArticleDocPageMax {
 		return nil, errors.New("invalid article document filter")
 	}
-	rows, err := s.pool.Query(ctx, ytArticleCandidateSQL+`, d.created_at, coalesce(b.tenant, ''), b.document_id IS NOT NULL AND b.content_sha IS NULL`+ytArticleCandidateFrom+`
+	query := ytArticleCandidateSQLFor(s.db()) + `, d.created_at, coalesce(b.tenant, ''), b.document_id IS NOT NULL AND b.content_sha IS NULL` + ytArticleCandidateFrom + `
 			LEFT JOIN yt_article_bindings b ON b.document_id = d.id
-			WHERE d.id > $2 AND ($1 = '' OR `+ytArticleBucketSQL+` = $1) ORDER BY d.id LIMIT $3`, bucket, afterID, limit)
+			WHERE d.id > $2 AND ($1 = '' OR ` + ytArticleBucketSQL + ` = $1) ORDER BY d.id LIMIT $3`
+	args := []any{bucket, afterID, limit}
+	if s.dialect == mysqlDialect {
+		// MySQL's placeholders are positional: $2 comes before $1 in the text.
+		query, args = ytMySQLArgs(query, args...)
+	}
+	rows, err := s.db().Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +251,8 @@ func scanYTArticleBinding(row interface{ Scan(...any) error }, b *YTArticleBindi
 
 func readYTArticleBinding(ctx context.Context, q ytRowQuerier, documentID int64) (YTArticleBinding, bool, error) {
 	var b YTArticleBinding
-	err := scanYTArticleBinding(q.QueryRow(ctx, `SELECT `+ytArticleBindingColumns+` FROM yt_article_bindings WHERE document_id=$1`, documentID), &b)
+	err := scanYTArticleBinding(q.QueryRow(ctx, sqlFor(q, `SELECT `+ytArticleBindingColumns+` FROM yt_article_bindings WHERE document_id=$1`,
+		`SELECT `+ytArticleBindingColumns+` FROM yt_article_bindings WHERE document_id=?`), documentID), &b)
 	if errors.Is(err, ErrNoRows) {
 		return YTArticleBinding{}, false, nil
 	}
@@ -253,11 +265,7 @@ func readYTArticleBinding(ctx context.Context, q ytRowQuerier, documentID int64)
 // YTArticleBinding reads a document's binding; found is false when it has
 // none.
 func (s *Store) YTArticleBinding(ctx context.Context, documentID int64) (YTArticleBinding, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTArticleBinding{}, false, ErrDialectUnsupported
-	}
-
-	return readYTArticleBinding(ctx, pgQuerier{pool: s.pool}, documentID)
+	return readYTArticleBinding(ctx, s.db(), documentID)
 }
 
 // lockYTArticleSourcesTx takes FOR SHARE, to commit, on what a candidate is
@@ -267,9 +275,10 @@ func (s *Store) YTArticleBinding(ctx context.Context, documentID int64) (YTArtic
 // then its task through the foreign key); FOR SHARE on the task row blocks a
 // project change, and no task or mapping writer locks a documents row while
 // it holds either (lockorder.go).
-func lockYTArticleSourcesTx(ctx context.Context, tx pgx.Tx, documentID int64) error {
+func lockYTArticleSourcesTx(ctx context.Context, tx transaction, documentID int64) error {
 	var taskID *int64
-	err := tx.QueryRow(ctx, `SELECT task_id FROM documents WHERE id=$1 FOR SHARE`, documentID).Scan(&taskID)
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT task_id FROM documents WHERE id=$1 FOR SHARE`,
+		`SELECT task_id FROM documents WHERE id=? FOR SHARE`), documentID).Scan(&taskID)
 	if errors.Is(err, ErrNoRows) {
 		return fmt.Errorf("%w: document %d no longer exists", ErrYTArticleBindingConflict, documentID)
 	}
@@ -277,14 +286,20 @@ func lockYTArticleSourcesTx(ctx context.Context, tx pgx.Tx, documentID int64) er
 		return err
 	}
 	var project *string
-	err = tx.QueryRow(ctx, `SELECT project FROM tasks WHERE id=$1 FOR SHARE`, *taskID).Scan(&project)
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT project FROM tasks WHERE id=$1 FOR SHARE`,
+		`SELECT project FROM tasks WHERE id=? FOR SHARE`), *taskID).Scan(&project)
 	if errors.Is(err, ErrNoRows) || (err == nil && project == nil) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `SELECT 1 FROM youtrack_projects WHERE hk_project=$1 FOR SHARE`, *project)
+	var one int
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT 1 FROM youtrack_projects WHERE hk_project=$1 FOR SHARE`,
+		`SELECT 1 FROM youtrack_projects WHERE hk_project=? FOR SHARE`), *project).Scan(&one)
+	if errors.Is(err, ErrNoRows) {
+		return nil
+	}
 	return err
 }
 
@@ -320,10 +335,6 @@ var ytSHA256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // can change between the comparison and the insert; then the new binding
 // row (a concurrent insert of the same key waits on the unique index).
 func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, verified YTArticleCandidate) (YTArticleBinding, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTArticleBinding{}, ErrDialectUnsupported
-	}
-
 	if b.DocumentID < 1 || verified.DocumentID != b.DocumentID || b.Tenant == "" || len(b.Tenant) > 255 || b.ArticleID == "" || len(b.ArticleID) > 64 ||
 		len(b.ArticleReadable) > 64 || b.ProjectID == "" || len(b.ProjectID) > 64 || b.Part < 0 || b.Generation != 0 ||
 		(b.ContentSHA != "" && !ytSHA256Hex.MatchString(b.ContentSHA)) || b.BoundBy == "" || !validText(b.BoundBy, 200) {
@@ -332,19 +343,20 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 	if YTArticleExcluded(verified.Key, verified.TaskID) {
 		return YTArticleBinding{}, fmt.Errorf("invalid article binding: document %d (%s) has no imported article", b.DocumentID, verified.Key)
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return YTArticleBinding{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if err := lockYTEntity(ctx, pgTransaction{tx}, ytwrite.ArticleEntity, strconv.FormatInt(b.DocumentID, 10)); err != nil {
+	if err := lockYTEntity(ctx, tx, ytwrite.ArticleEntity, strconv.FormatInt(b.DocumentID, 10)); err != nil {
 		return YTArticleBinding{}, err
 	}
 	// FOR SHARE on the documents authority row before the binding exists
 	// (r4547807096): a switch (FOR UPDATE) either commits first, and this
 	// transaction then sees documents canonical in YouTrack and queues no
 	// update, or waits for the binding and its update and counts them.
-	side, err := ytAuthorityShareTx(ctx, pgTransaction{tx}, YTAuthorityDocuments)
+	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityDocuments)
 	if err != nil {
 		return YTArticleBinding{}, err
 	}
@@ -352,15 +364,16 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 		return YTArticleBinding{}, err
 	}
 	var pending bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$1 AND entity_kind=$2 AND entity_id=$3
-		AND state NOT IN ('applied','rejected'))`, ytwrite.KindArticleCreate, ytwrite.ArticleEntity, strconv.FormatInt(b.DocumentID, 10)).Scan(&pending); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$1 AND entity_kind=$2 AND entity_id=$3
+		AND state NOT IN ('applied','rejected'))`, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=? AND entity_kind=? AND entity_id=?
+		AND state NOT IN ('applied','rejected'))`), ytwrite.KindArticleCreate, ytwrite.ArticleEntity, strconv.FormatInt(b.DocumentID, 10)).Scan(&pending); err != nil {
 		return YTArticleBinding{}, err
 	}
 	if pending {
 		return YTArticleBinding{}, fmt.Errorf("%w: document %d has an unresolved article_create op", ErrYTArticleBindingConflict, b.DocumentID)
 	}
 	var current YTArticleCandidate
-	err = scanYTArticleCandidate(tx.QueryRow(ctx, ytArticleCandidateSQL+ytArticleCandidateFrom+` WHERE d.id = $1`, b.DocumentID), &current)
+	err = scanYTArticleCandidate(tx.QueryRow(ctx, ytArticleCandidateSQLFor(tx)+ytArticleCandidateFrom+` WHERE d.id = `+sqlFor(tx, `$1`, `?`), b.DocumentID), &current)
 	if errors.Is(err, ErrNoRows) {
 		return YTArticleBinding{}, fmt.Errorf("%w: document %d no longer exists", ErrYTArticleBindingConflict, b.DocumentID)
 	}
@@ -379,8 +392,10 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 		// decided here: the binding is refused, and the document stays an
 		// unbound exception for the operator.
 		var after bool
-		if err := tx.QueryRow(ctx, `SELECT d.updated_at > a.switched_at FROM documents d, yt_authority a
-			WHERE d.id=$1 AND a.kind='documents' AND a.switched_at IS NOT NULL`, b.DocumentID).Scan(&after); err != nil && !errors.Is(err, ErrNoRows) {
+		if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT d.updated_at > a.switched_at FROM documents d, yt_authority a
+			WHERE d.id=$1 AND a.kind='documents' AND a.switched_at IS NOT NULL`,
+			`SELECT d.updated_at > a.switched_at FROM documents d, yt_authority a
+			WHERE d.id=? AND a.kind='documents' AND a.switched_at IS NOT NULL`), b.DocumentID).Scan(&after); err != nil && !errors.Is(err, ErrNoRows) {
 			return YTArticleBinding{}, err
 		}
 		if after {
@@ -392,11 +407,42 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 		contentSHA = b.ContentSHA
 	}
 	var got YTArticleBinding
-	err = scanYTArticleBinding(tx.QueryRow(ctx, `INSERT INTO yt_article_bindings(document_id, tenant, article_id, article_readable, project_id, part, generation, content_sha, origin, needs_update, bound_by, bound_at)
-		VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,$9,$10,$11)
-		ON CONFLICT DO NOTHING RETURNING `+ytArticleBindingColumns,
-		b.DocumentID, b.Tenant, b.ArticleID, b.ArticleReadable, b.ProjectID, b.Part, contentSHA, YTBindingImportVerified, b.NeedsUpdate, b.BoundBy, time.Now().UTC()), &got)
-	if err == nil {
+	var wrote bool
+	if dialectFor(tx) == mysqlDialect {
+		// MySQL has no ON CONFLICT DO NOTHING RETURNING: a plain INSERT tells
+		// a written row from a document already bound (its primary key) by the
+		// unique violation, because CLIENT_FOUND_ROWS makes an upsert report 1
+		// for a no-op too (B2's finding 5). The row the insert wrote is read
+		// back in the same transaction (hk 5077).
+		_, ierr := tx.Exec(ctx, `INSERT INTO yt_article_bindings(document_id, tenant, article_id, article_readable, project_id, part, generation, content_sha, origin, needs_update, bound_by, bound_at)
+			VALUES (?,?,?,?,?,?,0,?,?,?,?,?)`,
+			b.DocumentID, b.Tenant, b.ArticleID, b.ArticleReadable, b.ProjectID, b.Part, contentSHA, YTBindingImportVerified, b.NeedsUpdate, b.BoundBy, time.Now().UTC())
+		switch {
+		case ierr == nil:
+			wrote = true
+		case errors.Is(ierr, errUniqueViolation):
+			wrote = false
+		default:
+			return YTArticleBinding{}, ierr
+		}
+		if wrote {
+			var found bool
+			got, found, err = readYTArticleBinding(ctx, tx, b.DocumentID)
+			if err != nil {
+				return YTArticleBinding{}, err
+			}
+			if !found {
+				return YTArticleBinding{}, fmt.Errorf("%w: document %d's binding was not written", ErrYTArticleBindingConflict, b.DocumentID)
+			}
+		}
+	} else {
+		err = scanYTArticleBinding(tx.QueryRow(ctx, `INSERT INTO yt_article_bindings(document_id, tenant, article_id, article_readable, project_id, part, generation, content_sha, origin, needs_update, bound_by, bound_at)
+			VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,$9,$10,$11)
+			ON CONFLICT DO NOTHING RETURNING `+ytArticleBindingColumns,
+			b.DocumentID, b.Tenant, b.ArticleID, b.ArticleReadable, b.ProjectID, b.Part, contentSHA, YTBindingImportVerified, b.NeedsUpdate, b.BoundBy, time.Now().UTC()), &got)
+		wrote = err == nil
+	}
+	if wrote {
 		// In docs mode on (hk 4206), a binding whose article does not hold
 		// the document's body gets its article_update in the same
 		// transaction: no feed row comes for a binding, and the documents
@@ -417,10 +463,10 @@ func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, ver
 		}
 		return got, tx.Commit(ctx)
 	}
-	if !errors.Is(err, ErrNoRows) {
+	if err != nil && !errors.Is(err, ErrNoRows) {
 		return YTArticleBinding{}, err
 	}
-	have, found, err := readYTArticleBinding(ctx, pgTransaction{tx}, b.DocumentID)
+	have, found, err := readYTArticleBinding(ctx, tx, b.DocumentID)
 	switch {
 	case err != nil:
 		return YTArticleBinding{}, err

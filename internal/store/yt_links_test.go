@@ -155,7 +155,7 @@ func ytlDesired(t *testing.T, s *Store, tenant string, id int64) (ytLinksDesired
 		t.Fatal(err)
 	}
 	defer tx.Rollback(t.Context())
-	got, found, err := ytLinksDesiredTx(t.Context(), tx, tenant, id)
+	got, found, err := ytLinksDesiredTx(t.Context(), pgTransaction{tx}, tenant, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestYTLinkWritersOf(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	got, err := ytLinkWritersOfTx(ctx, tx, target.ID)
+	got, err := ytLinkWritersOfTx(ctx, pgTransaction{tx}, target.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

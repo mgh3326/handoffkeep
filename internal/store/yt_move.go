@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -105,8 +103,8 @@ type ytMoveDecision struct {
 // Errors wrapping ytwrite.ErrInvalid are a row the protocol cannot store; the
 // caller skips the task and logs it. The caller holds nothing but the feed
 // lock: this takes the task's lane lock, the lock every op of the task takes.
-func ytMoveForTx(ctx context.Context, tx pgx.Tx, now time.Time, id int64, t ytFieldsRow) (d ytMoveDecision, err error) {
-	if err := lockYTEntity(ctx, pgTransaction{tx}, "task", strconv.FormatInt(id, 10)); err != nil {
+func ytMoveForTx(ctx context.Context, tx transaction, now time.Time, id int64, t ytFieldsRow) (d ytMoveDecision, err error) {
+	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(id, 10)); err != nil {
 		return ytMoveDecision{}, err
 	}
 	bound, found, err := ytBindingNowTx(ctx, tx, id)
@@ -117,7 +115,7 @@ func ytMoveForTx(ctx context.Context, tx pgx.Tx, now time.Time, id int64, t ytFi
 		log.Printf("ytwrite.move_skipped_rebound task_id=%d issue_id=%q", id, t.issueID)
 		return ytMoveDecision{}, nil
 	}
-	pending, err := ytPendingMoveTx(ctx, pgTransaction{tx}, id, t.issueID)
+	pending, err := ytPendingMoveTx(ctx, tx, id, t.issueID)
 	if err != nil {
 		return ytMoveDecision{}, err
 	}
@@ -179,12 +177,10 @@ func claimYTFieldsProjectTx(ctx context.Context, tx transaction, op ytwrite.Op) 
 	if err != nil {
 		return ytwrite.ReasonInvalidIssue, err.Error(), nil
 	}
-	if dialectFor(tx) == mysqlDialect {
-		// B4b: a fields snapshot behind a move is not ported.
-		return "", "", ErrDialectUnsupported
-	}
+	// MySQL has no ::text cast for the bigint lane key (hk 5077).
 	var bound string
-	err = pgxTx(tx).QueryRow(ctx, `SELECT project_id FROM yt_task_bindings WHERE task_id::text=$1 AND tenant=$2 AND issue_id=$3`,
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT project_id FROM yt_task_bindings WHERE task_id::text=$1 AND tenant=$2 AND issue_id=$3`,
+		`SELECT project_id FROM yt_task_bindings WHERE CAST(task_id AS CHAR)=? AND tenant=? AND issue_id=?`),
 		op.EntityID, op.Tenant, op.YTTargetID).Scan(&bound)
 	if errors.Is(err, ErrNoRows) {
 		return "", "", nil
@@ -206,8 +202,9 @@ type ytBinding struct {
 }
 
 // ytBindingNowTx reads task's binding in tx: found is false for an unbound task.
-func ytBindingNowTx(ctx context.Context, tx pgx.Tx, taskID int64) (b ytBinding, found bool, err error) {
-	err = tx.QueryRow(ctx, `SELECT tenant, issue_id, project_id FROM yt_task_bindings WHERE task_id=$1`, taskID).
+func ytBindingNowTx(ctx context.Context, tx transaction, taskID int64) (b ytBinding, found bool, err error) {
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT tenant, issue_id, project_id FROM yt_task_bindings WHERE task_id=$1`,
+		`SELECT tenant, issue_id, project_id FROM yt_task_bindings WHERE task_id=?`), taskID).
 		Scan(&b.tenant, &b.issueID, &b.projectID)
 	if errors.Is(err, ErrNoRows) {
 		return ytBinding{}, false, nil

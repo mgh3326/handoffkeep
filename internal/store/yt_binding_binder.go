@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
@@ -86,24 +87,22 @@ func ytBindingIntentBackoff(attempts int) time.Duration {
 // task_comments, yt_task_bindings and yt_issue_intents, then new rows of
 // yt_binding_intents. It takes no lane lock and no task row.
 func (s *Store) ScanYTBindingCandidates(ctx context.Context, tenant string, limit int, now time.Time) (YTBindingScan, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTBindingScan{}, ErrDialectUnsupported
-	}
-
 	var out YTBindingScan
 	if tenant == "" || len(tenant) > 255 || limit < 1 {
 		return out, errors.New("invalid binding scan")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return out, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	var cursor int64
 	if err := tx.QueryRow(ctx, `SELECT last_comment_id FROM yt_binding_cursor WHERE id=1 FOR UPDATE`).Scan(&cursor); err != nil {
 		return out, err
 	}
-	rows, err := tx.Query(ctx, `SELECT id, task_id FROM task_comments WHERE id > $1 ORDER BY id LIMIT $2`, cursor, limit)
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT id, task_id FROM task_comments WHERE id > $1 ORDER BY id LIMIT $2`,
+		`SELECT id, task_id FROM task_comments WHERE id > ? ORDER BY id LIMIT ?`), cursor, limit)
 	if err != nil {
 		return out, err
 	}
@@ -131,7 +130,45 @@ func (s *Store) ScanYTBindingCandidates(ctx context.Context, tenant string, limi
 	}
 	now = now.UTC()
 	for _, taskID := range taskIDs {
-		tag, err := tx.Exec(ctx, `INSERT INTO yt_binding_intents(task_id, tenant, state, next_attempt_at, recorded_at)
+		args := []any{taskID, tenant, now, ytwrite.KindIssueCreate}
+		var tag int64
+		var err error
+		if dialectFor(tx) == mysqlDialect {
+			// MySQL refuses an INSERT whose SELECT reads its own target table
+			// in a subquery, so the "task already bound" guard is a read
+			// first. A plain INSERT then tells a new intent from one already
+			// there by its primary key: CLIENT_FOUND_ROWS makes an upsert
+			// report 1 for a no-op too (B2's finding 5), and ON CONFLICT DO
+			// NOTHING counts 0.
+			var bound bool
+			if bErr := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=?)`, taskID).Scan(&bound); bErr != nil {
+				return out, bErr
+			}
+			if bound {
+				continue
+			}
+			// The twin repeats the placeholders of the repeated parameters in
+			// order and spells the interval the CASE adds.
+			_, ierr := tx.Exec(ctx, `INSERT INTO yt_binding_intents(task_id, tenant, state, next_attempt_at, recorded_at)
+			SELECT ?,?,'pending',
+				CASE WHEN EXISTS(SELECT 1 FROM yt_issue_intents WHERE task_id=?)
+					OR EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=? AND entity_kind='task' AND entity_id=?
+						AND state NOT IN ('applied','rejected'))
+				THEN DATE_ADD(?, INTERVAL 1 HOUR) ELSE ? END,
+				?`,
+				taskID, tenant, taskID, ytwrite.KindIssueCreate, strconv.FormatInt(taskID, 10), now, now, now)
+			switch {
+			case ierr == nil:
+				tag = 1
+			case errors.Is(ierr, errUniqueViolation):
+				tag = 0
+			default:
+				return out, ierr
+			}
+			out.Tasks += int(tag)
+			continue
+		}
+		tag, err = tx.Exec(ctx, `INSERT INTO yt_binding_intents(task_id, tenant, state, next_attempt_at, recorded_at)
 			SELECT $1,$2,'pending',
 				CASE WHEN EXISTS(SELECT 1 FROM yt_issue_intents WHERE task_id=$1)
 					OR EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$4 AND entity_kind='task' AND entity_id=$1::text
@@ -139,14 +176,15 @@ func (s *Store) ScanYTBindingCandidates(ctx context.Context, tenant string, limi
 				THEN $3::timestamptz + interval '1 hour' ELSE $3::timestamptz END,
 				$3
 			WHERE NOT EXISTS(SELECT 1 FROM yt_task_bindings WHERE task_id=$1)
-			ON CONFLICT (task_id) DO NOTHING`, taskID, tenant, now, ytwrite.KindIssueCreate)
+			ON CONFLICT (task_id) DO NOTHING`, args...)
 		if err != nil {
 			return out, err
 		}
-		out.Tasks += int(tag.RowsAffected())
+		out.Tasks += int(tag)
 	}
 	if last != cursor {
-		if _, err := tx.Exec(ctx, `UPDATE yt_binding_cursor SET last_comment_id=$1 WHERE id=1`, last); err != nil {
+		if _, err := tx.Exec(ctx, sqlFor(tx, `UPDATE yt_binding_cursor SET last_comment_id=$1 WHERE id=1`,
+			`UPDATE yt_binding_cursor SET last_comment_id=? WHERE id=1`), last); err != nil {
 			return out, err
 		}
 	}
@@ -156,17 +194,16 @@ func (s *Store) ScanYTBindingCandidates(ctx context.Context, tenant string, limi
 // YTBindingIntentsDue lists, in due order, the tenant's intents whose next
 // attempt has come, at most limit of them.
 func (s *Store) YTBindingIntentsDue(ctx context.Context, tenant string, now time.Time, limit int) ([]YTBindingIntent, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if tenant == "" || limit < 1 {
 		return nil, errors.New("invalid binding intents read")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT task_id, tenant, state, reason, attempts, last_error, next_attempt_at, recorded_at
+	rows, err := s.db().Query(ctx, sqlFor(s, `SELECT task_id, tenant, state, reason, attempts, last_error, next_attempt_at, recorded_at
 		FROM yt_binding_intents
 		WHERE tenant=$1 AND state IN ('pending','refused','error') AND next_attempt_at <= $2
-		ORDER BY next_attempt_at, task_id LIMIT $3`, tenant, now.UTC(), limit)
+		ORDER BY next_attempt_at, task_id LIMIT $3`, `SELECT task_id, tenant, state, reason, attempts, last_error, next_attempt_at, recorded_at
+		FROM yt_binding_intents
+		WHERE tenant=? AND state IN ('pending','refused','error') AND next_attempt_at <= ?
+		ORDER BY next_attempt_at, task_id LIMIT ?`), tenant, now.UTC(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -188,14 +225,17 @@ func (s *Store) YTBindingIntentsDue(ctx context.Context, tenant string, now time
 // the detail, one more attempt (clamped at 8) and the next attempt after that
 // attempt's backoff. A terminal (excluded) or absent row is left alone.
 func (s *Store) RetryYTBindingIntent(ctx context.Context, taskID int64, state YTBindingIntentState, reason, detail string, now time.Time) error {
-	if s != nil && s.dialect == mysqlDialect {
-		return ErrDialectUnsupported
-	}
-
 	if taskID < 1 || (state != YTBindingIntentRefused && state != YTBindingIntentError) {
 		return errors.New("invalid binding intent outcome")
 	}
-	_, err := s.pool.Exec(ctx, `UPDATE yt_binding_intents SET
+	// MySQL assigns SET columns left to right, so attempts moves after
+	// next_attempt_at, which is written from the pre-update value; PostgreSQL
+	// reads every right-hand side of the old row.
+	args := []any{taskID, string(state), clipText(reason, 200), clipText(detail, 2000), now.UTC()}
+	if s.dialect == mysqlDialect {
+		args = []any{string(state), clipText(reason, 200), clipText(detail, 2000), now.UTC(), now.UTC(), taskID}
+	}
+	_, err := s.db().Exec(ctx, sqlFor(s, `UPDATE yt_binding_intents SET
 			state=$2, reason=$3, last_error=$4,
 			attempts=least(attempts+1, 8),
 			next_attempt_at=$5::timestamptz + (CASE least(attempts+1, 8)
@@ -204,37 +244,43 @@ func (s *Store) RetryYTBindingIntent(ctx context.Context, taskID int64, state YT
 				WHEN 3 THEN interval '24 hours'
 				ELSE interval '7 days' END),
 			recorded_at=$5
-		WHERE task_id=$1 AND state IN ('pending','refused','error')`,
-		taskID, string(state), clipText(reason, 200), clipText(detail, 2000), now.UTC())
+		WHERE task_id=$1 AND state IN ('pending','refused','error')`, `UPDATE yt_binding_intents SET
+			state=?, reason=?, last_error=?,
+			next_attempt_at=DATE_ADD(?, INTERVAL (CASE attempts
+				WHEN 0 THEN 1
+				WHEN 1 THEN 6
+				WHEN 2 THEN 24
+				ELSE 168 END) HOUR),
+			attempts=LEAST(attempts+1, 8),
+			recorded_at=?
+		WHERE task_id=? AND state IN ('pending','refused','error')`), args...)
 	return err
 }
 
 // ExcludeYTBindingIntent makes the task's intent terminal: the operator
 // unbound it, so no automatic binding may undo that (I7, design §6.1).
 func (s *Store) ExcludeYTBindingIntent(ctx context.Context, taskID int64, reason string, now time.Time) error {
-	if s != nil && s.dialect == mysqlDialect {
-		return ErrDialectUnsupported
-	}
-
 	if taskID < 1 {
 		return errors.New("invalid binding intent task")
 	}
-	_, err := s.pool.Exec(ctx, `UPDATE yt_binding_intents SET state='excluded', reason=$2, last_error='', next_attempt_at=$3::timestamptz, recorded_at=$3::timestamptz
-		WHERE task_id=$1 AND state <> 'excluded'`, taskID, clipText(reason, 200), now.UTC())
+	args := []any{taskID, clipText(reason, 200), now.UTC()}
+	if s.dialect == mysqlDialect {
+		args = []any{clipText(reason, 200), now.UTC(), now.UTC(), taskID}
+	}
+	_, err := s.db().Exec(ctx, sqlFor(s, `UPDATE yt_binding_intents SET state='excluded', reason=$2, last_error='', next_attempt_at=$3::timestamptz, recorded_at=$3::timestamptz
+		WHERE task_id=$1 AND state <> 'excluded'`, `UPDATE yt_binding_intents SET state='excluded', reason=?, last_error='', next_attempt_at=?, recorded_at=?
+		WHERE task_id=? AND state <> 'excluded'`), args...)
 	return err
 }
 
 // DropYTBindingIntent deletes the task's intent: it is bound, or nothing is
 // left to do.
 func (s *Store) DropYTBindingIntent(ctx context.Context, taskID int64) error {
-	if s != nil && s.dialect == mysqlDialect {
-		return ErrDialectUnsupported
-	}
-
 	if taskID < 1 {
 		return errors.New("invalid binding intent task")
 	}
-	_, err := s.pool.Exec(ctx, `DELETE FROM yt_binding_intents WHERE task_id=$1`, taskID)
+	_, err := s.db().Exec(ctx, sqlFor(s, `DELETE FROM yt_binding_intents WHERE task_id=$1`,
+		`DELETE FROM yt_binding_intents WHERE task_id=?`), taskID)
 	return err
 }
 
@@ -242,7 +288,8 @@ func (s *Store) DropYTBindingIntent(ctx context.Context, taskID int64) error {
 // yt_binding_history row ("" when it has none), in the caller's transaction.
 func ytBindingLatestActionTx(ctx context.Context, q ytRowQuerier, taskID int64) (string, error) {
 	var action string
-	err := q.QueryRow(ctx, `SELECT action FROM yt_binding_history WHERE task_id=$1 ORDER BY id DESC LIMIT 1`, taskID).Scan(&action)
+	err := q.QueryRow(ctx, sqlFor(q, `SELECT action FROM yt_binding_history WHERE task_id=$1 ORDER BY id DESC LIMIT 1`,
+		`SELECT action FROM yt_binding_history WHERE task_id=? ORDER BY id DESC LIMIT 1`), taskID).Scan(&action)
 	if errors.Is(err, ErrNoRows) {
 		return "", nil
 	}
@@ -253,14 +300,10 @@ func ytBindingLatestActionTx(ctx context.Context, q ytRowQuerier, taskID int64) 
 // bound it since: the latest yt_binding_history row's action is 'unbound'.
 // Counted in, the binder must not bind it again (I7).
 func (s *Store) YTBindingExcluded(ctx context.Context, taskID int64) (bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return false, ErrDialectUnsupported
-	}
-
 	if taskID < 1 {
 		return false, errors.New("invalid binding history task")
 	}
-	action, err := ytBindingLatestActionTx(ctx, pgQuerier{pool: s.pool}, taskID)
+	action, err := ytBindingLatestActionTx(ctx, s.db(), taskID)
 	return action == ytBindingActionUnbound, err
 }
 
@@ -268,14 +311,11 @@ func (s *Store) YTBindingExcluded(ctx context.Context, taskID int64) (bool, erro
 // none). The publication's max-id watermark uses the same rule in its own
 // transaction; this read is for the read-only commands and tests.
 func (s *Store) YTHighestCommentID(ctx context.Context, taskID int64) (int64, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return 0, ErrDialectUnsupported
-	}
-
 	if taskID < 1 {
 		return 0, errors.New("invalid comment task")
 	}
 	var id int64
-	err := s.pool.QueryRow(ctx, `SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$1`, taskID).Scan(&id)
+	err := s.db().QueryRow(ctx, sqlFor(s, `SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$1`,
+		`SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=?`), taskID).Scan(&id)
 	return id, err
 }

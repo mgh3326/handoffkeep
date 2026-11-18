@@ -86,24 +86,14 @@ func bindYTIssueApplyTx(s *Store, ctx context.Context, tx transaction, op ytwrit
 		return err
 	}
 	taskID, _ := strconv.ParseInt(op.EntityID, 10, 64)
-	// The field snapshot and the links retarget are B4b: on MySQL they run
-	// only when their mode is on, which cannot happen before those areas
-	// port.
-	if dialectFor(tx) == mysqlDialect {
-		if m, _ := s.ytFieldsNow(); m == YTFieldsOn {
-			return ErrDialectUnsupported
-		}
-		if m, _ := s.ytLinksNow(); m == YTLinksOn {
-			return ErrDialectUnsupported
-		}
-		return nil
-	}
-	if err := s.ytFieldsOnBindTx(ctx, pgxTx(tx), taskID, now); err != nil {
+	// Both helpers take the seam's transaction, so the first snapshot and the
+	// links retarget run on either dialect.
+	if err := s.ytFieldsOnBindTx(ctx, tx, taskID, now); err != nil {
 		return err
 	}
 	// The new binding is also the target of the tasks that point at this one
 	// (hk 3841, I14).
-	return ytLinksOnBindTx(ctx, pgxTx(tx), taskID)
+	return ytLinksOnBindTx(ctx, tx, taskID)
 }
 
 // ytIssueGateSQL is the issue_create gate (ytAdmitSQL): mode on, and o's task

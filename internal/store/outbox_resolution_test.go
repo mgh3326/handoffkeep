@@ -464,7 +464,7 @@ func TestOutboxReceiptsReceivedThenApplied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = insertNotificationOutboxOnce(ctx, tx, OutboxKindDecisionAnswered, "receipt-lane", "receipt-event-1", "text", time.Now().UTC()); err != nil {
+	if _, err = insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDecisionAnswered, "receipt-lane", "receipt-event-1", "text", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if err = tx.Commit(ctx); err != nil {

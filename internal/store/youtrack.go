@@ -14,7 +14,8 @@ import (
 // protocol and the audit read. The tables the removed sync wrote
 // (youtrack_outbox, youtrack_field_cache, youtrack_cursor,
 // youtrack_attempts, youtrack_processed_activities) are left in place,
-// unused; a later migration drops them.
+// unused; a later migration drops them, and MySQL never creates them
+// (hk 5077).
 
 const (
 	// YouTrackProvider is the task_origins provider for a mirrored issue.
@@ -79,12 +80,10 @@ func scanYouTrackMirror(row interface{ Scan(...any) error }, x *YouTrackMirror) 
 }
 
 func (s *Store) GetYouTrackMirror(ctx context.Context, taskID int64) (YouTrackMirror, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YouTrackMirror{}, false, ErrDialectUnsupported
-	}
-
 	var x YouTrackMirror
-	err := scanYouTrackMirror(s.pool.QueryRow(ctx, `SELECT `+youtrackMirrorColumns+` FROM task_origins WHERE provider='youtrack' AND task_id=$1`, taskID), &x)
+	err := scanYouTrackMirror(s.db().QueryRow(ctx, sqlFor(s,
+		`SELECT `+youtrackMirrorColumns+` FROM task_origins WHERE provider='youtrack' AND task_id=$1`,
+		`SELECT `+youtrackMirrorColumns+` FROM task_origins WHERE provider='youtrack' AND task_id=?`), taskID), &x)
 	if errors.Is(err, ErrNoRows) {
 		return YouTrackMirror{}, false, nil
 	}
@@ -94,12 +93,10 @@ func (s *Store) GetYouTrackMirror(ctx context.Context, taskID int64) (YouTrackMi
 // FindYouTrackMirrorByIssueID finds a task by the issue's stable internal id.
 // The display number is deliberately not a key.
 func (s *Store) FindYouTrackMirrorByIssueID(ctx context.Context, issueID string) (YouTrackMirror, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YouTrackMirror{}, false, ErrDialectUnsupported
-	}
-
 	var x YouTrackMirror
-	err := scanYouTrackMirror(s.pool.QueryRow(ctx, `SELECT `+youtrackMirrorColumns+` FROM task_origins WHERE provider='youtrack' AND external_id=$1`, issueID), &x)
+	err := scanYouTrackMirror(s.db().QueryRow(ctx, sqlFor(s,
+		`SELECT `+youtrackMirrorColumns+` FROM task_origins WHERE provider='youtrack' AND external_id=$1`,
+		`SELECT `+youtrackMirrorColumns+` FROM task_origins WHERE provider='youtrack' AND external_id=?`), issueID), &x)
 	if errors.Is(err, ErrNoRows) {
 		return YouTrackMirror{}, false, nil
 	}
@@ -107,15 +104,23 @@ func (s *Store) FindYouTrackMirrorByIssueID(ctx context.Context, issueID string)
 }
 
 func (s *Store) ListYouTrackMirrors(ctx context.Context, taskIDs []int64) (map[int64]YouTrackMirror, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	out := map[int64]YouTrackMirror{}
 	if len(taskIDs) == 0 {
 		return out, nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+youtrackMirrorColumns+` FROM task_origins WHERE provider='youtrack' AND task_id = ANY($1)`, taskIDs)
+	var query string
+	var args []any
+	if s.dialect == mysqlDialect {
+		query = `SELECT ` + youtrackMirrorColumns + ` FROM task_origins WHERE provider='youtrack' AND task_id IN (` + placeholders(len(taskIDs)) + `)`
+		args = make([]any, len(taskIDs))
+		for i, id := range taskIDs {
+			args[i] = id
+		}
+	} else {
+		query = `SELECT ` + youtrackMirrorColumns + ` FROM task_origins WHERE provider='youtrack' AND task_id = ANY($1)`
+		args = []any{taskIDs}
+	}
+	rows, err := s.db().Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -134,10 +139,6 @@ func (s *Store) ListYouTrackMirrors(ctx context.Context, taskIDs []int64) (map[i
 // existing row is updated in place; an issue already linked to a different
 // task is a conflict.
 func (s *Store) UpsertYouTrackMirror(ctx context.Context, in YouTrackMirrorInput) (YouTrackMirror, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YouTrackMirror{}, ErrDialectUnsupported
-	}
-
 	if in.TaskID < 1 || strings.TrimSpace(in.IssueID) == "" || strings.TrimSpace(in.Tenant) == "" {
 		return YouTrackMirror{}, ErrYouTrackMirrorConflict
 	}
@@ -152,8 +153,11 @@ func (s *Store) UpsertYouTrackMirror(ctx context.Context, in YouTrackMirrorInput
 		// No push happened yet; only created_at/snapshot_at need a time.
 		at = time.Now().UTC()
 	}
+	if s.dialect == mysqlDialect {
+		return s.upsertYouTrackMirrorMySQL(ctx, in, at, syncedAt)
+	}
 	var x YouTrackMirror
-	err := scanYouTrackMirror(s.pool.QueryRow(ctx, `
+	err := scanYouTrackMirror(s.db().QueryRow(ctx, `
 		INSERT INTO task_origins(task_id,provider,namespace,external_id,display_ref,url,title_snapshot,snapshot_at,created_by,created_at,tenant,role,synced_at)
 		VALUES($1,'youtrack',$2,$3,$4,$5,NULL,$6,$7,$6,$2,$8,$9)
 		ON CONFLICT (task_id) WHERE provider='youtrack' DO UPDATE SET
@@ -176,6 +180,62 @@ func (s *Store) UpsertYouTrackMirror(ctx context.Context, in YouTrackMirrorInput
 	return x, nil
 }
 
+// upsertYouTrackMirrorMySQL is UpsertYouTrackMirror on MySQL, which has no
+// RETURNING and no conflict target. ON DUPLICATE KEY UPDATE would also match
+// the issue's own unique key and then rewrite that row — the other task's —
+// so the write targets the task's row only: an UPDATE, an INSERT when the task
+// has none, and a re-read of the row it wrote. A unique violation means
+// another task already holds the issue (ErrYouTrackMirrorConflict), exactly as
+// PostgreSQL's conflict on the issue's key does.
+func (s *Store) upsertYouTrackMirrorMySQL(ctx context.Context, in YouTrackMirrorInput, at time.Time, syncedAt any) (YouTrackMirror, error) {
+	tx, release, err := s.begin(ctx)
+	if err != nil {
+		return YouTrackMirror{}, err
+	}
+	defer release()
+	defer tx.Rollback(ctx)
+	displayRef, url := nullIfEmpty(in.DisplayRef), nullIfEmpty(in.URL)
+	n, err := tx.Exec(ctx, `UPDATE task_origins SET namespace=?,external_id=?,display_ref=?,url=?,tenant=?,role=?,
+			synced_at=COALESCE(?,synced_at)
+		WHERE provider='youtrack' AND task_id=?`,
+		in.Tenant, in.IssueID, displayRef, url, in.Tenant, in.Role, syncedAt, in.TaskID)
+	if err != nil {
+		if errors.Is(err, errUniqueViolation) {
+			return YouTrackMirror{}, ErrYouTrackMirrorConflict
+		}
+		return YouTrackMirror{}, err
+	}
+	if n == 0 {
+		// No affected row: the task has no youtrack row (CLIENT_FOUND_ROWS
+		// makes an unchanged match count as affected, so zero means absent).
+		// The locking read holds the key until this transaction ends, so the
+		// insert cannot race a second writer of the same task.
+		var id int64
+		err = tx.QueryRow(ctx, `SELECT id FROM task_origins WHERE provider='youtrack' AND task_id=? FOR UPDATE`,
+			in.TaskID).Scan(&id)
+		if errors.Is(err, ErrNoRows) {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO task_origins(task_id,provider,namespace,external_id,display_ref,url,title_snapshot,snapshot_at,created_by,created_at,tenant,role,synced_at)
+				VALUES(?, 'youtrack', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+				in.TaskID, in.Tenant, in.IssueID, displayRef, url, at, YouTrackSyncActor, at, in.Tenant, in.Role, syncedAt)
+			if errors.Is(err, errUniqueViolation) {
+				// The task had no row, so the duplicate is the issue's own
+				// key: another task holds it.
+				return YouTrackMirror{}, ErrYouTrackMirrorConflict
+			}
+		}
+		if err != nil {
+			return YouTrackMirror{}, err
+		}
+	}
+	var x YouTrackMirror
+	if err := scanYouTrackMirror(tx.QueryRow(ctx,
+		`SELECT `+youtrackMirrorColumns+` FROM task_origins WHERE provider='youtrack' AND task_id=?`, in.TaskID), &x); err != nil {
+		return YouTrackMirror{}, err
+	}
+	return x, tx.Commit(ctx)
+}
+
 // ValidTaskLane reports whether name is a lane/task name. Other packages use
 // it instead of copying the lane alphabet.
 func ValidTaskLane(name string) bool { return validName(name) }
@@ -183,21 +243,15 @@ func ValidTaskLane(name string) bool { return validName(name) }
 // TaskProjectExists reports whether name is in the server's project
 // vocabulary.
 func (s *Store) TaskProjectExists(ctx context.Context, name string) (bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return false, ErrDialectUnsupported
-	}
-
 	var known bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`, name).Scan(&known)
+	err := s.db().QueryRow(ctx, sqlFor(s,
+		`SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=$1)`,
+		`SELECT EXISTS(SELECT 1 FROM task_projects WHERE name=?)`), name).Scan(&known)
 	return known, err
 }
 
 func (s *Store) ListYouTrackProjects(ctx context.Context) ([]YouTrackProject, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
-	rows, err := s.pool.Query(ctx, `SELECT hk_project,yt_project_id,short_name FROM youtrack_projects ORDER BY hk_project`)
+	rows, err := s.db().Query(ctx, `SELECT hk_project,yt_project_id,short_name FROM youtrack_projects ORDER BY hk_project`)
 	if err != nil {
 		return nil, err
 	}
@@ -216,14 +270,12 @@ func (s *Store) ListYouTrackProjects(ctx context.Context) ([]YouTrackProject, er
 // YouTrackProjectFor returns the mapping for an hk project, falling back to
 // the OTHER row. found is false only when even OTHER is missing.
 func (s *Store) YouTrackProjectFor(ctx context.Context, hkProject string) (YouTrackProject, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YouTrackProject{}, false, ErrDialectUnsupported
-	}
-
 	var x YouTrackProject
-	err := s.pool.QueryRow(ctx, `SELECT hk_project,yt_project_id,short_name FROM youtrack_projects WHERE hk_project=$1`, hkProject).Scan(&x.HKProject, &x.ProjectID, &x.ShortName)
+	err := s.db().QueryRow(ctx, sqlFor(s,
+		`SELECT hk_project,yt_project_id,short_name FROM youtrack_projects WHERE hk_project=$1`,
+		`SELECT hk_project,yt_project_id,short_name FROM youtrack_projects WHERE hk_project=?`), hkProject).Scan(&x.HKProject, &x.ProjectID, &x.ShortName)
 	if errors.Is(err, ErrNoRows) {
-		err = s.pool.QueryRow(ctx, `SELECT hk_project,yt_project_id,short_name FROM youtrack_projects WHERE hk_project='other'`).Scan(&x.HKProject, &x.ProjectID, &x.ShortName)
+		err = s.db().QueryRow(ctx, `SELECT hk_project,yt_project_id,short_name FROM youtrack_projects WHERE hk_project='other'`).Scan(&x.HKProject, &x.ProjectID, &x.ShortName)
 		if errors.Is(err, ErrNoRows) {
 			return YouTrackProject{}, false, nil
 		}
@@ -233,12 +285,10 @@ func (s *Store) YouTrackProjectFor(ctx context.Context, hkProject string) (YouTr
 
 // YouTrackProjectByShortName maps an issue's project back to an hk project.
 func (s *Store) YouTrackProjectByShortName(ctx context.Context, shortName string) (YouTrackProject, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YouTrackProject{}, false, ErrDialectUnsupported
-	}
-
 	var x YouTrackProject
-	err := s.pool.QueryRow(ctx, `SELECT hk_project,yt_project_id,short_name FROM youtrack_projects WHERE lower(short_name)=lower($1)`, shortName).Scan(&x.HKProject, &x.ProjectID, &x.ShortName)
+	err := s.db().QueryRow(ctx, sqlFor(s,
+		`SELECT hk_project,yt_project_id,short_name FROM youtrack_projects WHERE lower(short_name)=lower($1)`,
+		`SELECT hk_project,yt_project_id,short_name FROM youtrack_projects WHERE lower(short_name)=lower(?)`), shortName).Scan(&x.HKProject, &x.ProjectID, &x.ShortName)
 	if errors.Is(err, ErrNoRows) {
 		return YouTrackProject{}, false, nil
 	}
@@ -247,18 +297,24 @@ func (s *Store) YouTrackProjectByShortName(ctx context.Context, shortName string
 
 // PutYouTrackProject writes one mapping.
 func (s *Store) PutYouTrackProject(ctx context.Context, p YouTrackProject) error {
-	if s != nil && s.dialect == mysqlDialect {
-		return ErrDialectUnsupported
-	}
-
 	if strings.TrimSpace(p.HKProject) == "" || strings.TrimSpace(p.ShortName) == "" {
 		return ErrYouTrackProjectUnknown
 	}
-	_, err := s.pool.Exec(ctx, `
+	now := time.Now().UTC()
+	args := []any{p.HKProject, p.ProjectID, p.ShortName, now}
+	if s.dialect == mysqlDialect {
+		// One placeholder per column on MySQL; PostgreSQL repeats $4.
+		args = append(args, now)
+	}
+	_, err := s.db().Exec(ctx, sqlFor(s, `
 		INSERT INTO youtrack_projects(hk_project,yt_project_id,short_name,created_at,updated_at)
 		VALUES($1,$2,$3,$4,$4)
 		ON CONFLICT(hk_project) DO UPDATE SET yt_project_id=EXCLUDED.yt_project_id,short_name=EXCLUDED.short_name,updated_at=EXCLUDED.updated_at`,
-		p.HKProject, p.ProjectID, p.ShortName, time.Now().UTC())
+		`
+		INSERT INTO youtrack_projects(hk_project,yt_project_id,short_name,created_at,updated_at)
+		VALUES(?,?,?,?,?)
+		ON DUPLICATE KEY UPDATE yt_project_id=VALUES(yt_project_id),short_name=VALUES(short_name),updated_at=VALUES(updated_at)`),
+		args...)
 	return err
 }
 
@@ -267,33 +323,37 @@ func (s *Store) PutYouTrackProject(ctx context.Context, p YouTrackProject) error
 // let unrelated skipped items back into every batch. Writing the mapping
 // (PutYouTrackProject) is what clears skips.
 func (s *Store) SetYouTrackProjectID(ctx context.Context, hkProject, projectID string) error {
-	if s != nil && s.dialect == mysqlDialect {
-		return ErrDialectUnsupported
+	now := time.Now().UTC()
+	args := []any{hkProject, projectID, now}
+	if s.dialect == mysqlDialect {
+		// MySQL binds in statement order: the SET clause comes first.
+		args = []any{projectID, now, hkProject}
 	}
-
-	_, err := s.pool.Exec(ctx, `UPDATE youtrack_projects SET yt_project_id=$2,updated_at=$3 WHERE hk_project=$1`, hkProject, projectID, time.Now().UTC())
+	_, err := s.db().Exec(ctx, sqlFor(s,
+		`UPDATE youtrack_projects SET yt_project_id=$2,updated_at=$3 WHERE hk_project=$1`,
+		`UPDATE youtrack_projects SET yt_project_id=?,updated_at=? WHERE hk_project=?`), args...)
 	return err
 }
 
 // LinkYouTrackComment records a mirrored comment. It is idempotent for the
 // same pair.
 func (s *Store) LinkYouTrackComment(ctx context.Context, taskID, hkCommentID int64, youtrackCommentID string, at time.Time) error {
-	if s != nil && s.dialect == mysqlDialect {
-		return ErrDialectUnsupported
-	}
-
 	if taskID < 1 || hkCommentID < 1 || strings.TrimSpace(youtrackCommentID) == "" {
 		return ErrYouTrackActivityInput
 	}
-	_, err := s.pool.Exec(ctx, `
+	_, err := s.db().Exec(ctx, sqlFor(s, `
 		INSERT INTO youtrack_comment_links(hk_comment_id,task_id,youtrack_comment_id,created_at)
 		VALUES($1,$2,$3,$4)
-		ON CONFLICT(hk_comment_id) DO NOTHING`, hkCommentID, taskID, youtrackCommentID, at.UTC())
+		ON CONFLICT(hk_comment_id) DO NOTHING`, `
+		INSERT INTO youtrack_comment_links(hk_comment_id,task_id,youtrack_comment_id,created_at)
+		VALUES(?,?,?,?)
+		ON DUPLICATE KEY UPDATE hk_comment_id=hk_comment_id`), hkCommentID, taskID, youtrackCommentID, at.UTC())
 	return err
 }
 
-// YouTrackSyncLock is the single-run guard. pg_try_advisory_lock is session
-// scoped, so the caller must hold its connection until Release.
+// YouTrackSyncLock is the single-run guard. Both forms are session scoped
+// (pg_try_advisory_lock, GET_LOCK), so the caller must hold its connection
+// until Release.
 type YouTrackSyncLock struct {
 	conn      *pgxpool.Conn
 	mysqlConn *sql.Conn
@@ -346,11 +406,7 @@ func (l *YouTrackSyncLock) Release(ctx context.Context) error {
 // schema run adds each project's lanes to that project's 레인 enum, so a
 // project's list holds only the lanes its own tasks used.
 func (s *Store) ListTaskLanes(ctx context.Context) (map[string][]string, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT COALESCE(project,''),lane FROM tasks WHERE lane <> '' ORDER BY 1,2`)
+	rows, err := s.db().Query(ctx, `SELECT DISTINCT COALESCE(project,''),lane FROM tasks WHERE lane <> '' ORDER BY 1,2`)
 	if err != nil {
 		return nil, err
 	}

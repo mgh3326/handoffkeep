@@ -1129,11 +1129,11 @@ func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsI
 	}
 	if created && !progress {
 		text := dotsResultText(kind, key, issue, c)
-		if err := insertNotificationOutbox(ctx, tx, outboxKind, lane, "dots-"+c.ID, text, now); err != nil {
+		if err := insertNotificationOutbox(ctx, pgTransaction{tx}, outboxKind, lane, "dots-"+c.ID, text, now); err != nil {
 			return "", false, err
 		}
 		for _, extra := range notifyLanes {
-			if err := insertNotificationOutbox(ctx, tx, outboxKind, extra, "dots-"+c.ID+"-"+extra, text, now); err != nil {
+			if err := insertNotificationOutbox(ctx, pgTransaction{tx}, outboxKind, extra, "dots-"+c.ID+"-"+extra, text, now); err != nil {
 				return "", false, err
 			}
 		}

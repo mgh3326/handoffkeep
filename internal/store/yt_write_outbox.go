@@ -30,21 +30,27 @@ type YTWriteOutbox struct {
 // state is read from the same snapshot: an op moving between states during the
 // read is counted once, in one state, never in two or none. The statement is
 // one UNION ALL with one branch per open state. Each branch has a literal state
-// predicate, so it still uses its partial index (yt_write_ops_due,
-// yt_write_ops_dispatched) rather than scanning the applied history.
+// predicate, so PostgreSQL still uses its partial index (yt_write_ops_due,
+// yt_write_ops_dispatched) rather than scanning the applied history; MySQL
+// creates those keys whole, so a branch filters the open rows by state.
 func (s *Store) YTWriteOutboxStatus(ctx context.Context, now time.Time) (YTWriteOutbox, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTWriteOutbox{}, ErrDialectUnsupported
-	}
-
 	branches := make([]string, 0, len(YTWriteOutboxStates))
 	for _, st := range YTWriteOutboxStates {
-		branches = append(branches, `SELECT '`+string(st)+`'::text, count(*),
+		branch := `SELECT '` + string(st) + `'::text, count(*),
 			min(CASE WHEN state='dispatched' THEN dispatched_at ELSE created_at END),
 			count(*) FILTER (WHERE attempts >= 2), count(*) FILTER (WHERE reconciles >= 1)
-			FROM yt_write_ops WHERE state='`+string(st)+`'`)
+			FROM yt_write_ops WHERE state='` + string(st) + `'`
+		if s.dialect == mysqlDialect {
+			// No ::text cast and no FILTER on MySQL: SUM over a 0/1 CASE
+			// counts the same rows.
+			branch = `SELECT '` + string(st) + `', count(*),
+			min(CASE WHEN state='dispatched' THEN dispatched_at ELSE created_at END),
+			SUM(CASE WHEN attempts >= 2 THEN 1 ELSE 0 END), SUM(CASE WHEN reconciles >= 1 THEN 1 ELSE 0 END)
+			FROM yt_write_ops WHERE state='` + string(st) + `'`
+		}
+		branches = append(branches, branch)
 	}
-	rows, err := s.pool.Query(ctx, strings.Join(branches, " UNION ALL "))
+	rows, err := s.db().Query(ctx, strings.Join(branches, " UNION ALL "))
 	if err != nil {
 		return YTWriteOutbox{}, err
 	}

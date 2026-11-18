@@ -23,15 +23,20 @@ const YTAuditTaskPageMax = 1000
 // when it is not 0; those with id greater than afterID, at most limit. The
 // caller pages with the last id until a page comes back short.
 func (s *Store) YTAuditTasks(ctx context.Context, project string, taskID, afterID int64, limit int) ([]YTCommentCandidate, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if taskID < 0 || afterID < 0 || limit < 1 || limit > YTAuditTaskPageMax {
 		return nil, errors.New("invalid audit task filter")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id, coalesce(project,'') FROM tasks
-		WHERE ($1 = '' OR project = $1) AND ($2 = 0 OR id = $2) AND id > $3 ORDER BY id LIMIT $4`, project, taskID, afterID, limit)
+	query := sqlFor(s, `SELECT id, coalesce(project,'') FROM tasks
+		WHERE ($1 = '' OR project = $1) AND ($2 = 0 OR id = $2) AND id > $3 ORDER BY id LIMIT $4`,
+		`SELECT id, coalesce(project,'') FROM tasks
+		WHERE (? = '' OR project = ?) AND (? = 0 OR id = ?) AND id > ? ORDER BY id LIMIT ?`)
+	args := []any{project, taskID, afterID, limit}
+	if s.dialect == mysqlDialect {
+		// MySQL has one placeholder per value in statement order, so a value
+		// the PostgreSQL text repeats by number appears twice here.
+		args = []any{project, project, taskID, taskID, afterID, limit}
+	}
+	rows, err := s.db().Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -68,16 +73,23 @@ type YTAuditComments struct {
 // YTAuditTaskComments reads task taskID's comments for the audit against
 // issue issueID.
 func (s *Store) YTAuditTaskComments(ctx context.Context, taskID int64, issueID string) (YTAuditComments, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTAuditComments{}, ErrDialectUnsupported
-	}
-
 	out := YTAuditComments{Comments: []ytwrite.AuditComment{}, Links: map[int64]string{}, PulledYTIDs: map[string]bool{}}
-	rows, err := s.pool.Query(ctx, `SELECT c.id, c.body, c.author,
+	query := sqlFor(s, `SELECT c.id, c.body, c.author,
 			coalesce((SELECT o.id FROM yt_comment_write_links w JOIN yt_write_ops o ON o.id = w.op_id
 				WHERE w.comment_id = c.id AND o.kind = $2 AND o.yt_target_id = $3), 0),
 			coalesce((SELECT l.youtrack_comment_id FROM youtrack_comment_links l WHERE l.hk_comment_id = c.id), '')
-		FROM task_comments c WHERE c.task_id = $1 ORDER BY c.id`, taskID, ytwrite.KindCommentAppend, issueID)
+		FROM task_comments c WHERE c.task_id = $1 ORDER BY c.id`, `SELECT c.id, c.body, c.author,
+			coalesce((SELECT o.id FROM yt_comment_write_links w JOIN yt_write_ops o ON o.id = w.op_id
+				WHERE w.comment_id = c.id AND o.kind = ? AND o.yt_target_id = ?), 0),
+			coalesce((SELECT l.youtrack_comment_id FROM youtrack_comment_links l WHERE l.hk_comment_id = c.id), '')
+		FROM task_comments c WHERE c.task_id = ? ORDER BY c.id`)
+	args := []any{taskID, ytwrite.KindCommentAppend, issueID}
+	if s.dialect == mysqlDialect {
+		// Statement order on MySQL: the select list's two placeholders come
+		// before the WHERE clause's one.
+		args = []any{ytwrite.KindCommentAppend, issueID, taskID}
+	}
+	rows, err := s.db().Query(ctx, query, args...)
 	if err != nil {
 		return YTAuditComments{}, err
 	}

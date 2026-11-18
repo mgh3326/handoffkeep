@@ -40,11 +40,27 @@ func ytFamilyLaneKey(tenant, projectID, family string) string {
 // instead of blocking a worker's pass behind one slow create. The lock is a
 // session lock on the connection held until unlock, so it spans the remote
 // calls the root's search and create make.
+//
+// MySQL has no advisory locks: the lane is a GET_LOCK name on the same held
+// connection, prefixed hk: (design §4, §11.1) and at most 64 characters, so
+// the key is hashed into it (mysqlSessionLockName) as the worker locks are.
 func (l *YTWriteLedger) LockFamily(ctx context.Context, tenant, projectID, family string) (unlock func(), ok bool, err error) {
-	if l.s == nil || l.s.pool == nil {
+	if l.s == nil || (l.s.pool == nil && l.s.mysqlPool == nil) {
 		return nil, false, errors.New("store: no database pool for the family lane")
 	}
 	key := ytFamilyLaneKey(tenant, projectID, family)
+	if l.s.dialect == mysqlDialect {
+		name := mysqlSessionLockName("yt_family_root", key)
+		conn, got, err := mysqlTrySessionLock(ctx, l.s.mysqlPool, name)
+		if err != nil || !got {
+			return nil, false, err
+		}
+		return func() {
+			if err := mysqlReleaseSessionLock(conn, name); err != nil {
+				log.Printf("ytwrite.family_unlock_failed family=%q project_id=%q err=%q", family, projectID, err.Error())
+			}
+		}, true, nil
+	}
 	conn, err := l.s.pool.Acquire(ctx)
 	if err != nil {
 		return nil, false, err
@@ -78,7 +94,8 @@ func (l *YTWriteLedger) LockFamily(ctx context.Context, tenant, projectID, famil
 // project; found is false when none is recorded.
 func (l *YTWriteLedger) FamilyRoot(ctx context.Context, tenant, projectID, family string) (string, bool, error) {
 	var id string
-	err := l.s.pool.QueryRow(ctx, `SELECT article_id FROM yt_family_roots WHERE tenant=$1 AND project_id=$2 AND family=$3`,
+	err := l.s.db().QueryRow(ctx, sqlFor(l.s, `SELECT article_id FROM yt_family_roots WHERE tenant=$1 AND project_id=$2 AND family=$3`,
+		`SELECT article_id FROM yt_family_roots WHERE tenant=? AND project_id=? AND family=?`),
 		tenant, projectID, family).Scan(&id)
 	if errors.Is(err, ErrNoRows) {
 		return "", false, nil
@@ -91,8 +108,10 @@ func (l *YTWriteLedger) FamilyRoot(ctx context.Context, tenant, projectID, famil
 // wins: a root is never replaced, because the one already recorded is the one
 // the family's articles are under.
 func (l *YTWriteLedger) RecordFamilyRoot(ctx context.Context, tenant, projectID, family, articleID string, opID int64) error {
-	_, err := l.s.pool.Exec(ctx, `INSERT INTO yt_family_roots(tenant, project_id, family, article_id, op_id)
+	_, err := l.s.db().Exec(ctx, sqlFor(l.s, `INSERT INTO yt_family_roots(tenant, project_id, family, article_id, op_id)
 		VALUES ($1,$2,$3,$4,$5) ON CONFLICT (tenant, project_id, family) DO NOTHING`,
+		`INSERT INTO yt_family_roots(tenant, project_id, family, article_id, op_id)
+		VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE tenant=tenant`),
 		tenant, projectID, family, articleID, opID)
 	return err
 }

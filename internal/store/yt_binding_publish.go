@@ -82,9 +82,6 @@ type ytBindingPublication struct {
 // SHARE (as UnbindYTTaskBinding reads it), then the new binding, history and
 // op/link/map rows.
 func (s *Store) PublishYTAutoBinding(ctx context.Context, b YTTaskBinding, verified YTCanaryCandidate, ev YTAutoBindEvidence, actor string) (YTAutoBinding, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTAutoBinding{}, ErrDialectUnsupported
-	}
 	if actor == "" || ev.CommentsFrom < 0 || (ev.Authority != YTAuthorityHK && ev.Authority != YTAuthorityYouTrack) {
 		return YTAutoBinding{}, errors.New("invalid automatic task binding publication")
 	}
@@ -128,18 +125,19 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 	if p.auto && p.evidence.Authority == YTAuthorityHK {
 		commentsFrom = p.evidence.CommentsFrom
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if err := lockYTIssueOwnershipTx(ctx, s, pgTransaction{tx}, b.TaskID); err != nil {
+	if err := lockYTIssueOwnershipTx(ctx, s, tx, b.TaskID); err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	}
-	if err := lockYTEntity(ctx, pgTransaction{tx}, "task", strconv.FormatInt(b.TaskID, 10)); err != nil {
+	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(b.TaskID, 10)); err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	}
-	current, err := readYTCanaryCandidate(ctx, pgTransaction{tx}, b.TaskID, " FOR SHARE")
+	current, err := readYTCanaryCandidate(ctx, tx, b.TaskID, " FOR SHARE")
 	if err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	}
@@ -147,11 +145,11 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 		return YTTaskBinding{}, 0, 0, fmt.Errorf("%w: task %d's YouTrack mappings changed after verification (verified %+v, now %+v); verify again",
 			ErrYTBindingConflict, b.TaskID, verified, current)
 	}
-	have, found, err := readYTBinding(ctx, pgTransaction{tx}, b.TaskID)
+	have, found, err := readYTBinding(ctx, tx, b.TaskID)
 	if err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	}
-	latest, err := ytBindingLatestActionTx(ctx, pgTransaction{tx}, b.TaskID)
+	latest, err := ytBindingLatestActionTx(ctx, tx, b.TaskID)
 	if err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	}
@@ -174,7 +172,7 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 	}
 	// hk is creating (or adopting) the task's issue itself (hk 3898): that op
 	// publishes the binding when it is applied.
-	if pending, err := ytIssueOpPendingTx(ctx, pgTransaction{tx}, b.TaskID); err != nil {
+	if pending, err := ytIssueOpPendingTx(ctx, tx, b.TaskID); err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	} else if pending {
 		return YTTaskBinding{}, 0, 0, fmt.Errorf("%w: task %d has an unresolved issue_create op", ErrYTBindingConflict, b.TaskID)
@@ -183,7 +181,7 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 	// a switch commits before this read (refusing) or after this transaction,
 	// never between the listing and the copies.
 	if p.auto {
-		side, err := ytAuthorityShareTx(ctx, pgTransaction{tx}, YTAuthorityComments)
+		side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments)
 		if err != nil {
 			return YTTaskBinding{}, 0, 0, err
 		}
@@ -191,7 +189,7 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 			return YTTaskBinding{}, 0, 0, fmt.Errorf("%w: comments authority changed since the listing", ErrYTBindingConflict)
 		}
 	}
-	source, err := ytBindingDisagreement(ctx, pgTransaction{tx}, b)
+	source, err := ytBindingDisagreement(ctx, tx, b)
 	if err != nil {
 		return YTTaskBinding{}, 0, 0, err
 	}
@@ -203,16 +201,44 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 	}
 	now := time.Now().UTC()
 	var got YTTaskBinding
-	err = scanYTBinding(tx.QueryRow(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, comments_from)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,
-			CASE WHEN $9 < 0 THEN (SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$1) ELSE $9 END)
-		ON CONFLICT DO NOTHING RETURNING `+ytBindingColumns,
-		b.TaskID, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, now, p.origin, commentsFrom), &got)
-	if errors.Is(err, ErrNoRows) {
-		return YTTaskBinding{}, 0, 0, fmt.Errorf("%w: issue %s on %s is bound to another task", ErrYTBindingConflict, b.IssueID, b.Tenant)
-	}
-	if err != nil {
-		return YTTaskBinding{}, 0, 0, err
+	if dialectFor(tx) == mysqlDialect {
+		// MySQL has no RETURNING: the row is written and read back in this
+		// transaction, and its absence is the (tenant, issue_id) unique key
+		// refusing the binding.
+		// A plain INSERT tells the two conflicts of ON CONFLICT DO NOTHING
+		// apart from a write: the task's primary key (already bound) and the
+		// (tenant, issue_id) key (the issue belongs to another task). Both are
+		// the conflict PostgreSQL reports, and a unique-violation check is the
+		// only count MySQL gives (CLIENT_FOUND_ROWS makes an upsert report 1
+		// for a no-op too, B2's finding 5).
+		_, ierr := tx.Exec(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, comments_from)
+			SELECT ?,?,?,?,?,?,?,
+				CASE WHEN ? < 0 THEN (SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=?) ELSE ? END
+			FROM DUAL`,
+			b.TaskID, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, now, commentsFrom, b.TaskID, commentsFrom)
+		if ierr != nil {
+			return YTTaskBinding{}, 0, 0, fmt.Errorf("%w: issue %s on %s is bound to another task", ErrYTBindingConflict, b.IssueID, b.Tenant)
+		}
+		stored, ok, err := readYTBinding(ctx, tx, b.TaskID)
+		if err != nil {
+			return YTTaskBinding{}, 0, 0, err
+		}
+		if !ok || stored.Tenant != b.Tenant || stored.IssueID != b.IssueID {
+			return YTTaskBinding{}, 0, 0, fmt.Errorf("%w: issue %s on %s is bound to another task", ErrYTBindingConflict, b.IssueID, b.Tenant)
+		}
+		got = stored
+	} else {
+		err = scanYTBinding(tx.QueryRow(ctx, `INSERT INTO yt_task_bindings(task_id, tenant, issue_id, issue_readable, project_id, bound_by, bound_at, origin, comments_from)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,
+				CASE WHEN $9 < 0 THEN (SELECT coalesce(max(id),0) FROM task_comments WHERE task_id=$1) ELSE $9 END)
+			ON CONFLICT DO NOTHING RETURNING `+ytBindingColumns,
+			b.TaskID, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, now, p.origin, commentsFrom), &got)
+		if errors.Is(err, ErrNoRows) {
+			return YTTaskBinding{}, 0, 0, fmt.Errorf("%w: issue %s on %s is bound to another task", ErrYTBindingConflict, b.IssueID, b.Tenant)
+		}
+		if err != nil {
+			return YTTaskBinding{}, 0, 0, err
+		}
 	}
 	actor := p.actor
 	if actor == "" {
@@ -235,7 +261,8 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 	// worker's consumer read the task again and prepare its move and snapshot
 	// for the new binding (hk 4539). An unchanged snapshot makes no op.
 	if latest == ytBindingActionUnbound {
-		if _, err := tx.Exec(ctx, `INSERT INTO sync_log(model,model_id,action,at) VALUES('task',$1,'U',clock_timestamp())`,
+		if _, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO sync_log(model,model_id,action,at) VALUES('task',$1,'U',clock_timestamp())`,
+			`INSERT INTO sync_log(txn,model,model_id,action,at) VALUES(@hk_txn,'task',?,'U',UTC_TIMESTAMP(6))`),
 			strconv.FormatInt(b.TaskID, 10)); err != nil {
 			return YTTaskBinding{}, 0, 0, err
 		}
@@ -245,7 +272,8 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 	if p.auto && p.evidence.Authority == YTAuthorityHK {
 		for _, id := range p.evidence.Missing {
 			var c TaskComment
-			err := scanTaskComment(tx.QueryRow(ctx, `SELECT `+taskCommentColumns+` FROM task_comments WHERE id=$1`, id), &c)
+			err := scanTaskComment(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskCommentColumns+` FROM task_comments WHERE id=$1`,
+				`SELECT `+taskCommentColumns+` FROM task_comments WHERE id=?`), id), &c)
 			if errors.Is(err, ErrNoRows) {
 				return YTTaskBinding{}, 0, 0, fmt.Errorf("evidence comment %d does not exist", id)
 			}
@@ -256,7 +284,8 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 				return YTTaskBinding{}, 0, 0, fmt.Errorf("evidence comment %d is not task %d's to copy", id, b.TaskID)
 			}
 			var linkedOp int64
-			err = tx.QueryRow(ctx, `SELECT op_id FROM yt_comment_write_links WHERE comment_id=$1`, id).Scan(&linkedOp)
+			err = tx.QueryRow(ctx, sqlFor(tx, `SELECT op_id FROM yt_comment_write_links WHERE comment_id=$1`,
+				`SELECT op_id FROM yt_comment_write_links WHERE comment_id=?`), id).Scan(&linkedOp)
 			switch {
 			case err == nil:
 				linked++
@@ -268,7 +297,7 @@ func (s *Store) publishYTBinding(ctx context.Context, b YTTaskBinding, verified 
 			// held by this transaction's locks, so the enqueue cannot refuse
 			// for a missing binding or a disagreement: a false here is a
 			// broken invariant and rolls the publication back.
-			op, ok, err := enqueueYTCommentOnTx(ctx, pgTransaction{tx}, c)
+			op, ok, err := enqueueYTCommentOnTx(ctx, tx, c)
 			if err != nil {
 				return YTTaskBinding{}, 0, 0, err
 			}

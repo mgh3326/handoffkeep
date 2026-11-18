@@ -196,7 +196,7 @@ func (s *Store) EnqueueDeployLagNotices(ctx context.Context, now time.Time) (int
 		}
 		eventID := DeployLagNoticeEventID(svc.Name, now)
 		text := DeployLagNoticeText(svc.Name, st.LagCount)
-		inserted, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindDeployLag, "operator-desk", eventID, text, now)
+		inserted, err := insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDeployLag, "operator-desk", eventID, text, now)
 		if err != nil {
 			return 0, err
 		}

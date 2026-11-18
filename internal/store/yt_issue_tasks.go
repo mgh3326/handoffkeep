@@ -20,6 +20,22 @@ const (
 	YTLinkEntityMap = 3 // yt_entity_map task row: an applied issue_create op
 )
 
+// ytIssueTaskIDsSQL unions the three links, each naming its rank. The tenant is
+// one parameter, bound in each branch.
+const ytIssueTaskIDsSQL = `SELECT issue_id, task_id::text, 1 FROM yt_task_bindings WHERE tenant=$1
+		UNION ALL
+		SELECT external_id, task_id::text, 2 FROM task_origins WHERE provider='youtrack' AND (coalesce(tenant,'')='' OR tenant=$1)
+		UNION ALL
+		SELECT yt_id, hk_key, 3 FROM yt_entity_map WHERE entity_kind='task' AND (tenant=$1 OR tenant='')`
+
+// ytIssueTaskIDsMySQL is the MySQL twin: the tenant is one ? per branch, and
+// task_id is cast with CAST(... AS CHAR) instead of ::text.
+const ytIssueTaskIDsMySQL = `SELECT issue_id, CAST(task_id AS CHAR), 1 FROM yt_task_bindings WHERE tenant=?
+		UNION ALL
+		SELECT external_id, CAST(task_id AS CHAR), 2 FROM task_origins WHERE provider='youtrack' AND (coalesce(tenant,'')='' OR tenant=?)
+		UNION ALL
+		SELECT yt_id, hk_key, 3 FROM yt_entity_map WHERE entity_kind='task' AND (tenant=? OR tenant='')`
+
 // YTIssueTaskIDs maps every YouTrack issue id hk links to a task in tenant to
 // that task, from the binding, the mirror link and the write protocol's
 // entity map. When two sources name an issue, the stronger one is kept.
@@ -29,15 +45,11 @@ const (
 // on it. One plain read, no lock: the console joins it to a YouTrack read that
 // is not transactional.
 func (s *Store) YTIssueTaskIDs(ctx context.Context, tenant string) (map[string]YTIssueTask, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
+	query, args := sqlFor(s, ytIssueTaskIDsSQL, ytIssueTaskIDsMySQL), []any{tenant, tenant, tenant}
+	if dialectFor(s) != mysqlDialect {
+		args = []any{tenant}
 	}
-
-	rows, err := s.pool.Query(ctx, `SELECT issue_id, task_id::text, 1 FROM yt_task_bindings WHERE tenant=$1
-		UNION ALL
-		SELECT external_id, task_id::text, 2 FROM task_origins WHERE provider='youtrack' AND (coalesce(tenant,'')='' OR tenant=$1)
-		UNION ALL
-		SELECT yt_id, hk_key, 3 FROM yt_entity_map WHERE entity_kind='task' AND (tenant=$1 OR tenant='')`, tenant)
+	rows, err := s.db().Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

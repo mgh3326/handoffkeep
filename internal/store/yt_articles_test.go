@@ -578,7 +578,7 @@ func ytartUnwritten(t *testing.T, s *Store) int {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(t.Context())
-	n, _, err := ytArticlesUnwrittenTx(t.Context(), tx, ytcTenant)
+	n, _, err := ytArticlesUnwrittenTx(t.Context(), pgTransaction{tx}, ytcTenant)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1008,7 +1008,7 @@ func TestYTArticleConflictWithTenantlessAndTenantRows(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 	op := ytwrite.Op{ID: src.ID, EntityKind: ytwrite.ArticleEntity, EntityID: "903", Tenant: ytcTenant}
-	detail, err := ytArticleConflictTx(ctx, tx, op, "A-1")
+	detail, err := ytArticleConflictTx(ctx, pgTransaction{tx}, op, "A-1")
 	if err != nil || detail != "article is mapped to document 901" {
 		t.Fatalf("conflict = %q %v", detail, err)
 	}

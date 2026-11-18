@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // The notification outbox is hk's durable record of lane notifications owed
@@ -98,15 +96,15 @@ func assistantLaneText(prefix, body string) string {
 // insertNotificationOutbox records one owed lane notification inside the
 // writer's transaction. ON CONFLICT DO NOTHING keeps a replayed resolution
 // from queueing a second notification for the same event.
-func insertNotificationOutbox(ctx context.Context, tx pgx.Tx, kind, lane, eventID, text string, at time.Time) error {
+func insertNotificationOutbox(ctx context.Context, tx transaction, kind, lane, eventID, text string, at time.Time) error {
 	_, err := insertNotificationOutboxOnce(ctx, tx, kind, lane, eventID, text, at)
 	return err
 }
 
 // insertNotificationOutboxOnce is insertNotificationOutbox reporting whether
 // this call wrote the row.
-func insertNotificationOutboxOnce(ctx context.Context, tx pgx.Tx, kind, lane, eventID, text string, at time.Time) (bool, error) {
-	return insertNotificationOutboxTx(ctx, pgTransaction{tx}, kind, lane, eventID, text, at)
+func insertNotificationOutboxOnce(ctx context.Context, tx transaction, kind, lane, eventID, text string, at time.Time) (bool, error) {
+	return insertNotificationOutboxTx(ctx, tx, kind, lane, eventID, text, at)
 }
 
 func insertNotificationOutboxTx(ctx context.Context, tx transaction, kind, lane, eventID, text string, at time.Time) (bool, error) {

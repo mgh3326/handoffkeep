@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -85,13 +83,14 @@ func ytLinksGateSQL(s *Store) string {
 		return `FALSE`
 	}
 	return `o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
-		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
+		WHERE ` + s.q(`b.task_id::text = o.entity_id`, `CAST(b.task_id AS CHAR) = o.entity_id`) + ` AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
 }
 
 // ytLinksTargetsSQL lists the link targets an issue_links op o names, one
 // jsonb object {task_id, issue} per row in column t: the payload's parent,
 // related and duplicate entries (rows whose t is not an object are noise and
-// filtered by the callers).
+// filtered by the callers). It is the PostgreSQL form; MySQL reads the same
+// targets in Go (ytLinksPayloadTargets, hk 5077).
 const ytLinksTargetsSQL = `(SELECT o.payload->'desired'->'parent' AS t
 		UNION ALL SELECT jsonb_array_elements(CASE WHEN jsonb_typeof(o.payload->'desired'->'related') = 'array'
 			THEN o.payload->'desired'->'related' ELSE '[]'::jsonb END)
@@ -118,7 +117,8 @@ const ytLinksStaleSQL = `EXISTS (SELECT 1 FROM ` + ytLinksTargetsSQL + ` n
 
 // claimYTLinksTargetsTx is Claim's check of an issue_links op (ytLinksStaleSQL).
 // It first takes FOR KEY SHARE on the binding rows of the op's targets, in
-// task id order, and holds them until the claim commits: an unbind's DELETE of
+// task id order (FOR SHARE and the payload's targets read in Go on MySQL,
+// hk 5077), and holds them until the claim commits: an unbind's DELETE of
 // one of them either committed before (the check sees it) or waits for this
 // claim and then finds the op dispatched and refuses (ytLinksInFlightToTx).
 // A stale op is rejected with ReasonLinkTargetChanged, never dispatched, and
@@ -130,29 +130,103 @@ func claimYTLinksTargetsTx(ctx context.Context, tx transaction, op ytwrite.Op) (
 	if op.Kind != ytwrite.KindIssueLinks {
 		return "", "", nil
 	}
+	var stale bool
 	if dialectFor(tx) == mysqlDialect {
-		// B4b: the links payload walk is not ported.
-		return "", "", ErrDialectUnsupported
-	}
-	ptx := pgxTx(tx)
-	if _, err := ptx.Exec(ctx, `SELECT 1 FROM yt_task_bindings b WHERE b.task_id IN (
+		// MySQL has no jsonb array-elements to join the payload targets with
+		// (hk 5077): the same walk reads the payload in Go, and the binding
+		// rows it names are locked here, as FOR KEY SHARE locks them below.
+		stale, err = ytLinksStaleMySQL(ctx, tx, op.Tenant, op.Payload, true)
+	} else {
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM yt_task_bindings b WHERE b.task_id IN (
 			SELECT (n.t->>'task_id')::bigint FROM yt_write_ops o, LATERAL `+ytLinksTargetsSQL+` n
 			WHERE o.id = $1 AND jsonb_typeof(n.t) = 'object' AND n.t->>'task_id' ~ '^[0-9]{1,18}$')
 		ORDER BY b.task_id FOR KEY SHARE OF b`, op.ID); err != nil {
-		return "", "", err
+			return "", "", err
+		}
+		err = tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id = $1 AND `+ytLinksStaleSQL+`)`, op.ID).Scan(&stale)
 	}
-	var stale bool
-	if err := ptx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.id = $1 AND `+ytLinksStaleSQL+`)`, op.ID).Scan(&stale); err != nil {
+	if err != nil {
 		return "", "", err
 	}
 	if !stale {
 		return "", "", nil
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO sync_log(model,model_id,action,at) VALUES ('task', $1, 'U', clock_timestamp())`, op.EntityID); err != nil {
+	if _, err := tx.Exec(ctx, sqlFor(tx,
+		`INSERT INTO sync_log(model,model_id,action,at) VALUES ('task', $1, 'U', clock_timestamp())`,
+		`INSERT INTO sync_log(txn,model,model_id,action,at) VALUES(@hk_txn,'task',?,'U',UTC_TIMESTAMP(6))`), op.EntityID); err != nil {
 		return "", "", err
 	}
 	log.Printf("ytwrite.links_target_changed op_id=%d task_id=%s issue_id=%q", op.ID, op.EntityID, op.YTTargetID)
 	return ytwrite.ReasonLinkTargetChanged, "a link target of this snapshot is no longer bound to the issue it names", nil
+}
+
+// ytLinksPayloadTargets is the payload's link targets: the Go form of
+// ytLinksTargetsSQL for MySQL, whose JSON functions cannot feed a LATERAL
+// union (hk 5077).
+func ytLinksPayloadTargets(payload []byte) ([]ytwrite.IssueLinkTarget, error) {
+	var snap ytwrite.IssueLinksSnapshot
+	if _, err := scanJSONB(payload, &snap); err != nil {
+		return nil, err
+	}
+	out := make([]ytwrite.IssueLinkTarget, 0, 1+len(snap.Desired.Related)+len(snap.Desired.Duplicates))
+	if p := snap.Desired.Parent; p != nil {
+		out = append(out, *p)
+	}
+	out = append(out, snap.Desired.Related...)
+	out = append(out, snap.Desired.Duplicates...)
+	return out, nil
+}
+
+// ytLinksStaleMySQL is ytLinksStaleSQL for one payload on MySQL: o is stale
+// once any target it names is no longer that task's binding on tenant. lock
+// takes FOR SHARE on the binding rows of the targets, as the PostgreSQL text
+// takes FOR KEY SHARE.
+func ytLinksStaleMySQL(ctx context.Context, tx transaction, tenant string, payload []byte, lock bool) (bool, error) {
+	targets, err := ytLinksPayloadTargets(payload)
+	if err != nil || len(targets) == 0 {
+		return false, err
+	}
+	ids := make([]int64, 0, len(targets))
+	for _, t := range targets {
+		if t.TaskID > 0 {
+			ids = append(ids, t.TaskID)
+		}
+	}
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
+	text := `SELECT task_id, tenant, issue_id FROM yt_task_bindings WHERE task_id IN (` + placeholders(len(ids)) + `) ORDER BY task_id`
+	if lock {
+		text += ` FOR SHARE`
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := tx.Query(ctx, text, args...)
+	if err != nil {
+		return false, err
+	}
+	type binding struct{ tenant, issue string }
+	bound := map[int64]binding{}
+	for rows.Next() {
+		var id int64
+		var b binding
+		if err := rows.Scan(&id, &b.tenant, &b.issue); err != nil {
+			rows.Close()
+			return false, err
+		}
+		bound[id] = b
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	for _, t := range targets {
+		if b, ok := bound[t.TaskID]; !ok || b.tenant != tenant || b.issue != t.IssueID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ytLinksInFlightToTx lists the issue_links ops of other tasks on tenant that
@@ -162,7 +236,38 @@ func claimYTLinksTargetsTx(ctx context.Context, tx transaction, op ytwrite.Op) (
 // unbind's DELETE of the binding row, so a claim that held the row FOR KEY
 // SHARE has committed and its op is seen here, and a later claim waits for
 // the unbind and then sees no binding.
-func ytLinksInFlightToTx(ctx context.Context, tx pgx.Tx, tenant string, id int64, issue string) ([]ytLaneOp, error) {
+func ytLinksInFlightToTx(ctx context.Context, tx transaction, tenant string, id int64, issue string) ([]ytLaneOp, error) {
+	if dialectFor(tx) == mysqlDialect {
+		// The target walk is in Go on MySQL (hk 5077): no jsonb functions to
+		// join ytLinksTargetsSQL with.
+		rows, err := tx.Query(ctx, `SELECT o.id, o.kind, o.payload FROM yt_write_ops o
+			WHERE o.kind = ? AND o.tenant = ? AND o.entity_kind = 'task' AND o.entity_id <> ?
+				AND o.state IN ('dispatched','remote_unknown')
+			ORDER BY o.id`, ytwrite.KindIssueLinks, tenant, strconv.FormatInt(id, 10))
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []ytLaneOp
+		for rows.Next() {
+			var op ytLaneOp
+			var payload []byte
+			if err := rows.Scan(&op.id, &op.kind, &payload); err != nil {
+				return nil, err
+			}
+			targets, err := ytLinksPayloadTargets(payload)
+			if err != nil {
+				return nil, err
+			}
+			for _, t := range targets {
+				if t.TaskID == id && t.IssueID == issue {
+					out = append(out, op)
+					break
+				}
+			}
+		}
+		return out, rows.Err()
+	}
 	rows, err := tx.Query(ctx, `SELECT o.id, o.kind FROM yt_write_ops o
 		WHERE o.kind = $1 AND o.tenant = $2 AND o.entity_kind = 'task' AND o.entity_id <> $3::text
 			AND o.state IN ('dispatched','remote_unknown')
@@ -189,16 +294,75 @@ func ytLinksInFlightToTx(ctx context.Context, tx pgx.Tx, tenant string, id int64
 // not queued behind an op the claim would only reject. The caller holds the
 // task's lane lock; the rows are the task's own yt_write_ops rows, which a
 // lane holder updates after the lock (lockorder.go).
-func rejectStaleYTLinksOpsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant, taskKey string) error {
+func rejectStaleYTLinksOpsTx(ctx context.Context, tx transaction, now time.Time, tenant, taskKey string) error {
+	const detail = "a link target of this snapshot is no longer bound to the issue it names"
+	if dialectFor(tx) == mysqlDialect {
+		// The staleness test reads the payload in Go (hk 5077), so the rows
+		// are selected first and rejected by id in the same transaction.
+		rows, err := tx.Query(ctx, `SELECT o.id, o.payload FROM yt_write_ops o
+			WHERE o.entity_kind='task' AND o.entity_id=? AND o.state='prepared' AND o.tenant=? AND o.principal=? AND o.kind=?
+			ORDER BY o.id`, taskKey, tenant, YTLinksPrincipal, ytwrite.KindIssueLinks)
+		if err != nil {
+			return err
+		}
+		var ids []int64
+		type candidate struct {
+			id      int64
+			payload []byte
+		}
+		var candidates []candidate
+		for rows.Next() {
+			var id int64
+			var payload []byte
+			if err := rows.Scan(&id, &payload); err != nil {
+				rows.Close()
+				return err
+			}
+			candidates = append(candidates, candidate{id, payload})
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		// The rows are read before the staleness test runs its own queries:
+		// one MySQL transaction has one connection.
+		for _, c := range candidates {
+			stale, err := ytLinksStaleMySQL(ctx, tx, tenant, c.payload, false)
+			if err != nil {
+				return err
+			}
+			if stale {
+				ids = append(ids, c.id)
+			}
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		args := make([]any, 0, 3+len(ids))
+		args = append(args, ytwrite.ReasonLinkTargetChanged, detail, now.UTC())
+		marks := make([]string, len(ids))
+		for i, id := range ids {
+			marks[i] = "?"
+			args = append(args, id)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE yt_write_ops SET state='rejected', reason=?, last_error=?, resolved_at=?
+			WHERE id IN (`+strings.Join(marks, ", ")+`) AND state='prepared'`, args...); err != nil {
+			return err
+		}
+		for _, id := range ids {
+			log.Printf("ytwrite.links_target_changed op_id=%d task_id=%s", id, taskKey)
+		}
+		return nil
+	}
 	rows, err := tx.Query(ctx, `UPDATE yt_write_ops o SET state='rejected', reason=$4, last_error=$5, resolved_at=$6
 		WHERE o.entity_kind='task' AND o.entity_id=$1 AND o.state='prepared' AND o.tenant=$2 AND o.principal=$3 AND o.kind=$7
 			AND `+ytLinksStaleSQL+`
 		RETURNING o.id`, taskKey, tenant, YTLinksPrincipal, ytwrite.ReasonLinkTargetChanged,
-		"a link target of this snapshot is no longer bound to the issue it names", now.UTC(), ytwrite.KindIssueLinks)
+		detail, now.UTC(), ytwrite.KindIssueLinks)
 	if err != nil {
 		return err
 	}
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	ids, err := collectRows(rows, rowTo[int64])
 	if err != nil {
 		return err
 	}
@@ -258,13 +422,15 @@ func ytLinkWriter(kind string, src, dst int64) (writer int64, ok bool) {
 // live duplicate_of edges. An edge whose target has no binding on tenant goes
 // to Held. found is false when the task does not exist. The caller holds the
 // task's lane lock, so the set and the op prepared from it agree.
-func ytLinksDesiredTx(ctx context.Context, q pgx.Tx, tenant string, id int64) (ytLinksDesired, bool, error) {
+func ytLinksDesiredTx(ctx context.Context, q transaction, tenant string, id int64) (ytLinksDesired, bool, error) {
 	out := ytLinksDesired{Related: []ytLinkTarget{}, Duplicates: []ytLinkTarget{}, Held: []ytLinkHeld{}}
 	var parentID *int64
 	var parentIssue *string
-	err := q.QueryRow(ctx, `SELECT t.parent_id, b.issue_id FROM tasks t
+	err := q.QueryRow(ctx, sqlFor(q, `SELECT t.parent_id, b.issue_id FROM tasks t
 		LEFT JOIN yt_task_bindings b ON b.task_id = t.parent_id AND b.tenant = $2
-		WHERE t.id = $1`, id, tenant).Scan(&parentID, &parentIssue)
+		WHERE t.id = $1`, `SELECT t.parent_id, b.issue_id FROM tasks t
+		LEFT JOIN yt_task_bindings b ON b.task_id = t.parent_id AND b.tenant = ?
+		WHERE t.id = ?`), id, tenant).Scan(&parentID, &parentIssue)
 	if errors.Is(err, ErrNoRows) {
 		return ytLinksDesired{}, false, nil
 	}
@@ -280,10 +446,13 @@ func ytLinksDesiredTx(ctx context.Context, q pgx.Tx, tenant string, id int64) (y
 	}
 	// Only edges this task writes: related is stored src<dst, so src_id is the
 	// writer, and duplicate_of is written by its src.
-	rows, err := q.Query(ctx, `SELECT r.kind, r.dst_id, b.issue_id FROM task_relations r
+	rows, err := q.Query(ctx, sqlFor(q, `SELECT r.kind, r.dst_id, b.issue_id FROM task_relations r
 		LEFT JOIN yt_task_bindings b ON b.task_id = r.dst_id AND b.tenant = $2
 		WHERE r.src_id = $1 AND r.archived_at IS NULL AND r.kind IN ('related','duplicate_of')
-		ORDER BY r.kind, r.dst_id, r.id`, id, tenant)
+		ORDER BY r.kind, r.dst_id, r.id`, `SELECT r.kind, r.dst_id, b.issue_id FROM task_relations r
+		LEFT JOIN yt_task_bindings b ON b.task_id = r.dst_id AND b.tenant = ?
+		WHERE r.src_id = ? AND r.archived_at IS NULL AND r.kind IN ('related','duplicate_of')
+		ORDER BY r.kind, r.dst_id, r.id`), id, tenant)
 	if err != nil {
 		return ytLinksDesired{}, false, err
 	}
@@ -322,16 +491,20 @@ func ytLinksDesiredTx(ctx context.Context, q pgx.Tx, tenant string, id int64) (y
 // where it is dst_id (the lower id writes). Binding id makes their held edge
 // writable (I14), so the bind hook prepares each of them; id itself is not in
 // the result.
-func ytLinkWritersOfTx(ctx context.Context, q pgx.Tx, id int64) ([]int64, error) {
-	rows, err := q.Query(ctx, `SELECT id FROM tasks WHERE parent_id = $1
+func ytLinkWritersOfTx(ctx context.Context, q transaction, id int64) ([]int64, error) {
+	rows, err := q.Query(ctx, sqlFor(q, `SELECT id FROM tasks WHERE parent_id = $1
 		UNION
 		SELECT src_id FROM task_relations
 		WHERE dst_id = $1 AND archived_at IS NULL AND kind IN ('related','duplicate_of')
-		ORDER BY 1`, id)
+		ORDER BY 1`, `SELECT id FROM tasks WHERE parent_id = ?
+		UNION
+		SELECT src_id FROM task_relations
+		WHERE dst_id = ? AND archived_at IS NULL AND kind IN ('related','duplicate_of')
+		ORDER BY 1`), id)
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, pgx.RowTo[int64])
+	return collectRows(rows, rowTo[int64])
 }
 
 // ytLinksOutcome is what prepareYTLinksTx did with one task.
@@ -378,11 +551,11 @@ func ytLinksRequest(tenant, issue string, id int64, d ytLinksDesired) ytwrite.Is
 // source disagrees with, is skipped (the rules of the fields snapshot); every
 // other task prepares through prepareYTSnapshotTx, which makes no op when the
 // desired set is the one last prepared and that op was not rejected.
-func prepareYTLinksTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant string, id int64) (ytLinksOutcome, error) {
-	if err := lockYTEntity(ctx, pgTransaction{tx}, "task", strconv.FormatInt(id, 10)); err != nil {
+func prepareYTLinksTx(ctx context.Context, tx transaction, now time.Time, tenant string, id int64) (ytLinksOutcome, error) {
+	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(id, 10)); err != nil {
 		return "", err
 	}
-	b, found, err := readYTBinding(ctx, pgTransaction{tx}, id)
+	b, found, err := readYTBinding(ctx, tx, id)
 	if err != nil {
 		return "", err
 	}
@@ -392,7 +565,7 @@ func prepareYTLinksTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant stri
 	case b.Tenant != tenant:
 		return ytLinksOtherTenant, nil
 	}
-	if source, err := ytBindingDisagreement(ctx, pgTransaction{tx}, b); err != nil {
+	if source, err := ytBindingDisagreement(ctx, tx, b); err != nil {
 		return "", err
 	} else if source != "" {
 		log.Printf("ytwrite.links_skipped task_id=%d reason=binding_disagreement source=%q", id, source)
@@ -436,7 +609,7 @@ func prepareYTLinksTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant stri
 // passes that overlap in time take lane locks in one order), goes through
 // prepareYTLinksTx.
 func ytLinksHandler(s *Store, now time.Time) FeedHandler {
-	return func(ctx context.Context, tx pgx.Tx, rows []FeedRow) error {
+	return func(ctx context.Context, tx transaction, rows []FeedRow) error {
 		mode, tenant := s.ytLinksNow()
 		if mode != YTLinksOn {
 			return bumpYTLinksSweepTx(ctx, tx, now)
@@ -481,7 +654,7 @@ func ytLinksHandler(s *Store, now time.Time) FeedHandler {
 // lock (lockorder.go) and the consumer takes each one under its own pass. The
 // rows take the commit-time sync allocator lock, last, as every task write
 // does.
-func ytLinksOnBindTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
+func ytLinksOnBindTx(ctx context.Context, tx transaction, taskID int64) error {
 	return ytLinksWakeTx(ctx, tx, taskID, true)
 }
 
@@ -494,22 +667,24 @@ func ytLinksOnBindTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
 // does not reject the writers' ops itself: it holds id's lane lock, and a
 // feed pass that holds a writer's lane lock and its op rows may be waiting
 // for id's lane lock, so updating those rows there could close a cycle.
-func ytLinksOnUnbindTx(ctx context.Context, tx pgx.Tx, taskID int64) error {
+func ytLinksOnUnbindTx(ctx context.Context, tx transaction, taskID int64) error {
 	return ytLinksWakeTx(ctx, tx, taskID, false)
 }
 
 // ytLinksWakeTx writes the task 'U' feed rows of ytLinksOnBindTx: one for
 // each writer that points at task id, and one for id itself when self is set
 // and id writes a link.
-func ytLinksWakeTx(ctx context.Context, tx pgx.Tx, taskID int64, self bool) error {
+func ytLinksWakeTx(ctx context.Context, tx transaction, taskID int64, self bool) error {
 	ids, err := ytLinkWritersOfTx(ctx, tx, taskID)
 	if err != nil {
 		return err
 	}
 	var writes bool
 	if self {
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1 AND parent_id IS NOT NULL)
+		if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1 AND parent_id IS NOT NULL)
 		OR EXISTS (SELECT 1 FROM task_relations WHERE src_id = $1 AND archived_at IS NULL AND kind IN ('related','duplicate_of'))`,
+			`SELECT EXISTS (SELECT 1 FROM tasks WHERE id = ? AND parent_id IS NOT NULL)
+		OR EXISTS (SELECT 1 FROM task_relations WHERE src_id = ? AND archived_at IS NULL AND kind IN ('related','duplicate_of'))`),
 			taskID).Scan(&writes); err != nil {
 			return err
 		}
@@ -526,7 +701,19 @@ func ytLinksWakeTx(ctx context.Context, tx pgx.Tx, taskID int64, self bool) erro
 	for i, id := range ids {
 		texts[i] = strconv.FormatInt(id, 10)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO sync_log(model,model_id,action,at)
+	if dialectFor(tx) == mysqlDialect {
+		// MySQL has no unnest to select the ids from (hk 5077): one row per
+		// id, tagged with the transaction's sync token as the triggers' rows
+		// are.
+		values := make([]string, len(texts))
+		args := make([]any, len(texts))
+		for i, t := range texts {
+			values[i], args[i] = "('task', ?, 'U', UTC_TIMESTAMP(6))", t
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO sync_log(txn,model,model_id,action,at) VALUES `+strings.Join(values, ", "), args...); err != nil {
+			return err
+		}
+	} else if _, err := tx.Exec(ctx, `INSERT INTO sync_log(model,model_id,action,at)
 		SELECT 'task', u.model_id, 'U', clock_timestamp() FROM unnest($1::text[]) AS u(model_id)`, texts); err != nil {
 		return err
 	}

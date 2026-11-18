@@ -932,9 +932,18 @@ func OpenReadOnly(ctx context.Context, url string) (*Store, error) {
 // schema_migrations) has applied none.
 func (s *Store) MigrationApplied(ctx context.Context, id string) (bool, error) {
 	if s != nil && s.dialect == mysqlDialect {
-		return false, ErrDialectUnsupported
+		// MySQL records the same registered ids in its schema_migrations
+		// (migration_mysql.go), so the YouTrack area's preflights read it the
+		// same way on either dialect (hk 5077).
+		var applied bool
+		if err := s.db().QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='schema_migrations')`).Scan(&applied); err != nil || !applied {
+			return false, err
+		}
+		if err := s.db().QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id=?)`, id).Scan(&applied); err != nil {
+			return false, err
+		}
+		return applied, nil
 	}
-
 	var applied bool
 	err := s.pool.QueryRow(ctx, `SELECT current_schema() IS NOT NULL AND to_regclass(format('%I.schema_migrations', current_schema())) IS NOT NULL`).Scan(&applied)
 	if err != nil || !applied {
@@ -4707,7 +4716,9 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 // scroll position.
 func (s *Store) linkTaskDocs(ctx context.Context, out []SearchResult) error {
 	var hasBodyDoc bool
-	if e := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND column_name = 'body_doc' AND table_name = 'tasks')`).Scan(&hasBodyDoc); e != nil {
+	if e := s.db().QueryRow(ctx, s.q(
+		`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND column_name = 'body_doc' AND table_name = 'tasks')`,
+		`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND column_name = 'body_doc' AND table_name = 'tasks')`)).Scan(&hasBodyDoc); e != nil {
 		return fmt.Errorf("search task docs probe: %w", e)
 	}
 	if !hasBodyDoc {
@@ -4722,7 +4733,13 @@ func (s *Store) linkTaskDocs(ctx context.Context, out []SearchResult) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	rows, e := s.pool.Query(ctx, `SELECT id, split_part(body_doc, '#', 1) FROM tasks WHERE body_doc <> '' AND split_part(body_doc, '#', 1) = ANY($1) ORDER BY id`, keys)
+	args := make([]any, len(keys))
+	for i, k := range keys {
+		args[i] = k
+	}
+	rows, e := s.db().Query(ctx, s.q(
+		`SELECT id, split_part(body_doc, '#', 1) FROM tasks WHERE body_doc <> '' AND split_part(body_doc, '#', 1) = ANY($1) ORDER BY id`,
+		`SELECT id, SUBSTRING_INDEX(body_doc, '#', 1) FROM tasks WHERE body_doc <> '' AND SUBSTRING_INDEX(body_doc, '#', 1) IN (`+placeholders(len(keys))+`) ORDER BY id`), args...)
 	if e != nil {
 		return fmt.Errorf("search task docs: %w", e)
 	}

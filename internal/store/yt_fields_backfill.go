@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strconv"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // The issue_fields backfill (hk 4022, docs/youtrack-write-protocol.md "Kind
@@ -106,10 +104,6 @@ type YTFieldsBackfillReport struct {
 // again from the first task and passes the ones already sent as unchanged. A
 // dry run reads the same rows and writes nothing.
 func (s *Store) BackfillYTFieldsOps(ctx context.Context, opt YTFieldsBackfillOptions) (YTFieldsBackfillReport, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTFieldsBackfillReport{}, ErrDialectUnsupported
-	}
-
 	r := YTFieldsBackfillReport{Project: opt.Project, TaskID: opt.TaskID, Limit: opt.Limit, DryRun: opt.DryRun,
 		Projects: []*YTFieldsBackfillProject{}}
 	mode, tenant := s.ytFieldsNow()
@@ -120,12 +114,17 @@ func (s *Store) BackfillYTFieldsOps(ctx context.Context, opt YTFieldsBackfillOpt
 	if opt.Limit < 0 || opt.TaskID < 0 {
 		return r, errors.New("backfill limit and task id must not be negative")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id FROM tasks WHERE ($1 = '' OR project = $1) AND ($2 = 0 OR id = $2) ORDER BY id`,
-		opt.Project, opt.TaskID)
+	query, args := sqlFor(s, `SELECT id FROM tasks WHERE ($1 = '' OR project = $1) AND ($2 = 0 OR id = $2) ORDER BY id`,
+		`SELECT id FROM tasks WHERE (? = '' OR project = ?) AND (? = 0 OR id = ?) ORDER BY id`),
+		[]any{opt.Project, opt.TaskID}
+	if dialectFor(s) == mysqlDialect {
+		args = []any{opt.Project, opt.Project, opt.TaskID, opt.TaskID}
+	}
+	rows, err := s.db().Query(ctx, query, args...)
 	if err != nil {
 		return r, err
 	}
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	ids, err := collectRows(rows, rowTo[int64])
 	if err != nil {
 		return r, err
 	}
@@ -170,16 +169,17 @@ func (s *Store) BackfillYTFieldsOps(ctx context.Context, opt YTFieldsBackfillOpt
 // (ytSnapshotUnchanged: an unchanged sha whose op was rejected counts as prepared)
 // and rolls back.
 func (s *Store) backfillYTFields(ctx context.Context, tenant string, id int64, dryRun bool, remaining int) (ytFieldsOutcome, int, string, bool, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return "", 0, "", false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if err := lockYTEntity(ctx, pgTransaction{tx}, "task", strconv.FormatInt(id, 10)); err != nil {
+	if err := lockYTEntity(ctx, tx, "task", strconv.FormatInt(id, 10)); err != nil {
 		return "", 0, "", false, err
 	}
 	now := time.Now().UTC()
-	tasks, err := readYTFieldsRows(ctx, pgTransaction{tx}, []int64{id}, now, s.StartedStalledHours())
+	tasks, err := readYTFieldsRows(ctx, tx, []int64{id}, now, s.StartedStalledHours())
 	if err != nil {
 		return "", 0, "", false, err
 	}

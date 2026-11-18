@@ -55,7 +55,7 @@ func (s *Store) queueDecisionAnswerNotice(ctx context.Context, tx pgx.Tx, x Task
 	if base := s.decisionConsoleURL(); base != "" {
 		body += " | " + base + "/ui/tasks/" + taskID
 	}
-	_, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindDecisionAnswered, lane, decisionAnswerNoticeEventID(resolved.ID, resolutionID), assistantLaneText(prefix, body), at)
+	_, err := insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDecisionAnswered, lane, decisionAnswerNoticeEventID(resolved.ID, resolutionID), assistantLaneText(prefix, body), at)
 	return err
 }
 
@@ -74,7 +74,7 @@ func (s *Store) queueDecisionDenyNotice(ctx context.Context, tx pgx.Tx, x Task, 
 	if base := s.decisionConsoleURL(); base != "" {
 		body += " | " + base + "/ui/tasks/" + taskID
 	}
-	_, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindDecisionDenied, x.Lane, decisionDenyNoticeEventID(request.ID, denyAttemptID), assistantLaneText(prefix, body), at)
+	_, err := insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDecisionDenied, x.Lane, decisionDenyNoticeEventID(request.ID, denyAttemptID), assistantLaneText(prefix, body), at)
 	return err
 }
 

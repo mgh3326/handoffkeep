@@ -5,9 +5,6 @@ import (
 	"errors"
 	"log"
 	"time"
-
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // The issue-link sweep (hk 3841, design/2026-11-13/yt-issue-links §5.6, I13).
@@ -59,9 +56,21 @@ func ytLinksSweepStateTx(ctx context.Context, q ytRowQuerier) (YTLinksSweepState
 // (the feed pass is its only caller) and before any lane lock of the same
 // pass; a sweep slice takes the row only in its own short transactions, never
 // with a lane lock held (lockorder.go).
-func bumpYTLinksSweepTx(ctx context.Context, tx pgx.Tx, now time.Time) error {
+func bumpYTLinksSweepTx(ctx context.Context, tx transaction, now time.Time) error {
 	var generation int64
-	if err := tx.QueryRow(ctx, `INSERT INTO yt_links_sweep(singleton, generation, done_generation, after_task_id, updated_at)
+	if dialectFor(tx) == mysqlDialect {
+		// No RETURNING: the upsert and the read of the new generation share
+		// the transaction (hk 5077).
+		if _, err := tx.Exec(ctx, `INSERT INTO yt_links_sweep(singleton, generation, done_generation, after_task_id, updated_at)
+			VALUES (TRUE, 1, 0, 0, ?)
+			ON DUPLICATE KEY UPDATE generation = generation + 1, after_task_id = 0, updated_at = VALUES(updated_at)`,
+			now.UTC()); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT generation FROM yt_links_sweep WHERE singleton`).Scan(&generation); err != nil {
+			return err
+		}
+	} else if err := tx.QueryRow(ctx, `INSERT INTO yt_links_sweep(singleton, generation, done_generation, after_task_id, updated_at)
 		VALUES (TRUE, 1, 0, 0, $1)
 		ON CONFLICT (singleton) DO UPDATE SET generation = yt_links_sweep.generation + 1, after_task_id = 0, updated_at = EXCLUDED.updated_at
 		RETURNING generation`, now.UTC()).Scan(&generation); err != nil {
@@ -99,16 +108,12 @@ type YTLinksSweepPass struct {
 // transaction holding only the sweep row. No transaction holds the row and a
 // lane lock together.
 func (s *Store) RunYTLinksSweep(ctx context.Context, now time.Time, limit int) (YTLinksSweepPass, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTLinksSweepPass{}, ErrDialectUnsupported
-	}
-
 	pass := YTLinksSweepPass{Idle: true}
 	mode, tenant := s.ytLinksNow()
 	if mode != YTLinksOn || limit < 1 {
 		return pass, nil
 	}
-	st, err := ytLinksSweepStateTx(ctx, pgQuerier{pool: s.pool})
+	st, err := ytLinksSweepStateTx(ctx, s.db())
 	if err != nil {
 		return pass, err
 	}
@@ -116,12 +121,13 @@ func (s *Store) RunYTLinksSweep(ctx context.Context, now time.Time, limit int) (
 		return pass, nil
 	}
 	pass.Idle, pass.Generation = false, st.Generation
-	rows, err := s.pool.Query(ctx, `SELECT task_id FROM yt_task_bindings WHERE tenant=$1 AND task_id > $2 ORDER BY task_id LIMIT $3`,
+	rows, err := s.db().Query(ctx, sqlFor(s, `SELECT task_id FROM yt_task_bindings WHERE tenant=$1 AND task_id > $2 ORDER BY task_id LIMIT $3`,
+		`SELECT task_id FROM yt_task_bindings WHERE tenant=? AND task_id > ? ORDER BY task_id LIMIT ?`),
 		tenant, st.AfterTaskID, limit)
 	if err != nil {
 		return pass, err
 	}
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	ids, err := collectRows(rows, rowTo[int64])
 	if err != nil {
 		return pass, err
 	}
@@ -142,19 +148,26 @@ func (s *Store) RunYTLinksSweep(ctx context.Context, now time.Time, limit int) (
 	if len(ids) > 0 {
 		last = ids[len(ids)-1]
 	}
-	var tag pgconn.CommandTag
+	var n int64
 	if len(ids) < limit {
 		pass.Complete = true
-		tag, err = s.pool.Exec(ctx, `UPDATE yt_links_sweep SET done_generation = $1, after_task_id = 0, updated_at = $2
-			WHERE singleton AND generation = $1 AND after_task_id = $3`, st.Generation, now.UTC(), st.AfterTaskID)
+		n, err = s.db().Exec(ctx, sqlFor(s, `UPDATE yt_links_sweep SET done_generation = $1, after_task_id = 0, updated_at = $2
+			WHERE singleton AND generation = $1 AND after_task_id = $3`,
+			`UPDATE yt_links_sweep SET done_generation = ?, after_task_id = 0, updated_at = ?
+			WHERE singleton AND generation = ? AND after_task_id = ?`), st.Generation, now.UTC(), st.AfterTaskID)
 	} else {
-		tag, err = s.pool.Exec(ctx, `UPDATE yt_links_sweep SET after_task_id = $4, updated_at = $2
-			WHERE singleton AND generation = $1 AND after_task_id = $3`, st.Generation, now.UTC(), st.AfterTaskID, last)
+		if s.dialect == mysqlDialect {
+			n, err = s.db().Exec(ctx, `UPDATE yt_links_sweep SET after_task_id = ?, updated_at = ?
+				WHERE singleton AND generation = ? AND after_task_id = ?`, last, now.UTC(), st.Generation, st.AfterTaskID)
+		} else {
+			n, err = s.db().Exec(ctx, `UPDATE yt_links_sweep SET after_task_id = $4, updated_at = $2
+				WHERE singleton AND generation = $1 AND after_task_id = $3`, st.Generation, now.UTC(), st.AfterTaskID, last)
+		}
 	}
 	if err != nil {
 		return pass, err
 	}
-	if tag.RowsAffected() == 0 {
+	if n == 0 {
 		pass.Restarted, pass.Complete = true, false
 	}
 	log.Printf("ytwrite.links_sweep generation=%d visited=%d prepared=%d complete=%t restarted=%t last_task_id=%d",
@@ -164,10 +177,11 @@ func (s *Store) RunYTLinksSweep(ctx context.Context, now time.Time, limit int) (
 
 // sweepYTLinksTask is prepareYTLinksTx in its own transaction.
 func (s *Store) sweepYTLinksTask(ctx context.Context, now time.Time, tenant string, id int64) (ytLinksOutcome, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return "", err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	outcome, err := prepareYTLinksTx(ctx, tx, now, tenant, id)
 	if err != nil {

@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -72,23 +70,8 @@ func (s *Store) ytDecisionsNow() (ytDecisionsGate, bool) {
 func init() {
 	registerYTKindGate(ytwrite.KindDecisionCreate, ytDecisionCreateGateSQL)
 	registerYTKindGate(ytwrite.KindDecisionFields, ytDecisionFieldsGateSQL)
-	registerYTApplyHook(ytwrite.KindDecisionCreate, ytApplyHook{conflict: ytDecisionConflictTxQ, bind: bindYTDecisionApplyTxQ})
+	registerYTApplyHook(ytwrite.KindDecisionCreate, ytApplyHook{conflict: ytDecisionConflictTx, bind: bindYTDecisionApplyTx})
 	registerYTFeedStoreConsumer(ytDecisionsConsumer, []string{"decision"}, ytDecisionsHandler)
-}
-
-// The decision hooks stay on pgx.Tx: decision bindings are B6. The adapters
-// refuse a MySQL store before unwrapping.
-func ytDecisionConflictTxQ(ctx context.Context, tx transaction, op ytwrite.Op, ytID string) (string, error) {
-	if dialectFor(tx) == mysqlDialect {
-		return "", ErrDialectUnsupported
-	}
-	return ytDecisionConflictTx(ctx, pgxTx(tx), op, ytID)
-}
-func bindYTDecisionApplyTxQ(s *Store, ctx context.Context, tx transaction, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
-	if dialectFor(tx) == mysqlDialect {
-		return ErrDialectUnsupported
-	}
-	return bindYTDecisionApplyTx(s, ctx, pgxTx(tx), op, ytID, now, adopted)
 }
 
 // ytDecisionCreateGateSQL is the decision_create gate (ytAdmitSQL): mode on,
@@ -99,7 +82,7 @@ func ytDecisionCreateGateSQL(s *Store) string {
 		return `FALSE`
 	}
 	return `o.entity_kind = 'decision' AND NOT EXISTS (SELECT 1 FROM yt_decision_bindings b
-		WHERE b.decision_id = o.entity_id AND b.op_id IS DISTINCT FROM o.id)`
+		WHERE b.decision_id = o.entity_id AND ` + s.q(`b.op_id IS DISTINCT FROM o.id`, `NOT (b.op_id <=> o.id)`) + `)`
 }
 
 // ytDecisionFieldsGateSQL is the decision_fields gate: mode on, and o's
@@ -127,7 +110,12 @@ type YTDecisionBinding struct {
 
 const ytDecisionBindingColumns = `decision_id::bigint, tenant, issue_id, issue_readable, project_id, origin, coalesce(op_id,0), bound_by, bound_at`
 
-func scanYTDecisionBinding(row pgx.Row, b *YTDecisionBinding) error {
+// ytDecisionBindingColumnsMySQL is the twin for MySQL, where decision_id is
+// the B6 VARCHAR(20) key (the ported yt_decision_bindings): it casts to a
+// number instead of ::bigint.
+const ytDecisionBindingColumnsMySQL = `CAST(decision_id AS SIGNED), tenant, issue_id, issue_readable, project_id, origin, coalesce(op_id,0), bound_by, bound_at`
+
+func scanYTDecisionBinding(row row, b *YTDecisionBinding) error {
 	if err := row.Scan(&b.DecisionID, &b.Tenant, &b.IssueID, &b.IssueReadable, &b.ProjectID, &b.Origin, &b.OpID, &b.BoundBy, &b.BoundAt); err != nil {
 		return err
 	}
@@ -138,16 +126,14 @@ func scanYTDecisionBinding(row pgx.Row, b *YTDecisionBinding) error {
 // YTDecisionBinding reads a decision's binding; found is false when it has
 // none.
 func (s *Store) YTDecisionBinding(ctx context.Context, decisionID int64) (YTDecisionBinding, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTDecisionBinding{}, false, ErrDialectUnsupported
-	}
-
-	return readYTDecisionBinding(ctx, pgQuerier{pool: s.pool}, decisionID)
+	return readYTDecisionBinding(ctx, s.db(), decisionID)
 }
 
 func readYTDecisionBinding(ctx context.Context, q ytRowQuerier, decisionID int64) (YTDecisionBinding, bool, error) {
 	var b YTDecisionBinding
-	err := scanYTDecisionBinding(q.QueryRow(ctx, `SELECT `+ytDecisionBindingColumns+` FROM yt_decision_bindings WHERE decision_id=$1`,
+	err := scanYTDecisionBinding(q.QueryRow(ctx,
+		sqlFor(q, `SELECT `+ytDecisionBindingColumns+` FROM yt_decision_bindings WHERE decision_id=$1`,
+			`SELECT `+ytDecisionBindingColumnsMySQL+` FROM yt_decision_bindings WHERE decision_id=?`),
 		strconv.FormatInt(decisionID, 10)), &b)
 	if errors.Is(err, ErrNoRows) {
 		return YTDecisionBinding{}, false, nil
@@ -171,12 +157,17 @@ type ytDecisionRow struct {
 
 // readYTDecisionRows reads the projection inputs of ids at now, by id; a
 // deleted decision is absent.
-func readYTDecisionRows(ctx context.Context, q pgx.Tx, ids []int64, now time.Time) (map[int64]*ytDecisionRow, error) {
+func readYTDecisionRows(ctx context.Context, q querier, ids []int64, now time.Time) (map[int64]*ytDecisionRow, error) {
 	out := make(map[int64]*ytDecisionRow, len(ids))
 	if len(ids) == 0 {
 		return out, nil
 	}
-	rows, err := q.Query(ctx, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id = ANY($1::bigint[])`, ids)
+	query := `SELECT ` + decisionRecordColumns + ` FROM decision_requests WHERE id = ANY($1::bigint[])`
+	args := []any{ids}
+	if dialectFor(q) == mysqlDialect {
+		query, args = `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id IN (`+placeholders(len(ids))+`)`, intArgs(ids)
+	}
+	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -194,14 +185,28 @@ func readYTDecisionRows(ctx context.Context, q pgx.Tx, ids []int64, now time.Tim
 	}
 	// The channel of the latest resolution of a structured request, when the
 	// row is answered (decision_resolutions, keyed by request id).
-	rows, err = q.Query(ctx, `SELECT d.id,
+	query = `SELECT d.id,
 		coalesce((SELECT r.channel FROM decision_resolutions r
 			WHERE d.status = 'answered' AND d.source IN ('task_request','linear')
 			AND (r.request_id = d.source_ref OR r.revision_request_id = d.source_ref)
 			AND r.kind IN ('answered','default_applied')
 			ORDER BY r.resolution_id DESC LIMIT 1),''),
 		EXISTS(SELECT 1 FROM yt_write_ops o WHERE o.principal = $2 AND o.kind = $3 AND o.idem_key = 'decision-issue:' || d.id::text)
-		FROM decision_requests d WHERE d.id = ANY($1::bigint[])`, ids, YTDecisionsPrincipal, ytwrite.KindDecisionCreate)
+		FROM decision_requests d WHERE d.id = ANY($1::bigint[])`
+	args = []any{ids, YTDecisionsPrincipal, ytwrite.KindDecisionCreate}
+	if dialectFor(q) == mysqlDialect {
+		// MySQL has CONCAT instead of || and an IN list instead of ANY.
+		query = `SELECT d.id,
+			coalesce((SELECT r.channel FROM decision_resolutions r
+				WHERE d.status = 'answered' AND d.source IN ('task_request','linear')
+				AND (r.request_id = d.source_ref OR r.revision_request_id = d.source_ref)
+				AND r.kind IN ('answered','default_applied')
+				ORDER BY r.resolution_id DESC LIMIT 1),''),
+			EXISTS(SELECT 1 FROM yt_write_ops o WHERE o.principal = ? AND o.kind = ? AND o.idem_key = CONCAT('decision-issue:',CAST(d.id AS CHAR)))
+			FROM decision_requests d WHERE d.id IN (` + placeholders(len(ids)) + `)`
+		args = append([]any{YTDecisionsPrincipal, ytwrite.KindDecisionCreate}, intArgs(ids)...)
+	}
+	rows, err = q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -225,7 +230,16 @@ func readYTDecisionRows(ctx context.Context, q pgx.Tx, ids []int64, now time.Tim
 	for _, id := range ids {
 		keys = append(keys, strconv.FormatInt(id, 10))
 	}
-	rows, err = q.Query(ctx, `SELECT `+ytDecisionBindingColumns+` FROM yt_decision_bindings WHERE decision_id = ANY($1::text[])`, keys)
+	query = `SELECT ` + ytDecisionBindingColumns + ` FROM yt_decision_bindings WHERE decision_id = ANY($1::text[])`
+	args = []any{keys}
+	if dialectFor(q) == mysqlDialect {
+		query = `SELECT ` + ytDecisionBindingColumnsMySQL + ` FROM yt_decision_bindings WHERE decision_id IN (` + placeholders(len(keys)) + `)`
+		args = make([]any, len(keys))
+		for i, k := range keys {
+			args[i] = k
+		}
+	}
+	rows, err = q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +307,7 @@ const (
 // another tenant is skipped; a bound decision prepares its snapshot through
 // prepareYTSnapshotTx, which makes no op when the snapshot is the one last
 // prepared. A snapshot the protocol cannot store is skipped and logged.
-func prepareYTDecisionTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDecisionsGate, id int64, r *ytDecisionRow) (ytDecisionOutcome, error) {
+func prepareYTDecisionTx(ctx context.Context, tx transaction, now time.Time, g ytDecisionsGate, id int64, r *ytDecisionRow) (ytDecisionOutcome, error) {
 	switch {
 	case r == nil:
 		return ytDecisionDeleted, nil
@@ -306,7 +320,7 @@ func prepareYTDecisionTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDeci
 		if err != nil {
 			return "", err
 		}
-		op, created, err := prepareYTOpTx(ctx, pgTransaction{tx}, now, n)
+		op, created, err := prepareYTOpTx(ctx, tx, now, n)
 		if err != nil {
 			return "", err
 		}
@@ -314,7 +328,7 @@ func prepareYTDecisionTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDeci
 			return ytDecisionCreatePending, nil
 		}
 		if cerr := ytwrite.CheckDecision(req); cerr != nil {
-			if _, err := rejectYTOpTx(ctx, pgTransaction{tx}, now, op.ID, ytwrite.ReasonInvalidIssue, cerr.Error()); err != nil {
+			if _, err := rejectYTOpTx(ctx, tx, now, op.ID, ytwrite.ReasonInvalidIssue, cerr.Error()); err != nil {
 				return "", err
 			}
 			log.Printf("ytwrite.decision_create_rejected op_id=%d decision_id=%d err=%q", op.ID, id, cerr.Error())
@@ -374,7 +388,7 @@ func decisionFeedIDs(rows []FeedRow) []int64 {
 // decision, in sync_id order, is read under its lane lock and goes through
 // prepareYTDecisionTx.
 func ytDecisionsHandler(s *Store, now time.Time) FeedHandler {
-	return func(ctx context.Context, tx pgx.Tx, rows []FeedRow) error {
+	return func(ctx context.Context, tx transaction, rows []FeedRow) error {
 		g, on := s.ytDecisionsNow()
 		if !on {
 			return nil
@@ -390,7 +404,7 @@ func ytDecisionsHandler(s *Store, now time.Time) FeedHandler {
 			// a binding committed before this read is seen, and one after
 			// it waits for this pass, whose create op it then refuses to
 			// race (ErrYTDecisionOpPending).
-			if err := lockYTEntity(ctx, pgTransaction{tx}, ytwrite.DecisionEntity, strconv.FormatInt(id, 10)); err != nil {
+			if err := lockYTEntity(ctx, tx, ytwrite.DecisionEntity, strconv.FormatInt(id, 10)); err != nil {
 				return err
 			}
 			decisions, err := readYTDecisionRows(ctx, tx, []int64{id}, now)
@@ -445,15 +459,23 @@ func (s *Store) catchUpYTDecisionExpiries(ctx context.Context, now time.Time) er
 	// (a backfill with the mode off writes no snapshot), and no write would ever
 	// bring it here. Every sweep rescans the bound, open, expired decisions; the
 	// snapshot hash makes a rescan of an unchanged expiry a no-op.
-	rows, err := s.pool.Query(ctx, `SELECT d.id FROM decision_requests d
+	query := `SELECT d.id FROM decision_requests d
 		JOIN yt_decision_bindings b ON b.decision_id = d.id::text AND b.tenant = $1
 		WHERE d.status = 'open' AND d.expires_at IS NOT NULL AND d.expires_at <= $2
-		ORDER BY d.id`, g.tenant, now.UTC())
+		ORDER BY d.id`
+	if dialectFor(s) == mysqlDialect {
+		// yt_decision_bindings.decision_id is VARCHAR on MySQL (B6).
+		query = `SELECT d.id FROM decision_requests d
+			JOIN yt_decision_bindings b ON b.decision_id = CAST(d.id AS CHAR) AND b.tenant = ?
+			WHERE d.status = 'open' AND d.expires_at IS NOT NULL AND d.expires_at <= ?
+			ORDER BY d.id`
+	}
+	rows, err := s.db().Query(ctx, query, g.tenant, now.UTC())
 	if err != nil {
 		log.Printf("ytwrite.decision_expiry_sweep_failed err=%q", err.Error())
 		return err
 	}
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	ids, err := collectRows(rows, rowTo[int64])
 	if err != nil {
 		log.Printf("ytwrite.decision_expiry_sweep_failed err=%q", err.Error())
 		return err
@@ -480,7 +502,7 @@ func (s *Store) catchUpYTDecisionExpiries(ctx context.Context, now time.Time) er
 // on and its binding is on the gate's tenant (no op for an unchanged
 // snapshot). The caller holds, or prepareYTSnapshotTx takes, the decision's
 // lane lock.
-func (s *Store) ytDecisionSnapshotTx(ctx context.Context, tx pgx.Tx, id int64, now time.Time) (ytDecisionOutcome, error) {
+func (s *Store) ytDecisionSnapshotTx(ctx context.Context, tx transaction, id int64, now time.Time) (ytDecisionOutcome, error) {
 	g, on := s.ytDecisionsNow()
 	if !on {
 		return "", nil
@@ -503,13 +525,12 @@ func (s *Store) ytDecisionSnapshotTx(ctx context.Context, tx pgx.Tx, id int64, n
 // contradict a mapping hk already keeps: the decision bound or mapped to
 // another issue, or the issue bound or mapped to another decision. It returns
 // the conflict ("" when none) and logs it as ytwrite.binding_conflict.
-func ytDecisionConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string) (string, error) {
+func ytDecisionConflictTx(ctx context.Context, tx transaction, op ytwrite.Op, ytID string) (string, error) {
 	id, err := strconv.ParseInt(op.EntityID, 10, 64)
 	if err != nil || id < 1 || op.EntityKind != ytwrite.DecisionEntity {
 		return "", fmt.Errorf("decision_create op %d is not on a decision lane (%s:%s)", op.ID, op.EntityKind, op.EntityID)
 	}
-	var detail string
-	err = tx.QueryRow(ctx, `SELECT coalesce(
+	query := `SELECT coalesce(
 		(SELECT 'decision is bound to issue '||issue_id||' on '||tenant||' ('||origin||')' FROM yt_decision_bindings
 			WHERE decision_id=$1 AND (tenant<>$2 OR issue_id<>$3)),
 		(SELECT 'issue is bound to decision '||decision_id FROM yt_decision_bindings
@@ -518,7 +539,26 @@ func ytDecisionConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID st
 			WHERE entity_kind='decision' AND hk_key=$1 AND yt_id<>$3),
 		(SELECT 'issue is mapped to decision '||hk_key FROM yt_entity_map
 			WHERE entity_kind='decision' AND (tenant=$2 OR tenant='') AND yt_id=$3 AND hk_key<>$1),
-		'')`, op.EntityID, op.Tenant, ytID).Scan(&detail)
+		'')`
+	args := []any{op.EntityID, op.Tenant, ytID}
+	if dialectFor(tx) == mysqlDialect {
+		// MySQL has CONCAT instead of ||; the three bound arguments repeat in
+		// each subselect's order.
+		query = `SELECT coalesce(
+		(SELECT CONCAT('decision is bound to issue ',issue_id,' on ',tenant,' (',origin,')') FROM yt_decision_bindings
+			WHERE decision_id=? AND (tenant<>? OR issue_id<>?)),
+		(SELECT CONCAT('issue is bound to decision ',decision_id) FROM yt_decision_bindings
+			WHERE tenant=? AND issue_id=? AND decision_id<>? LIMIT 1),
+		(SELECT CONCAT('decision is mapped to issue ',yt_id) FROM yt_entity_map
+			WHERE entity_kind='decision' AND hk_key=? AND yt_id<>?),
+		(SELECT CONCAT('issue is mapped to decision ',hk_key) FROM yt_entity_map
+			WHERE entity_kind='decision' AND (tenant=? OR tenant='') AND yt_id=? AND hk_key<>?),
+		'')`
+		args = []any{op.EntityID, op.Tenant, ytID, op.Tenant, ytID, op.EntityID,
+			op.EntityID, ytID, op.Tenant, ytID, op.EntityID}
+	}
+	var detail string
+	err = tx.QueryRow(ctx, query, args...).Scan(&detail)
 	if err != nil {
 		return "", err
 	}
@@ -534,16 +574,30 @@ func ytDecisionConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID st
 // prepared here, behind the op on the decision's lane. The create wrote only
 // the summary, the description and the two ids. A binding of the decision to
 // this same issue is kept as it is.
-func bindYTDecisionApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string, now time.Time, _ bool) error {
+func bindYTDecisionApplyTx(s *Store, ctx context.Context, tx transaction, op ytwrite.Op, ytID string, now time.Time, _ bool) error {
 	id, _ := strconv.ParseInt(op.EntityID, 10, 64)
-	tag, err := tx.Exec(ctx, `INSERT INTO yt_decision_bindings(decision_id, tenant, issue_id, issue_readable, project_id, origin, op_id, bound_by, bound_at)
-		VALUES ($1,$2,$3,'',$4,'op_applied',$5,$6,$7) ON CONFLICT DO NOTHING`,
-		op.EntityID, op.Tenant, ytID, op.YTTargetID, op.ID, op.Principal, now.UTC())
+	// MySQL has no ON CONFLICT DO NOTHING: a plain INSERT whose unique
+	// violation is either this decision's own row (kept as it is) or another
+	// decision's claim on the issue (the apply rolls back). CLIENT_FOUND_ROWS
+	// would make an upsert report 1 for the no-op too (B2's finding 5).
+	args := []any{op.EntityID, op.Tenant, ytID, op.YTTargetID, op.ID, op.Principal, now.UTC()}
+	var affected int64
+	var err error
+	if dialectFor(tx) == mysqlDialect {
+		affected, err = tx.Exec(ctx, `INSERT INTO yt_decision_bindings(decision_id, tenant, issue_id, issue_readable, project_id, origin, op_id, bound_by, bound_at)
+			VALUES (?,?,?,'',?,'op_applied',?,?,?)`, args...)
+		if errors.Is(err, errUniqueViolation) {
+			affected, err = 0, nil
+		}
+	} else {
+		affected, err = tx.Exec(ctx, `INSERT INTO yt_decision_bindings(decision_id, tenant, issue_id, issue_readable, project_id, origin, op_id, bound_by, bound_at)
+			VALUES ($1,$2,$3,'',$4,'op_applied',$5,$6,$7) ON CONFLICT DO NOTHING`, args...)
+	}
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		have, found, err := readYTDecisionBinding(ctx, pgTransaction{tx}, id)
+	if affected == 0 {
+		have, found, err := readYTDecisionBinding(ctx, tx, id)
 		if err != nil {
 			return err
 		}
@@ -581,31 +635,31 @@ var (
 // In mode on, the decision's first snapshot is prepared in the same
 // transaction, behind any op on its lane.
 func (s *Store) BindYTDecision(ctx context.Context, b YTDecisionBinding, now time.Time) (created bool, err error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return false, ErrDialectUnsupported
-	}
-
 	if b.DecisionID <= 0 || b.Tenant == "" || b.IssueID == "" || b.BoundBy == "" {
 		return false, errors.New("a decision binding needs the decision, the tenant, the issue and who bound it")
 	}
 	key := strconv.FormatInt(b.DecisionID, 10)
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return false, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if err := lockYTEntity(ctx, pgTransaction{tx}, ytwrite.DecisionEntity, key); err != nil {
+	if err := lockYTEntity(ctx, tx, ytwrite.DecisionEntity, key); err != nil {
 		return false, err
 	}
 	var pending bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$1 AND entity_kind='decision' AND entity_id=$2
-		AND state NOT IN ('applied','rejected'))`, ytwrite.KindDecisionCreate, key).Scan(&pending); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx,
+		`SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=$1 AND entity_kind='decision' AND entity_id=$2
+		AND state NOT IN ('applied','rejected'))`,
+		`SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE kind=? AND entity_kind='decision' AND entity_id=?
+		AND state NOT IN ('applied','rejected'))`), ytwrite.KindDecisionCreate, key).Scan(&pending); err != nil {
 		return false, err
 	}
 	if pending {
 		return false, fmt.Errorf("%w: decision %d", ErrYTDecisionOpPending, b.DecisionID)
 	}
-	have, found, err := readYTDecisionBinding(ctx, pgTransaction{tx}, b.DecisionID)
+	have, found, err := readYTDecisionBinding(ctx, tx, b.DecisionID)
 	if err != nil {
 		return false, err
 	}
@@ -615,8 +669,12 @@ func (s *Store) BindYTDecision(ctx context.Context, b YTDecisionBinding, now tim
 		}
 		return false, tx.Commit(ctx)
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO yt_decision_bindings(decision_id, tenant, issue_id, issue_readable, project_id, origin, op_id, bound_by, bound_at)
-		VALUES ($1,$2,$3,$4,$5,'import_verified',NULL,$6,$7)`, key, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, now.UTC())
+	_, err = tx.Exec(ctx, sqlFor(tx,
+		`INSERT INTO yt_decision_bindings(decision_id, tenant, issue_id, issue_readable, project_id, origin, op_id, bound_by, bound_at)
+		VALUES ($1,$2,$3,$4,$5,'import_verified',NULL,$6,$7)`,
+		`INSERT INTO yt_decision_bindings(decision_id, tenant, issue_id, issue_readable, project_id, origin, op_id, bound_by, bound_at)
+		VALUES (?,?,?,?,?,'import_verified',NULL,?,?)`),
+		key, b.Tenant, b.IssueID, b.IssueReadable, b.ProjectID, b.BoundBy, now.UTC())
 	if errors.Is(mapDriverError(err), errUniqueViolation) {
 		return false, fmt.Errorf("%w: issue %s on %s is bound to another decision", ErrYTDecisionBindingConflict, b.IssueID, b.Tenant)
 	}
@@ -643,18 +701,25 @@ const YTDecisionCandidatesMax = 1000
 // UnboundYTDecisions lists the decisions with no binding and an id above
 // afterID, ascending, at most limit (1..YTDecisionCandidatesMax).
 func (s *Store) UnboundYTDecisions(ctx context.Context, afterID int64, limit int) ([]YTDecisionCandidate, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if afterID < 0 || limit < 1 || limit > YTDecisionCandidatesMax {
 		return nil, errors.New("invalid decision candidate page")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT d.id, EXISTS(SELECT 1 FROM yt_write_ops o WHERE o.kind=$3 AND o.entity_kind='decision'
+	query := `SELECT d.id, EXISTS(SELECT 1 FROM yt_write_ops o WHERE o.kind=$3 AND o.entity_kind='decision'
 			AND o.entity_id=d.id::text AND o.state NOT IN ('applied','rejected'))
 		FROM decision_requests d
 		WHERE d.id > $1 AND NOT EXISTS (SELECT 1 FROM yt_decision_bindings b WHERE b.decision_id = d.id::text)
-		ORDER BY d.id LIMIT $2`, afterID, limit, ytwrite.KindDecisionCreate)
+		ORDER BY d.id LIMIT $2`
+	args := []any{afterID, limit, ytwrite.KindDecisionCreate}
+	if s.dialect == mysqlDialect {
+		// yt_decision_bindings.decision_id is VARCHAR on MySQL (B6).
+		query = `SELECT d.id, EXISTS(SELECT 1 FROM yt_write_ops o WHERE o.kind=? AND o.entity_kind='decision'
+			AND o.entity_id=CAST(d.id AS CHAR) AND o.state NOT IN ('applied','rejected'))
+		FROM decision_requests d
+		WHERE d.id > ? AND NOT EXISTS (SELECT 1 FROM yt_decision_bindings b WHERE b.decision_id = CAST(d.id AS CHAR))
+		ORDER BY d.id LIMIT ?`
+		args = []any{ytwrite.KindDecisionCreate, afterID, limit}
+	}
+	rows, err := s.db().Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -675,20 +740,17 @@ func (s *Store) UnboundYTDecisions(ctx context.Context, afterID int64, limit int
 // decision_fields snapshot op when bound (and its snapshot sha differs).
 // Mode off or other tenant returns ("", nil).
 func (s *Store) PrepareYTDecision(ctx context.Context, id int64, now time.Time) (YTDecisionOutcome, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return "", ErrDialectUnsupported
-	}
-
 	g, on := s.ytDecisionsNow()
 	if !on {
 		return "", nil
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return "", err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if err := lockYTEntity(ctx, pgTransaction{tx}, ytwrite.DecisionEntity, strconv.FormatInt(id, 10)); err != nil {
+	if err := lockYTEntity(ctx, tx, ytwrite.DecisionEntity, strconv.FormatInt(id, 10)); err != nil {
 		return "", err
 	}
 	decisions, err := readYTDecisionRows(ctx, tx, []int64{id}, now)
@@ -708,19 +770,21 @@ func (s *Store) PrepareYTDecision(ctx context.Context, id int64, now time.Time) 
 // BoundYTDecisions lists, in decision id order, the ids of decisions bound on
 // tenant with an id greater than afterID, at most limit (1..YTDecisionCandidatesMax).
 func (s *Store) BoundYTDecisions(ctx context.Context, tenant string, afterID int64, limit int) ([]int64, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if tenant == "" || afterID < 0 || limit < 1 || limit > YTDecisionCandidatesMax {
 		return nil, errors.New("invalid bound decision page")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT decision_id::bigint FROM yt_decision_bindings
+	query := `SELECT decision_id::bigint FROM yt_decision_bindings
 		WHERE tenant = $1 AND decision_id::bigint > $2
-		ORDER BY decision_id::bigint LIMIT $3`, tenant, afterID, limit)
+		ORDER BY decision_id::bigint LIMIT $3`
+	if s.dialect == mysqlDialect {
+		// decision_id is the B6 VARCHAR(20) key on MySQL.
+		query = `SELECT CAST(decision_id AS SIGNED) FROM yt_decision_bindings
+			WHERE tenant = ? AND CAST(decision_id AS SIGNED) > ?
+			ORDER BY CAST(decision_id AS SIGNED) LIMIT ?`
+	}
+	rows, err := s.db().Query(ctx, query, tenant, afterID, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return pgx.CollectRows(rows, pgx.RowTo[int64])
+	return collectRows(rows, rowTo[int64])
 }

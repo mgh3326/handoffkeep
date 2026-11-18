@@ -86,7 +86,7 @@ func queueDeployResultNoticeTx(ctx context.Context, tx pgx.Tx, eventID, service,
 	} else if failedStepText != "" {
 		body += " at " + laneSafeText(failedStepText)
 	}
-	_, err = insertNotificationOutboxOnce(ctx, tx, OutboxKindDeployResult, lane, eventID, assistantLaneText("[hk] deploy ", body), at)
+	_, err = insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDeployResult, lane, eventID, assistantLaneText("[hk] deploy ", body), at)
 	return err
 }
 
