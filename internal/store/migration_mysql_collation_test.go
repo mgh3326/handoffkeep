@@ -12,6 +12,11 @@ import (
 // triggers are not live: 20261117-mysql-bulk-guards dropped them.
 func TestMySQLCollationRecreationCoversTriggers(t *testing.T) {
 	const collationID = "20261118-mysql-collation"
+	// The collation migration names other migrations in after: an unknown ID
+	// fails every MySQL open at startup, so the full registry must order.
+	if _, err := orderMySQLMigrations(mysqlMigrations); err != nil {
+		t.Fatalf("full MySQL registry does not order: %v", err)
+	}
 	created := map[string]bool{}
 	dropped := map[string]bool{}
 	for _, m := range mysqlMigrations {

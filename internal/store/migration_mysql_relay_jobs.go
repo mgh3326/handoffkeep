@@ -14,6 +14,10 @@ package store
 // rebuilds the constraint on databases migrated before the pin.
 const mysqlJobsSkillsCheckBody = `skills IS NULL OR JSON_TYPE(skills) COLLATE utf8mb4_0900_bin='ARRAY'`
 
+func init() {
+	registerMySQLMigration(mysqlMigration{id: "20261118-mysql-relay-jobs", after: []string{"20261118-mysql-tasks"}, steps: mysqlRelayJobsSteps})
+}
+
 var mysqlRelayJobsSteps = []string{
 	// The sync transaction token only groups pending rows before allocation.
 	// Committed rows copied between dialects already have sync_id values, so
