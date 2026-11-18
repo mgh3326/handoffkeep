@@ -723,11 +723,19 @@ func buildWaitsView(now time.Time, section string, rows []WaitRow, idle TaskDrif
 		bySection[r.Section] = append(bySection[r.Section], r)
 	}
 	view := WaitsView{AsOf: now, Section: section, Sections: make([]WaitSection, 0, len(waitSectionKeys)), Backlog: backlog}
+	if view.Backlog.Rows == nil {
+		view.Backlog.Rows = []WaitBacklogRow{}
+	}
 	if section != "" {
 		view.Backlog.Rows = []WaitBacklogRow{}
 	}
 	for _, key := range waitSectionKeys {
 		xs := bySection[key]
+		if xs == nil {
+			// An empty section encodes as rows: [], never null: the console parser
+			// rejects a null rows array.
+			xs = []WaitRow{}
+		}
 		sort.SliceStable(xs, func(i, j int) bool {
 			if !xs[i].Since.Equal(xs[j].Since) {
 				return xs[i].Since.Before(xs[j].Since)

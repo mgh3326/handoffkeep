@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -131,5 +132,37 @@ func TestInPlaceholdersPerDialect(t *testing.T) {
 	my := &sqlTransaction{}
 	if got := inPlaceholders(my, 2); got != "?,?" {
 		t.Fatalf("mysql placeholders=%q", got)
+	}
+}
+
+// An empty section and an empty backlog encode their rows as arrays, not null:
+// the console parser rejects rows: null, so one empty section would hide the page.
+func TestBuildWaitsViewEmptyRowsEncodeAsArrays(t *testing.T) {
+	view := buildWaitsView(time.Date(2026, 11, 18, 3, 0, 0, 0, time.UTC), "", nil, TaskDriftClass{}, WaitBacklog{})
+	raw, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Sections []struct {
+			Rows json.RawMessage `json:"rows"`
+		} `json:"sections"`
+		Backlog struct {
+			Rows json.RawMessage `json:"rows"`
+		} `json:"backlog"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Sections) != 4 {
+		t.Fatalf("sections=%d", len(doc.Sections))
+	}
+	for i, sec := range doc.Sections {
+		if string(sec.Rows) != "[]" {
+			t.Fatalf("section %d rows=%s, want []", i, sec.Rows)
+		}
+	}
+	if string(doc.Backlog.Rows) != "[]" {
+		t.Fatalf("backlog rows=%s, want []", doc.Backlog.Rows)
 	}
 }
