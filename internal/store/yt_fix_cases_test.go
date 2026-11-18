@@ -78,3 +78,26 @@ func init() {
 		}
 	})
 }
+
+// A capability check names the PostgreSQL migration that added the area's
+// table; on MySQL one area migration answers for it. The reviewed head
+// returned false for every YouTrack capability on MySQL, so the CLI's
+// preflights skipped the document audit.
+func init() {
+	registerYTAreaCase("store/migration-capability-ids", func(t *testing.T, s *Store) {
+		ctx := t.Context()
+		for _, id := range []string{YTArticleBindingsMigration, YTTaskBindingsMigration, YTFamilyRootsMigration, YTIssueLinksMigration} {
+			applied, err := s.MigrationApplied(ctx, id)
+			if err != nil {
+				t.Fatalf("%s: %v", id, err)
+			}
+			if !applied {
+				t.Fatalf("%s is not reported applied", id)
+			}
+		}
+		applied, err := s.MigrationApplied(ctx, "20990101-no-such-migration")
+		if err != nil || applied {
+			t.Fatalf("unknown migration: applied=%v err=%v", applied, err)
+		}
+	})
+}

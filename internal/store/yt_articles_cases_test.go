@@ -152,6 +152,48 @@ func ytArticlesCreateApplyCase(t *testing.T, s *Store) {
 	if b.ContentSHA != ytwrite.ContentSHA(body) || b.NeedsUpdate {
 		t.Fatalf("published content %+v", b)
 	}
+
+	// An article_update apply records the body it sent on the binding: the
+	// document's next change prepares one update (the cursor exists after this
+	// first pass, so the change is above it), and applying it clears the
+	// stale content sha.
+	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	const updated = "the article body, changed"
+	if _, _, err := s.PutDocument(ctx, Document{Key: cand.Key, Kind: "note", Body: updated, CreatedBy: "ytcase"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := s.YTWriteLedger().ListState(ctx, ytwrite.StatePrepared, YTFeedPassMax)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var update ytwrite.Op
+	for _, o := range prepared {
+		if o.Kind == ytwrite.KindArticleUpdate && o.EntityKind == ytwrite.ArticleEntity && o.EntityID == strconv.FormatInt(id, 10) {
+			update = o
+		}
+	}
+	if update.ID == 0 {
+		t.Fatalf("no article_update prepared for document %d: %+v", id, prepared)
+	}
+	claimedUpdate, outcome, err := s.YTWriteLedger().Claim(ctx, time.Now().UTC(), update.ID)
+	if err != nil || outcome != ytwrite.ClaimClaimed {
+		t.Fatalf("claim update: outcome=%s err=%v", outcome, err)
+	}
+	if _, err := s.YTWriteLedger().Apply(ctx, time.Now().UTC(), claimedUpdate.ID, b.ArticleID, nil); err != nil {
+		t.Fatal(err)
+	}
+	after, found, err := s.YTArticleBinding(ctx, id)
+	if err != nil || !found {
+		t.Fatalf("binding after update: found=%v err=%v", found, err)
+	}
+	if after.ContentSHA != ytwrite.ContentSHA(updated) || after.NeedsUpdate {
+		t.Fatalf("binding after the update apply = %+v, want sha %s", after, ytwrite.ContentSHA(updated))
+	}
 }
 
 // The document_articles consumer, in docs mode on, prepares one create for a
