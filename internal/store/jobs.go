@@ -222,11 +222,27 @@ type JobUpdate struct {
 	ExpectedOwner *JobOwner `json:"expected_owner"`
 }
 
-// terminalOnly reports an update containing only the terminal late-write
-// set: usage, skills and the once-only report pair. ExpectedOwner is a
-// condition, not a write, so it does not end the set; Owner does.
+// terminalOnly reports an update a terminal record accepts: the late-write
+// set (usage, skills and the once-only report pair), or an owner-only
+// transfer (hk 5303). A transfer must carry expected_owner, so the fence
+// holds; an owner write combined with any other field is refused. The
+// terminal record's state, result and every other field stay immutable.
 func (u JobUpdate) terminalOnly() bool {
-	return (u.Usage != nil || u.Skills != nil || u.SkillsSupported != nil || u.ReportDoc != nil || u.ReportSHA256 != nil) && u.State == nil && u.Role == nil && u.Label == nil && u.Family == nil && u.Profile == nil && u.Model == nil && u.Harness == nil && u.Effort == nil && u.Pool == nil && u.OwnerLane == nil && u.ParentLane == nil && u.ParentJob == nil && u.PaneID == nil && u.Worktree == nil && u.Result == nil && u.Selection == nil && u.At == nil && u.ReadyAt == nil && u.ReportVersion == nil && u.EndReason == nil && u.DiffStat == nil && u.Owner == nil
+	if u.Owner != nil {
+		return u.ExpectedOwner != nil && !u.lateWrite() && u.noOtherWrite()
+	}
+	return u.lateWrite() && u.noOtherWrite()
+}
+
+// lateWrite reports a write from the terminal late-write set.
+func (u JobUpdate) lateWrite() bool {
+	return u.Usage != nil || u.Skills != nil || u.SkillsSupported != nil || u.ReportDoc != nil || u.ReportSHA256 != nil
+}
+
+// noOtherWrite reports that no field outside the late-write set and the
+// owner pair is set. ExpectedOwner is a condition, not a write.
+func (u JobUpdate) noOtherWrite() bool {
+	return u.State == nil && u.Role == nil && u.Label == nil && u.Family == nil && u.Profile == nil && u.Model == nil && u.Harness == nil && u.Effort == nil && u.Pool == nil && u.OwnerLane == nil && u.ParentLane == nil && u.ParentJob == nil && u.PaneID == nil && u.Worktree == nil && u.Result == nil && u.Selection == nil && u.At == nil && u.ReadyAt == nil && u.ReportVersion == nil && u.EndReason == nil && u.DiffStat == nil
 }
 
 // checkJobOwner validates one owner pair. An owner that is set needs a node;
@@ -661,8 +677,9 @@ func (s *Store) ListJobsByTask(ctx context.Context, taskID int64, limit int) ([]
 
 // UpdateJob merges the allowlisted fields of u over the record. States only
 // move forward, a terminal record accepts only the late-write set (usage,
-// skills and the once-only report pair), and result is write-once together
-// with state=completed — violations are ErrJobStateConflict.
+// skills and the once-only report pair, or a fenced owner-only transfer), and
+// result is write-once together with state=completed — violations are
+// ErrJobStateConflict.
 func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, error) {
 	var out Job
 	err := s.retryTx(ctx, func() error {
