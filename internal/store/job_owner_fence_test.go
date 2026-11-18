@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
 // requireOwnerMismatch asserts err is a fence refusal naming want as the
@@ -118,7 +119,8 @@ func TestJobOwnerTransferOnTerminal(t *testing.T) {
 	// lost: the claim ends without a spawn.
 	jobContextClaim(t, s, "job-lost-xfer", nil)
 	jobContextUpdate(t, s, "job-lost-xfer", JobUpdate{Owner: &JobOwner{Node: "node-a", Epoch: 1}, ExpectedOwner: &JobOwner{}})
-	jobContextUpdate(t, s, "job-lost-xfer", JobUpdate{State: strptr("lost")})
+	endedAt := time.Now().UTC()
+	jobContextUpdate(t, s, "job-lost-xfer", JobUpdate{State: strptr("lost"), At: &endedAt})
 	before, _, _ := s.GetJob(ctx, "job-lost-xfer")
 	j := jobContextUpdate(t, s, "job-lost-xfer", JobUpdate{Owner: &JobOwner{Node: "node-b", Epoch: 2}, ExpectedOwner: &JobOwner{Node: "node-a", Epoch: 1}})
 	if j.OwnerNode != "node-b" || j.OwnerEpoch != 2 {
@@ -169,7 +171,7 @@ func TestJobOwnerTransferOnTerminalRefusals(t *testing.T) {
 	combined := []JobUpdate{
 		{Owner: &JobOwner{Node: "node-b", Epoch: 2}, ExpectedOwner: &JobOwner{Node: "node-a", Epoch: 1}, Label: strptr("moved")},
 		{Owner: &JobOwner{Node: "node-b", Epoch: 2}, ExpectedOwner: &JobOwner{Node: "node-a", Epoch: 1}, State: strptr("escalated")},
-		{Owner: &JobOwner{Node: "node-b", Epoch: 2}, ExpectedOwner: &JobOwner{Node: "node-a", Epoch: 1}, Result: json.RawMessage(`{"ok":true}`)},
+		{Owner: &JobOwner{Node: "node-b", Epoch: 2}, ExpectedOwner: &JobOwner{Node: "node-a", Epoch: 1}, State: strptr("completed"), Result: json.RawMessage(`{"ok":true}`)},
 		{Owner: &JobOwner{Node: "node-b", Epoch: 2}, ExpectedOwner: &JobOwner{Node: "node-a", Epoch: 1}, Usage: &JobUsage{InputTokens: func() *int64 { n := int64(9); return &n }()}},
 	}
 	for i, u := range combined {
