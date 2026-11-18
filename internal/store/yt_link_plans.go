@@ -438,7 +438,7 @@ func (l *YTWriteLedger) SettleLinks(ctx context.Context, now time.Time, id int64
 		if step, outcome, ok := st.StepRecord(latest.Marked); ok && latest.Attempt == f.Attempt && latest.Recover == f.Recover && step == latest.Marked-1 {
 			if _, err := tx.Exec(ctx, sqlFor(tx, `UPDATE yt_link_steps SET outcome=$5 WHERE op_id=$1 AND attempt=$2 AND recover=$3 AND step=$4`,
 				`UPDATE yt_link_steps SET outcome=? WHERE op_id=? AND attempt=? AND recover=? AND step=?`),
-				id, f.Attempt, f.Recover, step, string(outcome)); err != nil {
+				ytLinkStepOutcomeArgs(tx, id, f, step, string(outcome))...); err != nil {
 				return ytwrite.Op{}, err
 			}
 			latest.Outcome = outcome
@@ -498,6 +498,15 @@ func (l *YTWriteLedger) SettleLinks(ctx context.Context, now time.Time, id int64
 		return ytwrite.Op{}, err
 	}
 	return op, tx.Commit(ctx)
+}
+
+// ytLinkStepOutcomeArgs orders the step-outcome UPDATE's arguments: MySQL binds
+// the outcome first (the SET precedes the WHERE), PostgreSQL numbers it $5.
+func ytLinkStepOutcomeArgs(q any, id int64, f ytwrite.LinkFence, step int, outcome string) []any {
+	if dialectFor(q) == mysqlDialect {
+		return []any{outcome, id, f.Attempt, f.Recover, step}
+	}
+	return []any{id, f.Attempt, f.Recover, step, outcome}
 }
 
 // settleYTOpTx moves op id's row and returns it: the PostgreSQL statement has

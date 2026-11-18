@@ -153,7 +153,7 @@ func statusOwnedTx(ctx context.Context, tx transaction, out *YTLinksStatus, tena
 	const whereMySQL = `tenant=? AND released_at IS NULL AND (? = 0 OR writer_task_id=? OR target_task_id=?)`
 	var err error
 	if dialectFor(tx) == mysqlDialect {
-		err = tx.QueryRow(ctx, `SELECT count(*) FROM yt_link_owned WHERE `+whereMySQL, tenant, task, task).Scan(&out.OwnedOpen)
+		err = tx.QueryRow(ctx, `SELECT count(*) FROM yt_link_owned WHERE `+whereMySQL, tenant, task, task, task).Scan(&out.OwnedOpen)
 	} else {
 		err = tx.QueryRow(ctx, `SELECT count(*) FROM yt_link_owned WHERE `+where, tenant, task).Scan(&out.OwnedOpen)
 	}
@@ -163,7 +163,7 @@ func statusOwnedTx(ctx context.Context, tx transaction, out *YTLinksStatus, tena
 	var rows rows
 	if dialectFor(tx) == mysqlDialect {
 		rows, err = tx.Query(ctx, `SELECT `+ytLinkOwnedColumns+` FROM yt_link_owned WHERE `+whereMySQL+` ORDER BY id LIMIT ?`,
-			tenant, task, task, limit)
+			tenant, task, task, task, limit)
 	} else {
 		rows, err = tx.Query(ctx, `SELECT `+ytLinkOwnedColumns+` FROM yt_link_owned WHERE `+where+` ORDER BY id LIMIT $3`,
 			tenant, task, limit)

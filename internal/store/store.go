@@ -942,6 +942,17 @@ func (s *Store) MigrationApplied(ctx context.Context, id string) (bool, error) {
 		if err := s.db().QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id=?)`, id).Scan(&applied); err != nil {
 			return false, err
 		}
+		if applied {
+			return true, nil
+		}
+		// The YouTrack preflights ask for the PostgreSQL migration that added
+		// their table; MySQL records the area migrations instead, so one id
+		// answers for every PostgreSQL migration it carries.
+		if my, ok := mysqlMigrationFor[id]; ok {
+			if err := s.db().QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id=?)`, my).Scan(&applied); err != nil {
+				return false, err
+			}
+		}
 		return applied, nil
 	}
 	var applied bool
@@ -951,6 +962,29 @@ func (s *Store) MigrationApplied(ctx context.Context, id string) (bool, error) {
 	}
 	err = s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id=$1)`, id).Scan(&applied)
 	return applied, err
+}
+
+// mysqlMigrationFor maps a PostgreSQL migration id a capability check asks
+// for to the MySQL migration that carries the same objects: the MySQL port
+// groups whole areas, so one id answers for several of them (hk 5077).
+var mysqlMigrationFor = map[string]string{
+	YTArticleBindingsMigration:     "20261118-mysql-yt-feed",
+	YTAuthorityMigration:           "20261118-mysql-yt-write-ops",
+	YTBindingCommentsFromMigration: "20261118-mysql-yt-write-ops",
+	YTBindingHistoryMigration:      "20261118-mysql-yt-write-ops",
+	YTBindingIntentsMigration:      "20261118-mysql-yt-feed",
+	YTCommentHoldMigration:         "20261118-mysql-yt-write-ops",
+	YTCommentQueuedTargetMigration: "20261118-mysql-yt-write-ops",
+	YTDecisionBindingsMigration:    "20261118-mysql-yt-write-ops",
+	YTEntityMapTenantMigration:     "20261118-mysql-yt-write-ops",
+	YTFamilyRootsMigration:         "20261118-mysql-yt-feed",
+	YTIssueAdoptionMigration:       "20261118-mysql-yt-write-ops",
+	YTIssueClaimTargetMigration:    "20261118-mysql-yt-write-ops",
+	YTIssueLinksMigration:          "20261118-mysql-yt-feed",
+	YTLinkStepsMigration:           "20261118-mysql-yt-feed",
+	YTTaskBindingOriginMigration:   "20261118-mysql-yt-write-ops",
+	YTTaskBindingsMigration:        "20261118-mysql-yt-write-ops",
+	YTWritePathIndexesMigration:    "20261118-mysql-yt-write-ops",
 }
 
 // migrateIfBehind runs Store.migrate only when the schema is missing a version
@@ -4733,9 +4767,13 @@ func (s *Store) linkTaskDocs(ctx context.Context, out []SearchResult) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	args := make([]any, len(keys))
-	for i, k := range keys {
-		args[i] = k
+	var args []any
+	if s.dialect == mysqlDialect {
+		for _, k := range keys {
+			args = append(args, k)
+		}
+	} else {
+		args = []any{keys}
 	}
 	rows, e := s.db().Query(ctx, s.q(
 		`SELECT id, split_part(body_doc, '#', 1) FROM tasks WHERE body_doc <> '' AND split_part(body_doc, '#', 1) = ANY($1) ORDER BY id`,

@@ -195,14 +195,20 @@ func (s *Store) upsertYouTrackMirrorMySQL(ctx context.Context, in YouTrackMirror
 	defer release()
 	defer tx.Rollback(ctx)
 	displayRef, url := nullIfEmpty(in.DisplayRef), nullIfEmpty(in.URL)
-	n, err := tx.Exec(ctx, `UPDATE task_origins SET namespace=?,external_id=?,display_ref=?,url=?,tenant=?,role=?,
+	// apply writes this call's fields on the task's own row. A unique
+	// violation here is always the issue's key held by another task.
+	apply := func() (int64, error) {
+		n, err := tx.Exec(ctx, `UPDATE task_origins SET namespace=?,external_id=?,display_ref=?,url=?,tenant=?,role=?,
 			synced_at=COALESCE(?,synced_at)
 		WHERE provider='youtrack' AND task_id=?`,
-		in.Tenant, in.IssueID, displayRef, url, in.Tenant, in.Role, syncedAt, in.TaskID)
-	if err != nil {
+			in.Tenant, in.IssueID, displayRef, url, in.Tenant, in.Role, syncedAt, in.TaskID)
 		if errors.Is(err, errUniqueViolation) {
-			return YouTrackMirror{}, ErrYouTrackMirrorConflict
+			return 0, ErrYouTrackMirrorConflict
 		}
+		return n, err
+	}
+	n, err := apply()
+	if err != nil {
 		return YouTrackMirror{}, err
 	}
 	if n == 0 {
@@ -213,7 +219,8 @@ func (s *Store) upsertYouTrackMirrorMySQL(ctx context.Context, in YouTrackMirror
 		var id int64
 		err = tx.QueryRow(ctx, `SELECT id FROM task_origins WHERE provider='youtrack' AND task_id=? FOR UPDATE`,
 			in.TaskID).Scan(&id)
-		if errors.Is(err, ErrNoRows) {
+		switch {
+		case errors.Is(err, ErrNoRows):
 			_, err = tx.Exec(ctx, `
 				INSERT INTO task_origins(task_id,provider,namespace,external_id,display_ref,url,title_snapshot,snapshot_at,created_by,created_at,tenant,role,synced_at)
 				VALUES(?, 'youtrack', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
@@ -223,6 +230,12 @@ func (s *Store) upsertYouTrackMirrorMySQL(ctx context.Context, in YouTrackMirror
 				// key: another task holds it.
 				return YouTrackMirror{}, ErrYouTrackMirrorConflict
 			}
+		case err == nil:
+			// A same-task writer committed its row between our UPDATE and the
+			// locking read (READ COMMITTED takes no gap lock on an absent
+			// key). Its row is here now; this call's fields are applied to it
+			// rather than dropped.
+			_, err = apply()
 		}
 		if err != nil {
 			return YouTrackMirror{}, err

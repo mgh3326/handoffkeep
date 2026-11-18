@@ -417,6 +417,25 @@ func ytLinkWriter(kind string, src, dst int64) (writer int64, ok bool) {
 	return 0, false
 }
 
+// ytLinksDesiredArgs orders ytLinksDesiredTx's arguments: PostgreSQL names
+// the tenant and the task by their placeholder numbers, MySQL binds them in
+// statement order (tenant first in both statements).
+func ytLinksDesiredArgs(q any, tenant string, id int64) []any {
+	if dialectFor(q) == mysqlDialect {
+		return []any{tenant, id}
+	}
+	return []any{id, tenant}
+}
+
+// ytLinksTaskArgs repeats the task id for a MySQL statement that names it
+// twice, and passes it once for PostgreSQL's reused placeholder.
+func ytLinksTaskArgs(q any, id int64) []any {
+	if dialectFor(q) == mysqlDialect {
+		return []any{id, id}
+	}
+	return []any{id}
+}
+
 // ytLinksDesiredTx builds the desired set of writer task id on tenant: its
 // parent, the live related edges where it is src_id (the lower id), and its
 // live duplicate_of edges. An edge whose target has no binding on tenant goes
@@ -430,7 +449,7 @@ func ytLinksDesiredTx(ctx context.Context, q transaction, tenant string, id int6
 		LEFT JOIN yt_task_bindings b ON b.task_id = t.parent_id AND b.tenant = $2
 		WHERE t.id = $1`, `SELECT t.parent_id, b.issue_id FROM tasks t
 		LEFT JOIN yt_task_bindings b ON b.task_id = t.parent_id AND b.tenant = ?
-		WHERE t.id = ?`), id, tenant).Scan(&parentID, &parentIssue)
+		WHERE t.id = ?`), ytLinksDesiredArgs(q, tenant, id)...).Scan(&parentID, &parentIssue)
 	if errors.Is(err, ErrNoRows) {
 		return ytLinksDesired{}, false, nil
 	}
@@ -452,7 +471,7 @@ func ytLinksDesiredTx(ctx context.Context, q transaction, tenant string, id int6
 		ORDER BY r.kind, r.dst_id, r.id`, `SELECT r.kind, r.dst_id, b.issue_id FROM task_relations r
 		LEFT JOIN yt_task_bindings b ON b.task_id = r.dst_id AND b.tenant = ?
 		WHERE r.src_id = ? AND r.archived_at IS NULL AND r.kind IN ('related','duplicate_of')
-		ORDER BY r.kind, r.dst_id, r.id`), id, tenant)
+		ORDER BY r.kind, r.dst_id, r.id`), ytLinksDesiredArgs(q, tenant, id)...)
 	if err != nil {
 		return ytLinksDesired{}, false, err
 	}
@@ -685,7 +704,7 @@ func ytLinksWakeTx(ctx context.Context, tx transaction, taskID int64, self bool)
 		OR EXISTS (SELECT 1 FROM task_relations WHERE src_id = $1 AND archived_at IS NULL AND kind IN ('related','duplicate_of'))`,
 			`SELECT EXISTS (SELECT 1 FROM tasks WHERE id = ? AND parent_id IS NOT NULL)
 		OR EXISTS (SELECT 1 FROM task_relations WHERE src_id = ? AND archived_at IS NULL AND kind IN ('related','duplicate_of'))`),
-			taskID).Scan(&writes); err != nil {
+			ytLinksTaskArgs(tx, taskID)...).Scan(&writes); err != nil {
 			return err
 		}
 	}
@@ -708,7 +727,7 @@ func ytLinksWakeTx(ctx context.Context, tx transaction, taskID int64, self bool)
 		values := make([]string, len(texts))
 		args := make([]any, len(texts))
 		for i, t := range texts {
-			values[i], args[i] = "('task', ?, 'U', UTC_TIMESTAMP(6))", t
+			values[i], args[i] = "(@hk_txn, 'task', ?, 'U', UTC_TIMESTAMP(6))", t
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO sync_log(txn,model,model_id,action,at) VALUES `+strings.Join(values, ", "), args...); err != nil {
 			return err

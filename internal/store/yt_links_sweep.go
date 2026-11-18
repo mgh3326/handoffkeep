@@ -154,7 +154,7 @@ func (s *Store) RunYTLinksSweep(ctx context.Context, now time.Time, limit int) (
 		n, err = s.db().Exec(ctx, sqlFor(s, `UPDATE yt_links_sweep SET done_generation = $1, after_task_id = 0, updated_at = $2
 			WHERE singleton AND generation = $1 AND after_task_id = $3`,
 			`UPDATE yt_links_sweep SET done_generation = ?, after_task_id = 0, updated_at = ?
-			WHERE singleton AND generation = ? AND after_task_id = ?`), st.Generation, now.UTC(), st.AfterTaskID)
+			WHERE singleton AND generation = ? AND after_task_id = ?`), ytLinksSweepDoneArgs(s, st, now)...)
 	} else {
 		if s.dialect == mysqlDialect {
 			n, err = s.db().Exec(ctx, `UPDATE yt_links_sweep SET after_task_id = ?, updated_at = ?
@@ -173,6 +173,15 @@ func (s *Store) RunYTLinksSweep(ctx context.Context, now time.Time, limit int) (
 	log.Printf("ytwrite.links_sweep generation=%d visited=%d prepared=%d complete=%t restarted=%t last_task_id=%d",
 		pass.Generation, pass.Visited, pass.Prepared, pass.Complete, pass.Restarted, last)
 	return pass, nil
+}
+
+// ytLinksSweepDoneArgs orders the completion UPDATE's arguments: MySQL names
+// the generation twice (SET and WHERE) and PostgreSQL reuses $1.
+func ytLinksSweepDoneArgs(s *Store, st YTLinksSweepState, now time.Time) []any {
+	if s.dialect == mysqlDialect {
+		return []any{st.Generation, now.UTC(), st.Generation, st.AfterTaskID}
+	}
+	return []any{st.Generation, now.UTC(), st.AfterTaskID}
 }
 
 // sweepYTLinksTask is prepareYTLinksTx in its own transaction.

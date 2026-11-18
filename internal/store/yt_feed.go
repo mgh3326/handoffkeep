@@ -374,8 +374,12 @@ func (s *Store) runYTFeedConsumer(ctx context.Context, c ytFeedConsumer, limit i
 	if next == pass.Cursor {
 		return pass, tx.Commit(ctx)
 	}
+	advanceArgs := []any{next, now, c.name}
+	if dialectFor(tx) != mysqlDialect {
+		advanceArgs = []any{c.name, next, now}
+	}
 	if _, err := tx.Exec(ctx, sqlFor(tx, `UPDATE yt_feed_cursors SET last_sync_id=$2, updated_at=$3 WHERE consumer=$1`,
-		`UPDATE yt_feed_cursors SET last_sync_id=?, updated_at=? WHERE consumer=?`), next, now, c.name); err != nil {
+		`UPDATE yt_feed_cursors SET last_sync_id=?, updated_at=? WHERE consumer=?`), advanceArgs...); err != nil {
 		return pass, err
 	}
 	if err := tx.Commit(ctx); err != nil {

@@ -718,6 +718,20 @@ func ytArticleConflictTx(ctx context.Context, tx transaction, op ytwrite.Op, ytI
 // binding of the document to this same article is kept as it is.
 func bindYTArticleApplyTx(s *Store, ctx context.Context, tx transaction, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
 	id, _ := strconv.ParseInt(op.EntityID, 10, 64)
+	// The document is locked FOR SHARE before its binding is written, as
+	// AddYTArticleBinding does: the prune takes FOR UPDATE on the documents it
+	// deletes (doc_prune.go), so a binding cannot commit for a document the
+	// prune is deleting, and the prune's binding predicate cannot be stale
+	// (hk 5077). A document deleted before the apply cannot be given a binding
+	// that outlives it: the op is the conflict the protocol records.
+	var taskID *int64
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT task_id FROM documents WHERE id=$1 FOR SHARE`,
+		`SELECT task_id FROM documents WHERE id=? FOR SHARE`), id).Scan(&taskID); err != nil {
+		if errors.Is(err, ErrNoRows) {
+			return fmt.Errorf("%w: document %d was deleted before the op applied", ytwrite.ErrConflictingResult, id)
+		}
+		return err
+	}
 	var p ytwrite.ArticleCreatePayload
 	if err := json.Unmarshal(op.Payload, &p); err != nil {
 		return fmt.Errorf("payload of op %d: %w", op.ID, err)
@@ -861,10 +875,16 @@ func bindYTArticleUpdateApplyTx(s *Store, ctx context.Context, tx transaction, o
 	if err != nil {
 		return fmt.Errorf("article_update op %d is not on a document lane: %w", op.ID, err)
 	}
+	// MySQL binds the SET's placeholder before the WHERE's, PostgreSQL numbers
+	// it $4.
+	articleUpdateArgs := []any{ytwrite.ContentSHA(p.Content), id, op.Tenant, op.YTTargetID}
+	if dialectFor(tx) != mysqlDialect {
+		articleUpdateArgs = []any{id, op.Tenant, op.YTTargetID, ytwrite.ContentSHA(p.Content)}
+	}
 	if _, err := tx.Exec(ctx, sqlFor(tx, `UPDATE yt_article_bindings SET content_sha=$4, needs_update=false
 		WHERE document_id=$1 AND tenant=$2 AND article_id=$3`,
 		`UPDATE yt_article_bindings SET content_sha=?, needs_update=false
-		WHERE document_id=? AND tenant=? AND article_id=?`), id, op.Tenant, op.YTTargetID, ytwrite.ContentSHA(p.Content)); err != nil {
+		WHERE document_id=? AND tenant=? AND article_id=?`), articleUpdateArgs...); err != nil {
 		return err
 	}
 	// The article now holds an hk body: no post-switch baseline is left.
