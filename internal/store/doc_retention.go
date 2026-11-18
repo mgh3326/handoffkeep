@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -13,11 +12,11 @@ import (
 // Which documents qualify: review/mwr-* whose change merged and screens/*
 // whose job ended, both at least DocRetentionDays ago. 'Merged or ended' is
 // read from the change row (state='merged' and merged_at) for review/mwr-*
-// through the reviewer's job id (documents.job = reviews.reviewer_job_id) or
-// the document's task (change_tasks), and from the job row (ended_at) for
-// screens/* through documents.job or the key's second segment
-// (screens/<job>/...). A document with no linked merged change or ended job
-// is kept: only positive evidence of merge/end plus age deletes.
+// through the reviewer's job id (documents.job = reviews.reviewer_job_id),
+// and from the job row (ended_at) for screens/* through documents.job or the
+// key's second segment (screens/<job>/...). A document with no linked merged
+// change or ended job is kept: only positive evidence of merge/end plus age
+// deletes.
 //
 // Nothing else is deleted: only the two prefixes below, and never a document
 // a yt_article_bindings row still points to. attachment_refs rows filed
@@ -70,15 +69,14 @@ type DocRetentionResult struct {
 
 // docRetentionReviewEligible is the merge predicate for a documents row
 // aliased d with the cutoff in $3: a merged change at or before the cutoff,
-// linked through the reviewer's job id or the document's task.
-const docRetentionReviewEligible = `AND (
-  EXISTS (SELECT 1 FROM reviews r JOIN changes c ON c.id = r.change_id
-    WHERE r.reviewer_job_id = d.job AND d.job <> ''
-    AND c.state = 'merged' AND c.merged_at IS NOT NULL AND c.merged_at <= $3)
-  OR EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id = ct.change_id
-    WHERE ct.task_id = d.task_id AND d.task_id IS NOT NULL
-    AND c.state = 'merged' AND c.merged_at IS NOT NULL AND c.merged_at <= $3)
-)`
+// linked through the reviewer's job id (documents.job =
+// reviews.reviewer_job_id). Only the job leg is used: a task leg (ANY change
+// linked to d.task_id merged) would delete an open PR's prompt when its task
+// also implements an older merged PR, so it is kept, never deleted, without
+// its own merged change.
+const docRetentionReviewEligible = `AND EXISTS (SELECT 1 FROM reviews r JOIN changes c ON c.id = r.change_id
+  WHERE r.reviewer_job_id = d.job AND d.job <> ''
+  AND c.state = 'merged' AND c.merged_at IS NOT NULL AND c.merged_at <= $3)`
 
 // docRetentionScreensEligible is the job-end predicate for a documents row
 // aliased d with the cutoff in $3: an ended job at or before the cutoff,
@@ -135,30 +133,39 @@ func (s *Store) PruneRetention(ctx context.Context, cutoff time.Time, limit int,
 	}
 	res.KeptActive = mwrTotal + scrTotal - res.Matched
 	if !apply {
-		// Bytes is the body size of the first limit eligible unbound rows in
-		// id order across both prefixes. The screens predicate is renumbered
-		// from $3 to $6 so the union binds ($1,$2,$3) to the review range and
-		// cutoff and ($4,$5,$6) to the screens range and cutoff, with $7 the
-		// limit.
-		screensUnion := strings.Replace(docRetentionScreensEligible, "$3", "$6", 1)
-		rows, e := s.pool.Query(ctx, `SELECT octet_length(d.body) FROM documents d
-WHERE ((d.key COLLATE "C" >= $1 AND d.key COLLATE "C" < $2 `+docRetentionReviewEligible+`)
-   OR (d.key COLLATE "C" >= $4 AND d.key COLLATE "C" < $5 `+screensUnion+`))
+		// Bytes is the body size apply would delete: review/mwr-* rows first
+		// in id order, then screens/* rows, capped at limit — the same
+		// selection order as pruneRetentionBatch, so the preview and the
+		// apply agree on the row set.
+		drySizes := func(lo, hi, eligible string, want int) (int, error) {
+			if want <= 0 {
+				return 0, nil
+			}
+			rows, e := s.pool.Query(ctx, fmt.Sprintf(`SELECT octet_length(d.body) FROM documents d
+WHERE d.key COLLATE "C" >= $1 AND d.key COLLATE "C" < $2
 AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id = d.id)
-ORDER BY d.id LIMIT $7`, mwrLo, mwrHi, cutoff.UTC(), scrLo, scrHi, cutoff.UTC(), limit)
+%s
+ORDER BY d.id LIMIT $4`, eligible), lo, hi, cutoff.UTC(), want)
+			if e != nil {
+				return 0, e
+			}
+			defer rows.Close()
+			n := 0
+			for rows.Next() {
+				var size int64
+				if e = rows.Scan(&size); e != nil {
+					return 0, e
+				}
+				res.Bytes += size
+				n++
+			}
+			return n, rows.Err()
+		}
+		nReview, e := drySizes(mwrLo, mwrHi, docRetentionReviewEligible, limit)
 		if e != nil {
 			return res, e
 		}
-		for rows.Next() {
-			var size int64
-			if e = rows.Scan(&size); e != nil {
-				rows.Close()
-				return res, e
-			}
-			res.Bytes += size
-		}
-		rows.Close()
-		if e = rows.Err(); e != nil {
+		if _, e = drySizes(scrLo, scrHi, docRetentionScreensEligible, limit-nReview); e != nil {
 			return res, e
 		}
 		return res, nil

@@ -17,7 +17,7 @@ func (s *Store) mysqlPruneRetention(ctx context.Context, res DocRetentionResult,
 	cut := cutoff.UTC()
 	countEligible := `SELECT COUNT(*),COUNT(b.document_id) FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id=d.id WHERE d.` + "`key`" + `>=? AND d.` + "`key`" + `<? %s`
 	var mwrMatched, mwrBound, scrMatched, scrBound int64
-	if err := s.db().QueryRow(ctx, fmt.Sprintf(countEligible, mysqlReviewEligible), mwrLo, mwrHi, cut, cut).Scan(&mwrMatched, &mwrBound); err != nil {
+	if err := s.db().QueryRow(ctx, fmt.Sprintf(countEligible, mysqlReviewEligible), mwrLo, mwrHi, cut).Scan(&mwrMatched, &mwrBound); err != nil {
 		return res, err
 	}
 	if err := s.db().QueryRow(ctx, fmt.Sprintf(countEligible, mysqlScreensEligible), scrLo, scrHi, cut).Scan(&scrMatched, &scrBound); err != nil {
@@ -34,20 +34,36 @@ func (s *Store) mysqlPruneRetention(ctx context.Context, res DocRetentionResult,
 	}
 	res.KeptActive = mwrTotal + scrTotal - res.Matched
 	if !res.Applied {
-		rows, e := s.db().Query(ctx, `SELECT OCTET_LENGTH(d.body) FROM documents d WHERE ((d.`+"`key`"+`>=? AND d.`+"`key`"+`<? `+mysqlReviewEligible+`) OR (d.`+"`key`"+`>=? AND d.`+"`key`"+`<? `+mysqlScreensEligible+`)) AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id=d.id) ORDER BY d.id LIMIT ?`,
-			mwrLo, mwrHi, cut, cut, scrLo, scrHi, cut, res.Limit)
+		// Same selection order as the apply batches: review/mwr-* rows
+		// first, then screens/* rows, capped at limit.
+		drySizes := func(lo, hi, eligible string, want int) (int, error) {
+			if want <= 0 {
+				return 0, nil
+			}
+			rows, e := s.db().Query(ctx, fmt.Sprintf(`SELECT OCTET_LENGTH(d.body) FROM documents d WHERE d.`+"`key`"+`>=? AND d.`+"`key`"+`<? AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id=d.id) %s ORDER BY d.id LIMIT ?`, eligible), lo, hi, cut, want)
+			if e != nil {
+				return 0, e
+			}
+			defer rows.Close()
+			n := 0
+			for rows.Next() {
+				var size int64
+				if e = rows.Scan(&size); e != nil {
+					return 0, e
+				}
+				res.Bytes += size
+				n++
+			}
+			return n, rows.Err()
+		}
+		nReview, e := drySizes(mwrLo, mwrHi, mysqlReviewEligible, res.Limit)
 		if e != nil {
 			return res, e
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var size int64
-			if e = rows.Scan(&size); e != nil {
-				return res, e
-			}
-			res.Bytes += size
+		if _, e = drySizes(scrLo, scrHi, mysqlScreensEligible, res.Limit-nReview); e != nil {
+			return res, e
 		}
-		return res, rows.Err()
+		return res, nil
 	}
 	for res.Deleted < int64(res.Limit) {
 		var n int
@@ -66,7 +82,11 @@ func (s *Store) mysqlPruneRetention(ctx context.Context, res DocRetentionResult,
 	return res, nil
 }
 
-const mysqlReviewEligible = `AND (EXISTS (SELECT 1 FROM reviews r JOIN changes c ON c.id=r.change_id WHERE r.reviewer_job_id=d.job AND d.job<>'' AND c.state='merged' AND c.merged_at IS NOT NULL AND c.merged_at<=?) OR EXISTS (SELECT 1 FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=d.task_id AND d.task_id IS NOT NULL AND c.state='merged' AND c.merged_at IS NOT NULL AND c.merged_at<=?))`
+// mysqlReviewEligible mirrors docRetentionReviewEligible: the merged change at
+// or before the cutoff, linked only through the reviewer's job id. No task
+// leg: ANY merged change on the document's task must not delete another
+// change's prompt.
+const mysqlReviewEligible = `AND EXISTS (SELECT 1 FROM reviews r JOIN changes c ON c.id=r.change_id WHERE r.reviewer_job_id=d.job AND d.job<>'' AND c.state='merged' AND c.merged_at IS NOT NULL AND c.merged_at<=?)`
 
 const mysqlScreensEligible = `AND EXISTS (SELECT 1 FROM jobs j WHERE (j.job_id=d.job OR j.job_id=SUBSTRING_INDEX(SUBSTRING_INDEX(d.` + "`key`" + `,'/',2),'/',-1)) AND j.ended_at IS NOT NULL AND j.ended_at<=?)`
 
@@ -92,15 +112,7 @@ func (s *Store) mysqlRetentionBatch(ctx context.Context, cutoff time.Time, batch
 		if want <= 0 {
 			return nil
 		}
-		// The review predicate takes the cutoff twice (job and task legs);
-		// the screens predicate takes it once.
-		var rows rows
-		var err error
-		if strings.Contains(eligible, "change_tasks") {
-			rows, err = tx.Query(ctx, fmt.Sprintf(candidate, eligible)+` FOR UPDATE`, lo, hi, cutoff, cutoff, want)
-		} else {
-			rows, err = tx.Query(ctx, fmt.Sprintf(candidate, eligible)+` FOR UPDATE`, lo, hi, cutoff, want)
-		}
+		rows, err := tx.Query(ctx, fmt.Sprintf(candidate, eligible)+` FOR UPDATE`, lo, hi, cutoff, want)
 		if err != nil {
 			return err
 		}

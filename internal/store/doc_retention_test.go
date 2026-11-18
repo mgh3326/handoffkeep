@@ -82,7 +82,18 @@ func TestPruneRetentionDeletesOnlyMergedEndedOld(t *testing.T) {
 	if _, err := s.pool.Exec(ctx, `INSERT INTO change_tasks(change_id, task_id, relation, created_at) VALUES($1,$2,'implements',now())`, mergedOld, task.ID); err != nil {
 		t.Fatal(err)
 	}
-	reviewViaTask := retentionDoc(t, s, "review/mwr-101-viatask-p1-6", "brief", "", &task.ID)
+	// The same task also implements the still-open change: its open prompt
+	// must survive even though the task has a merged change.
+	if _, err := s.pool.Exec(ctx, `INSERT INTO change_tasks(change_id, task_id, relation, created_at) VALUES($1,$2,'implements',now())`, openOld, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Linked to the open change through the reviewer job and to the task
+	// that also has the old merged change: kept, because only the job leg
+	// decides and the prompt's own change is still open.
+	openTask := retentionDoc(t, s, "review/mwr-103-ontask-p1-6", "brief", "mwr-103-ccc-p1-3", &task.ID)
+	// No reviewer job at all: kept, because there is no merged change of its
+	// own to delete it by.
+	emptyJobTask := retentionDoc(t, s, "review/mwr-101-nojob-p1-7", "brief", "", &task.ID)
 	screensOld := retentionDoc(t, s, "screens/job-old/pane.txt", "evidence", "job-old", nil)
 	retentionDoc(t, s, "screens/job-fresh/pane.txt", "evidence", "job-fresh", nil)
 	retentionDoc(t, s, "screens/job-running/pane.txt", "evidence", "job-running", nil)
@@ -96,16 +107,16 @@ func TestPruneRetentionDeletesOnlyMergedEndedOld(t *testing.T) {
 	if dry.Applied || dry.Deleted != 0 {
 		t.Fatalf("dry run = %+v, want no deletes", dry)
 	}
-	// Eligible including the bound row: reviewOld, bound, reviewViaTask,
-	// screensOld, screensFallback.
-	if dry.Matched != 5 || dry.SkippedBound != 1 || dry.Bytes == 0 {
-		t.Fatalf("dry run counts = %+v, want matched 5 skipped_bound 1 bytes > 0", dry)
+	// Eligible including the bound row: reviewOld, bound, screensOld,
+	// screensFallback.
+	if dry.Matched != 4 || dry.SkippedBound != 1 || dry.Bytes == 0 {
+		t.Fatalf("dry run counts = %+v, want matched 4 skipped_bound 1 bytes > 0", dry)
 	}
-	// Prefix totals: 6 review + 4 screens = 10, minus 5 eligible = 5 kept.
-	if dry.KeptActive != 5 {
-		t.Fatalf("dry run kept_active = %d, want 5", dry.KeptActive)
+	// Prefix totals: 7 review + 4 screens = 11, minus 4 eligible = 7 kept.
+	if dry.KeptActive != 7 {
+		t.Fatalf("dry run kept_active = %d, want 7", dry.KeptActive)
 	}
-	for _, d := range []Document{reviewOld, reviewViaTask, screensOld, screensFallback, bound} {
+	for _, d := range []Document{reviewOld, screensOld, screensFallback, bound, openTask, emptyJobTask} {
 		if !docExists(t, s, d.Key) {
 			t.Fatalf("dry run deleted %s", d.Key)
 		}
@@ -115,18 +126,18 @@ func TestPruneRetentionDeletesOnlyMergedEndedOld(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !applied.Applied || applied.Deleted != 4 || applied.SkippedBound != 1 {
-		t.Fatalf("apply = %+v, want deleted 4 skipped_bound 1", applied)
+	if !applied.Applied || applied.Deleted != 3 || applied.SkippedBound != 1 {
+		t.Fatalf("apply = %+v, want deleted 3 skipped_bound 1", applied)
 	}
-	if applied.ReviewDeleted != 2 || applied.ScreensDeleted != 2 {
-		t.Fatalf("apply per-prefix = %+v, want review 2 screens 2", applied)
+	if applied.ReviewDeleted != 1 || applied.ScreensDeleted != 2 {
+		t.Fatalf("apply per-prefix = %+v, want review 1 screens 2", applied)
 	}
-	for _, key := range []string{reviewOld.Key, reviewViaTask.Key, screensOld.Key, screensFallback.Key} {
+	for _, key := range []string{reviewOld.Key, screensOld.Key, screensFallback.Key} {
 		if docExists(t, s, key) {
 			t.Fatalf("apply left eligible %s", key)
 		}
 	}
-	for _, key := range []string{"review/mwr-102-bbb-p1-2", "review/mwr-103-ccc-p1-3", "review/mwr-999-zzz-p1-9", bound.Key, "screens/job-fresh/pane.txt", "screens/job-running/pane.txt", "briefs/2026-01-01/keep.md"} {
+	for _, key := range []string{"review/mwr-102-bbb-p1-2", "review/mwr-103-ccc-p1-3", "review/mwr-999-zzz-p1-9", openTask.Key, emptyJobTask.Key, bound.Key, "screens/job-fresh/pane.txt", "screens/job-running/pane.txt", "briefs/2026-01-01/keep.md"} {
 		if !docExists(t, s, key) {
 			t.Fatalf("apply deleted kept %s", key)
 		}
@@ -135,8 +146,8 @@ func TestPruneRetentionDeletesOnlyMergedEndedOld(t *testing.T) {
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM doc_prune_log WHERE pruned_by='tester'`).Scan(&logs); err != nil {
 		t.Fatal(err)
 	}
-	if logs != 4 {
-		t.Fatalf("audit log rows = %d, want 4", logs)
+	if logs != 3 {
+		t.Fatalf("audit log rows = %d, want 3", logs)
 	}
 	var loggedSHA string
 	if err := s.pool.QueryRow(ctx, `SELECT sha256 FROM doc_prune_log WHERE document_key=$1`, reviewOld.Key).Scan(&loggedSHA); err != nil {
@@ -197,5 +208,44 @@ func TestPruneRetentionRespectsLimit(t *testing.T) {
 	}
 	if res.Deleted != 2 || res.Matched != 3 {
 		t.Fatalf("limit 2 apply = %+v, want deleted 2 of matched 3", res)
+	}
+}
+
+// TestPruneRetentionDryRunMatchesApplyOrder pins the selection order the two
+// medium findings disagreed on: with eligible rows in both prefixes and a
+// binding limit, the dry run must preview exactly the rows apply deletes
+// (review/mwr-* first in id order, then screens/*). The screens document is
+// created first so its id is smaller: an id-ordered dry run would preview its
+// bytes while apply deletes the review document.
+func TestPruneRetentionDryRunMatchesApplyOrder(t *testing.T) {
+	s := schemaStore(t, "doc_retention_order")
+	ctx := t.Context()
+	old := time.Now().UTC().Add(-40 * 24 * time.Hour)
+	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	change := retentionChange(t, s, "example/app", 301, "merged", &old)
+	retentionReview(t, s, change, "dddddddddddddddddddddddddddddddddddddddd", "mwr-301-ddd-p1-1")
+	retentionJob(t, s, "job-301", "completed", &old)
+	screens := retentionDoc(t, s, "screens/job-301/pane.txt", "evidence", "job-301", nil)
+	review := retentionDoc(t, s, "review/mwr-301-ddd-p1-1", "brief", "mwr-301-ddd-p1-1", nil)
+	if !(screens.ID < review.ID) {
+		t.Fatalf("test setup: screens id %d must be smaller than review id %d", screens.ID, review.ID)
+	}
+	dry, err := s.PruneRetention(ctx, cutoff, 1, false, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBytes := int64(len("body of " + review.Key))
+	if dry.Bytes != wantBytes {
+		t.Fatalf("dry run bytes = %d, want review bytes %d (review first)", dry.Bytes, wantBytes)
+	}
+	applied, err := s.PruneRetention(ctx, cutoff, 1, true, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Deleted != 1 || applied.ReviewDeleted != 1 || applied.ScreensDeleted != 0 || applied.Bytes != wantBytes {
+		t.Fatalf("apply = %+v, want deleted 1 review 1 bytes %d", applied, wantBytes)
+	}
+	if docExists(t, s, review.Key) || !docExists(t, s, screens.Key) {
+		t.Fatal("apply deleted the wrong row: want the review document gone and the screens document kept")
 	}
 }
