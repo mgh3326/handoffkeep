@@ -111,6 +111,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 		h.fleetStatusAPI(w, r, identity)
 	case r.Method == http.MethodPost && taskPriorityPathRE.MatchString(r.URL.Path):
 		h.taskPriority(w, r, identity)
+	case r.Method == http.MethodPost && taskOrderPathRE.MatchString(r.URL.Path):
+		h.taskOrder(w, r, identity)
 	case r.Method == http.MethodPost && taskLifecyclePathRE.MatchString(r.URL.Path):
 		h.taskLifecycle(w, r, identity)
 	case r.Method == http.MethodPost && r.URL.Path == "/ui/api/decision-requests/resolve":

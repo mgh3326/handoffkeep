@@ -34,3 +34,19 @@ func TestWorkerLeaseDetectsTerminatedSession(t *testing.T) {
 		t.Fatal("watch did not detect the terminated session")
 	}
 }
+
+func TestWorkerLeaseReleaseIsIdempotent(t *testing.T) {
+	s := schemaStore(t, "worker_lease_release")
+	lease, held, err := s.TryWorkerLock(t.Context(), HubForwardWorkerLock)
+	if err != nil || !held {
+		t.Fatalf("held=%v err=%v", held, err)
+	}
+	lease.Release()
+	lease.Release()
+	again, held, err := s.TryWorkerLock(t.Context(), HubForwardWorkerLock)
+	if err != nil || !held {
+		t.Fatalf("after double release: held=%v err=%v", held, err)
+	}
+	again.Release()
+	again.Release()
+}
