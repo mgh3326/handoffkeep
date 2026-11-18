@@ -317,7 +317,7 @@ func TestRecordLaneLookBindsNoticeToLane(t *testing.T) {
 	now := time.Now().UTC()
 	cur := laneCheckFindings(t, s, "look-lane", now)
 	notice := cur.NoticeEventID
-	if _, _, err := s.RecordLaneLook(ctx, "other-lane", LaneCheckEventID("other-lane", cur.FindingsHash, cur.LookEpoch, now), "", "look-lane", now); err == nil {
+	if _, _, err := s.RecordLaneLook(ctx, "look-lane", LaneCheckEventID("other-lane", cur.FindingsHash, cur.LookEpoch, now), "", "look-lane", now); err == nil {
 		t.Fatal("a look with another lane's notice was accepted")
 	}
 	if _, _, err := s.RecordLaneLook(ctx, "look-lane", "lanecheck-look-lane-nothash-1", "", "look-lane", now); err == nil {

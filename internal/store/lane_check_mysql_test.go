@@ -28,11 +28,18 @@ func TestMySQLLaneCheckRunsOnMySQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	project := "mylaneproj"
-	kept, err := s.CreateTask(ctx, Task{Lane: "mylane-design", Title: "mysql kept work", Kind: "ops", Project: &project, Priority: 1, CreatedBy: "tester"})
+	blocker, err := s.CreateTask(ctx, Task{Lane: "mylane-design", Title: "mysql blocker", Kind: "ops", Project: &project, Priority: 3, CreatedBy: "tester"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db().Exec(ctx, `UPDATE tasks SET created_at=? WHERE id=?`, time.Now().UTC().Add(-48*time.Hour), kept.ID); err != nil {
+	blocked, err := s.CreateTask(ctx, Task{Lane: "mylane-design", Title: "mysql blocked work", Kind: "ops", Project: &project, Priority: 3, CreatedBy: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddTaskRelation(ctx, blocker.ID, RelationBlocks, blocked.ID, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TransitionTaskWith(ctx, blocker.ID, TransitionInput{To: StateCompleted, By: "tester", Note: "blocker done", Evidence: "finished"}); err != nil {
 		t.Fatal(err)
 	}
 	ordered, err := s.CreateTask(ctx, Task{Lane: "mylane-design", Title: "mysql ordered work", Kind: "ops", Project: &project, Priority: 3, CreatedBy: "tester"})
@@ -56,8 +63,8 @@ func TestMySQLLaneCheckRunsOnMySQL(t *testing.T) {
 	if got.FindingsHash == "" {
 		t.Fatalf("no check for the lane: %+v", checks)
 	}
-	if ids := laneCheckFinding(got, LaneFindingKeptBacklog).TaskIDs; len(ids) != 1 || ids[0] != kept.ID {
-		t.Fatalf("kept_backlog = %v, want [%d]", ids, kept.ID)
+	if ids := laneCheckFinding(got, LaneFindingBlockerLanded).TaskIDs; len(ids) != 1 || ids[0] != blocked.ID {
+		t.Fatalf("blocker_landed = %v, want [%d]", ids, blocked.ID)
 	}
 	if ids := laneCheckFinding(got, LaneFindingOrderUnacked).TaskIDs; len(ids) != 1 || ids[0] != ordered.ID {
 		t.Fatalf("order_unacked = %v, want [%d]", ids, ordered.ID)
@@ -73,7 +80,7 @@ func TestMySQLLaneCheckRunsOnMySQL(t *testing.T) {
 		t.Fatalf("repeat RunLaneCheck = %d, %v; want 0", wrote, err)
 	}
 	look, changed, err := s.RecordLaneLook(ctx, "mylane-design", got.NoticeEventID, "looked", "mylane-design", now)
-	if err != nil || !changed || look.FindingsHash != got.FindingsHash {
+	if err != nil || !changed || look.FindingsHash != got.LookHash {
 		t.Fatalf("look = %+v changed=%t err=%v", look, changed, err)
 	}
 	if _, changed, err = s.RecordLaneLook(ctx, "mylane-design", got.NoticeEventID, "again", "mylane-design", now); err != nil || changed {
