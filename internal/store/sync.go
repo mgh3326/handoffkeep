@@ -87,6 +87,17 @@ func syncDeltaTx(ctx context.Context, tx transaction, after int64, limit int) ([
 // when the log becomes empty. Pending rows have no assigned ID and are never
 // eligible for pruning.
 func (s *Store) PruneSync(ctx context.Context, retention time.Duration) (int64, error) {
+	var out int64
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.pruneSyncOnce(ctx, retention)
+		return err
+	})
+	return out, err
+}
+
+// pruneSyncOnce is one attempt of PruneSync's transaction.
+func (s *Store) pruneSyncOnce(ctx context.Context, retention time.Duration) (int64, error) {
 	if retention <= 0 {
 		return 0, fmt.Errorf("%w: retention must be positive", ErrInvalidSync)
 	}

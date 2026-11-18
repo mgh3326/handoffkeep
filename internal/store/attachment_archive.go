@@ -238,6 +238,17 @@ func attachmentArchiveCandidates(ctx context.Context, q poolQuerier, limit int, 
 // (idempotent); a different location is a mismatch. The hot copy is not
 // touched here: the caller deletes it after this commits.
 func (s *Store) RecordAttachmentArchive(ctx context.Context, sha, location string, size int64, now time.Time) (AttachmentArchive, error) {
+	var out AttachmentArchive
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.recordAttachmentArchiveOnce(ctx, sha, location, size, now)
+		return err
+	})
+	return out, err
+}
+
+// recordAttachmentArchiveOnce is one attempt of RecordAttachmentArchive's transaction.
+func (s *Store) recordAttachmentArchiveOnce(ctx context.Context, sha, location string, size int64, now time.Time) (AttachmentArchive, error) {
 	if !attachmentSHARE.MatchString(sha) || location == "" || !validText(location, 2048) || size < 0 {
 		return AttachmentArchive{}, errors.New("invalid attachment archive")
 	}

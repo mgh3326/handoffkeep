@@ -207,6 +207,13 @@ var ErrAttachmentStagingCap = errors.New("attachment_staging_cap")
 // both pass it, and pending reservations count against the storage fuse so
 // transient staging spend is bounded by what could ever commit.
 func (s *Store) ReserveAttachmentUpload(ctx context.Context, u AttachmentUpload, stagingCap, clientCap, storageCap int64) error {
+	return s.retryTx(ctx, func() error {
+		return s.reserveAttachmentUploadOnce(ctx, u, stagingCap, clientCap, storageCap)
+	})
+}
+
+// reserveAttachmentUploadOnce is one attempt of ReserveAttachmentUpload's transaction.
+func (s *Store) reserveAttachmentUploadOnce(ctx context.Context, u AttachmentUpload, stagingCap, clientCap, storageCap int64) error {
 	if !attachmentUploadIDPattern.MatchString(u.ID) {
 		return errors.New("invalid attachment upload id")
 	}

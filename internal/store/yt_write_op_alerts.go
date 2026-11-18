@@ -48,6 +48,17 @@ var ytWriteOpAlertPointer = map[string]string{
 // candidate read. Two passes that straddle a window boundary would otherwise
 // both read an op as unmarked and announce it in two windows.
 func (s *Store) EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int, error) {
+	var out int
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.enqueueYTWriteOpAlertsOnce(ctx, now)
+		return err
+	})
+	return out, err
+}
+
+// enqueueYTWriteOpAlertsOnce is one attempt of EnqueueYTWriteOpAlerts's transaction.
+func (s *Store) enqueueYTWriteOpAlertsOnce(ctx context.Context, now time.Time) (int, error) {
 	now = now.UTC()
 	tx, release, err := s.begin(ctx)
 	if err != nil {

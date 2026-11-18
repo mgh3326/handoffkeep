@@ -169,6 +169,20 @@ func (s *Store) BackfillYTFieldsOps(ctx context.Context, opt YTFieldsBackfillOpt
 // (ytSnapshotUnchanged: an unchanged sha whose op was rejected counts as prepared)
 // and rolls back.
 func (s *Store) backfillYTFields(ctx context.Context, tenant string, id int64, dryRun bool, remaining int) (ytFieldsOutcome, int, string, bool, error) {
+	var outcome ytFieldsOutcome
+	var ops int
+	var project string
+	var more bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		outcome, ops, project, more, err = s.backfillYTFieldsOnce(ctx, tenant, id, dryRun, remaining)
+		return err
+	})
+	return outcome, ops, project, more, err
+}
+
+// backfillYTFieldsOnce is one attempt of backfillYTFields's transaction.
+func (s *Store) backfillYTFieldsOnce(ctx context.Context, tenant string, id int64, dryRun bool, remaining int) (ytFieldsOutcome, int, string, bool, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return "", 0, "", false, err

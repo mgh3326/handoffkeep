@@ -188,6 +188,20 @@ ORDER BY d.id LIMIT $4`, eligible), lo, hi, cutoff.UTC(), want)
 // doc_prune_log, and adds the counts to res. It returns how many documents it
 // deleted; zero means the candidates are exhausted.
 func (s *Store) pruneRetentionBatch(ctx context.Context, cutoff time.Time, batch int, prunedBy string, res *DocRetentionResult) (int, error) {
+	var n int
+	err := s.retryTx(ctx, func() error {
+		var err error
+		n, err = s.pruneRetentionBatchOnce(ctx, cutoff, batch, prunedBy, res)
+		return err
+	})
+	return n, err
+}
+
+// pruneRetentionBatchOnce is one whole retention batch (retried on MySQL after a
+// deadlock or lock-wait timeout). Its deletes are database rows only and roll
+// back with the transaction, and res changes only after the commit, so a retry
+// re-selects the same candidates and counts them once.
+func (s *Store) pruneRetentionBatchOnce(ctx context.Context, cutoff time.Time, batch int, prunedBy string, res *DocRetentionResult) (int, error) {
 	tx, e := s.pool.Begin(ctx)
 	if e != nil {
 		return 0, e

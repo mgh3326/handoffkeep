@@ -330,40 +330,46 @@ func (s *Store) SetYTAuthority(ctx context.Context, kinds []YTAuthorityKind, sid
 	}
 	// A rollback to hk reaches here on either dialect and takes no sync lock,
 	// as on PostgreSQL.
-	tx, release, err := s.begin(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer release()
-	defer tx.Rollback(ctx)
-	if side == YTAuthorityYouTrack {
-		held, err := tryYTSyncLockTx(ctx, pgxTx(tx))
+	err = s.retryTx(ctx, func() error {
+		tx, release, err := s.begin(ctx)
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
-		if !held {
-			return nil, nil, fmt.Errorf("%w: a youtrack sync, adopt or comment catch-up holds the sync lock; try again when it ends", ErrYTAuthorityRefused)
+		defer release()
+		defer tx.Rollback(ctx)
+		if side == YTAuthorityYouTrack {
+			held, err := tryYTSyncLockTx(ctx, pgxTx(tx))
+			if err != nil {
+				return err
+			}
+			if !held {
+				return fmt.Errorf("%w: a youtrack sync, adopt or comment catch-up holds the sync lock; try again when it ends", ErrYTAuthorityRefused)
+			}
 		}
-	}
-	before, after, err = s.setYTAuthorityTx(ctx, tx, seen, side, by, note)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, nil, err
-	}
-	for _, k := range YTAuthorityKinds {
-		if seen[k] {
-			var changed bool
-			for _, a := range before {
-				if a.Kind == k && a.Authority != side {
-					changed = true
+		before, after, err = s.setYTAuthorityTx(ctx, tx, seen, side, by, note)
+		if err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		for _, k := range YTAuthorityKinds {
+			if seen[k] {
+				var changed bool
+				for _, a := range before {
+					if a.Kind == k && a.Authority != side {
+						changed = true
+					}
+				}
+				if changed {
+					log.Printf("ytwrite.authority_set kind=%s authority=%s switched_by=%q note=%q", k, side, by, note)
 				}
 			}
-			if changed {
-				log.Printf("ytwrite.authority_set kind=%s authority=%s switched_by=%q note=%q", k, side, by, note)
-			}
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
 	}
 	return before, after, nil
 }

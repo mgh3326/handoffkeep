@@ -1024,6 +1024,17 @@ func (s *Store) catchUpYTArticles(ctx context.Context, now time.Time, bound bool
 
 // catchUpYTArticle is one document's catch-up transaction.
 func (s *Store) catchUpYTArticle(ctx context.Context, now time.Time, g ytDocsGate, id int64) (ytArticleOutcome, error) {
+	var out ytArticleOutcome
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.catchUpYTArticleOnce(ctx, now, g, id)
+		return err
+	})
+	return out, err
+}
+
+// catchUpYTArticleOnce is one attempt of catchUpYTArticle's transaction.
+func (s *Store) catchUpYTArticleOnce(ctx context.Context, now time.Time, g ytDocsGate, id int64) (ytArticleOutcome, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return "", err

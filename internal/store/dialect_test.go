@@ -67,6 +67,54 @@ func TestRetryTransactionOnlyOnceOnMySQLConflict(t *testing.T) {
 	}
 }
 
+// TestRetryTxRetriesDeadlockOnce injects one 1213 through retryTx and sees
+// exactly one retry: two attempts then success. A conflict that persists is
+// an error after the second attempt, never a third one (design §11.1).
+func TestRetryTxRetriesDeadlockOnce(t *testing.T) {
+	mysqlStore := &Store{dialect: mysqlDialect}
+	for _, number := range []uint16{1213, 1205} {
+		conflict := &mysql.MySQLError{Number: number, Message: "injected conflict"}
+		calls := 0
+		err := mysqlStore.retryTx(context.Background(), func() error {
+			calls++
+			if calls == 1 {
+				return conflict
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("MySQL %d: retryTx returned %v, want nil after one retry", number, err)
+		}
+		if calls != 2 {
+			t.Fatalf("MySQL %d: one injected conflict ran %d attempts, want exactly 2", number, calls)
+		}
+		calls = 0
+		err = mysqlStore.retryTx(context.Background(), func() error {
+			calls++
+			return conflict
+		})
+		if err == nil {
+			t.Fatalf("MySQL %d: persistent conflict returned nil, want the conflict", number)
+		}
+		if calls != 2 {
+			t.Fatalf("MySQL %d: persistent conflict ran %d attempts, want exactly 2", number, calls)
+		}
+	}
+	// PostgreSQL keeps its single-attempt behaviour: no retry even on 1213.
+	postgresStore := &Store{}
+	calls := 0
+	err := postgresStore.retryTx(context.Background(), func() error {
+		calls++
+		return &mysql.MySQLError{Number: 1213, Message: "injected conflict"}
+	})
+	if err == nil {
+		t.Fatal("PostgreSQL path returned nil for an injected 1213")
+	}
+	if calls != 1 {
+		t.Fatalf("PostgreSQL path ran %d attempts, want exactly 1", calls)
+	}
+}
+
 func TestPatchBenchRepOutcomeKeepsMySQLPortedPath(t *testing.T) {
 	mysqlStore := &Store{dialect: mysqlDialect}
 	_, err := mysqlStore.PatchBenchRepOutcome(context.Background(), 0, BenchRepOutcomePatch{})

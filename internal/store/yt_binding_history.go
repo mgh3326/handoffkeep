@@ -111,6 +111,17 @@ func insertYTBindingHistoryTx(ctx context.Context, tx transaction, b YTTaskBindi
 // authority row FOR SHARE (the order prepareYTOpTx has), then the task's
 // yt_write_ops rows, its binding row and its yt_entity_map row.
 func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbindOptions) (YTUnbindResult, error) {
+	var out YTUnbindResult
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.unbindYTTaskBindingOnce(ctx, taskID, o)
+		return err
+	})
+	return out, err
+}
+
+// unbindYTTaskBindingOnce is one attempt of UnbindYTTaskBinding's transaction.
+func (s *Store) unbindYTTaskBindingOnce(ctx context.Context, taskID int64, o YTUnbindOptions) (YTUnbindResult, error) {
 	res := YTUnbindResult{TaskID: taskID, Rejected: []YTUnbindOp{}, Released: []int64{}, Stranded: []int64{}}
 	if taskID < 1 || o.By == "" || !validText(o.By, 200) || !validText(o.Reason, 2000) {
 		return res, errors.New("invalid task unbind")

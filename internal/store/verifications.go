@@ -168,46 +168,50 @@ func (s *Store) RecordVerification(ctx context.Context, in VerificationInput, re
 	}
 	repo, n, _ := parsePRURL(in.PR)
 	now := time.Now().UTC()
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Verification{}, false, err
-	}
-	defer tx.Rollback(ctx)
-	// The stub never updates an existing row: an event writer that created
-	// the change first keeps its head (upsertChangeTx would overwrite it).
-	if _, err = tx.Exec(ctx, `INSERT INTO changes(repo,pr_number,state,head_sha,opened_at,created_at,updated_at)
+	var out Verification
+	var created bool
+	rerr := s.retryTx(ctx, func() error {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		// The stub never updates an existing row: an event writer that created
+		// the change first keeps its head (upsertChangeTx would overwrite it).
+		if _, err = tx.Exec(ctx, `INSERT INTO changes(repo,pr_number,state,head_sha,opened_at,created_at,updated_at)
 VALUES($1,$2,'open',$3,$4,$4,$4) ON CONFLICT(repo,pr_number) DO NOTHING`, repo, n, in.HeadSHA, now); err != nil {
-		return Verification{}, false, err
-	}
-	var changeID int64
-	var changeHead *string
-	if err = tx.QueryRow(ctx, `SELECT id,head_sha FROM changes WHERE repo=$1 AND pr_number=$2`, repo, n).Scan(&changeID, &changeHead); err != nil {
-		return Verification{}, false, err
-	}
-	args := []any{changeID, in.HeadSHA, in.Level, in.Verifier, nullStr(in.VerifierJobID), in.Family, nullStr(in.Profile), nullStr(in.Model), nullStr(in.Harness), in.Evidence, nullStr(in.CIResult), in.Source, recordedBy, now}
-	var v Verification
-	created := true
-	err = scanVerification(tx.QueryRow(ctx, `INSERT INTO verifications(change_id,head_sha,level,verifier,verifier_job_id,family,profile,model,harness,evidence,ci_result,source,recorded_by,recorded_at)
+			return err
+		}
+		var changeID int64
+		var changeHead *string
+		if err = tx.QueryRow(ctx, `SELECT id,head_sha FROM changes WHERE repo=$1 AND pr_number=$2`, repo, n).Scan(&changeID, &changeHead); err != nil {
+			return err
+		}
+		args := []any{changeID, in.HeadSHA, in.Level, in.Verifier, nullStr(in.VerifierJobID), in.Family, nullStr(in.Profile), nullStr(in.Model), nullStr(in.Harness), in.Evidence, nullStr(in.CIResult), in.Source, recordedBy, now}
+		err = scanVerification(tx.QueryRow(ctx, `INSERT INTO verifications(change_id,head_sha,level,verifier,verifier_job_id,family,profile,model,harness,evidence,ci_result,source,recorded_by,recorded_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 ON CONFLICT(change_id,head_sha) DO NOTHING
-RETURNING `+verificationColumns, args...), &v)
-	if errors.Is(err, ErrNoRows) {
-		created = false
-		if err = scanVerification(tx.QueryRow(ctx, `SELECT `+verificationColumns+` FROM verifications WHERE change_id=$1 AND head_sha=$2 FOR UPDATE`, changeID, in.HeadSHA), &v); err != nil {
-			return Verification{}, false, err
+RETURNING `+verificationColumns, args...), &out)
+		created = true
+		if errors.Is(err, ErrNoRows) {
+			created = false
+			if err = scanVerification(tx.QueryRow(ctx, `SELECT `+verificationColumns+` FROM verifications WHERE change_id=$1 AND head_sha=$2 FOR UPDATE`, changeID, in.HeadSHA), &out); err != nil {
+				return err
+			}
+			switch {
+			case out.samePayload(in):
+			case out.Level == VerificationBlocked:
+				err = scanVerification(tx.QueryRow(ctx, `UPDATE verifications SET level=$3,verifier=$4,verifier_job_id=$5,family=$6,profile=$7,model=$8,harness=$9,evidence=$10,ci_result=$11,source=$12,recorded_by=$13,recorded_at=$14
+WHERE change_id=$1 AND head_sha=$2 RETURNING `+verificationColumns, args...), &out)
+			default:
+				return ErrVerificationExists
+			}
 		}
-		switch {
-		case v.samePayload(in):
-		case v.Level == VerificationBlocked:
-			err = scanVerification(tx.QueryRow(ctx, `UPDATE verifications SET level=$3,verifier=$4,verifier_job_id=$5,family=$6,profile=$7,model=$8,harness=$9,evidence=$10,ci_result=$11,source=$12,recorded_by=$13,recorded_at=$14
-WHERE change_id=$1 AND head_sha=$2 RETURNING `+verificationColumns, args...), &v)
-		default:
-			return Verification{}, false, ErrVerificationExists
+		if err != nil {
+			return err
 		}
-	}
-	if err != nil {
-		return Verification{}, false, err
-	}
-	v.Current = changeHead != nil && *changeHead == v.HeadSHA
-	return v, created, tx.Commit(ctx)
+		out.Current = changeHead != nil && *changeHead == out.HeadSHA
+		return tx.Commit(ctx)
+	})
+	return out, created, rerr
 }

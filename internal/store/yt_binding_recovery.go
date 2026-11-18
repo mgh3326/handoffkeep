@@ -322,6 +322,17 @@ func (s *Store) heldYTCandidatesForTask(ctx context.Context, tenant string, task
 // read again under the lane lock, and an op that was dispatched, resolved or
 // admitted in between is left alone.
 func (s *Store) recoverHeldYTOp(ctx context.Context, now time.Time, c ytHeldOp) (bool, error) {
+	var out bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.recoverHeldYTOpOnce(ctx, now, c)
+		return err
+	})
+	return out, err
+}
+
+// recoverHeldYTOpOnce is one attempt of recoverHeldYTOp's transaction.
+func (s *Store) recoverHeldYTOpOnce(ctx context.Context, now time.Time, c ytHeldOp) (bool, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return false, err

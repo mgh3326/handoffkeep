@@ -142,6 +142,17 @@ func (s *Store) ApplyInbox(ctx context.Context, keys []string, action string, un
 // ErrInboxUndoConflict, so two tabs cannot undo each other's work. A second
 // undo of the same key is a no-op.
 func (s *Store) UndoInbox(ctx context.Context, eventKey, actor string) ([]InboxWrite, error) {
+	var out []InboxWrite
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.undoInboxOnce(ctx, eventKey, actor)
+		return err
+	})
+	return out, err
+}
+
+// undoInboxOnce is one attempt of UndoInbox's transaction.
+func (s *Store) undoInboxOnce(ctx context.Context, eventKey, actor string) ([]InboxWrite, error) {
 	if strings.TrimSpace(eventKey) == "" || !validText(eventKey, 128) || strings.TrimSpace(actor) == "" || !validText(actor, 320) {
 		return nil, ErrInvalidInboxWrite
 	}
@@ -333,6 +344,17 @@ func inboxRequestID(key string) (int64, bool) {
 // Only this writer takes inbox state rows, so the pair cannot close a cycle
 // with a decision writer that locks only its request.
 func (s *Store) applyInboxItem(ctx context.Context, key, action string, until *time.Time, actor, eventKey string, now time.Time) (InboxState, error) {
+	var out InboxState
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.applyInboxItemOnce(ctx, key, action, until, actor, eventKey, now)
+		return err
+	})
+	return out, err
+}
+
+// applyInboxItemOnce is one attempt of applyInboxItem's transaction.
+func (s *Store) applyInboxItemOnce(ctx context.Context, key, action string, until *time.Time, actor, eventKey string, now time.Time) (InboxState, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return InboxState{}, err

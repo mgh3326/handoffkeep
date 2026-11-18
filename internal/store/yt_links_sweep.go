@@ -186,6 +186,17 @@ func ytLinksSweepDoneArgs(s *Store, st YTLinksSweepState, now time.Time) []any {
 
 // sweepYTLinksTask is prepareYTLinksTx in its own transaction.
 func (s *Store) sweepYTLinksTask(ctx context.Context, now time.Time, tenant string, id int64) (ytLinksOutcome, error) {
+	var out ytLinksOutcome
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.sweepYTLinksTaskOnce(ctx, now, tenant, id)
+		return err
+	})
+	return out, err
+}
+
+// sweepYTLinksTaskOnce is one attempt of sweepYTLinksTask's transaction.
+func (s *Store) sweepYTLinksTaskOnce(ctx context.Context, now time.Time, tenant string, id int64) (ytLinksOutcome, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return "", err

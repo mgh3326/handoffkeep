@@ -635,6 +635,16 @@ var (
 // In mode on, the decision's first snapshot is prepared in the same
 // transaction, behind any op on its lane.
 func (s *Store) BindYTDecision(ctx context.Context, b YTDecisionBinding, now time.Time) (created bool, err error) {
+	err = s.retryTx(ctx, func() error {
+		var err error
+		created, err = s.bindYTDecisionOnce(ctx, b, now)
+		return err
+	})
+	return created, err
+}
+
+// bindYTDecisionOnce is one attempt of BindYTDecision's transaction.
+func (s *Store) bindYTDecisionOnce(ctx context.Context, b YTDecisionBinding, now time.Time) (created bool, err error) {
 	if b.DecisionID <= 0 || b.Tenant == "" || b.IssueID == "" || b.BoundBy == "" {
 		return false, errors.New("a decision binding needs the decision, the tenant, the issue and who bound it")
 	}
@@ -740,6 +750,17 @@ func (s *Store) UnboundYTDecisions(ctx context.Context, afterID int64, limit int
 // decision_fields snapshot op when bound (and its snapshot sha differs).
 // Mode off or other tenant returns ("", nil).
 func (s *Store) PrepareYTDecision(ctx context.Context, id int64, now time.Time) (YTDecisionOutcome, error) {
+	var out YTDecisionOutcome
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.prepareYTDecisionOnce(ctx, id, now)
+		return err
+	})
+	return out, err
+}
+
+// prepareYTDecisionOnce is one attempt of PrepareYTDecision's transaction.
+func (s *Store) prepareYTDecisionOnce(ctx context.Context, id int64, now time.Time) (YTDecisionOutcome, error) {
 	g, on := s.ytDecisionsNow()
 	if !on {
 		return "", nil

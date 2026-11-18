@@ -798,22 +798,24 @@ func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by stri
 	if s != nil && s.dialect == mysqlDialect {
 		return s.recordDecisionRequestMySQL(ctx, taskID, by, in)
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return DecisionRequestResult{}, err
-	}
-	defer tx.Rollback(ctx)
-	result, err := s.recordDecisionRequestTx(ctx, tx, taskID, by, in)
-	if err != nil {
-		return DecisionRequestResult{}, err
-	}
-	if result.Duplicate {
-		return result, nil
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return DecisionRequestResult{}, err
-	}
-	return result, nil
+	var out DecisionRequestResult
+	rerr := s.retryTx(ctx, func() error {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		result, err := s.recordDecisionRequestTx(ctx, tx, taskID, by, in)
+		if err != nil {
+			return err
+		}
+		out = result
+		if result.Duplicate {
+			return nil
+		}
+		return tx.Commit(ctx)
+	})
+	return out, rerr
 }
 
 func checkDecisionRequestWrite(taskID int64, by string, in *DecisionRequestInput) error {

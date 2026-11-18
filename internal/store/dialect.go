@@ -481,7 +481,9 @@ func (s *Store) beginNamedTransaction(ctx context.Context, key string) (transact
 // Retry only a complete MySQL transaction after a deadlock or lock timeout.
 // Its deferred rollback and session cleanup finish before the next attempt.
 func (s *Store) retryTransaction(ctx context.Context, attempt int, err error) bool {
-	return s.dialect == mysqlDialect && attempt == 0 && ctx.Err() == nil && errors.Is(mapDriverError(err), errSerializationFailure)
+	// A nil store cannot be MySQL: validation tests call write methods on a
+	// nil store and expect their input refusal before any store touch.
+	return s != nil && s.dialect == mysqlDialect && attempt == 0 && ctx.Err() == nil && errors.Is(mapDriverError(err), errSerializationFailure)
 }
 
 // dialected is implemented by every querier and transaction adapter, so a

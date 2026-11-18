@@ -139,6 +139,17 @@ func (s *Store) ListYouTrackMirrors(ctx context.Context, taskIDs []int64) (map[i
 // existing row is updated in place; an issue already linked to a different
 // task is a conflict.
 func (s *Store) UpsertYouTrackMirror(ctx context.Context, in YouTrackMirrorInput) (YouTrackMirror, error) {
+	var out YouTrackMirror
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.upsertYouTrackMirrorOnce(ctx, in)
+		return err
+	})
+	return out, err
+}
+
+// upsertYouTrackMirrorOnce is one attempt of UpsertYouTrackMirror's write.
+func (s *Store) upsertYouTrackMirrorOnce(ctx context.Context, in YouTrackMirrorInput) (YouTrackMirror, error) {
 	if in.TaskID < 1 || strings.TrimSpace(in.IssueID) == "" || strings.TrimSpace(in.Tenant) == "" {
 		return YouTrackMirror{}, ErrYouTrackMirrorConflict
 	}

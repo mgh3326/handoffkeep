@@ -145,6 +145,18 @@ const (
 // row, the task's lane lock, then the new rows
 // of yt_write_ops, yt_comment_write_links and yt_entity_map.
 func (s *Store) EnqueueYTAuditComment(ctx context.Context, commentID int64) (string, ytwrite.Op, error) {
+	var authority string
+	var out ytwrite.Op
+	err := s.retryTx(ctx, func() error {
+		var err error
+		authority, out, err = s.enqueueYTAuditCommentOnce(ctx, commentID)
+		return err
+	})
+	return authority, out, err
+}
+
+// enqueueYTAuditCommentOnce is one attempt of EnqueueYTAuditComment's transaction.
+func (s *Store) enqueueYTAuditCommentOnce(ctx context.Context, commentID int64) (string, ytwrite.Op, error) {
 	if commentID < 1 {
 		return "", ytwrite.Op{}, ErrTaskCommentInvalid
 	}

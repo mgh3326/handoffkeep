@@ -184,86 +184,131 @@ func decisionErrorCode(err error) string {
 // nothing is due.
 func (s *Store) ProcessNextDecisionNotice(ctx context.Context, now time.Time, send func(context.Context, DecisionNotice) (string, error)) (found bool, sendErr error, err error) {
 	now = now.UTC()
-	tx, err := s.db().Begin(ctx)
-	if err != nil {
-		return false, nil, err
-	}
-	defer tx.Rollback(ctx)
-	var x DecisionNotice
-	query := sqlFor(tx, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs,n.message_id,n.applied_version,n.attempts,`+decisionMentionSQL+`
-		FROM decision_deliveries n JOIN decision_requests d ON d.id=n.request_id LEFT JOIN tasks t ON t.id=d.task_id
-		WHERE n.destination='`+DecisionDestinationDiscord+`' AND n.state='pending' AND n.next_attempt_at<=$1::timestamptz
-		AND n.applied_version<>`+decisionEffectiveStatusSQL+`
-		ORDER BY n.next_attempt_at ASC,n.request_id ASC LIMIT 1 FOR UPDATE OF n SKIP LOCKED`,
-		`SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs,n.message_id,n.applied_version,n.attempts,
-		(coalesce(n.applied_version='' AND (coalesce(t.awaiting_decision,false)
-		OR (d.source='`+DecisionSourceTaskRequest+`' AND JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.decision_request.id')) COLLATE utf8mb4_0900_bin=d.source_ref AND JSON_EXTRACT(t.refs,'$.decision_request.human_only')=true)
-		OR d.due_at<=?),false))
-		FROM decision_deliveries n JOIN decision_requests d ON d.id=n.request_id LEFT JOIN tasks t ON t.id=d.task_id
-		WHERE n.destination='`+DecisionDestinationDiscord+`' AND n.state='pending' AND n.next_attempt_at<=?
-		AND n.applied_version<>CASE WHEN d.status='open' AND d.expires_at<=? THEN 'expired' ELSE d.status END
-		ORDER BY n.next_attempt_at ASC,n.request_id ASC LIMIT 1 FOR UPDATE SKIP LOCKED`)
-	args := []any{now, now.Add(DecisionNoticeNearDue)}
-	if dialectFor(tx) == mysqlDialect {
-		args = []any{now.Add(DecisionNoticeNearDue), now, now}
-	}
-	err = scanDecisionNoticeRow(tx.QueryRow(ctx, query, args...),
-		&x, now, &x.MessageID, &x.AppliedVersion, &x.Attempts, &x.Mention)
-	if errors.Is(err, ErrNoRows) {
-		return false, nil, nil
-	}
-	if err != nil {
-		return false, nil, err
-	}
-	want := x.Record.Status
-	key := `WHERE request_id=$1 AND destination='` + DecisionDestinationDiscord + `'`
-	if dialectFor(tx) == mysqlDialect {
-		key = `WHERE request_id=? AND destination='` + DecisionDestinationDiscord + `'`
-	}
-	update := func(execCtx context.Context, pgQuery, mysqlQuery string, pgArgs, mysqlArgs []any) (int64, error) {
+	// A deadlock after send must not post twice: the first attempt's send
+	// already happened, so a retry re-runs only the settle of that same row.
+	// Once a send has run, the retry selects that row by id and no other; if
+	// the row is no longer due, the send is reported as unsettled. A failure
+	// before send leaves sent false and the retry selects and sends normally.
+	var messageID string
+	var sent, skipped bool
+	var sentID int64
+	err = s.retryTx(ctx, func() error {
+		found = false
+		tx, err := s.db().Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		var x DecisionNotice
+		pinPG, pinMySQL := "", ""
+		if sent {
+			pinPG, pinMySQL = " AND n.request_id=$3", " AND n.request_id=?"
+		}
+		query := sqlFor(tx, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs,n.message_id,n.applied_version,n.attempts,`+decisionMentionSQL+`
+			FROM decision_deliveries n JOIN decision_requests d ON d.id=n.request_id LEFT JOIN tasks t ON t.id=d.task_id
+			WHERE n.destination='`+DecisionDestinationDiscord+`' AND n.state='pending' AND n.next_attempt_at<=$1::timestamptz
+			AND n.applied_version<>`+decisionEffectiveStatusSQL+pinPG+`
+			ORDER BY n.next_attempt_at ASC,n.request_id ASC LIMIT 1 FOR UPDATE OF n SKIP LOCKED`,
+			`SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs,n.message_id,n.applied_version,n.attempts,
+			(coalesce(n.applied_version='' AND (coalesce(t.awaiting_decision,false)
+			OR (d.source='`+DecisionSourceTaskRequest+`' AND JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.decision_request.id')) COLLATE utf8mb4_0900_bin=d.source_ref AND JSON_EXTRACT(t.refs,'$.decision_request.human_only')=true)
+			OR d.due_at<=?),false))
+			FROM decision_deliveries n JOIN decision_requests d ON d.id=n.request_id LEFT JOIN tasks t ON t.id=d.task_id
+			WHERE n.destination='`+DecisionDestinationDiscord+`' AND n.state='pending' AND n.next_attempt_at<=?
+			AND n.applied_version<>CASE WHEN d.status='open' AND d.expires_at<=? THEN 'expired' ELSE d.status END`+pinMySQL+`
+			ORDER BY n.next_attempt_at ASC,n.request_id ASC LIMIT 1 FOR UPDATE SKIP LOCKED`)
+		args := []any{now, now.Add(DecisionNoticeNearDue)}
 		if dialectFor(tx) == mysqlDialect {
-			return tx.Exec(execCtx, mysqlQuery, mysqlArgs...)
+			args = []any{now.Add(DecisionNoticeNearDue), now, now}
 		}
-		return tx.Exec(execCtx, pgQuery, pgArgs...)
-	}
-	// A request that closed before its first post is never posted, and one
-	// that was never posted has no message to edit.
-	if (x.Post() && want != DecisionStatusOpen) || (!x.Post() && x.MessageID == "") {
-		if _, err = update(ctx, `UPDATE decision_deliveries SET desired_version=$2,applied_version=$2 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET desired_version=?,applied_version=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, want}, []any{want, want, x.Record.ID}); err != nil {
-			return true, nil, err
+		if sent {
+			args = append(args, sentID)
 		}
-		return true, nil, tx.Commit(ctx)
-	}
-	if _, err = update(ctx, `UPDATE decision_deliveries SET desired_version=$2 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET desired_version=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, want}, []any{want, x.Record.ID}); err != nil {
-		return true, nil, err
-	}
-	messageID, sendErr := send(ctx, x)
-	// send may have created the message: record the outcome even if ctx is
-	// canceled now (shutdown), or the next start would post it again.
-	settle, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), decisionSettleTimeout)
-	defer cancelSettle()
-	switch {
-	case errors.Is(sendErr, ErrDecisionNoticeSkipped):
-		sendErr = nil
-		_, err = tx.Exec(settle, `UPDATE decision_deliveries SET state='unsent',last_error_code='' `+key, x.Record.ID)
-	case sendErr == nil && x.Post():
-		_, err = update(settle, `UPDATE decision_deliveries SET applied_version=desired_version,message_id=$2,posted_at=$3,attempts=0,last_error_code='',next_attempt_at=$3 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET applied_version=desired_version,message_id=?,posted_at=?,attempts=0,last_error_code='',next_attempt_at=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, messageID, now}, []any{messageID, now, now, x.Record.ID})
-	case sendErr == nil:
-		_, err = update(settle, `UPDATE decision_deliveries SET applied_version=desired_version,edited_at=$2,attempts=0,last_error_code='',next_attempt_at=$2 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET applied_version=desired_version,edited_at=?,attempts=0,last_error_code='',next_attempt_at=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, now}, []any{now, now, x.Record.ID})
-	default:
-		attempts := x.Attempts + 1
-		code := decisionErrorCode(sendErr)
-		if attempts >= decisionNoticeMaxAttempts || errors.Is(sendErr, ErrDecisionNoticeRejected) {
-			sendErr = fmt.Errorf("%w: request %d: %w", ErrDecisionNoticeGaveUp, x.Record.ID, sendErr)
-			_, err = update(settle, `UPDATE decision_deliveries SET state='failed',attempts=$2,last_error_code=$3 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET state='failed',attempts=?,last_error_code=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, attempts, code}, []any{attempts, code, x.Record.ID})
-		} else {
-			_, err = update(settle, `UPDATE decision_deliveries SET attempts=$2,last_error_code=$3,next_attempt_at=$4 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET attempts=?,last_error_code=?,next_attempt_at=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, attempts, code, now.Add(deliveryBackoff(x.Attempts))}, []any{attempts, code, now.Add(deliveryBackoff(x.Attempts)), x.Record.ID})
+		err = scanDecisionNoticeRow(tx.QueryRow(ctx, query, args...),
+			&x, now, &x.MessageID, &x.AppliedVersion, &x.Attempts, &x.Mention)
+		if errors.Is(err, ErrNoRows) {
+			if sent {
+				// The send ran, but its row left the due set before the retry
+				// could settle it: report the send as unsettled, not as nothing.
+				found = true
+				if sendErr == nil {
+					sendErr = fmt.Errorf("decision notice %d sent but not settled: its delivery row left the due set", sentID)
+				}
+			}
+			return nil
 		}
-	}
-	if err != nil {
-		return true, sendErr, err
-	}
-	return true, sendErr, tx.Commit(settle)
+		if err != nil {
+			return err
+		}
+		want := x.Record.Status
+		key := `WHERE request_id=$1 AND destination='` + DecisionDestinationDiscord + `'`
+		if dialectFor(tx) == mysqlDialect {
+			key = `WHERE request_id=? AND destination='` + DecisionDestinationDiscord + `'`
+		}
+		update := func(execCtx context.Context, pgQuery, mysqlQuery string, pgArgs, mysqlArgs []any) (int64, error) {
+			if dialectFor(tx) == mysqlDialect {
+				return tx.Exec(execCtx, mysqlQuery, mysqlArgs...)
+			}
+			return tx.Exec(execCtx, pgQuery, pgArgs...)
+		}
+		// A request that closed before its first post is never posted, and one
+		// that was never posted has no message to edit.
+		if (x.Post() && want != DecisionStatusOpen) || (!x.Post() && x.MessageID == "") {
+			// A send this invocation made before the request closed: keep the
+			// message id it returned, or the next drain posts the notice again.
+			if sent && sendErr == nil && messageID != "" {
+				if _, err = update(context.WithoutCancel(ctx), `UPDATE decision_deliveries SET message_id=$2,posted_at=$3 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET message_id=?,posted_at=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, messageID, now}, []any{messageID, now, x.Record.ID}); err != nil {
+					found = true
+					return err
+				}
+			}
+			if _, err = update(ctx, `UPDATE decision_deliveries SET desired_version=$2,applied_version=$2 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET desired_version=?,applied_version=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, want}, []any{want, want, x.Record.ID}); err != nil {
+				found = true
+				return err
+			}
+			found = true
+			return tx.Commit(ctx)
+		}
+		if _, err = update(ctx, `UPDATE decision_deliveries SET desired_version=$2 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET desired_version=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, want}, []any{want, x.Record.ID}); err != nil {
+			found = true
+			return err
+		}
+		if !sent {
+			messageID, sendErr = send(ctx, x)
+			sent, sentID = true, x.Record.ID
+		}
+		// send may have created the message: record the outcome even if ctx is
+		// canceled now (shutdown), or the next start would post it again.
+		settle, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), decisionSettleTimeout)
+		defer cancelSettle()
+		switch {
+		case skipped || errors.Is(sendErr, ErrDecisionNoticeSkipped):
+			// A retry sees sendErr already cleared, so the skip is remembered:
+			// it must not settle as a post.
+			skipped, sendErr = true, nil
+			_, err = tx.Exec(settle, `UPDATE decision_deliveries SET state='unsent',last_error_code='' `+key, x.Record.ID)
+		case sendErr == nil && x.Post():
+			_, err = update(settle, `UPDATE decision_deliveries SET applied_version=desired_version,message_id=$2,posted_at=$3,attempts=0,last_error_code='',next_attempt_at=$3 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET applied_version=desired_version,message_id=?,posted_at=?,attempts=0,last_error_code='',next_attempt_at=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, messageID, now}, []any{messageID, now, now, x.Record.ID})
+		case sendErr == nil:
+			_, err = update(settle, `UPDATE decision_deliveries SET applied_version=desired_version,edited_at=$2,attempts=0,last_error_code='',next_attempt_at=$2 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET applied_version=desired_version,edited_at=?,attempts=0,last_error_code='',next_attempt_at=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, now}, []any{now, now, x.Record.ID})
+		default:
+			attempts := x.Attempts + 1
+			code := decisionErrorCode(sendErr)
+			if attempts >= decisionNoticeMaxAttempts || errors.Is(sendErr, ErrDecisionNoticeRejected) {
+				sendErr = fmt.Errorf("%w: request %d: %w", ErrDecisionNoticeGaveUp, x.Record.ID, sendErr)
+				_, err = update(settle, `UPDATE decision_deliveries SET state='failed',attempts=$2,last_error_code=$3 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET state='failed',attempts=?,last_error_code=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, attempts, code}, []any{attempts, code, x.Record.ID})
+			} else {
+				_, err = update(settle, `UPDATE decision_deliveries SET attempts=$2,last_error_code=$3,next_attempt_at=$4 WHERE request_id=$1 AND destination='`+DecisionDestinationDiscord+`'`, `UPDATE decision_deliveries SET attempts=?,last_error_code=?,next_attempt_at=? WHERE request_id=? AND destination='`+DecisionDestinationDiscord+`'`, []any{x.Record.ID, attempts, code, now.Add(deliveryBackoff(x.Attempts))}, []any{attempts, code, now.Add(deliveryBackoff(x.Attempts)), x.Record.ID})
+			}
+		}
+		if err != nil {
+			found = true
+			return err
+		}
+		found = true
+		return tx.Commit(settle)
+	})
+	return found, sendErr, err
 }
 
 // DecisionNoticeState is a decision_deliveries row as stored.
@@ -356,99 +401,126 @@ func (s *Store) DecisionDeliveryHygiene(ctx context.Context, now time.Time) (Dec
 func (s *Store) ProcessDecisionDigest(ctx context.Context, now time.Time, send func(context.Context, DecisionDigest) (string, error)) (found bool, sendErr error, err error) {
 	now = now.UTC()
 	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	tx, err := s.db().Begin(ctx)
-	if err != nil {
-		return false, nil, err
-	}
-	defer tx.Rollback(ctx)
-	updateDigest := func(execCtx context.Context, pgQuery, mysqlQuery string, pgArgs, mysqlArgs []any) (int64, error) {
+	// As in ProcessNextDecisionNotice: a retry after send reuses the first
+	// attempt's outcome instead of posting twice.
+	var messageID string
+	var sent, skipped bool
+	var sentTotal int
+	err = s.retryTx(ctx, func() error {
+		found = false
+		tx, err := s.db().Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		updateDigest := func(execCtx context.Context, pgQuery, mysqlQuery string, pgArgs, mysqlArgs []any) (int64, error) {
+			if dialectFor(tx) == mysqlDialect {
+				return tx.Exec(execCtx, mysqlQuery, mysqlArgs...)
+			}
+			return tx.Exec(execCtx, pgQuery, pgArgs...)
+		}
+		insertArgs := []any{day, now}
 		if dialectFor(tx) == mysqlDialect {
-			return tx.Exec(execCtx, mysqlQuery, mysqlArgs...)
+			insertArgs = []any{day, now, now}
 		}
-		return tx.Exec(execCtx, pgQuery, pgArgs...)
-	}
-	insertArgs := []any{day, now}
-	if dialectFor(tx) == mysqlDialect {
-		insertArgs = []any{day, now, now}
-	}
-	if _, err = tx.Exec(ctx, sqlFor(tx, `INSERT INTO decision_notify_digest(day,state,next_attempt_at,created_at) VALUES($1::date,'pending',$2,$2) ON CONFLICT(day) DO NOTHING`, `INSERT INTO decision_notify_digest(day,state,next_attempt_at,created_at) VALUES(?,'pending',?,?) ON DUPLICATE KEY UPDATE day=day`), insertArgs...); err != nil {
-		return false, nil, err
-	}
-	var state string
-	var attempts int
-	var next time.Time
-	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT state,attempts,next_attempt_at FROM decision_notify_digest WHERE day=$1::date FOR UPDATE SKIP LOCKED`, `SELECT state,attempts,next_attempt_at FROM decision_notify_digest WHERE day=? FOR UPDATE SKIP LOCKED`), day).Scan(&state, &attempts, &next)
-	if errors.Is(err, ErrNoRows) {
-		return false, nil, nil
-	}
-	if err != nil {
-		return false, nil, err
-	}
-	if state != "pending" || next.After(now) {
-		return false, nil, nil
-	}
-	digest := DecisionDigest{Day: day}
-	const stale = `d.status='open' AND (d.expires_at IS NULL OR d.expires_at>$1::timestamptz)
-		AND (d.snoozed_until IS NULL OR d.snoozed_until<=$1::timestamptz) AND d.created_at<$2::timestamptz`
-	cutoff := now.Add(-DecisionDigestAge)
-	staleQuery := sqlFor(tx, stale, `d.status='open' AND (d.expires_at IS NULL OR d.expires_at>?) AND (d.snoozed_until IS NULL OR d.snoozed_until<=?) AND d.created_at<?`)
-	staleArgs := []any{now, cutoff}
-	if dialectFor(tx) == mysqlDialect {
-		staleArgs = []any{now, now, cutoff}
-	}
-	if err = tx.QueryRow(ctx, `SELECT count(*) FROM decision_requests d WHERE `+staleQuery, staleArgs...).Scan(&digest.Total); err != nil {
-		return false, nil, err
-	}
-	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs FROM decision_requests d LEFT JOIN tasks t ON t.id=d.task_id
-		WHERE `+stale+` ORDER BY d.created_at ASC,d.id ASC LIMIT $3`, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs FROM decision_requests d LEFT JOIN tasks t ON t.id=d.task_id
-		WHERE `+staleQuery+` ORDER BY d.created_at ASC,d.id ASC LIMIT ?`), append(staleArgs, DecisionDigestMaxItems)...)
-	if err != nil {
-		return false, nil, err
-	}
-	for rows.Next() {
-		var x DecisionNotice
-		if err := scanDecisionNoticeRow(rows, &x, now); err != nil {
-			rows.Close()
-			return false, nil, err
+		if _, err = tx.Exec(ctx, sqlFor(tx, `INSERT INTO decision_notify_digest(day,state,next_attempt_at,created_at) VALUES($1::date,'pending',$2,$2) ON CONFLICT(day) DO NOTHING`, `INSERT INTO decision_notify_digest(day,state,next_attempt_at,created_at) VALUES(?,'pending',?,?) ON DUPLICATE KEY UPDATE day=day`), insertArgs...); err != nil {
+			return err
 		}
-		digest.Items = append(digest.Items, x)
-	}
-	rows.Close()
-	if err = rows.Err(); err != nil {
-		return false, nil, err
-	}
-	if digest.Total == 0 {
-		if _, err = updateDigest(ctx, `UPDATE decision_notify_digest SET state='empty',sent_at=$2 WHERE day=$1::date`, `UPDATE decision_notify_digest SET state='empty',sent_at=? WHERE day=?`, []any{day, now}, []any{now, day}); err != nil {
-			return true, nil, err
+		var state string
+		var attempts int
+		var next time.Time
+		err = tx.QueryRow(ctx, sqlFor(tx, `SELECT state,attempts,next_attempt_at FROM decision_notify_digest WHERE day=$1::date FOR UPDATE SKIP LOCKED`, `SELECT state,attempts,next_attempt_at FROM decision_notify_digest WHERE day=? FOR UPDATE SKIP LOCKED`), day).Scan(&state, &attempts, &next)
+		if errors.Is(err, ErrNoRows) {
+			return nil
 		}
-		return true, nil, tx.Commit(ctx)
-	}
-	messageID, sendErr := send(ctx, digest)
-	// send may have created the message: record the outcome even if ctx is
-	// canceled now (shutdown), or the next start would post it again.
-	settle, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), decisionSettleTimeout)
-	defer cancelSettle()
-	switch {
-	case errors.Is(sendErr, ErrDecisionNoticeSkipped):
-		sendErr = nil
-		_, err = updateDigest(settle, `UPDATE decision_notify_digest SET state='unsent',listed=$2 WHERE day=$1::date`, `UPDATE decision_notify_digest SET state='unsent',listed=? WHERE day=?`, []any{day, digest.Total}, []any{digest.Total, day})
-	case sendErr == nil:
-		_, err = updateDigest(settle, `UPDATE decision_notify_digest SET state='sent',listed=$2,message_id=$3,sent_at=$4,attempts=$5,last_error='' WHERE day=$1::date`, `UPDATE decision_notify_digest SET state='sent',listed=?,message_id=?,sent_at=?,attempts=?,last_error='' WHERE day=?`,
-			[]any{day, digest.Total, messageID, now, attempts + 1}, []any{digest.Total, messageID, now, attempts + 1, day})
-	default:
-		lastError := firstBytes(sendErr.Error(), deliveryErrorMaxBytes)
-		if attempts+1 >= decisionNoticeMaxAttempts || errors.Is(sendErr, ErrDecisionNoticeRejected) {
-			sendErr = fmt.Errorf("%w: digest %s: %w", ErrDecisionNoticeGaveUp, day.Format(time.DateOnly), sendErr)
-			_, err = updateDigest(settle, `UPDATE decision_notify_digest SET state='failed',attempts=$2,last_error=$3 WHERE day=$1::date`, `UPDATE decision_notify_digest SET state='failed',attempts=?,last_error=? WHERE day=?`, []any{day, attempts + 1, lastError}, []any{attempts + 1, lastError, day})
-		} else {
-			_, err = updateDigest(settle, `UPDATE decision_notify_digest SET attempts=$2,last_error=$3,next_attempt_at=$4 WHERE day=$1::date`, `UPDATE decision_notify_digest SET attempts=?,last_error=?,next_attempt_at=? WHERE day=?`,
-				[]any{day, attempts + 1, lastError, now.Add(deliveryBackoff(attempts))}, []any{attempts + 1, lastError, now.Add(deliveryBackoff(attempts)), day})
+		if err != nil {
+			return err
 		}
-	}
-	if err != nil {
-		return true, sendErr, err
-	}
-	return true, sendErr, tx.Commit(settle)
+		if state != "pending" || next.After(now) {
+			if sent {
+				found = true
+				if sendErr == nil {
+					sendErr = fmt.Errorf("decision digest %s sent but not settled: its row is no longer pending", day.Format(time.DateOnly))
+				}
+			}
+			return nil
+		}
+		digest := DecisionDigest{Day: day}
+		const stale = `d.status='open' AND (d.expires_at IS NULL OR d.expires_at>$1::timestamptz)
+			AND (d.snoozed_until IS NULL OR d.snoozed_until<=$1::timestamptz) AND d.created_at<$2::timestamptz`
+		cutoff := now.Add(-DecisionDigestAge)
+		staleQuery := sqlFor(tx, stale, `d.status='open' AND (d.expires_at IS NULL OR d.expires_at>?) AND (d.snoozed_until IS NULL OR d.snoozed_until<=?) AND d.created_at<?`)
+		staleArgs := []any{now, cutoff}
+		if dialectFor(tx) == mysqlDialect {
+			staleArgs = []any{now, now, cutoff}
+		}
+		if err = tx.QueryRow(ctx, `SELECT count(*) FROM decision_requests d WHERE `+staleQuery, staleArgs...).Scan(&digest.Total); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, sqlFor(tx, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs FROM decision_requests d LEFT JOIN tasks t ON t.id=d.task_id
+			WHERE `+stale+` ORDER BY d.created_at ASC,d.id ASC LIMIT $3`, `SELECT `+decisionRecordColumnsD+`,coalesce(t.title,''),t.refs FROM decision_requests d LEFT JOIN tasks t ON t.id=d.task_id
+			WHERE `+staleQuery+` ORDER BY d.created_at ASC,d.id ASC LIMIT ?`), append(staleArgs, DecisionDigestMaxItems)...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var x DecisionNotice
+			if err := scanDecisionNoticeRow(rows, &x, now); err != nil {
+				rows.Close()
+				return err
+			}
+			digest.Items = append(digest.Items, x)
+		}
+		rows.Close()
+		if err = rows.Err(); err != nil {
+			return err
+		}
+		if sent {
+			digest.Total = sentTotal
+		}
+		if !sent && digest.Total == 0 {
+			if _, err = updateDigest(ctx, `UPDATE decision_notify_digest SET state='empty',sent_at=$2 WHERE day=$1::date`, `UPDATE decision_notify_digest SET state='empty',sent_at=? WHERE day=?`, []any{day, now}, []any{now, day}); err != nil {
+				found = true
+				return err
+			}
+			found = true
+			return tx.Commit(ctx)
+		}
+		if !sent {
+			messageID, sendErr = send(ctx, digest)
+			sentTotal = digest.Total
+			sent = true
+		}
+		// send may have created the message: record the outcome even if ctx is
+		// canceled now (shutdown), or the next start would post it again.
+		settle, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), decisionSettleTimeout)
+		defer cancelSettle()
+		switch {
+		case skipped || errors.Is(sendErr, ErrDecisionNoticeSkipped):
+			// As in the notice path: the skip survives a retry, which sees sendErr cleared.
+			skipped, sendErr = true, nil
+			_, err = updateDigest(settle, `UPDATE decision_notify_digest SET state='unsent',listed=$2 WHERE day=$1::date`, `UPDATE decision_notify_digest SET state='unsent',listed=? WHERE day=?`, []any{day, digest.Total}, []any{digest.Total, day})
+		case sendErr == nil:
+			_, err = updateDigest(settle, `UPDATE decision_notify_digest SET state='sent',listed=$2,message_id=$3,sent_at=$4,attempts=$5,last_error='' WHERE day=$1::date`, `UPDATE decision_notify_digest SET state='sent',listed=?,message_id=?,sent_at=?,attempts=?,last_error='' WHERE day=?`,
+				[]any{day, digest.Total, messageID, now, attempts + 1}, []any{digest.Total, messageID, now, attempts + 1, day})
+		default:
+			lastError := firstBytes(sendErr.Error(), deliveryErrorMaxBytes)
+			if attempts+1 >= decisionNoticeMaxAttempts || errors.Is(sendErr, ErrDecisionNoticeRejected) {
+				sendErr = fmt.Errorf("%w: digest %s: %w", ErrDecisionNoticeGaveUp, day.Format(time.DateOnly), sendErr)
+				_, err = updateDigest(settle, `UPDATE decision_notify_digest SET state='failed',attempts=$2,last_error=$3 WHERE day=$1::date`, `UPDATE decision_notify_digest SET state='failed',attempts=?,last_error=? WHERE day=?`, []any{day, attempts + 1, lastError}, []any{attempts + 1, lastError, day})
+			} else {
+				_, err = updateDigest(settle, `UPDATE decision_notify_digest SET attempts=$2,last_error=$3,next_attempt_at=$4 WHERE day=$1::date`, `UPDATE decision_notify_digest SET attempts=?,last_error=?,next_attempt_at=? WHERE day=?`,
+					[]any{day, attempts + 1, lastError, now.Add(deliveryBackoff(attempts))}, []any{attempts + 1, lastError, now.Add(deliveryBackoff(attempts)), day})
+			}
+		}
+		if err != nil {
+			found = true
+			return err
+		}
+		found = true
+		return tx.Commit(settle)
+	})
+	return found, sendErr, err
 }
 
 // DecisionDigestState is the stored state of one day's digest.

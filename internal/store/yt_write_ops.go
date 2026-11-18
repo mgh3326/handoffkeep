@@ -171,6 +171,18 @@ func clipText(s string, n int) string {
 }
 
 func (l *YTWriteLedger) Prepare(ctx context.Context, now time.Time, n ytwrite.NewOp) (ytwrite.Op, bool, error) {
+	var out ytwrite.Op
+	var created bool
+	err := l.s.retryTx(ctx, func() error {
+		var err error
+		out, created, err = l.prepareOnce(ctx, now, n)
+		return err
+	})
+	return out, created, err
+}
+
+// prepareOnce is one attempt of Prepare's transaction.
+func (l *YTWriteLedger) prepareOnce(ctx context.Context, now time.Time, n ytwrite.NewOp) (ytwrite.Op, bool, error) {
 	tx, release, err := l.s.begin(ctx)
 	if err != nil {
 		return ytwrite.Op{}, false, err
@@ -277,6 +289,18 @@ func (l *YTWriteLedger) ByID(ctx context.Context, id int64) (ytwrite.Op, error) 
 }
 
 func (l *YTWriteLedger) Claim(ctx context.Context, now time.Time, id int64) (ytwrite.Op, ytwrite.ClaimOutcome, error) {
+	var out ytwrite.Op
+	var outcome ytwrite.ClaimOutcome
+	err := l.s.retryTx(ctx, func() error {
+		var err error
+		out, outcome, err = l.claimOnce(ctx, now, id)
+		return err
+	})
+	return out, outcome, err
+}
+
+// claimOnce is one attempt of Claim's transaction.
+func (l *YTWriteLedger) claimOnce(ctx context.Context, now time.Time, id int64) (ytwrite.Op, ytwrite.ClaimOutcome, error) {
 	tx, release, err := l.s.begin(ctx)
 	if err != nil {
 		return ytwrite.Op{}, "", err
@@ -435,6 +459,17 @@ func (l *YTWriteLedger) moveYTOp(ctx context.Context, what string, same ytwrite.
 }
 
 func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID string, maps []ytwrite.MapRow) (ytwrite.Op, error) {
+	var out ytwrite.Op
+	err := l.s.retryTx(ctx, func() error {
+		var err error
+		out, err = l.applyOnce(ctx, now, id, ytID, maps)
+		return err
+	})
+	return out, err
+}
+
+// applyOnce is one attempt of Apply's transaction.
+func (l *YTWriteLedger) applyOnce(ctx context.Context, now time.Time, id int64, ytID string, maps []ytwrite.MapRow) (ytwrite.Op, error) {
 	tx, release, err := l.s.begin(ctx)
 	if err != nil {
 		return ytwrite.Op{}, err

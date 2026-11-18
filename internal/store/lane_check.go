@@ -438,6 +438,20 @@ func (s *Store) laneCheckLooked(ctx context.Context, q rowQuerier, c LaneCheck) 
 // repeated run inside a bucket writes nothing new. It returns how many rows
 // this call wrote.
 func (s *Store) RunLaneCheck(ctx context.Context, now time.Time) (int, error) {
+	var wrote int
+	err := s.retryTx(ctx, func() error {
+		var err error
+		wrote, err = s.runLaneCheckOnce(ctx, now)
+		return err
+	})
+	return wrote, err
+}
+
+// runLaneCheckOnce is one whole RunLaneCheck pass (retried on MySQL after a
+// deadlock or lock-wait timeout). Its writes are outbox and look rows keyed by
+// deterministic event ids, and no send happens inside it, so a retry that
+// repeats them writes nothing new.
+func (s *Store) runLaneCheckOnce(ctx context.Context, now time.Time) (int, error) {
 	now = now.UTC()
 	checks, err := s.LaneChecks(ctx, now)
 	if err != nil {
@@ -503,6 +517,20 @@ const laneLookColumns = `id,lane,notice_event_id,findings_hash,note,actor,create
 // check skips the lane while its findings still hash to that value. A repeat of
 // the same (lane, notice) changes nothing.
 func (s *Store) RecordLaneLook(ctx context.Context, lane, noticeEventID, note, actor string, now time.Time) (LaneLook, bool, error) {
+	var look LaneLook
+	var changed bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		look, changed, err = s.recordLaneLookOnce(ctx, lane, noticeEventID, note, actor, now)
+		return err
+	})
+	return look, changed, err
+}
+
+// recordLaneLookOnce is one whole RecordLaneLook call (retried on MySQL after a
+// deadlock or lock-wait timeout). Its only write is one lane_looks row keyed by
+// (lane, notice), so a retry that repeats it finds the row or inserts it once.
+func (s *Store) recordLaneLookOnce(ctx context.Context, lane, noticeEventID, note, actor string, now time.Time) (LaneLook, bool, error) {
 	lane = strings.TrimSpace(lane)
 	noticeEventID = strings.TrimSpace(noticeEventID)
 	note = strings.TrimSpace(note)

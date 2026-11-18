@@ -155,55 +155,56 @@ GROUP BY w.name`, names, repos, since)
 // to operator-desk with event_id "deploy-lag-<service>-<YYYY-MM-DD>" (idempotent ON CONFLICT).
 // Returns the number of new notifications enqueued.
 func (s *Store) EnqueueDeployLagNotices(ctx context.Context, now time.Time) (int, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return s.enqueueDeployLagNoticesMySQL(ctx, now)
-	}
-
-	now = now.UTC()
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback(ctx)
-
-	// Take transaction advisory lock to serialize passes
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('deploy_lag_notices', 0))`); err != nil {
-		return 0, err
-	}
-
-	services, err := listDeployServices(ctx, pgTransaction{tx})
-	if err != nil {
-		return 0, err
-	}
-
-	lastDeploys, err := readProjectLastSuccessfulDeploysTx(ctx, tx)
-	if err != nil {
-		return 0, err
-	}
-
-	enqueued := 0
-	for _, svc := range services {
-		if !svc.Active {
-			continue
+	var out int
+	rerr := s.retryTx(ctx, func() error {
+		if s != nil && s.dialect == mysqlDialect {
+			var err error
+			out, err = s.enqueueDeployLagNoticesMySQL(ctx, now)
+			return err
 		}
-		since, ok := lastDeploys[svc.Name]
-		st, err := deployLagStatusTx(ctx, pgTransaction{tx}, svc, since, ok)
+		now = now.UTC()
+		tx, err := s.pool.Begin(ctx)
 		if err != nil {
-			return 0, err
+			return err
 		}
-		if !st.Lagging {
-			continue
+		defer tx.Rollback(ctx)
+		// Take transaction advisory lock to serialize passes
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('deploy_lag_notices', 0))`); err != nil {
+			return err
 		}
-		eventID := DeployLagNoticeEventID(svc.Name, now)
-		text := DeployLagNoticeText(svc.Name, st.LagCount)
-		inserted, err := insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDeployLag, "operator-desk", eventID, text, now)
+		services, err := listDeployServices(ctx, pgTransaction{tx})
 		if err != nil {
-			return 0, err
+			return err
 		}
-		if inserted {
-			enqueued++
+		lastDeploys, err := readProjectLastSuccessfulDeploysTx(ctx, tx)
+		if err != nil {
+			return err
 		}
-	}
-
-	return enqueued, tx.Commit(ctx)
+		enqueued := 0
+		for _, svc := range services {
+			if !svc.Active {
+				continue
+			}
+			since, ok := lastDeploys[svc.Name]
+			st, err := deployLagStatusTx(ctx, pgTransaction{tx}, svc, since, ok)
+			if err != nil {
+				return err
+			}
+			if !st.Lagging {
+				continue
+			}
+			eventID := DeployLagNoticeEventID(svc.Name, now)
+			text := DeployLagNoticeText(svc.Name, st.LagCount)
+			inserted, err := insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDeployLag, "operator-desk", eventID, text, now)
+			if err != nil {
+				return err
+			}
+			if inserted {
+				enqueued++
+			}
+		}
+		out = enqueued
+		return tx.Commit(ctx)
+	})
+	return out, rerr
 }

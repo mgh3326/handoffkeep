@@ -223,6 +223,17 @@ func ytLinkPeerEdgesTx(ctx context.Context, tx transaction, tenant string, write
 }
 
 func (l *YTWriteLedger) PlanLinks(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, cur []ytwrite.IssueLink) (ytwrite.LinkPlan, error) {
+	var out ytwrite.LinkPlan
+	err := l.s.retryTx(ctx, func() error {
+		var err error
+		out, err = l.planLinksOnce(ctx, now, id, f, cur)
+		return err
+	})
+	return out, err
+}
+
+// planLinksOnce is one attempt of PlanLinks's transaction.
+func (l *YTWriteLedger) planLinksOnce(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, cur []ytwrite.IssueLink) (ytwrite.LinkPlan, error) {
 	now = now.UTC()
 	tx, release, err := l.s.begin(ctx)
 	if err != nil {
@@ -374,6 +385,13 @@ func (l *YTWriteLedger) LatestLinkPlan(ctx context.Context, id int64) (ytwrite.L
 }
 
 func (l *YTWriteLedger) MarkLinkStep(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, step int) error {
+	return l.s.retryTx(ctx, func() error {
+		return l.markLinkStepOnce(ctx, now, id, f, step)
+	})
+}
+
+// markLinkStepOnce is one attempt of MarkLinkStep's transaction.
+func (l *YTWriteLedger) markLinkStepOnce(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, step int) error {
 	tx, release, err := l.s.begin(ctx)
 	if err != nil {
 		return err
@@ -408,6 +426,17 @@ func (l *YTWriteLedger) MarkLinkStep(ctx context.Context, now time.Time, id int6
 }
 
 func (l *YTWriteLedger) SettleLinks(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, st ytwrite.LinkSettlement) (ytwrite.Op, error) {
+	var out ytwrite.Op
+	err := l.s.retryTx(ctx, func() error {
+		var err error
+		out, err = l.settleLinksOnce(ctx, now, id, f, st)
+		return err
+	})
+	return out, err
+}
+
+// settleLinksOnce is one attempt of SettleLinks's transaction.
+func (l *YTWriteLedger) settleLinksOnce(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, st ytwrite.LinkSettlement) (ytwrite.Op, error) {
 	now = now.UTC()
 	tx, release, err := l.s.begin(ctx)
 	if err != nil {
@@ -523,41 +552,50 @@ func settleYTOpTx(ctx context.Context, tx transaction, id int64, postgres, mysql
 }
 
 func (l *YTWriteLedger) LeaseLinkRecovery(ctx context.Context, now time.Time, id int64, reconciles int, until time.Time) (int, bool, error) {
-	if l.s.dialect == mysqlDialect {
-		// No RETURNING: the increment and the read of its value share one
-		// transaction, so they see the same row (hk 5077).
-		tx, release, err := l.s.begin(ctx)
-		if err != nil {
-			return 0, false, err
-		}
-		defer release()
-		defer tx.Rollback(ctx)
-		n, err := tx.Exec(ctx, `UPDATE yt_write_ops SET next_attempt_at=?, reconciles=reconciles+1, reason=?
-			WHERE id=? AND state='remote_unknown' AND next_attempt_at <= ? AND reconciles=?`,
-			until.UTC(), ytwrite.ReasonLinkRecovery, id, now.UTC(), reconciles)
-		if err != nil {
-			return 0, false, err
-		}
-		if n == 0 {
-			return 0, false, nil
-		}
-		var epoch int
-		if err := tx.QueryRow(ctx, `SELECT reconciles FROM yt_write_ops WHERE id=?`, id).Scan(&epoch); err != nil {
-			return 0, false, err
-		}
-		return epoch, true, tx.Commit(ctx)
-	}
 	var epoch int
-	err := l.s.db().QueryRow(ctx, `UPDATE yt_write_ops SET next_attempt_at=$4, reconciles=reconciles+1, reason=$5
-		WHERE id=$1 AND state='remote_unknown' AND next_attempt_at <= $2 AND reconciles=$3 RETURNING reconciles`,
-		id, now.UTC(), reconciles, until.UTC(), ytwrite.ReasonLinkRecovery).Scan(&epoch)
-	if errors.Is(err, ErrNoRows) {
-		return 0, false, nil
-	}
-	if err != nil {
-		return 0, false, err
-	}
-	return epoch, true, nil
+	var leased bool
+	err := l.s.retryTx(ctx, func() error {
+		// A retry must not inherit the lease of an attempt whose commit failed:
+		// only the attempt that commits reports a lease.
+		epoch, leased = 0, false
+		if l.s.dialect == mysqlDialect {
+			// No RETURNING: the increment and the read of its value share one
+			// transaction, so they see the same row (hk 5077).
+			tx, release, err := l.s.begin(ctx)
+			if err != nil {
+				return err
+			}
+			defer release()
+			defer tx.Rollback(ctx)
+			var n int64
+			n, err = tx.Exec(ctx, `UPDATE yt_write_ops SET next_attempt_at=?, reconciles=reconciles+1, reason=?
+				WHERE id=? AND state='remote_unknown' AND next_attempt_at <= ? AND reconciles=?`,
+				until.UTC(), ytwrite.ReasonLinkRecovery, id, now.UTC(), reconciles)
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				return nil
+			}
+			if err := tx.QueryRow(ctx, `SELECT reconciles FROM yt_write_ops WHERE id=?`, id).Scan(&epoch); err != nil {
+				return err
+			}
+			leased = true
+			return tx.Commit(ctx)
+		}
+		err := l.s.db().QueryRow(ctx, `UPDATE yt_write_ops SET next_attempt_at=$4, reconciles=reconciles+1, reason=$5
+			WHERE id=$1 AND state='remote_unknown' AND next_attempt_at <= $2 AND reconciles=$3 RETURNING reconciles`,
+			id, now.UTC(), reconciles, until.UTC(), ytwrite.ReasonLinkRecovery).Scan(&epoch)
+		if errors.Is(err, ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		leased = true
+		return nil
+	})
+	return epoch, leased, err
 }
 
 func (l *YTWriteLedger) LinkRecords(ctx context.Context, tenant, issueID string) (ytwrite.IssueLinkRecords, error) {

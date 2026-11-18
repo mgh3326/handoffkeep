@@ -244,6 +244,17 @@ func (s *Store) ytFeedCursorCreateTx(ctx context.Context, tx transaction, consum
 // design lane through); the cursor stays until an operator or the backfill
 // (Y3) moves it.
 func (s *Store) runYTFeedConsumer(ctx context.Context, c ytFeedConsumer, limit int, now time.Time) (YTFeedPass, error) {
+	var out YTFeedPass
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.runYTFeedConsumerOnce(ctx, c, limit, now)
+		return err
+	})
+	return out, err
+}
+
+// runYTFeedConsumerOnce is one attempt of runYTFeedConsumer's transaction.
+func (s *Store) runYTFeedConsumerOnce(ctx context.Context, c ytFeedConsumer, limit int, now time.Time) (YTFeedPass, error) {
 	pass := YTFeedPass{Consumer: c.name}
 	if limit < 1 {
 		return pass, nil

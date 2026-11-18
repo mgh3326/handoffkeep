@@ -721,6 +721,17 @@ func (s *Store) RecordSessionDecision(ctx context.Context, in SessionDecisionInp
 	if s != nil && s.dialect == mysqlDialect {
 		return s.recordSessionDecisionMySQL(ctx, in, now, audit, ref, b)
 	}
+	var out SessionDecisionResult
+	rerr := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.recordSessionDecisionPG(ctx, in, now, audit, ref, b)
+		return err
+	})
+	return out, rerr
+}
+
+// recordSessionDecisionPG is RecordSessionDecision's PostgreSQL transaction.
+func (s *Store) recordSessionDecisionPG(ctx context.Context, in SessionDecisionInput, now time.Time, audit *MCPWrite, ref string, b []byte) (SessionDecisionResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return SessionDecisionResult{}, err
@@ -747,7 +758,7 @@ func (s *Store) RecordSessionDecision(ctx context.Context, in SessionDecisionInp
 	err = tx.QueryRow(ctx, `INSERT INTO decision_requests(source,source_ref,lane,question,reading,grounds,status,answer,answered_by,answered_at,created_at,updated_at)
 		VALUES($1,$2,$3,$4,$5,$6::jsonb,'answered',$7,$8,$9,$10,$10)
 		ON CONFLICT(source,source_ref) DO NOTHING RETURNING id`,
-		DecisionSourceSessionChat, ref, in.Lane, in.Reading, in.Reading, string(b), in.Quote, in.By, decidedAt, now).Scan(&id)
+		DecisionSourceSessionChat, ref, in.Lane, in.Reading, in.Reading, string(b), in.Quote, in.By, in.DecidedAt, now).Scan(&id)
 	if errors.Is(err, ErrNoRows) {
 		var existing DecisionRecord
 		if err := scanDecisionRecord(tx.QueryRow(ctx, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE source=$1 AND source_ref=$2`, DecisionSourceSessionChat, ref), &existing, now); err != nil {
@@ -809,35 +820,38 @@ func (s *Store) SnoozeDecisionRecord(ctx context.Context, id int64, until, now t
 		return DecisionRecord{}, errors.New("invalid decision request snooze")
 	}
 	now = now.UTC()
-	tx, release, err := s.begin(ctx)
-	if err != nil {
-		return DecisionRecord{}, err
-	}
-	defer release()
-	defer tx.Rollback(ctx)
-	if s.dialect == mysqlDialect {
-		var previous *time.Time
-		if err := tx.QueryRow(ctx, `SELECT snoozed_until FROM decision_requests WHERE id=? FOR UPDATE`, id).Scan(&previous); err != nil {
-			if errors.Is(err, ErrNoRows) {
-				return DecisionRecord{}, ErrDecisionRecordNotFound
-			}
-			return DecisionRecord{}, err
-		}
-		affected, err := tx.Exec(ctx, `UPDATE decision_requests SET snoozed_until=?,updated_at=? WHERE id=? AND status='open'`, until.UTC(), now.UTC(), id)
+	var out DecisionRecord
+	err := s.retryTx(ctx, func() error {
+		tx, release, err := s.begin(ctx)
 		if err != nil {
-			return DecisionRecord{}, err
+			return err
 		}
-		if affected == 0 {
-			return DecisionRecord{}, ErrDecisionRecordNotOpen
+		defer release()
+		defer tx.Rollback(ctx)
+		if s.dialect == mysqlDialect {
+			var previous *time.Time
+			if err := tx.QueryRow(ctx, `SELECT snoozed_until FROM decision_requests WHERE id=? FOR UPDATE`, id).Scan(&previous); err != nil {
+				if errors.Is(err, ErrNoRows) {
+					return ErrDecisionRecordNotFound
+				}
+				return err
+			}
+			affected, err := tx.Exec(ctx, `UPDATE decision_requests SET snoozed_until=?,updated_at=? WHERE id=? AND status='open'`, until.UTC(), now.UTC(), id)
+			if err != nil {
+				return err
+			}
+			if affected == 0 {
+				return ErrDecisionRecordNotOpen
+			}
+		} else if _, err := snoozeDecisionRecordTx(ctx, pgxTx(tx), id, until, now); err != nil {
+			return err
 		}
-	} else if _, err := snoozeDecisionRecordTx(ctx, pgxTx(tx), id, until, now); err != nil {
-		return DecisionRecord{}, err
-	}
-	var x DecisionRecord
-	if err := scanDecisionRecord(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id=$1`, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id=?`), id), &x, now); err != nil {
-		return DecisionRecord{}, err
-	}
-	return x, tx.Commit(ctx)
+		if err := scanDecisionRecord(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id=$1`, `SELECT `+decisionRecordColumns+` FROM decision_requests WHERE id=?`), id), &out, now); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	})
+	return out, err
 }
 
 // snoozeDecisionRecordTx is SnoozeDecisionRecord's write, in the caller's

@@ -58,36 +58,40 @@ func scanDeployService(row pgx.Row, x *DeployService) error {
 }
 
 func (s *Store) PutDeployService(ctx context.Context, x DeployService) (DeployService, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return s.putDeployServiceMySQL(ctx, x)
-	}
-
-	if err := checkDeployService(x); err != nil {
-		return DeployService{}, err
-	}
-	// Serialize prefix claims before checking overlap, including concurrent puts.
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return DeployService{}, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('deploy_services_prefixes', 0))`); err != nil {
-		return DeployService{}, err
-	}
-	var conflict bool
-	err = tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM deploy_services s, unnest(s.record_prefixes) AS existing_prefix(prefix), unnest($2::text[]) AS proposed(prefix) WHERE s.active AND s.name <> $1 AND (strpos(existing_prefix.prefix,proposed.prefix)=1 OR strpos(proposed.prefix,existing_prefix.prefix)=1))`, x.Name, x.RecordPrefixes).Scan(&conflict)
-	if err != nil {
-		return DeployService{}, err
-	}
-	if conflict {
-		return DeployService{}, fmt.Errorf("%w: record prefix overlaps another active service", ErrInvalidDeployService)
-	}
 	var out DeployService
-	err = scanDeployService(tx.QueryRow(ctx, `INSERT INTO deploy_services(name,repo,record_prefixes,active,created_at,updated_at) VALUES($1,$2,$3,true,now(),now()) ON CONFLICT(name) DO UPDATE SET repo=EXCLUDED.repo,record_prefixes=EXCLUDED.record_prefixes,active=true,updated_at=EXCLUDED.updated_at RETURNING `+deployServiceColumns, x.Name, x.Repo, x.RecordPrefixes), &out)
-	if err != nil {
-		return DeployService{}, err
-	}
-	return out, tx.Commit(ctx)
+	rerr := s.retryTx(ctx, func() error {
+		if s != nil && s.dialect == mysqlDialect {
+			var err error
+			out, err = s.putDeployServiceMySQL(ctx, x)
+			return err
+		}
+		if err := checkDeployService(x); err != nil {
+			return err
+		}
+		// Serialize prefix claims before checking overlap, including concurrent puts.
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('deploy_services_prefixes', 0))`); err != nil {
+			return err
+		}
+		var conflict bool
+		err = tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM deploy_services s, unnest(s.record_prefixes) AS existing_prefix(prefix), unnest($2::text[]) AS proposed(prefix) WHERE s.active AND s.name <> $1 AND (strpos(existing_prefix.prefix,proposed.prefix)=1 OR strpos(proposed.prefix,existing_prefix.prefix)=1))`, x.Name, x.RecordPrefixes).Scan(&conflict)
+		if err != nil {
+			return err
+		}
+		if conflict {
+			return fmt.Errorf("%w: record prefix overlaps another active service", ErrInvalidDeployService)
+		}
+		err = scanDeployService(tx.QueryRow(ctx, `INSERT INTO deploy_services(name,repo,record_prefixes,active,created_at,updated_at) VALUES($1,$2,$3,true,now(),now()) ON CONFLICT(name) DO UPDATE SET repo=EXCLUDED.repo,record_prefixes=EXCLUDED.record_prefixes,active=true,updated_at=EXCLUDED.updated_at RETURNING `+deployServiceColumns, x.Name, x.Repo, x.RecordPrefixes), &out)
+		if err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	})
+	return out, rerr
 }
 
 func (s *Store) ListDeployServices(ctx context.Context) ([]DeployService, error) {
@@ -114,17 +118,21 @@ func listDeployServices(ctx context.Context, db rowsQuerier) ([]DeployService, e
 }
 
 func (s *Store) DeactivateDeployService(ctx context.Context, name string) (DeployService, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return s.deactivateDeployServiceMySQL(ctx, name)
-	}
-
-	if !validName(name) {
-		return DeployService{}, fmt.Errorf("%w: name must match [A-Za-z0-9._-]{1,128}", ErrInvalidDeployService)
-	}
 	var out DeployService
-	err := scanDeployService(s.pool.QueryRow(ctx, `UPDATE deploy_services SET active=false,updated_at=now() WHERE name=$1 RETURNING `+deployServiceColumns, name), &out)
-	if errors.Is(err, ErrNoRows) {
-		return DeployService{}, ErrServiceNotFound
-	}
-	return out, err
+	rerr := s.retryTx(ctx, func() error {
+		if s != nil && s.dialect == mysqlDialect {
+			var err error
+			out, err = s.deactivateDeployServiceMySQL(ctx, name)
+			return err
+		}
+		if !validName(name) {
+			return fmt.Errorf("%w: name must match [A-Za-z0-9._-]{1,128}", ErrInvalidDeployService)
+		}
+		err := scanDeployService(s.pool.QueryRow(ctx, `UPDATE deploy_services SET active=false,updated_at=now() WHERE name=$1 RETURNING `+deployServiceColumns, name), &out)
+		if errors.Is(err, ErrNoRows) {
+			return ErrServiceNotFound
+		}
+		return err
+	})
+	return out, rerr
 }

@@ -182,7 +182,7 @@ func (s *Store) catchUpYTComments(ctx context.Context, limit int, skip []int64, 
 	// needs no second pool connection, so it cannot wait on itself in a
 	// pool of one.
 	for _, c := range comments {
-		op, prepared, source, err := s.catchUpYTComment(ctx, lock, c)
+		op, prepared, source, err := s.catchUpYTComment(ctx, lock, c, issueOnly)
 		if err != nil {
 			return out, err
 		}
@@ -201,11 +201,13 @@ func (s *Store) catchUpYTComments(ctx context.Context, limit int, skip []int64, 
 // catchUpYTComment is one comment of a catch-up pass, in its own transaction
 // on the lock's own connection (the pass holds the sync lock: MySQL's is a
 // session lock, so the transaction must run on that session).
-func (s *Store) catchUpYTComment(ctx context.Context, lock *YouTrackSyncLock, c TaskComment) (op ytwrite.Op, prepared bool, source string, err error) {
+func (s *Store) catchUpYTComment(ctx context.Context, lock *YouTrackSyncLock, c TaskComment, issueOnly bool) (op ytwrite.Op, prepared bool, source string, err error) {
 	if lock.mysqlConn != nil {
-		err = mysqlWriteTransactionOnce(ctx, lock.mysqlConn, func(tx transaction) error {
+		// The pass holds the session lock, so the retry re-runs on the same
+		// connection through the one retry decision point (retryTransaction).
+		err = s.retryPinnedTransaction(ctx, lock.mysqlConn, func(tx transaction) error {
 			var e error
-			op, prepared, source, e = catchUpYTCommentTx(ctx, tx, c)
+			op, prepared, source, e = catchUpYTCommentTx(ctx, tx, c, issueOnly)
 			return e
 		})
 		return op, prepared, source, err
@@ -215,7 +217,7 @@ func (s *Store) catchUpYTComment(ctx context.Context, lock *YouTrackSyncLock, c 
 		return ytwrite.Op{}, false, "", err
 	}
 	defer tx.Rollback(ctx)
-	op, prepared, source, err = catchUpYTCommentTx(ctx, pgTransaction{tx}, c)
+	op, prepared, source, err = catchUpYTCommentTx(ctx, pgTransaction{tx}, c, issueOnly)
 	if err != nil {
 		return ytwrite.Op{}, false, "", err
 	}
@@ -227,7 +229,7 @@ func (s *Store) catchUpYTComment(ctx context.Context, lock *YouTrackSyncLock, c 
 // writer linked the comment first (an op link or a youtrack_comment_links
 // row) or the task has no binding; source is the
 // disagreeing source when the binding is ambiguous.
-func catchUpYTCommentTx(ctx context.Context, tx transaction, c TaskComment) (ytwrite.Op, bool, string, error) {
+func catchUpYTCommentTx(ctx context.Context, tx transaction, c TaskComment, issueOnly bool) (ytwrite.Op, bool, string, error) {
 	// FOR SHARE on the comments authority row, as the audit enqueue reads it
 	// (EnqueueYTAuditComment): a switch to youtrack commits before this read
 	// or after this transaction, never inside it.
@@ -255,6 +257,16 @@ func catchUpYTCommentTx(ctx context.Context, tx transaction, c TaskComment) (ytw
 		return ytwrite.Op{}, false, "", err
 	}
 	if owned {
+		return ytwrite.Op{}, false, "", nil
+	}
+	// Recheck the binding under the lane lock, on every attempt: a rebind after
+	// the candidate scan may have moved comments_from or the origin, and the
+	// comment must still be one this pass is allowed to copy.
+	b, found, err := readYTBinding(ctx, tx, c.TaskID)
+	if err != nil {
+		return ytwrite.Op{}, false, "", err
+	}
+	if !found || c.ID <= b.CommentsFrom || (issueOnly && b.Origin != YTBindingOpApplied && b.Origin != YTBindingAutoVerified) {
 		return ytwrite.Op{}, false, "", nil
 	}
 	op, prepared, source, err := ytCommentOnOpTx(ctx, tx, c, time.Now().UTC())

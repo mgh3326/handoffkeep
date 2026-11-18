@@ -203,6 +203,17 @@ func skipNotificationArgs(d storeDialect, before time.Time, reason string) []any
 // skipped row can never gain a receipt: sending is what skipping ruled out,
 // so it answers ErrOutboxConflict like any other disagreeing receipt.
 func (s *Store) MarkNotificationSent(ctx context.Context, eventID string, hubRowID int64) (NotificationOutbox, error) {
+	var out NotificationOutbox
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.markNotificationSentOnce(ctx, eventID, hubRowID)
+		return err
+	})
+	return out, err
+}
+
+// markNotificationSentOnce is one attempt of MarkNotificationSent's write.
+func (s *Store) markNotificationSentOnce(ctx context.Context, eventID string, hubRowID int64) (NotificationOutbox, error) {
 	if eventID == "" || len(eventID) > 256 || !validText(eventID, 256) || hubRowID < 1 {
 		return NotificationOutbox{}, errors.New("invalid notification mark")
 	}
@@ -235,6 +246,17 @@ func (s *Store) MarkNotificationSent(ctx context.Context, eventID string, hubRow
 // applied row is a conflict. An ack for a row the hub has not accepted yet is
 // ErrOutboxNotReceived: applied never precedes received.
 func (s *Store) MarkNotificationApplied(ctx context.Context, eventID, by string) (NotificationOutbox, error) {
+	var out NotificationOutbox
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.markNotificationAppliedOnce(ctx, eventID, by)
+		return err
+	})
+	return out, err
+}
+
+// markNotificationAppliedOnce is one attempt of MarkNotificationApplied's write.
+func (s *Store) markNotificationAppliedOnce(ctx context.Context, eventID, by string) (NotificationOutbox, error) {
 	if eventID == "" || !validText(eventID, 256) || by == "" || !validText(by, 128) {
 		return NotificationOutbox{}, errors.New("invalid notification ack")
 	}

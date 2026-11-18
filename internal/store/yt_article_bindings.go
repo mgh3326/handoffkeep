@@ -339,6 +339,17 @@ var ytSHA256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // can change between the comparison and the insert; then the new binding
 // row (a concurrent insert of the same key waits on the unique index).
 func (s *Store) AddYTArticleBinding(ctx context.Context, b YTArticleBinding, verified YTArticleCandidate) (YTArticleBinding, error) {
+	var out YTArticleBinding
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.addYTArticleBindingOnce(ctx, b, verified)
+		return err
+	})
+	return out, err
+}
+
+// addYTArticleBindingOnce is one attempt of AddYTArticleBinding's transaction.
+func (s *Store) addYTArticleBindingOnce(ctx context.Context, b YTArticleBinding, verified YTArticleCandidate) (YTArticleBinding, error) {
 	if b.DocumentID < 1 || verified.DocumentID != b.DocumentID || b.Tenant == "" || len(b.Tenant) > 255 || b.ArticleID == "" || len(b.ArticleID) > 64 ||
 		len(b.ArticleReadable) > 64 || b.ProjectID == "" || len(b.ProjectID) > 64 || b.Part < 0 || b.Generation != 0 ||
 		(b.ContentSHA != "" && !ytSHA256Hex.MatchString(b.ContentSHA)) || b.BoundBy == "" || !validText(b.BoundBy, 200) {

@@ -608,6 +608,17 @@ func (s *Store) ListJobsByTask(ctx context.Context, taskID int64, limit int) ([]
 // skills and the once-only report pair), and result is write-once together
 // with state=completed — violations are ErrJobStateConflict.
 func (s *Store) UpdateJob(ctx context.Context, id string, u JobUpdate) (Job, error) {
+	var out Job
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.updateJobOnce(ctx, id, u)
+		return err
+	})
+	return out, err
+}
+
+// updateJobOnce is one attempt of UpdateJob's transaction.
+func (s *Store) updateJobOnce(ctx context.Context, id string, u JobUpdate) (Job, error) {
 	var j Job
 	if !ValidJobID(id) {
 		return j, errors.New("invalid job id")

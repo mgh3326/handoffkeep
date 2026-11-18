@@ -187,6 +187,20 @@ func DriftSummaryText(day string, ds []DriftLaneDelivery, drift TaskDrift, hygie
 // visible. Event ids are deterministic per lane and day, so a repeated run
 // writes nothing new. It returns how many rows this call wrote.
 func (s *Store) EnqueueDriftNotices(ctx context.Context, now time.Time, drift TaskDrift, hygiene TaskHygieneReport) (int, error) {
+	var wrote int
+	err := s.retryTx(ctx, func() error {
+		var err error
+		wrote, err = s.enqueueDriftNoticesOnce(ctx, now, drift, hygiene)
+		return err
+	})
+	return wrote, err
+}
+
+// enqueueDriftNoticesOnce is one whole EnqueueDriftNotices transaction (retried
+// on MySQL after a deadlock or lock-wait timeout). Its writes are outbox rows
+// keyed by deterministic event ids and no send happens inside it, so a retry
+// that repeats them writes nothing new.
+func (s *Store) enqueueDriftNoticesOnce(ctx context.Context, now time.Time, drift TaskDrift, hygiene TaskHygieneReport) (int, error) {
 	now = now.UTC()
 	day := DriftDayOf(now)
 	ds := GroupDriftForDelivery(drift)

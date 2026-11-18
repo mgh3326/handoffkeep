@@ -173,54 +173,62 @@ func (s *Store) UpsertChatQuestion(ctx context.Context, x ChatQuestion) (ChatQue
 	}
 	x.ConversationID = ChatConversationID
 	now := time.Now().UTC()
-	tx, release, err := s.begin(ctx)
-	if err != nil {
-		return x, false, err
-	}
-	defer release()
-	defer tx.Rollback(ctx)
+	var out ChatQuestion
 	var created bool
-	if s.dialect == mysqlDialect {
-		_, err = tx.Exec(ctx, `INSERT INTO chat_questions(id,conversation_id,lane,body,state,created_at,updated_at) VALUES(?,?,?,?, 'pending',?,?)`,
-			x.ID, x.ConversationID, x.Lane, x.Body, now, now)
-		if errors.Is(err, errUniqueViolation) {
-			err = nil
-			_, err = tx.Exec(ctx, `UPDATE chat_questions SET
-				revision=revision+IF(body<>? OR lane<>?,1,0),
-				answer_message_id=IF(body<>? OR lane<>?,NULL,answer_message_id),
-				lane=?,body=?,updated_at=? WHERE id=? AND conversation_id=?`,
-				x.Body, x.Lane, x.Body, x.Lane, x.Lane, x.Body, now, x.ID, x.ConversationID)
-			if err == nil {
-				var exists bool
-				err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chat_questions WHERE id=? AND conversation_id=?)`, x.ID, x.ConversationID).Scan(&exists)
-				if err == nil && !exists {
-					return x, false, ErrChatConversation
+	err := s.retryTx(ctx, func() error {
+		// created says what this attempt did: a retry that takes the update
+		// path must not inherit the insert of an attempt that rolled back.
+		created = false
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		if s.dialect == mysqlDialect {
+			_, err = tx.Exec(ctx, `INSERT INTO chat_questions(id,conversation_id,lane,body,state,created_at,updated_at) VALUES(?,?,?,?, 'pending',?,?)`,
+				x.ID, x.ConversationID, x.Lane, x.Body, now, now)
+			if errors.Is(err, errUniqueViolation) {
+				err = nil
+				_, err = tx.Exec(ctx, `UPDATE chat_questions SET
+					revision=revision+IF(body<>? OR lane<>?,1,0),
+					answer_message_id=IF(body<>? OR lane<>?,NULL,answer_message_id),
+					lane=?,body=?,updated_at=? WHERE id=? AND conversation_id=?`,
+					x.Body, x.Lane, x.Body, x.Lane, x.Lane, x.Body, now, x.ID, x.ConversationID)
+				if err == nil {
+					var exists bool
+					err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chat_questions WHERE id=? AND conversation_id=?)`, x.ID, x.ConversationID).Scan(&exists)
+					if err == nil && !exists {
+						return ErrChatConversation
+					}
 				}
+			} else if err == nil {
+				created = true
 			}
-		} else if err == nil {
-			created = true
+			if err == nil {
+				err = scanChatQuestion(tx.QueryRow(ctx, `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=?`, x.ID), &x)
+			}
+		} else {
+			err = scanChatQuestionCreated(tx.QueryRow(ctx, chatQuestionUpsert+`,(xmax=0) AS created`, x.ID, x.ConversationID, x.Lane, x.Body, now), &x, &created)
 		}
-		if err == nil {
-			err = scanChatQuestion(tx.QueryRow(ctx, `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=?`, x.ID), &x)
+		if errors.Is(err, ErrNoRows) {
+			return ErrChatConversation
 		}
-	} else {
-		err = scanChatQuestionCreated(tx.QueryRow(ctx, chatQuestionUpsert+`,(xmax=0) AS created`, x.ID, x.ConversationID, x.Lane, x.Body, now), &x, &created)
-	}
-	if errors.Is(err, ErrNoRows) {
-		return x, false, ErrChatConversation
-	}
-	if err != nil {
-		return x, false, err
-	}
-	if s.dialect == mysqlDialect {
-		err = mirrorChatQuestionMySQLTx(ctx, tx, x, created, now)
-	} else {
-		err = mirrorChatQuestionTx(ctx, pgxTx(tx), x, created, now)
-	}
-	if err != nil {
-		return x, false, err
-	}
-	return x, created, tx.Commit(ctx)
+		if err != nil {
+			return err
+		}
+		if s.dialect == mysqlDialect {
+			err = mirrorChatQuestionMySQLTx(ctx, tx, x, created, now)
+		} else {
+			err = mirrorChatQuestionTx(ctx, pgxTx(tx), x, created, now)
+		}
+		if err != nil {
+			return err
+		}
+		out = x
+		return tx.Commit(ctx)
+	})
+	return out, created, err
 }
 
 // mirrorChatQuestionTx keeps a question's decision record in step with an
@@ -277,48 +285,53 @@ func (s *Store) TransitionChatQuestion(ctx context.Context, id, to, by string) (
 	}
 	now := time.Now().UTC()
 	var x ChatQuestion
-	tx, release, err := s.begin(ctx)
-	if err != nil {
-		return ChatQuestion{}, err
-	}
-	defer release()
-	defer tx.Rollback(ctx)
-	if s.dialect == mysqlDialect {
-		var affected int64
-		affected, err = tx.Exec(ctx, `UPDATE chat_questions SET state=?,resolved_at=CASE WHEN ?='resolved' THEN ? ELSE resolved_at END,updated_at=? WHERE id=? AND state='pending'`, to, to, now, now, id)
-		if err == nil && affected == 0 {
-			err = ErrNoRows
-		} else if err == nil {
-			err = scanChatQuestion(tx.QueryRow(ctx, `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=? AND state=?`, id, to), &x)
+	var out ChatQuestion
+	err := s.retryTx(ctx, func() error {
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
 		}
-	} else {
-		err = scanChatQuestion(tx.QueryRow(ctx, `UPDATE chat_questions SET state=$2,resolved_at=CASE WHEN $2='resolved' THEN $3 ELSE resolved_at END,updated_at=$3 WHERE id=$1 AND state='pending' RETURNING `+chatQuestionColumns, id, to, now), &x)
-	}
-	if err == nil {
+		defer release()
+		defer tx.Rollback(ctx)
 		if s.dialect == mysqlDialect {
-			if to == "withdrawn" {
-				err = mysqlSupersedeDecisionTx(ctx, tx, []string{DecisionSourceChat}, id, "withdrawn", now)
-			} else {
-				_, err = tx.Exec(ctx, `UPDATE decision_requests SET status='answered',answer='',answered_by=?,answered_at=?,updated_at=? WHERE source='chat' AND source_ref=? AND status='open'`, by, now, now, id)
+			var affected int64
+			affected, err = tx.Exec(ctx, `UPDATE chat_questions SET state=?,resolved_at=CASE WHEN ?='resolved' THEN ? ELSE resolved_at END,updated_at=? WHERE id=? AND state='pending'`, to, to, now, now, id)
+			if err == nil && affected == 0 {
+				err = ErrNoRows
+			} else if err == nil {
+				err = scanChatQuestion(tx.QueryRow(ctx, `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=? AND state=?`, id, to), &x)
 			}
 		} else {
-			err = closeChatDecisionTx(ctx, pgxTx(tx), id, to, "", by, now)
+			err = scanChatQuestion(tx.QueryRow(ctx, `UPDATE chat_questions SET state=$2,resolved_at=CASE WHEN $2='resolved' THEN $3 ELSE resolved_at END,updated_at=$3 WHERE id=$1 AND state='pending' RETURNING `+chatQuestionColumns, id, to, now), &x)
 		}
-		if err != nil {
-			return ChatQuestion{}, err
+		if err == nil {
+			if s.dialect == mysqlDialect {
+				if to == "withdrawn" {
+					err = mysqlSupersedeDecisionTx(ctx, tx, []string{DecisionSourceChat}, id, "withdrawn", now)
+				} else {
+					_, err = tx.Exec(ctx, `UPDATE decision_requests SET status='answered',answer='',answered_by=?,answered_at=?,updated_at=? WHERE source='chat' AND source_ref=? AND status='open'`, by, now, now, id)
+				}
+			} else {
+				err = closeChatDecisionTx(ctx, pgxTx(tx), id, to, "", by, now)
+			}
+			if err != nil {
+				return err
+			}
+			out = x
+			return tx.Commit(ctx)
 		}
-		return x, tx.Commit(ctx)
-	}
-	if !errors.Is(err, ErrNoRows) {
-		return ChatQuestion{}, err
-	}
-	if err = scanChatQuestion(s.db().QueryRow(ctx, s.q(`SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=$1`, `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=?`), id), &x); err != nil {
-		if errors.Is(err, ErrNoRows) {
-			return ChatQuestion{}, ErrChatQuestionNotFound
+		if !errors.Is(err, ErrNoRows) {
+			return err
 		}
-		return ChatQuestion{}, err
-	}
-	return ChatQuestion{}, ErrChatQuestionConflict
+		if err = scanChatQuestion(s.db().QueryRow(ctx, s.q(`SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=$1`, `SELECT `+chatQuestionColumns+` FROM chat_questions WHERE id=?`), id), &x); err != nil {
+			if errors.Is(err, ErrNoRows) {
+				return ErrChatQuestionNotFound
+			}
+			return err
+		}
+		return ErrChatQuestionConflict
+	})
+	return out, err
 }
 
 // ListChatQuestions returns questions in id order, which matches creation
@@ -373,7 +386,27 @@ func (s *Store) CreateChatMessage(ctx context.Context, x ChatMessage) (ChatMessa
 
 // PostChatMessage commits the body, Q changes and relation snapshots together.
 // The event-key lookup happens before any Q mutation, including on replay.
+// Relations are read after the write retry has returned: a read that fails
+// after a legacy commit must not be retried as a second insert.
 func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (ChatMessage, bool, error) {
+	var out ChatMessage
+	var created bool
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, created, err = s.postChatMessageOnce(ctx, post)
+		return err
+	})
+	if err != nil {
+		return ChatMessage{}, false, err
+	}
+	if err := s.loadChatRelations(ctx, []*ChatMessage{&out}); err != nil {
+		return ChatMessage{}, false, err
+	}
+	return out, created, nil
+}
+
+// postChatMessageOnce is one attempt of PostChatMessage's transaction.
+func (s *Store) postChatMessageOnce(ctx context.Context, post ChatMessagePost) (ChatMessage, bool, error) {
 	m := post.Message
 	var err error
 	m.ConversationID, err = chatConversation(m.ConversationID)
@@ -479,9 +512,6 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 				return ChatMessage{}, false, ErrChatMessageConflict
 			}
 			if err := tx.Commit(ctx); err != nil {
-				return ChatMessage{}, false, err
-			}
-			if err := s.loadChatRelations(ctx, []*ChatMessage{&old}); err != nil {
 				return ChatMessage{}, false, err
 			}
 			return old, false, nil
@@ -643,9 +673,6 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return ChatMessage{}, false, err
-	}
-	if err := s.loadChatRelations(ctx, []*ChatMessage{&m}); err != nil {
 		return ChatMessage{}, false, err
 	}
 	return m, true, nil
@@ -862,6 +889,17 @@ func (s *Store) PruneChat(ctx context.Context, limit int) (int64, error) {
 	if limit < 1 || limit > ChatPruneMaxDelete {
 		limit = ChatPruneMaxDelete
 	}
+	var out int64
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.pruneChatOnce(ctx, cutoff, limit)
+		return err
+	})
+	return out, err
+}
+
+// pruneChatOnce is one attempt of PruneChat's transaction.
+func (s *Store) pruneChatOnce(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return 0, err

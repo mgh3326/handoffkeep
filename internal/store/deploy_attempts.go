@@ -332,87 +332,98 @@ func (s *Store) StartDeploy(ctx context.Context, in DeployStart) (Deploy, bool, 
 	if in.StartedAt != nil {
 		started = *in.StartedAt
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Deploy{}, false, err
-	}
-	defer tx.Rollback(ctx)
-	var svc Service
-	if err = scanService(tx.QueryRow(ctx, `SELECT `+serviceColumns+` FROM services WHERE name=$1`, in.Service), &svc); errors.Is(err, ErrNoRows) {
-		return Deploy{}, false, ErrServiceNotFound
-	} else if err != nil {
-		return Deploy{}, false, err
-	}
-	for _, t := range in.Targets {
-		if !containsString(svc.Targets, t) {
-			return Deploy{}, false, fmt.Errorf("invalid deploy: target %q is not a target of the service", t)
+	var out Deploy
+	var created bool
+	rerr := s.retryTx(ctx, func() error {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return err
 		}
-	}
-	var id int64
-	err = tx.QueryRow(ctx, `INSERT INTO deploys(attempt_id,service,targets,action,previous_ref,deployed_ref,state,started_at,job_id,approval_ref,source,payload_hash)
+		defer tx.Rollback(ctx)
+		var svc Service
+		if err = scanService(tx.QueryRow(ctx, `SELECT `+serviceColumns+` FROM services WHERE name=$1`, in.Service), &svc); errors.Is(err, ErrNoRows) {
+			return ErrServiceNotFound
+		} else if err != nil {
+			return err
+		}
+		for _, t := range in.Targets {
+			if !containsString(svc.Targets, t) {
+				return fmt.Errorf("invalid deploy: target %q is not a target of the service", t)
+			}
+		}
+		var id int64
+		err = tx.QueryRow(ctx, `INSERT INTO deploys(attempt_id,service,targets,action,previous_ref,deployed_ref,state,started_at,job_id,approval_ref,source,payload_hash)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(attempt_id) DO NOTHING RETURNING id`,
-		in.AttemptID, in.Service, in.Targets, in.Action, nullStr(in.PreviousRef), in.DeployedRef, in.State, started, nullStr(in.JobID), nullStr(in.ApprovalRef), in.Source, hash).Scan(&id)
-	if errors.Is(err, ErrNoRows) {
-		var stored string
-		if err = tx.QueryRow(ctx, `SELECT payload_hash FROM deploys WHERE attempt_id=$1`, in.AttemptID).Scan(&stored); err != nil {
-			return Deploy{}, false, err
-		}
-		if stored != hash {
-			return Deploy{}, false, ErrDeployAttemptConflict
-		}
-		d, err := readDeployTx(ctx, tx, in.AttemptID)
-		return d, false, err
-	}
-	if err != nil {
-		return Deploy{}, false, err
-	}
-	// Changes in (repo, number) order, so two starts that insert the same new
-	// keys wait on each other in one order.
-	type candidate struct {
-		repo   string
-		number int
-		paths  []string
-	}
-	byKey := map[string]int{}
-	var cands []candidate
-	for _, c := range in.Changes {
-		repo, n, _ := parsePRURL(c.PR)
-		key := changeURL(repo, n)
-		if i, ok := byKey[key]; ok {
-			cands[i].paths = append(cands[i].paths, c.Paths...)
-			continue
-		}
-		byKey[key] = len(cands)
-		cands = append(cands, candidate{repo: repo, number: n, paths: c.Paths})
-	}
-	sort.Slice(cands, func(i, j int) bool {
-		if cands[i].repo != cands[j].repo {
-			return cands[i].repo < cands[j].repo
-		}
-		return cands[i].number < cands[j].number
-	})
-	for _, c := range cands {
-		var changeID int64
-		err = tx.QueryRow(ctx, `SELECT id FROM changes WHERE repo=$1 AND pr_number=$2`, c.repo, c.number).Scan(&changeID)
+			in.AttemptID, in.Service, in.Targets, in.Action, nullStr(in.PreviousRef), in.DeployedRef, in.State, started, nullStr(in.JobID), in.ApprovalRef, in.Source, hash).Scan(&id)
 		if errors.Is(err, ErrNoRows) {
-			changeID, err = upsertChangeTx(ctx, tx, changeWrite{repo: c.repo, number: c.number, state: ChangeMerged, mergedAt: &now}, now, now)
+			var stored string
+			if err = tx.QueryRow(ctx, `SELECT payload_hash FROM deploys WHERE attempt_id=$1`, in.AttemptID).Scan(&stored); err != nil {
+				return err
+			}
+			if stored != hash {
+				return ErrDeployAttemptConflict
+			}
+			d, err := readDeployTx(ctx, tx, in.AttemptID)
+			if err != nil {
+				return err
+			}
+			out = d
+			return nil
 		}
 		if err != nil {
-			return Deploy{}, false, err
+			return err
 		}
-		var matched *string
-		if c.repo == svc.Repo {
-			matched = matchedPattern(svc.PathPatterns, c.paths)
+		// Changes in (repo, number) order, so two starts that insert the same new
+		// keys wait on each other in one order.
+		type candidate struct {
+			repo   string
+			number int
+			paths  []string
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO deploy_changes(deploy_id,change_id,included,matched_pattern) VALUES($1,$2,$3,$4)`, id, changeID, matched != nil, matched); err != nil {
-			return Deploy{}, false, err
+		byKey := map[string]int{}
+		var cands []candidate
+		for _, c := range in.Changes {
+			repo, n, _ := parsePRURL(c.PR)
+			key := changeURL(repo, n)
+			if i, ok := byKey[key]; ok {
+				cands[i].paths = append(cands[i].paths, c.Paths...)
+				continue
+			}
+			byKey[key] = len(cands)
+			cands = append(cands, candidate{repo: repo, number: n, paths: c.Paths})
 		}
-	}
-	d, err := readDeployTx(ctx, tx, in.AttemptID)
-	if err != nil {
-		return Deploy{}, false, err
-	}
-	return d, true, tx.Commit(ctx)
+		sort.Slice(cands, func(i, j int) bool {
+			if cands[i].repo != cands[j].repo {
+				return cands[i].repo < cands[j].repo
+			}
+			return cands[i].number < cands[j].number
+		})
+		for _, c := range cands {
+			var changeID int64
+			err = tx.QueryRow(ctx, `SELECT id FROM changes WHERE repo=$1 AND pr_number=$2`, c.repo, c.number).Scan(&changeID)
+			if errors.Is(err, ErrNoRows) {
+				changeID, err = upsertChangeTx(ctx, tx, changeWrite{repo: c.repo, number: c.number, state: ChangeMerged, mergedAt: &now}, now, now)
+			}
+			if err != nil {
+				return err
+			}
+			var matched *string
+			if c.repo == svc.Repo {
+				matched = matchedPattern(svc.PathPatterns, c.paths)
+			}
+			if _, err = tx.Exec(ctx, `INSERT INTO deploy_changes(deploy_id,change_id,included,matched_pattern) VALUES($1,$2,$3,$4)`, id, changeID, matched != nil, matched); err != nil {
+				return err
+			}
+		}
+		d, err := readDeployTx(ctx, tx, in.AttemptID)
+		if err != nil {
+			return err
+		}
+		out = d
+		created = true
+		return tx.Commit(ctx)
+	})
+	return out, created, rerr
 }
 
 func containsString(xs []string, x string) bool {
@@ -486,56 +497,66 @@ func (s *Store) FinishDeploy(ctx context.Context, attemptID string, in DeployFin
 	case !validText(in.FailedStep, maxDeployText):
 		return Deploy{}, errors.New("invalid deploy: failed_step is at most 500 bytes")
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Deploy{}, err
-	}
-	defer tx.Rollback(ctx)
-	if in.State == DeploySuccess {
-		// Level 2 before the deploys row and the task rows (lockorder.go).
-		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-			return Deploy{}, err
+	var out Deploy
+	rerr := s.retryTx(ctx, func() error {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return err
 		}
-	}
-	var id int64
-	var state string
-	err = tx.QueryRow(ctx, `SELECT id,state FROM deploys WHERE attempt_id=$1 FOR UPDATE`, attemptID).Scan(&id, &state)
-	if errors.Is(err, ErrNoRows) {
-		return Deploy{}, ErrDeployNotFound
-	}
-	if err != nil {
-		return Deploy{}, err
-	}
-	switch state {
-	case in.State:
-		return readDeployTx(ctx, tx, attemptID)
-	case DeployRequested, DeployRunning:
-	default:
-		return Deploy{}, ErrDeployAttemptFinished
-	}
-	now := time.Now().UTC()
-	if _, err = tx.Exec(ctx, `UPDATE deploys SET state=$2, finished_at=$3, failed_step=$4 WHERE id=$1`, id, in.State, now, nullStr(in.FailedStep)); err != nil {
-		return Deploy{}, err
-	}
-	if in.State == DeploySuccess {
-		if err = s.deployedTasksTx(ctx, tx, id, attemptID, now); err != nil {
-			return Deploy{}, err
+		defer tx.Rollback(ctx)
+		if in.State == DeploySuccess {
+			// Level 2 before the deploys row and the task rows (lockorder.go).
+			if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+				return err
+			}
 		}
-	}
-	d, err := readDeployTx(ctx, tx, attemptID)
-	if err != nil {
-		return Deploy{}, err
-	}
-	if d.JobID != nil {
-		failed := ""
-		if d.FailedStep != nil {
-			failed = *d.FailedStep
+		var id int64
+		var state string
+		err = tx.QueryRow(ctx, `SELECT id,state FROM deploys WHERE attempt_id=$1 FOR UPDATE`, attemptID).Scan(&id, &state)
+		if errors.Is(err, ErrNoRows) {
+			return ErrDeployNotFound
 		}
-		if err = queueDeployResultNoticeTx(ctx, tx, deployResultAttemptEventID(attemptID), d.Service, *d.JobID, d.DeployedRef, d.State, nil, failed, now); err != nil {
-			return Deploy{}, err
+		if err != nil {
+			return err
 		}
-	}
-	return d, tx.Commit(ctx)
+		switch state {
+		case in.State:
+			d, err := readDeployTx(ctx, tx, attemptID)
+			if err != nil {
+				return err
+			}
+			out = d
+			return nil
+		case DeployRequested, DeployRunning:
+		default:
+			return ErrDeployAttemptFinished
+		}
+		now := time.Now().UTC()
+		if _, err = tx.Exec(ctx, `UPDATE deploys SET state=$2, finished_at=$3, failed_step=$4 WHERE id=$1`, id, in.State, now, nullStr(in.FailedStep)); err != nil {
+			return err
+		}
+		if in.State == DeploySuccess {
+			if err = s.deployedTasksTx(ctx, tx, id, attemptID, now); err != nil {
+				return err
+			}
+		}
+		d, err := readDeployTx(ctx, tx, attemptID)
+		if err != nil {
+			return err
+		}
+		if d.JobID != nil {
+			failed := ""
+			if d.FailedStep != nil {
+				failed = *d.FailedStep
+			}
+			if err = queueDeployResultNoticeTx(ctx, tx, deployResultAttemptEventID(attemptID), d.Service, *d.JobID, d.DeployedRef, d.State, nil, failed, now); err != nil {
+				return err
+			}
+		}
+		out = d
+		return tx.Commit(ctx)
+	})
+	return out, rerr
 }
 
 // changeDeployedSQL says whether change c needs nothing more to be deployed:

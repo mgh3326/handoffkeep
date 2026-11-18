@@ -813,50 +813,55 @@ func applyGateTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeGateWrite
 // the PR's changes row and then only that PR's child rows (lockorder.go) and
 // takes no task row.
 func (s *Store) ApplyChangeBatch(ctx context.Context, b ChangeBatch) (ChangeWriteResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return s.applyChangeBatchMySQL(ctx, b)
-	}
-
-	now := time.Now().UTC()
-	if err := checkChangeBatch(b, now); err != nil {
-		return ChangeWriteResult{}, err
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return ChangeWriteResult{}, err
-	}
-	defer tx.Rollback(ctx)
-	c, err := lockChangeTx(ctx, tx, b, now)
-	if err != nil {
-		return ChangeWriteResult{}, err
-	}
-	out := ChangeWriteResult{ChangeID: c.id, Sections: map[string]ChangeSectionResult{}}
-	if b.State != nil {
-		if out.Sections[SectionState], err = applyStateTx(ctx, tx, c, *b.State, now); err != nil {
-			return ChangeWriteResult{}, err
+	var out ChangeWriteResult
+	rerr := s.retryTx(ctx, func() error {
+		if s != nil && s.dialect == mysqlDialect {
+			var err error
+			out, err = s.applyChangeBatchMySQL(ctx, b)
+			return err
 		}
-	}
-	if b.Checks != nil {
-		if out.Sections[SectionChecks], err = applyChecksTx(ctx, tx, c, *b.Checks); err != nil {
-			return ChangeWriteResult{}, err
+		now := time.Now().UTC()
+		if err := checkChangeBatch(b, now); err != nil {
+			return err
 		}
-	}
-	if b.Threads != nil {
-		if out.Sections[SectionThreads], err = applyThreadsTx(ctx, tx, c, *b.Threads); err != nil {
-			return ChangeWriteResult{}, err
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return err
 		}
-	}
-	if b.Findings != nil {
-		if out.Sections[SectionFindings], err = applyFindingsTx(ctx, tx, c, *b.Findings, now); err != nil {
-			return ChangeWriteResult{}, err
+		defer tx.Rollback(ctx)
+		c, err := lockChangeTx(ctx, tx, b, now)
+		if err != nil {
+			return err
 		}
-	}
-	if b.Gate != nil {
-		if out.Sections[SectionGate], err = applyGateTx(ctx, tx, c, *b.Gate); err != nil {
-			return ChangeWriteResult{}, err
+		out = ChangeWriteResult{ChangeID: c.id, Sections: map[string]ChangeSectionResult{}}
+		if b.State != nil {
+			if out.Sections[SectionState], err = applyStateTx(ctx, tx, c, *b.State, now); err != nil {
+				return err
+			}
 		}
-	}
-	return out, tx.Commit(ctx)
+		if b.Checks != nil {
+			if out.Sections[SectionChecks], err = applyChecksTx(ctx, tx, c, *b.Checks); err != nil {
+				return err
+			}
+		}
+		if b.Threads != nil {
+			if out.Sections[SectionThreads], err = applyThreadsTx(ctx, tx, c, *b.Threads); err != nil {
+				return err
+			}
+		}
+		if b.Findings != nil {
+			if out.Sections[SectionFindings], err = applyFindingsTx(ctx, tx, c, *b.Findings, now); err != nil {
+				return err
+			}
+		}
+		if b.Gate != nil {
+			if out.Sections[SectionGate], err = applyGateTx(ctx, tx, c, *b.Gate); err != nil {
+				return err
+			}
+		}
+		return tx.Commit(ctx)
+	})
+	return out, rerr
 }
 
 // ApplyChangeState writes the state section of a PR.

@@ -493,64 +493,70 @@ func checkChangeMergeFlow(in ChangeMergeFlow) error {
 // tool record. It takes the merge-flow advisory lock, then locks the one
 // changes row (lockorder.go).
 func (s *Store) SetChangeMergeFlow(ctx context.Context, id int64, in ChangeMergeFlow) (Change, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return s.setChangeMergeFlowMySQL(ctx, id, in)
-	}
-
-	if err := checkChangeMergeFlow(in); err != nil {
-		return Change{}, err
-	}
-	now := time.Now().UTC()
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Change{}, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, changeAdvisoryLock); err != nil {
-		return Change{}, err
-	}
-	var locked int64
-	if err = tx.QueryRow(ctx, `SELECT id FROM changes WHERE id=$1 FOR NO KEY UPDATE`, id).Scan(&locked); err != nil {
-		if errors.Is(err, ErrNoRows) {
-			return Change{}, ErrChangeNotFound
+	var out Change
+	rerr := s.retryTx(ctx, func() error {
+		if s != nil && s.dialect == mysqlDialect {
+			var err error
+			out, err = s.setChangeMergeFlowMySQL(ctx, id, in)
+			return err
 		}
-		return Change{}, err
-	}
-	var state *string
-	if in.DependsOnChange != nil {
-		target := *in.DependsOnChange
-		var exists bool
-		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM changes WHERE id=$1)`, target).Scan(&exists); err != nil {
-			return Change{}, err
+		if err := checkChangeMergeFlow(in); err != nil {
+			return err
 		}
-		if !exists {
-			return Change{}, ErrChangeNotFound
+		now := time.Now().UTC()
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return err
 		}
-		// Follow the target's own dependencies; reaching id closes a cycle.
-		// UNION (not ALL) ends the walk even on a cycle that already exists.
-		var cycle bool
-		if err = tx.QueryRow(ctx, `WITH RECURSIVE chain(id) AS (
-	SELECT $2::bigint
-	UNION
-	SELECT c.depends_on_change_id FROM changes c JOIN chain ON c.id=chain.id WHERE c.depends_on_change_id IS NOT NULL
+		defer tx.Rollback(ctx)
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, changeAdvisoryLock); err != nil {
+			return err
+		}
+		var locked int64
+		if err = tx.QueryRow(ctx, `SELECT id FROM changes WHERE id=$1 FOR NO KEY UPDATE`, id).Scan(&locked); err != nil {
+			if errors.Is(err, ErrNoRows) {
+				return ErrChangeNotFound
+			}
+			return err
+		}
+		var state *string
+		if in.DependsOnChange != nil {
+			target := *in.DependsOnChange
+			var exists bool
+			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM changes WHERE id=$1)`, target).Scan(&exists); err != nil {
+				return err
+			}
+			if !exists {
+				return ErrChangeNotFound
+			}
+			// Follow the target's own dependencies; reaching id closes a cycle.
+			// UNION (not ALL) ends the walk even on a cycle that already exists.
+			var cycle bool
+			if err = tx.QueryRow(ctx, `WITH RECURSIVE chain(id) AS (
+SELECT $2::bigint
+UNION
+SELECT c.depends_on_change_id FROM changes c JOIN chain ON c.id=chain.id WHERE c.depends_on_change_id IS NOT NULL
 ) SELECT EXISTS(SELECT 1 FROM chain WHERE id=$1)`, id, target).Scan(&cycle); err != nil {
-			return Change{}, err
+				return err
+			}
+			if cycle {
+				return fmt.Errorf("%w: change %d would depend on itself through change %d", ErrChangeDependencyCycle, id, target)
+			}
+			state = &in.DependsOnState
 		}
-		if cycle {
-			return Change{}, fmt.Errorf("%w: change %d would depend on itself through change %d", ErrChangeDependencyCycle, id, target)
+		if _, err = tx.Exec(ctx, `UPDATE changes SET priority=$2,hold_reason=$3,depends_on_change_id=$4,depends_on_state=$5,updated_at=$6 WHERE id=$1`,
+			id, in.Priority, nullStr(in.HoldReason), in.DependsOnChange, state, now); err != nil {
+			return err
 		}
-		state = &in.DependsOnState
-	}
-	if _, err = tx.Exec(ctx, `UPDATE changes SET priority=$2, hold_reason=$3, depends_on_change_id=$4, depends_on_state=$5, updated_at=$6 WHERE id=$1`,
-		id, in.Priority, nullStr(in.HoldReason), in.DependsOnChange, state, now); err != nil {
-		return Change{}, err
-	}
-	out, err := s.listChangesWhere(ctx, tx, `id=$1`, nil, 1, id)
-	if err != nil {
-		return Change{}, err
-	}
-	if len(out) != 1 {
-		return Change{}, ErrChangeNotFound
-	}
-	return out[0], tx.Commit(ctx)
+		changes, err := s.listChangesWhere(ctx, tx, `id=$1`, nil, 1, id)
+		if err != nil {
+			return err
+		}
+		if len(changes) != 1 {
+			return ErrChangeNotFound
+		}
+		out = changes[0]
+		return tx.Commit(ctx)
+	})
+	return out, rerr
 }

@@ -88,6 +88,17 @@ func ytBindingIntentBackoff(attempts int) time.Duration {
 // yt_binding_intents. It takes no lane lock and no task row.
 func (s *Store) ScanYTBindingCandidates(ctx context.Context, tenant string, limit int, now time.Time) (YTBindingScan, error) {
 	var out YTBindingScan
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.scanYTBindingCandidatesOnce(ctx, tenant, limit, now)
+		return err
+	})
+	return out, err
+}
+
+// scanYTBindingCandidatesOnce is one attempt of ScanYTBindingCandidates's transaction.
+func (s *Store) scanYTBindingCandidatesOnce(ctx context.Context, tenant string, limit int, now time.Time) (YTBindingScan, error) {
+	var out YTBindingScan
 	if tenant == "" || len(tenant) > 255 || limit < 1 {
 		return out, errors.New("invalid binding scan")
 	}
