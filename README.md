@@ -554,7 +554,8 @@ quoting the operator, is a relay. A request carries an `answer_policy`
 (`--answer-policy` on `tasks decision-request` and `decisions ask`):
 `operator_relay_allowed` (the default) or `operator_direct`. A `human_only`
 request, a disposition item, and an `operator_direct` request do not close on a
-relay: the call answers `202` with `result: pending_confirmation` (the CLI
+relay (a session or dots answer that carries the operator's own words is the
+operator's answer, below): the call answers `202` with `result: pending_confirmation` (the CLI
 prints it and exits 0), the request stays open, and a later `operator_direct`
 answer closes it. `human_only` with `operator_relay_allowed` is refused. Every
 attempt keeps its proposed option, text and operator quote.
@@ -563,9 +564,18 @@ A session records the operator's words with
 `handoffkeep decisions resolve request dr-42-1 --channel session --quote '<words>' [--option A] [--text …] [--event-key k]`
 (`POST /v1/tasks/{id}/decision-request/resolve` with `channel: "session"` and the
 assistant's `provenance`/`operator_quote`/`decision_ref` fields). With `--quote`
-it is an `operator_relay` answer bound to that request id; without it, an
-`assistant_judgement`, refused on an `operator_direct` request. The session
-channel is never verified. `--channel cli` is the plain CLI answer and takes no
+it is an `operator_relay` answer bound to that request id, and it closes an
+`operator_direct` (or `human_only`) request at once: the operator's verbatim
+words with the exact request id are the operator's answer, relayed, so there
+is no second confirmation in the console. The resolution keeps channel
+`session`, the words and `operator_decided`, and the asking lane gets
+`decision_answered`. Without `--quote` it is an `assistant_judgement`, refused
+on an `operator_direct` request (`409 decision_request_human_only`), and so is
+a quote with no visible character; a `decision_ref` that is not the exact
+request id is `409 provenance_ref_mismatch`. Both refusals are kept as
+attempts and the request stays open. A disposition item still closes only on
+the console. The session channel is never verified, and the assistant channel
+still waits as `pending_confirmation`. `--channel cli` is the plain CLI answer and takes no
 `--quote`. The console route is `POST /ui/api/decision-requests/resolve`
 with `{request_id, option, text, event_key}`.
 
