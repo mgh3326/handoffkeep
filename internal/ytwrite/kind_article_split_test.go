@@ -1,6 +1,7 @@
 package ytwrite_test
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -92,5 +93,42 @@ func TestArticleSplitOpAndCheck(t *testing.T) {
 	legacy.LegacyArticleID = "3-1"
 	if err := ytwrite.CheckArticleSplit(legacy); err == nil {
 		t.Fatal("a legacy article was accepted for a split")
+	}
+}
+
+// hk 5304: an operator's split apply is anchored to the attempt and recovery
+// epoch of its first read. Under the op's lock, CheckSplitApply refuses
+// (ErrState) a locked row whose attempt or epoch moved past the read, or a
+// live recovery lease, even when the index and the latest plan still match.
+func TestCheckSplitApplyAnchorsTheOperatorRead(t *testing.T) {
+	now := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
+	op := ytwrite.Op{ID: 7, State: ytwrite.StateRemoteUnknown, Reason: ytwrite.ReasonServerError,
+		Attempts: 2, Reconciles: 3, YTResultID: "3-77", NextAttemptAt: now.Add(time.Hour)}
+	history := []ytwrite.SplitPlanRecord{{Attempt: 2, Recover: 1, Marked: 1, Outcome: ytwrite.StepAmbiguous,
+		Plan: ytwrite.SplitPlan{Kind: ytwrite.SplitPlanTag, Index: "3-77", Parts: 3, Steps: []int{2}}}}
+	saw := ytwrite.LinkSettlement{YTID: "3-77", SawPlan: true, SawAttempt: 2, SawRec: 1, SawMarked: 1,
+		SawOutcome: ytwrite.StepAmbiguous, SawReconciles: 3}
+	operator := ytwrite.LinkFence{Attempt: 2, Recover: 1, Epoch: ytwrite.EpochOperator}
+	leased := op
+	leased.Reason = ytwrite.ReasonLinkRecovery
+	staleEpoch, staleAttempt := saw, operator
+	staleEpoch.SawReconciles = 2
+	staleAttempt.Attempt = 1
+	for _, c := range []struct {
+		name string
+		op   ytwrite.Op
+		f    ytwrite.LinkFence
+		s    ytwrite.LinkSettlement
+		ok   bool
+	}{
+		{"current read", op, operator, saw, true},
+		{"a pass leased after the read", op, operator, staleEpoch, false},
+		{"an earlier attempt", op, staleAttempt, saw, false},
+		{"a pass holds the lease", leased, operator, saw, false},
+	} {
+		err := ytwrite.CheckSplitApply(c.op, history, c.f, c.s, now)
+		if (err == nil) != c.ok || (err != nil && !errors.Is(err, ytwrite.ErrState)) {
+			t.Errorf("%s: err = %v", c.name, err)
+		}
 	}
 }
