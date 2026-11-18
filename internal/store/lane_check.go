@@ -83,7 +83,12 @@ type LaneCheck struct {
 	// LookHash covers the findings a look leaves behind: wait_cleared is
 	// excluded, because the look itself advances its baseline and removes
 	// that finding. Comparing it is what stops a notice the lane looked at.
-	LookHash      string `json:"look_hash"`
+	LookHash string `json:"look_hash"`
+	// LookEpoch is the id of the lane's newest look or clearing row. It makes
+	// a notice id distinct from an earlier notice of the same findings: a
+	// state that goes away and returns is noticed again even inside one
+	// bucket, where the outbox would otherwise refuse the repeated id.
+	LookEpoch     int64  `json:"look_epoch"`
 	NoticeEventID string `json:"notice_event_id"`
 }
 
@@ -98,24 +103,48 @@ type LaneLook struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
-var laneCheckEventRE = regexp.MustCompile(`^lanecheck-(.+)-([0-9a-f]{8})-([0-9]+)$`)
-
 // LaneCheckEventID is the deterministic notice id of one lane's state in one
-// 6-hour bucket. The same findings inside a bucket give the same id, which the
-// hub refuses as a duplicate.
-func LaneCheckEventID(lane, hash string, now time.Time) string {
-	return fmt.Sprintf("lanecheck-%s-%s-%d", lane, hash, now.UTC().Unix()/laneCheckBucketSeconds)
+// 6-hour bucket, for one look epoch. The same findings, unlooked, inside a
+// bucket give the same id, which the outbox refuses as a duplicate; a look or
+// a clearing advances the epoch, so a state that returns later gets a new id.
+func LaneCheckEventID(lane, hash string, epoch int64, now time.Time) string {
+	return fmt.Sprintf("lanecheck-%s-%s-e%d-%d", lane, hash, epoch, now.UTC().Unix()/laneCheckBucketSeconds)
 }
 
+var (
+	laneCheckHashRE   = regexp.MustCompile(`^[0-9a-f]{8}$`)
+	laneCheckDigitsRE = regexp.MustCompile(`^[0-9]+$`)
+)
+
 // ParseLaneCheckEventID splits a lane_check notice id into its lane and
-// findings hash. It is how a look binds the id it was given to the state the
-// lane actually looked at.
+// findings hash, ignoring the epoch and bucket segments. It is how a look
+// binds the id it was given to the lane and state it names. The older format
+// without an epoch segment is still read.
 func ParseLaneCheckEventID(eventID string) (lane, hash string, ok bool) {
-	m := laneCheckEventRE.FindStringSubmatch(eventID)
-	if m == nil {
+	rest, found := strings.CutPrefix(eventID, "lanecheck-")
+	if !found {
 		return "", "", false
 	}
-	return m[1], m[2], true
+	// Bucket, then an optional e<epoch> segment, then the hash.
+	i := strings.LastIndex(rest, "-")
+	if i < 0 || !laneCheckDigitsRE.MatchString(rest[i+1:]) {
+		return "", "", false
+	}
+	rest = rest[:i]
+	if j := strings.LastIndex(rest, "-"); j >= 0 {
+		if seg := rest[j+1:]; strings.HasPrefix(seg, "e") && laneCheckDigitsRE.MatchString(seg[1:]) {
+			rest = rest[:j]
+		}
+	}
+	i = strings.LastIndex(rest, "-")
+	if i <= 0 {
+		return "", "", false
+	}
+	hash = rest[i+1:]
+	if !laneCheckHashRE.MatchString(hash) {
+		return "", "", false
+	}
+	return rest[:i], hash, true
 }
 
 // laneCheckHash is the sha8 of the sorted finding tokens ("name:id", and the
@@ -242,8 +271,9 @@ func (s *Store) laneCheck(ctx context.Context, lane string, now time.Time) (Lane
 	}
 
 	// wait_cleared needs the lane's last look as its baseline: a first notice
-	// cannot say what was cleared since a look that never happened.
-	lastLook, looked, err := s.laneCheckLastLook(ctx, lane)
+	// cannot say what was cleared since a look that never happened. The look's
+	// row id is also the notice epoch.
+	lastLook, epoch, looked, err := s.laneCheckLastLook(ctx, lane)
 	if err != nil {
 		return LaneCheck{}, fmt.Errorf("lane check %s: %w", LaneFindingWaitCleared, err)
 	}
@@ -269,7 +299,8 @@ func (s *Store) laneCheck(ctx context.Context, lane string, now time.Time) (Lane
 		Findings:      kept,
 		FindingsHash:  hash,
 		LookHash:      laneCheckLookHash(kept),
-		NoticeEventID: LaneCheckEventID(lane, hash, now),
+		LookEpoch:     epoch,
+		NoticeEventID: LaneCheckEventID(lane, hash, epoch, now),
 	}, nil
 }
 
@@ -352,20 +383,21 @@ func (s *Store) laneCheckLive(ctx context.Context, lane string) (bool, error) {
 	return live, err
 }
 
-// laneCheckLastLook returns the lane's newest look time, and whether one
-// exists.
-func (s *Store) laneCheckLastLook(ctx context.Context, lane string) (time.Time, bool, error) {
+// laneCheckLastLook returns the lane's newest look time and row id, and
+// whether one exists.
+func (s *Store) laneCheckLastLook(ctx context.Context, lane string) (time.Time, int64, bool, error) {
 	var at time.Time
+	var id int64
 	err := s.db().QueryRow(ctx, s.q(
-		`SELECT created_at FROM lane_looks WHERE lane=$1 ORDER BY id DESC LIMIT 1`,
-		`SELECT created_at FROM lane_looks WHERE lane=? ORDER BY id DESC LIMIT 1`), lane).Scan(&at)
+		`SELECT id,created_at FROM lane_looks WHERE lane=$1 ORDER BY id DESC LIMIT 1`,
+		`SELECT id,created_at FROM lane_looks WHERE lane=? ORDER BY id DESC LIMIT 1`), lane).Scan(&id, &at)
 	if errors.Is(err, ErrNoRows) {
-		return time.Time{}, false, nil
+		return time.Time{}, 0, false, nil
 	}
 	if err != nil {
-		return time.Time{}, false, err
+		return time.Time{}, 0, false, err
 	}
-	return at.UTC(), true, nil
+	return at.UTC(), id, true, nil
 }
 
 // laneCheckClearingEventID names a store-written clearing row. Unlike a notice

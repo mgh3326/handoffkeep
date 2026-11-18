@@ -317,13 +317,13 @@ func TestRecordLaneLookBindsNoticeToLane(t *testing.T) {
 	now := time.Now().UTC()
 	cur := laneCheckFindings(t, s, "look-lane", now)
 	notice := cur.NoticeEventID
-	if _, _, err := s.RecordLaneLook(ctx, "other-lane", LaneCheckEventID("other-lane", cur.FindingsHash, now), "", "look-lane", now); err == nil {
+	if _, _, err := s.RecordLaneLook(ctx, "other-lane", LaneCheckEventID("other-lane", cur.FindingsHash, cur.LookEpoch, now), "", "look-lane", now); err == nil {
 		t.Fatal("a look with another lane's notice was accepted")
 	}
 	if _, _, err := s.RecordLaneLook(ctx, "look-lane", "lanecheck-look-lane-nothash-1", "", "look-lane", now); err == nil {
 		t.Fatal("a malformed notice was accepted")
 	}
-	if _, _, err := s.RecordLaneLook(ctx, "look-lane", LaneCheckEventID("look-lane", "deadbeef", now), "", "look-lane", now); err == nil {
+	if _, _, err := s.RecordLaneLook(ctx, "look-lane", LaneCheckEventID("look-lane", "deadbeef", cur.LookEpoch, now), "", "look-lane", now); err == nil {
 		t.Fatal("a notice no check ever carried was accepted")
 	}
 	// The look stores the state it leaves (here no findings), not the notice
@@ -433,16 +433,24 @@ func TestLaneCheckIdentity(t *testing.T) {
 		t.Fatal("hash did not change with a new finding")
 	}
 	hash := laneCheckHash(a)
-	if got := LaneCheckEventID("lane-a", hash, now); got != LaneCheckEventID("lane-a", hash, now.Add(5*time.Hour)) {
-		t.Fatalf("ids differ inside one bucket: %s / %s", got, LaneCheckEventID("lane-a", hash, now.Add(5*time.Hour)))
+	if got := LaneCheckEventID("lane-a", hash, 0, now); got != LaneCheckEventID("lane-a", hash, 0, now.Add(5*time.Hour)) {
+		t.Fatalf("ids differ inside one bucket: %s / %s", got, LaneCheckEventID("lane-a", hash, 0, now.Add(5*time.Hour)))
 	}
-	next := LaneCheckEventID("lane-a", hash, now.Add(7*time.Hour))
-	if next == LaneCheckEventID("lane-a", hash, now) {
+	next := LaneCheckEventID("lane-a", hash, 0, now.Add(7*time.Hour))
+	if next == LaneCheckEventID("lane-a", hash, 0, now) {
 		t.Fatal("the next bucket reused the id")
 	}
 	lane, parsed, ok := ParseLaneCheckEventID(next)
 	if !ok || lane != "lane-a" || parsed != hash {
 		t.Fatalf("parse = %q %q %t", lane, parsed, ok)
+	}
+	// A look epoch makes the same findings in the same bucket a new id, so a
+	// state that returns after a look or clearing is noticed (review of #504).
+	if LaneCheckEventID("lane-a", hash, 2, now) == LaneCheckEventID("lane-a", hash, 1, now) {
+		t.Fatal("the look epoch does not change the notice id")
+	}
+	if lane, parsed, ok := ParseLaneCheckEventID(LaneCheckEventID("lane-a", hash, 12345, now)); !ok || lane != "lane-a" || parsed != hash {
+		t.Fatalf("epoch parse = %q %q %t", lane, parsed, ok)
 	}
 	ids := make([]int64, 12)
 	for i := range ids {
