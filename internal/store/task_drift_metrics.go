@@ -125,16 +125,18 @@ func (s *Store) driftLaneCheckStats(ctx context.Context, start, end time.Time) (
 	if err = s.db().QueryRow(ctx, q, start, end).Scan(&notices); err != nil {
 		return 0, 0, nil, err
 	}
-	q = s.q(`SELECT count(*) FROM lane_looks WHERE created_at>=$1 AND created_at<$2`,
-		`SELECT count(*) FROM lane_looks WHERE created_at>=? AND created_at<?`)
-	if err = s.db().QueryRow(ctx, q, start, end).Scan(&looks); err != nil {
+	// The clearing row the check writes for an empty lane is the store's
+	// record, not a lane's look, so it is not counted as one.
+	q = s.q(`SELECT count(*) FROM lane_looks WHERE created_at>=$1 AND created_at<$2 AND actor<>$3`,
+		`SELECT count(*) FROM lane_looks WHERE created_at>=? AND created_at<? AND actor<>?`)
+	if err = s.db().QueryRow(ctx, q, start, end, laneLookStoreActor).Scan(&looks); err != nil {
 		return 0, 0, nil, err
 	}
 	q = s.q(`SELECT l.created_at,n.created_at FROM lane_looks l JOIN notification_outbox n ON n.event_id=l.notice_event_id
-		WHERE l.created_at>=$1 AND l.created_at<$2 AND n.kind='lane_check'`,
+		WHERE l.created_at>=$1 AND l.created_at<$2 AND l.actor<>$3 AND n.kind='lane_check'`,
 		`SELECT l.created_at,n.created_at FROM lane_looks l JOIN notification_outbox n ON n.event_id=l.notice_event_id
-		WHERE l.created_at>=? AND l.created_at<? AND n.kind='lane_check'`)
-	rows, err := s.db().Query(ctx, q, start, end)
+		WHERE l.created_at>=? AND l.created_at<? AND l.actor<>? AND n.kind='lane_check'`)
+	rows, err := s.db().Query(ctx, q, start, end, laneLookStoreActor)
 	if err != nil {
 		return 0, 0, nil, err
 	}

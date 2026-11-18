@@ -56,6 +56,11 @@ const (
 	// laneCheckKeptBacklogAge is how long a priority 1 or 2 backlog task may
 	// sit untouched before it is a kept_backlog finding.
 	laneCheckKeptBacklogAge = 24 * time.Hour
+	// laneLookStoreActor and laneLookClearedNote are the clearing row the
+	// check writes when a lane's findings go empty: no lane looked, so the
+	// metrics do not count it as a look.
+	laneLookStoreActor  = "hk-lane-check"
+	laneLookClearedNote = "cleared: no findings"
 )
 
 // ErrLaneLookInvalid is a malformed look write: a lane name, a notice event
@@ -159,8 +164,10 @@ func LaneCheckNoticeText(c LaneCheck) string {
 }
 
 // LaneChecks computes every active design lane's findings at now. A lane is a
-// project's design_lane; operator-desk is never checked. Only lanes with at
-// least one finding are returned, in lane order.
+// project's design_lane; operator-desk is never checked. Every lane is
+// returned in lane order, including one with no findings: RunLaneCheck records
+// the empty state as the lane's last known state, so a finding that returns
+// later is not mistaken for one already looked at.
 func (s *Store) LaneChecks(ctx context.Context, now time.Time) ([]LaneCheck, error) {
 	now = now.UTC()
 	lanes, err := s.laneCheckLanes(ctx)
@@ -173,9 +180,7 @@ func (s *Store) LaneChecks(ctx context.Context, now time.Time) ([]LaneCheck, err
 		if err != nil {
 			return nil, err
 		}
-		if len(c.Findings) > 0 {
-			out = append(out, c)
-		}
+		out = append(out, c)
 	}
 	return out, nil
 }
@@ -419,6 +424,18 @@ func (s *Store) RunLaneCheck(ctx context.Context, now time.Time) (int, error) {
 		if err != nil {
 			return 0, err
 		}
+		if len(c.Findings) == 0 {
+			// The empty state is the lane's last known state. Recording it
+			// means a finding that returns with the same ids after a quiet
+			// period is new state, not one the lane already looked at.
+			if looked {
+				continue
+			}
+			if _, _, err := insertLaneLookTx(ctx, tx, c.Lane, c.NoticeEventID, c.LookHash, laneLookClearedNote, laneLookStoreActor, now); err != nil {
+				return 0, err
+			}
+			continue
+		}
 		if looked {
 			continue
 		}
@@ -451,7 +468,7 @@ func (s *Store) RecordLaneLook(ctx context.Context, lane, noticeEventID, note, a
 	if !validName(lane) {
 		return LaneLook{}, false, fmt.Errorf("%w: lane must be a name", ErrLaneLookInvalid)
 	}
-	parsedLane, _, ok := ParseLaneCheckEventID(noticeEventID)
+	parsedLane, noticeHash, ok := ParseLaneCheckEventID(noticeEventID)
 	if !ok || parsedLane != lane {
 		return LaneLook{}, false, fmt.Errorf("%w: notice must be lanecheck-%s-<hash>-<bucket>", ErrLaneLookInvalid, lane)
 	}
@@ -465,51 +482,70 @@ func (s *Store) RecordLaneLook(ctx context.Context, lane, noticeEventID, note, a
 		return LaneLook{}, false, err
 	}
 	now = now.UTC()
-	// The look records the state it leaves: the current findings with
-	// wait_cleared excluded, which is what the next check compares.
+	// A look acknowledges exactly the state its notice named. Asking for a
+	// look of anything else (a stale notice after the findings moved, or an
+	// id that no notice ever carried) is refused: accepting it would mark
+	// state the lane never saw as looked, and silence the newer findings.
 	check, err := s.laneCheck(ctx, lane, now)
 	if err != nil {
 		return LaneLook{}, false, err
 	}
-	hash := check.LookHash
+	if noticeHash != check.FindingsHash {
+		return LaneLook{}, false, fmt.Errorf("%w: notice %s does not name the lane's current findings (%s); look at the newest lane_check notice", ErrLaneLookInvalid, noticeEventID, check.NoticeEventID)
+	}
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return LaneLook{}, false, err
 	}
 	defer release()
 	defer tx.Rollback(ctx)
-	var look LaneLook
-	if s.dialect == mysqlDialect {
-		_, err = tx.Exec(ctx, `INSERT INTO lane_looks(lane,notice_event_id,findings_hash,note,actor,created_at) VALUES(?,?,?,?,?,?)`,
-			lane, noticeEventID, hash, note, actor, now)
-		if errors.Is(err, errUniqueViolation) {
-			err = scanLaneLook(tx.QueryRow(ctx, `SELECT `+laneLookColumns+` FROM lane_looks WHERE lane=? AND notice_event_id=?`, lane, noticeEventID), &look)
-			if err != nil {
-				return LaneLook{}, false, err
-			}
-			return look, false, nil
-		}
-		if err != nil {
-			return LaneLook{}, false, err
-		}
-		if err = scanLaneLook(tx.QueryRow(ctx, `SELECT `+laneLookColumns+` FROM lane_looks WHERE lane=? AND notice_event_id=?`, lane, noticeEventID), &look); err != nil {
-			return LaneLook{}, false, err
-		}
-	} else {
-		err = scanLaneLook(tx.QueryRow(ctx, `INSERT INTO lane_looks(lane,notice_event_id,findings_hash,note,actor,created_at)
-			VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (lane,notice_event_id) DO NOTHING
-			RETURNING `+laneLookColumns, lane, noticeEventID, hash, note, actor, now), &look)
-		if errors.Is(err, ErrNoRows) {
-			if err = scanLaneLook(tx.QueryRow(ctx, `SELECT `+laneLookColumns+` FROM lane_looks WHERE lane=$1 AND notice_event_id=$2`, lane, noticeEventID), &look); err != nil {
-				return LaneLook{}, false, err
-			}
-			return look, false, nil
-		}
-		if err != nil {
-			return LaneLook{}, false, err
-		}
+	// The stored hash is the state the look leaves behind: wait_cleared is
+	// excluded because this look advances its baseline.
+	look, changed, err := insertLaneLookTx(ctx, tx, lane, noticeEventID, check.LookHash, note, actor, now)
+	if err != nil {
+		return LaneLook{}, false, err
+	}
+	if !changed {
+		return look, false, nil
 	}
 	if err = tx.Commit(ctx); err != nil {
+		return LaneLook{}, false, err
+	}
+	return look, true, nil
+}
+
+// insertLaneLookTx records one lane_looks row inside the caller's transaction
+// and reports whether this call wrote it. A repeat of (lane, notice) reads and
+// returns the stored row.
+func insertLaneLookTx(ctx context.Context, tx transaction, lane, noticeEventID, hash, note, actor string, at time.Time) (LaneLook, bool, error) {
+	var look LaneLook
+	if dialectFor(tx) == mysqlDialect {
+		_, err := tx.Exec(ctx, `INSERT INTO lane_looks(lane,notice_event_id,findings_hash,note,actor,created_at) VALUES(?,?,?,?,?,?)`,
+			lane, noticeEventID, hash, note, actor, at)
+		if errors.Is(err, errUniqueViolation) {
+			if err = scanLaneLook(tx.QueryRow(ctx, `SELECT `+laneLookColumns+` FROM lane_looks WHERE lane=? AND notice_event_id=?`, lane, noticeEventID), &look); err != nil {
+				return LaneLook{}, false, err
+			}
+			return look, false, nil
+		}
+		if err != nil {
+			return LaneLook{}, false, err
+		}
+		if err := scanLaneLook(tx.QueryRow(ctx, `SELECT `+laneLookColumns+` FROM lane_looks WHERE lane=? AND notice_event_id=?`, lane, noticeEventID), &look); err != nil {
+			return LaneLook{}, false, err
+		}
+		return look, true, nil
+	}
+	err := scanLaneLook(tx.QueryRow(ctx, `INSERT INTO lane_looks(lane,notice_event_id,findings_hash,note,actor,created_at)
+		VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (lane,notice_event_id) DO NOTHING
+		RETURNING `+laneLookColumns, lane, noticeEventID, hash, note, actor, at), &look)
+	if errors.Is(err, ErrNoRows) {
+		if err = scanLaneLook(tx.QueryRow(ctx, `SELECT `+laneLookColumns+` FROM lane_looks WHERE lane=$1 AND notice_event_id=$2`, lane, noticeEventID), &look); err != nil {
+			return LaneLook{}, false, err
+		}
+		return look, false, nil
+	}
+	if err != nil {
 		return LaneLook{}, false, err
 	}
 	return look, true, nil

@@ -307,22 +307,28 @@ func TestLaneCheckNeverNoticesOperatorDesk(t *testing.T) {
 	}
 }
 
-// TestRecordLaneLookBindsNoticeToLane: a look for another lane's or a malformed
-// notice id is refused, and a repeat changes nothing.
+// TestRecordLaneLookBindsNoticeToLane pins the look's input: a malformed or
+// another lane's notice is refused, a notice that does not name the current
+// findings is refused, and a repeat changes nothing.
 func TestRecordLaneLookBindsNoticeToLane(t *testing.T) {
 	ctx := context.Background()
 	s := schemaStore(t, "lane-look")
+	laneCheckFixture(t, s, "look-project", "look-lane")
 	now := time.Now().UTC()
-	notice := LaneCheckEventID("look-lane", "abcdef01", now)
-	if _, _, err := s.RecordLaneLook(ctx, "other-lane", notice, "", "look-lane", now); err == nil {
+	cur := laneCheckFindings(t, s, "look-lane", now)
+	notice := cur.NoticeEventID
+	if _, _, err := s.RecordLaneLook(ctx, "other-lane", LaneCheckEventID("other-lane", cur.FindingsHash, now), "", "look-lane", now); err == nil {
 		t.Fatal("a look with another lane's notice was accepted")
 	}
 	if _, _, err := s.RecordLaneLook(ctx, "look-lane", "lanecheck-look-lane-nothash-1", "", "look-lane", now); err == nil {
 		t.Fatal("a malformed notice was accepted")
 	}
+	if _, _, err := s.RecordLaneLook(ctx, "look-lane", LaneCheckEventID("look-lane", "deadbeef", now), "", "look-lane", now); err == nil {
+		t.Fatal("a notice no check ever carried was accepted")
+	}
 	// The look stores the state it leaves (here no findings), not the notice
 	// id's hash: the two differ whenever wait_cleared is present.
-	if look, changed, err := s.RecordLaneLook(ctx, "look-lane", notice, "noted", "look-lane", now); err != nil || !changed || look.FindingsHash != laneCheckHash(nil) {
+	if look, changed, err := s.RecordLaneLook(ctx, "look-lane", notice, "noted", "look-lane", now); err != nil || !changed || look.FindingsHash != cur.LookHash || look.FindingsHash != laneCheckHash(nil) {
 		t.Fatalf("first look = %+v changed=%t err=%v", look, changed, err)
 	}
 	if _, changed, err := s.RecordLaneLook(ctx, "look-lane", notice, "again", "look-lane", now); err != nil || changed {
@@ -330,52 +336,77 @@ func TestRecordLaneLookBindsNoticeToLane(t *testing.T) {
 	}
 }
 
-// TestLaneCheckIdentity pins the notice id and the text without a database: a
-// stable hash per state, one id per 6-hour bucket, and a text that lists at
-// most ten ids and then the count.
-func TestLaneCheckIdentity(t *testing.T) {
-	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
-	a := []LaneCheckFinding{{Name: LaneFindingKeptBacklog, TaskIDs: []int64{7, 3}}, {Name: LaneFindingOrderUnacked, TaskIDs: []int64{9}}}
-	b := []LaneCheckFinding{{Name: LaneFindingOrderUnacked, TaskIDs: []int64{9}}, {Name: LaneFindingKeptBacklog, TaskIDs: []int64{3, 7}}}
-	if laneCheckHash(a) != laneCheckHash(b) {
-		t.Fatal("hash depends on finding order")
+// TestRecordLaneLookRefusesStateItDidNotSee pins the review finding on #504:
+// a look acknowledges exactly the state its notice named. A finding that
+// appeared between the notice and the look must not be silenced by it.
+func TestRecordLaneLookRefusesStateItDidNotSee(t *testing.T) {
+	ctx := context.Background()
+	s := schemaStore(t, "lane-lookstale")
+	laneCheckFixture(t, s, "lookstale-project", "lookstale-lane")
+	first := laneCheckTask(t, s, "lookstale-project", "lookstale-lane", "first kept work", 2)
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET created_at=$2 WHERE id=$1`, first.ID, time.Now().UTC().Add(-48*time.Hour)); err != nil {
+		t.Fatal(err)
 	}
-	c := append(append([]LaneCheckFinding{}, a...), LaneCheckFinding{Name: LaneFindingBlockerLanded, TaskIDs: []int64{11}})
-	if laneCheckHash(a) == laneCheckHash(c) {
-		t.Fatal("hash did not change with a new finding")
+	now := time.Now().UTC()
+	before := laneCheckFindings(t, s, "lookstale-lane", now)
+	if len(laneCheckFinding(before, LaneFindingKeptBacklog).TaskIDs) != 1 {
+		t.Fatal("no kept_backlog finding to name")
 	}
-	hash := laneCheckHash(a)
-	if got := LaneCheckEventID("lane-a", hash, now); got != LaneCheckEventID("lane-a", hash, now.Add(5*time.Hour)) {
-		t.Fatalf("ids differ inside one bucket: %s / %s", got, LaneCheckEventID("lane-a", hash, now.Add(5*time.Hour)))
+	late := laneCheckTask(t, s, "lookstale-project", "lookstale-lane", "second kept work", 2)
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET created_at=$2 WHERE id=$1`, late.ID, time.Now().UTC().Add(-48*time.Hour)); err != nil {
+		t.Fatal(err)
 	}
-	next := LaneCheckEventID("lane-a", hash, now.Add(7*time.Hour))
-	if next == LaneCheckEventID("lane-a", hash, now) {
-		t.Fatal("the next bucket reused the id")
+	if _, _, err := s.RecordLaneLook(ctx, "lookstale-lane", before.NoticeEventID, "looked at the old notice", "lookstale-lane", now); err == nil {
+		t.Fatal("a stale notice was accepted and would silence the newer finding")
 	}
-	lane, parsed, ok := ParseLaneCheckEventID(next)
-	if !ok || lane != "lane-a" || parsed != hash {
-		t.Fatalf("parse = %q %q %t", lane, parsed, ok)
+	after := laneCheckFindings(t, s, "lookstale-lane", now)
+	if _, changed, err := s.RecordLaneLook(ctx, "lookstale-lane", after.NoticeEventID, "looked", "lookstale-lane", now); err != nil || !changed {
+		t.Fatalf("current notice: changed=%t err=%v", changed, err)
 	}
-	ids := make([]int64, 12)
-	for i := range ids {
-		ids[i] = int64(i + 1)
+}
+
+// TestLaneCheckReclearsAfterAQuietPeriod pins the review finding on #504: a
+// lane whose findings go empty has that empty state recorded, so a finding
+// that returns with the same ids is new state and is noticed again.
+func TestLaneCheckReclearsAfterAQuietPeriod(t *testing.T) {
+	ctx := context.Background()
+	s := schemaStore(t, "lane-reclear")
+	laneCheckFixture(t, s, "reclear-project", "reclear-lane")
+	task := laneCheckTask(t, s, "reclear-project", "reclear-lane", "recurring kept work", 2)
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET created_at=$2 WHERE id=$1`, task.ID, time.Now().UTC().Add(-48*time.Hour)); err != nil {
+		t.Fatal(err)
 	}
-	text := LaneCheckNoticeText(LaneCheck{Lane: "lane-a", Findings: []LaneCheckFinding{{Name: LaneFindingKeptBacklog, TaskIDs: ids}}, NoticeEventID: next})
-	if !strings.Contains(text, "1, 2, 3, 4, 5, 6, 7, 8, 9, 10 (12)") || strings.Contains(text, "11, 12") {
-		t.Fatalf("text = %q", text)
+	now := time.Now().UTC()
+	if wrote, err := s.RunLaneCheck(ctx, now); err != nil || wrote != 1 {
+		t.Fatalf("first RunLaneCheck = %d, %v", wrote, err)
 	}
-	if !strings.Contains(text, "handoffkeep lanes look lane-a --notice "+next) {
-		t.Fatalf("text lacks the look command: %q", text)
+	cur := laneCheckFindings(t, s, "reclear-lane", now)
+	if _, _, err := s.RecordLaneLook(ctx, "reclear-lane", cur.NoticeEventID, "looked", "reclear-lane", now); err != nil {
+		t.Fatal(err)
 	}
-	// A look records the state it leaves: wait_cleared is not part of it, so
-	// the look cannot be undone by its own baseline advance (review of #504).
-	stable := []LaneCheckFinding{{Name: LaneFindingKeptBacklog, TaskIDs: []int64{7}}}
-	withWait := append(append([]LaneCheckFinding{}, stable...), LaneCheckFinding{Name: LaneFindingWaitCleared, TaskIDs: []int64{9}})
-	if laneCheckLookHash(withWait) != laneCheckLookHash(stable) {
-		t.Fatal("look hash depends on wait_cleared")
+	wait, err := s.AddTaskWait(ctx, task.ID, TaskWaitInput{OnKind: WaitOnExternal, OnRef: "ci-build", Reason: "waiting on CI"}, "tester")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if laneCheckHash(withWait) == laneCheckLookHash(withWait) {
-		t.Fatal("the notice hash must include wait_cleared")
+	// The finding disappears; the check records that empty state.
+	if wrote, err := s.RunLaneCheck(ctx, now.Add(time.Minute)); err != nil || wrote != 0 {
+		t.Fatalf("quiet RunLaneCheck = %d, %v", wrote, err)
+	}
+	var cleared int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM lane_looks WHERE lane=$1 AND actor=$2`, "reclear-lane", laneLookStoreActor).Scan(&cleared); err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 1 {
+		t.Fatalf("clearing rows = %d, want 1", cleared)
+	}
+	if _, _, err := s.ClearTaskWait(ctx, task.ID, wait.ID, "tester", "CI passed"); err != nil {
+		t.Fatal(err)
+	}
+	if wrote, err := s.RunLaneCheck(ctx, now.Add(2*time.Minute)); err != nil || wrote != 1 {
+		t.Fatalf("returning finding RunLaneCheck = %d, %v; want 1", wrote, err)
+	}
+	if got := laneCheckOutbox(t, s, "reclear-lane"); got != 2 {
+		t.Fatalf("lane_check rows = %d, want 2", got)
 	}
 }
 
