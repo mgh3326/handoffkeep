@@ -85,6 +85,21 @@ func TestDriftDayKST(t *testing.T) {
 	}
 }
 
+// TestDriftSummaryEventIDNeverCollidesWithLaneIDs pins the operator-desk
+// collision (mergewake #497 r4609810952, r4609806917): the summary id must
+// differ from every lane notice id, operator-desk's own included, or the
+// summary insert hits ON CONFLICT DO NOTHING and the day's summary is
+// silently dropped.
+func TestDriftSummaryEventIDNeverCollidesWithLaneIDs(t *testing.T) {
+	day := "2026-11-18"
+	summary := DriftSummaryEventID(day)
+	for _, lane := range []string{"lane-a", "operator-desk", "handoffkeep-design", "summary-operator-desk"} {
+		if id := DriftNoticeEventID(lane, day); id == summary {
+			t.Fatalf("summary id %q equals lane %q notice id", summary, lane)
+		}
+	}
+}
+
 // TestDriftOutboxKindWideningKeepsKinds pins the expand-only widening: the new
 // CHECK admits task_drift and every kind the previous release writes.
 func TestDriftOutboxKindWideningKeepsKinds(t *testing.T) {
@@ -104,24 +119,29 @@ func TestDriftOutboxKindWideningKeepsKinds(t *testing.T) {
 }
 
 // TestDriftEnqueueIsIdempotentPerLaneAndDay proves the marker: repeating the
-// enqueue for one day writes nothing new.
+// enqueue for one day writes nothing new. The operator-desk lane keeps its
+// own notice and the summary still goes out (mergewake #497 r4609810952,
+// r4609806917): their event ids differ.
 func TestDriftEnqueueIsIdempotentPerLaneAndDay(t *testing.T) {
 	s, _ := searchTestStore(t)
 	ctx := t.Context()
 	now := time.Date(2026, 11, 18, 1, 0, 0, 0, time.UTC)
 	since := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
 	drift := TaskDrift{
-		MergedPRNotMerged: TaskDriftClass{Count: 1, Tasks: []TaskDriftTask{driftTask(41, "lane-a", "merged", since)}},
+		MergedPRNotMerged: TaskDriftClass{Count: 2, Tasks: []TaskDriftTask{
+			driftTask(41, "lane-a", "merged", since),
+			driftTask(42, "operator-desk", "owned merge", since),
+		}},
 	}
-	if n, err := s.EnqueueDriftNotices(ctx, now, drift, TaskHygieneReport{}); err != nil || n != 2 {
-		t.Fatalf("enqueue = %d, %v; want 2 (lane + summary)", n, err)
+	if n, err := s.EnqueueDriftNotices(ctx, now, drift, TaskHygieneReport{}); err != nil || n != 3 {
+		t.Fatalf("enqueue = %d, %v; want 3 (two lanes + summary)", n, err)
 	}
 	if n, err := s.EnqueueDriftNotices(ctx, now.Add(5*time.Minute), drift, TaskHygieneReport{}); err != nil || n != 0 {
 		t.Fatalf("repeat enqueue = %d, %v; want 0", n, err)
 	}
 	var count int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE kind='task_drift'`).Scan(&count); err != nil || count != 2 {
-		t.Fatalf("task_drift rows = %d, %v; want 2", count, err)
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE kind='task_drift'`).Scan(&count); err != nil || count != 3 {
+		t.Fatalf("task_drift rows = %d, %v; want 3", count, err)
 	}
 	var event, text string
 	if err := s.pool.QueryRow(ctx, `SELECT event_id,text FROM notification_outbox WHERE target_lane='lane-a'`).Scan(&event, &text); err != nil {
@@ -134,6 +154,13 @@ func TestDriftEnqueueIsIdempotentPerLaneAndDay(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("lane text %q lacks %q", text, want)
 		}
+	}
+	var summary string
+	if err := s.pool.QueryRow(ctx, `SELECT text FROM notification_outbox WHERE event_id='drift-operator-desk-2026-11-18-summary'`).Scan(&summary); err != nil {
+		t.Fatalf("summary row missing alongside the operator-desk lane notice: %v", err)
+	}
+	if !strings.Contains(summary, "summary:") {
+		t.Fatalf("summary row is not the summary:\n%s", summary)
 	}
 }
 
@@ -150,7 +177,7 @@ func TestDriftEnqueueWritesSummaryOnEmptyDays(t *testing.T) {
 	if err := s.pool.QueryRow(ctx, `SELECT event_id,target_lane FROM notification_outbox WHERE kind='task_drift'`).Scan(&event, &lane); err != nil {
 		t.Fatal(err)
 	}
-	if event != "drift-operator-desk-2026-11-18" || lane != "operator-desk" {
+	if event != "drift-operator-desk-2026-11-18-summary" || lane != "operator-desk" {
 		t.Fatalf("summary row = %q to %q", event, lane)
 	}
 }

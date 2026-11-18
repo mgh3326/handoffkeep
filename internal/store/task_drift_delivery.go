@@ -39,9 +39,11 @@ func DriftNoticeEventID(lane, day string) string {
 }
 
 // DriftSummaryEventID is the idempotent outbox id of the operator-desk
-// summary for one day.
+// summary for one day. It carries a -summary suffix (the asker-notice
+// precedent, decisionAskerAnswerNoticeEventID) so it never equals a lane
+// notice id: lane operator-desk's own notice is drift-operator-desk-<day>.
 func DriftSummaryEventID(day string) string {
-	return "drift-operator-desk-" + day
+	return "drift-operator-desk-" + day + "-summary"
 }
 
 // DriftMetricsDocKey is the metrics document of one day.
