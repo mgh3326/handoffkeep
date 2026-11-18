@@ -29,6 +29,13 @@ func Parse(raw string) (*mysql.Config, error) {
 	cfg.DBName = strings.TrimPrefix(u.Path, "/")
 	cfg.ParseTime = true
 	cfg.Loc = time.UTC
+	// PostgreSQL stores timestamps at microsecond precision and pgx truncates
+	// to it; the MySQL driver otherwise sends nanoseconds and the server
+	// rounds DATETIME(6) up, which can put a stored time a few hundred
+	// nanoseconds after the Go time that wrote it (hk 5077).
+	if err := cfg.Apply(mysql.TimeTruncate(time.Microsecond)); err != nil {
+		return nil, err
+	}
 	// An UPDATE reports the rows it matched, as PostgreSQL does, not only the
 	// rows whose values changed: store code decides "not found" from it.
 	cfg.ClientFoundRows = true
@@ -38,7 +45,7 @@ func Parse(raw string) (*mysql.Config, error) {
 			return nil, fmt.Errorf("mysql URL parameter %q must occur once", key)
 		}
 		switch key {
-		case "time_zone", "transaction_isolation", "parseTime", "loc":
+		case "time_zone", "transaction_isolation", "parseTime", "loc", "timeTruncate":
 			return nil, fmt.Errorf("mysql URL parameter %q is controlled by the store", key)
 		case "tls":
 			cfg.TLSConfig = values[0]

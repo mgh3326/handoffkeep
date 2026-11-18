@@ -13,14 +13,12 @@ import (
 )
 
 // These are deliberately named, not a wildcard: an unexpected PostgreSQL
-// table must fail this check until its owner ports it or records an exception.
-var mysqlNotYetPorted = wordSet(`locks takes youtrack_projects yt_article_bindings yt_binding_cursor yt_binding_intents yt_decision_bindings yt_family_roots yt_feed_cursors yt_link_owned yt_link_plans yt_link_steps yt_link_unowned yt_links_sweep yt_snapshot_state`)
+// table must fail this check until its owner ports it or records an exception
+// here. Every area has now ported, so a new table must arrive with its MySQL
+// migration (hk 5077).
 var mysqlLeftOut = wordSet(`decision_notify deploy_changes deploys labels linear_board_owners linear_board_ownership_conflicts linear_board_tasks linear_capacity_state linear_create_admissions linear_decision_issues linear_decision_ops linear_issues linear_outbox schema_migrations schema_version services standing_orders status_updates task_labels task_state_migration task_subscribers verifications youtrack_attempts youtrack_cursor youtrack_decision_mirrors youtrack_doc_articles youtrack_field_cache youtrack_outbox youtrack_processed_activities`)
 
-// Tables of other areas that exist on MySQL only as the stubs of
-// migration_mysql_tasks.go; their owners extend them when they port.
-var mysqlStubs = wordSet(`youtrack_projects yt_decision_bindings yt_feed_cursors`)
-var mysqlPorted = wordSet(`attachment_refs attachment_uploads attachment_usage attachments bench_area_exceptions bench_catalog bench_grades bench_reps bench_scores change_checks change_findings change_gate_events change_tasks change_threads changes chat_message_questions chat_messages chat_questions decision_answer_attempts decision_deliveries decision_notify_digest decision_requests decision_resolutions dots_results dots_run_tokens checkpoints documents jobs ledger_cursors memory mcp_write_audit notification_outbox operator_inbox_events operator_inbox_state placement_decisions project_milestones project_owner_events quota_latest quota_leases quota_observations quota_presence relay_events reviews sync_decisions sync_log sync_state task_comments task_events task_origins task_projects task_relations task_spawn_notices task_spawn_records task_thread_cursors task_thread_deliveries tasks ticket_sets translations deploy_record_projection deploy_services yt_authority yt_comment_canary yt_comment_write_links yt_entity_map yt_task_bindings yt_write_op_alerts yt_write_ops yt_write_op_adoptions yt_issue_comment_bounds yt_issue_intents yt_binding_history youtrack_comment_links`)
+var mysqlPorted = wordSet(`attachment_refs attachment_uploads attachment_usage attachments bench_area_exceptions bench_catalog bench_grades bench_reps bench_scores change_checks change_findings change_gate_events change_tasks change_threads changes chat_message_questions chat_messages chat_questions decision_answer_attempts decision_deliveries decision_notify_digest decision_requests decision_resolutions dots_results dots_run_tokens checkpoints documents jobs ledger_cursors memory mcp_write_audit notification_outbox operator_inbox_events operator_inbox_state placement_decisions project_milestones project_owner_events quota_latest quota_leases quota_observations quota_presence relay_events reviews sync_decisions sync_log sync_state task_comments task_events task_origins task_projects task_relations task_spawn_notices task_spawn_records task_thread_cursors task_thread_deliveries tasks ticket_sets translations deploy_record_projection deploy_services yt_authority yt_comment_canary yt_comment_write_links yt_entity_map yt_task_bindings yt_write_op_alerts yt_write_ops yt_write_op_adoptions yt_issue_comment_bounds yt_issue_intents yt_binding_history youtrack_comment_links youtrack_projects yt_article_bindings yt_binding_cursor yt_binding_intents yt_decision_bindings yt_family_roots yt_feed_cursors yt_link_owned yt_link_plans yt_link_steps yt_link_unowned yt_links_sweep yt_snapshot_state`)
 
 func wordSet(s string) map[string]bool {
 	m := map[string]bool{}
@@ -50,6 +48,8 @@ var mysqlFunctionalPartialKeys = map[string][]string{
 	"chat_messages":            {"chat_messages_event_key"},
 	"decision_answer_attempts": {"decision_answer_attempts_one_deny"},
 	"mcp_write_audit":          {"mcp_write_audit_key"},
+	"yt_link_owned":            {"yt_link_owned_live"},
+	"yt_link_unowned":          {"yt_link_unowned_open"},
 }
 
 func inspectDriftSchema(t *testing.T, s *Store) driftSchema {
@@ -148,12 +148,12 @@ func TestMySQLSchemaDrift(t *testing.T) {
 	delete(p.columns["sync_log"], "txid")
 	delete(m.columns["sync_log"], "txn")
 	for table := range p.columns {
-		if !mysqlPorted[table] && !mysqlNotYetPorted[table] && !mysqlLeftOut[table] {
+		if !mysqlPorted[table] && !mysqlLeftOut[table] {
 			t.Errorf("PostgreSQL table %s is not classified", table)
 		}
 	}
 	for table := range m.columns {
-		if !mysqlPorted[table] && table != "schema_migrations" && table != "hk_locks" && !mysqlStubs[table] {
+		if !mysqlPorted[table] && table != "schema_migrations" && table != "hk_locks" {
 			t.Errorf("unexpected MySQL table %s", table)
 		}
 	}

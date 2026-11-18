@@ -374,7 +374,7 @@ func TestYTCommentQueuedRejectsWithAMovePending(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	mv, made, err := prepareYTOnceTx(ctx, tx, time.Now().UTC(), n, n.PayloadSHA)
+	mv, made, err := prepareYTOnceTx(ctx, pgTransaction{tx}, time.Now().UTC(), n, n.PayloadSHA)
 	if err != nil || !made {
 		t.Fatalf("prepare move: %v made=%v", err, made)
 	}

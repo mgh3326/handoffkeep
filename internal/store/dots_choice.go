@@ -214,7 +214,7 @@ func (s *Store) reconcileDotsChoiceTx(ctx context.Context, tx pgx.Tx, x Task, at
 		if lane != x.ParentLane {
 			eventID += "-" + lane
 		}
-		if _, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindDotsReport, lane, eventID, text, at); err != nil {
+		if _, err := insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDotsReport, lane, eventID, text, at); err != nil {
 			return Task{}, err
 		}
 	}

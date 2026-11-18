@@ -318,9 +318,6 @@ func ytCommentOnOpTx(ctx context.Context, tx transaction, c TaskComment, now tim
 // after an unbind, its sync_log row (taking the commit-time allocator lock
 // every task write takes, sync_migration.go).
 func (s *Store) AddYTTaskBinding(ctx context.Context, b YTTaskBinding, verified YTCanaryCandidate) (YTTaskBinding, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTTaskBinding{}, ErrDialectUnsupported
-	}
 	got, _, _, err := s.publishYTBinding(ctx, b, verified, ytBindingPublication{origin: YTBindingImportVerified})
 	return got, err
 }

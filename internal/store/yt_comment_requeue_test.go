@@ -81,7 +81,7 @@ func ytrqPrepareMove(t *testing.T, s *Store, task int64, projectID string) ytwri
 		t.Fatal(err)
 	}
 	defer tx.Rollback(t.Context())
-	mv, made, err := prepareYTOnceTx(t.Context(), tx, time.Now().UTC(), n, n.PayloadSHA)
+	mv, made, err := prepareYTOnceTx(t.Context(), pgTransaction{tx}, time.Now().UTC(), n, n.PayloadSHA)
 	if err != nil || !made {
 		t.Fatalf("prepare move: %v made=%v", err, made)
 	}

@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -61,9 +59,10 @@ type YTUnbindResult struct {
 
 // insertYTBindingHistoryTx appends one row to the task's binding history in
 // the caller's transaction.
-func insertYTBindingHistoryTx(ctx context.Context, tx pgx.Tx, b YTTaskBinding, action, actor, reason string, at time.Time) error {
-	_, err := tx.Exec(ctx, `INSERT INTO yt_binding_history(task_id, tenant, issue_id, origin, action, actor, reason, at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, b.TaskID, b.Tenant, b.IssueID, b.Origin, action, actor, reason, at.UTC())
+func insertYTBindingHistoryTx(ctx context.Context, tx transaction, b YTTaskBinding, action, actor, reason string, at time.Time) error {
+	_, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO yt_binding_history(task_id, tenant, issue_id, origin, action, actor, reason, at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, `INSERT INTO yt_binding_history(task_id, tenant, issue_id, origin, action, actor, reason, at)
+		VALUES (?,?,?,?,?,?,?,?)`), b.TaskID, b.Tenant, b.IssueID, b.Origin, action, actor, reason, at.UTC())
 	return err
 }
 
@@ -112,27 +111,24 @@ func insertYTBindingHistoryTx(ctx context.Context, tx pgx.Tx, b YTTaskBinding, a
 // authority row FOR SHARE (the order prepareYTOpTx has), then the task's
 // yt_write_ops rows, its binding row and its yt_entity_map row.
 func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbindOptions) (YTUnbindResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTUnbindResult{}, ErrDialectUnsupported
-	}
-
 	res := YTUnbindResult{TaskID: taskID, Rejected: []YTUnbindOp{}, Released: []int64{}, Stranded: []int64{}}
 	if taskID < 1 || o.By == "" || !validText(o.By, 200) || !validText(o.Reason, 2000) {
 		return res, errors.New("invalid task unbind")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return res, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
 	taskKey := strconv.FormatInt(taskID, 10)
-	if err := lockYTIssueOwnershipTx(ctx, s, pgTransaction{tx}, taskID); err != nil {
+	if err := lockYTIssueOwnershipTx(ctx, s, tx, taskID); err != nil {
 		return res, err
 	}
-	if err := lockYTEntity(ctx, pgTransaction{tx}, "task", taskKey); err != nil {
+	if err := lockYTEntity(ctx, tx, "task", taskKey); err != nil {
 		return res, err
 	}
-	b, found, err := readYTBinding(ctx, pgTransaction{tx}, taskID)
+	b, found, err := readYTBinding(ctx, tx, taskID)
 	if err != nil || !found {
 		return res, err
 	}
@@ -146,7 +142,7 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	if len(uncertain) > 0 {
 		return res, refuse("ops %s may have reached issue %s; resolve them first (yt ops resolve)", ytUnbindOpList(uncertain), b.IssueID)
 	}
-	pending, err := ytIssueOpPendingTx(ctx, pgTransaction{tx}, taskID)
+	pending, err := ytIssueOpPendingTx(ctx, tx, taskID)
 	if err != nil {
 		return res, err
 	}
@@ -157,13 +153,14 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	// without the binding, so an unbind that left it would not stop delivery
 	// to the issue. The canary has its own remover.
 	var enrolled bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1)`, taskID).Scan(&enrolled); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=$1)`,
+		`SELECT EXISTS(SELECT 1 FROM yt_comment_canary WHERE task_id=?)`), taskID).Scan(&enrolled); err != nil {
 		return res, err
 	}
 	if enrolled {
 		return res, refuse("the task is enrolled in the comment canary, which routes its comments without the binding; run youtrack canary remove %d first", taskID)
 	}
-	side, err := ytAuthorityShareTx(ctx, pgTransaction{tx}, YTAuthorityComments)
+	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityComments)
 	if err != nil {
 		return res, err
 	}
@@ -186,33 +183,10 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 		reason = ytwrite.ReasonUnbindForced
 	}
 	now := time.Now().UTC()
-	rows, err := tx.Query(ctx, `UPDATE yt_write_ops SET state='rejected', reason=$2, last_error=$3, resolved_at=$4
-		WHERE entity_kind='task' AND entity_id=$1 AND state='prepared' AND tenant=$10
-			AND ((principal=$5 AND kind=$6 AND (yt_target_id=$11 OR yt_target_id=''))
-				OR (principal=$7 AND kind IN ($8,$9) AND yt_target_id=$11)
-				OR (principal=$12 AND kind=$13 AND yt_target_id=$11))
-		RETURNING id, principal, kind`,
-		taskKey, reason, clipText(fmt.Sprintf("the binding to %s on %s was removed by %s", b.IssueID, b.Tenant, o.By), 2000), now,
-		YTCommentPrincipal, ytwrite.KindCommentAppend, YTFieldsPrincipal, ytwrite.KindIssueFields, ytwrite.KindIssueMove, b.Tenant, b.IssueID,
-		YTLinksPrincipal, ytwrite.KindIssueLinks)
-	if err != nil {
-		return res, err
-	}
 	var commentOps []int64
-	for rows.Next() {
-		var id int64
-		var principal, kind string
-		if err := rows.Scan(&id, &principal, &kind); err != nil {
-			rows.Close()
-			return res, err
-		}
-		res.Rejected = append(res.Rejected, YTUnbindOp{OpID: id, Kind: kind, Reason: reason})
-		if kind == ytwrite.KindCommentAppend {
-			commentOps = append(commentOps, id)
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+	res.Rejected, commentOps, err = ytRejectBindingOpsTx(ctx, tx, taskKey, b, reason,
+		clipText(fmt.Sprintf("the binding to %s on %s was removed by %s", b.IssueID, b.Tenant, o.By), 2000), now)
+	if err != nil {
 		return res, err
 	}
 	slices.SortFunc(res.Rejected, func(a, b YTUnbindOp) int { return cmp.Compare(a.OpID, b.OpID) })
@@ -225,7 +199,8 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	} else {
 		res.Released = comments
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM yt_task_bindings WHERE task_id=$1`, taskID); err != nil {
+	if _, err := tx.Exec(ctx, sqlFor(tx, `DELETE FROM yt_task_bindings WHERE task_id=$1`,
+		`DELETE FROM yt_task_bindings WHERE task_id=?`), taskID); err != nil {
 		return res, err
 	}
 	// Another task's links op that names this issue as a target and may be
@@ -243,18 +218,19 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	// issue_create) all hold the task's lane lock, which this transaction
 	// holds, so the row cannot appear or change between the read of the
 	// binding and this delete.
-	anchor, err := tx.Exec(ctx, `DELETE FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$1 AND yt_id=$2 AND (tenant=$3 OR tenant='')`,
+	anchor, err := tx.Exec(ctx, sqlFor(tx, `DELETE FROM yt_entity_map WHERE entity_kind='task' AND hk_key=$1 AND yt_id=$2 AND (tenant=$3 OR tenant='')`,
+		`DELETE FROM yt_entity_map WHERE entity_kind='task' AND hk_key=? AND yt_id=? AND (tenant=? OR tenant='')`),
 		taskKey, b.IssueID, b.Tenant)
 	if err != nil {
 		return res, err
 	}
-	res.AnchorReleased = anchor.RowsAffected() > 0
+	res.AnchorReleased = anchor > 0
 	// A pending issue intent (a task created while its project was unmapped)
 	// would make the issue worker create or adopt an issue and publish a
 	// binding again, undoing the unbind. The operator took over the task's
 	// issue; dropYTIssueIntentTx is what ensureYTIssueTx does for a task that
 	// has one.
-	if err := dropYTIssueIntentTx(ctx, pgTransaction{tx}, taskID); err != nil {
+	if err := dropYTIssueIntentTx(ctx, tx, taskID); err != nil {
 		return res, err
 	}
 	if err := insertYTBindingHistoryTx(ctx, tx, b, ytBindingActionUnbound, o.By, o.Reason, now); err != nil {
@@ -269,6 +245,84 @@ func (s *Store) UnbindYTTaskBinding(ctx context.Context, taskID int64, o YTUnbin
 	return res, tx.Commit(ctx)
 }
 
+// ytRejectBindingOpsTx rejects the prepared ops of the task's lane that the
+// removed binding admitted, and returns them in id order with the comment
+// ops among them. PostgreSQL names the rows in the UPDATE's RETURNING; MySQL
+// has no RETURNING, so it reads the same rows FOR UPDATE and updates them by
+// id in the same transaction.
+func ytRejectBindingOpsTx(ctx context.Context, tx transaction, taskKey string, b YTTaskBinding, reason, detail string, now time.Time) ([]YTUnbindOp, []int64, error) {
+	out := []YTUnbindOp{}
+	commentOps := []int64{}
+	if dialectFor(tx) == mysqlDialect {
+		rows, err := tx.Query(ctx, `SELECT id, kind FROM yt_write_ops WHERE entity_kind='task' AND entity_id=? AND state='prepared' AND tenant=?
+			AND ((principal=? AND kind=? AND (yt_target_id=? OR yt_target_id=''))
+				OR (principal=? AND kind IN (?,?) AND yt_target_id=?)
+				OR (principal=? AND kind=? AND yt_target_id=?))
+			ORDER BY id FOR UPDATE`,
+			taskKey, b.Tenant,
+			YTCommentPrincipal, ytwrite.KindCommentAppend, b.IssueID,
+			YTFieldsPrincipal, ytwrite.KindIssueFields, ytwrite.KindIssueMove, b.IssueID,
+			YTLinksPrincipal, ytwrite.KindIssueLinks, b.IssueID)
+		if err != nil {
+			return nil, nil, err
+		}
+		var ids []any
+		for rows.Next() {
+			var id int64
+			var kind string
+			if err := rows.Scan(&id, &kind); err != nil {
+				rows.Close()
+				return nil, nil, err
+			}
+			out = append(out, YTUnbindOp{OpID: id, Kind: kind, Reason: reason})
+			if kind == ytwrite.KindCommentAppend {
+				commentOps = append(commentOps, id)
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, nil, err
+		}
+		if len(ids) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE yt_write_ops SET state='rejected', reason=?, last_error=?, resolved_at=? WHERE id IN (`+placeholders(len(ids))+`)`,
+				append([]any{reason, detail, now}, ids...)...); err != nil {
+				return nil, nil, err
+			}
+		}
+		return out, commentOps, nil
+	}
+	rows, err := tx.Query(ctx, `UPDATE yt_write_ops SET state='rejected', reason=$2, last_error=$3, resolved_at=$4
+		WHERE entity_kind='task' AND entity_id=$1 AND state='prepared' AND tenant=$10
+			AND ((principal=$5 AND kind=$6 AND (yt_target_id=$11 OR yt_target_id=''))
+				OR (principal=$7 AND kind IN ($8,$9) AND yt_target_id=$11)
+				OR (principal=$12 AND kind=$13 AND yt_target_id=$11))
+		RETURNING id, principal, kind`,
+		taskKey, reason, detail, now,
+		YTCommentPrincipal, ytwrite.KindCommentAppend, YTFieldsPrincipal, ytwrite.KindIssueFields, ytwrite.KindIssueMove, b.Tenant, b.IssueID,
+		YTLinksPrincipal, ytwrite.KindIssueLinks)
+	if err != nil {
+		return nil, nil, err
+	}
+	for rows.Next() {
+		var id int64
+		var principal, kind string
+		if err := rows.Scan(&id, &principal, &kind); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		out = append(out, YTUnbindOp{OpID: id, Kind: kind, Reason: reason})
+		if kind == ytwrite.KindCommentAppend {
+			commentOps = append(commentOps, id)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return out, commentOps, nil
+}
+
 // ytLaneOp is an op of a task's lane named in a refusal.
 type ytLaneOp struct {
 	id   int64
@@ -276,9 +330,11 @@ type ytLaneOp struct {
 }
 
 // ytLaneOpsTx lists, in id order, the ops of the task's lane (entity kind
-// task) that match cond, a fixed SQL condition over yt_write_ops.
-func ytLaneOpsTx(ctx context.Context, tx pgx.Tx, taskKey, cond string) ([]ytLaneOp, error) {
-	rows, err := tx.Query(ctx, `SELECT id, kind FROM yt_write_ops WHERE entity_kind='task' AND entity_id=$1 AND `+cond+` ORDER BY id`, taskKey)
+// task) that match cond, a fixed SQL condition over yt_write_ops. cond names
+// no parameters, so one text serves both dialects.
+func ytLaneOpsTx(ctx context.Context, tx transaction, taskKey, cond string) ([]ytLaneOp, error) {
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT id, kind FROM yt_write_ops WHERE entity_kind='task' AND entity_id=$1 AND `+cond+` ORDER BY id`,
+		`SELECT id, kind FROM yt_write_ops WHERE entity_kind='task' AND entity_id=? AND `+cond+` ORDER BY id`), taskKey)
 	if err != nil {
 		return nil, err
 	}
@@ -323,12 +379,20 @@ func ytLaneOpIDs(ops []ytLaneOp) []int64 {
 
 // ytOpCommentIDsTx lists, ascending, the hk comments that the ops carry
 // through yt_comment_write_links.
-func ytOpCommentIDsTx(ctx context.Context, tx pgx.Tx, opIDs []int64) ([]int64, error) {
+func ytOpCommentIDsTx(ctx context.Context, tx transaction, opIDs []int64) ([]int64, error) {
 	out := []int64{}
 	if len(opIDs) == 0 {
 		return out, nil
 	}
-	rows, err := tx.Query(ctx, `SELECT comment_id FROM yt_comment_write_links WHERE op_id = ANY($1) ORDER BY comment_id`, opIDs)
+	args := []any{opIDs}
+	if dialectFor(tx) == mysqlDialect {
+		args = make([]any, len(opIDs))
+		for i, id := range opIDs {
+			args[i] = id
+		}
+	}
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT comment_id FROM yt_comment_write_links WHERE op_id = ANY($1) ORDER BY comment_id`,
+		`SELECT comment_id FROM yt_comment_write_links WHERE op_id IN (`+placeholders(len(opIDs))+`) ORDER BY comment_id`), args...)
 	if err != nil {
 		return nil, err
 	}

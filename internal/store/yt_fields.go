@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -81,7 +79,7 @@ func ytFieldsGateSQL(s *Store) string {
 		return `FALSE`
 	}
 	return `o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
-		WHERE b.task_id::text = o.entity_id AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
+		WHERE ` + s.q(`b.task_id::text = o.entity_id`, `CAST(b.task_id AS CHAR) = o.entity_id`) + ` AND b.issue_id = o.yt_target_id AND b.tenant = o.tenant)`
 }
 
 // ytFieldsRow is one task as the snapshot reads it, with its binding and
@@ -115,15 +113,55 @@ const ytFieldsSelectSQL = `SELECT tasks.id, tasks.title, tasks.state, tasks.prio
 	FROM tasks LEFT JOIN yt_task_bindings b ON b.task_id=tasks.id
 	WHERE tasks.id = ANY($1::bigint[])`
 
+// ytFieldsActivityMySQL is taskActivitySQL for MySQL. The job link is
+// tasks.refs->>'job_id' as MySQL's JSON_UNQUOTE, matched to jobs.job_id: MySQL's
+// jobs table has no refs column, and a JSON null becomes SQL NULL here, as
+// ->> gives it (the rule task_core_mysql.go uses). MySQL's GREATEST returns
+// NULL when any argument is NULL, where PostgreSQL's ignores NULLs, so each
+// subquery is coalesced to the task's own created_at: the result is the latest
+// of the values that exist, never NULL.
+const ytFieldsActivityMySQL = `GREATEST(tasks.created_at,
+	COALESCE((SELECT max(e.at) FROM task_events e WHERE e.task_id=tasks.id), tasks.created_at),
+	COALESCE((SELECT max(c.created_at) FROM task_comments c WHERE c.task_id=tasks.id), tasks.created_at),
+	COALESCE((SELECT max(j.updated_at) FROM jobs j WHERE j.job_id=IF(JSON_TYPE(JSON_EXTRACT(tasks.refs,'$.job_id'))='STRING',JSON_UNQUOTE(JSON_EXTRACT(tasks.refs,'$.job_id')),NULL) AND j.task_id=tasks.id), tasks.created_at))`
+
+// ytFieldsSelectSQLMySQL is the MySQL twin of ytFieldsSelectSQL for n ids in
+// an IN list (the ids are the query's arguments in order, one per
+// placeholder): the translation hash is SHA2 over the column's UTF-8 bytes
+// (the database default charset, as convert_to names it), the translation's
+// entity id is a CAST instead of ::text, and the activity uses MySQL's JSON
+// path.
+func ytFieldsSelectSQLMySQL(n int) string {
+	return `SELECT tasks.id, tasks.title, tasks.state, tasks.priority, tasks.lane, tasks.kind, tasks.refs,
+	tasks.body_doc, coalesce(tasks.project,''), coalesce(tasks.area,''), coalesce(tasks.expected,''), coalesce(tasks.parent_id,0),
+	tasks.due_at, tasks.awaiting_decision, ` + ytFieldsActivityMySQL + `,
+	coalesce((SELECT tr.text FROM translations tr WHERE tr.entity='task' AND tr.entity_id=CAST(tasks.id AS CHAR) AND tr.field='title'
+		AND tr.lang='ko' AND tr.source_sha256=SHA2(tasks.title,256) LIMIT 1),''),
+	coalesce((SELECT m.name FROM project_milestones m WHERE m.id=tasks.milestone_id),''),
+	coalesce(b.tenant,''), coalesce(b.issue_id,''), coalesce(b.project_id,''),
+	coalesce((SELECT p.yt_project_id FROM youtrack_projects p WHERE p.hk_project=tasks.project),''),
+	(EXISTS(SELECT 1 FROM youtrack_projects p WHERE p.hk_project=tasks.project AND p.yt_project_id=b.project_id)
+		OR (coalesce(tasks.project,'')='' AND NOT EXISTS(SELECT 1 FROM youtrack_projects p WHERE p.yt_project_id=b.project_id)))
+	FROM tasks LEFT JOIN yt_task_bindings b ON b.task_id=tasks.id
+	WHERE tasks.id IN (` + placeholders(n) + `)`
+}
+
 // readYTFieldsRows reads the snapshot inputs of ids at now, by task id; a
 // deleted task is absent.
-func readYTFieldsRows(ctx context.Context, q poolQuerier, ids []int64, now time.Time, stalledAfter time.Duration) (map[int64]ytFieldsRow, error) {
-	rows, err := q.Query(ctx, ytFieldsSelectSQL, ids)
+func readYTFieldsRows(ctx context.Context, q querier, ids []int64, now time.Time, stalledAfter time.Duration) (map[int64]ytFieldsRow, error) {
+	out := make(map[int64]ytFieldsRow, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	query, args := ytFieldsSelectSQL, []any{ids}
+	if dialectFor(q) == mysqlDialect {
+		query, args = ytFieldsSelectSQLMySQL(len(ids)), intArgs(ids)
+	}
+	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := make(map[int64]ytFieldsRow, len(ids))
 	for rows.Next() {
 		var r ytFieldsRow
 		f := &r.fields
@@ -201,7 +239,7 @@ func ytFieldsSkipOutcome(tenant string, t ytFieldsRow, found bool) ytFieldsOutco
 // the snapshot is the one last prepared. It returns the task's outcome and
 // the number of ops it prepared (a move and a snapshot are two) and the id of
 // the snapshot op it made, or 0.
-func prepareYTFieldsTx(ctx context.Context, tx pgx.Tx, now time.Time, tenant string, movesOn bool, id int64, t ytFieldsRow, found bool) (ytFieldsOutcome, int, int64, error) {
+func prepareYTFieldsTx(ctx context.Context, tx transaction, now time.Time, tenant string, movesOn bool, id int64, t ytFieldsRow, found bool) (ytFieldsOutcome, int, int64, error) {
 	if skip := ytFieldsSkipOutcome(tenant, t, found); skip != "" {
 		return skip, 0, 0, nil
 	}
@@ -293,12 +331,12 @@ func ytFieldsOpFor(id int64, t ytFieldsRow, project string) (ytwrite.NewOp, ytFi
 // caller holds the task's lane lock (Apply), which prepareYTSnapshotTx takes
 // again; the op queues after the issue_create on that lane. Mode off, or a
 // binding on another tenant than the gate's, prepares nothing.
-func (s *Store) ytFieldsOnBindTx(ctx context.Context, tx pgx.Tx, taskID int64, now time.Time) error {
+func (s *Store) ytFieldsOnBindTx(ctx context.Context, tx transaction, taskID int64, now time.Time) error {
 	mode, tenant := s.ytFieldsNow()
 	if mode != YTFieldsOn {
 		return nil
 	}
-	tasks, err := readYTFieldsRows(ctx, pgTransaction{tx}, []int64{taskID}, now, s.StartedStalledHours())
+	tasks, err := readYTFieldsRows(ctx, tx, []int64{taskID}, now, s.StartedStalledHours())
 	if err != nil {
 		return err
 	}
@@ -316,7 +354,7 @@ func (s *Store) ytFieldsOnBindTx(ctx context.Context, tx pgx.Tx, taskID int64, n
 // Mode off does nothing (the cursor advances). Otherwise each changed task,
 // in sync_id order, goes through prepareYTFieldsTx.
 func ytFieldsHandler(s *Store, now time.Time) FeedHandler {
-	return func(ctx context.Context, tx pgx.Tx, rows []FeedRow) error {
+	return func(ctx context.Context, tx transaction, rows []FeedRow) error {
 		mode, tenant := s.ytFieldsNow()
 		if mode != YTFieldsOn {
 			return nil
@@ -328,7 +366,7 @@ func ytFieldsHandler(s *Store, now time.Time) FeedHandler {
 				ids = append(ids, id)
 			}
 		}
-		tasks, err := readYTFieldsRows(ctx, pgTransaction{tx}, ids, now, s.StartedStalledHours())
+		tasks, err := readYTFieldsRows(ctx, tx, ids, now, s.StartedStalledHours())
 		if err != nil {
 			return err
 		}

@@ -102,12 +102,6 @@ func registerYTApplyHook(kind string, h ytApplyHook) {
 func (s *Store) ytAdmitSQL(tenant string) string {
 	kinds := make([]string, 0, len(ytKindGates))
 	for k := range ytKindGates {
-		if s.dialect == mysqlDialect && ytB4bKinds[k] {
-			// B4b kinds keep refusing on MySQL; their gates may read
-			// tables MySQL does not have yet, so the admit clause
-			// cannot reference them at all.
-			continue
-		}
 		kinds = append(kinds, k)
 	}
 	sort.Strings(kinds)
@@ -719,15 +713,4 @@ func (l *YTWriteLedger) MapGet(ctx context.Context, entityKind, hkKey string) (y
 		return ytwrite.MapRow{}, false, nil
 	}
 	return m, err == nil, err
-}
-
-// ytB4bKinds are the write kinds whose apply, schema and payload walk stay
-// PostgreSQL-only in B4a (hk 5077).
-var ytB4bKinds = map[string]bool{
-	ytwrite.KindIssueFields:    true,
-	ytwrite.KindIssueLinks:     true,
-	ytwrite.KindDecisionCreate: true,
-	ytwrite.KindDecisionFields: true,
-	ytwrite.KindArticleCreate:  true,
-	ytwrite.KindArticleUpdate:  true,
 }

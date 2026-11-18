@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -116,36 +114,9 @@ func (s *Store) ytDocsNow() (ytDocsGate, bool) {
 func init() {
 	registerYTKindGate(ytwrite.KindArticleCreate, ytArticleCreateGateSQL)
 	registerYTKindGate(ytwrite.KindArticleUpdate, ytArticleUpdateGateSQL)
-	registerYTApplyHook(ytwrite.KindArticleCreate, ytApplyHook{conflict: ytArticleConflictTxQ, bind: bindYTArticleApplyTxQ})
-	registerYTApplyHook(ytwrite.KindArticleUpdate, ytApplyHook{conflict: noYTConflictQ, bind: bindYTArticleUpdateApplyTxQ})
+	registerYTApplyHook(ytwrite.KindArticleCreate, ytApplyHook{conflict: ytArticleConflictTx, bind: bindYTArticleApplyTx})
+	registerYTApplyHook(ytwrite.KindArticleUpdate, ytApplyHook{conflict: noYTConflict, bind: bindYTArticleUpdateApplyTx})
 	registerYTFeedStoreConsumer(ytDocsConsumer, []string{"document"}, ytDocsHandler)
-}
-
-// The article hooks stay on pgx.Tx: their tables are B5. The adapters refuse
-// a MySQL store before unwrapping, never silently.
-func ytArticleConflictTxQ(ctx context.Context, tx transaction, op ytwrite.Op, ytID string) (string, error) {
-	if dialectFor(tx) == mysqlDialect {
-		return "", ErrDialectUnsupported
-	}
-	return ytArticleConflictTx(ctx, pgxTx(tx), op, ytID)
-}
-func bindYTArticleApplyTxQ(s *Store, ctx context.Context, tx transaction, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
-	if dialectFor(tx) == mysqlDialect {
-		return ErrDialectUnsupported
-	}
-	return bindYTArticleApplyTx(s, ctx, pgxTx(tx), op, ytID, now, adopted)
-}
-func noYTConflictQ(ctx context.Context, tx transaction, op ytwrite.Op, ytID string) (string, error) {
-	if dialectFor(tx) == mysqlDialect {
-		return "", ErrDialectUnsupported
-	}
-	return noYTConflict(ctx, pgxTx(tx), op, ytID)
-}
-func bindYTArticleUpdateApplyTxQ(s *Store, ctx context.Context, tx transaction, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
-	if dialectFor(tx) == mysqlDialect {
-		return ErrDialectUnsupported
-	}
-	return bindYTArticleUpdateApplyTx(s, ctx, pgxTx(tx), op, ytID, now, adopted)
 }
 
 // ytArticleCreateGateSQL is the article_create gate (ytAdmitSQL): mode on,
@@ -155,8 +126,10 @@ func ytArticleCreateGateSQL(s *Store) string {
 	if _, on := s.ytDocsNow(); !on {
 		return `FALSE`
 	}
-	return `o.entity_kind = 'document' AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b
-		WHERE b.document_id::text = o.entity_id AND b.op_id IS DISTINCT FROM o.id)`
+	return s.q(`o.entity_kind = 'document' AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b
+		WHERE b.document_id::text = o.entity_id AND b.op_id IS DISTINCT FROM o.id)`,
+		`o.entity_kind = 'document' AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b
+		WHERE CAST(b.document_id AS CHAR) = o.entity_id AND NOT (b.op_id <=> o.id))`)
 }
 
 // claimYTArticleCreateTx re-checks the source document while Claim holds its
@@ -170,13 +143,10 @@ func claimYTArticleCreateTx(ctx context.Context, tx transaction, op ytwrite.Op) 
 	if parseErr != nil || id < 1 || op.EntityKind != ytwrite.ArticleEntity {
 		return ytwrite.ReasonOutOfScope, "article_create is not on a document lane", nil
 	}
-	if dialectFor(tx) == mysqlDialect {
-		// B5: documents are not ported.
-		return "", "", ErrDialectUnsupported
-	}
 	var key string
 	var taskID *int64
-	err = pgxTx(tx).QueryRow(ctx, `SELECT key, task_id FROM documents WHERE id=$1 FOR SHARE`, id).Scan(&key, &taskID)
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT key, task_id FROM documents WHERE id=$1 FOR SHARE`,
+		"SELECT `key`, task_id FROM documents WHERE id=? FOR SHARE"), id).Scan(&key, &taskID)
 	if errors.Is(err, ErrNoRows) {
 		return ytwrite.ReasonOutOfScope, "document was deleted before article_create dispatch", nil
 	}
@@ -202,8 +172,10 @@ func ytArticleUpdateGateSQL(s *Store) string {
 	if _, on := s.ytDocsNow(); !on {
 		return `FALSE`
 	}
-	return `o.entity_kind = 'document' AND EXISTS (SELECT 1 FROM yt_article_bindings b
-		WHERE b.document_id::text = o.entity_id AND b.article_id = o.yt_target_id AND b.tenant = o.tenant)`
+	return s.q(`o.entity_kind = 'document' AND EXISTS (SELECT 1 FROM yt_article_bindings b
+		WHERE b.document_id::text = o.entity_id AND b.article_id = o.yt_target_id AND b.tenant = o.tenant)`,
+		`o.entity_kind = 'document' AND EXISTS (SELECT 1 FROM yt_article_bindings b
+		WHERE CAST(b.document_id AS CHAR) = o.entity_id AND b.article_id = o.yt_target_id AND b.tenant = o.tenant)`)
 }
 
 // ytArticleInScope reports whether the document kinds write the document:
@@ -269,7 +241,9 @@ type ytArticleRow struct {
 	// the document (youtrack_doc_articles, its first part; "" for none),
 	// legacyProject the YouTrack project it put it in (the youtrack_projects
 	// mapping of the ledger's hk project, "" when unknown) and legacyParts the
-	// number of parts it split the document into.
+	// number of parts it split the document into. youtrack_doc_articles is
+	// left out of MySQL (hk 5077, design §2): there all three read as empty,
+	// so a create never adopts a legacy article on that dialect.
 	legacyArticle string
 	legacyProject string
 	legacyParts   int
@@ -313,15 +287,77 @@ func ytArticleCreateSQL(principal, kind, reason, unsupported string) (held, retr
 	return held, retry
 }
 
+// ytArticleCreateSQLMySQL is ytArticleCreateSQL's MySQL twin (hk 5077): the
+// same chain over the same keys, with CONCAT for PostgreSQL's `||` and
+// CAST(id AS CHAR) for `::text`. The placeholders are passed as PostgreSQL
+// numbers so the enclosing statement can convert them (ytMySQLArgs).
+func ytArticleCreateSQLMySQL(principal, kind, reason, unsupported string) (held, retry string) {
+	first := `o.principal = ` + principal + ` AND o.kind = ` + kind + ` AND o.idem_key = CONCAT('document-article:', CAST(d.id AS CHAR))`
+	retryable := `o.state = 'rejected' AND o.reason = ` + reason + ` AND o.attempts = 0`
+	again := `r.state = 'rejected' AND r.reason = ` + unsupported + ` AND r.attempts <= 1`
+	next := func(a, b string) string {
+		return b + `.principal = ` + a + `.principal AND ` + b + `.kind = ` + a + `.kind
+		AND ` + b + `.idem_key = CONCAT(` + a + `.idem_key, ':retry-', CAST(` + a + `.id AS CHAR))`
+	}
+	retried := func(a string) string { return `EXISTS (SELECT 1 FROM yt_write_ops n WHERE ` + next(a, "n") + `)` }
+	held = `EXISTS (SELECT 1 FROM yt_write_ops o WHERE ` + first + ` AND (NOT (` + retryable + `)
+		OR EXISTS (SELECT 1 FROM yt_write_ops r WHERE ` + next("o", "r") + ` AND (NOT (` + again + `) OR ` + retried("r") + `))))`
+	retry = `coalesce((SELECT o.id FROM yt_write_ops o WHERE ` + first + ` AND ` + retryable + ` AND NOT ` + retried("o") + `),
+		(SELECT r.id FROM yt_write_ops o JOIN yt_write_ops r ON ` + next("o", "r") + `
+			WHERE ` + first + ` AND ` + retryable + ` AND ` + again + ` AND NOT ` + retried("r") + `), 0)`
+	return held, retry
+}
+
+// ytMySQLArgs turns a statement's PostgreSQL numbered placeholders ($n) into
+// MySQL's positional ? and returns the arguments in the order MySQL expects,
+// repeating the value of a placeholder that occurs more than once. A MySQL
+// twin of one of this file's statements therefore differs from PostgreSQL's
+// only in its SQL, and is written with the same numbers; no literal in these
+// statements contains a '$'.
+func ytMySQLArgs(query string, args ...any) (string, []any) {
+	var b strings.Builder
+	b.Grow(len(query))
+	out := make([]any, 0, len(args))
+	for i := 0; i < len(query); i++ {
+		if query[i] != '$' || i+1 == len(query) || query[i+1] < '0' || query[i+1] > '9' {
+			b.WriteByte(query[i])
+			continue
+		}
+		j, n := i+1, 0
+		for j < len(query) && query[j] >= '0' && query[j] <= '9' {
+			n = n*10 + int(query[j]-'0')
+			j++
+		}
+		if n < 1 || n > len(args) {
+			b.WriteString(query[i:j])
+			i = j - 1
+			continue
+		}
+		b.WriteByte('?')
+		out = append(out, args[n-1])
+		i = j - 1
+	}
+	return b.String(), out
+}
+
 // readYTArticleRow reads document id; nil when it is gone.
-func readYTArticleRow(ctx context.Context, tx pgx.Tx, id int64) (*ytArticleRow, error) {
+func readYTArticleRow(ctx context.Context, tx transaction, id int64) (*ytArticleRow, error) {
 	r := &ytArticleRow{}
 	held, retry := ytArticleCreateSQL("$2", "$3", "$4", "$5")
-	err := scanYTArticleCandidate(tx.QueryRow(ctx, ytArticleCandidateSQL+`, d.body, d.created_at, `+held+`, `+retry+`,
+	args := []any{id, YTDocsPrincipal, ytwrite.KindArticleCreate, ytwrite.ReasonInvalidIssue, ytwrite.ReasonUnsupportedKind}
+	query := ytArticleCandidateSQL + `, d.body, d.created_at, ` + held + `, ` + retry + `,
 			coalesce((SELECT l.article_id FROM youtrack_doc_articles l WHERE l.doc_key = d.key), ''),
 			coalesce((SELECT l.part_count FROM youtrack_doc_articles l WHERE l.doc_key = d.key), 0),
-			coalesce((SELECT lp.yt_project_id FROM youtrack_doc_articles l JOIN youtrack_projects lp ON lp.hk_project = l.hk_project WHERE l.doc_key = d.key), '')`+ytArticleCandidateFrom+` WHERE d.id = $1`,
-		id, YTDocsPrincipal, ytwrite.KindArticleCreate, ytwrite.ReasonInvalidIssue, ytwrite.ReasonUnsupportedKind), &r.doc, &r.body, &r.createdAt, &r.created, &r.retryOf, &r.legacyArticle, &r.legacyParts, &r.legacyProject)
+			coalesce((SELECT lp.yt_project_id FROM youtrack_doc_articles l JOIN youtrack_projects lp ON lp.hk_project = l.hk_project WHERE l.doc_key = d.key), '')` + ytArticleCandidateFrom + ` WHERE d.id = $1`
+	if dialectFor(tx) == mysqlDialect {
+		// youtrack_doc_articles is left out of MySQL (hk 5077, design §2):
+		// the legacy article, its part count and its project read as literals,
+		// so a MySQL create never adopts one.
+		held, retry = ytArticleCreateSQLMySQL("$2", "$3", "$4", "$5")
+		query = ytArticleCandidateSQLMySQL + `, d.body, d.created_at, ` + held + `, ` + retry + `, '', 0, ''` + ytArticleCandidateFrom + ` WHERE d.id = $1`
+		query, args = ytMySQLArgs(query, args...)
+	}
+	err := scanYTArticleCandidate(tx.QueryRow(ctx, query, args...), &r.doc, &r.body, &r.createdAt, &r.created, &r.retryOf, &r.legacyArticle, &r.legacyParts, &r.legacyProject)
 	if errors.Is(err, ErrNoRows) {
 		return nil, nil
 	}
@@ -330,11 +366,12 @@ func readYTArticleRow(ctx context.Context, tx pgx.Tx, id int64) (*ytArticleRow, 
 	}
 	r.createdAt = r.createdAt.UTC()
 	if r.retryOf > 0 {
-		if err := tx.QueryRow(ctx, `SELECT idem_key FROM yt_write_ops WHERE id = $1`, r.retryOf).Scan(&r.retryKey); err != nil {
+		if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT idem_key FROM yt_write_ops WHERE id = $1`,
+			`SELECT idem_key FROM yt_write_ops WHERE id = ?`), r.retryOf).Scan(&r.retryKey); err != nil {
 			return nil, err
 		}
 	}
-	r.binding, r.bound, err = readYTArticleBinding(ctx, pgTransaction{tx}, id)
+	r.binding, r.bound, err = readYTArticleBinding(ctx, tx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -381,13 +418,14 @@ func ytArticleFamily(id int64, key string) string {
 // the policy document its body amends (ytArticleAmends), else its family root
 // (ytArticleFamily). pending is true while that policy has no article on
 // tenant: the create waits, prepares no op, and the catch-up retries it.
-func ytArticleParentTx(ctx context.Context, tx pgx.Tx, tenant string, id int64, doc YTArticleCandidate, body string) (family, articleID string, pending bool, err error) {
+func ytArticleParentTx(ctx context.Context, tx transaction, tenant string, id int64, doc YTArticleCandidate, body string) (family, articleID string, pending bool, err error) {
 	policy := ytArticleAmends(doc.Key, body)
 	if policy == "" {
 		return ytArticleFamily(id, doc.Key), "", false, nil
 	}
 	var bt, article string
-	err = tx.QueryRow(ctx, `SELECT b.tenant, b.article_id FROM documents d JOIN yt_article_bindings b ON b.document_id = d.id WHERE d.key = $1`, policy).Scan(&bt, &article)
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT b.tenant, b.article_id FROM documents d JOIN yt_article_bindings b ON b.document_id = d.id WHERE d.key = $1`,
+		"SELECT b.tenant, b.article_id FROM documents d JOIN yt_article_bindings b ON b.document_id = d.id WHERE d.`key` = ?"), policy).Scan(&bt, &article)
 	if errors.Is(err, ErrNoRows) {
 		err = nil
 	}
@@ -450,7 +488,7 @@ func ytArticleTarget(g ytDocsGate, c YTArticleCandidate) (YTArticleProject, bool
 // before any claim, which a create that now checks replaces, hk 4295, and
 // that retry refused unsupported_kind on its first claim, hk 4357). A
 // document whose snapshot the protocol cannot store is skipped and logged.
-func prepareYTArticleTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDocsGate, id int64, r *ytArticleRow) (ytArticleOutcome, error) {
+func prepareYTArticleTx(ctx context.Context, tx transaction, now time.Time, g ytDocsGate, id int64, r *ytArticleRow) (ytArticleOutcome, error) {
 	if r == nil {
 		return ytArticleDeleted, nil
 	}
@@ -534,7 +572,7 @@ func prepareYTArticleTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDocsG
 	if err != nil {
 		return "", err
 	}
-	op, created, err := prepareYTOpTx(ctx, pgTransaction{tx}, now, n)
+	op, created, err := prepareYTOpTx(ctx, tx, now, n)
 	if err != nil {
 		return "", err
 	}
@@ -546,14 +584,14 @@ func prepareYTArticleTx(ctx context.Context, tx pgx.Tx, now time.Time, g ytDocsG
 		if r.legacyParts <= 1 {
 			detail = fmt.Sprintf("the legacy article %s's project has no YouTrack id in youtrack_projects", r.legacyArticle)
 		}
-		if _, err := rejectYTOpTx(ctx, pgTransaction{tx}, now, op.ID, ytwrite.ReasonLegacySyncedUnverified, detail); err != nil {
+		if _, err := rejectYTOpTx(ctx, tx, now, op.ID, ytwrite.ReasonLegacySyncedUnverified, detail); err != nil {
 			return "", err
 		}
 		log.Printf("ytwrite.article_create_rejected op_id=%d document_id=%d reason=%s err=%q", op.ID, id, ytwrite.ReasonLegacySyncedUnverified, detail)
 		return ytArticleLegacyUnverified, nil
 	}
 	if cerr := ytwrite.CheckArticle(req); cerr != nil {
-		if _, err := rejectYTOpTx(ctx, pgTransaction{tx}, now, op.ID, ytwrite.ReasonInvalidIssue, cerr.Error()); err != nil {
+		if _, err := rejectYTOpTx(ctx, tx, now, op.ID, ytwrite.ReasonInvalidIssue, cerr.Error()); err != nil {
 			return "", err
 		}
 		log.Printf("ytwrite.article_create_rejected op_id=%d document_id=%d err=%q", op.ID, id, cerr.Error())
@@ -582,7 +620,7 @@ func articleFeedIDs(rows []FeedRow) []int64 {
 // document, in sync_id order, is read under its lane lock and goes through
 // prepareYTArticleTx.
 func ytDocsHandler(s *Store, now time.Time) FeedHandler {
-	return func(ctx context.Context, tx pgx.Tx, rows []FeedRow) error {
+	return func(ctx context.Context, tx transaction, rows []FeedRow) error {
 		g, on := s.ytDocsNow()
 		if !on {
 			return nil
@@ -596,7 +634,7 @@ func ytDocsHandler(s *Store, now time.Time) FeedHandler {
 			// Read under the lane lock a create's Apply publishes the
 			// binding under: a binding committed before this read is seen,
 			// and one after it waits for this pass.
-			if err := lockYTEntity(ctx, pgTransaction{tx}, ytwrite.ArticleEntity, strconv.FormatInt(id, 10)); err != nil {
+			if err := lockYTEntity(ctx, tx, ytwrite.ArticleEntity, strconv.FormatInt(id, 10)); err != nil {
 				return err
 			}
 			r, err := readYTArticleRow(ctx, tx, id)
@@ -627,13 +665,14 @@ func ytDocsHandler(s *Store, now time.Time) FeedHandler {
 // the previous release wrote with no tenant can sit beside this tenant's row
 // for the same article (the unique index is per tenant), and either one is a
 // conflict, never a "more than one row" error that fails the apply.
-func ytArticleConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string) (string, error) {
+func ytArticleConflictTx(ctx context.Context, tx transaction, op ytwrite.Op, ytID string) (string, error) {
 	id, err := strconv.ParseInt(op.EntityID, 10, 64)
 	if err != nil || id < 1 || op.EntityKind != ytwrite.ArticleEntity {
 		return "", fmt.Errorf("article_create op %d is not on a document lane (%s:%s)", op.ID, op.EntityKind, op.EntityID)
 	}
 	var detail string
-	err = tx.QueryRow(ctx, `SELECT coalesce(
+	args := []any{id, op.Tenant, ytID, op.EntityID}
+	query := `SELECT coalesce(
 		(SELECT 'document is bound to article '||article_id||' on '||tenant||' ('||origin||')' FROM yt_article_bindings
 			WHERE document_id=$1 AND (tenant<>$2 OR article_id<>$3)),
 		(SELECT 'article is bound to document '||document_id FROM yt_article_bindings
@@ -643,7 +682,23 @@ func ytArticleConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID str
 		(SELECT 'article is mapped to document '||hk_key FROM yt_entity_map
 			WHERE entity_kind='document' AND (tenant=$2 OR tenant='') AND yt_id=$3 AND hk_key<>$4
 			ORDER BY hk_key LIMIT 1),
-		'')`, id, op.Tenant, ytID, op.EntityID).Scan(&detail)
+		'')`
+	if dialectFor(tx) == mysqlDialect {
+		// MySQL has CONCAT where PostgreSQL concatenates with `||` (hk 5077).
+		query = `SELECT coalesce(
+		(SELECT CONCAT('document is bound to article ', article_id, ' on ', tenant, ' (', origin, ')') FROM yt_article_bindings
+			WHERE document_id=$1 AND (tenant<>$2 OR article_id<>$3)),
+		(SELECT CONCAT('article is bound to document ', document_id) FROM yt_article_bindings
+			WHERE tenant=$2 AND article_id=$3 AND document_id<>$1 LIMIT 1),
+		(SELECT CONCAT('document is mapped to article ', yt_id) FROM yt_entity_map
+			WHERE entity_kind='document' AND hk_key=$4 AND yt_id<>$3),
+		(SELECT CONCAT('article is mapped to document ', hk_key) FROM yt_entity_map
+			WHERE entity_kind='document' AND (tenant=$2 OR tenant='') AND yt_id=$3 AND hk_key<>$4
+			ORDER BY hk_key LIMIT 1),
+		'')`
+		query, args = ytMySQLArgs(query, args...)
+	}
+	err = tx.QueryRow(ctx, query, args...).Scan(&detail)
 	if err != nil {
 		return "", err
 	}
@@ -661,8 +716,22 @@ func ytArticleConflictTx(ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID str
 // document's update when its body changed since the op was prepared (or the
 // article was adopted, whose content the op did not write: needs_update). A
 // binding of the document to this same article is kept as it is.
-func bindYTArticleApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
+func bindYTArticleApplyTx(s *Store, ctx context.Context, tx transaction, op ytwrite.Op, ytID string, now time.Time, adopted bool) error {
 	id, _ := strconv.ParseInt(op.EntityID, 10, 64)
+	// The document is locked FOR SHARE before its binding is written, as
+	// AddYTArticleBinding does: the prune takes FOR UPDATE on the documents it
+	// deletes (doc_prune.go), so a binding cannot commit for a document the
+	// prune is deleting, and the prune's binding predicate cannot be stale
+	// (hk 5077). A document deleted before the apply cannot be given a binding
+	// that outlives it: the op is the conflict the protocol records.
+	var taskID *int64
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT task_id FROM documents WHERE id=$1 FOR SHARE`,
+		`SELECT task_id FROM documents WHERE id=? FOR SHARE`), id).Scan(&taskID); err != nil {
+		if errors.Is(err, ErrNoRows) {
+			return fmt.Errorf("%w: document %d was deleted before the op applied", ytwrite.ErrConflictingResult, id)
+		}
+		return err
+	}
 	var p ytwrite.ArticleCreatePayload
 	if err := json.Unmarshal(op.Payload, &p); err != nil {
 		return fmt.Errorf("payload of op %d: %w", op.ID, err)
@@ -672,14 +741,30 @@ func bindYTArticleApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.O
 		// The legacy sync's article, in its own project.
 		origin, project = YTBindingImportVerified, p.LegacyProjectID
 	}
-	tag, err := tx.Exec(ctx, `INSERT INTO yt_article_bindings(document_id, tenant, article_id, article_readable, project_id, part, generation, content_sha, origin, op_id, needs_update, bound_by, bound_at)
-		VALUES ($1,$2,$3,'',$4,0,0,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING`,
-		id, op.Tenant, ytID, project, ytwrite.ContentSHA(p.Body), origin, op.ID, adopted, op.Principal, now.UTC())
+	// MySQL has no ON CONFLICT DO NOTHING: a plain INSERT, whose unique
+	// violation is either this document's own row (the binding is kept as it
+	// is) or another document's claim on the article (the apply rolls back, as
+	// ON CONFLICT DO NOTHING's no-row result does). CLIENT_FOUND_ROWS would
+	// make an upsert report 1 for the no-op too (B2's finding 5).
+	insert := `INSERT INTO yt_article_bindings(document_id, tenant, article_id, article_readable, project_id, part, generation, content_sha, origin, op_id, needs_update, bound_by, bound_at)
+		VALUES ($1,$2,$3,'',$4,0,0,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING`
+	args := []any{id, op.Tenant, ytID, project, ytwrite.ContentSHA(p.Body), origin, op.ID, adopted, op.Principal, now.UTC()}
+	var written int64
+	var err error
+	if dialectFor(tx) == mysqlDialect {
+		written, err = tx.Exec(ctx, `INSERT INTO yt_article_bindings(document_id, tenant, article_id, article_readable, project_id, part, generation, content_sha, origin, op_id, needs_update, bound_by, bound_at)
+		VALUES (?,?,?,'',?,0,0,?,?,?,?,?,?)`, args...)
+		if errors.Is(err, errUniqueViolation) {
+			written, err = 0, nil
+		}
+	} else {
+		written, err = tx.Exec(ctx, insert, args...)
+	}
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		have, found, err := readYTArticleBinding(ctx, pgTransaction{tx}, id)
+	if written == 0 {
+		have, found, err := readYTArticleBinding(ctx, tx, id)
 		if err != nil {
 			return err
 		}
@@ -701,7 +786,7 @@ func bindYTArticleApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.O
 // ytArticleSnapshotTx prepares document id's update in tx when the mode is
 // on and it is bound on the gate's tenant (no op for an unchanged body). The
 // caller holds the document's lane lock.
-func (s *Store) ytArticleSnapshotTx(ctx context.Context, tx pgx.Tx, id int64, now time.Time) (ytArticleOutcome, error) {
+func (s *Store) ytArticleSnapshotTx(ctx context.Context, tx transaction, id int64, now time.Time) (ytArticleOutcome, error) {
 	g, on := s.ytDocsNow()
 	if !on {
 		return "", nil
@@ -723,9 +808,11 @@ func (s *Store) ytArticleSnapshotTx(ctx context.Context, tx pgx.Tx, id int64, no
 const ytArticleBaselineKind = "article_baseline"
 
 // setYTArticleBaselineTx records document id's post-switch baseline.
-func setYTArticleBaselineTx(ctx context.Context, tx pgx.Tx, id int64, sha string) error {
-	_, err := tx.Exec(ctx, `INSERT INTO yt_snapshot_state(entity_kind,entity_id,kind,seq,last_sha,last_op_id) VALUES($1,$2,$3,1,$4,0)
+func setYTArticleBaselineTx(ctx context.Context, tx transaction, id int64, sha string) error {
+	_, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO yt_snapshot_state(entity_kind,entity_id,kind,seq,last_sha,last_op_id) VALUES($1,$2,$3,1,$4,0)
 		ON CONFLICT (entity_kind,entity_id,kind) DO UPDATE SET last_sha=EXCLUDED.last_sha`,
+		`INSERT INTO yt_snapshot_state(entity_kind,entity_id,kind,seq,last_sha,last_op_id) VALUES(?,?,?,1,?,0)
+		ON DUPLICATE KEY UPDATE last_sha=VALUES(last_sha)`),
 		ytwrite.ArticleEntity, strconv.FormatInt(id, 10), ytArticleBaselineKind, sha)
 	return err
 }
@@ -735,9 +822,10 @@ func setYTArticleBaselineTx(ctx context.Context, tx pgx.Tx, id int64, sha string
 // preparation takes it) and sha is the document's post-switch baseline. Under
 // hk (a rollback) the baseline is deleted and the body is written; the
 // switch gate counts it until then.
-func ytArticleSupersededTx(ctx context.Context, tx pgx.Tx, id int64, sha string) (bool, error) {
+func ytArticleSupersededTx(ctx context.Context, tx transaction, id int64, sha string) (bool, error) {
 	var baseline string
-	err := tx.QueryRow(ctx, `SELECT last_sha FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3`,
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT last_sha FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3`,
+		`SELECT last_sha FROM yt_snapshot_state WHERE entity_kind=? AND entity_id=? AND kind=?`),
 		ytwrite.ArticleEntity, strconv.FormatInt(id, 10), ytArticleBaselineKind).Scan(&baseline)
 	if errors.Is(err, ErrNoRows) || (err == nil && baseline != sha) {
 		return false, nil
@@ -745,21 +833,22 @@ func ytArticleSupersededTx(ctx context.Context, tx pgx.Tx, id int64, sha string)
 	if err != nil {
 		return false, err
 	}
-	side, err := ytAuthorityShareTx(ctx, pgTransaction{tx}, YTAuthorityDocuments)
+	side, err := ytAuthorityShareTx(ctx, tx, YTAuthorityDocuments)
 	if err != nil || side == YTAuthorityYouTrack {
 		return side == YTAuthorityYouTrack, err
 	}
 	// hk is canonical again (a rollback): the body is written now, and the
 	// baseline is spent with this preparation (r4548095657), so the rescan
 	// does not prepare it again should the update be rejected.
-	_, err = tx.Exec(ctx, `DELETE FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3`,
+	_, err = tx.Exec(ctx, sqlFor(tx, `DELETE FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3`,
+		`DELETE FROM yt_snapshot_state WHERE entity_kind=? AND entity_id=? AND kind=?`),
 		ytwrite.ArticleEntity, strconv.FormatInt(id, 10), ytArticleBaselineKind)
 	return false, err
 }
 
 // noYTConflict is the conflict check of an apply hook that publishes no new
 // mapping.
-func noYTConflict(context.Context, pgx.Tx, ytwrite.Op, string) (string, error) { return "", nil }
+func noYTConflict(context.Context, transaction, ytwrite.Op, string) (string, error) { return "", nil }
 
 // bindYTArticleUpdateApplyTx records, with an applied article_update, that
 // the bound article holds the op's body: content_sha becomes the body's
@@ -773,7 +862,7 @@ func noYTConflict(context.Context, pgx.Tx, ytwrite.Op, string) (string, error) {
 // the body A the article held when the feed saw A (and found it unchanged),
 // so the article now holds B while the document is A, and no feed row is
 // left to notice. The re-check prepares A's update behind this op.
-func bindYTArticleUpdateApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytwrite.Op, _ string, now time.Time, _ bool) error {
+func bindYTArticleUpdateApplyTx(s *Store, ctx context.Context, tx transaction, op ytwrite.Op, _ string, now time.Time, _ bool) error {
 	var p ytwrite.ArticleUpdatePayload
 	if err := json.Unmarshal(op.Payload, &p); err != nil {
 		return fmt.Errorf("payload of op %d: %w", op.ID, err)
@@ -786,12 +875,21 @@ func bindYTArticleUpdateApplyTx(s *Store, ctx context.Context, tx pgx.Tx, op ytw
 	if err != nil {
 		return fmt.Errorf("article_update op %d is not on a document lane: %w", op.ID, err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE yt_article_bindings SET content_sha=$4, needs_update=false
-		WHERE document_id=$1 AND tenant=$2 AND article_id=$3`, id, op.Tenant, op.YTTargetID, ytwrite.ContentSHA(p.Content)); err != nil {
+	// MySQL binds the SET's placeholder before the WHERE's, PostgreSQL numbers
+	// it $4.
+	articleUpdateArgs := []any{ytwrite.ContentSHA(p.Content), id, op.Tenant, op.YTTargetID}
+	if dialectFor(tx) != mysqlDialect {
+		articleUpdateArgs = []any{id, op.Tenant, op.YTTargetID, ytwrite.ContentSHA(p.Content)}
+	}
+	if _, err := tx.Exec(ctx, sqlFor(tx, `UPDATE yt_article_bindings SET content_sha=$4, needs_update=false
+		WHERE document_id=$1 AND tenant=$2 AND article_id=$3`,
+		`UPDATE yt_article_bindings SET content_sha=?, needs_update=false
+		WHERE document_id=? AND tenant=? AND article_id=?`), articleUpdateArgs...); err != nil {
 		return err
 	}
 	// The article now holds an hk body: no post-switch baseline is left.
-	if _, err := tx.Exec(ctx, `DELETE FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3`,
+	if _, err := tx.Exec(ctx, sqlFor(tx, `DELETE FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3`,
+		`DELETE FROM yt_snapshot_state WHERE entity_kind=? AND entity_id=? AND kind=?`),
 		ytwrite.ArticleEntity, op.EntityID, ytArticleBaselineKind); err != nil {
 		return err
 	}
@@ -820,6 +918,22 @@ func ytArticleCatchUpSelectSQL(held string) string {
 			OR (b.tenant = $5 AND (b.needs_update OR b.content_sha IS DISTINCT FROM d.sha256)
 				AND ($7 OR EXISTS (SELECT 1 FROM yt_snapshot_state st WHERE st.entity_kind = 'document'
 					AND st.entity_id = d.id::text AND st.kind = $8 AND st.last_sha = d.sha256))))
+		ORDER BY d.id LIMIT $6`
+}
+
+// ytArticleCatchUpSelectSQLMySQL is ytArticleCatchUpSelectSQL's MySQL twin
+// (hk 5077): MySQL has no LATERAL, so the binding is a plain LEFT JOIN on its
+// primary key (one row per document), `NOT (a <=> b)` stands for IS DISTINCT
+// FROM, and CAST(d.id AS CHAR) for d.id::text. The placeholders keep
+// PostgreSQL's numbers; ytMySQLArgs converts them.
+func ytArticleCatchUpSelectSQLMySQL(held string) string {
+	return `SELECT d.id, d.` + "`key`" + `, coalesce(d.task_id,0) FROM documents d
+		LEFT JOIN yt_article_bindings b ON b.document_id = d.id
+		WHERE d.id > $1 AND (
+			(b.document_id IS NULL AND d.created_at >= $2 AND NOT ` + held + `)
+			OR (b.tenant = $5 AND (b.needs_update OR NOT (b.content_sha <=> d.sha256))
+				AND ($7 OR EXISTS (SELECT 1 FROM yt_snapshot_state st WHERE st.entity_kind = 'document'
+					AND st.entity_id = CAST(d.id AS CHAR) AND st.kind = $8 AND st.last_sha = d.sha256))))
 		ORDER BY d.id LIMIT $6`
 }
 
@@ -853,8 +967,21 @@ func (s *Store) catchUpYTArticles(ctx context.Context, now time.Time, bound bool
 	var after int64
 	held, _ := ytArticleCreateSQL("$3", "$4", "$9", "$10")
 	query := ytArticleCatchUpSelectSQL(held)
+	args := []any{after, YTImportEndedAt, YTDocsPrincipal, ytwrite.KindArticleCreate, g.tenant, ytArticleCatchUpPage, bound, ytArticleBaselineKind, ytwrite.ReasonInvalidIssue, ytwrite.ReasonUnsupportedKind}
+	mysql := s.dialect == mysqlDialect
+	if mysql {
+		held, _ = ytArticleCreateSQLMySQL("$3", "$4", "$9", "$10")
+		query = ytArticleCatchUpSelectSQLMySQL(held)
+	}
 	for {
-		rows, err := s.pool.Query(ctx, query, after, YTImportEndedAt, YTDocsPrincipal, ytwrite.KindArticleCreate, g.tenant, ytArticleCatchUpPage, bound, ytArticleBaselineKind, ytwrite.ReasonInvalidIssue, ytwrite.ReasonUnsupportedKind)
+		args[0] = after
+		pageQuery, pageArgs := query, args
+		if mysql {
+			// The placeholders are converted per page: $1 (after) is the
+			// value that moves.
+			pageQuery, pageArgs = ytMySQLArgs(query, args...)
+		}
+		rows, err := s.db().Query(ctx, pageQuery, pageArgs...)
 		if err != nil {
 			return counts, noProject, err
 		}
@@ -897,12 +1024,13 @@ func (s *Store) catchUpYTArticles(ctx context.Context, now time.Time, bound bool
 
 // catchUpYTArticle is one document's catch-up transaction.
 func (s *Store) catchUpYTArticle(ctx context.Context, now time.Time, g ytDocsGate, id int64) (ytArticleOutcome, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return "", err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if err := lockYTEntity(ctx, pgTransaction{tx}, ytwrite.ArticleEntity, strconv.FormatInt(id, 10)); err != nil {
+	if err := lockYTEntity(ctx, tx, ytwrite.ArticleEntity, strconv.FormatInt(id, 10)); err != nil {
 		return "", err
 	}
 	r, err := readYTArticleRow(ctx, tx, id)
@@ -942,7 +1070,8 @@ func (s *Store) catchUpYTArticlesOnce(ctx context.Context, now time.Time) error 
 	}
 	if full {
 		var cursor bool
-		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM yt_feed_cursors WHERE consumer=$1)`, ytDocsConsumer).Scan(&cursor); err != nil || !cursor {
+		if err := s.db().QueryRow(ctx, sqlFor(s, `SELECT EXISTS(SELECT 1 FROM yt_feed_cursors WHERE consumer=$1)`,
+			`SELECT EXISTS(SELECT 1 FROM yt_feed_cursors WHERE consumer=?)`), ytDocsConsumer).Scan(&cursor); err != nil || !cursor {
 			return err
 		}
 	}
@@ -975,15 +1104,31 @@ const ytArticlesUnwrittenMax = 10
 // authority switch refuses while the count is not zero, whatever any
 // process's catch-up has scanned: it is the state, not a record of work.
 // It returns the count and up to ytArticlesUnwrittenMax ids.
-func ytArticlesUnwrittenTx(ctx context.Context, tx pgx.Tx, tenant string) (int, []int64, error) {
-	rows, err := tx.Query(ctx, `SELECT d.id, d.key, coalesce(d.task_id,0), octet_length(d.body), d.created_at,
+func ytArticlesUnwrittenTx(ctx context.Context, tx transaction, tenant string) (int, []int64, error) {
+	args := []any{tenant, YTDocsPrincipal, YTImportEndedAt}
+	query := `SELECT d.id, d.key, coalesce(d.task_id,0), octet_length(d.body), d.created_at,
 			b.document_id IS NOT NULL, b.document_id IS NOT NULL AND b.content_sha IS NULL
 		FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id = d.id
 		WHERE NOT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.principal = $2 AND o.entity_kind = 'document' AND o.entity_id = d.id::text
 				AND o.state IN ('prepared','dispatched','remote_unknown'))
 			AND ((b.document_id IS NULL AND d.created_at >= $3)
 				OR (b.tenant = $1 AND (b.needs_update OR b.content_sha IS DISTINCT FROM d.sha256)))
-		ORDER BY d.id`, tenant, YTDocsPrincipal, YTImportEndedAt)
+		ORDER BY d.id`
+	if dialectFor(tx) == mysqlDialect {
+		// LENGTH is MySQL's octet_length, CAST(id AS CHAR) its ::text and
+		// NOT (a <=> b) its IS DISTINCT FROM; `key` is quoted because MySQL
+		// reserves it (hk 5077).
+		query = `SELECT d.id, d.` + "`key`" + `, coalesce(d.task_id,0), LENGTH(d.body), d.created_at,
+			b.document_id IS NOT NULL, b.document_id IS NOT NULL AND b.content_sha IS NULL
+		FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id = d.id
+		WHERE NOT EXISTS (SELECT 1 FROM yt_write_ops o WHERE o.principal = $2 AND o.entity_kind = 'document' AND o.entity_id = CAST(d.id AS CHAR)
+				AND o.state IN ('prepared','dispatched','remote_unknown'))
+			AND ((b.document_id IS NULL AND d.created_at >= $3)
+				OR (b.tenant = $1 AND (b.needs_update OR NOT (b.content_sha <=> d.sha256))))
+		ORDER BY d.id`
+		query, args = ytMySQLArgs(query, args...)
+	}
+	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
 		return 0, nil, err
 	}

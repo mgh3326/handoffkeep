@@ -5,32 +5,20 @@ import (
 	"time"
 )
 
-// mysqlPruneDocuments requires the binding and attachment tables before it
-// can delete: another binary may add them while this process is running.
+// mysqlPruneDocuments deletes documents that no article binding and no
+// attachment reference holds. Both tables exist on MySQL now (yt_article_bindings
+// arrived with B4b, hk 5077), so B3's refusal is gone: the binding guard is
+// always part of the delete. What remains for the integration pass (hk 5088)
+// is the cross-area check that every MySQL caller of the prune sees the same
+// SkippedBound count as PostgreSQL.
 func (s *Store) mysqlPruneDocuments(ctx context.Context, res DocPruneResult, older time.Time) (DocPruneResult, error) {
-	bindings, err := s.mysqlTableExists(ctx, s.db(), "yt_article_bindings")
-	if err != nil {
-		return res, err
-	}
-	refs, err := s.mysqlTableExists(ctx, s.db(), "attachment_refs")
-	if err != nil {
-		return res, err
-	}
-	if !bindings || !refs {
-		return res, ErrDialectUnsupported
-	}
 	lo, hi := keyPrefixBounds(res.Prefix)
-	count := "SELECT COUNT(*),0 FROM documents d WHERE d.`key`>=? AND d.`key`<? AND d.updated_at<?"
-	if bindings {
-		count = "SELECT COUNT(*),COUNT(b.document_id) FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id=d.id WHERE d.`key`>=? AND d.`key`<? AND d.updated_at<?"
-	}
-	if err = s.db().QueryRow(ctx, count, lo, hi, older.UTC()).Scan(&res.Matched, &res.SkippedBound); err != nil {
+	count := "SELECT COUNT(*),COUNT(b.document_id) FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id=d.id WHERE d.`key`>=? AND d.`key`<? AND d.updated_at<?"
+	if err := s.db().QueryRow(ctx, count, lo, hi, older.UTC()).Scan(&res.Matched, &res.SkippedBound); err != nil {
 		return res, err
 	}
 	candidate := "SELECT d.id,d.`key`,OCTET_LENGTH(d.body) FROM documents d WHERE d.`key`>=? AND d.`key`<? AND d.updated_at<?"
-	if bindings {
-		candidate += " AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id=d.id)"
-	}
+	candidate += " AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id=d.id)"
 	candidate += " ORDER BY d.id LIMIT ?"
 	if !res.Applied {
 		rows, e := s.db().Query(ctx, candidate, lo, hi, older.UTC(), res.Limit)
@@ -84,10 +72,8 @@ func (s *Store) mysqlPruneDocuments(ctx context.Context, res DocPruneResult, old
 				if len(ids) == 0 {
 					return 0, nil
 				}
-				if refs {
-					if _, e = tx.Exec(ctx, "DELETE FROM attachment_refs WHERE ref_kind='document' AND ref_id IN ("+placeholders(len(keys))+")", keys...); e != nil {
-						return 0, e
-					}
+				if _, e = tx.Exec(ctx, "DELETE FROM attachment_refs WHERE ref_kind='document' AND ref_id IN ("+placeholders(len(keys))+")", keys...); e != nil {
+					return 0, e
 				}
 				deleted, e := tx.Exec(ctx, "DELETE FROM documents WHERE id IN ("+placeholders(len(ids))+")", ids...)
 				if e != nil {

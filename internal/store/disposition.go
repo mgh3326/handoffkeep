@@ -397,7 +397,7 @@ func queueDispositionAnswerNotice(ctx context.Context, tx pgx.Tx, lane, eventID 
 	if err != nil {
 		return err
 	}
-	_, err = insertNotificationOutboxOnce(ctx, tx, OutboxKindDispositionAnswered, lane, eventID, assistantLaneText("", text), at)
+	_, err = insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDispositionAnswered, lane, eventID, assistantLaneText("", text), at)
 	return err
 }
 

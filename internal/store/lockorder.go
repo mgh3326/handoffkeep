@@ -176,7 +176,10 @@ package store
 //     a transaction's lock or a row: the article_create send holds it across
 //     its remote calls only. A process that dies drops its connection and with
 //     it the lock. RecordFamilyRoot and FamilyRoot are single statements over
-//     yt_family_roots and take no other lock.
+//     yt_family_roots and take no other lock. MySQL has no advisory locks:
+//     the lane is GET_LOCK on the same held connection under the name
+//     mysqlSessionLockName("yt_family_root", key) (hk: prefix, 64 bytes) and
+//     RELEASE_LOCK releases it; the order is unchanged.
 //
 //   - The YouTrack write op log (yt_write_ops.go, hk 3697). Prepare and Claim
 //     take one advisory lock, the entity lane lock
@@ -322,7 +325,9 @@ package store
 //
 //   - The YouTrack change feed (yt_feed.go, hk 3997). A consumer's pass
 //     takes pg_try_advisory_xact_lock(8241873997) as the first lock of its
-//     transaction, only tried: a pass that does not get it reads nothing. It
+//     transaction, only tried: a pass that does not get it reads nothing (on
+//     MySQL the same id's hk_locks row FOR UPDATE NOWAIT, seeded by
+//     20261117-mysql-locks). It
 //     then inserts or locks FOR UPDATE its one yt_feed_cursors row, reads
 //     sync_state and sync_log without a lock, and runs the consumer's handler,
 //     which reads model rows without a lock and prepares ops: per entity the
@@ -335,7 +340,8 @@ package store
 //     no level 2-5 lock and no comment lock. The pruned alert inserts a new
 //     notification_outbox key (ON CONFLICT DO NOTHING).
 //     The op alert pass (EnqueueYTWriteOpAlerts, hk 4056) takes the advisory
-//     lock hashtextextended('yt_write_op_alerts', 0) first, then FOR SHARE on
+//     lock hashtextextended('yt_write_op_alerts', 0) first (an hk_locks row
+//     on MySQL, ytAlertPassLock), then FOR SHARE on
 //     the yt_write_ops rows it reads, then inserts notification_outbox and
 //     yt_write_op_alerts rows (ON CONFLICT DO NOTHING); it takes no lane lock.
 //     The issue_fields backfill (BackfillYTFieldsOps, hk 4022) runs one

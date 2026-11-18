@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -68,8 +66,7 @@ func init() {
 // o is a document copy whose target is the issue its task is bound to on o's
 // tenant now. Mode off admits nothing.
 func ytDocCommentGateSQL(s *Store) string {
-	if s.ytDocCommentsNow() != YTDocCommentsOn || s.dialect == mysqlDialect {
-		// B5: document comments are not ported.
+	if s.ytDocCommentsNow() != YTDocCommentsOn {
 		return `FALSE`
 	}
 	return `o.principal = '` + ytDocCommentPrincipal + `' AND o.entity_kind = 'task' AND EXISTS (SELECT 1 FROM yt_task_bindings b
@@ -86,9 +83,21 @@ type ytDocRow struct {
 }
 
 // readYTDocRows reads the documents in ids, by id; a deleted one is absent.
-func readYTDocRows(ctx context.Context, q poolQuerier, ids []int64) (map[int64]ytDocRow, error) {
-	rows, err := q.Query(ctx, `SELECT id, key, kind, body, sha256, coalesce(task_id,0), created_by
-		FROM documents WHERE id = ANY($1::bigint[])`, ids)
+func readYTDocRows(ctx context.Context, q querier, ids []int64) (map[int64]ytDocRow, error) {
+	query := `SELECT id, key, kind, body, sha256, coalesce(task_id,0), created_by
+		FROM documents WHERE id = ANY($1::bigint[])`
+	args := []any{ids}
+	if dialectFor(q) == mysqlDialect {
+		// MySQL has no arrays: an IN list of one placeholder per id, and
+		// `key` is quoted because MySQL reserves it (hk 5077).
+		query = `SELECT id, ` + "`key`" + `, kind, body, sha256, coalesce(task_id,0), created_by
+		FROM documents WHERE id IN (` + placeholders(len(ids)) + `)`
+		args = make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+	}
+	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +150,7 @@ const (
 // does. A key already taken by an op with another payload (the author or the
 // binding's target changed since) is counted and logged, never fatal: a
 // failure here would stop the feed on this row.
-func prepareYTDocTx(ctx context.Context, tx pgx.Tx, now time.Time, d ytDocRow, found bool) (ytDocResult, error) {
+func prepareYTDocTx(ctx context.Context, tx transaction, now time.Time, d ytDocRow, found bool) (ytDocResult, error) {
 	switch {
 	case !found:
 		return ytDocResult{reason: ytDocDeleted}, nil
@@ -156,14 +165,14 @@ func prepareYTDocTx(ctx context.Context, tx pgx.Tx, now time.Time, d ytDocRow, f
 	if !ok {
 		return ytDocResult{reason: ytDocNotTask}, nil
 	}
-	b, bound, err := readYTBinding(ctx, pgTransaction{tx}, d.taskID)
+	b, bound, err := readYTBinding(ctx, tx, d.taskID)
 	if err != nil {
 		return ytDocResult{}, err
 	}
 	if !bound {
 		return ytDocResult{reason: ytDocUnbound}, nil
 	}
-	source, err := ytBindingDisagreement(ctx, pgTransaction{tx}, b)
+	source, err := ytBindingDisagreement(ctx, tx, b)
 	if err != nil {
 		return ytDocResult{}, err
 	}
@@ -183,7 +192,7 @@ func prepareYTDocTx(ctx context.Context, tx pgx.Tx, now time.Time, d ytDocRow, f
 		if err != nil {
 			return res, err
 		}
-		op, made, err := prepareYTOpTx(ctx, pgTransaction{tx}, now.UTC(), n)
+		op, made, err := prepareYTOpTx(ctx, tx, now.UTC(), n)
 		if errors.Is(err, ytwrite.ErrKeyConflict) {
 			res.conflicts++
 			log.Printf("ytwrite.doc_comment_key_conflict doc_id=%d task_id=%d key=%q", d.id, d.taskID, n.Key)
@@ -197,7 +206,7 @@ func prepareYTDocTx(ctx context.Context, tx pgx.Tx, now time.Time, d ytDocRow, f
 			continue
 		}
 		if reason != "" {
-			if _, err := rejectYTOpTx(ctx, pgTransaction{tx}, now.UTC(), op.ID, reason, detail); err != nil {
+			if _, err := rejectYTOpTx(ctx, tx, now.UTC(), op.ID, reason, detail); err != nil {
 				return res, err
 			}
 		}
@@ -211,7 +220,7 @@ func prepareYTDocTx(ctx context.Context, tx pgx.Tx, now time.Time, d ytDocRow, f
 // document, in sync_id order, goes through prepareYTDocTx, and the pass logs
 // one ytwrite.doc_comments_feed line with the counts.
 func ytDocCommentsHandler(s *Store, now time.Time) FeedHandler {
-	return func(ctx context.Context, tx pgx.Tx, rows []FeedRow) error {
+	return func(ctx context.Context, tx transaction, rows []FeedRow) error {
 		if s.ytDocCommentsNow() != YTDocCommentsOn {
 			return nil
 		}
@@ -221,7 +230,7 @@ func ytDocCommentsHandler(s *Store, now time.Time) FeedHandler {
 				ids = append(ids, id)
 			}
 		}
-		docs, err := readYTDocRows(ctx, pgTransaction{tx}, ids)
+		docs, err := readYTDocRows(ctx, tx, ids)
 		if err != nil {
 			return err
 		}
@@ -252,17 +261,25 @@ func ytDocCommentsHandler(s *Store, now time.Time) FeedHandler {
 // principal (hk:doc-comments). The comment audit reads it to tell a bot comment
 // that is a document copy from any other bot comment (hk 4245). Read-only.
 func (s *Store) YTDocCommentOpIDs(ctx context.Context, tenant, issueID string, ids []int64) (map[int64]bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	out := map[int64]bool{}
 	if len(ids) == 0 {
 		return out, nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id FROM yt_write_ops
-		WHERE id = ANY($1::bigint[]) AND principal = $2 AND kind = $3 AND tenant = $4 AND yt_target_id = $5`,
-		ids, ytDocCommentPrincipal, ytwrite.KindCommentAppend, tenant, issueID)
+	query := `SELECT id FROM yt_write_ops
+		WHERE id = ANY($1::bigint[]) AND principal = $2 AND kind = $3 AND tenant = $4 AND yt_target_id = $5`
+	args := []any{ids, ytDocCommentPrincipal, ytwrite.KindCommentAppend, tenant, issueID}
+	if s.dialect == mysqlDialect {
+		// MySQL has no arrays: the id list becomes one placeholder per id
+		// and the other placeholders shift after it (hk 5077).
+		query = `SELECT id FROM yt_write_ops
+		WHERE id IN (` + placeholders(len(ids)) + `) AND principal = ? AND kind = ? AND tenant = ? AND yt_target_id = ?`
+		args = make([]any, 0, len(ids)+4)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		args = append(args, ytDocCommentPrincipal, ytwrite.KindCommentAppend, tenant, issueID)
+	}
+	rows, err := s.db().Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

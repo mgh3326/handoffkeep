@@ -7,13 +7,17 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // taskRefsExpr is the refs object a task search hit carries. searchTasks and
 // the YouTrack task hits share it, so both search backends return one shape.
 const taskRefsExpr = `jsonb_strip_nulls(jsonb_build_object('id',t.id::text,'state',t.state,'lane',t.lane,'priority',t.priority::text,'pr',t.refs->>'pr','head_sha',t.refs->>'head_sha','report_path',t.refs->>'report_path'))`
+
+// taskRefsExprMySQL is taskRefsExpr on MySQL. It builds the same object of
+// the same values; MySQL has no json_strip_nulls, so an absent ref is a JSON
+// null the Go decoder turns into the field's zero value, and the two numeric
+// refs are cast to text as PostgreSQL's ::text does.
+const taskRefsExprMySQL = `JSON_OBJECT('id',CAST(t.id AS CHAR),'state',t.state,'lane',t.lane,'priority',CAST(t.priority AS CHAR),'pr',t.refs->>'$.pr','head_sha',t.refs->>'$.head_sha','report_path',t.refs->>'$.report_path')`
 
 // NumericIDQuery reports whether a search query is a bare id or "#<id>". Every
 // search backend answers those by exact lookup in PostgreSQL.
@@ -24,9 +28,6 @@ func NumericIDQuery(q string) bool {
 // ExactNumericHit performs an exact numeric ID lookup for tasks and documents.
 // The boolean reports whether the query was a numeric ID query.
 func (s *Store) ExactNumericHit(ctx context.Context, q, scope, session string) ([]SearchResult, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, false, ErrDialectUnsupported
-	}
 	m := numericIDQuery.FindStringSubmatch(strings.TrimSpace(q))
 	if m == nil {
 		return nil, false, nil
@@ -36,8 +37,15 @@ func (s *Store) ExactNumericHit(ctx context.Context, q, scope, session string) (
 		return nil, true, nil
 	}
 	var out []SearchResult
+	args := []any{session, id}
+	if s.dialect == mysqlDialect {
+		// The MySQL twins number their placeholders in statement order: the
+		// id, then the session twice.
+		args = []any{id, session, session}
+	}
 	if scope == "tasks" || scope == "all" {
-		row := s.pool.QueryRow(ctx, `SELECT t.id::text,t.lane,t.kind,t.title,`+taskRefsExpr+`,t.created_at FROM tasks t WHERE t.id=$2 AND ($1='' OR t.lane=$1)`, session, id)
+		row := s.db().QueryRow(ctx, sqlFor(s, `SELECT t.id::text,t.lane,t.kind,t.title,`+taskRefsExpr+`,t.created_at FROM tasks t WHERE t.id=$2 AND ($1='' OR t.lane=$1)`,
+			`SELECT CAST(t.id AS CHAR),t.lane,t.kind,t.title,`+taskRefsExprMySQL+`,t.created_at FROM tasks t WHERE t.id=? AND (?='' OR t.lane=?)`), args...)
 		var x SearchResult
 		var refs []byte
 		switch err := row.Scan(&x.Key, &x.Session, &x.Kind, &x.Title, &refs, &x.CreatedAt); {
@@ -47,19 +55,20 @@ func (s *Store) ExactNumericHit(ctx context.Context, q, scope, session string) (
 			}
 			x.Scope, x.Snippet = "tasks", x.Title
 			out = append(out, x)
-		case errors.Is(err, pgx.ErrNoRows):
+		case errors.Is(err, ErrNoRows):
 		default:
 			return nil, true, fmt.Errorf("exact numeric hit task: %w", err)
 		}
 	}
 	if scope == "docs" || scope == "all" {
-		row := s.pool.QueryRow(ctx, `SELECT key,session,kind,left(body,160),created_at FROM documents WHERE id=$2 AND ($1='' OR session=$1)`, session, id)
+		row := s.db().QueryRow(ctx, sqlFor(s, `SELECT key,session,kind,left(body,160),created_at FROM documents WHERE id=$2 AND ($1='' OR session=$1)`,
+			"SELECT `key`,session,kind,LEFT(body,160),created_at FROM documents WHERE id=? AND (?='' OR session=?)"), args...)
 		var x SearchResult
 		switch err := row.Scan(&x.Key, &x.Session, &x.Kind, &x.Snippet, &x.CreatedAt); {
 		case err == nil:
 			x.Scope, x.Title = "docs", x.Key
 			out = append(out, x)
-		case errors.Is(err, pgx.ErrNoRows):
+		case errors.Is(err, ErrNoRows):
 		default:
 			return nil, true, fmt.Errorf("exact numeric hit doc: %w", err)
 		}
@@ -75,10 +84,12 @@ func (s *Store) ExactNumericHit(ctx context.Context, q, scope, session string) (
 // ExactDocHit looks up a document by exact key.
 // The boolean reports whether an exact document match was found.
 func (s *Store) ExactDocHit(ctx context.Context, key, session string) ([]SearchResult, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, false, ErrDialectUnsupported
+	args := []any{session, key}
+	if s.dialect == mysqlDialect {
+		args = []any{key, session, session}
 	}
-	row := s.pool.QueryRow(ctx, `SELECT key,session,kind,left(body,160),created_at FROM documents WHERE key=$2 AND ($1='' OR session=$1)`, session, key)
+	row := s.db().QueryRow(ctx, sqlFor(s, `SELECT key,session,kind,left(body,160),created_at FROM documents WHERE key=$2 AND ($1='' OR session=$1)`,
+		"SELECT `key`,session,kind,LEFT(body,160),created_at FROM documents WHERE `key`=? AND (?='' OR session=?)"), args...)
 	var x SearchResult
 	switch err := row.Scan(&x.Key, &x.Session, &x.Kind, &x.Snippet, &x.CreatedAt); {
 	case err == nil:
@@ -88,7 +99,7 @@ func (s *Store) ExactDocHit(ctx context.Context, key, session string) ([]SearchR
 			return nil, true, err
 		}
 		return out, true, nil
-	case errors.Is(err, pgx.ErrNoRows):
+	case errors.Is(err, ErrNoRows):
 		return nil, false, nil
 	default:
 		return nil, false, fmt.Errorf("exact doc hit: %w", err)
@@ -96,14 +107,12 @@ func (s *Store) ExactDocHit(ctx context.Context, key, session string) ([]SearchR
 }
 
 // DocumentKeyExists reports whether a document has exactly this key. The
-// YouTrack search backend uses it to keep an exact key lookup on PostgreSQL.
+// YouTrack search backend uses it to keep an exact key lookup before its
+// ranked search, on both dialects.
 func (s *Store) DocumentKeyExists(ctx context.Context, key string) (bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return false, ErrDialectUnsupported
-	}
-
 	var ok bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM documents WHERE key=$1)`, key).Scan(&ok); err != nil {
+	if err := s.db().QueryRow(ctx, sqlFor(s, `SELECT EXISTS (SELECT 1 FROM documents WHERE key=$1)`,
+		"SELECT EXISTS (SELECT 1 FROM documents WHERE `key`=?)"), key).Scan(&ok); err != nil {
 		return false, fmt.Errorf("document key exists: %w", err)
 	}
 	return ok, nil
@@ -117,18 +126,28 @@ func (s *Store) DocumentKeyExists(ctx context.Context, key string) (bool, error)
 // session filter). Title and Snippet are left empty: YouTrack's own text fills
 // them. When two tasks mirror one issue in this tenant the lower task id wins.
 func (s *Store) YouTrackTaskHits(ctx context.Context, tenant string, issueIDs []string, lane string) (map[string]SearchResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	out := map[string]SearchResult{}
 	if len(issueIDs) == 0 {
 		return out, nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT o.external_id,t.id::text,t.lane,t.kind,`+taskRefsExpr+` refs,t.created_at
+	args := []any{issueIDs, tenant, lane}
+	if s.dialect == mysqlDialect {
+		// MySQL has no = ANY: the ids are an IN list, in statement order
+		// after the namespace, and the lane's predicate repeats it.
+		args = make([]any, 0, len(issueIDs)+3)
+		args = append(args, tenant)
+		for _, id := range issueIDs {
+			args = append(args, id)
+		}
+		args = append(args, lane, lane)
+	}
+	rows, err := s.db().Query(ctx, sqlFor(s, `SELECT o.external_id,t.id::text,t.lane,t.kind,`+taskRefsExpr+` refs,t.created_at
 		FROM task_origins o JOIN tasks t ON t.id=o.task_id
 		WHERE o.provider='youtrack' AND o.namespace=$2 AND o.external_id=ANY($1) AND ($3='' OR t.lane=$3)
-		ORDER BY o.external_id,t.id`, issueIDs, tenant, lane)
+		ORDER BY o.external_id,t.id`, `SELECT o.external_id,CAST(t.id AS CHAR),t.lane,t.kind,`+taskRefsExprMySQL+` refs,t.created_at
+		FROM task_origins o JOIN tasks t ON t.id=o.task_id
+		WHERE o.provider='youtrack' AND o.namespace=? AND o.external_id IN (`+placeholders(len(issueIDs))+`) AND (?='' OR t.lane=?)
+		ORDER BY o.external_id,t.id`), args...)
 	if err != nil {
 		return nil, fmt.Errorf("youtrack task hits: %w", err)
 	}

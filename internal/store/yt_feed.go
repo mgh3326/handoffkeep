@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -60,7 +58,7 @@ type FeedRow struct {
 // and writes only through the YouTrack op log (prepareYTOpTx,
 // prepareYTSnapshotTx): it takes no task row and no lock of levels 2-5
 // (lockorder.go).
-type FeedHandler func(ctx context.Context, tx pgx.Tx, rows []FeedRow) error
+type FeedHandler func(ctx context.Context, tx transaction, rows []FeedRow) error
 
 type ytFeedConsumer struct {
 	name   string
@@ -73,7 +71,7 @@ type ytFeedConsumer struct {
 	// consumer's cursor, after the cursor row and before the first read: a
 	// consumer whose history before the cursor is not the feed's to handle
 	// records that here (task_links moves its sweep generation, I13).
-	created func(ctx context.Context, tx pgx.Tx, now time.Time) error
+	created func(ctx context.Context, tx transaction, now time.Time) error
 }
 
 // handler is c's handler for one pass of s at now.
@@ -115,7 +113,7 @@ func registerYTFeedStoreConsumer(name string, models []string, build func(s *Sto
 	if build == nil {
 		panic(fmt.Sprintf("store: yt feed consumer %q has no handler", name))
 	}
-	c, err := newYTFeedConsumer(name, models, func(context.Context, pgx.Tx, []FeedRow) error { return nil })
+	c, err := newYTFeedConsumer(name, models, func(context.Context, transaction, []FeedRow) error { return nil })
 	if err != nil {
 		panic("store: " + err.Error())
 	}
@@ -163,9 +161,6 @@ type YTFeedPass struct {
 // is returned with every pass that ran. With no consumer registered it does
 // nothing.
 func (s *Store) RunYTFeedConsumers(ctx context.Context, limit int) ([]YTFeedPass, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
 	names := make([]string, 0, len(ytFeedConsumers))
 	for name := range ytFeedConsumers {
 		names = append(names, name)
@@ -197,6 +192,46 @@ func (s *Store) RunYTFeedConsumers(ctx context.Context, limit int) ([]YTFeedPass
 	return out, first
 }
 
+// ytFeedCursorCreateTx creates the consumer's cursor at the feed's
+// max_sync_id on its first pass and reports whether it did. A row already
+// there is read FOR UPDATE: the pass advances it, and two passes never run at
+// once (the feed lock), so the lock is the cursor's row lock only.
+func (s *Store) ytFeedCursorCreateTx(ctx context.Context, tx transaction, consumer string, now time.Time, pass *YTFeedPass) (bool, error) {
+	if s.dialect != mysqlDialect {
+		err := tx.QueryRow(ctx, `INSERT INTO yt_feed_cursors(consumer,last_sync_id,updated_at)
+			SELECT $1,max_sync_id,$2 FROM sync_state WHERE singleton
+			ON CONFLICT (consumer) DO NOTHING RETURNING last_sync_id`, consumer, now).Scan(&pass.Cursor)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, ErrNoRows) {
+			return false, err
+		}
+	} else {
+		// MySQL has no RETURNING: read max_sync_id, insert, and tell the two
+		// outcomes apart by the primary key (design §5). The unique violation
+		// is the row already there, never another error (INSERT IGNORE would
+		// swallow a foreign-key or truncation failure too, design §11.4).
+		var maxSyncID int64
+		if err := tx.QueryRow(ctx, `SELECT max_sync_id FROM sync_state WHERE singleton=1`).Scan(&maxSyncID); err != nil {
+			return false, err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO yt_feed_cursors(consumer,last_sync_id,updated_at) VALUES(?,?,?)`, consumer, maxSyncID, now)
+		if err == nil {
+			pass.Cursor = maxSyncID
+			return true, nil
+		}
+		if !errors.Is(err, errUniqueViolation) {
+			return false, err
+		}
+	}
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT last_sync_id FROM yt_feed_cursors WHERE consumer=$1 FOR UPDATE`,
+		`SELECT last_sync_id FROM yt_feed_cursors WHERE consumer=? FOR UPDATE`), consumer).Scan(&pass.Cursor); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 // runYTFeedConsumer is one pass of c in one transaction: the feed lock (only
 // tried), c's cursor row (created at max_sync_id on the first pass), then up
 // to limit rows of c's models above the cursor in sync_id order, then the
@@ -216,33 +251,37 @@ func (s *Store) runYTFeedConsumer(ctx context.Context, c ytFeedConsumer, limit i
 	if limit > YTFeedPassMax {
 		limit = YTFeedPassMax
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return pass, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
+	// The feed pass lock is the first lock of the transaction: a transaction
+	// try-lock (8241873997) on PostgreSQL, the same id's hk_locks row with
+	// NOWAIT on MySQL (design §4). Only tried: a busy feed is another process's
+	// pass, and this one reads nothing.
 	var held bool
-	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, int64(ytFeedLockID)).Scan(&held); err != nil {
+	if s.dialect == mysqlDialect {
+		held, err = mysqlTransactionLock(ctx, tx, mysqlLockKey("id", strconv.FormatInt(ytFeedLockID, 10)), true)
+	} else {
+		err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, int64(ytFeedLockID)).Scan(&held)
+	}
+	if err != nil {
 		return pass, err
 	}
 	if !held {
 		pass.Busy = true
 		return pass, nil
 	}
-	err = tx.QueryRow(ctx, `INSERT INTO yt_feed_cursors(consumer,last_sync_id,updated_at)
-		SELECT $1,max_sync_id,$2 FROM sync_state WHERE singleton
-		ON CONFLICT (consumer) DO NOTHING RETURNING last_sync_id`, c.name, now).Scan(&pass.Cursor)
-	switch {
-	case err == nil:
-		pass.Created = true
+	created, err := s.ytFeedCursorCreateTx(ctx, tx, c.name, now, &pass)
+	if err != nil {
+		return pass, err
+	}
+	pass.Created = created
+	if created {
 		// History before the cursor is the backfill's (Y3), not the feed's.
 		log.Printf("ytwrite.feed_cursor_created consumer=%q last_sync_id=%d", c.name, pass.Cursor)
-	case !errors.Is(err, ErrNoRows):
-		return pass, err
-	default:
-		if err := tx.QueryRow(ctx, `SELECT last_sync_id FROM yt_feed_cursors WHERE consumer=$1 FOR UPDATE`, c.name).Scan(&pass.Cursor); err != nil {
-			return pass, err
-		}
 	}
 	if pass.Created && c.created != nil {
 		if err := c.created(ctx, tx, now); err != nil {
@@ -253,13 +292,32 @@ func (s *Store) runYTFeedConsumer(ctx context.Context, c ytFeedConsumer, limit i
 	// one snapshot: a prune that commits later cannot have removed a row this
 	// read skipped, and one that committed earlier shows in pruned_through,
 	// which stops the read.
-	rows, err := tx.Query(ctx, `SELECT st.pruned_through, st.max_sync_id, l.sync_id, l.model, l.model_id, l.action, l.at
+	var feedArgs []any
+	if s.dialect == mysqlDialect {
+		// The MySQL twin repeats the cursor placeholder (two comparisons) and
+		// lists the models.
+		feedArgs = append(feedArgs, pass.Cursor, pass.Cursor)
+		for _, m := range c.models {
+			feedArgs = append(feedArgs, m)
+		}
+	} else {
+		feedArgs = append(feedArgs, pass.Cursor, c.models)
+	}
+	feedArgs = append(feedArgs, limit)
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT st.pruned_through, st.max_sync_id, l.sync_id, l.model, l.model_id, l.action, l.at
 		FROM sync_state st
 		LEFT JOIN LATERAL (SELECT sync_id, model, model_id, action, at FROM sync_log
 			WHERE st.pruned_through <= $1 AND sync_id > $1 AND model = ANY($2::text[])
 			ORDER BY sync_id LIMIT $3) l ON true
 		WHERE st.singleton
-		ORDER BY l.sync_id`, pass.Cursor, c.models, limit)
+		ORDER BY l.sync_id`,
+		`SELECT st.pruned_through, st.max_sync_id, l.sync_id, l.model, l.model_id, l.action, l.at
+		FROM sync_state st
+		LEFT JOIN LATERAL (SELECT sync_id, model, model_id, action, at FROM sync_log
+			WHERE st.pruned_through <= ? AND sync_id > ? AND model IN (`+placeholders(len(c.models))+`)
+			ORDER BY sync_id LIMIT ?) l ON true
+		WHERE st.singleton
+		ORDER BY l.sync_id`), feedArgs...)
 	if err != nil {
 		return pass, err
 	}
@@ -285,7 +343,7 @@ func (s *Store) runYTFeedConsumer(ctx context.Context, c ytFeedConsumer, limit i
 		pass.Pruned = true
 		log.Printf("ytwrite.feed_pruned consumer=%q cursor=%d pruned_through=%d", c.name, pass.Cursor, pass.PrunedThrough)
 		text := fmt.Sprintf("[yt-feed] pruned consumer=%s cursor=%d pruned_through=%d | the consumer reads nothing until its cursor moves (backfill)", c.name, pass.Cursor, pass.PrunedThrough)
-		if _, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindYTWriteOp, "handoffkeep-design", fmt.Sprintf("yt-feed-%s-pruned-%d", c.name, pass.Cursor), text, now); err != nil {
+		if _, err := insertNotificationOutboxTx(ctx, tx, OutboxKindYTWriteOp, "handoffkeep-design", fmt.Sprintf("yt-feed-%s-pruned-%d", c.name, pass.Cursor), text, now); err != nil {
 			return pass, err
 		}
 		return pass, tx.Commit(ctx)
@@ -316,7 +374,12 @@ func (s *Store) runYTFeedConsumer(ctx context.Context, c ytFeedConsumer, limit i
 	if next == pass.Cursor {
 		return pass, tx.Commit(ctx)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE yt_feed_cursors SET last_sync_id=$2, updated_at=$3 WHERE consumer=$1`, c.name, next, now); err != nil {
+	advanceArgs := []any{next, now, c.name}
+	if dialectFor(tx) != mysqlDialect {
+		advanceArgs = []any{c.name, next, now}
+	}
+	if _, err := tx.Exec(ctx, sqlFor(tx, `UPDATE yt_feed_cursors SET last_sync_id=$2, updated_at=$3 WHERE consumer=$1`,
+		`UPDATE yt_feed_cursors SET last_sync_id=?, updated_at=? WHERE consumer=?`), advanceArgs...); err != nil {
 		return pass, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -367,7 +430,7 @@ func SnapshotKey(kind, entityID string, seq int64, sha string) string {
 // Locks: the entity's lane lock (lockYTEntity) first, then its
 // yt_snapshot_state row, then what prepareYTOpTx takes. Reading the last op's
 // state by id takes no lock. No other writer locks a yt_snapshot_state row.
-func prepareYTSnapshotTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrite.NewOp, sha string) (ytwrite.Op, bool, error) {
+func prepareYTSnapshotTx(ctx context.Context, tx transaction, now time.Time, n ytwrite.NewOp, sha string) (ytwrite.Op, bool, error) {
 	return prepareYTSnapshotRuleTx(ctx, tx, now, n, sha, true)
 }
 
@@ -379,22 +442,23 @@ func prepareYTSnapshotTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrit
 // operator's unbind closed (binding_removed, unbind_forced): YouTrack never
 // saw it, so the same request is prepared again, with the next seq, once the
 // task is bound again (hk 4539). The issue_move ops use it.
-func prepareYTOnceTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrite.NewOp, sha string) (ytwrite.Op, bool, error) {
+func prepareYTOnceTx(ctx context.Context, tx transaction, now time.Time, n ytwrite.NewOp, sha string) (ytwrite.Op, bool, error) {
 	return prepareYTSnapshotRuleTx(ctx, tx, now, n, sha, false)
 }
 
 // prepareYTSnapshotRuleTx is the rule both share; retryRejected is the hk
 // 4057 retry of an unchanged sha whose op was rejected.
-func prepareYTSnapshotRuleTx(ctx context.Context, tx pgx.Tx, now time.Time, n ytwrite.NewOp, sha string, retryRejected bool) (ytwrite.Op, bool, error) {
+func prepareYTSnapshotRuleTx(ctx context.Context, tx transaction, now time.Time, n ytwrite.NewOp, sha string, retryRejected bool) (ytwrite.Op, bool, error) {
 	if sha == "" || n.Kind == "" || n.EntityKind == "" || n.EntityID == "" {
 		return ytwrite.Op{}, false, errors.New("snapshot op needs a kind, an entity and a sha")
 	}
-	if err := lockYTEntity(ctx, pgTransaction{tx}, n.EntityKind, n.EntityID); err != nil {
+	if err := lockYTEntity(ctx, tx, n.EntityKind, n.EntityID); err != nil {
 		return ytwrite.Op{}, false, err
 	}
 	var lastSHA string
 	var seq, lastOpID int64
-	err := tx.QueryRow(ctx, `SELECT seq,last_sha,last_op_id FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3 FOR UPDATE`,
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT seq,last_sha,last_op_id FROM yt_snapshot_state WHERE entity_kind=$1 AND entity_id=$2 AND kind=$3 FOR UPDATE`,
+		`SELECT seq,last_sha,last_op_id FROM yt_snapshot_state WHERE entity_kind=? AND entity_id=? AND kind=? FOR UPDATE`),
 		n.EntityKind, n.EntityID, n.Kind).Scan(&seq, &lastSHA, &lastOpID)
 	if err != nil && !errors.Is(err, ErrNoRows) {
 		return ytwrite.Op{}, false, err
@@ -413,12 +477,14 @@ func prepareYTSnapshotRuleTx(ctx context.Context, tx pgx.Tx, now time.Time, n yt
 	}
 	seq++
 	n.Key = SnapshotKey(n.Kind, n.EntityID, seq, sha)
-	op, _, err := prepareYTOpTx(ctx, pgTransaction{tx}, now, n)
+	op, _, err := prepareYTOpTx(ctx, tx, now, n)
 	if err != nil {
 		return ytwrite.Op{}, false, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO yt_snapshot_state(entity_kind,entity_id,kind,seq,last_sha,last_op_id) VALUES($1,$2,$3,$4,$5,$6)
+	if _, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO yt_snapshot_state(entity_kind,entity_id,kind,seq,last_sha,last_op_id) VALUES($1,$2,$3,$4,$5,$6)
 		ON CONFLICT (entity_kind,entity_id,kind) DO UPDATE SET seq=EXCLUDED.seq, last_sha=EXCLUDED.last_sha, last_op_id=EXCLUDED.last_op_id`,
+		`INSERT INTO yt_snapshot_state(entity_kind,entity_id,kind,seq,last_sha,last_op_id) VALUES(?,?,?,?,?,?)
+		ON DUPLICATE KEY UPDATE seq=VALUES(seq), last_sha=VALUES(last_sha), last_op_id=VALUES(last_op_id)`),
 		n.EntityKind, n.EntityID, n.Kind, seq, sha, op.ID); err != nil {
 		return ytwrite.Op{}, false, err
 	}
@@ -429,9 +495,9 @@ func prepareYTSnapshotRuleTx(ctx context.Context, tx pgx.Tx, now time.Time, n yt
 // task's binding was removed (ytwrite.CancelledByUnbind): it never reached
 // YouTrack, so the once rule does not count it as a refusal. A missing op row
 // is not a cancellation. It reads the op by id without a lock.
-func ytSnapshotCancelledByUnbind(ctx context.Context, tx pgx.Tx, opID int64) (bool, error) {
+func ytSnapshotCancelledByUnbind(ctx context.Context, tx transaction, opID int64) (bool, error) {
 	var state, reason string
-	err := tx.QueryRow(ctx, `SELECT state, reason FROM yt_write_ops WHERE id=$1`, opID).Scan(&state, &reason)
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT state, reason FROM yt_write_ops WHERE id=$1`, `SELECT state, reason FROM yt_write_ops WHERE id=?`), opID).Scan(&state, &reason)
 	switch {
 	case errors.Is(err, ErrNoRows):
 		return false, nil
@@ -448,12 +514,12 @@ func ytSnapshotCancelledByUnbind(ctx context.Context, tx pgx.Tx, opID int64) (bo
 // since that op is sent, being sent or settled; only a rejected op, which
 // will never be sent, lets the same snapshot be prepared again. It reads the
 // op by id without a lock.
-func ytSnapshotUnchanged(ctx context.Context, tx pgx.Tx, lastSHA string, lastOpID int64, sha string) (bool, error) {
+func ytSnapshotUnchanged(ctx context.Context, tx transaction, lastSHA string, lastOpID int64, sha string) (bool, error) {
 	if lastSHA != sha {
 		return false, nil
 	}
 	var state string
-	err := tx.QueryRow(ctx, `SELECT state FROM yt_write_ops WHERE id=$1`, lastOpID).Scan(&state)
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT state FROM yt_write_ops WHERE id=$1`, `SELECT state FROM yt_write_ops WHERE id=?`), lastOpID).Scan(&state)
 	switch {
 	case errors.Is(err, ErrNoRows):
 		return true, nil

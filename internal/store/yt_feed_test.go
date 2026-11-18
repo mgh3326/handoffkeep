@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -35,7 +33,7 @@ func TestCollapseFeedRowsKeepsLastInOrder(t *testing.T) {
 }
 
 func TestYTFeedConsumerRegistration(t *testing.T) {
-	h := func(context.Context, pgx.Tx, []FeedRow) error { return nil }
+	h := func(context.Context, transaction, []FeedRow) error { return nil }
 	for _, tc := range []struct {
 		name   string
 		models []string
@@ -68,7 +66,7 @@ type ytFeedRecorder struct {
 
 func (r *ytFeedRecorder) consumer(t *testing.T, name string, models ...string) ytFeedConsumer {
 	t.Helper()
-	c, err := newYTFeedConsumer(name, models, func(_ context.Context, _ pgx.Tx, rows []FeedRow) error {
+	c, err := newYTFeedConsumer(name, models, func(_ context.Context, _ transaction, rows []FeedRow) error {
 		r.batches = append(r.batches, append([]FeedRow(nil), rows...))
 		return r.fail
 	})
@@ -270,7 +268,7 @@ func TestYTFeedHandlerErrorKeepsCursor(t *testing.T) {
 	}
 
 	// A handler error also rolls back what the handler wrote.
-	wrote, err := newYTFeedConsumer("test_rollback", []string{"task"}, func(ctx context.Context, tx pgx.Tx, rows []FeedRow) error {
+	wrote, err := newYTFeedConsumer("test_rollback", []string{"task"}, func(ctx context.Context, tx transaction, rows []FeedRow) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO yt_snapshot_state(entity_kind,entity_id,kind,seq,last_sha,last_op_id) VALUES('task','1','test',1,'x',1)`); err != nil {
 			return err
 		}
@@ -376,7 +374,7 @@ func TestPrepareYTSnapshotSkipsIdenticalSHA(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer tx.Rollback(ctx)
-		op, prepared, err := prepareYTSnapshotTx(ctx, tx, now, ytwrite.NewOp{Principal: "p", Kind: "task_fields", PayloadSHA: sha,
+		op, prepared, err := prepareYTSnapshotTx(ctx, pgTransaction{tx}, now, ytwrite.NewOp{Principal: "p", Kind: "task_fields", PayloadSHA: sha,
 			Payload: []byte(`{"sha":"` + sha + `"}`), EntityKind: "task", EntityID: "42", YTTargetID: "2-42", Actor: "a"}, sha)
 		if err != nil {
 			t.Fatal(err)
@@ -490,7 +488,7 @@ func TestPrepareYTSnapshotRetriesRejectedSHA(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer tx.Rollback(ctx)
-		op, prepared, err := prepareYTSnapshotTx(ctx, tx, now, ytwrite.NewOp{Principal: "p", Kind: "task_fields", PayloadSHA: sha,
+		op, prepared, err := prepareYTSnapshotTx(ctx, pgTransaction{tx}, now, ytwrite.NewOp{Principal: "p", Kind: "task_fields", PayloadSHA: sha,
 			Payload: []byte(`{"sha":"` + sha + `"}`), EntityKind: "task", EntityID: entity, YTTargetID: "2-" + entity, Actor: "a"}, sha)
 		if err != nil {
 			t.Fatal(err)

@@ -164,6 +164,23 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "yt_issue_intents", columns: strings.Fields("task_id tenant recorded_at"), order: []string{"task_id"}, bounds: map[string]int{"tenant": 255}},
 	{name: "yt_binding_history", serial: true, columns: strings.Fields("id task_id tenant issue_id origin action actor reason at"), order: []string{"id"}, bounds: map[string]int{"tenant": 255, "issue_id": 64, "origin": 32, "action": 16, "actor": 200, "reason": 2000}},
 	{name: "youtrack_comment_links", columns: strings.Fields("hk_comment_id task_id youtrack_comment_id created_at"), order: []string{"hk_comment_id"}, bounds: map[string]int{"youtrack_comment_id": 512}},
+	// The rest of the YouTrack area (hk 5077). Parents before children:
+	// yt_family_roots references yt_write_ops above. youtrack_projects,
+	// yt_binding_cursor and yt_links_sweep are seeded by a fresh schema, so
+	// the load upserts them.
+	{name: "youtrack_projects", upsert: true, columns: strings.Fields("hk_project yt_project_id short_name created_at updated_at"), order: []string{"hk_project"}, bounds: map[string]int{"hk_project": 128, "yt_project_id": 64, "short_name": 64}},
+	{name: "yt_article_bindings", columns: strings.Fields("document_id tenant article_id article_readable project_id part generation content_sha origin op_id needs_update bound_by bound_at"), order: []string{"document_id"}, bounds: map[string]int{"tenant": 255, "article_id": 64, "article_readable": 64, "project_id": 64, "content_sha": 64, "origin": 16, "bound_by": 200}},
+	{name: "yt_snapshot_state", columns: strings.Fields("entity_kind entity_id kind seq last_sha last_op_id"), order: []string{"entity_kind", "entity_id", "kind"}, bounds: map[string]int{"entity_kind": 64, "entity_id": 512, "kind": 64}},
+	{name: "yt_feed_cursors", columns: strings.Fields("consumer last_sync_id updated_at"), order: []string{"consumer"}, bounds: map[string]int{"consumer": 64}},
+	{name: "yt_binding_cursor", upsert: true, columns: strings.Fields("id last_comment_id"), order: []string{"id"}},
+	{name: "yt_binding_intents", columns: strings.Fields("task_id tenant state reason attempts last_error next_attempt_at recorded_at"), order: []string{"task_id"}, bounds: map[string]int{"tenant": 255, "state": 16, "reason": 200, "last_error": 2000}},
+	{name: "yt_decision_bindings", columns: strings.Fields("decision_id tenant issue_id issue_readable project_id origin op_id bound_by bound_at"), order: []string{"decision_id"}, bounds: map[string]int{"decision_id": 20, "tenant": 255, "issue_id": 64, "issue_readable": 64, "project_id": 64, "origin": 32, "bound_by": 200}},
+	{name: "yt_family_roots", columns: strings.Fields("tenant project_id family article_id op_id created_at"), order: []string{"tenant", "project_id", "family"}, bounds: map[string]int{"tenant": 255, "project_id": 64, "family": 64, "article_id": 64}},
+	{name: "yt_link_plans", serial: true, columns: strings.Fields("id op_id attempt recover plan created_at"), order: []string{"id"}},
+	{name: "yt_link_steps", columns: strings.Fields("op_id attempt recover step marked_at outcome"), order: []string{"op_id", "attempt", "recover", "step"}, bounds: map[string]int{"outcome": 16}},
+	{name: "yt_link_owned", serial: true, columns: strings.Fields("id tenant link_type from_issue to_issue writer_task_id target_task_id kind intended_op_id intended_at released_op_id released_at"), order: []string{"id"}, bounds: map[string]int{"tenant": 255, "link_type": 16, "from_issue": 64, "to_issue": 64, "kind": 16}},
+	{name: "yt_link_unowned", serial: true, columns: strings.Fields("id tenant issue_id link_type side other_issue first_seen_op_id last_seen_op_id first_seen_at last_seen_at gone_at"), order: []string{"id"}, bounds: map[string]int{"tenant": 255, "issue_id": 64, "link_type": 16, "side": 32, "other_issue": 64}},
+	{name: "yt_links_sweep", upsert: true, columns: strings.Fields("singleton generation done_generation after_task_id updated_at"), order: []string{"singleton"}},
 }
 
 // StoreCopyTables returns the currently ported tables in dependency order.
@@ -175,7 +192,7 @@ func StoreCopyTables() []string {
 	return out
 }
 
-var copyLeftOutTables = strings.Fields(`deploy_changes deploys labels linear_board_owners linear_board_ownership_conflicts linear_board_tasks linear_capacity_state linear_create_admissions linear_decision_issues linear_decision_ops linear_issues linear_outbox locks relay_events_retired_20260918 schema_migrations schema_version services standing_orders status_updates takes task_labels task_state_migration task_subscribers verifications youtrack_attempts youtrack_cursor youtrack_decision_mirrors youtrack_doc_articles youtrack_field_cache youtrack_outbox youtrack_processed_activities yt_article_bindings yt_binding_cursor yt_binding_intents yt_decision_bindings yt_family_roots yt_feed_cursors yt_link_owned yt_link_plans yt_link_steps yt_link_unowned yt_links_sweep yt_snapshot_state`)
+var copyLeftOutTables = strings.Fields(`deploy_changes deploys labels linear_board_owners linear_board_ownership_conflicts linear_board_tasks linear_capacity_state linear_create_admissions linear_decision_issues linear_decision_ops linear_issues linear_outbox relay_events_retired_20260918 schema_migrations schema_version services standing_orders status_updates task_labels task_state_migration task_subscribers verifications youtrack_attempts youtrack_cursor youtrack_decision_mirrors youtrack_doc_articles youtrack_field_cache youtrack_outbox youtrack_processed_activities`)
 
 type copyDB struct {
 	db    *sql.DB

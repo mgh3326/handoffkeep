@@ -73,9 +73,6 @@ func init() {
 
 func init() {
 	registerTaskAreaCase("documents/prune", func(t *testing.T, s *Store) {
-		if s.dialect == mysqlDialect {
-			t.Skip("prune requires the YouTrack binding and attachment areas")
-		}
 		ctx := t.Context()
 		doc, _, err := s.PutDocument(ctx, Document{Key: DocPrunePrefix + "test", Kind: "brief", Body: "prunable", CreatedBy: "tester"})
 		if err != nil {

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/mgh3326/handoffkeep/internal/ytwrite"
 )
 
@@ -103,10 +101,6 @@ type YTLinksPlanReport struct {
 // reads its issue's links through remote. An unknown opt.TaskID is
 // ErrTaskNotFound. Nothing is written.
 func (s *Store) PlanYTLinks(ctx context.Context, opt YTLinksPlanOptions, remote ytwrite.IssueLinksRemote) (YTLinksPlanReport, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return YTLinksPlanReport{}, ErrDialectUnsupported
-	}
-
 	mode, tenant := s.ytLinksSetting()
 	r := YTLinksPlanReport{Mode: mode, Tenant: tenant, TaskID: opt.TaskID, Project: opt.Project, Limit: opt.Limit,
 		Rows: []YTLinkPlanRow{}}
@@ -118,7 +112,8 @@ func (s *Store) PlanYTLinks(ctx context.Context, opt YTLinksPlanOptions, remote 
 	}
 	if opt.TaskID > 0 {
 		var exists bool
-		if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1)`, opt.TaskID).Scan(&exists); err != nil {
+		if err := s.db().QueryRow(ctx, sqlFor(s, `SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1)`,
+			`SELECT EXISTS (SELECT 1 FROM tasks WHERE id = ?)`), opt.TaskID).Scan(&exists); err != nil {
 			return r, err
 		}
 		if !exists {
@@ -126,20 +121,31 @@ func (s *Store) PlanYTLinks(ctx context.Context, opt YTLinksPlanOptions, remote 
 		}
 	}
 	// The sweep's walk (yt_task_bindings, ascending), narrowed by the filters.
-	q := `SELECT b.task_id FROM yt_task_bindings b
+	pgQuery := `SELECT b.task_id FROM yt_task_bindings b
 		JOIN tasks t ON t.id = b.task_id
 		WHERE b.tenant = $1 AND ($2 = '' OR t.project = $2) AND ($3 = 0 OR b.task_id = $3)
 		ORDER BY b.task_id`
-	args := []any{tenant, opt.Project, opt.TaskID}
+	myQuery := `SELECT b.task_id FROM yt_task_bindings b
+		JOIN tasks t ON t.id = b.task_id
+		WHERE b.tenant = ? AND (? = '' OR t.project = ?) AND (? = 0 OR b.task_id = ?)
+		ORDER BY b.task_id`
+	pgArgs := []any{tenant, opt.Project, opt.TaskID}
+	myArgs := []any{tenant, opt.Project, opt.Project, opt.TaskID, opt.TaskID}
 	if opt.Limit > 0 {
-		q += ` LIMIT $4`
-		args = append(args, opt.Limit)
+		pgQuery += ` LIMIT $4`
+		myQuery += ` LIMIT ?`
+		pgArgs = append(pgArgs, opt.Limit)
+		myArgs = append(myArgs, opt.Limit)
 	}
-	rows, err := s.pool.Query(ctx, q, args...)
+	args := pgArgs
+	if s.dialect == mysqlDialect {
+		args = myArgs
+	}
+	rows, err := s.db().Query(ctx, sqlFor(s, pgQuery, myQuery), args...)
 	if err != nil {
 		return r, err
 	}
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	ids, err := collectRows(rows, rowTo[int64])
 	if err != nil {
 		return r, err
 	}
@@ -169,19 +175,19 @@ func (s *Store) PlanYTLinks(ctx context.Context, opt YTLinksPlanOptions, remote 
 // is taken: a read-only report must not wait on a blocked lane, and the write
 // path re-plans under the lock before it sends.
 func (s *Store) planYTLinksTask(ctx context.Context, tenant string, id int64, remote ytwrite.IssueLinksRemote) (YTLinkPlanRow, bool, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := s.beginSnapshotA5(ctx)
 	if err != nil {
 		return YTLinkPlanRow{}, false, err
 	}
 	defer tx.Rollback(ctx)
-	b, found, err := readYTBinding(ctx, pgTransaction{tx}, id)
+	b, found, err := readYTBinding(ctx, tx, id)
 	if err != nil {
 		return YTLinkPlanRow{}, false, err
 	}
 	if !found || b.Tenant != tenant {
 		return YTLinkPlanRow{}, false, nil
 	}
-	source, err := ytBindingDisagreement(ctx, pgTransaction{tx}, b)
+	source, err := ytBindingDisagreement(ctx, tx, b)
 	if err != nil {
 		return YTLinkPlanRow{}, false, err
 	}

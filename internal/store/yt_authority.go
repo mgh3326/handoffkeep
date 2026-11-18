@@ -435,7 +435,7 @@ func (s *Store) setYTAuthorityTx(ctx context.Context, tx transaction, seen map[Y
 				// covers what a feed cursor cannot (changes before it, a
 				// binding published since, a create that was refused).
 				g, _ := s.ytDocsNow()
-				n, ids, err := ytArticlesUnwrittenTx(ctx, pgxTx(tx), g.tenant)
+				n, ids, err := ytArticlesUnwrittenTx(ctx, tx, g.tenant)
 				if err != nil {
 					return nil, nil, err
 				}

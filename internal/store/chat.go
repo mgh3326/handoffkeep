@@ -638,7 +638,7 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		}
 		eventID := chatAnsweredEventID(a.QuestionID, a.Revision)
 		text := assistantLaneText("[via berry] "+a.QuestionID+" answered: ", m.Body)
-		if err := insertNotificationOutbox(ctx, pgxTx(tx), OutboxKindChatAnswer, qLane, eventID, text, now); err != nil {
+		if err := insertNotificationOutbox(ctx, tx, OutboxKindChatAnswer, qLane, eventID, text, now); err != nil {
 			return ChatMessage{}, false, err
 		}
 	}
