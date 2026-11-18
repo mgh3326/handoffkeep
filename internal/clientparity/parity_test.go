@@ -44,6 +44,10 @@ var pairs = []struct {
 	{client.DecisionOptionAttachment{}, store.DecisionOptionAttachment{}},
 	{client.DecisionRequestResult{}, store.DecisionRequestResult{}},
 	{client.SimilarTask{}, store.SimilarTask{}},
+	// The job fence (hk 5276): GET /v1/jobs/{id} answers Job; PUT decodes JobUpdate.
+	{client.Job{}, store.Job{}},
+	{client.JobOwner{}, store.JobOwner{}},
+	{client.JobUpdate{}, store.JobUpdate{}},
 }
 
 // jsonFields lists a struct's encoded fields by JSON name, flattening
