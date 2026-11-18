@@ -141,13 +141,26 @@ func waitsCaseHandRefusals(t *testing.T, s *Store) {
 // projections are exercised on both dialects instead of being skipped.
 // Each dialect's statement binds its own argument list: PostgreSQL reuses one
 // numbered placeholder where MySQL repeats the value, so the lists differ.
+//
+// The write goes through begin and Commit, as every decision and task write does
+// on MySQL: the sync triggers number their rows only inside that transaction.
 func waitsRawExec(t *testing.T, s *Store, pg, my string, pgArgs, myArgs []any) {
 	t.Helper()
+	ctx := t.Context()
 	args := pgArgs
 	if s.dialect == mysqlDialect {
 		args = myArgs
 	}
-	if _, err := s.db().Exec(t.Context(), sqlFor(s.db(), pg, my), args...); err != nil {
+	tx, release, err := s.begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, sqlFor(tx, pg, my), args...); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 }
