@@ -78,6 +78,7 @@ export type Request = {
   recommendation_reason?: string;
   unverified?: string[];
   one_fix?: string;
+  grounds?: string[];
   question_ko?: string;
   question_ko_stale?: boolean;
   options: Option[];

@@ -487,6 +487,14 @@ func (c Client) RecordDecisionRequest(ctx context.Context, id int64, in store.De
 	return out, err
 }
 
+// RecordDecisionRequestNewTask files a decide task and records the request on
+// it in one call (`decisions ask --new-task`).
+func (c Client) RecordDecisionRequestNewTask(ctx context.Context, in store.NewTaskDecisionInput) (store.DecisionRequestResult, error) {
+	var out store.DecisionRequestResult
+	err := c.call(ctx, "POST", "/v1/decision-requests/new-task", in, &out)
+	return out, err
+}
+
 // ResolveDecisionRequest closes a task's current decision request.
 func (c Client) ResolveDecisionRequest(ctx context.Context, id int64, in store.DecisionResolveInput) (store.DecisionRequestResult, error) {
 	var out store.DecisionRequestResult

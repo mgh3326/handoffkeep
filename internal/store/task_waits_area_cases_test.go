@@ -139,8 +139,14 @@ func waitsCaseHandRefusals(t *testing.T, s *Store) {
 // waitsRawExec runs one fixture statement in the dialect of s. The fixtures
 // below write the rows the public write paths do not yet reach on MySQL, so the
 // projections are exercised on both dialects instead of being skipped.
-func waitsRawExec(t *testing.T, s *Store, pg, my string, args ...any) {
+// Each dialect's statement binds its own argument list: PostgreSQL reuses one
+// numbered placeholder where MySQL repeats the value, so the lists differ.
+func waitsRawExec(t *testing.T, s *Store, pg, my string, pgArgs, myArgs []any) {
 	t.Helper()
+	args := pgArgs
+	if s.dialect == mysqlDialect {
+		args = myArgs
+	}
 	if _, err := s.db().Exec(t.Context(), sqlFor(s.db(), pg, my), args...); err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +159,7 @@ func waitsCaseDecisionAndPendingAnswer(t *testing.T, s *Store) {
 	waitsRawExec(t, s,
 		`INSERT INTO decision_requests(source,source_ref,task_id,lane,question,created_at,updated_at) VALUES('task_request',$1,$2,$3,'waits case question',$4,$4)`,
 		`INSERT INTO decision_requests(source,source_ref,task_id,lane,question,created_at,updated_at) VALUES('task_request',?,?,?,'waits case question',?,?)`,
-		ref, task.ID, task.Lane, now)
+		[]any{ref, task.ID, task.Lane, now}, []any{ref, task.ID, task.Lane, now, now})
 
 	row, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionNeedsOperator, task.ID)
 	if !ok || row.Source != "derived:decision_request" || row.OnKind != WaitOnOperator || row.NextAction != "answer_decision" || row.RequestID != ref {
@@ -169,7 +175,8 @@ func waitsCaseDecisionAndPendingAnswer(t *testing.T, s *Store) {
 	waitsRawExec(t, s,
 		`INSERT INTO decision_answer_attempts(channel,event_key,payload_hash,task_id,request_id,revision_request_id,actor,result,received_at,text) VALUES('console',$1,$2,$3,$4,$4,'operator',$5,$6,$7)`,
 		`INSERT INTO decision_answer_attempts(channel,event_key,payload_hash,task_id,request_id,revision_request_id,actor,result,received_at,text) VALUES('console',?,?,?,?,?,'operator',?,?,?)`,
-		"waits-case-"+ref, hash, task.ID, ref, "pending_confirmation", now, "범위는 A로")
+		[]any{"waits-case-" + ref, hash, task.ID, ref, "pending_confirmation", now, "범위는 A로"},
+		[]any{"waits-case-" + ref, hash, task.ID, ref, ref, "pending_confirmation", now, "범위는 A로"})
 	answered, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionNeedsOperator, task.ID)
 	if !ok || answered.NextAction != "confirm_answer" || answered.Answer == nil {
 		t.Fatalf("answered-awaiting row=%+v found=%t", answered, ok)
@@ -232,7 +239,7 @@ func waitsCaseDerivedReview(t *testing.T, s *Store) {
 	waitsRawExec(t, s,
 		`INSERT INTO change_tasks(change_id,task_id,relation,created_at) VALUES($1,$2,'implements',$3)`,
 		`INSERT INTO change_tasks(change_id,task_id,relation,created_at) VALUES(?,?,'implements',?)`,
-		changeID, task.ID, now)
+		[]any{changeID, task.ID, now}, []any{changeID, task.ID, now})
 
 	row, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionWaitingOn, task.ID)
 	if !ok || row.Source != "derived:change_review" || row.OnKind != WaitOnPR || row.OnRef != "example/app#7401" || row.NextAction != "wait_review" {
@@ -241,7 +248,7 @@ func waitsCaseDerivedReview(t *testing.T, s *Store) {
 	waitsRawExec(t, s,
 		`UPDATE changes SET state='merged', merged_at=$1 WHERE id=$2`,
 		`UPDATE changes SET state='merged', merged_at=? WHERE id=?`,
-		now, changeID)
+		[]any{now, changeID}, []any{now, changeID})
 	if _, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionWaitingOn, task.ID); ok {
 		t.Fatal("a merged PR still waits for review")
 	}

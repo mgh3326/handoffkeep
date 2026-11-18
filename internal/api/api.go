@@ -678,6 +678,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/tasks/relane", s.tasksRelane)
 	m.HandleFunc("POST /v1/tasks/{id}/decision-request", s.taskDecisionRequest)
 	m.HandleFunc("POST /v1/tasks/{id}/decision-request/resolve", s.taskDecisionResolve)
+	m.HandleFunc("POST /v1/decision-requests/new-task", s.newTaskDecisionRequest)
 	m.HandleFunc("POST /v1/tasks/{id}/orders", s.taskOrderCreate)
 	m.HandleFunc("GET /v1/tasks/{id}/orders", s.taskOrdersList)
 	m.HandleFunc("POST /v1/task-orders/{order}/ack", s.taskOrderAck)
@@ -1380,6 +1381,28 @@ func (s Server) taskDecisionRequest(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusOK
 	}
 	jsonOut(w, status, x)
+}
+
+// newTaskDecisionRequest files a decide task and records its request on it
+// (`decisions ask --new-task`). A refused request files nothing; a similar
+// open task refuses the whole call (see RecordDecisionRequestNewTask).
+func (s Server) newTaskDecisionRequest(w http.ResponseWriter, r *http.Request) {
+	client, ok := s.auth(w, r)
+	if !ok {
+		return
+	}
+	defer r.Body.Close()
+	var input store.NewTaskDecisionInput
+	if err := decode(r, &input, store.MaxBytes); err != nil {
+		appErr(w, r, err)
+		return
+	}
+	x, err := s.Service.Store.RecordDecisionRequestNewTask(r.Context(), client, input)
+	if err != nil {
+		appErr(w, r, err)
+		return
+	}
+	jsonOut(w, http.StatusCreated, x)
 }
 
 // DecisionResolveResponse maps one ResolveDecision outcome to the HTTP status

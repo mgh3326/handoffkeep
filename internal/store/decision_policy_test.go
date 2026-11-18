@@ -223,13 +223,16 @@ func TestResolveDecisionSessionReplay(t *testing.T) {
 	}
 }
 
-// TestResolveDecisionSessionPendingKeepsQuote: a quoted session answer on a
-// direct-policy request waits, and its attempt keeps option and quote.
-func TestResolveDecisionSessionPendingKeepsQuote(t *testing.T) {
+// TestResolveDecisionAssistantPendingKeepsQuote: a quoted assistant answer on
+// a direct-policy request still waits (only the session channel closes it,
+// hk 5136), and its attempt keeps option and quote.
+func TestResolveDecisionAssistantPendingKeepsQuote(t *testing.T) {
 	s, _ := searchTestStore(t)
 	task := assistantTask(t, s, "in_progress")
 	request := policyRequest(t, s, task.ID, DecisionPolicyOperatorDirect, false)
-	out, err := s.ResolveDecision(context.Background(), sessionAnswer(request, "A로 가자"))
+	in := sessionAnswer(request, "A로 가자")
+	in.Channel = DecisionChannelAssistant
+	out, err := s.ResolveDecision(context.Background(), in)
 	if err != nil || out.Result != DecisionResultPendingConfirmation {
 		t.Fatalf("out=%+v err=%v", out, err)
 	}

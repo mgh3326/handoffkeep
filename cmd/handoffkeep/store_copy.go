@@ -23,7 +23,7 @@ func storeCopyCmd(args []string, out io.Writer) error {
 	fs.SetOutput(io.Discard)
 	from := fs.String("from", "", "source database URL (postgres:// or mysql://)")
 	to := fs.String("to", "", "destination URL; MySQL sets @hk_bulk_load on the copy session")
-	tablesArg := fs.String("tables", "", "comma-separated registered tables; default is all ported tables")
+	tablesArg := fs.String("tables", "", "comma-separated registered tables; default is all ported tables (tasks requires sync_decisions)")
 	verifyOnly := fs.Bool("verify-only", false, "compare parity without copying")
 	if err := fs.Parse(args); err != nil {
 		return err

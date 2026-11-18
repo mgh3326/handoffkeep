@@ -56,7 +56,31 @@ func (s *Store) queueDecisionAnswerNotice(ctx context.Context, tx pgx.Tx, x Task
 		body += " | " + base + "/ui/tasks/" + taskID
 	}
 	_, err := insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDecisionAnswered, lane, decisionAnswerNoticeEventID(resolved.ID, resolutionID), assistantLaneText(prefix, body), at)
+	if err != nil {
+		return err
+	}
+	asker, ok := decisionAskerNoticeLane(lane, resolved)
+	if !ok {
+		return nil
+	}
+	_, err = insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDecisionAnswered, asker, decisionAskerAnswerNoticeEventID(resolved.ID, resolutionID), assistantLaneText(prefix, body), at)
 	return err
+}
+
+// decisionAskerNoticeLane names the lane that gets a second answer notice:
+// the lane that asked, when it differs from the task's lane. The task lane
+// keeps its notice either way.
+func decisionAskerNoticeLane(taskLane string, resolved DecisionRequest) (string, bool) {
+	if resolved.RequestLane == "" || resolved.RequestLane == taskLane {
+		return "", false
+	}
+	return resolved.RequestLane, true
+}
+
+// decisionAskerAnswerNoticeEventID is the outbox id of the asker's copy of an
+// answer. It is distinct from the task lane's id, so both rows can coexist.
+func decisionAskerAnswerNoticeEventID(requestID string, resolutionID int64) string {
+	return decisionAnswerNoticeEventID(requestID, resolutionID) + "-asker"
 }
 
 // queueDecisionDenyNotice writes the lane notification for one operator deny,

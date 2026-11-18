@@ -174,6 +174,7 @@ type decisionOpen struct {
 	Recommended       string
 	DefaultAction     string
 	DueAt             *time.Time
+	Grounds           []string
 	At                time.Time
 }
 
@@ -189,14 +190,22 @@ func openDecisionTx(ctx context.Context, tx pgx.Tx, d decisionOpen) error {
 		}
 		options = string(b)
 	}
+	grounds := d.Grounds
+	if grounds == nil {
+		grounds = []string{}
+	}
+	groundsJSON, err := json.Marshal(grounds)
+	if err != nil {
+		return err
+	}
 	var taskID any
 	if d.TaskID > 0 {
 		taskID = d.TaskID
 	}
 	var id int64
-	err := tx.QueryRow(ctx, `INSERT INTO decision_requests(source,source_ref,task_id,job_id,lane,question,options,recommended,default_action,due_at,status,created_at,updated_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,'open',$11,$11) ON CONFLICT (source,source_ref) DO NOTHING RETURNING id`,
-		d.Source, d.SourceRef, taskID, d.JobID, d.Lane, d.Question, options, d.Recommended, d.DefaultAction, d.DueAt, d.At).Scan(&id)
+	err = tx.QueryRow(ctx, `INSERT INTO decision_requests(source,source_ref,task_id,job_id,lane,question,options,recommended,default_action,due_at,grounds,status,created_at,updated_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11::jsonb,'open',$12,$12) ON CONFLICT (source,source_ref) DO NOTHING RETURNING id`,
+		d.Source, d.SourceRef, taskID, d.JobID, d.Lane, d.Question, options, d.Recommended, d.DefaultAction, d.DueAt, string(groundsJSON), d.At).Scan(&id)
 	if errors.Is(err, ErrNoRows) {
 		return nil
 	}
@@ -306,7 +315,7 @@ func mirrorTaskDecisionsTx(ctx context.Context, tx pgx.Tx, before taskDecisionBe
 		// replaces the revision it names.
 		if cur.Status == DecisionRequestOpen {
 			d := decisionOpen{Source: DecisionSourceTaskRequest, SourceRef: cur.ID, TaskID: after.ID, Lane: after.Lane, Question: cur.Question,
-				Options: after.Refs.DecisionOptions, DefaultAction: cur.DefaultAction, DueAt: cur.DueAt, At: at}
+				Options: after.Refs.DecisionOptions, DefaultAction: cur.DefaultAction, DueAt: cur.DueAt, Grounds: cur.Grounds, At: at}
 			if after.Refs.DecisionOptions != nil {
 				d.Recommended = recommendedOption(*after.Refs.DecisionOptions)
 			}
