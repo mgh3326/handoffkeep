@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,7 +66,11 @@ func ytartCaseOps(t *testing.T, s *Store, id int64) []ytwrite.Op {
 func ytArticlesBindingRoundTripCase(t *testing.T, s *Store) {
 	ctx := t.Context()
 	id, cand := ytartCaseDoc(t, s, "briefs/ytcase/round-trip.md", "the binding body")
-	b := YTArticleBinding{DocumentID: id, Tenant: ytartCaseTenant, ArticleID: "0-40-A1", ProjectID: "0-40", BoundBy: "ytcase"}
+	// A content sha marks the binding as the document's own article, not a
+	// split document's index (content_sha NULL, which YTArticleDocs reports
+	// as BoundSplitIndex).
+	b := YTArticleBinding{DocumentID: id, Tenant: ytartCaseTenant, ArticleID: "0-40-A1", ProjectID: "0-40",
+		ContentSHA: strings.Repeat("a", 64), BoundBy: "ytcase"}
 	got, err := s.AddYTArticleBinding(ctx, b, cand)
 	if err != nil {
 		t.Fatal(err)
