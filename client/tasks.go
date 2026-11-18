@@ -139,6 +139,7 @@ type DecisionRequest struct {
 	RecommendationReason string              `json:"recommendation_reason,omitempty"`
 	Unverified           []string            `json:"unverified,omitempty"`
 	OneFix               string              `json:"one_fix,omitempty"`
+	Grounds              []string            `json:"grounds,omitempty"`
 	DueAt                *time.Time          `json:"due_at,omitempty"`
 	RequestedBy          string              `json:"requested_by"`
 	RequestedAt          time.Time           `json:"requested_at"`

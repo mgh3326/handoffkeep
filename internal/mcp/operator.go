@@ -113,7 +113,7 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.taskUpdate)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "decision_ask",
-		Description: "Ask the operator a structured decision on one hk task, recorded the same way as tasks decision-request. idempotency_key is required; a repeat returns the first result. The operator answers with decision_answer; a request marked operator-only (answer_policy operator_direct) closes only on the operator's own words.",
+		Description: "Ask the operator a structured decision on one hk task, recorded the same way as tasks decision-request. grounds is a list of one-line facts the recommendation rests on; lane names the asking lane (its answer notice also goes there when it differs from the task's lane). new_task true files a kind=decide task in project on lane, titled with the question, and records the request on it (no task_id); such a call is not replayed, so a retry is refused as a similar open task. idempotency_key is required; a repeat returns the first result. The operator answers with decision_answer; a request marked operator-only (answer_policy operator_direct) closes only on the operator's own words.",
 		Annotations: writeAnnotations(),
 	}, o.decisionAsk)
 	gmcp.AddTool(s, &gmcp.Tool{
