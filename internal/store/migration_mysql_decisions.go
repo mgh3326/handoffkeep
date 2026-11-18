@@ -70,8 +70,17 @@ var mysqlDecisionsSteps = []string{
 		CONSTRAINT decision_answer_attempts_task_fk FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE RESTRICT,
 		CONSTRAINT decision_answer_attempts_denies_fk FOREIGN KEY(denies_attempt_id) REFERENCES decision_answer_attempts(id) ON DELETE RESTRICT
 	)` + mysqlTableOptions,
+}
+
+// The decision-answer guards are hoisted so the collation migration can
+// rebuild them under the pinned connection collation (design §11.4, hk 5169).
+// They stay ahead of the tables below, as in the original step order.
+var mysqlDecisionsTriggers = []string{
 	`CREATE TRIGGER IF NOT EXISTS decision_answer_attempts_guard_update BEFORE UPDATE ON decision_answer_attempts FOR EACH ROW BEGIN IF COALESCE(@hk_bulk_load,0) <> 1 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='decision_answer_attempts is append-only'; END IF; END`,
 	`CREATE TRIGGER IF NOT EXISTS decision_answer_attempts_guard_delete BEFORE DELETE ON decision_answer_attempts FOR EACH ROW BEGIN IF COALESCE(@hk_bulk_load,0) <> 1 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='decision_answer_attempts is append-only'; END IF; END`,
+}
+
+var mysqlDecisionsStepsTail = []string{
 	`CREATE TABLE IF NOT EXISTS decision_resolutions (
 		resolution_id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, request_id VARCHAR(512) NOT NULL,
 		question_revision INT NOT NULL, revision_request_id VARCHAR(512) NOT NULL, task_id BIGINT NOT NULL,
@@ -149,14 +158,18 @@ var mysqlDecisionsSteps = []string{
 func init() {
 	registerMySQLMigration(mysqlMigration{
 		id: "20261118-mysql-decisions", after: []string{"20261118-mysql-tasks"},
-		steps: mysqlDecisionsSteps,
+		steps: append(append(append([]string{}, mysqlDecisionsSteps...), mysqlDecisionsTriggers...), mysqlDecisionsStepsTail...),
 	})
 	registerMySQLMigration(mysqlMigration{
 		id: "20261118-decision-sync-bulk-load", after: []string{"20261118-mysql-decisions"},
-		steps: []string{
-			`CREATE TRIGGER IF NOT EXISTS sync_decision_records_insert AFTER INSERT ON decision_requests FOR EACH ROW ` + mysqlBulkGuard(`INSERT INTO sync_log(txn,model,model_id,action,at) VALUES(@hk_txn,'decision',CONCAT('record:',NEW.id),'I',UTC_TIMESTAMP(6));`),
-			`CREATE TRIGGER IF NOT EXISTS sync_decision_records_update AFTER UPDATE ON decision_requests FOR EACH ROW ` + mysqlBulkGuard(`INSERT INTO sync_log(txn,model,model_id,action,at) VALUES(@hk_txn,'decision',CONCAT('record:',NEW.id),'U',UTC_TIMESTAMP(6));`),
-			`CREATE TRIGGER IF NOT EXISTS sync_decision_records_delete AFTER DELETE ON decision_requests FOR EACH ROW ` + mysqlBulkGuard(`INSERT INTO sync_log(txn,model,model_id,action,at) VALUES(@hk_txn,'decision',CONCAT('record:',OLD.id),'D',UTC_TIMESTAMP(6));`),
-		},
+		steps: mysqlDecisionSyncTriggers,
 	})
+}
+
+// The decision feed triggers are hoisted so the collation migration can
+// rebuild them under the pinned connection collation (design §11.4, hk 5169).
+var mysqlDecisionSyncTriggers = []string{
+	`CREATE TRIGGER IF NOT EXISTS sync_decision_records_insert AFTER INSERT ON decision_requests FOR EACH ROW ` + mysqlBulkGuard(`INSERT INTO sync_log(txn,model,model_id,action,at) VALUES(@hk_txn,'decision',CONCAT('record:',NEW.id),'I',UTC_TIMESTAMP(6));`),
+	`CREATE TRIGGER IF NOT EXISTS sync_decision_records_update AFTER UPDATE ON decision_requests FOR EACH ROW ` + mysqlBulkGuard(`INSERT INTO sync_log(txn,model,model_id,action,at) VALUES(@hk_txn,'decision',CONCAT('record:',NEW.id),'U',UTC_TIMESTAMP(6));`),
+	`CREATE TRIGGER IF NOT EXISTS sync_decision_records_delete AFTER DELETE ON decision_requests FOR EACH ROW ` + mysqlBulkGuard(`INSERT INTO sync_log(txn,model,model_id,action,at) VALUES(@hk_txn,'decision',CONCAT('record:',OLD.id),'D',UTC_TIMESTAMP(6));`),
 }

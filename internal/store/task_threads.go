@@ -518,10 +518,12 @@ func (s *Store) ClaimTaskThread(ctx context.Context, now time.Time) (TaskThreadI
 }
 
 // taskThreadRefText is the text of a refs member for the create row's grade and
-// tier: PostgreSQL's refs->>'k' (SQL NULL for a JSON null) on MySQL.
+// tier: PostgreSQL's refs->>'k' (SQL NULL for a JSON null) on MySQL. The JSON
+// calls are pinned to utf8mb4_0900_bin: JSON strings carry utf8mb4_bin, which
+// no longer mixes with the connection collation (design §11.4, hk 5169).
 func taskThreadRefText(path string) string {
 	v := `JSON_EXTRACT(t.refs,'` + path + `')`
-	return `CASE WHEN JSON_TYPE(` + v + `)='NULL' THEN NULL ELSE JSON_UNQUOTE(` + v + `) END`
+	return `CASE WHEN JSON_TYPE(` + v + `) COLLATE utf8mb4_0900_bin='NULL' THEN NULL ELSE JSON_UNQUOTE(` + v + `) COLLATE utf8mb4_0900_bin END`
 }
 
 // claimTaskThreadOnce is one whole ClaimTaskThread transaction.
@@ -625,7 +627,7 @@ func loadTaskThreadLine(ctx context.Context, tx transaction, x *TaskThreadItem, 
 	case 1:
 		var source, to, sourceRef, pr string
 		if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT coalesce(source,''),"to",coalesce(source_ref,''),coalesce(refs->>'pr','') FROM task_events WHERE id=$1`,
-			`SELECT COALESCE(source,''),`+"`to`"+`,COALESCE(source_ref,''),COALESCE(CASE WHEN JSON_TYPE(JSON_EXTRACT(refs,'$.pr'))='NULL' THEN NULL ELSE JSON_UNQUOTE(JSON_EXTRACT(refs,'$.pr')) END,'') FROM task_events WHERE id=?`), ref).Scan(&source, &to, &sourceRef, &pr); err != nil {
+			`SELECT COALESCE(source,''),`+"`to`"+`,COALESCE(source_ref,''),COALESCE(CASE WHEN JSON_TYPE(JSON_EXTRACT(refs,'$.pr')) COLLATE utf8mb4_0900_bin='NULL' THEN NULL ELSE JSON_UNQUOTE(JSON_EXTRACT(refs,'$.pr')) COLLATE utf8mb4_0900_bin END,'') FROM task_events WHERE id=?`), ref).Scan(&source, &to, &sourceRef, &pr); err != nil {
 			return err
 		}
 		x.PR = pr

@@ -3755,8 +3755,10 @@ func (s *Store) EventWatermarks(ctx context.Context) (EventWatermarks, error) {
 const awaitingEventSQL = `((kind='awaiting_decision' AND to_value='true') OR (kind='transition' AND "to"='needs_decision'))`
 
 // awaitingTaskDecisionSQLMySQL is awaitingTaskDecisionSQL for MySQL: the `?`
-// key-exists test is JSON_CONTAINS_PATH and `->>` takes a JSON path.
-const awaitingTaskDecisionSQLMySQL = `awaiting_decision AND NOT JSON_CONTAINS_PATH(refs,'one','$.disposition') AND COALESCE(refs->>'$.decision_request.status','')<>'open'`
+// key-exists test is JSON_CONTAINS_PATH and the status comes through CAST AS
+// CHAR, which takes the connection's utf8mb4_0900_bin (design §11.4, hk 5169):
+// a bare ->> carries utf8mb4_bin and no longer mixes with it.
+const awaitingTaskDecisionSQLMySQL = `awaiting_decision AND NOT JSON_CONTAINS_PATH(refs,'one','$.disposition') AND COALESCE(CAST(refs->>'$.decision_request.status' AS CHAR),'')<>'open'`
 
 // TaskDecision is an unresolved task together with the original question
 // recorded when the task last began waiting on a decision.

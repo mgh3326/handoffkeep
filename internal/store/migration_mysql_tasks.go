@@ -33,6 +33,13 @@ const (
 	mysqlTableOptions   = ` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin`
 )
 
+// mysqlTasksClosureCheckBody is the tasks closure CHECK predicate. JSON
+// strings carry utf8mb4_bin, which no longer mixes with the connection's
+// utf8mb4_0900_bin, so both JSON reads are pinned to the table collation
+// (design §11.4, hk 5169). Shared with the collation migration, which
+// rebuilds the constraint on databases migrated before the pin.
+const mysqlTasksClosureCheckBody = `JSON_EXTRACT(refs,'$.closure') IS NULL OR (JSON_UNQUOTE(JSON_EXTRACT(refs,'$.closure.type')) COLLATE utf8mb4_0900_bin IN ('resolved','cancelled','obsolete','superseded') AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(refs,'$.closure.evidence')) COLLATE utf8mb4_0900_bin,'') <> '')`
+
 // mysqlBulkGuard wraps a trigger body so the copy tool's bulk load (design §11.6)
 // bypasses it. Only the copy tool's connection sets @hk_bulk_load.
 func mysqlBulkGuard(body string) string {
@@ -40,8 +47,11 @@ func mysqlBulkGuard(body string) string {
 }
 
 func mysqlSyncEmit(name, table, event, model, row, action string) string {
+	// CAST AS CHAR takes the connection collation, but a trigger keeps the
+	// collation_connection it was created with, so the cast is pinned to the
+	// table collation (design §11.4, hk 5169).
 	return `CREATE TRIGGER IF NOT EXISTS ` + name + ` AFTER ` + event + ` ON ` + table + ` FOR EACH ROW ` +
-		mysqlBulkGuard(`INSERT INTO sync_log(txn,model,model_id,action,at) VALUES(@hk_txn,'`+model+`',CAST(`+row+`.id AS CHAR),'`+action+`',UTC_TIMESTAMP(6));`)
+		mysqlBulkGuard(`INSERT INTO sync_log(txn,model,model_id,action,at) VALUES(@hk_txn,'`+model+`',CAST(`+row+`.id AS CHAR) COLLATE utf8mb4_0900_bin,'`+action+`',UTC_TIMESTAMP(6));`)
 }
 
 var mysqlTasksSteps = []string{
@@ -91,7 +101,7 @@ var mysqlTasksSteps = []string{
 		ADD COLUMN sla_breaches_at DATETIME(6)`),
 	mysqlIfNoConstraint("tasks", "tasks_state_check", `ALTER TABLE tasks ADD CONSTRAINT tasks_state_check CHECK(`+mysqlTaskStateCheck+`)`),
 	mysqlIfNoConstraint("tasks", "tasks_kind_check", `ALTER TABLE tasks ADD CONSTRAINT tasks_kind_check CHECK(`+mysqlTaskKindCheck+`)`),
-	mysqlIfNoConstraint("tasks", "tasks_closure_check", `ALTER TABLE tasks ADD CONSTRAINT tasks_closure_check CHECK(JSON_EXTRACT(refs,'$.closure') IS NULL OR (JSON_UNQUOTE(JSON_EXTRACT(refs,'$.closure.type')) IN ('resolved','cancelled','obsolete','superseded') AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(refs,'$.closure.evidence')),'') <> ''))`),
+	mysqlIfNoConstraint("tasks", "tasks_closure_check", `ALTER TABLE tasks ADD CONSTRAINT tasks_closure_check CHECK(`+mysqlTasksClosureCheckBody+`)`),
 	mysqlIfNoConstraint("tasks", "tasks_parent_fk", `ALTER TABLE tasks ADD CONSTRAINT tasks_parent_fk FOREIGN KEY(parent_id) REFERENCES tasks(id) ON DELETE RESTRICT`),
 	mysqlIfNoConstraint("tasks", "tasks_milestone_fk", `ALTER TABLE tasks ADD CONSTRAINT tasks_milestone_fk FOREIGN KEY(milestone_id) REFERENCES project_milestones(id) ON DELETE RESTRICT`),
 	mysqlIfNoIndex("tasks", "tasks_lane_state_priority", `CREATE INDEX tasks_lane_state_priority ON tasks(lane, state, priority DESC, created_at ASC, id ASC)`),
@@ -106,9 +116,6 @@ var mysqlTasksSteps = []string{
 		// PostgreSQL: UNIQUE (task_id, source, source_ref) WHERE source<>'' AND source_ref<>''.
 		`UNIQUE KEY task_events_source_ref(task_id, (CASE WHEN source<>'' AND source_ref<>'' THEN source END), (CASE WHEN source<>'' AND source_ref<>'' THEN source_ref END)), ` +
 		`CONSTRAINT task_events_task_fk FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE RESTRICT)` + mysqlTableOptions,
-	`CREATE TRIGGER IF NOT EXISTS task_events_guard_update BEFORE UPDATE ON task_events FOR EACH ROW BEGIN IF COALESCE(@hk_bulk_load,0) <> 1 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='task_events is append-only'; END IF; END`,
-	`CREATE TRIGGER IF NOT EXISTS task_events_guard_delete BEFORE DELETE ON task_events FOR EACH ROW BEGIN IF COALESCE(@hk_bulk_load,0) <> 1 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='task_events is append-only'; END IF; END`,
-
 	`CREATE TABLE IF NOT EXISTS task_relations (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, kind VARCHAR(16) NOT NULL, src_id BIGINT NOT NULL, dst_id BIGINT NOT NULL, created_by LONGTEXT NOT NULL, created_at DATETIME(6) NOT NULL, archived_at DATETIME(6), archived_by LONGTEXT NOT NULL DEFAULT (''), ` +
 		`CONSTRAINT task_relations_kind_check CHECK(kind IN ('blocks','duplicate_of','related')), CONSTRAINT task_relations_ends_check CHECK(src_id<>dst_id), CONSTRAINT task_relations_related_check CHECK(kind<>'related' OR src_id<dst_id), ` +
 		`UNIQUE KEY task_relations_identity(kind, src_id, dst_id), KEY task_relations_dst(dst_id, kind), ` +
@@ -160,6 +167,8 @@ var mysqlTasksSteps = []string{
 // The triggers come last: they name sync_log, sync_decisions and tasks columns.
 // Each is guarded by @hk_bulk_load like the guards of 20261117-mysql-comments.
 var mysqlTasksTriggers = []string{
+	`CREATE TRIGGER IF NOT EXISTS task_events_guard_update BEFORE UPDATE ON task_events FOR EACH ROW BEGIN IF COALESCE(@hk_bulk_load,0) <> 1 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='task_events is append-only'; END IF; END`,
+	`CREATE TRIGGER IF NOT EXISTS task_events_guard_delete BEFORE DELETE ON task_events FOR EACH ROW BEGIN IF COALESCE(@hk_bulk_load,0) <> 1 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='task_events is append-only'; END IF; END`,
 	// PostgreSQL: CHECK(parent_id IS NULL OR parent_id<>id). MySQL refuses a CHECK
 	// that names the AUTO_INCREMENT column (error 3818), so a task that is its own
 	// parent is refused by triggers, with the check-violation error number.
@@ -182,6 +191,10 @@ var mysqlTasksTriggers = []string{
 // refs.decision_request.id, as PostgreSQL's handoffkeep_sync_decision does. An
 // UPDATE that leaves the decision_request object unchanged does nothing.
 // JSON null and non-string ids count as no id, as ->> gives SQL NULL there.
+// request_id is declared with the table collation and the JSON reads are
+// pinned to it: JSON strings carry utf8mb4_bin, which no longer mixes with
+// the connection collation, and a trigger otherwise keeps the
+// collation_connection it was created with (design §11.4, hk 5169).
 func mysqlTaskDecision(name, event string, update bool) string {
 	guard := ``
 	end := ``
@@ -189,8 +202,8 @@ func mysqlTaskDecision(name, event string, update bool) string {
 		guard = `IF NOT (JSON_EXTRACT(OLD.refs,'$.decision_request') <=> JSON_EXTRACT(NEW.refs,'$.decision_request')) THEN `
 		end = ` END IF;`
 	}
-	return `CREATE TRIGGER IF NOT EXISTS ` + name + ` AFTER ` + event + ` ON tasks FOR EACH ROW BEGIN DECLARE request_id LONGTEXT; IF COALESCE(@hk_bulk_load,0) <> 1 THEN ` + guard +
-		`SET request_id = IF(JSON_TYPE(JSON_EXTRACT(NEW.refs,'$.decision_request.id'))='STRING', JSON_UNQUOTE(JSON_EXTRACT(NEW.refs,'$.decision_request.id')), NULL); ` +
+	return `CREATE TRIGGER IF NOT EXISTS ` + name + ` AFTER ` + event + ` ON tasks FOR EACH ROW BEGIN DECLARE request_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin; IF COALESCE(@hk_bulk_load,0) <> 1 THEN ` + guard +
+		`SET request_id = IF(JSON_TYPE(JSON_EXTRACT(NEW.refs,'$.decision_request.id')) COLLATE utf8mb4_0900_bin='STRING', JSON_UNQUOTE(JSON_EXTRACT(NEW.refs,'$.decision_request.id')) COLLATE utf8mb4_0900_bin, NULL); ` +
 		`DELETE FROM sync_decisions WHERE task_id=NEW.id AND NOT (id <=> request_id); ` +
 		`IF COALESCE(request_id,'') <> '' THEN INSERT INTO sync_decisions(id,task_id,updated_at) VALUES(request_id,NEW.id,NEW.updated_at) ON DUPLICATE KEY UPDATE task_id=VALUES(task_id), updated_at=VALUES(updated_at); END IF;` + end + ` END IF; END`
 }

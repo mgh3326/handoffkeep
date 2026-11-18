@@ -236,10 +236,6 @@ var mysqlYTOpsSteps = []string{
 		reason LONGTEXT NOT NULL,
 		at DATETIME(6) NOT NULL,
 		KEY yt_binding_history_task(task_id, id DESC))` + mysqlTableOptions,
-	`CREATE TRIGGER IF NOT EXISTS yt_binding_history_guard_update BEFORE UPDATE ON yt_binding_history FOR EACH ROW ` +
-		mysqlBulkGuard(`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='yt_binding_history is append-only';`),
-	`CREATE TRIGGER IF NOT EXISTS yt_binding_history_guard_delete BEFORE DELETE ON yt_binding_history FOR EACH ROW ` +
-		mysqlBulkGuard(`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='yt_binding_history is append-only';`),
 	`CREATE TABLE IF NOT EXISTS yt_feed_cursors (
 		consumer VARCHAR(64) NOT NULL PRIMARY KEY,
 		last_sync_id BIGINT NOT NULL,
@@ -264,9 +260,13 @@ var mysqlYTOpsSteps = []string{
 		ON DUPLICATE KEY UPDATE hk_project=hk_project`,
 }
 
-// The four yt_write_ops guards. Each is mysqlBulkGuard-wrapped, like the
-// append-only guards of 20261117-mysql-comments.
+// The yt_binding_history guards and the four yt_write_ops guards. Each is
+// mysqlBulkGuard-wrapped, like the append-only guards of 20261117-mysql-comments.
 var mysqlYTOpsTriggers = []string{
+	`CREATE TRIGGER IF NOT EXISTS yt_binding_history_guard_update BEFORE UPDATE ON yt_binding_history FOR EACH ROW ` +
+		mysqlBulkGuard(`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='yt_binding_history is append-only';`),
+	`CREATE TRIGGER IF NOT EXISTS yt_binding_history_guard_delete BEFORE DELETE ON yt_binding_history FOR EACH ROW ` +
+		mysqlBulkGuard(`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='yt_binding_history is append-only';`),
 	// handoffkeep_yt_write_ops_guard, UPDATE arm (final version of
 	// 20261113-yt-comment-hold): identity columns immutable, resolved rows
 	// frozen, the lifecycle transition list, the retarget (hk 4263) and
