@@ -53,7 +53,7 @@ func stateClauseCore(state string, args *[]any) string {
 const coreTaskActivitySQL = `GREATEST(tasks.created_at,
 	COALESCE((SELECT max(e.at) FROM task_events e WHERE e.task_id=tasks.id), tasks.created_at),
 	COALESCE((SELECT max(c.created_at) FROM task_comments c WHERE c.task_id=tasks.id), tasks.created_at),
-	COALESCE((SELECT max(j.updated_at) FROM jobs j WHERE j.job_id=IF(JSON_TYPE(JSON_EXTRACT(tasks.refs,'$.job_id'))='STRING',JSON_UNQUOTE(JSON_EXTRACT(tasks.refs,'$.job_id')),NULL) AND j.task_id=tasks.id), tasks.created_at))`
+	COALESCE((SELECT max(j.updated_at) FROM jobs j WHERE j.job_id=IF(JSON_TYPE(JSON_EXTRACT(tasks.refs,'$.job_id')) COLLATE utf8mb4_0900_bin='STRING',JSON_UNQUOTE(JSON_EXTRACT(tasks.refs,'$.job_id')) COLLATE utf8mb4_0900_bin,NULL) AND j.task_id=tasks.id), tasks.created_at))`
 
 // coreTaskEventColumnsMySQL is taskEventColumns with the reserved words
 // from/to/by quoted with backticks instead of double quotes.

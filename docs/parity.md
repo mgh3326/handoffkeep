@@ -170,6 +170,7 @@ because that path has an authenticated principal.
 | waits_list | read | HTTP | Waits read: four sections (needs_operator, failed_start, waiting_on, idle_started) and the ordinary backlog (hk 5128) |
 | task_wait | write | HTTP | Hand wait on a task: operator, lane, task, pr, ci or external (hk 5128) |
 | task_unwait | write | HTTP | End a hand wait by its wait id (hk 5128) |
+| lane_look | write | HTTP | Record that a design lane looked at its lane_check notice, which stops the repeat until the findings change (hk 5201) |
 
 Read tools set `readOnlyHint: true`. The write tools (`put_checkpoint`,
 `put_document`, `attachment_put`, `attachment_upload_begin`, `attachment_upload_complete`, `attachment_put_from_path`, `decision_answer`,

@@ -95,3 +95,69 @@ func requestNotices(t *testing.T, s *Store, requestID string) []NotificationOutb
 	}
 	return out
 }
+
+// Invariant: an answer's free text reaches the lane notice after the option,
+// clipped with "…" and a full-text note when long; an option-only answer is
+// unchanged. The asker's copy (hk 5129) carries the same text.
+func TestDecisionAnswerNoticeCarriesText(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+
+	answerText := func(request DecisionRequest, option, text string) string {
+		t.Helper()
+		in := answerA(request, DecisionChannelCLI, "operator")
+		in.Option, in.Text = option, text
+		if _, err := s.ResolveDecision(ctx, in); err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		rows := requestNotices(t, s, request.ID)
+		if len(rows) != 1 {
+			t.Fatalf("notices=%+v, want 1", rows)
+		}
+		return rows[0].Text
+	}
+
+	task := assistantTask(t, s, "in_progress")
+	got := answerText(assistantRecord(t, s, task.ID), "A", "")
+	if !strings.Contains(got, "A #481 writer 명세에 통합 by operator via cli") || strings.Contains(got, "—") {
+		t.Fatalf("option-only changed: %q", got)
+	}
+
+	task = assistantTask(t, s, "in_progress")
+	got = answerText(assistantRecord(t, s, task.ID), "A", "나한테 안 보여주고 바로 정리해도 돼")
+	if !strings.Contains(got, "A #481 writer 명세에 통합 — 나한테 안 보여주고 바로 정리해도 돼") || strings.Contains(got, "…") || strings.Contains(got, "full text in record") {
+		t.Fatalf("option plus text: %q", got)
+	}
+
+	task = assistantTask(t, s, "in_progress")
+	got = answerText(assistantRecord(t, s, task.ID), "", "직접 정리함")
+	if !strings.Contains(got, "직접 정리함") || strings.Contains(got, "…") {
+		t.Fatalf("text-only: %q", got)
+	}
+
+	task = assistantTask(t, s, "in_progress")
+	long := strings.Repeat("가", 300)
+	got = answerText(assistantRecord(t, s, task.ID), "A", long)
+	if !strings.Contains(got, strings.Repeat("가", 200)+"…") || !strings.Contains(got, " (full text in record)") || strings.Contains(got, long) {
+		t.Fatalf("long text: %q", got)
+	}
+
+	askerTask := assistantTask(t, s, "in_progress")
+	askerIn := decisionInput()
+	askerIn.RequestLane = "asker-lane"
+	askerRequest := assistantRecordWith(t, s, askerTask.ID, askerIn)
+	in := answerA(askerRequest, DecisionChannelCLI, "operator")
+	in.Text = "나한테 안 보여주고 바로 정리해도 돼"
+	if _, err := s.ResolveDecision(ctx, in); err != nil {
+		t.Fatalf("resolve asker: %v", err)
+	}
+	rows := requestNotices(t, s, askerRequest.ID)
+	if len(rows) != 2 {
+		t.Fatalf("asker notices=%+v, want 2", rows)
+	}
+	for _, row := range rows {
+		if !strings.Contains(row.Text, "A #481 writer 명세에 통합 — 나한테 안 보여주고 바로 정리해도 돼") {
+			t.Fatalf("asker copy lost the text: %q", row.Text)
+		}
+	}
+}

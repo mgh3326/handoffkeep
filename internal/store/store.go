@@ -161,6 +161,12 @@ type TaskRefs struct {
 	// RevertPR is the PR that reverted this task's merge. Only a
 	// mergewake.revert event writes it (rule 9).
 	RevertPR string `json:"revert_pr,omitempty"`
+	// QuestionTask marks a kind=decide task filed only to carry a decision
+	// request: `decisions ask --new-task` sets it, and answering, withdrawing
+	// or default-applying the request closes the task to completed with the
+	// request id as evidence (operator decision 417, hk 5201). A decide task
+	// that also carries work does not have it and is left open.
+	QuestionTask bool `json:"question_task,omitempty"`
 }
 
 // GradeTier returns the task's grade and tier: refs.grade and refs.tier,
@@ -867,6 +873,13 @@ type SearchResult struct {
 
 func Open(ctx context.Context, url string) (*Store, error) { return open(ctx, url, nil) }
 
+// OpenServing is Open for the serve process, with a pool floor that leaves
+// query headroom after every session-lock worker has taken its connection.
+// The tools and tests use Open and keep the pool their URL asks for.
+func OpenServing(ctx context.Context, url string) (*Store, error) {
+	return openFloored(ctx, url, nil, workerPoolFloor)
+}
+
 // OpenWithoutMigration connects without inspecting or changing the schema, so
 // a dry run never executes DDL. Callers learn whether their tables exist from
 // their own query.
@@ -887,13 +900,19 @@ func OpenWithoutMigration(ctx context.Context, url string) (*Store, error) {
 
 // open is Open with an explicit migration registry; nil means the real one.
 func open(ctx context.Context, url string, registry []migration) (*Store, error) {
+	return openFloored(ctx, url, registry, 0)
+}
+
+func openFloored(ctx context.Context, url string, registry []migration, floor int32) (*Store, error) {
 	if strings.HasPrefix(url, "mysql://") {
+		// database/sql has no default connection cap, so the lease count alone
+		// cannot exhaust it.
 		return openMySQL(ctx, url)
 	}
 	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
 		return nil, errors.New("HANDOFFKEEP_DB_URL must be a PostgreSQL or MySQL URL")
 	}
-	p, err := newPool(ctx, url)
+	p, err := newPoolFloored(ctx, url, nil, floor)
 	if err != nil {
 		return nil, err
 	}
@@ -2416,6 +2435,11 @@ func mergeTaskRefs(old, patch TaskRefs) TaskRefs {
 	if patch.Tier != "" {
 		old.Tier = patch.Tier
 	}
+	// question_task is a one-way marker: a patch sets it, and no transition
+	// clears it (hk 5201).
+	if patch.QuestionTask {
+		old.QuestionTask = true
+	}
 	if patch.Linear != nil {
 		// A previous-release client still sends grade and tier under
 		// refs.linear during a blue-green overlap; they land in the new keys
@@ -3773,8 +3797,10 @@ func (s *Store) EventWatermarks(ctx context.Context) (EventWatermarks, error) {
 const awaitingEventSQL = `((kind='awaiting_decision' AND to_value='true') OR (kind='transition' AND "to"='needs_decision'))`
 
 // awaitingTaskDecisionSQLMySQL is awaitingTaskDecisionSQL for MySQL: the `?`
-// key-exists test is JSON_CONTAINS_PATH and `->>` takes a JSON path.
-const awaitingTaskDecisionSQLMySQL = `awaiting_decision AND NOT JSON_CONTAINS_PATH(refs,'one','$.disposition') AND COALESCE(refs->>'$.decision_request.status','')<>'open'`
+// key-exists test is JSON_CONTAINS_PATH and the status comes through CAST AS
+// CHAR, which takes the connection's utf8mb4_0900_bin (design §11.4, hk 5169):
+// a bare ->> carries utf8mb4_bin and no longer mixes with it.
+const awaitingTaskDecisionSQLMySQL = `awaiting_decision AND NOT JSON_CONTAINS_PATH(refs,'one','$.disposition') AND COALESCE(CAST(refs->>'$.decision_request.status' AS CHAR),'')<>'open'`
 
 // TaskDecision is an unresolved task together with the original question
 // recorded when the task last began waiting on a decision.

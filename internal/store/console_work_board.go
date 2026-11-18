@@ -127,6 +127,12 @@ func (b TaskWorkBoard) PrimaryJob() string {
 // A session ends when its job row is terminal or task_events records a later
 // claim/rebind to another job. An unbound placement stays visible while it is
 // a pending replacement.
+
+// workBoardsSeam is a test-only barrier invoked inside the work-board
+// snapshot after the placement read and before the job read. Production code
+// leaves it nil; it is unexported and unreachable from any network surface.
+var workBoardsSeam func(ctx context.Context)
+
 func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64]TaskWorkBoard, error) {
 	boards := make(map[int64]TaskWorkBoard, len(tasks))
 	if len(tasks) == 0 {
@@ -168,6 +174,9 @@ func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64
 	rows.Close()
 	if err != nil {
 		return nil, err
+	}
+	if workBoardsSeam != nil {
+		workBoardsSeam(ctx)
 	}
 	owners := map[string][]int64{}
 	jobIDs := []string{}
@@ -212,7 +221,7 @@ func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64
 	}
 	rows, err = tx.Query(ctx, sqlFor(tx, `SELECT task_id,at,COALESCE(refs->>'job_id',''),COALESCE(refs->'job_rebind'->>'from_job','')
 		FROM task_events WHERE task_id=ANY($1) AND refs IS NOT NULL ORDER BY id`,
-		`SELECT task_id,at,COALESCE(refs->>'$.job_id',''),COALESCE(refs->>'$.job_rebind.from_job','')
+		`SELECT task_id,at,COALESCE(CAST(refs->>'$.job_id' AS CHAR),''),COALESCE(CAST(refs->>'$.job_rebind.from_job' AS CHAR),'')
 		FROM task_events WHERE task_id IN (`+placeholders(len(ids))+`) AND refs IS NOT NULL ORDER BY id`), idArgs...)
 	if err != nil {
 		return nil, err

@@ -22,7 +22,7 @@ One row per logical write, committed **before** any remote call.
 |---|---|
 | `id` | op id; appears in the provenance line and the body marker |
 | `principal`, `kind`, `idem_key` | unique together: the idempotency key is scoped per authenticated principal and op kind, never derived from body text |
-| `payload_sha`, `payload` | what the write means (a hash, to tell a replay from key reuse) and the immutable outbound payload (JSON); the exact text sent is a pure function of the op and this payload |
+| `payload_sha`, `payload` | what the write means (a hash, to tell a replay from key reuse) and the immutable outbound payload (JSON); the exact text sent is a pure function of the op and this payload. `payload` becomes NULL more than 30 days after the op resolves (hk 5056); `payload_sha` is kept as the receipt |
 | `entity_kind`, `entity_id`, `yt_target_id` | the hk entity whose writes are ordered (`task`, `3697`) and the YouTrack id written to |
 | `tenant` | the YouTrack host the op was bound to when it was prepared (b1a; `''` for an op prepared without one). Part of the write's identity: it is in `payload_sha`, immutable by trigger, and only a dispatcher configured for that tenant sends or searches for the op |
 | `actor`, `created_at` | who the write is attributed to, and when (rendered in the provenance line) |
@@ -43,7 +43,9 @@ that wrote it).
 
 A trigger makes the table append-only: identity and payload columns never change,
 a resolved row never changes, only the lifecycle's moves are allowed, nothing is
-deleted.
+deleted. The one exception is the hk 5056 redaction: an applied or rejected row
+resolved more than 30 days ago may set `payload` to NULL, with every other
+column unchanged. The alert tick redacts in bounded batches.
 
 **Migration** `20261109-yt-write-ops` (expand-only): two new tables, three partial
 indexes, one trigger function. It touches no existing table and takes no lock on

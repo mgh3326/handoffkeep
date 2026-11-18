@@ -59,10 +59,13 @@ type QuotaObservation struct {
 	MeasuredAt time.Time `json:"measured_at"`
 	// ConfirmedAt is server-side: the newest measured_at at which the latest
 	// value was republished. Never decoded from request bodies.
-	ConfirmedAt *time.Time    `json:"confirmed_at,omitempty"`
-	ExpiresAt   *time.Time    `json:"expires_at,omitempty"`
-	Plan        string        `json:"plan,omitempty"`
-	Buckets     []QuotaBucket `json:"buckets"`
+	ConfirmedAt *time.Time `json:"confirmed_at,omitempty"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	Plan        string     `json:"plan,omitempty"`
+	// Balance is the credits remaining on a commandcode account. Optional;
+	// when present it must be >= 0. Stored in the observation value JSON.
+	Balance *float64      `json:"balance,omitempty"`
+	Buckets []QuotaBucket `json:"buckets"`
 	// FreeBucket is optional and valid only on automatic devin observations.
 	FreeBucket *QuotaFreeBucket `json:"free_bucket,omitempty"`
 }
@@ -110,6 +113,9 @@ func validQuotaFreeBucket(f QuotaFreeBucket) bool {
 }
 func validQuotaObservation(x QuotaObservation, now time.Time) bool {
 	if x.FreeBucket != nil && !validQuotaFreeBucket(*x.FreeBucket) {
+		return false
+	}
+	if x.Balance != nil && (math.IsNaN(*x.Balance) || math.IsInf(*x.Balance, 0) || *x.Balance < 0) {
 		return false
 	}
 	if x.MeasuredAt.IsZero() || x.MeasuredAt.After(now.Add(time.Minute)) || len(x.Plan) > 64 || len(x.Buckets) > 32 {

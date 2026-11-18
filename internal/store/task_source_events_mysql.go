@@ -10,16 +10,18 @@ import (
 
 // refs->>'pr' and refs->>'job_id' of a tasks row. JSON_UNQUOTE of a JSON null
 // is the string 'null' where PostgreSQL's ->> gives SQL NULL, so the value is
-// read only when it is a JSON string.
+// read only when it is a JSON string. The JSON calls are pinned to
+// utf8mb4_0900_bin: JSON strings carry utf8mb4_bin, which no longer mixes
+// with the connection collation (design §11.4, hk 5169).
 const (
-	srcEvRefsPRMySQL    = `CASE WHEN JSON_TYPE(JSON_EXTRACT(refs,'$.pr'))='STRING' THEN JSON_UNQUOTE(JSON_EXTRACT(refs,'$.pr')) END`
-	srcEvRefsJobIDMySQL = `CASE WHEN JSON_TYPE(JSON_EXTRACT(refs,'$.job_id'))='STRING' THEN JSON_UNQUOTE(JSON_EXTRACT(refs,'$.job_id')) END`
+	srcEvRefsPRMySQL    = `CASE WHEN JSON_TYPE(JSON_EXTRACT(refs,'$.pr')) COLLATE utf8mb4_0900_bin='STRING' THEN JSON_UNQUOTE(JSON_EXTRACT(refs,'$.pr')) COLLATE utf8mb4_0900_bin END`
+	srcEvRefsJobIDMySQL = `CASE WHEN JSON_TYPE(JSON_EXTRACT(refs,'$.job_id')) COLLATE utf8mb4_0900_bin='STRING' THEN JSON_UNQUOTE(JSON_EXTRACT(refs,'$.job_id')) COLLATE utf8mb4_0900_bin END`
 )
 
 // srcEvDeliveredPRMySQL is taskDeliveredPRSQL for the tasks row aliased t: the
 // task's own refs.pr, else the refs.pr of a "[bundle ...]" parent, else the empty string.
-const srcEvDeliveredPRMySQL = `COALESCE(NULLIF(CASE WHEN JSON_TYPE(JSON_EXTRACT(t.refs,'$.pr'))='STRING' THEN JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.pr')) END,''), ` +
-	`(SELECT CASE WHEN JSON_TYPE(JSON_EXTRACT(p.refs,'$.pr'))='STRING' THEN JSON_UNQUOTE(JSON_EXTRACT(p.refs,'$.pr')) END FROM tasks p WHERE p.id=t.parent_id AND p.title LIKE '[bundle %'), '')`
+const srcEvDeliveredPRMySQL = `COALESCE(NULLIF(CASE WHEN JSON_TYPE(JSON_EXTRACT(t.refs,'$.pr')) COLLATE utf8mb4_0900_bin='STRING' THEN JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.pr')) COLLATE utf8mb4_0900_bin END,''), ` +
+	`(SELECT CASE WHEN JSON_TYPE(JSON_EXTRACT(p.refs,'$.pr')) COLLATE utf8mb4_0900_bin='STRING' THEN JSON_UNQUOTE(JSON_EXTRACT(p.refs,'$.pr')) COLLATE utf8mb4_0900_bin END FROM tasks p WHERE p.id=t.parent_id AND p.title LIKE '[bundle %'), '')`
 
 // srcEvLockedTasksMySQL returns the tasks whose ids idQuery selects, locked
 // FOR UPDATE in ascending id order. PostgreSQL's ORDER BY ... FOR UPDATE

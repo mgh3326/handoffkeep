@@ -125,6 +125,7 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	registerMetaTools(s, o)
 	registerTaskContextTool(s, o)
 	registerTaskWaitTools(s, o)
+	registerLaneCheckTools(s, o)
 }
 
 func readOnlyAnnotations() *gmcp.ToolAnnotations {

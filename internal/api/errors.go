@@ -62,6 +62,7 @@ var errorRules = []errorRule{
 	{store.ErrSpawnInvalid, http.StatusBadRequest, "invalid_context", true},
 	{store.ErrTaskWaitInvalid, http.StatusBadRequest, "invalid_context", true},
 	{store.ErrTaskWaitNotFound, http.StatusNotFound, "task_wait_not_found", false},
+	{store.ErrLaneLookInvalid, http.StatusBadRequest, "lane_look_invalid", true},
 	{attachments.ErrDisabled, http.StatusServiceUnavailable, "attachments_disabled", false},
 	{attachments.ErrArchiveOff, http.StatusConflict, "attachment_archive_off", false},
 	{store.ErrAttachmentArchived, http.StatusConflict, "attachment_archived", false},

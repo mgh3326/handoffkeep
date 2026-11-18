@@ -1009,14 +1009,19 @@ type ytOpsAlertWorker struct {
 // opsAlertPasses is the set of outbox passes the alert worker runs each tick.
 type opsAlertPasses interface {
 	EnqueueYTWriteOpAlerts(ctx context.Context, now time.Time) (int, error)
+	RedactYTPayloads(ctx context.Context, now time.Time, limit int) (int64, error)
 	EnqueueDeployLagNotices(ctx context.Context, now time.Time) (int, error)
 }
 
 // runOpsAlertPasses runs every operator-desk notice pass once: pending
-// YouTrack write ops and deploy lag (hk 3291).
+// YouTrack write ops, the hk 5056 payload redaction of resolved ops older
+// than 30 days, and deploy lag (hk 3291).
 func runOpsAlertPasses(ctx context.Context, p opsAlertPasses, now time.Time) {
 	if _, err := p.EnqueueYTWriteOpAlerts(ctx, now); err != nil && ctx.Err() == nil {
 		log.Printf("ytwrite.alerts_failed err=%q", err.Error())
+	}
+	if _, err := p.RedactYTPayloads(ctx, now, store.YTPayloadRedactBatch); err != nil && ctx.Err() == nil {
+		log.Printf("ytwrite.payload_redact_failed err=%q", err.Error())
 	}
 	if _, err := p.EnqueueDeployLagNotices(ctx, now); err != nil && ctx.Err() == nil {
 		log.Printf("deploy_lag.enqueue_failed err=%q", err.Error())
