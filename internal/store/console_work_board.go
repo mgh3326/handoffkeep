@@ -221,7 +221,7 @@ func (s *Store) ReadTaskWorkBoards(ctx context.Context, tasks []Task) (map[int64
 	}
 	rows, err = tx.Query(ctx, sqlFor(tx, `SELECT task_id,at,COALESCE(refs->>'job_id',''),COALESCE(refs->'job_rebind'->>'from_job','')
 		FROM task_events WHERE task_id=ANY($1) AND refs IS NOT NULL ORDER BY id`,
-		`SELECT task_id,at,COALESCE(refs->>'$.job_id',''),COALESCE(refs->>'$.job_rebind.from_job','')
+		`SELECT task_id,at,COALESCE(CAST(refs->>'$.job_id' AS CHAR),''),COALESCE(CAST(refs->>'$.job_rebind.from_job' AS CHAR),'')
 		FROM task_events WHERE task_id IN (`+placeholders(len(ids))+`) AND refs IS NOT NULL ORDER BY id`), idArgs...)
 	if err != nil {
 		return nil, err
