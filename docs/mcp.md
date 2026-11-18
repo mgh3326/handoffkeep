@@ -213,7 +213,7 @@ An Access identity becomes the principal `operator:<email>` with channel
   `decision_ref` with the exact `request_id`. The resolution then keeps channel
   `dots` and provenance `operator_decided` (a relayed answer, not the verified
   path); without the words, or with a ref that binds another request or
-  revision, the answer is refused (`decision_operator_only` or
+  revision, the answer is refused (`operator_only_decision` or
   `provenance_ref_mismatch`) and the refusal is kept as an attempt. A
   disposition item is still answered only on the console.
 - `task_intake` records `source=chatgpt` and `dots` as `created_by`; the tool
