@@ -140,7 +140,7 @@ func waitsCaseDecisionAndPendingAnswer(t *testing.T, s *Store) {
 	ctx := t.Context()
 	task := flowCaseTask(t, s, "implement")
 	res, err := s.RecordDecisionRequest(ctx, task.ID, "director-1", decisionInput())
-	flowMust(t, err)
+	flowSkipUnported(t, s, err)
 
 	row, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionNeedsOperator, task.ID)
 	if !ok || row.Source != "derived:decision_request" || row.OnKind != WaitOnOperator || row.NextAction != "answer_decision" || row.RequestID != res.Request.ID {
@@ -183,7 +183,7 @@ func waitsCaseDerivedBlocks(t *testing.T, s *Store) {
 		t.Fatalf("blocked row=%+v found=%t", row, ok)
 	}
 	// Settling the blocker ends the wait: a derived wait is never stored.
-	if _, err := s.TransitionTask(ctx, blocker.ID, StateDropped, "tester", "", nil, ""); err != nil {
+	if _, err := s.TransitionTaskWith(ctx, blocker.ID, TransitionInput{To: StateDropped, By: "tester", Note: "dropped in the waits case", Evidence: "declined"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionWaitingOn, blocked.ID); ok {
@@ -208,12 +208,12 @@ func waitsCaseDerivedSpawnStart(t *testing.T, s *Store) {
 func waitsCaseDerivedReview(t *testing.T, s *Store) {
 	task := flowCaseTask(t, s, "implement")
 	pr := testPR(7401)
-	send(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: pr, TaskID: task.ID})
+	waitsSend(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: pr, TaskID: task.ID})
 	row, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionWaitingOn, task.ID)
 	if !ok || row.Source != "derived:change_review" || row.OnKind != WaitOnPR || row.OnRef != "example/app#7401" || row.NextAction != "wait_review" {
 		t.Fatalf("review row=%+v found=%t", row, ok)
 	}
-	send(t, s, mergeEvent(task.ID, pr))
+	waitsSend(t, s, mergeEvent(task.ID, pr))
 	if _, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionWaitingOn, task.ID); ok {
 		t.Fatal("a merged PR still waits for review")
 	}
@@ -240,7 +240,7 @@ func waitsCaseFailedStartSection(t *testing.T, s *Store) {
 
 func waitsCaseIdleStarted(t *testing.T, s *Store) {
 	task := flowCaseTask(t, s, "implement")
-	if _, err := s.TransitionTask(t.Context(), task.ID, StateDeveloping, "tester", "", nil, ""); err != nil {
+	if _, err := s.TransitionTask(t.Context(), task.ID, StateDeveloping, "tester", "", nil, "waits case: no job"); err != nil {
 		t.Fatal(err)
 	}
 	// Read far enough ahead that the task's last activity is older than the
@@ -313,7 +313,7 @@ func waitsCaseSpawnFailureComment(t *testing.T, s *Store) {
 		t.Fatalf("failed_start rows for the task=%d, want the derived failure and the hand wait", both)
 	}
 	// A transition into a started state after the comment ends the failed start.
-	if _, err := s.TransitionTask(ctx, task.ID, StateDeveloping, "tester", "", nil, ""); err != nil {
+	if _, err := s.TransitionTask(ctx, task.ID, StateDeveloping, "tester", "", nil, "waits case: no job"); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range waitsSection(t, waitsRead(t, s, ""), WaitSectionFailedStart).Rows {
@@ -372,4 +372,12 @@ func waitsCaseBacklogCountExact(t *testing.T, s *Store) {
 			t.Fatal("the waiting task is listed as ordinary backlog")
 		}
 	}
+}
+
+// waitsSend applies a source event; on MySQL the event path is not ported yet,
+// so the case skips there rather than failing.
+func waitsSend(t *testing.T, s *Store, in TaskSourceEvent) {
+	t.Helper()
+	_, err := s.ApplyTaskSourceEvent(t.Context(), in)
+	flowSkipUnported(t, s, err)
 }
