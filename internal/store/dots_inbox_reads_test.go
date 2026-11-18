@@ -40,11 +40,12 @@ func TestDotsInboxReadsRecordListAndPrune(t *testing.T) {
 	}
 
 	// since keeps reads at or after it.
+	second := xs[1].ReadAt
 	future := time.Now().UTC().Add(time.Hour)
 	if xs, err = s.ListDotsInboxReads(ctx, future, DotsInboxReadListMax); err != nil || len(xs) != 0 {
 		t.Fatalf("future since: xs=%+v err=%v", xs, err)
 	}
-	if xs, err = s.ListDotsInboxReads(ctx, xs[1].ReadAt, 1); err != nil || len(xs) != 1 || xs[0].Principal != "svc-x" {
+	if xs, err = s.ListDotsInboxReads(ctx, second, 1); err != nil || len(xs) != 1 || xs[0].Principal != "svc-x" {
 		t.Fatalf("limit: xs=%+v err=%v", xs, err)
 	}
 }
