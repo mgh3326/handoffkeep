@@ -204,7 +204,16 @@ func (s *Store) queueDecisionAnswerNoticeFlow(ctx context.Context, tx transactio
 	if base := s.decisionConsoleURL(); base != "" {
 		body += " | " + base + "/ui/tasks/" + taskID
 	}
-	_, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindDecisionAnswered, x.Lane, decisionAnswerNoticeEventID(resolved.ID, resolutionID), assistantLaneText(prefix, body), at)
+	text := assistantLaneText(prefix, body)
+	if _, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindDecisionAnswered, x.Lane, decisionAnswerNoticeEventID(resolved.ID, resolutionID), text, at); err != nil {
+		return err
+	}
+	// The asker's copy, as on PostgreSQL (hk 5129).
+	asker, ok := decisionAskerNoticeLane(x.Lane, resolved)
+	if !ok {
+		return nil
+	}
+	_, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindDecisionAnswered, asker, decisionAskerAnswerNoticeEventID(resolved.ID, resolutionID), text, at)
 	return err
 }
 

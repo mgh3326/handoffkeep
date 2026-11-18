@@ -101,7 +101,7 @@ func ctrCaseHoldsParent(t *testing.T, s *Store) {
 	flowMust(t, err)
 
 	_, err = s.CloseTaskCompleted(ctx, child.ID, "hk:doc research/close-rule", "tester", "child done", "ctr-parent-1")
-	flowSkipUnported(t, s, err)
+	flowMust(t, err)
 	got := flowCaseGet(t, s, parent.ID)
 	if got.State != StateBacklog || got.Refs.Closure != nil {
 		t.Fatalf("explicit parent closed by its child: state=%q closure=%v", got.State, got.Refs.Closure)
@@ -116,7 +116,6 @@ func ctrCaseHoldsParent(t *testing.T, s *Store) {
 		t.Fatalf("no held auto_close record on the explicit parent: %+v", got.Events)
 	}
 
-	needTables(t, s, "decision_requests and jobs")
 	now := time.Now().UTC()
 	d, err := s.TaskDrift(ctx, now, DriftDefaultMergedDays)
 	if err != nil {

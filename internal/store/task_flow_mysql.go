@@ -132,8 +132,16 @@ func mysqlOpenDecisionTx(ctx context.Context, tx transaction, d decisionOpen) (i
 	if d.TaskID > 0 {
 		taskID = d.TaskID
 	}
-	id, err := tx.InsertID(ctx, `INSERT INTO decision_requests(source,source_ref,task_id,job_id,lane,question,options,recommended,default_action,due_at,status,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,'open',?,?)`, d.Source, d.SourceRef, taskID, d.JobID, d.Lane, d.Question, options, d.Recommended, d.DefaultAction, d.DueAt, d.At, d.At)
+	grounds := d.Grounds
+	if grounds == nil {
+		grounds = []string{}
+	}
+	groundsJSON, err := json.Marshal(grounds)
+	if err != nil {
+		return 0, false, err
+	}
+	id, err := tx.InsertID(ctx, `INSERT INTO decision_requests(source,source_ref,task_id,job_id,lane,question,options,recommended,default_action,due_at,grounds,status,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,'open',?,?)`, d.Source, d.SourceRef, taskID, d.JobID, d.Lane, d.Question, options, d.Recommended, d.DefaultAction, d.DueAt, string(groundsJSON), d.At, d.At)
 	if errors.Is(err, errUniqueViolation) {
 		var existing int64
 		err = tx.QueryRow(ctx, `SELECT id FROM decision_requests WHERE source=? AND source_ref=?`, d.Source, d.SourceRef).Scan(&existing)
@@ -179,7 +187,7 @@ func mysqlMirrorTaskDecisionsTx(ctx context.Context, tx transaction, before task
 	case cur != nil && (prev == nil || prev.ID != cur.ID):
 		if cur.Status == DecisionRequestOpen {
 			d := decisionOpen{Source: DecisionSourceTaskRequest, SourceRef: cur.ID, TaskID: after.ID, Lane: after.Lane, Question: cur.Question,
-				Options: after.Refs.DecisionOptions, DefaultAction: cur.DefaultAction, DueAt: cur.DueAt, At: at}
+				Options: after.Refs.DecisionOptions, DefaultAction: cur.DefaultAction, DueAt: cur.DueAt, Grounds: cur.Grounds, At: at}
 			if after.Refs.DecisionOptions != nil {
 				d.Recommended = recommendedOption(*after.Refs.DecisionOptions)
 			}

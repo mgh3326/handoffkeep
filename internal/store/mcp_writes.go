@@ -328,7 +328,7 @@ func (s *Store) updateTaskTx(ctx context.Context, tx transaction, id int64, in T
 		changed = append(changed, "priority")
 	}
 	if in.CloseRule != "" && in.CloseRule != x.CloseRule {
-		if err := setTaskCloseRuleTx(ctx, pgTransaction{tx}, &x, in.CloseRule, w.Author, in.Note, mcpTaskUpdateSource, ref+":close_rule"); err != nil {
+		if err := setTaskCloseRuleTx(ctx, tx, &x, in.CloseRule, w.Author, in.Note, mcpTaskUpdateSource, ref+":close_rule"); err != nil {
 			return out, err
 		}
 		changed = append(changed, "close_rule")
