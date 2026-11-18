@@ -27,7 +27,7 @@ import (
 //	blocker_landed  a backlog or unstarted task's every blocker is settled,
 //	                and the last of them settled after the task last moved
 //	kept_backlog    a priority 1 or 2 backlog task older than 24h, with no
-//	                open wait and no claim
+//	                open wait, no open decision request and no claim
 //	room_to_run     the lane has no started task with a live job while
 //	                kept_backlog or blocker_landed is non-empty
 //	wait_cleared    a task whose wait cleared since the lane last looked
@@ -361,11 +361,13 @@ WHERE t.lane=$1 AND t.state IN ('backlog','unstarted')
 ORDER BY t.id`
 
 // laneCheckKeptBacklogSQL: a priority 1 or 2 backlog task older than the
-// second argument (an instant), with no open hand wait and no claim.
+// second argument (an instant), with no open hand wait, no open decision
+// request (waits lists it as needs_operator) and no claim.
 const laneCheckKeptBacklogSQL = `SELECT t.id FROM tasks t
 WHERE t.lane=$1 AND t.state='backlog' AND t.priority IN (1,2)
   AND t.created_at < $2 AND t.claimed_by=''
   AND NOT EXISTS (SELECT 1 FROM task_waits w WHERE w.task_id=t.id AND w.cleared_at IS NULL)
+  AND NOT EXISTS (SELECT 1 FROM decision_requests d WHERE d.task_id=t.id AND d.status='open')
 ORDER BY t.priority, t.created_at, t.id`
 
 const laneCheckWaitClearedSQL = `SELECT w.task_id FROM task_waits w JOIN tasks t ON t.id=w.task_id

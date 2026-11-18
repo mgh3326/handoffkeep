@@ -150,6 +150,35 @@ func TestLaneCheckFindsKeptBacklogAndRoomToRun(t *testing.T) {
 	}
 }
 
+// TestLaneCheckKeptBacklogSkipsOpenDecision: a task waiting on an operator
+// decision is listed as needs_operator, so it is not kept_backlog until the
+// request is resolved.
+func TestLaneCheckKeptBacklogSkipsOpenDecision(t *testing.T) {
+	ctx := context.Background()
+	s := schemaStore(t, "lane_kept_decision")
+	laneCheckFixture(t, s, "decision-project", "decision-lane")
+	task := laneCheckTask(t, s, "decision-project", "decision-lane", "decided work", 2)
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET created_at=$2 WHERE id=$1`, task.ID, time.Now().UTC().Add(-48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	request, err := s.RecordDecisionRequest(ctx, task.ID, "tester", decisionInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	c := laneCheckFindings(t, s, "decision-lane", now)
+	if got := laneCheckFinding(c, LaneFindingKeptBacklog); len(got.TaskIDs) != 0 {
+		t.Fatalf("kept_backlog with an open decision request: %v", got.TaskIDs)
+	}
+	if _, err := s.ResolveDecisionRequest(ctx, task.ID, "tester", DecisionResolveInput{RequestID: request.Request.ID, Kind: DecisionRequestAnswered, Option: "A", Responder: "operator"}); err != nil {
+		t.Fatal(err)
+	}
+	c = laneCheckFindings(t, s, "decision-lane", now)
+	if got := laneCheckFinding(c, LaneFindingKeptBacklog); len(got.TaskIDs) != 1 || got.TaskIDs[0] != task.ID {
+		t.Fatalf("kept_backlog after the decision resolved = %v, want [%d]", got.TaskIDs, task.ID)
+	}
+}
+
 // TestLaneCheckFindsWaitCleared: a wait that cleared after the lane's last
 // look is a finding, and the lane's baseline is the look it recorded.
 func TestLaneCheckFindsWaitCleared(t *testing.T) {
