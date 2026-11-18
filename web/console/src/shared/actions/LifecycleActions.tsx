@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  closeTaskCompleted, closeTaskMerged, dropTask, fetchLanes, holdTask, newEventKey, relaneTask, reopenTask,
+  closeTaskCompleted, closeTaskMerged, dropTask, fetchLanes, holdTask, newEventKey, orderTask, relaneTask, reopenTask,
   TaskActionError, taskActionMessage,
 } from "../boardApi";
 import { stateLabel } from "../states";
@@ -31,6 +31,8 @@ export function LifecycleAction({ action, target, eventKey, close, onApplied }: 
   switch (action.id) {
     case "hold":
       return <HoldAction target={target} eventKey={eventKey} close={close} onApplied={onApplied} />;
+    case "order":
+      return <OrderDialog target={target} eventKey={eventKey} close={close} onApplied={onApplied} />;
     case "relane":
       return <RelaneDialog target={target} eventKey={eventKey} close={close} onApplied={onApplied} />;
     default:
@@ -234,5 +236,42 @@ function RelaneDialog({ target, eventKey, close, onApplied }: { target: ActionTa
     {lanes !== null && lanes.length === 0 && <p>옮길 다른 레인이 없습니다.</p>}
     {lanes !== null && lanes.length > 0 && <label>옮길 레인 <select value={lane} onChange={e => edit(() => setLane(e.target.value))}>{lanes.map(name => <option key={name} value={name}>{name}</option>)}</select></label>}
     <label>이유 (선택) <textarea value={reason} onChange={e => edit(() => setReason(e.target.value))} /></label>
+  </ActionDialog>;
+}
+
+const ORDER_WORDS = "진행시켜";
+
+/** The operator's "set going". The words are recorded verbatim as the
+ * operator's instruction; the order approves no merge, deploy, spending,
+ * secret or policy change, and hk starts no worker. */
+function OrderDialog({ target, eventKey, close, onApplied }: { target: ActionTarget; eventKey: string; close: () => void; onApplied: () => void }) {
+  const [words, setWords] = useState(ORDER_WORDS);
+  const [pending, setPending] = useState(false);
+  // An edited text is a new intent with a new key; an unchanged retry replays
+  // the recorded order instead of writing a second.
+  const [key, setKey] = useState(eventKey);
+  const confirm = () => {
+    setPending(true);
+    void orderTask(target.id, words, key)
+      .then(result => {
+        close();
+        announce(result.duplicate ? "이미 기록된 지시입니다." : `${result.order.target_lane} 레인에 진행 지시를 보냈습니다.`);
+        onApplied();
+        changed(target.id);
+      })
+      .catch(error => { failed(error); })
+      .finally(() => setPending(false));
+  };
+  return <ActionDialog
+    title="진행시키기"
+    effect="진행 지시 보내기"
+    close={close}
+    pending={pending}
+    confirmDisabled={words.trim() === ""}
+    confirm={confirm}
+  >
+    <p>{stateLabel(target.state)} 작업을 담당 레인에 진행하라고 지시합니다. 적은 말이 운영자의 지시로 그대로 기록됩니다.</p>
+    <p>이 지시에는 머지·배포·비용·시크릿·정책 승인이 포함되지 않으며, hk는 작업자를 시작하지 않습니다.</p>
+    <label>지시 <textarea value={words} onChange={e => { setWords(e.target.value); setKey(newEventKey()); }} /></label>
   </ActionDialog>;
 }

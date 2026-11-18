@@ -4,6 +4,7 @@ const settled = new Set(["merged", "deployed", "completed", "dropped", "duplicat
 const completable = new Set(["decide", "ops", "verify"]);
 const mergeable = new Set(["reviewing", "researching", "developing"]);
 const holdable = new Set(["backlog", "unstarted"]);
+const orderable = new Set(["backlog", "unstarted", "triage"]);
 
 const closedReason = "종결된 작업은 변경할 수 없습니다";
 const awaitingReason = "결정 대기 중인 작업은 보류·드롭·중복만 가능";
@@ -12,6 +13,18 @@ const awaitingReason = "결정 대기 중인 작업은 보류·드롭·중복만
  * menu can show the whole set; disabledReason mirrors the store's guards and
  * is the only thing that blocks a click. */
 export const lifecycleActions: Action[] = [
+  {
+    id: "order",
+    label: "진행시키기",
+    keywords: ["order", "진행", "시작", "go", "지시"],
+    kind: "command",
+    confirm: "dialog",
+    applicable: () => true,
+    disabledReason: (target: ActionTarget) =>
+      settled.has(target.state) ? closedReason
+        : orderable.has(target.state) ? null
+          : "착수 전(분류·대기·착수 전) 작업만 진행시킬 수 있습니다",
+  },
   {
     id: "close-merged",
     label: "머지됨으로 닫기",
