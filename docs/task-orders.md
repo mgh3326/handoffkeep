@@ -11,8 +11,8 @@ settles, briefs and spawns as before. Design: `design/2026-11-18/hk5112-track-b`
 
 | # | Invariant | Input | Transition | Enforced in | Observable result |
 |---|---|---|---|---|---|
-| 1 | **An order starts work and widens nothing.** It names an existing task; the words are the operator's instruction for that task only. No approval (merge, deploy, spending, secret, policy) rides on it. | task id, words | none beyond the order row, one task event and one outbox row | `CreateTaskOrder` writes only those three rows; the outbox text says "no approval" and the task's state, lane, refs and decision requests are never touched | task row unchanged after an order; no decision request opened or answered |
-| 2 | **Only operator principals write an order.** Console Access (verified), the operator bearer (verified), or dots relaying the operator's words (`verified=false`). Every other client is refused. | caller identity | refused before the store is called | handlers: `/v1` route and MCP tool check the caller; the store ties `verified` to the channel (`dots` is never verified, `console` and `cli` always are) and refuses a mismatch | other bearer clients get 403 `operator_required`; `task_orders.verified` and `channel` agree (CHECK) |
+| 1 | **An order starts work and widens nothing.** It names an existing task; the words are the operator's instruction for that task only. No approval (merge, deploy, spending, secret, policy) rides on it. | task id, words | none beyond the order row, one task event and one outbox row | `CreateTaskOrder` writes only those three rows; the outbox text says "no approval" and the task's state, lane, refs and decision requests are never touched | the task's state, lane, priority, refs and updated_at are the same after an order (only the activity clock moves, through the task event); no decision request opened or answered |
+| 2 | **Only operator principals write an order.** Console Access (verified), the operator bearer (verified), or dots relaying the operator's words (`verified=false`). Every other client is refused. The order row (actor, channel, key, words, time) is the audit record, so no `mcp_write_audit` row is written. | caller identity | refused before the store is called | handlers: `/v1` route and MCP tool check the caller; the store ties `verified` to the channel (`dots` is never verified, `console` and `cli` always are) and refuses a mismatch | other bearer clients get 403 `operator_required`; `task_orders.verified` and `channel` agree (CHECK) |
 | 3 | **Idempotent write.** A key is required. The same actor, key, task and words replay the first order; the same key with other words or another task is refused. | actor, idempotency_key, task id, words | replay returns the stored order and writes nothing | UNIQUE (actor, idempotency_key) and an in-transaction compare, checked before the task-state and lane checks so a replay survives the task starting later | second call returns `duplicate=true` and the same order id; one row, one event, one outbox row; other words give 409 `order_key_conflict` |
 | 4 | **Only a not-yet-started task.** State must be `backlog`, `unstarted` or `triage`. | task state | refused otherwise | `CreateTaskOrder` under the task row lock | 409 `order_task_started` with the state as reason; nothing written |
 | 5 | **Target lane.** The project's `design_lane`, else the task's lane, else refused. | task project, task lane | `target_lane` fixed at write time | `CreateTaskOrder` reads `task_projects.design_lane` in the same transaction | order's `target_lane` equals the design lane, or the task lane; 409 `order_no_lane` when both are empty |
@@ -29,3 +29,15 @@ Surfaces over the one store method set: `POST /v1/tasks/{id}/orders`,
 `GET /v1/tasks/{id}/orders`, MCP `task_order` / `task_order_ack`, CLI
 `tasks order`, `tasks order-ack`, `tasks order-withdraw`, and the console
 action 진행시키기 on a backlog task.
+
+## Shape notes
+
+- `delivered_at` is not a column: the outbox row is the one record of delivery
+  (`notification_outbox.sent_at`), and the order read joins it, so nothing
+  copies the receipt or needs reconciling.
+- The ack comment is a system task comment keyed `task-order-ack` + order id;
+  `ack_comment_id` points at it.
+- An order's `waits_on_lane` is derived from the row: the target lane while
+  neither `acked_at` nor `withdrawn_at` is set. B-4 (hk 5128) reads it.
+- Every order write is `validate -> begin -> task-mutation lock -> task row
+  FOR UPDATE -> order row`, the order of `lockorder.go`.

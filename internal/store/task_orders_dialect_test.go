@@ -285,7 +285,17 @@ func ordersCaseTargetLane(t *testing.T, s *Store) {
 	if _, err := s.SetProjectDesignLane(ctx, none.project, "", "tester", "clear"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db().Exec(ctx, s.orderSQL(`UPDATE tasks SET lane='' WHERE id=$1`), none.task.ID); err != nil {
+	// tasks writes go through begin: MySQL tags the sync rows its triggers write.
+	tx, release, err := s.begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, s.orderSQL(`UPDATE tasks SET lane='' WHERE id=$1`), none.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.CreateTaskOrder(ctx, ordersInput(none, "k-none")); !errors.Is(err, ErrOrderNoLane) {
