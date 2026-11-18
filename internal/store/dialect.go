@@ -324,8 +324,13 @@ func (s *sqlSnapshot) Commit(ctx context.Context) error {
 		return mapDriverError(sql.ErrTxDone)
 	}
 	s.done = true
-	_, err := s.conn.ExecContext(ctx, `COMMIT`)
-	_ = s.conn.Close()
+	// A cancelled caller still needs its snapshot closed: without a live
+	// context no COMMIT is sent and Close returns the connection to the pool
+	// inside its read-only transaction, where later pool statements would
+	// join it. Detach the cleanup from cancellation; a failed COMMIT
+	// discards the connection instead of returning it to the pool.
+	_, err := s.conn.ExecContext(context.WithoutCancel(ctx), `COMMIT`)
+	s.closeSnapshotConn(err == nil)
 	return mapDriverError(err)
 }
 
@@ -334,9 +339,19 @@ func (s *sqlSnapshot) Rollback(ctx context.Context) error {
 		return nil
 	}
 	s.done = true
-	_, err := s.conn.ExecContext(ctx, `ROLLBACK`)
-	_ = s.conn.Close()
+	_, err := s.conn.ExecContext(context.WithoutCancel(ctx), `ROLLBACK`)
+	s.closeSnapshotConn(err == nil)
 	return mapDriverError(err)
+}
+
+// closeSnapshotConn releases the pinned connection. A failed COMMIT or
+// ROLLBACK discards it instead of returning it to the pool, so a connection
+// still inside its snapshot never circulates.
+func (s *sqlSnapshot) closeSnapshotConn(ok bool) {
+	if !ok {
+		_ = s.conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
+	_ = s.conn.Close()
 }
 
 // sqlSnapshotSavepoint keeps the snapshot's methods for statements; only its

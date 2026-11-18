@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"strings"
 	"sync"
@@ -27,6 +28,11 @@ func (s *Store) beginSnapshotA5(ctx context.Context) (transaction, error) {
 	return pgTransaction{tx}, nil
 }
 
+// beginMySQLSnapshotSeam is a test-only barrier invoked after the isolation
+// is set and before START TRANSACTION. Production code leaves it nil; it is
+// unexported and unreachable from any network surface.
+var beginMySQLSnapshotSeam func(ctx context.Context)
+
 // beginMySQLSnapshot opens the design §11.1 snapshot on MySQL: REPEATABLE READ
 // READ ONLY with the consistent snapshot established at START, so a commit
 // that lands between START and the first statement is already invisible. The
@@ -43,7 +49,15 @@ func (s *Store) beginMySQLSnapshot(ctx context.Context) (transaction, error) {
 		_ = conn.Close()
 		return nil, mapDriverError(err)
 	}
+	if beginMySQLSnapshotSeam != nil {
+		beginMySQLSnapshotSeam(ctx)
+	}
 	if _, err := conn.ExecContext(ctx, `START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY`); err != nil {
+		// The SET above is scoped to this connection's next transaction: a
+		// failed START must not return the connection to the pool with it
+		// pending, or the next transaction on it would run at REPEATABLE
+		// READ instead of the pool's READ COMMITTED default. Discard it.
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 		_ = conn.Close()
 		return nil, mapDriverError(err)
 	}
