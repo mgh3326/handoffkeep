@@ -409,6 +409,14 @@ func selectCopyTables(selected []string) (map[string]bool, error) {
 	if len(wanted) == 0 {
 		return nil, errors.New("no tables selected")
 	}
+	// tasks requires sync_decisions in the same selection. Loads bypass the
+	// sync_task_decision trigger on both dialects, so a tasks-only copy would
+	// leave the decision projection permanently missing on the target.
+	// Refuse before any database is opened instead of silently widening the
+	// --tables scope: explicit selections stay explicit.
+	if wanted["tasks"] && !wanted["sync_decisions"] {
+		return nil, fmt.Errorf("table %q requires %q in the same copy selection", "tasks", "sync_decisions")
+	}
 	return wanted, nil
 }
 
