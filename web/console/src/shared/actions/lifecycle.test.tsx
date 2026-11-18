@@ -255,7 +255,7 @@ it("offers 진행시키기 only on a task that has not started", () => {
 
 it("sends the operator's words verbatim in one order call", async () => {
   const applied = vi.fn();
-  const fetcher = mockWrites(new Response(JSON.stringify({ order: { id: "ord-aaaaaaaaaa", target_lane: "handoffkeep-design", channel: "console", verified: true }, duplicate: false }), { status: 200 }));
+  const fetcher = mockWrites(new Response(JSON.stringify({ order: { id: "ord-aaaaaaaaaa", target_lane: "design-lane", channel: "console", verified: true }, duplicate: false }), { status: 200 }));
   render(<div data-action-task="7"><TaskActions compact target={{ ...base, state: "backlog" }} onPriority={() => {}} onApplied={applied} /></div>);
   openMenu();
   fireEvent.click(screen.getByRole("menuitem", { name: "진행시키기" }));
