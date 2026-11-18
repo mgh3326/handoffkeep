@@ -136,14 +136,27 @@ func waitsCaseHandRefusals(t *testing.T, s *Store) {
 	}
 }
 
+// waitsRawExec runs one fixture statement in the dialect of s. The fixtures
+// below write the rows the public write paths do not yet reach on MySQL, so the
+// projections are exercised on both dialects instead of being skipped.
+func waitsRawExec(t *testing.T, s *Store, pg, my string, args ...any) {
+	t.Helper()
+	if _, err := s.db().Exec(t.Context(), sqlFor(s.db(), pg, my), args...); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func waitsCaseDecisionAndPendingAnswer(t *testing.T, s *Store) {
-	ctx := t.Context()
 	task := flowCaseTask(t, s, "implement")
-	res, err := s.RecordDecisionRequest(ctx, task.ID, "director-1", decisionInput())
-	flowSkipUnported(t, s, err)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	ref := "dr-" + strconv.FormatInt(task.ID, 10) + "-1"
+	waitsRawExec(t, s,
+		`INSERT INTO decision_requests(source,source_ref,task_id,lane,question,created_at,updated_at) VALUES('task_request',$1,$2,$3,'waits case question',$4,$4)`,
+		`INSERT INTO decision_requests(source,source_ref,task_id,lane,question,created_at,updated_at) VALUES('task_request',?,?,?,'waits case question',?,?)`,
+		ref, task.ID, task.Lane, now)
 
 	row, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionNeedsOperator, task.ID)
-	if !ok || row.Source != "derived:decision_request" || row.OnKind != WaitOnOperator || row.NextAction != "answer_decision" || row.RequestID != res.Request.ID {
+	if !ok || row.Source != "derived:decision_request" || row.OnKind != WaitOnOperator || row.NextAction != "answer_decision" || row.RequestID != ref {
 		t.Fatalf("decision row=%+v found=%t", row, ok)
 	}
 	if row.Answer != nil {
@@ -152,17 +165,11 @@ func waitsCaseDecisionAndPendingAnswer(t *testing.T, s *Store) {
 
 	// An answer recorded but not yet confirmed (a pending_confirmation attempt)
 	// stays in the section as answered, with its words.
-	insert := sqlFor(s.db(),
-		`INSERT INTO decision_answer_attempts(channel,event_key,payload_hash,task_id,request_id,revision_request_id,actor,result,received_at,text) VALUES('console',$1,$2,$3,$4,$4,'operator',$5,$6,$7)`,
-		`INSERT INTO decision_answer_attempts(channel,event_key,payload_hash,task_id,request_id,revision_request_id,actor,result,received_at,text) VALUES('console',?,?,?,?,?,'operator',?,?,?)`)
 	hash := strings.Repeat("a", 64)
-	args := []any{"waits-case-" + res.Request.ID, hash, task.ID, res.Request.ID, "pending_confirmation", time.Now().UTC(), "범위는 A로"}
-	if s.dialect == mysqlDialect {
-		args = []any{args[0], args[1], args[2], args[3], args[3], args[4], args[5], args[6]}
-	}
-	if _, err := s.db().Exec(ctx, insert, args...); err != nil {
-		t.Fatal(err)
-	}
+	waitsRawExec(t, s,
+		`INSERT INTO decision_answer_attempts(channel,event_key,payload_hash,task_id,request_id,revision_request_id,actor,result,received_at,text) VALUES('console',$1,$2,$3,$4,$4,'operator',$5,$6,$7)`,
+		`INSERT INTO decision_answer_attempts(channel,event_key,payload_hash,task_id,request_id,revision_request_id,actor,result,received_at,text) VALUES('console',?,?,?,?,?,'operator',?,?,?)`,
+		"waits-case-"+ref, hash, task.ID, ref, "pending_confirmation", now, "범위는 A로")
 	answered, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionNeedsOperator, task.ID)
 	if !ok || answered.NextAction != "confirm_answer" || answered.Answer == nil {
 		t.Fatalf("answered-awaiting row=%+v found=%t", answered, ok)
@@ -206,14 +213,35 @@ func waitsCaseDerivedSpawnStart(t *testing.T, s *Store) {
 }
 
 func waitsCaseDerivedReview(t *testing.T, s *Store) {
+	ctx := t.Context()
 	task := flowCaseTask(t, s, "implement")
-	pr := testPR(7401)
-	waitsSend(t, s, TaskSourceEvent{Source: SourceMergewakePR, SourceRef: pr, TaskID: task.ID})
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	ref := ChangeRef{Repo: "example/app", PR: 7401}
+	state := validState(now)
+	if _, err := s.ApplyChangeBatch(ctx, ChangeBatch{ChangeRef: ref, State: &state}); err != nil {
+		t.Fatal(err)
+	}
+	var changeID int64
+	if err := s.db().QueryRow(ctx, sqlFor(s.db(),
+		`SELECT id FROM changes WHERE repo=$1 AND pr_number=$2`,
+		`SELECT id FROM changes WHERE repo=? AND pr_number=?`), ref.Repo, ref.PR).Scan(&changeID); err != nil {
+		t.Fatal(err)
+	}
+	// The change is linked to the task as an implementing change, the link the
+	// source-event path writes; the fixture writes it directly so MySQL reads it too.
+	waitsRawExec(t, s,
+		`INSERT INTO change_tasks(change_id,task_id,relation,created_at) VALUES($1,$2,'implements',$3)`,
+		`INSERT INTO change_tasks(change_id,task_id,relation,created_at) VALUES(?,?,'implements',?)`,
+		changeID, task.ID, now)
+
 	row, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionWaitingOn, task.ID)
 	if !ok || row.Source != "derived:change_review" || row.OnKind != WaitOnPR || row.OnRef != "example/app#7401" || row.NextAction != "wait_review" {
 		t.Fatalf("review row=%+v found=%t", row, ok)
 	}
-	waitsSend(t, s, mergeEvent(task.ID, pr))
+	waitsRawExec(t, s,
+		`UPDATE changes SET state='merged', merged_at=$1 WHERE id=$2`,
+		`UPDATE changes SET state='merged', merged_at=? WHERE id=?`,
+		now, changeID)
 	if _, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionWaitingOn, task.ID); ok {
 		t.Fatal("a merged PR still waits for review")
 	}
@@ -372,12 +400,4 @@ func waitsCaseBacklogCountExact(t *testing.T, s *Store) {
 			t.Fatal("the waiting task is listed as ordinary backlog")
 		}
 	}
-}
-
-// waitsSend applies a source event; on MySQL the event path is not ported yet,
-// so the case skips there rather than failing.
-func waitsSend(t *testing.T, s *Store, in TaskSourceEvent) {
-	t.Helper()
-	_, err := s.ApplyTaskSourceEvent(t.Context(), in)
-	flowSkipUnported(t, s, err)
 }
