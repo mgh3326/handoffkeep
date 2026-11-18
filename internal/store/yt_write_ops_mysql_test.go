@@ -114,6 +114,86 @@ func TestMySQLYTWriteOpsGuards(t *testing.T) {
 	}
 }
 
+// TestMySQLYTPayloadRedact mirrors the hk 5056 PostgreSQL redaction on MySQL:
+// the guard allows exactly the redaction, and the batch is idempotent.
+func TestMySQLYTPayloadRedact(t *testing.T) {
+	ctx := t.Context()
+	s, err := Open(ctx, testdb.MySQLDatabase(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	now := time.Now().UTC()
+	old := now.Add(-31 * 24 * time.Hour)
+	exec := func(q string, args ...any) error {
+		_, err := s.mysqlPool.ExecContext(ctx, q, args...)
+		return err
+	}
+	resolve := func(id int64, at time.Time) {
+		t.Helper()
+		if err := exec(`UPDATE yt_write_ops SET state='rejected', reason='gone', resolved_at=? WHERE id=?`, at, id); err != nil {
+			t.Fatalf("resolve %d: %v", id, err)
+		}
+	}
+	isNull := func(id int64) bool {
+		t.Helper()
+		var nul bool
+		if err := s.mysqlPool.QueryRowContext(ctx, `SELECT payload IS NULL FROM yt_write_ops WHERE id=?`, id).Scan(&nul); err != nil {
+			t.Fatal(err)
+		}
+		return nul
+	}
+
+	// An old resolved op redacts; the receipt stays.
+	id := insertMySQLYTOp(t, s, "comment_append", "key-r1", "HK-1")
+	resolve(id, old)
+	if err := exec(`UPDATE yt_write_ops SET payload=NULL WHERE id=?`, id); err != nil {
+		t.Fatalf("redact: %v", err)
+	}
+	if !isNull(id) {
+		t.Fatal("payload not NULL after redact")
+	}
+	var sha string
+	if err := s.mysqlPool.QueryRowContext(ctx, `SELECT payload_sha FROM yt_write_ops WHERE id=?`, id).Scan(&sha); err != nil || sha != "sha" {
+		t.Fatalf("payload_sha = %q %v", sha, err)
+	}
+	// A second redaction, a young row, an unresolved row and any companion
+	// change are refused.
+	if err := exec(`UPDATE yt_write_ops SET payload=NULL WHERE id=?`, id); err == nil {
+		t.Error("second redact accepted")
+	}
+	young := insertMySQLYTOp(t, s, "comment_append", "key-r2", "HK-1")
+	resolve(young, now)
+	if err := exec(`UPDATE yt_write_ops SET payload=NULL WHERE id=?`, young); err == nil {
+		t.Error("young redact accepted")
+	}
+	prepared := insertMySQLYTOp(t, s, "comment_append", "key-r3", "HK-1")
+	if err := exec(`UPDATE yt_write_ops SET payload=NULL WHERE id=?`, prepared); err == nil {
+		t.Error("prepared redact accepted")
+	}
+	if err := exec(`UPDATE yt_write_ops SET payload=NULL, payload_sha='z' WHERE id=?`, young); err == nil {
+		t.Error("redact with a sha change accepted")
+	}
+
+	// The batch redacts every eligible op and is idempotent.
+	more := insertMySQLYTOp(t, s, "comment_append", "key-r4", "HK-1")
+	resolve(more, old)
+	if n, err := s.RedactYTPayloads(ctx, now, 10); err != nil || n != 1 {
+		t.Fatalf("batch = %d %v, want 1", n, err)
+	}
+	if n, err := s.RedactYTPayloads(ctx, now, 10); err != nil || n != 0 {
+		t.Fatalf("second batch = %d %v, want 0", n, err)
+	}
+	// A redacted op reads back with a nil payload.
+	got, err := s.YTWriteLedger().ByID(ctx, more)
+	if err != nil || got.Payload != nil || got.PayloadSHA != "sha" {
+		t.Fatalf("redacted read = %+v %v", got, err)
+	}
+	if isNull(young) || isNull(prepared) {
+		t.Fatal("ineligible op redacted")
+	}
+}
+
 // TestMySQLYTWriteLedgerPrepareClaim applies one comment op through the real
 // ledger on MySQL: prepare, claim with the retarget, apply.
 func TestMySQLYTWriteLedgerRoundTrip(t *testing.T) {
