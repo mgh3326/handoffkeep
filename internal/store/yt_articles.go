@@ -512,10 +512,10 @@ const (
 	ytArticleCreateRejected  ytArticleOutcome = "create_rejected"
 	// ytArticleSplitPrepared: an article_split op was prepared (hk 5085).
 	ytArticleSplitPrepared ytArticleOutcome = "split_prepared"
-	ytArticleCreatePending   ytArticleOutcome = "create_exists"
-	ytArticleNoProject       ytArticleOutcome = "no_project"
-	ytArticleParentPending   ytArticleOutcome = "parent_pending"
-	ytArticleInvalid         ytArticleOutcome = "invalid"
+	ytArticleCreatePending ytArticleOutcome = "create_exists"
+	ytArticleNoProject     ytArticleOutcome = "no_project"
+	ytArticleParentPending ytArticleOutcome = "parent_pending"
+	ytArticleInvalid       ytArticleOutcome = "invalid"
 	// ytArticleSuperseded: documents are canonical in YouTrack and the
 	// document's body is the post-switch baseline its article superseded.
 	ytArticleSuperseded ytArticleOutcome = "superseded"
