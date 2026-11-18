@@ -149,15 +149,15 @@ func init() {
 				t.Fatal(err)
 			}
 		}
-		exec(`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES($1,$2,'merged','head','base',$3,$4,$3,$3)`,
-			`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES(?,?,'merged','head','base',?,?,?,?)`,
+		exec(`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES($1,$2,'merged','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',$3,$4,$3,$3)`,
+			`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES(?,?,'merged','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',?,?,?,?)`,
 			"example/app", 201, now, old)
 		var changeOld int64
 		if err := s.db().QueryRow(ctx, s.q(`SELECT id FROM changes WHERE repo=$1 AND pr_number=$2`, `SELECT id FROM changes WHERE repo=? AND pr_number=?`), "example/app", 201).Scan(&changeOld); err != nil {
 			t.Fatal(err)
 		}
-		exec(`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES($1,$2,'merged','head','base',$3,$4,$3,$3)`,
-			`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES(?,?,'merged','head','base',?,?,?,?)`,
+		exec(`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES($1,$2,'merged','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',$3,$4,$3,$3)`,
+			`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES(?,?,'merged','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',?,?,?,?)`,
 			"example/app", 202, now, fresh)
 		exec(`INSERT INTO reviews(change_id, reviewed_head, round, pass, lens, reviewer_job_id, recorded_at) VALUES($1,$2,1,1,'correctness',$3,$4)`,
 			`INSERT INTO reviews(change_id, reviewed_head, round, pass, lens, reviewer_job_id, recorded_at) VALUES(?,?,1,1,'correctness',?,?)`,

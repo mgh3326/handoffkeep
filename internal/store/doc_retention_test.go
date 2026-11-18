@@ -15,7 +15,7 @@ func retentionChange(t *testing.T, s *Store, repo string, pr int, state string, 
 		opened = mergedAt.Add(-time.Hour)
 	}
 	if err := s.pool.QueryRow(ctx, `INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, merge_sha, opened_at, merged_at, created_at, updated_at)
-VALUES($1,$2,$3,'head','base',NULL,$4,$5,now(),now()) RETURNING id`, repo, pr, state, opened, mergedAt).Scan(&id); err != nil {
+VALUES($1,$2,$3,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',NULL,$4,$5,now(),now()) RETURNING id`, repo, pr, state, opened, mergedAt).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
 	return id
