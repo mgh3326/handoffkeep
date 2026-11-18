@@ -44,7 +44,7 @@ func main() {
 }
 func run(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|doc|attach|store-copy|tasks|tickets|decisions|placements|dots|services|deploys|changes|youtrack|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|doc|attach|store-copy|tasks|tickets|decisions|placements|waits|dots|services|deploys|changes|youtrack|version")
 	}
 	switch args[0] {
 	case "sync":
@@ -73,6 +73,8 @@ func run(args []string, out, errout io.Writer) error {
 		return ticketsCmd(args[1:], out)
 	case "decisions":
 		return decisionsCmd(args[1:], out)
+	case "waits":
+		return waitsCmd(args[1:], out)
 	case "placements":
 		return placementsCmd(args[1:], out)
 	case "dots":
@@ -90,7 +92,7 @@ func run(args []string, out, errout io.Writer) error {
 	case "version", "--version":
 		return versionCmd(args[1:], out)
 	default:
-		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|doc|attach|store-copy|tasks|tickets|decisions|placements|dots|services|deploys|changes|youtrack|version")
+		return errors.New("usage: handoffkeep serve|sync|ledger|since|status|mcp|doc|attach|store-copy|tasks|tickets|decisions|placements|waits|dots|services|deploys|changes|youtrack|version")
 	}
 }
 
@@ -215,7 +217,7 @@ func tasksCmd(args []string, out io.Writer) error {
 
 func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|set-area|areas|set-priority|parent|relate|unrelate|backfill-hierarchy|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|drift|settle-merged|hygiene|intake|triage")
+		return errors.New("usage: tasks add|list|export|claim|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|set-area|areas|set-priority|parent|relate|unrelate|wait|unwait|backfill-hierarchy|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|drift|settle-merged|hygiene|intake|triage")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -237,6 +239,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if args[0] == "relate" || args[0] == "unrelate" {
 		return taskRelationCmd(args, out)
+	}
+	if args[0] == "wait" || args[0] == "unwait" {
+		return taskWaitCmd(args, out)
 	}
 	if args[0] == "backfill-hierarchy" {
 		return taskBackfillHierarchyCmd(args[1:], out)

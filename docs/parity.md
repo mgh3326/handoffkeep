@@ -166,6 +166,9 @@ because that path has an authenticated principal.
 | projects_list | read | HTTP | Projects read |
 | task_states | read | HTTP | State machine |
 | fleet_capacity | read | HTTP | Fleet quota and placement capacity evidence |
+| waits_list | read | HTTP | Waits read: four sections (needs_operator, failed_start, waiting_on, idle_started) and the ordinary backlog (hk 5128) |
+| task_wait | write | HTTP | Hand wait on a task: operator, lane, task, pr, ci or external (hk 5128) |
+| task_unwait | write | HTTP | End a hand wait by its wait id (hk 5128) |
 
 Read tools set `readOnlyHint: true`. The write tools (`put_checkpoint`,
 `put_document`, `attachment_put`, `attachment_upload_begin`, `attachment_upload_complete`, `attachment_put_from_path`, `decision_answer`,
