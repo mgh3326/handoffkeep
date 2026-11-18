@@ -156,6 +156,7 @@ func scanVerification(row pgx.Row, v *Verification) error {
 // row, and no task row (lockorder.go).
 func (s *Store) RecordVerification(ctx context.Context, in VerificationInput, recordedBy string) (Verification, bool, error) {
 	if s != nil && s.dialect == mysqlDialect {
+		// Not ported to MySQL: the verifications table is left out of MySQL (design §2) (hk 5088).
 		return Verification{}, false, ErrDialectUnsupported
 	}
 

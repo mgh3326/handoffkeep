@@ -19,17 +19,15 @@ type MergedTaskEvent struct {
 }
 
 func (s *Store) ListMergedTaskEvents(ctx context.Context, limit int) ([]MergedTaskEvent, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if limit < 1 {
 		limit = 200
 	}
 	if limit > 2000 {
 		limit = 2000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT e.task_id, t.title, e.at, e.refs FROM tasks t JOIN LATERAL (SELECT task_id, at, refs, id FROM task_events WHERE task_id=t.id AND kind='transition' AND "to"='merged' ORDER BY at DESC, id DESC LIMIT 1) e ON true WHERE t.state='merged' ORDER BY e.at DESC, e.id DESC LIMIT $1`, limit)
+	rows, err := s.db().Query(ctx, s.q(
+		`SELECT e.task_id, t.title, e.at, e.refs FROM tasks t JOIN LATERAL (SELECT task_id, at, refs, id FROM task_events WHERE task_id=t.id AND kind='transition' AND "to"='merged' ORDER BY at DESC, id DESC LIMIT 1) e ON true WHERE t.state='merged' ORDER BY e.at DESC, e.id DESC LIMIT $1`,
+		"SELECT task_id, title, at, refs FROM (SELECT e.task_id, t.title, e.at, e.refs, e.id, ROW_NUMBER() OVER (PARTITION BY e.task_id ORDER BY e.at DESC, e.id DESC) AS rn FROM tasks t JOIN task_events e ON e.task_id=t.id AND e.kind='transition' AND e.`to`='merged' WHERE t.state='merged') x WHERE rn=1 ORDER BY at DESC, id DESC LIMIT ?"), limit)
 	if err != nil {
 		return nil, err
 	}

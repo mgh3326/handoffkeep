@@ -181,7 +181,7 @@ func hierarchyCaseDuplicateOf(t *testing.T, s *Store) {
 	a, b := flowCaseTask(t, s, "implement"), flowCaseTask(t, s, "implement")
 
 	changed, err := s.AddTaskRelation(ctx, a.ID, RelationDuplicateOf, b.ID, "tester")
-	flowSkipUnported(t, s, err)
+	flowMust(t, err)
 	if !changed {
 		t.Fatal("duplicate_of reported no change")
 	}
@@ -313,12 +313,12 @@ func hierarchyCaseAutoClose(t *testing.T, s *Store) {
 	}
 
 	_, err := s.CloseTaskCompleted(ctx, kids[0].ID, "hk:doc research/auto-close", "tester", "first done", "ac-1")
-	flowSkipUnported(t, s, err)
+	flowMust(t, err)
 	if got := flowCaseGet(t, s, parent.ID); got.State != StateBacklog {
 		t.Fatalf("parent closed with one sub-task open: state=%q", got.State)
 	}
 	_, err = s.CloseTaskCompleted(ctx, kids[1].ID, "hk:doc research/auto-close", "tester", "second done", "ac-2")
-	flowSkipUnported(t, s, err)
+	flowMust(t, err)
 	got := flowCaseGet(t, s, parent.ID)
 	if got.State != StateCompleted || got.Refs.Closure == nil {
 		t.Fatalf("parent state=%q closure=%v, want completed with a closure", got.State, got.Refs.Closure)

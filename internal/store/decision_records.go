@@ -674,10 +674,6 @@ func (s *Store) GetDecisionRecord(ctx context.Context, id int64, now time.Time) 
 // a session chat. It does not backfill decision documents. The request row is
 // the canonical record; its source_ref is stable within the settling lane.
 func (s *Store) RecordSessionDecision(ctx context.Context, in SessionDecisionInput, now time.Time, audit *MCPWrite) (SessionDecisionResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return SessionDecisionResult{}, ErrDialectUnsupported
-	}
-
 	if strings.TrimSpace(in.Key) == "" || len(in.Key) > 128 || strings.ContainsRune(in.Key, '\x00') ||
 		!validName(in.Lane) || !validText(in.By, 256) || strings.TrimSpace(in.By) == "" || strings.TrimSpace(in.Reading) == "" || len(in.Reading) > 2000 ||
 		strings.TrimSpace(in.Quote) == "" || len(in.Quote) > DecisionRequestTextMaxBytes || in.DecidedAt.IsZero() ||
@@ -721,6 +717,9 @@ func (s *Store) RecordSessionDecision(ctx context.Context, in SessionDecisionInp
 		if err := audit.validate(); err != nil {
 			return SessionDecisionResult{}, err
 		}
+	}
+	if s != nil && s.dialect == mysqlDialect {
+		return s.recordSessionDecisionMySQL(ctx, in, now, audit, ref, b)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

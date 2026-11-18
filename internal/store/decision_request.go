@@ -720,6 +720,12 @@ func rejectDecisionRequestSecrets(in DecisionRequestInput) error {
 // attachments row holds. The sentinel's text is the wire code; the address is
 // the caller's own input, so it is not echoed into the reason.
 func checkDecisionAttachmentsExist(ctx context.Context, tx pgx.Tx, options DecisionOptions) error {
+	return checkDecisionAttachmentsExistTx(ctx, pgTransaction{tx}, options)
+}
+
+// checkDecisionAttachmentsExistTx is checkDecisionAttachmentsExist on either
+// dialect's transaction.
+func checkDecisionAttachmentsExistTx(ctx context.Context, tx transaction, options DecisionOptions) error {
 	shas := []string{}
 	seen := map[string]bool{}
 	for _, option := range options.Options {
@@ -733,7 +739,15 @@ func checkDecisionAttachmentsExist(ctx context.Context, tx pgx.Tx, options Decis
 	if len(shas) == 0 {
 		return nil
 	}
-	rows, err := tx.Query(ctx, `SELECT sha256 FROM attachments WHERE sha256 = ANY($1)`, shas)
+	query, args := `SELECT sha256 FROM attachments WHERE sha256 = ANY($1)`, []any{shas}
+	if dialectFor(tx) == mysqlDialect {
+		args = make([]any, len(shas))
+		for i, sha := range shas {
+			args[i] = sha
+		}
+		query = `SELECT sha256 FROM attachments WHERE sha256 IN (` + placeholders(len(shas)) + `)`
+	}
+	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -758,7 +772,12 @@ func checkDecisionAttachmentsExist(ctx context.Context, tx pgx.Tx, options Decis
 }
 
 func insertDecisionEvent(ctx context.Context, tx pgx.Tx, x *Task, by, note string, at time.Time) error {
-	_, _, err := insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: x.ID, Kind: "decision", From: x.State, To: x.State, By: by, Note: note, Refs: x.Refs, Into: x, At: at})
+	return insertDecisionEventTx(ctx, pgTransaction{tx}, x, by, note, at)
+}
+
+// insertDecisionEventTx is insertDecisionEvent on either dialect's transaction.
+func insertDecisionEventTx(ctx context.Context, tx transaction, x *Task, by, note string, at time.Time) error {
+	_, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: "decision", From: x.State, To: x.State, By: by, Note: note, Refs: x.Refs, Into: x, At: at})
 	return err
 }
 
@@ -773,12 +792,11 @@ func isTerminalTaskState(state string) bool {
 // Supersedes names the open request; the new one gets the next revision and
 // no resolution. New requests are refused on merged/dropped tasks.
 func (s *Store) RecordDecisionRequest(ctx context.Context, taskID int64, by string, in DecisionRequestInput) (DecisionRequestResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return DecisionRequestResult{}, ErrDialectUnsupported
-	}
-
 	if err := checkDecisionRequestWrite(taskID, by, &in); err != nil {
 		return DecisionRequestResult{}, err
+	}
+	if s != nil && s.dialect == mysqlDialect {
+		return s.recordDecisionRequestMySQL(ctx, taskID, by, in)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -819,15 +837,21 @@ func checkDecisionRequestWrite(taskID int64, by string, in *DecisionRequestInput
 }
 
 func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID int64, by string, in DecisionRequestInput) (DecisionRequestResult, error) {
+	return s.recordDecisionRequestFlowTx(ctx, pgTransaction{tx}, taskID, by, in)
+}
+
+// recordDecisionRequestFlowTx is recordDecisionRequestTx on either dialect's
+// transaction.
+func (s *Store) recordDecisionRequestFlowTx(ctx context.Context, tx transaction, taskID int64, by string, in DecisionRequestInput) (DecisionRequestResult, error) {
 	if err := checkDecisionRequestWrite(taskID, by, &in); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	var err error
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err = s.lockTx(ctx, tx, 8241873001); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, taskID), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), taskID), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return DecisionRequestResult{}, ErrTaskNotFound
 		}
@@ -866,7 +890,7 @@ func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID i
 	// rows must not stay open, or a targeted answer could resolve the new
 	// request with text meant for the old question (hk 5000).
 	if current != nil && in.Supersedes != "" && x.Lane == "dots" && IsHKDotsRequest(x) {
-		if err = closeDotsAskOperatorQuestionsTx(ctx, tx, taskID, by, "", 0, now); err != nil {
+		if err = s.closeDotsAskOperatorQuestionsFlowTx(ctx, tx, taskID, by, "", 0, now); err != nil {
 			return DecisionRequestResult{}, err
 		}
 	}
@@ -875,7 +899,7 @@ func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID i
 	// holds: the operator's page would otherwise show a choice it cannot look
 	// at. Checked here, in the writing transaction, so a re-send of a
 	// duplicate never reaches it.
-	if err = checkDecisionAttachmentsExist(ctx, tx, options); err != nil {
+	if err = checkDecisionAttachmentsExistTx(ctx, tx, options); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	request := DecisionRequest{
@@ -915,7 +939,7 @@ func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID i
 		x.AwaitingDecision = true
 	}
 	x.UpdatedAt = now
-	if x, err = writeTaskTx(ctx, pgTransaction{tx}, x); err != nil {
+	if x, err = writeTaskTx(ctx, tx, x); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	note := "decision-request " + request.ID
@@ -925,13 +949,13 @@ func (s *Store) recordDecisionRequestTx(ctx context.Context, tx pgx.Tx, taskID i
 	note += ": " + request.Question
 	if setFlag {
 		// The event's note keeps the question readers of the flag expect.
-		if _, _, err = insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: taskID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: by, Note: request.Question, Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"}); err != nil {
+		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: taskID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: by, Note: request.Question, Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "false", ToValue: "true"}); err != nil {
 			return DecisionRequestResult{}, err
 		}
-	} else if err = insertDecisionEvent(ctx, tx, &x, by, note, now); err != nil {
+	} else if err = insertDecisionEventTx(ctx, tx, &x, by, note, now); err != nil {
 		return DecisionRequestResult{}, err
 	}
-	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, by, request.Question, 0, now); err != nil {
+	if err = s.mirrorTaskDecisionsFlowTx(ctx, tx, decisionBefore, x, by, request.Question, 0, now); err != nil {
 		return DecisionRequestResult{}, err
 	}
 	return DecisionRequestResult{Task: x, Request: request}, nil
@@ -973,9 +997,6 @@ func sameResolution(r DecisionResolution, in DecisionResolveInput, prov *assista
 // and decides nothing. Its caller is not a verified operator path, so a
 // human_only answer waits for confirmation (ErrDecisionPendingConfirmation).
 func (s *Store) ResolveDecisionRequest(ctx context.Context, taskID int64, by string, in DecisionResolveInput) (DecisionRequestResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return DecisionRequestResult{}, ErrDialectUnsupported
-	}
 	if taskID < 1 {
 		return DecisionRequestResult{}, invalidDecisionRequest("task id must be positive")
 	}
@@ -991,9 +1012,6 @@ func (s *Store) ResolveDecisionRequest(ctx context.Context, taskID int64, by str
 // over ResolveDecision: the kind is fixed to answered, and Responder and
 // DecidedBy are fixed by the answer's provenance inside ResolveDecision.
 func (s *Store) ResolveDecisionRequestAssistant(ctx context.Context, taskID int64, by string, in DecisionAssistantResolveInput) (DecisionRequestResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return DecisionRequestResult{}, ErrDialectUnsupported
-	}
 	if taskID < 1 {
 		return DecisionRequestResult{}, invalidDecisionRequest("task id must be positive")
 	}
@@ -1107,14 +1125,11 @@ func DecisionRequestHistory(task Task) []DecisionRequestEntry {
 // whatever the task state: backlog and in_progress requests are listed, and
 // merged/dropped ones are listed so the reader can show them as uncleaned.
 func (s *Store) ListOpenDecisionRequests(ctx context.Context, limit int) ([]Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if limit < 1 || limit > 1000 {
 		limit = 1000
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs->'decision_request'->>'status'='open' ORDER BY updated_at DESC,id DESC LIMIT $1`, limit)
+	rows, err := s.db().Query(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE refs->'decision_request'->>'status'='open' ORDER BY updated_at DESC,id DESC LIMIT $1`,
+		`SELECT `+taskColumns+` FROM tasks WHERE `+reportJSONText("refs", "$.decision_request.status")+`='open' ORDER BY updated_at DESC,id DESC LIMIT ?`), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1142,34 +1157,38 @@ type DecisionListPosition struct {
 // before, when set, reads strictly after that position in that order; the
 // MCP decisions_history tool is its reader.
 func (s *Store) ListClosedDecisionRequests(ctx context.Context, before *DecisionListPosition, limit int) ([]Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
 	if limit < 1 || limit > 1000 {
 		limit = 1000
 	}
 	closed := []string{DecisionRequestAnswered, DecisionRequestDefaultApplied, DecisionRequestWithdrawn}
-	var rows pgx.Rows
+	var rs rows
 	var err error
-	if before == nil {
-		rows, err = s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs->'decision_request'->>'status' = ANY($1) ORDER BY updated_at DESC,id DESC LIMIT $2`, closed, limit)
+	if s.dialect == mysqlDialect {
+		query := `SELECT ` + taskColumns + ` FROM tasks WHERE ` + reportJSONText("refs", "$.decision_request.status") + ` IN (?,?,?)`
+		args := []any{closed[0], closed[1], closed[2]}
+		if before != nil {
+			query += ` AND (updated_at,id) < (?,?)`
+			args = append(args, before.UpdatedAt.UTC(), before.ID)
+		}
+		rs, err = s.db().Query(ctx, query+` ORDER BY updated_at DESC,id DESC LIMIT ?`, append(args, limit)...)
+	} else if before == nil {
+		rs, err = s.db().Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs->'decision_request'->>'status' = ANY($1) ORDER BY updated_at DESC,id DESC LIMIT $2`, closed, limit)
 	} else {
-		rows, err = s.pool.Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs->'decision_request'->>'status' = ANY($1) AND (updated_at,id) < ($2,$3) ORDER BY updated_at DESC,id DESC LIMIT $4`, closed, before.UpdatedAt.UTC(), before.ID, limit)
+		rs, err = s.db().Query(ctx, `SELECT `+taskColumns+` FROM tasks WHERE refs->'decision_request'->>'status' = ANY($1) AND (updated_at,id) < ($2,$3) ORDER BY updated_at DESC,id DESC LIMIT $4`, closed, before.UpdatedAt.UTC(), before.ID, limit)
 	}
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rs.Close()
 	out := []Task{}
-	for rows.Next() {
+	for rs.Next() {
 		var x Task
-		if err := scanTask(rows, &x); err != nil {
+		if err := scanTask(rs, &x); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	return out, rs.Err()
 }
 
 // DecisionRequestCounts splits open requests the way every console surface

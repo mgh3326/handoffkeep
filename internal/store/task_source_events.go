@@ -471,13 +471,8 @@ func liveJobTx(ctx context.Context, q rowQuerier, x Task) (bool, error) {
 	if x.Refs.JobID == "" {
 		return false, nil
 	}
-	if dialectFor(q) == mysqlDialect {
-		// B7 dependency: the jobs table is not in the MySQL schema. Reached
-		// only for a task bound to a job (an empty job id answered above).
-		return false, ErrDialectUnsupported
-	}
 	var live bool
-	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM jobs WHERE job_id=$1 AND task_id=$2 AND state IN ('claimed','spawned'))`, x.Refs.JobID, x.ID).Scan(&live)
+	err := q.QueryRow(ctx, sqlFor(q, `SELECT EXISTS(SELECT 1 FROM jobs WHERE job_id=$1 AND task_id=$2 AND state IN ('claimed','spawned'))`, `SELECT EXISTS(SELECT 1 FROM jobs WHERE job_id=? AND task_id=? AND state IN ('claimed','spawned'))`), x.Refs.JobID, x.ID).Scan(&live)
 	return live, err
 }
 
@@ -539,11 +534,7 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 		if commentBody == "" {
 			return nil
 		}
-		if err := s.srcEvSystemCommentTx(ctx, tx, x.ID, ev.Source, commentKey, commentBody, now); err != nil {
-			if errors.Is(err, ErrDialectUnsupported) {
-				// MySQL only: a comment whose projection is not ported refuses.
-				return err
-			}
+		if err := s.insertSystemTaskCommentTx(ctx, tx, x.ID, ev.Source, commentKey, commentBody, now); err != nil {
 			log.Printf("task_event_comment_failed task_id=%d source=%q err=%q", x.ID, ev.Source, err)
 		}
 		return nil
@@ -644,11 +635,6 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 	case SourceMergewakeRevert:
 		x.Refs.RevertPR = ev.RevertPR
 	}
-	// B6 dependency: mirrorTaskDecisionsTx below supersedes the task's open
-	// decision rows when it ends; refuse before anything is written.
-	if err = srcEvDecisionGate(tx, to); err != nil {
-		return TaskEventResult{}, err
-	}
 	decisionBefore := decisionBeforeOf(x)
 	x.State, x.UpdatedAt = to, now
 	if err := applyLifecycle(&x, from, to, now, &TaskClosure{Type: "resolved", Evidence: ev.SourceRef}); err != nil {
@@ -666,13 +652,8 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 	if err = writeEventComment(); err != nil {
 		return TaskEventResult{}, err
 	}
-	// On MySQL the mirror acts only when the task ends (srcEvDecisionGate
-	// refused that before the write) and does nothing else here: the event
-	// changes neither the decision request nor the awaiting flag.
-	if dialectFor(tx) != mysqlDialect {
-		if err = mirrorTaskDecisionsTx(ctx, pgxTx(tx), decisionBefore, x, ev.Source, ev.Note, 0, now); err != nil {
-			return TaskEventResult{}, err
-		}
+	if err = s.mirrorTaskDecisionsFlowTx(ctx, tx, decisionBefore, x, ev.Source, ev.Note, 0, now); err != nil {
+		return TaskEventResult{}, err
 	}
 	deferNamedParentClose := x.ParentID != nil && ev.Pending[*x.ParentID] &&
 		(ev.Source == SourceMergewakeMerge || ev.Source == SourceDeploy)

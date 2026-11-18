@@ -399,10 +399,6 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 	if err := guard.Reject(m.Body); err != nil {
 		return ChatMessage{}, false, err
 	}
-	if s.dialect == mysqlDialect && len(post.Answers) != 0 {
-		// Assistant answer delivery writes notification_outbox, which B7 owns.
-		return ChatMessage{}, false, ErrDialectUnsupported
-	}
 	for i := range post.Questions {
 		if post.Questions[i].ConversationID != "" && post.Questions[i].ConversationID != m.ConversationID {
 			return ChatMessage{}, false, ErrChatConversation
@@ -615,7 +611,7 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		var qLane, qConversation, qState, qBody string
 		var qRevision int
 		var qAnswered *int64
-		err := tx.QueryRow(ctx, `SELECT lane,conversation_id,state,revision,answer_message_id,body FROM chat_questions WHERE id=$1 FOR UPDATE`, a.QuestionID).Scan(&qLane, &qConversation, &qState, &qRevision, &qAnswered, &qBody)
+		err := tx.QueryRow(ctx, sqlFor(tx, `SELECT lane,conversation_id,state,revision,answer_message_id,body FROM chat_questions WHERE id=$1 FOR UPDATE`, `SELECT lane,conversation_id,state,revision,answer_message_id,body FROM chat_questions WHERE id=? FOR UPDATE`), a.QuestionID).Scan(&qLane, &qConversation, &qState, &qRevision, &qAnswered, &qBody)
 		if errors.Is(err, ErrNoRows) {
 			return ChatMessage{}, false, ErrChatQuestionNotFound
 		}
@@ -628,12 +624,16 @@ func (s *Store) PostChatMessage(ctx context.Context, post ChatMessagePost) (Chat
 		if qState != "pending" || qRevision != a.Revision || qAnswered != nil {
 			return ChatMessage{}, false, ErrChatQuestionStale
 		}
-		if tag, err := tx.Exec(ctx, `UPDATE chat_questions SET answer_message_id=$2,updated_at=$3 WHERE id=$1 AND state='pending' AND revision=$4 AND answer_message_id IS NULL`, a.QuestionID, m.ID, now, a.Revision); err != nil {
+		answerArgs := []any{a.QuestionID, m.ID, now, a.Revision}
+		if s.dialect == mysqlDialect {
+			answerArgs = []any{m.ID, now, a.QuestionID, a.Revision}
+		}
+		if tag, err := tx.Exec(ctx, sqlFor(tx, `UPDATE chat_questions SET answer_message_id=$2,updated_at=$3 WHERE id=$1 AND state='pending' AND revision=$4 AND answer_message_id IS NULL`, `UPDATE chat_questions SET answer_message_id=?,updated_at=? WHERE id=? AND state='pending' AND revision=? AND answer_message_id IS NULL`), answerArgs...); err != nil {
 			return ChatMessage{}, false, err
 		} else if tag != 1 {
 			return ChatMessage{}, false, ErrChatQuestionStale
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) VALUES($1,$2,'reply',$3)`, m.ID, a.QuestionID, qBody); err != nil {
+		if _, err := tx.Exec(ctx, sqlFor(tx, `INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) VALUES($1,$2,'reply',$3)`, `INSERT INTO chat_message_questions(message_id,question_id,relation_kind,question_text) VALUES(?,?,'reply',?)`), m.ID, a.QuestionID, qBody); err != nil {
 			return ChatMessage{}, false, err
 		}
 		eventID := chatAnsweredEventID(a.QuestionID, a.Revision)

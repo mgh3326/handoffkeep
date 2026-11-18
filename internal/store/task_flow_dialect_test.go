@@ -14,10 +14,8 @@ import (
 // clock, writeTaskTx, and the lifecycle and priority writes. They run on
 // PostgreSQL in TestTasksAreaPostgres and on MySQL in TestMySQLTasksArea.
 //
-// A step that reaches an area the MySQL port has not covered yet (a relane or
-// a change link) answers ErrDialectUnsupported there; flowSkipUnported turns
-// exactly that answer into a skip on MySQL. A method of this file's own path
-// never goes through it: flowMust fails the case.
+// Every step runs on both dialects: any error, including a refusal, fails the
+// case through flowMust.
 
 func init() {
 	registerTaskAreaCase("flow/transitions", flowCaseTransitions)
@@ -37,19 +35,6 @@ const flowCaseProject = "flow-case"
 
 var flowCaseSeq atomic.Int64
 
-// flowSkipUnported skips a MySQL case at a step that needs another area; any
-// other error fails it. On PostgreSQL ErrDialectUnsupported never occurs.
-func flowSkipUnported(t *testing.T, s *Store, err error) {
-	t.Helper()
-	if err == nil {
-		return
-	}
-	if s.dialect == mysqlDialect && errors.Is(err, ErrDialectUnsupported) {
-		t.Skipf("MySQL: %v", err)
-	}
-	t.Fatal(err)
-}
-
 func flowMust(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
@@ -66,10 +51,10 @@ func flowCaseTask(t *testing.T, s *Store, kind string) Task {
 	t.Helper()
 	ctx := t.Context()
 	_, err := s.AddTaskProject(ctx, flowCaseProject, "flow-case")
-	flowSkipUnported(t, s, err)
+	flowMust(t, err)
 	project := flowCaseProject
 	x, err := s.CreateTask(ctx, Task{Lane: flowCaseName("lane"), Title: flowCaseName("task"), Kind: kind, Priority: 5, CreatedBy: "flow-case", Project: &project})
-	flowSkipUnported(t, s, err)
+	flowMust(t, err)
 	if x.State != StateBacklog {
 		t.Fatalf("new task state=%q, want backlog", x.State)
 	}
@@ -79,7 +64,7 @@ func flowCaseTask(t *testing.T, s *Store, kind string) Task {
 func flowCaseGet(t *testing.T, s *Store, id int64) Task {
 	t.Helper()
 	x, found, err := s.GetTask(t.Context(), id)
-	flowSkipUnported(t, s, err)
+	flowMust(t, err)
 	if !found {
 		t.Fatalf("task %d not found", id)
 	}
@@ -406,7 +391,7 @@ func flowCaseClaim(t *testing.T, s *Store) {
 	x := flowCaseTask(t, s, "implement")
 
 	got, err := s.ClaimTask(ctx, x.ID, "worker-a", "job-flow-1", "")
-	flowSkipUnported(t, s, err)
+	flowMust(t, err)
 	if got.State != StateDeveloping || got.ClaimedBy != "worker-a" || got.Refs.JobID != "job-flow-1" {
 		t.Fatalf("claim=%+v", got)
 	}
@@ -594,7 +579,7 @@ func flowCaseRelane(t *testing.T, s *Store) {
 	}
 
 	r, err := s.OperatorRelaneTask(ctx, a.ID, b.Lane, "tester", "move", "relane-1", "")
-	flowSkipUnported(t, s, err)
+	flowMust(t, err)
 	if r.Previous != a.Lane || r.Lane != b.Lane || !r.Changed {
 		t.Fatalf("relane=%+v", r)
 	}

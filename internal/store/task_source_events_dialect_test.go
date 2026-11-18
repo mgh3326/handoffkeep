@@ -9,10 +9,8 @@ import (
 )
 
 // Dialect-neutral cases for task_source_events.go (registry:
-// tasks_area_cases_test.go). ApplyTaskSourceEvent itself refuses on MySQL
-// until B5 ports the change records it writes (recordChangeTx), so the cases
-// that need it expect ErrDialectUnsupported there and the full behaviour on
-// PostgreSQL. The event rules run through applySourceEventTx on both, the way
+// tasks_area_cases_test.go). ApplyTaskSourceEvent runs on both dialects. The
+// event rules run through applySourceEventTx on both, the way
 // every producer other than the API reaches them (settle-merged, the job
 // role, the deploy record, the automatic closes), inside the task-mutation
 // lock.
@@ -137,7 +135,7 @@ func srcEvCaseInvalid(t *testing.T, s *Store) {
 		"revert without pr":  {Source: SourceMergewakeRevert, SourceRef: pr, TaskID: 1},
 		"duplicate task ids": {Source: SourceMergewakePR, SourceRef: pr, TaskID: 1, Tasks: []int64{2, 2}},
 	} {
-		if _, err := s.ApplyTaskSourceEvent(ctx, in); err == nil || errors.Is(err, ErrDialectUnsupported) || errors.Is(err, ErrTaskNotFound) {
+		if _, err := s.ApplyTaskSourceEvent(ctx, in); err == nil || errors.Is(err, ErrTaskNotFound) {
 			t.Errorf("%s: err=%v, want a validation error", name, err)
 		}
 	}
@@ -232,18 +230,6 @@ func srcEvCaseMerge(t *testing.T, s *Store) {
 	pr := srcEvPR(srcEvUnique())
 	ev := sourceEvent{Source: SourceMergewakeMerge, SourceRef: pr, PR: pr, MergeSHA: "0123456789abcdef", Named: map[int64]bool{}}
 	res, err := srcEvApplyTx(s, t, x, ev)
-	if s.dialect == mysqlDialect {
-		// B5/B6 dependency: the merge hold reads the change tables, and a task
-		// that merges ends its decisions. The refusal comes before any write.
-		if !errors.Is(err, ErrDialectUnsupported) {
-			t.Fatalf("err=%v, want ErrDialectUnsupported", err)
-		}
-		after := srcEvGet(t, s, x.ID)
-		if after.State != x.State || len(srcEvEventsOf(after, SourceMergewakeMerge)) != 0 || after.Refs.PR != "" {
-			t.Fatalf("a refused merge changed the task: %+v", after)
-		}
-		return
-	}
 	if err != nil || !res.Applied || res.State != StateMerged {
 		t.Fatalf("merge: res=%+v err=%v", res, err)
 	}

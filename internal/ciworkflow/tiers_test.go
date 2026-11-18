@@ -1351,7 +1351,9 @@ func TestMySQLStoreJobRunsPortAndDriftChecks(t *testing.T) {
 		t.Fatal("both database URLs are required")
 	}
 	run := stepRuns(job)
-	if !strings.Contains(run, "-tags=mysql") || !strings.Contains(run, "TestMySQL") || !strings.Contains(run, "./internal/store") {
-		t.Fatalf("MySQL store tests not selected: %s", run)
+	// The whole store package runs with the mysql tag (hk 5088): no -run filter
+	// may narrow it to the MySQL-named tests.
+	if !strings.Contains(run, "-tags=mysql") || !strings.Contains(run, "./internal/store") || strings.Contains(run, " -run ") {
+		t.Fatalf("MySQL store suite must run the whole package with -tags=mysql: %s", run)
 	}
 }

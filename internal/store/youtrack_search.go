@@ -181,6 +181,7 @@ func (s *Store) YouTrackTaskHits(ctx context.Context, tenant string, issueIDs []
 // document key, as in the PostgreSQL search; Refs carries the linked tasks.
 func (s *Store) YouTrackDocHits(ctx context.Context, articleIDs []string, session string) (map[string]SearchResult, error) {
 	if s != nil && s.dialect == mysqlDialect {
+		// Not ported to MySQL: full-text search, not ported (hk 4899 §6) (hk 5088).
 		return nil, ErrDialectUnsupported
 	}
 

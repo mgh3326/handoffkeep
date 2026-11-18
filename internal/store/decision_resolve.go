@@ -225,17 +225,24 @@ type decisionAttempt struct {
 }
 
 func insertDecisionAttempt(ctx context.Context, tx pgx.Tx, a decisionAttempt) (int64, error) {
-	var id int64
-	err := tx.QueryRow(ctx, `INSERT INTO decision_answer_attempts(channel,event_key,payload_hash,task_id,request_id,revision_request_id,question_revision,provenance,actor,result,received_at,denies_attempt_id,receipt,option_id,text,operator_quote)
+	return insertDecisionAttemptTx(ctx, pgTransaction{tx}, a)
+}
+
+// insertDecisionAttemptTx is insertDecisionAttempt on either dialect's
+// transaction.
+func insertDecisionAttemptTx(ctx context.Context, tx transaction, a decisionAttempt) (int64, error) {
+	id, err := tx.InsertID(ctx, sqlFor(tx, `INSERT INTO decision_answer_attempts(channel,event_key,payload_hash,task_id,request_id,revision_request_id,question_revision,provenance,actor,result,received_at,denies_attempt_id,receipt,option_id,text,operator_quote)
 		VALUES($1,$2,$3,$4,NULLIF($5,''),$6,NULLIF($7,0),NULLIF($8,''),$9,$10,$11,NULLIF($12,0),NULLIF($13,''),NULLIF($14,''),NULLIF($15,''),NULLIF($16,'')) RETURNING id`,
+		`INSERT INTO decision_answer_attempts(channel,event_key,payload_hash,task_id,request_id,revision_request_id,question_revision,provenance,actor,result,received_at,denies_attempt_id,receipt,option_id,text,operator_quote)
+		VALUES(?,?,?,?,NULLIF(?,''),?,NULLIF(?,0),NULLIF(?,''),?,?,?,NULLIF(?,0),NULLIF(?,''),NULLIF(?,''),NULLIF(?,''),NULLIF(?,''))`),
 		a.channel, a.eventKey, a.hash, a.taskID, a.root, a.revisionRequestID, a.revision, a.provenance, a.actor, a.result, a.at, a.deniesAttemptID, a.receipt,
-		a.option, a.text, a.quote).Scan(&id)
+		a.option, a.text, a.quote)
 	if err != nil {
-		return 0, err
+		return 0, mysqlDenyViolation(err)
 	}
 	if a.audit != nil {
 		result := map[string]any{"result": a.result, "attempt_id": id, "request_id": a.revisionRequestID}
-		if err := insertMCPWriteAuditTx(ctx, tx, *a.audit, a.taskID, result, a.at); err != nil {
+		if err := insertMCPWriteAudit(ctx, tx, *a.audit, a.taskID, result, a.at); err != nil {
 			return 0, err
 		}
 	}
@@ -284,10 +291,18 @@ func decidedBy(in ResolveDecisionInput, prov *assistantProvenance) string {
 // request whose effective policy is operator_direct is refused: the attempt is
 // recorded and the error returned.
 func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (ResolveDecisionOutcome, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return ResolveDecisionOutcome{}, ErrDialectUnsupported
-	}
+	var out ResolveDecisionOutcome
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = s.resolveDecisionOnce(ctx, in)
+		return err
+	})
+	return out, err
+}
 
+// resolveDecisionOnce is one attempt of ResolveDecision: one transaction, which
+// retryTx runs once more on MySQL after a deadlock.
+func (s *Store) resolveDecisionOnce(ctx context.Context, in ResolveDecisionInput) (ResolveDecisionOutcome, error) {
 	assistant := in.Channel == DecisionChannelAssistant
 	session := in.Channel == DecisionChannelSession
 	// relayed is a channel that always carries the assistant claim: the
@@ -370,16 +385,17 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 		eventKey = "auto:" + hash
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
+	if err = s.lockTx(ctx, tx, 8241873001); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
 	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, taskID), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, s.q(`SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), taskID), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return ResolveDecisionOutcome{}, ErrTaskNotFound
 		}
@@ -397,9 +413,9 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	}
 	// A previous release may write a QUESTION row during blue-green with no
 	// owner column; classify this task's rows before closing its request
-	// (hk 5000).
-	if x.Lane == "dots" && IsHKDotsRequest(x) {
-		if err = classifyDotsQuestionsTx(ctx, tx, x.ID); err != nil {
+	// (hk 5000). MySQL has no previous release, so its rows always have one.
+	if s.dialect != mysqlDialect && x.Lane == "dots" && IsHKDotsRequest(x) {
+		if err = classifyDotsQuestionsTx(ctx, pgxTx(tx), x.ID); err != nil {
 			return ResolveDecisionOutcome{}, err
 		}
 	}
@@ -436,7 +452,7 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	// changes no request.
 	record := func(result string, refusal error) (ResolveDecisionOutcome, error) {
 		attempt.result = result
-		id, err := insertDecisionAttempt(ctx, tx, attempt)
+		id, err := insertDecisionAttemptTx(ctx, tx, attempt)
 		if err != nil {
 			return ResolveDecisionOutcome{}, err
 		}
@@ -476,11 +492,11 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 		}
 		if current.Resolution != nil && sameResolution(*current.Resolution, effective, prov) {
 			attempt.result = DecisionResultAnswered
-			id, err := insertDecisionAttempt(ctx, tx, attempt)
+			id, err := insertDecisionAttemptTx(ctx, tx, attempt)
 			if err != nil {
 				return ResolveDecisionOutcome{}, err
 			}
-			resolutionID, err := decisionResolutionID(ctx, pgTransaction{tx}, root, current.Revision)
+			resolutionID, err := decisionResolutionID(ctx, tx, root, current.Revision)
 			if err != nil {
 				return ResolveDecisionOutcome{}, err
 			}
@@ -597,7 +613,7 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	}
 
 	attempt.result = DecisionResultAnswered
-	attemptID, err := insertDecisionAttempt(ctx, tx, attempt)
+	attemptID, err := insertDecisionAttemptTx(ctx, tx, attempt)
 	if err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
@@ -616,7 +632,7 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	flagWas := x.AwaitingDecision
 	if flagWas {
 		var others int
-		if others, err = otherBlockingDecisionsTx(ctx, tx, x.ID, resolved.ID); err != nil {
+		if others, err = otherBlockingDecisionsFlowTx(ctx, tx, x.ID, resolved.ID); err != nil {
 			return ResolveDecisionOutcome{}, err
 		}
 		x.AwaitingDecision = others > 0
@@ -625,14 +641,24 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	if err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET refs=$2::jsonb,awaiting_decision=$4,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, x.ID, string(encoded), now, x.AwaitingDecision), &x); err != nil {
+	if s.dialect == mysqlDialect {
+		// No RETURNING: the row is read back under the same task row lock.
+		if _, err = tx.Exec(ctx, `UPDATE tasks SET refs=?,awaiting_decision=?,updated_at=? WHERE id=?`, string(encoded), x.AwaitingDecision, now, x.ID); err != nil {
+			return ResolveDecisionOutcome{}, err
+		}
+		err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=?`, x.ID), &x)
+	} else {
+		err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET refs=$2::jsonb,awaiting_decision=$4,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, x.ID, string(encoded), now, x.AwaitingDecision), &x)
+	}
+	if err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
-	var resolutionID int64
-	err = tx.QueryRow(ctx, `INSERT INTO decision_resolutions(request_id,question_revision,revision_request_id,task_id,kind,option_id,text,receipt,provenance,channel,decided_by,recorded_by,attempt_id,committed_at)
+	resolutionID, err := tx.InsertID(ctx, s.q(`INSERT INTO decision_resolutions(request_id,question_revision,revision_request_id,task_id,kind,option_id,text,receipt,provenance,channel,decided_by,recorded_by,attempt_id,committed_at)
 		VALUES($1,$2,$3,$4,$5,NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),$9,$10,$11,$12,$13,$14) RETURNING resolution_id`,
+		`INSERT INTO decision_resolutions(request_id,question_revision,revision_request_id,task_id,kind,option_id,text,receipt,provenance,channel,decided_by,recorded_by,attempt_id,committed_at)
+		VALUES(?,?,?,?,?,NULLIF(?,''),NULLIF(?,''),NULLIF(?,''),?,?,?,?,?,?)`),
 		root, current.Revision, resolved.ID, x.ID, effective.Kind, in.Option, in.Text, in.Receipt, provenance, in.Channel,
-		decidedBy(in, prov), in.Actor, attemptID, now).Scan(&resolutionID)
+		decidedBy(in, prov), in.Actor, attemptID, now)
 	if err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
@@ -640,7 +666,7 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	// closing the request (answered, default_applied or withdrawn) closes those
 	// rows for display, while the plain path never selects them (hk 5000).
 	if x.Lane == "dots" && IsHKDotsRequest(x) {
-		if err = closeDotsAskOperatorQuestionsTx(ctx, tx, x.ID, decidedBy(in, prov), in.Text, 0, now); err != nil {
+		if err = s.closeDotsAskOperatorQuestionsFlowTx(ctx, tx, x.ID, decidedBy(in, prov), in.Text, 0, now); err != nil {
 			return ResolveDecisionOutcome{}, err
 		}
 	}
@@ -663,19 +689,19 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 	// One answered notice per resolution, on every channel. It is written
 	// before the decision event so a failure later in the transaction still
 	// rolls both back together.
-	if err = s.queueDecisionAnswerNotice(ctx, tx, x, resolved, in, decidedBy(in, prov), resolutionID, now); err != nil {
+	if err = s.queueDecisionAnswerNoticeFlow(ctx, tx, x, resolved, in, decidedBy(in, prov), resolutionID, now); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
 	if flagWas && !x.AwaitingDecision {
 		// The flag's own event: true to false, naming the request and who answered.
-		if _, _, err = insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: in.Actor, Note: "decision-clear " + resolved.ID + " by " + decidedBy(in, prov), Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
+		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: in.Actor, Note: "decision-clear " + resolved.ID + " by " + decidedBy(in, prov), Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
 			return ResolveDecisionOutcome{}, err
 		}
 	}
-	if err = insertDecisionEvent(ctx, tx, &x, in.Actor, note, now); err != nil {
+	if err = insertDecisionEventTx(ctx, tx, &x, in.Actor, note, now); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
-	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, in.Actor, note, 0, now); err != nil {
+	if err = s.mirrorTaskDecisionsFlowTx(ctx, tx, decisionBefore, x, in.Actor, note, 0, now); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
 	// A declaring dots request reconciles its result on every resolution: the
@@ -716,10 +742,10 @@ func checkDecisionDenyInput(in ResolveDecisionInput) error {
 // attempt of the open request revision. The denied row is never updated: the
 // deny is its own attempt pointing at it, the request stays open and no
 // resolution is written. The caller holds the task row lock.
-func (s *Store) denyDecisionAttempt(ctx context.Context, tx pgx.Tx, in ResolveDecisionInput, attempt decisionAttempt, x Task, request DecisionRequest) (ResolveDecisionOutcome, error) {
+func (s *Store) denyDecisionAttempt(ctx context.Context, tx transaction, in ResolveDecisionInput, attempt decisionAttempt, x Task, request DecisionRequest) (ResolveDecisionOutcome, error) {
 	var taskID int64
 	var result, revisionRequestID string
-	err := tx.QueryRow(ctx, `SELECT task_id,result,revision_request_id FROM decision_answer_attempts WHERE id=$1 FOR SHARE`, in.DeniesAttemptID).Scan(&taskID, &result, &revisionRequestID)
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT task_id,result,revision_request_id FROM decision_answer_attempts WHERE id=$1 FOR SHARE`, `SELECT task_id,result,revision_request_id FROM decision_answer_attempts WHERE id=? FOR SHARE`), in.DeniesAttemptID).Scan(&taskID, &result, &revisionRequestID)
 	if errors.Is(err, ErrNoRows) {
 		return ResolveDecisionOutcome{}, ErrDecisionAttemptNotFound
 	}
@@ -730,7 +756,7 @@ func (s *Store) denyDecisionAttempt(ctx context.Context, tx pgx.Tx, in ResolveDe
 		return ResolveDecisionOutcome{}, ErrDecisionAttemptNotPending
 	}
 	var denied bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM decision_answer_attempts WHERE denies_attempt_id=$1)`, in.DeniesAttemptID).Scan(&denied); err != nil {
+	if err = tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS(SELECT 1 FROM decision_answer_attempts WHERE denies_attempt_id=$1)`, `SELECT EXISTS(SELECT 1 FROM decision_answer_attempts WHERE denies_attempt_id=?)`), in.DeniesAttemptID).Scan(&denied); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
 	if denied {
@@ -739,7 +765,7 @@ func (s *Store) denyDecisionAttempt(ctx context.Context, tx pgx.Tx, in ResolveDe
 	attempt.result = DecisionResultDenied
 	attempt.deniesAttemptID = in.DeniesAttemptID
 	attempt.receipt = in.Receipt
-	id, err := insertDecisionAttempt(ctx, tx, attempt)
+	id, err := insertDecisionAttemptTx(ctx, tx, attempt)
 	if errors.Is(mapDriverError(err), ErrDecisionAttemptDenied) {
 		return ResolveDecisionOutcome{}, ErrDecisionAttemptDenied
 	}
@@ -750,10 +776,10 @@ func (s *Store) denyDecisionAttempt(ctx context.Context, tx pgx.Tx, in ResolveDe
 	if in.Receipt != "" {
 		note += " receipt " + in.Receipt
 	}
-	if err = s.queueDecisionDenyNotice(ctx, tx, x, request, in, id, attempt.at); err != nil {
+	if err = s.queueDecisionDenyNoticeFlow(ctx, tx, x, request, in, id, attempt.at); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
-	if err = insertDecisionEvent(ctx, tx, &x, in.Actor, note, attempt.at); err != nil {
+	if err = insertDecisionEventTx(ctx, tx, &x, in.Actor, note, attempt.at); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -766,7 +792,7 @@ func (s *Store) denyDecisionAttempt(ctx context.Context, tx pgx.Tx, in ResolveDe
 // and revision, 0 when none exists (a request answered before version 43).
 func decisionResolutionID(ctx context.Context, q rowQuerier, root string, revision int) (int64, error) {
 	var id int64
-	err := q.QueryRow(ctx, `SELECT resolution_id FROM decision_resolutions WHERE request_id=$1 AND question_revision=$2`, root, revision).Scan(&id)
+	err := q.QueryRow(ctx, sqlFor(q, `SELECT resolution_id FROM decision_resolutions WHERE request_id=$1 AND question_revision=$2`, `SELECT resolution_id FROM decision_resolutions WHERE request_id=? AND question_revision=?`), root, revision).Scan(&id)
 	if errors.Is(err, ErrNoRows) {
 		return 0, nil
 	}
@@ -788,11 +814,11 @@ type decisionReplay struct {
 // pending_confirmation attempt is a new attempt under its own key: it never
 // rewrites the pending one, so the pending replay still reports the open
 // request the first delivery saw (R2).
-func replayDecisionAttempt(ctx context.Context, tx pgx.Tx, in ResolveDecisionInput, eventKey, hash string, x Task) (decisionReplay, bool, error) {
+func replayDecisionAttempt(ctx context.Context, tx transaction, in ResolveDecisionInput, eventKey, hash string, x Task) (decisionReplay, bool, error) {
 	var attemptID int64
 	var revision int
 	var storedHash, result, revisionRequestID, root string
-	err := tx.QueryRow(ctx, `SELECT id,payload_hash,result,revision_request_id,COALESCE(request_id,''),COALESCE(question_revision,0) FROM decision_answer_attempts WHERE channel=$1 AND event_key=$2`, in.Channel, eventKey).
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT id,payload_hash,result,revision_request_id,COALESCE(request_id,''),COALESCE(question_revision,0) FROM decision_answer_attempts WHERE channel=$1 AND event_key=$2`, `SELECT id,payload_hash,result,revision_request_id,COALESCE(request_id,''),COALESCE(question_revision,0) FROM decision_answer_attempts WHERE channel=? AND event_key=?`), in.Channel, eventKey).
 		Scan(&attemptID, &storedHash, &result, &revisionRequestID, &root, &revision)
 	if errors.Is(err, ErrNoRows) {
 		return decisionReplay{}, false, nil
@@ -816,7 +842,12 @@ func replayDecisionAttempt(ctx context.Context, tx pgx.Tx, in ResolveDecisionInp
 	if out.Request.ID != revisionRequestID || (wantStatus != "" && out.Request.Status != wantStatus) {
 		// The revision moved on or was closed; report the request as it was.
 		var snapshot []byte
-		err = tx.QueryRow(ctx, `SELECT refs->'decision_request' FROM task_events WHERE task_id=$1 AND kind='decision' AND refs->'decision_request'->>'id'=$2 AND ($3::text='' OR refs->'decision_request'->>'status'=$3::text) ORDER BY id DESC LIMIT 1`, x.ID, revisionRequestID, wantStatus).Scan(&snapshot)
+		snapshotSQL, snapshotArgs := `SELECT refs->'decision_request' FROM task_events WHERE task_id=$1 AND kind='decision' AND refs->'decision_request'->>'id'=$2 AND ($3::text='' OR refs->'decision_request'->>'status'=$3::text) ORDER BY id DESC LIMIT 1`, []any{x.ID, revisionRequestID, wantStatus}
+		if dialectFor(tx) == mysqlDialect {
+			snapshotSQL = `SELECT JSON_EXTRACT(refs,'$.decision_request') FROM task_events WHERE task_id=? AND kind='decision' AND ` + reportJSONText("refs", "$.decision_request.id") + `=? AND (?='' OR ` + reportJSONText("refs", "$.decision_request.status") + `=?) ORDER BY id DESC LIMIT 1`
+			snapshotArgs = []any{x.ID, revisionRequestID, wantStatus, wantStatus}
+		}
+		err = tx.QueryRow(ctx, snapshotSQL, snapshotArgs...).Scan(&snapshot)
 		if err != nil && !errors.Is(err, ErrNoRows) {
 			return decisionReplay{}, false, err
 		}
@@ -827,14 +858,14 @@ func replayDecisionAttempt(ctx context.Context, tx pgx.Tx, in ResolveDecisionInp
 			out.Request = request
 		}
 	}
-	err = tx.QueryRow(ctx, `SELECT resolution_id FROM decision_resolutions WHERE attempt_id=$1`, attemptID).Scan(&out.ResolutionID)
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT resolution_id FROM decision_resolutions WHERE attempt_id=$1`, `SELECT resolution_id FROM decision_resolutions WHERE attempt_id=?`), attemptID).Scan(&out.ResolutionID)
 	if err != nil && !errors.Is(err, ErrNoRows) {
 		return decisionReplay{}, false, err
 	}
 	if out.ResolutionID == 0 && result == DecisionResultAnswered && root != "" && revision > 0 {
 		// An identical answer to a closed request is its own attempt without
 		// a resolution row; it reports the one resolution of that revision.
-		if out.ResolutionID, err = decisionResolutionID(ctx, pgTransaction{tx}, root, revision); err != nil {
+		if out.ResolutionID, err = decisionResolutionID(ctx, tx, root, revision); err != nil {
 			return decisionReplay{}, false, err
 		}
 	}

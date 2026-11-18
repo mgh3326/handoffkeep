@@ -192,6 +192,7 @@ func scanService(row pgx.Row, x *Service) error {
 // and the frozen changes they recorded.
 func (s *Store) PutService(ctx context.Context, x Service) (Service, error) {
 	if s != nil && s.dialect == mysqlDialect {
+		// Not ported to MySQL: services/deploys/deploy_changes are left out of MySQL (design §2) (hk 5088).
 		return Service{}, ErrDialectUnsupported
 	}
 
@@ -213,6 +214,7 @@ RETURNING `+serviceColumns, x.Name, x.Repo, x.PathPatterns, x.DeployMode, x.Targ
 // GetService reads one service.
 func (s *Store) GetService(ctx context.Context, name string) (Service, bool, error) {
 	if s != nil && s.dialect == mysqlDialect {
+		// Not ported to MySQL: services/deploys/deploy_changes are left out of MySQL (design §2) (hk 5088).
 		return Service{}, false, ErrDialectUnsupported
 	}
 
@@ -227,6 +229,7 @@ func (s *Store) GetService(ctx context.Context, name string) (Service, bool, err
 // ListServices reads every service by name.
 func (s *Store) ListServices(ctx context.Context) ([]Service, error) {
 	if s != nil && s.dialect == mysqlDialect {
+		// Not ported to MySQL: services/deploys/deploy_changes are left out of MySQL (design §2) (hk 5088).
 		return nil, ErrDialectUnsupported
 	}
 
@@ -306,6 +309,7 @@ func deployPayloadHash(in DeployStart) (string, error) {
 // (lockorder.go).
 func (s *Store) StartDeploy(ctx context.Context, in DeployStart) (Deploy, bool, error) {
 	if s != nil && s.dialect == mysqlDialect {
+		// Not ported to MySQL: services/deploys/deploy_changes are left out of MySQL (design §2) (hk 5088).
 		return Deploy{}, false, ErrDialectUnsupported
 	}
 
@@ -470,6 +474,7 @@ func readDeployTx(ctx context.Context, q pgx.Tx, attemptID string) (Deploy, erro
 // queues one result notice for the lane that asked (deploy_result_notify.go).
 func (s *Store) FinishDeploy(ctx context.Context, attemptID string, in DeployFinish) (Deploy, error) {
 	if s != nil && s.dialect == mysqlDialect {
+		// Not ported to MySQL: services/deploys/deploy_changes are left out of MySQL (design §2) (hk 5088).
 		return Deploy{}, ErrDialectUnsupported
 	}
 
@@ -591,6 +596,7 @@ FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND
 // is not the service's and is never pending.
 func (s *Store) PendingChanges(ctx context.Context, service string, limit int) ([]Change, error) {
 	if s != nil && s.dialect == mysqlDialect {
+		// Not ported to MySQL: services/deploys/deploy_changes are left out of MySQL (design §2) (hk 5088).
 		return nil, ErrDialectUnsupported
 	}
 

@@ -159,7 +159,7 @@ func dotsChoiceDecisionInput(task Task, docKey string, in DotsReplyInput) (Decis
 // answer may land while another blocking decision still keeps the task open:
 // nothing is done then, and the reconcile runs again when that decision
 // closes. Outbox ids name the decision, so a second run sends nothing.
-func (s *Store) reconcileDotsChoiceTx(ctx context.Context, tx pgx.Tx, x Task, at time.Time) (Task, error) {
+func (s *Store) reconcileDotsChoiceTx(ctx context.Context, tx transaction, x Task, at time.Time) (Task, error) {
 	declared := x.Refs.DotsChoice
 	if declared == nil || declared.ResultDoc == "" {
 		return x, nil
@@ -179,7 +179,7 @@ func (s *Store) reconcileDotsChoiceTx(ctx context.Context, tx pgx.Tx, x Task, at
 	// recorder of the resolution is this task's actor.
 	by := request.Resolution.By
 	if x.State == StateIcebox {
-		resumed, err := s.transitionTaskTx(ctx, pgTransaction{tx}, x.ID, TransitionInput{To: StateBacklog, By: by, Note: "decision answered: resume to close"}, false)
+		resumed, err := s.transitionTaskTx(ctx, tx, x.ID, TransitionInput{To: StateBacklog, By: by, Note: "decision answered: resume to close"}, false)
 		if err != nil {
 			return Task{}, err
 		}
@@ -195,7 +195,7 @@ func (s *Store) reconcileDotsChoiceTx(ctx context.Context, tx pgx.Tx, x Task, at
 	if x.ParentLane != "" {
 		lanes = append(lanes, x.ParentLane)
 	}
-	notified, _, err := dotsNotifyLanesTx(ctx, tx, x)
+	notified, _, err := dotsNotifyLanesFlowTx(ctx, tx, x)
 	if err != nil {
 		return Task{}, err
 	}
@@ -214,14 +214,14 @@ func (s *Store) reconcileDotsChoiceTx(ctx context.Context, tx pgx.Tx, x Task, at
 		if lane != x.ParentLane {
 			eventID += "-" + lane
 		}
-		if _, err := insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDotsReport, lane, eventID, text, at); err != nil {
+		if _, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindDotsReport, lane, eventID, text, at); err != nil {
 			return Task{}, err
 		}
 	}
 	if !taskTransitionAllowed(x.State, StateCompleted) {
 		return x, nil
 	}
-	completed, err := s.transitionTaskTx(ctx, pgTransaction{tx}, x.ID, TransitionInput{To: StateCompleted, By: by, Evidence: evidence}, false)
+	completed, err := s.transitionTaskTx(ctx, tx, x.ID, TransitionInput{To: StateCompleted, By: by, Evidence: evidence}, false)
 	if err != nil {
 		return Task{}, err
 	}

@@ -23,6 +23,7 @@ func (s *Store) SearchCtx(ctx context.Context, q, session string, limit int) ([]
 
 func (s *Store) searchCtx(ctx context.Context, q, session string, limit int) ([]SearchResult, error) {
 	if s != nil && s.dialect == mysqlDialect {
+		// Not ported to MySQL: ctx full-text search, B8 (hk 4899 §6) (hk 5088).
 		return nil, ErrDialectUnsupported
 	}
 	if limit < 1 {

@@ -87,10 +87,6 @@ func dotsRequestInvalid(reason string) error {
 
 // CreateDotsRequest creates a standalone request and its body in one transaction.
 func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequestInput) (Task, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return Task{}, ErrDialectUnsupported
-	}
-
 	lane := in.RequesterLane
 	if lane == "" {
 		lane = by
@@ -169,62 +165,79 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 		}
 		sourceRef = "hk-" + hex.EncodeToString(key[:])
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Task{}, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-		return Task{}, err
-	}
-	if in.IdempotencyKey != "" {
-		existing, found, err := taskBySourceTx(ctx, pgTransaction{tx}, "dots", sourceRef)
+	var out Task
+	err := s.retryTx(ctx, func() error {
+		out = Task{}
+		tx, release, err := s.begin(ctx)
 		if err != nil {
-			return Task{}, err
+			return err
 		}
-		if found {
-			var original string
-			if err := tx.QueryRow(ctx, `SELECT note FROM task_events WHERE task_id=$1 AND source='dots-request' AND source_ref=$2`, existing.ID, sourceRef).Scan(&original); err != nil {
-				return Task{}, err
-			}
-			if original != requestDigest {
-				return Task{}, dotsRequestInvalid("idempotency key was already used with different input")
-			}
-			return existing, nil
+		defer release()
+		defer tx.Rollback(ctx)
+		if err = s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
+			return err
 		}
-	}
-	x, err := insertTriageTaskTx(ctx, pgTransaction{tx}, item, "dots", sourceRef, "dots", nil, by, time.Now().UTC())
-	if err != nil {
-		return Task{}, err
-	}
-	// A declared option names pictures and videos this database holds; the
-	// check runs in the writing transaction, before the task is returned, so a
-	// request can never declare an option the operator cannot look at.
-	if err := checkDecisionAttachmentsExist(ctx, tx, DecisionOptions{Options: in.Options}); err != nil {
-		return Task{}, err
-	}
-	if err := s.enqueueYTIssueTx(ctx, pgTransaction{tx}, x); err != nil {
-		return Task{}, err
-	}
-	err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,parent_lane=$3,started_triage_at=NULL WHERE id=$1 RETURNING `+taskColumns, x.ID, StateBacklog, lane), &x)
-	if err != nil {
-		return Task{}, err
-	}
-	if len(in.Options) > 0 {
-		declared, err := json.Marshal(DotsChoice{Options: in.Options})
+		if in.IdempotencyKey != "" {
+			existing, found, err := taskBySourceTx(ctx, tx, "dots", sourceRef)
+			if err != nil {
+				return err
+			}
+			if found {
+				var original string
+				if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT note FROM task_events WHERE task_id=$1 AND source='dots-request' AND source_ref=$2`, `SELECT note FROM task_events WHERE task_id=? AND source='dots-request' AND source_ref=?`), existing.ID, sourceRef).Scan(&original); err != nil {
+					return err
+				}
+				if original != requestDigest {
+					return dotsRequestInvalid("idempotency key was already used with different input")
+				}
+				out = existing
+				return nil
+			}
+		}
+		x, err := insertTriageTaskTx(ctx, tx, item, "dots", sourceRef, "dots", nil, by, time.Now().UTC())
 		if err != nil {
-			return Task{}, err
+			return err
 		}
-		if err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET refs=jsonb_set(refs,'{dots_choice}',$2::jsonb) WHERE id=$1 RETURNING `+taskColumns, x.ID, string(declared)), &x); err != nil {
-			return Task{}, err
+		// A declared option names pictures and videos this database holds; the
+		// check runs in the writing transaction, before the task is returned, so a
+		// request can never declare an option the operator cannot look at.
+		if s.dialect == mysqlDialect {
+			err = checkDecisionAttachmentsExistMySQL(ctx, tx, DecisionOptions{Options: in.Options})
+		} else {
+			err = checkDecisionAttachmentsExist(ctx, pgxTx(tx), DecisionOptions{Options: in.Options})
 		}
+		if err != nil {
+			return err
+		}
+		if err := s.enqueueYTIssueTx(ctx, tx, x); err != nil {
+			return err
+		}
+		if err = s.updateTaskReturningCore(ctx, tx, &x, x.ID, `UPDATE tasks SET state=$2,parent_lane=$3,started_triage_at=NULL WHERE id=$1 RETURNING `, []any{x.ID, StateBacklog, lane},
+			`UPDATE tasks SET state=?,parent_lane=?,started_triage_at=NULL WHERE id=?`, []any{StateBacklog, lane, x.ID}); err != nil {
+			return err
+		}
+		if len(in.Options) > 0 {
+			declared, err := json.Marshal(DotsChoice{Options: in.Options})
+			if err != nil {
+				return err
+			}
+			if err := s.updateTaskReturningCore(ctx, tx, &x, x.ID, `UPDATE tasks SET refs=jsonb_set(refs,'{dots_choice}',$2::jsonb) WHERE id=$1 RETURNING `, []any{x.ID, string(declared)},
+				`UPDATE tasks SET refs=JSON_SET(refs,'$.dots_choice',CAST(? AS JSON)) WHERE id=?`, []any{string(declared), x.ID}); err != nil {
+				return err
+			}
+		}
+		if in.IdempotencyKey != "" {
+			if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: "source_event", By: by, Note: requestDigest, At: x.CreatedAt, Source: "dots-request", SourceRef: sourceRef}); err != nil {
+				return err
+			}
+		}
+		out = x
+		return tx.Commit(ctx)
+	})
+	if err != nil {
+		return Task{}, err
 	}
-	if in.IdempotencyKey != "" {
-		if _, _, err := insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: x.ID, Kind: "source_event", By: by, Note: requestDigest, At: x.CreatedAt, Source: "dots-request", SourceRef: sourceRef}); err != nil {
-			return Task{}, err
-		}
-	}
-	return x, tx.Commit(ctx)
+	return out, nil
 }
 
 // IsHKDotsRequest identifies a request that must remain on hk.
@@ -317,17 +330,19 @@ type DotsReply struct {
 // ListDotsReplies returns recorded replies in comment order, each QUESTION
 // carrying its answer when it has one.
 func (s *Store) ListDotsReplies(ctx context.Context, taskID int64) ([]DotsReply, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return nil, ErrDialectUnsupported
-	}
-
-	rows, err := s.pool.Query(ctx, `SELECT c.id,c.task_id,c.body,c.author,c.created_at,e.from_value,
+	rows, err := s.db().Query(ctx, s.q(`SELECT c.id,c.task_id,c.body,c.author,c.created_at,e.from_value,
 			dr.answered_at,COALESCE(dr.answered_by,''),COALESCE(dr.answer_comment_id,0),COALESCE(ac.body,dr.answer_text,'')
 		FROM task_comments c
 		JOIN task_events e ON e.task_id=c.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.to_value=c.id::text
 		LEFT JOIN dots_results dr ON dr.task_id=c.task_id AND dr.comment_id=e.source_ref AND dr.kind='QUESTION'
 		LEFT JOIN task_comments ac ON ac.id=dr.answer_comment_id
-		WHERE c.task_id=$1 ORDER BY c.id`, taskID)
+		WHERE c.task_id=$1 ORDER BY c.id`, `SELECT c.id,c.task_id,c.body,c.author,c.created_at,e.from_value,
+			dr.answered_at,COALESCE(dr.answered_by,''),COALESCE(dr.answer_comment_id,0),COALESCE(ac.body,dr.answer_text,'')
+		FROM task_comments c
+		JOIN task_events e ON e.task_id=c.task_id AND e.source='dots-hk-chatgpt' AND e.field='dots_reply' AND e.to_value=CAST(c.id AS CHAR) COLLATE utf8mb4_0900_bin
+		LEFT JOIN dots_results dr ON dr.task_id=c.task_id AND dr.comment_id=e.source_ref AND dr.kind='QUESTION'
+		LEFT JOIN task_comments ac ON ac.id=dr.answer_comment_id
+		WHERE c.task_id=? ORDER BY c.id`), taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -354,10 +369,6 @@ func (s *Store) ListDotsReplies(ctx context.Context, taskID int64) ([]DotsReply,
 // ReplyDots writes the reply, its state change, and its recorded outputs together.
 // Every reply but START must carry the run token START issued (dots_run_token.go).
 func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsReplyInput) (DotsReplyResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return DotsReplyResult{}, ErrDialectUnsupported
-	}
-
 	if in.TaskID < 1 || !validText(actor, 128) || actor == "" || channel != "chatgpt" || !validSourceRef(in.IdempotencyKey) || (in.AskOperator && in.Kind != "QUESTION") || (in.Takeover && in.Kind != "START") {
 		return DotsReplyResult{}, errors.New("invalid dots reply")
 	}
@@ -409,88 +420,123 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 	}
 	payloadHash := sha256.Sum256([]byte(payloadSource))
 	payload := hex.EncodeToString(payloadHash[:])
-	tx, err := s.pool.Begin(ctx)
+	var out DotsReplyResult
+	err := s.retryTx(ctx, func() error {
+		out = DotsReplyResult{}
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		// Lock order: mutation lock, comment lock, then task row.
+		if err = s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
+			return err
+		}
+		if err = s.lockTx(ctx, tx, taskCommentInsertLock); err != nil {
+			return err
+		}
+		res, afterCommit, err := s.replyDotsTx(ctx, tx, actor, channel, in, commentID, payload, annotated)
+		if err != nil {
+			return err
+		}
+		out = res
+		if afterCommit == nil {
+			// A replay recorded nothing; the transaction rolls back.
+			return nil
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return err
+		}
+		afterCommit()
+		return nil
+	})
 	if err != nil {
 		return DotsReplyResult{}, err
 	}
-	defer tx.Rollback(ctx)
-	// Lock order: mutation lock, comment lock, then task row.
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-		return DotsReplyResult{}, err
-	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
-		return DotsReplyResult{}, err
-	}
+	return out, nil
+}
+
+// replyDotsTx records one reply inside the caller's transaction, which holds
+// the mutation and comment locks. The returned function is the work that
+// follows a commit; it is nil for a replay, which writes nothing.
+func (s *Store) replyDotsTx(ctx context.Context, tx transaction, actor, channel string, in DotsReplyInput, commentID, payload string, annotated bool) (DotsReplyResult, func(), error) {
+	var err error
 	var task Task
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, in.TaskID), &task); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), in.TaskID), &task); err != nil {
 		if errors.Is(err, ErrNoRows) {
-			return DotsReplyResult{}, ErrTaskNotFound
+			return DotsReplyResult{}, nil, ErrTaskNotFound
 		}
-		return DotsReplyResult{}, err
+		return DotsReplyResult{}, nil, err
 	}
 	// The token is checked before the replay lookup: a replay returns the first
 	// result, so a caller without the run must not learn it.
 	if in.Kind != "START" {
-		if err = checkDotsRunTokenTx(ctx, pgTransaction{tx}, task, in.RunToken); err != nil {
-			return DotsReplyResult{}, err
+		if err = checkDotsRunTokenTx(ctx, tx, task, in.RunToken); err != nil {
+			return DotsReplyResult{}, nil, err
 		}
 	}
 	var previous string
-	err = tx.QueryRow(ctx, `SELECT note FROM task_events WHERE task_id=$1 AND source='dots-hk-chatgpt' AND source_ref=$2`, in.TaskID, commentID).Scan(&previous)
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT note FROM task_events WHERE task_id=$1 AND source='dots-hk-chatgpt' AND source_ref=$2`, `SELECT note FROM task_events WHERE task_id=? AND source='dots-hk-chatgpt' AND source_ref=?`), in.TaskID, commentID).Scan(&previous)
 	if err == nil {
 		// payload state document [skipped notify lanes]: the last field is
 		// absent on replies recorded before it was kept.
 		parts := strings.SplitN(previous, " ", 4)
 		if len(parts) < 3 {
-			return DotsReplyResult{}, errors.New("invalid recorded dots reply")
+			return DotsReplyResult{}, nil, errors.New("invalid recorded dots reply")
 		}
 		if parts[0] != payload {
-			return DotsReplyResult{}, ErrDotsReplyKeyConflict
+			return DotsReplyResult{}, nil, ErrDotsReplyKeyConflict
 		}
 		replayToken := ""
 		if in.Kind == "START" {
-			if replayToken, err = dotsRunTokenForIssueTx(ctx, pgTransaction{tx}, task.ID, commentID); err != nil {
-				return DotsReplyResult{}, err
+			if replayToken, err = dotsRunTokenForIssueTx(ctx, tx, task.ID, commentID); err != nil {
+				return DotsReplyResult{}, nil, err
 			}
 		}
 		var skipped []string
 		if len(parts) == 4 {
 			skipped = dotsSkippedLanesFromNote(parts[3])
 		}
-		return DotsReplyResult{TaskID: task.ID, State: parts[1], DocumentKey: parts[2], Duplicate: true, RunToken: replayToken, InvalidNotifyLanes: skipped}, nil
+		return DotsReplyResult{TaskID: task.ID, State: parts[1], DocumentKey: parts[2], Duplicate: true, RunToken: replayToken, InvalidNotifyLanes: skipped}, nil, nil
 	}
 	if !errors.Is(err, ErrNoRows) {
-		return DotsReplyResult{}, err
+		return DotsReplyResult{}, nil, err
 	}
 	if task.Lane != "dots" || !IsHKDotsRequest(task) {
-		return DotsReplyResult{}, errors.New("invalid dots request task")
+		return DotsReplyResult{}, nil, errors.New("invalid dots request task")
 	}
 	if in.Kind == "START" && !task.UpdatedAt.Equal(*in.ExpectedUpdatedAt) {
-		return DotsReplyResult{}, fmt.Errorf("%w: dots request has changed or is already claimed", ErrTaskConflict)
+		return DotsReplyResult{}, nil, fmt.Errorf("%w: dots request has changed or is already claimed", ErrTaskConflict)
 	}
 	if in.Kind == "START" && in.Takeover {
 		// A takeover starts a request that is already started: it needs a
 		// claim to take over and an unsettled request to take it on.
 		if task.ClaimedBy == "" || IsSettledState(task.State) {
-			return DotsReplyResult{}, fmt.Errorf("%w: dots request is not started, so there is no run to take over", ErrTaskConflict)
+			return DotsReplyResult{}, nil, fmt.Errorf("%w: dots request is not started, so there is no run to take over", ErrTaskConflict)
 		}
 	} else if in.Kind == "START" && (!IsClaimableState(task.State) || task.ClaimedBy != "") {
-		return DotsReplyResult{}, fmt.Errorf("%w: dots request has changed or is already claimed", ErrTaskConflict)
+		return DotsReplyResult{}, nil, fmt.Errorf("%w: dots request has changed or is already claimed", ErrTaskConflict)
 	}
 	if in.Kind != "START" && IsSettledState(task.State) {
-		return DotsReplyResult{}, ErrTaskConflict
+		return DotsReplyResult{}, nil, ErrTaskConflict
 	}
 	now := time.Now().UTC()
 	var commentRowID int64
-	if err = tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,$2,$3,$4) RETURNING id`, in.TaskID, in.Body, actor, now).Scan(&commentRowID); err != nil {
-		return DotsReplyResult{}, err
+	if s.dialect == mysqlDialect {
+		commentRowID, err = tx.InsertID(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES(?,?,?,?)`, in.TaskID, in.Body, actor, now)
+	} else {
+		err = tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,$2,$3,$4) RETURNING id`, in.TaskID, in.Body, actor, now).Scan(&commentRowID)
+	}
+	if err != nil {
+		return DotsReplyResult{}, nil, err
 	}
 	// While comments are canonical in YouTrack (hk 4122) the reply gets its
 	// op in this transaction, or is refused; under hk nothing changes.
 	reply := TaskComment{ID: commentRowID, TaskID: in.TaskID, Body: in.Body, Author: actor, CreatedAt: now}
-	replyOp, replyEnqueued, err := s.enqueueYTCommentIfCanonicalTx(ctx, pgTransaction{tx}, reply)
+	replyOp, replyEnqueued, err := s.enqueueYTCommentIfCanonicalTx(ctx, tx, reply)
 	if err != nil {
-		return DotsReplyResult{}, err
+		return DotsReplyResult{}, nil, err
 	}
 
 	var docKey string
@@ -499,15 +545,15 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 		issue := DotsIssue{Identifier: "hk-" + strconv.FormatInt(task.ID, 10), Title: task.Title, URL: fmt.Sprintf("hk:task/%d", task.ID), IssueUUID: fmt.Sprintf("hk:%d", task.ID)}
 		comment := DotsComment{ID: commentID, CreatedAt: now.Format(time.RFC3339Nano), Body: "[dots] " + in.Kind + "\n" + in.Body}
 		if _, ok := DotsKind(comment.Body); !ok {
-			return DotsReplyResult{}, errors.New("invalid dots reply")
+			return DotsReplyResult{}, nil, errors.New("invalid dots reply")
 		}
 		// The body document is editable after creation, so a bad notify line
 		// cannot refuse the reply (that would roll back the RESULT). It is
 		// skipped and reported in the result instead.
 		var notifyLanes []string
 		if in.Kind == "RESULT" {
-			if notifyLanes, invalidLanes, err = dotsNotifyLanesTx(ctx, tx, task); err != nil {
-				return DotsReplyResult{}, err
+			if notifyLanes, invalidLanes, err = dotsNotifyLanesFlowTx(ctx, tx, task); err != nil {
+				return DotsReplyResult{}, nil, err
 			}
 		}
 		var askOperator *bool
@@ -515,31 +561,31 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 			ask := in.AskOperator
 			askOperator = &ask
 		}
-		docKey, _, err = recordDotsResultTx(ctx, tx, in.Kind, issue, comment, &task, task.ParentLane, "hk-mcp", askOperator, notifyLanes...)
+		docKey, _, err = recordDotsResultFlowTx(ctx, tx, in.Kind, issue, comment, &task, task.ParentLane, "hk-mcp", askOperator, notifyLanes...)
 		if err != nil {
-			return DotsReplyResult{}, err
+			return DotsReplyResult{}, nil, err
 		}
 	}
 	var runToken string
 	switch in.Kind {
 	case "START":
 		if in.Takeover {
-			runToken, err = issueDotsRunTokenTx(ctx, pgTransaction{tx}, task.ID, commentID, actor, true, now)
+			runToken, err = issueDotsRunTokenTx(ctx, tx, task.ID, commentID, actor, true, now)
 			break
 		}
-		task, err = s.claimTaskTx(ctx, pgTransaction{tx}, task.ID, "dots", "", "dots request")
+		task, err = s.claimTaskTx(ctx, tx, task.ID, "dots", "", "dots request")
 		if err == nil {
-			runToken, err = issueDotsRunTokenTx(ctx, pgTransaction{tx}, task.ID, commentID, actor, false, now)
+			runToken, err = issueDotsRunTokenTx(ctx, tx, task.ID, commentID, actor, false, now)
 		}
 	case "BLOCKED":
-		task, err = s.transitionTaskTx(ctx, pgTransaction{tx}, task.ID, TransitionInput{To: "hold", By: actor, Note: in.Body}, false)
+		task, err = s.transitionTaskTx(ctx, tx, task.ID, TransitionInput{To: "hold", By: actor, Note: in.Body}, false)
 	case "RESULT":
 		if task.Refs.DotsChoice == nil {
 			if annotated {
 				err = errors.New("invalid dots reply: the request declares no options, so recommended, recommendation_reason, unverified and one_fix have no decision to carry")
 				break
 			}
-			task, err = s.transitionTaskTx(ctx, pgTransaction{tx}, task.ID, TransitionInput{To: StateCompleted, By: actor, Evidence: "hk:doc " + docKey}, false)
+			task, err = s.transitionTaskTx(ctx, tx, task.ID, TransitionInput{To: StateCompleted, By: actor, Evidence: "hk:doc " + docKey}, false)
 			break
 		}
 		// A declaring request ends in the operator's choice: the RESULT opens
@@ -551,30 +597,26 @@ func (s *Store) ReplyDots(ctx context.Context, actor, channel string, in DotsRep
 			break
 		}
 		var decision DecisionRequestResult
-		decision, err = s.recordDecisionRequestTx(ctx, tx, task.ID, actor, input)
+		decision, err = s.recordDecisionRequestFlowTx(ctx, tx, task.ID, actor, input)
 		if err != nil {
 			break
 		}
 		task = decision.Task
-		err = markDotsChoiceResultTx(ctx, tx, task.ID, docKey)
+		err = markDotsChoiceResultFlowTx(ctx, tx, task.ID, docKey)
 	case "QUESTION":
 		if in.AskOperator {
 			var decision DecisionRequestResult
-			decision, err = s.recordDecisionRequestTx(ctx, tx, task.ID, actor, DecisionRequestInput{Question: in.Body, Options: DecisionOptions{Options: []DecisionOption{{Key: "A", Label: "Provide an answer"}}, AllowFree: true}, DefaultAction: "Wait for an answer", Block: true, DotsQuestionCommentID: commentRowID})
+			decision, err = s.recordDecisionRequestFlowTx(ctx, tx, task.ID, actor, DecisionRequestInput{Question: in.Body, Options: DecisionOptions{Options: []DecisionOption{{Key: "A", Label: "Provide an answer"}}, AllowFree: true}, DefaultAction: "Wait for an answer", Block: true, DotsQuestionCommentID: commentRowID})
 			task = decision.Task
 		}
 	}
 	if err != nil {
-		return DotsReplyResult{}, err
+		return DotsReplyResult{}, nil, err
 	}
-	if _, _, err = insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: task.ID, Kind: "source_event", By: actor, Note: payload + " " + task.State + " " + docKey + dotsSkippedLanesNote(invalidLanes), At: now, Source: "dots-hk-chatgpt", SourceRef: commentID, Field: "dots_reply", FromValue: in.Kind, ToValue: strconv.FormatInt(commentRowID, 10)}); err != nil {
-		return DotsReplyResult{}, err
+	if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: task.ID, Kind: "source_event", By: actor, Note: payload + " " + task.State + " " + docKey + dotsSkippedLanesNote(invalidLanes), At: now, Source: "dots-hk-chatgpt", SourceRef: commentID, Field: "dots_reply", FromValue: in.Kind, ToValue: strconv.FormatInt(commentRowID, 10)}); err != nil {
+		return DotsReplyResult{}, nil, err
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return DotsReplyResult{}, err
-	}
-	logYTCommentEnqueued(reply, replyOp, replyEnqueued)
-	return DotsReplyResult{TaskID: task.ID, State: task.State, DocumentKey: docKey, RunToken: runToken, InvalidNotifyLanes: invalidLanes}, nil
+	return DotsReplyResult{TaskID: task.ID, State: task.State, DocumentKey: docKey, RunToken: runToken, InvalidNotifyLanes: invalidLanes}, func() { logYTCommentEnqueued(reply, replyOp, replyEnqueued) }, nil
 }
 
 // dotsSkippedLanesNote is the optional last field of a reply's event note: the
@@ -648,10 +690,6 @@ type DotsAnswerResult struct {
 // the answer marks its dots_results row, so a second answer finds nothing open.
 // A requester-lane comment alone answers nothing.
 func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller string, in DotsAnswerInput) (DotsAnswerResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		return DotsAnswerResult{}, ErrDialectUnsupported
-	}
-
 	if taskID < 1 {
 		return DotsAnswerResult{}, ErrTaskNotFound
 	}
@@ -665,42 +703,67 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 		return DotsAnswerResult{}, err
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	var out DotsAnswerResult
+	err := s.retryTx(ctx, func() error {
+		out = DotsAnswerResult{}
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+
+		// Lock order matches ReplyDots: task-mutation
+		// advisory lock (level 2), then taskCommentInsertLock, then task row FOR UPDATE.
+		if err = s.lockTx(ctx, tx, flowTaskMutationLockID); err != nil {
+			return err
+		}
+		if err = s.lockTx(ctx, tx, taskCommentInsertLock); err != nil {
+			return err
+		}
+		res, afterCommit, err := s.answerDotsQuestionTx(ctx, tx, taskID, caller, in)
+		if err != nil {
+			return err
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return err
+		}
+		out = res
+		afterCommit()
+		return nil
+	})
 	if err != nil {
 		return DotsAnswerResult{}, err
 	}
-	defer tx.Rollback(ctx)
+	return out, nil
+}
 
-	// Lock order matches ReplyDots: task-mutation
-	// advisory lock (level 2), then taskCommentInsertLock, then task row FOR UPDATE.
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8241873001)`); err != nil {
-		return DotsAnswerResult{}, err
-	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, taskCommentInsertLock); err != nil {
-		return DotsAnswerResult{}, err
-	}
-
+// answerDotsQuestionTx answers inside the caller's transaction, which holds the
+// mutation and comment locks. The returned function is the work that follows
+// the commit.
+func (s *Store) answerDotsQuestionTx(ctx context.Context, tx transaction, taskID int64, caller string, in DotsAnswerInput) (DotsAnswerResult, func(), error) {
+	var err error
 	var x Task
-	if err = scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, taskID), &x); err != nil {
+	if err = scanTask(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), taskID), &x); err != nil {
 		if errors.Is(err, ErrNoRows) {
-			return DotsAnswerResult{}, ErrTaskNotFound
+			return DotsAnswerResult{}, nil, ErrTaskNotFound
 		}
-		return DotsAnswerResult{}, err
+		return DotsAnswerResult{}, nil, err
 	}
 
 	if x.Lane != "dots" || !IsHKDotsRequest(x) {
-		return DotsAnswerResult{}, errors.New("invalid dots request task")
+		return DotsAnswerResult{}, nil, errors.New("invalid dots request task")
 	}
 	if x.Refs.Disposition != nil {
-		return DotsAnswerResult{}, ErrDispositionOperatorOnly
+		return DotsAnswerResult{}, nil, ErrDispositionOperatorOnly
 	}
 	if isTerminalTaskState(x.State) {
-		return DotsAnswerResult{}, ErrTaskTerminal
+		return DotsAnswerResult{}, nil, ErrTaskTerminal
 	}
 	// A previous release may write a QUESTION row during blue-green with no
 	// owner column; classify this task's rows before selecting one (hk 5000).
-	if err = classifyDotsQuestionsTx(ctx, tx, taskID); err != nil {
-		return DotsAnswerResult{}, err
+	if err = classifyDotsQuestionsFlowTx(ctx, tx, taskID); err != nil {
+		return DotsAnswerResult{}, nil, err
 	}
 
 	current := x.Refs.DecisionRequest
@@ -713,23 +776,23 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 	routeDecision := false
 	switch {
 	case in.QuestionID > 0:
-		q, found, qerr := dotsQuestionTargetTx(ctx, tx, taskID, in.QuestionID)
+		q, found, qerr := dotsQuestionTargetFlowTx(ctx, tx, taskID, in.QuestionID)
 		if qerr != nil {
-			return DotsAnswerResult{}, qerr
+			return DotsAnswerResult{}, nil, qerr
 		}
 		if !found {
-			return DotsAnswerResult{}, fmt.Errorf("%w: no open dots question has the given question_id", ErrNoOpenDotsQuestion)
+			return DotsAnswerResult{}, nil, fmt.Errorf("%w: no open dots question has the given question_id", ErrNoOpenDotsQuestion)
 		}
 		question = q
 		if q.AskOperator {
 			if !decisionOpen {
-				return DotsAnswerResult{}, ErrDecisionRequestResolved
+				return DotsAnswerResult{}, nil, ErrDecisionRequestResolved
 			}
 			// The target must be the open request's own question. A
 			// superseded request's rows are closed, and anything else is
 			// refused rather than resolving the wrong decision (hk 5000).
 			if current.DotsQuestionCommentID == 0 || q.CommentID != current.DotsQuestionCommentID {
-				return DotsAnswerResult{}, fmt.Errorf("%w: the given question is not the open decision request's question", ErrNoOpenDotsQuestion)
+				return DotsAnswerResult{}, nil, fmt.Errorf("%w: the given question is not the open decision request's question", ErrNoOpenDotsQuestion)
 			}
 			routeDecision = true
 		}
@@ -737,55 +800,51 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 		// The untargeted answer resolves the decision, as before.
 		routeDecision = true
 	default:
-		questions, qerr := dotsPlainQuestionsTx(ctx, tx, taskID)
+		questions, qerr := dotsPlainQuestionsFlowTx(ctx, tx, taskID)
 		if qerr != nil {
-			return DotsAnswerResult{}, qerr
+			return DotsAnswerResult{}, nil, qerr
 		}
 		switch len(questions) {
 		case 0:
 			// What was last asked tells the refusal apart: a decision question
 			// (already closed) means this is a second answer, otherwise nothing
 			// is open and the reason says so.
-			ask, found, qerr := dotsLatestQuestionAskOperatorTx(ctx, tx, taskID)
+			ask, found, qerr := dotsLatestQuestionAskOperatorFlowTx(ctx, tx, taskID)
 			if qerr != nil {
-				return DotsAnswerResult{}, qerr
+				return DotsAnswerResult{}, nil, qerr
 			}
 			if found && ask {
-				return DotsAnswerResult{}, ErrDecisionRequestResolved
+				return DotsAnswerResult{}, nil, ErrDecisionRequestResolved
 			}
-			return DotsAnswerResult{}, fmt.Errorf("%w: this request has no open dots question or decision request to answer", ErrNoOpenDotsQuestion)
+			return DotsAnswerResult{}, nil, fmt.Errorf("%w: this request has no open dots question or decision request to answer", ErrNoOpenDotsQuestion)
 		case 1:
 			question = questions[0]
 		default:
-			return DotsAnswerResult{}, fmt.Errorf("%w: more than one dots question is open; name the one to answer with question_id", ErrDotsQuestionAmbiguous)
+			return DotsAnswerResult{}, nil, fmt.Errorf("%w: more than one dots question is open; name the one to answer with question_id", ErrDotsQuestionAmbiguous)
 		}
 	}
 	if !routeDecision {
 		lane := strings.TrimSpace(in.RequesterLane)
 		if lane == "" || !validName(lane) {
-			return DotsAnswerResult{}, dotsRequestInvalid("answering a plain dots question requires the requester lane")
+			return DotsAnswerResult{}, nil, dotsRequestInvalid("answering a plain dots question requires the requester lane")
 		}
 		if x.ParentLane != lane {
-			return DotsAnswerResult{}, fmt.Errorf("%w: only the request's requester lane may answer its question", ErrTaskConflict)
+			return DotsAnswerResult{}, nil, fmt.Errorf("%w: only the request's requester lane may answer its question", ErrTaskConflict)
 		}
 
 		now := time.Now().UTC()
 		var comment TaskComment
-		err = scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,$2,$3,$4) RETURNING `+taskCommentColumns, taskID, in.Text, caller, now), &comment)
+		err = insertDotsAnswerCommentTx(ctx, tx, &comment, taskID, in.Text, caller, now)
 		if err != nil {
-			return DotsAnswerResult{}, err
+			return DotsAnswerResult{}, nil, err
 		}
-		op, enqueued, err := s.enqueueYTCommentTx(ctx, pgTransaction{tx}, comment)
+		op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, comment)
 		if err != nil {
-			return DotsAnswerResult{}, err
+			return DotsAnswerResult{}, nil, err
 		}
-		if err = markDotsQuestionAnsweredTx(ctx, tx, question.ResultID, caller, comment.ID, now); err != nil {
-			return DotsAnswerResult{}, err
+		if err = markDotsQuestionAnsweredFlowTx(ctx, tx, question.ResultID, caller, comment.ID, now); err != nil {
+			return DotsAnswerResult{}, nil, err
 		}
-		if err = tx.Commit(ctx); err != nil {
-			return DotsAnswerResult{}, err
-		}
-		logYTCommentEnqueued(comment, op, enqueued)
 		projection := ytProjectionOf(op, enqueued)
 		return DotsAnswerResult{
 			TaskID:    taskID,
@@ -793,27 +852,27 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 			Task:      x,
 			Question:  &DotsAnsweredQuestion{ResultID: question.ResultID, CommentID: question.CommentID},
 			Comment:   CreatedTaskComment{TaskComment: comment, YouTrackProjection: &projection},
-		}, nil
+		}, func() { logYTCommentEnqueued(comment, op, enqueued) }, nil
 	}
 	if current.EffectivePolicy(false) == DecisionPolicyOperatorDirect {
-		return DotsAnswerResult{}, ErrDecisionRequestHumanOnly
+		return DotsAnswerResult{}, nil, ErrDecisionRequestHumanOnly
 	}
 
 	now := time.Now().UTC()
 
 	// 1. Insert comment
 	var comment TaskComment
-	err = scanTaskComment(tx.QueryRow(ctx, `INSERT INTO task_comments(task_id,body,author,created_at) VALUES($1,$2,$3,$4) RETURNING `+taskCommentColumns, taskID, in.Text, caller, now), &comment)
+	err = insertDotsAnswerCommentTx(ctx, tx, &comment, taskID, in.Text, caller, now)
 	if err != nil {
-		return DotsAnswerResult{}, err
+		return DotsAnswerResult{}, nil, err
 	}
-	op, enqueued, err := s.enqueueYTCommentTx(ctx, pgTransaction{tx}, comment)
+	op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, comment)
 	if err != nil {
-		return DotsAnswerResult{}, err
+		return DotsAnswerResult{}, nil, err
 	}
 	// Closing the decision closes its ask_operator questions (display only).
-	if err = closeDotsAskOperatorQuestionsTx(ctx, tx, taskID, caller, in.Text, comment.ID, now); err != nil {
-		return DotsAnswerResult{}, err
+	if err = s.closeDotsAskOperatorQuestionsFlowTx(ctx, tx, taskID, caller, in.Text, comment.ID, now); err != nil {
+		return DotsAnswerResult{}, nil, err
 	}
 
 	// 2. Resolve decision request
@@ -834,9 +893,9 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 		text:              in.Text,
 		result:            DecisionResultAnswered,
 	}
-	attemptID, err := insertDecisionAttempt(ctx, tx, attempt)
+	attemptID, err := insertDecisionAttemptTx(ctx, tx, attempt)
 	if err != nil {
-		return DotsAnswerResult{}, err
+		return DotsAnswerResult{}, nil, err
 	}
 
 	resolved := *current
@@ -853,27 +912,29 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 	flagWas := x.AwaitingDecision
 	if flagWas {
 		var others int
-		if others, err = otherBlockingDecisionsTx(ctx, tx, x.ID, resolved.ID); err != nil {
-			return DotsAnswerResult{}, err
+		if others, err = otherBlockingDecisionsFlowTx(ctx, tx, x.ID, resolved.ID); err != nil {
+			return DotsAnswerResult{}, nil, err
 		}
 		x.AwaitingDecision = others > 0
 	}
 
 	encoded, err := json.Marshal(x.Refs)
 	if err != nil {
-		return DotsAnswerResult{}, err
+		return DotsAnswerResult{}, nil, err
 	}
-	if err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET refs=$2::jsonb,awaiting_decision=$4,updated_at=$3 WHERE id=$1 RETURNING `+taskColumns, x.ID, string(encoded), now, x.AwaitingDecision), &x); err != nil {
-		return DotsAnswerResult{}, err
+	if err = s.updateTaskReturningCore(ctx, tx, &x, x.ID, `UPDATE tasks SET refs=$2::jsonb,awaiting_decision=$4,updated_at=$3 WHERE id=$1 RETURNING `, []any{x.ID, string(encoded), now, x.AwaitingDecision},
+		`UPDATE tasks SET refs=?,awaiting_decision=?,updated_at=? WHERE id=?`, []any{string(encoded), x.AwaitingDecision, now, x.ID}); err != nil {
+		return DotsAnswerResult{}, nil, err
 	}
 
-	var resolutionID int64
-	err = tx.QueryRow(ctx, `INSERT INTO decision_resolutions(request_id,question_revision,revision_request_id,task_id,kind,option_id,text,receipt,provenance,channel,decided_by,recorded_by,attempt_id,committed_at)
+	resolutionID, err := tx.InsertID(ctx, s.q(`INSERT INTO decision_resolutions(request_id,question_revision,revision_request_id,task_id,kind,option_id,text,receipt,provenance,channel,decided_by,recorded_by,attempt_id,committed_at)
 		VALUES($1,$2,$3,$4,$5,NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),$9,$10,$11,$12,$13,$14) RETURNING resolution_id`,
+		`INSERT INTO decision_resolutions(request_id,question_revision,revision_request_id,task_id,kind,option_id,text,receipt,provenance,channel,decided_by,recorded_by,attempt_id,committed_at)
+		VALUES(?,?,?,?,?,NULLIF(?,''),NULLIF(?,''),NULLIF(?,''),?,?,?,?,?,?)`),
 		root, current.Revision, resolved.ID, x.ID, DecisionRequestAnswered, "", in.Text, "", DecisionProvenanceOperatorRelay, DecisionChannelCLI,
-		caller, caller, attemptID, now).Scan(&resolutionID)
+		caller, caller, attemptID, now)
 	if err != nil {
-		return DotsAnswerResult{}, err
+		return DotsAnswerResult{}, nil, err
 	}
 
 	note := "decision-" + DecisionRequestAnswered + " " + resolved.ID + ": " + in.Text
@@ -886,29 +947,25 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 		Channel:   DecisionChannelCLI,
 		Actor:     caller,
 	}
-	if err = s.queueDecisionAnswerNotice(ctx, tx, x, resolved, resolveIn, caller, resolutionID, now); err != nil {
-		return DotsAnswerResult{}, err
+	if err = s.queueDecisionAnswerNoticeFlow(ctx, tx, x, resolved, resolveIn, caller, resolutionID, now); err != nil {
+		return DotsAnswerResult{}, nil, err
 	}
 	if flagWas && !x.AwaitingDecision {
-		if _, _, err = insertEvent(ctx, pgTransaction{tx}, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: caller, Note: "decision-clear " + resolved.ID + " by " + caller, Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
-			return DotsAnswerResult{}, err
+		if _, _, err = insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: TaskEventAwaiting, From: x.State, To: x.State, By: caller, Note: "decision-clear " + resolved.ID + " by " + caller, Refs: x.Refs, Into: &x, At: now, Field: "awaiting_decision", FromValue: "true", ToValue: "false"}); err != nil {
+			return DotsAnswerResult{}, nil, err
 		}
 	}
-	if err = insertDecisionEvent(ctx, tx, &x, caller, note, now); err != nil {
-		return DotsAnswerResult{}, err
+	if err = insertDecisionEventTx(ctx, tx, &x, caller, note, now); err != nil {
+		return DotsAnswerResult{}, nil, err
 	}
-	if err = mirrorTaskDecisionsTx(ctx, tx, decisionBefore, x, caller, note, 0, now); err != nil {
-		return DotsAnswerResult{}, err
+	if err = s.mirrorTaskDecisionsFlowTx(ctx, tx, decisionBefore, x, caller, note, 0, now); err != nil {
+		return DotsAnswerResult{}, nil, err
 	}
 	// A declaring dots request reconciles its result on the answer (hk 4789).
 	if x, err = s.reconcileDotsChoiceTx(ctx, tx, x, now); err != nil {
-		return DotsAnswerResult{}, err
+		return DotsAnswerResult{}, nil, err
 	}
 
-	if err = tx.Commit(ctx); err != nil {
-		return DotsAnswerResult{}, err
-	}
-	logYTCommentEnqueued(comment, op, enqueued)
 	projection := ytProjectionOf(op, enqueued)
 
 	return DotsAnswerResult{
@@ -918,7 +975,7 @@ func (s *Store) AnswerDotsQuestion(ctx context.Context, taskID int64, caller str
 		Task:      x,
 		Request:   &resolved,
 		Comment:   CreatedTaskComment{TaskComment: comment, YouTrackProjection: &projection},
-	}, nil
+	}, func() { logYTCommentEnqueued(comment, op, enqueued) }, nil
 }
 
 // DotsComment is one Linear comment. CreatedAt keeps Linear's own ISO-8601
@@ -1067,12 +1124,17 @@ func dotsNotifyLanes(body, requester string) (lanes, invalid []string) {
 // invalid notify lanes. A body_doc may carry a "#section" suffix (ValidBodyDoc
 // admits it), so the document key is the part before the "#".
 func dotsNotifyLanesTx(ctx context.Context, tx pgx.Tx, task Task) (lanes, invalid []string, err error) {
+	return dotsNotifyLanesFlowTx(ctx, pgTransaction{tx}, task)
+}
+
+// dotsNotifyLanesFlowTx is dotsNotifyLanesTx on either dialect.
+func dotsNotifyLanesFlowTx(ctx context.Context, tx transaction, task Task) (lanes, invalid []string, err error) {
 	if task.BodyDoc == "" {
 		return nil, nil, nil
 	}
 	key, _, _ := strings.Cut(task.BodyDoc, "#")
 	var body string
-	if err := tx.QueryRow(ctx, `SELECT body FROM documents WHERE key=$1`, key).Scan(&body); err != nil {
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT body FROM documents WHERE key=$1`, "SELECT body FROM documents WHERE `key`=?"), key).Scan(&body); err != nil {
 		if errors.Is(err, ErrNoRows) {
 			return nil, nil, nil
 		}
@@ -1087,6 +1149,11 @@ func dotsNotifyLanesTx(ctx context.Context, tx pgx.Tx, task Task) (lanes, invali
 // kept as a document and sends nothing. notifyLanes add one lane event each,
 // beside the requester lane, for a RESULT.
 func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsIssue, c DotsComment, task *Task, lane, createdBy string, askOperator *bool, notifyLanes ...string) (key string, created bool, err error) {
+	return recordDotsResultFlowTx(ctx, pgTransaction{tx}, kind, issue, c, task, lane, createdBy, askOperator, notifyLanes...)
+}
+
+// recordDotsResultFlowTx is recordDotsResultTx on either dialect.
+func recordDotsResultFlowTx(ctx context.Context, tx transaction, kind string, issue DotsIssue, c DotsComment, task *Task, lane, createdBy string, askOperator *bool, notifyLanes ...string) (key string, created bool, err error) {
 	progress := kind == "PROGRESS" && createdBy == "hk-mcp"
 	if err := checkDotsResult(kind, issue, c, progress); err != nil {
 		return "", false, err
@@ -1105,35 +1172,30 @@ func recordDotsResultTx(ctx context.Context, tx pgx.Tx, kind string, issue DotsI
 	if task != nil {
 		taskID = &task.ID
 	}
-	tag, err := tx.Exec(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at,origin_class,task_id) VALUES($1,'note',$2,'',$3,$4,$5,$6,$6,'import',$7) ON CONFLICT(key) DO NOTHING`, key, DotsLane, body, hex.EncodeToString(sum[:]), createdBy, now, taskID)
+	created, err = insertDotsDocumentTx(ctx, tx, key, body, hex.EncodeToString(sum[:]), createdBy, now, taskID)
 	if err != nil {
 		return "", false, err
 	}
-	created = tag.RowsAffected() == 1
 	if createdBy == "hk-mcp" && !created {
 		return "", false, errors.New("dots reply document key collision")
 	}
 	if !created && taskID != nil {
-		if _, err := tx.Exec(ctx, `UPDATE documents SET task_id=$1 WHERE key=$2 AND task_id IS NULL`, *taskID, key); err != nil {
+		if _, err := tx.Exec(ctx, sqlFor(tx, `UPDATE documents SET task_id=$1 WHERE key=$2 AND task_id IS NULL`, "UPDATE documents SET task_id=? WHERE `key`=? AND task_id IS NULL"), *taskID, key); err != nil {
 			return "", false, err
 		}
 	}
 	if !progress {
-		if _, err := tx.Exec(ctx, `INSERT INTO dots_results(document_key,comment_id,issue_uuid,issue_identifier,kind,verdict,artefact_sha256,task_id,routed_lane,ask_operator,created_at,updated_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
-		ON CONFLICT(comment_id) DO UPDATE SET task_id=EXCLUDED.task_id, updated_at=EXCLUDED.updated_at
-		WHERE dots_results.task_id IS NULL AND EXCLUDED.task_id IS NOT NULL`,
-			key, c.ID, issue.IssueUUID, issue.Identifier, kind, verdict, hex.EncodeToString(artefact[:]), taskID, lane, askOperator, now); err != nil {
+		if err := upsertDotsResultTx(ctx, tx, key, c.ID, issue, kind, verdict, hex.EncodeToString(artefact[:]), taskID, lane, askOperator, now); err != nil {
 			return "", false, err
 		}
 	}
 	if created && !progress {
 		text := dotsResultText(kind, key, issue, c)
-		if err := insertNotificationOutbox(ctx, pgTransaction{tx}, outboxKind, lane, "dots-"+c.ID, text, now); err != nil {
+		if err := insertNotificationOutbox(ctx, tx, outboxKind, lane, "dots-"+c.ID, text, now); err != nil {
 			return "", false, err
 		}
 		for _, extra := range notifyLanes {
-			if err := insertNotificationOutbox(ctx, pgTransaction{tx}, outboxKind, extra, "dots-"+c.ID+"-"+extra, text, now); err != nil {
+			if err := insertNotificationOutbox(ctx, tx, outboxKind, extra, "dots-"+c.ID+"-"+extra, text, now); err != nil {
 				return "", false, err
 			}
 		}
