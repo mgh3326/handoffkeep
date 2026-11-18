@@ -174,10 +174,10 @@ func TestPruneRetentionRefusesBadInput(t *testing.T) {
 	ctx := t.Context()
 	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
 	for _, tc := range []struct {
-		name       string
-		cutoff     time.Time
-		limit      int
-		prunedBy   string
+		name     string
+		cutoff   time.Time
+		limit    int
+		prunedBy string
 	}{
 		{"zero cutoff", time.Time{}, 10, "test"},
 		{"future cutoff", time.Now().UTC().Add(time.Hour), 10, "test"},

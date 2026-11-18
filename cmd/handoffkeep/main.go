@@ -1342,7 +1342,7 @@ type docRetentionWorker struct {
 }
 
 const (
-	docRetentionInterval = 24 * time.Hour
+	docRetentionInterval    = 24 * time.Hour
 	docRetentionWorkerLimit = 5000
 )
 
@@ -1376,7 +1376,7 @@ func (w docRetentionWorker) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		}
+	}
 }
 
 type serveOptions struct {

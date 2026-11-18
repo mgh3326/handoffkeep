@@ -54,17 +54,17 @@ const (
 // unlinked) and is kept. Deleted is zero on a dry run, where Bytes is the
 // body size the run would delete, capped by limit.
 type DocRetentionResult struct {
-	OlderThan     time.Time `json:"older_than"`
-	Limit         int       `json:"limit"`
-	Applied       bool      `json:"applied"`
-	PrunedBy      string    `json:"pruned_by"`
-	Matched       int64     `json:"matched"`
-	Deleted       int64     `json:"deleted"`
-	SkippedBound  int64     `json:"skipped_bound"`
-	KeptActive    int64     `json:"kept_active"`
-	Bytes         int64     `json:"bytes"`
-	ReviewDeleted int64     `json:"review_deleted"`
-	ScreensDeleted int64    `json:"screens_deleted"`
+	OlderThan      time.Time `json:"older_than"`
+	Limit          int       `json:"limit"`
+	Applied        bool      `json:"applied"`
+	PrunedBy       string    `json:"pruned_by"`
+	Matched        int64     `json:"matched"`
+	Deleted        int64     `json:"deleted"`
+	SkippedBound   int64     `json:"skipped_bound"`
+	KeptActive     int64     `json:"kept_active"`
+	Bytes          int64     `json:"bytes"`
+	ReviewDeleted  int64     `json:"review_deleted"`
+	ScreensDeleted int64     `json:"screens_deleted"`
 }
 
 // docRetentionReviewEligible is the merge predicate for a documents row
