@@ -102,7 +102,7 @@ func TestTasksShowListsOpenOrders(t *testing.T) {
 	var calls []orderCall
 	h := orderServer(t, &calls, func(path string) (int, any) {
 		if strings.HasSuffix(path, "/orders") {
-			return http.StatusOK, map[string]any{"orders": []map[string]any{{"id": "ord-aaaaaaaaaa", "waits_on_lane": "handoffkeep-design", "open": true}}}
+			return http.StatusOK, map[string]any{"orders": []map[string]any{{"id": "ord-aaaaaaaaaa", "waits_on_lane": "design-lane", "open": true}}}
 		}
 		return http.StatusOK, map[string]any{"id": 42, "title": "t", "state": "backlog"}
 	})
@@ -114,7 +114,7 @@ func TestTasksShowListsOpenOrders(t *testing.T) {
 		ID         int64            `json:"id"`
 		OpenOrders []map[string]any `json:"open_orders"`
 	}
-	if err := json.Unmarshal(out.Bytes(), &shown); err != nil || shown.ID != 42 || len(shown.OpenOrders) != 1 || shown.OpenOrders[0]["waits_on_lane"] != "handoffkeep-design" {
+	if err := json.Unmarshal(out.Bytes(), &shown); err != nil || shown.ID != 42 || len(shown.OpenOrders) != 1 || shown.OpenOrders[0]["waits_on_lane"] != "design-lane" {
 		t.Fatalf("show output %s err=%v", out.String(), err)
 	}
 	if last := calls[len(calls)-1]; last.path != "/v1/tasks/42/orders?open=1" {

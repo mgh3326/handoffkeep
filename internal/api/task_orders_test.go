@@ -18,7 +18,7 @@ func orderAPIServer(t *testing.T) (*httptest.Server, *store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := httptest.NewServer(Server{Service: Service{Store: st}, Tokens: Tokens{"operator": "op-tok", "lane-session": "lane-tok", "operator-desk": "desk-tok"}}.Handler())
+	h := httptest.NewServer(Server{Service: Service{Store: st}, Tokens: Tokens{"operator": "op-tok", "lane-session": "lane-tok", "other-client": "desk-tok"}}.Handler())
 	t.Cleanup(h.Close)
 	t.Cleanup(st.Close)
 	return h, st

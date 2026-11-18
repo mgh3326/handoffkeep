@@ -148,8 +148,8 @@ func TestForwardSendsOneEventAndRecordsTheReceipt(t *testing.T) {
 		{Kind: store.OutboxKindDecisionAnswered, TargetLane: "operator-desk", EventID: "dr-1-1-answered", Text: "d"},
 		{Kind: store.OutboxKindChatAnswer, TargetLane: "other-lane", EventID: "Q-1-rev1-answered", Text: "c"},
 		{Kind: store.OutboxKindDotsBlocked, TargetLane: "operator-desk", EventID: "dots-4", Text: "b"},
-		{Kind: store.OutboxKindTaskOrder, TargetLane: "handoffkeep-design", EventID: "task-order-ord-aaaaaaaaaa", Text: "o"},
-		{Kind: store.OutboxKindTaskOrder, TargetLane: "handoffkeep-design", EventID: "task-order-withdrawn-ord-aaaaaaaaaa", Text: "w"},
+		{Kind: store.OutboxKindTaskOrder, TargetLane: "design-lane", EventID: "task-order-ord-aaaaaaaaaa", Text: "o"},
+		{Kind: store.OutboxKindTaskOrder, TargetLane: "design-lane", EventID: "task-order-withdrawn-ord-aaaaaaaaaa", Text: "w"},
 	}}
 	f, hub, _ := forwarderFixture(t, outbox)
 	sent, failed, err := f.Once(t.Context())
@@ -163,8 +163,8 @@ func TestForwardSendsOneEventAndRecordsTheReceipt(t *testing.T) {
 		{"operator-desk", "dr-1-1-answered", "decision"},
 		{"other-lane", "Q-1-rev1-answered", "info"},
 		{"operator-desk", "dots-4", "blocked"},
-		{"handoffkeep-design", "task-order-ord-aaaaaaaaaa", "order"},
-		{"handoffkeep-design", "task-order-withdrawn-ord-aaaaaaaaaa", "order"},
+		{"design-lane", "task-order-ord-aaaaaaaaaa", "order"},
+		{"design-lane", "task-order-withdrawn-ord-aaaaaaaaaa", "order"},
 	}
 	if len(hub.posts) != len(want) {
 		t.Fatalf("posts=%v", hub.posts)
