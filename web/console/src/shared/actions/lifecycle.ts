@@ -1,7 +1,7 @@
 import type { Action, ActionTarget } from "./index";
 
 const settled = new Set(["merged", "deployed", "completed", "dropped", "duplicate"]);
-const completable = new Set(["decide", "ops", "verify"]);
+const completable = new Set(["decide", "fix", "ops", "verify"]);
 const mergeable = new Set(["reviewing", "researching", "developing"]);
 const holdable = new Set(["backlog", "unstarted"]);
 const orderable = new Set(["backlog", "unstarted", "triage"]);
@@ -50,7 +50,7 @@ export const lifecycleActions: Action[] = [
         : target.awaiting_decision ? awaitingReason
           : target.state === "triage" ? "분류 대기 중인 작업은 완료로 닫을 수 없습니다"
             : completable.has(target.kind ?? "") ? null
-              : "decide·ops·verify 작업만 완료로 닫을 수 있습니다",
+              : "decide·fix·ops·verify 작업만 완료로 닫을 수 있습니다",
   },
   {
     id: "drop",

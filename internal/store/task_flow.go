@@ -600,10 +600,11 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx transaction, id int64, 
 		if !backToBacklog && deliveredBy == 0 && !taskTransitionAllowed(from, to) {
 			return Task{}, transitionConflict(from, to)
 		}
-		// An implement task completes on closure evidence like the other kinds;
-		// the evidence rules in applyLifecycle still apply (hk 4050).
-		if to == StateCompleted && from != StateMerged && !canCompleteKind(x.Kind) && x.Kind != "implement" {
-			return Task{}, fmt.Errorf("%w: completed applies to implement, decide, ops, verify and research tasks", ErrTaskConflict)
+		// An implement or fix task completes on closure evidence like the other
+		// kinds; the evidence rules in applyLifecycle still apply, and each has
+		// its own change guard below (hk 4050, hk 5256).
+		if to == StateCompleted && from != StateMerged && !canCompleteKind(x.Kind) && x.Kind != "implement" && x.Kind != "fix" {
+			return Task{}, fmt.Errorf("%w: completed applies to implement, fix, decide, ops, verify and research tasks", ErrTaskConflict)
 		}
 		// An implement task completes only with no unmerged PR and no open
 		// sub-task; a refusal names them (hk 4050).
@@ -614,6 +615,19 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx transaction, id int64, 
 			}
 			if blockers != "" {
 				return Task{}, fmt.Errorf("%w: implement cannot complete while %s", ErrTaskConflict, blockers)
+			}
+		}
+		// A fix task resolved by other work completes on closure evidence, but
+		// one whose own PR is still open or already merged must run the
+		// merged/deployed path instead (hk 5256). From merged, completed is
+		// that path's end, so only an open change still holds it there.
+		if to == StateCompleted && x.Kind == "fix" {
+			blockers, err := fixCompletionBlockers(ctx, tx, x.ID, from == StateMerged)
+			if err != nil {
+				return Task{}, err
+			}
+			if blockers != "" {
+				return Task{}, fmt.Errorf("%w: fix cannot complete while %s; a fix with its own PR closes through merged/deployed", ErrTaskConflict, blockers)
 			}
 		}
 		// A task waiting on a decision leaves only the way the old
@@ -930,6 +944,39 @@ func implementCompletionBlockers(ctx context.Context, tx transaction, taskID int
 		if c := TaskCategory(state); c != CategoryCompleted && c != CategoryCanceled {
 			parts = append(parts, fmt.Sprintf("open sub-task %d (%s)", id, state))
 		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return strings.Join(parts, ", "), nil
+}
+
+// fixCompletionBlockers names the implements changes that keep a fix task
+// from completing by hand (hk 5256): one still open — its PR is in flight —
+// or merged, whose delivery must run through merged/deployed. Unless the
+// task is already merged, where completed is the close that path ends in, a
+// merged change does not block either; a reverted one still counts, since
+// relanding takes a new PR. A closed change delivered nothing and does not
+// block. It returns "" when nothing blocks it.
+func fixCompletionBlockers(ctx context.Context, tx transaction, taskID int64, merged bool) (string, error) {
+	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT c.repo,c.pr_number,c.state FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=$1 AND ct.relation=$2 AND c.state<>$3 ORDER BY c.repo,c.pr_number`,
+		`SELECT c.repo,c.pr_number,c.state FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=? AND ct.relation=? AND c.state<>? ORDER BY c.repo,c.pr_number`), taskID, ChangeImplements, ChangeClosed)
+	if err != nil {
+		return "", err
+	}
+	var parts []string
+	for rows.Next() {
+		var repo, state string
+		var n int
+		if err := rows.Scan(&repo, &n, &state); err != nil {
+			rows.Close()
+			return "", err
+		}
+		if merged && state == ChangeMerged {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("PR %s#%d (%s)", repo, n, state))
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {

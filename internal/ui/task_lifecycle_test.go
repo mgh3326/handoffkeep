@@ -157,6 +157,15 @@ func TestTaskLifecycleActions(t *testing.T) {
 			fields: map[string]any{"state": "completed"},
 		},
 		{
+			name:   "close-completed-fix",
+			seed:   func() store.Task { return lifecycleSeed(t, st, laneA, store.StateReviewing, "fix") },
+			action: "close-completed",
+			body: func(store.Task) string {
+				return `{"evidence":"외부 작업으로 해소됨","event_key":"k-fix-complete"}`
+			},
+			fields: map[string]any{"state": "completed"},
+		},
+		{
 			name:   "drop",
 			seed:   func() store.Task { return lifecycleSeed(t, st, laneA, store.StateDeveloping, "implement") },
 			action: "drop",
@@ -235,7 +244,15 @@ func TestTaskLifecycleRefusals(t *testing.T) {
 		code   string
 	}{
 		{"merge-from-backlog", func() store.Task { return lifecycleSeed(t, st, lane, store.StateBacklog, "implement") }, "close-merged", `{"evidence":"https://example.com/pr/3","event_key":"r1"}`, 409, "task_merge_path"},
-		{"completed-wrong-kind", func() store.Task { return lifecycleSeed(t, st, lane, store.StateReviewing, "fix") }, "close-completed", `{"evidence":"https://example.com/run/3","event_key":"r2"}`, 409, "task_conflict"},
+		{"completed-fix-own-pr", func() store.Task {
+			x := lifecycleSeed(t, st, lane, store.StateReviewing, "fix")
+			pr := "https://github.com/example/app/pull/9101"
+			if _, err := st.ApplyTaskSourceEvent(context.Background(), store.TaskSourceEvent{Source: store.SourceMergewakePR, SourceRef: pr, TaskID: x.ID, PR: pr}); err != nil {
+				t.Fatal(err)
+			}
+			return x
+		}, "close-completed", `{"evidence":"https://example.com/r","event_key":"r2"}`, 409, "task_conflict"},
+		{"reopen-open-task", func() store.Task { return lifecycleSeed(t, st, lane, store.StateBacklog, "implement") }, "reopen", `{"reason":"x","event_key":"r7"}`, 409, "task_conflict"},
 		{"drop-bad-closure", func() store.Task { return lifecycleSeed(t, st, lane, store.StateDeveloping, "implement") }, "drop", `{"closure":"resolved","reason":"x","event_key":"r4"}`, 400, "invalid_request"},
 		{"drop-no-duplicate-of", func() store.Task { return lifecycleSeed(t, st, lane, store.StateDeveloping, "implement") }, "drop", `{"closure":"superseded","reason":"x","event_key":"r5"}`, 400, "duplicate_of_required"},
 		{"release-not-held", func() store.Task { return lifecycleSeed(t, st, lane, store.StateBacklog, "implement") }, "hold", `{"held":false,"event_key":"r6"}`, 409, "task_conflict"},

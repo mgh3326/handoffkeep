@@ -68,12 +68,6 @@ func TestCompletedKindGate(t *testing.T) {
 			t.Run(kind+"/"+from, func(t *testing.T) {
 				x := flowTask(t, s, s.pool, kind, from, true)
 				got, err := s.TransitionTaskWith(t.Context(), x.ID, TransitionInput{To: StateCompleted, By: "tester", Evidence: "https://example.com/result"})
-				if kind == "fix" {
-					if !errors.Is(err, ErrTaskConflict) {
-						t.Fatalf("err=%v", err)
-					}
-					return
-				}
 				if err != nil || got.State != StateCompleted {
 					t.Fatalf("state=%s err=%v", got.State, err)
 				}
