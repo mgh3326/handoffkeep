@@ -58,7 +58,9 @@ func (p *Protocol) sendSplit(ctx context.Context, op Op, k articleSplit) Result 
 		history, err = sl.SplitPlans(hctx, op.ID)
 		cancel()
 		if err != nil {
-			return settle(func(c context.Context) settled { return st.markUnknown(c, op, ReasonReconcileFailed, "plans: "+err.Error()) })
+			return settle(func(c context.Context) settled {
+				return st.markUnknown(c, op, ReasonReconcileFailed, "plans: "+err.Error())
+			})
 		}
 	}
 	sent := AnySent(history)
@@ -104,7 +106,9 @@ func (p *Protocol) sendSplit(ctx context.Context, op Op, k articleSplit) Result 
 			if errors.As(err, &ns) {
 				return early(err)
 			}
-			return settle(func(c context.Context) settled { return st.markUnknown(c, op, ReasonUnverified, "family root: "+err.Error()) })
+			return settle(func(c context.Context) settled {
+				return st.markUnknown(c, op, ReasonUnverified, "family root: "+err.Error())
+			})
 		}
 	}
 
