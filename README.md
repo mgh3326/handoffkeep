@@ -575,6 +575,31 @@ counts, integrity digests, and the task rows — read inside one repeatable-read
 read-only transaction. `handoffkeep tasks export` prints the document
 unchanged; see docs/contract.md for the full envelope and digest contract.
 
+### Task orders
+
+An order is the operator's "set going" for one task that has not started
+(backlog, unstarted or triage). It records the operator's words, the channel
+and the time, and queues one notice (hub type `order`) to the design lane that
+owns the task's project, else the task's own lane. hk starts no worker, and an
+order approves nothing: no merge, deploy, spending, secret or policy change
+rides on it. The lane reads the order from the task, not from the notice.
+
+```sh
+handoffkeep tasks order 42 --words "이거 진행시켜" --idempotency-key order-42-a   # operator token
+handoffkeep tasks show 42                                  # open_orders: orders still waiting on their lane
+handoffkeep tasks order-ack ord-abcdefghij --comment "읽었음, 곧 브리프 작성"   # the lane
+handoffkeep tasks order-withdraw ord-abcdefghij --reason "범위 변경"           # operator token, while open
+```
+
+Only the operator bearer, the console (진행시키기 on a task) and an Access
+operator relaying the operator's words through dots (`task_order`, recorded as
+relayed) may order. The same key with the same words replays the first order;
+other words are `order_key_conflict`. A started task is `order_task_started`,
+and a task with no design lane and no lane is `order_no_lane`. An open order
+waits on its lane (`waits_on_lane`) until it is acknowledged or withdrawn,
+which clears the wait once. The invariants are in
+[docs/task-orders.md](docs/task-orders.md).
+
 ### Task comments
 
 Each task has an append-only comment thread in `task_comments`. A comment is

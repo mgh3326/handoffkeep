@@ -119,6 +119,7 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "task_events", serial: true, columns: strings.Fields("id task_id from to by note at refs kind no_job source source_ref field from_value to_value auto applied"), order: []string{"id"}, bounds: map[string]int{"kind": 32, "source": 128, "source_ref": 512}},
 	{name: "task_relations", serial: true, columns: strings.Fields("id kind src_id dst_id created_by created_at archived_at archived_by"), order: []string{"id"}, bounds: map[string]int{"kind": 16}},
 	{name: "task_origins", serial: true, columns: strings.Fields("id task_id provider namespace external_id display_ref url title_snapshot snapshot_at created_by created_at tenant role synced_at"), order: []string{"id"}, bounds: map[string]int{"provider": 16, "namespace": 255, "external_id": 255, "role": 16}},
+	{name: "task_orders", columns: strings.Fields("id task_id words channel actor verified idempotency_key created_at target_lane acked_at acked_by ack_comment_id withdrawn_at withdrawn_by withdraw_reason"), order: []string{"id"}, bounds: map[string]int{"id": 32, "channel": 16, "actor": 320, "idempotency_key": 128, "target_lane": 255, "acked_by": 320, "withdrawn_by": 320}},
 	{name: "ticket_sets", serial: true, columns: strings.Fields("id source source_ref payload_sha256 parent_task_id created_at"), order: []string{"id"}, bounds: map[string]int{"source": 128, "source_ref": 512, "payload_sha256": 64}},
 	{name: "task_spawn_records", columns: strings.Fields("task_id request_id job role state reason attempt host next_check_at expires_at updated_at start_task_id start_until"), order: []string{"task_id"}, bounds: map[string]int{"state": 16, "start_until": 16}},
 	{name: "task_spawn_notices", columns: strings.Fields("notice_key task_id created_at"), order: []string{"notice_key"}, bounds: map[string]int{"notice_key": 255}},
@@ -408,6 +409,14 @@ func selectCopyTables(selected []string) (map[string]bool, error) {
 	}
 	if len(wanted) == 0 {
 		return nil, errors.New("no tables selected")
+	}
+	// tasks requires sync_decisions in the same selection. Loads bypass the
+	// sync_task_decision trigger on both dialects, so a tasks-only copy would
+	// leave the decision projection permanently missing on the target.
+	// Refuse before any database is opened instead of silently widening the
+	// --tables scope: explicit selections stay explicit.
+	if wanted["tasks"] && !wanted["sync_decisions"] {
+		return nil, fmt.Errorf("table %q requires %q in the same copy selection", "tasks", "sync_decisions")
 	}
 	return wanted, nil
 }

@@ -36,6 +36,14 @@ import (
 // attempt waits as pending_confirmation until a verified path answers. On a
 // verified path the operator may instead deny one pending attempt (Kind
 // deny, hk 3163): a denied attempt of its own that leaves the request open.
+//
+// The dots channel is the one place a claim closes an operator_direct request
+// without Verified: an answer that names provenance operator_decided, carries
+// the operator's verbatim quote and binds it to the exact request id is the
+// operator's answer relayed through the chat, so it closes the request and
+// keeps channel dots (operator decision 399, hk 5132). Dots' own judgement —
+// no claim, an assistant_judgement claim, or a quote with no visible rune —
+// never closes it, and every such refusal is kept as a refused attempt.
 
 // Answer channels. They are the values of decision_answer_attempts.channel
 // that ResolveDecision accepts; linear, lane and default are reserved by the
@@ -119,20 +127,17 @@ type ResolveDecisionInput struct {
 	Channel  string
 	Actor    string
 	Verified bool
-	// RefuseOperatorOnly makes an answer to an open request whose effective
-	// policy is operator_direct fail with ErrOperatorOnlyDecision. The check runs
-	// under the task lock, before any attempt is written, so the refusal leaves
-	// no attempt row and cannot race a policy change.
-	RefuseOperatorOnly bool
 
 	// Audit, when set, is the MCP write this answer is: its audit row is written
 	// in the same transaction as the attempt, so the answer and its record
 	// commit together (mcp_write_audit, hk 3465).
 	Audit *MCPWrite
 
-	// The relayed claim (channels assistant and session only): the provenance
-	// it names, the operator's verbatim words and the request id they are
-	// bound to.
+	// The provenance claim — the channels assistant and session always carry
+	// one, and dots carries one when it relays the operator: the provenance it
+	// names, the operator's verbatim words and the request id they are bound
+	// to. A dots answer to an operator_direct request closes it only as this
+	// claim with both the quote and the ref (operator decision 399, hk 5132).
 	Provenance    string
 	OperatorQuote string
 	DecisionRef   string
@@ -243,22 +248,26 @@ func insertDecisionAttemptTx(ctx context.Context, tx transaction, a decisionAtte
 }
 
 // derivedProvenance is the provenance of an answer, from the verified channel
-// and never from the body: a Verified channel is operator_direct; an assistant
-// or session answer is operator_relay with a visible operator quote and
-// assistant_judgement without; any other unverified answer is operator_relay.
-// It is empty when the assistant's claim is not a known value.
+// and never from the body: an operator_decided claim is operator_relay (the
+// operator's words arrived through a relay, on the dots channel too, which
+// authenticates through Access but still records channel dots); a Verified
+// channel is operator_direct; a judgement claim is assistant_judgement; any
+// other unverified answer is operator_relay. It is empty when the claim is not
+// a known value.
 func derivedProvenance(in ResolveDecisionInput, prov *assistantProvenance) string {
 	switch {
+	case prov != nil:
+		if !prov.valid() {
+			return ""
+		}
+		if prov.effective() == DecisionProvenanceOperatorDecided {
+			return DecisionProvenanceOperatorRelay
+		}
+		return DecisionProvenanceAssistantJudgement
 	case in.Verified:
 		return DecisionProvenanceOperatorDirect
-	case prov == nil:
-		return DecisionProvenanceOperatorRelay
-	case !prov.valid():
-		return ""
-	case prov.effective() == DecisionProvenanceOperatorDecided:
-		return DecisionProvenanceOperatorRelay
 	}
-	return DecisionProvenanceAssistantJudgement
+	return DecisionProvenanceOperatorRelay
 }
 
 // decidedBy names who decided, for decision_resolutions.decided_by.
@@ -275,9 +284,10 @@ func decidedBy(in ResolveDecisionInput, prov *assistantProvenance) string {
 }
 
 // ResolveDecision classifies one answer to a dr- request and records it; see
-// the file comment. Validation failures return an error and write nothing. An assistant judgement on a request whose
-// effective policy is operator_direct is refused: the attempt is recorded and
-// the error returned.
+// the file comment. Validation failures return an error and write nothing. An
+// assistant judgement, or a dots answer without the operator's words, to a
+// request whose effective policy is operator_direct is refused: the attempt is
+// recorded and the error returned.
 func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (ResolveDecisionOutcome, error) {
 	var out ResolveDecisionOutcome
 	err := s.retryTx(ctx, func() error {
@@ -292,9 +302,16 @@ func (s *Store) ResolveDecision(ctx context.Context, in ResolveDecisionInput) (R
 // retryTx runs once more on MySQL after a deadlock.
 func (s *Store) resolveDecisionOnce(ctx context.Context, in ResolveDecisionInput) (ResolveDecisionOutcome, error) {
 	assistant := in.Channel == DecisionChannelAssistant
-	// relayed is a channel that carries the assistant claim: the assistant
-	// and an operator session. Only the [via berry] note is assistant-only.
+	// relayed is a channel that always carries the assistant claim: the
+	// assistant and an operator session. Only the [via berry] note is
+	// assistant-only.
 	relayed := assistant || in.Channel == DecisionChannelSession
+	dots := in.Channel == DecisionChannelDots
+	// claimed is an input that carries a provenance claim. The assistant and
+	// session always do; the dots channel does when it names one, because a
+	// dots judgement has no claim and never closes an operator_direct request
+	// (operator decision 399, hk 5132).
+	claimed := relayed || (dots && (in.Provenance != "" || in.OperatorQuote != "" || in.DecisionRef != ""))
 	switch in.Channel {
 	case DecisionChannelCLI, DecisionChannelAssistant, DecisionChannelConsole, DecisionChannelSession,
 		DecisionChannelMCP, DecisionChannelDots:
@@ -317,7 +334,7 @@ func (s *Store) resolveDecisionOnce(ctx context.Context, in ResolveDecisionInput
 	}
 	effective := DecisionResolveInput{RequestID: in.RequestID, Kind: in.Kind, Option: in.Option, Text: in.Text, Receipt: in.Receipt, Responder: in.Responder}
 	var prov *assistantProvenance
-	if relayed {
+	if claimed {
 		if in.Kind != "" && in.Kind != DecisionRequestAnswered {
 			return ResolveDecisionOutcome{}, ErrDecisionAssistantKind
 		}
@@ -384,7 +401,7 @@ func (s *Store) resolveDecisionOnce(ctx context.Context, in ResolveDecisionInput
 
 	// A replay answers what the first delivery got, even after a newer
 	// revision exists, so the key is looked up before any classification.
-	replay, found, err := replayDecisionAttempt(ctx, tx, in.Channel, eventKey, hash, x)
+	replay, found, err := replayDecisionAttempt(ctx, tx, in, eventKey, hash, x)
 	if err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
@@ -402,10 +419,6 @@ func (s *Store) resolveDecisionOnce(ctx context.Context, in ResolveDecisionInput
 
 	decisionBefore := decisionBeforeOf(x)
 	current := x.Refs.DecisionRequest
-	if in.RefuseOperatorOnly && current != nil && current.ID == in.RequestID && current.Status == DecisionRequestOpen &&
-		current.EffectivePolicy(x.Refs.Disposition != nil) == DecisionPolicyOperatorDirect {
-		return ResolveDecisionOutcome{}, ErrOperatorOnlyDecision
-	}
 	provenance := derivedProvenance(in, prov)
 	now := time.Now().UTC()
 	attempt := decisionAttempt{
@@ -501,7 +514,7 @@ func (s *Store) resolveDecisionOnce(ctx context.Context, in ResolveDecisionInput
 		return s.denyDecisionAttempt(ctx, tx, in, attempt, x, currentCopy)
 	}
 
-	if relayed {
+	if claimed {
 		// An open request left on a merged or dropped task is uncleaned
 		// state, not answerable work — the pending list already excludes it.
 		// Only the operator path closes it, as request cleanup.
@@ -530,6 +543,17 @@ func (s *Store) resolveDecisionOnce(ctx context.Context, in ResolveDecisionInput
 			}
 		}
 		if prov.effective() == DecisionProvenanceOperatorDecided && prov.ref != in.RequestID {
+			// A dots claim carries the operator's words; a ref that binds
+			// another request or revision is a refused attempt the record
+			// keeps, so the asking lane can see what was proposed.
+			if dots {
+				out, err := record(decisionAttemptRefused, nil)
+				if err != nil {
+					return ResolveDecisionOutcome{}, err
+				}
+				out.Result = ""
+				return out, ErrProvenanceRefMismatch
+			}
 			return ResolveDecisionOutcome{}, ErrProvenanceRefMismatch
 		}
 		// The effective policy names the boundary in the request itself: on
@@ -538,7 +562,10 @@ func (s *Store) resolveDecisionOnce(ctx context.Context, in ResolveDecisionInput
 		// without the operator's quote. The refusal is recorded as an attempt.
 		if current.EffectivePolicy(x.Refs.Disposition != nil) == DecisionPolicyOperatorDirect && prov.effective() != DecisionProvenanceOperatorDecided {
 			var refused error = ErrDecisionRequestHumanOnly
-			if prov.claimed == DecisionProvenanceOperatorDecided {
+			if dots {
+				refused = ErrOperatorOnlyDecision
+			}
+			if prov.claimed == DecisionProvenanceOperatorDecided && !dots {
 				refused = fmt.Errorf("%w: no_operator_quote", ErrDecisionRequestHumanOnly)
 			}
 			out, err := record(decisionAttemptRefused, nil)
@@ -548,6 +575,17 @@ func (s *Store) resolveDecisionOnce(ctx context.Context, in ResolveDecisionInput
 			out.Result = ""
 			return out, refused
 		}
+	} else if dots && current.EffectivePolicy(x.Refs.Disposition != nil) == DecisionPolicyOperatorDirect {
+		// A dots answer with no provenance claim is dots' own judgement, and
+		// its own judgement never closes an operator_direct request, whatever
+		// the caller's Verified says (operator decision 399, hk 5132). The
+		// refusal is kept as an attempt, as for a judgement claim.
+		out, err := record(decisionAttemptRefused, nil)
+		if err != nil {
+			return ResolveDecisionOutcome{}, err
+		}
+		out.Result = ""
+		return out, ErrOperatorOnlyDecision
 	}
 	if in.Option != "" {
 		if x.Refs.DecisionOptions == nil || !optionKeys(*x.Refs.DecisionOptions)[in.Option] {
@@ -559,8 +597,12 @@ func (s *Store) resolveDecisionOnce(ctx context.Context, in ResolveDecisionInput
 	}
 	// "R1: a human_only request closes only on a verified path. An answer
 	// relayed by an assistant or a session waits for the operator." The same
-	// holds for every request whose effective policy is operator_direct.
-	if effective.Kind == DecisionRequestAnswered && current.EffectivePolicy(x.Refs.Disposition != nil) == DecisionPolicyOperatorDirect && provenance != DecisionProvenanceOperatorDirect {
+	// holds for every request whose effective policy is operator_direct, with
+	// one exception: a dots answer that carries the operator's words bound to
+	// this request is the operator's answer, relayed through the chat
+	// (operator decision 399, hk 5132).
+	if effective.Kind == DecisionRequestAnswered && current.EffectivePolicy(x.Refs.Disposition != nil) == DecisionPolicyOperatorDirect &&
+		provenance != DecisionProvenanceOperatorDirect && !(dots && prov != nil) {
 		return record(DecisionResultPendingConfirmation, nil)
 	}
 
@@ -572,7 +614,7 @@ func (s *Store) resolveDecisionOnce(ctx context.Context, in ResolveDecisionInput
 	resolved := *current
 	resolved.Status = effective.Kind
 	resolved.Resolution = &DecisionResolution{Kind: effective.Kind, Option: in.Option, Text: in.Text, Receipt: in.Receipt, Responder: effective.Responder, By: in.Actor, At: now}
-	if relayed {
+	if claimed {
 		resolved.Resolution.Provenance = prov.effective()
 		resolved.Resolution.OperatorQuote = prov.recordedQuote()
 		resolved.Resolution.DecisionRef = prov.recordedRef()
@@ -659,7 +701,7 @@ func (s *Store) resolveDecisionOnce(ctx context.Context, in ResolveDecisionInput
 	// A declaring dots request reconciles its result on every resolution: the
 	// answer completes it, and an answer recorded while another decision still
 	// blocks completes later, when that decision closes (hk 4789).
-	if x, err = s.reconcileDotsChoiceFlowTx(ctx, tx, x, now); err != nil {
+	if x, err = s.reconcileDotsChoiceTx(ctx, tx, x, now); err != nil {
 		return ResolveDecisionOutcome{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -766,11 +808,11 @@ type decisionReplay struct {
 // pending_confirmation attempt is a new attempt under its own key: it never
 // rewrites the pending one, so the pending replay still reports the open
 // request the first delivery saw (R2).
-func replayDecisionAttempt(ctx context.Context, tx transaction, channel, eventKey, hash string, x Task) (decisionReplay, bool, error) {
+func replayDecisionAttempt(ctx context.Context, tx transaction, in ResolveDecisionInput, eventKey, hash string, x Task) (decisionReplay, bool, error) {
 	var attemptID int64
 	var revision int
 	var storedHash, result, revisionRequestID, root string
-	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT id,payload_hash,result,revision_request_id,COALESCE(request_id,''),COALESCE(question_revision,0) FROM decision_answer_attempts WHERE channel=$1 AND event_key=$2`, `SELECT id,payload_hash,result,revision_request_id,COALESCE(request_id,''),COALESCE(question_revision,0) FROM decision_answer_attempts WHERE channel=? AND event_key=?`), channel, eventKey).
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT id,payload_hash,result,revision_request_id,COALESCE(request_id,''),COALESCE(question_revision,0) FROM decision_answer_attempts WHERE channel=$1 AND event_key=$2`, `SELECT id,payload_hash,result,revision_request_id,COALESCE(request_id,''),COALESCE(question_revision,0) FROM decision_answer_attempts WHERE channel=? AND event_key=?`), in.Channel, eventKey).
 		Scan(&attemptID, &storedHash, &result, &revisionRequestID, &root, &revision)
 	if errors.Is(err, ErrNoRows) {
 		return decisionReplay{}, false, nil
@@ -825,7 +867,7 @@ func replayDecisionAttempt(ctx context.Context, tx transaction, channel, eventKe
 	case decisionAttemptRefused:
 		out.Result = ""
 		out.Duplicate = false
-		return decisionReplay{out: out, err: ErrDecisionRequestHumanOnly}, true, nil
+		return decisionReplay{out: out, err: refusedAttemptError(in)}, true, nil
 	case DecisionResultStaleRevision:
 		out.Refusal = ErrDecisionRequestStale
 	case DecisionResultConflict, DecisionResultExpired:
@@ -839,4 +881,20 @@ func replayDecisionAttempt(ctx context.Context, tx transaction, channel, eventKe
 		}
 	}
 	return decisionReplay{out: out}, true, nil
+}
+
+// refusedAttemptError rebuilds the refusal a stored refused attempt returned.
+// Every channel but dots refuses with the assistant sentinel; a dots refusal
+// is one of two causes, and both are decidable from the claim and the request
+// id, which a replay repeats (the same event key with the same payload hash):
+// a claim whose ref binds another request or revision, else the operator_only
+// gate on a claim without the operator's words.
+func refusedAttemptError(in ResolveDecisionInput) error {
+	if in.Channel != DecisionChannelDots {
+		return ErrDecisionRequestHumanOnly
+	}
+	if p := normalizeAssistantProvenance(in); p.effective() == DecisionProvenanceOperatorDecided && p.ref != in.RequestID {
+		return ErrProvenanceRefMismatch
+	}
+	return ErrOperatorOnlyDecision
 }

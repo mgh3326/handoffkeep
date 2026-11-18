@@ -67,6 +67,7 @@ func TestMySQLStepGuardRoundTrip(t *testing.T) {
 		{mysqlIfColumnNotNull("jobs", "task_id", "ALTER TABLE jobs MODIFY task_id BIGINT NULL"), "not_null", "jobs", "task_id", "ALTER TABLE jobs MODIFY task_id BIGINT NULL"},
 		{mysqlIfNoIndex("tasks", "tasks_parent", "CREATE INDEX tasks_parent ON tasks(parent_id)"), "index", "tasks", "tasks_parent", "CREATE INDEX tasks_parent ON tasks(parent_id)"},
 		{mysqlIfNoConstraint("tasks", "tasks_state_check", "ALTER TABLE tasks ADD CONSTRAINT tasks_state_check CHECK(state<>'')"), "constraint", "tasks", "tasks_state_check", "ALTER TABLE tasks ADD CONSTRAINT tasks_state_check CHECK(state<>'')"},
+		{mysqlIfConstraint("tasks", "old_check", "ALTER TABLE tasks DROP CHECK old_check"), "has_constraint", "tasks", "old_check", "ALTER TABLE tasks DROP CHECK old_check"},
 	} {
 		kind, table, object, stmt, guarded := parseMySQLGuard(tc.step)
 		if !guarded || kind != tc.kind || table != tc.table || object != tc.object || stmt != tc.stmt {
@@ -84,6 +85,9 @@ func TestMySQLGuardExecutionForNullability(t *testing.T) {
 	}
 	if shouldRunMySQLGuard("not_null", false) {
 		t.Fatal("already nullable column reran the nullable conversion")
+	}
+	if !shouldRunMySQLGuard("has_constraint", true) || shouldRunMySQLGuard("has_constraint", false) {
+		t.Fatal("has_constraint guard must run a DROP only while the constraint exists")
 	}
 	if shouldRunMySQLGuard("column", true) || !shouldRunMySQLGuard("column", false) {
 		t.Fatal("column guard did not skip existing columns and run missing columns")

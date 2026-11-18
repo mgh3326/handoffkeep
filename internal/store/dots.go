@@ -962,7 +962,7 @@ func (s *Store) answerDotsQuestionTx(ctx context.Context, tx transaction, taskID
 		return DotsAnswerResult{}, nil, err
 	}
 	// A declaring dots request reconciles its result on the answer (hk 4789).
-	if x, err = s.reconcileDotsChoiceFlowTx(ctx, tx, x, now); err != nil {
+	if x, err = s.reconcileDotsChoiceTx(ctx, tx, x, now); err != nil {
 		return DotsAnswerResult{}, nil, err
 	}
 

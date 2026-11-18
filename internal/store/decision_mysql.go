@@ -188,23 +188,6 @@ func (s *Store) closeDotsAskOperatorQuestionsFlowTx(ctx context.Context, tx tran
 	return err
 }
 
-// reconcileDotsChoiceFlowTx is reconcileDotsChoiceTx on either dialect's
-// transaction. The dots area is not ported to MySQL, so there it only answers
-// the cases where reconcileDotsChoiceTx returns the task unchanged; a task that
-// would be reconciled is refused, which rolls the whole resolution back.
-func (s *Store) reconcileDotsChoiceFlowTx(ctx context.Context, tx transaction, x Task, at time.Time) (Task, error) {
-	if s.dialect != mysqlDialect {
-		return s.reconcileDotsChoiceTx(ctx, pgxTx(tx), x, at)
-	}
-	declared, request := x.Refs.DotsChoice, x.Refs.DecisionRequest
-	if declared == nil || declared.ResultDoc == "" || request == nil || request.Status != DecisionRequestAnswered ||
-		request.Doc != declared.ResultDoc || request.Resolution == nil || IsSettledState(x.State) || x.AwaitingDecision {
-		return x, nil
-	}
-	// Not ported to MySQL: the dots choice reconcile belongs to the dots area (hk 5088).
-	return Task{}, ErrDialectUnsupported
-}
-
 // queueDecisionAnswerNoticeFlow is queueDecisionAnswerNotice on either
 // dialect's transaction; the MySQL text is the same notice.
 func (s *Store) queueDecisionAnswerNoticeFlow(ctx context.Context, tx transaction, x Task, resolved DecisionRequest, in ResolveDecisionInput, decider string, resolutionID int64, at time.Time) error {
