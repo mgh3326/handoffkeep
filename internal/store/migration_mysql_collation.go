@@ -1,6 +1,9 @@
 package store
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // 20261118-mysql-collation rebuilds every trigger and the two JSON CHECK
 // constraints under the pinned connection collation utf8mb4_0900_bin.
@@ -14,13 +17,12 @@ import "strings"
 // JSON_TYPE carry utf8mb4_bin, so the closure and skills CHECK constraints
 // compared utf8mb4_bin with utf8mb4_0900_bin on every write (hk 5169).
 //
-// The rebuild drops each trigger and creates it again from the same body its
-// owning migration registers, so old and new definitions cannot drift: the
-// steps below are derived from those slices, with the IF NOT EXISTS infix
-// stripped so a stale body can never survive behind a no-op create. The two
-// CHECK constraints are dropped and re-added from the shared predicate
-// consts. The quota_history_immutable_* triggers are deliberately absent:
-// 20261117-mysql-bulk-guards dropped them, so there is nothing to rebuild.
+// The rebuild derives the triggers dynamically from the live trigger set
+// across all registered migrations (orderMySQLMigrations), so a trigger
+// modified or added by a parallel or future migration cannot be missed.
+// The steps strip any IF NOT EXISTS infix so a stale body can never survive
+// behind a no-op create. The two CHECK constraints are dropped and re-added
+// from the shared predicate consts.
 //
 // Locks: DROP/CREATE TRIGGER takes a metadata lock on its table while it
 // runs, and the ALTERs take one on tasks and jobs; each trigger is gone only
@@ -30,15 +32,19 @@ import "strings"
 // and semantics, and the previous release runs on the same 0900_bin
 // connection, so the rebuilt bodies evaluate exactly as before for it.
 
+const mysqlCollationMigrationID = "20261118-mysql-collation"
+
 // mysqlCollationTriggerName returns the trigger a CREATE TRIGGER step
 // creates, or false when the step creates no trigger.
 func mysqlCollationTriggerName(step string) (string, bool) {
-	rest, ok := strings.CutPrefix(step, "CREATE TRIGGER IF NOT EXISTS ")
+	step = strings.TrimSpace(step)
+	rest, ok := strings.CutPrefix(step, "CREATE TRIGGER ")
 	if !ok {
 		return "", false
 	}
-	name, _, _ := strings.Cut(rest, " ")
-	if name == "" {
+	rest = strings.TrimPrefix(rest, "IF NOT EXISTS ")
+	name, _, ok := strings.Cut(rest, " ")
+	if !ok || name == "" {
 		return "", false
 	}
 	return name, true
@@ -47,35 +53,123 @@ func mysqlCollationTriggerName(step string) (string, bool) {
 // mysqlCollationDropName returns the trigger a DROP TRIGGER step drops, or
 // false when the step drops no trigger.
 func mysqlCollationDropName(step string) (string, bool) {
-	name, ok := strings.CutPrefix(step, "DROP TRIGGER IF EXISTS ")
-	if !ok || name == "" || strings.Contains(name, " ") {
+	step = strings.TrimSpace(step)
+	rest, ok := strings.CutPrefix(step, "DROP TRIGGER ")
+	if !ok {
+		return "", false
+	}
+	rest = strings.TrimPrefix(rest, "IF EXISTS ")
+	name, _, _ := strings.Cut(rest, " ")
+	name = strings.TrimSuffix(name, ";")
+	if name == "" {
 		return "", false
 	}
 	return name, true
 }
 
-// mysqlCollationRecreateSteps returns the DROP + CREATE pair rebuilding every
-// trigger in groups. The CREATE drops the IF NOT EXISTS infix: the DROP just
-// removed the trigger, and a bare CREATE fails loudly if it somehow still
-// exists instead of silently keeping the stale body. A step that creates no
-// trigger panics: the registry validity test would fail the build anyway,
-// and a silent skip would leave a stale trigger behind.
-func mysqlCollationRecreateSteps(groups ...[]string) []string {
-	const prefix = "CREATE TRIGGER IF NOT EXISTS "
-	var out []string
-	for _, steps := range groups {
-		for _, step := range steps {
-			name, ok := mysqlCollationTriggerName(step)
-			if !ok {
-				panic("mysql collation migration: trigger step without a name: " + step)
-			}
-			out = append(out,
-				"DROP TRIGGER IF EXISTS "+name,
-				"CREATE TRIGGER "+strings.TrimPrefix(step, prefix),
-			)
+// mysqlBareCreateTrigger returns the trigger name and bare CREATE TRIGGER
+// statement (stripping IF NOT EXISTS), or false when step is not a create trigger.
+func mysqlBareCreateTrigger(step string) (name, bare string, ok bool) {
+	step = strings.TrimSpace(step)
+	const prefix = "CREATE TRIGGER "
+	rest, ok := strings.CutPrefix(step, prefix)
+	if !ok {
+		return "", "", false
+	}
+	rest = strings.TrimPrefix(rest, "IF NOT EXISTS ")
+	name, _, ok = strings.Cut(rest, " ")
+	if !ok || name == "" {
+		return "", "", false
+	}
+	return name, prefix + rest, true
+}
+
+// mysqlLiveTriggers derives the live triggers and their bare CREATE statements
+// from the migrations, in topological dependency order (excluding the collation
+// migration itself). It also returns the set of migration IDs that define or
+// replace those live triggers.
+func mysqlLiveTriggers(migrations []mysqlMigration) (live map[string]string, owners map[string]string, err error) {
+	others := make([]mysqlMigration, 0, len(migrations))
+	for _, m := range migrations {
+		if m.id != mysqlCollationMigrationID {
+			others = append(others, m)
 		}
 	}
-	return out
+	ordered, err := orderMySQLMigrations(others)
+	if err != nil {
+		return nil, nil, err
+	}
+	live = make(map[string]string)
+	owners = make(map[string]string)
+	for _, m := range ordered {
+		for _, step := range m.steps {
+			if name, ok := mysqlCollationDropName(step); ok {
+				delete(live, name)
+				delete(owners, name)
+			}
+			if name, bare, ok := mysqlBareCreateTrigger(step); ok {
+				live[name] = bare
+				owners[name] = m.id
+			}
+		}
+	}
+	return live, owners, nil
+}
+
+// resolveMySQLCollationMigration returns a caller-owned copy of migrations where
+// the collation migration's recreate steps and after dependencies are derived
+// from the live triggers across all other migrations. It never mutates the
+// input slice or the global mysqlMigrations registry.
+func resolveMySQLCollationMigration(migrations []mysqlMigration) ([]mysqlMigration, error) {
+	targetIdx := -1
+	for i := range migrations {
+		if migrations[i].id == mysqlCollationMigrationID {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx == -1 {
+		out := make([]mysqlMigration, len(migrations))
+		copy(out, migrations)
+		return out, nil
+	}
+	live, owners, err := mysqlLiveTriggers(migrations)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(live))
+	for name := range live {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	steps := make([]string, 0, len(mysqlCollationCheckSteps)+len(names)*2)
+	steps = append(steps, mysqlCollationCheckSteps...)
+	for _, name := range names {
+		steps = append(steps,
+			"DROP TRIGGER IF EXISTS "+name,
+			live[name],
+		)
+	}
+
+	afterMap := map[string]bool{
+		"20261118-mysql-tasks":      true, // tasks_closure_check
+		"20261118-mysql-relay-jobs": true, // jobs_skills_check
+	}
+	for _, migID := range owners {
+		afterMap[migID] = true
+	}
+	after := make([]string, 0, len(afterMap))
+	for id := range afterMap {
+		after = append(after, id)
+	}
+	sort.Strings(after)
+
+	out := make([]mysqlMigration, len(migrations))
+	copy(out, migrations)
+	out[targetIdx].steps = steps
+	out[targetIdx].after = after
+	return out, nil
 }
 
 // mysqlCollationCheckSteps rebuilds the two JSON CHECK constraints from the
@@ -90,30 +184,8 @@ var mysqlCollationCheckSteps = []string{
 
 func init() {
 	registerMySQLMigration(mysqlMigration{
-		id: "20261118-mysql-collation",
-		after: []string{
-			"20261117-mysql-bulk-guards",
-			"20261117-mysql-comments",
-			"20261117-mysql-changes",
-			"20261118-mysql-tasks",
-			"20261118-mysql-relay-jobs",
-			"20261118-mysql-decisions",
-			"20261118-decision-sync-bulk-load",
-			"20261118-mysql-documents",
-			"20261118-mysql-yt-feed",
-			"20261118-mysql-yt-write-ops",
-		},
-		steps: append(append([]string{}, mysqlCollationCheckSteps...),
-			mysqlCollationRecreateSteps(
-				mysqlBulkGuardTriggers,
-				mysqlCommentsTriggers,
-				mysqlChangesTriggers,
-				mysqlTasksTriggers,
-				mysqlDecisionsTriggers,
-				mysqlDecisionSyncTriggers,
-				mysqlDocumentsTriggers,
-				mysqlYTFeedTriggers,
-				mysqlYTOpsTriggers,
-			)...),
+		id:    mysqlCollationMigrationID,
+		after: []string{"20261118-mysql-tasks", "20261118-mysql-relay-jobs"},
+		steps: append([]string{}, mysqlCollationCheckSteps...),
 	})
 }

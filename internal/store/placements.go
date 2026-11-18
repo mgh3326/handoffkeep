@@ -335,7 +335,7 @@ func (s *Store) ListFleetCapacityPlacements(ctx context.Context, job, host strin
 		ORDER BY decided_at DESC,id DESC LIMIT $4`
 	args := []any{job, host, since, limit}
 	if s.dialect == mysqlDialect {
-		query = `SELECT ` + placementColumns + ` FROM placement_decisions WHERE (?='' OR job_id=?) AND (?='' OR chosen_host=? OR JSON_SEARCH(candidates,'one',?,NULL,'$[*].host') IS NOT NULL) AND decided_at>=? ORDER BY decided_at DESC,id DESC LIMIT ?`
+		query = `SELECT ` + placementColumns + ` FROM placement_decisions WHERE (?='' OR job_id=?) AND (?='' OR chosen_host=? OR JSON_CONTAINS(candidates,JSON_OBJECT('host',?))) AND decided_at>=? ORDER BY decided_at DESC,id DESC LIMIT ?`
 		args = []any{job, job, host, host, host, since, limit}
 	}
 	rows, err := s.db().Query(ctx, query, args...)
