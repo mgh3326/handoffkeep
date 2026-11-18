@@ -70,10 +70,16 @@ type LaneCheckFinding struct {
 
 // LaneCheck is one lane's findings and the identity of its notice.
 type LaneCheck struct {
-	Lane          string             `json:"lane"`
-	Findings      []LaneCheckFinding `json:"findings"`
-	FindingsHash  string             `json:"findings_hash"`
-	NoticeEventID string             `json:"notice_event_id"`
+	Lane     string             `json:"lane"`
+	Findings []LaneCheckFinding `json:"findings"`
+	// FindingsHash covers every finding, wait_cleared included: a newly
+	// cleared wait changes the notice id, so it is not deduplicated away.
+	FindingsHash string `json:"findings_hash"`
+	// LookHash covers the findings a look leaves behind: wait_cleared is
+	// excluded, because the look itself advances its baseline and removes
+	// that finding. Comparing it is what stops a notice the lane looked at.
+	LookHash      string `json:"look_hash"`
+	NoticeEventID string `json:"notice_event_id"`
 }
 
 // LaneLook is one recorded look.
@@ -257,8 +263,23 @@ func (s *Store) laneCheck(ctx context.Context, lane string, now time.Time) (Lane
 		Lane:          lane,
 		Findings:      kept,
 		FindingsHash:  hash,
+		LookHash:      laneCheckLookHash(kept),
 		NoticeEventID: LaneCheckEventID(lane, hash, now),
 	}, nil
+}
+
+// laneCheckLookHash is the hash a look records: the stable findings, with
+// wait_cleared left out because the look itself advances that baseline and
+// removes the finding. A wait that clears after the look is new state and
+// keeps the lane awake.
+func laneCheckLookHash(findings []LaneCheckFinding) string {
+	stable := make([]LaneCheckFinding, 0, len(findings))
+	for _, f := range findings {
+		if f.Name != LaneFindingWaitCleared {
+			stable = append(stable, f)
+		}
+	}
+	return laneCheckHash(stable)
 }
 
 // laneCheckIDs runs one finding query, binding lane plus any extra arguments.
@@ -342,19 +363,27 @@ func (s *Store) laneCheckLastLook(ctx context.Context, lane string) (time.Time, 
 	return at.UTC(), true, nil
 }
 
-// laneCheckLooked reports whether the lane's last look carries hash.
-func (s *Store) laneCheckLooked(ctx context.Context, q rowQuerier, lane, hash string) (bool, error) {
+// laneCheckLooked reports whether the lane's last look already covers c. A
+// look stores the state it leaves (LookHash, wait_cleared excluded), so it
+// covers the same stable findings; a wait that cleared after the look is new
+// state, so the finding keeps the lane awake until the next look.
+func (s *Store) laneCheckLooked(ctx context.Context, q rowQuerier, c LaneCheck) (bool, error) {
+	for _, f := range c.Findings {
+		if f.Name == LaneFindingWaitCleared && len(f.TaskIDs) > 0 {
+			return false, nil
+		}
+	}
 	var last string
 	err := q.QueryRow(ctx, s.q(
 		`SELECT findings_hash FROM lane_looks WHERE lane=$1 ORDER BY id DESC LIMIT 1`,
-		`SELECT findings_hash FROM lane_looks WHERE lane=? ORDER BY id DESC LIMIT 1`), lane).Scan(&last)
+		`SELECT findings_hash FROM lane_looks WHERE lane=? ORDER BY id DESC LIMIT 1`), c.Lane).Scan(&last)
 	if errors.Is(err, ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return last == hash, nil
+	return last == c.LookHash, nil
 }
 
 // RunLaneCheck computes every lane's findings and queues one lane_check
@@ -386,7 +415,7 @@ func (s *Store) RunLaneCheck(ctx context.Context, now time.Time) (int, error) {
 	}
 	wrote := 0
 	for _, c := range checks {
-		looked, err := s.laneCheckLooked(ctx, tx, c.Lane, c.FindingsHash)
+		looked, err := s.laneCheckLooked(ctx, tx, c)
 		if err != nil {
 			return 0, err
 		}
@@ -410,10 +439,11 @@ func (s *Store) RunLaneCheck(ctx context.Context, now time.Time) (int, error) {
 const laneLookColumns = `id,lane,notice_event_id,findings_hash,note,actor,created_at`
 
 // RecordLaneLook records that a lane looked at the state its notice names
-// (`lanes look <lane> --notice <event_id>`). The findings hash comes from the
-// notice id, which is this lane's lane_check id; the next check skips the lane
-// while its findings still hash to that value. A repeat of the same
-// (lane, notice) changes nothing.
+// (`lanes look <lane> --notice <event_id>`). The notice id must be this lane's
+// lane_check id; the stored hash is the state the look leaves behind (its
+// wait_cleared excluded, since the look advances that baseline), and the next
+// check skips the lane while its findings still hash to that value. A repeat of
+// the same (lane, notice) changes nothing.
 func (s *Store) RecordLaneLook(ctx context.Context, lane, noticeEventID, note, actor string, now time.Time) (LaneLook, bool, error) {
 	lane = strings.TrimSpace(lane)
 	noticeEventID = strings.TrimSpace(noticeEventID)
@@ -421,7 +451,7 @@ func (s *Store) RecordLaneLook(ctx context.Context, lane, noticeEventID, note, a
 	if !validName(lane) {
 		return LaneLook{}, false, fmt.Errorf("%w: lane must be a name", ErrLaneLookInvalid)
 	}
-	parsedLane, hash, ok := ParseLaneCheckEventID(noticeEventID)
+	parsedLane, _, ok := ParseLaneCheckEventID(noticeEventID)
 	if !ok || parsedLane != lane {
 		return LaneLook{}, false, fmt.Errorf("%w: notice must be lanecheck-%s-<hash>-<bucket>", ErrLaneLookInvalid, lane)
 	}
@@ -435,6 +465,13 @@ func (s *Store) RecordLaneLook(ctx context.Context, lane, noticeEventID, note, a
 		return LaneLook{}, false, err
 	}
 	now = now.UTC()
+	// The look records the state it leaves: the current findings with
+	// wait_cleared excluded, which is what the next check compares.
+	check, err := s.laneCheck(ctx, lane, now)
+	if err != nil {
+		return LaneLook{}, false, err
+	}
+	hash := check.LookHash
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return LaneLook{}, false, err

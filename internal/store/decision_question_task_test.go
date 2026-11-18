@@ -110,6 +110,37 @@ func TestDecideTaskThatCarriesWorkStaysOpen(t *testing.T) {
 	}
 }
 
+// TestQuestionTaskWithAnotherOpenDecisionStaysOpen pins the third boundary:
+// while another decision request is still open on the task, the resolve path
+// keeps the blocking flag and the close waits. The second row is inserted
+// directly because the normal writers supersede a flag row when a structured
+// request arrives; a legacy linear row is the state the guard defends.
+func TestQuestionTaskWithAnotherOpenDecisionStaysOpen(t *testing.T) {
+	ctx := context.Background()
+	s := schemaStore(t, "qtask-other")
+	res := newQuestionTask(t, s, "other-project", "other-lane")
+	if _, err := s.pool.Exec(ctx, `INSERT INTO decision_requests(source,source_ref,task_id,lane,question,status,created_at,updated_at)
+		VALUES('task_flag','review-fixture',$1,$2,'a second open question','open',now(),now())`, res.Task.ID, "other-lane"); err != nil {
+		t.Fatal(err)
+	}
+	// A flag row is written together with the task flag; set both so the task
+	// is in the state the review describes.
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET awaiting_decision=true WHERE id=$1`, res.Task.ID); err != nil {
+		t.Fatal(err)
+	}
+	answerDecision(t, s, res.Task.ID, res.Request.ID, DecisionRequestAnswered, "A", "")
+	got, found, err := s.GetTask(ctx, res.Task.ID)
+	if err != nil || !found {
+		t.Fatalf("GetTask: found=%t err=%v", found, err)
+	}
+	if got.State == StateCompleted || got.CompletedAt != nil {
+		t.Fatalf("closed to %s while another decision is open", got.State)
+	}
+	if !got.AwaitingDecision {
+		t.Fatal("the remaining open decision must keep the blocking flag")
+	}
+}
+
 // TestQuestionTaskWithChildStaysOpen pins the second boundary: a question task
 // that somehow has a child is carrying work and stays open.
 func TestQuestionTaskWithChildStaysOpen(t *testing.T) {

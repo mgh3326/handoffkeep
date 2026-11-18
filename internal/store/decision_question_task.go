@@ -18,6 +18,13 @@ func (s *Store) closeQuestionTaskTx(ctx context.Context, tx transaction, x *Task
 	if x.Kind != "decide" || !x.Refs.QuestionTask || IsSettledState(x.State) {
 		return nil
 	}
+	if x.AwaitingDecision {
+		// Another open decision still blocks the task: the resolve path kept
+		// the flag while one remains. Closing now would leave that question
+		// open on a settled task with its block cleared, so the close waits
+		// until the last request is answered (mergewake review of #504).
+		return nil
+	}
 	var carriesWork bool
 	if err := tx.QueryRow(ctx, s.q(
 		`SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_id=$1) OR EXISTS(SELECT 1 FROM change_tasks WHERE task_id=$1)`,
@@ -30,7 +37,6 @@ func (s *Store) closeQuestionTaskTx(ctx context.Context, tx transaction, x *Task
 	}
 	from := x.State
 	x.State = StateCompleted
-	x.AwaitingDecision = false
 	x.UpdatedAt = now
 	if err := applyLifecycle(x, from, StateCompleted, now, &TaskClosure{Type: "resolved", Evidence: requestID}); err != nil {
 		return err
