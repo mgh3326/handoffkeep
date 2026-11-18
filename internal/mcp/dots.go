@@ -3,9 +3,11 @@ package mcp
 import (
 	"context"
 	"errors"
+	"log"
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/api"
@@ -91,7 +93,9 @@ func dotsAttachmentView(a store.Attachment) attachmentView {
 	return attachmentView{SHA256: a.SHA256, SizeBytes: a.SizeBytes, MIME: a.MIME, OriginalName: a.OriginalName, CreatedAt: a.CreatedAt}
 }
 
-func (o operatorTools) dotsInbox(ctx context.Context, _ *gmcp.CallToolRequest, in dotsInboxInput) (*gmcp.CallToolResult, any, error) {
+func (o operatorTools) dotsInbox(ctx context.Context, _ *gmcp.CallToolRequest, in dotsInboxInput) (callResult *gmcp.CallToolResult, aux any, callErr error) {
+	listed := 0
+	defer func() { o.recordDotsInboxRead(ctx, listed, callErr) }()
 	limit := clampLimit(in.Limit, 20, 100)
 	tasks, err := o.service.Store.DotsInbox(ctx, in.Cursor, limit)
 	if err != nil {
@@ -177,5 +181,35 @@ func (o operatorTools) dotsInbox(ctx context.Context, _ *gmcp.CallToolRequest, i
 	if len(tasks) == limit {
 		next = tasks[len(tasks)-1].ID
 	}
+	listed = len(items)
 	return jsonResult(map[string]any{"requests": items, "next_cursor": next})
+}
+
+// recordDotsInboxRead persists one dots_inbox call and logs it (hk 4924). The
+// record runs on a detached context: the read happened even when the caller
+// went away. A failed record never fails the read; it logs its own event.
+func (o operatorTools) recordDotsInboxRead(ctx context.Context, listed int, callErr error) {
+	result := "ok"
+	if callErr != nil {
+		result = dotsInboxReadResult(callErr)
+	}
+	if o.service.Store != nil && o.principal.Actor != "" {
+		if err := o.service.Store.RecordDotsInboxRead(context.WithoutCancel(ctx), o.principal.Actor, listed, result); err != nil {
+			log.Printf("mcp.dots_inbox_read_record_failed err=%q", err)
+		}
+	}
+	log.Printf("mcp.dots_inbox_read principal=%q listed=%d", o.principal.Actor, listed)
+}
+
+// dotsInboxReadResult is the stored result of a failed read: the error text
+// the caller saw, first line only, bounded for the column.
+func dotsInboxReadResult(err error) string {
+	s := err.Error()
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 256 {
+		s = s[:256]
+	}
+	return s
 }
