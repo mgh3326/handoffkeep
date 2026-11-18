@@ -55,7 +55,7 @@ inbox and disposition writes refuse them.
 | Decisions | Record a decision settled in a session chat | — | — | POST /v1/decisions/record | decisions record | decision_record | Reserved `operator` bearer for CLI; verified MCP Access | decision record; MCP write audit | Stable key replays identical input; changed content conflicts | internal/store/decision_records_test.go, internal/api/decision_records_test.go, internal/mcp/operator_decisions_test.go |
 | Decisions | Read operator attention | — | GET /ui/api/attention | — | — | operator_attention | Operator, MCP bearer/Access | None (read) | n/a | internal/store/attention_test.go, internal/mcp/operator_decisions_test.go |
 | Decisions | Ask (create a structured request) | — | — | POST /v1/tasks/{id}/decision-request | tasks decision-request, decisions ask | — | bearer (agents and CLI) | decision record; task_events | No retraction; a superseded request can be replaced | cmd/handoffkeep/decision_request_test.go, internal/api/decision_records_test.go |
-| Decisions | Answer a request | — | POST /ui/api/decision-requests/resolve | POST /v1/decisions/resolve, POST /v1/tasks/{id}/decision-request/resolve | decisions resolve, tasks decision-resolve | decision_answer | Console: operator only (operator_direct); bearer writes may be recorded as pending confirmation; MCP Access is operator_direct; MCP bearer on an operator_only request is refused with `decision_operator_only` and its attempt waits as pending confirmation, otherwise it follows the bearer rule | decision record (actor, channel, provenance); task_events; ui.write | Final; the request cannot be unanswered | internal/ui/decision_resolve_test.go, internal/api/decision_resolve_test.go, internal/mcp/operator_test.go |
+| Decisions | Answer a request | — | POST /ui/api/decision-requests/resolve | POST /v1/decisions/resolve, POST /v1/tasks/{id}/decision-request/resolve | decisions resolve, tasks decision-resolve | decision_answer | Console: operator only (operator_direct); bearer writes may be recorded as pending confirmation; MCP Access is operator_direct, except that an operator_only request closes through dots only with the operator's verbatim `operator_quote` and the exact `decision_ref` (provenance `operator_decided`), and any other dots answer is refused with `operator_only_decision` or `provenance_ref_mismatch` and kept as a refused attempt; MCP bearer on an operator_only request is refused with `decision_operator_only` and its attempt waits as pending confirmation, otherwise it follows the bearer rule | decision record (actor, channel, provenance); task_events; ui.write | Final; the request cannot be unanswered | internal/ui/decision_resolve_test.go, internal/api/decision_resolve_test.go, internal/mcp/operator_test.go, internal/mcp/operator_dots_decision_test.go, internal/store/decision_dots_operator_test.go |
 | Decisions | Deny a pending confirmation | — | POST /ui/api/decision-requests/deny | — | — | — | Operator only | decision record; ui.write | The denied attempt is final; the request stays open | internal/ui/decision_deny_test.go |
 | Decisions | Snooze a decision record | — | — | POST /v1/decision-requests/{id}/snooze | decisions snooze | — | bearer | decision record | Snooze again with a new time | internal/api/decision_records_test.go |
 | Decisions | Legacy answer (task, escalation, lane) | — | retired with the legacy console (hk 4429); structured requests use POST /ui/api/decision-requests/resolve | POST /v1/decisions/resolve | decisions resolve | — | bearer (API/CLI) | relay event; task_events | Final; no undo | internal/api/decision_session_test.go |
@@ -194,9 +194,11 @@ hk 3465 adds `task_update` and `decision_ask` (HTTP only; both `readOnlyHint: fa
   response's `changed` lists `labels` when one moved.
 - `decision_ask` records a structured decision request on a task through the same
   path as `tasks decision-request`; `idempotency_key` is required. A request with
-  `answer_policy` `operator_direct` (or `human_only`) is operator-only: `decision_answer`
-  from the ChatGPT channel refuses it with `operator_only_decision` and writes no
-  attempt.
+  `answer_policy` `operator_direct` (or `human_only`) is operator-only:
+  `decision_answer` from the ChatGPT channel closes it only when the answer names
+  `provenance` `operator_decided`, carries the operator's verbatim
+  `operator_quote` and passes the exact `decision_ref`; any other dots answer is
+  refused with `operator_only_decision` and kept as a refused attempt.
 - `task_comment` and `task_intake` take an optional `idempotency_key`; a repeat
   returns the comment or task that key first made.
 - A write through the ChatGPT channel is labelled author `dots` (comment author,

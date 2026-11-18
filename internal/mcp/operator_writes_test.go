@@ -270,8 +270,8 @@ func TestDecisionAskReplayAndOperatorOnlyRefusal(t *testing.T) {
 		t.Fatalf("replay=%+v first=%+v", replay, operatorOnly)
 	}
 
-	// dots cannot answer an operator-only request; the refusal names its code and
-	// records no attempt.
+	// dots cannot answer an operator-only request without the operator's words;
+	// the refusal names its code and keeps the refused attempt (hk 5132).
 	text, isError := toolText(t, session, "decision_answer", map[string]any{
 		"request_id": operatorOnly.RequestID, "option": "A",
 	})
@@ -282,8 +282,11 @@ func TestDecisionAskReplayAndOperatorOnlyRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(attempts) != 0 {
-		t.Fatalf("refused answer recorded %d attempts", len(attempts))
+	if len(attempts) != 1 || attempts[0].Result != "refused" || attempts[0].Channel != store.DecisionChannelDots {
+		t.Fatalf("refused answer attempts=%+v", attempts)
+	}
+	if open, _, err := st.GetTask(ctx, task.ID); err != nil || open.Refs.DecisionRequest.Status != store.DecisionRequestOpen {
+		t.Fatalf("request after the refusal=%+v err=%v", open.Refs.DecisionRequest, err)
 	}
 
 	// A request without the operator-only policy is answered as before. It goes
