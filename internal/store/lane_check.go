@@ -368,6 +368,15 @@ func (s *Store) laneCheckLastLook(ctx context.Context, lane string) (time.Time, 
 	return at.UTC(), true, nil
 }
 
+// laneCheckClearingEventID names a store-written clearing row. Unlike a notice
+// id it carries the instant, because two clearings can fall inside one 6-hour
+// notice bucket and lane_looks is unique per (lane, notice event id): a reused
+// id would silently drop the second clearing and leave the lane looking as if
+// it still held the earlier findings.
+func laneCheckClearingEventID(lane, hash string, at time.Time) string {
+	return fmt.Sprintf("lanecheck-clear-%s-%s-%d", lane, hash, at.UnixNano())
+}
+
 // laneCheckLooked reports whether the lane's last look already covers c. A
 // look stores the state it leaves (LookHash, wait_cleared excluded), so it
 // covers the same stable findings; a wait that cleared after the look is new
@@ -431,7 +440,7 @@ func (s *Store) RunLaneCheck(ctx context.Context, now time.Time) (int, error) {
 			if looked {
 				continue
 			}
-			if _, _, err := insertLaneLookTx(ctx, tx, c.Lane, c.NoticeEventID, c.LookHash, laneLookClearedNote, laneLookStoreActor, now); err != nil {
+			if _, _, err := insertLaneLookTx(ctx, tx, c.Lane, laneCheckClearingEventID(c.Lane, c.LookHash, now), c.LookHash, laneLookClearedNote, laneLookStoreActor, now); err != nil {
 				return 0, err
 			}
 			continue

@@ -32,9 +32,10 @@ func applyLaneCheckMigration(ctx context.Context, tx pgx.Tx) error {
 }
 
 // lane_looks records that a design lane looked at its lane check (operator
-// decision 418, hk 5201): the notice it was answering, the stable findings
-// hash the look leaves behind (wait_cleared excluded, because the look
-// advances that baseline), who looked and when. The check skips a lane whose
+// decision 418, hk 5201): the notice it was answering (or, for the row the
+// check writes when a lane's findings go empty, its own instant-named id), the
+// stable findings hash the look leaves behind (wait_cleared excluded, because
+// the look advances that baseline), who looked and when. The check skips a lane whose
 // last look carries the current stable hash, so only a change of state
 // re-notices it, not the clock. The notification_outbox widening admits
 // 'lane_check' and rejects nothing it accepted, so the previous release keeps
