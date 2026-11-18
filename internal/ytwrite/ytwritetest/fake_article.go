@@ -172,6 +172,9 @@ func (f *FakeYouTrack) UpdateArticle(ctx context.Context, articleID, summary, co
 // ReadArticle returns the article as it is now, failing as QueueRead says;
 // an unknown article is a 404.
 func (f *FakeYouTrack) ReadArticle(ctx context.Context, articleID string) (ytwrite.RemoteArticle, error) {
+	if h := f.BeforeReadArticle; h != nil {
+		h(articleID)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads++
@@ -181,11 +184,66 @@ func (f *FakeYouTrack) ReadArticle(ctx context.Context, articleID string) (ytwri
 	if len(f.readFaults) > 0 {
 		err := f.readFaults[0]
 		f.readFaults = f.readFaults[1:]
-		return ytwrite.RemoteArticle{}, err
+		if err != nil { // a nil entry lets one read through
+			return ytwrite.RemoteArticle{}, err
+		}
 	}
 	a := f.articleLocked(articleID)
 	if a == nil {
 		return ytwrite.RemoteArticle{}, &ytwrite.RemoteError{Status: http.StatusNotFound, Message: "article not found"}
 	}
-	return *a, nil
+	out := *a
+	out.ChildIDs = nil
+	for _, c := range f.articles {
+		if c.ParentID == a.ID {
+			out.ChildIDs = append(out.ChildIDs, c.ID)
+		}
+	}
+	return out, nil
+}
+
+// EditArticle sets an article's content as a person would, outside hk.
+func (f *FakeYouTrack) EditArticle(id, content string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if a := f.articleLocked(id); a != nil {
+		a.Content = content
+	}
+}
+
+// SetArticleSummary renames an article as a person would.
+func (f *FakeYouTrack) SetArticleSummary(id, summary string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if a := f.articleLocked(id); a != nil {
+		a.Summary = summary
+	}
+}
+
+// MoveArticle moves an article and its descendants to another project, as
+// YouTrack moves a sub-tree.
+func (f *FakeYouTrack) MoveArticle(id, projectID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	moved := map[string]bool{id: true}
+	for changed := true; changed; {
+		changed = false
+		for _, a := range f.articles {
+			if (moved[a.ID] || moved[a.ParentID]) && a.ProjectID != projectID {
+				a.ProjectID, moved[a.ID], changed = projectID, true, true
+			}
+		}
+	}
+}
+
+// DeleteArticle removes an article as a person would.
+func (f *FakeYouTrack) DeleteArticle(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, a := range f.articles {
+		if a.ID == id {
+			f.articles = append(f.articles[:i], f.articles[i+1:]...)
+			return
+		}
+	}
 }

@@ -462,14 +462,16 @@ func (l *YTWriteLedger) Apply(ctx context.Context, now time.Time, id int64, ytID
 	var out ytwrite.Op
 	err := l.s.retryTx(ctx, func() error {
 		var err error
-		out, err = l.applyOnce(ctx, now, id, ytID, maps)
+		out, err = l.applyOnce(ctx, now, id, ytID, maps, nil)
 		return err
 	})
 	return out, err
 }
 
-// applyOnce is one attempt of Apply's transaction.
-func (l *YTWriteLedger) applyOnce(ctx context.Context, now time.Time, id int64, ytID string, maps []ytwrite.MapRow) (ytwrite.Op, error) {
+// applyOnce is one attempt of Apply's transaction. guard, when set, runs
+// under the op's row lock on an op that is not yet applied, before anything
+// is written, and refuses the apply with its error (ApplySplit's fence).
+func (l *YTWriteLedger) applyOnce(ctx context.Context, now time.Time, id int64, ytID string, maps []ytwrite.MapRow, guard func(tx transaction, op ytwrite.Op) error) (ytwrite.Op, error) {
 	tx, release, err := l.s.begin(ctx)
 	if err != nil {
 		return ytwrite.Op{}, err
@@ -508,6 +510,11 @@ func (l *YTWriteLedger) applyOnce(ctx context.Context, now time.Time, id int64, 
 	case ytwrite.StateDispatched, ytwrite.StateRemoteUnknown:
 	default:
 		return ytwrite.Op{}, fmt.Errorf("%w: apply from %s", ytwrite.ErrState, op.State)
+	}
+	if guard != nil {
+		if err := guard(tx, op); err != nil {
+			return ytwrite.Op{}, err
+		}
 	}
 	// A create kind (issue_create, decision_create) checks every mapping hk
 	// keeps for the entity and the issue before it writes any: on a conflict
