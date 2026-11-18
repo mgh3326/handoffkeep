@@ -415,6 +415,7 @@ func (s *Store) readWaitRows(ctx context.Context, tx transaction, now time.Time)
 		{"spawn start", readSpawnStartWaits},
 		{"reviews", readReviewWaits},
 		{"spawn failure comments", readSpawnFailureWaits},
+		{"orders", readOrderWaits},
 		{"hand", readHandWaits},
 	} {
 		got, err := read.fn(ctx, tx)
@@ -773,6 +774,34 @@ func readSpawnFailureWaits(ctx context.Context, tx transaction) ([]WaitRow, erro
 		w.Reason = line
 		w.Since = w.Since.UTC()
 		w.NextAction = "retry_spawn"
+		w.GroundsLink = taskGroundsLink(w.TaskID)
+		return w, nil
+	})
+}
+
+// readOrderWaits reads each open order (neither acknowledged nor withdrawn) as a
+// wait on its target lane: the order waits until that lane acknowledges it (hk
+// 5125, design hk 5112 §5 and §8.1).
+func readOrderWaits(ctx context.Context, tx transaction) ([]WaitRow, error) {
+	rows, err := tx.Query(ctx, `SELECT o.id, o.task_id, o.target_lane, o.created_at, t.lane, t.title, t.state, COALESCE(t.project,'')
+		FROM task_orders o JOIN tasks t ON t.id=o.task_id
+		WHERE o.acked_at IS NULL AND o.withdrawn_at IS NULL ORDER BY o.created_at, o.id`)
+	if err != nil {
+		return nil, err
+	}
+	return collectRows(rows, func(r row) (WaitRow, error) {
+		var w WaitRow
+		var orderID string
+		if err := r.Scan(&orderID, &w.TaskID, &w.OnRef, &w.Since, &w.Lane, &w.Title, &w.State, &w.Project); err != nil {
+			return WaitRow{}, err
+		}
+		w.Key = "order:" + orderID
+		w.Section = WaitSectionWaitingOn
+		w.Source = "derived:task_order"
+		w.OnKind = WaitOnLane
+		w.Reason = "order " + orderID + " not yet acknowledged"
+		w.Since = w.Since.UTC()
+		w.NextAction = "wait_lane"
 		w.GroundsLink = taskGroundsLink(w.TaskID)
 		return w, nil
 	})

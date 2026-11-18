@@ -22,6 +22,7 @@ func init() {
 	registerTaskAreaCase("waits/derived-review", waitsCaseDerivedReview)
 	registerTaskAreaCase("waits/failed-start-section", waitsCaseFailedStartSection)
 	registerTaskAreaCase("waits/spawn-failure-comment", waitsCaseSpawnFailureComment)
+	registerTaskAreaCase("waits/unacknowledged-order", waitsCaseUnacknowledgedOrder)
 	registerTaskAreaCase("waits/idle-started", waitsCaseIdleStarted)
 	registerTaskAreaCase("waits/backlog-apart-and-filter", waitsCaseBacklogApartAndFilter)
 }
@@ -314,5 +315,29 @@ func waitsCaseSpawnFailureComment(t *testing.T, s *Store) {
 		if r.Source == "derived:spawn_failed_comment" && r.TaskID == task.ID {
 			t.Fatal("a started task still shows a derived failed start")
 		}
+	}
+}
+
+// An open order waits on its target lane until the lane acknowledges it.
+func waitsCaseUnacknowledgedOrder(t *testing.T, s *Store) {
+	ctx := t.Context()
+	task := flowCaseTask(t, s, "implement")
+	if _, err := s.CreateTaskOrder(ctx, CreateTaskOrderInput{TaskID: task.ID, Words: "set going", Actor: "operator-test", Channel: "console", Verified: true, Key: "waits-order-" + strconv.FormatInt(task.ID, 10)}); err != nil {
+		t.Fatal(err)
+	}
+	orders, err := s.ListTaskOrders(ctx, task.ID, true)
+	flowMust(t, err)
+	if len(orders) != 1 {
+		t.Fatalf("open orders=%d, want 1", len(orders))
+	}
+	row, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionWaitingOn, task.ID)
+	if !ok || row.Source != "derived:task_order" || row.OnKind != WaitOnLane || row.OnRef != task.Lane || row.NextAction != "wait_lane" {
+		t.Fatalf("order row=%+v found=%t", row, ok)
+	}
+	if _, err := s.AckTaskOrder(ctx, orders[0].ID, task.Lane, "started"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := waitsFind(t, waitsRead(t, s, ""), WaitSectionWaitingOn, task.ID); ok {
+		t.Fatal("an acknowledged order still waits on its lane")
 	}
 }
