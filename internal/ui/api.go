@@ -105,6 +105,8 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 			return
 		}
 		h.deployPending(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/waits":
+		h.waits(w, r, identity)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/work-status":
 		h.workStatus(w, r, identity)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/fleet-status":
