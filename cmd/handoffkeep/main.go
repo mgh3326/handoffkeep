@@ -839,6 +839,8 @@ func docCmd(args []string, out io.Writer) error {
 	apply := fs.Bool("apply", false, "apply changes")
 	olderThan := fs.String("older-than", "", "prune: delete documents not updated for this many days, like 30d")
 	limit := fs.Int("limit", 1000, "prune: most documents one run deletes")
+	retention := fs.Bool("retention", false, "prune: delete retention-eligible review/mwr-* and screens/* (30d after merge/end)")
+	dryRun := fs.Bool("dry-run", false, "prune: dry run (default without --apply)")
 	afterID := fs.Int64("after-id", 0, "list: page by id, documents with id greater than this (0 starts)")
 	if e := fs.Parse(args[1:]); e != nil {
 		return e
@@ -934,6 +936,25 @@ func docCmd(args []string, out io.Writer) error {
 	case "policy-index":
 		return docPolicyIndex(ctx, c, *apply, out)
 	case "prune":
+		if *retention {
+			if *prefix != "" || *olderThan != "" {
+				return errors.New("doc prune --retention takes no --prefix or --older-than (always 30d after merge/end)")
+			}
+			if *dryRun && *apply {
+				return errors.New("doc prune --retention takes either --dry-run or --apply, not both")
+			}
+			if *limit < 1 || *limit > 100000 {
+				return errors.New("doc prune --retention --limit must be 1 to 100000")
+			}
+			v, e := c.PruneRetention(ctx, *limit, *apply && !*dryRun)
+			if e != nil {
+				return e
+			}
+			return printJSON(out, v)
+		}
+		if *dryRun {
+			return errors.New("doc prune --dry-run needs --retention")
+		}
 		days, e := parseDocOlderThan(*olderThan)
 		if e != nil {
 			return e
@@ -1305,6 +1326,54 @@ func (w chatRetentionWorker) Run(ctx context.Context) {
 	}
 }
 
+// docRetentionWorker is the daily retention job for review/mwr-* and
+// screens/* (hk 5057). Every run deletes at most docRetentionWorkerLimit
+// retention-eligible documents in DocRetentionBatch-sized transactions; a dry
+// run is `handoffkeep doc prune --retention` without --apply.
+type docRetentionWorker struct {
+	store    *store.Store
+	interval time.Duration
+	limit    int
+}
+
+const (
+	docRetentionInterval = 24 * time.Hour
+	docRetentionWorkerLimit = 5000
+)
+
+func (w docRetentionWorker) Run(ctx context.Context) {
+	if w.store == nil {
+		return
+	}
+	interval := w.interval
+	if interval <= 0 {
+		interval = docRetentionInterval
+	}
+	limit := w.limit
+	if limit <= 0 {
+		limit = docRetentionWorkerLimit
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		cutoff := time.Now().UTC().Add(-time.Duration(store.DocRetentionDays) * 24 * time.Hour)
+		res, err := w.store.PruneRetention(ctx, cutoff, limit, true, "retention")
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("doc retention prune error: %v", err)
+		} else if res.Deleted > 0 {
+			log.Printf("doc retention pruned deleted=%d review=%d screens=%d bytes=%d matched=%d skipped_bound=%d kept_active=%d", res.Deleted, res.ReviewDeleted, res.ScreensDeleted, res.Bytes, res.Matched, res.SkippedBound, res.KeptActive)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		}
+}
+
 type serveOptions struct {
 	bindings         []serverBinding
 	workers          []backgroundWorker
@@ -1477,7 +1546,7 @@ func serve(args []string, errout io.Writer) error {
 		return e
 	}
 	svc := api.Service{Store: st, Attachments: am, YouTrack: yt.search, SearchBackend: yt.searchBackend}
-	workers := []backgroundWorker{chatRetentionWorker{store: st}, placementRetentionWorker{store: st}, syncRetentionWorker{store: st, retention: retention}}
+	workers := []backgroundWorker{chatRetentionWorker{store: st}, placementRetentionWorker{store: st}, syncRetentionWorker{store: st, retention: retention}, docRetentionWorker{store: st}}
 	workers = append(workers, ytOpsAlertWorker{store: st})
 	if *iceboxDays > 0 {
 		workers = append(workers, backlogSweepWorker{store: st, days: *iceboxDays})
