@@ -506,8 +506,11 @@ func (s *Store) afterStateChangeTx(ctx context.Context, tx transaction, x Task, 
 // wait for a person, or "". x waits while one of its own implements changes is
 // open or reverted and not relanded (pieceHoldTx, the last-piece rule of a
 // merge), while it is awaiting a decision, or while its decision request is
-// open.
+// open. An explicit task (hk 5112) waits for a person whatever its pieces are.
 func (s *Store) closeGateTx(ctx context.Context, tx transaction, x Task) (string, error) {
+	if x.CloseRule == CloseRuleExplicit {
+		return explicitCloseReason, nil
+	}
 	if reason, err := pieceHoldTx(ctx, tx, x.ID, ""); err != nil || reason != "" {
 		return reason, err
 	}

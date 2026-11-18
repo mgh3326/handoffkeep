@@ -60,10 +60,11 @@ type taskUpdateInput struct {
 	State             string `json:"state,omitempty"`
 	Lane              string `json:"lane,omitempty"`
 	Priority          *int   `json:"priority,omitempty"`
+	CloseRule         string `json:"close_rule,omitempty"`
 	Note              string `json:"note,omitempty"`
 }
 
-// taskUpdate changes a task's state, lane or priority. expected_updated_at is
+// taskUpdate changes a task's state, lane, priority or close rule. expected_updated_at is
 // the updated_at the caller last read (task_show or task_get); a task that
 // moved since answers revision_conflict and nothing is written. The same
 // idempotency key returns the first call's result.
@@ -85,8 +86,9 @@ func (o operatorTools) taskUpdate(ctx context.Context, _ *gmcp.CallToolRequest, 
 	}
 	result, err := o.service.Store.UpdateTask(ctx, in.ID, store.TaskUpdateInput{
 		ExpectedUpdatedAt: expected, State: strings.TrimSpace(in.State), Lane: strings.TrimSpace(in.Lane),
-		Priority: in.Priority,
-		Note:     in.Note,
+		Priority:  in.Priority,
+		CloseRule: strings.TrimSpace(in.CloseRule),
+		Note:      in.Note,
 	}, write)
 	if err != nil {
 		return nil, nil, err

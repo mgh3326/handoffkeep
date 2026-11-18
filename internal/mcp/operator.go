@@ -108,7 +108,7 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.taskIntake)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "task_update",
-		Description: "Change one hk task's state, lane or priority in one call (any of them). expected_updated_at is the updated_at you read from task_show or task_get; a task that changed since answers revision_conflict and nothing is written. idempotency_key is required; a repeat returns the first call's result. Returns the changed fields, the new revision, console_url and youtrack_sync (sync_pending for a mirrored task).",
+		Description: "Change one hk task's state, lane, priority or close_rule (auto or explicit) in one call (any of them). expected_updated_at is the updated_at you read from task_show or task_get; a task that changed since answers revision_conflict and nothing is written. idempotency_key is required; a repeat returns the first call's result. Returns the changed fields, the new revision, console_url and youtrack_sync (sync_pending for a mirrored task).",
 		Annotations: writeAnnotations(),
 	}, o.taskUpdate)
 	gmcp.AddTool(s, &gmcp.Tool{

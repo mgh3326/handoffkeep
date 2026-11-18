@@ -101,6 +101,7 @@ var errorRules = []errorRule{
 	{store.ErrMilestoneProject, http.StatusBadRequest, "milestone_project", false},
 	{store.ErrTaskTerminal, http.StatusConflict, "task_terminal", false},
 	{store.ErrInvalidTaskPriority, http.StatusBadRequest, "invalid_task_priority", false},
+	{store.ErrInvalidCloseRule, http.StatusBadRequest, "invalid_close_rule", false},
 	{store.ErrDecisionRequestOpen, http.StatusConflict, "decision_request_open", false},
 	{store.ErrDecisionRequestStale, http.StatusConflict, "decision_request_stale", false},
 	{store.ErrDecisionRequestResolved, http.StatusConflict, "decision_request_resolved", false},

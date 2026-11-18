@@ -215,7 +215,7 @@ func tasksCmd(args []string, out io.Writer) error {
 
 func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|set-area|areas|set-priority|parent|relate|unrelate|backfill-hierarchy|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|drift|settle-merged|hygiene|intake|triage")
+		return errors.New("usage: tasks add|list|export|claim|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|set-area|areas|set-priority|close-rule|parent|relate|unrelate|backfill-hierarchy|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|drift|settle-merged|hygiene|intake|triage")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -231,6 +231,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if args[0] == "set-priority" {
 		return taskPriorityCmd(args, out)
+	}
+	if args[0] == "close-rule" {
+		return taskCloseRuleCmd(args, out)
 	}
 	if args[0] == "parent" {
 		return taskParentCmd(args[1:], out)
@@ -650,7 +653,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		}
 		return printJSON(out, x)
 	default:
-		return errors.New("usage: tasks add|list|export|claim|transition|reopen|rebind|relane|project|projects|owner|owners|set-area|areas|set-priority|parent|relate|unrelate|decision-request|decision-resolve|show|comment|comments|disposition|intake|triage")
+		return errors.New("usage: tasks add|list|export|claim|transition|reopen|rebind|relane|project|projects|owner|owners|set-area|areas|set-priority|close-rule|parent|relate|unrelate|decision-request|decision-resolve|show|comment|comments|disposition|intake|triage")
 	}
 }
 

@@ -568,6 +568,12 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 		// (the closure below takes ev.SourceRef as the evidence).
 		to = StateCompleted
 	}
+	// hk 5112 (close_rule explicit): a close the event would make is recorded,
+	// not applied. It is checked before any change or decision read, so an
+	// explicit task never reaches the parts of the close that are not ported.
+	if reason == "" && explicitHoldsClose(x, to) {
+		reason = explicitCloseReason
+	}
 	if reason == "" && ev.PR != "" && (ev.Source == SourceMergewakeMerge || ev.Source == SourceDeploy) {
 		reverted, err := revertNamesPRTx(ctx, tx, x.ID, ev.PR)
 		if err != nil {
