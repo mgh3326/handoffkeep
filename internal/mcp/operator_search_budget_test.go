@@ -41,7 +41,7 @@ func TestTaskSearchReadsHitsInOneBatch(t *testing.T) {
 	statements := func(query string) (results, statements int) {
 		t.Helper()
 		qctx, count := telemetry.WithQueryCount(ctx)
-		res, _, err := o.taskSearch(qctx, nil, taskSearchInput{Query: query})
+		res, _, err := o.taskSearch(qctx, nil, taskSearchInput{Query: query, Limit: 50})
 		if err != nil {
 			t.Fatal(err)
 		}
