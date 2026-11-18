@@ -149,25 +149,25 @@ func init() {
 				t.Fatal(err)
 			}
 		}
-		exec(`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES($1,$2,'merged','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',$3,$4,$3,$3)`,
+		exec(`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES($1,$2,'merged','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',$3,$4,$5,$6)`,
 			`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES(?,?,'merged','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',?,?,?,?)`,
-			"example/app", 201, now, old)
+			"example/app", 201, now, old, now, now)
 		var changeOld int64
 		if err := s.db().QueryRow(ctx, s.q(`SELECT id FROM changes WHERE repo=$1 AND pr_number=$2`, `SELECT id FROM changes WHERE repo=? AND pr_number=?`), "example/app", 201).Scan(&changeOld); err != nil {
 			t.Fatal(err)
 		}
-		exec(`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES($1,$2,'merged','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',$3,$4,$3,$3)`,
+		exec(`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES($1,$2,'merged','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',$3,$4,$5,$6)`,
 			`INSERT INTO changes(repo, pr_number, state, head_sha, base_sha, opened_at, merged_at, created_at, updated_at) VALUES(?,?,'merged','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',?,?,?,?)`,
-			"example/app", 202, now, fresh)
+			"example/app", 202, now, fresh, now, now)
 		exec(`INSERT INTO reviews(change_id, reviewed_head, round, pass, lens, reviewer_job_id, recorded_at) VALUES($1,$2,1,1,'correctness',$3,$4)`,
 			`INSERT INTO reviews(change_id, reviewed_head, round, pass, lens, reviewer_job_id, recorded_at) VALUES(?,?,1,1,'correctness',?,?)`,
 			changeOld, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mwr-201-aaa-p1-1", now)
-		exec(`INSERT INTO jobs(job_id, task_id, host, state, created_by, created_at, updated_at, ended_at) VALUES($1,0,'test-host','completed','tester',$2,$2,$3)`,
+		exec(`INSERT INTO jobs(job_id, task_id, host, state, created_by, created_at, updated_at, ended_at) VALUES($1,0,'test-host','completed','tester',$2,$3,$4)`,
 			`INSERT INTO jobs(job_id, task_id, host, state, created_by, created_at, updated_at, ended_at) VALUES(?,0,'test-host','completed','tester',?,?,?)`,
-			"job-ret-old", now, old)
-		exec(`INSERT INTO jobs(job_id, task_id, host, state, created_by, created_at, updated_at, ended_at) VALUES($1,0,'test-host','completed','tester',$2,$2,$3)`,
+			"job-ret-old", now, now, old)
+		exec(`INSERT INTO jobs(job_id, task_id, host, state, created_by, created_at, updated_at, ended_at) VALUES($1,0,'test-host','completed','tester',$2,$3,$4)`,
 			`INSERT INTO jobs(job_id, task_id, host, state, created_by, created_at, updated_at, ended_at) VALUES(?,0,'test-host','completed','tester',?,?,?)`,
-			"job-ret-fresh", now, fresh)
+			"job-ret-fresh", now, now, fresh)
 		put := func(key, kind, job string) {
 			t.Helper()
 			if _, _, err := s.PutDocument(ctx, Document{Key: key, Kind: kind, Body: "body of " + key, CreatedBy: "tester", Job: job}); err != nil {
