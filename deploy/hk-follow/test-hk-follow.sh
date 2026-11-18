@@ -386,6 +386,7 @@ t_gate_migration_kinds() {
 		'[{"filename":"internal/store/linear_board_migration.go","status":"added","patch":"+x"}]' \
 		'[{"filename":"internal/store/migration_a.go","status":"renamed","patch":"+x"}]' \
 		'[{"filename":"internal/store/tasks.go","status":"modified","patch":"@@ -1 +1 @@\n+func init() { registerMigration(migration{ID: \"x\"}) }"}]' \
+		'[{"filename":"internal/store/migration_a.go","status":"modified","patch":"@@ -1 +1 @@\n registerMigration(migration{\n-\tID: \"old\"\n+\tID: \"new\"\n }"}]' \
 		'[{"filename":"internal/store/big.go","status":"modified"}]'; do
 		compare "$SHA_OLD" "$SHA_NEW" ahead "$f"
 		want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
@@ -407,6 +408,37 @@ t_gate_not_migrations() {
 		compare "$SHA_OLD" "$SHA_NEW" ahead "$f"
 		want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
 	done
+}
+t_gate_mysql_migrations() {
+	# hk 5072: an added migration_mysql_*.go feeds the MySQL registry
+	# production PostgreSQL never runs, so it does not hold the promote.
+	setup; setup_tick
+	local f
+	for f in \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"added","patch":"+registerMySQLMigration("}]' \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"modified","patch":"@@ -1 +1 @@\n-old\n+new"}]'; do
+		compare "$SHA_OLD" "$SHA_NEW" ahead "$f"
+		want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	done
+	# The exclusion is by name AND content, and added files only: a
+	# PostgreSQL registration inside a MySQL-named file still holds, a
+	# renamed or copied migration_mysql_* file keeps the name rule (its
+	# patch shows only changed lines, so a carried-over registration would
+	# be invisible), a name without the migration_mysql_ prefix is not the
+	# MySQL registry, and a MySQL file whose patch GitHub omitted cannot be
+	# checked for registerMigration(.
+	for f in \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"added","patch":"+func init() { registerMigration(migration{ID: \"x\"}) }"}]' \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"renamed","patch":"+x"}]' \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"copied","patch":"+x"}]' \
+		'[{"filename":"internal/store/migration_mysqlfoo.go","status":"added","patch":"+x"}]' \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"modified"}]'; do
+		compare "$SHA_OLD" "$SHA_NEW" ahead "$f"
+		want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	done
+	# A PostgreSQL migration next to MySQL files still holds.
+	compare "$SHA_OLD" "$SHA_NEW" ahead '[{"filename":"internal/store/migration_mysql_tasks.go","status":"added","patch":"+x"},{"filename":"internal/store/migration_pg.go","status":"added","patch":"+x"}]'
+	want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
 }
 
 # --- tick ------------------------------------------------------------------

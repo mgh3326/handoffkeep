@@ -508,19 +508,27 @@ ci_ok_state() {
 # migrations <compare.json>: print each file in the comparison that adds a
 # migration. A file counts when it is an added, renamed or copied non-test Go
 # file under internal/store/ whose name says migration, or when any changed
-# store file's patch adds a registerMigration( call. A store Go file whose
-# patch GitHub left out (too large) counts too: the gate cannot read it, so it
-# must not pass it.
+# store file's patch touches a registerMigration( call — on an added or a
+# context line, since an edited ID inside a multi-line registration is a new
+# migration. An added migration_mysql_* file skips only the name rule: it
+# feeds the MySQL registry production PostgreSQL never runs. Renamed and
+# copied migration_mysql_* files keep it — their patch shows only changed
+# lines, so a carried-over PostgreSQL registration would be invisible — and
+# a store Go file whose patch GitHub left out (too large) counts too: the
+# gate cannot read it, so it must not pass it.
 migrations() {
 	jq -r '
 		.files[]?
 		| select(.filename | test("^internal/store/[^/]+\\.go$"))
 		| select(.filename | endswith("_test.go") | not)
 		| select(
-			((.status == "added" or .status == "renamed" or .status == "copied")
+			(.status == "added"
+				and (.filename | test("migration[^/]*\\.go$"))
+				and (.filename | test("^internal/store/migration_mysql_[^/]*\\.go$") | not))
+			or ((.status == "renamed" or .status == "copied")
 				and (.filename | test("migration[^/]*\\.go$")))
 			or ((.patch // null) == null and .status != "removed")
-			or ((.patch // "") | test("(^|\\n)\\+[^\\n]*registerMigration\\("))
+			or ((.patch // "") | test("(^|\\n)[ +][^\\n]*registerMigration\\("))
 		)
 		| .filename' "$1"
 }
