@@ -86,14 +86,25 @@ func (l *WorkerLease) Watch(ctx context.Context) error {
 	}
 }
 
-// Release closes the dedicated connection, dropping its session lock.
+// Release closes the dedicated connection, dropping its session lock. A
+// second call is a no-op: the first call already returned the connection to
+// the pool, and the lease no longer names a live connection for either
+// dialect.
 func (l *WorkerLease) Release() {
+	if l == nil {
+		return
+	}
 	if l.mysqlConn != nil {
 		_ = mysqlReleaseSessionLock(l.mysqlConn, l.mysqlName)
 		l.mysqlConn = nil
+		l.mysqlName = ""
+		return
+	}
+	if l.conn == nil {
 		return
 	}
 	discardWorkerConnection(l.conn)
+	l.conn = nil
 }
 
 func discardWorkerConnection(conn *pgxpool.Conn) {

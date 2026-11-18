@@ -205,15 +205,25 @@ An Access identity becomes the principal `operator:<email>` with channel
   principal `operator:<email>` and channel `chatgpt` are recorded in the
   `mcp_write_audit` row and in the response, so the record reads as dots while
   the operator's own console writes keep `operator:<email>`.
-- `decision_answer` closes the request on the verified operator path with
-  actor `operator:<email>` and provenance `operator_direct`.
+- `decision_answer` closes the request with actor `operator:<email>` and, on an
+  ordinary request, provenance `operator_direct`. A request marked operator_only
+  (`answer_policy` `operator_direct`, `human_only`, or a disposition item) closes
+  through dots only when the answer names the operator: `provenance`
+  `operator_decided`, `operator_quote` with the operator's verbatim words, and
+  `decision_ref` with the exact `request_id`. The resolution then keeps channel
+  `dots` and provenance `operator_decided` (a relayed answer, not the verified
+  path); without the words, or with a ref that binds another request or
+  revision, the answer is refused (`operator_only_decision` or
+  `provenance_ref_mismatch`) and the refusal is kept as an attempt. A
+  disposition item is still answered only on the console.
 - `task_intake` records `source=chatgpt` and `dots` as `created_by`; the tool
   response reports the exact `operator:<email>` principal and the `chatgpt`
   channel.
 
 Decision answers record the actual MCP route: `mcp` for bearer callers and
 `dots` for the verified ChatGPT Access channel. A human-only request is refused
-to a bearer caller and can be answered only on a verified operator path.
+to a bearer caller and closes on a verified operator path or on a dots answer
+that carries the operator's words and the exact request id.
 
 ## Tools
 
@@ -235,12 +245,14 @@ file tasks, or attach files.
 | `decisions_pending` | read | none | Open structured requests with question, options (each with its `attachments`: `sha256`, `caption`, `mime`, `original_name`), `recommendation_reason`, `unverified`, `one_fix`, `question_ko`/`options_ko` when fresh (`options_ko` carries each option's key and translated label only; media and the recommendation are read from `options`), and state |
 | `decisions_history` | read | optional `cursor`, `limit` | Closed structured requests plus session decisions with reading, verbatim quote, decision time and ground links; each closed request carries the same option attachments, `recommendation_reason`, `unverified` and `one_fix`. One `next_cursor` pages both lists. A cursor issued before session decisions were paged carries only the task position, so the session list restarts at its newest record once (bounded by `limit`, self-corrects on the next cursor) |
 | `operator_attention` | read | none | Counts and bounded items for open decisions and tasks awaiting a decision or stalled |
-| `decision_answer` | write | `request_id`, `option` or `text`, optional `note`, optional `idempotency_key` | Store result with channel `mcp` or `dots`; an already answered or stale request returns its error code |
+| `decision_answer` | write | `request_id`, `option` or `text`, optional `note`, optional `idempotency_key`, and on the dots channel optional `provenance`/`operator_quote`/`decision_ref` for an operator-only request | Store result with channel `mcp` or `dots`; an operator-only request refuses a dots answer that lacks the operator's words and request id, keeping the refusal as an attempt; an already answered or stale request returns its error code |
 | `task_comment` | write | `id`, `body`, optional `idempotency_key` | The appended comment, its author, and `replayed` (a repeated key returns the comment it first made) |
 | `task_intake` | write | `title`, `body`, `project`, optional `lane`, optional `idempotency_key` | The triage task, `created`, and duplicate candidates found before filing; a repeated key returns the task that key first filed |
 | `task_update` | write | `id`, `expected_updated_at`, `idempotency_key`, one or more of `state`, `lane`, `priority`, optional `note` | `changed`, the new `revision`, `replayed`, `console_url` and `youtrack_sync`; a stale revision returns `revision_conflict` and writes nothing |
 | `decision_ask` | write | `task_id`, `idempotency_key`, `question`, `options`, `default_action`, optional `answer_policy`, `human_only`, `block` and the other `tasks decision-request` fields | The recorded request id and whether it was a duplicate |
 | `decision_record` | write | `key`, `lane`, `reading`, `quote`, `decided_at`, `grounds` | Verified Cloudflare Access operators only; bearer callers receive `operator_required`. The CLI uses the reserved `operator` credential. Same-key retries replay, changed content is refused |
+| `task_order` | write | `task_id`, `words`, `idempotency_key` | The recorded order and whether it was a duplicate. Only an operator principal: the `operator` bearer, or an Access operator relaying the operator's words through dots (recorded unverified). Any other caller receives `operator_required`; a task past backlog, unstarted or triage is `order_task_started`; the same key with other words is `order_key_conflict`. An order approves nothing and starts no worker |
+| `task_order_ack` | write | `order_id`, `comment` | The acknowledged order; records `acked_at`, the acker and a task comment and clears the lane wait. A repeat returns the first acknowledgement; a withdrawn order is `order_not_open` |
 | `attachment_list` | read | optional `ref`, `limit` | Immutable attachment metadata |
 | `attachment_get_url` | read | `sha256` | Private presigned URL valid for ten minutes; an archived attachment answers `archived: true` with its `location` and no URL |
 | `attachment_read` | read | `sha256` | The file inline. `image/png`, `image/jpeg`, `image/gif` and `image/webp` come back as image content; one above 1.5 MiB encoded is downscaled to a 1600 px long edge and re-encoded (PNG, or JPEG q85 for a JPEG), a header declaring more than 40 megapixels is refused without decoding, and one that still does not fit is refused. `text/*`, `application/json`, and a generic type named `.md`/`.tsv`/`.csv`/`.txt` come back as text up to 256 KiB, cut at a UTF-8 boundary with a line naming the full size; bytes that are not UTF-8 are refused. Every other type, and every refusal, returns a text block naming `attachment_get_url`. An archived attachment answers `archived: true` with its `location` instead of content |

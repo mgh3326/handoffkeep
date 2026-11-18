@@ -133,6 +133,9 @@ func writeAction(path string) string {
 		if taskPriorityPathRE.MatchString(path) {
 			return "task-priority"
 		}
+		if taskOrderPathRE.MatchString(path) {
+			return "task-order"
+		}
 		if action := lifecycleWriteAction(path); action != "" {
 			return action
 		}
