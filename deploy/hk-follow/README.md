@@ -45,12 +45,12 @@ main push → ci.yml (ci-ok) ─┬→ deploy.yml (deploy-ok) → promote job �
 - **ci-ok** is selected exactly as release.yml's `ci-green` selects it. The verdict is the `ci-ok` job (latest attempt) of the newest ci.yml main push run for the sha, so a failed rerun overrides an older success and a dispatch run cannot. Only when that run was cancelled or skipped, and a newer main push run exists for another commit, does a ci-any-ref `ci-ok` commit status decide.
 - **deploy-ok** is the commit status that deploy.yml's status job posts.
 - **Migrations** are files in `internal/store/` changed between the deployed sha and the candidate (`compare/<deployed>...<sha>`). A file counts if it meets any of these:
-  - It is a non-test `.go` file, added, renamed or copied, whose name contains `migration` — except `migration_mysql_*.go`, which registers on the MySQL dialect that production PostgreSQL never runs.
-  - Its patch adds a `registerMigration(` call. This still counts inside a `migration_mysql_*` file: the name alone does not clear a PostgreSQL registration.
+  - It is a non-test `.go` file, added, renamed or copied, whose name contains `migration`. An added `migration_mysql_*.go` is exempt — it registers on the MySQL dialect that production PostgreSQL never runs — but a renamed or copied `migration_mysql_*` file still counts: its patch shows only changed lines, so a PostgreSQL registration carried over unchanged would be invisible.
+  - Its patch adds a `registerMigration(` call, or shows one on a context line — an edited ID inside a multi-line registration is a new migration. This still counts inside a `migration_mysql_*` file: the name alone does not clear a PostgreSQL registration.
   - It is a store `.go` file whose patch GitHub omitted — a MySQL-named file included, since the gate cannot check it for `registerMigration(`.
   - The comparison lists 300 files, GitHub's cap. Then every file counts, because the list may be partial.
 
-The `migration_mysql_*` exclusion holds only until the MySQL cutover (hk 4899 C2): when production runs the MySQL registry this rule flips, and that flip is a follow-up, not part of hk 5072.
+The added-`migration_mysql_*` exemption holds only until the MySQL cutover (hk 4899 C2): when production runs the MySQL registry this rule flips, and that flip is a follow-up, not part of hk 5072.
 
 ### The approval record
 
