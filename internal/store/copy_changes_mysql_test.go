@@ -44,7 +44,7 @@ func TestCopyChangesAreaRoundTripWithParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	my.Close()
-	tables := []string{"tasks", "changes", "change_tasks", "reviews", "change_checks", "change_threads", "change_findings", "change_gate_events", "deploy_record_projection", "deploy_services"}
+	tables := []string{"tasks", "sync_decisions", "changes", "change_tasks", "reviews", "change_checks", "change_threads", "change_findings", "change_gate_events", "deploy_record_projection", "deploy_services"}
 	forward, err := CopyStore(t.Context(), srcURL, myURL, tables, false)
 	if err != nil {
 		t.Fatal(err)

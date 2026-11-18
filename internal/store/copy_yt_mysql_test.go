@@ -17,7 +17,7 @@ func ytAreaCopyTables() []string {
 	var out []string
 	for _, name := range StoreCopyTables() {
 		if strings.HasPrefix(name, "yt_") || strings.HasPrefix(name, "youtrack_") ||
-			name == "tasks" || name == "documents" || name == "task_comments" {
+			name == "tasks" || name == "sync_decisions" || name == "documents" || name == "task_comments" {
 			out = append(out, name)
 		}
 	}
