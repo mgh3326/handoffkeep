@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -667,4 +668,112 @@ func TestQuotaFreeBucketValidation(t *testing.T) {
 	if ValidQuotaObservation(QuotaObservation{Kind: "auto", MeasuredAt: now, Buckets: []QuotaBucket{}}, now) {
 		t.Error("empty auto buckets accepted without free_bucket")
 	}
+}
+
+func TestQuotaBalanceValidation(t *testing.T) {
+	now := time.Now().UTC()
+	fptr := func(f float64) *float64 { return &f }
+	nan := math.NaN()
+	inf := math.Inf(1)
+	base := QuotaObservation{Kind: "auto", MeasuredAt: now, Buckets: []QuotaBucket{{Window: "5h", UsedPct: 10, Scope: "account"}}}
+	for _, tc := range []struct {
+		name string
+		bal  *float64
+		want bool
+	}{
+		{"absent balance accepted", nil, true},
+		{"zero balance accepted", fptr(0), true},
+		{"positive balance accepted", fptr(12.5), true},
+		{"negative balance refused", fptr(-0.1), false},
+		{"NaN balance refused", &nan, false},
+		{"Inf balance refused", &inf, false},
+	} {
+		x := base
+		x.Balance = tc.bal
+		if got := ValidQuotaObservationFor(quotaTestKey, x, now); got != tc.want {
+			t.Errorf("balance %s: got %v want %v", tc.name, got, tc.want)
+		}
+	}
+	expiry := now.Add(time.Hour)
+	m := QuotaObservation{Kind: "manual", Window: "7d", MeasuredAt: now, ExpiresAt: &expiry, Buckets: []QuotaBucket{{Window: "7d", UsedPct: 42, Scope: "account"}}, Balance: fptr(3)}
+	if !ValidQuotaObservationFor(quotaTestKey, m, now) {
+		t.Error("balance manual observation refused")
+	}
+	m.Balance = fptr(-1)
+	if ValidQuotaObservationFor(quotaTestKey, m, now) {
+		t.Error("balance negative manual observation accepted")
+	}
+}
+
+func testQuotaBalance(t *testing.T, s *Store) {
+	t.Helper()
+	ctx := context.Background()
+	const key = "codex:cccccccccccccccc"
+	if _, err := s.LeaseQuota(ctx, key, "client", holderA, 120); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Microsecond)
+	bal := 12.5
+	x := QuotaObservation{Kind: "auto", MeasuredAt: base, Buckets: []QuotaBucket{{Window: "5h", UsedPct: 30, Scope: "account"}}, Balance: &bal}
+	first, deduped, err := s.PutQuota(ctx, key, "client", holderA, x)
+	if err != nil || deduped {
+		t.Fatalf("balance first publish deduped=%v err=%v", deduped, err)
+	}
+	if first.Balance == nil || *first.Balance != 12.5 {
+		t.Fatalf("balance not stored: %+v", first.Balance)
+	}
+	latest, err := s.LatestQuota(ctx, key)
+	if err != nil || latest.Observation == nil || latest.Observation.Balance == nil || *latest.Observation.Balance != 12.5 {
+		t.Fatalf("balance latest=%+v err=%v", latest.Observation, err)
+	}
+	history, found, err := s.QuotaObservationHistory(ctx, key, base.Add(-time.Minute), base.Add(time.Minute), 10)
+	if err != nil || !found || len(history) != 1 || history[0].Balance == nil || *history[0].Balance != 12.5 {
+		t.Fatalf("balance history=%+v found=%v err=%v", history, found, err)
+	}
+	pooled, _, err := s.ListLatestQuota(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var poolBal *float64
+	for _, row := range pooled {
+		if row.AccountKey == key && row.Observation != nil {
+			poolBal = row.Observation.Balance
+		}
+	}
+	if poolBal == nil || *poolBal != 12.5 {
+		t.Fatalf("balance pool latest missing: %+v", pooled)
+	}
+	newer := x
+	newer.MeasuredAt = base.Add(time.Minute)
+	got, deduped, err := s.PutQuota(ctx, key, "client", holderA, newer)
+	if err != nil || !deduped || got.ID != first.ID {
+		t.Fatalf("balance dedupe: id=%d want=%d deduped=%v err=%v", got.ID, first.ID, deduped, err)
+	}
+	if got.Balance == nil || *got.Balance != 12.5 || got.ConfirmedAt == nil || !got.ConfirmedAt.Equal(newer.MeasuredAt) {
+		t.Fatalf("balance dedupe freshness=%+v", got)
+	}
+	var count int
+	if err = s.db().QueryRow(ctx, `SELECT count(*) FROM quota_observations`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("balance dedupe history=%d %v", count, err)
+	}
+	bal2 := 9.5
+	changed := x
+	changed.Balance = &bal2
+	changed.MeasuredAt = base.Add(2 * time.Minute)
+	next, deduped, err := s.PutQuota(ctx, key, "client", holderA, changed)
+	if err != nil || deduped || next.ID == first.ID {
+		t.Fatalf("balance change deduped=%v err=%v", deduped, err)
+	}
+	if next.Balance == nil || *next.Balance != 9.5 {
+		t.Fatalf("balance change stored=%+v", next.Balance)
+	}
+	latest, err = s.LatestQuota(ctx, key)
+	if err != nil || latest.Observation == nil || latest.Observation.Balance == nil || *latest.Observation.Balance != 9.5 {
+		t.Fatalf("balance change latest=%+v err=%v", latest.Observation, err)
+	}
+}
+
+func TestQuotaBalancePostgres(t *testing.T) {
+	s, _ := searchTestStore(t)
+	testQuotaBalance(t, s)
 }

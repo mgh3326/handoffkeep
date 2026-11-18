@@ -51,6 +51,7 @@ func TestSingletonServeWorkers(t *testing.T) {
 		id   store.WorkerLock
 	}{
 		{"hub forwarder", store.HubForwardWorkerLock},
+		{"drift delivery", store.DriftWorkerLock},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, url := testdb.Schema(t, "singleton_worker")
@@ -60,8 +61,8 @@ func TestSingletonServeWorkers(t *testing.T) {
 			}
 			defer st.Close()
 			var posts atomic.Int32
-			var effect func(context.Context) error
-			var check func()
+			effect := func(context.Context) error { return nil }
+			check := func() {}
 			if tc.id == store.HubForwardWorkerLock {
 				conn, err := pgx.Connect(t.Context(), url)
 				if err != nil {

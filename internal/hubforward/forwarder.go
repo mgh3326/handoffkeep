@@ -42,7 +42,8 @@ type Store interface {
 // notifyType is the lane-event type a row goes out with. A dots RESULT is
 // ready (it does not interrupt), a QUESTION is decision and a BLOCKED is
 // blocked (both interrupt; operator decision 166). A task order, or its
-// withdrawal, is an order (hk 5125).
+// withdrawal, is an order (hk 5125). A task drift delivery (hk 5112 track
+// B-3) is info.
 func notifyType(kind string) string {
 	switch kind {
 	case store.OutboxKindDotsDecision, store.OutboxKindDecisionAnswered:
@@ -55,6 +56,10 @@ func notifyType(kind string) string {
 		// An operator's order interrupts and is never digested (panewire
 		// delivery_policy: class interrupt); the lane acts on the record.
 		return "order"
+	case store.OutboxKindTaskDrift:
+		// The daily drift and hygiene delivery (hk 5112 track B-3) is a
+		// digest, never an interrupt.
+		return "info"
 	default:
 		return "info"
 	}

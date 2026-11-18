@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -11,12 +12,18 @@ import (
 
 func quotaDecode(w http.ResponseWriter, r *http.Request, out any) bool {
 	defer r.Body.Close()
-	if decodeLimited(r.Body, out, 32<<10) != nil {
+	if err := decodeLimited(r.Body, out, 32<<10); err != nil {
+		var df *DecodeFieldError
+		if errors.As(err, &df) && df.Field == "balance" {
+			jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_context", "field": "balance"})
+			return false
+		}
 		writeError(w, http.StatusBadRequest, "invalid_quota_request")
 		return false
 	}
 	return true
 }
+
 func (s Server) quotaAuth(w http.ResponseWriter, r *http.Request) (string, bool) {
 	client, ok := s.auth(w, r)
 	if !ok {
@@ -119,6 +126,13 @@ func (s Server) quotaPut(w http.ResponseWriter, r *http.Request) {
 	}
 	if !quotaDecode(w, r, &input) {
 		return
+	}
+	if input.Observation.Balance != nil {
+		b := *input.Observation.Balance
+		if math.IsNaN(b) || math.IsInf(b, 0) || b < 0 {
+			jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid_context", "field": "balance"})
+			return
+		}
 	}
 	if !store.ValidQuotaHolder(input.Holder) || !store.ValidQuotaObservationFor(r.PathValue("key"), input.Observation, time.Now()) {
 		writeError(w, http.StatusBadRequest, "invalid_quota_observation")
