@@ -156,7 +156,8 @@ func ytArticlesCreateApplyCase(t *testing.T, s *Store) {
 	// An article_update apply records the body it sent on the binding: the
 	// document's next change prepares one update (the cursor exists after this
 	// first pass, so the change is above it), and applying it clears the
-	// stale content sha.
+	// stale content sha. The consumer only prepares in docs mode on.
+	s.SetYTDocsMode(YTDocsOn, ytartCaseTenant, ytartCaseBuckets())
 	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
 		t.Fatal(err)
 	}

@@ -519,7 +519,7 @@ func ytLinkWritersOfTx(ctx context.Context, q transaction, id int64) ([]int64, e
 		UNION
 		SELECT src_id FROM task_relations
 		WHERE dst_id = ? AND archived_at IS NULL AND kind IN ('related','duplicate_of')
-		ORDER BY 1`), id)
+		ORDER BY 1`), ytLinksTaskArgs(q, id)...)
 	if err != nil {
 		return nil, err
 	}
