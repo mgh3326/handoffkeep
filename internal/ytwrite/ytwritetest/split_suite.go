@@ -482,6 +482,43 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		}
 	})
 
+	// The operator's decision is anchored at its first read (review of PR
+	// #511, r4615618102): a whole recovery pass that leases the op, marks a
+	// part create, gets an ambiguous answer and settles back to
+	// remote_unknown between that read and the decision leaves the same
+	// recorded index and a plan record the decision could match, but the
+	// part may still land, so the apply is refused and nothing is bound.
+	t.Run("operator_apply_after_a_finished_recovery_pass_is_refused", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 3)
+		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: DialFail})
+		op := e.prepare()
+		e.drive()
+		before := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
+		e.clock.Advance(time.Hour)
+		race := &racingLedger{splitLedger: e.ledger.(splitLedger), afterByID: func() {
+			e.yt.Queue(Fault{Kind: DelayCommit})
+			e.drive() // one recovery pass: part 2 answered ambiguously
+		}}
+		e.restart(race)
+		_, err := e.p.Resolve(context.Background(), op.ID, ytwrite.Resolution{Applied: true, YTID: before.YTResultID, By: "operator", Note: "looked"})
+		if !errors.Is(err, ytwrite.ErrState) {
+			t.Fatalf("the operator's apply after a recovery pass it did not see: %v", err)
+		}
+		got := e.op(op)
+		if got.State != ytwrite.StateRemoteUnknown || got.YTResultID != before.YTResultID {
+			t.Fatalf("op %s/%q index %q", got.State, got.Reason, got.YTResultID)
+		}
+		if m, ok, _ := e.ledger.MapGet(context.Background(), ytwrite.ArticleEntity, op.EntityID); ok {
+			t.Fatalf("document mapped to %s", m.YTID)
+		}
+		// A decision made from a current read applies.
+		e.yt.ReleaseDelayed()
+		if _, err := e.p.Resolve(context.Background(), op.ID, ytwrite.Resolution{Applied: true, YTID: before.YTResultID, By: "operator", Note: "looked again"}); err != nil {
+			t.Fatal(err)
+		}
+		e.wantState(op, ytwrite.StateApplied, "")
+	})
+
 	// The operator's word on a held op: not applied rejects it and leaves
 	// the family; nothing is sent.
 	t.Run("operator_not_applied_rejects", func(t *testing.T) {

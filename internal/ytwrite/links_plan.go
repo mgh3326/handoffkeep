@@ -202,6 +202,10 @@ type LinkSettlement struct {
 	SawAttempt, SawRec int
 	SawMarked          int
 	SawOutcome         StepOutcome
+	// SawReconciles is the op's recovery epoch when the operator first read
+	// it (article_split, CheckSplitOperator): a recovery pass leased after
+	// that read, even one already finished, refuses the decision.
+	SawReconciles int
 	// Read and Cur: for applied, the read that showed the plan done. An
 	// operator's apply has no read.
 	Read bool

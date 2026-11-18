@@ -214,8 +214,7 @@ func (l *YTWriteLedger) settleSplitOnce(ctx context.Context, now time.Time, id i
 	}
 	latest, found := ytwrite.LatestSplitPlan(history)
 	if f.Epoch == ytwrite.EpochOperator {
-		saw := ytwrite.LinkPlanRecord{Attempt: latest.Attempt, Recover: latest.Recover, Marked: latest.Marked, Outcome: latest.Outcome}
-		if err := ytwrite.CheckOperatorSaw(st, saw, found); err != nil {
+		if err := ytwrite.CheckSplitOperator(op, history, st); err != nil {
 			return ytwrite.Op{}, err
 		}
 	}

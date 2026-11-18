@@ -81,12 +81,7 @@ func (l *MemLedger) SettleSplit(_ context.Context, now time.Time, id int64, f yt
 	}
 	ps := l.splits[id]
 	if f.Epoch == ytwrite.EpochOperator {
-		var latest ytwrite.LinkPlanRecord
-		if len(ps) > 0 {
-			r := ps[len(ps)-1]
-			latest = ytwrite.LinkPlanRecord{Attempt: r.Attempt, Recover: r.Recover, Marked: r.Marked, Outcome: r.Outcome}
-		}
-		if err := ytwrite.CheckOperatorSaw(s, latest, len(ps) > 0); err != nil {
+		if err := ytwrite.CheckSplitOperator(*op, ps, s); err != nil {
 			return ytwrite.Op{}, err
 		}
 	}

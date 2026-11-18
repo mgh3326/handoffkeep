@@ -208,10 +208,24 @@ func CheckSplitApply(op Op, history []SplitPlanRecord, f LinkFence, s LinkSettle
 		return err
 	}
 	if f.Epoch == EpochOperator {
-		latest, found := LatestSplitPlan(history)
-		return CheckOperatorSaw(s, latest.linkRecord(), found)
+		return CheckSplitOperator(op, history, s)
 	}
 	return nil
+}
+
+// CheckSplitOperator refuses (ErrState) an operator's decision on a split op
+// that changed since the operator first read it: a recovery pass leased it
+// after that read (its Reconciles moved past SawReconciles, even when the
+// pass has already ended), or the latest plan or its record is no longer the
+// one the decision was made from (CheckOperatorSaw). A create the operator
+// did not see may still land; the decision is made again from a fresh read
+// (review of PR #511).
+func CheckSplitOperator(op Op, history []SplitPlanRecord, s LinkSettlement) error {
+	if op.Reconciles != s.SawReconciles {
+		return fmt.Errorf("%w: op %d was recovered (epoch %d) after the operator read it at epoch %d", ErrState, op.ID, op.Reconciles, s.SawReconciles)
+	}
+	latest, found := LatestSplitPlan(history)
+	return CheckOperatorSaw(s, latest.linkRecord(), found)
 }
 
 // SplitLedger is the ledger side of article_split. A Ledger that does not

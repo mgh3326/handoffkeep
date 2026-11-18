@@ -378,6 +378,12 @@ func (p *Protocol) resolveSplit(ctx context.Context, op Op, r Resolution) (Resul
 	if r.Applied && !resultIDRE.MatchString(r.YTID) {
 		return Result{}, fmt.Errorf("%w: youtrack id is empty or malformed", ErrInvalid)
 	}
+	// op is the operator's first read (Resolve's ByID). A recovery pass that
+	// holds it then may still be sending; one leased after it moves its
+	// epoch, which the ledger compares under the op's lock.
+	if op.Reason == ReasonLinkRecovery && op.NextAttemptAt.After(p.now()) {
+		return Result{}, fmt.Errorf("%w: a recovery pass holds op %d until %s", ErrState, op.ID, op.NextAttemptAt.Format(time.RFC3339))
+	}
 	history, err := sl.SplitPlans(ctx, op.ID)
 	if err != nil {
 		return Result{}, err
@@ -387,7 +393,8 @@ func (p *Protocol) resolveSplit(ctx context.Context, op Op, r Resolution) (Resul
 	if found && latest.Attempt == op.Attempts {
 		st.f.Recover = latest.Recover
 	}
-	saw := LinkSettlement{SawPlan: found, SawAttempt: latest.Attempt, SawRec: latest.Recover, SawMarked: latest.Marked, SawOutcome: latest.Outcome}
+	saw := LinkSettlement{SawPlan: found, SawAttempt: latest.Attempt, SawRec: latest.Recover, SawMarked: latest.Marked, SawOutcome: latest.Outcome,
+		SawReconciles: op.Reconciles}
 	if r.Applied {
 		// Fenced like the rejection: the ledger refuses it under the op's
 		// lock if a recovery pass holds the lease, the op recorded another
