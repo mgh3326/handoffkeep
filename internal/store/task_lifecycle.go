@@ -160,8 +160,10 @@ func recordedLifecyclePath(ctx context.Context, tx transaction, id int64, source
 	return path, len(path) > 0, nil
 }
 
-// CloseTaskCompleted closes a decide, ops, verify or research task with a result link,
-// document key, task reference, or written reason as evidence.
+// CloseTaskCompleted closes a task as completed with a result link,
+// document key, task reference, or written reason as evidence; the store's
+// per-kind completed rules apply (implement and fix also require no live
+// implements change of their own).
 func (s *Store) CloseTaskCompleted(ctx context.Context, id int64, evidence, by, note, key string) (Task, error) {
 	return s.operatorTransition(ctx, id, lifecycleSourceCloseCompleted, key, TransitionInput{
 		To: StateCompleted, Closure: "resolved", Evidence: strings.TrimSpace(evidence), By: by, Note: note,

@@ -34,7 +34,8 @@ it("explains every lifecycle action's store guard", () => {
   const developing = { ...base };
   expect(byID["close-merged"].applicable(developing)).toBe(true);
   expect(byID["close-merged"].disabledReason(developing)).toBeNull();
-  expect(byID["close-completed"].disabledReason(developing)).toContain("decide·ops·verify");
+  expect(byID["close-completed"].disabledReason(developing)).toContain("decide·fix·ops·verify");
+  expect(byID["close-completed"].disabledReason({ ...base, state: "reviewing", kind: "fix" })).toBeNull();
   expect(byID["drop"].disabledReason(developing)).toBeNull();
   expect(byID["hold"].disabledReason(developing)).toContain("대기 또는 착수 전");
   expect(byID["reopen"].disabledReason(developing)).toContain("종결되었거나 보류 중");
