@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -135,12 +136,16 @@ func (s *Store) PruneRetention(ctx context.Context, cutoff time.Time, limit int,
 	res.KeptActive = mwrTotal + scrTotal - res.Matched
 	if !apply {
 		// Bytes is the body size of the first limit eligible unbound rows in
-		// id order across both prefixes.
+		// id order across both prefixes. The screens predicate is renumbered
+		// from $3 to $6 so the union binds ($1,$2,$3) to the review range and
+		// cutoff and ($4,$5,$6) to the screens range and cutoff, with $7 the
+		// limit.
+		screensUnion := strings.Replace(docRetentionScreensEligible, "$3", "$6", 1)
 		rows, e := s.pool.Query(ctx, `SELECT octet_length(d.body) FROM documents d
 WHERE ((d.key COLLATE "C" >= $1 AND d.key COLLATE "C" < $2 `+docRetentionReviewEligible+`)
-   OR (d.key COLLATE "C" >= $3 AND d.key COLLATE "C" < $4 `+docRetentionScreensEligible+`))
+   OR (d.key COLLATE "C" >= $4 AND d.key COLLATE "C" < $5 `+screensUnion+`))
 AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id = d.id)
-ORDER BY d.id LIMIT $5`, mwrLo, mwrHi, cutoff.UTC(), scrLo, scrHi, cutoff.UTC(), limit)
+ORDER BY d.id LIMIT $7`, mwrLo, mwrHi, cutoff.UTC(), scrLo, scrHi, cutoff.UTC(), limit)
 		if e != nil {
 			return res, e
 		}
