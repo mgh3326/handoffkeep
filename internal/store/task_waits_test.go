@@ -26,6 +26,7 @@ func TestCheckTaskWaitInputRules(t *testing.T) {
 		{"task wait to another task", 5, TaskWaitInput{OnKind: WaitOnTask, OnRef: "9", Reason: "r"}, false},
 		{"task wait to itself", 5, TaskWaitInput{OnKind: WaitOnTask, OnRef: "5", Reason: "r"}, true},
 		{"task wait with a non-number", 5, TaskWaitInput{OnKind: WaitOnTask, OnRef: "9x", Reason: "r"}, true},
+		{"task wait with an empty reason", 5, TaskWaitInput{OnKind: WaitOnTask, OnRef: "9", Reason: ""}, true},
 		{"task wait with a leading zero", 5, TaskWaitInput{OnKind: WaitOnTask, OnRef: "09", Reason: "r"}, true},
 		{"external spawn failure", 5, TaskWaitInput{OnKind: WaitOnExternal, OnRef: WaitRefSpawn, Reason: "502 at hub-accept"}, false},
 		{"empty reason", 5, TaskWaitInput{OnKind: WaitOnOperator, Reason: ""}, true},

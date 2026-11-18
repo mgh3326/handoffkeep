@@ -120,6 +120,10 @@ func waitsCaseHandRefusals(t *testing.T, s *Store) {
 	if _, err := s.AddTaskWait(ctx, a.ID, TaskWaitInput{OnKind: WaitOnTask, OnRef: "999999999", Reason: "r"}, "tester"); !errors.Is(err, ErrTaskWaitInvalid) {
 		t.Fatalf("task wait on a missing task: %v", err)
 	}
+	blocker := flowCaseTask(t, s, "implement")
+	if _, err := s.AddTaskWait(ctx, a.ID, TaskWaitInput{OnKind: WaitOnTask, OnRef: strconv.FormatInt(blocker.ID, 10), Reason: ""}, "tester"); !errors.Is(err, ErrTaskWaitInvalid) {
+		t.Fatalf("task wait with an empty reason: %v", err)
+	}
 	if _, err := s.AddTaskWait(ctx, 999999999, TaskWaitInput{OnKind: WaitOnOperator, Reason: "r"}, "tester"); !errors.Is(err, ErrTaskNotFound) {
 		t.Fatalf("wait on a missing task: %v", err)
 	}

@@ -66,7 +66,6 @@ const (
 	maxWaitNoteBytes   = 1000
 	maxWaitByBytes     = 128
 	waitBacklogRows    = 50
-	waitBacklogScan    = 1000
 )
 
 // ErrTaskWaitInvalid refuses a wait the store cannot hold. Its text is the wire
@@ -132,7 +131,10 @@ func checkTaskWaitInput(taskID int64, in TaskWaitInput) error {
 		if _, ok := otherTaskID(in.OnRef, taskID); !ok {
 			return taskWaitInvalid("on_ref for a task wait must name another task id")
 		}
-	case in.Reason == "" || !validText(in.Reason, maxWaitReasonBytes):
+	}
+	// The reason is checked on its own: a switch arm above that matches first
+	// would otherwise skip it.
+	if in.Reason == "" || !validText(in.Reason, maxWaitReasonBytes) {
 		return taskWaitInvalid(fmt.Sprintf("reason is required, at most %d bytes", maxWaitReasonBytes))
 	}
 	for _, text := range []string{in.OnRef, in.Reason} {
@@ -348,12 +350,11 @@ type WaitBacklogRow struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// WaitBacklog is the ordinary backlog, listed apart from the sections. Count
-// covers the first waitBacklogScan backlog tasks; Truncated says there were more.
+// WaitBacklog is the ordinary backlog, listed apart from the sections: Count is
+// every backlog task no section names, Rows the first of them.
 type WaitBacklog struct {
-	Count     int              `json:"count"`
-	Truncated bool             `json:"truncated,omitempty"`
-	Rows      []WaitBacklogRow `json:"rows"`
+	Count int              `json:"count"`
+	Rows  []WaitBacklogRow `json:"rows"`
 }
 
 // WaitsView is the waits read at AsOf: the four sections and the backlog.
@@ -657,19 +658,32 @@ func readHandWaits(ctx context.Context, tx transaction) ([]WaitRow, error) {
 	})
 }
 
-// readWaitBacklog lists the ordinary backlog: backlog tasks that no section row
-// names. It reads the first waitBacklogScan backlog tasks and lists the first
-// waitBacklogRows of those left over.
+// readWaitBacklog counts the ordinary backlog exactly and lists its first
+// waitBacklogRows: backlog tasks that no section row names. The exclusion is in
+// SQL, before the count and the limit, so a backlog of any size is counted in
+// full.
 func readWaitBacklog(ctx context.Context, tx transaction, rows []WaitRow) (WaitBacklog, error) {
-	inSection := map[int64]bool{}
+	var ids []any
+	seen := map[int64]bool{}
 	for _, r := range rows {
-		inSection[r.TaskID] = true
+		if r.TaskID > 0 && !seen[r.TaskID] {
+			seen[r.TaskID] = true
+			ids = append(ids, r.TaskID)
+		}
 	}
-	found, err := tx.Query(ctx, `SELECT id, lane, title, COALESCE(project,''), created_at FROM tasks WHERE state='backlog' ORDER BY created_at, id LIMIT `+strconv.Itoa(waitBacklogScan))
+	notIn := ""
+	if len(ids) > 0 {
+		notIn = " AND id NOT IN (" + inPlaceholders(tx, len(ids)) + ")"
+	}
+	var count int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE state='backlog'`+notIn, ids...).Scan(&count); err != nil {
+		return WaitBacklog{}, err
+	}
+	found, err := tx.Query(ctx, `SELECT id, lane, title, COALESCE(project,''), created_at FROM tasks WHERE state='backlog'`+notIn+` ORDER BY created_at, id LIMIT `+strconv.Itoa(waitBacklogRows), ids...)
 	if err != nil {
 		return WaitBacklog{}, err
 	}
-	all, err := collectRows(found, func(r row) (WaitBacklogRow, error) {
+	listed, err := collectRows(found, func(r row) (WaitBacklogRow, error) {
 		var b WaitBacklogRow
 		if err := r.Scan(&b.TaskID, &b.Lane, &b.Title, &b.Project, &b.CreatedAt); err != nil {
 			return WaitBacklogRow{}, err
@@ -680,17 +694,7 @@ func readWaitBacklog(ctx context.Context, tx transaction, rows []WaitRow) (WaitB
 	if err != nil {
 		return WaitBacklog{}, err
 	}
-	out := WaitBacklog{Rows: []WaitBacklogRow{}, Truncated: len(all) == waitBacklogScan}
-	for _, b := range all {
-		if inSection[b.TaskID] {
-			continue
-		}
-		out.Count++
-		if len(out.Rows) < waitBacklogRows {
-			out.Rows = append(out.Rows, b)
-		}
-	}
-	return out, nil
+	return WaitBacklog{Count: count, Rows: listed}, nil
 }
 
 // buildWaitsView sorts the rows into the four sections, oldest first, and sets
