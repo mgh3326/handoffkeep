@@ -78,7 +78,7 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.changesSince)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "decisions_pending",
-		Description: "List the open structured decision requests. decisions holds needs_answer items (the task is open; reason is awaiting_answer or overdue). needs_cleanup holds requests still open on a merged or dropped task (reason task_closed): cleanup to close, not a question to answer. Each item has its question, options, Korean translations when present, and operator_only: true when only a verified operator answer may close it. Answer a needs_answer item with decision_answer.",
+		Description: "List the open structured decision requests. decisions holds needs_answer items (the task is open; reason is awaiting_answer or overdue). needs_cleanup holds requests still open on a merged or dropped task (reason task_closed): cleanup to close, not a question to answer. Each item has its question, options, Korean translations when present, and operator_only: true when the request closes only on the operator's own words (a verified operator answer, or a dots answer naming operator_decided provenance, the verbatim quote and this exact request id). Answer a needs_answer item with decision_answer.",
 		Annotations: readOnlyAnnotations(),
 	}, o.decisionsPending)
 	gmcp.AddTool(s, &gmcp.Tool{
@@ -93,7 +93,7 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.operatorAttention)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "decision_answer",
-		Description: "Answer one open hk decision request by request id, with an option key or free text and an optional note. Uses the same store path and validation as the console answer. The answer is recorded with the channel it came through (mcp, or dots for the chatgpt channel). Pass idempotency_key to make a retry safe: the same key with the same answer returns the first result. A request that is operator_only is refused with decision_operator_only unless the call comes through a verified operator path; the attempt is kept and waits for that operator. An already answered or stale request returns the store's error code.",
+		Description: "Answer one open hk decision request by request id, with an option key or free text and an optional note. Uses the same store path and validation as the console answer. The answer is recorded with the channel it came through (mcp, or dots for the chatgpt channel). Pass idempotency_key to make a retry safe: the same key with the same answer returns the first result. A request that is operator_only refuses a dots answer with decision_operator_only unless the answer names the operator: provenance operator_decided, operator_quote with the operator's verbatim words, and decision_ref with the exact request_id. A quote bound to another request or revision is refused with provenance_ref_mismatch. Those refusals are kept as attempts and the request stays open. An already answered or stale request returns the store's error code.",
 		Annotations: writeAnnotations(),
 	}, o.decisionAnswer)
 	gmcp.AddTool(s, &gmcp.Tool{
@@ -113,7 +113,7 @@ func registerOperatorTools(s *gmcp.Server, service api.Service, p principal) {
 	}, o.taskUpdate)
 	gmcp.AddTool(s, &gmcp.Tool{
 		Name:        "decision_ask",
-		Description: "Ask the operator a structured decision on one hk task, recorded the same way as tasks decision-request. idempotency_key is required; a repeat returns the first result. The operator answers with decision_answer; a request marked operator-only (answer_policy operator_direct) cannot be answered from this channel.",
+		Description: "Ask the operator a structured decision on one hk task, recorded the same way as tasks decision-request. idempotency_key is required; a repeat returns the first result. The operator answers with decision_answer; a request marked operator-only (answer_policy operator_direct) closes only on the operator's own words.",
 		Annotations: writeAnnotations(),
 	}, o.decisionAsk)
 	gmcp.AddTool(s, &gmcp.Tool{
@@ -793,10 +793,18 @@ func sameOptionKeys(a []decisionOptionView, b []store.DecisionOption) bool {
 }
 
 type decisionAnswerInput struct {
-	RequestID      string `json:"request_id"`
-	Option         string `json:"option,omitempty"`
-	Text           string `json:"text,omitempty"`
-	Note           string `json:"note,omitempty"`
+	RequestID string `json:"request_id"`
+	Option    string `json:"option,omitempty"`
+	Text      string `json:"text,omitempty"`
+	Note      string `json:"note,omitempty"`
+	// On the dots channel, a request marked operator_only (operator_direct)
+	// closes only as the operator's own answer: provenance operator_decided,
+	// operator_quote with the operator's verbatim words, and decision_ref with
+	// the exact request id. Absent, the answer is dots' own judgement and the
+	// request refuses it. Any other channel refuses a claim.
+	Provenance     string `json:"provenance,omitempty"`
+	OperatorQuote  string `json:"operator_quote,omitempty"`
+	DecisionRef    string `json:"decision_ref,omitempty"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
@@ -828,13 +836,15 @@ func (o operatorTools) decisionAnswer(ctx context.Context, _ *gmcp.CallToolReque
 	if write.Key != "" {
 		eventKey = store.MCPDecisionEventKey(o.principal.Actor, write.Key)
 	}
-	// dots (the ChatGPT channel) never answers an operator-only request: the
-	// store refuses it under the task lock, with no attempt written.
+	// On the dots (ChatGPT) channel a request marked operator_only closes only
+	// as the operator's own words bound to this request; the store refuses
+	// every other dots answer under the task lock and keeps the refusal as an
+	// attempt (operator decision 399, hk 5132).
 	out, err := o.service.Store.ResolveDecision(ctx, store.ResolveDecisionInput{
 		RequestID: requestID, Kind: store.DecisionRequestAnswered, Option: option, Text: text,
 		Channel: o.principal.decisionChannel(), Actor: o.principal.Actor, Verified: o.principal.Access,
-		RefuseOperatorOnly: o.principal.Channel == ChannelChatGPT,
-		EventKey:           eventKey, Audit: &write,
+		Provenance: strings.TrimSpace(in.Provenance), OperatorQuote: in.OperatorQuote, DecisionRef: strings.TrimSpace(in.DecisionRef),
+		EventKey: eventKey, Audit: &write,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -843,9 +853,10 @@ func (o operatorTools) decisionAnswer(ctx context.Context, _ *gmcp.CallToolReque
 		return nil, nil, out.Refusal
 	}
 	if out.Result == store.DecisionResultPendingConfirmation {
-		// ResolveDecision recorded this attempt and left the request open: only a
-		// verified operator path closes an operator-only request. Refuse with the
-		// code rather than report a success-shaped result.
+		// ResolveDecision recorded this attempt and left the request open: only
+		// a verified operator path or a dots answer with the operator's words
+		// closes an operator-only request. Refuse with the code rather than
+		// report a success-shaped result.
 		return nil, nil, fmt.Errorf("%s: attempt %d waits for a verified operator answer", decisionOperatorOnlyCode, out.AttemptID)
 	}
 	return jsonResult(map[string]any{

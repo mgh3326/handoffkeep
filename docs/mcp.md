@@ -205,15 +205,25 @@ An Access identity becomes the principal `operator:<email>` with channel
   principal `operator:<email>` and channel `chatgpt` are recorded in the
   `mcp_write_audit` row and in the response, so the record reads as dots while
   the operator's own console writes keep `operator:<email>`.
-- `decision_answer` closes the request on the verified operator path with
-  actor `operator:<email>` and provenance `operator_direct`.
+- `decision_answer` closes the request with actor `operator:<email>` and, on an
+  ordinary request, provenance `operator_direct`. A request marked operator_only
+  (`answer_policy` `operator_direct`, `human_only`, or a disposition item) closes
+  through dots only when the answer names the operator: `provenance`
+  `operator_decided`, `operator_quote` with the operator's verbatim words, and
+  `decision_ref` with the exact `request_id`. The resolution then keeps channel
+  `dots` and provenance `operator_decided` (a relayed answer, not the verified
+  path); without the words, or with a ref that binds another request or
+  revision, the answer is refused (`decision_operator_only` or
+  `provenance_ref_mismatch`) and the refusal is kept as an attempt. A
+  disposition item is still answered only on the console.
 - `task_intake` records `source=chatgpt` and `dots` as `created_by`; the tool
   response reports the exact `operator:<email>` principal and the `chatgpt`
   channel.
 
 Decision answers record the actual MCP route: `mcp` for bearer callers and
 `dots` for the verified ChatGPT Access channel. A human-only request is refused
-to a bearer caller and can be answered only on a verified operator path.
+to a bearer caller and closes on a verified operator path or on a dots answer
+that carries the operator's words and the exact request id.
 
 ## Tools
 
@@ -235,7 +245,7 @@ file tasks, or attach files.
 | `decisions_pending` | read | none | Open structured requests with question, options (each with its `attachments`: `sha256`, `caption`, `mime`, `original_name`), `recommendation_reason`, `unverified`, `one_fix`, `question_ko`/`options_ko` when fresh (`options_ko` carries each option's key and translated label only; media and the recommendation are read from `options`), and state |
 | `decisions_history` | read | optional `cursor`, `limit` | Closed structured requests plus session decisions with reading, verbatim quote, decision time and ground links; each closed request carries the same option attachments, `recommendation_reason`, `unverified` and `one_fix`. One `next_cursor` pages both lists. A cursor issued before session decisions were paged carries only the task position, so the session list restarts at its newest record once (bounded by `limit`, self-corrects on the next cursor) |
 | `operator_attention` | read | none | Counts and bounded items for open decisions and tasks awaiting a decision or stalled |
-| `decision_answer` | write | `request_id`, `option` or `text`, optional `note`, optional `idempotency_key` | Store result with channel `mcp` or `dots`; an already answered or stale request returns its error code |
+| `decision_answer` | write | `request_id`, `option` or `text`, optional `note`, optional `idempotency_key`, and on the dots channel optional `provenance`/`operator_quote`/`decision_ref` for an operator-only request | Store result with channel `mcp` or `dots`; an operator-only request refuses a dots answer that lacks the operator's words and request id, keeping the refusal as an attempt; an already answered or stale request returns its error code |
 | `task_comment` | write | `id`, `body`, optional `idempotency_key` | The appended comment, its author, and `replayed` (a repeated key returns the comment it first made) |
 | `task_intake` | write | `title`, `body`, `project`, optional `lane`, optional `idempotency_key` | The triage task, `created`, and duplicate candidates found before filing; a repeated key returns the task that key first filed |
 | `task_update` | write | `id`, `expected_updated_at`, `idempotency_key`, one or more of `state`, `lane`, `priority`, optional `note` | `changed`, the new `revision`, `replayed`, `console_url` and `youtrack_sync`; a stale revision returns `revision_conflict` and writes nothing |
