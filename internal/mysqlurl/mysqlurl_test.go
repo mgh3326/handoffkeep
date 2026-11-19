@@ -7,6 +7,7 @@ import (
 )
 
 func TestParse(t *testing.T) {
+	t.Setenv(caPEMEnv, "")
 	cfg, err := Parse("mysql://test:password@localhost:3306/testdb?tls=true")
 	if err != nil {
 		t.Fatal(err)

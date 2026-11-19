@@ -68,3 +68,19 @@ binds are rejected.
 
 The existing `at-pg-backup` service includes the `handoffkeep` database. This
 repository intentionally ships no backup service or timer.
+
+### MySQL
+
+`HANDOFFKEEP_DB_URL` may be a `mysql://` URL. When the server certificate is
+signed by a private CA and carries no SAN (the endpoint is reached by IP), set
+both of these:
+
+- `HANDOFFKEEP_MYSQL_CA_PEM`: the PEM text of the CA. It may hold several
+  certificates.
+- `HANDOFFKEEP_MYSQL_SERVER_NAME`: the name the server certificate must carry,
+  in its CN or a DNS SAN. Required while the CA is set.
+
+With the CA set, every connection verifies the chain against that CA and the
+name above; the URL's `tls=` must be omitted or `hk-pinned`. Go's own check
+ignores the CN when there is no SAN, which is why the name check is done here.
+With the CA unset, the URL's `tls=` works as before.
