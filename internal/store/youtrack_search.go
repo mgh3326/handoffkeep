@@ -180,23 +180,37 @@ func (s *Store) YouTrackTaskHits(ctx context.Context, tenant string, issueIDs []
 // non-empty session keeps only documents in that session. Title is the
 // document key, as in the PostgreSQL search; Refs carries the linked tasks.
 func (s *Store) YouTrackDocHits(ctx context.Context, articleIDs []string, session string) (map[string]SearchResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		// Not ported to MySQL: full-text search, not ported (hk 4899 §6) (hk 5088).
-		return nil, ErrDialectUnsupported
-	}
-
 	out := map[string]SearchResult{}
 	if len(articleIDs) == 0 {
 		return out, nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT a.article_id,d.key,d.session,d.kind,d.created_at
+	var q string
+	var args []any
+	if s.dialect == mysqlDialect {
+		// MySQL has no youtrack_doc_articles (left out, design §2; it was
+		// empty in production at the cutover), so only the bindings answer
+		// (hk 5613). The search itself runs in YouTrack, not in the store.
+		args = make([]any, 0, len(articleIDs)+2)
+		for _, id := range articleIDs {
+			args = append(args, id)
+		}
+		args = append(args, session, session)
+		q = `SELECT b.article_id,d.key,d.session,d.kind,d.created_at
+			FROM yt_article_bindings b JOIN documents d ON d.id=b.document_id
+			WHERE b.article_id IN (` + inPlaceholders(s, len(articleIDs)) + `) AND (?='' OR d.session=?)
+			ORDER BY 1,2`
+	} else {
+		q = `SELECT a.article_id,d.key,d.session,d.kind,d.created_at
 		FROM youtrack_doc_articles a JOIN documents d ON d.key=COALESCE(NULLIF(a.document_key,''),a.doc_key)
 		WHERE a.article_id=ANY($1) AND ($2='' OR d.session=$2)
 		UNION ALL
 		SELECT b.article_id,d.key,d.session,d.kind,d.created_at
 		FROM yt_article_bindings b JOIN documents d ON d.id=b.document_id
 		WHERE b.article_id=ANY($1) AND ($2='' OR d.session=$2)
-		ORDER BY 1,2`, articleIDs, session)
+		ORDER BY 1,2`
+		args = []any{articleIDs, session}
+	}
+	rows, err := s.db().Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("youtrack doc hits: %w", err)
 	}
