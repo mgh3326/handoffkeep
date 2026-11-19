@@ -126,7 +126,16 @@ func TestJobOwnerTransferOnTerminal(t *testing.T) {
 	if j.OwnerNode != "node-b" || j.OwnerEpoch != 2 {
 		t.Fatalf("lost transfer: %+v", j)
 	}
-	if j.State != "lost" || string(j.Result) != string(before.Result) || j.Label != before.Label || j.EndedAt == nil || !j.EndedAt.Equal(*before.EndedAt) {
+	// Nil-safe: the terminal timestamps must match whether or not the
+	// client supplied one (absent stays absent).
+	sameTime := func(a, b *time.Time) bool {
+		if a == nil || b == nil {
+			return a == b
+		}
+		return a.Equal(*b)
+	}
+	if j.State != "lost" || string(j.Result) != string(before.Result) || j.Label != before.Label ||
+		!sameTime(j.EndedAt, before.EndedAt) || !sameTime(j.EndedReceivedAt, before.EndedReceivedAt) {
 		t.Fatalf("lost transfer changed the terminal record: before=%+v after=%+v", before, j)
 	}
 
