@@ -118,36 +118,46 @@ func (s *Store) DocumentKeyExists(ctx context.Context, key string) (bool, error)
 	return ok, nil
 }
 
-// YouTrackTaskHits maps YouTrack issue ids to the hk tasks they mirror in one
-// tenant, keyed by issue id. task_origins is unique on (namespace, external_id),
-// and the namespace is the tenant, so a mapping left by another YouTrack tenant
-// never answers. An issue with no mapping in this tenant is absent, so the
-// caller drops that hit. A non-empty lane keeps only tasks in that lane (the
-// session filter). Title and Snippet are left empty: YouTrack's own text fills
-// them. When two tasks mirror one issue in this tenant the lower task id wins.
+// YouTrackTaskHits maps issue ids to tasks through their verified bindings.
+// Older tasks that still have only a task_origins mirror remain searchable;
+// a binding takes precedence when both forms exist. A non-empty lane keeps
+// only tasks in that lane. YouTrack's own text fills Title and Snippet.
 func (s *Store) YouTrackTaskHits(ctx context.Context, tenant string, issueIDs []string, lane string) (map[string]SearchResult, error) {
 	out := map[string]SearchResult{}
 	if len(issueIDs) == 0 {
 		return out, nil
 	}
-	args := []any{issueIDs, tenant, lane}
+	args := []any{issueIDs, tenant, lane, issueIDs, tenant, lane}
 	if s.dialect == mysqlDialect {
-		// MySQL has no = ANY: the ids are an IN list, in statement order
-		// after the namespace, and the lane's predicate repeats it.
-		args = make([]any, 0, len(issueIDs)+3)
-		args = append(args, tenant)
-		for _, id := range issueIDs {
-			args = append(args, id)
+		// MySQL has no = ANY; each source has its own IN list and filters.
+		args = make([]any, 0, 2*len(issueIDs)+6)
+		for i := 0; i < 2; i++ {
+			args = append(args, tenant)
+			for _, id := range issueIDs {
+				args = append(args, id)
+			}
+			args = append(args, lane, lane)
 		}
-		args = append(args, lane, lane)
 	}
-	rows, err := s.db().Query(ctx, sqlFor(s, `SELECT o.external_id,t.id::text,t.lane,t.kind,`+taskRefsExpr+` refs,t.created_at
+	rows, err := s.db().Query(ctx, sqlFor(s, `SELECT issue_id,task_id,lane,kind,refs,created_at FROM (
+		SELECT b.issue_id,t.id::text AS task_id,t.id AS task_order,t.lane,t.kind,`+taskRefsExpr+` AS refs,t.created_at,0 AS source_order
+		FROM yt_task_bindings b JOIN tasks t ON t.id=b.task_id
+		WHERE b.tenant=$2 AND b.issue_id=ANY($1) AND ($3='' OR t.lane=$3)
+		UNION ALL
+		SELECT o.external_id,t.id::text,t.id,t.lane,t.kind,`+taskRefsExpr+`,t.created_at,1
 		FROM task_origins o JOIN tasks t ON t.id=o.task_id
-		WHERE o.provider='youtrack' AND o.namespace=$2 AND o.external_id=ANY($1) AND ($3='' OR t.lane=$3)
-		ORDER BY o.external_id,t.id`, `SELECT o.external_id,CAST(t.id AS CHAR),t.lane,t.kind,`+taskRefsExprMySQL+` refs,t.created_at
+		WHERE o.provider='youtrack' AND o.namespace=$5 AND o.external_id=ANY($4) AND ($6='' OR t.lane=$6)
+		AND NOT EXISTS (SELECT 1 FROM yt_task_bindings b WHERE b.task_id=o.task_id)
+		) hits ORDER BY issue_id,source_order,task_order`, `SELECT issue_id,task_id,lane,kind,refs,created_at FROM (
+		SELECT b.issue_id,CAST(t.id AS CHAR) AS task_id,t.id AS task_order,t.lane,t.kind,`+taskRefsExprMySQL+` AS refs,t.created_at,0 AS source_order
+		FROM yt_task_bindings b JOIN tasks t ON t.id=b.task_id
+		WHERE b.tenant=? AND b.issue_id IN (`+placeholders(len(issueIDs))+`) AND (?='' OR t.lane=?)
+		UNION ALL
+		SELECT o.external_id,CAST(t.id AS CHAR),t.id,t.lane,t.kind,`+taskRefsExprMySQL+`,t.created_at,1
 		FROM task_origins o JOIN tasks t ON t.id=o.task_id
 		WHERE o.provider='youtrack' AND o.namespace=? AND o.external_id IN (`+placeholders(len(issueIDs))+`) AND (?='' OR t.lane=?)
-		ORDER BY o.external_id,t.id`), args...)
+		AND NOT EXISTS (SELECT 1 FROM yt_task_bindings b WHERE b.task_id=o.task_id)
+		) hits ORDER BY issue_id,source_order,task_order`), args...)
 	if err != nil {
 		return nil, fmt.Errorf("youtrack task hits: %w", err)
 	}

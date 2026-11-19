@@ -10,9 +10,11 @@ import (
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/api"
 	"github.com/mgh3326/handoffkeep/internal/store"
 	"github.com/mgh3326/handoffkeep/internal/testdb"
+	"github.com/mgh3326/handoffkeep/internal/youtrack"
 	gmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -98,6 +100,50 @@ func newOperatorTask(t *testing.T, st *store.Store, title string) store.Task {
 		t.Fatal(err)
 	}
 	return task
+}
+
+func TestDuplicateCandidatesUseYouTrackBindingSearch(t *testing.T) {
+	_, dbURL := testdb.Schema(t, "mcp_duplicate_binding")
+	st, err := store.Open(context.Background(), dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	pool, err := pgxpool.New(context.Background(), dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	task := newOperatorTask(t, st, "Binding backed duplicate candidate")
+	issueID := "3-" + fmt.Sprint(task.ID)
+	if _, err := pool.Exec(context.Background(), `INSERT INTO yt_task_bindings(task_id,tenant,issue_id,project_id,bound_by,bound_at) VALUES($1,'tenant',$2,'0-99','test',now())`, task.ID, issueID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutYouTrackProject(context.Background(), store.YouTrackProject{HKProject: "mcp-project", ShortName: "HK"}); err != nil {
+		t.Fatal(err)
+	}
+	ytHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/issues" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"` + issueID + `","idReadable":"HK-` + fmt.Sprint(task.ID) + `","summary":"existing"}]`))
+	}))
+	defer ytHTTP.Close()
+	client, err := youtrack.New(youtrack.Config{BaseURL: ytHTTP.URL, Token: "test", HTTPClient: ytHTTP.Client(), MaxRetries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	search := youtrack.NewService(st, client, youtrack.Options{Tenant: "tenant"})
+	o := operatorTools{service: api.Service{Store: st, YouTrack: search, SearchBackend: "youtrack"}}
+	candidates, err := o.duplicateCandidates(context.Background(), task.Title+" additional", task.Lane)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].ID != task.ID {
+		t.Fatalf("duplicate candidates = %+v, want bound task %d", candidates, task.ID)
+	}
 }
 
 type taskSummaryOut struct {

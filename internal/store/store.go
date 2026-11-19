@@ -871,7 +871,11 @@ type SearchResult struct {
 	Refs    Refs   `json:"refs,omitempty"`
 	// Truncated is set on every row of a page that was cut at the result cap,
 	// so a truncated page is never presented as the complete result set.
-	Truncated bool      `json:"truncated,omitempty"`
+	Truncated bool `json:"truncated,omitempty"`
+	// Partial and TimedOut identify rows returned by an all-scope search whose
+	// YouTrack lane exceeded its deadline. They are additive wire fields.
+	Partial   bool      `json:"partial,omitempty"`
+	TimedOut  bool      `json:"timed_out,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 

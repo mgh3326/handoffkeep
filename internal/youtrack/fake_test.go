@@ -21,6 +21,7 @@ type fakeStore struct {
 	projects    map[string]store.YouTrackProject
 	docs        map[string]store.Document
 	docArticles map[string]store.YouTrackDocArticle
+	ctxHits     []store.SearchResult
 	nextTaskID  int64
 }
 

@@ -105,7 +105,7 @@ func (f *fakeStore) ExactDocHit(_ context.Context, key, session string) ([]store
 }
 
 func (f *fakeStore) SearchCtx(_ context.Context, q, session string, limit int) ([]store.SearchResult, error) {
-	return []store.SearchResult{}, nil
+	return append([]store.SearchResult(nil), f.ctxHits...), nil
 }
 
 // fakeSearchYT answers /api/issues and /api/articles, honouring $top, and
@@ -375,6 +375,23 @@ func TestSearchErrorsImmediatelyOnYouTrackFailure(t *testing.T) {
 				t.Fatalf("got err %v, want %v", err, c.wantErr)
 			}
 		})
+	}
+}
+
+func TestSearchAllTimeoutReturnsAvailableContextAsPartial(t *testing.T) {
+	yt := &fakeSearchYT{delay: 2 * time.Second}
+	fs, svc := newSearchTest(t, yt, 20*time.Millisecond)
+	fs.ctxHits = []store.SearchResult{{Scope: "ctx", Key: "memory/available", Title: "available context"}}
+	if err := fs.PutYouTrackProject(context.Background(), store.YouTrackProject{HKProject: "handoffkeep", ShortName: "HK"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := svc.Search(context.Background(), "timeout probe", "all", "", 20)
+	if err != nil {
+		t.Fatalf("scope all timed out: %v", err)
+	}
+	if len(got) != 1 || got[0].Key != "memory/available" || !got[0].Partial || !got[0].TimedOut {
+		t.Fatalf("partial timeout results = %+v, want available context marked partial and timed_out", got)
 	}
 }
 
