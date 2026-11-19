@@ -66,6 +66,29 @@ func TestYouTrackTaskHitsMapIssuesAndFilterByLane(t *testing.T) {
 	}
 }
 
+func TestYouTrackTaskHitsUseBindingWithoutOrigin(t *testing.T) {
+	s := schemaStore(t, "youtrack_search_binding")
+	ctx := context.Background()
+	task := youtrackTask(t, s, "binding-search-lane", "binding only task")
+	issueID := "9-binding-" + strconv.FormatInt(task.ID, 10)
+	ytFeedExec(t, s, `INSERT INTO yt_task_bindings(task_id,tenant,issue_id,project_id,bound_by,bound_at) VALUES($1,$2,$3,'0-99','test',now())`, task.ID, "tenant", issueID)
+	if n := ytcCount(t, s, `SELECT count(*) FROM task_origins WHERE task_id=$1`, task.ID); n != 0 {
+		t.Fatalf("task_origins rows = %d, want none", n)
+	}
+
+	hits, err := s.YouTrackTaskHits(ctx, "tenant", []string{issueID}, "binding-search-lane")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hit, ok := hits[issueID]; !ok || hit.Key != strconv.FormatInt(task.ID, 10) || hit.Session != task.Lane {
+		t.Fatalf("binding hit = %+v, present=%v; want task %d", hit, ok, task.ID)
+	}
+	otherTenant, err := s.YouTrackTaskHits(ctx, "other-tenant", []string{issueID}, "")
+	if err != nil || len(otherTenant) != 0 {
+		t.Fatalf("other tenant hits=%+v err=%v; want none", otherTenant, err)
+	}
+}
+
 func TestYouTrackDocHitsMapArticlesAndFilterBySession(t *testing.T) {
 	s := schemaStore(t, "youtrack_search_docs")
 	ctx := context.Background()

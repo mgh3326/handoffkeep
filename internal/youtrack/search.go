@@ -127,6 +127,7 @@ func (s *Service) Search(ctx context.Context, q, scope, session string, limit in
 	var issues []Issue
 	var articles []Article
 	var err error
+	timedOut := false
 	if len(names) > 0 {
 		issues, err = s.client.SearchIssues(yctx, issueSearchQuery(names, text), limit+1)
 	}
@@ -138,10 +139,17 @@ func (s *Service) Search(ctx context.Context, q, scope, session string, limit in
 	}
 	if err != nil {
 		log.Printf("search.youtrack_error reason=%s scope=%q err=%v", searchFailureReason(yctx, err), scope, err)
-		if errors.Is(yctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return nil, store.ErrSearchTimeout
+		if errors.Is(yctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+			if scope != "all" || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return nil, store.ErrSearchTimeout
+			}
+			// Scope all has independent local context results. Keep any YouTrack
+			// lane that completed before the shared deadline and mark the page.
+			timedOut = true
+			err = nil
+		} else {
+			return nil, store.ErrSearchUnavailable
 		}
-		return nil, store.ErrSearchUnavailable
 	}
 
 	var lanes [][]store.SearchResult
@@ -205,6 +213,8 @@ func (s *Service) Search(ctx context.Context, q, scope, session string, limit in
 	}
 	for i := range merged {
 		merged[i].Truncated = truncated
+		merged[i].Partial = timedOut
+		merged[i].TimedOut = timedOut
 	}
 	return merged, nil
 }
