@@ -110,7 +110,7 @@ Submit ─► prepared ─Claim─► dispatched ─┬─ 2xx + valid id ──
   (`notSent`) both defer it through the same `Ledger.Defer` a 429 uses, so its
   accounting is the 429's: `Defer` leaves `attempts` as the claim set it, and each
   dispatch counts one attempt, as it does for a 429. Ops already rejected during a
-  window are not requeued by this change; that is an operator's backfill.
+  window are requeued by `handoffkeep youtrack ops requeue` (hk 5506, below).
 - **Caller cancellation never cancels a write or its reconciliation**: everything
   after the claim runs on a context detached from the caller's. Each step is
   still bounded: the remote call by `DispatchTimeout`, and recording its outcome
@@ -386,6 +386,36 @@ and times; never the body or the key. A full page carries `next_after_id`.
 [--adopted]` or `… --not-applied --by <name> --note <text>` posts the decision
 through `POST /v1/yt/ops/{id}/resolve` (operator bearer only). It refuses an op
 that is not `remote_unknown` (409 `ytwrite_state`) and never resends.
+
+**Read-only requeue** (`handoffkeep youtrack ops requeue`, hk 5506). Before
+hk 5494 a read-only 418 rejected the op it refused, and `rejected` is terminal.
+`youtrack ops requeue [--op N ...] [--after-id N] [--limit N] --by <name>
+[--apply]`, run in the serving container, returns such an op to `prepared`
+with the same id, key and payload, and the dispatcher sends it once more. Without
+`--apply` it lists what it would requeue (JSON) and writes nothing. Every other
+rejected op is listed `not_eligible` with its reason and is not changed.
+
+An op is eligible when it is `rejected`, its reason is `http_418`, its recorded
+error is the read-only answer (`ytwrite.RecordedReadOnly`, the match 418
+`invalid_state` that `readOnlyRefusal` uses, parsed back from the stored text),
+its kind is `comment_append` or `article_create`, its payload is held (a redacted
+payload sends an empty plan), and it was never reconciled. A comment op must
+still be the link's op (`yt_comment_write_links`); a copy made by the moved-comment
+requeue supersedes it. The worker's own admission (`ytAdmitSQL`, the SQL `Due`
+and `Claim` use) must admit it under the comment and document modes the CLI reads
+from the same environment, so a binding that moved, a mode that is off or a
+document bound to another op is `not_eligible` rather than stranded `prepared`.
+The planned kinds (`issue_links`, `issue_move`, `article_split`) send several
+steps, so a refusal can follow an applied step; they stay rejected.
+
+Each requeue runs in one transaction under the entity's lane lock and the
+authority share, as `prepareYTOpTx` does. It writes a `yt_write_op_requeues`
+row (who, when, and the rejected row's reason, error, attempts and
+`resolved_at`) and moves the op with a compare-and-set on `state='rejected'`,
+`reason='http_418'` and its attempts. The guard (`handoffkeep_yt_write_ops_guard`,
+migration `20261120-yt-write-op-requeue`, MySQL trigger `yt_write_ops_guard_update`)
+allows that one move and nothing else out of `rejected`. A second `--apply`
+requeues nothing, since the op is `prepared`.
 
 **Held-op recovery** (`store.RecoverHeldYTOps`, hk 4491). A task's
 `yt_task_bindings` row admits its hk comment, `issue_fields` and `issue_move`

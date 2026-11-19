@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -450,6 +451,54 @@ const readOnlyCode = "invalid_state"
 // request was not processed, so the op waits as a 429 does.
 func readOnlyRefusal(re *RemoteError) bool {
 	return re.Status == http.StatusTeapot && re.Code == readOnlyCode
+}
+
+// RecordedReadOnly reports whether a rejected op's recorded reason and error
+// are the read-only answer readOnlyRefusal matches (hk 5506). writeFailed
+// records re.Error() as last_error, so the status and code are parsed back out
+// of that text, anchored on its hk-authored prefix, and the same predicate
+// decides. Any other reason, shape or code is false.
+func RecordedReadOnly(reason, recorded string) bool {
+	if reason != "http_"+strconv.Itoa(http.StatusTeapot) {
+		return false
+	}
+	re, ok := parseRecordedRefusal(recorded)
+	return ok && readOnlyRefusal(re)
+}
+
+// parseRecordedRefusal reads the status and code back out of a recorded
+// RemoteError.Error(): "youtrack answered <status>: youtrack <METHOD> <path>:
+// <status> <code>[: <description>]" (APIError.Error, internal/youtrack). A
+// path has no ": " in it, so the first two separators split the text. The
+// code is the second field of the APIError status segment; a description
+// that happens to contain the code text is never read as one.
+func parseRecordedRefusal(recorded string) (*RemoteError, bool) {
+	rest, ok := strings.CutPrefix(recorded, "youtrack answered ")
+	if !ok {
+		return nil, false
+	}
+	statusText, apiText, ok := strings.Cut(rest, ": ")
+	if !ok {
+		return nil, false
+	}
+	status, err := strconv.Atoi(statusText)
+	if err != nil {
+		return nil, false
+	}
+	apiHead, apiTail, ok := strings.Cut(apiText, ": ")
+	if !ok || !strings.HasPrefix(apiHead, "youtrack ") {
+		return nil, false
+	}
+	segment, _, _ := strings.Cut(apiTail, ": ")
+	fields := strings.Fields(segment)
+	if len(fields) != 2 {
+		return nil, false
+	}
+	apiStatus, err := strconv.Atoi(fields[0])
+	if err != nil || apiStatus != status {
+		return nil, false
+	}
+	return &RemoteError{Status: status, Code: fields[1]}, true
 }
 
 // readOnlyWait is the wait for a read-only refusal: the server's Retry-After
