@@ -1068,13 +1068,16 @@ func (w ytOpsAlertWorker) Run(ctx context.Context) {
 	}
 }
 
-const youtrackOpsUsage = "usage: youtrack ops [--state pending|all|prepared|dispatched|applied|rejected|remote_unknown] [--kind K] [--task N] [--after-id N] [--limit N] | youtrack ops resolve <op id> --applied <youtrack id> [--adopted] | --not-applied --by <actor> --note <text>"
+const youtrackOpsUsage = "usage: youtrack ops [--state pending|all|prepared|dispatched|applied|rejected|remote_unknown] [--kind K] [--task N] [--after-id N] [--limit N] | youtrack ops resolve <op id> --applied <youtrack id> [--adopted] | --not-applied --by <actor> --note <text> | youtrack ops requeue [--op N ...] [--after-id N] --by <actor> [--apply]"
 
 // youtrackOpsCmd is `youtrack ops` (also `yt ops`): the write-protocol ops
 // through GET /v1/yt/ops. remote_unknown shows status pending, never done.
 func youtrackOpsCmd(args []string, out io.Writer) error {
 	if len(args) > 0 && args[0] == "resolve" {
 		return youtrackOpsResolveCmd(args[1:], out)
+	}
+	if len(args) > 0 && args[0] == "requeue" {
+		return youtrackOpsRequeueCmd(args[1:], out)
 	}
 	fs := flag.NewFlagSet("youtrack ops", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
