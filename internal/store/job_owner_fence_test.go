@@ -1,8 +1,10 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
 // requireOwnerMismatch asserts err is a fence refusal naming want as the
@@ -104,5 +106,94 @@ func TestJobOwnerFenceTerminalLateWrite(t *testing.T) {
 	j := jobContextUpdate(t, s, "job-late-fence", JobUpdate{Usage: usage, ExpectedOwner: &JobOwner{Node: "node-a", Epoch: 1}})
 	if j.Usage == nil || *j.Usage.InputTokens != 7 {
 		t.Fatalf("owner late write refused: %+v", j.Usage)
+	}
+}
+
+// A terminal record takes an owner-only transfer when expected_owner matches
+// and the epoch moves forward (hk 5303). The transfer changes only the owner:
+// state, result and every other field stay as they were.
+func TestJobOwnerTransferOnTerminal(t *testing.T) {
+	s := schemaStore(t, "job_owner_fence_terminal_transfer")
+	ctx := t.Context()
+
+	// lost: the claim ends without a spawn.
+	jobContextClaim(t, s, "job-lost-xfer", nil)
+	jobContextUpdate(t, s, "job-lost-xfer", JobUpdate{Owner: &JobOwner{Node: "node-a", Epoch: 1}, ExpectedOwner: &JobOwner{}})
+	endedAt := time.Now().UTC()
+	jobContextUpdate(t, s, "job-lost-xfer", JobUpdate{State: strptr("lost"), At: &endedAt})
+	before, _, _ := s.GetJob(ctx, "job-lost-xfer")
+	j := jobContextUpdate(t, s, "job-lost-xfer", JobUpdate{Owner: &JobOwner{Node: "node-b", Epoch: 2}, ExpectedOwner: &JobOwner{Node: "node-a", Epoch: 1}})
+	if j.OwnerNode != "node-b" || j.OwnerEpoch != 2 {
+		t.Fatalf("lost transfer: %+v", j)
+	}
+	// Nil-safe: the terminal timestamps must match whether or not the
+	// client supplied one (absent stays absent).
+	sameTime := func(a, b *time.Time) bool {
+		if a == nil || b == nil {
+			return a == b
+		}
+		return a.Equal(*b)
+	}
+	if j.State != "lost" || string(j.Result) != string(before.Result) || j.Label != before.Label ||
+		!sameTime(j.EndedAt, before.EndedAt) || !sameTime(j.EndedReceivedAt, before.EndedReceivedAt) {
+		t.Fatalf("lost transfer changed the terminal record: before=%+v after=%+v", before, j)
+	}
+	// The owner-only transfer keeps the stored updated_at: only the owner moved.
+	if !j.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("owner-only transfer advanced updated_at: before=%v after=%v", before.UpdatedAt, j.UpdatedAt)
+	}
+
+	// completed: the claim spawned and then completed.
+	jobContextClaim(t, s, "job-done-xfer", nil)
+	jobContextUpdate(t, s, "job-done-xfer", JobUpdate{Owner: &JobOwner{Node: "node-a", Epoch: 1}, ExpectedOwner: &JobOwner{}})
+	jobContextUpdate(t, s, "job-done-xfer", JobUpdate{State: strptr("spawned")})
+	jobContextUpdate(t, s, "job-done-xfer", JobUpdate{State: strptr("completed")})
+	j = jobContextUpdate(t, s, "job-done-xfer", JobUpdate{Owner: &JobOwner{Node: "node-b", Epoch: 2}, ExpectedOwner: &JobOwner{Node: "node-a", Epoch: 1}})
+	if j.OwnerNode != "node-b" || j.OwnerEpoch != 2 || j.State != "completed" {
+		t.Fatalf("completed transfer: %+v", j)
+	}
+	// The new owner's own late write lands on the transferred record.
+	usage := &JobUsage{InputTokens: func() *int64 { n := int64(3); return &n }()}
+	j = jobContextUpdate(t, s, "job-done-xfer", JobUpdate{Usage: usage, ExpectedOwner: &JobOwner{Node: "node-b", Epoch: 2}})
+	if j.Usage == nil || *j.Usage.InputTokens != 3 {
+		t.Fatalf("new owner late write refused: %+v", j.Usage)
+	}
+}
+
+// An owner write on a terminal record is refused without expected_owner, with
+// a stale one, and when combined with any other field (hk 5303).
+func TestJobOwnerTransferOnTerminalRefusals(t *testing.T) {
+	s := schemaStore(t, "job_owner_fence_terminal_refuse")
+	ctx := t.Context()
+	jobContextClaim(t, s, "job-refuse", nil)
+	jobContextUpdate(t, s, "job-refuse", JobUpdate{Owner: &JobOwner{Node: "node-a", Epoch: 1}, ExpectedOwner: &JobOwner{}})
+	jobContextUpdate(t, s, "job-refuse", JobUpdate{State: strptr("lost")})
+	before, _, _ := s.GetJob(ctx, "job-refuse")
+
+	// Unfenced: an owner write on a terminal record needs expected_owner.
+	_, err := s.UpdateJob(ctx, "job-refuse", JobUpdate{Owner: &JobOwner{Node: "node-b", Epoch: 2}})
+	if !errors.Is(err, ErrJobStateConflict) {
+		t.Fatalf("unfenced terminal transfer: want job_state_conflict, got %v", err)
+	}
+
+	// Stale: the condition names node-b, the record is owned by node-a.
+	_, err = s.UpdateJob(ctx, "job-refuse", JobUpdate{Owner: &JobOwner{Node: "node-c", Epoch: 2}, ExpectedOwner: &JobOwner{Node: "node-b", Epoch: 1}})
+	requireOwnerMismatch(t, err, JobOwner{Node: "node-a", Epoch: 1})
+
+	// Combined with a state, a result or a late write: refused, nothing lands.
+	combined := []JobUpdate{
+		{Owner: &JobOwner{Node: "node-b", Epoch: 2}, ExpectedOwner: &JobOwner{Node: "node-a", Epoch: 1}, Label: strptr("moved")},
+		{Owner: &JobOwner{Node: "node-b", Epoch: 2}, ExpectedOwner: &JobOwner{Node: "node-a", Epoch: 1}, State: strptr("escalated")},
+		{Owner: &JobOwner{Node: "node-b", Epoch: 2}, ExpectedOwner: &JobOwner{Node: "node-a", Epoch: 1}, State: strptr("completed"), Result: json.RawMessage(`{"ok":true}`)},
+		{Owner: &JobOwner{Node: "node-b", Epoch: 2}, ExpectedOwner: &JobOwner{Node: "node-a", Epoch: 1}, Usage: &JobUsage{InputTokens: func() *int64 { n := int64(9); return &n }()}},
+	}
+	for i, u := range combined {
+		if _, err := s.UpdateJob(ctx, "job-refuse", u); !errors.Is(err, ErrJobStateConflict) {
+			t.Fatalf("combined %d: want job_state_conflict, got %v", i, err)
+		}
+	}
+	after, _, _ := s.GetJob(ctx, "job-refuse")
+	if after.OwnerNode != "node-a" || after.OwnerEpoch != 1 || after.State != "lost" || after.Label != before.Label || after.Usage != nil || string(after.Result) != string(before.Result) {
+		t.Fatalf("refused terminal transfer applied: before=%+v after=%+v", before, after)
 	}
 }
