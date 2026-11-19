@@ -12,7 +12,8 @@ OCI Object Storage is deleted only after hk has recorded the archive (mode
 
 An attachment is a candidate when every hk task that refers to it is closed
 (merged, deployed, completed, dropped or duplicate) and the most recent of
-those closes is at least 7 days old. "Refers to" means a `task` ref or a
+those closes is at least the grace old: 7 days by default, set by
+`HANDOFFKEEP_ATTACH_ARCHIVE_GRACE` (below). "Refers to" means a `task` ref or a
 `document` ref whose document belongs to a task.
 
 It is never a candidate when it has a ref of another kind (memory, checkpoint,
@@ -174,6 +175,11 @@ that stops logs `.candidate_failed`, `.download_failed`, `.write_failed`,
 - `on`: hk records the archive and then deletes the hot object. The delete runs
   after the record commits; a failed delete is retried by the next call and
   reported, never silently ignored.
+
+`HANDOFFKEEP_ATTACH_ARCHIVE_GRACE` (read at serve start, next to the mode) sets
+the grace: a Go duration such as `24h` or `168h`. Unset means 7 days. A value
+that does not parse, or is below `1h`, stops the server at start. It moves only
+the candidate cutoff; the rule is otherwise unchanged.
 
 Once recorded, reads of the attachment answer `410 attachment_archived` with
 the location and sha on the download route, say "archived at `<location>`" in

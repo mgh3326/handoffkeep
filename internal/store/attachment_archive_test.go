@@ -229,3 +229,17 @@ func TestAttachmentArchiveRecordChecksAndIdempotency(t *testing.T) {
 		t.Fatalf("hot_deleted_at=%v, want the first mark", row.HotDeletedAt)
 	}
 }
+
+// The candidate cutoff is now minus the grace in force, and SetAttachmentArchiveGrace
+// replaces the 7-day default (HANDOFFKEEP_ATTACH_ARCHIVE_GRACE at serve start).
+func TestAttachmentArchiveCutoffHonoursSetGrace(t *testing.T) {
+	t.Cleanup(func() { SetAttachmentArchiveGrace(AttachmentArchiveGrace) })
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	if got, want := attachmentArchiveCutoff(now), now.Add(-7*24*time.Hour); !got.Equal(want) {
+		t.Fatalf("default cutoff = %v, want %v", got, want)
+	}
+	SetAttachmentArchiveGrace(24 * time.Hour)
+	if got, want := attachmentArchiveCutoff(now), now.Add(-24*time.Hour); !got.Equal(want) {
+		t.Fatalf("set cutoff = %v, want %v", got, want)
+	}
+}
