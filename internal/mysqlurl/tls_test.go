@@ -254,3 +254,45 @@ func TestParseTLSParameterWithoutCAIsUnchanged(t *testing.T) {
 		t.Fatalf("TLSConfig = %q, want the URL value unchanged", cfg.TLSConfig)
 	}
 }
+
+// The driver drops TLS and connects in plaintext when allowFallbackToPlaintext
+// is on and the server offers no SSL, so the pin refuses it. The check runs
+// through the DSN round trip the store uses.
+func TestPinnedRefusesFallbackToPlaintext(t *testing.T) {
+	ca := newTestCA(t, "hk-test-ca")
+	t.Setenv(caPEMEnv, ca.pemText)
+	t.Setenv(serverNameEnv, testServerName)
+	for _, value := range []string{"true", "1", "TRUE"} {
+		raw := "mysql://u:p@127.0.0.1:3306/db?tls=hk-pinned&allowFallbackToPlaintext=" + value
+		if _, err := Parse(raw); err == nil {
+			t.Fatalf("Parse(%q) accepted allowFallbackToPlaintext=%s while the CA is pinned", raw, value)
+		}
+	}
+	cfg, err := Parse("mysql://u:p@127.0.0.1:3306/db?allowFallbackToPlaintext=false")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dsn, err := mysql.ParseDSN(cfg.FormatDSN())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dsn.TLS == nil || dsn.AllowFallbackToPlaintext {
+		t.Fatalf("round trip with allowFallbackToPlaintext=false: TLS nil=%v fallback=%v", dsn.TLS == nil, dsn.AllowFallbackToPlaintext)
+	}
+}
+
+// With the CA unset the parameter passes through as before.
+func TestFallbackToPlaintextUnchangedWithoutCA(t *testing.T) {
+	unsetCA(t)
+	cfg, err := Parse("mysql://u:p@127.0.0.1:3306/db?allowFallbackToPlaintext=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dsn, err := mysql.ParseDSN(cfg.FormatDSN())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dsn.AllowFallbackToPlaintext {
+		t.Fatal("round trip dropped allowFallbackToPlaintext=true with the CA unset")
+	}
+}

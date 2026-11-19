@@ -64,6 +64,9 @@ func Parse(raw string) (*mysql.Config, error) {
 		if cfg.TLSConfig != "" && cfg.TLSConfig != pinnedTLSName {
 			return nil, fmt.Errorf("mysql URL tls=%q conflicts with %s; use tls=%s or omit tls", cfg.TLSConfig, caPEMEnv, pinnedTLSName)
 		}
+		if err := checkPinnedParams(cfg.Params); err != nil {
+			return nil, err
+		}
 		cfg.TLSConfig = pinnedTLSName
 	}
 	cfg.Params["time_zone"] = "'+00:00'"

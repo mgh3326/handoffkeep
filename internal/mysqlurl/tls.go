@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/go-sql-driver/mysql"
@@ -56,6 +57,21 @@ func pinnedTLS() (*tls.Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// checkPinnedParams refuses a URL parameter that would let the driver leave the
+// pinned TLS config. With allowFallbackToPlaintext on, the driver drops TLS and
+// connects in plaintext when the server greeting offers no SSL, which would
+// bypass the pin. Only an explicit false is allowed.
+func checkPinnedParams(params map[string]string) error {
+	v, ok := params["allowFallbackToPlaintext"]
+	if !ok {
+		return nil
+	}
+	if on, err := strconv.ParseBool(v); err == nil && !on {
+		return nil
+	}
+	return fmt.Errorf("mysql URL parameter allowFallbackToPlaintext is not allowed while %s is set", caPEMEnv)
 }
 
 // verifyPinned accepts the server only when its leaf chains to roots and the
