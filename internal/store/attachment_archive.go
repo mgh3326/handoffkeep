@@ -4,14 +4,32 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"sync/atomic"
 	"time"
 )
 
-// AttachmentArchiveGrace is how long every referring task must have been
-// closed before an attachment is archivable (design/2026-11-16/
-// hk-attachment-archive, decision/2026-11-09/hk-file-gateway §4). The clock
-// and the cutoff are passed in, so a reader and the record see one now.
+// AttachmentArchiveGrace is the default grace: how long every referring task
+// must have been closed before an attachment is archivable (design/2026-11-16/
+// hk-attachment-archive, decision/2026-11-09/hk-file-gateway §4). The serve
+// start may replace it with SetAttachmentArchiveGrace (HANDOFFKEEP_ATTACH_
+// ARCHIVE_GRACE). The clock and the cutoff are passed in, so a reader and the
+// record see one now.
 const AttachmentArchiveGrace = 7 * 24 * time.Hour
+
+// attachmentArchiveGrace is the grace in force, in nanoseconds.
+var attachmentArchiveGrace atomic.Int64
+
+func init() { attachmentArchiveGrace.Store(int64(AttachmentArchiveGrace)) }
+
+// SetAttachmentArchiveGrace sets the grace the candidate cutoff uses. It is
+// called once at serve start, before any archive request.
+func SetAttachmentArchiveGrace(d time.Duration) { attachmentArchiveGrace.Store(int64(d)) }
+
+// attachmentArchiveCutoff is the latest close that still counts as old enough
+// at now.
+func attachmentArchiveCutoff(now time.Time) time.Time {
+	return now.UTC().Add(-time.Duration(attachmentArchiveGrace.Load()))
+}
 
 // AttachmentArchiveCandidateTask is one task that refers to an attachment.
 // ClosedAt is the task's last transition into a settled state, read from
@@ -198,10 +216,11 @@ func (s *Store) ListAttachmentArchiveCandidates(ctx context.Context, limit int, 
 // a full page from the last one.
 func attachmentArchiveCandidates(ctx context.Context, q poolQuerier, limit int, after, sha string, now time.Time) ([]AttachmentArchiveCandidate, string, error) {
 	now = now.UTC()
-	query, args := attachmentArchiveCandidatesSQL, []any{now, now.Add(-AttachmentArchiveGrace), after, sha, limit + 1}
+	cutoff := attachmentArchiveCutoff(now)
+	query, args := attachmentArchiveCandidatesSQL, []any{now, cutoff, after, sha, limit + 1}
 	if dialectFor(q) == mysqlDialect {
 		// The text's placeholders in order: cutoff, now, after twice, sha twice, limit.
-		query, args = attachmentArchiveCandidatesMySQL, []any{now.Add(-AttachmentArchiveGrace), now, after, after, sha, sha, limit + 1}
+		query, args = attachmentArchiveCandidatesMySQL, []any{cutoff, now, after, after, sha, sha, limit + 1}
 	}
 	rows, err := q.Query(ctx, query, args...)
 	if err != nil {

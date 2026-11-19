@@ -443,6 +443,11 @@ func NewFromEnv(s *store.Store) (*Manager, error) {
 	if e != nil {
 		return nil, e
 	}
+	grace, e := ArchiveGraceFromEnv()
+	if e != nil {
+		return nil, e
+	}
+	store.SetAttachmentArchiveGrace(grace)
 	m := &Manager{Store: s, Config: cfg, Enabled: on, ArchiveMode: mode}
 	if !on {
 		return m, nil

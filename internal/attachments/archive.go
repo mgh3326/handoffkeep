@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -60,6 +61,28 @@ func ArchiveModeFromEnv() (ArchiveMode, error) {
 		return ArchiveModeOn, nil
 	}
 	return "", fmt.Errorf("HANDOFFKEEP_ATTACH_ARCHIVE_MODE=%q: want off, record or on", raw)
+}
+
+// minArchiveGrace is the smallest HANDOFFKEEP_ATTACH_ARCHIVE_GRACE a start
+// accepts.
+const minArchiveGrace = time.Hour
+
+// ArchiveGraceFromEnv reads HANDOFFKEEP_ATTACH_ARCHIVE_GRACE, a Go duration
+// (e.g. 24h, 168h): unset or blank is the store's default (7 days), a value
+// that does not parse or is below one hour is a start error.
+func ArchiveGraceFromEnv() (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_ATTACH_ARCHIVE_GRACE"))
+	if raw == "" {
+		return store.AttachmentArchiveGrace, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("HANDOFFKEEP_ATTACH_ARCHIVE_GRACE=%q: want a Go duration such as 24h: %w", raw, err)
+	}
+	if d < minArchiveGrace {
+		return 0, fmt.Errorf("HANDOFFKEEP_ATTACH_ARCHIVE_GRACE=%q: want at least %s", raw, minArchiveGrace)
+	}
+	return d, nil
 }
 
 // Candidates pages the blobs whose referring tasks are all closed and whose

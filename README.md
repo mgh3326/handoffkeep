@@ -798,8 +798,10 @@ extensions are rejected. Objects are never made public.
 `HANDOFFKEEP_ATTACH_ARCHIVE_MODE` (read at serve start, default `off`) governs
 archiving a blob once every task that refers to it is closed — merged,
 deployed, completed, dropped or duplicate — and the latest close is at least
-seven days old. `off` refuses the archive route; `record` records the verified
-archive location and keeps the hot copy (the canary); `on` records it and then
+the grace old (seven days unless `HANDOFFKEEP_ATTACH_ARCHIVE_GRACE` sets a
+Go duration of at least `1h`, read at serve start). `off` refuses the archive
+route; `record` records the verified archive location and keeps the hot copy
+(the canary); `on` records it and then
 deletes the hot object. A failed delete is logged as
 `attach.archive.hot_delete_failed` and retried by the next archive call for that
 sha. `GET /v1/attachments/archive-candidates?limit=&after=` pages what may be
