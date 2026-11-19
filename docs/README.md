@@ -68,3 +68,20 @@ binds are rejected.
 
 The existing `at-pg-backup` service includes the `handoffkeep` database. This
 repository intentionally ships no backup service or timer.
+
+### Copying the store (`store-copy`)
+
+`handoffkeep store-copy` copies the registered tables between a PostgreSQL and a
+MySQL database and compares their parity. Give each database URL either as a flag
+or by naming an environment variable that holds it. Prefer the environment form:
+a URL carries a password, and a flag value shows in the process list.
+
+```bash
+export HK_COPY_SRC='postgres://copy:<password>@pg.internal:5432/handoffkeep?sslmode=require'
+export HK_COPY_DST='mysql://copy:<password>@mysql.internal:3306/handoffkeep?tls=true'
+handoffkeep store-copy --from-env HK_COPY_SRC --to-env HK_COPY_DST --verify-only
+```
+
+Exactly one of `--from` and `--from-env` is required, and the same for `--to` and
+`--to-env`. An unset or empty variable is an error that names the variable, not its
+value. Errors and logs show a URL with its password removed.
