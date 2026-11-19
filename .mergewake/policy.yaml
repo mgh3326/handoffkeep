@@ -43,6 +43,8 @@ blocking:
     reason: API authentication and token forwarding can grant unauthorized access before a revert.
   - paths: ['internal/ui/reap.go', 'internal/attachments/**']
     reason: Reaping and attachment deletion can remove stored evidence before a revert.
+  - paths: ['internal/ytwrite/**', 'internal/youtrack/**', 'cmd/handoffkeep/yt_articles_roots*.go']
+    reason: YouTrack writes create, reparent or delete external articles and issues that a revert does not remove (hk 5085); internal/youtrack holds every mutating client call and the article roots commands (yt_articles_roots*.go, the scan that picks duplicate roots and the merge that reparents and deletes) call them directly.
   - paths: ['.github/workflows/**']
     reason: Workflow changes can execute privileged automation before a revert.
   - paths: ['.mergewake/**']
