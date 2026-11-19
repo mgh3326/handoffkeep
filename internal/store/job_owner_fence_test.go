@@ -138,6 +138,10 @@ func TestJobOwnerTransferOnTerminal(t *testing.T) {
 		!sameTime(j.EndedAt, before.EndedAt) || !sameTime(j.EndedReceivedAt, before.EndedReceivedAt) {
 		t.Fatalf("lost transfer changed the terminal record: before=%+v after=%+v", before, j)
 	}
+	// The owner-only transfer keeps the stored updated_at: only the owner moved.
+	if !j.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("owner-only transfer advanced updated_at: before=%v after=%v", before.UpdatedAt, j.UpdatedAt)
+	}
 
 	// completed: the claim spawned and then completed.
 	jobContextClaim(t, s, "job-done-xfer", nil)

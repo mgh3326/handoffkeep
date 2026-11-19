@@ -846,7 +846,11 @@ func (s *Store) updateJobOnce(ctx context.Context, id string, u JobUpdate) (Job,
 		j.OwnerNode = u.Owner.Node
 		j.OwnerEpoch = u.Owner.Epoch
 	}
-	j.UpdatedAt = time.Now().UTC()
+	// An owner-only transfer on a terminal record changes only owner_node and
+	// owner_epoch (hk 5303), so it keeps the stored updated_at.
+	if !(jobTerminal[j.State] && u.Owner != nil && u.noOtherWrite() && !u.lateWrite()) {
+		j.UpdatedAt = time.Now().UTC()
+	}
 	if u.Usage != nil {
 		usage := *u.Usage
 		usage.RecordedAt = &j.UpdatedAt
