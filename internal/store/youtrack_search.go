@@ -195,7 +195,7 @@ func (s *Store) YouTrackDocHits(ctx context.Context, articleIDs []string, sessio
 			args = append(args, id)
 		}
 		args = append(args, session, session)
-		q = `SELECT b.article_id,d.key,d.session,d.kind,d.created_at
+		q = `SELECT b.article_id,d.` + "`key`" + `,d.session,d.kind,d.created_at
 			FROM yt_article_bindings b JOIN documents d ON d.id=b.document_id
 			WHERE b.article_id IN (` + inPlaceholders(s, len(articleIDs)) + `) AND (?='' OR d.session=?)
 			ORDER BY 1,2`
