@@ -485,6 +485,22 @@ t_gate_store_mysql_pg_only_migration() {
 	compare "$SHA_OLD" "$SHA_NEW" ahead "[$MYSQL_PG_ONLY]"
 	want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
 }
+t_gate_store_mysql_renamed_out_of_namespace() {
+	# A file renamed out of the migration namespace keeps its old name's rule:
+	# a dual-registered PostgreSQL file renamed to helpers.go with a MySQL-step
+	# edit holds, and so does a MySQL migration renamed away. (Both promoted
+	# before the previous_filename check.)
+	HK_FOLLOW_STORE=mysql
+	setup; setup_tick
+	local f
+	for f in \
+		'[{"filename":"internal/store/helpers.go","previous_filename":"internal/store/migration_pg.go","status":"renamed","patch":"@@ -9 +9 @@\n-\tstepMySQL(x)\n+\tstepMySQL(y)"}]' \
+		'[{"filename":"internal/store/helpers.go","previous_filename":"internal/store/migration_mysql_tasks.go","status":"renamed","patch":"+x"}]' \
+		'[{"filename":"internal/store/helpers.go","previous_filename":"internal/store/migration_pg.go","status":"copied","patch":"+x"}]'; do
+		compare "$SHA_OLD" "$SHA_NEW" ahead "$f"
+		want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	done
+}
 t_gate_store_mysql_registration() {
 	# In mysql mode the registration call that counts is registerMySQLMigration(;
 	# a file that registers both dialects still holds, and an unreadable

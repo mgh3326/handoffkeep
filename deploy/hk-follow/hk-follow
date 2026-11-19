@@ -543,6 +543,10 @@ store_mode_ok() {
 # (a shared file such as migration.go) keeps the postgres rule, and also counts
 # when its patch touches a registerMySQLMigration( call.
 #
+# A renamed or copied file is classified by its old name as well as its new
+# one (previous_filename), so renaming a migration out of the migration_*
+# namespace does not hide it.
+#
 # In both modes a store Go file whose patch GitHub left out (too large) counts:
 # the gate cannot read it, so it must not pass it.
 migrations() {
@@ -555,9 +559,10 @@ migrations() {
 		| ((.patch // null) == null and $s != "removed") as $nopatch
 		| ((.patch // "") | test("(^|\\n)[ +][^\\n]*registerMigration\\(")) as $reg
 		| ((.patch // "") | test("(^|\\n)[ +][^\\n]*registerMySQLMigration\\(")) as $mysqlreg
-		| ($n | test("^internal/store/migration_mysql_[^/]*\\.go$")) as $mysqlname
-		| ($n | test("^internal/store/migration_[^/]*\\.go$")) as $pgname
-		| ($n | test("migration[^/]*\\.go$")) as $migname
+		| ([$n, (.previous_filename // $n)]) as $names
+		| ($names | any(test("^internal/store/migration_mysql_[^/]*\\.go$"))) as $mysqlname
+		| ($names | any(test("^internal/store/migration_[^/]*\\.go$"))) as $pgname
+		| ($names | any(test("migration[^/]*\\.go$"))) as $migname
 		| select(
 			if $mode == "mysql" then
 				if $mysqlname then $s != "removed"
