@@ -29,7 +29,13 @@ import (
 //     import made, or refused to bind, its article: a summary_cut document
 //     lands here);
 //   - over YTArticleSafePartBytes (the import split it), or bound to a split
-//     document's index: exception_not_updated, no op (D4, no Y5c now).
+//     document's index: exception_not_updated, no op (D4, no Y5c now);
+//   - except, with HANDOFFKEEP_YT_ARTICLE_SPLIT on (hk 5085), an unbound one
+//     over it created after the import ended: one article_split op, which
+//     writes an index and its parts and binds the document to the index on
+//     apply. A document bound by an article_split op is
+//     exception_not_updated whatever its body (S12), and a document with an
+//     article_split op gets no other create (S1).
 //
 // The ops ride the document's lane (document:<id>) under principal
 // hk:documents. A new article goes under a parent (ytArticleParentTx): a
@@ -82,6 +88,9 @@ type ytDocsGate struct {
 	tenant string
 	// buckets are the YouTrack projects of /shared and /unassigned.
 	buckets map[string]YTArticleProject
+	// split is the article split flag (SetYTArticleSplit) as ytDocsNow read
+	// it.
+	split bool
 }
 
 // SetYTDocsMode sets the gate for this process: the tenant, and the YouTrack
@@ -108,14 +117,25 @@ func (s *Store) ytDocsNow() (ytDocsGate, bool) {
 			return ytDocsGate{mode: YTDocsOff}, false
 		}
 	}
-	return *g, true
+	out := *g
+	out.split = s.ytArticleSplit.Load()
+	return out, true
 }
+
+// SetYTArticleSplit sets HANDOFFKEEP_YT_ARTICLE_SPLIT for this process (hk
+// 5085, S11): on prepares an article_split op for a new long document and
+// admits new ones; off (the default) prepares none and admits only the split
+// ops that were already dispatched, so they still settle. It acts only while
+// the document mode is on.
+func (s *Store) SetYTArticleSplit(on bool) { s.ytArticleSplit.Store(on) }
 
 func init() {
 	registerYTKindGate(ytwrite.KindArticleCreate, ytArticleCreateGateSQL)
 	registerYTKindGate(ytwrite.KindArticleUpdate, ytArticleUpdateGateSQL)
 	registerYTApplyHook(ytwrite.KindArticleCreate, ytApplyHook{conflict: ytArticleConflictTx, bind: bindYTArticleApplyTx})
 	registerYTApplyHook(ytwrite.KindArticleUpdate, ytApplyHook{conflict: noYTConflict, bind: bindYTArticleUpdateApplyTx})
+	registerYTKindGate(ytwrite.KindArticleSplit, ytArticleSplitGateSQL)
+	registerYTApplyHook(ytwrite.KindArticleSplit, ytApplyHook{conflict: ytArticleConflictTx, bind: bindYTArticleApplyTx})
 	registerYTFeedStoreConsumer(ytDocsConsumer, []string{"document"}, ytDocsHandler)
 }
 
@@ -132,11 +152,30 @@ func ytArticleCreateGateSQL(s *Store) string {
 		WHERE CAST(b.document_id AS CHAR) = o.entity_id AND NOT (b.op_id <=> o.id))`)
 }
 
+// ytArticleSplitGateSQL is the article_split gate (hk 5085): mode on, o's
+// document has no binding or one this op published, and either the split
+// flag is on or o was already dispatched (attempts > 0): turning the flag off
+// stops new splits while one already under way still settles (S11).
+func ytArticleSplitGateSQL(s *Store) string {
+	g, on := s.ytDocsNow()
+	if !on {
+		return `FALSE`
+	}
+	flag := `o.attempts > 0`
+	if g.split {
+		flag = `TRUE`
+	}
+	return s.q(`o.entity_kind = 'document' AND (`+flag+`) AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b
+		WHERE b.document_id::text = o.entity_id AND b.op_id IS DISTINCT FROM o.id)`,
+		`o.entity_kind = 'document' AND (`+flag+`) AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b
+		WHERE CAST(b.document_id AS CHAR) = o.entity_id AND NOT (b.op_id <=> o.id))`)
+}
+
 // claimYTArticleCreateTx re-checks the source document while Claim holds its
 // document lane lock. A prepared create is rejected before dispatch if its
 // document was deleted or moved out of the article scope in the meantime.
 func claimYTArticleCreateTx(ctx context.Context, tx transaction, op ytwrite.Op) (reject, detail string, err error) {
-	if op.Kind != ytwrite.KindArticleCreate || op.Principal != YTDocsPrincipal {
+	if (op.Kind != ytwrite.KindArticleCreate && op.Kind != ytwrite.KindArticleSplit) || op.Principal != YTDocsPrincipal {
 		return "", "", nil
 	}
 	id, parseErr := strconv.ParseInt(op.EntityID, 10, 64)
@@ -237,6 +276,12 @@ type ytArticleRow struct {
 	created  bool
 	retryOf  int64
 	retryKey string
+	// splitOp: the document has an article_split op, in any state (hk
+	// 5085): it is its only create, so no other is prepared (S1).
+	// splitBound: its binding was published by an article_split op, so it is
+	// never updated (S12).
+	splitOp    bool
+	splitBound bool
 	// legacyArticle is the article the legacy `youtrack sync` recorded for
 	// the document (youtrack_doc_articles, its first part; "" for none),
 	// legacyProject the YouTrack project it put it in (the youtrack_projects
@@ -375,6 +420,19 @@ func readYTArticleRow(ctx context.Context, tx transaction, id int64) (*ytArticle
 	if err != nil {
 		return nil, err
 	}
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS (SELECT 1 FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND idem_key=$3)`,
+		`SELECT EXISTS (SELECT 1 FROM yt_write_ops WHERE principal=? AND kind=? AND idem_key=?)`),
+		YTDocsPrincipal, ytwrite.KindArticleSplit, ytwrite.ArticleKey(id)).Scan(&r.splitOp); err != nil {
+		return nil, err
+	}
+	if r.bound && r.binding.OpID != 0 {
+		var kind string
+		err := tx.QueryRow(ctx, sqlFor(tx, `SELECT kind FROM yt_write_ops WHERE id=$1`, `SELECT kind FROM yt_write_ops WHERE id=?`), r.binding.OpID).Scan(&kind)
+		if err != nil && !errors.Is(err, ErrNoRows) {
+			return nil, err
+		}
+		r.splitBound = kind == ytwrite.KindArticleSplit
+	}
 	return r, nil
 }
 
@@ -452,10 +510,12 @@ const (
 	ytArticleUpdatePrepared  ytArticleOutcome = "update_prepared"
 	ytArticleCreatePrepared  ytArticleOutcome = "create_prepared"
 	ytArticleCreateRejected  ytArticleOutcome = "create_rejected"
-	ytArticleCreatePending   ytArticleOutcome = "create_exists"
-	ytArticleNoProject       ytArticleOutcome = "no_project"
-	ytArticleParentPending   ytArticleOutcome = "parent_pending"
-	ytArticleInvalid         ytArticleOutcome = "invalid"
+	// ytArticleSplitPrepared: an article_split op was prepared (hk 5085).
+	ytArticleSplitPrepared ytArticleOutcome = "split_prepared"
+	ytArticleCreatePending ytArticleOutcome = "create_exists"
+	ytArticleNoProject     ytArticleOutcome = "no_project"
+	ytArticleParentPending ytArticleOutcome = "parent_pending"
+	ytArticleInvalid       ytArticleOutcome = "invalid"
 	// ytArticleSuperseded: documents are canonical in YouTrack and the
 	// document's body is the post-switch baseline its article superseded.
 	ytArticleSuperseded ytArticleOutcome = "superseded"
@@ -498,7 +558,10 @@ func prepareYTArticleTx(ctx context.Context, tx transaction, now time.Time, g yt
 	if r.bound && r.binding.Tenant != g.tenant {
 		return ytArticleOtherTenant, nil
 	}
-	if ex := ytArticleException(r.doc.BodyBytes, r.bound, r.binding.ContentSHA == "", r.createdAt); ex != "" {
+	// A new long document is split when the flag is on (S11); with it off it
+	// stays an exception exactly as before.
+	split := g.split && !r.bound && YTArticleSplit(r.doc.BodyBytes) && !r.createdAt.Before(YTImportEndedAt)
+	if ex := ytArticleException(r.doc.BodyBytes, r.bound, r.binding.ContentSHA == "" || r.splitBound, r.createdAt); ex != "" && !split {
 		return ytArticleOutcome(ex), nil
 	}
 	summary := YTArticleSummary(r.doc.Key, r.doc.Kind)
@@ -535,8 +598,12 @@ func prepareYTArticleTx(ctx context.Context, tx transaction, now time.Time, g yt
 		log.Printf("ytwrite.article_update_enqueued op_id=%d document_id=%d article_id=%q", op.ID, id, r.binding.ArticleID)
 		return ytArticleUpdatePrepared, nil
 	}
-	if r.created {
+	if r.created || r.splitOp {
 		return ytArticleCreatePending, nil
+	}
+	if split && r.legacyArticle != "" {
+		// The legacy sync wrote it: never created again.
+		return ytArticleNotUpdated, nil
 	}
 	target, ok := ytArticleTarget(g, r.doc)
 	if !ok {
@@ -559,6 +626,9 @@ func prepareYTArticleTx(ctx context.Context, tx transaction, now time.Time, g yt
 			return ytArticleParentPending, nil
 		}
 		req.ParentFamily, req.ParentArticleID = family, parent
+	}
+	if split {
+		return prepareYTArticleSplitTx(ctx, tx, now, id, req)
 	}
 	if r.retryOf > 0 {
 		// Its only creates were refused before they were sent: replace the
@@ -599,6 +669,33 @@ func prepareYTArticleTx(ctx context.Context, tx transaction, now time.Time, g yt
 	}
 	log.Printf("ytwrite.article_create_enqueued op_id=%d document_id=%d project_id=%q retry_of=%d", op.ID, id, target.ID, r.retryOf)
 	return ytArticleCreatePrepared, nil
+}
+
+// prepareYTArticleSplitTx prepares a long document's one article_split op
+// (hk 5085). A request the protocol cannot send is recorded rejected in the
+// same transaction, as a create's is; either way the op is the document's
+// only create from here (S1).
+func prepareYTArticleSplitTx(ctx context.Context, tx transaction, now time.Time, id int64, req ytwrite.ArticleRequest) (ytArticleOutcome, error) {
+	n, err := ytwrite.ArticleSplitOp(req)
+	if err != nil {
+		return "", err
+	}
+	op, created, err := prepareYTOpTx(ctx, tx, now, n)
+	if err != nil {
+		return "", err
+	}
+	if !created {
+		return ytArticleCreatePending, nil
+	}
+	if cerr := ytwrite.CheckArticleSplit(req); cerr != nil {
+		if _, err := rejectYTOpTx(ctx, tx, now, op.ID, ytwrite.ReasonInvalidIssue, cerr.Error()); err != nil {
+			return "", err
+		}
+		log.Printf("ytwrite.article_split_rejected op_id=%d document_id=%d err=%q", op.ID, id, cerr.Error())
+		return ytArticleCreateRejected, nil
+	}
+	log.Printf("ytwrite.article_split_enqueued op_id=%d document_id=%d project_id=%q parts=%d", op.ID, id, req.YTProjectID, len(ytwrite.SplitArticleBody(req.Body)))
+	return ytArticleSplitPrepared, nil
 }
 
 // articleFeedIDs are the document ids of the feed rows, in order.
@@ -647,8 +744,8 @@ func ytDocsHandler(s *Store, now time.Time) FeedHandler {
 			}
 			counts[outcome]++
 		}
-		log.Printf("ytwrite.articles_feed documents=%d create_prepared=%d create_rejected=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d deleted=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d superseded=%d",
-			len(ids), counts[ytArticleCreatePrepared], counts[ytArticleCreateRejected], counts[ytArticleCreatePending], counts[ytArticleUpdatePrepared],
+		log.Printf("ytwrite.articles_feed documents=%d split_prepared=%d create_prepared=%d create_rejected=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d deleted=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d superseded=%d",
+			len(ids), counts[ytArticleSplitPrepared], counts[ytArticleCreatePrepared], counts[ytArticleCreateRejected], counts[ytArticleCreatePending], counts[ytArticleUpdatePrepared],
 			counts[ytArticleUnchanged], counts[ytArticleNotUpdated], counts[ytArticleUnboundImported], counts[ytArticleOutOfScope],
 			counts[ytArticleDeleted], counts[ytArticleOtherTenant], counts[ytArticleNoProject], counts[ytArticleInvalid], counts[ytArticleLegacyUnverified],
 			counts[ytArticleSuperseded])

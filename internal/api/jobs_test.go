@@ -446,3 +446,82 @@ func TestJobsSelection(t *testing.T) {
 		t.Fatalf("a refused write changed the selection: %v", got["selection"])
 	}
 }
+
+// The owner fence on PUT /v1/jobs/{job} (hk 5276): a stale expected_owner is
+// a 409 that names the current owner and applies nothing; a matching one
+// applies; an update without expected_owner is unfenced.
+func TestJobsOwnerFence(t *testing.T) {
+	srv := jobsAPIServer(t)
+	id := fmt.Sprintf("5276-builder-%d", time.Now().UnixNano())
+	if code, _ := jobsClaim(t, srv, "tok-a", id, "host-a", 5); code != http.StatusCreated {
+		t.Fatalf("claim: %d", code)
+	}
+	url := srv.URL + "/v1/jobs/" + id
+
+	code, body := jobsRequest(t, "PUT", url, "tok-a", `{"owner":{"node":"node-a","epoch":1},"expected_owner":{"node":"","epoch":0}}`)
+	if code != http.StatusOK || body["owner_node"] != "node-a" || body["owner_epoch"] != float64(1) {
+		t.Fatalf("transfer: %d %v", code, body)
+	}
+
+	code, body = jobsRequest(t, "PUT", url, "tok-a", `{"label":"stale","expected_owner":{"node":"node-b","epoch":1}}`)
+	if code != http.StatusConflict || body["error"] != "job_owner_mismatch" || body["owner_node"] != "node-a" || body["owner_epoch"] != float64(1) {
+		t.Fatalf("stale expected owner: %d %v", code, body)
+	}
+	if _, body = jobsRequest(t, "GET", url, "tok-a", ""); body["label"] != nil {
+		t.Fatalf("refused update applied: %v", body)
+	}
+
+	code, body = jobsRequest(t, "PUT", url, "tok-a", `{"owner":{"node":"node-b","epoch":1}}`)
+	if code != http.StatusConflict || body["error"] != "job_owner_mismatch" {
+		t.Fatalf("epoch must move forward: %d %v", code, body)
+	}
+
+	code, body = jobsRequest(t, "PUT", url, "tok-a", `{"state":"spawned","expected_owner":{"node":"node-a","epoch":1}}`)
+	if code != http.StatusOK || body["state"] != "spawned" {
+		t.Fatalf("matching expected owner: %d %v", code, body)
+	}
+
+	code, body = jobsRequest(t, "PUT", url, "tok-a", `{"label":"unfenced"}`)
+	if code != http.StatusOK || body["owner_node"] != "node-a" || body["label"] != "unfenced" {
+		t.Fatalf("unconditioned update: %d %v", code, body)
+	}
+}
+
+// An owner-only transfer on a terminal job (hk 5303): accepted with a matching
+// expected_owner, refused as job_state_conflict without one, refused as
+// job_owner_mismatch (naming the current owner) with a stale one.
+func TestJobsOwnerTransferOnTerminal(t *testing.T) {
+	srv := jobsAPIServer(t)
+	id := fmt.Sprintf("5303-builder-%d", time.Now().UnixNano())
+	if code, _ := jobsClaim(t, srv, "tok-a", id, "host-a", 5); code != http.StatusCreated {
+		t.Fatalf("claim: %d", code)
+	}
+	url := srv.URL + "/v1/jobs/" + id
+
+	if code, body := jobsRequest(t, "PUT", url, "tok-a", `{"owner":{"node":"node-a","epoch":1},"expected_owner":{"node":"","epoch":0}}`); code != http.StatusOK || body["owner_node"] != "node-a" {
+		t.Fatalf("first transfer: %d %v", code, body)
+	}
+	if code, body := jobsRequest(t, "PUT", url, "tok-a", `{"state":"lost"}`); code != http.StatusOK || body["state"] != "lost" {
+		t.Fatalf("lost: %d %v", code, body)
+	}
+
+	code, body := jobsRequest(t, "PUT", url, "tok-a", `{"owner":{"node":"node-b","epoch":2}}`)
+	if code != http.StatusConflict || body["error"] != "job_state_conflict" {
+		t.Fatalf("transfer without expected_owner: %d %v", code, body)
+	}
+
+	code, body = jobsRequest(t, "PUT", url, "tok-a", `{"owner":{"node":"node-c","epoch":2},"expected_owner":{"node":"node-b","epoch":1}}`)
+	if code != http.StatusConflict || body["error"] != "job_owner_mismatch" || body["owner_node"] != "node-a" || body["owner_epoch"] != float64(1) {
+		t.Fatalf("stale expected owner: %d %v", code, body)
+	}
+
+	code, body = jobsRequest(t, "PUT", url, "tok-a", `{"state":"completed","owner":{"node":"node-b","epoch":2},"expected_owner":{"node":"node-a","epoch":1}}`)
+	if code != http.StatusConflict || body["error"] != "job_state_conflict" {
+		t.Fatalf("transfer with state: %d %v", code, body)
+	}
+
+	code, body = jobsRequest(t, "PUT", url, "tok-a", `{"owner":{"node":"node-b","epoch":2},"expected_owner":{"node":"node-a","epoch":1}}`)
+	if code != http.StatusOK || body["owner_node"] != "node-b" || body["owner_epoch"] != float64(2) || body["state"] != "lost" {
+		t.Fatalf("owner-only transfer: %d %v", code, body)
+	}
+}

@@ -185,6 +185,21 @@ func ytDocsModeFromEnv() (store.YTDocsMode, error) {
 	}
 }
 
+// ytArticleSplitFromEnv reads HANDOFFKEEP_YT_ARTICLE_SPLIT (hk 5085): unset
+// or "off" (the default) leaves a long document exception_not_updated; "on"
+// splits a new one into an index and parts while the document mode is on.
+// Any other value is an error.
+func ytArticleSplitFromEnv() (bool, error) {
+	switch raw := strings.TrimSpace(os.Getenv("HANDOFFKEEP_YT_ARTICLE_SPLIT")); raw {
+	case "", "off":
+		return false, nil
+	case "on":
+		return true, nil
+	default:
+		return false, fmt.Errorf("HANDOFFKEEP_YT_ARTICLE_SPLIT=%q: want off or on", raw)
+	}
+}
+
 // ytDocsSetting is the document-article mode and, when on, the YouTrack
 // projects of the /shared and /unassigned buckets.
 type ytDocsSetting struct {
@@ -275,6 +290,14 @@ func ytCommentsWorkerFromEnv(st *store.Store) (backgroundWorker, error) {
 	articles, err := ytDocsModeFromEnv()
 	if err != nil {
 		return nil, err
+	}
+	split, err := ytArticleSplitFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	if st != nil {
+		st.SetYTArticleSplit(split)
+		log.Printf("ytwrite.article_split on=%t", split)
 	}
 	catchUp, err := ytCommentsCatchUpFromEnv()
 	if err != nil {
@@ -1045,13 +1068,16 @@ func (w ytOpsAlertWorker) Run(ctx context.Context) {
 	}
 }
 
-const youtrackOpsUsage = "usage: youtrack ops [--state pending|all|prepared|dispatched|applied|rejected|remote_unknown] [--kind K] [--task N] [--after-id N] [--limit N] | youtrack ops resolve <op id> --applied <youtrack id> [--adopted] | --not-applied --by <actor> --note <text>"
+const youtrackOpsUsage = "usage: youtrack ops [--state pending|all|prepared|dispatched|applied|rejected|remote_unknown] [--kind K] [--task N] [--after-id N] [--limit N] | youtrack ops resolve <op id> --applied <youtrack id> [--adopted] | --not-applied --by <actor> --note <text> | youtrack ops requeue [--op N ...] [--after-id N] --by <actor> [--apply]"
 
 // youtrackOpsCmd is `youtrack ops` (also `yt ops`): the write-protocol ops
 // through GET /v1/yt/ops. remote_unknown shows status pending, never done.
 func youtrackOpsCmd(args []string, out io.Writer) error {
 	if len(args) > 0 && args[0] == "resolve" {
 		return youtrackOpsResolveCmd(args[1:], out)
+	}
+	if len(args) > 0 && args[0] == "requeue" {
+		return youtrackOpsRequeueCmd(args[1:], out)
 	}
 	fs := flag.NewFlagSet("youtrack ops", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)

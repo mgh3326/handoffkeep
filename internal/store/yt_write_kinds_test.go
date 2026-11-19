@@ -37,7 +37,7 @@ func TestYTAdmitSQLPerKind(t *testing.T) {
 	// issue_links admits nothing until its consumer and mode land (hk 4638 S3).
 	const noLinks = `(o.kind = 'issue_links' AND (FALSE))`
 	// The document kinds (hk 4206) are FALSE until the docs mode is on.
-	const noArticles = `(o.kind = 'article_create' AND (FALSE)) OR (o.kind = 'article_update' AND (FALSE))`
+	const noArticles = `(o.kind = 'article_create' AND (FALSE)) OR (o.kind = 'article_split' AND (FALSE)) OR (o.kind = 'article_update' AND (FALSE))`
 	const noDecisions = `(o.kind = 'decision_create' AND (FALSE)) OR (o.kind = 'decision_fields' AND (FALSE))`
 	for _, tc := range []struct {
 		mode YTCommentsMode

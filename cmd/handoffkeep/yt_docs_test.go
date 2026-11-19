@@ -62,3 +62,19 @@ func TestYTDocsModeStartsTheWriteWorker(t *testing.T) {
 		t.Fatalf("all off: worker %v err %v", w, err)
 	}
 }
+
+// HANDOFFKEEP_YT_ARTICLE_SPLIT (hk 5085, S11) is off unless it says on; any
+// other value is a startup error.
+func TestYTArticleSplitFromEnv(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		on   bool
+		fail bool
+	}{{"", false, false}, {"off", false, false}, {"on", true, false}, {" on ", true, false}, {"yes", false, true}} {
+		t.Setenv("HANDOFFKEEP_YT_ARTICLE_SPLIT", tc.raw)
+		on, err := ytArticleSplitFromEnv()
+		if on != tc.on || (err != nil) != tc.fail {
+			t.Errorf("%q: on %v err %v", tc.raw, on, err)
+		}
+	}
+}

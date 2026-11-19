@@ -25,11 +25,13 @@ import (
 //
 //	order_unacked   an order to this lane is not acknowledged
 //	blocker_landed  a backlog or unstarted task's every blocker is settled,
-//	                and the last of them settled after the task last moved
+//	                and the last of them settled after the task last moved,
+//	                with no open wait and no open decision request
 //	kept_backlog    a priority 1 or 2 backlog task older than 24h, with no
-//	                open wait and no claim
+//	                open wait, no open decision request and no claim
 //	room_to_run     the lane has no started task with a live job while
-//	                kept_backlog or blocker_landed is non-empty
+//	                kept_backlog or blocker_landed is non-empty (both lists
+//	                already exclude tasks with an open wait or decision)
 //	wait_cleared    a task whose wait cleared since the lane last looked
 //
 // A lane whose last look carries the current findings hash is skipped, so
@@ -347,11 +349,19 @@ const laneCheckOrderUnackedSQL = `SELECT o.task_id FROM task_orders o
 WHERE o.target_lane=$1 AND o.acked_at IS NULL AND o.withdrawn_at IS NULL
 ORDER BY o.created_at, o.id`
 
+// laneCheckNoOpenWaitSQL excludes the task t.id when it has an open hand wait
+// or an open decision request (waits lists it as needs_operator). blocker_landed
+// and kept_backlog both use it, so a task an operator or another lane is holding
+// is not listed by either.
+const laneCheckNoOpenWaitSQL = `NOT EXISTS (SELECT 1 FROM task_waits w WHERE w.task_id=t.id AND w.cleared_at IS NULL)
+  AND NOT EXISTS (SELECT 1 FROM decision_requests d WHERE d.task_id=t.id AND d.status='open')`
+
 // laneCheckBlockerLandedSQL: a backlog or unstarted task whose every live
 // blocks source is settled, and whose newest settled source moved after the
-// task last moved.
+// task last moved, with no open wait or decision request.
 const laneCheckBlockerLandedSQL = `SELECT t.id FROM tasks t
 WHERE t.lane=$1 AND t.state IN ('backlog','unstarted')
+  AND ` + laneCheckNoOpenWaitSQL + `
   AND EXISTS (SELECT 1 FROM task_relations r WHERE r.kind='blocks' AND r.dst_id=t.id AND r.archived_at IS NULL)
   AND NOT EXISTS (SELECT 1 FROM task_relations r JOIN tasks b ON b.id=r.src_id
                   WHERE r.kind='blocks' AND r.dst_id=t.id AND r.archived_at IS NULL AND b.state NOT IN (` + settledStatesSQL + `))
@@ -361,11 +371,12 @@ WHERE t.lane=$1 AND t.state IN ('backlog','unstarted')
 ORDER BY t.id`
 
 // laneCheckKeptBacklogSQL: a priority 1 or 2 backlog task older than the
-// second argument (an instant), with no open hand wait and no claim.
+// second argument (an instant), with no open hand wait, no open decision
+// request (waits lists it as needs_operator) and no claim.
 const laneCheckKeptBacklogSQL = `SELECT t.id FROM tasks t
 WHERE t.lane=$1 AND t.state='backlog' AND t.priority IN (1,2)
   AND t.created_at < $2 AND t.claimed_by=''
-  AND NOT EXISTS (SELECT 1 FROM task_waits w WHERE w.task_id=t.id AND w.cleared_at IS NULL)
+  AND ` + laneCheckNoOpenWaitSQL + `
 ORDER BY t.priority, t.created_at, t.id`
 
 const laneCheckWaitClearedSQL = `SELECT w.task_id FROM task_waits w JOIN tasks t ON t.id=w.task_id

@@ -118,6 +118,9 @@ type FakeYouTrack struct {
 	// caller's context and the article it would write, before the fake's lock:
 	// tests hold one create open while another writer runs.
 	BeforeArticleCreate func(ctx context.Context, in ytwrite.ArticleCreate)
+	// BeforeReadArticle runs at the start of every ReadArticle, before the
+	// fake's lock: tests change an article between a search and its read.
+	BeforeReadArticle func(id string)
 }
 
 type delayedComment struct{ issue, text string }

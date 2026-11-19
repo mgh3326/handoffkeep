@@ -161,6 +161,10 @@ func TestAdapterErrorTranslation(t *testing.T) {
 		{"422", status(http.StatusUnprocessableEntity, nil), ytwrite.StateRejected, "http_422"},
 		{"401", status(http.StatusUnauthorized, nil), ytwrite.StatePrepared, ytwrite.ReasonUnauthorized},
 		{"429", status(http.StatusTooManyRequests, nil), ytwrite.StatePrepared, ytwrite.ReasonRateLimited},
+		// YouTrack's read-only maintenance answer: waits, is not rejected.
+		{"418 read-only", status(http.StatusTeapot, []byte(`{"error":"invalid_state","error_description":"The application is currently in read-only mode. Please try again later."}`)), ytwrite.StatePrepared, ytwrite.ReasonReadOnly},
+		// Another 418 body is an ordinary refusal.
+		{"418 other body", status(http.StatusTeapot, []byte(`{"error":"some_other_error","error_description":"refused"}`)), ytwrite.StateRejected, "http_418"},
 		{"408", status(http.StatusRequestTimeout, nil), ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError},
 		{"500", status(http.StatusInternalServerError, nil), ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError},
 		{"503", status(http.StatusServiceUnavailable, nil), ytwrite.StateRemoteUnknown, ytwrite.ReasonServerError},

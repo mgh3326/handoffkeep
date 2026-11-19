@@ -117,6 +117,7 @@ YouTrack 호출이 실패하면 PostgreSQL 결과로 돌아가고 이유를 로�
 | `HANDOFFKEEP_YT_FIELDS_MODE` | 아니오 | `on`이면 작업 필드(상태·우선순위·레인 등)를 쓴다 |
 | `HANDOFFKEEP_YT_MOVES_MODE` | 아니오 | `on`이면 프로젝트 이동을 쓴다. `FIELDS_MODE=on`이어야 한다 |
 | `HANDOFFKEEP_YT_DOCS_MODE` | 아니오 | `on`이면 문서를 YouTrack 글(article)로 쓴다 |
+| `HANDOFFKEEP_YT_ARTICLE_SPLIT` | 아니오 | `off`(기본) 또는 `on`. `on`이면 240 KiB가 넘는 새 문서를 색인 글 하나와 부분 글로 나눠 쓴다(hk 5085). `DOCS_MODE=on`일 때만 쓴다. `off`로 돌리면 새 분할을 멈추고, 이미 보낸 분할 op는 마저 정리한다 |
 | `HANDOFFKEEP_YT_DOC_COMMENTS_MODE` | 아니오 | `on`이면 문서 코멘트를 쓴다 |
 | `HANDOFFKEEP_YT_DECISIONS_MODE` | 아니오 | `on`이면 결정 요청을 DEC 프로젝트 이슈로 쓴다 |
 | `HANDOFFKEEP_UI_TASKS_SOURCE` | 아니오 | `hk`(기본) 또는 `youtrack`. 콘솔 작업 화면의 원천(아래, hk 4430). 다른 값이나 YouTrack 자격 없는 `youtrack`은 서버 시작 실패 |

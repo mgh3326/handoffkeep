@@ -30,19 +30,38 @@ Reads are open to every authenticated client.
   fields include `state`, `role`, `label`, `family`, `profile`, `model`,
   `pool`, `owner_lane`, `parent_lane`, `parent_job`, `pane_id`,
   `worktree` (`{origin, branch, head}`; `branch` is `null` on a detached
-  worktree), `report_doc`, `result`, `usage`, `selection` and the context fields below. Any other field returns 400.
+  worktree), `report_doc`, `result`, `usage`, `selection`, the owner fence
+  (`owner`, `expected_owner`, below) and the context fields below. Any other
+  field returns 400.
   Brief text, command lines, pane output and absolute local paths are
   never stored.
-- `GET /v1/jobs/{job}` — returns the record, or 404 `not_found`.
+- `GET /v1/jobs/{job}` — returns the record, or 404 `not_found`. Every read
+  carries `owner_node` (`""` = no owner) and `owner_epoch` (`0` = unfenced).
 - `GET /v1/jobs?task=N` — returns `{"jobs": [...]}`, oldest claim first.
 
 ## Write rules
 
+- Owner fence. `owner` `{node, epoch}` sets the job's owner; its `epoch`
+  must be greater than the stored `owner_epoch`, or the write returns 409
+  `job_owner_mismatch`. `expected_owner` `{node, epoch}` makes the whole
+  update conditional: when it differs from the stored `owner_node` and
+  `owner_epoch`, the server refuses it with 409 `job_owner_mismatch` and
+  applies none of the update, terminal late writes included. The 409 body
+  names the current owner as `owner_node` and `owner_epoch`. Sending `owner`
+  and `expected_owner` together is an atomic transfer. An update without
+  `expected_owner` is unfenced and behaves as before, so the fence is opt-in
+  per write. On a terminal record an `owner` write is accepted only as an
+  owner-only transfer: `owner` and `expected_owner` together, with the
+  expected owner matching and a greater epoch. Such a transfer changes only
+  `owner_node` and `owner_epoch`; `state`, `result` and every other field stay
+  as they were. An `owner` on a terminal record without `expected_owner`, or
+  combined with any other field, returns `job_state_conflict`; a stale
+  `expected_owner` returns `job_owner_mismatch` as on any record.
 - States only move forward: `claimed → spawned → completed | escalated |
   lost`. `completed` needs a recorded `spawned`; `escalated` and `lost` may
   end a claim that never spawned. A backward move, a skip to `completed`, or
-  a write to a terminal record outside the late-write set returns 409
-  `job_state_conflict`.
+  a write to a terminal record outside the late-write set and the owner-only
+  transfer returns 409 `job_state_conflict`.
 - `usage` is the harness session's token usage:
   `{input_tokens, output_tokens, reasoning_tokens, cache_read_tokens,
   cache_write_tokens, source}`. Counts are integers >= 0, and a missing or
@@ -75,6 +94,7 @@ Reads are open to every authenticated client.
 | 404 | `not_found` | unknown job id |
 | 409 | `job_id_taken` | a different claim on a taken id |
 | 409 | `job_state_conflict` | backward move or write to a terminal record |
+| 409 | `job_owner_mismatch` | `expected_owner` differs from the stored owner, or `owner.epoch` does not exceed the stored epoch; body carries `owner_node`, `owner_epoch` |
 
 ## Selection: why this model and host
 
@@ -142,7 +162,9 @@ It has at most 100 unique name/source pairs; names are 1–128 bytes, sources
 array requires `skills_supported:true`; false requires an empty or absent
 array. A zero call count means the skill was available but never called.
 Terminal updates may contain only `usage`, `skills`, `skills_supported`,
-and the once-only `report_doc` + `report_sha256` pair described above.
+the once-only `report_doc` + `report_sha256` pair described above, or the
+owner-only transfer (`owner` with `expected_owner`) described under the owner
+fence.
 Other terminal updates return `job_state_conflict`; invalid values and field
 combinations return `invalid_context` (secret-shaped values retain
 `secret_like_content`).

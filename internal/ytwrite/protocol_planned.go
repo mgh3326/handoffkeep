@@ -219,6 +219,10 @@ func (p *Protocol) reconcilePlanned(ctx context.Context, op Op, kind PlannedKind
 			return pass(wait, ReasonRateLimited, re.Error())
 		case errors.As(err, &re) && re.Status == http.StatusUnauthorized:
 			return pass(p.AuthWait, ReasonUnauthorized, re.Error())
+		case errors.As(err, &re) && readOnlyRefusal(re):
+			// Read-only maintenance: not processed, and a recovery that
+			// rejected here would lose the op's plan (the finding on #521).
+			return pass(p.readOnlyWait(re.RetryAfter), ReasonReadOnly, re.Error())
 		case errors.As(err, &re) && re.Status >= 400 && re.Status < 500 && re.Status != http.StatusRequestTimeout:
 			return end(st.reject(ctx, op, "http_"+strconv.Itoa(re.Status), re.Error()))
 		}

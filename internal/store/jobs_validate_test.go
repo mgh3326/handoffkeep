@@ -69,3 +69,27 @@ func TestCheckJobUpdateParentJobScanned(t *testing.T) {
 		t.Fatal("secret-shaped parent_job accepted")
 	}
 }
+
+func TestCheckJobUpdateOwner(t *testing.T) {
+	ok := []JobUpdate{
+		{ExpectedOwner: &JobOwner{}},
+		{ExpectedOwner: &JobOwner{Node: "node-a", Epoch: 4}},
+		{Owner: &JobOwner{Node: "node-a", Epoch: 1}},
+	}
+	for _, u := range ok {
+		if err := checkJobUpdate(u); err != nil {
+			t.Fatalf("%+v: %v", u, err)
+		}
+	}
+	bad := []JobUpdate{
+		{Owner: &JobOwner{Node: "", Epoch: 1}},
+		{Owner: &JobOwner{Node: "node-a", Epoch: -1}},
+		{ExpectedOwner: &JobOwner{Node: "node-a", Epoch: -1}},
+		{Owner: &JobOwner{Node: "node\x00a", Epoch: 1}},
+	}
+	for _, u := range bad {
+		if err := checkJobUpdate(u); err == nil {
+			t.Fatalf("%+v accepted", u)
+		}
+	}
+}

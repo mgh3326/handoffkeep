@@ -116,6 +116,52 @@ func TestLaneCheckFindsBlockerLanded(t *testing.T) {
 	}
 }
 
+// TestLaneCheckBlockerLandedSkipsOpenWait: a backlog task whose blocker settled
+// is not blocker_landed and gives no room_to_run while it carries an open
+// operator wait; clearing the wait brings it back, and wait_cleared reports it.
+func TestLaneCheckBlockerLandedSkipsOpenWait(t *testing.T) {
+	ctx := context.Background()
+	s := schemaStore(t, "lane_blocker_wait")
+	laneCheckFixture(t, s, "blocker-wait-project", "blocker-wait-lane")
+	blocker := laneCheckTask(t, s, "blocker-wait-project", "blocker-wait-lane", "the blocker", 1)
+	blocked := laneCheckTask(t, s, "blocker-wait-project", "blocker-wait-lane", "blocked work", 1)
+	if _, err := s.AddTaskRelation(ctx, blocker.ID, RelationBlocks, blocked.ID, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	wait, err := s.AddTaskWait(ctx, blocked.ID, TaskWaitInput{OnKind: WaitOnExternal, OnRef: "ci-build", Reason: "waiting on CI"}, "tester")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TransitionTaskWith(ctx, blocker.ID, TransitionInput{To: StateCompleted, By: "tester", Note: "blocker done", Evidence: "finished"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	quiet := laneCheckFindings(t, s, "blocker-wait-lane", now)
+	if got := laneCheckFinding(quiet, LaneFindingBlockerLanded); len(got.TaskIDs) != 0 {
+		t.Fatalf("blocker_landed with an open wait: %v", got.TaskIDs)
+	}
+	if got := laneCheckFinding(quiet, LaneFindingRoomToRun); len(got.TaskIDs) != 0 {
+		t.Fatalf("room_to_run with an open wait: %v", got.TaskIDs)
+	}
+	// The lane looks at that quiet state, so the later clearing is the only news.
+	if _, _, err := s.RecordLaneLook(ctx, "blocker-wait-lane", quiet.NoticeEventID, "quiet", "blocker-wait-lane", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.ClearTaskWait(ctx, blocked.ID, wait.ID, "tester", "CI passed"); err != nil {
+		t.Fatal(err)
+	}
+	c := laneCheckFindings(t, s, "blocker-wait-lane", now.Add(time.Minute))
+	if got := laneCheckFinding(c, LaneFindingBlockerLanded); len(got.TaskIDs) != 1 || got.TaskIDs[0] != blocked.ID {
+		t.Fatalf("blocker_landed after the wait cleared = %v, want [%d]", got.TaskIDs, blocked.ID)
+	}
+	if got := laneCheckFinding(c, LaneFindingRoomToRun); len(got.TaskIDs) != 1 || got.TaskIDs[0] != blocked.ID {
+		t.Fatalf("room_to_run after the wait cleared = %v, want [%d]", got.TaskIDs, blocked.ID)
+	}
+	if got := laneCheckFinding(c, LaneFindingWaitCleared); len(got.TaskIDs) != 1 || got.TaskIDs[0] != blocked.ID {
+		t.Fatalf("wait_cleared after the wait cleared = %v, want [%d]", got.TaskIDs, blocked.ID)
+	}
+}
+
 // TestLaneCheckFindsKeptBacklogAndRoomToRun: an old priority 1 backlog task
 // with no wait and no claim is kept_backlog, and a lane with no started job
 // has room_to_run naming it.
@@ -147,6 +193,35 @@ func TestLaneCheckFindsKeptBacklogAndRoomToRun(t *testing.T) {
 	}
 	if got := laneCheckFinding(c, LaneFindingRoomToRun); len(got.TaskIDs) != 0 {
 		t.Fatalf("room_to_run with nothing to run: %v", got.TaskIDs)
+	}
+}
+
+// TestLaneCheckKeptBacklogSkipsOpenDecision: a task waiting on an operator
+// decision is listed as needs_operator, so it is not kept_backlog until the
+// request is resolved.
+func TestLaneCheckKeptBacklogSkipsOpenDecision(t *testing.T) {
+	ctx := context.Background()
+	s := schemaStore(t, "lane_kept_decision")
+	laneCheckFixture(t, s, "decision-project", "decision-lane")
+	task := laneCheckTask(t, s, "decision-project", "decision-lane", "decided work", 2)
+	if _, err := s.pool.Exec(ctx, `UPDATE tasks SET created_at=$2 WHERE id=$1`, task.ID, time.Now().UTC().Add(-48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	request, err := s.RecordDecisionRequest(ctx, task.ID, "tester", decisionInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	c := laneCheckFindings(t, s, "decision-lane", now)
+	if got := laneCheckFinding(c, LaneFindingKeptBacklog); len(got.TaskIDs) != 0 {
+		t.Fatalf("kept_backlog with an open decision request: %v", got.TaskIDs)
+	}
+	if _, err := s.ResolveDecisionRequest(ctx, task.ID, "tester", DecisionResolveInput{RequestID: request.Request.ID, Kind: DecisionRequestAnswered, Option: "A", Responder: "operator"}); err != nil {
+		t.Fatal(err)
+	}
+	c = laneCheckFindings(t, s, "decision-lane", now)
+	if got := laneCheckFinding(c, LaneFindingKeptBacklog); len(got.TaskIDs) != 1 || got.TaskIDs[0] != task.ID {
+		t.Fatalf("kept_backlog after the decision resolved = %v, want [%d]", got.TaskIDs, task.ID)
 	}
 }
 

@@ -280,6 +280,26 @@ func RunLinksProtocol(t *testing.T, nl NewLedger) {
 		}
 	})
 
+	// A recovery read answered with YouTrack's read-only maintenance answer
+	// was not processed: the op waits (read_only) and is not rejected, so
+	// the plan it has is not lost; the next pass recovers it.
+	t.Run("read_only_recovery_read_waits_not_rejects", func(t *testing.T) {
+		e := newLinksEnv(t, nl)
+		e.applyRelated(20)
+		e.yt.QueueLinkCallFaults(LinkCallFault{Op: LinkOpRemove, Status: http.StatusServiceUnavailable, Count: 1})
+		op := e.prepare(lWriter, lIssue, related(21), nil)
+		e.drive()
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonPartialWrite)
+		e.yt.QueueLinkCallFaults(LinkCallFault{Op: LinkOpRead, Status: http.StatusTeapot, Code: "invalid_state", Count: 1})
+		e.clock.Advance(time.Hour)
+		e.drive()
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonReadOnly)
+		e.clock.Advance(time.Hour)
+		e.drive()
+		e.wantState(op, ytwrite.StateApplied, "")
+		e.wantLinks(lIssue, rel("2-21"))
+	})
+
 	// Partial write: the add lands, the remove answers 503; the op is
 	// remote_unknown and recovery's own plan finishes it.
 	t.Run("partial_write_recovers_by_a_new_plan", func(t *testing.T) {

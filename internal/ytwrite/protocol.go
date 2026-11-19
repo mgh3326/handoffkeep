@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -63,6 +64,10 @@ type Config struct {
 	MaxRetryAfter time.Duration
 	// AuthWait is the wait after a 401, which needs a repaired token (5m).
 	AuthWait time.Duration
+	// ReadOnlyWait is the wait after YouTrack's read-only maintenance answer
+	// (418 invalid_state, readOnlyRefusal) without Retry-After (5m). It is
+	// capped by MaxRetryAfter like a 429's wait.
+	ReadOnlyWait time.Duration
 	// ReconcileBase and ReconcileMax bound the initial doubling wait between
 	// evidence searches for one remote_unknown op (5s, 5m). After 50 searches,
 	// the protocol retries hourly, then daily after 24 more evidence searches.
@@ -112,6 +117,7 @@ func New(cfg Config) (*Protocol, error) {
 	def(&cfg.RateLimitWait, 5*time.Second)
 	def(&cfg.MaxRetryAfter, RetryAfterCap)
 	def(&cfg.AuthWait, 5*time.Minute)
+	def(&cfg.ReadOnlyWait, 5*time.Minute)
 	def(&cfg.ReconcileBase, 5*time.Second)
 	def(&cfg.ReconcileMax, 5*time.Minute)
 	def(&cfg.BlockedWait, 5*time.Second)
@@ -348,6 +354,9 @@ func (p *Protocol) send(ctx context.Context, op Op) Result {
 	if pk, ok := kind.(PlannedKind); ok {
 		return p.sendPlanned(ctx, op, pk)
 	}
+	if sk, ok := kind.(articleSplit); ok {
+		return p.sendSplit(ctx, op, sk)
+	}
 	text, err := kind.Render(op)
 	if err != nil {
 		sctx, cancel := p.settling(ctx)
@@ -413,6 +422,8 @@ func (p *Protocol) writeFailed(ctx context.Context, st settler, op Op, err error
 			return st.deferOp(ctx, op, now.Add(wait), ReasonRateLimited, re.Error())
 		case re.Status == http.StatusUnauthorized:
 			return st.deferOp(ctx, op, now.Add(p.AuthWait), ReasonUnauthorized, re.Error())
+		case readOnlyRefusal(re):
+			return st.deferOp(ctx, op, now.Add(p.readOnlyWait(re.RetryAfter)), ReasonReadOnly, re.Error())
 		case re.Status >= 500 || re.Status == http.StatusRequestTimeout:
 			return st.markUnknown(ctx, op, ReasonServerError, re.Error())
 		case re.Status >= 400 && re.Status < 500:
@@ -428,6 +439,76 @@ func (p *Protocol) writeFailed(ctx context.Context, st settler, op Op, err error
 		}
 		return st.markUnknown(ctx, op, ReasonTransport, err.Error())
 	}
+}
+
+// readOnlyCode is the error code YouTrack sends with its read-only maintenance
+// answer, 418 invalid_state ("The application is currently in read-only mode").
+const readOnlyCode = "invalid_state"
+
+// readOnlyRefusal reports whether a remote answer is that maintenance refusal.
+// The match is exact on both status and code: any other 418 (another code,
+// or no code) is an ordinary refusal and stays a rejection (http_418). The
+// request was not processed, so the op waits as a 429 does.
+func readOnlyRefusal(re *RemoteError) bool {
+	return re.Status == http.StatusTeapot && re.Code == readOnlyCode
+}
+
+// RecordedReadOnly reports whether a rejected op's recorded reason and error
+// are the read-only answer readOnlyRefusal matches (hk 5506). writeFailed
+// records re.Error() as last_error, so the status and code are parsed back out
+// of that text, anchored on its hk-authored prefix, and the same predicate
+// decides. Any other reason, shape or code is false.
+func RecordedReadOnly(reason, recorded string) bool {
+	if reason != "http_"+strconv.Itoa(http.StatusTeapot) {
+		return false
+	}
+	re, ok := parseRecordedRefusal(recorded)
+	return ok && readOnlyRefusal(re)
+}
+
+// parseRecordedRefusal reads the status and code back out of a recorded
+// RemoteError.Error(): "youtrack answered <status>: youtrack <METHOD> <path>:
+// <status> <code>[: <description>]" (APIError.Error, internal/youtrack). A
+// path has no ": " in it, so the first two separators split the text. The
+// code is the second field of the APIError status segment; a description
+// that happens to contain the code text is never read as one.
+func parseRecordedRefusal(recorded string) (*RemoteError, bool) {
+	rest, ok := strings.CutPrefix(recorded, "youtrack answered ")
+	if !ok {
+		return nil, false
+	}
+	statusText, apiText, ok := strings.Cut(rest, ": ")
+	if !ok {
+		return nil, false
+	}
+	status, err := strconv.Atoi(statusText)
+	if err != nil {
+		return nil, false
+	}
+	apiHead, apiTail, ok := strings.Cut(apiText, ": ")
+	if !ok || !strings.HasPrefix(apiHead, "youtrack ") {
+		return nil, false
+	}
+	segment, _, _ := strings.Cut(apiTail, ": ")
+	fields := strings.Fields(segment)
+	if len(fields) != 2 {
+		return nil, false
+	}
+	apiStatus, err := strconv.Atoi(fields[0])
+	if err != nil || apiStatus != status {
+		return nil, false
+	}
+	return &RemoteError{Status: status, Code: fields[1]}, true
+}
+
+// readOnlyWait is the wait for a read-only refusal: the server's Retry-After
+// when it sent one, else ReadOnlyWait; capped by MaxRetryAfter as a 429 is.
+func (p *Protocol) readOnlyWait(retryAfter time.Duration) time.Duration {
+	wait := retryAfter
+	if wait <= 0 {
+		wait = p.ReadOnlyWait
+	}
+	return min(wait, p.MaxRetryAfter)
 }
 
 // settler records one remote outcome: the Protocol itself through the
@@ -486,6 +567,8 @@ func (p *Protocol) notSent(ctx context.Context, st settler, op Op, ns *NotSentEr
 			return p.deferNotSent(ctx, st, op, min(wait, p.MaxRetryAfter), ReasonRateLimited, re.Error())
 		case re.Status == http.StatusUnauthorized:
 			return p.deferNotSent(ctx, st, op, p.AuthWait, ReasonUnauthorized, re.Error())
+		case readOnlyRefusal(re):
+			return p.deferNotSent(ctx, st, op, p.readOnlyWait(re.RetryAfter), ReasonReadOnly, re.Error())
 		case re.Status >= 400 && re.Status < 500 && re.Status != http.StatusRequestTimeout:
 			return st.reject(ctx, op, "http_"+strconv.Itoa(re.Status), re.Error())
 		}
@@ -663,6 +746,9 @@ func (p *Protocol) reconcile(ctx context.Context, op Op) (applied bool, err erro
 	if pk, ok := kind.(PlannedKind); ok {
 		return p.reconcilePlanned(ctx, op, pk)
 	}
+	if sk, ok := kind.(articleSplit); ok {
+		return p.reconcileSplit(ctx, op, sk)
+	}
 	want, rerr := kind.Render(op)
 	if rerr != nil {
 		return touch(ReasonReconcileFailed, rerr.Error())
@@ -762,6 +848,9 @@ func (p *Protocol) Resolve(ctx context.Context, id int64, r Resolution) (Result,
 	if kind, ok := p.kindFor(op.Kind); ok {
 		if _, planned := kind.(PlannedKind); planned {
 			return p.resolvePlanned(ctx, op, r)
+		}
+		if _, split := kind.(articleSplit); split {
+			return p.resolveSplit(ctx, op, r)
 		}
 	}
 	var got Op
