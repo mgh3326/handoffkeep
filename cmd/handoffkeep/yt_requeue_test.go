@@ -21,6 +21,7 @@ func TestYTOpsRequeueArgumentRules(t *testing.T) {
 		{"positional argument", []string{"--by", "ops", "5"}, "usage: youtrack ops requeue"},
 		{"negative after-id", []string{"--by", "ops", "--after-id=-1"}, "usage: youtrack ops requeue"},
 		{"limit over the bound", []string{"--by", "ops", "--limit", "100000"}, "usage: youtrack ops requeue"},
+		{"by longer than the history row", []string{"--by", strings.Repeat("a", 201), "--op", "5"}, "--by is longer than 200 characters"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -65,18 +66,45 @@ func TestYTRequeueRefusal(t *testing.T) {
 	}
 }
 
+// TestYTRequeueLinkScope pins which ops must still own their task comment's
+// link (hk 5506): task-comment ops only. A document copy (hk:doc-comments) has
+// no link row, so requiring one would make it unrequeueable.
+func TestYTRequeueLinkScope(t *testing.T) {
+	task := ytrroRejected(ytwrite.KindCommentAppend, ytrroRecorded)
+	task.Principal = YTCommentPrincipal
+	doc := task
+	doc.Principal = ytDocCommentPrincipal
+	article := ytrroRejected(ytwrite.KindArticleCreate, ytrroRecorded)
+	if !ytRequeueLinkRequired(task) {
+		t.Fatal("a task comment must keep its link")
+	}
+	if ytRequeueLinkRequired(doc) || ytRequeueLinkRequired(article) {
+		t.Fatal("a document copy or an article is not linked to a task comment")
+	}
+}
+
+// TestYTRequeueByLength refuses an operator name the history row cannot hold,
+// before any op is read.
+func TestYTRequeueByLength(t *testing.T) {
+	s := &Store{}
+	long := strings.Repeat("a", YTRequeueByMax+1)
+	if _, err := s.RequeueYTReadOnlyOps(t.Context(), time.Now(), YTRequeueOptions{Tenant: ytcTenant, OpIDs: []int64{1}, By: long, Apply: true}); err == nil {
+		t.Fatal("a name longer than the history row accepts was taken")
+	}
+}
+
 // TestYTRequeueOpsSelection pins the ids a pass considers: named ids in order
 // without repeats, and a positive-id check.
 func TestYTRequeueOpsSelection(t *testing.T) {
 	s := &Store{}
-	ids, next, err := s.selectYTRequeueOps(t.Context(), YTRequeueOptions{OpIDs: []int64{9, 3, 9, 5}})
+	ids, next, err := s.selectYTRequeueOps(t.Context(), YTRequeueOptions{Tenant: ytcTenant, OpIDs: []int64{9, 3, 9, 5}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if next != nil || len(ids) != 3 || ids[0] != 9 || ids[1] != 3 || ids[2] != 5 {
 		t.Fatalf("ids %v next %v", ids, next)
 	}
-	if _, _, err := s.selectYTRequeueOps(t.Context(), YTRequeueOptions{OpIDs: []int64{0}}); err == nil {
+	if _, _, err := s.selectYTRequeueOps(t.Context(), YTRequeueOptions{Tenant: ytcTenant, OpIDs: []int64{0}}); err == nil {
 		t.Fatal("a non-positive op id was accepted")
 	}
 }
@@ -121,7 +149,7 @@ func TestYTRequeueReadOnlyFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dry, err := s.RequeueYTReadOnlyOps(ctx, now, YTRequeueOptions{OpIDs: []int64{op.ID, other.ID}})
+	dry, err := s.RequeueYTReadOnlyOps(ctx, now, YTRequeueOptions{Tenant: ytcTenant, OpIDs: []int64{op.ID, other.ID}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,10 +160,22 @@ func TestYTRequeueReadOnlyFlow(t *testing.T) {
 		t.Fatalf("dry run wrote: op %+v, history rows %d", got, ytrroCount(t, s, op.ID))
 	}
 
-	if _, err := s.RequeueYTReadOnlyOps(ctx, now, YTRequeueOptions{OpIDs: []int64{op.ID}, Apply: true}); err == nil {
+	// An op of another tenant is refused, and nothing is written for it.
+	foreign, err := s.RequeueYTReadOnlyOps(ctx, now, YTRequeueOptions{Tenant: "other.youtrack.cloud", OpIDs: []int64{op.ID}, By: "operator", Apply: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(foreign.Ops) != 1 || foreign.Ops[0].Outcome != YTRequeueNotEligible || foreign.Ops[0].Reason != ytRequeueOtherTenant {
+		t.Fatalf("other tenant %+v", foreign.Ops)
+	}
+	if got, _ := s.YTWriteLedger().ByID(ctx, op.ID); got.State != ytwrite.StateRejected || ytrroCount(t, s, op.ID) != 0 {
+		t.Fatalf("other tenant wrote: op %+v, history rows %d", got, ytrroCount(t, s, op.ID))
+	}
+
+	if _, err := s.RequeueYTReadOnlyOps(ctx, now, YTRequeueOptions{Tenant: ytcTenant, OpIDs: []int64{op.ID}, Apply: true}); err == nil {
 		t.Fatal("apply without --by was accepted")
 	}
-	applied, err := s.RequeueYTReadOnlyOps(ctx, now, YTRequeueOptions{OpIDs: []int64{op.ID}, By: "operator", Apply: true})
+	applied, err := s.RequeueYTReadOnlyOps(ctx, now, YTRequeueOptions{Tenant: ytcTenant, OpIDs: []int64{op.ID}, By: "operator", Apply: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +193,7 @@ func TestYTRequeueReadOnlyFlow(t *testing.T) {
 		t.Fatalf("history rows %d, want 1", n)
 	}
 
-	again, err := s.RequeueYTReadOnlyOps(ctx, now, YTRequeueOptions{OpIDs: []int64{op.ID}, By: "operator", Apply: true})
+	again, err := s.RequeueYTReadOnlyOps(ctx, now, YTRequeueOptions{Tenant: ytcTenant, OpIDs: []int64{op.ID}, By: "operator", Apply: true})
 	if err != nil {
 		t.Fatal(err)
 	}

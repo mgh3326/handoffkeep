@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"slices"
 	"strings"
@@ -67,7 +68,13 @@ const (
 	ytRequeueCommentLinked = "comment_not_linked"
 	ytRequeueNotAdmitted   = "not_admitted"
 	ytRequeueChanged       = "changed_concurrently"
+	ytRequeueOtherTenant   = "other_tenant"
 )
+
+// YTRequeueByMax is the length of the operator name a requeue records: the
+// history row's by_operator (CHECK <= 200 on both dialects). A longer name is
+// refused before any op is touched.
+const YTRequeueByMax = 200
 
 // YTRequeueOptions selects the ops of one pass and says whether it applies.
 type YTRequeueOptions struct {
@@ -78,8 +85,12 @@ type YTRequeueOptions struct {
 	Limit   int
 	// By names the operator who requeues the ops; it is recorded with each
 	// requeue. Required when Apply is set.
-	By    string
-	Apply bool
+	By string
+	// Tenant is the serving tenant. Only ops of this tenant are considered
+	// (the dispatcher admits a tenant's ops only), and the admission check is
+	// bound to it, not to the op's own tenant.
+	Tenant string
+	Apply  bool
 }
 
 // YTRequeueItem is the answer for one op: its outcome and, when it is not
@@ -128,8 +139,15 @@ func ytRequeueRefusal(op ytwrite.Op) string {
 // the same ops requeues nothing: a requeued op is prepared, not rejected.
 func (s *Store) RequeueYTReadOnlyOps(ctx context.Context, now time.Time, opts YTRequeueOptions) (YTRequeueReport, error) {
 	out := YTRequeueReport{Apply: opts.Apply, Ops: []YTRequeueItem{}}
-	if opts.Apply && strings.TrimSpace(opts.By) == "" {
+	by := strings.TrimSpace(opts.By)
+	if opts.Apply && by == "" {
 		return out, errors.New("requeue: --by names the operator who requeues the ops")
+	}
+	if len(by) > YTRequeueByMax {
+		return out, fmt.Errorf("requeue: --by is longer than %d characters", YTRequeueByMax)
+	}
+	if strings.TrimSpace(opts.Tenant) == "" {
+		return out, errors.New("requeue: the serving tenant is required")
 	}
 	ids, next, err := s.selectYTRequeueOps(ctx, opts)
 	if err != nil {
@@ -137,7 +155,7 @@ func (s *Store) RequeueYTReadOnlyOps(ctx context.Context, now time.Time, opts YT
 	}
 	out.NextAfterID = next
 	for _, id := range ids {
-		item, err := s.requeueYTReadOnlyOp(ctx, now, id, strings.TrimSpace(opts.By), opts.Apply)
+		item, err := s.requeueYTReadOnlyOp(ctx, now, id, by, opts.Tenant, opts.Apply)
 		if err != nil {
 			return out, err
 		}
@@ -198,18 +216,18 @@ func (s *Store) selectYTRequeueOps(ctx context.Context, opts YTRequeueOptions) (
 
 // requeueYTReadOnlyOp decides one op in its own transaction, retried on a
 // transaction conflict like the other ledger writes.
-func (s *Store) requeueYTReadOnlyOp(ctx context.Context, now time.Time, id int64, by string, apply bool) (YTRequeueItem, error) {
+func (s *Store) requeueYTReadOnlyOp(ctx context.Context, now time.Time, id int64, by, tenant string, apply bool) (YTRequeueItem, error) {
 	var item YTRequeueItem
 	err := s.retryTx(ctx, func() error {
 		var err error
-		item, err = s.requeueYTReadOnlyOpOnce(ctx, now, id, by, apply)
+		item, err = s.requeueYTReadOnlyOpOnce(ctx, now, id, by, tenant, apply)
 		return err
 	})
 	return item, err
 }
 
 // requeueYTReadOnlyOpOnce is one attempt of requeueYTReadOnlyOp.
-func (s *Store) requeueYTReadOnlyOpOnce(ctx context.Context, now time.Time, id int64, by string, apply bool) (YTRequeueItem, error) {
+func (s *Store) requeueYTReadOnlyOpOnce(ctx context.Context, now time.Time, id int64, by, tenant string, apply bool) (YTRequeueItem, error) {
 	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return YTRequeueItem{}, err
@@ -239,10 +257,13 @@ func (s *Store) requeueYTReadOnlyOpOnce(ctx context.Context, now time.Time, id i
 			return ytRequeueNotEligibleItem(ytwrite.Op{ID: id}, ytRequeueNoOp), nil
 		}
 	}
+	if op.Tenant != tenant {
+		return ytRequeueNotEligibleItem(op, ytRequeueOtherTenant), nil
+	}
 	if reason := ytRequeueRefusal(op); reason != "" {
 		return ytRequeueNotEligibleItem(op, reason), nil
 	}
-	if reason, err := s.ytRequeueAdmissionTx(ctx, tx, op); err != nil {
+	if reason, err := s.ytRequeueAdmissionTx(ctx, tx, op, tenant); err != nil {
 		return YTRequeueItem{}, err
 	} else if reason != "" {
 		return ytRequeueNotEligibleItem(op, reason), nil
@@ -280,11 +301,20 @@ func (s *Store) requeueYTReadOnlyOpOnce(ctx context.Context, now time.Time, id i
 	return ytRequeueItem(op, YTRequeueRequeued, ""), nil
 }
 
+// ytRequeueLinkRequired reports whether op must still be the one its task
+// comment's yt_comment_write_links row names. Only the task-comment principal
+// writes those rows; a document-copy comment (hk:doc-comments) has none, and a
+// copy made by RequeueYTMovedComments supersedes only task-comment ops.
+func ytRequeueLinkRequired(op ytwrite.Op) bool {
+	return op.Kind == ytwrite.KindCommentAppend && op.Principal == YTCommentPrincipal
+}
+
 // ytRequeueAdmissionTx is the non-empty reason when the worker's own admission
-// (ytAdmitSQL, the same SQL Due and Claim use) does not admit op now, or the
-// comment's link no longer names it; "" when the op can be sent.
-func (s *Store) ytRequeueAdmissionTx(ctx context.Context, tx transaction, op ytwrite.Op) (string, error) {
-	if op.Kind == ytwrite.KindCommentAppend {
+// (ytAdmitSQL, the same SQL Due and Claim use, bound to the serving tenant) does
+// not admit op now, or the task comment's link no longer names it; "" when the
+// op can be sent.
+func (s *Store) ytRequeueAdmissionTx(ctx context.Context, tx transaction, op ytwrite.Op, tenant string) (string, error) {
+	if ytRequeueLinkRequired(op) {
 		var comment int64
 		err := tx.QueryRow(ctx, sqlFor(tx, `SELECT comment_id FROM yt_comment_write_links WHERE op_id=$1`,
 			`SELECT comment_id FROM yt_comment_write_links WHERE op_id=?`), op.ID).Scan(&comment)
@@ -298,7 +328,7 @@ func (s *Store) ytRequeueAdmissionTx(ctx context.Context, tx transaction, op ytw
 	var one int
 	err := tx.QueryRow(ctx, sqlFor(tx,
 		`SELECT 1 FROM yt_write_ops o WHERE o.id=$1 AND `+s.ytAdmitSQL("$2"),
-		`SELECT 1 FROM yt_write_ops o WHERE o.id=? AND `+s.ytAdmitSQL("?")), op.ID, op.Tenant).Scan(&one)
+		`SELECT 1 FROM yt_write_ops o WHERE o.id=? AND `+s.ytAdmitSQL("?")), op.ID, tenant).Scan(&one)
 	if errors.Is(err, ErrNoRows) {
 		return ytRequeueNotAdmitted, nil
 	}

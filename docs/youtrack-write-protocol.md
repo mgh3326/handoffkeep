@@ -398,12 +398,13 @@ rejected op is listed `not_eligible` with its reason and is not changed.
 An op is eligible when it is `rejected`, its reason is `http_418`, its recorded
 error is the read-only answer (`ytwrite.RecordedReadOnly`, the match 418
 `invalid_state` that `readOnlyRefusal` uses, parsed back from the stored text),
-its kind is `comment_append` or `article_create`, its payload is held (a redacted
+its tenant is the serving tenant, its kind is `comment_append` or `article_create`, its payload is held (a redacted
 payload sends an empty plan), and it was never reconciled. A comment op must
 still be the link's op (`yt_comment_write_links`); a copy made by the moved-comment
 requeue supersedes it. The worker's own admission (`ytAdmitSQL`, the SQL `Due`
-and `Claim` use) must admit it under the comment and document modes the CLI reads
-from the same environment, so a binding that moved, a mode that is off or a
+and `Claim` use, bound to the serving tenant) must admit it. The CLI sets the
+comment, document-comment and article modes from the same environment as serve,
+and reads the article bucket projects from YouTrack, so a binding that moved, a mode that is off or a
 document bound to another op is `not_eligible` rather than stranded `prepared`.
 The planned kinds (`issue_links`, `issue_move`, `article_split`) send several
 steps, so a refusal can follow an applied step; they stay rejected.

@@ -57,11 +57,18 @@ func youtrackOpsRequeueCmd(args []string, out io.Writer) error {
 	if fs.NArg() != 0 || *afterID < 0 || *limit < 1 || *limit > store.YTRequeueListMax || bindBy == "" {
 		return errors.New(youtrackOpsRequeueUsage)
 	}
+	if len(bindBy) > store.YTRequeueByMax {
+		return fmt.Errorf("--by is longer than %d characters", store.YTRequeueByMax)
+	}
 	commentsMode, err := ytCommentsModeFromEnv()
 	if err != nil {
 		return exitCodeError{code: youtrackExitConfig, err: err}
 	}
 	docsMode, err := ytDocsModeFromEnv()
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	docCommentsMode, err := ytDocCommentsModeFromEnv()
 	if err != nil {
 		return exitCodeError{code: youtrackExitConfig, err: err}
 	}
@@ -97,14 +104,27 @@ func youtrackOpsRequeueCmd(args []string, out io.Writer) error {
 			return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("the database lacks migration %s: deploy the release that adds it first; the preflight never migrates", store.YTWriteOpRequeueMigration)}
 		}
 	}
-	// The admission the dispatcher applies (ytAdmitSQL) reads the comment and
-	// document modes; the pass evaluates it with the same modes the server runs.
+	// The admission the dispatcher applies (ytAdmitSQL) reads the modes the
+	// server runs with, so the pass sets them as serve does. A document's
+	// article gate needs the import's /shared and /unassigned projects, which
+	// only YouTrack knows, so they are read here as serve reads them.
 	st.SetYTCommentsMode(commentsMode)
+	st.SetYTDocCommentsMode(docCommentsMode)
 	if docsMode == store.YTDocsOn {
-		st.SetYTDocsMode(store.YTDocsOn, tenant, nil)
+		bucketCtx, cancelBucket := context.WithTimeout(context.Background(), ytCommentsGetTimeout)
+		buckets, err := ytArticleBuckets(bucketCtx, client)
+		cancelBucket()
+		if err != nil {
+			return exitCodeError{code: youtrackExitFailed, err: fmt.Errorf("HANDOFFKEEP_YT_DOCS_MODE=on: read the article bucket projects: %w", err)}
+		}
+		projects := map[string]store.YTArticleProject{}
+		for k, b := range buckets {
+			projects[k] = store.YTArticleProject{ID: b.ID, ShortName: b.ShortName}
+		}
+		st.SetYTDocsMode(store.YTDocsOn, tenant, projects)
 	}
 	report, err := st.RequeueYTReadOnlyOps(context.Background(), time.Now().UTC(), store.YTRequeueOptions{
-		OpIDs: ops, AfterID: *afterID, Limit: *limit, By: bindBy, Apply: *apply})
+		OpIDs: ops, AfterID: *afterID, Limit: *limit, By: bindBy, Tenant: tenant, Apply: *apply})
 	if err != nil {
 		return err
 	}
