@@ -440,6 +440,123 @@ t_gate_mysql_migrations() {
 	compare "$SHA_OLD" "$SHA_NEW" ahead '[{"filename":"internal/store/migration_mysql_tasks.go","status":"added","patch":"+x"},{"filename":"internal/store/migration_pg.go","status":"added","patch":"+x"}]'
 	want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
 }
+MYSQL_PG_ONLY='{"filename":"internal/store/migration_pg.go","status":"added","patch":"+func init() { registerMigration(migration{ID: \"x\"}) }"}'
+t_gate_store_mysql_migrations() {
+	# hk 4899 C2: in mysql mode an added or changed migration_mysql_*.go is the
+	# production DDL and holds.
+	HK_FOLLOW_STORE=mysql
+	setup; setup_tick
+	local f
+	for f in \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"added","patch":"+x"}]' \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"modified","patch":"@@ -1 +1 @@\n-old\n+new"}]' \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"renamed","patch":"+x"}]' \
+		'[{"filename":"internal/store/migration_mysql_tasks.go","status":"modified"}]'; do
+		compare "$SHA_OLD" "$SHA_NEW" ahead "$f"
+		want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	done
+	# A removed MySQL file is not a new migration.
+	compare "$SHA_OLD" "$SHA_NEW" ahead '[{"filename":"internal/store/migration_mysql_tasks.go","status":"removed"}]'
+	want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_store_mysql_pg_only_migration() {
+	# In mysql mode an added PostgreSQL-only migration file does not hold: its
+	# patch is the whole file. The same file holds in postgres mode.
+	HK_FOLLOW_STORE=mysql
+	setup; setup_tick
+	local f
+	compare "$SHA_OLD" "$SHA_NEW" ahead "[$MYSQL_PG_ONLY]"
+	want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	# A changed, renamed or copied PostgreSQL-only file holds: its patch is
+	# partial, so a MySQL step edited outside every shown hunk cannot be ruled
+	# out. (A registerMigration-only hunk used to pass here.)
+	for f in \
+		'[{"filename":"internal/store/migration_pg.go","status":"modified","patch":"@@ -1 +1 @@\n registerMigration(migration{\n-\tID: \"old\"\n+\tID: \"new\"\n }"}]' \
+		'[{"filename":"internal/store/migration_pg.go","status":"modified","patch":"@@ -9 +9 @@\n-\tstepMySQL(x)\n+\tstepMySQL(y)"}]' \
+		'[{"filename":"internal/store/migration_pg.go","status":"renamed","patch":"+x"}]' \
+		'[{"filename":"internal/store/migration_pg.go","status":"copied","patch":"+x"}]'; do
+		compare "$SHA_OLD" "$SHA_NEW" ahead "$f"
+		want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	done
+	# A removed PostgreSQL-only file adds nothing.
+	compare "$SHA_OLD" "$SHA_NEW" ahead '[{"filename":"internal/store/migration_pg.go","status":"removed"}]'
+	want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	HK_FOLLOW_STORE=postgres
+	compare "$SHA_OLD" "$SHA_NEW" ahead "[$MYSQL_PG_ONLY]"
+	want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_store_mysql_renamed_out_of_namespace() {
+	# A file renamed out of the migration namespace keeps its old name's rule:
+	# a dual-registered PostgreSQL file renamed to helpers.go with a MySQL-step
+	# edit holds, and so does a MySQL migration renamed away. (Both promoted
+	# before the previous_filename check.)
+	HK_FOLLOW_STORE=mysql
+	setup; setup_tick
+	local f
+	for f in \
+		'[{"filename":"internal/store/helpers.go","previous_filename":"internal/store/migration_pg.go","status":"renamed","patch":"@@ -9 +9 @@\n-\tstepMySQL(x)\n+\tstepMySQL(y)"}]' \
+		'[{"filename":"internal/store/helpers.go","previous_filename":"internal/store/migration_mysql_tasks.go","status":"renamed","patch":"+x"}]' \
+		'[{"filename":"internal/store/helpers.go","previous_filename":"internal/store/migration_pg.go","status":"copied","patch":"+x"}]'; do
+		compare "$SHA_OLD" "$SHA_NEW" ahead "$f"
+		want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	done
+}
+t_gate_store_renamed_from_outside_store() {
+	# A file renamed into internal/store from outside it is not a migration
+	# unless its old name was a store migration file.
+	HK_FOLLOW_STORE=mysql
+	setup; setup_tick
+	compare "$SHA_OLD" "$SHA_NEW" ahead '[{"filename":"internal/store/utils.go","previous_filename":"web/console/src/migration_utils.go","status":"renamed","patch":"+x"}]'
+	want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	HK_FOLLOW_STORE=postgres
+	compare "$SHA_OLD" "$SHA_NEW" ahead '[{"filename":"internal/store/utils.go","previous_filename":"web/console/src/migration_utils.go","status":"renamed","patch":"+x"}]'
+	want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_gate_store_mysql_registration() {
+	# In mysql mode the registration call that counts is registerMySQLMigration(;
+	# a file that registers both dialects still holds, and an unreadable
+	# PostgreSQL-only file still holds (the gate cannot check it).
+	HK_FOLLOW_STORE=mysql
+	setup; setup_tick
+	local f
+	for f in \
+		'[{"filename":"internal/store/migration_pg.go","status":"modified","patch":"@@ -1 +1 @@\n+func init() { registerMySQLMigration(migration{ID: \"x\"}) }"}]' \
+		'[{"filename":"internal/store/migration_pg.go","status":"added","patch":"+func init() { registerMigration(migration{ID: \"x\"}); registerMySQLMigration(migration{ID: \"x\"}) }"}]' \
+		'[{"filename":"internal/store/migration_pg.go","status":"modified"}]' \
+		'[{"filename":"internal/store/tasks.go","status":"modified","patch":"@@ -1 +1 @@\n+func init() { registerMySQLMigration(migration{ID: \"x\"}) }"}]'; do
+		compare "$SHA_OLD" "$SHA_NEW" ahead "$f"
+		want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	done
+}
+t_gate_store_mysql_shared_migration_go() {
+	# A changed shared migration.go (not migration_*.go) keeps the postgres
+	# content rule in both modes: it holds on a registration call.
+	HK_FOLLOW_STORE=mysql
+	setup; setup_tick
+	compare "$SHA_OLD" "$SHA_NEW" ahead '[{"filename":"internal/store/migration.go","status":"modified","patch":"@@ -1 +1 @@\n+func init() { registerMigration(migration{ID: \"x\"}) }"}]'
+	want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	compare "$SHA_OLD" "$SHA_NEW" ahead '[{"filename":"internal/store/migration.go","status":"modified","patch":"+// comment"}]'
+	want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
+t_store_mode_bad_value() {
+	# Any value other than postgres or mysql (including empty) is a start error:
+	# main logs the refusal and exits 1 before it reads GitHub or writes state.
+	local v want_line out rc
+	for v in pg MySQL ''; do
+		case "$v" in
+		'') want_line="hk_follow.refused reason=store_mode value=''" ;;
+		*) want_line="hk_follow.refused reason=store_mode value=$v" ;;
+		esac
+		setup; setup_tick
+		HK_FOLLOW_STORE=$v
+		rc=0
+		out=$(main tick 2>&1) || rc=$?
+		want 1 "$rc"
+		want "$want_line" "$out"
+		want "" "$(calls)"
+		fails test -e "$FIX/state/state.json"
+	done
+}
 
 # --- tick ------------------------------------------------------------------
 
@@ -677,6 +794,13 @@ t_tick_hold_then_approval() {
 	tick
 	want "deployed" "$(state_field verdict)"
 	want "deploy-approval/handoffkeep/$SHA_NEW" "$(jq -r .approval_ref "$FIX"/records/deploy_handoffkeep_2*)"
+}
+t_tick_gate_log_names_store() {
+	HK_FOLLOW_STORE=mysql
+	setup; setup_tick
+	compare "$SHA_OLD" "$SHA_NEW" ahead "$MIG_ADDED"
+	out=$(tick 2>&1)
+	want 1 "$(printf '%s\n' "$out" | grep -c 'hk_follow.gate .*store=mysql')"
 }
 t_tick_already_serving() {
 	setup; setup_tick

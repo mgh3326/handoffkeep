@@ -273,6 +273,10 @@ jobs:
           HANDOFFKEEP_TOKEN: ${{ secrets.HK_PROMOTE_TOKEN }}
           HANDOFFKEEP_CF_ACCESS_CLIENT_ID: ${{ secrets.HK_PROMOTE_CF_ACCESS_CLIENT_ID }}
           HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET: ${{ secrets.HK_PROMOTE_CF_ACCESS_CLIENT_SECRET }}
+          # The store mode must match the one ncp's tick uses (hk 5425). Set the
+          # repository variable HK_FOLLOW_STORE to mysql at the cutover, with the
+          # env file on ncp; unset means postgres.
+          HK_FOLLOW_STORE: ${{ vars.HK_FOLLOW_STORE || 'postgres' }}
         run: |
           export HANDOFFKEEP_CLI="$RUNNER_TEMP/handoffkeep"
           bash deploy/hk-follow/hk-follow promote "$TARGET_SHA"

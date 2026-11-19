@@ -47,6 +47,10 @@ set -euo pipefail
 : "${HK_FOLLOW_IMAGE_WAIT:=1200}"
 : "${HK_FOLLOW_GITHUB_API:=https://api.github.com}"
 : "${HK_FOLLOW_APPROVAL_PREFIX:=deploy-approval/handoffkeep}"
+# Which registry production runs: postgres (the migration rule of hk 5072) or
+# mysql (the flipped rule after the hk 4899 C2 cutover). Unset means postgres.
+# Set only as a default: an empty value is kept and refused by store_mode_ok.
+: "${HK_FOLLOW_STORE=postgres}"
 : "${SHIFTGATE:=shiftgate}"
 : "${HANDOFFKEEP_CLI:=handoffkeep}"
 : "${PANEWIRE:=panewire}"
@@ -505,32 +509,73 @@ ci_ok_state() {
 	esac
 }
 
+# store_mode_ok: HK_FOLLOW_STORE must be postgres or mysql. Anything else is a
+# start error: the caller logs the refusal and exits before it reads GitHub or
+# writes state.
+store_mode_ok() {
+	case "$HK_FOLLOW_STORE" in
+	postgres | mysql) return 0 ;;
+	*) log "hk_follow.refused reason=store_mode value=$(printf '%q' "$HK_FOLLOW_STORE")"; return 1 ;;
+	esac
+}
+
 # migrations <compare.json>: print each file in the comparison that adds a
-# migration. A file counts when it is an added, renamed or copied non-test Go
-# file under internal/store/ whose name says migration, or when any changed
-# store file's patch touches a registerMigration( call — on an added or a
-# context line, since an edited ID inside a multi-line registration is a new
-# migration. An added migration_mysql_* file skips only the name rule: it
-# feeds the MySQL registry production PostgreSQL never runs. Renamed and
-# copied migration_mysql_* files keep it — their patch shows only changed
-# lines, so a carried-over PostgreSQL registration would be invisible — and
-# a store Go file whose patch GitHub left out (too large) counts too: the
-# gate cannot read it, so it must not pass it.
+# migration, under the rule of HK_FOLLOW_STORE.
+#
+# postgres (the rule since hk 5072): a file counts when it is an added,
+# renamed or copied non-test Go file under internal/store/ whose name says
+# migration, except an added migration_mysql_* file, which feeds the MySQL
+# registry production PostgreSQL never runs. A renamed or copied
+# migration_mysql_* file still counts: its patch shows only changed lines, so
+# a carried-over PostgreSQL registration would be invisible. Or a store file's
+# patch adds a registerMigration( call, or shows one on a context line — an
+# edited ID inside a multi-line registration is a new migration.
+#
+# mysql (after the hk 4899 C2 cutover, production runs MySQL): a file
+# migration_mysql_*.go counts when it is not removed, whatever its patch.
+# A PostgreSQL-only file (migration_*.go, not migration_mysql_*) counts when
+# it is added and its patch shows a registerMySQLMigration( call or cannot be
+# read, so a PostgreSQL-only added file does not hold. An added file's patch is
+# the whole file, so that is a full answer. A changed, renamed or copied
+# PostgreSQL-only file always counts: its patch is partial, and an edit to a
+# MySQL step in a dual-registered file can sit outside every hunk that shows a
+# registration call. Any other store file
+# (a shared file such as migration.go) keeps the postgres rule, and also counts
+# when its patch touches a registerMySQLMigration( call.
+#
+# A renamed or copied file is classified by its old name as well as its new
+# one (previous_filename), so renaming a migration out of the migration_*
+# namespace does not hide it.
+#
+# In both modes a store Go file whose patch GitHub left out (too large) counts:
+# the gate cannot read it, so it must not pass it.
 migrations() {
-	jq -r '
+	jq -r --arg mode "$HK_FOLLOW_STORE" '
 		.files[]?
 		| select(.filename | test("^internal/store/[^/]+\\.go$"))
 		| select(.filename | endswith("_test.go") | not)
+		| (.filename) as $n
+		| (.status) as $s
+		| ((.patch // null) == null and $s != "removed") as $nopatch
+		| ((.patch // "") | test("(^|\\n)[ +][^\\n]*registerMigration\\(")) as $reg
+		| ((.patch // "") | test("(^|\\n)[ +][^\\n]*registerMySQLMigration\\(")) as $mysqlreg
+		| ([$n, (.previous_filename // $n)]) as $names
+		| ($names | any(test("^internal/store/migration_mysql_[^/]*\\.go$"))) as $mysqlname
+		| ($names | any(test("^internal/store/migration_[^/]*\\.go$"))) as $pgname
+		| ($names | any(test("^internal/store/[^/]*migration[^/]*\\.go$"))) as $migname
 		| select(
-			(.status == "added"
-				and (.filename | test("migration[^/]*\\.go$"))
-				and (.filename | test("^internal/store/migration_mysql_[^/]*\\.go$") | not))
-			or ((.status == "renamed" or .status == "copied")
-				and (.filename | test("migration[^/]*\\.go$")))
-			or ((.patch // null) == null and .status != "removed")
-			or ((.patch // "") | test("(^|\\n)[ +][^\\n]*registerMigration\\("))
-		)
-		| .filename' "$1"
+			if $mode == "mysql" then
+				if $mysqlname then $s != "removed"
+				elif $pgname then $s != "removed" and (($s != "added") or $nopatch or $mysqlreg)
+				else (($s == "added" or $s == "renamed" or $s == "copied") and $migname)
+					or $nopatch or $reg or $mysqlreg
+				end
+			else
+				($s == "added" and $migname and ($mysqlname | not))
+				or (($s == "renamed" or $s == "copied") and $migname)
+				or $nopatch or $reg
+			end)
+		| $n' "$1"
 }
 
 # gate <sha> <deployed-sha>: set GATE_VERDICT and GATE_REASON and, for an
@@ -673,7 +718,7 @@ promote() {
 
 	gate "$sha" "$CUR_REV"
 	verdict=$GATE_VERDICT reason=$GATE_REASON
-	log "hk_follow.promote_gate sha=$sha deployed_sha=$CUR_REV verdict=$verdict reason=$reason approval_ref=${GATE_APPROVAL_REF:-none}"
+	log "hk_follow.promote_gate sha=$sha store=$HK_FOLLOW_STORE deployed_sha=$CUR_REV verdict=$verdict reason=$reason approval_ref=${GATE_APPROVAL_REF:-none}"
 	case "$verdict" in
 	noop)
 		return 0
@@ -934,7 +979,7 @@ tick_locked() {
 	fi
 	GATE_APPROVAL_REF=$approval
 
-	log "hk_follow.gate sha=${sha:-none} digest=$TAG_DIGEST deployed_sha=$(IFS=,; echo "${bases[*]:-unknown}") verdict=$verdict reason=$reason approval_ref=${GATE_APPROVAL_REF:-none}"
+	log "hk_follow.gate sha=${sha:-none} store=$HK_FOLLOW_STORE digest=$TAG_DIGEST deployed_sha=$(IFS=,; echo "${bases[*]:-unknown}") verdict=$verdict reason=$reason approval_ref=${GATE_APPROVAL_REF:-none}"
 	if [[ "$verdict" == promote ]]; then
 		# shiftgate's hold is read before anything starts, and only from a
 		# readable state. shiftgate still lists a service whose state.json
@@ -1098,6 +1143,9 @@ main() {
 		esac
 	done
 	set -- "${args[@]+"${args[@]}"}"
+	case "${1:-}" in
+	promote | tick | gate) store_mode_ok || exit 1 ;;
+	esac
 	case "${1:-}" in
 	promote) [[ $# -eq 2 ]] || usage; promote "$2" ;;
 	tick) [[ $# -eq 1 ]] || usage; tick ;;
