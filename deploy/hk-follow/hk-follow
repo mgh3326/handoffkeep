@@ -533,9 +533,13 @@ store_mode_ok() {
 #
 # mysql (after the hk 4899 C2 cutover, production runs MySQL): a file
 # migration_mysql_*.go counts when it is not removed, whatever its patch.
-# A PostgreSQL-only file (migration_*.go, not migration_mysql_*) counts only
-# when its patch adds or shows a registerMySQLMigration( call, so a
-# PostgreSQL-only registration no longer holds a promote. Any other store file
+# A PostgreSQL-only file (migration_*.go, not migration_mysql_*) counts when
+# it is added and its patch shows a registerMySQLMigration( call or cannot be
+# read, so a PostgreSQL-only added file does not hold. An added file's patch is
+# the whole file, so that is a full answer. A changed, renamed or copied
+# PostgreSQL-only file always counts: its patch is partial, and an edit to a
+# MySQL step in a dual-registered file can sit outside every hunk that shows a
+# registration call. Any other store file
 # (a shared file such as migration.go) keeps the postgres rule, and also counts
 # when its patch touches a registerMySQLMigration( call.
 #
@@ -557,7 +561,7 @@ migrations() {
 		| select(
 			if $mode == "mysql" then
 				if $mysqlname then $s != "removed"
-				elif $pgname then $nopatch or $mysqlreg
+				elif $pgname then $s != "removed" and (($s != "added") or $nopatch or $mysqlreg)
 				else (($s == "added" or $s == "renamed" or $s == "copied") and $migname)
 					or $nopatch or $reg or $mysqlreg
 				end

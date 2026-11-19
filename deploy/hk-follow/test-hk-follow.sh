@@ -460,18 +460,27 @@ t_gate_store_mysql_migrations() {
 	want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
 }
 t_gate_store_mysql_pg_only_migration() {
-	# In mysql mode a PostgreSQL-only migration file does not hold, whether it
-	# is added, renamed or copied; the same file holds in postgres mode.
+	# In mysql mode an added PostgreSQL-only migration file does not hold: its
+	# patch is the whole file. The same file holds in postgres mode.
 	HK_FOLLOW_STORE=mysql
 	setup; setup_tick
 	local f
+	compare "$SHA_OLD" "$SHA_NEW" ahead "[$MYSQL_PG_ONLY]"
+	want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	# A changed, renamed or copied PostgreSQL-only file holds: its patch is
+	# partial, so a MySQL step edited outside every shown hunk cannot be ruled
+	# out. (A registerMigration-only hunk used to pass here.)
 	for f in \
-		"[$MYSQL_PG_ONLY]" \
-		'[{"filename":"internal/store/migration_pg.go","status":"renamed","patch":"@@ -1 +1 @@\n registerMigration(migration{\n-\tID: \"old\"\n+\tID: \"new\"\n }"}]' \
+		'[{"filename":"internal/store/migration_pg.go","status":"modified","patch":"@@ -1 +1 @@\n registerMigration(migration{\n-\tID: \"old\"\n+\tID: \"new\"\n }"}]' \
+		'[{"filename":"internal/store/migration_pg.go","status":"modified","patch":"@@ -9 +9 @@\n-\tstepMySQL(x)\n+\tstepMySQL(y)"}]' \
+		'[{"filename":"internal/store/migration_pg.go","status":"renamed","patch":"+x"}]' \
 		'[{"filename":"internal/store/migration_pg.go","status":"copied","patch":"+x"}]'; do
 		compare "$SHA_OLD" "$SHA_NEW" ahead "$f"
-		want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+		want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
 	done
+	# A removed PostgreSQL-only file adds nothing.
+	compare "$SHA_OLD" "$SHA_NEW" ahead '[{"filename":"internal/store/migration_pg.go","status":"removed"}]'
+	want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
 	HK_FOLLOW_STORE=postgres
 	compare "$SHA_OLD" "$SHA_NEW" ahead "[$MYSQL_PG_ONLY]"
 	want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
