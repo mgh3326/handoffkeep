@@ -562,7 +562,7 @@ migrations() {
 		| ([$n, (.previous_filename // $n)]) as $names
 		| ($names | any(test("^internal/store/migration_mysql_[^/]*\\.go$"))) as $mysqlname
 		| ($names | any(test("^internal/store/migration_[^/]*\\.go$"))) as $pgname
-		| ($names | any(test("migration[^/]*\\.go$"))) as $migname
+		| ($names | any(test("^internal/store/[^/]*migration[^/]*\\.go$"))) as $migname
 		| select(
 			if $mode == "mysql" then
 				if $mysqlname then $s != "removed"

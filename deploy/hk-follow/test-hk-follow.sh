@@ -501,6 +501,17 @@ t_gate_store_mysql_renamed_out_of_namespace() {
 		want "hold migration" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
 	done
 }
+t_gate_store_renamed_from_outside_store() {
+	# A file renamed into internal/store from outside it is not a migration
+	# unless its old name was a store migration file.
+	HK_FOLLOW_STORE=mysql
+	setup; setup_tick
+	compare "$SHA_OLD" "$SHA_NEW" ahead '[{"filename":"internal/store/utils.go","previous_filename":"web/console/src/migration_utils.go","status":"renamed","patch":"+x"}]'
+	want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+	HK_FOLLOW_STORE=postgres
+	compare "$SHA_OLD" "$SHA_NEW" ahead '[{"filename":"internal/store/utils.go","previous_filename":"web/console/src/migration_utils.go","status":"renamed","patch":"+x"}]'
+	want "promote ok" "$(run_gate "$SHA_NEW" "$SHA_OLD")"
+}
 t_gate_store_mysql_registration() {
 	# In mysql mode the registration call that counts is registerMySQLMigration(;
 	# a file that registers both dialects still holds, and an unreadable
