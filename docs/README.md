@@ -68,3 +68,36 @@ binds are rejected.
 
 The existing `at-pg-backup` service includes the `handoffkeep` database. This
 repository intentionally ships no backup service or timer.
+
+### MySQL
+
+`HANDOFFKEEP_DB_URL` may be a `mysql://` URL. When the server certificate is
+signed by a private CA and carries no SAN (the endpoint is reached by IP), set
+both of these:
+
+- `HANDOFFKEEP_MYSQL_CA_PEM`: the PEM text of the CA. It may hold several
+  certificates. Set to an empty value, it is an error, not unset.
+- `HANDOFFKEEP_MYSQL_SERVER_NAME`: the name the server certificate must carry,
+  in its CN or a DNS SAN. Required while the CA is set.
+
+With the CA set, every connection verifies the chain against that CA and the
+name above; the URL's `tls=` must be omitted or `hk-pinned`. Go's own check
+ignores the CN when there is no SAN, which is why the name check is done here.
+With the CA unset, the URL's `tls=` works as before.
+
+### Copying the store (`store-copy`)
+
+`handoffkeep store-copy` copies the registered tables between a PostgreSQL and a
+MySQL database and compares their parity. Give each database URL either as a flag
+or by naming an environment variable that holds it. Prefer the environment form:
+a URL carries a password, and a flag value shows in the process list.
+
+```bash
+export HK_COPY_SRC='postgres://copy:<password>@pg.internal:5432/handoffkeep?sslmode=require'
+export HK_COPY_DST='mysql://copy:<password>@mysql.internal:3306/handoffkeep?tls=true'
+handoffkeep store-copy --from-env HK_COPY_SRC --to-env HK_COPY_DST --verify-only
+```
+
+Exactly one of `--from` and `--from-env` is required, and the same for `--to` and
+`--to-env`. An unset or empty variable is an error that names the variable, not its
+value. Errors and logs show a URL with its password removed.

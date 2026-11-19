@@ -14,7 +14,8 @@ import (
 // Parse requires a TCP URL and configures every connection for UTC, the
 // store's READ COMMITTED isolation level and the binary text collation the
 // schema uses (design §11.4), so a literal compared on a connection cannot pick
-// the server's case-insensitive default.
+// the server's case-insensitive default. When HANDOFFKEEP_MYSQL_CA_PEM is set,
+// the connection uses the pinned CA instead of the URL's tls= (see tls.go).
 func Parse(raw string) (*mysql.Config, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -22,6 +23,10 @@ func Parse(raw string) (*mysql.Config, error) {
 	}
 	if u.Scheme != "mysql" || u.Host == "" || u.User == nil || strings.TrimPrefix(u.Path, "/") == "" || strings.Contains(strings.TrimPrefix(u.Path, "/"), "/") {
 		return nil, fmt.Errorf("invalid mysql URL")
+	}
+	pinned, err := pinnedTLS()
+	if err != nil {
+		return nil, err
 	}
 	cfg := mysql.NewConfig()
 	cfg.Net = "tcp"
@@ -54,6 +59,15 @@ func Parse(raw string) (*mysql.Config, error) {
 		default:
 			cfg.Params[key] = values[0]
 		}
+	}
+	if pinned != nil {
+		if cfg.TLSConfig != "" && cfg.TLSConfig != pinnedTLSName {
+			return nil, fmt.Errorf("mysql URL tls=%q conflicts with %s; use tls=%s or omit tls", cfg.TLSConfig, caPEMEnv, pinnedTLSName)
+		}
+		if err := checkPinnedParams(cfg.Params); err != nil {
+			return nil, err
+		}
+		cfg.TLSConfig = pinnedTLSName
 	}
 	cfg.Params["time_zone"] = "'+00:00'"
 	cfg.Params["transaction_isolation"] = "'READ-COMMITTED'"
