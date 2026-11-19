@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -181,10 +182,31 @@ func TestParseRequiresServerNameWithCA(t *testing.T) {
 }
 
 func TestParseRejectsCAWithoutCertificate(t *testing.T) {
-	t.Setenv(caPEMEnv, "not a certificate")
 	t.Setenv(serverNameEnv, testServerName)
-	if _, err := Parse("mysql://u:p@127.0.0.1:3306/db"); err == nil {
-		t.Fatal("Parse accepted a CA holding no certificate")
+	for _, value := range []string{"not a certificate", "", "  \n"} {
+		t.Setenv(caPEMEnv, value)
+		if _, err := Parse("mysql://u:p@127.0.0.1:3306/db"); err == nil {
+			t.Fatalf("Parse accepted CA value %q holding no certificate", value)
+		}
+	}
+}
+
+// An empty CA variable set in the environment must not drop the pin: the URL's
+// tls=skip-verify is refused rather than used.
+func TestParseEmptyCAValueDoesNotFallBackToURLTLS(t *testing.T) {
+	t.Setenv(caPEMEnv, "")
+	t.Setenv(serverNameEnv, testServerName)
+	if _, err := Parse("mysql://u:p@127.0.0.1:3306/db?tls=skip-verify"); err == nil {
+		t.Fatal("Parse used URL tls=skip-verify while HANDOFFKEEP_MYSQL_CA_PEM is set but empty")
+	}
+}
+
+// unsetCA removes the CA variable for one test; t.Setenv restores it afterwards.
+func unsetCA(t *testing.T) {
+	t.Helper()
+	t.Setenv(caPEMEnv, "")
+	if err := os.Unsetenv(caPEMEnv); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -222,7 +244,7 @@ func TestParseTLSParameterWithCA(t *testing.T) {
 }
 
 func TestParseTLSParameterWithoutCAIsUnchanged(t *testing.T) {
-	t.Setenv(caPEMEnv, "")
+	unsetCA(t)
 	t.Setenv(serverNameEnv, "")
 	cfg, err := Parse("mysql://u:p@127.0.0.1:3306/db?tls=skip-verify")
 	if err != nil {

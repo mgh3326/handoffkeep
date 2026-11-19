@@ -76,7 +76,7 @@ signed by a private CA and carries no SAN (the endpoint is reached by IP), set
 both of these:
 
 - `HANDOFFKEEP_MYSQL_CA_PEM`: the PEM text of the CA. It may hold several
-  certificates.
+  certificates. Set to an empty value, it is an error, not unset.
 - `HANDOFFKEEP_MYSQL_SERVER_NAME`: the name the server certificate must carry,
   in its CN or a DNS SAN. Required while the CA is set.
 

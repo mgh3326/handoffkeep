@@ -25,11 +25,13 @@ const (
 
 // pinnedTLS returns the pinned TLS config when HANDOFFKEEP_MYSQL_CA_PEM is set
 // and registers it with the driver under pinnedTLSName. It returns nil, nil
-// when the CA is unset. Each call registers again; the environment is fixed for
-// the life of a process, so every call registers the same config.
+// only when the variable is absent. A set but empty or blank value is an error:
+// treating it as unset would drop the pin and let the URL's tls= decide.
+// Each call registers again; the environment is fixed for the life of a
+// process, so every call registers the same config.
 func pinnedTLS() (*tls.Config, error) {
-	pemText := os.Getenv(caPEMEnv)
-	if strings.TrimSpace(pemText) == "" {
+	pemText, set := os.LookupEnv(caPEMEnv)
+	if !set {
 		return nil, nil
 	}
 	serverName := strings.TrimSpace(os.Getenv(serverNameEnv))
