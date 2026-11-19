@@ -139,7 +139,12 @@ func (s *Store) ytWriteOpAlertCandidates(ctx context.Context, tx transaction, cl
 				OR (o.state='remote_unknown' AND o.created_at <= ?))
 			AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='stuck')
 			ORDER BY o.id LIMIT ? FOR SHARE`)
+		// PostgreSQL reuses $1 for the three cutoffs; MySQL binds each ? in
+		// order, so it needs the cutoff three times (hk 5611).
 		args = []any{cutoff.UTC(), ytWriteOpAlertBatchMax}
+		if dialectFor(tx) == mysqlDialect {
+			args = []any{cutoff.UTC(), cutoff.UTC(), cutoff.UTC(), ytWriteOpAlertBatchMax}
+		}
 	case ytWriteOpAlertRejected:
 		q = sqlFor(tx, `SELECT o.state, o.reason, `+ytHeldOpColumns+` FROM yt_write_ops o
 			WHERE (o.state='rejected' OR (o.state='applied' AND o.reason='`+ytwrite.ReasonBindingConflict+`'))
