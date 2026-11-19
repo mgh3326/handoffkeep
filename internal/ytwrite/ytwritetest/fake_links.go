@@ -121,8 +121,11 @@ type LinkCallFault struct {
 	Op         LinkOp
 	Status     int
 	RetryAfter time.Duration
-	Landed     bool
-	Count      int
+	// Code is the remote's error code (YouTrack's "error" field) on the
+	// answer, for a fault a code decides (418 invalid_state).
+	Code   string
+	Landed bool
+	Count  int
 }
 
 // QueueLinkCallFaults adds failures for the next matching in-memory calls.
@@ -157,7 +160,7 @@ func (f LinkCallFault) err() error {
 	if f.Status == 0 {
 		return errors.New("ytwritetest: injected transport failure")
 	}
-	return &ytwrite.RemoteError{Status: f.Status, RetryAfter: f.RetryAfter, Message: "injected fault"}
+	return &ytwrite.RemoteError{Status: f.Status, RetryAfter: f.RetryAfter, Code: f.Code, Message: "injected fault"}
 }
 
 func (l *fakeLinks) init() {
