@@ -95,6 +95,7 @@ const (
 	ReasonRemoteUnknown     = "remote_unknown"
 	ReasonRateLimited       = "rate_limited"
 	ReasonUnauthorized      = "unauthorized"
+	ReasonReadOnly          = "read_only"
 	ReasonWaitingForEarlier = "waiting_for_earlier_op"
 	ReasonOutcomeUnrecorded = "outcome_unrecorded"
 	ReasonNoID              = "no_id_in_reply"
@@ -485,7 +486,10 @@ type IssueRemote interface {
 type RemoteError struct {
 	Status     int
 	RetryAfter time.Duration
-	Message    string
+	// Code is the remote's own error code from the reply body (YouTrack's
+	// "error" field), "" when the body carried none.
+	Code    string
+	Message string
 }
 
 func (e *RemoteError) Error() string {

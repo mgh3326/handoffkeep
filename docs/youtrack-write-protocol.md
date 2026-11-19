@@ -55,8 +55,8 @@ one (new, empty tables only); the previous release neither reads nor writes them
 
 ```
 Submit ─► prepared ─Claim─► dispatched ─┬─ 2xx + valid id ─────────► applied
-              ▲                         ├─ 4xx (not 401/408/429) ──► rejected
-              │                         ├─ 429 / 401 ──────────────► prepared (later next_attempt_at)
+              ▲                         ├─ 4xx (not 401/408/429/418 read-only) ─► rejected
+              │                         ├─ 429 / 401 / 418 read-only ► prepared (later next_attempt_at)
               └─────────────────────────┤   (the request was not processed)
                                         └─ 5xx, 408, transport error, ─► remote_unknown
                                            2xx without id, crash          │
@@ -98,6 +98,19 @@ Submit ─► prepared ─Claim─► dispatched ─┬─ 2xx + valid id ──
   wait is recorded as 30 days, never dropped. 401 waits for a repaired token. Both
   put the op back to `prepared` (a listing 429 keeps it `remote_unknown`) with a
   later `next_attempt_at`, because the request was not processed.
+- **418 read-only is a 429-style wait (`read_only`).** During YouTrack's read-only
+  maintenance window a write or a read is answered `418` with error
+  `invalid_state` ("The application is currently in read-only mode"). That is the
+  only 418 treated this way: the match is exact on both status and code
+  (`readOnlyRefusal`, `internal/ytwrite/protocol.go`), and any other 418 stays a
+  rejection (`http_418`). The request was not processed, so the op goes back to
+  `prepared` with reason `read_only`, after the server's `Retry-After` when it sent
+  one, else `ReadOnlyWait` (5m, a `Protocol` field). The wait is capped by
+  `MaxRetryAfter`, as a 429's is. The write path (`writeFailed`) and the read path
+  (`notSent`) both defer it through the same `Ledger.Defer` a 429 uses, so its
+  accounting is the 429's: `Defer` leaves `attempts` as the claim set it, and each
+  dispatch counts one attempt, as it does for a 429. Ops already rejected during a
+  window are not requeued by this change; that is an operator's backfill.
 - **Caller cancellation never cancels a write or its reconciliation**: everything
   after the claim runs on a context detached from the caller's. Each step is
   still bounded: the remote call by `DispatchTimeout`, and recording its outcome
@@ -136,7 +149,7 @@ Every path (HTTP, MCP, CLI) gets one `ytwrite.Result`:
 |---|---|
 | `OpID` | the handle; keep it, and `Lookup` it |
 | `Status` | `pending`, `applied` or `rejected`; **pending is never success** |
-| `State`, `Reason` | lifecycle state and a stable cause code (`rate_limited`, `remote_unknown`, `waiting_for_earlier_op`, `http_404`, …) |
+| `State`, `Reason` | lifecycle state and a stable cause code (`rate_limited`, `read_only`, `remote_unknown`, `waiting_for_earlier_op`, `http_404`, …) |
 | `RetryAfter` | when to look again |
 | `YTID` | the YouTrack id, only when applied |
 | `Replayed` | the key already named a recorded op |
@@ -257,6 +270,7 @@ author is for the comment audit (`youtrack audit`), never for evidence.
 | 408, 5xx | `RemoteError` | `remote_unknown` (`http_5xx`) |
 | 401 | `RemoteError` | `prepared`, retried after the auth wait |
 | 429 | `RemoteError` + wait | `prepared` until `Retry-After` (kept as sent, up to 30 days) |
+| 418 `invalid_state` (read-only maintenance) | `RemoteError` + wait | `prepared` (`read_only`) until `Retry-After`, else `ReadOnlyWait` (5m) |
 | other 4xx (400, 403, 404, 409, 422, …) | `RemoteError` | `rejected` (`http_<status>`) |
 
 ## Slice b1a: the comment canary

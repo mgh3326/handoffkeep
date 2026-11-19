@@ -272,13 +272,15 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 			return pass(wait, ReasonRateLimited, re.Error())
 		case errors.As(err, &re) && re.Status == http.StatusUnauthorized:
 			return pass(p.AuthWait, ReasonUnauthorized, re.Error())
+		case errors.As(err, &re) && readOnlyRefusal(re):
+			return pass(p.readOnlyWait(re.RetryAfter), ReasonReadOnly, re.Error())
 		}
 		return pass(0, ReasonReconcileFailed, err.Error())
 	}
 	read, err := k.readFamily(rctx, ar, op, d, op.YTResultID, IndexMaybeSent(history))
 	if err != nil {
 		var re *RemoteError
-		if errors.As(err, &re) && re.Status >= 400 && re.Status < 500 && re.Status != http.StatusTooManyRequests && re.Status != http.StatusUnauthorized {
+		if errors.As(err, &re) && re.Status >= 400 && re.Status < 500 && re.Status != http.StatusTooManyRequests && re.Status != http.StatusUnauthorized && !readOnlyRefusal(re) {
 			// A read refused: nothing to act on; the operator looks.
 			return pass(0, "http_"+strconv.Itoa(re.Status), err.Error())
 		}
