@@ -23,7 +23,7 @@ var mysqlYTWriteOpRequeueSteps = []string{
 		prior_last_error TEXT NOT NULL,
 		prior_resolved_at DATETIME(6) NOT NULL,
 		INDEX yt_write_op_requeues_op (op_id, id),
-		CONSTRAINT yt_write_op_requeues_op_fk FOREIGN KEY (op_id) REFERENCES yt_write_ops(id),
+		CONSTRAINT yt_write_op_requeues_op_check CHECK(op_id > 0),
 		CONSTRAINT yt_write_op_requeues_by_check CHECK(by_operator <> '' AND CHAR_LENGTH(by_operator) <= 200),
 		CONSTRAINT yt_write_op_requeues_attempts_check CHECK(prior_attempts >= 0),
 		CONSTRAINT yt_write_op_requeues_reason_check CHECK(CHAR_LENGTH(prior_reason) <= 200))` + mysqlTableOptions,

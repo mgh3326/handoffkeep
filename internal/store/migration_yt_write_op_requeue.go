@@ -21,6 +21,10 @@ import (
 // and resolved_at) in the same transaction, so the history survives the
 // reset.
 //
+// The history table has no foreign key to yt_write_ops, as
+// yt_write_op_adoptions has none: a foreign key would make the test suites'
+// TRUNCATE of yt_write_ops fail on every schema that holds a requeue.
+//
 // Expand-only: CREATE TABLE and CREATE OR REPLACE FUNCTION take no lock on
 // yt_write_ops. The previous release never moves a rejected row back to
 // prepared, so the wider guard changes nothing it does. After names the
@@ -36,7 +40,7 @@ func init() {
 var ytWriteOpRequeueStatements = []string{
 	`CREATE TABLE IF NOT EXISTS yt_write_op_requeues (
 		id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-		op_id BIGINT NOT NULL REFERENCES yt_write_ops(id),
+		op_id BIGINT NOT NULL CHECK(op_id > 0),
 		requeued_at TIMESTAMPTZ NOT NULL,
 		by_operator TEXT NOT NULL CHECK(by_operator <> '' AND length(by_operator) <= 200),
 		prior_attempts INTEGER NOT NULL CHECK(prior_attempts >= 0),
