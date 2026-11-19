@@ -31,6 +31,7 @@ import (
 //	408, 5xx                                    *ytwrite.RemoteError           remote_unknown
 //	401                                         *ytwrite.RemoteError           prepared, auth wait
 //	429                                         *ytwrite.RemoteError + wait    prepared until Retry-After (kept as sent, up to ytwrite.RetryAfterCap)
+//	418 invalid_state (read-only maintenance)   *ytwrite.RemoteError + wait    prepared (read_only) until Retry-After, else Protocol.ReadOnlyWait
 //	other 4xx (400, 403, 404, 409, 422, ...)    *ytwrite.RemoteError           rejected
 //
 // The bot key is removed from every error text before it leaves this file, so
@@ -135,6 +136,7 @@ func (r *WriteRemote) send(ctx context.Context, method, path string, query url.V
 	return nil, nil, &ytwrite.RemoteError{
 		Status:     resp.StatusCode,
 		RetryAfter: parseRetryAfterAt(resp.Header.Get("Retry-After"), ytwrite.RetryAfterCap, r.now()),
+		Code:       apiErr.Code,
 		Message:    redactText(msg, r.c.token),
 	}
 }
