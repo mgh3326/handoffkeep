@@ -879,6 +879,15 @@ type SearchResult struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// SearchPage is one search answer with its page-level deadline state. A page
+// that timed out empty has no row to carry Partial and TimedOut, so the
+// response reports them here as well.
+type SearchPage struct {
+	Results  []SearchResult
+	Partial  bool
+	TimedOut bool
+}
+
 func Open(ctx context.Context, url string) (*Store, error) { return open(ctx, url, nil) }
 
 // OpenServing is Open for the serve process, with a pool floor that leaves
