@@ -20,6 +20,11 @@ const (
 	// FeatureDotsAnswerQuestion is the dots answer body's requester_lane and
 	// question_id fields: a plain QUESTION answer and its target (hk 5000).
 	FeatureDotsAnswerQuestion = "dots_answer_question"
+	// FeatureDecisionRecordingLane is the decision resolve body's
+	// recording_lane field: the lane whose session recorded a session answer,
+	// used to skip that lane's own answer notice (hk 5527). The CLI omits it on
+	// a server that does not list it, so the answer is still recorded.
+	FeatureDecisionRecordingLane = "decision_recording_lane"
 )
 
 // Features lists every feature this build accepts. Every Feature constant above
@@ -31,4 +36,5 @@ var Features = []string{
 	FeatureResolveNoJob,
 	FeatureDispositionProject,
 	FeatureDotsAnswerQuestion,
+	FeatureDecisionRecordingLane,
 }
