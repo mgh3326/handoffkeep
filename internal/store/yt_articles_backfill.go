@@ -30,22 +30,22 @@ const YTArticleWaitingFamilyRoot = "waiting_family_root"
 // (hk 5265 item 3).
 const ytArticleFamilyUncertain ytArticleOutcome = "family_root_uncertain"
 
+// ytArticleFamilyPending is the outcome of a short document whose family has
+// an unresolved root-capable create on its project and no root recorded yet:
+// the backfill enqueues one such create per family and project until the
+// first one's root is recorded (or it ends rejected), so no second create can
+// reach an uncertain root and make a second root.
+const ytArticleFamilyPending ytArticleOutcome = "family_root_pending"
+
 // ytArticleCandidateChanged is the outcome of a backfill whose document no
-// longer resolves to the bucket and YouTrack project it was verified in (its
-// task moved or its mapping changed after classification): nothing is enqueued.
+// longer reads as the candidate it was verified as (its task moved, its
+// mapping changed, or its body changed) once the locks are held: nothing is
+// enqueued.
 const ytArticleCandidateChanged ytArticleOutcome = "candidate_changed"
 
 // ErrYTArticleBackfillMode is refused when the document mode is off: the gate
 // admits no article op then, so the backfill prepares none.
 var ErrYTArticleBackfillMode = errors.New("store: HANDOFFKEEP_YT_DOCS_MODE is off: the article backfill prepares no op")
-
-// YTArticleEnqueueTarget is the candidate a backfill verified: the bucket the
-// document was listed in and the YouTrack project id its article belongs in.
-// PrepareYTArticleBackfill refuses it when the document resolves elsewhere now.
-type YTArticleEnqueueTarget struct {
-	Bucket    string
-	ProjectID string
-}
 
 // YTArticleFamilyOf is a document key's family: its first segment when the key
 // has a '/' and the segment names a family (ytwrite.ValidFamily), else "". It
@@ -65,18 +65,26 @@ func YTArticleFamilyOf(key string) string {
 // another. The separator is the unit separator, which no part can carry.
 func ytFamilyKey(project, family string) string { return project + "\x1f" + family }
 
-// YTArticleFamilyStates is what a tenant's family roots look like: whether the
-// store recorded a root for a family on a project, and whether a root create
-// on it was left uncertain (remote_unknown) with no root recorded since. The
-// zero value knows no family.
+// YTArticleFamilyStates is what a tenant's family roots look like, per project
+// and family: whether the store recorded a root; whether a root create is
+// unresolved (prepared, dispatched or remote_unknown) and none is recorded
+// yet (pending); and whether one is remote_unknown (uncertain). The zero value
+// knows no family.
 type YTArticleFamilyStates struct {
 	recorded  map[string]bool
+	pending   map[string]bool
 	uncertain map[string]bool
 }
 
 // Recorded reports whether the store recorded a root for family on project.
 func (f YTArticleFamilyStates) Recorded(project, family string) bool {
 	return f.recorded[ytFamilyKey(project, family)]
+}
+
+// Pending reports whether an unresolved root-capable create for family on
+// project exists (it may still record the root).
+func (f YTArticleFamilyStates) Pending(project, family string) bool {
+	return f.pending[ytFamilyKey(project, family)]
 }
 
 // Uncertain reports whether a root create for family on project is
@@ -88,7 +96,7 @@ func (f YTArticleFamilyStates) Uncertain(project, family string) bool {
 // ytArticleFamilyStatesTx reads YTArticleFamilyStates for tenant on q (a
 // read-only pool or a transaction).
 func ytArticleFamilyStatesTx(ctx context.Context, q querier, tenant string) (YTArticleFamilyStates, error) {
-	out := YTArticleFamilyStates{recorded: map[string]bool{}, uncertain: map[string]bool{}}
+	out := YTArticleFamilyStates{recorded: map[string]bool{}, pending: map[string]bool{}, uncertain: map[string]bool{}}
 	rows, err := q.Query(ctx, sqlFor(q, `SELECT project_id, family FROM yt_family_roots WHERE tenant=$1`,
 		`SELECT project_id, family FROM yt_family_roots WHERE tenant=?`), tenant)
 	if err != nil {
@@ -106,47 +114,70 @@ func ytArticleFamilyStatesTx(ctx context.Context, q querier, tenant string) (YTA
 	if err := rows.Err(); err != nil {
 		return out, err
 	}
-	ops, err := q.Query(ctx, sqlFor(q, `SELECT yt_target_id, payload FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND tenant=$3 AND state='remote_unknown'`,
-		`SELECT yt_target_id, payload FROM yt_write_ops WHERE principal=? AND kind=? AND tenant=? AND state='remote_unknown'`),
+	ops, err := q.Query(ctx, sqlFor(q, `SELECT yt_target_id, payload, state FROM yt_write_ops WHERE principal=$1 AND kind=$2 AND tenant=$3 AND state IN ('prepared','dispatched','remote_unknown')`,
+		`SELECT yt_target_id, payload, state FROM yt_write_ops WHERE principal=? AND kind=? AND tenant=? AND state IN ('prepared','dispatched','remote_unknown')`),
 		YTDocsPrincipal, ytwrite.KindArticleCreate, tenant)
 	if err != nil {
 		return out, err
 	}
 	defer ops.Close()
 	for ops.Next() {
-		var project string
+		var project, state string
 		var payload []byte
-		if err := ops.Scan(&project, &payload); err != nil {
+		if err := ops.Scan(&project, &payload, &state); err != nil {
 			return out, err
 		}
 		var p ytwrite.ArticleCreatePayload
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return out, err
 		}
-		if p.ParentFamily != "" && !out.recorded[ytFamilyKey(project, p.ParentFamily)] {
-			out.uncertain[ytFamilyKey(project, p.ParentFamily)] = true
+		if p.ParentFamily == "" {
+			continue
+		}
+		key := ytFamilyKey(project, p.ParentFamily)
+		out.pending[key] = true
+		if state == "remote_unknown" {
+			out.uncertain[key] = true
 		}
 	}
-	return out, ops.Err()
+	if err := ops.Err(); err != nil {
+		return out, err
+	}
+	// A recorded root settles its family: pending and uncertain are about a
+	// root not yet recorded.
+	for key := range out.recorded {
+		delete(out.pending, key)
+		delete(out.uncertain, key)
+	}
+	return out, nil
 }
 
 // YTArticleFamilies reads the tenant's YTArticleFamilyStates (read-only).
 func (s *Store) YTArticleFamilies(ctx context.Context, tenant string) (YTArticleFamilyStates, error) {
-	return ytArticleFamilyStatesTx(ctx, s.db(), tenant)
+	var out YTArticleFamilyStates
+	err := s.retryTx(ctx, func() error {
+		var err error
+		out, err = ytArticleFamilyStatesTx(ctx, s.db(), tenant)
+		return err
+	})
+	return out, err
 }
 
-// ytArticleRootWaits is whether prepareYTArticleTx would prepare a split for r
-// that waits on its family's root on its target project: an unbound, in-scope
-// long document with the split flag on, in a family, not legacy-mirrored (the
-// legacy sync's article is never split), not amending a policy (its parent is
-// that policy's article), and with no root recorded for the family on its
-// project. The rule is date-free: the backfill admits long documents from
-// before the import too, so the audit and the authority refusal count them.
+// ytArticleSplitEligible is whether prepareYTArticleTx would prepare a split
+// for r: an unbound, in-scope long document with the split flag on, not
+// legacy-mirrored (the legacy sync's article is never split) and not amending a
+// policy (its parent is that policy's article). The rule is date-free: the
+// backfill admits long documents from before the import too.
+func ytArticleSplitEligible(g ytDocsGate, r *ytArticleRow) bool {
+	return r != nil && !r.bound && g.split && YTArticleSplit(r.doc.BodyBytes) && ytArticleInScope(r.doc.Key, r.doc.TaskID) &&
+		r.legacyArticle == "" && ytArticleAmends(r.doc.Key, r.body) == ""
+}
+
+// ytArticleRootWaits is whether an eligible long document waits on its
+// family's root on its target project: the split creates no root (S13), so it
+// waits while none is recorded for its family there.
 func ytArticleRootWaits(g ytDocsGate, r *ytArticleRow, states YTArticleFamilyStates) bool {
-	if r == nil || r.bound || !g.split || !YTArticleSplit(r.doc.BodyBytes) || !ytArticleInScope(r.doc.Key, r.doc.TaskID) {
-		return false
-	}
-	if r.legacyArticle != "" || ytArticleAmends(r.doc.Key, r.body) != "" {
+	if !ytArticleSplitEligible(g, r) {
 		return false
 	}
 	family := YTArticleFamilyOf(r.doc.Key)
@@ -161,62 +192,80 @@ func ytArticleRootWaits(g ytDocsGate, r *ytArticleRow, states YTArticleFamilySta
 // its family's root (ytArticleRootWaits) for tenant, with the buckets' projects
 // as the gate would resolve them. Read-only.
 func (s *Store) YTArticleRootWaits(ctx context.Context, tenant string, buckets map[string]YTArticleProject, id int64) (bool, error) {
-	tx, release, err := s.begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer release()
-	defer tx.Rollback(ctx)
-	r, err := readYTArticleRow(ctx, tx, id)
-	if err != nil || r == nil {
-		return false, err
-	}
-	states, err := ytArticleFamilyStatesTx(ctx, tx, tenant)
-	if err != nil {
-		return false, err
-	}
-	return ytArticleRootWaits(ytDocsGate{tenant: tenant, buckets: buckets, split: true}, r, states), nil
+	var waits bool
+	err := s.retryTx(ctx, func() error {
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		r, err := readYTArticleRow(ctx, tx, id)
+		if err != nil || r == nil {
+			return err
+		}
+		states, err := ytArticleFamilyStatesTx(ctx, tx, tenant)
+		if err != nil {
+			return err
+		}
+		waits = ytArticleRootWaits(ytDocsGate{tenant: tenant, buckets: buckets, split: true}, r, states)
+		return nil
+	})
+	return waits, err
 }
 
 // YTArticleHasOp reports whether document id already has an article op
 // (create or split) that holds its article: a backfill enqueue then adds
 // nothing, which is what --limit counts. Read-only.
 func (s *Store) YTArticleHasOp(ctx context.Context, id int64) (bool, error) {
-	tx, release, err := s.begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer release()
-	defer tx.Rollback(ctx)
-	r, err := readYTArticleRow(ctx, tx, id)
-	if err != nil || r == nil {
-		return false, err
-	}
-	return r.created || r.splitOp, nil
+	var has bool
+	err := s.retryTx(ctx, func() error {
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		r, err := readYTArticleRow(ctx, tx, id)
+		if err != nil || r == nil {
+			return err
+		}
+		has = r.created || r.splitOp
+		return nil
+	})
+	return has, err
 }
 
 // PrepareYTArticleBackfill prepares document id's article op for the backfill
 // (hk 5265) and returns its outcome: create_prepared, split_prepared,
 // create_exists, not_updated (a long document with the split flag off),
-// family_root_uncertain, candidate_changed, or another outcome of
-// prepareYTArticleTx. want is the candidate the caller verified: when the
-// document no longer lists in want.Bucket or resolves to another project,
-// nothing is enqueued. The decision is prepareYTArticleTx's, under the
-// document's lane lock, with the backfill's relaxations (ytDocsGate.backfill).
+// family_root_uncertain, family_root_pending, candidate_changed, or another
+// outcome of prepareYTArticleTx. verified is the candidate the caller listed
+// and classified: once the locks are held, a document that no longer reads as
+// it is enqueues nothing.
+//
+// The locks are AddYTArticleBinding's, in its order (lockorder.go): the
+// article entity lock, the documents authority share, then FOR SHARE on the
+// document, its task and its project mapping. A task or mapping move committed
+// before those locks is seen by the read below (candidate_changed); one that
+// tries after them waits for this transaction, so the op lands on the verified
+// target (PR 528 r4639004015). The re-check and the op insert are one
+// transaction, on PostgreSQL and MySQL.
+//
 // A bound document is refused without an op: binding and updates are not the
 // backfill's.
-func (s *Store) PrepareYTArticleBackfill(ctx context.Context, id int64, now time.Time, want YTArticleEnqueueTarget) (string, error) {
+func (s *Store) PrepareYTArticleBackfill(ctx context.Context, id int64, now time.Time, verified YTArticleCandidate) (string, error) {
 	var out ytArticleOutcome
 	err := s.retryTx(ctx, func() error {
 		var err error
-		out, err = s.prepareYTArticleBackfillOnce(ctx, now, id, want)
+		out, err = s.prepareYTArticleBackfillOnce(ctx, now, id, verified)
 		return err
 	})
 	return string(out), err
 }
 
 // prepareYTArticleBackfillOnce is one attempt of PrepareYTArticleBackfill.
-func (s *Store) prepareYTArticleBackfillOnce(ctx context.Context, now time.Time, id int64, want YTArticleEnqueueTarget) (ytArticleOutcome, error) {
+func (s *Store) prepareYTArticleBackfillOnce(ctx context.Context, now time.Time, id int64, verified YTArticleCandidate) (ytArticleOutcome, error) {
 	g, on := s.ytDocsNow()
 	if !on {
 		return "", ErrYTArticleBackfillMode
@@ -231,28 +280,40 @@ func (s *Store) prepareYTArticleBackfillOnce(ctx context.Context, now time.Time,
 	if err := lockYTEntity(ctx, tx, ytwrite.ArticleEntity, strconv.FormatInt(id, 10)); err != nil {
 		return "", err
 	}
+	// The same share AddYTArticleBinding takes: a documents authority switch
+	// (FOR UPDATE) either commits first or waits for this op.
+	if _, err := ytAuthorityShareTx(ctx, tx, YTAuthorityDocuments); err != nil {
+		return "", err
+	}
+	if err := lockYTArticleSourcesTx(ctx, tx, id); err != nil {
+		if errors.Is(err, ErrYTArticleBindingConflict) {
+			return ytArticleCandidateChanged, nil
+		}
+		return "", err
+	}
 	r, err := readYTArticleRow(ctx, tx, id)
 	if err != nil {
 		return "", err
 	}
-	if r != nil {
-		if r.bound {
-			return ytArticleUnchanged, nil
-		}
+	if r == nil || r.doc != verified {
+		return ytArticleCandidateChanged, nil
+	}
+	if r.bound {
+		return ytArticleUnchanged, nil
+	}
+	if family := YTArticleFamilyOf(r.doc.Key); family != "" && ytArticleAmends(r.doc.Key, r.body) == "" && !r.created && !r.splitOp {
 		target, _ := ytArticleTarget(g, r.doc)
-		if r.doc.Bucket != want.Bucket || target.ID != want.ProjectID {
-			return ytArticleCandidateChanged, nil
+		states, err := ytArticleFamilyStatesTx(ctx, tx, g.tenant)
+		if err != nil {
+			return "", err
 		}
-		// A family whose root create is uncertain gets nothing new on that
-		// project until the create settles (hk 5265 item 3).
-		if family := YTArticleFamilyOf(r.doc.Key); family != "" && !r.created && !r.splitOp && ytArticleAmends(r.doc.Key, r.body) == "" {
-			states, err := ytArticleFamilyStatesTx(ctx, tx, g.tenant)
-			if err != nil {
-				return "", err
-			}
-			if states.Uncertain(target.ID, family) {
-				return ytArticleFamilyUncertain, nil
-			}
+		if states.Uncertain(target.ID, family) {
+			return ytArticleFamilyUncertain, nil
+		}
+		// One root-capable create per family and project until its root is
+		// recorded: a split creates no root, so only a short document waits here.
+		if !YTArticleSplit(r.doc.BodyBytes) && states.Pending(target.ID, family) && !states.Recorded(target.ID, family) {
+			return ytArticleFamilyPending, nil
 		}
 	}
 	outcome, err := prepareYTArticleTx(ctx, tx, now, g, id, r)
@@ -262,13 +323,29 @@ func (s *Store) prepareYTArticleBackfillOnce(ctx context.Context, now time.Time,
 	return outcome, tx.Commit(ctx)
 }
 
-// ytArticlesWaitingRootTx lists, in tx, the long documents waiting on a family
-// root (ytArticleRootWaits) for the unwritten count and the authority refusal.
-// It is called only while the split flag is on: with it off a long document is
-// an exception, not a wait. Every unbound long document is read, whatever its
-// date, because the backfill splits the ones from before the import too.
-func ytArticlesWaitingRootTx(ctx context.Context, tx transaction, g ytDocsGate) ([]int64, error) {
-	// LENGTH is MySQL's octet_length (hk 5077).
+// ytDocumentOpActiveTx reports whether document id has an unresolved hk
+// documents op (prepared, dispatched or remote_unknown) in tx: the write the
+// authority switch must wait for.
+func ytDocumentOpActiveTx(ctx context.Context, tx transaction, id int64) (bool, error) {
+	var active bool
+	err := tx.QueryRow(ctx, sqlFor(tx, `SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=$1 AND entity_kind='document' AND entity_id=$2 AND state IN ('prepared','dispatched','remote_unknown'))`,
+		`SELECT EXISTS(SELECT 1 FROM yt_write_ops WHERE principal=? AND entity_kind='document' AND entity_id=? AND state IN ('prepared','dispatched','remote_unknown'))`),
+		YTDocsPrincipal, strconv.FormatInt(id, 10)).Scan(&active)
+	return active, err
+}
+
+// ytArticlesLongUnwrittenTx lists, in tx, the long documents the split must
+// write but does not, with the split flag on: every eligible one
+// (ytArticleSplitEligible) that waits on its family's root (any op state: its
+// split cannot send until the root exists), and every eligible one with its
+// root in place and no unresolved op. waiting counts the first kind. With the
+// flag off a long document is an exception, not a write, so nothing is listed.
+func ytArticlesLongUnwrittenTx(ctx context.Context, tx transaction, g ytDocsGate) (ids []int64, waiting int, err error) {
+	if !g.split {
+		return nil, 0, nil
+	}
+	// LENGTH is MySQL's octet_length (hk 5077). Every unbound long document is
+	// read, whatever its date: the backfill splits the ones from before the import too.
 	query := `SELECT d.id FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id = d.id
 		WHERE b.document_id IS NULL AND octet_length(d.body) > $1 ORDER BY d.id`
 	args := []any{YTArticleSafePartBytes}
@@ -279,37 +356,48 @@ func ytArticlesWaitingRootTx(ctx context.Context, tx transaction, g ytDocsGate) 
 	}
 	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	var ids []int64
+	var long []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, 0, err
 		}
-		ids = append(ids, id)
+		long = append(long, id)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	if len(ids) == 0 {
-		return nil, nil
+	if len(long) == 0 {
+		return nil, 0, nil
 	}
 	states, err := ytArticleFamilyStatesTx(ctx, tx, g.tenant)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	var waits []int64
-	for _, id := range ids {
+	for _, id := range long {
 		r, err := readYTArticleRow(ctx, tx, id)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
+		}
+		if !ytArticleSplitEligible(g, r) {
+			continue
 		}
 		if ytArticleRootWaits(g, r, states) {
-			waits = append(waits, id)
+			ids = append(ids, id)
+			waiting++
+			continue
+		}
+		active, err := ytDocumentOpActiveTx(ctx, tx, id)
+		if err != nil {
+			return nil, 0, err
+		}
+		if !active {
+			ids = append(ids, id)
 		}
 	}
-	return waits, nil
+	return ids, waiting, nil
 }

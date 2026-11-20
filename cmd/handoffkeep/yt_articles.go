@@ -203,8 +203,10 @@ type ytArticler struct {
 	limit    int
 	enqueued int
 	// families is the tenant's family roots (store.YTArticleFamilies), read
-	// once per run by a backfill.
-	families store.YTArticleFamilyStates
+	// once per run by a backfill. rootPlanned is the root-capable creates this
+	// run planned or prepared, per rootKey.
+	families    store.YTArticleFamilyStates
+	rootPlanned map[string]bool
 }
 
 // ytArticleAction is what the backfill does with one document (or, in a dry
@@ -644,10 +646,33 @@ func (a *ytArticler) planned(ctx context.Context, d store.YTArticleDoc, class st
 		if waits {
 			act.Reason = store.YTArticleWaitingFamilyRoot
 		}
+	case family != "" && !a.families.Recorded(target, family) && (a.families.Pending(target, family) || a.rootPlanned[rootKey(target, family)]):
+		// One root-capable create per family and project until its root is
+		// recorded (the store enforces the same rule).
+		act.Action, act.Reason = "wait", "family_root_pending"
 	default:
 		act.Action = "enqueue_create"
 	}
 	return act, nil
+}
+
+// rootKey is one family's root on one project, the key of the backfill's
+// in-run plan of root-capable creates (store.YTArticleFamilyStates has the same
+// keying).
+func rootKey(project, family string) string { return project + "\x1f" + family }
+
+// markRoot records that a root-capable create for d's family on target is
+// prepared (or planned by a dry run), so the family's later short documents
+// in this run wait for its root.
+func (a *ytArticler) markRoot(d store.YTArticleDoc, target string) {
+	family := store.YTArticleFamilyOf(d.Key)
+	if family == "" || store.YTArticleSplit(d.BodyBytes) {
+		return
+	}
+	if a.rootPlanned == nil {
+		a.rootPlanned = map[string]bool{}
+	}
+	a.rootPlanned[rootKey(target, family)] = true
 }
 
 // enqueue prepares a missing document's op when the plan says so. A document
@@ -676,18 +701,22 @@ func (a *ytArticler) enqueue(ctx context.Context, d store.YTArticleDoc, act *ytA
 		act.Action, act.Reason = "wait", "limit"
 		return nil
 	}
+	_, target, _ := a.target(d.YTArticleCandidate)
 	if !a.apply {
 		a.enqueued++
+		a.markRoot(d, target)
 		return nil
 	}
-	_, target, _ := a.target(d.YTArticleCandidate)
-	outcome, err := a.st.PrepareYTArticleBackfill(ctx, d.DocumentID, time.Now().UTC(), store.YTArticleEnqueueTarget{Bucket: d.Bucket, ProjectID: target})
+	outcome, err := a.st.PrepareYTArticleBackfill(ctx, d.DocumentID, time.Now().UTC(), d.YTArticleCandidate)
 	if err != nil {
 		return err
 	}
 	act.Action, act.Reason = outcome, ""
 	if outcome == "create_prepared" || outcome == "split_prepared" {
 		a.enqueued++
+		if outcome == "create_prepared" {
+			a.markRoot(d, target)
+		}
 	}
 	return nil
 }

@@ -47,8 +47,10 @@ func ybfAction(t *testing.T, r ytArticlesReport, doc int64) ytArticleAction {
 // TestArticlesBackfillPlansThenEnqueues (hk 5265): a dry run plans every
 // missing document and writes nothing; --apply prepares one op per missing
 // document through the protocol, --limit bounds the ops, a rerun prepares no
-// second op, a family whose root create is uncertain is held, and a long
-// document waiting on its family's root shows waiting_family_root.
+// second op, one root-capable create per family and project waits for its
+// root, a family whose root create is uncertain is held (per project), a moved
+// candidate enqueues nothing, and a long document waiting on its family's root
+// is shown and counted.
 func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	_, dbURL := testdb.Schema(t, "yta_enqueue")
 	ctx := t.Context()
@@ -71,17 +73,24 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	}
 	tenant := u.Host
 
-	if _, err := st.AddTaskProject(ctx, "rda", "test"); err != nil {
-		t.Fatal(err)
+	for _, p := range []store.YouTrackProject{{HKProject: "rda", ProjectID: "0-7", ShortName: "RDA"}, {HKProject: "sma", ProjectID: "0-8", ShortName: "SMA"}} {
+		if _, err := st.AddTaskProject(ctx, p.HKProject, "test"); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.PutYouTrackProject(ctx, p); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := st.PutYouTrackProject(ctx, store.YouTrackProject{HKProject: "rda", ProjectID: "0-7", ShortName: "RDA"}); err != nil {
-		t.Fatal(err)
+	newTask := func(project string) int64 {
+		t.Helper()
+		p := project
+		task, err := st.CreateTask(ctx, store.Task{Lane: "ybf-lane", Title: "enqueue", Kind: "implement", CreatedBy: "test", Project: &p})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task.ID
 	}
-	rda := "rda"
-	task, err := st.CreateTask(ctx, store.Task{Lane: "ybf-lane", Title: "enqueue", Kind: "implement", CreatedBy: "test", Project: &rda})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rdaTask := newTask("rda")
 	put := func(key, body string, taskID *int64) int64 {
 		t.Helper()
 		d, _, err := st.PutDocument(ctx, store.Document{Key: key, Kind: "note", Body: body, CreatedBy: "test", TaskID: taskID})
@@ -90,11 +99,12 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 		}
 		return d.ID
 	}
-	// m1 is a short missing document of family note and m2 a long one of the
-	// same family, whose split waits for a root (none is recorded). u0 and u1
+	// m1 and m5 are short missing documents of family note on rda, m2 a long
+	// one of the same family (its split waits on the family's root). u0 and u1
 	// are shared documents of family uncertain.
-	m1 := put("note/rda/fresh", "fresh", &task.ID)
-	m2 := put("note/rda/huge", strings.Repeat("line\n", 50*1024), &task.ID)
+	m1 := put("note/rda/fresh", "fresh", &rdaTask)
+	m2 := put("note/rda/huge", strings.Repeat("line\n", 50*1024), &rdaTask)
+	m5 := put("note/rda/second", "second", &rdaTask)
 	u0 := put("uncertain/first", "first", nil)
 	u1 := put("uncertain/second", "second", nil)
 
@@ -103,6 +113,12 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	t.Setenv("YOUTRACK_BOT_API_KEY", "fake-test-key")
 	t.Setenv("HANDOFFKEEP_YT_DOCS_MODE", "on")
 	t.Setenv("HANDOFFKEEP_YT_ARTICLE_SPLIT", "on")
+	// The store is the same gate the command opens (for the direct store calls).
+	st.SetYTDocsMode(store.YTDocsOn, tenant, map[string]store.YTArticleProject{
+		store.YTArticleBucketShared:     {ID: "0-3", ShortName: "SHRDOC"},
+		store.YTArticleBucketUnassigned: {ID: "0-1", ShortName: "HK"},
+	})
+	st.SetYTArticleSplit(true)
 
 	create, split := string(ytwrite.KindArticleCreate), string(ytwrite.KindArticleSplit)
 	ops := func(kind string, doc int64) int {
@@ -122,9 +138,24 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 		}
 		return n
 	}
+	// candidate is the listed candidate of doc, as classification verified it.
+	candidate := func(doc int64) store.YTArticleCandidate {
+		t.Helper()
+		docs, err := st.YTArticleDocs(ctx, "", 0, store.YTArticleDocPageMax)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range docs {
+			if d.DocumentID == doc {
+				return d.YTArticleCandidate
+			}
+		}
+		t.Fatalf("document %d is not listed", doc)
+		return store.YTArticleCandidate{}
+	}
 
 	// A dry run (the default) plans every missing document, reads YouTrack
-	// and writes nothing.
+	// and writes nothing. m5 waits on m1's root-capable create.
 	dry, err := ybfRun(t, "yt", "articles-backfill")
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +168,9 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	}
 	if a := ybfAction(t, dry, m2); a.Action != "enqueue_split" || a.Reason != store.YTArticleWaitingFamilyRoot {
 		t.Errorf("m2 dry-run action = %+v, want enqueue_split waiting on its family root", a)
+	}
+	if a := ybfAction(t, dry, m5); a.Action != "wait" || a.Reason != "family_root_pending" {
+		t.Errorf("m5 dry-run action = %+v, want wait for the family's pending root create", a)
 	}
 
 	// --apply --limit 1 prepares the first document's create and nothing more.
@@ -153,11 +187,17 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	if a := ybfAction(t, r, m2); a.Action != "wait" || a.Reason != "limit" {
 		t.Errorf("m2 action = %+v, want wait for the limit", a)
 	}
-	if ops(create, m1) != 1 || total() != 1 {
-		t.Fatalf("after --limit 1: %d create ops for m1, %d ops in all", ops(create, m1), total())
+	var target string
+	if err := conn.QueryRow(ctx, `SELECT yt_target_id FROM yt_write_ops WHERE principal = $1 AND kind = $2 AND entity_id = $3`,
+		store.YTDocsPrincipal, create, strconv.FormatInt(m1, 10)).Scan(&target); err != nil {
+		t.Fatal(err)
+	}
+	if target != "0-7" || ops(create, m1) != 1 || total() != 1 {
+		t.Fatalf("after --limit 1: m1's op targets %q, %d create ops for m1, %d ops in all", target, ops(create, m1), total())
 	}
 
-	// --apply prepares the rest: one op per document, the split of m2 included.
+	// --apply prepares the rest: the split of m2 and the shared documents, and
+	// not m5, whose family's root create is still pending.
 	r, err = ybfRun(t, "yt", "articles-backfill", "--apply", "--by", "test:enqueue")
 	if err != nil {
 		t.Fatal(err)
@@ -171,8 +211,14 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	if a := ybfAction(t, r, m2); a.Action != "split_prepared" {
 		t.Errorf("m2 action = %+v, want split_prepared", a)
 	}
-	if ops(create, m1) != 1 || ops(split, m2) != 1 || ops(create, u0) != 1 || ops(create, u1) != 1 || total() != 4 {
-		t.Fatalf("after --apply: m1 %d, m2 split %d, u0 %d, u1 %d, %d ops in all", ops(create, m1), ops(split, m2), ops(create, u0), ops(create, u1), total())
+	if ops(create, m1) != 1 || ops(split, m2) != 1 || ops(create, u0) != 1 || ops(create, u1) != 1 || ops(create, m5) != 0 || total() != 4 {
+		t.Fatalf("after --apply: m1 %d, m2 split %d, u0 %d, u1 %d, m5 %d, %d ops in all", ops(create, m1), ops(split, m2), ops(create, u0), ops(create, u1), ops(create, m5), total())
+	}
+
+	// The store refuses a second root-capable create while the family's first
+	// one is unresolved, even when the command did not plan it.
+	if got, err := st.PrepareYTArticleBackfill(ctx, m5, time.Now().UTC(), candidate(m5)); err != nil || got != "family_root_pending" || ops(create, m5) != 0 {
+		t.Fatalf("m5 at the store = %q, %v with %d ops; want family_root_pending and no op", got, err, ops(create, m5))
 	}
 
 	// A rerun prepares nothing: no second op for any document.
@@ -186,7 +232,6 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	if a := ybfAction(t, r, m2); a.Action != "split_exists" {
 		t.Errorf("m2 on the rerun = %+v, want split_exists", a)
 	}
-
 	// --limit counts only the ops a run would add: with every op present a
 	// dry run with --limit 1 plans none and waits on none.
 	if dry, err := ybfRun(t, "yt", "articles-backfill", "--limit", "1"); err != nil || *dry.Enqueued != 0 || ybfAction(t, dry, m1).Action != "create_exists" || ybfAction(t, dry, m2).Action != "split_exists" {
@@ -194,7 +239,7 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	}
 
 	// A family whose root create is uncertain (remote_unknown, no root
-	// recorded) gets no new op: u2 waits.
+	// recorded) gets no new op on its project: u2 waits.
 	u2 := put("uncertain/third", "third", nil)
 	if _, err := conn.Exec(ctx, `UPDATE yt_write_ops SET state='remote_unknown' WHERE principal = $1 AND kind = $2 AND entity_id = $3`,
 		store.YTDocsPrincipal, create, strconv.FormatInt(u0, 10)); err != nil {
@@ -213,7 +258,7 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 
 	// The hold is per project: a document of the same family on the rda
 	// project is not held by the shared project's uncertain root.
-	u3 := put("uncertain/rda-doc", "rda doc", &task.ID)
+	u3 := put("uncertain/rda-doc", "rda doc", &rdaTask)
 	if r, err = ybfRun(t, "yt", "articles-backfill", "--apply", "--by", "test:enqueue"); err != nil {
 		t.Fatal(err)
 	}
@@ -221,40 +266,67 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 		t.Fatalf("u3 (rda project) = %+v with %d ops in all %d; want create_prepared", a, ops(create, u3), total())
 	}
 
-	// The store refuses a candidate that no longer resolves where it was
-	// verified: m3 now lists in rda, not in the shared bucket it was verified in.
-	m3 := put("note/rda/moved", "moved", &task.ID)
-	st.SetYTDocsMode(store.YTDocsOn, tenant, map[string]store.YTArticleProject{
-		store.YTArticleBucketShared:     {ID: "0-3", ShortName: "SHRDOC"},
-		store.YTArticleBucketUnassigned: {ID: "0-1", ShortName: "HK"},
-	})
-	st.SetYTArticleSplit(true)
-	if got, err := st.PrepareYTArticleBackfill(ctx, m3, time.Now().UTC(), store.YTArticleEnqueueTarget{Bucket: store.YTArticleBucketShared, ProjectID: "0-3"}); err != nil || got != "candidate_changed" || ops(create, m3) != 0 {
+	// A task move committed before the backfill's locks: the document no
+	// longer reads as the candidate verified, so nothing is enqueued.
+	movedTask := newTask("rda")
+	m3 := put("note/rda/moved", "moved", &movedTask)
+	verified := candidate(m3)
+	if _, err := conn.Exec(ctx, `UPDATE tasks SET project = 'sma' WHERE id = $1`, movedTask); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := st.PrepareYTArticleBackfill(ctx, m3, time.Now().UTC(), verified); err != nil || got != "candidate_changed" || ops(create, m3) != 0 {
 		t.Fatalf("a moved candidate = %q, %v with %d ops; want candidate_changed and no op", got, err, ops(create, m3))
 	}
 
-	// A long document from before the import, unbound, waits on the same root:
-	// the backfill splits it too, so the audit and the authority count it.
-	m4 := put("note/rda/old-huge", strings.Repeat("line\n", 50*1024), &task.ID)
-	if _, err := conn.Exec(ctx, `UPDATE documents SET created_at=$1 WHERE id=$2`, store.YTImportEndedAt.Add(-time.Hour), m4); err != nil {
+	// A task move that commits while prepare runs: whichever way the lock
+	// orders them, the outcome is the same, and no op is written.
+	racingTask := newTask("rda")
+	m4 := put("note/rda/racing", "racing", &racingTask)
+	verified4 := candidate(m4)
+	moveTx, err := conn.Begin(ctx)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := moveTx.Exec(ctx, `UPDATE tasks SET project = 'sma' WHERE id = $1`, racingTask); err != nil {
+		t.Fatal(err)
+	}
+	type prepared struct {
+		outcome string
+		err     error
+	}
+	done := make(chan prepared, 1)
+	go func() {
+		got, err := st.PrepareYTArticleBackfill(ctx, m4, time.Now().UTC(), verified4)
+		done <- prepared{got, err}
+	}()
+	if err := moveTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-done; got.err != nil || got.outcome != "candidate_changed" || ops(create, m4) != 0 {
+		t.Fatalf("a racing move = %q, %v with %d ops; want candidate_changed and no op", got.outcome, got.err, ops(create, m4))
 	}
 
 	// The audit shows the long documents waiting on their root, not as an
 	// exception, while the split flag is on; with it off they are not_updated.
+	// m6 is a long document from before the import: the audit counts it as the
+	// backfill would split it.
+	m6 := put("note/rda/old-huge", strings.Repeat("line\n", 50*1024), &rdaTask)
+	if _, err := conn.Exec(ctx, `UPDATE documents SET created_at=$1 WHERE id=$2`, store.YTImportEndedAt.Add(-time.Hour), m6); err != nil {
+		t.Fatal(err)
+	}
 	a := &ytAuditor{st: st, tenant: tenant, articles: true, split: true, families: true}
 	docs, err := a.documents(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(docs.WaitingFamilyRoot.DocumentIDs, []int64{m2, m4}) || docs.NotUpdated.Count != 0 {
+	if !slices.Equal(docs.WaitingFamilyRoot.DocumentIDs, []int64{m2, m6}) || docs.NotUpdated.Count != 0 {
 		t.Fatalf("audit with the split on = waiting %v, not_updated %d", docs.WaitingFamilyRoot.DocumentIDs, docs.NotUpdated.Count)
 	}
 	a.split = false
 	if docs, err = a.documents(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(docs.NotUpdated.DocumentIDs, []int64{m2, m4}) || docs.WaitingFamilyRoot.Count != 0 {
+	if !slices.Equal(docs.NotUpdated.DocumentIDs, []int64{m2, m6}) || docs.WaitingFamilyRoot.Count != 0 {
 		t.Fatalf("audit with the split off = not_updated %v, waiting %d", docs.NotUpdated.DocumentIDs, docs.WaitingFamilyRoot.Count)
 	}
 }

@@ -1232,16 +1232,16 @@ func ytArticlesUnwrittenTx(ctx context.Context, tx transaction, g ytDocsGate) (n
 	if err != nil || !g.split {
 		return n, ids, 0, err
 	}
-	waits, err := ytArticlesWaitingRootTx(ctx, tx, g)
+	long, waiting, err := ytArticlesLongUnwrittenTx(ctx, tx, g)
 	if err != nil {
 		return 0, nil, 0, err
 	}
-	for _, id := range waits {
+	for _, id := range long {
 		if len(ids) < ytArticlesUnwrittenMax {
 			ids = append(ids, id)
 		}
 	}
-	return n + len(waits), ids, len(waits), nil
+	return n + len(long), ids, waiting, nil
 }
 
 // ytArticlesUnwrittenCountTx is ytArticlesUnwrittenTx's count without the
