@@ -248,9 +248,13 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	// A family whose root create is uncertain (remote_unknown, no root
 	// recorded) gets no new op on its project: u2 waits.
 	u2 := put("uncertain/third", "third", nil)
-	if _, err := conn.Exec(ctx, `UPDATE yt_write_ops SET state='remote_unknown' WHERE principal = $1 AND kind = $2 AND entity_id = $3`,
-		store.YTDocsPrincipal, create, strconv.FormatInt(u0, 10)); err != nil {
-		t.Fatal(err)
+	// The protocol moves an op prepared, then dispatched, then remote_unknown;
+	// a trigger refuses prepared to remote_unknown directly.
+	for _, state := range []string{"dispatched", "remote_unknown"} {
+		if _, err := conn.Exec(ctx, `UPDATE yt_write_ops SET state = $1, dispatched_at = CASE WHEN $1 = 'dispatched' THEN now() ELSE dispatched_at END WHERE principal = $2 AND kind = $3 AND entity_id = $4`,
+			state, store.YTDocsPrincipal, create, strconv.FormatInt(u0, 10)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	r, err = ybfRun(t, "yt", "articles-backfill", "--apply", "--by", "test:enqueue")
 	if err != nil {
