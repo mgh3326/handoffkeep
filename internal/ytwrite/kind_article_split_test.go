@@ -132,3 +132,33 @@ func TestCheckSplitApplyAnchorsTheOperatorRead(t *testing.T) {
 		}
 	}
 }
+
+// hk 5273 (review of PR #511 r4615892346): the index lists one summary per
+// part, so a body of many parts with a long multi-byte summary would render
+// an index over the article bound though every part fits. Admission refuses
+// such a document (its op is stored rejected, no request is ever made); the
+// same summary over fewer parts is admitted and its index fits.
+func TestCheckArticleSplitBoundsTheIndex(t *testing.T) {
+	req := articleReq()
+	req.Summary = strings.Repeat("𝄞", ytwrite.ArticleSummaryLimit)
+	req.Body = strings.Repeat("b", 10*ytwrite.SplitChunkMaxBytes)
+	if err := ytwrite.CheckArticleSplit(req); err != nil {
+		t.Fatalf("a 10-part document: %v", err)
+	}
+	at := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	if ix := ytwrite.RenderSplitIndex(req.Actor, at, 1<<62, req.Summary, 10); len(ix) > ytwrite.ArticlePartMaxBytes {
+		t.Fatalf("10-part index %d bytes", len(ix))
+	}
+	const parts = 270
+	req.Body = strings.Repeat("b", parts*ytwrite.SplitChunkMaxBytes)
+	if n := len(ytwrite.SplitArticleBody(req.Body)); n != parts {
+		t.Fatalf("%d parts, want %d", n, parts)
+	}
+	if ix := ytwrite.RenderSplitIndex(req.Actor, at, 1, req.Summary, parts); len(ix) <= ytwrite.ArticlePartMaxBytes {
+		t.Fatalf("the %d-part index is %d bytes: the case does not exceed the bound", parts, len(ix))
+	}
+	err := ytwrite.CheckArticleSplit(req)
+	if !errors.Is(err, ytwrite.ErrInvalid) || !strings.Contains(err.Error(), "index of 270 parts") {
+		t.Fatalf("a document whose index outgrows an article: %v", err)
+	}
+}

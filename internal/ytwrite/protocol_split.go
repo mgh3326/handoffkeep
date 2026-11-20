@@ -72,7 +72,7 @@ func (p *Protocol) sendSplit(ctx context.Context, op Op, k articleSplit) Result 
 		case errors.As(err, &hold):
 			return settle(func(c context.Context) settled { return st.markUnknown(c, op, hold.Reason, hold.Detail) })
 		case sent:
-			return settle(func(c context.Context) settled { return st.markUnknown(c, op, ReasonReconcileFailed, err.Error()) })
+			return settle(func(c context.Context) settled { return st.readFailed(c, op, ReasonReconcileFailed, err) })
 		case errors.As(err, &refused):
 			return settle(func(c context.Context) settled { return st.reject(c, op, refused.Reason, refused.Detail) })
 		}
@@ -133,14 +133,14 @@ func (p *Protocol) sendSplit(ctx context.Context, op Op, k articleSplit) Result 
 			st.stopped, st.step = true, n
 			if n == 0 && !sent {
 				return settle(func(c context.Context) settled {
-					return p.deferNotSent(c, st, op, p.reconcileDelay(op.Attempts), ReasonNotSent, "step not marked: "+markErr.Error())
+					return p.deferNotSent(c, st, op, p.reconcileDelay(op.Attempts), ReasonNotSent, "step not sent: "+markErr.Error())
 				})
 			}
 			if n > 0 {
 				st.outcome = StepOK
 			}
 			return settle(func(c context.Context) settled {
-				return st.markUnknown(c, op, ReasonPartialWrite, "step not marked: "+markErr.Error())
+				return st.markUnknown(c, op, ReasonPartialWrite, "step not sent: "+markErr.Error())
 			})
 		}
 		st.outcome = splitStepOutcome(err)
@@ -149,6 +149,12 @@ func (p *Protocol) sendSplit(ctx context.Context, op Op, k articleSplit) Result 
 	st.outcome = StepOK
 
 	// 4. Read again: applied only when the whole family reads back (S5).
+	// The read stays in the dispatch window (rctx), so the send ends before
+	// StaleAfter and within the worker's stop budget (review of PR #527
+	// r4638925834, r4638926101): reads too slow for what is left of it end
+	// remote_unknown unverified, with the successful create recorded, and
+	// recovery verifies the family under its own lease and read budget
+	// (splitVerifyBudget, hk 5273).
 	final, readErr := k.readFamily(rctx, ar, op, d, index, false)
 	return settle(func(c context.Context) settled {
 		var hold *HoldError
@@ -156,7 +162,7 @@ func (p *Protocol) sendSplit(ctx context.Context, op Op, k articleSplit) Result 
 		case errors.As(readErr, &hold):
 			return st.markUnknown(c, op, hold.Reason, hold.Detail)
 		case readErr != nil:
-			return st.markUnknown(c, op, ReasonUnverified, "final read: "+readErr.Error())
+			return st.readFailed(c, op, ReasonUnverified, fmt.Errorf("final read: %w", readErr))
 		case !final.complete():
 			return st.markUnknown(c, op, ReasonPartialWrite, "the read after the plan does not show every part")
 		}
@@ -165,16 +171,31 @@ func (p *Protocol) sendSplit(ctx context.Context, op Op, k articleSplit) Result 
 }
 
 // executeSplit runs k.executeSplit for st's executor, marking each create in
-// the ledger before its request. markErr is the mark that stopped it.
+// the ledger before its request. markErr is what stopped it before step n's
+// request: the mark failed, or the remote deadline (rctx) passed before the
+// mark or while it was written. A create never sent on an expired context is
+// a stopped step (recorded definite), not an ambiguous request that recovery
+// would wait on forever (hk 5273, review of PR #511 r4615892430); a deadline
+// that passes once the request is under way stays ambiguous (S2).
 func (p *Protocol) executeSplit(ctx, rctx context.Context, st *splitSettler, k articleSplit, ar ArticleRemote, op Op, d splitDoc, parent string, plan SplitPlan) (n int, index string, markErr, err error) {
+	expired := func(when string) error {
+		if err := rctx.Err(); err != nil {
+			markErr = fmt.Errorf("remote deadline passed %s, so the create was not sent: %w", when, err)
+			return markErr
+		}
+		return nil
+	}
 	mark := func(i int, index string) error {
+		if err := expired("before its mark"); err != nil {
+			return err
+		}
 		mctx, cancel := p.settling(ctx)
 		defer cancel()
 		if err := st.sl.MarkSplitStep(mctx, p.now(), op.ID, st.f, i, index); err != nil {
 			markErr = err
 			return err
 		}
-		return nil
+		return expired("during its mark")
 	}
 	n, index, err = k.executeSplit(rctx, ar, op, d, parent, plan, mark)
 	return n, index, markErr, err
@@ -199,16 +220,20 @@ func splitStepOutcome(err error) StepOutcome {
 // shows that create (S7); an index whose create may have been sent and that no
 // read finds makes none either (S1).
 func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (bool, error) {
+	caller := ctx
 	sl, ok := p.Ledger.(SplitLedger)
 	ar, rok := p.Remote.(ArticleRemote)
 	if !ok || !rok {
 		return false, p.touchUnknown(ctx, op, 0, ReasonReconcileFailed, "the ledger or remote cannot split "+op.Kind)
 	}
-	// The lease, its deadline and its epoch are reconcilePlanned's.
+	// The lease, its deadline and its epoch are reconcilePlanned's, but
+	// sized for the pass's two family reads (splitRecoveryLease).
+	d, derr := renderSplit(op)
+	lease := p.splitRecoveryLease(d.parts)
 	start := p.now()
-	wctx, cancelWork := context.WithTimeout(context.WithoutCancel(ctx), p.DispatchTimeout+p.SettleTimeout)
+	wctx, cancelWork := context.WithTimeout(context.WithoutCancel(ctx), lease-p.SettleTimeout)
 	defer cancelWork()
-	epoch, leased, err := sl.LeaseLinkRecovery(wctx, start, op.ID, op.Reconciles, start.Add(p.linkRecoveryLease()))
+	epoch, leased, err := sl.LeaseLinkRecovery(wctx, start, op.ID, op.Reconciles, start.Add(lease))
 	if err != nil || !leased {
 		return false, err
 	}
@@ -235,9 +260,8 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 		}
 		return end(s)
 	}
-	d, err := renderSplit(op)
-	if err != nil {
-		return pass(0, ReasonReconcileFailed, err.Error())
+	if derr != nil {
+		return pass(0, ReasonReconcileFailed, derr.Error())
 	}
 	history, err := sl.SplitPlans(ctx, op.ID)
 	if err != nil {
@@ -251,8 +275,6 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 	} else {
 		found = false
 	}
-	rctx, cancelRemote := context.WithTimeout(wctx, p.DispatchTimeout)
-	defer cancelRemote()
 	// failed classifies a recovery request's error, as reconcilePlanned's
 	// does, except that a 4xx after the index exists rejects partial_write
 	// (S9).
@@ -277,7 +299,22 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 		}
 		return pass(0, ReasonReconcileFailed, err.Error())
 	}
-	read, err := k.readFamily(rctx, ar, op, d, op.YTResultID, IndexMaybeSent(history))
+	// Each family read has its own budget, the creates theirs
+	// (DispatchTimeout), all within the lease (hk 5273, review of PR #511
+	// r4615892443). A read sends nothing, so it also stops when the worker
+	// does (review of PR #527 r4638925829): the pass then settles on its
+	// own detached context and the next worker reads again.
+	// The read's context is the caller's (so a stop reaches it at once),
+	// bounded by the work deadline and the read budget.
+	workEnd, _ := wctx.Deadline()
+	verify := func(index string, search bool) (familyRead, error) {
+		bctx, cancelWork := context.WithDeadline(caller, workEnd)
+		defer cancelWork()
+		vctx, cancel := context.WithTimeout(bctx, p.splitVerifyBudget(d.parts))
+		defer cancel()
+		return k.readFamily(vctx, ar, op, d, index, search)
+	}
+	read, err := verify(op.YTResultID, IndexMaybeSent(history))
 	if err != nil {
 		var re *RemoteError
 		if errors.As(err, &re) && re.Status >= 400 && re.Status < 500 && re.Status != http.StatusTooManyRequests && re.Status != http.StatusUnauthorized && !readOnlyRefusal(re) {
@@ -308,6 +345,8 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 		log.Printf("ytwrite.split_recover_exhausted op_id=%d recovers=%d", op.ID, recovers)
 		return pass(0, ReasonRecoverExhausted, fmt.Sprintf("%d recovery plans did not converge; an operator resolves it", recovers))
 	}
+	rctx, cancelRemote := context.WithTimeout(wctx, p.DispatchTimeout)
+	defer cancelRemote()
 	parent := ""
 	if read.index == "" {
 		parent, err = k.splitParent(rctx, ar, op, d)
@@ -340,7 +379,7 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 			if n > 0 {
 				st.outcome = StepOK
 			}
-			return pass(0, ReasonReconcileFailed, "step not marked: "+markErr.Error())
+			return pass(0, ReasonReconcileFailed, "step not sent: "+markErr.Error())
 		}
 		st.outcome = splitStepOutcome(err)
 		var re *RemoteError
@@ -354,7 +393,7 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 		return failed(err)
 	}
 	st.outcome = StepOK
-	final, err := k.readFamily(rctx, ar, op, d, index, false)
+	final, err := verify(index, false)
 	if err != nil {
 		return failed(err)
 	}
@@ -418,6 +457,19 @@ func (p *Protocol) resolveSplit(ctx context.Context, op Op, r Resolution) (Resul
 	return p.result(s.op, false), nil
 }
 
+// splitVerifyBudget bounds one read of a family of parts articles: a
+// DispatchTimeout for each GET it makes (the index, each part, the index
+// again), so a family whose every GET fits DispatchTimeout reads whole.
+func (p *Protocol) splitVerifyBudget(parts int) time.Duration {
+	return time.Duration(parts+2) * p.DispatchTimeout
+}
+
+// splitRecoveryLease is linkRecoveryLease for a split of parts articles: the
+// pass's creates and ledger steps as for links, plus its two family reads.
+func (p *Protocol) splitRecoveryLease(parts int) time.Duration {
+	return p.linkRecoveryLease() + 2*p.splitVerifyBudget(parts)
+}
+
 func splitStepName(step, parts int) string {
 	if step == 0 {
 		return "the index"
@@ -469,6 +521,23 @@ func (s *splitSettler) deferOp(ctx context.Context, op Op, next time.Time, reaso
 
 func (s *splitSettler) markUnknown(ctx context.Context, op Op, reason, detail string) settled {
 	return s.settle(ctx, op, LinkSettlement{To: StateRemoteUnknown, Next: s.p.now().Add(s.p.reconcileDelay(0)), Reason: reason, Detail: detail})
+}
+
+// readFailed is markUnknown for a family read that failed with err. A 429
+// keeps the op remote_unknown (a create may already exist) but due no
+// sooner than the remote asked, capped by MaxRetryAfter, as the write path
+// waits (hk 5273, review of PR #511 r4615892383, r4615892399).
+func (s *splitSettler) readFailed(ctx context.Context, op Op, reason string, err error) settled {
+	var re *RemoteError
+	if !errors.As(err, &re) || re.Status != http.StatusTooManyRequests {
+		return s.markUnknown(ctx, op, reason, err.Error())
+	}
+	wait := re.RetryAfter
+	if wait <= 0 {
+		wait = s.p.RateLimitWait
+	}
+	delay := max(s.p.reconcileDelay(0), min(wait, s.p.MaxRetryAfter))
+	return s.settle(ctx, op, LinkSettlement{To: StateRemoteUnknown, Next: s.p.now().Add(delay), Reason: ReasonRateLimited, Detail: err.Error()})
 }
 
 // pass ends a recovery pass that did not resolve the op (linkSettler.pass).
