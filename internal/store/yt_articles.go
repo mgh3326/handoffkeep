@@ -178,7 +178,7 @@ func ytArticleCreateGateSQL(s *Store) string {
 				AND f.payload->>'parent_family' = o.payload->>'parent_family'))`,
 		`o.entity_kind = 'document' AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b
 		WHERE CAST(b.document_id AS CHAR) = o.entity_id AND NOT (b.op_id <=> o.id))
-		AND (o.state <> 'prepared' OR coalesce(JSON_UNQUOTE(JSON_EXTRACT(o.payload, '$.parent_family')), '') = ''
+		AND (o.state <> 'prepared' OR coalesce(JSON_UNQUOTE(JSON_EXTRACT(o.payload, '$.parent_family')) COLLATE utf8mb4_0900_bin, '') = ''
 			OR EXISTS (SELECT 1 FROM yt_family_roots r
 				WHERE r.tenant = o.tenant AND r.project_id = o.yt_target_id
 				AND r.family = JSON_UNQUOTE(JSON_EXTRACT(o.payload, '$.parent_family')) COLLATE utf8mb4_0900_bin)
