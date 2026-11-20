@@ -371,6 +371,13 @@ func ytArticleFamilyGateTx(ctx context.Context, tx transaction, tenant, project,
 			return "", err
 		}
 	}
+	return ytArticleFamilyHeldTx(ctx, tx, tenant, project, family, root)
+}
+
+// ytArticleFamilyHeldTx is ytArticleFamilyGateTx's check without its lock:
+// the read-only requeue's dry run reads it unlocked, and its apply after it
+// took the lock itself.
+func ytArticleFamilyHeldTx(ctx context.Context, tx transaction, tenant, project, family string, root bool) (ytArticleOutcome, error) {
 	states, err := ytArticleFamilyStatesTx(ctx, tx, tenant)
 	if err != nil {
 		return "", err

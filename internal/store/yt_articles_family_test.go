@@ -219,3 +219,122 @@ func TestYTArticleFamilyGateIsPerFamily(t *testing.T) {
 		}
 	}
 }
+
+// ytartQueuedCreate prepares document id's root-capable article_create
+// directly, as a release before hk 5761 could queue it beside another open
+// create of its family (no family check at preparation).
+func ytartQueuedCreate(t *testing.T, s *Store, id int64, key string) ytwrite.Op {
+	t.Helper()
+	n, err := ytwrite.ArticleOp(ytwrite.ArticleRequest{Principal: YTDocsPrincipal, Actor: YTDocsPrincipal, YTProjectID: ytartShared, YTProjectShort: "SHRDOC",
+		Tenant: ytcTenant, DocumentID: id, Summary: YTArticleSummary(key, "note"), Body: "body of " + key, ParentFamily: ytArticleFamily(id, key)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, created, err := s.YTWriteLedger().Prepare(t.Context(), time.Now().UTC(), n)
+	if err != nil || !created {
+		t.Fatalf("prepare %d: %v %v", id, created, err)
+	}
+	return op
+}
+
+// Two root-capable creates of one family already queued (a previous release
+// prepared both): the worker's admission dispatches only the older one while
+// it is unresolved, holds the newer one through remote_unknown, and admits it
+// once the family's root is recorded (hk 5761, S1).
+func TestYTArticleCreateDispatchFencedByFamily(t *testing.T) {
+	s := ytartSetup(t, "ytart_famfence", true)
+	ctx := t.Context()
+	first := ytartPut(t, s, "famfence/first.md", "first", nil)
+	second := ytartPut(t, s, "famfence/second.md", "second", nil)
+	plain := ytartPut(t, s, "plain", "no family", nil)
+	a := ytartQueuedCreate(t, s, first, "famfence/first.md")
+	b := ytartQueuedCreate(t, s, second, "famfence/second.md")
+	c := ytartQueuedCreate(t, s, plain, "plain")
+	l := s.YTTenantLedger(ytcTenant)
+	now := time.Now().UTC()
+	due := func() map[int64]bool {
+		t.Helper()
+		ops, err := l.Due(ctx, now.Add(time.Minute), 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[int64]bool{}
+		for _, op := range ops {
+			out[op.ID] = true
+		}
+		return out
+	}
+	if d := due(); !d[a.ID] || d[b.ID] || !d[c.ID] {
+		t.Fatalf("due %v: want the older family create and the familyless one, not the newer", d)
+	}
+	claim := func(id int64, want ytwrite.ClaimOutcome) {
+		t.Helper()
+		if _, outcome, err := l.Claim(ctx, now, id); err != nil || outcome != want {
+			t.Fatalf("claim %d = %v, %v; want %v", id, outcome, err, want)
+		}
+	}
+	claim(b.ID, ytwrite.ClaimHeld)
+	claim(a.ID, ytwrite.ClaimClaimed)
+	claim(b.ID, ytwrite.ClaimHeld)
+	if _, err := l.MarkUnknown(ctx, now, a.ID, now.Add(time.Hour), ytwrite.ReasonTransport, "lost"); err != nil {
+		t.Fatal(err)
+	}
+	claim(b.ID, ytwrite.ClaimHeld)
+	if err := s.YTWriteLedger().RecordFamilyRoot(ctx, ytcTenant, ytartShared, "famfence", "3-700", a.ID); err != nil {
+		t.Fatal(err)
+	}
+	claim(b.ID, ytwrite.ClaimClaimed)
+}
+
+// The read-only requeue (hk 5506) does not revive a rejected root-capable
+// create beside another document's open create of the family, nor behind an
+// uncertain one, in a dry run or in apply; once the root is recorded it
+// requeues it (hk 5761).
+func TestYTRequeueReadOnlyHoldsFamilyCreate(t *testing.T) {
+	s := ytartSetup(t, "ytart_famrequeue", true)
+	ctx := t.Context()
+	first := ytartPut(t, s, "famrq/first.md", "first", nil)
+	second := ytartPut(t, s, "famrq/second.md", "second", nil)
+	g, _ := s.ytDocsNow()
+	now := time.Now().UTC()
+	if out, err := s.catchUpYTArticle(ctx, now, g, first); err != nil || out != ytArticleCreatePrepared {
+		t.Fatalf("first = %q, %v", out, err)
+	}
+	a := ytartOps(t, s, first)[0]
+	const readOnly = "youtrack answered 418: youtrack POST /api/articles: 418 invalid_state: The application is currently in read-only mode. Please try again later."
+	if _, err := s.YTWriteLedger().Reject(ctx, now, a.ID, "http_418", readOnly); err != nil {
+		t.Fatal(err)
+	}
+	// a is rejected, so second's create is the family's one open create.
+	if out, err := s.catchUpYTArticle(ctx, now, g, second); err != nil || out != ytArticleCreatePrepared {
+		t.Fatalf("second = %q, %v", out, err)
+	}
+	b := ytartOps(t, s, second)[0]
+	requeue := func(apply bool, wantOutcome, wantReason string) {
+		t.Helper()
+		rep, err := s.RequeueYTReadOnlyOps(ctx, now, YTRequeueOptions{Tenant: ytcTenant, OpIDs: []int64{a.ID}, By: "operator", Apply: apply})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rep.Ops) != 1 || rep.Ops[0].Outcome != wantOutcome || rep.Ops[0].Reason != wantReason {
+			t.Fatalf("requeue apply=%v: %+v, want %s %q", apply, rep.Ops, wantOutcome, wantReason)
+		}
+	}
+	requeue(false, YTRequeueNotEligible, string(ytArticleFamilyPending))
+	requeue(true, YTRequeueNotEligible, string(ytArticleFamilyPending))
+	if got, _ := s.YTWriteLedger().ByID(ctx, a.ID); got.State != ytwrite.StateRejected {
+		t.Fatalf("a was revived beside b: %+v", got)
+	}
+	l := s.YTTenantLedger(ytcTenant)
+	if _, outcome, err := l.Claim(ctx, now, b.ID); err != nil || outcome != ytwrite.ClaimClaimed {
+		t.Fatalf("claim b: %v %v", outcome, err)
+	}
+	if _, err := l.MarkUnknown(ctx, now, b.ID, now.Add(time.Hour), ytwrite.ReasonTransport, "lost"); err != nil {
+		t.Fatal(err)
+	}
+	requeue(true, YTRequeueNotEligible, string(ytArticleFamilyUncertain))
+	if err := s.YTWriteLedger().RecordFamilyRoot(ctx, ytcTenant, b.YTTargetID, "famrq", "3-710", b.ID); err != nil {
+		t.Fatal(err)
+	}
+	requeue(true, YTRequeueRequeued, "")
+}

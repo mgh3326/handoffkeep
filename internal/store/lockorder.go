@@ -193,7 +193,11 @@ package store
 //     document, task and youtrack_projects rows FOR SHARE); the catch-up
 //     (catchUpYTArticleOnce) after its one lane lock; a feed pass of
 //     document_articles (ytDocsHandler) after the feed lock and every lane
-//     lock of the pass, which it takes before deciding any document. Under it
+//     lock of the pass, which it takes before deciding any document; the
+//     read-only requeue (requeueYTReadOnlyOpOnce) of a root-capable create
+//     after the op's lane lock and its authority row FOR SHARE, and before
+//     FOR UPDATE on that op's row (a row only a holder of the same lane
+//     locks). Under it
 //     the holder reads yt_family_roots and yt_write_ops without a lock and
 //     inserts its op (prepareYTOpTx: the lane lock it already holds, then the
 //     authority row FOR SHARE, which a switch holds while waiting for no lane
