@@ -37,6 +37,14 @@ const ytArticleFamilyUncertain ytArticleOutcome = "family_root_uncertain"
 // reach an uncertain root and make a second root.
 const ytArticleFamilyPending ytArticleOutcome = "family_root_pending"
 
+// ytArticleFamilyLock is the lockYTEntity kind of a family's root-capable
+// creates on one project: a transaction-scoped lock keyed by tenant, project and
+// family, taken before the family's pending state is read and the create
+// inserted, so the check and the insert are atomic across documents (PR 528
+// r4639407801, r4639418292). It is distinct from the worker's session family
+// lane (ytwrite.Ledger.LockFamily), which covers the send.
+const ytArticleFamilyLock = "yt_article_family"
+
 // ytArticleCandidateChanged is the outcome of a backfill whose document no
 // longer reads as the candidate it was verified as (its task moved, its
 // mapping changed, or its body changed) once the locks are held: nothing is
@@ -305,6 +313,13 @@ func (s *Store) prepareYTArticleBackfillOnce(ctx context.Context, now time.Time,
 	}
 	if family := YTArticleFamilyOf(r.doc.Key); family != "" && ytArticleAmends(r.doc.Key, r.body) == "" && !r.created && !r.splitOp {
 		target, _ := ytArticleTarget(g, r.doc)
+		if !YTArticleSplit(r.doc.BodyBytes) {
+			// The short document's root-capable create: serialize its family on
+			// this project before reading the pending state.
+			if err := lockYTEntity(ctx, tx, ytArticleFamilyLock, g.tenant+"\x1f"+target.ID+"\x1f"+family); err != nil {
+				return "", err
+			}
+		}
 		states, err := ytArticleFamilyStatesTx(ctx, tx, g.tenant)
 		if err != nil {
 			return "", err

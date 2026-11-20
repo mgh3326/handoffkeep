@@ -313,6 +313,39 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 		t.Fatalf("a racing move = %q, %v with %d ops; want candidate_changed and no op", got.outcome, got.err, ops(create, m4))
 	}
 
+	// Two short documents of one new family on one project, prepared at the
+	// same time: exactly one root-capable create is inserted, and the other
+	// waits for it (the family lock makes the pending check and the insert one).
+	ra := put("race/rda/a", "a", &rdaTask)
+	rb := put("race/rda/b", "b", &rdaTask)
+	ca, cb := candidate(ra), candidate(rb)
+	raced := make(chan prepared, 2)
+	for _, c := range []struct {
+		id   int64
+		want store.YTArticleCandidate
+	}{{ra, ca}, {rb, cb}} {
+		go func() {
+			got, err := st.PrepareYTArticleBackfill(ctx, c.id, time.Now().UTC(), c.want)
+			raced <- prepared{got, err}
+		}()
+	}
+	created, waited := 0, 0
+	for range 2 {
+		got := <-raced
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		switch got.outcome {
+		case "create_prepared":
+			created++
+		case "family_root_pending":
+			waited++
+		}
+	}
+	if created != 1 || waited != 1 || ops(create, ra)+ops(create, rb) != 1 {
+		t.Fatalf("two concurrent short documents of one family: %d created, %d waited, %d creates in all; want one of each", created, waited, ops(create, ra)+ops(create, rb))
+	}
+
 	// The audit shows the long documents waiting on their root, not as an
 	// exception, while the split flag is on; with it off they are not_updated.
 	// m6 is a long document from before the import: the audit counts it as the
