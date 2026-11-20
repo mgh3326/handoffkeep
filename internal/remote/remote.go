@@ -525,6 +525,19 @@ type DecisionChannelResolveInput struct {
 // named channel.
 func (c Client) ResolveDecisionChannel(ctx context.Context, id int64, in DecisionChannelResolveInput) (store.DecisionRequestResult, error) {
 	var out store.DecisionRequestResult
+	// recording_lane rides only a server that lists it. An older server refuses
+	// the unknown field with invalid_context before any write, so the field is
+	// dropped there: the answer is still recorded, and the asker keeps its
+	// notice (hk 5527).
+	if in.RecordingLane != "" {
+		listed, err := c.supportsFeature(ctx, capabilities.FeatureDecisionRecordingLane)
+		if err != nil {
+			return out, err
+		}
+		if !listed {
+			in.RecordingLane = ""
+		}
+	}
 	err := c.call(ctx, "POST", fmt.Sprintf("/v1/tasks/%d/decision-request/resolve", id), in, &out)
 	return out, err
 }

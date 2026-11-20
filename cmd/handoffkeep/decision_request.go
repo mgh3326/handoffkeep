@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -497,6 +498,8 @@ func decisionResolveRequestCmd(args []string, out io.Writer) error {
 		}
 	case store.DecisionChannelSession:
 		in.Provenance = store.DecisionProvenanceAssistantJudgement
+		// The recording lane lets hk skip the asker's copy of its own answer (hk 5527).
+		in.RecordingLane = strings.TrimSpace(os.Getenv("PANEWIRE_LANE"))
 		if *quote != "" {
 			in.Provenance, in.OperatorQuote, in.DecisionRef = store.DecisionProvenanceOperatorDecided, *quote, requestID
 		}
