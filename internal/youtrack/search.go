@@ -21,12 +21,19 @@ import (
 const DefaultSearchTimeout = 3 * time.Second
 
 const (
-	searchIssueFields   = "id,idReadable,summary,description"
-	searchArticleFields = "id,idReadable,summary,content,parentArticle(id)"
-	searchExcerptRunes  = 160
-	searchDefaultLimit  = 20
-	searchMaxLimit      = 100
-	searchMaxTaskLimit  = 50
+	searchIssueFields = "id,idReadable,summary,description"
+	// searchArticleRefFields is a docs-lane candidate without its content: the
+	// ids that map it to a document, and its summary for the excerpt fallback.
+	// Content is read per shown hit with GetArticle, so the candidate set stays
+	// far below the response cap however large the articles are.
+	searchArticleRefFields = "id,idReadable,summary,parentArticle(id)"
+	searchExcerptRunes     = 160
+	searchDefaultLimit     = 20
+	searchMaxLimit         = 100
+	searchMaxTaskLimit     = 50
+	// searchDocContentWorkers bounds the parallel GetArticle calls that load the
+	// content of the docs hits a page shows.
+	searchDocContentWorkers = 8
 )
 
 // docRankOther is the rank of a document key that matches no docRankTable
@@ -69,13 +76,13 @@ func (c *Client) SearchIssues(ctx context.Context, query string, top int) ([]Iss
 	return out, err
 }
 
-// SearchArticleText returns up to top 기술 자료 articles whose text matches a
-// YouTrack query, with their content for the excerpt. A 5xx is not retried,
-// for the same reason as SearchIssues.
-func (c *Client) SearchArticleText(ctx context.Context, query string, top int) ([]Article, error) {
+// SearchArticleRefs returns up to top 기술 자료 articles whose text matches a
+// YouTrack query, without their content (see searchArticleRefFields). A 5xx is
+// not retried, for the same reason as SearchIssues.
+func (c *Client) SearchArticleRefs(ctx context.Context, query string, top int) ([]Article, error) {
 	q := url.Values{}
 	q.Set("query", query)
-	q.Set("fields", searchArticleFields)
+	q.Set("fields", searchArticleRefFields)
 	q.Set("$top", strconv.Itoa(top))
 	var out []Article
 	err := c.do(ctx, http.MethodGet, "/api/articles", q, nil, &out, false)
@@ -100,13 +107,15 @@ func (s *Service) Search(ctx context.Context, q, scope, session string, limit in
 // keep YouTrack's relevance order, except that the docs lane is reranked by
 // docRankTable. Scopes tasks and docs keep YouTrack's order (docs reranked).
 //
-// The two YouTrack lanes run concurrently under one shared deadline. A lane
-// that misses it leaves the other lane's hits in the page; scope all then
-// marks the page Partial and TimedOut. Scopes tasks and docs have one lane,
-// so its deadline is the search's deadline and fails the call.
+// The two YouTrack lanes run concurrently under one shared deadline. The docs
+// lane reads its candidates without content, reranks them, and reads the content
+// of the hits it shows. A lane that misses the deadline leaves the other lane's
+// hits in the page; scope all then marks the page Partial and TimedOut. Scopes
+// tasks and docs have one lane, so its deadline is the search's deadline and
+// fails the call.
 //
-// Each YouTrack request asks for limit+1 hits, except the docs lane, which asks
-// for enough hits to rerank (docFetchLimit). The page is truncated when a
+// Each YouTrack request asks for limit+1 hits, except the docs candidates, which
+// ask for enough hits to rerank (docFetchLimit). The page is truncated when a
 // lane returned more than limit, even if some of those hits had no hk mapping,
 // or when the merged list is longer than limit. A truncated page sets Truncated
 // on every row.
@@ -168,56 +177,68 @@ func (s *Service) SearchPage(ctx context.Context, q, scope, session string, limi
 
 	yctx, cancel := context.WithTimeout(ctx, s.searchTimeout)
 	defer cancel()
+
+	clean := cleanSearchText(text)
 	var (
-		issues      []Issue
-		articles    []Article
-		issuesErr   error
-		articlesErr error
-		wg          sync.WaitGroup
+		issues        []Issue
+		candidates    []Article
+		docs          []docHit
+		issuesFail    *laneFailure
+		candidatesErr *laneFailure
+		contentFail   *laneFailure
+		docsErr       error
+		wg            sync.WaitGroup
 	)
 	if len(names) > 0 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			issues, issuesErr = s.client.SearchIssues(yctx, issueSearchQuery(names, text), limit+1)
+			var err error
+			issues, err = s.client.SearchIssues(yctx, issueSearchQuery(names, text), limit+1)
+			if err != nil {
+				issuesFail = failure(yctx, "issues", err)
+			}
 		}()
 	}
-	if wantDocs {
-		if clean := cleanSearchText(text); clean != "" {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				articles, articlesErr = s.client.SearchArticleText(yctx, clean, docFetchLimit(limit))
-			}()
-		}
+	if wantDocs && clean != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			candidates, err = s.client.SearchArticleRefs(yctx, clean, docFetchLimit(limit))
+			if err != nil {
+				candidatesErr = failure(yctx, "articles", err)
+				return
+			}
+			// The docs lane finishes here, inside its own goroutine: a slow issue
+			// lane must not hold the content loads until the shared deadline.
+			docs, docsErr = s.rankedDocHits(ctx, candidates, session, limit)
+			if docsErr != nil {
+				return
+			}
+			contentFail = s.loadDocContent(yctx, docs)
+		}()
 	}
 	wg.Wait()
 
-	timedOut := false
-	for _, lane := range []struct {
-		name string
-		err  error
-	}{{"issues", issuesErr}, {"articles", articlesErr}} {
-		if lane.err == nil {
-			continue
-		}
-		reason := searchFailureReason(yctx, lane.err)
-		log.Printf("search.youtrack_error lane=%s reason=%s scope=%q err=%v", lane.name, reason, scope, lane.err)
-		if reason != "timeout" && !errors.Is(lane.err, context.DeadlineExceeded) {
-			return store.SearchPage{}, store.ErrSearchUnavailable
-		}
-		if scope != "all" || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return store.SearchPage{}, store.ErrSearchTimeout
-		}
-		// Scope all has independent local context results. The timed-out lane
-		// contributes nothing; the other lane keeps its hits, and the page is marked.
-		timedOut = true
-	}
-	if issuesErr != nil {
+	if issuesFail != nil {
 		issues = nil
 	}
-	if articlesErr != nil {
-		articles = nil
+	var failures []laneFailure
+	for _, f := range []*laneFailure{issuesFail, candidatesErr, contentFail} {
+		if f != nil {
+			failures = append(failures, *f)
+		}
+	}
+	timedOut, err := settleLanes(ctx, scope, failures)
+	if err != nil {
+		return store.SearchPage{}, err
+	}
+	if candidatesErr != nil {
+		candidates, docs = nil, nil
+	}
+	if docsErr != nil {
+		return store.SearchPage{}, docsErr
 	}
 
 	var lanes [][]store.SearchResult
@@ -241,30 +262,13 @@ func (s *Service) SearchPage(ctx context.Context, q, scope, session string, limi
 		lanes = append(lanes, lane)
 	}
 	if wantDocs {
-		overflow = overflow || len(articles) > limit
-		allArticleIDs := articleIDs(articles)
-		for _, a := range articles {
-			if a.HasParent() {
-				allArticleIDs = append(allArticleIDs, a.ParentArticle.ID)
-			}
-		}
-		hits, err := s.store.YouTrackDocHits(ctx, allArticleIDs, session)
-		if err != nil {
-			return store.SearchPage{}, err
-		}
-		lane := []store.SearchResult{}
-		for _, article := range articles {
-			x, ok := hits[article.ID]
-			if !ok && article.HasParent() {
-				x, ok = hits[article.ParentArticle.ID]
-			}
-			if !ok {
-				continue
-			}
-			x.Snippet = excerpt(article.Content, article.Summary)
+		overflow = overflow || len(candidates) > limit
+		lane := make([]store.SearchResult, 0, len(docs))
+		for _, d := range docs {
+			x := d.hit
+			x.Snippet = excerpt(d.article.Content, d.article.Summary)
 			lane = append(lane, x)
 		}
-		rankDocLane(lane)
 		lanes = append(lanes, lane)
 	}
 	if scope == "all" {
@@ -288,20 +292,126 @@ func (s *Service) SearchPage(ctx context.Context, q, scope, session string, limi
 	return store.SearchPage{Results: merged, Partial: timedOut, TimedOut: timedOut}, nil
 }
 
-// docFetchLimit is how many articles the docs lane asks YouTrack for: three
-// times the page limit plus one, so the rerank has room to lift a decision or
-// policy doc above job copies. It is capped at searchMaxLimit+1, the most the
-// lane asked for before the rerank.
-func docFetchLimit(limit int) int {
-	return min(3*limit+1, searchMaxLimit+1)
+// laneFailure is one YouTrack call that did not answer. It is classified when
+// its own lane returns, so a timeout is read at the deadline that caused it.
+type laneFailure struct {
+	lane    string
+	reason  string
+	err     error
+	timeout bool
 }
 
-// rankDocLane reorders a docs lane by docRankTable, in place. The sort is
-// stable, so hits of one rank keep YouTrack's order.
-func rankDocLane(lane []store.SearchResult) {
-	sort.SliceStable(lane, func(i, j int) bool {
-		return docRank(lane[i].Key) < docRank(lane[j].Key)
+// failure classifies a lane's error as it returns. A lane is a timeout only
+// when the shared deadline had passed by then, or the call itself reports a
+// deadline; an HTTP error that came back before the deadline stays an upstream
+// failure, even if the other lane runs into the deadline later.
+func failure(yctx context.Context, lane string, err error) *laneFailure {
+	reason := searchFailureReason(yctx, err)
+	return &laneFailure{
+		lane:    lane,
+		reason:  reason,
+		err:     err,
+		timeout: reason == "timeout" || errors.Is(err, context.DeadlineExceeded),
+	}
+}
+
+// settleLanes logs every failed lane, then decides the page. An upstream error
+// fails the search whatever the other lane did. A deadline fails a single-lane
+// scope; scope all keeps the other lane's hits and reports timedOut.
+func settleLanes(ctx context.Context, scope string, failures []laneFailure) (bool, error) {
+	for _, f := range failures {
+		log.Printf("search.youtrack_error lane=%s reason=%s scope=%q err=%v", f.lane, f.reason, scope, f.err)
+	}
+	for _, f := range failures {
+		if !f.timeout {
+			return false, store.ErrSearchUnavailable
+		}
+	}
+	if len(failures) == 0 {
+		return false, nil
+	}
+	if scope != "all" || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return false, store.ErrSearchTimeout
+	}
+	return true, nil
+}
+
+// docHit is one docs-lane hit with the article it came from. The article's
+// content is loaded only for the hits a page shows.
+type docHit struct {
+	hit     store.SearchResult
+	article Article
+}
+
+// rankedDocHits maps the candidate articles to their documents, reranks them by
+// docRankTable (stable), and keeps the first limit+1, the most the lane ever
+// returned before the rerank.
+func (s *Service) rankedDocHits(ctx context.Context, candidates []Article, session string, limit int) ([]docHit, error) {
+	ids := articleIDs(candidates)
+	for _, a := range candidates {
+		if a.HasParent() {
+			ids = append(ids, a.ParentArticle.ID)
+		}
+	}
+	hits, err := s.store.YouTrackDocHits(ctx, ids, session)
+	if err != nil {
+		return nil, err
+	}
+	out := []docHit{}
+	for _, article := range candidates {
+		x, ok := hits[article.ID]
+		if !ok && article.HasParent() {
+			x, ok = hits[article.ParentArticle.ID]
+		}
+		if ok {
+			out = append(out, docHit{hit: x, article: article})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return docRank(out[i].hit.Key) < docRank(out[j].hit.Key)
 	})
+	if len(out) > limit+1 {
+		out = out[:limit+1]
+	}
+	return out, nil
+}
+
+// loadDocContent reads the content of each hit's article, for the excerpt. A
+// failed read leaves that excerpt on the article's summary. It returns the first
+// failure in hit order, classified as the articles lane.
+func (s *Service) loadDocContent(yctx context.Context, docs []docHit) *laneFailure {
+	failures := make([]*laneFailure, len(docs))
+	sem := make(chan struct{}, searchDocContentWorkers)
+	var wg sync.WaitGroup
+	for i := range docs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			a, err := s.client.GetArticle(yctx, docs[i].article.ID)
+			if err != nil {
+				failures[i] = failure(yctx, "articles", err)
+				return
+			}
+			docs[i].article.Content = a.Content
+		}()
+	}
+	wg.Wait()
+	for _, f := range failures {
+		if f != nil {
+			return f
+		}
+	}
+	return nil
+}
+
+// docFetchLimit is how many candidate articles the docs lane asks YouTrack for:
+// three times the page limit plus one, so the rerank has room to lift a
+// decision or policy doc above job copies. It is capped at searchMaxLimit+1,
+// the most the lane asked for before the rerank.
+func docFetchLimit(limit int) int {
+	return min(3*limit+1, searchMaxLimit+1)
 }
 
 // docRank is the rank of a document key in docRankTable.

@@ -118,8 +118,10 @@ type fakeSearchYT struct {
 	delay    time.Duration
 	oversize bool
 	// pathDelay overrides delay for one endpoint, e.g. "/api/issues", so one
-	// lane can be slow while the other answers at once.
-	pathDelay map[string]time.Duration
+	// lane can be slow while the other answers at once. pathStatus fails one
+	// endpoint with an HTTP status, with the other endpoints unaffected.
+	pathDelay  map[string]time.Duration
+	pathStatus map[string]int
 
 	mu      sync.Mutex
 	queries []string
@@ -140,6 +142,10 @@ func (y *fakeSearchYT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if status := y.pathStatus[r.URL.Path]; status != 0 {
+		http.Error(w, `{"error":"unavailable"}`, status)
+		return
+	}
 	if y.status != 0 {
 		http.Error(w, `{"error":"unavailable"}`, y.status)
 		return
@@ -149,22 +155,44 @@ func (y *fakeSearchYT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	top, _ := strconv.Atoi(r.URL.Query().Get("$top"))
-	switch r.URL.Path {
-	case "/api/issues":
+	switch {
+	case r.URL.Path == "/api/issues":
 		xs := y.issues
 		if top > 0 && len(xs) > top {
 			xs = xs[:top]
 		}
 		_ = json.NewEncoder(w).Encode(xs)
-	case "/api/articles":
+	case r.URL.Path == "/api/articles":
+		// Like YouTrack, content is returned only when the request asks for it.
 		xs := y.articles
 		if top > 0 && len(xs) > top {
 			xs = xs[:top]
 		}
+		if !strings.Contains(r.URL.Query().Get("fields"), "content") {
+			xs = withoutContent(xs)
+		}
 		_ = json.NewEncoder(w).Encode(xs)
+	case strings.HasPrefix(r.URL.Path, "/api/articles/"):
+		id := strings.TrimPrefix(r.URL.Path, "/api/articles/")
+		for _, a := range y.articles {
+			if a.ID == id {
+				_ = json.NewEncoder(w).Encode(a)
+				return
+			}
+		}
+		http.NotFound(w, r)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func withoutContent(xs []Article) []Article {
+	out := make([]Article, len(xs))
+	for i, a := range xs {
+		a.Content = ""
+		out[i] = a
+	}
+	return out
 }
 
 func (y *fakeSearchYT) recorded() []string {
@@ -573,12 +601,17 @@ func TestSearchAllEmptyTimedOutPageIsMarked(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	logs := captureLog(t)
 	page, err := svc.SearchPage(context.Background(), "nothing matches", "all", "", 20)
 	if err != nil {
 		t.Fatalf("scope all with no lane answering: %v", err)
 	}
 	if len(page.Results) != 0 || !page.Partial || !page.TimedOut {
 		t.Fatalf("page = %+v, want an empty page marked partial and timed_out", page)
+	}
+	// Both lanes missed the deadline; each one is logged, not just the first.
+	if out := logs.String(); !strings.Contains(out, "lane=issues reason=timeout") || !strings.Contains(out, "lane=articles reason=timeout") {
+		t.Fatalf("log = %q, want both timed-out lanes logged", out)
 	}
 }
 
@@ -649,6 +682,89 @@ func TestSearchDocsFetchesRoomForRerank(t *testing.T) {
 		if !x.Truncated {
 			t.Fatalf("row %+v of a truncated page lacks Truncated", x)
 		}
+	}
+}
+
+// The docs candidates are read without content, so the wider 3× candidate set
+// stays under the client's 4 MiB response cap however large the articles are.
+// A candidate request with content (61 × 100 KiB ≈ 6 MiB) would be refused as
+// oversize and fail the whole search; this test fails if that comes back.
+func TestSearchDocsCandidatesStayUnderResponseCap(t *testing.T) {
+	big := strings.Repeat("a", 100<<10)
+	articles := make([]Article, 0, 70)
+	mapped := map[string]string{}
+	for i := 1; i <= 70; i++ {
+		id := "101-" + strconv.Itoa(i)
+		articles = append(articles, Article{ID: id, Summary: "doc " + id, Content: big})
+		if i <= 25 {
+			mapped["design/bulk-"+strconv.Itoa(i)] = id
+		}
+	}
+	yt := &fakeSearchYT{articles: articles}
+	fs, svc := newSearchTest(t, yt, time.Second)
+	seedDocArticles(t, fs, mapped)
+
+	got, err := svc.Search(context.Background(), "bulk", "docs", "", 20)
+	if err != nil {
+		t.Fatalf("docs search with large articles: %v", err)
+	}
+	if len(got) != 20 {
+		t.Fatalf("rows = %d, want the limit of 20", len(got))
+	}
+	if len(got[0].Snippet) == 0 || !strings.HasPrefix(got[0].Snippet, "aaaa") {
+		t.Fatalf("snippet = %q, want the article's content", got[0].Snippet)
+	}
+}
+
+// Each failed lane is classified when it returns and logged. An HTTP error that
+// came back before the deadline is not relabelled a timeout by the other lane's
+// deadline, so the page fails as unavailable instead of partial.
+func TestSearchAllHTTPErrorIsNotLabelledTimeout(t *testing.T) {
+	yt := &fakeSearchYT{
+		issues:     []Issue{{ID: "2-1", Summary: "one"}},
+		articles:   []Article{{ID: "101-1", Summary: "doc one", Content: "body"}},
+		pathStatus: map[string]int{"/api/issues": http.StatusUnauthorized},
+		pathDelay:  map[string]time.Duration{"/api/articles": 2 * time.Second},
+	}
+	fs, svc := newSearchTest(t, yt, 100*time.Millisecond)
+	ctx := context.Background()
+	if err := fs.PutYouTrackProject(ctx, store.YouTrackProject{HKProject: "handoffkeep", ShortName: "HK"}); err != nil {
+		t.Fatal(err)
+	}
+	logs := captureLog(t)
+
+	_, err := svc.SearchPage(ctx, "one", "all", "", 20)
+	if !errors.Is(err, store.ErrSearchUnavailable) {
+		t.Fatalf("err = %v, want search_unavailable (the 401 is an upstream failure)", err)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "lane=issues reason=http_401") || !strings.Contains(out, "lane=articles reason=timeout") {
+		t.Fatalf("log = %q, want both lanes logged with their own reasons", out)
+	}
+}
+
+// A docs hit whose content read misses the deadline keeps its document, with
+// its summary as the excerpt, and the page is marked partial.
+func TestSearchAllContentTimeoutKeepsDocWithSummary(t *testing.T) {
+	yt := &fakeSearchYT{
+		articles:  []Article{{ID: "101-1", Summary: "doc one", Content: "body text"}},
+		pathDelay: map[string]time.Duration{"/api/articles/101-1": 2 * time.Second},
+	}
+	fs, svc := newSearchTest(t, yt, 150*time.Millisecond)
+	seedDocArticles(t, fs, map[string]string{"design/one": "101-1"})
+
+	page, err := svc.SearchPage(context.Background(), "one", "all", "", 20)
+	if err != nil {
+		t.Fatalf("scope all with a slow content read: %v", err)
+	}
+	if keys := searchKeys(page.Results); strings.Join(keys, ",") != "docs:design/one" {
+		t.Fatalf("keys = %v, want the doc kept", keys)
+	}
+	if got := page.Results[0].Snippet; got != "doc one" {
+		t.Fatalf("snippet = %q, want the summary fallback", got)
+	}
+	if !page.Partial || !page.TimedOut {
+		t.Fatalf("page = partial %v timed_out %v, want both set", page.Partial, page.TimedOut)
 	}
 }
 
