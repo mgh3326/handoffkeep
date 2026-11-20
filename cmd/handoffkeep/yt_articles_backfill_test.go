@@ -101,7 +101,8 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	}
 	// m1 and m5 are short missing documents of family note on rda, m2 a long
 	// one of the same family (its split waits on the family's root). u0 and u1
-	// are shared documents of family uncertain.
+	// are shared documents of family uncertain: one root-capable create per
+	// family and project, so u1 waits for u0's root.
 	m1 := put("note/rda/fresh", "fresh", &rdaTask)
 	m2 := put("note/rda/huge", strings.Repeat("line\n", 50*1024), &rdaTask)
 	m5 := put("note/rda/second", "second", &rdaTask)
@@ -155,12 +156,12 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	}
 
 	// A dry run (the default) plans every missing document, reads YouTrack
-	// and writes nothing. m5 waits on m1's root-capable create.
+	// and writes nothing. m5 and u1 wait on their family's root-capable create.
 	dry, err := ybfRun(t, "yt", "articles-backfill")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dry.Mode != "dry_run" || dry.Enqueued == nil || *dry.Enqueued != 4 || fake.writes != 0 || total() != 0 {
+	if dry.Mode != "dry_run" || dry.Enqueued == nil || *dry.Enqueued != 3 || fake.writes != 0 || total() != 0 {
 		t.Fatalf("dry run = mode %q, enqueued %v; %d writes, %d ops", dry.Mode, dry.Enqueued, fake.writes, total())
 	}
 	if a := ybfAction(t, dry, m1); a.Action != "enqueue_create" || a.Class != ytArticleMissing {
@@ -171,6 +172,9 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	}
 	if a := ybfAction(t, dry, m5); a.Action != "wait" || a.Reason != "family_root_pending" {
 		t.Errorf("m5 dry-run action = %+v, want wait for the family's pending root create", a)
+	}
+	if a := ybfAction(t, dry, u1); a.Action != "wait" || a.Reason != "family_root_pending" {
+		t.Errorf("u1 dry-run action = %+v, want wait for u0's pending root create", a)
 	}
 
 	// --apply --limit 1 prepares the first document's create and nothing more.
@@ -196,14 +200,17 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 		t.Fatalf("after --limit 1: m1's op targets %q, %d create ops for m1, %d ops in all", target, ops(create, m1), total())
 	}
 
-	// --apply prepares the rest: the split of m2 and the shared documents, and
-	// not m5, whose family's root create is still pending.
+	// --apply prepares the rest: the split of m2 and u0, and not m5 or u1,
+	// whose family's root create is still pending.
 	r, err = ybfRun(t, "yt", "articles-backfill", "--apply", "--by", "test:enqueue")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Enqueued == nil || *r.Enqueued != 3 {
-		t.Fatalf("apply enqueued %v, want 3", r.Enqueued)
+	if r.Enqueued == nil || *r.Enqueued != 2 {
+		t.Fatalf("apply enqueued %v, want 2", r.Enqueued)
+	}
+	if a := ybfAction(t, r, u1); a.Action != "wait" || a.Reason != "family_root_pending" {
+		t.Errorf("u1 action = %+v, want wait for u0's pending root create", a)
 	}
 	if a := ybfAction(t, r, m1); a.Action != "create_exists" {
 		t.Errorf("m1 on the second apply = %+v, want create_exists", a)
@@ -211,7 +218,7 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	if a := ybfAction(t, r, m2); a.Action != "split_prepared" {
 		t.Errorf("m2 action = %+v, want split_prepared", a)
 	}
-	if ops(create, m1) != 1 || ops(split, m2) != 1 || ops(create, u0) != 1 || ops(create, u1) != 1 || ops(create, m5) != 0 || total() != 4 {
+	if ops(create, m1) != 1 || ops(split, m2) != 1 || ops(create, u0) != 1 || ops(create, u1) != 0 || ops(create, m5) != 0 || total() != 3 {
 		t.Fatalf("after --apply: m1 %d, m2 split %d, u0 %d, u1 %d, m5 %d, %d ops in all", ops(create, m1), ops(split, m2), ops(create, u0), ops(create, u1), ops(create, m5), total())
 	}
 
@@ -226,7 +233,7 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Enqueued == nil || *r.Enqueued != 0 || total() != 4 {
+	if r.Enqueued == nil || *r.Enqueued != 0 || total() != 3 {
 		t.Fatalf("rerun enqueued %v, %d ops in all; want none", r.Enqueued, total())
 	}
 	if a := ybfAction(t, r, m2); a.Action != "split_exists" {
@@ -252,7 +259,7 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	if a := ybfAction(t, r, u2); a.Action != "wait" || a.Reason != "family_root_uncertain" {
 		t.Errorf("u2 action = %+v, want wait for the uncertain family root", a)
 	}
-	if ops(create, u2) != 0 || ops(create, u0) != 1 || total() != 4 {
+	if ops(create, u2) != 0 || ops(create, u0) != 1 || total() != 3 {
 		t.Fatalf("uncertain family: u2 has %d ops, u0 %d, %d in all", ops(create, u2), ops(create, u0), total())
 	}
 
@@ -262,7 +269,7 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	if r, err = ybfRun(t, "yt", "articles-backfill", "--apply", "--by", "test:enqueue"); err != nil {
 		t.Fatal(err)
 	}
-	if a := ybfAction(t, r, u3); a.Action != "create_prepared" || ops(create, u3) != 1 || total() != 5 {
+	if a := ybfAction(t, r, u3); a.Action != "create_prepared" || ops(create, u3) != 1 || total() != 4 {
 		t.Fatalf("u3 (rda project) = %+v with %d ops in all %d; want create_prepared", a, ops(create, u3), total())
 	}
 
