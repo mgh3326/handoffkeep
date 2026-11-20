@@ -655,6 +655,152 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		}
 	})
 
+	// hk 5273 (review of PR #511 r4615892383): a resumed send whose first
+	// read is answered 429 stays remote_unknown (a create of the op was
+	// sent) but is due no sooner than the remote's Retry-After, as the write
+	// path waits; then it completes the one family.
+	t.Run("429_on_the_resumed_read_waits_retry_after", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 3)
+		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: RateLimit, RetryAfter: time.Minute})
+		op := e.prepare()
+		e.drive()
+		e.wantState(op, ytwrite.StatePrepared, ytwrite.ReasonRateLimited)
+		e.clock.Advance(2 * time.Minute)
+		e.queueReads(&ytwrite.RemoteError{Status: http.StatusTooManyRequests, RetryAfter: 10 * time.Minute, Message: "slow down"})
+		e.drive()
+		got := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonRateLimited)
+		if wait := got.NextAttemptAt.Sub(e.clock.Now()); wait < 10*time.Minute {
+			t.Fatalf("due in %s, want the 10m Retry-After", wait)
+		}
+		reads := e.yt.Reads()
+		e.clock.Advance(5 * time.Minute)
+		e.drive()
+		if r := e.yt.Reads(); r != reads {
+			t.Fatalf("%d reads before Retry-After passed", r-reads)
+		}
+		e.clock.Advance(6 * time.Minute)
+		e.drive()
+		got = e.wantState(op, ytwrite.StateApplied, "")
+		e.wantOneFamily(op, got.YTResultID)
+	})
+
+	// hk 5273 (review of PR #511 r4615892399): every create succeeded and
+	// the final read is answered 429: remote_unknown rate_limited, not due
+	// before Retry-After, no create more; recovery then applies.
+	t.Run("429_on_the_final_read_waits_retry_after", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 2)
+		e.queueReads(&ytwrite.RemoteError{Status: http.StatusTooManyRequests, RetryAfter: 2 * time.Hour, Message: "slow down"})
+		op := e.prepare()
+		e.drive()
+		got := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonRateLimited)
+		if wait := got.NextAttemptAt.Sub(e.clock.Now()); wait != 2*time.Hour {
+			t.Fatalf("due in %s, want the 2h Retry-After", wait)
+		}
+		writes := len(e.yt.ArticleWrites())
+		e.clock.Advance(time.Hour)
+		e.drive()
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonRateLimited)
+		e.clock.Advance(time.Hour)
+		e.drive()
+		got = e.wantState(op, ytwrite.StateApplied, "")
+		e.wantOneFamily(op, got.YTResultID)
+		if w := len(e.yt.ArticleWrites()); w != writes {
+			t.Fatalf("%d creates after a complete family", w-writes)
+		}
+	})
+
+	// hk 5273 (review of PR #511 r4615892411): a part deleted after its own
+	// GET in the final read is not taken as present: the index's children
+	// are read again and differ, so the op is not applied; recovery makes
+	// the part again and applies one family.
+	t.Run("part_deleted_during_the_final_read_is_not_applied", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 3)
+		op := e.prepare()
+		var deleted string
+		e.yt.BeforeArticleCreate = func(_ context.Context, in ytwrite.ArticleCreate) {
+			if !strings.Contains(in.Content, ytwrite.PartMarker(op.ID, 3, 3)) {
+				return
+			}
+			e.yt.BeforeArticleCreate = nil
+			e.yt.BeforeReadArticle = func(id string) {
+				if p3 := e.partIDs(op, 3); len(p3) == 1 && id == p3[0] {
+					e.yt.BeforeReadArticle = nil
+					deleted = e.partIDs(op, 1)[0]
+					e.yt.DeleteArticle(deleted) // part 1 was read already
+				}
+			}
+		}
+		e.drive()
+		if deleted == "" {
+			t.Fatal("part 1 was never deleted")
+		}
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonUnverified)
+		e.clock.Advance(time.Hour)
+		e.drive()
+		got := e.wantState(op, ytwrite.StateApplied, "")
+		e.wantOneFamily(op, got.YTResultID)
+	})
+
+	// hk 5273 (review of PR #511 r4615892430): the remote deadline passes
+	// while part 2's create is marked, so its POST is never sent. That is a
+	// stopped step (definite), not an ambiguous create: recovery makes
+	// part 2 and applies, instead of holding outcome_ambiguous forever.
+	t.Run("deadline_during_a_mark_stops_before_the_post", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 3)
+		e.dispatch = 200 * time.Millisecond
+		hook := &markHook{splitLedger: e.ledger.(splitLedger), step: 2, after: func() { time.Sleep(300 * time.Millisecond) }}
+		e.restart(hook)
+		op := e.prepare()
+		e.drive()
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonPartialWrite)
+		if n := e.part(op, 2); n != 0 {
+			t.Fatalf("part 2 made %d times", n)
+		}
+		for _, w := range e.yt.ArticleWrites() {
+			if strings.Contains(w.Content, ytwrite.PartMarker(op.ID, 2, 3)) {
+				t.Fatal("part 2's POST was sent on an expired deadline")
+			}
+		}
+		e.restart(e.ledger)
+		e.clock.Advance(time.Hour)
+		e.drive()
+		got := e.wantState(op, ytwrite.StateApplied, "")
+		e.wantOneFamily(op, got.YTResultID)
+	})
+
+	// hk 5273 (review of PR #511 r4615892443): the final read has its own
+	// budget. GETs that each fit DispatchTimeout but together do not still
+	// verify the family; GETs past that budget leave the op remote_unknown
+	// unverified with no create more, and a later pass applies.
+	t.Run("slow_reads_verify_within_their_own_budget", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 2)
+		e.dispatch = 200 * time.Millisecond
+		e.restart(e.ledger)
+		slow := 120 * time.Millisecond // 4 GETs (index, 2 parts, index): 480ms > 200ms
+		e.yt.BeforeReadArticle = func(string) { time.Sleep(slow) }
+		op := e.prepare()
+		e.drive()
+		got := e.wantState(op, ytwrite.StateApplied, "")
+		e.wantOneFamily(op, got.YTResultID)
+
+		e2 := newSplitEnv(t, nl, 2)
+		e2.dispatch = 200 * time.Millisecond
+		e2.restart(e2.ledger)
+		e2.yt.BeforeReadArticle = func(string) { time.Sleep(300 * time.Millisecond) } // 4 × 300ms > 4 × 200ms
+		op2 := e2.prepare()
+		e2.drive()
+		e2.wantState(op2, ytwrite.StateRemoteUnknown, ytwrite.ReasonUnverified)
+		writes := len(e2.yt.ArticleWrites())
+		e2.yt.BeforeReadArticle = func(string) { time.Sleep(slow) }
+		e2.clock.Advance(time.Hour)
+		e2.drive()
+		got = e2.wantState(op2, ytwrite.StateApplied, "")
+		e2.wantOneFamily(op2, got.YTResultID)
+		if w := len(e2.yt.ArticleWrites()); w != writes {
+			t.Fatalf("%d creates to verify a complete family", w-writes)
+		}
+	})
+
 	// The operator's word on a held op: not applied rejects it and leaves
 	// the family; nothing is sent.
 	t.Run("operator_not_applied_rejects", func(t *testing.T) {
@@ -687,6 +833,8 @@ type splitEnv struct {
 	parts  int
 	// family is the document's family (its parent root), "" for none.
 	family string
+	// dispatch is the protocol's DispatchTimeout (30s when zero).
+	dispatch time.Duration
 }
 
 const (
@@ -727,7 +875,11 @@ func newSplitEnvBody(t *testing.T, nl NewSplitLedger, body string) *splitEnv {
 
 func (e *splitEnv) restart(l ytwrite.Ledger) {
 	e.t.Helper()
-	p, err := ytwrite.New(ytwrite.Config{Ledger: l, Remote: e.yt, Now: e.clock.Now, DispatchTimeout: 30 * time.Second, StaleAfter: time.Minute})
+	dispatch := e.dispatch
+	if dispatch == 0 {
+		dispatch = 30 * time.Second
+	}
+	p, err := ytwrite.New(ytwrite.Config{Ledger: l, Remote: e.yt, Now: e.clock.Now, DispatchTimeout: dispatch, StaleAfter: time.Minute})
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -846,6 +998,23 @@ func (e *splitEnv) wantOneFamily(op ytwrite.Op, index string) {
 	if strings.Join(chunks, "") != ytwrite.EscapeArticleBody(e.body) {
 		e.t.Fatal("the parts do not hold the body")
 	}
+}
+
+// markHook runs before, after each MarkSplitStep of step (the plan's index):
+// a ledger whose mark is slow.
+type markHook struct {
+	splitLedger
+	step  int
+	after func()
+}
+
+func (m *markHook) MarkSplitStep(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, step int, index string) error {
+	err := m.splitLedger.MarkSplitStep(ctx, now, id, f, step, index)
+	if h := m.after; h != nil && step == m.step {
+		m.after = nil
+		h()
+	}
+	return err
 }
 
 // splitLedger is a ledger with the split side.

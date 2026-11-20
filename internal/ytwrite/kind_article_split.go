@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -106,8 +108,9 @@ func RenderSplitIndex(actor string, at time.Time, opID int64, summary string, n 
 
 // CheckArticleSplit explains why a long document's split request cannot be
 // sent: the article request's own checks (CheckArticle) without its size
-// bound, a body that does need a split, and no legacy article (a document the
-// legacy sync wrote is never created again).
+// bound, a body that does need a split, no legacy article (a document the
+// legacy sync wrote is never created again), and an index that fits one
+// article (hk 5273, review of PR #511 r4615892346).
 func CheckArticleSplit(req ArticleRequest) error {
 	if !NeedsSplit(req.Body) {
 		return fmt.Errorf("%w: document body is within %d bytes: not split", ErrInvalid, MaxArticleBytes)
@@ -123,7 +126,22 @@ func CheckArticleSplit(req ArticleRequest) error {
 	if !utf8.ValidString(req.Body) || strings.ContainsRune(req.Body, 0) {
 		return fmt.Errorf("%w: document body is not valid UTF-8 text without NUL", ErrInvalid)
 	}
+	if n, size := splitIndexBound(req); size > ArticlePartMaxBytes {
+		return fmt.Errorf("%w: the index of %d parts would be %d bytes, over the %d-byte article bound", ErrInvalid, n, size, ArticlePartMaxBytes)
+	}
 	return nil
+}
+
+// splitIndexBound is the number of parts req's body splits into and the most
+// bytes its rendered index can take: the op id and time the op will carry
+// are not known yet, so it renders with the longest id and a time of fixed
+// width (ProvenanceTimeLayout). The index lists one summary per part, so a
+// body of many parts with a long multi-byte summary can outgrow an article
+// though every part fits; such a document is refused before its op is
+// stored, never sent.
+func splitIndexBound(req ArticleRequest) (parts, size int) {
+	n := len(SplitArticleBody(req.Body))
+	return n, len(RenderSplitIndex(req.Actor, time.Time{}, math.MaxInt64, req.Summary, n))
 }
 
 // ArticleSplitOp is the op a long document's split stores: one per document
@@ -286,16 +304,9 @@ func (k articleSplit) readFamily(ctx context.Context, ar ArticleRemote, op Op, d
 	var index RemoteArticle
 	switch {
 	case known != "":
-		got, err := ar.ReadArticle(ctx, known)
-		var re *RemoteError
-		if errors.As(err, &re) && re.Status == http.StatusNotFound {
-			return r, &HoldError{Reason: ReasonIndexGone, Detail: "index article " + known + " is gone"}
-		}
+		got, err := readSplitIndex(ctx, ar, op, d, known, true)
 		if err != nil {
-			return r, fmt.Errorf("index %s: %w", known, err)
-		}
-		if got.ID != known || got.Summary != d.p.Summary || got.Content != d.index || (got.ProjectID != "" && got.ProjectID != op.YTTargetID) {
-			return r, &HoldError{Reason: ReasonMarkerMismatch, Detail: "index article " + known + " does not hold the op's rendered index"}
+			return r, err
 		}
 		index = got
 	case search:
@@ -324,12 +335,9 @@ func (k articleSplit) readFamily(ctx context.Context, ar ArticleRemote, op Op, d
 			return r, nil
 		}
 		// The search returns no children: read the index directly.
-		got, err := ar.ReadArticle(ctx, exact[0])
+		got, err := readSplitIndex(ctx, ar, op, d, exact[0], false)
 		if err != nil {
-			return r, fmt.Errorf("index %s: %w", exact[0], err)
-		}
-		if got.ID != exact[0] || got.Summary != d.p.Summary || got.Content != d.index || (got.ProjectID != "" && got.ProjectID != op.YTTargetID) {
-			return r, &HoldError{Reason: ReasonMarkerMismatch, Detail: "index article " + exact[0] + " does not hold the op's rendered index"}
+			return r, err
 		}
 		index = got
 	default:
@@ -364,7 +372,49 @@ func (k articleSplit) readFamily(ctx context.Context, ar ArticleRemote, op Op, d
 			r.parts[i] = child
 		}
 	}
+	// The children were read one by one: a part deleted after its read, or
+	// a child added after the list was read, would leave a read of a family
+	// that never existed at one moment. The index is read again and its
+	// children must be the ones just read, else the read decides nothing
+	// (hk 5273, review of PR #511 r4615892411; S3, S5).
+	again, err := readSplitIndex(ctx, ar, op, d, index.ID, true)
+	if err != nil {
+		return r, err
+	}
+	if !slices.Equal(sortedIDs(again.ChildIDs), sortedIDs(index.ChildIDs)) {
+		return r, fmt.Errorf("%w: index %s children %v, then %v", errFamilyChanged, index.ID, index.ChildIDs, again.ChildIDs)
+	}
 	return r, nil
+}
+
+// errFamilyChanged is a family read whose index's children changed while
+// it was read: nothing is planned or applied from it; the op is read again
+// later (remote_unknown, or not sent when nothing was).
+var errFamilyChanged = errors.New("the family changed during its read")
+
+func sortedIDs(ids []string) []string {
+	out := slices.Clone(ids)
+	slices.Sort(out)
+	return out
+}
+
+// readSplitIndex reads id directly and checks it is op's index: in the op's
+// project, with the op's summary and exact rendered index, else a
+// *HoldError. A 404 is ReasonIndexGone when the index was known to exist
+// (gone), else the remote's error.
+func readSplitIndex(ctx context.Context, ar ArticleRemote, op Op, d splitDoc, id string, known bool) (RemoteArticle, error) {
+	got, err := ar.ReadArticle(ctx, id)
+	var re *RemoteError
+	if known && errors.As(err, &re) && re.Status == http.StatusNotFound {
+		return got, &HoldError{Reason: ReasonIndexGone, Detail: "index article " + id + " is gone"}
+	}
+	if err != nil {
+		return got, fmt.Errorf("index %s: %w", id, err)
+	}
+	if got.ID != id || got.Summary != d.p.Summary || got.Content != d.index || (got.ProjectID != "" && got.ProjectID != op.YTTargetID) {
+		return got, &HoldError{Reason: ReasonMarkerMismatch, Detail: "index article " + id + " does not hold the op's rendered index"}
+	}
+	return got, nil
 }
 
 // splitParent is the parent the index goes under, read only: the amended
