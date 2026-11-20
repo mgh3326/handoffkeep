@@ -249,10 +249,6 @@ type ytAuditDocProject struct {
 func (a *ytAuditor) documents(ctx context.Context, bucket string) (*ytAuditDocuments, error) {
 	out := &ytAuditDocuments{Unbound: ytArticlesClass{DocumentIDs: []int64{}}, ytAuditDocExceptions: newYTAuditDocExceptions(), Projects: []*ytAuditDocProject{}}
 	byProject := map[string]*ytAuditDocProject{}
-	states, err := a.st.YTArticleFamilies(ctx, a.tenant)
-	if err != nil {
-		return nil, err
-	}
 	var after int64
 	for {
 		docs, err := a.st.YTArticleDocs(ctx, bucket, after, ytArticleDocPage)
@@ -276,8 +272,16 @@ func (a *ytAuditor) documents(ctx context.Context, bucket string) (*ytAuditDocum
 				p.Unbound.add(d.DocumentID)
 			}
 			class := store.YTArticleExceptionOf(d, a.tenant)
-			if a.split && class == store.YTArticleExceptionNotUpdated && store.YTArticleWaitingRoot(d, states.Recorded) {
-				class = store.YTArticleWaitingFamilyRoot
+			if class == store.YTArticleExceptionNotUpdated && a.split && a.families && d.BoundTenant == "" {
+				// A long document the split is waiting to write on its family's
+				// root (hk 5265): the store's rule, the one the backfill applies.
+				waits, err := a.st.YTArticleRootWaits(ctx, a.tenant, a.buckets, d.DocumentID)
+				if err != nil {
+					return nil, err
+				}
+				if waits {
+					class = store.YTArticleWaitingFamilyRoot
+				}
 			}
 			out.add(class, d.DocumentID)
 			p.add(class, d.DocumentID)
@@ -321,7 +325,12 @@ type ytAuditor struct {
 	sleep func(ctx context.Context, d time.Duration) error
 	// split is HANDOFFKEEP_YT_ARTICLE_SPLIT: with it on, a long document
 	// waiting on its family's root is shown as waiting_family_root (hk 5265).
-	split bool
+	// families is set when the schema has yt_family_roots (the family
+	// migration), and buckets are the synthetic buckets' YouTrack projects
+	// (read only with split and families on).
+	split    bool
+	families bool
+	buckets  map[string]store.YTArticleProject
 }
 
 // errYTAuditStop ends the run: a read the server will not take for longer
@@ -733,7 +742,25 @@ func youtrackAuditCmd(args []string, out io.Writer) error {
 	if err != nil {
 		return exitCodeError{code: youtrackExitConfig, err: err}
 	}
-	a := &ytAuditor{st: st, remote: remote, tenant: remote.Tenant(), botID: me.ID, enqueue: *enqueue, toPG: toPG, articles: articles, split: split}
+	// The family roots are read only where the waiting class can appear: with
+	// the split flag on and the family migration applied (a schema without it
+	// is audited without the class, as one without the bindings is without the count).
+	families, err := st.MigrationApplied(openCtx, store.YTFamilyRootsMigration)
+	if err != nil {
+		return err
+	}
+	var buckets map[string]store.YTArticleProject
+	if split && families && articles {
+		resolved, err := ytArticleBuckets(openCtx, client)
+		if err != nil {
+			return fmt.Errorf("resolve the article projects: %w", err)
+		}
+		buckets = map[string]store.YTArticleProject{}
+		for k, b := range resolved {
+			buckets[k] = store.YTArticleProject{ID: b.ID, ShortName: b.ShortName}
+		}
+	}
+	a := &ytAuditor{st: st, remote: remote, tenant: remote.Tenant(), botID: me.ID, enqueue: *enqueue, toPG: toPG, articles: articles, split: split, families: families, buckets: buckets}
 	report, err := a.run(context.Background(), *project, *task, *limit)
 	if err != nil {
 		return err

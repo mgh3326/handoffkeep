@@ -527,8 +527,12 @@ func (a *ytArticler) run(ctx context.Context, bucket, bindBy string) (ytArticles
 			}
 			var act *ytArticleAction
 			if a.backfill && (got.class == ytArticleMatched || got.class == ytArticleSHADiffers || got.class == ytArticleMissing) {
-				planned := a.planned(d, got.class)
-				act = &planned
+				planned, err := a.planned(tctx, d, got.class)
+				if err != nil {
+					got = ytArticleResult{class: ytArticleError, detail: err.Error()}
+				} else {
+					act = &planned
+				}
 			}
 			if bindBy != "" && (got.class == ytArticleMatched || got.class == ytArticleSHADiffers) {
 				_, err := a.st.AddYTArticleBinding(tctx, got.binding, d.YTArticleCandidate)
@@ -608,46 +612,64 @@ func (a *ytArticler) run(ctx context.Context, bucket, bindBy string) (ytArticles
 }
 
 // planned is a missing or verified document's action in a dry run, and the
-// intent an --apply run then carries out (enqueue fills in the store's outcome).
-// A long document waits when the split flag is off; with it on it is enqueued
-// even while its family has no root, and shows waiting_family_root, because
-// the split creates no root and waits until a single-article create makes one
-// (S13). A short one's create makes the family's root when there is none.
-func (a *ytArticler) planned(d store.YTArticleDoc, class string) ytArticleAction {
+// intent an --apply run then carries out (enqueue fills in the store's
+// outcome). A long document waits when the split flag is off; with it on it is
+// enqueued even while its family has no root on its project, and shows
+// waiting_family_root, because the split creates no root and waits until a
+// single-article create makes one (S13). The waiting rule is the store's
+// (YTArticleRootWaits), the same one the audit and the authority refusal use.
+func (a *ytArticler) planned(ctx context.Context, d store.YTArticleDoc, class string) (ytArticleAction, error) {
 	act := ytArticleAction{DocumentID: d.DocumentID, Project: d.Bucket, Class: class}
 	if class != ytArticleMissing {
 		act.Action = "bind"
-		return act
+		return act, nil
 	}
 	family := store.YTArticleFamilyOf(d.Key)
-	long := store.YTArticleSplit(d.BodyBytes)
-	_, _, missing := a.target(d.YTArticleCandidate)
+	_, target, missing := a.target(d.YTArticleCandidate)
 	switch {
 	case !a.docsOn:
 		act.Action, act.Reason = "wait", "docs_mode_off"
 	case missing != "":
 		act.Action, act.Reason = "wait", "no_project"
-	case family != "" && a.families.Uncertain[family] && !a.families.Recorded[family]:
+	case family != "" && a.families.Uncertain(target, family):
 		act.Action, act.Reason = "wait", "family_root_uncertain"
-	case long && !a.splitOn:
+	case store.YTArticleSplit(d.BodyBytes) && !a.splitOn:
 		act.Action, act.Reason = "wait", "split_flag_off"
-	case long:
+	case store.YTArticleSplit(d.BodyBytes):
+		waits, err := a.st.YTArticleRootWaits(ctx, a.tenant, a.projects(), d.DocumentID)
+		if err != nil {
+			return act, err
+		}
 		act.Action = "enqueue_split"
-		if family != "" && !a.families.Recorded[family] {
+		if waits {
 			act.Reason = store.YTArticleWaitingFamilyRoot
 		}
 	default:
 		act.Action = "enqueue_create"
 	}
-	return act
+	return act, nil
 }
 
-// enqueue prepares a missing document's op (store.PrepareYTArticleBackfill)
-// when the plan says so: under --apply it is the store's outcome, and in a dry
-// run the planned enqueue counts toward --limit. It stops at --limit enqueued
-// ops, and a document the plan waits on is left as planned.
+// enqueue prepares a missing document's op when the plan says so. A document
+// that already has its op adds nothing and is reported as exists, whatever
+// the limit; --limit counts only the ops a run would add (dry run) or added
+// (apply). Under --apply the store decides (PrepareYTArticleBackfill) against
+// the candidate verified here: its bucket and project.
 func (a *ytArticler) enqueue(ctx context.Context, d store.YTArticleDoc, act *ytArticleAction) error {
 	if act == nil || !strings.HasPrefix(act.Action, "enqueue_") {
+		return nil
+	}
+	has, err := a.st.YTArticleHasOp(ctx, d.DocumentID)
+	if err != nil {
+		return err
+	}
+	if has {
+		if act.Action == "enqueue_split" {
+			act.Action = "split_exists"
+		} else {
+			act.Action = "create_exists"
+		}
+		act.Reason = ""
 		return nil
 	}
 	if a.limit > 0 && a.enqueued >= a.limit {
@@ -658,7 +680,8 @@ func (a *ytArticler) enqueue(ctx context.Context, d store.YTArticleDoc, act *ytA
 		a.enqueued++
 		return nil
 	}
-	outcome, err := a.st.PrepareYTArticleBackfill(ctx, d.DocumentID, time.Now().UTC())
+	_, target, _ := a.target(d.YTArticleCandidate)
+	outcome, err := a.st.PrepareYTArticleBackfill(ctx, d.DocumentID, time.Now().UTC(), store.YTArticleEnqueueTarget{Bucket: d.Bucket, ProjectID: target})
 	if err != nil {
 		return err
 	}
@@ -667,6 +690,16 @@ func (a *ytArticler) enqueue(ctx context.Context, d store.YTArticleDoc, act *ytA
 		a.enqueued++
 	}
 	return nil
+}
+
+// projects is the synthetic buckets' YouTrack projects as the store's gate
+// takes them.
+func (a *ytArticler) projects() map[string]store.YTArticleProject {
+	out := map[string]store.YTArticleProject{}
+	for k, b := range a.buckets {
+		out[k] = store.YTArticleProject{ID: b.ID, ShortName: b.ShortName}
+	}
+	return out
 }
 
 // ytArticleBuckets resolves each synthetic bucket's YouTrack project by the
@@ -777,6 +810,17 @@ func youtrackArticlesCmd(args []string, out io.Writer, backfill bool) error {
 		}
 		if !applied {
 			return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("the database lacks migration %s: deploy the release that adds it first; the preflight never migrates", store.YTArticleBindingsMigration)}
+		}
+		if backfill {
+			// The dry run reads the family roots (waiting_family_root,
+			// family_root_uncertain), so it needs their migration too.
+			families, err := st.MigrationApplied(openCtx, store.YTFamilyRootsMigration)
+			if err != nil {
+				return err
+			}
+			if !families {
+				return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("the database lacks migration %s: deploy the release that adds it first; a dry run never migrates", store.YTFamilyRootsMigration)}
+			}
 		}
 	}
 	bucketCtx, cancelBucket := context.WithTimeout(context.Background(), ytCommentsGetTimeout)

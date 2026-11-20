@@ -1227,12 +1227,12 @@ const ytArticlesUnwrittenMax = 10
 // is counted too, as waiting_family_root (hk 5265 item 4): the split waits on
 // that root, and it is not an op's work (its op is prepared but cannot send).
 // waiting is how many of the count are that class.
-func ytArticlesUnwrittenTx(ctx context.Context, tx transaction, tenant string, split bool) (n int, ids []int64, waiting int, err error) {
-	n, ids, err = ytArticlesUnwrittenCountTx(ctx, tx, tenant)
-	if err != nil || !split {
+func ytArticlesUnwrittenTx(ctx context.Context, tx transaction, g ytDocsGate) (n int, ids []int64, waiting int, err error) {
+	n, ids, err = ytArticlesUnwrittenCountTx(ctx, tx, g.tenant)
+	if err != nil || !g.split {
 		return n, ids, 0, err
 	}
-	waits, err := ytArticlesWaitingRootTx(ctx, tx, tenant)
+	waits, err := ytArticlesWaitingRootTx(ctx, tx, g)
 	if err != nil {
 		return 0, nil, 0, err
 	}

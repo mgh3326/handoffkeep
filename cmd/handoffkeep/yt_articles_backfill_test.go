@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -182,8 +183,14 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 	if r.Enqueued == nil || *r.Enqueued != 0 || total() != 4 {
 		t.Fatalf("rerun enqueued %v, %d ops in all; want none", r.Enqueued, total())
 	}
-	if a := ybfAction(t, r, m2); a.Action != "create_exists" {
-		t.Errorf("m2 on the rerun = %+v, want create_exists", a)
+	if a := ybfAction(t, r, m2); a.Action != "split_exists" {
+		t.Errorf("m2 on the rerun = %+v, want split_exists", a)
+	}
+
+	// --limit counts only the ops a run would add: with every op present a
+	// dry run with --limit 1 plans none and waits on none.
+	if dry, err := ybfRun(t, "yt", "articles-backfill", "--limit", "1"); err != nil || *dry.Enqueued != 0 || ybfAction(t, dry, m1).Action != "create_exists" || ybfAction(t, dry, m2).Action != "split_exists" {
+		t.Fatalf("dry run --limit 1 with every op present = enqueued %v, %v; %+v", dry.Enqueued, err, dry.Actions)
 	}
 
 	// A family whose root create is uncertain (remote_unknown, no root
@@ -204,21 +211,50 @@ func TestArticlesBackfillPlansThenEnqueues(t *testing.T) {
 		t.Fatalf("uncertain family: u2 has %d ops, u0 %d, %d in all", ops(create, u2), ops(create, u0), total())
 	}
 
-	// The audit shows the long document waiting on its root, not as an
-	// exception, while the split flag is on; with it off it is not_updated.
-	a := &ytAuditor{st: st, tenant: tenant, articles: true, split: true}
+	// The hold is per project: a document of the same family on the rda
+	// project is not held by the shared project's uncertain root.
+	u3 := put("uncertain/rda-doc", "rda doc", &task.ID)
+	if r, err = ybfRun(t, "yt", "articles-backfill", "--apply", "--by", "test:enqueue"); err != nil {
+		t.Fatal(err)
+	}
+	if a := ybfAction(t, r, u3); a.Action != "create_prepared" || ops(create, u3) != 1 || total() != 5 {
+		t.Fatalf("u3 (rda project) = %+v with %d ops in all %d; want create_prepared", a, ops(create, u3), total())
+	}
+
+	// The store refuses a candidate that no longer resolves where it was
+	// verified: m3 now lists in rda, not in the shared bucket it was verified in.
+	m3 := put("note/rda/moved", "moved", &task.ID)
+	st.SetYTDocsMode(store.YTDocsOn, tenant, map[string]store.YTArticleProject{
+		store.YTArticleBucketShared:     {ID: "0-3", ShortName: "SHRDOC"},
+		store.YTArticleBucketUnassigned: {ID: "0-1", ShortName: "HK"},
+	})
+	st.SetYTArticleSplit(true)
+	if got, err := st.PrepareYTArticleBackfill(ctx, m3, time.Now().UTC(), store.YTArticleEnqueueTarget{Bucket: store.YTArticleBucketShared, ProjectID: "0-3"}); err != nil || got != "candidate_changed" || ops(create, m3) != 0 {
+		t.Fatalf("a moved candidate = %q, %v with %d ops; want candidate_changed and no op", got, err, ops(create, m3))
+	}
+
+	// A long document from before the import, unbound, waits on the same root:
+	// the backfill splits it too, so the audit and the authority count it.
+	m4 := put("note/rda/old-huge", strings.Repeat("line\n", 50*1024), &task.ID)
+	if _, err := conn.Exec(ctx, `UPDATE documents SET created_at=$1 WHERE id=$2`, store.YTImportEndedAt.Add(-time.Hour), m4); err != nil {
+		t.Fatal(err)
+	}
+
+	// The audit shows the long documents waiting on their root, not as an
+	// exception, while the split flag is on; with it off they are not_updated.
+	a := &ytAuditor{st: st, tenant: tenant, articles: true, split: true, families: true}
 	docs, err := a.documents(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(docs.WaitingFamilyRoot.DocumentIDs, []int64{m2}) || docs.NotUpdated.Count != 0 {
+	if !slices.Equal(docs.WaitingFamilyRoot.DocumentIDs, []int64{m2, m4}) || docs.NotUpdated.Count != 0 {
 		t.Fatalf("audit with the split on = waiting %v, not_updated %d", docs.WaitingFamilyRoot.DocumentIDs, docs.NotUpdated.Count)
 	}
 	a.split = false
 	if docs, err = a.documents(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(docs.NotUpdated.DocumentIDs, []int64{m2}) || docs.WaitingFamilyRoot.Count != 0 {
+	if !slices.Equal(docs.NotUpdated.DocumentIDs, []int64{m2, m4}) || docs.WaitingFamilyRoot.Count != 0 {
 		t.Fatalf("audit with the split off = not_updated %v, waiting %d", docs.NotUpdated.DocumentIDs, docs.WaitingFamilyRoot.Count)
 	}
 }

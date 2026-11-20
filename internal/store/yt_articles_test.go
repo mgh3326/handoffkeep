@@ -578,7 +578,7 @@ func ytartUnwritten(t *testing.T, s *Store) int {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(t.Context())
-	n, _, _, err := ytArticlesUnwrittenTx(t.Context(), pgTransaction{tx}, ytcTenant, false)
+	n, _, _, err := ytArticlesUnwrittenTx(t.Context(), pgTransaction{tx}, ytDocsGate{tenant: ytcTenant})
 	if err != nil {
 		t.Fatal(err)
 	}
