@@ -284,6 +284,43 @@ func TestYTArticleCreateDispatchFencedByFamily(t *testing.T) {
 		t.Fatal(err)
 	}
 	claim(b.ID, ytwrite.ClaimClaimed)
+
+	// The reverse order: a newer create already in flight (a previous release
+	// dispatched it while the older one was deferred) holds the older one.
+	older := ytartPut(t, s, "famrev/older.md", "older", nil)
+	newer := ytartPut(t, s, "famrev/newer.md", "newer", nil)
+	o := ytartQueuedCreate(t, s, older, "famrev/older.md")
+	n := ytartQueuedCreate(t, s, newer, "famrev/newer.md")
+	now = time.Now().UTC()
+	if _, err := s.pool.Exec(ctx, `UPDATE yt_write_ops SET next_attempt_at = $2 WHERE id = $1`, o.ID, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE yt_write_ops SET next_attempt_at = $2 WHERE id = $1`, n.ID, now.Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, outcome, err := l.Claim(ctx, now, o.ID); err != nil || outcome != ytwrite.ClaimNotDue {
+		t.Fatalf("claim the deferred older create = %v, %v; want not_due", outcome, err)
+	}
+	// The newer one cannot be claimed past the prepared older one either: put
+	// it in flight as the previous release did.
+	if _, err := s.pool.Exec(ctx, `UPDATE yt_write_ops SET state = 'dispatched', dispatched_at = now() WHERE id = $1`, n.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE yt_write_ops SET next_attempt_at = $2 WHERE id = $1`, o.ID, now.Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	claim(o.ID, ytwrite.ClaimHeld)
+	if _, err := l.MarkUnknown(ctx, now, n.ID, now.Add(time.Hour), ytwrite.ReasonTransport, "lost"); err != nil {
+		t.Fatal(err)
+	}
+	if d := due(); d[o.ID] {
+		t.Fatalf("due %v lists the older create behind a remote_unknown newer one", d)
+	}
+	claim(o.ID, ytwrite.ClaimHeld)
+	if err := s.YTWriteLedger().RecordFamilyRoot(ctx, ytcTenant, ytartShared, "famrev", "3-701", n.ID); err != nil {
+		t.Fatal(err)
+	}
+	claim(o.ID, ytwrite.ClaimClaimed)
 }
 
 // The read-only requeue (hk 5506) does not revive a rejected root-capable

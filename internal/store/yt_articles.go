@@ -149,8 +149,11 @@ func init() {
 //
 // A root-capable create (a parent_family in its payload) is also fenced at
 // dispatch (hk 5761, S1): it is admitted only once its family's root is
-// recorded on its project, or while no older root-capable create of the same
-// tenant, project and family is unresolved. Preparation keeps one such create
+// recorded on its project, or while no other root-capable create of the same
+// tenant, project and family is in flight (dispatched or remote_unknown,
+// whatever its id: a previous release could dispatch a newer one first) and
+// no older one is prepared (the id picks one among prepared creates).
+// Preparation keeps one such create
 // open per family (ytArticleFamilyGateTx); the fence covers creates queued
 // before that rule (a previous release could queue two), so the second cannot
 // send while the first is in flight or remote_unknown and search a stale view
@@ -166,7 +169,8 @@ func ytArticleCreateGateSQL(s *Store) string {
 			OR EXISTS (SELECT 1 FROM yt_family_roots r
 				WHERE r.tenant = o.tenant AND r.project_id = o.yt_target_id AND r.family = o.payload->>'parent_family')
 			OR NOT EXISTS (SELECT 1 FROM yt_write_ops f
-				WHERE f.entity_kind = 'document' AND f.state NOT IN ('applied','rejected') AND f.id < o.id
+				WHERE f.entity_kind = 'document' AND f.state NOT IN ('applied','rejected') AND f.id <> o.id
+				AND (f.state IN ('dispatched','remote_unknown') OR f.id < o.id)
 				AND f.principal = o.principal AND f.kind = o.kind AND f.tenant = o.tenant AND f.yt_target_id = o.yt_target_id
 				AND f.payload->>'parent_family' = o.payload->>'parent_family'))`,
 		`o.entity_kind = 'document' AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b
@@ -176,7 +180,8 @@ func ytArticleCreateGateSQL(s *Store) string {
 				WHERE r.tenant = o.tenant AND r.project_id = o.yt_target_id
 				AND r.family = JSON_UNQUOTE(JSON_EXTRACT(o.payload, '$.parent_family')) COLLATE utf8mb4_0900_bin)
 			OR NOT EXISTS (SELECT 1 FROM yt_write_ops f
-				WHERE f.entity_kind = 'document' AND f.state NOT IN ('applied','rejected') AND f.id < o.id
+				WHERE f.entity_kind = 'document' AND f.state NOT IN ('applied','rejected') AND f.id <> o.id
+				AND (f.state IN ('dispatched','remote_unknown') OR f.id < o.id)
 				AND f.principal = o.principal AND f.kind = o.kind AND f.tenant = o.tenant AND f.yt_target_id = o.yt_target_id
 				AND JSON_UNQUOTE(JSON_EXTRACT(f.payload, '$.parent_family')) COLLATE utf8mb4_0900_bin = JSON_UNQUOTE(JSON_EXTRACT(o.payload, '$.parent_family')) COLLATE utf8mb4_0900_bin))`)
 }
