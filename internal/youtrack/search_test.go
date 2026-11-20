@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -116,6 +117,9 @@ type fakeSearchYT struct {
 	status   int
 	delay    time.Duration
 	oversize bool
+	// pathDelay overrides delay for one endpoint, e.g. "/api/issues", so one
+	// lane can be slow while the other answers at once.
+	pathDelay map[string]time.Duration
 
 	mu      sync.Mutex
 	queries []string
@@ -125,9 +129,13 @@ func (y *fakeSearchYT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	y.mu.Lock()
 	y.queries = append(y.queries, r.URL.Path+"?"+r.URL.Query().Get("query"))
 	y.mu.Unlock()
-	if y.delay > 0 {
+	delay := y.delay
+	if d, ok := y.pathDelay[r.URL.Path]; ok {
+		delay = d
+	}
+	if delay > 0 {
 		select {
-		case <-time.After(y.delay):
+		case <-time.After(delay):
 		case <-r.Context().Done():
 			return
 		}
@@ -413,7 +421,10 @@ func TestSearchRawTextQueries(t *testing.T) {
 		`/api/issues?(project: {HK}) and (project\: OTHER \"x\" \\ for\: me)`,
 		`/api/articles?project\: OTHER \"x\" \\ for\: me`,
 	}
+	// The lanes are requested concurrently, so arrival order is not fixed.
 	got := yt.recorded()
+	sort.Strings(got)
+	sort.Strings(want)
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("queries =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
@@ -505,6 +516,139 @@ func TestSearchTasksWithoutMirroredProjectsAsksNothing(t *testing.T) {
 	}
 	if len(got) != 0 || len(yt.recorded()) != 0 {
 		t.Fatalf("got %+v, YouTrack queries %v; want no YouTrack call and no hits", got, yt.recorded())
+	}
+}
+
+// seedDocArticles mirrors each key as a document and links it to its article
+// id, so the fake YouTrack's article hits map back to hk documents.
+func seedDocArticles(t *testing.T, fs *fakeStore, articleByKey map[string]string) {
+	t.Helper()
+	ctx := context.Background()
+	for key, articleID := range articleByKey {
+		fs.mu.Lock()
+		fs.docs[key] = store.Document{Key: key, Kind: strings.SplitN(key, "/", 2)[0], Session: "sess-rank"}
+		fs.mu.Unlock()
+		if err := fs.UpsertYouTrackDocArticle(ctx, store.YouTrackDocArticle{DocKey: key, HKProject: "handoffkeep", ArticleID: articleID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestSearchAllSlowIssueLaneKeepsDocHitsAndMarksPage(t *testing.T) {
+	yt := &fakeSearchYT{
+		issues:    []Issue{{ID: "2-1", Summary: "task one"}},
+		articles:  []Article{{ID: "101-1", Summary: "doc one", Content: "body"}},
+		pathDelay: map[string]time.Duration{"/api/issues": 2 * time.Second},
+	}
+	fs, svc := newSearchTest(t, yt, 100*time.Millisecond)
+	ctx := context.Background()
+	if err := fs.PutYouTrackProject(ctx, store.YouTrackProject{HKProject: "handoffkeep", ShortName: "HK"}); err != nil {
+		t.Fatal(err)
+	}
+	seedDocArticles(t, fs, map[string]string{"design/one": "101-1"})
+	logs := captureLog(t)
+
+	page, err := svc.SearchPage(ctx, "one", "all", "", 20)
+	if err != nil {
+		t.Fatalf("scope all with a slow issue lane: %v", err)
+	}
+	if keys := searchKeys(page.Results); strings.Join(keys, ",") != "docs:design/one" {
+		t.Fatalf("keys = %v, want the article hit kept while issues timed out", keys)
+	}
+	if !page.Partial || !page.TimedOut {
+		t.Fatalf("page = partial %v timed_out %v, want both set", page.Partial, page.TimedOut)
+	}
+	if !page.Results[0].Partial || !page.Results[0].TimedOut {
+		t.Fatalf("row %+v lacks the partial/timed_out marker", page.Results[0])
+	}
+	if !strings.Contains(logs.String(), "search.youtrack_error lane=issues reason=timeout") {
+		t.Fatalf("log = %q, want the timed-out lane named", logs.String())
+	}
+}
+
+func TestSearchAllEmptyTimedOutPageIsMarked(t *testing.T) {
+	yt := &fakeSearchYT{delay: 2 * time.Second}
+	fs, svc := newSearchTest(t, yt, 20*time.Millisecond)
+	if err := fs.PutYouTrackProject(context.Background(), store.YouTrackProject{HKProject: "handoffkeep", ShortName: "HK"}); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := svc.SearchPage(context.Background(), "nothing matches", "all", "", 20)
+	if err != nil {
+		t.Fatalf("scope all with no lane answering: %v", err)
+	}
+	if len(page.Results) != 0 || !page.Partial || !page.TimedOut {
+		t.Fatalf("page = %+v, want an empty page marked partial and timed_out", page)
+	}
+}
+
+func TestSearchDocsRanksDecisionAheadOfJobCopies(t *testing.T) {
+	yt := &fakeSearchYT{articles: []Article{
+		{ID: "101-1", Summary: "r1"},
+		{ID: "101-2", Summary: "d-b"},
+		{ID: "101-3", Summary: "d-a"},
+		{ID: "101-4", Summary: "other z"},
+		{ID: "101-5", Summary: "brief x"},
+		{ID: "101-6", Summary: "d-c"},
+		{ID: "101-7", Summary: "design q"},
+	}}
+	fs, svc := newSearchTest(t, yt, time.Second)
+	ctx := context.Background()
+	seedDocArticles(t, fs, map[string]string{
+		"reports/job-1/report": "101-1",
+		"decision/b":           "101-2",
+		"decision/a":           "101-3",
+		"zeta/other-z":         "101-4",
+		"brief/2026-11-20/x":   "101-5",
+		"decision/c":           "101-6",
+		"design/q":             "101-7",
+	})
+
+	got, err := svc.Search(ctx, "x", "docs", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rank order: decision, then design, then other, then job copies last. Each
+	// rank keeps YouTrack's order (decision/b before decision/a before decision/c).
+	want := []string{
+		"docs:decision/b", "docs:decision/a", "docs:decision/c",
+		"docs:design/q", "docs:zeta/other-z",
+		"docs:reports/job-1/report", "docs:brief/2026-11-20/x",
+	}
+	if keys := searchKeys(got); strings.Join(keys, ",") != strings.Join(want, ",") {
+		t.Fatalf("keys = %v\nwant %v", keys, want)
+	}
+}
+
+func TestSearchDocsFetchesRoomForRerank(t *testing.T) {
+	// Three job copies come first in YouTrack's order. Asking for limit+1 hits
+	// would return only those three and never reach the decision doc behind them.
+	yt := &fakeSearchYT{articles: []Article{
+		{ID: "101-1", Summary: "r1"},
+		{ID: "101-2", Summary: "r2"},
+		{ID: "101-3", Summary: "r3"},
+		{ID: "101-4", Summary: "d1"},
+	}}
+	fs, svc := newSearchTest(t, yt, time.Second)
+	seedDocArticles(t, fs, map[string]string{
+		"reports/job-1/r": "101-1",
+		"reports/job-2/r": "101-2",
+		"reports/job-3/r": "101-3",
+		"decision/d1":     "101-4",
+	})
+
+	got, err := svc.Search(context.Background(), "x", "docs", "", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"docs:decision/d1", "docs:reports/job-1/r"}
+	if keys := searchKeys(got); strings.Join(keys, ",") != strings.Join(want, ",") {
+		t.Fatalf("keys = %v, want %v", keys, want)
+	}
+	for _, x := range got {
+		if !x.Truncated {
+			t.Fatalf("row %+v of a truncated page lacks Truncated", x)
+		}
 	}
 }
 

@@ -130,7 +130,7 @@ func (s *Store) YouTrackTaskHits(ctx context.Context, tenant string, issueIDs []
 	args := []any{issueIDs, tenant, lane, issueIDs, tenant, lane}
 	if s.dialect == mysqlDialect {
 		// MySQL has no = ANY; each source has its own IN list and filters.
-		args = make([]any, 0, 2*len(issueIDs)+6)
+		args = make([]any, 0, 2*len(issueIDs)+7)
 		for i := 0; i < 2; i++ {
 			args = append(args, tenant)
 			for _, id := range issueIDs {
@@ -138,6 +138,9 @@ func (s *Store) YouTrackTaskHits(ctx context.Context, tenant string, issueIDs []
 			}
 			args = append(args, lane, lane)
 		}
+		// The second select's NOT EXISTS counts only this tenant's bindings; it
+		// is the last placeholder in the statement.
+		args = append(args, tenant)
 	}
 	rows, err := s.db().Query(ctx, sqlFor(s, `SELECT issue_id,task_id,lane,kind,refs,created_at FROM (
 		SELECT b.issue_id,t.id::text AS task_id,t.id AS task_order,t.lane,t.kind,`+taskRefsExpr+` AS refs,t.created_at,0 AS source_order
@@ -147,7 +150,7 @@ func (s *Store) YouTrackTaskHits(ctx context.Context, tenant string, issueIDs []
 		SELECT o.external_id,t.id::text,t.id,t.lane,t.kind,`+taskRefsExpr+`,t.created_at,1
 		FROM task_origins o JOIN tasks t ON t.id=o.task_id
 		WHERE o.provider='youtrack' AND o.namespace=$5 AND o.external_id=ANY($4) AND ($6='' OR t.lane=$6)
-		AND NOT EXISTS (SELECT 1 FROM yt_task_bindings b WHERE b.task_id=o.task_id)
+		AND NOT EXISTS (SELECT 1 FROM yt_task_bindings b WHERE b.task_id=o.task_id AND b.tenant=$2)
 		) hits ORDER BY issue_id,source_order,task_order`, `SELECT issue_id,task_id,lane,kind,refs,created_at FROM (
 		SELECT b.issue_id,CAST(t.id AS CHAR) AS task_id,t.id AS task_order,t.lane,t.kind,`+taskRefsExprMySQL+` AS refs,t.created_at,0 AS source_order
 		FROM yt_task_bindings b JOIN tasks t ON t.id=b.task_id
@@ -156,7 +159,7 @@ func (s *Store) YouTrackTaskHits(ctx context.Context, tenant string, issueIDs []
 		SELECT o.external_id,CAST(t.id AS CHAR),t.id,t.lane,t.kind,`+taskRefsExprMySQL+`,t.created_at,1
 		FROM task_origins o JOIN tasks t ON t.id=o.task_id
 		WHERE o.provider='youtrack' AND o.namespace=? AND o.external_id IN (`+placeholders(len(issueIDs))+`) AND (?='' OR t.lane=?)
-		AND NOT EXISTS (SELECT 1 FROM yt_task_bindings b WHERE b.task_id=o.task_id)
+		AND NOT EXISTS (SELECT 1 FROM yt_task_bindings b WHERE b.task_id=o.task_id AND b.tenant=?)
 		) hits ORDER BY issue_id,source_order,task_order`), args...)
 	if err != nil {
 		return nil, fmt.Errorf("youtrack task hits: %w", err)

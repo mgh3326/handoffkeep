@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
@@ -26,6 +28,33 @@ const (
 	searchMaxLimit      = 100
 	searchMaxTaskLimit  = 50
 )
+
+// docRankOther is the rank of a document key that matches no docRankTable
+// prefix. Ranks sort ascending, so a lower rank comes first.
+const docRankOther = 6
+
+// docRankJob ranks job copies last: a report or brief copy answers the question
+// behind a decision, policy or design doc, so the docs lane shows the latter first.
+const docRankJob = 7
+
+// docRankTable orders the docs lane by key prefix. A key takes the rank of the
+// first prefix it starts with; a key that matches none takes docRankOther.
+// Inside one rank the lane keeps YouTrack's relevance order (a stable sort).
+var docRankTable = []struct {
+	prefix string
+	rank   int
+}{
+	{"decision/", 0},
+	{"policy/", 1},
+	{"design/", 2},
+	{"findings/", 3},
+	{"experiment/", 4},
+	{"consult/", 5},
+	{"reports/", docRankJob},
+	{"briefs/", docRankJob},
+	{"brief/", docRankJob},
+	{"review/", docRankJob},
+}
 
 // SearchIssues returns up to top issues matching a YouTrack query. A 5xx is not
 // retried: a search answers within its own deadline, and PostgreSQL answers
@@ -53,7 +82,14 @@ func (c *Client) SearchArticleText(ctx context.Context, query string, top int) (
 	return out, err
 }
 
-// Search answers one /v1/search call from YouTrack exclusively.
+// Search answers one /v1/search call from YouTrack exclusively. It is
+// SearchPage without the page-level deadline state.
+func (s *Service) Search(ctx context.Context, q, scope, session string, limit int) ([]store.SearchResult, error) {
+	page, err := s.SearchPage(ctx, q, scope, session, limit)
+	return page.Results, err
+}
+
+// SearchPage answers one /v1/search call from YouTrack exclusively.
 // Exact document keys and numeric ID lookups (#<id> or <id>) are answered
 // directly by exact store lookups without querying YouTrack.
 // Scope "ctx" searches checkpoints and memory via SearchCtx.
@@ -61,27 +97,35 @@ func (c *Client) SearchArticleText(ctx context.Context, query string, top int) (
 // Scope all merges three lanes round-robin, one hit from each non-empty lane in
 // turn: YouTrack issues (tasks), YouTrack articles (docs), and hk ctx
 // newest first. Each lane keeps its own order, so the YouTrack lanes
-// keep YouTrack's relevance order. Scopes tasks and docs keep YouTrack's order.
+// keep YouTrack's relevance order, except that the docs lane is reranked by
+// docRankTable. Scopes tasks and docs keep YouTrack's order (docs reranked).
 //
-// Each YouTrack request asks for limit+1 hits. The page is truncated when a
+// The two YouTrack lanes run concurrently under one shared deadline. A lane
+// that misses it leaves the other lane's hits in the page; scope all then
+// marks the page Partial and TimedOut. Scopes tasks and docs have one lane,
+// so its deadline is the search's deadline and fails the call.
+//
+// Each YouTrack request asks for limit+1 hits, except the docs lane, which asks
+// for enough hits to rerank (docFetchLimit). The page is truncated when a
 // lane returned more than limit, even if some of those hits had no hk mapping,
 // or when the merged list is longer than limit. A truncated page sets Truncated
 // on every row.
-func (s *Service) Search(ctx context.Context, q, scope, session string, limit int) ([]store.SearchResult, error) {
+func (s *Service) SearchPage(ctx context.Context, q, scope, session string, limit int) (store.SearchPage, error) {
 	if err := store.CheckSearch(q, scope, session); err != nil {
-		return nil, err
+		return store.SearchPage{}, err
 	}
 	text := strings.TrimSpace(q)
 	limit = searchLimit(scope, limit)
 
 	if scope == "ctx" {
-		return s.store.SearchCtx(ctx, text, session, limit)
+		rows, err := s.store.SearchCtx(ctx, text, session, limit)
+		return store.SearchPage{Results: rows}, err
 	}
 
 	if store.NumericIDQuery(text) {
 		hits, ok, err := s.store.ExactNumericHit(ctx, text, scope, session)
 		if err != nil {
-			return nil, err
+			return store.SearchPage{}, err
 		}
 		if ok {
 			if len(hits) > limit {
@@ -90,7 +134,7 @@ func (s *Service) Search(ctx context.Context, q, scope, session string, limit in
 					hits[i].Truncated = true
 				}
 			}
-			return hits, nil
+			return store.SearchPage{Results: hits}, nil
 		}
 	}
 
@@ -100,7 +144,7 @@ func (s *Service) Search(ctx context.Context, q, scope, session string, limit in
 	if wantDocs {
 		hits, ok, err := s.store.ExactDocHit(ctx, text, session)
 		if err != nil {
-			return nil, err
+			return store.SearchPage{}, err
 		}
 		if ok {
 			if len(hits) > limit {
@@ -109,7 +153,7 @@ func (s *Service) Search(ctx context.Context, q, scope, session string, limit in
 					hits[i].Truncated = true
 				}
 			}
-			return hits, nil
+			return store.SearchPage{Results: hits}, nil
 		}
 	}
 
@@ -117,39 +161,63 @@ func (s *Service) Search(ctx context.Context, q, scope, session string, limit in
 	if wantTasks {
 		projects, err := s.store.ListYouTrackProjects(ctx)
 		if err != nil {
-			return nil, err
+			return store.SearchPage{}, err
 		}
 		names = mirroredShortNames(projects)
 	}
 
 	yctx, cancel := context.WithTimeout(ctx, s.searchTimeout)
 	defer cancel()
-	var issues []Issue
-	var articles []Article
-	var err error
-	timedOut := false
+	var (
+		issues      []Issue
+		articles    []Article
+		issuesErr   error
+		articlesErr error
+		wg          sync.WaitGroup
+	)
 	if len(names) > 0 {
-		issues, err = s.client.SearchIssues(yctx, issueSearchQuery(names, text), limit+1)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			issues, issuesErr = s.client.SearchIssues(yctx, issueSearchQuery(names, text), limit+1)
+		}()
 	}
-	if err == nil && wantDocs {
-		clean := cleanSearchText(text)
-		if clean != "" {
-			articles, err = s.client.SearchArticleText(yctx, clean, limit+1)
+	if wantDocs {
+		if clean := cleanSearchText(text); clean != "" {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				articles, articlesErr = s.client.SearchArticleText(yctx, clean, docFetchLimit(limit))
+			}()
 		}
 	}
-	if err != nil {
-		log.Printf("search.youtrack_error reason=%s scope=%q err=%v", searchFailureReason(yctx, err), scope, err)
-		if errors.Is(yctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
-			if scope != "all" || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return nil, store.ErrSearchTimeout
-			}
-			// Scope all has independent local context results. Keep any YouTrack
-			// lane that completed before the shared deadline and mark the page.
-			timedOut = true
-			err = nil
-		} else {
-			return nil, store.ErrSearchUnavailable
+	wg.Wait()
+
+	timedOut := false
+	for _, lane := range []struct {
+		name string
+		err  error
+	}{{"issues", issuesErr}, {"articles", articlesErr}} {
+		if lane.err == nil {
+			continue
 		}
+		reason := searchFailureReason(yctx, lane.err)
+		log.Printf("search.youtrack_error lane=%s reason=%s scope=%q err=%v", lane.name, reason, scope, lane.err)
+		if reason != "timeout" && !errors.Is(lane.err, context.DeadlineExceeded) {
+			return store.SearchPage{}, store.ErrSearchUnavailable
+		}
+		if scope != "all" || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return store.SearchPage{}, store.ErrSearchTimeout
+		}
+		// Scope all has independent local context results. The timed-out lane
+		// contributes nothing; the other lane keeps its hits, and the page is marked.
+		timedOut = true
+	}
+	if issuesErr != nil {
+		issues = nil
+	}
+	if articlesErr != nil {
+		articles = nil
 	}
 
 	var lanes [][]store.SearchResult
@@ -158,7 +226,7 @@ func (s *Service) Search(ctx context.Context, q, scope, session string, limit in
 		overflow = overflow || len(issues) > limit
 		hits, err := s.store.YouTrackTaskHits(ctx, s.tenant, issueIDs(issues), session)
 		if err != nil {
-			return nil, err
+			return store.SearchPage{}, err
 		}
 		lane := []store.SearchResult{}
 		for _, issue := range issues {
@@ -182,7 +250,7 @@ func (s *Service) Search(ctx context.Context, q, scope, session string, limit in
 		}
 		hits, err := s.store.YouTrackDocHits(ctx, allArticleIDs, session)
 		if err != nil {
-			return nil, err
+			return store.SearchPage{}, err
 		}
 		lane := []store.SearchResult{}
 		for _, article := range articles {
@@ -196,12 +264,13 @@ func (s *Service) Search(ctx context.Context, q, scope, session string, limit in
 			x.Snippet = excerpt(article.Content, article.Summary)
 			lane = append(lane, x)
 		}
+		rankDocLane(lane)
 		lanes = append(lanes, lane)
 	}
 	if scope == "all" {
 		ctxHits, err := s.store.SearchCtx(ctx, text, session, limit+1)
 		if err != nil {
-			return nil, err
+			return store.SearchPage{}, err
 		}
 		overflow = overflow || len(ctxHits) > limit
 		lanes = append(lanes, ctxHits)
@@ -216,7 +285,33 @@ func (s *Service) Search(ctx context.Context, q, scope, session string, limit in
 		merged[i].Partial = timedOut
 		merged[i].TimedOut = timedOut
 	}
-	return merged, nil
+	return store.SearchPage{Results: merged, Partial: timedOut, TimedOut: timedOut}, nil
+}
+
+// docFetchLimit is how many articles the docs lane asks YouTrack for: three
+// times the page limit plus one, so the rerank has room to lift a decision or
+// policy doc above job copies. It is capped at searchMaxLimit+1, the most the
+// lane asked for before the rerank.
+func docFetchLimit(limit int) int {
+	return min(3*limit+1, searchMaxLimit+1)
+}
+
+// rankDocLane reorders a docs lane by docRankTable, in place. The sort is
+// stable, so hits of one rank keep YouTrack's order.
+func rankDocLane(lane []store.SearchResult) {
+	sort.SliceStable(lane, func(i, j int) bool {
+		return docRank(lane[i].Key) < docRank(lane[j].Key)
+	})
+}
+
+// docRank is the rank of a document key in docRankTable.
+func docRank(key string) int {
+	for _, c := range docRankTable {
+		if strings.HasPrefix(key, c.prefix) {
+			return c.rank
+		}
+	}
+	return docRankOther
 }
 
 // searchLimit applies the same defaults and caps as the PostgreSQL search:

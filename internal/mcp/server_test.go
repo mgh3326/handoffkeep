@@ -27,6 +27,9 @@ func (*spyBackend) ListDocuments(context.Context, string, string, string, int64,
 func (*spyBackend) Search(context.Context, string, string, string, int) ([]store.SearchResult, error) {
 	return nil, errors.New("unexpected")
 }
+func (*spyBackend) SearchPage(context.Context, string, string, string, int) (store.SearchPage, error) {
+	return store.SearchPage{}, errors.New("unexpected")
+}
 func (*spyBackend) PutAttachment(context.Context, string, string, string, string, []byte) (store.Attachment, bool, error) {
 	return store.Attachment{}, false, errors.New("unexpected")
 }
