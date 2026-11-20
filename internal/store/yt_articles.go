@@ -648,6 +648,20 @@ func prepareYTArticleTx(ctx context.Context, tx transaction, now time.Time, g yt
 		}
 		req.RetryOf, req.RetryKey = r.retryOf, r.retryKey
 	}
+	if req.ParentFamily != "" {
+		// A root-capable create (hk 5761): one per tenant, project and family
+		// until its root is recorded. A document held here prepares no op and
+		// stays unbound with no create, so the catch-up's rescan decides it
+		// again once the root is recorded or the other create is rejected.
+		held, err := ytArticleFamilyGateTx(ctx, tx, g.tenant, target.ID, req.ParentFamily, true)
+		if err != nil {
+			return "", err
+		}
+		if held != "" {
+			log.Printf("ytwrite.article_family_pending document_id=%d project_id=%q family=%q reason=%s", id, target.ID, req.ParentFamily, held)
+			return held, nil
+		}
+	}
 	n, err := ytwrite.ArticleOp(req)
 	if err != nil {
 		return "", err
@@ -737,13 +751,20 @@ func ytDocsHandler(s *Store, now time.Time) FeedHandler {
 			return nil
 		}
 		counts := map[ytArticleOutcome]int{}
+		// Every document is read under the lane lock a create's Apply
+		// publishes the binding under: a binding committed before this read
+		// is seen, and one after it waits for this pass. The pass takes all
+		// its lane locks before it decides any document, so the family lock a
+		// root-capable create takes (ytArticleFamilyGateTx) comes after every
+		// lane lock of the pass: a catch-up or backfill holding one lane and
+		// waiting on the family lock cannot hold a lane this pass still waits
+		// for (lockorder.go, hk 5761).
 		for _, id := range ids {
-			// Read under the lane lock a create's Apply publishes the
-			// binding under: a binding committed before this read is seen,
-			// and one after it waits for this pass.
 			if err := lockYTEntity(ctx, tx, ytwrite.ArticleEntity, strconv.FormatInt(id, 10)); err != nil {
 				return err
 			}
+		}
+		for _, id := range ids {
 			r, err := readYTArticleRow(ctx, tx, id)
 			if err != nil {
 				return err
@@ -754,11 +775,11 @@ func ytDocsHandler(s *Store, now time.Time) FeedHandler {
 			}
 			counts[outcome]++
 		}
-		log.Printf("ytwrite.articles_feed documents=%d split_prepared=%d create_prepared=%d create_rejected=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d deleted=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d superseded=%d",
+		log.Printf("ytwrite.articles_feed documents=%d split_prepared=%d create_prepared=%d create_rejected=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d deleted=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d superseded=%d family_root_pending=%d family_root_uncertain=%d",
 			len(ids), counts[ytArticleSplitPrepared], counts[ytArticleCreatePrepared], counts[ytArticleCreateRejected], counts[ytArticleCreatePending], counts[ytArticleUpdatePrepared],
 			counts[ytArticleUnchanged], counts[ytArticleNotUpdated], counts[ytArticleUnboundImported], counts[ytArticleOutOfScope],
 			counts[ytArticleDeleted], counts[ytArticleOtherTenant], counts[ytArticleNoProject], counts[ytArticleInvalid], counts[ytArticleLegacyUnverified],
-			counts[ytArticleSuperseded])
+			counts[ytArticleSuperseded], counts[ytArticleFamilyPending], counts[ytArticleFamilyUncertain])
 		return nil
 	}
 }
@@ -1200,10 +1221,10 @@ func (s *Store) catchUpYTArticlesOnce(ctx context.Context, now time.Time) error 
 	}
 	s.ytDocsScanned, s.ytDocsLastScan = true, now
 	if full || counts[ytArticleCreatePrepared] > 0 || noProject > 0 {
-		log.Printf("ytwrite.articles_catchup full=%t create_prepared=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d",
+		log.Printf("ytwrite.articles_catchup full=%t create_prepared=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d family_root_pending=%d family_root_uncertain=%d",
 			full, counts[ytArticleCreatePrepared], counts[ytArticleCreatePending], counts[ytArticleUpdatePrepared], counts[ytArticleUnchanged],
 			counts[ytArticleNotUpdated], counts[ytArticleUnboundImported], counts[ytArticleOutOfScope], counts[ytArticleOtherTenant],
-			noProject, counts[ytArticleInvalid], counts[ytArticleLegacyUnverified])
+			noProject, counts[ytArticleInvalid], counts[ytArticleLegacyUnverified], counts[ytArticleFamilyPending], counts[ytArticleFamilyUncertain])
 	}
 	s.ytDocsCaughtUp.Store(noProject == 0)
 	return nil
