@@ -89,6 +89,26 @@ func TestYouTrackTaskHitsUseBindingWithoutOrigin(t *testing.T) {
 	}
 }
 
+// A legacy task_origins mirror is suppressed only by a binding of the searched
+// tenant: another tenant's binding on the same task must not hide this tenant's
+// origin hit.
+func TestYouTrackTaskHitsOriginIgnoresOtherTenantBinding(t *testing.T) {
+	s := schemaStore(t, "youtrack_search_origin_tenant")
+	ctx := context.Background()
+	task := youtrackTask(t, s, "origin-tenant-lane", "origin tenant task")
+	issueID := "9-origin-" + strconv.FormatInt(task.ID, 10)
+	ytFeedExec(t, s, `INSERT INTO yt_task_bindings(task_id,tenant,issue_id,project_id,bound_by,bound_at) VALUES($1,$2,$3,'0-99','test',now())`, task.ID, "other-tenant", "9-other-"+strconv.FormatInt(task.ID, 10))
+	ytFeedExec(t, s, `INSERT INTO task_origins(task_id,provider,namespace,external_id,snapshot_at,created_by,created_at) VALUES($1,'youtrack',$2,$3,now(),'test',now())`, task.ID, "tenant", issueID)
+
+	hits, err := s.YouTrackTaskHits(ctx, "tenant", []string{issueID}, "origin-tenant-lane")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hit, ok := hits[issueID]; !ok || hit.Key != strconv.FormatInt(task.ID, 10) {
+		t.Fatalf("origin hit = %+v, present=%v; want task %d (other tenant's binding must not suppress it)", hit, ok, task.ID)
+	}
+}
+
 func TestYouTrackDocHitsMapArticlesAndFilterBySession(t *testing.T) {
 	s := schemaStore(t, "youtrack_search_docs")
 	ctx := context.Background()
