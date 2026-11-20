@@ -60,7 +60,7 @@ func (s *Store) queueDecisionAnswerNotice(ctx context.Context, tx pgx.Tx, x Task
 	if err != nil {
 		return err
 	}
-	asker, ok := decisionAskerNoticeLane(lane, resolved)
+	asker, ok := decisionAskerNoticeLane(lane, resolved, in)
 	if !ok {
 		return nil
 	}
@@ -70,9 +70,15 @@ func (s *Store) queueDecisionAnswerNotice(ctx context.Context, tx pgx.Tx, x Task
 
 // decisionAskerNoticeLane names the lane that gets a second answer notice:
 // the lane that asked, when it differs from the task's lane. The task lane
-// keeps its notice either way.
-func decisionAskerNoticeLane(taskLane string, resolved DecisionRequest) (string, bool) {
+// keeps its notice either way. A session answer that the asker lane itself
+// recorded gets no second notice: the asker's session saw the answer it
+// wrote (hk 5527). Console and other channels, and a session answer recorded
+// by another lane, keep the asker's copy.
+func decisionAskerNoticeLane(taskLane string, resolved DecisionRequest, in ResolveDecisionInput) (string, bool) {
 	if resolved.RequestLane == "" || resolved.RequestLane == taskLane {
+		return "", false
+	}
+	if in.Channel == DecisionChannelSession && in.RecordingLane == resolved.RequestLane {
 		return "", false
 	}
 	return resolved.RequestLane, true

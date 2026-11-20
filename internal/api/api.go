@@ -1509,7 +1509,7 @@ func (s Server) taskDecisionResolve(w http.ResponseWriter, r *http.Request) {
 		TaskID: id, RequestID: input.RequestID, Kind: input.Kind, Option: input.Option, Text: input.Text,
 		Receipt: input.Receipt, Responder: input.Responder, EventKey: input.EventKey,
 		Provenance: input.Provenance, OperatorQuote: input.OperatorQuote, DecisionRef: input.DecisionRef,
-		Actor: client,
+		Actor: client, RecordingLane: input.RecordingLane,
 	}
 	switch input.Channel {
 	case "", store.DecisionChannelCLI:

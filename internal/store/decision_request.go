@@ -318,6 +318,11 @@ type DecisionResolveInput struct {
 	// EventKey makes a re-sent answer replay the first delivery's result (see
 	// ResolveDecisionInput.EventKey). Optional.
 	EventKey string `json:"event_key,omitempty"`
+	// RecordingLane is the lane whose session records a session-channel
+	// answer (the CLI sends PANEWIRE_LANE). It is self-reported: it only
+	// decides whether the asker lane is told about its own answer
+	// (decisionAskerNoticeLane, hk 5527). Optional.
+	RecordingLane string `json:"recording_lane,omitempty"`
 }
 
 // DecisionAssistantResolveInput is what the assistant path accepts: the

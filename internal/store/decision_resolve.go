@@ -130,6 +130,12 @@ type ResolveDecisionInput struct {
 	Actor    string
 	Verified bool
 
+	// RecordingLane is the lane whose session recorded a session-channel
+	// answer, self-reported by the CLI. A session answer recorded by the
+	// request's asker lane sends that lane no answer notice (hk 5527). Other
+	// channels ignore it.
+	RecordingLane string
+
 	// Audit, when set, is the MCP write this answer is: its audit row is written
 	// in the same transaction as the attempt, so the answer and its record
 	// commit together (mcp_write_audit, hk 3465).
@@ -325,6 +331,9 @@ func (s *Store) resolveDecisionOnce(ctx context.Context, in ResolveDecisionInput
 		if err := in.Audit.validate(); err != nil {
 			return ResolveDecisionOutcome{}, err
 		}
+	}
+	if in.RecordingLane != "" && !validName(in.RecordingLane) {
+		return ResolveDecisionOutcome{}, invalidDecisionRequest("recording_lane is not a lane name")
 	}
 	if in.Verified && relayed {
 		return ResolveDecisionOutcome{}, invalidDecisionRequest("the " + in.Channel + " channel is never verified")

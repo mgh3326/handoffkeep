@@ -20,7 +20,7 @@ func TestDecisionAskerNoticeLane(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			lane, ok := decisionAskerNoticeLane(c.taskLane, DecisionRequest{RequestLane: c.requestLane})
+			lane, ok := decisionAskerNoticeLane(c.taskLane, DecisionRequest{RequestLane: c.requestLane}, ResolveDecisionInput{Channel: DecisionChannelCLI})
 			if lane != c.wantLane || ok != c.wantOK {
 				t.Fatalf("lane=%q ok=%v, want lane=%q ok=%v", lane, ok, c.wantLane, c.wantOK)
 			}
@@ -70,6 +70,61 @@ func TestDecisionAnswerNoticeReachesAsker(t *testing.T) {
 	}
 	if rows := requestNotices(t, s, sameRequest.ID); len(rows) != 1 {
 		t.Fatalf("same-lane request: notices=%+v, want 1", rows)
+	}
+}
+
+// Invariant (hk 5527): a session answer recorded by the request's asker lane
+// sends that lane no answer notice, since its session wrote the answer; the
+// task lane's notice stays. A console answer, and a session answer recorded
+// by another lane, still reach the asker.
+func TestDecisionAnswerNoticeSkipsRecordingAsker(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	askerRows := func(t *testing.T, requestID string) int {
+		n := 0
+		for _, row := range requestNotices(t, s, requestID) {
+			if row.TargetLane == "asker-lane" {
+				n++
+			}
+		}
+		return n
+	}
+	newRequest := func(t *testing.T) (Task, DecisionRequest) {
+		task := assistantTask(t, s, "in_progress")
+		in := decisionInput()
+		in.RequestLane = "asker-lane"
+		return task, assistantRecordWith(t, s, task.ID, in)
+	}
+
+	task, request := newRequest(t)
+	recorded := sessionAnswer(request, "")
+	recorded.RecordingLane = "asker-lane"
+	if _, err := s.ResolveDecision(ctx, recorded); err != nil {
+		t.Fatalf("session resolve by asker: %v", err)
+	}
+	if asker := askerRows(t, request.ID); asker != 0 {
+		t.Fatalf("session by asker lane: asker notices=%d, want 0", asker)
+	}
+	if rows := requestNotices(t, s, request.ID); len(rows) != 1 || rows[0].TargetLane != task.Lane {
+		t.Fatalf("session by asker lane: notices=%+v, want the task lane's one row", rows)
+	}
+
+	_, consoleRequest := newRequest(t)
+	if _, err := s.ResolveDecision(ctx, answerA(consoleRequest, DecisionChannelConsole, "operator")); err != nil {
+		t.Fatalf("console resolve: %v", err)
+	}
+	if asker := askerRows(t, consoleRequest.ID); asker != 1 {
+		t.Fatalf("console answer: asker notices=%d, want 1", asker)
+	}
+
+	_, otherRequest := newRequest(t)
+	byOther := sessionAnswer(otherRequest, "")
+	byOther.RecordingLane = "other-lane"
+	if _, err := s.ResolveDecision(ctx, byOther); err != nil {
+		t.Fatalf("session resolve by other lane: %v", err)
+	}
+	if asker := askerRows(t, otherRequest.ID); asker != 1 {
+		t.Fatalf("session by other lane: asker notices=%d, want 1", asker)
 	}
 }
 

@@ -209,7 +209,7 @@ func (s *Store) queueDecisionAnswerNoticeFlow(ctx context.Context, tx transactio
 		return err
 	}
 	// The asker's copy, as on PostgreSQL (hk 5129).
-	asker, ok := decisionAskerNoticeLane(x.Lane, resolved)
+	asker, ok := decisionAskerNoticeLane(x.Lane, resolved, in)
 	if !ok {
 		return nil
 	}
