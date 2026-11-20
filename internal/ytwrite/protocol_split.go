@@ -149,15 +149,13 @@ func (p *Protocol) sendSplit(ctx context.Context, op Op, k articleSplit) Result 
 	st.outcome = StepOK
 
 	// 4. Read again: applied only when the whole family reads back (S5).
-	// The read has its own budget (splitVerifyBudget), not what the creates
-	// left of DispatchTimeout: slow reads of a family whose creates all
-	// succeeded must not leave it unverified on every pass (hk 5273, review
-	// of PR #511 r4615892443). It sends nothing, and every settlement is
-	// fenced to this attempt, so running past StaleAfter cannot add a
-	// create beside a recovery pass; exhausting it is remote_unknown.
-	vctx, cancelVerify := context.WithTimeout(context.WithoutCancel(ctx), p.splitVerifyBudget(d.parts))
-	defer cancelVerify()
-	final, readErr := k.readFamily(vctx, ar, op, d, index, false)
+	// The read stays in the dispatch window (rctx), so the send ends before
+	// StaleAfter and within the worker's stop budget (review of PR #527
+	// r4638925834, r4638926101): reads too slow for what is left of it end
+	// remote_unknown unverified, with the successful create recorded, and
+	// recovery verifies the family under its own lease and read budget
+	// (splitVerifyBudget, hk 5273).
+	final, readErr := k.readFamily(rctx, ar, op, d, index, false)
 	return settle(func(c context.Context) settled {
 		var hold *HoldError
 		switch {
@@ -222,6 +220,7 @@ func splitStepOutcome(err error) StepOutcome {
 // shows that create (S7); an index whose create may have been sent and that no
 // read finds makes none either (S1).
 func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (bool, error) {
+	caller := ctx
 	sl, ok := p.Ledger.(SplitLedger)
 	ar, rok := p.Remote.(ArticleRemote)
 	if !ok || !rok {
@@ -302,10 +301,14 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 	}
 	// Each family read has its own budget, the creates theirs
 	// (DispatchTimeout), all within the lease (hk 5273, review of PR #511
-	// r4615892443).
+	// r4615892443). A read sends nothing, so it also stops when the worker
+	// does (review of PR #527 r4638925829): the pass then settles on its
+	// own detached context and the next worker reads again.
 	verify := func(index string, search bool) (familyRead, error) {
 		vctx, cancel := context.WithTimeout(wctx, p.splitVerifyBudget(d.parts))
 		defer cancel()
+		stop := context.AfterFunc(caller, cancel)
+		defer stop()
 		return k.readFamily(vctx, ar, op, d, index, search)
 	}
 	read, err := verify(op.YTResultID, IndexMaybeSent(history))

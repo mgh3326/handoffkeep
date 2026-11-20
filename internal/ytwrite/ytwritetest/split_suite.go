@@ -768,10 +768,12 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		e.wantOneFamily(op, got.YTResultID)
 	})
 
-	// hk 5273 (review of PR #511 r4615892443): the final read has its own
-	// budget. GETs that each fit DispatchTimeout but together do not still
-	// verify the family; GETs past that budget leave the op remote_unknown
-	// unverified with no create more, and a later pass applies.
+	// hk 5273 (review of PR #511 r4615892443; PR #527 r4638925834,
+	// r4638926101): the send's final read stays in its dispatch window, so
+	// GETs that each fit DispatchTimeout but together do not leave the op
+	// remote_unknown unverified, never still reading. Recovery's reads have
+	// their own budget: it verifies the family with no create more. GETs
+	// past that budget too leave the op remote_unknown, again no create.
 	t.Run("slow_reads_verify_within_their_own_budget", func(t *testing.T) {
 		e := newSplitEnv(t, nl, 2)
 		e.dispatch = 200 * time.Millisecond
@@ -779,9 +781,20 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		slow := 120 * time.Millisecond // 4 GETs (index, 2 parts, index): 480ms > 200ms
 		e.yt.BeforeReadArticle = func(string) { time.Sleep(slow) }
 		op := e.prepare()
+		start := time.Now()
+		e.drive()
+		if took := time.Since(start); took > 400*time.Millisecond {
+			t.Fatalf("the send took %s: its final read outlived the dispatch window", took)
+		}
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonUnverified)
+		writes := len(e.yt.ArticleWrites())
+		e.clock.Advance(time.Hour)
 		e.drive()
 		got := e.wantState(op, ytwrite.StateApplied, "")
 		e.wantOneFamily(op, got.YTResultID)
+		if w := len(e.yt.ArticleWrites()); w != writes {
+			t.Fatalf("%d creates to verify a complete family", w-writes)
+		}
 
 		e2 := newSplitEnv(t, nl, 2)
 		e2.dispatch = 200 * time.Millisecond
@@ -790,7 +803,10 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		op2 := e2.prepare()
 		e2.drive()
 		e2.wantState(op2, ytwrite.StateRemoteUnknown, ytwrite.ReasonUnverified)
-		writes := len(e2.yt.ArticleWrites())
+		writes = len(e2.yt.ArticleWrites())
+		e2.clock.Advance(time.Hour)
+		e2.drive()
+		e2.wantState(op2, ytwrite.StateRemoteUnknown, ytwrite.ReasonReconcileFailed)
 		e2.yt.BeforeReadArticle = func(string) { time.Sleep(slow) }
 		e2.clock.Advance(time.Hour)
 		e2.drive()
@@ -799,6 +815,34 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		if w := len(e2.yt.ArticleWrites()); w != writes {
 			t.Fatalf("%d creates to verify a complete family", w-writes)
 		}
+	})
+
+	// Review of PR #527 r4638925829: recovery's family read sends nothing,
+	// so a worker that stops ends it at once; the pass still settles and
+	// creates nothing, and a later pass applies.
+	t.Run("recovery_read_stops_with_the_worker", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 2)
+		e.queueReads(errBadGateway)
+		op := e.prepare()
+		e.drive()
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonUnverified)
+		writes := len(e.yt.ArticleWrites())
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		e.yt.BeforeReadArticle = func(string) {
+			e.yt.BeforeReadArticle = nil
+			cancel() // the worker stops during the read
+		}
+		e.clock.Advance(time.Hour)
+		_, _ = e.p.Drive(ctx, 10)
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonReconcileFailed)
+		if w := len(e.yt.ArticleWrites()); w != writes {
+			t.Fatalf("%d creates from a stopped pass", w-writes)
+		}
+		e.clock.Advance(time.Hour)
+		e.drive()
+		got := e.wantState(op, ytwrite.StateApplied, "")
+		e.wantOneFamily(op, got.YTResultID)
 	})
 
 	// The operator's word on a held op: not applied rejects it and leaves
