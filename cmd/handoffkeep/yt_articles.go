@@ -25,9 +25,15 @@ import (
 // bindings). `youtrack articles-preflight` finds, for every hk document the
 // import made an article for, that article in YouTrack and reports what a
 // binding would record; it writes nothing. `youtrack articles-backfill` makes
-// the same classification and binds the documents whose article verifies
-// (matched and sha_differs). Both open the database directly and verify
+// the same classification and, with --apply, binds the documents whose article
+// verifies (matched and sha_differs). Both open the database directly and verify
 // against the tenant the write worker uses (the host of YOUTRACK_URL).
+//
+// `youtrack articles-backfill` (hk 5265) is a dry run unless --apply: --apply
+// binds the same verified articles, then prepares the op of each missing
+// document through store.PrepareYTArticleBackfill (the catch-up's decision),
+// so the backfill creates nothing the protocol would not. planned and enqueue
+// hold its per-document action.
 //
 // An article verifies when it is a top-level article of the document's
 // YouTrack project whose summary is the import's rendering of the document
@@ -152,7 +158,13 @@ type ytArticlesReport struct {
 	Documents int                  `json:"documents"`
 	Projects  []*ytArticlesProject `json:"projects"`
 	BoundNow  *int                 `json:"bound_now,omitempty"`
-	errors    int
+	// Mode is "dry_run" or "apply" for the backfill; Enqueued the ops it
+	// prepared (apply) or would prepare (dry run); Actions every document it
+	// binds, enqueues or waits on. All three are set by the backfill only.
+	Mode     string            `json:"mode,omitempty"`
+	Enqueued *int              `json:"enqueued,omitempty"`
+	Actions  []ytArticleAction `json:"actions,omitempty"`
+	errors   int
 }
 
 // ytArticleRemote is the YouTrack the commands read.
@@ -179,6 +191,37 @@ type ytArticler struct {
 	unstable map[string]bool
 	// indexErr is the article list's read error, kept for the run (loadIndex).
 	indexErr error
+	// backfill is set by `articles-backfill` (dry run or apply): the run
+	// records each bind/enqueue action. apply is set when bindBy is (--apply):
+	// the run binds and enqueues. docsOn is the document mode (an enqueue needs
+	// it), splitOn HANDOFFKEEP_YT_ARTICLE_SPLIT, and limit bounds the ops
+	// enqueued (0: no bound; enqueued counts them).
+	backfill bool
+	apply    bool
+	docsOn   bool
+	splitOn  bool
+	limit    int
+	enqueued int
+	// families is the tenant's family roots (store.YTArticleFamilies), read
+	// once per run by a backfill. rootPlanned is the root-capable creates this
+	// run planned or prepared, per rootKey.
+	families    store.YTArticleFamilyStates
+	rootPlanned map[string]bool
+}
+
+// ytArticleAction is what the backfill does with one document (or, in a dry
+// run, would do). Action is the intent of a dry run (bind, enqueue_create,
+// enqueue_split, or wait with a Reason), and under --apply the store's
+// outcome for the document (bound, create_prepared, split_prepared,
+// create_exists, not_updated, family_root_uncertain, ...). Reason names why a
+// document waits: docs_mode_off, split_flag_off, waiting_family_root,
+// family_root_uncertain, no_project or limit.
+type ytArticleAction struct {
+	DocumentID int64  `json:"document_id"`
+	Project    string `json:"project"`
+	Class      string `json:"class"`
+	Action     string `json:"action"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 // ytArticleListUnstable is the reason a project's documents are not
@@ -448,6 +491,18 @@ func (a *ytArticler) run(ctx context.Context, bucket, bindBy string) (ytArticles
 	if a.lookup == nil {
 		a.lookup = map[string]string{}
 	}
+	a.apply = bindBy != ""
+	if a.backfill {
+		r.Mode = "dry_run"
+		if a.apply {
+			r.Mode = "apply"
+		}
+		families, err := a.st.YTArticleFamilies(ctx, a.tenant)
+		if err != nil {
+			return r, err
+		}
+		a.families = families
+	}
 	byProject := map[string]*ytArticlesProject{}
 	boundNow := 0
 	var after int64
@@ -472,18 +527,48 @@ func (a *ytArticler) run(ctx context.Context, bucket, bindBy string) (ytArticles
 			} else {
 				got = a.classify(tctx, d, bindBy)
 			}
+			var act *ytArticleAction
+			if a.backfill && (got.class == ytArticleMatched || got.class == ytArticleSHADiffers || got.class == ytArticleMissing) {
+				planned, err := a.planned(tctx, d, got.class)
+				if err != nil {
+					got = ytArticleResult{class: ytArticleError, detail: err.Error()}
+				} else {
+					act = &planned
+				}
+			}
 			if bindBy != "" && (got.class == ytArticleMatched || got.class == ytArticleSHADiffers) {
 				_, err := a.st.AddYTArticleBinding(tctx, got.binding, d.YTArticleCandidate)
 				switch {
 				case err == nil:
 					boundNow++
+					if act != nil {
+						act.Action = "bound"
+					}
 				case errors.Is(err, store.ErrYTArticleBindingConflict):
 					got = ytArticleResult{class: ytArticleAmbiguous, detail: err.Error()}
 				default:
 					got = ytArticleResult{class: ytArticleError, detail: err.Error()}
 				}
 			}
+			if act != nil && got.class == ytArticleMissing {
+				// The enqueue follows the binding: a document that verifies
+				// is bound above and never reaches here (hk 5265 item 1).
+				if err := a.enqueue(tctx, d, act); err != nil {
+					got = ytArticleResult{class: ytArticleError, detail: err.Error()}
+				}
+			}
 			cancel()
+			if act != nil {
+				act.Class = got.class
+				switch {
+				case got.class == ytArticleError:
+					act.Action, act.Reason = "error", got.detail
+				case got.class == ytArticleAmbiguous && act.Action == "bind":
+					// A refused binding (store.ErrYTArticleBindingConflict).
+					act.Action, act.Reason = "refused", got.detail
+				}
+				r.Actions = append(r.Actions, *act)
+			}
 			switch got.class {
 			case ytArticleError:
 				r.errors++
@@ -521,7 +606,150 @@ func (a *ytArticler) run(ctx context.Context, bucket, bindBy string) (ytArticles
 	if bindBy != "" {
 		r.BoundNow = &boundNow
 	}
+	if a.backfill {
+		enqueued := a.enqueued
+		r.Enqueued = &enqueued
+	}
 	return r, nil
+}
+
+// planned is a missing or verified document's action in a dry run, and the
+// intent an --apply run then carries out (enqueue fills in the store's
+// outcome). A long document waits when the split flag is off; with it on it is
+// enqueued even while its family has no root on its project, and shows
+// waiting_family_root, because the split creates no root and waits until a
+// single-article create makes one (S13). The waiting rule is the store's
+// (YTArticleRootWaits), the same one the audit and the authority refusal use.
+func (a *ytArticler) planned(ctx context.Context, d store.YTArticleDoc, class string) (ytArticleAction, error) {
+	act := ytArticleAction{DocumentID: d.DocumentID, Project: d.Bucket, Class: class}
+	if class != ytArticleMissing {
+		act.Action = "bind"
+		return act, nil
+	}
+	// A document that already has its op adds nothing, whatever its family's
+	// state: the family's pending wait is for documents with no op yet.
+	has, err := a.st.YTArticleHasOp(ctx, d.DocumentID)
+	if err != nil {
+		return act, err
+	}
+	if has {
+		act.Action = "create_exists"
+		if store.YTArticleSplit(d.BodyBytes) {
+			act.Action = "split_exists"
+		}
+		return act, nil
+	}
+	// The family the store applies its family checks to: "" for a document that
+	// amends a policy, whose parent is the policy's article.
+	family, err := a.st.YTArticleRootFamily(ctx, d.DocumentID)
+	if err != nil {
+		return act, err
+	}
+	_, target, missing := a.target(d.YTArticleCandidate)
+	switch {
+	case !a.docsOn:
+		act.Action, act.Reason = "wait", "docs_mode_off"
+	case missing != "":
+		act.Action, act.Reason = "wait", "no_project"
+	case family != "" && a.families.Uncertain(target, family):
+		act.Action, act.Reason = "wait", "family_root_uncertain"
+	case store.YTArticleSplit(d.BodyBytes) && !a.splitOn:
+		act.Action, act.Reason = "wait", "split_flag_off"
+	case store.YTArticleSplit(d.BodyBytes):
+		waits, err := a.st.YTArticleRootWaits(ctx, a.tenant, a.projects(), d.DocumentID)
+		if err != nil {
+			return act, err
+		}
+		act.Action = "enqueue_split"
+		if waits {
+			act.Reason = store.YTArticleWaitingFamilyRoot
+		}
+	case family != "" && !a.families.Recorded(target, family) && (a.families.Pending(target, family) || a.rootPlanned[rootKey(target, family)]):
+		// One root-capable create per family and project until its root is
+		// recorded (the store enforces the same rule).
+		act.Action, act.Reason = "wait", "family_root_pending"
+	default:
+		act.Action = "enqueue_create"
+	}
+	return act, nil
+}
+
+// rootKey is one family's root on one project, the key of the backfill's
+// in-run plan of root-capable creates (store.YTArticleFamilyStates has the same
+// keying).
+func rootKey(project, family string) string { return project + "\x1f" + family }
+
+// markRoot records that a root-capable create for d's family on target is
+// prepared (or planned by a dry run), so the family's later short documents
+// in this run wait for its root.
+func (a *ytArticler) markRoot(family string, bytes int, target string) {
+	if family == "" || store.YTArticleSplit(bytes) {
+		return
+	}
+	if a.rootPlanned == nil {
+		a.rootPlanned = map[string]bool{}
+	}
+	a.rootPlanned[rootKey(target, family)] = true
+}
+
+// enqueue prepares a missing document's op when the plan says so. A document
+// that already has its op adds nothing and is reported as exists, whatever
+// the limit; --limit counts only the ops a run would add (dry run) or added
+// (apply). Under --apply the store decides (PrepareYTArticleBackfill) against
+// the candidate verified here: its bucket and project.
+func (a *ytArticler) enqueue(ctx context.Context, d store.YTArticleDoc, act *ytArticleAction) error {
+	if act == nil || !strings.HasPrefix(act.Action, "enqueue_") {
+		return nil
+	}
+	has, err := a.st.YTArticleHasOp(ctx, d.DocumentID)
+	if err != nil {
+		return err
+	}
+	if has {
+		if act.Action == "enqueue_split" {
+			act.Action = "split_exists"
+		} else {
+			act.Action = "create_exists"
+		}
+		act.Reason = ""
+		return nil
+	}
+	if a.limit > 0 && a.enqueued >= a.limit {
+		act.Action, act.Reason = "wait", "limit"
+		return nil
+	}
+	_, target, _ := a.target(d.YTArticleCandidate)
+	family, err := a.st.YTArticleRootFamily(ctx, d.DocumentID)
+	if err != nil {
+		return err
+	}
+	if !a.apply {
+		a.enqueued++
+		a.markRoot(family, d.BodyBytes, target)
+		return nil
+	}
+	outcome, err := a.st.PrepareYTArticleBackfill(ctx, d.DocumentID, time.Now().UTC(), d.YTArticleCandidate)
+	if err != nil {
+		return err
+	}
+	act.Action, act.Reason = outcome, ""
+	if outcome == "create_prepared" || outcome == "split_prepared" {
+		a.enqueued++
+		if outcome == "create_prepared" {
+			a.markRoot(family, d.BodyBytes, target)
+		}
+	}
+	return nil
+}
+
+// projects is the synthetic buckets' YouTrack projects as the store's gate
+// takes them.
+func (a *ytArticler) projects() map[string]store.YTArticleProject {
+	out := map[string]store.YTArticleProject{}
+	for k, b := range a.buckets {
+		out[k] = store.YTArticleProject{ID: b.ID, ShortName: b.ShortName}
+	}
+	return out
 }
 
 // ytArticleBuckets resolves each synthetic bucket's YouTrack project by the
@@ -551,7 +779,7 @@ func ytArticleBuckets(ctx context.Context, projects youtrack.ProjectLister) (map
 
 const (
 	youtrackArticlesPreflightUsage = "usage: youtrack articles-preflight [--project P]"
-	youtrackArticlesBackfillUsage  = "usage: youtrack articles-backfill [--project P] [--by NAME]"
+	youtrackArticlesBackfillUsage  = "usage: youtrack articles-backfill [--project P] [--dry-run | --apply] [--by NAME] [--limit N]"
 )
 
 // youtrackArticlesCmd is `youtrack articles-preflight` (backfill false):
@@ -570,9 +798,14 @@ func youtrackArticlesCmd(args []string, out io.Writer, backfill bool) error {
 	project := fs.String("project", "", "only documents of this hk project (or /shared, /unassigned)")
 	valueFlags := []string{"project"}
 	var by *string
+	var apply, dryRun *bool
+	var limit *int
 	if backfill {
 		by = fs.String("by", "operator:cli", "who bound the documents")
-		valueFlags = append(valueFlags, "by")
+		apply = fs.Bool("apply", false, "bind the verified documents and enqueue the missing and long ones")
+		dryRun = fs.Bool("dry-run", false, "report what --apply would do and write nothing (the default)")
+		limit = fs.Int("limit", 0, "enqueue at most N ops (0: all)")
+		valueFlags = append(valueFlags, "by", "limit")
 	}
 	ordered, err := splitArgs(args, valueFlags...)
 	if err != nil {
@@ -584,10 +817,15 @@ func youtrackArticlesCmd(args []string, out io.Writer, backfill bool) error {
 	if fs.NArg() != 0 {
 		return errors.New(usage)
 	}
+	// bindBy is the binding's bound_by, and set only by --apply: a dry run
+	// (the default) binds and enqueues nothing.
 	bindBy := ""
 	if backfill {
-		if bindBy = strings.TrimSpace(*by); bindBy == "" {
+		if bindBy = strings.TrimSpace(*by); bindBy == "" || *limit < 0 || (*apply && *dryRun) {
 			return errors.New(usage)
+		}
+		if !*apply {
+			bindBy = ""
 		}
 	}
 	dbURL := strings.TrimSpace(os.Getenv("HANDOFFKEEP_DB_URL"))
@@ -602,11 +840,12 @@ func youtrackArticlesCmd(args []string, out io.Writer, backfill bool) error {
 	}
 	openCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// The preflight never writes: it opens without migrating, on a pool
-	// whose every transaction is READ ONLY, and refuses a schema without
-	// yt_article_bindings. The backfill migrates as the server does.
+	// The preflight and a dry run never write: they open without migrating,
+	// on a pool whose every transaction is READ ONLY, and refuse a schema
+	// without yt_article_bindings. --apply migrates as the server does.
+	applying := backfill && *apply
 	openStore := store.OpenReadOnly
-	if backfill {
+	if applying {
 		openStore = store.Open
 	}
 	st, err := openStore(openCtx, dbURL)
@@ -614,13 +853,24 @@ func youtrackArticlesCmd(args []string, out io.Writer, backfill bool) error {
 		return err
 	}
 	defer st.Close()
-	if !backfill {
+	if !applying {
 		applied, err := st.MigrationApplied(openCtx, store.YTArticleBindingsMigration)
 		if err != nil {
 			return err
 		}
 		if !applied {
 			return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("the database lacks migration %s: deploy the release that adds it first; the preflight never migrates", store.YTArticleBindingsMigration)}
+		}
+		if backfill {
+			// The dry run reads the family roots (waiting_family_root,
+			// family_root_uncertain), so it needs their migration too.
+			families, err := st.MigrationApplied(openCtx, store.YTFamilyRootsMigration)
+			if err != nil {
+				return err
+			}
+			if !families {
+				return exitCodeError{code: youtrackExitConfig, err: fmt.Errorf("the database lacks migration %s: deploy the release that adds it first; a dry run never migrates", store.YTFamilyRootsMigration)}
+			}
 		}
 	}
 	bucketCtx, cancelBucket := context.WithTimeout(context.Background(), ytCommentsGetTimeout)
@@ -634,19 +884,30 @@ func youtrackArticlesCmd(args []string, out io.Writer, backfill bool) error {
 	}
 	a := &ytArticler{st: st, remote: client, tenant: youtrack.NewWriteRemote(client).Tenant(), buckets: buckets}
 	if backfill {
+		a.backfill, a.limit = true, *limit
 		// In HANDOFFKEEP_YT_DOCS_MODE=on (hk 4206) each binding whose article
 		// does not hold the document's body gets its article_update in the
-		// binding's own transaction, as serve's catch-up would.
+		// binding's own transaction, as serve's catch-up would. The same mode
+		// is what admits the ops --apply enqueues (hk 5265): with it off, the
+		// run binds and enqueues nothing.
 		mode, err := ytDocsModeFromEnv()
 		if err != nil {
 			return exitCodeError{code: youtrackExitConfig, err: err}
 		}
-		if mode == store.YTDocsOn {
+		split, err := ytArticleSplitFromEnv()
+		if err != nil {
+			return exitCodeError{code: youtrackExitConfig, err: err}
+		}
+		a.docsOn, a.splitOn = mode == store.YTDocsOn, split
+		if a.docsOn {
 			projects := map[string]store.YTArticleProject{}
 			for k, b := range buckets {
 				projects[k] = store.YTArticleProject{ID: b.ID, ShortName: b.ShortName}
 			}
 			st.SetYTDocsMode(store.YTDocsOn, a.tenant, projects)
+		}
+		if applying {
+			st.SetYTArticleSplit(split)
 		}
 	}
 	report, err := a.run(context.Background(), strings.TrimSpace(*project), bindBy)

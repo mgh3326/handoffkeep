@@ -25,11 +25,13 @@ import (
 
 // ytartFake is the YouTrack the article commands read: the project list, the
 // article list (paged by $skip/$top, without content) and one article by id
-// or readable id; hits counts requests per path.
+// or readable id; hits counts requests per path, and writes the requests of
+// any other method (none is allowed).
 type ytartFake struct {
 	mu       sync.Mutex
 	articles []map[string]any
 	hits     map[string]int
+	writes   int
 }
 
 func (f *ytartFake) add(id, readable, projectID, summary, content string) {
@@ -44,6 +46,7 @@ func (f *ytartFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch {
 	case r.Method != http.MethodGet:
+		f.writes++
 		http.Error(w, `{"error":"unexpected"}`, http.StatusMethodNotAllowed)
 	case r.URL.Path == "/api/admin/projects":
 		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "0-1", "shortName": "HK", "name": "Unassigned hk tasks"},
@@ -106,6 +109,7 @@ type ytartReport struct {
 	Documents int            `json:"documents"`
 	Projects  []ytartProject `json:"projects"`
 	BoundNow  *int           `json:"bound_now"`
+	Mode      string         `json:"mode"`
 }
 
 func (r ytartReport) project(t *testing.T, name string) ytartProject {
@@ -289,7 +293,7 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 		t.Fatalf("--project rda: %+v, %v", r, err)
 	}
 
-	r, err = ytartRun(t, "yt", "articles-backfill", "--by", "test:backfill")
+	r, err = ytartRun(t, "yt", "articles-backfill", "--apply", "--by", "test:backfill")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,12 +327,16 @@ func TestArticlesPreflightAndBackfill(t *testing.T) {
 
 	// A second run binds nothing and reads no bound document's article.
 	before := fake.hitsOf("/api/articles/RDA-A-" + id(r1))
-	r, err = ytartRun(t, "yt", "articles-backfill")
+	r, err = ytartRun(t, "yt", "articles-backfill", "--apply")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if *r.BoundNow != 0 || bindings() != 5 || fake.hitsOf("/api/articles/RDA-A-"+id(r1)) != before {
 		t.Fatalf("second backfill bound %d, %d rows, %d reads of a bound article", *r.BoundNow, bindings(), fake.hitsOf("/api/articles/RDA-A-"+id(r1))-before)
+	}
+	// The default is a dry run: it binds nothing, and writes nothing.
+	if r, err := ytartRun(t, "yt", "articles-backfill"); err != nil || r.Mode != "dry_run" || r.BoundNow != nil || bindings() != 5 || fake.writes != 0 {
+		t.Fatalf("dry run = %+v, %v; %d bindings, %d writes", r, err, bindings(), fake.writes)
 	}
 	ytartIDs(t, "rda bound", r.project(t, "rda").Bound, r1, r2, r5)
 	ytartIDs(t, "sma bound", r.project(t, "sma").Bound, s1, s3)

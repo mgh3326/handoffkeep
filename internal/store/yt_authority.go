@@ -441,12 +441,12 @@ func (s *Store) setYTAuthorityTx(ctx context.Context, tx transaction, seen map[Y
 				// covers what a feed cursor cannot (changes before it, a
 				// binding published since, a create that was refused).
 				g, _ := s.ytDocsNow()
-				n, ids, err := ytArticlesUnwrittenTx(ctx, tx, g.tenant)
+				n, ids, waiting, err := ytArticlesUnwrittenTx(ctx, tx, g)
 				if err != nil {
 					return nil, nil, err
 				}
 				if n > 0 {
-					refusals = append(refusals, fmt.Sprintf("%s: %d documents have content YouTrack lacks and no op writing it (%v)", k, n, ids))
+					refusals = append(refusals, fmt.Sprintf("%s: %d documents have content YouTrack lacks and no op writing it (%v; %s: %d)", k, n, ids, YTArticleWaitingFamilyRoot, waiting))
 				}
 			}
 			for _, f := range ytAuthorityFeeds[k] {

@@ -43,11 +43,23 @@ handoffkeep youtrack authority set <kind|all> <hk|youtrack> --by NAME --note TEX
 handoffkeep youtrack comments-preflight [--project P] [--days N] [--all]
 handoffkeep youtrack comments-backfill  [--project P] [--days N] [--all] [--by NAME]
 handoffkeep youtrack articles-preflight [--project P]
-handoffkeep youtrack articles-backfill  [--project P] [--by NAME]
+handoffkeep youtrack articles-backfill  [--project P] [--dry-run | --apply] [--by NAME] [--limit N]
 handoffkeep youtrack issues-backfill    [--project P] [--dry-run]
 handoffkeep youtrack fields-backfill    [--project P] [--task N] [--limit N] [--dry-run]
 handoffkeep youtrack decisions-backfill [--apply] [--by NAME] [--limit N]
 ```
+
+`articles-backfill`은 기본이 `--dry-run`이다: 문서마다 분류와 할 일(`action`)을 보고하고 아무것도
+쓰지 않으며, 읽기 전용으로 연다. `--apply`는 검증된 임포트 article을 바인딩하고, 바인딩되지 않은
+문서 중 임포트가 끝나기 전에 만들어진 것은 article_create op를, 240 KiB를 넘는 긴 문서는
+article_split op를 준비한다. 두 op는 서버 catch-up과 같은 결정 경로(`prepareYTArticleTx`)로
+만들어지므로 같은 op 식별자와 같은 거절을 받는다. 준비는 `HANDOFFKEEP_YT_DOCS_MODE=on`일 때만
+하고, 아니면 바인딩만 한다. 긴 문서는 `HANDOFFKEEP_YT_ARTICLE_SPLIT=on`일 때만 준비되며, 그
+가족(문서 키의 첫 세그먼트)의 root가 아직 없으면 `waiting_family_root`로 보이면서 기다린다(split은
+root를 만들지 않는다). root는 같은 가족의 단일 article create가 만든다. root 생성이 결과를 알 수
+없이 끝난 가족은 새 op 없이 `family_root_uncertain`으로 보류된다. `--limit N`은 준비하는 op 수를
+센다. 롤아웃: `--dry-run`으로 보고 `--apply --limit 5`로 몇 개 확인한 뒤 나머지를 실행한다.
+준비된 op 중 아직 보내지 않은 것은 버릴 수 있고, 이미 만들어진 article은 남는다.
 
 `fields-backfill`의 `--limit`은 만든 op 개수를 센다. 프로젝트가 옮겨진 task는 op가 둘(이동과
 스냅샷)이라 `--limit 1`로는 준비되지 않으니 `2` 이상을 쓴다. 남은 한도에 맞지 않는 task는 그
