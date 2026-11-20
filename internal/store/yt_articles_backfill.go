@@ -165,19 +165,21 @@ func (s *Store) YTArticleFamilies(ctx context.Context, tenant string) (YTArticle
 
 // ytArticleSplitEligible is whether prepareYTArticleTx would prepare a split
 // for r: an unbound, in-scope long document with the split flag on, not
-// legacy-mirrored (the legacy sync's article is never split) and not amending a
-// policy (its parent is that policy's article). The rule is date-free: the
-// backfill admits long documents from before the import too.
+// legacy-mirrored (the legacy sync's article is never split). A document that
+// amends a policy is eligible too: its split goes under the policy's article.
+// The rule is date-free: the backfill admits long documents from before the
+// import too.
 func ytArticleSplitEligible(g ytDocsGate, r *ytArticleRow) bool {
 	return r != nil && !r.bound && g.split && YTArticleSplit(r.doc.BodyBytes) && ytArticleInScope(r.doc.Key, r.doc.TaskID) &&
-		r.legacyArticle == "" && ytArticleAmends(r.doc.Key, r.body) == ""
+		r.legacyArticle == ""
 }
 
 // ytArticleRootWaits is whether an eligible long document waits on its
 // family's root on its target project: the split creates no root (S13), so it
-// waits while none is recorded for its family there.
+// waits while none is recorded for its family there. A document that amends a
+// policy waits on nothing family-wide: its parent is the policy's article.
 func ytArticleRootWaits(g ytDocsGate, r *ytArticleRow, states YTArticleFamilyStates) bool {
-	if !ytArticleSplitEligible(g, r) {
+	if !ytArticleSplitEligible(g, r) || ytArticleAmends(r.doc.Key, r.body) != "" {
 		return false
 	}
 	family := YTArticleFamilyOf(r.doc.Key)

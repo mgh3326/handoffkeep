@@ -626,6 +626,19 @@ func (a *ytArticler) planned(ctx context.Context, d store.YTArticleDoc, class st
 		act.Action = "bind"
 		return act, nil
 	}
+	// A document that already has its op adds nothing, whatever its family's
+	// state: the family's pending wait is for documents with no op yet.
+	has, err := a.st.YTArticleHasOp(ctx, d.DocumentID)
+	if err != nil {
+		return act, err
+	}
+	if has {
+		act.Action = "create_exists"
+		if store.YTArticleSplit(d.BodyBytes) {
+			act.Action = "split_exists"
+		}
+		return act, nil
+	}
 	family := store.YTArticleFamilyOf(d.Key)
 	_, target, missing := a.target(d.YTArticleCandidate)
 	switch {
