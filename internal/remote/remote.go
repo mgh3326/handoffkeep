@@ -151,8 +151,17 @@ func (c Client) ListDocuments(ctx context.Context, prefix, kind, session string,
 const searchWireCap = 100
 
 func (c Client) Search(ctx context.Context, q, scope, session string, limit int) ([]store.SearchResult, error) {
+	page, err := c.SearchPage(ctx, q, scope, session, limit)
+	return page.Results, err
+}
+
+// SearchPage is Search with the page-level deadline state the server reports
+// beside the rows (partial, timed_out).
+func (c Client) SearchPage(ctx context.Context, q, scope, session string, limit int) (store.SearchPage, error) {
 	var out struct {
-		Results []store.SearchResult `json:"results"`
+		Results  []store.SearchResult `json:"results"`
+		Partial  bool                 `json:"partial"`
+		TimedOut bool                 `json:"timed_out"`
 	}
 	// Request one extra row so a cut page stays detectable against a server
 	// that predates per-row truncated markers: len(results) > limit means more
@@ -166,7 +175,7 @@ func (c Client) Search(ctx context.Context, q, scope, session string, limit int)
 	p := url.Values{"q": {q}, "scope": {scope}, "session": {session}, "limit": {fmt.Sprint(req)}}
 	e := c.call(ctx, "GET", "/v1/search?"+p.Encode(), nil, &out)
 	if e != nil {
-		return nil, e
+		return store.SearchPage{}, e
 	}
 	xs := out.Results
 	if limit >= 1 && len(xs) > limit {
@@ -175,7 +184,7 @@ func (c Client) Search(ctx context.Context, q, scope, session string, limit int)
 			xs[i].Truncated = true
 		}
 	}
-	return xs, nil
+	return store.SearchPage{Results: xs, Partial: out.Partial, TimedOut: out.TimedOut}, nil
 }
 func (c Client) PutAttachment(ctx context.Context, _ string, name, mime, ref string, body []byte) (store.Attachment, bool, error) {
 	x, created, e := client.Client(c).PutAttachment(ctx, name, mime, ref, body)

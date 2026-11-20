@@ -27,6 +27,7 @@ type Backend interface {
 	GetDocument(context.Context, string) (store.Document, bool, error)
 	ListDocuments(context.Context, string, string, string, int64, *int64, int) ([]store.Document, *int64, error)
 	Search(context.Context, string, string, string, int) ([]store.SearchResult, error)
+	SearchPage(context.Context, string, string, string, int) (store.SearchPage, error)
 	PutAttachment(context.Context, string, string, string, string, []byte) (store.Attachment, bool, error)
 	ListAttachments(context.Context, string, int) ([]store.Attachment, error)
 	AttachmentURL(context.Context, string) (string, error)
@@ -139,11 +140,11 @@ func newServer(service Backend, client string, allowPathUpload bool) *gmcp.Serve
 		if x.Scope == "" {
 			x.Scope = "all"
 		}
-		v, e := service.Search(ctx, x.Q, x.Scope, x.Session, x.Limit)
+		page, e := service.SearchPage(ctx, x.Q, x.Scope, x.Session, x.Limit)
 		if e != nil {
 			return nil, nil, e
 		}
-		return result(map[string]any{"results": v})
+		return result(api.SearchBody(page))
 	})
 	gmcp.AddTool(s, &gmcp.Tool{Name: "get_document", Description: "Get a document by key.", Annotations: readOnlyAnnotations()}, func(ctx context.Context, _ *gmcp.CallToolRequest, x struct {
 		Key string `json:"key"`

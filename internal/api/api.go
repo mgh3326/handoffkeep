@@ -223,16 +223,39 @@ func (s Service) ListDocuments(ctx context.Context, prefix, kind, session string
 	return xs, nextAfterID(afterID, len(xs), limit, last), nil
 }
 func (s Service) Search(ctx context.Context, q, scope, session string, limit int) ([]store.SearchResult, error) {
+	page, err := s.SearchPage(ctx, q, scope, session, limit)
+	return page.Results, err
+}
+
+// SearchPage is Search with the page-level deadline state, which /v1/search and
+// the MCP search tool report beside the rows.
+func (s Service) SearchPage(ctx context.Context, q, scope, session string, limit int) (store.SearchPage, error) {
 	if scope == "ctx" {
-		return s.Store.SearchCtx(ctx, q, session, limit)
+		rows, err := s.Store.SearchCtx(ctx, q, session, limit)
+		return store.SearchPage{Results: rows}, err
 	}
 	if s.SearchBackend == youtrackSearchBackend || s.YouTrack != nil {
 		if s.YouTrack == nil {
-			return nil, store.ErrSearchUnavailable
+			return store.SearchPage{}, store.ErrSearchUnavailable
 		}
-		return s.YouTrack.Search(ctx, q, scope, session, limit)
+		return s.YouTrack.SearchPage(ctx, q, scope, session, limit)
 	}
-	return s.Store.Search(ctx, q, scope, session, limit)
+	rows, err := s.Store.Search(ctx, q, scope, session, limit)
+	return store.SearchPage{Results: rows}, err
+}
+
+// SearchBody is the /v1/search response. partial and timed_out appear only
+// when a YouTrack lane missed the deadline, so an empty page after a deadline
+// reads differently from no match; rows keep their own fields.
+func SearchBody(page store.SearchPage) map[string]any {
+	body := map[string]any{"results": page.Results}
+	if page.Partial {
+		body["partial"] = true
+	}
+	if page.TimedOut {
+		body["timed_out"] = true
+	}
+	return body
 }
 
 // youtrackSearchBackend is the HANDOFFKEEP_SEARCH_BACKEND value that selects
@@ -2219,12 +2242,12 @@ func (s Server) search(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, e)
 		return
 	}
-	xs, e := s.Service.Search(r.Context(), r.URL.Query().Get("q"), defaultString(r.URL.Query().Get("scope"), "all"), r.URL.Query().Get("session"), n)
+	page, e := s.Service.SearchPage(r.Context(), r.URL.Query().Get("q"), defaultString(r.URL.Query().Get("scope"), "all"), r.URL.Query().Get("session"), n)
 	if e != nil {
 		appErr(w, r, e)
 		return
 	}
-	jsonOut(w, http.StatusOK, map[string]any{"results": xs})
+	jsonOut(w, http.StatusOK, SearchBody(page))
 }
 func (s Server) documents(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
