@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -36,15 +35,9 @@ import (
 //     that moved, a mode that is off or a document bound elsewhere refuses
 //     the op here instead of leaving it prepared and blocking its lane.
 //
-//   - for a root-capable article_create, its family has no other open
-//     root-capable create and no uncertain root on its project
-//     (ytArticleFamilyHeldTx: family_root_pending, family_root_uncertain;
-//     hk 5761).
-//
 // Locks (lockorder.go): the entity's lane lock, the authority share of the
-// op's principal, for a root-capable article_create its family create lock
-// (ytArticleFamilyLock), then the op row, the order prepareYTOpTx's callers
-// take. A dry run takes none and writes nothing.
+// op's principal, then the op row, the same order prepareYTOpTx takes. A
+// dry run takes none and writes nothing.
 
 // ytRequeueKinds are the kinds the requeue may return to prepared. Their
 // refusal comes before any write the op makes: a comment append is one POST,
@@ -255,15 +248,6 @@ func (s *Store) requeueYTReadOnlyOpOnce(ctx context.Context, now time.Time, id i
 		if err := lockYTAuthorityForOpTx(ctx, tx, op.Principal); err != nil {
 			return YTRequeueItem{}, err
 		}
-		// A root-capable create takes its family's create lock, as its
-		// preparation did (hk 5761): the family check below and the return to
-		// prepared are atomic against another document's create. The family
-		// is the payload's, which no transition changes.
-		if family := ytRequeueFamily(op); family != "" {
-			if err := lockYTEntity(ctx, tx, ytArticleFamilyLock, op.Tenant+"\x1f"+op.YTTargetID+"\x1f"+family); err != nil {
-				return YTRequeueItem{}, err
-			}
-		}
 		// Read again under the locks: the op may have moved since the first read.
 		op, found, err = readYTOpRowTx(ctx, tx, id, true)
 		if err != nil {
@@ -283,18 +267,6 @@ func (s *Store) requeueYTReadOnlyOpOnce(ctx context.Context, now time.Time, id i
 		return YTRequeueItem{}, err
 	} else if reason != "" {
 		return ytRequeueNotEligibleItem(op, reason), nil
-	}
-	if family := ytRequeueFamily(op); family != "" {
-		// One root-capable create per tenant, project and family until its
-		// root is recorded (S1): an op revived beside another document's open
-		// create, or behind an uncertain one, could make a second root.
-		held, err := ytArticleFamilyHeldTx(ctx, tx, op.Tenant, op.YTTargetID, family, true)
-		if err != nil {
-			return YTRequeueItem{}, err
-		}
-		if held != "" {
-			return ytRequeueNotEligibleItem(op, string(held)), nil
-		}
 	}
 	if !apply {
 		return ytRequeueItem(op, YTRequeueWouldRequeue, ""), nil
@@ -327,21 +299,6 @@ func (s *Store) requeueYTReadOnlyOpOnce(ctx context.Context, now time.Time, id i
 	}
 	log.Printf("ytwrite.read_only_requeued op_id=%d kind=%s entity_kind=%s entity_id=%q by=%q", id, op.Kind, op.EntityKind, op.EntityID, by)
 	return ytRequeueItem(op, YTRequeueRequeued, ""), nil
-}
-
-// ytRequeueFamily is the family of op when it is a documents article_create
-// that can make a family root (its payload names a parent_family), else "".
-// An unreadable payload names none: ytRequeueRefusal and the admission decide
-// such an op.
-func ytRequeueFamily(op ytwrite.Op) string {
-	if op.Kind != ytwrite.KindArticleCreate || op.Principal != YTDocsPrincipal || len(op.Payload) == 0 {
-		return ""
-	}
-	var p ytwrite.ArticleCreatePayload
-	if json.Unmarshal(op.Payload, &p) != nil {
-		return ""
-	}
-	return p.ParentFamily
 }
 
 // ytRequeueLinkRequired reports whether op must still be the one its task

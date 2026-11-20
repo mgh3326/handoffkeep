@@ -146,47 +146,14 @@ func init() {
 // ytArticleCreateGateSQL is the article_create gate (ytAdmitSQL): mode on,
 // and o's document has no binding or one this op published. A backfill
 // binding holds the op: the document already has its article.
-//
-// A root-capable create (a parent_family in its payload) is also fenced at
-// dispatch (hk 5761, S1): it is admitted only once its family's root is
-// recorded on its project, or while no other root-capable create of the same
-// tenant, project and family is in flight (dispatched or remote_unknown,
-// whatever its id: a previous release could dispatch a newer one first) and
-// no older one is prepared (the id picks one among prepared creates).
-// Preparation keeps one such create
-// open per family (ytArticleFamilyGateTx); the fence covers creates queued
-// before that rule (a previous release could queue two), so the second cannot
-// send while the first is in flight or remote_unknown and search a stale view
-// into a second root. The unresolved scan is the yt_write_ops_entity_open
-// partial index (document ops not applied or rejected). The fence is a rule
-// for prepared candidates only: the read-only requeue runs this admission on
-// a rejected op and then applies its own locked family check
-// (ytArticleFamilyHeldTx), which names the reason.
 func ytArticleCreateGateSQL(s *Store) string {
 	if _, on := s.ytDocsNow(); !on {
 		return `FALSE`
 	}
 	return s.q(`o.entity_kind = 'document' AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b
-		WHERE b.document_id::text = o.entity_id AND b.op_id IS DISTINCT FROM o.id)
-		AND (o.state <> 'prepared' OR coalesce(o.payload->>'parent_family', '') = ''
-			OR EXISTS (SELECT 1 FROM yt_family_roots r
-				WHERE r.tenant = o.tenant AND r.project_id = o.yt_target_id AND r.family = o.payload->>'parent_family')
-			OR NOT EXISTS (SELECT 1 FROM yt_write_ops f
-				WHERE f.entity_kind = 'document' AND f.state NOT IN ('applied','rejected') AND f.id <> o.id
-				AND (f.state IN ('dispatched','remote_unknown') OR f.id < o.id)
-				AND f.principal = o.principal AND f.kind = o.kind AND f.tenant = o.tenant AND f.yt_target_id = o.yt_target_id
-				AND f.payload->>'parent_family' = o.payload->>'parent_family'))`,
+		WHERE b.document_id::text = o.entity_id AND b.op_id IS DISTINCT FROM o.id)`,
 		`o.entity_kind = 'document' AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b
-		WHERE CAST(b.document_id AS CHAR) = o.entity_id AND NOT (b.op_id <=> o.id))
-		AND (o.state <> 'prepared' OR coalesce(JSON_UNQUOTE(JSON_EXTRACT(o.payload, '$.parent_family')), '') = ''
-			OR EXISTS (SELECT 1 FROM yt_family_roots r
-				WHERE r.tenant = o.tenant AND r.project_id = o.yt_target_id
-				AND r.family = JSON_UNQUOTE(JSON_EXTRACT(o.payload, '$.parent_family')) COLLATE utf8mb4_0900_bin)
-			OR NOT EXISTS (SELECT 1 FROM yt_write_ops f
-				WHERE f.entity_kind = 'document' AND f.state NOT IN ('applied','rejected') AND f.id <> o.id
-				AND (f.state IN ('dispatched','remote_unknown') OR f.id < o.id)
-				AND f.principal = o.principal AND f.kind = o.kind AND f.tenant = o.tenant AND f.yt_target_id = o.yt_target_id
-				AND JSON_UNQUOTE(JSON_EXTRACT(f.payload, '$.parent_family')) COLLATE utf8mb4_0900_bin = JSON_UNQUOTE(JSON_EXTRACT(o.payload, '$.parent_family')) COLLATE utf8mb4_0900_bin))`)
+		WHERE CAST(b.document_id AS CHAR) = o.entity_id AND NOT (b.op_id <=> o.id))`)
 }
 
 // ytArticleSplitGateSQL is the article_split gate (hk 5085): mode on, o's
@@ -681,20 +648,6 @@ func prepareYTArticleTx(ctx context.Context, tx transaction, now time.Time, g yt
 		}
 		req.RetryOf, req.RetryKey = r.retryOf, r.retryKey
 	}
-	if req.ParentFamily != "" {
-		// A root-capable create (hk 5761): one per tenant, project and family
-		// until its root is recorded. A document held here prepares no op and
-		// stays unbound with no create, so the catch-up's rescan decides it
-		// again once the root is recorded or the other create is rejected.
-		held, err := ytArticleFamilyGateTx(ctx, tx, g.tenant, target.ID, req.ParentFamily, true)
-		if err != nil {
-			return "", err
-		}
-		if held != "" {
-			log.Printf("ytwrite.article_family_pending document_id=%d project_id=%q family=%q reason=%s", id, target.ID, req.ParentFamily, held)
-			return held, nil
-		}
-	}
 	n, err := ytwrite.ArticleOp(req)
 	if err != nil {
 		return "", err
@@ -784,20 +737,13 @@ func ytDocsHandler(s *Store, now time.Time) FeedHandler {
 			return nil
 		}
 		counts := map[ytArticleOutcome]int{}
-		// Every document is read under the lane lock a create's Apply
-		// publishes the binding under: a binding committed before this read
-		// is seen, and one after it waits for this pass. The pass takes all
-		// its lane locks before it decides any document, so the family lock a
-		// root-capable create takes (ytArticleFamilyGateTx) comes after every
-		// lane lock of the pass: a catch-up or backfill holding one lane and
-		// waiting on the family lock cannot hold a lane this pass still waits
-		// for (lockorder.go, hk 5761).
 		for _, id := range ids {
+			// Read under the lane lock a create's Apply publishes the
+			// binding under: a binding committed before this read is seen,
+			// and one after it waits for this pass.
 			if err := lockYTEntity(ctx, tx, ytwrite.ArticleEntity, strconv.FormatInt(id, 10)); err != nil {
 				return err
 			}
-		}
-		for _, id := range ids {
 			r, err := readYTArticleRow(ctx, tx, id)
 			if err != nil {
 				return err
@@ -808,11 +754,11 @@ func ytDocsHandler(s *Store, now time.Time) FeedHandler {
 			}
 			counts[outcome]++
 		}
-		log.Printf("ytwrite.articles_feed documents=%d split_prepared=%d create_prepared=%d create_rejected=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d deleted=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d superseded=%d family_root_pending=%d family_root_uncertain=%d",
+		log.Printf("ytwrite.articles_feed documents=%d split_prepared=%d create_prepared=%d create_rejected=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d deleted=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d superseded=%d",
 			len(ids), counts[ytArticleSplitPrepared], counts[ytArticleCreatePrepared], counts[ytArticleCreateRejected], counts[ytArticleCreatePending], counts[ytArticleUpdatePrepared],
 			counts[ytArticleUnchanged], counts[ytArticleNotUpdated], counts[ytArticleUnboundImported], counts[ytArticleOutOfScope],
 			counts[ytArticleDeleted], counts[ytArticleOtherTenant], counts[ytArticleNoProject], counts[ytArticleInvalid], counts[ytArticleLegacyUnverified],
-			counts[ytArticleSuperseded], counts[ytArticleFamilyPending], counts[ytArticleFamilyUncertain])
+			counts[ytArticleSuperseded])
 		return nil
 	}
 }
@@ -1254,10 +1200,10 @@ func (s *Store) catchUpYTArticlesOnce(ctx context.Context, now time.Time) error 
 	}
 	s.ytDocsScanned, s.ytDocsLastScan = true, now
 	if full || counts[ytArticleCreatePrepared] > 0 || noProject > 0 {
-		log.Printf("ytwrite.articles_catchup full=%t create_prepared=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d family_root_pending=%d family_root_uncertain=%d",
+		log.Printf("ytwrite.articles_catchup full=%t create_prepared=%d create_exists=%d update_prepared=%d unchanged=%d exception_not_updated=%d exception_unbound_imported=%d out_of_scope=%d other_tenant=%d no_project=%d invalid=%d legacy_synced_unverified=%d",
 			full, counts[ytArticleCreatePrepared], counts[ytArticleCreatePending], counts[ytArticleUpdatePrepared], counts[ytArticleUnchanged],
 			counts[ytArticleNotUpdated], counts[ytArticleUnboundImported], counts[ytArticleOutOfScope], counts[ytArticleOtherTenant],
-			noProject, counts[ytArticleInvalid], counts[ytArticleLegacyUnverified], counts[ytArticleFamilyPending], counts[ytArticleFamilyUncertain])
+			noProject, counts[ytArticleInvalid], counts[ytArticleLegacyUnverified])
 	}
 	s.ytDocsCaughtUp.Store(noProject == 0)
 	return nil
