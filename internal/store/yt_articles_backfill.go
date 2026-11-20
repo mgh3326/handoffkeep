@@ -198,6 +198,29 @@ func ytArticleRootWaits(g ytDocsGate, r *ytArticleRow, states YTArticleFamilySta
 	return !states.Recorded(target.ID, family)
 }
 
+// YTArticleRootFamily is the family whose root document id's article goes
+// under: its key's family, or "" when the key names none, or when the document
+// amends a policy (its parent is that policy's article, as the store prepares
+// it). It is the family the family checks apply to. Read-only.
+func (s *Store) YTArticleRootFamily(ctx context.Context, id int64) (string, error) {
+	var family string
+	err := s.retryTx(ctx, func() error {
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		r, err := readYTArticleRow(ctx, tx, id)
+		if err != nil || r == nil || ytArticleAmends(r.doc.Key, r.body) != "" {
+			return err
+		}
+		family = YTArticleFamilyOf(r.doc.Key)
+		return nil
+	})
+	return family, err
+}
+
 // YTArticleRootWaits reports whether document id is a long document waiting on
 // its family's root (ytArticleRootWaits) for tenant, with the buckets' projects
 // as the gate would resolve them. Read-only.

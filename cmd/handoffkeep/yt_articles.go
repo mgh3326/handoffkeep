@@ -639,7 +639,12 @@ func (a *ytArticler) planned(ctx context.Context, d store.YTArticleDoc, class st
 		}
 		return act, nil
 	}
-	family := store.YTArticleFamilyOf(d.Key)
+	// The family the store applies its family checks to: "" for a document that
+	// amends a policy, whose parent is the policy's article.
+	family, err := a.st.YTArticleRootFamily(ctx, d.DocumentID)
+	if err != nil {
+		return act, err
+	}
 	_, target, missing := a.target(d.YTArticleCandidate)
 	switch {
 	case !a.docsOn:
@@ -677,9 +682,8 @@ func rootKey(project, family string) string { return project + "\x1f" + family }
 // markRoot records that a root-capable create for d's family on target is
 // prepared (or planned by a dry run), so the family's later short documents
 // in this run wait for its root.
-func (a *ytArticler) markRoot(d store.YTArticleDoc, target string) {
-	family := store.YTArticleFamilyOf(d.Key)
-	if family == "" || store.YTArticleSplit(d.BodyBytes) {
+func (a *ytArticler) markRoot(family string, bytes int, target string) {
+	if family == "" || store.YTArticleSplit(bytes) {
 		return
 	}
 	if a.rootPlanned == nil {
@@ -715,9 +719,13 @@ func (a *ytArticler) enqueue(ctx context.Context, d store.YTArticleDoc, act *ytA
 		return nil
 	}
 	_, target, _ := a.target(d.YTArticleCandidate)
+	family, err := a.st.YTArticleRootFamily(ctx, d.DocumentID)
+	if err != nil {
+		return err
+	}
 	if !a.apply {
 		a.enqueued++
-		a.markRoot(d, target)
+		a.markRoot(family, d.BodyBytes, target)
 		return nil
 	}
 	outcome, err := a.st.PrepareYTArticleBackfill(ctx, d.DocumentID, time.Now().UTC(), d.YTArticleCandidate)
@@ -728,7 +736,7 @@ func (a *ytArticler) enqueue(ctx context.Context, d store.YTArticleDoc, act *ytA
 	if outcome == "create_prepared" || outcome == "split_prepared" {
 		a.enqueued++
 		if outcome == "create_prepared" {
-			a.markRoot(d, target)
+			a.markRoot(family, d.BodyBytes, target)
 		}
 	}
 	return nil
