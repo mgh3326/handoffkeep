@@ -1366,10 +1366,22 @@ binding is outside what the backfill checks.
   document ids for `bound`, `matched`, `sha_differs`, `missing`, `ambiguous` (and its subset `summary_cut`),
   `excluded` and `error`. A bound or excluded document is classified without
   a YouTrack read.
-- `handoffkeep youtrack articles-backfill [--project P] [--by NAME]` binds
-  every `matched` and `sha_differs` document and adds `bound_now`; a refused
-  publication counts as `ambiguous` and the run goes on. A re-run binds
-  nothing and reads nothing for a bound document.
+- `handoffkeep youtrack articles-backfill [--project P] [--dry-run | --apply] [--by NAME] [--limit N]`
+  is a dry run unless `--apply` (hk 5265): it reads like the preflight, opens
+  read-only, and reports per document an `action` (`bind`, `enqueue_create`,
+  `enqueue_split`, or `wait` with a `reason`) without writing. `--apply` binds
+  every `matched` and `sha_differs` document and adds `bound_now` (a refused
+  publication counts as `ambiguous` and the run goes on; a re-run binds nothing
+  and reads nothing for a bound document). It then prepares, through the
+  catch-up's own decision (`store.PrepareYTArticleBackfill`), one op per
+  `missing` document: an `article_create`, or an `article_split` for a
+  document over 240 KiB. Preparing needs `HANDOFFKEEP_YT_DOCS_MODE=on` (with it
+  off, the run binds only) and a long document needs
+  `HANDOFFKEEP_YT_ARTICLE_SPLIT=on`. A family with no recorded root shows
+  `waiting_family_root` for its long documents (a split creates no root; a
+  single-article create of the family makes one); a family whose root create is
+  `remote_unknown` gets no new op (`family_root_uncertain`). `--limit N` bounds
+  the ops prepared. A re-run prepares nothing a document already has.
 - Each read has 15 s and each document 60 s; the article list, read once, has 10 minutes. A document in
   class `error` exits 1 after the report.
 

@@ -217,6 +217,9 @@ type ytAuditDocuments struct {
 type ytAuditDocExceptions struct {
 	NotUpdated      ytArticlesClass `json:"exception_not_updated"`
 	UnboundImported ytArticlesClass `json:"exception_unbound_imported"`
+	// WaitingFamilyRoot: a long document the split is waiting to write, whose
+	// family has no recorded root (store.YTArticleWaitingFamilyRoot).
+	WaitingFamilyRoot ytArticlesClass `json:"waiting_family_root"`
 }
 
 // add counts document id under class (one of the store's exception
@@ -227,11 +230,13 @@ func (e *ytAuditDocExceptions) add(class string, id int64) {
 		e.NotUpdated.add(id)
 	case store.YTArticleExceptionUnboundImported:
 		e.UnboundImported.add(id)
+	case store.YTArticleWaitingFamilyRoot:
+		e.WaitingFamilyRoot.add(id)
 	}
 }
 
 func newYTAuditDocExceptions() ytAuditDocExceptions {
-	return ytAuditDocExceptions{NotUpdated: ytArticlesClass{DocumentIDs: []int64{}}, UnboundImported: ytArticlesClass{DocumentIDs: []int64{}}}
+	return ytAuditDocExceptions{NotUpdated: ytArticlesClass{DocumentIDs: []int64{}}, UnboundImported: ytArticlesClass{DocumentIDs: []int64{}}, WaitingFamilyRoot: ytArticlesClass{DocumentIDs: []int64{}}}
 }
 
 type ytAuditDocProject struct {
@@ -244,6 +249,10 @@ type ytAuditDocProject struct {
 func (a *ytAuditor) documents(ctx context.Context, bucket string) (*ytAuditDocuments, error) {
 	out := &ytAuditDocuments{Unbound: ytArticlesClass{DocumentIDs: []int64{}}, ytAuditDocExceptions: newYTAuditDocExceptions(), Projects: []*ytAuditDocProject{}}
 	byProject := map[string]*ytAuditDocProject{}
+	states, err := a.st.YTArticleFamilies(ctx, a.tenant)
+	if err != nil {
+		return nil, err
+	}
 	var after int64
 	for {
 		docs, err := a.st.YTArticleDocs(ctx, bucket, after, ytArticleDocPage)
@@ -267,6 +276,9 @@ func (a *ytAuditor) documents(ctx context.Context, bucket string) (*ytAuditDocum
 				p.Unbound.add(d.DocumentID)
 			}
 			class := store.YTArticleExceptionOf(d, a.tenant)
+			if a.split && class == store.YTArticleExceptionNotUpdated && store.YTArticleWaitingRoot(d, states.Recorded) {
+				class = store.YTArticleWaitingFamilyRoot
+			}
 			out.add(class, d.DocumentID)
 			p.add(class, d.DocumentID)
 		}
@@ -307,6 +319,9 @@ type ytAuditor struct {
 	articles bool
 	// sleep waits d or until ctx ends (nil: the wall clock).
 	sleep func(ctx context.Context, d time.Duration) error
+	// split is HANDOFFKEEP_YT_ARTICLE_SPLIT: with it on, a long document
+	// waiting on its family's root is shown as waiting_family_root (hk 5265).
+	split bool
 }
 
 // errYTAuditStop ends the run: a read the server will not take for longer
@@ -714,7 +729,11 @@ func youtrackAuditCmd(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	a := &ytAuditor{st: st, remote: remote, tenant: remote.Tenant(), botID: me.ID, enqueue: *enqueue, toPG: toPG, articles: articles}
+	split, err := ytArticleSplitFromEnv()
+	if err != nil {
+		return exitCodeError{code: youtrackExitConfig, err: err}
+	}
+	a := &ytAuditor{st: st, remote: remote, tenant: remote.Tenant(), botID: me.ID, enqueue: *enqueue, toPG: toPG, articles: articles, split: split}
 	report, err := a.run(context.Background(), *project, *task, *limit)
 	if err != nil {
 		return err

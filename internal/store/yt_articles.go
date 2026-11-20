@@ -91,6 +91,10 @@ type ytDocsGate struct {
 	// split is the article split flag (SetYTArticleSplit) as ytDocsNow read
 	// it.
 	split bool
+	// backfill is set for PrepareYTArticleBackfill (hk 5265): an unbound
+	// document created before the import ended gets its create and a long one
+	// its split, as the operator asked for them, not as the feed would.
+	backfill bool
 }
 
 // SetYTDocsMode sets the gate for this process: the tenant, and the YouTrack
@@ -559,9 +563,15 @@ func prepareYTArticleTx(ctx context.Context, tx transaction, now time.Time, g yt
 		return ytArticleOtherTenant, nil
 	}
 	// A new long document is split when the flag is on (S11); with it off it
-	// stays an exception exactly as before.
-	split := g.split && !r.bound && YTArticleSplit(r.doc.BodyBytes) && !r.createdAt.Before(YTImportEndedAt)
-	if ex := ytArticleException(r.doc.BodyBytes, r.bound, r.binding.ContentSHA == "" || r.splitBound, r.createdAt); ex != "" && !split {
+	// stays an exception exactly as before. The backfill (hk 5265) splits a
+	// long document the import made too, and creates an unbound one the
+	// import did not verify.
+	split := g.split && !r.bound && YTArticleSplit(r.doc.BodyBytes) && (g.backfill || !r.createdAt.Before(YTImportEndedAt))
+	ex := ytArticleException(r.doc.BodyBytes, r.bound, r.binding.ContentSHA == "" || r.splitBound, r.createdAt)
+	if g.backfill && ex == YTArticleExceptionUnboundImported {
+		ex = ""
+	}
+	if ex != "" && !split {
 		return ytArticleOutcome(ex), nil
 	}
 	summary := YTArticleSummary(r.doc.Key, r.doc.Kind)
@@ -1212,7 +1222,31 @@ const ytArticlesUnwrittenMax = 10
 // authority switch refuses while the count is not zero, whatever any
 // process's catch-up has scanned: it is the state, not a record of work.
 // It returns the count and up to ytArticlesUnwrittenMax ids.
-func ytArticlesUnwrittenTx(ctx context.Context, tx transaction, tenant string) (int, []int64, error) {
+//
+// With the split flag on (split), a long document whose family has no root
+// is counted too, as waiting_family_root (hk 5265 item 4): the split waits on
+// that root, and it is not an op's work (its op is prepared but cannot send).
+// waiting is how many of the count are that class.
+func ytArticlesUnwrittenTx(ctx context.Context, tx transaction, tenant string, split bool) (n int, ids []int64, waiting int, err error) {
+	n, ids, err = ytArticlesUnwrittenCountTx(ctx, tx, tenant)
+	if err != nil || !split {
+		return n, ids, 0, err
+	}
+	waits, err := ytArticlesWaitingRootTx(ctx, tx, tenant)
+	if err != nil {
+		return 0, nil, 0, err
+	}
+	for _, id := range waits {
+		if len(ids) < ytArticlesUnwrittenMax {
+			ids = append(ids, id)
+		}
+	}
+	return n + len(waits), ids, len(waits), nil
+}
+
+// ytArticlesUnwrittenCountTx is ytArticlesUnwrittenTx's count without the
+// long documents waiting on a root.
+func ytArticlesUnwrittenCountTx(ctx context.Context, tx transaction, tenant string) (int, []int64, error) {
 	args := []any{tenant, YTDocsPrincipal, YTImportEndedAt}
 	query := `SELECT d.id, d.key, coalesce(d.task_id,0), octet_length(d.body), d.created_at,
 			b.document_id IS NOT NULL, b.document_id IS NOT NULL AND b.content_sha IS NULL
