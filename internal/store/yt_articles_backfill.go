@@ -376,16 +376,45 @@ func ytArticleFamilyGateTx(ctx context.Context, tx transaction, tenant, project,
 
 // ytArticleFamilyHeldTx is ytArticleFamilyGateTx's check without its lock:
 // the read-only requeue's dry run reads it unlocked, and its apply after it
-// took the lock itself.
+// took the lock itself. It is YTArticleFamilyStates' rule for one family on
+// one project, read for that family only: a recorded root settles it; else a
+// remote_unknown root-capable create holds every op of the family
+// (uncertain), and, for a root-capable one (root), any unresolved one holds
+// it (pending). It reads no payload into Go: the family is matched in SQL, as
+// the dispatch fence matches it (ytArticleCreateGateSQL), over the
+// yt_write_ops_entity_open partial index.
 func ytArticleFamilyHeldTx(ctx context.Context, tx transaction, tenant, project, family string, root bool) (ytArticleOutcome, error) {
-	states, err := ytArticleFamilyStatesTx(ctx, tx, tenant)
-	if err != nil {
+	var recorded bool
+	if err := tx.QueryRow(ctx, sqlFor(tx,
+		`SELECT EXISTS(SELECT 1 FROM yt_family_roots WHERE tenant=$1 AND project_id=$2 AND family=$3)`,
+		`SELECT EXISTS(SELECT 1 FROM yt_family_roots WHERE tenant=? AND project_id=? AND family=?)`),
+		tenant, project, family).Scan(&recorded); err != nil {
 		return "", err
 	}
-	if states.Uncertain(project, family) {
+	if recorded {
+		return "", nil
+	}
+	open := `FROM yt_write_ops WHERE entity_kind='document' AND state NOT IN ('applied','rejected')
+		AND principal=$1 AND kind=$2 AND tenant=$3 AND yt_target_id=$4 AND payload->>'parent_family'=$5`
+	openMySQL := `FROM yt_write_ops WHERE entity_kind='document' AND state NOT IN ('applied','rejected')
+		AND principal=? AND kind=? AND tenant=? AND yt_target_id=?
+		AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.parent_family')) COLLATE utf8mb4_0900_bin = ?`
+	var uncertain, pending bool
+	args := []any{YTDocsPrincipal, ytwrite.KindArticleCreate, tenant, project, family}
+	if dialectFor(tx) == mysqlDialect {
+		// Positional placeholders: the second EXISTS takes the five again.
+		args = append(args, args...)
+	}
+	if err := tx.QueryRow(ctx, sqlFor(tx,
+		`SELECT EXISTS(SELECT 1 `+open+` AND state='remote_unknown'), EXISTS(SELECT 1 `+open+`)`,
+		`SELECT EXISTS(SELECT 1 `+openMySQL+` AND state='remote_unknown'), EXISTS(SELECT 1 `+openMySQL+`)`),
+		args...).Scan(&uncertain, &pending); err != nil {
+		return "", err
+	}
+	if uncertain {
 		return ytArticleFamilyUncertain, nil
 	}
-	if root && states.Pending(project, family) && !states.Recorded(project, family) {
+	if root && pending {
 		return ytArticleFamilyPending, nil
 	}
 	return "", nil

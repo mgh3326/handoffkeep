@@ -160,8 +160,13 @@ func TestYTArticleFamilyLockSerialisesCreates(t *testing.T) {
 		out, err := s.catchUpYTArticle(ctx, now, g, second)
 		done <- result{out, err}
 	}()
-	// The second document's transaction waits on the family lock the first
-	// one holds (an advisory lock not granted), and does not finish before it.
+	// The second document's transaction waits on an advisory lock that the
+	// first transaction's backend blocks (the family lock: the first holds
+	// only that and the first document's lane), and does not finish before it.
+	var holder int
+	if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holder); err != nil {
+		t.Fatal(err)
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		select {
@@ -170,7 +175,7 @@ func TestYTArticleFamilyLockSerialisesCreates(t *testing.T) {
 		default:
 		}
 		var waiting bool
-		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted)`).Scan(&waiting); err != nil {
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted AND $1 = ANY(pg_blocking_pids(pid)))`, holder).Scan(&waiting); err != nil {
 			t.Fatal(err)
 		}
 		if waiting {
@@ -285,29 +290,30 @@ func TestYTArticleCreateDispatchFencedByFamily(t *testing.T) {
 	}
 	claim(b.ID, ytwrite.ClaimClaimed)
 
-	// The reverse order: a newer create already in flight (a previous release
-	// dispatched it while the older one was deferred) holds the older one.
+	// The reverse order, through the ledger's own transitions: a previous
+	// release (no fence: the unscoped ledger admits as it did) claimed the
+	// older create and deferred it, then dispatched the newer one. Once the
+	// older one is due again, the newer one in flight holds it, whatever the
+	// ids say.
 	older := ytartPut(t, s, "famrev/older.md", "older", nil)
 	newer := ytartPut(t, s, "famrev/newer.md", "newer", nil)
 	o := ytartQueuedCreate(t, s, older, "famrev/older.md")
 	n := ytartQueuedCreate(t, s, newer, "famrev/newer.md")
+	ul := s.YTWriteLedger()
 	now = time.Now().UTC()
-	if _, err := s.pool.Exec(ctx, `UPDATE yt_write_ops SET next_attempt_at = $2 WHERE id = $1`, o.ID, now.Add(time.Hour)); err != nil {
+	if _, outcome, err := ul.Claim(ctx, now, o.ID); err != nil || outcome != ytwrite.ClaimClaimed {
+		t.Fatalf("claim the older create = %v, %v", outcome, err)
+	}
+	if _, err := ul.Defer(ctx, now, o.ID, now.Add(time.Hour), ytwrite.ReasonRateLimited, "429"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.pool.Exec(ctx, `UPDATE yt_write_ops SET next_attempt_at = $2 WHERE id = $1`, n.ID, now.Add(-time.Second)); err != nil {
-		t.Fatal(err)
+	claim(o.ID, ytwrite.ClaimNotDue)
+	if _, outcome, err := ul.Claim(ctx, now, n.ID); err != nil || outcome != ytwrite.ClaimClaimed {
+		t.Fatalf("claim the newer create while the older is deferred = %v, %v", outcome, err)
 	}
-	if _, outcome, err := l.Claim(ctx, now, o.ID); err != nil || outcome != ytwrite.ClaimNotDue {
-		t.Fatalf("claim the deferred older create = %v, %v; want not_due", outcome, err)
-	}
-	// The newer one cannot be claimed past the prepared older one either: put
-	// it in flight as the previous release did.
-	if _, err := s.pool.Exec(ctx, `UPDATE yt_write_ops SET state = 'dispatched', dispatched_at = now() WHERE id = $1`, n.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.pool.Exec(ctx, `UPDATE yt_write_ops SET next_attempt_at = $2 WHERE id = $1`, o.ID, now.Add(-time.Second)); err != nil {
-		t.Fatal(err)
+	now = now.Add(2 * time.Hour) // past the older create's deferral
+	if d := due(); d[o.ID] {
+		t.Fatalf("due %v lists the older create behind a dispatched newer one", d)
 	}
 	claim(o.ID, ytwrite.ClaimHeld)
 	if _, err := l.MarkUnknown(ctx, now, n.ID, now.Add(time.Hour), ytwrite.ReasonTransport, "lost"); err != nil {
@@ -319,6 +325,9 @@ func TestYTArticleCreateDispatchFencedByFamily(t *testing.T) {
 	claim(o.ID, ytwrite.ClaimHeld)
 	if err := s.YTWriteLedger().RecordFamilyRoot(ctx, ytcTenant, ytartShared, "famrev", "3-701", n.ID); err != nil {
 		t.Fatal(err)
+	}
+	if d := due(); !d[o.ID] {
+		t.Fatalf("due %v leaves out the older create once the root is recorded", d)
 	}
 	claim(o.ID, ytwrite.ClaimClaimed)
 }

@@ -158,14 +158,17 @@ func init() {
 // before that rule (a previous release could queue two), so the second cannot
 // send while the first is in flight or remote_unknown and search a stale view
 // into a second root. The unresolved scan is the yt_write_ops_entity_open
-// partial index (document ops not applied or rejected).
+// partial index (document ops not applied or rejected). The fence is a rule
+// for prepared candidates only: the read-only requeue runs this admission on
+// a rejected op and then applies its own locked family check
+// (ytArticleFamilyHeldTx), which names the reason.
 func ytArticleCreateGateSQL(s *Store) string {
 	if _, on := s.ytDocsNow(); !on {
 		return `FALSE`
 	}
 	return s.q(`o.entity_kind = 'document' AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b
 		WHERE b.document_id::text = o.entity_id AND b.op_id IS DISTINCT FROM o.id)
-		AND (coalesce(o.payload->>'parent_family', '') = ''
+		AND (o.state <> 'prepared' OR coalesce(o.payload->>'parent_family', '') = ''
 			OR EXISTS (SELECT 1 FROM yt_family_roots r
 				WHERE r.tenant = o.tenant AND r.project_id = o.yt_target_id AND r.family = o.payload->>'parent_family')
 			OR NOT EXISTS (SELECT 1 FROM yt_write_ops f
@@ -175,7 +178,7 @@ func ytArticleCreateGateSQL(s *Store) string {
 				AND f.payload->>'parent_family' = o.payload->>'parent_family'))`,
 		`o.entity_kind = 'document' AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b
 		WHERE CAST(b.document_id AS CHAR) = o.entity_id AND NOT (b.op_id <=> o.id))
-		AND (coalesce(JSON_UNQUOTE(JSON_EXTRACT(o.payload, '$.parent_family')), '') = ''
+		AND (o.state <> 'prepared' OR coalesce(JSON_UNQUOTE(JSON_EXTRACT(o.payload, '$.parent_family')), '') = ''
 			OR EXISTS (SELECT 1 FROM yt_family_roots r
 				WHERE r.tenant = o.tenant AND r.project_id = o.yt_target_id
 				AND r.family = JSON_UNQUOTE(JSON_EXTRACT(o.payload, '$.parent_family')) COLLATE utf8mb4_0900_bin)
