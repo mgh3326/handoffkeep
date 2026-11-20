@@ -941,10 +941,16 @@ func openFloored(ctx context.Context, url string, registry []migration, floor in
 // default_transaction_read_only on, so PostgreSQL makes each transaction on
 // the pool READ ONLY and refuses any write through it (SQLSTATE 25006). It
 // differs from OpenForPlan, whose pool accepts writes, in that last part.
-// The caller checks the schema it needs with MigrationApplied.
+// The caller checks the schema it needs with MigrationApplied. A mysql:// URL
+// opens the MySQL store the same way (openMySQLReadOnly): no migration, and
+// every session read-only (hk 5711; the dry runs failed once hk served from
+// MySQL).
 func OpenReadOnly(ctx context.Context, url string) (*Store, error) {
+	if strings.HasPrefix(url, "mysql://") {
+		return openMySQLReadOnly(ctx, url)
+	}
 	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
-		return nil, errors.New("HANDOFFKEEP_DB_URL must be a PostgreSQL URL")
+		return nil, errors.New("HANDOFFKEEP_DB_URL must be a PostgreSQL or MySQL URL")
 	}
 	p, err := newPoolParams(ctx, url, map[string]string{"default_transaction_read_only": "on"})
 	if err != nil {
