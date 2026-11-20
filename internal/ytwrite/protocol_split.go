@@ -304,11 +304,14 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 	// r4615892443). A read sends nothing, so it also stops when the worker
 	// does (review of PR #527 r4638925829): the pass then settles on its
 	// own detached context and the next worker reads again.
+	// The read's context is the caller's (so a stop reaches it at once),
+	// bounded by the work deadline and the read budget.
+	workEnd, _ := wctx.Deadline()
 	verify := func(index string, search bool) (familyRead, error) {
-		vctx, cancel := context.WithTimeout(wctx, p.splitVerifyBudget(d.parts))
+		bctx, cancelWork := context.WithDeadline(caller, workEnd)
+		defer cancelWork()
+		vctx, cancel := context.WithTimeout(bctx, p.splitVerifyBudget(d.parts))
 		defer cancel()
-		stop := context.AfterFunc(caller, cancel)
-		defer stop()
 		return k.readFamily(vctx, ar, op, d, index, search)
 	}
 	read, err := verify(op.YTResultID, IndexMaybeSent(history))
