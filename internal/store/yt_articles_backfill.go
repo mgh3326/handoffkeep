@@ -335,25 +335,12 @@ func (s *Store) prepareYTArticleBackfillOnce(ctx context.Context, now time.Time,
 		return ytArticleUnchanged, nil
 	}
 	if family := YTArticleFamilyOf(r.doc.Key); family != "" && ytArticleAmends(r.doc.Key, r.body) == "" && !r.created && !r.splitOp {
+		// A short document's create is root-capable; a split creates no root
+		// (S13), so a long one is held only by an uncertain root.
 		target, _ := ytArticleTarget(g, r.doc)
-		if !YTArticleSplit(r.doc.BodyBytes) {
-			// The short document's root-capable create: serialize its family on
-			// this project before reading the pending state.
-			if err := lockYTEntity(ctx, tx, ytArticleFamilyLock, g.tenant+"\x1f"+target.ID+"\x1f"+family); err != nil {
-				return "", err
-			}
-		}
-		states, err := ytArticleFamilyStatesTx(ctx, tx, g.tenant)
-		if err != nil {
-			return "", err
-		}
-		if states.Uncertain(target.ID, family) {
-			return ytArticleFamilyUncertain, nil
-		}
-		// One root-capable create per family and project until its root is
-		// recorded: a split creates no root, so only a short document waits here.
-		if !YTArticleSplit(r.doc.BodyBytes) && states.Pending(target.ID, family) && !states.Recorded(target.ID, family) {
-			return ytArticleFamilyPending, nil
+		out, err := ytArticleFamilyGateTx(ctx, tx, g.tenant, target.ID, family, !YTArticleSplit(r.doc.BodyBytes))
+		if err != nil || out != "" {
+			return out, err
 		}
 	}
 	outcome, err := prepareYTArticleTx(ctx, tx, now, g, id, r)
@@ -361,6 +348,76 @@ func (s *Store) prepareYTArticleBackfillOnce(ctx context.Context, now time.Time,
 		return "", err
 	}
 	return outcome, tx.Commit(ctx)
+}
+
+// ytArticleFamilyGateTx is the family check before an article op of family on
+// project is inserted in tx (hk 5265, hk 5761): ytArticleFamilyUncertain while
+// a root create of the family there is remote_unknown and no root is
+// recorded, and, for a root-capable create (root), ytArticleFamilyPending
+// while another root-capable create is unresolved and no root is recorded;
+// "" when the op may be inserted. A root-capable create first takes the
+// family's ytArticleFamilyLock, so the read and the caller's insert are atomic
+// across documents: at most one root-capable create per tenant, project and
+// family exists until its root is recorded (S1), and no second create can
+// reach an uncertain root and make a second root. The caller holds the
+// document's lane lock and takes no lock after this one but the op insert's
+// (lockorder.go). Every path that inserts a root-capable article_create calls
+// it: the backfill before prepareYTArticleTx, and prepareYTArticleTx itself
+// (the feed, the catch-up), where a second call in the backfill's transaction
+// re-takes the held lock and reads the same state.
+func ytArticleFamilyGateTx(ctx context.Context, tx transaction, tenant, project, family string, root bool) (ytArticleOutcome, error) {
+	if root {
+		if err := lockYTEntity(ctx, tx, ytArticleFamilyLock, tenant+"\x1f"+project+"\x1f"+family); err != nil {
+			return "", err
+		}
+	}
+	return ytArticleFamilyHeldTx(ctx, tx, tenant, project, family, root)
+}
+
+// ytArticleFamilyHeldTx is ytArticleFamilyGateTx's check without its lock:
+// the read-only requeue's dry run reads it unlocked, and its apply after it
+// took the lock itself. It is YTArticleFamilyStates' rule for one family on
+// one project, read for that family only: a recorded root settles it; else a
+// remote_unknown root-capable create holds every op of the family
+// (uncertain), and, for a root-capable one (root), any unresolved one holds
+// it (pending). It reads no payload into Go: the family is matched in SQL, as
+// the dispatch fence matches it (ytArticleCreateGateSQL), over the
+// yt_write_ops_entity_open partial index.
+func ytArticleFamilyHeldTx(ctx context.Context, tx transaction, tenant, project, family string, root bool) (ytArticleOutcome, error) {
+	var recorded bool
+	if err := tx.QueryRow(ctx, sqlFor(tx,
+		`SELECT EXISTS(SELECT 1 FROM yt_family_roots WHERE tenant=$1 AND project_id=$2 AND family=$3)`,
+		`SELECT EXISTS(SELECT 1 FROM yt_family_roots WHERE tenant=? AND project_id=? AND family=?)`),
+		tenant, project, family).Scan(&recorded); err != nil {
+		return "", err
+	}
+	if recorded {
+		return "", nil
+	}
+	open := `FROM yt_write_ops WHERE entity_kind='document' AND state NOT IN ('applied','rejected')
+		AND principal=$1 AND kind=$2 AND tenant=$3 AND yt_target_id=$4 AND payload->>'parent_family'=$5`
+	openMySQL := `FROM yt_write_ops WHERE entity_kind='document' AND state NOT IN ('applied','rejected')
+		AND principal=? AND kind=? AND tenant=? AND yt_target_id=?
+		AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.parent_family')) COLLATE utf8mb4_0900_bin = ?`
+	var uncertain, pending bool
+	args := []any{YTDocsPrincipal, ytwrite.KindArticleCreate, tenant, project, family}
+	if dialectFor(tx) == mysqlDialect {
+		// Positional placeholders: the second EXISTS takes the five again.
+		args = append(args, args...)
+	}
+	if err := tx.QueryRow(ctx, sqlFor(tx,
+		`SELECT EXISTS(SELECT 1 `+open+` AND state='remote_unknown'), EXISTS(SELECT 1 `+open+`)`,
+		`SELECT EXISTS(SELECT 1 `+openMySQL+` AND state='remote_unknown'), EXISTS(SELECT 1 `+openMySQL+`)`),
+		args...).Scan(&uncertain, &pending); err != nil {
+		return "", err
+	}
+	if uncertain {
+		return ytArticleFamilyUncertain, nil
+	}
+	if root && pending {
+		return ytArticleFamilyPending, nil
+	}
+	return "", nil
 }
 
 // ytDocumentOpActiveTx reports whether document id has an unresolved hk

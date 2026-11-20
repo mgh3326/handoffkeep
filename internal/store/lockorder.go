@@ -183,6 +183,30 @@ package store
 //     the lane is GET_LOCK on the same held connection under the name
 //     mysqlSessionLockName("yt_family_root", key) (hk: prefix, 64 bytes) and
 //     RELEASE_LOCK releases it; the order is unchanged.
+//   - The family create lock (ytArticleFamilyGateTx, hk 5265, hk 5761) is a
+//     transaction-scoped entity lock, lockYTEntity(yt_article_family,
+//     <tenant>\x1f<project>\x1f<family>), distinct from the family lane above.
+//     Every transaction that may insert a root-capable article_create takes it
+//     after all its other locks but the insert's own: the backfill
+//     (PrepareYTArticleBackfill) after AddYTArticleBinding's locks (the
+//     document's lane lock, the documents authority row FOR SHARE, the
+//     document, task and youtrack_projects rows FOR SHARE); the catch-up
+//     (catchUpYTArticleOnce) after its one lane lock; a feed pass of
+//     document_articles (ytDocsHandler) after the feed lock and every lane
+//     lock of the pass, which it takes before deciding any document; the
+//     read-only requeue (requeueYTReadOnlyOpOnce) of a root-capable create
+//     after the op's lane lock and its authority row FOR SHARE, and before
+//     FOR UPDATE on that op's row (a row only a holder of the same lane
+//     locks). Under it
+//     the holder reads yt_family_roots and yt_write_ops without a lock and
+//     inserts its op (prepareYTOpTx: the lane lock it already holds, then the
+//     authority row FOR SHARE, which a switch holds while waiting for no lane
+//     or family lock). A backfill or catch-up holds one family lock and waits
+//     for nothing after it but that insert; only a feed pass, one at a time,
+//     holds several. A holder of a family lock therefore never waits for a
+//     lane lock, and no cycle runs through it, on PostgreSQL or on MySQL
+//     (an hk_locks row there, as every entity lock). The backfill's second
+//     call in prepareYTArticleTx re-takes the lock it holds.
 //
 //   - The YouTrack write op log (yt_write_ops.go, hk 3697). Prepare and Claim
 //     take one advisory lock, the entity lane lock
