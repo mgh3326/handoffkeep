@@ -110,6 +110,107 @@ type ytWriteOpAlertCandidate struct {
 	label string
 }
 
+// ytWriteOpAlertRow is one op a class's read returns: its state and reason,
+// and the held-op columns the notice names.
+type ytWriteOpAlertRow struct {
+	op            ytHeldOp
+	state, reason string
+}
+
+// ytWriteOpAlertArm is one read of a class's candidates: SQL without its
+// locking clause (ytReadWriteOpAlertArm adds it) and its arguments.
+type ytWriteOpAlertArm struct {
+	sql  string
+	args []any
+}
+
+// ytWriteOpAlertArms returns the reads that together list class's candidates,
+// each bounded to the batch. PostgreSQL reads them in one statement, which its
+// partial index yt_write_ops_alert_scan serves. MySQL reads one arm per state:
+// a single statement that ORs the states and orders by id under a limit lets
+// MySQL walk the primary key in id order and examine the table until it has
+// the batch (hk 5878). An arm is an equality on state, so yt_write_ops_state_id
+// serves its order and its limit, and the arms are disjoint.
+func ytWriteOpAlertArms(tx transaction, class string, cutoff time.Time) ([]ytWriteOpAlertArm, error) {
+	cut := cutoff.UTC()
+	batch := ytWriteOpAlertBatchMax
+	binding := ytwrite.ReasonBindingConflict
+	if dialectFor(tx) != mysqlDialect {
+		switch class {
+		case ytWriteOpAlertStuck:
+			// PostgreSQL reuses $1 for the three cutoffs.
+			return []ytWriteOpAlertArm{{sql: `SELECT o.state, o.reason, ` + ytHeldOpColumns + ` FROM yt_write_ops o
+				WHERE ((o.state='prepared' AND o.created_at <= $1) OR (o.state='dispatched' AND o.dispatched_at <= $1)
+					OR (o.state='remote_unknown' AND o.created_at <= $1))
+				AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='stuck')
+				ORDER BY o.id LIMIT $2`, args: []any{cut, batch}}}, nil
+		case ytWriteOpAlertRejected:
+			// Only the limit: this class has no time condition.
+			return []ytWriteOpAlertArm{{sql: `SELECT o.state, o.reason, ` + ytHeldOpColumns + ` FROM yt_write_ops o
+				WHERE (o.state='rejected' OR (o.state='applied' AND o.reason='` + binding + `'))
+				AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='rejected')
+				ORDER BY o.id LIMIT $1`, args: []any{batch}}}, nil
+		}
+		return nil, fmt.Errorf("unknown yt op alert class %q", class)
+	}
+	const stuckNotAlerted = `AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='stuck')`
+	const rejectedNotAlerted = `AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='rejected')`
+	sel := `SELECT o.state, o.reason, ` + ytHeldOpColumns + ` FROM yt_write_ops o WHERE `
+	switch class {
+	case ytWriteOpAlertStuck:
+		// Each state's cutoff is bound where its time condition is.
+		return []ytWriteOpAlertArm{
+			{sql: sel + `o.state='prepared' AND o.created_at <= ? ` + stuckNotAlerted + ` ORDER BY o.id LIMIT ?`, args: []any{cut, batch}},
+			{sql: sel + `o.state='dispatched' AND o.dispatched_at <= ? ` + stuckNotAlerted + ` ORDER BY o.id LIMIT ?`, args: []any{cut, batch}},
+			{sql: sel + `o.state='remote_unknown' AND o.created_at <= ? ` + stuckNotAlerted + ` ORDER BY o.id LIMIT ?`, args: []any{cut, batch}},
+		}, nil
+	case ytWriteOpAlertRejected:
+		return []ytWriteOpAlertArm{
+			{sql: sel + `o.state='rejected' ` + rejectedNotAlerted + ` ORDER BY o.id LIMIT ?`, args: []any{batch}},
+			{sql: sel + `o.state='applied' AND o.reason='` + binding + `' ` + rejectedNotAlerted + ` ORDER BY o.id LIMIT ?`, args: []any{batch}},
+		}, nil
+	}
+	return nil, fmt.Errorf("unknown yt op alert class %q", class)
+}
+
+// ytReadWriteOpAlertArm runs one arm under the transaction's row locks: the
+// candidates are share-locked until the pass commits, as the single statement
+// locked them.
+func ytReadWriteOpAlertArm(ctx context.Context, tx transaction, arm ytWriteOpAlertArm) ([]ytWriteOpAlertRow, error) {
+	lock := ` FOR SHARE OF o`
+	if dialectFor(tx) == mysqlDialect {
+		lock = ` FOR SHARE`
+	}
+	rows, err := tx.Query(ctx, arm.sql+lock, arm.args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ytWriteOpAlertRow
+	for rows.Next() {
+		var r ytWriteOpAlertRow
+		if err := rows.Scan(&r.state, &r.reason, &r.op.id, &r.op.principal, &r.op.kind, &r.op.tenant, &r.op.entityKind, &r.op.entityID, &r.op.target, &r.op.createdAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ytCapByID sorts rows by id and keeps the first limit. It merges the arms of
+// one class: each arm already holds its first limit ids, so the first limit of
+// the union is the first limit of the class.
+func ytCapByID[T any](rows []T, id func(T) int64, limit int) []T {
+	sort.Slice(rows, func(i, j int) bool { return id(rows[i]) < id(rows[j]) })
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows
+}
+
 // ytWriteOpAlertCandidates lists the ops of class not yet announced, oldest
 // first, up to the batch bound. The row lock keeps a pending alert from racing
 // a concurrent resolution. A stuck op is prepared since before cutoff, or
@@ -124,62 +225,21 @@ type ytWriteOpAlertCandidate struct {
 // under "prepared", so one notice tells the operator which command applies;
 // an op its gate admits, and any other kind, stays "prepared".
 func (s *Store) ytWriteOpAlertCandidates(ctx context.Context, tx transaction, class string, cutoff time.Time) ([]ytWriteOpAlertCandidate, error) {
-	// The binding-conflict reason is a literal, not a parameter, so a cached
-	// generic plan can still use the partial index yt_write_ops_alert_scan.
-	var q string
-	var args []any
-	switch class {
-	case ytWriteOpAlertStuck:
-		q = sqlFor(tx, `SELECT o.state, o.reason, `+ytHeldOpColumns+` FROM yt_write_ops o
-			WHERE ((o.state='prepared' AND o.created_at <= $1) OR (o.state='dispatched' AND o.dispatched_at <= $1)
-				OR (o.state='remote_unknown' AND o.created_at <= $1))
-			AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='stuck')
-			ORDER BY o.id LIMIT $2 FOR SHARE OF o`, `SELECT o.state, o.reason, `+ytHeldOpColumns+` FROM yt_write_ops o
-			WHERE ((o.state='prepared' AND o.created_at <= ?) OR (o.state='dispatched' AND o.dispatched_at <= ?)
-				OR (o.state='remote_unknown' AND o.created_at <= ?))
-			AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='stuck')
-			ORDER BY o.id LIMIT ? FOR SHARE`)
-		// PostgreSQL reuses $1 for the three cutoffs; MySQL binds each ? in
-		// order, so it needs the cutoff three times (hk 5611).
-		args = []any{cutoff.UTC(), ytWriteOpAlertBatchMax}
-		if dialectFor(tx) == mysqlDialect {
-			args = []any{cutoff.UTC(), cutoff.UTC(), cutoff.UTC(), ytWriteOpAlertBatchMax}
-		}
-	case ytWriteOpAlertRejected:
-		q = sqlFor(tx, `SELECT o.state, o.reason, `+ytHeldOpColumns+` FROM yt_write_ops o
-			WHERE (o.state='rejected' OR (o.state='applied' AND o.reason='`+ytwrite.ReasonBindingConflict+`'))
-			AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='rejected')
-			ORDER BY o.id LIMIT $1 FOR SHARE OF o`, `SELECT o.state, o.reason, `+ytHeldOpColumns+` FROM yt_write_ops o
-			WHERE (o.state='rejected' OR (o.state='applied' AND o.reason='`+ytwrite.ReasonBindingConflict+`'))
-			AND NOT EXISTS (SELECT 1 FROM yt_write_op_alerts a WHERE a.op_id=o.id AND a.alert_class='rejected')
-			ORDER BY o.id LIMIT ? FOR SHARE`)
-		// Only the limit: this class has no time condition, so a cutoff
-		// argument would have no placeholder to bind.
-		args = []any{ytWriteOpAlertBatchMax}
-	default:
-		return nil, fmt.Errorf("unknown yt op alert class %q", class)
-	}
-	rows, err := tx.Query(ctx, q, args...)
+	arms, err := ytWriteOpAlertArms(tx, class, cutoff)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	type row struct {
-		op            ytHeldOp
-		state, reason string
-	}
-	var found []row
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.state, &r.reason, &r.op.id, &r.op.principal, &r.op.kind, &r.op.tenant, &r.op.entityKind, &r.op.entityID, &r.op.target, &r.op.createdAt); err != nil {
+	var found []ytWriteOpAlertRow
+	for _, arm := range arms {
+		got, err := ytReadWriteOpAlertArm(ctx, tx, arm)
+		if err != nil {
 			return nil, err
 		}
-		found = append(found, r)
+		found = append(found, got...)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	rows.Close()
+	// Every arm is bounded to the batch, so the first batch ids of their union
+	// are the first batch ids of the class (an op is in one arm only).
+	found = ytCapByID(found, func(r ytWriteOpAlertRow) int64 { return r.op.id }, ytWriteOpAlertBatchMax)
 	sides := map[YTAuthorityKind]YTAuthoritySide{}
 	var out []ytWriteOpAlertCandidate
 	for _, r := range found {
