@@ -287,15 +287,13 @@ func TestDispositionAnswerNotice(t *testing.T) {
 }
 
 // Invariant: a deploy result notifies the lane that spawned the deploy's job,
-// once per result: the structured finish writes it in the finish transaction
-// (a commit failure leaves the attempt running and no row), a replayed finish
-// writes nothing new, a deploy record document is a report of its own (never
-// matched to an attempt by service/job/ref, so another target's result is not
-// silenced): replayed it writes nothing new, corrected at the same key it
-// notifies again, and control characters or NUL in its fields neither fail the
-// document write nor make the notice undeliverable. A record without a ref or
-// a retried attempt is a result of its own, ambiguous job/ref pairs never
-// share an id, and a deploy with no job or no recorded lane writes none.
+// once per result. A deploy record document is its own report (never matched
+// by service/job/ref, so another target's result is not silenced): replayed it
+// writes nothing new, corrected at the same key it notifies again, and control
+// characters or NUL in its fields neither fail the document write nor make the
+// notice undeliverable. A record without a ref is a result of its own,
+// ambiguous job/ref pairs never share an id, and a record with no job or no
+// recorded lane writes none. (The attempt-finish notice went with /v1/deploys.)
 func TestDeployResultNotice(t *testing.T) {
 	f := newDeployFixture(t, "outbox_deploy", "prod")
 	pool := f.s.pool
@@ -309,42 +307,8 @@ func TestDeployResultNotice(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	startRef := func(attempt, job, ref string) Deploy {
-		t.Helper()
-		d, _, err := f.s.StartDeploy(ctx, DeployStart{AttemptID: attempt, Service: f.svc, Targets: []string{"prod"}, Action: DeployActionDeploy, DeployedRef: ref, JobID: job, Source: "mergewake"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return d
-	}
-	start := func(attempt, job string) Deploy { return startRef(attempt, job, "ref-"+attempt) }
 	claim("job-deploy-1", "asker-lane", "worker-lane")
 	claim("job-deploy-2", "", "owner-only-lane")
-	d := start("att-1", "job-deploy-1")
-	id := deployResultAttemptEventID("att-1")
-
-	undo := failOutboxCommit(t, pool)
-	if _, err := f.s.FinishDeploy(ctx, "att-1", DeployFinish{State: DeploySuccess}); err == nil {
-		t.Fatal("commit failure was not reported")
-	}
-	if rows := outboxByPrefix(t, pool, "deploy-result-"); len(rows) != 0 {
-		t.Fatalf("rolled back finish left %d notices", len(rows))
-	}
-	var state string
-	if err := pool.QueryRow(ctx, `SELECT state FROM deploys WHERE id=$1`, d.ID).Scan(&state); err != nil || state != DeployRequested {
-		t.Fatalf("rollback left the attempt %q err=%v", state, err)
-	}
-	undo()
-
-	f.finish(t, "att-1", DeploySuccess)
-	rows := outboxByPrefix(t, pool, id)
-	if len(rows) != 1 || rows[0].TargetLane != "asker-lane" || rows[0].Kind != OutboxKindDeployResult || rows[0].Text != "[hk] deploy "+f.svc+" ref-att-1 job job-deploy-1: success" {
-		t.Fatalf("rows=%+v", rows)
-	}
-	f.finish(t, "att-1", DeploySuccess)
-	if rows := outboxByPrefix(t, pool, id); len(rows) != 1 {
-		t.Fatalf("replayed finish left %d notices", len(rows))
-	}
 
 	// A record document is its own report, identified by its key and the
 	// SHA256 of its stored body: the same job, ref and result at another
@@ -369,9 +333,6 @@ func TestDeployResultNotice(t *testing.T) {
 	}
 	if rows := outboxByPrefix(t, pool, recID); len(rows) != 1 || rows[0].TargetLane != "asker-lane" {
 		t.Fatalf("record rows=%+v (replay must add none)", rows)
-	}
-	if rows := outboxByPrefix(t, pool, id); len(rows) != 1 {
-		t.Fatalf("record disturbed the attempt's notice: %d rows", len(rows))
 	}
 	// A correction at the same key notifies again: result, then failed step.
 	failedID := put(rec, body("staging", `"ref-att-1"`, "failed", `"failed_step":2,`, "job-deploy-1"))
@@ -418,37 +379,15 @@ func TestDeployResultNotice(t *testing.T) {
 		t.Fatalf("record without ref rows=%+v", rows)
 	}
 
-	// Distinct deploys never share an id: hyphen-ambiguous (job, ref) pairs
-	// land on their own lanes, and a retried attempt of the same job and ref
-	// is a result of its own.
-	claim("a-b", "lane-ab", "")
-	claim("a", "lane-a", "")
-	startRef("att-amb-1", "a-b", "c")
-	startRef("att-amb-2", "a", "b-c")
-	f.finish(t, "att-amb-1", DeployFailed)
-	f.finish(t, "att-amb-2", DeployFailed)
-	startRef("att-retry-1", "a", "r")
-	startRef("att-retry-2", "a", "r")
-	f.finish(t, "att-retry-1", DeployFailed)
-	f.finish(t, "att-retry-2", DeployFailed)
-	for attempt, lane := range map[string]string{"att-amb-1": "lane-ab", "att-amb-2": "lane-a", "att-retry-1": "lane-a", "att-retry-2": "lane-a"} {
-		if rows := outboxByPrefix(t, pool, deployResultAttemptEventID(attempt)); len(rows) != 1 || rows[0].TargetLane != lane {
-			t.Fatalf("attempt %s rows=%+v want lane %s", attempt, rows, lane)
-		}
-	}
-
-	// No job, or a job no lane is recorded for: nobody asked, nothing queued.
-	start("att-nojob", "")
-	f.finish(t, "att-nojob", DeployFailed)
+	// A record with no job, or a job no lane is recorded for: nobody asked.
 	claim("job-deploy-3", "", "")
-	start("att-nolane", "job-deploy-3")
-	f.finish(t, "att-nolane", DeployRolledBack)
-	start("att-unknown-job", "job-never-claimed")
-	f.finish(t, "att-unknown-job", DeployFailed)
-	for _, attempt := range []string{"att-nojob", "att-nolane", "att-unknown-job"} {
-		if rows := outboxByPrefix(t, pool, deployResultAttemptEventID(attempt)); len(rows) != 0 {
-			t.Fatalf("attempt %s with no asking lane wrote %+v", attempt, rows)
-		}
+	noJobID := put("deploy/"+f.svc+"/20261113T040203Z", `{"schema":"`+DeployRecordSchema+`","service":"`+f.svc+`","target":"prod","deployed_ref":"ref-nj","result":"failed","job_id":null,"included_prs":null}`)
+	if rows := outboxByPrefix(t, pool, noJobID); len(rows) != 0 {
+		t.Fatalf("record with no job wrote %+v", rows)
+	}
+	noLaneID := put("deploy/"+f.svc+"/20261113T050203Z", body("prod", `"ref-nl"`, "rolled_back", "", "job-deploy-3"))
+	if rows := outboxByPrefix(t, pool, noLaneID); len(rows) != 0 {
+		t.Fatalf("record for a job with no lane wrote %+v", rows)
 	}
 }
 

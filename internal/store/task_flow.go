@@ -514,7 +514,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx transaction, id int64, 
 			return Task{}, fmt.Errorf("%w: a triage task without a kind cannot close as merged; set its kind first", ErrTaskConflict)
 		}
 		// The delivered task implements the PR, like a task its merge event
-		// names, so the PR's deploy and revert reach it (deployedTasksTx,
+		// names, so the PR's deploy and revert reach it (SettleMerged,
 		// propagateRevertTx). It is linked before the hold below so a reland
 		// PR counts as one; a refusal rolls the link back.
 		if err = linkChangeTask(ctx, tx, deliveredBy, id, ChangeImplements, true, now); err != nil {
