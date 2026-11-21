@@ -87,6 +87,29 @@ func (s *Store) listChangesWhereMySQL(ctx context.Context, where string, afterID
 		return nil, err
 	}
 	rows.Close()
+	rows, err = s.db().Query(ctx, `SELECT `+verificationColumns+` FROM verifications WHERE change_id IN (`+marks+`) ORDER BY recorded_at DESC, id DESC`, intArgs(ids)...)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var v Verification
+		if err = scanVerification(rows, &v); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		c := &changes[positions[v.ChangeID]]
+		v.Current = c.HeadSHA != nil && *c.HeadSHA == v.HeadSHA
+		c.Verifications = append(c.Verifications, v)
+		if v.Current {
+			current := v
+			c.Verification = &current
+		}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
 	return changes, nil
 }
 
