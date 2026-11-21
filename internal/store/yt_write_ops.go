@@ -703,13 +703,7 @@ func (l *YTWriteLedger) Due(ctx context.Context, now time.Time, limit int) ([]yt
 		// uncertain ops of this tenant are always listed for their evidence
 		// search.
 		if l.s.dialect == mysqlDialect {
-			return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops o
-				WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= ?
-				AND ((o.state = 'remote_unknown' AND o.tenant = ?)
-					OR (o.state = 'prepared' AND `+l.s.ytAdmitSQL("?")+`
-						AND NOT EXISTS (SELECT 1 FROM yt_write_ops e
-							WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected'))))
-				ORDER BY o.next_attempt_at, o.id LIMIT ?`, now.UTC(), l.tenant, l.tenant, ytLimit(limit))
+			return l.list(ctx, ytDueMySQLSQL(l.s), ytDueMySQLArgs(now, l.tenant, ytLimit(limit))...)
 		}
 		return l.list(ctx, `SELECT `+ytOpColumns+` FROM yt_write_ops o
 			WHERE o.state IN ('prepared','remote_unknown') AND o.next_attempt_at <= $1
@@ -731,11 +725,44 @@ func (l *YTWriteLedger) Due(ctx context.Context, now time.Time, limit int) ([]yt
 		ORDER BY o.next_attempt_at, o.id LIMIT ?`), now.UTC(), ytLimit(limit))
 }
 
-func (l *YTWriteLedger) Stale(ctx context.Context, cutoff time.Time, limit int) ([]ytwrite.Op, error) {
-	return l.list(ctx, sqlFor(l.s, `SELECT `+ytOpColumns+` FROM yt_write_ops
+// ytDueMySQLSQL is the scoped Due read on MySQL, args ytDueMySQLArgs. Each
+// state is its own arm: an equality on state, the time bound, and the
+// order (next_attempt_at, id) with the limit, so MySQL reads the open ops of
+// that state in order and stops at the limit (yt_write_ops_state_due, hk
+// 5878). The arms are disjoint, so the outer order and limit give the same
+// pass a single statement did, without the combined OR that walked the
+// time index over every resolved op.
+func ytDueMySQLSQL(s *Store) string {
+	return `(SELECT ` + ytOpColumns + ` FROM yt_write_ops o
+		WHERE o.state = 'remote_unknown' AND o.next_attempt_at <= ? AND o.tenant = ?
+		ORDER BY o.next_attempt_at, o.id LIMIT ?)
+	UNION ALL
+	(SELECT ` + ytOpColumns + ` FROM yt_write_ops o
+		WHERE o.state = 'prepared' AND o.next_attempt_at <= ? AND ` + s.ytAdmitSQL("?") + `
+			AND NOT EXISTS (SELECT 1 FROM yt_write_ops e
+				WHERE e.entity_kind = o.entity_kind AND e.entity_id = o.entity_id AND e.id < o.id AND e.state NOT IN ('applied','rejected'))
+		ORDER BY o.next_attempt_at, o.id LIMIT ?)
+	ORDER BY next_attempt_at, id LIMIT ?`
+}
+
+// ytDueMySQLArgs binds ytDueMySQLSQL: the cutoff and the tenant for each
+// arm, the limit per arm, and the overall limit.
+func ytDueMySQLArgs(now time.Time, tenant string, limit int) []any {
+	return []any{now.UTC(), tenant, limit, now.UTC(), tenant, limit, limit}
+}
+
+// ytStaleSQL is the Stale read (args: the cutoff, the limit). On MySQL it is
+// one equality on state with a time bound, so yt_write_ops_state_id serves the
+// order by id and the limit stops the read after the dispatched ops in range.
+func ytStaleSQL(s *Store) string {
+	return sqlFor(s, `SELECT `+ytOpColumns+` FROM yt_write_ops
 		WHERE state='dispatched' AND dispatched_at <= $1 ORDER BY id LIMIT $2`,
 		`SELECT `+ytOpColumns+` FROM yt_write_ops
-		WHERE state='dispatched' AND dispatched_at <= ? ORDER BY id LIMIT ?`), cutoff.UTC(), ytLimit(limit))
+		WHERE state='dispatched' AND dispatched_at <= ? ORDER BY id LIMIT ?`)
+}
+
+func (l *YTWriteLedger) Stale(ctx context.Context, cutoff time.Time, limit int) ([]ytwrite.Op, error) {
+	return l.list(ctx, ytStaleSQL(l.s), cutoff.UTC(), ytLimit(limit))
 }
 
 func (l *YTWriteLedger) ListState(ctx context.Context, state ytwrite.State, limit int) ([]ytwrite.Op, error) {
