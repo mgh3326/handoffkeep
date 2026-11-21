@@ -511,8 +511,10 @@ func (r *SchemaRunner) planAttach(ps *projectState, spec FieldSpec, pl *planStat
 }
 
 // planValues compares one attached field's bundle with the spec: missing
-// values are added; a state bundle's existing values also get their resolved
-// flag and ordinal corrected. Values the spec does not name are left alone.
+// values are added; an archived one the spec names is un-archived (YouTrack
+// keeps it, so a write of it is refused as absent); a state bundle's existing
+// values also get their resolved flag and ordinal corrected. Values the spec
+// does not name are left alone, archived or not.
 // Projects may share a bundle, so a change is queued once per bundle: the
 // second project's identical addition is dropped, and a value only that
 // project's spec names (a milestone) is still added.
@@ -555,6 +557,12 @@ func (r *SchemaRunner) planValues(ctx context.Context, ps *projectState, spec Fi
 					return err
 				}})
 			continue
+		}
+		if el.Archived && once("unarchive", want.Name) {
+			changes = append(changes, Change{Project: ps.hk, Object: spec.Name, Action: "unarchive", Value: want.Name, phase: phaseValue,
+				run: func(ctx context.Context) error {
+					return r.Client.UnarchiveBundleValue(ctx, spec.Kind, bundleID, el.ID)
+				}})
 		}
 		if spec.Kind != KindState {
 			continue

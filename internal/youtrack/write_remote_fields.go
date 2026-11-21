@@ -143,7 +143,7 @@ func (r *WriteRemote) ensureBundleValue(ctx context.Context, projectID, field st
 	if !ok || s.bundleID == "" {
 		return fmt.Errorf("field %q: a %s bundle takes no added value", field, s.typeID)
 	}
-	base := "/api/admin/customFieldSettings/bundles/" + kindPath + "/" + url.PathEscape(s.bundleID) + "/values"
+	base := bundleValuesPath(kindPath, s.bundleID)
 	q := url.Values{}
 	q.Set("fields", "id,name,archived")
 	path, body, action := base, any(struct {
@@ -152,10 +152,7 @@ func (r *WriteRemote) ensureBundleValue(ctx context.Context, projectID, field st
 	}{elementType, value}), "added"
 	if _, v, ok := s.findValue(value); ok && v.archived {
 		path, action = base+"/"+url.PathEscape(v.id), "unarchived"
-		body = struct {
-			Type     string `json:"$type"`
-			Archived bool   `json:"archived"`
-		}{elementType, false}
+		body = unarchiveBody(elementType)
 	}
 	_, _, err := r.send(ctx, http.MethodPost, path, q, body)
 	var re *ytwrite.RemoteError

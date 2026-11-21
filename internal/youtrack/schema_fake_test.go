@@ -59,6 +59,7 @@ type fakeElement struct {
 	ID, Name string
 	Ordinal  int
 	Resolved bool
+	Archived bool
 }
 
 func newFakeTenant(t *testing.T) *fakeTenant {
@@ -381,7 +382,7 @@ func (f *fakeTenant) globalByID(id string) *fakeGlobal {
 func (f *fakeTenant) bundleJSON(b *fakeBundle) map[string]any {
 	values := []map[string]any{}
 	for _, v := range b.Values {
-		el := map[string]any{"id": v.ID, "name": v.Name, "ordinal": v.Ordinal}
+		el := map[string]any{"id": v.ID, "name": v.Name, "ordinal": v.Ordinal, "archived": v.Archived}
 		if b.Kind == KindState {
 			el["isResolved"] = v.Resolved
 		}
@@ -449,7 +450,10 @@ func (f *fakeTenant) bundleRoute(w http.ResponseWriter, r *http.Request, rest []
 			if res, ok := body["isResolved"].(bool); ok {
 				v.Resolved = res
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"id": v.ID, "name": v.Name, "ordinal": v.Ordinal, "isResolved": v.Resolved})
+			if arch, ok := body["archived"].(bool); ok {
+				v.Archived = arch
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"id": v.ID, "name": v.Name, "ordinal": v.Ordinal, "isResolved": v.Resolved, "archived": v.Archived})
 			return
 		}
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no value"})
