@@ -1971,12 +1971,10 @@ binding. `handoffkeep youtrack decisions-backfill [--apply] [--by NAME]
 [--limit N]` checks every unbound decision: one GET of `DEC-<id>`, bound
 only when its readable id is `DEC-<id>`, it is in the DEC project, its
 summary names the decision and its `결정 ID` equals the id
-(`youtrack.VerifyDecisionIssue`), with `origin = 'import_verified'`. When
-that issue is missing or does not verify and the legacy sync recorded another
-issue for the decision (`youtrack_decision_mirrors`), that issue is read and
-bound under the same rules except the readable id, which YouTrack chose
-(`verified_legacy` in the report). When both `DEC-<id>` and a different
-mirrored issue verify, neither is bound (`ambiguous`). Without
+(`youtrack.VerifyDecisionIssue`), with `origin = 'import_verified'`. A decision whose
+`DEC-<id>` is missing or does not verify is never bound from another issue:
+the legacy mirror fallback is gone (hk 5937; production had no
+`youtrack_decision_mirrors` rows). Without
 `--apply` it is the preflight: the database is opened read-only and nothing
 is written. A decision whose `decision_create` is unresolved is refused
 (`pending_op`). With `--apply` and mode on in the command's environment, each

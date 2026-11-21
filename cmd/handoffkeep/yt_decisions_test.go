@@ -56,7 +56,7 @@ func TestYTDecisionsBackfillBindsOnlyVerified(t *testing.T) {
 	}
 	defer st.Close()
 	ids := map[string]int64{}
-	for i, qid := range []string{"verified", "summary", "field", "project", "missing", "error", "legacy", "both", "legacybad"} {
+	for i, qid := range []string{"verified", "summary", "field", "project", "missing", "error"} {
 		lane := "ytd-cmd-" + qid
 		if _, _, err := st.UpsertChatQuestion(ctx, store.ChatQuestion{ID: fmt.Sprintf("Q-20261112-%02d", 10+i), Lane: lane, Body: qid + "?"}); err != nil {
 			t.Fatal(err)
@@ -73,68 +73,39 @@ func TestYTDecisionsBackfillBindsOnlyVerified(t *testing.T) {
 		youtrack.DecisionReadable(ids["summary"]):  ytdIssue("2-2", ids["summary"], "[결정] other", ids["summary"], ytdCmdProject),
 		youtrack.DecisionReadable(ids["field"]):    ytdIssue("2-3", ids["field"], sum("field"), ids["field"]+1000, ytdCmdProject),
 		youtrack.DecisionReadable(ids["project"]):  ytdIssue("2-4", ids["project"], sum("project"), ids["project"], "0-99"),
-		// The legacy sync's issue: its own number and summary form, found
-		// through youtrack_decision_mirrors.
-		"2-9": func() youtrack.Issue {
-			i := ytdIssue("2-9", ids["legacy"], "[결정 "+strconv.FormatInt(ids["legacy"], 10)+"] legacy?", ids["legacy"], ytdCmdProject)
-			i.IDReadable = "DEC-9001"
-			return i
-		}(),
-		// Both the import's issue and a legacy one verify: ambiguous.
-		youtrack.DecisionReadable(ids["both"]): ytdIssue("2-10", ids["both"], sum("both"), ids["both"], ytdCmdProject),
-		"2-11":                                 ytdIssue("2-11", ids["both"], "[결정 "+strconv.FormatInt(ids["both"], 10)+"] both?", ids["both"], ytdCmdProject),
-		// No DEC-<id>, and the legacy issue's 결정 ID was changed.
-		"2-12": ytdIssue("2-12", ids["legacybad"], "[결정 "+strconv.FormatInt(ids["legacybad"], 10)+"] bad?", ids["legacybad"]+1, ytdCmdProject),
 	}, errs: map[string]error{youtrack.DecisionReadable(ids["error"]): errors.New("connection reset")}}
-	mirrors := map[int64]store.YouTrackDecisionMirror{}
-	for name, issue := range map[string]string{"legacy": "2-9", "both": "2-11", "legacybad": "2-12"} {
-		mirrors[ids[name]] = store.YouTrackDecisionMirror{DecisionID: ids[name], IssueID: issue, DisplayRef: "DEC-x", Stamp: "x"}
-	}
-	backfill := mirrorStore{Store: st, mirrors: mirrors}
-	opts := ytDecisionsOptions{Tenant: "tenant.youtrack.cloud", ProjectID: ytdCmdProject, BindBy: "operator:test", Snapshots: "off"}
 
-	pre, err := ytDecisionsBackfillRun(ctx, backfill, fake, opts)
+	pre, err := ytDecisionsBackfillRun(ctx, st, fake, ytDecisionsOptions{Tenant: "tenant.youtrack.cloud", ProjectID: ytdCmdProject, BindBy: "operator:test", Snapshots: "off"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pre.Checked != 9 || pre.Verified.Count != 2 || pre.Legacy.Count != 1 || pre.Ambiguous.Count != 1 || pre.Ambiguous.IDs[0] != ids["both"] ||
-		pre.Bound.Count != 0 || pre.Mismatch.Count != 4 || pre.Missing.Count != 1 || pre.Error.Count != 1 {
+	if pre.Checked != 6 || pre.Verified.Count != 1 || pre.Bound.Count != 0 || pre.Mismatch.Count != 3 || pre.Missing.Count != 1 || pre.Error.Count != 1 {
 		t.Fatalf("preflight %+v", pre)
 	}
 	if _, found, _ := st.YTDecisionBinding(ctx, ids["verified"]); found {
 		t.Fatal("the preflight bound a decision")
 	}
 
-	opts.Apply = true
-	got, err := ytDecisionsBackfillRun(ctx, backfill, fake, opts)
+	opts := ytDecisionsOptions{Tenant: "tenant.youtrack.cloud", ProjectID: ytdCmdProject, BindBy: "operator:test", Apply: true, Snapshots: "off"}
+	got, err := ytDecisionsBackfillRun(ctx, st, fake, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Bound.Count != 2 || got.Bound.IDs[0] != ids["verified"] || got.Bound.IDs[1] != ids["legacy"] || got.Mismatch.Count != 4 || len(got.Reasons) != 4 {
+	if got.Bound.Count != 1 || got.Bound.IDs[0] != ids["verified"] || got.Mismatch.Count != 3 || len(got.Reasons) != 3 {
 		t.Fatalf("apply %+v", got)
-	}
-	if b, found, err := st.YTDecisionBinding(ctx, ids["legacy"]); err != nil || !found || b.IssueID != "2-9" || b.IssueReadable != "DEC-9001" {
-		t.Fatalf("legacy binding %+v %v %v", b, found, err)
 	}
 	b, found, err := st.YTDecisionBinding(ctx, ids["verified"])
 	if err != nil || !found || b.IssueID != "2-1" || b.Origin != "import_verified" || b.IssueReadable != youtrack.DecisionReadable(ids["verified"]) || b.ProjectID != ytdCmdProject {
 		t.Fatalf("binding %+v %v %v", b, found, err)
 	}
-	legacyBad := false
-	for _, m := range got.Reasons {
-		legacyBad = legacyBad || (m.ID == ids["legacybad"] && strings.Contains(m.Reason, "legacy mirror issue 2-12"))
-	}
-	if !legacyBad {
-		t.Fatalf("legacy mismatch reason lost: %+v", got.Reasons)
-	}
-	for _, name := range []string{"summary", "field", "project", "missing", "error", "both", "legacybad"} {
+	for _, name := range []string{"summary", "field", "project", "missing", "error"} {
 		if _, found, _ := st.YTDecisionBinding(ctx, ids[name]); found {
 			t.Fatalf("%s was bound", name)
 		}
 	}
 	// A second run checks only the unbound ones again.
-	again, err := ytDecisionsBackfillRun(ctx, backfill, fake, opts)
-	if err != nil || again.Checked != 7 || again.Bound.Count != 0 {
+	again, err := ytDecisionsBackfillRun(ctx, st, fake, opts)
+	if err != nil || again.Checked != 5 || again.Bound.Count != 0 {
 		t.Fatalf("second run %+v %v", again, err)
 	}
 }
@@ -186,21 +157,9 @@ func TestYTDecisionsModeStartsTheWriteWorker(t *testing.T) {
 	}
 }
 
-// mirrorStore is the real store whose legacy mirror rows the test gives, so
-// the backfill's mirror read needs no seeded table.
-type mirrorStore struct {
-	*store.Store
-	mirrors map[int64]store.YouTrackDecisionMirror
-}
-
-func (m mirrorStore) ListYouTrackDecisionMirrors(_ context.Context, _ []int64) (map[int64]store.YouTrackDecisionMirror, error) {
-	return m.mirrors, nil
-}
-
 type fakeYTDStore struct {
 	unbound  []store.YTDecisionCandidate
 	bound    []int64
-	mirrors  map[int64]store.YouTrackDecisionMirror
 	bindings map[int64]store.YTDecisionBinding
 	outcomes map[int64]store.YTDecisionOutcome
 	calls    map[int64]int
@@ -247,10 +206,6 @@ func (f *fakeYTDStore) PrepareYTDecision(_ context.Context, id int64, _ time.Tim
 	}
 	f.calls[id]++
 	return f.outcomes[id], nil
-}
-
-func (f *fakeYTDStore) ListYouTrackDecisionMirrors(_ context.Context, _ []int64) (map[int64]store.YouTrackDecisionMirror, error) {
-	return f.mirrors, nil
 }
 
 // Unit test for the case in the comment: 6 decisions bound while mode was off,

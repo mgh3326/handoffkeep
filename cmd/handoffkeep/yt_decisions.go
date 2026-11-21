@@ -15,8 +15,7 @@ import (
 )
 
 // `youtrack decisions-backfill` (hk 4054): bind each decision's imported
-// DEC-<id> issue, or the issue the legacy `youtrack sync` mirrored it to,
-// after verifying it (hk 3833 §2.1), so its decision_fields
+// DEC-<id> issue after verifying it (hk 3833 §2.1), so its decision_fields
 // snapshots have a target and its full text reaches the issue. Read-only by
 // default (the preflight); --apply binds.
 
@@ -44,10 +43,8 @@ type ytDecisionsMismatch struct {
 	Reason string `json:"reason"`
 }
 
-// ytDecisionsReport is what one run found. Verified: the DEC-<id> issue, or
-// the legacy mirror's issue (also counted in Legacy), verifies (in --apply,
-// it was bound now); Ambiguous: both DEC-<id> and the different issue the
-// legacy mirror recorded verify (never bound); Bound: --apply published the
+// ytDecisionsReport is what one run found. Verified: the DEC-<id> issue
+// verifies (in --apply, it was bound now); Bound: --apply published the
 // binding; Missing: no DEC-<id> issue; Mismatch: an issue that fails the
 // verification (never bound); PendingOp: the decision's decision_create op is
 // unresolved (the op gives it its issue); Conflict: the binding was refused
@@ -63,8 +60,6 @@ type ytDecisionsReport struct {
 	Snapshots      string                `json:"snapshots"`
 	Checked        int                   `json:"checked"`
 	Verified       ytDecisionsClass      `json:"verified"`
-	Legacy         ytDecisionsClass      `json:"verified_legacy"`
-	Ambiguous      ytDecisionsClass      `json:"ambiguous"`
 	Bound          ytDecisionsClass      `json:"bound"`
 	Missing        ytDecisionsClass      `json:"missing"`
 	Mismatch       ytDecisionsClass      `json:"mismatch"`
@@ -89,7 +84,6 @@ type ytDecisionsBackfillStore interface {
 	BoundYTDecisions(ctx context.Context, tenant string, afterID int64, limit int) ([]int64, error)
 	BindYTDecision(ctx context.Context, b store.YTDecisionBinding, now time.Time) (bool, error)
 	PrepareYTDecision(ctx context.Context, id int64, now time.Time) (store.YTDecisionOutcome, error)
-	ListYouTrackDecisionMirrors(ctx context.Context, decisionIDs []int64) (map[int64]store.YouTrackDecisionMirror, error)
 }
 
 type ytDecisionsOptions struct {
@@ -106,9 +100,7 @@ type ytDecisionsOptions struct {
 }
 
 // ytDecisionsBackfillRun checks every unbound decision, oldest first: one GET
-// of DEC-<id> each, then youtrack.VerifyDecisionIssue; when that issue is
-// missing or does not verify and the legacy mirror recorded another issue for
-// the decision, one GET of that one, verified without the readable-id rule. With Apply, a
+// of DEC-<id> each, verified by youtrack.VerifyDecisionIssue. With Apply, a
 // verified issue is bound (store.BindYTDecision). A failed read is counted
 // and the run goes on.
 func ytDecisionsBackfillRun(ctx context.Context, st ytDecisionsBackfillStore, issues ytDecisionIssueGetter, o ytDecisionsOptions) (ytDecisionsReport, error) {
@@ -124,14 +116,6 @@ func ytDecisionsBackfillRun(ctx context.Context, st ytDecisionsBackfillStore, is
 		if err != nil {
 			return r, err
 		}
-		ids := make([]int64, 0, len(page))
-		for _, c := range page {
-			ids = append(ids, c.ID)
-		}
-		mirrors, err := st.ListYouTrackDecisionMirrors(ctx, ids)
-		if err != nil {
-			return r, err
-		}
 		for _, c := range page {
 			after = c.ID
 			if o.Limit > 0 && r.Checked >= o.Limit {
@@ -142,32 +126,8 @@ func ytDecisionsBackfillRun(ctx context.Context, st ytDecisionsBackfillStore, is
 				r.PendingOp.add(c.ID)
 				continue
 			}
-			// The import's DEC-<id> first; then the issue the legacy
-			// `youtrack sync` recorded for the decision
-			// (youtrack_decision_mirrors), whose number YouTrack chose.
 			issue, class, reason, err := ytDecisionIssueVerify(ctx, issues, youtrack.DecisionReadable(c.ID), c.ID, o.ProjectID, youtrack.DecisionReadable(c.ID))
-			if m, ok := mirrors[c.ID]; ok && class != "error" && m.IssueID != "" && m.IssueID != issue.ID {
-				li, lclass, lreason, lerr := ytDecisionIssueVerify(ctx, issues, m.IssueID, c.ID, o.ProjectID, "")
-				switch {
-				case lclass == "error":
-					class, err = lclass, lerr
-				case lclass == "verified" && class == "verified":
-					// Two issues verify for one decision: binding either
-					// would leave the other stale. Refused for the operator.
-					class = "ambiguous"
-				case lclass == "verified":
-					issue, class = li, lclass
-					r.Legacy.add(c.ID)
-				case lclass == "mismatch" && class == "missing":
-					// The only candidate is the legacy issue: report why it
-					// was refused.
-					class, reason = lclass, "legacy mirror issue "+m.IssueID+": "+lreason
-				}
-			}
 			switch class {
-			case "ambiguous":
-				r.Ambiguous.add(c.ID)
-				continue
 			case "missing":
 				r.Missing.add(c.ID)
 				if o.Apply && o.Snapshots == string(store.YTDecisionsOn) {
