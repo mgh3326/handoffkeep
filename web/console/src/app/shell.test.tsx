@@ -44,7 +44,7 @@ describe("Shell navigation", () => {
     expect(destinations.map((d) => [d.label, d.href])).toEqual(EXPECTED);
   });
 
-  it.each([390, 1440])("renders 홈·결정·작업·작업 현황·대기·배포·플릿 현황 in order with their hrefs at %i px", (width) => {
+  it.each([390, 1440])("keeps all seven links in the nav, in order, with their hrefs at %i px", (width) => {
     setWidth(width);
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 503 })));
     render(
@@ -52,9 +52,64 @@ describe("Shell navigation", () => {
         <p>page</p>
       </Shell>,
     );
-    const links = within(screen.getByRole("navigation")).getAllByRole("link");
+    // The 더보기 panel is hidden until opened; the DOM still carries every destination once.
+    const links = within(screen.getByRole("navigation")).getAllByRole("link", { hidden: true });
     expect(links.map((a) => [a.textContent, a.getAttribute("href")])).toEqual(EXPECTED);
     expect(links.find((a) => a.getAttribute("aria-current") === "page")?.textContent).toBe("작업");
+  });
+
+  it("puts four tabs on the bar and the other three behind 더보기", () => {
+    setWidth(320);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 503 })));
+    render(
+      <Shell current="home">
+        <p>page</p>
+      </Shell>,
+    );
+    const nav = screen.getByRole("navigation");
+    const visible = within(nav).getAllByRole("link").map((a) => a.textContent);
+    expect(visible).toEqual(["홈", "결정", "작업", "작업 현황"]);
+    const toggle = within(nav).getByRole("button", { name: "더보기" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(within(nav).queryByRole("link", { name: "배포" })).toBeNull();
+    expect(within(nav).queryByRole("link", { name: "대기" })).toBeNull();
+  });
+
+  it("opens 더보기 on click, closes it on Escape and returns focus to the toggle", () => {
+    setWidth(390);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 503 })));
+    render(
+      <Shell current="deploys">
+        <p>page</p>
+      </Shell>,
+    );
+    const nav = screen.getByRole("navigation");
+    const toggle = within(nav).getByRole("button", { name: "더보기" });
+    // The current page is off the bar, so the toggle says so visually.
+    expect(toggle.hasAttribute("data-current")).toBe(true);
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    const deploys = within(nav).getByRole("link", { name: "배포" });
+    expect(deploys.getAttribute("aria-current")).toBe("page");
+    expect(within(nav).getByRole("link", { name: "대기" }).getAttribute("href")).toBe("/ui/waits");
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(toggle);
+    expect(within(nav).queryByRole("link", { name: "배포" })).toBeNull();
+  });
+
+  it("closes 더보기 on a pointer press outside the nav", () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 503 })));
+    render(
+      <Shell current="home">
+        <p>page</p>
+      </Shell>,
+    );
+    const toggle = screen.getByRole("button", { name: "더보기" });
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.pointerDown(screen.getByText("page"));
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("marks nothing current for a page outside the seven destinations", () => {
@@ -80,7 +135,7 @@ describe("Shell navigation", () => {
     expect(link.textContent).toContain("기한 경과 1건");
     // The other five links carry no counter.
     for (const name of ["홈", "작업", "작업 현황", "배포", "플릿 현황"]) {
-      expect(within(screen.getByRole("link", { name })).queryByText(/\d/)).toBeNull();
+      expect(within(screen.getByRole("link", { name, hidden: true })).queryByText(/\d/)).toBeNull();
     }
     // One polite region carries the whole summary.
     await waitFor(() => expect(document.querySelector('[aria-live="polite"]')?.textContent).toBe("열린 결정 3건, 기한 경과 1건"));

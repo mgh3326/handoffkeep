@@ -1,8 +1,10 @@
-// The console shell: brand, theme choice and the four-row navigation around a
-// page (홈 · 결정 · 작업 · 배포: the decision comes second because a pending
-// decision outranks everything else on the board). One <nav> serves both layouts — shell.css turns it into a fixed
-// bottom tab bar below 768px and a left sidebar from 768px up — so the DOM
-// never carries two copies of the links. shell.css is imported by the shell
+// The console shell: brand, theme choice and the navigation around a page.
+// The decision comes second because a pending decision outranks everything
+// else on the board. One <nav> serves both layouts — shell.css turns it into a
+// one-row fixed bottom tab bar below 768px and a left sidebar from 768px up —
+// so the DOM never carries two copies of the links. Below 768px the entries
+// flagged `tab: false` sit in a 더보기 disclosure above the bar; from 768px up
+// that disclosure is not shown and every entry is in the sidebar. shell.css is imported by the shell
 // entry (main.tsx) and linked by the server and deploys page templates, so the
 // stylesheet has one fixed name for every page that renders this component.
 
@@ -16,15 +18,16 @@ import { OriginalPreference } from "../shared/translation";
 
 export type NavKey = "home" | "work" | "decisions" | "deploys" | "work-status" | "fleet-status" | "waits";
 
-/** Navigation entries are data: a new page is one row here. */
-export const destinations: { key: NavKey; label: string; href: string }[] = [
-  { key: "home", label: "홈", href: "/ui" },
-  { key: "decisions", label: "결정", href: "/ui/decisions" },
-  { key: "work", label: "작업", href: "/ui/work" },
-  { key: "work-status", label: "작업 현황", href: "/ui/work-status" },
-  { key: "waits", label: "대기", href: "/ui/waits" },
-  { key: "deploys", label: "배포", href: "/ui/deploys" },
-  { key: "fleet-status", label: "플릿 현황", href: "/ui/fleet-status" },
+/** Navigation entries are data: a new page is one row here. `tab` marks the
+ * entries that stay on the phone's tab bar; the rest open from 더보기. */
+export const destinations: { key: NavKey; label: string; href: string; tab: boolean }[] = [
+  { key: "home", label: "홈", href: "/ui", tab: true },
+  { key: "decisions", label: "결정", href: "/ui/decisions", tab: true },
+  { key: "work", label: "작업", href: "/ui/work", tab: true },
+  { key: "work-status", label: "작업 현황", href: "/ui/work-status", tab: true },
+  { key: "waits", label: "대기", href: "/ui/waits", tab: false },
+  { key: "deploys", label: "배포", href: "/ui/deploys", tab: false },
+  { key: "fleet-status", label: "플릿 현황", href: "/ui/fleet-status", tab: false },
 ];
 
 /** The spoken form of the decision counter, also the live announcement. */
@@ -49,6 +52,42 @@ export function Shell({ current, children }: { current: NavKey | null; children:
   const { data } = poll(loadAttention, 60_000);
   const [announcement, setAnnouncement] = useState({ sequence: 0, text: "" });
   const lastBadge = useRef("");
+  const [moreOpen, setMoreOpen] = useState(false);
+  const navRef = useRef<HTMLElement>(null);
+  const moreRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMoreOpen(false);
+        moreRef.current?.focus();
+      }
+    };
+    const onPointer = (event: Event) => {
+      if (!navRef.current?.contains(event.target as Node)) setMoreOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("pointerdown", onPointer);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("pointerdown", onPointer);
+    };
+  }, [moreOpen]);
+  const link = (d: (typeof destinations)[number]) => (
+    <a key={d.key} href={d.href} aria-current={d.key === current ? "page" : undefined}>
+      {d.label}
+      {d.key === "decisions" && data && data.decisions.count > 0 && (
+        <Chip kind="count" group="decision" count={data.decisions.count} label={`열린 결정 ${data.decisions.count}건`} />
+      )}
+      {d.key === "decisions" && data && data.decisions.overdue > 0 && (
+        <>
+          <span className="hk-shell-nav-dot" aria-hidden="true" />
+          <span className="hk-sr-only">기한 경과 {data.decisions.overdue}건</span>
+        </>
+      )}
+    </a>
+  );
+  const overflowCurrent = destinations.some((d) => !d.tab && d.key === current);
   useEffect(() => {
     const announce = (event: Event) => {
       if (event instanceof CustomEvent && typeof event.detail === "string") setAnnouncement(x => ({ sequence: x.sequence + 1, text: event.detail }));
@@ -69,21 +108,22 @@ export function Shell({ current, children }: { current: NavKey | null; children:
         </a>
         <div className="hk-shell-controls"><OriginalPreference /><ThemeChoice /></div>
       </header>
-      <nav className="hk-shell-nav" aria-label="콘솔 내비게이션">
-        {destinations.map((d) => (
-          <a key={d.key} href={d.href} aria-current={d.key === current ? "page" : undefined}>
-            {d.label}
-            {d.key === "decisions" && data && data.decisions.count > 0 && (
-              <Chip kind="count" group="decision" count={data.decisions.count} label={`열린 결정 ${data.decisions.count}건`} />
-            )}
-            {d.key === "decisions" && data && data.decisions.overdue > 0 && (
-              <>
-                <span className="hk-shell-nav-dot" aria-hidden="true" />
-                <span className="hk-sr-only">기한 경과 {data.decisions.overdue}건</span>
-              </>
-            )}
-          </a>
-        ))}
+      <nav className="hk-shell-nav" aria-label="콘솔 내비게이션" ref={navRef}>
+        {destinations.filter((d) => d.tab).map(link)}
+        <button
+          ref={moreRef}
+          type="button"
+          className="hk-shell-more-toggle"
+          aria-expanded={moreOpen}
+          aria-controls="hk-shell-more"
+          data-current={overflowCurrent ? "" : undefined}
+          onClick={() => setMoreOpen((open) => !open)}
+        >
+          더보기
+        </button>
+        <div id="hk-shell-more" className="hk-shell-more" hidden={!moreOpen}>
+          {destinations.filter((d) => !d.tab).map(link)}
+        </div>
       </nav>
       <main className="hk-shell-main">{children}</main>
       <div className="hk-sr-only" aria-live="polite"><span key={announcement.sequence}>{announcement.text}</span></div>
