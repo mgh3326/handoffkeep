@@ -21,17 +21,13 @@ var ErrDecisionNewTaskProject = errors.New("decision_new_task_project")
 // decision request on it, in one call. Every refusal the request write can
 // raise runs before the task row is created, so a refused request files
 // nothing: the request's shape, its secret scan and its option attachments
-// are checked first, and the dialect guard comes before anything else (the
-// request write itself is PostgreSQL-only). The task is then created through
+// are checked first. The task is then created through
 // CreateTaskChecked, which refuses a similar open task, so a retry after an
 // unknown outcome gets that refusal instead of a second task. What remains
 // after the create is the request write's database failures; if one of
 // those fails, the task stays in backlog with no request and the caller
 // re-sends with the request on that task.
 func (s *Store) RecordDecisionRequestNewTask(ctx context.Context, by string, in NewTaskDecisionInput) (DecisionRequestResult, error) {
-	if s.dialect == mysqlDialect {
-		return DecisionRequestResult{}, ErrDialectUnsupported
-	}
 	if in.Project == "" {
 		return DecisionRequestResult{}, ErrDecisionNewTaskProject
 	}
@@ -68,10 +64,11 @@ func (s *Store) RecordDecisionRequestNewTask(ctx context.Context, by string, in 
 // checkNewTaskAttachments runs the option attachment existence check in a
 // read-only transaction, before the new task's row is written.
 func (s *Store) checkNewTaskAttachments(ctx context.Context, options DecisionOptions) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, release, err := s.begin(ctx)
 	if err != nil {
 		return err
 	}
+	defer release()
 	defer tx.Rollback(ctx)
-	return checkDecisionAttachmentsExist(ctx, tx, options)
+	return checkDecisionAttachmentsExistTx(ctx, tx, options)
 }

@@ -24,14 +24,11 @@ func TestDecisionRequestGroundSecretRefused(t *testing.T) {
 }
 
 // Invariant: a new task is refused, with nothing written, before the request
-// write can refuse it: on MySQL (the request write is PostgreSQL-only) and on a
-// secret-like ground. Neither path reaches the pool.
+// write can refuse it: a secret-like ground is caught before the pool is
+// reached. The MySQL path runs in TestMySQLNewTaskDecisionFilesTaskAndRequest.
 func TestNewTaskRefusedBeforeAnyWrite(t *testing.T) {
 	ctx := context.Background()
 	in := NewTaskDecisionInput{Project: "p", Lane: "mac-lane", Request: decisionInput()}
-	if _, err := (&Store{dialect: mysqlDialect}).RecordDecisionRequestNewTask(ctx, "tester", in); !errors.Is(err, ErrDialectUnsupported) {
-		t.Fatalf("mysql: err=%v, want ErrDialectUnsupported", err)
-	}
 	secret := in
 	secret.Request.Grounds = []string{"AKIA" + strings.Repeat("X", 16)}
 	_, err := (&Store{}).RecordDecisionRequestNewTask(ctx, "tester", secret)

@@ -22,10 +22,6 @@ func (s *Store) SearchCtx(ctx context.Context, q, session string, limit int) ([]
 }
 
 func (s *Store) searchCtx(ctx context.Context, q, session string, limit int) ([]SearchResult, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		// Not ported to MySQL: ctx full-text search, B8 (hk 4899 §6) (hk 5088).
-		return nil, ErrDialectUnsupported
-	}
 	if limit < 1 {
 		limit = 20
 	}
@@ -47,7 +43,11 @@ func (s *Store) searchCtx(ctx context.Context, q, session string, limit int) ([]
 		ORDER BY created_at DESC, key
 		LIMIT $3`
 
-	rows, err := s.pool.Query(ctx, sql, session, pattern, limit+1)
+	args := []any{session, pattern, limit + 1}
+	if s.dialect == mysqlDialect {
+		sql, args = ctxSearchMySQL, []any{session, session, pattern, pattern, session, session, pattern, pattern, pattern, limit + 1}
+	}
+	rows, err := s.db().Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search ctx: %w", err)
 	}
@@ -78,3 +78,19 @@ func (s *Store) searchCtx(ctx context.Context, q, session string, limit int) ([]
 	}
 	return out, nil
 }
+
+// ctxSearchMySQL is the scope "ctx" search on MySQL. Its collation is
+// utf8mb4_0900_bin, so LIKE is case-sensitive as on PostgreSQL. The result key
+// is item_key because `key` is reserved in MySQL, and the memory refs are an
+// empty JSON object, as in the PostgreSQL statement.
+const ctxSearchMySQL = `SELECT 'ctx' scope, CAST(c.id AS CHAR) item_key, c.session, c.kind, c.title, LEFT(c.body, 160) snippet, c.refs, c.created_at
+		FROM checkpoints c
+		WHERE (? = '' OR c.session = ?)
+		  AND (c.title LIKE ? ESCAPE '\\' OR c.body LIKE ? ESCAPE '\\')
+		UNION ALL
+		SELECT 'ctx' scope, CONCAT(m.agent, '/', m.name) item_key, m.agent session, m.memory_type kind, m.name title, LEFT(m.content, 160) snippet, CAST('{}' AS JSON) refs, m.updated_at created_at
+		FROM memory m
+		WHERE (? = '' OR m.agent = ?)
+		  AND (m.name LIKE ? ESCAPE '\\' OR m.description LIKE ? ESCAPE '\\' OR m.content LIKE ? ESCAPE '\\')
+		ORDER BY created_at DESC, item_key
+		LIMIT ?`
