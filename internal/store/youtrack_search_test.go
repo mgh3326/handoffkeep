@@ -115,16 +115,10 @@ func TestYouTrackDocHitsMapArticlesAndFilterBySession(t *testing.T) {
 	if _, _, err := s.PutDocument(ctx, Document{Key: "design/hits-a", Kind: "design", Session: "sess-hits", Body: "# A\n\nbody", CreatedBy: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: "design/hits-a", HKProject: "handoffkeep", ArticleID: "55-1"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: "/hk-part/search-test/2", DocumentKey: "design/hits-a", PartIndex: 2, PartCount: 2, HKProject: "handoffkeep", ArticleID: "55-3"}); err != nil {
-		t.Fatal(err)
-	}
+	seedYouTrackDocArticle(t, s, YouTrackDocArticle{DocKey: "design/hits-a", HKProject: "handoffkeep", ArticleID: "55-1"})
+	seedYouTrackDocArticle(t, s, YouTrackDocArticle{DocKey: "/hk-part/search-test/2", DocumentKey: "design/hits-a", PartIndex: 2, PartCount: 2, HKProject: "handoffkeep", ArticleID: "55-3"})
 	// An index article has no document row, so it must not be a hit.
-	if err := s.UpsertYouTrackDocArticle(ctx, YouTrackDocArticle{DocKey: "index:hk:handoffkeep", HKProject: "handoffkeep", ArticleID: "55-2"}); err != nil {
-		t.Fatal(err)
-	}
+	seedYouTrackDocArticle(t, s, YouTrackDocArticle{DocKey: "index:hk:handoffkeep", HKProject: "handoffkeep", ArticleID: "55-2"})
 
 	hits, err := s.YouTrackDocHits(ctx, []string{"55-1", "55-2", "55-3"}, "")
 	if err != nil {
@@ -195,5 +189,25 @@ func TestCheckSearchRefusesWhatSearchRefused(t *testing.T) {
 		if err := CheckSearch("x", scope, ""); err != nil {
 			t.Fatalf("CheckSearch scope %s = %v, want accepted", scope, err)
 		}
+	}
+}
+
+// seedYouTrackDocArticle writes one article ledger row. The store has no
+// writer for the ledger any more (the sync that filled it is gone), so the
+// search tests seed it directly.
+func seedYouTrackDocArticle(t *testing.T, s *Store, x YouTrackDocArticle) {
+	t.Helper()
+	if x.DocumentKey == "" {
+		x.DocumentKey = x.DocKey
+	}
+	if x.PartIndex == 0 {
+		x.PartIndex = 1
+	}
+	if x.PartCount == 0 {
+		x.PartCount = 1
+	}
+	if _, err := s.pool.Exec(t.Context(), `INSERT INTO youtrack_doc_articles(doc_key,document_key,part_index,part_count,part_sha,hk_project,article_id,source_sha,bytes,synced_at)
+		VALUES($1,$2,$3,$4,'',$5,$6,'',0,now())`, x.DocKey, x.DocumentKey, x.PartIndex, x.PartCount, x.HKProject, x.ArticleID); err != nil {
+		t.Fatal(err)
 	}
 }
