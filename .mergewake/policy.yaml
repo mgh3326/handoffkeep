@@ -3,6 +3,9 @@ enabled: true
 required_checks:
   - 'test'
   - 'pr: store + postgres'
+  # Production serves MySQL since 2026-11-20 (hk 4899); #531, #536 and #543
+  # merged with this check red and turned main red (hk 5796, 5899, 5950).
+  - 'store: mysql and schema drift'
   - 'vitest'
   - 'build (linux, amd64)'
   - 'build (linux, arm64)'
