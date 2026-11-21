@@ -4787,7 +4787,11 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 			if e != nil {
 				return out, nil
 			}
-			row := s.pool.QueryRow(ctx, `SELECT key,session,kind,left(body,160),created_at FROM documents WHERE id=$2 AND ($1='' OR session=$1)`, session, id)
+			docArgs := []any{session, id}
+			if s.dialect == mysqlDialect {
+				docArgs = []any{id, session, session}
+			}
+			row := s.db().QueryRow(ctx, sqlFor(s, `SELECT key,session,kind,left(body,160),created_at FROM documents WHERE id=$2 AND ($1='' OR session=$1)`, docExactMySQL), docArgs...)
 			var x SearchResult
 			switch e := row.Scan(&x.Key, &x.Session, &x.Kind, &x.Snippet, &x.CreatedAt); {
 			case e == nil:
@@ -4817,10 +4821,14 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 	FROM page p
 	LEFT JOIN documents d ON p.scope='docs' AND d.id=p.row_id
 	ORDER BY p.created_at DESC,p.scope,p.key,p.session,p.title`
-	if capture, ok := ctx.Value(searchCaptureKey{}).(searchCapture); ok {
-		capture(mainSQL, []any{session, q, limit + 1})
+	mainArgs := []any{session, q, limit + 1}
+	if s.dialect == mysqlDialect {
+		mainSQL, mainArgs = docsSearchMySQL(q, session, limit+1)
 	}
-	rows, e := s.pool.Query(ctx, mainSQL, session, q, limit+1)
+	if capture, ok := ctx.Value(searchCaptureKey{}).(searchCapture); ok {
+		capture(mainSQL, mainArgs)
+	}
+	rows, e := s.db().Query(ctx, mainSQL, mainArgs...)
 	if e != nil {
 		return nil, fmt.Errorf("search: %w", e)
 	}
@@ -4946,7 +4954,11 @@ func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]S
 	titleMatch := `(to_tsvector('simple',t.title) @@ plainto_tsquery('simple',$2) OR t.title ILIKE '%'||$4||'%' ESCAPE '\' OR EXISTS (SELECT 1 FROM translations tr WHERE tr.entity='task' AND tr.entity_id=t.id::text AND tr.field='title' AND tr.lang='ko' AND tr.source_sha256=encode(sha256(convert_to(t.title,'UTF8')),'hex') AND tr.text ILIKE '%'||$4||'%' ESCAPE '\'))`
 	out := []SearchResult{}
 	if exactID >= 0 {
-		row := s.pool.QueryRow(ctx, `SELECT t.id::text,t.lane,t.kind,t.title,`+refsExpr+`,t.created_at FROM tasks t WHERE t.id=$2 AND ($1='' OR t.lane=$1)`, lane, exactID)
+		exactArgs := []any{lane, exactID}
+		if s.dialect == mysqlDialect {
+			exactArgs = []any{exactID, lane, lane}
+		}
+		row := s.db().QueryRow(ctx, sqlFor(s, `SELECT t.id::text,t.lane,t.kind,t.title,`+refsExpr+`,t.created_at FROM tasks t WHERE t.id=$2 AND ($1='' OR t.lane=$1)`, tasksExactMySQL), exactArgs...)
 		var x SearchResult
 		var refs []byte
 		switch e := row.Scan(&x.Key, &x.Session, &x.Kind, &x.Title, &refs, &x.CreatedAt); {
@@ -4963,7 +4975,7 @@ func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]S
 		}
 	}
 	var comments bool
-	if e := s.pool.QueryRow(ctx, `SELECT to_regclass('task_comments') IS NOT NULL`).Scan(&comments); e != nil {
+	if e := s.db().QueryRow(ctx, sqlFor(s, `SELECT to_regclass('task_comments') IS NOT NULL`, tasksProbeCommentsMySQL)).Scan(&comments); e != nil {
 		return nil, fmt.Errorf("search tasks probe: %w", e)
 	}
 	parts := []string{`SELECT 'tasks' scope,t.id::text key,t.lane session,t.kind,t.title,` +
@@ -4982,10 +4994,14 @@ func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]S
 			refsExpr+` refs,t.created_at,2 match_rank FROM task_comments c JOIN tasks t ON t.id=c.task_id WHERE ($1='' OR t.lane=$1) AND (to_tsvector('simple',c.body) @@ plainto_tsquery('simple',$2) OR c.body ILIKE '%'||$4||'%' ESCAPE '\' OR EXISTS (SELECT 1 FROM translations tr WHERE tr.entity='task_comment' AND tr.entity_id=c.id::text AND tr.field='body' AND tr.lang='ko' AND tr.source_sha256=encode(sha256(convert_to(c.body,'UTF8')),'hex') AND tr.text ILIKE '%'||$4||'%' ESCAPE '\')) AND NOT `+titleMatch+` ORDER BY t.id, c.created_at DESC, c.id DESC)`)
 	}
 	mainSQL := `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (SELECT DISTINCT ON (key) * FROM (` + strings.Join(parts, " UNION ALL ") + ") candidates ORDER BY key,match_rank,created_at DESC) r ORDER BY r.match_rank,r.created_at DESC,r.key DESC LIMIT $3"
-	if capture, ok := ctx.Value(searchCaptureKey{}).(searchCapture); ok {
-		capture(mainSQL, []any{lane, q, limit + 1, like})
+	mainArgs := []any{lane, q, limit + 1, like}
+	if s.dialect == mysqlDialect {
+		mainSQL, mainArgs = tasksSearchMySQL(q, lane, like, limit+1, comments)
 	}
-	rows, e := s.pool.Query(ctx, mainSQL, lane, q, limit+1, like)
+	if capture, ok := ctx.Value(searchCaptureKey{}).(searchCapture); ok {
+		capture(mainSQL, mainArgs)
+	}
+	rows, e := s.db().Query(ctx, mainSQL, mainArgs...)
 	if e != nil {
 		return nil, fmt.Errorf("search tasks: %w", e)
 	}
