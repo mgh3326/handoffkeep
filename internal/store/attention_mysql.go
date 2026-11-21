@@ -18,17 +18,20 @@ const attentionInboxVisibleMySQL = `(s.done_at IS NULL AND (s.snoozed_until IS N
 const attentionTaskVisibleMySQL = `(s.done_at IS NULL OR s.done_at<` + taskActivitySQLMySQL + `) AND (s.snoozed_until IS NULL OR s.snoozed_until<=?)`
 
 // relayDecisionNeededKeyMySQL is the functional key of an open-decision lane
-// event: its id when the row is a [decision-needed] lane.event, else NULL. The
-// index relay_events_decision_lane is built on this exact expression
+// event: 1 when the row is a [decision-needed] lane.event, else 0. It names no
+// AUTO_INCREMENT column (MySQL rejects such a functional key, error 3754), so
+// the index relay_events_decision_lane is built on this flag and the InnoDB
+// primary key follows it. The index is built on this exact expression
 // (migration 20261121-relay-decision-lane), and attentionOpenLaneDecisionSQLMySQL
-// tests it, so the planner ranges over the decision-needed events alone instead
-// of every lane.event row. Keep the two texts identical.
-const relayDecisionNeededKeyMySQL = `CASE WHEN kind='lane.event' AND text LIKE '[decision-needed]%' THEN id END`
+// compares it with = 1, the form the optimizer matches to the key, so the
+// planner ranges over the decision-needed events alone instead of every
+// lane.event row. Keep the two texts identical.
+const relayDecisionNeededKeyMySQL = `CASE WHEN kind='lane.event' AND text LIKE '[decision-needed]%' THEN 1 ELSE 0 END`
 
 // attentionOpenLaneDecisionSQLMySQL is openLaneDecisionSQL for MySQL. It reads
 // relay_events as "e" and is used only where e is the sole table in scope, so
 // the key's bare column names resolve to e.
-const attentionOpenLaneDecisionSQLMySQL = `(` + relayDecisionNeededKeyMySQL + `) IS NOT NULL AND NOT EXISTS (
+const attentionOpenLaneDecisionSQLMySQL = `(` + relayDecisionNeededKeyMySQL + `) = 1 AND NOT EXISTS (
 			SELECT 1 FROM relay_events resolved WHERE resolved.kind='lane.event' AND resolved.owner_lane=e.owner_lane
 			AND resolved.text LIKE CONCAT('[decision-answered] #',e.id,':%') AND resolved.id>e.id
 		)`

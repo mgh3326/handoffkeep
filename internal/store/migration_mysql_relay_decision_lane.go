@@ -5,8 +5,10 @@ package store
 // it the planner scans every lane.event row (about 53k examined per call on
 // production) and tests the [decision-needed] prefix on each one; the index
 // ranges over the matching events alone. The statement is a functional key on
-// relay_events, which the prior migration created with kind, text and id, so it
-// depends on 20261118-mysql-relay-jobs. The build scans relay_events and takes a
+// relay_events, which the prior migration created with kind and text, so it
+// depends on 20261118-mysql-relay-jobs. The key is a 0/1 flag, not the row id:
+// MySQL rejects a functional key over the AUTO_INCREMENT id (error 3754). The
+// build scans relay_events and takes a
 // metadata lock for its duration, pausing writes to it until the index is
 // built, as the relay_events index builds in that migration do. Keep the table
 // small during this expand step; the rows the index covers are the
