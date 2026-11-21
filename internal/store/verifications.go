@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
@@ -143,8 +142,8 @@ func checkVerification(in VerificationInput) error {
 
 const verificationColumns = `id,change_id,head_sha,level,verifier,verifier_job_id,family,profile,model,harness,evidence,ci_result,source,recorded_by,recorded_at`
 
-func scanVerification(row pgx.Row, v *Verification) error {
-	return row.Scan(&v.ID, &v.ChangeID, &v.HeadSHA, &v.Level, &v.Verifier, &v.VerifierJobID, &v.Family, &v.Profile, &v.Model, &v.Harness, &v.Evidence, &v.CIResult, &v.Source, &v.RecordedBy, &v.RecordedAt)
+func scanVerification(r row, v *Verification) error {
+	return r.Scan(&v.ID, &v.ChangeID, &v.HeadSHA, &v.Level, &v.Verifier, &v.VerifierJobID, &v.Family, &v.Profile, &v.Model, &v.Harness, &v.Evidence, &v.CIResult, &v.Source, &v.RecordedBy, &v.RecordedAt)
 }
 
 // RecordVerification stores the verdict for (in.PR, in.HeadSHA). A PR hk has
@@ -155,16 +154,14 @@ func scanVerification(row pgx.Row, v *Verification) error {
 // It locks at most one changes row (the stub insert) and one verifications
 // row, and no task row (lockorder.go).
 func (s *Store) RecordVerification(ctx context.Context, in VerificationInput, recordedBy string) (Verification, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		// Not ported to MySQL: the verifications table is left out of MySQL (design §2) (hk 5088).
-		return Verification{}, false, ErrDialectUnsupported
-	}
-
 	if err := checkVerification(in); err != nil {
 		return Verification{}, false, err
 	}
 	if !validText(recordedBy, 128) || recordedBy == "" {
 		return Verification{}, false, errors.New("invalid verification: recorded_by is required")
+	}
+	if s != nil && s.dialect == mysqlDialect {
+		return s.recordVerificationMySQL(ctx, in, recordedBy)
 	}
 	repo, n, _ := parsePRURL(in.PR)
 	now := time.Now().UTC()
