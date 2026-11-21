@@ -38,7 +38,7 @@ type SettleMergedReport struct {
 	Tasks   map[string][]int64 `json:"tasks"`
 }
 
-// SettleMerged applies the deploy task rule (deployedTasksTx) to the merged
+// SettleMerged applies the deploy task rule to the merged
 // tasks of project (every project when empty): a task whose implements
 // changes are all deployed moves to deployed with the newest successful
 // included attempt as evidence (source hk.deploy). Every other task stays
@@ -73,7 +73,7 @@ func (s *Store) settleMergedOnce(ctx context.Context, project string, dryRun boo
 	}
 	defer release()
 	defer tx.Rollback(ctx)
-	// Level 2 before the task rows (lockorder.go), as FinishDeploy takes it.
+	// Level 2 before the task rows (lockorder.go).
 	if err = s.lockTx(ctx, tx, 8241873001); err != nil {
 		return SettleMergedReport{}, err
 	}
@@ -118,7 +118,7 @@ func (s *Store) settleMergedOnce(ctx context.Context, project string, dryRun boo
 
 // settleReasonTx decides one merged task. It returns SettleDeployed with the
 // attempt id that carries the task, or the reason it stays merged. The rules
-// are the ones deployedTasksTx and PendingChanges use: changeDeployedSQL for
+// are the ones this sweep uses: changeDeployedSQL for
 // containment, and an included successful deploy for the evidence.
 func (s *Store) settleReasonTx(ctx context.Context, tx transaction, taskID int64) (string, string, error) {
 	var linked, noSHA int

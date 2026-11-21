@@ -110,9 +110,9 @@ A lookup that Discord answers with 429, or that cannot connect, did not run.
 hk waits for `Retry-After` (or the backoff) and looks again; it does not
 create in the meantime.
 
-A deploy failure is posted only when it is a `deploys` row (written by
-`StartDeploy` and `FinishDeploy`) whose `deploy_changes` include a change of
-the task. A failure recorded only as a deploy-record document links to no
+A deploy failure is posted only when it is a `deploys` row whose
+`deploy_changes` include a change of the task. (The attempt writers that made
+those rows were removed in hk 5913; the deploy-record path is the live one.) A failure recorded only as a deploy-record document links to no
 task, so it is not posted.
 
 ## Rollout

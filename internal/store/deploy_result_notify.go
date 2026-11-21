@@ -14,19 +14,10 @@ import (
 )
 
 // A deploy result is a resolution too (hk 3295): the lane that asked for the
-// deploy hears one notice when its attempt ends or its deploy record lands.
-// The asker is the lane that spawned the deploy's job (parent_lane, else the
-// job's own lane); a deploy with no job, or a job no lane is recorded for,
-// has no asker and writes nothing.
-
-// deployResultAttemptEventID names the result of one deploy attempt. The
-// attempt id is one field, so the id cannot collide the way a join of several
-// free-text fields (service, job, ref) could; it is hashed to stay within the
-// 256-byte event id cap whatever the attempt id's length.
-func deployResultAttemptEventID(attemptID string) string {
-	sum := sha256.Sum256([]byte("attempt\x00" + attemptID))
-	return "deploy-result-attempt-" + hex.EncodeToString(sum[:16])
-}
+// deploy hears one notice when its deploy record lands. The asker is the lane
+// that spawned the deploy's job (parent_lane, else the job's own lane); a
+// deploy with no job, or a job no lane is recorded for, has no asker and
+// writes nothing. (The attempt-finish notice went with /v1/deploys, hk 5913.)
 
 // deployResultRecordEventID names the result one stored deploy record
 // document reports: the document key and the SHA256 of its stored body. A

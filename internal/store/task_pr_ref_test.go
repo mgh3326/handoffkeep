@@ -138,8 +138,8 @@ func TestEpicPRDoesNotDeliverChild(t *testing.T) {
 func TestReconciledChangeSettlesHeldTask(t *testing.T) {
 	f := newDeployFixture(t, "reconcile", "prod")
 	held := flowTask(t, f.s, f.s.pool, "implement", StateBacklog, false)
-	// The deploy finishes before the task has any change link, so FinishDeploy's
-	// rule (which moves merged tasks) has nothing to act on. The later merge and
+	// The deploy finishes before the task has any change link, so there is
+	// nothing for a task rule to act on. The later merge and
 	// the open PR 2 link then leave the task merged and held, the state of the
 	// four held tasks; settle-merged reaches it only after PR 2 is reconciled.
 	f.start(t, "s-reconcile", "deploy", []string{"prod"}, f.cand(1, "internal/a.go"), f.cand(2, "internal/b.go"))

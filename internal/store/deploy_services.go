@@ -4,13 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
-var ErrInvalidDeployService = errors.New("invalid_deploy_service")
+var (
+	ErrInvalidDeployService = errors.New("invalid_deploy_service")
+	ErrServiceNotFound      = errors.New("service_not_found")
+)
+
+var repoRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
 type DeployService struct {
 	Name           string    `json:"name"`
