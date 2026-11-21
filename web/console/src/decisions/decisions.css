@@ -457,7 +457,8 @@
 }
 .decision-cta {
   position: sticky;
-  bottom: var(--hk-space-16);
+  /* Sits on top of the tab bar; the bar's height is the shell's one token. */
+  bottom: calc(var(--hk-shell-nav-height) + var(--hk-space-2));
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -476,7 +477,8 @@
   flex: 1 1 auto;
 }
 html {
-  scroll-padding-bottom: 160px;
+  /* Keeps an anchored option clear of the answer bar, which is about 160px tall. */
+  scroll-padding-bottom: calc(var(--hk-shell-nav-height) + 160px);
 }
 @media (min-width: 768px) {
   .decision-list .decision-tab,

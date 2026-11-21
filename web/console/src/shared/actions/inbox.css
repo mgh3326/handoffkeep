@@ -231,7 +231,7 @@
   .inbox-toast {
     left: var(--hk-space-2);
     right: var(--hk-space-2);
-    bottom: calc(var(--hk-space-4) + var(--hk-space-16));
+    bottom: calc(var(--hk-shell-nav-height) + var(--hk-space-4));
   }
 }
 

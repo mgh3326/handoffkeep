@@ -101,10 +101,19 @@ small {
   outline: var(--hk-focus-width) solid var(--hk-focus);
   outline-offset: var(--hk-focus-offset);
 }
+/* The one height of the bottom tab bar (its border and safe-area inset
+   included). Everything that sits above the bar offsets by this value, so
+   nothing is covered by it. Zero where the bar is not drawn (768px up). */
+:root {
+  --hk-shell-nav-height: calc(var(--hk-row-height) + var(--hk-border-width) + env(safe-area-inset-bottom, 0px));
+}
+html {
+  scroll-padding-bottom: var(--hk-shell-nav-height);
+}
 .hk-shell-main {
   min-width: 0;
   /* Room for the fixed tab bar so the last line is never covered. */
-  padding-bottom: calc(var(--hk-row-height) + env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(var(--hk-shell-nav-height) + var(--hk-space-4));
 }
 .hk-view {
   padding: var(--hk-space-4);
@@ -115,8 +124,11 @@ small {
   position: fixed;
   inset: auto 0 0 0;
   z-index: var(--hk-z-header);
+  box-sizing: border-box;
+  height: var(--hk-shell-nav-height);
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   background: var(--hk-surface-1);
   border-top: var(--hk-border-width) solid var(--hk-border-subtle);
   padding-bottom: env(safe-area-inset-bottom, 0px);
@@ -144,10 +156,51 @@ small {
   border-radius: var(--hk-radius-pill);
   background: var(--hk-danger);
 }
-.hk-shell-nav a[aria-current="page"] {
+.hk-shell-nav a[aria-current="page"],
+.hk-shell-more-toggle[data-current] {
   color: var(--hk-text-heading);
   background: var(--hk-surface-selected);
   font-weight: var(--hk-weight-strong);
+}
+.hk-shell-more-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--hk-row-height);
+  min-width: var(--hk-touch-height);
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--hk-text-secondary);
+  font: inherit;
+  font-size: var(--hk-font-row);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.hk-shell-more-toggle:focus-visible {
+  outline: var(--hk-focus-width) solid var(--hk-focus);
+  outline-offset: var(--hk-focus-offset-inset);
+}
+/* 더보기 opens the entries that are not on the bar, as a list above it. */
+.hk-shell-more[hidden] {
+  display: none;
+}
+.hk-shell-more {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--hk-shell-nav-height);
+  display: grid;
+  padding: var(--hk-space-2);
+  background: var(--hk-surface-1);
+  border-top: var(--hk-border-width) solid var(--hk-border-subtle);
+  box-shadow: var(--hk-elevation-panel);
+}
+.hk-shell-more a {
+  justify-content: flex-start;
+  padding: 0 var(--hk-space-4);
+  border-radius: var(--hk-radius-control);
 }
 
 @media (min-width: 768px) {
@@ -161,15 +214,16 @@ small {
     grid-area: head;
     padding: var(--hk-space-2) var(--hk-space-8);
   }
+  :root {
+    /* No bar at this width: the sidebar carries every destination. */
+    --hk-shell-nav-height: 0px;
+  }
   .hk-shell-main {
     grid-area: main;
     padding-bottom: 0;
   }
   .hk-view {
     padding: var(--hk-space-6) var(--hk-space-8);
-  }
-  html {
-    scroll-padding-bottom: 0;
   }
   .hk-shell-nav {
     grid-area: nav;
@@ -178,6 +232,7 @@ small {
     inset: auto;
     align-self: start;
     height: 100dvh;
+    grid-auto-flow: row;
     grid-template-columns: minmax(0, 1fr);
     grid-auto-rows: min-content;
     gap: var(--hk-space-1);
@@ -185,6 +240,13 @@ small {
     border-top: 0;
     border-right: var(--hk-border-width) solid var(--hk-border-subtle);
     padding: var(--hk-space-16) var(--hk-space-3) 0;
+  }
+  .hk-shell-more-toggle {
+    display: none;
+  }
+  .hk-shell-more[hidden],
+  .hk-shell-more {
+    display: contents;
   }
   .hk-shell-nav a {
     align-items: center;
