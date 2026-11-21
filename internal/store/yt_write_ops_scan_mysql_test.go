@@ -98,7 +98,7 @@ func TestMySQLOpenOpReadsUseStateIndexes(t *testing.T) {
 // where it is not aliased; subqueries use other aliases and are not checked.
 func explainOpenRead(t *testing.T, ctx context.Context, s *Store, name, query string, args ...any) {
 	t.Helper()
-	rows, err := s.db().Query(ctx, "EXPLAIN "+query, args...)
+	rows, err := s.db().Query(ctx, "EXPLAIN FORMAT=TRADITIONAL "+query, args...)
 	if err != nil {
 		t.Fatalf("%s: EXPLAIN: %v", name, err)
 	}
