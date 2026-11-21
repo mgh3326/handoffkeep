@@ -136,14 +136,28 @@ func TestMySQLTaskBoardReadUsesProjectStateIndex(t *testing.T) {
 
 	project := fmt.Sprintf("plan-proj-%d", time.Now().UnixNano())
 	when := time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)
-	const n = 2000
+	// One task in twenty is in the board's project and state; the rest are in
+	// another project or state, as on production (a project's backlog is a
+	// small share of all tasks). With every row matching, a walk of PRIMARY in
+	// id order is the cheaper plan and the planner rightly takes it.
+	other := project + "-other"
+	const n = 4000
 	const batch = 500
 	const row = `(?,?,?,?,?,?,?,?,?)`
 	for start := 0; start < n; start += batch {
 		end := min(start+batch, n)
 		var args []any
 		for i := start; i < end; i++ {
-			args = append(args, "lane-plan", fmt.Sprintf("plan task %d", i), "implement", "backlog", "test", when, when, when, project)
+			p, st := other, "developing"
+			switch {
+			case i%20 == 0:
+				p, st = project, "backlog"
+			case i%2 == 0:
+				p, st = project, "completed"
+			case i%3 == 0:
+				p, st = other, "backlog"
+			}
+			args = append(args, "lane-plan", fmt.Sprintf("plan task %d", i), "implement", st, "test", when, when, when, p)
 		}
 		q := `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at,project) VALUES ` +
 			strings.TrimSuffix(strings.Repeat(row+",", end-start), ",")
@@ -152,6 +166,14 @@ func TestMySQLTaskBoardReadUsesProjectStateIndex(t *testing.T) {
 		}
 	}
 
+	// Fresh statistics: the planner reads the index cardinalities, not the
+	// rows just inserted.
+	// ANALYZE TABLE answers a result set, so it is read and closed.
+	ar, err := s.db().Query(ctx, `ANALYZE TABLE tasks`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ar.Close()
 	if key := relayPlanKey(t, ctx, s, "tasks",
 		`SELECT id FROM tasks WHERE 1=1 AND id>? AND state IN (?) AND project=? ORDER BY id ASC LIMIT ?`,
 		int64(0), "backlog", project, 50); key != "tasks_project_state_id" {
