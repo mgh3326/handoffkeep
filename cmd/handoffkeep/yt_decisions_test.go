@@ -86,14 +86,14 @@ func TestYTDecisionsBackfillBindsOnlyVerified(t *testing.T) {
 		// No DEC-<id>, and the legacy issue's 결정 ID was changed.
 		"2-12": ytdIssue("2-12", ids["legacybad"], "[결정 "+strconv.FormatInt(ids["legacybad"], 10)+"] bad?", ids["legacybad"]+1, ytdCmdProject),
 	}, errs: map[string]error{youtrack.DecisionReadable(ids["error"]): errors.New("connection reset")}}
+	mirrors := map[int64]store.YouTrackDecisionMirror{}
 	for name, issue := range map[string]string{"legacy": "2-9", "both": "2-11", "legacybad": "2-12"} {
-		if err := st.PutYouTrackDecisionMirror(ctx, store.YouTrackDecisionMirror{DecisionID: ids[name], IssueID: issue, DisplayRef: "DEC-x", Stamp: "x"}); err != nil {
-			t.Fatal(err)
-		}
+		mirrors[ids[name]] = store.YouTrackDecisionMirror{DecisionID: ids[name], IssueID: issue, DisplayRef: "DEC-x", Stamp: "x"}
 	}
+	backfill := mirrorStore{Store: st, mirrors: mirrors}
 	opts := ytDecisionsOptions{Tenant: "tenant.youtrack.cloud", ProjectID: ytdCmdProject, BindBy: "operator:test", Snapshots: "off"}
 
-	pre, err := ytDecisionsBackfillRun(ctx, st, fake, opts)
+	pre, err := ytDecisionsBackfillRun(ctx, backfill, fake, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestYTDecisionsBackfillBindsOnlyVerified(t *testing.T) {
 	}
 
 	opts.Apply = true
-	got, err := ytDecisionsBackfillRun(ctx, st, fake, opts)
+	got, err := ytDecisionsBackfillRun(ctx, backfill, fake, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestYTDecisionsBackfillBindsOnlyVerified(t *testing.T) {
 		}
 	}
 	// A second run checks only the unbound ones again.
-	again, err := ytDecisionsBackfillRun(ctx, st, fake, opts)
+	again, err := ytDecisionsBackfillRun(ctx, backfill, fake, opts)
 	if err != nil || again.Checked != 7 || again.Bound.Count != 0 {
 		t.Fatalf("second run %+v %v", again, err)
 	}
@@ -184,6 +184,17 @@ func TestYTDecisionsModeStartsTheWriteWorker(t *testing.T) {
 	if w, err := ytCommentsWorkerFromEnv(&store.Store{}); err != nil || w != nil {
 		t.Fatalf("all off: worker %v err %v", w, err)
 	}
+}
+
+// mirrorStore is the real store whose legacy mirror rows the test gives, so
+// the backfill's mirror read needs no seeded table.
+type mirrorStore struct {
+	*store.Store
+	mirrors map[int64]store.YouTrackDecisionMirror
+}
+
+func (m mirrorStore) ListYouTrackDecisionMirrors(_ context.Context, _ []int64) (map[int64]store.YouTrackDecisionMirror, error) {
+	return m.mirrors, nil
 }
 
 type fakeYTDStore struct {

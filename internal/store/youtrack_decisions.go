@@ -2,8 +2,6 @@ package store
 
 import (
 	"context"
-	"errors"
-	"strings"
 )
 
 // YouTrackDecisionMirror links one decision request to its YouTrack DEC issue.
@@ -16,24 +14,8 @@ type YouTrackDecisionMirror struct {
 	Stamp      string `json:"stamp"`
 }
 
-// GetYouTrackDecisionMirror returns the mirror row of one decision, if any.
-func (s *Store) GetYouTrackDecisionMirror(ctx context.Context, decisionID int64) (YouTrackDecisionMirror, bool, error) {
-	if s != nil && s.dialect == mysqlDialect {
-		// Not ported to MySQL: youtrack_decision_mirrors is left out of MySQL (design §2) (hk 5088).
-		return YouTrackDecisionMirror{}, false, ErrDialectUnsupported
-	}
-
-	var x YouTrackDecisionMirror
-	err := s.pool.QueryRow(ctx, `SELECT decision_id,issue_id,display_ref,stamp FROM youtrack_decision_mirrors WHERE decision_id=$1`, decisionID).
-		Scan(&x.DecisionID, &x.IssueID, &x.DisplayRef, &x.Stamp)
-	if errors.Is(err, ErrNoRows) {
-		return YouTrackDecisionMirror{}, false, nil
-	}
-	return x, err == nil, err
-}
-
 // ListYouTrackDecisionMirrors returns the mirror rows for the given decisions,
-// keyed by decision id.
+// keyed by decision id. Its one reader is the decisions backfill.
 func (s *Store) ListYouTrackDecisionMirrors(ctx context.Context, decisionIDs []int64) (map[int64]YouTrackDecisionMirror, error) {
 	if s != nil && s.dialect == mysqlDialect {
 		// Not ported to MySQL: youtrack_decision_mirrors is left out of MySQL (design §2) (hk 5088).
@@ -57,23 +39,4 @@ func (s *Store) ListYouTrackDecisionMirrors(ctx context.Context, decisionIDs []i
 		out[x.DecisionID] = x
 	}
 	return out, rows.Err()
-}
-
-// PutYouTrackDecisionMirror records the issue a decision maps to. It replaces
-// the row for the same decision.
-func (s *Store) PutYouTrackDecisionMirror(ctx context.Context, x YouTrackDecisionMirror) error {
-	if s != nil && s.dialect == mysqlDialect {
-		// Not ported to MySQL: youtrack_decision_mirrors is left out of MySQL (design §2) (hk 5088).
-		return ErrDialectUnsupported
-	}
-
-	if x.DecisionID < 1 || strings.TrimSpace(x.IssueID) == "" {
-		return ErrYouTrackMirrorConflict
-	}
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO youtrack_decision_mirrors(decision_id,issue_id,display_ref,stamp,created_at)
-		VALUES($1,$2,$3,$4,now())
-		ON CONFLICT(decision_id) DO UPDATE SET issue_id=EXCLUDED.issue_id, display_ref=EXCLUDED.display_ref, stamp=EXCLUDED.stamp`,
-		x.DecisionID, x.IssueID, x.DisplayRef, x.Stamp)
-	return err
 }
