@@ -179,9 +179,19 @@ func hasBundle(kind FieldKind) bool {
 // is known at plan time for an existing project and only once the project is
 // created for a new one.
 type projectState struct {
+	// hk is the hk project, "" for the bucket: its lanes are the "" vocabulary.
 	hk    string
 	short string
 	ytID  string
+}
+
+// label names the project in changes and reports; the bucket is not an hk project
+// so its name cannot be one.
+func (ps *projectState) label() string {
+	if ps.hk == "" {
+		return bucketLabel
+	}
+	return ps.hk
 }
 
 // globalRef is a field definition: found at plan time, or created by the
@@ -192,9 +202,10 @@ type globalRef struct {
 }
 
 // Plan reads the tenant and hk and returns what Apply would do. project limits
-// it to one hk project; empty is every hk project.
+// it to one hk project, or to the bucket when it is BucketShortName; empty is
+// every hk project and the bucket.
 func (r *SchemaRunner) Plan(ctx context.Context, project string) (Plan, error) {
-	vocab, hkProjects, err := r.loadVocabulary(ctx, project)
+	vocab, hkProjects, withBucket, err := r.loadVocabulary(ctx, project)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -240,8 +251,15 @@ func (r *SchemaRunner) Plan(ctx context.Context, project string) (Plan, error) {
 		}
 		plan.Changes = append(plan.Changes, fieldChanges...)
 	}
+	if withBucket {
+		bucketChanges, err := r.planBucket(ctx, vocab, pl)
+		if err != nil {
+			return Plan{}, err
+		}
+		plan.Changes = append(plan.Changes, bucketChanges...)
+	}
 	// The sort is stable, so within a phase the order is hk project name, then
-	// the order of Desired.
+	// the bucket, then the order of Desired.
 	sort.SliceStable(plan.Changes, func(i, j int) bool { return plan.Changes[i].phase < plan.Changes[j].phase })
 
 	linkTypes, err := r.Client.ListLinkTypes(ctx)
@@ -252,39 +270,63 @@ func (r *SchemaRunner) Plan(ctx context.Context, project string) (Plan, error) {
 	return plan, nil
 }
 
-func (r *SchemaRunner) loadVocabulary(ctx context.Context, project string) (Vocabulary, []string, error) {
+// loadVocabulary reads the hk side. A project names one hk project; the
+// bucket's short name (BucketShortName, any case) names the bucket alone; empty
+// names every hk project and the bucket. withBucket says whether the bucket is
+// planned.
+func (r *SchemaRunner) loadVocabulary(ctx context.Context, project string) (vocab Vocabulary, hkProjects []string, withBucket bool, err error) {
 	all, err := r.Store.ListTaskProjects(ctx)
 	if err != nil {
-		return Vocabulary{}, nil, err
+		return Vocabulary{}, nil, false, err
 	}
 	sort.Strings(all)
-	hkProjects := all
+	hkProjects = all
+	withBucket = true
 	if project != "" {
 		hkProjects = nil
-		for _, name := range all {
-			if name == project {
-				hkProjects = []string{name}
-			}
-		}
-		if hkProjects == nil {
-			return Vocabulary{}, nil, fmt.Errorf("%w: %q is not an hk project", ErrSchemaProject, project)
+		withBucket = false
+		if slices.Contains(all, project) {
+			hkProjects = []string{project}
+		} else if strings.EqualFold(project, BucketShortName) {
+			withBucket = true
+		} else {
+			return Vocabulary{}, nil, false, fmt.Errorf("%w: %q is not an hk project", ErrSchemaProject, project)
 		}
 	}
 	lanes, err := r.Store.ListTaskLanes(ctx)
 	if err != nil {
-		return Vocabulary{}, nil, err
+		return Vocabulary{}, nil, false, err
 	}
-	return Vocabulary{Kinds: store.TaskKinds(), Lanes: projectLanes(lanes)}, hkProjects, nil
+	return Vocabulary{Kinds: store.TaskKinds(), Lanes: projectLanes(lanes)}, hkProjects, withBucket, nil
 }
 
-// projectLanes files the lanes of tasks with no project under the project
-// such tasks are synced to (defaultHKProject), keeping name order.
+// planBucket plans the fields of the bucket project (BucketShortName), the one
+// a task with no hk project is written to, with the vocabulary of those tasks
+// (their lanes, under the "" key). The bucket is only read: it is never created,
+// renamed or given a youtrack_projects row. None or several projects with that
+// short name is a report, not an error, so the other projects still plan.
+func (r *SchemaRunner) planBucket(ctx context.Context, vocab Vocabulary, pl *planState) ([]Change, error) {
+	id, err := ResolveBucketProject(ctx, r.Client)
+	if errors.Is(err, ErrBucketProject) {
+		pl.report(Report{Object: "bucket", Status: "unresolved", Value: err.Error()})
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return r.planFields(ctx, &projectState{short: BucketShortName, ytID: id}, vocab, pl)
+}
+
+// bucketLabel is the project column of the bucket's changes: the bucket is not
+// an hk project, so its name cannot be one.
+const bucketLabel = "bucket " + BucketShortName
+
+// projectLanes groups the lanes of each hk project. Tasks with no project keep
+// their own "" key: their lanes are the bucket's vocabulary, and no write for
+// them reaches any other project (ytIssueProject).
 func projectLanes(byProject map[string][]string) map[string][]string {
 	out := make(map[string][]string, len(byProject))
 	for project, lanes := range byProject {
-		if project == "" {
-			project = defaultHKProject
-		}
 		out[project] = append(out[project], lanes...)
 	}
 	for project, lanes := range out {
@@ -423,14 +465,14 @@ func (r *SchemaRunner) planFields(ctx context.Context, ps *projectState, vocab V
 		// A field of that name with another type or no bundle is not the field
 		// the schema wants; say so rather than call the project converged.
 		if got := have.Field.FieldType.ID; got != fieldTypeID(spec.Kind) {
-			pl.report(Report{Object: "field", Status: "mismatch", Value: fmt.Sprintf("%s %s type %q want %q", ps.hk, spec.Name, got, fieldTypeID(spec.Kind))})
+			pl.report(Report{Object: "field", Status: "mismatch", Value: fmt.Sprintf("%s %s type %q want %q", ps.label(), spec.Name, got, fieldTypeID(spec.Kind))})
 			continue
 		}
 		if !hasBundle(spec.Kind) {
 			continue
 		}
 		if have.Bundle == nil {
-			pl.report(Report{Object: "field", Status: "mismatch", Value: fmt.Sprintf("%s %s has no bundle", ps.hk, spec.Name)})
+			pl.report(Report{Object: "field", Status: "mismatch", Value: fmt.Sprintf("%s %s has no bundle", ps.label(), spec.Name)})
 			continue
 		}
 		valueChanges, err := r.planValues(ctx, ps, spec, have.Bundle.ID, pl)
@@ -439,7 +481,7 @@ func (r *SchemaRunner) planFields(ctx context.Context, ps *projectState, vocab V
 		}
 		changes = append(changes, valueChanges...)
 	}
-	reportDuplicateFields(ps.hk, attached, pl)
+	reportDuplicateFields(ps.label(), attached, pl)
 	return changes, nil
 }
 
@@ -484,17 +526,17 @@ func (r *SchemaRunner) planAttach(ps *projectState, spec FieldSpec, pl *planStat
 				return nil
 			}})
 	case ref.typ != fieldTypeID(spec.Kind):
-		pl.report(Report{Object: "field", Status: "mismatch", Value: fmt.Sprintf("%s is defined as %q, want %q (not attached to %s)", spec.Name, ref.typ, fieldTypeID(spec.Kind), ps.hk)})
+		pl.report(Report{Object: "field", Status: "mismatch", Value: fmt.Sprintf("%s is defined as %q, want %q (not attached to %s)", spec.Name, ref.typ, fieldTypeID(spec.Kind), ps.label())})
 		return nil
 	}
 	value := fieldTypeID(spec.Kind)
 	if hasBundle(spec.Kind) {
 		value = fmt.Sprintf("%s with %d values", fieldTypeID(spec.Kind), len(spec.Values))
 	}
-	changes = append(changes, Change{Project: ps.hk, Object: spec.Name, Action: "attach", Value: value, phase: phaseAttach,
+	changes = append(changes, Change{Project: ps.label(), Object: spec.Name, Action: "attach", Value: value, phase: phaseAttach,
 		run: func(ctx context.Context) error {
 			if ps.ytID == "" || ref.id == "" {
-				return fmt.Errorf("attach %q to %s: project or field definition missing", spec.Name, ps.hk)
+				return fmt.Errorf("attach %q to %s: project or field definition missing", spec.Name, ps.label())
 			}
 			bundleID := ""
 			if hasBundle(spec.Kind) {
@@ -551,7 +593,7 @@ func (r *SchemaRunner) planValues(ctx context.Context, ps *projectState, spec Fi
 			if spec.Kind == KindState {
 				value = fmt.Sprintf("%s (resolved=%t ordinal=%d)", want.Name, want.Resolved, want.Ordinal)
 			}
-			changes = append(changes, Change{Project: ps.hk, Object: spec.Name, Action: "add-value", Value: value, phase: phaseValue,
+			changes = append(changes, Change{Project: ps.label(), Object: spec.Name, Action: "add-value", Value: value, phase: phaseValue,
 				run: func(ctx context.Context) error {
 					_, err := r.Client.AddBundleValue(ctx, spec.Kind, bundleID, want)
 					return err
@@ -559,7 +601,7 @@ func (r *SchemaRunner) planValues(ctx context.Context, ps *projectState, spec Fi
 			continue
 		}
 		if el.Archived && once("unarchive", want.Name) {
-			changes = append(changes, Change{Project: ps.hk, Object: spec.Name, Action: "unarchive", Value: want.Name, phase: phaseValue,
+			changes = append(changes, Change{Project: ps.label(), Object: spec.Name, Action: "unarchive", Value: want.Name, phase: phaseValue,
 				run: func(ctx context.Context) error {
 					return r.Client.UnarchiveBundleValue(ctx, spec.Kind, bundleID, el.ID)
 				}})
@@ -568,13 +610,13 @@ func (r *SchemaRunner) planValues(ctx context.Context, ps *projectState, spec Fi
 			continue
 		}
 		if el.IsResolved != want.Resolved && once("resolved", want.Name) {
-			changes = append(changes, Change{Project: ps.hk, Object: spec.Name, Action: "set-resolved", Value: fmt.Sprintf("%s=%t", el.Name, want.Resolved), phase: phaseFlag,
+			changes = append(changes, Change{Project: ps.label(), Object: spec.Name, Action: "set-resolved", Value: fmt.Sprintf("%s=%t", el.Name, want.Resolved), phase: phaseFlag,
 				run: func(ctx context.Context) error {
 					return r.Client.SetStateElement(ctx, bundleID, el.ID, map[string]any{"isResolved": want.Resolved})
 				}})
 		}
 		if el.Ordinal != want.Ordinal && once("ordinal", want.Name) {
-			changes = append(changes, Change{Project: ps.hk, Object: spec.Name, Action: "set-ordinal", Value: fmt.Sprintf("%s=%d", el.Name, want.Ordinal), phase: phaseFlag,
+			changes = append(changes, Change{Project: ps.label(), Object: spec.Name, Action: "set-ordinal", Value: fmt.Sprintf("%s=%d", el.Name, want.Ordinal), phase: phaseFlag,
 				run: func(ctx context.Context) error {
 					return r.Client.SetStateElement(ctx, bundleID, el.ID, map[string]any{"ordinal": want.Ordinal})
 				}})
@@ -633,7 +675,3 @@ func (r *SchemaRunner) Apply(ctx context.Context, plan Plan) (int, error) {
 	}
 	return applied, nil
 }
-
-// defaultHKProject is the hk project a task or document without one is filed
-// under when the schema is planned.
-const defaultHKProject = "other"

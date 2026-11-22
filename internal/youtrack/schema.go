@@ -156,7 +156,8 @@ type BundleValue struct {
 }
 
 // Vocabulary is the hk data the desired schema is built from. Lanes are per
-// hk project; the rest is shared by every project.
+// hk project, and the lanes of tasks with no project are under the "" key (the
+// bucket's vocabulary); the rest is shared by every project.
 type Vocabulary struct {
 	Kinds []string
 	Lanes map[string][]string

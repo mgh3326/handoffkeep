@@ -31,7 +31,7 @@ func youtrackSchemaCmd(args []string, out io.Writer) error {
 	}
 	fs := flag.NewFlagSet("youtrack schema", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	project := fs.String("project", "", "limit the run to one hk project")
+	project := fs.String("project", "", "limit the run to one hk project, or to the bucket HK")
 	asJSON := fs.Bool("json", false, "print JSON instead of one tab-separated line per change")
 	ordered, err := splitArgs(args[1:], "project")
 	if err != nil {

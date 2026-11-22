@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -174,8 +175,10 @@ func TestSchemaPlanListsExactlyWhatIsMissing(t *testing.T) {
 	if got := planLines(plan); !reflect.DeepEqual(got, want) {
 		t.Fatalf("plan lines differ\n got: %q\nwant: %q", got, want)
 	}
-	if len(plan.Reports) != 0 {
-		t.Fatalf("reports=%+v, the tenant has the built-in link types", plan.Reports)
+	// The seeded tenant has the built-in link types and no HK bucket: the one
+	// report is the missing bucket (hk 6071), not a link type.
+	if len(plan.Reports) != 1 || plan.Reports[0].Object != "bucket" || plan.Reports[0].Status != "unresolved" {
+		t.Fatalf("reports=%+v, want only the missing bucket", plan.Reports)
 	}
 	if w := f.writes(); len(w) != 0 {
 		t.Fatalf("plan wrote to YouTrack: %v", w)
@@ -774,11 +777,134 @@ func TestSchemaStopsWhenRetryAfterOutlastsTheDeadline(t *testing.T) {
 	}
 }
 
-func TestProjectLanesFilesUnassignedTasksUnderOther(t *testing.T) {
+// The lanes of tasks with no project stay under their own key: the bucket's
+// vocabulary. They are not filed under other, which no task-without-project
+// write reaches (hk 6071).
+func TestProjectLanesKeepsUnassignedTasksApart(t *testing.T) {
 	got := projectLanes(map[string][]string{"": {"lane-z", "lane-a"}, "other": {"lane-a", "lane-o"}, "handoffkeep": {"lane-h"}})
-	want := map[string][]string{"other": {"lane-a", "lane-o", "lane-z"}, "handoffkeep": {"lane-h"}}
+	want := map[string][]string{"": {"lane-a", "lane-z"}, "other": {"lane-a", "lane-o"}, "handoffkeep": {"lane-h"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("projectLanes=%v want %v", got, want)
+	}
+}
+
+// The bucket HK is planned from the vocabulary of tasks with no project: a
+// state value archived there is unarchived, a missing one is added, and a
+// second plan is empty. --project HK plans the bucket alone (hk 6071).
+func TestSchemaPlansTheBucketProject(t *testing.T) {
+	f, st, runner := seedSchemaTenant(t)
+	ctx := context.Background()
+	st.lanes[""] = []string{"lane-z"}
+	vocab := Vocabulary{Kinds: store.TaskKinds(), Lanes: projectLanes(st.lanes)}
+	bucket := f.addProject(BucketShortName, "Unassigned hk tasks")
+	projects := len(f.projects)
+	for _, spec := range runner.Schema.Desired(vocab, "") {
+		f.attach(bucket, spec.Name, spec.Kind, spec.Values)
+	}
+	var state *fakeBundle
+	for _, pf := range bucket.Fields {
+		if b := f.bundles[pf.BundleID]; b != nil && strings.HasSuffix(b.Name, " "+runner.Schema.StateBundle) {
+			state = b
+		}
+	}
+	if state == nil {
+		t.Fatal("bucket has no state bundle")
+	}
+	// A project-less task's lane that the bucket's 레인 bundle lacks must be
+	// planned as an add: the lanes are the "" vocabulary, not the bucket label's.
+	var lane *fakeBundle
+	for _, pf := range bucket.Fields {
+		if b := f.bundles[pf.BundleID]; b != nil && strings.HasSuffix(b.Name, " "+runner.Schema.LaneField) {
+			lane = b
+		}
+	}
+	if lane == nil {
+		t.Fatal("bucket has no lane bundle")
+	}
+	lane.Values = slices.DeleteFunc(lane.Values, func(v *fakeElement) bool { return v.Name == "lane-z" })
+
+	var triage *fakeElement
+	kept := state.Values[:0]
+	for _, v := range state.Values {
+		switch v.Name {
+		case StateLabel("triage"):
+			triage = v
+			v.Archived = true
+		case StateLabel("completed"):
+			continue // missing from the bundle: planned as add
+		}
+		kept = append(kept, v)
+	}
+	state.Values = kept
+
+	plan, err := runner.Plan(ctx, BucketShortName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantUnarchive := bucketLabel + "\t" + runner.Schema.StateBundle + "\tunarchive\t" + StateLabel("triage")
+	wantAdd := bucketLabel + "\t" + runner.Schema.StateBundle + "\tadd-value\t" + StateLabel("completed")
+	wantLaneAdd := bucketLabel + "\t" + runner.Schema.LaneField + "\tadd-value\tlane-z"
+	var unarchives, adds, laneAdds int
+	for _, line := range planLines(plan) {
+		if line == wantUnarchive {
+			unarchives++
+		}
+		if strings.HasPrefix(line, wantAdd) {
+			adds++
+		}
+		if line == wantLaneAdd {
+			laneAdds++
+		}
+		if !strings.HasPrefix(line, bucketLabel+"\t") {
+			t.Errorf("--project HK planned a non-bucket change: %q", line)
+		}
+	}
+	if unarchives != 1 || adds != 1 || laneAdds != 1 {
+		t.Fatalf("bucket plan unarchive=%d add=%d lane-add=%d:\n%s", unarchives, adds, laneAdds, strings.Join(planLines(plan), "\n"))
+	}
+	if _, err := runner.Apply(ctx, plan); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if triage.Archived {
+		t.Fatal("declared value still archived in the bucket")
+	}
+	again, err := runner.Plan(ctx, BucketShortName)
+	if err != nil || len(again.Changes) != 0 || len(again.Reports) != 0 {
+		t.Fatalf("second bucket plan: %q reports=%v err=%v", planLines(again), again.Reports, err)
+	}
+	for _, p := range st.puts {
+		if p.ShortName == BucketShortName || p.HKProject == "" {
+			t.Fatalf("the bucket got a youtrack_projects row: %+v", p)
+		}
+	}
+	if len(f.projects) != projects {
+		t.Fatalf("the bucket plan created a project: %d projects, had %d", len(f.projects), projects)
+	}
+}
+
+// A tenant with no HK project, or two, is a report on the bucket row; the other
+// projects still plan (hk 6071).
+func TestSchemaReportsAMissingOrAmbiguousBucket(t *testing.T) {
+	f, _, runner := seedSchemaTenant(t)
+	ctx := context.Background()
+	plan, err := runner.Plan(ctx, "")
+	if err != nil {
+		t.Fatalf("plan without a bucket: %v", err)
+	}
+	if !slices.ContainsFunc(plan.Reports, func(r Report) bool { return r.Object == "bucket" && r.Status == "unresolved" }) {
+		t.Fatalf("no bucket report without an HK project: %+v", plan.Reports)
+	}
+	if !slices.ContainsFunc(planLines(plan), func(l string) bool { return strings.HasPrefix(l, "handoffkeep\t") }) {
+		t.Fatal("the other projects were not planned")
+	}
+	f.addProject(BucketShortName, "one")
+	f.addProject("hk", "two")
+	plan, err = runner.Plan(ctx, "")
+	if err != nil {
+		t.Fatalf("plan with two buckets: %v", err)
+	}
+	if !slices.ContainsFunc(plan.Reports, func(r Report) bool { return r.Object == "bucket" && r.Status == "unresolved" }) {
+		t.Fatalf("no bucket report with two HK projects: %+v", plan.Reports)
 	}
 }
 
