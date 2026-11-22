@@ -83,7 +83,7 @@ handoffkeep youtrack schema apply [--project P] [--json]
 `영역_0`처럼 `<이름>_<숫자>`가 기본 이름과 함께 붙은 중복 필드). 이런 필드는
 건드리지 않는다. 링크 타입은 만들지 않는다.
 
-`--project HK`(버킷의 short name, 대소문자 무관)를 주면 hk 프로젝트 대신 버킷만 계획한다.
+`--project HK`(버킷의 short name, 대소문자 무관)를 주면 hk 프로젝트 대신 버킷만 계획한다. hk 프로젝트 이름이 정확히 `HK`이면 그 프로젝트가 먼저 잡힌다.
 프로젝트 없는 task는 버킷 `HK`에 쓰이므로(`ytIssueProject`), `plan`은 버킷도 계획한다.
 버킷은 아래 표와 같은 필드를 맞추되, 레인은 프로젝트 없는 task들의 레인만 쓴다. 계획의
 프로젝트 칸은 `bucket HK`다. 버킷은 읽기만 하며 만들거나 이름을 바꾸지 않고

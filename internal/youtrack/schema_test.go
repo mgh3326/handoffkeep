@@ -810,6 +810,19 @@ func TestSchemaPlansTheBucketProject(t *testing.T) {
 	if state == nil {
 		t.Fatal("bucket has no state bundle")
 	}
+	// A project-less task's lane that the bucket's 레인 bundle lacks must be
+	// planned as an add: the lanes are the "" vocabulary, not the bucket label's.
+	var lane *fakeBundle
+	for _, pf := range bucket.Fields {
+		if b := f.bundles[pf.BundleID]; b != nil && strings.HasSuffix(b.Name, " "+runner.Schema.LaneField) {
+			lane = b
+		}
+	}
+	if lane == nil {
+		t.Fatal("bucket has no lane bundle")
+	}
+	lane.Values = slices.DeleteFunc(lane.Values, func(v *fakeElement) bool { return v.Name == "lane-z" })
+
 	var triage *fakeElement
 	kept := state.Values[:0]
 	for _, v := range state.Values {
@@ -830,7 +843,8 @@ func TestSchemaPlansTheBucketProject(t *testing.T) {
 	}
 	wantUnarchive := bucketLabel + "\t" + runner.Schema.StateBundle + "\tunarchive\t" + StateLabel("triage")
 	wantAdd := bucketLabel + "\t" + runner.Schema.StateBundle + "\tadd-value\t" + StateLabel("completed")
-	var unarchives, adds int
+	wantLaneAdd := bucketLabel + "\t" + runner.Schema.LaneField + "\tadd-value\tlane-z"
+	var unarchives, adds, laneAdds int
 	for _, line := range planLines(plan) {
 		if line == wantUnarchive {
 			unarchives++
@@ -838,12 +852,15 @@ func TestSchemaPlansTheBucketProject(t *testing.T) {
 		if strings.HasPrefix(line, wantAdd) {
 			adds++
 		}
+		if line == wantLaneAdd {
+			laneAdds++
+		}
 		if !strings.HasPrefix(line, bucketLabel+"\t") {
 			t.Errorf("--project HK planned a non-bucket change: %q", line)
 		}
 	}
-	if unarchives != 1 || adds != 1 {
-		t.Fatalf("bucket plan unarchive=%d add=%d:\n%s", unarchives, adds, strings.Join(planLines(plan), "\n"))
+	if unarchives != 1 || adds != 1 || laneAdds != 1 {
+		t.Fatalf("bucket plan unarchive=%d add=%d lane-add=%d:\n%s", unarchives, adds, laneAdds, strings.Join(planLines(plan), "\n"))
 	}
 	if _, err := runner.Apply(ctx, plan); err != nil {
 		t.Fatalf("apply: %v", err)
