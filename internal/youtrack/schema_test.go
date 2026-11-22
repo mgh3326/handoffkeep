@@ -781,3 +781,70 @@ func TestProjectLanesFilesUnassignedTasksUnderOther(t *testing.T) {
 		t.Fatalf("projectLanes=%v want %v", got, want)
 	}
 }
+
+// An archived value the spec declares is planned as unarchive and un-archived
+// by apply; an archived value the spec does not name is left archived; a
+// second plan is empty (hk 6047).
+func TestSchemaUnarchivesADeclaredArchivedValue(t *testing.T) {
+	f, _, runner := seedSchemaTenant(t)
+	ctx := context.Background()
+	var state *fakeBundle
+	for _, b := range f.bundles {
+		if b.Name == "MERGEWAKE hk 상태" {
+			state = b
+		}
+	}
+	if state == nil {
+		t.Fatal("no mergewake state bundle seeded")
+	}
+	var triage *fakeElement
+	for _, v := range state.Values {
+		if v.Name == StateLabel("triage") {
+			triage = v
+		}
+	}
+	if triage == nil {
+		t.Fatalf("no %q value in the state bundle", StateLabel("triage"))
+	}
+	triage.Archived = true
+	state.Values = append(state.Values, &fakeElement{ID: f.id("68"), Name: "옛 상태", Ordinal: 99, Archived: true})
+
+	plan, err := runner.Plan(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "\thk 상태\tunarchive\t" + StateLabel("triage")
+	unarchives := 0
+	for _, line := range planLines(plan) {
+		if strings.HasSuffix(line, want) {
+			unarchives++
+		}
+		if strings.Contains(line, "옛 상태") {
+			t.Errorf("an undeclared archived value is planned: %q", line)
+		}
+	}
+	if unarchives != 1 {
+		t.Fatalf("unarchive of %q planned %d times, want once:\n%s", StateLabel("triage"), unarchives, strings.Join(planLines(plan), "\n"))
+	}
+	if _, err := runner.Apply(ctx, plan); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if triage.Archived != false {
+		t.Fatal("declared value still archived after apply")
+	}
+	if !state.Values[len(state.Values)-1].Archived {
+		t.Fatal("undeclared archived value was touched")
+	}
+	wantWrite := "POST /api/admin/customFieldSettings/bundles/state/" + state.ID + "/values/" + triage.ID
+	found := false
+	for _, w := range f.writes() {
+		found = found || w == wantWrite
+	}
+	if !found {
+		t.Fatalf("no un-archive request %q in %v", wantWrite, f.writes())
+	}
+	again, err := runner.Plan(ctx, "")
+	if err != nil || len(again.Changes) != 0 {
+		t.Fatalf("second plan: %q err=%v", planLines(again), err)
+	}
+}

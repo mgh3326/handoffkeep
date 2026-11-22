@@ -51,12 +51,14 @@ type ProjectField struct {
 }
 
 // BundleElement is one value of a bundle. IsResolved is read for state bundles
-// only, which are the only ones that carry it.
+// only, which are the only ones that carry it. Archived is a value YouTrack
+// holds but hides from its bundle's use; the plan un-archives a declared one.
 type BundleElement struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
 	Ordinal    int    `json:"ordinal"`
 	IsResolved bool   `json:"isResolved"`
+	Archived   bool   `json:"archived"`
 }
 
 // Bundle is an enum or state bundle with its values.
@@ -163,9 +165,9 @@ func (c *Client) GetBundle(ctx context.Context, kind FieldKind, id string) (Bund
 	if err != nil {
 		return Bundle{}, err
 	}
-	fields := "id,$type,name,values(id,name,ordinal)"
+	fields := "id,$type,name,values(id,name,ordinal,archived)"
 	if kind == KindState {
-		fields = "id,$type,name,values(id,name,ordinal,isResolved)"
+		fields = "id,$type,name,values(id,name,ordinal,isResolved,archived)"
 	}
 	q := url.Values{}
 	q.Set("fields", fields)
@@ -210,6 +212,34 @@ func (c *Client) CreateBundle(ctx context.Context, kind FieldKind, name string, 
 		return Bundle{}, fmt.Errorf("youtrack POST bundles/%s: answer has no id", kindPath)
 	}
 	return out, nil
+}
+
+// bundleValuesPath is the admin path of a bundle's values; a value's own path
+// is that plus its id.
+func bundleValuesPath(kindPath, bundleID string) string {
+	return "/api/admin/customFieldSettings/bundles/" + kindPath + "/" + url.PathEscape(bundleID) + "/values"
+}
+
+// unarchiveBody is the body that makes a bundle value live again.
+func unarchiveBody(elementType string) any {
+	return struct {
+		Type     string `json:"$type"`
+		Archived bool   `json:"archived"`
+	}{elementType, false}
+}
+
+// UnarchiveBundleValue makes an archived value of a bundle live again. It is
+// the call ensureBundleValue makes for an open-set value (hk 4234); the name is
+// never sent.
+func (c *Client) UnarchiveBundleValue(ctx context.Context, kind FieldKind, bundleID, valueID string) error {
+	kindPath, err := bundlePath(kind)
+	if err != nil {
+		return err
+	}
+	_, elementType := bundleTypes(kind)
+	q := url.Values{}
+	q.Set("fields", "id,name,archived")
+	return c.post(ctx, bundleValuesPath(kindPath, bundleID)+"/"+url.PathEscape(valueID), q, unarchiveBody(elementType), nil)
 }
 
 // AddBundleValue adds one value to an existing bundle. A state value carries

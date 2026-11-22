@@ -83,6 +83,13 @@ handoffkeep youtrack schema apply [--project P] [--json]
 `영역_0`처럼 `<이름>_<숫자>`가 기본 이름과 함께 붙은 중복 필드). 이런 필드는
 건드리지 않는다. 링크 타입은 만들지 않는다.
 
+`unarchive` 줄은 선언된 값이 YouTrack에 보관(archived)된 채 있는 경우다. 보관된
+값은 쓰기 경로에서 없는 값으로 취급되어 닫힌 집합 필드(예: `hk 상태`)에 쓰면
+거부되므로, `apply`는 그 값을 되살린다(`ensureBundleValue`와 같은 호출). 선언에 없는
+값은 보관 여부와 관계없이 건드리지 않는다. 예를 들어 `hk 상태`의 `분류 대기`가
+보관돼 있으면 `plan`은 `unarchive` 한 줄을 내고, `apply` 뒤의 `plan`은 비어 있다.
+되돌리려면 YouTrack에서 그 값을 다시 보관하면 된다.
+
 `apply`는 같은 계획을 프로젝트 → 필드 정의 → 필드 연결 → 번들 값 → 플래그·ordinal
 순서로, 한 번에 요청 하나씩 실행한다. 변경마다 `youtrack.schema_applied` 로그를
 남기며, 첫 오류에서 멈춘다(`youtrack.schema_apply_failed`). 429는 서버의
@@ -92,8 +99,8 @@ handoffkeep youtrack schema apply [--project P] [--json]
 
 | 대상 | 하는 일 |
 |---|---|
-| `hk 상태` | 12개 상태 값을 모두 두고, 각 값의 `isResolved`와 ordinal을 hk 상태 순서로 맞춘다 |
-| `종류`, `등급`, `티어`, `레인` | 없는 값만 추가한다(종류는 저장소의 닫힌 집합, 등급 S+·S·A+·A·B·C, 티어 T0–T3, 레인은 hk 작업에 쓰인 모든 레인) |
+| `hk 상태` | 12개 상태 값을 모두 두고, 각 값의 `isResolved`와 ordinal을 hk 상태 순서로 맞춘다. 보관(archived)된 선언 값은 `unarchive`로 되살린다 |
+| `종류`, `등급`, `티어`, `레인` | 없는 값만 추가한다(종류는 저장소의 닫힌 집합, 등급 S+·S·A+·A·B·C, 티어 T0–T3, 레인은 hk 작업에 쓰인 모든 레인). 보관된 선언 값은 `unarchive`로 되살린다 |
 | `마감`, `영역`, `마일스톤`, `예상 소요` | 필드 정의가 없으면 만들고, 프로젝트에 없으면 연결한다 |
 | `hk ID`, `hk 우선순위`, `hk 프로젝트`, `PR`, `작업 job`, `멈춤` | 위와 같이 정의를 만들고 연결한다 |
 | 프로젝트 | hk 프로젝트마다 YouTrack 프로젝트와 `youtrack_projects` 행이 있게 한다. 같은 이름의 YouTrack 프로젝트가 있으면 매핑만 쓰고, 없으면 만든다. HK 버킷·SHRDOC·DEC는 건드리지 않는다 |
