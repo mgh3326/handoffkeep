@@ -480,7 +480,7 @@ func TestYTArticlesCatchUpCoversTheFirstPassGap(t *testing.T) {
 		t.Fatalf("%d documents unwritten after the catch-up", n)
 	}
 	// Again, directly: idempotent.
-	if _, _, err := s.catchUpYTArticles(t.Context(), time.Now().UTC(), true); err != nil {
+	if _, err := s.catchUpYTArticles(t.Context(), time.Now().UTC(), 0, true); err != nil {
 		t.Fatal(err)
 	}
 	if len(ytartOps(t, s, fresh)) != 1 || len(ytartOps(t, s, bound)) != 1 {
@@ -833,6 +833,77 @@ func TestYTArticlesFeedNoProjectIsRetried(t *testing.T) {
 	}
 	if ops := ytartOps(t, s, id); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleCreate || ops[0].YTTargetID != "0-44" || !other.ytDocsCaughtUp.Load() {
 		t.Fatalf("after the mapping: ops %+v caught up %v", ops, other.ytDocsCaughtUp.Load())
+	}
+}
+
+// ytartFullDue makes the next catch-up call walk every document.
+func ytartFullDue(s *Store) {
+	s.ytDocsCatchUpMu.Lock()
+	s.ytDocsLastFull = time.Time{}
+	s.ytDocsCatchUpMu.Unlock()
+}
+
+// hk 6132: a tick with no new document lists one page past the watermark, not
+// the table from id 0; a new document and a changed bound one are caught on
+// the next tick; the hourly full walk starts from 0 again.
+func TestYTArticleCatchUpTickWalksOnlyNewDocuments(t *testing.T) {
+	s := ytartSetup(t, "ytart_tick", true)
+	ctx := t.Context()
+	bound := ytartPut(t, s, "note/ytart/tick-bound", "old", nil)
+	ytartImported(t, s, bound)
+	ytartBind(t, s, bound, "3-700", "", false)
+	first := ytartPut(t, s, "design/ytart/tick-first.md", "first", nil)
+	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil || !s.ytDocsScanned {
+		t.Fatalf("start-up walk: %v", err)
+	}
+	if ops := ytartOps(t, s, first); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleCreate {
+		t.Fatalf("start-up walk ops %+v", ops)
+	}
+	var pages []int64
+	s.ytArticlePage = func(after int64) { pages = append(pages, after) }
+	ytartRescanDue(s)
+	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	if len(pages) != 1 || pages[0] != first {
+		t.Fatalf("a quiet tick listed pages after %v, want one page after %d", pages, first)
+	}
+	// The bound document's body changes: its feed row makes the update on
+	// the next tick.
+	ytartPut(t, s, "note/ytart/tick-bound", "changed", nil)
+	ytartRescanDue(s)
+	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	if ops := ytartOps(t, s, bound); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleUpdate {
+		t.Fatalf("changed bound document: ops %+v", ops)
+	}
+	// A new document is listed past the watermark and caught on the next tick.
+	pages = nil
+	// A family's open root would hold a design document's create (the
+	// family_root_pending wait), so the new one is in its own family.
+	second := ytartPut(t, s, "note/ytart/tick-second", "second", nil)
+	ytartRescanDue(s)
+	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	if ops := ytartOps(t, s, second); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleCreate {
+		t.Fatalf("new document: ops %+v", ops)
+	}
+	for _, after := range pages {
+		if after == 0 {
+			t.Fatalf("a tick walked from id 0: pages %v", pages)
+		}
+	}
+	// The hourly walk starts from id 0 again.
+	pages = nil
+	ytartFullDue(s)
+	ytartRescanDue(s)
+	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	if len(pages) == 0 || pages[0] != 0 {
+		t.Fatalf("full walk pages %v, want the first from 0", pages)
 	}
 }
 

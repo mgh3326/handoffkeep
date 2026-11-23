@@ -718,11 +718,23 @@ type Store struct {
 	// ytDocsCaughtUp is set once the document-article catch-up has run in
 	// this process (catchUpYTArticlesOnce).
 	ytDocsCaughtUp atomic.Bool
-	// ytDocsCatchUpMu guards ytDocsScanned (the catch-up's full scan ran in
-	// this process) and ytDocsLastScan (when it last scanned).
+	// ytDocsCatchUpMu guards the catch-up's state: ytDocsScanned (the
+	// start-up walk ran in this process), ytDocsLastScan (when it last
+	// ticked), ytDocsLastFull (when it last walked every document),
+	// ytDocsSide (the documents authority at that walk), ytDocsWatermark (the
+	// highest document id committed before the last walk) and ytDocsWaiting
+	// (the documents waiting on an outside fact, which every tick decides
+	// again).
 	ytDocsCatchUpMu sync.Mutex
 	ytDocsScanned   bool
 	ytDocsLastScan  time.Time
+	ytDocsLastFull  time.Time
+	ytDocsSide      YTAuthoritySide
+	ytDocsWatermark int64
+	ytDocsWaiting   []int64
+	// ytArticlePage, when set (tests only), runs before each catch-up page
+	// query with the page's after id.
+	ytArticlePage func(after int64)
 	// ytDecExpiry is the decisions' expiry sweep (catchUpYTDecisionExpiries).
 	ytDecExpiry ytDecisionExpirySweep
 	// ytBindingChecked, when set (tests only), runs inside AddYTTaskBinding
