@@ -17,11 +17,22 @@ func init() {
 	registerTaskAreaCase("doc_refs/dots_request_records_cited_documents", docRefsCaseDotsRequest)
 }
 
-// docRefsTask files a backlog task with a unique lane and title.
+// docRefsProject registers a fresh project; new tasks must name one.
+func docRefsProject(t *testing.T, s *Store) string {
+	t.Helper()
+	project := fmt.Sprintf("docref-%d", srcEvUnique())
+	if _, err := s.AddTaskProject(t.Context(), project, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	return project
+}
+
+// docRefsTask files a backlog task in a fresh project with a unique lane and title.
 func docRefsTask(t *testing.T, s *Store, title string) Task {
 	t.Helper()
 	n := srcEvUnique()
-	x, err := s.CreateTask(t.Context(), Task{Lane: fmt.Sprintf("docref-lane-%d", n), Title: title, Kind: "implement", Priority: 5, CreatedBy: "tester"})
+	project := docRefsProject(t, s)
+	x, err := s.CreateTask(t.Context(), Task{Lane: fmt.Sprintf("docref-lane-%d", n), Title: title, Kind: "implement", Priority: 5, CreatedBy: "tester", Project: &project})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +131,8 @@ func docRefsCaseSeparateFromBinding(t *testing.T, s *Store) {
 func docRefsCaseDotsRequest(t *testing.T, s *Store) {
 	ctx := t.Context()
 	key := docRefsDoc(t, s, nil)
-	in := DotsRequestInput{Title: "verify schema", Body: "check the schema doc", RequesterLane: "docref-requester", DocKeys: []string{key, key}}
+	project := docRefsProject(t, s)
+	in := DotsRequestInput{Title: "verify schema", Body: "check the schema doc", RequesterLane: "docref-requester", Project: project, DocKeys: []string{key, key}}
 	task, err := s.CreateDotsRequest(ctx, "tester", in)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +143,7 @@ func docRefsCaseDotsRequest(t *testing.T, s *Store) {
 	}
 
 	before := srcEvUnique()
-	_, err = s.CreateDotsRequest(ctx, "tester", DotsRequestInput{Title: "cites a missing document", Body: "x", RequesterLane: "docref-requester", DocKeys: []string{fmt.Sprintf("tbls/absent-%d/doc", before)}})
+	_, err = s.CreateDotsRequest(ctx, "tester", DotsRequestInput{Title: "cites a missing document", Body: "x", RequesterLane: "docref-requester", Project: project, DocKeys: []string{fmt.Sprintf("tbls/absent-%d/doc", before)}})
 	if !errors.Is(err, ErrDocNotFound) {
 		t.Fatalf("request citing a missing document: err=%v, want ErrDocNotFound", err)
 	}
