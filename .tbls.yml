@@ -6,10 +6,10 @@ er:
   format: mermaid
 
 # Relations the code relies on without a foreign key (operator decision 484, hk 6130,
-# hk 6131). Declared for the document only; the database is unchanged. A column with a
+# hk 6131, hk 6125). Declared for the document only; the database is unchanged. A column with a
 # real FOREIGN KEY is drawn from the schema and is not listed here. This list is not an
 # inventory of every id-like column: it covers the task, job, document and write-op keys
-# named in hk 6131 and leaves external ids (YouTrack issue, project and sync ids,
+# named in hk 6131 and hk 6125 and leaves external ids (YouTrack issue, project and sync ids,
 # delivery ids) and the remaining audit columns undeclared.
 relations:
   - table: decision_requests
@@ -144,6 +144,16 @@ relations:
     parentTable: yt_write_ops
     parentColumns: [id]
     def: "op that released the link, NULL while it is owned (no foreign key)"
+  - table: task_doc_refs
+    columns: [task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task that cites the document (no foreign key; hk 6125)"
+  - table: task_doc_refs
+    columns: [doc_key]
+    parentTable: documents
+    parentColumns: [key]
+    def: "document the task cites by reference, not the binding (no foreign key; hk 6125)"
 
 # Domain viewpoints (dots review hk 6133, P1). Every table is in at least one
 # viewpoint; `tables` is the union of its groups and scopes the page's ER diagram.
@@ -356,6 +366,7 @@ viewpoints:
     tables:
       - documents
       - doc_prune_log
+      - task_doc_refs
       - attachments
       - attachment_refs
       - attachment_uploads
@@ -365,10 +376,11 @@ viewpoints:
       - yt_article_bindings
     groups:
       - name: "Documents"
-        desc: "Documents by key and the prune log of deleted ones."
+        desc: "Documents by key, the tasks that cite one by reference, and the prune log of deleted ones."
         tables:
           - documents
           - doc_prune_log
+          - task_doc_refs
       - name: "Attachments"
         desc: "Attachment blobs, the refs filed against them, uploads and usage."
         tables:
