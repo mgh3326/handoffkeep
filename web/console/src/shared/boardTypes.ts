@@ -237,6 +237,9 @@ export type WorkDocument = { key: string; kind: string; origin_class: string };
 export type BoardDetail = {
   documents: WorkDocument[];
   documents_truncated: boolean;
+  /** Documents the task cites by reference (hk 6125); optional for older servers. */
+  doc_refs?: WorkDocument[];
+  doc_refs_truncated?: boolean;
   origins: WorkOrigin[];
   changes: WorkChange[];
   jobs: WorkJob[];

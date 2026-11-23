@@ -77,6 +77,8 @@ export async function fetchTaskDetail(id: number): Promise<BoardDetail> {
     !Array.isArray(data.dwell) ||
     !Array.isArray(data.documents) || !data.documents.every(d => record(d) && typeof d.key === "string" && typeof d.kind === "string" && typeof d.origin_class === "string") ||
     typeof data.documents_truncated !== "boolean" ||
+    (data.doc_refs !== undefined && (!Array.isArray(data.doc_refs) || !data.doc_refs.every(d => record(d) && typeof d.key === "string" && typeof d.kind === "string" && typeof d.origin_class === "string"))) ||
+    (data.doc_refs_truncated !== undefined && typeof data.doc_refs_truncated !== "boolean") ||
     !Array.isArray(data.origins) || !data.origins.every(validOrigin) ||
     !Array.isArray(data.changes) || !data.changes.every(validChange) ||
     !Array.isArray(data.jobs) || !data.jobs.every(validJob) ||
