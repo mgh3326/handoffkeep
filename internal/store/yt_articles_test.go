@@ -898,6 +898,7 @@ func TestYTArticleCatchUpTickWalksOnlyNewDocuments(t *testing.T) {
 	// The hourly walk starts from id 0 again.
 	pages = nil
 	ytartFullDue(s)
+	ytartRescanDue(s)
 	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
 		t.Fatal(err)
 	}
