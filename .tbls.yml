@@ -4,3 +4,98 @@ dsn: my://root@127.0.0.1:3306/handoffkeep
 docPath: schema-doc
 er:
   format: mermaid
+
+# Relations the code relies on without a foreign key (operator decision 484, hk 6130).
+# Declared for the document only; the database is unchanged. A column with a real
+# FOREIGN KEY is drawn from the schema and is not listed here.
+relations:
+  - table: decision_requests
+    columns: [task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task the row belongs to (no foreign key)"
+  - table: jobs
+    columns: [task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task the row belongs to (no foreign key)"
+  - table: mcp_write_audit
+    columns: [task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task the row belongs to (no foreign key)"
+  - table: placement_decisions
+    columns: [task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task the row belongs to (no foreign key)"
+  - table: sync_decisions
+    columns: [task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task the row belongs to (no foreign key)"
+  - table: task_thread_deliveries
+    columns: [task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task the row belongs to (no foreign key)"
+  - table: yt_binding_history
+    columns: [task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task the row belongs to (no foreign key)"
+  - table: yt_binding_intents
+    columns: [task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task the row belongs to (no foreign key)"
+  - table: yt_comment_canary
+    columns: [task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task the row belongs to (no foreign key)"
+  - table: yt_issue_comment_bounds
+    columns: [task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task the row belongs to (no foreign key)"
+  - table: yt_issue_intents
+    columns: [task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task the row belongs to (no foreign key)"
+  - table: yt_task_bindings
+    columns: [task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task the row belongs to (no foreign key)"
+  - table: yt_link_owned
+    columns: [writer_task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task whose link write owns the YouTrack link"
+  - table: yt_link_owned
+    columns: [target_task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task at the other end of the owned link"
+  - table: yt_article_bindings
+    columns: [document_id]
+    parentTable: documents
+    parentColumns: [id]
+    def: "hk document the YouTrack article mirrors"
+  - table: decision_deliveries
+    columns: [request_id]
+    parentTable: decision_requests
+    parentColumns: [id]
+    def: "decision request the notification delivers (joined on d.id = n.request_id)"
+  - table: yt_decision_bindings
+    columns: [decision_id]
+    parentTable: decision_requests
+    parentColumns: [id]
+    def: "decision request as decimal text (migration_yt_decision_bindings.go)"
+  - table: operator_inbox_events
+    columns: [previous_request_id]
+    parentTable: decision_requests
+    parentColumns: [id]
+    def: "decision request whose snooze the event replaced"
