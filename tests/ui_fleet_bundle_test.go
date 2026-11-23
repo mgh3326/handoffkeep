@@ -36,6 +36,32 @@ var allowedAbsoluteURLs = []string{
 	// constants in thrown messages, never requested.
 	"https://github.com/remarkjs/react-markdown/blob/main/changelog.md",
 	"https://github.com/syntax-tree/hast-util-to-jsx-runtime",
+	// Mermaid's lazily loaded diagram chunks (hk 6126) carry XML namespace
+	// identifiers, licence banners and error-message documentation links from
+	// their own libraries (ELK, Chevrotain, Langium, marked, DOMPurify,
+	// jQuery-based helpers). They are string constants, never requested: the
+	// chunks load only for a document with that diagram type, and
+	// TestFleetRuntimeCDNZero still rejects any external script, link, @import
+	// or font URL.
+	"http://www.w3.org/2001/XMLSchema#",
+	"http://www.w3.org/2000/xmlns/",
+	"http://www.eclipse.org/",
+	"http:///org/eclipse/emf/ecore/util/ExtendedMetaData",
+	"https://chevrotain.io/docs/",
+	"https://github.com/chevrotain/chevrotain/issues",
+	"https://langium.org/docs/",
+	"https://en.wikipedia.org/wiki/LL_parser",
+	"https://github.com/babel/babel/blob/main/packages/babel-helpers/LICENSE",
+	"https://github.com/markedjs/marked.",
+	"https://github.com/mermaid-js/mermaid/issues",
+	"https://github.com/mermaid-js/mermaid/releases/tag/",
+	"https://github.com/gre/bezier-easing",
+	"https://github.com/jquery/jquery/blob/master/src/event.js",
+	"https://jquery.org/license/",
+	"https://tldrlegal.com/license/mit-license",
+	"http://opensource.org/licenses/MIT",
+	"http://en.wikipedia.org/wiki/MIT_License",
+	"http://engelschall.com",
 }
 
 func consoleDir(t *testing.T) string {
