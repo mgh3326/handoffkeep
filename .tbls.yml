@@ -1,0 +1,6 @@
+name: handoffkeep
+desc: "MySQL schema built from the repository's migrations (internal/store) on MySQL ${MYSQL_VERSION} (SELECT VERSION() in the schema-doc run). handoffkeep_work runs the same code and migrations, so this document covers both."
+dsn: my://root@127.0.0.1:3306/handoffkeep
+docPath: schema-doc
+er:
+  format: mermaid
