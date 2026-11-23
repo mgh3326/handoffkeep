@@ -1,0 +1,102 @@
+name: schema-doc
+
+# Generates the MySQL schema document with tbls (hk 6106). The schema is built
+# to head on a throwaway MySQL service with the repository's own migration path,
+# never on an operating database (operator decision 480).
+#
+# Triggers: a push to main that changes the migrations, the MySQL open path, the
+# gated test, the tbls config or this workflow, and a manual dispatch. No
+# pull_request trigger, so pull request CI is unchanged.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'internal/store/*migration*.go'
+      - 'internal/store/open_mysql.go'
+      - 'internal/store/schema_doc_mysql_test.go'
+      - '.tbls.yml'
+      - '.github/workflows/schema-doc.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  schema-doc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        # The image and digest the mysql-store job in ci.yml runs, so the
+        # document is built on the engine the tests run on.
+        image: mysql:26.10.0@sha256:3819b2b23835c4a73c8b022fafc33c8095c0f81c929a8b7a84613d2fba6c52f5
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_ROOT_HOST: "%"
+          MYSQL_DATABASE: handoffkeep
+        ports: ["127.0.0.1:3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u root" --health-interval 10s --health-timeout 5s --health-retries 12
+    steps:
+      - name: Start job clock
+        shell: bash
+        run: echo "JOB_START_SEC=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go-cached
+
+      - name: Migrate MySQL schema to head
+        env:
+          HANDOFFKEEP_SCHEMA_DOC_MYSQL_URL: mysql://root@127.0.0.1:3306/handoffkeep
+          HANDOFFKEEP_SCHEMA_DOC_VERSION_FILE: ${{ runner.temp }}/mysql-version.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -tags=mysql -count=1 -v -run '^TestSchemaDocMigrate$' ./internal/store
+          test -s "${HANDOFFKEEP_SCHEMA_DOC_VERSION_FILE}"
+          echo "MYSQL_VERSION=$(cat "${HANDOFFKEEP_SCHEMA_DOC_VERSION_FILE}")" >> "$GITHUB_ENV"
+
+      - name: Install tbls v1.97.0
+        env:
+          TBLS_VERSION: 1.97.0
+          TBLS_SHA256: 43c81f408495d9b626d0265a6ebb57c6d1c4a5e072d3eecc3e88825cc6c64e9a
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sSL -o tbls.tar.gz "https://github.com/k1LoW/tbls/releases/download/v${TBLS_VERSION}/tbls_v${TBLS_VERSION}_linux_amd64.tar.gz"
+          echo "${TBLS_SHA256}  tbls.tar.gz" | sha256sum -c -
+          tar -xzf tbls.tar.gz tbls
+          sudo install -m 0755 tbls /usr/local/bin/tbls
+          rm -f tbls.tar.gz tbls
+          tbls version
+
+      - name: Generate schema documentation with tbls
+        shell: bash
+        run: |
+          set -euo pipefail
+          start_sec=$(date +%s)
+          tbls doc --er-format mermaid
+          tbls out -t json -o schema-doc/schema.json
+          end_sec=$(date +%s)
+          echo "tbls step took $(( end_sec - start_sec )) seconds"
+
+      - name: Upload schema doc artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: schema-doc
+          path: schema-doc/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Print job duration
+        if: always()
+        shell: bash
+        run: echo "job took $(( $(date +%s) - JOB_START_SEC )) seconds"
