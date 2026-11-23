@@ -2,8 +2,11 @@ package ui
 
 import (
 	"encoding/json"
+	"io"
 	"log"
+	"mime"
 	"net/http"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -840,6 +843,43 @@ func (h *Handler) boardDoc(w http.ResponseWriter, r *http.Request) {
 		Reason:    reason,
 		Body:      strings.ToValidUTF8(document.Body, "\uFFFD"),
 	})
+}
+
+// boardDocDownload serves one document's current body as a JSON attachment:
+// the console's download control for a JSON document, such as a tbls
+// schema.json beside its doc. The key is shape-checked like boardDoc, and the
+// stored bytes go out unchanged.
+func (h *Handler) boardDocDownload(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Query().Get("key")
+	if !validDocumentKey(key) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_context")
+		return
+	}
+	document, found, err := h.store.GetDocument(r.Context(), key)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	if !found {
+		writeJSONError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	writeDocumentDownload(w, key, document.Body)
+}
+
+// writeDocumentDownload answers with the body as application/json and an
+// attachment whose filename is the key's last segment.
+func writeDocumentDownload(w http.ResponseWriter, key, body string) {
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(key)})
+	if disposition == "" {
+		disposition = "attachment"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", disposition)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, body)
 }
 
 type policyManifest struct {

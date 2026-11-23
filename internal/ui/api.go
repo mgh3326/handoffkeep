@@ -89,6 +89,13 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, identity cfac
 			return
 		}
 		h.boardDoc(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/doc/download":
+		// The same operator-only reading material as /ui/api/board/doc.
+		if identity.ServiceName != "" {
+			writeJSONError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		h.boardDocDownload(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/ui/api/board/doc/attachments":
 		if identity.ServiceName != "" {
 			writeJSONError(w, http.StatusForbidden, "forbidden")
