@@ -79,3 +79,16 @@
   padding: var(--hk-space-3);
   overflow-x: auto;
 }
+.hk-doc-mermaid {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: var(--hk-space-3) 0;
+}
+.hk-doc-schema {
+  margin: var(--hk-space-6) 0;
+}
+.hk-doc-schema code {
+  font-family: var(--hk-font-mono);
+  overflow-wrap: anywhere;
+}

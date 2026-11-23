@@ -29,11 +29,58 @@ function sectionFromHash(): string | null {
   return hash === "" ? null : hash;
 }
 
+// A tbls document (`<prefix>/doc`) sits beside its `<prefix>/schema.json`.
+function siblingSchemaKey(key: string): string | null {
+  return key.endsWith("/doc") ? `${key.slice(0, -"doc".length)}schema.json` : null;
+}
+
+type Schema = { status: "none" } | { status: "ready"; doc: DocPayload } | { status: "error" };
+
+function SchemaLink({ doc, schema, schemaKey }: { doc: DocPayload; schema: DocPayload; schemaKey: string }) {
+  const same = doc.sha256 === schema.sha256;
+  return (
+    <section className="hk-doc-schema" aria-label="schema.json">
+      <p>
+        Schema: <a href={`/ui/doc/${schemaKey}`}>{schemaKey}</a>
+      </p>
+      <p className="muted">
+        This document · updated {formatMinuteUTC(doc.updated_at)} · sha256 <code>{doc.sha256}</code>
+      </p>
+      <p className="muted">
+        schema.json · updated {formatMinuteUTC(schema.updated_at)} · sha256 <code>{schema.sha256}</code>
+      </p>
+      <p className="muted" role="status">
+        {same ? "Same version: the two sha256 values match." : "Different versions: the two sha256 values differ."}
+      </p>
+    </section>
+  );
+}
+
 export default function DocView({ docKey }: { docKey: string }) {
   const [state, setState] = useState<State>({ status: "loading" });
+  const [schema, setSchema] = useState<Schema>({ status: "none" });
   const [attachments, setAttachments] = useState<BoardAttachment[]>([]);
   const [attachmentsTruncated, setAttachmentsTruncated] = useState(false);
   const [attachmentsError, setAttachmentsError] = useState(false);
+  useEffect(() => {
+    const schemaKey = siblingSchemaKey(docKey);
+    setSchema({ status: "none" });
+    if (schemaKey === null) return;
+    let cancelled = false;
+    fetchDoc(schemaKey).then(
+      (doc) => {
+        if (!cancelled) setSchema({ status: "ready", doc });
+      },
+      (err: unknown) => {
+        if (cancelled) return;
+        // A missing sibling is simply no schema link; any other failure says so.
+        setSchema(err instanceof HttpError && err.status === 404 ? { status: "none" } : { status: "error" });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [docKey]);
   useEffect(() => {
     let cancelled = false;
     setState({ status: "loading" });
@@ -78,9 +125,18 @@ export default function DocView({ docKey }: { docKey: string }) {
       ) : (
         <>
           <p className="muted">{REASON[doc.reason ?? ""] ?? "Shown as text."}</p>
+          {doc.reason === "json" && (
+            <p>
+              <a className="hk-doc-download" href={`/ui/api/board/doc/download?key=${encodeURIComponent(doc.key)}`} download>
+                Download JSON
+              </a>
+            </p>
+          )}
           <pre className="hk-doc-raw">{doc.body}</pre>
         </>
       )}
+      {schema.status === "ready" && <SchemaLink doc={doc} schema={schema.doc} schemaKey={schema.doc.key} />}
+      {schema.status === "error" && <p className="muted" role="note">Could not check schema.json for this document.</p>}
       {(attachments.length > 0 || attachmentsError) && <section><h2>첨부 {attachmentsTruncated && <small>100+</small>}</h2>{attachmentsError ? <p role="alert">첨부를 불러오지 못했습니다.</p> : attachments.map(a => <p key={a.sha256}><a href={`/ui/files/${a.sha256}`}>{a.original_name}</a> · {a.size_bytes} bytes · {a.mime} · {formatMinuteUTC(a.created_at)} · {a.created_by}</p>)}</section>}
     </article>
   );
