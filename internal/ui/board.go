@@ -495,6 +495,8 @@ type boardDocument struct {
 type boardDetailResponse struct {
 	Documents          []boardDocument    `json:"documents"`
 	DocumentsTruncated bool               `json:"documents_truncated"`
+	DocRefs            []boardDocument    `json:"doc_refs"`
+	DocRefsTruncated   bool               `json:"doc_refs_truncated"`
 	Origins            []store.TaskOrigin `json:"origins"`
 	Changes            []store.Change     `json:"changes"`
 	Jobs               []boardJob         `json:"jobs"`
@@ -676,6 +678,21 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 	for _, document := range documents {
 		projectedDocuments = append(projectedDocuments, boardDocument{Key: document.Key, Kind: document.Kind, OriginClass: document.OriginClass})
 	}
+	// References (hk 6125) are listed apart from the bindings above.
+	docRefs, err := h.store.ListTaskDocRefs(r.Context(), id)
+	if err != nil {
+		log.Printf("ui.board_detail_error err=%q", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	docRefsTruncated := len(docRefs) > 100
+	if docRefsTruncated {
+		docRefs = docRefs[:100]
+	}
+	projectedDocRefs := make([]boardDocument, 0, len(docRefs))
+	for _, ref := range docRefs {
+		projectedDocRefs = append(projectedDocRefs, boardDocument{Key: ref.Key, Kind: ref.Kind})
+	}
 	originsTruncated, changesTruncated, jobsTruncated := len(origins) > 100, len(changes) > 100, len(jobs) > 100
 	if originsTruncated {
 		origins = origins[:100]
@@ -700,6 +717,7 @@ func (h *Handler) boardTaskDetail(w http.ResponseWriter, r *http.Request) {
 	response := boardDetailResponse{
 		Spawn:     task.Spawn,
 		Documents: projectedDocuments, DocumentsTruncated: documentsTruncated,
+		DocRefs: projectedDocRefs, DocRefsTruncated: docRefsTruncated,
 		Origins: origins, Changes: changes, Jobs: projectedJobs, OriginsTruncated: originsTruncated, ChangesTruncated: changesTruncated, JobsTruncated: jobsTruncated,
 		Task:      projectBoardTask(task),
 		Events:    make([]boardEvent, 0, len(task.Events)),
