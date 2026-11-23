@@ -880,7 +880,9 @@ func TestYTArticleCatchUpTickWalksOnlyNewDocuments(t *testing.T) {
 	}
 	// A new document is listed past the watermark and caught on the next tick.
 	pages = nil
-	second := ytartPut(t, s, "design/ytart/tick-second.md", "second", nil)
+	// A family's open root would hold a design document's create (the
+	// family_root_pending wait), so the new one is in its own family.
+	second := ytartPut(t, s, "note/ytart/tick-second", "second", nil)
 	ytartRescanDue(s)
 	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
 		t.Fatal(err)
