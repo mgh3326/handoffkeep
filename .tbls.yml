@@ -99,3 +99,13 @@ relations:
     parentTable: decision_requests
     parentColumns: [id]
     def: "decision request whose snooze the event replaced"
+  - table: task_doc_refs
+    columns: [task_id]
+    parentTable: tasks
+    parentColumns: [id]
+    def: "task that cites the document (no foreign key; hk 6125)"
+  - table: task_doc_refs
+    columns: [doc_key]
+    parentTable: documents
+    parentColumns: [key]
+    def: "document the task cites by reference, not the binding (no foreign key; hk 6125)"

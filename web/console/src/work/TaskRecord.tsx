@@ -49,6 +49,8 @@ export function TaskRecord({ id }: { id: number }) {
   if (error !== null) return <p role="alert">불러오지 못함 <button onClick={() => setAttempt(n => n + 1)}>다시 시도</button></p>;
   if (!data) return <p role="status">Loading…</p>;
   const { task, origins, documents, changes, jobs } = data;
+  // Documents this task cites by reference (hk 6125), listed after its bindings.
+  const docRefs = data.doc_refs ?? [];
   const timeline = [
     ...data.events.map(event => ({ key: `e${event.id}`, at: event.at, actor: event.by, text: eventText(event), comment: null as BoardComment | null })),
     ...comments.map(comment => ({ key: `c${comment.id}`, at: comment.created_at, actor: comment.author, text: null as string | null, comment })),
@@ -58,7 +60,7 @@ export function TaskRecord({ id }: { id: number }) {
     {data.body && <Section title="본문"><MarkdownBody original={data.body} korean={data.body_ko} stale={data.body_ko_stale} /></Section>}
     <Section title="종료 근거">{task.refs.closure ? <p>{task.refs.closure.type} · {task.refs.closure.evidence}</p> : ["merged", "deployed", "completed", "dropped", "duplicate", "canceled"].includes(task.state) ? <p>종결 증거 없음</p> : <p>기록 없음</p>}</Section>
     <Section title="출처" truncated={data.origins_truncated}>{origins.length ? origins.map((o, i) => <p key={i}>{o.provider} · {o.namespace} · {o.url ? <a href={o.url}>{o.display_ref || o.url}</a> : o.display_ref || "—"}</p>) : <p>기록 없음</p>}</Section>
-    <Section title="문서" truncated={data.documents_truncated}>{documents.length ? documents.map(d => <p key={d.key}><a href={`/ui/doc/${d.key.split("/").map(encodeURIComponent).join("/")}`}>{d.key}</a> · {d.kind} · {d.origin_class || "미분류"}</p>) : <p>기록 없음</p>}</Section>
+    <Section title="문서" truncated={data.documents_truncated || data.doc_refs_truncated}>{documents.length || docRefs.length ? <>{documents.map(d => <p key={d.key}><a href={`/ui/doc/${d.key.split("/").map(encodeURIComponent).join("/")}`}>{d.key}</a> · {d.kind} · {d.origin_class || "미분류"}</p>)}{docRefs.map(d => <p key={`ref:${d.key}`}><a href={`/ui/doc/${d.key.split("/").map(encodeURIComponent).join("/")}`}>{d.key}</a> · {d.kind} · 참조</p>)}</> : <p>기록 없음</p>}</Section>
     <Section title="첨부" truncated={attachmentsTruncated}>{attachmentsError ? <p role="alert">첨부를 불러오지 못했습니다.</p> : !attachmentsLoaded ? <p role="status">첨부 불러오는 중…</p> : <TaskAttachments attachments={attachments} />}</Section>
     <Section title="변경" truncated={data.changes_truncated}>{changes.length ? changes.map(c => <div key={c.id}><p><a href={c.pr}>{c.pr}</a> · {c.state} · {c.head_sha?.slice(0, 7)} · {c.merged_at && formatMinuteKST(c.merged_at)} · {c.hold_reason} {c.depends_on_change_id && `depends on #${c.depends_on_change_id} ${c.depends_on_state || ""}`}</p>{c.reviews?.map(r => <p key={r.id}>{r.lens} · {r.round}/{r.pass} · {r.family}/{r.model} · {r.verdict} · c {r.critical ?? "?"} h {r.high ?? "?"} m {r.medium ?? "?"} l {r.low ?? "?"}</p>)}</div>) : <p>기록 없음</p>}</Section>
     {data.spawn && <Section title="실행 요청"><SpawnBlock spawn={data.spawn} /></Section>}
