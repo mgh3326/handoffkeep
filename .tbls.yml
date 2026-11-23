@@ -1,13 +1,16 @@
 name: handoffkeep
-desc: "MySQL schema built from the repository's migrations (internal/store) on MySQL ${MYSQL_VERSION} (SELECT VERSION() in the schema-doc run). handoffkeep_work runs the same code and migrations, so this document covers both."
+desc: "MySQL schema built from the repository's migrations (internal/store) on MySQL ${MYSQL_VERSION} (SELECT VERSION() in the schema-doc run). handoffkeep_work runs the same code and migrations, so this document covers both. In an ER diagram, a line whose label contains 'no foreign key' or 'not enforced by a foreign key' is a relation declared in .tbls.yml for a column the code joins on; the database has no such constraint."
 dsn: my://root@127.0.0.1:3306/handoffkeep
 docPath: schema-doc
 er:
   format: mermaid
 
-# Relations the code relies on without a foreign key (operator decision 484, hk 6130).
-# Declared for the document only; the database is unchanged. A column with a real
-# FOREIGN KEY is drawn from the schema and is not listed here.
+# Relations the code relies on without a foreign key (operator decision 484, hk 6130,
+# hk 6131, hk 6125). Declared for the document only; the database is unchanged. A column with a
+# real FOREIGN KEY is drawn from the schema and is not listed here. This list is not an
+# inventory of every id-like column: it covers the task, job, document and write-op keys
+# named in hk 6131 and hk 6125 and leaves external ids (YouTrack issue, project and sync ids,
+# delivery ids) and the remaining audit columns undeclared.
 relations:
   - table: decision_requests
     columns: [task_id]
@@ -18,22 +21,22 @@ relations:
     columns: [task_id]
     parentTable: tasks
     parentColumns: [id]
-    def: "task the row belongs to (no foreign key)"
+    def: "linked to a task when there is one; not enforced by a foreign key"
   - table: mcp_write_audit
     columns: [task_id]
     parentTable: tasks
     parentColumns: [id]
-    def: "task the row belongs to (no foreign key)"
+    def: "linked to a task when there is one; not enforced by a foreign key"
   - table: placement_decisions
     columns: [task_id]
     parentTable: tasks
     parentColumns: [id]
-    def: "task the row belongs to (no foreign key)"
+    def: "linked to a task when there is one; not enforced by a foreign key"
   - table: sync_decisions
     columns: [task_id]
     parentTable: tasks
     parentColumns: [id]
-    def: "task the row belongs to (no foreign key)"
+    def: "mapping derived by trigger from the task's legacy refs.decision_request.id; not decision_requests.id, and no foreign key"
   - table: task_thread_deliveries
     columns: [task_id]
     parentTable: tasks
@@ -73,32 +76,74 @@ relations:
     columns: [writer_task_id]
     parentTable: tasks
     parentColumns: [id]
-    def: "task whose link write owns the YouTrack link"
+    def: "task whose link write owns the YouTrack link (no foreign key)"
   - table: yt_link_owned
     columns: [target_task_id]
     parentTable: tasks
     parentColumns: [id]
-    def: "task at the other end of the owned link"
+    def: "task at the other end of the owned link (no foreign key)"
   - table: yt_article_bindings
     columns: [document_id]
     parentTable: documents
     parentColumns: [id]
-    def: "hk document the YouTrack article mirrors"
+    def: "hk document the YouTrack article mirrors (no foreign key)"
   - table: decision_deliveries
     columns: [request_id]
     parentTable: decision_requests
     parentColumns: [id]
-    def: "decision request the notification delivers (joined on d.id = n.request_id)"
+    def: "decision request the notification delivers (joined on d.id = n.request_id; no foreign key)"
   - table: yt_decision_bindings
     columns: [decision_id]
     parentTable: decision_requests
     parentColumns: [id]
-    def: "decision request as decimal text (migration_yt_decision_bindings.go)"
+    def: "decision request as decimal text (migration_yt_decision_bindings.go; no foreign key)"
   - table: operator_inbox_events
     columns: [previous_request_id]
     parentTable: decision_requests
     parentColumns: [id]
-    def: "decision request whose snooze the event replaced"
+    def: "decision request whose earlier snooze state is recorded for undo; NULL for unrelated events; no foreign key"
+  - table: placement_decisions
+    columns: [job_id]
+    parentTable: jobs
+    parentColumns: [job_id]
+    def: "job the placement decided for (no foreign key)"
+  - table: decision_requests
+    columns: [job_id]
+    parentTable: jobs
+    parentColumns: [job_id]
+    parentCardinality: "zero or one"
+    def: "job the request belongs to; an empty job_id means no job (no foreign key)"
+  - table: documents
+    columns: [job]
+    parentTable: jobs
+    parentColumns: [job_id]
+    parentCardinality: "zero or one"
+    def: "job the document was filed for; an empty job means none (no foreign key)"
+  - table: yt_task_bindings
+    columns: [op_id]
+    parentTable: yt_write_ops
+    parentColumns: [id]
+    def: "the issue_create op that published an op_applied binding, NULL otherwise (no foreign key)"
+  - table: yt_decision_bindings
+    columns: [op_id]
+    parentTable: yt_write_ops
+    parentColumns: [id]
+    def: "the op that published an op_applied binding, NULL for an import_verified backfill (no foreign key)"
+  - table: yt_article_bindings
+    columns: [op_id]
+    parentTable: yt_write_ops
+    parentColumns: [id]
+    def: "the op that published the binding, NULL for an import_verified backfill (no foreign key)"
+  - table: yt_link_owned
+    columns: [intended_op_id]
+    parentTable: yt_write_ops
+    parentColumns: [id]
+    def: "op whose plan recorded the link (no foreign key)"
+  - table: yt_link_owned
+    columns: [released_op_id]
+    parentTable: yt_write_ops
+    parentColumns: [id]
+    def: "op that released the link, NULL while it is owned (no foreign key)"
   - table: task_doc_refs
     columns: [task_id]
     parentTable: tasks
@@ -109,3 +154,330 @@ relations:
     parentTable: documents
     parentColumns: [key]
     def: "document the task cites by reference, not the binding (no foreign key; hk 6125)"
+
+# Domain viewpoints (dots review hk 6133, P1). Every table is in at least one
+# viewpoint; `tables` is the union of its groups and scopes the page's ER diagram.
+# The hub tables a domain joins also appear in its "Related outside this domain"
+# group, so the edges that leave the domain stay visible without the full diagram.
+# Every table belongs to at least one viewpoint; `tbls lint` enforces it when a
+# new migration adds a table that no viewpoint lists.
+lint:
+  requireViewpoints:
+    enabled: true
+
+viewpoints:
+  - id: tasks
+    name: "Tasks, jobs and dots"
+    desc: |
+      Work items and the fleet that runs them: tasks and their comments, events,
+      orders and threads; the jobs placed for them; fleet quota, projects, dots
+      runs, bench records and the store's own plumbing.
+    tables:
+      - tasks
+      - task_comments
+      - task_events
+      - task_orders
+      - task_origins
+      - task_projects
+      - task_relations
+      - task_spawn_notices
+      - task_spawn_records
+      - task_thread_cursors
+      - task_thread_deliveries
+      - task_waits
+      - ticket_sets
+      - jobs
+      - placement_decisions
+      - lane_looks
+      - relay_events
+      - mcp_write_audit
+      - quota_latest
+      - quota_leases
+      - quota_observations
+      - quota_presence
+      - project_milestones
+      - project_owner_events
+      - dots_inbox_reads
+      - dots_results
+      - dots_run_tokens
+      - memory
+      - checkpoints
+      - translations
+      - ledger_cursors
+      - bench_area_exceptions
+      - bench_catalog
+      - bench_grades
+      - bench_reps
+      - bench_scores
+      - hk_locks
+      - schema_migrations
+    groups:
+      - name: "Tasks"
+        desc: "The work items themselves and everything keyed to one task."
+        tables:
+          - tasks
+          - task_comments
+          - task_events
+          - task_orders
+          - task_origins
+          - task_projects
+          - task_relations
+          - task_spawn_notices
+          - task_spawn_records
+          - task_thread_cursors
+          - task_thread_deliveries
+          - task_waits
+          - ticket_sets
+      - name: "Jobs and placement"
+        desc: "Sessions placed for tasks: the job, its placement decision, lane looks, relay events and MCP write audit."
+        tables:
+          - jobs
+          - placement_decisions
+          - lane_looks
+          - relay_events
+          - mcp_write_audit
+      - name: "Fleet and quota"
+        desc: "Hosts, accounts, quota observations and leases, and project ownership and milestones."
+        tables:
+          - quota_latest
+          - quota_leases
+          - quota_observations
+          - quota_presence
+          - project_milestones
+          - project_owner_events
+      - name: "Dots and memory"
+        desc: "Dots run tokens and inbox reads, agent memory, session checkpoints, translations and the ledger cursor."
+        tables:
+          - dots_inbox_reads
+          - dots_results
+          - dots_run_tokens
+          - memory
+          - checkpoints
+          - translations
+          - ledger_cursors
+      - name: "Bench"
+        desc: "The benchmark catalog and its area exceptions, grades, reps and scores."
+        tables:
+          - bench_area_exceptions
+          - bench_catalog
+          - bench_grades
+          - bench_reps
+          - bench_scores
+      - name: "Store"
+        desc: "The store's own plumbing: advisory locks and the migration ledger."
+        tables:
+          - hk_locks
+          - schema_migrations
+  - id: changes
+    name: "Changes, review and deploy"
+    desc: |
+      A change from proposal to production: its checks, findings, gate events and
+      threads; the reviews and verifications on it; and the deploy records and
+      services the deploy watcher reads.
+    tables:
+      - changes
+      - change_checks
+      - change_findings
+      - change_gate_events
+      - change_tasks
+      - change_threads
+      - reviews
+      - verifications
+      - deploy_record_projection
+      - deploy_services
+      - tasks
+    groups:
+      - name: "Changes"
+        desc: "A change, its checks, findings, gate events, task links and threads."
+        tables:
+          - changes
+          - change_checks
+          - change_findings
+          - change_gate_events
+          - change_tasks
+          - change_threads
+      - name: "Review"
+        desc: "Reviews and verifications recorded against a change."
+        tables:
+          - reviews
+          - verifications
+      - name: "Deploy"
+        desc: "The deploy records and services the deploy watcher projects."
+        tables:
+          - deploy_record_projection
+          - deploy_services
+      - name: "Related outside this domain"
+        desc: "Tables one relation away, drawn so the edges that leave this domain stay visible."
+        tables:
+          - tasks
+  - id: decisions
+    name: "Decisions and notifications"
+    desc: |
+      Decisions the fleet asks an operator or a peer to settle, their answers and
+      deliveries, the notification outbox, and the operator inbox and chat that
+      carry them.
+    tables:
+      - decision_requests
+      - decision_answer_attempts
+      - decision_deliveries
+      - decision_notify_digest
+      - decision_resolutions
+      - notification_outbox
+      - operator_inbox_events
+      - operator_inbox_state
+      - chat_messages
+      - chat_questions
+      - chat_message_questions
+      - jobs
+      - tasks
+      - yt_decision_bindings
+    groups:
+      - name: "Decision requests"
+        desc: "Decision requests, their answer attempts, deliveries, digests and resolutions."
+        tables:
+          - decision_requests
+          - decision_answer_attempts
+          - decision_deliveries
+          - decision_notify_digest
+          - decision_resolutions
+      - name: "Notifications"
+        desc: "The notification outbox that delivers decision and task notices."
+        tables:
+          - notification_outbox
+      - name: "Operator inbox and chat"
+        desc: "The operator inbox state and its undo events, and operator chat messages and questions."
+        tables:
+          - operator_inbox_events
+          - operator_inbox_state
+          - chat_messages
+          - chat_questions
+          - chat_message_questions
+      - name: "Related outside this domain"
+        desc: "Tables one relation away, drawn so the edges that leave this domain stay visible."
+        tables:
+          - jobs
+          - tasks
+          - yt_decision_bindings
+  - id: documents
+    name: "Documents and attachments"
+    desc: |
+      Documents by key (briefs, reports, notes) and the attachment blobs and refs
+      filed against them, plus the prune log of deleted documents.
+    tables:
+      - documents
+      - doc_prune_log
+      - task_doc_refs
+      - attachments
+      - attachment_refs
+      - attachment_uploads
+      - attachment_usage
+      - jobs
+      - tasks
+      - yt_article_bindings
+    groups:
+      - name: "Documents"
+        desc: "Documents by key, the tasks that cite one by reference, and the prune log of deleted ones."
+        tables:
+          - documents
+          - doc_prune_log
+          - task_doc_refs
+      - name: "Attachments"
+        desc: "Attachment blobs, the refs filed against them, uploads and usage."
+        tables:
+          - attachments
+          - attachment_refs
+          - attachment_uploads
+          - attachment_usage
+      - name: "Related outside this domain"
+        desc: "Tables one relation away, drawn so the edges that leave this domain stay visible."
+        tables:
+          - jobs
+          - tasks
+          - yt_article_bindings
+  - id: youtrack
+    name: "YouTrack sync"
+    desc: |
+      The YouTrack projection: issue, article and decision bindings, owned and
+      unowned links, the write-op queue that sends each change, and the sync log
+      and cursors that replay it.
+    tables:
+      - youtrack_projects
+      - youtrack_comment_links
+      - yt_authority
+      - yt_article_bindings
+      - yt_binding_cursor
+      - yt_binding_history
+      - yt_binding_intents
+      - yt_comment_canary
+      - yt_comment_write_links
+      - yt_decision_bindings
+      - yt_entity_map
+      - yt_family_roots
+      - yt_issue_comment_bounds
+      - yt_issue_intents
+      - yt_snapshot_state
+      - yt_task_bindings
+      - yt_link_owned
+      - yt_link_plans
+      - yt_link_steps
+      - yt_link_unowned
+      - yt_links_sweep
+      - yt_write_ops
+      - yt_write_op_adoptions
+      - yt_write_op_alerts
+      - yt_write_op_requeues
+      - sync_log
+      - sync_state
+      - sync_decisions
+      - yt_feed_cursors
+      - decision_requests
+      - documents
+      - tasks
+    groups:
+      - name: "Bindings"
+        desc: "The issue, article and decision bindings the projection keeps, and its cursors and history."
+        tables:
+          - youtrack_projects
+          - youtrack_comment_links
+          - yt_authority
+          - yt_article_bindings
+          - yt_binding_cursor
+          - yt_binding_history
+          - yt_binding_intents
+          - yt_comment_canary
+          - yt_comment_write_links
+          - yt_decision_bindings
+          - yt_entity_map
+          - yt_family_roots
+          - yt_issue_comment_bounds
+          - yt_issue_intents
+          - yt_snapshot_state
+          - yt_task_bindings
+      - name: "Links"
+        desc: "Links hk owns on YouTrack, the plans and steps that send them, unowned links and the sweep cursor."
+        tables:
+          - yt_link_owned
+          - yt_link_plans
+          - yt_link_steps
+          - yt_link_unowned
+          - yt_links_sweep
+      - name: "Write ops"
+        desc: "The write-op queue and the adoption, alert and requeue bookkeeping around it."
+        tables:
+          - yt_write_ops
+          - yt_write_op_adoptions
+          - yt_write_op_alerts
+          - yt_write_op_requeues
+      - name: "Sync"
+        desc: "The sync log, its cursor, the decision mirror and the YouTrack feed cursors."
+        tables:
+          - sync_log
+          - sync_state
+          - sync_decisions
+          - yt_feed_cursors
+      - name: "Related outside this domain"
+        desc: "Tables one relation away, drawn so the edges that leave this domain stay visible."
+        tables:
+          - decision_requests
+          - documents
+          - tasks
