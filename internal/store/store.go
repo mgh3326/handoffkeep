@@ -721,13 +721,15 @@ type Store struct {
 	// ytDocsCatchUpMu guards the catch-up's state: ytDocsScanned (the
 	// start-up walk ran in this process), ytDocsLastScan (when it last
 	// ticked), ytDocsLastFull (when it last walked every document),
-	// ytDocsWatermark (the highest document id a walk listed) and
-	// ytDocsWaiting (the documents waiting on an outside fact, which every
-	// tick decides again).
+	// ytDocsSide (the documents authority at that walk), ytDocsWatermark (the
+	// highest document id committed before the last walk) and ytDocsWaiting
+	// (the documents waiting on an outside fact, which every tick decides
+	// again).
 	ytDocsCatchUpMu sync.Mutex
 	ytDocsScanned   bool
 	ytDocsLastScan  time.Time
 	ytDocsLastFull  time.Time
+	ytDocsSide      YTAuthoritySide
 	ytDocsWatermark int64
 	ytDocsWaiting   []int64
 	// ytArticlePage, when set (tests only), runs before each catch-up page

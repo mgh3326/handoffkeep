@@ -1099,20 +1099,19 @@ func ytArticleCatchUpSelectSQLMySQL(held string) string {
 }
 
 // ytArticleFullScanEvery is how often catchUpYTArticlesOnce walks every
-// document again, after the start-up walk. The ticks between list only what
-// is past the watermark (ytDocsWatermark) and decide the waiting documents
-// (ytDocsWaiting); the full walk is the net for what those do not list: a
-// document whose id committed below the watermark, a rollback's post-switch
-// baseline bodies (no feed row is made for them), and a bound document whose
-// binding or body changed while no feed row named it.
+// document again (the minute rescan's own query, from id 0). The ticks
+// between list only the documents past the watermark (ytDocsWatermark) and
+// decide the waiting ones (ytDocsWaiting). The full walk is the net for what
+// those do not list: a document whose id committed below the watermark. A
+// switch of the documents authority walks at once (ytDocsSide), since a
+// rollback to hk writes the post-switch baseline bodies, which make no feed
+// row (r4548095657).
 const ytArticleFullScanEvery = time.Hour
 
 // ytArticleScan is what one catch-up walk decided.
 type ytArticleScan struct {
 	counts    map[ytArticleOutcome]int
 	noProject int
-	// last is the highest document id the walk listed: the watermark.
-	last int64
 	// waiting names the documents decided as waiting on something outside
 	// the document (ytArticleWaits).
 	waiting []int64
@@ -1131,12 +1130,14 @@ func (sc *ytArticleScan) add(id int64, outcome ytArticleOutcome) {
 
 // ytArticleWaits reports whether an outcome waits on a fact outside the
 // document: a project mapping (no_project), a parent's article
-// (parent_pending) or a family's root (family_root_pending and
-// family_root_uncertain). Such a document gets no feed row when that fact
-// changes, so every tick decides it again until the outcome changes.
+// (parent_pending), a family's root (family_root_pending and
+// family_root_uncertain), or a create rejected invalid_issue that the next
+// create retries (create_rejected, hk 4295). Such a document gets no feed row
+// when that fact changes, so every tick decides it again until its outcome
+// changes; a rejected create that is not retried reads back as create_exists.
 func ytArticleWaits(o ytArticleOutcome) bool {
 	switch o {
-	case ytArticleNoProject, ytArticleParentPending, ytArticleFamilyPending, ytArticleFamilyUncertain:
+	case ytArticleNoProject, ytArticleParentPending, ytArticleFamilyPending, ytArticleFamilyUncertain, ytArticleCreateRejected:
 		return true
 	}
 	return false
@@ -1176,10 +1177,10 @@ func (s *Store) decideYTArticles(ctx context.Context, now time.Time, g ytDocsGat
 // walk. bound true (the full walk) lists every bound document too.
 //
 // The list runs in pages of ytArticleCatchUpPage, from id from, so a tick
-// past the watermark reads only the documents created since. The returned
-// scan carries the highest id listed (the next watermark) and the outcomes.
+// past the watermark reads only the documents created since. It returns the
+// outcomes; the watermark is read by the caller before the walk.
 func (s *Store) catchUpYTArticles(ctx context.Context, now time.Time, from int64, bound bool) (ytArticleScan, error) {
-	sc := ytArticleScan{counts: map[ytArticleOutcome]int{}, last: from}
+	sc := ytArticleScan{counts: map[ytArticleOutcome]int{}}
 	g, on := s.ytDocsNow()
 	if !on {
 		return sc, nil
@@ -1233,7 +1234,6 @@ func (s *Store) catchUpYTArticles(ctx context.Context, now time.Time, from int64
 			return sc, err
 		}
 		if listed < ytArticleCatchUpPage {
-			sc.last = after
 			return sc, nil
 		}
 	}
@@ -1277,17 +1277,26 @@ func (s *Store) catchUpYTArticleOnce(ctx context.Context, now time.Time, g ytDoc
 // the waiting ones.
 const ytArticleRescanEvery = time.Minute
 
+// ytArticleTop is the highest document id committed when it is read.
+func (s *Store) ytArticleTop(ctx context.Context) (int64, error) {
+	var top int64
+	err := s.db().QueryRow(ctx, `SELECT COALESCE(MAX(id),0) FROM documents`).Scan(&top)
+	return top, err
+}
+
 // catchUpYTArticlesOnce runs, in mode on, after the document_articles cursor
-// exists (so every later change is the feed's), one full catch-up per
-// process, then a tick at most every ytArticleRescanEvery, and a full walk
-// again at most every ytArticleFullScanEvery. A tick lists only the documents
-// past the watermark (the highest id any walk listed) and decides the
-// documents that waited on an outside fact (ytArticleWaits): such a document
-// gets no feed row, so a youtrack_projects mapping added later is found on
-// the next tick of any worker (r4546690164, r4547806956, r4547880757). A tick
-// with no new document therefore issues one page query, not a walk of the
-// table. RunYTFeedConsumers calls it after every pass. ytDocsCaughtUp is set
-// while the last scan found none waiting for a project.
+// exists (so every later change is the feed's). The start-up walk is the one
+// full catch-up per process, bound as it always was (bound true). After it, a
+// tick runs at most every ytArticleRescanEvery: it lists the documents past
+// the watermark and decides the waiting ones (ytArticleWaits). A walk from id
+// 0 (bound false, the minute rescan's own query) runs at most every
+// ytArticleFullScanEvery and at once when the documents authority switches.
+// The watermark is the highest id committed before the walk started, so a
+// tick with no new document reads no rows past it. A document waiting on an
+// outside fact (no project, a parent, a family root, a rejected create)
+// gets no feed row when that fact changes, so each tick decides it again.
+// RunYTFeedConsumers calls it after every pass. ytDocsCaughtUp is set while
+// the last scan found none waiting for a project.
 // The documents authority switch does not rely on it: it refuses while any
 // document is unwritten (ytArticlesUnwrittenTx).
 func (s *Store) catchUpYTArticlesOnce(ctx context.Context, now time.Time) error {
@@ -1297,21 +1306,29 @@ func (s *Store) catchUpYTArticlesOnce(ctx context.Context, now time.Time) error 
 	}
 	s.ytDocsCatchUpMu.Lock()
 	defer s.ytDocsCatchUpMu.Unlock()
-	full := !s.ytDocsScanned || now.Sub(s.ytDocsLastFull) >= ytArticleFullScanEvery
-	if !full && now.Sub(s.ytDocsLastScan) < ytArticleRescanEvery {
+	if s.ytDocsScanned && now.Sub(s.ytDocsLastScan) < ytArticleRescanEvery {
 		return nil
 	}
-	if full {
+	startUp := !s.ytDocsScanned
+	if startUp {
 		var cursor bool
 		if err := s.db().QueryRow(ctx, sqlFor(s, `SELECT EXISTS(SELECT 1 FROM yt_feed_cursors WHERE consumer=$1)`,
 			`SELECT EXISTS(SELECT 1 FROM yt_feed_cursors WHERE consumer=?)`), ytDocsConsumer).Scan(&cursor); err != nil || !cursor {
 			return err
 		}
 	}
+	side, err := ytAuthorityTx(ctx, s.db(), YTAuthorityDocuments)
+	if err != nil {
+		return err
+	}
+	full := startUp || side != s.ytDocsSide || now.Sub(s.ytDocsLastFull) >= ytArticleFullScanEvery
+	top, err := s.ytArticleTop(ctx)
+	if err != nil {
+		return err
+	}
 	var sc ytArticleScan
-	var err error
 	if full {
-		sc, err = s.catchUpYTArticles(ctx, now, 0, true)
+		sc, err = s.catchUpYTArticles(ctx, now, 0, startUp)
 	} else {
 		sc, err = s.catchUpYTArticles(ctx, now, s.ytDocsWatermark, false)
 		if err == nil {
@@ -1325,10 +1342,10 @@ func (s *Store) catchUpYTArticlesOnce(ctx context.Context, now time.Time) error 
 	counts := sc.counts
 	s.ytDocsScanned, s.ytDocsLastScan = true, now
 	if full {
-		s.ytDocsLastFull = now
+		s.ytDocsLastFull, s.ytDocsSide = now, side
 	}
-	if sc.last > s.ytDocsWatermark {
-		s.ytDocsWatermark = sc.last
+	if top > s.ytDocsWatermark {
+		s.ytDocsWatermark = top
 	}
 	// sc.waiting is every document still waiting: the new ones and the ones
 	// this tick decided again.
