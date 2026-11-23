@@ -67,6 +67,7 @@ type tierJob struct {
 	Steps       []step         `yaml:"steps"`
 	Concurrency map[string]any `yaml:"concurrency"`
 	Permissions map[string]any `yaml:"permissions"`
+	Strategy    map[string]any `yaml:"strategy"`
 }
 
 type tierWorkflow struct {
@@ -460,8 +461,16 @@ func deployTierProblems(wf tierWorkflow) []string {
 	if fmt.Sprint(linux.Env["HANDOFFKEEP_TEST_DB_URL"]) == "" {
 		add("deploy-linux must set HANDOFFKEEP_TEST_DB_URL")
 	}
-	if !strings.Contains(stepRuns(linux), "go test -v -race -timeout 30m ./...") {
-		add("deploy-linux must run the full -race suite against PostgreSQL")
+	race := stepRuns(linux)
+	for _, want := range []string{
+		`go test -v -race -timeout 30m "${pkglist[@]}"`,
+		"go test -v -race -timeout 30m ./internal/store -run",
+		"scripts/package-test-shard.sh",
+		"scripts/store-test-shard.sh",
+	} {
+		if !strings.Contains(race, want) {
+			add("deploy-linux must run the -race suite against PostgreSQL in shards (missing %q, hk 6156)", want)
+		}
 	}
 
 	macos := wf.Jobs["deploy-macos"]
@@ -498,19 +507,16 @@ func deployWorkflowProblems(raw []byte) []string {
 	if err := yaml.Unmarshal(raw, &wf); err != nil {
 		return []string{fmt.Sprintf("deploy.yml: %v", err)}
 	}
-	run, ok := wf.On["workflow_run"].(map[string]any)
+	// hk 6156: the deploy tier starts with the main-push run. A workflow_run
+	// trigger would start it after the main tier, the old two-step shape.
+	if _, ok := wf.On["workflow_run"]; ok {
+		add("must not trigger on workflow_run: the deploy tier starts with the main-push run (hk 6156)")
+	}
+	push, ok := wf.On["push"].(map[string]any)
 	if !ok {
-		add("must trigger on workflow_run")
-	} else {
-		if got := fmt.Sprint(run["workflows"]); got != "[ci]" {
-			add("workflow_run.workflows is %q, want [ci]", got)
-		}
-		if got := fmt.Sprint(run["types"]); got != "[completed]" {
-			add("workflow_run.types is %q, want [completed]", got)
-		}
-		if got := fmt.Sprint(run["branches"]); got != "[main]" {
-			add("workflow_run.branches is %q, want [main]", got)
-		}
+		add("must trigger on push (the main-push run, hk 6156)")
+	} else if got := fmt.Sprint(push["branches"]); got != "[main]" {
+		add("push.branches is %q, want [main]", got)
 	}
 	if _, ok := wf.On["workflow_dispatch"]; !ok {
 		add("must trigger on workflow_dispatch(sha)")
@@ -730,6 +736,12 @@ func tierProblems(ci, anyRef, deploy, policy []byte) []string {
 	if fmt.Sprint(wf.Concurrency["cancel-in-progress"]) != "true" || !strings.Contains(fmt.Sprint(wf.Concurrency["group"]), "github.ref") {
 		add("ci.yml concurrency must key on github.ref and cancel the older run in progress")
 	}
+	// hk 6156: a deploy call from deploy.yml's push run carries the push event,
+	// so only inputs.suite tells it apart from the main push run; without it
+	// the two would share a group and cancel each other.
+	if !strings.Contains(fmt.Sprint(wf.Concurrency["group"]), "inputs.suite") {
+		add("ci.yml concurrency must key a called run on its run id when the caller is a push (inputs.suite, hk 6156)")
+	}
 
 	out = append(out, gitleaksScopeProblems(wf)...)
 	out = append(out, prStoreDBProblems(wf, policy)...)
@@ -745,7 +757,7 @@ func tierProblems(ci, anyRef, deploy, policy []byte) []string {
 		if hasRace(j) {
 			add("job %s: pull requests reach it and it runs -race", name)
 		}
-		if len(j.Services) > 0 && name != prStoreDB && name != "mysql-store" {
+		if len(j.Services) > 0 && name != prStoreDB && name != "mysql-store-shard" {
 			add("job %s: pull requests reach it and it starts service containers", name)
 		}
 		if ro := runsOnText(j.RunsOn); ro != "ubuntu-latest" {
@@ -766,7 +778,9 @@ func tierProblems(ci, anyRef, deploy, policy []byte) []string {
 			needs[n] = true
 		}
 		for name := range wf.Jobs {
-			if name != "ci-ok" && !needs[name] {
+			// mysql-store is the required check's aggregate. It fails on a
+			// cancelled leg, so ci-ok reads the legs instead (hk 6156).
+			if name != "ci-ok" && name != "mysql-store" && !needs[name] {
 				add("ci-ok must need %s", name)
 			}
 		}
@@ -876,9 +890,9 @@ func TestCITierMatrix(t *testing.T) {
 	if err := yaml.Unmarshal(allWorkflows(t), &wf); err != nil {
 		t.Fatal(err)
 	}
-	light := []string{"auto-tag-test", "build", "mysql-store", "pr-store-db", "test", "vitest"}
+	light := []string{"auto-tag-test", "build", "mysql-store", "mysql-store-shard", "pr-store-db", "test", "vitest"}
 	// suite=test drops the vitest and build jobs (their own suite selectors).
-	testOnly := []string{"auto-tag-test", "mysql-store", "pr-store-db", "test"}
+	testOnly := []string{"auto-tag-test", "mysql-store", "mysql-store-shard", "pr-store-db", "test"}
 	mainJobsList := []string{"main-migration", "main-packages", "main-quota-mutants", "main-release-dryrun", "main-reopen-mutants", "main-store-1", "main-store-2"}
 	mainTier := append(append([]string{}, light...), mainJobsList...)
 	mainTest := append(append([]string{}, testOnly...), mainJobsList...)
@@ -893,7 +907,7 @@ func TestCITierMatrix(t *testing.T) {
 		{"main-push-test", "push", "test", mainTest},
 		{"dispatch-all", "workflow_dispatch", "all", mainTier},
 		{"any-ref-deploy", "workflow_dispatch", "deploy", deploy},
-		{"deploy-workflow-run", "workflow_run", "deploy", deploy},
+		{"deploy-main-push", "push", "deploy", deploy},
 		{"deploy-called", "workflow_call", "deploy", deploy},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -939,6 +953,8 @@ func evalGuard(expr, event, suite string) (bool, error) {
 		{`contains(fromJSON('["all","test"]'), inputs.suite || 'all')`, suite == "all" || suite == "test"},
 		{`contains(fromJSON('["all","vitest"]'), inputs.suite || 'all')`, suite == "all" || suite == "vitest"},
 		{`contains(fromJSON('["all","build"]'), inputs.suite || 'all')`, suite == "all" || suite == "build"},
+		// The required-check aggregate runs even when a leg fails (hk 6156).
+		{"always()", true},
 	}
 	for _, a := range atoms {
 		expr = strings.ReplaceAll(expr, a.text, fmt.Sprint(a.val))
@@ -1098,7 +1114,7 @@ func TestCITierJobInventory(t *testing.T) {
 		file string
 		want []string
 	}{
-		{"ci.yml", []string{"auto-tag-test", "build", "ci-ok", "deploy-linux", "deploy-macos", "deploy-release", "main-migration", "main-packages", "main-quota-mutants", "main-release-dryrun", "main-reopen-mutants", "main-store-1", "main-store-2", "mysql-store", "pr-store-db", "test", "vitest"}},
+		{"ci.yml", []string{"auto-tag-test", "build", "ci-ok", "deploy-linux", "deploy-macos", "deploy-release", "main-migration", "main-packages", "main-quota-mutants", "main-release-dryrun", "main-reopen-mutants", "main-store-1", "main-store-2", "mysql-store", "mysql-store-shard", "pr-store-db", "test", "vitest"}},
 		{"deploy.yml", []string{"ci", "promote", "schema-compat", "status", "target"}},
 	} {
 		var wf tierWorkflow
@@ -1150,7 +1166,7 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 	const storeEnv = "        env:\n          HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable\n          PACKAGES: ${{ steps.decide.outputs.packages }}\n"
 	for _, m := range []struct{ name, old, new string }{
 		{"race-in-pr-test", "run: go test -timeout 10m ./...", "run: go test -race -timeout 10m ./..."},
-		{"race-in-main-store-1", "      - name: go test store shard 1\n        env:\n          HANDOFFKEEP_SEARCH_LATENCY: ${{ inputs.packages == './internal/store' && '1' || '' }}\n        run: |\n          if [ -f scripts/store-test-shard.sh ]; then\n            RUN_REGEX=$(bash scripts/store-test-shard.sh 1)\n            go test -v -timeout 20m ./internal/store -run \"$RUN_REGEX\"", "      - name: go test store shard 1\n        env:\n          HANDOFFKEEP_SEARCH_LATENCY: ${{ inputs.packages == './internal/store' && '1' || '' }}\n        run: |\n          if [ -f scripts/store-test-shard.sh ]; then\n            RUN_REGEX=$(bash scripts/store-test-shard.sh 1)\n            go test -v -race -timeout 20m ./internal/store -run \"$RUN_REGEX\""},
+		{"race-in-main-store-1", "      - name: go test store shard 1\n        env:\n          HANDOFFKEEP_SEARCH_LATENCY: ${{ inputs.packages == './internal/store' && '1' || '' }}\n        run: |\n          if [ -f scripts/store-test-shard.sh ]; then\n            RUN_REGEX=$(bash scripts/store-test-shard.sh 1 2)\n            go test -v -timeout 20m ./internal/store -run \"$RUN_REGEX\"", "      - name: go test store shard 1\n        env:\n          HANDOFFKEEP_SEARCH_LATENCY: ${{ inputs.packages == './internal/store' && '1' || '' }}\n        run: |\n          if [ -f scripts/store-test-shard.sh ]; then\n            RUN_REGEX=$(bash scripts/store-test-shard.sh 1 2)\n            go test -v -race -timeout 20m ./internal/store -run \"$RUN_REGEX\""},
 		{"main-packages-race-only", `go test -v -timeout 20m "${pkgs[@]}"`, `go test -v -race -timeout 20m "${pkgs[@]}"`},
 		{"self-hosted-pr-test", "'all') }}\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n", "'all') }}\n    runs-on: [self-hosted, linux]\n    timeout-minutes: 15\n"},
 		{"runner-variable-pr-test", "'all') }}\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n", "'all') }}\n    runs-on: ${{ vars.HANDOFFKEEP_POST_LINUX_RUNNER || 'ubuntu-latest' }}\n    timeout-minutes: 15\n"},
@@ -1158,8 +1174,8 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"no-cancel-in-progress", "cancel-in-progress: true}", "cancel-in-progress: false}"},
 		{"main-push-keeps-running", "cancel-in-progress: true}", `cancel-in-progress: "${{ github.event_name == 'pull_request' }}"}`},
 		{"main-store-1-unguarded", "    if: ${{ " + mainGuard + " }}\n    name: 'main: store shard 1'", "    if: ${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'main: store shard 1'"},
-		{"deploy-linux-unguarded", "    if: ${{ " + deployGuard + " }}\n    name: 'deploy: race + postgres'", "    if: ${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'deploy: race + postgres'"},
-		{"deploy-linux-race-removed", "go test -v -race -timeout 30m ./...", "go test -v -timeout 30m ./..."},
+		{"deploy-linux-unguarded", "    if: ${{ " + deployGuard + " }}\n    name: 'deploy: race + postgres (shard ${{ matrix.shard }} of 3)'", "    if: ${{ contains(fromJSON('[\"all\",\"test\"]'), inputs.suite || 'all') }}\n    name: 'deploy: race + postgres (shard ${{ matrix.shard }} of 3)'"},
+		{"deploy-linux-race-removed", `go test -v -race -timeout 30m "${pkglist[@]}"`, `go test -v -timeout 30m "${pkglist[@]}"`},
 		{"deploy-macos-on-linux", "'deploy: macos'\n    runs-on: macos-latest", "'deploy: macos'\n    runs-on: ubuntu-latest"},
 		{"deploy-macos-no-db-switch", "      HANDOFFKEEP_TEST_NO_DB: \"1\"\n    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          ref: ${{ inputs.ref }}\n      # The local action comes from the workflow revision", "    steps:\n      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0\n        with:\n          ref: ${{ inputs.ref }}\n      # The local action comes from the workflow revision"},
 		{"deploy-release-dropped", "      - run: bash scripts/test-build-release.sh", "      - run: true"},
@@ -1180,7 +1196,7 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"pr-store-db-expr-in-run", `go test -timeout 20m -count=1 -v "${pkgs[@]}"`, `go test -timeout 20m -count=1 -v "${pkgs[@]}" -run '${{ github.head_ref }}'`},
 		{"pr-store-db-ignores-selection", `go test -timeout 20m -count=1 -v "${pkgs[@]}"`, `go test -timeout 20m -count=1 -v ./internal/store/...`},
 		{"pr-store-db-packages-not-from-decision", "          PACKAGES: ${{ steps.decide.outputs.packages }}\n", "          PACKAGES: ./internal/store/...\n"},
-		{"pr-store-db-not-in-ci-ok", "needs: [test, pr-store-db, mysql-store, vitest,", "needs: [test, mysql-store, vitest,"},
+		{"pr-store-db-not-in-ci-ok", "needs: [test, pr-store-db, mysql-store-shard, vitest,", "needs: [test, mysql-store-shard, vitest,"},
 		// hk 4342: a job-level service or an ungated docker step boots
 		// PostgreSQL even when the decision selects nothing.
 		{"pr-store-db-service-back", "    timeout-minutes: 25\n    steps:", "    timeout-minutes: 25\n    services:\n      postgres:\n        image: postgres:17\n    steps:"},
@@ -1239,7 +1255,7 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"deploy-one-group-per-run", "group: deploy", "group: deploy-${{ github.run_id }}"},
 		{"deploy-widens-permissions", "\n  statuses: write\njobs:", "\n  statuses: write\n  packages: write\njobs:"},
 		{"deploy-drops-contents-read", "  contents: read\n  statuses: write", "  statuses: write"},
-		{"deploy-no-workflow-run", "  workflow_run:\n    # ci.yml is by name, the only workflow it may follow. branches: [main] drops\n    # every pull request and any-ref call at the trigger, before a run exists;\n    # the target job repeats the main-push test so a manually edited trigger\n    # cannot deploy a PR head.\n    workflows: [ci]\n    types: [completed]\n    branches: [main]\n", ""},
+		{"deploy-keeps-workflow-run", "on:\n  push:\n", "on:\n  workflow_run:\n    workflows: [ci]\n    types: [completed]\n    branches: [main]\n  push:\n"},
 		{"deploy-follows-any-branch", "    branches: [main]\n", "    branches: [main, develop]\n"},
 		{"deploy-unpinned-context", "context=deploy-ok", "context=ci-ok"},
 		{"deploy-status-on-dispatch-sha", "      TARGET_SHA: ${{ needs.target.outputs.sha }}\n      RESULT:", "      TARGET_SHA: ${{ github.sha }}\n      RESULT:"},
@@ -1336,9 +1352,9 @@ func TestMySQLStoreJobRunsPortAndDriftChecks(t *testing.T) {
 	if err := yaml.Unmarshal(readWorkflow(t, "ci.yml"), &wf); err != nil {
 		t.Fatal(err)
 	}
-	job, ok := wf.Jobs["mysql-store"]
+	job, ok := wf.Jobs["mysql-store-shard"]
 	if !ok {
-		t.Fatal("missing mysql-store job")
+		t.Fatal("missing mysql-store-shard job")
 	}
 	mysql, ok := job.Services["mysql"].(map[string]any)
 	if !ok || !strings.HasPrefix(fmt.Sprint(mysql["image"]), "mysql:26.10.0@sha256:") {
@@ -1351,9 +1367,12 @@ func TestMySQLStoreJobRunsPortAndDriftChecks(t *testing.T) {
 		t.Fatal("both database URLs are required")
 	}
 	run := stepRuns(job)
-	// The whole store package runs with the mysql tag (hk 5088): no -run filter
-	// may narrow it to the MySQL-named tests.
-	if !strings.Contains(run, "-tags=mysql") || !strings.Contains(run, "./internal/store") || strings.Contains(run, " -run ") {
-		t.Fatalf("MySQL store suite must run the whole package with -tags=mysql: %s", run)
+	// Each leg runs its shard of the whole store package with the mysql tag
+	// (hk 5088, hk 6156): the only -run filter allowed is the shard regex,
+	// which is dealt from the mysql-tagged list, so no leg narrows to the
+	// MySQL-named tests.
+	shardRun := `go test -p 2 -tags=mysql -v -timeout 30m -run "$RUN_REGEX" ./internal/store`
+	if !strings.Contains(run, `scripts/store-test-shard.sh "$SHARD" "$SHARDS" mysql`) || !strings.Contains(run, shardRun) || strings.Count(run, " -run ") != 1 {
+		t.Fatalf("MySQL store shard must run its mysql-tagged shard of the whole package: %s", run)
 	}
 }

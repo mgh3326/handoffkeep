@@ -8,7 +8,7 @@ import (
 
 // schema-doc.yml (hk 6106) builds the MySQL schema document on a throwaway
 // service container. These guards keep it off pull requests, on the same MySQL
-// image as ci.yml's mysql-store job, and on the reviewed tbls checksum.
+// image as ci.yml's mysql-store-shard job, and on the reviewed tbls checksum.
 
 const reviewedTblsSHA256 = "43c81f408495d9b626d0265a6ebb57c6d1c4a5e072d3eecc3e88825cc6c64e9a"
 
@@ -60,12 +60,12 @@ func TestSchemaDocWorkflow(t *testing.T) {
 	if err := yaml.Unmarshal(readWorkflow(t, "ci.yml"), &ci); err != nil {
 		t.Fatal(err)
 	}
-	want := ci.Jobs["mysql-store"].Services["mysql"].Image
+	want := ci.Jobs["mysql-store-shard"].Services["mysql"].Image
 	if want == "" {
-		t.Fatal("ci.yml mysql-store job has no mysql service image")
+		t.Fatal("ci.yml mysql-store-shard job has no mysql service image")
 	}
 	if got := job.Services["mysql"].Image; got != want {
-		t.Errorf("schema-doc mysql image = %q, want the mysql-store image %q", got, want)
+		t.Errorf("schema-doc mysql image = %q, want the mysql-store-shard image %q", got, want)
 	}
 
 	var checksum string

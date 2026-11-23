@@ -42,16 +42,22 @@ on:
 #          other event, and an unset variable, uses a hosted runner, because a
 #          dispatch checks out an arbitrary ref and only reviewed, merged code
 #          may reach our machines.
-#   T-DEPLOY suite=deploy only, off a pull request: deploy-linux and
-#          deploy-macos, the -race suite against PostgreSQL, the -race suite
-#          without a database on macOS, and the release-build dry run.
-#          deploy.yml runs this tier from a successful main ci run, and on
-#          dispatch, plus its schema-compat job (the previous release must
+#   T-DEPLOY suite=deploy only, off a pull request: deploy-linux (sharded, see
+#          below) and deploy-macos, the -race suite against
+#          PostgreSQL and the -race suite without a database on macOS, and the
+#          release-build dry run. deploy.yml runs this tier on each push to
+#          main (hk 6156: it starts with the main-push run, not after it), and
+#          on dispatch, plus its schema-compat job (the previous release must
 #          still serve on the target schema, hk 3511), and publishes the
 #          deploy-ok commit status. A ci-any-ref dispatch runs the same jobs
 #          as a diagnostic and publishes no deploy-ok. The deploy tier stays
 #          on hosted runners: deploy.yml also runs on dispatch, and its
 #          provenance is the caller's event, not a main push.
+# Long suites are sharded (hk 6156): the MySQL store suite and deploy-linux run
+# as matrix legs, each leg a deterministic share of the tests (or of the
+# packages, for the race suite's non-store half). mysql-store is the one check
+# named 'store: mysql and schema drift' (.mergewake/policy.yaml); it passes only
+# when every mysql-store-shard leg succeeded, and ci-ok reads the legs directly.
 # A newer push cancels the older run of the same ref, on a pull request and on
 # main alike (operator 2026-11-06, reverses hk 3103): the newest main head is
 # the one that ships, and its green ci-ok covers the heads it contains. A
@@ -59,10 +65,12 @@ on:
 # gate treats it as superseded and releases only the newest green head. When
 # the newest head fails, mergewake watch bisects (ci-any-ref) to find and
 # revert the breaking merge. Dispatch and workflow_call runs group by run id,
-# so they never cancel each other. A workflow_run call is deploy.yml's: it
-# groups by run id as well, so neither a main push nor the next deploy can
-# cancel a deploy in progress (the deploy tier never cancels).
-concurrency: {group: "ci-${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || github.event_name == 'workflow_run') && github.run_id || github.ref }}", cancel-in-progress: true}
+# so they never cancel each other. A call from deploy.yml is a workflow_call
+# whose caller's event is a push, so the group also keys on inputs.suite: a
+# deploy run then groups by its own run id and can never cancel, or be
+# cancelled by, the main push run of the same sha. The deploy tier never
+# cancels.
+concurrency: {group: "ci-${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || (inputs.suite || '') != '') && github.run_id || github.ref }}", cancel-in-progress: true}
 permissions:
   contents: read
 jobs:
@@ -191,13 +199,45 @@ jobs:
       - run: bash scripts/test-previous-release-base.sh
 
   mysql-store:
-    if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    # The required check 'store: mysql and schema drift' (.mergewake/policy.yaml,
+    # hk 6156). It keeps that exact name and passes only when every
+    # mysql-store-shard leg succeeded. A cancelled or failed leg fails it too:
+    # ci-ok reads the legs directly, so this check is never the reason a main
+    # head reads failure instead of unknown.
+    if: ${{ always() && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     name: 'store: mysql and schema drift'
+    needs: [mysql-store-shard]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every MySQL store shard must succeed
+        env:
+          RESULT: ${{ needs.mysql-store-shard.result }}
+        run: |
+          if [ "$RESULT" != success ]; then
+            echo "MySQL store shards ended $RESULT; every shard must succeed" >&2
+            exit 1
+          fi
+          echo "all MySQL store shards succeeded"
+
+  mysql-store-shard:
+    # The whole store package on MySQL and PostgreSQL, sharded three ways
+    # (hk 6156): each leg runs a round-robin share of the tests from
+    # `go test -tags=mysql -list` (scripts/store-test-shard.sh), so the legs
+    # cover every test exactly once. A single leg took ~23 minutes. SHARDS must
+    # equal the matrix size; internal/ciworkflow checks that.
+    if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    name: 'store: mysql shard ${{ matrix.shard }} of 3'
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
       HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
       HANDOFFKEEP_TEST_MYSQL_URL: mysql://root:handoffkeep@localhost:3306/handoffkeep
+      SHARDS: "3"
     services:
       postgres:
         image: postgres:17
@@ -227,11 +267,16 @@ jobs:
           path: workflow
           sparse-checkout: .github/actions/setup-go-cached
       - uses: ./workflow/.github/actions/setup-go-cached
-      # The whole store package with the mysql tag, both URLs set: every
+      # The store package with the mysql tag, both URLs set: every
       # dialect-neutral case runs on PostgreSQL and on MySQL, and each
       # MySQL-only case runs on MySQL. Skips are listed in the log (hk 5088).
-      - name: Test store suite on MySQL and PostgreSQL
-        run: go test -p 2 -tags=mysql -v -timeout 30m ./internal/store 2>&1 | tee store-mysql-suite.log; exit "${PIPESTATUS[0]}"
+      # Each leg runs its shard of the mysql-tagged test list (hk 6156).
+      - name: Test store shard on MySQL and PostgreSQL
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          RUN_REGEX=$(bash scripts/store-test-shard.sh "$SHARD" "$SHARDS" mysql)
+          go test -p 2 -tags=mysql -v -timeout 30m -run "$RUN_REGEX" ./internal/store 2>&1 | tee "store-mysql-suite-$SHARD.log"; exit "${PIPESTATUS[0]}"
 
   pr-store-db:
     # Runs on every event, so it always reports a conclusion and can be a
@@ -424,7 +469,7 @@ jobs:
           HANDOFFKEEP_SEARCH_LATENCY: ${{ inputs.packages == './internal/store' && '1' || '' }}
         run: |
           if [ -f scripts/store-test-shard.sh ]; then
-            RUN_REGEX=$(bash scripts/store-test-shard.sh 1)
+            RUN_REGEX=$(bash scripts/store-test-shard.sh 1 2)
             go test -v -timeout 20m ./internal/store -run "$RUN_REGEX"
           else
             go test -v -timeout 20m ./internal/store
@@ -463,7 +508,7 @@ jobs:
           HANDOFFKEEP_SEARCH_LATENCY: ${{ inputs.packages == './internal/store' && '1' || '' }}
         run: |
           if [ -f scripts/store-test-shard.sh ]; then
-            RUN_REGEX=$(bash scripts/store-test-shard.sh 2)
+            RUN_REGEX=$(bash scripts/store-test-shard.sh 2 2)
             go test -v -timeout 20m ./internal/store -run "$RUN_REGEX"
           else
             echo "historical ref without store sharding script; shard 1 ran internal/store"
@@ -653,12 +698,21 @@ jobs:
     # deploy.yml concurrency group is one per repository and does not cancel.
     # Both runners are hosted: a dispatch can name any sha, and only reviewed,
     # merged code may reach our machines.
+    # Sharded three ways (hk 6156): each leg runs its share of the non-store
+    # packages (scripts/package-test-shard.sh) and of the internal/store tests
+    # (scripts/store-test-shard.sh), so the legs together are ./... exactly
+    # once. A single leg took 17 to 21 minutes. SHARDS must equal the matrix size.
     if: ${{ github.event_name != 'pull_request' && inputs.suite == 'deploy' }}
-    name: 'deploy: race + postgres'
+    name: 'deploy: race + postgres (shard ${{ matrix.shard }} of 3)'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
       HANDOFFKEEP_TEST_DB_URL: postgres://handoffkeep:handoffkeep@localhost:5432/handoffkeep?sslmode=disable
+      SHARDS: "3"
     services:
       postgres:
         image: postgres:17
@@ -692,8 +746,17 @@ jobs:
         working-directory: web/console
       - run: git diff --exit-code -- internal/ui/static/console
       - run: test -z "$(git status --porcelain --untracked-files=all -- internal/ui/static/console)"
-      - name: go test -race
-        run: go test -v -race -timeout 30m ./...
+      - name: go test -race (this shard)
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          pkgs=$(bash scripts/package-test-shard.sh "$SHARD" "$SHARDS")
+          if [ -n "$pkgs" ]; then
+            mapfile -t pkglist <<< "$pkgs"
+            go test -v -race -timeout 30m "${pkglist[@]}"
+          fi
+          RUN_REGEX=$(bash scripts/store-test-shard.sh "$SHARD" "$SHARDS")
+          go test -v -race -timeout 30m ./internal/store -run "$RUN_REGEX"
 
   deploy-macos:
     # T-DEPLOY (hk 3440): the CLI ships darwin binaries, so the -race suite
@@ -766,7 +829,7 @@ jobs:
     # the needs context although the jobs API says cancelled (run
     # 42061203904: a deploy job abandoned, hk 3155).
     name: ${{ inputs.packages != '' && 'ci-ok (test, packages)' || ((inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite)) }}
-    needs: [test, pr-store-db, mysql-store, vitest, build, auto-tag-test, main-store-1, main-store-2, main-packages, main-migration, main-reopen-mutants, main-quota-mutants, main-release-dryrun, deploy-linux, deploy-macos, deploy-release]
+    needs: [test, pr-store-db, mysql-store-shard, vitest, build, auto-tag-test, main-store-1, main-store-2, main-packages, main-migration, main-reopen-mutants, main-quota-mutants, main-release-dryrun, deploy-linux, deploy-macos, deploy-release]
     if: ${{ always() && (contains(needs.*.result, 'failure') || !(contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'abandoned'))) }}
     runs-on: ubuntu-latest
     steps:
@@ -777,7 +840,7 @@ jobs:
           PACKAGES: ${{ inputs.packages }}
           TEST: ${{ needs.test.result }}
           PR_STORE_DB: ${{ needs.pr-store-db.result }}
-          MYSQL_STORE: ${{ needs.mysql-store.result }}
+          MYSQL_STORE: ${{ needs.mysql-store-shard.result }}
           VITEST: ${{ needs.vitest.result }}
           BUILD: ${{ needs.build.result }}
           AUTO_TAG: ${{ needs.auto-tag-test.result }}
@@ -818,7 +881,7 @@ jobs:
           require "$at" auto-tag-test "$AUTO_TAG"
           require "$(in_suite test)" test "$TEST"
           require "$(in_suite test)" pr-store-db "$PR_STORE_DB"
-          require "$(in_suite test)" mysql-store "$MYSQL_STORE"
+          require "$(in_suite test)" mysql-store-shard "$MYSQL_STORE"
           require "$(in_suite vitest)" vitest "$VITEST"
           require "$(in_suite build)" build "$BUILD"
           main_test=no; [ "$main" = yes ] && main_test=$(in_suite test)

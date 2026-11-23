@@ -35,21 +35,35 @@ and CI.
 
 CI has three tiers (`.github/workflows/ci.yml` plus `deploy.yml`). A pull
 request runs the light jobs only: no `-race`, hosted runners, PostgreSQL only
-for the DB-backed packages it changes (below). The main tier is every other non-PR event: the light
-jobs plus the parallel main jobs (`main-store-1`, `main-store-2`, `main-packages`,
-`main-migration`, `main-reopen-mutants`, `main-quota-mutants`, `main-release-dryrun`), which run the Go suite against PostgreSQL
-**without** `-race`, the migration/startup smoke, the reopen/quota mutants and
-bundle freshness, targeting 10 minutes; its aggregate is `ci-ok`. The deploy
-tier (`deploy.yml`, `suite=deploy`) runs `-race` with PostgreSQL, the same
-suite on macOS, the release-build dry run, and the previous-release schema
-check (the target migrates, the previous release must still serve) after a
-successful main CI run, never cancelling, and publishes the `deploy-ok` commit
-status; release.yml
-still gates on `ci-ok` until mergewake reads `deploy_checks` (its `GATE` value
-is the one-line switch). A red main head is bisected and reverted.
+for the DB-backed packages it changes (below). The main tier is every other
+non-PR event: the light jobs plus the parallel main jobs (`main-store-1`,
+`main-store-2`, `main-packages`, `main-migration`, `main-reopen-mutants`,
+`main-quota-mutants`, `main-release-dryrun`), which run the Go suite against
+PostgreSQL **without** `-race`, the migration/startup smoke, the reopen/quota
+mutants and bundle freshness, targeting 10 minutes; its aggregate is `ci-ok`.
+The deploy tier (`deploy.yml`, `suite=deploy`) runs `-race` with PostgreSQL
+(`deploy-linux`), the same suite on macOS, the release-build dry run, and the
+previous-release schema check (the target migrates, the previous release must
+still serve). Since hk 6156 `deploy.yml` starts on each push to main, beside the
+main tier rather than after it, never cancels, and publishes the `deploy-ok`
+commit status; a head ships only when `ci-ok` and `deploy-ok` are both green
+(hk-follow's gate and release.yml's `ci-green`, whose `GATE` value is the
+one-line switch). A red main head is bisected and reverted.
 `ci-any-ref` accepts `packages` only with `suite=test`; those runs post `ci-ok-test-packages`.
 `ci-any-ref suite=deploy` runs the deploy tier as a diagnostic and posts
 `ci-ok-deploy`, never `deploy-ok`. `scripts/check go` runs the heavy half locally.
+
+The two long suites are sharded (hk 6156): `store: mysql shard i of 3`
+(`mysql-store-shard`) and `deploy: race + postgres (shard i of 3)`
+(`deploy-linux`), plus `main-store-1` and `main-store-2`. Each shard is a
+deterministic share: `scripts/store-test-shard.sh <i> <n> [mysql]` deals the
+sorted `Test`/`Example`/`Fuzz` names of `./internal/store` round-robin, and
+`scripts/package-test-shard.sh <i> <n>` deals the other packages. Add a test
+or a package and it lands in a shard with no edit. `store: mysql and schema
+drift` is the exact name of the required check: it is the aggregate that
+passes only when every MySQL shard succeeded. `internal/ciworkflow`'s
+`TestCIShardsPartitionTheSuites` proves each shard set covers the list exactly
+once. When you add a shard, keep the matrix size and `SHARDS` equal.
 The PR tier runs PostgreSQL only in `pr: store + postgres`, and there for every
 Go package the PR changes that has DB-backed tests: a `_test.go` file in it
 imports `internal/testdb` at the PR head, and a changed or removed file belongs
