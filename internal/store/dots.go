@@ -73,6 +73,10 @@ type DotsRequestInput struct {
 	// declaration and behaves as before. An option takes no recommended flag
 	// here; dots names its recommendation on RESULT.
 	Options []DecisionOption `json:"options,omitempty"`
+	// DocKeys are documents the request cites (hk 6125). They are recorded as
+	// task references in the same transaction as the request; the request's
+	// binding is unchanged. Each key must name a stored document.
+	DocKeys []string `json:"docs,omitempty"`
 }
 
 // ErrDotsRequestInvalid refuses a dots request the store cannot accept. Its
@@ -119,6 +123,14 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 	if err := rejectDotsChoiceSecrets(in.Options); err != nil {
 		return Task{}, err
 	}
+	if len(in.DocKeys) > maxDotsRequestDocs {
+		return Task{}, dotsRequestInvalid("docs must name at most 20 document keys")
+	}
+	for _, key := range in.DocKeys {
+		if !validDocKey(key) {
+			return Task{}, dotsRequestInvalid("docs must name document keys of 1-512 bytes without \"..\" or a leading /")
+		}
+	}
 	if _, invalid := dotsNotifyLanes(in.Body, lane); len(invalid) > 0 {
 		return Task{}, dotsRequestInvalid("the [알릴 레인] line names a lane that is not [A-Za-z0-9._-]{1,128}")
 	}
@@ -145,6 +157,11 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 			return Task{}, err
 		}
 		digestParts = append(digestParts, string(encoded))
+	}
+	if len(in.DocKeys) > 0 {
+		// Only a request that cites documents adds this part, so the digest of
+		// every request without one is unchanged.
+		digestParts = append(digestParts, strings.Join(in.DocKeys, "\x01"))
 	}
 	requestHash := sha256.Sum256([]byte(strings.Join(digestParts, "\x00")))
 	requestDigest := hex.EncodeToString(requestHash[:])
@@ -228,6 +245,13 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 		}
 		if in.IdempotencyKey != "" {
 			if _, _, err := insertEvent(ctx, tx, taskEventInput{TaskID: x.ID, Kind: "source_event", By: by, Note: requestDigest, At: x.CreatedAt, Source: "dots-request", SourceRef: sourceRef}); err != nil {
+				return err
+			}
+		}
+		// A cited document that is not stored refuses the whole request: the
+		// transaction rolls back, so no half-recorded request is left behind.
+		for _, key := range in.DocKeys {
+			if _, err := addTaskDocRefTx(ctx, tx, x.ID, key, by, x.CreatedAt); err != nil {
 				return err
 			}
 		}

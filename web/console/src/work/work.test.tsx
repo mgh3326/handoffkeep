@@ -160,6 +160,19 @@ it("shows origin namespace and linked document classes, including an unclassifie
   expect(screen.queryByText(/origin class: unknown/)).toBeNull();
 });
 
+it("lists documents the task references apart from its bindings, marked 참조", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => json({
+    ...detail,
+    documents: [{ key: "reports/one", kind: "report", origin_class: "job" }],
+    doc_refs: [{ key: "tbls/oci/mysql/panewire_hub/doc", kind: "design", origin_class: "" }],
+  })));
+  render(<TaskRecord id={101} />);
+  expect(await screen.findByText(/design · 참조/)).toBeTruthy();
+  expect(screen.getByRole("link", { name: "tbls/oci/mysql/panewire_hub/doc" }).getAttribute("href")).toBe("/ui/doc/tbls/oci/mysql/panewire_hub/doc");
+  expect(screen.getByText(/report · job/)).toBeTruthy();
+  expect(screen.queryByText(/report · job · 참조/)).toBeNull();
+});
+
 it("rejects a malformed linked document list", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => json({ ...detail, documents: [{ key: "x", kind: "note", origin_class: 42 }] })));
   await expect(fetchTaskDetail(101)).rejects.toThrow("malformed");

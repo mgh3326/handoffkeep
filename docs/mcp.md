@@ -122,6 +122,31 @@ leaves `dots_inbox` available and makes `dots_reply` return
 `dots_reply_writes_disabled`. Set it to `on` to enable replies, or to `off`
 to stop them again.
 
+## Documents cited by a task
+
+A document has one binding: the task that owns it (`documents.task_id`). A task
+can also cite a document it does not own by reference, so several requests can
+check one living document, such as a schema document, without rebinding it
+(hk 6125). A reference is a row in `task_doc_refs`; the binding is unchanged.
+
+- `handoffkeep dots request ... --doc KEY` (repeatable, at most 20) records a
+  reference on the request task in the same transaction as the task. The
+  request's API field is `docs`. A key with no stored document refuses the whole
+  request with 400 `doc_not_found`; no task is created.
+- `handoffkeep tasks doc-ref add TASK --doc KEY` records references on an
+  existing task. `tasks doc-ref rm TASK --doc KEY` drops one, and
+  `tasks doc-ref list TASK` reads them.
+- The API is `GET /v1/tasks/{id}/doc-refs`, `POST /v1/tasks/{id}/doc-refs` with
+  `{"doc": KEY}` (201 when new, 200 when it already existed), and
+  `DELETE /v1/tasks/{id}/doc-refs?doc=KEY`. An unknown task is 404 `not_found`;
+  an unknown document is 400 `doc_not_found`.
+- A reference whose document is later removed is not listed.
+- The task page in the console lists bound documents, then referenced ones
+  marked 참조. Each one opens the document view.
+
+There is no MCP tool for references yet: the MCP surface has `dots_inbox` and
+`dots_reply` only, and no request-creating tool to add `docs` to.
+
 ## Proxied hosts
 
 cloudflared reaches the origin over loopback (`127.0.0.1:8800`) and forwards
