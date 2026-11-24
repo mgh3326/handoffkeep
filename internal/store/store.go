@@ -2412,7 +2412,7 @@ func validTaskLinear(x TaskLinear) bool {
 		return false
 	}
 	for _, value := range []string{x.Brief, x.Report, x.Verify, x.Decision} {
-		if value != "" && !validDocKey(value) {
+		if value != "" && !ValidDocKey(value) {
 			return false
 		}
 	}
@@ -2565,7 +2565,7 @@ const BodyDocSectionMax = 200
 // never carry body text.
 func ValidBodyDoc(v string) bool {
 	key, section, hasSection := strings.Cut(v, "#")
-	if !bodyDocKeyRE.MatchString(key) || strings.HasPrefix(key, "/") || strings.Contains(key, "..") || !validDocKey(key) {
+	if !bodyDocKeyRE.MatchString(key) || strings.HasPrefix(key, "/") || strings.Contains(key, "..") || !ValidDocKey(key) {
 		return false
 	}
 	if !hasSection {
@@ -3984,13 +3984,13 @@ func (s *Store) ListOpenLaneDecisions(ctx context.Context, limit int) ([]RelayEv
 	return out, nil
 }
 
-// validDocKey is the key contract: a non-empty path up to maxDocKeyBytes bytes,
+// ValidDocKey is the key contract: a non-empty path up to maxDocKeyBytes bytes,
 // not absolute, no "..", no NUL.
-func validDocKey(k string) bool {
+func ValidDocKey(k string) bool {
 	return len(k) > 0 && len(k) <= maxDocKeyBytes && !strings.HasPrefix(k, "/") && !strings.Contains(k, "..") && !strings.ContainsRune(k, 0)
 }
 func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, error) {
-	if !validDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validDocumentText(x.Body) {
+	if !ValidDocKey(x.Key) || !documentKinds[x.Kind] || !validText(x.Session, 128) || !validText(x.Job, 128) || !validDocumentText(x.Body) {
 		return x, false, errors.New("invalid document")
 	}
 	if !ValidActor(x.CreatedBy) {
@@ -4090,7 +4090,7 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 	return out, created, rerr
 }
 func (s *Store) GetDocument(ctx context.Context, key string) (Document, bool, error) {
-	if !validDocKey(key) {
+	if !ValidDocKey(key) {
 		return Document{}, false, errors.New("invalid document key")
 	}
 	var x Document
@@ -4199,7 +4199,7 @@ func validAttachmentRef(kind, id string) bool {
 		return id == ""
 	}
 	if kind == "document" {
-		return validDocKey(id)
+		return ValidDocKey(id)
 	}
 	// memory refs stay valid: the previous release still writes ref_kind
 	// 'memory' during the blue-green overlap, and the List filter must keep

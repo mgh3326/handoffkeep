@@ -96,7 +96,7 @@ func deref(p *string) string {
 func checkEvidence(e string) error {
 	blank := func(r rune) bool { return r <= ' ' || r == 0x7f }
 	if key, ok := strings.CutPrefix(e, "hk:doc "); ok {
-		if !validDocKey(key) || strings.ContainsFunc(key, blank) {
+		if !ValidDocKey(key) || strings.ContainsFunc(key, blank) {
 			return errors.New("invalid verification: evidence hk:doc key is not a valid document key")
 		}
 		return nil

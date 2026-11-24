@@ -167,7 +167,7 @@ func validDotsAdoptedRef(ref string) bool {
 		return true
 	}
 	m := dotsDocRefRE.FindStringSubmatch(ref)
-	return m != nil && validDocKey(m[1])
+	return m != nil && ValidDocKey(m[1])
 }
 
 // validDotsCanvaURL accepts an https link to a Canva design: a canva.com host

@@ -131,7 +131,7 @@ func validDisposition(refs TaskRefs) bool {
 	if f.FactsAsOf.IsZero() || f.ResidualN < 0 || f.ResidualN > 10000 {
 		return false
 	}
-	if f.ResidualDoc != "" && !validDocKey(f.ResidualDoc) {
+	if f.ResidualDoc != "" && !ValidDocKey(f.ResidualDoc) {
 		return false
 	}
 	if f.ResidualN > 0 && f.ResidualDoc == "" {
@@ -143,7 +143,7 @@ func validDisposition(refs TaskRefs) bool {
 	}
 	switch in.State {
 	case "installed", "not_installed", "partial":
-		if in.Witness == "" || !validDocKey(in.Witness) || in.TargetsTotal == 0 {
+		if in.Witness == "" || !ValidDocKey(in.Witness) || in.TargetsTotal == 0 {
 			return false
 		}
 		if in.State == "partial" && (in.TargetsPass == 0 || in.TargetsPass == in.TargetsTotal) {
@@ -153,7 +153,7 @@ func validDisposition(refs TaskRefs) bool {
 			return false
 		}
 	default:
-		if in.Witness != "" && !validDocKey(in.Witness) {
+		if in.Witness != "" && !ValidDocKey(in.Witness) {
 			return false
 		}
 	}

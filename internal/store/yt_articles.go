@@ -486,7 +486,7 @@ func ytArticleAmends(key, body string) string {
 			continue
 		}
 		v = strings.TrimSpace(v)
-		if strings.HasPrefix(v, "policy/") && validDocKey(v) {
+		if strings.HasPrefix(v, "policy/") && ValidDocKey(v) {
 			return v
 		}
 		return ""

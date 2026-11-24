@@ -137,7 +137,7 @@ func isDotsDocKey(key string) bool {
 			return false
 		}
 	}
-	return validDocKey(key)
+	return ValidDocKey(key)
 }
 
 // dotsNonSpaceRunes counts the non-space characters of s.

@@ -31,7 +31,7 @@ type TaskDocRef struct {
 // document is refused with ErrDocNotFound, and an unknown task with
 // ErrTaskNotFound.
 func (s *Store) AddTaskDocRef(ctx context.Context, taskID int64, key, by string) (bool, error) {
-	if taskID < 1 || !validDocKey(key) || !ValidActor(by) {
+	if taskID < 1 || !ValidDocKey(key) || !ValidActor(by) {
 		return false, errors.New("invalid task doc ref")
 	}
 	var changed bool
@@ -58,7 +58,7 @@ func (s *Store) AddTaskDocRef(ctx context.Context, taskID int64, key, by string)
 // RemoveTaskDocRef drops the reference from task taskID to the document key.
 // It reports changed=false when no such reference exists.
 func (s *Store) RemoveTaskDocRef(ctx context.Context, taskID int64, key string) (bool, error) {
-	if taskID < 1 || !validDocKey(key) {
+	if taskID < 1 || !ValidDocKey(key) {
 		return false, errors.New("invalid task doc ref")
 	}
 	var changed bool
@@ -154,4 +154,21 @@ func addTaskDocRefTx(ctx context.Context, tx transaction, taskID int64, key, by 
 		return false, err
 	}
 	return true, nil
+}
+
+// deleteTaskDocRefsMySQLTx drops every task reference to the keys of documents
+// the MySQL delete path removes in the same transaction. A reference has no
+// foreign key to documents, so without this a re-created key would list the
+// old citations (hk 6138). Call it after the documents delete. The PostgreSQL
+// paths run the same statement inline (`= ANY($1)`).
+func deleteTaskDocRefsMySQLTx(ctx context.Context, tx transaction, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	args := make([]any, len(keys))
+	for i, key := range keys {
+		args[i] = key
+	}
+	_, err := tx.Exec(ctx, "DELETE FROM task_doc_refs WHERE doc_key IN ("+placeholders(len(keys))+")", args...)
+	return err
 }

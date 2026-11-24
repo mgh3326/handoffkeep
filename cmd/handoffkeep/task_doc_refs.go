@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"strconv"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/store"
 )
 
 const taskDocRefUsage = "usage: tasks doc-ref add|rm <task> --doc <key>\n       tasks doc-ref list <task>\n\nA doc-ref is a reference from a task to a document it does not own (hk 6125). The document's binding is unchanged; the task page lists references marked 참조."
@@ -48,6 +51,13 @@ func taskDocRefCmd(args []string, out io.Writer) error {
 	} else if len(docs) == 0 {
 		return errors.New("tasks doc-ref " + sub + " requires --doc <key>")
 	}
+	// Every key is checked before the first change, so a bad key in the list
+	// sends nothing.
+	for _, doc := range docs {
+		if !store.ValidDocKey(doc) {
+			return fmt.Errorf("document key %q is not a valid document key", doc)
+		}
+	}
 	if err := mustClient(c); err != nil {
 		return err
 	}
@@ -61,24 +71,32 @@ func taskDocRefCmd(args []string, out io.Writer) error {
 		}
 		return printJSON(out, map[string]any{"task_id": id, "doc_refs": refs})
 	case "add":
-		var changes []any
-		for _, doc := range docs {
-			change, err := c.AddTaskDocRef(ctx, id, doc)
-			if err != nil {
-				return err
-			}
-			changes = append(changes, change)
-		}
-		return printJSON(out, map[string]any{"changes": changes})
+		return applyDocRefs(out, docs, func(doc string) (any, error) {
+			return c.AddTaskDocRef(ctx, id, doc)
+		})
 	default:
-		var changes []any
-		for _, doc := range docs {
-			change, err := c.RemoveTaskDocRef(ctx, id, doc)
-			if err != nil {
-				return err
-			}
-			changes = append(changes, change)
-		}
-		return printJSON(out, map[string]any{"changes": changes})
+		return applyDocRefs(out, docs, func(doc string) (any, error) {
+			return c.RemoveTaskDocRef(ctx, id, doc)
+		})
 	}
+}
+
+// applyDocRefs applies one change per key, in order, and prints the list of
+// changes. If a change fails, the changes already applied are printed before
+// the error, so the caller can see what the server did.
+func applyDocRefs(out io.Writer, docs []string, apply func(doc string) (any, error)) error {
+	var changes []any
+	for _, doc := range docs {
+		change, err := apply(doc)
+		if err != nil {
+			if len(changes) > 0 {
+				if perr := printJSON(out, map[string]any{"changes": changes}); perr != nil {
+					return errors.Join(err, perr)
+				}
+			}
+			return err
+		}
+		changes = append(changes, change)
+	}
+	return printJSON(out, map[string]any{"changes": changes})
 }

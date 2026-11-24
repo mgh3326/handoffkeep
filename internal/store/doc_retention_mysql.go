@@ -160,6 +160,9 @@ func (s *Store) mysqlRetentionBatch(ctx context.Context, cutoff time.Time, batch
 	if e != nil {
 		return 0, e
 	}
+	if e = deleteTaskDocRefsMySQLTx(ctx, tx, strKeys); e != nil {
+		return 0, e
+	}
 	if e = tx.Commit(ctx); e != nil {
 		return 0, e
 	}
