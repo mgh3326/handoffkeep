@@ -79,3 +79,44 @@ func TestResolveDecisionChannelOmitsRecordingLaneOnOlderServer(t *testing.T) {
 		t.Fatalf("current server bodies=%v, want recording_lane sent", body)
 	}
 }
+
+// Invariant (hk 5748): a failed capability lookup is treated like an unlisted
+// feature. A transient 503 on GET /v1/capabilities must not stop the resolve:
+// the POST goes out once, without recording_lane, so the answer is recorded
+// and the asker keeps its notice.
+func TestResolveDecisionChannelSendsWithoutRecordingLaneWhenCapabilitiesFail(t *testing.T) {
+	resetCapabilitiesCache()
+	var mu sync.Mutex
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/capabilities" {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/decision-request/resolve") {
+			raw, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			bodies = append(bodies, string(raw))
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+
+	in := DecisionChannelResolveInput{
+		DecisionResolveInput: store.DecisionResolveInput{RequestID: "dr-1-1", Kind: store.DecisionRequestAnswered, Option: "A", RecordingLane: "asker-lane"},
+		Channel:              store.DecisionChannelSession,
+	}
+	client := Client{URL: server.URL, Token: "t"}
+	if _, err := client.ResolveDecisionChannel(context.Background(), 1, in); err != nil {
+		t.Fatalf("resolve with failed capability lookup: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 1 || strings.Contains(bodies[0], "recording_lane") {
+		t.Fatalf("bodies=%v, want one resolve body without recording_lane", bodies)
+	}
+}
