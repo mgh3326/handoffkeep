@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // SearchCtx implements scope "ctx": dialect-neutral LIKE search over the small
@@ -28,8 +27,7 @@ func (s *Store) searchCtx(ctx context.Context, q, session string, limit int) ([]
 	if limit > 100 {
 		limit = 100
 	}
-	like := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
-	pattern := "%" + like + "%"
+	pattern := pgLikePattern(q)
 
 	sql := `SELECT 'ctx' scope, c.id::text key, c.session, c.kind, c.title, left(c.body, 160) snippet, c.refs, c.created_at
 		FROM checkpoints c
