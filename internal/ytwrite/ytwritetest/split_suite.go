@@ -761,6 +761,9 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 				t.Fatal("part 2's POST was sent on an expired deadline")
 			}
 		}
+		// Recovery creates part 2 under the default window: the short window
+		// was only for the send whose deadline is the point (hk 6224).
+		e.dispatch = 0
 		e.restart(e.ledger)
 		e.clock.Advance(time.Hour)
 		e.drive()
@@ -796,14 +799,17 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 			t.Fatalf("%d creates to verify a complete family", w-writes)
 		}
 
+		// The send ends unverified by a refused read under the default window
+		// (hk 6224); the short window and the slow reads start with recovery.
 		e2 := newSplitEnv(t, nl, 2)
+		e2.queueReads(errBadGateway)
+		op2 := e2.prepare()
+		e2.drive()
+		e2.wantState(op2, ytwrite.StateRemoteUnknown, ytwrite.ReasonUnverified)
 		e2.dispatch = 200 * time.Millisecond
 		e2.restart(e2.ledger)
 		// Six GETs (index, two parts, their revision checks, index) at 700ms
 		e2.yt.BeforeReadArticle = func(string) { time.Sleep(700 * time.Millisecond) } // 4.2s > 18 × 200ms
-		op2 := e2.prepare()
-		e2.drive()
-		e2.wantState(op2, ytwrite.StateRemoteUnknown, ytwrite.ReasonUnverified)
 		writes = len(e2.yt.ArticleWrites())
 		e2.clock.Advance(time.Hour)
 		e2.drive()
@@ -888,13 +894,16 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 	// whole and applies: 9 GETs at 120ms fit 18 × 200ms, while the old
 	// parts-plus-two budget of 4 × 200ms held 7 of them.
 	t.Run("unrelated_children_fit_the_verify_budget", func(t *testing.T) {
+		// The send runs under the default dispatch window: its creates' marks
+		// must not depend on ledger speed (hk 6224). Only recovery's reads get
+		// the short window under test.
 		e := newSplitEnv(t, nl, 2)
-		e.dispatch = 200 * time.Millisecond
-		e.restart(e.ledger)
 		e.queueReads(errBadGateway)
 		op := e.prepare()
 		e.drive()
 		got := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonUnverified)
+		e.dispatch = 200 * time.Millisecond
+		e.restart(e.ledger)
 		for i := 0; i < 3; i++ {
 			e.yt.InjectChildOf(got.YTResultID, splitProject, "unrelated child", "unrelated content")
 		}
@@ -917,15 +926,16 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 	// the next pass creates the part.
 	t.Run("step_stopped_at_the_work_deadline_is_recorded_definite", func(t *testing.T) {
 		e := newSplitEnv(t, nl, 2)
-		e.dispatch = 30 * time.Millisecond
 		e.settle = 200 * time.Millisecond
 		e.restart(e.ledger)
 		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: DialFail}) // index, part 1, then part 2 never sent
 		op := e.prepare()
-		e.drive()
+		e.drive() // the send runs under the default window (hk 6224)
 		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
+		// The 30ms window is set for the recovery whose stopped step it times.
 		// The lease is 430ms + 2 × 540ms, so the work deadline is 1310ms in and
 		// the lease ends at 1510ms: the mark's wait lands between them.
+		e.dispatch = 30 * time.Millisecond
 		hook := &markHook{splitLedger: ctxSettleLedger{splitLedger: e.ledger.(splitLedger)}, step: 0,
 			after: func() { time.Sleep(1400 * time.Millisecond) }}
 		e.restart(hook)
