@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -1082,5 +1083,32 @@ func TestYTArticleConflictWithTenantlessAndTenantRows(t *testing.T) {
 	detail, err := ytArticleConflictTx(ctx, pgTransaction{tx}, op, "A-1")
 	if err != nil || detail != "article is mapped to document 901" {
 		t.Fatalf("conflict = %q %v", detail, err)
+	}
+}
+
+// hk 6184: the minute tick decides each waiting document again, and carries
+// it once even when the listing and the waiting set both name it.
+func TestYTArticleScanWaitingSetHoldsEachWaitOnce(t *testing.T) {
+	for _, o := range []ytArticleOutcome{ytArticleNoProject, ytArticleParentPending, ytArticleFamilyPending,
+		ytArticleFamilyUncertain, ytArticleCreateRejected} {
+		if !ytArticleWaits(o) {
+			t.Fatalf("%s is not a waiting outcome", o)
+		}
+	}
+	if ytArticleWaits(ytArticleUnchanged) || ytArticleWaits(ytArticleCreatePrepared) || ytArticleWaits(ytArticleSuperseded) {
+		t.Fatal("an outcome that waits on no outside fact is a waiting outcome")
+	}
+	sc := ytArticleScan{counts: map[ytArticleOutcome]int{}}
+	sc.add(7, ytArticleNoProject)
+	sc.add(9, ytArticleCreatePrepared)
+	sc.add(7, ytArticleNoProject)
+	sc.add(9, ytArticleCreateRejected)
+	sc.add(7, ytArticleNoProject)
+	sc.add(3, ytArticleUnchanged)
+	if want := []int64{7, 9}; !slices.Equal(sc.waiting, want) {
+		t.Fatalf("waiting %v, want %v", sc.waiting, want)
+	}
+	if sc.noProject != 3 {
+		t.Fatalf("no_project %d", sc.noProject)
 	}
 }

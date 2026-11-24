@@ -1113,8 +1113,10 @@ type ytArticleScan struct {
 	counts    map[ytArticleOutcome]int
 	noProject int
 	// waiting names the documents decided as waiting on something outside
-	// the document (ytArticleWaits).
+	// the document (ytArticleWaits), each once: a document can be decided
+	// both by a tick's listing and by the waiting set it carries over.
 	waiting []int64
+	seen    map[int64]bool
 }
 
 // add records one document's outcome.
@@ -1123,7 +1125,11 @@ func (sc *ytArticleScan) add(id int64, outcome ytArticleOutcome) {
 	if outcome == ytArticleNoProject {
 		sc.noProject++
 	}
-	if ytArticleWaits(outcome) {
+	if ytArticleWaits(outcome) && !sc.seen[id] {
+		if sc.seen == nil {
+			sc.seen = map[int64]bool{}
+		}
+		sc.seen[id] = true
 		sc.waiting = append(sc.waiting, id)
 	}
 }
@@ -1131,10 +1137,12 @@ func (sc *ytArticleScan) add(id int64, outcome ytArticleOutcome) {
 // ytArticleWaits reports whether an outcome waits on a fact outside the
 // document: a project mapping (no_project), a parent's article
 // (parent_pending), a family's root (family_root_pending and
-// family_root_uncertain), or a create rejected invalid_issue that the next
+// family_root_uncertain) or a create rejected invalid_issue that the next
 // create retries (create_rejected, hk 4295). Such a document gets no feed row
 // when that fact changes, so every tick decides it again until its outcome
 // changes; a rejected create that is not retried reads back as create_exists.
+// A superseded body is not waiting: a rollback to hk changes the documents
+// authority, which walks every document at once (ytDocsSide).
 func ytArticleWaits(o ytArticleOutcome) bool {
 	switch o {
 	case ytArticleNoProject, ytArticleParentPending, ytArticleFamilyPending, ytArticleFamilyUncertain, ytArticleCreateRejected:
