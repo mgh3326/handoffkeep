@@ -155,6 +155,62 @@ relations:
     parentTable: documents
     parentColumns: [key]
     def: "document the task cites by reference, not the binding (no foreign key; hk 6125)"
+  # hk 6233: links the code joins on or keys by a named column, with no foreign key.
+  - table: yt_link_plans
+    columns: [op_id]
+    parentTable: yt_write_ops
+    parentColumns: [id]
+    def: "the write op whose link plan this is (no foreign key)"
+  - table: yt_link_steps
+    columns: [op_id, attempt]
+    parentTable: yt_link_plans
+    parentColumns: [op_id, attempt]
+    def: "the link plan attempt whose steps these are (no foreign key)"
+  - table: yt_write_op_alerts
+    columns: [op_id]
+    parentTable: yt_write_ops
+    parentColumns: [id]
+    def: "the write op the alert is about (no foreign key)"
+  - table: yt_write_op_adoptions
+    columns: [op_id]
+    parentTable: yt_write_ops
+    parentColumns: [id]
+    def: "the write op another worker adopted (no foreign key)"
+  - table: yt_write_op_requeues
+    columns: [op_id]
+    parentTable: yt_write_ops
+    parentColumns: [id]
+    def: "the write op that was requeued (no foreign key)"
+  - table: lane_looks
+    columns: [notice_event_id]
+    parentTable: notification_outbox
+    parentColumns: [event_id]
+    parentCardinality: "zero or one"
+    def: "the notice the lane look answers, joined on event_id (no foreign key)"
+  - table: bench_grades
+    columns: [profile]
+    parentTable: bench_catalog
+    parentColumns: [profile]
+    parentCardinality: "one or more"
+    def: "the catalog profile the grade belongs to, joined on profile (no foreign key)"
+  - table: tasks
+    columns: [project]
+    parentTable: youtrack_projects
+    parentColumns: [hk_project]
+    parentCardinality: "zero or one"
+    def: "the YouTrack project mapped to the task's hk project, joined on hk_project (no foreign key)"
+  - table: relay_events
+    columns: [question]
+    parentTable: chat_questions
+    parentColumns: [id]
+    parentCardinality: "zero or one"
+    def: "the chat question the relay event carries; joined in a trigger (no foreign key)"
+  - table: deploy_record_projection
+    columns: [key, sha256]
+    parentTable: documents
+    parentColumns: [key, sha256]
+    parentCardinality: "zero or one"
+    def: "the document the deploy record was read from, joined on key and sha256 (no foreign key)"
 
 # Per-table comments (hk 6233): the hand text for each table. The derived
 # usage (which Go file and function reads, writes and deletes it) is appended at
@@ -210,6 +266,7 @@ comments:
     labels: [cursor-checkpoint]
     tableComment: |
       Per-thread read position of a task thread, so a lane resumes its thread where it stopped.
+      Stands alone by design: a position in task_events (epoch and scan event ids), not a reference to a row that must exist.
       Retention: none.
   - table: task_thread_deliveries
     labels: [queue-outbox]
@@ -260,6 +317,7 @@ comments:
     labels: [lock-lease]
     tableComment: |
       A lease that holds part of an account's quota for one owner and holder while a job uses it; released by ReleaseQuota.
+      Stands alone by design: account_key is text and no table holds accounts; quota_latest and quota_presence share the key but have no parent.
       Retention: released by ReleaseQuota (quota.go) when the holder returns the lease; no age rule.
   - table: quota_observations
     labels: [history-log]
@@ -270,6 +328,7 @@ comments:
     labels: [cache-derived]
     tableComment: |
       Presence heartbeat per account, written with each presence report and read by placement to see which accounts are live.
+      Stands alone by design: account_key is text and no table holds accounts; quota_latest and quota_leases share the key but have no parent.
       Retention: rows whose last_seen is older than 30 days (QuotaPresenceRetention, quota.go) are deleted by putQuotaPresence, per account.
   - table: project_milestones
     labels: [source-of-record]
@@ -285,6 +344,7 @@ comments:
     labels: [history-log]
     tableComment: |
       One row per dots inbox read: who read the inbox, when and what it listed.
+      Stands alone by design: one row per read, keyed by principal text; no other table holds principals.
       Retention: rows older than 30 days (DotsInboxReadRetention) are deleted in the same transaction as each insert (RecordDotsInboxRead, dots_inbox_reads.go).
   - table: dots_results
     labels: [history-log]
@@ -300,26 +360,31 @@ comments:
     labels: [source-of-record]
     tableComment: |
       Free-text agent memory notes saved by sessions, the store's only copy of them.
+      Stands alone by design: agent memory notes keyed by session and agent text; no table holds them.
       Retention: none. No production code path writes it at head; the generic copy path can.
   - table: checkpoints
     labels: [history-log]
     tableComment: |
       Session checkpoints and handoffs saved by sessions (kind, title, body and refs), read by context search.
+      Stands alone by design: session checkpoints are keyed by session name, a text value with no table behind it.
       Retention: none. No production code path writes it at head; the generic copy path can. Candidate for retirement, not changed here.
   - table: translations
     labels: [cache-derived]
     tableComment: |
       Stored Korean translations of English text, keyed by source text, so a translated view does not translate again.
+      Stands alone by design: keyed by source text and language with the entity kind stored as text: polymorphic, so no single parent.
       Retention: none.
   - table: ledger_cursors
     labels: [cursor-checkpoint]
     tableComment: |
       The position of the ledger reader, so it resumes from the last ledger entry it applied.
+      Stands alone by design: one cursor per consumer name; no other table is consumed by name.
       Retention: none.
   - table: bench_area_exceptions
     labels: [config]
     tableComment: |
       Benchmark area exceptions that an operator decided for a profile and effort, with evidence and expiry.
+      Stands alone by design: profile and effort are text; no production code joins it to bench_catalog.
       Retention: none. No production code path reads or writes it at head; the generic copy path lists it. Candidate for retirement, not changed here.
   - table: bench_catalog
     labels: [config]
@@ -335,21 +400,25 @@ comments:
     labels: [history-log]
     tableComment: |
       Benchmark repetitions and their outcomes, one row per run, read by bench scoring.
+      Stands alone by design: one row per benchmark run; it names its profile and model as text, and no code joins it to bench_catalog.
       Retention: none.
   - table: bench_scores
     labels: [history-log]
     tableComment: |
       Benchmark scores per model, effort, harness and source. No production code path reads or writes it at head; only its creation and indexes remain. Candidate for retirement, not changed here.
+      Stands alone by design: scores are keyed by model, effort, harness and source as text; no code joins them.
       Retention: none.
   - table: hk_locks
     labels: [lock-lease]
     tableComment: |
       MySQL advisory-lock rows (one per lock key) that serialise store writes across processes.
+      Stands alone by design: lock keys are hashes, not references to rows.
       Retention: none.
   - table: schema_migrations
     labels: [history-log]
     tableComment: |
       The migration ledger: one row per registered migration ID applied to this database, written by the migration runner.
+      Stands alone by design: its keys are migration IDs in the code, not rows of another table.
       Retention: none.
   # ---- changes ----
   - table: changes
@@ -401,6 +470,7 @@ comments:
     labels: [config]
     tableComment: |
       The services a deploy can target, written from the service registry and read by the deploy paths.
+      Stands alone by design: the registry of deployable services, keyed by name; deploy rows name a service as text and no code joins them.
       Retention: none.
   # ---- decisions ----
   - table: decision_requests
@@ -422,6 +492,7 @@ comments:
     labels: [queue-outbox]
     tableComment: |
       Decision notices waiting for the next digest, sent together and then cleared.
+      Stands alone by design: groups notices by day and names no other row.
       Retention: none.
   - table: decision_resolutions
     labels: [source-of-record]
@@ -442,6 +513,7 @@ comments:
     labels: [source-of-record]
     tableComment: |
       The operator's state per inbox item (read, snoozed or done), read by the inbox list.
+      Stands alone by design: item_key is 'decision:request:<id>' or 'decision:lane_event:<id>', one of two tables by prefix, so no single parent exists (the code joins decision_requests by that text).
       Retention: none; a row is removed when an undo restores the item.
   - table: chat_messages
     labels: [source-of-record]
@@ -468,6 +540,7 @@ comments:
     labels: [history-log]
     tableComment: |
       Log of the documents a prune deleted: key, when and the rule that pruned it.
+      Stands alone by design: the log of pruned document keys; the documents it names are gone.
       Retention: none.
   - table: task_doc_refs
     labels: [link-join]
@@ -488,11 +561,13 @@ comments:
     labels: [queue-outbox]
     tableComment: |
       Uploads in progress, finalised into attachments when the upload completes.
+      Stands alone by design: ref_kind and ref_id name the document or task the upload is for, a polymorphic reference, so no single table is its parent.
       Retention: none.
   - table: attachment_usage
     labels: [cache-derived]
     tableComment: |
       Usage counters for attachment storage, recomputed from attachments.
+      Stands alone by design: monthly counters keyed by month; nothing points at them.
       Retention: none.
   # ---- youtrack ----
   - table: youtrack_projects
@@ -509,6 +584,7 @@ comments:
     labels: [config]
     tableComment: |
       Which side is authoritative for each synced field of an entity, read before a sync writes.
+      Stands alone by design: kind names the entity type as text: polymorphic, like yt_snapshot_state.
       Retention: none.
   - table: yt_article_bindings
     labels: [link-join]
@@ -519,6 +595,7 @@ comments:
     labels: [cursor-checkpoint]
     tableComment: |
       Position of the binding binder in the binding work, so it resumes where it stopped.
+      Stands alone by design: one position for the binding binder; it refers to no row.
       Retention: none.
   - table: yt_binding_history
     labels: [history-log]
@@ -569,6 +646,7 @@ comments:
     labels: [cache-derived]
     tableComment: |
       Last snapshot of a synced entity as YouTrack returned it, used to tell what changed.
+      Stands alone by design: entity_kind and entity_id name a document, an article binding or a task: polymorphic.
       Retention: rows are removed when a binding update is applied or superseded (yt_articles.go).
   - table: yt_task_bindings
     labels: [link-join]
@@ -594,11 +672,13 @@ comments:
     labels: [cache-derived]
     tableComment: |
       YouTrack links observed but not owned by this store, recorded so the sweep can read them.
+      Stands alone by design: YouTrack link keys are external ids, left undeclared by design (AGENTS.md: external ids).
       Retention: none.
   - table: yt_links_sweep
     labels: [cursor-checkpoint]
     tableComment: |
       The position of the link sweep over YouTrack links.
+      Stands alone by design: the sweep cursor over YouTrack links: a position, not a reference to a row.
       Retention: none.
   - table: yt_write_ops
     labels: [queue-outbox]
@@ -624,11 +704,13 @@ comments:
     labels: [history-log]
     tableComment: |
       Sync log: the ordered change feed that replicas read, one row per change.
+      Stands alone by design: one ordered feed; rows are read by position (sync_id), not by a key that points at another table.
       Retention: rows older than the sync retention (HANDOFFKEEP_SYNC_RETENTION, 30 days by default) are deleted by pruneSyncOnce (sync.go), keeping the durable reset boundary.
   - table: sync_state
     labels: [cursor-checkpoint]
     tableComment: |
       The sync position for this store: the last change id written and the reset boundary.
+      Stands alone by design: the replica's position in sync_log, a cursor.
       Retention: none.
   - table: sync_decisions
     labels: [cache-derived]
@@ -639,6 +721,7 @@ comments:
     labels: [cursor-checkpoint]
     tableComment: |
       Cursors into the YouTrack activity feed, one per feed, so each feed read resumes where it stopped.
+      Stands alone by design: one cursor per YouTrack feed, a position in sync_log.
       Retention: none.
 
 # Domain viewpoints (dots review hk 6133, P1). Every table is in at least one
