@@ -10,7 +10,8 @@ import (
 
 // MySQL leg of document retention (hk 5057). Same predicates as
 // doc_retention.go: review/mwr-* by merged change, screens/* by ended job,
-// only unbound documents, audit row per deletion in the same transaction.
+// the merge link of doc_retention_merge.go when it is on, only unbound
+// documents, audit row per deletion in the same transaction.
 func (s *Store) mysqlPruneRetention(ctx context.Context, res DocRetentionResult, cutoff time.Time) (DocRetentionResult, error) {
 	mwrLo, mwrHi := keyPrefixBounds(DocRetentionMwrPrefix)
 	scrLo, scrHi := keyPrefixBounds(DocRetentionScreensPrefix)
@@ -91,8 +92,16 @@ const mysqlReviewEligible = `AND EXISTS (SELECT 1 FROM reviews r JOIN changes c 
 const mysqlScreensEligible = `AND EXISTS (SELECT 1 FROM jobs j WHERE (j.job_id=d.job OR j.job_id=SUBSTRING_INDEX(SUBSTRING_INDEX(d.` + "`key`" + `,'/',2),'/',-1)) AND j.ended_at IS NOT NULL AND j.ended_at<=?)`
 
 // mysqlRetentionBatch deletes up to batch retention-eligible documents
-// (review first, then screens) in one transaction with one audit row each.
+// (review first, then screens, then the merge link when it is on) in one
+// transaction with one audit row each.
 func (s *Store) mysqlRetentionBatch(ctx context.Context, cutoff time.Time, batch int, prunedBy string, res *DocRetentionResult) (int, error) {
+	// The merge leg's pick runs before the transaction: every statement in
+	// it before the recheck is a locking read, so the recheck is its first
+	// consistent read and its snapshot starts after the row locks are held.
+	merge, e := s.mergeLinkBatchIDs(ctx, cutoff, batch)
+	if e != nil {
+		return 0, e
+	}
 	tx, release, e := s.begin(ctx)
 	if e != nil {
 		return 0, e
@@ -107,20 +116,13 @@ func (s *Store) mysqlRetentionBatch(ctx context.Context, cutoff time.Time, batch
 	var shas []string
 	var strKeys []string
 	var size int64
-	nReview := 0
-	collect := func(lo, hi, eligible string, want int) error {
-		if want <= 0 {
-			return nil
-		}
-		rows, err := tx.Query(ctx, fmt.Sprintf(candidate, eligible)+` FOR UPDATE`, lo, hi, cutoff, want)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
+	nReview, nMerge := 0, 0
+	scan := func(rs rows) error {
+		defer rs.Close()
+		for rs.Next() {
 			var id, n int64
 			var key, sha string
-			if err = rows.Scan(&id, &key, &sha, &n); err != nil {
+			if err := rs.Scan(&id, &key, &sha, &n); err != nil {
 				return err
 			}
 			ids = append(ids, id)
@@ -129,7 +131,17 @@ func (s *Store) mysqlRetentionBatch(ctx context.Context, cutoff time.Time, batch
 			strKeys = append(strKeys, key)
 			size += n
 		}
-		return rows.Err()
+		return rs.Err()
+	}
+	collect := func(lo, hi, eligible string, want int) error {
+		if want <= 0 {
+			return nil
+		}
+		rows, err := tx.Query(ctx, fmt.Sprintf(candidate, eligible)+` FOR UPDATE`, lo, hi, cutoff, want)
+		if err != nil {
+			return err
+		}
+		return scan(rows)
 	}
 	if e = collect(mwrLo, mwrHi, mysqlReviewEligible, batch); e != nil {
 		return 0, e
@@ -138,6 +150,41 @@ func (s *Store) mysqlRetentionBatch(ctx context.Context, cutoff time.Time, batch
 	if len(ids) < batch {
 		if e = collect(scrLo, scrHi, mysqlScreensEligible, batch-len(ids)); e != nil {
 			return 0, e
+		}
+	}
+	nScreens := len(ids) - nReview
+	if len(ids) < batch && len(merge) > 0 {
+		// The merge leg (hk 6280): lock the picked rows, then classify them
+		// again under the lock and keep only the rows still eligible.
+		skip := make(map[int64]bool, len(ids))
+		for _, id := range ids {
+			skip[id.(int64)] = true
+		}
+		if merge = withoutIDs(merge, skip); len(merge) > 0 {
+			args := make([]any, len(merge))
+			for i, id := range merge {
+				args[i] = id
+			}
+			lock, err := tx.Query(ctx, "SELECT id FROM documents WHERE id IN ("+placeholders(len(merge))+") ORDER BY id FOR UPDATE", args...)
+			if err != nil {
+				return 0, err
+			}
+			for lock.Next() {
+			}
+			lock.Close()
+			if err = lock.Err(); err != nil {
+				return 0, err
+			}
+			q, qargs := mergeLinkRecheckSQL(true, cutoff, merge)
+			rows, err := tx.Query(ctx, q, qargs...)
+			if err != nil {
+				return 0, err
+			}
+			before := len(ids)
+			if err = scan(rows); err != nil {
+				return 0, err
+			}
+			nMerge = len(ids) - before
 		}
 	}
 	if len(ids) == 0 {
@@ -172,6 +219,7 @@ func (s *Store) mysqlRetentionBatch(ctx context.Context, cutoff time.Time, batch
 	res.Deleted += int64(len(ids))
 	res.Bytes += size
 	res.ReviewDeleted += int64(nReview)
-	res.ScreensDeleted += int64(len(ids)) - int64(nReview)
+	res.ScreensDeleted += int64(nScreens)
+	res.MergeLinkDeleted += int64(nMerge)
 	return len(ids), nil
 }
