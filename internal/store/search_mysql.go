@@ -17,6 +17,25 @@ import "strings"
 // Matching is case-insensitive through LOWER on both sides, because the MySQL
 // collation (utf8mb4_0900_bin) is case-sensitive. `key` is reserved in MySQL, so
 // it is backtick-quoted, and the result key is item_key, as the ctx port does.
+//
+// LIKE wildcards: every LIKE predicate here names one escape character, `!`, in
+// an ESCAPE clause, and mysqlContainsPattern escapes `!`, `%` and `_` with it.
+// MySQL's implicit escape is a backslash, and the backslash a query carries is
+// also sql_mode-dependent (NO_BACKSLASH_ESCAPES), so no backslash is used here
+// and the match does not depend on sql_mode.
+
+// mysqlLikeEscape is the escape character named by every LIKE predicate of the
+// search statements (`ESCAPE '!'` in the SQL text).
+const mysqlLikeEscape = "!"
+
+// mysqlLikeEscaper escapes the escape character itself and the two LIKE
+// wildcards, so the query matches as literal text.
+var mysqlLikeEscaper = strings.NewReplacer("!", "!!", "%", "!%", "_", "!_")
+
+// mysqlContainsPattern is the LIKE pattern that matches q anywhere in the text.
+func mysqlContainsPattern(q string) string {
+	return "%" + mysqlLikeEscaper.Replace(q) + "%"
+}
 
 // docExactMySQL is the documents row for a numeric id query. Its arguments are
 // the id, then the session twice; ExactNumericHit uses the same statement.
@@ -24,8 +43,9 @@ const docExactMySQL = "SELECT `key`,session,kind,LEFT(body,160),created_at FROM 
 
 // docsSearchMySQL is the documents part of scope "all" and "docs" on MySQL, in
 // the column order of the PostgreSQL statement. q is matched as PostgreSQL
-// matches it: literally inside LOCATE, and with % around it inside LIKE. fetch
-// is the page size plus one, as in the PostgreSQL statement.
+// matches it: literally inside LOCATE, and literally inside LIKE (see
+// mysqlContainsPattern). fetch is the page size plus one, as in the PostgreSQL
+// statement.
 func docsSearchMySQL(q, session string, fetch int) (string, []any) {
 	sql := "SELECT 'docs' scope, d.`key` item_key, d.session, d.kind, d.`key` title, " +
 		"CASE WHEN LOCATE(LOWER(?), LOWER(d.body)) > 0 " +
@@ -33,9 +53,9 @@ func docsSearchMySQL(q, session string, fetch int) (string, []any) {
 		"ELSE LEFT(d.body, 160) END snippet, " +
 		"CAST('{}' AS JSON) refs, d.created_at " +
 		"FROM documents d " +
-		"WHERE (? = '' OR d.session = ?) AND LOWER(CONCAT(d.`key`, ' ', d.body)) LIKE LOWER(?) " +
+		"WHERE (? = '' OR d.session = ?) AND LOWER(CONCAT(d.`key`, ' ', d.body)) LIKE LOWER(?) ESCAPE '!' " +
 		"ORDER BY d.created_at DESC, d.`key`, d.session, d.`key` LIMIT ?"
-	return sql, []any{q, q, session, session, "%" + q + "%", fetch}
+	return sql, []any{q, q, session, session, mysqlContainsPattern(q), fetch}
 }
 
 // tasksExactMySQL is the tasks row for a numeric id query: the id, then the lane
@@ -51,16 +71,16 @@ const tasksProbeCommentsMySQL = "SELECT EXISTS (SELECT 1 FROM information_schema
 // the lowest match rank and then the newest created_at, as PostgreSQL's
 // DISTINCT ON keeps. The window functions pick that row before the LIMIT, so a
 // comment-heavy task cannot fill the page. fetch is the page size plus one.
-func tasksSearchMySQL(q, lane, like string, fetch int, comments bool) (string, []any) {
-	pat := "%" + like + "%"
+func tasksSearchMySQL(q, lane string, fetch int, comments bool) (string, []any) {
+	pat := mysqlContainsPattern(q)
 	// titleMatch: the task title, or its Korean translation, contains the term.
-	const titleMatch = "(LOWER(t.title) LIKE LOWER(?) OR EXISTS (SELECT 1 FROM translations tr WHERE tr.entity='task' AND tr.entity_id=CAST(t.id AS CHAR) AND tr.field='title' AND tr.lang='ko' AND tr.source_sha256=SHA2(t.title,256) AND LOWER(tr.text) LIKE LOWER(?)))"
+	const titleMatch = "(LOWER(t.title) LIKE LOWER(?) ESCAPE '!' OR EXISTS (SELECT 1 FROM translations tr WHERE tr.entity='task' AND tr.entity_id=CAST(t.id AS CHAR) AND tr.field='title' AND tr.lang='ko' AND tr.source_sha256=SHA2(t.title,256) AND LOWER(tr.text) LIKE LOWER(?) ESCAPE '!'))"
 	const titleWindow = "CASE WHEN LOCATE(LOWER(?), LOWER(t.title)) > 0 " +
 		"THEN SUBSTRING(t.title, GREATEST(1, LOCATE(LOWER(?), LOWER(t.title)) - 40), 160) ELSE LEFT(t.title, 160) END"
 
 	titleSnippet := "COALESCE((SELECT SUBSTRING(tr.text, GREATEST(1, LOCATE(LOWER(?), LOWER(tr.text)) - 40), 160) " +
 		"FROM translations tr WHERE tr.entity='task' AND tr.entity_id=CAST(t.id AS CHAR) AND tr.field='title' AND tr.lang='ko' " +
-		"AND tr.source_sha256=SHA2(t.title,256) AND LOWER(tr.text) LIKE LOWER(?)), " + titleWindow + ")"
+		"AND tr.source_sha256=SHA2(t.title,256) AND LOWER(tr.text) LIKE LOWER(?) ESCAPE '!'), " + titleWindow + ")"
 
 	parts := []string{
 		"SELECT 'tasks' scope, CAST(t.id AS CHAR) item_key, t.lane session, t.kind, t.title, " + titleSnippet + " snippet, " +
@@ -81,7 +101,7 @@ func tasksSearchMySQL(q, lane, like string, fetch int, comments bool) (string, [
 			"FROM tasks t JOIN documents d ON d.`key` = SUBSTRING_INDEX(t.body_doc, '#', 1) "+
 			"JOIN translations tr ON tr.entity='task' AND tr.entity_id=CAST(t.id AS CHAR) AND tr.field='body' AND tr.lang='ko' "+
 			"AND tr.source_sha256=SHA2(d.body,256) "+
-			"WHERE (? = '' OR t.lane = ?) AND LOWER(tr.text) LIKE LOWER(?) AND NOT "+titleMatch)
+			"WHERE (? = '' OR t.lane = ?) AND LOWER(tr.text) LIKE LOWER(?) ESCAPE '!' AND NOT "+titleMatch)
 	args = append(args, q, lane, lane, pat, pat, pat)
 
 	if comments {
@@ -89,7 +109,7 @@ func tasksSearchMySQL(q, lane, like string, fetch int, comments bool) (string, [
 		// window runs after the WHERE, as PostgreSQL's DISTINCT ON does.
 		commentSnippet := "COALESCE((SELECT SUBSTRING(tr.text, GREATEST(1, LOCATE(LOWER(?), LOWER(tr.text)) - 40), 160) " +
 			"FROM translations tr WHERE tr.entity='task_comment' AND tr.entity_id=CAST(c.id AS CHAR) AND tr.field='body' AND tr.lang='ko' " +
-			"AND tr.source_sha256=SHA2(c.body,256) AND LOWER(tr.text) LIKE LOWER(?)), " +
+			"AND tr.source_sha256=SHA2(c.body,256) AND LOWER(tr.text) LIKE LOWER(?) ESCAPE '!'), " +
 			"CASE WHEN LOCATE(LOWER(?), LOWER(c.body)) > 0 " +
 			"THEN SUBSTRING(c.body, GREATEST(1, LOCATE(LOWER(?), LOWER(c.body)) - 40), 160) ELSE LEFT(c.body, 160) END)"
 		parts = append(parts,
@@ -98,9 +118,9 @@ func tasksSearchMySQL(q, lane, like string, fetch int, comments bool) (string, [
 				taskRefsExprMySQL+" refs, t.created_at, "+
 				"ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY c.created_at DESC, c.id DESC) rn "+
 				"FROM task_comments c JOIN tasks t ON t.id = c.task_id "+
-				"WHERE (? = '' OR t.lane = ?) AND (LOWER(c.body) LIKE LOWER(?) OR EXISTS (SELECT 1 FROM translations tr "+
+				"WHERE (? = '' OR t.lane = ?) AND (LOWER(c.body) LIKE LOWER(?) ESCAPE '!' OR EXISTS (SELECT 1 FROM translations tr "+
 				"WHERE tr.entity='task_comment' AND tr.entity_id=CAST(c.id AS CHAR) AND tr.field='body' AND tr.lang='ko' "+
-				"AND tr.source_sha256=SHA2(c.body,256) AND LOWER(tr.text) LIKE LOWER(?))) AND NOT "+titleMatch+
+				"AND tr.source_sha256=SHA2(c.body,256) AND LOWER(tr.text) LIKE LOWER(?) ESCAPE '!')) AND NOT "+titleMatch+
 				") cm WHERE cm.rn = 1")
 		args = append(args, q, pat, q, q, lane, lane, pat, pat, pat, pat)
 	}
