@@ -177,12 +177,19 @@ func domainSummary(vps []viewpoint, s schemaJSON) (string, error) {
 		if e.declared {
 			fmt.Fprintf(&b, "  %s -.->|\"%d declared\"| %s\n", e.from, edges[e], e.to)
 		} else {
-			fmt.Fprintf(&b, "  %s -->|\"%d foreign keys\"| %s\n", e.from, edges[e], e.to)
+			fmt.Fprintf(&b, "  %s -->|\"%d %s\"| %s\n", e.from, edges[e], plural(edges[e], "foreign key", "foreign keys"), e.to)
 		}
 	}
 	fmt.Fprintf(&b, "```\n\n")
 	fmt.Fprintf(&b, "Solid arrows are foreign keys in the database; dashed arrows are relations declared in `.tbls.yml`. An arrow runs from the domain of a table to the domain of the table it refers to.\n\n")
 	return b.String(), nil
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // insertAfterTitle puts section after the first markdown title line, or at the
