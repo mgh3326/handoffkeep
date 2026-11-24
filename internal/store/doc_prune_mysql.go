@@ -52,6 +52,7 @@ func (s *Store) mysqlPruneDocuments(ctx context.Context, res DocPruneResult, old
 					return 0, e
 				}
 				var ids, keys []any
+				var docKeys []string
 				var size int64
 				for rows.Next() {
 					var id, n int64
@@ -62,6 +63,7 @@ func (s *Store) mysqlPruneDocuments(ctx context.Context, res DocPruneResult, old
 					}
 					ids = append(ids, id)
 					keys = append(keys, key)
+					docKeys = append(docKeys, key)
 					size += n
 				}
 				e = rows.Err()
@@ -77,6 +79,9 @@ func (s *Store) mysqlPruneDocuments(ctx context.Context, res DocPruneResult, old
 				}
 				deleted, e := tx.Exec(ctx, "DELETE FROM documents WHERE id IN ("+placeholders(len(ids))+")", ids...)
 				if e != nil {
+					return 0, e
+				}
+				if e = deleteTaskDocRefsMySQLTx(ctx, tx, docKeys); e != nil {
 					return 0, e
 				}
 				if e = tx.Commit(ctx); e != nil {

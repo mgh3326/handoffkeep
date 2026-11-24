@@ -144,6 +144,9 @@ func (s *Store) pruneDocumentBatch(ctx context.Context, prefix string, olderThan
 		if e != nil {
 			return e
 		}
+		if _, e = tx.Exec(ctx, `DELETE FROM task_doc_refs WHERE doc_key = ANY($1)`, keys); e != nil {
+			return e
+		}
 		if e = tx.Commit(ctx); e != nil {
 			return e
 		}

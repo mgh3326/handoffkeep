@@ -28,7 +28,7 @@ import (
 // keyPrefixSentinel is the largest code point, U+10FFFF.
 const keyPrefixSentinel = "\U0010FFFF"
 
-// maxDocKeyBytes is the key length limit validDocKey enforces. A prefix range
+// maxDocKeyBytes is the key length limit ValidDocKey enforces. A prefix range
 // is closed with it when the prefix's own last code point has no successor.
 const maxDocKeyBytes = 512
 

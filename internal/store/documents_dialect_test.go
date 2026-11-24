@@ -91,6 +91,10 @@ func init() {
 		if err != nil {
 			t.Fatal(err)
 		}
+		citer := docRefsTask(t, s, "cites a pruned document")
+		if _, err := s.AddTaskDocRef(ctx, citer.ID, doc.Key, "tester"); err != nil {
+			t.Fatal(err)
+		}
 		cutoff := time.Now().UTC().Add(-24 * time.Hour)
 		res, err := s.PruneDocuments(ctx, DocPrunePrefix, cutoff, 10, false)
 		if err != nil || res.Matched != 1 || res.Deleted != 0 || res.Bytes != int64(len("prunable")) {
@@ -99,6 +103,9 @@ func init() {
 		res, err = s.PruneDocuments(ctx, DocPrunePrefix, cutoff, 10, true)
 		if err != nil || res.Deleted != 1 {
 			t.Fatalf("apply: %+v err=%v", res, err)
+		}
+		if n := docRefCount(t, s, doc.Key); n != 0 {
+			t.Fatalf("prune left %d task reference(s) to the deleted document", n)
 		}
 		if _, found, err := s.GetDocument(ctx, doc.Key); err != nil || found {
 			t.Fatalf("get after prune: found=%v err=%v", found, err)
@@ -178,6 +185,13 @@ func init() {
 		put("review/mwr-202-bbb-p1-2", "brief", "mwr-202-bbb-p1-2")
 		put("screens/job-ret-old/pane.txt", "evidence", "job-ret-old")
 		put("screens/job-ret-fresh/pane.txt", "evidence", "job-ret-fresh")
+		// One task cites the two expiring documents and one kept document.
+		citer := docRefsTask(t, s, "cites retention candidates")
+		for _, key := range []string{"review/mwr-201-aaa-p1-1", "screens/job-ret-old/pane.txt", "review/mwr-202-bbb-p1-2"} {
+			if _, err := s.AddTaskDocRef(ctx, citer.ID, key, "tester"); err != nil {
+				t.Fatal(err)
+			}
+		}
 		dry, err := s.PruneRetention(ctx, cutoff, 10, false, "test")
 		if err != nil {
 			t.Fatal(err)
@@ -198,6 +212,12 @@ func init() {
 		if _, found, err := s.GetDocument(ctx, "review/mwr-202-bbb-p1-2"); err != nil || !found {
 			t.Fatalf("review fresh missing: found=%v err=%v", found, err)
 		}
+		if docRefCount(t, s, "review/mwr-201-aaa-p1-1") != 0 || docRefCount(t, s, "screens/job-ret-old/pane.txt") != 0 {
+			t.Fatal("retention left task references to the deleted documents")
+		}
+		if docRefCount(t, s, "review/mwr-202-bbb-p1-2") != 1 {
+			t.Fatal("retention dropped the reference to a kept document")
+		}
 		var logs int64
 		if err := s.db().QueryRow(ctx, s.q(`SELECT count(*) FROM doc_prune_log WHERE pruned_by=$1`, `SELECT COUNT(*) FROM doc_prune_log WHERE pruned_by=?`), "test").Scan(&logs); err != nil {
 			t.Fatal(err)
@@ -208,6 +228,12 @@ func init() {
 		again, err := s.PruneRetention(ctx, cutoff, 10, true, "test")
 		if err != nil || again.Deleted != 0 {
 			t.Fatalf("second run: %+v err=%v", again, err)
+		}
+		// A key re-created after its expiry must not list the old citation.
+		put("review/mwr-201-aaa-p1-1", "brief", "mwr-201-aaa-p1-1")
+		refs, err := s.ListTaskDocRefs(ctx, citer.ID)
+		if err != nil || len(refs) != 1 || refs[0].Key != "review/mwr-202-bbb-p1-2" {
+			t.Fatalf("refs after re-create = %+v err=%v, want only the kept document", refs, err)
 		}
 	})
 }

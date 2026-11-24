@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -123,11 +124,14 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 	if err := rejectDotsChoiceSecrets(in.Options); err != nil {
 		return Task{}, err
 	}
+	// The cited set is one set: the same keys in any order, with repeats, make
+	// the same digest and the same references (hk 6138).
+	in.DocKeys = canonicalDocKeys(in.DocKeys)
 	if len(in.DocKeys) > maxDotsRequestDocs {
 		return Task{}, dotsRequestInvalid("docs must name at most 20 document keys")
 	}
 	for _, key := range in.DocKeys {
-		if !validDocKey(key) {
+		if !ValidDocKey(key) {
 			return Task{}, dotsRequestInvalid("docs must name document keys of 1-512 bytes without \"..\" or a leading /")
 		}
 	}
@@ -262,6 +266,17 @@ func (s *Store) CreateDotsRequest(ctx context.Context, by string, in DotsRequest
 		return Task{}, err
 	}
 	return out, nil
+}
+
+// canonicalDocKeys returns the cited keys sorted and without repeats. It copies
+// the slice, so the caller's order is left as it was.
+func canonicalDocKeys(keys []string) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	out := slices.Clone(keys)
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // IsHKDotsRequest identifies a request that must remain on hk.
@@ -1115,7 +1130,7 @@ func checkDotsResult(kind string, issue DotsIssue, c DotsComment, allowProgress 
 	}
 	key := dotsResultKey(issue, c)
 	body := dotsResultBody(kind, issue, c)
-	if !validDocKey(key) || !validDocumentText(body) {
+	if !ValidDocKey(key) || !validDocumentText(body) {
 		return errors.New("invalid dots result")
 	}
 	return guard.Reject(key + "\n" + body)

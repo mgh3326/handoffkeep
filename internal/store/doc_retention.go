@@ -261,6 +261,9 @@ SELECT k, h, $3, $4 FROM unnest($1::text[], $2::text[]) AS t(k, h)`, keys, shas,
 	if e != nil {
 		return 0, e
 	}
+	if _, e = tx.Exec(ctx, `DELETE FROM task_doc_refs WHERE doc_key = ANY($1)`, keys); e != nil {
+		return 0, e
+	}
 	if e = tx.Commit(ctx); e != nil {
 		return 0, e
 	}

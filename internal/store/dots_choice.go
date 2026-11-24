@@ -49,7 +49,7 @@ func validDotsChoice(c DotsChoice) bool {
 	if !validDecisionOptions(DecisionOptions{Options: c.Options}) {
 		return false
 	}
-	return c.ResultDoc == "" || validDocKey(c.ResultDoc)
+	return c.ResultDoc == "" || ValidDocKey(c.ResultDoc)
 }
 
 // CheckDotsChoice checks a request's declared options before anything is

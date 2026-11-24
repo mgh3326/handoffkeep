@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"reflect"
@@ -47,6 +49,8 @@ func TestTaskDocRefCLI(t *testing.T) {
 		{"tasks", "doc-ref", "list", "42", "--doc", "tbls/a/doc"},
 		{"tasks", "doc-ref", "add", "0", "--doc", "tbls/a/doc"},
 		{"tasks", "doc-ref", "bogus", "42"},
+		{"tasks", "doc-ref", "add", "42", "--doc", "tbls/a/doc", "--doc", "../escape"},
+		{"tasks", "doc-ref", "rm", "42", "--doc", "tbls/a/doc", "--doc", "/absolute/doc"},
 	} {
 		calls = nil
 		if err := run(append(bad, base...), io.Discard, io.Discard); err == nil {
@@ -55,6 +59,32 @@ func TestTaskDocRefCLI(t *testing.T) {
 		if len(calls) != 0 {
 			t.Fatalf("%v: refused call still sent %+v", bad, calls)
 		}
+	}
+}
+
+// TestTaskDocRefPartialOutput checks that when a later add fails, the changes
+// already applied are printed before the error and the rest is not sent.
+func TestTaskDocRefPartialOutput(t *testing.T) {
+	var calls []orderCall
+	h := orderServer(t, &calls, func(string) (int, any) {
+		if len(calls) == 2 {
+			return http.StatusConflict, map[string]any{"error": "doc_not_found"}
+		}
+		return http.StatusOK, map[string]any{"changed": true, "task_id": 42}
+	})
+	var out bytes.Buffer
+	args := []string{"tasks", "doc-ref", "add", "42", "--doc", "tbls/a/doc", "--doc", "tbls/b/doc", "--doc", "tbls/c/doc", "--url", h.URL, "--token", "tok"}
+	if err := run(args, &out, io.Discard); err == nil {
+		t.Fatal("want the second add refused")
+	}
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want the third add not sent", len(calls))
+	}
+	var got struct {
+		Changes []map[string]any `json:"changes"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil || len(got.Changes) != 1 {
+		t.Fatalf("stdout = %q err=%v, want the one change already applied", out.String(), err)
 	}
 }
 
