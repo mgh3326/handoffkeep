@@ -106,7 +106,8 @@ relations:
     columns: [job_id]
     parentTable: jobs
     parentColumns: [job_id]
-    def: "job the placement decided for (no foreign key)"
+    parentCardinality: "zero or one"
+    def: "job the placement decided for; a refused or failed attempt may precede the claim, so no jobs row may exist yet (no foreign key)"
   - table: decision_requests
     columns: [job_id]
     parentTable: jobs
