@@ -430,7 +430,7 @@ comments:
     labels: [cache-derived]
     tableComment: |
       The CI checks of a change's head, mirrored from the forge so state reads need no call out.
-      Retention: none; replaced when a head changes.
+      Retention: none; one row per change, head and check; earlier heads' rows are kept (marked gone when a check disappears) and the all-heads view reads them.
   - table: change_findings
     labels: [history-log]
     tableComment: |
@@ -439,7 +439,7 @@ comments:
   - table: change_gate_events
     labels: [history-log]
     tableComment: |
-      One row per gate decision on a change. No production code path writes it at head; only the thread rendering reads it. Candidate for retirement, not changed here.
+      The gate history: one row per gate decision on a change. The change_gate_events_record trigger records a decision when an update changes a change's gate state, head or decision time; the thread rendering reads it.
       Retention: none.
   - table: change_tasks
     labels: [link-join]

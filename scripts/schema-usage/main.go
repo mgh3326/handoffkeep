@@ -3,12 +3,16 @@
 // deletes each table from the SQL in internal/ and cmd/, so nobody keeps that
 // list by hand.
 //
-//	schema-usage report
-//	    print the derived usage of every table (for review)
-//	schema-usage config OUT
+//	schema-usage report [LIVE_JSON]
+//	    print the derived usage of every table (for review); with LIVE_JSON,
+//	    also the triggers of the migrated schema
+//	schema-usage config OUT LIVE_JSON
 //	    write OUT: .tbls.yml with the derived usage appended to each table's
 //	    comment and the role legend appended to desc; exits non-zero when a
-//	    table has no hand comment, no role label, or a comment names no table
+//	    table has no hand comment, no role label, or a comment names no table.
+//	    LIVE_JSON is tbls's JSON export of the migrated database (tbls out -t
+//	    json); the triggers it defines are stated on the tables they write,
+//	    delete or guard (hk 6258)
 //	schema-usage summary SCHEMA_JSON README
 //	    insert the domain summary (counts and a domain-level diagram, real
 //	    foreign keys solid, declared relations dashed) after README's title
@@ -34,10 +38,13 @@ func main() {
 
 func run(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: schema-usage report | config OUT | summary SCHEMA_JSON README")
+		return errors.New("usage: schema-usage report [LIVE_JSON] | config OUT LIVE_JSON | summary SCHEMA_JSON README")
 	}
 	switch args[0] {
 	case "report":
+		if len(args) > 2 {
+			return errors.New("report takes at most LIVE_JSON")
+		}
 		cfg, err := loadConfig(".tbls.yml")
 		if err != nil {
 			return err
@@ -50,13 +57,18 @@ func run(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if len(args) == 2 {
+			if err := attachTriggersFile(u, args[1]); err != nil {
+				return err
+			}
+		}
 		printReport(out, u)
 		return nil
 	case "config":
-		if len(args) != 2 {
-			return errors.New("config needs OUT")
+		if len(args) != 3 {
+			return errors.New("config needs OUT and LIVE_JSON")
 		}
-		return writeConfig(".tbls.yml", args[1])
+		return writeConfig(".tbls.yml", args[1], args[2])
 	case "summary":
 		if len(args) != 3 {
 			return errors.New("summary needs SCHEMA_JSON and README")
@@ -70,19 +82,22 @@ func printReport(out io.Writer, u *Usage) {
 	names := sortedTables(u.Tables)
 	for _, name := range names {
 		t := u.Use[name]
-		if t == nil {
-			fmt.Fprintf(out, "%s\n  no code reads or writes it\n", name)
-			continue
-		}
 		fmt.Fprintf(out, "%s\n", name)
-		fmt.Fprintf(out, "  reads:  %s\n", orNone(groupByFile(sortedUnits(t.Reads))))
-		fmt.Fprintf(out, "  writes: %s\n", orNone(groupByFile(sortedUnits(t.Writes))))
-		for _, unit := range sortedUnits(mapKeysDeletes(t.Deletes)) {
-			for _, stmt := range t.Deletes[unit] {
-				fmt.Fprintf(out, "  delete: %s: %s\n", unit, stmt)
+		if t == nil {
+			fmt.Fprintf(out, "  no code reads or writes it\n")
+		} else {
+			fmt.Fprintf(out, "  reads:  %s\n", orNone(groupByFile(sortedUnits(t.Reads))))
+			fmt.Fprintf(out, "  writes: %s\n", orNone(groupByFile(sortedUnits(t.Writes))))
+			for _, unit := range sortedUnits(mapKeysDeletes(t.Deletes)) {
+				for _, stmt := range t.Deletes[unit] {
+					fmt.Fprintf(out, "  delete: %s: %s\n", unit, stmt)
+				}
 			}
+			fmt.Fprintf(out, "  joins:  %s\n", orNone(strings.Join(sortedKeys(t.Joins), ", ")))
 		}
-		fmt.Fprintf(out, "  joins:  %s\n", orNone(strings.Join(sortedKeys(t.Joins), ", ")))
+		for _, line := range triggerFactsOf(name, u.Triggers).lines() {
+			fmt.Fprintf(out, "  %s\n", line)
+		}
 	}
 }
 
@@ -128,7 +143,7 @@ func loadConfig(path string) (map[string]any, error) {
 	return cfg, nil
 }
 
-func writeConfig(tblsPath, outPath string) error {
+func writeConfig(tblsPath, outPath, livePath string) error {
 	cfg, err := loadConfig(tblsPath)
 	if err != nil {
 		return err
@@ -139,6 +154,9 @@ func writeConfig(tblsPath, outPath string) error {
 	}
 	u, err := Scan(".", tables)
 	if err != nil {
+		return err
+	}
+	if err := attachTriggersFile(u, livePath); err != nil {
 		return err
 	}
 	if err := applyUsage(cfg, u); err != nil {
@@ -171,6 +189,11 @@ func applyUsage(cfg map[string]any, u *Usage) error {
 			problems = append(problems, fmt.Sprintf("comments names table %q, which no viewpoint lists", name))
 		}
 	}
+	for _, tr := range u.Triggers {
+		if !u.Tables[tr.Table] {
+			problems = append(problems, fmt.Sprintf("trigger %q fires on table %q, which no viewpoint lists", tr.Name, tr.Table))
+		}
+	}
 	for _, name := range sortedTables(u.Tables) {
 		m := entries[name]
 		if m == nil {
@@ -184,7 +207,7 @@ func applyUsage(cfg map[string]any, u *Usage) error {
 		if roleOf(m) == "" {
 			problems = append(problems, fmt.Sprintf("table %q needs exactly one role label (one of %s)", name, strings.Join(roleNames(), ", ")))
 		}
-		derived := derivedLines(u.Use[name])
+		derived := derivedLines(u.Use[name], triggerFactsOf(name, u.Triggers))
 		m["tableComment"] = strings.TrimSpace(hand) + "\n\n" + strings.Join(derived, "\n")
 	}
 	if len(problems) > 0 {
@@ -196,15 +219,26 @@ func applyUsage(cfg map[string]any, u *Usage) error {
 	return nil
 }
 
-// derivedLines are the facts the code gives a table, one line each.
-func derivedLines(t *TableUse) []string {
+// derivedLines are the facts the code and the triggers give a table, one line
+// each. A table no code touches but a trigger does gets the trigger lines.
+func derivedLines(t *TableUse, f triggerFacts) []string {
 	if t == nil {
-		return []string{"Code (derived from internal/ and cmd/, tests and migrations excluded): no production statement reads or writes this table."}
+		if f.none() {
+			return []string{"Code (derived from internal/ and cmd/, tests and migrations excluded): no production statement reads or writes this table."}
+		}
+		t = &TableUse{}
 	}
-	lines := []string{
-		"Read by: " + orNone(groupByFile(sortedUnits(t.Reads))) + ".",
-		"Written by: " + orNone(groupByFile(sortedUnits(t.Writes))) + ".",
+	code := groupByFile(sortedUnits(t.Writes))
+	lines := []string{"Read by: " + orNone(groupByFile(sortedUnits(t.Reads))) + "."}
+	switch {
+	case code != "":
+		lines = append(lines, "Written by: "+code+".")
+	case len(f.Written)+len(f.Deleted) > 0:
+		lines = append(lines, "Written by: no production code.")
+	default:
+		lines = append(lines, "Written by: none.")
 	}
+	lines = append(lines, f.Written...)
 	var dels []string
 	for _, unit := range sortedUnits(mapKeysDeletes(t.Deletes)) {
 		for _, stmt := range t.Deletes[unit] {
@@ -214,6 +248,8 @@ func derivedLines(t *TableUse) []string {
 	if len(dels) > 0 {
 		lines = append(lines, "Deleted by: "+strings.Join(dels, "; ")+".")
 	}
+	lines = append(lines, f.Deleted...)
+	lines = append(lines, f.Guarded...)
 	lines = append(lines, "Joined in the same statement with: "+orNone(strings.Join(sortedKeys(t.Joins), ", "))+".")
 	return lines
 }
