@@ -48,9 +48,10 @@ func relayPlanKey(t *testing.T, ctx context.Context, s *Store, table, query stri
 }
 
 // TestMySQLRelayEventReadsUseLookupIndexes seeds lane events for one lane, most
-// of them delivered, so the planner has real statistics (hk 5928). It checks
-// the three relay_events reads that the digests showed scanning the lane or
-// the kind: the undelivered polls by kind and by lane, and the lane-event
+// of them delivered, so the planner has real statistics (hk 5928, hk 6254). It
+// checks the relay_events reads that the digests showed scanning the table,
+// the lane or the kind: the undelivered polls with no lane or kind (with and
+// without a cursor), by kind and by lane, and the lane-event
 // idempotency read that appendRelayEventOnce runs under FOR UPDATE. Each must
 // use its index, and the undelivered poll must return only the undelivered rows
 // of its lane, in id order.
@@ -101,8 +102,28 @@ func TestMySQLRelayEventReadsUseLookupIndexes(t *testing.T) {
 		}
 	}
 
-	// The three reads the digests showed scanning relay_events. The poll by
-	// kind is the global one, so only its plan is checked here.
+	// Fresh statistics: the planner reads the index cardinalities, not the
+	// rows just inserted. ANALYZE TABLE answers a result set, so it is read
+	// and closed.
+	ar, err := s.db().Query(ctx, `ANALYZE TABLE relay_events`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ar.Close()
+
+	// The reads the digests showed scanning relay_events. The polls by kind
+	// and with no lane or kind are global, so only their plans are checked
+	// here: other tests share the table.
+	if key := relayPlanKey(t, ctx, s, "relay_events",
+		`SELECT id FROM relay_events WHERE 1=1 AND delivered_at IS NULL ORDER BY id ASC LIMIT ?`,
+		100); key != "relay_events_undelivered_all" {
+		t.Errorf("undelivered poll with no lane or kind uses %q, want relay_events_undelivered_all", key)
+	}
+	if key := relayPlanKey(t, ctx, s, "relay_events",
+		`SELECT id FROM relay_events WHERE 1=1 AND delivered_at IS NULL AND id>? ORDER BY id ASC LIMIT ?`,
+		int64(1), 100); key != "relay_events_undelivered_all" {
+		t.Errorf("undelivered poll after a cursor uses %q, want relay_events_undelivered_all", key)
+	}
 	if key := relayPlanKey(t, ctx, s, "relay_events",
 		`SELECT id FROM relay_events WHERE 1=1 AND kind=? AND delivered_at IS NULL ORDER BY id ASC LIMIT ?`,
 		"lane.event", 100); key != "relay_events_undelivered_kind" {
