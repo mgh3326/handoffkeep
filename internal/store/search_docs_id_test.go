@@ -77,6 +77,45 @@ func TestSearchDocsExactIDLeads(t *testing.T) {
 	}
 }
 
+// hk 6202: LIKE wildcards (_ and %) in doc search queries match literally on
+// PostgreSQL, matching MySQL's docsSearchMySQL behavior.
+func TestSearchDocsWildcardsAreLiteral(t *testing.T) {
+	s, _ := searchTestStore(t)
+	ctx := context.Background()
+	under, _, err := s.PutDocument(ctx, Document{Key: "k/under", Kind: "note", Body: "a_c literal match", CreatedBy: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.PutDocument(ctx, Document{Key: "k/under-decoy", Kind: "note", Body: "abc decoy match", CreatedBy: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	pct, _, err := s.PutDocument(ctx, Document{Key: "k/pct", Kind: "note", Body: "100% complete", CreatedBy: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.PutDocument(ctx, Document{Key: "k/pct-decoy", Kind: "note", Body: "100x complete", CreatedBy: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, scope := range []string{"docs", "all"} {
+		xs, err := s.Search(ctx, "a_c", scope, "", 10)
+		if err != nil {
+			t.Fatalf("search a_c scope=%s: %v", scope, err)
+		}
+		if len(xs) != 1 || xs[0].Key != under.Key {
+			t.Fatalf("search a_c scope=%s: got %v, want [%s]", scope, resultKeys(xs), under.Key)
+		}
+
+		xs, err = s.Search(ctx, "100%", scope, "", 10)
+		if err != nil {
+			t.Fatalf("search 100%% scope=%s: %v", scope, err)
+		}
+		if len(xs) != 1 || xs[0].Key != pct.Key {
+			t.Fatalf("search 100%% scope=%s: got %v, want [%s]", scope, resultKeys(xs), pct.Key)
+		}
+	}
+}
+
 // Scopes other than tasks also mark a page cut at the cap: every returned row
 // carries truncated=true, and a page that fits reports no truncation (#551).
 func TestSearchScopesCapAndTruncated(t *testing.T) {

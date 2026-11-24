@@ -68,6 +68,40 @@ func TestMySQLSearchDocsFindsBodyAndExactID(t *testing.T) {
 	if mysqlSearchHasKey(other, "docs", doc.Key) {
 		t.Fatalf("session filter: hits=%+v, the other session must not see %s", other, doc.Key)
 	}
+
+	// hk 6202: LIKE wildcards in doc search queries match literally on MySQL,
+	// matching PostgreSQL's escaped ILIKE behavior.
+	under, _, err := s.PutDocument(ctx, Document{Key: "hk6202/under-" + n, Kind: "note", Session: session, Body: "a_c literal match", CreatedBy: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.PutDocument(ctx, Document{Key: "hk6202/under-decoy-" + n, Kind: "note", Session: session, Body: "abc decoy match", CreatedBy: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	pct, _, err := s.PutDocument(ctx, Document{Key: "hk6202/pct-" + n, Kind: "note", Session: session, Body: "100% complete", CreatedBy: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.PutDocument(ctx, Document{Key: "hk6202/pct-decoy-" + n, Kind: "note", Session: session, Body: "100x complete", CreatedBy: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range []string{"docs", "all"} {
+		hits, err := s.Search(ctx, "a_c", scope, session, 20)
+		if err != nil {
+			t.Fatalf("search a_c scope=%s on mysql: %v", scope, err)
+		}
+		if len(hits) != 1 || hits[0].Key != under.Key {
+			t.Fatalf("search a_c scope=%s on mysql: got %v, want [%s]", scope, hits, under.Key)
+		}
+
+		hits, err = s.Search(ctx, "100%", scope, session, 20)
+		if err != nil {
+			t.Fatalf("search 100%% scope=%s on mysql: %v", scope, err)
+		}
+		if len(hits) != 1 || hits[0].Key != pct.Key {
+			t.Fatalf("search 100%% scope=%s on mysql: got %v, want [%s]", scope, hits, pct.Key)
+		}
+	}
 }
 
 // TestMySQLSearchTasksFindsTitleAndCommentsOnce runs scope "tasks" on MySQL. A

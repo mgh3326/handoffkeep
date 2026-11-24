@@ -4750,7 +4750,16 @@ type searchCapture func(sql string, args []any)
 
 type searchCaptureKey struct{}
 
-// defaultSearchTimeout bounds one Search call, across all of its statements.
+// pgLikeEscaper escapes backslashes and the LIKE wildcards `%` and `_` so a
+// query matches as literal text in PostgreSQL statements that use ESCAPE '\'.
+var pgLikeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// pgLikePattern returns q escaped for a PostgreSQL LIKE / ILIKE pattern with
+// ESCAPE '\' and wrapped in '%' wildcards so it matches anywhere in the text.
+func pgLikePattern(q string) string {
+	return "%" + pgLikeEscaper.Replace(q) + "%"
+}
+
 // Short Korean queries (2 characters) cannot use the trigram indexes and scan
 // every row of the searched tables (hk 2658), so an unbounded call can hold a
 // connection for many seconds after its client has gone.
@@ -4838,7 +4847,7 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 	}
 	parts := []string{}
 	if scope == "all" || scope == "docs" {
-		parts = append(parts, `(SELECT 'docs' scope,key,session,key title,created_at,id row_id FROM documents WHERE ($1='' OR session=$1) AND (to_tsvector('simple',key || ' ' || body) @@ plainto_tsquery('simple',$2) OR key || ' ' || body ILIKE '%' || $2 || '%') ORDER BY created_at DESC,key,session,title LIMIT $3)`)
+		parts = append(parts, `(SELECT 'docs' scope,key,session,key title,created_at,id row_id FROM documents WHERE ($1='' OR session=$1) AND (to_tsvector('simple',key || ' ' || body) @@ plainto_tsquery('simple',$2) OR key || ' ' || body ILIKE '%' || $4 || '%' ESCAPE '\') ORDER BY created_at DESC,key,session,title LIMIT $3)`)
 	}
 	mainSQL := `WITH candidates AS (` + strings.Join(parts, " UNION ALL ") + `), page AS MATERIALIZED (
 		SELECT scope,key,session,title,created_at,row_id FROM candidates
@@ -4852,7 +4861,7 @@ func (s *Store) search(ctx context.Context, q, scope, session string, limit int)
 	FROM page p
 	LEFT JOIN documents d ON p.scope='docs' AND d.id=p.row_id
 	ORDER BY p.created_at DESC,p.scope,p.key,p.session,p.title`
-	mainArgs := []any{session, q, limit + 1}
+	mainArgs := []any{session, q, limit + 1, pgLikeEscaper.Replace(q)}
 	if s.dialect == mysqlDialect {
 		mainSQL, mainArgs = docsSearchMySQL(q, session, limit+1)
 	}
@@ -4972,7 +4981,7 @@ func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]S
 	if limit > 50 {
 		limit = 50
 	}
-	like := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
+	like := pgLikeEscaper.Replace(q)
 	var exactID int64 = -1
 	if m := numericIDQuery.FindStringSubmatch(strings.TrimSpace(q)); m != nil {
 		id, e := strconv.ParseInt(m[1], 10, 64)
