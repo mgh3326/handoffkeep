@@ -78,6 +78,8 @@ type FakeYouTrack struct {
 	findFail        error
 	findFailSummary string
 	searches        []ytwrite.ArticleSearch
+	// articleRevs numbers the article revisions the fake gives UpdatedAt.
+	articleRevs int64
 	// fieldsMissing names the projects whose issue fields are not set up;
 	// projectField the type of each project's hk project field (an enum
 	// unless SetProjectField says otherwise).

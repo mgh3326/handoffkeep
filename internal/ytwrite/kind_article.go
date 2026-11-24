@@ -334,6 +334,11 @@ type RemoteArticle struct {
 	// CreatedAt is when the article was created, zero when the remote did not
 	// say. A family with several roots uses its oldest by this (hk 4797).
 	CreatedAt time.Time
+	// UpdatedAt is when the article's text last changed (YouTrack's updated),
+	// zero when the remote did not say. A split family read compares it to
+	// see that no part changed between its reads: an edit and a restore to
+	// the same text change it (hk 5744, review of PR #527 r4638925840).
+	UpdatedAt time.Time
 	// ChildIDs are the article's sub-articles, as ReadArticle reads them
 	// directly (childArticles), never by search; nil from FindArticles. A
 	// split document's parts are found here (hk 5085).

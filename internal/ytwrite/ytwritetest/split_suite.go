@@ -799,7 +799,8 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		e2 := newSplitEnv(t, nl, 2)
 		e2.dispatch = 200 * time.Millisecond
 		e2.restart(e2.ledger)
-		e2.yt.BeforeReadArticle = func(string) { time.Sleep(300 * time.Millisecond) } // 4 × 300ms > 4 × 200ms
+		// Six GETs (index, two parts, their revision checks, index) at 700ms
+		e2.yt.BeforeReadArticle = func(string) { time.Sleep(700 * time.Millisecond) } // 4.2s > 18 × 200ms
 		op2 := e2.prepare()
 		e2.drive()
 		e2.wantState(op2, ytwrite.StateRemoteUnknown, ytwrite.ReasonUnverified)
@@ -845,6 +846,101 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 		e.wantOneFamily(op, got.YTResultID)
 	})
 
+	// Review of PR #527 r4638925840, r4638926109: a part edited after its read
+	// and restored before the next part's read reads as exact content in both
+	// reads, and the child ids do not change. Its revision moved, so the
+	// family is not read whole and the send's final read applies nothing.
+	t.Run("same_id_edit_between_part_reads_is_not_applied", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 2)
+		op := e.prepare()
+		fired := false
+		e.yt.BeforeReadArticle = func(id string) {
+			if fired {
+				return
+			}
+			if p2 := e.partIDs(op, 2); len(p2) != 1 || p2[0] != id {
+				return
+			}
+			fired = true
+			p1 := e.partIDs(op, 1)[0]
+			a, _ := e.yt.Article(p1)
+			e.yt.EditArticle(p1, "edited between the reads")
+			e.yt.EditArticle(p1, a.Content) // restored: the same text, a new revision
+		}
+		e.drive()
+		if !fired {
+			t.Fatal("part 2 was never read")
+		}
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonUnverified)
+		writes := len(e.yt.ArticleWrites())
+		e.clock.Advance(time.Hour)
+		e.drive()
+		got := e.wantState(op, ytwrite.StateApplied, "")
+		e.wantOneFamily(op, got.YTResultID)
+		if w := len(e.yt.ArticleWrites()); w != writes {
+			t.Fatalf("%d creates to verify a complete family", w-writes)
+		}
+	})
+
+	// Review of PR #527 r4638925843: the family read GETs every child of the
+	// index, unrelated ones too. Three unrelated children under a two-part
+	// index are read within the read's GET budget, so the recovery read is
+	// whole and applies: 9 GETs at 120ms fit 18 × 200ms, while the old
+	// parts-plus-two budget of 4 × 200ms held 7 of them.
+	t.Run("unrelated_children_fit_the_verify_budget", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 2)
+		e.dispatch = 200 * time.Millisecond
+		e.restart(e.ledger)
+		e.queueReads(errBadGateway)
+		op := e.prepare()
+		e.drive()
+		got := e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonUnverified)
+		for i := 0; i < 3; i++ {
+			e.yt.InjectChildOf(got.YTResultID, splitProject, "unrelated child", "unrelated content")
+		}
+		e.yt.BeforeReadArticle = func(string) { time.Sleep(120 * time.Millisecond) }
+		writes := len(e.yt.ArticleWrites())
+		e.clock.Advance(time.Hour)
+		e.drive()
+		got = e.wantState(op, ytwrite.StateApplied, "")
+		e.wantOneFamily(op, got.YTResultID)
+		if w := len(e.yt.ArticleWrites()); w != writes {
+			t.Fatalf("%d creates to verify a complete family", w-writes)
+		}
+	})
+
+	// Review of PR #527 r4638926113: a recovery step stopped as the work
+	// deadline passes is recorded definite. The ledger refuses a settlement on
+	// a context already done, so a pass that settled on the work context would
+	// record nothing, and the next pass would hold the marked part outcome_lost.
+	// The pass settles on the lease's end, so the stopped step is recorded and
+	// the next pass creates the part.
+	t.Run("step_stopped_at_the_work_deadline_is_recorded_definite", func(t *testing.T) {
+		e := newSplitEnv(t, nl, 2)
+		e.dispatch = 30 * time.Millisecond
+		e.settle = 200 * time.Millisecond
+		e.restart(e.ledger)
+		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: DialFail}) // index, part 1, then part 2 never sent
+		op := e.prepare()
+		e.drive()
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
+		// The lease is 430ms + 2 × 540ms, so the work deadline is 1310ms in and
+		// the lease ends at 1510ms: the mark's wait lands between them.
+		hook := &markHook{splitLedger: ctxSettleLedger{splitLedger: e.ledger.(splitLedger)}, step: 0,
+			after: func() { time.Sleep(1400 * time.Millisecond) }}
+		e.restart(hook)
+		e.clock.Advance(time.Hour)
+		e.drive()
+		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonReconcileFailed)
+		if n := e.part(op, 2); n != 0 {
+			t.Fatalf("part 2 made %d times by a stopped step", n)
+		}
+		e.clock.Advance(time.Hour)
+		e.drive()
+		got := e.wantState(op, ytwrite.StateApplied, "")
+		e.wantOneFamily(op, got.YTResultID)
+	})
+
 	// The operator's word on a held op: not applied rejects it and leaves
 	// the family; nothing is sent.
 	t.Run("operator_not_applied_rejects", func(t *testing.T) {
@@ -879,6 +975,8 @@ type splitEnv struct {
 	family string
 	// dispatch is the protocol's DispatchTimeout (30s when zero).
 	dispatch time.Duration
+	// settle is the protocol's SettleTimeout (10s when zero).
+	settle time.Duration
 }
 
 const (
@@ -923,7 +1021,7 @@ func (e *splitEnv) restart(l ytwrite.Ledger) {
 	if dispatch == 0 {
 		dispatch = 30 * time.Second
 	}
-	p, err := ytwrite.New(ytwrite.Config{Ledger: l, Remote: e.yt, Now: e.clock.Now, DispatchTimeout: dispatch, StaleAfter: time.Minute})
+	p, err := ytwrite.New(ytwrite.Config{Ledger: l, Remote: e.yt, Now: e.clock.Now, DispatchTimeout: dispatch, SettleTimeout: e.settle, StaleAfter: time.Minute})
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -1046,6 +1144,20 @@ func (e *splitEnv) wantOneFamily(op ytwrite.Op, index string) {
 
 // markHook runs before, after each MarkSplitStep of step (the plan's index):
 // a ledger whose mark is slow.
+// ctxSettleLedger refuses a settlement on a context already done, as the
+// store does (its queries run on the context they are given); the in-memory
+// ledger ignores contexts.
+type ctxSettleLedger struct {
+	splitLedger
+}
+
+func (l ctxSettleLedger) SettleSplit(ctx context.Context, now time.Time, id int64, f ytwrite.LinkFence, s ytwrite.LinkSettlement) (ytwrite.Op, error) {
+	if err := ctx.Err(); err != nil {
+		return ytwrite.Op{}, err
+	}
+	return l.splitLedger.SettleSplit(ctx, now, id, f, s)
+}
+
 type markHook struct {
 	splitLedger
 	step  int

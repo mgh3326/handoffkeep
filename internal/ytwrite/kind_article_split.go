@@ -344,6 +344,8 @@ func (k articleSplit) readFamily(ctx context.Context, ar ArticleRemote, op Op, d
 		return r, nil
 	}
 	r.index = index.ID
+	// revs[i] is part i+1's revision at its read.
+	revs := make([]time.Time, d.parts)
 	for _, child := range index.ChildIDs {
 		got, err := ar.ReadArticle(ctx, child)
 		var re *RemoteError
@@ -369,7 +371,31 @@ func (k articleSplit) readFamily(ctx context.Context, ar ArticleRemote, op Op, d
 			if r.parts[i] != "" {
 				return r, &HoldError{Reason: ReasonDuplicatePart, Detail: fmt.Sprintf("articles %s and %s both hold part %d of %d", r.parts[i], child, i+1, d.parts)}
 			}
-			r.parts[i] = child
+			r.parts[i], revs[i] = child, got.UpdatedAt
+		}
+	}
+	// The parts were read one by one, so a part edited after its read and
+	// restored before the next one's read would leave exact content in both
+	// reads that never existed together (review of PR #527 r4638925840,
+	// r4638926109). Each accepted part is read again: a change after its
+	// read moves its revision, even a restore to the same text, and such a
+	// family is not read whole. Each part is then unchanged from its own read
+	// to the end of the family read, so all of them held their read content
+	// at the latest of those reads.
+	for i, id := range r.parts {
+		if id == "" {
+			continue
+		}
+		got, err := ar.ReadArticle(ctx, id)
+		var re *RemoteError
+		if errors.As(err, &re) && re.Status == http.StatusNotFound {
+			return r, fmt.Errorf("%w: part %d (%s) is gone", errFamilyChanged, i+1, id)
+		}
+		if err != nil {
+			return r, fmt.Errorf("part %d (%s): %w", i+1, id, err)
+		}
+		if got.ID != id || got.ParentID != index.ID || got.Content != d.partContents[i] || got.Summary != d.partSummaries[i] || !got.UpdatedAt.Equal(revs[i]) {
+			return r, fmt.Errorf("%w: part %d (%s) changed while the family was read", errFamilyChanged, i+1, id)
 		}
 	}
 	// The children were read one by one: a part deleted after its read, or

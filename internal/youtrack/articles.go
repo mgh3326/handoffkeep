@@ -26,7 +26,11 @@ type Article struct {
 	// Created is the article's creation time in epoch milliseconds (0 when the
 	// field list did not ask for it). The family root lookup orders the roots
 	// by it (hk 4797).
-	Created int64  `json:"created,omitempty"`
+	Created int64 `json:"created,omitempty"`
+	// Updated is the article's last change in epoch milliseconds (0 when the
+	// field list did not ask for it). A split family read uses it to see that
+	// a part did not change between its reads (hk 5744).
+	Updated int64  `json:"updated,omitempty"`
 	Type    string `json:"$type"`
 }
 

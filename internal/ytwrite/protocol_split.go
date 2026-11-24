@@ -231,7 +231,11 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 	d, derr := renderSplit(op)
 	lease := p.splitRecoveryLease(d.parts)
 	start := p.now()
-	wctx, cancelWork := context.WithTimeout(context.WithoutCancel(ctx), lease-p.SettleTimeout)
+	// The lease's own context ends at its deadline; the work context ends a
+	// SettleTimeout before it, so the reserve is the settlements' (sctx below).
+	leaseCtx, cancelLease := context.WithTimeout(context.WithoutCancel(ctx), lease)
+	defer cancelLease()
+	wctx, cancelWork := context.WithTimeout(leaseCtx, lease-p.SettleTimeout)
 	defer cancelWork()
 	epoch, leased, err := sl.LeaseLinkRecovery(wctx, start, op.ID, op.Reconciles, start.Add(lease))
 	if err != nil || !leased {
@@ -242,6 +246,12 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 		return false, nil
 	}
 	ctx = wctx
+	// What the pass records runs on the lease context, not on the work context
+	// (wctx): the SettleTimeout the lease reserves for the ledger is theirs, so
+	// a step stopped as the work ends is still recorded definite (review of PR
+	// #527 r4638926113). It is not cancelled with the caller, as a settlement
+	// must not be.
+	sctx := leaseCtx
 	st := &splitSettler{p: p, sl: sl, f: LinkFence{Attempt: op.Attempts, Epoch: epoch}, index: op.YTResultID}
 	end := func(s settled) (bool, error) {
 		if s.err != nil {
@@ -251,10 +261,10 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 		return s.op.State == StateApplied, nil
 	}
 	pass := func(wait time.Duration, reason, detail string) (bool, error) {
-		return end(st.pass(ctx, op, wait, reason, detail))
+		return end(st.pass(sctx, op, wait, reason, detail))
 	}
 	apply := func(index string) (bool, error) {
-		s := st.apply(ctx, op, index)
+		s := st.apply(sctx, op, index)
 		if errors.Is(s.err, ErrState) {
 			return false, nil
 		}
@@ -312,7 +322,9 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 		defer cancelWork()
 		vctx, cancel := context.WithTimeout(bctx, p.splitVerifyBudget(d.parts))
 		defer cancel()
-		return k.readFamily(vctx, ar, op, d, index, search)
+		// The read's GETs are counted and capped at splitVerifyGETs, the count
+		// its time budget is sized from (review of PR #527 r4638925843).
+		return k.readFamily(vctx, &readBudget{ArticleRemote: ar, left: splitVerifyGETs(d.parts)}, op, d, index, search)
 	}
 	read, err := verify(op.YTResultID, IndexMaybeSent(history))
 	if err != nil {
@@ -386,9 +398,9 @@ func (p *Protocol) reconcileSplit(ctx context.Context, op Op, k articleSplit) (b
 		if errors.As(err, &re) && re.Status >= 400 && re.Status < 500 && re.Status != http.StatusRequestTimeout &&
 			re.Status != http.StatusTooManyRequests && re.Status != http.StatusUnauthorized {
 			if st.index != "" {
-				return end(st.reject(ctx, op, ReasonPartialWrite, st.rejectDetail(plan, n, err, d.parts)))
+				return end(st.reject(sctx, op, ReasonPartialWrite, st.rejectDetail(plan, n, err, d.parts)))
 			}
-			return end(st.reject(ctx, op, "http_"+strconv.Itoa(re.Status), re.Error()))
+			return end(st.reject(sctx, op, "http_"+strconv.Itoa(re.Status), re.Error()))
 		}
 		return failed(err)
 	}
@@ -457,11 +469,61 @@ func (p *Protocol) resolveSplit(ctx context.Context, op Op, r Resolution) (Resul
 	return p.result(s.op, false), nil
 }
 
+// The GETs one verification read of a family may issue (hk 5744, review of
+// PR #527 r4638925843): up to splitDiscoveryGETs to find an index whose id was
+// never recorded, the index twice, each part twice (its read and its revision
+// check) and up to splitUnrelatedMax other children of the index. An index
+// with more children than that is not read whole in one pass: the read stops
+// at its count (readBudget) and the pass is retried.
+const (
+	splitDiscoveryGETs = 4
+	splitUnrelatedMax  = 8
+)
+
+// splitVerifyGETs is the most GETs and searches one verification read of a
+// family of parts articles issues.
+func splitVerifyGETs(parts int) int {
+	return splitDiscoveryGETs + 2 + 2*parts + splitUnrelatedMax
+}
+
 // splitVerifyBudget bounds one read of a family of parts articles: a
-// DispatchTimeout for each GET it makes (the index, each part, the index
-// again), so a family whose every GET fits DispatchTimeout reads whole.
+// DispatchTimeout for each GET the read may issue (splitVerifyGETs), so a
+// family whose reads fit that count reads whole within its time budget.
 func (p *Protocol) splitVerifyBudget(parts int) time.Duration {
-	return time.Duration(parts+2) * p.DispatchTimeout
+	return time.Duration(splitVerifyGETs(parts)) * p.DispatchTimeout
+}
+
+// errReadBudget is a verification read that would issue more GETs than its
+// budget: nothing it read is acted on, and the pass is retried.
+var errReadBudget = errors.New("the family read used its GET budget")
+
+// readBudget is the remote a verification read goes through. It counts the
+// reads and searches the family read issues and refuses any past left.
+type readBudget struct {
+	ArticleRemote
+	left int
+}
+
+func (b *readBudget) spend() error {
+	if b.left <= 0 {
+		return errReadBudget
+	}
+	b.left--
+	return nil
+}
+
+func (b *readBudget) ReadArticle(ctx context.Context, id string) (RemoteArticle, error) {
+	if err := b.spend(); err != nil {
+		return RemoteArticle{}, err
+	}
+	return b.ArticleRemote.ReadArticle(ctx, id)
+}
+
+func (b *readBudget) FindArticles(ctx context.Context, s ArticleSearch) ([]RemoteArticle, error) {
+	if err := b.spend(); err != nil {
+		return nil, err
+	}
+	return b.ArticleRemote.FindArticles(ctx, s)
 }
 
 // splitRecoveryLease is linkRecoveryLease for a split of parts articles: the
