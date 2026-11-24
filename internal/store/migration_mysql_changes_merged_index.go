@@ -26,7 +26,7 @@ package store
 // if the server cannot do it online. Each step is restartable: mysqlIfNoIndex
 // runs it only while the index is absent.
 var mysqlChangesMergedIndexSteps = []string{
-	mysqlIfNoIndex("changes", "changes_repo_state_merged", `CREATE INDEX changes_repo_state_merged ON changes(repo(191), state, merged_at) ALGORITHM=INPLACE, LOCK=NONE`),
+	mysqlIfNoIndex("changes", "changes_repo_state_merged", `CREATE INDEX changes_repo_state_merged ON changes(repo(191), state, merged_at) ALGORITHM=INPLACE LOCK=NONE`),
 }
 
 func init() {

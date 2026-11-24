@@ -44,9 +44,9 @@ package store
 // build scan scales with the table; check its row count before deploy. Each
 // step is restartable: mysqlIfNoIndex runs it only while the index is absent.
 var mysqlReadIndexSteps = []string{
-	mysqlIfNoIndex("tasks", "tasks_state_id", `CREATE INDEX tasks_state_id ON tasks(state, id) ALGORITHM=INPLACE, LOCK=NONE`),
-	mysqlIfNoIndex("task_events", "task_events_task_kind_to_at", "CREATE INDEX task_events_task_kind_to_at ON task_events(task_id, kind, `to`(32), at, id) ALGORITHM=INPLACE, LOCK=NONE"),
-	mysqlIfNoIndex("yt_write_ops", "yt_write_ops_state_tenant_due", `CREATE INDEX yt_write_ops_state_tenant_due ON yt_write_ops(state, tenant, next_attempt_at, id) ALGORITHM=INPLACE, LOCK=NONE`),
+	mysqlIfNoIndex("tasks", "tasks_state_id", `CREATE INDEX tasks_state_id ON tasks(state, id) ALGORITHM=INPLACE LOCK=NONE`),
+	mysqlIfNoIndex("task_events", "task_events_task_kind_to_at", "CREATE INDEX task_events_task_kind_to_at ON task_events(task_id, kind, `to`(32), at, id) ALGORITHM=INPLACE LOCK=NONE"),
+	mysqlIfNoIndex("yt_write_ops", "yt_write_ops_state_tenant_due", `CREATE INDEX yt_write_ops_state_tenant_due ON yt_write_ops(state, tenant, next_attempt_at, id) ALGORITHM=INPLACE LOCK=NONE`),
 }
 
 func init() {
