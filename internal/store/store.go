@@ -4760,6 +4760,7 @@ func pgLikePattern(q string) string {
 	return "%" + pgLikeEscaper.Replace(q) + "%"
 }
 
+// defaultSearchTimeout bounds one Search call, across all of its statements.
 // Short Korean queries (2 characters) cannot use the trigram indexes and scan
 // every row of the searched tables (hk 2658), so an unbounded call can hold a
 // connection for many seconds after its client has gone.
