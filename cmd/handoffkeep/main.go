@@ -1590,6 +1590,7 @@ func serve(args []string, errout io.Writer) error {
 	}
 	workers = append(workers, singletonWorker{store: st, id: store.DriftWorkerLock, worker: &driftWorker{store: st}})
 	workers = append(workers, singletonWorker{store: st, id: store.LaneCheckWorkerLock, worker: &laneCheckWorker{store: st}})
+	workers = append(workers, singletonWorker{store: st, id: store.TableStatsWorkerLock, worker: &tableStatsWorker{store: st}})
 	uiHandler, e := uiFromEnv(st, am)
 	if e != nil {
 		return e

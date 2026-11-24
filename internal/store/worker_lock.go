@@ -25,7 +25,10 @@ const (
 	// LaneCheckWorkerLock is the per-lane wake check's lock (operator
 	// decision 418, hk 5201): it ticks every 15 minutes and queues one
 	// lane_check notice per lane whose findings need a look.
-	LaneCheckWorkerLock     WorkerLock = 8241873521
+	LaneCheckWorkerLock WorkerLock = 8241873521
+	// TableStatsWorkerLock is the daily MySQL table snapshot's lock (hk 6231):
+	// it ticks every 5 minutes and takes at most one snapshot a day.
+	TableStatsWorkerLock    WorkerLock = 8241873522
 	workerLockProbeInterval            = time.Second
 	workerLockProbeTimeout             = 2 * time.Second
 )
@@ -34,7 +37,7 @@ const (
 // Each one keeps a pooled connection checked out, so the pool serve opens must
 // be at least this many connections plus query headroom.
 var sessionWorkerLocks = []WorkerLock{
-	HubForwardWorkerLock, TaskThreadWorkerLock, DriftWorkerLock, LaneCheckWorkerLock,
+	HubForwardWorkerLock, TaskThreadWorkerLock, DriftWorkerLock, LaneCheckWorkerLock, TableStatsWorkerLock,
 }
 
 // workerPoolHeadroom is what is left for store queries and API requests after
