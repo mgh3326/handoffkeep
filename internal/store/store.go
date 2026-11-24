@@ -5027,7 +5027,7 @@ func (s *Store) searchTasks(ctx context.Context, q, lane string, limit int) ([]S
 	mainSQL := `SELECT scope,key,session,kind,title,snippet,refs,created_at FROM (SELECT DISTINCT ON (key) * FROM (` + strings.Join(parts, " UNION ALL ") + ") candidates ORDER BY key,match_rank,created_at DESC) r ORDER BY r.match_rank,r.created_at DESC,r.key DESC LIMIT $3"
 	mainArgs := []any{lane, q, limit + 1, like}
 	if s.dialect == mysqlDialect {
-		mainSQL, mainArgs = tasksSearchMySQL(q, lane, like, limit+1, comments)
+		mainSQL, mainArgs = tasksSearchMySQL(q, lane, limit+1, comments)
 	}
 	if capture, ok := ctx.Value(searchCaptureKey{}).(searchCapture); ok {
 		capture(mainSQL, mainArgs)
