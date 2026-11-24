@@ -542,8 +542,12 @@ func deployWorkflowProblems(raw []byte) []string {
 	if fmt.Sprint(wf.Concurrency["cancel-in-progress"]) != "false" {
 		add("concurrency.cancel-in-progress is %q, want false", wf.Concurrency["cancel-in-progress"])
 	}
-	if g := fmt.Sprint(wf.Concurrency["group"]); g != "deploy" {
-		add("concurrency.group is %q, want one group per repository (\"deploy\")", g)
+	// Only a run that deploys joins the one per-repository group; a run the
+	// target job skips gets its own, so it cannot displace a pending deploy
+	// (hk 6168). The condition must be target's if, exactly.
+	wantGroup := "${{ (" + unwrap(wf.Jobs["target"].If) + ") && 'deploy' || format('deploy-noop-{0}', github.run_id) }}"
+	if g := fmt.Sprint(wf.Concurrency["group"]); g != wantGroup {
+		add("concurrency.group is %q, want %q: one group per repository for deploying runs, a per-run group for runs target skips", g, wantGroup)
 	}
 	want := map[string]string{"contents": "read", "statuses": "write"}
 	for k, v := range want {
@@ -1270,7 +1274,9 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 	// deploy.yml mutants: each breaks one deploy-tier rule.
 	for _, m := range []struct{ name, old, new string }{
 		{"deploy-cancels", "cancel-in-progress: false", "cancel-in-progress: true"},
-		{"deploy-one-group-per-run", "group: deploy", "group: deploy-${{ github.run_id }}"},
+		{"deploy-one-group-per-run", "&& 'deploy' || format(", "&& format('deploy-{0}', github.run_id) || format("},
+		{"deploy-noop-joins-deploy-group", "format('deploy-noop-{0}', github.run_id) }}", "'deploy' }}"},
+		{"deploy-group-condition-drifts", "github.event.workflow_run.run_attempt > 1)) && 'deploy'", "github.event.workflow_run.run_attempt > 0)) && 'deploy'"},
 		{"deploy-widens-permissions", "\n  statuses: write\njobs:", "\n  statuses: write\n  packages: write\njobs:"},
 		{"deploy-drops-contents-read", "  contents: read\n  statuses: write", "  statuses: write"},
 		{"deploy-workflow-run-without-rerun-gate", " && github.event.workflow_run.run_attempt > 1) }}", ") }}"},

@@ -24,7 +24,8 @@ name: deploy
 #                 input picks the previous release for schema-compat; empty
 #                 means the newest v* tag before the target.
 #
-# Concurrency is one group per repository and never cancels: a race failure on
+# Concurrency is one group per repository for the runs that deploy (a run
+# target skips gets its own group, hk 6168) and never cancels: a race failure on
 # a head must not disappear because a newer head arrived, and a cancelled head
 # would read unknown. Only the newest pending run is kept, so a burst of main
 # pushes deploys the newest head and drops the rest from the queue (a dropped
@@ -59,7 +60,13 @@ on:
         default: ''
         type: string
 concurrency:
-  group: deploy
+  # Only a run that deploys joins the deploy group; any other run (a first
+  # attempt's or a failed or cancelled ci completion, which target skips) gets
+  # a group of its own. GitHub keeps one pending run per group, so a skipped
+  # workflow_run event in the deploy group replaced the pending push deploy of
+  # the same head and that head never got deploy-ok (a3a31d5e, hk 6168). The
+  # condition is target's if, character for character (internal/ciworkflow).
+  group: ${{ (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.run_attempt > 1)) && 'deploy' || format('deploy-noop-{0}', github.run_id) }}
   cancel-in-progress: false
 permissions:
   contents: read
