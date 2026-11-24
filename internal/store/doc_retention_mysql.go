@@ -95,6 +95,13 @@ const mysqlScreensEligible = `AND EXISTS (SELECT 1 FROM jobs j WHERE (j.job_id=d
 // (review first, then screens, then the merge link when it is on) in one
 // transaction with one audit row each.
 func (s *Store) mysqlRetentionBatch(ctx context.Context, cutoff time.Time, batch int, prunedBy string, res *DocRetentionResult) (int, error) {
+	// The merge leg's pick runs before the transaction: every statement in
+	// it before the recheck is a locking read, so the recheck is its first
+	// consistent read and its snapshot starts after the row locks are held.
+	merge, e := s.mergeLinkBatchIDs(ctx, cutoff, batch)
+	if e != nil {
+		return 0, e
+	}
 	tx, release, e := s.begin(ctx)
 	if e != nil {
 		return 0, e
@@ -146,27 +153,34 @@ func (s *Store) mysqlRetentionBatch(ctx context.Context, cutoff time.Time, batch
 		}
 	}
 	nScreens := len(ids) - nReview
-	if len(ids) < batch && s.mergeLinkApplyOn() {
-		// The merge leg (hk 6280): eligible ids first, then the rows
-		// themselves locked, with the binding checked again under the lock.
+	if len(ids) < batch && len(merge) > 0 {
+		// The merge leg (hk 6280): lock the picked rows, then classify them
+		// again under the lock and keep only the rows still eligible.
 		skip := make(map[int64]bool, len(ids))
 		for _, id := range ids {
 			skip[id.(int64)] = true
 		}
-		more, err := mergeLinkCandidateIDs(ctx, tx.Query, true, cutoff, batch-len(ids), skip)
-		if err != nil {
-			return 0, err
-		}
-		if len(more) > 0 {
-			args := make([]any, len(more))
-			for i, id := range more {
+		if merge = withoutIDs(merge, skip); len(merge) > 0 {
+			args := make([]any, len(merge))
+			for i, id := range merge {
 				args[i] = id
 			}
-			before := len(ids)
-			rows, err := tx.Query(ctx, "SELECT d.id,d.`key`,d.sha256,OCTET_LENGTH(d.body) FROM documents d WHERE d.id IN ("+placeholders(len(more))+") AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id=d.id) ORDER BY d.id FOR UPDATE", args...)
+			lock, err := tx.Query(ctx, "SELECT id FROM documents WHERE id IN ("+placeholders(len(merge))+") ORDER BY id FOR UPDATE", args...)
 			if err != nil {
 				return 0, err
 			}
+			for lock.Next() {
+			}
+			lock.Close()
+			if err = lock.Err(); err != nil {
+				return 0, err
+			}
+			q, qargs := mergeLinkRecheckSQL(true, cutoff, merge)
+			rows, err := tx.Query(ctx, q, qargs...)
+			if err != nil {
+				return 0, err
+			}
+			before := len(ids)
 			if err = scan(rows); err != nil {
 				return 0, err
 			}

@@ -227,6 +227,10 @@ func (s *Store) pruneRetentionBatch(ctx context.Context, cutoff time.Time, batch
 // back with the transaction, and res changes only after the commit, so a retry
 // re-selects the same candidates and counts them once.
 func (s *Store) pruneRetentionBatchOnce(ctx context.Context, cutoff time.Time, batch int, prunedBy string, res *DocRetentionResult) (int, error) {
+	merge, e := s.mergeLinkBatchIDs(ctx, cutoff, batch)
+	if e != nil {
+		return 0, e
+	}
 	tx, e := s.pool.Begin(ctx)
 	if e != nil {
 		return 0, e
@@ -274,26 +278,23 @@ func (s *Store) pruneRetentionBatchOnce(ctx context.Context, cutoff time.Time, b
 		}
 		nScreens = len(ids) - before
 	}
-	if len(ids) < batch && s.mergeLinkApplyOn() {
-		// The merge leg (hk 6280): eligible ids first, then the rows
-		// themselves locked, with the binding checked again under the lock.
+	if len(ids) < batch && len(merge) > 0 {
+		// The merge leg (hk 6280): lock the picked rows, then classify them
+		// again under the lock and keep only the rows still eligible.
 		skip := make(map[int64]bool, len(ids))
 		for _, id := range ids {
 			skip[id] = true
 		}
-		query := func(ctx context.Context, q string, args ...any) (rows, error) { return tx.Query(ctx, q, args...) }
-		more, e := mergeLinkCandidateIDs(ctx, query, false, cutoff, batch-len(ids), skip)
-		if e != nil {
-			return 0, e
-		}
-		if len(more) > 0 {
-			before := len(ids)
-			rows, e := tx.Query(ctx, `SELECT d.id, d.key, d.sha256, octet_length(d.body) FROM documents d
-WHERE d.id = ANY($1) AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id = d.id)
-ORDER BY d.id FOR UPDATE OF d`, more)
+		if merge = withoutIDs(merge, skip); len(merge) > 0 {
+			if _, e = tx.Exec(ctx, `SELECT id FROM documents WHERE id = ANY($1) ORDER BY id FOR UPDATE`, merge); e != nil {
+				return 0, e
+			}
+			q, args := mergeLinkRecheckSQL(false, cutoff, merge)
+			rows, e := tx.Query(ctx, q, args...)
 			if e != nil {
 				return 0, e
 			}
+			before := len(ids)
 			if e = scan(rows); e != nil {
 				return 0, e
 			}

@@ -694,6 +694,9 @@ type Store struct {
 	// retentionMergeLinkOverride overrides DocRetentionMergeLinkApply for
 	// this store (setRetentionMergeLinkApply): 0 keeps the const, 1 on, 2 off.
 	retentionMergeLinkOverride atomic.Int32
+	// retentionMergeSeam is a test-only hook run between the merge leg's
+	// pick and its batch transaction; nil in production.
+	retentionMergeSeam func()
 	// stalledHours is started_stalled_hours; zero means the default.
 	stalledHours atomic.Int64
 	// consoleURL is the console base URL answer notifications link to; nil

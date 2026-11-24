@@ -13,13 +13,15 @@ import (
 // The hk 5057 review/mwr-* leg links a document to its change through
 // reviews.reviewer_job_id, which no production review row carries, so it
 // matches nothing. The merge link reads the change from the mergewake job id
-// instead. A review job (mwr-<pr>-<sha7>-p<n>-<unix>, jobs.go) files
+// instead. A review job (mwr-<pr>-<sha7>-p<n>-<unix>, or the compact
+// mwr-<pr>-<sha7>p<n><suffix> current mergewake writes) files
 // review/mwr-<job>, briefs/mwr-<job>, screens/mwr-<job>/... and
 // reports/mwr-<job>, all with documents.job = <job>. A document under one of
 // the three families in docRetentionMergeLinkFamilies is linked only on
 // positive evidence:
 //
-//  1. documents.job is J and parses as mwr-<N digits>-<S 7 hex>-...;
+//  1. documents.job is J and parses as mwr-<N digits>-<S 7 hex> followed by
+//     '-' or 'p<digit>' (S is exactly the first 7 characters after N);
 //  2. the documents with job = J under the four mwr- families (the three
 //     below plus reports/mwr-, read only as evidence) carry exactly one
 //     distinct non-NULL task_id T (none: unlinked; two or more: ambiguous);
@@ -38,10 +40,22 @@ import (
 // A dry run always reports its per-family classification (merge_link); an
 // apply run deletes by it only when the switch is on (mergeLinkApplyOn).
 //
+// Apply (switch on) picks whole jobs, so one job's eligible documents are
+// never split across batches: before the batch transaction it lists the
+// eligible ids of the first jobs (mergeLinkPickSQL); inside it, after the hk
+// 5057 legs, it locks those rows by id and only then re-runs the whole
+// classification restricted to them (mergeLinkRecheckSQL), deleting only the
+// rows still eligible. The recheck is a new statement after the locks are held
+// (a fresh snapshot on PostgreSQL READ COMMITTED; on MySQL the transaction's
+// first consistent read, since every earlier statement in it is a locking
+// read), so a binding, an upsert or a second task committed before the lock is
+// seen. A write committed after the recheck is the same as one committed
+// after the delete.
+//
 // Cost: documents.job has no index, so the job -> task map is built once per
 // statement by a grouped scan of the four key ranges (documents.key is
 // uniquely indexed); no statement probes documents by job per row. A dry run
-// adds one statement and an apply batch two.
+// adds one statement and an apply batch three (pick, lock, recheck).
 const (
 	// DocRetentionBriefsMwrPrefix holds the brief copy of a review job.
 	DocRetentionBriefsMwrPrefix = "briefs/mwr-"
@@ -117,6 +131,19 @@ func newMergeLinkSQL(mysql bool, cutoff time.Time) *mergeLinkSQL {
 	return b
 }
 
+// inIDs is expr restricted to ids: = ANY($n) on PostgreSQL, IN (?,...) on
+// MySQL. ids must not be empty.
+func (b *mergeLinkSQL) inIDs(expr string, ids []int64) string {
+	if b.mysql {
+		for _, id := range ids {
+			b.args = append(b.args, id)
+		}
+		return expr + " IN (" + placeholders(len(ids)) + ")"
+	}
+	b.args = append(b.args, ids)
+	return fmt.Sprintf("%s = ANY($%d)", expr, len(b.args))
+}
+
 func (b *mergeLinkSQL) p(name string) string {
 	v, ok := b.vals[name]
 	if !ok {
@@ -143,14 +170,14 @@ func (b *mergeLinkSQL) inRange(alias string, i int) string {
 	return fmt.Sprintf("(%s >= %s AND %s < %s)", k, b.p(fmt.Sprintf("lo%d", i)), k, b.p(fmt.Sprintf("hi%d", i)))
 }
 
-// cte is the WITH clause ending in ml(id, family, class): one row per
+// cte is the WITH clause ending in ml(id, job, family, class): one row per
 // document under the three families with its merge-link class.
 func (b *mergeLinkSQL) cte() string {
-	jobRE, prNum, sha7 := `x.job ~ '^mwr-[0-9]{1,9}-[0-9a-f]{7}-'`, `split_part(jt.job, '-', 2)::bigint`, `split_part(jt.job, '-', 3) || '%'`
+	jobRE, prNum, sha7 := `x.job ~ '^mwr-[0-9]{1,9}-[0-9a-f]{7}(-|p[0-9])'`, `split_part(jt.job, '-', 2)::bigint`, `left(split_part(jt.job, '-', 3), 7) || '%'`
 	if b.mysql {
-		jobRE = `x.job REGEXP '^mwr-[0-9]{1,9}-[0-9a-f]{7}-'`
+		jobRE = `x.job REGEXP '^mwr-[0-9]{1,9}-[0-9a-f]{7}(-|p[0-9])'`
 		prNum = `CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(jt.job, '-', 2), '-', -1) AS UNSIGNED)`
-		sha7 = `CONCAT(SUBSTRING_INDEX(SUBSTRING_INDEX(jt.job, '-', 3), '-', -1), '%')`
+		sha7 = `CONCAT(LEFT(SUBSTRING_INDEX(SUBSTRING_INDEX(jt.job, '-', 3), '-', -1), 7), '%')`
 	}
 	var sb strings.Builder
 	sb.WriteString("WITH jt AS (\n  SELECT x.job, COUNT(DISTINCT x.task_id) AS ntask, MIN(x.task_id) AS task_id\n  FROM documents x\n  WHERE (")
@@ -161,7 +188,7 @@ func (b *mergeLinkSQL) cte() string {
 	sb.WriteString("  LEFT JOIN changes c ON c.id = ct.change_id AND c.pr_number = " + prNum + "\n")
 	sb.WriteString("    AND EXISTS (SELECT 1 FROM reviews r WHERE r.change_id = c.id AND r.reviewed_head LIKE " + sha7 + ")\n")
 	sb.WriteString("  GROUP BY jt.job, jt.ntask\n")
-	sb.WriteString("), ml AS (\n  SELECT d.id,\n")
+	sb.WriteString("), ml AS (\n  SELECT d.id, d.job,\n")
 	sb.WriteString("    CASE WHEN " + b.inRange("d", 0) + " THEN 'review/mwr-' WHEN " + b.inRange("d", 1) + " THEN 'briefs/mwr-' ELSE 'screens/mwr-' END AS family,\n")
 	sb.WriteString(`    CASE WHEN jc.job IS NULL OR jc.ntask = 0 THEN 'unlinked'
       WHEN jc.ntask > 1 THEN 'ambiguous'
@@ -197,13 +224,28 @@ func mergeLinkCountsSQL(mysql bool, cutoff time.Time) (string, []any) {
 	return q, b.args
 }
 
-// mergeLinkCandidatesSQL lists the ids of merge-link-eligible (so unbound)
-// documents, oldest id first, at most limit.
-func mergeLinkCandidatesSQL(mysql bool, cutoff time.Time, limit int) (string, []any) {
+// mergeLinkPickSQL lists every merge-link-eligible (so unbound) id of the
+// first jobs eligible jobs, jobs ordered by their oldest eligible id: whole
+// jobs, so apply never splits one across batches.
+func mergeLinkPickSQL(mysql bool, cutoff time.Time, jobs int) (string, []any) {
 	b := newMergeLinkSQL(mysql, cutoff)
-	b.vals["limit"] = limit
+	b.vals["jobs"] = jobs
 	q := b.cte()
-	q += "SELECT ml.id FROM ml WHERE ml.class = 'eligible' ORDER BY ml.id LIMIT " + b.p("limit")
+	q += "SELECT ml.id FROM ml JOIN (SELECT m2.job FROM ml m2 WHERE m2.class = 'eligible' GROUP BY m2.job ORDER BY MIN(m2.id) LIMIT " + b.p("jobs") + ") pick ON pick.job = ml.job WHERE ml.class = 'eligible' ORDER BY ml.id"
+	return q, b.args
+}
+
+// mergeLinkRecheckSQL re-runs the classification for ids (already locked by
+// the caller) and returns id, key, sha256 and body size of those still
+// eligible.
+func mergeLinkRecheckSQL(mysql bool, cutoff time.Time, ids []int64) (string, []any) {
+	b := newMergeLinkSQL(mysql, cutoff)
+	q := b.cte()
+	size, key := "octet_length(rd.body)", "rd.key"
+	if mysql {
+		size, key = "OCTET_LENGTH(rd.body)", "rd.`key`"
+	}
+	q += "SELECT rd.id, " + key + ", rd.sha256, " + size + " FROM ml JOIN documents rd ON rd.id = ml.id WHERE ml.class = 'eligible' AND " + b.inIDs("ml.id", ids) + " ORDER BY rd.id"
 	return q, b.args
 }
 
@@ -252,14 +294,11 @@ func (s *Store) mergeLinkCounts(ctx context.Context, cutoff time.Time) (map[stri
 	return out, rs.Err()
 }
 
-// mergeLinkCandidateIDs returns up to want merge-link-eligible ids not in
-// skip (rows an hk 5057 leg already chose for this batch), oldest first.
-func mergeLinkCandidateIDs(ctx context.Context, query func(context.Context, string, ...any) (rows, error), mysql bool, cutoff time.Time, want int, skip map[int64]bool) ([]int64, error) {
-	if want <= 0 {
-		return nil, nil
-	}
-	q, args := mergeLinkCandidatesSQL(mysql, cutoff, want+len(skip))
-	rs, err := query(ctx, q, args...)
+// mergeLinkPick returns the eligible ids of the first jobs eligible jobs,
+// read outside the batch transaction (see the apply note above).
+func (s *Store) mergeLinkPick(ctx context.Context, cutoff time.Time, jobs int) ([]int64, error) {
+	q, args := mergeLinkPickSQL(s.dialect == mysqlDialect, cutoff, jobs)
+	rs, err := s.db().Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -270,9 +309,40 @@ func mergeLinkCandidateIDs(ctx context.Context, query func(context.Context, stri
 		if err = rs.Scan(&id); err != nil {
 			return nil, err
 		}
-		if !skip[id] && len(ids) < want {
-			ids = append(ids, id)
-		}
+		ids = append(ids, id)
 	}
 	return ids, rs.Err()
+}
+
+// mergeLinkJobsPerBatch is how many jobs one apply batch picks for the merge
+// leg: about a batch of documents at three families per job.
+func mergeLinkJobsPerBatch(batch int) int {
+	return max(1, batch/len(docRetentionMergeLinkFamilies))
+}
+
+// mergeLinkBatchIDs is the batch's merge-leg pick: nil when the leg is off,
+// else the eligible ids of whole jobs, after the test seam.
+func (s *Store) mergeLinkBatchIDs(ctx context.Context, cutoff time.Time, batch int) ([]int64, error) {
+	if !s.mergeLinkApplyOn() {
+		return nil, nil
+	}
+	ids, err := s.mergeLinkPick(ctx, cutoff, mergeLinkJobsPerBatch(batch))
+	if err != nil {
+		return nil, err
+	}
+	if s.retentionMergeSeam != nil {
+		s.retentionMergeSeam()
+	}
+	return ids, nil
+}
+
+// withoutIDs is ids minus skip, in order.
+func withoutIDs(ids []int64, skip map[int64]bool) []int64 {
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if !skip[id] {
+			out = append(out, id)
+		}
+	}
+	return out
 }

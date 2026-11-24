@@ -362,3 +362,84 @@ func TestRetentionKeepsReportsMwr(t *testing.T) {
 		w.assertKeys([]string{review.Key}, []string{report.Key, other.Key})
 	})
 }
+
+// TestRetentionMergeLinkCompactJobIDs: the compact job id current mergewake
+// writes (mwr-<pr>-<sha7>p<n><suffix>, no hyphen after the sha7) links like
+// the hyphenated one, and the head prefix is exactly the first 7 characters.
+// An 8-hex segment or a non-p suffix does not parse.
+func TestRetentionMergeLinkCompactJobIDs(t *testing.T) {
+	forRetentionDialects(t, "doc_retention_ml_compact", func(t *testing.T, s *Store) {
+		w := newMLWorld(t, s)
+		s.setRetentionMergeLinkApply(true)
+		task := w.task("compact")
+		w.change("example/app", 751, "merged", w.daysAgo(40), "0d338a8"+strings.Repeat("e", 33), task)
+		w.change("example/app", 752, "open", nil, "1818a0e"+strings.Repeat("f", 33), task)
+		merged := w.jobDocs("mwr-751-0d338a8p1t3lmlwo", &task)
+		open := w.jobDocs("mwr-752-1818a0ep2t3lfq4f", &task)
+		eightHex := w.doc("review/mwr-751-0d338a8ep1t3lmlwo", "mwr-751-0d338a8ep1t3lmlwo", &task)
+		notP := w.doc("review/mwr-751-0d338a8x1t3lmlwo", "mwr-751-0d338a8x1t3lmlwo", &task)
+
+		dry := w.run(false)
+		one := DocRetentionFamily{EligibleRows: 1, Unmerged: 1, Total: 2}
+		w.assertFamilies(dry, map[string]DocRetentionFamily{
+			DocRetentionMwrPrefix:        {EligibleRows: 1, Unmerged: 1, Unlinked: 2, Total: 4},
+			DocRetentionBriefsMwrPrefix:  one,
+			DocRetentionScreensMwrPrefix: one,
+		})
+		if applied := w.run(true); applied.MergeLinkDeleted != 3 {
+			t.Fatalf("apply = %+v, want the merged compact job's 3 documents", applied)
+		}
+		kept := []string{merged[DocRetentionKeptPrefix].Key, eightHex.Key, notP.Key}
+		for _, d := range open {
+			kept = append(kept, d.Key)
+		}
+		w.assertKeys([]string{merged[DocRetentionMwrPrefix].Key, merged[DocRetentionBriefsMwrPrefix].Key, merged[DocRetentionScreensMwrPrefix].Key}, kept)
+	})
+}
+
+// TestRetentionMergeLinkRechecksUnderLock: between the merge leg's pick and
+// its batch transaction one picked document is bound to a YouTrack article,
+// another is upserted onto an open PR's job, and a third job gains a
+// document on a second task. The recheck under the row lock sees all three
+// and deletes only what is still eligible.
+func TestRetentionMergeLinkRechecksUnderLock(t *testing.T) {
+	forRetentionDialects(t, "doc_retention_ml_recheck", func(t *testing.T, s *Store) {
+		w := newMLWorld(t, s)
+		s.setRetentionMergeLinkApply(true)
+		task, other := w.task("recheck"), w.task("recheck-other")
+		w.change("example/app", 761, "merged", w.daysAgo(40), sha40('a'), task)
+		w.change("example/app", 762, "merged", w.daysAgo(40), sha40('b'), task)
+		w.change("example/app", 763, "merged", w.daysAgo(40), sha40('c'), task)
+		w.change("example/app", 764, "open", nil, sha40('d'), task)
+		j1, j2, j3 := "mwr-761-aaaaaaap1x", "mwr-762-bbbbbbbp1x", "mwr-763-cccccccp1x"
+		d1 := w.jobDocs(j1, &task)
+		d2 := w.jobDocs(j2, &task)
+		d3 := w.jobDocs(j3, &task)
+		fired := false
+		s.retentionMergeSeam = func() {
+			if fired {
+				return
+			}
+			fired = true
+			w.bind(d1[DocRetentionMwrPrefix])
+			moved := d2[DocRetentionBriefsMwrPrefix]
+			if _, _, err := s.PutDocument(t.Context(), Document{Key: moved.Key, Kind: moved.Kind, Body: "moved to the open PR's job", CreatedBy: "tester", Job: "mwr-764-dddddddp1x", TaskID: &task}); err != nil {
+				t.Fatal(err)
+			}
+			w.doc("briefs/"+j3+"-extra", j3, &other)
+		}
+		applied := w.run(true)
+		if !fired {
+			t.Fatal("merge seam never ran")
+		}
+		deleted := []string{d1[DocRetentionBriefsMwrPrefix].Key, d1[DocRetentionScreensMwrPrefix].Key, d2[DocRetentionMwrPrefix].Key, d2[DocRetentionScreensMwrPrefix].Key}
+		if applied.MergeLinkDeleted != int64(len(deleted)) {
+			t.Fatalf("apply = %+v, want %d merge-link deletions", applied, len(deleted))
+		}
+		kept := []string{d1[DocRetentionMwrPrefix].Key, d1[DocRetentionKeptPrefix].Key, d2[DocRetentionBriefsMwrPrefix].Key, d2[DocRetentionKeptPrefix].Key, "briefs/" + j3 + "-extra"}
+		for _, d := range d3 {
+			kept = append(kept, d.Key)
+		}
+		w.assertKeys(deleted, kept)
+	})
+}
