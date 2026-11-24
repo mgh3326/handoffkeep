@@ -14,7 +14,8 @@ stored and returned as JSON arrays (for example `"prs":["26"]` and
 `"jobs":["hk-v0"]`) in checkpoint and checkpoint-search output.
 
 Limits are 64 KiB per checkpoint field and the newest 500 checkpoints per
-session. Documents are 512 KiB, use SHA-256
+session. Documents are 1 MiB of body text
+(the store refuses a longer one with `document_too_large`), use SHA-256
 idempotency, and are not a substitute for source control.
 
 # Task snapshot export

@@ -29,7 +29,23 @@ import (
 )
 
 const MaxBytes = 64 << 10
-const DocumentMaxBytes = 512 << 10
+
+// DocumentMaxBytes bounds one document body in bytes of its decoded text. The
+// store refuses a longer body with ErrDocumentTooLarge; no other layer decides
+// the size.
+const DocumentMaxBytes = 1 << 20
+
+// DocumentWireMaxBytes is the decode cap of a PUT /v1/documents request body.
+// A decoded body byte can take up to six wire bytes (a control character is
+// written \u00XX), so a maximal body needs 6*DocumentMaxBytes on the wire; MaxBytes
+// covers the other envelope fields. A twofold cap would refuse a body under
+// DocumentMaxBytes that carries many control characters, so the decoder takes
+// the full bound and the store decides the length.
+const DocumentWireMaxBytes = 6*DocumentMaxBytes + MaxBytes
+
+// ErrDocumentTooLarge refuses a document body longer than DocumentMaxBytes. The
+// text after "document_too_large: " is store-authored (the lengths).
+var ErrDocumentTooLarge = errors.New("document_too_large")
 
 var ErrTrigramUnavailable = errors.New("PostgreSQL pg_trgm extension unavailable: grant CREATE on the database/schema or install pg_trgm as an administrator")
 
@@ -3982,6 +3998,9 @@ func (s *Store) PutDocument(ctx context.Context, x Document) (Document, bool, er
 	}
 	if (x.OriginClass != "" && !documentOriginClasses[x.OriginClass]) || (x.TaskID != nil && *x.TaskID < 1) {
 		return x, false, errors.New("invalid document")
+	}
+	if len(x.Body) > DocumentMaxBytes {
+		return x, false, fmt.Errorf("%w: body is %d bytes; the limit is %d", ErrDocumentTooLarge, len(x.Body), DocumentMaxBytes)
 	}
 	if e := guard.Reject(x.Key + "\n" + x.Body); e != nil {
 		return x, false, e
