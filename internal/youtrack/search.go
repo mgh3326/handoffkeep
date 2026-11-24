@@ -377,8 +377,11 @@ func (s *Service) rankedDocHits(ctx context.Context, candidates []Article, sessi
 }
 
 // loadDocContent reads the content of each hit's article, for the excerpt. A
-// failed read leaves that excerpt on the article's summary. It returns the first
-// failure in hit order, classified as the articles lane.
+// 404 (e.g. an article deleted between SearchArticleRefs and GetArticle) falls
+// back to the article's summary. A non-timeout failure (401, 403, 5xx,
+// transport) is returned first so settleLanes fails the search immediately;
+// otherwise the first timeout failure in hit order is returned, keeping
+// partial-page behaviour under scope all.
 func (s *Service) loadDocContent(yctx context.Context, docs []docHit) *laneFailure {
 	failures := make([]*laneFailure, len(docs))
 	sem := make(chan struct{}, searchDocContentWorkers)
@@ -386,18 +389,26 @@ func (s *Service) loadDocContent(yctx context.Context, docs []docHit) *laneFailu
 	for i := range docs {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func() {
+		go func(i int) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			a, err := s.client.GetArticle(yctx, docs[i].article.ID)
 			if err != nil {
+				if IsNotFound(err) {
+					return
+				}
 				failures[i] = failure(yctx, "articles", err)
 				return
 			}
 			docs[i].article.Content = a.Content
-		}()
+		}(i)
 	}
 	wg.Wait()
+	for _, f := range failures {
+		if f != nil && !f.timeout {
+			return f
+		}
+	}
 	for _, f := range failures {
 		if f != nil {
 			return f

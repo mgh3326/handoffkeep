@@ -768,6 +768,62 @@ func TestSearchAllContentTimeoutKeepsDocWithSummary(t *testing.T) {
 	}
 }
 
+// A docs hit whose article was deleted between SearchArticleRefs and GetArticle
+// (answering 404) is not a failure: it falls back to its summary and the page
+// is served successfully.
+func TestSearchDocsContentDeletedArticleFallsBackToSummary(t *testing.T) {
+	yt := &fakeSearchYT{
+		// /api/articles will return candidate 101-1, but /api/articles/101-1
+		// will answer 404 because pathStatus overrides it.
+		articles:   []Article{{ID: "101-1", Summary: "doc summary", Content: "old body"}},
+		pathStatus: map[string]int{"/api/articles/101-1": http.StatusNotFound},
+	}
+	fs, svc := newSearchTest(t, yt, 500*time.Millisecond)
+	seedDocArticles(t, fs, map[string]string{"design/one": "101-1"})
+
+	page, err := svc.SearchPage(context.Background(), "one", "docs", "", 20)
+	if err != nil {
+		t.Fatalf("search failed on 404 content read: %v", err)
+	}
+	if len(page.Results) != 1 {
+		t.Fatalf("results len = %d, want 1", len(page.Results))
+	}
+	if page.Results[0].Snippet != "doc summary" {
+		t.Fatalf("snippet = %q, want summary fallback", page.Results[0].Snippet)
+	}
+	if page.Partial || page.TimedOut {
+		t.Fatalf("page marked partial/timed_out unexpectedly: partial=%v, timed_out=%v", page.Partial, page.TimedOut)
+	}
+}
+
+// A non-timeout content failure (such as 401) fails the search even if a
+// timeout occurred on an earlier hit in hit order.
+func TestSearchContentTimeoutBeforeHTTPErrorFailsSearch(t *testing.T) {
+	yt := &fakeSearchYT{
+		articles: []Article{
+			{ID: "101-1", Summary: "doc one"},
+			{ID: "101-2", Summary: "doc two"},
+		},
+		pathDelay:  map[string]time.Duration{"/api/articles/101-1": 2 * time.Second},
+		pathStatus: map[string]int{"/api/articles/101-2": http.StatusUnauthorized},
+	}
+	fs, svc := newSearchTest(t, yt, 150*time.Millisecond)
+	seedDocArticles(t, fs, map[string]string{
+		"design/one": "101-1",
+		"design/two": "101-2",
+	})
+	logs := captureLog(t)
+
+	_, err := svc.SearchPage(context.Background(), "doc", "all", "", 20)
+	if !errors.Is(err, store.ErrSearchUnavailable) {
+		t.Fatalf("err = %v, want search_unavailable (401 must fail the search despite timeout ahead)", err)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "reason=http_401") {
+		t.Fatalf("log = %q, want http_401 failure logged", out)
+	}
+}
+
 func TestSearchHelpers(t *testing.T) {
 	if got := excerpt("  alpha\n\n beta  ", "fallback"); got != "alpha beta" {
 		t.Fatalf("excerpt = %q", got)
