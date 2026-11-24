@@ -528,13 +528,13 @@ func (c Client) ResolveDecisionChannel(ctx context.Context, id int64, in Decisio
 	// recording_lane rides only a server that lists it. An older server refuses
 	// the unknown field with invalid_context before any write, so the field is
 	// dropped there: the answer is still recorded, and the asker keeps its
-	// notice (hk 5527).
+	// notice (hk 5527). A failed capability lookup (a transient 5xx, a refusal)
+	// is treated the same as an unlisted feature: the field is dropped and the
+	// resolve still goes out, because omitting it only leaves the notice in
+	// place (hk 5748).
 	if in.RecordingLane != "" {
 		listed, err := c.supportsFeature(ctx, capabilities.FeatureDecisionRecordingLane)
-		if err != nil {
-			return out, err
-		}
-		if !listed {
+		if err != nil || !listed {
 			in.RecordingLane = ""
 		}
 	}
