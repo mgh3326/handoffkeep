@@ -2323,7 +2323,7 @@ func (s Server) document(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPut {
 		defer r.Body.Close()
 		var x store.Document
-		if e := decode(r, &x, store.DocumentMaxBytes); e != nil {
+		if e := decode(r, &x, store.DocumentWireMaxBytes); e != nil {
 			appErr(w, r, e)
 			return
 		}

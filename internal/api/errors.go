@@ -59,6 +59,7 @@ var errorRules = []errorRule{
 	{store.ErrYTCommentUnsendable, http.StatusBadRequest, "yt_comment_unsendable", true},
 	{store.ErrInvalidSync, http.StatusBadRequest, "invalid_context", false},
 	{store.ErrDocPruneInvalid, http.StatusBadRequest, "invalid_doc_prune", true},
+	{store.ErrDocumentTooLarge, http.StatusRequestEntityTooLarge, "document_too_large", true},
 	{store.ErrSpawnInvalid, http.StatusBadRequest, "invalid_context", true},
 	{store.ErrTaskWaitInvalid, http.StatusBadRequest, "invalid_context", true},
 	{store.ErrTaskWaitNotFound, http.StatusNotFound, "task_wait_not_found", false},
