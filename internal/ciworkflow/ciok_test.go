@@ -74,8 +74,8 @@ var ciOkCases = []ciOkCase{
 	{name: "failure-with-abandoned-fails", env: greenEnv("test", "TEST", "failure", "MAIN_STORE_1", "abandoned"), exit: 1, output: "test did not succeed: failure"},
 	// pr-store-db always reports: success on every event that runs the test suite.
 	{name: "pull-request-green-passes", env: greenEnv("all", "EVENT", "pull_request", "MAIN_STORE_1", "skipped", "MAIN_STORE_2", "skipped", "MAIN_PACKAGES", "skipped", "MAIN_MIGRATION", "skipped", "MAIN_REOPEN_MUTANTS", "skipped", "MAIN_QUOTA_MUTANTS", "skipped", "MAIN_RELEASE_DRYRUN", "skipped")},
-	{name: "mysql-store-failure-fails", env: greenEnv("test", "MYSQL_STORE", "failure"), exit: 1, output: "mysql-store did not succeed: failure"},
-	{name: "mysql-store-skipped-in-test-suite-fails", env: greenEnv("test", "MYSQL_STORE", "skipped"), exit: 1, output: "mysql-store did not succeed: skipped"},
+	{name: "mysql-store-failure-fails", env: greenEnv("test", "MYSQL_STORE", "failure"), exit: 1, output: "mysql-store-shard did not succeed: failure"},
+	{name: "mysql-store-skipped-in-test-suite-fails", env: greenEnv("test", "MYSQL_STORE", "skipped"), exit: 1, output: "mysql-store-shard did not succeed: skipped"},
 	{name: "pr-store-db-failure-fails", env: greenEnv("test", "PR_STORE_DB", "failure"), exit: 1, output: "pr-store-db did not succeed: failure"},
 	{name: "pr-store-db-skipped-in-test-suite-fails", env: greenEnv("test", "PR_STORE_DB", "skipped"), exit: 1, output: "pr-store-db did not succeed: skipped"},
 	{name: "pr-store-db-ran-outside-suite-fails", env: greenEnv("vitest", "VITEST", "success", "TEST", "skipped", "PR_STORE_DB", "success", "MAIN_STORE_1", "skipped", "MAIN_STORE_2", "skipped", "MAIN_PACKAGES", "skipped", "MAIN_MIGRATION", "skipped", "MAIN_REOPEN_MUTANTS", "skipped", "MAIN_QUOTA_MUTANTS", "skipped", "MAIN_RELEASE_DRYRUN", "skipped"), exit: 1, output: "pr-store-db ran outside its suite or tier: success"},

@@ -233,9 +233,16 @@ def validate(wf_text: str, ci_text: str) -> None:
         if "github.workflow_sha" in block:
             assert re.search(r"ref: \$\{\{ github\.workflow_sha \}\}", block), \
                 "a workflow-revision checkout must pin github.workflow_sha"
-            assert "path: workflow" in block and \
-                "sparse-checkout: .github/actions/setup-go-cached" in block, \
-                "a github.workflow_sha checkout must sparse-fetch only setup-go-cached into workflow/"
+            # Two sparse side trees of the workflow revision are allowed: the
+            # setup action into workflow/ (hk 3629), and the two shard selector
+            # scripts into shard-scripts/ (hk 6156). Each fetches nothing else.
+            action_tree = "path: workflow" in block and \
+                "sparse-checkout: .github/actions/setup-go-cached" in block
+            selector_tree = "path: shard-scripts" in block and \
+                "scripts/store-test-shard.sh" in block and \
+                "scripts/package-test-shard.sh" in block
+            assert action_tree or selector_tree, \
+                "a github.workflow_sha checkout must sparse-fetch only setup-go-cached into workflow/ or the shard selectors into shard-scripts/"
         else:
             assert re.search(r"ref: \$\{\{ inputs\.ref \}\}", block), \
                 "every checkout must pin inputs.ref or github.workflow_sha"

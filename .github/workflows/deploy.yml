@@ -9,10 +9,15 @@ name: deploy
 # then release.yml's ci-green keeps reading ci-ok (decision §4-3).
 #
 # Triggers:
-#   workflow_run  a ci.yml run completed. Only a successful main push run
-#                 deploys: a pull request is not a candidate, and a cancelled
-#                 or failed run has no verdict (its head reads unknown, never
-#                 green). The target is that run's head sha.
+#   push  a push to main (hk 6156). The deploy tier starts with the main-push
+#         run instead of after it, so the two tiers run side by side on one
+#         head and merge-to-production is one tier long, not two. The target is
+#         the pushed sha. deploy-ok says only that this tier is green: a head
+#         moves only when its ci-ok is green as well, because hk-follow's gate
+#         (I1) and release.yml's ci-green both require ci-ok and deploy-ok on
+#         the sha. The promote job waits, bounded, for the main tier to finish
+#         before it reads that gate, so a verdict still pending cannot hold a
+#         release that would pass.
 #   workflow_dispatch  the sha input, or the dispatched ref's head when empty.
 #                 This is how a human re-runs the tier on an old head, and how
 #                 the PR that introduced this file was measured. The base
@@ -22,13 +27,22 @@ name: deploy
 # Concurrency is one group per repository and never cancels: a race failure on
 # a head must not disappear because a newer head arrived, and a cancelled head
 # would read unknown. Only the newest pending run is kept, so a burst of main
-# pushes deploys the newest head and drops the rest from the queue.
+# pushes deploys the newest head and drops the rest from the queue (a dropped
+# head is cancelled while pending and reads unknown, never green). A push
+# starts a deploy even when its main tier later fails; that head then has a
+# deploy-ok success and no ci-ok success, and the gate refuses it.
 on:
-  workflow_run:
-    # ci.yml is by name, the only workflow it may follow. branches: [main] drops
-    # every pull request and any-ref call at the trigger, before a run exists;
-    # the target job repeats the main-push test so a manually edited trigger
+  push:
+    # branches: [main] drops every pull request and any other branch at the
+    # trigger; the target job repeats the main-push test so an edited trigger
     # cannot deploy a PR head.
+    branches: [main]
+  workflow_run:
+    # A rerun of a main push's ci run that turns green (hk 6156 review). The
+    # push above already handles the first attempt; a rerun fires no push, so
+    # without this a head whose promote was held on a failed or pending ci-ok
+    # would stay unpromoted. The target job accepts only a successful rerun
+    # (run_attempt > 1) of a main push, so a normal push deploys once.
     workflows: [ci]
     types: [completed]
     branches: [main]
@@ -52,11 +66,10 @@ permissions:
   statuses: write
 jobs:
   target:
-    # Decide whether this event deploys at all and name the commit. A ci.yml
-    # workflow_run deploys only when that run succeeded on a main push; a
-    # cancelled run, a pull request and any other conclusion are skipped here,
-    # so the tier never runs and no status is posted.
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success') }}
+    # Decide whether this event deploys at all and name the commit. A push
+    # deploys only when it lands on main; any other ref is skipped here, so the
+    # tier never runs and no status is posted.
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.run_attempt > 1) }}
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
@@ -70,6 +83,9 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
         run: |
           case "$EVENT" in
+            push)
+              SHA="$HEAD_SHA"
+              ;;
             workflow_run)
               SHA="$RUN_SHA"
               ;;
@@ -224,6 +240,11 @@ jobs:
     # re-checking the same gate itself. This job only moves a registry tag: it
     # holds no server credential and reaches no host.
     #
+    # Since hk 6156 the main tier (ci.yml's ci-ok) runs beside this tier, not
+    # before it. The first step waits, bounded, for ci.yml's push run on the
+    # target to complete; the gate then reads a final ci-ok. A timeout falls
+    # through to the gate, which holds the promote as it always did.
+    #
     # The gate is deploy/hk-follow/hk-follow's, shared with hk-follow (I1, I2):
     # ci-ok and deploy-ok success on the sha, the sha on main and newer than
     # the sha the tag names now, and an approval record
@@ -235,7 +256,7 @@ jobs:
     needs: [target, ci, schema-compat, status]
     if: ${{ needs.ci.result == 'success' && needs.schema-compat.result == 'success' && needs.status.result == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       actions: read
@@ -251,6 +272,23 @@ jobs:
           # differs from schema-compat's identical checkout ref.)
           ref: '${{ github.workflow_sha }}'
           persist-credentials: false
+      - name: Wait for the main tier on the target
+        # ci.yml's push run on the same sha reports ci-ok, which the gate needs
+        # as a final verdict. Poll for it to complete, bounded at 30 minutes; a
+        # missing run or a timeout leaves the decision to the gate, which holds
+        # the promote rather than guessing.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ needs.target.outputs.sha }}
+        run: |
+          for _ in $(seq 1 60); do
+            state=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$TARGET_SHA&event=push&branch=main&per_page=1" -q '.workflow_runs | first // {} | .status // "none"') || state=unknown
+            case "$state" in
+              completed | none) break ;;
+            esac
+            sleep 30
+          done
+          echo "main tier on $TARGET_SHA: $state"
       - uses: ./.github/actions/setup-go-cached
       - name: Build the hk CLI for the approval read
         run: go build -trimpath -o "$RUNNER_TEMP/handoffkeep" ./cmd/handoffkeep
