@@ -106,6 +106,19 @@ func mapDriverError(err error) error {
 	return mappedError{err: err, sentinel: sentinel}
 }
 
+// documentBodyWriteError maps PostgreSQL's refusal of a document body that has
+// too many distinct words for the documents full-text index (SQLSTATE 54000,
+// "string is too long for tsvector") to ErrDocumentTooLarge. The match takes
+// both the code and the message; any other error passes through unchanged. The
+// reason is store-authored: the driver's text is not echoed.
+func documentBodyWriteError(err error) error {
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) && pe.Code == "54000" && strings.Contains(pe.Message, "too long for tsvector") {
+		return fmt.Errorf("%w: body has too many distinct words to index", ErrDocumentTooLarge)
+	}
+	return err
+}
+
 // mappedError retains the driver's diagnostic text and unwrap chain.
 type mappedError struct{ err, sentinel error }
 

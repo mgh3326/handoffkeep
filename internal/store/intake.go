@@ -208,7 +208,7 @@ func insertTriageTaskTx(ctx context.Context, tx transaction, item triageItem, so
 	key := fmt.Sprintf("task-body/%d", x.ID)
 	sum := sha256.Sum256([]byte(item.Body))
 	if _, err := tx.Exec(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at) VALUES($1,'brief','','',$2,$3,$4,$5,$5)`, key, item.Body, hex.EncodeToString(sum[:]), by, now); err != nil {
-		return Task{}, err
+		return Task{}, documentBodyWriteError(err)
 	}
 	err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET body_doc=$2 WHERE id=$1 RETURNING `+taskColumns, x.ID, key), &x)
 	return x, err
