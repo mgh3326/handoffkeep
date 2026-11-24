@@ -79,15 +79,25 @@ jobs:
           rm -f tbls.tar.gz tbls
           tbls version
 
+      - name: Export the migrated schema for its triggers
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The triggers a table is written or guarded by live only in the
+          # database, so the config step reads them from tbls's JSON export of
+          # the migrated schema (hk 6258).
+          tbls out -c .tbls.yml -t json -o "${RUNNER_TEMP}/live.json"
+
       - name: Build the tbls config with the usage derived from the code
         shell: bash
         run: |
           set -euo pipefail
           # Each table's hand comment (.tbls.yml) plus the reads, writes and
-          # deletes the SQL in internal/ and cmd/ gives it (hk 6233). The
-          # generated config is not committed and the repository's .tbls.yml
-          # is unchanged.
-          go run ./scripts/schema-usage config "${RUNNER_TEMP}/tbls.yml"
+          # deletes the SQL in internal/ and cmd/ gives it (hk 6233), and the
+          # triggers of the migrated schema that write, delete or guard it
+          # (hk 6258). The generated config is not committed and the
+          # repository's .tbls.yml is unchanged.
+          go run ./scripts/schema-usage config "${RUNNER_TEMP}/tbls.yml" "${RUNNER_TEMP}/live.json"
 
       - name: Generate schema documentation with tbls
         shell: bash

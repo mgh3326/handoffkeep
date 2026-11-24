@@ -42,6 +42,9 @@ type TableUse struct {
 type Usage struct {
 	Tables map[string]bool // the tables of the migrated schema: every viewpoint's table
 	Use    map[string]*TableUse
+	// Triggers are the migrated schema's triggers (hk 6258). Nil until
+	// attachTriggersFile reads the live schema; Scan does not derive them.
+	Triggers []triggerUse
 }
 
 var (
