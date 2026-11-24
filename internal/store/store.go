@@ -691,6 +691,9 @@ type Store struct {
 	// autoCloseOff inverts the auto_close_parent setting so the zero Store has
 	// it on, the default.
 	autoCloseOff atomic.Bool
+	// retentionMergeLinkOverride overrides DocRetentionMergeLinkApply for
+	// this store (setRetentionMergeLinkApply): 0 keeps the const, 1 on, 2 off.
+	retentionMergeLinkOverride atomic.Int32
 	// stalledHours is started_stalled_hours; zero means the default.
 	stalledHours atomic.Int64
 	// consoleURL is the console base URL answer notifications link to; nil

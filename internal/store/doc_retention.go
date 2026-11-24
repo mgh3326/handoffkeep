@@ -5,12 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // Document retention (hk 5057, hk 4899 A3, operator answer dr-5057-2 A).
 //
 // Which documents qualify: review/mwr-* whose change merged and screens/*
-// whose job ended, both at least DocRetentionDays ago. 'Merged or ended' is
+// whose job ended, both at least DocRetentionDays ago, plus (when
+// DocRetentionMergeLinkApply is on) review/mwr-*, briefs/mwr-* and
+// screens/mwr-* whose review job's change merged that long ago through the
+// merge link (doc_retention_merge.go, hk 6280). reports/mwr-* is never
+// deleted. 'Merged or ended' is
 // read from the change row (state='merged' and merged_at) for review/mwr-*
 // through the reviewer's job id (documents.job = reviews.reviewer_job_id),
 // and from the job row (ended_at) for screens/* through documents.job or the
@@ -18,7 +24,7 @@ import (
 // change or ended job is kept: only positive evidence of merge/end plus age
 // deletes.
 //
-// Nothing else is deleted: only the two prefixes below, and never a document
+// Nothing else is deleted: only the prefixes above, and never a document
 // a yt_article_bindings row still points to. attachment_refs rows filed
 // against a deleted document (ref_kind='document') are removed with it, so no
 // dangling ref survives; the attachment blobs stay.
@@ -47,12 +53,20 @@ const (
 	DocRetentionMaxLimit = DocPruneMaxLimit
 )
 
-// DocRetentionResult counts one retention run over both prefixes. Matched is
-// every retention-eligible document including bound ones; SkippedBound of
-// them have a YouTrack article binding and are kept. KeptActive is every
-// document under either prefix that is not retention-eligible (too fresh or
-// unlinked) and is kept. Deleted is zero on a dry run, where Bytes is the
-// body size the run would delete, capped by limit.
+// DocRetentionResult counts one retention run. Matched, SkippedBound,
+// KeptActive, the dry-run Bytes, ReviewDeleted and ScreensDeleted describe the
+// hk 5057 legs (review/mwr-* by reviewer job, screens/* by job end) exactly as
+// before the merge link: Matched is every document those legs make eligible
+// including bound ones; SkippedBound of them have a YouTrack article binding
+// and are kept. KeptActive is every document under review/mwr- or screens/
+// that those legs do not make eligible. Deleted is zero on a dry run, where
+// Bytes is the body size those legs would delete, capped by limit.
+//
+// The merge link (hk 6280) is reported apart: MergeLinkApply says whether an
+// apply run deletes by it, MergeLink is its per-family classification (dry run
+// only, whether the switch is on or off), and MergeLinkDeleted counts the
+// documents an apply run deleted by it alone. On apply, Deleted and Bytes
+// include those documents.
 type DocRetentionResult struct {
 	OlderThan      time.Time `json:"older_than"`
 	Limit          int       `json:"limit"`
@@ -65,6 +79,10 @@ type DocRetentionResult struct {
 	Bytes          int64     `json:"bytes"`
 	ReviewDeleted  int64     `json:"review_deleted"`
 	ScreensDeleted int64     `json:"screens_deleted"`
+
+	MergeLinkApply   bool                          `json:"merge_link_apply"`
+	MergeLinkDeleted int64                         `json:"merge_link_deleted"`
+	MergeLink        map[string]DocRetentionFamily `json:"merge_link,omitempty"`
 }
 
 // docRetentionReviewEligible is the merge predicate for a documents row
@@ -99,7 +117,7 @@ ORDER BY d.id LIMIT $4`
 // client id or "retention") and is recorded on every deleted document; it is
 // required even for a dry run so the caller is always identified.
 func (s *Store) PruneRetention(ctx context.Context, cutoff time.Time, limit int, apply bool, prunedBy string) (DocRetentionResult, error) {
-	res := DocRetentionResult{OlderThan: cutoff.UTC(), Limit: limit, Applied: apply, PrunedBy: prunedBy}
+	res := DocRetentionResult{OlderThan: cutoff.UTC(), Limit: limit, Applied: apply, PrunedBy: prunedBy, MergeLinkApply: s.mergeLinkApplyOn()}
 	if cutoff.IsZero() || cutoff.After(time.Now()) {
 		return res, fmt.Errorf("%w: older_than must be a time in the past", ErrDocPruneInvalid)
 	}
@@ -108,6 +126,13 @@ func (s *Store) PruneRetention(ctx context.Context, cutoff time.Time, limit int,
 	}
 	if prunedBy == "" {
 		return res, fmt.Errorf("%w: pruned_by is required", ErrDocPruneInvalid)
+	}
+	if !apply {
+		ml, e := s.mergeLinkCounts(ctx, cutoff)
+		if e != nil {
+			return res, e
+		}
+		res.MergeLink = ml
 	}
 	if s.dialect == mysqlDialect {
 		return s.mysqlPruneRetention(ctx, res, cutoff)
@@ -184,7 +209,7 @@ ORDER BY d.id LIMIT $4`, eligible), lo, hi, cutoff.UTC(), want)
 }
 
 // pruneRetentionBatch deletes up to batch retention-eligible documents (review
-// first, then screens) in one transaction, records each deletion in
+// first, then screens, then the merge link when it is on) in one transaction, records each deletion in
 // doc_prune_log, and adds the counts to res. It returns how many documents it
 // deleted; zero means the candidates are exhausted.
 func (s *Store) pruneRetentionBatch(ctx context.Context, cutoff time.Time, batch int, prunedBy string, res *DocRetentionResult) (int, error) {
@@ -212,15 +237,8 @@ func (s *Store) pruneRetentionBatchOnce(ctx context.Context, cutoff time.Time, b
 	var ids []int64
 	var keys, shas []string
 	var bytes int64
-	var nReview, nScreens int
-	collect := func(lo, hi, eligible string, want int) error {
-		if want <= 0 {
-			return nil
-		}
-		rows, e := tx.Query(ctx, fmt.Sprintf(docRetentionCandidatesPG+` FOR UPDATE OF d`, eligible), lo, hi, cutoff, want)
-		if e != nil {
-			return e
-		}
+	var nReview, nScreens, nMerge int
+	scan := func(rows pgx.Rows) error {
 		defer rows.Close()
 		for rows.Next() {
 			var id, size int64
@@ -235,6 +253,16 @@ func (s *Store) pruneRetentionBatchOnce(ctx context.Context, cutoff time.Time, b
 		}
 		return rows.Err()
 	}
+	collect := func(lo, hi, eligible string, want int) error {
+		if want <= 0 {
+			return nil
+		}
+		rows, e := tx.Query(ctx, fmt.Sprintf(docRetentionCandidatesPG+` FOR UPDATE OF d`, eligible), lo, hi, cutoff, want)
+		if e != nil {
+			return e
+		}
+		return scan(rows)
+	}
 	if e = collect(mwrLo, mwrHi, docRetentionReviewEligible, batch); e != nil {
 		return 0, e
 	}
@@ -245,6 +273,32 @@ func (s *Store) pruneRetentionBatchOnce(ctx context.Context, cutoff time.Time, b
 			return 0, e
 		}
 		nScreens = len(ids) - before
+	}
+	if len(ids) < batch && s.mergeLinkApplyOn() {
+		// The merge leg (hk 6280): eligible ids first, then the rows
+		// themselves locked, with the binding checked again under the lock.
+		skip := make(map[int64]bool, len(ids))
+		for _, id := range ids {
+			skip[id] = true
+		}
+		query := func(ctx context.Context, q string, args ...any) (rows, error) { return tx.Query(ctx, q, args...) }
+		more, e := mergeLinkCandidateIDs(ctx, query, false, cutoff, batch-len(ids), skip)
+		if e != nil {
+			return 0, e
+		}
+		if len(more) > 0 {
+			before := len(ids)
+			rows, e := tx.Query(ctx, `SELECT d.id, d.key, d.sha256, octet_length(d.body) FROM documents d
+WHERE d.id = ANY($1) AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id = d.id)
+ORDER BY d.id FOR UPDATE OF d`, more)
+			if e != nil {
+				return 0, e
+			}
+			if e = scan(rows); e != nil {
+				return 0, e
+			}
+			nMerge = len(ids) - before
+		}
 	}
 	if len(ids) == 0 {
 		return 0, nil
@@ -274,5 +328,6 @@ SELECT k, h, $3, $4 FROM unnest($1::text[], $2::text[]) AS t(k, h)`, keys, shas,
 	res.Bytes += bytes
 	res.ReviewDeleted += int64(nReview)
 	res.ScreensDeleted += int64(nScreens)
+	res.MergeLinkDeleted += int64(nMerge)
 	return len(ids), nil
 }

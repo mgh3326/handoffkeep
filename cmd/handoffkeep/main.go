@@ -847,7 +847,7 @@ func docCmd(args []string, out io.Writer) error {
 	apply := fs.Bool("apply", false, "apply changes")
 	olderThan := fs.String("older-than", "", "prune: delete documents not updated for this many days, like 30d")
 	limit := fs.Int("limit", 1000, "prune: most documents one run deletes")
-	retention := fs.Bool("retention", false, "prune: delete retention-eligible review/mwr-* and screens/* (30d after merge/end)")
+	retention := fs.Bool("retention", false, "prune: delete retention-eligible review/mwr-* and screens/* (30d after merge/end); the dry run also classifies review/mwr-, briefs/mwr- and screens/mwr- by the review job's merged change (merge_link; reports/mwr- is kept), a leg apply uses only when switched on")
 	dryRun := fs.Bool("dry-run", false, "prune: dry run (default without --apply)")
 	afterID := fs.Int64("after-id", 0, "list: page by id, documents with id greater than this (0 starts)")
 	if e := fs.Parse(args[1:]); e != nil {
@@ -1335,7 +1335,9 @@ func (w chatRetentionWorker) Run(ctx context.Context) {
 }
 
 // docRetentionWorker is the daily retention job for review/mwr-* and
-// screens/* (hk 5057). Every run deletes at most docRetentionWorkerLimit
+// screens/* (hk 5057), plus review/mwr-*, briefs/mwr-* and screens/mwr-* by
+// the merge link when store.DocRetentionMergeLinkApply is on (hk 6280;
+// reports/mwr-* is kept). Every run deletes at most docRetentionWorkerLimit
 // retention-eligible documents in DocRetentionBatch-sized transactions; a dry
 // run is `handoffkeep doc prune --retention` without --apply.
 type docRetentionWorker struct {
@@ -1372,7 +1374,7 @@ func (w docRetentionWorker) Run(ctx context.Context) {
 			}
 			log.Printf("doc retention prune error: %v", err)
 		} else if res.Deleted > 0 {
-			log.Printf("doc retention pruned deleted=%d review=%d screens=%d bytes=%d matched=%d skipped_bound=%d kept_active=%d", res.Deleted, res.ReviewDeleted, res.ScreensDeleted, res.Bytes, res.Matched, res.SkippedBound, res.KeptActive)
+			log.Printf("doc retention pruned deleted=%d review=%d screens=%d merge_link=%d merge_link_apply=%t bytes=%d matched=%d skipped_bound=%d kept_active=%d", res.Deleted, res.ReviewDeleted, res.ScreensDeleted, res.MergeLinkDeleted, res.MergeLinkApply, res.Bytes, res.Matched, res.SkippedBound, res.KeptActive)
 		}
 		select {
 		case <-ctx.Done():
