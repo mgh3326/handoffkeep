@@ -1526,6 +1526,13 @@ func (s Server) taskDecisionResolve(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, err)
 		return
 	}
+	// RecordingLane is client-reported, not server-verified. A bearer client
+	// is per host, not per lane, so no server-known binding ties a client to
+	// the lane it names; a lane grant per client cannot verify it either.
+	// Accepted risk (hk 5747, operator answer C): the only effect is that the
+	// asker's notice may be suppressed for a session answer naming that lane.
+	// The answer is still recorded and no state changes; the worst case is a
+	// missed notice. Revisit if a lane binding ever exists.
 	in := store.ResolveDecisionInput{
 		TaskID: id, RequestID: input.RequestID, Kind: input.Kind, Option: input.Option, Text: input.Text,
 		Receipt: input.Receipt, Responder: input.Responder, EventKey: input.EventKey,
