@@ -41,12 +41,31 @@ func (f *FakeYouTrack) InjectChildArticle(projectID, summary, content string) st
 	return id
 }
 
+// InjectChildOf adds an article under parentID, as a person would add a child
+// to an hk index, and returns its id.
+func (f *FakeYouTrack) InjectChildOf(parentID, projectID, summary, content string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := f.addArticleLocked(projectID, summary, content)
+	f.articleLocked(id).ParentID = parentID
+	return id
+}
+
 func (f *FakeYouTrack) addArticleLocked(projectID, summary, content string) string {
 	f.nextID++
 	id := fmt.Sprintf("3-%d", f.nextID)
-	f.articles = append(f.articles, &ytwrite.RemoteArticle{ID: id, ProjectID: projectID, Summary: summary, Content: content,
-		CreatedAt: time.UnixMilli(int64(f.nextID)).UTC()})
+	a := &ytwrite.RemoteArticle{ID: id, ProjectID: projectID, Summary: summary, Content: content,
+		CreatedAt: time.UnixMilli(int64(f.nextID)).UTC()}
+	f.touchLocked(a)
+	f.articles = append(f.articles, a)
 	return id
+}
+
+// touchLocked gives a its next revision: every change to an article's text
+// moves UpdatedAt, a restore to the same text included.
+func (f *FakeYouTrack) touchLocked(a *ytwrite.RemoteArticle) {
+	f.articleRevs++
+	a.UpdatedAt = time.UnixMilli(f.articleRevs).UTC()
 }
 
 func (f *FakeYouTrack) articleLocked(id string) *ytwrite.RemoteArticle {
@@ -165,6 +184,7 @@ func (f *FakeYouTrack) UpdateArticle(ctx context.Context, articleID, summary, co
 	}
 	return f.createLocked(func() string {
 		a.Summary, a.Content = summary, content
+		f.touchLocked(a)
 		return a.ID
 	})
 }
@@ -208,6 +228,7 @@ func (f *FakeYouTrack) EditArticle(id, content string) {
 	defer f.mu.Unlock()
 	if a := f.articleLocked(id); a != nil {
 		a.Content = content
+		f.touchLocked(a)
 	}
 }
 
@@ -217,6 +238,7 @@ func (f *FakeYouTrack) SetArticleSummary(id, summary string) {
 	defer f.mu.Unlock()
 	if a := f.articleLocked(id); a != nil {
 		a.Summary = summary
+		f.touchLocked(a)
 	}
 }
 

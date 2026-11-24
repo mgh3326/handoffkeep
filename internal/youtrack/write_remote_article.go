@@ -120,7 +120,7 @@ func (r *WriteRemote) articleWrite(ctx context.Context, path string, body any) (
 // GET.
 func (r *WriteRemote) ReadArticle(ctx context.Context, articleID string) (ytwrite.RemoteArticle, error) {
 	q := url.Values{}
-	q.Set("fields", articleSearchFields+",content,childArticles(id)")
+	q.Set("fields", articleSearchFields+",updated,content,childArticles(id)")
 	data, readErr, err := r.send(ctx, http.MethodGet, "/api/articles/"+url.PathEscape(articleID), q, nil)
 	if err != nil {
 		return ytwrite.RemoteArticle{}, err
@@ -140,6 +140,9 @@ func (r *WriteRemote) ReadArticle(ctx context.Context, articleID string) (ytwrit
 	}
 	if a.Created > 0 {
 		out.CreatedAt = time.UnixMilli(a.Created).UTC()
+	}
+	if a.Updated > 0 {
+		out.UpdatedAt = time.UnixMilli(a.Updated).UTC()
 	}
 	if a.Project != nil {
 		out.ProjectID = a.Project.ID
