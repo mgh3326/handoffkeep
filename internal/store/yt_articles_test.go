@@ -1086,64 +1086,29 @@ func TestYTArticleConflictWithTenantlessAndTenantRows(t *testing.T) {
 	}
 }
 
-// hk 6184: the minute tick decides the waiting documents again, so it carries
-// a superseded one until a rollback to hk makes its body writable, and it
-// carries each waiting document once even when the listing and the waiting
-// set both name it.
+// hk 6184: the minute tick decides each waiting document again, and carries
+// it once even when the listing and the waiting set both name it.
 func TestYTArticleScanWaitingSetHoldsEachWaitOnce(t *testing.T) {
 	for _, o := range []ytArticleOutcome{ytArticleNoProject, ytArticleParentPending, ytArticleFamilyPending,
-		ytArticleFamilyUncertain, ytArticleCreateRejected, ytArticleSuperseded} {
+		ytArticleFamilyUncertain, ytArticleCreateRejected} {
 		if !ytArticleWaits(o) {
 			t.Fatalf("%s is not a waiting outcome", o)
 		}
 	}
-	if ytArticleWaits(ytArticleUnchanged) || ytArticleWaits(ytArticleCreatePrepared) {
+	if ytArticleWaits(ytArticleUnchanged) || ytArticleWaits(ytArticleCreatePrepared) || ytArticleWaits(ytArticleSuperseded) {
 		t.Fatal("an outcome that waits on no outside fact is a waiting outcome")
 	}
 	sc := ytArticleScan{counts: map[ytArticleOutcome]int{}}
-	sc.add(7, ytArticleSuperseded)
+	sc.add(7, ytArticleNoProject)
 	sc.add(9, ytArticleCreatePrepared)
-	sc.add(7, ytArticleSuperseded)
+	sc.add(7, ytArticleNoProject)
 	sc.add(9, ytArticleCreateRejected)
 	sc.add(7, ytArticleNoProject)
 	sc.add(3, ytArticleUnchanged)
 	if want := []int64{7, 9}; !slices.Equal(sc.waiting, want) {
 		t.Fatalf("waiting %v, want %v", sc.waiting, want)
 	}
-	if sc.noProject != 1 || sc.counts[ytArticleSuperseded] != 2 {
-		t.Fatalf("counts %v no_project %d", sc.counts, sc.noProject)
-	}
-}
-
-// hk 6184: a document decided superseded while YouTrack is canonical stays in
-// the waiting set, so the next tick after a rollback to hk writes its body
-// (the switch's own full walk also does; this pins the tick's share).
-func TestYTArticleSupersededStaysWaitingUntilRollback(t *testing.T) {
-	s := ytartSetup(t, "ytart_superseded", true)
-	ctx := t.Context()
-	id := ytartPut(t, s, "note/ytart/superseded", "hk body", nil)
-	ytartImported(t, s, id)
-	ytartPass(t, s)
-	ytartAuthority(t, s, YTAuthorityYouTrack)
-	ytartBind(t, s, id, "3-970", ytwrite.ContentSHA("what the import wrote"), true)
-	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
-		t.Fatal(err)
-	}
-	if ops := ytartOps(t, s, id); len(ops) != 0 {
-		t.Fatalf("ops while superseded %+v", ops)
-	}
-	if !slices.Contains(s.ytDocsWaiting, id) {
-		t.Fatalf("superseded document not waiting: %v", s.ytDocsWaiting)
-	}
-	ytartAuthority(t, s, YTAuthorityHK)
-	ytartRescanDue(s)
-	if _, err := s.RunYTFeedConsumers(ctx, 100); err != nil {
-		t.Fatal(err)
-	}
-	if ops := ytartOps(t, s, id); len(ops) != 1 || ops[0].Kind != ytwrite.KindArticleUpdate {
-		t.Fatalf("after the rollback: ops %+v", ops)
-	}
-	if slices.Contains(s.ytDocsWaiting, id) {
-		t.Fatalf("written document still waiting: %v", s.ytDocsWaiting)
+	if sc.noProject != 3 {
+		t.Fatalf("no_project %d", sc.noProject)
 	}
 }
