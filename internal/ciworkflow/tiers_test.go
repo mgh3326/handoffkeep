@@ -544,7 +544,7 @@ func deployWorkflowProblems(raw []byte) []string {
 	}
 	// Only a run that deploys joins the one per-repository group; a run the
 	// target job skips gets its own, so it cannot displace a pending deploy
-	// (hk 6168). The condition must be target's if, exactly.
+	// (hk 6169). The condition must be target's if, exactly.
 	wantGroup := "${{ (" + unwrap(wf.Jobs["target"].If) + ") && 'deploy' || format('deploy-noop-{0}', github.run_id) }}"
 	if g := fmt.Sprint(wf.Concurrency["group"]); g != wantGroup {
 		add("concurrency.group is %q, want %q: one group per repository for deploying runs, a per-run group for runs target skips", g, wantGroup)
