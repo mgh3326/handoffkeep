@@ -27,7 +27,11 @@ func (s *Store) ListMergedTaskEvents(ctx context.Context, limit int) ([]MergedTa
 	}
 	rows, err := s.db().Query(ctx, s.q(
 		`SELECT e.task_id, t.title, e.at, e.refs FROM tasks t JOIN LATERAL (SELECT task_id, at, refs, id FROM task_events WHERE task_id=t.id AND kind='transition' AND "to"='merged' ORDER BY at DESC, id DESC LIMIT 1) e ON true WHERE t.state='merged' ORDER BY e.at DESC, e.id DESC LIMIT $1`,
-		"SELECT task_id, title, at, refs FROM (SELECT e.task_id, t.title, e.at, e.refs, e.id, ROW_NUMBER() OVER (PARTITION BY e.task_id ORDER BY e.at DESC, e.id DESC) AS rn FROM tasks t JOIN task_events e ON e.task_id=t.id AND e.kind='transition' AND e.`to`='merged' WHERE t.state='merged') x WHERE rn=1 ORDER BY at DESC, id DESC LIMIT ?"), limit)
+		// Drive from the merged tasks (tasks_state_id), then take each task's
+		// latest merge with a LATERAL probe of task_events_task_kind_to_at.
+		// A plain join let the optimizer scan task_events and rank every row
+		// with a window (hk 6222).
+		"SELECT x.task_id, x.title, x.at, x.refs FROM (SELECT t.id AS task_id, t.title, e.at, e.refs, e.id FROM tasks t JOIN LATERAL (SELECT at, refs, id FROM task_events WHERE task_id=t.id AND kind='transition' AND `to`='merged' ORDER BY at DESC, id DESC LIMIT 1) e ON true WHERE t.state='merged') x ORDER BY x.at DESC, x.id DESC LIMIT ?"), limit)
 	if err != nil {
 		return nil, err
 	}
