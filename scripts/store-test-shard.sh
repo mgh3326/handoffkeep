@@ -7,6 +7,9 @@
 # no edit here. The optional third argument "mysql" lists the tests under the
 # mysql build tag, which is the list the MySQL suite runs. The partition is
 # proved by internal/ciworkflow's TestCIShardsPartitionTheSuites.
+# Run from the module root being tested. The script itself may come from any
+# checkout (CI takes it from the workflow revision, hk 6156): it reads the
+# module through the go tool in the current directory, so it never cd's.
 set -euo pipefail
 
 usage() {
@@ -26,9 +29,6 @@ case "$tags" in
   '' | mysql) ;;
   *) usage ;;
 esac
-
-here=$(cd "$(dirname "$0")/.." && pwd)
-cd "$here"
 
 tagargs=()
 if [ "$tags" = mysql ]; then

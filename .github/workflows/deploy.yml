@@ -37,6 +37,15 @@ on:
     # trigger; the target job repeats the main-push test so an edited trigger
     # cannot deploy a PR head.
     branches: [main]
+  workflow_run:
+    # A rerun of a main push's ci run that turns green (hk 6156 review). The
+    # push above already handles the first attempt; a rerun fires no push, so
+    # without this a head whose promote was held on a failed or pending ci-ok
+    # would stay unpromoted. The target job accepts only a successful rerun
+    # (run_attempt > 1) of a main push, so a normal push deploys once.
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       sha:
@@ -60,7 +69,7 @@ jobs:
     # Decide whether this event deploys at all and name the commit. A push
     # deploys only when it lands on main; any other ref is skipped here, so the
     # tier never runs and no status is posted.
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.run_attempt > 1) }}
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
@@ -69,12 +78,16 @@ jobs:
         id: resolve
         env:
           EVENT: ${{ github.event_name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
           INPUT_SHA: ${{ inputs.sha }}
           HEAD_SHA: ${{ github.sha }}
         run: |
           case "$EVENT" in
             push)
               SHA="$HEAD_SHA"
+              ;;
+            workflow_run)
+              SHA="$RUN_SHA"
               ;;
             workflow_dispatch)
               SHA="${INPUT_SHA:-$HEAD_SHA}"

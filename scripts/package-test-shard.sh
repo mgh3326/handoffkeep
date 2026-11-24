@@ -5,6 +5,9 @@
 # store tests, one import path per line. A shard can be empty when there are
 # fewer packages than shards. internal/ciworkflow's TestCIShardsPartitionTheSuites
 # proves the shards cover the list exactly once.
+# Run from the module root being tested. The script itself may come from any
+# checkout (CI takes it from the workflow revision, hk 6156): it reads the
+# module through the go tool in the current directory, so it never cd's.
 set -euo pipefail
 
 usage() {
@@ -19,9 +22,6 @@ case "$count" in '' | *[!0-9]*) usage ;; esac
 if [ "$count" -lt 1 ] || [ "$index" -lt 1 ] || [ "$index" -gt "$count" ]; then
   usage
 fi
-
-here=$(cd "$(dirname "$0")/.." && pwd)
-cd "$here"
 
 pkgs=$(go list ./... | awk '!/\/internal\/store$/' | LC_ALL=C sort)
 

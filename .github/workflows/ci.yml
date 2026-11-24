@@ -271,11 +271,22 @@ jobs:
       # dialect-neutral case runs on PostgreSQL and on MySQL, and each
       # MySQL-only case runs on MySQL. Skips are listed in the log (hk 5088).
       # Each leg runs its shard of the mysql-tagged test list (hk 6156).
+      # The shard selectors come from the workflow revision, not the ref under
+      # test (hk 6156 review): a ci-any-ref dispatch can name a commit that
+      # predates these scripts or their interface, and the selector must match
+      # the leg count below. Sparse keeps the side tree to the two scripts.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: shard-scripts
+          sparse-checkout: |
+            scripts/store-test-shard.sh
+            scripts/package-test-shard.sh
       - name: Test store shard on MySQL and PostgreSQL
         env:
           SHARD: ${{ matrix.shard }}
         run: |
-          RUN_REGEX=$(bash scripts/store-test-shard.sh "$SHARD" "$SHARDS" mysql)
+          RUN_REGEX=$(bash shard-scripts/scripts/store-test-shard.sh "$SHARD" "$SHARDS" mysql)
           go test -p 2 -tags=mysql -v -timeout 30m -run "$RUN_REGEX" ./internal/store 2>&1 | tee "store-mysql-suite-$SHARD.log"; exit "${PIPESTATUS[0]}"
 
   pr-store-db:
@@ -746,16 +757,27 @@ jobs:
         working-directory: web/console
       - run: git diff --exit-code -- internal/ui/static/console
       - run: test -z "$(git status --porcelain --untracked-files=all -- internal/ui/static/console)"
+      # The shard selectors come from the workflow revision, not the ref under
+      # test (hk 6156 review): a ci-any-ref dispatch can name a commit that
+      # predates these scripts or their interface, and the selector must match
+      # the leg count below. Sparse keeps the side tree to the two scripts.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: shard-scripts
+          sparse-checkout: |
+            scripts/store-test-shard.sh
+            scripts/package-test-shard.sh
       - name: go test -race (this shard)
         env:
           SHARD: ${{ matrix.shard }}
         run: |
-          pkgs=$(bash scripts/package-test-shard.sh "$SHARD" "$SHARDS")
+          pkgs=$(bash shard-scripts/scripts/package-test-shard.sh "$SHARD" "$SHARDS")
           if [ -n "$pkgs" ]; then
             mapfile -t pkglist <<< "$pkgs"
             go test -v -race -timeout 30m "${pkglist[@]}"
           fi
-          RUN_REGEX=$(bash scripts/store-test-shard.sh "$SHARD" "$SHARDS")
+          RUN_REGEX=$(bash shard-scripts/scripts/store-test-shard.sh "$SHARD" "$SHARDS")
           go test -v -race -timeout 30m ./internal/store -run "$RUN_REGEX"
 
   deploy-macos:

@@ -507,16 +507,34 @@ func deployWorkflowProblems(raw []byte) []string {
 	if err := yaml.Unmarshal(raw, &wf); err != nil {
 		return []string{fmt.Sprintf("deploy.yml: %v", err)}
 	}
-	// hk 6156: the deploy tier starts with the main-push run. A workflow_run
-	// trigger would start it after the main tier, the old two-step shape.
-	if _, ok := wf.On["workflow_run"]; ok {
-		add("must not trigger on workflow_run: the deploy tier starts with the main-push run (hk 6156)")
-	}
+	// hk 6156: the deploy tier starts with the main-push run. Its workflow_run
+	// trigger exists only for a successful rerun of a main push's ci run (the
+	// target job checks run_attempt), so a rerun that turns main green still
+	// deploys. Without that rerun path a held promote never recovers.
 	push, ok := wf.On["push"].(map[string]any)
 	if !ok {
 		add("must trigger on push (the main-push run, hk 6156)")
 	} else if got := fmt.Sprint(push["branches"]); got != "[main]" {
 		add("push.branches is %q, want [main]", got)
+	}
+	run, ok := wf.On["workflow_run"].(map[string]any)
+	if !ok {
+		add("must trigger on workflow_run of ci, so a rerun that turns main green deploys (hk 6156 review)")
+	} else {
+		if got := fmt.Sprint(run["workflows"]); got != "[ci]" {
+			add("workflow_run.workflows is %q, want [ci]", got)
+		}
+		if got := fmt.Sprint(run["types"]); got != "[completed]" {
+			add("workflow_run.types is %q, want [completed]", got)
+		}
+		if got := fmt.Sprint(run["branches"]); got != "[main]" {
+			add("workflow_run.branches is %q, want [main]", got)
+		}
+	}
+	// The rerun path must stay gated: a workflow_run that also deployed a
+	// normal first attempt would deploy every main push twice (hk 6156 review).
+	if target := unwrap(wf.Jobs["target"].If); !strings.Contains(target, "github.event.workflow_run.run_attempt > 1") {
+		add("the target job must accept a workflow_run only for a rerun (run_attempt > 1), got %q", target)
 	}
 	if _, ok := wf.On["workflow_dispatch"]; !ok {
 		add("must trigger on workflow_dispatch(sha)")
@@ -1255,8 +1273,8 @@ func TestCITierMutantsTurnRed(t *testing.T) {
 		{"deploy-one-group-per-run", "group: deploy", "group: deploy-${{ github.run_id }}"},
 		{"deploy-widens-permissions", "\n  statuses: write\njobs:", "\n  statuses: write\n  packages: write\njobs:"},
 		{"deploy-drops-contents-read", "  contents: read\n  statuses: write", "  statuses: write"},
-		{"deploy-keeps-workflow-run", "on:\n  push:\n", "on:\n  workflow_run:\n    workflows: [ci]\n    types: [completed]\n    branches: [main]\n  push:\n"},
-		{"deploy-follows-any-branch", "    branches: [main]\n", "    branches: [main, develop]\n"},
+		{"deploy-workflow-run-without-rerun-gate", " && github.event.workflow_run.run_attempt > 1) }}", ") }}"},
+		{"deploy-follows-any-branch", "    types: [completed]\n    branches: [main]\n", "    types: [completed]\n    branches: [main, develop]\n"},
 		{"deploy-unpinned-context", "context=deploy-ok", "context=ci-ok"},
 		{"deploy-status-on-dispatch-sha", "      TARGET_SHA: ${{ needs.target.outputs.sha }}\n      RESULT:", "      TARGET_SHA: ${{ github.sha }}\n      RESULT:"},
 		{"deploy-status-without-always", "if: ${{ always() && needs.target.result == 'success' }}", "if: ${{ needs.target.result == 'success' }}"},

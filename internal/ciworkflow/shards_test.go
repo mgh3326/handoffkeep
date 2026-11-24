@@ -306,3 +306,81 @@ func TestDeployPromoteWaitsForMainTier(t *testing.T) {
 		t.Fatal("promote must wait for the main tier's ci.yml run on the target before the gate reads ci-ok (hk 6156)")
 	}
 }
+
+// TestShardSelectorsComeFromWorkflowRevision pins the hk 6156 review fix: the
+// selector scripts are checked out from github.workflow_sha, not taken from
+// the ref under test. A ci-any-ref dispatch can name an older commit whose
+// scripts predate the leg count, and the legs would then fail or run the old
+// halves. The scripts must also never cd into their own checkout, since they
+// read the module from the working directory.
+func TestShardSelectorsComeFromWorkflowRevision(t *testing.T) {
+	var wf tierWorkflow
+	if err := yaml.Unmarshal(readWorkflow(t, "ci.yml"), &wf); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"mysql-store-shard", "deploy-linux"} {
+		j, ok := wf.Jobs[name]
+		if !ok {
+			t.Fatalf("ci.yml must have a %s job", name)
+		}
+		var pinned bool
+		for _, s := range j.Steps {
+			if !hasAction(s.Uses, "actions/checkout") || fmt.Sprint(s.With["path"]) != "shard-scripts" {
+				continue
+			}
+			sparse := fmt.Sprint(s.With["sparse-checkout"])
+			pinned = fmt.Sprint(s.With["ref"]) == "${{ github.workflow_sha }}" &&
+				strings.Contains(sparse, "scripts/store-test-shard.sh") &&
+				strings.Contains(sparse, "scripts/package-test-shard.sh")
+		}
+		if !pinned {
+			t.Errorf("%s must check out the selector scripts from github.workflow_sha into shard-scripts (hk 6156 review)", name)
+		}
+		run := stepRuns(j)
+		if strings.Contains(run, "bash scripts/store-test-shard.sh") || strings.Contains(run, "bash scripts/package-test-shard.sh") {
+			t.Errorf("%s runs a selector from the ref under test; it must run shard-scripts/scripts/ (hk 6156 review)", name)
+		}
+		if !strings.Contains(run, "shard-scripts/scripts/store-test-shard.sh") {
+			t.Errorf("%s must select its store tests with shard-scripts/scripts/store-test-shard.sh", name)
+		}
+	}
+	for _, f := range []string{"store-test-shard.sh", "package-test-shard.sh"} {
+		body, err := os.ReadFile(filepath.Join("..", "..", "scripts", f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := string(body)
+		if strings.Contains(src, "cd \"$here\"") {
+			t.Errorf("scripts/%s must not cd into its own checkout: it runs from the module root", f)
+		}
+	}
+}
+
+// TestDeployReRunOfMainCIDeploys pins the hk 6156 review fix: a rerun of a
+// main push's ci run that turns green fires workflow_run, and the target job
+// accepts exactly that case (a successful rerun of a push to main), so the
+// promote held on a failed or pending ci-ok recovers without a manual dispatch.
+func TestDeployReRunOfMainCIDeploys(t *testing.T) {
+	var wf tierWorkflow
+	if err := yaml.Unmarshal(readWorkflow(t, "deploy.yml"), &wf); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := wf.On["workflow_run"]; !ok {
+		t.Fatal("deploy.yml must trigger on workflow_run of ci, so a rerun that turns main green deploys")
+	}
+	target := unwrap(wf.Jobs["target"].If)
+	for _, want := range []string{
+		"github.event_name == 'workflow_run'",
+		"github.event.workflow_run.event == 'push'",
+		"github.event.workflow_run.head_branch == 'main'",
+		"github.event.workflow_run.conclusion == 'success'",
+		"github.event.workflow_run.run_attempt > 1",
+	} {
+		if !strings.Contains(target, want) {
+			t.Errorf("target job must accept a workflow_run only with %q, got %q", want, target)
+		}
+	}
+	if !strings.Contains(stepRuns(wf.Jobs["target"]), "SHA=\"$RUN_SHA\"") {
+		t.Error("target must resolve a workflow_run to its run head sha")
+	}
+}
