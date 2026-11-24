@@ -24,6 +24,18 @@ type tableStatsRead struct {
 // consistent reads take no row locks. The only identifiers used are the table
 // names information_schema lists, quoted by quoteMySQLIdent.
 func (s *Store) readTableStatsMySQL(ctx context.Context) (tableStatsRead, error) {
+	var out tableStatsRead
+	err := s.retryTx(ctx, func() error {
+		var e error
+		out, e = s.readTableStatsMySQLOnce(ctx)
+		return e
+	})
+	return out, err
+}
+
+// readTableStatsMySQLOnce is one attempt of readTableStatsMySQL, run under
+// retryTx so a retryable failure starts over on a fresh connection.
+func (s *Store) readTableStatsMySQLOnce(ctx context.Context) (tableStatsRead, error) {
 	started := time.Now()
 	conn, err := s.mysqlPool.Conn(ctx)
 	if err != nil {
