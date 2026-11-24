@@ -88,6 +88,16 @@ Toolchains are pinned: Go from `go.mod`, Node from `web/console/.nvmrc`.
 Workflow actions are pinned to full commit SHAs, one version per action
 across all workflows; `internal/ciworkflow` enforces both.
 
+**Schema document** (`.tbls.yml`, `.github/workflows/schema-doc.yml`, hk 6233).
+A table is documented in `.tbls.yml` `comments:`: one `tableComment` (why it
+exists, then its retention rule, or "Retention: none") and one role label from
+the set `scripts/schema-usage/roles.go` defines. Each table lists the production
+code that reads, writes and deletes it, which `scripts/schema-usage` derives from
+the SQL in `internal/` and `cmd/`; do not write that list by hand. A new table
+needs its `comments:` entry and a viewpoint, or the schema-doc run fails
+(`tbls lint` and the generator both check it). That run is on push to main and
+on dispatch, never on a pull request.
+
 ## Go
 
 **API errors** (`internal/api/errors.go`). Error bodies are
