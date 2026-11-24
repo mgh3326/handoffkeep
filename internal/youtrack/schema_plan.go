@@ -302,8 +302,9 @@ func (r *SchemaRunner) loadVocabulary(ctx context.Context, project string) (voca
 
 // planBucket plans the fields of the bucket project (BucketShortName), the one
 // a task with no hk project is written to, with the vocabulary of those tasks
-// (their lanes, under the "" key). The bucket is only read: it is never created,
-// renamed or given a youtrack_projects row. None or several projects with that
+// (their lanes, under the "" key). apply writes the planned fields and values
+// to the bucket, but the bucket itself is never created, renamed or given a
+// youtrack_projects row. None or several projects with that
 // short name is a report, not an error, so the other projects still plan.
 func (r *SchemaRunner) planBucket(ctx context.Context, vocab Vocabulary, pl *planState) ([]Change, error) {
 	id, err := ResolveBucketProject(ctx, r.Client)

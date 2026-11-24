@@ -86,8 +86,8 @@ handoffkeep youtrack schema apply [--project P] [--json]
 `--project HK`(버킷의 short name, 대소문자 무관)를 주면 hk 프로젝트 대신 버킷만 계획한다. hk 프로젝트 이름이 정확히 `HK`이면 그 프로젝트가 먼저 잡힌다.
 프로젝트 없는 task는 버킷 `HK`에 쓰이므로(`ytIssueProject`), `plan`은 버킷도 계획한다.
 버킷은 아래 표와 같은 필드를 맞추되, 레인은 프로젝트 없는 task들의 레인만 쓴다. 계획의
-프로젝트 칸은 `bucket HK`다. 버킷은 읽기만 하며 만들거나 이름을 바꾸지 않고
-`youtrack_projects`에 넣지 않는다. 같은 short name의 프로젝트가 없거나 둘이면 `report`의
+프로젝트 칸은 `bucket HK`다. `apply`는 계획대로 버킷의 필드와 값을 쓰지만, 버킷 자체는
+만들거나 이름을 바꾸지 않고 `youtrack_projects`에 넣지 않는다. 같은 short name의 프로젝트가 없거나 둘이면 `report`의
 `bucket` 줄로 알리고, 다른 프로젝트의 계획은 그대로 낸다.
 
 `unarchive` 줄은 선언된 값이 YouTrack에 보관(archived)된 채 있는 경우다. 보관된
@@ -201,7 +201,7 @@ YouTrack 이슈를 읽는다. 서버가 봇 토큰으로 읽고 브라우저는 
 ## 테이블
 
 쓰기 프로토콜은 `yt_*` 테이블과 `task_origins`(미러 링크), `youtrack_projects`,
-`youtrack_comment_links`, `youtrack_decision_mirrors`, `youtrack_doc_articles`를
-쓴다. 옛 동기화 세대가 쓰던 `youtrack_outbox`, `youtrack_field_cache`,
-`youtrack_cursor`, `youtrack_attempts`, `youtrack_processed_activities`는 더 이상
+`youtrack_comment_links`, `youtrack_doc_articles`를 쓴다. 옛 동기화 세대가 쓰던
+`youtrack_outbox`, `youtrack_field_cache`, `youtrack_cursor`, `youtrack_attempts`,
+`youtrack_processed_activities`, `youtrack_decision_mirrors`는 더 이상
 읽거나 쓰지 않는다. 테이블은 빈 채로 남겨 두고, 나중의 마이그레이션이 지운다.
