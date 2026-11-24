@@ -34,7 +34,9 @@ tagargs=()
 if [ "$tags" = mysql ]; then
   tagargs=(-tags=mysql)
 fi
-tests=$(go test "${tagargs[@]}" -list . ./internal/store | grep -E '^(Test|Example|Fuzz)' | LC_ALL=C sort)
+# ${a[@]+"${a[@]}"} expands an empty array to nothing; a bare "${a[@]}" aborts
+# under set -u on bash before 4.4, which is macOS /bin/bash 3.2 (hk 6160).
+tests=$(go test ${tagargs[@]+"${tagargs[@]}"} -list . ./internal/store | grep -E '^(Test|Example|Fuzz)' | LC_ALL=C sort)
 
 # NR is 1-based, so NR % count == index % count is the 0-based k % count == index - 1.
 selected=$(awk -v i="$index" -v n="$count" 'NR % n == i % n' <<< "$tests")
@@ -43,4 +45,5 @@ if [ -z "$selected" ]; then
   exit 1
 fi
 
-printf '^(%s)$\n' "$(paste -sd '|' <<< "$selected")"
+# BSD paste (macOS) reads stdin only when named as "-" (hk 6160).
+printf '^(%s)$\n' "$(paste -sd '|' - <<< "$selected")"
