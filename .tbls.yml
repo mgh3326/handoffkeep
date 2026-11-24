@@ -1,5 +1,5 @@
 name: handoffkeep
-desc: "MySQL schema built from the repository's migrations (internal/store) on MySQL ${MYSQL_VERSION} (SELECT VERSION() in the schema-doc run). handoffkeep_work runs the same code and migrations, so this document covers both. In an ER diagram, a line whose label contains 'no foreign key' or 'not enforced by a foreign key' is a relation declared in .tbls.yml for a column the code joins on; the database has no such constraint."
+desc: "MySQL schema built from the repository's migrations (internal/store) on MySQL ${MYSQL_VERSION} (SELECT VERSION() in the schema-doc run). handoffkeep_work runs the same code and migrations, so this document covers both. In an ER diagram a solid line is a real foreign key in the database. A dashed line is a relation declared in .tbls.yml for a column the code joins on; the database has no foreign key for it (its label says so)."
 dsn: my://root@127.0.0.1:3306/handoffkeep
 docPath: schema-doc
 er:
@@ -156,6 +156,491 @@ relations:
     parentColumns: [key]
     def: "document the task cites by reference, not the binding (no foreign key; hk 6125)"
 
+# Per-table comments (hk 6233): the hand text for each table. The derived
+# usage (which Go file and function reads, writes and deletes it) is appended at
+# schema-doc time by scripts/schema-usage; do not write it here.
+comments:
+  # ---- tasks ----
+  - table: tasks
+    labels: [source-of-record]
+    tableComment: |
+      The task record: title, state, priority, project, claim and the job that runs it. Every other tasks-domain table keys to it.
+      Retention: none; rows are kept.
+  - table: task_comments
+    labels: [source-of-record]
+    tableComment: |
+      Comments on a task, including the ones mirrored from or to YouTrack.
+      Retention: none.
+  - table: task_events
+    labels: [history-log]
+    tableComment: |
+      Append-only event log of a task: each state change and lifecycle step, read to render the task timeline.
+      Retention: none.
+  - table: task_orders
+    labels: [queue-outbox]
+    tableComment: |
+      Orders addressed to a task's lane; the lane reads an order, then acknowledges it, and the row stays as the record.
+      Retention: none.
+  - table: task_origins
+    labels: [link-join]
+    tableComment: |
+      Where a task came from: the YouTrack issue or chat message it was created or synced from.
+      Retention: none.
+  - table: task_projects
+    labels: [link-join]
+    tableComment: |
+      The project a task belongs to, with the project owner and milestone context read from the project tables.
+      Retention: none.
+  - table: task_relations
+    labels: [link-join]
+    tableComment: |
+      Typed edges between tasks (for example blocks), written by the hierarchy and spawn code and read by lane checks and wait logic.
+      Retention: none.
+  - table: task_spawn_notices
+    labels: [history-log]
+    tableComment: |
+      Notices recorded when a spawn request for a task fails or changes state, kept so the owner can see them.
+      Retention: none.
+  - table: task_spawn_records
+    labels: [history-log]
+    tableComment: |
+      Record of each spawn request made for a task (request, job, outcome), read by the wait and spawn paths.
+      Retention: none.
+  - table: task_thread_cursors
+    labels: [cursor-checkpoint]
+    tableComment: |
+      Per-thread read position of a task thread, so a lane resumes its thread where it stopped.
+      Retention: none.
+  - table: task_thread_deliveries
+    labels: [queue-outbox]
+    tableComment: |
+      Thread messages waiting to be delivered to a lane for a task; a row leaves the queue when its delivery is recorded.
+      Retention: none.
+  - table: task_waits
+    labels: [source-of-record]
+    tableComment: |
+      A wait registered by a task or lane until its condition holds (for example a decision or a blocking task), read by lane checks.
+      Retention: none.
+  - table: ticket_sets
+    labels: [link-join]
+    tableComment: |
+      A set of tickets sliced from one parent task, written at intake and read when the set is dispatched.
+      Retention: none.
+  - table: jobs
+    labels: [source-of-record]
+    tableComment: |
+      A job: one panewire session run for a task, with its pane, host, owner and state.
+      Retention: none.
+  - table: placement_decisions
+    labels: [history-log]
+    tableComment: |
+      Where a job was placed (host and quota pool) and why; read by the console board and the placement path.
+      Retention: rows whose decided_at is older than 180 days are deleted by PrunePlacements (placements.go, PlacementRetention = 180 days), 1000 per run.
+  - table: lane_looks
+    labels: [history-log]
+    tableComment: |
+      Record of a lane look at its current findings, so an unchanged notice stays silenced until the lane's state changes.
+      Retention: none.
+  - table: relay_events
+    labels: [history-log]
+    tableComment: |
+      Messages relayed between lanes, kept as the audit of what was sent to whom; read by decision records and task lifecycle.
+      Retention: none.
+  - table: mcp_write_audit
+    labels: [history-log]
+    tableComment: |
+      Audit row for each write made through the MCP tools: the tool, the task it touched and the outcome.
+      Retention: none.
+  - table: quota_latest
+    labels: [cache-derived]
+    tableComment: |
+      The latest quota reading per account, window and kind, copied from quota_observations for fast reads by placement.
+      Retention: none; rows are replaced as new readings arrive.
+  - table: quota_leases
+    labels: [lock-lease]
+    tableComment: |
+      A lease that holds part of an account's quota for one owner and holder while a job uses it; released by ReleaseQuota.
+      Retention: released by ReleaseQuota (quota.go) when the holder returns the lease; no age rule.
+  - table: quota_observations
+    labels: [history-log]
+    tableComment: |
+      Every quota reading taken from an account: the measurement history that quota_latest points into.
+      Retention: rows received more than 90 days ago that no quota_latest row points to are deleted by pruneQuotaHistory (quota.go).
+  - table: quota_presence
+    labels: [cache-derived]
+    tableComment: |
+      Presence heartbeat per account, written with each presence report and read by placement to see which accounts are live.
+      Retention: rows whose last_seen is older than 30 days (QuotaPresenceRetention, quota.go) are deleted by putQuotaPresence, per account.
+  - table: project_milestones
+    labels: [source-of-record]
+    tableComment: |
+      Milestones of a project, the dates and goals that tasks are planned against.
+      Retention: none.
+  - table: project_owner_events
+    labels: [history-log]
+    tableComment: |
+      History of project owner changes: who owned a project and when, read by the project overview.
+      Retention: none.
+  - table: dots_inbox_reads
+    labels: [history-log]
+    tableComment: |
+      One row per dots inbox read: who read the inbox, when and what it listed.
+      Retention: rows older than 30 days (DotsInboxReadRetention) are deleted in the same transaction as each insert (RecordDotsInboxRead, dots_inbox_reads.go).
+  - table: dots_results
+    labels: [history-log]
+    tableComment: |
+      Results recorded by a dots run, one row per run outcome, read by the dots views.
+      Retention: none.
+  - table: dots_run_tokens
+    labels: [lock-lease]
+    tableComment: |
+      Token that identifies one dots run, issued when the run starts and checked when it reports.
+      Retention: none.
+  - table: memory
+    labels: [source-of-record]
+    tableComment: |
+      Free-text agent memory notes saved by sessions, the store's only copy of them.
+      Retention: none. No production code path writes it at head; the generic copy path can.
+  - table: checkpoints
+    labels: [history-log]
+    tableComment: |
+      Session checkpoints and handoffs saved by sessions (kind, title, body and refs), read by context search.
+      Retention: none. No production code path writes it at head; the generic copy path can. Candidate for retirement, not changed here.
+  - table: translations
+    labels: [cache-derived]
+    tableComment: |
+      Stored Korean translations of English text, keyed by source text, so a translated view does not translate again.
+      Retention: none.
+  - table: ledger_cursors
+    labels: [cursor-checkpoint]
+    tableComment: |
+      The position of the ledger reader, so it resumes from the last ledger entry it applied.
+      Retention: none.
+  - table: bench_area_exceptions
+    labels: [config]
+    tableComment: |
+      Benchmark area exceptions that an operator decided for a profile and effort, with evidence and expiry.
+      Retention: none. No production code path reads or writes it at head; the generic copy path lists it. Candidate for retirement, not changed here.
+  - table: bench_catalog
+    labels: [config]
+    tableComment: |
+      The benchmark catalog: the profiles and efforts the benchmark code knows, written from the catalog and read by bench reads.
+      Retention: none; upserted on each catalog load.
+  - table: bench_grades
+    labels: [config]
+    tableComment: |
+      Grade per benchmark profile, replaced from the catalog on each load.
+      Retention: rows for a profile are deleted and re-inserted by upsertBenchCatalog (store.go) when the catalog changes; no age rule.
+  - table: bench_reps
+    labels: [history-log]
+    tableComment: |
+      Benchmark repetitions and their outcomes, one row per run, read by bench scoring.
+      Retention: none.
+  - table: bench_scores
+    labels: [history-log]
+    tableComment: |
+      Benchmark scores per model, effort, harness and source. No production code path reads or writes it at head; only its creation and indexes remain. Candidate for retirement, not changed here.
+      Retention: none.
+  - table: hk_locks
+    labels: [lock-lease]
+    tableComment: |
+      MySQL advisory-lock rows (one per lock key) that serialise store writes across processes.
+      Retention: none.
+  - table: schema_migrations
+    labels: [history-log]
+    tableComment: |
+      The migration ledger: one row per registered migration ID applied to this database, written by the migration runner.
+      Retention: none.
+  # ---- changes ----
+  - table: changes
+    labels: [source-of-record]
+    tableComment: |
+      A change (a pull request) tracked from proposal to merge and deploy, with its head, state and task links.
+      Retention: none.
+  - table: change_checks
+    labels: [cache-derived]
+    tableComment: |
+      The CI checks of a change's head, mirrored from the forge so state reads need no call out.
+      Retention: none; replaced when a head changes.
+  - table: change_findings
+    labels: [history-log]
+    tableComment: |
+      Review findings on a change, recorded with their severity and disposition.
+      Retention: none.
+  - table: change_gate_events
+    labels: [history-log]
+    tableComment: |
+      One row per gate decision on a change. No production code path writes it at head; only the thread rendering reads it. Candidate for retirement, not changed here.
+      Retention: none.
+  - table: change_tasks
+    labels: [link-join]
+    tableComment: |
+      The tasks a change delivers, linking each change to its task records.
+      Retention: none.
+  - table: change_threads
+    labels: [source-of-record]
+    tableComment: |
+      Review threads on a change: the comment thread and its resolution state.
+      Retention: none.
+  - table: reviews
+    labels: [history-log]
+    tableComment: |
+      Each review recorded against a change: reviewer, head reviewed and verdict.
+      Retention: none.
+  - table: verifications
+    labels: [history-log]
+    tableComment: |
+      Each verification run against a change head: what was checked and its result.
+      Retention: none.
+  - table: deploy_record_projection
+    labels: [cache-derived]
+    tableComment: |
+      Projection of deploy records into one row per deploy, rebuilt from the deploy records and read by the deploy views.
+      Retention: none.
+  - table: deploy_services
+    labels: [config]
+    tableComment: |
+      The services a deploy can target, written from the service registry and read by the deploy paths.
+      Retention: none.
+  # ---- decisions ----
+  - table: decision_requests
+    labels: [source-of-record]
+    tableComment: |
+      A decision request: a question a session asks the operator or a peer to settle, with its options and task.
+      Retention: none.
+  - table: decision_answer_attempts
+    labels: [history-log]
+    tableComment: |
+      Each attempt to answer a decision request, with its outcome, so a retried answer is recognised.
+      Retention: none.
+  - table: decision_deliveries
+    labels: [queue-outbox]
+    tableComment: |
+      A decision notice waiting to be delivered to a lane or channel; a row is marked when the delivery is recorded.
+      Retention: none.
+  - table: decision_notify_digest
+    labels: [queue-outbox]
+    tableComment: |
+      Decision notices waiting for the next digest, sent together and then cleared.
+      Retention: none.
+  - table: decision_resolutions
+    labels: [source-of-record]
+    tableComment: |
+      How a decision request was settled: the answer and who settled it.
+      Retention: none.
+  - table: notification_outbox
+    labels: [queue-outbox]
+    tableComment: |
+      Notifications waiting to be sent to a lane or channel, read by the outbox sender.
+      Retention: none.
+  - table: operator_inbox_events
+    labels: [history-log]
+    tableComment: |
+      Operator inbox events, each with the previous decision request state kept so an undo can restore it.
+      Retention: none.
+  - table: operator_inbox_state
+    labels: [source-of-record]
+    tableComment: |
+      The operator's state per inbox item (read, snoozed or done), read by the inbox list.
+      Retention: none; a row is removed when an undo restores the item.
+  - table: chat_messages
+    labels: [source-of-record]
+    tableComment: |
+      Operator chat messages, with their relay state.
+      Retention: delivered operator messages older than one year are deleted by pruneChatOnce (chat.go), at most ChatPruneMaxDelete per run.
+  - table: chat_questions
+    labels: [source-of-record]
+    tableComment: |
+      Questions raised in chat and their state, linked to decision records.
+      Retention: rows older than one year in a terminal state are deleted by pruneChatOnce (chat.go), at most ChatPruneMaxDelete per run.
+  - table: chat_message_questions
+    labels: [link-join]
+    tableComment: |
+      Link rows between a chat message and the questions it carries.
+      Retention: deleted with their message by pruneChatOnce (chat.go).
+  # ---- documents ----
+  - table: documents
+    labels: [source-of-record]
+    tableComment: |
+      A document by key: briefs, reports, notes and the other text handoffs keep.
+      Retention: a document's body is deleted 30 days after the merge or end of the job it belongs to (DocRetentionDays, doc_retention.go PruneRetention, run every 24 hours by the retention worker in cmd/handoffkeep).
+  - table: doc_prune_log
+    labels: [history-log]
+    tableComment: |
+      Log of the documents a prune deleted: key, when and the rule that pruned it.
+      Retention: none.
+  - table: task_doc_refs
+    labels: [link-join]
+    tableComment: |
+      A task citing a document by key, so the citation survives the binding of the document.
+      Retention: rows are deleted when their document is pruned (doc_prune.go, doc_retention.go) and by RemoveTaskDocRef.
+  - table: attachments
+    labels: [source-of-record]
+    tableComment: |
+      Attachment blobs stored for documents and tasks, with their object location.
+      Retention: none by age; an attachment is marked hot-deleted on request (attachment_archive.go, MarkAttachmentHotDeleted), not deleted by a timer.
+  - table: attachment_refs
+    labels: [link-join]
+    tableComment: |
+      References from an attachment to the document or task that uses it.
+      Retention: rows are deleted when their document is pruned (doc_prune.go, doc_retention.go).
+  - table: attachment_uploads
+    labels: [queue-outbox]
+    tableComment: |
+      Uploads in progress, finalised into attachments when the upload completes.
+      Retention: none.
+  - table: attachment_usage
+    labels: [cache-derived]
+    tableComment: |
+      Usage counters for attachment storage, recomputed from attachments.
+      Retention: none.
+  # ---- youtrack ----
+  - table: youtrack_projects
+    labels: [config]
+    tableComment: |
+      The YouTrack projects this store syncs with, and the configuration each one uses.
+      Retention: none.
+  - table: youtrack_comment_links
+    labels: [link-join]
+    tableComment: |
+      Link between a task comment and the YouTrack comment that mirrors it.
+      Retention: none.
+  - table: yt_authority
+    labels: [config]
+    tableComment: |
+      Which side is authoritative for each synced field of an entity, read before a sync writes.
+      Retention: none.
+  - table: yt_article_bindings
+    labels: [link-join]
+    tableComment: |
+      Binding of a document to a YouTrack article.
+      Retention: none.
+  - table: yt_binding_cursor
+    labels: [cursor-checkpoint]
+    tableComment: |
+      Position of the binding binder in the binding work, so it resumes where it stopped.
+      Retention: none.
+  - table: yt_binding_history
+    labels: [history-log]
+    tableComment: |
+      History of binding changes: each bind and unbind of a task or entity.
+      Retention: none.
+  - table: yt_binding_intents
+    labels: [queue-outbox]
+    tableComment: |
+      Intent to bind a task to a YouTrack issue, recorded before the bind is sent and removed when it is applied or dropped.
+      Retention: none; removed by DropYTBindingIntent (yt_binding_binder.go).
+  - table: yt_comment_canary
+    labels: [history-log]
+    tableComment: |
+      Canary comment per task: a probe comment written to check that comment writes reach YouTrack; removed by removeYTCommentCanaryOnce (yt_comments.go).
+      Retention: none beyond that removal.
+  - table: yt_comment_write_links
+    labels: [link-join]
+    tableComment: |
+      Link from a task comment write to the YouTrack comment it produced.
+      Retention: none.
+  - table: yt_decision_bindings
+    labels: [link-join]
+    tableComment: |
+      Binding of a decision request to a YouTrack issue, keyed by the request as decimal text.
+      Retention: none.
+  - table: yt_entity_map
+    labels: [link-join]
+    tableComment: |
+      Map from a store key to a YouTrack entity id, per tenant; a row is removed when a binding is unbound.
+      Retention: none beyond unbind (unbindYTTaskBindingOnce, yt_binding_history.go).
+  - table: yt_family_roots
+    labels: [link-join]
+    tableComment: |
+      The root issue of each issue family, so related issues resolve to one root.
+      Retention: none.
+  - table: yt_issue_comment_bounds
+    labels: [cursor-checkpoint]
+    tableComment: |
+      Per-issue bounds of comment sync: the last comment seen, so sync reads only what is new.
+      Retention: none.
+  - table: yt_issue_intents
+    labels: [queue-outbox]
+    tableComment: |
+      Intent to create or bind a YouTrack issue for a task, removed when applied or dropped.
+      Retention: none beyond removal (dropYTIssueIntentTx, yt_issues.go).
+  - table: yt_snapshot_state
+    labels: [cache-derived]
+    tableComment: |
+      Last snapshot of a synced entity as YouTrack returned it, used to tell what changed.
+      Retention: rows are removed when a binding update is applied or superseded (yt_articles.go).
+  - table: yt_task_bindings
+    labels: [link-join]
+    tableComment: |
+      Binding of a task to a YouTrack issue.
+      Retention: none beyond unbind (unbindYTTaskBindingOnce, yt_binding_history.go).
+  - table: yt_link_owned
+    labels: [link-join]
+    tableComment: |
+      A YouTrack link that this store created and owns, with the task at each end.
+      Retention: none; a link is released, not deleted (released_op_id).
+  - table: yt_link_plans
+    labels: [queue-outbox]
+    tableComment: |
+      Plan of link operations to run on YouTrack, executed step by step.
+      Retention: none.
+  - table: yt_link_steps
+    labels: [queue-outbox]
+    tableComment: |
+      The steps of a link plan, each sent and recorded in order.
+      Retention: none.
+  - table: yt_link_unowned
+    labels: [cache-derived]
+    tableComment: |
+      YouTrack links observed but not owned by this store, recorded so the sweep can read them.
+      Retention: none.
+  - table: yt_links_sweep
+    labels: [cursor-checkpoint]
+    tableComment: |
+      The position of the link sweep over YouTrack links.
+      Retention: none.
+  - table: yt_write_ops
+    labels: [queue-outbox]
+    tableComment: |
+      The write queue to YouTrack: each change to send, with its state and payload, applied by the write worker.
+      Retention: none; payloads are redacted in place (yt_payload_redact.go).
+  - table: yt_write_op_adoptions
+    labels: [history-log]
+    tableComment: |
+      Record of a write op adopted by another worker, kept for the alert and requeue trail.
+      Retention: none.
+  - table: yt_write_op_alerts
+    labels: [history-log]
+    tableComment: |
+      Alerts raised for write ops that fail, kept until read by the operator.
+      Retention: none.
+  - table: yt_write_op_requeues
+    labels: [history-log]
+    tableComment: |
+      Audit row for each requeue of a write op; written by yt_requeue_read_only.go.
+      Retention: none.
+  - table: sync_log
+    labels: [history-log]
+    tableComment: |
+      Sync log: the ordered change feed that replicas read, one row per change.
+      Retention: rows older than the sync retention (HANDOFFKEEP_SYNC_RETENTION, 30 days by default) are deleted by pruneSyncOnce (sync.go), keeping the durable reset boundary.
+  - table: sync_state
+    labels: [cursor-checkpoint]
+    tableComment: |
+      The sync position for this store: the last change id written and the reset boundary.
+      Retention: none.
+  - table: sync_decisions
+    labels: [cache-derived]
+    tableComment: |
+      Mirror of decisions for sync, keyed by request id. Its writes come from MySQL triggers (migration_mysql_tasks.go), not from Go code; no Go statement reads it. Candidate for retirement, not changed here.
+      Retention: none.
+  - table: yt_feed_cursors
+    labels: [cursor-checkpoint]
+    tableComment: |
+      Cursors into the YouTrack activity feed, one per feed, so each feed read resumes where it stopped.
+      Retention: none.
+
 # Domain viewpoints (dots review hk 6133, P1). Every table is in at least one
 # viewpoint; `tables` is the union of its groups and scopes the page's ER diagram.
 # The hub tables a domain joins also appear in its "Related outside this domain"
@@ -163,8 +648,18 @@ relations:
 # Every table belongs to at least one viewpoint; `tbls lint` enforces it when a
 # new migration adds a table that no viewpoint lists.
 lint:
+  requireTableComment:
+    enabled: true
   requireViewpoints:
     enabled: true
+
+# Mermaid templates: the default templates with one change. A relation declared in
+# relations: above is virtual and drawn dashed (..); a real foreign key is solid (--).
+# Copies of output/mermaid/templates from tbls v1.97.0, edited in that one place.
+templates:
+  mermaid:
+    schema: scripts/schema-usage/templates/schema.mermaid.tmpl
+    table: scripts/schema-usage/templates/table.mermaid.tmpl
 
 viewpoints:
   - id: tasks

@@ -16,6 +16,7 @@ on:
       - 'internal/store/open_mysql.go'
       - 'internal/store/schema_doc_mysql_test.go'
       - '.tbls.yml'
+      - 'scripts/schema-usage/**'
       - '.github/workflows/schema-doc.yml'
   workflow_dispatch:
 
@@ -78,15 +79,34 @@ jobs:
           rm -f tbls.tar.gz tbls
           tbls version
 
+      - name: Build the tbls config with the usage derived from the code
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Each table's hand comment (.tbls.yml) plus the reads, writes and
+          # deletes the SQL in internal/ and cmd/ gives it (hk 6233). The
+          # generated config is not committed and the repository's .tbls.yml
+          # is unchanged.
+          go run ./scripts/schema-usage config "${RUNNER_TEMP}/tbls.yml"
+
       - name: Generate schema documentation with tbls
         shell: bash
         run: |
           set -euo pipefail
           start_sec=$(date +%s)
-          tbls doc --er-format mermaid
-          tbls out -t json -o schema-doc/schema.json
+          tbls doc -c "${RUNNER_TEMP}/tbls.yml" --er-format mermaid
+          tbls out -c "${RUNNER_TEMP}/tbls.yml" -t json -o schema-doc/schema.json
+          go run ./scripts/schema-usage summary schema-doc/schema.json schema-doc/README.md
           end_sec=$(date +%s)
           echo "tbls step took $(( end_sec - start_sec )) seconds"
+
+      - name: Lint table comments and viewpoints
+        shell: bash
+        # A table with no comment or no role label, or a table in no viewpoint,
+        # fails this run; it never gates a pull request (hk 6233, item 5).
+        run: |
+          set -euo pipefail
+          tbls lint -c "${RUNNER_TEMP}/tbls.yml"
 
       - name: Upload schema doc artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
