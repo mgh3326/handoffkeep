@@ -27,7 +27,7 @@ func insertDotsDocumentTx(ctx context.Context, tx transaction, key, body, sha st
 		return err == nil, err
 	}
 	tag, err := tx.Exec(ctx, `INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at,origin_class,task_id) VALUES($1,'note',$2,'',$3,$4,$5,$6,$6,'import',$7) ON CONFLICT(key) DO NOTHING`, key, DotsLane, body, sha, createdBy, now, taskID)
-	return tag == 1, err
+	return tag == 1, documentBodyWriteError(err)
 }
 
 // upsertDotsResultTx records a dots result row. A row that exists for the
