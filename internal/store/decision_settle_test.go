@@ -124,9 +124,21 @@ func settledBackfillSetup(t *testing.T, s *Store) (settled []int64, open string)
 		if _, err := s.RecordDecisionRequest(ctx, task.ID, "director-1", in); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.db().Exec(ctx, s.q(`UPDATE tasks SET state=$1 WHERE id=$2`, `UPDATE tasks SET state=? WHERE id=?`), state, task.ID); err != nil {
+		// Written in a store transaction: on MySQL its commit stamps the
+		// sync_log row the update writes, which the database cleanup checks.
+		tx, release, err := s.begin(ctx)
+		if err != nil {
 			t.Fatal(err)
 		}
+		if _, err := tx.Exec(ctx, s.q(`UPDATE tasks SET state=$1 WHERE id=$2`, `UPDATE tasks SET state=? WHERE id=?`), state, task.ID); err != nil {
+			release()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			release()
+			t.Fatal(err)
+		}
+		release()
 		settled = append(settled, task.ID)
 	}
 	unsettled := decisionTask(t, s, "in_progress")
