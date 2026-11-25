@@ -156,10 +156,25 @@ func checkIntakeHeader(source, sourceRef, lane, by string) error {
 	return guard.Reject(sourceRef)
 }
 
+// taskBySourceQuery is the (source, source_ref) lookup. Both indexes that
+// enforce the pair cover only rows with both values set: PostgreSQL's
+// tasks_source_ref is partial (only rows with both values set), and
+// MySQL's is a functional index over the same CASE expressions. With both
+// values set, the query names those predicates so the planner uses the index.
+// An empty value keeps the plain equality, since no index covers that row.
+func taskBySourceQuery(q rowQuerier, source, sourceRef string) string {
+	if source == "" || sourceRef == "" {
+		return sqlFor(q, `SELECT `+taskColumns+` FROM tasks WHERE source=$1 AND source_ref=$2`, `SELECT `+taskColumns+` FROM tasks WHERE source=? AND source_ref=?`)
+	}
+	return sqlFor(q,
+		`SELECT `+taskColumns+` FROM tasks WHERE source<>'' AND source_ref<>'' AND source=$1 AND source_ref=$2`,
+		`SELECT `+taskColumns+` FROM tasks WHERE (CASE WHEN source<>'' AND source_ref<>'' THEN source END)=? AND (CASE WHEN source<>'' AND source_ref<>'' THEN source_ref END)=?`)
+}
+
 // taskBySourceTx returns the task recorded for (source, source_ref).
 func taskBySourceTx(ctx context.Context, q rowQuerier, source, sourceRef string) (Task, bool, error) {
 	var x Task
-	err := scanTask(q.QueryRow(ctx, sqlFor(q, `SELECT `+taskColumns+` FROM tasks WHERE source=$1 AND source_ref=$2`, `SELECT `+taskColumns+` FROM tasks WHERE source=? AND source_ref=?`), source, sourceRef), &x)
+	err := scanTask(q.QueryRow(ctx, taskBySourceQuery(q, source, sourceRef), source, sourceRef), &x)
 	if errors.Is(err, ErrNoRows) {
 		return Task{}, false, nil
 	}
