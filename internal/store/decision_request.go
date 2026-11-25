@@ -204,11 +204,8 @@ type DecisionRequest struct {
 	// or operator_relay_allowed lets a relayed answer close the request,
 	// operator_direct makes it wait for a verified path. Read it through
 	// EffectivePolicy, which also folds in human_only and dispositions.
-	AnswerPolicy string `json:"answer_policy,omitempty"`
-	// WithdrawnReason names why a withdrawn request has no operator text: the
-	// task settled before anyone answered it (DecisionWithdrawnTaskSettled, hk 6339).
-	WithdrawnReason string              `json:"withdrawn_reason,omitempty"`
-	Resolution      *DecisionResolution `json:"resolution,omitempty"`
+	AnswerPolicy string              `json:"answer_policy,omitempty"`
+	Resolution   *DecisionResolution `json:"resolution,omitempty"`
 }
 
 // Answer policies (DecisionRequest.AnswerPolicy).
