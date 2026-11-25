@@ -189,7 +189,9 @@ func (s *Store) closeDotsAskOperatorQuestionsFlowTx(ctx context.Context, tx tran
 }
 
 // queueDecisionAnswerNoticeFlow is queueDecisionAnswerNotice on either
-// dialect's transaction; the MySQL text is the same notice.
+// dialect's transaction; the MySQL text is the same notice. A session answer
+// recorded by the task lane's own session writes no task-lane notice, as on
+// PostgreSQL (hk 6481); the decision event and audit rows are still written.
 func (s *Store) queueDecisionAnswerNoticeFlow(ctx context.Context, tx transaction, x Task, resolved DecisionRequest, in ResolveDecisionInput, decider string, resolutionID int64, at time.Time) error {
 	if s.dialect != mysqlDialect {
 		return s.queueDecisionAnswerNotice(ctx, pgxTx(tx), x, resolved, in, decider, resolutionID, at)
@@ -205,8 +207,10 @@ func (s *Store) queueDecisionAnswerNoticeFlow(ctx context.Context, tx transactio
 		body += " | " + base + "/ui/tasks/" + taskID
 	}
 	text := assistantLaneText(prefix, body)
-	if _, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindDecisionAnswered, x.Lane, decisionAnswerNoticeEventID(resolved.ID, resolutionID), text, at); err != nil {
-		return err
+	if !decisionSelfRecordedAnswer(x.Lane, in) {
+		if _, err := insertNotificationOutboxOnce(ctx, tx, OutboxKindDecisionAnswered, x.Lane, decisionAnswerNoticeEventID(resolved.ID, resolutionID), text, at); err != nil {
+			return err
+		}
 	}
 	// The asker's copy, as on PostgreSQL (hk 5129).
 	asker, ok := decisionAskerNoticeLane(x.Lane, resolved, in)

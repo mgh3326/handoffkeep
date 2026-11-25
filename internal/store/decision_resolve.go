@@ -132,8 +132,10 @@ type ResolveDecisionInput struct {
 
 	// RecordingLane is the lane whose session recorded a session-channel
 	// answer, self-reported by the CLI. A session answer recorded by the
-	// request's asker lane sends that lane no answer notice (hk 5527). Other
-	// channels ignore it.
+	// request's asker lane sends that lane no answer notice, and a session
+	// answer recorded by the task lane sends the task lane none either
+	// (decisionSelfRecordedAnswer, hk 5527 and hk 6481). Other channels
+	// ignore it.
 	RecordingLane string
 
 	// Audit, when set, is the MCP write this answer is: its audit row is written
