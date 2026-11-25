@@ -4,7 +4,8 @@ package store
 // migration of the same ID (hk 6339). Its steps run in the same order: the
 // inbox request and the task_flag rows, the dots operator questions, then the
 // task refs and block. Each match reads the open refs, which the last step
-// changes.
+// changes. The join compares the column as utf8mb4_bin, the collation JSON
+// strings carry; a 0900_bin side is error 1267 against the column (hk 5169).
 //
 // Idempotent: a second run matches no row. Expand-only: it changes values and
 // adds one JSON key that the previous release does not read; no column or
@@ -14,7 +15,7 @@ func init() {
 	registerMySQLMigration(mysqlMigration{
 		id: "20261125-settled-open-decision-withdraw",
 		steps: []string{
-			`UPDATE decision_requests d JOIN tasks t ON JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.decision_request.id')) COLLATE utf8mb4_0900_bin = d.source_ref
+			`UPDATE decision_requests d JOIN tasks t ON d.source_ref COLLATE utf8mb4_bin = JSON_UNQUOTE(JSON_EXTRACT(t.refs,'$.decision_request.id'))
 				SET d.status='superseded', d.superseded_by='withdrawn', d.updated_at=NOW(6)
 				WHERE d.source IN ('task_request','linear') AND d.status='open'
 				  AND t.state IN ('merged','deployed','completed','dropped','duplicate')
