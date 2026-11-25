@@ -162,7 +162,7 @@ func TestForwardSendsOneEventAndRecordsTheReceipt(t *testing.T) {
 		{"operator-desk", "dots-2", "decision"},
 		{"operator-desk", "dots-followup-3", "info"},
 		{"operator-desk", "dr-1-1-answered", "decision"},
-		{"other-lane", "Q-1-rev1-answered", "info"},
+		{"other-lane", "Q-1-rev1-answered", "decision"},
 		{"operator-desk", "dots-4", "blocked"},
 		{"design-lane", "task-order-ord-aaaaaaaaaa", "order"},
 		{"design-lane", "task-order-withdrawn-ord-aaaaaaaaaa", "order"},
