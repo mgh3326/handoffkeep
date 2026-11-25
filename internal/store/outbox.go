@@ -41,6 +41,10 @@ const (
 	// hk 5201): one row per lane whose findings need a look, deduplicated by
 	// a 6-hour bucket in its event id. It goes out as hub type "info".
 	OutboxKindLaneCheck = "lane_check"
+	// OutboxKindDotsNote is the design lane's note of a dots comment or intake
+	// (hk 6307): dots' opinion for the design session to sort, never an order.
+	// It goes out as hub type "info", so it never interrupts.
+	OutboxKindDotsNote = "dots_note"
 	// OutboxSkipBeforeForwarder is the skip_reason of a row queued before the
 	// forwarder's cutoff: it was settled visibly instead of delivered, because
 	// turning forwarding on must not flush the backlog (hk 4986).

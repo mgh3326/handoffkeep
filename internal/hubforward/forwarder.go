@@ -64,6 +64,10 @@ func notifyType(kind string) string {
 		// The per-lane wake check (operator decision 418, hk 5201) is a wake,
 		// not an interrupt: the design session judges what to do on it.
 		return "info"
+	case store.OutboxKindDotsNote:
+		// A dots note (hk 6307) is dots' opinion on a comment or intake, for the
+		// design session to sort. It is info, never a wake-asking type.
+		return "info"
 	default:
 		return "info"
 	}

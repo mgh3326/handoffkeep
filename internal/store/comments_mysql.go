@@ -80,6 +80,12 @@ func (s *Store) mysqlCreateCommentOnce(ctx context.Context, taskID int64, author
 		if err != nil {
 			return CreatedTaskComment{}, false, err
 		}
+		// The MySQL twin of the dots note in CreateMCPTaskCommentProjected (hk 6307).
+		if w.Author == DotsLabel {
+			if err = queueDotsCommentNoteTx(ctx, tx, c); err != nil {
+				return CreatedTaskComment{}, false, err
+			}
+		}
 	}
 	op, enqueued, err := s.enqueueYTCommentTx(ctx, tx, c)
 	if err != nil {
