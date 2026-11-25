@@ -38,9 +38,22 @@ func TestTaskBySourceUsesSourceIndex(t *testing.T) {
 		}
 		q := `INSERT INTO tasks(lane,title,kind,state,created_by,created_at,updated_at,last_activity_at,source,source_ref) VALUES ` +
 			strings.TrimSuffix(strings.Repeat(row+",", end-start), ",")
-		if _, err := s.db().Exec(ctx, q, args...); err != nil {
+		// tasks is a synced table: insert through the store's transaction so
+		// the sync_log rows its trigger writes are numbered at commit.
+		tx, release, err := s.begin(ctx)
+		if err != nil {
 			t.Fatal(err)
 		}
+		if _, err := tx.Exec(ctx, q, args...); err != nil {
+			tx.Rollback(ctx)
+			release()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			release()
+			t.Fatal(err)
+		}
+		release()
 	}
 	// Fresh statistics, as in the relay plan test. ANALYZE answers a result
 	// set, so it is read and closed.
