@@ -235,6 +235,18 @@ func CheckIntake(in IntakeInput) error {
 // returns the task already recorded for it with created=false and changes
 // nothing. Kind may be left unset; the triage gate requires it on the way out.
 func (s *Store) IntakeTask(ctx context.Context, in IntakeInput) (Task, bool, error) {
+	return s.intakeTask(ctx, in, false)
+}
+
+// IntakeDotsTask is IntakeTask for an intake dots filed through the MCP path
+// (hk 6307). When it creates the task, the same transaction also queues one
+// dots note to the project's design lane, so the task and its note commit
+// together. A repeated intake finds the task and queues nothing.
+func (s *Store) IntakeDotsTask(ctx context.Context, in IntakeInput) (Task, bool, error) {
+	return s.intakeTask(ctx, in, true)
+}
+
+func (s *Store) intakeTask(ctx context.Context, in IntakeInput, dotsNote bool) (Task, bool, error) {
 	if err := CheckIntake(in); err != nil {
 		return Task{}, false, err
 	}
@@ -262,12 +274,18 @@ func (s *Store) IntakeTask(ctx context.Context, in IntakeInput) (Task, bool, err
 			out = existing
 			return tx.Commit(ctx)
 		}
-		x, err := insertTriageTaskTx(ctx, tx, item, in.Source, in.SourceRef, in.Lane, nil, in.CreatedBy, time.Now().UTC())
+		now := time.Now().UTC()
+		x, err := insertTriageTaskTx(ctx, tx, item, in.Source, in.SourceRef, in.Lane, nil, in.CreatedBy, now)
 		if err != nil {
 			return err
 		}
 		if err := s.intakeEnqueueYTIssueTx(ctx, tx, x); err != nil {
 			return err
+		}
+		if dotsNote {
+			if err := queueDotsIntakeNoteTx(ctx, tx, x, now); err != nil {
+				return err
+			}
 		}
 		out, created = x, true
 		return tx.Commit(ctx)

@@ -971,7 +971,15 @@ func (o operatorTools) taskIntake(ctx context.Context, _ *gmcp.CallToolRequest, 
 	if err != nil {
 		return nil, nil, err
 	}
-	task, created, err := o.service.IntakeTask(ctx, intakeActor(principal{Actor: write.Author}), intake)
+	var task store.Task
+	var created bool
+	if write.Author == store.DotsLabel {
+		// dots' intake also queues its design-lane note, in the same transaction
+		// as the task (hk 6307); a repeat queues nothing.
+		task, created, err = o.service.Store.IntakeDotsTask(ctx, intake)
+	} else {
+		task, created, err = o.service.IntakeTask(ctx, intakeActor(principal{Actor: write.Author}), intake)
+	}
 	if err != nil {
 		return nil, nil, err
 	}

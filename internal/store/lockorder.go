@@ -207,7 +207,10 @@ package store
 //     yt_entity_map in Apply). Since slice b1a (hk 3739, yt_comments.go) the
 //     comment writers are the one exception to "first lock": CreateTaskComment
 //     and CreateMCPTaskComment take taskCommentInsertLock, insert the comment
-//     (KEY SHARE on its task row; MCP also writes its audit row), and only
+//     (KEY SHARE on its task row; MCP also writes its audit row; a dots-authored
+//     MCP comment also reads its task and project with plain selects and
+//     inserts its dots_note notification_outbox row, hk 6307, taking no lock
+//     beyond the insert's own row), and only
 //     then take the lane lock of that task, read without a lock (mode on, hk
 //     3810: the task's yt_task_bindings row, its task_origins, yt_entity_map,
 //     yt_comment_canary and youtrack_projects rows) and insert new rows of

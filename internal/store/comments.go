@@ -199,6 +199,13 @@ func (s *Store) CreateMCPTaskCommentProjected(ctx context.Context, taskID int64,
 		if err := insertMCPWriteAuditTx(ctx, tx, w, taskID, x, now); err != nil {
 			return err
 		}
+		// A dots comment also queues its design-lane note in this transaction
+		// (hk 6307). Only this non-replay branch queues it, so a replay adds none.
+		if w.Author == DotsLabel {
+			if err := queueDotsCommentNoteTx(ctx, pgTransaction{tx}, x); err != nil {
+				return err
+			}
+		}
 		op, enqueued, err := s.enqueueYTCommentTx(ctx, pgTransaction{tx}, x)
 		if err != nil {
 			return err
