@@ -226,7 +226,7 @@ func TestDomainSummaryDrawsDeclaredRelationsDashed(t *testing.T) {
 	if strings.Contains(out, "tasks -->|\"1 foreign keys\"| tasks") {
 		t.Errorf("a relation inside one domain is not an edge:\n%s", out)
 	}
-	if !strings.Contains(out, "| Tasks | 2 |") || !strings.Contains(out, "| **All** | **3** |") {
+	if !strings.Contains(out, "| [Tasks](viewpoint-tasks.md) | 2 |") || !strings.Contains(out, "| **All** | **3** |") {
 		t.Errorf("counts wrong:\n%s", out)
 	}
 }
