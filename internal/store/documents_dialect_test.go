@@ -96,11 +96,11 @@ func init() {
 			t.Fatal(err)
 		}
 		cutoff := time.Now().UTC().Add(-24 * time.Hour)
-		res, err := s.PruneDocuments(ctx, DocPrunePrefix, cutoff, 10, false)
+		res, err := s.PruneDocuments(ctx, DocPrunePrefix, cutoff, 10, false, "test-prune")
 		if err != nil || res.Matched != 1 || res.Deleted != 0 || res.Bytes != int64(len("prunable")) {
 			t.Fatalf("dry run: %+v err=%v", res, err)
 		}
-		res, err = s.PruneDocuments(ctx, DocPrunePrefix, cutoff, 10, true)
+		res, err = s.PruneDocuments(ctx, DocPrunePrefix, cutoff, 10, true, "test-prune")
 		if err != nil || res.Deleted != 1 {
 			t.Fatalf("apply: %+v err=%v", res, err)
 		}

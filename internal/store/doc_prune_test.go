@@ -56,7 +56,7 @@ func TestPruneDocumentsDeletesOnlyOldMwrWithApply(t *testing.T) {
 	}
 	cutoff := time.Now().UTC().Add(-30 * day)
 
-	dry, err := s.PruneDocuments(ctx, DocPrunePrefix, cutoff, 100, false)
+	dry, err := s.PruneDocuments(ctx, DocPrunePrefix, cutoff, 100, false, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestPruneDocumentsDeletesOnlyOldMwrWithApply(t *testing.T) {
 		t.Fatal("dry run deleted a document")
 	}
 
-	applied, err := s.PruneDocuments(ctx, DocPrunePrefix, cutoff, 100, true)
+	applied, err := s.PruneDocuments(ctx, DocPrunePrefix, cutoff, 100, true, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestPruneDocumentsDeletesOnlyOldMwrWithApply(t *testing.T) {
 func TestPruneDocumentsRefusesOtherPrefixes(t *testing.T) {
 	s := schemaStore(t, "doc_prune_refuse")
 	for _, prefix := range []string{"", "review/", "review/mwr", "review/2026-11-01/", "review/mwr-x/"} {
-		_, err := s.PruneDocuments(t.Context(), prefix, time.Now().UTC().Add(-time.Hour), 10, true)
+		_, err := s.PruneDocuments(t.Context(), prefix, time.Now().UTC().Add(-time.Hour), 10, true, "test")
 		if !errors.Is(err, ErrDocPruneInvalid) {
 			t.Fatalf("PruneDocuments(%q) error = %v, want ErrDocPruneInvalid", prefix, err)
 		}
@@ -112,7 +112,7 @@ func TestPruneDocumentsRespectsLimit(t *testing.T) {
 	for _, key := range []string{"review/mwr-l1", "review/mwr-l2", "review/mwr-l3"} {
 		putPruneDoc(t, s, key, 40*24*time.Hour)
 	}
-	res, err := s.PruneDocuments(t.Context(), DocPrunePrefix, time.Now().UTC().Add(-30*24*time.Hour), 2, true)
+	res, err := s.PruneDocuments(t.Context(), DocPrunePrefix, time.Now().UTC().Add(-30*24*time.Hour), 2, true, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

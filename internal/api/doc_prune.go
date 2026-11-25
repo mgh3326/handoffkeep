@@ -68,7 +68,7 @@ func (s Server) docPrune(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(in.OlderThanDays) * 24 * time.Hour)
-	res, e := s.Service.Store.PruneDocuments(r.Context(), in.Prefix, cutoff, in.Limit, in.Apply)
+	res, e := s.Service.Store.PruneDocuments(r.Context(), in.Prefix, cutoff, in.Limit, in.Apply, client)
 	if e != nil {
 		appErr(w, r, e)
 		return

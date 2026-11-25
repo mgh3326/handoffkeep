@@ -29,8 +29,12 @@ import (
 // against a deleted document (ref_kind='document') are removed with it, so no
 // dangling ref survives; the attachment blobs stay.
 //
-// A deletion is recorded in doc_prune_log (who, what, when, a sha list) in
-// the same transaction that deletes the document. Dry runs write no log row.
+// A deletion is recorded in doc_prune_log (who, what, when, a sha list, and
+// the document's job and task_id) in the same transaction that deletes the
+// document. Dry runs write no log row. The job and task_id are the merge
+// link's evidence after the delete (hk 6289): a deleted document still counts
+// as a witness of its job's task, and a deleted second task still makes the
+// job ambiguous.
 //
 // It is idempotent (a second run finds no row to delete and logs nothing)
 // and bounded per run (limit, in DocRetentionBatch-sized transactions).
@@ -66,7 +70,12 @@ const (
 // apply run deletes by it, MergeLink is its per-family classification (dry run
 // only, whether the switch is on or off), and MergeLinkDeleted counts the
 // documents an apply run deleted by it alone. On apply, Deleted and Bytes
-// include those documents.
+// include those documents. The merge leg deletes whole jobs only, and only
+// while all of a job's eligible documents fit the batch and the run's limit
+// (hk 6290): MergeLinkSkippedJobs counts the eligible jobs an apply run left
+// whole because they did not fit and did not delete later in the run, so a
+// limit smaller than every eligible job deletes nothing by the merge link and
+// says why.
 type DocRetentionResult struct {
 	OlderThan      time.Time `json:"older_than"`
 	Limit          int       `json:"limit"`
@@ -83,6 +92,10 @@ type DocRetentionResult struct {
 	MergeLinkApply   bool                          `json:"merge_link_apply"`
 	MergeLinkDeleted int64                         `json:"merge_link_deleted"`
 	MergeLink        map[string]DocRetentionFamily `json:"merge_link,omitempty"`
+
+	MergeLinkSkippedJobs int64 `json:"merge_link_skipped_jobs"`
+	// mergeSkipped is the set behind MergeLinkSkippedJobs (noteMergeSkips).
+	mergeSkipped map[string]bool
 }
 
 // docRetentionReviewEligible is the merge predicate for a documents row
@@ -105,7 +118,7 @@ const docRetentionScreensEligible = `AND EXISTS (SELECT 1 FROM jobs j
 
 // docRetentionCandidates lists unbound retention-eligible documents under one
 // prefix, oldest id first, so each batch is deterministic.
-const docRetentionCandidatesPG = `SELECT d.id, d.key, d.sha256, octet_length(d.body) FROM documents d
+const docRetentionCandidatesPG = `SELECT d.id, d.key, d.sha256, octet_length(d.body), d.job, d.task_id FROM documents d
 WHERE d.key COLLATE "C" >= $1 AND d.key COLLATE "C" < $2
 AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id = d.id)
 %s
@@ -238,24 +251,18 @@ func (s *Store) pruneRetentionBatchOnce(ctx context.Context, cutoff time.Time, b
 	defer tx.Rollback(ctx)
 	mwrLo, mwrHi := keyPrefixBounds(DocRetentionMwrPrefix)
 	scrLo, scrHi := keyPrefixBounds(DocRetentionScreensPrefix)
-	var ids []int64
-	var keys, shas []string
-	var bytes int64
-	var nReview, nScreens, nMerge int
-	scan := func(rows pgx.Rows) error {
+	var picked []retentionRow
+	scan := func(rows pgx.Rows) ([]retentionRow, error) {
 		defer rows.Close()
+		var out []retentionRow
 		for rows.Next() {
-			var id, size int64
-			var key, sha string
-			if e = rows.Scan(&id, &key, &sha, &size); e != nil {
-				return e
+			var r retentionRow
+			if e := rows.Scan(&r.id, &r.key, &r.sha, &r.size, &r.job, &r.task); e != nil {
+				return nil, e
 			}
-			ids = append(ids, id)
-			keys = append(keys, key)
-			shas = append(shas, sha)
-			bytes += size
+			out = append(out, r)
 		}
-		return rows.Err()
+		return out, rows.Err()
 	}
 	collect := func(lo, hi, eligible string, want int) error {
 		if want <= 0 {
@@ -265,51 +272,68 @@ func (s *Store) pruneRetentionBatchOnce(ctx context.Context, cutoff time.Time, b
 		if e != nil {
 			return e
 		}
-		return scan(rows)
+		got, e := scan(rows)
+		picked = append(picked, got...)
+		return e
 	}
 	if e = collect(mwrLo, mwrHi, docRetentionReviewEligible, batch); e != nil {
 		return 0, e
 	}
-	nReview = len(ids)
-	if len(ids) < batch {
-		before := len(ids)
-		if e = collect(scrLo, scrHi, docRetentionScreensEligible, batch-len(ids)); e != nil {
+	nReview := len(picked)
+	if len(picked) < batch {
+		if e = collect(scrLo, scrHi, docRetentionScreensEligible, batch-len(picked)); e != nil {
 			return 0, e
 		}
-		nScreens = len(ids) - before
 	}
-	if len(ids) < batch && len(merge) > 0 {
+	nScreens := len(picked) - nReview
+	var admittedJobs, skippedJobs []string
+	if len(picked) < batch && len(merge.ids) > 0 {
 		// The merge leg (hk 6280): lock the picked rows, then classify them
-		// again under the lock and keep only the rows still eligible.
-		skip := make(map[int64]bool, len(ids))
-		for _, id := range ids {
-			skip[id] = true
+		// again under the lock, keep only the rows still eligible and admit
+		// whole jobs while they fit (admitMergeJobs, hk 6290).
+		skip := make(map[int64]bool, len(picked))
+		for _, r := range picked {
+			skip[r.id] = true
 		}
-		if merge = withoutIDs(merge, skip); len(merge) > 0 {
-			if _, e = tx.Exec(ctx, `SELECT id FROM documents WHERE id = ANY($1) ORDER BY id FOR UPDATE`, merge); e != nil {
+		if ids := withoutIDs(merge.ids, skip); len(ids) > 0 {
+			if _, e = tx.Exec(ctx, `SELECT id FROM documents WHERE id = ANY($1) ORDER BY id FOR UPDATE`, ids); e != nil {
 				return 0, e
 			}
-			q, args := mergeLinkRecheckSQL(false, cutoff, merge)
+			q, args := mergeLinkRecheckSQL(false, cutoff, ids)
 			rows, e := tx.Query(ctx, q, args...)
 			if e != nil {
 				return 0, e
 			}
-			before := len(ids)
-			if e = scan(rows); e != nil {
+			still, e := scan(rows)
+			if e != nil {
 				return 0, e
 			}
-			nMerge = len(ids) - before
+			var admitted []retentionRow
+			admitted, admittedJobs, skippedJobs = admitMergeJobs(merge.jobs, still, batch-len(picked))
+			picked = append(picked, admitted...)
 		}
 	}
-	if len(ids) == 0 {
+	nMerge := len(picked) - nReview - nScreens
+	if len(picked) == 0 {
+		res.noteMergeSkips(nil, skippedJobs)
 		return 0, nil
+	}
+	ids := make([]int64, len(picked))
+	keys := make([]string, len(picked))
+	shas := make([]string, len(picked))
+	jobs := make([]string, len(picked))
+	tasks := make([]*int64, len(picked))
+	var bytes int64
+	for i, r := range picked {
+		ids[i], keys[i], shas[i], jobs[i], tasks[i] = r.id, r.key, r.sha, r.job, r.task
+		bytes += r.size
 	}
 	if _, e = tx.Exec(ctx, `DELETE FROM attachment_refs WHERE ref_kind='document' AND ref_id = ANY($1)`, keys); e != nil {
 		return 0, e
 	}
 	now := time.Now().UTC()
-	if _, e = tx.Exec(ctx, `INSERT INTO doc_prune_log(document_key, sha256, pruned_at, pruned_by)
-SELECT k, h, $3, $4 FROM unnest($1::text[], $2::text[]) AS t(k, h)`, keys, shas, now, prunedBy); e != nil {
+	if _, e = tx.Exec(ctx, `INSERT INTO doc_prune_log(document_key, sha256, pruned_at, pruned_by, job, task_id)
+SELECT k, h, $3, $4, j, t FROM unnest($1::text[], $2::text[], $5::text[], $6::bigint[]) AS u(k, h, j, t)`, keys, shas, now, prunedBy, jobs, tasks); e != nil {
 		return 0, e
 	}
 	tag, e := tx.Exec(ctx, `DELETE FROM documents WHERE id = ANY($1)`, ids)
@@ -330,5 +354,6 @@ SELECT k, h, $3, $4 FROM unnest($1::text[], $2::text[]) AS t(k, h)`, keys, shas,
 	res.ReviewDeleted += int64(nReview)
 	res.ScreensDeleted += int64(nScreens)
 	res.MergeLinkDeleted += int64(nMerge)
+	res.noteMergeSkips(admittedJobs, skippedJobs)
 	return len(ids), nil
 }

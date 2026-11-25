@@ -92,8 +92,9 @@ const mysqlReviewEligible = `AND EXISTS (SELECT 1 FROM reviews r JOIN changes c 
 const mysqlScreensEligible = `AND EXISTS (SELECT 1 FROM jobs j WHERE (j.job_id=d.job OR j.job_id=SUBSTRING_INDEX(SUBSTRING_INDEX(d.` + "`key`" + `,'/',2),'/',-1)) AND j.ended_at IS NOT NULL AND j.ended_at<=?)`
 
 // mysqlRetentionBatch deletes up to batch retention-eligible documents
-// (review first, then screens, then the merge link when it is on) in one
-// transaction with one audit row each.
+// (review first, then screens, then whole merge-link jobs while they fit when
+// the leg is on) in one transaction with one audit row each, carrying the
+// document's job and task_id.
 func (s *Store) mysqlRetentionBatch(ctx context.Context, cutoff time.Time, batch int, prunedBy string, res *DocRetentionResult) (int, error) {
 	// The merge leg's pick runs before the transaction: every statement in
 	// it before the recheck is a locking read, so the recheck is its first
@@ -110,28 +111,19 @@ func (s *Store) mysqlRetentionBatch(ctx context.Context, cutoff time.Time, batch
 	defer tx.Rollback(ctx)
 	mwrLo, mwrHi := keyPrefixBounds(DocRetentionMwrPrefix)
 	scrLo, scrHi := keyPrefixBounds(DocRetentionScreensPrefix)
-	candidate := `SELECT d.id,d.` + "`key`" + `,d.sha256,OCTET_LENGTH(d.body) FROM documents d WHERE d.` + "`key`" + `>=? AND d.` + "`key`" + `<? AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id=d.id) %s ORDER BY d.id LIMIT ?`
-	var ids []any
-	var keys []any
-	var shas []string
-	var strKeys []string
-	var size int64
-	nReview, nMerge := 0, 0
-	scan := func(rs rows) error {
+	candidate := `SELECT d.id,d.` + "`key`" + `,d.sha256,OCTET_LENGTH(d.body),d.job,d.task_id FROM documents d WHERE d.` + "`key`" + `>=? AND d.` + "`key`" + `<? AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id=d.id) %s ORDER BY d.id LIMIT ?`
+	var picked []retentionRow
+	scan := func(rs rows) ([]retentionRow, error) {
 		defer rs.Close()
+		var out []retentionRow
 		for rs.Next() {
-			var id, n int64
-			var key, sha string
-			if err := rs.Scan(&id, &key, &sha, &n); err != nil {
-				return err
+			var r retentionRow
+			if err := rs.Scan(&r.id, &r.key, &r.sha, &r.size, &r.job, &r.task); err != nil {
+				return nil, err
 			}
-			ids = append(ids, id)
-			keys = append(keys, key)
-			shas = append(shas, sha)
-			strKeys = append(strKeys, key)
-			size += n
+			out = append(out, r)
 		}
-		return rs.Err()
+		return out, rs.Err()
 	}
 	collect := func(lo, hi, eligible string, want int) error {
 		if want <= 0 {
@@ -141,31 +133,35 @@ func (s *Store) mysqlRetentionBatch(ctx context.Context, cutoff time.Time, batch
 		if err != nil {
 			return err
 		}
-		return scan(rows)
+		got, err := scan(rows)
+		picked = append(picked, got...)
+		return err
 	}
 	if e = collect(mwrLo, mwrHi, mysqlReviewEligible, batch); e != nil {
 		return 0, e
 	}
-	nReview = len(ids)
-	if len(ids) < batch {
-		if e = collect(scrLo, scrHi, mysqlScreensEligible, batch-len(ids)); e != nil {
+	nReview := len(picked)
+	if len(picked) < batch {
+		if e = collect(scrLo, scrHi, mysqlScreensEligible, batch-len(picked)); e != nil {
 			return 0, e
 		}
 	}
-	nScreens := len(ids) - nReview
-	if len(ids) < batch && len(merge) > 0 {
+	nScreens := len(picked) - nReview
+	var admittedJobs, skippedJobs []string
+	if len(picked) < batch && len(merge.ids) > 0 {
 		// The merge leg (hk 6280): lock the picked rows, then classify them
-		// again under the lock and keep only the rows still eligible.
-		skip := make(map[int64]bool, len(ids))
-		for _, id := range ids {
-			skip[id.(int64)] = true
+		// again under the lock, keep only the rows still eligible and admit
+		// whole jobs while they fit (admitMergeJobs, hk 6290).
+		skip := make(map[int64]bool, len(picked))
+		for _, r := range picked {
+			skip[r.id] = true
 		}
-		if merge = withoutIDs(merge, skip); len(merge) > 0 {
-			args := make([]any, len(merge))
-			for i, id := range merge {
+		if ids := withoutIDs(merge.ids, skip); len(ids) > 0 {
+			args := make([]any, len(ids))
+			for i, id := range ids {
 				args[i] = id
 			}
-			lock, err := tx.Query(ctx, "SELECT id FROM documents WHERE id IN ("+placeholders(len(merge))+") ORDER BY id FOR UPDATE", args...)
+			lock, err := tx.Query(ctx, "SELECT id FROM documents WHERE id IN ("+placeholders(len(ids))+") ORDER BY id FOR UPDATE", args...)
 			if err != nil {
 				return 0, err
 			}
@@ -175,32 +171,42 @@ func (s *Store) mysqlRetentionBatch(ctx context.Context, cutoff time.Time, batch
 			if err = lock.Err(); err != nil {
 				return 0, err
 			}
-			q, qargs := mergeLinkRecheckSQL(true, cutoff, merge)
+			q, qargs := mergeLinkRecheckSQL(true, cutoff, ids)
 			rows, err := tx.Query(ctx, q, qargs...)
 			if err != nil {
 				return 0, err
 			}
-			before := len(ids)
-			if err = scan(rows); err != nil {
+			still, err := scan(rows)
+			if err != nil {
 				return 0, err
 			}
-			nMerge = len(ids) - before
+			var admitted []retentionRow
+			admitted, admittedJobs, skippedJobs = admitMergeJobs(merge.jobs, still, batch-len(picked))
+			picked = append(picked, admitted...)
 		}
 	}
-	if len(ids) == 0 {
+	nMerge := len(picked) - nReview - nScreens
+	if len(picked) == 0 {
+		res.noteMergeSkips(nil, skippedJobs)
 		return 0, nil
+	}
+	ids := make([]any, len(picked))
+	keys := make([]any, len(picked))
+	strKeys := make([]string, len(picked))
+	var size int64
+	now := time.Now().UTC()
+	vals := make([]string, len(picked))
+	logArgs := make([]any, 0, len(picked)*6)
+	for i, r := range picked {
+		ids[i], keys[i], strKeys[i] = r.id, r.key, r.key
+		size += r.size
+		vals[i] = "(?,?,?,?,?,?)"
+		logArgs = append(logArgs, r.key, r.sha, now, prunedBy, r.job, r.task)
 	}
 	if _, e = tx.Exec(ctx, "DELETE FROM attachment_refs WHERE ref_kind='document' AND ref_id IN ("+placeholders(len(keys))+")", keys...); e != nil {
 		return 0, e
 	}
-	now := time.Now().UTC()
-	vals := make([]string, len(ids))
-	args := make([]any, 0, len(ids)*4)
-	for i := range ids {
-		vals[i] = "(?,?,?,?)"
-		args = append(args, strKeys[i], shas[i], now, prunedBy)
-	}
-	if _, e = tx.Exec(ctx, "INSERT INTO doc_prune_log(document_key, sha256, pruned_at, pruned_by) VALUES "+strings.Join(vals, ","), args...); e != nil {
+	if _, e = tx.Exec(ctx, "INSERT INTO doc_prune_log(document_key, sha256, pruned_at, pruned_by, job, task_id) VALUES "+strings.Join(vals, ","), logArgs...); e != nil {
 		return 0, e
 	}
 	deleted, e := tx.Exec(ctx, "DELETE FROM documents WHERE id IN ("+placeholders(len(ids))+")", ids...)
@@ -221,5 +227,6 @@ func (s *Store) mysqlRetentionBatch(ctx context.Context, cutoff time.Time, batch
 	res.ReviewDeleted += int64(nReview)
 	res.ScreensDeleted += int64(nScreens)
 	res.MergeLinkDeleted += int64(nMerge)
+	res.noteMergeSkips(admittedJobs, skippedJobs)
 	return len(ids), nil
 }
