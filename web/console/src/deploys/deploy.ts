@@ -9,7 +9,7 @@ import { getJSON } from "../shared/http";
 export type DeployRecordView = {
   record_key: string;
   result: string;
-  /** The environment the attempt names (hk-ship/hk-follow write "ncp").
+  /** The environment the attempt names (hk-ship/hk-follow write "oci").
    * Absent on a record that did not name one. */
   target?: string;
   /** The commit the attempt ran: the running SHA of a success record. Null

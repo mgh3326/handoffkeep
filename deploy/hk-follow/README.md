@@ -1,21 +1,23 @@
 # hk-follow: push deploy for handoffkeep
 
 hk 3509 implements hk:doc `decision/2026-11-08/hk-push-rollout-shiftgate` r3.
-A green main head reaches ncp without a person, and nothing reaches into
-ncp: no SSH, no tunnel, no deploy key.
+A green main head reaches oci without a person, and nothing reaches into
+oci: no SSH, no tunnel, no deploy key. hk is served from oci since
+2026-11-19 (hk 5049). The host this ran on before was ncp (returned
+2026-11-24, hk 6446): `HK_FOLLOW_TARGET` defaults to `oci` now.
 
 ```
 main push → ci.yml (ci-ok) ─┬→ deploy.yml (deploy-ok) → promote job ──moves──▶ ghcr …/handoffkeep:deploy
             image.yml ──────┘   (…/handoffkeep:<sha>)                                   │
                                                                                         ▼ every 30 s
-                               ncp: hk-follow.timer → hk-follow tick → shiftgate deploy handoffkeep, handoffkeep-work
+                               oci: hk-follow.timer → hk-follow tick → shiftgate deploy handoffkeep, handoffkeep-work
                                                                      → commit status `deployed`, hk deploy record, lane event
 ```
 
 | File | Role |
 |---|---|
-| `hk-follow` | the script. `promote <sha>` runs in deploy.yml; `tick` runs on ncp; `gate <sha> <deployed-sha>` prints the verdict; `state` and `reset` manage the tick state. |
-| `hk-follow.service`, `hk-follow.timer` | systemd units for ncp (a oneshot every 30 s after the last run). |
+| `hk-follow` | the script. `promote <sha>` runs in deploy.yml; `tick` runs on oci; `gate <sha> <deployed-sha>` prints the verdict; `state` and `reset` manage the tick state. |
+| `hk-follow.service`, `hk-follow.timer` | systemd units for oci (a oneshot every 30 s after the last run). |
 | `test-hk-follow.sh` | decision tests against a fake GitHub, registry, hk, shiftgate and healthz. CI runs it in the light tier (`auto-tag-test`). |
 | `mutants.py` | removes one invariant check at a time; the tests must fail on each. Run it after you change the gate or the rollout loop. |
 
@@ -23,12 +25,12 @@ main push → ci.yml (ci-ok) ─┬→ deploy.yml (deploy-ok) → promote job �
 
 | | Rule | Where |
 |---|---|---|
-| I1 | Only a sha with ci-ok and deploy-ok success that is on main and newer than the deployed sha is promoted or installed. On ncp, the deployed sha is every distinct revision still served by a service that needs the candidate, so after a partial rollout or a per-service rollback the gate passes against each one. | `gate`, run by both `promote` and `tick`. `tick` also requires the `deploy` index to carry exactly the child manifests of `:<sha>`, so a tag mover cannot bind other images to a good sha. |
+| I1 | Only a sha with ci-ok and deploy-ok success that is on main and newer than the deployed sha is promoted or installed. On oci, the deployed sha is every distinct revision still served by a service that needs the candidate, so after a partial rollout or a per-service rollback the gate passes against each one. | `gate`, run by both `promote` and `tick`. `tick` also requires the `deploy` index to carry exactly the child manifests of `:<sha>`, so a tag mover cannot bind other images to a good sha. |
 | I2 | If the release adds a migration since the deployed sha, it ships only with an approval record. | `gate` (`migrations`, approval lookup), both callers. |
 | I3 | The rollout matches hk-ship: `handoffkeep`, then `handoffkeep-work`. Each `/healthz` `vcs_revision` must equal the sha, or the rollout stops. shiftgate has already flipped by then, so a mismatch runs `shiftgate rollback <svc>` and checks that the previous revision serves again. | `tick` |
 | I4 | A failed rollout leaves the previous colour serving and is never retried by itself. Only a new digest runs. | `tick`: the attempt is written to `state.json` before the first shiftgate call. shiftgate's hold state is read for every service before anything starts. A held digest is refused, and an unreadable status means wait, because an explicit deploy would clear a rollback's hold. |
 | I5 | One rollout at a time. | `tick`: `flock` on `$HK_FOLLOW_STATE_DIR/lock`; also, systemd never starts a oneshot unit twice. |
-| I6 | No new credential on ncp beyond a GitHub token and the existing hk token. | The registry is read anonymously (the package is public). |
+| I6 | No new credential on oci beyond a GitHub token and the existing hk token. | The registry is read anonymously (the package is public). |
 
 ### The gate
 
@@ -76,7 +78,7 @@ Every result appears in four places. Consumers should read them in this order.
    | Context | Writer | `success` | `pending` | `failure` |
    |---|---|---|---|---|
    | `deploy-promote` | the promote job | `promoted deploy=<digest12> from <sha12>` | `deploy-held:<reason> …` | `deploy-refused:<reason>` |
-   | `deployed` | hk-follow | `deployed on ncp: handoffkeep,handoffkeep-work` | `rolling out on ncp` or `deploy-held:<reason>` | `failed at <step> on ncp; not retried`, `deploy-refused:<reason>`, or `rollout interrupted …` |
+   | `deployed` | hk-follow | `deployed on oci: handoffkeep,handoffkeep-work` | `rolling out on oci` or `deploy-held:<reason>` | `failed at <step> on oci; not retried`, `deploy-refused:<reason>`, or `rollout interrupted …` |
 
    A sha whose `deployed` status is success is serving on both services. The failure steps are:
    - `shiftgate_<svc>_exit_<rc>`: shiftgate exited 1 (failed), 3 (recovery required) or 78 (configuration refused).
@@ -87,7 +89,7 @@ Every result appears in four places. Consumers should read them in this order.
 2. **hk deploy records**. For each service that hk-follow attempted, it writes the doc `deploy/<service>/<UTC yyyymmddThhmmssZ>` (kind `report`). It uses the `deploy-record/v0` shape that hk-ship writes, with `source: "hk-follow"`:
 
    ```json
-   {"schema":"deploy-record/v0","service":"handoffkeep","target":"ncp",
+   {"schema":"deploy-record/v0","service":"handoffkeep","target":"oci",
     "head_sha":"<sha>","deployed_ref":"ghcr.io/mgh3326/handoffkeep@sha256:<deploy index digest>",
     "previous_ref":"<sha served before>","deployed_at":"<RFC3339 UTC>",
     "result":"success|failed|rolled_back","failed_step":null,"failed_step_name":null,"job_id":null,
@@ -106,7 +108,7 @@ Every result appears in four places. Consumers should read them in this order.
 
    Delivery is durable. Each report of a terminal state (the `deployed` status, the deploy records and the lane event) is first written to `$HK_FOLLOW_STATE_DIR/outbox/`, and the state is saved only after all of them are queued. Queue names carry a per-directory sequence, so entries queued in the same second still deliver in queue order. Each tick delivers the queue oldest first and removes what was delivered. A report whose delivery fails (GitHub, hk or panewire unreachable, or a refused status) stays queued and is retried each tick; `outbox_retry` marks it, but every other entry is still attempted in the same pass, so a failed record never holds back the safety alert behind it. Only a later status for the same sha and context waits behind a failed one (`outbox_hold`): a retry must not overwrite the state the older report still carries. shiftgate is never run again to recreate a report. A crash between queuing and the save leaves `started`; the next tick reports `rollout interrupted` without running shiftgate. A crash after a successful rollout but before the save also reports `interrupted`: a conservative false alarm, not a lost report. Delivery is at least once, so a crash between an accepted delivery and its removal repeats that one report. An entry the server or GitHub refuses permanently — a 4xx validation or secret refusal on a record, a 400 or 422 status, an entry of a kind the script does not know — is not retried: it moves to `outbox/rejected/`, one `hk_follow.outbox_rejected` line and one lane event say so, and it holds nothing back, so a later record with the same key is still delivered. Nothing is deleted; Operations says how to retry one.
 
-## Install on ncp (handoffkeep-design)
+## Install on oci (handoffkeep-design)
 
 Nothing here is installed by the PR. These are the steps the design session runs (T-a):
 
@@ -128,7 +130,7 @@ Nothing here is installed by the PR. These are the steps the design session runs
    # -H "Authorization: Bearer $HK_PROMOTE_TOKEN" to expect 200 (approval
    # present) or 404 (no approval yet).
    ```
-6. **Bootstrap the tag.** Promote compares against the sha the `deploy` tag names, so the tag must exist before the first promote. Until it exists, every promote posts `deploy-promote` pending ("no baseline: bootstrap the deploy tag (README step 6)") and passes without promoting, so the deploy workflow stays green before hk-follow is installed. A tag that exists but carries no revision, or a registry error, fails the job (`deploy-refused:baseline_unreadable`). Point it at the sha ncp serves now; the image built for that sha already exists:
+6. **Bootstrap the tag.** Promote compares against the sha the `deploy` tag names, so the tag must exist before the first promote. Until it exists, every promote posts `deploy-promote` pending ("no baseline: bootstrap the deploy tag (README step 6)") and passes without promoting, so the deploy workflow stays green before hk-follow is installed. A tag that exists but carries no revision, or a registry error, fails the job (`deploy-refused:baseline_unreadable`). Point it at the sha oci serves now; the image built for that sha already exists:
 
    ```bash
    sha=$(curl -fsS http://127.0.0.1:8800/healthz | jq -r .vcs_revision)
@@ -148,7 +150,7 @@ Nothing here is installed by the PR. These are the steps the design session runs
 - **Roll back.** Run `shiftgate rollback <svc>`. shiftgate holds the digest it rolled back from, and hk-follow's state already marks that digest handled, so nothing redeploys it. The next promote (a new sha) deploys normally. A source revert and a DB rollback are separate steps (r2 §2).
 - **Retry a failed digest.** Fix the cause, then run `hk-follow reset`. The next tick evaluates the digest again. If shiftgate holds it (an image failure), clear the hold first with an explicit `shiftgate deploy <svc> --digest <d>`.
 - **Retry a rejected outbox entry.** A report the server or GitHub refused permanently — a 4xx validation or secret refusal on a record, a `400` or `422` status, an entry of a kind the script does not know — is not retried. It leaves the queue for `/var/lib/hk-follow/outbox/rejected/`, holding nothing back: the journal gets one `hk_follow.outbox_rejected key=<key> reason=<code>` line, the design lane gets one event, and a later record with the same key is still delivered. Nothing is deleted. To retry one, fix the cause, read the entry with `jq . /var/lib/hk-follow/outbox/rejected/<name>`, and check the current state of its document key with `handoffkeep doc get <key>`. A put is an upsert by key, so a requeued report that a later one superseded would overwrite the newer state: if a later report for that key was already delivered, do not requeue it (leave it in `rejected/` as the archive, or delete it to drop that report for good). Otherwise move it back with `mv /var/lib/hk-follow/outbox/rejected/<name> /var/lib/hk-follow/outbox/`; the next tick delivers it. If the move itself fails, the entry stays queued and holds its key (`hk_follow.outbox_reject_failed`), so nothing behind it is lost.
-- **After a deploy.** Push deploy rolls only the ncp server. Run `deploy/hk-cli-sync <tag>` on the operator's mac after the `[hk-follow] ... deployed on ncp` event, so the release CLI reaches every fleet host too. It refuses unless the tag is on main, its `deploy-ok` is success, the release has `SHA256SUMS`, and ncp serves the tag's commit. `--dry-run` prints the plan and writes nothing.
+- **After a deploy.** Push deploy rolls only the oci server. Run `deploy/hk-cli-sync <tag>` on the operator's mac after the `[hk-follow] ... deployed on oci` event, so the release CLI reaches every fleet host too. It refuses unless the tag is on main, its `deploy-ok` is success, the release has `SHA256SUMS`, and oci serves the tag's commit. `--dry-run` prints the plan and writes nothing.
 
 ## Where this differs from r3
 

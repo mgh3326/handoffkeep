@@ -40,7 +40,7 @@ type deployRecordView struct {
 	RecordKey string `json:"record_key"`
 	Result    string `json:"result"`
 	// Target is the environment the record's attempt names (hk-ship/hk-follow
-	// write "ncp", "mbp", …). Empty on a record that did not name one.
+	// write "oci", "mbp", …). Empty on a record that did not name one.
 	Target      string     `json:"target,omitempty"`
 	HeadSHA     *string    `json:"head_sha"`
 	DeployedRef *string    `json:"deployed_ref"`

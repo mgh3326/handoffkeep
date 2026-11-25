@@ -2,7 +2,7 @@ name: image
 # Builds the handoffkeep container image after merge (T-POST): main pushes
 # build, smoke-test and push to GHCR; manual runs build and smoke-test only.
 # Pull requests do not run it (mergewake watches image on main). Tags
-# <full commit sha> and `main`. No deploy step lives here — the NCP systemd
+# <full commit sha> and `main`. No deploy step lives here — the oci systemd
 # deployment is unchanged by this pipeline.
 on:
   push:

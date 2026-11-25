@@ -6,7 +6,7 @@
 #                                         gate (I1, I2) and moves the image tag
 #                                         `deploy` to <sha>'s image. It never
 #                                         reaches a server.
-#   hk-follow tick [--dry-run]            the ncp systemd timer (every 30 s).
+#   hk-follow tick [--dry-run]            the systemd timer on oci (every 30 s).
 #                                         Reads the `deploy` tag, re-checks the
 #                                         gate against GitHub (I1, I2: it does
 #                                         not trust whoever moved the tag),
@@ -42,7 +42,7 @@ set -euo pipefail
 : "${HK_FOLLOW_STATE_DIR:=/var/lib/hk-follow}"
 : "${HK_FOLLOW_LOCK:=${HK_FOLLOW_STATE_DIR}/lock}"
 : "${HK_FOLLOW_NOTIFY_LANE:=handoffkeep-design}"
-: "${HK_FOLLOW_TARGET:=ncp}"
+: "${HK_FOLLOW_TARGET:=oci}"
 : "${HK_FOLLOW_HEALTH_WAIT:=60}"
 : "${HK_FOLLOW_IMAGE_WAIT:=1200}"
 : "${HK_FOLLOW_GITHUB_API:=https://api.github.com}"
@@ -747,7 +747,8 @@ promote() {
 		# range) literal is never reachable from a GitHub-hosted runner,
 		# which is how 4c2b23ca failed closed with approval_unreadable.
 		# The check stays out of gate() on purpose: tick shares gate() and
-		# ncp's HANDOFFKEEP_URL is its loopback hk, so a gate-level check
+		# the tick host's HANDOFFKEEP_URL is its loopback hk (oci; ncp before
+		# it was returned 2026-11-24), so a gate-level check
 		# would hold every migration release on the host forever.
 		if [[ "$reason" == approval_unreadable ]] && hk_promote_url_is_private; then
 			log "hk_follow.promote_refused sha=$sha reason=approval_unreadable:private_url url_host=$(hk_promote_url_host)"
@@ -777,7 +778,7 @@ promote() {
 }
 
 # ---------------------------------------------------------------------------
-# tick (ncp).
+# tick (oci).
 # ---------------------------------------------------------------------------
 
 STATE_FILE() { echo "${HK_FOLLOW_STATE_DIR}/state.json"; }

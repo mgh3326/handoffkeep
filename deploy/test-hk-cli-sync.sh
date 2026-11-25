@@ -2,11 +2,15 @@
 # Tests for deploy/hk-cli-sync/hk-cli-sync against fake gh, ssh and scp on PATH.
 # The fake ssh runs each remote command under a per-host fake HOME, and the
 # fake scp copies into that HOME, so the install steps (checksum, backup,
-# atomic mv) really run against files. Connectivity and ncp's healthz are the
-# only things faked.
+# atomic mv) really run against files. Connectivity and the serving host's
+# healthz are the only things faked.
 #
 #   bash deploy/test-hk-cli-sync.sh
 set -uo pipefail
+
+# A caller's serving-host settings must not leak into the cases below; each
+# case sets what it needs.
+unset HK_CLI_SERVER HK_CLI_SERVER_HEALTH HK_CLI_NCP HK_CLI_NCP_HEALTH
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 SCRIPT="$HERE/hk-cli-sync"
@@ -66,7 +70,7 @@ cmd=${args[1]:-}
 echo "ssh $host $cmd" >>"$FIX/calls"
 grep -qxF "$host" "$FIX/unreachable" 2>/dev/null && exit 255
 case "$cmd" in
-*healthz*) cat "$FIX/ncp_healthz"; exit 0 ;;
+*healthz*) cat "$FIX/server_healthz"; exit 0 ;;
 esac
 mkdir -p "$FIX/remote/$host"
 HOME="$FIX/remote/$host" bash -c "$cmd"
@@ -116,7 +120,7 @@ version_script() {
 fx_gh() { printf '%s' "$2" >"$FIX/gh/$(printf '%s' "$1" | tr '/' '_')"; }
 
 # green: a tag that is on main, deploy-ok success, a complete release, and
-# ncp serving the tag's commit. Every failure case changes one of these.
+# the serving host serving the tag's commit. Every failure case changes one of these.
 green() {
 	mkdir -p "$FIX/gh" "$FIX/release" "$FIX/remote"
 	fx_gh "repos/$REPO/commits/$TAG" "{\"sha\":\"$SHA\"}"
@@ -129,7 +133,7 @@ green() {
 		chmod 644 "$FIX/release/handoffkeep_$arch"
 	done
 	sums "$FIX/release"
-	printf '{"vcs_revision":"%s"}' "$SHA" >"$FIX/ncp_healthz"
+	printf '{"vcs_revision":"%s"}' "$SHA" >"$FIX/server_healthz"
 }
 
 # setup: a fresh fixture directory for one case.
@@ -220,16 +224,52 @@ check "exit 5" rc_is 5
 check "no download" lacks "$FIX/calls" "gh release download"
 check "no scp" lacks "$FIX/calls" "scp "
 
-echo "== refusal: ncp serves another sha"
+echo "== default host list no longer names ncp; the serving host is oci"
 setup
-printf '{"vcs_revision":"%s"}' "$OLD" >"$FIX/ncp_healthz"
+version_script "$TAG" >"$FIX/release/handoffkeep_linux_amd64"
+chmod 644 "$FIX/release/handoffkeep_linux_amd64"
+sums "$FIX/release"
+printf '{"assets":[{"name":"handoffkeep_darwin_amd64"},{"name":"handoffkeep_darwin_arm64"},{"name":"handoffkeep_linux_amd64"},{"name":"handoffkeep_linux_arm64"},{"name":"SHA256SUMS"}]}' >"$FIX/release_view.json"
+(
+	export FIX HOME="$FIX/home" PATH="$FIX/bin:$PATH"
+	unset HK_CLI_HOSTS
+	bash "$SCRIPT" "$TAG" --dry-run
+) >"$FIX/out" 2>"$FIX/err"
+RC=$?
+check "exit 0" rc_is 0
+check "oci planned" has "$FIX/out" "plan oci install $TAG"
+check "no ncp planned" lacks "$FIX/out" "ncp"
+check "healthz read from oci" has "$FIX/calls" "ssh oci curl"
+
+echo "== deprecated HK_CLI_NCP alone still names the serving host"
+setup
+export HK_CLI_NCP=oci
+run "$TAG"
+unset HK_CLI_NCP
+check "exit 0" rc_is 0
+check "healthz read from the HK_CLI_NCP host" has "$FIX/calls" "ssh oci curl"
+check "CLI installed on m1b" has "$FIX/remote/m1b/.local/bin/handoffkeep" "release=$TAG"
+
+echo "== deprecated HK_CLI_NCP mismatch refuses naming that host"
+setup
+printf '{"vcs_revision":"%s"}' "$OLD" >"$FIX/server_healthz"
+export HK_CLI_NCP=oci
+run "$TAG"
+unset HK_CLI_NCP
+check "exit 6" rc_is 6
+check "refusal names oci" has "$FIX/err" "oci serves"
+check "no scp" lacks "$FIX/calls" "scp "
+
+echo "== refusal: the serving host serves another sha"
+setup
+printf '{"vcs_revision":"%s"}' "$OLD" >"$FIX/server_healthz"
 run "$TAG"
 check "exit 6" rc_is 6
 check "no scp" lacks "$FIX/calls" "scp "
 
-echo "== refusal: ncp healthz unreadable"
+echo "== refusal: the serving host healthz unreadable"
 setup
-printf 'ncp\n' >"$FIX/unreachable"
+printf 'oci\n' >"$FIX/unreachable"
 run "$TAG"
 check "exit 6" rc_is 6
 check "no scp" lacks "$FIX/calls" "scp "
