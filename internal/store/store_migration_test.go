@@ -476,4 +476,3 @@ func TestChatV16ToV17Upgrade(t *testing.T) {
 		t.Fatalf("version 17 rows=%d err=%v", version, err)
 	}
 }
-

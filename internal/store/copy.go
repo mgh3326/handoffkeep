@@ -559,7 +559,7 @@ func classifyCopyColumn(mysqlDB bool, dataType, detail string) (copyValueKind, e
 // strings on MySQL. They are compared and converted as a list of strings.
 var copyArrayColumns = map[string]bool{
 	"deploy_services.record_prefixes": true,
-	"task_thread_deliveries.posted":       true,
+	"task_thread_deliveries.posted":   true,
 }
 
 func isCopyArrayColumn(table, column string) bool { return copyArrayColumns[table+"."+column] }
