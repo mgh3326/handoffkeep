@@ -893,7 +893,16 @@ type AttachmentUsage struct {
 	Puts       int64  `json:"puts_month"`
 	Gets       int64  `json:"gets_month"`
 	BytesAdded int64  `json:"bytes_added_month"`
-	TotalBytes int64  `json:"bytes_total"`
+	// TotalBytes is the bytes still in the object store: every attachment
+	// whose hot copy has not been deleted. It is what the storage fuse
+	// counts (hk 6570). ArchivedBytes is the bytes whose hot copy was
+	// deleted after the archive copy was recorded; they live only in the
+	// archive and no longer count against the fuse.
+	TotalBytes    int64 `json:"bytes_total"`
+	ArchivedBytes int64 `json:"bytes_archived"`
+	// CapBytes is the storage fuse in force, filled by the API from the
+	// server's configuration; the store leaves it zero.
+	CapBytes int64 `json:"cap_bytes,omitempty"`
 }
 type SearchResult struct {
 	Scope   string `json:"scope"`
@@ -4298,8 +4307,16 @@ func attachmentLocationArgs(d storeDialect, sha, location string) []any {
 	return []any{sha, location}
 }
 
+// attachmentHotBytesSQL sums the attachment bytes still in the object store.
+// A row whose hot copy was deleted (hot_deleted_at set, only ever after its
+// archive copy was recorded and verified) holds no object-store bytes, and
+// an archived sha refuses every new put (ErrAttachmentArchived), so its
+// object is never written again. Counting those rows made the fuse read the
+// sum of all bytes ever added instead of what the store holds (hk 6570).
+const attachmentHotBytesSQL = `SELECT COALESCE(SUM(size_bytes),0) FROM attachments WHERE hot_deleted_at IS NULL`
+
 // attachmentChargedBytes is the storage-fuse total for a new attachment
-// write: committed attachment bytes plus the bytes still reserved by uploads
+// write: committed attachment bytes still in the object store plus the bytes still reserved by uploads
 // that can still commit — pending and completing rows whose staging object is
 // not yet confirmed gone. Done and refused rows are excluded: their bytes are
 // either already committed or can never commit again. $1 names one upload to
@@ -4307,8 +4324,8 @@ func attachmentLocationArgs(d storeDialect, sha, location string) []any {
 // caller passes ”. ReserveAttachmentUpload keeps its own wider sum — every
 // unreleased row, resolved ones included — because at begin time nothing is
 // mid-commit and a stricter admission only refuses earlier.
-const attachmentChargedBytes = `SELECT (SELECT COALESCE(SUM(size_bytes),0) FROM attachments) + (SELECT COALESCE(SUM(size_bytes),0) FROM attachment_uploads WHERE staging_deleted_at IS NULL AND status IN ('pending','completing') AND ($1='' OR id<>$1))`
-const attachmentChargedBytesMySQL = `SELECT (SELECT COALESCE(SUM(size_bytes),0) FROM attachments) + (SELECT COALESCE(SUM(size_bytes),0) FROM attachment_uploads WHERE staging_deleted_at IS NULL AND status IN ('pending','completing') AND (?='' OR id<>?))`
+const attachmentChargedBytes = `SELECT (` + attachmentHotBytesSQL + `) + (SELECT COALESCE(SUM(size_bytes),0) FROM attachment_uploads WHERE staging_deleted_at IS NULL AND status IN ('pending','completing') AND ($1='' OR id<>$1))`
+const attachmentChargedBytesMySQL = `SELECT (` + attachmentHotBytesSQL + `) + (SELECT COALESCE(SUM(size_bytes),0) FROM attachment_uploads WHERE staging_deleted_at IS NULL AND status IN ('pending','completing') AND (?='' OR id<>?))`
 
 // PutAttachment records an immutable object and its reference after S3 PUT has
 // succeeded. It serializes quota accounting with a locked monthly usage row.
@@ -4739,12 +4756,14 @@ func (s *Store) AttachmentUsage(ctx context.Context) (AttachmentUsage, error) {
 	if e != nil {
 		return x, e
 	}
-	e = s.db().QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes),0) FROM attachments`).Scan(&x.TotalBytes)
+	e = s.db().QueryRow(ctx, `SELECT COALESCE(SUM(CASE WHEN hot_deleted_at IS NULL THEN size_bytes ELSE 0 END),0), COALESCE(SUM(CASE WHEN hot_deleted_at IS NOT NULL THEN size_bytes ELSE 0 END),0) FROM attachments`).Scan(&x.TotalBytes, &x.ArchivedBytes)
 	return x, e
 }
+
+// AttachmentObjectCount counts the attachments still in the object store.
 func (s *Store) AttachmentObjectCount(ctx context.Context) (int64, error) {
 	var n int64
-	return n, s.db().QueryRow(ctx, `SELECT COUNT(*) FROM attachments`).Scan(&n)
+	return n, s.db().QueryRow(ctx, `SELECT COUNT(*) FROM attachments WHERE hot_deleted_at IS NULL`).Scan(&n)
 }
 
 // searchCapture receives the main search statement and its arguments. The

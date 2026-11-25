@@ -2625,6 +2625,7 @@ func (s Server) usage(w http.ResponseWriter, r *http.Request) {
 		appErr(w, r, e)
 		return
 	}
+	u.CapBytes = s.Service.Attachments.Config.StorageCap
 	jsonOut(w, http.StatusOK, map[string]any{"attachments": "enabled", "usage": u, "cap_bytes": s.Service.Attachments.Config.StorageCap, "cap_ratio": float64(u.TotalBytes) / float64(s.Service.Attachments.Config.StorageCap)})
 }
 func (s Server) metrics(w http.ResponseWriter, r *http.Request) {
@@ -2661,7 +2662,7 @@ func (s Server) metrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	fmt.Fprintf(w, "handoffkeep_attach_bytes_total %d\nhandoffkeep_attach_objects %d\nhandoffkeep_attach_puts_month %d\nhandoffkeep_attach_gets_month %d\nhandoffkeep_attach_cap_bytes %d\nhandoffkeep_attach_cap_ratio %.8f\n", u.TotalBytes, objects, u.Puts, u.Gets, c.StorageCap, float64(u.TotalBytes)/float64(c.StorageCap))
+	fmt.Fprintf(w, "handoffkeep_attach_bytes_total %d\nhandoffkeep_attach_bytes_archived %d\nhandoffkeep_attach_objects %d\nhandoffkeep_attach_puts_month %d\nhandoffkeep_attach_gets_month %d\nhandoffkeep_attach_cap_bytes %d\nhandoffkeep_attach_cap_ratio %.8f\n", u.TotalBytes, u.ArchivedBytes, objects, u.Puts, u.Gets, c.StorageCap, float64(u.TotalBytes)/float64(c.StorageCap))
 	_, _ = w.Write(outbox.Bytes())
 	s.ClientRevisions.writeMetrics(w)
 }
