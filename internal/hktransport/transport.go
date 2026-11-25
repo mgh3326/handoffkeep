@@ -540,13 +540,14 @@ func (c Client) Call(ctx context.Context, method, path string, input, output any
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var x struct {
-			Error, Pattern, Reason, Field string
-			SimilarTasks                  []SimilarTask `json:"similar_tasks"`
-			Reset                         bool
-			MinSyncID                     int64 `json:"min_sync_id"`
+			Error, Pattern, Reason, Field, Param string
+			Allowed                              any
+			SimilarTasks                         []SimilarTask `json:"similar_tasks"`
+			Reset                                bool
+			MinSyncID                            int64 `json:"min_sync_id"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&x)
-		return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern, Reason: x.Reason, Field: x.Field, SimilarTasks: x.SimilarTasks, Reset: x.Reset, MinSyncID: x.MinSyncID}
+		return &HTTPError{Status: resp.StatusCode, Code: x.Error, Pattern: x.Pattern, Reason: x.Reason, Field: x.Field, Param: x.Param, Allowed: x.Allowed, SimilarTasks: x.SimilarTasks, Reset: x.Reset, MinSyncID: x.MinSyncID}
 	}
 	if e := HTMLBodyError(resp); e != nil {
 		return e
@@ -569,6 +570,12 @@ type HTTPError struct {
 	Pattern string
 	Reason  string
 	Field   string
+	// Param names the rejected query or body parameter, when the server
+	// named one (hk 6479: invalid_context/invalid_export_query refusals
+	// carry param plus allowed). Allowed is the wire "allowed" value: a
+	// string range ("1..1000") or a list of accepted names.
+	Param   string
+	Allowed any
 	// SimilarTasks lists the open tasks a 409 similar_tasks found.
 	SimilarTasks []SimilarTask
 	// Reset and MinSyncID carry a change-feed reader's expired-cursor answer
@@ -595,6 +602,9 @@ func (e *HTTPError) Error() string {
 		}
 		return "similar_tasks: " + strings.Join(parts, "; ")
 	}
+	if e.Param != "" && e.Allowed != nil {
+		return fmt.Sprintf("%s: %s must be %s", e.Code, e.Param, allowedText(e.Allowed))
+	}
 	if e.Pattern != "" {
 		return fmt.Sprintf("%s:%s", e.Code, e.Pattern)
 	}
@@ -608,6 +618,25 @@ func (e *HTTPError) Error() string {
 		return fmt.Sprintf("http_%d", e.Status)
 	}
 	return e.Code
+}
+
+// allowedText renders the wire "allowed" value for Error: a plain string
+// range, or "one of" plus the accepted names for a list.
+func allowedText(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case []string:
+		return "one of " + strings.Join(t, ", ")
+	case []any:
+		names := make([]string, 0, len(t))
+		for _, x := range t {
+			names = append(names, fmt.Sprint(x))
+		}
+		return "one of " + strings.Join(names, ", ")
+	default:
+		return fmt.Sprint(v)
+	}
 }
 
 // ErrorCode returns the server's error code ("not_found", "queue_empty", ...)

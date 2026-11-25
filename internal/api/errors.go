@@ -36,6 +36,21 @@ func writeError(w http.ResponseWriter, status int, code string) {
 	jsonOut(w, status, map[string]string{"error": code})
 }
 
+// writeParamError is the one helper for a refusal that names its parameter
+// (hk 6479). The code stays the old one, so old clients keep working; param
+// names the rejected query parameter and allowed carries what it accepts — a
+// "1..1000" range string or the accepted vocabulary. An optional
+// store-authored reason is kept for refusals whose reason old clients read
+// (the area vocabulary). Never build these bodies ad-hoc in a handler; call
+// this.
+func writeParamError(w http.ResponseWriter, status int, code, param string, allowed any, reason ...string) {
+	body := map[string]any{"error": code, "param": param, "allowed": allowed}
+	if len(reason) > 0 && reason[0] != "" {
+		body["reason"] = reason[0]
+	}
+	jsonOut(w, status, body)
+}
+
 // errorRule maps one sentinel error to its HTTP status and wire code. When
 // reason is set, the text after "<sentinel text>: " is returned as "reason";
 // only set it for sentinels whose reason is store-authored, never echoed

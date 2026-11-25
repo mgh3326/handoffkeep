@@ -186,6 +186,30 @@ func (c Client) SearchPage(ctx context.Context, q, scope, session string, limit 
 	}
 	return store.SearchPage{Results: xs, Partial: out.Partial, TimedOut: out.TimedOut}, nil
 }
+
+// GET /v1/tasks/search, the duplicate check before tasks add. project nil
+// means no project filter ("" selects legacy rows with no project); state ""
+// means every state; open keeps only unfinished tasks and is exclusive with
+// state. Results arrive in search order — relevance first, newest first
+// within equal rank — with whether the window was cut.
+func (c Client) SearchTasks(ctx context.Context, q, lane, state string, project *string, open bool, limit int) ([]store.Task, bool, error) {
+	var out struct {
+		Tasks     []store.Task `json:"tasks"`
+		Truncated bool         `json:"truncated"`
+	}
+	p := url.Values{"q": {q}, "lane": {lane}, "state": {state}, "limit": {fmt.Sprint(limit)}}
+	if open {
+		p.Set("open", "true")
+	}
+	if project != nil {
+		p.Set("project", *project)
+	}
+	e := c.call(ctx, "GET", "/v1/tasks/search?"+p.Encode(), nil, &out)
+	if e != nil {
+		return nil, false, e
+	}
+	return out.Tasks, out.Truncated, nil
+}
 func (c Client) PutAttachment(ctx context.Context, _ string, name, mime, ref string, body []byte) (store.Attachment, bool, error) {
 	x, created, e := client.Client(c).PutAttachment(ctx, name, mime, ref, body)
 	return storeAttachment(x), created, e
@@ -887,10 +911,11 @@ func (c Client) ExportTasks(ctx context.Context, lane, state, parentLane string,
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var x struct {
-			Error, Field string
+			Error, Field, Param string
+			Allowed             any
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&x)
-		return nil, &HTTPError{Status: resp.StatusCode, Code: x.Error, Field: x.Field}
+		return nil, &HTTPError{Status: resp.StatusCode, Code: x.Error, Field: x.Field, Param: x.Param, Allowed: x.Allowed}
 	}
 	if e := hktransport.HTMLBodyError(resp); e != nil {
 		return nil, e
