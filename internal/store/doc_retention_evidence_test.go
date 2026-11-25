@@ -164,7 +164,20 @@ func TestDocPruneLogRecordsJobAndTask(t *testing.T) {
 		jobPrune := "mwr-780-0000000-p1-0"
 		byAge := w.doc("review/"+jobPrune, jobPrune, &tPrune)
 		noTask := w.doc("review/mwr-780-0000000-p2-0", jobPrune, nil)
-		w.exec(`UPDATE documents SET updated_at=$1 WHERE key=$2 OR key=$3`, "UPDATE documents SET updated_at=? WHERE `key`=? OR `key`=?", w.now.Add(-48*time.Hour), byAge.Key, noTask.Key)
+		// Through s.begin, so a MySQL sync trigger sees the transaction's sync id.
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = tx.Exec(ctx, s.q(`UPDATE documents SET updated_at=$1 WHERE key=$2 OR key=$3`, "UPDATE documents SET updated_at=? WHERE `key`=? OR `key`=?"), w.now.Add(-48*time.Hour), byAge.Key, noTask.Key)
+		if err == nil {
+			err = tx.Commit(ctx)
+		}
+		_ = tx.Rollback(ctx)
+		release()
+		if err != nil {
+			t.Fatal(err)
+		}
 		pruned, err := s.PruneDocuments(ctx, DocPrunePrefix, w.now.Add(-24*time.Hour), 10, true, "log-test")
 		if err != nil || pruned.Deleted != 2 {
 			t.Fatalf("PruneDocuments = %+v err=%v, want 2 deleted", pruned, err)
