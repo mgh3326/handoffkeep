@@ -1,8 +1,10 @@
 /* The document viewer's own styles: loaded with the lazy DocView chunk, so
  * Home and Work never fetch them. Tokens only. */
 
+/* The document fills the content area (hk 6328): wide tables, diagrams and
+ * long lines read better at full width than in the 660px reading column. */
 .hk-doc {
-  max-width: var(--hk-reading-width);
+  max-width: none;
 }
 .hk-doc-head h1 {
   overflow-wrap: anywhere;
