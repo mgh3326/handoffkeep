@@ -211,8 +211,10 @@ func TestExportRouteAuthAndValidation(t *testing.T) {
 			resp.Body.Close()
 			t.Fatalf("query=%s status=%d", query, resp.StatusCode)
 		}
-		var body map[string]string
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || body["error"] != "invalid_export_query" {
+		// Since hk 6479 the body also names the refused parameter and what it
+		// allows ("param", "allowed"), so values are not all strings.
+		var body map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || body["error"] != "invalid_export_query" || body["param"] == nil {
 			resp.Body.Close()
 			t.Fatalf("query=%s body=%v err=%v", query, body, err)
 		}
@@ -553,8 +555,12 @@ func TestExportNoStoreAndErrorBodies(t *testing.T) {
 		if err := json.Unmarshal(body["error"], &code); err != nil || code != wantCode {
 			t.Fatalf("error=%s want %s body=%s", code, wantCode, raw)
 		}
-		if len(body) != 1 {
-			t.Fatalf("error body has extra fields: %s", raw)
+		// The only detail keys an error may carry are the refused parameter
+		// what it allows and an optional reason (hk 6479); anything else would be a leak.
+		for k := range body {
+			if k != "error" && k != "param" && k != "allowed" && k != "reason" {
+				t.Fatalf("error body has extra field %q: %s", k, raw)
+			}
 		}
 	}
 
