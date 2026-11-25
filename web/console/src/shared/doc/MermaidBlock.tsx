@@ -1,7 +1,10 @@
 // One `mermaid` fenced block. It shows the drawn SVG, or — when the block is
 // too large or does not parse — the source as text with a one-line reason.
+// A drawn diagram is a button: activating it opens the full-window viewer.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import DiagramViewer from "./DiagramViewer";
+import { naturalSize } from "./diagramView";
 import { DiagramTooLarge, renderMermaid } from "./mermaidRender";
 
 type State = { status: "drawing" } | { status: "svg"; svg: string } | { status: "failed"; reason: string };
@@ -16,6 +19,9 @@ function reasonOf(err: unknown): string {
 
 export default function MermaidBlock({ source }: { source: string }) {
   const [state, setState] = useState<State>({ status: "drawing" });
+  const [viewing, setViewing] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const size = useMemo(() => (state.status === "svg" ? naturalSize(state.svg) : null), [state]);
   useEffect(() => {
     let cancelled = false;
     setState({ status: "drawing" });
@@ -32,12 +38,24 @@ export default function MermaidBlock({ source }: { source: string }) {
     };
   }, [source]);
 
-  if (state.status === "svg") {
+  if (state.status === "svg" && size !== null) {
     // The SVG goes in as an image, not as markup: the page's CSP (style-src
     // 'self') would block the <style> Mermaid puts inside it, and an image is
     // its own document, where scripts never run and nothing is fetched.
     const src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(state.svg)}`;
-    return <img className="hk-doc-mermaid" data-doc-diagram="svg" src={src} alt="Diagram" />;
+    const close = () => {
+      // Focus goes back to the diagram before the viewer unmounts.
+      trigger.current?.focus();
+      setViewing(false);
+    };
+    return (
+      <>
+        <button ref={trigger} type="button" className="hk-doc-diagram" aria-label="Open diagram" onClick={() => setViewing(true)}>
+          <img className="hk-doc-mermaid" data-doc-diagram="svg" src={src} alt="Diagram" />
+        </button>
+        {viewing && <DiagramViewer src={src} size={size} onClose={close} />}
+      </>
+    );
   }
   return (
     <>
