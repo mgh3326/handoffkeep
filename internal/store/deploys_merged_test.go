@@ -7,7 +7,7 @@ import (
 
 // ListMergedTaskEvents returns one row per merged task (its latest merge),
 // newest first, and leaves out tasks that are not merged. Both dialects run
-// it; the MySQL read is a LATERAL per merged task (hk 6222).
+// it; the read drives from the merge transitions, newest first (hk 6397).
 func TestListMergedTaskEventsLatestMergeFirst(t *testing.T) {
 	s, _ := searchTestStore(t)
 	ctx := context.Background()

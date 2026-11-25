@@ -3851,8 +3851,11 @@ const awaitingEventSQL = `((kind='awaiting_decision' AND to_value='true') OR (ki
 // awaitingTaskDecisionSQLMySQL is awaitingTaskDecisionSQL for MySQL: the `?`
 // key-exists test is JSON_CONTAINS_PATH and the status comes through CAST AS
 // CHAR, which takes the connection's utf8mb4_0900_bin (design §11.4, hk 5169):
-// a bare ->> carries utf8mb4_bin and no longer mixes with it.
-const awaitingTaskDecisionSQLMySQL = `awaiting_decision AND NOT JSON_CONTAINS_PATH(refs,'one','$.disposition') AND COALESCE(CAST(refs->>'$.decision_request.status' AS CHAR),'')<>'open'`
+// a bare ->> carries utf8mb4_bin and no longer mixes with it. The flag is an
+// explicit `= TRUE`: a bare truth test is `<> 0`, which MySQL cannot range
+// over, so the awaiting halves would walk the table instead of their index
+// (hk 6397).
+const awaitingTaskDecisionSQLMySQL = `awaiting_decision = TRUE AND NOT JSON_CONTAINS_PATH(refs,'one','$.disposition') AND COALESCE(CAST(refs->>'$.decision_request.status' AS CHAR),'')<>'open'`
 
 // TaskDecision is an unresolved task together with the original question
 // recorded when the task last began waiting on a decision.

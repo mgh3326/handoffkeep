@@ -260,25 +260,39 @@ func attentionLaneItems(ctx context.Context, tx transaction, now time.Time) ([]A
 	return out, rows.Err()
 }
 
+// attentionTasksBranch is one half of the waiting-tasks read: the awaiting
+// branch ranges over the awaiting_decision rows, the stalled branch over one
+// state's rows. The two sets are disjoint (the stalled half carries NOT
+// awaiting_decision), so UNION ALL keeps every waiting task once.
+func attentionTasksBranch(where string) string {
+	return `SELECT tasks.id,title,lane,state,priority,(` + awaitingTaskDecisionSQL + `) AS awaiting,` + taskActivitySQL + ` AS since,s.read_at,s.done_at,s.snoozed_until
+		FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key='task:'||tasks.id
+		WHERE (` + where + `) AND ` + attentionTaskVisible("$2")
+}
+
 // attentionTasksTx reads the waiting tasks. stalledBefore is the activity time
 // a started task must be older than to count as stalled; now is the read time
-// the inbox triage state is judged against.
+// the inbox triage state is judged against. Each count is the same LEFT JOIN
+// as its item query, so a count never covers an item its list hides.
 func attentionTasksTx(ctx context.Context, tx transaction, stalledBefore, now time.Time) (AttentionTasks, error) {
 	out := AttentionTasks{Items: []AttentionTask{}}
 	// Only awaiting and started rows can qualify, so the activity subqueries
-	// run for those alone.
-	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT COUNT(*) FILTER (WHERE `+awaitingTaskDecisionSQL+`),
-		COUNT(*) FILTER (WHERE `+attentionStalledSQL+`)
-		FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key='task:'||tasks.id
-		WHERE ((`+awaitingTaskDecisionSQL+`) OR (`+attentionStalledSQL+`)) AND `+attentionTaskVisible("$2"), attentionTaskCountsMySQL), attentionTaskArgs(tx, stalledBefore, now, true, 0)...).Scan(&out.AwaitingDecision, &out.Stalled); err != nil {
+	// run for those alone. Each count is its own indexed read: the awaiting
+	// half ranges over the awaiting_decision rows, the stalled half over one
+	// state's rows.
+	if err := tx.QueryRow(ctx, sqlFor(tx, `SELECT
+		(SELECT COUNT(*) FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key='task:'||tasks.id
+			WHERE (`+awaitingTaskDecisionSQL+`) AND `+attentionTaskVisible("$2")+`),
+		(SELECT COUNT(*) FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key='task:'||tasks.id
+			WHERE (`+attentionStalledSQL+`) AND `+attentionTaskVisible("$2")+`)`, attentionTaskCountsMySQL), attentionTaskArgs(tx, stalledBefore, now, true, 0)...).Scan(&out.AwaitingDecision, &out.Stalled); err != nil {
 		return out, err
 	}
 	out.Count = out.AwaitingDecision + out.Stalled
 
-	rows, err := tx.Query(ctx, sqlFor(tx, `SELECT tasks.id,title,lane,state,priority,(`+awaitingTaskDecisionSQL+`) AS awaiting,`+taskActivitySQL+` AS since,s.read_at,s.done_at,s.snoozed_until
-		FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key='task:'||tasks.id
-		WHERE ((`+awaitingTaskDecisionSQL+`) OR (`+attentionStalledSQL+`)) AND `+attentionTaskVisible("$2")+`
-		ORDER BY since DESC, tasks.id DESC LIMIT $3`, attentionTaskItemsMySQL), attentionTaskArgs(tx, stalledBefore, now, false, AttentionItems)...)
+	rows, err := tx.Query(ctx, sqlFor(tx, `(`+attentionTasksBranch(awaitingTaskDecisionSQL)+`)
+		UNION ALL
+		(`+attentionTasksBranch(attentionStalledSQL)+`)
+		ORDER BY since DESC, id DESC LIMIT $3`, attentionTaskItemsMySQL), attentionTaskArgs(tx, stalledBefore, now, false, AttentionItems)...)
 	if err != nil {
 		return out, err
 	}
@@ -316,10 +330,14 @@ func (s *Store) AttentionTaskCandidates(ctx context.Context, now time.Time, star
 	if s.dialect == mysqlDialect {
 		return s.attentionTaskCandidatesMySQL(ctx, now, startedIDs)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT tasks.id,title,lane,state,priority,(`+awaitingTaskDecisionSQL+`) AS awaiting,`+taskActivitySQL+` AS since,s.read_at,s.done_at,s.snoozed_until
-		FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key='task:'||tasks.id
-		WHERE ((`+awaitingTaskDecisionSQL+`) OR (tasks.id = ANY($3) AND NOT awaiting_decision AND `+taskActivitySQL+` < $1::timestamptz)) AND `+attentionTaskVisible("$2")+`
-		ORDER BY since DESC, tasks.id DESC`, now.Add(-s.StartedStalledHours()), now, startedIDs)
+	// The awaiting half ranges over the awaiting_decision rows and the started
+	// half probes the started ids by primary key. The two sets are disjoint
+	// (the started half carries NOT awaiting_decision), so UNION ALL keeps
+	// every waiting task once, in the same newest-first order.
+	rows, err := s.pool.Query(ctx, `(`+attentionTasksBranch(awaitingTaskDecisionSQL)+`)
+		UNION ALL
+		(`+attentionTasksBranch(`tasks.id = ANY($3) AND NOT awaiting_decision AND `+taskActivitySQL+` < $1::timestamptz`)+`)
+		ORDER BY since DESC, id DESC`, now.Add(-s.StartedStalledHours()), now, startedIDs)
 	if err != nil {
 		return nil, err
 	}
