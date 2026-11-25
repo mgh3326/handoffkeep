@@ -518,9 +518,11 @@ func (s *Store) resolveDecisionOnce(ctx context.Context, in ResolveDecisionInput
 		case DecisionRequestDefaultApplied:
 			return record(DecisionResultExpired, ErrDecisionRequestResolved)
 		case DecisionRequestWithdrawn:
-			// Withdrawn because its task settled (hk 6339): the refusal stays
-			// task_terminal, as it was while the request was still open.
-			if current.WithdrawnReason == DecisionWithdrawnTaskSettled {
+			// Withdrawn because its task settled (hk 6339) and still settled:
+			// the refusal stays task_terminal, as it was while the request was
+			// open. A task reopened since keeps the answer path of a withdrawn
+			// request.
+			if current.WithdrawnReason == DecisionWithdrawnTaskSettled && isTerminalTaskState(x.State) {
 				return ResolveDecisionOutcome{}, ErrTaskTerminal
 			}
 			return record(DecisionResultSuperseded, ErrDecisionRequestResolved)

@@ -48,7 +48,11 @@ func settleWithdrawCase(t *testing.T, s *Store, to string) {
 	t.Helper()
 	ctx := context.Background()
 	task := decisionTask(t, s, "in_progress")
-	open, err := s.RecordDecisionRequest(ctx, task.ID, "director-1", decisionInput())
+	// A blocking request flags the task. Only a drop can leave a flagged task
+	// (the transition table), so the block is set for the drop case.
+	in := decisionInput()
+	in.Block = to == StateDropped
+	open, err := s.RecordDecisionRequest(ctx, task.ID, "director-1", in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,6 +68,9 @@ func settleWithdrawCase(t *testing.T, s *Store, to string) {
 	}
 	if status, by := settleInboxRow(t, s, open.Request.ID); status != "superseded" || by != DecisionRequestWithdrawn {
 		t.Fatalf("%s: inbox status=%s superseded_by=%s, want superseded by withdrawn", to, status, by)
+	}
+	if got.AwaitingDecision {
+		t.Fatalf("%s: settled task still awaits a decision", to)
 	}
 	if ids := driftIDs(driftAt(t, s, time.Now().UTC(), DriftDefaultMergedDays).SettledOpenDecision); ids[task.ID] {
 		t.Fatalf("%s: drift still lists task %d", to, task.ID)
@@ -112,7 +119,9 @@ func settledBackfillSetup(t *testing.T, s *Store) (settled []int64, open string)
 	ctx := context.Background()
 	for _, state := range []string{StateMerged, StateCompleted, StateDropped} {
 		task := decisionTask(t, s, "in_progress")
-		if _, err := s.RecordDecisionRequest(ctx, task.ID, "director-1", decisionInput()); err != nil {
+		in := decisionInput()
+		in.Block = state == StateDropped // a flagged task, as the drop case of the withdraw test
+		if _, err := s.RecordDecisionRequest(ctx, task.ID, "director-1", in); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.db().Exec(ctx, s.q(`UPDATE tasks SET state=$1 WHERE id=$2`, `UPDATE tasks SET state=? WHERE id=?`), state, task.ID); err != nil {

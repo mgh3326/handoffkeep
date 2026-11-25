@@ -83,6 +83,9 @@ func TestMySQLSettledOpenDecisionBackfill(t *testing.T) {
 		if r == nil || r.Status != DecisionRequestWithdrawn || r.WithdrawnReason != DecisionWithdrawnTaskSettled {
 			t.Fatalf("task %d after backfill request=%+v", id, r)
 		}
+		if x.AwaitingDecision {
+			t.Fatalf("task %d still awaits a decision after backfill", id)
+		}
 		if status, by := settleInboxRow(t, s, r.ID); status != "superseded" || by != DecisionRequestWithdrawn {
 			t.Fatalf("task %d inbox status=%s superseded_by=%s", id, status, by)
 		}
