@@ -81,9 +81,10 @@ const (
 	// one. It is read only as task evidence for the merge link.
 	DocRetentionKeptPrefix = "reports/mwr-"
 	// DocRetentionMergeLinkApply turns the merge leg on for apply runs. It
-	// is off: a later PR turns it on after its gate (hk 6278). Dry runs
-	// report the leg either way.
-	DocRetentionMergeLinkApply = false
+	// is on since its gate passed (hk 6278, operator decision 493; findings
+	// 2026-11-25/hk6278-retention-gate and the post-hk 6289 dry run). Dry runs
+	// report the leg either way. Set it to false to stop the leg.
+	DocRetentionMergeLinkApply = true
 )
 
 // docRetentionMergeLinkFamilies are the key prefixes the merge link may
