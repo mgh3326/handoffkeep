@@ -162,16 +162,25 @@ func applyLifecycle(x *Task, from, to string, now time.Time, c *TaskClosure) err
 
 // writeTaskTx stores the mutable state of x: state, refs, claimant, the
 // awaiting flag and the lifecycle timestamps.
-func writeTaskTx(ctx context.Context, q rowQuerier, x Task) (Task, error) {
+func writeTaskTx(ctx context.Context, tx transaction, x Task) (Task, error) {
+	at := x.UpdatedAt
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	// Every writer that settles a task passes here, so an open decision
+	// request is withdrawn in the same transaction (hk 6339).
+	if err := withdrawSettledRequestTx(ctx, tx, &x, at); err != nil {
+		return Task{}, err
+	}
 	encoded, err := json.Marshal(x.Refs)
 	if err != nil {
 		return Task{}, err
 	}
-	if dialectFor(q) == mysqlDialect {
-		return mysqlWriteTask(ctx, q, x, string(encoded))
+	if dialectFor(tx) == mysqlDialect {
+		return mysqlWriteTask(ctx, tx, x, string(encoded))
 	}
 	var out Task
-	err = scanTask(q.QueryRow(ctx, `UPDATE tasks SET state=$2,refs=$3::jsonb,updated_at=$4,claimed_by=$5,awaiting_decision=$6,started_at=$7,completed_at=$8,canceled_at=$9,triaged_at=$10,started_triage_at=$11 WHERE id=$1 RETURNING `+taskColumns,
+	err = scanTask(tx.QueryRow(ctx, `UPDATE tasks SET state=$2,refs=$3::jsonb,updated_at=$4,claimed_by=$5,awaiting_decision=$6,started_at=$7,completed_at=$8,canceled_at=$9,triaged_at=$10,started_triage_at=$11 WHERE id=$1 RETURNING `+taskColumns,
 		x.ID, x.State, string(encoded), x.UpdatedAt, x.ClaimedBy, x.AwaitingDecision, x.StartedAt, x.CompletedAt, x.CanceledAt, x.TriagedAt, x.StartedTriageAt), &out)
 	return out, err
 }

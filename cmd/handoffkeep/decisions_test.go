@@ -226,7 +226,10 @@ func TestDecisionsBackfillDryRunWritesNothing(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.TransitionTask(ctx, dropped.ID, "dropped", "backfill-lane", "not needed", nil, ""); err != nil {
+	// Direct SQL, not a transition: a settling transition withdraws the open
+	// request (hk 6339), and this fixture needs the open request that a settled
+	// task keeps from before that change or from another writer.
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET state='dropped' WHERE id=$1`, dropped.ID); err != nil {
 		t.Fatal(err)
 	}
 	// live: an escalation of a running job.
