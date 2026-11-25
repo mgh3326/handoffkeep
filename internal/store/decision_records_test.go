@@ -435,13 +435,19 @@ func TestDecisionRecordSupersededWhenTaskEnds(t *testing.T) {
 				}
 			}
 			row := onlyDecision(t, decisionRowsWhere(t, s, `task_id=$1`, ending.ID), DecisionStatusSuperseded)
-			if row.SupersededBy != fmt.Sprintf("task:%d:%s", ending.ID, x.State) {
-				t.Fatalf("superseded_by=%q state=%s", row.SupersededBy, x.State)
+			// A settled end withdraws the request first (hk 6339), so the inbox
+			// row is superseded as a withdraw; an icebox end is not settled.
+			wantBy, wantStatus := fmt.Sprintf("task:%d:%s", ending.ID, x.State), DecisionRequestOpen
+			if IsSettledState(x.State) {
+				wantBy, wantStatus = DecisionRequestWithdrawn, DecisionRequestWithdrawn
+			}
+			if row.SupersededBy != wantBy {
+				t.Fatalf("superseded_by=%q state=%s, want %q", row.SupersededBy, x.State, wantBy)
 			}
 			onlyDecision(t, decisionRowsWhere(t, s, `task_id=$1`, other.ID), DecisionStatusOpen)
-			// The source's own record is not closed by the supersede.
+			// The source's own refs record follows the same rule.
 			got, _, err := s.GetTask(ctx, ending.ID)
-			if err != nil || got.Refs.DecisionRequest == nil || got.Refs.DecisionRequest.Status != DecisionRequestOpen {
+			if err != nil || got.Refs.DecisionRequest == nil || got.Refs.DecisionRequest.Status != wantStatus {
 				t.Fatalf("source request after supersede=%+v err=%v", got.Refs.DecisionRequest, err)
 			}
 		})

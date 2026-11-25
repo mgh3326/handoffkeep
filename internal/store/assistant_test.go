@@ -91,10 +91,10 @@ func TestAssistantResolveRefusesDisposition(t *testing.T) {
 	}
 }
 
-// Invariant: the assistant path refuses an open request on a merged or
-// dropped task — the pending list already calls that uncleaned state, not
-// answerable work. The refusal writes nothing; the operator path keeps its
-// cleanup meaning and still closes the request.
+// Invariant: the assistant path refuses a request on a merged or dropped
+// task. Settling the task withdraws its open request (hk 6339), so the request
+// is withdrawn with task_settled, and the operator's cleanup answer is refused
+// as task_terminal too. The refusals write nothing.
 func TestAssistantResolveRefusesTerminalTask(t *testing.T) {
 	s, _ := searchTestStore(t)
 	ctx := context.Background()
@@ -114,17 +114,16 @@ func TestAssistantResolveRefusesTerminalTask(t *testing.T) {
 			t.Fatalf("state=%s assistant resolve err=%v", state, err)
 		}
 		got, _, _ := s.GetTask(ctx, task.ID)
-		if got.Refs.DecisionRequest.Status != DecisionRequestOpen || got.Refs.DecisionRequest.Resolution != nil {
-			t.Fatalf("state=%s request mutated: %+v", state, got.Refs.DecisionRequest)
+		if got.Refs.DecisionRequest.Status != DecisionRequestWithdrawn || got.Refs.DecisionRequest.WithdrawnReason != DecisionWithdrawnTaskSettled || got.Refs.DecisionRequest.Resolution != nil {
+			t.Fatalf("state=%s request after settle: %+v", state, got.Refs.DecisionRequest)
 		}
-		closed, err := s.ResolveDecisionRequest(ctx, task.ID, "director-1", DecisionResolveInput{RequestID: request.ID, Kind: DecisionRequestAnswered, Option: "A", Responder: "operator"})
-		if err != nil || closed.Request.Status != DecisionRequestAnswered {
-			t.Fatalf("state=%s operator cleanup resolve=%+v err=%v", state, closed.Request.Status, err)
+		// Nothing is left to clean up: the operator's answer is refused the
+		// same way, and no notice is written.
+		if _, err := s.ResolveDecisionRequest(ctx, task.ID, "director-1", DecisionResolveInput{RequestID: request.ID, Kind: DecisionRequestAnswered, Option: "A", Responder: "operator"}); !errors.Is(err, ErrTaskTerminal) {
+			t.Fatalf("state=%s operator resolve on settled task err=%v, want task_terminal", state, err)
 		}
-		// Only the operator's cleanup answer writes a notice; the refused
-		// assistant attempt above wrote none.
-		if n := len(requestNotices(t, s, request.ID)); n != 1 {
-			t.Fatalf("state=%s refused assistant resolve left %d notices, want 1 from the cleanup", state, n)
+		if n := len(requestNotices(t, s, request.ID)); n != 0 {
+			t.Fatalf("state=%s refused resolves left %d notices, want 0", state, n)
 		}
 	}
 }
