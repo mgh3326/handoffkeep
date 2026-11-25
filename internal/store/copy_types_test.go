@@ -42,17 +42,17 @@ func TestCopyChecksumNormalizesMySQLBooleans(t *testing.T) {
 	}
 }
 
-func TestCopyEvidenceRefsConvertsBetweenPostgresArrayAndMySQLJSON(t *testing.T) {
+func TestCopyPostedConvertsBetweenPostgresArrayAndMySQLJSON(t *testing.T) {
 	const pgArray = `{"ref:a","ref,b","quoted\"ref"}`
 	const jsonArray = `["ref:a","ref,b","quoted\"ref"]`
-	mysqlValue, err := copyInsertValue(pgArray, "bench_area_exceptions", "evidence_refs", copyTextArray, false, true)
+	mysqlValue, err := copyInsertValue(pgArray, "task_thread_deliveries", "posted", copyTextArray, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, ok := mysqlValue.(string); !ok || got != jsonArray {
 		t.Fatalf("PostgreSQL text array was not encoded as MySQL JSON: got %T(%v)", mysqlValue, mysqlValue)
 	}
-	postgresValue, err := copyInsertValue([]byte(jsonArray), "bench_area_exceptions", "evidence_refs", copyJSON, true, false)
+	postgresValue, err := copyInsertValue([]byte(jsonArray), "task_thread_deliveries", "posted", copyJSON, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,11 +63,11 @@ func TestCopyEvidenceRefsConvertsBetweenPostgresArrayAndMySQLJSON(t *testing.T) 
 	if got := []string{array.Index(0).(string), array.Index(1).(string), array.Index(2).(string)}; !reflect.DeepEqual(got, []string{"ref:a", "ref,b", `quoted"ref`}) {
 		t.Fatalf("converted PostgreSQL array=%v", got)
 	}
-	pgCanonical, err := canonicalCopyValue(pgArray, "bench_area_exceptions", "evidence_refs", copyTextArray, false)
+	pgCanonical, err := canonicalCopyValue(pgArray, "task_thread_deliveries", "posted", copyTextArray, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	myCanonical, err := canonicalCopyValue([]byte(jsonArray), "bench_area_exceptions", "evidence_refs", copyJSON, true)
+	myCanonical, err := canonicalCopyValue([]byte(jsonArray), "task_thread_deliveries", "posted", copyJSON, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestCopyNormalizesMySQLNumericColumns(t *testing.T) {
 	if got, ok := floating.(float64); !ok || got != 1.25 {
 		t.Fatalf("float=%T(%v)", floating, floating)
 	}
-	insertedFloat, err := copyInsertValue([]byte("1.25"), "bench_scores", "score", copyFloat, true, false)
+	insertedFloat, err := copyInsertValue([]byte("1.25"), "bench_catalog", "score", copyFloat, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,15 +205,15 @@ func TestCopyStoreTasksWithoutSyncDecisionsRefusesBeforeOpen(t *testing.T) {
 	}
 }
 
-func TestCopyEmptyEvidenceRefsPreservesEmptyArray(t *testing.T) {
-	mysqlValue, err := copyInsertValue([]string(nil), "bench_area_exceptions", "evidence_refs", copyTextArray, false, true)
+func TestCopyEmptyPostedPreservesEmptyArray(t *testing.T) {
+	mysqlValue, err := copyInsertValue([]string(nil), "task_thread_deliveries", "posted", copyTextArray, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, ok := mysqlValue.(string); !ok || got != "[]" {
 		t.Fatalf("empty PostgreSQL array encoded as MySQL JSON %T(%v), want []", mysqlValue, mysqlValue)
 	}
-	postgresValue, err := copyInsertValue([]byte("[]"), "bench_area_exceptions", "evidence_refs", copyJSON, true, false)
+	postgresValue, err := copyInsertValue([]byte("[]"), "task_thread_deliveries", "posted", copyJSON, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,11 +221,11 @@ func TestCopyEmptyEvidenceRefsPreservesEmptyArray(t *testing.T) {
 	if !ok || refs == nil || len(refs) != 0 {
 		t.Fatalf("empty MySQL JSON array converted to PostgreSQL value %T(%v), want non-nil empty array", postgresValue, postgresValue)
 	}
-	pgCanonical, err := canonicalCopyValue([]string(nil), "bench_area_exceptions", "evidence_refs", copyTextArray, false)
+	pgCanonical, err := canonicalCopyValue([]string(nil), "task_thread_deliveries", "posted", copyTextArray, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	myCanonical, err := canonicalCopyValue([]byte("[]"), "bench_area_exceptions", "evidence_refs", copyJSON, true)
+	myCanonical, err := canonicalCopyValue([]byte("[]"), "task_thread_deliveries", "posted", copyJSON, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestCopyEmptyEvidenceRefsPreservesEmptyArray(t *testing.T) {
 		t.Fatalf("empty array checksum rows differ: PostgreSQL=%s MySQL=%s", pgRow, myRow)
 	}
 	if _, err := parseJSONTextArray([]byte("null")); err == nil {
-		t.Fatal("JSON null was accepted as an evidence_refs array")
+		t.Fatal("JSON null was accepted as a posted array")
 	}
 }
 

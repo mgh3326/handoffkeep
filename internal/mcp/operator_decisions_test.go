@@ -20,7 +20,7 @@ import (
 // operator-only request refused to a bearer caller keeps its attempt and stays
 // open.
 func TestDecisionsPendingSplitsCleanupAndOperatorOnly(t *testing.T) {
-	st := newOperatorStore(t)
+	st, pool := newOperatorStoreWithPool(t)
 	ctx := context.Background()
 	options := store.DecisionOptions{Options: []store.DecisionOption{{Key: "A", Label: "first", Recommended: true}, {Key: "B", Label: "second"}}}
 
@@ -39,7 +39,10 @@ func TestDecisionsPendingSplitsCleanupAndOperatorOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.TransitionTask(ctx, dropped.ID, "dropped", "tester", "step", nil, ""); err != nil {
+	// Direct SQL, not a transition: a settling transition withdraws the open
+	// request (hk 6339), and this fixture needs the open request that a settled
+	// task keeps from before that change or from another writer.
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET state='dropped' WHERE id=$1`, dropped.ID); err != nil {
 		t.Fatal(err)
 	}
 

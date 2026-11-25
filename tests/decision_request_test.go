@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mgh3326/handoffkeep/internal/remote"
 	"github.com/mgh3326/handoffkeep/internal/store"
+	"github.com/mgh3326/handoffkeep/internal/testdb"
 )
 
 // #618: one decision-request record, three console readers. These tests seed
@@ -44,6 +46,23 @@ func drTask(t *testing.T, s *store.Store, lane string, path ...string) store.Tas
 		}
 	}
 	return x
+}
+
+// drSettleDirect moves a task to a settled state by SQL, after its request is
+// recorded. A settling transition withdraws the open request (hk 6339), and
+// this fixture needs the open request that a settled task keeps from before
+// that change or from another writer, the state the queue's uncleaned mark
+// reads.
+func drSettleDirect(t *testing.T, id int64, state string) {
+	t.Helper()
+	pool, err := pgxpool.New(t.Context(), testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(t.Context(), `UPDATE tasks SET state=$2 WHERE id=$1`, id, state); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func drRecord(t *testing.T, s *store.Store, id int64, in store.DecisionRequestInput) store.DecisionRequest {
@@ -111,11 +130,10 @@ func TestUIDecisionRequestViewsAgree(t *testing.T) {
 	drRecord(t, s, overdue.ID, late)
 	merged := drTask(t, s, lane, "claimed", "in_progress")
 	drRecord(t, s, merged.ID, drInput("머지 전 요청"))
-	for _, to := range []string{"verifying", "merged"} {
-		if _, err := s.TransitionTask(t.Context(), merged.ID, to, "dr-test", "step", nil, ""); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := s.TransitionTask(t.Context(), merged.ID, "verifying", "dr-test", "step", nil, ""); err != nil {
+		t.Fatal(err)
 	}
+	drSettleDirect(t, merged.ID, "merged")
 	answered := drTask(t, s, lane, "claimed", "in_progress")
 	answeredReq := drRecord(t, s, answered.ID, drInput("답한 요청"))
 	if _, err := s.ResolveDecisionRequest(t.Context(), answered.ID, "director-1", store.DecisionResolveInput{RequestID: answeredReq.ID, Kind: store.DecisionRequestAnswered, Option: "A", Responder: "operator"}); err != nil {
