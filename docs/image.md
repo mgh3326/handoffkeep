@@ -2,7 +2,7 @@
 
 `.github/workflows/image.yml` builds the image on every PR (build + smoke only)
 and pushes it to GHCR on each `main` push. This pipeline only *produces* the
-image — the NCP systemd deployment is unchanged.
+image — the oci systemd deployment is unchanged.
 
 - **Image**: `ghcr.io/mgh3326/handoffkeep`
 - **Tags**: `<full commit sha>` (per push) and `main` (moving, latest main).

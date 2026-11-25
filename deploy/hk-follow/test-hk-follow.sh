@@ -570,7 +570,7 @@ t_tick_deploys() {
 	want "deploy handoffkeep-work $dig" "$(grep '^deploy handoffkeep-work ' "$FIX/calls")"
 	want 1 "$(count "status $SHA_NEW deployed success")"
 	want 2 "$(count '^record deploy/handoffkeep')"
-	want 1 "$(count 'notify .* deployed on ncp')"
+	want 1 "$(count 'notify .* deployed on oci')"
 	local rec
 	rec=$(cat "$FIX"/records/deploy_handoffkeep_2*)
 	want "deploy-record/v0 handoffkeep $SHA_NEW success hk-follow $SHA_OLD" \
@@ -885,7 +885,7 @@ t_tick_records_retried_after_hk_outage() {
 	tick
 	want 2 "$(count '^record deploy/handoffkeep')"
 	want 2 "$(count '^deploy ')"
-	want 1 "$(count 'notify .* deployed on ncp')"
+	want 1 "$(count 'notify .* deployed on oci')"
 }
 
 t_tick_status_retried() {

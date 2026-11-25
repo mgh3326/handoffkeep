@@ -3,17 +3,18 @@
 #
 #   bash deploy/hk-cli-sync vX.Y.Z [--dry-run]
 #
-# Push deploy (hk-follow) rolls only the ncp server. This copies the release
-# CLI of the same tag to each host in HK_CLI_HOSTS. The design session runs it
-# by hand after hk-follow reports `[hk-follow] ... deployed on ncp`. It runs on
-# the operator's mac and reaches the hosts with ssh's own configuration.
+# Push deploy (hk-follow) rolls only the serving host, oci (ncp returned
+# 2026-11-24, hk 6446). This copies the release CLI of the same tag to each
+# host in HK_CLI_HOSTS. The design session runs it by hand after hk-follow
+# reports `[hk-follow] ... deployed on oci`. It runs on the operator's mac and
+# reaches the hosts with ssh's own configuration.
 #
 # Refusals, each a named exit code, touch no host:
 #   3  the tag's commit is not on origin/main
 #   4  its deploy-ok commit status is not success
 #   5  the release has no SHA256SUMS, or it lacks one unambiguous entry for an
 #      asset a host needs
-#   6  ncp serves another revision, or its healthz is unreadable
+#   6  the serving host serves another revision, or its healthz is unreadable
 #   7  a downloaded asset does not match its SHA256SUMS entry
 # A reachable host that fails does not stop the others; the run ends with
 # exit 8. An unreachable host is a WARN and does not fail the run. A host
@@ -21,10 +22,15 @@
 # Exit 1 is any other error (GitHub, a missing tool); exit 2 is usage.
 #
 # Environment (all optional):
-#   HK_CLI_HOSTS      "host:os_arch ..." (`local` is this machine, no ssh)
-#   HK_CLI_REPO       owner/name of the repository (default mgh3326/handoffkeep)
-#   HK_CLI_NCP        the ncp ssh host (default ncp)
-#   HK_CLI_NCP_HEALTH the healthz URL on ncp (default http://127.0.0.1:8800/healthz)
+#   HK_CLI_HOSTS         "host:os_arch ..." (`local` is this machine, no ssh)
+#   HK_CLI_REPO          owner/name of the repository (default mgh3326/handoffkeep)
+#   HK_CLI_SERVER        the serving host's ssh name (default oci)
+#   HK_CLI_SERVER_HEALTH the healthz URL on the serving host
+#                        (default http://127.0.0.1:8800/healthz)
+#   HK_CLI_NCP           deprecated alias for HK_CLI_SERVER, kept for one release
+#                        so existing callers keep working; HK_CLI_SERVER wins
+#                        when both are set
+#   HK_CLI_NCP_HEALTH    deprecated alias for HK_CLI_SERVER_HEALTH, same rule
 # Credentials come from gh's and ssh's own configuration; nothing is printed.
 #
 # Dependencies: bash, gh, jq, ssh, scp, sha256sum or shasum.
@@ -33,17 +39,17 @@ set -euo pipefail
 # ~ and $HOME in the host command strings are for the host's shell, not this one.
 # shellcheck disable=SC2088
 
-: "${HK_CLI_HOSTS:=local:darwin_amd64 m1b:darwin_arm64 m1:darwin_arm64 desktop:linux_amd64 pi:linux_arm64 oci:linux_arm64 ncp:linux_amd64}"
+: "${HK_CLI_HOSTS:=local:darwin_amd64 m1b:darwin_arm64 m1:darwin_arm64 desktop:linux_amd64 pi:linux_arm64 oci:linux_arm64}"
 : "${HK_CLI_REPO:=mgh3326/handoffkeep}"
-: "${HK_CLI_NCP:=ncp}"
-: "${HK_CLI_NCP_HEALTH:=http://127.0.0.1:8800/healthz}"
+: "${HK_CLI_SERVER:=${HK_CLI_NCP:-oci}}"
+: "${HK_CLI_SERVER_HEALTH:=${HK_CLI_NCP_HEALTH:-http://127.0.0.1:8800/healthz}}"
 
 readonly EX_ERROR=1
 readonly EX_USAGE=2
 readonly EX_NOT_ON_MAIN=3
 readonly EX_DEPLOY_NOT_OK=4
 readonly EX_NO_SUMS=5
-readonly EX_NCP_MISMATCH=6
+readonly EX_SERVER_MISMATCH=6
 readonly EX_CHECKSUM=7
 readonly EX_HOST_FAILED=8
 
@@ -160,12 +166,12 @@ for entry in $HK_CLI_HOSTS; do
 		refuse "$EX_CHECKSUM" "$name does not match its SHA256SUMS entry"
 done
 
-# SC2029: the healthz URL is meant to expand on ncp, not here.
+# SC2029: the healthz URL is meant to expand on the serving host, not here.
 # shellcheck disable=SC2029
-served=$(ssh "${SSH_OPTS[@]}" "$HK_CLI_NCP" "curl -fsS $HK_CLI_NCP_HEALTH" 2>/dev/null |
+served=$(ssh "${SSH_OPTS[@]}" "$HK_CLI_SERVER" "curl -fsS $HK_CLI_SERVER_HEALTH" 2>/dev/null |
 	jq -r '.vcs_revision // empty' 2>/dev/null) || served=""
 [[ "$served" == "$sha" ]] ||
-	refuse "$EX_NCP_MISMATCH" "$HK_CLI_NCP serves '${served:-unreadable}', tag $TAG is $sha"
+	refuse "$EX_SERVER_MISMATCH" "$HK_CLI_SERVER serves '${served:-unreadable}', tag $TAG is $sha"
 
 # ---------------------------------------------------------------------------
 # Per-host install. `local` runs here; every other host is reached by ssh.
