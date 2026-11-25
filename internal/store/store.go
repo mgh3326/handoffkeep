@@ -4759,6 +4759,7 @@ func (s *Store) AttachmentUsage(ctx context.Context) (AttachmentUsage, error) {
 	e = s.db().QueryRow(ctx, `SELECT COALESCE(SUM(CASE WHEN hot_deleted_at IS NULL THEN size_bytes ELSE 0 END),0), COALESCE(SUM(CASE WHEN hot_deleted_at IS NOT NULL THEN size_bytes ELSE 0 END),0) FROM attachments`).Scan(&x.TotalBytes, &x.ArchivedBytes)
 	return x, e
 }
+
 // AttachmentObjectCount counts the attachments still in the object store.
 func (s *Store) AttachmentObjectCount(ctx context.Context) (int64, error) {
 	var n int64
