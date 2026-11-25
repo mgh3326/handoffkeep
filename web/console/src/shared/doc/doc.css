@@ -94,3 +94,72 @@
   font-family: var(--hk-font-mono);
   overflow-wrap: anywhere;
 }
+
+/* A drawn diagram opens the full-window viewer (DiagramViewer). The button
+ * wraps the same image, so it looks like the image; the focus ring shows
+ * where the keyboard is. */
+.hk-doc-diagram {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: zoom-in;
+}
+.hk-doc-diagram:focus-visible {
+  outline: var(--hk-focus-width) solid var(--hk-focus);
+  outline-offset: var(--hk-focus-offset);
+}
+/* The viewer is a modal over the page: the scrim, then a bar of controls and
+ * the stage. Zoom and pan are immediate, with no transition, so reduced motion
+ * needs no rule of its own. */
+.hk-diagram-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--hk-z-modal);
+  display: flex;
+  flex-direction: column;
+  gap: var(--hk-space-3);
+  padding: var(--hk-space-4);
+  background: var(--hk-scrim);
+  overscroll-behavior: contain;
+}
+.hk-diagram-viewer-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--hk-space-2);
+  color: var(--hk-text-primary);
+  font-size: var(--hk-type-meta);
+}
+.hk-diagram-viewer-bar .hk-button:last-child {
+  margin-left: auto;
+}
+.hk-diagram-viewer-zoom {
+  min-width: 4ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.hk-diagram-viewer-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--hk-surface-1);
+  border-radius: var(--hk-radius-card);
+  cursor: grab;
+  /* Pointer drags and pinches pan and zoom the diagram; the browser must not
+   * scroll or zoom the page for them. */
+  touch-action: none;
+  user-select: none;
+}
+.hk-diagram-viewer-image {
+  position: absolute;
+  left: 0;
+  top: 0;
+  max-width: none;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
