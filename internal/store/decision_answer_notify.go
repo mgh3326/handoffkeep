@@ -37,11 +37,22 @@ func (s *Store) decisionConsoleURL() string {
 	return ""
 }
 
+// decisionSelfRecordedAnswer reports whether the lane saw its own answer: a
+// session-channel answer recorded by that lane's session. The decision event
+// and audit rows are still written; only the lane notice is skipped, because
+// the recording session saw its own answer (hk 5527 for the asker lane,
+// hk 6481 for the task lane). Other channels, and a session answer without
+// a recording lane, never skip.
+func decisionSelfRecordedAnswer(lane string, in ResolveDecisionInput) bool {
+	return in.Channel == DecisionChannelSession && in.RecordingLane != "" && in.RecordingLane == lane
+}
+
 // queueDecisionAnswerNotice writes the lane notification for one successful
 // resolution, inside the resolve transaction, so a rollback takes the
 // decision event and the notice together. The lane is the task's lane: the
 // request's requested_by is the filing client's identity, not a hub lane, so
-// routing to it would post to a lane that may not exist.
+// routing to it would post to a lane that may not exist. A session answer
+// recorded by the task lane's own session writes no task-lane notice.
 func (s *Store) queueDecisionAnswerNotice(ctx context.Context, tx pgx.Tx, x Task, resolved DecisionRequest, in ResolveDecisionInput, decider string, resolutionID int64, at time.Time) error {
 	lane := x.Lane
 	taskID := strconv.FormatInt(x.ID, 10)
@@ -56,29 +67,32 @@ func (s *Store) queueDecisionAnswerNotice(ctx context.Context, tx pgx.Tx, x Task
 	if base := s.decisionConsoleURL(); base != "" {
 		body += " | " + base + "/ui/tasks/" + taskID
 	}
-	_, err := insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDecisionAnswered, lane, decisionAnswerNoticeEventID(resolved.ID, resolutionID), assistantLaneText(prefix, body), at)
-	if err != nil {
-		return err
+	text := assistantLaneText(prefix, body)
+	if !decisionSelfRecordedAnswer(lane, in) {
+		if _, err := insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDecisionAnswered, lane, decisionAnswerNoticeEventID(resolved.ID, resolutionID), text, at); err != nil {
+			return err
+		}
 	}
 	asker, ok := decisionAskerNoticeLane(lane, resolved, in)
 	if !ok {
 		return nil
 	}
-	_, err = insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDecisionAnswered, asker, decisionAskerAnswerNoticeEventID(resolved.ID, resolutionID), assistantLaneText(prefix, body), at)
+	_, err := insertNotificationOutboxOnce(ctx, pgTransaction{tx}, OutboxKindDecisionAnswered, asker, decisionAskerAnswerNoticeEventID(resolved.ID, resolutionID), text, at)
 	return err
 }
 
 // decisionAskerNoticeLane names the lane that gets a second answer notice:
 // the lane that asked, when it differs from the task's lane. The task lane
-// keeps its notice either way. A session answer that the asker lane itself
-// recorded gets no second notice: the asker's session saw the answer it
-// wrote (hk 5527). Console and other channels, and a session answer recorded
-// by another lane, keep the asker's copy.
+// keeps its notice either way, except when its own session recorded the
+// answer (decisionSelfRecordedAnswer, hk 6481). A session answer that the
+// asker lane itself recorded gets no second notice: the asker's session saw
+// the answer it wrote (hk 5527). Console and other channels, and a session
+// answer recorded by another lane, keep the asker's copy.
 func decisionAskerNoticeLane(taskLane string, resolved DecisionRequest, in ResolveDecisionInput) (string, bool) {
 	if resolved.RequestLane == "" || resolved.RequestLane == taskLane {
 		return "", false
 	}
-	if in.Channel == DecisionChannelSession && in.RecordingLane == resolved.RequestLane {
+	if decisionSelfRecordedAnswer(resolved.RequestLane, in) {
 		return "", false
 	}
 	return resolved.RequestLane, true

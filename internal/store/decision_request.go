@@ -323,8 +323,8 @@ type DecisionResolveInput struct {
 	EventKey string `json:"event_key,omitempty"`
 	// RecordingLane is the lane whose session records a session-channel
 	// answer (the CLI sends PANEWIRE_LANE). It is self-reported: it only
-	// decides whether the asker lane is told about its own answer
-	// (decisionAskerNoticeLane, hk 5527). Optional.
+	// decides whether a lane is told about its own answer
+	// (decisionSelfRecordedAnswer, hk 5527 and hk 6481). Optional.
 	RecordingLane string `json:"recording_lane,omitempty"`
 }
 

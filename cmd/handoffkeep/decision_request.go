@@ -498,7 +498,8 @@ func decisionResolveRequestCmd(args []string, out io.Writer) error {
 		}
 	case store.DecisionChannelSession:
 		in.Provenance = store.DecisionProvenanceAssistantJudgement
-		// The recording lane lets hk skip the asker's copy of its own answer (hk 5527).
+		// The recording lane lets hk skip a lane's copy of its own answer
+		// (hk 5527 for the asker, hk 6481 for the task lane).
 		in.RecordingLane = strings.TrimSpace(os.Getenv("PANEWIRE_LANE"))
 		if *quote != "" {
 			in.Provenance, in.OperatorQuote, in.DecisionRef = store.DecisionProvenanceOperatorDecided, *quote, requestID
