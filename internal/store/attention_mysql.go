@@ -70,17 +70,33 @@ const attentionLaneItemsMySQL = `SELECT lane.id,lane.owner_lane,lane.text,lane.r
 		WHERE ` + attentionInboxVisibleMySQL + `
 		ORDER BY lane.received_at DESC, lane.id DESC LIMIT ?`
 
-// attentionTaskCountsMySQL takes the stalled threshold twice, then the read time.
-const attentionTaskCountsMySQL = `SELECT COALESCE(SUM(CASE WHEN ` + awaitingTaskDecisionSQLMySQL + ` THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN ` + attentionStalledSQLMySQL + ` THEN 1 ELSE 0 END),0)
+// attentionTasksBranchMySQL is one half of the waiting-tasks read: the
+// awaiting half ranges over the awaiting_decision rows, the other half over
+// one state's rows (the counts and items reads) or the started ids by primary
+// key (the candidates read). The halves are disjoint (NOT awaiting_decision),
+// so UNION ALL keeps every waiting task once.
+func attentionTasksBranchMySQL(where string) string {
+	return `SELECT tasks.id,title,lane,state,priority,(` + awaitingTaskDecisionSQLMySQL + `) AS awaiting,` + taskActivitySQLMySQL + ` AS since,s.read_at,s.done_at,s.snoozed_until
 		FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key=CONCAT('task:',tasks.id)
-		WHERE ((` + awaitingTaskDecisionSQLMySQL + `) OR (` + attentionStalledSQLMySQL + `)) AND ` + attentionTaskVisibleMySQL
+		WHERE ((` + where + `)) AND ` + attentionTaskVisibleMySQL
+}
 
-// attentionTaskItemsMySQL takes the stalled threshold, the read time and the limit.
-const attentionTaskItemsMySQL = `SELECT tasks.id,title,lane,state,priority,(` + awaitingTaskDecisionSQLMySQL + `) AS awaiting,` + taskActivitySQLMySQL + ` AS since,s.read_at,s.done_at,s.snoozed_until
-		FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key=CONCAT('task:',tasks.id)
-		WHERE ((` + awaitingTaskDecisionSQLMySQL + `) OR (` + attentionStalledSQLMySQL + `)) AND ` + attentionTaskVisibleMySQL + `
-		ORDER BY since DESC, tasks.id DESC LIMIT ?`
+// attentionTaskCountsMySQL takes the read time, then the stalled threshold
+// and the read time again: the awaiting half names only the read time, the
+// stalled half names the threshold and the read time.
+var attentionTaskCountsMySQL = `SELECT (SELECT COUNT(*) FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key=CONCAT('task:',tasks.id)
+		WHERE ((` + awaitingTaskDecisionSQLMySQL + `)) AND ` + attentionTaskVisibleMySQL + `),
+		(SELECT COUNT(*) FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key=CONCAT('task:',tasks.id)
+		WHERE ((` + attentionStalledSQLMySQL + `)) AND ` + attentionTaskVisibleMySQL + `)`
+
+// attentionTaskItemsMySQL takes the read time, then the stalled threshold
+// and the read time again, then the limit: the awaiting half names only the
+// read time, the stalled half names the threshold and the read time, and the
+// outer order names the limit.
+var attentionTaskItemsMySQL = `(` + attentionTasksBranchMySQL(awaitingTaskDecisionSQLMySQL) + `)
+		UNION ALL
+		(` + attentionTasksBranchMySQL(attentionStalledSQLMySQL) + `)
+		ORDER BY since DESC, id DESC LIMIT ?`
 
 // attentionNowArgs is the read time as the argument list of a statement:
 // once on PostgreSQL (one numbered $1), mysqlN times on MySQL (one per `?`).
@@ -104,33 +120,46 @@ func attentionItemArgs(tx transaction, now time.Time, mysqlNows, limit int) []an
 
 // attentionTaskArgs is the argument list of the task counts (counts) or the
 // task items: the stalled threshold, the read time and, for items, the limit.
-// MySQL's counts text names the threshold twice.
+// Each MySQL text names the read time once per half: the awaiting half takes
+// it, then the stalled half takes the threshold and the read time.
 func attentionTaskArgs(tx transaction, stalledBefore, now time.Time, counts bool, limit int) []any {
 	if counts {
 		if dialectFor(tx) == mysqlDialect {
-			return []any{stalledBefore, stalledBefore, now}
+			return []any{now, stalledBefore, now}
 		}
 		return []any{stalledBefore, now}
+	}
+	if dialectFor(tx) == mysqlDialect {
+		return []any{now, stalledBefore, now, limit}
 	}
 	return []any{stalledBefore, now, limit}
 }
 
-// attentionTaskCandidatesMySQL is AttentionTaskCandidates on MySQL: every
-// waiting task, newest activity first. The started ids are an IN list; an
-// empty list (no task YouTrack shows started) is the always-false condition.
-func (s *Store) attentionTaskCandidatesMySQL(ctx context.Context, now time.Time, startedIDs []int64) ([]AttentionTask, error) {
+// attentionTaskCandidatesMySQLQuery is AttentionTaskCandidates on MySQL: the
+// awaiting half ranges over the awaiting_decision rows and the started half
+// probes the started ids by primary key. An empty started list (no task
+// YouTrack shows started) is the always-false condition. The caller passes
+// the read time, then the started ids, then the stall threshold and the read
+// time again, matching the placeholders' order.
+func attentionTaskCandidatesMySQLQuery(startedIDs []int64) (string, []any) {
 	started := "FALSE"
-	args := []any{}
+	ids := []any{}
 	if len(startedIDs) > 0 {
 		started = "tasks.id IN (" + placeholders(len(startedIDs)) + ")"
 		for _, id := range startedIDs {
-			args = append(args, id)
+			ids = append(ids, id)
 		}
 	}
-	query := `SELECT tasks.id,title,lane,state,priority,(` + awaitingTaskDecisionSQLMySQL + `) AS awaiting,` + taskActivitySQLMySQL + ` AS since,s.read_at,s.done_at,s.snoozed_until
-		FROM tasks LEFT JOIN operator_inbox_state s ON s.item_key=CONCAT('task:',tasks.id)
-		WHERE ((` + awaitingTaskDecisionSQLMySQL + `) OR (` + started + ` AND NOT awaiting_decision AND ` + taskActivitySQLMySQL + ` < ?)) AND ` + attentionTaskVisibleMySQL + `
-		ORDER BY since DESC, tasks.id DESC`
+	return `(` + attentionTasksBranchMySQL(awaitingTaskDecisionSQLMySQL) + `)
+		UNION ALL
+		(` + attentionTasksBranchMySQL(started+` AND NOT awaiting_decision AND `+taskActivitySQLMySQL+` < ?`) + `)
+		ORDER BY since DESC, id DESC`, ids
+}
+
+// attentionTaskCandidatesMySQL is every waiting task, newest activity first.
+func (s *Store) attentionTaskCandidatesMySQL(ctx context.Context, now time.Time, startedIDs []int64) ([]AttentionTask, error) {
+	query, ids := attentionTaskCandidatesMySQLQuery(startedIDs)
+	args := append([]any{now}, ids...)
 	args = append(args, now.Add(-s.StartedStalledHours()), now)
 	rows, err := s.db().Query(ctx, query, args...)
 	if err != nil {
