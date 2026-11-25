@@ -227,7 +227,7 @@ func (s *Store) reserveAttachmentUploadOnce(ctx context.Context, u AttachmentUpl
 		return err
 	}
 	var committed, used, usedByClient int64
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes), 0) FROM attachments`).Scan(&committed); err != nil {
+	if err := tx.QueryRow(ctx, attachmentHotBytesSQL).Scan(&committed); err != nil {
 		return err
 	}
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(size_bytes), 0) FROM attachment_uploads WHERE staging_deleted_at IS NULL`).Scan(&used); err != nil {

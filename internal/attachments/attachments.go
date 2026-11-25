@@ -35,9 +35,16 @@ const (
 	// holding object, then promoted to the content key without the body
 	// entering memory.
 	BufferedCompletionMaxBytes int64 = 256 << 20
-	// DefaultStorageCap is the account storage fuse; its OCI allowance basis
-	// is still to confirm.
-	DefaultStorageCap int64 = 20_000_000_000 // OCI allowance — to confirm
+	// DefaultStorageCap is the storage fuse: the most attachment bytes the
+	// object store may hold (hot copies only; archived and hot-deleted
+	// bytes do not count, hk 6570). It sits under OCI's allowance for this
+	// tenancy, which refused puts with StorageLimitExceeded at about 10.1 GB
+	// on 2026-11-19 (hk 5328) and is not confirmed beyond that; Oracle gives
+	// a paid or Free Trial tenancy 10 GB of Standard storage. 9 GB is the
+	// fallback operator decision 516 set (hk 6571). The bucket's tenancy
+	// holds other buckets too, so the fuse alone does not keep OCI from
+	// refusing. HK_ATTACH_STORAGE_CAP_BYTES replaces it.
+	DefaultStorageCap int64 = 9_000_000_000
 	DefaultPutCap     int64 = 800000
 	DefaultGetCap     int64 = 8000000
 	// Staging pending bytes count against the storage fuse at begin, so the
