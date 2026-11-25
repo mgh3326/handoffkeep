@@ -39,11 +39,12 @@ const (
 	OutboxKindTaskDrift = "task_drift"
 	// OutboxKindLaneCheck is the per-lane wake check (operator decision 418,
 	// hk 5201): one row per lane whose findings need a look, deduplicated by
-	// a 6-hour bucket in its event id. It goes out as hub type "info".
+	// a 6-hour bucket in its event id. It goes out as hub type "findings", a
+	// wake-asking type, so the lane is woken at once (hk 6341).
 	OutboxKindLaneCheck = "lane_check"
 	// OutboxKindDotsNote is the design lane's note of a dots comment or intake
 	// (hk 6307): dots' opinion for the design session to sort, never an order.
-	// It goes out as hub type "info", so it never interrupts.
+	// It goes out as hub type "info": it waits for the lane's idle re-wake.
 	OutboxKindDotsNote = "dots_note"
 	// OutboxSkipBeforeForwarder is the skip_reason of a row queued before the
 	// forwarder's cutoff: it was settled visibly instead of delivered, because

@@ -39,35 +39,37 @@ type Store interface {
 	SkipNotificationsBefore(ctx context.Context, before time.Time, reason string) (int64, error)
 }
 
-// notifyType is the lane-event type a row goes out with. A dots RESULT is
-// ready (it does not interrupt), a QUESTION is decision and a BLOCKED is
-// blocked (both interrupt; operator decision 166). A task order, or its
-// withdrawal, is an order (hk 5125). A task drift delivery (hk 5112 track
-// B-3) is info.
+// notifyType is the lane-event type a row goes out with. Since hub hk 6338 a
+// typed hk notice to a design or desk lane is filed in the inbox: a
+// wake-asking type (decision, order, blocked, findings, ready) also wakes the
+// lane at once with one line, and info waits for the idle re-wake (about 30
+// minutes, operator decision 498). So a notice the lane acts on at once must
+// carry a wake-asking type (hk 6341):
+//   - an answer to the lane's own question (decision answer or denial, chat
+//     answer, disposition answer), and a dots QUESTION: decision;
+//   - a dots BLOCKED: blocked (operator decision 166);
+//   - a dots RESULT: ready;
+//   - a task order or its withdrawal: order (hk 5125);
+//   - a deploy result the lane waits on to verify, and the per-lane wake check
+//     (operator decision 418, hk 5201): findings. A lane check is not an
+//     operator order, so it is not sent as order;
+//   - everything else is info: the daily drift digest (hk 5112), deploy lag,
+//     a dots note (hk 6307, never wake-asking), dots followup, and YouTrack
+//     write-op alerts.
 func notifyType(kind string) string {
 	switch kind {
-	case store.OutboxKindDotsDecision, store.OutboxKindDecisionAnswered:
+	case store.OutboxKindDotsDecision, store.OutboxKindDecisionAnswered,
+		store.OutboxKindDecisionDenied, store.OutboxKindChatAnswer,
+		store.OutboxKindDispositionAnswered:
 		return "decision"
 	case store.OutboxKindDotsBlocked:
 		return "blocked"
 	case store.OutboxKindDotsReport:
 		return "ready"
 	case store.OutboxKindTaskOrder:
-		// An operator's order interrupts and is never digested (panewire
-		// delivery_policy: class interrupt); the lane acts on the record.
 		return "order"
-	case store.OutboxKindTaskDrift:
-		// The daily drift and hygiene delivery (hk 5112 track B-3) is a
-		// digest, never an interrupt.
-		return "info"
-	case store.OutboxKindLaneCheck:
-		// The per-lane wake check (operator decision 418, hk 5201) is a wake,
-		// not an interrupt: the design session judges what to do on it.
-		return "info"
-	case store.OutboxKindDotsNote:
-		// A dots note (hk 6307) is dots' opinion on a comment or intake, for the
-		// design session to sort. It is info, never a wake-asking type.
-		return "info"
+	case store.OutboxKindDeployResult, store.OutboxKindLaneCheck:
+		return "findings"
 	default:
 		return "info"
 	}
