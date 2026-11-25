@@ -223,6 +223,49 @@ func TestForwardSkipsRowsBeforeTheCutoff(t *testing.T) {
 	}
 }
 
+// The pre-cutoff settle runs until one tick finds nothing still owed, then
+// stops: later ticks poll without the UPDATE (hk 6398). A pre-cutoff row is
+// still never posted, because the list itself carries the cutoff.
+func TestForwarderSkipsPreCutoffOnce(t *testing.T) {
+	cutoff := time.Date(2026, 11, 1, 23, 0, 0, 0, time.UTC)
+	outbox := &fakeOutbox{rows: []store.NotificationOutbox{
+		{Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "backlog", Text: "old", CreatedAt: cutoff.Add(-time.Hour)},
+		{Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "live", Text: "new", CreatedAt: cutoff.Add(time.Minute)},
+	}}
+	f, hub, _ := forwarderFixture(t, outbox)
+	if !f.Cutoff.Equal(cutoff) {
+		t.Fatalf("fixture cutoff=%v, want %v", f.Cutoff, cutoff)
+	}
+	if sent, failed, err := f.Once(t.Context()); err != nil || sent != 1 || failed != 0 {
+		t.Fatalf("first sent=%d failed=%d err=%v", sent, failed, err)
+	}
+	if sent, failed, err := f.Once(t.Context()); err != nil || sent != 0 || failed != 0 {
+		t.Fatalf("second sent=%d failed=%d err=%v", sent, failed, err)
+	}
+	if got := len(outbox.skipCounts); got != 2 {
+		t.Fatalf("skip calls=%d, want 2 (the settle, then the tick that finds nothing)", got)
+	}
+	for i := range 3 {
+		if sent, failed, err := f.Once(t.Context()); err != nil || sent != 0 || failed != 0 {
+			t.Fatalf("tick %d sent=%d failed=%d err=%v", i, sent, failed, err)
+		}
+	}
+	if got := len(outbox.skipCounts); got != 2 {
+		t.Fatalf("skip calls=%d, want no settle after the tick that found nothing", got)
+	}
+	if len(hub.posts) != 1 || hub.posts[0]["event"] != "live" {
+		t.Fatalf("posts=%v, want only the row at or after the cutoff", hub.posts)
+	}
+	if outbox.marks["backlog"] != 0 {
+		t.Fatalf("a pre-cutoff row recorded a receipt: %v", outbox.marks)
+	}
+	for _, since := range outbox.listSince {
+		if !since.Equal(f.Cutoff) {
+			t.Fatalf("list cutoff=%v, want %v", since, f.Cutoff)
+		}
+	}
+}
+
 // A store that cannot settle the backlog must not let an old row through:
 // the run fails instead of posting it (hk 4986).
 func TestForwardRefusesToPostWhenTheBacklogCannotBeSkipped(t *testing.T) {
