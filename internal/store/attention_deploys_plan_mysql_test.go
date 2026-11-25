@@ -333,7 +333,8 @@ func seedPlanEvents(t *testing.T, ctx context.Context, s *Store, seeds []planEve
 // its table (type ALL) or uses no key. Tables not in allowed (the inbox
 // joins, the UNION result) are not checked. minReads is how many monitored
 // reads the plan must hold (the two halves of a UNION, the outer read with
-// its join and probe).
+// its join and probe). Each monitored row is logged, so the CI log carries
+// the after plan next to the pass.
 func assertNoFullScan(t *testing.T, ctx context.Context, s *Store, name, query string, allowed map[string]map[string]bool, minReads int, args ...any) {
 	t.Helper()
 	rows, err := s.db().Query(ctx, "EXPLAIN FORMAT=TRADITIONAL "+query, args...)
@@ -352,6 +353,7 @@ func assertNoFullScan(t *testing.T, ctx context.Context, s *Store, name, query s
 			continue
 		}
 		checked++
+		t.Logf("%s: table=%s select=%s type=%s key=%s rows=%s extra=%q", name, table.String, selectType.String, typ.String, key.String, est.String, extra.String)
 		if typ.String == "ALL" {
 			t.Errorf("%s: read of %s scans the whole table (extra %q); want an index", name, table.String, extra.String)
 		}
