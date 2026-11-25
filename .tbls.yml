@@ -535,11 +535,13 @@ comments:
     labels: [source-of-record]
     tableComment: |
       A document by key: briefs, reports, notes and the other text handoffs keep.
-      Retention: a document's body is deleted 30 days after the merge or end of the job it belongs to (DocRetentionDays, doc_retention.go PruneRetention, run every 24 hours by the retention worker in cmd/handoffkeep): review/mwr-* by the reviewer job's merged change and screens/* by the job's end. The merge link (doc_retention_merge.go, hk 6280) also makes review/mwr-*, briefs/mwr-* and screens/mwr-* eligible 30 days after the merge of the one change their review job (mwr-<pr>-<sha7>-...) links to through its task, PR number and reviewed head; apply deletes by it only when DocRetentionMergeLinkApply is on, and the dry run reports it per family either way. reports/mwr-* is never deleted, and a document bound to a YouTrack article is kept.
+      Retention: a document's body is deleted 30 days after the merge or end of the job it belongs to (DocRetentionDays, doc_retention.go PruneRetention, run every 24 hours by the retention worker in cmd/handoffkeep): review/mwr-* by the reviewer job's merged change and screens/* by the job's end. The merge link (doc_retention_merge.go, hk 6280) also makes review/mwr-*, briefs/mwr-* and screens/mwr-* eligible 30 days after the merge of the one change their review job (mwr-<pr>-<sha7>-...) links to through its task, PR number and reviewed head (the task read from the job's live mwr- documents and the doc_prune_log rows of its deleted ones); apply deletes by it only when DocRetentionMergeLinkApply is on, and the dry run reports it per family either way. reports/mwr-* is never deleted, and a document bound to a YouTrack article is kept.
   - table: doc_prune_log
     labels: [history-log]
     tableComment: |
-      Log of the documents a prune deleted: key, when and the rule that pruned it.
+      Log of the documents a prune deleted: key, sha256, when and who pruned it, plus the deleted document's job and task_id.
+      Every pruner writes one row per deleted document in the deleting transaction (doc_prune.go PruneDocuments, doc_retention.go and doc_retention_mysql.go PruneRetention).
+      job and task_id (hk 6289) keep the merge link's task evidence after a delete: doc_retention_merge.go counts a review job's tasks over its live mwr- documents and these rows, so a deleted witness still links its job and a deleted second task still makes it ambiguous. Rows written before 20261125-doc-prune-log-evidence have NULL in both and are no evidence.
       Stands alone by design: the log of pruned document keys; the documents it names are gone.
       Retention: none.
   - table: task_doc_refs

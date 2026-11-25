@@ -23,8 +23,15 @@ import (
 //  1. documents.job is J and parses as mwr-<N digits>-<S 7 hex> followed by
 //     '-' or 'p<digit>' (S is exactly the first 7 characters after N);
 //  2. the documents with job = J under the four mwr- families (the three
-//     below plus reports/mwr-, read only as evidence) carry exactly one
-//     distinct non-NULL task_id T (none: unlinked; two or more: ambiguous);
+//     below plus reports/mwr-, read only as evidence), together with the
+//     doc_prune_log rows of deleted documents with job = J under the same
+//     four families, carry exactly one distinct non-NULL task_id T (none:
+//     unlinked; two or more: ambiguous). The log rows (hk 6289) keep the
+//     evidence of a document another leg deleted first (the hk 5057 legs or
+//     hk 3639 PruneDocuments): a deleted witness still links its siblings,
+//     and a deleted document with a second task still makes the job
+//     ambiguous. Rows logged before 20261125-doc-prune-log-evidence have NULL
+//     job and task_id and are no evidence either way;
 //  3. exactly one change C has a change_tasks row for T, pr_number N and a
 //     reviews row whose reviewed_head starts with S (none: unlinked; two or
 //     more: ambiguous).
@@ -44,8 +51,16 @@ import (
 // never split across batches: before the batch transaction it lists the
 // eligible ids of the first jobs (mergeLinkPickSQL); inside it, after the hk
 // 5057 legs, it locks those rows by id and only then re-runs the whole
-// classification restricted to them (mergeLinkRecheckSQL), deleting only the
-// rows still eligible. The recheck is a new statement after the locks are held
+// classification restricted to them (mergeLinkRecheckSQL), keeping only the
+// rows still eligible. It then admits a job's rows only when all of them fit
+// the room left (admitMergeJobs, hk 6290): the batch size less the ids the hk
+// 5057 legs chose, where the batch size is already DocRetentionBatch capped
+// at the run's limit less its deletions. A job that does not fit is never
+// split; it waits for a later batch or run, and the result counts it in
+// merge_link_skipped_jobs. When no remaining job fits (a limit below the
+// smallest eligible job) the merge leg deletes nothing and the run ends, so
+// a run never loops on it. The pick puts jobs that fit a whole batch first,
+// so a job larger than any batch never holds back the ones that fit. The recheck is a new statement after the locks are held
 // (a fresh snapshot on PostgreSQL READ COMMITTED; on MySQL the transaction's
 // first consistent read, since every earlier statement in it is a locking
 // read), so a binding, an upsert or a second task committed before the lock is
@@ -54,7 +69,8 @@ import (
 //
 // Cost: documents.job has no index, so the job -> task map is built once per
 // statement by a grouped scan of the four key ranges (documents.key is
-// uniquely indexed); no statement probes documents by job per row. A dry run
+// uniquely indexed) and of the same ranges of doc_prune_log
+// (doc_prune_log_evidence); no statement probes documents by job per row. A dry run
 // adds one statement and an apply batch three (pick, lock, recheck).
 const (
 	// DocRetentionBriefsMwrPrefix holds the brief copy of a review job.
@@ -167,7 +183,21 @@ func (b *mergeLinkSQL) inRange(alias string, i int) string {
 	if b.mysql {
 		k = alias + ".`key`"
 	}
+	return b.colInRange(k, i)
+}
+
+// colInRange is the key expression k within prefix range i.
+func (b *mergeLinkSQL) colInRange(k string, i int) string {
 	return fmt.Sprintf("(%s >= %s AND %s < %s)", k, b.p(fmt.Sprintf("lo%d", i)), k, b.p(fmt.Sprintf("hi%d", i)))
+}
+
+// logInRanges is doc_prune_log row pl within any of the four mwr- ranges.
+func (b *mergeLinkSQL) logInRanges() string {
+	k := `pl.document_key COLLATE "C"`
+	if b.mysql {
+		k = "pl.document_key"
+	}
+	return b.colInRange(k, 0) + " OR " + b.colInRange(k, 1) + " OR " + b.colInRange(k, 2) + " OR " + b.colInRange(k, 3)
 }
 
 // cte is the WITH clause ending in ml(id, job, family, class): one row per
@@ -180,9 +210,14 @@ func (b *mergeLinkSQL) cte() string {
 		sha7 = `CONCAT(LEFT(SUBSTRING_INDEX(SUBSTRING_INDEX(jt.job, '-', 3), '-', -1), 7), '%')`
 	}
 	var sb strings.Builder
-	sb.WriteString("WITH jt AS (\n  SELECT x.job, COUNT(DISTINCT x.task_id) AS ntask, MIN(x.task_id) AS task_id\n  FROM documents x\n  WHERE (")
-	sb.WriteString(b.inRange("x", 0) + " OR " + b.inRange("x", 1) + " OR " + b.inRange("x", 2) + " OR " + b.inRange("x", 3))
-	sb.WriteString(")\n  AND " + jobRE + "\n  GROUP BY x.job\n")
+	// jt counts a job's tasks over its live documents and, as evidence that
+	// survives a delete (hk 6289), the doc_prune_log rows another leg wrote
+	// for the same job in the same four ranges. A log row without a task
+	// (every row logged before 20261125-doc-prune-log-evidence) adds nothing.
+	sb.WriteString("WITH jt AS (\n  SELECT x.job, COUNT(DISTINCT x.task_id) AS ntask, MIN(x.task_id) AS task_id\n  FROM (\n    SELECT xd.job, xd.task_id FROM documents xd\n    WHERE (")
+	sb.WriteString(b.inRange("xd", 0) + " OR " + b.inRange("xd", 1) + " OR " + b.inRange("xd", 2) + " OR " + b.inRange("xd", 3))
+	sb.WriteString(")\n    UNION ALL\n    SELECT pl.job, pl.task_id FROM doc_prune_log pl\n    WHERE pl.task_id IS NOT NULL AND (" + b.logInRanges() + ")\n  ) x\n")
+	sb.WriteString("  WHERE " + jobRE + "\n  GROUP BY x.job\n")
 	sb.WriteString("), jc AS (\n  SELECT jt.job, jt.ntask, COUNT(DISTINCT c.id) AS nchange, MIN(c.id) AS change_id\n  FROM jt\n")
 	sb.WriteString("  LEFT JOIN change_tasks ct ON jt.ntask = 1 AND ct.task_id = jt.task_id\n")
 	sb.WriteString("  LEFT JOIN changes c ON c.id = ct.change_id AND c.pr_number = " + prNum + "\n")
@@ -224,20 +259,23 @@ func mergeLinkCountsSQL(mysql bool, cutoff time.Time) (string, []any) {
 	return q, b.args
 }
 
-// mergeLinkPickSQL lists every merge-link-eligible (so unbound) id of the
-// first jobs eligible jobs, jobs ordered by their oldest eligible id: whole
-// jobs, so apply never splits one across batches.
-func mergeLinkPickSQL(mysql bool, cutoff time.Time, jobs int) (string, []any) {
+// mergeLinkPickSQL lists (job, id) for every merge-link-eligible (so
+// unbound) id of the first jobs eligible jobs: whole jobs, so apply never
+// splits one across batches. Jobs whose eligible count fits capacity come
+// first, each group ordered by its oldest eligible id, so a job too large for
+// any batch never holds back the ones that fit.
+func mergeLinkPickSQL(mysql bool, cutoff time.Time, jobs, capacity int) (string, []any) {
 	b := newMergeLinkSQL(mysql, cutoff)
 	b.vals["jobs"] = jobs
+	b.vals["cap"] = capacity
 	q := b.cte()
-	q += "SELECT ml.id FROM ml JOIN (SELECT m2.job FROM ml m2 WHERE m2.class = 'eligible' GROUP BY m2.job ORDER BY MIN(m2.id) LIMIT " + b.p("jobs") + ") pick ON pick.job = ml.job WHERE ml.class = 'eligible' ORDER BY ml.id"
+	q += "SELECT ml.job, ml.id FROM ml JOIN (SELECT m2.job, CASE WHEN COUNT(*) <= " + b.p("cap") + " THEN 0 ELSE 1 END AS over_cap, MIN(m2.id) AS first_id FROM ml m2 WHERE m2.class = 'eligible' GROUP BY m2.job ORDER BY over_cap, first_id LIMIT " + b.p("jobs") + ") pick ON pick.job = ml.job WHERE ml.class = 'eligible' ORDER BY pick.over_cap, pick.first_id, ml.id"
 	return q, b.args
 }
 
 // mergeLinkRecheckSQL re-runs the classification for ids (already locked by
-// the caller) and returns id, key, sha256 and body size of those still
-// eligible.
+// the caller) and returns id, key, sha256, body size, job and task_id of
+// those still eligible.
 func mergeLinkRecheckSQL(mysql bool, cutoff time.Time, ids []int64) (string, []any) {
 	b := newMergeLinkSQL(mysql, cutoff)
 	q := b.cte()
@@ -245,7 +283,7 @@ func mergeLinkRecheckSQL(mysql bool, cutoff time.Time, ids []int64) (string, []a
 	if mysql {
 		size, key = "OCTET_LENGTH(rd.body)", "rd.`key`"
 	}
-	q += "SELECT rd.id, " + key + ", rd.sha256, " + size + " FROM ml JOIN documents rd ON rd.id = ml.id WHERE ml.class = 'eligible' AND " + b.inIDs("ml.id", ids) + " ORDER BY rd.id"
+	q += "SELECT rd.id, " + key + ", rd.sha256, " + size + ", rd.job, rd.task_id FROM ml JOIN documents rd ON rd.id = ml.id WHERE ml.class = 'eligible' AND " + b.inIDs("ml.id", ids) + " ORDER BY rd.id"
 	return q, b.args
 }
 
@@ -294,24 +332,35 @@ func (s *Store) mergeLinkCounts(ctx context.Context, cutoff time.Time) (map[stri
 	return out, rs.Err()
 }
 
+// mergeLinkPicked is the merge leg's pick for one batch: the picked jobs in
+// admission order and their eligible ids.
+type mergeLinkPicked struct {
+	jobs []string
+	ids  []int64
+}
+
 // mergeLinkPick returns the eligible ids of the first jobs eligible jobs,
 // read outside the batch transaction (see the apply note above).
-func (s *Store) mergeLinkPick(ctx context.Context, cutoff time.Time, jobs int) ([]int64, error) {
-	q, args := mergeLinkPickSQL(s.dialect == mysqlDialect, cutoff, jobs)
+func (s *Store) mergeLinkPick(ctx context.Context, cutoff time.Time, jobs, capacity int) (mergeLinkPicked, error) {
+	var out mergeLinkPicked
+	q, args := mergeLinkPickSQL(s.dialect == mysqlDialect, cutoff, jobs, capacity)
 	rs, err := s.db().Query(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return out, err
 	}
 	defer rs.Close()
-	var ids []int64
 	for rs.Next() {
+		var job string
 		var id int64
-		if err = rs.Scan(&id); err != nil {
-			return nil, err
+		if err = rs.Scan(&job, &id); err != nil {
+			return out, err
 		}
-		ids = append(ids, id)
+		if n := len(out.jobs); n == 0 || out.jobs[n-1] != job {
+			out.jobs = append(out.jobs, job)
+		}
+		out.ids = append(out.ids, id)
 	}
-	return ids, rs.Err()
+	return out, rs.Err()
 }
 
 // mergeLinkJobsPerBatch is how many jobs one apply batch picks for the merge
@@ -320,20 +369,88 @@ func mergeLinkJobsPerBatch(batch int) int {
 	return max(1, batch/len(docRetentionMergeLinkFamilies))
 }
 
-// mergeLinkBatchIDs is the batch's merge-leg pick: nil when the leg is off,
-// else the eligible ids of whole jobs, after the test seam.
-func (s *Store) mergeLinkBatchIDs(ctx context.Context, cutoff time.Time, batch int) ([]int64, error) {
+// mergeLinkBatchIDs is the batch's merge-leg pick: empty when the leg is
+// off, else the eligible ids of whole jobs, after the test seam.
+func (s *Store) mergeLinkBatchIDs(ctx context.Context, cutoff time.Time, batch int) (mergeLinkPicked, error) {
 	if !s.mergeLinkApplyOn() {
-		return nil, nil
+		return mergeLinkPicked{}, nil
 	}
-	ids, err := s.mergeLinkPick(ctx, cutoff, mergeLinkJobsPerBatch(batch))
+	picked, err := s.mergeLinkPick(ctx, cutoff, mergeLinkJobsPerBatch(batch), batch)
 	if err != nil {
-		return nil, err
+		return picked, err
 	}
 	if s.retentionMergeSeam != nil {
 		s.retentionMergeSeam()
 	}
-	return ids, nil
+	return picked, nil
+}
+
+// retentionRow is one document a retention batch deletes, with what its
+// doc_prune_log row records.
+type retentionRow struct {
+	id   int64
+	key  string
+	sha  string
+	size int64
+	job  string
+	task *int64
+}
+
+// admitMergeJobs is the merge leg's limit rule (hk 6290): it admits a job's
+// rechecked eligible rows only when all of them fit the remaining capacity
+// (the batch's DocRetentionBatch less the ids already chosen, which the
+// caller has already capped at the run's limit less its deletions). A job
+// that does not fit is never split: it is returned in skipped and stays for
+// a later batch or run. Jobs are tried in order (the pick's order, then any
+// job a row moved to before the recheck), and a smaller later job may still
+// fit after a larger one is skipped.
+func admitMergeJobs(order []string, rows []retentionRow, capacity int) (admitted []retentionRow, admittedJobs, skipped []string) {
+	byJob := make(map[string][]retentionRow, len(order))
+	jobs := append([]string(nil), order...)
+	seen := make(map[string]bool, len(order))
+	for _, j := range order {
+		seen[j] = true
+	}
+	for _, r := range rows {
+		if !seen[r.job] {
+			seen[r.job] = true
+			jobs = append(jobs, r.job)
+		}
+		byJob[r.job] = append(byJob[r.job], r)
+	}
+	for _, j := range jobs {
+		rs := byJob[j]
+		if len(rs) == 0 {
+			continue
+		}
+		if len(rs) > capacity {
+			skipped = append(skipped, j)
+			continue
+		}
+		admitted = append(admitted, rs...)
+		admittedJobs = append(admittedJobs, j)
+		capacity -= len(rs)
+	}
+	return admitted, admittedJobs, skipped
+}
+
+// noteMergeSkips records, after a batch, which jobs the merge leg left whole
+// for lack of room and which it deleted, and refreshes MergeLinkSkippedJobs:
+// the jobs this run skipped and never deleted.
+func (res *DocRetentionResult) noteMergeSkips(admitted, skipped []string) {
+	if len(admitted) == 0 && len(skipped) == 0 {
+		return
+	}
+	if res.mergeSkipped == nil {
+		res.mergeSkipped = map[string]bool{}
+	}
+	for _, j := range skipped {
+		res.mergeSkipped[j] = true
+	}
+	for _, j := range admitted {
+		delete(res.mergeSkipped, j)
+	}
+	res.MergeLinkSkippedJobs = int64(len(res.mergeSkipped))
 }
 
 // withoutIDs is ids minus skip, in order.

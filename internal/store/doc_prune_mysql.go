@@ -2,22 +2,24 @@ package store
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
 // mysqlPruneDocuments deletes documents that no article binding and no
-// attachment reference holds. Both tables exist on MySQL now (yt_article_bindings
+// attachment reference holds, with one doc_prune_log row each (key, sha256,
+// job, task_id, prunedBy) in the deleting transaction, as on PostgreSQL. Both tables exist on MySQL now (yt_article_bindings
 // arrived with B4b, hk 5077), so B3's refusal is gone: the binding guard is
 // always part of the delete. What remains for the integration pass (hk 5088)
 // is the cross-area check that every MySQL caller of the prune sees the same
 // SkippedBound count as PostgreSQL.
-func (s *Store) mysqlPruneDocuments(ctx context.Context, res DocPruneResult, older time.Time) (DocPruneResult, error) {
+func (s *Store) mysqlPruneDocuments(ctx context.Context, res DocPruneResult, older time.Time, prunedBy string) (DocPruneResult, error) {
 	lo, hi := keyPrefixBounds(res.Prefix)
 	count := "SELECT COUNT(*),COUNT(b.document_id) FROM documents d LEFT JOIN yt_article_bindings b ON b.document_id=d.id WHERE d.`key`>=? AND d.`key`<? AND d.updated_at<?"
 	if err := s.db().QueryRow(ctx, count, lo, hi, older.UTC()).Scan(&res.Matched, &res.SkippedBound); err != nil {
 		return res, err
 	}
-	candidate := "SELECT d.id,d.`key`,OCTET_LENGTH(d.body) FROM documents d WHERE d.`key`>=? AND d.`key`<? AND d.updated_at<?"
+	candidate := "SELECT d.id,d.`key`,OCTET_LENGTH(d.body),d.sha256,d.job,d.task_id FROM documents d WHERE d.`key`>=? AND d.`key`<? AND d.updated_at<?"
 	candidate += " AND NOT EXISTS (SELECT 1 FROM yt_article_bindings b WHERE b.document_id=d.id)"
 	candidate += " ORDER BY d.id LIMIT ?"
 	if !res.Applied {
@@ -27,12 +29,11 @@ func (s *Store) mysqlPruneDocuments(ctx context.Context, res DocPruneResult, old
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var id, size int64
-			var key string
-			if e = rows.Scan(&id, &key, &size); e != nil {
+			var r retentionRow
+			if e = rows.Scan(&r.id, &r.key, &r.size, &r.sha, &r.job, &r.task); e != nil {
 				return res, e
 			}
-			res.Bytes += size
+			res.Bytes += r.size
 		}
 		return res, rows.Err()
 	}
@@ -51,20 +52,22 @@ func (s *Store) mysqlPruneDocuments(ctx context.Context, res DocPruneResult, old
 				if e != nil {
 					return 0, e
 				}
-				var ids, keys []any
-				var docKeys []string
+				var ids, keys, logArgs []any
+				var docKeys, vals []string
 				var size int64
+				now := time.Now().UTC()
 				for rows.Next() {
-					var id, n int64
-					var key string
-					if e = rows.Scan(&id, &key, &n); e != nil {
+					var r retentionRow
+					if e = rows.Scan(&r.id, &r.key, &r.size, &r.sha, &r.job, &r.task); e != nil {
 						rows.Close()
 						return 0, e
 					}
-					ids = append(ids, id)
-					keys = append(keys, key)
-					docKeys = append(docKeys, key)
-					size += n
+					ids = append(ids, r.id)
+					keys = append(keys, r.key)
+					docKeys = append(docKeys, r.key)
+					vals = append(vals, "(?,?,?,?,?,?)")
+					logArgs = append(logArgs, r.key, r.sha, now, prunedBy, r.job, r.task)
+					size += r.size
 				}
 				e = rows.Err()
 				rows.Close()
@@ -75,6 +78,9 @@ func (s *Store) mysqlPruneDocuments(ctx context.Context, res DocPruneResult, old
 					return 0, nil
 				}
 				if _, e = tx.Exec(ctx, "DELETE FROM attachment_refs WHERE ref_kind='document' AND ref_id IN ("+placeholders(len(keys))+")", keys...); e != nil {
+					return 0, e
+				}
+				if _, e = tx.Exec(ctx, "INSERT INTO doc_prune_log(document_key, sha256, pruned_at, pruned_by, job, task_id) VALUES "+strings.Join(vals, ","), logArgs...); e != nil {
 					return 0, e
 				}
 				deleted, e := tx.Exec(ctx, "DELETE FROM documents WHERE id IN ("+placeholders(len(ids))+")", ids...)
