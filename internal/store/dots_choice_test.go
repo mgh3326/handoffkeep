@@ -348,10 +348,9 @@ func TestDotsChoiceAnnotationsRefused(t *testing.T) {
 	}
 }
 
-// Invariant (hk 4789, hk 6339): an answer to a declaring request's decision
-// on a task that was settled in the meantime is not recorded. Settling the
-// task withdrew the request, so the answer is refused as task_terminal, and
-// the requester lane hears nothing.
+// Invariant (hk 4789): an answer to a declaring request's decision on a task
+// that was settled in the meantime is still recorded — the console's cleanup
+// path — but it neither completes the task nor sends the requester a result.
 func TestDotsChoiceAnswerOnSettledTaskResolvesOnly(t *testing.T) {
 	s := schemaStore(t, "dots_choice_settled")
 	ctx := context.Background()
@@ -359,19 +358,19 @@ func TestDotsChoiceAnswerOnSettledTaskResolvesOnly(t *testing.T) {
 	if _, err := s.TransitionTaskWith(ctx, task.ID, TransitionInput{To: StateDropped, By: "operator:test@example.com", Note: "not needed any more", Evidence: "declined"}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := s.ResolveDecision(ctx, ResolveDecisionInput{
+	out, err := s.ResolveDecision(ctx, ResolveDecisionInput{
 		RequestID: task.Refs.DecisionRequest.ID, Kind: DecisionRequestAnswered, Option: "A", Text: "A로 갑시다",
 		Channel: DecisionChannelConsole, Actor: "operator:robin@example.com", Verified: true, EventKey: "console-settled",
 	})
-	if !errors.Is(err, ErrTaskTerminal) {
-		t.Fatalf("answer on a settled task err=%v, want task_terminal", err)
+	if err != nil || out.Result != DecisionResultAnswered {
+		t.Fatalf("outcome=%+v err=%v", out, err)
 	}
 	done, _, err := s.GetTask(ctx, task.ID)
 	if err != nil || done.State != StateDropped {
 		t.Fatalf("state=%s err=%v, want the settled state kept", done.State, err)
 	}
-	if done.Refs.DecisionRequest == nil || done.Refs.DecisionRequest.Status != DecisionRequestWithdrawn {
-		t.Fatalf("request=%+v, want it withdrawn by the settle", done.Refs.DecisionRequest)
+	if done.Refs.DecisionRequest == nil || done.Refs.DecisionRequest.Status != DecisionRequestAnswered {
+		t.Fatalf("request=%+v, want it answered", done.Refs.DecisionRequest)
 	}
 	var n int
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE starts_with(event_id,'dots-answer-')`).Scan(&n); err != nil || n != 0 {

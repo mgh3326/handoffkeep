@@ -281,10 +281,10 @@ func TestDecisionRequestDuplicateSend(t *testing.T) {
 	}
 }
 
-// A4: requests are listed whatever the task state. Merging a task withdraws
-// its open request (hk 6339): the request is no longer open, and it keeps its
-// history. Its decision rows are never read as merges.
-func TestDecisionRequestStateIndependentAndSettledWithdraw(t *testing.T) {
+// A4: requests are listed whatever the task state; an open request on a
+// merged task is uncleaned, not answered, and closing it keeps its history.
+// Its decision rows are never read as merges.
+func TestDecisionRequestStateIndependentAndUncleaned(t *testing.T) {
 	s, _ := searchTestStore(t)
 	ctx := context.Background()
 	backlog := decisionTask(t, s, "backlog")
@@ -305,15 +305,15 @@ func TestDecisionRequestStateIndependentAndSettledWithdraw(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 1 {
-		t.Fatalf("open list=%d, want the backlog request only", len(list))
+	if len(list) != 2 {
+		t.Fatalf("open list=%d", len(list))
 	}
-	if pending, uncleaned := DecisionRequestCounts(list); pending != 1 || uncleaned != 0 {
+	if pending, uncleaned := DecisionRequestCounts(list); pending != 1 || uncleaned != 1 {
 		t.Fatalf("pending=%d uncleaned=%d", pending, uncleaned)
 	}
 	merged, _, _ := s.GetTask(ctx, work.ID)
-	if merged.Refs.DecisionRequest == nil || merged.Refs.DecisionRequest.Status != DecisionRequestWithdrawn || merged.Refs.DecisionRequest.WithdrawnReason != DecisionWithdrawnTaskSettled {
-		t.Fatalf("merged request=%+v, want withdrawn with task_settled", merged.Refs.DecisionRequest)
+	if state := DecisionRequestState(*merged.Refs.DecisionRequest, merged.State, false, time.Now()); state != DecisionViewUncleaned {
+		t.Fatalf("merged open state=%s", state)
 	}
 	decisions, _, err := s.CountNeedsDecision(ctx)
 	if err != nil || decisions != 1 {
@@ -327,12 +327,13 @@ func TestDecisionRequestStateIndependentAndSettledWithdraw(t *testing.T) {
 	}()); !errors.Is(err, ErrTaskTerminal) {
 		t.Fatalf("new request on merged task: %v", err)
 	}
-	if _, err := s.ResolveDecisionRequest(ctx, work.ID, "director-1", DecisionResolveInput{RequestID: open.Request.ID, Kind: DecisionRequestWithdrawn, Text: "머지로 무의미해짐"}); !errors.Is(err, ErrTaskTerminal) {
-		t.Fatalf("withdraw on merged: %v, want task_terminal", err)
+	closed, err := s.ResolveDecisionRequest(ctx, work.ID, "director-1", DecisionResolveInput{RequestID: open.Request.ID, Kind: DecisionRequestWithdrawn, Text: "머지로 무의미해짐"})
+	if err != nil || closed.Task.State != "merged" {
+		t.Fatalf("withdraw on merged: %+v %v", closed.Task.State, err)
 	}
 	full, _, _ := s.GetTask(ctx, work.ID)
 	history := DecisionRequestHistory(full)
-	if len(history) != 1 || history[0].Request.Status != DecisionRequestWithdrawn || history[0].Request.WithdrawnReason != DecisionWithdrawnTaskSettled {
+	if len(history) != 1 || history[0].Request.Status != DecisionRequestWithdrawn || history[0].Request.Resolution.Text != "머지로 무의미해짐" {
 		t.Fatalf("history=%+v", history)
 	}
 	merges, err := s.ListMergedTaskEvents(ctx, 2000)
