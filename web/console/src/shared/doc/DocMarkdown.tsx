@@ -92,6 +92,25 @@ export default function DocMarkdown({ body, section, onSection }: { body: string
     if (section === null || root.current === null) {
       return;
     }
+    // A table row links to the combined document's file anchor
+    // (`#user-content-file-<table>.md`). The browser's native fragment scroll
+    // ran before this lazy chunk rendered, so scroll to that element first.
+    let wanted = section;
+    try {
+      wanted = decodeURIComponent(section);
+    } catch {
+      // keep the raw section text
+    }
+    const anchored =
+      wanted === ""
+        ? null
+        : [...root.current.querySelectorAll("[id]")].find((el) => el.id === wanted) ?? null;
+    if (anchored instanceof HTMLElement) {
+      anchored.classList.add("hk-doc-section-target");
+      anchored.scrollIntoView?.({ block: "start" });
+      onSection?.(true);
+      return;
+    }
     const heading = findSectionHeading(root.current, section);
     if (heading) {
       heading.classList.add("hk-doc-section-target");

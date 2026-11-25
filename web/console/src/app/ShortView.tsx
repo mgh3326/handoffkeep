@@ -26,6 +26,7 @@ import {
   type StorageRow,
 } from "../shared/doc/shortView";
 import { formatDayUTC, formatMinuteUTC } from "../shared/time";
+import "../shared/doc/doc.css";
 
 type Sibling<T> =
   | { status: "loading" }

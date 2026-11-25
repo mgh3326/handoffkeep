@@ -82,6 +82,9 @@ export function parseStatsHistory(body: string): StatsSnapshot[] {
   if (!Array.isArray(doc.snapshots)) {
     throw new Error("stats의 table-stats-history에 snapshots가 없습니다");
   }
+  if (doc.snapshots.length === 0) {
+    throw new Error("stats의 table-stats-history에 snapshot이 없습니다");
+  }
   return (doc.snapshots as unknown[]).map((entry, i) => {
     if (typeof entry !== "object" || entry === null) {
       throw new Error(`stats의 snapshot ${i}가 올바르지 않습니다`);

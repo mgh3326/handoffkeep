@@ -102,8 +102,10 @@ describe("parseStatsHistory", () => {
   });
 
   it("accepts the shape doc's `version` spelling as well as the writer's `v`", () => {
-    const snaps = parseStatsHistory(statsBody(JSON.stringify({ version: 1, snapshots: [] })));
-    expect(snaps).toEqual([]);
+    const snaps = parseStatsHistory(
+      statsBody(JSON.stringify({ version: 1, snapshots: [{ at: "2026-11-25T03:15:35Z", tables: {} }] })),
+    );
+    expect(snaps).toEqual([{ at: "2026-11-25T03:15:35Z", tables: {} }]);
   });
 
   it.each([
@@ -111,6 +113,7 @@ describe("parseStatsHistory", () => {
     ["unclosed fence", "```json table-stats-history\n{}", "닫히지 않았습니다"],
     ["broken json", statsBody("not json"), "JSON이 아닙니다"],
     ["unknown version", statsBody(JSON.stringify({ v: 9, snapshots: [] })), "version이 낯설어요: 9"],
+    ["empty snapshots", statsBody(JSON.stringify({ v: 1, snapshots: [] })), "snapshot이 없습니다"],
   ])("rejects %s", (_name, body, message) => {
     expect(() => parseStatsHistory(body as string)).toThrow(message as string);
   });

@@ -29,6 +29,8 @@ const HISTORY = JSON.stringify({
 
 const STATS_BODY = `# stats\n\n## History\n\n\`\`\`json table-stats-history\n${HISTORY}\n\`\`\`\n`;
 
+const EMPTY_STATS_BODY = `# stats\n\n## History\n\n\`\`\`json table-stats-history\n${JSON.stringify({ v: 1, snapshots: [] })}\n\`\`\`\n`;
+
 const REVIEW_BODY = JSON.stringify({
   version: 1,
   read_cost: {
@@ -89,6 +91,7 @@ function shortLocation() {
 afterEach(() => {
   vi.unstubAllGlobals();
   window.history.pushState({}, "", "/");
+  Reflect.deleteProperty(window.HTMLElement.prototype, "scrollIntoView");
 });
 
 describe("short view", () => {
@@ -205,5 +208,31 @@ describe("short view", () => {
     render(<DocView docKey={key} />);
     expect(await screen.findByRole("heading", { name: "Heading" })).toBeTruthy();
     expect(screen.queryByText("전체 문서")).toBeNull();
+  });
+
+  it("an empty stats history shows the stats line without crashing", async () => {
+    shortLocation();
+    answers({
+      [STATS_KEY]: { status: 200, body: payload(STATS_KEY, EMPTY_STATS_BODY) },
+      [REVIEW_KEY]: { status: 200, body: payload(REVIEW_KEY, REVIEW_BODY) },
+    });
+    render(<DocView docKey={DOC_KEY} />);
+    expect(await screen.findByText(/snapshot이 없습니다/)).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "읽기 비용 상위" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "저장 용량 상위" })).toBeNull();
+  });
+
+  it("a table section hash scrolls to the table anchor in the full view", async () => {
+    sectionLocation();
+    const scrolled: Element[] = [];
+    window.HTMLElement.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this);
+    };
+    answers({ [DOC_KEY]: { status: 200, body: payload(DOC_KEY, "<!-- file: beta.md -->\n\n## beta\n") } });
+    render(<DocView docKey={DOC_KEY} />);
+    await screen.findByRole("heading", { name: "beta" });
+    const anchor = document.getElementById("user-content-file-beta.md");
+    expect(anchor).not.toBeNull();
+    expect(scrolled).toContain(anchor);
   });
 });
