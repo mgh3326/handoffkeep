@@ -29,16 +29,7 @@ func TestCopyPostgresMySQLAndBackWithParity(t *testing.T) {
 	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO quota_observations(id,account_key,kind,window_key,measured_at,value,received_at) VALUES(91001,'copy-test','manual','day', $1, $2, $1)`, when, json.RawMessage(`{"b":2,"a":1}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO bench_area_exceptions(profile,effort,area,action,evidence_refs,decision_ref,decided_by,decided_at,expires_with_model_id) VALUES('copy-test','','docs','exclude',ARRAY['ref:a','ref,b','quoted"ref'],'hk:task/1','test',$1,'model')`, when); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO bench_area_exceptions(profile,effort,area,action,evidence_refs,decision_ref,decided_by,decided_at,expires_with_model_id) VALUES('copy-test-empty','','docs','prefer',ARRAY[]::TEXT[],'hk:task/2','test',$1,'model')`, when); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO bench_reps(id,origin_id,profile,created_by,recorded_at,created_at,first_ci_green,completed,merged,reverted_within_7d) VALUES(92001,92001,'copy-test','copy-test',$1,$1,TRUE,17,FALSE,TRUE)`, when); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO bench_scores(model_id,effort,harness,source,metric,score,captured_at,cost_per_task_usd,updated_by,updated_at) VALUES('copy-model','','','copy-test','metric',1.25,$1,2.5,'test',$1)`, when); err != nil {
 		t.Fatal(err)
 	}
 	// B7 tables are seeded on the PostgreSQL side and copied in both directions
@@ -222,12 +213,12 @@ func TestCopyRefusesOverlongMySQLColumnValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pg.Close()
-	long := strings.Repeat("x", 129)
-	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO bench_scores(model_id,effort,harness,source,metric,updated_by,captured_at,updated_at) VALUES($1,'','','source','metric','test',now(),now())`, long); err != nil {
+	long := strings.Repeat("x", 201)
+	if _, err := pg.pool.Exec(t.Context(), `INSERT INTO bench_catalog(profile,effort,model_id,pool,grade,deviation_ref,decided_at,decided_by) VALUES($1,'','model','pool','A','ref',now(),'test')`, long); err != nil {
 		t.Fatal(err)
 	}
-	_, err = CopyStore(t.Context(), pgURL, myURL, []string{"bench_scores"}, false)
-	if err == nil || !strings.Contains(err.Error(), "refusing bench_scores.model_id") {
+	_, err = CopyStore(t.Context(), pgURL, myURL, []string{"bench_catalog"}, false)
+	if err == nil || !strings.Contains(err.Error(), "refusing bench_catalog.profile") {
 		t.Fatalf("expected overlong-value refusal, got %v", err)
 	}
 }

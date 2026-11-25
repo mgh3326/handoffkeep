@@ -92,11 +92,9 @@ var copyTableRegistry = []copyTableSpec{
 	{name: "attachment_refs", columns: strings.Fields("sha256 ref_kind ref_id"), order: []string{"sha256", "ref_kind", "ref_id"}, bounds: map[string]int{"sha256": 64, "ref_kind": 16, "ref_id": 512}},
 	{name: "attachment_uploads", columns: strings.Fields("id staging_key name mime size_bytes sha256 ref_kind ref_id created_by status reason created_at expires_at updated_at staging_deleted_at claim_nonce"), order: []string{"id"}, bounds: map[string]int{"id": 32, "sha256": 64, "ref_kind": 16}},
 	{name: "attachment_usage", columns: strings.Fields("month puts gets bytes_added"), order: []string{"month"}, bounds: map[string]int{"month": 7}},
-	{name: "bench_area_exceptions", columns: strings.Fields("profile effort area action evidence_refs decision_ref decided_by decided_at expires_with_model_id retired_at"), order: []string{"profile", "effort", "area"}, bounds: map[string]int{"profile": 200, "effort": 200, "area": 200, "action": 16}},
 	{name: "bench_catalog", columns: strings.Fields("profile effort model_id pool grade score gate gate_reason benchmark_source benchmark_annotation boundary_version deviation_ref decided_at decided_by retired_at"), order: []string{"profile", "effort"}, bounds: map[string]int{"profile": 200, "effort": 200, "grade": 16, "gate": 32}},
 	{name: "bench_grades", columns: strings.Fields("profile grade boundary_version deviation_ref decided_at decided_by"), order: []string{"profile"}, bounds: map[string]int{"profile": 200, "grade": 16}},
 	{name: "bench_reps", serial: true, columns: strings.Fields("id origin_id profile model_id task_ref tier role rounds blockers_found completed input_tokens output_tokens notes recorded_at effort grade table_grade created_by created_at experiment_id arm first_ci_green critical_findings high_findings merged reverted_within_7d reviewer_profile reviewer_effort reasoning_tokens cache_read_tokens cache_write_tokens spawn_to_ready_s spawn_to_merge_s"), order: []string{"id"}, bounds: map[string]int{"created_by": 128}},
-	{name: "bench_scores", columns: strings.Fields("model_id effort harness source metric score rank captured_at time_per_task_min cost_per_task_usd provenance updated_by updated_at"), order: []string{"model_id", "effort", "harness", "source", "metric"}, bounds: map[string]int{"model_id": 128, "effort": 128, "harness": 128, "source": 128, "metric": 128}},
 	{name: "quota_observations", serial: true, columns: strings.Fields("id account_key kind window_key measured_at value received_at"), order: []string{"id"}, bounds: map[string]int{"account_key": 64, "kind": 16, "window_key": 16}},
 	{name: "quota_latest", columns: strings.Fields("account_key kind window_key observation_id measured_at confirmed_at"), order: []string{"account_key", "kind", "window_key"}, bounds: map[string]int{"account_key": 64, "kind": 16, "window_key": 16}},
 	{name: "quota_leases", columns: strings.Fields("account_key owner holder expires_at"), order: []string{"account_key"}, bounds: map[string]int{"account_key": 64}},
@@ -560,8 +558,7 @@ func classifyCopyColumn(mysqlDB bool, dataType, detail string) (copyValueKind, e
 // copyArrayColumns are PostgreSQL TEXT[] columns that are JSON arrays of
 // strings on MySQL. They are compared and converted as a list of strings.
 var copyArrayColumns = map[string]bool{
-	"bench_area_exceptions.evidence_refs": true,
-	"deploy_services.record_prefixes":     true,
+	"deploy_services.record_prefixes": true,
 	"task_thread_deliveries.posted":       true,
 }
 

@@ -477,39 +477,3 @@ func TestChatV16ToV17Upgrade(t *testing.T) {
 	}
 }
 
-// TestBenchAreaExceptionsV19MigrationIsAdditive rewinds to a v18 schema —
-// the version row deleted, the table dropped — and proves v19 creates
-// bench_area_exceptions once, writes its version marker once, and a second
-// migrate is a no-op. The closed action CHECK is asserted against the
-// migrated table itself.
-func TestBenchAreaExceptionsV19MigrationIsAdditive(t *testing.T) {
-	s, pool := searchTestStore(t)
-	ctx := context.Background()
-	for _, q := range []string{
-		`DELETE FROM schema_version WHERE version=19`,
-		`DROP TABLE bench_area_exceptions`,
-	} {
-		if _, err := pool.Exec(ctx, q); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := s.migrate(ctx); err != nil {
-		t.Fatalf("v19 migrate: %v", err)
-	}
-	var tables, version int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_tables WHERE schemaname=current_schema() AND tablename='bench_area_exceptions'`).Scan(&tables); err != nil || tables != 1 {
-		t.Fatalf("tables=%d err=%v", tables, err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=19`).Scan(&version); err != nil || version != 1 {
-		t.Fatalf("version 19 rows=%d err=%v", version, err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO bench_area_exceptions(profile,effort,area,action,evidence_refs,decision_ref,decided_by,decided_at,expires_with_model_id) VALUES('p','','docs','require','{srv:1}','hk:task/1','t',now(),'m')`); err == nil {
-		t.Fatal("action outside the closed set accepted")
-	}
-	if err := s.migrate(ctx); err != nil {
-		t.Fatalf("second migrate: %v", err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_version WHERE version=19`).Scan(&version); err != nil || version != 1 {
-		t.Fatalf("version 19 rows after restart=%d err=%v", version, err)
-	}
-}
