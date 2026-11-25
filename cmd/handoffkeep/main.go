@@ -211,13 +211,46 @@ func taskCreateRequirements() string {
 	return "tasks add requires --lane <name> and --title <text>, and --kind must be one of " + strings.Join(store.TaskKinds(), ", ")
 }
 
+// tasksHelp is the help tasks list -h and tasks search -h print instead of a
+// bare "flag: help requested" (hk 6479): the usage plus the limits and
+// allowed values the server enforces. Other subcommands keep the old output.
+func tasksHelp(sub string) string {
+	if sub == "search" {
+		return tasksSearchUsage()
+	}
+	return tasksListUsage()
+}
+
+// tasksListUsage states what the default listing returns and what each
+// filter accepts. The state and area sets come from the store's own
+// vocabularies so the help cannot drift from them.
+func tasksListUsage() string {
+	return `usage: tasks list [--lane L] [--state S] [--parent-lane P] [--project P] [--area A] [--stalled] [--change N] [--after-id N] [--limit N]
+  Lists the oldest tasks first, 20 by default.
+  --limit accepts 1..1000 (default 20); the server names the parameter when it refuses one.
+  --state accepts: ` + strings.Join(store.AcceptedStateNames(), ", ") + `.
+  --area accepts the closed vocabulary listed by tasks areas; --stalled accepts true or false.
+  --change takes a positive change id and cannot be combined with other filters; --after-id accepts an integer >= 0.`
+}
+
+// tasksSearchUsage states the duplicate check before tasks add: words across
+// every state, relevance first, newest first within equal rank.
+func tasksSearchUsage() string {
+	return `usage: tasks search <words...> [--project P] [--state S | --open] [--lane L] [--limit N]
+  Finds tasks by words across every state: the duplicate check before tasks add.
+  Results come back by relevance, newest first within equal rank; no match exits 0 with {"tasks":[]}.
+  Words match titles (plus Korean title translations, translated bodies and comment bodies).
+  --limit accepts 1..50 (default 20).
+  --state accepts: ` + strings.Join(store.AcceptedStateNames(), ", ") + `.
+  --open keeps only unfinished tasks (everything but merged, deployed, completed, dropped and duplicate) and is exclusive with --state.`
+}
 func tasksCmd(args []string, out io.Writer) error {
 	return tasksCmdE(args, out, os.Stderr)
 }
 
 func tasksCmdE(args []string, out, errout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: tasks add|list|export|claim|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|set-area|areas|set-priority|close-rule|parent|relate|unrelate|wait|unwait|backfill-hierarchy|order|order-ack|order-withdraw|doc-ref|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|drift|settle-merged|hygiene|intake|triage")
+		return errors.New("usage: tasks add|list|search|export|claim|transition|reopen|rebind|relane|project|projects|owner|owners|milestone|set-area|areas|set-priority|close-rule|parent|relate|unrelate|wait|unwait|backfill-hierarchy|order|order-ack|order-withdraw|doc-ref|decision-request|decision-resolve|show|comment|comments|disposition|event|sweep|drift|settle-merged|hygiene|intake|triage")
 	}
 	if args[0] == "disposition" {
 		return dispositionCmd(args[1:], out)
@@ -328,6 +361,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	question := fs.String("question", "", "question required for needs_decision")
 	limit := fs.Int("limit", 20, "maximum results")
 	stalled := fs.Bool("stalled", false, "list only stalled tasks: started, not awaiting a decision, no activity within the server's started_stalled_hours (tasks list only)")
+	open := fs.Bool("open", false, "search only unfinished tasks: everything but merged, deployed, completed, dropped and duplicate (tasks search only, exclusive with --state)")
 	pr := fs.String("pr", "", "pull request reference; with --to merged from an open state before reviewing, the merged PR that delivered the task (hk checks its change record)")
 	headSHA := fs.String("head-sha", "", "head revision reference")
 	reportPath := fs.String("report-path", "", "report path reference")
@@ -347,12 +381,17 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		return err
 	}
 	if err := fs.Parse(parseArgs); err != nil {
+		if errors.Is(err, flag.ErrHelp) && (args[0] == "list" || args[0] == "search") {
+			fmt.Fprintln(out, tasksHelp(args[0]))
+			return nil
+		}
 		return err
 	}
 	docFlagUsed, noJobSet, projectSet, areaSet, expectedSet := false, false, false, false, false
 	parentSet, duplicateOfSet, stalledSet := false, false, false
 	linkSet, kindSet, prioritySet := false, false, false
 	closureSet := false
+	openSet := false
 	fs.Visit(func(item *flag.Flag) {
 		switch item.Name {
 		case "closure", "evidence":
@@ -366,6 +405,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		}
 		if item.Name == "stalled" {
 			stalledSet = true
+		}
+		if item.Name == "open" {
+			openSet = true
 		}
 		if item.Name == "parent" {
 			parentSet = true
@@ -431,6 +473,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if stalledSet && args[0] != "list" {
 		return errors.New("--stalled is accepted only by tasks list")
+	}
+	if openSet && args[0] != "search" {
+		return errors.New("--open is accepted only by tasks search")
 	}
 	if docFlagUsed && args[0] != "add" {
 		return errors.New("--doc is accepted only by tasks add")
@@ -550,6 +595,29 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		}
 		if err != nil {
 			return err
+		}
+		return printJSON(out, map[string]any{"tasks": xs})
+	case "search":
+		words := fs.Args()
+		if len(words) == 0 {
+			return errors.New(tasksSearchUsage())
+		}
+		if openSet && strings.TrimSpace(*state) != "" {
+			return errors.New("--open and --state are exclusive")
+		}
+		if *limit < 1 || *limit > 50 {
+			return errors.New("tasks search --limit must be between 1 and 50")
+		}
+		var projectFilter *string
+		if projectSet {
+			projectFilter = project
+		}
+		xs, _, err := c.SearchTasks(ctx, strings.Join(words, " "), *lane, *state, projectFilter, *open, *limit)
+		if err != nil {
+			return err
+		}
+		if xs == nil {
+			xs = []store.Task{}
 		}
 		return printJSON(out, map[string]any{"tasks": xs})
 	case "export":
@@ -674,7 +742,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		}
 		return printJSON(out, taskShowOutput{Task: x, OpenOrders: orders})
 	default:
-		return errors.New("usage: tasks add|list|export|claim|transition|reopen|rebind|relane|project|projects|owner|owners|set-area|areas|set-priority|close-rule|parent|relate|unrelate|order|order-ack|order-withdraw|doc-ref|decision-request|decision-resolve|show|comment|comments|disposition|intake|triage")
+		return errors.New("usage: tasks add|list|search|export|claim|transition|reopen|rebind|relane|project|projects|owner|owners|set-area|areas|set-priority|close-rule|parent|relate|unrelate|order|order-ack|order-withdraw|doc-ref|decision-request|decision-resolve|show|comment|comments|disposition|intake|triage")
 	}
 }
 

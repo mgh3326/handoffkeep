@@ -641,6 +641,7 @@ func (s Server) Handler() http.Handler {
 	m.HandleFunc("POST /v1/ticket-sets", s.ticketSetsCreate)
 	m.HandleFunc("GET /v1/triage", s.triageList)
 	m.HandleFunc("GET /v1/tasks", s.tasksList)
+	m.HandleFunc("GET /v1/tasks/search", s.tasksSearch)
 	m.HandleFunc("GET /v1/tasks/export", s.tasksExport)
 	m.HandleFunc("GET /v1/tasks/sweep", s.tasksSweepPreview)
 	m.HandleFunc("GET /v1/tasks/drift", s.tasksDrift)
@@ -870,9 +871,8 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	limit, err := queryLimit(r, 20, 1000)
-	if err != nil {
-		appErr(w, r, err)
+	limit, ok := taskLimit(w, r, 20, 1000, "invalid_context")
+	if !ok {
 		return
 	}
 	if r.URL.Query().Has("change") {
@@ -880,12 +880,12 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		// an intersection.
 		changeID, parseErr := strconv.ParseInt(r.URL.Query().Get("change"), 10, 64)
 		if parseErr != nil || changeID < 1 {
-			writeError(w, http.StatusBadRequest, "invalid_context")
+			writeParamError(w, http.StatusBadRequest, "invalid_context", "change", "a positive integer")
 			return
 		}
 		for _, other := range []string{"lane", "state", "parent_lane", "project", "area", "stalled", "after_id"} {
 			if r.URL.Query().Has(other) {
-				writeError(w, http.StatusBadRequest, "invalid_context")
+				writeParamError(w, http.StatusBadRequest, "invalid_context", "change", "change only, no other filters")
 				return
 			}
 		}
@@ -900,10 +900,28 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lane, state, parentLane := r.URL.Query().Get("lane"), r.URL.Query().Get("state"), r.URL.Query().Get("parent_lane")
+	if lane != "" && !store.ValidProjectName(lane) {
+		writeParamError(w, http.StatusBadRequest, "invalid_context", "lane", paramAllowedNames)
+		return
+	}
+	if state != "" {
+		if _, ok := store.ParseStateFilter(state); !ok {
+			writeParamError(w, http.StatusBadRequest, "invalid_context", "state", store.AcceptedStateNames())
+			return
+		}
+	}
+	if parentLane != "" && !store.ValidProjectName(parentLane) {
+		writeParamError(w, http.StatusBadRequest, "invalid_context", "parent_lane", paramAllowedNames)
+		return
+	}
 	var project *string
 	if r.URL.Query().Has("project") {
 		v := r.URL.Query().Get("project")
 		project = &v
+		if v != "" && !store.ValidProjectName(v) {
+			writeParamError(w, http.StatusBadRequest, "invalid_context", "project", paramAllowedNames)
+			return
+		}
 	}
 	var area *string
 	if r.URL.Query().Has("area") {
@@ -914,34 +932,36 @@ func (s Server) tasksList(w http.ResponseWriter, r *http.Request) {
 	// not depend on a database round trip.
 	if area != nil && *area != "" {
 		if err := store.CheckTaskArea(area); err != nil {
-			appErr(w, r, err)
+			reason, _ := strings.CutPrefix(err.Error(), store.ErrTaskAreaUnknown.Error()+": ")
+			writeParamError(w, http.StatusBadRequest, "invalid_request", "area", store.TaskAreas(), reason)
 			return
 		}
 	}
-	stalled := false
+	var stalled bool
 	if r.URL.Query().Has("stalled") {
-		if stalled, err = strconv.ParseBool(r.URL.Query().Get("stalled")); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_context")
+		v, err := strconv.ParseBool(r.URL.Query().Get("stalled"))
+		if err != nil {
+			writeParamError(w, http.StatusBadRequest, "invalid_context", "stalled", "true,false")
 			return
 		}
+		stalled = v
 	}
 	var xs []store.Task
+	var err error
 	switch {
 	case stalled:
 		q := store.TaskQuery{Lane: lane, State: state, ParentLane: parentLane, Project: project, Area: area, Stalled: true, Limit: limit}
 		if r.URL.Query().Has("after_id") {
-			afterID, parseErr := queryCursor(r, "after_id")
-			if parseErr != nil {
-				appErr(w, r, parseErr)
+			afterID, ok := taskCursor(w, r, "after_id", "invalid_context")
+			if !ok {
 				return
 			}
 			q.AfterID = &afterID
 		}
 		xs, err = s.Service.ListTasksFiltered(r.Context(), q)
 	case r.URL.Query().Has("after_id"):
-		afterID, parseErr := queryCursor(r, "after_id")
-		if parseErr != nil {
-			appErr(w, r, parseErr)
+		afterID, ok := taskCursor(w, r, "after_id", "invalid_context")
+		if !ok {
 			return
 		}
 		xs, err = s.Service.ListTasksPage(r.Context(), lane, state, parentLane, project, area, afterID, limit)
@@ -979,16 +999,33 @@ func (s Server) tasksExport(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(w, r); !ok {
 		return
 	}
-	limit, err := queryLimit(r, 1000, store.ExportLimitMax)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_export_query")
+	limit, ok := taskLimit(w, r, 1000, store.ExportLimitMax, "invalid_export_query")
+	if !ok {
 		return
 	}
 	lane, state, parentLane := r.URL.Query().Get("lane"), r.URL.Query().Get("state"), r.URL.Query().Get("parent_lane")
+	if lane != "" && !store.ValidProjectName(lane) {
+		writeParamError(w, http.StatusBadRequest, "invalid_export_query", "lane", paramAllowedNames)
+		return
+	}
+	if state != "" {
+		if _, ok := store.ParseStateFilter(state); !ok {
+			writeParamError(w, http.StatusBadRequest, "invalid_export_query", "state", store.AcceptedStateNames())
+			return
+		}
+	}
+	if parentLane != "" && !store.ValidProjectName(parentLane) {
+		writeParamError(w, http.StatusBadRequest, "invalid_export_query", "parent_lane", paramAllowedNames)
+		return
+	}
 	var project *string
 	if r.URL.Query().Has("project") {
 		v := r.URL.Query().Get("project")
 		project = &v
+		if v != "" && !store.ValidProjectName(v) {
+			writeParamError(w, http.StatusBadRequest, "invalid_export_query", "project", paramAllowedNames)
+			return
+		}
 	}
 	out, err := s.Service.ExportTasks(r.Context(), lane, state, parentLane, project, limit)
 	if err != nil {
@@ -2227,6 +2264,43 @@ func decodeError(err error) error {
 	}
 	return err
 }
+
+// paramAllowedNames is the "allowed" value for lane, parent-lane and project
+// filters: they share the store's validName alphabet.
+const paramAllowedNames = "1..128 chars of A-Za-z0-9._-"
+
+// taskLimit parses ?limit= for the task routes that name their parameter on
+// refusal (hk 6479). Absent means def; a non-numeric or out-of-range value
+// answers code with param "limit" and allowed "1..<max>". It reports whether
+// the caller may continue.
+func taskLimit(w http.ResponseWriter, r *http.Request, def, max int, code string) (int, bool) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return def, true
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > max {
+		writeParamError(w, http.StatusBadRequest, code, "limit", "1.."+strconv.Itoa(max))
+		return 0, false
+	}
+	return n, true
+}
+
+// taskCursor parses the non-negative int64 cursor query parameter name for
+// the task routes that name their parameter on refusal. Absent is 0.
+func taskCursor(w http.ResponseWriter, r *http.Request, name, code string) (int64, bool) {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return 0, true
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 {
+		writeParamError(w, http.StatusBadRequest, code, name, "integer >= 0")
+		return 0, false
+	}
+	return n, true
+}
+
 func queryLimit(r *http.Request, def, max int) (int, error) {
 	x := def
 	if v := r.URL.Query().Get("limit"); v != "" {
