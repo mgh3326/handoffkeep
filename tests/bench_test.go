@@ -184,7 +184,6 @@ func sameRepRow(a, b map[string]any) bool {
 func benchClean(t *testing.T, p *pgxpool.Pool) {
 	t.Helper()
 	for _, query := range []string{
-		`DELETE FROM bench_scores WHERE model_id IN ('claude-opus-5','kimi-k3','guard-model','identity-score') OR model_id LIKE 'bench-limit-%' OR model_id IN ('benchlm-model','bench-invalid-score')`,
 		`DELETE FROM bench_reps WHERE origin_id IN (568,569,570,571,572,573) AND created_by IN ('bench-client','bench-peer')`,
 		`DELETE FROM bench_catalog WHERE profile LIKE 'bench-%' OR profile IN ('codex-terra-max','codex-sol','kiro-sol','bench-grade-cat-compat')`,
 		`DELETE FROM bench_grades WHERE profile LIKE 'bench-%' OR profile IN ('codex-terra-max','codex-sol','kiro-sol')`,
@@ -210,7 +209,7 @@ func TestBenchSchemaV9IsAdditiveAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(p.Close)
-	for _, table := range []string{"bench_scores", "bench_reps", "bench_grades", "bench_catalog"} {
+	for _, table := range []string{"bench_reps", "bench_grades", "bench_catalog"} {
 		var name *string
 		if err := p.QueryRow(t.Context(), `SELECT to_regclass($1)`, table).Scan(&name); err != nil {
 			t.Fatal(err)

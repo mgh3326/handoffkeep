@@ -380,12 +380,6 @@ comments:
       The position of the ledger reader, so it resumes from the last ledger entry it applied.
       Stands alone by design: one cursor per consumer name; no other table is consumed by name.
       Retention: none.
-  - table: bench_area_exceptions
-    labels: [config]
-    tableComment: |
-      Benchmark area exceptions that an operator decided for a profile and effort, with evidence and expiry.
-      Stands alone by design: profile and effort are text; no production code joins it to bench_catalog.
-      Retention: none. No production code path reads or writes it at head; the generic copy path lists it. Candidate for retirement, not changed here.
   - table: bench_catalog
     labels: [config]
     tableComment: |
@@ -401,12 +395,6 @@ comments:
     tableComment: |
       Benchmark repetitions and their outcomes, one row per run, read by bench scoring.
       Stands alone by design: one row per benchmark run; it names its profile and model as text, and no code joins it to bench_catalog.
-      Retention: none.
-  - table: bench_scores
-    labels: [history-log]
-    tableComment: |
-      Benchmark scores per model, effort, harness and source. No production code path reads or writes it at head; only its creation and indexes remain. Candidate for retirement, not changed here.
-      Stands alone by design: scores are keyed by model, effort, harness and source as text; no code joins them.
       Retention: none.
   - table: hk_locks
     labels: [lock-lease]
@@ -785,11 +773,9 @@ viewpoints:
       - checkpoints
       - translations
       - ledger_cursors
-      - bench_area_exceptions
       - bench_catalog
       - bench_grades
       - bench_reps
-      - bench_scores
       - hk_locks
       - schema_migrations
     groups:
@@ -837,13 +823,11 @@ viewpoints:
           - translations
           - ledger_cursors
       - name: "Bench"
-        desc: "The benchmark catalog and its area exceptions, grades, reps and scores."
+        desc: "The benchmark catalog and its grades and reps."
         tables:
-          - bench_area_exceptions
           - bench_catalog
           - bench_grades
           - bench_reps
-          - bench_scores
       - name: "Store"
         desc: "The store's own plumbing: advisory locks and the migration ledger."
         tables:

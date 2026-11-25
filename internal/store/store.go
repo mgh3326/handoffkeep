@@ -1210,10 +1210,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := migrateOnce(ctx, tx, 9, func() error {
+		// Retired by operator decision 501, hk 6389: new installs no longer
+		// create bench_scores; existing databases keep the empty table until
+		// release 2 (hk 6390) drops it.
 		v9 := []string{
-			`CREATE TABLE IF NOT EXISTS bench_scores (model_id TEXT NOT NULL, effort TEXT NOT NULL DEFAULT '', harness TEXT NOT NULL DEFAULT '', source TEXT NOT NULL, metric TEXT NOT NULL, score DOUBLE PRECISION, rank INTEGER, captured_at TIMESTAMPTZ NOT NULL, time_per_task_min DOUBLE PRECISION, cost_per_task_usd DOUBLE PRECISION, provenance TEXT NOT NULL DEFAULT '', updated_by TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL, UNIQUE(model_id, effort, harness, source, metric))`,
-			`CREATE INDEX IF NOT EXISTS bench_scores_model_source ON bench_scores(model_id, source)`,
-			`CREATE INDEX IF NOT EXISTS bench_scores_source_metric ON bench_scores(source, metric, model_id, effort, harness)`,
 			`CREATE TABLE IF NOT EXISTS bench_reps (id BIGSERIAL PRIMARY KEY, origin_id BIGINT NOT NULL CHECK(origin_id >= 1), profile TEXT NOT NULL, model_id TEXT, task_ref TEXT, tier TEXT, role TEXT, rounds INTEGER, blockers_found INTEGER, completed INTEGER, input_tokens BIGINT, output_tokens BIGINT, notes TEXT, recorded_at TIMESTAMPTZ NOT NULL, effort TEXT, grade TEXT, table_grade TEXT, created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, UNIQUE(created_by, origin_id))`,
 			`CREATE INDEX IF NOT EXISTS bench_reps_profile_id ON bench_reps(profile, id DESC)`,
 			`CREATE INDEX IF NOT EXISTS bench_reps_grade_effort_id ON bench_reps(grade, effort, id DESC)`,
@@ -1389,16 +1389,11 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := migrateOnce(ctx, tx, 19, func() error {
-		// Version 19 (hk 1944) adds the bench area exception list: per-area
-		// routing exceptions kept next to, but separate from, the grade
-		// catalog. The area column is validated in code against the TaskAreas
-		// constant (same reason as v18 — a CHECK would freeze a copy of the
-		// vocabulary), the action CHECK is closed, and evidence_refs carries
-		// at least one ref enforced by the write path. Retired rows stay in
-		// place; there is no DELETE.
+		// Retired by operator decision 501, hk 6389: new installs no longer
+		// create bench_area_exceptions; existing databases keep the empty
+		// table until release 2 (hk 6390) drops it. The version marker stays
+		// so the integer versions remain frozen.
 		v19 := []string{
-			`CREATE TABLE IF NOT EXISTS bench_area_exceptions (profile TEXT NOT NULL, effort TEXT NOT NULL DEFAULT '', area TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('exclude','prefer')), evidence_refs TEXT[] NOT NULL, decision_ref TEXT NOT NULL, decided_by TEXT NOT NULL, decided_at TIMESTAMPTZ NOT NULL, expires_with_model_id TEXT NOT NULL, retired_at TIMESTAMPTZ, PRIMARY KEY(profile, effort, area))`,
-			`CREATE INDEX IF NOT EXISTS bench_area_exceptions_area ON bench_area_exceptions(area) WHERE retired_at IS NULL`,
 			`INSERT INTO schema_version(version) VALUES (19)`,
 		}
 		return execAll(ctx, tx, v19)
