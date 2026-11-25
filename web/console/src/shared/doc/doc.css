@@ -163,3 +163,57 @@
   transform-origin: 0 0;
   pointer-events: none;
 }
+
+/* The short schema view (hk 6392): three groups of rows. One badge style for
+ * every state; a row wraps onto more lines at mobile width instead of
+ * overflowing. Tokens only. */
+.hk-short section {
+  margin: var(--hk-space-6) 0;
+}
+.hk-short-group {
+  list-style: none;
+  margin: var(--hk-space-3) 0;
+  padding: 0;
+}
+.hk-short-row {
+  padding: var(--hk-space-3) 0;
+  border-top: 1px solid var(--hk-border);
+}
+.hk-short-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--hk-space-2);
+  font-size: var(--hk-type-row);
+  line-height: var(--hk-line-row);
+}
+.hk-short-table code {
+  font-family: var(--hk-font-mono);
+  overflow-wrap: anywhere;
+}
+.hk-short-badge {
+  display: inline-block;
+  padding: 0 var(--hk-space-2);
+  border: 1px solid var(--hk-border-strong);
+  border-radius: var(--hk-radius-badge);
+  background: var(--hk-badge-fill);
+  font-size: var(--hk-type-row);
+  line-height: var(--hk-line-row);
+  white-space: nowrap;
+}
+.hk-short-field {
+  color: var(--hk-text-secondary);
+  overflow-wrap: anywhere;
+}
+.hk-short-meta {
+  margin-left: auto;
+  color: var(--hk-text-secondary);
+  font-family: var(--hk-font-mono);
+  white-space: nowrap;
+}
+.hk-short-note {
+  margin: var(--hk-space-1) 0 0;
+  color: var(--hk-text-secondary);
+  font-size: var(--hk-type-row);
+  line-height: var(--hk-line-row);
+}

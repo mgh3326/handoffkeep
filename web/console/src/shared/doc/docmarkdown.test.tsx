@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import DocMarkdown from "./DocMarkdown";
 
@@ -77,5 +77,39 @@ describe("DocMarkdown Mermaid blocks", () => {
     expect((await screen.findByRole("note")).textContent).toMatch(/limit is 50000/);
     expect(mermaid.parse).not.toHaveBeenCalled();
     expect(mermaid.render).not.toHaveBeenCalled();
+  });
+});
+
+describe("DocMarkdown section scroll", () => {
+  const combined = ["<!-- file: tasks.md -->", "", "## tasks", "", "<!-- file: decisions.md -->", "", "## decisions"].join(
+    "\n",
+  );
+
+  function mockScroll() {
+    const scrolled: Element[] = [];
+    window.HTMLElement.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this);
+    };
+    return scrolled;
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(window.HTMLElement.prototype, "scrollIntoView");
+  });
+
+  it("scrolls to a file anchor a table row links to", () => {
+    const scrolled = mockScroll();
+    const { container } = render(<DocMarkdown body={combined} section="user-content-file-decisions.md" />);
+    const anchor = container.querySelector('[id="user-content-file-decisions.md"]');
+    expect(anchor).not.toBeNull();
+    expect(scrolled).toEqual([anchor]);
+    expect(anchor instanceof HTMLElement && anchor.classList.contains("hk-doc-section-target")).toBe(true);
+  });
+
+  it("still scrolls to a heading for a plain section", () => {
+    const scrolled = mockScroll();
+    render(<DocMarkdown body={combined} section="decisions" />);
+    const heading = screen.getByRole("heading", { name: "decisions" });
+    expect(scrolled).toEqual([heading]);
   });
 });
