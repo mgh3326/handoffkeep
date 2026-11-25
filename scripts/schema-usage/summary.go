@@ -152,7 +152,14 @@ func domainSummary(vps []viewpoint, s schemaJSON) (string, error) {
 	for _, vp := range vps {
 		c := counts[vp.id]
 		total += c.tables
-		fmt.Fprintf(&b, "| %s | %d | %d | %d | %d |\n", vp.name, c.tables, c.inside, c.out, c.in)
+		// The domain's name links to its viewpoint page (tbls writes
+		// viewpoint-<id>.md); in the combined document the console turns that
+		// link into a jump to the domain's section.
+		label := vp.name
+		if vp.id != "" {
+			label = fmt.Sprintf("[%s](viewpoint-%s.md)", vp.name, vp.id)
+		}
+		fmt.Fprintf(&b, "| %s | %d | %d | %d | %d |\n", label, c.tables, c.inside, c.out, c.in)
 	}
 	fmt.Fprintf(&b, "| **All** | **%d** | | | |\n\n", total)
 
