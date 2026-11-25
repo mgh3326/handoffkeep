@@ -34,10 +34,20 @@ function payload(key: string, sha256: string, extra: Record<string, unknown> = {
   };
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  window.history.pushState({}, "", "/");
+});
+
+// The full view of a tbls doc now lives behind ?full=1; the short view is
+// the default. These tests exercise the full view, so they open it there.
+function fullView() {
+  window.history.pushState({}, "", `/ui/doc/${DOC_KEY}?full=1`);
+}
 
 describe("DocView schema.json beside a tbls doc", () => {
   it("links the sibling schema.json and shows both hashes as the same version", async () => {
+    fullView();
     answers({
       [DOC_KEY]: { status: 200, body: payload(DOC_KEY, SHA_A) },
       [SCHEMA_KEY]: { status: 200, body: payload(SCHEMA_KEY, SHA_A, { format: "unsupported", reason: "json", body: "{}" }) },
@@ -49,6 +59,7 @@ describe("DocView schema.json beside a tbls doc", () => {
   });
 
   it("shows a different version when the two sha256 values differ", async () => {
+    fullView();
     answers({
       [DOC_KEY]: { status: 200, body: payload(DOC_KEY, SHA_A) },
       [SCHEMA_KEY]: { status: 200, body: payload(SCHEMA_KEY, SHA_B, { format: "unsupported", reason: "json", body: "{}" }) },
@@ -60,6 +71,7 @@ describe("DocView schema.json beside a tbls doc", () => {
   });
 
   it("shows no schema link when the sibling is missing", async () => {
+    fullView();
     const fetchMock = answers({ [DOC_KEY]: { status: 200, body: payload(DOC_KEY, SHA_A) } });
     render(<DocView docKey={DOC_KEY} />);
     expect(await screen.findByRole("heading", { name: "Heading" })).toBeTruthy();
@@ -69,6 +81,7 @@ describe("DocView schema.json beside a tbls doc", () => {
   });
 
   it("says so when the sibling check fails for another reason", async () => {
+    fullView();
     answers({
       [DOC_KEY]: { status: 200, body: payload(DOC_KEY, SHA_A) },
       [SCHEMA_KEY]: { status: 500, body: {} },
@@ -97,6 +110,7 @@ describe("DocView JSON download control", () => {
   });
 
   it("offers no download for a document that is not JSON", async () => {
+    fullView();
     answers({
       [DOC_KEY]: { status: 200, body: payload(DOC_KEY, SHA_A, { format: "unsupported", reason: "too_large", body: "x" }) },
     });

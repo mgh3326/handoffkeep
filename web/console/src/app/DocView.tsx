@@ -4,6 +4,8 @@
 
 import { lazy, Suspense, useEffect, useState } from "react";
 import { HttpError } from "../shared/http";
+import ShortView from "./ShortView";
+import { shortViewApplies } from "../shared/doc/shortView";
 import { fetchDoc, type DocPayload } from "../shared/doc/docApi";
 import { RendererBoundary } from "../shared/doc/RendererBoundary";
 import { formatMinuteUTC } from "../shared/time";
@@ -57,6 +59,13 @@ function SchemaLink({ doc, schema, schemaKey }: { doc: DocPayload; schema: DocPa
 }
 
 export default function DocView({ docKey }: { docKey: string }) {
+  if (shortViewApplies(docKey, window.location.search, window.location.hash)) {
+    return <ShortView docKey={docKey} />;
+  }
+  return <FullDocView docKey={docKey} />;
+}
+
+function FullDocView({ docKey }: { docKey: string }) {
   const [state, setState] = useState<State>({ status: "loading" });
   const [schema, setSchema] = useState<Schema>({ status: "none" });
   const [attachments, setAttachments] = useState<BoardAttachment[]>([]);
