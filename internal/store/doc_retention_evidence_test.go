@@ -84,7 +84,10 @@ func TestRetentionMergeLinkWitnessSurvivesLegacyDelete(t *testing.T) {
 // TestRetentionMergeLinkApplyHonoursLimitAndBatch: with the switch on, the
 // merge leg deletes whole jobs only while they fit (hk 6290). A limit below
 // one job's eligible count deletes nothing and reports the skip; a limit
-// that fits one job but not two deletes exactly one whole job.
+// that fits one job but not two deletes exactly one whole job. The pick
+// reaches one job per batch of this size, so MergeLinkPickSkippedJobs counts
+// only the job the pick reached while the other eligible job remains
+// untouched and uncounted.
 func TestRetentionMergeLinkApplyHonoursLimitAndBatch(t *testing.T) {
 	forRetentionDialects(t, "doc_retention_ml_limit", func(t *testing.T, s *Store) {
 		w := newMLWorld(t, s)
@@ -124,7 +127,7 @@ func TestRetentionMergeLinkApplyHonoursLimitAndBatch(t *testing.T) {
 
 		for _, limit := range []int{1, 2} {
 			res := w.prune(limit)
-			if res.Deleted != 0 || res.MergeLinkDeleted != 0 || res.MergeLinkSkippedJobs != 1 {
+			if res.Deleted != 0 || res.MergeLinkDeleted != 0 || res.MergeLinkPickSkippedJobs != 1 {
 				t.Fatalf("limit %d: apply = %+v, want nothing deleted and one job skipped", limit, res)
 			}
 			if gone := noSplit(); gone != 0 {
@@ -133,7 +136,7 @@ func TestRetentionMergeLinkApplyHonoursLimitAndBatch(t *testing.T) {
 		}
 
 		res := w.prune(4)
-		if res.Deleted != 3 || res.MergeLinkDeleted != 3 || res.Deleted > int64(res.Limit) || res.MergeLinkSkippedJobs != 1 {
+		if res.Deleted != 3 || res.MergeLinkDeleted != 3 || res.Deleted > int64(res.Limit) || res.MergeLinkPickSkippedJobs != 1 {
 			t.Fatalf("limit 4: apply = %+v, want one whole job (3) and the other skipped", res)
 		}
 		if gone := noSplit(); gone != 1 {
@@ -141,7 +144,7 @@ func TestRetentionMergeLinkApplyHonoursLimitAndBatch(t *testing.T) {
 		}
 
 		res = w.prune(100)
-		if res.Deleted != 3 || res.MergeLinkSkippedJobs != 0 {
+		if res.Deleted != 3 || res.MergeLinkPickSkippedJobs != 0 {
 			t.Fatalf("limit 100: apply = %+v, want the remaining job and no skip", res)
 		}
 		if gone := noSplit(); gone != 2 {
