@@ -392,6 +392,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	linkSet, kindSet, prioritySet := false, false, false
 	closureSet := false
 	openSet := false
+	stateSet := false
 	fs.Visit(func(item *flag.Flag) {
 		switch item.Name {
 		case "closure", "evidence":
@@ -408,6 +409,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		}
 		if item.Name == "open" {
 			openSet = true
+		}
+		if item.Name == "state" {
+			stateSet = true
 		}
 		if item.Name == "parent" {
 			parentSet = true
@@ -464,6 +468,11 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if closureSet && args[0] != "transition" {
 		return errors.New("--closure/--evidence are accepted only by tasks transition")
+	}
+	// --state is the list/add filter; a transition names its target with --to.
+	// Refused here so no request is sent with the target missing.
+	if stateSet && args[0] == "transition" {
+		return errors.New("tasks transition takes --to <state>; --state is a list filter")
 	}
 	if *set && args[0] != "transition" {
 		return errors.New("--set is accepted only by tasks transition")
