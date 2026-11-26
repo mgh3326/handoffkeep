@@ -223,10 +223,9 @@ func TestForwardSkipsRowsBeforeTheCutoff(t *testing.T) {
 	}
 }
 
-// The pre-cutoff settle runs until one tick finds nothing still owed, then
-// stops: later ticks poll without the UPDATE (hk 6398). A pre-cutoff row is
-// still never posted, because the list itself carries the cutoff.
-func TestForwarderSkipsPreCutoffOnce(t *testing.T) {
+// The pre-cutoff settle runs every tick because a caller can commit a row with
+// an older created_at after an earlier settle returned empty (hk 6418).
+func TestForwarderResettlesLatePreCutoffRows(t *testing.T) {
 	cutoff := time.Date(2026, 11, 1, 23, 0, 0, 0, time.UTC)
 	outbox := &fakeOutbox{rows: []store.NotificationOutbox{
 		{Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "backlog", Text: "old", CreatedAt: cutoff.Add(-time.Hour)},
@@ -243,15 +242,25 @@ func TestForwarderSkipsPreCutoffOnce(t *testing.T) {
 		t.Fatalf("second sent=%d failed=%d err=%v", sent, failed, err)
 	}
 	if got := len(outbox.skipCounts); got != 2 {
-		t.Fatalf("skip calls=%d, want 2 (the settle, then the tick that finds nothing)", got)
+		t.Fatalf("skip calls=%d, want a settle on each tick", got)
+	}
+	outbox.rows = append(outbox.rows, store.NotificationOutbox{
+		Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "late-backlog",
+		Text: "old", CreatedAt: cutoff.Add(-time.Minute),
+	})
+	if sent, failed, err := f.Once(t.Context()); err != nil || sent != 0 || failed != 0 {
+		t.Fatalf("late-row tick sent=%d failed=%d err=%v", sent, failed, err)
+	}
+	if !outbox.skipped["late-backlog"] {
+		t.Fatalf("late pre-cutoff row remained owed: skipped=%v", outbox.skipped)
 	}
 	for i := range 3 {
 		if sent, failed, err := f.Once(t.Context()); err != nil || sent != 0 || failed != 0 {
 			t.Fatalf("tick %d sent=%d failed=%d err=%v", i, sent, failed, err)
 		}
 	}
-	if got := len(outbox.skipCounts); got != 2 {
-		t.Fatalf("skip calls=%d, want no settle after the tick that found nothing", got)
+	if got := len(outbox.skipCounts); got != 6 {
+		t.Fatalf("skip calls=%d, want one settle per tick", got)
 	}
 	if len(hub.posts) != 1 || hub.posts[0]["event"] != "live" {
 		t.Fatalf("posts=%v, want only the row at or after the cutoff", hub.posts)
@@ -263,6 +272,25 @@ func TestForwarderSkipsPreCutoffOnce(t *testing.T) {
 		if !since.Equal(f.Cutoff) {
 			t.Fatalf("list cutoff=%v, want %v", since, f.Cutoff)
 		}
+	}
+}
+
+func TestForwarderResettlesWhileCutoffIsInTheFuture(t *testing.T) {
+	outbox := &fakeOutbox{}
+	f, _, now := forwarderFixture(t, outbox)
+	f.Cutoff = (*now).Add(time.Minute)
+	if sent, failed, err := f.Once(t.Context()); err != nil || sent != 0 || failed != 0 {
+		t.Fatalf("initial tick sent=%d failed=%d err=%v", sent, failed, err)
+	}
+	outbox.rows = append(outbox.rows, store.NotificationOutbox{
+		Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "future-cutoff-backlog",
+		Text: "old", CreatedAt: (*now).Add(30 * time.Second),
+	})
+	if sent, failed, err := f.Once(t.Context()); err != nil || sent != 0 || failed != 0 {
+		t.Fatalf("late tick sent=%d failed=%d err=%v", sent, failed, err)
+	}
+	if !outbox.skipped["future-cutoff-backlog"] {
+		t.Fatalf("row before future cutoff remained owed: skipped=%v", outbox.skipped)
 	}
 }
 

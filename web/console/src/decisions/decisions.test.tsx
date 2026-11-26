@@ -89,6 +89,11 @@ it("A1 renders the record, request and task link", async () => {
     screen.getByRole("link", { name: "Ship console" }).getAttribute("href"),
   ).toBe("/ui/tasks/7");
 });
+it("reserves scroll room after the decision CTA for the mobile sticky bar", async () => {
+  await start();
+  expect(document.querySelector(".decision-scroll-end")?.getAttribute("aria-hidden")).toBe("true");
+  expect(document.querySelector(".decision-scroll-end")?.className).toContain("decision-scroll-end");
+});
 it("A2 starts unselected and separates recommendation and default", async () => {
   await start();
   expect(

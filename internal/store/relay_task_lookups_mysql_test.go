@@ -47,6 +47,29 @@ func relayPlanKey(t *testing.T, ctx context.Context, s *Store, table, query stri
 	return key
 }
 
+func relayPlanExtra(t *testing.T, ctx context.Context, s *Store, table, query string, args ...any) string {
+	t.Helper()
+	rows, err := s.db().Query(ctx, "EXPLAIN FORMAT=TRADITIONAL "+query, args...)
+	if err != nil {
+		t.Fatalf("EXPLAIN %s: %v", query, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, selectType, tbl, partitions, typ, possible, key, keyLen, ref, est, filtered, extra sql.NullString
+		if err := rows.Scan(&id, &selectType, &tbl, &partitions, &typ, &possible, &key, &keyLen, &ref, &est, &filtered, &extra); err != nil {
+			t.Fatalf("scan plan: %v", err)
+		}
+		if tbl.String == table {
+			return extra.String
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+	t.Fatalf("plan has no read of %s: %s", table, query)
+	return ""
+}
+
 // TestMySQLRelayEventReadsUseLookupIndexes seeds lane events for one lane, most
 // of them delivered, so the planner has real statistics (hk 5928, hk 6254). It
 // checks the relay_events reads that the digests showed scanning the table,

@@ -469,6 +469,10 @@
   border-radius: var(--hk-radius-card);
   background: var(--hk-surface-1);
 }
+.decision-scroll-end {
+  height: calc(var(--hk-shell-nav-height) + 160px);
+  pointer-events: none;
+}
 .decision-cta p {
   flex: 1 0 100%;
   margin: 0;
@@ -481,6 +485,9 @@ html {
   scroll-padding-bottom: calc(var(--hk-shell-nav-height) + 160px);
 }
 @media (min-width: 768px) {
+  .decision-scroll-end {
+    display: none;
+  }
   .decision-list .decision-tab,
   .decision-toolbar .hk-button {
     min-height: var(--hk-control-height);
