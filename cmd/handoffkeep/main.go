@@ -225,12 +225,11 @@ func tasksHelp(sub string) string {
 // filter accepts. The state and area sets come from the store's own
 // vocabularies so the help cannot drift from them.
 func tasksListUsage() string {
-	return `usage: tasks list [--lane L] [--state S] [--parent-lane P] [--project P] [--area A] [--stalled] [--change N] [--after-id N] [--limit N]
+	return `usage: tasks list [--lane L] [--state S] [--parent-lane P] [--project P] [--area A] [--stalled] [--limit N]
   Lists the oldest tasks first, 20 by default.
   --limit accepts 1..1000 (default 20); the server names the parameter when it refuses one.
   --state accepts: ` + strings.Join(store.AcceptedStateNames(), ", ") + `.
-  --area accepts the closed vocabulary listed by tasks areas; --stalled accepts true or false.
-  --change takes a positive change id and cannot be combined with other filters; --after-id accepts an integer >= 0.`
+  --area accepts the closed vocabulary listed by tasks areas; --stalled accepts true or false.`
 }
 
 // tasksSearchUsage states the duplicate check before tasks add: words across
@@ -611,7 +610,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if len(words) == 0 {
 			return errors.New(tasksSearchUsage())
 		}
-		if openSet && strings.TrimSpace(*state) != "" {
+		if *open && strings.TrimSpace(*state) != "" {
 			return errors.New("--open and --state are exclusive")
 		}
 		if *limit < 1 || *limit > 50 {
@@ -621,12 +620,16 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if projectSet {
 			projectFilter = project
 		}
-		xs, _, err := c.SearchTasks(ctx, strings.Join(words, " "), *lane, *state, projectFilter, *open, *limit)
+		xs, truncated, err := c.SearchTasks(ctx, strings.Join(words, " "), *lane, *state, projectFilter, *open, *limit)
 		if err != nil {
 			return err
 		}
 		if xs == nil {
 			xs = []store.Task{}
+		}
+		if truncated {
+			// A cut window can hide matches: say so rather than read as "no duplicate".
+			return printJSON(out, map[string]any{"tasks": xs, "truncated": true})
 		}
 		return printJSON(out, map[string]any{"tasks": xs})
 	case "export":
