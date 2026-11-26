@@ -94,14 +94,15 @@ func TestMySQLGuardExecutionForNullability(t *testing.T) {
 	}
 }
 
-// Every MySQL migration step is either plain DDL/DML or one of the four
-// guards; a guard with a missing part would silently run nothing.
+// Every MySQL migration step is either plain DDL/DML or a guard; a guard with a
+// missing part would silently run nothing. A require_empty guard is a refusal
+// with no statement of its own.
 func TestMySQLMigrationStepsAreWellFormed(t *testing.T) {
 	for _, m := range mysqlMigrations {
 		for i, step := range m.steps {
 			if strings.HasPrefix(step, mysqlGuardSep) {
 				kind, table, object, stmt, ok := parseMySQLGuard(step)
-				if !ok || kind == "" || table == "" || object == "" || strings.TrimSpace(stmt) == "" {
+				if !ok || kind == "" || table == "" || object == "" || (strings.TrimSpace(stmt) == "" && kind != "require_empty") {
 					t.Errorf("%s step %d: malformed guard %q", m.id, i+1, step)
 				}
 			}
