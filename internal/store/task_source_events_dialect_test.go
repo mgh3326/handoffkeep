@@ -319,6 +319,9 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 		t.Fatal(err)
 	}
 	heldPR, otherOpenPR := srcEvPR(srcEvUnique()), srcEvPR(srcEvUnique())
+	if _, err := s.db().Exec(ctx, s.q(`UPDATE tasks SET created_at=$1 WHERE id=$2`, `UPDATE tasks SET created_at=? WHERE id=?`), time.Now().UTC().Add(-3*time.Minute), heldChild.ID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := srcEvApplyPublicAt(s, t, heldParent.ID, SourceMergewakePR, heldPR, time.Now().UTC().Add(-2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}

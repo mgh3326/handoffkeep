@@ -965,7 +965,9 @@ func taskHoldOpenedAtTx(ctx context.Context, tx transaction, taskID int64, pr st
 	var openedAt time.Time
 	var err error
 	if repo, number, ok := parsePRURL(pr); ok {
-		err = tx.QueryRow(ctx, sqlFor(tx, `SELECT opened_at FROM changes WHERE repo=$1 AND pr_number=$2`, `SELECT opened_at FROM changes WHERE repo=? AND pr_number=?`), repo, number).Scan(&openedAt)
+		err = tx.QueryRow(ctx, sqlFor(tx, `SELECT c.opened_at FROM changes c JOIN change_tasks ct ON ct.change_id=c.id
+		WHERE ct.task_id=$1 AND ct.relation='implements' AND c.repo=$2 AND c.pr_number=$3`, `SELECT c.opened_at FROM changes c JOIN change_tasks ct ON ct.change_id=c.id
+		WHERE ct.task_id=? AND ct.relation='implements' AND c.repo=? AND c.pr_number=?`), taskID, repo, number).Scan(&openedAt)
 	} else if dialectFor(tx) == mysqlDialect {
 		err = tx.QueryRow(ctx, `SELECT c.opened_at FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
 		WHERE ct.task_id=? AND ct.relation='implements' AND c.state<>'closed' AND c.reverted_by_change_id IS NULL
