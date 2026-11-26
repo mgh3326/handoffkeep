@@ -434,6 +434,18 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 	if !foundMultiFinding {
 		t.Fatalf("hygiene did not report the planned child relative to PR B: %+v", hygiene.Findings.MergedPROpenTasks)
 	}
+	hygiene, err = s.TaskHygiene(ctx, multiAsOf, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, close := range hygiene.MechanicalCloses {
+		if close.TaskID == multi.ID {
+			t.Fatalf("hygiene execution closed two-PR task despite its planned child: %+v", close)
+		}
+	}
+	if got := srcEvGet(t, s, multi.ID); got.State != StateReviewing {
+		t.Fatalf("hygiene execution moved two-PR task to %s, want reviewing", got.State)
+	}
 }
 
 func srcEvApplyPublicAt(s *Store, t *testing.T, taskID int64, source, pr string, at time.Time) (TaskEventResult, error) {
