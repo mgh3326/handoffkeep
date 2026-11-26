@@ -855,7 +855,9 @@ t_gh_get_without_token() {
 	# gh_get must not abort under set -u on bash <4.4 when GH_TOKEN is unset.
 	# /bin/bash is 3.2 on macOS; the regression only reproduces there.
 	setup
-	env -u GH_TOKEN /bin/bash -c 'set -u; HK_FOLLOW_LIB=1; source "$1"; curl() { printf "%s\n" "$@" >"$2"; printf 200; }; gh_get /repos/x "$3" && echo ok' _ "$SCRIPT" "$FIX/curl-args" "$FIX/out" >"$FIX/ok" 2>&1
+	# The fake's own $2 is curl's second argument (-o), not the recording path,
+	# so the path is captured before curl is redefined.
+	env -u GH_TOKEN /bin/bash -c 'set -u; HK_FOLLOW_LIB=1; source "$1"; argsf=$2; curl() { printf "%s\n" "$@" >"$argsf"; printf 200; }; gh_get /repos/x "$3" && echo ok' _ "$SCRIPT" "$FIX/curl-args" "$FIX/out" >"$FIX/ok" 2>&1
 	want "ok" "$(cat "$FIX/ok")"
 	fails grep -q Authorization "$FIX/curl-args"
 }
