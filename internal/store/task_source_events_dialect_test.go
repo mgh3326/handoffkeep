@@ -311,6 +311,34 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 		t.Fatalf("planned piece parent state=%s pr=%q, want merged adopting %s", got.State, got.Refs.PR, piecePR)
 	}
 
+	// If another implements PR becomes the parent's current ref after a held
+	// merge, settling the children must still check that unrelated open PR.
+	heldParent := srcEvTask(t, s, "held PR before another open PR")
+	heldChild := srcEvTask(t, s, "piece holding PR A")
+	if _, _, err := s.SetTaskParent(ctx, heldChild.ID, &heldParent.ID, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	heldPR, otherOpenPR := srcEvPR(srcEvUnique()), srcEvPR(srcEvUnique())
+	if _, err := srcEvApplyPublicAt(s, t, heldParent.ID, SourceMergewakePR, heldPR, time.Now().UTC().Add(-2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := srcEvApplyPublicAt(s, t, heldParent.ID, SourceMergewakeMerge, heldPR, time.Now().UTC().Add(-time.Minute)); err != nil || res.Applied {
+		t.Fatalf("merge PR A while its piece is open: res=%+v err=%v, want held", res, err)
+	}
+	if res, err := srcEvApplyPublicAt(s, t, heldParent.ID, SourceMergewakePR, otherOpenPR, time.Now().UTC()); err != nil || res.Applied {
+		t.Fatalf("record another open PR B: res=%+v err=%v, want recorded without moving", res, err)
+	}
+	if _, err := s.db().Exec(ctx, s.q(`UPDATE tasks SET refs=refs||jsonb_build_object('pr',$1::text) WHERE id=$2`, `UPDATE tasks SET refs=JSON_SET(refs,'$.pr',?) WHERE id=?`), otherOpenPR, heldParent.ID); err != nil {
+		t.Fatal(err)
+	}
+	heldChildPR := srcEvPR(srcEvUnique())
+	if res, err := srcEvApplyPublicAt(s, t, heldChild.ID, SourceMergewakeMerge, heldChildPR, time.Now().UTC()); err != nil || !res.Applied {
+		t.Fatalf("settle the child: res=%+v err=%v", res, err)
+	}
+	if got := srcEvGet(t, s, heldParent.ID); got.State != StateReviewing || got.Refs.PR != otherOpenPR {
+		t.Fatalf("parent after child close: state=%s refs.pr=%q, want reviewing with open PR B %s", got.State, got.Refs.PR, otherOpenPR)
+	}
+
 	// The old held shape becomes mechanical when the child's timestamp proves
 	// it was filed after the merged PR opened. The planned-piece counterpart
 	// remains held in both drift and hygiene.

@@ -677,12 +677,12 @@ func (s *Store) autoCloseOneParentTx(ctx context.Context, tx transaction, p Task
 		// A sub-task is still merged and waiting for its deploy.
 		return false, p, nil
 	}
-	closePR := p.Refs.PR
+	closePR, err := heldMergePRTx(ctx, tx, p.ID)
+	if err != nil {
+		return false, p, err
+	}
 	if closePR == "" {
-		closePR, err = heldMergePRTx(ctx, tx, p.ID)
-		if err != nil {
-			return false, p, err
-		}
+		closePR = p.Refs.PR
 	}
 	if gate, err := s.closeGateTx(ctx, tx, p, closePR); err != nil || gate != "" {
 		if err != nil {
