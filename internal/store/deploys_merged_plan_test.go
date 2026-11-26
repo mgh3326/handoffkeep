@@ -36,6 +36,9 @@ func TestListMergedTaskEventsPostgresStopsAtLimit(t *testing.T) {
 			if !strings.Contains(plan, "Limit") {
 				t.Fatalf("plan has no Limit node:\n%s", plan)
 			}
+			if !strings.Contains(plan, "task_events_kind_to_at_id") {
+				t.Fatalf("the event scan does not read task_events_kind_to_at_id; the statement cannot stop at the limit:\n%s", plan)
+			}
 			scanned := maxScanRows(t, plan, "on task_events e")
 			backlog := tasks * tc.merges
 			if scanned > tc.maxScan {
@@ -66,11 +69,12 @@ func TestListMergedTaskEventsPostgresStopsAtLimit(t *testing.T) {
 	}
 }
 
-// explainIndexPlan is explainAnalyzedPlan with sequential scans off for the
-// transaction. On a fixture this small the planner prefers a sequential scan
-// and a full sort, which is a cost choice, not the statement's shape; with
-// the scan off, the planner must take the ordered index the statement is
-// written for, and the test measures that plan.
+// explainIndexPlan is explainAnalyzedPlan with sequential scans and sorts off
+// for the transaction. On a fixture this small the planner prefers a
+// sequential scan with a full sort, which is a cost choice, not the
+// statement's shape. With both off, the only ordered plan left reads
+// task_events_kind_to_at_id newest first, the plan the statement is written
+// for, and the test measures that plan.
 func explainIndexPlan(t *testing.T, s *Store, query string, args []any) string {
 	t.Helper()
 	ctx := t.Context()
@@ -79,8 +83,10 @@ func explainIndexPlan(t *testing.T, s *Store, query string, args []any) string {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
-		t.Fatal(err)
+	for _, set := range []string{"SET LOCAL enable_seqscan = off", "SET LOCAL enable_sort = off"} {
+		if _, err := tx.Exec(ctx, set); err != nil {
+			t.Fatal(err)
+		}
 	}
 	rows, err := tx.Query(ctx, "EXPLAIN (ANALYZE, BUFFERS) "+query, args...)
 	if err != nil {
