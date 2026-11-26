@@ -269,6 +269,33 @@ check "stale alias warning" has "$FIX/err" "HK_CLI_NCP=ncp is stale; using oci"
 check "healthz read from oci" has "$FIX/calls" "ssh oci curl"
 check "retired host not used" lacks "$FIX/calls" "ssh ncp"
 
+echo "== stale HK_CLI_NCP=ncp ignores the legacy HK_CLI_NCP_HEALTH URL"
+setup
+export HK_CLI_NCP=ncp HK_CLI_NCP_HEALTH=http://127.0.0.1:9999/healthz
+run "$TAG"
+unset HK_CLI_NCP HK_CLI_NCP_HEALTH
+check "exit 0" rc_is 0
+check "warning says the health URL is ignored" has "$FIX/err" "ignoring HK_CLI_NCP_HEALTH"
+check "default healthz read from oci" has "$FIX/calls" "ssh oci curl -fsS http://127.0.0.1:8800/healthz"
+check "legacy healthz URL not used" lacks "$FIX/calls" "9999"
+
+echo "== stale HK_CLI_NCP=ncp reads HK_CLI_SERVER_HEALTH when set"
+setup
+export HK_CLI_NCP=ncp HK_CLI_NCP_HEALTH=http://127.0.0.1:9999/healthz HK_CLI_SERVER_HEALTH=http://127.0.0.1:7777/healthz
+run "$TAG"
+unset HK_CLI_NCP HK_CLI_NCP_HEALTH HK_CLI_SERVER_HEALTH
+check "exit 0" rc_is 0
+check "explicit healthz URL read from oci" has "$FIX/calls" "ssh oci curl -fsS http://127.0.0.1:7777/healthz"
+check "legacy healthz URL not used" lacks "$FIX/calls" "9999"
+
+echo "== deprecated HK_CLI_NCP host keeps the HK_CLI_NCP_HEALTH fallback"
+setup
+export HK_CLI_NCP=legacy HK_CLI_NCP_HEALTH=http://127.0.0.1:9999/healthz
+run "$TAG"
+unset HK_CLI_NCP HK_CLI_NCP_HEALTH
+check "exit 0" rc_is 0
+check "legacy healthz URL read from the HK_CLI_NCP host" has "$FIX/calls" "ssh legacy curl -fsS http://127.0.0.1:9999/healthz"
+
 echo "== deprecated HK_CLI_NCP mismatch refuses naming that host"
 setup
 printf '{"vcs_revision":"%s"}' "$OLD" >"$FIX/server_healthz"
