@@ -72,10 +72,11 @@ const (
 // documents an apply run deleted by it alone. On apply, Deleted and Bytes
 // include those documents. The merge leg deletes whole jobs only, and only
 // while all of a job's eligible documents fit the batch and the run's limit
-// (hk 6290): MergeLinkSkippedJobs counts the eligible jobs an apply run left
-// whole because they did not fit and did not delete later in the run, so a
-// limit smaller than every eligible job deletes nothing by the merge link and
-// says why.
+// (hk 6290): MergeLinkPickSkippedJobs counts the distinct jobs the merge
+// leg's capped pick reached and left whole for lack of room in some batch of
+// this run and never admitted later in it. It is not every eligible job left
+// at run end: a job the pick never reached is not counted. A limit smaller
+// than every eligible job deletes nothing by the merge link and says why.
 type DocRetentionResult struct {
 	OlderThan      time.Time `json:"older_than"`
 	Limit          int       `json:"limit"`
@@ -93,8 +94,8 @@ type DocRetentionResult struct {
 	MergeLinkDeleted int64                         `json:"merge_link_deleted"`
 	MergeLink        map[string]DocRetentionFamily `json:"merge_link,omitempty"`
 
-	MergeLinkSkippedJobs int64 `json:"merge_link_skipped_jobs"`
-	// mergeSkipped is the set behind MergeLinkSkippedJobs (noteMergeSkips).
+	MergeLinkPickSkippedJobs int64 `json:"merge_link_pick_skipped_jobs"`
+	// mergeSkipped is the set behind MergeLinkPickSkippedJobs (noteMergeSkips).
 	mergeSkipped map[string]bool
 }
 

@@ -57,7 +57,7 @@ import (
 // 5057 legs chose, where the batch size is already DocRetentionBatch capped
 // at the run's limit less its deletions. A job that does not fit is never
 // split; it waits for a later batch or run, and the result counts it in
-// merge_link_skipped_jobs. When no remaining job fits (a limit below the
+// merge_link_pick_skipped_jobs. When no remaining job fits (a limit below the
 // smallest eligible job) the merge leg deletes nothing and the run ends, so
 // a run never loops on it. The pick puts jobs that fit a whole batch first,
 // so a job larger than any batch never holds back the ones that fit. The recheck is a new statement after the locks are held
@@ -435,9 +435,9 @@ func admitMergeJobs(order []string, rows []retentionRow, capacity int) (admitted
 	return admitted, admittedJobs, skipped
 }
 
-// noteMergeSkips records, after a batch, which jobs the merge leg left whole
-// for lack of room and which it deleted, and refreshes MergeLinkSkippedJobs:
-// the jobs this run skipped and never deleted.
+// noteMergeSkips records, after a batch, which jobs the merge leg's pick left
+// whole for lack of room and which it later admitted, and refreshes
+// MergeLinkPickSkippedJobs: the jobs this run skipped and never admitted.
 func (res *DocRetentionResult) noteMergeSkips(admitted, skipped []string) {
 	if len(admitted) == 0 && len(skipped) == 0 {
 		return
@@ -451,7 +451,7 @@ func (res *DocRetentionResult) noteMergeSkips(admitted, skipped []string) {
 	for _, j := range admitted {
 		delete(res.mergeSkipped, j)
 	}
-	res.MergeLinkSkippedJobs = int64(len(res.mergeSkipped))
+	res.MergeLinkPickSkippedJobs = int64(len(res.mergeSkipped))
 }
 
 // withoutIDs is ids minus skip, in order.
