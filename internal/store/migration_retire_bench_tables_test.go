@@ -42,7 +42,7 @@ func runRetireBenchTables(t *testing.T, s *Store) error {
 }
 
 func TestRetireBenchTablesDropsEmptyTables(t *testing.T) {
-	s := schemaStore(t, "retire-bench-empty")
+	s := schemaStore(t, "retire_bench_empty")
 	createRetiredBenchTables(t, s)
 	if err := runRetireBenchTables(t, s); err != nil {
 		t.Fatalf("empty tables refused: %v", err)
@@ -57,7 +57,7 @@ func TestRetireBenchTablesDropsEmptyTables(t *testing.T) {
 func TestRetireBenchTablesRefusesAnyRowAndKeepsBoth(t *testing.T) {
 	for _, table := range retiredBenchTables {
 		t.Run(table, func(t *testing.T) {
-			s := schemaStore(t, "retire-bench-rows")
+			s := schemaStore(t, "retire_bench_rows")
 			createRetiredBenchTables(t, s)
 			if _, err := s.pool.Exec(t.Context(), `INSERT INTO `+table+` (id) VALUES (1)`); err != nil {
 				t.Fatal(err)
@@ -76,7 +76,7 @@ func TestRetireBenchTablesRefusesAnyRowAndKeepsBoth(t *testing.T) {
 }
 
 func TestRetireBenchTablesIsNoOpWhenAbsent(t *testing.T) {
-	s := schemaStore(t, "retire-bench-absent")
+	s := schemaStore(t, "retire_bench_absent")
 	for _, table := range retiredBenchTables {
 		if benchTableExists(t, s, table) {
 			t.Fatalf("%s exists on a fresh install", table)

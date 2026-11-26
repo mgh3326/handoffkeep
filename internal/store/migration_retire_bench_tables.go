@@ -23,13 +23,17 @@ func init() {
 }
 
 // applyRetireBenchTables refuses while either table holds a row, then drops
-// both. It takes ACCESS SHARE to count each table and ACCESS EXCLUSIVE to drop
-// it, all inside the migrating transaction under migrationLockID. No live
-// writer holds either table: release 1 removed the writers, and the release
-// that ran them has been superseded. The counts run before any DROP, so a
-// refusal leaves both tables in place. A fresh install never created them, so
-// the to_regclass check skips them and DROP IF EXISTS is a no-op.
+// both, all inside the migrating transaction under migrationLockID. Each
+// existing table is locked ACCESS EXCLUSIVE before any count, in the order of
+// retiredBenchTables. A concurrent INSERT (even from a session outside the app)
+// then waits until this transaction ends, so the count sees every committed row
+// and nothing is written between the check and the DROP. The locks are taken
+// before any DROP, so a refusal leaves both tables in place. No live writer
+// holds either table: release 1 removed the writers, and the release that ran
+// them has been superseded. A fresh install never created them, so the
+// to_regclass check skips them and DROP IF EXISTS is a no-op.
 func applyRetireBenchTables(ctx context.Context, tx pgx.Tx) error {
+	var present []string
 	for _, table := range retiredBenchTables {
 		var exists bool
 		if err := tx.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, table).Scan(&exists); err != nil {
@@ -38,6 +42,12 @@ func applyRetireBenchTables(ctx context.Context, tx pgx.Tx) error {
 		if !exists {
 			continue
 		}
+		if _, err := tx.Exec(ctx, `LOCK TABLE `+table+` IN ACCESS EXCLUSIVE MODE`); err != nil {
+			return err
+		}
+		present = append(present, table)
+	}
+	for _, table := range present {
 		var rows int64
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM `+table).Scan(&rows); err != nil {
 			return err
