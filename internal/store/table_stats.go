@@ -126,7 +126,7 @@ func (s *Store) RunTableStats(ctx context.Context, now time.Time) (TableStatsRun
 		if !TableStatsDue(now, newest, len(hist.Snapshots) > 0) {
 			return tx.Commit(ctx)
 		}
-		read, err := s.readTableStatsMySQL(ctx)
+		read, err := s.readTableStatsMySQLOnce(ctx)
 		if err != nil {
 			return fmt.Errorf("table stats read: %w", err)
 		}

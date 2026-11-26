@@ -255,47 +255,47 @@ func (s *Store) RunDriftDelivery(ctx context.Context, now time.Time) (bool, erro
 	now = now.UTC()
 	day := DriftDayOf(now)
 	var ran bool
-	err := s.retryTx(ctx, func() error {
-		tx, release, err := s.begin(ctx)
-		if err != nil {
-			return err
-		}
-		defer release()
-		defer tx.Rollback(ctx)
-		if err = s.lockWorkerOperationTx(ctx, tx, "drift_delivery"); err != nil {
-			return err
-		}
-		var found bool
-		err = tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM documents WHERE key=$1)`, "SELECT EXISTS(SELECT 1 FROM documents WHERE `key`=?)"), DriftMetricsDocKey(day)).Scan(&found)
-		if err != nil {
-			return err
-		}
-		if found {
-			return tx.Commit(ctx)
-		}
-		drift, err := s.TaskDrift(ctx, now, DriftDefaultMergedDays)
-		if err != nil {
-			return fmt.Errorf("drift delivery drift: %w", err)
-		}
-		hygiene, err := s.TaskHygiene(ctx, now, "", true)
-		if err != nil {
-			return fmt.Errorf("drift delivery hygiene: %w", err)
-		}
-		if _, err := s.EnqueueDriftNotices(ctx, now, drift, hygiene); err != nil {
-			return fmt.Errorf("drift delivery notices: %w", err)
-		}
-		m, err := s.BuildDriftMetrics(ctx, day, drift, hygiene)
-		if err != nil {
-			return err
-		}
-		if _, err := s.WriteDriftMetrics(ctx, day, m); err != nil {
-			return fmt.Errorf("drift delivery metrics: %w", err)
-		}
-		if err = tx.Commit(ctx); err != nil {
-			return err
-		}
-		ran = true
-		return nil
-	})
+	// Keep this lock transaction open across the worker's independently retried
+	// writes. Each called write path owns its retry loop; wrapping this workflow
+	// in retryTx would retry those roots a second time on a persistent deadlock.
+	tx, release, err := s.begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	defer tx.Rollback(ctx)
+	if err = s.lockWorkerOperationTx(ctx, tx, "drift_delivery"); err != nil {
+		return false, err
+	}
+	var found bool
+	err = tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM documents WHERE key=$1)`, "SELECT EXISTS(SELECT 1 FROM documents WHERE `key`=?)"), DriftMetricsDocKey(day)).Scan(&found)
+	if err != nil {
+		return false, err
+	}
+	if found {
+		return false, tx.Commit(ctx)
+	}
+	drift, err := s.TaskDrift(ctx, now, DriftDefaultMergedDays)
+	if err != nil {
+		return false, fmt.Errorf("drift delivery drift: %w", err)
+	}
+	hygiene, err := s.TaskHygiene(ctx, now, "", true)
+	if err != nil {
+		return false, fmt.Errorf("drift delivery hygiene: %w", err)
+	}
+	if _, err := s.EnqueueDriftNotices(ctx, now, drift, hygiene); err != nil {
+		return false, fmt.Errorf("drift delivery notices: %w", err)
+	}
+	m, err := s.BuildDriftMetrics(ctx, day, drift, hygiene)
+	if err != nil {
+		return false, err
+	}
+	if _, err := s.WriteDriftMetrics(ctx, day, m); err != nil {
+		return false, fmt.Errorf("drift delivery metrics: %w", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	ran = true
 	return ran, err
 }
