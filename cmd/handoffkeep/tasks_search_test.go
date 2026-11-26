@@ -172,3 +172,56 @@ func TestTasksHelpPrintsUsage(t *testing.T) {
 		}
 	}
 }
+
+// TestTasksSearchCLITruncatedSurfaces proves a window the server cut prints
+// "truncated": true, so a cut search cannot read as "no duplicate".
+func TestTasksSearchCLITruncatedSurfaces(t *testing.T) {
+	var queries []string
+	searchServer(t, `{"tasks":[{"id":3,"lane":"d","title":"probe alpha","kind":"implement","state":"backlog","created_by":"t","created_at":"2026-11-01T00:00:00Z","updated_at":"2026-11-01T00:00:00Z"}],"truncated":true}`+"\n", &queries, 0)
+	var out bytes.Buffer
+	if err := tasksCmd([]string{"search", "probe"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var printed struct {
+		Tasks     []json.RawMessage `json:"tasks"`
+		Truncated bool              `json:"truncated"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &printed); err != nil {
+		t.Fatalf("decode %q: %v", out.String(), err)
+	}
+	if !printed.Truncated || len(printed.Tasks) != 1 {
+		t.Fatalf("output=%q", out.String())
+	}
+}
+
+// TestTasksSearchCLIOpenFalseWithState proves --open=false is not an
+// exclusive conflict with --state, while --open with --state still refuses.
+func TestTasksSearchCLIOpenFalseWithState(t *testing.T) {
+	var queries []string
+	searchServer(t, `{"tasks":[],"truncated":false}`+"\n", &queries, 0)
+	if err := tasksCmd([]string{"search", "probe", "--open=false", "--state", "backlog"}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("--open=false --state refused: %v", err)
+	}
+	values, err := url.ParseQuery(queries[0])
+	if err != nil || values.Get("state") != "backlog" || values.Has("open") {
+		t.Fatalf("query=%q err=%v", queries[0], err)
+	}
+	if err := tasksCmd([]string{"search", "probe", "--open", "--state", "backlog"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "--open and --state are exclusive") {
+		t.Fatalf("--open --state err=%v", err)
+	}
+}
+
+// TestTasksListHelpAdvertisesOnlyRealFlags proves tasks list -h names no
+// flag the CLI does not define (--change and --after-id were advertised but
+// never wired).
+func TestTasksListHelpAdvertisesOnlyRealFlags(t *testing.T) {
+	var out bytes.Buffer
+	if err := tasksCmd([]string{"list", "-h"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{"--change", "--after-id"} {
+		if strings.Contains(out.String(), gone) {
+			t.Fatalf("list help still advertises %s: %q", gone, out.String())
+		}
+	}
+}

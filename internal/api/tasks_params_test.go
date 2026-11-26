@@ -101,6 +101,7 @@ func TestTasksExportBadParamsNameTheParam(t *testing.T) {
 		{"unknown state", "/v1/tasks/export?state=nope", "state"},
 		{"bad lane", "/v1/tasks/export?lane=BAD!", "lane"},
 		{"bad project", "/v1/tasks/export?project=BAD!", "project"},
+		{"bad parent lane", "/v1/tasks/export?parent_lane=BAD!", "parent_lane"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, out := projectRequest(t, h.URL, http.MethodGet, tc.path, "tok", nil)
@@ -202,6 +203,17 @@ func TestTasksSearchAPI(t *testing.T) {
 	code, body = get("/v1/tasks/search?q=searchprobe&open=true")
 	if code != http.StatusOK || len(tasksOf(body)) != 3 {
 		t.Fatalf("open filter: code=%d body=%v", code, body)
+	}
+	// An explicit empty project selects legacy rows with no project, and the
+	// search stays a filtered one: every returned row has no project.
+	code, body = get("/v1/tasks/search?q=searchprobe&project=")
+	if code != http.StatusOK {
+		t.Fatalf("empty project: code=%d body=%v", code, body)
+	}
+	for _, x := range tasksOf(body) {
+		if p := x.(map[string]any)["project"]; p != nil {
+			t.Fatalf("empty project returned a row with project %v", p)
+		}
 	}
 	// An empty match is 200 with no rows.
 	code, body = get("/v1/tasks/search?q=searchprobe&state=icebox")
