@@ -199,13 +199,13 @@ func (s *Store) TaskDrift(ctx context.Context, now time.Time, mergedDays int) (T
 	if out.MergedPRNotMerged, err = driftList(ctx, tx, "not settled, with a merged PR: an implements change is merged and not reverted, or refs.pr is merged (a merged changes row names it, or a merged or deployed task does); no unrelanded revert", sqlFor(tx, driftMergedPRSQL, driftMergedPRSQLMySQL)); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_pr_not_merged: %w", err)
 	}
-	if err = s.annotateDriftHolds(ctx, tx, &out.MergedPRNotMerged, mergeAppliesFrom); err != nil {
+	if err = s.annotateDriftHolds(ctx, tx, &out.MergedPRNotMerged, mergeAppliesFrom, false); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift merged_pr_not_merged: %w", err)
 	}
 	if out.AutoCloseHeld, err = driftList(ctx, tx, "auto-close due and not made: an unsettled parent in an auto-close state, every sub-task settled and one did work, moving it to merged, deployed, or completed for decide, ops, verify and research", sqlFor(tx, driftAutoCloseHeldSQL, driftAutoCloseHeldSQLMySQL)); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift auto_close_held: %w", err)
 	}
-	if err = s.annotateDriftHolds(ctx, tx, &out.AutoCloseHeld, autoCloseAppliesFrom); err != nil {
+	if err = s.annotateDriftHolds(ctx, tx, &out.AutoCloseHeld, autoCloseAppliesFrom, true); err != nil {
 		return TaskDrift{}, fmt.Errorf("drift auto_close_held: %w", err)
 	}
 	if out.MergedWithoutDeploy, err = driftMergedWithoutDeploy(ctx, tx, now.Add(-time.Duration(mergedDays)*24*time.Hour), mergedDays); err != nil {
@@ -302,18 +302,31 @@ func driftMechanical(h taskHolds, gate, state string, applies func(state string)
 // annotateDriftHolds fills, for each task a class names, what holds its close:
 // open_prs, reverted_prs, open_sub_tasks, and hold (the first reason). It sets
 // mechanical through driftMechanical. It only reads.
-func (s *Store) annotateDriftHolds(ctx context.Context, tx transaction, c *TaskDriftClass, applies func(state string) bool) error {
+func (s *Store) annotateDriftHolds(ctx context.Context, tx transaction, c *TaskDriftClass, applies func(state string) bool, preferHeldMerge bool) error {
 	for i := range c.Tasks {
 		x := &c.Tasks[i]
 		var t Task
 		if err := scanTask(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, `SELECT `+taskColumns+` FROM tasks WHERE id=?`), x.ID), &t); err != nil {
 			return err
 		}
-		h, err := taskHoldsTx(ctx, tx, x.ID, "")
+		pr := x.PR
+		if verified, err := hygieneVerifiedPRTx(ctx, tx, t); err != nil {
+			return err
+		} else if verified != "" {
+			pr = verified
+		}
+		heldPR, err := heldMergePRTx(ctx, tx, x.ID)
 		if err != nil {
 			return err
 		}
-		gate, err := s.closeGateTx(ctx, tx, t)
+		if heldPR != "" && ((preferHeldMerge && t.State != StateMerged) || (!preferHeldMerge && pr == "")) {
+			pr = heldPR
+		}
+		h, err := taskHoldsTx(ctx, tx, x.ID, pr)
+		if err != nil {
+			return err
+		}
+		gate, err := s.closeGateTx(ctx, tx, t, pr)
 		if err != nil {
 			return err
 		}

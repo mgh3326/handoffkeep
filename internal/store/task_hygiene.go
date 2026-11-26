@@ -490,11 +490,33 @@ func (s *Store) hygieneDecideTx(ctx context.Context, tx transaction, c hygieneCa
 	if t.Refs.DecisionRequest != nil {
 		d.finding.DecisionRequest = t.Refs.DecisionRequest.ID
 	}
-	h, err := taskHoldsTx(ctx, tx, t.ID, "")
+	var err error
+	holdPR := t.Refs.PR
+	if c.rule == hygieneMergedRule {
+		d.pr, err = hygieneVerifiedPRTx(ctx, tx, t)
+		if err != nil {
+			return d, err
+		}
+		holdPR = d.pr
+	} else if c.rule == hygieneParentRule {
+		if t.State == StateMerged {
+			d.pr = t.Refs.PR
+		} else {
+			d.pr, err = heldMergePRTx(ctx, tx, t.ID)
+			if err != nil {
+				return d, err
+			}
+			if d.pr == "" {
+				d.pr = t.Refs.PR
+			}
+		}
+		holdPR = d.pr
+	}
+	h, err := taskHoldsTx(ctx, tx, t.ID, holdPR)
 	if err != nil {
 		return d, err
 	}
-	gate, err := s.closeGateTx(ctx, tx, t)
+	gate, err := s.closeGateTx(ctx, tx, t, holdPR)
 	if err != nil {
 		return d, err
 	}
@@ -539,18 +561,7 @@ func (s *Store) hygieneDecideTx(ctx context.Context, tx transaction, c hygieneCa
 		if err != nil {
 			return d, err
 		}
-		d.pr = t.Refs.PR
-		if d.target == StateMerged && d.pr == "" {
-			d.pr, err = heldMergePRTx(ctx, tx, t.ID)
-			if err != nil {
-				return d, err
-			}
-		}
 	} else {
-		d.pr, err = hygieneVerifiedPRTx(ctx, tx, t)
-		if err != nil {
-			return d, err
-		}
 		if d.pr == "" {
 			d.finding.Hold = "no merged, unreverted change verifies the closing PR"
 			return d, nil

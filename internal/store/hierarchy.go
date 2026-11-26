@@ -506,12 +506,14 @@ func (s *Store) afterStateChangeTx(ctx context.Context, tx transaction, x Task, 
 // wait for a person, or "". x waits while one of its own implements changes is
 // open or reverted and not relanded (pieceHoldTx, the last-piece rule of a
 // merge), while it is awaiting a decision, or while its decision request is
-// open. An explicit task (hk 5112) waits for a person whatever its pieces are.
-func (s *Store) closeGateTx(ctx context.Context, tx transaction, x Task) (string, error) {
+// open. pr is the PR the close would apply; when known it sets the same
+// sub-task cutoff as the merge gate. An explicit task (hk 5112) waits for a
+// person whatever its pieces are.
+func (s *Store) closeGateTx(ctx context.Context, tx transaction, x Task, pr string) (string, error) {
 	if x.CloseRule == CloseRuleExplicit {
 		return explicitCloseReason, nil
 	}
-	if reason, err := pieceHoldTx(ctx, tx, x.ID, ""); err != nil || reason != "" {
+	if reason, err := pieceHoldTx(ctx, tx, x.ID, pr); err != nil || reason != "" {
 		return reason, err
 	}
 	if x.AwaitingDecision {
@@ -637,6 +639,15 @@ func (s *Store) autoCloseTx(ctx context.Context, tx transaction, child Task, by 
 func (s *Store) autoCloseOneParentTx(ctx context.Context, tx transaction, p Task, childID int64, childState string, now time.Time) (bool, Task, error) {
 	switch {
 	case p.State == StateMerged:
+		followUp, err := followUpSubTaskTx(ctx, tx, p.ID, childID, p.Refs.PR)
+		if err != nil {
+			return false, p, err
+		}
+		if followUp {
+			// This child was filed after the parent's implementing PR opened.
+			// Its later settlement cannot reopen or re-close that delivery.
+			return false, p, nil
+		}
 		// A merged parent waits for its sub-tasks to deploy: only a
 		// sub-task's deploy moves it on (hk 4172).
 		if childState != StateDeployed {
@@ -666,7 +677,15 @@ func (s *Store) autoCloseOneParentTx(ctx context.Context, tx transaction, p Task
 		// A sub-task is still merged and waiting for its deploy.
 		return false, p, nil
 	}
-	if gate, err := s.closeGateTx(ctx, tx, p); err != nil || gate != "" {
+	closePR := p.Refs.PR
+	if to == StateMerged {
+		if heldPR, err := heldMergePRTx(ctx, tx, p.ID); err != nil {
+			return false, p, err
+		} else if heldPR != "" {
+			closePR = heldPR
+		}
+	}
+	if gate, err := s.closeGateTx(ctx, tx, p, closePR); err != nil || gate != "" {
 		if err != nil {
 			return false, p, err
 		}
@@ -687,11 +706,10 @@ func (s *Store) autoCloseOneParentTx(ctx context.Context, tx transaction, p Task
 	}
 	from := p.State
 	decisionBefore := decisionBeforeOf(p)
-	if to == StateMerged && p.Refs.PR == "" {
-		// The close is the parent's merge: it adopts a held merge's PR (hk 4172).
-		if p.Refs.PR, err = heldMergePRTx(ctx, tx, p.ID); err != nil {
-			return false, p, err
-		}
+	if to == StateMerged && closePR != "" {
+		// The close is the parent's merge: it adopts the held merge's PR even
+		// when another open implements PR has since replaced refs.pr (hk 4172).
+		p.Refs.PR = closePR
 	}
 	p.State, p.UpdatedAt = to, now
 	if err := applyLifecycle(&p, from, to, now, &TaskClosure{Type: "resolved", Evidence: ref}); err != nil {

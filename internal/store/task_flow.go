@@ -532,7 +532,7 @@ func (s *Store) transitionTaskTx(ctx context.Context, tx transaction, id int64, 
 		// The close-on-merge rule a merge event applies (hk 3294) holds here
 		// too: another implements change still open, a reverted piece not
 		// relanded or an open sub-task keeps the task open.
-		hold, err := mergeHoldTx(ctx, tx, id, refs.PR)
+		hold, err := mergeHoldTx(ctx, tx, id, refs.PR, false)
 		if err != nil {
 			return Task{}, err
 		}
