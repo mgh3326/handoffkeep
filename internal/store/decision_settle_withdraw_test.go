@@ -30,6 +30,41 @@ func TestSettleKeepsClosedDecisionRequest(t *testing.T) {
 	settleKeepsCase(t, s)
 }
 
+// A settled task with only the legacy needs_decision flag has no structured
+// request to withdraw, but its flag and task_flag inbox row still must close.
+func TestSettleClearsFlagOnlyDecision(t *testing.T) {
+	s, _ := searchTestStore(t)
+	settleFlagOnlyCase(t, s)
+}
+
+func settleFlagOnlyCase(t *testing.T, s *Store) {
+	t.Helper()
+	task := decisionTask(t, s, "in_progress")
+	for _, state := range []string{"verifying", StateReviewing} {
+		if _, err := s.TransitionTask(t.Context(), task.ID, state, "dr-test", "step", nil, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.TransitionTask(t.Context(), task.ID, "needs_decision", "dr-test", "which way?", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	send(t, s, mergeEvent(task.ID, testPR(6415)))
+	got, _, err := s.GetTask(t.Context(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != StateMerged || got.AwaitingDecision {
+		t.Fatalf("settled task state=%s awaiting=%v", got.State, got.AwaitingDecision)
+	}
+	var open int
+	if err := s.db().QueryRow(t.Context(), s.q(`SELECT count(*) FROM decision_requests WHERE task_id=$1 AND source='task_flag' AND status='open'`, `SELECT count(*) FROM decision_requests WHERE task_id=? AND source='task_flag' AND status='open'`), task.ID).Scan(&open); err != nil {
+		t.Fatal(err)
+	}
+	if open != 0 {
+		t.Fatalf("open task_flag rows=%d, want 0", open)
+	}
+}
+
 // TestSettledOpenDecisionBackfill: the registered migration withdraws the open
 // request of each task already settled, supersedes its open inbox row, leaves
 // an unsettled task alone, and a second run changes nothing.
