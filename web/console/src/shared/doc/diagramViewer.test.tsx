@@ -77,6 +77,39 @@ describe("diagram viewer", () => {
     expect(scaleOf()).toBeCloseTo(0.1);
   });
 
+  // A press on the stage drops focus from the control that had it (a browser
+  // moves focus to the body); blur here stands in for that, as jsdom does not.
+  async function pressStage() {
+    await openViewer();
+    (document.activeElement as HTMLElement).blur();
+    // jsdom has no PointerEvent, so fireEvent would drop `button`; a MouseEvent
+    // carries it, and React reads it for the primary-button check.
+    viewerImage().dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    viewerImage().dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
+    return screen.getByRole("dialog", { name: "Diagram viewer" });
+  }
+
+  it("diagram viewer closes on Esc after a press on the stage", async () => {
+    const dialog = await pressStage();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("diagram viewer zooms on + after a press on the stage", async () => {
+    await pressStage();
+    const fit = scaleOf();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "+" });
+    expect(scaleOf()).toBeCloseTo(fit * 1.25);
+  });
+
+  it("diagram viewer keeps Tab inside after a press on the stage", async () => {
+    const dialog = await pressStage();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close" }));
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
   it("diagram viewer keeps the svg as an image", async () => {
     const { container } = await openViewer();
     expect(container.querySelector('img[data-doc-diagram="svg"]')).not.toBeNull();
