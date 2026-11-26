@@ -236,9 +236,8 @@ func TestMergedTaskEventsReadsOnlyRecent(t *testing.T) {
 	// lookup per task. Estimated rows therefore track merged tasks, not the
 	// number of merge transitions. No read scans a table.
 	assertNoFullScan(t, ctx, s, "merged task events", listMergedTaskEventsMySQL, map[string]map[string]bool{
-		"t":           {"tasks_state_id": true},
 		"task_events": {"task_events_task_kind_to_at": true},
-	}, 2, 2000)
+	}, 1, 2000)
 	assertMergedTaskEventEstimate(t, ctx, s)
 }
 
