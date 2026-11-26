@@ -41,7 +41,16 @@ set -euo pipefail
 
 : "${HK_CLI_HOSTS:=local:darwin_amd64 m1b:darwin_arm64 m1:darwin_arm64 desktop:linux_amd64 pi:linux_arm64 oci:linux_arm64}"
 : "${HK_CLI_REPO:=mgh3326/handoffkeep}"
-: "${HK_CLI_SERVER:=${HK_CLI_NCP:-oci}}"
+if [[ -z "${HK_CLI_SERVER:-}" ]]; then
+	case "${HK_CLI_NCP:-}" in
+	ncp)
+		echo "hk-cli-sync: warning: HK_CLI_NCP=ncp is stale; using oci" >&2
+		HK_CLI_SERVER=oci
+		;;
+	"") HK_CLI_SERVER=oci ;;
+	*) HK_CLI_SERVER=$HK_CLI_NCP ;;
+	esac
+fi
 : "${HK_CLI_SERVER_HEALTH:=${HK_CLI_NCP_HEALTH:-http://127.0.0.1:8800/healthz}}"
 
 readonly EX_ERROR=1
