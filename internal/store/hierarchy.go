@@ -677,12 +677,13 @@ func (s *Store) autoCloseOneParentTx(ctx context.Context, tx transaction, p Task
 		// A sub-task is still merged and waiting for its deploy.
 		return false, p, nil
 	}
-	closePR, err := heldMergePRTx(ctx, tx, p.ID)
-	if err != nil {
-		return false, p, err
-	}
-	if closePR == "" {
-		closePR = p.Refs.PR
+	closePR := p.Refs.PR
+	if to == StateMerged {
+		if heldPR, err := heldMergePRTx(ctx, tx, p.ID); err != nil {
+			return false, p, err
+		} else if heldPR != "" {
+			closePR = heldPR
+		}
 	}
 	if gate, err := s.closeGateTx(ctx, tx, p, closePR); err != nil || gate != "" {
 		if err != nil {
@@ -705,11 +706,10 @@ func (s *Store) autoCloseOneParentTx(ctx context.Context, tx transaction, p Task
 	}
 	from := p.State
 	decisionBefore := decisionBeforeOf(p)
-	if to == StateMerged && p.Refs.PR == "" {
-		// The close is the parent's merge: it adopts a held merge's PR (hk 4172).
-		if p.Refs.PR, err = heldMergePRTx(ctx, tx, p.ID); err != nil {
-			return false, p, err
-		}
+	if to == StateMerged && closePR != "" {
+		// The close is the parent's merge: it adopts the held merge's PR even
+		// when another open implements PR has since replaced refs.pr (hk 4172).
+		p.Refs.PR = closePR
 	}
 	p.State, p.UpdatedAt = to, now
 	if err := applyLifecycle(&p, from, to, now, &TaskClosure{Type: "resolved", Evidence: ref}); err != nil {

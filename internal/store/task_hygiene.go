@@ -498,11 +498,19 @@ func (s *Store) hygieneDecideTx(ctx context.Context, tx transaction, c hygieneCa
 			return d, err
 		}
 		holdPR = d.pr
-	} else if holdPR == "" {
-		holdPR, err = heldMergePRTx(ctx, tx, t.ID)
-		if err != nil {
-			return d, err
+	} else if c.rule == hygieneParentRule {
+		if t.State == StateMerged {
+			d.pr = t.Refs.PR
+		} else {
+			d.pr, err = heldMergePRTx(ctx, tx, t.ID)
+			if err != nil {
+				return d, err
+			}
+			if d.pr == "" {
+				d.pr = t.Refs.PR
+			}
 		}
+		holdPR = d.pr
 	}
 	h, err := taskHoldsTx(ctx, tx, t.ID, holdPR)
 	if err != nil {
@@ -552,13 +560,6 @@ func (s *Store) hygieneDecideTx(ctx context.Context, tx transaction, c hygieneCa
 		}
 		if err != nil {
 			return d, err
-		}
-		d.pr = t.Refs.PR
-		if d.target == StateMerged && d.pr == "" {
-			d.pr, err = heldMergePRTx(ctx, tx, t.ID)
-			if err != nil {
-				return d, err
-			}
 		}
 	} else {
 		if d.pr == "" {

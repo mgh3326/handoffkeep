@@ -338,6 +338,58 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 	if got := srcEvGet(t, s, heldParent.ID); got.State != StateReviewing || got.Refs.PR != otherOpenPR {
 		t.Fatalf("parent after child close: state=%s refs.pr=%q, want reviewing with open PR B %s", got.State, got.Refs.PR, otherOpenPR)
 	}
+	drift, err := s.TaskDrift(ctx, time.Now().UTC(), DriftDefaultMergedDays)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, ok := driftEntry(drift.AutoCloseHeld, heldParent.ID); !ok || row.Mechanical || len(row.OpenPRs) != 1 || row.OpenPRs[0] != otherOpenPR {
+		t.Fatalf("held-parent drift=%+v listed=%t, want open PR B to hold the parent", row, ok)
+	}
+	hygiene, err := s.TaskHygiene(ctx, time.Now().UTC(), "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, close := range hygiene.MechanicalCloses {
+		if close.TaskID == heldParent.ID {
+			t.Fatalf("hygiene preview would close parent with open PR B: %+v", close)
+		}
+	}
+	foundHeldParent := false
+	for _, finding := range hygiene.Findings.AutoCloseHeldParents {
+		if finding.ID == heldParent.ID && !finding.Mechanical && len(finding.OpenPRs) == 1 && finding.OpenPRs[0] == otherOpenPR {
+			foundHeldParent = true
+		}
+	}
+	if !foundHeldParent {
+		t.Fatalf("hygiene did not report open PR B as parent hold: %+v", hygiene.Findings.AutoCloseHeldParents)
+	}
+	otherRepo, otherNumber, ok := parsePRURL(otherOpenPR)
+	if !ok {
+		t.Fatalf("parse open PR B %q", otherOpenPR)
+	}
+	if _, err := s.db().Exec(ctx, s.q(`UPDATE changes SET state='closed' WHERE repo=$1 AND pr_number=$2`, `UPDATE changes SET state='closed' WHERE repo=? AND pr_number=?`), otherRepo, otherNumber); err != nil {
+		t.Fatal(err)
+	}
+	hygiene, err = s.TaskHygiene(ctx, time.Now().UTC(), "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundHeldClose := false
+	for _, close := range hygiene.MechanicalCloses {
+		if close.TaskID == heldParent.ID && close.ToState == StateMerged && close.PR == heldPR {
+			foundHeldClose = true
+		}
+	}
+	if !foundHeldClose {
+		t.Fatalf("after closing PR B, hygiene preview did not select held PR A: %+v", hygiene.MechanicalCloses)
+	}
+	hygiene, err = s.TaskHygiene(ctx, time.Now().UTC(), "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := srcEvGet(t, s, heldParent.ID); got.State != StateMerged || got.Refs.PR != heldPR {
+		t.Fatalf("parent after hygiene retry: state=%s refs.pr=%q, want merged with held PR A %s", got.State, got.Refs.PR, heldPR)
+	}
 
 	// The old held shape becomes mechanical when the child's timestamp proves
 	// it was filed after the merged PR opened. The planned-piece counterpart
@@ -358,7 +410,7 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 	if _, err := s.db().Exec(ctx, s.q(`UPDATE tasks SET created_at=$1 WHERE id=$2`, `UPDATE tasks SET created_at=? WHERE id=?`), legacyOpened.Add(time.Second), legacyChild.ID); err != nil {
 		t.Fatal(err)
 	}
-	drift, err := s.TaskDrift(ctx, time.Now().UTC(), DriftDefaultMergedDays)
+	drift, err = s.TaskDrift(ctx, time.Now().UTC(), DriftDefaultMergedDays)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +437,7 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 	if row, ok := driftEntry(drift.MergedPRNotMerged, planned.ID); !ok || row.Mechanical || len(row.OpenSubTasks) != 1 {
 		t.Fatalf("planned piece drift=%+v listed=%t, want held by its open child", row, ok)
 	}
-	hygiene, err := s.TaskHygiene(ctx, time.Now().UTC(), "", true)
+	hygiene, err = s.TaskHygiene(ctx, time.Now().UTC(), "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
