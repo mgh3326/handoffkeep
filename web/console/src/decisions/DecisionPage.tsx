@@ -566,6 +566,7 @@ export function DecisionPage({ id }: { id: string }) {
           </p>
         )}
       </div>
+      <div className="decision-scroll-end" aria-hidden="true" />
       {screen === "confirming" && req && (
         <ConfirmSheet
           option={req.options.find((o) => o.key === option)?.label ?? option}

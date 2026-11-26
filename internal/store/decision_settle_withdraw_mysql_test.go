@@ -36,6 +36,15 @@ func TestMySQLSettleKeepsClosedDecisionRequest(t *testing.T) {
 	settleKeepsCase(t, s)
 }
 
+func TestMySQLSettleClearsFlagOnlyDecision(t *testing.T) {
+	s, err := Open(t.Context(), testdb.MySQLDatabase(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	settleFlagOnlyCase(t, s)
+}
+
 // TestMySQLSettledOpenDecisionBackfill runs the MySQL steps of the registered
 // migration, in one transaction as the migrator does, and checks the same
 // result as the PostgreSQL test, including that a second run changes nothing.

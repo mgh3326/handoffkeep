@@ -241,23 +241,42 @@ check "oci planned" has "$FIX/out" "plan oci install $TAG"
 check "no ncp planned" lacks "$FIX/out" "ncp"
 check "healthz read from oci" has "$FIX/calls" "ssh oci curl"
 
-echo "== deprecated HK_CLI_NCP alone still names the serving host"
+echo "== deprecated HK_CLI_NCP alias still names a distinct serving host"
 setup
-export HK_CLI_NCP=oci
+export HK_CLI_NCP=legacy
 run "$TAG"
 unset HK_CLI_NCP
 check "exit 0" rc_is 0
-check "healthz read from the HK_CLI_NCP host" has "$FIX/calls" "ssh oci curl"
+check "healthz read from the HK_CLI_NCP host" has "$FIX/calls" "ssh legacy curl"
 check "CLI installed on m1b" has "$FIX/remote/m1b/.local/bin/handoffkeep" "release=$TAG"
+
+echo "== HK_CLI_SERVER takes precedence over HK_CLI_NCP"
+setup
+export HK_CLI_SERVER=oci HK_CLI_NCP=legacy
+run "$TAG"
+unset HK_CLI_SERVER HK_CLI_NCP
+check "exit 0" rc_is 0
+check "healthz read from the HK_CLI_SERVER host" has "$FIX/calls" "ssh oci curl"
+check "legacy host not used for healthz" lacks "$FIX/calls" "ssh legacy curl"
+
+echo "== stale HK_CLI_NCP=ncp warns and falls back to oci"
+setup
+export HK_CLI_NCP=ncp
+run "$TAG"
+unset HK_CLI_NCP
+check "exit 0" rc_is 0
+check "stale alias warning" has "$FIX/err" "HK_CLI_NCP=ncp is stale; using oci"
+check "healthz read from oci" has "$FIX/calls" "ssh oci curl"
+check "retired host not used" lacks "$FIX/calls" "ssh ncp"
 
 echo "== deprecated HK_CLI_NCP mismatch refuses naming that host"
 setup
 printf '{"vcs_revision":"%s"}' "$OLD" >"$FIX/server_healthz"
-export HK_CLI_NCP=oci
+export HK_CLI_NCP=legacy
 run "$TAG"
 unset HK_CLI_NCP
 check "exit 6" rc_is 6
-check "refusal names oci" has "$FIX/err" "oci serves"
+check "refusal names legacy" has "$FIX/err" "legacy serves"
 check "no scp" lacks "$FIX/calls" "scp "
 
 echo "== refusal: the serving host serves another sha"

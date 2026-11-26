@@ -75,6 +75,21 @@ describe("Shell navigation", () => {
     expect(within(nav).queryByRole("link", { name: "대기" })).toBeNull();
   });
 
+  it("keeps overflow destinations visible on desktop with 더보기 closed, including after resize", () => {
+    setWidth(390);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 503 })));
+    render(<Shell current="home"><p>page</p></Shell>);
+    const nav = screen.getByRole("navigation");
+    const toggle = within(nav).getByRole("button", { name: "더보기" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    const overflow = nav.querySelector<HTMLElement>(".hk-shell-more");
+    expect(overflow?.hasAttribute("hidden")).toBe(true);
+    expect(overflow?.className).toBe("hk-shell-more");
+    setWidth(1024);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(overflow?.hasAttribute("hidden")).toBe(true);
+  });
+
   it("opens 더보기 on click, closes it on Escape and returns focus to the toggle", () => {
     setWidth(390);
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 503 })));
