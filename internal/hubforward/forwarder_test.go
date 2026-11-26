@@ -1,6 +1,7 @@
 package hubforward
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,7 @@ type fakeOutbox struct {
 	skipped    map[string]bool
 	skipCounts []int64
 	skipErr    error
+	skipBlocks bool
 	listSince  []time.Time
 }
 
@@ -48,7 +50,13 @@ func (f *fakeOutbox) ListUnsentNotifications(_ context.Context, _ int, since tim
 	return out, nil
 }
 
-func (f *fakeOutbox) SkipNotificationsBefore(_ context.Context, before time.Time, _ string) (int64, error) {
+func (f *fakeOutbox) SkipNotificationsBefore(ctx context.Context, before time.Time, _ string) (int64, error) {
+	if f.skipBlocks {
+		// Stands in for an UPDATE waiting on a row lock: it returns only when
+		// its context ends.
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
 	if f.skipErr != nil {
 		return 0, f.skipErr
 	}
@@ -294,16 +302,63 @@ func TestForwarderResettlesWhileCutoffIsInTheFuture(t *testing.T) {
 	}
 }
 
-// A store that cannot settle the backlog must not let an old row through:
-// the run fails instead of posting it (hk 4986).
-func TestForwardRefusesToPostWhenTheBacklogCannotBeSkipped(t *testing.T) {
+// A tick whose settle fails still delivers the live row, and the backlog row is
+// not posted: the list carries the cutoff, so the failure costs nothing but a
+// log line and a retry on the next tick (hk 6912).
+func TestForwardDeliversLiveRowsWhenSettleFails(t *testing.T) {
 	outbox := &fakeOutbox{
 		skipErr: errors.New("skip failed"),
-		rows:    []store.NotificationOutbox{{Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "backlog", Text: "old", CreatedAt: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)}},
+		rows: []store.NotificationOutbox{
+			{Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "backlog", Text: "old", CreatedAt: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)},
+			{Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "live", Text: "new", CreatedAt: time.Date(2026, 11, 1, 23, 30, 0, 0, time.UTC)},
+		},
 	}
 	f, hub, _ := forwarderFixture(t, outbox)
-	if sent, failed, err := f.Once(t.Context()); err == nil || sent != 0 || failed != 0 || len(hub.posts) != 0 {
-		t.Fatalf("sent=%d failed=%d posts=%d err=%v", sent, failed, len(hub.posts), err)
+	var logs bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(old) })
+	if sent, failed, err := f.Once(t.Context()); err != nil || sent != 1 || failed != 0 {
+		t.Fatalf("sent=%d failed=%d err=%v", sent, failed, err)
+	}
+	if len(hub.posts) != 1 || hub.posts[0]["event"] != "live" {
+		t.Fatalf("posts=%v, want only the live row", hub.posts)
+	}
+	if !strings.Contains(logs.String(), "notification_forward.settle_failed") {
+		t.Fatalf("log=%q, want a settle_failed event", logs.String())
+	}
+}
+
+// A settle that blocks on a row lock cannot hold the tick: its own deadline
+// ends it, and the live row goes out on that tick (hk 6912).
+func TestForwardDeliversLiveRowsWhileSettleBlocks(t *testing.T) {
+	outbox := &fakeOutbox{
+		skipBlocks: true,
+		rows: []store.NotificationOutbox{
+			{Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "backlog", Text: "old", CreatedAt: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)},
+			{Kind: store.OutboxKindDotsReport, TargetLane: "operator-desk", EventID: "live", Text: "new", CreatedAt: time.Date(2026, 11, 1, 23, 30, 0, 0, time.UTC)},
+		},
+	}
+	f, hub, _ := forwarderFixture(t, outbox)
+	type result struct {
+		sent, failed int
+		err          error
+	}
+	done := make(chan result, 1)
+	go func() {
+		sent, failed, err := f.Once(t.Context())
+		done <- result{sent, failed, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil || r.sent != 1 || r.failed != 0 {
+			t.Fatalf("sent=%d failed=%d err=%v", r.sent, r.failed, r.err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("a blocked settle held the tick past its deadline")
+	}
+	if len(hub.posts) != 1 || hub.posts[0]["event"] != "live" {
+		t.Fatalf("posts=%v, want only the live row", hub.posts)
 	}
 }
 
