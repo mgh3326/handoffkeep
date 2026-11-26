@@ -149,9 +149,9 @@ func TestMergedTaskEventsReadsOnlyRecent(t *testing.T) {
 	lane := fmt.Sprintf("plan-deploys-%d", now.UnixNano())
 	h := func(hours int) time.Time { return now.Add(time.Duration(hours) * time.Hour) }
 
-	// Fifteen hundred merged tasks with one old merge each, as on production
-	// (most rows merged): a tasks-driven read walks them all, while the
-	// rewritten read stops after its limit.
+	// Fifteen hundred merged tasks with four merges each. With a 2,000 row
+	// limit the former event-driven read exhausts all 6,000 old merge rows;
+	// the current read visits each merged task and probes one newest merge.
 	base := now.Add(-90 * 24 * time.Hour)
 	otherIDs := seedPlanTasks(t, ctx, s, func() []planTaskSeed {
 		out := make([]planTaskSeed, 0, 1500)
@@ -161,9 +161,11 @@ func TestMergedTaskEventsReadsOnlyRecent(t *testing.T) {
 		return out
 	}())
 	seedPlanEvents(t, ctx, s, func() []planEventSeed {
-		out := make([]planEventSeed, 0, 1500)
+		out := make([]planEventSeed, 0, 6000)
 		for i, id := range otherIDs {
-			out = append(out, planEventSeed{taskID: id, from: "developing", to: "merged", by: "tester", at: base.Add(time.Duration(i) * time.Second)})
+			for merge := range 4 {
+				out = append(out, planEventSeed{taskID: id, from: "join", to: "merged", by: "tester", at: base.Add(time.Duration(i*4+merge) * time.Second)})
+			}
 		}
 		return out
 	}())
@@ -236,13 +238,13 @@ func TestMergedTaskEventsReadsOnlyRecent(t *testing.T) {
 	assertNoFullScan(t, ctx, s, "merged task events", listMergedTaskEventsMySQL, map[string]map[string]bool{
 		"t":           {"tasks_state_id": true},
 		"task_events": {"task_events_task_kind_to_at": true},
-	}, 2, 10)
+	}, 2, 2000)
 	assertMergedTaskEventEstimate(t, ctx, s)
 }
 
 func assertMergedTaskEventEstimate(t *testing.T, ctx context.Context, s *Store) {
 	t.Helper()
-	rows, err := s.db().Query(ctx, "EXPLAIN FORMAT=TRADITIONAL "+listMergedTaskEventsMySQL, 10)
+	rows, err := s.db().Query(ctx, "EXPLAIN FORMAT=TRADITIONAL "+listMergedTaskEventsMySQL, 2000)
 	if err != nil {
 		t.Fatalf("merged task events: EXPLAIN estimates: %v", err)
 	}
