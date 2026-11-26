@@ -254,28 +254,48 @@ func (s *Store) WriteDriftMetrics(ctx context.Context, day string, m DriftMetric
 func (s *Store) RunDriftDelivery(ctx context.Context, now time.Time) (bool, error) {
 	now = now.UTC()
 	day := DriftDayOf(now)
-	if _, found, err := s.GetDocument(ctx, DriftMetricsDocKey(day)); err != nil {
-		return false, err
-	} else if found {
-		return false, nil
-	}
-	drift, err := s.TaskDrift(ctx, now, DriftDefaultMergedDays)
-	if err != nil {
-		return false, fmt.Errorf("drift delivery drift: %w", err)
-	}
-	hygiene, err := s.TaskHygiene(ctx, now, "", true)
-	if err != nil {
-		return false, fmt.Errorf("drift delivery hygiene: %w", err)
-	}
-	if _, err := s.EnqueueDriftNotices(ctx, now, drift, hygiene); err != nil {
-		return false, fmt.Errorf("drift delivery notices: %w", err)
-	}
-	m, err := s.BuildDriftMetrics(ctx, day, drift, hygiene)
-	if err != nil {
-		return false, err
-	}
-	if _, err := s.WriteDriftMetrics(ctx, day, m); err != nil {
-		return false, fmt.Errorf("drift delivery metrics: %w", err)
-	}
-	return true, nil
+	var ran bool
+	err := s.retryTx(ctx, func() error {
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		if err = s.lockWorkerOperationTx(ctx, tx, "drift_delivery"); err != nil {
+			return err
+		}
+		var found bool
+		err = tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM documents WHERE key=$1)`, "SELECT EXISTS(SELECT 1 FROM documents WHERE `key`=?)"), DriftMetricsDocKey(day)).Scan(&found)
+		if err != nil {
+			return err
+		}
+		if found {
+			return tx.Commit(ctx)
+		}
+		drift, err := s.TaskDrift(ctx, now, DriftDefaultMergedDays)
+		if err != nil {
+			return fmt.Errorf("drift delivery drift: %w", err)
+		}
+		hygiene, err := s.TaskHygiene(ctx, now, "", true)
+		if err != nil {
+			return fmt.Errorf("drift delivery hygiene: %w", err)
+		}
+		if _, err := s.EnqueueDriftNotices(ctx, now, drift, hygiene); err != nil {
+			return fmt.Errorf("drift delivery notices: %w", err)
+		}
+		m, err := s.BuildDriftMetrics(ctx, day, drift, hygiene)
+		if err != nil {
+			return err
+		}
+		if _, err := s.WriteDriftMetrics(ctx, day, m); err != nil {
+			return fmt.Errorf("drift delivery metrics: %w", err)
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return err
+		}
+		ran = true
+		return nil
+	})
+	return ran, err
 }

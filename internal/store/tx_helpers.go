@@ -105,6 +105,19 @@ func (s *Store) lockTx(ctx context.Context, tx transaction, id int64) error {
 	return err
 }
 
+// lockWorkerOperationTx serializes one worker's check-and-write operation in
+// the current database. Session worker locks gate a whole worker generation;
+// this transaction lock also protects a brief overlap between generations.
+func (s *Store) lockWorkerOperationTx(ctx context.Context, tx transaction, operation string) error {
+	key := "worker:" + operation
+	if s.dialect == mysqlDialect {
+		_, err := mysqlTransactionLock(ctx, tx, mysqlLockKey("worker", operation), false)
+		return err
+	}
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, key)
+	return err
+}
+
 // collectRows is pgx.CollectRows over the store's driver-neutral rows: it
 // closes rows, and an empty result is a non-nil empty slice, so JSON stays [].
 func collectRows[T any](r rows, f func(row) (T, error)) ([]T, error) {

@@ -4,6 +4,8 @@ package store
 
 import (
 	"fmt"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -71,4 +73,80 @@ func TestTableStatsMySQLReadsExactCountsAndRestoresTheSession(t *testing.T) {
 	if session != global {
 		t.Fatalf("session information_schema_stats_expiry = %d after the snapshot, want the global default %d", session, global)
 	}
+}
+
+// TestMySQLTableStatsSerializesWorkerGenerations exercises the overlap window:
+// one store holds the old colour's unsalted session lock while two stores run
+// the check-and-write operation concurrently. The database-local transaction
+// lock must permit the new worker lock generation and preserve one snapshot.
+func TestMySQLTableStatsSerializesWorkerGenerations(t *testing.T) {
+	ctx := t.Context()
+	url := testdb.MySQLDatabase(t)
+	oldColour, err := Open(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer oldColour.Close()
+	newColour, err := Open(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer newColour.Close()
+
+	legacyName := mysqlSessionLockName("id", strconv.FormatInt(int64(TableStatsWorkerLock), 10))
+	legacyConn, held, err := mysqlTrySessionLock(ctx, oldColour.mysqlPool, legacyName)
+	if err != nil || !held {
+		t.Fatalf("hold legacy worker lock: held=%v err=%v", held, err)
+	}
+	defer func() { _ = mysqlReleaseSessionLock(legacyConn, legacyName) }()
+	lease, held, err := newColour.TryWorkerLock(ctx, TableStatsWorkerLock)
+	if err != nil || !held {
+		t.Fatalf("new worker lock while legacy generation is held: held=%v err=%v", held, err)
+	}
+	defer lease.Release()
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	results := make([]TableStatsRun, 2)
+	errs := make([]error, 2)
+	stores := []*Store{oldColour, newColour}
+	for i := range stores {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = stores[i].RunTableStats(ctx, time.Date(2026, 11, 27, 3, 0, 0, 0, time.UTC))
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("RunTableStats[%d]: %v", i, err)
+		}
+	}
+	if got := boolCount(results[0].Ran, results[1].Ran); got != 1 {
+		t.Fatalf("runs = %+v, want exactly one snapshot", results)
+	}
+	doc, found, err := oldColour.GetDocument(ctx, TableStatsDocKey)
+	if err != nil || !found {
+		t.Fatalf("table stats document found=%v err=%v", found, err)
+	}
+	history, err := parseTableStatsDoc(doc.Body, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(history.Snapshots); got != 1 {
+		t.Fatalf("snapshot count = %d, want 1", got)
+	}
+}
+
+func boolCount(values ...bool) int {
+	count := 0
+	for _, value := range values {
+		if value {
+			count++
+		}
+	}
+	return count
 }
