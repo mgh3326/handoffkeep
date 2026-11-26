@@ -197,7 +197,18 @@ func (s *Store) SkipNotificationsBefore(ctx context.Context, before time.Time, r
 		return 0, errors.New("invalid notification skip")
 	}
 	if s.dialect == mysqlDialect {
-		return s.skipNotificationsBeforeMySQL(ctx, before, reason)
+		// A deadlock or lock-wait timeout retries the whole settle, as every
+		// other MySQL write transaction does (retryTx).
+		var settled int64
+		err := s.retryTx(ctx, func() error {
+			var err error
+			settled, err = s.skipNotificationsBeforeMySQL(ctx, before, reason)
+			return err
+		})
+		if err != nil {
+			return 0, err
+		}
+		return settled, nil
 	}
 	tag, err := s.db().Exec(ctx, `UPDATE notification_outbox SET skipped_at=now(),skip_reason=$2 WHERE id IN (SELECT id FROM notification_outbox WHERE created_at < $1 AND sent_at IS NULL AND skipped_at IS NULL FOR UPDATE SKIP LOCKED)`, before, reason)
 	if err != nil {
