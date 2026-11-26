@@ -94,6 +94,22 @@ it("reserves scroll room after the decision CTA for the mobile sticky bar", asyn
   expect(document.querySelector(".decision-scroll-end")?.getAttribute("aria-hidden")).toBe("true");
   expect(document.querySelector(".decision-scroll-end")?.className).toContain("decision-scroll-end");
 });
+it("puts a submit result badge before the mobile clearance spacer, so the result scrolls into view above it", async () => {
+  fetcher.mockImplementation((_path, init) =>
+    init?.method === "POST"
+      ? Promise.resolve(response({ result: "stale_revision" }, 409))
+      : Promise.resolve(response(detail)),
+  );
+  await sheet();
+  fireEvent.click(screen.getByRole("button", { name: "답변 보내기" }));
+  const badge = await waitFor(() => {
+    const el = document.querySelector(".decision-result-stale_revision");
+    expect(el).not.toBeNull();
+    return el as Element;
+  });
+  const spacer = document.querySelector(".decision-scroll-end") as Element;
+  expect(badge.compareDocumentPosition(spacer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
 it("A2 starts unselected and separates recommendation and default", async () => {
   await start();
   expect(
