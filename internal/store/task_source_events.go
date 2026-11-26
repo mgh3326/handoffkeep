@@ -591,7 +591,7 @@ func (s *Store) applySourceEventTx(ctx context.Context, tx transaction, x Task, 
 		}
 	}
 	if reason == "" && ev.Source == SourceMergewakeMerge {
-		if reason, err = mergeHoldTx(ctx, tx, x.ID, ev.PR); err != nil {
+		if reason, err = mergeHoldTx(ctx, tx, x.ID, ev.PR, true); err != nil {
 			return TaskEventResult{}, err
 		}
 		held = reason != ""
@@ -851,8 +851,8 @@ const allOpenSubTasksSQL = `SELECT id FROM tasks WHERE parent_id=$1 AND state NO
 // one of its implements changes is reverted and not relanded, or while one of
 // its sub-tasks is not settled (a parent closes through auto_close_parent
 // when its last sub-task settles).
-func mergeHoldTx(ctx context.Context, tx transaction, taskID int64, pr string) (string, error) {
-	h, err := taskHoldsTx(ctx, tx, taskID, pr)
+func mergeHoldTx(ctx context.Context, tx transaction, taskID int64, pr string, followUps bool) (string, error) {
+	h, err := taskHoldsWithFollowUpsTx(ctx, tx, taskID, pr, followUps)
 	if err != nil {
 		return "", err
 	}
@@ -905,6 +905,14 @@ func (h taskHolds) mergeReason() string {
 // taskHoldsTx reads the holds on task taskID. pr, when set, is the PR the
 // caller is merging: it is not an open hold on the task.
 func taskHoldsTx(ctx context.Context, tx transaction, taskID int64, pr string) (taskHolds, error) {
+	return taskHoldsWithFollowUpsTx(ctx, tx, taskID, pr, true)
+}
+
+// taskHoldsWithFollowUpsTx optionally treats children created after the
+// implementing PR opened as follow-ups. Only PR source events have that
+// incoming-merge boundary; a direct task transition keeps the all-children
+// close rule even when it links a previously merged PR in the same tx.
+func taskHoldsWithFollowUpsTx(ctx context.Context, tx transaction, taskID int64, pr string, followUps bool) (taskHolds, error) {
 	var h taskHolds
 	if err := srcEvChangesGate(tx); err != nil {
 		// B5 dependency: the first two holds read change_tasks and changes.
@@ -935,20 +943,28 @@ func taskHoldsTx(ctx context.Context, tx transaction, taskID int64, pr string) (
 	if h.RevertedPRs, err = collectRows(rows, rowTo[string]); err != nil {
 		return h, err
 	}
-	openedAt, found, err := taskHoldOpenedAtTx(ctx, tx, taskID, pr)
-	if err != nil {
-		return h, err
-	}
-	if !found {
+	if !followUps {
 		// Without an implements change there is no PR boundary. Preserve the
-		// planned-piece rule and treat every unsettled child as a hold.
+		// direct-transition rule and treat every unsettled child as a hold.
 		query := allOpenSubTasksSQL
 		if dialectFor(tx) == mysqlDialect {
 			query = `SELECT id FROM tasks WHERE parent_id=? AND state NOT IN (` + settledStatesSQL + `) ORDER BY id`
 		}
 		rows, err = tx.Query(ctx, query, taskID)
 	} else {
-		rows, err = tx.Query(ctx, subTaskQuery, taskID, openedAt)
+		openedAt, found, lookupErr := taskHoldOpenedAtTx(ctx, tx, taskID, pr)
+		if lookupErr != nil {
+			return h, lookupErr
+		}
+		if !found {
+			query := allOpenSubTasksSQL
+			if dialectFor(tx) == mysqlDialect {
+				query = `SELECT id FROM tasks WHERE parent_id=? AND state NOT IN (` + settledStatesSQL + `) ORDER BY id`
+			}
+			rows, err = tx.Query(ctx, query, taskID)
+		} else {
+			rows, err = tx.Query(ctx, subTaskQuery, taskID, openedAt)
+		}
 	}
 	if err != nil {
 		return h, err
