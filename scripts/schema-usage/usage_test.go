@@ -2,10 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // writeTree writes files under a fresh root and returns it. Paths are relative
@@ -170,7 +173,7 @@ func TestApplyUsageRequiresCommentAndRole(t *testing.T) {
 	if err == nil {
 		t.Fatal("want errors for a table with no role, a comment naming an unknown table")
 	}
-	for _, want := range []string{`table "jobs" has no tableComment`, `table "jobs" needs exactly one role label`, `comments names table "ghost"`} {
+	for _, want := range []string{`table "jobs" has no tableComment`, `table "jobs" needs exactly one role label`, `comments names table "ghost", which no viewpoint lists: add the table to a viewpoint in .tbls.yml`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
@@ -463,7 +466,57 @@ func TestTriggerOnUnlistedTableFailsConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := applyUsage(commentsFor("tasks"), u)
-	if err == nil || !strings.Contains(err.Error(), `trigger "ghost_guard" fires on table "ghost", which no viewpoint lists`) {
-		t.Errorf("err = %v, want the unlisted-table refusal", err)
+	if err == nil || !strings.Contains(err.Error(), `trigger "ghost_guard" fires on table "ghost", which no viewpoint lists: add the table to a viewpoint in .tbls.yml`) {
+		t.Errorf("err = %v, want the unlisted-table refusal naming the remedy", err)
+	}
+}
+
+// tblsForRun is a minimal .tbls.yml: one viewpoint, a comments entry per table.
+const tblsForRun = `name: handoffkeep
+viewpoints:
+  - id: changes
+    name: Changes
+    tables:
+      - changes
+      - change_gate_events
+comments:
+  - table: changes
+    tableComment: The changes.
+    labels: [source-of-record]
+  - table: change_gate_events
+    tableComment: Gate decisions.
+    labels: [history-log]
+`
+
+// The command path: run("config", OUT, LIVE_JSON) reads .tbls.yml and the code
+// tree from the working directory and must carry the live file's triggers into
+// OUT. A mutant that drops the live argument leaves the trigger line unstated.
+func TestRunConfigStatesTriggerFactsFromLiveJSON(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		".tbls.yml":                 tblsForRun,
+		"internal/store/changes.go": "package store\n\nfunc (s *Store) Touch() { _ = \"SELECT id FROM changes\" }\n",
+	})
+	t.Chdir(root)
+	live := liveSchemaFile(t, map[string][]map[string]string{
+		"changes": {tblsTrigger("change_gate_events_record", changeGateEventsRecordTrigger)},
+	}, "changes", "change_gate_events")
+	out := filepath.Join(t.TempDir(), "config.yml")
+	if err := run([]string{"config", out, live}, io.Discard); err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	gate := commentOf(t, cfg, "change_gate_events")
+	if !strings.Contains(gate, "Written by trigger: change_gate_events_record (AFTER UPDATE ON changes).") {
+		t.Errorf("config output must state the writing trigger from LIVE_JSON, got:\n%s", gate)
+	}
+	if strings.Contains(gate, "Written by: none.") {
+		t.Errorf("a table a trigger writes must not read Written by: none., got:\n%s", gate)
 	}
 }
