@@ -131,7 +131,7 @@ export function largestStorage(snapshots: StatsSnapshot[], limit = 5): { at: str
       let delta: StorageDelta;
       if (prev === null) {
         delta = { kind: "same" };
-      } else if (!(table in prev.tables)) {
+      } else if (!Object.prototype.hasOwnProperty.call(prev.tables, table)) {
         delta = { kind: "new" };
       } else {
         delta = { kind: "bytes", value: bytes - (prev.tables[table][2] + prev.tables[table][3]) };
@@ -145,12 +145,7 @@ export function largestStorage(snapshots: StatsSnapshot[], limit = 5): { at: str
 
 export type ReviewState = "OPEN" | "DECIDED" | "NOT_A_PROBLEM" | "WAITING";
 
-const REVIEW_STATES: Record<string, true> = {
-  OPEN: true,
-  DECIDED: true,
-  NOT_A_PROBLEM: true,
-  WAITING: true,
-};
+const REVIEW_STATES = new Set<string>(["OPEN", "DECIDED", "NOT_A_PROBLEM", "WAITING"]);
 
 export type ReviewTable = {
   state: ReviewState;
@@ -236,7 +231,7 @@ export function parseReview(body: string): ReviewDoc {
     }
     const row = entry as Record<string, unknown>;
     const state = row.state;
-    if (typeof state !== "string" || !REVIEW_STATES[state]) {
+    if (typeof state !== "string" || !REVIEW_STATES.has(state)) {
       throw new Error(`review.json의 테이블 '${name}'의 state가 낯설어요: ${String(state)}`);
     }
     if (state === "DECIDED" && !isNonEmptyString(row.decision)) {
