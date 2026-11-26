@@ -42,7 +42,7 @@ func (s Service) SearchTasks(ctx context.Context, q, lane, state string, project
 		filter = f
 		filtered = true
 	}
-	if project != nil && *project != "" {
+	if project != nil {
 		filtered = true
 	}
 	searchLimit := limit

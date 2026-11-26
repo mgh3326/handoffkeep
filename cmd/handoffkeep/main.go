@@ -225,12 +225,11 @@ func tasksHelp(sub string) string {
 // filter accepts. The state and area sets come from the store's own
 // vocabularies so the help cannot drift from them.
 func tasksListUsage() string {
-	return `usage: tasks list [--lane L] [--state S] [--parent-lane P] [--project P] [--area A] [--stalled] [--change N] [--after-id N] [--limit N]
+	return `usage: tasks list [--lane L] [--state S] [--parent-lane P] [--project P] [--area A] [--stalled] [--limit N]
   Lists the oldest tasks first, 20 by default.
   --limit accepts 1..1000 (default 20); the server names the parameter when it refuses one.
   --state accepts: ` + strings.Join(store.AcceptedStateNames(), ", ") + `.
-  --area accepts the closed vocabulary listed by tasks areas; --stalled accepts true or false.
-  --change takes a positive change id and cannot be combined with other filters; --after-id accepts an integer >= 0.`
+  --area accepts the closed vocabulary listed by tasks areas; --stalled accepts true or false.`
 }
 
 // tasksSearchUsage states the duplicate check before tasks add: words across
@@ -392,6 +391,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	linkSet, kindSet, prioritySet := false, false, false
 	closureSet := false
 	openSet := false
+	stateSet := false
 	fs.Visit(func(item *flag.Flag) {
 		switch item.Name {
 		case "closure", "evidence":
@@ -408,6 +408,9 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		}
 		if item.Name == "open" {
 			openSet = true
+		}
+		if item.Name == "state" {
+			stateSet = true
 		}
 		if item.Name == "parent" {
 			parentSet = true
@@ -464,6 +467,11 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 	}
 	if closureSet && args[0] != "transition" {
 		return errors.New("--closure/--evidence are accepted only by tasks transition")
+	}
+	// --state is the list/add filter; a transition names its target with --to.
+	// Refused here so no request is sent with the target missing.
+	if stateSet && args[0] == "transition" {
+		return errors.New("tasks transition takes --to <state>; --state is a list filter")
 	}
 	if *set && args[0] != "transition" {
 		return errors.New("--set is accepted only by tasks transition")
@@ -602,7 +610,7 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if len(words) == 0 {
 			return errors.New(tasksSearchUsage())
 		}
-		if openSet && strings.TrimSpace(*state) != "" {
+		if *open && strings.TrimSpace(*state) != "" {
 			return errors.New("--open and --state are exclusive")
 		}
 		if *limit < 1 || *limit > 50 {
@@ -612,12 +620,16 @@ func tasksCmdE(args []string, out, errout io.Writer) error {
 		if projectSet {
 			projectFilter = project
 		}
-		xs, _, err := c.SearchTasks(ctx, strings.Join(words, " "), *lane, *state, projectFilter, *open, *limit)
+		xs, truncated, err := c.SearchTasks(ctx, strings.Join(words, " "), *lane, *state, projectFilter, *open, *limit)
 		if err != nil {
 			return err
 		}
 		if xs == nil {
 			xs = []store.Task{}
+		}
+		if truncated {
+			// A cut window can hide matches: say so rather than read as "no duplicate".
+			return printJSON(out, map[string]any{"tasks": xs, "truncated": true})
 		}
 		return printJSON(out, map[string]any{"tasks": xs})
 	case "export":
