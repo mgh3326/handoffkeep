@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/internal/store"
 )
@@ -107,6 +108,47 @@ func TestMigrateRefusesCorruptSource(t *testing.T) {
 	}
 	if target.puts != 0 || len(db.locations) != 0 {
 		t.Fatalf("continued after source mismatch: puts=%d locations=%v", target.puts, db.locations)
+	}
+}
+
+// A hot-deleted row is archived: the fuse does not count it, so migrate must not
+// copy it or record a location, even when its source copy still exists, and a
+// hot-deleted row with no source copy must not stop the run.
+func TestMigrateSkipsHotDeletedRows(t *testing.T) {
+	sha := func(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
+	archived, gone, live := []byte("archived, source copy kept"), []byte("archived, no source copy"), []byte("live row")
+	hotAt := time.Unix(1700000000, 0)
+	db := &migrationDBFake{rows: []store.Attachment{
+		{SHA256: sha(archived), SizeBytes: int64(len(archived)), MIME: "text/plain", HotDeletedAt: &hotAt},
+		{SHA256: sha(gone), SizeBytes: int64(len(gone)), MIME: "text/plain", HotDeletedAt: &hotAt},
+		{SHA256: sha(live), SizeBytes: int64(len(live)), MIME: "text/plain"},
+	}}
+	source := &fakeObjects{objects: map[string][]byte{key(sha(archived)): archived, key(sha(live)): live}}
+	target := &fakeObjects{objects: map[string][]byte{}}
+	want := MigrationResult{
+		Objects:           3,
+		Bytes:             int64(len(archived) + len(gone) + len(live)),
+		SkippedHotDeleted: 2,
+	}
+	dry, err := Migrate(t.Context(), db, source, target, "target", false)
+	if err != nil || dry != want {
+		t.Fatalf("dry run = %+v, %v; want %+v", dry, err, want)
+	}
+	got, err := Migrate(t.Context(), db, source, target, "target", true)
+	if err != nil || got != want {
+		t.Fatalf("migrate = %+v, %v; want %+v", got, err, want)
+	}
+	if _, ok := target.objects[key(sha(archived))]; ok || target.puts != 1 {
+		t.Fatalf("hot-deleted row copied to target: puts=%d", target.puts)
+	}
+	if _, ok := db.locations[sha(archived)]; ok {
+		t.Fatalf("hot-deleted row got a location: %q", db.locations[sha(archived)])
+	}
+	if _, ok := db.locations[sha(gone)]; ok {
+		t.Fatalf("hot-deleted row without source copy got a location: %q", db.locations[sha(gone)])
+	}
+	if string(target.objects[key(sha(live))]) != string(live) || db.locations[sha(live)] != "target" {
+		t.Fatalf("live row not migrated: locations=%v", db.locations)
 	}
 }
 

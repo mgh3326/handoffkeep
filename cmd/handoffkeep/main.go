@@ -1261,6 +1261,10 @@ func attachCmd(args []string, out io.Writer) error {
 	}
 }
 
+// attachMigrateCmd copies attachment objects between object-store prefixes.
+// Rows whose hot copy was archived (hot_deleted_at set) are skipped and counted
+// in skipped_hot_deleted: the hot-bytes fuse counts only hot rows, so migrating
+// one would put a copy outside the fuse.
 func attachMigrateCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("attach migrate", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -1309,7 +1313,7 @@ func attachMigrateCmd(args []string, out io.Writer) error {
 	if e != nil {
 		return e
 	}
-	return printJSON(out, map[string]any{"dry_run": !*apply, "objects": result.Objects, "bytes": result.Bytes})
+	return printJSON(out, map[string]any{"dry_run": !*apply, "objects": result.Objects, "bytes": result.Bytes, "skipped_hot_deleted": result.SkippedHotDeleted})
 }
 
 func attachmentMIME(name string) string {

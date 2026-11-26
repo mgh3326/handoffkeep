@@ -825,7 +825,10 @@ handoffkeep attach usage
 `attach migrate` copies every object from one environment prefix to another,
 checks the source and target size and SHA-256 against the content address, and
 records the target endpoint and bucket for each verified object. It keeps the
-source objects. A prefix such as `OCI` reads `OCI_S3_ENDPOINT`,
+source objects. Attachments already archived out of the hot store (their
+`hot_deleted_at` is set) are skipped and counted as `skipped_hot_deleted`: the
+hot-bytes fuse counts only hot rows, so a migrated copy would sit outside it. A
+prefix such as `OCI` reads `OCI_S3_ENDPOINT`,
 `OCI_S3_REGION`, `OCI_S3_BUCKET`, `OCI_S3_ACCESS_KEY_ID`,
 `OCI_S3_SECRET_ACCESS_KEY`, and optional `OCI_S3_BUCKET_LOOKUP`.
 

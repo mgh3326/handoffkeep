@@ -370,6 +370,10 @@ type MigrationDB interface {
 type MigrationResult struct {
 	Objects int64 `json:"objects"`
 	Bytes   int64 `json:"bytes"`
+	// SkippedHotDeleted counts rows with hot_deleted_at set. Migrate leaves
+	// them alone: the hot-bytes fuse counts only hot rows, so a copy written
+	// for one would sit outside the fuse.
+	SkippedHotDeleted int64 `json:"skipped_hot_deleted"`
 }
 
 // Migrate copies and verifies all content-addressed objects before recording
@@ -377,6 +381,9 @@ type MigrationResult struct {
 // attachment metadata. An object already verified at the target is not read
 // from the source, so a rerun after the cutover (when new rows exist only at
 // the target) completes and picks up rows added after an earlier run's snapshot.
+// A row whose hot copy was archived (hot_deleted_at set) is skipped entirely:
+// no copy, no location update, and it never stops the run. The fuse counts only
+// hot rows, so a migrated copy of one would escape the hot-bytes fuse.
 func Migrate(ctx context.Context, db MigrationDB, source, target ObjectStore, targetLocation string, apply bool) (MigrationResult, error) {
 	rows, err := db.ListAttachmentObjects(ctx)
 	if err != nil {
@@ -385,11 +392,17 @@ func Migrate(ctx context.Context, db MigrationDB, source, target ObjectStore, ta
 	result := MigrationResult{Objects: int64(len(rows))}
 	for _, x := range rows {
 		result.Bytes += x.SizeBytes
+		if x.HotDeletedAt != nil {
+			result.SkippedHotDeleted++
+		}
 	}
 	if !apply {
 		return result, nil
 	}
 	for _, x := range rows {
+		if x.HotDeletedAt != nil {
+			continue
+		}
 		objectKey := key(x.SHA256)
 		if _, err := readVerified(ctx, target, objectKey, x.SHA256, x.SizeBytes); err != nil {
 			if !objectNotFound(err) {
