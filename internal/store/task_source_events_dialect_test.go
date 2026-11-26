@@ -319,9 +319,7 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 		t.Fatal(err)
 	}
 	heldPR, otherOpenPR := srcEvPR(srcEvUnique()), srcEvPR(srcEvUnique())
-	if _, err := s.db().Exec(ctx, s.q(`UPDATE tasks SET created_at=$1 WHERE id=$2`, `UPDATE tasks SET created_at=? WHERE id=?`), time.Now().UTC().Add(-3*time.Minute), heldChild.ID); err != nil {
-		t.Fatal(err)
-	}
+	srcEvExecTx(t, s, s.q(`UPDATE tasks SET created_at=$1 WHERE id=$2`, `UPDATE tasks SET created_at=? WHERE id=?`), time.Now().UTC().Add(-3*time.Minute), heldChild.ID)
 	if _, err := srcEvApplyPublicAt(s, t, heldParent.ID, SourceMergewakePR, heldPR, time.Now().UTC().Add(-2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
@@ -331,9 +329,7 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 	if res, err := srcEvApplyPublicAt(s, t, heldParent.ID, SourceMergewakePR, otherOpenPR, time.Now().UTC()); err != nil || res.Applied {
 		t.Fatalf("record another open PR B: res=%+v err=%v, want recorded without moving", res, err)
 	}
-	if _, err := s.db().Exec(ctx, s.q(`UPDATE tasks SET refs=refs||jsonb_build_object('pr',$1::text) WHERE id=$2`, `UPDATE tasks SET refs=JSON_SET(refs,'$.pr',?) WHERE id=?`), otherOpenPR, heldParent.ID); err != nil {
-		t.Fatal(err)
-	}
+	srcEvExecTx(t, s, s.q(`UPDATE tasks SET refs=refs||jsonb_build_object('pr',$1::text) WHERE id=$2`, `UPDATE tasks SET refs=JSON_SET(refs,'$.pr',?) WHERE id=?`), otherOpenPR, heldParent.ID)
 	heldChildPR := srcEvPR(srcEvUnique())
 	if res, err := srcEvApplyPublicAt(s, t, heldChild.ID, SourceMergewakeMerge, heldChildPR, time.Now().UTC()); err != nil || !res.Applied {
 		t.Fatalf("settle the child: res=%+v err=%v", res, err)
@@ -370,9 +366,7 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 	if !ok {
 		t.Fatalf("parse open PR B %q", otherOpenPR)
 	}
-	if _, err := s.db().Exec(ctx, s.q(`UPDATE changes SET state='closed' WHERE repo=$1 AND pr_number=$2`, `UPDATE changes SET state='closed' WHERE repo=? AND pr_number=?`), otherRepo, otherNumber); err != nil {
-		t.Fatal(err)
-	}
+	srcEvExecTx(t, s, s.q(`UPDATE changes SET state='closed' WHERE repo=$1 AND pr_number=$2`, `UPDATE changes SET state='closed' WHERE repo=? AND pr_number=?`), otherRepo, otherNumber)
 	hygiene, err = s.TaskHygiene(ctx, time.Now().UTC(), "", true)
 	if err != nil {
 		t.Fatal(err)
@@ -410,9 +404,7 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 	if res, err := srcEvApplyPublicAt(s, t, legacy.ID, SourceMergewakeMerge, legacyPR, legacyOpened.Add(time.Minute)); err != nil || res.Applied {
 		t.Fatalf("legacy merge: res=%+v err=%v, want held before timestamp correction", res, err)
 	}
-	if _, err := s.db().Exec(ctx, s.q(`UPDATE tasks SET created_at=$1 WHERE id=$2`, `UPDATE tasks SET created_at=? WHERE id=?`), legacyOpened.Add(time.Second), legacyChild.ID); err != nil {
-		t.Fatal(err)
-	}
+	srcEvExecTx(t, s, s.q(`UPDATE tasks SET created_at=$1 WHERE id=$2`, `UPDATE tasks SET created_at=? WHERE id=?`), legacyOpened.Add(time.Second), legacyChild.ID)
 	drift, err = s.TaskDrift(ctx, time.Now().UTC(), DriftDefaultMergedDays)
 	if err != nil {
 		t.Fatal(err)
@@ -534,6 +526,22 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 func srcEvApplyPublicAt(s *Store, t *testing.T, taskID int64, source, pr string, at time.Time) (TaskEventResult, error) {
 	t.Helper()
 	return s.ApplyTaskSourceEvent(t.Context(), TaskSourceEvent{Source: source, SourceRef: pr, PR: pr, TaskID: taskID, At: &at})
+}
+
+func srcEvExecTx(t *testing.T, s *Store, query string, args ...any) {
+	t.Helper()
+	tx, release, err := s.begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	defer tx.Rollback(t.Context())
+	if _, err := tx.Exec(t.Context(), query, args...); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func srcEvDeployKey(service string) string {
