@@ -36,6 +36,7 @@ var retryExemptOpens = map[string]string{
 	"Store.checkNewTaskAttachments": "read-only attachment check, PostgreSQL-only caller",
 	"Store.DeployLagStatuses":       "read-only lag read",
 	"Store.deployLagStatusesMySQL":  "read-only lag read, MySQL branch",
+	"Store.RunDriftDelivery":        "operation-lock transaction spans independently retried idempotent delivery writes",
 	// Not retryable in place.
 	"Store.migrate":     "DDL statements are not transactional on MySQL; never retried",
 	"CopyStore":         "offline bulk-load driver; per-table transactions below",

@@ -21,10 +21,10 @@ import (
 //     ('researching','developing','reviewing'). MySQL already has this key
 //     (20261124-mysql-read-indexes); PostgreSQL has none leading with state,
 //     so the half walked the table here too.
-//   - task_events_kind_to_at_id (kind, "to", at DESC, id DESC):
-//     ListMergedTaskEvents (deploys.go) now drives from the merge transitions,
-//     newest first, and stops after its limit. No key leads with kind, so the
-//     outer read walked task_events; the new key reads only the newest merges.
+//   - task_events_kind_to_at_id (kind, "to", at DESC, id DESC): this served
+//     the event-driven ListMergedTaskEvents read introduced in hk 6397. The
+//     current read drives from merged tasks and uses the per-task key added in
+//     20261124-mysql-read-indexes; this historical key remains in place.
 //
 // Expand-only: three secondary indexes, no column, table or constraint change.
 // The previous release's reads and writes are unchanged; its plans can only
