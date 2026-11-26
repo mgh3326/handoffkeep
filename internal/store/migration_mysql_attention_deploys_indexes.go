@@ -13,12 +13,11 @@ package store
 //     awaiting rows. The stalled half needs no new key: it filters state IN
 //     (...) and rides the existing tasks_state_id (20261124-mysql-read-indexes),
 //     and the candidates' started half probes the primary key.
-//   - task_events_kind_to_at_id (kind, `to`(32), at DESC, id DESC):
-//     ListMergedTaskEvents (deploys.go) now drives from the merge transitions,
-//     newest first, and stops after its limit. The per-task key
-//     task_events_task_kind_to_at leads with task_id, which the outer read
-//     does not filter on, so it walked task_events; the new key reads only
-//     the newest merges in order. `to` is LONGTEXT, so the key takes a
+//   - task_events_kind_to_at_id (kind, `to`(32), at DESC, id DESC): this
+//     served the event-driven ListMergedTaskEvents read introduced in hk 6397.
+//     The current read drives from merged tasks and uses the per-task key
+//     task_events_task_kind_to_at added in 20261124-mysql-read-indexes; this
+//     historical key remains in place. `to` is LONGTEXT, so the key takes a
 //     32-character prefix; the equality is rechecked on the row.
 //
 // Expand-only: two secondary indexes, no column, table or constraint change.

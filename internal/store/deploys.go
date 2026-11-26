@@ -18,22 +18,21 @@ type MergedTaskEvent struct {
 	Refs   *TaskRefs
 }
 
-// listMergedTaskEventsSQL drives from the merge transitions, newest first:
-// each row kept is a task's latest merge and the task is still merged. That
-// is exactly the per-task latest merge the old tasks-driven LATERAL read
-// returned: for a merged task the latest transition is its merge, so keeping
-// merges with no newer merge of the same task keeps one row per merged task.
-// The outer equality and order ride task_events_kind_to_at_id, the NOT EXISTS
-// probe rides the per-task key, and tasks is a primary-key join, so the read
-// stops after the limit instead of walking every merged task.
-const listMergedTaskEventsSQL = `SELECT e.task_id, t.title, e.at, e.refs FROM task_events e JOIN tasks t ON t.id=e.task_id
-	WHERE e.kind='transition' AND e."to"='merged' AND t.state='merged'
-	AND NOT EXISTS (SELECT 1 FROM task_events n WHERE n.task_id=e.task_id AND n.kind='transition' AND n."to"='merged' AND (n.at > e.at OR (n.at = e.at AND n.id > e.id)))
+// listMergedTaskEventsSQL drives from the bounded set of currently merged
+// tasks, then uses the per-task event index to find one newest merge each.
+// Ordering and the tie-break remain on the selected event's (at, id).
+const listMergedTaskEventsSQL = `SELECT e.task_id, t.title, e.at, e.refs FROM tasks t
+	JOIN LATERAL (SELECT id, task_id, at, refs FROM task_events
+		WHERE task_id=t.id AND kind='transition' AND "to"='merged'
+		ORDER BY at DESC, id DESC LIMIT 1) e ON true
+	WHERE t.state='merged'
 	ORDER BY e.at DESC, e.id DESC LIMIT $1`
 
-const listMergedTaskEventsMySQL = `SELECT e.task_id, t.title, e.at, e.refs FROM task_events e JOIN tasks t ON t.id=e.task_id
-	WHERE e.kind='transition' AND e.` + "`to`" + `='merged' AND t.state='merged'
-	AND NOT EXISTS (SELECT 1 FROM task_events n WHERE n.task_id=e.task_id AND n.kind='transition' AND n.` + "`to`" + `='merged' AND (n.at > e.at OR (n.at = e.at AND n.id > e.id)))
+const listMergedTaskEventsMySQL = `SELECT e.task_id, t.title, e.at, e.refs FROM tasks t
+	JOIN LATERAL (SELECT id, task_id, at, refs FROM task_events
+		WHERE task_id=t.id AND kind='transition' AND ` + "`to`" + `='merged'
+		ORDER BY at DESC, id DESC LIMIT 1) e ON true
+	WHERE t.state='merged'
 	ORDER BY e.at DESC, e.id DESC LIMIT ?`
 
 func (s *Store) ListMergedTaskEvents(ctx context.Context, limit int) ([]MergedTaskEvent, error) {
