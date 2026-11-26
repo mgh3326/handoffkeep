@@ -93,6 +93,10 @@ export default function DiagramViewer({ src, size, onClose }: Props) {
     if (event.button !== 0 || stage.current === null) return;
     // Touch and pen report button 0 too; a middle or right click is not a drag.
     event.currentTarget.setPointerCapture?.(event.pointerId);
+    // The stage is not focusable, so a press would otherwise drop focus to the
+    // body and take the keys with it. Focus the dialog root (tabIndex -1), which
+    // keeps the keys and the Tab trap on this viewer.
+    root.current?.focus({ preventScroll: true });
     pointers.current.set(event.pointerId, pointIn(stage.current, event.clientX, event.clientY));
   };
 
@@ -126,6 +130,13 @@ export default function DiagramViewer({ src, size, onClose }: Props) {
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    // Shift+Tab from the dialog root itself (after a press on the stage) would
+    // leave the dialog backwards; send it to the last control, as the trap does.
+    if (event.key === "Tab" && event.shiftKey && event.target === root.current) {
+      event.preventDefault();
+      closeButton.current?.focus();
+      return;
+    }
     // Escape closes and Tab stays inside the dialog, as in every hk dialog.
     dialogKeys(event, onClose);
     if (event.defaultPrevented) return;
@@ -168,6 +179,7 @@ export default function DiagramViewer({ src, size, onClose }: Props) {
     <div
       ref={root}
       className="hk-diagram-viewer"
+      tabIndex={-1}
       role="dialog"
       aria-modal="true"
       aria-label="Diagram viewer"

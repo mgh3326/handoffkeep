@@ -126,6 +126,10 @@
   background: var(--hk-scrim);
   overscroll-behavior: contain;
 }
+/* The root takes focus when the stage is pressed; it is a container, not a control. */
+.hk-diagram-viewer:focus {
+  outline: none;
+}
 .hk-diagram-viewer-bar {
   display: flex;
   flex-wrap: wrap;
