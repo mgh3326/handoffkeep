@@ -31,7 +31,7 @@ func TestListMergedTaskEventsPostgresStopsAtLimit(t *testing.T) {
 			s := schemaStore(t, "merged_events_plan")
 			seedMergedBacklog(t, s, tasks, tc.merges, base)
 
-			plan := explainAnalyzedPlan(t, s, listMergedTaskEventsSQL, []any{limit})
+			plan := explainIndexPlan(t, s, listMergedTaskEventsSQL, []any{limit})
 			t.Logf("merged task events plan (%s):\n%s", tc.name, plan)
 			if !strings.Contains(plan, "Limit") {
 				t.Fatalf("plan has no Limit node:\n%s", plan)
@@ -64,6 +64,41 @@ func TestListMergedTaskEventsPostgresStopsAtLimit(t *testing.T) {
 			}
 		})
 	}
+}
+
+// explainIndexPlan is explainAnalyzedPlan with sequential scans off for the
+// transaction. On a fixture this small the planner prefers a sequential scan
+// and a full sort, which is a cost choice, not the statement's shape; with
+// the scan off, the planner must take the ordered index the statement is
+// written for, and the test measures that plan.
+func explainIndexPlan(t *testing.T, s *Store, query string, args []any) string {
+	t.Helper()
+	ctx := t.Context()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := tx.Query(ctx, "EXPLAIN (ANALYZE, BUFFERS) "+query, args...)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	var lines []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("explain: %v", err)
+		}
+		lines = append(lines, line)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // seedMergedBacklog inserts tasks merged tasks, each merged merges times. Merge

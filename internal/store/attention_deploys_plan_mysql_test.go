@@ -187,6 +187,17 @@ func TestMergedTaskEventsReadsOnlyRecent(t *testing.T) {
 		{taskID: t1, from: "join", to: "merged", by: "tester", at: h(-17)},
 	})
 
+	// Open work next to the merged rows, so merged is a selective state. With
+	// only merged rows the optimizer reads tasks whole (type=ALL) instead of
+	// probing tasks_state_id, and the plan check below would reject that read.
+	seedPlanTasks(t, ctx, s, func() []planTaskSeed {
+		out := make([]planTaskSeed, 0, 8000)
+		for i := range 8000 {
+			out = append(out, planTaskSeed{lane: lane, title: fmt.Sprintf("open %d", i), state: "developing", created: base})
+		}
+		return out
+	}())
+
 	ar, err := s.db().Query(ctx, `ANALYZE TABLE tasks, task_events`)
 	if err != nil {
 		t.Fatal(err)
