@@ -34,6 +34,7 @@ func (w singletonWorker) Run(ctx context.Context) {
 			log.Printf("worker.lock_failed lock_id=%d err=%q", w.id, err)
 		}
 		if held {
+			log.Printf("worker.lock_acquired lock_id=%d name=%q", w.id, lease.LockName())
 			workerCtx, cancel := context.WithCancel(ctx)
 			watched := make(chan error, 1)
 			go func() { err := lease.Watch(workerCtx); cancel(); watched <- err }()

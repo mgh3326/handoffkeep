@@ -2,12 +2,16 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/internal/guard"
 )
 
 // MySQL table statistics (hk 6231, operator decision 489). Once a day the
@@ -92,36 +96,76 @@ func (s *Store) RunTableStats(ctx context.Context, now time.Time) (TableStatsRun
 		return TableStatsRun{}, nil
 	}
 	now = now.UTC().Truncate(time.Second)
-	doc, found, err := s.GetDocument(ctx, TableStatsDocKey)
-	if err != nil {
-		return TableStatsRun{}, fmt.Errorf("table stats document: %w", err)
-	}
-	hist, err := parseTableStatsDoc(doc.Body, found)
-	if err != nil {
-		return TableStatsRun{}, err
-	}
-	var newest time.Time
-	if n := len(hist.Snapshots); n > 0 {
-		newest = hist.Snapshots[n-1].At
-	}
-	if !TableStatsDue(now, newest, len(hist.Snapshots) > 0) {
-		return TableStatsRun{}, nil
-	}
-	read, err := s.readTableStatsMySQL(ctx)
-	if err != nil {
-		return TableStatsRun{}, fmt.Errorf("table stats read: %w", err)
-	}
-	hist.Snapshots = append(hist.Snapshots, tableStatRecord{
-		At: now, ReadMS: read.elapsed.Milliseconds(), Fresh: read.fresh, Tables: read.tables,
+	var result TableStatsRun
+	err := s.retryTx(ctx, func() error {
+		tx, release, err := s.begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer tx.Rollback(ctx)
+		if err = s.lockWorkerOperationTx(ctx, tx, "table_stats"); err != nil {
+			return err
+		}
+		// Read after acquiring the lock: another worker generation may have
+		// completed the daily snapshot while this call waited.
+		var docBody string
+		err = tx.QueryRow(ctx, s.q(`SELECT body FROM documents WHERE key=$1`, "SELECT body FROM documents WHERE `key`=?"), TableStatsDocKey).Scan(&docBody)
+		found := err == nil
+		if err != nil && !errors.Is(err, ErrNoRows) {
+			return fmt.Errorf("table stats document: %w", err)
+		}
+		hist, err := parseTableStatsDoc(docBody, found)
+		if err != nil {
+			return err
+		}
+		var newest time.Time
+		if n := len(hist.Snapshots); n > 0 {
+			newest = hist.Snapshots[n-1].At
+		}
+		if !TableStatsDue(now, newest, len(hist.Snapshots) > 0) {
+			return tx.Commit(ctx)
+		}
+		read, err := s.readTableStatsMySQLOnce(ctx)
+		if err != nil {
+			return fmt.Errorf("table stats read: %w", err)
+		}
+		hist.Snapshots = append(hist.Snapshots, tableStatRecord{
+			At: now, ReadMS: read.elapsed.Milliseconds(), Fresh: read.fresh, Tables: read.tables,
+		})
+		body, err := fitTableStatsDoc(hist)
+		if err != nil {
+			return err
+		}
+		if err = putTableStatsDocumentTx(ctx, s, tx, body); err != nil {
+			return fmt.Errorf("table stats write: %w", err)
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return err
+		}
+		result = TableStatsRun{Ran: true, Tables: len(read.tables), Elapsed: read.elapsed}
+		return nil
 	})
-	body, err := fitTableStatsDoc(hist)
-	if err != nil {
-		return TableStatsRun{}, err
+	return result, err
+}
+
+func putTableStatsDocumentTx(ctx context.Context, s *Store, tx transaction, body string) error {
+	if !ValidDocKey(TableStatsDocKey) || !documentKinds["report"] || !ValidActor(TableStatsActor) || !validDocumentText(body) {
+		return errors.New("invalid table stats document")
 	}
-	if _, _, err = s.PutDocument(ctx, Document{Key: TableStatsDocKey, Kind: "report", Body: body, CreatedBy: TableStatsActor}); err != nil {
-		return TableStatsRun{}, fmt.Errorf("table stats write: %w", err)
+	if len(body) > DocumentMaxBytes {
+		return fmt.Errorf("%w: body is %d bytes; the limit is %d", ErrDocumentTooLarge, len(body), DocumentMaxBytes)
 	}
-	return TableStatsRun{Ran: true, Tables: len(read.tables), Elapsed: read.elapsed}, nil
+	if err := guard.Reject(TableStatsDocKey + "\n" + body); err != nil {
+		return err
+	}
+	sum := sha256.Sum256([]byte(body))
+	now := time.Now().UTC()
+	_, err := tx.Exec(ctx, s.q(
+		`INSERT INTO documents(key,kind,session,job,body,sha256,created_by,created_at,updated_at) VALUES($1,'report','','',$2,$3,$4,$5,$6) ON CONFLICT(key) DO UPDATE SET kind=EXCLUDED.kind,session=EXCLUDED.session,job=EXCLUDED.job,body=EXCLUDED.body,sha256=EXCLUDED.sha256,created_by=EXCLUDED.created_by,updated_at=EXCLUDED.updated_at`,
+		"INSERT INTO documents(`key`,kind,session,job,body,sha256,created_by,created_at,updated_at) VALUES(?,'report','','',?,?,?,?,?) ON DUPLICATE KEY UPDATE kind=VALUES(kind),session=VALUES(session),job=VALUES(job),body=VALUES(body),sha256=VALUES(sha256),created_by=VALUES(created_by),updated_at=VALUES(updated_at)"),
+		TableStatsDocKey, body, hex.EncodeToString(sum[:]), TableStatsActor, now, now)
+	return documentBodyWriteError(err)
 }
 
 // parseTableStatsDoc reads the history block of the document body. A missing

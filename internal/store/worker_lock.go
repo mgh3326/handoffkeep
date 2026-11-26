@@ -62,6 +62,15 @@ type WorkerLease struct {
 	conn      *pgxpool.Conn
 	mysqlConn *sql.Conn
 	mysqlName string
+	lockName  string
+}
+
+// LockName is a diagnostic identity for the acquired session lock.
+func (l *WorkerLease) LockName() string {
+	if l == nil {
+		return ""
+	}
+	return l.lockName
 }
 
 // TryWorkerLock reserves a connection for the lifetime of a worker. An
@@ -72,12 +81,11 @@ func (s *Store) TryWorkerLock(ctx context.Context, id WorkerLock) (*WorkerLease,
 		return nil, false, errors.New("unknown worker lock")
 	}
 	if s.dialect == mysqlDialect {
-		name := mysqlSessionLockName("id", strconv.FormatInt(int64(id), 10))
-		conn, held, err := mysqlTrySessionLock(ctx, s.mysqlPool, name)
+		conn, name, held, err := mysqlTryWorkerSessionLock(ctx, s.mysqlPool, id)
 		if err != nil || !held {
 			return nil, held, err
 		}
-		return &WorkerLease{mysqlConn: conn, mysqlName: name}, true, nil
+		return &WorkerLease{mysqlConn: conn, mysqlName: name, lockName: name}, true, nil
 	}
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
@@ -92,7 +100,7 @@ func (s *Store) TryWorkerLock(ctx context.Context, id WorkerLock) (*WorkerLease,
 		conn.Release()
 		return nil, false, nil
 	}
-	return &WorkerLease{conn: conn}, true, nil
+	return &WorkerLease{conn: conn, lockName: "pg_advisory:" + strconv.FormatInt(int64(id), 10)}, true, nil
 }
 
 // Watch returns if the session fails or ctx is canceled. The worker must stop

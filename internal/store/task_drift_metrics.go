@@ -254,10 +254,26 @@ func (s *Store) WriteDriftMetrics(ctx context.Context, day string, m DriftMetric
 func (s *Store) RunDriftDelivery(ctx context.Context, now time.Time) (bool, error) {
 	now = now.UTC()
 	day := DriftDayOf(now)
-	if _, found, err := s.GetDocument(ctx, DriftMetricsDocKey(day)); err != nil {
+	var ran bool
+	// Keep this lock transaction open across the worker's independently retried
+	// writes. Each called write path owns its retry loop; wrapping this workflow
+	// in retryTx would retry those roots a second time on a persistent deadlock.
+	tx, release, err := s.begin(ctx)
+	if err != nil {
 		return false, err
-	} else if found {
-		return false, nil
+	}
+	defer release()
+	defer tx.Rollback(ctx)
+	if err = s.lockWorkerOperationTx(ctx, tx, "drift_delivery"); err != nil {
+		return false, err
+	}
+	var found bool
+	err = tx.QueryRow(ctx, s.q(`SELECT EXISTS(SELECT 1 FROM documents WHERE key=$1)`, "SELECT EXISTS(SELECT 1 FROM documents WHERE `key`=?)"), DriftMetricsDocKey(day)).Scan(&found)
+	if err != nil {
+		return false, err
+	}
+	if found {
+		return false, tx.Commit(ctx)
 	}
 	drift, err := s.TaskDrift(ctx, now, DriftDefaultMergedDays)
 	if err != nil {
@@ -277,5 +293,9 @@ func (s *Store) RunDriftDelivery(ctx context.Context, now time.Time) (bool, erro
 	if _, err := s.WriteDriftMetrics(ctx, day, m); err != nil {
 		return false, fmt.Errorf("drift delivery metrics: %w", err)
 	}
-	return true, nil
+	if err = tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	ran = true
+	return ran, err
 }

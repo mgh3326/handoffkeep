@@ -393,11 +393,21 @@ const decisionResolveOKBody = `{"task":{"id":5,"state":"in_progress"},"request":
 
 func TestDecisionsResolveRequestCLI(t *testing.T) {
 	h, seen := relaneServer(t, 200, decisionResolveOKBody)
+	resolveRequests := func() []relaneRequest {
+		var requests []relaneRequest
+		for _, request := range *seen {
+			if request.Path == "/v1/tasks/5/decision-request/resolve" {
+				requests = append(requests, request)
+			}
+		}
+		return requests
+	}
 	var out bytes.Buffer
 	if err := run([]string{"decisions", "resolve", "request", "dr-5-1", "--channel", "session", "--quote", "A로 가자", "--option", "A", "--url", h.URL, "--token", "tok"}, &out, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	req := (*seen)[0]
+	requests := resolveRequests()
+	req := requests[0]
 	if req.Path != "/v1/tasks/5/decision-request/resolve" {
 		t.Fatalf("request=%+v", req)
 	}
@@ -416,13 +426,15 @@ func TestDecisionsResolveRequestCLI(t *testing.T) {
 	if err := run([]string{"decisions", "resolve", "request", "dr-5-1", "--channel", "session", "--option", "A", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if body := (*seen)[1].Body; body["provenance"] != "assistant_judgement" || body["operator_quote"] != nil {
+	requests = resolveRequests()
+	if body := requests[1].Body; body["provenance"] != "assistant_judgement" || body["operator_quote"] != nil {
 		t.Fatalf("no-quote body=%v", body)
 	}
 	if err := run([]string{"decisions", "resolve", "request", "dr-5-1", "--channel", "cli", "--option", "A", "--url", h.URL, "--token", "tok"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if body := (*seen)[2].Body; body["channel"] != "cli" || body["provenance"] != nil {
+	requests = resolveRequests()
+	if body := requests[2].Body; body["channel"] != "cli" || body["provenance"] != nil {
 		t.Fatalf("cli body=%v", body)
 	}
 }
