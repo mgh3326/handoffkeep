@@ -944,8 +944,7 @@ func taskHoldsWithFollowUpsTx(ctx context.Context, tx transaction, taskID int64,
 		return h, err
 	}
 	if !followUps {
-		// Without an implements change there is no PR boundary. Preserve the
-		// direct-transition rule and treat every unsettled child as a hold.
+		// Direct task transitions keep the all-children close rule.
 		query := allOpenSubTasksSQL
 		if dialectFor(tx) == mysqlDialect {
 			query = `SELECT id FROM tasks WHERE parent_id=? AND state NOT IN (` + settledStatesSQL + `) ORDER BY id`
@@ -973,30 +972,54 @@ func taskHoldsWithFollowUpsTx(ctx context.Context, tx transaction, taskID int64,
 	return h, err
 }
 
-// taskHoldOpenedAtTx returns the implements change that establishes the
-// boundary between planned pieces and PR follow-ups. An incoming PR is the
-// boundary for its merge event; other readers use the task's earliest live
-// implements change. A missing boundary keeps the conservative old behavior.
+// taskHoldOpenedAtTx returns the opened_at boundary when pr is the task's
+// sole live implements change. With no incoming PR, only a merged task's own
+// refs.pr can provide that boundary. Multi-PR tasks keep the all-children
+// hold.
 func taskHoldOpenedAtTx(ctx context.Context, tx transaction, taskID int64, pr string) (time.Time, bool, error) {
-	var openedAt time.Time
-	var err error
-	if repo, number, ok := parsePRURL(pr); ok {
-		err = tx.QueryRow(ctx, sqlFor(tx, `SELECT c.opened_at FROM changes c JOIN change_tasks ct ON ct.change_id=c.id
-		WHERE ct.task_id=$1 AND ct.relation='implements' AND c.repo=$2 AND c.pr_number=$3`, `SELECT c.opened_at FROM changes c JOIN change_tasks ct ON ct.change_id=c.id
-		WHERE ct.task_id=? AND ct.relation='implements' AND c.repo=? AND c.pr_number=?`), taskID, repo, number).Scan(&openedAt)
-	} else if dialectFor(tx) == mysqlDialect {
-		err = tx.QueryRow(ctx, `SELECT c.opened_at FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
-		WHERE ct.task_id=? AND ct.relation='implements' AND c.state<>'closed' AND c.reverted_by_change_id IS NULL
-		ORDER BY c.opened_at,c.id LIMIT 1`, taskID).Scan(&openedAt)
-	} else {
-		err = tx.QueryRow(ctx, `SELECT c.opened_at FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
-		WHERE ct.task_id=$1 AND ct.relation='implements' AND c.state<>'closed' AND c.reverted_by_change_id IS NULL
-		ORDER BY c.opened_at,c.id LIMIT 1`, taskID).Scan(&openedAt)
+	if pr == "" {
+		var task Task
+		if err := scanTask(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, `SELECT `+taskColumns+` FROM tasks WHERE id=?`), taskID), &task); err != nil {
+			if errors.Is(err, ErrNoRows) {
+				return time.Time{}, false, nil
+			}
+			return time.Time{}, false, err
+		}
+		if task.State != StateMerged || task.Refs.PR == "" {
+			return time.Time{}, false, nil
+		}
+		pr = task.Refs.PR
 	}
+	repo, number, ok := parsePRURL(pr)
+	if !ok {
+		return time.Time{}, false, nil
+	}
+	var openedAt time.Time
+	var liveCount int64
+	query := sqlFor(tx, `SELECT c.opened_at, (SELECT COUNT(*) FROM change_tasks live_ct JOIN changes live_c ON live_c.id=live_ct.change_id
+		WHERE live_ct.task_id=$1 AND live_ct.relation='implements' AND live_c.state<>'closed' AND live_c.reverted_by_change_id IS NULL)
+		FROM changes c JOIN change_tasks ct ON ct.change_id=c.id
+		WHERE ct.task_id=$1 AND ct.relation='implements' AND c.repo=$2 AND c.pr_number=$3
+		AND c.state<>'closed' AND c.reverted_by_change_id IS NULL`, `SELECT c.opened_at, (SELECT COUNT(*) FROM change_tasks live_ct JOIN changes live_c ON live_c.id=live_ct.change_id
+		WHERE live_ct.task_id=? AND live_ct.relation='implements' AND live_c.state<>'closed' AND live_c.reverted_by_change_id IS NULL)
+		FROM changes c JOIN change_tasks ct ON ct.change_id=c.id
+		WHERE ct.task_id=? AND ct.relation='implements' AND c.repo=? AND c.pr_number=?
+		AND c.state<>'closed' AND c.reverted_by_change_id IS NULL`)
+	args := []any{taskID, repo, number}
+	if dialectFor(tx) == mysqlDialect {
+		args = []any{taskID, taskID, repo, number}
+	}
+	err := tx.QueryRow(ctx, query, args...).Scan(&openedAt, &liveCount)
 	if errors.Is(err, ErrNoRows) {
 		return time.Time{}, false, nil
 	}
-	return openedAt, err == nil, err
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if liveCount != 1 {
+		return time.Time{}, false, nil
+	}
+	return openedAt, true, nil
 }
 
 // followUpSubTaskTx reports whether childID was created after the parent PR's

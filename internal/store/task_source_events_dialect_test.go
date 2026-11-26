@@ -244,8 +244,8 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 	ctx := t.Context()
 	openAt := time.Now().UTC().Add(-time.Minute)
 
-	// A child filed after the parent's PR opened is a follow-up. The merge
-	// applies and its deploy record is applied in the same turn.
+	// A child filed after the sole implements PR opened is a follow-up. The
+	// merge applies, and the deploy hold query uses the task's merged PR.
 	parent := srcEvTask(t, s, "follow-up parent deploy")
 	parentPR := srcEvPR(srcEvUnique())
 	if res, err := srcEvApplyPublicAt(s, t, parent.ID, SourceMergewakePR, parentPR, openAt); err != nil || !res.Applied {
@@ -255,9 +255,31 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 	if _, _, err := s.SetTaskParent(ctx, followup.ID, &parent.ID, "tester"); err != nil {
 		t.Fatal(err)
 	}
-	putDeploy(t, s, srcEvDeployKey("followup"), "followup", "success", []string{parentPR})
-	if res, err := srcEvApplyPublicAt(s, t, parent.ID, SourceMergewakeMerge, parentPR, time.Now().UTC()); err != nil || !res.Applied || res.State != StateDeployed {
-		t.Fatalf("merge with follow-up: res=%+v err=%v, want deployed", res, err)
+	if res, err := srcEvApplyPublicAt(s, t, parent.ID, SourceMergewakeMerge, parentPR, time.Now().UTC()); err != nil || !res.Applied || res.State != StateMerged {
+		t.Fatalf("merge with follow-up: res=%+v err=%v, want merged", res, err)
+	}
+	holds := srcEvTaskHolds(t, s, parent.ID, "")
+	if len(holds.OpenSubTasks) != 0 {
+		t.Fatalf("merged parent deploy holds=%+v, want post-open child excluded", holds.OpenSubTasks)
+	}
+
+	// A second live implements PR disables the exemption: the post-A child
+	// remains a hold in both dialects.
+	multi := srcEvTask(t, s, "two live PR parent")
+	prA, prB := srcEvPR(srcEvUnique()), srcEvPR(srcEvUnique())
+	if _, err := srcEvApplyPublicAt(s, t, multi.ID, SourceMergewakePR, prA, time.Now().UTC().Add(-2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	multiChild := srcEvTask(t, s, "post-A child on two-PR parent")
+	if _, _, err := s.SetTaskParent(ctx, multiChild.ID, &multi.ID, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srcEvApplyPublicAt(s, t, multi.ID, SourceMergewakePR, prB, time.Now().UTC().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	multiHolds := srcEvTaskHolds(t, s, multi.ID, prA)
+	if len(multiHolds.OpenSubTasks) != 1 || multiHolds.OpenSubTasks[0] != multiChild.ID {
+		t.Fatalf("two-PR parent holds=%+v, want post-A child %d to remain held", multiHolds.OpenSubTasks, multiChild.ID)
 	}
 
 	// The same later child cannot move an already merged parent when it is
@@ -279,11 +301,8 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 		t.Fatal(err)
 	}
 	putDeploy(t, s, srcEvDeployKey("child"), "child", "success", []string{childPR})
-	if _, err := s.SettleMerged(ctx, "", false); err != nil {
-		t.Fatal(err)
-	}
-	if got := srcEvGet(t, s, lateChild.ID); got.State != StateDeployed {
-		t.Fatalf("follow-up child state=%s, want deployed before checking its parent", got.State)
+	if err := srcEvRunDeployDecision(t, s, lateChild.ID); err != nil {
+		t.Fatalf("deploy follow-up child: %v", err)
 	}
 	if got := srcEvGet(t, s, mergedParent.ID); got.State != StateMerged {
 		t.Fatalf("follow-up deployment moved parent to %s, want merged", got.State)
@@ -462,70 +481,48 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 		t.Fatalf("hygiene did not report the planned-piece hold: %+v", hygiene.Findings.MergedPROpenTasks)
 	}
 
-	// With multiple implements PRs, holds are evaluated against the PR hygiene
-	// will close. The child is after A but before B: it is a follow-up to A and
-	// a planned piece for B, the newest merged change hygiene selects.
-	multi := srcEvTask(t, s, "two PR parent")
-	prA, prB := srcEvPR(srcEvUnique()), srcEvPR(srcEvUnique())
-	if _, err := srcEvApplyPublicAt(s, t, multi.ID, SourceMergewakePR, prA, time.Now().UTC().Add(-time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	multiChild := srcEvTask(t, s, "piece for second PR")
-	if _, _, err := s.SetTaskParent(ctx, multiChild.ID, &multi.ID, "tester"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := srcEvApplyPublicAt(s, t, multi.ID, SourceMergewakePR, prB, time.Now().UTC().Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if res, err := srcEvApplyPublicAt(s, t, multi.ID, SourceMergewakeMerge, prA, time.Now().UTC().Add(2*time.Minute)); err != nil || res.Applied {
-		t.Fatalf("merge PR A while B is open: res=%+v err=%v, want held", res, err)
-	}
-	if res, err := srcEvApplyPublicAt(s, t, multi.ID, SourceMergewakeMerge, prB, time.Now().UTC().Add(3*time.Minute)); err != nil || res.Applied || !strings.Contains(res.Reason, "sub-tasks") {
-		t.Fatalf("merge PR B with its planned piece open: res=%+v err=%v, want held", res, err)
-	}
-	multiAsOf := time.Now().UTC().Add(4 * time.Minute)
-	drift, err = s.TaskDrift(ctx, multiAsOf, DriftDefaultMergedDays)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if row, ok := driftEntry(drift.MergedPRNotMerged, multi.ID); !ok || row.Mechanical || len(row.OpenSubTasks) != 1 {
-		t.Fatalf("two-PR drift=%+v listed=%t, want held by child relative to PR B", row, ok)
-	}
-	hygiene, err = s.TaskHygiene(ctx, multiAsOf, "", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, close := range hygiene.MechanicalCloses {
-		if close.TaskID == multi.ID {
-			t.Fatalf("hygiene preview would close two-PR task despite its planned child: %+v", close)
-		}
-	}
-	foundMultiFinding := false
-	for _, finding := range hygiene.Findings.MergedPROpenTasks {
-		if finding.ID == multi.ID && !finding.Mechanical && len(finding.OpenSubTasks) == 1 {
-			foundMultiFinding = true
-		}
-	}
-	if !foundMultiFinding {
-		t.Fatalf("hygiene did not report the planned child relative to PR B: %+v", hygiene.Findings.MergedPROpenTasks)
-	}
-	hygiene, err = s.TaskHygiene(ctx, multiAsOf, "", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, close := range hygiene.MechanicalCloses {
-		if close.TaskID == multi.ID {
-			t.Fatalf("hygiene execution closed two-PR task despite its planned child: %+v", close)
-		}
-	}
-	if got := srcEvGet(t, s, multi.ID); got.State != StateReviewing {
-		t.Fatalf("hygiene execution moved two-PR task to %s, want reviewing", got.State)
-	}
 }
 
 func srcEvApplyPublicAt(s *Store, t *testing.T, taskID int64, source, pr string, at time.Time) (TaskEventResult, error) {
 	t.Helper()
 	return s.ApplyTaskSourceEvent(t.Context(), TaskSourceEvent{Source: source, SourceRef: pr, PR: pr, TaskID: taskID, At: &at})
+}
+
+func srcEvTaskHolds(t *testing.T, s *Store, taskID int64, pr string) taskHolds {
+	t.Helper()
+	tx, release, err := s.begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	defer tx.Rollback(t.Context())
+	holds, err := taskHoldsTx(t.Context(), tx, taskID, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return holds
+}
+
+func srcEvRunDeployDecision(t *testing.T, s *Store, taskID int64) error {
+	t.Helper()
+	ctx := t.Context()
+	tx, release, err := s.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	defer tx.Rollback(ctx)
+	if err := s.lockTx(ctx, tx, 8241873001); err != nil {
+		return err
+	}
+	var task Task
+	if err := scanTask(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1 FOR UPDATE`, `SELECT `+taskColumns+` FROM tasks WHERE id=? FOR UPDATE`), taskID), &task); err != nil {
+		return err
+	}
+	if _, err := s.deployOnMergedTx(ctx, tx, task, time.Now().UTC(), map[int64]bool{}, map[int64]bool{}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func srcEvExecTx(t *testing.T, s *Store, query string, args ...any) {
