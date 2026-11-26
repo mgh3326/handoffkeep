@@ -16,9 +16,11 @@ import (
 // rows); the partial PostgreSQL index cannot range on created_at either.
 //
 // notification_outbox_unsent_poll (sent_at, skipped_at, created_at, id) keeps
-// the two NULL equalities as the leading equality prefix, ranges on
-// created_at, and carries id so the poll's ORDER BY id LIMIT reads in key
-// order. Both statements become one range of the rows still owed.
+// the two NULL equalities as the leading equality prefix and ranges on
+// created_at, limiting rows visited by both statements. For the poll's
+// ORDER BY id LIMIT, PostgreSQL uses the existing partial
+// notification_outbox_unsent_live (id) index; created_at before id in this
+// index does not provide that ordering.
 //
 // Expand-only: one new secondary index, no column, table or constraint change.
 // The previous release's reads and writes are unchanged; its plans can only
