@@ -386,6 +386,68 @@ func TestParseTriggerReadsWritesDeletesAndGuardsInAnyKeywordCase(t *testing.T) {
 	}
 }
 
+// The trigger definitions below are the SQL the migrations create (hk 6261):
+// migration_mysql_changes.go for change_gate_events_record and
+// migration_mysql_tasks.go (mysqlTaskDecision) for the sync_task_decision pair.
+const changeGateEventsRecordTrigger = `CREATE TRIGGER change_gate_events_record AFTER UPDATE ON changes FOR EACH ROW
+BEGIN
+	IF COALESCE(@hk_bulk_load,0) <> 1 AND NEW.gate_state IS NOT NULL AND NEW.gate_head IS NOT NULL AND NEW.gate_decided_at IS NOT NULL
+	AND (NOT (OLD.gate_state <=> NEW.gate_state) OR NOT (OLD.gate_head <=> NEW.gate_head) OR NOT (OLD.gate_decided_at <=> NEW.gate_decided_at)) THEN
+		INSERT INTO change_gate_events(change_id,head_sha,state,changed,reasons,policy_revision,decided_at,source)
+		VALUES(NEW.id,NEW.gate_head,NEW.gate_state,NOT (OLD.gate_state <=> NEW.gate_state) OR NOT (OLD.gate_head <=> NEW.gate_head),COALESCE(NEW.gate_reasons,JSON_ARRAY()),NEW.gate_policy_revision,NEW.gate_decided_at,COALESCE(NEW.gate_source,'review'))
+		ON DUPLICATE KEY UPDATE id=id;
+	END IF;
+END`
+
+const syncTaskDecisionInsertTrigger = `CREATE TRIGGER sync_task_decision_insert AFTER INSERT ON tasks FOR EACH ROW BEGIN DECLARE request_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin; IF COALESCE(@hk_bulk_load,0) <> 1 THEN SET request_id = IF(JSON_TYPE(JSON_EXTRACT(NEW.refs,'$.decision_request.id')) COLLATE utf8mb4_0900_bin='STRING', JSON_UNQUOTE(JSON_EXTRACT(NEW.refs,'$.decision_request.id')) COLLATE utf8mb4_0900_bin, NULL); DELETE FROM sync_decisions WHERE task_id=NEW.id AND NOT (id <=> request_id); IF COALESCE(request_id,'') <> '' THEN INSERT INTO sync_decisions(id,task_id,updated_at) VALUES(request_id,NEW.id,NEW.updated_at) ON DUPLICATE KEY UPDATE task_id=VALUES(task_id), updated_at=VALUES(updated_at); END IF; END IF; END`
+
+const syncTaskDecisionUpdateTrigger = `CREATE TRIGGER sync_task_decision_update AFTER UPDATE ON tasks FOR EACH ROW BEGIN DECLARE request_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin; IF COALESCE(@hk_bulk_load,0) <> 1 THEN IF NOT (JSON_EXTRACT(OLD.refs,'$.decision_request') <=> JSON_EXTRACT(NEW.refs,'$.decision_request')) THEN SET request_id = IF(JSON_TYPE(JSON_EXTRACT(NEW.refs,'$.decision_request.id')) COLLATE utf8mb4_0900_bin='STRING', JSON_UNQUOTE(JSON_EXTRACT(NEW.refs,'$.decision_request.id')) COLLATE utf8mb4_0900_bin, NULL); DELETE FROM sync_decisions WHERE task_id=NEW.id AND NOT (id <=> request_id); IF COALESCE(request_id,'') <> '' THEN INSERT INTO sync_decisions(id,task_id,updated_at) VALUES(request_id,NEW.id,NEW.updated_at) ON DUPLICATE KEY UPDATE task_id=VALUES(task_id), updated_at=VALUES(updated_at); END IF; END IF; END IF; END`
+
+// A real MySQL trigger writes only the table its INSERT names: the columns of
+// ON DUPLICATE KEY UPDATE and the literals of the body are not tables.
+func TestParseTriggerReadsOnlyRealTargetsOfMigratedTriggers(t *testing.T) {
+	cases := []struct {
+		table, name, def, writes, deletes string
+	}{
+		{"changes", "change_gate_events_record", changeGateEventsRecordTrigger, "change_gate_events", ""},
+		{"tasks", "sync_task_decision_insert", syncTaskDecisionInsertTrigger, "sync_decisions", "sync_decisions"},
+		{"tasks", "sync_task_decision_update", syncTaskDecisionUpdateTrigger, "sync_decisions", "sync_decisions"},
+	}
+	for _, c := range cases {
+		use, err := parseTrigger(c.table, c.name, c.def)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := strings.Join(use.Writes, ","); got != c.writes {
+			t.Errorf("%s: Writes = %q, want %q", c.name, got, c.writes)
+		}
+		if got := strings.Join(use.Deletes, ","); got != c.deletes {
+			t.Errorf("%s: Deletes = %q, want %q", c.name, got, c.deletes)
+		}
+		if use.Guard {
+			t.Errorf("%s: not a SIGNAL trigger", c.name)
+		}
+	}
+}
+
+// Keywords inside a string literal are data: they name no table and end no
+// statement, and a doubled quote does not close the literal early.
+func TestParseTriggerIgnoresKeywordsInsideLiterals(t *testing.T) {
+	use, err := parseTrigger("tasks", "decoy",
+		"CREATE TRIGGER decoy AFTER UPDATE ON tasks FOR EACH ROW BEGIN "+
+			"SET @note = 'UPDATE audit_log SET x=1; DELETE FROM audit_log'; "+
+			"UPDATE tasks SET title = 'it''s INSERT INTO other' WHERE id = NEW.id; END")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(use.Writes, ","); got != "tasks" {
+		t.Errorf("Writes = %q, want tasks", got)
+	}
+	if got := strings.Join(use.Deletes, ","); got != "" {
+		t.Errorf("Deletes = %q, want none", got)
+	}
+}
+
 func TestParseTriggerRejectsAHeaderItDoesNotKnow(t *testing.T) {
 	if _, err := parseTrigger("changes", "x", "CREATE TRIGGER x AFTER UPDATE ON changes BEGIN END"); err == nil {
 		t.Fatal("a definition without FOR EACH ROW must fail, not be skipped")

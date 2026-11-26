@@ -34,7 +34,21 @@ var (
 	// ignores keyword case: a stored body is SQL, not Go prose.
 	triggerWriteRe = regexp.MustCompile("(?i)\\b(INSERT\\s+INTO|REPLACE\\s+INTO|UPDATE|DELETE\\s+FROM)\\s+[`\"]?([a-z_][a-z0-9_]*)")
 	signalRe       = regexp.MustCompile(`(?i)\bSIGNAL\b`)
+	// triggerLiteralRe is a quoted string. Its words are data, not statements:
+	// "UPDATE audit_log" inside 'x' names no table. A doubled quote stays inside.
+	triggerLiteralRe = regexp.MustCompile(`'(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.|"")*"`)
+	// triggerUpsertRe is an INSERT's ON DUPLICATE KEY UPDATE clause. Its UPDATE
+	// assigns columns of the row being written; it writes no table. The clause
+	// ends at its statement's semicolon.
+	triggerUpsertRe = regexp.MustCompile(`(?i)\bON\s+DUPLICATE\s+KEY\s+UPDATE\b[^;]*`)
 )
+
+// triggerStatements is a trigger body with its literals blanked and its upsert
+// clauses removed, so only statement keywords remain for the scans below.
+func triggerStatements(body string) string {
+	blanked := triggerLiteralRe.ReplaceAllString(body, "''")
+	return triggerUpsertRe.ReplaceAllString(blanked, "")
+}
 
 // triggersFromLive reads the triggers of tbls's JSON export of the migrated
 // database, ordered by the table they fire on, then by name.
@@ -78,14 +92,15 @@ func parseTrigger(table, name, def string) (triggerUse, error) {
 	if m == nil {
 		return triggerUse{}, fmt.Errorf("trigger %s on %s: definition is not CREATE TRIGGER ... FOR EACH ROW", name, table)
 	}
+	body := triggerStatements(m[2])
 	use := triggerUse{
 		Name:  name,
 		Table: table,
 		On:    strings.Join(strings.Fields(m[1]), " ") + " ON " + table,
-		Guard: signalRe.MatchString(m[2]),
+		Guard: signalRe.MatchString(body),
 	}
 	writes, deletes := map[string]bool{}, map[string]bool{}
-	for _, w := range triggerWriteRe.FindAllStringSubmatch(m[2], -1) {
+	for _, w := range triggerWriteRe.FindAllStringSubmatch(body, -1) {
 		target := strings.ToLower(w[2])
 		if strings.EqualFold(strings.Join(strings.Fields(w[1]), " "), "DELETE FROM") {
 			deletes[target] = true
