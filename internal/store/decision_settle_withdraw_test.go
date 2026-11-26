@@ -40,10 +40,8 @@ func TestSettleClearsFlagOnlyDecision(t *testing.T) {
 func settleFlagOnlyCase(t *testing.T, s *Store) {
 	t.Helper()
 	task := decisionTask(t, s, "in_progress")
-	for _, state := range []string{"verifying", StateReviewing} {
-		if _, err := s.TransitionTask(t.Context(), task.ID, state, "dr-test", "step", nil, ""); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := s.TransitionTask(t.Context(), task.ID, StateReviewing, "dr-test", "step", nil, ""); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := s.TransitionTask(t.Context(), task.ID, "needs_decision", "dr-test", "which way?", nil, ""); err != nil {
 		t.Fatal(err)
