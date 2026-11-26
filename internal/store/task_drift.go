@@ -309,11 +309,24 @@ func (s *Store) annotateDriftHolds(ctx context.Context, tx transaction, c *TaskD
 		if err := scanTask(tx.QueryRow(ctx, sqlFor(tx, `SELECT `+taskColumns+` FROM tasks WHERE id=$1`, `SELECT `+taskColumns+` FROM tasks WHERE id=?`), x.ID), &t); err != nil {
 			return err
 		}
-		h, err := taskHoldsTx(ctx, tx, x.ID, "")
+		pr := x.PR
+		if verified, err := hygieneVerifiedPRTx(ctx, tx, t); err != nil {
+			return err
+		} else if verified != "" {
+			pr = verified
+		}
+		if pr == "" {
+			heldPR, err := heldMergePRTx(ctx, tx, x.ID)
+			if err != nil {
+				return err
+			}
+			pr = heldPR
+		}
+		h, err := taskHoldsTx(ctx, tx, x.ID, pr)
 		if err != nil {
 			return err
 		}
-		gate, err := s.closeGateTx(ctx, tx, t)
+		gate, err := s.closeGateTx(ctx, tx, t, pr)
 		if err != nil {
 			return err
 		}

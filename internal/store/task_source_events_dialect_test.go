@@ -255,7 +255,7 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 	if _, _, err := s.SetTaskParent(ctx, followup.ID, &parent.ID, "tester"); err != nil {
 		t.Fatal(err)
 	}
-	putDeploy(t, s, fmt.Sprintf("deploy/followup/%d", srcEvUnique()), "followup", "success", []string{parentPR})
+	putDeploy(t, s, srcEvDeployKey("followup"), "followup", "success", []string{parentPR})
 	if res, err := srcEvApplyPublicAt(s, t, parent.ID, SourceMergewakeMerge, parentPR, time.Now().UTC()); err != nil || !res.Applied || res.State != StateDeployed {
 		t.Fatalf("merge with follow-up: res=%+v err=%v, want deployed", res, err)
 	}
@@ -278,9 +278,12 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 	if _, err := srcEvApplyPublicAt(s, t, lateChild.ID, SourceMergewakeMerge, childPR, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	putDeploy(t, s, fmt.Sprintf("deploy/child/%d", srcEvUnique()), "child", "success", []string{childPR})
+	putDeploy(t, s, srcEvDeployKey("child"), "child", "success", []string{childPR})
 	if _, err := s.SettleMerged(ctx, "", false); err != nil {
 		t.Fatal(err)
+	}
+	if got := srcEvGet(t, s, lateChild.ID); got.State != StateDeployed {
+		t.Fatalf("follow-up child state=%s, want deployed before checking its parent", got.State)
 	}
 	if got := srcEvGet(t, s, mergedParent.ID); got.State != StateMerged {
 		t.Fatalf("follow-up deployment moved parent to %s, want merged", got.State)
@@ -383,11 +386,64 @@ func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
 	if !foundPlannedFinding {
 		t.Fatalf("hygiene did not report the planned-piece hold: %+v", hygiene.Findings.MergedPROpenTasks)
 	}
+
+	// With multiple implements PRs, holds are evaluated against the PR hygiene
+	// will close. The child is after A but before B: it is a follow-up to A and
+	// a planned piece for B, the newest merged change hygiene selects.
+	multi := srcEvTask(t, s, "two PR parent")
+	prA, prB := srcEvPR(srcEvUnique()), srcEvPR(srcEvUnique())
+	if _, err := srcEvApplyPublicAt(s, t, multi.ID, SourceMergewakePR, prA, time.Now().UTC().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	multiChild := srcEvTask(t, s, "piece for second PR")
+	if _, _, err := s.SetTaskParent(ctx, multiChild.ID, &multi.ID, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srcEvApplyPublicAt(s, t, multi.ID, SourceMergewakePR, prB, time.Now().UTC().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := srcEvApplyPublicAt(s, t, multi.ID, SourceMergewakeMerge, prA, time.Now().UTC().Add(2*time.Minute)); err != nil || res.Applied {
+		t.Fatalf("merge PR A while B is open: res=%+v err=%v, want held", res, err)
+	}
+	if res, err := srcEvApplyPublicAt(s, t, multi.ID, SourceMergewakeMerge, prB, time.Now().UTC().Add(3*time.Minute)); err != nil || res.Applied || !strings.Contains(res.Reason, "sub-tasks") {
+		t.Fatalf("merge PR B with its planned piece open: res=%+v err=%v, want held", res, err)
+	}
+	multiAsOf := time.Now().UTC().Add(4 * time.Minute)
+	drift, err = s.TaskDrift(ctx, multiAsOf, DriftDefaultMergedDays)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, ok := driftEntry(drift.MergedPRNotMerged, multi.ID); !ok || row.Mechanical || len(row.OpenSubTasks) != 1 {
+		t.Fatalf("two-PR drift=%+v listed=%t, want held by child relative to PR B", row, ok)
+	}
+	hygiene, err = s.TaskHygiene(ctx, multiAsOf, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, close := range hygiene.MechanicalCloses {
+		if close.TaskID == multi.ID {
+			t.Fatalf("hygiene preview would close two-PR task despite its planned child: %+v", close)
+		}
+	}
+	foundMultiFinding := false
+	for _, finding := range hygiene.Findings.MergedPROpenTasks {
+		if finding.ID == multi.ID && !finding.Mechanical && len(finding.OpenSubTasks) == 1 {
+			foundMultiFinding = true
+		}
+	}
+	if !foundMultiFinding {
+		t.Fatalf("hygiene did not report the planned child relative to PR B: %+v", hygiene.Findings.MergedPROpenTasks)
+	}
 }
 
 func srcEvApplyPublicAt(s *Store, t *testing.T, taskID int64, source, pr string, at time.Time) (TaskEventResult, error) {
 	t.Helper()
 	return s.ApplyTaskSourceEvent(t.Context(), TaskSourceEvent{Source: source, SourceRef: pr, PR: pr, TaskID: taskID, At: &at})
+}
+
+func srcEvDeployKey(service string) string {
+	stamp := time.Now().UTC().Add(time.Duration(srcEvUnique()%100000) * time.Second)
+	return fmt.Sprintf("deploy/%s/%s", service, stamp.Format("20060102T150405Z"))
 }
 
 func srcEvCaseConcurrent(t *testing.T, s *Store) {

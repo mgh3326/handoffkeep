@@ -506,12 +506,14 @@ func (s *Store) afterStateChangeTx(ctx context.Context, tx transaction, x Task, 
 // wait for a person, or "". x waits while one of its own implements changes is
 // open or reverted and not relanded (pieceHoldTx, the last-piece rule of a
 // merge), while it is awaiting a decision, or while its decision request is
-// open. An explicit task (hk 5112) waits for a person whatever its pieces are.
-func (s *Store) closeGateTx(ctx context.Context, tx transaction, x Task) (string, error) {
+// open. pr is the PR the close would apply; when known it sets the same
+// sub-task cutoff as the merge gate. An explicit task (hk 5112) waits for a
+// person whatever its pieces are.
+func (s *Store) closeGateTx(ctx context.Context, tx transaction, x Task, pr string) (string, error) {
 	if x.CloseRule == CloseRuleExplicit {
 		return explicitCloseReason, nil
 	}
-	if reason, err := pieceHoldTx(ctx, tx, x.ID, ""); err != nil || reason != "" {
+	if reason, err := pieceHoldTx(ctx, tx, x.ID, pr); err != nil || reason != "" {
 		return reason, err
 	}
 	if x.AwaitingDecision {
@@ -675,7 +677,14 @@ func (s *Store) autoCloseOneParentTx(ctx context.Context, tx transaction, p Task
 		// A sub-task is still merged and waiting for its deploy.
 		return false, p, nil
 	}
-	if gate, err := s.closeGateTx(ctx, tx, p); err != nil || gate != "" {
+	closePR := p.Refs.PR
+	if closePR == "" {
+		closePR, err = heldMergePRTx(ctx, tx, p.ID)
+		if err != nil {
+			return false, p, err
+		}
+	}
+	if gate, err := s.closeGateTx(ctx, tx, p, closePR); err != nil || gate != "" {
 		if err != nil {
 			return false, p, err
 		}
