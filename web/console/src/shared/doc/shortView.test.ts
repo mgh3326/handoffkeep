@@ -137,6 +137,22 @@ describe("largestStorage", () => {
     expect(rows.map((r) => r.table)).toEqual(["t1", "t2", "t3", "t4", "t5"]);
     expect(rows[0].delta).toEqual({ kind: "same" });
   });
+
+  it("treats a table named like an inherited key as new when the previous snapshot lacks it", () => {
+    const snaps = parseStatsHistory(
+      statsBody(
+        JSON.stringify({
+          v: 1,
+          snapshots: [
+            { at: "2026-11-25T03:15:35Z", tables: { a: [1, 1, 10, 0] } },
+            { at: "2026-11-25T04:15:35Z", tables: { a: [1, 1, 10, 0], toString: [1, 1, 30, 0] } },
+          ],
+        }),
+      ),
+    );
+    const { rows } = largestStorage(snaps);
+    expect(rows.find((r) => r.table === "toString")).toEqual({ table: "toString", bytes: 30, delta: { kind: "new" } });
+  });
 });
 
 describe("parseReview", () => {
@@ -163,6 +179,7 @@ describe("parseReview", () => {
     ["WAITING with a date that does not exist", reviewBody({ tables: { x: { state: "WAITING", until: "2026-02-30", note: "" } } }), "until이 올바른 날짜가 아닙니다"],
     ["missing read_cost", reviewBody({ read_cost: undefined }), "read_cost가 없습니다"],
     ["missing cleanup", reviewBody({ cleanup: [7] }), "cleanup 목록이 없습니다"],
+    ["state named like an inherited key", reviewBody({ tables: { x: { state: "toString", note: "" } } }), "state가 낯설어요: toString"],
   ])("refuses %s with one line naming the problem", (_name, body, message) => {
     expect(() => parseReview(body as string)).toThrow(message as string);
   });
