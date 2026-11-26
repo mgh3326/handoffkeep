@@ -16,17 +16,13 @@ const DecisionWithdrawnTaskSettled = "task_settled"
 // A block still set on the task is cleared, its task_flag rows are
 // superseded, and the dots operator questions of the task are closed, so no
 // row of a settled task reads as pending. All of it runs in the task write's
-// transaction. A task that is not settled, or a request that is not open, is
-// left as it is.
+// transaction. A task that is not settled is left as it is; a task without an
+// open request still has its awaiting flag and task_flag rows cleared.
 func withdrawSettledRequestTx(ctx context.Context, tx transaction, x *Task, at time.Time) error {
 	r := x.Refs.DecisionRequest
-	if r == nil || r.Status != DecisionRequestOpen || !IsSettledState(x.State) {
+	if !IsSettledState(x.State) {
 		return nil
 	}
-	closed := *r
-	closed.Status = DecisionRequestWithdrawn
-	closed.WithdrawnReason = DecisionWithdrawnTaskSettled
-	x.Refs.DecisionRequest = &closed
 	by := fmt.Sprintf("task:%d:%s", x.ID, x.State)
 	mysql := dialectFor(tx) == mysqlDialect
 	if x.AwaitingDecision {
@@ -41,6 +37,13 @@ func withdrawSettledRequestTx(ctx context.Context, tx transaction, x *Task, at t
 			return err
 		}
 	}
+	if r == nil || r.Status != DecisionRequestOpen {
+		return nil
+	}
+	closed := *r
+	closed.Status = DecisionRequestWithdrawn
+	closed.WithdrawnReason = DecisionWithdrawnTaskSettled
+	x.Refs.DecisionRequest = &closed
 	// Only a dots request's ask_operator questions carry these rows, and no
 	// other close of the request leaves one open (dots answer, resolve).
 	if mysql {
