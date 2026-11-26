@@ -28,6 +28,13 @@ func TestOutboxUnsentPollUsesIndex(t *testing.T) {
 
 	cutoff := time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)
 	settledAt := cutoff.Add(-time.Hour)
+	// One unsent row committed below the cutoff, inserted first so it holds the
+	// lowest id: the live poll must exclude it, and the first settle must
+	// settle it (hk 6912).
+	if _, err := s.db().Exec(ctx, `INSERT INTO notification_outbox(kind,target_lane,event_id,text,created_at) VALUES(?,?,?,?,?)`,
+		OutboxKindDotsReport, "plan-lane", "plan-late-pre-cutoff", "text", cutoff.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 	const n = 20000
 	const batch = 500
 	for start := 0; start < n; start += batch {
@@ -101,9 +108,9 @@ func TestOutboxUnsentPollUsesIndex(t *testing.T) {
 		}
 	}
 
-	// No live row predates the cutoff in this outage-shaped poll fixture.
-	if settled, err := s.SkipNotificationsBefore(ctx, cutoff, OutboxSkipBeforeForwarder); err != nil || settled != 0 {
-		t.Fatalf("settle = %d err = %v, want 0", settled, err)
+	// The first settle settles the one pre-cutoff row; the second finds none.
+	if settled, err := s.SkipNotificationsBefore(ctx, cutoff, OutboxSkipBeforeForwarder); err != nil || settled != 1 {
+		t.Fatalf("settle = %d err = %v, want 1", settled, err)
 	}
 	if again, err := s.SkipNotificationsBefore(ctx, cutoff, OutboxSkipBeforeForwarder); err != nil || again != 0 {
 		t.Fatalf("second settle = %d err = %v, want 0", again, err)

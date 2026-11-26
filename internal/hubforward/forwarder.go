@@ -21,9 +21,13 @@ import (
 const (
 	defaultInterval = 5 * time.Second
 	postTimeout     = 5 * time.Second
-	baseBackoff     = 30 * time.Second
-	maxBackoff      = 10 * time.Minute
-	batchSize       = 200
+	// settleTimeout bounds one per-tick settle. A settle that waits on a row
+	// lock held by another transaction gives up after this, and the tick's
+	// cutoff-filtered list and delivery still run (hk 6912).
+	settleTimeout = 2 * time.Second
+	baseBackoff   = 30 * time.Second
+	maxBackoff    = 10 * time.Minute
+	batchSize     = 200
 	// hubLaneTextMaxBytes is the current panewire relay ingress limit. Handoffkeep
 	// stores the full outbox text; this cap applies only to the forwarded copy.
 	hubLaneTextMaxBytes = 2048
@@ -137,7 +141,8 @@ func (f *Forwarder) Run(ctx context.Context) {
 
 // Once forwards every unsent row not waiting out a backoff. The list carries
 // the cutoff, not only the settle, so a row that commits between the two reads
-// can never be posted as backlog. The settle runs on every tick because a row
+// can never be posted as backlog, and a tick whose settle failed or timed out
+// still cannot post one. The settle runs on every tick because a row
 // with caller-supplied created_at can commit below the cutoff after an empty
 // settle. A row counts as sent only once its receipt is stored; a failed mark
 // goes round again and the hub's duplicate answer supplies the same id.
@@ -145,9 +150,7 @@ func (f *Forwarder) Once(ctx context.Context) (sent, failed int, err error) {
 	if f.Cutoff.IsZero() {
 		return 0, 0, errNoCutoff
 	}
-	if _, err := f.Store.SkipNotificationsBefore(ctx, f.Cutoff, store.OutboxSkipBeforeForwarder); err != nil {
-		return 0, 0, fmt.Errorf("skip rows before cutoff: %w", err)
-	}
+	f.settleTick(ctx)
 	rows, err := f.Store.ListUnsentNotifications(ctx, batchSize, f.Cutoff)
 	if err != nil {
 		return 0, 0, err
@@ -180,6 +183,18 @@ func (f *Forwarder) Once(ctx context.Context) (sent, failed int, err error) {
 		}
 	}
 	return sent, failed, nil
+}
+
+// settleTick settles pre-cutoff rows under its own short deadline. A settle that
+// fails or times out is logged and does not stop the tick: the list after it
+// still carries the cutoff, so no pre-cutoff row is posted, and live rows go out.
+// The next tick settles again.
+func (f *Forwarder) settleTick(ctx context.Context) {
+	sctx, cancel := context.WithTimeout(ctx, settleTimeout)
+	defer cancel()
+	if _, err := f.Store.SkipNotificationsBefore(sctx, f.Cutoff, store.OutboxSkipBeforeForwarder); err != nil {
+		log.Printf("notification_forward.settle_failed cutoff=%s err=%q", f.cutoffText(), err.Error())
+	}
 }
 
 func (f *Forwarder) forward(ctx context.Context, row store.NotificationOutbox) error {

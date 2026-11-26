@@ -44,8 +44,10 @@ set -euo pipefail
 if [[ -z "${HK_CLI_SERVER:-}" ]]; then
 	case "${HK_CLI_NCP:-}" in
 	ncp)
-		echo "hk-cli-sync: warning: HK_CLI_NCP=ncp is stale; using oci" >&2
+		echo "hk-cli-sync: warning: HK_CLI_NCP=ncp is stale; using oci and ignoring HK_CLI_NCP_HEALTH" >&2
 		HK_CLI_SERVER=oci
+		# The legacy health URL names the retired host; it must not check oci.
+		HK_CLI_NCP_HEALTH=
 		;;
 	"") HK_CLI_SERVER=oci ;;
 	*) HK_CLI_SERVER=$HK_CLI_NCP ;;
