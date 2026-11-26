@@ -169,6 +169,10 @@ func writeConfig(tblsPath, outPath, livePath string) error {
 	return os.WriteFile(outPath, raw, 0o644)
 }
 
+// unlistedRemedy is what a refusal for a table outside every viewpoint tells
+// the author to do: the table joins a viewpoint and gets a comments entry.
+const unlistedRemedy = "add the table to a viewpoint in .tbls.yml and give it a comments: entry (tableComment and one role label)"
+
 // applyUsage checks the hand comments against the tables the code creates and
 // appends the derived usage to each table comment.
 func applyUsage(cfg map[string]any, u *Usage) error {
@@ -186,12 +190,12 @@ func applyUsage(cfg map[string]any, u *Usage) error {
 	var problems []string
 	for name := range entries {
 		if !u.Tables[name] {
-			problems = append(problems, fmt.Sprintf("comments names table %q, which no viewpoint lists", name))
+			problems = append(problems, fmt.Sprintf("comments names table %q, which no viewpoint lists: %s", name, unlistedRemedy))
 		}
 	}
 	for _, tr := range u.Triggers {
 		if !u.Tables[tr.Table] {
-			problems = append(problems, fmt.Sprintf("trigger %q fires on table %q, which no viewpoint lists", tr.Name, tr.Table))
+			problems = append(problems, fmt.Sprintf("trigger %q fires on table %q, which no viewpoint lists: %s", tr.Name, tr.Table, unlistedRemedy))
 		}
 	}
 	for _, name := range sortedTables(u.Tables) {
