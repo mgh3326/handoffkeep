@@ -22,8 +22,15 @@ func TestHKFollowRecordsParse(t *testing.T) {
 			t.Skipf("%s not installed: hk-follow targets Linux hosts", tool)
 		}
 	}
+	script, err := filepath.Abs(filepath.Join("..", "..", "deploy", "hk-follow", "test-hk-follow.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	out := t.TempDir()
-	cmd := exec.Command("bash", filepath.Join("..", "..", "deploy", "hk-follow", "test-hk-follow.sh"))
+	// The script runs in its own temp dir, so a stray relative write from a
+	// fake lands there and never in this package's checked-in tree.
+	cmd := exec.Command("bash", script)
+	cmd.Dir = t.TempDir()
 	cmd.Env = append(os.Environ(), "HK_FOLLOW_RECORD_OUT="+out)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("test-hk-follow.sh: %v\n%s", err, b)
