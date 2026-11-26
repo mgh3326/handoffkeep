@@ -637,6 +637,15 @@ func (s *Store) autoCloseTx(ctx context.Context, tx transaction, child Task, by 
 func (s *Store) autoCloseOneParentTx(ctx context.Context, tx transaction, p Task, childID int64, childState string, now time.Time) (bool, Task, error) {
 	switch {
 	case p.State == StateMerged:
+		followUp, err := followUpSubTaskTx(ctx, tx, p.ID, childID, p.Refs.PR)
+		if err != nil {
+			return false, p, err
+		}
+		if followUp {
+			// This child was filed after the parent's implementing PR opened.
+			// Its later settlement cannot reopen or re-close that delivery.
+			return false, p, nil
+		}
 		// A merged parent waits for its sub-tasks to deploy: only a
 		// sub-task's deploy moves it on (hk 4172).
 		if childState != StateDeployed {

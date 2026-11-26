@@ -839,8 +839,10 @@ func unresolvedRevertMySQL(task string) string {
 		WHERE rt.task_id=` + task + ` AND rt.relation='implements' AND r.state='merged' AND r.reverted_by_change_id IS NULL AND r.opened_at>COALESCE(rv.merged_at,rv.created_at))`
 }
 
-// openSubTasksSQL lists the sub-tasks of task $1 that are not settled.
-const openSubTasksSQL = `SELECT id FROM tasks WHERE parent_id=$1 AND state NOT IN (` + settledStatesSQL + `) ORDER BY id`
+// openSubTasksSQL lists unsettled sub-tasks filed no later than the PR that
+// delivers the parent. Later children are follow-ups, not pieces of that PR.
+const openSubTasksSQL = `SELECT id FROM tasks WHERE parent_id=$1 AND state NOT IN (` + settledStatesSQL + `) AND created_at<=$2 ORDER BY id`
+const allOpenSubTasksSQL = `SELECT id FROM tasks WHERE parent_id=$1 AND state NOT IN (` + settledStatesSQL + `) ORDER BY id`
 
 // mergeHoldTx is the close-on-merge rule (hk 3294): a merge closes a task
 // only when it delivers the task's last open piece. It returns why the merge
@@ -859,9 +861,9 @@ func mergeHoldTx(ctx context.Context, tx transaction, taskID int64, pr string) (
 
 // taskHolds is what holds a task's close: its implements changes still open
 // (other than the PR being merged), its implements changes reverted and not
-// relanded (unresolvedRevertSQL), and its sub-tasks not yet settled. It is the
-// one read of the close-on-merge holds, shared by the merge gate, the automatic
-// close of a parent (closeGateTx) and the drift report.
+// relanded (unresolvedRevertSQL), and its pre-PR sub-tasks not yet settled. It
+// is the one read of the close-on-merge holds, shared by the merge gate, the
+// automatic close of a parent (closeGateTx) and the drift report.
 type taskHolds struct {
 	OpenPRs      []string
 	RevertedPRs  []string
@@ -916,7 +918,7 @@ func taskHoldsTx(ctx context.Context, tx transaction, taskID int64, pr string) (
 	if dialectFor(tx) == mysqlDialect {
 		openQuery = `SELECT CONCAT('https://github.com/',c.repo,'/pull/',c.pr_number) FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ct.task_id=? AND ct.relation='implements' AND c.state='open' AND NOT (c.repo=? AND c.pr_number=?) ORDER BY c.id`
 		revertedQuery = `SELECT CONCAT('https://github.com/',c.repo,'/pull/',c.pr_number) FROM change_tasks ct JOIN changes c ON c.id=ct.change_id WHERE ` + unresolvedRevertMySQL("?") + ` ORDER BY c.id`
-		subTaskQuery = `SELECT id FROM tasks WHERE parent_id=? AND state NOT IN (` + settledStatesSQL + `) ORDER BY id`
+		subTaskQuery = `SELECT id FROM tasks WHERE parent_id=? AND state NOT IN (` + settledStatesSQL + `) AND created_at<=? ORDER BY id`
 		revertedArgs = append(revertedArgs, taskID)
 	}
 	rows, err := tx.Query(ctx, openQuery, taskID, repo, n)
@@ -933,12 +935,66 @@ func taskHoldsTx(ctx context.Context, tx transaction, taskID int64, pr string) (
 	if h.RevertedPRs, err = collectRows(rows, rowTo[string]); err != nil {
 		return h, err
 	}
-	rows, err = tx.Query(ctx, subTaskQuery, taskID)
+	openedAt, found, err := taskHoldOpenedAtTx(ctx, tx, taskID, pr)
+	if err != nil {
+		return h, err
+	}
+	if !found {
+		// Without an implements change there is no PR boundary. Preserve the
+		// planned-piece rule and treat every unsettled child as a hold.
+		query := allOpenSubTasksSQL
+		if dialectFor(tx) == mysqlDialect {
+			query = `SELECT id FROM tasks WHERE parent_id=? AND state NOT IN (` + settledStatesSQL + `) ORDER BY id`
+		}
+		rows, err = tx.Query(ctx, query, taskID)
+	} else {
+		rows, err = tx.Query(ctx, subTaskQuery, taskID, openedAt)
+	}
 	if err != nil {
 		return h, err
 	}
 	h.OpenSubTasks, err = collectRows(rows, rowTo[int64])
 	return h, err
+}
+
+// taskHoldOpenedAtTx returns the implements change that establishes the
+// boundary between planned pieces and PR follow-ups. An incoming PR is the
+// boundary for its merge event; other readers use the task's earliest live
+// implements change. A missing boundary keeps the conservative old behavior.
+func taskHoldOpenedAtTx(ctx context.Context, tx transaction, taskID int64, pr string) (time.Time, bool, error) {
+	var openedAt time.Time
+	var err error
+	if repo, number, ok := parsePRURL(pr); ok {
+		err = tx.QueryRow(ctx, sqlFor(tx, `SELECT opened_at FROM changes WHERE repo=$1 AND pr_number=$2`, `SELECT opened_at FROM changes WHERE repo=? AND pr_number=?`), repo, number).Scan(&openedAt)
+	} else if dialectFor(tx) == mysqlDialect {
+		err = tx.QueryRow(ctx, `SELECT c.opened_at FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
+		WHERE ct.task_id=? AND ct.relation='implements' AND c.state<>'closed' AND c.reverted_by_change_id IS NULL
+		ORDER BY c.opened_at,c.id LIMIT 1`, taskID).Scan(&openedAt)
+	} else {
+		err = tx.QueryRow(ctx, `SELECT c.opened_at FROM change_tasks ct JOIN changes c ON c.id=ct.change_id
+		WHERE ct.task_id=$1 AND ct.relation='implements' AND c.state<>'closed' AND c.reverted_by_change_id IS NULL
+		ORDER BY c.opened_at,c.id LIMIT 1`, taskID).Scan(&openedAt)
+	}
+	if errors.Is(err, ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	return openedAt, err == nil, err
+}
+
+// followUpSubTaskTx reports whether childID was created after the parent PR's
+// opened_at. It protects an already merged parent from a later follow-up close
+// while preserving hk 3294/4172 for pieces filed before that PR opened.
+func followUpSubTaskTx(ctx context.Context, tx transaction, parentID, childID int64, pr string) (bool, error) {
+	openedAt, found, err := taskHoldOpenedAtTx(ctx, tx, parentID, pr)
+	if err != nil || !found {
+		return false, err
+	}
+	var createdAt time.Time
+	err = tx.QueryRow(ctx, sqlFor(tx, `SELECT created_at FROM tasks WHERE id=$1 AND parent_id=$2`, `SELECT created_at FROM tasks WHERE id=? AND parent_id=?`), childID, parentID).Scan(&createdAt)
+	if errors.Is(err, ErrNoRows) {
+		return false, nil
+	}
+	return createdAt.After(openedAt), err
 }
 
 // pieceHoldTx is the part of mergeHoldTx about the task's own changes: it

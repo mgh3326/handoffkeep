@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ func init() {
 	registerTaskAreaCase("source_events/pr_opened_applies_and_redelivers", srcEvCasePROpened)
 	registerTaskAreaCase("source_events/not_applied_is_recorded", srcEvCaseNotApplied)
 	registerTaskAreaCase("source_events/merge_event", srcEvCaseMerge)
+	registerTaskAreaCase("source_events/followup_subtasks_do_not_hold", srcEvCaseFollowupSubtasks)
 	registerTaskAreaCase("source_events/concurrent_redelivery_applies_once", srcEvCaseConcurrent)
 	registerTaskAreaCase("source_events/deploy_record_without_merged_task", srcEvCaseDeployRecordNoTask)
 }
@@ -236,6 +238,156 @@ func srcEvCaseMerge(t *testing.T, s *Store) {
 	if after := srcEvGet(t, s, x.ID); after.State != StateMerged || after.Refs.PR != pr {
 		t.Fatalf("after merge: state=%s refs.pr=%q", after.State, after.Refs.PR)
 	}
+}
+
+func srcEvCaseFollowupSubtasks(t *testing.T, s *Store) {
+	ctx := t.Context()
+	openAt := time.Now().UTC().Add(-time.Minute)
+
+	// A child filed after the parent's PR opened is a follow-up. The merge
+	// applies and its deploy record is applied in the same turn.
+	parent := srcEvTask(t, s, "follow-up parent deploy")
+	parentPR := srcEvPR(srcEvUnique())
+	if res, err := srcEvApplyPublicAt(s, t, parent.ID, SourceMergewakePR, parentPR, openAt); err != nil || !res.Applied {
+		t.Fatalf("open parent PR: res=%+v err=%v", res, err)
+	}
+	followup := srcEvTask(t, s, "PR follow-ups")
+	if _, _, err := s.SetTaskParent(ctx, followup.ID, &parent.ID, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	putDeploy(t, s, fmt.Sprintf("deploy/followup/%d", srcEvUnique()), "followup", "success", []string{parentPR})
+	if res, err := srcEvApplyPublicAt(s, t, parent.ID, SourceMergewakeMerge, parentPR, time.Now().UTC()); err != nil || !res.Applied || res.State != StateDeployed {
+		t.Fatalf("merge with follow-up: res=%+v err=%v, want deployed", res, err)
+	}
+
+	// The same later child cannot move an already merged parent when it is
+	// eventually deployed.
+	mergedParent := srcEvTask(t, s, "merged parent with follow-up")
+	mergedPR := srcEvPR(srcEvUnique())
+	if _, err := srcEvApplyPublicAt(s, t, mergedParent.ID, SourceMergewakePR, mergedPR, openAt); err != nil {
+		t.Fatal(err)
+	}
+	lateChild := srcEvTask(t, s, "late follow-up")
+	if _, _, err := s.SetTaskParent(ctx, lateChild.ID, &mergedParent.ID, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := srcEvApplyPublicAt(s, t, mergedParent.ID, SourceMergewakeMerge, mergedPR, time.Now().UTC()); err != nil || !res.Applied || res.State != StateMerged {
+		t.Fatalf("merge with late child: res=%+v err=%v", res, err)
+	}
+	childPR := srcEvPR(srcEvUnique())
+	if _, err := srcEvApplyPublicAt(s, t, lateChild.ID, SourceMergewakeMerge, childPR, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	putDeploy(t, s, fmt.Sprintf("deploy/child/%d", srcEvUnique()), "child", "success", []string{childPR})
+	if _, err := s.SettleMerged(ctx, "", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := srcEvGet(t, s, mergedParent.ID); got.State != StateMerged {
+		t.Fatalf("follow-up deployment moved parent to %s, want merged", got.State)
+	}
+
+	// A child filed before the PR opened still holds the merge. Settling that
+	// piece preserves hk 3294/4172: the parent adopts the held PR.
+	pieceParent := srcEvTask(t, s, "planned piece parent")
+	piece := srcEvTask(t, s, "planned piece")
+	if _, _, err := s.SetTaskParent(ctx, piece.ID, &pieceParent.ID, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	piecePR := srcEvPR(srcEvUnique())
+	if _, err := srcEvApplyPublicAt(s, t, pieceParent.ID, SourceMergewakePR, piecePR, time.Now().UTC().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := srcEvApplyPublicAt(s, t, pieceParent.ID, SourceMergewakeMerge, piecePR, time.Now().UTC().Add(2*time.Minute)); err != nil || res.Applied || !strings.Contains(res.Reason, "sub-tasks") {
+		t.Fatalf("planned piece merge: res=%+v err=%v, want held", res, err)
+	}
+	pieceMergePR := srcEvPR(srcEvUnique())
+	if res, err := srcEvApplyPublicAt(s, t, piece.ID, SourceMergewakeMerge, pieceMergePR, time.Now().UTC()); err != nil || !res.Applied {
+		t.Fatalf("settle planned piece: res=%+v err=%v", res, err)
+	}
+	if got := srcEvGet(t, s, pieceParent.ID); got.State != StateMerged || got.Refs.PR != piecePR {
+		t.Fatalf("planned piece parent state=%s pr=%q, want merged adopting %s", got.State, got.Refs.PR, piecePR)
+	}
+
+	// The old held shape becomes mechanical when the child's timestamp proves
+	// it was filed after the merged PR opened. The planned-piece counterpart
+	// remains held in both drift and hygiene.
+	legacy := srcEvTask(t, s, "legacy held follow-up")
+	legacyChild := srcEvTask(t, s, "legacy late child")
+	if _, _, err := s.SetTaskParent(ctx, legacyChild.ID, &legacy.ID, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	legacyPR := srcEvPR(srcEvUnique())
+	legacyOpened := time.Now().UTC().Add(time.Minute)
+	if _, err := srcEvApplyPublicAt(s, t, legacy.ID, SourceMergewakePR, legacyPR, legacyOpened); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := srcEvApplyPublicAt(s, t, legacy.ID, SourceMergewakeMerge, legacyPR, legacyOpened.Add(time.Minute)); err != nil || res.Applied {
+		t.Fatalf("legacy merge: res=%+v err=%v, want held before timestamp correction", res, err)
+	}
+	if _, err := s.db().Exec(ctx, s.q(`UPDATE tasks SET created_at=$1 WHERE id=$2`, `UPDATE tasks SET created_at=? WHERE id=?`), legacyOpened.Add(time.Second), legacyChild.ID); err != nil {
+		t.Fatal(err)
+	}
+	drift, err := s.TaskDrift(ctx, time.Now().UTC(), DriftDefaultMergedDays)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, ok := driftEntry(drift.MergedPRNotMerged, legacy.ID); !ok || !row.Mechanical || len(row.OpenSubTasks) != 0 {
+		t.Fatalf("legacy follow-up drift=%+v listed=%t, want mechanical without open_sub_tasks", row, ok)
+	}
+	planned := srcEvTask(t, s, "planned piece drift")
+	plannedChild := srcEvTask(t, s, "open planned piece")
+	if _, _, err := s.SetTaskParent(ctx, plannedChild.ID, &planned.ID, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	plannedPR := srcEvPR(srcEvUnique())
+	plannedOpened := time.Now().UTC().Add(time.Minute)
+	if _, err := srcEvApplyPublicAt(s, t, planned.ID, SourceMergewakePR, plannedPR, plannedOpened); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srcEvApplyPublicAt(s, t, planned.ID, SourceMergewakeMerge, plannedPR, plannedOpened.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	drift, err = s.TaskDrift(ctx, plannedOpened.Add(2*time.Minute), DriftDefaultMergedDays)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, ok := driftEntry(drift.MergedPRNotMerged, planned.ID); !ok || row.Mechanical || len(row.OpenSubTasks) != 1 {
+		t.Fatalf("planned piece drift=%+v listed=%t, want held by its open child", row, ok)
+	}
+	hygiene, err := s.TaskHygiene(ctx, time.Now().UTC(), "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundClose := false
+	foundPlannedClose := false
+	for _, close := range hygiene.MechanicalCloses {
+		if close.TaskID == legacy.ID && close.Rule == "merged_pr" {
+			foundClose = true
+		}
+		if close.TaskID == planned.ID {
+			foundPlannedClose = true
+		}
+	}
+	if !foundClose {
+		t.Fatalf("hygiene mechanical closes do not include legacy follow-up task %d: %+v", legacy.ID, hygiene.MechanicalCloses)
+	}
+	if foundPlannedClose {
+		t.Fatalf("hygiene listed a planned piece as mechanical: %+v", hygiene.MechanicalCloses)
+	}
+	foundPlannedFinding := false
+	for _, finding := range hygiene.Findings.MergedPROpenTasks {
+		if finding.ID == planned.ID && !finding.Mechanical && len(finding.OpenSubTasks) == 1 {
+			foundPlannedFinding = true
+		}
+	}
+	if !foundPlannedFinding {
+		t.Fatalf("hygiene did not report the planned-piece hold: %+v", hygiene.Findings.MergedPROpenTasks)
+	}
+}
+
+func srcEvApplyPublicAt(s *Store, t *testing.T, taskID int64, source, pr string, at time.Time) (TaskEventResult, error) {
+	t.Helper()
+	return s.ApplyTaskSourceEvent(t.Context(), TaskSourceEvent{Source: source, SourceRef: pr, PR: pr, TaskID: taskID, At: &at})
 }
 
 func srcEvCaseConcurrent(t *testing.T, s *Store) {
