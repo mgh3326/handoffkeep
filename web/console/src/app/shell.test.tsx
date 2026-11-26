@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { destinations, Shell } from "./Shell";
@@ -88,6 +89,15 @@ describe("Shell navigation", () => {
     setWidth(1024);
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(overflow?.hasAttribute("hidden")).toBe(true);
+    // jsdom neither loads shell.css nor evaluates @media, so desktop visibility is a CSS contract:
+    // inside the min-width: 768px block, .hk-shell-more must be display: contents !important to beat the
+    // global [hidden] rule (display: none !important). Pre-#603 CSS had no !important and fails here.
+    const css = readFileSync("src/app/shell.css", "utf8");
+    expect(css).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important/);
+    const rule = /\.hk-shell-more\s*\{[^}]*display:\s*contents\s*!important/.exec(css);
+    expect(rule).not.toBeNull();
+    const media = css.lastIndexOf("@media", rule?.index ?? 0);
+    expect(css.slice(media, rule?.index ?? 0)).toMatch(/min-width:\s*768px/);
   });
 
   it("opens 더보기 on click, closes it on Escape and returns focus to the toggle", () => {

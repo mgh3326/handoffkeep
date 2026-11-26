@@ -566,7 +566,6 @@ export function DecisionPage({ id }: { id: string }) {
           </p>
         )}
       </div>
-      <div className="decision-scroll-end" aria-hidden="true" />
       {screen === "confirming" && req && (
         <ConfirmSheet
           option={req.options.find((o) => o.key === option)?.label ?? option}
@@ -578,6 +577,8 @@ export function DecisionPage({ id }: { id: string }) {
         />
       )}
       {result && <ResultBadge result={result} raw={rawResult} />}
+      {/* Last in the article: the result badge sits in the scrollable content above this clearance. */}
+      <div className="decision-scroll-end" aria-hidden="true" />
     </article>
   );
 }
