@@ -149,8 +149,8 @@ func TestMergedTaskEventsReadsOnlyRecent(t *testing.T) {
 	lane := fmt.Sprintf("plan-deploys-%d", now.UnixNano())
 	h := func(hours int) time.Time { return now.Add(time.Duration(hours) * time.Hour) }
 
-	// Fifteen hundred merged tasks with four merges each. With a 2,000 row
-	// limit the former event-driven read exhausts all 6,000 old merge rows;
+	// Fifteen hundred merged tasks with four merges each. With the console's
+	// 1,001 row limit the former event-driven read exhausts all 6,000 old merge rows;
 	// the current read visits each merged task and probes one newest merge.
 	base := now.Add(-90 * 24 * time.Hour)
 	otherIDs := seedPlanTasks(t, ctx, s, func() []planTaskSeed {
@@ -186,6 +186,17 @@ func TestMergedTaskEventsReadsOnlyRecent(t *testing.T) {
 		// Same timestamp as t5; this later id must sort first.
 		{taskID: t1, from: "join", to: "merged", by: "tester", at: h(-17)},
 	})
+
+	// Open work next to the merged rows, so merged is a selective state. With
+	// only merged rows the optimizer reads tasks whole (type=ALL) instead of
+	// probing tasks_state_id, and the plan check below would reject that read.
+	seedPlanTasks(t, ctx, s, func() []planTaskSeed {
+		out := make([]planTaskSeed, 0, 8000)
+		for i := range 8000 {
+			out = append(out, planTaskSeed{lane: lane, title: fmt.Sprintf("open %d", i), state: "developing", created: base})
+		}
+		return out
+	}())
 
 	ar, err := s.db().Query(ctx, `ANALYZE TABLE tasks, task_events`)
 	if err != nil {
@@ -232,18 +243,21 @@ func TestMergedTaskEventsReadsOnlyRecent(t *testing.T) {
 		t.Fatalf("limit 2 = %v, want [t1 t5]", capped)
 	}
 
-	// The plan: merged tasks range over tasks_state_id, with one keyed event
-	// lookup per task. Estimated rows therefore track merged tasks, not the
-	// number of merge transitions. No read scans a table.
+	// The plan at the console's limit (1,001 rows, below the 1,500 merged
+	// tasks seeded above): merged tasks range over tasks_state_id (the driving
+	// read is monitored under its alias t), with one keyed event lookup per
+	// task. Estimated rows therefore track merged tasks, not the number of
+	// merge transitions. No read scans a table.
 	assertNoFullScan(t, ctx, s, "merged task events", listMergedTaskEventsMySQL, map[string]map[string]bool{
+		"t":           {"tasks_state_id": true},
 		"task_events": {"task_events_task_kind_to_at": true},
-	}, 1, 2000)
+	}, 2, 1001)
 	assertMergedTaskEventEstimate(t, ctx, s)
 }
 
 func assertMergedTaskEventEstimate(t *testing.T, ctx context.Context, s *Store) {
 	t.Helper()
-	rows, err := s.db().Query(ctx, "EXPLAIN FORMAT=TRADITIONAL "+listMergedTaskEventsMySQL, 2000)
+	rows, err := s.db().Query(ctx, "EXPLAIN FORMAT=TRADITIONAL "+listMergedTaskEventsMySQL, 1001)
 	if err != nil {
 		t.Fatalf("merged task events: EXPLAIN estimates: %v", err)
 	}
