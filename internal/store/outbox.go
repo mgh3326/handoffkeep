@@ -176,28 +176,79 @@ func notificationSinceArgs(d storeDialect, limit int, since time.Time) []any {
 	return []any{limit, since}
 }
 
+// skipSettleChunk caps the ids one MySQL settle UPDATE names in its IN list.
+const skipSettleChunk = 500
+
 // SkipNotificationsBefore settles every row created before the forwarder's
 // cutoff as skipped: the first start of forwarding settles the backlog
 // visibly instead of posting weeks of stale notices (hk 4986). It touches
 // only rows still owed (sent_at and skipped_at NULL), so a restart re-skips
 // nothing, and it never writes sent_at or hub_row_id. It returns how many
 // rows this call settled.
+//
+// A row another transaction holds is skipped, not waited on (hk 6920): the
+// lock read takes only the rows it can lock (FOR UPDATE SKIP LOCKED), so the
+// call returns at once with the rest settled, and the held row is settled by
+// a later call once it is released. A plain UPDATE would wait on that row
+// until the server's lock-wait timeout, and on MySQL a lock-wait timeout
+// fails the whole statement, unlocked rows included.
 func (s *Store) SkipNotificationsBefore(ctx context.Context, before time.Time, reason string) (int64, error) {
 	if before.IsZero() || reason == "" || !validText(reason, 128) {
 		return 0, errors.New("invalid notification skip")
 	}
-	tag, err := s.db().Exec(ctx, s.q(`UPDATE notification_outbox SET skipped_at=now(),skip_reason=$2 WHERE created_at < $1 AND sent_at IS NULL AND skipped_at IS NULL`, `UPDATE notification_outbox SET skipped_at=UTC_TIMESTAMP(6),skip_reason=? WHERE created_at < ? AND sent_at IS NULL AND skipped_at IS NULL`), skipNotificationArgs(s.dialect, before, reason)...)
+	if s.dialect == mysqlDialect {
+		return s.skipNotificationsBeforeMySQL(ctx, before, reason)
+	}
+	tag, err := s.db().Exec(ctx, `UPDATE notification_outbox SET skipped_at=now(),skip_reason=$2 WHERE id IN (SELECT id FROM notification_outbox WHERE created_at < $1 AND sent_at IS NULL AND skipped_at IS NULL FOR UPDATE SKIP LOCKED)`, before, reason)
 	if err != nil {
 		return 0, err
 	}
 	return tag, nil
 }
 
-func skipNotificationArgs(d storeDialect, before time.Time, reason string) []any {
-	if d == mysqlDialect {
-		return []any{reason, before}
+// skipNotificationsBeforeMySQL locks the owed rows it can get with SKIP LOCKED
+// and updates exactly those, in one transaction. MySQL's UPDATE cannot skip a
+// locked row, and a subquery on the same table cannot feed it, so the ids are
+// read first and the held rows stay out of the list.
+func (s *Store) skipNotificationsBeforeMySQL(ctx context.Context, before time.Time, reason string) (int64, error) {
+	tx, release, err := s.begin(ctx)
+	if err != nil {
+		return 0, err
 	}
-	return []any{before, reason}
+	defer release()
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `SELECT id FROM notification_outbox WHERE created_at < ? AND sent_at IS NULL AND skipped_at IS NULL FOR UPDATE SKIP LOCKED`, before)
+	if err != nil {
+		return 0, err
+	}
+	var ids []any
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return 0, err
+	}
+	var settled int64
+	for start := 0; start < len(ids); start += skipSettleChunk {
+		end := min(start+skipSettleChunk, len(ids))
+		args := append([]any{reason}, ids[start:end]...)
+		n, err := tx.Exec(ctx, `UPDATE notification_outbox SET skipped_at=UTC_TIMESTAMP(6),skip_reason=? WHERE id IN (`+placeholders(end-start)+`) AND sent_at IS NULL AND skipped_at IS NULL`, args...)
+		if err != nil {
+			return 0, err
+		}
+		settled += n
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return settled, nil
 }
 
 // MarkNotificationSent records the hub's receipt for one outbox row. It is
