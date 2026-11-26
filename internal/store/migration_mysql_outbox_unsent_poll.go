@@ -12,9 +12,9 @@ package store
 //
 // notification_outbox_unsent_poll (sent_at, skipped_at, created_at, id) keeps
 // the two NULL equalities as the leading equality prefix (MySQL has no partial
-// index, so the NULLs are the key), ranges on created_at, and carries id for
-// the poll's ORDER BY id LIMIT. InnoDB appends the primary key to the entry,
-// so the poll's rows come out in id order and LIMIT stops the scan.
+// index, so the NULLs are the key) and ranges on created_at, limiting rows
+// visited by both statements. Since created_at precedes id, it does not
+// provide the poll's ORDER BY id LIMIT ordering.
 //
 // Expand-only: one secondary index, no column, table or constraint change. The
 // previous release's reads are unchanged and its plans can only gain a key,

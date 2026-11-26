@@ -100,20 +100,13 @@ type Forwarder struct {
 	Now      func() time.Time
 	Cutoff   time.Time
 
-	// skipDone records that a pre-cutoff settle found nothing still owed: the
-	// cutoff does not move, so no later tick can settle more. Once keeps
-	// settling while a settle finds rows, so a failed or partial start still
-	// retries on the next tick.
-	skipDone bool
-
 	retries map[string]retry
 }
 
 // Run forwards due rows every interval until ctx ends. It settles the backlog
-// before the cutoff once at start and logs what that start did; a start that
-// settled nothing marks the settle done, otherwise Once keeps settling until
-// one tick finds nothing, so a failed first attempt cannot let an old row
-// through.
+// before the cutoff once at start and logs what that start did. Once settles
+// again before each poll so a late commit with a caller-supplied pre-cutoff
+// created_at cannot remain owed after an earlier empty settle.
 func (f *Forwarder) Run(ctx context.Context) {
 	interval := f.Interval
 	if interval <= 0 {
@@ -129,9 +122,6 @@ func (f *Forwarder) Run(ctx context.Context) {
 		log.Printf("notification_forward.skip_failed cutoff=%s err=%q", f.cutoffText(), err.Error())
 	} else {
 		log.Printf("notification_forward.start enabled=true cutoff=%s skipped=%d", f.cutoffText(), skipped)
-		if skipped == 0 {
-			f.skipDone = true
-		}
 	}
 	for {
 		if _, _, err := f.Once(ctx); err != nil && ctx.Err() == nil {
@@ -147,23 +137,16 @@ func (f *Forwarder) Run(ctx context.Context) {
 
 // Once forwards every unsent row not waiting out a backoff. The list carries
 // the cutoff, not only the settle, so a row that commits between the two reads
-// can never be posted as backlog. The settle runs only until one tick finds
-// nothing still owed, then stops: the cutoff does not move, so later ticks
-// cannot settle more. A row counts as sent only once its receipt
-// is stored; a failed mark goes round again and the hub's duplicate answer
-// supplies the same id.
+// can never be posted as backlog. The settle runs on every tick because a row
+// with caller-supplied created_at can commit below the cutoff after an empty
+// settle. A row counts as sent only once its receipt is stored; a failed mark
+// goes round again and the hub's duplicate answer supplies the same id.
 func (f *Forwarder) Once(ctx context.Context) (sent, failed int, err error) {
 	if f.Cutoff.IsZero() {
 		return 0, 0, errNoCutoff
 	}
-	if !f.skipDone {
-		settled, err := f.Store.SkipNotificationsBefore(ctx, f.Cutoff, store.OutboxSkipBeforeForwarder)
-		if err != nil {
-			return 0, 0, fmt.Errorf("skip rows before cutoff: %w", err)
-		}
-		if settled == 0 {
-			f.skipDone = true
-		}
+	if _, err := f.Store.SkipNotificationsBefore(ctx, f.Cutoff, store.OutboxSkipBeforeForwarder); err != nil {
+		return 0, 0, fmt.Errorf("skip rows before cutoff: %w", err)
 	}
 	rows, err := f.Store.ListUnsentNotifications(ctx, batchSize, f.Cutoff)
 	if err != nil {
