@@ -705,7 +705,7 @@ comments:
   - table: sync_decisions
     labels: [cache-derived]
     tableComment: |
-      Mirror of decisions for sync, keyed by request id. Its writes come from MySQL triggers (migration_mysql_tasks.go), not from Go code; no Go statement reads it. Candidate for retirement, not changed here.
+      Mirror of decisions for sync, keyed by request id. Its writes come from MySQL triggers (migration_mysql_tasks.go), not from Go code; no Go statement reads it.
       Retention: none.
   - table: yt_feed_cursors
     labels: [cursor-checkpoint]
