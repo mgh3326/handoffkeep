@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import DocView from "./DocView";
 
 const DOC_KEY = "tbls/oci/mysql/handoffkeep/doc";
@@ -233,6 +233,8 @@ describe("short view", () => {
     await screen.findByRole("heading", { name: "beta" });
     const anchor = document.getElementById("user-content-file-beta.md");
     expect(anchor).not.toBeNull();
-    expect(scrolled).toContain(anchor);
+    // DocMarkdown scrolls from a passive effect, which React may flush after
+    // the heading is already in the DOM, so wait for the scroll itself.
+    await waitFor(() => expect(scrolled).toContain(anchor));
   });
 });
