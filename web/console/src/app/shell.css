@@ -244,9 +244,11 @@ html {
   .hk-shell-more-toggle {
     display: none;
   }
-  .hk-shell-more[hidden],
+  /* The global [hidden] rule is important so mobile's disclosure remains
+     closed. On desktop, its links are ordinary sidebar rows regardless of
+     that mobile-only state. */
   .hk-shell-more {
-    display: contents;
+    display: contents !important;
   }
   .hk-shell-nav a {
     align-items: center;
