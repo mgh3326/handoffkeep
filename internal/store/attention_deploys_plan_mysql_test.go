@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -133,10 +134,9 @@ func TestAttentionReadsOnlyCandidates(t *testing.T) {
 
 // This test proves the hk 6397 rewrite of the console deploys read (hk 5584
 // digest f9a5f28d, about 6,165 rows examined per call every ~86 s): the read
-// drives from the merge transitions, newest first, keeps each task's latest
-// merge while the task is still merged, and stops after its limit. The plan
-// statement below is the store's own text (listMergedTaskEventsMySQL); the
-// rows are read through ListMergedTaskEvents.
+// drives from currently merged tasks and probes one newest merge per task.
+// The plan statement below is the store's own text; rows are read through
+// ListMergedTaskEvents.
 func TestMergedTaskEventsReadsOnlyRecent(t *testing.T) {
 	ctx := t.Context()
 	s, err := Open(ctx, testdb.MySQLDatabase(t))
@@ -181,6 +181,8 @@ func TestMergedTaskEventsReadsOnlyRecent(t *testing.T) {
 		{taskID: t3, from: "developing", to: "merged", by: "tester", at: h(-23)},
 		{taskID: t3, from: "merged", to: "dropped", by: "tester", at: h(-20)},
 		{taskID: t5, from: "developing", to: "merged", by: "tester", at: h(-17)},
+		// Same timestamp as t5; this later id must sort first.
+		{taskID: t1, from: "join", to: "merged", by: "tester", at: h(-17)},
 	})
 
 	ar, err := s.db().Query(ctx, `ANALYZE TABLE tasks, task_events`)
@@ -189,13 +191,13 @@ func TestMergedTaskEventsReadsOnlyRecent(t *testing.T) {
 	}
 	ar.Close()
 
-	// The newest merges first: t5, the second merge of t2 (kept once), t1,
+	// The newest merges first: t1, t5 (same at, larger id), t2's re-merge,
 	// then the newest old merges. t3 merged and dropped, t4 never merged.
 	newestOld := append([]int64{}, otherIDs...)
 	for i, j := 0, len(newestOld)-1; i < j; i, j = i+1, j-1 {
 		newestOld[i], newestOld[j] = newestOld[j], newestOld[i]
 	}
-	want := append([]int64{t5, t2, t1}, newestOld[:7]...)
+	want := append([]int64{t1, t5, t2}, newestOld[:7]...)
 	got, err := s.ListMergedTaskEvents(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -211,8 +213,8 @@ func TestMergedTaskEventsReadsOnlyRecent(t *testing.T) {
 			t.Fatalf("event %d (task %d) refs = %+v, want nil", i, id, got[i].Refs)
 		}
 	}
-	if !got[0].At.Equal(h(-17)) || !got[1].At.Equal(h(-18)) || !got[2].At.Equal(h(-19)) {
-		t.Fatalf("first merges at %v, %v, %v, want -17h, -18h, -19h", got[0].At, got[1].At, got[2].At)
+	if !got[0].At.Equal(h(-17)) || !got[1].At.Equal(h(-17)) || !got[2].At.Equal(h(-18)) {
+		t.Fatalf("first merges at %v, %v, %v, want -17h, -17h, -18h", got[0].At, got[1].At, got[2].At)
 	}
 	for _, x := range got {
 		if x.TaskID == t3 || x.TaskID == t4 {
@@ -224,18 +226,50 @@ func TestMergedTaskEventsReadsOnlyRecent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(capped) != 2 || capped[0].TaskID != t5 || capped[1].TaskID != t2 {
-		t.Fatalf("limit 2 = %v, want [t5 t2]", capped)
+	if len(capped) != 2 || capped[0].TaskID != t1 || capped[1].TaskID != t5 {
+		t.Fatalf("limit 2 = %v, want [t1 t5]", capped)
 	}
 
-	// The plan: the outer read ranges over task_events_kind_to_at_id, tasks
-	// is a primary-key join, and the NOT EXISTS probe uses its per-task key.
-	// No read scans a table.
+	// The plan: merged tasks range over tasks_state_id, with one keyed event
+	// lookup per task. Estimated rows therefore track merged tasks, not the
+	// number of merge transitions. No read scans a table.
 	assertNoFullScan(t, ctx, s, "merged task events", listMergedTaskEventsMySQL, map[string]map[string]bool{
-		"e": {"task_events_kind_to_at_id": true},
-		"t": {"PRIMARY": true},
-		"n": nil,
-	}, 3, 10)
+		"t":           {"tasks_state_id": true},
+		"task_events": {"task_events_task_kind_to_at": true},
+	}, 2, 10)
+	assertMergedTaskEventEstimate(t, ctx, s)
+}
+
+func assertMergedTaskEventEstimate(t *testing.T, ctx context.Context, s *Store) {
+	t.Helper()
+	rows, err := s.db().Query(ctx, "EXPLAIN FORMAT=TRADITIONAL "+listMergedTaskEventsMySQL, 10)
+	if err != nil {
+		t.Fatalf("merged task events: EXPLAIN estimates: %v", err)
+	}
+	defer rows.Close()
+	var taskRows, eventRows int64 = -1, -1
+	for rows.Next() {
+		var id, selectType, table, partitions, typ, possible, key, keyLen, ref, est, filtered, extra sql.NullString
+		if err := rows.Scan(&id, &selectType, &table, &partitions, &typ, &possible, &key, &keyLen, &ref, &est, &filtered, &extra); err != nil {
+			t.Fatal(err)
+		}
+		if table.String == "t" {
+			taskRows, _ = strconv.ParseInt(est.String, 10, 64)
+		}
+		if table.String == "task_events" {
+			eventRows, _ = strconv.ParseInt(est.String, 10, 64)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("merged event estimate: merged-task rows=%d, per-task merge rows=%d", taskRows, eventRows)
+	if taskRows < 100 || taskRows > 3000 {
+		t.Errorf("merged-task estimate=%d, want fixture-scale estimate 100..3000", taskRows)
+	}
+	if eventRows < 0 || eventRows > 10 {
+		t.Errorf("per-task merge estimate=%d, want a small keyed lookup (<=10)", eventRows)
+	}
 }
 
 // planTaskSeed is one tasks row for a plan fixture (every NOT NULL column the
