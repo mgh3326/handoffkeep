@@ -173,6 +173,11 @@ func writeConfig(tblsPath, outPath, livePath string) error {
 // the author to do: the table joins a viewpoint and gets a comments entry.
 const unlistedRemedy = "add the table to a viewpoint in .tbls.yml and give it a comments: entry (tableComment and one role label)"
 
+// staleCommentRemedy is for a comments: entry whose table no viewpoint lists.
+// The entry may be stale or misspelled, so adding the name to a viewpoint
+// would only let a nonexistent table through.
+const staleCommentRemedy = "if the table exists, add it to a viewpoint in .tbls.yml; otherwise remove or correct this comments: entry"
+
 // applyUsage checks the hand comments against the tables the code creates and
 // appends the derived usage to each table comment.
 func applyUsage(cfg map[string]any, u *Usage) error {
@@ -190,7 +195,7 @@ func applyUsage(cfg map[string]any, u *Usage) error {
 	var problems []string
 	for name := range entries {
 		if !u.Tables[name] {
-			problems = append(problems, fmt.Sprintf("comments names table %q, which no viewpoint lists: %s", name, unlistedRemedy))
+			problems = append(problems, fmt.Sprintf("comments names table %q, which no viewpoint lists: %s", name, staleCommentRemedy))
 		}
 	}
 	for _, tr := range u.Triggers {
