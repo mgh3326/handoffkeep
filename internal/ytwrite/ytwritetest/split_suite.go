@@ -926,24 +926,23 @@ func RunSplitProtocol(t *testing.T, nl NewSplitLedger) {
 	// the next pass creates the part.
 	t.Run("step_stopped_at_the_work_deadline_is_recorded_definite", func(t *testing.T) {
 		e := newSplitEnv(t, nl, 2)
-		e.settle = 200 * time.Millisecond
+		e.settle = 1500 * time.Millisecond
 		e.restart(e.ledger)
 		e.yt.Queue(Fault{}, Fault{}, Fault{Kind: DialFail}) // index, part 1, then part 2 never sent
 		op := e.prepare()
 		e.drive() // the send runs under the default window (hk 6224)
 		e.wantState(op, ytwrite.StateRemoteUnknown, ytwrite.ReasonTransport)
 		// The 30ms window is set for the recovery whose stopped step it times.
-		// The lease is 430ms + 2 × 540ms = 1510ms. The recovery's send context
-		// is bounded by the 30ms dispatch window, so once the mark returns
-		// after more than 30ms that context is done and the step is stopped
-		// (time.Sleep never returns early, so the lower bound holds on any
-		// runner). The settlement runs on the lease context, which is still
-		// live while the mark's wait stays well under the 1510ms lease end:
-		// the 100ms wait leaves 1.4s of overshoot before the lease ends,
-		// instead of the 110ms a 1400ms wait left.
+		// The lease is 30ms + 2 × 1500ms + 2 × 540ms = 4110ms, and the work
+		// context ends a SettleTimeout before it, at 2610ms. The mark's wait
+		// is 2700ms: time.Sleep never returns early, so the work deadline has
+		// passed on any runner, and the lease is still live for the
+		// settlement, which runs on the lease context, until 4110ms. That is
+		// about 1.4s of overshoot on each side. A revert to settling on the
+		// work context would be refused by ctxSettleLedger and fails here.
 		e.dispatch = 30 * time.Millisecond
 		hook := &markHook{splitLedger: ctxSettleLedger{splitLedger: e.ledger.(splitLedger)}, step: 0,
-			after: func() { time.Sleep(100 * time.Millisecond) }}
+			after: func() { time.Sleep(2700 * time.Millisecond) }}
 		e.restart(hook)
 		e.clock.Advance(time.Hour)
 		e.drive()
