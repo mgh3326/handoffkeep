@@ -536,6 +536,26 @@ func checkCompleteSetFloor(t *testing.T, f stateFixture) {
 	if r := f.apply(t, batch(h1, 1, true, "A")); r.Sections["checks"].Applied {
 		t.Fatal("an older complete set moved the floor")
 	}
+	// A partial write at the set's own observed_at may not insert an excluded
+	// check either (equal-timestamp chunks share one observed_at).
+	f.apply(t, batch(h1, 2, false, "C"))
+	if got := live()[h1]; got["C"] || !got["A"] || !got["B"] {
+		t.Fatalf("a write at the mark changed the set's checks: %v", got)
+	}
+	// A replay of the complete set at the same instant leaves its checks present,
+	// and a same-instant complete set still inserts the checks it names.
+	if r := f.apply(t, batch(h1, 2, true, "A", "B")); !r.Sections["checks"].Applied {
+		t.Fatalf("replay of the complete set: %+v", r.Sections["checks"])
+	}
+	if got := live()[h1]; !got["A"] || !got["B"] {
+		t.Fatalf("after the replay: %v", got)
+	}
+	if r := f.apply(t, batch(h1, 2, true, "A", "B", "D")); !r.Sections["checks"].Applied {
+		t.Fatalf("same-instant complete set with a new check: %+v", r.Sections["checks"])
+	}
+	if got := live()[h1]; !got["D"] || got["C"] {
+		t.Fatalf("the same-instant complete set did not insert its new check: %v", got)
+	}
 	// (c) A newer write for C after the complete set reads as present.
 	if r := f.apply(t, batch(h1, 3, false, "C")); !r.Sections["checks"].Applied {
 		t.Fatalf("newer write for C: %+v", r.Sections["checks"])

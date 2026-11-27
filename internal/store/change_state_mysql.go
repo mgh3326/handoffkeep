@@ -117,33 +117,32 @@ func applyChangeChecksMySQL(ctx context.Context, tx transaction, c changeLock, w
 	for _, k := range w.Checks {
 		names = append(names, k.Name)
 	}
-	// A write older than the head's newest complete set answers stale whole
-	// (hk 7056), as applyChecksTx does: no insert may read as present.
+	// The newest complete set's mark is read as stored before this write, and
+	// a check with no row that the mark judges is not inserted (hk 7056), as in
+	// applyChecksTx.
 	mark, err := checkSetObservedMySQL(ctx, tx, c.id, w.HeadSHA)
 	if err != nil {
 		return ChangeSectionResult{}, err
 	}
-	if mark != nil && w.ObservedAt.Before(*mark) {
-		return staleResult, nil
-	}
-	newer := map[string]bool{}
+	stored := map[string]time.Time{}
 	if len(names) > 0 {
-		args := make([]any, 0, len(names)+3)
-		args = append(args, c.id, w.HeadSHA, w.ObservedAt)
+		args := make([]any, 0, len(names)+2)
+		args = append(args, c.id, w.HeadSHA)
 		for _, n := range names {
 			args = append(args, n)
 		}
-		rows, err := tx.Query(ctx, `SELECT name FROM change_checks WHERE change_id=? AND head_sha=? AND observed_at>? AND name IN (`+placeholders(len(names))+`)`, args...)
+		rows, err := tx.Query(ctx, `SELECT name,observed_at FROM change_checks WHERE change_id=? AND head_sha=? AND name IN (`+placeholders(len(names))+`)`, args...)
 		if err != nil {
 			return ChangeSectionResult{}, err
 		}
 		for rows.Next() {
 			var n string
-			if err := rows.Scan(&n); err != nil {
+			var at time.Time
+			if err := rows.Scan(&n, &at); err != nil {
 				rows.Close()
 				return ChangeSectionResult{}, err
 			}
-			newer[n] = true
+			stored[n] = at
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -151,11 +150,12 @@ func applyChangeChecksMySQL(ctx context.Context, tx transaction, c changeLock, w
 		}
 		rows.Close()
 	}
-	if olderThan(c.checksObserved, w.ObservedAt) && len(newer) == len(names) {
+	settled := settledChecks(names, stored, w, mark)
+	if olderThan(c.checksObserved, w.ObservedAt) && allSettled(names, settled) {
 		return staleResult, nil
 	}
 	for _, k := range w.Checks {
-		if newer[k.Name] {
+		if settled[k.Name] {
 			continue
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO change_checks(change_id,head_sha,name,state,conclusion,url,required,started_at,completed_at,observed_at,source,gone,delivery_id)
@@ -178,7 +178,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,FALSE,?) ON DUPLICATE KEY UPDATE
 		if _, err := tx.Exec(ctx, query, args...); err != nil {
 			return ChangeSectionResult{}, err
 		}
-		// The mark only moves forward; this write is not older than it here.
+		// The mark only moves forward: the ON DUPLICATE KEY clause keeps a newer one.
 		if _, err := tx.Exec(ctx, `INSERT INTO change_check_sets(change_id,head_sha,observed_at) VALUES(?,?,?)
 ON DUPLICATE KEY UPDATE observed_at=IF(observed_at<VALUES(observed_at),VALUES(observed_at),observed_at)`, c.id, w.HeadSHA, w.ObservedAt); err != nil {
 			return ChangeSectionResult{}, err
