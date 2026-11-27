@@ -173,7 +173,7 @@ func TestApplyUsageRequiresCommentAndRole(t *testing.T) {
 	if err == nil {
 		t.Fatal("want errors for a table with no role, a comment naming an unknown table")
 	}
-	for _, want := range []string{`table "jobs" has no tableComment`, `table "jobs" needs exactly one role label`, `comments names table "ghost", which no viewpoint lists: add the table to a viewpoint in .tbls.yml`} {
+	for _, want := range []string{`table "jobs" has no tableComment`, `table "jobs" needs exactly one role label`, `comments names table "ghost", which no viewpoint lists: if the table exists, add it to a viewpoint in .tbls.yml; otherwise remove or correct this comments: entry`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
@@ -466,7 +466,7 @@ func TestTriggerOnUnlistedTableFailsConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := applyUsage(commentsFor("tasks"), u)
-	if err == nil || !strings.Contains(err.Error(), `trigger "ghost_guard" fires on table "ghost", which no viewpoint lists: add the table to a viewpoint in .tbls.yml`) {
+	if err == nil || !strings.Contains(err.Error(), `trigger "ghost_guard" fires on table "ghost", which no viewpoint lists: add the table to a viewpoint in .tbls.yml and give it a comments: entry (tableComment and one role label)`) {
 		t.Errorf("err = %v, want the unlisted-table refusal naming the remedy", err)
 	}
 }
