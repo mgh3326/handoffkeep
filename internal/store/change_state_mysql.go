@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 )
@@ -112,28 +113,38 @@ func markGoneMySQL(ctx context.Context, tx transaction, table string, changeID i
 // the newer set stable for the transaction, so the upsert itself needs no
 // freshness clause (ON DUPLICATE KEY UPDATE has no WHERE).
 func applyChangeChecksMySQL(ctx context.Context, tx transaction, c changeLock, w ChangeChecksWrite) (ChangeSectionResult, error) {
+	// Truncate to the stores' microsecond precision, as applyChecksTx does.
+	w.ObservedAt = w.ObservedAt.Truncate(time.Microsecond)
 	names := make([]string, 0, len(w.Checks))
 	for _, k := range w.Checks {
 		names = append(names, k.Name)
 	}
-	newer := map[string]bool{}
+	// The newest complete set's mark is read as stored before this write, and
+	// a check with no row that the mark judges is not inserted (hk 7056), as in
+	// applyChecksTx.
+	mark, err := checkSetObservedMySQL(ctx, tx, c.id, w.HeadSHA)
+	if err != nil {
+		return ChangeSectionResult{}, err
+	}
+	stored := map[string]time.Time{}
 	if len(names) > 0 {
-		args := make([]any, 0, len(names)+3)
-		args = append(args, c.id, w.HeadSHA, w.ObservedAt)
+		args := make([]any, 0, len(names)+2)
+		args = append(args, c.id, w.HeadSHA)
 		for _, n := range names {
 			args = append(args, n)
 		}
-		rows, err := tx.Query(ctx, `SELECT name FROM change_checks WHERE change_id=? AND head_sha=? AND observed_at>? AND name IN (`+placeholders(len(names))+`)`, args...)
+		rows, err := tx.Query(ctx, `SELECT name,observed_at FROM change_checks WHERE change_id=? AND head_sha=? AND name IN (`+placeholders(len(names))+`)`, args...)
 		if err != nil {
 			return ChangeSectionResult{}, err
 		}
 		for rows.Next() {
 			var n string
-			if err := rows.Scan(&n); err != nil {
+			var at time.Time
+			if err := rows.Scan(&n, &at); err != nil {
 				rows.Close()
 				return ChangeSectionResult{}, err
 			}
-			newer[n] = true
+			stored[n] = at
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -141,11 +152,12 @@ func applyChangeChecksMySQL(ctx context.Context, tx transaction, c changeLock, w
 		}
 		rows.Close()
 	}
-	if olderThan(c.checksObserved, w.ObservedAt) && len(newer) == len(names) {
+	settled := settledChecks(names, stored, w, mark)
+	if olderThan(c.checksObserved, w.ObservedAt) && allSettled(names, settled) {
 		return staleResult, nil
 	}
 	for _, k := range w.Checks {
-		if newer[k.Name] {
+		if settled[k.Name] {
 			continue
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO change_checks(change_id,head_sha,name,state,conclusion,url,required,started_at,completed_at,observed_at,source,gone,delivery_id)
@@ -168,6 +180,11 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,FALSE,?) ON DUPLICATE KEY UPDATE
 		if _, err := tx.Exec(ctx, query, args...); err != nil {
 			return ChangeSectionResult{}, err
 		}
+		// The mark only moves forward: the ON DUPLICATE KEY clause keeps a newer one.
+		if _, err := tx.Exec(ctx, `INSERT INTO change_check_sets(change_id,head_sha,observed_at) VALUES(?,?,?)
+ON DUPLICATE KEY UPDATE observed_at=IF(observed_at<VALUES(observed_at),VALUES(observed_at),observed_at)`, c.id, w.HeadSHA, w.ObservedAt); err != nil {
+			return ChangeSectionResult{}, err
+		}
 	}
 	if c.checksObserved == nil || w.ObservedAt.After(*c.checksObserved) {
 		if err := updateChangeMySQL(ctx, tx, c.id, nil, setCol{"checks_observed_at", "", w.ObservedAt}, setCol{"checks_source", "", w.Source}); err != nil {
@@ -175,6 +192,19 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,FALSE,?) ON DUPLICATE KEY UPDATE
 		}
 	}
 	return ChangeSectionResult{Applied: true}, nil
+}
+
+// checkSetObservedMySQL is checkSetObservedTx for MySQL (hk 7056).
+func checkSetObservedMySQL(ctx context.Context, tx transaction, changeID int64, head string) (*time.Time, error) {
+	var at time.Time
+	err := tx.QueryRow(ctx, `SELECT observed_at FROM change_check_sets WHERE change_id=? AND head_sha=?`, changeID, head).Scan(&at)
+	if errors.Is(err, ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &at, nil
 }
 
 func applyChangeThreadsMySQL(ctx context.Context, tx transaction, c changeLock, w ChangeThreadsWrite) (ChangeSectionResult, error) {

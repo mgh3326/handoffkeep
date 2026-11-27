@@ -18,3 +18,13 @@ func TestChangeChecksChunkedPollFreshnessMySQL(t *testing.T) {
 	f := stateFixture{s: s, ref: ChangeRef{Repo: "example/chunkfreshmysql", PR: 1}, base: time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)}
 	checkChunkedPollFreshness(t, f)
 }
+
+func TestChangeChecksCompleteSetFloorMySQL(t *testing.T) {
+	s, err := Open(t.Context(), testdb.MySQLDatabase(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	f := stateFixture{s: s, ref: ChangeRef{Repo: "example/completefloormysql", PR: 1}, base: time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)}
+	checkCompleteSetFloor(t, f)
+}

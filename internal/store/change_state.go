@@ -693,28 +693,41 @@ func applyStateTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeStateWri
 // not rewritten, except that a write carrying a delivery_id stores it when it
 // differs: the write "wrote" the row, so the read reports that delivery. An
 // unchanged row in a write without a delivery_id is left alone.
+//
+// A check the head's newest complete set (hk 7056) has judged and that has no
+// stored row is not inserted by a write at or before that set's observed_at
+// (floorRefuses, settledChecks). The complete set's own write is judged against
+// the mark as stored before it, so it still inserts its own checks, including
+// a replay at the same instant. The mark moves forward only.
 func applyChecksTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeChecksWrite) (ChangeSectionResult, error) {
+	// The stores keep observed_at at microseconds, and the mark read back is
+	// microsecond-precise; truncate once so the floor compares like with like.
+	w.ObservedAt = w.ObservedAt.Truncate(time.Microsecond)
 	names := make([]string, 0, len(w.Checks))
 	for _, k := range w.Checks {
 		names = append(names, k.Name)
 	}
-	// newer holds the named checks whose stored row for this head is newer
-	// than the write; the changes row lock keeps the set stable for the
-	// transaction.
-	newer := map[string]bool{}
+	mark, err := checkSetObservedTx(ctx, tx, c.id, w.HeadSHA)
+	if err != nil {
+		return ChangeSectionResult{}, err
+	}
+	// stored holds the observed_at of each named check's row for this head; the
+	// changes row lock keeps it stable for the transaction.
+	stored := map[string]time.Time{}
 	if len(names) > 0 {
-		rows, err := tx.Query(ctx, `SELECT name FROM change_checks WHERE change_id=$1 AND head_sha=$2 AND observed_at>$3 AND name=ANY($4::text[])`,
-			c.id, w.HeadSHA, w.ObservedAt, names)
+		rows, err := tx.Query(ctx, `SELECT name,observed_at FROM change_checks WHERE change_id=$1 AND head_sha=$2 AND name=ANY($3::text[])`,
+			c.id, w.HeadSHA, names)
 		if err != nil {
 			return ChangeSectionResult{}, err
 		}
 		for rows.Next() {
 			var n string
-			if err := rows.Scan(&n); err != nil {
+			var at time.Time
+			if err := rows.Scan(&n, &at); err != nil {
 				rows.Close()
 				return ChangeSectionResult{}, err
 			}
-			newer[n] = true
+			stored[n] = at
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -722,12 +735,13 @@ func applyChecksTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeChecksW
 		}
 		rows.Close()
 	}
-	if olderThan(c.checksObserved, w.ObservedAt) && len(newer) == len(names) {
+	settled := settledChecks(names, stored, w, mark)
+	if olderThan(c.checksObserved, w.ObservedAt) && allSettled(names, settled) {
 		return staleResult, nil
 	}
 	b := &statementBatch{}
 	for _, k := range w.Checks {
-		if newer[k.Name] {
+		if settled[k.Name] {
 			continue
 		}
 		b.Queue(`INSERT INTO change_checks(change_id,head_sha,name,state,conclusion,url,required,started_at,completed_at,observed_at,source,gone,delivery_id)
@@ -746,6 +760,10 @@ WHERE (change_checks.state,change_checks.conclusion,change_checks.url,change_che
 		// write older than this one from reviving them.
 		b.Queue(`UPDATE change_checks SET gone=true,observed_at=$3,source=$4 WHERE change_id=$1 AND head_sha=$2 AND observed_at<=$3 AND name <> ALL($5::text[]) AND (NOT gone OR observed_at<$3)`,
 			c.id, w.HeadSHA, w.ObservedAt, w.Source, names)
+		// The mark only moves forward: the conflict clause keeps a newer mark.
+		b.Queue(`INSERT INTO change_check_sets(change_id,head_sha,observed_at) VALUES($1,$2,$3)
+ON CONFLICT(change_id,head_sha) DO UPDATE SET observed_at=EXCLUDED.observed_at WHERE change_check_sets.observed_at<EXCLUDED.observed_at`,
+			c.id, w.HeadSHA, w.ObservedAt)
 	}
 	if err := execBatch(ctx, tx, b); err != nil {
 		return ChangeSectionResult{}, err
@@ -756,6 +774,64 @@ WHERE (change_checks.state,change_checks.conclusion,change_checks.url,change_che
 		}
 	}
 	return ChangeSectionResult{Applied: true}, nil
+}
+
+// checkSetObservedTx returns the observed_at of the newest complete check set
+// applied to head, or nil when none has been (hk 7056).
+func checkSetObservedTx(ctx context.Context, tx pgx.Tx, changeID int64, head string) (*time.Time, error) {
+	var at time.Time
+	err := tx.QueryRow(ctx, `SELECT observed_at FROM change_check_sets WHERE change_id=$1 AND head_sha=$2`, changeID, head).Scan(&at)
+	if errors.Is(err, ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &at, nil
+}
+
+// floorRefuses reports whether a check with no stored row may not be inserted
+// by w, given the head's newest complete set at mark (hk 7056). A write older
+// than the set refuses it. A write at the set's observed_at refuses it unless
+// the write is itself complete: the complete set's own write inserts its
+// checks, and a replay of it at the same instant is not refused. mark is the
+// stored value before w, so the set judges its own write against what came
+// before it.
+func floorRefuses(mark *time.Time, w ChangeChecksWrite) bool {
+	if mark == nil {
+		return false
+	}
+	if w.ObservedAt.Before(*mark) {
+		return true
+	}
+	return w.ObservedAt.Equal(*mark) && !w.Complete
+}
+
+// settledChecks reports, for each named check, whether w leaves it alone:
+// its stored row (stored maps the names that have one to its observed_at) is
+// newer than w, or it has no row and floorRefuses refuses the insert.
+// Rows at w's own observed_at are not newer, so a write at that instant still
+// upserts them, as #625 has it.
+func settledChecks(names []string, stored map[string]time.Time, w ChangeChecksWrite, mark *time.Time) map[string]bool {
+	out := make(map[string]bool, len(names))
+	for _, n := range names {
+		if at, ok := stored[n]; ok {
+			out[n] = at.After(w.ObservedAt)
+			continue
+		}
+		out[n] = floorRefuses(mark, w)
+	}
+	return out
+}
+
+// allSettled reports whether every named check is settled.
+func allSettled(names []string, settled map[string]bool) bool {
+	for _, n := range names {
+		if !settled[n] {
+			return false
+		}
+	}
+	return true
 }
 
 func applyThreadsTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeThreadsWrite) (ChangeSectionResult, error) {
