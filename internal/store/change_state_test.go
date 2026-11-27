@@ -542,6 +542,12 @@ func checkCompleteSetFloor(t *testing.T, f stateFixture) {
 	if got := live()[h1]; got["C"] || !got["A"] || !got["B"] {
 		t.Fatalf("a write at the mark changed the set's checks: %v", got)
 	}
+	// A partial write a few hundred nanoseconds past the mark is the same instant
+	// at the stores' microsecond precision, so it is refused too.
+	f.apply(t, ChangeBatch{Checks: &ChangeChecksWrite{HeadSHA: h1, Checks: []ChangeCheckIn{{Name: "E", State: "completed", Conclusion: "success"}}, ObservedAt: f.at(2).Add(300 * time.Nanosecond), Source: "poll"}})
+	if got := live()[h1]; got["E"] {
+		t.Fatalf("a sub-microsecond write past the mark inserted an excluded check: %v", got)
+	}
 	// A replay of the complete set at the same instant leaves its checks present,
 	// and a same-instant complete set still inserts the checks it names.
 	if r := f.apply(t, batch(h1, 2, true, "A", "B")); !r.Sections["checks"].Applied {

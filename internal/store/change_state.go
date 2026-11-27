@@ -700,6 +700,9 @@ func applyStateTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeStateWri
 // the mark as stored before it, so it still inserts its own checks, including
 // a replay at the same instant. The mark moves forward only.
 func applyChecksTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeChecksWrite) (ChangeSectionResult, error) {
+	// The stores keep observed_at at microseconds, and the mark read back is
+	// microsecond-precise; truncate once so the floor compares like with like.
+	w.ObservedAt = w.ObservedAt.Truncate(time.Microsecond)
 	names := make([]string, 0, len(w.Checks))
 	for _, k := range w.Checks {
 		names = append(names, k.Name)

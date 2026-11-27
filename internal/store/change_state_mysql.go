@@ -113,6 +113,8 @@ func markGoneMySQL(ctx context.Context, tx transaction, table string, changeID i
 // the newer set stable for the transaction, so the upsert itself needs no
 // freshness clause (ON DUPLICATE KEY UPDATE has no WHERE).
 func applyChangeChecksMySQL(ctx context.Context, tx transaction, c changeLock, w ChangeChecksWrite) (ChangeSectionResult, error) {
+	// Truncate to the stores' microsecond precision, as applyChecksTx does.
+	w.ObservedAt = w.ObservedAt.Truncate(time.Microsecond)
 	names := make([]string, 0, len(w.Checks))
 	for _, k := range w.Checks {
 		names = append(names, k.Name)
