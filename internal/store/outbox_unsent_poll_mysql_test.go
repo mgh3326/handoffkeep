@@ -74,9 +74,10 @@ func TestOutboxUnsentPollUsesIndex(t *testing.T) {
 	}
 	ar.Close()
 
+	// The settle's lock read (hk 6920) is the statement that finds the rows.
 	if key := relayPlanKey(t, ctx, s, "notification_outbox",
-		`UPDATE notification_outbox SET skipped_at=UTC_TIMESTAMP(6),skip_reason=? WHERE created_at < ? AND sent_at IS NULL AND skipped_at IS NULL`,
-		OutboxSkipBeforeForwarder, cutoff); key != "notification_outbox_unsent_poll" {
+		`SELECT id FROM notification_outbox WHERE created_at < ? AND sent_at IS NULL AND skipped_at IS NULL FOR UPDATE SKIP LOCKED`,
+		cutoff); key != "notification_outbox_unsent_poll" {
 		t.Errorf("pre-cutoff settle uses %q, want notification_outbox_unsent_poll", key)
 	}
 	if key := relayPlanKey(t, ctx, s, "notification_outbox",

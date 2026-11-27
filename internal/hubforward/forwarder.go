@@ -21,9 +21,11 @@ import (
 const (
 	defaultInterval = 5 * time.Second
 	postTimeout     = 5 * time.Second
-	// settleTimeout bounds one per-tick settle. A settle that waits on a row
-	// lock held by another transaction gives up after this, and the tick's
-	// cutoff-filtered list and delivery still run (hk 6912).
+	// settleTimeout bounds one per-tick settle. The store skips rows another
+	// transaction holds rather than waiting on them (hk 6920), so the settle
+	// normally returns well inside this; the bound stops a settle that is still
+	// stuck from holding the tick, and the tick's cutoff-filtered list and
+	// delivery still run (hk 6912).
 	settleTimeout = 2 * time.Second
 	baseBackoff   = 30 * time.Second
 	maxBackoff    = 10 * time.Minute
