@@ -157,8 +157,10 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,FALSE,?) ON DUPLICATE KEY UPDATE
 		}
 	}
 	if w.Complete {
-		query := `UPDATE change_checks SET gone=TRUE,observed_at=?,source=? WHERE change_id=? AND head_sha=? AND NOT gone AND observed_at<=? AND name NOT IN (` + placeholders(len(names)) + `)`
-		args := []any{w.ObservedAt, w.Source, c.id, w.HeadSHA, w.ObservedAt}
+		// Rows already gone also take the write's observed_at when it is newer,
+		// as in applyChecksTx, so an older write cannot revive them.
+		query := `UPDATE change_checks SET gone=TRUE,observed_at=?,source=? WHERE change_id=? AND head_sha=? AND observed_at<=? AND name NOT IN (` + placeholders(len(names)) + `) AND (NOT gone OR observed_at<?)`
+		args := []any{w.ObservedAt, w.Source, c.id, w.HeadSHA, w.ObservedAt, w.ObservedAt}
 		for _, n := range names {
 			args = append(args, n)
 		}

@@ -429,7 +429,7 @@ func checkChunkedPollFreshness(t *testing.T, f stateFixture) {
 		t.Fatalf("the fresh check did not land: %+v", c)
 	}
 	// An older write naming only the newer check answers stale.
-	if r := f.apply(t, batch(10, "poll", false, "", ck("build", "failed"))); !r.Sections["checks"].Applied || r.Sections["checks"].Reason != staleReason {
+	if r := f.apply(t, batch(10, "poll", false, "", ck("build", "failed"))); r.Sections["checks"].Applied || r.Sections["checks"].Reason != staleReason {
 		t.Fatalf("an older write naming only a newer check: %+v", r.Sections["checks"])
 	}
 	if c := byName()["build"]; c.State != "completed" {
@@ -462,6 +462,21 @@ func checkChunkedPollFreshness(t *testing.T, f stateFixture) {
 	}
 	if c := byName()["build"]; c.DeliveryID == nil || *c.DeliveryID != "wh-1" {
 		t.Fatalf("an unchanged check in a write without delivery_id lost its delivery: %+v", c)
+	}
+	// A newer complete set also advances the observed_at of rows it leaves
+	// gone, so a later write older than the set cannot revive them.
+	if r := f.apply(t, batch(25, "poll", true, "", ck("build", "completed"))); !r.Sections["checks"].Applied {
+		t.Fatalf("newer complete write went stale: %+v", r.Sections["checks"])
+	}
+	if r := f.apply(t, batch(20, "poll", false, "", ck("docs", "queued"), ck("zzz", "queued"))); !r.Sections["checks"].Applied {
+		t.Fatalf("older write naming a gone check and a fresh one went stale: %+v", r.Sections["checks"])
+	}
+	got = byName()
+	if _, ok := got["docs"]; ok {
+		t.Fatal("an older write revived a check a newer complete set left gone")
+	}
+	if c := got["zzz"]; c.State != "queued" || !c.ObservedAt.Equal(f.at(20)) {
+		t.Fatalf("the fresh check did not land: %+v", c)
 	}
 }
 

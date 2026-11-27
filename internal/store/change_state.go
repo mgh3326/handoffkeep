@@ -741,7 +741,10 @@ WHERE (change_checks.state,change_checks.conclusion,change_checks.url,change_che
 			c.id, w.HeadSHA, k.Name, k.State, nullStr(k.Conclusion), nullStr(k.URL), k.Required, k.StartedAt, k.CompletedAt, w.ObservedAt, w.Source, nullStr(w.DeliveryID))
 	}
 	if w.Complete {
-		b.Queue(`UPDATE change_checks SET gone=true,observed_at=$3,source=$4 WHERE change_id=$1 AND head_sha=$2 AND NOT gone AND observed_at<=$3 AND name <> ALL($5::text[])`,
+		// Rows already gone also take the write's observed_at when it is newer:
+		// the complete set still excludes them, and the advance keeps a later
+		// write older than this one from reviving them.
+		b.Queue(`UPDATE change_checks SET gone=true,observed_at=$3,source=$4 WHERE change_id=$1 AND head_sha=$2 AND observed_at<=$3 AND name <> ALL($5::text[]) AND (NOT gone OR observed_at<$3)`,
 			c.id, w.HeadSHA, w.ObservedAt, w.Source, names)
 	}
 	if err := execBatch(ctx, tx, b); err != nil {
