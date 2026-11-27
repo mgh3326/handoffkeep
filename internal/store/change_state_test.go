@@ -470,15 +470,18 @@ func checkChunkedPollFreshness(t *testing.T, f stateFixture) {
 	if r := f.apply(t, batch(25, "poll", true, "", ck("build", "completed"))); !r.Sections["checks"].Applied {
 		t.Fatalf("newer complete write went stale: %+v", r.Sections["checks"])
 	}
-	if r := f.apply(t, batch(20, "poll", false, "", ck("docs", "queued"), ck("zzz", "queued"))); !r.Sections["checks"].Applied {
-		t.Fatalf("older write naming a gone check and a fresh one went stale: %+v", r.Sections["checks"])
+	// The set at 25 is the newest complete set for this head and excluded zzz,
+	// so an older write below it is stale whole (hk 7056): zzz, which has no
+	// row to compare, must not insert as present.
+	if r := f.apply(t, batch(20, "poll", false, "", ck("docs", "queued"), ck("zzz", "queued"))); r.Sections["checks"].Applied {
+		t.Fatalf("an older write below the newest complete set applied: %+v", r.Sections["checks"])
 	}
 	got = byName()
 	if _, ok := got["docs"]; ok {
 		t.Fatal("an older write revived a check a newer complete set left gone")
 	}
-	if c := got["zzz"]; c.State != "queued" || !c.ObservedAt.Equal(f.at(20)) {
-		t.Fatalf("the fresh check did not land: %+v", c)
+	if c, ok := got["zzz"]; ok {
+		t.Fatalf("an older write inserted a check the newer complete set excluded: %+v", c)
 	}
 	if _, ok := got["build"]; !ok {
 		t.Fatal("the complete write marked its own named check gone")
@@ -487,6 +490,74 @@ func checkChunkedPollFreshness(t *testing.T, f stateFixture) {
 
 func TestChangeChecksChunkedPollFreshness(t *testing.T) {
 	checkChunkedPollFreshness(t, newStateFixture(t, "chunkfresh"))
+}
+
+func TestChangeChecksCompleteSetFloor(t *testing.T) {
+	checkCompleteSetFloor(t, newStateFixture(t, "completefloor"))
+}
+
+// checkCompleteSetFloor pins hk 7056 on both dialects: an older write cannot
+// insert a check that the head's newest complete set left out, while a newer
+// write, another head, and a complete set's own marking are unchanged.
+func checkCompleteSetFloor(t *testing.T, f stateFixture) {
+	t.Helper()
+	batch := func(head string, min int, complete bool, names ...string) ChangeBatch {
+		cs := make([]ChangeCheckIn, len(names))
+		for i, n := range names {
+			cs[i] = ChangeCheckIn{Name: n, State: "completed", Conclusion: "success"}
+		}
+		return ChangeBatch{Checks: &ChangeChecksWrite{HeadSHA: head, Checks: cs, ObservedAt: f.at(min), Source: "poll", Complete: complete}}
+	}
+	// live maps each head to the checks that read as present on it.
+	live := func() map[string]map[string]bool {
+		t.Helper()
+		out := map[string]map[string]bool{}
+		for _, c := range *f.view(t, ChangeReadOptions{AllHeads: true}).Checks {
+			if out[c.HeadSHA] == nil {
+				out[c.HeadSHA] = map[string]bool{}
+			}
+			out[c.HeadSHA][c.Name] = true
+		}
+		return out
+	}
+	const h1, h2, h3 = testSHA1, testSHA2, testSHA3
+
+	// (a) A newer complete set {A,B}, then an older write {C}: C is refused.
+	if r := f.apply(t, batch(h1, 2, true, "A", "B")); !r.Sections["checks"].Applied {
+		t.Fatalf("complete set: %+v", r.Sections["checks"])
+	}
+	if r := f.apply(t, batch(h1, 1, false, "C")); r.Sections["checks"].Applied {
+		t.Fatal("an older write below the complete set applied")
+	}
+	if got := live()[h1]; !got["A"] || !got["B"] || got["C"] {
+		t.Fatalf("after the older write: %v", got)
+	}
+	// The set's floor never moves back: an older complete set is refused too.
+	if r := f.apply(t, batch(h1, 1, true, "A")); r.Sections["checks"].Applied {
+		t.Fatal("an older complete set moved the floor")
+	}
+	// (c) A newer write for C after the complete set reads as present.
+	if r := f.apply(t, batch(h1, 3, false, "C")); !r.Sections["checks"].Applied {
+		t.Fatalf("newer write for C: %+v", r.Sections["checks"])
+	}
+	if got := live()[h1]; !got["C"] || !got["A"] || !got["B"] {
+		t.Fatalf("after the newer write: %v", got)
+	}
+
+	// (b) An older write {C} before a complete set that does not name it: the
+	// set marks C gone, as before this guard.
+	if r := f.apply(t, batch(h2, 1, false, "C")); !r.Sections["checks"].Applied || !live()[h2]["C"] {
+		t.Fatalf("older write before the set: %+v", r.Sections["checks"])
+	}
+	f.apply(t, batch(h2, 2, true, "A"))
+	if got := live()[h2]; got["C"] || !got["A"] {
+		t.Fatalf("the complete set left C present: %v", got)
+	}
+
+	// (d) Another head has no floor, so its older write lands.
+	if r := f.apply(t, batch(h3, 1, false, "C")); !r.Sections["checks"].Applied || !live()[h3]["C"] {
+		t.Fatalf("an older write on a head with no set was refused: %+v", r.Sections["checks"])
+	}
 }
 
 func TestChangeThreadsCompleteMarksGone(t *testing.T) {

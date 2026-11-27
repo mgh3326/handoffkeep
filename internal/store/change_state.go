@@ -693,10 +693,23 @@ func applyStateTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeStateWri
 // not rewritten, except that a write carrying a delivery_id stores it when it
 // differs: the write "wrote" the row, so the read reports that delivery. An
 // unchanged row in a write without a delivery_id is left alone.
+//
+// A write older than the head's newest complete set (hk 7056) answers stale
+// whole. That set marked gone every row it did not name, and a row it named is
+// newer than this write, so nothing here can land: an insert would read as
+// present for a check the set excluded. The complete set's own write moves the
+// head's mark forward only, in the same transaction.
 func applyChecksTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeChecksWrite) (ChangeSectionResult, error) {
 	names := make([]string, 0, len(w.Checks))
 	for _, k := range w.Checks {
 		names = append(names, k.Name)
+	}
+	mark, err := checkSetObservedTx(ctx, tx, c.id, w.HeadSHA)
+	if err != nil {
+		return ChangeSectionResult{}, err
+	}
+	if mark != nil && w.ObservedAt.Before(*mark) {
+		return staleResult, nil
 	}
 	// newer holds the named checks whose stored row for this head is newer
 	// than the write; the changes row lock keeps the set stable for the
@@ -746,6 +759,10 @@ WHERE (change_checks.state,change_checks.conclusion,change_checks.url,change_che
 		// write older than this one from reviving them.
 		b.Queue(`UPDATE change_checks SET gone=true,observed_at=$3,source=$4 WHERE change_id=$1 AND head_sha=$2 AND observed_at<=$3 AND name <> ALL($5::text[]) AND (NOT gone OR observed_at<$3)`,
 			c.id, w.HeadSHA, w.ObservedAt, w.Source, names)
+		// The mark only moves forward; this write is not older than it here.
+		b.Queue(`INSERT INTO change_check_sets(change_id,head_sha,observed_at) VALUES($1,$2,$3)
+ON CONFLICT(change_id,head_sha) DO UPDATE SET observed_at=EXCLUDED.observed_at WHERE change_check_sets.observed_at<EXCLUDED.observed_at`,
+			c.id, w.HeadSHA, w.ObservedAt)
 	}
 	if err := execBatch(ctx, tx, b); err != nil {
 		return ChangeSectionResult{}, err
@@ -756,6 +773,20 @@ WHERE (change_checks.state,change_checks.conclusion,change_checks.url,change_che
 		}
 	}
 	return ChangeSectionResult{Applied: true}, nil
+}
+
+// checkSetObservedTx returns the observed_at of the newest complete check set
+// applied to head, or nil when none has been (hk 7056).
+func checkSetObservedTx(ctx context.Context, tx pgx.Tx, changeID int64, head string) (*time.Time, error) {
+	var at time.Time
+	err := tx.QueryRow(ctx, `SELECT observed_at FROM change_check_sets WHERE change_id=$1 AND head_sha=$2`, changeID, head).Scan(&at)
+	if errors.Is(err, ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &at, nil
 }
 
 func applyThreadsTx(ctx context.Context, tx pgx.Tx, c changeLock, w ChangeThreadsWrite) (ChangeSectionResult, error) {

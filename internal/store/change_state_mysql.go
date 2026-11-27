@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 )
@@ -116,6 +117,15 @@ func applyChangeChecksMySQL(ctx context.Context, tx transaction, c changeLock, w
 	for _, k := range w.Checks {
 		names = append(names, k.Name)
 	}
+	// A write older than the head's newest complete set answers stale whole
+	// (hk 7056), as applyChecksTx does: no insert may read as present.
+	mark, err := checkSetObservedMySQL(ctx, tx, c.id, w.HeadSHA)
+	if err != nil {
+		return ChangeSectionResult{}, err
+	}
+	if mark != nil && w.ObservedAt.Before(*mark) {
+		return staleResult, nil
+	}
 	newer := map[string]bool{}
 	if len(names) > 0 {
 		args := make([]any, 0, len(names)+3)
@@ -168,6 +178,11 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,FALSE,?) ON DUPLICATE KEY UPDATE
 		if _, err := tx.Exec(ctx, query, args...); err != nil {
 			return ChangeSectionResult{}, err
 		}
+		// The mark only moves forward; this write is not older than it here.
+		if _, err := tx.Exec(ctx, `INSERT INTO change_check_sets(change_id,head_sha,observed_at) VALUES(?,?,?)
+ON DUPLICATE KEY UPDATE observed_at=IF(observed_at<VALUES(observed_at),VALUES(observed_at),observed_at)`, c.id, w.HeadSHA, w.ObservedAt); err != nil {
+			return ChangeSectionResult{}, err
+		}
 	}
 	if c.checksObserved == nil || w.ObservedAt.After(*c.checksObserved) {
 		if err := updateChangeMySQL(ctx, tx, c.id, nil, setCol{"checks_observed_at", "", w.ObservedAt}, setCol{"checks_source", "", w.Source}); err != nil {
@@ -175,6 +190,19 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,FALSE,?) ON DUPLICATE KEY UPDATE
 		}
 	}
 	return ChangeSectionResult{Applied: true}, nil
+}
+
+// checkSetObservedMySQL is checkSetObservedTx for MySQL (hk 7056).
+func checkSetObservedMySQL(ctx context.Context, tx transaction, changeID int64, head string) (*time.Time, error) {
+	var at time.Time
+	err := tx.QueryRow(ctx, `SELECT observed_at FROM change_check_sets WHERE change_id=? AND head_sha=?`, changeID, head).Scan(&at)
+	if errors.Is(err, ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &at, nil
 }
 
 func applyChangeThreadsMySQL(ctx context.Context, tx transaction, c changeLock, w ChangeThreadsWrite) (ChangeSectionResult, error) {

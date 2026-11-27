@@ -419,6 +419,11 @@ comments:
     tableComment: |
       The CI checks of a change's head, mirrored from the forge so state reads need no call out.
       Retention: none; one row per change, head and check; earlier heads' rows are kept (marked gone when a check disappears) and the all-heads view reads them.
+  - table: change_check_sets
+    labels: [source-of-record]
+    tableComment: |
+      The observed_at of the newest complete check set applied to each change head: the floor an older check write cannot insert below, so a check a newer complete set excluded never reads as present.
+      Retention: none; one row per change and head, moved forward only.
   - table: change_findings
     labels: [history-log]
     tableComment: |
@@ -842,6 +847,7 @@ viewpoints:
     tables:
       - changes
       - change_checks
+      - change_check_sets
       - change_findings
       - change_gate_events
       - change_tasks
@@ -857,6 +863,7 @@ viewpoints:
         tables:
           - changes
           - change_checks
+          - change_check_sets
           - change_findings
           - change_gate_events
           - change_tasks
