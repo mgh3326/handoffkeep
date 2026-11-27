@@ -160,10 +160,11 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,FALSE,?) ON DUPLICATE KEY UPDATE
 		// Rows already gone also take the write's observed_at when it is newer,
 		// as in applyChecksTx, so an older write cannot revive them.
 		query := `UPDATE change_checks SET gone=TRUE,observed_at=?,source=? WHERE change_id=? AND head_sha=? AND observed_at<=? AND name NOT IN (` + placeholders(len(names)) + `) AND (NOT gone OR observed_at<?)`
-		args := []any{w.ObservedAt, w.Source, c.id, w.HeadSHA, w.ObservedAt, w.ObservedAt}
+		args := []any{w.ObservedAt, w.Source, c.id, w.HeadSHA, w.ObservedAt}
 		for _, n := range names {
 			args = append(args, n)
 		}
+		args = append(args, w.ObservedAt)
 		if _, err := tx.Exec(ctx, query, args...); err != nil {
 			return ChangeSectionResult{}, err
 		}

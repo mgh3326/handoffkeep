@@ -449,8 +449,10 @@ func checkChunkedPollFreshness(t *testing.T, f stateFixture) {
 			t.Fatalf("an unnamed older check %s stayed", name)
 		}
 	}
-	if c := got["test"]; c.State != "completed" || !c.ObservedAt.Equal(f.at(15)) {
-		t.Fatalf("named check test: %+v", c)
+	for _, name := range []string{"test", "lint"} {
+		if c := got[name]; c.State != "completed" || !c.ObservedAt.Equal(f.at(15)) {
+			t.Fatalf("named check %s: %+v", name, c)
+		}
 	}
 	if fv := freshness(); !fv.ObservedAt.Equal(f.at(20)) || fv.Source == nil || *fv.Source != "webhook" {
 		t.Fatalf("the watermark moved back: %+v", fv)
@@ -477,6 +479,9 @@ func checkChunkedPollFreshness(t *testing.T, f stateFixture) {
 	}
 	if c := got["zzz"]; c.State != "queued" || !c.ObservedAt.Equal(f.at(20)) {
 		t.Fatalf("the fresh check did not land: %+v", c)
+	}
+	if _, ok := got["build"]; !ok {
+		t.Fatal("the complete write marked its own named check gone")
 	}
 }
 
